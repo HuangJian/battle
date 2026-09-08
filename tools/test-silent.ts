@@ -61,6 +61,23 @@ function isHeavyFile(path: string): boolean {
   return false
 }
 
+/**
+ * 「无测试影响」的改动类型：纯文档 / notebook / 课程配置 / gitignore。
+ *
+ * 这些文件不参与任何 TS 或 Python 代码路径，改它们不可能让测试变红。若仍走
+ * fallback 全量，等于每次写文档都白烧一整轮套件（并会撞上 spawn 真实 CLI 的慢
+ * 测试 —— 2026-09-08 `tests/training-train.test.ts` 因此触发 ensureVenv() 联网装
+ * torch，40s+ 且 exit 4）。
+ *
+ * 只在**全部**改动都属于这些类型时才跳过；只要混进一个代码文件就照常跑。
+ * 逃逸阀：`BATTLE_TEST_FORCE_ALL=1` 强制跑全量。
+ */
+const TEST_INERT_RE = [/\.md$/i, /\.ipynb$/i, /\.jsonc$/i, /(^|\/)\.gitignore$/]
+
+function isTestInertFile(rel: string): boolean {
+  return TEST_INERT_RE.some((re) => re.test(rel))
+}
+
 /** Enumerate every test file in the repo (repo-relative, forward slashes). */
 function allTestFiles(cwd: string): string[] {
   const collect = (raw: string[]): string[] => {
@@ -245,6 +262,20 @@ export async function runSilentTest(
         ok: true,
         summary: 'no relevant tests',
         detail: `${label}: no tests map to local changes (strict mode)\n`,
+      }
+    } else if (
+      changed.length > 0 &&
+      changed.every(isTestInertFile) &&
+      !process.env.BATTLE_TEST_FORCE_ALL
+    ) {
+      // 文档/notebook/课程配置改动 → 不 fallback 全量（见 isTestInertFile 注释）。
+      return {
+        ok: true,
+        summary: 'no relevant tests (docs/config only)',
+        detail:
+          `${label}: ${changed.length} changed file(s) are docs / notebook / course-config ` +
+          `only (md, ipynb, jsonc, .gitignore) — no TS or Python code path affected.\n` +
+          `  Set BATTLE_TEST_FORCE_ALL=1 to run the full suite anyway.\n`,
       }
     } else {
       files = allTests

@@ -19,6 +19,9 @@ generated-stages.json
 replays/
 *.cpuprofile
 
+# 控制台客户端 bundle（build.ts 启动自动构建，产物不入库；plan/Training-Console-Preact.md 未决项 3）
+tools/training/console/.build/
+
 # God AI 调优一次性诊断产物（progress doc §0.C：A/B 脚本不入库，临时数据 commit 前删除）
 tmp/
 reports/

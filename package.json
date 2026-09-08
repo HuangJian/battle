@@ -23,7 +23,7 @@
     "lint": "oxlint",
     "format": "oxfmt",
     "train": "bun tools/training/console/server.ts",
-    "check": "tsc --noEmit --incremental && bun test --parallel --timeout=50000",
+    "check": "tsc --noEmit --incremental && bun tools/check-decisions.ts && bun test --parallel --timeout=50000",
     "freeze:check": "bash tools/probe-det-baseline.sh --golden",
     "freeze:l2": "bun tools/diag/archived-reach-audit.ts",
     "setup": "git config core.hooksPath tools/githook"
@@ -33,6 +33,8 @@
     "@types/bun": "^1.3.14",
     "oxfmt": "^0.59.0",
     "oxlint": "^1.74.0",
+    "preact": "^10.29.8",
+    "preact-render-to-string": "^6.7.0",
     "typescript": "7.0.2",
     "vite": "8.1.5"
   }

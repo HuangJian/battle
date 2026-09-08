@@ -55,6 +55,23 @@ bun tools/agent/sampler-agent.ts --port 8443 --workers <N>
 
 磁盘余量 ≥2GB（agent 自检 `minDiskFreeMB=2048`，不足拒单）。
 
+### 2.1 rollout 引擎：优先 node（DECISIONS §367，可选但推荐）
+
+同一个 `conv_feats.wasm` 推理，node(V8) 比 bun(JSC) 快 ~1.6×（本机实测 features 4.62ms vs
+7.55ms；端到端单局 ~1.4×）。**agent 本体始终跑 bun**，只是采样子进程交给 node：
+
+- **引擎=本机微基准自动选**（五平台实测：V8 只在 win/wsl x64 赢、mac/arm64 bun 赢）：
+  启动时对同一 conv_feats.wasm 实测两引擎稳态 forward（~0.3-0.5s/次），选快者（3% 迟滞）；
+  决策按 bun/node 版本 + wasm sha 缓存 → 日常重启零开销，升级后自动重测。
+- node 要求 **≥ v22**；选中 node 时 `bun build --target=node` 预打包 exporter。
+- 不满足/打包失败/子进程连续失败 2 次 → **自动回退 bun**，行为与旧版完全一致。
+- 开关：`--no-node` 或 `SAMPLER_ENGINE=bun` 强制 bun；`SAMPLER_ENGINE=node` 强制 node；
+  `SAMPLER_NODE_BIN=/path/to/node` 指定参与基准的 node。
+- 自检：启动行含 `rolloutEngine=node (v26.8.1)`；`GET /v1/ping` 有 `rolloutEngine` /
+  `nodeVersion` 字段。
+- ⚠️ 若打包产物的同级 `wasm/conv_feats.wasm` 缺失，会**静默回退 TS 路径（14× 慢）**——
+  不要手工删 `tmp/dist-agent/node-bundle/`。
+
 ## 3. Android 平板（Termux，局域网直连）
 
 ### 3.1 环境
@@ -250,3 +267,12 @@ while ($true) {
 游戏模拟只用 JS double 四则运算 + 种子化整数 RNG（mulberry32），IEEE 754 语义
 跨平台一致；同 major.minor 的 bun 使用同一 JSC 引擎。macos 节点已在生产中跨架构
 贡献通过 `validate_result` 校验的战果，arm64-Android / x64-CloudShell 同理。
+
+### 2.2 长驻 serve worker（默认开；`--no-persist` 关闭）
+
+每局一次性子进程要付进程启动 + wasm 编译 + JIT 预热。per-tick rollout 默认走长驻 worker
+（exporter `--serve`：stdin 一行一局），第 2 局起每局省 ~0.4s（Windows 实测；proot 下进程
+启动更贵、收益更大）。本机验证 1 spawn + N reuse，产物与一次性路径逐字节相同。
+- 回退链完备：worker 异常/超时**本局自动回退一次性 spawn**（不丢局）；连续 3 次失败自动熔断，
+  本进程余生改回一次性（保险丝）。`--no-persist` 可整体关闭。
+- 节点建议 A/B 观察指标：`time node -e 1` / `time bun -e 1`（进程启动成本）+ 局均墙钟与吞吐（局/h）。

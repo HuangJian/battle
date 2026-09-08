@@ -1,4 +1,7 @@
-"""清理 nn-training/tmp/pytest-tmp 下过期测试临时目录（沙箱零弹窗版）。
+"""清理仓库根 tmp/pytest-tmp 下过期测试临时目录（沙箱零弹窗版）。
+
+2026-09-08 双 tmp 统一：pytest 临时目录随 conftest.py 迁到仓库根 tmp/，
+本脚本目标同步迁移（不再清理 nn-training/tmp）。
 
 **为什么用 `python -S` 启动**（2026-09-02，用户拍板方案）：
 WorkBuddy 沙箱的删除保护通过 sitecustomize 注入（`python -c "import shutil;
@@ -7,7 +10,7 @@ print(shutil.rmtree.__module__)"` 正常模式输出 `sitecustomize`）。`-S` �
 删除确认（交互式弹窗 / 无交互失败）。这是**绕过沙箱删除保护**的手段——用户知情
 并批准，且**严格限界**：
 
-  * 只删除 `nn-training/tmp/pytest-tmp/` 下的**直接子目录**（测试临时目录）；
+  * 只删除 `tmp/pytest-tmp/` 下的**直接子目录**（测试临时目录）；
   * 按目录 mtime 保留最近 KEEP_DAYS 天（默认 1，环境变量 NN_TMP_KEEP_DAYS 可调）；
   * 绝不触碰目录本身、其他路径、或非子目录内容。
 
@@ -25,7 +28,7 @@ from pathlib import Path
 
 KEEP_DAYS = float(os.environ.get("NN_TMP_KEEP_DAYS", "1"))
 # 脚本位于 tools/githook/ → parents[2] = 仓库根
-TARGET = Path(__file__).resolve().parents[2] / "nn-training" / "tmp" / "pytest-tmp"
+TARGET = Path(__file__).resolve().parents[2] / "tmp" / "pytest-tmp"
 
 
 def main() -> int:

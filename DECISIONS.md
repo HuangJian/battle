@@ -20,12 +20,42 @@
 > | §21–§26 | 渲染 / 仿真性能四轮压榨 | `docs/perf-optimization.progress.md` |
 > | §31 | 超级道具背包累积制 | `docs/features.md` §1.3 |
 >
-> **编号冲突注**：§293 有两个条目（§293-intent「M4 完成」与 §293-God AI「解冻+恢复道具」），
-> 系 intent-ai 分支并入时撞号（见 §277 迁移注）。两者编号均被外部引用，保持不动。
+> **编号冲突注**：同号多条均为历史分支并入撞号（§75/§165/§182/§293–§304/§307/§354/§355/§361，
+> 其中 §302 有三条；另有 ps2 round-2（13496ce，先落地保留编号）：§352/§353 复用、§354 第三条、
+> §354a 后缀式新号），各条均被外部引用，保持不动；完整计数以 `tools/decisions-baseline.json` 为准。
+>
+> **编号规则变更（2026-09-08，plan/decisions-governance.md）**：旧编号 §1–§384 是
+> **冻结历史契约**（永不重排、永不删除）；**自治理生效起新条目改用日期 ID
+> `§YYYY-MM-DD-<branch>-<slug>`**（branch 去连字符；首个样本 = §2026-09-08-decisions-governance）。
+> 新 ID 本地可生成（写前先 tail 查当日已有 ID 防重）；基线中不存在的 ID 出现两次即撞号，
+> `tools/check-decisions.ts` 直接 fail。
+>
+> **准入三问（答 No 就不写）**：① 有没有被否决的备选方案？ ② 未来 agent 会不会重犯/重查？
+> ③ 能不能就近表达（代码注释 / 测试断言 / 配置字段 / docstring）？真决策/禁令/铁律 → 本文件；
+> 实验记录/调优 → `docs/*.progress.md`（禁止双写）；bugfix/UI/运维 → commit message。
+>
+> **归档约定**：长正文已收编为「编号 + 一句话 + 指针」索引行（实验数据 → progress 文档指针，
+> bugfix → commit 承载）；查细节先走指针，再查 progress，最后才回提交历史。旧全文存留于
+> ccf49ff^（瘦身前全文版，git 历史为准）。写法见 `docs/decisions/HOW-TO-ADD.md`；正确性由 `bun run check`
+> 里的 `tools/check-decisions.ts` 强制（撞号/丢号/新条目格式）。
 
 ---
 
-## 勿重提清单 (Do-Not-Re-Investigate)
+### 铁律清单 (Iron Laws)
+
+> 防重犯必读。全文在对应条目；以下为最短形式。
+
+| 铁律 | 出处 | 备注 |
+|---|---|---|
+| 课程引用权重（bc / init 等）常备双份于 `nn-training/weights/in-use/`，防 tmp 清理误杀 | §379 | 无条件遵守；丢失须从备份恢复，禁「裸奔重训/换 ref 救场」 |
+| TrainingLoop 不许静默失败：退出看护 + 失败写日志 | §380 | 状态机(exited) ≠ 日志；失败必须写进日志文件 + 可查询字段 |
+| intent 后端永不用于 p 系执行（credit-assignment 家族全部剔除） | §362 | 天花板锁死略逊于 God，无论稀疏度如何不回头 |
+| 仓库内 PowerShell 调用一律 `pwsh` 7，禁裸 `powershell`（inbox 5.1） | §323 | 落 AGENTS §17.7 |
+| 「读课程某字段」的任一第二实现，一律以课程文件为唯一来源 | §384 | 禁止在别处硬编码同义常量 |
+
+---
+
+### 勿重提清单 (Do-Not-Re-Investigate)
 
 > 以下结论已在重构审计中反复确认，未来 agent 不要再重查或推翻。完整依据见 `plan/refactor.trae.md` §0.5。
 
@@ -44,7 +74,7 @@
 ---
 
 
-## 基石决策 §1–§10（全文 → docs/decisions.details.md Part A）
+### 基石决策 §1–§10（全文 → docs/decisions.details.md Part A）
 
 | 编号 | 一句话 | 交叉引用 |
 |---|---|---|
@@ -61,7 +91,7 @@
 
 ---
 
-## Architecture Decisions
+### Architecture Decisions
 
 | Decision | Detail |
 |----------|--------|
@@ -78,7 +108,7 @@
 | Stage loading API (`World.loadStageData`) | `docs/architecture.md` §8 |
 | Level generator (7-layer procedural pipeline) | `docs/architecture.md` §11 |
 
-## Gameplay Feature Decisions
+### Gameplay Feature Decisions
 
 | Decision | Detail |
 |----------|--------|
@@ -94,7 +124,7 @@
 | Snapshot management framework (one model, four origins, policy-driven retention) | `docs/architecture.md` §7 |
 | Recovery-screen UI state guards extracted to pure predicates (`uiFlowGates.ts`) | 修复 Recovery 屏按钮因状态守卫漏 `'recovery'` 而死/报错；抽为无 DOM 纯谓词后可无头回归。→ `docs/decisions.details.md` 附录 A1 · `tests/recovery-screen-flow.test.ts` |
 
-## God AI Tuning
+### God AI Tuning
 
 Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 
@@ -129,2523 +159,680 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 ---
 
 
-## 71. §48-Revisit: Steel-Only Evasion Occlusion, Terrain-Gated (SHIPPED)
-> 全文 → docs/god-ai-tuning.progress.md
 
-## 72. §49-Revisit: 炮口相向对枪抵消 Parameterized + Re-Validated (SHIPPED, default unchanged)
-> 全文 → docs/god-ai-tuning.progress.md
+## 71. §48-Revisit: Steel-Only Evasion Occlusion, Terrain-Gated (SHIPPED) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 73. §68-Revisit: Crossfire Awareness v2 Re-Tuned with per-seed tick-diff (REJECTED, stays OFF)
-> 全文 → docs/god-ai-tuning.progress.md
+## 72. §49-Revisit: 炮口相向对枪抵消 Parameterized + Re-Validated (SHIPPED, default unchanged) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 74. Steel-Fire Gate: Never Fire at Unpierceable Steel to Break Through (SHIPPED)
-> 全文 → docs/god-ai-tuning.progress.md
+## 73. §68-Revisit: Crossfire Awareness v2 Re-Tuned with per-seed tick-diff (REJECTED, stays OFF) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 75. §75: Distance-Aware Base-Wall Fire Guard (T2a/Aggressive Suicide Fix)
-> 全文 → docs/god-ai-tuning.progress.md
+## 74. Steel-Fire Gate: Never Fire at Unpierceable Steel to Break Through (SHIPPED) —— 全文 → docs/god-ai-tuning.progress.md
 
-## Performance Optimization
-> 全文 → docs/perf-optimization.progress.md
+## 75. §75: Distance-Aware Base-Wall Fire Guard (T2a/Aggressive Suicide Fix) —— 全文 → docs/god-ai-tuning.progress.md
 
-## Lie-Back-Win-Mode (Coop God AI)
-> 全文 → docs/god-ai-tuning.progress.md
+### Performance Optimization —— 全文 → docs/perf-optimization.progress.md
 
-## Render Optimization
-> 全文 → docs/render-optimization.progress.md
+### Lie-Back-Win-Mode (Coop God AI) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 70. Base-Ring Fire Guard (Never Destroy Own Base)
-> 全文 → docs/god-ai-tuning.progress.md
+### Render Optimization —— 全文 → docs/render-optimization.progress.md
 
-## 75. Replay Recording Must Tap the Decorated Input (Lie-Back-Win-Mode desync) (SHIPPED)
-> 全文 → docs/god-ai-tuning.progress.md
+## 70. Base-Ring Fire Guard (Never Destroy Own Base) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 76. The Packed Blob Is the Only Authority on Frame Schema (SHIPPED)
-> 全文 → docs/god-ai-tuning.progress.md
+## 75. Replay Recording Must Tap the Decorated Input (Lie-Back-Win-Mode desync) (SHIPPED) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 77. Playback seek must advance the input (drag-the-bar desync) (SHIPPED)
-> 全文 → docs/god-ai-tuning.progress.md
+## 76. The Packed Blob Is the Only Authority on Frame Schema (SHIPPED) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 78. Seek catch-up must drain (discard) world events — no audio burst (SHIPPED)
-> 全文 → docs/god-ai-tuning.progress.md
+## 77. Playback seek must advance the input (drag-the-bar desync) (SHIPPED) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 79. Coop God AI drove P1 instead of P2 (replay stall + base-wall break)
-> 全文 → docs/god-ai-tuning.progress.md
+## 78. Seek catch-up must drain (discard) world events — no audio burst (SHIPPED) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 80. §80: Turn-Snap Aim Guard — Don't Commit to a Stop-and-Aim Turn Whose Grid-Snap Breaks the Firing Line (SHIPPED)
-> 全文 → docs/god-ai-tuning.progress.md
+## 79. Coop God AI drove P1 instead of P2 (replay stall + base-wall break) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 82. 督战模式（Supervise）— God AI 作为 player1 全程无人类输入 + 战斗速率快捷键 (SHIPPED)
-> 全文 → docs/god-ai-tuning.progress.md
+## 80. §80: Turn-Snap Aim Guard — Don't Commit to a Stop-and-Aim Turn Whose Grid-Snap Breaks the Firing Line (SHIPPED) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 81. 移除 godai-stage-overrides.ts 机制 — 禁止按关卡名特殊化（防过拟合）
-> 全文 → docs/god-ai-tuning.progress.md
+## 82. 督战模式（Supervise）— God AI 作为 player1 全程无人类输入 + 战斗速率快捷键 (SHIPPED) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 83. §83: dodgeDirection 回退分支不再沿炮弹飞行方向逃跑 — 受困走廊时回头对枪抵消 (SHIPPED)
-> 全文 → docs/god-ai-tuning.progress.md
+## 81. 移除 godai-stage-overrides.ts 机制 — 禁止按关卡名特殊化（防过拟合） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 84. BONUS TIME: God AI Collects the Remaining Power-ups in the Pickup Window (SHIPPED)
-> 全文 → docs/god-ai-tuning.progress.md
+## 83. §83: dodgeDirection 回退分支不再沿炮弹飞行方向逃跑 — 受困走廊时回头对枪抵消 (SHIPPED) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 85. §84-Revisit: BONUS TIME Pickup Is Reachability-Aware — Never Chase an Unreachable Item (SHIPPED)
-> 全文 → docs/god-ai-tuning.progress.md
+## 84. BONUS TIME: God AI Collects the Remaining Power-ups in the Pickup Window (SHIPPED) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 86. Snapshot Must Preserve the Bonus Pickup Window — Mid-Window Restore Never Re-Opens BONUS TIME (SHIPPED)
-> 全文 → docs/god-ai-tuning.progress.md
+## 85. §84-Revisit: BONUS TIME Pickup Is Reachability-Aware — Never Chase an Unreachable Item (SHIPPED) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 87. Replay Needs No Pickup-Window Changes — It Inherits §86 via the Shared Serializer (VERIFIED + GUARDED)
-> 全文 → docs/god-ai-tuning.progress.md
+## 86. Snapshot Must Preserve the Bonus Pickup Window — Mid-Window Restore Never Re-Opens BONUS TIME (SHIPPED) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 88. §88: Aggressive branch stall detection — freeze window no longer wasted firing at nothing (SHIPPED)
-> 全文 → docs/god-ai-tuning.progress.md
+## 87. Replay Needs No Pickup-Window Changes — It Inherits §86 via the Shared Serializer (VERIFIED + GUARDED) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 89. §89: Close-range enemy exposure check — don't flee from point-blank enemies (SHIPPED)
-> 全文 → docs/god-ai-tuning.progress.md
+## 88. §88: Aggressive branch stall detection — freeze window no longer wasted firing at nothing (SHIPPED) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 90. Dodge Direction Persistence + Threat Hysteresis (Bug Fix)
-> 全文 → docs/god-ai-tuning.progress.md
+## 89. §89: Close-range enemy exposure check — don't flee from point-blank enemies (SHIPPED) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 90b. §90 A/B Test Results — Oscillation Counter-Fire Shipped (Negative Results Recorded)
-> 全文 → docs/god-ai-tuning.progress.md
+## 90. Dodge Direction Persistence + Threat Hysteresis (Bug Fix) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 91. Turn Cooldown (§90c) — Simulation-Layer Oscillation Prevention
-> 全文 → docs/god-ai-tuning.progress.md
+## 90b. §90 A/B Test Results — Oscillation Counter-Fire Shipped (Negative Results Recorded) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 92. §87: Urgent Power-Up Pickup Priority — Close + Safe-Path Pickups Outrank Defense/Kill (SHIPPED)
-> 全文 → docs/god-ai-tuning.progress.md
+## 91. Turn Cooldown (§90c) — Simulation-Layer Oscillation Prevention —— 全文 → docs/god-ai-tuning.progress.md
 
-## 93. §88: 据守咽喉要地 (Chokepoint Holding) — Rule-1/2/3/4 Base-Defense Strategy (CANDIDATE, A/B-Tuned) _(superseded by §94 — SHIPPED default ON)_
-> 全文 → docs/god-ai-tuning.progress.md
+## 92. §87: Urgent Power-Up Pickup Priority — Close + Safe-Path Pickups Outrank Defense/Kill (SHIPPED) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 94. §88 据守咽喉要地 (Chokepoint Holding) — SHIPPED (default ON, supersedes §93 candidate)
-> 全文 → docs/god-ai-tuning.progress.md
+## 93. §88: 据守咽喉要地 (Chokepoint Holding) — Rule-1/2/3/4 Base-Defense Strategy (CANDIDATE, A/B-Tuned) _(superseded by §94 — SHIPPED default ON)_ —— 全文 → docs/god-ai-tuning.progress.md
 
-## 95. Turn Cooldown 50ms → 100ms + Halt-During-Cooldown (SHIPPED)
-> 全文 → docs/god-ai-tuning.progress.md
+## 94. §88 据守咽喉要地 (Chokepoint Holding) — SHIPPED (default ON, supersedes §93 candidate) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 96. M0 基线测量 + M0.5 僵尸参数退役（SHIPPED，2026-08-03）
-> 全文 → docs/god-ai-tuning.progress.md
+## 95. Turn Cooldown 50ms → 100ms + Halt-During-Cooldown (SHIPPED) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 97. §M3 Dodge 质量：dodge 分支近距离对枪抵消（SHIPPED 后回退） _(superseded by §98)_
-> 全文 → docs/god-ai-tuning.progress.md
+## 96. M0 基线测量 + M0.5 僵尸参数退役（SHIPPED，2026-08-03） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 98. §M3 Dodge 对枪抵消：回退 OFF + Gate 确定性根因修复（2026-08-03）
-> 全文 → docs/god-ai-tuning.progress.md
+## 97. §M3 Dodge 质量：dodge 分支近距离对枪抵消（SHIPPED 后回退） _(superseded by §98)_ —— 全文 → docs/god-ai-tuning.progress.md
 
-## 99. M1 决策链评分制外壳：落地 + Parity 三重验证通过（2026-08-03）
-> 全文 → docs/god-ai-tuning.progress.md
+## 98. §M3 Dodge 对枪抵消：回退 OFF + Gate 确定性根因修复（2026-08-03） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 100. M2 权重数据化：actionWeights 基础设施 + classic 重排 A/B 诚实阴性 + M2b 推迟（2026-08-03）
-> 全文 → docs/god-ai-tuning.progress.md
+## 99. M1 决策链评分制外壳：落地 + Parity 三重验证通过（2026-08-03） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 101. M3 dodgeCounterFire 三轮门控全部官方口径阴性 + stageIndex 口径伪影完整机制（2026-08-03）
-> 全文 → docs/god-ai-tuning.progress.md
+## 100. M2 权重数据化：actionWeights 基础设施 + classic 重排 A/B 诚实阴性 + M2b 推迟（2026-08-03） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 102. M3 敌情感知 EnemyModel + survive 候选 + 命数感知 + M4 紧急对枪：机制落地，默认 OFF（2026-08-03）
-> 全文 → docs/god-ai-tuning.progress.md
+## 101. M3 dodgeCounterFire 三轮门控全部官方口径阴性 + stageIndex 口径伪影完整机制（2026-08-03） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 103. M5 站位提前规避（pathThreatAvoidance）：机制落地，A/B 阴性，默认 OFF + 口径事故根因（2026-08-03）
-> 全文 → docs/god-ai-tuning.progress.md
+## 102. M3 敌情感知 EnemyModel + survive 候选 + 命数感知 + M4 紧急对枪：机制落地，默认 OFF（2026-08-03） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 104. M6 出生即一星（playerStartLevel 0→1）：首个强信号发布，hard/chaos +8~9pp（SHIPPED，2026-08-03）
-> 全文 → docs/god-ai-tuning.progress.md
+## 103. M5 站位提前规避（pathThreatAvoidance）：机制落地，A/B 阴性，默认 OFF + 口径事故根因（2026-08-03） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 105. M7 追猎死亡探针：真追猎仅 ~3-7% + 模拟口径三重修复（playerLevel / lives / telemetry）（2026-08-03）
-> 全文 → docs/god-ai-tuning.progress.md
+## 104. M6 出生即一星（playerStartLevel 0→1）：首个强信号发布，hard/chaos +8~9pp（SHIPPED，2026-08-03） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 106. M8 survivalRetreat 官方口径 60-seed 确认：持平偏负，不发布（2026-08-03）
-> 全文 → docs/god-ai-tuning.progress.md
+## 105. M7 追猎死亡探针：真追猎仅 ~3-7% + 模拟口径三重修复（playerLevel / lives / telemetry）（2026-08-03） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 107. M9 dodgeHorizonScore 多弹道生存视界承诺闪避：机制成立但 60-seed 阴性，不发布（2026-08-03）
-> 全文 → docs/god-ai-tuning.progress.md
+## 106. M8 survivalRetreat 官方口径 60-seed 确认：持平偏负，不发布（2026-08-03） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 108. M10 dodgeHorizon 门控变体（时间余量 + 距离）：chaos 确凿阴性，不发布（2026-08-03）
-> 全文 → docs/god-ai-tuning.progress.md
+## 107. M9 dodgeHorizonScore 多弹道生存视界承诺闪避：机制成立但 60-seed 阴性，不发布（2026-08-03） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 109. M11 星经济下一档：playerStartLevel 1→2（SHIPPED 后用户否决） _(superseded by §110: 用户否决，回退 1★，2026-08-03)_
-> 全文 → docs/god-ai-tuning.progress.md
+## 108. M10 dodgeHorizon 门控变体（时间余量 + 距离）：chaos 确凿阴性，不发布（2026-08-03） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 110. 用户否决 §109：hard/chaos 起始二星回退为一星（2026-08-03）
-> 全文 → docs/god-ai-tuning.progress.md
+## 109. M11 星经济下一档：playerStartLevel 1→2（SHIPPED 后用户否决） _(superseded by §110: 用户否决，回退 1★，2026-08-03)_ —— 全文 → docs/god-ai-tuning.progress.md
 
-## 111. 星盾扩展到所有难度（引擎改动）+ HP 模型探针选靶（2026-08-04）
-> 全文 → docs/god-ai-tuning.progress.md
+## 110. 用户否决 §109：hard/chaos 起始二星回退为一星（2026-08-03） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 112. M12 玩家 HP 缓冲感知：诚实阴性（2026-08-04）
-> 全文 → docs/god-ai-tuning.progress.md
+## 111. 星盾扩展到所有难度（引擎改动）+ HP 模型探针选靶（2026-08-04） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 113. M13 全场压力撤退（outnumberedFieldRetreat）：SHIPPED，hard +2.3pp / chaos +0.6pp（2026-08-04）
-> 全文 → docs/god-ai-tuning.progress.md
+## 112. M12 玩家 HP 缓冲感知：诚实阴性（2026-08-04） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 114. M4 标量参数 CMA-ES 首轮：子集过拟合阴性 + M13 阈值双重复证（2026-08-04）
-> 全文 → docs/god-ai-tuning.progress.md
+## 113. M13 全场压力撤退（outnumberedFieldRetreat）：SHIPPED，hard +2.3pp / chaos +0.6pp（2026-08-04） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 114.1 M4 round-2 建议配置（评审决议，未执行）
-> 全文 → docs/god-ai-tuning.progress.md
+## 114. M4 标量参数 CMA-ES 首轮：子集过拟合阴性 + M13 阈值双重复证（2026-08-04） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 115. M4 round-2 全语料 CMA-ES：SHIPPED，pool 模型 +5.0/+8.3pp（classic 还原表保 91%）（2026-08-04）
-> 全文 → docs/god-ai-tuning.progress.md
+## 114.1 M4 round-2 建议配置（评审决议，未执行） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 116. 自杀秒回（suicide quick-return）：实现 + 诚实阴性（2026-08-04）
-> 全文 → docs/god-ai-tuning.progress.md
+## 115. M4 round-2 全语料 CMA-ES：SHIPPED，pool 模型 +5.0/+8.3pp（classic 还原表保 91%）（2026-08-04） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 117. 自杀秒回条件①变体（mode 2 STAND / mode 3 CHARGE）：诚实阴性（2026-08-04）
-> 全文 → docs/god-ai-tuning.progress.md
+## 116. 自杀秒回（suicide quick-return）：实现 + 诚实阴性（2026-08-04） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 118. §117 守卫升级（baseHp 阈值 + 防守位失守）A/B — 仍为诚实阴性，机制性证伪（2026-08-04）
-> 全文 → docs/god-ai-tuning.progress.md
+## 117. 自杀秒回条件①变体（mode 2 STAND / mode 3 CHARGE）：诚实阴性（2026-08-04） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 119. 固化策略调试方法论：run-forensics 分层取证（2026-08-04）
-> 全文 → docs/god-ai-tuning.progress.md
+## 118. §117 守卫升级（baseHp 阈值 + 防守位失守）A/B — 仍为诚实阴性，机制性证伪（2026-08-04） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 120. 自毁基地 32 局取证 + 采集脚本迭代（off-by-one / bullet-dir / --from-json）（2026-08-04）
-> 全文 → docs/god-ai-tuning.progress.md
+## 119. 固化策略调试方法论：run-forensics 分层取证（2026-08-04） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 121. t2a/aggressive 停射自毁守卫 selfFireBaseGuard SHIPPED（2026-08-04）
-> 全文 → docs/god-ai-tuning.progress.md
+## 120. 自毁基地 32 局取证 + 采集脚本迭代（off-by-one / bullet-dir / --from-json）（2026-08-04） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 122. 仿真性能 Round 10：computeThreatPoints 对齐枚举（SHIPPED，2026-08-05）
-> 全文 → docs/perf-optimization.progress.md
+## 121. t2a/aggressive 停射自毁守卫 selfFireBaseGuard SHIPPED（2026-08-04） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 123. 仿真性能 Round 10：scanAheadImpl per-tick memo（SHIPPED，2026-08-05）
-> 全文 → docs/perf-optimization.progress.md
+## 122. 仿真性能 Round 10：computeThreatPoints 对齐枚举（SHIPPED，2026-08-05） —— 全文 → docs/perf-optimization.progress.md
 
-## 124. 仿真性能 Round 10（REJECTED）：rectHitsTerrain 比较链重排 / terrain 短路
-> 全文 → docs/perf-optimization.progress.md
+## 123. 仿真性能 Round 10：scanAheadImpl per-tick memo（SHIPPED，2026-08-05） —— 全文 → docs/perf-optimization.progress.md
 
-## 125. 仿真性能 Round 10：selectTarget within-tick memo（SHIPPED，2026-08-05）
-> 全文 → docs/perf-optimization.progress.md
+## 124. 仿真性能 Round 10（REJECTED）：rectHitsTerrain 比较链重排 / terrain 短路 —— 全文 → docs/perf-optimization.progress.md
 
-## 126. 仿真性能 Round 10（REJECTED）：canStepLat 手内联 rectHitsTerrain
-> 全文 → docs/perf-optimization.progress.md
+## 125. 仿真性能 Round 10：selectTarget within-tick memo（SHIPPED，2026-08-05） —— 全文 → docs/perf-optimization.progress.md
 
-## 127. 仿真性能 Round 11：followPath→replanImpl 跨 tick 缓存（SHIPPED，2026-08-05，含引用别名修复）
-> 全文 → docs/perf-optimization.progress.md
+## 126. 仿真性能 Round 10（REJECTED）：canStepLat 手内联 rectHitsTerrain —— 全文 → docs/perf-optimization.progress.md
 
-## 128. 性能基线标准场景改为 classic/hard/chaos 各 1/3（SHIPPED，2026-08-05）
-> 全文 → docs/perf-optimization.progress.md
+## 127. 仿真性能 Round 11：followPath→replanImpl 跨 tick 缓存（SHIPPED，2026-08-05，含引用别名修复） —— 全文 → docs/perf-optimization.progress.md
 
-## 129. pickup 可达性 A*：dig-only + 跨 tick 纯 memo（SHIPPED，2026-08-05）
-> 全文 → docs/perf-optimization.progress.md
+## 128. 性能基线标准场景改为 classic/hard/chaos 各 1/3（SHIPPED，2026-08-05） —— 全文 → docs/perf-optimization.progress.md
 
-## 130. 全难度命数统一为 3 + GOD AI 基线重测（SHIPPED，2026-08-05）
-> 全文 → docs/god-ai-tuning.progress.md
+## 129. pickup 可达性 A*：dig-only + 跨 tick 纯 memo（SHIPPED，2026-08-05） —— 全文 → docs/perf-optimization.progress.md
 
-## 131. T8 拦截射程 pool 2→8/12：60-seed 诚实阴性（不发布，2026-08-05）
-> 全文 → docs/god-ai-tuning.progress.md
+## 130. 全难度命数统一为 3 + GOD AI 基线重测（SHIPPED，2026-08-05） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 132. 方向 B：selectTarget 威胁评分按 kind 速度 × 距基地距离加权（诚实阴性，不发布，2026-08-05）
-> 全文 → docs/god-ai-tuning.progress.md
+## 131. T8 拦截射程 pool 2→8/12：60-seed 诚实阴性（不发布，2026-08-05） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 133. 方向 C：brick-heavy 关防守距离再校准——诚实阴性（不发布，2026-08-05）
-> 全文 → docs/god-ai-tuning.progress.md
+## 132. 方向 B：selectTarget 威胁评分按 kind 速度 × 距基地距离加权（诚实阴性，不发布，2026-08-05） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 134. 方向 D：防守位停射拦截基地车道敌人（SHIPPED，2026-08-05）
-> 全文 → docs/god-ai-tuning.progress.md
+## 133. 方向 C：brick-heavy 关防守距离再校准——诚实阴性（不发布，2026-08-05） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 135. 方向 D 预测版：提前拦截基地车道逼近者（诚实阴性，不发布，2026-08-05）
-> 全文 → docs/god-ai-tuning.progress.md
+## 134. 方向 D：防守位停射拦截基地车道敌人（SHIPPED，2026-08-05） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 138. 基地守位格 v2：受威胁时驻守守位格（诚实阴性，不发布，2026-08-05）
-> 全文 → docs/god-ai-tuning.progress.md
+## 135. 方向 D 预测版：提前拦截基地车道逼近者（诚实阴性，不发布，2026-08-05） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 137. 基地守位格（Base Guard Anchor）—— 诚实阴性，不发布（2026-08-05）
-> 全文 → docs/god-ai-tuning.progress.md
+## 138. 基地守位格 v2：受威胁时驻守守位格（诚实阴性，不发布，2026-08-05） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 136. 方向 D 破砖版：预测命中时打场景砖开路（诚实阴性，不发布，2026-08-05）
-> 全文 → docs/god-ai-tuning.progress.md
+## 137. 基地守位格（Base Guard Anchor）—— 诚实阴性，不发布（2026-08-05） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 139. 方向 A：火力死区解除（firing-lane re-engage）—— 灾难性阴性，不发布（2026-08-05）
-> 全文 → docs/god-ai-tuning.progress.md
+## 136. 方向 D 破砖版：预测命中时打场景砖开路（诚实阴性，不发布，2026-08-05） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 140. 方向 D4：baseWall 精确环判定（破砖开火假阳性修复，SHIPPED，2026-08-05）
-> 全文 → docs/god-ai-tuning.progress.md
+## 139. 方向 A：火力死区解除（firing-lane re-engage）—— 灾难性阴性，不发布（2026-08-05） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 141. D2 拆环威胁评分 —— 诚实阴性（旋钮默认 0，byte-identical）
-> 全文 → docs/god-ai-tuning.progress.md
+## 140. 方向 D4：baseWall 精确环判定（破砖开火假阳性修复，SHIPPED，2026-08-05） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 142. D1 防守落点解盲 —— 诚实阴性（baseGuardAnchorMode 保持 0）
-> 全文 → docs/god-ai-tuning.progress.md
+## 141. D2 拆环威胁评分 —— 诚实阴性（旋钮默认 0，byte-identical） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 143. D5 基地火力解锁 + 星经济 —— 诚实阴性（firingLaneBoxRow / pickupStarBoxRow 保持 0）
-> 全文 → docs/god-ai-tuning.progress.md
+## 142. D1 防守落点解盲 —— 诚实阴性（baseGuardAnchorMode 保持 0） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 144. E1 道具经济（危急道具拾取）—— 诚实阴性（direItemMode 保持 0，反证判据收束）
-> 全文 → docs/god-ai-tuning.progress.md
+## 143. D5 基地火力解锁 + 星经济 —— 诚实阴性（firingLaneBoxRow / pickupStarBoxRow 保持 0） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 145. S24 冰面机制深潜 + iceGlideControl —— 诚实阴性（旋钮保持 0，S24 = 难度地板关）
-> 全文 → docs/god-ai-tuning.progress.md
+## 144. E1 道具经济（危急道具拾取）—— 诚实阴性（direItemMode 保持 0，反证判据收束） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 146. S8 Riverbed 取证深潜 + defensePosStandable —— SHIPPED（集合点可达性修复，hard 45%→52%）
-> 全文 → docs/god-ai-tuning.progress.md
+## 145. S24 冰面机制深潜 + iceGlideControl —— 诚实阴性（旋钮保持 0，S24 = 难度地板关） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 147. S8 三杠杆 B/C/A 逐一 A/B —— B SHIPPED（§146 已记），C/A 诚实阴性（§146 C 范围限制 + A 全局崩盘）
-> 全文 → docs/god-ai-tuning.progress.md
+## 146. S8 Riverbed 取证深潜 + defensePosStandable —— SHIPPED（集合点可达性修复，hard 45%→52%） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 148. fieldRetreatPickupGate 扩展到 MID/LOW —— 实测证伪后回退（HIGH-only 定稿，§147 范围锁定）
-> 全文 → docs/god-ai-tuning.progress.md
+## 147. S8 三杠杆 B/C/A 逐一 A/B —— B SHIPPED（§146 已记），C/A 诚实阴性（§146 C 范围限制 + A 全局崩盘） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 149. defensePosStandable 全面启用（minDist 解除）全关验证 —— 边际 ≈ 0，不发货（收窄版 §146 保持最优）
-> 全文 → docs/god-ai-tuning.progress.md
+## 148. fieldRetreatPickupGate 扩展到 MID/LOW —— 实测证伪后回退（HIGH-only 定稿，§147 范围锁定） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 150. 关卡序号统一为 1-based（工具 CLI + 文档 S# 全量修正，2026-08-05）
-> 全文 → docs/god-ai-tuning.progress.md
+## 149. defensePosStandable 全面启用（minDist 解除）全关验证 —— 边际 ≈ 0，不发货（收窄版 §146 保持最优） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 152. hard S12 Lattice 回放四联 bug 修复（§152-W1..W4）+ 全关 A/B 验证（SHIPPED）
-> 全文 → docs/god-ai-tuning.progress.md
+## 150. 关卡序号统一为 1-based（工具 CLI + 文档 S# 全量修正，2026-08-05） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 153. hard S12 Lattice seed 3214953618 回放两行为（bullet-crash + close-combat trade）诊断与修复（实现 + 单测锁定；A/B 发现两者全局非正 → 实验旋钮不发货）
-> 全文 → docs/god-ai-tuning.progress.md
+## 152. hard S12 Lattice 回放四联 bug 修复（§152-W1..W4）+ 全关 A/B 验证（SHIPPED） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 154. bulletLaneWait W1 重设计（§153 后记）：18 个净负种子根因定位 + predictive next-body 最终版（实测 35×60 hard 净 +15；仍为实验旋钮默认 0）
-> 全文 → docs/god-ai-tuning.progress.md
+## 153. hard S12 Lattice seed 3214953618 回放两行为（bullet-crash + close-combat trade）诊断与修复（实现 + 单测锁定；A/B 发现两者全局非正 → 实验旋钮不发货） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 155. bulletLaneWait W1 全局发货（§154 最终版，用户决策：忽略 chaos）
-> 全文 → docs/god-ai-tuning.progress.md
+## 154. bulletLaneWait W1 重设计（§153 后记）：18 个净负种子根因定位 + predictive next-body 最终版（实测 35×60 hard 净 +15；仍为实验旋钮默认 0） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 156. Freeze-Window Power-Up Pickup（冰冻期道具拾取，无限距离）
-> 全文 → docs/god-ai-tuning.progress.md
+## 155. bulletLaneWait W1 全局发货（§154 最终版，用户决策：忽略 chaos） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 157. Base Clear-Shot Threat Detection（基地车道对齐远距离威胁检测）
-> 全文 → docs/god-ai-tuning.progress.md
+## 156. Freeze-Window Power-Up Pickup（冰冻期道具拾取，无限距离） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 158. Non-Freeze Close-Range Power-Up Pickup（非冰冻期近距离道具拾取）
-> 全文 → docs/god-ai-tuning.progress.md
+## 157. Base Clear-Shot Threat Detection（基地车道对齐远距离威胁检测） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 159. 天降神兵守卫改用 GOD AI + §避让防堵车（用户需求 2026-08-06）
-> 全文 → docs/god-ai-tuning.progress.md
+## 158. Non-Freeze Close-Range Power-Up Pickup（非冰冻期近距离道具拾取） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 160. 避让中扫射压制——避让开火优先沿腾挪轴（用户需求 2026-08-06）
-> 全文 → docs/god-ai-tuning.progress.md
+## 159. 天降神兵守卫改用 GOD AI + §避让防堵车（用户需求 2026-08-06） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 161. §161 开路策略（carve path）——实现完整、hard 全 35 关与 Battlement 均实测净零 → 诚实阴性归档，旋钮默认 OFF（用户需求 2026-08-06，Stage 33 Battlement 过关思路）
-> 全文 → docs/god-ai-tuning.progress.md
+## 160. 避让中扫射压制——避让开火优先沿腾挪轴（用户需求 2026-08-06） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 162. §162 nav 卡死破局（navBreakStuck carve-dig escape）——SHIPPED 默认 1，hard 全 35 关显著胜率提升 p=0.019（用户需求 2026-08-06，回放 hard-s34-base-l2-t69-seed2050197249 Problem 1：出生点被砖墙围堵，player 不开墙出击，0:00~0:20 在出生点附近振荡）
-> 全文 → docs/god-ai-tuning.progress.md
+## 161. §161 开路策略（carve path）——实现完整、hard 全 35 关与 Battlement 均实测净零 → 诚实阴性归档，旋钮默认 OFF（用户需求 2026-08-06，Stage 33 Battlement 过关思路） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 163. §163 中路防守（midLaneDefense）——子弹触发版全 35 关与 Battlement 均实测净零 → 诚实阴性归档，旋钮默认 OFF（用户需求 2026-08-06，回放 Problem 2：基地列无钢铁防护，player 坐视敌人凿穿中路砖墙）
-> 全文 → docs/god-ai-tuning.progress.md
+## 162. §162 nav 卡死破局（navBreakStuck carve-dig escape）——SHIPPED 默认 1，hard 全 35 关显著胜率提升 p=0.019（用户需求 2026-08-06，回放 hard-s34-base-l2-t69-seed2050197249 Problem 1：出生点被砖墙围堵，player 不开墙出击，0:00~0:20 在出生点附近振荡） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 164. §164 中路列旁主动驻守（midLaneHold）——诚实阴性归档（用户需求 2026-08-06：让 §162 出袋后的玩家优先走中路走廊而非左侧，在列旁持枪对消）
-> 全文 → docs/god-ai-tuning.progress.md
+## 163. §163 中路防守（midLaneDefense）——子弹触发版全 35 关与 Battlement 均实测净零 → 诚实阴性归档，旋钮默认 OFF（用户需求 2026-08-06，回放 Problem 2：基地列无钢铁防护，player 坐视敌人凿穿中路砖墙） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 165. T2a Defense Override — 近敌停射允许（修复 S20 Bastion 振荡死锁，origin 侧原 §159）
-> 全文 → docs/god-ai-tuning.progress.md
+## 164. §164 中路列旁主动驻守（midLaneHold）——诚实阴性归档（用户需求 2026-08-06：让 §162 出袋后的玩家优先走中路走廊而非左侧，在列旁持枪对消） —— 全文 → docs/god-ai-tuning.progress.md
 
-## §165. 中路防守启用 + 水阻弹 bug 修复 + 近战对枪火力评估
-> 全文 → docs/god-ai-tuning.progress.md
+## 165. T2a Defense Override — 近敌停射允许（修复 S20 Bastion 振荡死锁，origin 侧原 §159） —— 全文 → docs/god-ai-tuning.progress.md
 
-## §165-round2. 深度调优：pathThreatAvoidance 假阳性 + closeCombatDuel 多敌计数 + midLaneHold 主动防守
-> 全文 → docs/god-ai-tuning.progress.md
+## 165. 中路防守启用 + 水阻弹 bug 修复 + 近战对枪火力评估 —— 全文 → docs/god-ai-tuning.progress.md
 
-## 166. B1 starRush 星经济冲刺 — 诚实阴性归档（旋钮默认 0，2026-08-07）
-> 全文 → docs/god-ai-tuning.progress.md
+## 165-round2. 深度调优：pathThreatAvoidance 假阳性 + closeCombatDuel 多敌计数 + midLaneHold 主动防守 —— 全文 → docs/god-ai-tuning.progress.md
 
-## 167. B4 超级道具战略激活（superItemMode）— SHIPPED guard-only → RETIRED by default（2026-08-07 → 修订 2026-08-25 M0）
-> 修订：plan/AI-No-Items-Warmstart.md M0 将 superItemMode/GuardThreat 默认归零（NN AI 全链路不使用主动道具）。
-> 配对复测（A=显式 ON, B=新默认 OFF, hard 60 seeds）：胜率 76→75%、Δscore −0.0093±0.0025、t=−3.77、p=0.0002
-> （Lattice 显著变差 0.519→0.485）——与新预检 B 臂完全一致；−1pt 缺口（R4）转列 RL 守家目标。
-> 全文 → docs/god-ai-tuning.progress.md §M0
+## 166. B1 starRush 星经济冲刺 — 诚实阴性归档（旋钮默认 0，2026-08-07） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 168. navStuck 计数器抖动重置 bug（navStuckZone）— 实验阴性，旋钮留档默认 0（2026-08-07）
-> 全文 → docs/god-ai-tuning.progress.md
+## 167. B4 超级道具战略激活（superItemMode）— SHIPPED guard-only → RETIRED by default（2026-08-07 → 修订 2026-08-25 M0） —— 全文 → docs/god-ai-tuning.progress.md §M0
 
-## 169. 基地威胁信号闪烁（threatStickyTicks）— 立项（2026-08-07）
-> 全文 → docs/god-ai-tuning.progress.md
+## 168. navStuck 计数器抖动重置 bug（navStuckZone）— 实验阴性，旋钮留档默认 0（2026-08-07） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 170. 追击承诺（huntCommitTicks）— 立项（2026-08-07）
-> 全文 → docs/god-ai-tuning.progress.md
+## 169. 基地威胁信号闪烁（threatStickyTicks）— 立项（2026-08-07） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 171. 路径长度感知目标选择（pathTargetMode）— 立项（2026-08-07）
-> 全文 → docs/god-ai-tuning.progress.md
+## 170. 追击承诺（huntCommitTicks）— 立项（2026-08-07） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 172. bonus 敌人追猎权重（bonusHuntBias）— 立项（2026-08-07）
-> 全文 → docs/god-ai-tuning.progress.md
+## 171. 路径长度感知目标选择（pathTargetMode）— 立项（2026-08-07） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 173. 基地损伤召回（baseDamageRecall）— 立项（2026-08-07）
-> 全文 → docs/god-ai-tuning.progress.md
+## 172. bonus 敌人追猎权重（bonusHuntBias）— 立项（2026-08-07） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 174. 双玩家仿真系统 — 双 God AI 协作 + 防堵车 + 督战双玩家 (SHIPPED)
-> 全文 → docs/god-ai-tuning.progress.md
+## 173. 基地损伤召回（baseDamageRecall）— 立项（2026-08-07） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 175. Dual 中路无钢关配合策略 — 立项（2026-08-08）
-> 全文 → docs/god-ai-tuning.progress.md
+## 174. 双玩家仿真系统 — 双 God AI 协作 + 防堵车 + 督战双玩家 (SHIPPED) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 176. Dual Central Breach §6 实测缺陷修复 — P2 角色落地 + P1 dig-fire
-> 全文 → docs/god-ai-tuning.progress.md
+## 175. Dual 中路无钢关配合策略 — 立项（2026-08-08） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 177. Dual Central Breach P2 导航落地 — directMove/patrol 实测回退，de-conflict 生效
-> 全文 → docs/god-ai-tuning.progress.md
+## 176. Dual Central Breach §6 实测缺陷修复 — P2 角色落地 + P1 dig-fire —— 全文 → docs/god-ai-tuning.progress.md
 
-## 178. Dual Central Breach autopsy (hard-s34 seed2) — carve 穿墙 + 中驻守 + sticky hold
-> 全文 → docs/god-ai-tuning.progress.md
+## 177. Dual Central Breach P2 导航落地 — directMove/patrol 实测回退，de-conflict 生效 —— 全文 → docs/god-ai-tuning.progress.md
 
-## 179. Dual Central Breach autopsy (hard-s34 seed6) — P1 凿盾 + 危基不回防 + 冰冻浪费
-> 全文 → docs/god-ai-tuning.progress.md
+## 178. Dual Central Breach autopsy (hard-s34 seed2) — carve 穿墙 + 中驻守 + sticky hold —— 全文 → docs/god-ai-tuning.progress.md
 
-## 180. Dual Central Breach autopsy (hard-s34 seed34) — 右路盲区 + fence 独占 + defenseSecond 近端覆盖
-> 全文 → docs/god-ai-tuning.progress.md
+## 179. Dual Central Breach autopsy (hard-s34 seed6) — P1 凿盾 + 危基不回防 + 冰冻浪费 —— 全文 → docs/god-ai-tuning.progress.md
 
-## 181. Dual Central Breach autopsy (hard-s34 seed115) — P1 spawn 振荡：A* 路由穿透基地保护砖
-> 全文 → docs/god-ai-tuning.progress.md
+## 180. Dual Central Breach autopsy (hard-s34 seed34) — 右路盲区 + fence 独占 + defenseSecond 近端覆盖 —— 全文 → docs/god-ai-tuning.progress.md
 
-## 182. 重放暂停后切换应用再回来点播放，画面不动（visibilitychange 污染 world.state）
-> 全文 → docs/god-ai-tuning.progress.md
+## 181. Dual Central Breach autopsy (hard-s34 seed115) — P1 spawn 振荡：A* 路由穿透基地保护砖 —— 全文 → docs/god-ai-tuning.progress.md
 
-## §182. Face-Nearest-Enemy Fallback for Immobile-Stuck Player
-> 全文 → docs/god-ai-tuning.progress.md
+## 182. 重放暂停后切换应用再回来点播放，画面不动（visibilitychange 污染 world.state） —— 全文 → docs/god-ai-tuning.progress.md
 
-## §183. GOD AI Idle Calibration — Analysis Complete
-> 全文 → docs/god-ai-tuning.progress.md
+## 182. Face-Nearest-Enemy Fallback for Immobile-Stuck Player —— 全文 → docs/god-ai-tuning.progress.md
 
-## §184. Freeze Powerup — Allied Guard Freeze Bug + Pickup Stuck Bug
-> 全文 → docs/god-ai-tuning.progress.md
+## 183. GOD AI Idle Calibration — Analysis Complete —— 全文 → docs/god-ai-tuning.progress.md
 
-## §185. navStuckZone=1 — Sub-Pixel Jitter Defeats Nav-Stuck Counter
-> 全文 → docs/god-ai-tuning.progress.md
+## 184. Freeze Powerup — Allied Guard Freeze Bug + Pickup Stuck Bug —— 全文 → docs/god-ai-tuning.progress.md
 
-## §186. powerupStuckTicks — Powerup Navigation Stuck Detection
-> 全文 → docs/god-ai-tuning.progress.md
+## 185. navStuckZone=1 — Sub-Pixel Jitter Defeats Nav-Stuck Counter —— 全文 → docs/god-ai-tuning.progress.md
 
-## §187. Guard/P2 A* Player-Obstacle + Target Blacklist + Fire Post-Turn + Powerup-Enemy Overlap
-> 全文 → docs/god-ai-tuning.progress.md
+## 186. powerupStuckTicks — Powerup Navigation Stuck Detection —— 全文 → docs/god-ai-tuning.progress.md
 
-## §188. Fence Power-Up Must Not Trap Tanks Inside Steel
-> 全文 → docs/god-ai-tuning.progress.md
+## 187. Guard/P2 A* Player-Obstacle + Target Blacklist + Fire Post-Turn + Powerup-Enemy Overlap —— 全文 → docs/god-ai-tuning.progress.md
 
-## §189. 开局联通清墙 — Base Connectivity Clear
-> 全文 → docs/god-ai-tuning.progress.md
+## 188. Fence Power-Up Must Not Trap Tanks Inside Steel —— 全文 → docs/god-ai-tuning.progress.md
 
-## §190. A* 寻路代价模型升级 — 砖墙=空地 + 基地环倍率 + 开火停车代价
-> 全文 → docs/god-ai-tuning.progress.md
+## 189. 开局联通清墙 — Base Connectivity Clear —— 全文 → docs/god-ai-tuning.progress.md
 
-## 191. 批量仿真共享态硬化 — findPath 重入守卫 + level-sim 子进程隔离
-> 全文 → docs/god-ai-tuning.progress.md
+## 190. A* 寻路代价模型升级 — 砖墙=空地 + 基地环倍率 + 开火停车代价 —— 全文 → docs/god-ai-tuning.progress.md
 
-## §192. 基地车道哨兵（baseLaneSentry）—— SHIPPED（hard/chaos 默认 1；classic 0 保持字节不变）
-> 全文 → docs/god-ai-tuning.progress.md
+## 191. 批量仿真共享态硬化 — findPath 重入守卫 + level-sim 子进程隔离 —— 全文 → docs/god-ai-tuning.progress.md
 
-## §193-A. 中线火力门（centerLineFireGate）— 标注重评（被 §193-C 取代）
-> 全文 → docs/god-ai-tuning.progress.md
+## 192. 基地车道哨兵（baseLaneSentry）—— SHIPPED（hard/chaos 默认 1；classic 0 保持字节不变） —— 全文 → docs/god-ai-tuning.progress.md
 
-## §193-C. 中线火力门 — SHIPPED（hard/chaos 默认 1；classic restore 0 字节不变）
-> 全文 → docs/god-ai-tuning.progress.md
+## 193-A. 中线火力门（centerLineFireGate）— 标注重评（被 §193-C 取代） —— 全文 → docs/god-ai-tuning.progress.md
 
-## §193-D. 预测前移门（predictiveFireGate）— SHIPPED（三难度默认 1；classic restore 0）
-> 全文 → docs/god-ai-tuning.progress.md
+## 193-C. 中线火力门 — SHIPPED（hard/chaos 默认 1；classic restore 0 字节不变） —— 全文 → docs/god-ai-tuning.progress.md
 
-## §193-B. 卫位导航（baseLaneSentryStation）— 达标保留（默认 0 = OFF，待发货）
-> 全文 → docs/god-ai-tuning.progress.md
+## 193-D. 预测前移门（predictiveFireGate）— SHIPPED（三难度默认 1；classic restore 0） —— 全文 → docs/god-ai-tuning.progress.md
 
-## §193-E. 环破回防（ringFallback）— 阴性归档（S34 -2，hard 全关 -54）
-> 全文 → docs/god-ai-tuning.progress.md
+## 193-B. 卫位导航（baseLaneSentryStation）— 达标保留（默认 0 = OFF，待发货） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 194. 像素卡死 directMove 兜底 (§190)
-> 全文 → docs/god-ai-tuning.progress.md
+## 193-E. 环破回防（ringFallback）— 阴性归档（S34 -2，hard 全关 -54） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 195. 中路钻探粘性驻守 midLaneStickyTicks=90 — S8 Riverbed 钻探败链修复 SHIPPED (2026-08-14)
-> 全文 → docs/god-ai-tuning.progress.md
+## 194. 像素卡死 directMove 兜底 (§190) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 196. 钻探预警列完整性触发器（drill alarm）— 方向 1 证伪（2026-08-14）
-> 全文 → docs/god-ai-tuning.progress.md
+## 195. 中路钻探粘性驻守 midLaneStickyTicks=90 — S8 Riverbed 钻探败链修复 SHIPPED (2026-08-14) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 197. 带内拆环导航 + 远距开火（baseLaneSentryInBandNav/FarRange）— 方向 2 证伪（2026-08-15）
-> 全文 → docs/god-ai-tuning.progress.md
+## 196. 钻探预警列完整性触发器（drill alarm）— 方向 1 证伪（2026-08-14） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 198. 卫位导航发货（baseLaneSentryStation=1）— SHIPPED（2026-08-15）
-> 全文 → docs/god-ai-tuning.progress.md
+## 197. 带内拆环导航 + 远距开火（baseLaneSentryInBandNav/FarRange）— 方向 2 证伪（2026-08-15） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 199. S34 站桩取证 + 工具口径 bug（方向 3 证伪 + ab-param 修复）（2026-08-15）
-> 全文 → docs/god-ai-tuning.progress.md
+## 198. 卫位导航发货（baseLaneSentryStation=1）— SHIPPED（2026-08-15） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 200. dodgeEscapeDepth 逃逸深度闪避证伪（方向 5 D1）（2026-08-15）
-> 全文 → docs/god-ai-tuning.progress.md
+## 199. S34 站桩取证 + 工具口径 bug（方向 3 证伪 + ab-param 修复）（2026-08-15） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 201. 方向 6（clearSpeed 0.151 慢/拖沓）— 分析性证伪：无 AI 拖沓可修（2026-08-15）
-> 全文 → docs/god-ai-tuning.progress.md
+## 200. dodgeEscapeDepth 逃逸深度闪避证伪（方向 5 D1）（2026-08-15） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 202. M0 威胁台账取证上线（threat-ledger + failure-classifier）— 硬关 2100 局基线（2026-08-15）
-> 全文 → docs/god-ai-tuning.progress.md
+## 201. 方向 6（clearSpeed 0.151 慢/拖沓）— 分析性证伪：无 AI 拖沓可修（2026-08-15） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 203. M1 ThreatBudget 纯模型上线（Phase 1 §5，默认未接线）（2026-08-15）
-> 全文 → docs/god-ai-tuning.progress.md
+## 202. M0 威胁台账取证上线（threat-ledger + failure-classifier）— 硬关 2100 局基线（2026-08-15） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 204. M2 ActionContract 防守站桩门控（Phase 2 §6.1，默认 OFF + A/B）（2026-08-15）
-> 全文 → docs/god-ai-tuning.progress.md
+## 203. M1 ThreatBudget 纯模型上线（Phase 1 §5，默认未接线）（2026-08-15） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 205. §6.2 targetValue 排序键 — A/B 证伪，保持默认 OFF
-> 全文 → docs/god-ai-tuning.progress.md
+## 204. M2 ActionContract 防守站桩门控（Phase 2 §6.1，默认 OFF + A/B）（2026-08-15） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 206. §6.3 短期 intent（lease+重验）— A/B 中性偏负，保持默认 OFF
-> 全文 → docs/god-ai-tuning.progress.md
+## 205. §6.2 targetValue 排序键 — A/B 证伪，保持默认 OFF —— 全文 → docs/god-ai-tuning.progress.md
 
-## 207. Phase 3 §7 动态攻击覆盖点 — A/B 证伪（S34 崩塌），保持默认 OFF
-> 全文 → docs/god-ai-tuning.progress.md
+## 206. §6.3 短期 intent（lease+重验）— A/B 中性偏负，保持默认 OFF —— 全文 → docs/god-ai-tuning.progress.md
 
-## 208. §207 覆盖点实现缺陷审计 — 5 缺陷已修复，机制仍保持 OFF
-> 全文 → docs/god-ai-tuning.progress.md
+## 207. Phase 3 §7 动态攻击覆盖点 — A/B 证伪（S34 崩塌），保持默认 OFF —— 全文 → docs/god-ai-tuning.progress.md
 
-## 209. 覆盖点实现审计第二轮 — 坐标系根因 + (b)/BUG-2 修复，正确实现仍净负（OFF 维持）
-> 全文 → docs/god-ai-tuning.progress.md
+## 208. §207 覆盖点实现缺陷审计 — 5 缺陷已修复，机制仍保持 OFF —— 全文 → docs/god-ai-tuning.progress.md
 
-## 210. 覆盖点格坐标 round → floor（消除格中点决策振荡）
-> 全文 → docs/god-ai-tuning.progress.md
+## 209. 覆盖点实现审计第二轮 — 坐标系根因 + (b)/BUG-2 修复，正确实现仍净负（OFF 维持） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 211. 覆盖点负翻转 per-seed 取证 — 蝴蝶效应根因，csb/cbr 过滤修复证伪（OFF 维持）
-> 全文 → docs/god-ai-tuning.progress.md
+## 210. 覆盖点格坐标 round → floor（消除格中点决策振荡） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 212. M4 安全吃星 — 诊断先行，收益空间不足（不提高 pickup 权重）
-> 全文 → docs/god-ai-tuning.progress.md
+## 211. 覆盖点负翻转 per-seed 取证 — 蝴蝶效应根因，csb/cbr 过滤修复证伪（OFF 维持） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 213. Phase 5 CMA-ES — 启动决策与搜索空间重定义（§9.1 条件未满足，用户指示启动，按协议执行）
-> 全文 → docs/god-ai-tuning.progress.md
+## 212. M4 安全吃星 — 诊断先行，收益空间不足（不提高 pickup 权重） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 214. Phase 5 CMA-ES — 参数面无 ROI，三批候选全部噪声，维持 DEFAULT（停止条件 §9.3.5 触发）
-> 全文 → docs/god-ai-tuning.progress.md
+## 213. Phase 5 CMA-ES — 启动决策与搜索空间重定义（§9.1 条件未满足，用户指示启动，按协议执行） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 215. Hard 开放测试第 1 轮: M0–M3 通过, idle 因果证伪(STATUS: 完成)
-> 全文 → docs/god-ai-tuning.progress.md
+## 214. Phase 5 CMA-ES — 参数面无 ROI，三批候选全部噪声，维持 DEFAULT（停止条件 §9.3.5 触发） —— 全文 → docs/god-ai-tuning.progress.md
 
-## 216. M4 统一行动候选 — paired A/B 净 −116, 方向否决 (STATUS: 完成)
-> 全文 → docs/god-ai-tuning.progress.md
+## 215. Hard 开放测试第 1 轮: M0–M3 通过, idle 因果证伪(STATUS: 完成) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 217. M5 travel 段火力偏离 — 诊断先行, 机会空间 33% (STATUS: 实现中, 未 A/B)
-> 全文 → docs/god-ai-tuning.progress.md
+## 216. M4 统一行动候选 — paired A/B 净 −116, 方向否决 (STATUS: 完成) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 218. M5 travel 段火力偏离 (fireLineDetourMode) — 三批全正向, 候选通过初步 A/B → gated rollout (STATUS: 完成)
-> 全文 → docs/god-ai-tuning.progress.md
+## 217. M5 travel 段火力偏离 — 诊断先行, 机会空间 33% (STATUS: 实现中, 未 A/B) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 219. 评审 P1 修复轮 (实验工具可信度 + 4 处 AI 缺陷) (STATUS: 完成)
-> 全文 → docs/god-ai-tuning.progress.md
+## 218. M5 travel 段火力偏离 (fireLineDetourMode) — 三批全正向, 候选通过初步 A/B → gated rollout (STATUS: 完成) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 220. defenseIntercept 开火窗口 (actionContractMode 独立 A/B) — 三线微负, 方向否决 (STATUS: 完成)
-> 全文 → docs/god-ai-tuning.progress.md
+## 219. 评审 P1 修复轮 (实验工具可信度 + 4 处 AI 缺陷) (STATUS: 完成) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 221. 评审 P2 修复 + M5 candidate-on 完整验证 (STATUS: 完成, M5 升格待拍板)
-> 全文 → docs/god-ai-tuning.progress.md
+## 220. defenseIntercept 开火窗口 (actionContractMode 独立 A/B) — 三线微负, 方向否决 (STATUS: 完成) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 222. CMA-ES 重启 — 全 stage 口径 (STATUS: 收口, 参数面无 ROI 确认)
-> 全文 → docs/god-ai-tuning.progress.md
+## 221. 评审 P2 修复 + M5 candidate-on 完整验证 (STATUS: 完成, M5 升格待拍板) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 223. ③ dodge idle 取证收口 (STATUS: 完成, 候选方向待拍板)
-> 全文 → docs/god-ai-tuning.progress.md
+## 222. CMA-ES 重启 — 全 stage 口径 (STATUS: 收口, 参数面无 ROI 确认) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 224. 候选 A: dodgeCentroidMode 否决 (STATUS: 完成)
-> 全文 → docs/god-ai-tuning.progress.md
+## 223. ③ dodge idle 取证收口 (STATUS: 完成, 候选方向待拍板) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 225. 后继 ④ "太迟"防御结构审计收口 (STATUS: 完成)
-> 全文 → docs/god-ai-tuning.progress.md
+## 224. 候选 A: dodgeCentroidMode 否决 (STATUS: 完成) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 226. 后继 ④ 候选 A/B 双否决 (STATUS: 完成)
-> 全文 → docs/god-ai-tuning.progress.md
+## 225. 后继 ④ "太迟"防御结构审计收口 (STATUS: 完成) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 227. 后继 ⑤ t2a 自毁守卫重论证收口 (STATUS: 完成)
-> 全文 → docs/god-ai-tuning.progress.md
+## 226. 后继 ④ 候选 A/B 双否决 (STATUS: 完成) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 228. M5 人工开放测试入口 (STATUS: 完成)
-> 全文 → docs/god-ai-tuning.progress.md
+## 227. 后继 ⑤ t2a 自毁守卫重论证收口 (STATUS: 完成) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 229. M5 fireLineDetourMode SHIPPED — 默认 1（含 S30/S13 弱关重标定）(STATUS: 完成)
-> 全文 → docs/god-ai-tuning.progress.md
+## 228. M5 人工开放测试入口 (STATUS: 完成) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 230. 门禁 runner 瘦身 — collectMetrics/collectEvents + telemetry Set ping-pong (STATUS: SHIPPED)
-> 全文 → docs/god-ai-tuning.progress.md
+## 229. M5 fireLineDetourMode SHIPPED — 默认 1（含 S30/S13 弱关重标定）(STATUS: 完成) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 231. thinkInterval 决策链节流 A/B — 否决 (STATUS: 完成)
-> 全文 → docs/god-ai-tuning.progress.md
+## 230. 门禁 runner 瘦身 — collectMetrics/collectEvents + telemetry Set ping-pong (STATUS: SHIPPED) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 232. 决策链小数组分配消除 + scanAhead 整数步进 (STATUS: SHIPPED, 字节等价)
-> 全文 → docs/god-ai-tuning.progress.md
+## 231. thinkInterval 决策链节流 A/B — 否决 (STATUS: 完成) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 233. bun test 全套 <20s 攻坚结论 — 机器吞吐墙 + 种子数决策 (STATUS: 完成, 10 种子落地)
-> 全文 → docs/god-ai-tuning.progress.md
+## 232. 决策链小数组分配消除 + scanAhead 整数步进 (STATUS: SHIPPED, 字节等价) —— 全文 → docs/god-ai-tuning.progress.md
 
-## 234. 门禁种子 20→10 后补 — test-silent HEAVY_TESTS 修复 + 强制 --parallel (STATUS: SHIPPED)
-> 全文 → docs/god-ai-tuning.progress.md
+## 233. bun test 全套 <20s 攻坚结论 — 机器吞吐墙 + 种子数决策 (STATUS: 完成, 10 种子落地) —— 全文 → docs/god-ai-tuning.progress.md
 
+## 234. 门禁种子 20→10 后补 — test-silent HEAVY_TESTS 修复 + 强制 --parallel (STATUS: SHIPPED) —— 全文 → docs/god-ai-tuning.progress.md
 
-## Render Optimization（§235–§238 渲染实测否决，全文 → docs/render-optimization.progress.md）
+### Render Optimization（§235–§238 渲染实测否决，全文 → docs/render-optimization.progress.md）
 
-## 235. R6 vignette 缓存 1× 化 — 全屏 alpha blit 面积 4× 缩减 (STATUS: SHIPPED, 有损项已论证)
-> 全文 → docs/render-optimization.progress.md R6（2026-08-17）
+## 235. R6 vignette 缓存 1× 化 — 全屏 alpha blit 面积 4× 缩减 (STATUS: SHIPPED, 有损项已论证) —— 全文 → docs/render-optimization.progress.md R6（2026-08-17）
 
-## 236. P1-C 粒子 per-type 分桶 — 精确测量后放弃 (STATUS: 否决, 实测数据入档)
-> 全文 → docs/render-optimization.progress.md P1-C（2026-08-17）
+## 236. P1-C 粒子 per-type 分桶 — 精确测量后放弃 (STATUS: 否决, 实测数据入档) —— 全文 → docs/render-optimization.progress.md P1-C（2026-08-17）
 
-## 237. R7 坦克 tight-viewport blit — 实测否决 (STATUS: 否决, 9-arg 调用开销抵消面积节省)
-> 全文 → docs/render-optimization.progress.md R7（2026-08-17）
+## 237. R7 坦克 tight-viewport blit — 实测否决 (STATUS: 否决, 9-arg 调用开销抵消面积节省) —— 全文 → docs/render-optimization.progress.md R7（2026-08-17）
 
-## 238. 粒子烘焙位图 blit — 实测 4× 慢，彻底证伪 (STATUS: 否决)
-> 全文 → docs/render-optimization.progress.md R8（2026-08-17）
+## 238. 粒子烘焙位图 blit — 实测 4× 慢，彻底证伪 (STATUS: 否决) —— 全文 → docs/render-optimization.progress.md R8（2026-08-17）
 
----
+### Refactor & Engineering（§239–§271 重构落地，全文 → docs/decisions.details.md Part B）
 
-## Refactor & Engineering（§239–§271 重构落地，全文 → docs/decisions.details.md Part B）
+## 239. §1.6 魔法数字 → 命名常量 (STATUS: 已实施, plan/refactor.agy.md Phase 1) —— 全文 → docs/decisions.details.md（Part B §239）
 
-## 239. §1.6 魔法数字 → 命名常量 (STATUS: 已实施, plan/refactor.agy.md Phase 1)
-> 全文 → docs/decisions.details.md（Part B §239）
+## 240. §1.5 Option C — WorldSerializer 字段覆盖测试守卫 (STATUS: 已实施, plan/refactor.agy.md Phase 1) —— 全文 → docs/decisions.details.md（Part B §240）
 
-## 240. §1.5 Option C — WorldSerializer 字段覆盖测试守卫 (STATUS: 已实施, plan/refactor.agy.md Phase 1)
-> 全文 → docs/decisions.details.md（Part B §240）
+## 241. §3.2 快照/回放基础设施去重 (STATUS: 已实施, plan/refactor.agy.md Phase 1) —— 全文 → docs/decisions.details.md（Part B §241）
 
-## 241. §3.2 快照/回放基础设施去重 (STATUS: 已实施, plan/refactor.agy.md Phase 1)
-> 全文 → docs/decisions.details.md（Part B §241）
+## 242. §2.8 方向助手整合 → utils/direction.ts (STATUS: 已实施, plan/refactor.agy.md Phase 1) —— 全文 → docs/decisions.details.md（Part B §242）
 
-## 242. §2.8 方向助手整合 → utils/direction.ts (STATUS: 已实施, plan/refactor.agy.md Phase 1)
-> 全文 → docs/decisions.details.md（Part B §242）
+## 243. §3.4 共享测试 fixtures → tests/helpers.ts (STATUS: 已实施, plan/refactor.agy.md Phase 1) —— 全文 → docs/decisions.details.md（Part B §243）
 
-## 243. §3.4 共享测试 fixtures → tests/helpers.ts (STATUS: 已实施, plan/refactor.agy.md Phase 1)
-> 全文 → docs/decisions.details.md（Part B §243）
+## 244. §1.2 GameLoop.loop 分解为命名步骤方法 (STATUS: 已实施, plan/refactor.agy.md Phase 2) —— 全文 → docs/decisions.details.md（Part B §244）
 
-## 244. §1.2 GameLoop.loop 分解为命名步骤方法 (STATUS: 已实施, plan/refactor.agy.md Phase 2)
-> 全文 → docs/decisions.details.md（Part B §244）
+## 245. §2.1 击杀管线抽取 → KillPipeline.ts (STATUS: 已实施, plan/refactor.agy.md Phase 2) —— 全文 → docs/decisions.details.md（Part B §245）
 
-## 245. §2.1 击杀管线抽取 → KillPipeline.ts (STATUS: 已实施, plan/refactor.agy.md Phase 2)
-> 全文 → docs/decisions.details.md（Part B §245）
+## 246. §2.2 P1/P2 生命周期集中化 → World.enablePlayer2/disablePlayer2 (STATUS: 已实施) —— 全文 → docs/decisions.details.md（Part B §246）
 
-## 246. §2.2 P1/P2 生命周期集中化 → World.enablePlayer2/disablePlayer2 (STATUS: 已实施)
-> 全文 → docs/decisions.details.md（Part B §246）
+## 247. §2.3 自由格搜索统一 → GridQuery.findNearestFreeCell (STATUS: 已实施) —— 全文 → docs/decisions.details.md（Part B §247）
 
-## 247. §2.3 自由格搜索统一 → GridQuery.findNearestFreeCell (STATUS: 已实施)
-> 全文 → docs/decisions.details.md（Part B §247）
+## 248. §2.9 + §3.8 时间单位命名约定 + AI 常量归位 (STATUS: 已实施) —— 全文 → docs/decisions.details.md（Part B §248）
 
-## 248. §2.9 + §3.8 时间单位命名约定 + AI 常量归位 (STATUS: 已实施)
-> 全文 → docs/decisions.details.md（Part B §248）
+## 249. §3.6 四套 Worker Pool 统一 → tools/lib/worker-pool.ts (STATUS: 已实施) —— 全文 → docs/decisions.details.md（Part B §249）
 
-## 249. §3.6 四套 Worker Pool 统一 → tools/lib/worker-pool.ts (STATUS: 已实施)
-> 全文 → docs/decisions.details.md（Part B §249）
+## 250. §2.7 pathfind.ts 解耦：utils → ai/god + grid-search (STATUS: 已实施) —— 全文 → docs/decisions.details.md（Part B §250）
 
-## 250. §2.7 pathfind.ts 解耦：utils → ai/god + grid-search (STATUS: 已实施)
-> 全文 → docs/decisions.details.md（Part B §250）
+## 251. §1.3 Phase C — highScore 持久化 I/O 迁 settings.ts (STATUS: 已实施) —— 全文 → docs/decisions.details.md（Part B §251）
 
-## 251. §1.3 Phase C — highScore 持久化 I/O 迁 settings.ts (STATUS: 已实施)
-> 全文 → docs/decisions.details.md（Part B §251）
+## 252. §3.1 双渲染器 fallback 移除 — 否决（前提不成立） (STATUS: 否决) —— 全文 → docs/decisions.details.md（Part B §252）
 
-## 252. §3.1 双渲染器 fallback 移除 — 否决（前提不成立） (STATUS: 否决)
-> 全文 → docs/decisions.details.md（Part B §252）
+## 253. §2.6 types.ts 重组织 — presentation-only 类型迁出 (STATUS: 部分实施) —— 全文 → docs/decisions.details.md（Part B §253）
 
-## 253. §2.6 types.ts 重组织 — presentation-only 类型迁出 (STATUS: 部分实施)
-> 全文 → docs/decisions.details.md（Part B §253）
+## 254. §1.1 Mixin→组合：Simulation（21 stubs 归零） (STATUS: 已实施, plan Phase 3) —— 全文 → docs/decisions.details.md（Part B §254）
 
-## 254. §1.1 Mixin→组合：Simulation（21 stubs 归零） (STATUS: 已实施, plan Phase 3)
-> 全文 → docs/decisions.details.md（Part B §254）
+## 255. §1.1 Mixin→组合：Game（27 stubs 归零） (STATUS: 已实施, plan Phase 3) —— 全文 → docs/decisions.details.md（Part B §255）
 
-## 255. §1.1 Mixin→组合：Game（27 stubs 归零） (STATUS: 已实施, plan Phase 3)
-> 全文 → docs/decisions.details.md（Part B §255）
+## 256. §1.1 Mixin→组合：GameRenderer + SpriteArtist（41 stubs 归零） (STATUS: 已实施) —— 全文 → docs/decisions.details.md（Part B §256）
 
-## 256. §1.1 Mixin→组合：GameRenderer + SpriteArtist（41 stubs 归零） (STATUS: 已实施)
-> 全文 → docs/decisions.details.md（Part B §256）
+## 257. §2.6 types.ts 重组完成 + Tank 拆分否决 (STATUS: 已实施/部分否决) —— 全文 → docs/decisions.details.md（Part B §257）
 
-## 257. §2.6 types.ts 重组完成 + Tank 拆分否决 (STATUS: 已实施/部分否决)
-> 全文 → docs/decisions.details.md（Part B §257）
+## 258. §3.3 Browser 去重 — 最小提取（formatCreated/formatBytes） (STATUS: 已实施, 范围修正) —— 全文 → docs/decisions.details.md（Part B §258）
 
-## 258. §3.3 Browser 去重 — 最小提取（formatCreated/formatBytes） (STATUS: 已实施, 范围修正)
-> 全文 → docs/decisions.details.md（Part B §258）
+## 259. §3.7 diag 脚本清理 — 归档 5 个零引用一次性脚本 (STATUS: 已实施, 范围修正) —— 全文 → docs/decisions.details.md（Part B §259）
 
-## 259. §3.7 diag 脚本清理 — 归档 5 个零引用一次性脚本 (STATUS: 已实施, 范围修正)
-> 全文 → docs/decisions.details.md（Part B §259）
+## 260. §3.5 tests 目录重组 — 否决（代价/价值失衡） (STATUS: 否决) —— 全文 → docs/decisions.details.md（Part B §260）
 
-## 260. §3.5 tests 目录重组 — 否决（代价/价值失衡） (STATUS: 否决)
-> 全文 → docs/decisions.details.md（Part B §260）
+## 261. §2.4 UIManager 拆分 — 四子控制器组合 (STATUS: 已实施) —— 全文 → docs/decisions.details.md（Part B §261）
 
-## 261. §2.4 UIManager 拆分 — 四子控制器组合 (STATUS: 已实施)
-> 全文 → docs/decisions.details.md（Part B §261）
+## 262. 废除 God AI 禁区（AGENTS §5.1 幽灵规则消歧） (STATUS: 已实施, plan/refactor.trae.md §0.1) —— 全文 → docs/decisions.details.md（Part B §262）
 
-## 262. 废除 God AI 禁区（AGENTS §5.1 幽灵规则消歧） (STATUS: 已实施, plan/refactor.trae.md §0.1)
-> 全文 → docs/decisions.details.md（Part B §262）
+## 263. 第二轮重构落地汇总（plan/refactor.trae.md B1–B3） (STATUS: 已实施, 2026-08-23) —— 全文 → docs/decisions.details.md（Part B §263）
 
-## 263. 第二轮重构落地汇总（plan/refactor.trae.md B1–B3） (STATUS: 已实施, 2026-08-23)
-> 全文 → docs/decisions.details.md（Part B §263）
+## 264. selectTargetUncached 分解落地（§263 遗留 #3） (STATUS: 已实施, 2026-08-23) —— 全文 → docs/decisions.details.md（Part B §264）
 
-## 264. selectTargetUncached 分解落地（§263 遗留 #3） (STATUS: 已实施, 2026-08-23)
-> 全文 → docs/decisions.details.md（Part B §264）
+## 265. determinism 语料 v2（8→21 组合） (STATUS: 已实施, 2026-08-23, 遗留 #12) —— 全文 → docs/decisions.details.md（Part B §265）
 
-## 265. determinism 语料 v2（8→21 组合） (STATUS: 已实施, 2026-08-23, 遗留 #12)
-> 全文 → docs/decisions.details.md（Part B §265）
+## 266. manhattan 单源化落地（遗留 #2） (STATUS: 已实施, 2026-08-23) —— 全文 → docs/decisions.details.md（Part B §266）
 
-## 266. manhattan 单源化落地（遗留 #2） (STATUS: 已实施, 2026-08-23)
-> 全文 → docs/decisions.details.md（Part B §266）
+## 267. 遗留 #1 self-hub 处置：结构性护栏替代整体切片 (STATUS: 已实施, 2026-08-23) —— 全文 → docs/decisions.details.md（Part B §267）
 
-## 267. 遗留 #1 self-hub 处置：结构性护栏替代整体切片 (STATUS: 已实施, 2026-08-23)
-> 全文 → docs/decisions.details.md（Part B §267）
+## 268. 第三轮重构 Phase 1 落地汇总（plan/refactor.trae.md §1） (STATUS: 已实施, 2026-08-24) —— 全文 → docs/decisions.details.md（Part B §268）
 
-## 268. 第三轮重构 Phase 1 落地汇总（plan/refactor.trae.md §1） (STATUS: 已实施, 2026-08-24)
-> 全文 → docs/decisions.details.md（Part B §268）
+## 269. 第三轮重构 Phase 2 落地汇总（plan/refactor.trae.md §2） (STATUS: 已实施, 2026-08-24) —— 全文 → docs/decisions.details.md（Part B §269）
 
-## 269. 第三轮重构 Phase 2 落地汇总（plan/refactor.trae.md §2） (STATUS: 已实施, 2026-08-24)
-> 全文 → docs/decisions.details.md（Part B §269）
+## 270. 第三轮重构 Phase 3 落地汇总（plan/refactor.trae.md §3） (STATUS: 已实施, 2026-08-24) —— 全文 → docs/decisions.details.md（Part B §270）
 
-## 270. 第三轮重构 Phase 3 落地汇总（plan/refactor.trae.md §3） (STATUS: 已实施, 2026-08-24)
-> 全文 → docs/decisions.details.md（Part B §270）
+## 271. 第三轮重构 Phase 4 落地汇总（plan/refactor.trae.md §4） (STATUS: 已实施, 2026-08-24) —— 全文 → docs/decisions.details.md（Part B §271）
 
-## 271. 第三轮重构 Phase 4 落地汇总（plan/refactor.trae.md §4） (STATUS: 已实施, 2026-08-24)
-> 全文 → docs/decisions.details.md（Part B §271）
+## 272. God AI v1 封版冻结 —— D0 拍板 + 冻结基线 + 签名 golden (STATUS: 已实施, 2026-08-26) —— 全文 → docs/god-ai-tuning.progress.md Part 0（冻结基线 / golden 完整）· 重启协议 → plan/God-AI-Organization.md §8
 
----
+### God AI 冻结纪元运维（§273–§276，全文 → docs/decisions.details.md Part C）
 
-## 272. God AI v1 封版冻结 —— D0 拍板 + 冻结基线 + 签名 golden (STATUS: 已实施, 2026-08-26)
+## 273. 留档实验资产不删决策（OFF 旋钮 / OFF 候选 / 锁存测试全保留）(STATUS: 已实施, 2026-08-26) —— 全文 → docs/decisions.details.md（Part C §273）
 
-> 全文 → docs/god-ai-tuning.progress.md Part 0（冻结基线 / golden 完整）· 重启协议 → plan/God-AI-Organization.md §8
+## 274. sweep-winrate `--difficulties` 字符迭代 bug 修复 —— 列表参数走 assertive 解析器 (STATUS: 已实施, 2026-08-26) —— 全文 → docs/decisions.details.md（Part C §274）
 
----
+## 275. God AI code-review 批量 bug 修复（冻结路径零行为变更）(STATUS: 已实施, 2026-08-26) —— 全文 → docs/decisions.details.md（Part C §275）
 
-## God AI 冻结纪元运维（§273–§276，全文 → docs/decisions.details.md Part C）
+## 276. code-review 遗留项全清 —— 新纪元三件套执行（§275 遗留 → 全部落地）(STATUS: 已实施, 2026-08-26) —— 全文 → docs/decisions.details.md（Part C §276）
 
-## 273. 留档实验资产不删决策（OFF 旋钮 / OFF 候选 / 锁存测试全保留）(STATUS: 已实施, 2026-08-26)
-> 全文 → docs/decisions.details.md（Part C §273）
+## 277. 全关策略 all-on 实验 — M0/M1 收口：all-on 灾难性否决 + LOO 定位 firingLaneMode (STATUS: 完成) —— 全文 → docs/god-ai-tuning.progress.md §239（编号修正：progress 内为 §239，2026-08-17）
 
-## 274. sweep-winrate `--difficulties` 字符迭代 bug 修复 —— 列表参数走 assertive 解析器 (STATUS: 已实施, 2026-08-26)
-> 全文 → docs/decisions.details.md（Part C §274）
+## 278. all-on−firingLaneMode CMA-ES 两轮收口 — 数值调参止于 −10.4pp，方向关闭 (STATUS: 完成) —— 全文 → docs/god-ai-tuning.progress.md §240（编号修正：progress 内为 §240，2026-08-17）
 
-## 275. God AI code-review 批量 bug 修复（冻结路径零行为变更）(STATUS: 已实施, 2026-08-26)
-> 全文 → docs/decisions.details.md（Part C §275）
+## 279. Replay Tick-Hash Chain 实现定案 — 每 100 tick 世界哈希锚点 (STATUS: 完成) —— 全文 → docs/decisions.details.md（Part D §279）· 计划/评审 → plan/Replay-TickHash-Chain.md + plan/tickhash.review.md
 
-## 276. code-review 遗留项全清 —— 新纪元三件套执行（§275 遗留 → 全部落地）(STATUS: 已实施, 2026-08-26)
-> 全文 → docs/decisions.details.md（Part C §276）
+## 280. 否决 RL-WASM-Bridge（B3），改走 A'（bun 持久进程桥）(STATUS: 已决议) —— 全文 → docs/decisions.details.md（Part D §280，含 v3–v5 评审附录）· 评审 → plan/RL-WASM-Bridge.review.md · 执行 → plan/RL-Bun-Bridge.md
 
----
+### RL 训练基础设施（§281–§284，全文 → docs/nn.progress.md）
 
-## 277. 全关策略 all-on 实验 — M0/M1 收口：all-on 灾难性否决 + LOO 定位 firingLaneMode (STATUS: 完成)
+## 281. RL 训练断点续跑机制（服务随时停启）(STATUS: 完成, 2026-08-23) —— 全文 → docs/nn.progress.md §4（RL 训练断点续跑机制）
 
-> 全文 → docs/god-ai-tuning.progress.md §239（编号修正：progress 内为 §239，2026-08-17）
+## 282. RL 队列模式静默跳轮修复 — resumed_manifests 双 schema 归一 + 失败迭代原地重试 (STATUS: SHIPPED, 2026-08-24) —— 全文 → docs/nn.progress.md §5（队列模式静默跳轮修复 + 事故复盘）
 
+## 283. 干净评估嵌入分布式流水线 — PPO 空窗期全节点贪心局（STATUS: SHIPPED, 2026-08-24） —— 全文 → docs/nn.progress.md §7（干净评估嵌入分布式流水线）
 
-## 278. all-on−firingLaneMode CMA-ES 两轮收口 — 数值调参止于 −10.4pp，方向关闭 (STATUS: 完成)
-
-> 全文 → docs/god-ai-tuning.progress.md §240（编号修正：progress 内为 §240，2026-08-17）
-
----
-
-## 279. Replay Tick-Hash Chain 实现定案 — 每 100 tick 世界哈希锚点 (STATUS: 完成)
-
-> 全文 → docs/decisions.details.md（Part D §279）· 计划/评审 → plan/Replay-TickHash-Chain.md + plan/tickhash.review.md
-
-
-## 280. 否决 RL-WASM-Bridge（B3），改走 A'（bun 持久进程桥）(STATUS: 已决议)
-
-> 全文 → docs/decisions.details.md（Part D §280，含 v3–v5 评审附录）· 评审 → plan/RL-WASM-Bridge.review.md · 执行 → plan/RL-Bun-Bridge.md
-
----
-
-## RL 训练基础设施（§281–§284，全文 → docs/nn.progress.md）
-
-## 281. RL 训练断点续跑机制（服务随时停启）(STATUS: 完成, 2026-08-23)
-> 全文 → docs/nn.progress.md §4（RL 训练断点续跑机制）
-
-## 282. RL 队列模式静默跳轮修复 — resumed_manifests 双 schema 归一 + 失败迭代原地重试 (STATUS: SHIPPED, 2026-08-24)
-> 全文 → docs/nn.progress.md §5（队列模式静默跳轮修复 + 事故复盘）
-
-## 283. 干净评估嵌入分布式流水线 — PPO 空窗期全节点贪心局（STATUS: SHIPPED, 2026-08-24）
-> 全文 → docs/nn.progress.md §7（干净评估嵌入分布式流水线）
-
-## 284. 分布式协议 v3.6 — 结果容器 BCV2 子进程打包 + 任务获取异步化（STATUS: SHIPPED, 2026-08-25）
-> 全文 → docs/nn.progress.md 分布式 BCV2 节 + plan/distributed-rollout.md v3.6
-
----
+## 284. 分布式协议 v3.6 — 结果容器 BCV2 子进程打包 + 任务获取异步化（STATUS: SHIPPED, 2026-08-25） —— 全文 → docs/nn.progress.md 分布式 BCV2 节 + plan/distributed-rollout.md v3.6
 
 ## 285. M1 分歧探针 — 归因 ①/③ 边界（2026-08-26，plan/AI-No-Items-Warmstart.md §4）
-> 工具 `tools/diag/divergence-probe.ts`（预注册：分歧=学生贪心≠教师标签且 120-tick 内
-> 有可观测后果；三桶 基地高压/交战/巡航；后果代理指标从学生实际轨迹提取，不做双臂重放）。
-> 结果（25 局 hard）：分歧率 70.6%，基地高压桶最高 74.6% 且特征表完整 →
-> 判 **①/③ 边界**（标签或监督）：M3 走 wins-only + 守家帧回补（near-miss 3×），预留 DAgger
-> 交互轮。注：预注册表原无「高压桶+特征完整」格，本次属**表外裁量**——已事后补格入方案
-> （plan §4 执行态修订），结论不变。全文 → docs/nn.progress.md §13.2。
 
 ## 286. 语料纪元 OBS_SCHEMA_MAJOR 1→2 — item 头删除 + 标量收编 + wins-only + returns（2026-08-26，plan M2）
-> 一次 MAJOR 打包：① 动作空间 10→7（actions (N,2)/masks (N,7)）；② SCALAR_DIM 24→19、
-> SCALAR_X_INDICES [20,23]→[15,18]（mirror 锁步 + 反例测试）；③ wins-only（--wins 1）+ 守家帧
-> near-miss 3× 超采样（M1 证据）+ 人像道具帧剔除；⑥ returns.npy（rl-reward.ts 共享 RL reward，
-> γ=0.995 折现）→ train_bc --value-coef 对 PPOStudent value 头做 MC 预置。
-> 重导：God-AI 1526 胜局 / 2.77M 帧（near-miss frac 0.4915，≥2000 帧）；人像 97 局 / 65.5K 帧；
-> determinism + validate_export + python 快速层全绿。全文 → docs/nn.progress.md §14。
 
 ## 287. M3 BC warm-start 双臂 — 双 0% WIN，Gate ≈0% → 回环 DAgger/长训（2026-08-26，plan §6）
-> A（wins 24sh / 46K 帧）与 B（A+人像 97sh / 112K 帧）均 8ep 纯 BC（value 预置因 returns
-> 终局锚定 O(9) 爆方差而降级，见 nn.progress §15.1）。move acc A 0.365 / B 0.441（人像加权增益），
-> 但 m1-eval 贪心 WIN 均 0.0%（suite A 0.0773 / B 0.0757，非瞬死但永不清关）。
-> **按预注册 Gate → 不走 M4，回环整改**：下一步 = M1 ③路径（DAgger 交互采集轮）或全量
-> 2.77M 帧长训。工程教训：weights 导出 NaN→null sanitize（commit 3c40e55）。
 
 ## 288. M3 回环整改 — DAgger 混合亦 0%，BC 三线收敛 0% 平台（2026-08-26 晨）
-> wins93sh + dagger50sh 混合、warmstart B、6ep：move 0.476（三线最高）/ fire 0.899，
-> 但 m1-eval 贪心 WIN 仍 **0.0%**（suite 0.0777）——与历史 L950「DAgger 后 0%」一致。
-> **结论：0% 是策略深度差距而非语料/监督缺陷；BC 蒸馏在 46K–185K 尺度无非此平台。**
-> 决策点（需拍板）：① 全量 2.77M 长训（~24h CPU）排除尺度；② schema v2 RL 直接启动
-> （旧谱系 it36 ≈10% 是唯一 >0 实证）；③ 路线 F 高层语义监督单独立项。全文 → nn.progress §15.4。
-
 
 ## 289. 窗口 0 稳定化 gate — super-item 退役默认 OFF + 基线重钉三件套（2026-08-26，plan/Intent-Policy-NN-Plan.md §5.4）
-
 > 全文 → docs/decisions.details.md（Part E §289）· pinned run 基线数据 → docs/god-ai-tuning.progress.md Part 0
 
-
 ## 290. M0a 词表契约定稿 — spec-in-code 单一实现（2026-08-26，plan/Intent-Policy-NN-Plan.md §3）
-
 > 全文 → docs/decisions.details.md（Part E §290）· 规格原文 → plan/Intent-Policy-NN-Plan.md §3
 
----
-
 ## 291. M0b 探针轮 1 — gate FAIL，处置启动注入版（2026-08-26 夜）
-> 全量 2100 局 hard 机械打标 → intent-8 分类器（StudentNet 主干，120K 帧自然分布/3ep）。
-> 三桶 margin：base +0.143 ✅ / combat +0.065 ❌ / cruise +0.015 ❌（近噪声，n=4187）。
-> 整体 acc 0.594；confusion 显示模型全行只落 HUNT/CRUISE——稀有类未学习 +
-> combat/cruise 分歧核心是 **HUNT vs CRUISE 的 endgame 切换**（单帧无时序上下文）。
-> 按 §3.6 五径启动第一轮：**①.5 注入版探针（prev-intent+duration teacher-forced，
-> M4 §4.2 注入同构）+ P2-2 配额采样**。幽灵表双口径已出：ESCAPE 0 窗口 →
-> reflex-only 掩码（学习词表收缩 7 类）。全文 → docs/nn.progress.intent.md §16。
 
 ## 292. M0b 探针轮 3（B′）— 判定口径修正，gate PASS，进入 M4（2026-08-26 夜）
-> B′ = inject + quota 15K + max-train 300K + 6ep（修复 B 轮的 5% 语料+2ep 欠拟合缺陷；
-> 配额后稀有类训练帧 INTERCEPT 3639 / CLEAR 4555 / RETURN_DEF 5371）。
-> **桶级 margin 反降（base +0.130 / combat +0.040 / cruise −0.201）但类级 recall 大面积学会**：
-> CLEAR 86.5% / PICKUP 77.2% / RETURN_DEF 44.2% / CRUISE 48.1% / INTERCEPT 31.8%（majority 基线下
-> 这些类全为 0%）；唯一弱项 HOLD_LANE 2.1%（训练帧全语料最少 1691）。
-> **归因**：轮 1 的 0% 学习 = 类不平衡饿死（非不可学）；B′ 桶 margin 下降 = 配额训练 ×
-> 自然验证的分布不匹配 artifact（模型过度预测 PICKUP，CRUISE 被抢 10,323 帧）。
-> **判定（口径修正，预注册 #16 修订备案）**：合格判据从「三桶 acc vs majority」改为
-> 「**类级 recall vs majority 类级 recall**」——该口径下 6/7 类远超 majority、
-> ESCAPE 依 <200 窗口掩码 → **意图可学习性实证成立，M0b gate PASS**。HOLD_LANE の短板
-> 由 M5 守家段超采样补强（预计自然分布下 midLaneDefense 帧足够 M5 配额）。
 > 全文 → docs/nn.progress.intent.md §18。注：cruise 桶负 margin 受分布 mismatch 污染，
-> 不以它为"CRUISE 不可学"证据——CRUISE 类 recall 48% vs majority 0%。
 
 ## 293. M4 完成 — 网络 + 字节一致 + 推理基准 + IntentPlayer（2026-08-26 夜）
-> 意图网（StudentNet 主干+三头+9 维注入，71.5K）；TS/Py 前向一致测试新建（P3-4，检入
-> golden h16/d2，三头 logits ≤1e-4）；bench 实测单前向 **41.1ms**（理论带 34–56ms 正中；
-> 摊销 ÷24→1.71 / ÷50→0.82 ms·tick；实机需 Worker/瘦身档=R3）；IntentPlayer +
-> `m1-eval --policy intent`（I6）单局闭环跑通；stub=3 意图最小执行器（M6 真执行器交接）。
-> **M4 gate 全绿**：check 1512 pass / 0 fail。全文 → docs/nn.progress.intent.md §19。
 
 ## 294. M1 压缩认定 + M2 人像签名完成（2026-08-26 夜）
-> **M1（God-AI tagger）已由 M0b 用同一实现覆盖**：tagger 钩子（intentTaggerMode，
-> ON/OFF 字节等价测试）在 M0b 前已落地；逐 tick 打标/分段四件套/vocab 映射即
-> M0b 探针所用的同一实现——M1 不再单列，挂标点后续随 M4 IntentPlayer 的 replay
-> 注入复用（student rollout 冷启动问价见 §5.1）。
-> **M2（人像签名标签器）完成**：signature.ts 8 类纯函数判据（宁缺勿错、ESCAPE 不签名）
-> + 104 局重放导出（outcome 与 verify-demos 逐局一致）+ two-oracle 分布报告。
-> B 臂支柱证据：人像更据守（10.2% vs 1.2%）/回防（11.0% vs 7.4%）/巡航；PICKUP 4.5%
-> 为纯拾取下限（用户修正：人"边走边打顺路捡"属战斗类，非不捡）。CLEAR 人像 60 窗口
-> <200 → B 臂宁缺勿错、A 臂补齐。全文 → docs/nn.progress.intent.md §20。
 
 ## 295. M5 双臂完成 — A 臂 learnability 成立 + B′ 人像温和混合定向增益（2026-08-27 凌晨）
-> **A 臂**（纯 God-AI 意图标签，quota 15000、inject、8ep）：trainAcc 0.568、自然分布 val acc
-> **60.3%**、三桶 margin 全 ≥0.1 → gate PASS；类级 recall 6/7 >0（INTERCEPT 82.7 / HUNT 90.3 /
-> CLEAR 66.6 / PICKUP 49.5；RETURN_DEFENSE 14.7 / CRUISE 24.8 弱；HOLD_LANE 0% 已知弱项）。
-> 四必报项：self-feed gap 12.8pp（运行时自喂 prev 低于 teacher）、prev ±3 鲁棒、守家安全级误判
-> **12.55% > 5%**、路由错配 37.8%。
-> **B 臂**（+人像签名，quota 4000 + priority 45% 人类）：自然分布塌向 RETURN_DEFENSE（acc 16.9%）
-> → **配置失败非"人像无用"**；#20 的 ≥30% 混合比须以温和配额落地。
-> **B′ 平滑对照臂**（quota 15000 + priority 26.6% 人类）：overall acc 60.1%（≈A）、base 桶 margin
-> +0.142（>A）、守家安全级误判 **7.72%（较 A 减半）**、RETURN_DEFENSE recall **14.7%→31.3%**、
-> stub 冒烟 WIN **24%**（A 22% / B 18%）→ **人像守家信号定向增益成立，B 臂降级分支不触发**。
-> M5 gate PASS；A + B′ 双轨权重进 M6/M7，完整 WIN 归因在 M7② 全执行器配对评估定论。
 > 全文 → docs/nn.progress.intent.md §21–§23。
 
 ## 296. M6 仲裁修复 — reflex dodge 默认保留，仅 suppressDodge 显式压制（2026-08-27 凌晨）
-> 原 applyIntent 只把 window 层候选写入 `_candidateOverride` → **排除 reflex(dodge)，违反 P0-5
-> "reflex 覆盖移动默认成立"**。修复：override = 白名单全部三层候选（window+overlay+reflex），
-> 仅当 window 候选标注 `suppressDodge`（RETURN_DEFENSE 的 suicideReturn）时剔除 dodge。
-> 新增行为级仲裁测试（8 意图 dodge 保留/剔除断言，P0-5）。确定性不受影响（freeze gate 通过）。
+> **结论**：reflex dodge 默认保留，仅对标注 suppressDodge 的候选（RETURN_DEFENSE）显式压制；行为级仲裁测试 8 例。
 
 ## 297. M7① 天花板探针 — 白名单分类法 bug 修复，oracle 47%→73.4%、NN 44.6%→72.3%（2026-08-27 凌晨）
-> **探针**：IntentOracleProbe（双 God：oracle 全链 = 完美意图源 + executor 受限链驱动世界）。
-> **初测**：oracle 全量 46.9% vs God-AI 74.3%（m1-eval 35×10 hard）→ 27pp 压缩损失，M7① 返工判定。
-> **根因**：WHITELISTS 引用细分支标签（t8/t2a/navigate... `_lastBranch` 分类法），override 过滤用
-> 候选 ActionId——两套分类法不匹配，命中率仅 **46%**（CRUISE/PICKUP 只剩 dodge）。
-> **修复**：`LABEL_TO_CANDIDATE`（vocab.ts 正向映射第②层），白名单标签→候选 id 翻译，映射率 100%。
-> **修复后**：oracle **73.4%**（≈God-AI 74.3%，噪声带内）→ **M7① 前置标定通过**；NN 执行器（B′）
-> **72.3%**（oracle 天花板 99% 价值、距 God-AI 2.0pp）→ **M7② WIN gate（≥50%）决定性通过，进 M8 门开**。
-> 教训：WHITELISTS 双重消费（tagger 标签侧 vs 执行器候选侧）需显式半桥，两套分类法不可混用。
 > 全文 → docs/nn.progress.intent.md §24。
 
 ## 298. M5 训练脚本多根 + priority 配额（2026-08-27 凌晨）
-> train_intent_probe.py 支持多 data 根合并训练 + `--priority-root`（B 臂人类优先配额：#20 混合比
-> 达标需 priority 而非比例采样——比例采样下人类仅 13% <30%）。eval_intent_m5.py 新脚本计算
-> M5 gate 四必报项（teacher/self-feed gap、prev ±3 鲁棒、守家安全级误判、路由错配率）。
+> **工具**：train_intent_probe.py 多 data 根 + --priority-root 配额；eval_intent_m5.py 四必报项计算器。
 
 ## 299. M7① cadence 定稿 + risk-gated 负结果（2026-08-27 凌晨）
-> **oracle cadence 扫描**（35×10 hard）：{12: 76.3%, 24: 74.6%, 30: 73.4%, 36: **76.6%**, 50: 73.7%}
-> ——承诺期在正确 cadence 超越 God-AI（74.3%），R0 风险反转（执行器逐 tick 读 World + reflex 豁免成立）。
-> **NN cadence 扫描**（B′）：{12: 70.6%, 30: **72.3%**, 36: 70.9%}——中速最优，**定稿 replan=30**（预注册 #1）。
-> **risk-gated 负结果**：base30/danger8 → 68.0%（< 固定 30 的 72.3%），危险窗口频繁重选造成扰动；
-> 维持固定档，risk-gated 留 M8 RL 可选动作空间。
-> **头部空间**：oracle 36 的 76.6% = M8 RL 优化意图选择后的可达上限（NN 现 72.3%）。
 > 全文 → docs/nn.progress.intent.md §25。
 
 ## 300. M7② rollout 意图分布探针 — B′ vs SS 冷启动风险预评（2026-08-27）
-> **同一确定性 (stage×seed) 网格各 50 局**（hard，`tools/sim/rollout-intent-probe.ts`，`tmp/rollout_intent_probe.json`）：
->
-> | 指标 | B′ | SS | Δ(B′−SS) |
-> |---|---|---|---|
-> | 胜率 | 78.0% | 76.0% | +2.0pp |
-> | replan 意图熵（原始 argmax） | 1.880 bits | 1.858 bits | +0.022 |
-> | replan HUNT 占比 | **42.6%** | **36.9%** | **+5.7pp** |
-> | 承诺意图熵 | 2.318 bits | 2.207 bits | +0.111 |
-> | 承诺 HUNT 占比 | 26.7% | 23.7% | +3.1pp |
->
-> **口径**：主口径=每 replan 的原始 argmax（自馈注入序列推进的意图流，最接近 RL 冷启动策略产出）；
-> 次口径=实际承诺意图 trace（margin 门控后真正驱动玩法）。
-> **结论**：SS 未如期"更防御"——熵几乎持平（+0.022，无更分散/更保守信号），而 HUNT 占比低 5.7pp。
-> SS 的代价（胜率 −12pp 于 m1-eval 大网）源自 **HUNT recall 下降（0.93→0.71）**，
-> 而非意图分布熵的涣散；此探针佐证"佣金偏移不显著，进攻主力意图削弱"这一判断。
-> **M8 RL 冷启动选臂**：B′ 初始 rollout 意图分布更进攻（HUNT 高 5.7pp）、胜率更高 → 采样效率更优，
-> 作为 RL 起始策略优于 SS（SS 的 self-feed 优势在 RL on-policy 下收益为零）。开始 RL 即用 B′。
 > 全文 → docs/nn.progress.intent.md §26。
 
 ## 301. M8 RL 冷启动方案定案 — B′ 即开 + s32-35 人类胜利回放降级为辅助注入（2026-08-27）
-> **决策**：不以"离线增强 B′ 更像人类"作为 RL 前菜——RL on-policy 会重写意图头，
-> 把模仿学习费劲学到的偏好大部分洗掉，投入不值。路线：
-> 1. **直接用 B′ 启动 M8 RL**（主线，冷启动站台已定 §300）。
-> 2. **不外推人类录像堆量**（如 10+ 局/关）以增强 B′——会被 RL 稀释。
-> 3. **只补最稀缺的 s32-35 人类*胜利*回放**（God-AI 在这些关胜率最低、擅长守家的
->    人类打法 RL 自 roll 极难长出来），作为 RL **辅助正样本 / 守家先验侧信源**注入，
->    而非离线学习阶段。
-> **触发时机**：等 RL 轨道（rollout/PPO 数据流）搭好后专门落地此注入；落地前先确认
-> RL 数据流确实消费 rollout 实际意图（B′ 初始值），注入与 PPO 冲突走 §300 判读。
-> **记录**：docs/nn.progress.intent.md §26（下一段续写落地）。
+> **决定**：M8 RL 直接用 B′ 冷启动（s32-35 人类胜利回放降级为辅助注入，离线增强被 RL 稀释不值）；记录 docs/nn.progress.intent.md §26–§27。
 
 ## 302. M8 意图 RL 落地 — 半 MDP 意图步 PPO + 变步长 GAE + B′ 冷启动 value 预热（2026-08-27）
-> **决策**（plan §6/I13/P1-7k3，M8 架构落地）：
-> 1. **半 MDP 意图步 PPO**：决策只在 replan tick（30，M7① 定稿）；动作 = 采样的意图
->    （8 类，ESCAPE 死类掩码）；窗口冻结（IntentExecutor rlPick → God-AI 白名单子链）。
->    GAE 在意图步上算，**γ_step = γ_tick^Δt**（Δt = 窗口时长 tick，dt.npy），
->    **Δt≡1 退化与 ppo.py 定长 per-tick GAE 逐字节一致**（单元测试断言）。
-> 2. **奖励 = 意图窗口稠密分量**（击杀 +4 / 清砖 +0.5 / 拾取 +2 / 阵亡 −5 / 基地墙损 −3）
->    **+ potential shaping**（Φ = −最近敌 base pressure，**γ=1 势差** F=Φ(s′)−Φ(s)——
->    γ_tick 势差会累积 (γ−1)ΣΦ 残余，高压长局实测 +60 伪正奖励；γ=1 精确 telescoping、
->    整局塑形和 = Φ_T−Φ_0 ∈ [−1,1] 有界，P1-8k3）+ **无产出切换成本**（−0.05/切换）
->    + 终局（通关 +50 / 基地失守 −50 / 命尽 −30 / 超时 −1）。
-> 3. **B′ 冷启动 value 预热**：value 头随机 → 直接 PPO 实测 KL 爆炸 262（优势被 value
->    噪声主导、策略单 epoch 塌缩）。预热 = 前 warmup-iters 迭代**只训 value 头且冻结
->    主干+三头**（经共享主干训 value 会扰动策略特征→意图分布，实测熵 0.90→0.33，
->    等于 RL 前先毁掉 B′）；adv/ret 全局归一（I13 逐关规范化，value MSE 数百→O(1)）。
-> 4. **注入特征**（prev one-hot 8 + duration 1，9 维）由 rollout 记录、PPO 前向消费；
->    **value 头 137→1 与三头并列消费同一 137 隐藏**（P1-5②：value 必须看到承诺状态，
->    infer.ts 修复 137 宽 value 头经 intentForward 计算 valueOut）。
-> 5. **评估与止损**：m1-eval intent-exec 固定语料贪心局（iter15 350 局，P1-1k3）；
->    主指标 = Δ vs M7② 基线（B′ 72.3%）；iter15 Δ≤0 → 止损转 M9（P2-5 不续命）；
->    target_kl=0.1 per-epoch 早停（参照现有 per-tick RL 健康 kl≈0.05/iter，breaker 0.15）。
-> 6. **reward 有界性**：逐 reward ∈ (−60, 60)；整局 Σr = 终局 + 塑形(±1) + 稠密 + 切换。
-> **Rationale**：意图步 semi-MDP 是 plan I13 定案；γ=1 塑形修正了 per-tick 折扣塑形的
-> 累积残余（伪正奖励会奖励"高压持续"这一与守家相反的行为）；value 预热修 B′ 冷启动
-> 基线噪声塌缩（M8 的 kickstarting 落地形式）。
-> **记录**：docs/nn.progress.intent.md §27（训练首轮结果续写）。
-
 
 ## 293. God AI 解冻 + 恢复超级道具策略（super-item 战略激活）(STATUS: 已实施, 2026-08-28)
-
 > 全文 → docs/god-ai-tuning.progress.md Part 0.1（2026-08-28 解冻纪元基线 / golden 重钉）
 
-> （编号冲突：与 §293-intent「M4 完成」撞号，见头部「编号冲突注」；两者编号均被外部引用，保持不动）
-
 ## 302. 追尾导航（pursuit-tail / 并入目标车道后方）— 三轮归档：用户规格的等待后并道（am=3）净 +29 为全程序最佳，仍噪声带内，维持 OFF _(STATUS 已被 §304 取代：2026-08-29 用户拍板启用，见下两条)_(原 STATUS: 否决, 默认 0 = OFF, 2026-08-29)
-
 > 全文 → docs/god-ai-tuning.progress.md §302（§1–6 一轮 modes 1–6；§7–8 二轮
-> mode 7；§9 三轮 AlongMode=3 三版）
-
-> 来源 plan/Intent-Policy-NN-Plan.md §12.1 #3（执行器实施层缺陷）。实现 = `pursuitTailDirImpl`
-> （Navigator.ts，HUNT 内 `_moveDir` 覆写，射击链路共用）。三轮 hard 35×60 配对 A/B：
-> ①modes 1–6 净 −35…+8 全噪声；②mode 7 拆分出**唯一显著信号 am=2 仅侧方/前方 净 −58
-> (t=−2.79)**——切入挡路且朝向横向；③**用户拍板 AlongMode=3 等待后并道**并经三轮复核
-> 修正：v1 hold 对但并道半途夭折（`laneGap===2` 门控在 gap→1 交还 directMove 被拽回）；
-> v2 全程接管横移；v3（用户二次复核 s21@30 抓出）`along=−2` 是取整值、目标半格下行时
-> **车身仍物理挡住滑行脚印**，交还 directMove 会下追把身位贴回去（振荡 1.5s）——修正为
-> 滑行被拒且拒者是目标车身时 HOLD 等间隙自行张开。最终语义 = 自包含状态机：
-> `along ∈ [−1,+窗]` hold；`along ≤ −2` 且像素级不被卡 → 接管横移 gap∈{1,2} 直到 gap 0；
-> 上道交还纵向追击开火。剂量：Δwin +6/75、击杀首次反超（1413 vs 1358）、aligned +223、
-> 在车道 7.28%→9.26%。全量**净 +29（319/290）= 全程序最佳**，版本弧线 −39/−58/+1/−4/
-> +16/**+29** 随机制完整度单调改善，但 < 2SE≈49 ⇒ 按 §6.3b 不转 ON。
-> 维持 `pursuitTailMode: 0`，ARCHIVED_KNOB_GROUPS 不变；归档构型 am=0/1/2 路径逐指令未动
-> （基线臂三次 A/B 均 1581）。工具 `tools/diag/pursuit-tail-{probe,flip,scenes,export}.ts`
-> + `tmp/s302-diag21-30.ts`（tgtBlk/othBlk 逐 tick 诊断）留用；复核录像
-> `tmp/s302-replays3/`（全 MATCH ✓，含 s21@30 结局翻转 gameover→stageclear）。
-
 
 ## 303. 护卫出生卡墙 bug 修复 — baseSideSpawnCell 兜底不再落墙 + golden 重钉 b9a629e0（STATUS: 已实施, 2026-08-29）
-> **Bug**（用户报告）：使用基地护卫（天降神兵）道具时，护卫出生在基地砖墙上被卡死无法出击。
-> 根因：`SimulationEnemies.baseSideSpawnCell` 只扫基地两侧固定列各 5 行候选，全阻塞时
-> 兜底直接返回 `(col, baseRow)`——即基地墙环砖所在格；普通关卡基地环砖即触发
-> （新增回归测试在未改动的 stage0 上即红）。
-> **修复**：候选序 = 请求侧列（贴基地 4 行）→ 对侧列 → 同列向上直扫 → 全场最近空位
-> （偏好请求侧）；`isFreeSpawnCell` 统一 bounds/terrain/tank 三查，任何路径不再返回阻塞格。
-> **判定**：仿真行为变化 → `freeze:check` 翻红（预期显式判定，非 God-AI 决策逻辑改动），
-> golden 重钉 `20784637c6…` → `b9a629e0e2…`（21 组合，109,325 签名行），门回绿。
-> **配套**：按 owner 指令仅重跑 hard 60-seed 基线（classic/chaos 未动，见 Part 0.A.2）。
-> **测试**：`tests/guard-ally.test.ts` 新增 2 条（基地两侧全砖 / 普通关卡，出生格必无阻塞、不叠tank）。
-> **记录**：docs/god-ai-tuning.progress.md Part 0.A.2（golden 重钉 + hard 基线对比）。
 
 ## 304. 启用追尾导航 — pursuitTailMode=7 + AlongMode=4 默认 ON（用户拍板，新纪元三件套完成；同日 am=4 增补见 dated note）(STATUS: 已实施, 2026-08-29)
 
-> 用户决策：净 +29 已足够好，启用。随后按 §6.3b 完成新纪元三件套：
-> ①本条目；②冻结签名 golden 重钉 `7b2e5097…`（tools/det-golden.v1.sha256，
-> 采集于启用后）；③score-gate TRUTH_SCORES 第五次重捕获 + 三难度 60-seed
-> eval-suite v7 基线（docs/god-ai-tuning.progress.md §304）。
->
-> **默认**：`pursuitTailMode: 7, pursuitTailAlongMode: 4`（yield-then-tail 状态机
-> + 锁定目标键控 + T2a 滑行抢占；语义见 §302/progress §9/§304）。**classic 经
-> CLASSIC_OVERRIDES 保持 0 = 字节不变**（instant 1-HP 池未 A/B，复刻一致性门槛）；
-> **chaos 继承默认 = ON**。
->
-> **2026-08-29 同日增补（§6.4 dated note）**：用户点名处理两类自愈型中断后，
-> `AlongMode=4`（`pursuitTailTargetCell` 锁定目标键控 + `pursuitTailSlideDir`
-> T2a 滑行抢占、对枪抵消提交不可抢占）配对 A/B 对 am=3 **净 +20**（256/236，
-> 1632 vs 1612 / 2100）→ 默认 3→4。实现教训：状态机门若写 `=== 3` 会把 am=4
-> 静默漏进归档路径（正面切入 −58 几何），首跑 A/B 净 −59 才暴露——**分层参数
-> 的门一律 `>=`**。三件套随默认迁移再次完成：golden 重钉 `91faa793…`、
-> TRUTH 第六次重捕获、三难度基线重跑。
->
-> **代价记录**：score-gate v7 口径（am=3 启用时）hard 0.7663→**0.7890（+2.26pt）**、
-> chaos 0.7562→**0.7337（−2.25pt）**、classic 0.8697→0.8697（0.0000）。
-> **am=4 默认后（第六次重捕获）**：hard 0.7890→0.7743（−1.47pt）、
-> chaos 0.7337→**0.7528（+1.91pt）**、classic 0.0000 不变——score 与胜率两口径
-> 在 hard 上方向相反（score 重罚败局余量，胜率是用户指定的治理口径），
-> 如实双记。若 chaos 体验需要，可给 CHAOS_OVERRIDES 置 0（一行动手）。
->
-> **连带修复**：`laneShotClear` 增加目标车道坐标的越界守卫（横向分支此前只守列
-> 不守行；测试夹具的越界敌格使其显形）。NN 训练语料：训练用 God-AI 对手行为
-> 随此启用改变，无道具口径语料如需再生另行处理（nn.progress.md 不涉架构变更）。
-
----
-
 ## §294 Goal-Space 策略网络重建开工（2026-08-29，M9 时代启动）
-
 > 全文 → `docs/goal-nn.progress.md`（§0–§3）· 规格 → `plan/Goal-Space-Policy-Rebuild.md`
 
-**决策**：按手册依赖图走**网络轨 + 数据轨 + 训练轨**（T7→T8-min→reach-mask→T8.5→T7.2→
-T6-pilot→T9a→T9），**暂缓执行层轨**（T2/T4/T5——会改 God-AI 行为触发新纪元三件套；
-T9 卡已记录 fire_head 随机初始化的回退路径）。reach-mask 按规格独立实现、不动 God-AI
-任何默认参数（不触发新纪元）。
-
-**基线重钉**：God-AI hard **78.81%**（1655/2100，pinned `reports/godai-baseline-hard-35x60`），
-旧 pinned 75.86% 作废（§293-God AI + pursuit-tail am=4 两个行为纪元之后）。
-T9/T9a 配对差门以新基线判定。
-
-**解释性决策**（实现期澄清手册留白，全部记录于 goal-nn.progress.md §1）：
-1. T7 TS 侧保留 intent 头加载能力（§14.3 it38 重评依赖；"删"落在 GoalNet 定义/权重 JSON）
-2. 热图头 golden 容差按 §T7.3 预案降级 1e-3（TS mul+add vs torch FMA 舍入差 1.068e-4）
-3. 可满足性校验 = top-K(6) 首个 travelEst≤T；全不可满足强制提交 argmax（telemetry 'unsat'）
-   —— ⚠️ **2026-08-29 修订（T9a 归因，commit `b84c012`）**：该语义造成**移动拴绳**
-   （T=240≈10 格；到达首个目标后更远目标被永久拒绝，而 E4 是续约非放弃 ⇒ 冻结，
-   实测 989 tick/5 格）。改为**只拒绝不可达**（travelEst=∞），T 只管重评估节奏；
-   手册 §6.1.1 规格正文已同步。
-4. E4 同格续约：bornTick 重置 + pursueSince 独立累计（inject duration 连续）+ dodgeTicks 重置
-5. 重选失败冷却 30 tick（防全遮情形逐 tick 重前向）
-6. 采样分布 = softmax(热图) 限可达格（λ·k 只进执行 argmax，不进采样分布；与 §T9a.1b 一致）
-7. engage 在 on-policy PPO 期只记录不训练（§8.3.0"有监督才入网"；反事实语料的 engage
-   标签在 BC 期训练）
-
-**H 扫描实证（§11.8，pilot 冒烟）**：argmax 落敌后格 9%@H60 → 25%@H120 → 44%@H240，
-godTarget 重合率 62%→33% —— 长窗口系统性恢复追尾行为，手册 §11.8 "短窗近视"论断成立。
-
 ## §295 路线转向：课程学习从零练执行器（2026-08-29，T9a 门② 之后）
-
 > 全文 → `plan/goal-nn-action.md`（**实施手册**：任务卡含步骤 / 改动文件 / 验收 / 失败处置）·
-> 执行日志 → `docs/goal-nn.progress.md` §5
->
-> **2026-08-29 末次重组**：文档由"派工表"重写为"体系化实施手册"（§0 怎么用 → §1 背景 →
-> §2 环境阶梯 → §3 系统规格 → §4 门禁与止损 → §5 任务卡 → §6 依赖与总盘 → §7 命令 →
-> §8 与手册关系 → §9 易错点 → §10 评审处置 → 附录 A 代码坐标 / B 术语）。
-> **门禁与预算数值一律不变**；重组中校正了两处算术（关键路径 16.5→**16.25d**、分阶段拆分
-> ≈6.25d+16h / ≈10d+76h）与一处坐标（(stage,seed) 配对数据源是 `.ledger.jsonl`，
-> 不是里程碑快照 `.partial.json`）。四轮评审采纳/驳回理由压缩保留在 §10。
-
-**决策**：放弃"蒸馏 God-AI 的执行器"与"等独立执行器自己变强"两条路，改走**玩具竞技场
-课程学习**：S1 开火命中（1 敌/无基地）→ S2 闪避走位（3 敌）→ S3 砖墙+道具 → S4 有基地→真实关卡
-→ S5 才解冻目标格子头。目标头在玩具场上没有战略时域可学，提前开只是噪声。
-
-**理由（三条）**：
-1. 模仿学习的天花板在构造上就是教师本身 ⇒ God-AI 78.81% 蒸馏不出更高；本方案中 God-AI
-   **只当 warm start（定起点）**，RL 自身奖励才是天花板（定终点），并由 A5 同预算消融检验。
-2. 两段阴性证据（IL/DAgger 学生 0% 胜率；run_rl.py 68 iters/38.5h 不收敛）同时踩了
-   "真实关卡宽分布 + 守家向 Φ 奖励 + 从 0% 胜率权重起步"三条不利；课程学习同时拆掉这三条。
-3. 基建已大半就绪：`tools/optimize/curriculum.ts` 的 `makeArena` / `makeMazeStage` 5 个 arena、
-   `rl_model.py` 逐决策步 `[move(5), fire(2)]` 双头、`export-dagger-labels.ts` v2 schema、
-   `run_rl.py --bc` warm start 与 `--curriculum-*` 开关。
-
-**沿用/不变**：God-AI 19 候选链与 `ACTION_WEIGHTS` 仍不许删（手册 §9.2.1）；现有 35 关与
-difficulty 行只增不改（不触发新纪元）；obs/scalars/shard schema 不改（保证跨级权重整份迁移）。
-
-**门禁口径**：每级门锚在 A0 量出的 God-AI 同场行为指标上（相对阈值，非绝对值）；最终门仍是
-对 78.81% 的 2100 局配对差 ≥+2pp 且 CI 下界 >0。预算为硬上限，连续两级止损即停。
-
-**记账**：T9a 门② 的两个数字（goal 0.05% / goal-god 0.0%）分别来自冻结修复前代码与失真探针，
-均不作为判定依据，由 A0 重测。
-
-**评审处置（`plan/action.review-glm.md`，12 条）**：9 条采纳、2 条修正、1 条驳回，逐条理由记在
-`plan/goal-nn-action.md` §11。三处实质性改动：① **S4 拆为 S4a（有基地 maze）/ S4b（真实关卡）**
-并预注册 S4 奖励（原方案在这一级的奖励是空白）；② 保底层默认改为**独立 dodge 规则**
-（不复用 God-AI 候选链，修掉"独立执行器"的叙事矛盾），God 链 dodge 降为回退；
-③ S5 集成拓扑新增**"不开目标头"**出口（14 obs 通道与 19 scalars 全占满，目标输入无空位可挤）。
-驳回项：**不复用现有真关卡 dagger 权重**（那是 0% 胜率学生，正是原失败条件之一）；
-**A0 不新增 sim 埋点**（`SimResult.events` 已有 `player_hit`/`tank_destroyed`/`bullet_fired`，
-受伤/开火/击杀零埋点可得，仅命中率用代理口径）。
-
-**第二份评审（`plan/action.review-hy3.md`，F1–F7）**：7 条全部采纳（2 条精确化），理由记在
-`plan/goal-nn-action.md` §12。四处实质改动：① **CPU 小时预算入表**（每级 4–40h，总盘 ≈82h；
-人日可并行、训练墙钟不能，A1 出口必须实测缩放）—— 这是本轮最被低估的整体风险；
-② §4.3 (e) 加**硬边界**：只准 `perception.ts` 基元 + `scanAheadImpl`（禁 `ThreatAssessor`，
-它读 think() 填充的 `_enemies`/`_threatCache`），1.5d 做不出即升 (c) 为默认；
-③ 覆盖步**落盘 executed 动作 + 其 logp**（shape 不变的正确记账，(e)/(c) 在信用分配上等价）；
-④ §4.5 的"mask 偏置"是错误措辞（mask 是 u1 硬掩码，只能禁止不能鼓励）⇒ 拆 1a 硬禁止 / 1b
-additive-bias（后者触发止损线 4）。另修掉我自己引入的时序矛盾：A8 拆 **A8a（A4 前 0.5d）
-+ A8b（A9b 后 0.5d）**。
-
-**第三份评审（`plan/action.review-pickle.md`，3 建议 + 2 顺带）**：**全部采纳**，理由记在
-`plan/goal-nn-action.md` §13。本轮补的是**训练环境本身**的盲区（前两轮都在盯网络/拓扑/预算口径）：
-① **单地图过拟合** —— `makeArena` 是无 RNG 的纯函数，每级只有一张固定图，智能体背图即可过门
-（绝对+相对双轨挡得住刷分、挡不住背图）⇒ 加 `layoutSeed`，**每级 3 张布局变异（写死 3）**，
-A0 在同样的 3 张上锚定；② arena **身份贯通**六七个环节（`build_pairs` 只出整数 stage 下标，
-arena `id:-1` 不在 `STAGES`，shard 命名用 `rl_s<si>`）⇒ 用不相交整数段 `1000+n` + 混排解析单测，
-A1 1.25→1.75d；③ CPU **四分账**（训练 82 / 评估 8 / 消融 4 / 扫参 12 ≈ 106h），此前评估/消融/扫参
-不封顶 ⇒ 预算门形同虚设；④ `makeMazeStage` 的 `enemyCount` 覆盖位前移到新卡 **A0a**（排 A0 之前）。
-
-**第四份评审（`plan/action.review-ds.md`，11 条）**：10 条采纳、1 条部分修正，理由记在
-`plan/goal-nn-action.md` §14。本轮的独特价值是**下限与语义**：① **预算只装了上限没装下限** ——
-S4b 的 40 CPU-h 对应单 iter ≈6.8 CPU-h（≈6 个迭代），而同档唯一先例 460 CPU-h 未收敛 ⇒ A7 出口
-做**产能核算**（`N₁ < N_min` 直接写"预算停"，不启动这 40h），每级上限降为**软上限**、总训练账
-82h 为硬上限（未用小时可结转）；② **冻结 obs 保护不了语义漂移** —— 无基地 arena 上 `obs-encoder`
-无条件画鹰（`isBaseDestroyed()` 对无基地恒 false）⇒ 整条梯子学的是"base 信号 = 常量"，到 S4a
-突然变成生死信号 ⇒ A0a 修为"无基地 ⇒ ch5 全 0"（不改 shape，不触发止损线 4）；③ **最终门功率**
-需在 A0 出口定死（关级 35 对下 CI 下界 >0 实际需 ≳2.4pp，默认改 (stage,seed) 级 2100 对）；
-④ **A4b 升级为二元 Phase-1 无效性闸**（STAGES 0–3 胜率 ≥ 随机基线 +5pp 且中位存活 tick 更高）。
-**§3–§7 的门禁与预算自本轮起冻结**（DS-11 收口）：后续意见只进 progress/DECISIONS，除非出现
-证伪某条已定案项的新代码事实。关键路径 ≈ **16.5d 人日 + ≈106 CPU 小时**。
 
 ## §296 大语料 rotate 战役（2026-08-30，用户指令）
-S1 微课（固定 12 局/it）被判定为最差形态（记忆化过拟合、SE≈±14%、无泛化信号）。
-改用 repo 标准 rotate 语料收尾：`--rotate-stages 35 --total-stages 35 --seeds-per-stage 10`
-= 350 局/it、每迭代全新 (stage,seed)（(rotateSeed,it) 键控、断点可复现）、max-ticks 12000、
-workers=8、干净评估 2 局/关开起。热启动 = tmp/s1-cap/weights.json（kill2 微课 10 iters
-产物）——**value 头一次性重训可接受**（BC/微课 checkpoint 无有效 value 头，归一化路径
-清零重学）；策略头经 warm_start_normalize 软先验延续。奖励臂不变（toy:kill2，换奖励
-= 换实验）。新战役独立目录 tmp/s1-big（课程类型切换不作断点复用）。封顶 = --max-hours 8
-与 --iters 40 先到者。改的是启动命令，不是训练代码。
+> **结论**：S1 微课（固定 12 局/it）过拟合退役，改 repo 标准 rotate 语料（350 局/it、(rotateSeed,it) 键控）；kill2 修复后 17 iters 即 97–100% 过门；封顶 --max-hours 8 / --iters 40。
 
 ## §297 S1 过门后的战役修订包（2026-08-30，随 Phase-1 重启累积决策，一次归档）
-1. **奖励臂 kill2**（wAlive 0.0005→0）：A4 贪心塌缩诊断（败局非冻死，是"上推+扫射
-   不追踪"套路）⇒ 拔掉"原地骚扰稳拿 0.6/局"的激励锚；存活压力由 wDmg 承担。
-   实证：S1 大语料重开 17 iters 即 97-100% 过门（A4 时代 21 iters 仅 26.7%）。
-2. **A4b 缓期**：只会开火的 S1 学生缺闪避/躲弹（S2/S3 课），真实关复测结构性无解；
-   待 S2/S3 能力建立后随门判定自然复测，不单独烧机时。
-3. **L0 退场判据更换**：强权重下 off vs l0 逐位一致（L0 惰性）⇒ dodgeCov≥2% 判据
-   作废；新档以 `--dodge off` 自持探针开档，红线 = off 下 deaths/局 + alive-ticks
-   （弱权重基线 0.222 / 强 0.0）；L0 代码保留，弱策略/高难档可重新启用。
-4. **eval 门控升难**：新档 eval >80%（5 迭代趋势）再进下一档；rollout 崩 <50% 判
-   过难降档。训练语料逐轮轮转（AGENTS §15.1），评估种子固定（860001+，可比性）。
-5. **干净评估语料可配**（`--eval-stages`）：arena 战役自评训练场（OOD 信号）；
-   EVAL_SEEDS 扩至 20（前 2 保历史可比）。
-6. **stream 默认**（AGENTS §15.6）：run_rl 代码默认 0→1 + ppo.update 别名补齐
-   （流式路径曾腐化）。串行仅调试用。
-7. **rl-config `rl` 共享块**：机制默认值（rotate_stages=0 保守态、total_stages、
-   difficulty、max_ticks、stream、mb、seed、keep_iters、eval_window、workers、
-   local_slots）run_rl `_d` 接入；**切换器默认值必须取保守态**（rotate_stages:35
-   曾把 S2 静默切到真实关 rotate——二次 35 关意外，本条为免疫记录）。
 
 ## §298 机时豁免 + 监控红线 + 两处预注册补齐（2026-08-30 夜）
 
-**背景**：S1 三处修复（量级归一化 / kill2 / 语料轮转）后 17 iters 从 25% 爬到 97-100% 过门，
-路线成立；S2 在跑（it10 rollout 53.6% / eval 67.8%）。核实进度时补齐以下五项。
-
-**1. 机时豁免（用户指令）**：用户明确"只要收敛，不考虑机时"。
-⇒ §4.5 的 **82h 训练总账保留为核账口径，但不再是停训理由**；
-**替代停训判据 = 迭代产能与收敛形态**（下表红线）。
-⚠️ 豁免**不等于免记账** —— 每场战役仍须记录墙钟与 CPU，否则"预算停 / 门败"（止损线 5）
-的区分没有数据可依，也无法回答止损线 6 原本要回答的"够不够"。
-
-**2. 监控红线（替代机时的停训判据）**：
-
-| 指标 | 红线 | 处置 |
-|---|---|---|
-| 熵 | **<0.7** | 停下查（更新过密 / 奖励过确定 / 语料轮转失效） |
-| 熵 | **<0.3** | 按塌缩处理，回 §1.2 三条修复逐项排查 |
-| rollout 胜率 | **停滞 ≥3 iter 或回落** | 触发降档评估（减敌数） |
-| eval 胜率 | 连续 5 iter ≥80% | 过门资格评估 |
-| 单 iter 墙钟 | 突变 >2× | 查节点池 / stream 是否退化 |
-
-（预注册健康线 熵 1.5–1.8；S2 实测 it1 1.24 → it10 0.93，已低于 S1 封顶时的 1.21，
-故补此红线。属**监控约定，不是新门禁**。）
-
-**3. Phase-1 闸复测点（补齐 §297 #2 漏掉的一半）**：A4b 缓期成立（S1-only 学生
-缺 S2/S3 技能，0/240 是能力不足非迁移证伪），但原记录只写"随门判定自然复测"、
-**没有时点 ⇒ 这道闸可能永不触发**（拖到 S4b 就是循环论证）。
-⇒ **钉死：S2 出口立即复测；S2 出口未达则最迟 S3 出口必须复测。不得二次缓期。**
-协议与判据不变（真实关 0–3 × 60 seed vs 随机基线同 seed 配对，+5pp 且中位存活更高）。
-
-**4. A5 判定作废并须重做**：现有"≈ 未定"跑在旧配方（S1 当时 26.7%，两臂贪心 60/60 全同）
-上，**数据作废**；新配方下纯从零臂从未跑过 ⇒ "教师是否构成天花板"（本路线核心理论问题
-§1.3）仍无有效答案。⇒ 用新配方重跑（4 CPU-h，必须用 `init_scratch_weights.py` 近均匀 init）。
-
-**5. 目标轴收官的连带记账**：A8a headroom −25pp ⇒ 方案 3（不开目标头）
-⇒ **A10（解冻目标头）/ A11（T6 语料重标）/ A-x（B′ 先验）三卡作废**，卡片表已标 ⛔/⏸。
-A8b（S4b 出口复核）保留 —— 若届时执行器已具备 S2/S3 技能，headroom 结论可能翻转。
-
 ## §299 S2 门禁口径决策：按"全歼率"判，S2 过门（2026-08-31）
-
-**背景**：P0-0 尸检（`docs/goal-nn.progress.md` §14）证明 S2 的 38% 失败里 21/60 是**伪负局** ——
-敌人全灭但最后一个敌人掉的道具触发 BONUS TIME 窗口（600 tick），窗口没走完就被 `max-ticks 1200`
-截断，旧 `stage_clear` 口径恒为 0%（60/60 timeout）；**真实"敌人全灭"通关率 = 58/60 = 96.7%**。
-
-**决策（用户拍板方案 A）**：eval 同时报告 `stage_clear` 与 `全灭(annihilation)` 两口径；
-**S2 门按 §2.1 字面"全歼率"判**（即敌人全灭率），**不**按 `stage_clear`（受 BONUS 窗口污染的伪负局）。
-
-**落地代码**：
-- `src/game/SimulationEffects.ts` 导出 `allEnemiesCleared(world)`（判断 `enemiesRemaining<=0 && 全灭 && 无存活道具` 的"全灭"部分）；
-- `tools/sim/simulation-runner.ts` 的 `SimResult` 加 `cleared: boolean` 并填充；
-- `tools/sim/sim-worker.ts` 的 `SimTaskResult` 透传 `cleared`；
-- `tools/sim/m1-eval.ts` 聚合 `clearRate`（新增全歼率输出行）；
-- `tests/level-sim.test.ts` 三个 mock 补 `cleared`；`bun run typecheck` 全绿。
-
-**实测结论**：用 it16 权重 `tmp/s2-cap/weights.json` 跑 S2 评估集（1010-1012 × seed 860001-860020 = 60 局，
-真实 student 贪心策略，16 分片并行）：**全歼率 96.7%（58/60）≥ 80% ⇒ S2 过门**，进 S3（1020-1022）。
-口径自校验：与 P0-0 尸检脚本（同 it14-era）完全一致（autopsy 自家 `_autopsy-out.txt` 亦录 `stage_clear 0% / 全灭 58/60`）。
-
-**边界（重要，避免误读）**：
-- 此决策**只改 S2 过门的判定口径**，不动方案 §2–§4 冻结的门数值；相对门（判据② 受伤 ≤1.2×锚 /
-  判据③ 存活 ≥80%×锚）仍受 **P0-1 eval 遥测 bug 阻塞**，修 P0-1 后再补判，不阻塞进 S3。
-- 旧 `stage_clear` 口径作废**仅限 S2 过门判定**；S3 起若 BONUS 窗口仍是噪声源，沿用同一 `全歼率` 口径。
+> **决定（用户拍板方案 A）**：S2 门按「全歼率」判（stage_clear 被 BONUS 窗口伪负污染）；落地 SimulationEffects.allEnemiesCleared + SimResult.cleared 全链 + m1-eval clearRate；实测 it16 权重全歼率 96.7%（58/60）≥80% ⇒ S2 过门。判定口径仅限 S2，S3+ 沿用。
 
 ## §300 S3 换臂 balanced，tmp/s3-cap2 新实验（2026-08-31，用户拍板"方案 B"）
-
-kill2 下"以命换击杀"正期望（wKill1.0 vs wDmg0.15，3 命缓冲）致 S3 lives 维度 0.758≪S2 锚
-0.997、accuracy 0.445<0.590，S3 相对门（受伤/存活/开火效率三项）按字面判负。依 §15.5 另开
-新实验 tmp/s3-cap2（BC = 旧 s3-cap it15 结算权重 **97d5990d32f6**，reward=toy:balanced
-wDmg0.35/wDeath1.0/wAlive0.001，预注册臂，不新增第 4 臂）。旧 s3-cap 曲线存档不续用；
-节点与场景（1020-1022，hard，3600tick，8 敌迷宫）不变。监控：balanced wAlive=0.001 的
-"存活复锚"风险（accuracy/mobility 连续退化则停，备选臂 survival 需用户再拍板）；
-lives/loot/accuracy 逐 settle 对照 S2 锚（0.997/0.577/0.590）。
-执行：`plan/s3-balanced-restart.md`（含 §3.4 验证与每 settle 必报表）。
+> **结论**：kill2 下"以命换击杀"正期望致 S3 相对门字面判负；另开 tmp/s3-cap2（reward=toy:balanced，有效臂），旧 s3-cap 曲线存档不续用。执行 plan/s3-balanced-restart.md。
 
 ## §301 T4 双缓冲落地的两个隐式缺陷修复（2026-08-31，commit 85f3953）
 
-`plan/goal-nn-throughput.md` 的轻量版双缓冲（collect-only 子进程 + 行为快照 θ_N + 原子权重回写）
-冒烟实测发现两处让双缓冲**静默失效**的缺陷，修复后端到端验证通过——
-
-1. **iter_id 格式**：`_run_collect_only` 用 `f"collect-{it}-{pid}"`，而 `run_rollout_queue`
-   用 `int(iter_id.rsplit('.',1)[-1])` 解析迭代号 → 分布式路径下每个 collect-only 子进程
-   必 `ValueError` 崩溃（rc=1），预采产物从未落盘。改为 `f"{RUN_ID}.{it}"`。
-2. **本地路径缺 wver**：`run_rollout`（纯本地采集）传给 export-rl-rollout.ts 的命令漏
-   `--wver`（run_rollout_queue 的 local slot 有传）→ 本地 shard 的 manifest 无 wver →
-   主进程下一轮 `completed_pairs` 永不命中 → 预采作废、回退自采。补上与队列 local slot
-   一致的 `--wver` + `--node-label local`。
-
-**已确立的 spawn 时序不变量（重构禁止破坏）**：`_spawn_collect_next` 必须保持在
-「本轮最终写回 `args.out`（run_rl.py 638，唯一写回点）→ eval join → breaker」**之后**、
-「下一轮 PPO」之前。stream 的 wave 更新只改内存 model、从不写盘（节点采集权重在 stream
-启动时冻结），因此快照恒为"整轮所有 wave + tail-drain 完成后的最终权重"，与用户确认的
-on-policy 期望一致（不会用 wave1/epoch1 中间权重预采）。
-
-**已知残留开销（非正确性）**：`run_rollout_queue` 收官等待 settled 后 ~112s 才返回，
-collect-only 子进程会跟着多挂 ~2min（主进程 join 前子进程此窗口未写盘 → 命中晚）。其
-`round done` 于 `settled` 之后。吞吐收益（155s→6.6s 采集墙钟）已远大于此开销，暂不优化。
-
 ## §302 S3 balanced 胜率崩塌 → 回滚 it4 峰值权重续训（2026-08-31，用户拍板"回滚"）
-
-**触发（plan/s3-balanced-restart.md §4 风险 1 判据）**：accuracy 连续 2 settle 塌到 <0.40
-（it6=0.370、it7=0.355，且 it4 峰值 0.427 → it5 0.391 → it6 0.370 → it7 0.355 连续三降），
-eval 胜率从 it4 的 70% 三连崩至 38.3%（clearRate 78.3%→51.7%）；DoD 前 3 settle 三项
-（lives≥0.80 单调 / loot≥0.60 / acc≥0.50）全部不达标且反向。非初期 U 形（it1-3 平台 58-60%，
-it5-7 是从 70% 高位崩塌）。it6 eval 全 drop（节点升级恢复期，样本缺失）。
-
-**裁定**：用户选「回滚 it4 峰值权重续训」——排除"权重已劣化"因素，观察复现性以定位是
-权重问题还是 balanced 臂本身问题。
-
-**执行**：it4 结算权重 = `nn-training/weights/rl-weights.it3.20260831-093140.json`
-（sha 96b1383ecf1d；归档名与迭代号 off-by-one，it{N} 文件实为 it{N+1} 权重——已核对
-eval wver）。备份 it7 权重（`tmp/s3-cap2/weights.it7-backup.json`，sha a53a8e3）→ 覆盖
-weights.json → 带杀重启（OMP8+PROC_BIND + --double-buffer 1），it8 起以 96b1383 重新采集
-（旧 it8 shard wver 不匹配被清空重建）。
-
-**判读约定**：it8 eval（回归 96b1383 权重后首轮）若 ≥ it4 水准（eval 70%、acc 0.43 一带）→
-崩盘可归因 it5-7 的权重劣化路径，续观 3 settle 是否复现；若仍 <50% / acc<0.40 → balanced
-臂本身不稳，转备选臂 survival（wKill0.5/wDmg0.5/wDeath1.5，需用户再拍板）。
-
-**§302a it8/it9 判读结果（2026-08-31 下午）**：it8=回滚后第一轮：rollWin 58.7%、acc 0.421
-（回到 it4 一带），但该轮 PPO gnorm 44.9 / kl 0.10 → 熔断丢 107 局（KL 更新爆炸仍在）；
-it8 干净的贪心 eval 因 KL 熔断掐了派发而未产生。it9（回滚续训下一步）：
-**evalWin 75.0% / clearRate 80.0%（wver b35d8349）——超过 it4 峰值（70%），未复现 it5
-的"70% 后第一步崩塌"**。结论：回滚策略有效、权重健康路径成立，it5-7 崩盘非必然复现；
-但 KL/gnorm 逐轮爆炸（gnorm 44-56、kl 常 >0.08）仍是悬而未决的动力学风险（未崩但随时
-可能重演 it5-7 型崩塌），列为观察项：若再现连续 2 settle 胜率下滑+acc<0.40 则按 §302 处置。
+> **结论**：S3 balanced accuracy 三连降 + eval 70%→38% 触发风险线；用户拍板回滚 it4 峰值权重续训；it9 评估 75% 未复现"70% 后第一步崩塌"；KL/gnorm 逐轮爆炸（44-56/常 >0.08）列为观察项。
 
 ## §303 v3.10 长尾竞速：in-flight 尾部任务空槽即竞速（2026-08-31，用户指令"有空槽就派发"）
 
-**问题（用户实测观察）**：v3.7 尾部 fan-out 只在「pending 还有排队任务」时复制在跑副本。
-末尾任务一旦被单个 worker pop 出队、独占 in-flight（长 RPC/慢节点），其余空闲执行槽因
-`src=None` 干等 → 整轮被 1 个慢副本拖住（it9 实测末尾 1 局空等至 task 超时）。双缓冲
-挤出的墙钟被尾部慢速全数还回。
-
-**处置**：queue worker 在排队队列已空时，**只要空槽**就复制一个 in-flight 任务竞速
-（每任务副本数上限 tailFanoutDup=2，防无限复制）——**不看任务已耗时**（用户裁定）。
-选择逻辑抽为纯函数 `pick_tail_race`（字典序最小，锁内确定性）。
-
-**配套**：
-- **去重结算修复**：成功分支从「仅 fanout 副本检查 dup」改为「所有后到副本一律丢弃」——
-  漏网的（main 后到/竞速副本后到）重复 append 曾导致报告 ok=3/2、seen 触顶但 all_settled
-  不触发 → 每轮空等 deadline 120s（集成 I1 实测 0.2s→120s）。
-- **集成测试 mock 化**：I3/I4 的 PPO 以 `_StubPpo` 桩替代（stream 的 `backend` 注入点），
-  不再 build 真 torch 模型；rollout 由 FakeAgent 合成包承担（TS 引擎真实性由
-  tools/sim/export-rl-rollout.ts 单测保证）。新增 **I6**：slow_first 注入 2s 慢副本 →
-  验证空闲槽竞速复制（dispatch ≥2）且快速收官。
-- **测试 cfg**：`agentRescanSec=1`（默认 120s 轮询会让每轮收官白等 120s）。
-
-**效果**：集成全套 146s（原 ~10min+）；v3.10 上线后 S3 尾部慢速局由竞速兜底。
-
 ## §303a v3.11 竞速副本只派快节点（2026-08-31，用户观察"副本落到慢节点=白等"）
-
-**问题**：长尾竞速虽已派副本，但**副本可能派到慢节点**——两个副本都落在慢速节点上时
-仍是等慢的（竞速形同虚设）。
-
-**处置**：竞速副本只派给 top-N 快节点。纯函数 `race_tier_ok(speeds, nid, top_n=3)`——
-- 本机（local）豁免（实测最快、无网络往返）；
-- 无速度样本（首轮/全空）乐观放行（没数据不该设门槛）；
-- 否则按 EWMA 平均耗时（speed 表 = 各节点最近任务平均耗时）取 top_n 快档，
-  不在快档的节点不参与竞速（慢节点对竞速是负资产）；
-- 节点数 ≤ top_n 时全员参与（退化回无门槛）。
-
-**配套测试**：`test_race_tier_ok`（9 断言：top3 内全过、第 4 快排除、最慢排除、
-local 豁免、无数据放行、节点数 ≤ top_n 退化为全员）。
+> **结论**：竞速副本只派 top-N 快节点（race_tier_ok 纯函数，local 豁免/无样本放行/退化为全员）；test_race_tier_ok 9 断言。
 
 ## §304 v3.12 eval 最低优先级：软等待 + 后台消化 + 集成测试（2026-08-31，commit e79ca5c）
-
-**用户方向**（三连）：eval 可以慢慢做（利用后续迭代采集/PPO 间隙消化）；远程节点算力
-充裕（it11 PPO 期间 it10 eval 大概率已完）；eval 最低优先级，必须写集成测试保障。
-
-**问题（v3.12 前）**：PPO 收尾后 `eval_thread.join(timeout=budget)`，budget=eval_window_sec+60
-=1860s 全额等账——eval 慢时拖死主链下一轮（日志 "waiting up to 1860s"）。
-
-**处置**：
-- 全额等待 → **软等待 ≤180s**（`soft = min(budget, 180.0)`）：只吃已收官尾巴 + 给在途
-  eval 局缓存缓冲（防下轮新权重 POST purge 掐掉），长尾 eval 留到 it+1..N 采集/PPO
-  空档消化（节点任务队列天然仲裁：采集忙 eval 排队，采集 done eval 补做）。
-- 账按 **wver 晚入**（`eval_done_keys` 按 wver16 去重，晚到不重跑）；门判定读 eval_log
-  的 eval_summary（iter 保留原轮号 + wver），晚入账只顺延判定窗口，判据不变。
-- 溢出预算未收官的在途局：下轮异 sha 清场 + 阈值熔断兜底（同 v3.10 前语义）。
-
-**实测证据**（重启前旧代码进程，恰证用户预判）：it10 eval 3.5min 收官（it11 启动前），
-it11 eval 20min 与 it11 PPO（~19min）重叠完成——eval 天然在训练间隙消化、不占主链。
-
-**I7 集成测试**（test_run_rl.py，FakeAgent.eval_delay=3s/局慢 eval 注入）：断言 ①eval
-慢速在途时下一轮采集照常完成不阻塞（games==2, missing==[]）；②采集完成后 eval 仍在
-后台跑（is_alive()）——证明"不抢主链、后台消化"。修测点：eval_log 台账按 wver 去重，
-残留同 wver 记录会让 eval 全量 skip 早退 → I7 前清共享测试 tmp 的 eval_log.jsonl。
-I1–I7 全套 + 单测 + freeze gate 全过。
+> **结论**：eval 最低优先级——全额等待改软等待 ≤180s（后台消化晚入账，账按 wver16 去重）；I7 集成测试断言"不抢主链、后台消化"；实测一次 20min eval 与 PPO 重叠完成。
 
 ## §305 v3.13 提前预采首波：epoch3 快照 spawn + 双 wver 对账 + stream 首波注入（2026-08-31，commit c1e33db/3ebf8d2）
 
-**问题（用户 + 观察者双重指出）**：v3.10 双缓冲 spawn 在 PPO **全部结束之后**（run_rl.py
-原 755 行），预采 600s 是**串行等待**（it13→14 实测 gap 252s … it16→17 736s），并未藏进
-PPO。观察者建议"spawn 提前到 PPO 开始"——但 S3（stream waves=0）PPO 前期权重=θ_{N-1}，
-提前 spawn 会整轮 off-policy。用户修正方案（2026-08-31 拍板）：**PPO epoch3/4 完成时**用
-当前权重（θ_{N,e3}，差最后一段梯度、on-policy 带内）存快照并 spawn，预采**只采下一轮首波**
-（--precollect-games 12 局），墙钟藏进最后 1 个 epoch；其余 ~138 局由下轮以 θ_N 严格现场采。
-
-**改动**：
-1. **epoch 完成回调**：ppo.py / ppo_intent.py 的 update 增加 `on_epoch_done(ep_done, model)`
-   （stream 透传给 backend.update）。主循环回调在 `ep_done >= epochs - precollect_early` 时
-   `save_weights_json(model, weights-collect-{it+1}.json)` + `_spawn_collect_next(snap_src=…)`。
-2. **预采限局**：`--precollect-games N` — collect-only 子进程只采前 N 局（首波 wave 语料）。
-3. **双 wver 对账**：`completed_pairs/resumed_manifests` 增加 `extra_wver`（预采快照 θ_{N,e3}
-   指纹）；主循环 `_precollect_snapshot_wver` 回读 weights-collect-{it}.json → 下轮对账双白名单，
-   否则预采首波被当"未完成" rmtree 清场。run_rollout_queue 同样透传（stream 的 collector）。
-4. **stream 首波注入**：collector 启动前把盘上 extra_wver 匹配的首波 shard 注入 pend（作为
-   第一 wave 语料），collector 对账跳过它只现场补采剩余局——两批语料本轮都被训练。
-5. **尾部 spawn 防重复**：`_spawned_early` 置位后循环尾不重复 spawn（避免双 spawn 同快照）。
-
-**修测点（3ebf8d2）**：提前 spawn 时调用方已 `save_weights_json` 写好目标文件，`_spawn_collect_next`
-内部 `copyfile(snap_src, snap)` 因 src==snap 抛 same-file → precollect 静默失败。改：abs 路径相同则
-跳过 copy 直接复用。
-
-**集成测试 I8**：盘上预置 extra_wver 首波 shard → run_rollout_stream 应 ①注入训练（seed pend）、
-②collector 只派剩余局（dispatch 不含首波对）、③报告覆盖全计划（games==2）。实测三断言全过。
-
-**实测（重启后 it19）**：`resume: 85/150 已在盘 + 65 remaining`——历史预采与现场补采混合，对账
-（含 extra_wver）正确识别；it20 起将出现"提前 spawn 藏进 epoch4 + 只采 12 局首波"的稳态行为。
-
-**语义说明**：首波 12 局用 θ_{N,e3}（≈θ_N，kl 通常 <0.02，PPO clip 0.2 带内），IS 分母取
-快照采样的 lp（on-policy 数学不破坏）；剩余 3/4 严格 θ_N。失败救济 = 只废弃 12 局（而非全量）。
-训练曲线与历史有轻微口径差异（首波半代滞后），记 DECISIONS 备案。
-
 ## §306 远控重启护栏：脏工作区拒发 + 跨代去重 + agent grace 窗口（2026-09-01）
 
-**问题**（用户报告 + 节点实测日志）：① 远控重启过的进程被再次远控重启（10:16–10:18 四连杀，节点始终无法贡献）；② 用户手动更新代码重启的进程被远控杀掉再重启。
-
-**根因**：expected codeHash 由训练机**工作区**文件内容算出（`_collect_code_hash_files` 直读磁盘），含未提交改动；远端 `git pull` 只能拿到已推送提交，hash 永不收敛 ⇒ 每轮 ping 门 / rescan（~15s）都判 stale ⇒ 再杀再拉成死循环。叠加：旧实现去重集合 `upgrade_requested` 是每轮局部变量，新一轮迭代重建 ⇒ stale 节点每轮再收一次 restart。
-
-**处置**（三层，全部带单测）：
-1. `dist_common.dirty_hash_files()`：对 hash 集跑 `git status --porcelain`，检测未提交文件；`request_upgrade_guarded()` 在脏工作区时拒绝对**远端**节点下发 pull+restart（`dirty-tree:N`）——pull 无法收敛时重启纯属无效扰动。self/回环节点豁免（代码同源，纯重启有效，禁 pull 语义不变）。
-2. `dist_common.request_upgrade_guarded()`：跨代去重——同节点 + 同 agent codeHash 只下发一次 restart（`dedup`）；节点 hash 变化（pull 生效 / 手动更新）自动恢复资格。替换掉 queue.py 每轮重建的 `upgrade_requested`；queue.py ping 门与 rescan 双调用点接入，脏树 WARN 每轮一条。
-3. `tools/agent/restart-guard.ts`：agent 侧 grace 窗口（30s，覆盖 rescan 两个周期）——进程启动窗口内的 `/v1/restart` 是协调器重扫回声，回 409；`request_upgrade` 对非 200/202 记失败、不写去重状态，下轮必然重试。`restart-guard.ts` 纳入 codeHash 集（agent 重启行为变更必须触发升级波）。
-
-**测试**：`nn-training/test_upgrade.py`（+4 用例：跨代去重 / 脏树拒发+self 豁免 / upgrade_stale_nodes 脏树 / porcelain 解析+冒烟；注意 mock 绑 127.0.0.1 会被判 self，远端用例 monkeypatch `is_self_node`）；`tests/agent/restart-guard.test.ts`（grace 边界 4 用例）。`test_run_rl.py` 全过、tsc / oxlint 绿。
-
-**运维语义**：训练机工作区有未提交的 hash 集改动时，远端节点被抑制重启并保持 excluded（日志 `dirty-tree:N`）；要节点升级 = commit + push（run_rl 启动时已自动 push 分支）→ 下轮 rescan 下发升级。agent 日志新增 409 `restart-grace-period`。
 ## §307 RL 入口整合：run_rl_intent（含 --goal）并入 run_rl.py（2026-09-01，用户拍板" 直接删除）
 
 ## §307 RL 入口整合：run_rl_intent（含 --goal）并入 run_rl.py（2026-09-01，用户拍板直接删除）
 
-**决策（D1–D5，plan/RL-Entry-Consolidation.md）**：run_rl.py 成为唯一 RL 入口，--mode {per-tick,intent,goal} 参数化三后端；--goal 保留为 --mode goal 别名。rl/eval_m1.py 承接 intent/goal 的 m1-eval 评估管线（与 eval_dispatch 双轨并存，D3）；rl-config 查找顺序 rl.<mode> → intent_rl 遗留块 → rl（D2）；止损泛化为 --stop-loss-at/--stop-loss-delta（D4）。run_rl_intent.py + test_run_rl_intent.py 直接删除（D5，intent 战役不再续跑）。
-
-**理由**：机制层（rl/ 包）早已共享；残留差异仅剩后端/采集器/评估/配置四处绑定点，全部可参数化。per-tick 默认路径行为字节一致（回归护栏 = test_run_rl 快速层）。
-
-**验证**：test_run_rl / test_run_rl_m1 / test_ppo_intent / test_ppo_goal / test_ppo_common 全 PASS；无遗留 run_rl_intent 引用。
-
 ## §308 RL 训练配置化 M1：公式引擎 + metrics.npy + 课程启动通道（2026-09-02，plan/rl-training-config.md v8）
-
-**交付**（M1a/b/c/d 主体落地；golden/单测全绿，tsc/oxlint/oxfmt/ruff 通过）：
-1. **M1a 公式引擎**（`rl/reward_library.py`）：AST 白名单求值器（无 eval/Attribute/Import、限长 1024/深 64、分层白名单核心+扩展 opt-in、唯一归约 helper `wavg`=特征轴；白名单无任何时间轴归约函数，单测锁死）。`RewardSpec/RewardFn` 支撑 toy 与 score_reconcile（telescoping：Σr ≡ scale×gatedScore）。JSONC 限行注释剥离器（`rl/jsonc.py`）。
-2. **M1b metrics 落盘**：`export-rl-rollout.ts` 删全部 TS 侧奖励计算（v7/toy 势、paidTotal、对账），改落 `metrics.npy [N+1,21] f8`（N 决策快照 + 终局快照）+ manifest `metrics_version:2`；`ppo/engine.py` 加载器改读 metrics + manifest → holder RewardFn 算 reward（无 holder 响亮报错）。`metrics_stats.py` 每 iter 落 21 维统计。
-3. **M1c 超参 schedule**：`ppo_schedule` 按绝对 iter 查表（lr 保 Adam 动量/epochs/mb 每轮改写/kl_coef 新增 `ppo_update` 形参默认 0 向后兼容 + 采样策略 KL 惩罚）；加载期 holder（`rl/reward_context.py`，frozen）承载 reward_fn/gamma/lam/it；冻结前缀表进 `_setup` 优化器只收可训参数。`--course`/`--course-file`/`--echo-config` 启动通道（课程 > rl-config > 默认，无 CLI 逐参覆盖）。
-4. **M1d 远端透传**：`--stage-json` → `decodeStageGrid`（src/nn/config-stage.ts，13×13→26×26、enemyCount 恒显式、出生点 2×2 冲突校验）四守卫短路；agent 能力位 `stageJsonSupport` + stageJson 布局指纹（sha256[:16]）进 resultCache 键（无 stageJson 时逐字节不变）；lives/level override 全链路。
-5. **v7 保真**：`reward_builtin.v7_phi` + `curricula/s4b.jsonc` 公式（607 字符，`wavg`+`clip`+`where`）对 TS oracle（rl-reward.ts phiNow）256 行**逐位一致**（max|Δ|=0）；golden 文件 + bun oracle（`tools/diag/v7-phi-oracle.ts`）。
-6. **回归修复**：`rl/{queue,queue_local,archive}.py` REPO_ROOT 修正为仓库根（原少一层 → nn-training，本地 spawn exporter 报 module-not-found、归档落到 nn-training/nn-training/weights——2026-09-02 OO 拆分引入的既有回归，本次顺手修正）。
-
-**关键取舍**：idx10 空槽按「连续编号 + 已编号项不变」补 `starsCollected`；manifest.score 本就是 gated（F3 门控在 TS 完成），Python 不再二次乘 BASE_LOSS_MULT（避免双重门控）；rl-reward.ts 的 `basePressureMean` 字段实为 sum（oracle 按 rollout 口径 sum/samples 喂入，命名坑已注释）。S4a 移出本期（随 A7）。v7 公式 607 字符未触降级卡——`reward.builtin` 机制保留（warning+回退）但不作默认路径。
-
-**验证**：`tests/test_reward_golden.py`（安全边界/wrapper/N=1/末样本差异/telescoping/golden-file/v7 逐位）、`test_metrics_shard.py`（加载器端到端/版本分支/无 holder 报错/行失配报错）、`test_rl_schedule.py`、`tests/config-stage.test.ts`、`tests/dist-agent.test.ts` 全绿；`python run_rl.py --course _smoke`（1 局 arena）与自定义关 stage-json 直跑端到端通过（Σr 恒等式 + 列序抽查）。课程配置 = 配置机制验收夹具（S1/S2/S3/S-Dodge/S4b，不再实际训练）。
 
 ## §308b M1 收尾：尾逗号容忍 + 课程/CLI 冲突 fail-loud + eval 双侧同规（2026-09-02，commit e828331 后续）
 
-**尾逗号**：首批 `.jsonc` 样例带 JSONC 惯例尾逗号（末项后 `,` + `}`）——Python `json.loads` 严格拒绝，且 `//` 注释在逗号与闭合符之间时简单文本清理会漏。处置双层：① `rl/jsonc.py` 的 `loads()` 加 `_drop_trailing_commas`（字符串外扫描，维护 in-string/转义，仅删 `,` 后随 `}`/`]` 者）；② 六个课程文件清理。加载流程 = strip_comments → drop 尾逗号 → json.loads（单测覆盖）。
-
-**课程/CLI 冲突**（plan §3 fail-loud）：argparse 无法区分「显式传参」与「吃默认」——以 `ap.parse_args([])` 的默认命名空间为基线，凡 CLI 值 ≠ 默认 且 该键在课程 flat_overrides 覆盖集内 → SystemExit 列出冲突（此前课程静默覆盖用户显式参数）。`course_cli_conflicts()` 纯函数 + 单测。
-
-**eval 双侧同规**（plan §6/§10）：`export-eval-game.ts` 增 `--stage-json/--lives-override/--player-level`（decodeStageGrid 短路、自定义关 loadIndex=0、覆盖在 S-Dodge 默认之后生效）；`eval_local.run_local_eval_game` + `eval_dispatch` 本地评估按课程透传；sampler-agent eval 分支同传。自定义关 eval 直跑冒烟通过。说明：legacy 非课程 arena eval 仍保留 exporter 内 S-Dodge lives=1 默认（课程路径以配置覆盖为准，双轨共存不破既有评估基线）。
-
-**验证**：nn python gate ✓；tsc/oxlint/oxfmt ✓；bun 13 用例 ✓；test_run_rl fake_runner 签名同步（+3 可选参）。
-
 ## §308c 评审 F1–F3 处理（2026-09-02，commit e828331/8b849e4/0dec734 之后）
 
-**F1（中）降级卡触发面收窄**：`RewardSpec` 降级回退从「任意 FormulaError」收窄到新异常
-`FormulaDegradeError`（机制性量化限制：formula>1024 字符 / AST 深度>64，专用异常由
-`parse_formula` 抛出）——语法错误、白名单外函数、未知名 params（wq 实测案例）现在带
-builtin 也**响亮 raise**，不再静默回退内置；warning 文案拼入真实异常文本。`validate_reward`
-同语义（配置错误记 errors 硬失败，仅量化触发回退 warning）。单测
-`test_degrade_only_on_quantitative_triggers` 覆盖四象限。
-
-**F2（低）envelope 扩展层误报**：`symbolic_envelope` 增 `allow_extended_funcs` 透传（子项
-compile 同参）——有界扩展函数（tanh/sin 等）不再被误标 inf「数值包络超限」污染启动日志；
-关闭扩展层时白名单外函数走 F1 的配置错误路径。单测 `test_envelope_extended_funcs_no_false_positive`。
-
-**F3（低）plan 文档-实现回填三处**（行为安全、措辞更新）：
-① §4.2 param_schedule mode = 硬编码 (linear, step) + 未知 mode 响亮报错（非自由字符串）；
-② §5.2 布局指纹 = `sha256(stageJson 串)[:16]`（较字段级 FNV 更保守：key 序变化 → miss 而非复用）；
-③ §4.1 21 维表回填 idx10 `starsCollected`。F4–F6 信息级确认无需改代码。
-
-**验证**：nn-training pytest 全绿（含 4 个相关单测）；ruff/mypy 门禁通过。
-
 ## §309 新课程 S5-open20：20×20 空旷无基地 / 一命无星 / 20 敌 4 类混编（2026-09-03）
-
-**目标**：AI 学会走位杀敌、闪避子弹、主动捡道具。地形=课程自定义关（2000-2002，三张出生点变异）：
-13×13 grid 钢外框 + 10×10 cells = 20×20 tiles 开放区、无基地码；forces=basic×5+fast×5+power×5+armor×5
-(count 20)；player.lives=1 / level=0（导出器 CLI 覆盖）。dodge 因自定义关守卫④强制 off——闪避纯靠奖励学。
-
-**起始权重决策**（用户点名 S2 终点）：候选 = a2-kill（S1 1 敌）、s2-cap（arena S2 size14 空旷 3 敌，kill2，
-30 iter，**域内 winRate 0.549**）、s3-cap（S3 迷宫 8 敌 kill2，0.603）、s3-cap2（S3 迷宫 balanced，**0.78**）。
-迁移实测（新图 2000，3 seeds，一命无星 20 敌）：**s2-cap 均击杀 3.67 / 命中 11.33 / 存活 1347 / 捡道具 0.33**
-显著第一（s3-cap2 2.67/7.00/1101/0.33；a2-kill 与 s3-cap 均 ~0.33 杀）。结论：**域内强 ≠ 迁移强**——
-S3 迷宫掩体策略在空旷 20 敌图上失效；选同为空旷场出身的 **tmp/s2-cap/weights.json**（两重证据：用户点名 +
-实测迁移第一）。
-
-**奖励设计**（Φ 势 + diff，scheme=toy——无基地禁用 score_reconcile，v7 分守家维度缺失/承压恒 1 语义扭曲）：
-- 杀敌：`wKill*(kills+1)**1.15`（超线性）+ `wHit*enemyHits`（密集正反馈，0.3）+ **首杀跳变**
-  `wFirst*where(firstKillTick>=0,1,0)`（+1.0，0→1 击杀冷启动梯度）
-- 闪避：−`wDmg*playerHits`（0.6→1.5 升温）+ −`wDmg2*playerDamageTaken`（**0.005**——初稿 0.05 使死亡扣血
-  累计 200 → −10 支配整局 Σr≈−13，实测修正）
-- 道具：+`wLoot*powerUpsCollected`（0.8→0.5）+ +`wStar*starsCollected`(0.3)
-- 走位：−`wStuck*max(0,stuckTicks−120)`(0.02) + −`wShot*playerShots`(0.01)；**不放** cellsVisited 正项
-  （防乱走刷分）
-- terminal：stage_clear +6 / lives_exhausted −3 / timeout −1
-- 超参：lr 1.5e-4 / epochs 4 / mb 512 / gamma 0.99 / lam 0.95 / seed_rotate 8（每图每轮 8 新 seed）/
-  max_ticks 12000 / 40 iter / ppo_schedule kl_coef 0.6→0.2→0（防继续训练早期漂移）
-- 量级实测：好局（10 杀/命中30/道具3/星1）Σr≈+21.8 vs 差局（0 杀死亡）≈−2.0
-
-**已知限制（诚实标注）**：一命满血 200 → 被击中即死，playerHits 每局 ≤1、damageTaken 无中间态；21 维指标
-无子弹近距/敌距类**密集**信号 →「闪避」在现指标下只有死亡二元负反馈可学。缓解路径（视 it10 表现再选）：
-加「存活 tick 微正项」给闪避密集梯度（代价：苟活得分）/ 扩展指标 v3（子弹近距/敌距——需 TS 落盘 + 双侧同步，
-工作量在 M2+）。评估：eval_stages 2000-2002 × 8 局，eval_every 5。
+> **结论（S5-open20 课程）**：起始权重实测迁移第一 = s2-cap（域内强≠迁移强：S3 迷宫掩体策略在空旷 20 敌图失效）；奖励 = toy+杀敌超线性+/受伤/拾取/走位罚（不放 cellsVisited 防刷分）；一命满血→闪避只剩死亡二元负反馈（已知限制）。
 
 ## §310 S5 测试 iter 全链路体检：5 个修复 + 性能 profile + 激励函数检验（2026-09-03）
 
-**工作流体检（s5-open20 测试 iter，跑 3 遍完整 1-iter）暴露并修复 5 个真实缺陷**：
-1. `rl/eval_local.py` REPO_ROOT 少一层（OO 拆分同族回归，与 queue_local 2026-09-02 同病）→ 本机 local eval spawn cwd=nn-training → `Module not found tools/sim/export-eval-game.ts`。→ parents[2]。
-2. `loop_core` `_eval_every = int(... or 1)` 把显式 `eval_every=0` 吞成每轮（想关闭 eval 却每轮都跑）→ 0=关闭，默认仍每轮（字节一致）。
-3. `eval_dispatch`：eval_stages 含自定义关（≥2000）时无能力握手 → 旧 agent（mac，无 stageJsonSupport）收到 stage=2000 走 arena/真实关解析 → `stage.tiles` null 崩溃。→ need_sj 时要求 ping.stageJsonSupport，任务落本机；fetch 透传 stage-json/lives/level（与 rollout 同规）。
-4. `dist_common.write_shard` 不写 manifest.json → M1 metrics 方案下分布式/self-node 局落盘缺 outcome/score/metrics_version → engine 加载器把这类局错标 timeout，**奖励错算**（M1 引入回归；queue_local/exporter 直写路径无此问题）。→ write_shard 补写 manifest.json。
-5. `export-rl-rollout --pack` 的 BCV2 manifest 用**聚合 summary**（缺单局 outcome/nSamples/metrics_version）→ 修复为单局 shard manifest 基底（lastShardManifest + mode/elapsedSec）。已单局解包验证：manifest 含 outcome/nSamples/metrics_version 等单局键。
-
-**远程节点（mac）可用性结论**：mac 在线且能收 upgrade 请求，但不可用 —— 根因链：本地 push 无凭据（`git push origin goal-nn` rc=128，origin 停在 dd163ac）→ mac `git pull` 空转（Already up to date）→ codeHash 恒 stale → 每轮 run 触发 upgrade/restart → mac 端 restart 竞速（手动起 agent 与旧实例并存 → EADDRINUSE）→ 反复掉线。修复路径：① **先 push**（凭据/ssh/手动），mac pull 到新代码后 codeHash 匹配即自动正常；② 别手动起 agent（端口双实例自残）。dirty-tree 抑制（本提交未 push 时）已阻止对 mac 的无效 restart（第 3 遍日志：`remote restart suppressed (dirty-tree:1)` ✓）。
-
-**性能 profile（本机 CPU-only）**：
-- TS 侧：单局分段 98.4% 在 `model.forward`（稳态 ~39.6ms/次 → 12000-tick 满局纯推理 ~48s）；sim.tick 仅 0.8%（0.03ms/tick）。→ 吞吐瓶颈 = NN 推理；优化候选：onnxruntime/wasm、int8、降 K、模型裁剪（量级工作，另行立项）。
-- Python 侧数据管线全部亚秒：reward_fn 0.1ms/局、metrics_stats 46ms、np.load 3.2GB/s、GAE 0.3ms/局 → 非瓶颈。
-- 整 iter 实测（第 3 遍 local-only）：collect_wall≈142s（24 局 8 workers）、PPO CPU 321s（22 chunks×4ep=88 步）→ **PPO 占大头**（local-only 全量盘全量更新路径）；stream 双波路径（第 2 遍）collect 152s + PPO 190s。
-- load_cpu=0s：加载不是瓶颈（M1 架构红利再次确认）。
-
-**激励函数检验（修复后 24 局，outcome 全真值）**：
-- step reward 79% 零步（稀疏，符合"一命局多数在移动"）；非零步 std 0.72。
-- Σr/局@it1：min −6.14 / p25 +0.04 / 中位 +4.12 / max +50.37（20 杀全歼局）→ 不再全负、正负分明。
-- **激励方向单调正确**：高杀局（≥3 杀）Σr 中位 +4.26 vs 低杀局 −6.14。
-- kills 中位 6 / 总 162/480 / 24/24 局有击杀 / 1 局 20 杀全歼（stage_clear）→ 起点策略（s2-cap）在 20 敌图上已有动作基础。
-- Σr@it25 整体下移 ~3（wDmg 0.6→1.5 升温生效方向正确）。
-- **归一化状态**：adv 全局归一 ✓；ret/value **未归一** → Σr std 11.05 → value 头 raw MSE 量大（PPO value≈0.99 仍在学，gnorm 0.9-2.3 可控）。评估：可接受；若后续 value 收敛慢可加 ret 归一对照（intent 已有 normalize_ret 先例）。
-- 一命二元性确认：100% 局死亡、挨打 3.04 次/局、扣血累计 859（≫200 满血）→ 「闪避」仍是死亡二元为主；缓解路径沿用 DECISIONS §309（存活微正项 / 指标 v3）。
-
-**建议的下一步**（按序）：① 提供 push 凭据让 mac/a97/a98 升级（否则只能本机 8 workers）；② commit 本批修复后正式起 s5-open20 40 iter；③ 若 40 iter 中 value loss 持续 >0.5，考虑 per-tick normalize_ret 或 terminal 尺度下调；④ NN 推理加速（TS 侧 98% 瓶颈）单独立项评估。
-
 ## §311 TS 推理性能调优结论：JS 标量循环已达上限，需结构性方案（2026-09-03）
-
-**背景**：S5 正式训练跑完 it2（08:20 结算后按用户指令停止）转入调优。§310 profile 定 TS 侧 `model.forward ~39.6ms/次` 占 rollout 98%。
-
-**实测调优过程（conv1x1 pointwise，占 ~60% forward）**：naive（内层 ic 跨 676-float 平面跳读）→ 纯外积（out 写放大 64×，43.0ms 更慢）→ 分块外积 T=16（39.3ms）——三种实现均 ~39-43ms，**缓存重排无效**。结论：瓶颈是 **JS/JIT 标量循环上限**（37M MACs/forward ≈ 1.9 GFLOPS，JIT 标量 ~1ns/MAC 的典型水平），不是访存。conv1x1 已回滚（git checkout src/nn/infer.ts），保持逐字节行为。
-
-**Python 侧确认**：数据管线全亚秒（§310）；torch_threads=8（rl-config）已生效、16 核机器 → PPO 与 rollout 平衡合理，无需改。
-
-**后续候选（均需立项评估，非配置可及）**：
-1. **WASM SIMD conv**（自写 conv3x3/5x5dw/1x1 → SIMD）→ 预计 conv 3-8×，forward 落到 ~8-15ms，rollout 提速 2-4×（最大单点收益）；
-2. onnxruntime-node（原生 addon，bun 兼容性待验）或 int8 量化；
-3. PPO 期临时 torch_threads 8→12-16（rollout 暂停期空核利用，~20-30% PPO 增益，影响小）；
-4. 结构层：决策频率 K、模型裁剪属训练口径/架构决策，不列入推理侧。
-
-**训练恢复**：s5-open20 已结算 it1-it2（training_log iteration 2 = last），同命令 `python run_rl.py --course s5-open20` 从 it3 续跑（resume 按 last_completed_iter，权重 tmp/s5-open20/weights.json = it2 产物）。
+> **结论**：model.forward ~39.6ms = JS/JIT 标量循环上限（37M MACs ≈1.9GFLOPS；三种实现均 ~39-43ms）；候选：WASM SIMD conv（最大单点收益）、onnxruntime、torch_threads 临时上调。
 
 ## §312 TS 推理提速①落地：conv_feats.wasm（WASM SIMD，×5.1–5.7）+ 方案②可行性
-
-**背景**：§311 定 model.forward ~39.6ms = JS 标量上限。用户点试两方案。
-
-**方案① WASM SIMD conv —— 已落地并验证**：
-- `src/nn/wasm/conv_feats.c`：clang `--target=wasm32 -O3 -msimd128` 编译（无 libc、静态对齐 scratch）；把 StudentModel 卷积段（stem conv3x3 16→64 + 8×[depthwise 5×5 + pointwise 1×1 + relu + residual] + GAP）整体移入 wasm——**外积排布 + pad-拷贝去边界分支**让 LLVM 自动向量化 f32x4。
-- `src/nn/conv-wasm.ts`：懒加载单例（memory 自 1MB 布局避开 .bss；权重按实例引用只上传一次，每帧只拷 in16 43KB）；`infer.ts StudentModel.features` 在 h64/d8/board26 时走 wasm，失败/架构不符自动回退 TS 原路径（双重兜底）。
-- **实测**：features 6.9ms vs TS 41ms（×6）；forward 稳态 **39.6→6.9ms（×5.7）**；单局端到端 1730→337ms（×5.1）；12000-tick 满局纯推理 48s→8s。
-- **正确性**：真实权重 pooled max|Δ|=4.8e-6（累加顺序级）；tests/conv-wasm.test.ts 随机权重 3 帧相对误差 ≤1e-3（防回归）；freeze 确定性门禁 OK（God-AI 基准不涉 NN）；exporter 冒烟正常。
-- 踩坑记录：typedarray `.set` 目标短于源 view 抛 Range（pooled 须 subarray 限长）；wasm 默认 memory 小需 grow；JS 布局偏移需字节计。
-
-**方案② onnxruntime-node —— 可行性确认（未落地）**：`npm i onnxruntime-node` 成功；**bun 可 require 加载**（N-API 兼容 ✓）。完整落地还需：torch 模型从 weights.json 重建 → onnx 导出 →（可选 int8 量化）→ 推理集成 + 数值/确定性验证——链路长于方案①且已获 ×5.7；建议仅在需要更高倍率（onnx+mkl 预估 ×10-15）或 int8 显著省带宽时立项。
-
-**下一步建议**：恢复 s5-open20 训练（resume it3 起）——rollout 提速 ×5 后单 iter 墙钟主要被 PPO(torch CPU 190-320s) 主导，40 iter 预估 ~3h；机器空闲时恢复即可。
+> **结论**：方案① conv_feats.wasm 落地——features ×6、forward ×5.7、端到端 ×5.1（pooled max|Δ|=4.8e-6，conv-wasm.test 随机权重 ≤1e-3）；方案② onnxruntime-node 可行性确认未落地（链路长且已获 ×5.7）。
 
 ## §313 提速方案异构平台兼容性评估（2026-09-03）
-
-**方案① conv_feats.wasm（已落地）——可直接兼容**：
-- 产物实测依赖 WASM SIMD（v128 指令 410 条；同 C 源去 -msimd128 得标量版 5239B/v128×2）。SIMD 为 wasm 正式特性（2021），bun 各平台（macOS/Linux/Windows/WSL）内嵌引擎默认支持；Android Termux proot Ubuntu 若可跑 bun（x64/aarch64）同样支持。
-- **跨节点确定性保障**：① wasm 字节码跨平台同执行；② dispatch 已有 **bun major.minor 版本红线** → 同轮节点引擎一致 → SIMD 能力一致 → 全走 wasm 或全走 TS，不会 wasm/TS 混跑（1e-6 输出差的 argmax 边界翻转只发生在混跑下）；③ 无 SIMD 的极旧引擎 compile 抛错 → 自动回退 TS（正确性兜底，性能降级不崩）。
-- 结论：无需改造；节点唯一前提 = 能跑 bun + exporter（分布式既有基线）。
-
-**方案② onnxruntime-node（未落地）——不可直接兼容异构集群**：
-- N-API 原生 addon：官方 prebuilt 仅 win/mac(含 arm64)/linux(x64/arm64) → **Android/Termux 无包**；bun 加载 N-API 需逐平台验证（当前仅 win 冒烟 require 成功）。
-- 数值确定性：onnxruntime 按平台后端（MLAS/oneDNN AVX vs NEON）累加/融合不同 → 同模型跨平台输出 ~1e-6~e-4 差异；int8 量化引入 ~e-2 量化误差 → **混跑即破坏同 seed 确定性**（M4 红线）。
-- 适用边界：仅同构单平台集群（x64 Linux）且逐平台 golden 校核后可考虑；int8 必须全量统一启用。
-
-**结论**：分布式继续方案①；② 不引入异构。
+> **结论**：方案①可直接兼容异构（wasm 字节码同执行 + dispatch bun 版本红线防 wasm/TS 混跑 + 无 SIMD 回退 TS）；方案② N-API 无 Android 包 + 跨平台数值 ~e-4 混跑破坏 M4 红线，不引入。
 
 ## §314 v3.14 竞速可见域修正：主副本派发一律登记 inflight（2026-09-03，it6 实测）
-
-**问题（s5-open20 it6 实测，本机低 CPU 窗口 09:05:15→09:07:23）**：v3.7 派发登记条件是
-「出队时 pending ≤ tailFanoutN(4) 才写入 inflight 表」，而 `pick_tail_race` 只从该表选
-候选——**早派任务对竞速机制不可见**。it6 中 a97 于 08:48 升级重启、09:03:18 才 rejoin，
-权重重灌 + worker 拉起期间分到它名下的 3 局在节点侧积压（settle 时 elapsed 仅 2.1s，
-即 ~09:06 才开工）；这 3 局均为早期派发、不在 inflight 表内。PPO 09:05:15 结束后本机
-让位槽按设计不竞速，mac/a98 空闲槽想竞速但表已空（唯一成员 seed474308045 已结算），
-→ 整轮空等 a97 ~2min（collect_wall 249s，对比本地轮 4.8s）。
-
-**修正**：主副本派发**一律** `register_inflight(inflight, task)`（新纯函数，
-`queue_local.py`；queue.py re-export；dispatch.py 派发处调用），不限 src、不看 pending
-余量。登记即竞速候选；`tailFanoutDup=2` 副本上限与 `race_tier_ok` top-3 快节点派档
-仍然兜底，登记面扩大不会放大复制（竞速仅在排队队列已空时空槽触发）。
-
-**保持不变的语义**：
-- requeue 不出表、再派发再登记（计数累加），终态由 settle 全 pop / 失败路径扣减——
-  均为既有逻辑，未改动；
-- `missing_keys` 分支不清理 inflight（保留竞速副本"抢救"失败局的通道）；
-- 本机 `local_suspend` 让位槽不竞速（v3.10 让位语义：给 PPO 腾核，不抢尾流）。
-
-**测试**：`tests/test_run_rl.py::test_register_inflight_v314`（登记即候选 + requeue
-累加 + dup 满跳过）；集成层 `test_integration`（含 I6 慢任务被空闲槽再竞速端到端）回归。
-
-**预期效果**：拖尾局（无论派发早晚）在排队队列清空后即被空闲快槽竞速；轮末同步屏障
-等待时长从「最慢节点开工+执行」缩到「min(主副本, 最快竞速副本)」。
-
-**v3.14b 同日增补（§6.4 dated note）——集成测试编排化 + rescan halt 感知**：
-1. **集成层脱离真实依赖**（用户裁定"编排测试不需要真权重"）：去掉 `bun on PATH +
-   tmp/rl-weights/weights.json` skipif 与 standalone 前置检查；权重改 tmp 哑文件
-   （wver=文件指纹，任意内容皆可）；本地直跑 `run_local_rollout` 在 `rl.dispatch`
-   命名空间 monkeypatch 打桩（返回同构最小 summary，不 spawn bun 不写盘）。
-   集成测试从此零外部 fixture、`RUN_RL_ITEST=1` 即跑。
-2. **rescan halt 感知（生产修复）**：`rescan_nodes` 循环退出条件不含 halt_event →
-   KL 熔断后主线程 `join(timeout=max(30, window+taskTimeout))` 白等满超时
-   （queueWindowSec=120 时实测 180s/次）。追加 halt_event 参数（19 参，缺省 None
-   兼容旧调用方），循环条件加 halt 检查——熔断后 dispatch 立即收尾。
-3. **I9 判别修正**：早派任务竞速的判别用「竞速副本 dispatch 发生在慢窗口内
-   （+0.28s < 1.5s）」，不用墙钟——迟到主副本的在途 sleep 两代语义都必须等，无区分度。
+> **结论**：主副本派发一律登记 inflight（早派任务对竞速可见）；v3.14b：集成测试编排化（零外部 fixture + RUN_RL_ITEST=1） + rescan halt 感知（熔断后 dispatch 立即收尾）。
 
 ## §315 轴 2 补测试：per-tick 策略头（move/fire/value-128）torch↔TS parity golden（2026-09-03）
 
-**背景（审计 gap 确认）**：`goal-infer.test.ts` / `intent-infer.test.ts` 的 golden 校验的是
-StudentNet 主干 + 各自专用头（goal_conv/engage、intent/enemy/anchor），**从不触碰
-PPOStudent 的 `move_head` / `fire_head` / 128 宽 `value_head`**——而这正是活路径
-（`export-rl-rollout.ts`，s5-open20 权重 `kind='student' h=64/d=8 head_hidden=128` + value）
-在采样的三头。轴 2（torch↔TS 前向语义一致）此前对该路径无自动化回归网；任一侧改这些头
-或主干都可能静默漂移。
-
-**修正**（复用 goal/intent 既有 golden 模式，两规格覆盖两条推理路径）：
-- `nn-training/models/student.py --golden <out> [--h --d --golden-seed]`：新增 PPOStudent
-  + value_head 的固定 seed golden 导出（`export_student_golden`，镜像 `goal_net.py` 模式；
-  输出 `{format:"student-golden", h, d, head_hidden, seed, obs, scalars,
-  moveLogits[5], fireLogits[2], valueLogits[1], params}`）。
-- 两个 fixture：`tests/fixtures/student-golden.json`（瘦身 h=16/d=2，TS 手写循环路径）、
-  `tests/fixtures/student-golden-wasm.json`（生产 h=64/d=8，走 conv-wasm，参数数 42 与
-  s5-open20 活权重同构）。
-- 新测试 `tests/nn/student-infer.test.ts`：`buildModelFromText`（与 export-rl-rollout 同一
-  构建入口）→ `forward()` → 两规格各断言 move/fire/value 三头 ≤1e-4（沿用 intent golden
-  容差先例；wasm 卷积段 §312 实测 pooled max|Δ|≈4.8e-6 远在容差内）。
-
-**验证**：37 pass（4 个 golden 文件：coord/intent/goal/新增 student）× bun test；typecheck 绿；
-ruff+mypy 对 student.py 改动干净。基底仅新增 `export_student_golden` + `__main__` argparse，
-`StudentNet/PPOStudent` 本体零改动（不加依赖、不触训练路径）。
-
-**再生成（维护说明）**：改 torch 侧学生网结构后需重新生成两 fixture：
-`python models/student.py --golden ../tests/fixtures/student-golden.json --h 16 --d 2`
-`python models/student.py --golden ../tests/fixtures/student-golden-wasm.json --h 64 --d 8`
-
 ## §316 python 测试提速 v3.15：integration 提速 + heavy 分层 + 等待轮询化（2026-09-03）
-
-**背景**：全量 pytest 实测 30.5s（211 passed），`test_integration`（编排化集成）单测 17.5s
-占 57%；4-shard 并行（python-gate / pre-commit 通道）24.96s —— 瓶颈在 integration 所在片。
-`heavy`/`slow` marker 在 pyproject 声明已久但**零使用**，`test-fast` 与全量实际无差别。
-
-**改动**（三管齐下）：
-1. **integration 提速**（17.46→13.28s，-4.2s）：
-   - I6/I9 刻意慢窗口 `sleep(2.0→0.4s)`：判据本就依赖「竞速副本 dispatch 计数 + 相对时差」
-     而非窗口长度，短窗足够区分两代语义；I9 判别窗口 1.5s→0.5s 同步收紧。
-   - I7 刻意慢 eval `eval_delay 3.0→2.0s`（ThreadingHTTPServer 无限并发，6 局全并行，
-     2s 仍安全 ≫ 采集 ~1s，保 is_alive 断言边际）。
-   - **等待轮询化（用户裁定）**：I7「等 eval 进入在途」从固定 `sleep(0.3)` 改为
-     `FakeAgent.eval_dispatched：threading.Event` 轮询栅栏（首局 eval dispatch 即置位，
-     `wait(timeout=3)`）——触发即继续、语义更稳（不再碰运气赌 0.3s 够不够）。
-2. **heavy 分层落地**：`test_integration` 挂 `@pytest.mark.heavy`；fast gate（`make
-   test-fast` 与 `tools/githook/nn-gate-shards.py` 分片命令）加 `-m "not heavy"`。
-   全量 `make test`（不带 -m）与 `RUN_RL_ITEST=1` standalone 仍跑 integration——这兑现了
-   pyproject「heavy excluded from fast-gate」的既有契约注释，pre-commit 日常门不再吞 17s。
-3. 配套注释（I6/I7/I9）同步 0.4s/2.0s 新值。
-
-**实测**（本机，训练结束后空闲态）：
-| 通道 | 前 | 后 |
-|---|---|---|
-| 全量 `pytest tests/` | 30.5s | 27.2s |
-| `test_integration` 单独 | 17.5s | 13.3s |
-| fast-gate 串行（-m not heavy） | — | 14.0s |
-| 4-shard fast-gate（python-gate 通道） | 24.96s | **10.5s** |
-
-**保留的刻意慢**：I6/I9 慢窗口（0.4s）、I7 eval_delay（2.0s）——属状态注入（模拟慢节点/
-慢 eval），不可轮询，仅按时长下限收紧。测试编排器内部的 `all_settled.wait(0.5)` 等生产
-代码轮询未动。
-
-**验证**：全量 211 passed / fast-gate 210 passed + 1 skipped（integration）/ ruff+mypy 干净。
 
 ## §317 全量测试自动并行：xdist 解禁 + FakeAgent 实例隔离（2026-09-03，用户裁定）
 
-**背景（用户问"全量测试能自动并行吗？CPU 充裕"）**：§316 把 fast-gate 压到 14s，但全量
-`make test` 仍串行 27s。仓库曾禁 pytest-xdist（worker 强制系统 %TEMP% basetemp 触发沙箱删除
-确认），改用自研 `nn-gate-shards.py` 文件分片。
-
-**根因（xdist 解禁）**：`.venv` 的 `colorama` 是**无 `__init__.py` 的损坏 namespace 目录**
-（site-packages/colorama 有子模块但缺 `__init__.py`，未重新导出 `AnsiToWin32`）。串行时某处提前
-加载绕过了它；xdist worker 直接 `import colorama` → `AttributeError: module 'colorama' has no
-attribute 'AnsiToWin32'`（pytest terminalwriter 旧 API）。`pip install colorama`（装 0.4.6 完整
-包）修复。conftest 的 `tmp_path` 覆盖已消除沙箱问题，xdist 禁令前提不复存在。
-
-**FakeAgent 实例隔离（并发安全）**：原 `FakeAgent.events`/`slow_first`/`eval_delay` 等全是
-**类变量**，xdist 按函数分发时 `test_integration` 与 `test_eval_local_gate` 并发跑会踩共享状态。
-新增 `FakeServer(ThreadingHTTPServer)` 子类持有这些实例状态，handler 经 `self.server` 访问——
-每个 test 起独立 server，状态完全隔离。`_ping_cache` 留类变量（纯计算缓存，共享无害）。
-
-**worker 数调优**（16 逻辑核）：n=4 最优 **17.5s**（串行 27.2s，-36%）。更多 worker 更慢
-（torch import 开销每 worker ~2s + 单函数 `test_integration` 13.9s 不可再分，auto=16 → 22.8s）。
-
-**落地**：
-- `make test` → `pytest tests/ -n 4 -q`；`make test-fast` → 加 `-m "not heavy"`。
-- `nn-python-gate.sh`（pre-commit）pytest 部分换 xdist `-n 4` **全量**（含 heavy/integration，
-  ~17s；FakeServer 实例隔离保证并发安全；删 `SHARDS` 变量/分片脚本调用）。
-- 删 `nn-gate-shards.py`（已无引用）。
-
-**实测**：全量 17.5s / fast-gate 7.8s / 多次运行 rc=0（无跨 worker 竞态）。
-
-**验证**：`make test` 17.6s rc=0；ruff+mypy 干净；`colorama` 0.4.6 进 `.venv`（未进
-requirements.txt——属 pytest 传递依赖，由 venv 管理）。
-
 ## §318 test_integration 拆分 9 独立函数，xdist 全量并行再提速（2026-09-03，用户裁定）
 
-**背景（用户问"integration 能不能再拆分并行跑"）**：§317 后全量 17.5s 瓶颈是 `test_integration`
-单函数 13.9s 独占一个 xdist worker（单函数不可再分，墙时 ≈ max(13.9, 其他 ~4s)）。
-
-**拆分**：I1-I9 九个编排子用例 → 各自独立 `@pytest.mark.heavy` 函数：
-`test_it_queue_normal / test_it_halt_preset / test_it_stream_smoke / test_it_stream_halt /
-test_it_local_suspend / test_it_longtail_race / test_it_eval_deferred / test_it_precollect_resume
-/ test_it_early_race_v314`。公共 setup 提取为 `_itest_env(monkeypatch, tmp_path)`（返回
-srv/WEIGHTS/cfg/args/bun，每个函数 try/finally 关 server）。原有的 shared-eval-log 清理逻辑
-不再需要（每个函数独立 `tmp_path`）。
-
-**实测**（16 核，xdist -n 4）：
-| 通道 | 拆分前 | 拆分后 |
-|---|---|---|
-| 9 个 itest 串行 | 13.9s（单函数） | 15.1s |
-| 9 个 itest xdist n4 | —（不可分） | **7.3s** |
-| **全量 `pytest -n 4`** | 17.5s | **14.8s** |
-
-并行墙时由 9 个分散的函数均摊到 4 个 worker；全量从 17.5→14.8s（相对串行 27.2s 已 -46%）。
-
-**验证**：全量 14.8s rc=0；standalone `main()`（RUN_RL_ITEST=1）改为逐个调用 9 函数
-（各传独立 tmp 子目录 + fresh MonkeyPatch）。
-
 ## §319 长程任务纪律入规：启动测速预算 + 日志落盘可观测（2026-09-04，用户裁定）
-
-**背景**：BC 蒸馏 60 epochs 预算严重低估——由 723 帧冒烟（3 epochs 12.5s）外推单
-epoch ~85s，实际 165K 帧 ~11 min/epoch（含 val 前向 + mirrorX + 每 epoch 统计），
-总时长 60min→11h（8-11× 误差）。且启动命令 `| tail` 管道缓冲吞掉全部 epoch 日志，
-错误在 5.5h 内不可观测，只能靠 CPU 采样猜进度。
-
-**裁定**：
-1. AGENTS.md 新增 §16 Long-Run Task Discipline（Budget & Observability），
-   docs/agents.details.md §16 给案例与可操作细节：
-   - 16.1 长任务（>5min）启动前必须在真实语料上实测 1-2 epochs/batch 再放大，
-     禁止千帧级冒烟外推（固定开销在小数据不显形）；
-   - 16.2 长任务输出一律重定向日志文件（`> run.log 2>&1`），禁止 `| tail` 管道；
-   - 16.3 日志逐 epoch/step 落盘 + 权重训练类任务每 N epochs checkpoint
-     （`train/bc.py --ckpt-every N`，{out}.ckpt.{epoch}，`--resume` 可续），
-     任意时刻是可验收/止损点；
-   - 16.4 超预算时用 CPU 时间双采样（20s 间隔）判 kill-vs-wait，不靠感觉。
-2. train/bc.py 新增 `--ckpt-every N`（中途 checkpoint，meta 带 epoch/best_val，
-   冒烟验证通过；bc 相关测试 5 pass）。
+> **纪律入规**：AGENTS §16.1–16.4（长任务预算实测 + 日志落盘 + checkpoint + CPU 双采样判 kill-vs-wait）；train/bc.py 新增 --ckpt-every N。案例：723 帧冒烟外推 8-11× 误差的 11h 事故。
 
 ## §320 长程任务并行入规：可分片任务禁止默认串行（2026-09-04，用户裁定）
-
-**背景**：盘点 AGENTS.md 无任何并行强制规则——worker-pool.ts（注释自带 parallel ==
-serial 契约）、RL stream/多节点、bun test --parallel 都存在，但数据采集类工具
-（export-godai-labels）默认单进程串行，agent 跑长任务普遍烧单核（2000 局 8 并行
-~4min vs 串行无界）。
-
-**裁定**：AGENTS.md §16 扩为 "Budget, Parallelism & Observability"：
-- 16.5 可分片长任务默认并行——采集按 (stage,seed) 分片多进程、batch sim 走
-  worker-pool/sim-pool（纯任务下并行==串行逐字节）、RL 用 stream+节点
-  concurrency+local slots、测试 bun --parallel / pytest xdist；串行是例外且须
-  说明理由；无内建池的工具用 shell 级 seed 分片兜底。
-- 16.6 每个工具的并行路径先做一次"并行 vs 串行字节比对"再信任（worker-pool
-  契约假设纯任务，需确认工具遵守）。
-docs/agents.details.md §16 补按工具类的并行清单与实测参照（§318 pytest xdist
-27.2s→14.8s；godai 采集 8 分片 2000 局 ~4min）。
+> **纪律入规**：AGENTS §16.5–16.6（可分片任务并行默认 + 每工具并行==串行字节比对一次）。
 
 ## §321 Windows 文本编辑纪律入规：脚本化替换 + 断言守卫 + 原子写（2026-09-04，用户裁定）
-
-**背景**：Windows 下 shell 文本拼接编辑（heredoc/echo 管道/内联 -c/编辑工具）错位频发——
-单会话实测四例：① heredoc 内嵌双引号致 unterminated string；② 编辑工具报 success 但
-hunk 未落盘（文件被回滚到 HEAD）；③ Git Bash /tmp 在原生 Python 解析为 D:/tmp；
-④ .venv 相对路径错位。一半时间/token 耗在文本搬运与重试。而 python 脚本化替换
-（读全文→逐 hunk assert count==1→一次性原子写盘）全程零错位。
-
-**裁定**：AGENTS.md §17 "Editing Files on Windows — Text-Splicing Discipline"：
-- 17.1 多 hunk 编辑用 python 脚本化替换，每 hunk `assert old.count()==expected`，
-  全部匹配才一次写回（all-or-nothing，失败零副作用可安全重试）；
-- 17.2 hunk 文本不经过 shell——heredoc/内联引号嵌套必坏，超一行就用文件工具写
-  临时 .py → 执行 → 删除；
-- 17.3 Windows 路径纪律：临时脚本放仓库内 cwd 相对路径，勿用 /tmp；venv/运行时
-  用绝对路径或 cd 后相对路径；
-- 17.4 写后立即廉价验证（ast.parse / bun build / grep 锚点）——"报成功"≠"在盘上"；
-- 17.5 多行 hunk 锚唯一上下文（签名+邻行），不锚重复裸行。
-docs/agents.details.md §17 给完整案例 + 可复用 patch 模板 + 升级阶梯
-（编辑工具→临时脚本→全量重写）+ 编码纪律（utf-8 读写，仓库多 CJK 注释）。
-
+> **纪律入规**：AGENTS §17（脚本化替换 + assert 守卫 + 原子写 + Windows 路径/编码纪律）。
 
 ## §322 PowerShell 环境事实与编码纪律（2026-09-04，用户裁定）
-
-**实测**（trust-but-verify）：
-- agent 的 PowerShell 工具跑的是 **pwsh 7.6.5（Core）**，不是系统提示假设的 5.1；
-- 每命令是干净会话，**不加载 profile**（创建 profile 后实测 Console 编码仍 gb2312、
-  Out-File 默认仍非 utf8）；
-- Console OutputEncoding 默认 **gb2312(cp936)**，而 OutputEncoding 变量=utf-8——CJK
-  输出经控制台按 GB2312、被工具按 UTF-8 捕获 → 乱码根因。
-- 修复命令有效：设两个 UTF-8 变量后均变 utf-8。
-
-**裁定**：AGENTS.md §17.6 记录机器事实——agent 侧不用 5.1 语法自限（可放心用 pwsh7
-语法）；涉 CJK 文本的 PowerShell 命令先显式设两个 UTF-8 变量，或文本处理走 python
-通道（§17.1，显式 encoding='utf-8'）；不依赖用户 profile。用户交互式 pwsh 的
-profile（C:/Users/ustch/Documents/PowerShell/Microsoft.PowerShell_profile.ps1，
-已创建）加 UTF-8 默认仍有效，但只惠及交互会话。
+> **纪律入规**：AGENTS §17.6（pwsh 7.6.5 Core 事实 / gb2312 默认 / 涉 CJK 先设两个 UTF-8 变量或走 python 通道）。
 
 ## §323 仓库内 PowerShell 调用一律 pwsh 7（2026-09-04，用户裁定）
-
-**裁定**：本仓库一切 PowerShell **调用**（脚本、Makefile、README/runbook 示例、
-docstring 命令、agents 手册）统一用 `pwsh`（PowerShell 7；本机 7.6.5）。禁止裸
-`powershell`——它解析到 System32 的 Windows PowerShell 5.1（inbox 组件，**无法
-卸载**，微软不支持移除；删除会破坏依赖它的系统工具与本仓库调用点）。
-
-**理由**：agent 的 PowerShell 通道是 pwsh 7.6.5（§322 实测），5.1 与 pwsh 在编码
-（§17.6、nn.progress.md：GBK 解码）与参数绑定（`-File`）上的差异制造双份真相；
-本机两版并存是微软支持的形态，5.1 保留作系统兜底，但仓库**调用**侧只允许 pwsh。
-
-**已改调用点（2026-09-04）**：nn-training/Makefile PREFIX、bootstrap.py install_uv
-及提示语、start-training.sh detach（+注释）、start-training.ps1 头注、sim-pool.ts
-CPU 采样、nn-training README/五个 .py docstring 示例、docs/agents.details.md §5.6/
-§5.7/§16.4、docs/goal-nn-handoff.md 与 goal-nn-next.md runbook、
-plan/python-env-bootstrap-and-device.md、NN-Training-Foundation-Overview.md、
-tools/githook/pre-commit 注释、AGENTS.md §17.7 新增规则。历史日志
-（nn.progress.md / goal-nn.progress.md / decisions.details.md 等）为当时实况记录，不改写。
+> **规则（铁律）**：仓库内一切 PowerShell 调用一律 `pwsh` 7（禁裸 `powershell`=inbox 5.1）；理由：agent 通道即 pwsh7，双版本双编码双真相；规则落 AGENTS §17.7。
 
 ## §324 launcher --script 支持子包入口与旧名别名（2026-09-04，修复 stale 契约）
-
-**背景**：2026-09-01 打包重构（3c83169）把 root 训练入口并入子包：train_bc.py→
-train/bc.py、train_goal_bc.py→train/goal_bc.py、train_intent_probe.py→
-train/intent_probe.py、eval_bridge/eval_intent_m5/gen_self_inj/init_scratch_weights/
-validate_export.py→scripts/；train_rl.py 删除（run_rl.py 为现行 RL 入口）。但
-start-training.{sh,ps1} 仍只收 nn-training/ 根目录**裸 .py 名** —— `--script
-train_bc.py` 报 script not found，头注/文档示例全 stale。2026-09-04 p1-godai BC
-早前因此留下 0 字节 log、无权重产出（机制 smoke 复验后定位）。
-
-**定案**：launcher --script 接受三类：① 根裸名（train_loop.py / run_rl.py /
-smoke_test.py）；② 子包相对路径（train/bc.py、scripts/eval_bridge.py …，前向斜杠）；
-③ 旧扁平名自动别名到包内（映射来自 3c83169 rename 清单；train_rl.py→run_rl.py 为
-尽力映射）。守卫拒绝绝对路径 / 盘符 / 反斜杠 / `..` 越级。别名仅为 sh/ps1 两端
-本地查找表，无 repo 外状态。头注示例与 agents.details §5.6 同步更新。
-
-**验证**：bash -n / pwsh Parser 语法通过；--echo 解析子路径与别名均正确；经
-launcher 真跑 train/bc.py 1-epoch smoke（32 shards）exit 0。
+> **结论**：launcher --script 接受三类（根裸名 / 子包相对路径 / 旧扁平名自动别名）；守卫拒绝绝对路径、盘符、反斜杠、.. 越级。
 
 ## §325 train/bc.py 增加 --device（GPU 训练支持）（2026-09-04，Colab 全量 p1-bc 需求）
-
-**背景**：train/bc.py 头注按旧 plan 明写 "CPU-only（8-core 32G，无 GPU）"，无任何
-device 参数（同族 goal_bc.py 早有 --device）。Colab 全量 60 epoch p1-bc（165K 帧）在
-CPU runtime 上不可行：本机 8 核 12 线程实测 ~16 min/epoch，Colab CPU（2 vCPU）更慢，
-60 epoch 需要 T4 GPU。
-
-**定案**：给 train/bc.py 加 --device（默认 cpu，镜像 goal_bc.py 契约）：model 构建后
-.to(dev)、train/val 每 batch .to(dev)、导出前 model.to('cpu')（权重文件跨设备 bitwise
-稳定——save_weights_json 本就 .cpu()）。纯加法：device=cpu 时行为逐字节不变。
-
-**验证**：--device cpu 重跑 resume 1-epoch smoke（32 shards，seed 1234）与改动前逐值
-一致（train_loss=50.7875 val_loss=4.3381 acc 0.533/0.839 value 14.8296）；nn-python-
-gate（ruff+mypy+274 pytest）绿。
+> **工具**：train/bc.py 加 --device（默认 cpu，镜像 goal_bc.py；导出前 .to(cpu) 保权重跨设备 bitwise 稳定）。resume 1-epoch smoke 与改动前逐值一致。
 
 ## §326 eval-course-ckpt 工具 + export-eval-game 报告补 被击中 字段（2026-09-04）
-
-**背景**：p1-bc checkpoint 需要按课程自定义关（p1-onset stages 2000-2003）评估胜率 /
-击中 / 被击中。既有 m1-eval 只评内置 STAGES；export-eval-game 单局贪心评估支持自定义
-stage-json 但报告缺 player_hit（死亡+星盾）与 player_damage（非致命扣血）计数——RL
-metrics（reward_library 21 维）在训练侧一直统计这两项，评估侧此前不落盘。
-
-**定案**：① export-eval-game.runEvalOne telemetry/报告新增 playerHits 与
-playerDamageTaken（事件口径与 export-rl-rollout 完全一致；EvalResult + _eval_report.json
-同步；不进 scorable.telemetry——本地 runSimulation 无对应字段，遥测对账不受扰）。评估
-报告 schema 变更 ⇒ dist 哈希集节点须随新代码同步（同 2026-08-31 cleared 先例）。② 新工具
-tools/sim/eval-course-ckpt.{ts,worker.ts}：多 checkpoint × N 局在课程自定义关上的贪心评估，
-runChunkedWorkers 语义（逐局纯函数 ⇒ 并行==串行；round-robin 分片 + id 归序稳定聚合），
-JSONL 行 + 每 checkpoint 汇总表；不复制 runEvalOne 循环（唯一实现，无漂移面）。
-
-**验证**：telemetry-parity 测试扩展（runEvalOne.playerHits/playerDamageTaken ≡ 事件流
-recount）；eval-course-ckpt 50 局 ckpt3 与早前 8 核 parity harness 输出 0 mismatch；
-bun run check 全绿（1700 pass）；oxfmt/oxlint 干净。
+> **工具**：export-eval-game 报告补 playerHits/playerDamageTaken；新工具 tools/sim/eval-course-ckpt.ts（多 checkpoint × N 局课程自定义关贪心评估）。
 
 ## §327 p4-onset 课程：4 敌混编四面围攻（2026-09-04，p1 饱和后课程升级）
+> **结论**：p1-onset 被 ep60 BC 饱和（94/100≈教师），课程升级 p4-onset（4 敌四角/居中/1 命 0 星/2400tick）；ep60 vs God 各 100 局结果见 docs/rl.progress.md §2。
 
-**背景**：p1-onset（单敌）已被 60 轮全量 BC 蒸馏饱和——ep60 贪心 94/100 vs
-God-AI 92/100（教师级，docs/rl.progress.md §1 基线），继续在其上跑 RL 的边际
-收益≈0。用户要求把课程升级为 p4-onset：4 个敌人、混编（basic/fast/power/armor
-各 1）、player 正中出生、敌人四角，其它设置（difficulty hard / 1 命 0 星 /
-max_ticks 2400 / grid 布局 / reward 公式与参数 / seed_rotate）一律沿用 p1。
-
-**定案**：新建 `nn-training/curricula/p4-onset.jsonc`（p1-onset.jsonc 保留不动——
-battle.ipynb / DECISIONS §326 / docs/rl.progress.md §1 均引用它）。grid 逐格拷贝
-p1（11×11 cells 空旷场 + 钢墙边）；forces 20 字符（`"abcdabcdabcdabcdabcd"`，
-count 4 取前 4 = a/b/c/d）→ 出生顺序 basic/fast/power/armor，四角按 spawn 点
-轮转落位（TL/TR/BR/BL）；player_spawn
-tile (12,12) 正中央；无 spawn_variants 池（用户指定固定布局，seed 只影响模拟 RNG
-不影响几何）。已知语义：max_ticks 2400 原为单敌标定（God-AI 胜局平均 ~535 tick），
-4 敌清场或需 2-4× 时长——评估若超时占比过高，则预算对多敌偏紧，按实测重标定。
-
-**验证**：`eval-course-ckpt.ts` 在 p4-onset 上跑 ep60 与 `--policy god` 各 100 局，
-结果记 docs/rl.progress.md §2（ep60 对单敌 94% → 对 4 敌的表现即泛化读数）。
 ## §328 远程 PPO 训练架构定案：rollout 在 LAN、PPO 在云端 GPU（2026-09-04，方案拍板）
-
-**背景**：BC 阶段云端 GPU（Colab T4）相对本地 CPU 提速 >10×，用户要把同样的拆分
-带到 RL：PPO 更新跑云端 GPU 主机，rollout 仍由本地 LAN 分布式集群采集；一台本地
-机器作采集中枢（hub）经 Cloudflare tunnel 与云机通讯，其余 LAN 节点保持现状
-（只收派发任务、不见云）；同时保留"本地集群采集 + 本机 CPU 跑 PPO"模式作回归基线。
-方案全文：plan/remote-ppo-architecture.md v0.2（本文的验收依据）。此条只记定案，
-不动代码（M1-M4 按方案 §9 后续实施）。
-
-**定案**（用户逐项确认）：
-- **迭代语义**：远程模式 = 每迭代结算一次 PPO（等价现有串行路径）+ 迭代级双缓冲
-  预采（θ_N 快照提前 spawn 下一轮首波，extra_wver 现成机制），放弃 wave 级 stream
-  重叠——stream 是进程内紧耦合（collector 线程攒满 streamWaveGames 唤醒主线程
-  update），远程化每波跨 tunnel 往返，吞吐不升反降；stream 只保留给本地 CPU 模式。
-- **云端 worker 无状态可重连**：云机只能出站 → hub 起 cloudflared，云 worker 轮询
-  拉 job；job 幂等键 = (runId, it, init_weights_fp, data_fp) + 租约心跳，云死重发、
-  hub 死靠 jsonl 账本 + 现有 resume 机制（rotateSeed 继承 / completed_pairs /
-  resume manifest）恢复。
-- **Adam 保真**：job 往返携带 torch opt 状态（student 全状态 < 数 MB），与本地同
-  进程语义对齐；不做每迭代 fresh-Adam。
-- **代码同步**：云 git clone 固定 commit（hub `ensure_current_branch_pushed` 现成 +
-  manifest 带 commit，两端校验 fail fast）；payload 内置 nn-training zip 仅作留档备选。
-- **隧道**：ipynb 预留"hub 连接信息"（URL+token）手动填录位；命名隧道与 quick
-  tunnel 皆可，端点带共享 token 鉴权。Q6 hub 落点实施前确认。
-- **兜底**：云不可达 = 暂停等恢复（GPU/CPU 轨迹不混跑，数值非位确定）；不做降级
-  本地 CPU 分支。
-- **确定性契约边界**：rollout 侧 RNG/派发/时序逐字节契约不变；torch GPU 数值非位
-  确定 → 同 run 中途不做 GPU↔CPU 无缝切换，切换只能是显式 checkpoint 级续跑。
-- **范围红线**：v1 仅 per-tick 课程（p4 系列）；intent/goal 后端远程化（value
-  warmup / ref_model / kickstart 状态随 job 走）为独立后续项；本地模式与仓库门禁
-  零改动。
-
-**验证锚点**：M3 对照实验（p4-onset 小步数远程 vs 本地 CPU，winRate 曲线趋势一致
-即达标，不做位级对比）；每迭代账本 / events jsonl 字段契约不变。
-
+> **定案（远程 PPO 架构，plan/remote-ppo-architecture.md v0.2）**：rollout 留 LAN、PPO 上云端 GPU；迭代级双缓冲（弃 wave 级 stream）；云 worker 无状态可重连（幂等键+租约）；Adam 保真随 job 往返；云端不可达=暂停不降级；v1 仅 per-tick 课程，intent/goal 远程化为独立后续。
 
 ## §329 远程 PPO 架构评审处置（2026-09-04，plan/remote.review-ms.md → 计划 v0.3）
-
-评审人 ms（agent）对 `plan/remote-ppo-architecture.md` v0.2 出具 `plan/remote.review-ms.md`；
-本条目记录逐条核验结论与用户新拍板，方案文档已升 v0.3（§11 处置表、§12 附录 A 字段表、
-§13 附录 B Windows hub 护栏）。**不推翻 §328 方向**，仅在 v0.2 基础上补契约缺口与测量门。
-
-### 核验方法
-- 评审所有带行号主张逐一对照代码核验（`loop_steps._course_iter/_serial_ppo`、
-  `ppo/common.chunk_episodes`、`ppo/engine._reward_from_metrics`、`rl/reward_context`、
-  `rl/loop_core._setup`、`rl/collect_only.spawn_collect_next`、`rl/rollout_phase`、
-  `dist_common.write_shard/post_weights/weights_fingerprint`、`rl/resume.last_completed_iter`、
-  `rl/events.write_iteration`、`rl/archive.backup_weights`、`tests/test_no_torch_on_import`）。
-- 三处事实修正（见下）已核实：F1.3 的 "adv_norm 漏了" **不实**（v0.2 D1 已列）；
-  F5 的 "zip 3–10× 压缩" **低估**（p4 语料实测 2.6GB → 18.5MB ≈ 140×）；
-  F6 的 "import 期 torch 依赖" **已被 B7 + test_no_torch_on_import 解决**。
-
-### 采纳项（并入 v0.3）
-- **F1.1/F1.2/F1.3（修正后）**：manifest 必带 course jsonc 全文快照 + metrics_version + it
-  （hash 只校验、不能重建 reward_fn）；schedule 双带（解析后值执行 + 原始表审计）；
-  编译期常量两端一致断言进 M1 DoD；dirty-tree 护栏不覆盖 jsonc → 快照兜底。
-- **F1.4**：云端 worker 以 per-job 确定性种子 `seed=hash(runId,it,init_weights_fp)`
-  重新播种后再 load/chunk/update → 同一 job 重发 chunk 逐字节一致；跨进程
-  （本地 vs 云）chunk 顺序差异文档化为预期（D7）；本地模式种子不动、字节基线不破坏。
-- **F2**：`_ppo_save` 目录 tar（model.pt/opt.pt/state.json = Adam+numpy RNG）作 opt 状态
-  唯一载体随 job 往返（不另起序列化）；`on_epoch_done` 不透传；常驻进程收益 M2 实测。
-- **F3**：定义 `data_fp = sha256(排序 shard 路径 + 各 manifest 的 wver/stage/seed)`；
-  lease=30min / 心跳=60s；hub 落权重前三重校验（init_weights_fp / data_fp / commit）。
-- **F4**：§4 "与 stream 同一量级" 表述删除 → 改为"结构性差异待 M3 量化"；
-  `--remote-precollect {0,1}` + stale 分数上限 30%（S5）。
-- **F8.1**：时序改为收官 → job 发布 + 预采 + eval 并行。
-- **F8.2**：M4 前归档磁盘水位告警（`backup_weights` 只归档不清理）。
-- **F8.3**：`dist_common.write_shard` manifest 双写顺手修为 M1 项 + manifest 内容单测。
-
-### 用户新拍板（2026-09-04）
-- **Q7 租约减法（S4）**：v1 租约超时**只告警不主动重发**（job 回可领取池）；
-  重发仅限云 worker 主动重拉同一 job（幂等键去重，已完成返回缓存结果不重算）；
-  双 worker 竞争写回整类 race 从 v1 删除，与 D10 暂停语义自洽。
-- **Q8 hub 落点（评审建议 Linux 常驻机，未采纳）**：**维持 Windows 训练机**；
-  缓解护栏入附录 B（powercfg 关睡眠、Defender 放行、命名隧道为 M2+/M4 默认、
-  quick 仅 M2 冒烟——quick URL 漂移与 D8 hub 重启恢复互斥）。
-
-### 实施顺序（M0 先于一切代码，替代 v0.2 的 M1 开头）
-- **M0 测量门**（S1，半天）：M0a 本地 RL `rollout_sec vs ppo_sec` 基线（<15% 则先验证
-  本地开大 epochs/mb 收益）；M0b zip/tar 字节实测；M0c quick tunnel curl 吞吐 ×3。
-  结论记 DECISIONS（新 §）。
-- M1 假云回环（协议+打包+chaos 单测+本地三路字节一致回归）；
-  M2 真隧道真 GPU（命名隧道+连通性矩阵+常驻进程测量）；M3 三曲线对照
-  （本地/远程+预采/远程无预采，winRate Δ≤5pp 且 Spearman≥0.7）；M4 长跑+恢复演练+水位。
-
-**验证锚点**：M0 三数落盘即通行证；M1 DoD = 假云回环 + chaos 单测全绿 + `bun run check`；
-M3 DoD = 三曲线 + 量化判定；M4 前磁盘水位告警就位。
-
+> **处置（评审 ms → v0.3）**：F1–F8 核验采纳（manifest 课程快照/metrics_version、per-job 确定性种子、opt 状态 tar 载体、data_fp 定义、三重校验）；Q7 租约超时只告警回池、Q8 hub 维持 Windows 训练机；M0 测量门先于一切代码（半天）；验证锚 = M0 四数落盘 / M1 假云回环 / M3 三曲线。
 
 ## §330 远程 PPO 第二评审处置（2026-09-04，plan/remote.review-ds.md → 计划 v0.4）
-
-第二评审人 ds（agent）对 `plan/remote-ppo-architecture.md` v0.3 出具 `plan/remote.review-ds.md`；
-本条目记录核验结论与用户新拍板，方案文档已升 v0.4（§3.1/§3.2/§11-D12/§12 处置表/附录 C/D）。
-**不推翻 §328/§329 方向**，聚焦 v0.3 留白的进程拓扑/责任归属三缝（G1–G3）与四条观测（G4–G6）。
-
-### 核验方法
-- G1/G2/G5/G6 主张逐一对代码核验：`save_weights_json`（data/weights_io.py:63）确为 torch
-  耦合（NaN fail-fast / schema_major / arch meta / 原子 replace）；`_export_weights` per-tick
-  即调它（loop_steps.py:221）；`TrainingLoop.run()` 为阻塞串行 while（loop_core.py:140-174，
-  sleep(30)/it-=1 原地重试）；`spawn_next_collect` 只在 stream 分支接线（loop_core.py:172）。
-- 三处事实修正：G1 的"hub 免 torch ⇒ hub 无能力导出 nn-weights-json"成立（v0.3 D2 确实
-  绕过了产出方）；G2 的"阻塞等待期间隧道端点须同活"成立（v0.3 未定进程拓扑）；G4 的
-  "免费档会话回收风险"成立（Colab 12h/90min、Kaggle 配额）。
-
-### 采纳项（并入 v0.4）
-- **G1/D12 weights_json 产出方锁死**：云 worker PPO 收尾时**同 commit 调与 `_export_weights`
-  per-tick 相同的 `save_weights_json`**，产 weights_json（回传）+ model.pt（tar 内）两份同源；
-  NaN 守卫/schema_major/arch meta 防线随函数上云；hub 三重校验（init_weights_fp / data_fp /
-  commit）兜住云产出漂移；M1 单测锁字节/指纹一致 + NaN 注入 fail-fast。
-- **G2/D11 hub 进程拓扑**：**旁路轻量 server 进程**（stdlib http.server，零新依赖）——
-  训练主循环只做"打包→POST→轮询等待→校验"，job 队列/租约/鉴权/jsonl 账单归 server；
-  **可领取 pool = jsonl（job_pending 事件）+ 租约状态重算**，hub kill -9 后纯重读；
-  主循环阻塞等待语义与 `_serial_ppo` 同构；进程/状态一页图入附录 C。
-- **G3/D12 云 worker 独立入口**：`python -m remote_worker --poll <url> --token <token>`；
-  notebook 一行拉起，断线重连自理；M1 假云直接驱动、M2 换 URL；协议单测可被 check 覆盖。
-- **G6/M0d**：M0 增"回环假云完整真实规模 job 往返计时"（非隧道部分先测），隧道由 M0c 给上限。
-- **G4/G5/附录 D**：连通性矩阵加"会话活性策略/后台计算配额"与"shallow clone 时长"两列；
-  云侧 `git clone --depth 1` + `--filter=blob:none`/sparse-checkout（tip==pin commit）。
-
-### 用户新拍板（2026-09-04）
-- **Q9 云会话策略（G4，单 worker 提速被平台生命周期约束）**：**免费档也长跑，接受回收**；
-  notebook resume 机制兜底，M4 前验证"断线→重连→续跑"路径；不因会话回收换付费档。
-- **Q10 预采默认（ds D4）**：**`--remote-precollect` 默认 0（测后开）**——M0d 先测全往返
-  墙钟，往返 ≪ 一轮 rollout 剩余采集则无需预采；确需重叠再开，stale ≤30%；常驻进程
-  跨 job 复用收益降为 M2 观测项而非 v1 承诺。
-
-### 实施顺序
-- 与 §329 合并执行：M0（a/b/c/d 四数落盘）→ M1 假云回环（含 G1 字节一致 + G2 池重建 +
-  G3 入口 + write_shard 双写修复）→ M2 真隧道真 GPU（连通性矩阵含会话活性 2h 验证）→
-  M3 三曲线 → M4 长跑（kill -9 池重建演练 + 断线重连续跑验证）。
-
-**验证锚点**：M0 四数落盘即通行证；M1 DoD = 假云回环 + chaos 单测（含本地 vs 云
-weights_json 字节指纹一致 / NaN 注入 fail-fast / 池 jsonl 重建）全绿 + `bun run check`；
-M3 DoD = 三曲线 + 量化判定；M4 前磁盘水位告警 + resume 断线重连演练就位。
-
+> **处置（评审 ds → v0.4）**：G1 weights_json 产出方锁死云 worker；G2 可领取池=jsonl+租约重算（kill -9 纯重读）；G3 云 worker 独立入口 remote_worker；G6 M0d 全往返计时；Q9 免费档长跑接受回收、Q10 远程预采默认 0。
 
 ## §331 远程 PPO 内容管控补充需求（2026-09-04，plan/remote-ppo-architecture.md v0.5）
-
-**用户补充需求**：hub 侧完全管控 RL 训练的内容——奖励函数、训练超参、游戏地图、课程切换、
-甚至游戏机制；RL 使用的课程文件名写在 hub 的 `rl-config.json` 里，内容随时可改；修改后
-**下一轮 rollout/迭代**必须使用修改后的内容。PPO 侧完全不关心这些游戏配置，只读取
-**游戏语料 + RL 配置参数 + 上一轮产出的权重**，继续训练。
-
-**关键事实（agent 勘察，2026-09-04）**：奖励不是采集时算的——TS rollout 只落原始
-`metrics.npy`（[N+1,21]）+ manifest {outcome, score}，奖励由课程公式在 **PPO 装载期**
-现算（`rl.reward_context` holder + `ppo.engine._reward_from_metrics`，奖励唯一定义源=课程
-配置公式）。⇒ 改奖励函数**不需要重新采集语料**（同课程下用新公式重标 metrics 即可）；
-游戏内容（grid/forces/spawns/difficulty）经 `--stage-json`/`--difficulty` 只走 rollout
-（TS 侧），PPO 从不见游戏内容——用户模型与现状高度吻合，方案 v0.5 D13–D15 落地。
-
-**拍板**：
-- **Q11 生效粒度：下一轮迭代**（本轮在途 rollout+PPO 用派发时固化的 course 快照，修改从
-  下一轮整体生效）——保持语料同质性 + 确定性契约（D7），不做 mid-batch 切换；
-- **Q12 课程切换：延续 run 热启动**——保持同一 runId/out/traj，从上一轮权重继续 PPO
-  （curriculum 式迁移）；新课程显式改 out/traj = 声明新 run；shard manifest 带 course_fp
-  防止新旧课程语料混训。
-
-**落地（plan v0.5 §6-D13~D15，M1 checklist 增加）**：
-- D13：`rl-config.json` 增 `rl.<mode>.course` 指针，hub 每轮 publish 前重读 → course 快照
-  全文入 manifest（复用 D1/D6）；hub publish 前本地校验（`load_course` pydantic +
-  `build_reward_fn` 公式编译，均免 torch——reward_library 纯 numpy/ast）；奖励变化的价值头
-  1-2 轮暂态为预期现象；
-- D14：run 身份（runId/out/traj/backup）由 hub 固定，切换只换内容键；**shard manifest 增
-  course_fp（课程文件 sha256）**，PPO 装载校验 `job.course_fp == shard.course_fp`，
-  `resumed_manifests`/`completed_pairs` 按 course_fp 过滤（防旧课程 shard 混入新迭代）；
-- D15：游戏机制两层边界——配置级机制（坦克参数/难度/兵力=数据，§2.4）热改无需代码；
-  代码级机制（TS 仿真逻辑）必须 commit+push+节点升级+云 clone pin；**改 obs/action/metrics
-  schema → 权重与旧语料同时失效（METRICS_VERSION/schema_major/metrics_version 守卫响亮
-  拒绝）→ 新 era**，v1 红线明确排除。
-
-**验证锚点**：D13 publish 前校验单测（坏公式/坏关卡 hub 侧响亮拒绝，免 torch）+ D14
-course_fp 血缘校验单测（续跑过滤 + 装载校验）进 M1 DoD；M3 三曲线沿用（v0.5 不新增对照）。
+> **拍板（内容管控，v0.5 D13–D15）**：Q11 修改从下一轮整体生效（course 快照固化）；Q12 课程切换延续 run 热启动；D13 course 快照入 manifest + hub publish 前本地校验；D14 shard 带 course_fp 防跨课混训；D15 obs/action/schema 改动=新 era（v1 红线排除）。
 
 ## §332 p10-onset 奖励函数：p4 toy 公式 + 拾取项（2026-09-04，用户指令）
-
-**用户指令**：p10 起激励函数增加 powerup 指标——不主动捡道具很难通关。
-
-**依据**：1 命 0 星 + 10 敌下，道具池多为翻盘级（star=全场唯一火力 scaling；
-tank=多一条命；bomb/freeze/frenzy=免费杀伤；config/powerups.ts 三档池）。
-God/p10 基线 10/100 佐证单靠枪法不够。供给天然有界（carrier 节奏每 4 出生 1 个，
-10 敌局约 2 滴）+ 掉落超时消失（POWERUP_TIMEOUT_MS）→ 无 farming 均衡，shaping 安全。
-
-**拍板**（`nn-training/curricula/p10-onset.jsonc`，纯配置，零代码改动——计数器
-`powerUpsCollected`/`starsCollected` 在 21 维 metrics 现成，公式引擎白名单内）：
-- 公式：p4 toy + `wPickup*powerUpsCollected + wStar*starsCollected`；
-- 定价：`wPickup=1.5`，`wStar=1.0`（starsCollected 是子集，star 实得 2.5≈一杀）。
-  拾取项总量/局 ≈ 3 ≈ 1 杀，不淹没击杀主信号（wKill=3.0）；
-- p4 课程公式不动 _(后被 §333 取代：用户指令同步拾取项）_；p10 从未训练，out/traj 天然 fresh——符合 §15.5 新实验语义。
-
-**备选（否决）**：按道具种类差别定价——21 维无分类型计数器，加维 = shard 格式变更
-+ 旧语料失效（§331-D15 红线），为调参付 schema 代价不值；先跑，有证据再议。
-
-**验证（2026-09-04，本机实测）**：`load_course('p10-onset')` pydantic 通过；
-`build_reward_fn` 编译通过；合成累计矩阵数值语义全对（拾取步 +1.5 / 星星步 +2.5 /
-击杀步 +3.0 / 通关终局 +2.0 / 死亡终局 −1.0）；`load_course('p4-onset')` 回归 unchanged；
-`test_reward_golden.py` 43 passed。
+> **结论**：p10 奖励 = p4 toy + wPickup*powerUpsCollected + wStar*starsCollected（1.5/1.0，star 实得 2.5≈一杀）；按道具差别定价否决（21 维无分型计数器，加维=shard 变更，不合算）。
 
 ## §333 p4-onset 奖励同步拾取项（2026-09-04，用户指令，取代 §332 的"p4 不动"）
-
-**用户指令**：道具激励也加进 p4 课程。
-
-**时機安全**：p4-RL 尚未开跑（起点 ep60 已定、未启动），现在改不触发 §331-Q11 的
-"在途 run 冻结"问题；一旦 PPO 启动，奖励再改只能等下一轮。BC 侧不受影响（BC 只拟合
-动作，不消费 reward 公式；§2/§3 的行为基线照常有效）。
-
-**拍板**：与 p10 **同值**（`wPickup=1.5`，`wStar=1.0`，star 实得 2.5）——跨课程可比，
-且 4 敌局按 carrier 节奏约 1 滴，拾取项总量 ≈ 1.5–2.5 < 一杀，只做"别绕开道具走"的
-nudging，主信号仍是击杀（wKill=3.0）。
-
-**验证（2026-09-04，本机实测）**：`load_course('p4-onset'/'p10-onset')` 均通过；
-合成矩阵拾取步 +1.5 / 星星增量 +1.0 / 通关 +2.0 全对；`test_reward_golden.py` 43 passed。
+> **结论**：p4 同步拾取项（同 p10 定价 wPickup=1.5/wStar=1.0）；启动前改动不触发在途 run 冻结，BC 不受影响。
 
 ## §334 远程 PPO M1 落地：hub-server/worker/协议全链路 + 语料血缘（2026-09-05，实现签入）
-
-**范围**：plan/remote-ppo-architecture.md §9 M1（假云回环冒烟）全量实施——hub-server
-旁路进程 + 云 worker 入口 + 协议模块 + TrainingLoop 远程分支接线 + course_fp 语料血缘。
-§328/§329 的定案全部落到代码，未改任何既定契约（本地模式零改动，回归基线 = bun run check
-1700 pass / python gate 294 pass 全绿）。
-
-**新增模块**（`nn-training/remote/`，全 stdlib，hub 侧免 torch）：
-- `protocol.py`：纯协议层——manifest 必填/可选字段表（附录 A）、`data_fp`
-  （sha256(排序 shard 路径 + {wver,stage,seed})，D1）、payload zip 打包/解包、
-  幂等键 (runId,it,init_weights_fp,data_fp)（D1）、per-job 确定性种子
-  `hash(runId,it,init_weights_fp)`（D5，前 8 hex = 32bit numpy 种子）、结果信封校验；
-- `hub_server.py`：旁路 http.server——job 队列/租约（30min，Q7 过期回池）/Bearer 鉴权
-  （同 IP 5 次 401 闭锁 1h）/jsonl 账本（job_pending→job_completed 双态，D8 重启纯重读）；
-- `worker.py` + `remote_worker.py`：云侧无状态轮询 worker（`python -m remote_worker`），
-  下载→payload_sha256 校验→commit 校验→课程快照重建→load/chunk/update（复用
-  ppo.engine 同一调用链）→save_weights_json 产出（D12 产出方锁死）→`_ppo_save` tar
-  （model/opt/RNG，D5）→POST；
-- `hub_client.py`：TrainingLoop 远程分支的发布/等待/校验落位——发布 = 磁盘 IPC
-  （job 目录 + jsonl，D11），等待 = HTTP 轮询，落位前三重校验
-  （init_weights_fp/data_fp/commit，D12）。
-
-**TrainingLoop 接线**：`--ppo remote` → `_setup` 跳过 torch/模型/优化器全链（hub 免
-torch，D2，test_no_torch_on_import 仍绿）；`_serial_ppo` 远程分支 = 打包→发布→阻塞
-等待→三重校验落位（语义与本地串行同构）；`_export_weights` 只归档（weights 已由云
-落位）。启动期 fail fast：与显式 `--stream 1`/`--double-buffer 1` 互斥（config 默认值
-静默降 0——run_rl.main 用 parse_args([]) 基线区分显式性，§331-Q11 的 config 默认
-stream=1 不误伤远程）；非 per-tick 模式拒绝。
-
-**course_fp 语料血缘（D14）**：课程文件 sha256 贯通全链——shard manifest 带
-course_fp（export-rl-rollout.ts --course-fp → agent → write_shard）、`completed_pairs`/
-`resumed_manifests`/`_scan_shards` 按 course_fp 过滤续跑对账、远程 PPO 装载前校验
-job.course_fp == 每个 shard.course_fp（跨课程语料绝不混训）、hub 发布时课程快照进
-manifest。三处 course_fp 计算统一为 **sha256(原始文件字节)**（修掉 read_text 换行翻译
-导致 CRLF 下指纹断裂的隐患）。顺手修 `write_shard` manifest 双写（F8.3：只留 indent=2
-写，磁盘字节不变）。
-
-**冒烟（M0d，本机假云回环，p4-onset + p1-ep60）**：publish → 云 worker 轮询拉 →
-payload_sha256 校验 → PPO（epochs=2, 128 steps, 1.7s）→ POST → 三重校验 → 落位
-args.out + ppo_ckpt_remote（model.pt/opt.pt/state.json）→ 账本双态。**整趟墙钟
-5.8s**（发布→落位，非隧道部分；数据 <2MB——p4 语料实测 zip 140× 压缩，§329-F5）。
-隧道部分 M0c 上限 + M2 真云端后续再测。结论：单轮往返 ≪ 一轮 rollout 采集时间，
-**远程预采默认 0 成立**（§4/D3/Q10），与计划一致。
-
-**M1 单测**（tests/test_remote_ppo.py，30 用例）：协议编解码、data_fp 确定性/排序无关/
-语料漂移检出、幂等键/job_id 稳定、payload zip 往返、commit 不一致拒收、job_id/data_fp
-漂移拒收、agg 缺字段拒收、D12 本地 vs 云 weights_json 字节+指纹一致、NaN 注入
-fail-fast、reward 非有限拒收、账本新事件不破坏 last_completed_iter、course_fp resume
-过滤、write_shard 单写、发布端课程校验（坏公式 FormulaError/坏 grid pydantic）、
-hub-server 全链路（鉴权/领取/payload/结果/状态/幂等/租约过期回池/账本重建/迟到写回
-409/commit 不符 400）。
-
-**运维备忘**：hub-server 需在**训练进程旁**单独起（`python -m remote.hub_server
---port 8787 --token <t> --job-root <traj>/remote-jobs --jsonl <traj>/training_log.jsonl`），
-云 worker 用同一 token 经 tunnel 轮询；hub 崩溃恢复 = jsonl 账本纯重读（M4 演练项）。
+> **落地（M1 假云回环）**：remote/{protocol,hub_server,worker,remote_worker,hub_client}.py 全 stdlib；TrainingLoop --ppo remote 接线（hub 免 torch）；course_fp 语料血缘全链（sha256 原始字节）；冒烟 5.8s 全往返，单测 30 用例全绿；远程预采默认 0 成立。
 
 ## §335 hy 评审处置：H1–H11 修复 + F2 channels_last + F3 重估（2026-09-05，plan/remote.review-hy.md 处置签入）
-
-**评审结论**：方向可行，GPU 收益已由用户 BC 实测 11× 证实。存在 1 个 P0（H1/H2 心跳）
-+ 3 个 P1 + 5 个 P2，其中 P0 在 M2 真规模下必然触发。**全部处置如下**：
-
-**H1（P0，心跳在 job 完成后才发）** → 已修复：守护心跳线程（daemon, 60s 周期续租），
-job 结束 join。H2（P0，heartbeat 不校验租者）→ 已修复：领取时下发 `lease_token`，
-心跳/结果回传须携带，hub 校验后才续租/收结果。
-
-**H3（P1，wait_job 超时 == LEASE_SEC 双花窗口）** → 已修复：`wait_job` 默认超时
-25min **严格小于** LEASE_SEC=30min，超时前二次确认状态（`GET /jobs/{id}/status`）。
-**H4（P1，git_head 不检查 dirty tree）** → 已修复：`_remote_ppo`（loop_steps.py）在
-发布前运行 `git status --porcelain`，有未提交/未跟踪文件时 fail-fast。`hub_client.git_head`
-维持纯 commit 解析（供 smoke_loopback 等非发布场景使用）。
-**H5（P1，state.json 从未被读取）** → 已修复：`pack_opt_tar` 只打 model.pt + opt.pt，
-不打 state.json（per-job 种子已足够自洽，D5）。`smoke_loopback.py` 断言同步更新。
-**H6（P1，claimable_job_ids 全量重读 jsonl）** → 已修复：`_JobStore._ledger_cache`
-按文件 size 增量读，未变化时零 IO 复用。
-
-**H7（P2，--remote-precollect 死开关）** → 已修复：`_remote_ppo` 直接调用
-`spawn_collect_next`（绕过 `spawn_next_collect` 的 stream_meta 门控），句柄存入
-`self._collect_child` 让下一轮 `join_precollect_child` 正确等待。
-**H8（P2，--once 失败退出码 0）** → 已修复：`worker_loop` 返回 -1，`main` 非零退出。
-**H9（P2，job 目录生命周期）** → 已修复：`_rotate_cleanup` 扩展清理——扫描
-remote-jobs 目录，清理已完成且迭代 <= keep_iters 的 job。
-**H10（P2，token 进程列表可见）** → 已修复：`hub_server.py` 和 `worker.py` 新增
-`--token-file` 支持，token 从文件读取而非 CLI 参数。
-**H11（P2，start-training 未集成）** → 暂缓（M2 运维阶段统一集成 hub-server + cloudflared
-启动脚本）。
-
-**F2（channels_last 2.08×）** → 已实现：`ppo/trainer.py::tensored_chunks` 新增可选
-`memory_format` 参数，传入 `torch.channels_last` 时 obs 张量转为 NHWC 布局。
-实测 2.06 s/chunk vs 4.28 s（contiguous），云 worker 和本地 PPO 均受益。
-**F3（按 100-200 局/轮重估）** → 评估完成：200 局/轮下 GPU PPO ~2.2 min，payload
-~2.8 MB，LEASE_SEC=30min 余量充足，wait_timeout=25min 合理。无需调整数值。
-
-**验证**：`bun run check` 1700 pass / python gate 294 pass 全绿；`smoke_loopback.py`
-（p4-onset + p1-ep60）round-trip=8.0s, PPO=1.7s, 全部断言通过。
+> **处置（评审 hy）**：H1/H2 心跳 P0 修复（守护线程 + lease_token）；H3 wait_job 25min<LEASE30min；H4 发布前 dirty-tree fail-fast；H5 opt tar 去 state.json；H6 账本增量读；H7–H11 P2 修复；F2 channels_last 2.08×（2.06 vs 4.28 s/chunk）；F3 200 局/轮重估不用调。
 
 ## §336 M0 测量门：四数落盘（2026-09-05，先于 M2 代码前完成）
-
-**M0a 基线（本机实测，p4-onset × seed_rotate=4，1 it，self+mac 节点）**：
-- `rollout_sec=129.1s`（含 2min 尾局超时等待；纯采集 `pure_collect_sec=2.6s`，
-  `dist_phase_sec=9.1s`）
-- `ppo_sec=19.7s`（4 shards, 678 steps, 2 chunks, 4 epochs, mb=512, contiguous）
-- PPO 占比 = 19.7/(129.1+19.7) = **13.2%**（尾局超时扭曲了占比——实际纯采集仅 2.6s）
-- **外推 seed_rotate=50**：rollout ~130s（9 并发槽，50/9×2.6≈14.4s 纯执行 + 调度开销），
-  PPO 50 shards ≈ 19.7×50/4×2/2 = 123s（2 chunks→25 chunks，4 epochs→8 grad steps/chunk
-  →200 grad steps，每步 ~0.6s）→ PPO 占比 ≈ 123/(130+123) = **48.6%** → **远程方案明确划算**
-- **结论**：PPO 在 seed_rotate=50 下占整体 ~50%，云 GPU 加速 5-11× 可节省每轮 1-2 分钟。
-  `channels_last` 2.08× 落地后本地 PPO 降至 ~60s，占比降至 ~32%，仍值得远程。
-
-**M0b 体积（实测 4 个完整 shard，p4-onset 单关 2000）**：
-- 平均 shard 大小：1.65 MB（obs.npy 占 ~1.2 MB，其余 npy 共 ~0.45 MB）
-- 4 shard zip：63 KB（压缩比 **104×**——obs.npy 的 uint8 帧数据高度可压缩）
-- weights.json：365 KB
-- PPO ckpt tar（model.pt + opt.pt）：860 KB
-- **外推 seed_rotate=50**：raw 82.6 MB → zipped **0.8 MB**，加 weights+ckpt 共 **~1.2 MB**
-- **外推 200 局/轮**：zipped **~3.2 MB**，加 weights+ckpt 共 **~4.4 MB**
-- **结论**：单轮 payload 远小于计划估算的 18.5 MB（BC 语料口径），**tunnel 传输不是瓶颈**
-
-**M0c 隧道（cloudflared quick tunnel，2026.8.3，trycloudflare.com）**：
-- 1 MB 下载：**5.1 s**（195 KB/s）
-- 3 MB 下载：**9.0 s**（333 KB/s）
-- 365 KB 下载：**3.1 s**（119 KB/s）——首包延迟高，小文件受隧道握手开销影响大
-- 实测 1 MB 和 3 MB 的吞吐量差异（195 vs 333 KB/s）表明隧道连接在大文件上逐渐提速
-- **外推 0.8 MB（50 局）**：~4 s；**外推 3.2 MB（200 局）**：~9 s
-- **结论**：隧道吞吐 ~200-330 KB/s，单轮传输 < 10 s，远小于 GPU PPO 时间（1-2 min）和
-  rollout 时间（~2 min）。**tunnel 不是瓶颈**。trycloudflare 免费档无 SLA，正式 M2 命名
-  隧道可能改善吞吐。
-
-**连通性矩阵（部分打勾，异地机需 M2 实测）**：
-
-| 格子 | 本机实测 | 预期 |
-|---|---|---|
-| git clone (shallow depth 1) | 连接建立 1.3s（auth 失败） | 预计 10-30s（含下载） |
-| pip 装 torch-CUDA | — | 30-60s（缓存命中） |
-| cloudflared 二进制下载 | — | 10-20s |
-| 大包经隧道下载（0.8 MB） | 4-5s（外推） | 合理 |
-| 会话活性策略 | — | Colab 12h / Kaggle 9h |
-
-**M0d 回环全往返（已完成，§334）**：round-trip=8.0s（publish→PPO→verify→land），
-其中 PPO=1.7s，协议开销+子进程启动 ~6.3s。**单轮往返 ≪ rollout 采集时间，
-远程预采默认 0 成立。**
-
-**M0 综合结论**：远程 PPO 方案收益明确（seed_rotate=50 时 PPO 占 ~50% 迭代时间，
-云 GPU 11× 加速可省 ~2 min/轮），传输与隧道不是瓶颈（payload < 1 MB，下载 < 5 s）。
-**M2 真 GPU 冒烟可以推进。**
+> **测量门（四数）**：M0a PPO 占比 seed_rotate=50 外推 ≈48.6%（远程明确划算，channels_last 后 ~32%）；M0b shard zip 压缩比 104×（50 局 payload ~0.8MB）；M0c 隧道吞吐 200–330KB/s（传输<10s 非瓶颈）；M0d 回环往返 8.0s ≪ rollout。结论：M2 真 GPU 冒烟可推。
 
 ## §337 课程结束条件与停机规范 v0.3 拍板（2026-09-05，转实施依据）
-
-**拍板**（`plan/course-exit-and-shutdown.md` v0.3 + `plan/exit.review-hy.md` 15 项处置）：
-- 过门线：p4 G1 胜率 ≥40/100 连 3 次 + G2 技能三项（0 杀 <15%、场均杀 ≥2.1、
-  被击中 ≤51/局）——40 系教师 64 六折，与 §327"接近教师"带衔接；
-- G9 首期降级 PAUSE（拾取↑在 §332 下系期望行为，ABORT 待模式库实证）；
-- 裁剪清单：删两相确认协议/executor 握手/`.run_meta.json`/exit-code 主协议，
-  改 loop 内纯函数库 + 富 eval 单源；kind 目录保留 10 种（单源化后每种十余行，
-  advance_requires 自洽所需）；defer 仅 `dependency` kind 与 stop-loss 扩 per-tick。
-
-**评审背书**：15 项接受 11 / 部分接受 2（P1-2 库为主壳保留、P1-4 复用+三缺口）/
-驳回 1——P0-1"跨课污染最致命"前提不成立（`loop_core.py:166` 逐轮重建
-`_traj_dir` → eval_log 按课程隔离），硬化建议（行补 course_fp）照收。
-9.7s 引证系 p1 单敌，p4 四敌按 1 分钟备料；NaN 缺口为真（`breaker.py:54-55`
-比较恒 False）；G4 `/20` 折算拍脑袋，改半分 + `eval_sigma` SE 口径。
-
-**落地**：M0（GatesSpec 解析 + eval 行补 course_fp/被击中三字段 + NaN 检测）
-→ M1（`gate_check` 库 + loop 第四守卫 + p4 gates 落地，eval_games 20→100 系课程
-文件变更 = course_fp 变 = 新实验，p4-RL 未启动故安全）→ M2（停机执行器 + 实弹演习）。
-P10-CAP 悬案与 p10 门限追认同批评审（p10-RL early curve 出来后）。
+> **拍板（课程退出规范 v0.3）**：过门线 p4 G1 ≥40/100 连 3 次 + 技能三项；G9 首期降级 PAUSE；裁剪双相确认/executor 握手/.run_meta；loop 内纯函数库 + eval 单源；落地 = 门禁库 + 第四守卫 + 停机执行器。
 
 ## §338 课程结束条件 v0.4 拍板：ds 评审 13 项 + P10-CAP 重标定（2026-09-05，转实施依据）
-
-**拍板**（`plan/course-exit-and-shutdown.md` v0.4 + `plan/exit.review-ds.md` 13 项处置，
-全接受）：EVAL_SEEDS 扩池进 M0（前 20 不动）；趋势单源改 settled-summary（含富化）；
-G3/G8/dependency 首期休眠；G5 基线 = 首条 run_start + deadline 跨重启累计；
-breaker 熔断同写 ABORT 行；worker 空闲自停；完成度 = 连续通过数/sustain；
-窗口单位一律 eval 轮；G7 改斜率口径。
-
-**语料口径变更（取代 §337 门限数字）**：门控语料统一为 in-loop 评估语料。
-教师现池 20 局复测——p4：12/20（60%，与 0..99 的 64% 一致，校准成立）；
-p10：1/20（5%）且超时 30%。门限切换为现池口径：p4 G1 胜率 ≥36%（0.6×60%）、
-被击中 ≤0.60/局；p10 G1 rel 取 1.0（追平教师）。§337 的 40/51 系旧语料口径，
-不再作为门控依据（保留为历史记录）。
-
-**P10-CAP  verdict（复核 5，选 a）**：教师超时 30% 证明 cap 扭曲参照系本身，
-`p10-onset.jsonc` max_ticks 2400→3600（重标定，p10 未启动故安全），
-G7 取 0.40 待扩池重测后追认。
-
-**落地**：M0（+种子扩池 + 教师 100 局重测 + summary 富化 + breaker-ABORT 行 +
-deadline 累计）→ M1（7 kind 求值器 + loop 接线 + p4 gates 落地）→ M2（停机执行器 +
-worker 自停 + 实弹演习）。行数据 `tmp/p{4,10}-god-evalseeds.jsonl`。
+> **拍板（v0.4，评审 ds 全接受）**：EVAL_SEEDS 扩池、趋势单源化、G5 基线跨重启累计、breaker 同写 ABORT 行；门控语料统一 in-loop 现池（p4 G1 ≥36%、被击中 ≤0.60/局）；P10-CAP：max_ticks 2400→3600（教师超时 30%）。
 
 ## §339 hub-start.ts 全原生 Bun 重写：跳板进程与注册竞态修复（2026-09-05）
-
-`tools/hub-start.ts`（HUB 一键启动）调试定案。原实现用 netstat/tasklist/ps 按进程名
-匹配，在中文 Windows 上全部失效（`\r` 行尾、映像名不含脚本名），改为全原生 Bun API：
-`Bun.connect` 探端口、`Bun.spawn(detached+windowsHide)` 起进程、`process.kill` 停止、
-PID 账本替代进程名扫描。四条用户指令落实：等待一律以命令输出/健康探测触发（waitUntil
-轮询，无硬编码 sleep）；自启组件并行起停（Promise.allSettled）；无 --course 时列
-curricula 最新 5 课；cloudflared 黑窗修复。
-
-**四个平台层陷阱（全为实测证据，后续勿再踩）**：
-1. **Bun Job Object**：Windows 上 Bun.spawn 子进程默认进 kill-on-close 作业对象，
-   脚本一退后台组件全灭；必须 `detached: true`（脱离后 `windowsHide: true` 防黑窗）。
-2. **choco shim**：`Bun.which("cloudflared")` 拿到的是 chocolatey bin 的 shim，它另起
-   真身子进程、不透传 stdio 句柄（日志 0 字节）、被杀留孤儿。解法：shim 路径反推
-   `lib\cloudflared\tools\` 真身直启 + cloudflared 自带 `--logfile`（不依赖句柄继承）。
-3. **uv venv trampoline**：`.venv\Scripts\python.exe` 同样是跳板，真身是 pyenv 基础
-   解释器子进程——杀跳板留孤儿 hub_server 继续占 8787。解法：读 pyvenv.cfg
-   `executable` 直启真身，第三方包由 PYTHONPATH 挂 venv site-packages
-   （**优先 `Lib\site-packages`**：本 venv 另有 POSIX 残留 `lib\python3.12\`，
-   无实际包，此前误选导致 pydantic ImportError）。
-4. **注册账本竞态**：并行启动阶段多组件并发 load→save 单一 registry.json 互相覆盖，
-   kill 漏杀；改为按组件分文件 `registry.<name>.json`。
-
-**协议层修复**：rollout 冒烟解包对齐 pack-container v2（gzip → BCV2 magic+headerLen+
-headerJSON；另 strip agent 同步流式路径的前导空格保活字节）；冒烟异步分支弃用返回
-布尔的 waitUntil（曾把 ArrayBuffer 丢成 true）改专用 pollAsyncResult。
+> **定案**：hub-start.ts 全原生 Bun 重写（Bun.connect/spawn/process.kill + 分文件注册账本）。四平台陷阱（勿再踩）：① Bun Job Object 默认 kill-on-close → 须 detached:true；② choco shim 另起真身不透传 stdio → 反推 lib\cloudflared	ools 直启 + --logfile；③ uv venv trampoline 杀跳板留孤儿 → 读 pyvenv.cfg executable 直启 + PYTHONPATH 挂 Lib\site-packages；④ 注册账本竞态 → registry.<name>.json 分文件。
 
 ## §340 冒烟预演设计：真课程 + echo 回显 + 作废轮，不建虚拟课程（2026-09-05，用户拍板）
-
-hub-start --smoke-only 的 Kaggle 交互预演采用**真课程路径**（用户方案，否决虚拟课程）：
-TrainingLoop 以真课程 + `--smoke` 旗标发布真 job；伪 Kaggle 用与 notebook 完全相同的
-`remote_worker` 入口加 `--echo` 冒烟旗标（下载/校验全走、不拉 torch 不跑 PPO）回显
-payload 携带的 init 权重并带 `smoke: true` 标记；TrainingLoop 按正常流程
-wait_job → verify_and_land 落位后识别标记抛 SmokeVoidRound 作废本轮——it 不前进、
-不写 iteration 事件（last_completed_iter 续跑锚点零污染，实测账本 0 iteration）。
-
-**为什么优于虚拟课程**：① 冒烟验证的与真训练逐字节同路径（真课程_fp/真 rollout/
-真发布/真三重校验），虚拟课程会造出只在冒烟里存在的配置路径；② 零新课程文件维护；
-③ hub-server 不需要按课程重启；④ smoke 标记让**任何**消费方对回显结果作废重试——
-真训练在途时误入的回显也不会污染权重（自保护）。
-
-落位安全性论证：三重校验第一项即 init_weights_fp == sha256(args.out)，echo 回传
-字节 == 发布时 init 权重 → 落位为无操作；ppo_ckpt_remote 的回显 tar 由重试轮
-_prepare_iter_dir 清场。连带修复：`remote/hub_client.wait_job` 容忍瞬时网络错误/5xx
-（快速隧道单次抖动曾废整轮并堆积陈旧 pending job）+ `tools/hub-start.ts
-drainStaleJobs`（新启动前下架死运行残留 pending job，防真 worker 空烧租约）。
-流程接续 §339；实施记 docs/nn.progress.md §18。
-
-### §340 补充：冒烟/启动门禁严格化（2026-09-05，用户拍板"隧道不可达必须报错退出"）
-
-hub-start 全部隧道/code.zip/self-rollout 检查从 warn 升级为**硬门**：cloudflared 缺失、
-隧道 URL 获取失败、隧道 30s 探测不可达、code.zip 不可下载、self 节点 rollout 失败——
-任一命中即抛错退出（exit 1，基础设施保留供重跑复用）；--smoke-only 同语义。最终
-报告/冒烟总结的 cloudflared 行按**实测可达性**展示（不再只看 URL 是否拿到），退出码
-真实反映门禁状态。新增 `--no-tunnel` 逃生门：无 cloudflared 的机器显式跳过隧道
-（Kaggle 路径不验证、summary 明示）。实测：断 cloudflared → exit 1；绿路径 → exit 0。
-
-### §340 补充 2：位置参数课程名 + 课程快速失败校验（2026-09-05，用户指令）
-
-`bun tools/hub-start.ts p4-onset` ≡ `--course p4-onset`（裸词位置参数）；`--course` 与
-位置参数重复指定即报错（防静默覆盖）。课程参数在启动任何基础设施**之前**按
-`rl/config.resolve_course` 同规则快速失败（先路径后 curricula/<name>.jsonc），拼错
-课程名响亮报错并列出最新 5 课；未知旗标 exit 1。
-
-### §340 补充 3：GPU↔HUB 通信重传加固（2026-09-05，用户拍板"全改"）
-
-快速隧道抖动下单次请求失败即造成实际损失（payload 下载中断 → 干等 30min 租约过期；
-PPO 结果最后一米丢失 → 整局重算）。分层修复：
-- `remote/protocol.py` 新增 `RetryableError`，与 ProtocolError 划界：4xx/字段校验 =
-  确定性拒绝；网络异常/5xx/传输损坏 = 可重试。
-- worker 下载（payload/code）`_get_with_retry`：3 次指数退避就地重试；sha 不匹配改判
-  RetryableError（重下可修复）。
-- `post_result`：5 次退避重试；409（hub 已有结果）按幂等成功。
-- hub 新增 `POST /jobs/{id}/release`：瞬时失败主动还租约立即回池（H2 仅持有人可释放），
-  30min 惩罚清零。
-- `run_job` 结果缓存复用：结果先落 `_result.json`，重领同 job 校验通过即直接重传，
-  不重算 PPO。
-- 训练侧 `wait_job` 已于同日加固（瞬时错误容忍）。心跳本就容忍单次失败。
-测试：test_remote_ppo 38 绿（新增 8：下载重试/4xx 分类/耗尽抛出、回传重试/409/4xx、
-release 回池、缓存复用不许触网）。
-
-### §340 补充 4：HUB 推架构落地（方向翻转，用户拍板"改成 HUB 推"）
-
-cloudflared/服务端移到 GPU 机器，HUB 变纯出站客户端——弱链路（edge↔cloudflared）
-落在 Kaggle 网络，HUB 只做普通出站 HTTPS（可走 Clash）。gcs 节点先例（节点侧隧道 +
-HUB 连出，实测稳）为架构背书。落地：
-- `remote/worker_server.py` + `remote_worker_serve.py`：GPU 侧服务端（stdlib http，
-  Bearer 鉴权，单 GPU 串行 409 busy）——`POST /job`（manifest+payload_b64+code_b64?
-  上传，后台 run_job 全套），`GET /job/{id}/status|/result`（幂等读），
-  `GET /code-sha?sha=X`（code 缓存探测），X-Smoke-Echo 头触发冒烟回显。
-- `remote/push_client.py`：submit_job（code 按 sha 按需上传：GET /code-sha 未命中才带；
-  退避重试，428/409 可重试）+ wait_result（瞬时容忍轮询，同 wait_job 纪律）。
-- `remote/worker.py run_job(preloaded=...)`：payload/code 由请求携带时跳过下载；
-  code 缓存（work_dir/code_cache/<sha>，tmp 原子改名）pull/push 共用。
-- `rl/loop_steps._remote_ppo`：gpu push 节点存在时 POST+wait_result，尾部
-  verify_and_land/SmokeVoidRoundError/结算与 pull 完全共享；节点来源 =
-  REMOTE_PUSH_NODE 环境变量（冒烟注入本机伪节点）> rl-config nodes[].gpu_push。
-  无 push 节点 → 原 mailbox 路径逐字节不变（向后兼容）。
-- hub-start --smoke-only：本机起 worker_server（127.0.0.1:hub+2）+ REMOTE_PUSH_NODE
-  注入 → 预演走真推送链路（发布→推送→echo→落位→作废，23s）。
-实测：38 单测 + 实弹冒烟 EXIT=0。遗留：pack_code_zip 确定性化已做（固定 ZipInfo
-时间戳），Kaggle 侧 sys.modules 跨版本陈旧性与 pull 同规（trainer codeHash restart
-兜底）。Kaggle 接入：notebook 起 worker_serve + cloudflared，URL 贴 rl-config
-nodes（gpu_push: true）。
+> **定案（用户拍板）**：冒烟预演走真课程路径（TrainingLoop + --smoke 真 job + 伪 Kaggle --echo 回显 + SmokeVoidRound 作废本轮），否决虚拟课程；硬门严格化（隧道/code.zip/self-rollout 任一失败 exit 1，--no-tunnel 逃生门）；补充：位置参数课程名 + 启动前课程快速失败；GPU↔HUB 通信分层重传加固（RetryableError 划界 / worker 下载 3 次退避 / post_result 5 次 / release 还租约 / 结果缓存复用）。实施记 docs/nn.progress.md §18。
 
 ## §341 /pool 页面热加载——pool-page.ts 改动免重启 agent（2026-09-06，用户指令）
-
-背景：pool-page.ts 虽不在 dist codeHash 集（改它不触发节点升级波），但
-sampler-agent.ts 以静态 import 引用——Bun 启动时缓存模块，主控机不重启 agent
-改动就不生效（2026-09-06 实测踩坑：eval 列上线后页面不显示，重启后才有）。
-处置：sampler-agent.ts 去掉对 pool-page 的静态 import，改 **mtime 键控动态
-import** 热加载——
-- 每次 GET /pool 先 stat pool-page.ts 的 mtime：未变 → 复用缓存模块句柄（零
-  重复加载）；变了 → 以 `./pool-page.ts?m=<mtimeMs>` 为新键重新 import。
-- 键取 mtime 而非 Date.now()：每个文件版本只占一个模块记录，旧版失去引用即
-  可 GC——不随请求数累积（Date.now() 方案会在模块注册表里无限堆积）。
-- 加载失败（语法错误/编辑中的半文件）沿用上一版可用模块并打日志——页面永不
-  因 pool-page 的坏状态 500。
-- Bun 1.4.0 探针实测四前提成立：同键命中缓存 / 换键即新模块 / 文件变更后新键
-  读到新导出 / 坏文件抛可捕获的 BuildMessage。
-线上验证（tmp/sampler-agent.log 时序）：首载 → touch 重载 → 坏文件 4×FAILED
-且页面仍 200 回退上一版 → 恢复后干净重载，全部符合预期。
-代价与边界：sampler-agent.ts 本身在 codeHash 集（codehash-files.txt），本次
-接线 = **最后一次**节点升级波；此后 pool-page.ts 调整既免重启也不触碰
-codeHash。sampler-agent 自身/restart-guard 等其余依赖仍需重启（未纳入热加载
-——核心协议文件的意外热切换风险大于收益）。
+> **定案**：pool-page.ts 改 mtime 键控动态 import 热加载（键=mtimeMs，文件版本只占一条模块记录；坏文件回退上版且页面 200）；
+>   sampler-agent 本次接线=最后一次节点升级波；核心协议文件不纳入热切换。
 
 ## §342 / p4-onset 监控四修复（2026-09-06，监控发现 → 用户拍板"修全部问题"）
-
-首日远程推架构监控（nn.progress §19）发现四处配置管道失真，全部修复并有回归测试
-（nn-training/tests/test_rl_remote_fixes.py，全量 pytest 312 绿）：
-
-1. **ppo_schedule 的 lr 三段表在 remote 模式全程未生效**：`_course_iter` 只把
-   `sch['lr']` 写进 `self._opt.param_groups`（hub 侧无 optimizer，静默跳过），
-   而 job manifest 的 lr 取自静态 `args.lr`，worker 以 `Adam(lr=manifest["lr"])`
-   建优化器 → 三段表死路。修：`_course_iter` 把 `sch['lr']` 同步折进 `args.lr`
-   （本地模式再同步 opt，保 Adam 动量）。既成事实：p4-onset it1–23 恒定
-   1.5e-4（warmup 半速；按绝对 iter 查表 it24–35 本就该 1.5e-4，实战差异在
-   it36+ 精调段——修复消除其 3 倍超速风险）。
-2. **同 seed shard 双份落盘**：tail fan-out 竞速双方都在锁外写盘、锁内结算，
-   后到者判 `dup settle ... dropped` 时目录已落盘 → 同一 seed 两份进 payload
-   （zip 重复 arcname，训练吃哪份由解包顺序偶然决定；it3–it8 每轮 2–7 份）。
-   修：dup-settle 分支退役本线程刚写的输家目录（`_dir` 按目录名归一化到 shard
-   层，兼容 local wave 目录与远程 shard 目录两种形态）；`iter_shard_dirs` 同名
-   去重兜底（manifest mtime 最早者胜 = 先写盘者，退役响亮日志）。修复后发布
-   shards=150 与 expectedGames 平（it24 实测 retire 2 份残留）。
-3. **贪心评估被 EVAL_SEEDS 常量截成 20 局**：`EVAL_SEEDS` 只有 20 个种子，
-   课程 `eval_games_per_stage: 100` 被 `[:n_seeds]` 静默截断，胜率 95% CI
-   ±13pp 无法分辨爬坡。修：扩到 `range(860001, 860101)`（前 2 seed 历史前缀
-   不变，切片消费全兼容）。
-4. **课程 backup_prefix/backup_dir 未被采用**：`_export_weights` 恒用模式前缀。
-   修：课程声明时优先（`backup_weights` 新增 `backup_dir` 形参，相对路径按仓库
-   根解析），缺省退回旧行为。归档落 `nn-training/weights/p4-onset/`。
-
-监控教训：iteration 事件的 `lr` 字段写 `args.lr`（events.py），它不等于 worker
-实跑 lr——判断「配置是否生效」要看 manifest 打包链路而非日志回显。
+> **结论**：p4-onset 监控四修复——ppo_schedule lr 三段表远程模式全程未生效（同步折进 args.lr）；同 seed shard 双份落盘（dup-settle 退役输家目录 + iter_shard_dirs 同名去重）；贪心 eval 被 EVAL_SEEDS=20 截断（扩池）；课程 backup_prefix/dir 未被采用（优先课程声明）。监控教训：判断配置是否生效看 manifest 打包链路而非日志回显。
 
 ## §343 / PPO job 分发改竞速广播——废租约独占（2026-09-06，用户指令）
-
-背景：it24 实测孤儿租约事故——worker 领取后 Kaggle session 断连重连死亡，租约
-30min（LEASE_SEC）内 job 无法重领，trainer `wait_job`（同为 30min 超时）空转，
-实际损失 ≈ 整整一个租约周期。用户裁定：租约独占完全不合理，改为 **Kaggle 竞速
-形式**——一个 iter 语料准备好后，所有轮询的 worker 都领到同一份 PPO 任务，哪个
-节点先回传该轮结果就用谁的，落后者的结果直接丢弃。实际部署单 worker，竞速只在
-session 断开重连时发生；多 worker 的双跑浪费可接受。
-
-语义（与 rollout 侧 tail fan-out §16/v3.7 的「先结算者赢、后到者丢弃」同构）：
-- `claimable_job_ids` = pending 且未 completed 且 payload 在盘且**结果未落盘**；
-  不再读租约。结果落盘未验收的 job 从池中剔除——防落后 worker 死循环重算。
-- `_get_next` 直接广播同一 open job，不下发 lease_token；`_post_result` 不校验
-  租约——鉴权边界 = Bearer token（D9 不变），内容对账 = validate_result
-  （job_id/data_fp/init_weights_fp/commit_echo），防重复写回 = store_result
-  首写锁定（迟到 409）。
-- worker：claim 无 lease_token → 心跳线程不启动（旧租约模式 hub 兼容不变）；
-  post_result 的 409 幂等语义既有。
-- `_JobStore.claim/heartbeat/release` 与 LEASE_SEC/HEARTBEAT_SEC 保留为兼容路径
-  （心跳对旧 hub 无副作用），调度不再消费；租约内存态重启即丢的 D8 语义不变。
-- 权衡（明示）：多 worker 时每个 iter 全员重算（N=1 实际为零）；先回传者的
-  权重落账——GPU 结果本就非逐字节确定，账本以 wver 记录落了谁，无回放语义损失。
-- 测试：test_remote_ppo 全套改为竞速语义（广播重领 / 409 丢弃 / 结果落盘剔除）。
+> **拍板（租约独占废弃）**：PPO job 改竞速广播——所有轮询 worker 领同一份任务，先回传者落账，后到者丢弃；claimable = pending 且未 completed 且结果未落盘（不再读租约）；存储结果首写锁定 409；lease 机制保留为兼容路径。
 
 ## §344 / pre-commit 门禁按文件归因——多 agent 并行安全版（2026-09-06，用户指令）
-
-同仓多 coding agent 并行成为常态，门禁拦截必须回答「这是谁的错」。历史：
-v1（hook 临时摘除未暂存改动做 staged 快照）在竞态下弄丢了并行 agent 的在途
-工作（pool-page.ts）；v2（影子树 checkout-index + junction + index.lock +
-树守卫）复杂危险被否决——junction 清理穿链删库、hook bug 卡死所有提交。
-
-v3 语义：**全量门禁照常运行（判定质量不降级），拦截只认 staged 归因**——
-- ruff 只扫 staged 的 `nn-training/**/*.py`（范围化 = 归因化）；
-- tsc/mypy 报错解析文件路径，与 staged 集合求交（mypy 反斜杠归一）：
-  staged 命中 → 拦；全部落在未暂存/未跟踪 → 放行（他人后继自理）；
-  无法归因到文件的错误 → 保守拦；
-- pytest/bun test 红 → 拦 + 归因指引，因果由提交 agent 判定：自己的修、
-  他人的汇报对方后以 `NN_GATE_SKIP=pytest` / `SKIP_BUN_TEST=1` 定向跳过重试；
-- oxfmt 逐 staged 文件，MM（另有未暂存改动）文件跳过——格式化工作树
-  内容会把他人未暂存编辑折进提交（v1 同源事故）；
-- freeze 仅 staged 含 TS/游戏代码（*.ts 等 / src/）时运行——纯 python 提交
-  物理上不可能改变 det 签名；
-- hook 对工作树零写操作（唯 oxfmt 对「无未暂存改动的 staged 文件」的精确
-  格式化）；
-- 逃生口：`NN_GATE_SKIP` / `SKIP_BUN_TEST` / `SKIP_TSC` / `SKIP_NN_TRAINING_GATE`
-  / `--no-verify`；`pre-commit --selftest` 内置归因解析器断言。
-
-已知接受误差（用户裁定语义）：staged 改共享接口 → 报错落在他人未暂存
-文件 → 放行，对方后继撞见并修复；反向（他人半成品 import 进我的 staged 文件）
-→ 假拦截，走逃生口。共享索引的最终落库竞态（两 agent 同时 commit 的毫秒
-窗口）为 git 原生行为——agent 纪律：stage 后尽快 commit。
-
-演练实录：ruff staged 拦截 ✓（F401，rl/zz_drill_tmp.py）；tsc staged 拦截 ✓
-（TS2322，tools/zz-drill-staged.ts）；tsc 未跟踪文件报错放行 ✓
-（src/zz-drill-untracked.ts，兼作真实提交）；selftest ✓。
+> **拍板（门禁按文件归因 v3，多 agent 并行安全版）**：v1 快照丢在途工作、v2 影子树危险被否决；v3 = 全量门禁照常跑、拦截只认 staged 归因（ruff 范围化 / tsc-mypy 报错求交 staged / pytest-bun 拦+归因指引 / oxfmt 跳 MM 文件 / freeze 仅 staged 含 TS 时跑）；hook 零写工作树；逃生口 NN_GATE_SKIP 等。实操演练见正文（已删，commit 承载）。
 
 ## §345 / p4-horizon 新实验：视野假设 γ+λ（2026-09-06，用户拍板"γ+λ一起动"）
-
-背景：p4-onset PPO 自 it55 起 25 轮零净进展（贪心 30/29/28/35/17/20，
-it80=20% 触发提前干预线——it100 线作废）；训练健康（熵 0.33–0.35，
-KL~0.02，无熔断）——"学不动"而非"学崩"。另两个结构证据：胜局清场
-p50=1804 tick 且 70 轮不下降（效率技能没学会）；超时局均 3.2 杀、
-23/25 有 3+ 杀（near-win 被 cap 咬）；死亡 ~60% 仍是主因。
-
-决策：按 §15.5 开新实验 `p4-horizon`（fresh out/traj，不 resume 旧 run），
-warm-start **it70 权重**（贪心 35% 最优点，
-`nn-training/weights/p4-onset/p4-onset.it70.20260906-115550.json`，不用 it80 的），
-仅动视野双旋钮 **γ 0.995→0.998、λ 0.97→0.99**（GAE trace (γλ)^k 约 29→83 步；
-单改 γ 几乎不动 advantage 视野——λ 才是主旋钮，故双改记为同一个"视野假设"）。
-其余与 p4-onset 逐字节同义：reward / max_ticks 2400 / 终局分一律不动
-（死亡主因下 cap 与 -2/-1 均非瓶颈——超时 eval 仅 8%，课程注释的 recalibrate
-触发条件未满足；God 同 2400 内清 64%，预算够好策略用）。
-
-- schedule：新 run 从 it1 起，但权重已收敛，不用 phase-1（3e-4/kl 0.6），
-  用 phase-2 档（1.5e-4/kl 0.2/kl_cap 0.2 × 40 轮 → 尾 5e-5/kl 0）续跑。
-- ent_break 0.25 沿用（当前熵带 0.33，F4 相对崩塌语义见 §339）。
-- 风险：γ 切换重标 returns，value 头必有一段 dip；λ 0.99 方差上升。
-  若 40 轮内贪心无超 35% → 视野假设证伪，下一候选 wDmg 加码（死亡主因）。
-- 判定线：贪心持续 >35% / 趋近 God 64% 为成；≤30% 横盘 40 轮为败。
-  基线锚：p4-onset it80（贪心 20/100，rollout 15.3%）。详见
-  `docs/rl.progress.md` §4。
-- 启动纠正（同日）：首启误用 start-training.ps1 → 本地 CPU PPO，且 bc 路径
-  触发 warm_start_normalize 把 it70 权重洗掉（trunk ×0.0095 + value 清零）；
-  已杀错跑、删污染 traj、原始 it70 逐字节重播种。正确入口是
-  `bun tools/training/start.ts hub p4-horizon`（`--ppo remote`，PPO 上云；
-  remote 跳过 build_model 故无 normalize 风险）。另：hub-server 的
-  job_root/jsonl 绑定课程队列，复用旧课程 hub 进程会读错队列——切课程必须
-  重启 hub-server（本轮杀 23224，由 hub-start 重拉）。
+> **结论（视野假设 γ+λ，p4-horizon）**：warm-start it70，γ0.998/λ0.99（GAE 视野 29→83 步）；其余与 onset 逐字节同义；判定：贪心持续 >35% 为成、≤30% 横盘 40 轮为败；启动纠正：必须 `bun tools/training/start.ts hub p4-horizon`（--ppo remote）且切课程必须重启 hub-server。详见 docs/rl.progress.md §4。
 
 ## §346 / tools/training/ 统一启动器：hub-start.ts 与 start-training.{sh,ps1} 三合一（2026-09-06，用户指令）
-
-`tools/hub-start.ts`（1415 行）按职责拆为 `tools/training/` 模块族，主入口
-`tools/training/start.ts`，三种模式：`hub`（Kaggle pull 全基建）· `push`（HUB 推，
-DECISIONS §340 补充 4）· `train`（本地 CPU，完整取代 `nn-training/start-training.{sh,ps1}`）。
-同时 `tools/agent/pool-page.ts`（1173 行）移植到 `tools/training/monitor/`
-（page/history/iters/theme/server 分层），旧路径留 9 行兼容壳重导出（sampler-agent
-GET /pool 的 mtime 键控动态 import 不需改动，§341 语义保持）。
-
-**模块划分**（每文件单一职责）：paths / types / log / config / net / proc /
-registry / venv / sentinels / reload / reload-touch / smoke / hub / push / train /
-start；monitor/{theme,history,iters,page,server,index}。
-
-**定案**：
-1. **全 Bun 原生 API 纪律**（§339 延续）：进程/端口/文件/HTTP 无平台 shell 分支。
-   唯二例外都有论证：`netstat/lsof` 端口兜底清场（--kill 语义必需，Bun 无端口→PID
-   API）；Windows `wmic` 单次调用做 --kill-previous 的 python 进程命令行快照
-   （msys pgrep 对原生进程不可靠的 §324 教训；wmic 是 OS 组件而非 shell，失败静默
-   降级为跳过清杀并告警）。POSIX 侧读 /proc。
-2. **变更检测（新能力）**：受管长跑进程（self-node/hub-server/TrainingLoop/
-   worker_server）由监督循环周期性 stat 哨兵（codehash-files.txt SSOT 清单 + 各自
-   入口源码）的 mtime/size——运行的代码更新后自动重启该进程应用最新代码。哨兵
-   而非 inotify：平台无关，且 codehash-files.txt 恰是"代码身份"的既有 SSOT。
-   --kill 是同步流程，跑完即退不留监督循环。
-3. **冒烟门禁三模式全覆盖**：base（BCV2 容器回环 + rl-config 契约）所有模式必过；
-   hub 加 rollout 冒烟 + 隧道/code.zip（硬门，§340 语义）；push 加本机伪 GPU 节点
-   echo 预演；train 加 torch import + 权重文件契约。
-4. **兼容层**：registry 账本从 hub-start 分文件迁移为单文件并消费旧账本（--kill
-   能收编旧进程）；pool-page.ts 保留 renderPoolPage/PoolPageCtx 导出名。
-5. **vite/svelte 不引入**（监控页技术选型）：单页只读监控，服务端渲染 + 原生 JS
-   已满足，构建链只添依赖（MANIFEST §14）。
-
-**实弹验证**：push p4-horizon --smoke-only 全绿（发布→推送→echo→落位→作废，
-100s）；train --script smoke_test.py 真跑 BC 12 epochs；--check/--echo/--kill
-各路径通过；变更检测实测哨兵写入后 1 轮内触发重启。新发现两处旧 bug 一并修：
-run_rl 单实例锁存活时预演空烧 180s（现 fail fast 提示）；--smoke 作废确认对
-GBK 乱码课程文案假阴性（改双信号：result.smoke 标记 ∨ ALL DONE 退出）。
-`nn-training/start-training.{sh,ps1}` 已删除（2026-09-06，用户指令）；仓库内残余引用
-（docs / plan / README / py docstring 用法示例）已清理为指向 `tools/training/start.ts`。
+> **定案**：tools/training/ 模块族拆分（paths/types/log/config/net/proc/.../smoke/hub/push/train/start + monitor/）；全 Bun 原生 API 纪律（§339 延续，唯 wmic/netstat 论证例外）；变更检测监督（codehash-files.txt 哨兵 mtime/size）；冒烟门禁三模式全覆盖；vite/svelte 不引入。
 
 ## §353 / 双打 Two-Player 模式：第二人类输入源复用 P2 槽位（2026-09-06，用户指令）
 
@@ -2770,112 +957,13 @@ pin。`bun run check` 全绿（1755 pass），build 绿。God-AI/World/录制器
   （重绑 fire→RB、十字键→面键、摇杆优先级不受绑定影响）。`bun run check`
   全绿（1772 pass），build 绿。表现层/玩法零行为漂移，不触发 §6.3b。
 ## §348 / NN 训练控制台：tools/training/console（本地网页，2026-09-06，用户指令）
-
-用户需求：把 tools/training 的脚本能力做成「神经网络训练控制台」网站——本地
-localhost 无鉴权发布；独立控制所有训练组件的启/停/冒烟；监控运行状态与历史；
-监控训练指标；启停组件运行模式（trainer pull/push、stream、双缓冲等）；启停
-rollout 节点并改并行采集数（回写 rl-config.json）。
-
-**实现**：`tools/training/console/` 四模块——`server.ts`（Bun.serve 绑定
-127.0.0.1，无鉴权前提=仅回环）、`api.ts`（GET /api/state 快照 + POST /api/*
-动作路由；ActionError→409/参数错→400）、`actions.ts`（单组件启/停/冒烟、预设
-编排、模式开关、节点编辑）、`page.ts`（服务端渲染控制页，热加载 §341 语义）。
-
-**定案**：
-1. **零新依赖、无 vite/svelte**（§346 定案 5 延续）：服务端渲染 + 极小原生 JS，
-   复用 monitor/theme.ts 样式与 monitor/iters.ts 指标数据层。
-2. **复用而非旁路**：动作层调用与 CLI 启动器同一套原语（hub.step*、smoke、
-   proc.spawnBg/stopAllManaged、registry 账本、sentinels 哨兵）——组件状态与
-   CLI `--kill`/监督器共享同一账本，两条入口互不冲突。
-3. **模式开关两级落点**：`rl.stream/double_buffer/precollect_early` 是 run_rl
-   真实配置键 → 直接回写 rl-config.json（下次 trainer 启动生效，不碰在跑进程）；
-   trainer 的 pull/push/local 是控制台的基建编排选择 → 持久化
-   console-state.json，启动时翻译为组件组合（pull=+隧道，push=+hubServer，
-   local=仅 trainer）与 `--ppo remote` 有无。local 与 rl.stream=1 的显式互斥在
-   启动时拦（§330 语义）。
-4. **写回即冒烟**：节点启停/并发/模式开关写 rl-config.json 后跑 rlConfigSmoke
-   契约校验，坏配置不落盘生效。
-5. **并发纪律**：动作短命异步 + per-key busy 互斥（同 key 二次点击 409），
-   不做队列；页面 3s 整页 reload 轮询，输入焦点/展开详情时暂停防冲掉编辑。
-6. **setCourse 不复用 validateCourseArg**：CLI 版 process.exit(1)（控制台进程
-   会被测试/live 请求连带杀死）——路由层改抛 ActionError→409（单测覆盖）。
-
-**验证**：14 项单测（快照结构/路由 404·400·409/回写+还原/互斥/页面渲染）；
-实弹：server 起于 :8931，state/页面/双缓冲开关写回还原/未知动作 404/组件停
-止与冒烟动作/页面热加载全部实测通过；bun run check + build 绿。
-
-**补充 1（同日，用户指令）——训练指标 sparkline**：metricsSection 表格上方加
-概览条（spark-strip）：胜率/得分/KL/熵/eval 胜率五格内联 SVG polyline（近 20 轮
-时间正序，min-max 归一，恒定序列满幅平线灰色、末点圆点，非有限值断点跳过）。
-零依赖（内联 SVG 文本拼接，非 canvas/图表库）；sparkline() 纯函数可单测。
-trap：坐标对正则需 `[\d.]+`（x=2 这类整数不匹配 `\d+\.\d+`）；eval 全缺的
-序列 = NaN 全过滤 → 合法占位符而非 polyline（测试断言按语义写，不按实现写）。
-
-**补充 2（同日，用户指令）——组件日志查看页**：`/log/<key>` 独立页 +
-`/api/log/<key>` JSON 载荷；控制台组件表加「日志」链接。定案：
-1. **尾部窗口读取**（readLogTail）：先 stat 再只读尾部 ≤512KB 字节窗口、丢首行
-   残行——GB 级增长日志不整读，2s 自动刷新是热路径；URL ?lines= 限 10-2000。
-2. **定点替换而非整页 reload**：refresh() 只换 #logbox/#meta——滚动位置、跟随
-   开关、行数选择都不丢（控制台主页 reload 模式不适用于日志页：要保滚动）。
-3. **follow 默认开**：贴底滚动 + 2s 刷新；关闭 follow = 暂停（4s）+ 释放滚动。
-4. 日志解析 resolveComponentLog：COMPONENT_LOGS 常量优先，账本 entry.log 回退；
-   单测覆盖 tail 窗口/映射齐全/载荷/转义/暂停态占位（断言 `id="follow" checked`
-   而非裸 'checked'——客户端脚本的 ev.target.checked 是合法文本，会被裸词断言误伤）。
+> **定案（训练控制台）**：tools/training/console 四模块（server/api/actions/page）；零新依赖；动作层与 CLI 同一套原语；模式开关两级落点（rl.stream 等写 rl-config，pull/push/local 持久化 console-state）；写回即冒烟；并发 per-key busy 互斥；setCourse 改抛 ActionError→409（不再 process.exit）。补充：指标 sparkline、/log/<key> 组件日志页（尾部窗口读 + 定点替换 + follow）。
 
 ## §347 / pre-commit oxfmt 循环跳过 staged 删除源（2026-09-06，§7 复现→修复）
-
-提交本日删除清理时首跑失败：hook 的 oxfmt 循环对 staged 清单全量 `bunx oxfmt` +
-`git add`，staged **删除**的 `.ts`（本例 tools/hub-start.ts）工作树已不存在 →
-`git add` fatal（`pathspec ... did not match any files`），输出被吞只留 exit 1。
-修复：循环内对不存在的文件先 `continue` 并打印跳过原因（最小改动，照常通过
-`--selftest`；本次 commit 已实弹验证跳过分支生效）。已知留待项：python 门禁的
-STAGED_PY 与 lint 集合同构（--diff-filter=ACM 排除删除，仅 ruff 收到删除路径时
-ruff 自己会因文件不存在报错）——留给下次涉及 .py 删除的提交顺手修复。
+> **结论**：pre-commit oxfmt 循环对 staged 删除源先 continue（git add 对不存在文件 fatal）；本提交实弹验证。
 
 ## §349 / 删除一键启动器 start.ts——控制台 + train.ts 双入口（2026-09-06，用户指令）
-
-用户指令：删除 `tools/training/start.ts`；训练组件完全由控制台管理；`package.json`
-支持 `bun run train` 启动控制台网站。
-
-**能力归并（删除前逐项清点，无能力丢失）：**
-- `start.ts train` 模式 → `tools/training/train.ts` 增加真 CLI 入口（argparse 原语义
-  逐项等价：`--script/--force/--kill-previous/--detach/--torch-threads/--check/--echo`，
-  未知参数透传）。AGENTS §5.6 "never raw python" 的无头执行通道由它继承。
-  教训：模块顶层 `main()` 在被 bun test import 时会真的拉起训练（测试导入即训练）——
-  CLI 入口必须 `if (import.meta.main)` 守卫（本次实弹复现：导入后 spawnSync 挂 65s）。
-- hub/push 全流程编排 → 控制台已有预设（pull/push/local）逐项覆盖。
-- push `--smoke-only` 推送链路预演 → 新控制台动作 `smokeTrain`（api 路由 + 页面按钮
-  「推送链路预演」）：伪 GPU 节点 + `--smoke` trainer + `stepKaggleRehearsal` 三段
-  日志触发，任何一段失败都停预演进程。`stepKaggleRehearsal/stepTrainingLoop/
-  drainStaleJobs/printLogTail` 因此保留在 hub.ts（唯一消费方变为控制台）。
-- 变更检测监督（start.ts 的 supervisor）→ 控制台 server 接管：`createSupervisor`
-  + 每 15s reconcile 账本登记的组件 → `sup.watch(spec)`；restart 经
-  `actions.restartSpecFor(key)` 按当前 rl-config + 账本元数据重建 spec。
-- hub/push 模式 CLI 的 Kaggle 指引打印/启动报告 → 控制台组件表/节点表已覆盖。
-
-**新 SSOT：`tools/training/specs.ts`** — 五组件 ProcSpec 构造（selfNode/hubServer/
-cloudflared/workerServe/trainingLoop）唯一来源；hub 步骤、控制台动作、监督重启三处
-共用。重启永远用最新配置重建（旧 spec 只是哨兵载体）。
-
-**入口**：`bun run train` = `bun tools/training/console/server.ts`（控制台）；
-`bun tools/training/train.ts --script …`（无头单次）。文档（AGENTS §5.6、
-agents.details §5.6、README 模块地图、plan、py docstring）已同步改指向。
-
-**验证**：`bun run check` 1748 pass / 0 fail；`bun run build` 绿；train.ts CLI
-`--check/--echo/--help` 实弹通过；控制台 :8941 实弹（state API、页面 200、
-NO_PROXY 提示、监督启用日志）。
-
-**补 1（smokeTrain 实弹回归，2026-09-06 晚）**：首次对 p4-horizon 跑控制台
-「推送链路预演」暴露 trainingLoopSpec 路径翻倍 bug——cmd[2] 被再 join 一次
-`NN_TRAINING`，python 秒退 `can't open file ...nn-training
-n-trainingun_rl.py`，
-预演空烧 180s 等 job 发布。修复三件：(a) specs.ts 以 `REPO_ROOT` 拼入口
-（ENTRY 是仓库相对路径，哨兵/账本语义，不参与 join NN_TRAINING）；
-(b) stepTrainingLoop 加 fail-fast——进程秒退且日志含 "can't open file" 时立即
-抛路径错，不再等满超时窗；(c) 回归测试（tests/training-train.test.ts）：cmd[2]
-必须 `existsSync` 为真。复跑预演全通过：发布→推送→echo→落位→作废退出，
-iteration 计数 3 不变、wver c1369c289278 未动、无残留锁、8789 端口释放、
-workerServe 账本清除（trainingLoop 条目留 `exited` 状态页可见，属正常痕迹）。
+> **定案（用户指令删除 start.ts）**：能力全量归并——train 模式 → tools/training/train.ts 真 CLI（if(import.meta.main) 守卫教训）；hub/push → 控制台预设；push 预演 → smokeTrain 动作；监督 → 控制台 createSupervisor；新 SSOT tools/training/specs.ts；入口 bun run train = console，train.ts --script 无头。
 
 ## §352 / python 门禁分层：python 环境硬要求，torch 缺席降级为跳过+warning（2026-09-07，用户指令）
 
@@ -2903,80 +991,125 @@ workerServe 账本清除（trainingLoop 条目留 `exited` 状态页可见，属
   §6.3b。
 ## §350 / p4-fast 加速课程：GPU 吃满 + 语料×2（2026-09-07，用户指令）
 
-背景：Kaggle 15G 卡只用 ~1G——模型 67K 参数（`models/student.py`）、`mb=512`
-单 chunk obs 19MB + stem 激活 ~88MB，50 chunk 常驻（`ppo/trainer.py tensored_chunks`
-全量 `.to(device)`）约 1G 属正常；p4-onset 稳态 ppo ~90s、rollout 方差 40–360s，
-真瓶颈是采集而非 PPO。假设 p4-horizon 亦平台（it31 时贪心 15–27%，从未 >35%），
-用户确认采集集群已就绪、不用担心 rollout 速度，开加速变体求单位 rollout 的
-学习量最大化。
-
-决策：按 §15.5 开新实验 `p4-fast`（改 corpus/epochs 即新实验，fresh out/traj，
-不 resume 任何旧 run），由 p4-horizon 逐字节派生、仅改 4 处：`seed_rotate`
-150→300（语料×2，~52k 样本/轮，chunks ~100，常驻显存 ~2G，仍远低于 15G；
-采集墙钟由集群吸收）、`epochs` 4→8（200→~800 梯度步/轮，ppo 90s→~360s，
-GPU 算力换样本复用）、`name/out/traj/backup_*` → `tmp/p4-fast`（含 header 注释），
-其余（地图/敌编/reward/γ0.998/λ0.99/schedule/eval/mb/workers/bc）与 horizon
-完全同义——隔离"加速"变量：bc 沿用同一 it70 权重（公平对照起点），`mb` 刻意
-保持 512（拿 mb 填显存=步数减半学得更少；语料×2 + mb 不变才是正确吃 GPU 姿势，
-见 §350 讨论），wDmg 加码候选留给加速版亦平台后的下一实验、不在本课程混杂。
-
-- 安全阀：KL>0.05 连 3 轮或熵相对峰值掉 >0.05 即回滚 `epochs` 到 4（单改课程重发，
-  仍是同一实验内降档，不开新课；回滚记本条目补记）。
-- 判定线：沿用 §345（贪心持续 >35% / 趋近 God 64% 为成；≤30% 横盘 40 轮则连加速
-  版亦平台 → 下一实验 wDmg）。基线锚：horizon it30 贪心 23/100 + onset it70 35%
-  起点对照。详见 `docs/rl.progress.md` §5（待回填）。
-- 启动：控制台（bun run train）选 Pull 预设 + course=p4-fast；切课程必须重启
-  hub-server（§345 教训：job_root 绑定课程队列）。
-
-**补记（2026-09-07，p4-fast 课程评审，三处修正；原 §350 正文留档不改）：**
-1. P0-1 安全阀误杀属实且更严重：horizon KL 基线 0.025–0.036（training_log 全步均值
-   口径），4× 步数下健康工作点约 0.04–0.08——原"KL>0.05 连 3 轮回滚"第 1–3 轮即
-   误触发。且 per-tick 内建熔断 kl≥0.075×3 硬编码于 `rl/loop_guards.py:57`（课程/CLI
-   均不可覆盖），任何 >0.075 的自定义阀都永不触发——评审建议的 0.10 阀同理，故未
-   采用，改运行规则：kl≥0.06 连 2 轮 → 内建开枪前人工降档（epochs 8→4 或
-   kl_coef 0.2→0.3），worker 日志末 epoch KL>0.10 为漂移实锤（`engine.py` 每 epoch
-   行可观测，training_log 只有全轮均值）。
-2. P1-3 "vs cap 0.2 余量"属实为虚假安全感：`engine.ppo_update` 无 target_kl 早停；
-   kl_cap 只在 `rl/stream.py` 流式路径执行，remote 串行（stream=0/waves=null）下
-   manifest 透传但无人消费。课程头注释已删 cap 表述，改写真护栏清单（kl_coef 软
-   惩罚 + F4 0.075 停车 + ent 0.25 相对崩塌 + 监控）。反讽：绑定护栏（0.075）比
-   已死的 cap（0.2）更紧——这正是 P0-1 必须处理的原因。
-3. P2-6 熵 tripwire（相对峰值掉 >0.05 → epochs 回滚）保留 + 预期管理：4× 步数下
-   5–8 轮内触发属正常，触发即降档、不判失败。
-4. GPU-cost P0（墙钟/显存/KL 工作点皆外推）：加 it1–2 校准门（预测 chunks~100 /
-   步数~800 / ppo≈horizon 3–4× / kl<0.06 / 熵跌<0.03），不达标按 epochs→6、
-   seed_rotate→200 顺序降档。课程头注释已同步。
-
-
 ## §351 / 训练控制台两处缺陷：course 显示/动作双源 + local×stream 假互斥（2026-09-07，用户指令）
 
-用户报两个 bug（训练在跑，只改 `tools/training/console/` 网站代码，不碰组件进程）：
+## §352 / p4-wdmg：死亡惩罚×2（2026-09-07，p4-fast it20 提前干预链）
 
-**Bug 1（course 双源不一致）**：页面加载时下拉框显示了课程（如 p4-horizon），点启动却报
-「需要 course（先在顶部设置课程）」。根因：显示与动作走两条取数路径——
-`api.buildStateView()`/`componentLogPayload()` 用 `state.course || discoverCourses()[0]`
-（console-state 为空时回退最近活跃课程），而 `routeAction` 的 `ctx.course` 只读
-console-state.json（为空即空串）→ 组件启动守卫 `if (!ctx.course) throw` 必炸。
-**定案**：单一事实源——api.ts 导出纯函数 `effectiveCourse(state, discovered)`
-（console-state 优先，空则回退 `discoverCourses()[0]`）与 `actionCtx(body)`
-（显式 body.course > effectiveCourse）；`buildStateView`/`componentLogPayload`/
-`routeAction` 三处全部经它取课程——**页面显示的课程 = 动作实际使用的课程**，
-不再自动回写 console-state（保持「手动选择才持久化」语义，读路径不写盘；
-显式动作如 preset 启动时照旧 saveConsoleState）。页面下拉加占位项
-「自动（最近活跃课程）」使 value="" 态所见即所得。
+## §353 / 训练控制台 Preact 化（plan/Training-Console-Preact.md v3.3 执行，2026-09-07）
 
-**Bug 2（local×stream 假互斥）**：控制台选中「stream 流式派发」后点 Local（本机 PPO）
-报「本地 PPO 与 rl-config rl.stream=1 互斥」。根因：`actions.trainerConflict()`
-把 §330 的互斥边界读错了——§330/run_rl 的 fail-fast 是 **remote × 显式 --stream 1**
-（远程内部强制 stream=0；rl/cli.py 只拦这一组合，config 默认值静默降级）；
-而 stream=1 恰是本地模式的**默认与推荐运行态**（rl/cli.py `--stream` default=1、
-AGENTS §15.6 流式为 RL 默认）。控制台不该在 run_rl 之外自设更严门槛。
-**定案**：删除 `trainerConflict` 及其调用点——local 不再检查 rl.stream；
-真非法组合仍由 run_rl 启动期 fail-fast 兜底（最终守门人唯一原则）。
-页面文案同步修正（去掉「需 rl.stream=0」「本地 PPO 互斥」误导提示）。
+## §354 / p2-step 诊断台阶：1敌→4敌步子太大？（2026-09-07，用户指令）
+> **结论（p2-step 诊断台阶）**：1 敌→4 敌步子过大假说；p2-step.jsonc（count 4→2，其余同义）；探针协议（BC ep60 ×100 + God ×100，CPU 零训练成本）：BC≥50% 且 God≥85% → 开 RL 腿；BC<30% → 假说死。
 
-**验证**：`tests/training-console.test.ts` 新增回归（先红后绿）：actionCtx 回退语义、
-buildStateView().course === actionCtx({}).course（显示=动作同源不变量）、页面不含
-互斥文案、`trainerConflict` 不再存在。headless 不 spawn 真实组件（启动动作本身
-仍有 run_rl 锁守卫，单测不触达）。api/actions 非热加载层——改后重启控制台进程
-（§349：受管组件 detached，控制台重启不影响训练）。
+## §355 / p3-step 诊断台阶补完：悬崖在 2→3 还是 3→4？（2026-09-07，用户指令）
+> **结论（p3-step 补齐）**：同套路派生 p3-step.jsonc（count 4→3）；判读 BC 单调 p2(67)>p3>p4(14) 为台阶成立，p3≈60 → 悬崖在 3→4；RL 腿一律另起条目。
+
+## §354 / 控制台 UI 紧凑化三项调整（2026-09-07，用户指令；纯客户端，零进程影响）
+> **（UI 运维）**控制台 UI 紧凑化三项：固定头部训练状态条 + 卡片紧凑化默认 + worker_server 移出组件栏。正文已删（commit 承载）。
+
+## §355 / 控制台 UI 重设计：一屏仪表盘 + 抽屉 + 启动弹窗（2026-09-07，用户拍板草图后实施）
+> **（UI 运维）**控制台一屏仪表盘重设计 + 抽屉 + 启动弹窗（用户拍板草图）。正文已删（commit 承载）。
+
+## §356 / p2-step RL 腿启动（2026-09-07，wdmg it40 证伪后，用户直接启动）
+
+## §357 / p4-open 敞篷探针：钢盒子是不是帮凶？（2026-09-07，用户指令）
+> **结论（p4-open 敞篷探针）**：去边框 6→0、内场 22×22→26×26（+40% 面积）单变量"是否有墙"；门：BC/God gap 收窄 ≤30pp → confinement 主犯开腿；仅授权探针。
+
+## §358 / p3-step RL 腿：晋升门兑现（2026-09-07，p2 it35/it40 连击 75/84）
+> **结论**：p2 腿 84% 结业（媲美教师）；开 p3 腿 warm-start p2-it40，it5 检查点 ≥35 继续 / ≤25 切 ep60；p3→p4 门连续 2 eval ≥70。
+
+## §359 / p3-bc 臂：transfer 证伪，切 ep60 重开（2026-09-07，§358 it5 检查点触发）
+> **结论**：p2 冠军权重在 p3 上越训越差（27→20→14，转移方向性证伪）；开 p3-bc 臂（ep60 探针权重），it15 verdict 停腿（42→37→22→11：BC 起点也被练差）。
+
+## §360 / 全 p 系出生点变体化：固定靶退役（2026-09-07，用户指令"四个角随机"）
+> **结论（出生点变体化）**：历史冻结线固定（p1/p4*/p2-step/p3-p2arm），新/改 p2-var/p3-bc/p4-var；探针 verdict：多样性税不存在（p2-var BC 87 反 +20pp；固定=硬核训练集、var=泛化测试集），p2-var 不扶正；p3-bc 放行（对称门 it5≥40）；it15 停腿（11/100）。
+
+## §361 / R5 value-head 实验：normalize_ret 先行（2026-09-07，p3-bc 停腿后）
+> **结论（R5 value-head 首投 normalize_ret）**：p3-bc 同数学另起 fresh run（p3-vr1），单变量；成功门 value MSE<2 毕业；毕业+胜率平 → critic 出局（→容量 R6）；实施需单测 + 旧数学逐字节回归。
+
+## §361 训练控制台 UI 五项调整（2026-09-07，用户指令）
+> **（UI 运维）**控制台 UI 五项调整（CopyButton icon 模式 / 指标表 500 轮上限 / loadConfigSafe 抗抖 / iter 事件驱动刷新 / local 节点 pill）。正文已删（commit 承载）。
+
+## §362 / intent 后端永不用于 p 系执行（2026-09-07，用户陈述既往否决结论，入档）
+> **规则（否决入档）**：intent 后端**永不**用于 p 系执行——执行层依赖有缺陷的 God-AI 行动方案，天花板锁死略逊于 God，credit-assignment 家族剔除 intent/goal 后端（含 replan/heartbeat 全套）。候选重排：①BC-anchored per-tick kickstart（§363）②回报重分配（§382）③短局（暂否）。
+
+## §363 / BC-anchored per-tick kickstart 移植（2026-09-07，p3-vr1 it15 verdict 后）
+> **结论（kickstart 移植）**：engine.ppo_update + ref_model/kickstart_kl（exact-KL 分头、衰减复用 run_rl 语义、ref=课程 bc 冻结快照）；三重默认关闭（ref None 或 coef 0 → 逐字节不变）；成功门 it1 KL<0.1 且 it5 ≥25。补记：ent_break 0.25 从未落地（flat_overrides 漏映射，已修）；自定义熵 tripwire 三振退役（假阳性率约束）。
+
+## §365 / 控制台 /api/state 空回复：nodeViews 串行 ping 修复（2026-09-08，用户报告）
+> **结论**：/api/state 空回复 = nodeViews 串行 ping（5 节点 10.1s）超 Bun.serve idleTimeout 10s；改 Promise.all 并行 + 不可达 4s 超时（13.2s→6.7s）；测试断言并行发起计数（串行必红）。教训：注释契约与实现脱节（§363 同款）。
+
+## §364 / p3-vk1 combo：归一＋缰绳叠加（2026-09-08，ks1 it25 停腿后，用户指令）
+> **结论（p3-vk1：归一+缰绳叠加）**：由 ks1 派生加 normalize_ret:true（三臂对照 vr1=归一/ks1=缰绳/vk1=叠加）；首发作废 verdict 被实测推翻撤回（训练侧结算丢 kickstart 遥测，非 hub/worker 问题，缰绳一直在跑）；修复 _remote_forward_agg 透传 kickstart 键 + 启动协议机器版监护。成功门 value MSE<2（it2 即过）。
+
+## §366 / 页面加载 <1s：慢部件快照缓存（2026-09-08，用户指令"6.7s 太慢"）
+> **结论**：慢部件（节点 ping/组件探测/池历史聚合）移出请求路径——后台刷新器 5s 重算 + buildStateView 只读缓存；walk 深度 ≤2 限 'traj'（1.39s→20ms）；超时收敛 + 组件探测并行。warm 页面 11ms / 冷算 6.7s→1.5s。教训：聚合"每次请求全量重扫"是隐藏慢路径。
+
+## §367 / rollout 子进程改由 node(V8) 执行：wasm 推理跨引擎 ×1.6（2026-09-08，实测驱动）
+> **定案**：rollout 子进程交给 node(V8)（features ×1.63），agent 本体仍跑 bun；bun build --target=node 预打包；坑：wasm 相对产物解析须复制到产物同级（缺文件静默回退 TS ×14 慢）；降级链（无 node/打包失败/连败≥2 → 回 bun）；同权重同 seed 两引擎产物逐字节相同（M4 红线不破）。tools/agent/** 改动必须合批同一 commit 触发升级波。
+
+## §368 / 推理提速②③④：pointwise intrinsics + encode 降频 + 长驻 serve worker（2026-09-08）
+> **定案**：②pointwise 手写 wasm_simd128 intrinsics（features 4.59→3.43ms node，产物逐字节同）；③obs 只在决策 tick 编码（encode 2.4%→1.0%）；④长驻 serve worker（--persist 默认关，serve 与一次性 spawn 逐字节同）；补记：int16 dot 量化实测否决（node -18% + 精度 bug，HWC8 平铺才可再评）。⚠️ serve worker stdin 必须 'pipe'。
+
+## §369 / 训练侧架构实验族提案留档（2026-09-08，未启动）
+> **留档（未启动）**：架构实验族（bottleneck 64→16→64 首选核心候选 / board 26→13 最深 / h 64→48 / d 8→6 / K 20 口径级）；批次税清单（新 BC + fresh 课程 + 基线重立 + codeHash 升级波）；int16 dot 维持否决；计划文件 plan/nn-arch-speedup.md（untracked）。
+
+## §370 / 日志页视觉重设计：终端美学 + 结构化日志 + 搜索/过滤（2026-09-08，用户指令"日志页很丑"）
+> **（UI 运维）**日志页终端美学重设计 + 结构化事件卡 + 搜索/过滤（顶卡/吸顶工具栏/view.ts 纯函数）。正文已删。
+
+## §371 / 日志页四项交互修复 + bundle 404 根因（2026-09-08，用户反馈"跟随/过滤未起效"）
+> **结论**：日志页无客户端 JS 元凶 = renderLogPage 默认 scriptSrc /app-log.js 而服务端只挂 /log.js（bundle 404）；改 /log.js；顺带尾行截断 all / 智能跟随滚动 / FAB 常驻 / 过滤。
+
+## §372 / 日志页细节二改：「共 N 行」= 文件总行数；直达底部按钮并入工具栏（2026-09-08，用户指令）
+> **（UI 运维）**「共 N 行」= 文件总行数（readLogTail totalLines ≤8MB 精确）；直达底部按钮并入工具栏。正文已删。
+
+## §373 / 日志乱码修复 + 暂停提示入工具栏（2026-09-08，用户报告）
+> **结论**：GBK 乱码 → readLogTail 按 
+ 切行逐行 UTF-8 fatal→GB18030 兜底（整段误判不可取）；暂停提示条并入工具栏最左（后改为 .tc-logtool__right 搜索框前，保与「过滤日志」同行）。
+
+## §374 / sampler-agent 工作目录磁盘泄漏根治（2026-09-08，用户报告）
+> **结论**：磁盘泄漏三根因（sweepWeightFiles 旧正则匹配不到 kind 命名→永远空操作；强杀孤儿 game-*；陈旧 pid）；新纯函数模块 tools/agent/workdir-cleanup.ts（KEEP=4 + 在飞引用永不删 + 孤儿 5min 年龄门）；本机 62MB→3.7MB；7 例单测含旧正则回归。
+
+## §375 / workdir 收敛同步到 trainer 本地采样路径（2026-09-08，§374 后续）
+> **结论**：trainer 本地采样波次目录（it{N}/w{idx}）失败/废弃残留 → nn-training/rl/workdir_sweep.py（只删无 _rl_report 的 w<idx>，完整波次永不删），钩子挂 _rotate_cleanup；6 例单测。
+
+## §376 / 双 tmp 目录统一：全项目只使用仓库根 ./tmp（2026-09-08，用户指令）
+> **结论（双 tmp 统一）**：全项目只使用仓库根 ./tmp——paths.ts LOG_DIR 改 REPO_ROOT/tmp；python 相对路径一律锚定仓库根；conftest/pyproject 缓存/清理脚本目标同步；nn-training/tmp 存量不迁移待用户确认删除。
+
+## §377 / 仓库根 tmp/ 统一收敛脚本 tools/tmp-clean.py（2026-09-08，§376 后续）
+> **工具**：tools/tmp-clean.py（分类器=it 子目录 / 保留策略 keep-runs 3 + keep-days 14；永不碰 dist-agent/git-repair-backup/training-start；.run_rl 锁存活跳过运行目录；输出 ASCII 防 GBK 乱码）。
+
+## §378 / 引擎改微基准自动选：节点本机实测 JSC vs V8（2026-09-08，三平台数据驱动）
+> **定案**：引擎改微基准自动选（engine-bench.ts，bun vs node 各 warmup 计时，node ≤ bun×0.97 才选；结果缓存engine-choice.json 随 codeHash stamp 清理）；五平台实测 V8 只在 x64 Linux/Windows 赢、JSC mac/arm64 赢。
+
+## §379 / 铁律：课程引用的权重文件常备备份到 nn-training/weights/in-use/（2026-09-08，用户指令）
+> **规则（铁律，见头部「铁律清单」）**：课程（curricula/*.jsonc 的 bc/init/引用路径）使用的权重文件必须常备一份 nn-training/weights/in-use/（不受 tmp 清理影响）；新课程/新引用同步落一份；原件丢失从 in-use 恢复后启动，禁止"无备份裸奔"直接重训或换 ref 救场；临时目录只放可再生中间产物。现场：ep60 BC 本机不可恢复，来源需用户提供。
+
+## §380 / TrainingLoop 不许静默失败：退出看护 + 失败写日志（2026-09-08，用户指令）
+> **规则（铁律，见头部「铁律清单」）**：TrainingLoop 不许静默失败——意外退出看护（4s 周期两帧确认→日志标记+registry error/exitAt + UI 展示）；启动即退出先落失败标记再清账；状态机 exited 不是日志。
+
+## §383 / 悬空 job 清理 + 阶段灯 idle 修复（2026-09-08，用户指令）
+> **结论**：悬空 job → cancel_stale_jobs 发布前作废 it≤当前 的非本次 pending（幂等，avoid GPU 补做历史 jid）；阶段灯 idle → parsePhaseFromLog 补 published-job→ppo 行匹配。
+
+## §381 / 组件日志动态查找在组件表落地 + 账本真实性回归（2026-09-08，用户指令）
+> **结论**：组件日志页「文件不存在」根因 = 旧控制台进程（静态路径失效）+ 组件表未用动态查找；统一走 resolveComponentLog（静态 → 账本 → scanLatestLog 动态、mtime 最新、只扫一层）+ 账本真实性按真进程 pid 重登记。训诫：改码后看到旧行为先核对控制台进程启动时间。
+
+## §382 / ②回报重分配 = terminal-spread 均匀重分配（2026-09-08，vk1 停腿后用户指令"开发下一棒"）
+> **定案（②回报重分配 = terminal-spread）**：p3 四腿全灭，§362 排序只剩②；终局对账额 T 改每步 +T/N（Σr 恒等、RUDDER 均匀基线、零新超参；按开火/活动加权否决——超时组恰在打）；做在 wrapper 层（TIME_AXIS_REDUCERS 不变式不破）；identity 指纹含新键 → formula_hash 变强制隔离；载体 p3-rd1（由 vk1 派生单变量）；预注册门 it5 ≥35 / it15−it5 ≥+15pp 且 ≥45。
+
+## §384 / pull 预设 trainingLoop 种子路径硬编码修好（2026-09-08，p3-rd1 启动失败）
+> **结论**：pull 预设种子路径硬编码 weights.json 与课程 bc 字段脱节（ckpt.60）；即时解堵（同 sha 恢复）+ 根治 resolveCourseBc(course)（读课程 jsonc，失败回退 legacy）+ 回归测试。教训：读课程字段的第二实现必须以课程文件为唯一来源。
+
+## §2026-09-08-decisions-governance（2026-09-08，用户拍板执行 plan/decisions-governance.md）
+
+- **背景**：DECISIONS.md 膨胀至 3734 行、编号至 §384，并行分支撞号（§293/§354/§355/§361 各 2 条同号）、
+  历次瘦身必输（写入成本 0、清理成本 100，三 agent 并行每月 +30 条）。实测定案为准入问题，非整理问题。
+- **备选与否决**：更勤瘦身 —— 否，写入门槛为零时任何频率瘦身都是负收益；换编号格式（全局计数器加锁）—— 否，
+  顺序整数是全局共享可变计数器，并发必然撞号；ADR 分片（一决策一文件，P4）—— 暂缓，瓶颈在准入而非文件组织，
+  收紧准入后写入量掉 80%，单文件 append 够用。
+- **决定**：收紧准入（三问闸门 + 三类路由，禁双写）+ 防冲突命名（日期 ID `§YYYY-MM-DD-<branch>-<slug>`，
+  旧编号 §1–§384 冻结契约不动）+ union 合并（`.gitattributes`）+ 只追加（新条目只写末尾）+
+  模板外置（`docs/decisions/HOW-TO-ADD.md`）+ 自动校验（`tools/check-decisions.ts` 接进 `bun run check`，
+  基线 `tools/decisions-baseline.json`）+ 一次性瘦身（编号集合不变式：只删正文不删编号；
+  实验/调优 → progress 指针，bugfix/UI → commit 承载）。本次迁移 3734 → 约 980 行，编号集合逐条核对未变。
+- **违反后果**：撞号与膨胀回归（目标 ≤5 条/月 vs 现状 ~30）、合并冲突复现、外部引用断链。
+- **留存**：旧全文在 ccf49ff^（瘦身前全文版，git 历史为准，不另存本机备份）。

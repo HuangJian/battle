@@ -139,6 +139,7 @@ def _write_synthetic_shard(
 
 # ------------------------------------------------------------------ 主流程
 
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="remote PPO loopback smoke (M0d/M1)")
     ap.add_argument("--work", default="tmp/remote-smoke", help="冒烟工作目录（仓库内，gitignore）")
@@ -149,10 +150,11 @@ def main() -> int:
 
     import numpy as np  # noqa: F401 — 确保 import 顺序稳定
 
-    work = ROOT / args.work
+    work = REPO / args.work  # 2026-09-08 双 tmp 统一：锚定仓库根 tmp/，不用 ROOT(nn-training)/tmp
     if work.exists():
         shutil.rmtree(work)  # 冒烟目录可整体重建（非训练产物）
     work.mkdir(parents=True)
+
     def log(msg: str) -> None:
         print(f"[smoke] {msg}", flush=True)
 
@@ -170,7 +172,9 @@ def main() -> int:
         z.extract("battle2-p1bc/run/weights.json", work)
     shutil.copyfile(work / "battle2-p1bc" / "run" / "weights.json", init_w)
     init_weights_fp = hashlib.sha256(init_w.read_bytes()).hexdigest()
-    log(f"init weights p1-ep60 -> {init_w} ({init_w.stat().st_size} bytes, fp={init_weights_fp[:12]}…)")
+    log(
+        f"init weights p1-ep60 -> {init_w} ({init_w.stat().st_size} bytes, fp={init_weights_fp[:12]}…)"
+    )
 
     # ---- 2) 合成 shard（traj/it1/rl_s2000_seed{...}——p4 自定义关 ID 2000） ----
     traj_dir = work / "traj"
@@ -296,7 +300,7 @@ def main() -> int:
         f"SMOKE PASS: round-trip={t_total:.1f}s jid={jid} "
         f"steps={agg.get('steps')} chunks={agg.get('chunks')} "
         f"kl={agg.get('kl')} ppo_sec={result.get('ppo_sec')} "
-        f"landed_wver={landed_fp[:12]}… opt_ckpt={'/'.join(f for f in ('model.pt','opt.pt','state.json') if (ckpt/f).exists())}"
+        f"landed_wver={landed_fp[:12]}… opt_ckpt={'/'.join(f for f in ('model.pt', 'opt.pt', 'state.json') if (ckpt / f).exists())}"
     )
     srv.shutdown()
     th.join(timeout=5)

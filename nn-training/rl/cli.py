@@ -272,6 +272,14 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
     )
     ap.add_argument("--seed", type=int, default=_d("seed", 7))
     ap.add_argument(
+        "--normalize-ret",
+        type=int,
+        default=_d("normalize_ret", 0),
+        help="R5：ret 跨 batch 归一（value 头拟合 O(1) 目标）；0 = 历史行为 "
+        "（默认）。课程模式由课程 normalize_ret 驱动（课程是单一事实来源，"
+        "无 CLI 逐参覆盖）。",
+    )
+    ap.add_argument(
         "--max-hours",
         type=float,
         default=0.0,

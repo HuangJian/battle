@@ -263,6 +263,7 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
             self._opt = None
             self._device = None
             self._ref_model = None
+            self._bc_ref = None
             self._ppo_mod = None
             self._ppo_goal = None
             self._ppo_intent = None
@@ -309,6 +310,21 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 p.requires_grad = False
             ref_model.eval()
         self._ref_model = ref_model
+        # BC-anchored kickstart（§363）：ref = 课程 bc 冻结快照（validate_args 已
+        # 保 kickstart_ref 仅 per-tick 且 warmup_iters=0）。与 intent 取 args.out
+        # 不同：bc 文件不可变，重启断点续跑不改变锚点。
+        self._bc_ref = None
+        if args.mode == "per-tick" and bool(getattr(args, "kickstart_ref", False)):
+            from data.weights_io import load_state_into
+
+            bc_ref = self._ppo_mod.build_ppo(args.bc)
+            load_state_into(bc_ref, args.bc)
+            for p in bc_ref.parameters():
+                p.requires_grad = False
+            bc_ref.eval()
+            bc_ref.to(device)
+            self._bc_ref = bc_ref
+            log("[run_rl] kickstart ref built from course bc (frozen master)")
         # M1c 冻结层/头（plan §7）：freeze/freeze_heads 前缀表 → requires_grad=False，
         # 优化器只收可训参数（前缀 = name.startswith，前缀间不得父子歧义，见单测）。
         freeze_prefixes = list(getattr(args, "freeze", []) or []) + list(

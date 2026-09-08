@@ -423,10 +423,20 @@ def _stub_local_rollout(
         arr = _synth_payload(30).get(arr_name)
         if arr is not None:
             np.save(str(out_dir / f"{arr_name}.npy"), arr)
-    (out_dir / "manifest.json").write_text(json.dumps({
-        "wver": wver, "stage": si, "seed": sd, "nSamples": 30, "ticks": 900,
-        "outcome": "stage_clear", "score": 0.4,
-    }), encoding="utf-8")
+    (out_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "wver": wver,
+                "stage": si,
+                "seed": sd,
+                "nSamples": 30,
+                "ticks": 900,
+                "outcome": "stage_clear",
+                "score": 0.4,
+            }
+        ),
+        encoding="utf-8",
+    )
     return {
         "node": "local",
         "wver": wver,
@@ -443,7 +453,9 @@ def _stub_local_rollout(
     }
 
 
-def _itest_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[FakeServer, Path, dict, types.SimpleNamespace, str]:
+def _itest_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> tuple[FakeServer, Path, dict, types.SimpleNamespace, str]:
     """为集成子测试拉起 FakeServer + 本地直跑打桩。调用方负责 try/finally 关闭 server。"""
     weights = tmp_path / "weights.json"
     weights.write_text('{"stub": true}')
@@ -451,9 +463,21 @@ def _itest_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[FakeSer
     srv = FakeServer(("127.0.0.1", 0), FakeAgent)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     cfg = {
-        "nodes": [{"id": "fake", "url": f"http://127.0.0.1:{srv.server_address[1]}",
-                   "authKey": "", "concurrency": 4, "enabled": True}],
-        "policy": {"taskTimeoutSec": 60, "queueWindowSec": 120, "statusTimeoutSec": 3, "agentRescanSec": 1},
+        "nodes": [
+            {
+                "id": "fake",
+                "url": f"http://127.0.0.1:{srv.server_address[1]}",
+                "authKey": "",
+                "concurrency": 4,
+                "enabled": True,
+            }
+        ],
+        "policy": {
+            "taskTimeoutSec": 60,
+            "queueWindowSec": 120,
+            "statusTimeoutSec": 3,
+            "agentRescanSec": 1,
+        },
     }
     args = types.SimpleNamespace(workers=4, max_ticks=300, difficulty="hard")
     bun = shutil.which("bun") or "bun-stub"
@@ -468,7 +492,13 @@ def test_it_queue_normal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
         traj.mkdir()
         drained_ts, result_ts = [], []
         rep = run_rl.run_rollout_queue(
-            bun, str(WEIGHTS), traj, [(0, 111), (3, 222)], args, cfg, "i1.1",
+            bun,
+            str(WEIGHTS),
+            traj,
+            [(0, 111), (3, 222)],
+            args,
+            cfg,
+            "i1.1",
             local_slots_max=0,
             on_result=lambda _s: result_ts.append(time.time()),
             on_queue_drained=lambda: drained_ts.append(time.time()),
@@ -495,8 +525,15 @@ def test_it_halt_preset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
         ev.set()
         calls = []
         rep2 = run_rl.run_rollout_queue(
-            bun, str(WEIGHTS), traj, [(0, 111), (3, 222)], args, cfg, "i2.2",
-            local_slots_max=0, halt_event=ev,
+            bun,
+            str(WEIGHTS),
+            traj,
+            [(0, 111), (3, 222)],
+            args,
+            cfg,
+            "i2.2",
+            local_slots_max=0,
+            halt_event=ev,
             on_queue_drained=lambda: calls.append(1),
         )
         check(rep2.get("halt_aborted") is True, "I2 halt_aborted flagged")
@@ -525,10 +562,18 @@ def test_it_stream_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
             return th
 
         rep3 = _run_rollout_stream(
-            bun, str(WEIGHTS), traj, [(0, 111), (0, 222), (1, 333), (1, 444)],
+            bun,
+            str(WEIGHTS),
+            traj,
+            [(0, 111), (0, 222), (1, 333), (1, 444)],
             types.SimpleNamespace(**{**vars(args), "epochs": 1, "mb": 64}),
-            cfg3, "i3.3", None, None, "cpu",
-            on_collect_done=on_collect_done, backend=stub3,
+            cfg3,
+            "i3.3",
+            None,
+            None,
+            "cpu",
+            on_collect_done=on_collect_done,
+            backend=stub3,
         )
         sm = rep3.pop("_stream")
         check(rep3["games"] == 4 and sm["waves"] >= 1, "I3 streamed round trained")
@@ -536,7 +581,9 @@ def test_it_stream_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
         check(sm["halted"] is False and sm["dropped_games"] == 0, "I3 no halt (cap high)")
         check(len(fired) == 1, f"I3 eval fired exactly once (got {len(fired)})")
         wts3 = [t for kind, t, _x in srv.events if kind == "weights"]
-        check(bool(wts3) and fired[0] > wts3[0], "I3 eval after weight distribution (queue-drained)")
+        check(
+            bool(wts3) and fired[0] > wts3[0], "I3 eval after weight distribution (queue-drained)"
+        )
         check("_eval_thread" in rep3, "I3 eval thread returned via report")
     finally:
         srv.shutdown()
@@ -553,9 +600,18 @@ def test_it_stream_halt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
         cfg4["policy"]["streamWaveGames"] = 2
         cfg4["policy"]["streamKlCap"] = 1e-6
         rep4 = _run_rollout_stream(
-            bun, str(WEIGHTS), traj, [(0, 111), (0, 222), (1, 333), (1, 444)],
+            bun,
+            str(WEIGHTS),
+            traj,
+            [(0, 111), (0, 222), (1, 333), (1, 444)],
             types.SimpleNamespace(**{**vars(args), "epochs": 1, "mb": 64}),
-            cfg4, "i4.4", None, None, "cpu", on_collect_done=None, backend=stub4,
+            cfg4,
+            "i4.4",
+            None,
+            None,
+            "cpu",
+            on_collect_done=None,
+            backend=stub4,
         )
         sm4 = rep4.pop("_stream")
         check(sm4["halted"] is True, f"I4 halted (cum_kl={sm4['kl_cum']:.1f})")
@@ -574,18 +630,36 @@ def test_it_local_suspend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
         susp = threading.Event()
         susp.set()
         rep5a = run_rl.run_rollout_queue(
-            bun, str(WEIGHTS), traj, pairs5, args, cfg, "i5.51",
-            local_slots_max=2, local_suspend=susp,
+            bun,
+            str(WEIGHTS),
+            traj,
+            pairs5,
+            args,
+            cfg,
+            "i5.51",
+            local_slots_max=2,
+            local_suspend=susp,
         )
-        check(rep5a["games"] == 2 and "local" not in rep5a["dist"]["nodes"],
-              f"I5 suspended -> zero local settlements (byNode={rep5a['dist']['nodes']})")
+        check(
+            rep5a["games"] == 2 and "local" not in rep5a["dist"]["nodes"],
+            f"I5 suspended -> zero local settlements (byNode={rep5a['dist']['nodes']})",
+        )
         traj = tmp_path / "i5b"
         traj.mkdir()
         rep5b = run_rl.run_rollout_queue(
-            bun, str(WEIGHTS), traj, pairs5, args, cfg, "i5.52", local_slots_max=2,
+            bun,
+            str(WEIGHTS),
+            traj,
+            pairs5,
+            args,
+            cfg,
+            "i5.52",
+            local_slots_max=2,
         )
-        check(rep5b["games"] == 2 and rep5b["dist"]["nodes"] == {"local": 2},
-              f"I5b no-suspend -> local owns head tasks ({rep5b['dist']['nodes']})")
+        check(
+            rep5b["games"] == 2 and rep5b["dist"]["nodes"] == {"local": 2},
+            f"I5b no-suspend -> local owns head tasks ({rep5b['dist']['nodes']})",
+        )
     finally:
         srv.shutdown()
 
@@ -600,7 +674,14 @@ def test_it_longtail_race(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
         srv._slowed_once = set()
         t0 = time.time()
         rep6 = run_rl.run_rollout_queue(
-            bun, str(WEIGHTS), traj, [(0, 111), (3, 222)], args, cfg, "i6.6", local_slots_max=0,
+            bun,
+            str(WEIGHTS),
+            traj,
+            [(0, 111), (3, 222)],
+            args,
+            cfg,
+            "i6.6",
+            local_slots_max=0,
         )
         took6 = time.time() - t0
         n_slow_disp = sum(1 for kind, _t, p in srv.events if kind == "dispatch" and p == (0, 111))
@@ -616,15 +697,21 @@ def test_it_longtail_race(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
 @pytest.mark.heavy
 def test_it_eval_deferred(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import rl.eval_dispatch as ed
+
     srv, WEIGHTS, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
     try:
         traj = tmp_path / "i7"
         traj.mkdir()
         srv.eval_delay = 2.0
-        args_eval = types.SimpleNamespace(**{**vars(args), "eval_games_per_stage": 2, "eval_stages": "0-2"})
+        args_eval = types.SimpleNamespace(
+            **{**vars(args), "eval_games_per_stage": 2, "eval_stages": "0-2"}
+        )
         eval_th = threading.Thread(
-            target=lambda: ed.dispatch_eval_round(bun, str(WEIGHTS), traj, args_eval, cfg, "i7.e", 10),
-            daemon=True, name="eval-it10",
+            target=lambda: ed.dispatch_eval_round(
+                bun, str(WEIGHTS), traj, args_eval, cfg, "i7.e", 10
+            ),
+            daemon=True,
+            name="eval-it10",
         )
         eval_th.start()
         srv.eval_dispatched.clear()
@@ -632,11 +719,20 @@ def test_it_eval_deferred(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
             raise AssertionError("I7 eval round never dispatched a game")
         t_collect = time.time()
         rep7 = run_rl.run_rollout_queue(
-            bun, str(WEIGHTS), traj, [(0, 111), (3, 222)], args, cfg, "i7.9", local_slots_max=0,
+            bun,
+            str(WEIGHTS),
+            traj,
+            [(0, 111), (3, 222)],
+            args,
+            cfg,
+            "i7.9",
+            local_slots_max=0,
         )
         t_collect = round(time.time() - t_collect, 1)
-        check(rep7["games"] == 2 and rep7["missing"] == [],
-              f"I7 collection completes while slow eval in flight ({t_collect}s)")
+        check(
+            rep7["games"] == 2 and rep7["missing"] == [],
+            f"I7 collection completes while slow eval in flight ({t_collect}s)",
+        )
         check(eval_th.is_alive(), "I7 slow eval still running afterwards (deferred to background)")
         eval_th.join(timeout=45)
     finally:
@@ -653,19 +749,35 @@ def test_it_precollect_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
         plan8 = [(0, 111), (3, 222)]
         pre_pair, cur_pair = (0, 111), (3, 222)
         _mk_shard(traj, *pre_pair, "e" * 64)
-        args8 = types.SimpleNamespace(**{**vars(args), "max_ticks": 600, "mb": 128, "epochs": 1, "seed": 7})
+        args8 = types.SimpleNamespace(
+            **{**vars(args), "max_ticks": 600, "mb": 128, "epochs": 1, "seed": 7}
+        )
         cfg8 = json.loads(json.dumps(cfg))
         cfg8["policy"]["streamWaveGames"] = 1
         stub8 = _StubPpo(kl=1e-12)
         rep8 = _run_rollout_stream(
-            bun, str(WEIGHTS), traj, plan8, args8, cfg8, "i8.8",
-            None, None, None, backend=stub8, extra_wver="e" * 64,
+            bun,
+            str(WEIGHTS),
+            traj,
+            plan8,
+            args8,
+            cfg8,
+            "i8.8",
+            None,
+            None,
+            None,
+            backend=stub8,
+            extra_wver="e" * 64,
         )
         disp8 = [p for kind, _t, p in srv.events if kind == "dispatch"]
-        check(stub8.updates >= 2,
-              f"I8 precollected shard trained as first wave + rest collected (updates={stub8.updates})")
-        check(pre_pair not in disp8 and cur_pair in disp8,
-              f"I8 collector skips precollected pair, dispatches only remaining ({disp8})")
+        check(
+            stub8.updates >= 2,
+            f"I8 precollected shard trained as first wave + rest collected (updates={stub8.updates})",
+        )
+        check(
+            pre_pair not in disp8 and cur_pair in disp8,
+            f"I8 collector skips precollected pair, dispatches only remaining ({disp8})",
+        )
         check(rep8["games"] == 2, f"I8 report covers full plan (games={rep8['games']})")
     finally:
         srv.shutdown()
@@ -705,7 +817,9 @@ def test_it_early_race_v314(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
         srv.slow_first = {(0, 111)}
         srv._slowed_once = set()
         t0 = time.time()
-        rep9 = run_rl.run_rollout_queue(bun, str(WEIGHTS), traj, plan9, args, cfg, "i9.9", local_slots_max=0)
+        rep9 = run_rl.run_rollout_queue(
+            bun, str(WEIGHTS), traj, plan9, args, cfg, "i9.9", local_slots_max=0
+        )
         took9 = time.time() - t0
         check(rep9["games"] == 8 and rep9["missing"] == [], "I9 all 8 settled")
         # 竞速证据：调度器日志中 seed111 出现过 tail-race / dup settle / fanout copy。
@@ -714,11 +828,13 @@ def test_it_early_race_v314(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
         # （2026-09-06 实测：慢主副本的 HTTP 事件偶发缺席，raced 仍为 True —— 计数断言
         # 是多余的、且制造 flake）。
         raced = any(
-            "seed111" in ln
-            and ("race lane" in ln or "dup settle" in ln or "fanout copy" in ln)
+            "seed111" in ln and ("race lane" in ln or "dup settle" in ln or "fanout copy" in ln)
             for ln in lines
         )
-        check(raced, "I9 slow in-flight task re-raced by idle slot (log has tail-race/dup/fanout for seed111)")
+        check(
+            raced,
+            "I9 slow in-flight task re-raced by idle slot (log has tail-race/dup/fanout for seed111)",
+        )
         # 死锁兜底（非性能上界）：健康轮 ~0.1-4s（含竞速 churn）；xdist 并行/高负载下实测
         # 可超 5s（2026-09-06 hook 门禁实测）→ 放宽到 30s，仍能抓住 queueWindowSec=120 的
         # 死锁空等（这才是本断言的目的：round 必须自己终结，不靠外部超时）。
@@ -820,6 +936,8 @@ def test_backup_weights(tmp: Path) -> None:
         check(remain == ["it1", "it2", "it3"], f"只归档不清理（got {remain}）")
     finally:
         rl_archive.WEIGHTS_BACKUP_DIR = old_dir
+
+
 def test_eval_local_gate(tmp: Path) -> None:
     """R6 补丁：eval 本地参与——gate 放行后本机直跑全部/尾局；gate 不放行则让位。"""
     import rl.eval_dispatch as ed
@@ -842,8 +960,18 @@ def test_eval_local_gate(tmp: Path) -> None:
     calls: list[tuple[int, int]] = []
 
     def fake_runner(
-        bun, snap, stage, seed, out_dir, max_ticks, difficulty, timeout_sec, wver,
-        stage_json="", lives_override=None, player_level=None,
+        bun,
+        snap,
+        stage,
+        seed,
+        out_dir,
+        max_ticks,
+        difficulty,
+        timeout_sec,
+        wver,
+        stage_json="",
+        lives_override=None,
+        player_level=None,
     ):
         calls.append((stage, seed))
         assert Path(snap).read_text(encoding="utf-8") == '{"arch":{}}'
@@ -1033,7 +1161,10 @@ def main() -> None:
     # 每次运行子目录（沙箱零删除适配）：standalone 共享 tmp/test-run-rl 会残留旧
     # 子目录，二次运行 mkdir(exist_ok=False，二级
     #  mkdir(exist_ok=False) → FileExistsError。带随机后缀每次新建。
-    tmp = REPO / "tmp" / "test-run-rl" / f"run-{secrets.token_hex(4)}"
+    # 仓库根 tmp/（2026-09-08 双 tmp 统一；REPO 仍是 nn-training，仅作 sys.path）
+    tmp = (
+        Path(__file__).resolve().parents[2] / "tmp" / "test-run-rl" / f"run-{secrets.token_hex(4)}"
+    )
     tmp.mkdir(parents=True, exist_ok=True)
     test_mirror_scalar_lockstep()
     test_resume_scope(tmp)
@@ -1050,9 +1181,15 @@ def main() -> None:
     test_race_tier_ok()
     if ITEST:
         itests = [
-            test_it_queue_normal, test_it_halt_preset, test_it_stream_smoke,
-            test_it_stream_halt, test_it_local_suspend, test_it_longtail_race,
-            test_it_eval_deferred, test_it_precollect_resume, test_it_early_race_v314,
+            test_it_queue_normal,
+            test_it_halt_preset,
+            test_it_stream_smoke,
+            test_it_stream_halt,
+            test_it_local_suspend,
+            test_it_longtail_race,
+            test_it_eval_deferred,
+            test_it_precollect_resume,
+            test_it_early_race_v314,
         ]
         for fn in itests:
             sub = tmp / fn.__name__
@@ -1142,10 +1279,25 @@ def test_rl_config_validation() -> None:
     check(_raises(reward="toy:"), "reward toy: 缺 arm 拦截")
     # validate_args 对 Namespace：非法 → SystemExit
     bad = types.SimpleNamespace(
-        mode="per-tick", iters=2, stream=1, double_buffer=0, precollect_games=5,
-        precollect_samples=1000, workers=8, local_slots=0, mb=512, epochs=4,
-        lr=3e-4, seed=7, keep_iters=3, stop_loss_at=0, stop_loss_delta=0.0,
-        adv_norm="auto", eval_seeds=10, eval_at="", reward="",
+        mode="per-tick",
+        iters=2,
+        stream=1,
+        double_buffer=0,
+        precollect_games=5,
+        precollect_samples=1000,
+        workers=8,
+        local_slots=0,
+        mb=512,
+        epochs=4,
+        lr=3e-4,
+        seed=7,
+        keep_iters=3,
+        stop_loss_at=0,
+        stop_loss_delta=0.0,
+        adv_norm="auto",
+        eval_seeds=10,
+        eval_at="",
+        reward="",
     )
     try:
         validate_args(bad)

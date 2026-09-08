@@ -1,0 +1,104 @@
+// 课程 p3-cover —— 掩体探针（DECISIONS §385；p3 五战全败根因分析后的零成本彩票）
+//
+// 由 p3-bc.jsonc 逐字节派生，仅改动以下 3 处：
+//   1. name: p3-bc → p3-cover
+//   2. stages[0].grid：空场 → 加 4 组 2×2 钢掩体（CODE 6 = steel WHOLE），
+//      位于 grid (4,4)/(8,4)/(4,8)/(8,8)（玩家恒居中 grid(6,6)，四斜角各一块）
+//   3. bc → weights/in-use（tmp/ep60 已随 tmp 清理消失，§384 同款）
+//
+// 动机（2026-09-08 p3 根因分析）：p3 是 13×13 全空地 + 1 命 + hard + 3 敌，
+// 玩家无任何地形可用，生存是纯走位博弈。BC 挨打率从 p2 的 29 涨到 59（×2.0），
+// 而 God 只从 16 涨到 21（×1.31）——缺的是多敌威胁规避，掩体可替代一部分。
+//
+// 探针协议（CPU only，~30s，零训练）：同 seeds 0-99 配对
+//   BC ep60 ×100 ＋ God ×100。判读：BC ≥60 → 掩体有效，p3 腿改用本图；
+//   BC 42-55 → 灰区（可能需更多/不同布局）；BC ≤45 → 空场无罪，回主线 A。
+//
+// 本文件只授权探针，不授权 RL 腿（另起条目）。
+{
+  "version": 5,
+  "name": "p3-cover",
+  "mode": "per-tick",
+  "stages": [
+    {
+      "name": "p4-onset-mixed-cover",
+      "grid": [
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 6, 0, 0, 0, 6, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 6, 0, 0, 0, 6, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+      ],
+      "forces": "abcdabcdabcdabcdabcd",
+      "count": 3,
+      "player_spawn": { "col": 12, "row": 12 },
+      "enemy_spawns": [
+        { "col": 2, "row": 2 },
+        { "col": 22, "row": 2 },
+        { "col": 22, "row": 22 },
+        { "col": 2, "row": 22 }
+      ],
+      "spawn_variants": [
+        {"enemy_spawns": [{"col": 2, "row": 2},{"col": 22, "row": 2},{"col": 22, "row": 22}]},
+        {"enemy_spawns": [{"col": 22, "row": 2},{"col": 22, "row": 22},{"col": 2, "row": 22}]},
+        {"enemy_spawns": [{"col": 2, "row": 2},{"col": 22, "row": 22},{"col": 2, "row": 22}]},
+        {"enemy_spawns": [{"col": 2, "row": 2},{"col": 22, "row": 2},{"col": 2, "row": 22}]}
+      ]
+    }
+  ],
+  "difficulty": "hard",
+  "max_ticks": 2400,
+  "seed_rotate": 150,
+  "player": {
+    "lives": 1,
+    "level": 0
+  },
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.3,
+      "wPickup": 1.5,
+      "wStar": 1.0,
+      "wDmg": 1.0,
+      "wStuck": 0.02,
+      "wShot": 0.01
+    },
+    "terminal": {
+      "stage_clear": 2.0,
+      "lives_exhausted": -1.0,
+      "timeout": -2.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/in-use/p1-bc-ep60.json",
+  "iters": 0,
+  "max_hours": 24,
+  "workers": 8,
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  "gamma": 0.998,
+  "lam": 0.99,
+  "ppo_schedule": [
+    { "until_iter": 40, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
+    { "kl_coef": 0.0, "lr": 0.00005 }
+  ],
+  "out": "tmp/p3-cover/weights.json",
+  "traj": "tmp/p3-cover",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/p3-cover",
+  "backup_prefix": "p3-cover",
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 100,
+  "eval_every": 5
+}

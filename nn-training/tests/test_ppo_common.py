@@ -247,3 +247,160 @@ def test_backend_params_match_config() -> None:
     from ppo.config import assert_backend_constants
 
     assert_backend_constants()
+
+
+def _ret_norm_shards(tmp_path: Path) -> dict[str, dict[str, npt.NDArray]]:
+    """两个 marker 目录 + 按名取数的 synthetic payload（ret 尺度不一，模拟
+    R5 现场：value/return 量级差）。"""
+    payloads: dict[str, dict[str, npt.NDArray]] = {}
+    specs = [("shard_a", 10, 5.0, 2.0), ("shard_b", 6, -3.0, 0.5)]
+    for name, n, base, step in specs:
+        d = tmp_path / name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "metrics.npy").write_bytes(b"0")
+        (d / "obs.npy").write_bytes(b"0")
+        rng = np.random.RandomState(11)
+        payloads[name] = {
+            "obs": rng.randint(0, 255, (n, 14, 26, 26)).astype(np.uint8),
+            "scalars": rng.randn(n, 24).astype(np.float32),
+            "a_move": rng.randint(0, 5, n).astype(np.int64),
+            "a_fire": rng.randint(0, 2, n).astype(np.int64),
+            "lp_move": rng.randn(n).astype(np.float32),
+            "lp_fire": rng.randn(n).astype(np.float32),
+            "value": rng.randn(n).astype(np.float32),
+            "adv": (rng.randn(n) * 3 + 1).astype(np.float32),
+            "ret": (np.arange(n, dtype=np.float32) * step + base),
+            "mask": np.ones(n, dtype=np.int64),
+            "reward": np.zeros(n, dtype=np.float32),
+            "done": np.zeros(n, dtype=np.int64),
+        }
+    return payloads
+
+
+def _ret_norm_call(
+    tmp_path: Path, payloads: dict[str, dict[str, npt.NDArray]], normalize_ret: bool
+) -> list[dict]:
+    def loader(dirpath: str) -> dict[str, npt.NDArray]:
+        return {k: v.copy() for k, v in payloads[Path(dirpath).name].items()}
+
+    return ppo_common.load_episodes_common(
+        str(tmp_path),
+        label="ppo",
+        shard_kind="RL",
+        need_files=("metrics.npy", "obs.npy"),
+        shard_loader=loader,
+        gae=lambda d: (d["adv"], d["ret"]),
+        gae_name="GAE",
+        normalize_ret=normalize_ret,
+    )
+
+
+def test_load_episodes_common_ret_untouched_by_default(tmp_path: Path) -> None:
+    """默认 normalize_ret=False：ret 逐字节不变（历史行为回归锚）；
+    reward/done 字段照旧剥离，adv 仍全局归一。"""
+    payloads = _ret_norm_shards(tmp_path)
+    eps = _ret_norm_call(tmp_path, payloads, False)
+    assert len(eps) == 2
+    for ep in eps:
+        assert "reward" not in ep and "done" not in ep
+    got = np.concatenate([e["ret"] for e in eps])
+    want = np.concatenate(
+        [payloads["shard_a"]["ret"], payloads["shard_b"]["ret"]]
+    )
+    np.testing.assert_array_equal(got, want)
+
+
+def test_load_episodes_common_ret_normalized_when_enabled(tmp_path: Path) -> None:
+    """normalize_ret=True：ret 全局 mean 0 / std 1；obs 等载荷逐字节不动；
+    adv 归一不受影响。"""
+    payloads = _ret_norm_shards(tmp_path)
+    eps = _ret_norm_call(tmp_path, payloads, True)
+    got_ret = np.concatenate([e["ret"] for e in eps])
+    assert abs(float(got_ret.mean())) < 1e-6
+    assert abs(float(got_ret.std()) - 1.0) < 1e-6
+    for name in ("shard_a", "shard_b"):
+        ep = next(e for e in eps if e["obs"].shape[0] == payloads[name]["obs"].shape[0]
+                  and np.array_equal(e["obs"], payloads[name]["obs"]))
+        assert ep is not None
+    got_adv = np.concatenate([e["adv"] for e in eps])
+    assert abs(float(got_adv.mean())) < 1e-5
+
+
+def _kick_chunks() -> list[dict]:
+    """§363 kickstart 数值夹具：B=8 合成 minibatch（numpy 口径，与 tensored 一致）。"""
+    rng = np.random.RandomState(3)
+    n = 8
+    return [
+        {
+            "obs": rng.randint(0, 255, (n, 14, 26, 26)).astype(np.uint8),
+            "scalars": (rng.randn(n, 19)).astype(np.float32),
+            "a_move": rng.randint(0, 5, n).astype(np.int64),
+            "a_fire": rng.randint(0, 2, n).astype(np.int64),
+            "lp_move": (rng.randn(n) * 0.2).astype(np.float32),
+            "lp_fire": (rng.randn(n) * 0.2).astype(np.float32),
+            "adv": (rng.randn(n)).astype(np.float32),
+            "ret": (rng.randn(n) * 2 + 1).astype(np.float32),
+            "mask": np.ones((n, 7), dtype=np.int64),
+        }
+    ]
+
+
+def _kick_models():
+    import torch
+
+    from models.student import PPOStudent
+
+    torch.manual_seed(0)
+    m = PPOStudent()
+    torch.manual_seed(0)
+    m2 = PPOStudent()
+    torch.manual_seed(1)
+    ref = PPOStudent()
+    ref.eval()
+    for p in ref.parameters():
+        p.requires_grad = False
+    return torch, m, m2, ref
+
+
+def _kick_state(m) -> list:
+    return [p.detach().cpu().clone() for p in m.parameters()]
+
+
+def test_ppo_update_kickstart_off_is_identity() -> None:
+    """缺省路径恒等：ref=None（无论 kl 为何值）与 kl=0（无论 ref 有无）跑出逐字节
+    相同的权重——旧行为回归锚。"""
+    import ppo.engine as engine
+
+    torch, m1, m2, ref = _kick_models()
+    chunks = _kick_chunks()
+    o1 = torch.optim.Adam(m1.parameters(), lr=1e-4)
+    o2 = torch.optim.Adam(m2.parameters(), lr=1e-4)
+    np.random.seed(7)
+    a1 = engine.ppo_update(m1, o1, chunks, 1, torch.device("cpu"))
+    np.random.seed(7)
+    a2 = engine.ppo_update(
+        m2, o2, chunks, 1, torch.device("cpu"), ref_model=ref, kickstart_kl=0.0
+    )
+    assert a1["kickstart"] == 0.0 and a2["kickstart"] == 0.0
+    for p, q in zip(_kick_state(m1), _kick_state(m2), strict=True):
+        assert torch.equal(p, q), "关闭路径权重必须逐字节一致"
+
+
+def test_ppo_update_kickstart_bites_when_armed() -> None:
+    """武装路径：ref 就绪＋kl>0 → kickstart 列 >0 且权重偏离关闭路径。"""
+    import ppo.engine as engine
+
+    torch, m1, m2, ref = _kick_models()
+    chunks = _kick_chunks()
+    o1 = torch.optim.Adam(m1.parameters(), lr=1e-4)
+    o2 = torch.optim.Adam(m2.parameters(), lr=1e-4)
+    np.random.seed(7)
+    engine.ppo_update(m1, o1, chunks, 1, torch.device("cpu"))
+    np.random.seed(7)
+    agg = engine.ppo_update(
+        m2, o2, chunks, 1, torch.device("cpu"), ref_model=ref, kickstart_kl=1.0
+    )
+    assert agg["kickstart"] > 0, "不同初始化的 ref 应有正 KL"
+    assert any(
+        not torch.equal(p, q) for p, q in zip(_kick_state(m1), _kick_state(m2), strict=True)
+    ), "缰绳应改变更新轨迹"

@@ -1,8 +1,8 @@
 /** registry.ts — 受管进程 PID 账本（按组件分文件，天然无并行注册竞态，§339）。
 
- *  账本文件：nn-training/tmp/training-start/registry.json（单文件足够——本工具链
+ *  账本文件：tmp/training-start/registry.json（单文件足够——本工具链
  *  所有 spawn 走监督器串行登记，不再有 hub-start 并行阶段互相覆盖的问题）。
- *  legacy：hub-start 时代的 nn-training/tmp/hub-start/registry.<name>.json 在
+ *  legacy：hub-start 时代的 tmp/hub-start/registry.<name>.json 在
  *  load/clear 时一并消费，保证旧账本里的进程也能被 --kill 收编。
  */
 

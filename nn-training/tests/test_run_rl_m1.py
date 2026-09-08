@@ -244,6 +244,8 @@ def main() -> None:
     test_merged_mode_args()
     test_stop_loss_hit()
     test_update_kwargs()
+    test_update_kwargs_kickstart_zerowarmup()
+    test_validate_args_kickstart_gates()
     print()
     if FAILS:
         print(f"RESULT: {len(FAILS)} FAILURE(S)")
@@ -255,3 +257,53 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def test_update_kwargs_kickstart_zerowarmup() -> None:
+    print("[fast] update_kwargs：warmup_iters=0 时缰绳 it1 即满额（§363）")
+    args = types.SimpleNamespace(
+        epochs=4, warmup_iters=0, kickstart_kl=1.0, kickstart_decay=0.5, seed=7
+    )
+    check(
+        abs(run_rl.update_kwargs(args, 1, 1, object())["kl_coef"] - 1.0) < 1e-9,
+        "warmup 0 → it1 kl=1.0（缰绳勒住 smash 轮）",
+    )
+    check(
+        abs(run_rl.update_kwargs(args, 2, 1, object())["kl_coef"] - 0.5) < 1e-9,
+        "it2 衰减到 0.5",
+    )
+    args1 = types.SimpleNamespace(
+        epochs=4, warmup_iters=1, kickstart_kl=1.0, kickstart_decay=0.5, seed=7
+    )
+    check(
+        run_rl.update_kwargs(args1, 1, 1, object())["kl_coef"] == 0.0,
+        "warmup 1 → it1 kl=0（footgun，validate_args 应拦截，见下）",
+    )
+
+
+def test_validate_args_kickstart_gates() -> None:
+    print("[fast] validate_args：kickstart 双闸（§363）")
+    from rl.config import validate_args
+
+    ok = types.SimpleNamespace(mode="per-tick", kickstart_ref=True, warmup_iters=0)
+    try:
+        validate_args(ok)
+        check(True, "per-tick + ref + warmup 0 通过")
+    except SystemExit as e:
+        check(False, f"合法组合不应拦截：{e}")
+    bad_mode = types.SimpleNamespace(
+        mode="intent", kickstart_ref=True, warmup_iters=0
+    )
+    try:
+        validate_args(bad_mode)
+        check(False, "intent + ref 应拦截")
+    except SystemExit:
+        check(True, "intent + ref 拦截")
+    bad_warm = types.SimpleNamespace(
+        mode="per-tick", kickstart_ref=True, warmup_iters=1
+    )
+    try:
+        validate_args(bad_warm)
+        check(False, "warmup!=0 应拦截")
+    except SystemExit:
+        check(True, "warmup!=0 拦截")

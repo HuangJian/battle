@@ -6,13 +6,15 @@
  *  - api.routeAction：未知动作 404、参数错误 400、busy 互斥 409、
  *    节点启停/并发回写 rl-config.json（临时副本，跑完还原）；
  *  - actions 控制台状态：trainer 模式持久化（console-state.json 副本）；
- *  - page.renderConsolePage：渲染包含关键区块与转义安全。
+ *  - 纯函数与 SSR（render.tsx 包装）：渲染包含关键区块与转义安全。
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
+import { readIterMetrics } from '../tools/training/console/iters'
+import { LOG_DIR } from '../tools/training/paths'
 
 // ── 隔离：rl-config.json 与 console-state.json 指向临时副本（跑前备份，跑后还原）──
 
@@ -83,7 +85,8 @@ afterAll(() => {
 
 const api = await import('../tools/training/console/api')
 const actions = await import('../tools/training/console/actions')
-const page = await import('../tools/training/console/page')
+const render = await import('../tools/training/console/render')
+const view = await import('../tools/training/ui/view')
 
 function post(act: string, body: Record<string, unknown> = {}): Promise<Response> {
   return api.routeAction(act, body) as Promise<Response>
@@ -116,11 +119,122 @@ describe('console/api.buildStateView', () => {
   })
 
   it('课程发现含 curricula/*.jsonc（即使 tmp 无日志）', () => {
-    const courses = api.discoverCourses()
+    const courses = api.discoverCourses(50) // max 越 12 上限：环境课程目录增长会把 p4-fast 挤出
     // curricula/ 至少有 p4-fast.jsonc 等；不强制非空，但类型必须对
     for (const c of courses) expect(typeof c).toBe('string')
     // p4-fast 在 curricula/ 有定义但 tmp/ 可能无日志——应被补充进列表
     expect(courses).toContain('p4-fast')
+  })
+})
+
+describe('console/api.nodeViews 并行 ping（§365：串行导致 /api/state 超时空回复）', () => {
+  it('enabled 节点并发探测：全部同时发起，顺序保持，disabled 不探测', async () => {
+    const origFetch = globalThis.fetch
+    let active = 0
+    let maxActive = 0
+    const started: string[] = []
+    let release!: () => void
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    globalThis.fetch = ((url: unknown, init?: RequestInit) => {
+      active++
+      maxActive = Math.max(maxActive, active)
+      started.push(String(url))
+      return new Promise<Response>((resolve, reject) => {
+        const onAbort = (): void => {
+          active--
+          reject(new DOMException('aborted', 'AbortError'))
+        }
+        init?.signal?.addEventListener('abort', onAbort)
+        void gate.then(() => {
+          init?.signal?.removeEventListener('abort', onAbort)
+          active--
+          resolve(
+            new Response(JSON.stringify({ codeHash: 'abcd1234', cpus: 8 }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            }),
+          )
+        })
+      })
+    }) as typeof fetch
+    try {
+      const cfg = {
+        version: 1,
+        nodes: [
+          { id: 'a', url: 'http://node-a', authKey: 'k', concurrency: 2, enabled: true },
+          { id: 'b', url: 'http://node-b', authKey: 'k', concurrency: 2, enabled: true },
+          { id: 'c', url: 'http://node-c', authKey: 'k', concurrency: 2, enabled: true },
+          { id: 'off', url: 'http://node-off', authKey: 'k', concurrency: 2, enabled: false },
+        ],
+        rl: { hub_port: 8900, agent_port: 8910, remote_token: 't' },
+      } as Parameters<typeof api.nodeViews>[0]
+      const p = api.nodeViews(cfg)
+      // 并行实现下全部 enabled 节点在同一微任务批次已发起 fetch（串行实现此刻仅 1 个挂起）
+      expect(started.length).toBe(3)
+      expect(started.every((u) => u.endsWith('/v1/ping'))).toBe(true)
+      expect(maxActive).toBe(3) // 三个 ping 同时挂起 = 并行；串行永远 maxActive=1
+      release()
+      const nv = await p
+      expect(nv.map((n) => n.id)).toEqual(['a', 'b', 'c', 'off']) // Promise.all 保序
+      expect(nv.filter((n) => n.online === true).length).toBe(3)
+      expect(nv.find((n) => n.id === 'off')!.online).toBeNull() // disabled 不探测
+    } finally {
+      release()
+      globalThis.fetch = origFetch
+    }
+  })
+})
+
+describe('console/api 慢部件快照缓存（§366：页面加载 <1s）', () => {
+  it('buildStateView 冷算一次后缓存命中：重复请求零新增探测', async () => {
+    api.invalidateSlowSnapshot() // 清掉前序测试可能留下的真实快照
+    const origFetch = globalThis.fetch
+    let calls = 0
+    globalThis.fetch = ((_url: unknown, _init?: RequestInit) => {
+      calls++
+      return Promise.resolve(
+        new Response(JSON.stringify({ codeHash: 'x', cpus: 4 }), { status: 200 }),
+      )
+    }) as typeof fetch
+    try {
+      const s1 = await api.buildStateView()
+      expect(calls).toBeGreaterThan(0) // 冷路径：发节点/组件探测
+      const coldCalls = calls
+      const s2 = await api.buildStateView()
+      expect(s2.course).toBe(s1.course)
+      expect(s2.components.length).toBe(s1.components.length)
+      expect(calls).toBe(coldCalls) // 缓存命中：零新增探测 → 页面加载只读缓存
+    } finally {
+      globalThis.fetch = origFetch
+      api.invalidateSlowSnapshot()
+    }
+  })
+
+  it('invalidateSlowSnapshot 后下一次 buildStateView 重新冷算（动作即时上屏）', async () => {
+    api.invalidateSlowSnapshot()
+    const origFetch = globalThis.fetch
+    let calls = 0
+    globalThis.fetch = ((_url: unknown, _init?: RequestInit) => {
+      calls++
+      return Promise.resolve(
+        new Response(JSON.stringify({ codeHash: 'x', cpus: 4 }), { status: 200 }),
+      )
+    }) as typeof fetch
+    try {
+      await api.buildStateView() // 冷算填缓存
+      const warm = calls
+      await api.buildStateView()
+      expect(calls).toBe(warm)
+      api.invalidateSlowSnapshot() // 模拟动作：置空缓存
+      const before = calls
+      await api.buildStateView() // 重新冷算
+      expect(calls).toBeGreaterThan(before)
+    } finally {
+      globalThis.fetch = origFetch
+      api.invalidateSlowSnapshot()
+    }
   })
 })
 
@@ -239,7 +353,7 @@ describe('console course single source (DECISIONS §351 bug 1)', () => {
 
   it('页面课程下拉含「自动（最近活跃课程）」占位项', async () => {
     const s = await api.buildStateView()
-    const html = page.renderConsolePage(s)
+    const html = render.renderConsolePage(s)
     expect(html).toContain('自动（最近活跃课程）')
   })
 })
@@ -247,31 +361,35 @@ describe('console course single source (DECISIONS §351 bug 1)', () => {
 describe('console local×stream 假互斥移除 (DECISIONS §351 bug 2)', () => {
   it('页面不再声称 local 需 rl.stream=0 / 本地 PPO 互斥；stream 开关仍在', async () => {
     const s = await api.buildStateView()
-    const html = page.renderConsolePage(s)
+    const html = render.renderConsolePage(s)
     expect(html).not.toContain('需 rl.stream=0')
     expect(html).not.toContain('本地 PPO 互斥')
-    expect(html).toContain('stream 流式派发')
+    // stream 开关已收入 TrainingLoop 启动弹窗（SSR 首帧不渲染）
+    expect(html).not.toContain('class="tc-modal-mask"')
   })
 })
 
-describe('console/page.renderConsolePage', () => {
-  it('渲染包含区块标题、动作 data-act 与转义', async () => {
+describe('console SSR renderConsolePage', () => {
+  it('渲染包含区块标题、动作按钮、开关键与转义', async () => {
     const s = await api.buildStateView()
-    const html = page.renderConsolePage(s)
+    const html = render.renderConsolePage(s)
     expect(html).toContain('NN 训练控制台')
-    expect(html).toContain('data-act="start"')
-    expect(html).toContain('data-act="preset"')
-    expect(html).toContain('rl.double_buffer')
-    expect(html).toContain('data-node-enable=')
-    expect(html).toContain('训练指标')
-    // 无原始 <script> 注入风险：esc() 生效于 url
+    expect(html).toContain('tc-cc__name') // 组件小卡（名称渲染体）
+    expect(html).toContain('tc-hero') // 训练状态 hero
+    expect(html).toContain('tc-comps') // 组件 4 小卡
+    expect(html).toContain('tc-npill') // 节点 pill 行
+    expect(html).toContain('训练状态') // hero aria-label
+    // 详情抽屉 / TrainingLoop 启动弹窗默认不渲染（SSR 首帧；tc-drawer 类名在 CSS，用 <aside 判定）
+    expect(html).not.toContain('<aside class="tc-drawer"')
+    expect(html).not.toContain('class="tc-modal-mask"')
+    // 无原始 <script> 注入风险：SSR 输出经 preact 转义
     expect(html).not.toContain('<script>alert')
   })
 })
 
-describe('console/page.sparkline', () => {
+describe('console sparkline (ui/view)', () => {
   it('正态序列：polyline 坐标数 = 数据点数，含末点圆点', () => {
-    const svg = page.sparkline([1, 2, 3, 4, 5])
+    const svg = view.sparkline([1, 2, 3, 4, 5])
     expect(svg).toContain('<svg')
     expect(svg).toContain('<polyline')
     // 5 个坐标对（每对 x,y；[\d.] 同时匹配整数与小数）
@@ -285,7 +403,7 @@ describe('console/page.sparkline', () => {
   })
 
   it('恒定序列：满幅平线（y 折半）+ 灰色（无形状可循）', () => {
-    const svg = page.sparkline([7, 7, 7, 7])
+    const svg = view.sparkline([7, 7, 7, 7])
     // 全部 y 相同 = height/2
     const ys = [...svg.matchAll(/,([\d.]+) /g)].map((m) => m[1])
     expect(new Set(ys).size).toBeLessThanOrEqual(1)
@@ -293,8 +411,8 @@ describe('console/page.sparkline', () => {
   })
 
   it('空序列与非有限值：占位符 / NaN 点被跳过', () => {
-    expect(page.sparkline([])).toContain('muted')
-    const svg = page.sparkline([1, Number.NaN, 3])
+    expect(view.sparkline([])).toContain('muted')
+    const svg = view.sparkline([1, Number.NaN, 3])
     const pairs =
       svg
         .split('<polyline')[1]!
@@ -303,14 +421,12 @@ describe('console/page.sparkline', () => {
     expect(pairs.length).toBe(2)
   })
 
-  it('指标表渲染 sparkline 概览条（有数据课程）', async () => {
+  it('hero 渲染胜率趋势 sparkline（有数据课程）', async () => {
     const s = await api.buildStateView()
-    const html = page.renderConsolePage(s)
-    expect(html).toContain('spark-strip')
-    expect(html).toContain('spark-cell')
+    const html = render.renderConsolePage(s)
+    expect(html).toContain('tc-hero')
     if (s.metrics.available && s.metrics.iters.length > 0) {
       expect(html).toContain('<svg class="spark"')
-      expect(html).toContain('eval 胜率')
     }
   })
 
@@ -323,6 +439,7 @@ describe('console/page.sparkline', () => {
       components: [],
       nodes: [],
       modes: { trainerPpo: 'pull' as const, stream: 0, doubleBuffer: 0, precollectEarly: 0 },
+      phase: { phase: 'idle' as const, sinceMs: null, iter: null },
       metrics: {
         available: true,
         iters: Array.from({ length: 30 }, (_, i) => ({
@@ -347,16 +464,31 @@ describe('console/page.sparkline', () => {
           accuracy: 0,
           loot: 0,
           kills: 0,
-          actuals: null,
-          evalData: null,
+          actuals: { games: 4, totalKills: i, totalPU: i % 3, avgTicks: 100 },
+          evalData: {
+            time: '',
+            games: 10,
+            wins: i % 10,
+            winRate: (i % 10) / 10,
+            clears: 0,
+            clearRate: 0,
+            dropped: 0,
+            sec: 30,
+            wver: 'v1',
+            outcomes: {},
+            avgTicks: 100,
+            totalKills: i,
+            totalPU: 0,
+            scoreMean: 0,
+            scoreStd: 0,
+          },
         })),
       },
     }
-    const html = page.renderConsolePage(s)
-    // 30 轮输入、eval 全空（NaN）→ 4 条有限序列有 polyline，eval 列为占位符
+    const html = render.renderConsolePage(s)
+    // 30 轮输入 → hero 画 4 条 polyline：KPI 大胜率走势 1 条 + 击杀/道具/eval 三格各 1 条（胜率不再重复画），点数 ≤20
     const polylines = html.match(/<polyline/g) ?? []
     expect(polylines.length).toBe(4)
-    expect(html).toContain('eval 胜率')
     for (const seg of html.split('<polyline').slice(1)) {
       const pts = seg.split('/>')[0]!.match(/[\d.]+,[\d.]+/g) ?? []
       expect(pts.length).toBeLessThanOrEqual(20)
@@ -378,6 +510,55 @@ describe('console/log viewer (§348 补 2)', () => {
     }
   })
 
+  it('readLogTail：maxLines=all 读全部行，小文件不截断（§371）', () => {
+    const rel = 'tmp/logtail-all-371.log'
+    const p = path.join(import.meta.dir, '..', 'nn-training', rel)
+    mkdirSync(path.dirname(p), { recursive: true })
+    const lines = Array.from({ length: 50 }, (_, i) => `line-${i}`)
+    writeFileSync(p, lines.join('\n') + '\n', 'utf-8')
+    try {
+      const t = api.readLogTail(rel, 'all')
+      expect(t.exists).toBe(true)
+      expect(t.truncated).toBe(false)
+      expect(t.lines).toEqual(lines)
+      expect(t.totalLines).toBe(50) // 顶部「共 N 行」= 文件总行数（§372）
+      // 数字模式仍然只取尾 N 行
+      const t5 = api.readLogTail(rel, 5)
+      expect(t5.lines).toEqual(lines.slice(-5))
+      // 缺文件：totalLines null
+      expect(api.readLogTail('tmp/no-such-log-xyz.log', 50).totalLines).toBeNull()
+    } finally {
+      rmSync(p, { force: true })
+    }
+  })
+
+  it('日志 GBK 乱码修复（§373）：混合 UTF-8/GBK 行逐行容错解码，不误伤其它行', () => {
+    // 「超时（瞬时连接被拒），重试 5.0s 之后」的 GBK 字节（python gbk encode 实测）
+    const gbkB64 = 's6zKsaOoy7LKscGsvdOxu77co6mjrNbYytQgNS4wcyDWrrrz'
+    const gbkBytes = Uint8Array.from(atob(gbkB64), (c) => c.charCodeAt(0))
+    const rel = 'tmp/logtail-gbk-373.log'
+    const p = path.join(import.meta.dir, '..', 'nn-training', rel)
+    mkdirSync(path.dirname(p), { recursive: true })
+    const buf = Buffer.concat([
+      Buffer.from('[09:01:53] wait_job: job bb11e73f1d2c327d HTTP 530 '),
+      Buffer.from(gbkBytes),
+      Buffer.from('\n'),
+      Buffer.from('[09:01:55] [sampler-agent] task ok utf8 中文正常行\n'),
+    ])
+    writeFileSync(p, buf)
+    try {
+      const t = api.readLogTail(rel, 'all')
+      expect(t.lines[0]).toContain('超时（瞬时连接被拒）')
+      expect(t.lines[0]).not.toContain('\uFFFD') // 无替换符乱码残留
+      expect(t.lines[1]).toBe('[09:01:55] [sampler-agent] task ok utf8 中文正常行') // UTF-8 行不受影响
+      // dashboard 卡的 logTail 同步修复
+      const tail = api.logTail(rel, 5)
+      expect(tail[0]).toContain('超时')
+    } finally {
+      rmSync(p, { force: true })
+    }
+  })
+
   it('resolveComponentLog：五个组件均有日志映射；未知组件 null', () => {
     const cfg = JSON.parse(readFileSync(REAL_CONFIG, 'utf-8')) as Parameters<
       typeof api.resolveComponentLog
@@ -394,11 +575,64 @@ describe('console/log viewer (§348 补 2)', () => {
     expect(api.resolveComponentLog('nope' as never, cfg, 'x')).toBeNull()
   })
 
+  it('scanLatestLog（§374/§381）：cloudflared 动态文件名按 mtime 取最新，忽略无关文件', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'bcity-logscan-'))
+    try {
+      const stale = path.join(dir, 'cloudflared-2026-09-08T04-00-00-a1.log')
+      const fresh = path.join(dir, 'cloudflared-2026-09-08T05-00-00-a1.log')
+      writeFileSync(stale, 'stale\n', 'utf-8')
+      writeFileSync(fresh, 'fresh\n', 'utf-8')
+      writeFileSync(path.join(dir, 'hub-server.out'), 'noise\n', 'utf-8')
+      // 指定 mtime（utimes 确定性：stale < fresh），不依赖写入顺序
+      utimesSync(stale, new Date('2026-09-08T05:00:00Z'), new Date('2026-09-08T05:00:00Z'))
+      utimesSync(fresh, new Date('2026-09-08T06:00:00Z'), new Date('2026-09-08T06:00:00Z'))
+      expect(api.scanLatestLog(dir, 'cloudflared', 'x')).toBe(fresh)
+      // 无匹配文件 → null；目录不存在 → null（不抛）
+      expect(api.scanLatestLog(dir, 'workerServe', 'x')).toBeNull()
+      const missing = path.join(os.tmpdir(), 'bcity-logscan-no-such-dir-xyz')
+      expect(api.scanLatestLog(missing, 'selfNode', 'x')).toBeNull()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('scanLatestLog（§374/§381）：trainingLoop 扫课程子目录与 course 直连路径', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'bcity-logscan2-'))
+    try {
+      const courseDir = path.join(dir, 'p3-vk1')
+      const otherDir = path.join(dir, 'ep60')
+      mkdirSync(courseDir, { recursive: true })
+      mkdirSync(otherDir, { recursive: true })
+      const a = path.join(courseDir, 'training-loop.log')
+      const b = path.join(otherDir, 'training-loop.log')
+      writeFileSync(a, 'a\n', 'utf-8')
+      writeFileSync(b, 'b\n', 'utf-8')
+      utimesSync(a, new Date('2026-09-08T05:00:00Z'), new Date('2026-09-08T05:00:00Z'))
+      utimesSync(b, new Date('2026-09-08T06:00:00Z'), new Date('2026-09-08T06:00:00Z'))
+      // 任意课程目录里最新的 training-loop.log（ep60 新）
+      expect(api.scanLatestLog(dir, 'trainingLoop', '')).toBe(b)
+      // course 直连路径存在且比其它都新 → 优先
+      utimesSync(a, new Date('2026-09-08T07:00:00Z'), new Date('2026-09-08T07:00:00Z'))
+      expect(api.scanLatestLog(dir, 'trainingLoop', 'p3-vk1')).toBe(a)
+      // 目录不存在 → null
+      expect(
+        api.scanLatestLog(
+          path.join(os.tmpdir(), 'bcity-logscan2-no-dir'),
+          'trainingLoop',
+          'p3-vk1',
+        ),
+      ).toBeNull()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('componentLogPayload：已知组件返回载荷；未知组件 null', async () => {
     const p = await api.componentLogPayload('selfNode', 50)
     expect(p).not.toBeNull()
     expect(p!.component).toBe('selfNode')
-    expect(p!.log).toBe('tmp/sampler-agent.log')
+    // 2026-09-08 双 tmp 统一：组件日志统一落到 LOG_DIR = 仓库根 tmp/（绝对路径）
+    expect(p!.log).toBe(path.join(LOG_DIR, 'sampler-agent.log'))
     expect(Array.isArray(p!.lines)).toBe(true)
     expect(await api.componentLogPayload('nope' as never, 50)).toBeNull()
   })
@@ -406,7 +640,7 @@ describe('console/log viewer (§348 补 2)', () => {
   it('renderLogPage：日志内容转义 + 组件导航 + follow 开关', async () => {
     const p = (await api.componentLogPayload('selfNode', 40))!
     const state = await api.buildStateView()
-    const html = page.renderLogPage(p, {
+    const html = render.renderLogPage(p, {
       components: state.components.map((c) => ({ key: c.key, label: c.label, status: c.status })),
       follow: true,
       lines: 40,
@@ -416,19 +650,79 @@ describe('console/log viewer (§348 补 2)', () => {
     expect(html).toContain('id="follow" checked')
     expect(html).toContain('/log/trainingLoop')
     expect(html).toContain('返回控制台')
-    // 日志文本必须经 esc()（原始 <script> 不得出现在 logbox 内容里）
+    // 日志文本必须经转义（原始 <script> 不得出现在 logbox 内容里）
     expect(html).not.toContain('<script>alert')
-    expect(html).toContain('setInterval(refresh')
   })
 
   it('renderLogPage：暂停态（follow=false）刷新间隔 4s；缺文件显示占位', async () => {
     const p = (await api.componentLogPayload('cloudflared', 20))!
     p.exists = false
     p.lines = []
-    const html = page.renderLogPage(p, { components: [], follow: false, lines: 20 })
+    const html = render.renderLogPage(p, { components: [], follow: false, lines: 20 })
     expect(html).toContain('日志文件不存在')
-    expect(html).toContain('setInterval(refresh, 4000)')
-    // follow 复选框无 checked 属性（客户端脚本里的 ev.target.checked 不算）
+    // follow 复选框无 checked 属性（跟随节奏由客户端 usePolling + shouldFollow 纯函数实现）
     expect(html).not.toContain('id="follow" checked')
+  })
+})
+
+describe('console/api §361③：配置损坏兜底与日志尾容错', () => {
+  it('loadConfigSafe：rl-config.json 瞬时损坏回退上次成功配置，不抛 500', async () => {
+    const before = readFileSync(REAL_CONFIG, 'utf-8')
+    const good = api.loadConfigSafe()
+    expect(good.nodes).toBeInstanceOf(Array)
+    try {
+      // 模拟 saveConfig 写盘窗口的半截 JSON（§339 同款竞态家族）
+      writeFileSync(REAL_CONFIG, '{"version":1,"nodes":[', 'utf-8')
+      const safe = api.loadConfigSafe()
+      expect(safe.nodes).toEqual(good.nodes) // 回退内存缓存
+    } finally {
+      writeFileSync(REAL_CONFIG, before, 'utf-8')
+    }
+    expect(api.loadConfigSafe().nodes).toBeInstanceOf(Array) // 恢复后无崩溃
+  })
+
+  it('logTail：缺文件安全 + 尾窗口 + 超长行截断（单行损坏不拖垮）', () => {
+    expect(api.logTail('tmp/no-such-log-xyz.log', 5)).toEqual([])
+    const p = path.join(import.meta.dir, '..', 'nn-training', 'tmp', 'logtail-test-361.log')
+    mkdirSync(path.dirname(p), { recursive: true })
+    writeFileSync(p, 'a\n' + 'x'.repeat(300) + '\nb\n')
+    try {
+      const t = api.logTail('tmp/logtail-test-361.log', 5)
+      expect(t[0]).toBe('a')
+      expect(t[1]!.length).toBe(200) // 超长行截到 200
+      expect(t[2]).toBe('b')
+    } finally {
+      rmSync(p, { force: true })
+    }
+  })
+})
+
+describe('console/iters §361②：完整指标表不截断（MAX 500 上限）', () => {
+  it('600 轮日志 → 返回最近 500 轮', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'bcity-iters-361-'))
+    try {
+      const lines: string[] = []
+      for (let i = 0; i < 600; i++) {
+        lines.push(
+          JSON.stringify({ event: 'iteration', iter: i, time: '', winRate: 0.5, score_mean: 0 }),
+        )
+      }
+      writeFileSync(path.join(dir, 'training_log.jsonl'), lines.join('\n'), 'utf-8')
+      const { rows } = readIterMetrics(dir)
+      expect(rows.length).toBe(500)
+      expect(rows[0]!.iter).toBe(599)
+      expect(rows[499]!.iter).toBe(100)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('console/actions.resolveCourseBc（§384：种子路径读课程 bc 字段）', () => {
+  it('p3-rd1/vk1 → 课程 bc（.ckpt.60）；未知课程 → legacy 硬编码', () => {
+    expect(actions.resolveCourseBc('p3-rd1')).toContain('weights.json.ckpt.60')
+    expect(actions.resolveCourseBc('p3-vk1')).toContain('weights.json.ckpt.60')
+    expect(actions.resolveCourseBc('no-such-course-xyz').endsWith('weights.json')).toBe(true)
+    expect(actions.resolveCourseBc('no-such-course-xyz')).not.toContain('ckpt')
   })
 })

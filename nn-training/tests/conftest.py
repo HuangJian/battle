@@ -1,4 +1,5 @@
 """Shared pytest fixtures for nn-training pure-logic tests."""
+
 from __future__ import annotations
 
 import sys
@@ -13,8 +14,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-def bp_args(sps: int = 3, rotate_stages: int = 35, total_stages: int = 35,
-            seeds: str = "0-3", stages: str = "0-3") -> types.SimpleNamespace:
+def bp_args(
+    sps: int = 3,
+    rotate_stages: int = 35,
+    total_stages: int = 35,
+    seeds: str = "0-3",
+    stages: str = "0-3",
+) -> types.SimpleNamespace:
     """Minimal duck-typed args for build_pairs()."""
     return types.SimpleNamespace(
         rotate_stages=rotate_stages,
@@ -45,7 +51,8 @@ def tmp_path(request) -> Path:
     交互式弹确认、pre-commit hook 等无交互场景直接 SystemExit 失败）。
 
     本实现：
-      * 目录落在 `nn-training/tmp/pytest-tmp/<nodeid>-<pid>-<id>`（已 gitignore）；
+      * 目录落在仓库根 `tmp/pytest-tmp/<nodeid>-<pid>-<id>`（已 gitignore，
+        2026-09-08 双 tmp 统一：不再用 nn-training/tmp）；
       * 每个测试唯一目录、**从不删除**（磁盘增长可接受，手动清理一次即可）；
       * pytest 的 basetemp 不再被创建/清空 → 全程零删除、零弹窗。
       * **pid 参与命名**（2026-09-02）：分片并行（nn-gate-shards.py 多进程跑
@@ -55,7 +62,7 @@ def tmp_path(request) -> Path:
     import os
     import time as _time
 
-    root = Path(__file__).resolve().parent.parent / "tmp" / "pytest-tmp"
+    root = Path(__file__).resolve().parents[2] / "tmp" / "pytest-tmp"  # 仓库根 tmp/
     root.mkdir(parents=True, exist_ok=True)
     safe = request.node.nodeid.replace("/", "__").replace("::", "__")
     # pid + 毫秒时间戳 + id 三重唯一（2026-09-02）：

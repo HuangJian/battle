@@ -11,16 +11,15 @@ import {
   resolveTorchThreads,
   torchThreadEnv,
 } from '../tools/training/venv'
-import { resolveTrainScript } from '../tools/training/train'
+import { resolveTrainScript, parseCli } from '../tools/training/train'
 import {
   aggregateNodeHistory,
-  contribCell,
-  poolStatusCell,
   emptyHistory,
-} from '../tools/training/monitor/history'
-import { readIterMetrics } from '../tools/training/monitor/iters'
+  poolStatus,
+} from '../tools/training/console/pool-history'
+import { readIterMetrics } from '../tools/training/console/iters'
+import { stripIsoPrefix } from '../tools/training/ui/view'
 import { TRAINING_LOOP_ENTRY, trainingLoopSpec } from '../tools/training/specs'
-import { renderMonitorPage } from '../tools/training/monitor/page'
 import { writeFileSync, mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -98,6 +97,14 @@ describe('training venv helpers (tools/training/venv.ts)', () => {
     if (s.pyOk) expect(s.python.length).toBeGreaterThan(0)
     if (!s.pyOk) expect(s.reason).toBeTruthy()
   })
+
+  it('live python env is a hard requirement: gate reports a runnable interpreter (§352)', () => {
+    // 本机 python 环境必须具备——坏了就是红，不跳过（与 torch 缺席的降级语义不同）。
+    const gate = pythonGateState()
+    expect(gate.pyOk).toBe(true)
+    expect(gate.python).toBeTruthy()
+    expect(gate.reason).toBeNull()
+  })
 })
 
 describe('train script resolution (tools/training/train.ts, DECISIONS §324)', () => {
@@ -129,17 +136,27 @@ describe('train script resolution (tools/training/train.ts, DECISIONS §324)', (
   })
 })
 
-describe('monitor data layers (tools/training/monitor/*)', () => {
-  it('empty history renders placeholder cells', () => {
-    const h = emptyHistory()
-    expect(poolStatusCell(h)).toContain('无数据')
-    expect(contribCell(h, 5)).toContain('-')
+describe('pool data layers (tools/training/console/pool-history + iters)', () => {
+  it('poolStatus thresholds: nodata → healthy ≥90% / warn ≥70% / bad', () => {
+    expect(poolStatus(emptyHistory())).toBe('nodata')
+    expect(
+      poolStatus({
+        ...emptyHistory(),
+        recent: [true, true, true, true, true, true, true, true, true, true],
+      }),
+    ).toBe('healthy')
+    expect(
+      poolStatus({
+        ...emptyHistory(),
+        recent: [true, true, true, false, false, true, true, true, true, true],
+      }),
+    ).toBe('warn')
+    expect(poolStatus({ ...emptyHistory(), recent: [false, false] })).toBe('bad')
   })
-  it('contrib cell marks lagging nodes with tooltip', () => {
-    const h = { ...emptyHistory(), lastIter: 3, lastIterOk: 0 }
-    const cell = contribCell(h, 10)
-    expect(cell).toContain('it3')
-    expect(cell).toContain('it10')
+  it('lastError 剥离 sampler-agent 的 UTC ISO 前缀（GLM-U3）', () => {
+    expect(stripIsoPrefix('2026-09-07T02:03:04.567Z link timeout')).toBe('link timeout')
+    expect(stripIsoPrefix('2026-09-07T02:03:04Z s5/seed1: boom')).toBe('s5/seed1: boom')
+    expect(stripIsoPrefix('normal error')).toBe('normal error')
   })
   it('aggregateNodeHistory returns empty aggregate without tmp data', () => {
     // 仓库 tmp/ 总存在；聚合不抛错即可（数据多少无关正确性）。
@@ -223,39 +240,6 @@ describe('monitor data layers (tools/training/monitor/*)', () => {
   })
 })
 
-describe('monitor page render (tools/training/monitor/page.ts)', () => {
-  it('renders a full standalone page without any server', async () => {
-    const html = await renderMonitorPage({
-      workers: 2,
-      inflight: { size: 0 },
-      gamesDoneTotal: 0,
-      localHash: () => 'x'.repeat(64),
-      nodes: [
-        { id: 'self', url: 'http://127.0.0.1:9', authKey: 'k', enabled: false, concurrency: 1 },
-      ],
-      localSlots: 4,
-    })
-    expect(html.startsWith('<!doctype html>')).toBe(true)
-    expect(html).toContain('id="pool"')
-    expect(html).toContain('已禁用节点')
-    expect(html).toContain('本机直跑')
-    // 密钥不渲染（页面契约）
-    expect(html).not.toContain('"k"')
-  })
-  it('renders placeholder page for non-master machines (no nodes)', async () => {
-    const html = await renderMonitorPage({
-      workers: 0,
-      inflight: { size: 0 },
-      gamesDoneTotal: 0,
-      localHash: () => '',
-      nodes: null,
-      localSlots: null,
-    })
-    expect(html).toContain('id="pool"')
-    expect(html).not.toContain('已禁用节点')
-  })
-})
-
 describe('training path constants', () => {
   it('repo root resolves from module location', () => {
     expect(path.basename(REPO_ROOT)).not.toBe('training')
@@ -286,21 +270,52 @@ describe('ProcSpec path semantics (tools/training/specs.ts, DECISIONS §349 regr
   })
 })
 
-describe('train CLI arg parsing (tools/training/train.ts main, DECISIONS §349)', () => {
-  // §352 门禁：torch 缺席时这两个 spawn 真实 CLI 的测试只跳过（带 warning），
-  // python 环境本身仍由 pythonGateState 硬门禁覆盖（下方 dedicated test）。
-  const gate = pythonGateState()
-  it.skipIf(!gate.torchReady)('translates --check to a successful interpreter probe (spawns real CLI)', async () => {
-    const r = Bun.spawnSync(['bun', 'tools/training/train.ts', '--check'], {
-      cwd: REPO_ROOT,
-      stdout: 'pipe',
-      stderr: 'pipe',
-    })
-    expect(r.exitCode).toBe(0)
-    expect(r.stdout.toString()).toContain('torch 可用')
-  }, 60000)
+describe('train CLI arg parsing (tools/training/train.ts, DECISIONS §349)', () => {
+  // 纯参数解析：不 spawn、不碰 venv/torch。
+  // 历史教训（2026-09-08，详见 train.ts parseCli 上方注释）：这两条分支曾用
+  // 「spawn 真实 CLI」来测，pre-commit 门禁 fallback 全量时命中它们 →
+  // ensureVenv() 委派 bootstrap.py 联网装 torch，单用例 40s+ 且 exit 4。
+  // 参数解析是纯函数，就该纯函数测；只有真要起训练的路径才允许碰 torch。
+  it('--check / --echo 标志被识别，互不串台', () => {
+    expect(parseCli(['--check']).opts.check).toBe(true)
+    expect(parseCli(['--check']).opts.echo).toBe(false)
+    expect(parseCli(['--echo']).opts.echo).toBe(true)
+    expect(parseCli(['--echo']).opts.check).toBe(false)
+    expect(parseCli([]).opts).toMatchObject({ check: false, echo: false })
+  })
 
-  it.skipIf(!gate.torchReady)('--echo prints the exact command and exits 0 without executing', () => {
+  it('--script 取值，其余参数按序进 scriptArgs', () => {
+    const { opts } = parseCli(['--script', 'ppo/bench.py', '--iters', '1', '--foo', 'bar'])
+    expect(opts.script).toBe('ppo/bench.py')
+    expect(opts.scriptArgs).toEqual(['--iters', '1', '--foo', 'bar'])
+  })
+
+  it('别名与数值参数：非法数值回落默认 0', () => {
+    expect(parseCli(['--kill-previous']).opts.killPrevious).toBe(true)
+    expect(parseCli(['--killprevious']).opts.killPrevious).toBe(true)
+    expect(parseCli(['--torch-threads', '7']).opts.torchThreads).toBe(7)
+    expect(parseCli(['--torch-threads', 'abc']).opts.torchThreads).toBe(0)
+    expect(parseCli(['--force']).opts.force).toBe(true)
+    expect(parseCli(['--detach']).opts.detach).toBe(true)
+  })
+
+  it('未知参数进 scriptArgs，不吞掉后续 flag', () => {
+    const { opts } = parseCli(['x.py', '--echo', '--detach'])
+    expect(opts.scriptArgs).toEqual(['x.py'])
+    expect(opts.echo).toBe(true)
+    expect(opts.detach).toBe(true)
+  })
+
+  it('--help / -h 返回 help 标记，不留 scriptArgs', () => {
+    expect(parseCli(['--help']).help).toBe(true)
+    expect(parseCli(['-h']).help).toBe(true)
+    expect(parseCli(['--help']).opts.scriptArgs).toEqual([])
+  })
+
+  // 唯一保留的 spawn：端到端守住「--echo 不碰 venv/torch」这条回归线。
+  // 超时 60s → 15s 是护栏：一旦 --echo 又被挪到 ensureVenv() 之后，它会去联网
+  // 装 torch，必然超时变红（而不是悄悄慢下来）。
+  it('--echo 端到端：只打印命令、不触发 torch 引导', () => {
     const r = Bun.spawnSync(
       ['bun', 'tools/training/train.ts', '--echo', '--script', 'ppo/bench.py', '--iters', '1'],
       {
@@ -314,7 +329,7 @@ describe('train CLI arg parsing (tools/training/train.ts main, DECISIONS §349)'
     // Windows 下路径以 JSON 转义形式打印（ppo\\bench.py）——按文件名断言，平台无关。
     expect(out).toContain('bench.py')
     expect(out).toContain('--iters')
-  }, 60000)
+  }, 15000)
 
   it('--help exits 0 with usage', () => {
     const r = Bun.spawnSync(['bun', 'tools/training/train.ts', '--help'], {
@@ -324,14 +339,7 @@ describe('train CLI arg parsing (tools/training/train.ts main, DECISIONS §349)'
     })
     expect(r.exitCode).toBe(0)
     expect(r.stdout.toString()).toContain('用法')
-  }, 60000)
-
-  it('python env is a hard requirement: gate state reports a runnable interpreter (§352)', () => {
-    // 本机 python 环境必须具备——坏了就是红，不跳过（与 torch 缺席的降级语义不同）。
-    expect(gate.pyOk).toBe(true)
-    expect(gate.python).toBeTruthy()
-    expect(gate.reason).toBeNull()
-  })
+  }, 15000)
 })
 
 describe('supervisor sentinel fingerprint', () => {

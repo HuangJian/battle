@@ -108,6 +108,8 @@ def write_iteration(jsonl_path: Path, args, it: int, report: dict, m: dict) -> N
             "entropy": agg["entropy"] if agg else None,
             "kl": agg["kl"] if agg else None,
             "mean_ret": agg["mean_ret"] if agg else None,
+            # R5§363：缰绳遥测（旧 agg 无此键 → None，不破兼容）。
+            "kickstart": (agg.get("kickstart") if agg else None),
             "lr": args.lr,
             # P1-12：reward/dodge 臂版本落盘（历史实验可归因——
             # 此前奖励规格无记录，复盘无法区分 v7/toy 臂）

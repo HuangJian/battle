@@ -7,6 +7,15 @@ wandb/
 *.npz
 *.json.bak
 
+# ---- BC 蒸馏语料（tools/sim/export-godai-labels.ts 产出的 shard 目录，GB 级）----
+# 命名约定：<tag>-godai*/ 或 godai-*/（例：data/p3-godai/ = 1225 胜局 / 1.7 GB）。
+# 语料永不入库：本机导出 → 压缩 → 上传 Colab（见 ipynb/battle-bc.ipynb 第 3 节）。
+# 注：data/ 下的课程 stage 定义（如 p3-stage.json）是配置，照常入库。
+data/*godai*/
+data/*-corpus/
+# 供 Colab 上传的语料压缩包（GB 级原始数据压成 ~15 MB，同样不入库）
+data/*godai*.zip
+
 # ---- trained weights: versioned archives + active pointer (inside weights/, backed up to netdisk) ----
 # WEIGHTS.md (the committed registry) lives in weights/ and is intentionally NOT ignored.
 weights/weights.json

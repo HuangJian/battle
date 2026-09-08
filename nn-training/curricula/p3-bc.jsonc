@@ -1,0 +1,104 @@
+// 课程 p3-bc —— ep60 重开臂（DECISIONS §359）：transfer 证伪后的 B 计划
+//
+// 由 p3-step.jsonc 逐字节派生，仅改动以下 3 处，其余（地图/count 3/player/
+// reward/scale/schedule/eval/护栏）全同义：
+//   1. name: p3-step → p3-bc
+//   2. bc: p2-it40 → p1-BC ep60（`tmp/ep60/...ckpt.60`，即探针权重——transfer
+//      27→20→14 方向性证伪；对称门见下）
+//   3. out/traj/backup_dir/backup_prefix → tmp/p3-bc（fresh；p2arm 隔离见 §359）
+//
+// p3→p4 门连续 2 eval ≥70 不变（§358）。
+//
+// 补（§360 全系变体化）：stages[0].spawn_variants 新增 4 三元组去一角
+// （[TL,TR,BR]/[TR,BR,BL]/[TL,BR,BL]/[TL,TR,BL]，玩家恒居中；顶层 enemy_spawns
+// 保留）。新基线（§12，固定版 36/82 作废）：BC 42 / God 81。对称门重定：
+// it5 ≥40 则 ep60 臂成立继续（hold 住零样本线即及格）。p3-bc 启动放行。
+{
+  "version": 5,
+  "name": "p3-bc",
+  "mode": "per-tick",
+  "stages": [
+    {
+      "name": "p4-onset-mixed",
+      "grid": [
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+      ],
+      "forces": "abcdabcdabcdabcdabcd",
+      "count": 3,
+      "player_spawn": { "col": 12, "row": 12 },
+      "enemy_spawns": [
+        { "col": 2, "row": 2 },
+        { "col": 22, "row": 2 },
+        { "col": 22, "row": 22 },
+        { "col": 2, "row": 22 }
+      ],
+      "spawn_variants": [
+        {"enemy_spawns": [{"col": 2, "row": 2},{"col": 22, "row": 2},{"col": 22, "row": 22}]},
+        {"enemy_spawns": [{"col": 22, "row": 2},{"col": 22, "row": 22},{"col": 2, "row": 22}]},
+        {"enemy_spawns": [{"col": 2, "row": 2},{"col": 22, "row": 22},{"col": 2, "row": 22}]},
+        {"enemy_spawns": [{"col": 2, "row": 2},{"col": 22, "row": 2},{"col": 2, "row": 22}]}
+      ]
+    }
+  ],
+  "difficulty": "hard",
+  "max_ticks": 2400,
+  "seed_rotate": 150,
+  "player": {
+    "lives": 1,
+    "level": 0
+  },
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.3,
+      "wPickup": 1.5,
+      "wStar": 1.0,
+      "wDmg": 1.0,
+      "wStuck": 0.02,
+      "wShot": 0.01
+    },
+    "terminal": {
+      "stage_clear": 2.0,
+      "lives_exhausted": -1.0,
+      "timeout": -2.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+  "bc": "tmp/ep60/battle2-p1bc/run/weights.json.ckpt.60",
+  "iters": 0,
+  "max_hours": 24,
+  "workers": 8,
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  "gamma": 0.998,
+  "lam": 0.99,
+  "ppo_schedule": [
+    { "until_iter": 40, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
+    { "kl_coef": 0.0, "lr": 0.00005 }
+  ],
+  "out": "tmp/p3-bc/weights.json",
+  "traj": "tmp/p3-bc",
+  // F4 ENT 熔断：沿用 horizon 档 0.25（RL 腿启用时生效；探针不消费）。
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/p3-bc",
+  "backup_prefix": "p3-bc",
+  // 自定义关 stage ID 从 2000 开始，p3-bc 仅 1 关 → ID 2000
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 100,
+  "eval_every": 5
+}

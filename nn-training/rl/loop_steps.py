@@ -72,6 +72,38 @@ def _push_job_round(nodes: list[dict], manifest: dict, jid: str, payload_bytes: 
     raise RetryableError(f"push 全部节点失败: {last}")
 
 
+def _kickstart_ref_payload(args: Any) -> tuple[str, str]:
+    """BC ref 权重文件 → (base64, sha256)。缺失响亮失败（缰绳无尺子＝静默裸奔，
+    不可接受）。仅 kickstart 激活路径调用。"""
+    import base64
+
+    path = str(getattr(args, "bc", "") or "")
+    if not path or not Path(path).exists():
+        raise SystemExit(
+            f"[run_rl] kickstart_ref 要求课程 bc 权重存在（ref 尺子）：{path!r}——"
+            "检查课程 bc 路径"
+        )
+    raw = Path(path).read_bytes()
+    return base64.b64encode(raw).decode("ascii"), hashlib.sha256(raw).hexdigest()
+
+
+def _remote_forward_agg(agg: dict) -> dict:
+    """云 worker result agg → 训练侧结算 agg（与 _serial_ppo 的 ppo_update agg 同口径）。
+
+    2026-09-08 vk1 事故回归：R5§363 之后云端 agg 已携带 `kickstart`（缰绳遥测），
+    结算端若丢弃该键 → iteration 行 kickstart 恒 None——worker 缰绳明明在跑、
+    可观测性却全盲，整根腿被误判「课程配置未起效」而作废。缺失键按 0.0 兜底
+    （旧 worker 无该键，不破迭代行结构）。"""
+    return {
+        "policy": float(agg.get("policy", 0.0)),
+        "value": float(agg.get("value", 0.0)),
+        "entropy": float(agg.get("entropy", 0.0)),
+        "kl": float(agg.get("kl", 0.0)),
+        "mean_ret": float(agg.get("mean_ret", 0.0)),
+        "kickstart": float(agg.get("kickstart", 0.0) or 0.0),
+    }
+
+
 class TrainingSteps:
     """单轮结算与梯度步 mixin。"""
 
@@ -83,6 +115,7 @@ class TrainingSteps:
     _opt: Any
     _device: Any
     _ref_model: Any
+    _bc_ref: Any
     _ppo_mod: Any
     _ppo_goal: Any
     _ppo_intent: Any
@@ -253,6 +286,7 @@ class TrainingSteps:
             float(getattr(args, "gamma", 0.995)),
             float(getattr(args, "lam", 0.95)),
             normalize_adv=getattr(args, "adv_norm", "auto") != "none",
+            normalize_ret=bool(getattr(args, "normalize_ret", 0)),
         )
         total_steps = sum(e["obs"].shape[0] for e in episodes)
         chunks = self.ppo_backend.chunk_episodes(episodes, args.mb)
@@ -268,6 +302,15 @@ class TrainingSteps:
                 **self.update_kwargs(args, it, self._start_it, self._ref_model),
             )
         else:
+            # BC-anchored kickstart（§363）：缰绳系数走 update_kwargs 衰减语义
+            # （warmup_iters=0 由 validate_args 强制，故 it1 即满额）；
+            # value_warmup_epochs 忽略（per-tick 无 warmup 概念，R5-warmup 另排）。
+            kick = 0.0
+            bc_ref = getattr(self, "_bc_ref", None)
+            if bc_ref is not None:
+                kick = float(
+                    self.update_kwargs(args, it, self._start_it, bc_ref)["kl_coef"]
+                )
             agg = self._ppo_mod.ppo_update(
                 self._model,
                 self._opt,
@@ -276,6 +319,8 @@ class TrainingSteps:
                 self._device,
                 ckpt_path=str(traj_dir / "ppo_ckpt"),
                 kl_coef=float(getattr(args, "_kl_coef", 0.0) or 0.0),
+                ref_model=bc_ref,
+                kickstart_kl=kick,
             )
         self._ppo_sec = round(time.time() - t_ppo, 1)
         self._chunks_n = len(chunks)
@@ -357,6 +402,15 @@ class TrainingSteps:
         run_id = RUN_ID
         ckpt_remote_path = Path(args.traj) / f"it{it - 1}" / "ppo_ckpt_remote"
         ckpt_remote: Path | None = ckpt_remote_path if ckpt_remote_path.exists() else None
+        # BC-anchored kickstart（§363）：缰绳系数走 update_kwargs 衰减（ref 传 None——
+        # 系数是纯数学，不需模型）；ref 权重读课程 bc 文件（一次，base64 进 manifest）。
+        kick_on = bool(getattr(args, "kickstart_ref", False))
+        kick_kl = (
+            float(self.update_kwargs(args, it, self._start_it, None)["kl_coef"])
+            if kick_on
+            else 0.0
+        )
+        ref_b64, ref_fp = _kickstart_ref_payload(args) if kick_on else ("", "")
         manifest = publish_job(
             job_root=job_root,
             jsonl_path=str(self._jsonl_path),
@@ -383,6 +437,10 @@ class TrainingSteps:
             kl_coef=float(getattr(args, "_kl_coef", 0.0) or 0.0),
             kl_cap=getattr(args, "_kl_cap", None),
             adv_norm=getattr(args, "adv_norm", "auto"),
+            normalize_ret=bool(getattr(args, "normalize_ret", 0)),
+            kickstart_kl=kick_kl,
+            ref_weights_b64=ref_b64,
+            ref_weights_fp=ref_fp,
             shuffle=True,
             schedule_raw=course.ppo_schedule_dicts(),
             log=log,
@@ -434,23 +492,25 @@ class TrainingSteps:
             if self._collect_child is not None:
                 log(f"[run_rl] remote precollect: next-round first-wave spawned (pid={self._collect_child.pid})")
         # 结算字段（下游 breaker / stop-loss / events 账本原样消费，D4）
-        agg = result.get("agg", {})
-        self._agg = {
-            "policy": float(agg.get("policy", 0.0)),
-            "value": float(agg.get("value", 0.0)),
-            "entropy": float(agg.get("entropy", 0.0)),
-            "kl": float(agg.get("kl", 0.0)),
-            "mean_ret": float(agg.get("mean_ret", 0.0)),
-        }
-        self._chunks_n = int(agg.get("chunks", 0))
-        self._total_steps = int(agg.get("steps", 0))
+        self._agg = _remote_forward_agg(result.get("agg", {}))
+        self._chunks_n = int(result.get("agg", {}).get("chunks", 0))
+        self._total_steps = int(result.get("agg", {}).get("steps", 0))
         self._kl_cum = self._agg["kl"]
         self._ppo_sec = round(time.time() - t_ppo, 1)
+        # 启动协议补丁（2026-09-08 vk1 事故）：kickstart_ref 已要求时，it1 校准把
+        # 「缰绳真实落地」做进循环——云端 agg 无 kickstart 键或值恒 0 = worker 没跑
+        # 缰绳（旧代码/模块钉住），响亮警示而非静默裸奔；正常值应为 0.1~0.6 量级。
+        if kick_on and not result.get("smoke") and float(self._agg.get("kickstart", 0.0)) == 0.0:
+            log(
+                f"[run_rl] WARN remote it{it}: kickstart_ref 已要求（kk 衰减调度激活）"
+                "但云端结果 kickstart=0——worker 未执行缰绳？查 worker 代码/会话新鲜度"
+            )
         log(
             f"[run_rl] remote ppo it{it}: job {jid} accepted — "
             f"steps={self._total_steps} chunks={self._chunks_n} "
             f"kl={self._agg['kl']:.5f} entropy={self._agg['entropy']:.4f} "
-            f"({self._ppo_sec}s round-trip) -> {args.out}"
+            + (f"kickstart={self._agg['kickstart']:.4f} " if kick_on else "")
+            + f"({self._ppo_sec}s round-trip) -> {args.out}"
         )
 
     def _export_weights(self, it: int) -> None:

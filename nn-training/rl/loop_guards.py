@@ -29,6 +29,7 @@ from rl.breaker import (
 from rl.events import write_circuit_break
 from rl.log import log
 from rl.stop_loss import eval_sigma, stop_loss_hit
+from rl.workdir_sweep import sweep_failed_wave_dirs
 
 
 class TrainingGuards:
@@ -46,6 +47,7 @@ class TrainingGuards:
     _prev_entropy: Any
     _stop_loss_streak: int
     _traj_root: Any
+    _traj_dir: Any
 
     def _breaker(self, it: int) -> bool:
         """F4 熔断 + KL/熵漂移告警（纯逻辑在 rl/breaker.py）。返回 True = 熔断停车。"""
@@ -156,8 +158,7 @@ class TrainingGuards:
             # H9：清理旧 job 目录（已完成的 job 不再需要 payload 与结果文件）
             if getattr(args, "ppo", "local") == "remote":
                 job_root = Path(
-                    getattr(args, "remote_job_root", "")
-                    or str(self._traj_root / "remote-jobs")
+                    getattr(args, "remote_job_root", "") or str(self._traj_root / "remote-jobs")
                 )
                 if job_root.exists():
                     cutoff = it - args.keep_iters
@@ -179,3 +180,13 @@ class TrainingGuards:
                                 shutil.rmtree(jd, ignore_errors=True)
                             except BaseException:
                                 pass
+            # §374 同步（2026-09-08）：本地采样波次目录收敛——本轮已全部结算（无在飞
+            # 子进程），清失败/废弃局的孤儿 w* 目录（无 _rl_report.json：部分 shard +
+            # rollout.log 是死重，PPO/resume 都不消费）。完整波次目录是语料，永不删
+            # （resume 依赖）；删除失败（沙箱保护/占用）跳过，训练照常。
+            try:
+                swept = sweep_failed_wave_dirs(self._traj_dir, log=log)
+                if swept:
+                    log(f"[run_rl] workdir-sweep it{it}: {swept} failed wave dir(s) removed")
+            except BaseException:
+                pass

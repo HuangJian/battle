@@ -410,9 +410,26 @@ visual/tunable value (color, timing, count, threshold).
    ambiguous.
 
 ### 6.3 Record the decision BEFORE executing
-- **Foundational / architecture / gameplay-mechanic decisions** (the §1–§10 lineage) → full entry in
-  `DECISIONS.md` using this format (keep numbering sequential; revising an older decision marks it
-  `_(superseded by §N)_` — history matters, never delete):
+- **Decision admission (决策治理, plan/decisions-governance.md, 2026-09-08)**: before opening
+  `DECISIONS.md` run the three gates: ① 有没有被否决的备选方案？ ② 未来 agent 会不会重犯/重查？
+  ③ 能不能就近表达（代码注释 / 测试断言 / 配置字段名 / docstring）？ — 有一问答 No 就不写。
+- **Three-way routing**: 真决策 / 禁令 / 铁律（不可逆、有被否决备选、防重犯）→ `DECISIONS.md`;
+  实验记录 / 参数调优 / 探针结论 → the matching `docs/*.progress.md`（**禁止双写**）;
+  bugfix / UI 调整 / 运维清理 → **commit message only**（要防重犯者落成测试断言）;
+  临时上下文 → `.workbuddy/memory/YYYY-MM-DD.md`.
+- **New-entry ID (自治理生效起)**: `§YYYY-MM-DD-<branch>-<slug>`（branch 去连字符，如
+  `god-ai` → `godai`；同日同分支第 N 条加 `-N`）. Old §1–§384 are a **frozen external-reference
+  contract: never renumber, never delete**; superseded entries are marked `_(superseded by §ID)_`.
+- **Entry template (≤12 lines, 备选与否决必填)**:
+  背景（2 行）→ 备选与否决（A —— 否，因为…；B —— 否，因为…）→ 决定（1–3 行）→ 违反后果（1 行）.
+- **Append-only + union**: new entries go at file **end only**（禁止中部插入；`.gitattributes`
+  已设 `DECISIONS.md merge=union`，并行 append 零冲突）. 写前只需读
+  `docs/decisions/HOW-TO-ADD.md` + `tail -200`，不要全文扫描几千行。
+- **Automated guard**: `bun run check` runs `tools/check-decisions.ts`（撞号 / 丢号 /
+  新条目格式，基线见 `tools/decisions-baseline.json`）.
+- **Historical format（§1–§384 期间使用，仅供解读旧条目）**: foundational / architecture /
+  gameplay-mechanic decisions previously used this shape — keep numbering sequential; revising an
+  older decision marks it `_(superseded by §N)_` — history matters, never delete:
 
 ```markdown
 ## N. <Short Title>

@@ -277,9 +277,16 @@ if [ -n "$STAGED_TS" ]; then
 fi
 
 # ---------- lint（oxlint，staged 文件——红即拦） ----------
-STAGED_LINT=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(ts|js|mjs|cjs|tsx|jsx|json)$' || true)
+# 只喂 oxlint 真正会解析的扩展名（TS/JS 系）。早期版本把 .json 也列进 grep，
+# 而 oxlint 不 lint json → 传进去得到 "No files found to lint" + exit 1，
+# 于是「只改 md/jsonc/json/ipynb 的提交」被这个假红拦下（2026-09-08 实测）。
+STAGED_LINT=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(ts|js|mjs|cjs|tsx|jsx)$' || true)
 if [ -n "$STAGED_LINT" ]; then
-  echo "$STAGED_LINT" | tr '\n' '\0' | xargs -0 -r "$BUN" x oxlint
+  echo " ▸ lint (oxlint, staged TS/JS)"
+  if ! echo "$STAGED_LINT" | tr '\n' '\0' | xargs -0 -r "$BUN" x oxlint; then
+    echo "✗ oxlint 红——修复后重新 commit"
+    exit 1
+  fi
 fi
 
 # ---------- freeze gate（det signature vs golden — DECISIONS §272） ----------

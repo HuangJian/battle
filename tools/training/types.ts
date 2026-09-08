@@ -41,6 +41,9 @@ export interface RegistryEntry {
   metrics?: number
   /** 启动模式：控制台 trainer 编排（pull/push/local）或 'remote'（冒烟预演）。 */
   mode?: 'pull' | 'push' | 'local' | 'remote'
+  /** 非正常退出记录（§380 exit-watchdog 写入；UI/API 展示退出原因）。 */
+  error?: string
+  exitAt?: string
 }
 
 /** registry.json：全部组件条目（缺省组件 = 未启动）。 */

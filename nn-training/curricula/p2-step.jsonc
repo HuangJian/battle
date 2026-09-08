@@ -1,0 +1,102 @@
+// 课程 p2-step —— 诊断台阶（DECISIONS §354）：p1(1 敌)→p4(4 敌)步子太大？
+//
+// 由 p4-horizon.jsonc 逐字节派生，仅改动以下 4 处，其余（地图/player_spawn/forces 串/
+// difficulty/1命0星/max_ticks/reward/gamma/lam/schedule/eval 节奏）完全同义：
+//   1. name: p4-horizon → p2-step
+//   2. stages[0].count: 4 → 2（敌数单变量隔离。语义经 World.ts:504-505 核实：
+//      spawn 队列取 forces 前 count 种，"abcd…" 故为 basic TL＋fast TR；
+//      4 出生点照列，队列循环，前两敌落 TL/TR）
+//   3. bc: it70 → p1-BC ep60（`tmp/ep60/battle2-p1bc/run/weights.json.ckpt.60`，
+//      即探针权重——p1 毕业生，p2 上 67%，本腿参考系生效；it70 首发的 it1–3 为
+//      pilot 数据，已隔离至 tmp/p2-step-it70pilot/，见 §356 补记）
+//   4. out/traj/backup_dir/backup_prefix → tmp/p2-step（Pilot 隔离后由 ep60 腿
+//      全新启用；探针阶段只用 eval，不写 traj）
+//
+// 用途（本条目只授权探针，不授权 RL）：
+//   BC ep60 ×100 ＋ God ×100，同 seeds 配对（tools/sim/eval-course-ckpt.ts）。
+//   门：BC≥50% 且 God≥85% → 台阶存在（RL 腿另起 DECISIONS 条目，超参到时定，
+//   reward/γ/λ/schedule 现值仅为占位）；BC<30% → 步子假说死；30–50% 灰区再议。
+// 注意：reward/γ/λ/schedule 沿用 horizon 版——探针贪心 eval 不消费它们。
+{
+  "version": 5,
+  "name": "p2-step",
+  "mode": "per-tick",
+  "stages": [
+    {
+      "name": "p4-onset-mixed",
+      "grid": [
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+      ],
+      "forces": "abcdabcdabcdabcdabcd",
+      "count": 2,
+      "player_spawn": { "col": 12, "row": 12 },
+      "enemy_spawns": [
+        { "col": 2, "row": 2 },
+        { "col": 22, "row": 2 },
+        { "col": 22, "row": 22 },
+        { "col": 2, "row": 22 }
+      ]
+    }
+  ],
+  "difficulty": "hard",
+  "max_ticks": 2400,
+  "seed_rotate": 150,
+  "player": {
+    "lives": 1,
+    "level": 0
+  },
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.3,
+      "wPickup": 1.5,
+      "wStar": 1.0,
+      "wDmg": 1.0,
+      "wStuck": 0.02,
+      "wShot": 0.01
+    },
+    "terminal": {
+      "stage_clear": 2.0,
+      "lives_exhausted": -1.0,
+      "timeout": -2.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+  "bc": "tmp/ep60/battle2-p1bc/run/weights.json.ckpt.60",
+  "iters": 0,
+  "max_hours": 24,
+  "workers": 8,
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  "gamma": 0.998,
+  "lam": 0.99,
+  "ppo_schedule": [
+    { "until_iter": 40, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
+    { "kl_coef": 0.0, "lr": 0.00005 }
+  ],
+  "out": "tmp/p2-step/weights.json",
+  "traj": "tmp/p2-step",
+  // F4 ENT 熔断：沿用 horizon 档 0.25（RL 腿启用时生效；探针不消费）。
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/p2-step",
+  "backup_prefix": "p2-step",
+  // 自定义关 stage ID 从 2000 开始，p2-step 仅 1 关 → ID 2000
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 100,
+  "eval_every": 5
+}

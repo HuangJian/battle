@@ -34,6 +34,9 @@ if _ilu.find_spec("schema") is None:
 
 from models.student import StudentNet
 
+# 仓库根（models/ 上溯 3 层；2026-09-08 双 tmp 统一：相对 tmp/ 一律锚定仓库根 tmp/）
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 INTENT_DIM = 8
 ENEMY_HEAD_DIM = 5  # none + e0..e3
 ANCHOR_HEAD_DIM = 16  # role 槽位（vocab.ANCHOR_ROLE_IDS）
@@ -175,7 +178,7 @@ def main() -> None:
     inj = torch.zeros(2, INJECT_DIM)
     i, e, a = m(obs, sc, inj)
     print("intent", tuple(i.shape), "enemy", tuple(e.shape), "anchor", tuple(a.shape))
-    export_intent_weights(m, "tmp/_intent_net_weights.json")
+    export_intent_weights(m, os.path.join(REPO_ROOT, "tmp", "_intent_net_weights.json"))
     print("export roundtrip ok")
 
 

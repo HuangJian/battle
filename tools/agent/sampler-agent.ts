@@ -20,7 +20,7 @@
  * 启动：bun tools/dist/sampler-agent.ts --port 8443 [--workers N] [--cache-mb 2048]
  * 首启生成随机 authKey 写同目录 agent.auth 并打印一次；运维复制到 rl-config.json。
  */
-import { spawn, spawnSync } from 'node:child_process'
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { gunzipSync, gzipSync } from 'node:zlib'
 import fs from 'node:fs'
@@ -35,6 +35,10 @@ import {
   buildPack as buildPackV2,
   unpackContainer as unpackContainerV2,
 } from '../sim/pack-container'
+// rollout 子进程运行时选择（node/V8 推理更快；§353）
+import { createRolloutRunner, type LaunchPlan, type RolloutRunner } from './rollout-runner'
+// 工作目录磁盘收敛纯函数（boot 孤儿清理 + 权重文件保留；修正则 2026-09-08，§374）
+import { staleOrphanPlan, sweepWeightFilePlan } from './workdir-cleanup'
 
 // 时间戳日志（2026-08-30 用户指令）：单点包装 console——agent 全部日志带本地时间
 // 前缀（HH:MM:SS，与训练侧 log() 同格式）。必须位于任何日志调用之前。
@@ -68,6 +72,13 @@ let port = 8443
 let workers = CPUS
 let cacheMaxBytes = 2048 * 1024 * 1024
 let cacheMaxItems = 32
+/** --no-node：强制 rollout 子进程走 bun（A/B 对照与回滚开关；见 rollout-runner.ts）。 */
+let forceBun = false
+/** 长驻 worker（§368 提速④）：默认开（2026-09-08 用户指令"全量开关"）；
+ * `--no-persist` 回退每局一次性 spawn；worker 连续失败 PERSIST_DISABLE_STREAK 次自动熔断。 */
+let persistEnabled = true
+let persistFailStreak = 0
+const PERSIST_DISABLE_STREAK = 3
 {
   const argv = process.argv.slice(2)
   for (let i = 0; i < argv.length; i++) {
@@ -76,7 +87,26 @@ let cacheMaxItems = 32
     else if (a === '--workers') workers = Math.max(1, parseInt(argv[++i], 10))
     else if (a === '--cache-mb') cacheMaxBytes = Math.max(1, parseInt(argv[++i], 10)) * 1024 * 1024
     else if (a === '--max-cache-items') cacheMaxItems = Math.max(1, parseInt(argv[++i], 10))
+    else if (a === '--no-node') forceBun = true
+    else if (a === '--no-persist') persistEnabled = false
   }
+}
+
+// ---------------- rollout 子进程运行时（node/V8 vs bun/JSC，§353） ----------------
+// 推理同一个 conv_feats.wasm：node(V8) 4.62ms vs bun(JSC) 7.55ms（本机实测 ×1.63）。
+// agent 自身仍在 bun（Bun.serve / bunVersion 版本门 / codeHash 口径不变），只把
+// 采样子进程交给 node：预打包 exporter（--target=node）+ 产物同级放 conv_feats.wasm。
+let _runner: RolloutRunner | null = null
+function rolloutRunner(): RolloutRunner {
+  if (!_runner) {
+    _runner = createRolloutRunner({
+      repoRoot: REPO_ROOT,
+      codeHash: memoizedCodeHash(),
+      forceBun,
+      log: (m: string) => console.log(m),
+    })
+  }
+  return _runner
 }
 
 // ---------------- 运维控制：git pull / 重启（v3.7，用户需求 2026-08-27） ----------------
@@ -434,6 +464,16 @@ function latestWeightsOfKind(kind: string): WeightsState | null {
 }
 const AUTH_KEY = loadOrCreateAuthKey()
 fs.mkdirSync(WORK_DIR, { recursive: true })
+// boot 收敛（§374）：清被杀进程残留的 game-* 孤儿 / 陈旧 pid，权重按 kind 收敛到最新
+// KEEP 份——重启后内存桶为空，旧文件若无人清扫会无限累积（此前正则不匹配 kind 命名）。
+const workdirBefore = fs.readdirSync(WORK_DIR).length
+try {
+  sweepWorkdir()
+  const swept = workdirBefore - fs.readdirSync(WORK_DIR).length
+  if (swept > 0) console.log(`[sampler-agent] workdir swept @boot (${swept} stale entries removed)`)
+} catch {
+  /* best effort */
+}
 
 function lruPut(key: string, buf: Buffer): void {
   const prev = resultCache.get(key)
@@ -465,22 +505,37 @@ function diskFreeMB(): number | null {
   }
 }
 
-/** 权重文件保留清扫：只留最新 KEEP 份；被在飞评估局占用的尽力跳过。 */
-const WEIGHT_FILES_KEEP = 4
-
-function sweepWeightFiles(): void {
+/**
+ * 工作目录磁盘收敛（boot + 权重切换时调用）：
+ *  - 权重文件按 kind 各留最新 KEEP 份（修正则匹配 weights-<kind>-<sha16>.json）；
+ *    在飞权重桶引用的文件跳过（删掉即 /v1/task 409/局失败）；
+ *  - 清 mtime 早于 STALE_ORPHAN_MS 的 game-* 孤儿目录（被杀进程残留，finally 无法执行）
+ *    与陈旧 agent.pid/agent-child.pid（年龄门防误删 /v1/restart 交接窗口内父进程在飞局）。
+ * 逻辑在 workdir-cleanup.ts（纯函数，单测共享）；此处只做 IO 与在飞桶枚举。
+ */
+function sweepWorkdir(nowMs = Date.now()): void {
   try {
-    const files = fs
+    const live = new Set<string>()
+    for (const bucket of weightsByKindSha.values())
+      for (const ws of bucket.values()) live.add(path.basename(ws.file))
+    const names = fs
       .readdirSync(WORK_DIR)
-      .filter((f) => /^weights-[0-9a-f]{16}\.json$/.test(f))
-      .map((f) => {
-        const p = path.join(WORK_DIR, f)
-        return { p, m: fs.statSync(p).mtimeMs }
-      })
-      .sort((a, b) => b.m - a.m)
-    for (const x of files.slice(WEIGHT_FILES_KEEP)) {
+      .filter(
+        (n) =>
+          /^weights-[a-z]+-[0-9a-f]{16}\.json$/.test(n) ||
+          /^game-\d+-\d+$/.test(n) ||
+          n === 'agent.pid' ||
+          n === 'agent-child.pid',
+      )
+    const entries = names.map((name) => ({
+      name,
+      mtimeMs: fs.statSync(path.join(WORK_DIR, name)).mtimeMs,
+    }))
+    const del = sweepWeightFilePlan(entries, live)
+    const { games, pids } = staleOrphanPlan(entries, nowMs)
+    for (const name of [...del, ...games, ...pids]) {
       try {
-        fs.rmSync(x.p, { force: true })
+        fs.rmSync(path.join(WORK_DIR, name), { recursive: true, force: true })
       } catch {
         /* busy — next sweep */
       }
@@ -506,6 +561,137 @@ export function unpackContainer(buf: Buffer): {
   files: Record<string, string>
 } {
   return JSON.parse(gunzipSync(buf).toString('utf8'))
+}
+
+// ---------------- §368 提速④：长驻 worker 池（--persist，默认关） ----------------
+// 一次性子进程每局付一次：进程启动 + wasm 编译 + JIT 预热 + 权重解析。serve 模式把 N 局
+// 复用到同一进程（export-rl-rollout.ts --serve：stdin 一行一局，`__SERVE_OK__` /
+// `__SERVE_ERR__` 标记结果；per-game shard 与一次性路径逐字节一致，已实测）。
+// 只对 per-tick rollout 生效；worker 异常/超时 → 杀掉并**本局回退一次性 spawn**（不丢局）。
+const PERSIST_SERVE_ENTRIES = new Set(['tools/sim/export-rl-rollout.ts'])
+const PERSIST_TASK_TIMEOUT_MS = 600_000
+interface PoolWorker {
+  child: ChildProcess
+  key: string // plan.argv[0]（bun= .ts 源 / node= .mjs 产物）
+  busy: boolean
+  buf: string
+  pending: ((ok: boolean, msg: string) => void) | null
+}
+const persistPool: PoolWorker[] = []
+
+function persistSpawn(plan: LaunchPlan): PoolWorker | null {
+  try {
+    const child = spawn(plan.cmd, [plan.argv[0]!, '--serve'], {
+      cwd: REPO_ROOT,
+      // serve worker 靠 stdin 收任务 → 必须 'pipe'（一次性 spawn 的 stdin=ignore 是另一条路径）
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+    })
+    const w: PoolWorker = { child, key: plan.argv[0]!, busy: false, buf: '', pending: null }
+    const settle = (ok: boolean, msg: string): void => {
+      const pend = w.pending
+      if (pend) {
+        w.pending = null
+        w.busy = false
+        pend(ok, msg)
+      }
+    }
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', (c: string) => {
+      w.buf += c
+      let nl = w.buf.indexOf('\n')
+      while (nl >= 0) {
+        const line = w.buf.slice(0, nl).trim()
+        w.buf = w.buf.slice(nl + 1)
+        if (line.startsWith('__SERVE_OK__')) settle(true, '')
+        else if (line.startsWith('__SERVE_ERR__'))
+          settle(false, line.slice('__SERVE_ERR__'.length).trim() || 'worker error')
+        nl = w.buf.indexOf('\n')
+      }
+    })
+    child.on('error', () => settle(false, 'spawn error'))
+    child.on('close', (code, signal) => {
+      console.log(
+        `[sampler-agent] persist worker closed code=${code} signal=${signal} (was busy=${w.busy})`,
+      )
+      settle(false, 'worker exited')
+      const i = persistPool.indexOf(w)
+      if (i >= 0) persistPool.splice(i, 1)
+    })
+    persistPool.push(w)
+    return w
+  } catch {
+    return null
+  }
+}
+
+function killPersistPool(): void {
+  for (const w of persistPool) {
+    try {
+      w.child.kill('SIGTERM')
+    } catch {
+      /* gone */
+    }
+  }
+  persistPool.length = 0
+}
+
+/** 走长驻 worker 跑一局；true=成功且 _result.pack 已写入。失败/不可用 → false（调用方一次性兜底）。 */
+async function runViaPersistWorker(
+  plan: LaunchPlan,
+  args: string[],
+  gameDir: string,
+): Promise<boolean> {
+  const key = plan.argv[0]!
+  let w: PoolWorker | undefined = persistPool.find((x) => !x.busy && x.key === key)
+  if (!w) {
+    if (persistPool.length >= workers) return false // 全忙（并发门应阻止）→ 一次性兜底
+    w = persistSpawn(plan) ?? undefined
+    if (w) console.log(`[sampler-agent] persist worker spawned (${path.basename(key)})`)
+  } else console.log(`[sampler-agent] persist worker reused (${path.basename(key)})`)
+  if (!w) return false
+  w.busy = true
+  const result = new Promise<boolean>((resolve) => {
+    w!.pending = (ok, _msg) => {
+      if (!ok) {
+        const i = persistPool.indexOf(w!)
+        if (i >= 0) persistPool.splice(i, 1)
+        try {
+          w!.child.kill('SIGTERM')
+        } catch {
+          /* gone */
+        }
+        resolve(false)
+      } else resolve(true)
+    }
+    const timer = setTimeout(() => {
+      if (w!.pending) {
+        const pend = w!.pending
+        w!.pending = null
+        try {
+          w!.child.kill('SIGTERM')
+        } catch {
+          /* gone */
+        }
+        const i = persistPool.indexOf(w!)
+        if (i >= 0) persistPool.splice(i, 1)
+        pend(false, 'timeout')
+      }
+    }, PERSIST_TASK_TIMEOUT_MS)
+    ;(timer as ReturnType<typeof setTimeout>).unref?.()
+  })
+  if (!w.child.stdin) {
+    w.busy = false
+    return false
+  }
+  try {
+    w.child.stdin.write(JSON.stringify(args.slice(1)) + '\n')
+  } catch {
+    w.busy = false
+    return false
+  }
+  const ok = await result
+  return ok && fs.existsSync(path.join(gameDir, '_result.pack'))
 }
 
 async function runGame(
@@ -544,19 +730,15 @@ async function runGame(
   const gameDir = path.join(WORK_DIR, `game-${process.pid}-${seq}`)
   fs.mkdirSync(gameDir, { recursive: true })
   try {
-    const args = [
-      isEval
-        ? 'tools/sim/export-eval-game.ts'
-        : isGoalRollout
-          ? 'tools/sim/export-goal-rollout.ts'
-          : isIntentRollout
-            ? 'tools/sim/export-intent-rollout.ts'
-            : 'tools/sim/export-rl-rollout.ts',
-      '--weights',
-      wfile,
-      '--out',
-      gameDir,
-    ]
+    // §353：exporter 入口先取出，交给 runner 决定用 bun 直跑 TS 还是 node 跑打包产物。
+    const entryTs = isEval
+      ? 'tools/sim/export-eval-game.ts'
+      : isGoalRollout
+        ? 'tools/sim/export-goal-rollout.ts'
+        : isIntentRollout
+          ? 'tools/sim/export-intent-rollout.ts'
+          : 'tools/sim/export-rl-rollout.ts'
+    const args = [entryTs, '--weights', wfile, '--out', gameDir]
     if (isEval) {
       // export-eval-game.ts 用单数形式 --stage/--seed
       args.push('--stage', String(stage), '--seed', String(seed))
@@ -589,6 +771,9 @@ async function runGame(
       // goal/intent exporter 不认识该参数）
       if (courseFp && !isGoalRollout && !isIntentRollout) args.push('--course-fp', courseFp)
     }
+    // §353：rollout 子进程运行时（node 跑打包产物 / bun 直跑 TS 源码）。
+    // 先取 runner 实例定 node-label，args 全部就位后再 launch（argv 快照须完整）。
+    const runner = rolloutRunner()
     args.push(
       '--max-ticks',
       String(maxTicks),
@@ -597,42 +782,68 @@ async function runGame(
       '--wver',
       ws.sha,
       '--node-label',
-      `bun-${process.pid}`,
+      `${runner.engine}-${process.pid}`,
       // v3.6：容器在子进程内组装（BCV2，tools/sim/pack-container.ts）——base64+gzip+JSON
       // 拼装与仿真并行，不再阻塞 agent 主线程（8 workers 串行打包曾是吞吐瓶颈）。
       '--pack',
       path.join(gameDir, '_result.pack'),
     )
-    const child = spawn(process.execPath, args, {
-      cwd: REPO_ROOT,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      // Windows：隐藏子进程控制台窗口（否则 self 节点每个对局都会弹黑窗抢焦点）。
-      windowsHide: true,
-    })
-    let tail = ''
-    const cap = (chunk: Buffer): void => {
-      tail = (tail + chunk.toString('utf8')).slice(-4000)
-    }
-    child.stdout.on('data', cap)
-    child.stderr.on('data', cap)
-    const rc = await new Promise<number>((resolve, reject) => {
-      child.on('error', reject)
-      child.on('close', (code) => resolve(code ?? -1))
-    })
+    const plan = runner.launch(entryTs, args)
     const scriptName = isEval
       ? 'export-eval-game'
       : isIntentRollout
         ? 'export-intent-rollout'
         : 'export-rl-rollout'
-    if (rc !== 0) throw new Error(`${scriptName} exited ${rc}: ${tail}`)
-
-    // 子进程已把结果打成 BCV2 容器（manifest 含 stage/seed/mode/elapsedSec 溯源戳），
-    // 主线程只做一次顺序读——不再读 12 个 shard + base64 + gzip。
     const packFile = path.join(gameDir, '_result.pack')
-    if (!fs.existsSync(packFile)) {
-      throw new Error(`${scriptName} produced no result pack: ${tail}`)
+    let packBuf: Buffer | null = null
+    // §368：--persist 时 per-tick rollout 走长驻 worker（省每局进程启动/JIT 预热/wasm 编译），
+    // 失败自动回退一次性 spawn（本局不丢）。
+    if (persistEnabled && PERSIST_SERVE_ENTRIES.has(entryTs)) {
+      const viaWorker = await runViaPersistWorker(plan, args, gameDir)
+      if (viaWorker) {
+        persistFailStreak = 0
+        runner.noteSuccess(plan.engine)
+        packBuf = fs.readFileSync(packFile)
+      } else if (++persistFailStreak >= PERSIST_DISABLE_STREAK) {
+        // 连续失败 → 本进程余生熔断（worker 产物/运行环境有问题的保险丝）
+        persistEnabled = false
+        console.log(
+          `[sampler-agent] persist worker 连续失败 ${PERSIST_DISABLE_STREAK} 次 → 熔断，改回一次性 spawn`,
+        )
+      }
     }
-    return fs.readFileSync(packFile)
+    if (!packBuf) {
+      // ---- 一次性 spawn（默认路径 / 长驻不可用或失败时的兜底）----
+      const child = spawn(plan.cmd, plan.argv, {
+        cwd: REPO_ROOT,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        // Windows：隐藏子进程控制台窗口（否则 self 节点每个对局都会弹黑窗抢焦点）。
+        windowsHide: true,
+      })
+      let tail = ''
+      const cap = (chunk: Buffer): void => {
+        tail = (tail + chunk.toString('utf8')).slice(-4000)
+      }
+      child.stdout.on('data', cap)
+      child.stderr.on('data', cap)
+      const rc = await new Promise<number>((resolve, reject) => {
+        child.on('error', reject)
+        child.on('close', (code) => resolve(code ?? -1))
+      })
+      if (rc !== 0) {
+        // 引擎级降级判定：node 连续 NODE_FAIL_LIMIT 次失败 → 该进程余生回退 bun。
+        runner.noteFailure(plan.engine, `rc=${rc} ${tail.slice(-200)}`)
+        throw new Error(`${scriptName} exited ${rc}: ${tail}`)
+      }
+      runner.noteSuccess(plan.engine)
+      // 子进程已把结果打成 BCV2 容器（manifest 含 stage/seed/mode/elapsedSec 溯源戳），
+      // 主线程只做一次顺序读——不再读 12 个 shard + base64 + gzip。
+      if (!fs.existsSync(packFile)) {
+        throw new Error(`${scriptName} produced no result pack: ${tail}`)
+      }
+      packBuf = fs.readFileSync(packFile)
+    }
+    return packBuf
   } finally {
     fs.rmSync(gameDir, { recursive: true, force: true })
   }
@@ -825,7 +1036,7 @@ async function handle(req: Request): Promise<Response> {
         }
       }
     }
-    sweepWeightFiles()
+    sweepWorkdir()
     console.log(
       `[sampler-agent] weights[${kind}] switched -> ${actualSha.slice(0, 12)}… (result cache purged)`,
     )
@@ -1170,6 +1381,10 @@ async function handle(req: Request): Promise<Response> {
       bunVersion: Bun.version,
       agentVersion: cachedGitShortHash(),
       cpus: CPUS,
+      // §353：rollout 子进程实际运行时（bun=JSC 直跑 TS / node=V8 跑打包产物）
+      rolloutEngine: rolloutRunner().engine,
+      nodeVersion: rolloutRunner().node?.version ?? null,
+      persist: persistEnabled,
       workers,
       gamesDoneTotal,
       gamesDoneByIter: Object.fromEntries(gamesDoneByIter),
@@ -1195,6 +1410,9 @@ async function handle(req: Request): Promise<Response> {
       bunVersion: Bun.version,
       agentVersion: cachedGitShortHash(),
       cpus: CPUS,
+      // §353：rollout 引擎与 node 版本（纯观测；调度口径不变）
+      rolloutEngine: rolloutRunner().engine,
+      nodeVersion: rolloutRunner().node?.version ?? null,
       // 能力声明：trainer 据此把节点纳入干净评估分发（旧 agent 无此字段 → 自动跳过）
       evalSupport: true,
       // M1d：课程自定义关（stageJson）支持位——不支持的节点绝不派 stageJson 任务
@@ -1214,13 +1432,16 @@ if (import.meta.main) {
   }
   if (showHelp) {
     console.log(
-      'usage: bun tools/dist/sampler-agent.ts --port 8443 [--workers N] [--cache-mb 2048] [--max-cache-items 32] [--print-code-hash]',
+      'usage: bun tools/dist/sampler-agent.ts --port 8443 [--workers N] [--cache-mb 2048] [--max-cache-items 32] [--print-code-hash] [--no-node]',
     )
     process.exit(0)
   }
+  // §353：先探测 node + 预打包 exporter（日志进启动行之前，便于巡检一眼看到引擎）。
+  rolloutRunner()
   console.log(
     `[sampler-agent] listening on 0.0.0.0:${port} workers=${workers} cache=${(cacheMaxBytes / (1024 * 1024)).toFixed(0)}MB/${cacheMaxItems} ` +
-      `codeHash=${memoizedCodeHash().slice(0, 12)}… agentVersion=${cachedGitShortHash()} cpus=${CPUS}`,
+      `codeHash=${memoizedCodeHash().slice(0, 12)}… agentVersion=${cachedGitShortHash()} cpus=${CPUS} ` +
+      `rolloutEngine=${rolloutRunner().engine}${rolloutRunner().node ? ` (${rolloutRunner().node!.version})` : ''}`,
   )
   // Bun.serve 的 idleTimeout 上限 255s，而单局最长 ~480s——仅靠它不足以阻止长静默 task 连接被回收。
   // 因此设 idleTimeout=255(允许的最大值) + task 响应流式的"保活 chunk"（每 20s 发一个空格字节），
@@ -1241,6 +1462,7 @@ if (import.meta.main) {
           /* already gone */
         }
       }
+      killPersistPool()
       process.exit(0)
     })
   }

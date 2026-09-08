@@ -1,0 +1,103 @@
+// 课程 p2-var —— 出生点变体（DECISIONS §360）：固定靶退役
+//
+// 由 p2-step.jsonc 逐字节派生，仅改动以下 3 处，其余全同义：
+//   1. name/dirs → p2-var（tmp/p2-var，fresh；与在跑的 p2-step 腿无交集）
+//   2. stages[0].spawn_variants：新增 6 对子全组合（C(4,2)：[TL,TR]/[TL,BR]/[TL,BL]/
+//      [TR,BR]/[TR,BL]/[BR,BL]；玩家恒居中；kinds 随表序自然轮换＝白送多样性）。
+//      顶层 enemy_spawns 保留（无 seed 回退路径与旧行为一致）
+//   3. bc 占位（探针不消费；RL 腿到时定）
+//
+// 用途（本条目只授权探针）：BC ep60 ×100 ＋ God ×100（100 局≈每 variant 17 局，
+// 只读总数）。与固定版（67/85）对照读"多样性税"。注意：本文件头注释提及的
+// pilot 隔离路径以 p2-step.jsonc 为准（此处无 pilot）。
+{
+  "version": 5,
+  "name": "p2-var",
+  "mode": "per-tick",
+  "stages": [
+    {
+      "name": "p4-onset-mixed",
+      "grid": [
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+      ],
+      "forces": "abcdabcdabcdabcdabcd",
+      "count": 2,
+      "player_spawn": { "col": 12, "row": 12 },
+      "enemy_spawns": [
+        { "col": 2, "row": 2 },
+        { "col": 22, "row": 2 },
+        { "col": 22, "row": 22 },
+        { "col": 2, "row": 22 }
+      ],
+      "spawn_variants": [
+        {"enemy_spawns": [{"col": 2, "row": 2},{"col": 22, "row": 2}]},
+        {"enemy_spawns": [{"col": 2, "row": 2},{"col": 22, "row": 22}]},
+        {"enemy_spawns": [{"col": 2, "row": 2},{"col": 2, "row": 22}]},
+        {"enemy_spawns": [{"col": 22, "row": 2},{"col": 22, "row": 22}]},
+        {"enemy_spawns": [{"col": 22, "row": 2},{"col": 2, "row": 22}]},
+        {"enemy_spawns": [{"col": 22, "row": 22},{"col": 2, "row": 22}]}
+      ]
+    }
+  ],
+  "difficulty": "hard",
+  "max_ticks": 2400,
+  "seed_rotate": 150,
+  "player": {
+    "lives": 1,
+    "level": 0
+  },
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.3,
+      "wPickup": 1.5,
+      "wStar": 1.0,
+      "wDmg": 1.0,
+      "wStuck": 0.02,
+      "wShot": 0.01
+    },
+    "terminal": {
+      "stage_clear": 2.0,
+      "lives_exhausted": -1.0,
+      "timeout": -2.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+  "bc": "tmp/ep60/battle2-p1bc/run/weights.json.ckpt.60",
+  "iters": 0,
+  "max_hours": 24,
+  "workers": 8,
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  "gamma": 0.998,
+  "lam": 0.99,
+  "ppo_schedule": [
+    { "until_iter": 40, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
+    { "kl_coef": 0.0, "lr": 0.00005 }
+  ],
+  "out": "tmp/p2-var/weights.json",
+  "traj": "tmp/p2-var",
+  // F4 ENT 熔断：沿用 horizon 档 0.25（RL 腿启用时生效；探针不消费）。
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/p2-var",
+  "backup_prefix": "p2-var",
+  // 自定义关 stage ID 从 2000 开始，p2-var 仅 1 关 → ID 2000
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 100,
+  "eval_every": 5
+}

@@ -8,13 +8,28 @@
 
 import { closeSync, existsSync, openSync, readFileSync, readdirSync, readSync, statSync } from 'fs'
 import path from 'path'
-import { NN_TRAINING, REPO_ROOT } from '../paths'
+import { LOG_DIR, NN_TRAINING, REPO_ROOT } from '../paths'
 import { httpOk, pidAlive } from '../net'
 import { loadRegistry } from '../registry'
 import { loadConfig } from '../config'
 import { COMPONENT_LABELS, loadConsoleState } from './actions'
-import { readIterMetrics, type IterRow } from '../monitor/iters'
+import { readIterMetrics } from './iters'
+import { aggregateNodeHistory, emptyHistory, poolStatus } from './pool-history'
 import type { Component, RlConfig } from '../types'
+// 视图类型单一源：ui/view.ts（api.ts 不再定义本地视图类型）
+import { parsePhaseFromLog, stripIsoPrefix } from '../ui/view'
+import type {
+  ComponentView,
+  ConsoleStateView,
+  LogPayload,
+  MetricsView,
+  NodeHistoryRow,
+  NodeLocalView,
+  NodeView,
+  PhaseInfo,
+  PoolView,
+  SelfStatus,
+} from '../ui/view'
 import {
   ActionError,
   busy,
@@ -31,62 +46,42 @@ import {
   type StartCtx,
 } from './actions'
 
-// ────────────────────────── 快照类型 ──────────────────────────
+// ────────────────────────── 快照类型（单一源 ui/view.ts，此处仅透传导出） ──────────────────────────
 
-export interface ComponentView {
-  key: Component
-  label: string
-  /** running = 进程存活；stopped = 无存活进程；exited = 登记仍在但进程已死。 */
-  status: 'running' | 'stopped' | 'exited'
-  pid: number | null
-  url: string | null
-  course: string | null
-  mode: string | null
-  healthy: boolean | null
-  /** 日志文件相对 nn-training/ 的路径（页面点击查看尾行）。 */
-  log: string | null
-  logTail: string[]
-  busy: boolean
-}
+export type {
+  ComponentView,
+  ConsoleStateView,
+  LogPayload,
+  MetricsView,
+  ModeView,
+  NodeView,
+} from '../ui/view'
 
-export interface NodeView {
-  id: string
-  url: string
-  gpuPush: boolean
-  enabled: boolean
-  concurrency: number
-  /** /v1/ping 实时探测；null = 未探测（disabled 时跳过）。 */
-  online: boolean | null
-  codeHash: string | null
-  cpus: number | null
-  busy: boolean
-}
+// ────────────────────────── 配置读取（§361③：rl-config.json 瞬时读损坏兜底） ──────────────────────────
 
-export interface ModeView {
-  /** 控制台 trainer 基建编排（console-state 持久化）。 */
-  trainerPpo: 'pull' | 'push' | 'local'
-  /** rl-config rl.* 键（trainer 启动时消费）。 */
-  stream: number
-  doubleBuffer: number
-  precollectEarly: number
-}
+const CFG_RETRY_MS = 1000
+let cfgLastOk: RlConfig | null = null
+let cfgBadUntil = 0
+const EMPTY_CONFIG = { version: 1, nodes: [], rl: {} } as unknown as RlConfig
 
-export interface ConsoleStateView {
-  time: string
-  course: string
-  /** tmp/ 下有 training_log.jsonl 的课程（最近更新优先）。 */
-  courses: string[]
-  components: ComponentView[]
-  nodes: NodeView[]
-  modes: ModeView
-  metrics: MetricsView
-}
-
-export interface MetricsView {
-  /** 该课程是否有数据。 */
-  available: boolean
-  iters: IterRow[]
-  error?: string
+/**
+ * 读 rl-config.json + 损坏兜底。控制台自身 saveConfig 用 writeFileSync 非原子写
+ * （2026-09-06 §339 同款竞态家族）——轮询恰落在写盘窗口会读到半截/空 JSON，loadConfig
+ * 抛错会让 /api/state 整条 500 → 前端「刷新失败，正在重试」banner 假阳性（§361③根因）。
+ * 失败回退上次成功配置（内存缓存；1s 坏窗内直接命中缓存，不再反复解析半截文件）；
+ * 从未成功过则回退空配置（UI 降级为空节点/组件列表，不 500）。
+ */
+export function loadConfigSafe(): RlConfig {
+  if (Date.now() < cfgBadUntil && cfgLastOk) return cfgLastOk
+  try {
+    const cfg = loadConfig()
+    cfgLastOk = cfg
+    cfgBadUntil = 0
+    return cfg
+  } catch {
+    cfgBadUntil = Date.now() + CFG_RETRY_MS
+    return cfgLastOk ?? EMPTY_CONFIG
+  }
 }
 
 // ────────────────────────── 课程发现 ──────────────────────────
@@ -153,12 +148,14 @@ export function actionCtx(body: PostBody): StartCtx {
 }
 // ────────────────────────── 快照组装 ──────────────────────────
 
+// 组件日志统一读 LOG_DIR（仓库根 tmp/，2026-09-08 双 tmp 统一）——绝对路径，
+// 与组件启动写入路径（specs.ts log:）同源，不依赖控制台自身 cwd。
 const COMPONENT_LOGS: Partial<Record<Component, (cfg: RlConfig, course: string) => string>> = {
-  selfNode: () => 'tmp/sampler-agent.log',
-  hubServer: () => 'tmp/hub-server.out',
-  cloudflared: (_c) => 'tmp/cloudflared.log',
-  trainingLoop: (_cfg, course) => `tmp/${course || 'nocourse'}/training-loop.log`,
-  workerServe: () => 'tmp/remote-worker-serve.log',
+  selfNode: () => path.join(LOG_DIR, 'sampler-agent.log'),
+  hubServer: () => path.join(LOG_DIR, 'hub-server.out'),
+  cloudflared: (_c) => path.join(LOG_DIR, 'cloudflared.log'),
+  trainingLoop: (_cfg, course) => path.join(LOG_DIR, course || 'nocourse', 'training-loop.log'),
+  workerServe: () => path.join(LOG_DIR, 'remote-worker-serve.log'),
 }
 
 const HEALTHY_PORTS: Partial<Record<Component, (cfg: RlConfig) => string>> = {
@@ -175,57 +172,142 @@ const ALL_COMPONENTS: Component[] = [
   'workerServe',
 ]
 
-function logTail(nnRel: string, n = 5): string[] {
+/** 逐行容错的日志尾（§361③）：单行损坏/读取异常只丢该行，不再让整个 /api/state 500。 */
+// ────────────────────────── 日志字节容错解码（§373） ──────────────────────────
+// python 子进程（hub/worker/run_rl）在 zh-CN Windows 下可能以 GBK(stdout) 写日志，
+// 整段按 UTF-8 解码会产生「˲ʱ󣩡」式乱码。逐行严格 UTF-8 解码，失败行用
+// GB18030（GBK 超集）重解——纯 UTF-8 文件零影响，只有真正 GBK 行走兜底。
+
+function decodeLogBytes(u8: Uint8Array): string {
   try {
-    return readFileSync(path.join(REPO_ROOT, 'nn-training', nnRel), 'utf-8')
-      .split('\n')
-      .filter(Boolean)
-      .slice(-n)
-      .map((l) => l.slice(0, 200))
+    return new TextDecoder('utf-8', { fatal: true }).decode(u8)
   } catch {
-    return []
+    return new TextDecoder('gb18030').decode(u8)
   }
+}
+
+/** 按 \n 字节切行并逐行容错解码（窗口读的 buf 含被切半的 UTF-8/GBK 尾字节也不影响其它行）。 */
+function splitLogBytes(buf: Uint8Array): string[] {
+  const out: string[] = []
+  let start = 0
+  for (let i = 0; i < buf.length; i++) {
+    if (buf[i] === 10) {
+      out.push(decodeLogBytes(buf.subarray(start, i)))
+      start = i + 1
+    }
+  }
+  if (start < buf.length) out.push(decodeLogBytes(buf.subarray(start)))
+  return out
+}
+
+export function logTail(nnRel: string, n = 5): string[] {
+  let raw: Uint8Array
+  try {
+    raw = readFileSync(path.isAbsolute(nnRel) ? nnRel : path.join(REPO_ROOT, 'nn-training', nnRel))
+  } catch {
+    return [] // 文件缺失/暂时不可读 = 无日志尾（正常态，非错误）
+  }
+  const out: string[] = []
+  for (const line of splitLogBytes(raw)) {
+    if (!line) continue
+    out.push(line.length > 200 ? line.slice(0, 200) : line)
+  }
+  return out.slice(-n) // 只取尾 n 行（原语义）
 }
 
 // ────────────────────────── 日志查看（§348 补 2） ──────────────────────────
 
-/** 组件日志解析：路径常量优先，缺省回退账本 entry.log。返回 null = 该组件无日志
- *  语义（理论上不发生——ALL_COMPONENTS 全部有 COMPONENT_LOGS 映射）。 */
+/** 组件日志解析：静态映射存在 → 用之；否则账本 entry.log → 否则运行时动态查找（§374）：
+ *  cloudflared 每次 spawn 生成 cloudflared-<ts>.log（动态文件名），trainingLoop 日志在
+ *  tmp/<course>/ 下，清理 tmp 或换课程后静态路径会失效——按组件语义扫 tmp 找最近活跃文件。
+ *  全失败返回静态路径（让 UI 显示「日志文件不存在」占位，而非 404）。 */
 export function resolveComponentLog(key: Component, cfg: RlConfig, course: string): string | null {
   const mapped = COMPONENT_LOGS[key]?.(cfg, course)
-  if (mapped) return mapped
-  const entry = loadRegistry()[key]
-  if (entry?.log) return entry.log
-  return null
+  if (mapped && existsSync(mapped)) return mapped
+  const entryLog = loadRegistry()[key]?.log
+  if (entryLog && existsSync(entryLog)) return entryLog
+  const found = findLatestLog(key, course)
+  if (found) return found
+  return mapped ?? entryLog ?? null
 }
 
-export interface LogPayload {
-  component: Component
-  label: string
-  /** nn-training/ 相对日志路径。 */
-  log: string | null
-  /** 文件是否存在。 */
-  exists: boolean
-  fileSize: number
-  lines: string[]
-  truncated: boolean
+/** 组件日志文件名匹配（LOG_DIR 一层放文件；trainingLoop 在 LOG_DIR/<course>/ 子目录）。 */
+const LOG_NAME_MATCH: Record<Component, (name: string) => boolean> = {
+  selfNode: (n) => n.startsWith('sampler-agent') && n.endsWith('.log'),
+  hubServer: (n) => n.startsWith('hub-server'),
+  cloudflared: (n) => n.startsWith('cloudflared') && n.endsWith('.log'),
+  trainingLoop: (n) => n === 'training-loop.log',
+  workerServe: (n) => n.startsWith('remote-worker-serve') && n.endsWith('.log'),
+}
+
+/**
+ * 运行时动态查找组件日志（§374）：trainingLoop 扫 LOG_DIR 各课程目录的 training-loop.log；
+ * 其余扫 LOG_DIR 一层匹配文件，mtime 最新者为准。只扫一层 + 定点 stat，不做全文递归
+ * （§366 教训：扫描慢路径会拖垮请求）。dir 参数化（§381）：真实路径用 LOG_DIR，
+ * 单测注入临时目录获得确定性。
+ */
+export function scanLatestLog(dir: string, key: Component, course: string): string | null {
+  let bestP: string | null = null
+  let bestM = -1
+  const consider = (p: string): void => {
+    try {
+      const m = statSync(p).mtimeMs
+      if (m > bestM) {
+        bestP = p
+        bestM = m
+      }
+    } catch {
+      /* stat race */
+    }
+  }
+  const match = LOG_NAME_MATCH[key]
+  try {
+    if (key === 'trainingLoop') {
+      if (course) consider(path.join(dir, course, 'training-loop.log'))
+      for (const d of readdirSync(dir, { withFileTypes: true })) {
+        if (d.isDirectory()) consider(path.join(dir, d.name, 'training-loop.log'))
+      }
+    } else {
+      for (const d of readdirSync(dir, { withFileTypes: true })) {
+        if (d.isFile() && match(d.name)) consider(path.join(dir, d.name))
+      }
+    }
+  } catch {
+    /* tmp unreadable */
+  }
+  return bestP
+}
+
+/** 对真实 LOG_DIR 的动态查找（scanLatestLog 的默认目录版）。 */
+export function findLatestLog(key: Component, course: string): string | null {
+  return scanLatestLog(LOG_DIR, key, course)
 }
 
 /** 从文件末尾读取至多 maxLines 行（readFileSync 整文件读对 GB 级增长日志是浪费；
- *  先 stat 再只读尾部字节窗口——日志页 2s 自动刷新，这是热路径）。 */
+ *  先 stat 再只读尾部字节窗口——日志页 2s 自动刷新，这是热路径）。
+ *  maxLines='all'（§371 优化 1）：读整个文件（字节窗口放宽到 4MB 上限，行数不截）。 */
 export function readLogTail(
   nnRel: string,
-  maxLines = 200,
+  maxLines: number | 'all' = 200,
   maxBytes = 512 * 1024,
-): { lines: string[]; exists: boolean; fileSize: number; truncated: boolean } {
-  const abs = path.join(NN_TRAINING, nnRel)
+): {
+  lines: string[]
+  exists: boolean
+  fileSize: number
+  truncated: boolean
+  /** 文件总行数（顶部「共 N 行」）；>8MB 返回 null（UI 按截断窗口退化显示）。 */
+  totalLines: number | null
+} {
+  const abs = path.isAbsolute(nnRel) ? nnRel : path.join(NN_TRAINING, nnRel)
   let fileSize = 0
   try {
     fileSize = statSync(abs).size
   } catch {
-    return { lines: [], exists: false, fileSize: 0, truncated: false }
+    return { lines: [], exists: false, fileSize: 0, truncated: false, totalLines: null }
   }
-  const window = Math.min(maxBytes, fileSize)
+  const all = maxLines === 'all'
+  const effBytes = all ? Math.max(maxBytes, 4 * 1024 * 1024) : maxBytes
+  const window = Math.min(effBytes, fileSize)
   const buf = Buffer.alloc(window)
   try {
     const fh = openSync(abs, 'r')
@@ -235,30 +317,44 @@ export function readLogTail(
       closeSync(fh)
     }
   } catch {
-    return { lines: [], exists: true, fileSize, truncated: false }
+    return { lines: [], exists: true, fileSize, truncated: false, totalLines: null }
   }
-  let text = buf.toString('utf-8')
   // 首行多半是被窗口切半的残行——丢弃（除非窗口覆盖了整个文件）。
   const partial = window < fileSize
-  const lines = text.split('\n')
+  const lines = splitLogBytes(buf)
   if (partial) lines.shift()
   // 尾部空行折叠；过长行截断显示。
   const out = lines
     .filter((l) => l.length > 0)
-    .slice(-maxLines)
+    .slice(all ? undefined : -maxLines)
     .map((l) => (l.length > 500 ? `${l.slice(0, 500)}…` : l))
+  // 顶部「共 N 行」要总行数：≤8MB 精确统计（字节计数换行 + 末尾残行），更大返回 null。
+  let totalLines: number | null = null
+  if (fileSize <= 8 * 1024 * 1024) {
+    try {
+      const whole = readFileSync(abs)
+      let n = 0
+      let idx = whole.indexOf(10)
+      while (idx !== -1) (n++, (idx = whole.indexOf(10, idx + 1)))
+      if (whole.length > 0 && whole[whole.length - 1] !== 10) n++
+      totalLines = n
+    } catch {
+      totalLines = null
+    }
+  }
   return {
     lines: out,
     exists: true,
     fileSize,
-    truncated: partial || lines.length > maxLines,
+    truncated: partial,
+    totalLines,
   }
 }
 
 /** 日志页数据载荷（GET /api/log/<key> 与页面渲染共用）。 */
 export async function componentLogPayload(
   key: Component,
-  maxLines: number,
+  maxLines: number | 'all',
 ): Promise<LogPayload | null> {
   if (!ALL_COMPONENTS.includes(key)) return null
   const cfg = loadConfig()
@@ -275,95 +371,184 @@ export async function componentLogPayload(
     fileSize: t.fileSize,
     lines: t.lines,
     truncated: t.truncated,
+    totalLines: t.totalLines,
+    updatedAt: Date.now(),
   }
 }
 
-/** 组件视图（健康探测按组件语义：端口服务 ping / 隧道 URL / 存活即健康）。 */
+/** 组件视图（健康探测按组件语义：端口服务 ping / 隧道 URL / 存活即健康）。
+ *  探测并行（§366）：本地端口 1.5s、cloudflared 隧道 2.5s 超时，串行会叠加等待。 */
 export async function componentViews(cfg: RlConfig, course: string): Promise<ComponentView[]> {
   const reg = loadRegistry()
-  const views: ComponentView[] = []
-  for (const key of ALL_COMPONENTS) {
-    const e = reg[key]
-    const alive = pidAlive(e?.pid)
-    const status: ComponentView['status'] = e ? (alive ? 'running' : 'exited') : 'stopped'
-    let healthy: boolean | null = null
-    const probe = HEALTHY_PORTS[key]?.(cfg)
-    if (status === 'running' && probe) {
-      healthy = await httpOk(
-        probe,
-        key === 'selfNode'
-          ? (cfg.nodes.find((n) => n.id === 'self')?.authKey ?? '')
-          : cfg.rl.remote_token,
-        2500,
-      )
-    } else if (status === 'running' && key === 'cloudflared') {
-      healthy = e?.url ? await httpOk(`${e.url}/ping`, cfg.rl.remote_token, 8000) : null
-    } else if (status === 'running' && key === 'trainingLoop') {
-      healthy = true // 存活即健康（就绪以日志产出为准，见 iters 指标）
-    }
-    const logRel = COMPONENT_LOGS[key]?.(cfg, course) ?? e?.log ?? null
-    views.push({
-      key,
-      label: COMPONENT_LABELS[key],
-      status,
-      pid: e?.pid ?? null,
-      url: e?.url ?? null,
-      course: e?.course ?? null,
-      mode: e?.mode ?? null,
-      healthy,
-      log: logRel,
-      logTail: logRel ? logTail(logRel) : [],
-      busy: busy.has(`start:${key}`) || busy.has(`stop:${key}`) || busy.has(`smoke:${key}`),
-    })
-  }
-  return views
+  return Promise.all(
+    ALL_COMPONENTS.map(async (key): Promise<ComponentView> => {
+      const e = reg[key]
+      const alive = pidAlive(e?.pid)
+      const status: ComponentView['status'] = e ? (alive ? 'running' : 'exited') : 'stopped'
+      let healthy: boolean | null = null
+      const probe = HEALTHY_PORTS[key]?.(cfg)
+      if (status === 'running' && probe) {
+        healthy = await httpOk(
+          probe,
+          key === 'selfNode'
+            ? (cfg.nodes.find((n) => n.id === 'self')?.authKey ?? '')
+            : cfg.rl.remote_token,
+          1500,
+        )
+      } else if (status === 'running' && key === 'cloudflared') {
+        healthy = e?.url ? await httpOk(`${e.url}/ping`, cfg.rl.remote_token, 2500) : null
+      } else if (status === 'running' && key === 'trainingLoop') {
+        healthy = true // 存活即健康（就绪以日志产出为准，见 iters 指标）
+      }
+      // 运行时动态查找（§374）：静态映射 ≠ 实际落盘文件（cloudflared 动态文件名、
+      // 课程子目录日志、tmp 清理后重建）——组件表日志/尾行与 /log/<key> 页同源。
+      const logRel = resolveComponentLog(key, cfg, course)
+      return {
+        key,
+        label: COMPONENT_LABELS[key],
+        status,
+        pid: e?.pid ?? null,
+        url: e?.url ?? null,
+        course: e?.course ?? null,
+        mode: e?.mode ?? null,
+        healthy,
+        log: logRel,
+        logTail: logRel ? logTail(logRel) : [],
+        /** §380：非正常退出原因（exit-watchdog 记录），UI 显示"已退出"处展示。 */
+        error: e?.error ?? null,
+        busy: busy.has(`start:${key}`) || busy.has(`stop:${key}`) || busy.has(`smoke:${key}`),
+        // cloudflared 卡展示隧道 auth key（复制用）；其余组件无密钥字段
+        ...(key === 'cloudflared' ? { secret: cfg.rl.remote_token } : {}),
+      }
+    }),
+  )
 }
 
-/** 节点视图（rl-config + enabled 节点并行 ping）。 */
+/** 节点视图（rl-config + enabled 节点并行 ping）。
+ *  并行是硬要求：不可达节点各自等 AbortSignal.timeout(1500)，串行会让 /api/state
+ *  在节点离线时拖到 N×4s（2026-09-08 实测 5 启用节点 10.1s → 超过 Bun.serve 默认
+ *  idleTimeout 10s，服务端关连接 → curl 空回复；DECISIONS §365）。Promise.all 保序，
+ *  输出与串行一致。超时 1500ms：健康探测口径，1.5s 不应答即视为离线（§366 预算）。 */
 export async function nodeViews(cfg: RlConfig): Promise<NodeView[]> {
-  const out: NodeView[] = []
-  for (const n of cfg.nodes) {
-    let online: boolean | null = null
-    let codeHash: string | null = null
-    let cpus: number | null = null
-    if (n.enabled) {
+  return Promise.all(
+    cfg.nodes.map(async (n): Promise<NodeView> => {
+      let online: boolean | null = null
+      let codeHash: string | null = null
+      let cpus: number | null = null
+      if (n.enabled) {
+        try {
+          const resp = await fetch(`${n.url}/v1/ping`, {
+            headers: { Authorization: `Bearer ${n.authKey}` },
+            signal: AbortSignal.timeout(1500),
+          })
+          online = resp.status === 200
+          if (online) {
+            const body = (await resp.json()) as { codeHash?: string; cpus?: number }
+            codeHash = body.codeHash ? body.codeHash.slice(0, 12) : null
+            cpus = typeof body.cpus === 'number' ? body.cpus : null
+          }
+        } catch {
+          online = false
+        }
+      }
+      return {
+        id: n.id,
+        url: n.url,
+        gpuPush: !!n.gpu_push,
+        enabled: n.enabled,
+        concurrency: n.concurrency,
+        online,
+        codeHash,
+        cpus,
+        busy: busy.has(`node:${n.id}`),
+        lastContrib: -1,
+      }
+    }),
+  )
+}
+
+// ────────────────────────── 慢部件快照缓存（§366：页面加载 <1s） ──────────────────────────
+// 节点 ping（超时 1.5s）、组件健康探测（1.5-2.5s）、池历史聚合（磁盘）全部移出请求路径：
+// 后台刷新器每 SNAPSHOT_REFRESH_MS 重算一次，buildStateView 只读缓存。请求侧开销只剩
+// 配置/课程/指标（实测 ~150ms）；新鲜度 ≤1 个刷新周期（5s），对监控面板不可见。
+// 动作（启/停/切课）经 invalidateSlowSnapshot 置空缓存 → 下一次 buildStateView 冷算即时反映。
+
+export interface SlowSnapshot {
+  components: ComponentView[]
+  nodes: NodeView[]
+  localNode: NodeLocalView | null
+  phase: PhaseInfo
+}
+
+const SNAPSHOT_REFRESH_MS = 5000
+let slowSnapshot: SlowSnapshot | null = null
+let snapshotInFlight: Promise<void> | null = null
+
+/** 重算慢部件快照并落缓存。promise 单飞：并发调用共享同一次计算，防后台刷新与请求互相叠加。 */
+export function refreshSlowSnapshot(cfg: RlConfig, course: string): Promise<void> {
+  if (snapshotInFlight) return snapshotInFlight
+  snapshotInFlight = (async () => {
+    try {
+      const [components, nodes] = await Promise.all([componentViews(cfg, course), nodeViews(cfg)])
+      // 节点上一轮贡献数（池历史聚合；无数据 = -1）。
+      const contribById = new Map<string, number>()
+      let localNode: NodeLocalView | null = null
       try {
-        const resp = await fetch(`${n.url}/v1/ping`, {
-          headers: { Authorization: `Bearer ${n.authKey}` },
-          signal: AbortSignal.timeout(4000),
-        })
-        online = resp.status === 200
-        if (online) {
-          const body = (await resp.json()) as { codeHash?: string; cpus?: number }
-          codeHash = body.codeHash ? body.codeHash.slice(0, 12) : null
-          cpus = typeof body.cpus === 'number' ? body.cpus : null
+        const { hist, globalMaxIt } = aggregateNodeHistory()
+        for (const [id, h] of hist) contribById.set(id, globalMaxIt >= 0 ? h.lastIterOk : -1)
+        const localH = hist.get('local')
+        const slots = Number(cfg.rl.local_slots)
+        if (Number.isInteger(slots) && slots > 0) {
+          localNode = {
+            id: 'local',
+            slots,
+            lastContrib: globalMaxIt >= 0 ? (localH?.lastIterOk ?? 0) : -1,
+          }
         }
       } catch {
-        online = false
+        /* 池历史不可用 → 全部 -1 */
       }
+      for (const n of nodes) n.lastContrib = contribById.has(n.id) ? contribById.get(n.id)! : -1
+      // 当前训练阶段（训练循环日志尾解析）。
+      const logTail = components.find((c) => c.key === 'trainingLoop')?.logTail ?? []
+      const phase = parsePhaseFromLog(logTail)
+      slowSnapshot = { components, nodes, localNode, phase }
+    } finally {
+      snapshotInFlight = null
     }
-    out.push({
-      id: n.id,
-      url: n.url,
-      gpuPush: !!n.gpu_push,
-      enabled: n.enabled,
-      concurrency: n.concurrency,
-      online,
-      codeHash,
-      cpus,
-      busy: busy.has(`node:${n.id}`),
-    })
-  }
-  return out
+  })()
+  return snapshotInFlight
 }
 
-/** 完整状态快照（页面 3s 轮询的数据源）。 */
+/** 动作后置空缓存：下一次 buildStateView 冷算，动作结果即时上屏（不主动后台刷新，避免与请求竞争）。 */
+export function invalidateSlowSnapshot(): void {
+  slowSnapshot = null
+}
+
+/** 后台刷新器：立即暖一次 + 每 intervalMs 重算（unref，不阻止进程退出）。服务端启动时调用一次。 */
+export function startSnapshotRefresher(intervalMs: number = SNAPSHOT_REFRESH_MS): void {
+  const run = async (): Promise<void> => {
+    try {
+      const cfg = loadConfigSafe()
+      const course = effectiveCourse(loadConsoleState(), discoverCourses())
+      await refreshSlowSnapshot(cfg, course)
+    } catch {
+      /* 下一拍重试 */
+    }
+  }
+  void run()
+  const t = setInterval(() => void run(), intervalMs)
+  t.unref?.()
+}
+
+/** 完整状态快照（页面轮询的数据源）。慢部件（节点 ping/组件探测/池历史）走快照缓存。 */
 export async function buildStateView(): Promise<ConsoleStateView> {
-  const cfg = loadConfig()
+  const cfg = loadConfigSafe()
   const state = loadConsoleState()
   const courses = discoverCourses()
   const course = effectiveCourse(state, courses)
-  const [components, nodes] = await Promise.all([componentViews(cfg, course), nodeViews(cfg)])
+  if (!slowSnapshot) await refreshSlowSnapshot(cfg, course)
+  const { components, nodes, localNode, phase } = slowSnapshot!
   let metrics: MetricsView = { available: false, iters: [] }
   if (course && existsSync(path.join(REPO_ROOT, 'tmp', course, 'training_log.jsonl'))) {
     try {
@@ -381,6 +566,7 @@ export async function buildStateView(): Promise<ConsoleStateView> {
     courses,
     components,
     nodes,
+    localNode,
     modes: {
       trainerPpo: state.trainerPpo,
       stream: Number(cfg.rl.stream ?? 0),
@@ -388,7 +574,196 @@ export async function buildStateView(): Promise<ConsoleStateView> {
       precollectEarly: Number(cfg.rl.precollect_early ?? 0),
     },
     metrics,
+    phase,
   }
+}
+
+// ────────────────────────── /api/pool（§3.3 数据端点：独立慢节奏 + 服务端 30s TTL 缓存） ──────────────────────────
+
+const POOL_TTL_MS = 30_000
+/** 缓存 key 带 course（DS-E1）：切课程天然 miss 重算，30s 窗口内不错课程数据。 */
+const poolCache = new Map<string, { at: number; view: PoolView }>()
+
+// 本机 codeHash 惰性 memo（R9）：sampler-agent 是重模块，lazy import + 5s TTL；失败降级空串。
+let localHashMemo = ''
+let localHashAt = 0
+async function localCodeHash(): Promise<string> {
+  if (localHashMemo && Date.now() - localHashAt < 5000) return localHashMemo
+  try {
+    const mod = (await import('../../agent/sampler-agent')) as {
+      collectCodeHashEntries: () => { relPath: string; content: Buffer }[]
+      computeCodeHashFromFiles: (e: { relPath: string; content: Buffer }[]) => string
+    }
+    localHashMemo = mod.computeCodeHashFromFiles(mod.collectCodeHashEntries())
+  } catch {
+    localHashMemo = ''
+  }
+  localHashAt = Date.now()
+  return localHashMemo
+}
+
+/** selfNode 存活时拉 /v1/status；失败/未启动 → null（UI 显示「agent 未启动」占位，不伪造）。 */
+async function fetchSelfStatus(cfg: RlConfig): Promise<SelfStatus | null> {
+  const reg = loadRegistry()
+  if (!pidAlive(reg.selfNode?.pid)) return null
+  const auth = cfg.nodes.find((n) => n.id === 'self')?.authKey ?? ''
+  try {
+    const resp = await fetch(`http://127.0.0.1:${cfg.rl.agent_port}/v1/status`, {
+      headers: auth ? { Authorization: `Bearer ${auth}` } : {},
+      signal: AbortSignal.timeout(4000),
+    })
+    if (!resp.ok) return null
+    const b = (await resp.json()) as {
+      workers?: number
+      gamesDoneTotal?: number
+      inflight?: unknown[]
+      diskFreeMB?: number | null
+      lastError?: string
+      uptimeSec?: number
+      resultCache?: { items?: number; bytes?: number }
+      recentFailed?: number
+    }
+    return {
+      workers: Number(b.workers ?? 0),
+      inflight: Array.isArray(b.inflight) ? b.inflight.length : 0,
+      gamesDoneTotal: Number(b.gamesDoneTotal ?? 0),
+      diskFreeMB: typeof b.diskFreeMB === 'number' ? b.diskFreeMB : null,
+      lastError: b.lastError ? stripIsoPrefix(String(b.lastError)).slice(0, 200) : null,
+      uptimeSec: typeof b.uptimeSec === 'number' ? b.uptimeSec : null,
+      resultCacheItems: Number(b.resultCache?.items ?? 0),
+      resultCacheBytes: Number(b.resultCache?.bytes ?? 0),
+      recentFailed: Number(b.recentFailed ?? 0),
+    }
+  } catch {
+    return null
+  }
+}
+
+function nodeHistoryRow(
+  n: {
+    id: string
+    url: string
+    authKey: string
+    enabled: boolean
+    concurrency: number
+    gpu_push?: boolean
+  },
+  h: ReturnType<typeof emptyHistory>,
+  agg: { globalMaxIt: number },
+  ping: Record<string, unknown> | null,
+  pingMs: number | null,
+  localHash: string,
+): NodeHistoryRow {
+  const disabled = !n.enabled
+  let status: NodeHistoryRow['status']
+  let spec = '-'
+  let version = ''
+  let versionOk: boolean | null = null
+  if (disabled) {
+    status = 'disabled'
+  } else if (ping) {
+    const codeHash = String(ping.codeHash ?? '')
+    version = codeHash ? codeHash.slice(0, 7) : ''
+    versionOk = codeHash.length > 0 ? codeHash === localHash : null
+    spec = ping.cpus ? `${ping.cpus} 核` : '?核'
+    status = poolStatus(h) // 在线但无结算历史 → 'nodata' 灰显
+  } else {
+    status = h.recent.length === 0 ? 'noping' : poolStatus(h)
+  }
+  return {
+    id: n.id,
+    kind: 'node',
+    status,
+    okN: h.recent.filter(Boolean).length,
+    recentN: h.recent.length,
+    spec,
+    versionOk,
+    version,
+    pingMs: disabled ? null : pingMs,
+    ok: h.ok,
+    fail: h.fail,
+    contrib: h.lastIterOk,
+    lastIter: h.lastIter,
+    globalMaxIt: agg.globalMaxIt,
+    avgElapsedSec: h.avgElapsedSec,
+    lastOkTs: h.lastOkTs,
+    lastFailTs: h.lastFailTs,
+    lastError: h.lastError,
+    recent: h.recent,
+  }
+}
+
+/** 池汇总（首屏不入流：扫描 tmp 太重，客户端异步拉；R7）。 */
+export async function buildPoolView(fresh = false): Promise<PoolView> {
+  const cfg = loadConfig()
+  const state = loadConsoleState()
+  const course = effectiveCourse(state, discoverCourses())
+  const key = `pool-view:${course}`
+  const cached = poolCache.get(key)
+  if (!fresh && cached && Date.now() - cached.at < POOL_TTL_MS) return cached.view
+
+  const hash = await localCodeHash()
+  const agg = aggregateNodeHistory()
+  const probes = await Promise.all(
+    cfg.nodes.map(async (n) => {
+      if (!n.enabled)
+        return { n, ping: null as Record<string, unknown> | null, ms: null as number | null }
+      const started = Date.now()
+      try {
+        const resp = await fetch(`${n.url.replace(/\/$/, '')}/v1/ping`, {
+          headers: { Authorization: `Bearer ${n.authKey}` },
+          signal: AbortSignal.timeout(2500),
+        })
+        if (!resp.ok) return { n, ping: null, ms: Date.now() - started }
+        return { n, ping: (await resp.json()) as Record<string, unknown>, ms: Date.now() - started }
+      } catch {
+        return { n, ping: null, ms: Date.now() - started }
+      }
+    }),
+  )
+
+  const nodes: NodeHistoryRow[] = []
+  for (const { n, ping, ms } of probes) {
+    const h = agg.hist.get(n.id) ?? emptyHistory()
+    nodes.push(nodeHistoryRow(n, h, agg, ping, ms, hash))
+  }
+
+  const localH = agg.hist.get('local') ?? emptyHistory()
+  const slots = Number(cfg.rl.local_slots)
+  const local: NodeHistoryRow = {
+    id: 'local',
+    kind: 'local',
+    status: poolStatus(localH),
+    okN: localH.recent.filter(Boolean).length,
+    recentN: localH.recent.length,
+    spec: Number.isInteger(slots) && slots > 0 ? `${slots} 槽` : '-',
+    versionOk: null,
+    version: '',
+    pingMs: null,
+    ok: localH.ok,
+    fail: localH.fail,
+    contrib: localH.lastIterOk,
+    lastIter: localH.lastIter,
+    globalMaxIt: agg.globalMaxIt,
+    avgElapsedSec: localH.avgElapsedSec,
+    lastOkTs: localH.lastOkTs,
+    lastFailTs: localH.lastFailTs,
+    lastError: localH.lastError,
+    recent: localH.recent,
+  }
+
+  const view: PoolView = {
+    cachedAt: Date.now(),
+    course,
+    epochMs: agg.epochMs,
+    activeFlow: agg.activeFlow,
+    nodes,
+    local,
+    selfStatus: await fetchSelfStatus(cfg),
+    localHash: hash,
+  }
+  poolCache.set(key, { at: view.cachedAt, view })
+  return view
 }
 
 // ────────────────────────── 动作路由 ──────────────────────────
