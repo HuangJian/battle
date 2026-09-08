@@ -60,10 +60,13 @@ bun tools/agent/sampler-agent.ts --port 8443 --workers <N>
 同一个 `conv_feats.wasm` 推理，node(V8) 比 bun(JSC) 快 ~1.6×（本机实测 features 4.62ms vs
 7.55ms；端到端单局 ~1.4×）。**agent 本体始终跑 bun**，只是采样子进程交给 node：
 
-- 启动自动探测 node（`where.exe node` / `which -a node`，挑版本最高的），要求 **≥ v22**；
-  满足则 `bun build --target=node` 预打包 exporter（~1.5s，仅启动时一次），子进程跑产物。
+- **引擎=本机微基准自动选**（五平台实测：V8 只在 win/wsl x64 赢、mac/arm64 bun 赢）：
+  启动时对同一 conv_feats.wasm 实测两引擎稳态 forward（~0.3-0.5s/次），选快者（3% 迟滞）；
+  决策按 bun/node 版本 + wasm sha 缓存 → 日常重启零开销，升级后自动重测。
+- node 要求 **≥ v22**；选中 node 时 `bun build --target=node` 预打包 exporter。
 - 不满足/打包失败/子进程连续失败 2 次 → **自动回退 bun**，行为与旧版完全一致。
-- 开关：`--no-node` 强制 bun（A/B 对照）；`SAMPLER_NODE_BIN=/path/to/node` 指定运行时。
+- 开关：`--no-node` 或 `SAMPLER_ENGINE=bun` 强制 bun；`SAMPLER_ENGINE=node` 强制 node；
+  `SAMPLER_NODE_BIN=/path/to/node` 指定参与基准的 node。
 - 自检：启动行含 `rolloutEngine=node (v26.8.1)`；`GET /v1/ping` 有 `rolloutEngine` /
   `nodeVersion` 字段。
 - ⚠️ 若打包产物的同级 `wasm/conv_feats.wasm` 缺失，会**静默回退 TS 路径（14× 慢）**——

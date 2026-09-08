@@ -5,6 +5,9 @@ import path from 'node:path'
 import {
   MIN_NODE_MAJOR,
   NODE_FAIL_LIMIT,
+  EngineChoice,
+  choiceValid,
+  chooseByBench,
   bundleNameFor,
   bundlePathFor,
   createRolloutRunner,
@@ -180,6 +183,7 @@ describe('createRolloutRunner', () => {
       writeFileSync(out, '// bundled\n')
       return { status: 0 }
     },
+    bench: () => ({ bunMs: 8.0, nodeMs: 5.0 }),
     ...extra,
   })
 
@@ -236,5 +240,110 @@ describe('createRolloutRunner', () => {
     const { repoRoot, bundleDir } = setup()
     const r = createRolloutRunner(opts(repoRoot, bundleDir))
     expect(r.launch('tools/sim/other.ts', ['tools/sim/other.ts']).engine).toBe('bun')
+  })
+})
+
+describe('引擎微基准自动选择（§374）', () => {
+  const setup = () => {
+    const repoRoot = mkdtempSync(path.join(tmpdir(), 'rr-bench-'))
+    const bundleDir = mkdtempSync(path.join(tmpdir(), 'rr-benchb-'))
+    mkdirSync(path.dirname(path.join(repoRoot, ENTRY_RL)), { recursive: true })
+    writeFileSync(path.join(repoRoot, ENTRY_RL), '// stub\n')
+    mkdirSync(path.join(repoRoot, 'src', 'nn', 'wasm'), { recursive: true })
+    writeFileSync(path.join(repoRoot, 'src', 'nn', 'wasm', 'conv_feats.wasm'), 'WASM')
+    return { repoRoot, bundleDir }
+  }
+  const node = (v = 'v26.8.1') => ({
+    bin: 'node',
+    version: v,
+    major: 26,
+    minor: 8,
+    patch: 1,
+    rank: 26_008_001,
+  })
+  const opts = (repoRoot: string, bundleDir: string, extra: Record<string, unknown> = {}) => ({
+    repoRoot,
+    bundleDir,
+    codeHash: 'h1',
+    detect: () => node(),
+    build: (_e: string, o: string) => {
+      writeFileSync(o, '// bundle\n')
+      return { status: 0 }
+    },
+    ...extra,
+  })
+
+  it('chooseByBench：node 快 ≥3% 才选 node（迟滞）', () => {
+    expect(chooseByBench(8.0, 5.0)).toBe('node') // 快 37%
+    expect(chooseByBench(8.0, 7.9)).toBe('bun') // 快 1.3% < 3% → bun
+    expect(chooseByBench(8.0, 8.0)).toBe('bun')
+    expect(chooseByBench(8.0, null)).toBe('bun')
+    expect(chooseByBench(8.0, 0)).toBe('bun')
+  })
+
+  it('choiceValid：bun/node 版本或 wasm 变了即失效', () => {
+    const c: EngineChoice = {
+      winner: 'node',
+      bunMs: 8,
+      nodeMs: 5,
+      bunVer: '1.4.2',
+      nodeVer: 'v26.8.1',
+      wasmSha: 'abc',
+      ts: 1,
+    }
+    expect(choiceValid(c, '1.4.2', 'v26.8.1', 'abc')).toBe(true)
+    expect(choiceValid(c, '1.4.3', 'v26.8.1', 'abc')).toBe(false)
+    expect(choiceValid(c, '1.4.2', 'v26.8.2', 'abc')).toBe(false)
+    expect(choiceValid(c, '1.4.2', 'v26.8.1', 'abd')).toBe(false)
+    expect(choiceValid(null, '1.4.2', 'v26.8.1', 'abc')).toBe(false)
+  })
+
+  it('node 明显更快 → 选 node 且落缓存；二次创建读缓存不再跑基准', () => {
+    const { repoRoot, bundleDir } = setup()
+    let benchCalls = 0
+    const mk = (bench: () => { bunMs: number; nodeMs: number } | null) =>
+      createRolloutRunner(opts(repoRoot, bundleDir, { bench }))
+    const r1 = mk(() => {
+      benchCalls++
+      return { bunMs: 8.0, nodeMs: 5.0 }
+    })
+    expect(r1.engine).toBe('node')
+    expect(benchCalls).toBe(1)
+    const r2 = mk(() => {
+      benchCalls++
+      return { bunMs: 8.0, nodeMs: 999 }
+    }) // 缓存命中→不应再测
+    expect(r2.engine).toBe('node') // 沿用缓存
+    expect(benchCalls).toBe(1)
+  })
+
+  it('node 不达标(迟滞内) → 选 bun', () => {
+    const { repoRoot, bundleDir } = setup()
+    const r = createRolloutRunner(
+      opts(repoRoot, bundleDir, { bench: () => ({ bunMs: 8.0, nodeMs: 8.1 }) }),
+    )
+    expect(r.engine).toBe('bun')
+  })
+
+  it('微基准失败 → 回退 bun', () => {
+    const { repoRoot, bundleDir } = setup()
+    const r = createRolloutRunner(opts(repoRoot, bundleDir, { bench: () => null }))
+    expect(r.engine).toBe('bun')
+  })
+
+  it('forceNode 直接选 node（跳过基准）', () => {
+    const { repoRoot, bundleDir } = setup()
+    let called = false
+    const r = createRolloutRunner(
+      opts(repoRoot, bundleDir, {
+        forceNode: true,
+        bench: () => {
+          called = true
+          return { bunMs: 1, nodeMs: 1 }
+        },
+      }),
+    )
+    expect(r.engine).toBe('node')
+    expect(called).toBe(false)
   })
 })

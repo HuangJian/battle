@@ -10,8 +10,11 @@
  *   故换引擎不破坏跨节点确定性（M4 红线）。
  *
  * 策略：**agent 自身仍跑在 bun**（Bun.serve / 版本门 / codeHash 口径不变），只把
- * rollout 采样子进程交给 node —— 用 `bun build --target=node` 预打包 exporter，
- * 由 node 执行打包产物。
+ * rollout 采样子进程的引擎交给**本机微基准自动选择**（§374/§378）：五平台实测 V8
+ * 只在 win/wsl x64 赢 14-30%，mac/arm64 是 bun 赢 3-6% —— 版本门槛修不出平台差异，
+ * 故启动时对同一 conv_feats.wasm 实测两引擎稳态 forward，选快者（3% 迟滞；结果按
+ * bun/node 版本 + wasm sha 缓存，日常重启零开销）。用 node 时执行 `bun build
+ * --target=node` 预打包 exporter。
  *
  * ⚠️ 打包产物必须自带 wasm：`conv-wasm.ts` 用 `new URL('./wasm/conv_feats.wasm',
  * import.meta.url)` 定位，打包后是相对**产物**解析的。缺文件不会报错，而是**静默
@@ -22,6 +25,7 @@
  * ≥ NODE_FAIL_LIMIT 次 → 永久退回 bun（`--no-node` 可强制）。
  */
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
@@ -249,16 +253,133 @@ export function detectBestNode(opts: BestNodeOptions = {}): NodeRuntime | null {
   return best
 }
 
+// ================= 引擎微基准自动选择（DECISIONS §374） =================
+/** node 需比 bun 快 ≥ 此比例才入选（迟滞，防噪声横跳）。 */
+export const ENGINE_BENCH_MARGIN = 0.97
+const BENCH_ENTRY_TS = 'tools/agent/engine-bench.ts'
+const BENCH_MJS = 'engine-bench.mjs'
+const CHOICE_FILE = 'engine-choice.json'
+const BENCH_ROUNDS = 2
+
+export interface EngineChoice {
+  winner: RolloutEngine
+  bunMs: number
+  nodeMs: number | null
+  bunVer: string
+  nodeVer: string
+  wasmSha: string
+  ts: number
+}
+
+function sha256File(p: string): string {
+  return createHash('sha256').update(fs.readFileSync(p)).digest('hex').slice(0, 16)
+}
+
+export function engineChoiceFile(bundleDir: string): string {
+  return path.join(bundleDir, CHOICE_FILE)
+}
+
+/** 缓存是否仍有效（bun/node 版本与 wasm 都没变才算数）。 */
+export function choiceValid(
+  c: EngineChoice | null,
+  bunVer: string,
+  nodeVer: string,
+  wasmSha: string,
+): boolean {
+  return !!c && c.bunVer === bunVer && c.nodeVer === nodeVer && c.wasmSha === wasmSha
+}
+
+/** 迟滞判据：node 明显更快才选 node。 */
+export function chooseByBench(
+  bunMs: number,
+  nodeMs: number | null,
+  margin = ENGINE_BENCH_MARGIN,
+): RolloutEngine {
+  if (nodeMs === null || !Number.isFinite(nodeMs) || nodeMs <= 0) return 'bun'
+  return nodeMs <= bunMs * margin ? 'node' : 'bun'
+}
+
+/** 真跑微基准（bun 跑 TS 源 / node 跑打包 mjs，各自进程内计时，spawn 税不进数字）。 */
+export function runEngineBench(
+  repoRoot: string,
+  bundleDir: string,
+  bunPath: string,
+  node: NodeRuntime,
+  log: (m: string) => void,
+  build?: BuildOptions['build'],
+): { bunMs: number; nodeMs: number } | null {
+  try {
+    fs.mkdirSync(bundleDir, { recursive: true })
+    const mjs = path.join(bundleDir, BENCH_MJS)
+    if (!fs.existsSync(mjs)) {
+      const b =
+        build ??
+        ((entry: string, out: string) => {
+          const r = spawnSync(bunPath, ['build', entry, '--target=node', `--outfile=${out}`], {
+            cwd: repoRoot,
+            encoding: 'utf8',
+            windowsHide: true,
+          })
+          return { status: r.status ?? -1, stderr: String(r.stderr ?? '') }
+        })
+      const r = b(path.join(repoRoot, BENCH_ENTRY_TS), mjs)
+      if (r.status !== 0 || !fs.existsSync(mjs)) {
+        log(`[rollout-runner] engine-bench 打包失败 rc=${r.status} → 略过微基准`)
+        return null
+      }
+    }
+    const wasm = path.join(repoRoot, 'src', 'nn', 'wasm', 'conv_feats.wasm')
+    if (!fs.existsSync(wasm)) return null
+    const run = (cmd: string, entry: string): number | null => {
+      const r = spawnSync(cmd, [entry, wasm, String(BENCH_ROUNDS)], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        timeout: 60_000,
+        windowsHide: true,
+      })
+      if (r.status !== 0) return null
+      let best: number | null = null
+      for (const line of String(r.stdout ?? '').split(/\r?\n/)) {
+        const m = /^BENCH\s+([\d.]+)$/.exec(line.trim())
+        if (m) {
+          const v = Number(m[1])
+          if (best === null || v < best) best = v
+        }
+      }
+      return best
+    }
+    const bunMs = run(bunPath, path.join(repoRoot, BENCH_ENTRY_TS))
+    const nodeMs = run(node.bin, mjs)
+    if (bunMs === null || nodeMs === null) {
+      log(`[rollout-runner] 微基准失败 bun=${bunMs} node=${nodeMs} → 略过`)
+      return null
+    }
+    return { bunMs, nodeMs }
+  } catch (e) {
+    log(`[rollout-runner] 微基准异常: ${e instanceof Error ? e.message : String(e)} → 略过`)
+    return null
+  }
+}
+
+export function engineVersion(): string {
+  const r = spawnSync(process.execPath, ['--version'], { encoding: 'utf8', windowsHide: true })
+  return (r.stdout ?? '').trim() || 'unknown'
+}
+
 export interface RunnerOptions {
   repoRoot: string
   bundleDir?: string
   codeHash?: string
-  /** 强制 bun（A/B 对照与回滚用；CLI `--no-node`）。 */
+  /** 强制 bun（A/B 对照与回滚用；CLI `--no-node` / env SAMPLER_ENGINE=bun）。 */
   forceBun?: boolean
+  /** 强制 node（env SAMPLER_ENGINE=node；需 node≥22）。 */
+  forceNode?: boolean
   nodeBin?: string
   log?: (msg: string) => void
   detect?: (opts: DetectOptions) => NodeRuntime | null
   build?: BuildOptions['build']
+  /** 注入微基准（单测用）：返回 bun/node 稳态 forward ms；null=基准失败。缺省真跑。 */
+  bench?: () => { bunMs: number; nodeMs: number } | null
 }
 
 export interface RolloutRunner {
@@ -282,33 +403,97 @@ export function createRolloutRunner(opts: RunnerOptions): RolloutRunner {
   let engine: RolloutEngine = 'bun'
   let node: NodeRuntime | null = null
   let reason: string
+  const envEngine = (process.env.SAMPLER_ENGINE ?? '').toLowerCase()
+  const forceNode = opts.forceNode || envEngine === 'node'
 
-  if (opts.forceBun) {
-    reason = 'forceBun（--no-node / SAMPLER_NODE_BIN 未启用）'
+  // 引擎选择（§374：默认按本机微基准自动择优；缓存命中零开销）
+  if (opts.forceBun || envEngine === 'bun') {
+    reason = opts.forceBun
+      ? 'forceBun（--no-node / SAMPLER_ENGINE=bun）'
+      : 'SAMPLER_ENGINE=bun 强制'
   } else {
+    const t0 = Date.now()
+    prepareBundleDir(bundleDir, opts.codeHash ?? '')
     node = (opts.detect ?? detectBestNode)({ bin: opts.nodeBin })
     if (!node) {
       reason = `node ≥ v${MIN_NODE_MAJOR} 不可用 → bun`
+    } else if (forceNode) {
+      engine = 'node'
+      reason = `SAMPLER_ENGINE=node 强制（${node.version}）`
     } else {
-      const t0 = Date.now()
-      prepareBundleDir(bundleDir, opts.codeHash ?? '')
-      let ok = 0
-      for (const entryTs of Object.keys(NODE_BUNDLE_ENTRIES)) {
-        if (
-          ensureNodeBundle(entryTs, { repoRoot: opts.repoRoot, bundleDir, build: opts.build, log })
-        )
-          ok++
+      // 微基准自动选：缓存优先（bun/node 版本 + wasm 未变即复用）
+      const bunVer = engineVersion()
+      const wasmPath = path.join(opts.repoRoot, 'src', 'nn', 'wasm', 'conv_feats.wasm')
+      const wasmSha = fs.existsSync(wasmPath) ? sha256File(wasmPath) : ''
+      const choiceFile = engineChoiceFile(bundleDir)
+      let loaded: EngineChoice | null = null
+      try {
+        if (fs.existsSync(choiceFile)) {
+          const j = JSON.parse(fs.readFileSync(choiceFile, 'utf8')) as EngineChoice
+          if (choiceValid(j, bunVer, node.version, wasmSha)) loaded = j
+        }
+      } catch {
+        /* 缓存损坏 → 重测 */
       }
-      if (ok === 0) {
-        reason = `node ${node.version} 可用但打包全失败 → bun`
-        node = null
+      if (loaded) {
+        engine = loaded.winner
+        reason =
+          `微基准缓存（winner=${loaded.winner}，bun ${loaded.bunMs.toFixed(2)}ms` +
+          (loaded.nodeMs !== null ? ` / node ${loaded.nodeMs.toFixed(2)}ms` : '') +
+          `，${bunVer} vs ${node.version}）`
       } else {
-        engine = 'node'
-        reason = `node ${node.version}（打包 ${ok}/${Object.keys(NODE_BUNDLE_ENTRIES).length}，${Date.now() - t0}ms）`
+        const bench = (
+          opts.bench ??
+          (() => runEngineBench(opts.repoRoot, bundleDir, process.execPath, node!, log, opts.build))
+        )()
+        if (!bench) {
+          reason = `node ${node.version} 可用但微基准失败 → bun`
+          node = null
+        } else {
+          engine = chooseByBench(bench.bunMs, bench.nodeMs)
+          const choice: EngineChoice = {
+            winner: engine,
+            bunMs: bench.bunMs,
+            nodeMs: bench.nodeMs,
+            bunVer,
+            nodeVer: node.version,
+            wasmSha,
+            ts: Date.now(),
+          }
+          try {
+            fs.mkdirSync(bundleDir, { recursive: true })
+            fs.writeFileSync(choiceFile, JSON.stringify(choice))
+          } catch {
+            /* 缓存写失败不影响本次决策 */
+          }
+          reason =
+            `微基准：bun ${bench.bunMs.toFixed(2)}ms vs node ${bench.nodeMs.toFixed(2)}ms → ` +
+            (engine === 'node' ? `node ${node.version}` : 'bun（node 未快过 3% 迟滞）') +
+            `（${Date.now() - t0}ms）`
+        }
       }
     }
   }
   log(`[rollout-runner] engine=${engine} — ${reason}`)
+
+  // engine=node 时预打包 exporter（bun 引擎不需要 bundle）
+  if (engine === 'node' && node) {
+    const t0 = Date.now()
+    let ok = 0
+    for (const entryTs of Object.keys(NODE_BUNDLE_ENTRIES)) {
+      if (ensureNodeBundle(entryTs, { repoRoot: opts.repoRoot, bundleDir, build: opts.build, log }))
+        ok++
+    }
+    if (ok === 0) {
+      log(`[rollout-runner] node ${node.version} 可用但打包全失败 → 退回 bun`)
+      engine = 'bun'
+      node = null
+    } else {
+      log(
+        `[rollout-runner] exporter 打包 ${ok}/${Object.keys(NODE_BUNDLE_ENTRIES).length}（${Date.now() - t0}ms）`,
+      )
+    }
+  }
 
   let failStreak = 0
   const bundles = new Map<string, string | null>()

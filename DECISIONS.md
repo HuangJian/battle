@@ -3476,3 +3476,133 @@ bundle 路径一致性校验（SSR script src ∈ servable paths + log.js 禁词
 **补记（2026-09-08，§373 修订）：**「已暂停跟随 · 正在读历史」初版放在 tc-logtool 内
 nav（组件 chips）之前——导航被提示挤出成两行，且提示不在「过滤日志」所在行。
 改为移入 `.tc-logtool__right` 内、搜索框之前，与「过滤日志」同排且位于该行最左。
+
+## §374 / sampler-agent 工作目录磁盘泄漏根治（2026-09-08，用户报告）
+
+**问题**：sampler-agent 长期运行后 `tmp/dist-agent` 累积 153 个权重文件（~54MB），
+另有被杀进程残留的 `game-<pid>-<seq>` 半成品目录与陈旧 `agent.pid`/`agent-child.pid`。
+
+**根因**：
+1. v3.7 kind 分桶后权重文件名改为 `weights-<kind>-<sha16>.json`，而
+   `sweepWeightFiles()` 正则仍是旧的 `/^weights-[0-9a-f]{16}\.json$/`（无 kind 段）
+   ——永远匹配不到任何文件，清扫静默空操作，磁盘「只留 4 份」上限从未生效。
+   内存桶逐出（每 kind 64）只在单进程代内生效，每次 /v1/restart 后桶清空重新累积。
+2. 进程被强杀时 runGame 的 `finally { rmSync(gameDir) }` 无法执行 → game-* 孤儿目录。
+3. agent.pid / agent-child.pid 在进程死掉后无人清理。
+
+**决定**：
+1. **新纯函数模块 `tools/agent/workdir-cleanup.ts`**（同 restart-guard.ts 先例，与单测
+   共享）：`sweepWeightFilePlan` 修正则为 `weights-<kind>-<sha16>.json`，按 kind 各自
+   保留最新 KEEP=4 份，**在飞权重桶引用的文件永不删**（删正在被 /v1/task 消费的权重
+   = 该局 409/失败）；`staleOrphanPlan` 删除 mtime 早于 STALE_ORPHAN_MS=5min 的
+   game-* 与 pid 文件——**年龄门**防误删 /v1/restart 交接窗口内父进程的在飞局目录
+   （父进程 spawn 子进程后 ~500ms 才退出，在飞局最长 ~480s）。
+2. **sampler-agent boot 收敛**：启动时 sweepWorkdir()——清孤儿/陈旧 pid、权重按 kind
+   收敛；/v1/weights 权重切换的调用点同步改走新实现。
+3. **一次性清理**：本机 62MB → 3.7MB（删 149 个权重、game-9756-1、4 个 smoke-* A/B
+   目录、陈旧 pid 文件与游离 .json.gz；保留最新 4 份权重 + node-bundle 缓存）。
+
+**测试**：tests/agent/workdir-cleanup.test.ts 7 例——含显式回归「旧正则匹配不到 kind
+命名 → 清扫空操作」，以及 live 引用保护、每 kind 独立保留、孤儿年龄门。bun run check
+全绿（1820 pass）。
+
+## §375 / workdir 收敛同步到 trainer 本地采样路径（2026-09-08，§374 后续）
+
+**问题**：sampler-agent 的 workdir 收敛（§374）只覆盖节点侧；trainer 侧 local_slots
+直跑（rl/queue_local.run_local_rollout）每局一个 `it{N}/w{idx}/` 波次目录，next_idx
+单调递增永不复用。失败/废弃局（子进程 rc!=0 或被杀的尝试）留下无 `_rl_report.json`
+的部分 shard + rollout.log 孤儿波次目录——dispatch 回队后用新 w{idx} 重跑，旧目录
+无人清理（MAX_TASK_ATTEMPTS=3 时单局最多留 2 个，长跑累积）。
+
+**决定**：
+1. **新模块 `nn-training/rl/workdir_sweep.py`**（plan_ 纯函数 + sweep_ IO 执行分离，
+   同 queue_local.pick_tail_race 纯函数测试先例）：`plan_failed_wave_dirs` 只挑
+   `w<idx>` 目录中无 `_rl_report.json` 者；`sweep_failed_wave_dirs` 删除并计数，
+   best-effort（沙箱删除保护/占用拦截时跳过，与 loop_core._prepare_iter_dir 同策略）。
+2. **钩子挂在 `loop_guards._rotate_cleanup`**（每轮迭代收尾：全部局已结算、无在飞
+   子进程）：清当前 it 目录的失败波次目录，删了打日志。完整波次目录是 PPO 语料
+   （load_episodes / completed_pairs 以 manifest 为准，resume 依赖）——**永不删**。
+3. **不删已结算波次目录**：即使 PPO 已消费，也保留到 keep_iters 轮转（删了会破坏
+   _prepare_iter_dir 的断点续跑语义 → 重采）。
+
+**测试**：nn-training/tests/test_workdir_sweep.py 6 例（只删失败波次、w 命名防误配、
+report-only 保守保留、缺目录空操作、幂等）；python 快速层 324 全过 + ruff/mypy 绿；
+TS 侧 bun run check 全绿（1820 pass）。
+
+## §376 / 双 tmp 目录统一：全项目只使用仓库根 ./tmp（2026-09-08，用户指令）
+
+**问题**：`./tmp`（仓库根）与 `./nn-training/tmp` 并存，极易混淆。`nn-training/tmp`
+是多个来源相对路径走偏的产物（存量 4.65GB）：
+1. `tools/training/paths.ts` 的 `LOG_DIR = nn-training/tmp`——训练控制台/启动器全部
+   组件日志（hub-server / sampler-agent / cloudflared / training-loop / worker-serve /
+   training-start / registry）都写到这里；
+2. pytest 临时目录：`tests/conftest.py` 的 tmp_path 覆盖用 `parent.parent/tmp`（=
+   nn-training/tmp/pytest-tmp），`test_terminal_stats`/`test_run_rl` 同；`task.py clean`
+   与 `nn-clean-tmp.py` 目标也是 nn-training/tmp；
+3. ruff/mypy 缓存（pyproject `cache-dir`/`cache_dir` = cwd 相对 `tmp/...`）；
+4. python 入口脚本相对 `tmp/...` 默认路径（worker.py --out / remote_worker_serve --work /
+   smoke_loopback / init_scratch_weights / models 导出 / ppo/bench）在 spawn cwd=
+   NN_TRAINING 时落到 nn-training/tmp。
+
+**决定**：
+1. `paths.ts`：`LOG_DIR` → `REPO_ROOT/tmp`（绝对路径），全部组件日志/账本/哨兵随之
+   统一到仓库根 tmp/；console `COMPONENT_LOGS` 改读 LOG_DIR（顺带修掉「specs 写
+   nn-training/tmp、console 读 cwd 相对 tmp/」的旧错位）；hub.ts 报错文案同步。
+2. **python 相对路径一律锚定仓库根**（run_rl.py cwd 锚定之外的入口同样处理）：
+   worker.py / remote_worker_serve.py / init_scratch_weights.py 在 main() 把相对
+   --out/--work 解析到仓库根（不改 chdir——`-m` 入口靠 cwd 进 sys.path，chdir 会断
+   延迟 import）；smoke_loopback 的 `ROOT/args.work` → `REPO/args.work`；
+   models/goal_net、intent_net 导出与 ppo/bench.py 写入锚定 REPO_ROOT/tmp。
+   不动 rl/cli.py、rl/config.py 与课程文件的 `tmp/...` 默认——run_rl.py 已在 main()
+   锚定 cwd 到仓库根，那些路径本就正确解析到 ./tmp。
+3. **门禁**：conftest.py pytest-tmp → 仓库根 tmp/pytest-tmp；test_terminal_stats REPO
+   改 parents[2]；test_run_rl 的 tmp 用 parents[2]（REPO 保留作 sys.path）；
+   pyproject 缓存改 `../tmp/...`（ruff/mypy 恒从 nn-training 跑）；task.py clean 与
+   nn-clean-tmp.py 目标同步；README §门禁产物文案更新。
+4. `nn-training/tmp` 存量不迁移（均为历史垃圾：worker/冒烟/测试残留 + 空壳运行目录 +
+   cloudflared/hub 日志），待用户确认后整体删除（gitignore 已有 `tmp/` 覆盖，无 git
+   影响）。
+
+**测试**：training-console.test.ts 的组件日志路径断言改为 `path.join(LOG_DIR, …)`；
+pytest 后仓库根 tmp/pytest-tmp 出现新目录、nn-training/tmp 零新写入（324 pass）；
+TS bun run check 全绿（1823 pass）。注意：运行中的训练控制台需重启才拾取新 LOG_DIR。
+
+## §377 / 仓库根 tmp/ 统一收敛脚本 tools/tmp-clean.py（2026-09-08，§376 后续）
+
+**背景**：双 tmp 统一（§376）后仓库根 tmp/ 成为唯一临时根（25GB+），需要统一的
+保留策略脚本（用户指令：日志/缓存/临时目录分类收敛）。
+
+**决定**：新增 `tools/tmp-clean.py`（python stdlib、dry-run 默认、`--apply` 执行）：
+- **分类器** = 目录内是否有 `it<N>` 子目录 → 运行目录；否则按名字分类。
+- **保留策略**（--keep-runs 默认 3 / --keep-days 默认 14，均可覆盖）：
+  - 缓存（.uv-cache / .ruff-cache / .mypy-cache）：一律可删（可再生）；
+  - 日志/一次性文件（tmp 根 *.log *.out *.err *.txt *.jsonl）：按 mtime 年龄；
+  - 工具临时目录（perf-cmp.* / smoke-* / probe-* / ep* / m2 / pytest-tmp 子目录等）：
+    按目录内最新文件 mtime 年龄；
+  - 运行目录：按目录内最新文件 mtime 排序保留最近 keep-runs 个 + keep-days 内新鲜的
+    （正在写的运行必然新鲜，天然豁免）。
+- **永不触碰**：dist-agent（agent 自管理，§374）、git-repair-backup（事故备份）、
+  training-start（控制台账本 console-state/registry/monitor——删了会打断控制台）。
+- **运行检测**：nn-training/.run_rl.lock holder 存活时跳过运行目录收敛并告警
+  （日志/缓存/临时目录照常）；锁陈旧则忽略。
+- 沙箱：与 nn-clean-tmp.py 同法 `python -S ... --apply` 可绕过 WorkBuddy 删除保护。
+- 输出 ASCII（zh-CN 控制台 GBK 下中文乱码，§17.6；同 weights_prune.py 先例）。
+
+**测试**：合成夹具单测（分类/年龄/keep_runs/保护目录全断言通过）+ 真实 tmp/ dry-run
+验证（默认策略当前可回收 1.29GB 缓存；`--keep-runs 2 --keep-days 0.5` 计划 21.5GB，
+运行/临时/缓存三类全部正确）。pre-commit 钩子仍用快速的 nn-clean-tmp.py（pytest-tmp
+子集），本脚本为按需统一工具，未入钩子（全扫 2.9GB 运行目录不适合门禁热路径）。
+
+## §378 / 引擎改微基准自动选：节点本机实测 JSC vs V8（2026-09-08，三平台数据驱动）
+
+五平台实测（perf-cmp-rollout.ts，同一权重）：node/bun(new) = Windows 1.27-1.30×、WSL 1.14×、
+macOS 0.94×、Android proot 0.94-0.97× → **V8 只在 x64 Linux/Windows 系赢，JSC 在 mac/arm64 赢**；
+版本门槛（≥22/≥26）修不出该平台差异。改为 **启动时微基准自动选**：
+- `tools/agent/engine-bench.ts`：features 稳态 forward（dummy 权重，37M MACs 与值无关），
+  bun 跑 TS / node 跑打包 mjs，各自进程内 warmup+计时，spawn 税不进数字；输出 `BENCH <ms>`。
+- 决策：node_avg ≤ bun_avg × 0.97（3% 迟滞防噪声横跳）才选 node；结果落
+  `tmp/dist-agent/node-bundle/engine-choice.json`（键=bun/node 版本+wasm sha）→ 日常重启零开销，
+  升级/换内核自动重测。缓存随 bundleDir 的 codeHash stamp 一并清理。
+- 强制：`--no-node` / `SAMPLER_ENGINE=bun|node`；`SAMPLER_NODE_BIN` = 参与基准的 node。
+- 本机冒烟：微基准 bun 5.84 vs node22 4.41ms → 选 node；二次启动走缓存（基准 0 次）。
+- 跨引擎字节一致已在五平台 3/3 验证 → 节点间引擎混用不破坏确定性（M4）。
