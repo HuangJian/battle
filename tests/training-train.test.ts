@@ -7,7 +7,7 @@ import {
   type SmokeItem,
 } from '../tools/training/smoke'
 import { resolveTorchThreads, torchThreadEnv } from '../tools/training/venv'
-import { resolveTrainScript } from '../tools/training/train'
+import { resolveTrainScript, parseCli } from '../tools/training/train'
 import {
   aggregateNodeHistory,
   emptyHistory,
@@ -233,18 +233,52 @@ describe('ProcSpec path semantics (tools/training/specs.ts, DECISIONS §349 regr
   })
 })
 
-describe('train CLI arg parsing (tools/training/train.ts main, DECISIONS §349)', () => {
-  it('translates --check to a successful interpreter probe (spawns real CLI)', async () => {
-    const r = Bun.spawnSync(['bun', 'tools/training/train.ts', '--check'], {
-      cwd: REPO_ROOT,
-      stdout: 'pipe',
-      stderr: 'pipe',
-    })
-    expect(r.exitCode).toBe(0)
-    expect(r.stdout.toString()).toContain('torch 可用')
-  }, 60000)
+describe('train CLI arg parsing (tools/training/train.ts, DECISIONS §349)', () => {
+  // 纯参数解析：不 spawn、不碰 venv/torch。
+  // 历史教训（2026-09-08，详见 train.ts parseCli 上方注释）：这两条分支曾用
+  // 「spawn 真实 CLI」来测，pre-commit 门禁 fallback 全量时命中它们 →
+  // ensureVenv() 委派 bootstrap.py 联网装 torch，单用例 40s+ 且 exit 4。
+  // 参数解析是纯函数，就该纯函数测；只有真要起训练的路径才允许碰 torch。
+  it('--check / --echo 标志被识别，互不串台', () => {
+    expect(parseCli(['--check']).opts.check).toBe(true)
+    expect(parseCli(['--check']).opts.echo).toBe(false)
+    expect(parseCli(['--echo']).opts.echo).toBe(true)
+    expect(parseCli(['--echo']).opts.check).toBe(false)
+    expect(parseCli([]).opts).toMatchObject({ check: false, echo: false })
+  })
 
-  it('--echo prints the exact command and exits 0 without executing', () => {
+  it('--script 取值，其余参数按序进 scriptArgs', () => {
+    const { opts } = parseCli(['--script', 'ppo/bench.py', '--iters', '1', '--foo', 'bar'])
+    expect(opts.script).toBe('ppo/bench.py')
+    expect(opts.scriptArgs).toEqual(['--iters', '1', '--foo', 'bar'])
+  })
+
+  it('别名与数值参数：非法数值回落默认 0', () => {
+    expect(parseCli(['--kill-previous']).opts.killPrevious).toBe(true)
+    expect(parseCli(['--killprevious']).opts.killPrevious).toBe(true)
+    expect(parseCli(['--torch-threads', '7']).opts.torchThreads).toBe(7)
+    expect(parseCli(['--torch-threads', 'abc']).opts.torchThreads).toBe(0)
+    expect(parseCli(['--force']).opts.force).toBe(true)
+    expect(parseCli(['--detach']).opts.detach).toBe(true)
+  })
+
+  it('未知参数进 scriptArgs，不吞掉后续 flag', () => {
+    const { opts } = parseCli(['x.py', '--echo', '--detach'])
+    expect(opts.scriptArgs).toEqual(['x.py'])
+    expect(opts.echo).toBe(true)
+    expect(opts.detach).toBe(true)
+  })
+
+  it('--help / -h 返回 help 标记，不留 scriptArgs', () => {
+    expect(parseCli(['--help']).help).toBe(true)
+    expect(parseCli(['-h']).help).toBe(true)
+    expect(parseCli(['--help']).opts.scriptArgs).toEqual([])
+  })
+
+  // 唯一保留的 spawn：端到端守住「--echo 不碰 venv/torch」这条回归线。
+  // 超时 60s → 15s 是护栏：一旦 --echo 又被挪到 ensureVenv() 之后，它会去联网
+  // 装 torch，必然超时变红（而不是悄悄慢下来）。
+  it('--echo 端到端：只打印命令、不触发 torch 引导', () => {
     const r = Bun.spawnSync(
       ['bun', 'tools/training/train.ts', '--echo', '--script', 'ppo/bench.py', '--iters', '1'],
       {
@@ -258,7 +292,7 @@ describe('train CLI arg parsing (tools/training/train.ts main, DECISIONS §349)'
     // Windows 下路径以 JSON 转义形式打印（ppo\\bench.py）——按文件名断言，平台无关。
     expect(out).toContain('bench.py')
     expect(out).toContain('--iters')
-  }, 60000)
+  }, 15000)
 
   it('--help exits 0 with usage', () => {
     const r = Bun.spawnSync(['bun', 'tools/training/train.ts', '--help'], {
@@ -268,7 +302,7 @@ describe('train CLI arg parsing (tools/training/train.ts main, DECISIONS §349)'
     })
     expect(r.exitCode).toBe(0)
     expect(r.stdout.toString()).toContain('用法')
-  }, 60000)
+  }, 15000)
 })
 
 describe('supervisor sentinel fingerprint', () => {

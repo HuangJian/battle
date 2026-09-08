@@ -210,6 +210,17 @@ export interface TrainLaunchResult {
 /** 启动训练（前台 exec 语义 / detach 分离语义）。 */
 export function launchTraining(opts: TrainOptions): TrainLaunchResult {
   const script = resolveTrainScript(opts.script)
+
+  // --echo：只打印命令、不执行，**不碰 venv/torch**。必须排在 ensureVenv() 之前 ——
+  // 否则一次「纯打印」会触发 bootstrap.py 联网装 torch（pre-commit 门禁曾因此卡 40s+
+  // 并以 exit 4 失败）。resolveVenvPython() 是纯路径解析（读 pyvenv.cfg），零副作用。
+  if (opts.echo) {
+    const { python } = resolveVenvPython()
+    const echoCmd = [python, '-u', path.join(NN_TRAINING, script), ...opts.scriptArgs]
+    console.log(echoCmd.map((c) => JSON.stringify(c)).join(' '))
+    process.exit(0)
+  }
+
   preflightTrainLoopLock(opts.force, script)
 
   // venv+torch（缺了委派 bootstrap.py；失败退出码 4 对齐旧启动器）
@@ -246,12 +257,7 @@ export function launchTraining(opts: TrainOptions): TrainLaunchResult {
 
   const cmd = [python, '-u', scriptAbs, ...opts.scriptArgs]
 
-  // 只打印、不执行
-  if (opts.echo) {
-    console.log(cmd.map((c) => JSON.stringify(c)).join(' '))
-    process.exit(0)
-  }
-  // 校验模式：给 agent「本机到底有没有 torch」的第一手答案
+  // 校验模式：给 agent「本机到底有没有 torch」的第一手答案（--echo 已在上方提前返回）
   if (opts.check) {
     log('torch 可用。启动训练: bun tools/training/train.ts --script <name>.py [args]')
     log(`或直接用解释器: ${python} -u ${scriptAbs}`)
@@ -307,7 +313,7 @@ export function launchTraining(opts: TrainOptions): TrainLaunchResult {
 
 // ────────────────────────── CLI（直跑本文件） ──────────────────────────
 
-interface Cli {
+export interface Cli {
   opts: TrainOptions
   help: boolean
 }
@@ -328,7 +334,15 @@ function usage(): void {
   其余参数原样透传给训练脚本。`)
 }
 
-function parseCli(argv: string[]): Cli {
+/**
+ * 纯参数解析（零副作用、不碰 venv/torch）——唯一被单元测试直接调用的表面积。
+ *
+ * 历史教训（2026-09-08）：CLI 的两条分支（`--check` 解释器探针、`--echo` 打印）
+ * 曾用「spawn 真实 CLI」来测，结果 pre-commit 门禁 fallback 全量时触发
+ * `ensureVenv()` → 联网装 torch，单用例 40s+ 且 exit 4。参数解析是纯函数，
+ * 就该纯函数测；只有真要起训练的路径才允许碰 torch。
+ */
+export function parseCli(argv: string[]): Cli {
   const opts: TrainOptions = {
     script: 'train_loop.py',
     scriptArgs: [],
