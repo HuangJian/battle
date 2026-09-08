@@ -25,7 +25,7 @@ import {
   writeFileSync,
 } from 'fs'
 import path from 'path'
-import { LOG_DIR, NN_TRAINING, REPO_ROOT, START_LOG_DIR } from '../paths'
+import { CURRICULA_DIR, LOG_DIR, NN_TRAINING, REPO_ROOT, START_LOG_DIR } from '../paths'
 import { httpOk, killPid, pidAlive, waitUntil } from '../net'
 import { clearComponent, loadRegistry, saveComponent } from '../registry'
 import { loadConfig, saveConfig, validateCourseArg } from '../config'
@@ -152,6 +152,24 @@ function runRlLockHolder(): number | null {
   }
 }
 
+/** 课程 BC 种子路径（§384）：读课程 jsonc 的 `bc` 字段（相对仓库根解析）；
+ *  文件缺失/解析失败/无 bc 键时回退 legacy 硬编码（旧课程兼容）。 */
+export function resolveCourseBc(course: string): string {
+  const legacy = path.join(REPO_ROOT, 'tmp/ep60/battle2-p1bc/run/weights.json')
+  try {
+    const raw = readFileSync(path.join(CURRICULA_DIR, `${course}.jsonc`), 'utf-8')
+    const stripped = raw
+      .split('\n')
+      .filter((l) => !l.trimStart().startsWith('//'))
+      .join('\n')
+    const bc: unknown = (JSON.parse(stripped) as { bc?: unknown }).bc
+    if (typeof bc === 'string' && bc.length > 0) return path.join(REPO_ROOT, bc)
+  } catch {
+    /* 回退 legacy */
+  }
+  return legacy
+}
+
 // ────────────────────────── 组件启动 ──────────────────────────
 
 export interface StartCtx {
@@ -220,7 +238,7 @@ export async function startComponent(key: Component, ctx: StartCtx): Promise<Act
         const trajDir = path.join(REPO_ROOT, 'tmp', ctx.course)
         const weightsPath = path.join(trajDir, 'weights.json')
         if (!existsSync(weightsPath)) {
-          const bcPath = path.join(REPO_ROOT, 'tmp/ep60/battle2-p1bc/run/weights.json')
+          const bcPath = resolveCourseBc(ctx.course)
           mkdirSync(trajDir, { recursive: true })
           if (existsSync(bcPath)) {
             copyFileSync(bcPath, weightsPath)
@@ -562,7 +580,7 @@ export async function smokeTrain(course: string): Promise<ActionResult> {
     const trajDir = path.join(REPO_ROOT, 'tmp', course)
     const weightsPath = path.join(trajDir, 'weights.json')
     if (!existsSync(weightsPath)) {
-      const bcPath = path.join(REPO_ROOT, 'tmp/ep60/battle2-p1bc/run/weights.json')
+      const bcPath = resolveCourseBc(course)
       mkdirSync(trajDir, { recursive: true })
       if (!existsSync(bcPath)) return done(false, `初始权重缺失且 BC 产物不存在: ${bcPath}`)
       copyFileSync(bcPath, weightsPath)

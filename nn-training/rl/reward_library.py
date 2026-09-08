@@ -622,6 +622,9 @@ class RewardSpec:
     reward_scale: float = 10.0
     allow_extended_funcs: bool = False
     builtin: str = ""  # 降级卡回退目标（空 = 超限即硬失败）
+    #: 终局重分配（DECISIONS §382）：True 时终局对账额 T 改为每步 +T/N，
+    #: False = 历史行为（全砸末样本）。Σr 恒等不变，只换时间分配。
+    terminal_spread: bool = False
 
     def identity(self) -> str:
         """reward 血缘指纹（review 勘误 2：命名 scheme 已撤销，只记 formula 指纹）。"""
@@ -637,6 +640,7 @@ class RewardSpec:
                 "scheme": self.scheme,
                 "scale": self.reward_scale,
                 "ext": self.allow_extended_funcs,
+                "spread": self.terminal_spread,
             },
             sort_keys=True,
         )
@@ -649,6 +653,8 @@ class RewardFn:
     `scheme='toy'`：末样本 `+= terminal[outcome]`（未列出的 outcome = 0）。
     `scheme='score_reconcile'`：末样本 `+= scale·gatedScore − (Φ[N]−Φ[0])`，
     使 Σr ≡ scale·gatedScore（telescoping 恒等式）。
+
+    `terminal_spread=True`（§382）：终局额改为每步 `+= T/N`（Σr 不变）。
     """
 
     def __init__(self, spec: RewardSpec) -> None:
@@ -711,9 +717,14 @@ class RewardFn:
         phi = self.phi(m, it)
         r = np.diff(phi)  # r[i] = Φ[i+1] − Φ[i]，共 N 个样本
         if self.spec.scheme == "score_reconcile":
-            r[-1] += self.spec.reward_scale * float(gated_score) - (phi[-1] - phi[0])
+            tail = self.spec.reward_scale * float(gated_score) - (phi[-1] - phi[0])
         else:
-            r[-1] += float(self.spec.terminal.get(outcome, 0.0))
+            tail = float(self.spec.terminal.get(outcome, 0.0))
+        if self.spec.terminal_spread:
+            # §382 均匀重分配：终局额按步均摊（Σr 与 lump 版恒等，N≥1 上方已保证）
+            r = r + tail / r.shape[0]
+        else:
+            r[-1] += tail
         if not np.all(np.isfinite(r)):
             raise FormulaError(f"reward 出现非有限值（outcome={outcome}）——拒绝污染 GAE")
         return r

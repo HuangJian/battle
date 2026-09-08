@@ -6,6 +6,43 @@
 
 ---
 
+## §18 p3-rd1 建成待启动：terminal-spread 均匀重分配（2026-09-08，DECISIONS §382）
+
+> 实现（`bun run check` 1835 pass / pytest 快速层全绿 / ruff+mypy 绿）：
+> `RewardSpec/RewarBlock.terminal_spread`（默认 False=历史逐字节不变，既有
+> golden 全过）→ wrapper 层终局额按步均摊（Σr 恒等，四 outcome＋reconcile
+> 双恒等式测试锁定；N=1 退化 lump；开/关指纹不同，D14 隔离生效）。
+> 载体 `p3-rd1.jsonc` 由 vk1 派生，body diff 仅 5 处（改名/flag/fresh 目录），
+> echo-config 双验证：rd1 spread=True fp=586c166b vs vk1 False fp=2b25ed。
+> 预注册门见 §382（it5≥35；it15−it5≥+15pp 且 ≥45 继续；≤35 停；verdict 只看
+> 配对净变化＋翻转率）。启动链：setCourse p3-rd1 → 重启 hub → Pull；
+> it1 校准必查 kickstart 列＋terminal_spread=True（§16/§364 启动协议）。
+
+---
+
+## §17 p3-vk1 combo 判否停腿：冲高回落 49→32（2026-09-08）
+
+> fresh 腿 it1–30（§16 纠错后 it1–12 为有效 combo 数据，无需剔除；it13 起 resume，
+> kickstart 列 0.30–0.44 全程在跑）。贪心 eval（同 100 种子配对）：
+> it5 36 → it10 36 → it15 46 → it20 49 → it25 37 → **it30 32**（rollout 同期
+> 11–19% 全程平）。配对翻转率 ~40%（it15→it30 翻转 48 局、净 −14pp≈2σ；
+> it20→it30 净 −17）：49 是带顶噪音，37→32 两连跌把腿带回起点之下——
+> **守住 15 轮然后 decay**，不如 ks1 的平（34–43）。verdict：combo 无增益，
+> 1+1 不 >1，停腿（用户已执行 stop trainingLoop）。
+> 健康项全程静（KL 0.004–0.005、熵 0.25–0.29、value 冻）——死因不在优化器，
+> 在这套 reward/地图下缰绳只能守不能攻（ks1 同结论；p4-wdmg 四连败同源）。
+> 途中记：it28 熵 0.255→0.312 反弹＋kick 0.32→0.44 上跳＋rollout→24%，
+> 策略动了一下，eval 方向向下——"动≠好"的又一例。
+> p3 淘汰链闭环：bc 阴跌 / vr1 平 / ks1 平 / vk1 冲高回落——"critic/缰绳带
+> p3 爬坡"证伪。下一棒按 §362 只剩**②回报重分配**（step 级 credit
+> assignment，R5 诊断的真凶）。
+> **口径教训（本次实锤）：**曾用 rollout 0.113 对 ks1 eval 43 误判"11.3%<<35
+> 判否"——门是 eval 门，rollout（采样）与 eval（贪心）差 ~30pp 系探索/部署差，
+> 永不可跨口径对比。本 § 上半段"反转"叙事（46→49 爬升）同样被配对翻转率证伪：
+> it15→it20 净 +3 只是噪音。以后 verdict 只看配对净变化＋翻转率，不看单点。
+
+---
+
 ## §16 p3-vk1 首发作废：hub 陈旧代码跑了 11 轮 vr1 复刻（2026-09-08）
 
 > loop 侧全对（manifest kickstart_kl 衰减正确、ref 487KB 已发货、normalize True），

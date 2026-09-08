@@ -3716,3 +3716,18 @@ R5 诊断原文：episode 级 return 方差健康（std 5.12），step 级 credi
 - 预注册门：it5 eval ≥35（不比 vk1 36/ks1 38 起点差）；it15−it5 ≥+15pp
   且 it15 ≥45 → 继续（翻转噪音下 2σ）；it15 ≤35 → 停腿；之间 → it20 裁决。
   verdict 只看配对净变化＋翻转率（§17 教训），不看单点。
+
+## §384 / pull 预设 trainingLoop 种子路径硬编码修好（2026-09-08，p3-rd1 启动失败）
+
+症状：pull 预设中断——"初始权重缺失且 BC 产物不存在:
+tmp/ep60/battle2-p1bc/run/weights.json"，而真实产物是同目录的
+`weights.json.ckpt.60`（全部 p3 课程的 `bc` 字段亦指它）。
+根因：console actions.ts 两处种子逻辑硬编码 `weights.json` 文件名，与课程
+`bc` 字段脱节——§363 同款"文档/配置与实现分家"（断言配映射测试的教训在此
+重演：课程改 bc 名，console 毫不知情）。
+处置：① 即时解堵——由同 sha（a83b14293a…）的 `.ckpt.60` 恢复 `weights.json`；
+② 根治——新增 `resolveCourseBc(course)`：读课程 jsonc 的 `bc` 字段（相对仓库
+根解析），失败回退 legacy 硬编码；两处种子点同源＋回归测试（rd1/vk1 指
+ckpt.60、未知课程回退）。教训：凡"读课程某字段"的第二实现，一律以课程文件
+为唯一来源，禁止在别处硬编码同义常量。
+注意：actions 不热加载——修复随下次控制台重启生效；本次靠①即时解堵。

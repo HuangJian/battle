@@ -330,6 +330,8 @@ class RewardBlock(BaseModel):
     reward_scale: float = 10.0
     #: 扩展层函数（三角/双曲/特殊）opt-in，默认最小攻击面（评审 LC §2.2）
     allow_extended_funcs: bool = False
+    #: 终局重分配（DECISIONS §382）：True 时终局额按步均摊，默认 False 历史行为
+    terminal_spread: bool = False
 
     @field_validator("terminal")
     @classmethod
@@ -527,6 +529,7 @@ class CourseConfig(BaseModel):
             reward_scale=self.reward.reward_scale,
             allow_extended_funcs=self.reward.allow_extended_funcs,
             builtin=self.reward.builtin,
+            terminal_spread=self.reward.terminal_spread,
         )
 
     def ppo_schedule_dicts(self) -> list[dict[str, Any]]:
@@ -752,6 +755,7 @@ def echo_config(args, course: CourseConfig | None, it: int = 1) -> None:
 
         _log(f"=== 奖励（course={course.name}） it={it} ===")
         _log(f"  scheme       = {spec.scheme}  scale={spec.reward_scale}")
+        _log(f"  terminal_spread = {spec.terminal_spread}")
         _log(f"  formula      = {spec.formula or f'<builtin:{spec.builtin}>'}")
         if fn._compiled is not None:
             _log(f"  formula_len  = {len(spec.formula)}  ast_depth={fn._compiled.depth}")

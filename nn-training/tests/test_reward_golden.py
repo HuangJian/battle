@@ -509,6 +509,95 @@ def test_v7_ts_oracle_fidelity() -> None:
     assert np.max(np.abs(v7_phi(m, spec.params) - exp)) <= 1e-9
 
 
+# ================================================================== 终局重分配（§382）
+
+
+def _toy_pair() -> tuple[Any, Any]:
+    """同一 spec 的 lump 版 / spread 版 RewardFn 对（仅 terminal_spread 不同）。"""
+    base: dict[str, Any] = dict(
+        formula="3*kills + wHit*enemyHits",
+        params={"wHit": 0.3},
+        terminal={"stage_clear": 2.0, "lives_exhausted": -1.0, "timeout": -2.0},
+    )
+    return build_reward_fn(RewardSpec(**base)), build_reward_fn(
+        RewardSpec(**base, terminal_spread=True)
+    )
+
+
+def test_spread_sum_identity_toy() -> None:
+    """spread 版 Σr 与 lump 版逐位同（四种 outcome 全测）——只换时间分配。"""
+    lump, spread = _toy_pair()
+    rng = np.random.default_rng(382)
+    m = np.zeros((40, METRICS_DIM))
+    m[:, METRIC_INDEX["kills"]] = np.cumsum(rng.integers(0, 2, 40))
+    m[:, METRIC_INDEX["enemyHits"]] = np.cumsum(rng.integers(0, 3, 40))
+    for outcome in ("stage_clear", "lives_exhausted", "timeout", "base_destroyed"):
+        assert lump(m, outcome, 0.0, 1).sum() == pytest.approx(
+            spread(m, outcome, 0.0, 1).sum(), abs=1e-12
+        ), outcome
+
+
+def test_spread_uniform_values() -> None:
+    """spread 版每步 = 势差 + T/N；outcome 差异摊到全序列（非仅末样本）。"""
+    lump, spread = _toy_pair()
+    m = np.zeros((6, METRICS_DIM))
+    m[:, METRIC_INDEX["kills"]] = [0, 1, 1, 2, 2, 2]  # N=5
+    r_spread = spread(m, "timeout", 0.0, 1)
+    dense = np.diff([0, 3, 3, 6, 6, 6])  # Φ=kills*3 的势差
+    np.testing.assert_allclose(r_spread, dense - 2.0 / 5)
+    # outcome 差 spread 到每一步：clear 与 timeout 全序列差恒定
+    d = spread(m, "stage_clear", 0.0, 1) - spread(m, "timeout", 0.0, 1)
+    np.testing.assert_allclose(d, np.full(5, (2.0 - (-2.0)) / 5))
+
+
+def test_spread_n1_equals_lump() -> None:
+    """N=1 单样本局：均摊退化为 lump（逐位同）。"""
+    lump, spread = _toy_pair()
+    m = np.zeros((2, METRICS_DIM))
+    m[:, METRIC_INDEX["kills"]] = [1, 4]
+    for outcome in ("stage_clear", "timeout"):
+        np.testing.assert_array_equal(
+            spread(m, outcome, 0.0, 1), lump(m, outcome, 0.0, 1)
+        )
+
+
+def test_spread_reconcile_sum_identity() -> None:
+    """reconcile 版 spread：Σr 仍 ≡ scale×gatedScore。"""
+    base: dict[str, Any] = dict(
+        formula="3*kills - ticks/1000", params={}, scheme="score_reconcile",
+        reward_scale=10.0,
+    )
+    fn = build_reward_fn(RewardSpec(**base, terminal_spread=True))
+    rng = np.random.default_rng(382)
+    m = np.zeros((50, METRICS_DIM))
+    m[:, METRIC_INDEX["kills"]] = np.cumsum(rng.integers(0, 2, 50))
+    m[:, METRIC_INDEX["ticks"]] = np.arange(50) * 10
+    for score in (0.0, 0.21, 0.83, 1.0):
+        assert fn(m, "timeout", score, 1).sum() == pytest.approx(
+            10.0 * score, abs=1e-9
+        ), score
+
+
+def test_spread_default_off_and_identity() -> None:
+    """默认关闭（历史行为）：flag 缺省 False；开/关指纹不同（D14 隔离生效）。"""
+    lump, spread = _toy_pair()
+    assert lump.spec.terminal_spread is False
+    assert spread.spec.terminal_spread is True
+    assert lump.spec.identity() != spread.spec.identity()
+    # 关 = 旧语义：outcome 只动末样本（与既有 golden 同断言形状）
+    m = np.zeros((6, METRICS_DIM))
+    m[:, METRIC_INDEX["kills"]] = [0, 1, 1, 2, 2, 2]
+    r_clear = lump(m, "stage_clear", 0.0, 1)
+    r_dead = lump(m, "lives_exhausted", 0.0, 1)
+    np.testing.assert_array_equal(r_clear[:-1], r_dead[:-1])
+
+
+def test_spread_course_plumbing() -> None:
+    """课程 plumbing：vk1 关 / rd1 开（RewardBlock→RewardSpec 透传）。"""
+    assert load_course("p3-vk1").reward_spec().terminal_spread is False
+    assert load_course("p3-rd1").reward_spec().terminal_spread is True
+
+
 if __name__ == "__main__":
     for fn in (
         test_no_time_axis_reducers,
@@ -516,6 +605,12 @@ if __name__ == "__main__":
         test_single_sample_episode_n1,
         test_outcome_changes_only_last_sample,
         test_score_reconcile_telescoping,
+        test_spread_sum_identity_toy,
+        test_spread_uniform_values,
+        test_spread_n1_equals_lump,
+        test_spread_reconcile_sum_identity,
+        test_spread_default_off_and_identity,
+        test_spread_course_plumbing,
         test_param_schedule_linear_and_step,
         test_v7_formula_matches_builtin_bitwise,
         test_v7_first_kill_sentinel,

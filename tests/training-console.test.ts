@@ -717,3 +717,12 @@ describe('console/iters §361②：完整指标表不截断（MAX 500 上限）'
     }
   })
 })
+
+describe('console/actions.resolveCourseBc（§384：种子路径读课程 bc 字段）', () => {
+  it('p3-rd1/vk1 → 课程 bc（.ckpt.60）；未知课程 → legacy 硬编码', () => {
+    expect(actions.resolveCourseBc('p3-rd1')).toContain('weights.json.ckpt.60')
+    expect(actions.resolveCourseBc('p3-vk1')).toContain('weights.json.ckpt.60')
+    expect(actions.resolveCourseBc('no-such-course-xyz').endsWith('weights.json')).toBe(true)
+    expect(actions.resolveCourseBc('no-such-course-xyz')).not.toContain('ckpt')
+  })
+})
