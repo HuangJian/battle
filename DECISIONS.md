@@ -3317,3 +3317,106 @@ it2（1.01）即过。
 监控面板的正确形态是"后台刷新 + 请求读缓存"，新鲜度 1 个刷新周期即可。
 另：DECISIONS.md / 源码并行编辑遭遇静默回滚（§17 同款），改用脚本化替换 +
 逐次验证落地。
+
+## §367 / rollout 子进程改由 node(V8) 执行：wasm 推理跨引擎 ×1.6（2026-09-08，实测驱动）
+
+**实测动机**（本机 bun 1.4.2 / node 26.8.1，CPU 空闲，同一 `conv_feats.wasm` 37M MACs）：
+`features` **bun/JSC 7.55ms vs node/V8 4.62ms（×1.63）**；逐决策 forward 7.33 vs 4.42ms；
+端到端单局 export（1200 tick，含 ~660ms 进程启动）1904 vs 1546ms（扣启动 ~1.4×，实测
+再跑到 1.35–1.8×，取决于进程启动占比）。node 26.8.1 比 node 22.22.2 再快 ~15%。
+**同权重同 seed 下两引擎产出的 npy/manifest 逐字节相同**（wasm 字节码 + IEEE754）
+→ 换引擎不触碰 M4 跨节点确定性红线。
+
+**决策**：**agent 本体仍跑 bun**（Bun.serve、`bunVersion` 版本门、codeHash 口径全不变），
+只把 rollout 采样子进程交给 node——启动时探测 node ≥ v22（在 `where.exe/which -a` 候选里
+挑版本最高的），用 `bun build --target=node` 预打包 exporter，子进程执行打包产物。
+新增 `tools/agent/rollout-runner.ts`（纯逻辑，可单测）+ `tests/agent/rollout-runner.test.ts`（19 用例）。
+
+**关键坑（实测代价一整天）**：`conv-wasm.ts` 用 `new URL('./wasm/conv_feats.wasm', import.meta.url)`
+定位，打包后是相对**产物**解析的；缺文件**不报错**，而是静默回退 TS 特征路径（4.4ms → 62.7ms，
+14× 慢）。故 `ensureNodeBundle` 必把 wasm 复制到产物同级 `wasm/` 下，并有单测断言。
+
+**降级链**（任一触发 → 退回 bun，行为与改动前逐字节一致）：无 node / major<22 / 打包全失败 /
+node 子进程连续失败 ≥2 次；`--no-node` 强制 bun；`SAMPLER_NODE_BIN` 指定运行时。
+codeHash 变化时清掉旧产物目录（stamp 比对），产物原子落盘（tmp + rename，抗同机多 agent 并发）。
+
+**观测**：`/v1/ping`、`/v1/status` 新增 `rolloutEngine` / `nodeVersion`（纯观测，调度口径不变）；
+启动行与 `/v1/status` 可直接看到引擎。`--node-label` 由 `bun-<pid>` 改为 `<engine>-<pid>`
+（manifest.node 为信息字段，无消费方）。
+
+**纪律**：本改动触碰 `tools/agent/**` → 必触发远端升级波（杀旧 + pull + 重启，丢在飞局），
+按既有约定**合批进同一个 commit**；self 节点修改后必须重启，否则 codeHash 与磁盘不符会被剔除。
+
+## §368 / 推理提速②③④：pointwise intrinsics + encode 降频 + 长驻 serve worker（2026-09-08）
+
+承接 §367（引擎 node/V8 ×1.63）。以下全部先实测后落地，改动相互独立、可各自回滚：
+
+**② pointwise 手写 intrinsics（src/nn/wasm/conv_feats.{c,wasm}）**：1x1 层（占 60% MACs）由
+"外积排布等 LLVM 自动向量化"改为 `wasm_simd128` 手写（4oc×4px 寄存器块 + relu/residual 融合，
+累加顺序不变）。features **bun 8.10→5.46ms（1.48×）、node 4.59→3.43ms（1.35×）**；单局端到端
+1932→1663ms；**产物与旧内核逐字节相同**（11 文件实测）。实测否决项：relaxed-FMA（跨引擎取整
+差异+M4 风险、且更慢）、stem/dw 全 intrinsics 化（v3 反而更慢且非逐位）、自动向量化循环重排
+（v2a，V8 下 0.61×）。工具链：本机 clang 20（--target=wasm32 -O3 -msimd128 --export-memory）。
+
+**③ obs 只在决策 tick 编码（export-rl-rollout.ts）**：encode 占整局 2.4%→1.0%，产物逐字节
+相同（encode 结果只在决策 tick 被消费）。白送的 1.4%。
+
+**④ 长驻 serve worker（实验开关 `--persist`，默认关）**：export-rl-rollout.ts 加 `--serve`
+（stdin 一行一任务、`__SERVE_OK__`/`__SERVE_ERR__` 标记、`__SERVE_READY__` 就绪）；agent 侧
+worker 池（--persist 启用），只覆盖 per-tick rollout，省每局进程启动+wasm 编译+JIT 预热。
+本机实测 4 连局：1 spawn + 3 reuse，第 2 局起墙钟 -0.4s（Windows；proot 下进程启动更贵、
+收益更大，**需在 Android 节点实测 `time node -e 1` 再决定全量开**）。serve 与一次性 spawn 的
+shard **逐字节相同**。失败链：worker 异常/超时 → 杀进程 + **本局回退一次性 spawn**（不丢局）。
+⚠️ 坑：serve worker 的 stdin 必须是 `'pipe'`（一度写成 ignore → child.stdin=null → 每次静默
+回退一次性；spawn/reuse/close 日志可观测）。产物经 BCV2 v2 解包验证 stage/seed/outcome 正确。
+
+**纪律**：本批（tools/agent/** + export-rl-rollout.ts + conv_feats.wasm）同属 codeHash 集 →
+**一次升级波**（杀旧+pull+重启，丢在飞局），须与 §367 改动合批进同一 commit；--persist 默认关，
+先在单节点（a97/a98）A/B 观察再决定全量。
+
+**§368 补记（int16 dot 量化实测否决）**：pointwise 占比先量准——去掉 pw 的对照内核 bun 5.21→2.37ms /
+node 3.29→1.67ms（pw≈50-55% of features）。HWC 转置 + 激活 int15 + 权重 per-oc int12 + `i32x4.dot_i16x8`
+集成（tmp/split/conv_feats_q16.c）实测 **bun +4% / node -18%**（vs i1 f32 intrinsics），且 pooled
+max|Δ|=0.55（有正确性 bug 未定位）。纯点积吞吐（dotbench 2.2-2.9×）在真实内核里被 ①激活 CHW→HWC
+转置+量化（每 block 43K 元素）②4px 分块下激活流 stride=H 的访存模式 ③逐 oc 重读权值行 吃掉。
+**结论：不落地**。若未来整体改 HWC8 平铺（pixel×8ch 连续块，两操作数同连续）可再评估，估最多
++10-20%，复杂度与精度代价不成比例。
+
+## §369 / 训练侧架构实验族提案留档（2026-09-08，未启动）
+
+触发条件：p4-fast 出结论后（贪心 >35% 成 / ≤30% 横盘 40 轮败）。动机：rollout 推理已榨干工程侧
+（§367 node 引擎 + §368 i1 内核/persist/encode，单局 ~1.4s），再提速只剩降 MACs = 动架构 = 重训。
+候选按破坏面分级（plan/nn-arch-speedup.md 全量矩阵）：bottleneck 64→16→64（MAC ×1.8，只砸
+wasm 内核结构 + 网络定义，不动 obs 契约 → 首选核心候选）；board 26→13（×3.5，最深：obs/shard
+形状契约全链 + schemaMajor bump → 放最后且先出设计评审）；h 64→48（×1.5，参数化但 wasm 常量须
+同批重编否则静默回退 TS ~6×）；d 8→6（×1.15，不值单独做）；K 10→20（口径级，当课程实验不当
+性能 hack）。批次税：新 BC（bc 起点 it70 失效；God-AI 语料工具已课程化，无采集新账）+ fresh
+课程目录（§15.5）+ 贪心基线重立 + codeHash 升级波（与 §367/368 未提交批合批）+ 远端 worker
+code 重发。判定线沿用 §345（质量优先，不得低于同期对照）。建议先立「架构脚手架」（arch 参数化
+checklist + conv_feats 宏注入可配置源）再走 阶段1 低风险变量 → 阶段2 bottleneck → 阶段3 board13。
+int16 dot 量化维持否决（§368 补记）。计划文件 plan/nn-arch-speedup.md（untracked，不入库）。
+## §370 / 日志页视觉重设计：终端美学 + 结构化日志 + 搜索/过滤（2026-09-08，用户指令"日志页很丑"）
+
+**问题**：首页一屏仪表盘（§354/§355）已美化，日志页仍是裸 <pre> 纯文本 +
+扁平工具栏：无时间戳/级别区分、trainingLoop 的 JSON 行原样平铺极难读、无搜索/过滤。
+
+**决定**（直观 + 审美 + 交互三目标）：
+1. **顶卡**：组件活点（运行绿呼吸/退出红/未启灰）+ 标题 + 文件路径（超长省略号）+ 行数/
+   体积芯片 + 「已截断·尾部 N 行」琥珀徽章 + 返回按钮。
+2. **吸顶工具栏**：组件导航 pill（带状态点、当前高亮）+ 搜索框（/ 聚焦、Esc 清空、命中
+   <mark> 高亮、✕ 清除）+ 级别过滤分段控件（全部/错误/警告，带实时计数）+ follow 开关
+   （跟随中 2s/自动 4s）+ 尾行数选择 + 暂停读历史提示条。
+3. **日志体（终端美学）**：mac 风三色点面板头（文件 chip + LIVE 呼吸灯 + 行计数）+ 深色
+   #0d1117 面板；每行 = 行号 gutter + 时间戳列 + [组件] 徽章 + 正文；错误行红左边条+淡红底、
+   警告黄。trainingLoop 的 JSON 行渲染为**结构化事件卡**（event 彩色徽章 + 精选 k:v
+   it/win/kl/mean_ret/entropy/job/time，iter_error 红底 + error 原文）——原始 JSON 平铺
+   是最大可读性杀手。
+4. **FAB 回到底部**：新到行数 +N 徽章呼吸（未贴底读历史时计新行）；智能 follow 语义（§4.9）不变。
+5. 纯函数抽 view.ts（parseLogLine / parseTrainingEvent / formatBytes），独立单测。
+
+书架自检（§2.7）：架构未动（SSR renderLogPage 契约/URL 参数/api 载荷全不变）；纯展示层。
+
+**测试**：preact SSR —— parseLogLine 时间戳/标签/级别切分、parseTrainingEvent 字段精选与
+iter_error 的 error 提取（win 百分化/kl 4 位小数）、formatBytes B/KB/MB、renderLogPage
+JSON 行渲染为事件卡 + 普通行红色级别 + 行号 gutter，且存量锚点（id=logbox / id=follow
+checked / 返回控制台 / /log/trainingLoop / 无 <script> 注入）全保留。控制台 70 测试全绿。

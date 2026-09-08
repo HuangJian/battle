@@ -193,13 +193,90 @@ a.tc-preset{text-decoration:none;display:inline-block}
 .tc-link{background:none;border:none;padding:0;color:var(--accent);cursor:pointer;font-size:var(--fs-2);font-weight:600}
 .tc-link:hover{text-decoration:underline}
 
-/* ── 日志页 ──────────────────────────────────────────────── */
-.tc-logbox{background:#10141f;color:#d6e2f0;padding:14px 16px;border-radius:var(--r-3);overflow:auto;
-  max-height:calc(100vh - 260px);font-size:var(--fs-2);line-height:1.55;
-  font-family:ui-monospace,'Cascadia Mono',Consolas,monospace;white-space:pre-wrap;word-break:break-all}
-.tc-log-toggle{position:fixed;right:24px;bottom:24px;background:var(--card);border:1px solid var(--border);
-  border-radius:var(--r-2);box-shadow:var(--sh-2);padding:8px 14px;font-size:var(--fs-2);cursor:pointer;z-index:30}
-.tc-log-toggle:hover{border-color:var(--accent);color:var(--accent)}
+/* ── 日志页（§367 重设计：终端美学 + 结构化日志 + 搜索/过滤交互） ───────────────────────────── */
+.tc-logwrap{padding:var(--sp-4) 0 var(--sp-6);display:flex;flex-direction:column;gap:var(--sp-3)}
+
+/* 顶卡 */
+.tc-loghead{display:flex;align-items:center;gap:var(--sp-3);background:var(--card);border:1px solid var(--border);border-radius:var(--r-3);padding:10px var(--sp-4);flex-wrap:wrap}
+.tc-loghead__dot{width:10px;height:10px;border-radius:50%;background:var(--gray);flex-shrink:0}
+.tc-loghead__dot--live{background:var(--green);box-shadow:0 0 0 3px var(--green-bg);animation:tc-live 1.6s ease-in-out infinite}
+@keyframes tc-live{0%,100%{opacity:1}50%{opacity:.45}}
+.tc-loghead h1{font-size:var(--fs-4);margin:0;display:flex;align-items:baseline;gap:6px;white-space:nowrap}
+.tc-loghead__sep{color:var(--muted);font-weight:400}
+.tc-loghead__comp{font-family:ui-monospace,'Cascadia Mono',Consolas,monospace}
+.tc-loghead__meta{display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap;min-width:0}
+.tc-logpath{font-size:var(--fs-2);color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:min(46vw,420px)}
+.tc-loghead__back{margin-left:auto}
+.tc-chip{display:inline-flex;align-items:center;gap:4px;padding:1px 8px;border-radius:999px;font-size:var(--fs-2);background:var(--accent-bg);color:var(--accent);white-space:nowrap}
+.tc-chip b{font-weight:700}
+.tc-chip--amber{background:#fdf3e7;color:#b45309}
+.tc-chip--red{background:var(--red-bg);color:var(--red)}
+.tc-chip--muted{background:var(--gray-bg);color:var(--muted)}
+
+/* 吸顶工具栏 */
+.tc-logtool{display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap;position:sticky;top:0;z-index:20;background:var(--bg);padding:8px 2px;border-bottom:1px solid var(--border)}
+.tc-logtool__nav{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.tc-lognav{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border:1px solid var(--border);border-radius:999px;font-size:var(--fs-2);color:var(--muted);text-decoration:none;white-space:nowrap}
+.tc-lognav:hover{border-color:var(--accent);color:var(--accent)}
+.tc-lognav--on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+.tc-lognav--on .tc-dot--on{background:rgba(255,255,255,.85)}
+.tc-logtool__right{display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap;margin-left:auto}
+.tc-logtool__search{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--border);border-radius:999px;padding:3px 10px;background:var(--card);min-width:180px}
+.tc-logtool__search:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg)}
+.tc-logtool__search-icon{color:var(--muted);font-size:13px}
+.tc-logtool__search input{border:none;outline:none;background:none;font-size:var(--fs-2);width:100%;color:var(--text)}
+.tc-logtool__clear{border:none;background:none;color:var(--muted);cursor:pointer;font-size:11px;padding:0 2px}
+.tc-logtool__clear:hover{color:var(--red)}
+.tc-logtool__lines{display:inline-flex;align-items:center;gap:6px;font-size:var(--fs-2);color:var(--muted)}
+
+/* 暂停跟随提示条 */
+.tc-logpause{position:sticky;top:46px;z-index:19;align-self:flex-start;padding:4px 12px;border-radius:999px;background:var(--yellow-bg);color:#b45309;font-size:var(--fs-2);font-weight:600}
+
+/* 日志面板：终端风 */
+.tc-logpanel{background:#0d1117;border:1px solid #232a36;border-radius:var(--r-3);overflow:hidden;box-shadow:var(--sh-1)}
+.tc-logpanel__hd{display:flex;align-items:center;gap:var(--sp-2);padding:8px 12px;background:#161c26;border-bottom:1px solid #232a36;color:#8b98ab;font-size:var(--fs-2)}
+.tc-logpanel__dots{display:inline-flex;gap:5px}
+.tc-logpanel__dots i{width:10px;height:10px;border-radius:50%;background:#ff5f57}
+.tc-logpanel__dots i:nth-child(2){background:#febc2e}
+.tc-logpanel__dots i:nth-child(3){background:#28c840}
+.tc-logpanel__file{font-family:ui-monospace,'Cascadia Mono',Consolas,monospace;margin-left:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:52vw}
+.tc-logpanel__live{margin-left:auto;display:inline-flex;align-items:center;gap:5px;color:#28c840;font-weight:700;letter-spacing:.5px;font-size:10.5px}
+.tc-logpanel__live i{width:7px;height:7px;border-radius:50%;background:#28c840;animation:tc-live 1.6s ease-in-out infinite}
+.tc-logpanel__count{font-size:var(--fs-2);color:#8b98ab}
+
+.tc-logbox{flex:1;overflow:auto;max-height:calc(100vh - 250px);padding:6px 0 14px;scroll-behavior:auto}
+.tc-logline{display:grid;grid-template-columns:44px 78px auto 1fr;align-items:start;gap:8px;padding:1px 12px;font-size:var(--fs-2);line-height:1.6;font-family:ui-monospace,'Cascadia Mono',Consolas,monospace;white-space:pre-wrap;word-break:break-all;color:#c9d4e3;border-left:2px solid transparent}
+.tc-logline:hover{background:rgba(255,255,255,.045)}
+.tc-logline__no{color:#4b5563;text-align:right;user-select:none;font-variant-numeric:tabular-nums}
+.tc-logline__ts{color:#5b6774;user-select:none;font-variant-numeric:tabular-nums}
+.tc-logline__text{min-width:0}
+.tc-logline mark{background:#b45309;color:#fff;padding:0 1px;border-radius:2px}
+.tc-logline--warn{border-left-color:var(--yellow);background:rgba(180,83,9,.07)}
+.tc-logline--warn:hover{background:rgba(180,83,9,.12)}
+.tc-logline--error{border-left-color:var(--red);background:rgba(220,38,38,.08)}
+.tc-logline--error:hover{background:rgba(220,38,38,.13)}
+.tc-logline--error .tc-logline__text{color:#f3b4b4}
+.tc-logline--ev{display:block;padding:3px 12px 3px 0;grid-template-columns:none;background:rgba(47,95,224,.05);border-left:2px solid var(--accent)}
+.tc-logline--ev.tc-logline--ev-iter_error{border-left-color:var(--red);background:rgba(220,38,38,.08)}
+.tc-logline--ev-iter_error .tc-logchip{background:var(--red);color:#fff}
+.tc-logline--ev-run_start .tc-logchip,.tc-logline--ev-job_completed .tc-logchip{background:var(--green);color:#fff}
+.tc-logline--ev-iteration .tc-logchip{background:var(--accent);color:#fff}
+.tc-logline--ev-job_pending .tc-logchip{background:var(--yellow);color:#fff}
+.tc-logline__body{display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap}
+.tc-logchip{display:inline-block;padding:0 7px;border-radius:6px;font-size:10.5px;font-weight:700;background:#232a36;color:#aeb9c9;white-space:nowrap}
+.tc-logchip--tag{background:transparent;color:#7d8ea3;font-weight:600;border:1px solid #2b3442}
+.tc-logkv{display:inline-flex;align-items:baseline;gap:4px;white-space:nowrap}
+.tc-logkv__k{color:#7d8ea3;font-size:10.5px}
+.tc-logkv__v{color:#dbe4f0;font-weight:600}
+.tc-logkv__err{color:#f3b4b4;font-weight:600;font-size:var(--fs-2);word-break:break-all}
+.tc-logempty{display:flex;flex-direction:column;align-items:center;gap:6px;padding:48px 16px;color:#8b98ab;text-align:center}
+.tc-logempty__icon{font-size:26px}
+
+/* FAB 回到底部 */
+.tc-logfab{position:fixed;right:24px;bottom:24px;display:inline-flex;align-items:center;gap:7px;background:var(--card);border:1px solid var(--border);border-radius:999px;box-shadow:var(--sh-2);padding:9px 16px;font-size:var(--fs-2);font-weight:600;color:var(--text);cursor:pointer;z-index:30}
+.tc-logfab:hover{border-color:var(--accent);color:var(--accent)}
+.tc-logfab__icon{color:var(--accent);font-size:14px}
+.tc-logfab__badge{min-width:20px;text-align:center;padding:0 6px;border-radius:999px;background:var(--accent);color:#fff;font-size:11px;font-weight:700;animation:tc-live 1.2s ease-in-out infinite}
 
 /* ── 响应式 ──────────────────────────────────────────────── */
 @media (max-width:900px){.tc-wrap{padding:var(--sp-4)}.tc-table thead th,.tc-table tbody td{padding:8px 10px}.tc-topbar{gap:var(--sp-2)}}
