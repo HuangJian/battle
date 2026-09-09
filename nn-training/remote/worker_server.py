@@ -31,6 +31,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from remote._port_guard import ensure_port_free
 from remote.protocol import ProtocolError, normalize_manifest
 from remote.worker import run_job
 
@@ -203,6 +204,12 @@ def serve_forever(port: int, token: str, work_dir: Path, *, device: str = "cpu",
     """阻塞运行（调用方负责进程生命周期）；token 缺失响亮报错。"""
     if not token:
         raise SystemExit("[worker-serve] ERROR: 需要 --token（与 HUB 共享密钥）")
+    # §双监听守卫（同 hub_server）：Windows SO_REUSEADDR 双绑同端口不崩，后启动者
+    # 静默变僵尸——bind 前探测 127.0.0.1（worker 绑 0.0.0.0 含回环，任何本地监听都冲突）。
+    try:
+        ensure_port_free("127.0.0.1", port)
+    except RuntimeError as e:
+        raise SystemExit(f"[worker-serve] ERROR: {e}") from None
     state = WorkerServerState(work_dir)
     srv = make_worker_server(state, port, token, device=device, torch_threads=torch_threads)
     print(f"[{time.strftime('%H:%M:%S')}] [worker-serve] listening on 0.0.0.0:{port} "

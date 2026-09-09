@@ -37,6 +37,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Lock
 
+from remote._port_guard import ensure_port_free
 from remote.protocol import AUTH_HEADER, LEASE_SEC, ProtocolError, normalize_manifest
 
 # ------------------------------------------------------------------ state
@@ -526,6 +527,13 @@ def main() -> None:
             sys.exit(1)
     if not token:
         print("[hub-server] ERROR: 需要 --token 或 --token-file", flush=True)
+        sys.exit(1)
+    # §双监听守卫：Windows SO_REUSEADDR 允许双绑同端口（后启动者静默变僵尸）——
+    # bind 前探测，端口已有活监听者即拒绝启动（2026-09-09 8787 双实例事故）。
+    try:
+        ensure_port_free(args.host, args.port)
+    except RuntimeError as e:
+        print(f"[hub-server] ERROR: {e}", flush=True)
         sys.exit(1)
     store = _JobStore(args.job_root, args.jsonl)
     srv = make_server(store, args.port, token, host=args.host)
