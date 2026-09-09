@@ -28,6 +28,7 @@ import {
   REFRESH_INTERVALS,
   refreshLabel,
   TC_GLOBAL_INTERVAL,
+  TC_RO_BANNER_DISMISSED,
   type ConsoleStateView,
   type PhaseInfo,
   type RefreshSec,
@@ -63,6 +64,26 @@ function initInterval(): RefreshSec {
   return 300
 }
 
+/** 本机判定（局域网只读边界）：页面经 localhost/127.0.0.1 打开 = 本机，可执行动作；
+ *  经局域网 IP 打开 = 只读查看（服务端 POST 还会 403 兜底，双保险）。 */
+function isLocalHost(): boolean {
+  if (typeof location === 'undefined') return true // SSR 首帧无 location，按本机渲染
+  const h = location.hostname
+  return h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]'
+}
+
+/** 把查看课程写入 URL（?course=，history.replaceState）：局域网刷新/分享链接保持所选课程。 */
+function writeUrlCourse(c: string): void {
+  try {
+    const u = new URL(location.href)
+    if (c) u.searchParams.set('course', c)
+    else u.searchParams.delete('course')
+    history.replaceState(null, '', u.pathname + u.search)
+  } catch {
+    /* ignore */
+  }
+}
+
 /** 阶段耗时格式化 'Xs' / 'Xm Ys' / 'Xh Ym'。 */
 function fmtElapsed(ms: number | null): string {
   if (ms == null || ms < 0) return '—'
@@ -87,6 +108,18 @@ export function App({ initial }: AppProps) {
   const [drawerTab, setDrawerTab] = useState<DrawerTabKey | null>(null)
   const [trainOpen, setTrainOpen] = useState(false)
   const [poolFreshNonce, setPoolFreshNonce] = useState(0)
+  // 只读横幅可关闭：localStorage 记住「不再显示」（仅局域网只读视图相关；tc. 前缀防误删）。
+  const [roBannerDismissed, setRoBannerDismissed] = useState(
+    () => readLocal(TC_RO_BANNER_DISMISSED) === '1',
+  )
+  // 视图课程（局域网只读核心）：初始 = SSR 的 ?course= 覆盖或操作员课程；切换只改本浏览器
+  // 的查看 + URL，本机才额外 POST setCourse 同步操作员课程（动作 WYSIWYG 走 body.course）。
+  const isLocal = isLocalHost()
+  // 只读视图标记：服务端按请求来源 stamp（SSR 首帧即正确，无闪跳）；缺省回退 hostname 判定。
+  const readOnly = initial.readOnly ?? !isLocal
+  const [viewCourse, setViewCourse] = useState<string>(initial.course)
+  const viewCourseRef = useRef(viewCourse)
+  viewCourseRef.current = viewCourse
   // 阶段耗时段 10s 客户端自走（sinceMs 是服务器锚点；两次轮询之间显示不冻结）。
   const [now, setNow] = useState(() => Date.now())
 
@@ -94,9 +127,10 @@ export function App({ initial }: AppProps) {
   const failCount = useRef(0)
 
   // ── 拉取 /api/state（刷新间隔；单次失败 retry，连续 3 次 down） ──
+  // 始终带当前查看课程（?course= 只读覆盖）——切课程后轮询/iter 加速/可见性恢复都取同一课程。
   const refreshState = useCallback(async (): Promise<void> => {
     try {
-      const s = await fetchState()
+      const s = await fetchState(viewCourseRef.current)
       setStateView(s)
       setConnError('off')
       failCount.current = 0
@@ -167,9 +201,14 @@ export function App({ initial }: AppProps) {
   }, [refreshState])
 
   // ── 动作派发（POST → flash → 重拉 state） ──
+  // 课程敏感动作（start/preset/smoke/smokeTrain/nodeSmoke/setCourse）统一带上当前查看课程：
+  // 「所见即所控」——操作员启动的 trainer/hub 一定用他正在看的课程，不依赖全局 console-state。
+  // 局域网来源 POST 会被服务端 403（只读门控），此处只是本机路径的语义保证。
   const doAction = useCallback(
     async (act: string, body: Record<string, unknown> = {}): Promise<{ ok: boolean }> => {
-      const r = await postAction(act, body)
+      const course = viewCourseRef.current
+      const fullBody = course ? { course, ...body } : body
+      const r = await postAction(act, fullBody)
       setFlash({ ok: r.ok, message: r.message })
       void refreshState()
       return { ok: r.ok }
@@ -182,45 +221,75 @@ export function App({ initial }: AppProps) {
     await doAction('preset', { mode })
   }
 
-  // hub-server 运行中锁定课程：hub 按课程建 jobRoot/日志目录，切课程会打乱在途训练
-  // 状态——先停止 hub-server 再切换（§367 UI 交互）。
+  // hub-server 运行中锁定课程（仅本机）：hub 按课程建 jobRoot/日志目录，切操作员课程会打乱
+  // 在途训练状态——先停止 hub-server 再切换（§367 UI 交互）。局域网查看不受此限：只读切换
+  // 课程不影响任何训练状态。
   const hubRunning = (stateView?.components ?? []).some(
     (c) => c.key === 'hubServer' && c.status === 'running',
   )
 
-  // ── 顶栏（标题行放到页面最顶端） ──
-  const course = stateView?.course ?? ''
+  // 课程下拉 onChange：本机 = 查看 + POST setCourse 同步操作员课程；局域网 = 仅查看 + 写 URL。
+  // 注意：ref 须在此同步更新（setState 后下一渲染才赋值）——随后的 refreshState/doAction
+  // 立即读到的必须已是新课程，否则轮询仍拉旧课程。
+  const onCourseChange = (e: Event): void => {
+    const c = (e.target as HTMLSelectElement).value
+    viewCourseRef.current = c
+    setViewCourse(c)
+    writeUrlCourse(c)
+    void refreshState()
+    setPoolFreshNonce((n) => n + 1)
+    // 只读视图不 POST（服务端也会 403 兜底）；用服务端 stamp 的 readOnly 而非 isLocal。
+    if (!readOnly) void doAction('setCourse', { course: c })
+  }
 
   // 顶栏阶段耗时（至今；now 由 10s ticker 驱动，轮询间隙不冻结）。
   const phaseInfo: PhaseInfo | null = stateView?.phase ?? null
   const phaseElapsed = phaseInfo && phaseInfo.sinceMs != null ? now - phaseInfo.sinceMs : null
 
+  // 正在训练的课程：trainingLoop 运行时的注册课程（启动即记账）；监督重启丢 course 时
+  // 回退服务端生效课程（console-state，正常流程与训练课程一致）。查看课程 ≠ 训练课程时，
+  // 在课程 select 后高亮提示——局域网切去查看其它课程也能一眼看到训练在哪个课程上。
+  const trainingLoop = (stateView?.components ?? []).find((c) => c.key === 'trainingLoop')
+  const trainingCourse =
+    trainingLoop?.status === 'running' ? trainingLoop.course || stateView?.course || '' : ''
+
   return (
     <div className="tc-wrap">
       <Flash flash={flash} onHide={() => setFlash(null)} />
-
       <header className="tc-topbar">
         <div className="tc-topbar__row">
           <h1>
             <span className="dot" />
             网训战役指挥部
           </h1>
-          {/* 课程选择：标题行中部（最新 iter 指标 chips 已移除） */}
+          {readOnly ? (
+            <span
+              className="tc-badge tc-badge--ro"
+              title="本页面为局域网只读视图；启停/冒烟/模式开关/节点编辑仅在本机 localhost 打开控制台时可用"
+            >
+              🔒 局域网只读
+            </span>
+          ) : null}
+          {/* 课程选择：标题行中部（最新 iter 指标 chips 已移除）——本机可切操作员课程，
+              局域网只读切换查看课程（不落盘、不影响训练） */}
           <label className="tc-topbar__course" title={undefined}>
             <span className="tc-topbar__course-lbl">课程</span>
             <select
               id="courseSel"
               className="tc-sel"
-              value={course}
-              disabled={hubRunning}
+              value={viewCourse}
+              // 课程锁只对本机生效：用服务端 stamp 的 readOnly（SSR 首帧即正确）而非客户端 isLocal——
+              // 后者 SSR 期恒 true，会渲染出局域网首帧 disabled 的 select（靠 hydration 纠正不可靠）。
+              // 局域网只读切换课程不影响训练，任何训练状态下都可切。
+              disabled={hubRunning && !readOnly}
               title={
-                hubRunning
+                hubRunning && !readOnly
                   ? 'hub-server 运行中——切课程会打乱在途训练状态，先停止 hub-server 再切换'
-                  : undefined
+                  : readOnly
+                    ? '局域网只读：切换仅影响当前浏览器的查看课程，不影响训练'
+                    : undefined
               }
-              onChange={(e) =>
-                void doAction('setCourse', { course: (e.target as HTMLSelectElement).value })
-              }
+              onChange={onCourseChange}
             >
               <option value="">自动（最近活跃课程）</option>
               {(stateView?.courses ?? []).map((c) => (
@@ -229,7 +298,16 @@ export function App({ initial }: AppProps) {
                 </option>
               ))}
             </select>
-            {hubRunning ? (
+            {trainingCourse && trainingCourse !== viewCourse ? (
+              <span
+                className="tc-training-tag"
+                title={`正在训练 ${trainingCourse}；当前查看 ${viewCourse || '(自动)'}——切换查看不影响训练`}
+              >
+                <span className="tc-dot tc-dot--on" />
+                正在训练：{trainingCourse}
+              </span>
+            ) : null}
+            {hubRunning && !readOnly ? (
               <span className="tc-muted tc-small" title="先停止 hub-server 再切换课程">
                 hub 运行中，课程已锁定
               </span>
@@ -292,7 +370,6 @@ export function App({ initial }: AppProps) {
           </div>
         </div>
       </header>
-
       {connError !== 'off' ? (
         <div className="tc-banner tc-banner--err" role="alert">
           <span>
@@ -304,35 +381,54 @@ export function App({ initial }: AppProps) {
             重试
           </button>
         </div>
+      ) : null}{' '}
+      {readOnly && !roBannerDismissed ? (
+        <div className="tc-banner tc-banner--ro" role="status">
+          <span>
+            🔒 只读模式：可查看任意课程/日志/节点统计；启停组件、冒烟、模式开关与节点编辑 仅在本机
+            localhost 打开控制台时可用（本页动作按钮已禁用）。
+          </span>
+          <button
+            type="button"
+            className="tc-btn tc-btn--sm"
+            aria-label="关闭只读提示"
+            title="关闭后不再显示（清 tc.* localStorage 可恢复）"
+            onClick={() => {
+              writeLocal(TC_RO_BANNER_DISMISSED, '1')
+              setRoBannerDismissed(true)
+            }}
+          >
+            ✕
+          </button>
+        </div>
       ) : null}
-
       <PanelErrorBoundary>
         <Hero stateView={stateView} onMore={() => setDrawerTab('metrics')} />
       </PanelErrorBoundary>
-
       <PanelErrorBoundary>
         <ComponentCards
           stateView={stateView}
           onAction={doAction}
           onLaunchTrainer={() => setTrainOpen(true)}
+          course={viewCourse}
+          readOnly={readOnly}
         />
       </PanelErrorBoundary>
-
       <PanelErrorBoundary>
         <NodePills
           nodes={stateView?.nodes ?? []}
           local={stateView?.localNode ?? null}
           onAction={doAction}
           onMore={() => setDrawerTab('nodes')}
+          readOnly={readOnly}
         />
       </PanelErrorBoundary>
-
       <p className="tc-caption">
-        仅回环 127.0.0.1 无鉴权（DECISIONS §348）· /api/state {refreshInterval}s 轮询 ·
-        首页即训练态势：胜率焦点 + 组件卡（点击卡在下方展开全宽最近日志）+ 节点 pill 行 ·
-        详情进抽屉（指标 | 节点统计 | 日志）· Esc 关闭弹窗/抽屉 · r 立即刷新全部。
+        局域网只读：可查看任意课程/日志/节点统计（课程▾仅本浏览器切换）；启停/冒烟/模式/节点编辑
+        仅本机 localhost 生效 · /api/state {refreshInterval}s 轮询 · 首页即训练态势：胜率焦点 +
+        组件卡 （点击卡在下方展开全宽最近日志）+ 节点 pill 行 · 详情进抽屉（指标 | 节点统计 |
+        日志）· Esc 关闭弹窗/抽屉 · r 立即刷新全部。
       </p>
-
       <Drawer
         open={drawerTab !== null}
         activeTab={drawerTab ?? 'metrics'}
@@ -345,10 +441,11 @@ export function App({ initial }: AppProps) {
         onClose={() => setDrawerTab(null)}
       >
         {drawerTab === 'metrics' ? <MetricsTable stateView={stateView} /> : null}
-        {drawerTab === 'nodes' ? <NodeStats enabled poolFreshNonce={poolFreshNonce} /> : null}
-        {drawerTab === 'log' ? <LogNavCard stateView={stateView} /> : null}
+        {drawerTab === 'nodes' ? (
+          <NodeStats enabled poolFreshNonce={poolFreshNonce} course={viewCourse} />
+        ) : null}
+        {drawerTab === 'log' ? <LogNavCard stateView={stateView} course={viewCourse} /> : null}
       </Drawer>
-
       {stateView ? (
         <TrainLaunchModal
           open={trainOpen}
@@ -356,6 +453,7 @@ export function App({ initial }: AppProps) {
           onClose={() => setTrainOpen(false)}
           onAction={doAction}
           onLaunch={(m) => void handleLaunch(m)}
+          readOnly={readOnly}
         />
       ) : null}
     </div>

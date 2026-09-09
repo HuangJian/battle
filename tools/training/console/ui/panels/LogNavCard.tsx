@@ -6,7 +6,14 @@ import { Pill } from '../../../ui/components/Pill'
 const tone = (status: string): 'g' | 'y' | 'r' | 'gray' =>
   status === 'running' ? 'g' : status === 'exited' ? 'r' : 'gray'
 
-export function LogNavCard({ stateView }: { stateView: ConsoleStateView | null }) {
+export function LogNavCard({
+  stateView,
+  course,
+}: {
+  stateView: ConsoleStateView | null
+  /** 当前查看课程（日志页链接带 ?course=，保持同课程查看）。 */
+  course?: string
+}) {
   if (!stateView) return <div className="tc-loading">加载中…</div>
   const mains = stateView.components.filter((c) => c.key !== 'workerServe')
   return (
@@ -19,7 +26,10 @@ export function LogNavCard({ stateView }: { stateView: ConsoleStateView | null }
             style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}
           >
             <Pill tone={tone(c.status)}>{c.label}</Pill>
-            <a className="tc-btn tc-btn--sm" href={`/log/${c.key}`}>
+            <a
+              className="tc-btn tc-btn--sm"
+              href={`/log/${c.key}${course ? `?course=${encodeURIComponent(course)}` : ''}`}
+            >
               日志 →
             </a>
           </span>

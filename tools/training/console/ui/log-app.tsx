@@ -128,8 +128,11 @@ export function LogApp({ initial, options }: LogAppProps) {
     if (next) setArrivals(0)
   }
 
+  // 视图课程（?course= 只读覆盖）：轮询与组件导航保持同课程（LAN 切课程查看时日志也跟课程）。
+  const course = options.course ?? ''
+
   const refetch = useCallback(async (): Promise<void> => {
-    const p = await fetchLog(initial.component, lines)
+    const p = await fetchLog(initial.component, lines, course)
     const grew = p.lines.length - linesLenRef.current
     linesLenRef.current = p.lines.length
     setPayload(p)
@@ -137,7 +140,7 @@ export function LogApp({ initial, options }: LogAppProps) {
     if (grew > 0 && !(followRef.current && pinnedRef.current)) {
       setArrivals((a) => a + grew)
     }
-  }, [initial.component, lines])
+  }, [initial.component, lines, course])
 
   usePolling({ enabled: true, intervalSec: follow ? 2 : 4, fetch: refetch })
 
@@ -272,7 +275,10 @@ export function LogApp({ initial, options }: LogAppProps) {
             </span>
           ) : null}
         </div>
-        <a className="tc-btn tc-btn--sm tc-loghead__back" href="/">
+        <a
+          className="tc-btn tc-btn--sm tc-loghead__back"
+          href={`/${course ? `?course=${encodeURIComponent(course)}` : ''}`}
+        >
           ← 返回控制台
         </a>
       </header>
@@ -284,7 +290,7 @@ export function LogApp({ initial, options }: LogAppProps) {
             <a
               key={c.key}
               className={`tc-lognav${c.key === payload.component ? ' tc-lognav--on' : ''}`}
-              href={`/log/${c.key}`}
+              href={`/log/${c.key}${course ? `?course=${encodeURIComponent(course)}` : ''}`}
             >
               <span className={statusDot(c.status)} />
               {c.label}

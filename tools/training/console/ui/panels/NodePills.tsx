@@ -11,9 +11,14 @@ export interface NodePillsProps {
   local?: NodeLocalView | null
   onAction: (act: string, body: Record<string, unknown>) => void
   onMore: () => void
+  /** 局域网只读视图：pill 无点击语义（编辑/启用/冒烟仅本机），悬停提示说明。 */
+  readOnly?: boolean
 }
 
-export function NodePills({ nodes, local, onAction, onMore }: NodePillsProps) {
+/** 只读视图的节点 pill 提示。 */
+const RO_TITLE = '只读模式：节点编辑/冒烟仅限本机 localhost'
+
+export function NodePills({ nodes, local, onAction, onMore, readOnly }: NodePillsProps) {
   const [showOff, setShowOff] = useState(false)
   const [editing, setEditing] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
@@ -28,9 +33,14 @@ export function NodePills({ nodes, local, onAction, onMore }: NodePillsProps) {
       {local ? (
         <span
           className="tc-npill tc-npill--local"
-          title={`本机直跑 · ${local.slots} 槽 · 上轮贡献 ${local.lastContrib >= 0 ? local.lastContrib : '—'}`}
+          title={
+            local.slots > 0
+              ? `本机直跑 · ${local.slots} 槽 · 上轮贡献 ${local.lastContrib >= 0 ? local.lastContrib : '—'}`
+              : `本机直跑未启用（rl-config rl.local_slots = 0）· 上轮贡献 ${local.lastContrib >= 0 ? local.lastContrib : '—'}`
+          }
         >
-          <span className="tc-dot tc-dot--on" />
+          {/* slots=0 = 直跑未启用：灰点（非绿），与「运行中」语义区分 */}
+          <span className={`tc-dot ${local.slots > 0 ? 'tc-dot--on' : 'tc-dot--empty'}`} />
           <b>local</b>
           <span className="v">{local.slots}槽</span>
           <span className="tc-npill__contrib">
@@ -50,7 +60,9 @@ export function NodePills({ nodes, local, onAction, onMore }: NodePillsProps) {
           n={n}
           editing={editing === n.id}
           draft={draft}
+          readOnly={readOnly}
           onEdit={() => {
+            if (readOnly) return
             setEditing(n.id)
             setDraft(String(n.concurrency))
             setShowOff(false)
@@ -85,7 +97,9 @@ export function NodePills({ nodes, local, onAction, onMore }: NodePillsProps) {
               editing={editing === n.id}
               draft={draft}
               off
+              readOnly={readOnly}
               onEdit={() => {
+                if (readOnly) return
                 setEditing(n.id)
                 setDraft(String(n.concurrency))
               }}
@@ -114,6 +128,7 @@ interface NodeEditPillProps {
   editing: boolean
   draft: string
   off?: boolean
+  readOnly?: boolean
   onEdit: () => void
   onDraft: (v: string) => void
   onSave: () => void
@@ -126,13 +141,15 @@ function NodeEditPill({
   editing,
   draft,
   off,
+  readOnly,
   onEdit,
   onDraft,
   onSave,
   onToggle,
   onSmoke,
 }: NodeEditPillProps) {
-  if (editing) {
+  // 只读模式：编辑态永不进入（onEdit 已挡）；无 role/onClick/tabIndex，纯展示 + 悬停提示。
+  if (editing && !readOnly) {
     return (
       <span className={`tc-npill tc-npill__edit${off ? ' tc-npill--off' : ''}`}>
         <b>{n.id}</b>
@@ -162,14 +179,16 @@ function NodeEditPill({
       </span>
     )
   }
+  const roCls = readOnly ? ' tc-npill--ro' : ''
   if (off) {
     return (
       <span
-        className="tc-npill tc-npill--off tc-npill--dead"
-        role="button"
-        tabIndex={0}
-        aria-label={`${n.id}，${n.enabled ? '离线' : '停用'}，点击编辑`}
-        onClick={onEdit}
+        className={`tc-npill tc-npill--off tc-npill--dead${roCls}`}
+        role={readOnly ? undefined : 'button'}
+        tabIndex={readOnly ? undefined : 0}
+        aria-label={`${n.id}，${n.enabled ? '离线' : '停用'}${readOnly ? '（只读）' : '，点击编辑'}`}
+        title={readOnly ? RO_TITLE : undefined}
+        onClick={readOnly ? undefined : onEdit}
       >
         <span className="tc-dot tc-dot--dead" />
         <b>{n.id}</b>
@@ -179,11 +198,16 @@ function NodeEditPill({
   }
   return (
     <span
-      className="tc-npill"
-      role="button"
-      tabIndex={0}
-      aria-label={`${n.id} 在线，并发 ${n.concurrency}，上轮贡献 ${n.lastContrib >= 0 ? n.lastContrib : '—'}，点击编辑`}
-      onClick={onEdit}
+      className={`tc-npill${roCls}`}
+      role={readOnly ? undefined : 'button'}
+      tabIndex={readOnly ? undefined : 0}
+      aria-label={
+        readOnly
+          ? `${n.id} 在线，并发 ${n.concurrency}（只读）`
+          : `${n.id} 在线，并发 ${n.concurrency}，上轮贡献 ${n.lastContrib >= 0 ? n.lastContrib : '—'}，点击编辑`
+      }
+      title={readOnly ? RO_TITLE : undefined}
+      onClick={readOnly ? undefined : onEdit}
     >
       <span className="tc-dot tc-dot--on" />
       <b>{n.id}</b>

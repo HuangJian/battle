@@ -17,7 +17,14 @@ export interface ComponentCardsProps {
   onAction: (act: string, body: Record<string, unknown>) => Promise<{ ok: boolean }>
   /** TrainingLoop 卡「启动」回调（App 打开模式弹窗）。 */
   onLaunchTrainer: () => void
+  /** 当前查看课程（日志页链接带 ?course=，保持同课程查看）。 */
+  course?: string
+  /** 局域网只读视图：启/停/冒烟按钮禁用并给提示（日志/详情仍可看）。 */
+  readOnly?: boolean
 }
+
+/** 只读视图的动作按钮提示（局域网用户误点前的说明）。 */
+const RO_TITLE = '只读模式：操作仅限本机 localhost'
 
 function dotClass(c: ComponentView): string {
   if (c.busy) return 'tc-dot--warn'
@@ -32,7 +39,13 @@ function statusText(c: ComponentView): string {
   return '未启动'
 }
 
-export function ComponentCards({ stateView, onAction, onLaunchTrainer }: ComponentCardsProps) {
+export function ComponentCards({
+  stateView,
+  onAction,
+  onLaunchTrainer,
+  course,
+  readOnly,
+}: ComponentCardsProps) {
   const [open, setOpen] = useState<string | null>(null)
   // §367：pending[key] = 点击时的 status；效果层在状态切换完成后移除（解锁）。
   const [pending, setPending] = useState<Record<string, string>>({})
@@ -85,6 +98,8 @@ export function ComponentCards({ stateView, onAction, onLaunchTrainer }: Compone
           const isRunning = c.status === 'running'
           const locked = c.busy || pending[c.key] !== undefined
           const meta = c.pid ? `PID ${c.pid} · ${statusText(c)}` : statusText(c)
+          const roLocked = locked || !!readOnly
+          const roTitle = readOnly ? RO_TITLE : locked ? '动作进行中…' : undefined
           return (
             <section
               key={c.key}
@@ -133,9 +148,9 @@ export function ComponentCards({ stateView, onAction, onLaunchTrainer }: Compone
                     <button
                       type="button"
                       className="tc-btn tc-btn--sm"
-                      disabled={locked}
+                      disabled={roLocked}
                       aria-label={`停止 ${c.label}`}
-                      title={locked ? '动作进行中…' : undefined}
+                      title={roTitle}
                       onClick={() => fire(c, 'stop')}
                     >
                       停止
@@ -144,9 +159,9 @@ export function ComponentCards({ stateView, onAction, onLaunchTrainer }: Compone
                       <button
                         type="button"
                         className="tc-iconbtn"
-                        disabled={locked}
+                        disabled={roLocked}
                         aria-label={`冒烟 ${c.label}`}
-                        title="冒烟"
+                        title={readOnly ? RO_TITLE : '冒烟'}
                         onClick={() => void onAction('smoke', { component: c.key })}
                       >
                         ◎
@@ -156,7 +171,7 @@ export function ComponentCards({ stateView, onAction, onLaunchTrainer }: Compone
                       className="tc-iconbtn"
                       aria-label={`日志 ${c.label}`}
                       title="日志"
-                      href={`/log/${c.key}`}
+                      href={`/log/${c.key}${course ? `?course=${encodeURIComponent(course)}` : ''}`}
                     >
                       ≡
                     </a>
@@ -165,9 +180,9 @@ export function ComponentCards({ stateView, onAction, onLaunchTrainer }: Compone
                   <button
                     type="button"
                     className="tc-btn tc-btn--sm tc-btn--primary"
-                    disabled={locked}
+                    disabled={roLocked}
                     aria-label={`启动 ${c.label}`}
-                    title={locked ? '动作进行中…' : undefined}
+                    title={roTitle}
                     onClick={c.key === 'trainingLoop' ? onLaunchTrainer : () => fire(c, 'start')}
                   >
                     启动
@@ -177,7 +192,10 @@ export function ComponentCards({ stateView, onAction, onLaunchTrainer }: Compone
               {c.status === 'exited' && c.error ? (
                 // §380：非正常退出原因直面展示（不再只有空洞的"已退出"）+ 一键进日志页
                 <div className="tc-cc__err" role="alert">
-                  <a className="tc-cc__err-link" href={`/log/${c.key}`}>
+                  <a
+                    className="tc-cc__err-link"
+                    href={`/log/${c.key}${course ? `?course=${encodeURIComponent(course)}` : ''}`}
+                  >
                     ⚠ {c.error} · 日志
                   </a>
                 </div>

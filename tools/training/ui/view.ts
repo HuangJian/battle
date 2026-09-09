@@ -26,7 +26,8 @@ export interface ComponentView {
   log: string | null
   logTail: string[]
   busy: boolean
-  /** 需要展示的密钥型字段（仅 cloudflared：rl.remote_token，供用户复制贴给远端）。回环无鉴权页可接受。 */
+  /** 需要展示的密钥型字段（仅 cloudflared：rl.remote_token，供用户复制贴给远端）。
+   *  局域网只读与回环同权展示——只读是动作边界，不是数据边界（2026-09-09 用户指令）。 */
   secret?: string
   /** 非正常退出原因（§380 消费；服务端填充由该条目实施方完成）。 */
   error?: string | null
@@ -49,7 +50,8 @@ export interface NodeView {
 
 export interface NodeLocalView {
   id: 'local'
-  /** 本机直跑槽数（rl.local_slots）；0 = 配置缺失/非法。 */
+  /** 本机直跑槽数（rl.local_slots）；显式 0 = 直跑未启用（仍出芯片，slots=0）；
+   *  配置缺失/非法（NaN）时整个 localNode 缺省不出。 */
   slots: number
   /** 上一轮贡献数（与节点同口径：全局最新轮下 local 成功局数；-1 = 无池数据）。 */
   lastContrib: number
@@ -89,6 +91,9 @@ export interface ConsoleStateView {
   metrics: MetricsView
   /** 当前训练阶段（顶栏图标用）。 */
   phase: PhaseInfo
+  /** 局域网只读视图（服务端按请求来源 stamp；true = 本页只读——动作按钮禁用 + 只读角标）。
+   *  缺省（SSR/测试直构）时客户端回退 location.hostname 判定。 */
+  readOnly?: boolean
 }
 
 // ────────────────────────── 日志视图类型 ──────────────────────────
@@ -112,6 +117,8 @@ export interface LogPageOptions {
   follow: boolean
   /** 尾行数；'all' = 读全部（§371 优化 1）。 */
   lines: number | 'all'
+  /** 视图课程（?course= 只读覆盖；空 = 自动/操作员课程）。日志页轮询与组件导航透传。 */
+  course?: string
 }
 
 // ────────────────────────── 日志页展示层纯函数（§367：直观/审美/交互） ──────────────────────────
@@ -700,6 +707,10 @@ export const TC_CARD_KEY = (id: string): string => `${TC_KEY_PREFIX}card.${id}`
 export const TC_INTERVAL_KEY = (id: string): string => `${TC_KEY_PREFIX}interval.${id}`
 export const TC_GLOBAL_INTERVAL = `${TC_KEY_PREFIX}globalInterval`
 export const TC_METRICS_FILTER = `${TC_KEY_PREFIX}metrics.filter`
+/** 局域网只读横幅关闭键（用户关闭后不再显示；tc. 前缀保证不被 cleanupNonTcKeys 误删）。 */
+export const TC_RO_BANNER_DISMISSED = `${TC_KEY_PREFIX}ro.bannerDismissed`
+/** hero 最新 6 轮区块视图（'main' 主行 / 'eval' 干净评估）。 */
+export const TC_HERO_ITER_VIEW = `${TC_KEY_PREFIX}hero.iters`
 export const TC_TREND_RANGE = `${TC_KEY_PREFIX}trend.range`
 export const TC_TRAIN_MODE = `${TC_KEY_PREFIX}train.mode`
 export const TC_TRAIN_TOGGLES = `${TC_KEY_PREFIX}train.toggles`

@@ -14,6 +14,8 @@ export interface TrainLaunchModalProps {
   onClose: () => void
   onAction: (act: string, body: Record<string, unknown>) => void
   onLaunch: (mode: 'pull' | 'push' | 'local') => void
+  /** 局域网只读视图：行为开关/预演/启动全部禁用（兜底——启动入口本已被组件卡禁用）。 */
+  readOnly?: boolean
 }
 
 export function TrainLaunchModal({
@@ -22,6 +24,7 @@ export function TrainLaunchModal({
   onClose,
   onAction,
   onLaunch,
+  readOnly,
 }: TrainLaunchModalProps) {
   type Mode = 'pull' | 'push' | 'local'
 
@@ -106,6 +109,11 @@ export function TrainLaunchModal({
         onClick={(e) => e.stopPropagation()}
       >
         <h3>启动 TrainingLoop</h3>
+        {readOnly ? (
+          <p className="tc-banner tc-banner--ro" style={{ margin: 0 }}>
+            🔒 只读模式：启动训练仅限本机 localhost 打开控制台操作。
+          </p>
+        ) : null}
         <div className="tc-line">
           <span className="tc-muted tc-small" style={{ minWidth: 90 }}>
             trainer 编排
@@ -127,18 +135,21 @@ export function TrainLaunchModal({
             label="stream"
             checked={toggles.stream}
             title="rl.stream：run_rl 的 --stream；本地默认开，远程内部强制 0"
+            disabled={readOnly}
             onChange={(v) => applyToggle('rl.stream', v)}
           />
           <Toggle
             label="双缓冲"
             checked={toggles.doubleBuffer}
             title="rl.double_buffer"
+            disabled={readOnly}
             onChange={(v) => applyToggle('rl.double_buffer', v)}
           />
           <Toggle
             label="预采"
             checked={toggles.precollectEarly}
             title="rl.precollect_early"
+            disabled={readOnly}
             onChange={(v) => applyToggle('rl.precollect_early', v)}
           />
         </div>
@@ -146,7 +157,12 @@ export function TrainLaunchModal({
           <button
             type="button"
             className="tc-btn tc-btn--sm"
-            title="端到端预演：本机伪 GPU 节点 echo（不跑真 PPO）"
+            title={
+              readOnly
+                ? '只读模式：预演仅限本机 localhost'
+                : '端到端预演：本机伪 GPU 节点 echo（不跑真 PPO）'
+            }
+            disabled={readOnly}
             onClick={() => onAction('smokeTrain', {})}
           >
             推送链路预演（不跑 PPO）
@@ -161,6 +177,7 @@ export function TrainLaunchModal({
             type="button"
             className="tc-btn tc-btn--primary"
             aria-label={`按 ${mode} 模式启动 TrainingLoop`}
+            disabled={readOnly}
             onClick={() => onLaunch(mode)}
           >
             启动（{mode}）

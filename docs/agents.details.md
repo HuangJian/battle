@@ -230,10 +230,13 @@ was folded into them; it had already replaced `nn-training/start-training.{sh,ps
 `tools/hub-start.ts` in DECISIONS §346):
 
 - **Training console** (daily management of all training components):
-  `bun run train` → http://127.0.0.1:8900 (loopback-only, no auth). Start/stop/smoke per component,
-  pull/push/local trainer presets, `rl.stream`/`rl.double_buffer`/`rl.precollect_early` toggles,
-  rollout-node enable/concurrency (writes back rl-config.json), per-iteration metrics + sparklines,
-  per-component log viewer, and change-detection supervision (sentinel mtime → auto-restart).
+  `bun run train` → http://127.0.0.1:8900 (LAN read-only + loopback control, §2026-09-09-goalnn-console-lan-readonly):
+  binds 0.0.0.0 so the LAN can view any course/logs/node stats (`?course=` read-only override, never
+  writes console-state), while every POST action (start/stop/smoke, pull/push/local presets,
+  `rl.stream`/`rl.double_buffer`/`rl.precollect_early` toggles, rollout-node enable/concurrency,
+  writes back rl-config.json) is gated to loopback callers only (403 otherwise; LAN responses strip
+  the cloudflared tunnel auth key). Per-iteration metrics + sparklines, per-component log viewer,
+  and change-detection supervision (sentinel mtime → auto-restart) are all read paths, open to LAN.
 - **Headless one-shot runner**: `bun tools/training/train.ts --script <name>.py [args]`
   (venv setup, single-instance locking, smoke gates, `--force`, `--kill-previous`, `--detach`,
   `--torch-threads`, `--check`, `--echo`).

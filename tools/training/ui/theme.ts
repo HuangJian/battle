@@ -61,6 +61,8 @@ a.tc-btn{display:inline-block;text-decoration:none;text-align:center}
   font-size:var(--fs-2);margin-bottom:var(--sp-3);flex-wrap:wrap}
 .tc-banner--dirty{background:var(--yellow-bg);color:var(--yellow);border:1px solid var(--yellow)}
 .tc-banner--err{background:var(--red-bg);color:var(--red);border:1px solid var(--red)}
+/* 局域网只读横幅（§2026-09-09-goalnn-console-lan-readonly 延伸）：琥珀色 + 加粗，一眼可见 */
+.tc-banner--ro{background:var(--yellow-bg);color:#9a3f00;border:1.5px solid var(--yellow);font-weight:600}
 .tc-banner button{margin-left:auto}
 
 /* ── Card（折叠 / 最大化 / 陈旧度 / 卡级动作） ───────────── */
@@ -104,6 +106,8 @@ a.tc-btn{display:inline-block;text-decoration:none;text-align:center}
 .tc-badge--r{background:var(--red-bg);color:var(--red)}
 .tc-badge--gray{background:var(--gray-bg);color:var(--gray)}
 .tc-badge--a{background:var(--accent-bg);color:var(--accent)}
+/* 局域网只读角标：琥珀描边 + 外发光，吸顶顶栏常驻可见 */
+.tc-badge--ro{background:var(--yellow-bg);color:#9a3f00;border:1px solid var(--yellow);box-shadow:0 0 0 3px var(--yellow-bg);font-weight:700}
 .tc-pill--note{background:var(--yellow-bg);color:var(--yellow);margin-left:6px}
 
 /* ── 表格（粘性表头/首列 + 密度 + 显隐 + 行展开） ────────── */
@@ -335,6 +339,13 @@ a.tc-preset{text-decoration:none;display:inline-block}
 /* hero 最新 6 轮完整指标（§367 UI：首页训练状态区直读最近趋势） */
 .tc-hero__iters{flex:1 1 100%;min-width:0;margin-top:var(--sp-3);border-top:1px dashed var(--border);padding-top:var(--sp-2);overflow-x:auto}
 .tc-hero__iters-hd{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);font-size:var(--fs-2);color:var(--muted);font-weight:600;margin-bottom:2px}
+/* 标题 + 主行/eval toggle 左侧一组（「完整指标表 ›」保持右对齐） */
+.tc-hero__iters-left{display:flex;align-items:center;gap:10px;min-width:0}
+
+/* 正在训练的课程标签（课程 select 后高亮；脉冲绿点提醒查看课程 ≠ 训练课程） */
+.tc-training-tag{display:inline-flex;align-items:center;gap:6px;padding:2px 10px;border-radius:999px;
+  background:var(--green-bg);color:var(--green);font-size:var(--fs-2);font-weight:700;white-space:nowrap}
+.tc-training-tag .tc-dot{animation:tc-live 1.6s ease-in-out infinite}
 .tc-hero__iters .tc-table thead th{position:static} /* 6 行紧凑表无需吸顶 */
 .tc-hero__iters .tc-table tbody td{padding:4px 10px;font-size:var(--fs-2)}
 .tc-hero__iters .tc-table thead th{padding:5px 10px}
@@ -413,5 +424,8 @@ a.tc-preset{text-decoration:none;display:inline-block}
 .tc-npill--local{cursor:default;border-color:var(--accent);background:var(--accent-bg)}
 .tc-npill--local:hover{border-color:var(--accent)}
 .tc-npill--local .v{color:var(--muted)}
+/* 局域网只读节点 pill：无点击语义、无 hover 高亮（编辑/冒烟仅本机） */
+.tc-npill--ro{cursor:default;opacity:.92}
+.tc-npill--ro:hover{border-color:var(--border)}
 `
 }

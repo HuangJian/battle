@@ -105,3 +105,13 @@ export async function sha256Hex(data: Uint8Array): Promise<string> {
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('')
 }
+
+/** 是否为回环地址（控制台局域网只读边界的判断）：IPv4 回环、IPv6 回环与
+ *  IPv4-mapped 回环（::ffff:127.x.x.x）均为真；null/未知 → 假（fail closed，
+ *  无法判定来源的一律视为非本机，动作被拒）。 */
+export function isLoopbackAddress(ip: string | null | undefined): boolean {
+  if (!ip) return false
+  if (ip === '127.0.0.1' || ip === '::1' || ip === '0:0:0:0:0:0:0:1') return true
+  if (ip.startsWith('::ffff:127.')) return true // IPv4-mapped 回环
+  return false
+}

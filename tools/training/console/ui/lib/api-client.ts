@@ -41,20 +41,31 @@ export async function postAction(
   }
 }
 
-export async function fetchState(): Promise<ConsoleStateView> {
-  const r = await fetch('/api/state')
+export async function fetchState(course = ''): Promise<ConsoleStateView> {
+  const q = course ? `?course=${encodeURIComponent(course)}` : ''
+  const r = await fetch(`/api/state${q}`)
   if (!r.ok) throw new Error(`/api/state HTTP ${r.status}`)
   return (await r.json()) as ConsoleStateView
 }
 
-export async function fetchPool(fresh = false): Promise<PoolView> {
-  const r = await fetch(`/api/pool${fresh ? '?fresh=1' : ''}`)
+export async function fetchPool(fresh = false, course = ''): Promise<PoolView> {
+  const params = new URLSearchParams()
+  if (fresh) params.set('fresh', '1')
+  if (course) params.set('course', course)
+  const q = params.toString()
+  const r = await fetch(`/api/pool${q ? `?${q}` : ''}`)
   if (!r.ok) throw new Error(`/api/pool HTTP ${r.status}`)
   return (await r.json()) as PoolView
 }
 
-export async function fetchLog(key: string, lines: number | 'all'): Promise<LogPayload> {
-  const r = await fetch(`/api/log/${key}?lines=${lines}`)
+export async function fetchLog(
+  key: string,
+  lines: number | 'all',
+  course = '',
+): Promise<LogPayload> {
+  const params = new URLSearchParams({ lines: String(lines) })
+  if (course) params.set('course', course)
+  const r = await fetch(`/api/log/${key}?${params.toString()}`)
   if (!r.ok) throw new Error(`/api/log/${key} HTTP ${r.status}`)
   return (await r.json()) as LogPayload
 }

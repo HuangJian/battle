@@ -8,7 +8,7 @@
 
 import { closeSync, existsSync, openSync, readFileSync, readdirSync, readSync, statSync } from 'fs'
 import path from 'path'
-import { LOG_DIR, NN_TRAINING, REPO_ROOT } from '../paths'
+import { CURRICULA_DIR, LOG_DIR, NN_TRAINING, REPO_ROOT } from '../paths'
 import { httpOk, pidAlive } from '../net'
 import { loadRegistry } from '../registry'
 import { loadConfig } from '../config'
@@ -82,6 +82,24 @@ export function loadConfigSafe(): RlConfig {
     cfgBadUntil = Date.now() + CFG_RETRY_MS
     return cfgLastOk ?? EMPTY_CONFIG
   }
+}
+
+// ────────────────── 视图课程参数校验（局域网只读防线 2：GET ?course= 只读覆盖） ──────────────────
+
+/** 校验 GET 端点（/api/state /api/pool /api/log/<key> /log/<key>）的 ?course= 参数：
+ *  只放行真实存在的课程（tmp/<course> 目录或 curricula/<course>.jsonc）且形态限
+ *  [A-Za-z0-9._-]——杜绝路径穿越（?course=../xxx）与任意路径读取。非法/空 → 返回 ''，
+ *  视图静默回退操作员课程（服务端不报错；LAN 只是多看了一眼）。 */
+export function sanitizeViewCourse(raw: string | null): string {
+  if (!raw) return ''
+  if (!/^[A-Za-z0-9._-]+$/.test(raw)) return ''
+  try {
+    if (existsSync(path.join(REPO_ROOT, 'tmp', raw))) return raw
+    if (existsSync(path.join(CURRICULA_DIR, `${raw}.jsonc`))) return raw
+  } catch {
+    /* 回退自动课程 */
+  }
+  return ''
 }
 
 // ────────────────────────── 课程发现 ──────────────────────────
@@ -351,15 +369,17 @@ export function readLogTail(
   }
 }
 
-/** 日志页数据载荷（GET /api/log/<key> 与页面渲染共用）。 */
+/** 日志页数据载荷（GET /api/log/<key> 与页面渲染共用）。courseOverride 为只读视图课程
+ *  （?course=，已 sanitize）；空则回退操作员课程。 */
 export async function componentLogPayload(
   key: Component,
   maxLines: number | 'all',
+  courseOverride?: string,
 ): Promise<LogPayload | null> {
   if (!ALL_COMPONENTS.includes(key)) return null
   const cfg = loadConfig()
   const state = loadConsoleState()
-  const course = effectiveCourse(state, discoverCourses())
+  const course = courseOverride || effectiveCourse(state, discoverCourses())
   const nnRel = resolveComponentLog(key, cfg, course)
   if (!nnRel) return null
   const t = readLogTail(nnRel, maxLines)
@@ -472,6 +492,8 @@ export async function nodeViews(cfg: RlConfig): Promise<NodeView[]> {
 // 后台刷新器每 SNAPSHOT_REFRESH_MS 重算一次，buildStateView 只读缓存。请求侧开销只剩
 // 配置/课程/指标（实测 ~150ms）；新鲜度 ≤1 个刷新周期（5s），对监控面板不可见。
 // 动作（启/停/切课）经 invalidateSlowSnapshot 置空缓存 → 下一次 buildStateView 冷算即时反映。
+// 局域网只读（§…）：缓存按课程键控——LAN 切换查看课程时按课程各自冷算/刷新，互不串数据。
+// 组件/节点视图本身全局（进程状态），但 trainingLoop 日志尾与阶段是课程相关的，故整体键控。
 
 export interface SlowSnapshot {
   components: ComponentView[]
@@ -481,57 +503,96 @@ export interface SlowSnapshot {
 }
 
 const SNAPSHOT_REFRESH_MS = 5000
-let slowSnapshot: SlowSnapshot | null = null
-let snapshotInFlight: Promise<void> | null = null
+/** 非操作员课程（LAN 查看者切到的课程）快照的存活窗口：超过该时长未被查看即丢弃，
+ *  避免后台刷新器为无人看的课程持续做节点 ping（§366 慢探测预算）。 */
+const SNAPSHOT_VIEW_TTL_MS = 60_000
 
-/** 重算慢部件快照并落缓存。promise 单飞：并发调用共享同一次计算，防后台刷新与请求互相叠加。 */
-export function refreshSlowSnapshot(cfg: RlConfig, course: string): Promise<void> {
-  if (snapshotInFlight) return snapshotInFlight
-  snapshotInFlight = (async () => {
-    try {
-      const [components, nodes] = await Promise.all([componentViews(cfg, course), nodeViews(cfg)])
-      // 节点上一轮贡献数（池历史聚合；无数据 = -1）。
-      const contribById = new Map<string, number>()
-      let localNode: NodeLocalView | null = null
-      try {
-        const { hist, globalMaxIt } = aggregateNodeHistory()
-        for (const [id, h] of hist) contribById.set(id, globalMaxIt >= 0 ? h.lastIterOk : -1)
-        const localH = hist.get('local')
-        const slots = Number(cfg.rl.local_slots)
-        if (Number.isInteger(slots) && slots > 0) {
-          localNode = {
-            id: 'local',
-            slots,
-            lastContrib: globalMaxIt >= 0 ? (localH?.lastIterOk ?? 0) : -1,
-          }
-        }
-      } catch {
-        /* 池历史不可用 → 全部 -1 */
+interface SlowSnapEntry {
+  snap: SlowSnapshot
+  at: number
+  lastAccess: number
+}
+
+const slowSnapshots = new Map<string, SlowSnapEntry>()
+const snapshotInFlight = new Map<string, Promise<SlowSnapshot>>()
+
+/** 重算指定课程的慢部件快照（不落缓存；落缓存由 getSlowSnapshot 负责）。 */
+async function computeSlowSnapshot(cfg: RlConfig, course: string): Promise<SlowSnapshot> {
+  const [components, nodes] = await Promise.all([componentViews(cfg, course), nodeViews(cfg)])
+  // 节点上一轮贡献数（池历史聚合；无数据 = -1）。
+  const contribById = new Map<string, number>()
+  let localNode: NodeLocalView | null = null
+  try {
+    const { hist, globalMaxIt } = aggregateNodeHistory()
+    for (const [id, h] of hist) contribById.set(id, globalMaxIt >= 0 ? h.lastIterOk : -1)
+    const localH = hist.get('local')
+    const slots = Number(cfg.rl.local_slots)
+    // 显式 0（直跑未启用）也出芯片（slots=0）；配置缺失/非法（NaN）才整体缺省。
+    if (Number.isInteger(slots) && slots >= 0) {
+      localNode = {
+        id: 'local',
+        slots,
+        lastContrib: globalMaxIt >= 0 ? (localH?.lastIterOk ?? 0) : -1,
       }
-      for (const n of nodes) n.lastContrib = contribById.has(n.id) ? contribById.get(n.id)! : -1
-      // 当前训练阶段（训练循环日志尾解析）。
-      const logTail = components.find((c) => c.key === 'trainingLoop')?.logTail ?? []
-      const phase = parsePhaseFromLog(logTail)
-      slowSnapshot = { components, nodes, localNode, phase }
-    } finally {
-      snapshotInFlight = null
     }
-  })()
-  return snapshotInFlight
+  } catch {
+    /* 池历史不可用 → 全部 -1 */
+  }
+  for (const n of nodes) n.lastContrib = contribById.has(n.id) ? contribById.get(n.id)! : -1
+  // 当前训练阶段（训练循环日志尾解析）。
+  const logTail = components.find((c) => c.key === 'trainingLoop')?.logTail ?? []
+  const phase = parsePhaseFromLog(logTail)
+  return { components, nodes, localNode, phase }
 }
 
-/** 动作后置空缓存：下一次 buildStateView 冷算，动作结果即时上屏（不主动后台刷新，避免与请求竞争）。 */
+/** 取指定课程的快照：5s 内新鲜命中缓存；否则按课程单飞重算（并发共享同一次计算）。 */
+export function getSlowSnapshot(cfg: RlConfig, course: string): Promise<SlowSnapshot> {
+  const now = Date.now()
+  const ent = slowSnapshots.get(course)
+  if (ent) ent.lastAccess = now
+  if (ent && now - ent.at < SNAPSHOT_REFRESH_MS) return Promise.resolve(ent.snap)
+  const inflight = snapshotInFlight.get(course)
+  if (inflight) return inflight
+  const p = computeSlowSnapshot(cfg, course).then(
+    (snap) => {
+      slowSnapshots.set(course, { snap, at: Date.now(), lastAccess: Date.now() })
+      snapshotInFlight.delete(course)
+      return snap
+    },
+    (e) => {
+      snapshotInFlight.delete(course)
+      throw e
+    },
+  )
+  snapshotInFlight.set(course, p)
+  return p
+}
+
+/** 动作后置空缓存（全部课程）：下一次 buildStateView 冷算，动作结果即时上屏
+ *  （不主动后台刷新，避免与请求竞争）。 */
 export function invalidateSlowSnapshot(): void {
-  slowSnapshot = null
+  slowSnapshots.clear()
 }
 
-/** 后台刷新器：立即暖一次 + 每 intervalMs 重算（unref，不阻止进程退出）。服务端启动时调用一次。 */
+/** 后台刷新器：立即暖一次 + 每 intervalMs 重算（unref，不阻止进程退出）。服务端启动时
+ *  调用一次。操作员课程每拍必刷（保持原语义）；近期被查看（SNAPSHOT_VIEW_TTL_MS 内）的
+ *  其它课程跟随刷新；超时未看的课程丢弃，不再占用探测预算。 */
 export function startSnapshotRefresher(intervalMs: number = SNAPSHOT_REFRESH_MS): void {
   const run = async (): Promise<void> => {
     try {
       const cfg = loadConfigSafe()
-      const course = effectiveCourse(loadConsoleState(), discoverCourses())
-      await refreshSlowSnapshot(cfg, course)
+      const operatorCourse = effectiveCourse(loadConsoleState(), discoverCourses())
+      const now = Date.now()
+      const targets = new Set<string>([operatorCourse])
+      for (const [c, ent] of slowSnapshots) {
+        if (c === operatorCourse) continue
+        if (now - ent.lastAccess > SNAPSHOT_VIEW_TTL_MS) {
+          slowSnapshots.delete(c)
+          continue
+        }
+        targets.add(c)
+      }
+      await Promise.all([...targets].map((c) => getSlowSnapshot(cfg, c)))
     } catch {
       /* 下一拍重试 */
     }
@@ -541,14 +602,15 @@ export function startSnapshotRefresher(intervalMs: number = SNAPSHOT_REFRESH_MS)
   t.unref?.()
 }
 
-/** 完整状态快照（页面轮询的数据源）。慢部件（节点 ping/组件探测/池历史）走快照缓存。 */
-export async function buildStateView(): Promise<ConsoleStateView> {
+/** 完整状态快照（页面轮询的数据源）。慢部件（节点 ping/组件探测/池历史）走快照缓存。
+ *  courseOverride 为只读视图课程（?course=，已 sanitize）；空则回退操作员课程。
+ *  只读覆盖不写 console-state——LAN 切换查看课程绝不影响训练。 */
+export async function buildStateView(courseOverride?: string): Promise<ConsoleStateView> {
   const cfg = loadConfigSafe()
   const state = loadConsoleState()
   const courses = discoverCourses()
-  const course = effectiveCourse(state, courses)
-  if (!slowSnapshot) await refreshSlowSnapshot(cfg, course)
-  const { components, nodes, localNode, phase } = slowSnapshot!
+  const course = courseOverride || effectiveCourse(state, courses)
+  const { components, nodes, localNode, phase } = await getSlowSnapshot(cfg, course)
   let metrics: MetricsView = { available: false, iters: [] }
   if (course && existsSync(path.join(REPO_ROOT, 'tmp', course, 'training_log.jsonl'))) {
     try {
@@ -696,11 +758,12 @@ function nodeHistoryRow(
   }
 }
 
-/** 池汇总（首屏不入流：扫描 tmp 太重，客户端异步拉；R7）。 */
-export async function buildPoolView(fresh = false): Promise<PoolView> {
+/** 池汇总（首屏不入流：扫描 tmp 太重，客户端异步拉；R7）。courseOverride 为只读视图课程
+ *  （?course=，已 sanitize）；空则回退操作员课程。缓存 key 已带 course（DS-E1）。 */
+export async function buildPoolView(fresh = false, courseOverride?: string): Promise<PoolView> {
   const cfg = loadConfig()
   const state = loadConsoleState()
-  const course = effectiveCourse(state, discoverCourses())
+  const course = courseOverride || effectiveCourse(state, discoverCourses())
   const key = `pool-view:${course}`
   const cached = poolCache.get(key)
   if (!fresh && cached && Date.now() - cached.at < POOL_TTL_MS) return cached.view
@@ -739,7 +802,8 @@ export async function buildPoolView(fresh = false): Promise<PoolView> {
     status: poolStatus(localH),
     okN: localH.recent.filter(Boolean).length,
     recentN: localH.recent.length,
-    spec: Number.isInteger(slots) && slots > 0 ? `${slots} 槽` : '-',
+    // 显式 0 也显示「0 槽」（与 pill 芯片同口径）；配置缺失/非法（NaN）才 '-'。
+    spec: Number.isInteger(slots) && slots >= 0 ? `${slots} 槽` : '-',
     versionOk: null,
     version: '',
     versionLocal: hash.slice(0, 7),

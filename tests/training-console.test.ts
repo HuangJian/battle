@@ -15,7 +15,7 @@ import os from 'os'
 import path from 'path'
 import { readIterMetrics } from '../tools/training/console/iters'
 import { LOG_DIR } from '../tools/training/paths'
-import type { ConsoleStateView } from '../tools/training/ui/view'
+import type { ConsoleStateView, IterRow } from '../tools/training/ui/view'
 
 // ── 隔离：rl-config.json 与 console-state.json 指向临时副本（跑前备份，跑后还原）──
 
@@ -236,6 +236,190 @@ describe('console/api 慢部件快照缓存（§366：页面加载 <1s）', () =
       globalThis.fetch = origFetch
       api.invalidateSlowSnapshot()
     }
+  })
+})
+
+describe('console local 芯片（rl.local_slots = 0 也显示）', () => {
+  it('buildStateView：local_slots=0 时 localNode 仍出现（slots=0）；配置缺失才缺省', async () => {
+    const cfg = loadRealConfig()
+    try {
+      const patched = JSON.parse(JSON.stringify(cfg)) as TestConfig
+      patched.rl.local_slots = 0
+      writeFileSync(REAL_CONFIG, JSON.stringify(patched, null, 2))
+      api.invalidateSlowSnapshot()
+      const s = await api.buildStateView()
+      expect(s.localNode).not.toBeNull()
+      expect(s.localNode!.slots).toBe(0)
+    } finally {
+      writeFileSync(REAL_CONFIG, JSON.stringify(cfg, null, 2))
+      api.invalidateSlowSnapshot()
+    }
+  })
+
+  it('buildPoolView：local_slots=0 时 local 行 spec 显示「0 槽」（非缺失的 -）', async () => {
+    const cfg = loadRealConfig()
+    try {
+      const patched = JSON.parse(JSON.stringify(cfg)) as TestConfig
+      patched.rl.local_slots = 0
+      writeFileSync(REAL_CONFIG, JSON.stringify(patched, null, 2))
+      const p = await api.buildPoolView(true)
+      expect(p.local).not.toBeNull()
+      expect(p.local!.spec).toBe('0 槽')
+    } finally {
+      writeFileSync(REAL_CONFIG, JSON.stringify(cfg, null, 2))
+    }
+  })
+})
+
+describe('console 局域网只读边界（§…：LAN 查看 / localhost 控制）', () => {
+  it('isLoopbackAddress：回环 IPv4/IPv6/mapped 为真，局域网地址与未知为假（fail closed）', async () => {
+    const net = await import('../tools/training/net')
+    expect(net.isLoopbackAddress('127.0.0.1')).toBe(true)
+    expect(net.isLoopbackAddress('::1')).toBe(true)
+    expect(net.isLoopbackAddress('0:0:0:0:0:0:0:1')).toBe(true)
+    expect(net.isLoopbackAddress('::ffff:127.0.0.1')).toBe(true)
+    expect(net.isLoopbackAddress('192.168.1.23')).toBe(false)
+    expect(net.isLoopbackAddress('10.0.0.5')).toBe(false)
+    expect(net.isLoopbackAddress(null)).toBe(false)
+    expect(net.isLoopbackAddress(undefined)).toBe(false)
+  })
+
+  it('sanitizeViewCourse：放行真实课程，拒绝路径穿越与不存在的课程', () => {
+    const courses = api.discoverCourses(50)
+    const real = courses[0]
+    if (real) expect(api.sanitizeViewCourse(real)).toBe(real)
+    expect(api.sanitizeViewCourse('../../secret')).toBe('')
+    expect(api.sanitizeViewCourse('a/b')).toBe('')
+    expect(api.sanitizeViewCourse('no-such-course-xyz')).toBe('')
+    expect(api.sanitizeViewCourse('')).toBe('')
+    expect(api.sanitizeViewCourse(null)).toBe('')
+  })
+
+  it('buildStateView(course) 只读覆盖查看课程且不写 console-state', async () => {
+    const before = actions.loadConsoleState()
+    const courses = api.discoverCourses(50)
+    const target = courses.find((c) => c !== before.course) ?? before.course
+    const s = await api.buildStateView(target)
+    expect(s.course).toBe(target)
+    // 只读：查看课程绝不落盘 console-state（LAN 切换不影响操作员课程/训练）
+    expect(actions.loadConsoleState()).toEqual(before)
+    // 无参 = 操作员课程（原语义不变）
+    const s2 = await api.buildStateView()
+    expect(s2.course).toBe(api.effectiveCourse(before, courses))
+  })
+
+  it('buildPoolView 课程键控：course 覆盖改变返回课程（缓存 key 带课程）', async () => {
+    const courses = api.discoverCourses(50)
+    const target = courses[0]
+    if (!target) return
+    const p = await api.buildPoolView(false, target)
+    expect(p.course).toBe(target)
+  })
+
+  it('componentLogPayload 接受课程覆盖（日志页跟课程）', async () => {
+    const courses = api.discoverCourses(50)
+    const target = courses[0]
+    if (!target) return
+    const p = await api.componentLogPayload('trainingLoop', 50, target)
+    expect(p).not.toBeNull()
+    expect(p!.component).toBe('trainingLoop')
+    expect(Array.isArray(p!.lines)).toBe(true)
+  })
+
+  it('cloudflared token 行：局域网只读与回环同权展示 + 复制键（只读是动作边界，不是数据边界）', async () => {
+    const base = await api.buildStateView()
+    // 只读 SSR 与正常 SSR 一样渲染 token 行与复制键（secret 经 buildStateView 透传）
+    for (const readOnly of [true, false]) {
+      const html = render.renderConsolePage({ ...base, readOnly })
+      expect(html).toContain('aria-label="复制auth key"') // cloudflared token 复制键
+      expect(html).toContain('token') // token 行本体
+    }
+    // 数据源确认：快照里 cloudflared 恒带 secret
+    const s = await api.buildStateView()
+    expect(s.components.find((c) => c.key === 'cloudflared')!.secret).toBeDefined()
+  })
+
+  it('只读视图 SSR：readOnly=true 渲染只读角标 + 横幅，动作按钮禁用；false 不渲染', async () => {
+    const base = await api.buildStateView()
+    const html = render.renderConsolePage({ ...base, readOnly: true })
+    // 角标与横幅（类名断言避开 CSS 内联定义里的同名串）
+    expect(html).toContain('class="tc-badge tc-badge--ro"')
+    expect(html).toContain('class="tc-banner tc-banner--ro"')
+    expect(html).toContain('🔒 只读模式')
+    // 只读视图的动作按钮 SSR 即禁用（无闪跳）：至少一个组件卡动作按钮带 disabled 属性
+    // （正则匹配 <button...disabled>，避开 <style> 内联 CSS 里的 :disabled 选择器）
+    expect(html).toMatch(/<button[^>]*disabled/)
+    const html2 = render.renderConsolePage({ ...base, readOnly: false })
+    expect(html2).not.toContain('class="tc-badge tc-badge--ro"')
+    expect(html2).not.toContain('class="tc-banner tc-banner--ro"')
+    expect(html2).not.toContain('🔒 只读模式')
+  })
+
+  it('课程 select：局域网只读下 hub 运行也不禁用（可切查看课程）；本机 hub 运行才锁定', async () => {
+    const base = await api.buildStateView()
+    // hubServer 强制 running（hub 运行 = 在途训练状态）
+    const mk = (readOnly: boolean): ConsoleStateView => ({
+      ...base,
+      readOnly,
+      components: base.components.map((c) =>
+        c.key === 'hubServer' ? { ...c, status: 'running' as const } : c,
+      ),
+    })
+    const selTag = (html: string): string =>
+      html.match(/<select[^>]*id="courseSel"[^>]*>/)?.[0] ?? ''
+    // 局域网只读：hub 运行中 select 仍可用（切换仅影响查看），无锁定提示
+    const roSel = selTag(render.renderConsolePage(mk(true)))
+    expect(roSel).not.toContain('disabled')
+    expect(render.renderConsolePage(mk(true))).not.toContain('hub 运行中，课程已锁定')
+    // 本机：hub 运行中 select 锁定（原语义保留）
+    const rwSel = selTag(render.renderConsolePage(mk(false)))
+    expect(rwSel).toContain('disabled')
+    expect(render.renderConsolePage(mk(false))).toContain('hub 运行中，课程已锁定')
+  })
+
+  it('训练中课程标签：trainingLoop 运行且课程 ≠ 查看课程时，select 后高亮「正在训练：<课程>」', async () => {
+    const base = await api.buildStateView()
+    const mk = (course: string, tlCourse: string | null, running: boolean): ConsoleStateView => ({
+      ...base,
+      course,
+      components: base.components.map((c) =>
+        c.key === 'trainingLoop'
+          ? {
+              ...c,
+              status: running ? ('running' as const) : ('stopped' as const),
+              course: tlCourse,
+            }
+          : c,
+      ),
+    })
+    // 查看 viewB、训练 trainA → select 后高亮训练课程
+    const html = render.renderConsolePage(mk('viewB', 'trainA', true))
+    expect(html).toContain('正在训练：trainA')
+    // 查看课程 = 训练课程 → 无标签（正在看的就是训练的）
+    const same = render.renderConsolePage(mk('trainA', 'trainA', true))
+    expect(same).not.toContain('正在训练：')
+    // trainingLoop 未运行 → 无标签
+    const idle = render.renderConsolePage(mk('viewB', 'trainA', false))
+    expect(idle).not.toContain('正在训练：')
+  })
+
+  it('只读横幅关闭键带 tc. 前缀：cleanupNonTcKeys 白名单清理不误删', () => {
+    expect(view.TC_RO_BANNER_DISMISSED.startsWith('tc.')).toBe(true)
+    const mem = new Map<string, string>()
+    const storage = {
+      getItem: (k: string): string | null => mem.get(k) ?? null,
+      setItem: (k: string, v: string): void => void mem.set(k, v),
+      removeItem: (k: string): void => void mem.delete(k),
+      key: (i: number): string | null => [...mem.keys()][i] ?? null,
+      get length(): number {
+        return mem.size
+      },
+    }
+    mem.set(view.TC_RO_BANNER_DISMISSED, '1')
+    mem.set('junk.readonly', 'x')
+    const removed = view.cleanupNonTcKeys(storage)
+    expect(removed).toEqual(['junk.readonly'])
+    expect(mem.has(view.TC_RO_BANNER_DISMISSED)).toBe(true)
   })
 })
 
@@ -800,6 +984,71 @@ describe('console/iters §361②：完整指标表不截断（MAX 500 上限）'
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('console hero 最新 6 轮 eval toggle', () => {
+  const mkIterRow = (iter: number, hasEval: boolean): IterRow => ({
+    iter,
+    time: `t${iter}`,
+    winRate: 0.5,
+    scoreMean: 0,
+    scoreStd: 0,
+    samples: 1,
+    rolloutSec: 1,
+    ppoSec: 1,
+    kl: 0,
+    entropy: 1,
+    policyLoss: 0,
+    valueLoss: 0,
+    meanRet: 0,
+    lr: 1e-4,
+    expectedGames: 4,
+    halted: false,
+    topDims: '',
+    avgTicks: 100,
+    accuracy: 0,
+    loot: 0,
+    kills: 0,
+    actuals: null,
+    evalData: hasEval
+      ? {
+          time: `e${iter}`,
+          games: 10,
+          wins: 1,
+          winRate: 0.1,
+          clears: 0,
+          clearRate: 0,
+          dropped: 0,
+          sec: 30,
+          wver: 'v1',
+          outcomes: {},
+          avgTicks: 100,
+          totalKills: 1,
+          totalPU: 0,
+          scoreMean: 0,
+          scoreStd: 0,
+        }
+      : null,
+  })
+
+  it('eval 视图数据源 = 有 evalData 的轮，iter 倒序（与抽屉 eval 过滤同口径）', () => {
+    const rows = [1, 2, 3, 4, 5, 6, 7, 8].map((i) => mkIterRow(i, i % 2 === 0))
+    const ev = view.filterGroups(view.iterGroups(rows), 'eval')
+    expect(ev.map((g) => g.iter)).toEqual([8, 6, 4, 2])
+    for (const g of ev) expect(g.eval).not.toBeNull()
+    // rollout 过滤 = 无 eval 的轮（奇数 iter：1,3,5,7）；eval 过滤 = 有 eval 的轮（偶数）
+    const mains = view.filterGroups(view.iterGroups(rows), 'rollout')
+    expect(mains.map((g) => g.iter)).toEqual([7, 5, 3, 1])
+    expect(mains.length).toBe(4)
+  })
+
+  it('hero SSR 默认主行视图：渲染主行/eval toggle 与「最新 6 轮完整指标」', async () => {
+    const s = await api.buildStateView()
+    const html = render.renderConsolePage(s)
+    expect(html).toContain('主行') // toggle 主行档
+    expect(html).toContain('完整指标表')
+    expect(html).toContain('最新 ')
   })
 })
 

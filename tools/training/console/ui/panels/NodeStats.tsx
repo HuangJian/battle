@@ -12,6 +12,8 @@ export interface NodeStatsProps {
   /** 抽屉开着才轮询（DS-U5 语义；展开补拉一次）。 */
   enabled: boolean
   poolFreshNonce: number
+  /** 当前查看课程（/api/pool ?course= 只读覆盖，课程键控缓存）。 */
+  course?: string
 }
 
 const statusBadge = (s: NodeHistoryRow['status'], okN: number, recentN: number) => {
@@ -184,20 +186,23 @@ function rowExpand(r: NodeHistoryRow) {
   )
 }
 
-export function NodeStats({ enabled, poolFreshNonce }: NodeStatsProps) {
+export function NodeStats({ enabled, poolFreshNonce, course }: NodeStatsProps) {
   const [pool, setPool] = useState<PoolView | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [showOnlyBad, setShowOnlyBad] = useState(false)
 
-  const load = useCallback(async (fresh: boolean): Promise<void> => {
-    try {
-      const p = await fetchPool(fresh)
-      setPool(p)
-      setErr(null)
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e))
-    }
-  }, [])
+  const load = useCallback(
+    async (fresh: boolean): Promise<void> => {
+      try {
+        const p = await fetchPool(fresh, course ?? '')
+        setPool(p)
+        setErr(null)
+      } catch (e) {
+        setErr(e instanceof Error ? e.message : String(e))
+      }
+    },
+    [course],
+  )
 
   usePolling({ enabled, intervalSec: 300, fetch: () => load(false) })
 

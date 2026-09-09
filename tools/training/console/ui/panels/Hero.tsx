@@ -3,11 +3,14 @@
  *  走势图支持悬停显示坐标，并由统一档位开关切换 全量/最近30/最近10（持久化到 localStorage）。 */
 
 import {
+  filterGroups,
   fmtPct,
+  iterGroups,
   klTone,
   latestRow,
   metricSeries,
   retTone,
+  TC_HERO_ITER_VIEW,
   TC_TREND_RANGE,
   winTone,
   type ConsoleStateView,
@@ -16,6 +19,7 @@ import {
   type TrendRange,
 } from '../../../ui/view'
 import { Badge } from '../../../ui/components/Pill'
+import { SegmentedControl } from '../../../ui/components/SegmentedControl'
 import { TrendChart } from '../../../ui/components/TrendChart'
 import { useEffect, useState } from 'preact/hooks'
 
@@ -50,114 +54,272 @@ function TrendCell({
   )
 }
 
-/** 最新 6 轮完整指标（紧凑表，iter 倒序）：主行口径与抽屉指标表一致（实际值优先、
- *  ≈ 为磁盘清理后的估算）；eval 列 = 干净评估（greedy 固定语料）。表头行右侧
+/** 主行视图：最新 6 轮完整指标（紧凑表，iter 倒序）：主行口径与抽屉指标表一致（实际值优先、
+ *  ≈ 为磁盘清理后的估算）；eval 列 = 干净评估（greedy 固定语料）。 */
+function MainTable({ rows }: { rows: IterRow[] }) {
+  return (
+    <table className="tc-table tc-table--dense">
+      <thead>
+        <tr>
+          <th>iter</th>
+          <th>时间</th>
+          <th>胜率</th>
+          <th>eval</th>
+          <th className="tc-num">存活</th>
+          <th className="tc-num">击杀</th>
+          <th className="tc-num">道具</th>
+          <th className="tc-num">得分</th>
+          <th className="tc-num">rollout</th>
+          <th className="tc-num">PPO</th>
+          <th>KL</th>
+          <th className="tc-num">熵</th>
+          <th>mean_ret</th>
+          <th className="tc-num">lr</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((r) => (
+          <tr key={r.iter}>
+            <td>
+              <b>{r.iter}</b>
+              {r.halted ? (
+                <span className="tc-pill tc-pill--note" title="该轮被 KL halt 中止">
+                  halted
+                </span>
+              ) : null}
+            </td>
+            <td className="tc-muted" style={{ whiteSpace: 'nowrap' }}>
+              {r.time}
+            </td>
+            <td>
+              <Badge tone={winTone(r.winRate)}>{fmtPct(r.winRate)}</Badge>
+            </td>
+            <td>
+              {r.evalData && r.evalData.winRate !== null ? (
+                <Badge tone={winTone(r.evalData.winRate)}>{fmtPct(r.evalData.winRate)}</Badge>
+              ) : (
+                <span className="tc-muted">-</span>
+              )}
+            </td>
+            <td className="tc-num">
+              {r.actuals ? (
+                r.actuals.avgTicks
+              ) : (
+                <span className="tc-muted" title="该轮磁盘数据已清理，估算值">
+                  {r.avgTicks}≈
+                </span>
+              )}
+            </td>
+            <td className="tc-num">
+              {r.actuals ? (
+                <>
+                  {r.actuals.totalKills}
+                  <span className="tc-muted"> /{r.actuals.games}局</span>
+                </>
+              ) : (
+                <span className="tc-muted" title="该轮磁盘数据已清理，估算值">
+                  {r.kills.toFixed(1)}≈
+                </span>
+              )}
+            </td>
+            <td className="tc-num">
+              {r.actuals ? (
+                <>
+                  {r.actuals.totalPU}
+                  <span className="tc-muted"> /{r.actuals.games}局</span>
+                </>
+              ) : (
+                <span className="tc-muted" title="该轮磁盘数据已清理，估算值">
+                  {(r.loot * 100).toFixed(0)}%≈
+                </span>
+              )}
+            </td>
+            <td className="tc-num">
+              {r.scoreMean.toFixed(4)}
+              <span className="tc-muted">±{r.scoreStd.toFixed(4)}</span>
+            </td>
+            <td className="tc-num">{r.rolloutSec.toFixed(0)}s</td>
+            <td className="tc-num">{r.ppoSec.toFixed(0)}s</td>
+            <td>
+              <Badge tone={klTone(r.kl)}>{r.kl.toFixed(4)}</Badge>
+            </td>
+            <td className="tc-num">{r.entropy.toFixed(3)}</td>
+            <td>
+              <Badge tone={retTone(r.meanRet)}>{r.meanRet.toFixed(3)}</Badge>
+            </td>
+            <td className="tc-num">{r.lr.toFixed(6)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
+/** eval 视图：最新 6 轮干净评估（有 evalData 的轮，iter 倒序；与抽屉 eval 过滤同口径）。
+ *  列 = 评估专属字段：eval 胜率（含局数）、全歼、存活/击杀/道具/得分（评估实际值）、
+ *  窗口用时、评估权重版本。无记录时给空态行。 */
+function EvalTable({ rows }: { rows: IterRow[] }) {
+  const groups = filterGroups(iterGroups(rows), 'eval').slice(0, 6)
+  return (
+    <table className="tc-table tc-table--dense">
+      <thead>
+        <tr>
+          <th>iter</th>
+          <th>时间</th>
+          <th>eval 胜率</th>
+          <th className="tc-num">全歼</th>
+          <th className="tc-num">存活</th>
+          <th className="tc-num">击杀</th>
+          <th className="tc-num">道具</th>
+          <th className="tc-num">得分</th>
+          <th className="tc-num">用时</th>
+          <th>wver</th>
+        </tr>
+      </thead>
+      <tbody>
+        {groups.length === 0 ? (
+          <tr>
+            <td colSpan={10} className="tc-muted" style={{ textAlign: 'center' }}>
+              该课程暂无 eval 评估记录
+            </td>
+          </tr>
+        ) : (
+          groups.map((g) => {
+            const e = g.eval!
+            return (
+              <tr key={`e${g.iter}`}>
+                <td>
+                  <span className="tc-muted" style={{ whiteSpace: 'nowrap' }}>
+                    eval it{g.iter}
+                  </span>
+                  {e.dropped > 0 ? (
+                    <span
+                      className="tc-pill tc-pill--note"
+                      title="评估窗口内未收官、被下轮权重分发清场的评估局数"
+                    >
+                      缺{e.dropped}
+                    </span>
+                  ) : null}
+                </td>
+                <td className="tc-muted" style={{ whiteSpace: 'nowrap' }}>
+                  {e.time}
+                </td>
+                <td>
+                  {e.winRate !== null ? (
+                    <>
+                      <Badge
+                        tone={winTone(e.winRate)}
+                        title={`干净评估（greedy 固定语料）· 评估权重 = 第 ${g.iter} 轮 PPO 更新前 · ${e.games} 局 ${e.wins} 胜 · 全歼 ${e.clears} · 用时 ${e.sec}s`}
+                      >
+                        {fmtPct(e.winRate)}
+                      </Badge>{' '}
+                      <span className="tc-muted">
+                        {e.wins}/{e.games}
+                      </span>
+                    </>
+                  ) : (
+                    <span className="tc-muted">-</span>
+                  )}
+                </td>
+                <td className="tc-num">
+                  {e.clearRate !== null ? (
+                    <span title={`全歼率 ${fmtPct(e.clearRate)}`}>{e.clears}</span>
+                  ) : (
+                    <span className="tc-muted">{e.clears || '-'}</span>
+                  )}
+                </td>
+                <td className="tc-num">
+                  {e.avgTicks !== null ? e.avgTicks : <span className="tc-muted">-</span>}
+                </td>
+                <td className="tc-num">
+                  {e.totalKills !== null ? (
+                    <>
+                      {e.totalKills}
+                      <span className="tc-muted"> /{e.games}局</span>
+                    </>
+                  ) : (
+                    <span className="tc-muted">-</span>
+                  )}
+                </td>
+                <td className="tc-num">
+                  {e.totalPU !== null ? (
+                    <>
+                      {e.totalPU}
+                      <span className="tc-muted"> /{e.games}局</span>
+                    </>
+                  ) : (
+                    <span className="tc-muted">-</span>
+                  )}
+                </td>
+                <td className="tc-num">
+                  {e.scoreMean !== null ? (
+                    <>
+                      {e.scoreMean.toFixed(4)}
+                      <span className="tc-muted">±{(e.scoreStd ?? 0).toFixed(4)}</span>
+                    </>
+                  ) : (
+                    <span className="tc-muted">-</span>
+                  )}
+                </td>
+                <td className="tc-num">{e.sec.toFixed(0)}s</td>
+                <td className="tc-mono tc-muted tc-small">{e.wver.slice(0, 7)}</td>
+              </tr>
+            )
+          })
+        )}
+      </tbody>
+    </table>
+  )
+}
+
+/** 最新 6 轮区块：主行 / eval 双视图 toggle（持久化 localStorage）；表头行右侧
  *  「完整指标表 ›」进指标抽屉（与标题同一行、右对齐）。 */
 function LastIters({ iters, onMore }: { iters: IterRow[]; onMore: () => void }) {
-  const rows = [...iters].sort((a, b) => b.iter - a.iter).slice(0, 6)
-  if (rows.length === 0) return null
+  const [view, setView] = useState<'main' | 'eval'>('main')
+  // hydrate 后从 localStorage 恢复视图（SSR 首帧恒主行，避免 hydration 不一致）。
+  useEffect(() => {
+    try {
+      const v = localStorage.getItem(TC_HERO_ITER_VIEW)
+      if (v === 'main' || v === 'eval') setView(v)
+    } catch {
+      /* 隐私模式等不可写场景忽略 */
+    }
+  }, [])
+  const onView = (v: 'main' | 'eval'): void => {
+    setView(v)
+    try {
+      localStorage.setItem(TC_HERO_ITER_VIEW, v)
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const mains = [...iters].sort((a, b) => b.iter - a.iter).slice(0, 6)
+  if (mains.length === 0) return null
+  const ev = view === 'eval'
+  const n = ev ? filterGroups(iterGroups(iters), 'eval').length : mains.length
   return (
     <div className="tc-hero__iters">
       <div className="tc-hero__iters-hd">
-        <span>最新 {rows.length} 轮完整指标</span>
+        <span className="tc-hero__iters-left">
+          <span>
+            最新 {Math.min(n, 6)} 轮{ev ? ' eval 评估' : '完整指标'}
+          </span>
+          <SegmentedControl<'main' | 'eval'>
+            value={view}
+            ariaLabel="指标行视图"
+            options={[
+              { value: 'main', label: '主行' },
+              { value: 'eval', label: 'eval' },
+            ]}
+            onChange={onView}
+          />
+        </span>
         <button type="button" className="tc-link" onClick={onMore}>
           完整指标表 ›
         </button>
       </div>
-      <table className="tc-table tc-table--dense">
-        <thead>
-          <tr>
-            <th>iter</th>
-            <th>时间</th>
-            <th>胜率</th>
-            <th>eval</th>
-            <th className="tc-num">存活</th>
-            <th className="tc-num">击杀</th>
-            <th className="tc-num">道具</th>
-            <th className="tc-num">得分</th>
-            <th className="tc-num">rollout</th>
-            <th className="tc-num">PPO</th>
-            <th>KL</th>
-            <th className="tc-num">熵</th>
-            <th>mean_ret</th>
-            <th className="tc-num">lr</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => (
-            <tr key={r.iter}>
-              <td>
-                <b>{r.iter}</b>
-                {r.halted ? (
-                  <span className="tc-pill tc-pill--note" title="该轮被 KL halt 中止">
-                    halted
-                  </span>
-                ) : null}
-              </td>
-              <td className="tc-muted" style={{ whiteSpace: 'nowrap' }}>
-                {r.time}
-              </td>
-              <td>
-                <Badge tone={winTone(r.winRate)}>{fmtPct(r.winRate)}</Badge>
-              </td>
-              <td>
-                {r.evalData && r.evalData.winRate !== null ? (
-                  <Badge tone={winTone(r.evalData.winRate)}>{fmtPct(r.evalData.winRate)}</Badge>
-                ) : (
-                  <span className="tc-muted">-</span>
-                )}
-              </td>
-              <td className="tc-num">
-                {r.actuals ? (
-                  r.actuals.avgTicks
-                ) : (
-                  <span className="tc-muted" title="该轮磁盘数据已清理，估算值">
-                    {r.avgTicks}≈
-                  </span>
-                )}
-              </td>
-              <td className="tc-num">
-                {r.actuals ? (
-                  <>
-                    {r.actuals.totalKills}
-                    <span className="tc-muted"> /{r.actuals.games}局</span>
-                  </>
-                ) : (
-                  <span className="tc-muted" title="该轮磁盘数据已清理，估算值">
-                    {r.kills.toFixed(1)}≈
-                  </span>
-                )}
-              </td>
-              <td className="tc-num">
-                {r.actuals ? (
-                  <>
-                    {r.actuals.totalPU}
-                    <span className="tc-muted"> /{r.actuals.games}局</span>
-                  </>
-                ) : (
-                  <span className="tc-muted" title="该轮磁盘数据已清理，估算值">
-                    {(r.loot * 100).toFixed(0)}%≈
-                  </span>
-                )}
-              </td>
-              <td className="tc-num">
-                {r.scoreMean.toFixed(4)}
-                <span className="tc-muted">±{r.scoreStd.toFixed(4)}</span>
-              </td>
-              <td className="tc-num">{r.rolloutSec.toFixed(0)}s</td>
-              <td className="tc-num">{r.ppoSec.toFixed(0)}s</td>
-              <td>
-                <Badge tone={klTone(r.kl)}>{r.kl.toFixed(4)}</Badge>
-              </td>
-              <td className="tc-num">{r.entropy.toFixed(3)}</td>
-              <td>
-                <Badge tone={retTone(r.meanRet)}>{r.meanRet.toFixed(3)}</Badge>
-              </td>
-              <td className="tc-num">{r.lr.toFixed(6)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      {ev ? <EvalTable rows={iters} /> : <MainTable rows={mains} />}
     </div>
   )
 }
