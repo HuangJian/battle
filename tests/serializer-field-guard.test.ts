@@ -59,6 +59,8 @@ const EXCLUDED: Record<string, string> = {
 
   // Session-scoped signal & identity.
   rewindPending: 'one-tick signal consumed by Game.ts within the same session',
+  rewindPendingBy:
+    'one-tick rewind payer (1|2) alongside rewindPending — consumed by Simulation.refundRewind in the same session',
   seed: 'session identity for RNG stream derivation; preserved by object identity across restoreWorld',
 }
 

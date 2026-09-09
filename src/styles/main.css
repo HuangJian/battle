@@ -326,6 +326,28 @@ body {
   background: color-mix(in srgb, #f0c040 12%, transparent);
 }
 
+/* P2's own inventory counter in the super pill — a bare gold number after
+   the P2 key chip, e.g. "Guardian<F5> 2 [R] 1" (P1 stock · P2 key · P2
+   stock). Shown only while a player2 tank exists (双打/躺赢 per-player
+   inventories, superStocks.ts). */
+.hud-super-p2-stock {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  color: #f0c040;
+  min-width: 9px;
+  text-align: center;
+}
+
+/* Both P2 elements are toggled via the `hidden` attribute; their
+   display:inline-block / font rules would otherwise override the UA
+   [hidden] { display:none } — without this guard a hidden chip/counter
+   would stay visible in single-player (P0 regression class). */
+.hud-super-p2[hidden],
+.hud-super-p2-stock[hidden] {
+  display: none;
+}
+
 /* Replay indicator — persistent badge in the HUD center area during playback. */
 .hud-replay {
   margin-right: 8px;

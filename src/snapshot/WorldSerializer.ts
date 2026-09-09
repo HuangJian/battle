@@ -107,10 +107,15 @@ export function cloneWorld(world: World): WorldSnapshot {
     guardStock: world.guardStock,
     frenzyStock: world.frenzyStock,
     sacrificeStock: world.sacrificeStock,
+    // P2's separate inventory (双打/躺赢 per-player split — superStocks.ts)
+    guardStock2: world.guardStock2,
+    frenzyStock2: world.frenzyStock2,
+    sacrificeStock2: world.sacrificeStock2,
     fenceExpireFrame: world.fenceExpireFrame,
     // New power-ups (new-powerups-plan.md)
     empTimer: world.empTimer,
     rewindStock: world.rewindStock,
+    rewindStock2: world.rewindStock2,
     mines: world.mines.map((m) => ({ ...m })),
   }
 }
@@ -238,11 +243,16 @@ export function restoreWorld(world: World, snap: WorldSnapshot): void {
   world.guardStock = snap.guardStock ?? 0
   world.frenzyStock = snap.frenzyStock ?? 0
   world.sacrificeStock = snap.sacrificeStock ?? 0
+  // P2's separate inventory (legacy snapshots have no P2 fields → 0).
+  world.guardStock2 = snap.guardStock2 ?? 0
+  world.frenzyStock2 = snap.frenzyStock2 ?? 0
+  world.sacrificeStock2 = snap.sacrificeStock2 ?? 0
   world.fenceExpireFrame = snap.fenceExpireFrame
 
   // New power-ups (new-powerups-plan.md)
   world.empTimer = snap.empTimer ?? 0
   world.rewindStock = snap.rewindStock ?? 0
+  world.rewindStock2 = snap.rewindStock2 ?? 0
   world.mines = snap.mines ? snap.mines.map((m) => ({ ...m })) : []
 
   // Resume playing

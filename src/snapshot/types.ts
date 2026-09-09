@@ -180,6 +180,11 @@ export interface WorldSnapshot {
   guardStock: number
   frenzyStock: number
   sacrificeStock: number
+  // P2's separate inventory (双打/躺赢 per-player split — superStocks.ts).
+  // Optional for backward compat: legacy snapshots restore P2 to 0.
+  guardStock2?: number
+  frenzyStock2?: number
+  sacrificeStock2?: number
   // Per-tank frenzy fields (Q9): now live on Tank, not World.
   // Optional here for backward compat with old snapshots that had them.
   frenzyTimer?: number
@@ -191,7 +196,9 @@ export interface WorldSnapshot {
 
   // ---- New power-ups (new-powerups-plan.md) ----
   empTimer: number // 电磁静默: enemy silence timer
-  rewindStock: number // 时光宝盒: inventory count
+  rewindStock: number // 时光宝盒: P1 inventory count
+  /** P2's 时光宝盒 inventory (optional — legacy snapshots restore to 0). */
+  rewindStock2?: number
   mines: Mine[] // 地雷: active mines
 }
 

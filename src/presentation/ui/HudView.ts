@@ -4,6 +4,7 @@ import type { KeyBindings } from '../../types'
 import { parseBinding } from '../../game/Input'
 import { localizedStageName } from '../../config/stages'
 import { t, localizeRoot } from '../../i18n'
+import { superStockTotal } from '../../game/superStocks'
 
 /**
  * HudView — the in-game HUD bar and its per-frame sync logic
@@ -55,7 +56,13 @@ export class HudView {
   private frenzyEl: HTMLElement
   private sacrificeEl: HTMLElement
   private rewindEl: HTMLElement
-  /** Rail header stock total (`×N`, sum of all four inventories). */
+  /** P2's separate inventory counters (双打/躺赢 per-player split — shown
+   *  only while a player2 tank exists; gold, after the P2 key chip). */
+  private guard2El: HTMLElement
+  private frenzy2El: HTMLElement
+  private sacrifice2El: HTMLElement
+  private rewind2El: HTMLElement
+  /** Rail header stock total (`×N`, sum of BOTH players' inventories). */
   private superTotalEl: HTMLElement
   /**
    * The super-item inventory — a SIDE RAIL beside the playfield (owned here,
@@ -97,7 +104,13 @@ export class HudView {
   private lastFrenzy = -1
   private lastSacrifice = -1
   private lastRewind = -1
+  private lastGuard2 = -1
+  private lastFrenzy2 = -1
+  private lastSacrifice2 = -1
+  private lastRewind2 = -1
   private lastSuperTotal = -1
+  /** Whether the P2 stock counters are currently shown (mirror). */
+  private p2StocksShown = false
   // Buff countdowns: remaining whole seconds last written (-1 = chip hidden).
   private lastShieldSec = -1
   private lastFreezeSec = -1
@@ -213,21 +226,25 @@ export class HudView {
         <span class="hud-super-icon">🛡</span>
         <span class="hud-label" data-hud-super-label="guard">Guardian&lt;F5&gt;</span>
         <span class="hud-value" data-hud="guard">0</span>
+        <span class="hud-super-p2-stock" data-hud="guard2" hidden>0</span>
       </div>
       <div class="hud-item hud-super">
         <span class="hud-super-icon">❄</span>
         <span class="hud-label" data-hud-super-label="frenzy">Frenzy&lt;F6&gt;</span>
         <span class="hud-value" data-hud="frenzy">0</span>
+        <span class="hud-super-p2-stock" data-hud="frenzy2" hidden>0</span>
       </div>
       <div class="hud-item hud-super">
         <span class="hud-super-icon">💥</span>
         <span class="hud-label" data-i18n="hud.sacrifice">同归</span>
         <span class="hud-value" data-hud="sacrifice">0</span>
+        <span class="hud-super-p2-stock" data-hud="sacrifice2" hidden>0</span>
       </div>
       <div class="hud-item hud-super">
         <span class="hud-super-icon">⏱</span>
         <span class="hud-label" data-hud-super-label="rewind">Time Box&lt;F7&gt;</span>
         <span class="hud-value" data-hud="rewind">0</span>
+        <span class="hud-super-p2-stock" data-hud="rewind2" hidden>0</span>
       </div>
     `
 
@@ -257,6 +274,10 @@ export class HudView {
     this.frenzyEl = rq('[data-hud="frenzy"]')
     this.sacrificeEl = rq('[data-hud="sacrifice"]')
     this.rewindEl = rq('[data-hud="rewind"]')
+    this.guard2El = rq('[data-hud="guard2"]')
+    this.frenzy2El = rq('[data-hud="frenzy2"]')
+    this.sacrifice2El = rq('[data-hud="sacrifice2"]')
+    this.rewind2El = rq('[data-hud="rewind2"]')
     this.superTotalEl = rq('[data-hud="super-total"]')
     this.superItems = Array.from(this.superRail.querySelectorAll('.hud-super'))
     this.guardLabel = this.superRail.querySelector('[data-hud-super-label="guard"]')
@@ -489,6 +510,18 @@ export class HudView {
     for (const el of this.superItems) {
       if (el.hidden !== hideSuper) el.hidden = hideSuper
     }
+    // P2's stock counters (per-player inventories, superStocks.ts): shown
+    // whenever a player2 tank exists (双打 human / coop God AI / dual
+    // spectate) AND the mode has super items — change-guarded so a P2
+    // enable/disable flip without a stock change still shows/hides them.
+    const p2StocksShown = !!world.player2 && !hideSuper
+    if (this.p2StocksShown !== p2StocksShown) {
+      this.p2StocksShown = p2StocksShown
+      for (const el of [this.guard2El, this.frenzy2El, this.sacrifice2El, this.rewind2El]) {
+        el.hidden = !p2StocksShown
+      }
+    }
+
     // 双打 Two-Player: show/hide the P2 super-key label rows. The flag can
     // flip (CC toggle / snapshot restore) without any binding or locale
     // change, so this change-guarded sync lives here, not only in
@@ -524,9 +557,27 @@ export class HudView {
         this.rewindEl.textContent = String(world.rewindStock)
         this.lastRewind = world.rewindStock
       }
-      // Rail header total — the whole inventory at a glance (change-guarded).
-      const total =
-        world.guardStock + world.frenzyStock + world.sacrificeStock + world.rewindStock
+      // P2's own counters (hidden elements stay in sync so a flip-in shows
+      // the current value immediately).
+      if (world.guardStock2 !== this.lastGuard2) {
+        this.guard2El.textContent = String(world.guardStock2)
+        this.lastGuard2 = world.guardStock2
+      }
+      if (world.frenzyStock2 !== this.lastFrenzy2) {
+        this.frenzy2El.textContent = String(world.frenzyStock2)
+        this.lastFrenzy2 = world.frenzyStock2
+      }
+      if (world.sacrificeStock2 !== this.lastSacrifice2) {
+        this.sacrifice2El.textContent = String(world.sacrificeStock2)
+        this.lastSacrifice2 = world.sacrificeStock2
+      }
+      if (world.rewindStock2 !== this.lastRewind2) {
+        this.rewind2El.textContent = String(world.rewindStock2)
+        this.lastRewind2 = world.rewindStock2
+      }
+      // Rail header total — BOTH players' inventories at a glance
+      // (change-guarded; superStocks.ts).
+      const total = superStockTotal(world)
       if (total !== this.lastSuperTotal) {
         this.superTotalEl.textContent = `×${total}`
         this.lastSuperTotal = total

@@ -155,7 +155,7 @@ describe('HudView super-item rail visibility (HUD redesign follow-up)', () => {
     const total = hud.superRail.querySelector('[data-hud="super-total"]')!
     expect(total.textContent).toBe('×0')
 
-    // Total = sum of all four inventories, updated only on change.
+    // Total = sum of BOTH players' inventories, updated only on change.
     world.guardStock = 2
     world.frenzyStock = 1
     world.sacrificeStock = 0
@@ -164,5 +164,38 @@ describe('HudView super-item rail visibility (HUD redesign follow-up)', () => {
     expect(total.textContent).toBe('×7')
     hud.syncWorld(world) // unchanged — no rewrite churn
     expect(total.textContent).toBe('×7')
+  })
+
+  it('shows P2 stock counters only while a player2 tank exists (per-player inventories)', () => {
+    const hud = makeHud()
+    hud.setVisible(true)
+    const world = new World()
+
+    // Single-player: P2 counters exist in the DOM but stay hidden, even when
+    // P2's fields carry stock (they belong to nobody on the field yet).
+    world.guardStock = 2
+    world.rewindStock2 = 3
+    hud.syncWorld(world)
+    const guard2 = hud.superRail.querySelector<HTMLElement>('[data-hud="guard2"]')!
+    const rewind2 = hud.superRail.querySelector<HTMLElement>('[data-hud="rewind2"]')!
+    expect(guard2.hidden).toBe(true)
+    expect(rewind2.hidden).toBe(true)
+
+    // 双打 Two-Player: P2 joins — its own counters appear with P2's values.
+    world.twoPlayer = true
+    world.enablePlayer2()
+    hud.syncWorld(world)
+    expect(guard2.hidden).toBe(false)
+    expect(guard2.textContent).toBe('0')
+    expect(rewind2.textContent).toBe('3')
+    // Header total counts BOTH players' inventories.
+    const total = hud.superRail.querySelector('[data-hud="super-total"]')!
+    expect(total.textContent).toBe('×5')
+
+    // P2 leaves (menu / disable): counters hide again.
+    world.twoPlayer = false
+    world.disablePlayer2()
+    hud.syncWorld(world)
+    expect(guard2.hidden).toBe(true)
   })
 })

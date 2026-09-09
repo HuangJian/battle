@@ -9,6 +9,7 @@ import { CELL, TANK, GRID, DIR_VECTORS, Direction, SEED_HASH } from '../constant
 import { SACRIFICE_BASE_RADIUS_CELLS } from '../config/powerups'
 import { recordEnemyKill, destroyBrickAoE } from './KillPipeline'
 import { aabb } from '../utils/helpers'
+import { superStock, spendSuperStock, clearSuperStock } from './superStocks'
 import { RNG } from '../utils/RNG'
 import { GodAIInput } from '../ai/GodAIInput'
 import { GUARD_GOD_AI_PARAMS } from '../ai/god/params'
@@ -64,7 +65,7 @@ export class EnemiesSystem {
    */
   activateGuard(p: Tank): void {
     const w = this.d.world
-    if (w.guardStock <= 0) return
+    if (superStock(w, p, 'guard') <= 0) return
 
     let activeGuards = 0
     for (const a of w.allies) {
@@ -72,7 +73,8 @@ export class EnemiesSystem {
     }
     const extraCount = activeGuards === 0 ? 1 : 2
 
-    w.guardStock--
+    // The summoner pays from THEIR OWN 天降神兵 inventory (superStocks.ts).
+    spendSuperStock(w, p, 'guard')
     this.spawnGuard(p)
     for (let i = 0; i < extraCount; i++) this.spawnAccompanyingEnemy(p)
   }
@@ -510,9 +512,12 @@ export class EnemiesSystem {
    */
   triggerSacrificeAoE(player: Tank): void {
     const w = this.d.world
-    if (w.sacrificeStock <= 0) return
+    // The FALLEN player's own 同归于尽 inventory blasts (superStocks.ts) —
+    // P1's death spends P1's stock, P2's death spends P2's.
+    const stock = superStock(w, player, 'sacrifice')
+    if (stock <= 0) return
 
-    const radiusCells = SACRIFICE_BASE_RADIUS_CELLS + (w.sacrificeStock - 1)
+    const radiusCells = SACRIFICE_BASE_RADIUS_CELLS + (stock - 1)
     const radiusPx = radiusCells * CELL
     const cx = player.x + player.w / 2
     const cy = player.y + player.h / 2
@@ -536,7 +541,8 @@ export class EnemiesSystem {
     destroyBrickAoE(w, cx, cy, radiusPx)
 
     this.d.effects.createExplosion(cx, cy, 'big')
-    w.sacrificeStock = 0
+    // Release ALL of the fallen player's sacrifice items at once.
+    clearSuperStock(w, player, 'sacrifice')
   }
 
   // ================================================================

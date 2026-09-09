@@ -27,6 +27,7 @@ import { hasStarPerk } from '../config/rules'
 import { recordEnemyKill } from './KillPipeline'
 import { findNearestFreeCell } from './GridQuery'
 import { genId } from './World'
+import { addSuperStock } from './superStocks'
 import { aabb } from '../utils/helpers'
 import type { PowerUpType, Tank } from '../types'
 import type { SimulationSystems } from './systems'
@@ -432,8 +433,8 @@ export class PowerUpSystem {
         break
 
       case 'rewind':
-        // Add one rewind stock (accumulated); activated with F7
-        w.rewindStock++
+        // Add one rewind stock to the COLLECTOR's inventory (superStocks.ts)
+        addSuperStock(w, p, 'rewind')
         break
 
       case 'decoy':
@@ -447,18 +448,20 @@ export class PowerUpSystem {
         break
 
       // ---- Super power-ups (强力道具, DECISIONS.md §31) ----
-      // Picked up into an inventory (accumulated), not applied instantly.
+      // Picked up into the COLLECTOR's inventory (accumulated, superStocks.ts
+      // per-player split — P1 and P2 each hoard and spend their own), not
+      // applied instantly.
       case 'guard':
         // 天降神兵 — accumulate; released actively with F5 (Phase 2 summon).
-        w.guardStock++
+        addSuperStock(w, p, 'guard')
         break
       case 'frenzy':
         // 狂暴宣泄 — accumulate; released actively with F6.
-        w.frenzyStock++
+        addSuperStock(w, p, 'frenzy')
         break
       case 'sacrifice':
         // 同归于尽 — accumulate; released passively when a life is lost.
-        w.sacrificeStock++
+        addSuperStock(w, p, 'sacrifice')
         break
     }
   }

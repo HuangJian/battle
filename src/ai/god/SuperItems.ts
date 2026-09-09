@@ -19,6 +19,7 @@
 import type { GodAIInput } from '../GodAIInput'
 import type { DecisionContext } from './DecisionCore'
 import { scanAheadImpl } from './FireControl'
+import { superStock } from '../../game/superStocks'
 
 /** Set self._pressGuard / self._pressFrenzy for this tick. */
 export function superItemPressesImpl(self: GodAIInput, ctx: DecisionContext): void {
@@ -33,7 +34,7 @@ export function superItemPressesImpl(self: GodAIInput, ctx: DecisionContext): vo
   // (isBaseUnderThreat, per-tick cached) → no allied guard already on the
   // field (re-summoning while one lives adds 2 extra enemies for marginal
   // gain). Decoys live in w.allies too — they are not guards.
-  if (prm.superItemGuardThreat > 0 && w.guardStock > 0 && self.hasBase) {
+  if (prm.superItemGuardThreat > 0 && superStock(w, ctx.p, 'guard') > 0 && self.hasBase) {
     let guardAlive = false
     const allies = w.allies
     for (let ai = 0; ai < allies.length; ai++) {
@@ -54,7 +55,7 @@ export function superItemPressesImpl(self: GodAIInput, ctx: DecisionContext): vo
   // is a free death). Never re-release mid-barrage.
   if (
     prm.superItemFrenzyAim > 0 &&
-    w.frenzyStock > 0 &&
+    superStock(w, ctx.p, 'frenzy') > 0 &&
     (ctx.p.frenzyTimer ?? 0) <= 0 &&
     ctx.threat === null &&
     scanAheadImpl(self, ctx.pcx, ctx.pcy, ctx.p.dir).enemy

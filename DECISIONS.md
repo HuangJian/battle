@@ -1139,3 +1139,14 @@ pin。`bun run check` 全绿（1755 pass），build 绿。God-AI/World/录制器
 - **决定**：R2 全项修复 + 回归测试（static-pad-poll / mode-inputs-game / 同实例槽位连续性含 index 回收例）；
   约定：settings 类测试必须自带 storage 隔离，不得依赖 happy-dom preload 的共享 localStorage（R2-P2-4）。
 - **违反后果**：纯手柄用户静态屏死键回归；coop 恢复后 P2 影子跟随 P1；手柄热插拔静默换垫无事件。
+
+## §2026-09-09-ps2-superstocks-2p（2026-09-09，双人/躺赢强力道具分家）
+
+- **背景**：2p/coop/督战双玩家 下强力道具（guard/frenzy/sacrifice/rewind）原为世界共享库存
+  （w.guardStock 等四项），任一玩家都能花掉另一个攒的道具，与「各自使用」预期不符。
+- **备选与否决**：保持共享 —— 否，无法各自使用；拾取进收集者 + 消耗按使用者扣（采纳，superStocks.ts
+  是唯一的 tank→slot 映射）；快照 P2 字段必填 —— 否，可选 + 旧档还原 0（向后兼容）。
+- **决定**：四项库存各拆 P1/P2（P1 保名 + P2 加 Stock2 后缀，镜像 lives2/score2）；拾取进收集者、
+  释放扣本人、同归于尽由阵亡者引爆、rewind 退款退给付费方（rewindPendingBy 记录，仅同会话信号不序列化）；
+  God AI 按自己控制的坦克读自己的库存；startGame 顺带修复 rewindStock 未重置的历史遗漏（与其余三类对称）。
+- **违反后果**：2p 下跨玩家消费、回放分歧（tickHash 已含 4 个新字段）；旧存档恢复后 P2 库存归零。

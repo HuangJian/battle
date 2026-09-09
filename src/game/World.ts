@@ -265,10 +265,16 @@ export class World {
   player2SpawnPoint: { col: number; row: number }
 
   // --- Super power-up inventory & frenzy state (DECISIONS.md §31) ---
-  // Accumulated counts from picking up super power-ups (强力道具).
+  // Accumulated counts from picking up super power-ups (强力道具). P1 fields
+  // keep the historical names; the P2 fields (…Stock2, mirroring lives2 /
+  // score2) hold the SECOND player's separate inventory — 双打 twoPlayer /
+  // coop / dual-spectate each collect and spend their OWN stock (superStocks.ts).
   guardStock: number // 天降神兵 — Phase 2 summons a base guard
   frenzyStock: number // 狂暴宣泄 — active F6 barrage
   sacrificeStock: number // 同归于尽 — passive AoE on losing a life
+  guardStock2: number
+  frenzyStock2: number
+  sacrificeStock2: number
   // Active 狂暴宣泄 barrage runtime. Snapshot-safe so a rewind mid-barrage
   // (and the enemy-kill that may trigger it) is faithful.
   // 栅栏道具 (fence): the frame at which the temporary steel ring around the
@@ -278,12 +284,18 @@ export class World {
   // --- New power-ups (new-powerups-plan.md) ---
   /** EMP timer: when > 0, all enemy tanks are silenced (can move but not fire). */
   empTimer: number
-  /** Rewind stock: number of 时光宝盒 items in inventory. */
+  /** Rewind stock: number of 时光宝盒 items in inventory (P1). */
   rewindStock: number
+  /** P2's 时光宝盒 inventory (superStocks.ts). */
+  rewindStock2: number
   /** Signal flag: set by Simulation.activateRewind, consumed by Game.ts to
    *  trigger RecoveryController.beginManualRewind(). Cleared by Game.ts.
    *  Lives on the World (no hidden state outside it — AGENTS §2.2). */
   rewindPending: boolean
+  /** Which player's stock paid for the pending rewind (1|2) — the refund
+   *  (Simulation.refundRewind) must return it to the SAME inventory.
+   *  Transient signal alongside rewindPending, never serialized. */
+  rewindPendingBy: 1 | 2
   /** Active mines placed by the player. Snapshot-safe. */
   mines: Mine[]
 
@@ -354,10 +366,15 @@ export class World {
     this.guardStock = 0
     this.frenzyStock = 0
     this.sacrificeStock = 0
+    this.guardStock2 = 0
+    this.frenzyStock2 = 0
+    this.sacrificeStock2 = 0
     this.fenceExpireFrame = undefined
     this.empTimer = 0
     this.rewindStock = 0
+    this.rewindStock2 = 0
     this.rewindPending = false
+    this.rewindPendingBy = 1
     this.mines = []
   }
 
@@ -436,10 +453,19 @@ export class World {
     // Fresh run: clear any deferred drops left over from a previous game
     // (e.g. a buffered drop from the final stage of a won run).
     this.pendingDrops = []
-    // Fresh run: reset super power-up inventory & frenzy state (§31).
+    // Fresh run: reset super power-up inventory & frenzy state (§31) — both
+    // players' inventories (a new run starts everyone empty).
     this.guardStock = 0
     this.frenzyStock = 0
     this.sacrificeStock = 0
+    this.guardStock2 = 0
+    this.frenzyStock2 = 0
+    this.sacrificeStock2 = 0
+    // rewindStock too — the historical startGame omitted it, so a fresh run
+    // used to inherit the previous run's 时光宝盒 stock; symmetric with the
+    // other three super kinds (each player starts every run empty).
+    this.rewindStock = 0
+    this.rewindStock2 = 0
     this.loadStage(startStage)
   }
 

@@ -145,7 +145,7 @@ describe('rewind edges in playback (P1-1) — stock consumption matches live', (
     expect(replayWorld.rewindPending).toBe(liveWorld.rewindPending) // true
   })
 
-  it('2p: rewind edges in BOTH streams are recorded and re-enacted (world-global stock)', () => {
+  it('2p: rewind edges in BOTH streams are recorded and re-enacted (per-player stocks)', () => {
     const TICKS = 80
     const p1Frames: InputFrame[] = Array.from({ length: TICKS }, (_, i) =>
       i === 20 ? { ...idle(), rewind: true } : idle(),
@@ -167,7 +167,10 @@ describe('rewind edges in playback (P1-1) — stock consumption matches live', (
       liveWorld.player2.spawnTimer = 0
       liveWorld.player2.shieldTimer = 0
     }
+    // Each player starts with their OWN 时光宝盒 inventory (superStocks.ts
+    // per-player split — P1@20 spends P1's, P2@50 spends P2's).
     liveWorld.rewindStock = 3
+    liveWorld.rewindStock2 = 3
     const in1 = new ScriptedInput(p1Frames)
     const in2 = new ScriptedInput(p2Frames)
     const sim = new Simulation(liveWorld, in1)
@@ -187,7 +190,9 @@ describe('rewind edges in playback (P1-1) — stock consumption matches live', (
     expect(un).not.toBeNull()
     expect(un!.p1[20].rewind).toBe(true)
     expect(un!.p2![50].rewind).toBe(true)
-    expect(liveWorld.rewindStock).toBe(1) // 3 - P1@20 - P2@50
+    // Each player spent from their OWN inventory only.
+    expect(liveWorld.rewindStock).toBe(2) // P1's: 3 - P1@20
+    expect(liveWorld.rewindStock2).toBe(2) // P2's: 3 - P2@50
 
     // ---- REPLAY ----
     const mgr = new ReplayManager({ now: () => 0 })
@@ -207,7 +212,8 @@ describe('rewind edges in playback (P1-1) — stock consumption matches live', (
       pc.update(16.7)
       guard++
     }
-    expect(replayWorld.rewindStock).toBe(liveWorld.rewindStock) // 1
+    expect(replayWorld.rewindStock).toBe(liveWorld.rewindStock) // 2
+    expect(replayWorld.rewindStock2).toBe(liveWorld.rewindStock2) // 2
     expect(replayWorld.rewindPending).toBe(liveWorld.rewindPending)
   })
 

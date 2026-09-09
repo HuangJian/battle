@@ -113,12 +113,20 @@ export class Simulation {
   /** One-Author routing (§4.1): consume the pending manual-rewind flag. */
   clearRewindPending(): void {
     this.world.rewindPending = false
+    // rewindPendingBy is deliberately NOT reset here — GameLoop calls this
+    // BEFORE deciding whether the rewind can start, and a failed start
+    // refunds through refundRewind() right after, which needs the flag to
+    // know whose inventory to return the charge to. It is refreshed on every
+    // activateRewind, so a stale value is never observable.
   }
 
   /** One-Author routing (§4.1): refund a rewind stock charge (rewind could
-   * not start — recovery busy or not playing). */
+   * not start — recovery busy or not playing). Returned to the SAME
+   * player's inventory that paid for it (rewindPendingBy, set by
+   * activateRewind — superStocks.ts per-player inventories). */
   refundRewind(): void {
-    this.world.rewindStock++
+    if (this.world.rewindPendingBy === 2) this.world.rewindStock2++
+    else this.world.rewindStock++
   }
 
   /**

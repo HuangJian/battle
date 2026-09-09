@@ -21,6 +21,7 @@ import { spawnBulletSpeedPxPerTick } from '../config/speed'
 import { recordEnemyKill, destroyBrickAoE } from './KillPipeline'
 import { genId } from './World'
 import { aabb } from '../utils/helpers'
+import { superStock, spendSuperStock, playerSlotOf } from './superStocks'
 import type { Bullet, Tank } from '../types'
 import type { InputLike } from './Input'
 import type { SimulationSystems } from './systems'
@@ -55,16 +56,17 @@ export class PlayerSystem {
       return
     }
 
-    // --- Active super-item release (F5 天降神兵 / F6 狂暴宣泄) ---
-    // Super items are human-only (God AI wasItemPressed returns false).
-    if (input && input.wasItemPressed('guard') && w.guardStock > 0) {
+    // --- Active super-item release (F5 天降神兵 / F6 狂暴宣泄 / F7 时光宝盒) ---
+    // Each player spends from THEIR OWN inventory (superStocks.ts) — in 双打 /
+    // coop / dual-spectate, P1's press never touches P2's stock and vice versa.
+    if (input && input.wasItemPressed('guard') && superStock(w, p, 'guard') > 0) {
       this.d.enemies.activateGuard(p)
     }
-    if (input && input.wasItemPressed('frenzy') && w.frenzyStock > 0) {
+    if (input && input.wasItemPressed('frenzy') && superStock(w, p, 'frenzy') > 0) {
       this.activateFrenzy(p)
     }
-    // Rewind (时光宝盒): triggered by F7
-    if (input && input.wasItemPressed('rewind') && w.rewindStock > 0) {
+    // Rewind (时光宝盒): triggered by F7 (P1) / G (P2)
+    if (input && input.wasItemPressed('rewind') && superStock(w, p, 'rewind') > 0) {
       this.activateRewind(p)
     }
 
@@ -148,10 +150,10 @@ export class PlayerSystem {
     w.pushEvent({ type: 'bullet_fired', bullet })
   }
 
-  /** Activate a 狂暴宣泄 barrage (consume one from inventory). */
+  /** Activate a 狂暴宣泄 barrage (consume one from the OWNER's inventory). */
   activateFrenzy(p: Tank): void {
     const w = this.d.world
-    w.frenzyStock--
+    spendSuperStock(w, p, 'frenzy')
     const interval = Math.max(1, p.nextFireInterval / 5)
     p.frenzyInterval = interval
     p.frenzyShotsLeft = FRENZY_SHOTS
@@ -165,14 +167,16 @@ export class PlayerSystem {
    * Activate 时光宝盒 (new-powerups-plan §4.3): consume one rewind stock and
    * trigger a manual rewind to the most recent snapshot.
    */
-  private activateRewind(_p: Tank): void {
+  private activateRewind(p: Tank): void {
     const w = this.d.world
-    if (w.rewindStock <= 0) return
+    if (superStock(w, p, 'rewind') <= 0) return
     if (w.state !== 'playing') return
     // Signal Game.ts to trigger RecoveryController.beginManualRewind()
-    // (actual rewind logic is in Game.ts, not Simulation — AGENTS §2.1)
-    w.rewindStock--
+    // (actual rewind logic is in Game.ts, not Simulation — AGENTS §2.1).
+    // Record WHOSE stock paid so a failed rewind refunds the same player.
+    spendSuperStock(w, p, 'rewind')
     w.rewindPending = true
+    w.rewindPendingBy = playerSlotOf(w, p)
   }
 
   // ================================================================

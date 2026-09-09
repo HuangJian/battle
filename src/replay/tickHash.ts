@@ -215,6 +215,11 @@ export function worldTickHash(world: World): string {
     world.frenzyStock,
     world.rewindStock,
     world.sacrificeStock,
+    // P2's separate inventory (双打/躺赢 per-player split — superStocks.ts)
+    world.guardStock2,
+    world.frenzyStock2,
+    world.rewindStock2,
+    world.sacrificeStock2,
     world.stageClearTimer,
     world.gameOverTimer,
     world.pickupWindowTimer,
