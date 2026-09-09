@@ -686,6 +686,7 @@ def worker_loop(
             time.sleep(poll_sec)
             continue
         idle_since = time.time()
+        _polls_since_log = 0  # claim 即上报：alive 行下次只数 claim 之后的轮询，不与本行重复
         jid = job["job_id"]
         lease_token = str(job.get("lease_token", "") or "")
         log(f"job {jid} claimed — downloading payload ({_polls_since_accept} polls since last accepted result)")
