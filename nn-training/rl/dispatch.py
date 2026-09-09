@@ -421,6 +421,15 @@ class RolloutDispatcher:
         local_cap = [local_slots]
         local_active = [0]
         last_remote_ok = [time.time()]
+        # 2026-09-09 诊断：local_slots 闸门实测失效（配置 1、实测并发≈8）时的一手证据。
+        # 线程孵化数 = max(local_slots, cap_full) ⇒ 闸门若失效，并发就等于这里的
+        # thread_slots；与实测并发对比即可判定闸门是否真的在起作用。
+        log(
+            f"[dist] slots: local_slots={local_slots} (max={local_slots_max}) "
+            f"cap_full={cap_full} workers={args.workers} "
+            f"thread_slots={max(local_slots, cap_full)} "
+            f"nodes={[(n['id'], n['c']) for n in nodes]}"
+        )
         remote_dead_sec = float(policy.get("remoteDeadSecs", 150))
 
         # 收尾调度（tail dispatch）：按局均耗时的 EWMA 把节点分为快/慢两档；
@@ -680,6 +689,12 @@ class RolloutDispatcher:
                                 inflight_ts[task] = time.time()
                                 inflight_nodes.setdefault(task, set()).add(nd_id)
                                 fanout_copy = True
+                                # 闸门配对（2026-09-10）：竞速副本此前不计入 local_active，
+                                # 结算却一律递减 ⇒ 计数被打成负数 ⇒ `local_active < local_cap`
+                                # 恒真、local_slots 闸门永久失效（实测 local_slots=1 跑出 8
+                                # 并发、tail-race 249 次全被 local 抢走）。本机槽照闸门计数。
+                                if nd is None:
+                                    local_active[0] += 1
                                 attempt = attempts.get(task, 0) + 1
                                 log(
                                     f"[dist] tail-race s{task[0]}/seed{task[1]} "
@@ -765,7 +780,8 @@ class RolloutDispatcher:
                     busy503 = isinstance(e, dist_common.DistError) and e.status == 503
                 with lock:
                     if nd is None and task is not None:
-                        local_active[0] -= 1
+                        # max(0, …)：任何未配对路径都不许把计数打成负数（负 = 闸门失效）。
+                        local_active[0] = max(0, local_active[0] - 1)
                     if summary is not None:
                         # v3.10 去重结算（对 main / 竞速(fan-out) 副本一律适用）：
                         # v3.7 只在 fanout_copy 且 seen 时丢——漏网的后到者（主副本/竞速副本）
