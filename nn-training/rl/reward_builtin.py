@@ -14,7 +14,7 @@ from collections.abc import Callable, Mapping
 
 import numpy as np
 
-from rl.reward_library import METRIC_INDEX
+from rl.reward_library import METRIC_INDEX, METRICS
 
 #: 内置实现注册表（名字 → 可调用）。添加新内置即在此登记。
 _REGISTRY: dict[str, Callable[[np.ndarray, Mapping[str, float]], np.ndarray]] = {}
@@ -70,8 +70,8 @@ def v7_phi(metrics: np.ndarray, params: Mapping[str, float]) -> np.ndarray:
     null 维（值不可算）**不进分子也不进分母**——TS `add(key, null)` 直接 return。
     """
     m = np.asarray(metrics, dtype=np.float64)
-    if m.ndim != 2:
-        raise ValueError(f"metrics 应为 [K,21]，收到 {m.shape}")
+    if m.ndim != 2 or m.shape[1] != len(METRICS):
+        raise ValueError(f"metrics 应为 [K,{len(METRICS)}]，收到 {m.shape}")
 
     def col(name: str) -> np.ndarray:
         return m[:, METRIC_INDEX[name]]

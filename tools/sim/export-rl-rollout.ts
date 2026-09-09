@@ -96,10 +96,12 @@ const RL_SHARD_FILES = [
   'mask.npy',
 ] as const
 
-// ---- 21 维指标列序（MUST mirror `nn-training/rl/reward_library.py::METRICS`）----
+// ---- 30 维指标列序（MUST mirror `nn-training/rl/reward_library.py::METRICS`）----
 // 改任一侧必须同步另一侧 + manifest metrics_version 不变则任何 shape[0] 下游
 // 会静默错读。idx10=starsCollected 补 plan §4.1 表的空槽（连续编号 0..20）。
-const METRICS_DIM = 21
+// idx21–28=道具流分类型计数（§9，metric v3：spawn/got × bomb/tank/freeze/shield，
+// 追加在尾部，老列号不动）。idx29=puSpawnStar（v4：star 供给列，拾取列 idx10 已有）。
+const METRICS_DIM = 30
 
 // F3：基地失守局终局 score ×= BASE_LOSS_MULT。旧值 0.25 让「投降」太便宜——
 // it1–it68 审计发现 agent 卡在「会动不会守家」局部最优（eval base_destroyed 占
@@ -192,6 +194,19 @@ interface Telemetry {
   powerUpsSpawned: number
   powerUpsCollected: number
   starsCollected: number
+  /** 分类型掉落/拾取（道具流遥测，§9）：spawn-side 经 census 按 pu.type 计数，
+   * pickup-side 经 powerup_collected 事件按 e.powerUp 计数（census 对账余量
+   * 归不清类型的那笔，沿用既有保守口径）。列序见 metricsRow 尾部 idx 21–28。 */
+  puSpawnBomb: number
+  puSpawnTank: number
+  puSpawnFreeze: number
+  puSpawnShield: number
+  puGotBomb: number
+  puGotTank: number
+  puGotFreeze: number
+  puGotShield: number
+  /** star 掉落数（c4 基线发现 star 供给不可测：拾取有列、掉落无列） */
+  puSpawnStar: number
   baseWallTotal: number
   baseWallIntact: number
   basePressureSum: number
@@ -305,7 +320,7 @@ interface ShardData {
   lpMove: number[]
   lpFire: number[]
   value: number[]
-  /** 每决策步的 21 维指标快照（[N+1][21]：决策行 + 终局行）——reward 的唯一定义源。 */
+  /** 每决策步的 30 维指标快照（[N+1][30]：决策行 + 终局行）——reward 的唯一定义源。 */
   metrics: number[][]
   done: number[]
   mask: number[]
@@ -413,6 +428,15 @@ function runOne(
     powerUpsSpawned: 0,
     powerUpsCollected: 0,
     starsCollected: 0,
+    puSpawnBomb: 0,
+    puSpawnTank: 0,
+    puSpawnFreeze: 0,
+    puSpawnShield: 0,
+    puGotBomb: 0,
+    puGotTank: 0,
+    puGotFreeze: 0,
+    puGotShield: 0,
+    puSpawnStar: 0,
     baseWallTotal: countBaseWall(world),
     baseWallIntact: countBaseWall(world),
     basePressureSum: 0,
@@ -441,7 +465,7 @@ function runOne(
   let decisionTicks = 0 // 决策 tick 数（K 间隔）
   let dodgeTicks = 0 // L0/保底层覆盖采样动作的决策 tick 数（§3.5 覆盖率口径）
 
-  // 21 维指标快照（列序 MUST mirror rl/reward_library.py::METRICS —— 见文件头
+  // 30 维指标快照（列序 MUST mirror rl/reward_library.py::METRICS —— 见文件头
   // METRICS_DIM 注释）。语义 = 旧 countersPhi 的同刻状态（tick t 决策前）。
   // 每决策步推一行 + 终局再推一行 ⇒ shard.metrics 恒为 [N+1] 行。
   const metricsRow = (): number[] => {
@@ -468,6 +492,15 @@ function runOne(
       tel.cellsVisited.size, // 18 cellsVisited
       world.playerLevel, // 19 playerLevel
       tel.enemyTotal, // 20 enemyTotal
+      tel.puSpawnBomb, // 21 puSpawnBomb
+      tel.puSpawnTank, // 22 puSpawnTank
+      tel.puSpawnFreeze, // 23 puSpawnFreeze
+      tel.puSpawnShield, // 24 puSpawnShield
+      tel.puGotBomb, // 25 puGotBomb
+      tel.puGotTank, // 26 puGotTank
+      tel.puGotFreeze, // 27 puGotFreeze
+      tel.puGotShield, // 28 puGotShield
+      tel.puSpawnStar, // 29 puSpawnStar
     ]
   }
 
@@ -560,7 +593,12 @@ function runOne(
       } else if (e.type === 'powerup_collected') {
         collectedThisTick++
         tel.powerUpsCollected++
-        if ((e as any).powerUp === 'star') tel.starsCollected++
+        const put = (e as any).powerUp
+        if (put === 'star') tel.starsCollected++
+        if (put === 'bomb') tel.puGotBomb++
+        else if (put === 'tank') tel.puGotTank++
+        else if (put === 'freeze') tel.puGotFreeze++
+        else if (put === 'shield') tel.puGotShield++
       } else if (e.type === 'enemy_hit') {
         tel.enemyHits++
         hitThisTick = true
@@ -574,6 +612,11 @@ function runOne(
         if (!seenPuIds.has(pu.id)) {
           seenPuIds.add(pu.id)
           tel.powerUpsSpawned++
+          if (pu.type === 'bomb') tel.puSpawnBomb++
+          else if (pu.type === 'tank') tel.puSpawnTank++
+          else if (pu.type === 'freeze') tel.puSpawnFreeze++
+          else if (pu.type === 'shield') tel.puSpawnShield++
+          else if (pu.type === 'star') tel.puSpawnStar++
         }
       }
       let vanished = 0
@@ -853,7 +896,7 @@ function main(argv: string[] = process.argv.slice(2)): void {
         schemaMajor: OBS_SCHEMA_MAJOR,
         collector: 'RL',
         policy: 'nn-student-rl',
-        metrics_version: 2, // [N+1,21] f8 —— shape[0] 下游据此分版本，防静默错读
+        metrics_version: 4, // [N+1,30] f8 —— shape[0] 下游据此分版本，防静默错读
         difficulty,
         stage: si,
         seed,
@@ -925,7 +968,7 @@ function main(argv: string[] = process.argv.slice(2)): void {
     dimMeans[k] = +(xs.reduce((a, b) => a + b, 0) / xs.length).toFixed(4)
   const summary = {
     collector: 'RL',
-    metrics_version: 2, // [N+1,21] f8 —— 与 manifest 同版（下游分版本读取）
+    metrics_version: 4, // [N+1,30] f8 —— 与 manifest 同版（下游分版本读取）
     customStages: stageJson ? '1' : '0', // 自定义关（Python 课程）标记
     difficulty,
     stages,

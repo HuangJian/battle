@@ -8,7 +8,7 @@
  * through the same masked-argmax deployment evaluator as the RL eval loop
  * (export-eval-game.runEvalOne, pure v7 scoring). Rows carry the full hit
  * accounting (kills / enemyHits 击中 / playerHits+playerDamageTaken 被击中),
- * the fields the RL metrics (reward_library METRICS 21-dim) track.
+ * the fields the RL metrics (reward_library METRICS 30-dim) track.
  *
  * Determinism & parallelism: each game is a pure function of (weights bytes,
  * stageLocal, seed) — fresh World, own seeded RNG, decodeStageGrid spawn

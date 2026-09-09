@@ -52,6 +52,15 @@ DEFAULT_RANGES: dict[str, tuple[float, float]] = {
     "cellsVisited": (0.0, 676.0),
     "playerLevel": (0.0, 4.0),
     "enemyTotal": (0.0, 40.0),
+    "puSpawnBomb": (0.0, 30.0),
+    "puSpawnTank": (0.0, 30.0),
+    "puSpawnFreeze": (0.0, 30.0),
+    "puSpawnShield": (0.0, 30.0),
+    "puGotBomb": (0.0, 30.0),
+    "puGotTank": (0.0, 30.0),
+    "puGotFreeze": (0.0, 30.0),
+    "puGotShield": (0.0, 30.0),
+    "puSpawnStar": (0.0, 30.0),
 }
 
 #: 单加性项在角点上的绝对上界（超过即判为数值爆炸风险）。

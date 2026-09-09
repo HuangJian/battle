@@ -46,6 +46,7 @@ import dist_common
 import rl.dispatch as _rdispatch  # monkeypatch 目标：run_local_rollout 的查找命名空间
 import run_rl
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+from rl.reward_library import METRICS_DIM  # fake shard 与落盘同维（metric v3）
 from rl.stream import run_rollout_stream as _run_rollout_stream  # B7：run_rl 模块级不再 re-export
 from schema import BOARD, FIRE_DIM, MASK_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM
 
@@ -219,8 +220,9 @@ def _synth_payload(n: int = 30) -> dict[str, np.ndarray]:
         "lp_fire": -np.abs(f32(n)) - 0.05,
         "value": f32(n),
         # plan/rl-training-config.md §4.2：per-tick 奖励由 Python 奖励引擎计算，
-        # metrics.npy [N+1,21] f8 存储——TS 侧不再落 reward.npy（intent 时代遗留）。
-        "metrics": np.zeros((n + 1, 21), dtype=np.float64),
+        # metrics.npy [N+1,29] f8 存储（metric v3，道具流 8 列）——TS 侧不再落
+        # reward.npy（intent 时代遗留）。本 fake 仅占位，实际消费方走引擎加载器。
+        "metrics": np.zeros((n + 1, METRICS_DIM), dtype=np.float64),
         "done": done,
         "mask": np.ones((n, MASK_DIM), dtype=np.int64),
     }

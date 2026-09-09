@@ -199,7 +199,7 @@ class TrainingSteps:
             )
 
     def _write_iter_stats(self, it: int) -> None:
-        """M1c：每 iter 落 metrics_stats.jsonl（21 维统计 + 血缘；非致命）。"""
+        """M1c：每 iter 落 metrics_stats.jsonl（全维度统计 + 血缘；非致命）。"""
         course = getattr(self.args, "course_obj", None)
         if course is None:
             return

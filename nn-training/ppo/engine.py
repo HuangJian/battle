@@ -149,18 +149,19 @@ def load_shard(dirpath: str) -> dict[str, np.ndarray]:
 
 
 def _reward_from_metrics(metrics: np.ndarray, manifest: dict, dirpath: str) -> np.ndarray:
-    """metrics [N+1,21] + manifest {outcome, score} → reward [N]（float32）。
+    """metrics [N+1,29] + manifest {outcome, score} → reward [N]（float32）。
 
     wrapper（§4.3.3）：Φ = formula(metrics)；r[i] = Φ[i+1]−Φ[i]；末样本 +=
     reconcile（score_reconcile → scale·score(gated)−(Φ[N]−Φ[0])；toy → terminal）。
     """
     from rl.reward_context import current as _ctx_current
+    from rl.reward_library import METRICS_DIM
 
     ctx = _ctx_current()
     m = np.asarray(metrics, dtype=np.float64)
-    if m.ndim != 2 or m.shape[1] != 21:
+    if m.ndim != 2 or m.shape[1] != METRICS_DIM:
         raise ValueError(
-            f"metrics 形状应为 [N+1,21]，收到 {m.shape}（{dirpath}）——metrics_version 不匹配？"
+            f"metrics 形状应为 [N+1,{METRICS_DIM}]，收到 {m.shape}（{dirpath}）——metrics_version 不匹配？"
         )
     mver = manifest.get("metrics_version")
     if mver is not None and int(mver) != ctx.metrics_version:

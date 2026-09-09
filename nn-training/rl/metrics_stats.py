@@ -1,9 +1,9 @@
 """metrics_stats —— 每 iter 指标统计量落盘（plan §4.7 / M1b）。
 
-`<traj>/metrics_stats.jsonl`：21 维每维 {mean,min,max,p50,p05,p95,std} + 派生
+`<traj>/metrics_stats.jsonl`：全维度每维 {mean,min,max,p50,p05,p95,std} + 派生
 episode_return / step_reward / term_contribution（顶层 `+−` 拆项占比）。
 
-时机（评审 P1-4）：numpy 向量化算 21×9 万步精确分位 + 一次 reward 求值 ≈ 几十
+时机（评审 P1-4）：numpy 向量化算全维度×9 万步精确分位 + 一次 reward 求值 ≈ 几十
 ms，**inline 算完对 PPO 完全无感**；默认 inline，不预设线程/队列复杂度
 （profiling >200ms 才升级后台 worker——当前不实现，留 TODO 注释）。
 """

@@ -1,14 +1,14 @@
 """reward_library —— 奖励公式引擎（M1a，plan/rl-training-config.md §4.3）。
 
-奖励的**唯一定义源在 Python**：TS 每决策步只落 21 维指标向量（`metrics.npy`，
-`[N+1,21]` f8），奖励由课程配置里的 `formula` 定义并在此求值。**没有命名
+奖励的**唯一定义源在 Python**：TS 每决策步只落 30 维指标向量（`metrics.npy`，
+`[N+1,30]` f8），奖励由课程配置里的 `formula` 定义并在此求值。**没有命名
 scheme** —— 旧课程（kill/kill2/balanced/dodge-mix）与 v7 都是配置公式，它们是
 公式引擎的验收用例，不是引擎之外的第二机制。
 
 三段式（评审 R2-1）：
     parse   —— `ast.parse` + 白名单递归校验（一次性，配置加载期）
     compile —— 缓存 AST，每 iter 解析一次（含 param_schedule 折算）
-    eval    —— 向量化：对 `[N+1,21]` 指标矩阵一次算完 Φ，禁逐 step Python 循环
+    eval    —— 向量化：对 `[N+1,30]` 指标矩阵一次算完 Φ，禁逐 step Python 循环
 
 Φ → reward 的 wrapper（§4.3.3，golden 锁定的对象）：
 
@@ -43,7 +43,7 @@ import numpy as np
 
 # ---------------------------------------------------------------- 指标向量
 
-#: 21 维指标名（TS 侧 `metrics.npy` 的列序，与 plan §4.1 逐项对齐）。
+#: 30 维指标名（TS 侧 `metrics.npy` 的列序，与 plan §4.1 逐项对齐）。
 #: 变更此元组 = shard 格式变更，必须同步 `METRICS_VERSION` 与 TS 落盘端。
 #:
 # > **idx10 勘误（v8 表 vs 正文）**：plan §4.1 的表只列出 20 个名字（左列 0–9、
@@ -52,6 +52,10 @@ import numpy as np
 #: 尚未入表、且已现成计数的字段）：baseAlive=11 … enemyTotal=20 全部保持原位，
 #: 索引连续无空槽。`startLives` 按 plan 由 `player.lives`/difficulty 派生，
 #: 走 `params`，不占向量维。
+#:
+# > **idx21–28（metric v3，plan/feasibility-map.md §9 道具流）**：分类型掉落/
+#: 拾取计数（spawn/got × bomb/tank/freeze/shield），一律追加在尾部，
+#: 0–20 列号永久不动。
 METRICS: tuple[str, ...] = (
     "ticks",  # 0
     "kills",  # 1
@@ -74,13 +78,22 @@ METRICS: tuple[str, ...] = (
     "cellsVisited",  # 18
     "playerLevel",  # 19
     "enemyTotal",  # 20  静态（本局敌人总数）
+    "puSpawnBomb",  # 21
+    "puSpawnTank",  # 22
+    "puSpawnFreeze",  # 23
+    "puSpawnShield",  # 24
+    "puGotBomb",  # 25
+    "puGotTank",  # 26
+    "puGotFreeze",  # 27
+    "puGotShield",  # 28
+    "puSpawnStar",  # 29  ← v4：star 供给列（拾取列 idx10 已有；c4 基线发现供给不可测）
 )
 
 METRIC_INDEX: dict[str, int] = {name: i for i, name in enumerate(METRICS)}
 METRICS_DIM = len(METRICS)
-#: shard manifest 版本：`[N+1,21]` 布局。任何用 `shape[0]` 推 episode 长度的
+#: shard manifest 版本：`[N+1,30]` 布局。任何用 `shape[0]` 推 episode 长度的
 #: 下游在版本不匹配时必须响亮报错，而非静默错读（评审 LC §1.1）。
-METRICS_VERSION = 2
+METRICS_VERSION = 4
 
 #: 终局 outcome 名（与 TS `manifest.outcome` 同源）；未列出的 terminal 键 = 0。
 OUTCOMES: tuple[str, ...] = ("stage_clear", "lives_exhausted", "timeout", "base_destroyed")
@@ -756,7 +769,7 @@ def assert_no_time_axis_reducers() -> None:
 
 def _self_check() -> None:
     assert_no_time_axis_reducers()
-    assert len(METRICS) == METRICS_DIM == 21, METRICS_DIM
+    assert len(METRICS) == METRICS_DIM == 30, METRICS_DIM
     assert len(set(METRICS)) == METRICS_DIM
 
 

@@ -57,6 +57,7 @@ from remote.protocol import (
 from remote.protocol import (
     job_id as make_job_id,
 )
+from rl.reward_library import METRICS_DIM  # numpy-only 模块，守免 torch 原则
 
 REPO = ROOT.parent  # git 根（hub_client.REPO_ROOT 与 git_head 用）
 
@@ -97,7 +98,7 @@ def _write_shard(dirpath: Path, stage: int, seed: int, wver: str = "w" * 64,
     """写一个最小完整 shard（obs.npy + metrics.npy + manifest.json）。"""
     dirpath.mkdir(parents=True, exist_ok=True)
     np.save(dirpath / "obs.npy", np.zeros((4, 14, 26, 26), dtype=np.uint8))
-    np.save(dirpath / "metrics.npy", np.zeros((5, 21), dtype=np.float64))
+    np.save(dirpath / "metrics.npy", np.zeros((5, METRICS_DIM), dtype=np.float64))
     np.save(dirpath / "value.npy", np.zeros(4, dtype=np.float32))
     mm = {
         "stage": stage,
@@ -343,6 +344,7 @@ def test_reward_nonfinite_rejected(tmp_path: Path) -> None:
     """reward 公式产出非有限值 → 响亮拒绝（防污染 GAE）。"""
     from rl.config import load_course
     from rl.reward_library import (
+        METRICS_DIM,
         FormulaError,
         build_reward_fn,
         reward_from_spec,
@@ -351,7 +353,7 @@ def test_reward_nonfinite_rejected(tmp_path: Path) -> None:
     course = load_course(str(ROOT / "curricula" / "p4-onset.jsonc"))
     spec = course.reward_spec()
     fn = build_reward_fn(spec)
-    metrics = np.zeros((3, 21), dtype=np.float64)
+    metrics = np.zeros((3, METRICS_DIM), dtype=np.float64)
     # 注入 NaN 指标（整行，避免公式未用该列而漏检）→ phi 应抛
     metrics[1, :] = float("nan")
     try:
@@ -360,7 +362,7 @@ def test_reward_nonfinite_rejected(tmp_path: Path) -> None:
     except (FormulaError, ValueError, OverflowError):
         pass
     # 正常指标不应抛
-    r = reward_from_spec(spec, np.zeros((3, 21), dtype=np.float64), "win", it=1)
+    r = reward_from_spec(spec, np.zeros((3, METRICS_DIM), dtype=np.float64), "win", it=1)
     assert r.shape == (2,)
 
 

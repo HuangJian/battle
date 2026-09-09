@@ -74,7 +74,7 @@ def main() -> None:
                 "reward": [float(x) for x in r],
             }
         )
-    doc = {"metrics_version": 2, "generated_by": "scripts/regen_reward_golden.py", "cases": cases}
+    doc = {"metrics_version": 4, "generated_by": "scripts/regen_reward_golden.py", "cases": cases}
     GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
     GOLDEN_PATH.write_text(json.dumps(doc, indent=1), encoding="utf-8")
     print(f"golden regenerated: {GOLDEN_PATH} ({len(cases)} cases)")

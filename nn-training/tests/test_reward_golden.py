@@ -467,7 +467,7 @@ def test_golden_file() -> None:
     if not path.exists():
         pytest.skip(f"golden 文件不存在（用 scripts/regen_reward_golden.py 生成）：{path}")
     golden = json.loads(path.read_text(encoding="utf-8"))
-    assert golden.get("metrics_version") == 2, "golden 与指标向量版本不匹配——需重新生成"
+    assert golden.get("metrics_version") == 4, "golden 与指标向量版本不匹配——需重新生成"
     cache: dict[str, Any] = {}
     for case in golden["cases"]:
         name = case["course"]
@@ -598,6 +598,52 @@ def test_spread_course_plumbing() -> None:
     assert load_course("p3-rd1").reward_spec().terminal_spread is True
 
 
+# ================================================================== 道具流指标 v3（§9）
+
+
+def test_item_metrics_layout_locked() -> None:
+    """v3 锁步：0–20 列号永久不动，新 8 列追加在尾部（TS metricsRow 同序）。"""
+    from rl.reward_library import METRIC_INDEX, METRICS
+
+    assert METRICS[20] == "enemyTotal"
+    assert list(METRICS[21:]) == [
+        "puSpawnBomb",
+        "puSpawnTank",
+        "puSpawnFreeze",
+        "puSpawnShield",
+        "puGotBomb",
+        "puGotTank",
+        "puGotFreeze",
+        "puGotShield",
+        "puSpawnStar",
+    ]
+    assert METRIC_INDEX["puGotBomb"] == 25
+    assert METRIC_INDEX["puSpawnShield"] == 24
+    assert METRIC_INDEX["puSpawnStar"] == 29
+
+
+def test_item_metrics_formula_and_envelope() -> None:
+    """新列可用：公式引用求值正确 + validation 包络放行。"""
+    spec = RewardSpec(
+        formula="wKill*kills + wBomb*puGotBomb - wDmg*playerHits",
+        params={"wKill": 3.0, "wBomb": 2.0, "wDmg": 1.0},
+        terminal={"timeout": -2.0},
+    )
+    rep = validate_reward(spec)
+    assert rep.ok, rep.errors
+    fn = build_reward_fn(spec)
+    m = _metrics(5, kills=2, enemyHits=3)
+    m[:, METRIC_INDEX["puGotBomb"]] = [0, 0, 1, 1, 1]
+    r = fn(m, "timeout", 0.0, 1)
+    assert r.shape == (4,) and np.all(np.isfinite(r))
+    # bomb 到手那步多 +wBomb（势差含 2.0）
+    dense = np.diff(3.0 * np.array([2, 2, 2, 2, 2])) + np.diff(
+        2.0 * np.array([0, 0, 1, 1, 1])
+    )
+    np.testing.assert_allclose(r[:-1], dense[:-1])
+    assert r[-1] == pytest.approx(dense[-1] - 2.0)
+
+
 if __name__ == "__main__":
     for fn in (
         test_no_time_axis_reducers,
@@ -611,6 +657,8 @@ if __name__ == "__main__":
         test_spread_reconcile_sum_identity,
         test_spread_default_off_and_identity,
         test_spread_course_plumbing,
+        test_item_metrics_layout_locked,
+        test_item_metrics_formula_and_envelope,
         test_param_schedule_linear_and_step,
         test_v7_formula_matches_builtin_bitwise,
         test_v7_first_kill_sentinel,

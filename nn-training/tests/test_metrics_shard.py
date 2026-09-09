@@ -1,7 +1,7 @@
 """test_metrics_shard —— metrics.npy 加载端到端（M1b，plan §4.2 / §11 DoD）。
 
 三层确定性/契约在 shard 级验证：
-  1. `[N+1,21] f8` 布局 + `metrics_version` 版本分支（错版本响亮报错，不静默错读）；
+  1. `[N+1,30] f8` 布局 + `metrics_version` 版本分支（错版本响亮报错，不静默错读）；
   2. Python 公式引擎在加载器里算 reward：Σr ≡ REWARD_SCALE×gatedScore（telescoping）；
   3. 无 holder 时响亮报错（旧 reward.npy 直读路径已删除）。
 """
@@ -46,7 +46,7 @@ def _write_shard(root: Path, name: str, n: int, metrics: np.ndarray, manifest: d
 
 
 def _synthetic_metrics(n: int, seed: int = 1) -> np.ndarray:
-    """n 决策行 + 1 终局行（21 维；kills 单调、baseAlive 终局可翻 0）。"""
+    """n 决策行 + 1 终局行（30 维；kills 单调、baseAlive 终局可翻 0）。"""
     rng = np.random.default_rng(seed)
     m = np.zeros((n + 1, METRICS_DIM), dtype=np.float64)
     m[:, METRIC_INDEX["ticks"]] = np.arange(n + 1) * 10.0
@@ -88,7 +88,7 @@ def test_load_episodes_reconcile_telescoping(tmp_path: Path) -> None:
             n,
             m,
             {
-                "metrics_version": 2,
+                "metrics_version": 4,
                 "nSamples": n,
                 "outcome": outcome,
                 "score": score,
@@ -135,7 +135,7 @@ def test_no_holder_loud_error(tmp_path: Path) -> None:
         "g1",
         n,
         _synthetic_metrics(n),
-        {"metrics_version": 2, "nSamples": n, "outcome": "timeout", "score": 0.0},
+        {"metrics_version": 4, "nSamples": n, "outcome": "timeout", "score": 0.0},
     )
     with pytest.raises(RuntimeError, match="reward_context holder 未设置"):
         engine.load_episodes(str(tmp_path))
@@ -149,7 +149,7 @@ def test_row_shape_mismatch_loud(tmp_path: Path) -> None:
         "g1",
         n,
         _synthetic_metrics(n - 1),  # 行数少一行
-        {"metrics_version": 2, "nSamples": n, "outcome": "timeout", "score": 0.0},
+        {"metrics_version": 4, "nSamples": n, "outcome": "timeout", "score": 0.0},
     )
     with (
         Scoped(reward_fn=_s4b_fn(), gamma=0.995, lam=0.95, it=1),
