@@ -677,7 +677,14 @@ class RolloutDispatcher:
                         # 新规则：保留 tail_fanout_dup 上限防复制爆炸；删除快慢分档，任意
                         # 空槽都能抢；PPO 完毕的 local 也参与；永不派回任务当前持有节点；
                         # 超时冷却黑名单节点也不能抢回同一任务。
-                        if not (nd is None and suspended) and inflight:
+                        # 本机槽参与竞速同样受 local_cap 闸门约束（2026-09-10）：此前这条
+                        # 分支只看「让位 + 有在飞任务」，8 个本机线程在竞速阶段全部放行
+                        # （tail-race 548 次被 local 抢走、self 1 / mac 2），local_slots
+                        # 形同虚设。local_slots=0 ⇒ 本机不参与竞速（只留失联兜底）。
+                        _local_lane_ok = nd is not None or (
+                            not suspended and local_active[0] < local_cap[0]
+                        )
+                        if _local_lane_ok and inflight:
                             # v3.16 使用 pick_race_target 排除当前节点 + 冷却黑名单
                             tail_cand = pick_race_target(
                                 inflight, tail_fanout_dup, nd_id,
