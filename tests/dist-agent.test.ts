@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'bun:test'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import {
   collectCodeHashEntries,
   computeCodeHashFromFiles,
@@ -6,6 +8,12 @@ import {
   unpackContainer,
   SHARD_FILES,
 } from '../tools/agent/sampler-agent'
+// F3/F4 纯实现（与 sampler-agent 同源，诊断工具/单测共用）
+import {
+  codeHashReport,
+  collectCodeHashEntries as collectCodeHashEntriesPure,
+  REPO_ROOT,
+} from '../tools/agent/codehash-files'
 import { buildPack, PACK_MAGIC } from '../tools/sim/pack-container'
 
 /**
@@ -162,5 +170,51 @@ describe('codeHash SSOT manifest (tools/agent/codehash-files.txt)', () => {
     expect(rels.some((r) => r.startsWith('src/nn/'))).toBe(true) // 目录条目递归纳入
     expect(rels.every((r) => !r.includes('\\'))).toBe(true) // 全 posix 正斜杠
     expect(new Set(rels).size).toBe(rels.length) // 无重复
+  })
+
+  it('F3 目录递归噪声过滤：隐藏/缓存/临时文件不计入；单文件条目不过滤', () => {
+    // fixture 落在仓库 tmp/pytest-tmp（gitignored）：manifest 条目按 REPO_ROOT 相对
+    // 路径解析，OS 临时目录的绝对路径无法经 walk 的 path.join(REPO_ROOT, ...) 到达。
+    const base = mkdtempSync(join(REPO_ROOT, 'tmp', 'pytest-tmp', 'chfix-f3-'))
+    const relDir = join(base, 'src', 'nn')
+    mkdirSync(join(relDir, 'wasm'), { recursive: true })
+    writeFileSync(join(relDir, 'conv.ts'), 'x')
+    writeFileSync(join(relDir, 'wasm', 'conv_feats.wasm'), 'wasm')
+    writeFileSync(join(relDir, '.DS_Store'), 'x')
+    mkdirSync(join(relDir, '__pycache__'), { recursive: true })
+    writeFileSync(join(relDir, '__pycache__', 'infer.pyc'), 'x')
+    writeFileSync(join(relDir, 'x.pyc'), 'x')
+    writeFileSync(join(relDir, 'x.tmp'), 'x')
+    writeFileSync(join(relDir, 'x~'), 'x')
+    const relPosix = base.slice(REPO_ROOT.length).replace(/[\\/]/g, '/').replace(/^\//, '')
+    const manifest = join(base, 'codehash-files.txt')
+    // 目录条目（受过滤）+ 显式单文件条目（不过滤）。
+    writeFileSync(manifest, `# fixture\n${relPosix}/src/nn/\n${relPosix}/src/nn/x.tmp\n`)
+    try {
+      const rels = collectCodeHashEntriesPure(manifest).map((e) => e.relPath)
+      const p = (f: string): string => `${relPosix}/src/nn/${f}`
+      // 目录递归只留合法文件；显式单文件 x.tmp 不过滤（F3 契约）。
+      expect(rels).toContain(p('conv.ts'))
+      expect(rels).toContain(p('wasm/conv_feats.wasm'))
+      expect(rels).toContain(p('x.tmp'))
+      for (const bad of ['.DS_Store', '__pycache__', 'x.pyc', 'x~']) {
+        expect(rels.some((r) => r === p(bad) || r.startsWith(p(bad) + '/'))).toBe(false)
+      }
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
+  })
+
+  it('F4 codeHashReport 输出格式：sha8\\tsize\\trelPath + codeHash=<full> 末行', () => {
+    const report = codeHashReport()
+    const lines = report.split('\n')
+    expect(lines[lines.length - 1]).toMatch(/^codeHash=[0-9a-f]{64}$/)
+    expect(lines.length).toBe(collectCodeHashEntriesPure().length + 1)
+    if (lines.length > 1) {
+      const first = lines[0].split('\t')
+      expect(first.length).toBe(3)
+      expect(first[0]).toMatch(/^[0-9a-f]{8}$/)
+      expect(Number.isInteger(Number(first[1]))).toBe(true)
+    }
   })
 })

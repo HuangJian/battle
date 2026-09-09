@@ -34,6 +34,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # 分布式采样（plan/distributed-rollout.md v3.3）：runId 使 iterId={runId}.{it} 全局唯一，
 # 杜绝 relaunch 后旧 run 未取结果与新 run 任务在 agent 侧混叠。
 RUN_ID = secrets.token_hex(8)
+
+# F6（plan/dist-codehash-stale-fix.md）：dedup 静默排除的显式告警计数。RolloutDispatcher
+# 每迭代新建实例，计数器必须挂模块级才跨轮累积；连续 ≥3 轮 dedup 且非 self ⇒ WARN。
+# 非 dedup 结局（节点 rejoin / restart-requested / dirty-tree / restart-failed）清零。
+DEDUP_STREAK: dict[str, int] = {}
 MAX_TASK_ATTEMPTS = (
     3  # 单局失败回队重试上限；超限计入 missing 当轮放弃（rotate 新鲜种子自然补覆盖）
 )
@@ -185,6 +190,8 @@ class RolloutDispatcher:
                 f"remote restart suppressed until committed+pushed"
             )
         cfg_nodes = [n for n in cfg.get("nodes", []) if n.get("enabled", True)]
+        # F6：跨轮 dedup 计数（模块级 dict 的局部别名）
+        dedup_streak = DEDUP_STREAK
 
         def _probe(n: dict):
             nid = str(n.get("id") or n.get("url") or "?")
@@ -207,10 +214,19 @@ class RolloutDispatcher:
             if ping.get("codeHash") != code_hash:
                 # 主动升级（guarded，2026-09-01 重启循环修复②）：分支 = 训练机当前分支
                 # （dist_common.UPGRADE_BRANCH 锁存）。护栏见 dist_common.request_upgrade_
-                # guarded——跨代去重（同节点同 agent codeHash 只杀一次）+ 脏工作区拒发
-                # （远端 pull 永不收敛，手动更新重启的进程不再被远控杀掉）。
+                # guarded——跨代去重（同节点同 (agent codeHash, 期望 hash) 只杀一次，
+                # F1：键含期望 hash）+ 脏工作区拒发（远端 pull 永不收敛，手动更新重启
+                # 的进程不再被远控杀掉）。
+                # F2（plan/dist-codehash-stale-fix.md）：mismatch 分支所有日志携带两侧
+                # hash 前缀——运维一眼看出差异在哪一侧（mac 事故 root-cause 前提）。
+                local_short = code_hash[:8]
+                remote_short = str(ping.get("codeHash") or "")[:8] or "none"
                 if not upgrade_branch:
-                    log(f"[dist] node {nid}: codeHash mismatch — excluded (red)")
+                    log(
+                        f"[dist] node {nid}: codeHash mismatch "
+                        f"(local={local_short} remote={remote_short}) — excluded (red)"
+                    )
+                    dedup_streak.pop(nid, None)
                     continue
                 ok, reason = dist_common.request_upgrade_guarded(
                     nid,
@@ -219,11 +235,13 @@ class RolloutDispatcher:
                     upgrade_branch,
                     str(ping.get("codeHash")),
                     dirty=dirty_files,
+                    expected_hash=code_hash,
                 )
                 if dist_common.is_self_node(n["url"], nid):
                     log(
-                        f"[dist] node {nid}: self node stale — restart-only upgrade "
-                        f"({reason}), no git pull; excluded this round"
+                        f"[dist] node {nid}: self node stale "
+                        f"(local={local_short} remote={remote_short}) — restart-only "
+                        f"upgrade ({reason}), no git pull; excluded this round"
                     )
                 elif reason == "restart-requested":
                     log(
@@ -231,22 +249,38 @@ class RolloutDispatcher:
                         f"(accepted) — will rejoin after restart"
                     )
                 elif reason == "dedup":
+                    # F6：连续 ≥3 轮 dedup 且非 self ⇒ 显式告警——dedup 是静默排除，
+                    # mac 事故 40+ 轮无任何提示；指引用 codehash-report 双侧 diff 定位。
+                    dedup_streak[nid] = dedup_streak.get(nid, 0) + 1
                     log(
-                        f"[dist] node {nid}: codeHash mismatch — restart already sent "
-                        f"for this agent codeHash (dedup) — excluded this round"
+                        f"[dist] node {nid}: codeHash mismatch "
+                        f"(local={local_short} remote={remote_short}) — restart already "
+                        f"sent for this agent codeHash (dedup) — excluded this round"
                     )
+                    if not dist_common.is_self_node(n["url"], nid) and dedup_streak[nid] >= 3:
+                        log(
+                            f"[dist] WARN node {nid}: stale for {dedup_streak[nid]} "
+                            f"rounds, upgrade suppressed by dedup — 在节点执行 "
+                            f"'bun tools/agent/codehash-report.ts' 与本机 diff"
+                            f"（见 plan/dist-codehash-stale-fix.md §4）"
+                        )
                 elif reason.startswith("dirty-tree"):
                     log(
-                        f"[dist] node {nid}: codeHash mismatch — remote pull cannot "
-                        f"converge (uncommitted training-tree changes), restart "
+                        f"[dist] node {nid}: codeHash mismatch "
+                        f"(local={local_short} remote={remote_short}) — remote pull "
+                        f"cannot converge (uncommitted training-tree changes), restart "
                         f"suppressed ({reason}) — excluded this round"
                     )
                 else:
                     log(
-                        f"[dist] node {nid}: codeHash mismatch — upgrade request failed "
-                        f"({reason}) — excluded this round"
+                        f"[dist] node {nid}: codeHash mismatch "
+                        f"(local={local_short} remote={remote_short}) — upgrade request "
+                        f"failed ({reason}) — excluded this round"
                     )
+                if reason != "dedup":
+                    dedup_streak.pop(nid, None)
                 continue
+            dedup_streak.pop(nid, None)
             remote_full = str(ping.get("bunVersion", "?"))
             if mm(remote_full) != mm(local_bun):
                 log(
@@ -776,6 +810,7 @@ class RolloutDispatcher:
                             meta_path,
                             {
                                 "node": nd_id,
+                                "mode": "rollout",  # F5：console 贡献列按 mode 分桶
                                 "it": iter_no,
                                 "stage": task[0],
                                 "seed": task[1],
@@ -865,6 +900,7 @@ class RolloutDispatcher:
                             meta_path,
                             {
                                 "node": nd_id,
+                                "mode": "rollout",  # F5：console 贡献列按 mode 分桶
                                 "it": iter_no,
                                 "stage": task[0],
                                 "seed": task[1],

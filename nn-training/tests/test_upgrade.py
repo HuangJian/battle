@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -21,8 +22,12 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO))
+# 仓库根 battle2（tests/ 上溯 3 层，与 rl/queue_local.py 同约定）——bun 侧脚本在
+# tools/agent/ 下，旧 REPO=nn-training 让对拍测试的 bun 路径指向不存在的
+# nn-training/tools/agent/sampler-agent.ts（2026-09-09 修复）。
+REPO = Path(__file__).resolve().parents[2]
+NN_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(NN_DIR))
 
 import dist_common
 
@@ -189,35 +194,87 @@ def test_upgrade_stale_nodes() -> None:
 
 
 def test_request_upgrade_guarded_dedup() -> None:
-    """跨代去重（修复「重启过的进程被再次远控重启」）：同节点同 agent codeHash 只
-    杀一次；节点 hash 变化（pull 生效/手动更新）后恢复资格。"""
+    """跨代去重（修复「重启过的进程被再次远控重启」）：同节点同 (agent codeHash,
+    期望 hash) 只杀一次；节点 hash 变化（pull 生效/手动更新）后恢复资格。
+
+    F1（plan/dist-codehash-stale-fix.md）：dedup 键纳入期望 hash——agent hash 没变但
+    训练机期望值变了（本机 commit/切分支/改集内文件）⇒ 允许再发一次升级。"""
     dist_common.reset_restart_state()
     mock = MockAgent(code_hash="stale-hash-abc")
     try:
         ok1, r1 = dist_common.request_upgrade_guarded(
-            "n1", mock.url(), "K", "goal-nn", "stale-hash-abc", dirty=[]
+            "n1",
+            mock.url(),
+            "K",
+            "goal-nn",
+            "stale-hash-abc",
+            dirty=[],
+            expected_hash="expect-1",
         )
         check(ok1 and r1 == "restart-requested", f"首次 → restart-requested, got {r1}")
         check(len(mock.restart_calls) == 1, "首次恰好 1 次 POST")
-        # 同一节点、同一 agent codeHash 再请求 → dedup，不杀进程。
+        # 同一节点、同一 agent codeHash + 同一期望 hash 再请求 → dedup，不杀进程。
         ok2, r2 = dist_common.request_upgrade_guarded(
-            "n1", mock.url(), "K", "goal-nn", "stale-hash-abc", dirty=[]
+            "n1",
+            mock.url(),
+            "K",
+            "goal-nn",
+            "stale-hash-abc",
+            dirty=[],
+            expected_hash="expect-1",
         )
-        check(ok2 is False and r2 == "dedup", f"同 hash 二次 → dedup, got {r2}")
+        check(ok2 is False and r2 == "dedup", f"同 (hash, 期望) 二次 → dedup, got {r2}")
         check(len(mock.restart_calls) == 1, "dedup 不再发 POST")
+        # F1 核心回归：agent hash 没变但训练机期望 hash 变了 ⇒ 能收到第二次升级请求
+        # （mac 事故「pull+重启 后 hash 不变 → 永远无法重新纳管」的修复）。
+        ok3, r3 = dist_common.request_upgrade_guarded(
+            "n1",
+            mock.url(),
+            "K",
+            "goal-nn",
+            "stale-hash-abc",
+            dirty=[],
+            expected_hash="expect-2",
+        )
+        check(ok3 and r3 == "restart-requested", f"期望 hash 变化 → 可再次重启, got {r3}")
+        check(len(mock.restart_calls) == 2, "期望 hash 变化后的重启恰好发出")
+        # 期望 hash 不变 + ping_hash 不变 ⇒ 仍 dedup（防 F1 把去重改成失效）。
+        ok4, r4 = dist_common.request_upgrade_guarded(
+            "n1",
+            mock.url(),
+            "K",
+            "goal-nn",
+            "stale-hash-abc",
+            dirty=[],
+            expected_hash="expect-2",
+        )
+        check(ok4 is False and r4 == "dedup", f"同 (hash, 期望) 三次 → 仍 dedup, got {r4}")
+        check(len(mock.restart_calls) == 2, "仍 dedup 不再发 POST")
         # 节点 hash 变化（pull 生效 / 手动更新成功但仍 stale）→ 恢复重启资格。
         mock.code_hash = "still-stale-but-new"
-        ok3, r3 = dist_common.request_upgrade_guarded(
-            "n1", mock.url(), "K", "goal-nn", "still-stale-but-new", dirty=[]
+        ok5, r5 = dist_common.request_upgrade_guarded(
+            "n1",
+            mock.url(),
+            "K",
+            "goal-nn",
+            "still-stale-but-new",
+            dirty=[],
+            expected_hash="expect-2",
         )
-        check(ok3 and r3 == "restart-requested", f"hash 变化后 → 可再次重启, got {r3}")
-        check(len(mock.restart_calls) == 2, "第二次重启恰好发出")
+        check(ok5 and r5 == "restart-requested", f"hash 变化后 → 可再次重启, got {r5}")
+        check(len(mock.restart_calls) == 3, "第三次重启恰好发出")
         # 不同节点互不影响（去重按 nid 隔离）。
-        ok4, r4 = dist_common.request_upgrade_guarded(
-            "n2", mock.url(), "K", "goal-nn", "still-stale-but-new", dirty=[]
+        ok6, r6 = dist_common.request_upgrade_guarded(
+            "n2",
+            mock.url(),
+            "K",
+            "goal-nn",
+            "still-stale-but-new",
+            dirty=[],
+            expected_hash="expect-2",
         )
-        check(ok4 and r4 == "restart-requested", f"另一节点首杀不受影响, got {r4}")
-        check(len(mock.restart_calls) == 3, "n2 的首杀发出")
+        check(ok6 and r6 == "restart-requested", f"另一节点首杀不受影响, got {r6}")
+        check(len(mock.restart_calls) == 4, "n2 的首杀发出")
     finally:
         mock.close()
 
@@ -318,6 +375,100 @@ def test_dirty_hash_files_smoke() -> None:
     check(isinstance(d, list), f"dirty_hash_files 返回 list（不抛）, got {type(d).__name__}")
 
 
+def test_codehash_f3_noise_filtering() -> None:
+    """F3（plan/dist-codehash-stale-fix.md）：目录递归受噪声过滤——.DS_Store /
+    __pycache__ / x.pyc / 编辑器临时后缀不计入；合法 .ts/.wasm 保留；显式单文件
+    条目不受过滤（契约：只对目录递归生效）。fixture 在 tmp/pytest-tmp 内临时造
+    （禁止污染仓库），测试后清理。"""
+    import time
+
+    real_manifest = dist_common.CODE_HASH_MANIFEST
+    base = (
+        Path(dist_common.REPO_ROOT)
+        / "tmp"
+        / "pytest-tmp"
+        / f"chfix-f3-{os.getpid()}-{int(time.time() * 1000)}"
+    )
+    fixture = base / "src" / "nn"
+    (fixture / "wasm").mkdir(parents=True, exist_ok=True)
+    (fixture / "conv.ts").write_text("x", encoding="utf-8")
+    (fixture / "wasm" / "conv_feats.wasm").write_bytes(b"wasm")
+    (fixture / ".DS_Store").write_bytes(b"\x00")
+    (fixture / ".editorconfig").write_text("x", encoding="utf-8")
+    (fixture / "__pycache__").mkdir(exist_ok=True)
+    (fixture / "__pycache__" / "infer.cpython-310.pyc").write_bytes(b"pyc")
+    (fixture / "node_modules" / "pkg").mkdir(parents=True, exist_ok=True)
+    (fixture / "node_modules" / "pkg" / "index.ts").write_text("x", encoding="utf-8")
+    (fixture / "x.pyc").write_bytes(b"pyc")
+    (fixture / "x.orig").write_text("x", encoding="utf-8")
+    (fixture / "x.rej").write_text("x", encoding="utf-8")
+    (fixture / "x.bak").write_text("x", encoding="utf-8")
+    (fixture / "x.tmp").write_text("x", encoding="utf-8")
+    (fixture / "x.log").write_text("x", encoding="utf-8")
+    (fixture / "x.swp").write_text("x", encoding="utf-8")
+    (fixture / "x~").write_text("x", encoding="utf-8")
+    rel_dir = os.path.relpath(fixture, dist_common.REPO_ROOT).replace("\\", "/")
+    manifest = base / "codehash-files.txt"
+    # 目录条目（受过滤）+ 显式单文件条目（不过滤）+ 不存在条目（跳过）。
+    manifest.write_text(
+        f"# fixture\n{rel_dir}/\n{rel_dir}/x.tmp\ntmp/definitely-missing/ignored.ts\n",
+        encoding="utf-8",
+    )
+    try:
+        dist_common.CODE_HASH_MANIFEST = str(manifest)
+        entries = dist_common._collect_code_hash_files()
+        rels = [rel for rel, _c in entries]
+        included = sorted(r for r in rels if r.startswith(rel_dir))
+        want = sorted(
+            [
+                f"{rel_dir}/conv.ts",
+                f"{rel_dir}/wasm/conv_feats.wasm",
+                f"{rel_dir}/x.tmp",  # 显式单文件条目不过滤
+            ]
+        )
+        check(included == want, f"F3 过滤后只留合法文件, got {included}")
+        for bad in (
+            ".DS_Store",
+            ".editorconfig",
+            "x.pyc",
+            "x.orig",
+            "x.rej",
+            "x.bak",
+            "x.log",
+            "x.swp",
+            "x~",
+            "__pycache__",
+            "node_modules",
+        ):
+            check(
+                not any(r == f"{rel_dir}/{bad}" for r in rels),
+                f"目录递归过滤 {bad}",
+            )
+    finally:
+        dist_common.CODE_HASH_MANIFEST = real_manifest
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_code_hash_report() -> None:
+    """F4：code_hash_report() 输出格式——每行 `sha8\tsize\trelPath`，末行
+    `codeHash=<full>`；行数 = 文件数 + 1。与 codehash-report.ts 同格式（双侧
+    diff 定位 stale 的前提）。"""
+    report = dist_common.code_hash_report()
+    lines = report.splitlines()
+    n_files = len(dist_common._collect_code_hash_files())
+    check(
+        len(lines) == n_files + 1,
+        f"报告行数 = 文件数+1 (got {len(lines)} vs {n_files}+1)",
+    )
+    check(lines[-1].startswith("codeHash="), f"末行 codeHash=<full>, got {lines[-1][:20]!r}")
+    if n_files:
+        first = lines[0].split("\t")
+        check(
+            len(first) == 3 and len(first[0]) == 8 and first[1].isdigit(),
+            f"首行 sha8\tsize\trelPath, got {lines[0]!r}",
+        )
+
+
 def test_codehash_manifest_expansion() -> None:
     """SSOT 清单 codehash-files.txt 展开：目录条目递归、文件条目直接纳入，relPath 全
     正斜杠且无重复；本次事故的 3 个关键文件必须在集内。"""
@@ -366,6 +517,30 @@ def test_codehash_bilingual_contract() -> None:
         len(ts_hash) == 64 and ts_hash == py_hash,
         f"双语 codeHash 一致 (TS={ts_hash[:12]}… Python={py_hash[:12]}…)",
     )
+    # F3/F4 文件集逐文件对拍（2026-09-01 事故防线：hash 相同但集不同由这里兜底）——
+    # --print-code-hash-files 输出与 Python 侧 _collect_code_hash_files 全等。
+    proc2 = subprocess.run(
+        [bun, str(agent), "--print-code-hash-files"],
+        cwd=str(REPO),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if proc2.returncode != 0:
+        check(False, f"bun --print-code-hash-files 非零退出: {proc2.stderr.strip()}")
+        return
+    ts_lines = proc2.stdout.strip().splitlines()
+    ts_files = {ln.split("\t")[2] for ln in ts_lines[:-1]}
+    py_files = {rel for rel, _c in dist_common._collect_code_hash_files()}
+    check(
+        ts_files == py_files,
+        f"双侧文件集逐文件一致 (TS={len(ts_files)} vs Python={len(py_files)})",
+    )
+    if ts_lines:
+        check(
+            ts_lines[-1].startswith("codeHash="),
+            f"--print-code-hash-files 末行 codeHash=<full>, got {ts_lines[-1][:20]!r}",
+        )
 
 
 def main() -> None:
@@ -377,6 +552,8 @@ def main() -> None:
     test_upgrade_stale_nodes_dirty_tree()
     test_parse_porcelain()
     test_dirty_hash_files_smoke()
+    test_codehash_f3_noise_filtering()
+    test_code_hash_report()
     test_codehash_manifest_expansion()
     test_codehash_bilingual_contract()
     print(f"== {'PASS' if not FAILS else 'FAIL'} ({len(FAILS)} failures) ==")

@@ -55,8 +55,13 @@ export interface NodeHistory {
   recent: boolean[]
   /** 该节点自己最近一次成功结算的轮次（-1 = 无成功记录）。 */
   lastIter: number
-  /** 全局最新轮（globalMaxIt）该节点的成功结算局数。 */
+  /** 全局最新轮（globalMaxIt）该节点的成功结算局数（rollout + eval 合计）。 */
   lastIterOk: number
+  /** 全局最新轮 rollout 成功局数（F5，plan/dist-codehash-stale-fix.md：贡献列按
+   *  mode 分桶——"只跑 eval 的节点"不再看起来在贡献 rollout）。 */
+  contribRollout: number
+  /** 全局最新轮 eval 成功局数。 */
+  contribEval: number
 }
 
 export function emptyHistory(): NodeHistory {
@@ -72,6 +77,8 @@ export function emptyHistory(): NodeHistory {
     recent: [],
     lastIter: -1,
     lastIterOk: 0,
+    contribRollout: 0,
+    contribEval: 0,
   }
 }
 
@@ -95,6 +102,10 @@ export function aggregateNodeHistory(): HistoryAggregate {
   const hist = new Map<string, NodeHistory>()
   // 各节点在「轮次 → 成功局数」的分布：上轮贡献度按全局最大轮对齐。
   const okByNodeIt = new Map<string, Map<number, number>>()
+  // F5：按 mode 分桶的 ok 计数（node -> it -> count），键与 okByNodeIt 同构。
+  // 声明必须在此处（解析循环之前）——const 在 TDZ 内引用会抛 ReferenceError。
+  const okByNodeItRollout = new Map<string, Map<number, number>>()
+  const okByNodeItEval = new Map<string, Map<number, number>>()
   const bump = (node: string): NodeHistory => {
     let h = hist.get(node)
     if (!h) {
@@ -175,6 +186,7 @@ export function aggregateNodeHistory(): HistoryAggregate {
             ts?: string
             reason?: string
             it?: number
+            mode?: string
           }
           if (!r.node) continue
           const nts = normTs(r.ts)
@@ -194,6 +206,15 @@ export function aggregateNodeHistory(): HistoryAggregate {
                 okByNodeIt.set(r.node, m)
               }
               m.set(it, (m.get(it) ?? 0) + 1)
+              // F5：按 mode 分桶——旧记录无 mode 字段按 rollout 处理（向后兼容）。
+              const mode = r.mode === 'eval' ? 'eval' : 'rollout'
+              const modeMap = mode === 'eval' ? okByNodeItEval : okByNodeItRollout
+              let mm = modeMap.get(r.node)
+              if (!mm) {
+                mm = new Map()
+                modeMap.set(r.node, mm)
+              }
+              mm.set(it, (mm.get(it) ?? 0) + 1)
             }
             if (typeof r.elapsedSec === 'number' && r.elapsedSec > 0) {
               h.elapsedRecent.push(r.elapsedSec)
@@ -227,7 +248,12 @@ export function aggregateNodeHistory(): HistoryAggregate {
     let maxIt = -1
     if (m) for (const it of m.keys()) if (it > maxIt) maxIt = it
     h.lastIter = maxIt
+    // 合计保留（渲染层仍可用）；分桶口径供贡献列拆分展示 rollout/eval。
     h.lastIterOk = (globalMaxIt >= 0 && m?.get(globalMaxIt)) || 0
+    const mr = okByNodeItRollout.get(node)
+    const me = okByNodeItEval.get(node)
+    h.contribRollout = (globalMaxIt >= 0 && mr?.get(globalMaxIt)) || 0
+    h.contribEval = (globalMaxIt >= 0 && me?.get(globalMaxIt)) || 0
     // 滑动窗口均值（最近 ≤50 局）：口径升级/负载变化后即时不被终身历史拖累。
     h.avgElapsedSec = h.elapsedRecent.length
       ? +(h.elapsedRecent.reduce((a, b) => a + b, 0) / h.elapsedRecent.length).toFixed(1)

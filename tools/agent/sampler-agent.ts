@@ -39,6 +39,17 @@ import {
 import { createRolloutRunner, type LaunchPlan, type RolloutRunner } from './rollout-runner'
 // 工作目录磁盘收敛纯函数（boot 孤儿清理 + 权重文件保留；修正则 2026-09-08，§374）
 import { staleOrphanPlan, sweepWeightFilePlan } from './workdir-cleanup'
+// codeHash 文件集展开（F3/F4 抽出，plan/dist-codehash-stale-fix.md）：纯实现 + 诊断
+// 工具与单测共用；本文件重新导出以保持对外 API 稳定（console api.ts / dist-agent.test.ts）。
+import {
+  codeHashReport,
+  collectCodeHashEntries,
+  computeCodeHash,
+  computeCodeHashFromFiles,
+  REPO_ROOT,
+} from './codehash-files'
+
+export { collectCodeHashEntries, computeCodeHash, computeCodeHashFromFiles }
 
 // 时间戳日志（2026-08-30 用户指令）：单点包装 console——agent 全部日志带本地时间
 // 前缀（HH:MM:SS，与训练侧 log() 同格式）。必须位于任何日志调用之前。
@@ -48,7 +59,6 @@ const _ts = (): string => new Date().toLocaleTimeString('sv-SE')
 console.log = (...a: unknown[]): void => _agentLog(`[${_ts()}]`, ...a)
 console.error = (...a: unknown[]): void => _agentLogErr(`[${_ts()}]`, ...a)
 
-const REPO_ROOT = path.resolve(import.meta.dir, '..', '..')
 const AGENT_AUTH_PATH = path.join(import.meta.dir, 'agent.auth')
 const WORK_DIR = path.join(REPO_ROOT, 'tmp', 'dist-agent')
 export const SHARD_FILES = [
@@ -199,60 +209,7 @@ function serveWithRetry(
 }
 
 // ---------------- codeHash（与 nn-training/dist_common.py 逐字节一致的双语契约） ----------------
-/** 对 entries（posix 相对路径 + 内容）按路径字典序，依次喂 sha256(path)+sha256(content)。 */
-export function computeCodeHashFromFiles(entries: { relPath: string; content: Buffer }[]): string {
-  const sorted = [...entries].sort((a, b) =>
-    a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0,
-  )
-  const h = createHash('sha256')
-  for (const e of sorted) {
-    h.update(e.relPath.replace(/\\/g, '/'))
-    h.update(createHash('sha256').update(e.content).digest())
-  }
-  return h.digest('hex')
-}
-
-const CODE_HASH_MANIFEST = path.join(import.meta.dir, 'codehash-files.txt')
-
-export function collectCodeHashEntries(): { relPath: string; content: Buffer }[] {
-  // 按 SSOT 清单 codehash-files.txt 展开 codeHash 文件集（与 dist_common.py 同源）。
-  // 清单每行一个条目：'#' 注释 / 空行忽略；以 '/' 结尾 = 目录（递归）；其余 = 具体
-  // 文件（相对 repo 根、posix 路径；不存在则跳过）。两侧读同一清单，杜绝单侧漂移。
-  const out: { relPath: string; content: Buffer }[] = []
-  let text = ''
-  try {
-    text = fs.readFileSync(CODE_HASH_MANIFEST, 'utf8')
-  } catch {
-    return out
-  }
-  const walk = (dir: string): void => {
-    if (!fs.existsSync(dir)) return
-    for (const name of fs.readdirSync(dir)) {
-      const p = path.join(dir, name)
-      if (fs.statSync(p).isDirectory()) walk(p)
-      else out.push({ relPath: path.relative(REPO_ROOT, p), content: fs.readFileSync(p) })
-    }
-  }
-  for (const raw of text.split(/\r?\n/)) {
-    const spec = raw.trim()
-    if (!spec || spec.startsWith('#')) continue
-    const s = spec.replace(/\\/g, '/')
-    if (s.endsWith('/')) walk(path.join(REPO_ROOT, ...s.slice(0, -1).split('/')))
-    else {
-      const p = path.join(REPO_ROOT, ...s.split('/'))
-      if (fs.existsSync(p) && fs.statSync(p).isFile())
-        out.push({ relPath: path.relative(REPO_ROOT, p), content: fs.readFileSync(p) })
-    }
-  }
-  // relPath 归一化正斜杠——Windows 上的 self agent 用 path.relative 会产出反斜杠，
-  // 与 Python 侧（已归一化）哈希不一致 ⇒ self 永远 codeHash 红姻。
-  for (const e of out) e.relPath = e.relPath.replace(/\\/g, '/')
-  return out
-}
-
-export function computeCodeHash(): string {
-  return computeCodeHashFromFiles(collectCodeHashEntries())
-}
+// 实现已迁至 ./codehash-files（纯模块，无本文件模块加载副作用）；此处仅 re-export。
 
 /**
  * memo 化 codeHash：启动/首次调用算一次缓存，仅在 /v1/update 的 git pull 真正切换
@@ -1430,9 +1387,15 @@ if (import.meta.main) {
     console.log(computeCodeHash())
     process.exit(0)
   }
+  if (process.argv.includes('--print-code-hash-files')) {
+    // F4：TSV 报告（与 codehash-report.ts / dist_common.code_hash_report() 同格式）。
+    // console.log 已被时间戳包装覆盖，用 process.stdout.write 保证输出可 diff。
+    process.stdout.write(codeHashReport() + '\n')
+    process.exit(0)
+  }
   if (showHelp) {
     console.log(
-      'usage: bun tools/dist/sampler-agent.ts --port 8443 [--workers N] [--cache-mb 2048] [--max-cache-items 32] [--print-code-hash] [--no-node]',
+      'usage: bun tools/dist/sampler-agent.ts --port 8443 [--workers N] [--cache-mb 2048] [--max-cache-items 32] [--print-code-hash] [--print-code-hash-files] [--no-node]',
     )
     process.exit(0)
   }

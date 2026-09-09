@@ -80,7 +80,14 @@ const poolColumns: Col<NodeHistoryRow>[] = [
         ) : (
           <span className="tc-muted">-</span>
         )}
-        {r.versionOk === false ? <Pill tone="y">旧</Pill> : null}
+        {r.versionOk === false ? (
+          <Pill
+            tone="y"
+            title={`local=${r.versionLocal || '?'} remote=${r.version || '?'} — 在节点跑 bun tools/agent/codehash-report.ts 与本机 diff`}
+          >
+            旧
+          </Pill>
+        ) : null}
       </>
     ),
   },
@@ -98,18 +105,22 @@ const poolColumns: Col<NodeHistoryRow>[] = [
     cell: (r) => (r.fail > 0 ? r.fail : <span className="tc-muted">0</span>),
   },
   {
+    // F5（plan/dist-codehash-stale-fix.md）：贡献按 mode 分桶——"只跑 eval 的节点"
+    // 不再看起来在贡献 rollout。合计 contrib 保留，展示 rollout/eval 两数。
     key: 'contrib',
-    label: '上轮贡献',
+    label: '上轮贡献 rl/ev',
     align: 'num',
     cell: (r) =>
       r.contrib > 0 ? (
-        r.contrib
+        <span title={`rollout ${r.contribRollout} · eval ${r.contribEval}`}>
+          {r.contribRollout}/{r.contribEval}
+        </span>
       ) : r.lastIter >= 0 && r.globalMaxIt >= 0 ? (
         <span
           className="tc-muted"
           title={`该节点最近一次成功结算在 it${r.lastIter}，已落后当前 it${r.globalMaxIt}`}
         >
-          {r.contrib}
+          0/0
         </span>
       ) : (
         '-'

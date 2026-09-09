@@ -261,10 +261,18 @@ export interface NodeHistoryRow {
   versionOk: boolean | null
   /** 短版本号（前 7 位）。 */
   version: string
+  /** 训练机侧短 hash（前 7 位）——F5（plan/dist-codehash-stale-fix.md）：stale 诊断
+   *  Pill 展示两侧 hash，一眼看出差异在哪一侧。 */
+  versionLocal: string
   pingMs: number | null
   ok: number
   fail: number
+  /** 上轮贡献合计（rollout + eval）。 */
   contrib: number
+  /** F5（plan/dist-codehash-stale-fix.md）：上轮贡献按 mode 分桶——"只跑 eval 的
+   * 节点"不再看起来在贡献 rollout。 */
+  contribRollout: number
+  contribEval: number
   lastIter: number
   globalMaxIt: number
   avgElapsedSec: number | null

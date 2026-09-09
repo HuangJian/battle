@@ -123,12 +123,29 @@ def compute_code_hash() -> str:
 CODE_HASH_MANIFEST = os.path.join(REPO_ROOT, "tools", "agent", "codehash-files.txt")
 
 
+def _skip_codehash_dir(name: str) -> bool:
+    """目录递归时的跳过规则（F3，plan/dist-codehash-stale-fix.md）：任一路径段以
+    '.' 开头（隐藏项 .git/.DS_Store/.venv）或名为 __pycache__ / node_modules。
+    与 tools/agent/codehash-files.ts isSkippedCodeHashDir 逐条对齐——契约写死在
+    codehash-files.txt 头部注释，任一侧改动必须双侧同步。"""
+    return name.startswith(".") or name in ("__pycache__", "node_modules")
+
+
+def _skip_codehash_file(name: str) -> bool:
+    """文件级跳过规则（F3）：隐藏项（. 开头）+ 编辑器/构建临时后缀。
+    与 tools/agent/codehash-files.ts isSkippedCodeHashFile 逐条对齐。"""
+    return name.startswith(".") or name.endswith(
+        (".pyc", ".orig", ".rej", ".bak", ".tmp", ".log", ".swp", "~")
+    )
+
+
 def _collect_code_hash_files() -> list[tuple[str, bytes]]:
     """按 SSOT 清单 codehash-files.txt 展开 codeHash 文件集（与 sampler-agent.ts 同源）。
 
     清单每行一个条目：'#' 注释 / 空行忽略；以 '/' 结尾 = 目录（递归纳入其下所有
-    文件）；其余 = 具体文件（相对 repo 根、posix 路径；不存在则跳过）。两侧读同一
-    清单、按同一规则展开，杜绝单侧硬编码漂移（2026-09-01 事故教训）。
+    文件，目录条目受 F3 噪声过滤）；其余 = 具体文件（相对 repo 根、posix 路径；
+    不存在则跳过，单文件条目不过滤）。两侧读同一清单、按同一规则展开，杜绝单侧
+    硬编码漂移（2026-09-01 事故教训）。
     """
     out: list[tuple[str, bytes]] = []
     try:
@@ -140,8 +157,12 @@ def _collect_code_hash_files() -> list[tuple[str, bytes]]:
         spec = spec.replace("\\", "/")
         if spec.endswith("/"):
             root = os.path.join(REPO_ROOT, *spec.rstrip("/").split("/"))
-            for dirpath, _dirs, files in os.walk(root):
+            for dirpath, dirnames, files in os.walk(root):
+                # F3：跳过隐藏/缓存目录（剪枝不递归），再按文件规则过滤。
+                dirnames[:] = [d for d in dirnames if not _skip_codehash_dir(d)]
                 for name in files:
+                    if _skip_codehash_file(name):
+                        continue
                     p = os.path.join(dirpath, name)
                     rel = os.path.relpath(p, REPO_ROOT).replace("\\", "/")
                     with open(p, "rb") as f:
@@ -153,6 +174,25 @@ def _collect_code_hash_files() -> list[tuple[str, bytes]]:
                 with open(p, "rb") as f:
                     out.append((rel, f.read()))
     return out
+
+
+def code_hash_report() -> str:
+    """codeHash 诊断报告（F4，plan/dist-codehash-stale-fix.md）：与
+    tools/agent/codehash-report.ts 同格式的 TSV，供双侧 diff 定位 stale 差异。
+
+    每行 `sha8\tsize\trelPath`（按 relPath 排序），末行 `codeHash=<full>`。
+    用法：python -c "import dist_common;print(dist_common.code_hash_report())"
+    """
+    entries = _collect_code_hash_files()
+    entries.sort(key=lambda e: e[0])
+    h = hashlib.sha256()
+    lines: list[str] = []
+    for rel, content in entries:
+        h.update(rel.encode())
+        h.update(hashlib.sha256(content).digest())
+        lines.append(f"{hashlib.sha256(content).digest().hex()[:8]}\t{len(content)}\t{rel}")
+    lines.append(f"codeHash={h.hexdigest()}")
+    return "\n".join(lines)
 
 
 # ---------------- HTTP ----------------
@@ -252,9 +292,12 @@ def request_upgrade(url: str, auth_key: str, branch: str, timeout: float = 20.0)
 # 处置（双层）：
 #   - 脏工作区护栏：hash 集内有未提交改动时，拒绝对**远端**节点下发 pull+restart
 #     （无效且具破坏性）；self/回环节点豁免（代码同源，纯重启即拾取工作区新代码）。
-#   - 跨代去重：同一节点 + 同一 agent codeHash 只下发一次 restart；节点 hash 变化
-#     （pull 生效 / 手动更新）后自动恢复资格。
-_RESTART_SEEN: dict[str, str] = {}
+#   - 跨代去重：同一节点 + 同一 (agent codeHash, 期望 hash) 只下发一次 restart；
+#     节点 hash 变化（pull 生效 / 手动更新）或训练机期望值变化（本机 commit/切分支/
+#     改集内文件）后自动恢复资格（F1，plan/dist-codehash-stale-fix.md：dedup 键纳入
+#     期望 hash——否则 mac 类字节差异稳定后训练机永远不再下发升级，运维 pull+重启
+#     因 hash 不变反而永远无法重新纳管）。
+_RESTART_SEEN: dict[str, tuple[str, str]] = {}  # nid -> (agent_ping_hash, expected_hash)
 
 
 def reset_restart_state() -> None:
@@ -310,29 +353,34 @@ def request_upgrade_guarded(
     ping_hash: str,
     timeout: float = 20.0,
     dirty: list[str] | None = None,
+    expected_hash: str = "",
 ) -> tuple[bool, str]:
     """带护栏的重启请求（ping 门 / rescan / upgrade_stale_nodes 共用入口）。
 
     返回 (ok, reason)：
       restart-requested  — 已下发，节点将 pull + 重启（本轮生效）
-      dedup              — 同节点同 agent codeHash 已重启过，跳过（防连环杀）
+      dedup              — 同节点同 (agent codeHash, 期望 hash) 已重启过，跳过
+                           （防连环杀；期望 hash 变化 ⇒ 允许再发一次，F1）
       dirty-tree:<n>     — 期望 hash 含 n 个未提交文件，远端 pull 永不收敛，拒发
       restart-failed     — agent 拒绝（409 grace / 5xx）或不可达；不写去重状态
                            （协调器下轮 rescan 自动重试）
     self/回环节点：永远**纯重启**（branch 强制空——共享工作区禁 pull），不受
     脏工作区护栏限制，去重同样生效。
     dirty 显式传参供测试与调用方复用每轮已检测结果；None = 自动检测。
+    expected_hash 默认 "" 使未传参调用方行为与旧版逐字等价（向后兼容）；调用方
+    必须显式传训练机当前 codeHash（F1 核心：dedup 键含期望值）。
     """
     if dirty is None:
         dirty = [] if is_self_node(url, nid) else dirty_hash_files()
     if not is_self_node(url, nid) and dirty:
         return False, f"dirty-tree:{len(dirty)}"
-    if _RESTART_SEEN.get(nid) == ping_hash:
+    key = (ping_hash, expected_hash)
+    if _RESTART_SEEN.get(nid) == key:
         return False, "dedup"
     actual_branch = "" if is_self_node(url, nid) else branch
     ok = request_upgrade(url, auth_key, actual_branch, timeout=timeout)
     if ok:
-        _RESTART_SEEN[nid] = ping_hash
+        _RESTART_SEEN[nid] = key
     return ok, ("restart-requested" if ok else "restart-failed")
 
 
@@ -372,6 +420,7 @@ def upgrade_stale_nodes(
             ping_hash,
             timeout=restart_timeout,
             dirty=dirty,
+            expected_hash=expected_hash,
         )
         out.append(
             {"id": nid, "upgraded": ok, "reason": reason, "agentVersion": ping.get("agentVersion")}

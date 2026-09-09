@@ -256,11 +256,44 @@ while ($true) {
 |---|---|---|
 | `node X: ping failed — excluded` | 休眠 / 网络不通 / 进程没起 | wake-lock；确认 agent 存活；从 PC `Test-NetConnection <ip> -Port 8443` |
 | curl 得到 `<a>Found</a>` / jwt 重定向页 | Cloud Shell 端口预览鉴权墙 | 改走 §4 cloudflared 隧道 |
-| `codeHash mismatch — excluded (red)` | commit 不一致或有本地改动 | `git status` 必须干净且在指定 commit |
+| `codeHash mismatch — excluded (red)` | commit 不一致或有本地改动 | `git status` 必须干净且在指定 commit；日志含 `local=xxx remote=yyy`——按 §7.1 双侧 codehash-report diff 定位 |
+| 日志连续多轮 `(dedup) — excluded` | 同 (agent hash, 期望 hash) 已被要求重启过（F1 键含期望值） | 训练机改集内文件 commit+push 后期望 hash 变化自动再发升级；持续 dedup 按 §7.1 双侧 diff |
 | `bunVersion ... differs — excluded (red)` | 非 1.4.x | 更换 bun 构建（major.minor 必须一致） |
 | 大量 `HTTP 503: {"error":"busy"}` | concurrency > workers | 调低 rl-config.json 的 concurrency |
 | `wver not cached here` (409) | 该节点尚未收到本轮权重 | 等下轮 weights POST；持续出现则查 POST 失败行 |
 | `Remote end closed` | 传输中断连（休眠/省电断网） | 插电 + wake-lock；任务 900s 超时自动回队 |
+
+### 7.1 codeHash stale 双侧诊断（codehash-report，plan/dist-codehash-stale-fix.md §4）
+
+`codeHash mismatch` 只说明两侧不一致，看不出差在哪一侧。双侧各生成一份文件级报告，diff 即定位：
+
+```bash
+# ① 训练机（协调器工作区）：
+python -c "import sys,dist_common;sys.stdout.reconfigure(newline='\n');print(dist_common.code_hash_report())" > local.tsv
+# ② 节点：
+bun tools/agent/codehash-report.ts > mac.tsv
+# ③ 对比：
+diff local.tsv mac.tsv
+```
+
+> Windows 上的 Python stdout 会把 `\n` 翻译成 `\r\n`（bun 侧恒为 `\n`）——不加
+> `sys.stdout.reconfigure(newline='\n')` 会让 diff 每行都报差异（内容其实一致）。
+> Unix 训练机可直接用 `python -c "import dist_common;print(dist_common.code_hash_report())"`。
+
+报告每行 `sha8\tsize\trelPath`（按路径排序），末行 `codeHash=<full>`——多文件 / 少文件 /
+内容不同一目了然。节点侧也可用 `bun tools/agent/sampler-agent.ts --print-code-hash-files`
+（输出同格式）。常见结论与处置：
+
+| 现象（diff 结论） | 处置 |
+|---|---|
+| 节点多出 `.DS_Store` / 临时文件（`.pyc`/`*~`/`*.log` 等） | 删除；此类噪声已由 F3 过滤规则永久免疫（双侧同规则） |
+| 节点有本地未提交改动 | 决定 commit+push，或 `git checkout -- <文件>` 还原（**禁用 git stash**） |
+| `core.autocrlf` 与训练机（`input`）不一致 | 对齐后重新 checkout 集内文件 |
+| `src/nn/wasm/conv_feats.wasm` 字节不同 | 从训练机复制覆盖，勿在节点本地重编 |
+| 分支/目录不对 | 确认 agent 的 `REPO_ROOT` 与分支 = 训练机 `UPGRADE_BRANCH` |
+
+> 训练机侧自身先自查：`dist_common.dirty_hash_files()` 非空（集内有未提交改动）时，远端
+> pull 永远无法收敛到期望 hash——先 commit+push 再谈节点。
 
 ## 8. 确定性说明（为什么跨架构安全）
 

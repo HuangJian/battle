@@ -186,7 +186,10 @@ def rescan_nodes(
                 continue  # 仍未上线，下轮再试
             if ping.get("codeHash") != code_hash:
                 # guarded 重启（跨代去重 + 脏树拒发，同 ping 门）；dedup 静默跳过
-                # （rescan 周期 ~15s，重复刷屏无信息量）。
+                # （rescan 周期 ~15s，重复刷屏无信息量）。F2：日志带两侧 hash——
+                # 与 ping 门同口径，运维一眼看出差异在哪一侧。
+                local_short = code_hash[:8]
+                remote_short = str(ping.get("codeHash") or "")[:8] or "none"
                 if not upgrade_branch:
                     continue
                 ok, reason = dist_common.request_upgrade_guarded(
@@ -196,21 +199,32 @@ def rescan_nodes(
                     upgrade_branch,
                     str(ping.get("codeHash")),
                     dirty=dirty_files,
+                    expected_hash=code_hash,
                 )
                 if reason == "restart-requested":
                     log(
-                        f"[dist] rescan {nid}: codeHash stale — requested upgrade "
-                        f"to {upgrade_branch} (accepted)"
+                        f"[dist] rescan {nid}: codeHash stale "
+                        f"(local={local_short} remote={remote_short}) — requested "
+                        f"upgrade to {upgrade_branch} (accepted)"
                     )
                 elif reason.startswith("dirty-tree"):
                     log(
-                        f"[dist] rescan {nid}: codeHash stale — remote restart "
+                        f"[dist] rescan {nid}: codeHash stale "
+                        f"(local={local_short} remote={remote_short}) — remote restart "
                         f"suppressed ({reason}: uncommitted training-tree changes)"
                     )
                 elif dist_common.is_self_node(n["url"], nid):
-                    log(f"[dist] rescan {nid}: self node stale — restart-only ({reason})")
+                    log(
+                        f"[dist] rescan {nid}: self node stale "
+                        f"(local={local_short} remote={remote_short}) — restart-only "
+                        f"({reason})"
+                    )
                 elif reason != "dedup":
-                    log(f"[dist] rescan {nid}: codeHash stale — upgrade request failed ({reason})")
+                    log(
+                        f"[dist] rescan {nid}: codeHash stale "
+                        f"(local={local_short} remote={remote_short}) — upgrade "
+                        f"request failed ({reason})"
+                    )
                 continue
             remote_full = str(ping.get("bunVersion", "?"))
             # mm 就地内联（param 已删）：major.minor 一致性红线（确定性，M4）
