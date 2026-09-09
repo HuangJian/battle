@@ -19,6 +19,25 @@ from rl.queue_local import (
 )
 
 
+def local_slots_max_of(args) -> int | None:
+    """本机直跑槽位上限（传给 run_rollout_queue 的 local_slots_max）。
+
+    语义（2026-09-09 统一；此前各调用方各写一套，collect_only 干脆漏传 ⇒
+    rl.local_slots 形同虚设、local 恒按 workers 满额并发）：
+      > 0  = 显式槽位数；
+      0    = **关闭**本机直跑（全部交给远端节点）——远端集体失联时仍会自动兜底接管；
+      None / 负数 = 未设置 → 退回 min(workers, 任务数)（既有 auto 行为）。
+    """
+    raw = getattr(args, "local_slots", None)
+    if raw is None:
+        return None
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return v if v >= 0 else None
+
+
 def bun_version(bun: str) -> str:
     try:
         return (

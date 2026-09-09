@@ -22,7 +22,7 @@ from rl.collect_only import precollect_snapshot_wver, spawn_collect_next
 from rl.eval_dispatch import dispatch_eval_bg
 from rl.eval_m1 import dispatch_eval_bg_m1
 from rl.log import log
-from rl.queue import RUN_ID, run_rollout, run_rollout_queue
+from rl.queue import RUN_ID, local_slots_max_of, run_rollout, run_rollout_queue
 from rl.resume import completed_pairs
 from rl.stream import run_rollout_stream
 
@@ -229,10 +229,10 @@ def dispatch_rollout_phase(
                 args,
                 dist_cfg,
                 iter_id,
-                # 本机直跑槽位（2026-09-06）：串行路径此前忽略 args.local_slots、
-                # 恒用 args.workers 封顶——rl.local_slots 热读后这里传下去使其真正
-                # 生效；0/缺省 = None = 退回 workers 封顶（既有行为不变）。
-                local_slots_max=(args.local_slots or None),
+                # 本机直跑槽位（2026-09-06 引入 / 2026-09-09 统一语义）：
+                # 0 = 关闭本机直跑（全交给远端），负数/None = auto 退回 workers 封顶。
+                # 旧写法 `args.local_slots or None` 把 0 也吞成 None（关不掉）。
+                local_slots_max=local_slots_max_of(args),
                 course_fp=course_fp,
             )
             # 串行：rollout 返回即 collector 收官；后台评估藏进随后的长 ppo_backend 空窗

@@ -234,12 +234,13 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
     ap.add_argument(
         "--local-slots",
         type=int,
-        default=_d("local_slots", 0),
+        default=_d("local_slots", None),
         help="trainer direct-thread slots (stream mode). R6 schedule: "
         "first-dispatched during collection; suspend once PPO waves "
         "begin (auto-resume if the whole cluster stalls); join eval "
-        "remainder after PPO. 0 = auto (max(2, workers//4))；默认取 "
-        "rl-config 的 rl.local_slots（每轮热读，2026-09-06 起）",
+        "remainder after PPO. 0 = 关闭本机直跑（全交给远端节点；远端集体失联仍自动"
+        "兜底接管）；缺省/未配置 = auto（stream 走 max(2, workers//4)，queue 走 "
+        "workers 封顶）。默认取 rl-config 的 rl.local_slots（每轮热读，2026-09-06 起）",
     )
     ap.add_argument(
         "--force",

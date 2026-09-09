@@ -12,7 +12,7 @@ import numpy as np
 
 import dist_common
 from rl.log import log
-from rl.queue import run_rollout_queue
+from rl.queue import local_slots_max_of, run_rollout_queue
 from rl.resume import _scan_shards, completed_pairs
 
 
@@ -152,12 +152,13 @@ def run_rollout_stream(
         with lock:
             pend.append(dict(summary))
 
-    # 本机直跑槽位：--local-slots 显式指定优先；0 = 自动 max(2, workers//4)
-    # （给 torch 让核的历史折中）。这些槽与远端 agent 同队抢任务，保证训练机
-    # 自身有保底采样份额——课程起步期每轮仅 12 局，不保底会被先孵化的远端
-    # 线程瞬间抢空（2026-08-25 实测 local=0）。
-    _ovr = int(getattr(args, "local_slots", 0) or 0)
-    local_slots = _ovr if _ovr > 0 else max(2, int(args.workers) // 4)
+    # 本机直跑槽位（2026-09-09 统一语义，与 queue.local_slots_max_of 一致）：
+    #   显式 >0 = 槽位数；0 = 关闭本机直跑（全交给远端，失联仍兜底）；
+    #   负数/未设置 = auto max(2, workers//4)（给 torch 让核的历史折中，
+    #   课程起步期每轮仅 12 局时保底采样份额，2026-08-25 实测 local=0）。
+    # 旧写法 `or 0` 把 0 也当 auto，关不掉本机直跑。
+    _ls = local_slots_max_of(args)
+    local_slots = _ls if _ls is not None else max(2, int(args.workers) // 4)
     policy = cfg.get("policy", {})
     kl_cap = float(policy.get("streamKlCap", 0.06))  # 0.12 为旧 2× 口径（P0-3 换算）
     _kl_cap_override = getattr(args, "_kl_cap", None)

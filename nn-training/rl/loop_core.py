@@ -176,10 +176,11 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 # rl.local_slots 热读（2026-09-06 用户指令）：每轮从 rl-config 覆盖
                 # args.local_slots——改配置下一轮即生效，无需重启训练。CLI 显式
                 # --local-slots 同样被覆盖（该值以 rl-config 为 SSOT；rl.workers 的
-                # 既有语义不变）。
-                hot_slots = int((dist_cfg or {}).get("rl", {}).get("local_slots", 0) or 0)
-                if hot_slots > 0:
-                    args.local_slots = hot_slots
+                # 既有语义不变）。0 = 关闭本机直跑（2026-09-09 语义统一）；无 key
+                # 不覆盖（保留 CLI/默认值）。
+                _hot = (dist_cfg or {}).get("rl", {}).get("local_slots")
+                if _hot is not None:
+                    args.local_slots = int(_hot)
                 t_rollout = time.time()
                 self._rollout_phase(it, pairs, dist_cfg, self._eval_on_round(it))
                 self._log_report(it, t_rollout)

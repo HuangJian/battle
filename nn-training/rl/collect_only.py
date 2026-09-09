@@ -12,7 +12,7 @@ from pathlib import Path
 import dist_common
 from rl.course import build_pairs
 from rl.log import log
-from rl.queue import REPO_ROOT, RUN_ID, run_rollout, run_rollout_queue
+from rl.queue import REPO_ROOT, RUN_ID, local_slots_max_of, run_rollout, run_rollout_queue
 
 
 def run_collect_only(args, traj_root, rotate_seed, bun) -> None:
@@ -76,6 +76,9 @@ def run_collect_only(args, traj_root, rotate_seed, bun) -> None:
                 iter_id,
                 on_result=_on_result,
                 halt_event=halt_event,
+                # 本机直跑槽位（2026-09-09 补齐：此前漏传 ⇒ rl.local_slots 失效、
+                # local 恒按 workers 满额并发）。0 = 关闭本机直跑（远端兜底保留）。
+                local_slots_max=local_slots_max_of(args),
                 course_fp=_course_file_fp(args),
             )
         else:
@@ -90,6 +93,7 @@ def run_collect_only(args, traj_root, rotate_seed, bun) -> None:
                 args,
                 dist_cfg,
                 iter_id,
+                local_slots_max=local_slots_max_of(args),
                 course_fp=_course_file_fp(args),
             )
         else:
