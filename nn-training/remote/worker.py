@@ -660,8 +660,12 @@ def worker_loop(
     done = 0
     idle_since = time.time()
     _last_alive_log = time.time()
+    _polls_since_log = 0
+    _polls_since_accept = 0
     while True:
         try:
+            _polls_since_log += 1
+            _polls_since_accept += 1
             job = poll_job(base_url, token)
         except Exception as e:
             log(f"poll failed: {e} — retry in {poll_sec}s")
@@ -673,16 +677,18 @@ def worker_loop(
             if max_idle_sec > 0 and time.time() - idle_since > max_idle_sec:
                 log(f"idle > {max_idle_sec}s — exit")
                 break
-            # 每 30s 打一次 alive 日志，让用户知道 worker 在正常运行
-            if time.time() - _last_alive_log > 30:
-                log(f"polling hub (no job yet, {done} done)")
+            # 每 60s 打一次 alive 日志，让用户知道 worker 在正常运行
+            # （附带周期内请求数——验证轮询周期真在生效 + 附带连续空闲秒数便于判断孤儿 job）。
+            if time.time() - _last_alive_log > 60:
+                log(f"polling hub (no job yet, {done} done, {_polls_since_log} polls, idle {int(time.time() - idle_since)}s)")
                 _last_alive_log = time.time()
+                _polls_since_log = 0
             time.sleep(poll_sec)
             continue
         idle_since = time.time()
         jid = job["job_id"]
         lease_token = str(job.get("lease_token", "") or "")
-        log(f"job {jid} claimed — downloading payload")
+        log(f"job {jid} claimed — downloading payload ({_polls_since_accept} polls since last accepted result)")
         # 心跳线程仅在有租约时启动（§343 竞速 hub 不下发 lease_token——无租约可续，
         # 结果胜负由 hub store_result 首写锁定决定，落后者 409 丢弃）。
         # 旧租约模式 hub：H1（review-hy P0）job 执行期间 60s 周期续租，job 结束 join。
@@ -711,6 +717,7 @@ def worker_loop(
             post_result(base_url, token, jid, result, lease_token=lease_token)
             log(f"job {jid} done — result accepted")
             done += 1
+            _polls_since_accept = 0
             job_ok = True
         except RetryableError as e:
             # 瞬时失败（网络/5xx/传输损坏）：主动还租约立即回池——不再付 30min 过期等待

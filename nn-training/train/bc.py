@@ -250,7 +250,12 @@ def train(args) -> dict:
     }
 
     t0 = time.time()
+    # 全局 epoch 偏移（--epoch-offset）：resume 续训时 ckpt/日志/归档按全局轮编号，
+    # 否则第二段 run 的 ckpt.1..N 会撞名第一段（2026-09-09 p3bc 61-90 事故）。
+    epoch_base = int(getattr(args, "epoch_offset", 0) or 0)
+    epoch_total = epoch_base + args.epochs
     for epoch in range(1, args.epochs + 1):
+        gepoch = epoch_base + epoch
         model.train()
         run = {"loss": 0.0, "n": 0, "vloss": 0.0, "vn": 0}
         for batch in train_dl:
@@ -309,7 +314,7 @@ def train(args) -> dict:
         history["fire_acc"].append(round(fa, 4))
         history["value_loss"].append(float("nan") if math.isnan(vl) else round(vl, 4))
         print(
-            f"[epoch {epoch:3d}/{args.epochs}] "
+            f"[epoch {gepoch:3d}/{epoch_total}] "
             f"train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
             f"acc move={ma:.3f} fire={fa:.3f} "
             + (f"value={vl:.4f} " if not math.isnan(vl) else "")
@@ -321,13 +326,13 @@ def train(args) -> dict:
         # Mid-run checkpoint (--ckpt-every N): save current weights (not best, for resume).
         ckpt_every = int(getattr(args, "ckpt_every", 0) or 0)
         if ckpt_every > 0 and epoch % ckpt_every == 0:
-            ckpt_path = f"{args.out}.ckpt.{epoch}"
+            ckpt_path = f"{args.out}.ckpt.{gepoch}"
             save_weights_json(
                 model,
                 ckpt_path,
-                extra_meta={"epoch": epoch, "best_val_loss": round(best_val, 4), "ckpt": True},
+                extra_meta={"epoch": gepoch, "best_val_loss": round(best_val, 4), "ckpt": True},
             )
-            print(f"[train] checkpoint epoch {epoch}/{args.epochs} -> {ckpt_path}")
+            print(f"[train] checkpoint epoch {gepoch}/{epoch_total} -> {ckpt_path}")
 
     # Restore best on CPU (weights export/registry must be bitwise-stable
     # regardless of training device).
@@ -346,7 +351,7 @@ def train(args) -> dict:
     out_dir = os.path.dirname(os.path.abspath(args.out))
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     versioned = os.path.join(
-        out_dir, f"weights.{stamp}_ep{args.epochs}_val{float(best_val):.4f}.json"
+        out_dir, f"weights.{stamp}_ep{epoch_total}_val{float(best_val):.4f}.json"
     )
     save_weights_json(model, versioned, extra_meta=meta)
     _safe_copy(versioned, args.out)  # active pointer for the TS runtime (read-only tolerant)
@@ -419,6 +424,12 @@ def main():
     )
     ap.add_argument(
         "--resume", default=None, help="resume training from a weights JSON (continue, not retrain)"
+    )
+    ap.add_argument(
+        "--epoch-offset",
+        type=int,
+        default=0,
+        help="global epoch base for --resume continuation (ckpt/log/archive numbering; 0 = fresh run)",
     )
     ap.add_argument(
         "--ckpt-every",
