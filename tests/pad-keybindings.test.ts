@@ -26,6 +26,7 @@ function pad(overrides: {
   const pressed = overrides.buttons ?? {}
   return {
     index: 0,
+    id: 'test-pad-0',
     axes: overrides.axes ?? [0, 0],
     buttons: Array.from({ length: 17 }, (_, i) => ({
       pressed: pressed[i] ?? false,

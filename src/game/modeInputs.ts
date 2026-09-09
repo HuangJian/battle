@@ -20,13 +20,16 @@ export interface ModeInputPlan {
   keepGodInput: boolean
   /** P1's God AI input survives (spectate). */
   keepSpectateGodInput: boolean
-  /** The second God AI survives (督战双玩家). */
-  keepGodInput2: boolean
-  /** The auto-fire decorator survives (coop only). */
-  keepAutoFire: boolean
 }
 
-/** Pure decision — which decorators the world's CURRENT mode requires. */
+/** Pure decision — which decorators the world's CURRENT mode requires.
+ *
+ *  Note (2p-review R2-P2-2): only the two DRIVER objects the decision table
+ *  itself must keep are columns here. The 督战双玩家 second AI (godInput2) and
+ *  the auto-fire decorator are NOT columns: the former is re-derived from
+ *  world.spectateDual inside `rearmSpectateGodInput()`, the latter follows the
+ *  branch structure directly — dead columns in a pure decision table are a
+ *  lie waiting to rot. */
 export function planModeInputs(world: {
   coop: boolean
   spectate: boolean
@@ -34,26 +37,11 @@ export function planModeInputs(world: {
   twoPlayer: boolean
 }): ModeInputPlan {
   if (world.coop) {
-    return {
-      keepGodInput: true,
-      keepSpectateGodInput: false,
-      keepGodInput2: false,
-      keepAutoFire: true,
-    }
+    return { keepGodInput: true, keepSpectateGodInput: false }
   }
   if (world.spectate) {
-    return {
-      keepGodInput: false,
-      keepSpectateGodInput: true,
-      keepGodInput2: world.spectateDual,
-      keepAutoFire: false,
-    }
+    return { keepGodInput: false, keepSpectateGodInput: true }
   }
   // twoPlayer and plain: no AI decorators survive.
-  return {
-    keepGodInput: false,
-    keepSpectateGodInput: false,
-    keepGodInput2: false,
-    keepAutoFire: false,
-  }
+  return { keepGodInput: false, keepSpectateGodInput: false }
 }

@@ -18,6 +18,7 @@ import type { GamepadSnapshot } from '../src/game/GamepadInput'
 function padWithButtonPressed(button: number): GamepadSnapshot {
   return {
     index: 0,
+    id: 'test-pad-0',
     axes: [0, 0, 0, 0],
     buttons: Array.from({ length: 17 }, (_, i) => ({
       pressed: i === button,

@@ -28,11 +28,16 @@ export { GAMEPAD_BUTTONS } from './settings'
 // ================================================================
 
 /** Minimal structural snapshot of one Gamepad (subset we consume).
- *  `index` is the browser's per-device id — stable while a pad stays
- *  connected, freed on disconnect — and is what the manager uses to keep
- *  player slots STABLE across polls (2p-review P0-4). */
+ *  `index` is the browser's per-device slot — stable while a pad stays
+ *  connected, FREED on disconnect and reusable by a later device (2p-review
+ *  R2-P2-3); `id` is the device's identity string. The manager keeps player
+ *  slots STABLE across polls by (index, id) pair (2p-review P0-4): an index
+ *  alone cannot identify a pad once the browser recycled it to another
+ *  device, which would silently swap players' pads with no event. */
 export interface GamepadSnapshot {
   index: number
+  /** Real `Gamepad.id` — stable device identity, unlike the recyclable index. */
+  id: string
   axes: readonly number[]
   buttons: readonly { pressed: boolean; value: number }[]
   connected: boolean
@@ -225,11 +230,14 @@ export class GamepadManager {
    */
   bindings: PadBindings = DEFAULT_PAD_BINDINGS
 
-  /** Overridable navigator seam — returns the live pads in slot order. */
+  /** Overridable navigator seam — returns the live pads in slot order.
+   *  Zero-allocation: the real `Gamepad` structurally carries every
+   *  GamepadSnapshot field (incl. `id` — device identity, 2p-review R2-P2-3),
+   *  so the raw array is returned as-is; this is called per render frame. */
   protected collect(): (GamepadSnapshot | null)[] {
-    const nav = navigator as Navigator & { getGamepads?: () => (GamepadSnapshot | null)[] }
+    const nav = navigator as Navigator & { getGamepads?: () => (Gamepad | null)[] }
     if (!nav.getGamepads) return []
-    return nav.getGamepads()
+    return nav.getGamepads() as (GamepadSnapshot | null)[]
   }
 
   /**
@@ -319,10 +327,13 @@ export class GamepadManager {
   }
 }
 
-/** True when a slot's pad appeared, disappeared, or changed identity. */
+/** True when a slot's pad appeared, disappeared, or changed identity.
+ *  Identity is the (index, id) pair (2p-review R2-P2-3): a browser can free
+ *  an index when its pad disconnects and hand it to a DIFFERENT pad, so an
+ *  index match alone would treat a silent pad swap as the same device. */
 function slotChanged(prev: GamepadSnapshot | null, next: GamepadSnapshot | null): boolean {
   if (!next !== !prev) return true
-  return !!next && !!prev && next.index !== prev.index
+  return !!next && !!prev && (next.index !== prev.index || next.id !== prev.id)
 }
 
 /**

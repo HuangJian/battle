@@ -12,46 +12,31 @@ import { planModeInputs } from '../src/game/modeInputs'
  */
 
 describe('planModeInputs — mode ⇒ which input decorators survive', () => {
-  it('coop keeps P2 God AI + P1 auto-fire, and clears spectate residue', () => {
+  it('coop keeps P2 God AI and clears spectate residue', () => {
     const plan = planModeInputs({
       coop: true,
       spectate: true, // stale flag from a previous spectate session
       spectateDual: true,
       twoPlayer: false,
     })
-    expect(plan).toEqual({
-      keepGodInput: true,
-      keepSpectateGodInput: false,
-      keepGodInput2: false,
-      keepAutoFire: true,
-    })
+    expect(plan).toEqual({ keepGodInput: true, keepSpectateGodInput: false })
   })
 
-  it('spectate keeps P1 God AI (+ the second AI when dual) and NEVER auto-fire', () => {
+  it('spectate keeps P1 God AI (dual handled inside rearmSpectateGodInput)', () => {
     const single = planModeInputs({
       coop: false,
       spectate: true,
       spectateDual: false,
       twoPlayer: false,
     })
-    expect(single).toEqual({
-      keepGodInput: false,
-      keepSpectateGodInput: true,
-      keepGodInput2: false,
-      keepAutoFire: false,
-    })
+    expect(single).toEqual({ keepGodInput: false, keepSpectateGodInput: true })
     const dual = planModeInputs({
       coop: false,
       spectate: true,
       spectateDual: true,
       twoPlayer: false,
     })
-    expect(dual).toEqual({
-      keepGodInput: false,
-      keepSpectateGodInput: true,
-      keepGodInput2: true,
-      keepAutoFire: false,
-    })
+    expect(dual).toEqual({ keepGodInput: false, keepSpectateGodInput: true })
   })
 
   it('twoPlayer keeps NO AI decorators — P2 is the second HUMAN keyboard', () => {
@@ -61,12 +46,7 @@ describe('planModeInputs — mode ⇒ which input decorators survive', () => {
       spectateDual: false,
       twoPlayer: true,
     })
-    expect(plan).toEqual({
-      keepGodInput: false,
-      keepSpectateGodInput: false,
-      keepGodInput2: false,
-      keepAutoFire: false,
-    })
+    expect(plan).toEqual({ keepGodInput: false, keepSpectateGodInput: false })
   })
 
   it('plain (no mode) keeps nothing', () => {
@@ -76,11 +56,6 @@ describe('planModeInputs — mode ⇒ which input decorators survive', () => {
       spectateDual: false,
       twoPlayer: false,
     })
-    expect(plan).toEqual({
-      keepGodInput: false,
-      keepSpectateGodInput: false,
-      keepGodInput2: false,
-      keepAutoFire: false,
-    })
+    expect(plan).toEqual({ keepGodInput: false, keepSpectateGodInput: false })
   })
 })

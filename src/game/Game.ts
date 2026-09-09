@@ -34,6 +34,17 @@ import { SnapshotController } from './GameSnapshot'
 import { ReplayController } from './GameReplay'
 
 /**
+ * 2p-review R2-P1: does the current `godInput` qualify as the COOP P2 driver?
+ * Coop needs an AI bound to player2 (`isPlayer2()`). A null (never armed) or
+ * P1-bound AI (leftover from spectate) must be rebuilt — reusing a P1-bound
+ * AI as the P2 driver would make P2 shadow P1's every decision (including
+ * wrong lives/lives2 accounting). Pure — headless-testable.
+ */
+export function needsCoopGodInputRebuild(ai: GodAIInput | null): boolean {
+  return !ai || !ai.isPlayer2()
+}
+
+/**
  * Game — top-level orchestrator. Owns the game loop, wires all systems.
  *
  * Composition, not inheritance (plan/refactor.agy.md §1.1): the former
@@ -190,14 +201,20 @@ export class Game {
     // without its entity collapses to the plain (no-decorator) case.
     const coopArmed = plan.keepGodInput && !!w.player2
     if (coopArmed) {
-      // Coop: P2 driven by God AI (re-create if missing), P1 auto-fires.
+      // Coop: P2 driven by God AI (2p-review R2-P1: ALWAYS a P2-bound AI — a
+      // leftover spectate P1 AI must never be reused as the P2 driver, or P2
+      // silently shadows P1's decisions), P1 auto-fires.
       this.godInput2 = null
-      if (!this.godInput) {
+      if (needsCoopGodInputRebuild(this.godInput)) {
         const rng = new RNG((w.seed ^ SEED_HASH) >>> 0)
         this.godInput = new GodAIInput(w, undefined, rng, (world) => world.player2)
         this.godInput.reset()
       }
-      this.autoFireInput = new AutoFireInput(this.input)
+      // 2p-review R2-P2-1: keep an existing (possibly DISARMED) auto-fire
+      // decorator across same-session restores — a manual rewind must not
+      // magically re-arm a player who already took over firing. Cross-mode
+      // spectate already nulls it, so a fresh coop session still gets armed.
+      this.autoFireInput ??= new AutoFireInput(this.input)
       this.audio.player2Id = w.player2?.id ?? null
     } else {
       // Spectate re-arms P1's God AI itself (incl. dual P2); plain and

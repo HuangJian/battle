@@ -1126,3 +1126,16 @@ pin。`bun run check` 全绿（1755 pass），build 绿。God-AI/World/录制器
   新增 UIManager 全启动集成测试（tests/ui-integration.test.ts，含菜单点击路由 / 本地化切换 / 手柄图例落 DOM）；
   i18n-smoke 改用 defineProperty 覆写 localStorage（happy-dom 是只读访问器，直接赋值会抛）。
 - **违反后果**：UI 测试退回手写解析器（覆盖漏、维护贵）；新增 UI 测试必须跑在 happy-dom 下，不许再造解析器。
+
+## §2026-09-09-ps2-r2fixes（2026-09-09，2p-ps2.review.md 第二轮评审）
+
+- **背景**：R2 评审 7 项——静态屏纯手柄饥饿（menu/pause/gameover 无轮询，Start 死键）、
+  coop 分支复用 stale spectate P1 AI 驱动 P2、无条件 new AutoFireInput 复活缴械态、
+  决策表死列、手柄 index 复用静默换垫、happy-dom preload 全局 localStorage、P2 label 缺 CSS。
+- **备选与否决**：静态屏常驻 rAF 轮询 —— 否，键鼠用户白付功耗（presence 门控 interval，各付各的）；
+  slot 只比 index —— 否，浏览器回收 index 给新设备即静默换垫（改 (index,id) 二元组）；
+  决策表 keepGodInput2/keepAutoFire 消费化 —— 否，dual 派生在 rearmSpectateGodInput、autofire 随分支结构，
+  死列删除更诚实。
+- **决定**：R2 全项修复 + 回归测试（static-pad-poll / mode-inputs-game / 同实例槽位连续性含 index 回收例）；
+  约定：settings 类测试必须自带 storage 隔离，不得依赖 happy-dom preload 的共享 localStorage（R2-P2-4）。
+- **违反后果**：纯手柄用户静态屏死键回归；coop 恢复后 P2 影子跟随 P1；手柄热插拔静默换垫无事件。

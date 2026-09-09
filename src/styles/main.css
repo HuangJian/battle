@@ -147,6 +147,15 @@ body {
   text-transform: uppercase;
 }
 
+/* 双打 Two-Player super-item key row (2p-review R2-P2-5): the P2 label renders
+   BELOW the P1 label inside the same .hud-item column, aligned like the P2
+   score/GOD slot (gold — the base color is set inline at creation). */
+.hud-super-p2 {
+  display: block;
+  line-height: 1;
+  margin-top: 2px;
+}
+
 .hud-value {
   font-family: var(--font-mono);
   font-size: 16px;

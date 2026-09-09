@@ -11,8 +11,52 @@ import { cycleBattleSpeed } from './battleSpeed'
 import { t } from '../i18n'
 import type { Game } from './Game'
 
+/**
+ * Static-screen pad-poll cadence (2p-review R2-P1): a pure-pad user on a
+ * static screen (menu / paused / gameover / victory) has no keyboard keydowns
+ * to wake the event-driven static path, so the GamepadManager is never polled
+ * and pad edges freeze. When a pad is present we run a minimal interval that
+ * polls + processes input like the keydown path would. ~10 Hz is plenty for
+ * menu-confirm / pause edges and keeps the idle cost trivial.
+ */
+export const STATIC_PAD_POLL_MS = 100
+
+/**
+ * R2-P1 pure decision: should the static-screen pad-poll interval run?
+ * True iff the game is live (not stopped / hidden / mid-playback) AND a pad
+ * is present AND the world is on a loop-idle (static) screen — exactly the
+ * conditions under which the event-driven static input path never runs.
+ * Keyboard-only users keep the 0-loop idle (no interval, fan off); pad users
+ * pay the tiny poll cost only while a static screen is actually up.
+ */
+export function wantsStaticPadPoll(o: {
+  running: boolean
+  hidden: boolean
+  playback: unknown
+  padPresent: boolean
+  worldState: string
+}): boolean {
+  return o.running && !o.hidden && !o.playback && o.padPresent && LOW_POWER_STATES.has(o.worldState)
+}
+
+/**
+ * R2-P1 pure presence scan over a getGamepads() result: any connected pad?
+ * Undefined (API unavailable — headless / older browsers) reads as no pads.
+ */
+export function anyGamepadConnected(pads: readonly (Gamepad | null)[] | undefined): boolean {
+  return (pads ?? []).some((p) => !!p && p.connected)
+}
+
 export class LoopController {
   constructor(private g: Game) {}
+  /**
+   * Whether ANY gamepad is currently connected (2p-review R2-P1) — kept in
+   * sync from gamepadconnected/disconnected events + an initial scan. Gates
+   * the static-screen pad-poll interval so keyboard-only users pay nothing.
+   */
+  private padPresent = false
+  /** The static-screen pad-poll interval id (0 = not running). */
+  private staticPollId = 0
   async start(): Promise<void> {
     this.g.input.attach(window)
     // 双打 Two-Player: P2's keyboard listens on the same window — independent
@@ -30,6 +74,14 @@ export class LoopController {
     // 督战 battle-speed hotkeys (Alt+> faster / Alt+< slower) — live play AND
     // replay playback, so the same shortcuts work wherever ticks are running.
     window.addEventListener('keydown', this.onSpeedKey)
+    // Gamepad presence (2p-review R2-P1): the browser fires connect/disconnect
+    // events, so we know whether a pad exists WITHOUT polling; the static-screen
+    // pad-poll interval is gated on this presence flag (keyboard-only users
+    // keep the 0-loop idle).
+    window.addEventListener('gamepadconnected', this.onGamepadPresenceEvent)
+    window.addEventListener('gamepaddisconnected', this.onGamepadPresenceEvent)
+    // Pads already connected before page load never fire an event — scan once.
+    this.padPresent = this.scanPadPresence()
     // Load persisted snapshots (IndexedDB) — snapshots survive reloads.
     await this.g.snapshots.hydrate()
     await this.g.replays.hydrate()
@@ -57,6 +109,10 @@ export class LoopController {
     this.g.running = true
     this.g.lastTime = performance.now()
     document.addEventListener('visibilitychange', this.onVisibility)
+    // Start the presence-gated pad-poll driver if a pad is already connected
+    // on a static screen (the first loop frame's scheduleFrame would too, but
+    // a static screen never arms rAF, so start it here explicitly).
+    this.syncStaticPadPoll()
     this.loop(this.g.lastTime)
   }
 
@@ -68,6 +124,10 @@ export class LoopController {
     window.removeEventListener('keydown', this.onStaticKey)
     window.removeEventListener('keydown', this.onPerfKey)
     window.removeEventListener('keydown', this.onSpeedKey)
+    window.removeEventListener('gamepadconnected', this.onGamepadPresenceEvent)
+    window.removeEventListener('gamepaddisconnected', this.onGamepadPresenceEvent)
+    // Stop the static-screen pad-poll driver — the game is shutting down.
+    this.syncStaticPadPoll()
     this.g.input.detach(window)
     this.g.input2.detach(window)
   }
@@ -81,6 +141,8 @@ export class LoopController {
       if (!this.g._hidden) {
         this.g._hidden = true
         cancelAnimationFrame(this.g.rafId)
+        // A hidden tab must not pay for the static pad-poll interval either.
+        this.syncStaticPadPoll()
       }
     } else if (this.g._hidden) {
       this.g._hidden = false
@@ -111,6 +173,8 @@ export class LoopController {
           this.g.presentation.markNeedsRender()
           this.scheduleFrame()
         }
+        // Tab visible again + pad + static screen → re-arm the pad-poll driver.
+        this.syncStaticPadPoll()
       }
     }
   }
@@ -134,9 +198,13 @@ export class LoopController {
       // True idle: no loop at all. Static-screen input is handled by
       // `onStaticKey` / mouse handlers, and the on-demand render gate keeps
       // the canvas correct, so the main thread stays fully asleep — fan off.
-      return
+    } else {
+      this.g.rafId = requestAnimationFrame(this.loop)
     }
-    this.g.rafId = requestAnimationFrame(this.loop)
+    // Presence-gated pad polling for static screens (2p-review R2-P1): start
+    // the minimal interval when a static screen + connected pad coexist, stop
+    // it on every other transition (action state / pad unplugged / playback).
+    this.syncStaticPadPoll()
   }
 
   /**
@@ -166,21 +234,40 @@ export class LoopController {
    * play can never double-fire with the loop.
    */
   onStaticKey = (_e: KeyboardEvent): void => {
-    if (!this.g.running || this.g._hidden) return
+    if (!this.canProcessStaticInput()) return
+    this.processStaticInput()
+  }
+
+  /**
+   * Shared guard list for the static (idle) screens — used by BOTH the
+   * keydown handler (keyboard users) and the static pad-poll interval (pure
+   * gamepad users, 2p-review R2-P1) so the two drivers can never disagree
+   * about when static input may be processed.
+   */
+  private canProcessStaticInput(): boolean {
+    if (!this.g.running || this.g._hidden) return false
     // During playback the vsync rAF loop owns ALL input (handlePlaybackInput)
     // — never double-process here, even if the replay drove the world into a
     // LOW_POWER state (e.g. 'gameover' at the end of a defeat replay).
-    if (this.g.playback) return
-    if (!LOW_POWER_STATES.has(this.g.world.state)) return
+    if (this.g.playback) return false
+    if (!LOW_POWER_STATES.has(this.g.world.state)) return false
     // UI modals own their own keyboard handling; never double-process.
-    if (this.g.presentation.ui.snapshotBrowser.isOpen()) return
-    if (this.g.presentation.ui.replayBrowser.isOpen()) return
-    if (this.g.presentation.ui.isControlsOpen()) return
+    if (this.g.presentation.ui.snapshotBrowser.isOpen()) return false
+    if (this.g.presentation.ui.replayBrowser.isOpen()) return false
+    if (this.g.presentation.ui.isControlsOpen()) return false
+    return true
+  }
 
-    // Process the key via the same code path the loop uses, then clear the
-    // per-frame input edges so a single press is consumed exactly once.
-    // Static screens run no rAF loop, so pads are polled here too — a Start
-    // press on the menu / pause / game-over screen is consumed exactly once.
+  /**
+   * One static-screen input frame: poll pads, process the state input via
+   * the same code path the rAF loop uses, clear the per-frame input edges so
+   * a single press is consumed exactly once, then repaint on demand + (re)arm
+   * the right loop driver. Shared by `onStaticKey` and the static pad-poll
+   * interval tick — static screens run no rAF loop, so pads are polled here
+   * too: a Start press on the menu / pause / game-over screen is consumed
+   * exactly once regardless of which driver delivered the frame.
+   */
+  private processStaticInput(): void {
     this.pollPads()
     this.g.handleStateInput()
     this.g.simulation.input.endFrame()
@@ -189,6 +276,56 @@ export class LoopController {
     this.g.input2.endFrame()
     // Repaint on demand + (re)arm the loop driver if the state changed.
     this.refreshStaticScreen()
+  }
+
+  /**
+   * Presence-gated static-screen pad polling (2p-review R2-P1): when a pad is
+   * connected AND the world is on a static (loop-idle) screen, a pure-pad
+   * user has NO keyboard keydowns to wake the event-driven static path — pad
+   * edges would freeze forever (menu Start can't confirm, pause Start can't
+   * resume, gameover Start can't return). Drive the same static-input frame
+   * from a minimal interval while that holds, and only then: keyboard-only
+   * users keep the 0-loop idle, each user pays for their own input path.
+   */
+  private syncStaticPadPoll(): void {
+    const want = wantsStaticPadPoll({
+      running: this.g.running,
+      hidden: this.g._hidden,
+      playback: this.g.playback,
+      padPresent: this.padPresent,
+      worldState: this.g.world.state,
+    })
+    if (want && this.staticPollId === 0) {
+      this.staticPollId = window.setInterval(this.onStaticPadTick, STATIC_PAD_POLL_MS)
+    } else if (!want && this.staticPollId !== 0) {
+      window.clearInterval(this.staticPollId)
+      this.staticPollId = 0
+    }
+  }
+
+  /** The interval driver — one static-input frame per tick, same guards as
+   *  the keydown path (a UI modal owns input while open; the loop owns
+   *  action states). No-op when the game stopped / went hidden meanwhile. */
+  private onStaticPadTick = (): void => {
+    if (!this.canProcessStaticInput()) return
+    this.processStaticInput()
+  }
+
+  /** Re-scan navigator on every connect/disconnect event (the event's own
+   *  `gamepad` only tells us about ONE device; others may remain). */
+  private onGamepadPresenceEvent = (): void => {
+    this.padPresent = this.scanPadPresence()
+    this.syncStaticPadPoll()
+  }
+
+  /** Any connected pad right now? False when the API is unavailable. */
+  private scanPadPresence(): boolean {
+    const nav = navigator as Navigator & { getGamepads?: () => (Gamepad | null)[] }
+    try {
+      return anyGamepadConnected(nav.getGamepads?.())
+    } catch {
+      return false
+    }
   }
 
   /**

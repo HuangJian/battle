@@ -24,11 +24,15 @@ import type { Direction } from '../src/constants'
 
 /** Distinct device indices — the browser's `Gamepad.index` contract. */
 let nextPadIndex = 0
+/** Distinct device ids — the browser's `Gamepad.id` contract (2p-review
+ *  R2-P2-3: identity is the (index, id) PAIR, since indices get recycled). */
+let nextPadId = 0
 
 /** Build a Gamepad-like plain object (tests construct these directly). */
 function pad(over: Partial<GamepadSnapshot> = {}): GamepadSnapshot {
   return {
     index: nextPadIndex++,
+    id: `test-pad-${nextPadId++}`,
     axes: [0, 0, 0, 0],
     buttons: new Array(17).fill(0).map(() => ({ pressed: false, value: 0 })),
     connected: true,
@@ -314,11 +318,28 @@ describe('GamepadManager — device slotting (pure, injected snapshots)', () => 
     const a = pad()
     m.pollForTests([a, null])
     m.consumeEvents()
-    // A is replaced by a DIFFERENT pad in the same navigator slot.
+    // A is replaced by a DIFFERENT pad in the same navigator slot (new index).
     const c = pad()
     m.pollForTests([c, null])
     expect(m.consumeEvents()).toEqual([{ player: 1, type: 'connected' }])
     expect(m.p1Snapshot).toBe(c)
+  })
+
+  it('reports a connect when the browser RECYCLES an index to a different pad (R2-P2-3)', () => {
+    const m = new GamepadManager()
+    const a = pad({ index: 0 })
+    m.pollForTests([a, null])
+    m.consumeEvents()
+    // A unplugs; the browser frees index 0 and hands it to a DIFFERENT pad
+    // (same index, new id). Index alone would call this the same device and
+    // silently swap pads with no event; the (index, id) pair must flag it.
+    const recycled = pad({ index: 0 })
+    m.pollForTests([recycled, null])
+    expect(m.consumeEvents()).toEqual([{ player: 1, type: 'connected' }])
+    expect(m.p1Snapshot).toBe(recycled)
+    // Steady state: polling the SAME (index, id) pair again is not a change.
+    m.pollForTests([recycled, null])
+    expect(m.consumeEvents()).toEqual([])
   })
 
   it('button indices match the standard-mapping constants', () => {
