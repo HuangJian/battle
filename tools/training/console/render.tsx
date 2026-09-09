@@ -37,7 +37,7 @@ function shell(title: string, bodyHtml: string, initialJson: string, scriptSrc: 
 /** 控制台首屏（只含 /api/state；pool 卡 skeleton + 客户端异步拉，E8/R7）。 */
 export function renderConsolePage(state: ConsoleStateView, scriptSrc = '/app.js'): string {
   const html = renderToString(<App initial={state} />)
-  return shell('NN 训练控制台', html, JSON.stringify(state), scriptSrc)
+  return shell('网训战役指挥部', html, JSON.stringify(state), scriptSrc)
 }
 
 /** 日志页（/log/<key>，SSR 首帧 + hydrate）。bundle 与 /app.js 同目录：/log.js（§371：旧默认

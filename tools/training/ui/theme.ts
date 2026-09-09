@@ -172,13 +172,22 @@ a.tc-preset{text-decoration:none;display:inline-block}
 .tc-flash--ok{background:var(--green-bg);color:var(--green);border:1px solid var(--green)}
 .tc-flash--bad{background:var(--red-bg);color:var(--red);border:1px solid var(--red)}
 
-/* ── Sparkline 概览条 ────────────────────────────────────── */
-.tc-spark-strip{display:flex;gap:var(--sp-4);flex-wrap:wrap;margin:var(--sp-1) 0 var(--sp-4)}
-.tc-spark-cell{flex:1;min-width:130px;background:#fafbfd;border:1px solid var(--border);border-radius:var(--r-2);padding:7px 10px;cursor:pointer}
-.tc-spark-cell--on{outline:2px solid var(--accent)}
-.tc-spark-head{display:flex;justify-content:space-between;align-items:baseline;font-size:var(--fs-2);color:var(--muted);margin-bottom:2px}
-.tc-spark-head b{color:var(--text);font-size:var(--fs-3)}
-.spark{display:block}
+/* ── 走势图（轻量 SVG + 悬停坐标） ────────────────────── */
+.tc-trend{position:relative;width:100%;min-height:40px}
+.tc-trend__svg{display:block;width:100%;height:100%;overflow:visible}
+.tc-trend__tip{position:absolute;top:0;transform:translate(-50%,-100%);display:flex;flex-direction:column;align-items:center;gap:1px;padding:3px 7px;border-radius:6px;background:var(--card);border:1px solid var(--border);box-shadow:var(--sh-1);pointer-events:none;white-space:nowrap;z-index:5;font-size:10.5px;line-height:1.3;margin-top:-4px}
+.tc-trend__tip-it{color:var(--muted)}
+.tc-trend__tip-val{color:var(--text);font-weight:700;font-variant-numeric:tabular-nums}
+
+/* 走势范围档位（全量 / 最近30 / 最近10）：胶囊分段控件，非独立按键 */
+.tc-trend-range{display:flex;gap:0;margin-bottom:var(--sp-2);align-self:flex-start}
+.tc-trend-range__btn{border:1px solid var(--border);background:var(--card);padding:3px 11px;font-size:var(--fs-2);color:var(--muted);cursor:pointer;transition:all .12s}
+.tc-trend-range__btn:first-child{border-radius:999px 0 0 999px}
+.tc-trend-range__btn:last-child{border-radius:0 999px 999px 0}
+.tc-trend-range__btn:not(:first-child){border-left:none}
+.tc-trend-range__btn:hover{color:var(--accent)}
+.tc-trend-range__btn--on{background:var(--accent);border-color:var(--accent);color:#fff}
+.tc-trend-range__btn--on:hover{color:#fff}
 .tc-hl{animation:tc-hl 300ms ease-out}
 @keyframes tc-hl{0%{background:#fff3bf}100%{background:transparent}}
 
@@ -293,8 +302,8 @@ a.tc-preset{text-decoration:none;display:inline-block}
 .tc-hero__sub{font-size:var(--fs-2);color:var(--muted)}
 .tc-hero__right{flex:1;display:flex;flex-direction:column;gap:var(--sp-2);min-width:300px}
 
-/* hero 右侧趋势网格：击杀/道具/eval 三等宽格，上「标签+值」下「通栏走势」 */
-.tc-trends{display:grid;grid-template-columns:repeat(3,1fr);gap:var(--sp-3);flex:1;min-width:300px;align-self:stretch}
+/* hero 右侧趋势网格：胜率/击杀/道具/eval 四等宽格，上「标签+值」下「走势图」（同行不换行） */
+.tc-trends{display:grid;grid-template-columns:repeat(4,1fr);gap:var(--sp-3);flex:1;min-width:300px}
 .tc-tcell{display:flex;flex-direction:column;gap:3px;padding:7px 10px;background:var(--row-hover);border:1px solid var(--border);border-radius:var(--r-2);min-width:0}
 .tc-tcell__hd{display:flex;align-items:baseline;justify-content:space-between;gap:var(--sp-2)}
 .tc-tcell__lbl{color:var(--muted);font-weight:600;font-size:var(--fs-2);white-space:nowrap}

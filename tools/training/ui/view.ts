@@ -368,7 +368,6 @@ export function stripIsoPrefix(text: string): string {
 
 // ────────────────────────── 纯函数：sparkline ──────────────────────────
 
-export const SPARK_POINTS = 20
 export const SPARK_W = 110
 export const SPARK_H = 26
 
@@ -420,30 +419,59 @@ export interface Series {
   key: string
   label: string
   vals: number[]
+  /** 与 vals 逐位对齐的迭代序号（时间正序）。 */
+  iters: number[]
 }
 
-/** 指标表列集（时间正序；actuals/eval 缺轮断点 = NaN 会被 sparkPoints 过滤）。 */
+/** 走势图范围档位：全量 / 最近 30 轮 / 最近 10 轮。 */
+export type TrendRange = 'all' | '30' | '10'
+
+/**
+ * 按范围档位截取序列。eval 走势在有限轮里常带 NaN 缺口，
+ * 其「最近 N」语义 = 最近 N 个**有效**评估点（而非最近 N 轮迭代），
+ * 避免窗口内全是 NaN 画空图；「全量」档同样只保留有效点。
+ * 其它指标 = 最近 N 轮迭代（按 iter 截取）。
+ */
+export function sliceSeries(series: Series, range: TrendRange): Series {
+  const { key, label, vals, iters } = series
+  if (vals.length === 0) return { key, label, vals, iters }
+  // eval：先过滤到有效评估点，再按档位截取。
+  if (key === 'eval') {
+    const pairs = vals.map((v, i) => ({ v, it: iters[i] })).filter((p) => Number.isFinite(p.v))
+    const sliced = range === 'all' ? pairs : pairs.slice(-Number(range))
+    return { key, label, vals: sliced.map((p) => p.v), iters: sliced.map((p) => p.it) }
+  }
+  if (range === 'all') return { key, label, vals, iters }
+  return { key, label, vals: vals.slice(-Number(range)), iters: iters.slice(-Number(range)) }
+}
+
+/** 指标表列集（时间正序；actuals/eval 缺轮断点 = NaN 会被 sparkPoints 过滤）。
+ *  返回全量时序（不做 20 轮截断），由 sliceSeries / TrendChart 按范围档位截取。 */
 export function metricSeries(rows: IterRow[]): Series[] {
-  const chrono = [...rows].sort((a, b) => a.iter - b.iter).slice(-SPARK_POINTS)
+  const chrono = [...rows].sort((a, b) => a.iter - b.iter)
+  const iters = chrono.map((r) => r.iter)
   return [
-    { key: 'winRate', label: '胜率', vals: chrono.map((r) => r.winRate) },
-    { key: 'scoreMean', label: '得分', vals: chrono.map((r) => r.scoreMean) },
-    { key: 'kl', label: 'KL', vals: chrono.map((r) => r.kl) },
-    { key: 'entropy', label: '熵', vals: chrono.map((r) => r.entropy) },
+    { key: 'winRate', label: '胜率', vals: chrono.map((r) => r.winRate), iters },
+    { key: 'scoreMean', label: '得分', vals: chrono.map((r) => r.scoreMean), iters },
+    { key: 'kl', label: 'KL', vals: chrono.map((r) => r.kl), iters },
+    { key: 'entropy', label: '熵', vals: chrono.map((r) => r.entropy), iters },
     {
       key: 'eval',
       label: 'eval 胜率',
       vals: chrono.map((r) => (r.evalData ? (r.evalData.winRate as number) : Number.NaN)),
+      iters,
     },
     {
       key: 'kills',
       label: '击杀',
       vals: chrono.map((r) => (r.actuals ? r.actuals.totalKills : Number.NaN)),
+      iters,
     },
     {
       key: 'pu',
       label: '道具',
       vals: chrono.map((r) => (r.actuals ? r.actuals.totalPU : Number.NaN)),
+      iters,
     },
   ]
 }
@@ -672,6 +700,7 @@ export const TC_CARD_KEY = (id: string): string => `${TC_KEY_PREFIX}card.${id}`
 export const TC_INTERVAL_KEY = (id: string): string => `${TC_KEY_PREFIX}interval.${id}`
 export const TC_GLOBAL_INTERVAL = `${TC_KEY_PREFIX}globalInterval`
 export const TC_METRICS_FILTER = `${TC_KEY_PREFIX}metrics.filter`
+export const TC_TREND_RANGE = `${TC_KEY_PREFIX}trend.range`
 export const TC_NODE_VIEW = (view: 'ctl' | 'pool', key: string): string =>
   `${TC_KEY_PREFIX}node.${view}.${key}`
 

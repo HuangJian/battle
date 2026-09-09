@@ -15,6 +15,7 @@ import os from 'os'
 import path from 'path'
 import { readIterMetrics } from '../tools/training/console/iters'
 import { LOG_DIR } from '../tools/training/paths'
+import type { ConsoleStateView } from '../tools/training/ui/view'
 
 // ── 隔离：rl-config.json 与 console-state.json 指向临时副本（跑前备份，跑后还原）──
 
@@ -421,18 +422,19 @@ describe('console sparkline (ui/view)', () => {
     expect(pairs.length).toBe(2)
   })
 
-  it('hero 渲染胜率趋势 sparkline（有数据课程）', async () => {
+  it('hero 渲染胜率趋势走势图（有数据课程）', async () => {
     const s = await api.buildStateView()
     const html = render.renderConsolePage(s)
     expect(html).toContain('tc-hero')
     if (s.metrics.available && s.metrics.iters.length > 0) {
-      expect(html).toContain('<svg class="spark"')
+      // 大胜率走势 SVG（tc-trend__svg），含坐标轴网格线
+      expect(html).toContain('tc-trend__svg')
+      expect(html).toContain('<line') // 网格线
     }
   })
 
-  it('sparkline 只取最近 20 轮且时间正序', () => {
-    // 直接验证 metricSeries 的排序窗口语义（经 renderConsolePage 间接覆盖亦可）
-    const s = {
+  describe('console trend chart / 走势范围 (§382: 全量/最近30/最近10)', () => {
+    const mkView = (n: number, withEval: boolean): ConsoleStateView => ({
       time: 't',
       course: 'c',
       courses: [],
@@ -442,7 +444,7 @@ describe('console sparkline (ui/view)', () => {
       phase: { phase: 'idle' as const, sinceMs: null, iter: null },
       metrics: {
         available: true,
-        iters: Array.from({ length: 30 }, (_, i) => ({
+        iters: Array.from({ length: n }, (_, i) => ({
           iter: 100 - i,
           time: '',
           winRate: i / 100,
@@ -465,35 +467,118 @@ describe('console sparkline (ui/view)', () => {
           loot: 0,
           kills: 0,
           actuals: { games: 4, totalKills: i, totalPU: i % 3, avgTicks: 100 },
-          evalData: {
-            time: '',
-            games: 10,
-            wins: i % 10,
-            winRate: (i % 10) / 10,
-            clears: 0,
-            clearRate: 0,
-            dropped: 0,
-            sec: 30,
-            wver: 'v1',
-            outcomes: {},
-            avgTicks: 100,
-            totalKills: i,
-            totalPU: 0,
-            scoreMean: 0,
-            scoreStd: 0,
-          },
+          evalData: withEval
+            ? {
+                time: '',
+                games: 10,
+                wins: i % 10,
+                winRate: (i % 10) / 10,
+                clears: 0,
+                clearRate: 0,
+                dropped: 0,
+                sec: 30,
+                wver: 'v1',
+                outcomes: {},
+                avgTicks: 100,
+                totalKills: i,
+                totalPU: 0,
+                scoreMean: 0,
+                scoreStd: 0,
+              }
+            : null,
         })),
       },
-    }
-    const html = render.renderConsolePage(s)
-    // 30 轮输入 → hero 画 4 条 polyline：KPI 大胜率走势 1 条 + 击杀/道具/eval 三格各 1 条（胜率不再重复画），点数 ≤20
-    const polylines = html.match(/<polyline/g) ?? []
-    expect(polylines.length).toBe(4)
-    for (const seg of html.split('<polyline').slice(1)) {
-      const pts = seg.split('/>')[0]!.match(/[\d.]+,[\d.]+/g) ?? []
-      expect(pts.length).toBeLessThanOrEqual(20)
-      expect(pts.length).toBeGreaterThan(0)
-    }
+    })
+
+    it('metricSeries 返回全量时间正序 + 逐位对齐的 iters', () => {
+      const series = view.metricSeries(mkView(30, true).metrics.iters)
+      const win = series.find((s) => s.key === 'winRate')!
+      expect(win.vals.length).toBe(30)
+      expect(win.iters.length).toBe(30)
+      // 时间正序：iters 升序（输入 iter=100-i 是降序，排序后应升序）
+      expect(win.iters[0]).toBe(71)
+      expect(win.iters[29]).toBe(100)
+    })
+
+    it('sliceSeries：all 全量 / 30 / 10 截取点数正确', () => {
+      const series = view.metricSeries(mkView(50, true).metrics.iters)
+      const win = series.find((s) => s.key === 'winRate')!
+      expect(view.sliceSeries(win, 'all').vals.length).toBe(50)
+      expect(view.sliceSeries(win, '30').vals.length).toBe(30)
+      expect(view.sliceSeries(win, '10').vals.length).toBe(10)
+    })
+
+    it('sliceSeries eval 特殊语义：「最近 N」= 最近 N 个有效点（跳过 NaN 缺口）', () => {
+      // 仅偶数 iter 有 eval 数据 → 50 轮中约 25 个有效点
+      const iters = Array.from({ length: 50 }, (_, i) => ({
+        iter: i + 1,
+        time: '',
+        winRate: 0.5,
+        scoreMean: 0,
+        scoreStd: 0,
+        samples: 1,
+        rolloutSec: 1,
+        ppoSec: 1,
+        kl: 0,
+        entropy: 1,
+        policyLoss: 0,
+        valueLoss: 0,
+        meanRet: 0,
+        lr: 0.0001,
+        expectedGames: 4,
+        halted: false,
+        topDims: '',
+        avgTicks: 100,
+        accuracy: 0,
+        loot: 0,
+        kills: 0,
+        actuals: null,
+        evalData:
+          (i + 1) % 2 === 0
+            ? {
+                time: '',
+                games: 10,
+                wins: 1,
+                winRate: 0.1,
+                clears: 0,
+                clearRate: 0,
+                dropped: 0,
+                sec: 30,
+                wver: 'v1',
+                outcomes: {},
+                avgTicks: 100,
+                totalKills: 0,
+                totalPU: 0,
+                scoreMean: 0,
+                scoreStd: 0,
+              }
+            : null,
+      }))
+      const series = view.metricSeries(iters)
+      const evalS = series.find((s) => s.key === 'eval')!
+      // 全量 eval：只保留非 NaN（25 个有效点），iters 逐位对齐
+      const all = view.sliceSeries(evalS, 'all')
+      expect(all.vals.length).toBe(25)
+      expect(all.iters.length).toBe(25)
+      // 最近 10 个有效 eval 点
+      const last10 = view.sliceSeries(evalS, '10')
+      expect(last10.vals.length).toBe(10)
+      // 应为最后 10 个偶数 iter：32,34,...,50
+      expect(last10.iters[0]).toBe(32)
+      expect(last10.iters[9]).toBe(50)
+    })
+
+    it('hero 渲染 4 条走势图 + 范围档位开关', () => {
+      const html = render.renderConsolePage(mkView(30, true))
+      // 大胜率走势 1 + 击杀/道具/eval 三格 = 4 张走势图（匹配元素，排除 CSS 里的同名类定义）
+      const charts = (html.match(/class="tc-trend__svg"/g) ?? []).length
+      expect(charts).toBe(4)
+      // 范围档位渲染且默认最近 30
+      expect(html).toContain('tc-trend-range__btn')
+      expect(html).toContain('全量')
+      expect(html).toContain('最近30')
+      expect(html).toContain('最近10')
+    })
   })
 })
 

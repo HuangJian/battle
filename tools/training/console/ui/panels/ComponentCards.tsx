@@ -72,6 +72,9 @@ export function ComponentCards({ stateView, onAction, onLaunchTrainer }: Compone
 
   if (!stateView) return null
   const mains = stateView.components.filter((c) => c.key !== 'workerServe')
+  // 组件卡片固定顺序：hubServer > trainingLoop > selfNode > cloudflared
+  const ORDER: string[] = ['hubServer', 'trainingLoop', 'selfNode', 'cloudflared']
+  mains.sort((a, b) => ORDER.indexOf(a.key) - ORDER.indexOf(b.key))
   const openCard = mains.find((c) => c.key === open) ?? null
 
   return (

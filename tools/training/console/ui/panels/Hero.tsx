@@ -1,5 +1,6 @@
 /** Hero.tsx — 训练状态 hero（一屏焦点）：胜率大数字 + 大走势图；右侧击杀/道具/eval 三格趋势；
- *  下方最新 6 轮完整指标（紧凑表）。数据口径 = /api/state.metrics；「完整指标表 ›」进抽屉。 */
+ *  下方最新 6 轮完整指标（紧凑表）。数据口径 = /api/state.metrics；「完整指标表 ›」进抽屉。
+ *  走势图支持悬停显示坐标，并由统一档位开关切换 全量/最近30/最近10（持久化到 localStorage）。 */
 
 import {
   fmtPct,
@@ -7,28 +8,33 @@ import {
   latestRow,
   metricSeries,
   retTone,
+  TC_TREND_RANGE,
   winTone,
   type ConsoleStateView,
   type IterRow,
   type Series,
+  type TrendRange,
 } from '../../../ui/view'
 import { Badge } from '../../../ui/components/Pill'
-import { Sparkline } from '../../../ui/components/Sparkline'
+import { TrendChart } from '../../../ui/components/TrendChart'
+import { useEffect, useState } from 'preact/hooks'
 
 export interface HeroProps {
   stateView: ConsoleStateView | null
   onMore: () => void
 }
 
-/** 右侧趋势格：上「标签 + 最新值」下「通栏 sparkline」；数据缺失显示占位。 */
+/** 右侧趋势格：上「标签 + 最新值」下「走势图」；数据缺失显示占位。 */
 function TrendCell({
   series,
   fmt,
   tone,
+  range,
 }: {
   series: Series | undefined
   fmt: (v: number | null) => string
   tone?: 'g' | 'y' | 'r'
+  range: TrendRange
 }) {
   const last = series ? (series.vals.filter(Number.isFinite).slice(-1)[0] ?? null) : null
   return (
@@ -37,7 +43,9 @@ function TrendCell({
         <span className="tc-tcell__lbl">{series ? series.label : '—'}</span>
         <b className={tone ? `tc-mtrend__val--${tone}` : undefined}>{fmt(last)}</b>
       </span>
-      {series ? <Sparkline values={series.vals} width={120} height={26} /> : null}
+      {series ? (
+        <TrendChart series={series} range={range} fmt={fmt} tone={tone} height={64} />
+      ) : null}
     </div>
   )
 }
@@ -163,19 +171,40 @@ export function Hero({ stateView, onMore }: HeroProps) {
   const puSeries = series.find((m) => m.key === 'pu')
   const evalSeries = series.find((m) => m.key === 'eval')
 
+  // 走势范围档位（全量 / 最近30 / 最近10）；持久化到 localStorage，hydrate 后恢复。
+  const [range, setRange] = useState<TrendRange>('30')
+  useEffect(() => {
+    try {
+      const v = localStorage.getItem(TC_TREND_RANGE)
+      if (v === 'all' || v === '30' || v === '10') setRange(v)
+    } catch {
+      /* 隐私模式等不可写场景忽略 */
+    }
+  }, [])
+  const onRange = (r: TrendRange): void => {
+    setRange(r)
+    try {
+      localStorage.setItem(TC_TREND_RANGE, r)
+    } catch {
+      /* ignore */
+    }
+  }
+
   if (!head) {
     return (
       <section className="tc-hero" aria-label="训练状态">
-        <div className="tc-hero__kpi">
-          <span className="tc-hero__lbl">采样胜率</span>
-          <span className="tc-hero__val">—</span>
-          <span className="tc-hero__sub">
-            {stateView && stateView.metrics.available === false
-              ? '该课程暂无迭代记录'
-              : '等待最新迭代…'}
-          </span>
-        </div>
-        <div className="tc-hero__right" style={{ alignContent: 'end' }}>
+        <div className="tc-hero__right">
+          <div className="tc-tcell">
+            <span className="tc-tcell__hd">
+              <span className="tc-tcell__lbl">采样胜率</span>
+              <b>—</b>
+            </span>
+            <span className="tc-muted tc-small">
+              {stateView && stateView.metrics.available === false
+                ? '该课程暂无迭代记录'
+                : '等待最新迭代…'}
+            </span>
+          </div>
           <button type="button" className="tc-link" onClick={onMore}>
             完整指标表 ›
           </button>
@@ -185,30 +214,49 @@ export function Hero({ stateView, onMore }: HeroProps) {
   }
 
   const winVal = fmtPct(head.winRate)
-  const tone = winTone(head.winRate) === 'g' ? 'ok' : 'danger'
-  const killsTxt = head.actuals ? `${head.actuals.totalKills}/${head.actuals.games}局` : '—'
-  const evalTxt =
-    head.evalData && head.evalData.winRate !== null ? `eval ${fmtPct(head.evalData.winRate)}` : null
+  const tone = winTone(head.winRate)
 
   return (
     <section className="tc-hero" aria-label="训练状态">
-      <div className="tc-hero__kpi">
-        <span className="tc-hero__lbl">采样胜率 · it{head.iter}</span>
-        <span className={`tc-hero__val tc-hero__val--${tone}`}>{winVal}</span>
-        {winSeries ? <Sparkline values={winSeries.vals} width={170} height={30} /> : null}
-        <span className="tc-hero__sub">
-          击杀 {killsTxt}
-          {evalTxt ? ` · ${evalTxt}` : ''}
-        </span>
-      </div>
       <div className="tc-hero__right">
+        <div className="tc-trend-range" role="group" aria-label="走势范围">
+          {(['all', '30', '10'] as TrendRange[]).map((r) => (
+            <button
+              key={r}
+              type="button"
+              className={`tc-trend-range__btn${range === r ? ' tc-trend-range__btn--on' : ''}`}
+              aria-pressed={range === r}
+              onClick={() => onRange(r)}
+            >
+              {r === 'all' ? '全量' : `最近${r}`}
+            </button>
+          ))}
+        </div>
         <div className="tc-trends">
-          <TrendCell series={killsSeries} fmt={(v) => (v != null ? `${v.toFixed(0)}` : '—')} />
-          <TrendCell series={puSeries} fmt={(v) => (v != null ? `${v.toFixed(0)}` : '—')} />
+          <div className="tc-tcell">
+            <span className="tc-tcell__hd">
+              <span className="tc-tcell__lbl">胜率</span>
+              <b className={`tc-mtrend__val--${tone}`}>{winVal}</b>
+            </span>
+            {winSeries ? (
+              <TrendChart series={winSeries} range={range} fmt={fmtPct} tone={tone} height={64} />
+            ) : null}
+          </div>
+          <TrendCell
+            series={killsSeries}
+            fmt={(v) => (v != null ? `${v.toFixed(0)}` : '—')}
+            range={range}
+          />
+          <TrendCell
+            series={puSeries}
+            fmt={(v) => (v != null ? `${v.toFixed(0)}` : '—')}
+            range={range}
+          />
           <TrendCell
             series={evalSeries}
             tone={winTone(evalSeries?.vals.filter(Number.isFinite).slice(-1)[0] ?? 0)}
             fmt={fmtPct}
+            range={range}
           />
         </div>
       </div>
