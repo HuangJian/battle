@@ -318,31 +318,90 @@ def _parse_porcelain(text: str) -> list[str]:
     return out
 
 
-def dirty_hash_files() -> list[str]:
-    """codeHash 覆盖集中与 git HEAD 不一致的文件（修改/暂存/未跟踪）。
-
-    非空 ⇒ 期望 codeHash 含未推送的本地改动，远端 git pull 永远无法收敛——
-    此时对远端节点下发 restart+pull 只会产生无效扰动（拉到同样的提交、hash 依旧
-    不等 → 下轮再杀，无限重启循环）。返回空列表 = 集内代码全部已提交（pull 可收敛）。
-    git 不可用/出错时返回 []（保守放行）——跨代去重护栏仍兜底防循环。
-    """
-    rels = [rel for rel, _content in _collect_code_hash_files()]
+def _git_index_blobs(rels: list[str]) -> dict[str, str]:
+    """索引中 rel → blob sha 映射；未跟踪路径不出现在结果里。"""
     if not rels:
+        return {}
+    proc = subprocess.run(
+        ["git", "ls-files", "-s", "--", *rels],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        **_POPEN_NO_WINDOW,
+    )
+    if proc.returncode != 0:
+        return {}
+    out: dict[str, str] = {}
+    for line in proc.stdout.splitlines():
+        if "\t" not in line:
+            continue
+        meta, raw_path = line.split("\t", 1)
+        fields = meta.split()
+        if len(fields) < 2:
+            continue
+        out[raw_path.strip().strip('"').replace("\\", "/")] = fields[1]
+    return out
+
+
+def _git_cat_blobs(shas: list[str]) -> dict[str, bytes]:
+    """批量取 blob 原始字节（git cat-file --batch）；缺失的 sha 不进结果。"""
+    if not shas:
+        return {}
+    proc = subprocess.run(
+        ["git", "cat-file", "--batch"],
+        cwd=REPO_ROOT,
+        input=("\n".join(shas) + "\n").encode(),
+        capture_output=True,
+        timeout=30,
+        **_POPEN_NO_WINDOW,
+    )
+    out: dict[str, bytes] = {}
+    buf = proc.stdout
+    pos = 0
+    while pos < len(buf):
+        nl = buf.find(b"\n", pos)
+        if nl < 0:
+            break
+        parts = buf[pos:nl].decode("utf-8", "replace").split()
+        pos = nl + 1
+        if len(parts) < 3:
+            continue  # "<sha> missing"
+        oid, size = parts[0], int(parts[2])
+        out[oid] = buf[pos : pos + size]
+        pos += size + 1
+    return out
+
+
+def dirty_hash_files() -> list[str]:
+    """codeHash 覆盖集中「工作区字节 ≠ git 索引内容」的文件（含未跟踪文件）。
+
+    非空 ⇒ 期望 codeHash 含 pull 拿不到的本地字节，远端 git pull 永远无法收敛——
+    此时对远端节点下发 restart+pull 只会产生无效扰动（拉到同样的提交、hash 依旧
+    不等 → 下轮再杀，无限重启循环）。返回空列表 = 集内代码与索引逐字节一致。
+
+    判据用**原始字节 vs 索引 blob 字节**，不用 git status：core.autocrlf=input 会把
+    工作区 CRLF 规范化成 LF 再比对，「工作区 CRLF / 索引 LF」这类纯 EOL 污染被完全
+    隐藏（2026-09-09 mac 事故：git status 干净、dirty=[]，但 codeHash 与远端干净
+    checkout 只差一个 src/nn/wasm/conv_feats.c 的 CRLF，节点卡了 40 分钟）。
+
+    未跟踪文件同样计为 dirty——远端 pull 不会带出该文件。git 不可用/出错时返回 []
+    （保守放行）——跨代去重护栏仍兜底防循环。
+    """
+    entries = _collect_code_hash_files()
+    if not entries:
         return []
     try:
-        proc = subprocess.run(
-            ["git", "status", "--porcelain", "--", *rels],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            **_POPEN_NO_WINDOW,
-        )
-        if proc.returncode != 0:
-            return []
-        return _parse_porcelain(proc.stdout)
+        idx = _git_index_blobs([rel for rel, _ in entries])
+        blobs = _git_cat_blobs(sorted(set(idx.values())))
     except Exception:
         return []
+    dirty: list[str] = []
+    for rel, content in entries:
+        sha = idx.get(rel)
+        if sha is None or blobs.get(sha) != content:
+            dirty.append(rel)
+    return dirty
 
 
 def request_upgrade_guarded(

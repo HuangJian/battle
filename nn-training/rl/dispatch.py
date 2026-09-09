@@ -805,6 +805,10 @@ class RolloutDispatcher:
                         streaks[nd_id] = 0
                         if nd is not None:
                             last_remote_ok[0] = time.time()
+                        # byNode / dist.nodes 按**配置节点 id**（mac/self/local）记账：
+                        # summary["node"] 是 agent 自报的 worker 名（bun-71535 /
+                        # node-30332 之类），直接用它汇总会看不到真实节点（2026-09-09）。
+                        summary["nodeId"] = nd_id
                         results.append(summary)
                         _record_agent_meta(
                             meta_path,
@@ -1007,7 +1011,8 @@ class RolloutDispatcher:
         missing = sorted(k for k in all_tasks if k not in seen)
         by_node: dict[str, int] = {}
         for s in results:
-            nid = str(s.get("node", "?"))
+            # nodeId = 下发时的配置 id；缺失时回退 agent 自报名（旧结果/本地直跑）。
+            nid = str(s.get("nodeId") or s.get("node") or "?")
             by_node[nid] = by_node.get(nid, 0) + 1
         log(
             f"[dist] round done: ok={len(results)}/{n_total_tasks} missing={len(missing)} "

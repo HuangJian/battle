@@ -1,3 +1,28 @@
+# 行尾规范化（2026-09-09 CRLF 污染事故）
+#
+# 事故：训练机 core.autocrlf=input —— git 比较时会先把工作区 CRLF 规范化成 LF，
+# 于是「工作区 CRLF / 索引 LF」这类纯行尾污染在 git status / git diff 下完全不可见。
+# src/nn/wasm/conv_feats.c 因此长期以 CRLF 躺在训练机工作区，使分布式 codeHash
+# 期望值被污染（8dd23d78 ≠ 远端干净 checkout 的 0e4aa1ef），mac 节点被判 stale、
+# 几十分钟零贡献。
+#
+# 统一 eol=lf：checkout 恒写 LF，从根上杜绝工作区/索引行尾漂移。
+
+* text=auto eol=lf
+
 # 决策治理（plan/decisions-governance.md，2026-09-08）：DECISIONS.md 只追加，
 # 多 agent 并行各自 append 时 union 合并，杜绝合并冲突。
 DECISIONS.md merge=union
+
+# 二进制：绝不参与行尾转换（binary = -text -diff）
+*.wasm binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.zip binary
+*.npy binary
+*.pdf binary
+*.pkl binary
+*.pt binary

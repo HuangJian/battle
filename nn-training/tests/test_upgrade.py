@@ -375,6 +375,35 @@ def test_dirty_hash_files_smoke() -> None:
     check(isinstance(d, list), f"dirty_hash_files 返回 list（不抛）, got {type(d).__name__}")
 
 
+def test_dirty_hash_files_eol_blindspot() -> None:
+    """dirty 判据必须穿透 autocrlf：工作区**原始字节** vs 索引 blob 逐字节比对。
+
+    回归 2026-09-09 mac 事故：src/nn/wasm/conv_feats.c 工作区 CRLF / 索引 LF，
+    git status（core.autocrlf=input 会先规范化再比较）判为干净 ⇒ dirty=[] ⇒
+    训练机期望 codeHash 与远端干净 checkout 不等，节点卡了 40 分钟零贡献。
+    """
+    real = dist_common._collect_code_hash_files()
+    if not real:
+        check(False, "codeHash 文件集非空（前置条件）")
+        return
+    rel, content = real[0]
+    orig = dist_common._collect_code_hash_files
+    try:
+        dist_common._collect_code_hash_files = lambda: [(rel, content)]
+        got = dist_common.dirty_hash_files()
+        check(got == [], f"工作区字节=索引 → clean, got {got}")
+        # 仅行尾差异（语义等价、字节不同）必须判 dirty——git status 看不见它
+        dist_common._collect_code_hash_files = lambda: [(rel, content.replace(b"\n", b"\r\n"))]
+        got = dist_common.dirty_hash_files()
+        check(got == [rel], f"纯 CRLF 污染 → dirty（autocrlf 盲区）, got {got}")
+        # 未跟踪文件（远端 pull 拿不到）同样 dirty
+        dist_common._collect_code_hash_files = lambda: [("no/such/untracked.ts", b"x")]
+        got = dist_common.dirty_hash_files()
+        check(got == ["no/such/untracked.ts"], f"未跟踪 → dirty, got {got}")
+    finally:
+        dist_common._collect_code_hash_files = orig
+
+
 def test_codehash_f3_noise_filtering() -> None:
     """F3（plan/dist-codehash-stale-fix.md）：目录递归受噪声过滤——.DS_Store /
     __pycache__ / x.pyc / 编辑器临时后缀不计入；合法 .ts/.wasm 保留；显式单文件
@@ -552,6 +581,7 @@ def main() -> None:
     test_upgrade_stale_nodes_dirty_tree()
     test_parse_porcelain()
     test_dirty_hash_files_smoke()
+    test_dirty_hash_files_eol_blindspot()
     test_codehash_f3_noise_filtering()
     test_code_hash_report()
     test_codehash_manifest_expansion()
