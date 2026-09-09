@@ -4,12 +4,27 @@
  *  - nextExitFailures：两帧确认（死 pid 连续两轮才判定）、复活清零、error 幂等跳过；
  *  - recordExitFailure：标记文本（label/PID/日志尾）落盘 + save(error/exitAt) 记录。
  * 纯函数 + 注入 —— 不碰磁盘 registry / 不拉真实组件日志。
+ *
+ * 真实 io 的默认 save（saveComponent）会把条目写进 tmp/training-start/registry.json——
+ * 必须先把账本重定向到临时目录（BCITY_REGISTRY_FILE），否则测试覆写线上账本、
+ * 运行中的控制台会全部误报「已退出」（2026-09-09 事故根因）。
  */
 
-import { afterEach, describe, expect, it } from 'bun:test'
+import { afterAll, afterEach, describe, expect, it } from 'bun:test'
 import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
+
+// 模块级：测试账本重定向到临时目录（registry.ts 惰性读取 env，top-level 赋值即可生效）。
+const REG_SCRATCH = mkdtempSync(path.join(os.tmpdir(), 'bcity-registry-'))
+process.env.BCITY_REGISTRY_FILE = path.join(REG_SCRATCH, 'registry.json')
+afterAll(() => {
+  try {
+    rmSync(REG_SCRATCH, { recursive: true, force: true })
+  } catch {
+    /* noop */
+  }
+})
 import {
   buildExitMarker,
   nextExitFailures,

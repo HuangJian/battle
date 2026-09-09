@@ -11,7 +11,13 @@ import path from 'path'
 import { LOG_DIR, START_LOG_DIR } from './paths'
 import type { Component, Registry, RegistryEntry } from './types'
 
-const REGISTRY_PATH = path.join(START_LOG_DIR, 'registry.json')
+/** 账本路径（每次调用现取）。默认 tmp/training-start/registry.json；
+ *  BCITY_REGISTRY_FILE 显式指定时用它——单测把账本指向临时目录，
+ *  绝不让测试写进线上账本（2026-09-09 事故：exit-watchdog 测试的默认真实 io
+ *  把 fixture PID 1/7 覆写了运行中的 registry.json，控制台全组件误报「已退出」）。 */
+function registryPath(): string {
+  return process.env.BCITY_REGISTRY_FILE ?? path.join(START_LOG_DIR, 'registry.json')
+}
 
 /** hub-start 旧账本目录（legacy 迁移读取）。 */
 const LEGACY_DIR = path.join(LOG_DIR, 'hub-start')
@@ -28,7 +34,7 @@ const REG_KEYS: Component[] = [
 export function loadRegistry(): Registry {
   const reg: Registry = {}
   try {
-    Object.assign(reg, JSON.parse(readFileSync(REGISTRY_PATH, 'utf-8')) as Registry)
+    Object.assign(reg, JSON.parse(readFileSync(registryPath(), 'utf-8')) as Registry)
   } catch {
     /* not started */
   }
@@ -48,7 +54,7 @@ export function loadRegistry(): Registry {
 }
 
 export function saveRegistry(reg: Registry): void {
-  writeFileSync(REGISTRY_PATH, JSON.stringify(reg, null, 2), 'utf-8')
+  writeFileSync(registryPath(), JSON.stringify(reg, null, 2), 'utf-8')
 }
 
 /** 登记或更新一个组件条目。 */
@@ -68,7 +74,7 @@ export function clearComponent(name: Component): void {
 
 export function clearRegistry(): void {
   try {
-    unlinkSync(REGISTRY_PATH)
+    unlinkSync(registryPath())
   } catch {
     /* absent */
   }
