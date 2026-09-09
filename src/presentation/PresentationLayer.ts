@@ -214,10 +214,18 @@ export class PresentationLayer {
     // Super-item rail (non-classic modes) is a REAL layout sibling beside the
     // playfield — reserve its width so the canvas fits next to it instead of
     // being overlapped. Hidden (classic / menu) → offsetWidth is 0 → no cost.
+    // The .game-body gap is 12px (8px under 640px) — read it live so the
+    // reserve matches the actual flex gap (hud.review.md P1-9).
     let railReserve = 0
     const rail = this.ui.superRailEl
     if (rail && !rail.hidden && rail.offsetWidth > 0) {
-      railReserve = rail.getBoundingClientRect().width + 12 // width + gap
+      let gap = 12
+      const body = rail.parentElement
+      if (body) {
+        const parsed = Number.parseFloat(window.getComputedStyle(body).columnGap || '')
+        if (Number.isFinite(parsed)) gap = parsed
+      }
+      railReserve = rail.getBoundingClientRect().width + gap // width + gap
     }
 
     const hud = this.ui.hudBarEl

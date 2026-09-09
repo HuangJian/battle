@@ -383,13 +383,14 @@ export class PowerUpSystem {
         break
 
       case 'bomb':
-        // Destroy all enemies on screen
+        // Destroy all enemies on screen — score follows the COLLECTOR
+        // (hud.review.md P0-4), mirroring bullet-kill attribution.
         for (const tank of w.tanks) {
           if (!tank.alive) continue
           tank.alive = false
           w._needsCleanup = true
           this.d.effects.createExplosion(tank.x + tank.w / 2, tank.y + tank.h / 2, 'big')
-          recordEnemyKill(w, tank)
+          recordEnemyKill(w, tank, { toScore2: !isP1 })
         }
         break
 

@@ -226,25 +226,25 @@ export class HudView {
         <span class="hud-super-icon">🛡</span>
         <span class="hud-label" data-hud-super-label="guard">Guardian&lt;F5&gt;</span>
         <span class="hud-value" data-hud="guard">0</span>
-        <span class="hud-super-p2-stock" data-hud="guard2" hidden>0</span>
+        <span class="hud-super-p2-stock" data-hud="guard2" title="P2" hidden>0</span>
       </div>
       <div class="hud-item hud-super">
         <span class="hud-super-icon">❄</span>
         <span class="hud-label" data-hud-super-label="frenzy">Frenzy&lt;F6&gt;</span>
         <span class="hud-value" data-hud="frenzy">0</span>
-        <span class="hud-super-p2-stock" data-hud="frenzy2" hidden>0</span>
+        <span class="hud-super-p2-stock" data-hud="frenzy2" title="P2" hidden>0</span>
       </div>
       <div class="hud-item hud-super">
         <span class="hud-super-icon">💥</span>
         <span class="hud-label" data-i18n="hud.sacrifice">同归</span>
         <span class="hud-value" data-hud="sacrifice">0</span>
-        <span class="hud-super-p2-stock" data-hud="sacrifice2" hidden>0</span>
+        <span class="hud-super-p2-stock" data-hud="sacrifice2" title="P2" hidden>0</span>
       </div>
       <div class="hud-item hud-super">
         <span class="hud-super-icon">⏱</span>
         <span class="hud-label" data-hud-super-label="rewind">Time Box&lt;F7&gt;</span>
         <span class="hud-value" data-hud="rewind">0</span>
-        <span class="hud-super-p2-stock" data-hud="rewind2" hidden>0</span>
+        <span class="hud-super-p2-stock" data-hud="rewind2" title="P2" hidden>0</span>
       </div>
     `
 
@@ -309,13 +309,20 @@ export class HudView {
    * HUD is up AND the mode actually has super items (non-classic). The change
    * is change-guarded and fires the host callback — the rail reserves real
    * horizontal space beside the playfield, so the canvas must be re-sized
-   * when it appears/disappears (classic ↔ non-classic, menu ↔ play).
+   * when it appears/disappears (classic ↔ non-classic, menu ↔ play) AND when
+   * its width changes (P2 join/leave, key-label text — hud.review.md P1-7).
    */
   private applySuperRailVisibility(): void {
     const hidden = !this.hudVisible || this.hideSuper
     if (this.superRail.hidden === hidden) return
     this.superRail.hidden = hidden
     this.onSuperRailToggle?.()
+  }
+
+  /** Rail width changed without a visibility flip (P2 stocks/chips in/out,
+   *  key-label text) — the host must re-size the canvas around it. */
+  private notifyRailGeometryChanged(): void {
+    if (!this.superRail.hidden) this.onSuperRailToggle?.()
   }
 
   /** Show or hide the persistent REPLAY indicator in the HUD center area. */
@@ -339,13 +346,14 @@ export class HudView {
   }
 
   /** Re-render the super-item key labels from the current bindings + locale.
-   *  When P2 bindings are provided, a second colored row per item is rendered
-   *  for two-player mode (stocks are world-global — either human may spend
-   *  one — so each player's own release key is shown). The P2 rows are
-   *  CREATED lazily on the first call that supplies P2 bindings (2p-review
+   *  When P2 bindings are provided, a second gold key chip per item is
+   *  rendered for two-player mode (per-player inventories — each human spends
+   *  their own stock, so each player's own release key is shown). The P2 chips
+   *  are CREATED lazily on the first call that supplies P2 bindings (2p-review
    *  P0-1: the update/show-hide logic shipped without the create step, so
-   *  the rows never appeared). */
-  updateSuperKeyLabels(bindings: KeyBindings, bindings2?: KeyBindings): void {
+   *  the rows never appeared). Returns true when any chip text changed (the
+   *  host re-sizes the canvas — the rail width changed). */
+  updateSuperKeyLabels(bindings: KeyBindings, bindings2?: KeyBindings): boolean {
     const actions: Array<['guard' | 'frenzy' | 'rewind', string]> = [
       ['guard', t('hud.guard')],
       ['frenzy', t('hud.frenzy')],
@@ -361,9 +369,10 @@ export class HudView {
             : this.rewindLabel
       if (el) el.textContent = formatSuperKeyLabel(name, bindings[action])
     }
-    // P2 rows — lazily created, then kept in sync. Visible only in
+    // P2 chips — lazily created, then kept in sync. Visible only in
     // two-player mode; syncWorld mirrors the flag so a mode flip without a
-    // label change still shows/hides the rows.
+    // label change still shows/hides the chips.
+    let changed = false
     if (bindings2) {
       for (const [action] of actions) {
         const el2 = this.ensureP2Label(action)
@@ -371,11 +380,16 @@ export class HudView {
           // The P2 chip shows only the bare KEY (gold chip after the stock
           // counter) — P1's label already names the item, so a second full
           // "Guardian<R>" row would only add vertical clutter (HUD redesign).
-          el2.textContent = formatKeyCode(parseBinding(bindings2[action]).code)
+          const text = formatKeyCode(parseBinding(bindings2[action]).code)
+          if (el2.textContent !== text) {
+            el2.textContent = text
+            changed = true
+          }
           el2.hidden = !this.twoPlayerLabels
         }
       }
     }
+    return changed
   }
 
   /** Lazily create (and cache) the P2 release-key chip inside the super item.
@@ -520,17 +534,21 @@ export class HudView {
       for (const el of [this.guard2El, this.frenzy2El, this.sacrifice2El, this.rewind2El]) {
         el.hidden = !p2StocksShown
       }
+      // P2 counters in/out changes the rail width (hud.review.md P1-7).
+      this.notifyRailGeometryChanged()
     }
 
     // 双打 Two-Player: show/hide the P2 super-key label rows. The flag can
     // flip (CC toggle / snapshot restore) without any binding or locale
     // change, so this change-guarded sync lives here, not only in
     // updateSuperKeyLabels. Rows mirror the P1 items' classic-mode hiding.
+    // Any visibility flip changes the rail width (hud.review.md P1-7).
     if (this.twoPlayerLabels !== world.twoPlayer) {
       this.twoPlayerLabels = world.twoPlayer
       for (const el of [this.guardLabel2, this.frenzyLabel2, this.rewindLabel2]) {
         if (el) el.hidden = !world.twoPlayer || hideSuper
       }
+      this.notifyRailGeometryChanged()
     } else if (!world.twoPlayer) {
       // classic-mode gate above flipped while 2p rows are already hidden —
       // nothing to do (they only show when twoPlayer && !hideSuper).

@@ -659,6 +659,13 @@ export class World {
     const d = this.difficulty
     this.lives2 = d?.startLives ?? 3
     this.playerLevel2 = d?.playerStartLevel ?? 0
+    // Fresh P2 starts with an empty super-item inventory (hud.review.md P0-2):
+    // stocks are consumables like lives, not score — no ghost inheritance
+    // from a previous P2 session.
+    this.guardStock2 = 0
+    this.frenzyStock2 = 0
+    this.sacrificeStock2 = 0
+    this.rewindStock2 = 0
     const p1Col = this.playerSpawnPoint?.col ?? 8
     this.player2SpawnPoint = { col: computePlayer2SpawnCol(p1Col), row: 24 }
     this.spawnPlayer2()
@@ -675,6 +682,13 @@ export class World {
     this.player2 = null
     this.lives2 = 0
     this.playerLevel2 = 0
+    // Drop P2's super-item inventory with it (hud.review.md P0-2) — otherwise
+    // the combined rail total would count unspendable ghost stock in
+    // single-player after a mid-run coop exit.
+    this.guardStock2 = 0
+    this.frenzyStock2 = 0
+    this.sacrificeStock2 = 0
+    this.rewindStock2 = 0
   }
 
   /**

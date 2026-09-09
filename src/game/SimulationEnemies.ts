@@ -9,7 +9,7 @@ import { CELL, TANK, GRID, DIR_VECTORS, Direction, SEED_HASH } from '../constant
 import { SACRIFICE_BASE_RADIUS_CELLS } from '../config/powerups'
 import { recordEnemyKill, destroyBrickAoE } from './KillPipeline'
 import { aabb } from '../utils/helpers'
-import { superStock, spendSuperStock, clearSuperStock } from './superStocks'
+import { superStock, spendSuperStock, clearSuperStock, playerSlotOf } from './superStocks'
 import { RNG } from '../utils/RNG'
 import { GodAIInput } from '../ai/GodAIInput'
 import { GUARD_GOD_AI_PARAMS } from '../ai/god/params'
@@ -524,6 +524,9 @@ export class EnemiesSystem {
 
     // Destroy enemies within radius (normal kill accounting). Allies are
     // friendly — the blast only consumes hostile tanks (§31 Phase 2).
+    // Score follows the FALLEN player (hud.review.md P0-4): P2's sacrifice
+    // credits score2, mirroring bullet-kill attribution.
+    const toScore2 = playerSlotOf(w, player) === 2
     for (const t of w.tanks) {
       if (!t.alive || t.allegiance !== 'enemy' || t.spawnTimer > 0) continue
       const tx = t.x + t.w / 2
@@ -532,7 +535,7 @@ export class EnemiesSystem {
         t.alive = false
         w._needsCleanup = true
         this.d.effects.createExplosion(t.x + t.w / 2, t.y + t.h / 2, 'big')
-        recordEnemyKill(w, t)
+        recordEnemyKill(w, t, { toScore2 })
         w.pushEvent({ type: 'tank_destroyed', tank: t, by: 'player' })
       }
     }

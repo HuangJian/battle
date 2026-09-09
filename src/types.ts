@@ -53,6 +53,9 @@ export interface Mine {
    *  Set to MINE_ARM_MS on creation; decremented in updatePlaying. */
   armTimer: number
   alive: boolean
+  /** Which player placed it (hud.review.md P0-4) — kill credit follows the
+   *  owner. Optional: pre-split saves lack it and default to P1. */
+  ownerSlot?: 1 | 2
 }
 
 export interface Vec2 {

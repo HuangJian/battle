@@ -179,6 +179,12 @@ describe('rewind edges in playback (P1-1) — stock consumption matches live', (
     recorder.startNew(liveWorld)
     for (let t = 0; t < TICKS; t++) {
       sim.tick()
+      // Model GameLoop's per-frame pending consumption (hud.review.md P0-1):
+      // headless ticks never reach RecoveryController, so without this the
+      // tick-20 press would leave pending set and the tick-50 press (a later
+      // frame live) would be wrongly blocked by the same-tick double-press
+      // guard. A started rewind keeps the stock spent — clear, never refund.
+      if (liveWorld.rewindPending) sim.clearRewindPending()
       recorder.recordFrame(in1, in2)
       in1.advance()
       in2.advance()
@@ -210,6 +216,10 @@ describe('rewind edges in playback (P1-1) — stock consumption matches live', (
     let guard = 0
     while (!pc.isEnded && guard < TICKS + 10) {
       pc.update(16.7)
+      // Same per-tick consumption model as the live loop above (hud.review
+      // P0-1) — keeps both sides on the identical consumption schedule so
+      // the comparison stays live-faithful instead of headless-artifact.
+      if (replayWorld.rewindPending) sim2.clearRewindPending()
       guard++
     }
     expect(replayWorld.rewindStock).toBe(liveWorld.rewindStock) // 2

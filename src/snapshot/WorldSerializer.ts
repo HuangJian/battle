@@ -255,6 +255,11 @@ export function restoreWorld(world: World, snap: WorldSnapshot): void {
   world.rewindStock2 = snap.rewindStock2 ?? 0
   world.mines = snap.mines ? snap.mines.map((m) => ({ ...m })) : []
 
+  // Transient one-tick rewind signal never travels with a snapshot
+  // (hud.review.md P0-3) — a restore must not inherit a stale pending flag.
+  world.rewindPending = false
+  world.rewindPendingBy = 1
+
   // Resume playing
   world.state = 'playing'
 }

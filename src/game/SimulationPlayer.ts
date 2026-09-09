@@ -171,6 +171,10 @@ export class PlayerSystem {
     const w = this.d.world
     if (superStock(w, p, 'rewind') <= 0) return
     if (w.state !== 'playing') return
+    // One rewind per frame: updatePlayerTank runs twice per tick (P1→P2), so
+    // without this guard a same-tick double press would spend BOTH stocks
+    // while RecoveryController starts only one rewind (hud.review.md P0-1).
+    if (w.rewindPending) return
     // Signal Game.ts to trigger RecoveryController.beginManualRewind()
     // (actual rewind logic is in Game.ts, not Simulation — AGENTS §2.1).
     // Record WHOSE stock paid so a failed rewind refunds the same player.
@@ -285,6 +289,8 @@ export class PlayerSystem {
       h: TANK,
       armTimer: MINE_ARM_MS,
       alive: true,
+      // Kill credit follows the placer (hud.review.md P0-4).
+      ownerSlot: playerSlotOf(w, p),
     })
     // (perf §68) New mine added — enable the updateMines loop.
     w._hasActiveMines = true
@@ -355,7 +361,9 @@ export class PlayerSystem {
         const cy = mine.y + mine.h / 2
         const radiusPx = MINE_RADIUS_CELLS * CELL
 
-        // Damage enemies in radius (normal kill accounting)
+        // Damage enemies in radius (normal kill accounting — credit follows
+        // the mine's placer, hud.review.md P0-4).
+        const toScore2 = mine.ownerSlot === 2
         for (let ti = 0; ti < tanks.length; ti++) {
           const tank = tanks[ti]
           if (!tank.alive || tank.allegiance !== 'enemy' || tank.spawnTimer > 0) continue
@@ -365,7 +373,7 @@ export class PlayerSystem {
             tank.alive = false
             w._needsCleanup = true
             this.d.effects.createExplosion(tank.x + tank.w / 2, tank.y + tank.h / 2, 'big')
-            recordEnemyKill(w, tank)
+            recordEnemyKill(w, tank, { toScore2 })
             w.pushEvent({ type: 'tank_destroyed', tank, by: 'player' })
           }
         }

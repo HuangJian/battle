@@ -235,9 +235,15 @@ export class UIManager {
   }
 
   /** Re-render the HUD super-item labels (bindings + locale changed).
-   *  P2's bindings ride along so the two-player rows carry P2's own keys. */
+   *  P2's bindings ride along so the two-player rows carry P2's own keys.
+   *  A text change widens/narrows the rail — flag a canvas re-size
+   *  (hud.review.md P1-7). */
   private updateSuperKeyLabels(): void {
-    this.hud.updateSuperKeyLabels(this.controls.currentBindings, this.controls.currentBindings2)
+    const changed = this.hud.updateSuperKeyLabels(
+      this.controls.currentBindings,
+      this.controls.currentBindings2,
+    )
+    if (changed) this.superRailDirty = true
   }
 
   /** Apply theme colors as CSS variables — only when theme key changes */

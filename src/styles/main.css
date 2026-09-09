@@ -338,6 +338,16 @@ body {
   min-width: 9px;
   text-align: center;
 }
+/* P1/P2 separator (hud.review.md P0-6): in coop/dual the P2 key chip is
+   hidden, so the two stocks would read as adjacent bare numbers ("2 1").
+   The middot keeps them distinguishable without touching textContent
+   (tests assert pure numbers). */
+.hud-super-p2-stock:not([hidden])::before {
+  content: '·';
+  margin-right: 6px;
+  color: var(--theme-text-muted);
+  font-weight: 400;
+}
 
 /* Both P2 elements are toggled via the `hidden` attribute; their
    display:inline-block / font rules would otherwise override the UA

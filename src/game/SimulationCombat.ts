@@ -655,8 +655,9 @@ export class CombatSystem {
     } else {
       // Lie-Back-Win-Mode Q1: route kill score to the shooter's pool.
       // 双打 twoPlayer shares the P2 slot — P2's human kills credit score2.
+      // 督战双玩家 owns the same slot (hud.review.md P0-4).
       const isGodKill =
-        (w.coop || w.twoPlayer) && bullet.ownerId === w.player2?.id
+        (w.coop || w.twoPlayer || w.spectateDual) && bullet.ownerId === w.player2?.id
       // Accompanying "balance" enemies (isExtra) are outside the per-stage
       // 20-enemy count, so they never decrement enemiesRemaining / block
       // stage clear — but they still count as a normal kill for score
@@ -758,7 +759,10 @@ export class CombatSystem {
     const w = this.d.world
     const newLevel = PLAYER_PROGRESSION.maximumLevel - 1 // 3★ → 2★
     tank.level = newLevel
-    w.playerLevel = newLevel
+    // Per-player star level (hud.review.md P0-5): P2's shield spends P2's
+    // level, never P1's.
+    if (tank === w.player2) w.playerLevel2 = newLevel
+    else w.playerLevel = newLevel
     const stats = profileToStats(resolveProfile('player', newLevel), 'player', newLevel, w.rules)
     tank.speed = stats.speed * (w.rules.speedJitter ? rollSpeedJitter(w.rng) : 1)
     tank.bulletSpeed = stats.bulletSpeed

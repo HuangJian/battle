@@ -182,8 +182,11 @@ describe('HudView super-item rail visibility (HUD redesign follow-up)', () => {
     expect(rewind2.hidden).toBe(true)
 
     // 双打 Two-Player: P2 joins — its own counters appear with P2's values.
+    // (P0-2: enablePlayer2 starts P2 empty like lives2 — set P2 stock AFTER
+    // the join, mirroring a real pickup.)
     world.twoPlayer = true
     world.enablePlayer2()
+    world.rewindStock2 = 3
     hud.syncWorld(world)
     expect(guard2.hidden).toBe(false)
     expect(guard2.textContent).toBe('0')
