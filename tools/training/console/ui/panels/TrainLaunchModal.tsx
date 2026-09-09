@@ -2,10 +2,11 @@
  *  选择 trainer 模式（Pull/Push/Local）+ rl-config 行为开关（即时写）+ 推送链路预演入口。
  *  Esc / 遮罩关闭由 App 全局处理。 */
 
-import { useState } from 'preact/hooks'
+import { useEffect, useRef, useState } from 'preact/hooks'
 import type { ModeView } from '../../../ui/view'
 import { SegmentedControl } from '../../../ui/components/SegmentedControl'
 import { Toggle } from '../../../ui/components/Toggle'
+import { TC_TRAIN_MODE, TC_TRAIN_TOGGLES } from '../../../ui/view'
 
 export interface TrainLaunchModalProps {
   open: boolean
@@ -22,7 +23,79 @@ export function TrainLaunchModal({
   onAction,
   onLaunch,
 }: TrainLaunchModalProps) {
-  const [mode, setMode] = useState<'pull' | 'push' | 'local'>(modes.trainerPpo)
+  type Mode = 'pull' | 'push' | 'local'
+
+  // trainer 模式偏好：localStorage 优先 → 服务端 modes 兜底
+  const [mode, setMode] = useState<Mode>(() => {
+    try {
+      const v = localStorage.getItem(TC_TRAIN_MODE)
+      if (v === 'pull' || v === 'push' || v === 'local') return v
+    } catch {
+      /* ignore */
+    }
+    return modes.trainerPpo
+  })
+
+  // 行为开关偏好：localStorage 优先 → 服务端 modes 兜底
+  const [toggles, setToggles] = useState<{
+    stream: boolean
+    doubleBuffer: boolean
+    precollectEarly: boolean
+  }>(() => {
+    try {
+      const raw = localStorage.getItem(TC_TRAIN_TOGGLES)
+      if (raw) {
+        const parsed = JSON.parse(raw) as Record<string, boolean>
+        return {
+          stream: parsed.stream == null ? modes.stream === 1 : parsed.stream,
+          doubleBuffer:
+            parsed.doubleBuffer == null ? modes.doubleBuffer === 1 : parsed.doubleBuffer,
+          precollectEarly:
+            parsed.precollectEarly == null ? modes.precollectEarly === 1 : parsed.precollectEarly,
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    return {
+      stream: modes.stream === 1,
+      doubleBuffer: modes.doubleBuffer === 1,
+      precollectEarly: modes.precollectEarly === 1,
+    }
+  })
+
+  // 每次变化时持久化到 localStorage（服务端写由 onAction 负责，不在此处耦合）
+  const togglesRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!togglesRef.current) return
+    const prev = JSON.parse(localStorage.getItem(TC_TRAIN_TOGGLES) ?? '{}') as Record<
+      string,
+      boolean
+    > | null
+    if (prev && JSON.stringify(prev) === JSON.stringify(toggles)) return
+    try {
+      localStorage.setItem(TC_TRAIN_TOGGLES, JSON.stringify(toggles))
+    } catch {
+      /* ignore */
+    }
+  }, [toggles])
+
+  useEffect(() => {
+    if (mode === modes.trainerPpo) return
+    try {
+      localStorage.setItem(TC_TRAIN_MODE, mode)
+    } catch {
+      /* ignore */
+    }
+  }, [mode])
+
+  const applyToggle = (key: string, v: boolean): void => {
+    const next = { ...toggles, [key]: v }
+    setToggles(next)
+    onAction('setMode', { key, value: v ? '1' : '0' })
+  }
+
   if (!open) return null
   return (
     <div className="tc-modal-mask" onClick={onClose}>
@@ -48,29 +121,25 @@ export function TrainLaunchModal({
             onChange={setMode}
           />
         </div>
-        <div className="tc-line">
-          <span className="tc-muted tc-small" style={{ minWidth: 90 }}>
-            行为开关
-          </span>
+        <div className="tc-line tc-toggle-group" ref={togglesRef}>
+          <span className="tc-muted tc-small">行为开关</span>
           <Toggle
             label="stream"
-            checked={modes.stream === 1}
+            checked={toggles.stream}
             title="rl.stream：run_rl 的 --stream；本地默认开，远程内部强制 0"
-            onChange={(v) => onAction('setMode', { key: 'rl.stream', value: v ? '1' : '0' })}
+            onChange={(v) => applyToggle('rl.stream', v)}
           />
           <Toggle
             label="双缓冲"
-            checked={modes.doubleBuffer === 1}
+            checked={toggles.doubleBuffer}
             title="rl.double_buffer"
-            onChange={(v) => onAction('setMode', { key: 'rl.double_buffer', value: v ? '1' : '0' })}
+            onChange={(v) => applyToggle('rl.double_buffer', v)}
           />
           <Toggle
             label="预采"
-            checked={modes.precollectEarly === 1}
+            checked={toggles.precollectEarly}
             title="rl.precollect_early"
-            onChange={(v) =>
-              onAction('setMode', { key: 'rl.precollect_early', value: v ? '1' : '0' })
-            }
+            onChange={(v) => applyToggle('rl.precollect_early', v)}
           />
         </div>
         <div className="tc-line">

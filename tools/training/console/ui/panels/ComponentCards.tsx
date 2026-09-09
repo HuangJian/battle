@@ -122,7 +122,10 @@ export function ComponentCards({ stateView, onAction, onLaunchTrainer }: Compone
                   </div>
                 </div>
               ) : (
-                <span className="tc-cc__meta">{meta}</span>
+                <span className="tc-cc__meta">
+                  {meta}
+                  {c.mode ? <b className="tc-cc__mode">{c.mode}</b> : null}
+                </span>
               )}
               <div className="tc-cc__acts" onClick={(e) => e.stopPropagation()}>
                 {isRunning ? (

@@ -151,10 +151,15 @@ a.tc-btn{display:inline-block;text-decoration:none;text-align:center}
   border-radius:var(--r-2);box-shadow:var(--sh-2);padding:var(--sp-2);z-index:20;min-width:150px}
 .tc-colmenu__panel label{display:flex;align-items:center;gap:6px;padding:3px 6px;cursor:pointer;font-size:var(--fs-2)}
 
-/* ── Segmented（节点卡 控制|统计 / 预设按钮） ────────────── */
-.tc-segmented{display:inline-flex;gap:4px;padding:3px;background:var(--gray-bg);border-radius:var(--r-1)}
-.tc-segmented__btn{border:none;background:none;padding:5px 12px;border-radius:6px;cursor:pointer;font-size:var(--fs-2);color:var(--muted)}
-.tc-segmented__btn--on{background:var(--card);color:var(--accent);font-weight:700;box-shadow:var(--sh-1)}
+/* ── Segmented（统一胶囊分段控件：节点卡/密度/行过滤/trainer 模式） ── */
+.tc-segmented{display:inline-flex;align-items:center}
+.tc-segmented__btn{border:1px solid var(--border);background:var(--card);padding:3px 11px;font-size:var(--fs-2);color:var(--muted);cursor:pointer;transition:all .12s;white-space:nowrap}
+.tc-segmented__btn:first-child{border-radius:999px 0 0 999px}
+.tc-segmented__btn:last-child{border-radius:0 999px 999px 0}
+.tc-segmented__btn:not(:first-child){border-left:none}
+.tc-segmented__btn:hover{color:var(--accent)}
+.tc-segmented__btn--on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+.tc-segmented__btn--on:hover{color:#fff}
 .tc-preset{padding:7px 14px;border:1.5px solid var(--border);border-radius:9px;background:var(--card);cursor:pointer;font-size:var(--fs-3)}
 .tc-preset--on{border-color:var(--accent);background:var(--accent-bg);color:var(--accent);font-weight:700}
 a.tc-preset{text-decoration:none;display:inline-block}
@@ -164,6 +169,13 @@ a.tc-preset{text-decoration:none;display:inline-block}
 .tc-toggle code{font-size:var(--fs-2);color:var(--muted)}
 .tc-toggle input[type=checkbox]{accent-color:var(--accent)}
 .tc-conc{width:64px;padding:4px 7px;border:1px solid var(--border);border-radius:7px;font-size:var(--fs-3)}
+
+/* ── Modal 内 toggle 组（统一视觉，非散落独立按键） ────────── */
+.tc-toggle-group{display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap}
+.tc-toggle-group .tc-toggle{margin:0;padding:5px 12px;border:1px solid var(--border);border-radius:var(--r-2);background:var(--card);font-size:var(--fs-2);font-weight:600;transition:all .12s;min-width:72px;justify-content:center}
+.tc-toggle-group .tc-toggle:hover{border-color:var(--accent);color:var(--accent)}
+.tc-toggle-group .tc-toggle input[type=checkbox]{accent-color:var(--accent);margin-right:6px}
+.tc-toggle-group .tc-toggle input[type=checkbox]:checked+span{color:var(--accent);font-weight:700}
 
 /* ── Flash（动作结果/全局） ──────────────────────────────── */
 .tc-flash{position:fixed;top:14px;right:14px;max-width:460px;padding:10px 14px;border-radius:var(--r-2);
@@ -335,6 +347,8 @@ a.tc-preset{text-decoration:none;display:inline-block}
 .tc-cc__hd{display:flex;align-items:center;gap:var(--sp-2)}
 .tc-cc__name{font-size:var(--fs-3);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tc-cc__meta{font-size:11.5px;color:var(--muted);min-height:16px;word-break:break-all;font-family:ui-monospace,'Cascadia Mono',Consolas,monospace}
+/* trainingLoop 运行模式高亮徽章 */
+.tc-cc__mode{display:inline-block;margin-left:6px;padding:0 7px;border-radius:999px;background:var(--accent-bg);color:var(--accent);font-weight:700;font-size:10.5px;white-space:nowrap;line-height:18px;font-family:ui-monospace,'Cascadia Mono',Consolas,monospace}
 .tc-cc__acts{display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap}
 .tc-cc__detail{display:block;background:var(--gray-bg);border:1px solid var(--border);border-radius:var(--r-1);padding:var(--sp-2) var(--sp-3);font-size:11px;font-family:ui-monospace,'Cascadia Mono',Consolas,monospace;color:var(--muted);white-space:pre-wrap;word-break:break-all;max-height:200px;overflow-y:auto;margin-bottom:var(--sp-4)}
 .tc-cc__err{display:flex;align-items:center;gap:8px;background:var(--red-bg);border:1px solid #ecc8c8;border-radius:var(--r-2);padding:8px 12px;font-size:var(--fs-2)}

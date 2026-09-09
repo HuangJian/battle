@@ -701,6 +701,8 @@ export const TC_INTERVAL_KEY = (id: string): string => `${TC_KEY_PREFIX}interval
 export const TC_GLOBAL_INTERVAL = `${TC_KEY_PREFIX}globalInterval`
 export const TC_METRICS_FILTER = `${TC_KEY_PREFIX}metrics.filter`
 export const TC_TREND_RANGE = `${TC_KEY_PREFIX}trend.range`
+export const TC_TRAIN_MODE = `${TC_KEY_PREFIX}train.mode`
+export const TC_TRAIN_TOGGLES = `${TC_KEY_PREFIX}train.toggles`
 export const TC_NODE_VIEW = (view: 'ctl' | 'pool', key: string): string =>
   `${TC_KEY_PREFIX}node.${view}.${key}`
 

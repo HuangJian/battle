@@ -273,6 +273,7 @@ export function MetricsTable({ stateView }: { stateView: ConsoleStateView | null
         columns={metricCols}
         initialSortKey="iter"
         initialSortDir="desc"
+        storagePrefix="tc.metrics"
         emptyText="尚无完整迭代记录"
         ariaLabel="训练指标"
         toolbarLeft={
