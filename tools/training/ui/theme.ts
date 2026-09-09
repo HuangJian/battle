@@ -28,15 +28,9 @@ body{font-family:ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,'PingFa
 .tc-topbar{position:sticky;top:0;z-index:60;display:flex;flex-direction:column;gap:var(--sp-2);
   background:var(--bg);padding:var(--sp-3) 0;border-bottom:1px solid var(--border);margin-bottom:var(--sp-4)}
 .tc-topbar__row{display:flex;align-items:center;gap:var(--sp-4);flex-wrap:wrap}
-.tc-status{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:var(--fs-2);color:var(--muted)}
-.tc-status .tc-cchip{display:inline-flex;align-items:baseline;gap:4px;padding:2px 9px;border-radius:999px;
-  background:var(--card);border:1px solid var(--border);white-space:nowrap;font-size:var(--fs-2)}
-.tc-status .tc-cchip .lbl{color:var(--muted)}
-.tc-status .tc-cchip b{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
-.tc-status .tc-cchip--g b{color:var(--green)}
-.tc-status .tc-cchip--y b{color:var(--yellow)}
-.tc-status .tc-cchip--r b{color:var(--red)}
-.tc-status .tc-cchip--a b{color:var(--accent)}
+/* 课程选择：标题行中部（flex:1 吃掉左右剩余，内部居中 —— §382 标题行置顶 + 指标 chips 移除） */
+.tc-topbar__course{flex:1;display:flex;align-items:center;justify-content:center;gap:var(--sp-2);font-size:var(--fs-2);color:var(--muted);white-space:nowrap}
+.tc-topbar__course .tc-sel{max-width:220px}
 .tc-h1{margin:0;font-size:var(--fs-5);font-weight:700;letter-spacing:.2px;display:flex;align-items:center;gap:var(--sp-2)}
 .tc-badge--status{display:inline-flex;align-items:center;gap:6px;background:var(--accent-bg);color:var(--accent);
   border-radius:999px;padding:2px 10px;font-size:var(--fs-2);font-weight:600;white-space:nowrap}
@@ -115,14 +109,18 @@ a.tc-btn{display:inline-block;text-decoration:none;text-align:center}
 /* ── 表格（粘性表头/首列 + 密度 + 显隐 + 行展开） ────────── */
 .tc-tablewrap{overflow:auto;max-height:min(60vh,720px)}
 .tc-card--max .tc-tablewrap{flex:1;max-height:none;min-height:0}
+/* 数据表弹性列：抽屉（或等高 card）内根容器竖直撑满，滚动收在 tablewrap */
+.tc-dtable{display:flex;flex-direction:column;min-height:0}
 .tc-table{width:100%;border-collapse:separate;border-spacing:0}
 .tc-table thead th{background:#fafbfd;border-bottom:2px solid var(--border);text-align:left;padding:11px 14px;
   font-size:var(--fs-2);font-weight:600;color:var(--muted);cursor:pointer;white-space:nowrap;user-select:none;
   letter-spacing:.3px;position:sticky;top:0;z-index:2}
 .tc-table thead th:hover{background:#f0f3f8;color:var(--accent)}
-.tc-table tbody td{padding:10px 14px;border-bottom:1px solid #f0f2f6;font-size:var(--fs-3);vertical-align:middle}
+.tc-table tbody td{padding:10px 14px;border-bottom:1px solid #f0f2f6;font-size:var(--fs-3);vertical-align:middle;background:#fff}
 .tc-table tbody tr:last-child td{border-bottom:none}
-.tc-table tbody tr:hover td{background:var(--row-hover)}
+/* 斑马纹 + hover 三色区分：奇行白 / 偶行 #f4f6fa / hover #e9edf7（hover 放其后、同特异性时胜出） */
+.tc-table tbody tr:nth-child(even) td{background:#f4f6fa}
+.tc-table tbody tr:hover td{background:#e9edf7}
 .tc-table th.tc-sort-desc::after{content:" ▾";color:var(--accent)}
 .tc-table th.tc-sort-asc::after{content:" ▴";color:var(--accent)}
 .tc-table th.thhl{background:#eef2fe;box-shadow:inset 3px 0 0 var(--accent)}
@@ -132,7 +130,7 @@ a.tc-btn{display:inline-block;text-decoration:none;text-align:center}
 .tc-num{text-align:right;font-variant-numeric:tabular-nums}
 .tc-firstcol{position:sticky;left:0;background:#fff;z-index:1}
 .tc-table thead th.tc-firstcol{background:#fafbfd;z-index:3}
-.tc-table tbody tr:hover td.tc-firstcol{background:#f1f4fa}
+.tc-table tbody tr:hover td.tc-firstcol{background:#e9edf7}
 .tc-row-expand td{background:#fafbfd;font-size:var(--fs-2);padding:8px 14px;border-bottom:1px solid #f0f2f6}
 .tc-row-expand .tc-recent-dots{display:flex;gap:4px;align-items:center;flex-wrap:wrap}
 .tc-dot{width:9px;height:9px;border-radius:50%;display:inline-block}
@@ -144,9 +142,10 @@ a.tc-btn{display:inline-block;text-decoration:none;text-align:center}
 .tc-caption{padding:var(--sp-2) var(--sp-4);border-top:1px solid #f0f2f6;font-size:var(--fs-2);color:var(--muted);line-height:1.8}
 .tc-caption b{color:#59606f}
 
-/* ── 表格工具栏（过滤 / 列 / 密度 / 关键词） ─────────────── */
+/* ── 表格工具栏（过滤 / 列 / 密度 / 关键词 / 返回顶部） ──────── */
 .tc-toolbar{display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap;padding:var(--sp-3) var(--sp-4) 0;font-size:var(--fs-2);color:var(--muted)}
 .tc-toolbar input[type=text]{padding:4px 8px;border:1px solid var(--border);border-radius:8px;background:var(--card);font-size:var(--fs-2)}
+.tc-toolbar__totop{margin-left:auto} /* 「返回顶部」贴工具栏最右缘 */
 .tc-colmenu{position:relative}
 .tc-colmenu__panel{position:absolute;right:0;top:24px;background:var(--card);border:1px solid var(--border);
   border-radius:var(--r-2);box-shadow:var(--sh-2);padding:var(--sp-2);z-index:20;min-width:150px}
@@ -303,7 +302,6 @@ a.tc-preset{text-decoration:none;display:inline-block}
 .tc-mtrend__val--g{color:var(--green)}
 .tc-mtrend__val--y{color:var(--yellow)}
 .tc-mtrend__val--r{color:var(--red)}
-.tc-hero__more{align-self:flex-end;flex-shrink:0}
 
 /* 顶栏阶段指示器 */
 .tc-phase{display:inline-flex;align-items:center;gap:5px;padding:3px 12px;border-radius:999px;font-size:var(--fs-2);font-weight:600;white-space:nowrap;font-variant-numeric:tabular-nums}
@@ -315,7 +313,7 @@ a.tc-preset{text-decoration:none;display:inline-block}
 
 /* hero 最新 6 轮完整指标（§367 UI：首页训练状态区直读最近趋势） */
 .tc-hero__iters{flex:1 1 100%;min-width:0;margin-top:var(--sp-3);border-top:1px dashed var(--border);padding-top:var(--sp-2);overflow-x:auto}
-.tc-hero__iters-hd{display:block;font-size:var(--fs-2);color:var(--muted);font-weight:600;margin-bottom:2px}
+.tc-hero__iters-hd{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);font-size:var(--fs-2);color:var(--muted);font-weight:600;margin-bottom:2px}
 .tc-hero__iters .tc-table thead th{position:static} /* 6 行紧凑表无需吸顶 */
 .tc-hero__iters .tc-table tbody td{padding:4px 10px;font-size:var(--fs-2)}
 .tc-hero__iters .tc-table thead th{padding:5px 10px}
@@ -329,10 +327,12 @@ a.tc-preset{text-decoration:none;display:inline-block}
 .tc-cc__name{font-size:var(--fs-3);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tc-cc__meta{font-size:11.5px;color:var(--muted);min-height:16px;word-break:break-all;font-family:ui-monospace,'Cascadia Mono',Consolas,monospace}
 .tc-cc__acts{display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap}
-.tc-cc__detail{display:none;grid-column:1/-1;background:var(--gray-bg);border-radius:var(--r-1);padding:var(--sp-2) var(--sp-3);font-size:11px;font-family:ui-monospace,'Cascadia Mono',Consolas,monospace;color:var(--muted);white-space:pre-wrap;word-break:break-all}
-.tc-cc--open .tc-cc__detail{display:block}
+.tc-cc__detail{display:block;background:var(--gray-bg);border:1px solid var(--border);border-radius:var(--r-1);padding:var(--sp-2) var(--sp-3);font-size:11px;font-family:ui-monospace,'Cascadia Mono',Consolas,monospace;color:var(--muted);white-space:pre-wrap;word-break:break-all;max-height:200px;overflow-y:auto;margin-bottom:var(--sp-4)}
+.tc-cc__err{display:flex;align-items:center;gap:8px;background:var(--red-bg);border:1px solid #ecc8c8;border-radius:var(--r-2);padding:8px 12px;font-size:var(--fs-2)}
+.tc-cc__err-link{color:var(--red);font-weight:700;text-decoration:none}
+.tc-cc__err-link:hover{text-decoration:underline}
 .tc-cc__sec{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);word-break:break-all;min-width:0}
-.tc-cc__sec code{font-family:ui-monospace,'Cascadia Mono',Consolas,monospace;background:var(--gray-bg);border-radius:6px;padding:1px 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px}
+.tc-cc__sec code{font-family:ui-monospace,'Cascadia Mono',Consolas,monospace;background:var(--gray-bg);border-radius:6px;padding:1px 6px;flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap} /* code 铺满剩余宽、复制键贴右缘 */
 
 /* 状态点 */
 .tc-dot--warn{background:var(--yellow)}
@@ -366,8 +366,11 @@ a.tc-preset{text-decoration:none;display:inline-block}
 .tc-drawer__tabs{display:flex;gap:var(--sp-1);padding:var(--sp-2) var(--sp-4);border-bottom:1px solid var(--border);background:var(--card)}
 .tc-drawer__tab{padding:3px 14px;border-radius:999px;font-size:var(--fs-2);color:var(--muted);cursor:pointer;border:none;background:none;font-weight:600}
 .tc-drawer__tab--on{background:var(--accent);color:#fff}
-.tc-drawer__body{flex:1;overflow:auto;padding:var(--sp-3) var(--sp-4)}
-.tc-drawer__body .tc-tablewrap{max-height:none} /* 全屏下表格随 body 滚动，不再内部限高 */
+.tc-drawer__body{flex:1;display:flex;flex-direction:column;gap:var(--sp-2);overflow:hidden;padding:var(--sp-3) var(--sp-4)} /* 页面不滚动——表格内部滚动 */
+/* 抽屉面板：竖直弹性链 面板→表根→tablewrap，表格整高铺满 modal 中间区域 */
+.tc-drawer__panel{display:flex;flex-direction:column;gap:var(--sp-3);flex:1;min-height:0}
+.tc-drawer__panel .tc-dtable{flex:1;min-height:0}
+.tc-drawer__panel .tc-tablewrap{flex:1 1 auto;min-height:0;max-height:none}
 
 /* 弹窗（TrainingLoop 启动） */
 .tc-modal-mask{position:fixed;inset:0;background:rgba(16,24,40,.35);z-index:80;display:flex;align-items:center;justify-content:center}

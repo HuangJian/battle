@@ -1,4 +1,5 @@
-/** ComponentCards.tsx — 组件 4 小卡（一屏行）：点击卡展开详情，主按钮随状态换身。
+/** ComponentCards.tsx — 组件 4 小卡（一屏行）：点击卡展开详情，详情带在卡片网格**下方**
+ *  整行全宽显示（不复用卡宽）。主按钮随状态换身。
  *  - 未启动：唯一「启动」（品牌色）；运行中：「停止」+ 冒烟/日志 小图标 + 详情。
  *  - cloudflared 常态缩略 endpoint + auth key，各带复制（CopyButton）——复制点击不展开卡片。
  *  - TrainingLoop 的「启动」→ 打开 TrainLaunchModal（App 层），选模式后再预设。
@@ -71,126 +72,130 @@ export function ComponentCards({ stateView, onAction, onLaunchTrainer }: Compone
 
   if (!stateView) return null
   const mains = stateView.components.filter((c) => c.key !== 'workerServe')
+  const openCard = mains.find((c) => c.key === open) ?? null
 
   return (
-    <div className="tc-comps" aria-label="组件">
-      {mains.map((c) => {
-        const isOpen = open === c.key
-        const isRunning = c.status === 'running'
-        const locked = c.busy || pending[c.key] !== undefined
-        const meta = c.pid ? `PID ${c.pid} · ${statusText(c)}` : statusText(c)
-        return (
-          <section
-            key={c.key}
-            className={`tc-cc${isOpen ? ' tc-cc--open' : ''}`}
-            aria-label={c.label}
-            onClick={() => setOpen(isOpen ? null : c.key)}
-          >
-            <div className="tc-cc__hd">
-              <span className={`tc-dot ${dotClass(c)}`} />
-              <span className="tc-cc__name">{c.key}</span>
-            </div>
-            {c.key === 'cloudflared' ? (
-              // 复制按键不展开卡片：meta 区（隧道/auth key + 复制）整体吞掉冒泡。
-              <div className="tc-cc__meta" onClick={(e) => e.stopPropagation()}>
-                <div className="tc-cc__sec">
-                  {c.url ? (
-                    <>
-                      <code title={c.url}>{shortUrl(c.url)}</code>
-                      <CopyButton text={c.url} label="隧道" icon small />
-                    </>
-                  ) : (
-                    <span className="tc-muted">未建立隧道</span>
-                  )}
-                </div>
-                <div className="tc-cc__sec">
-                  <code>
-                    token{' '}
-                    {c.secret
-                      ? c.secret.length > 14
-                        ? `${c.secret.slice(0, 7)}…${c.secret.slice(-4)}`
-                        : (c.secret ?? '-')
-                      : '-'}
-                  </code>
-                  {c.secret ? <CopyButton text={c.secret} label="auth key" icon small /> : null}
-                </div>
+    <>
+      <div className="tc-comps" aria-label="组件">
+        {mains.map((c) => {
+          const isOpen = open === c.key
+          const isRunning = c.status === 'running'
+          const locked = c.busy || pending[c.key] !== undefined
+          const meta = c.pid ? `PID ${c.pid} · ${statusText(c)}` : statusText(c)
+          return (
+            <section
+              key={c.key}
+              className={`tc-cc${isOpen ? ' tc-cc--open' : ''}`}
+              aria-label={c.label}
+              onClick={() => setOpen(isOpen ? null : c.key)}
+            >
+              <div className="tc-cc__hd">
+                <span className={`tc-dot ${dotClass(c)}`} />
+                <span className="tc-cc__name">{c.key}</span>
               </div>
-            ) : (
-              <span className="tc-cc__meta">{meta}</span>
-            )}
-            <div className="tc-cc__acts" onClick={(e) => e.stopPropagation()}>
-              {isRunning ? (
-                <>
-                  <button
-                    type="button"
-                    className="tc-btn tc-btn--sm"
-                    disabled={locked}
-                    aria-label={`停止 ${c.label}`}
-                    title={locked ? '动作进行中…' : undefined}
-                    onClick={() => fire(c, 'stop')}
-                  >
-                    停止
-                  </button>
-                  {c.key !== 'trainingLoop' ? (
+              {c.key === 'cloudflared' ? (
+                // 复制按键不展开卡片：meta 区（隧道/auth key + 复制）整体吞掉冒泡。
+                <div className="tc-cc__meta" onClick={(e) => e.stopPropagation()}>
+                  <div className="tc-cc__sec">
+                    {c.url ? (
+                      <>
+                        <code title={c.url}>{shortUrl(c.url)}</code>
+                        <CopyButton text={c.url} label="隧道" icon small />
+                      </>
+                    ) : (
+                      <span className="tc-muted">未建立隧道</span>
+                    )}
+                  </div>
+                  <div className="tc-cc__sec">
+                    <code>
+                      token{' '}
+                      {c.secret
+                        ? c.secret.length > 14
+                          ? `${c.secret.slice(0, 7)}…${c.secret.slice(-4)}`
+                          : (c.secret ?? '-')
+                        : '-'}
+                    </code>
+                    {c.secret ? <CopyButton text={c.secret} label="auth key" icon small /> : null}
+                  </div>
+                </div>
+              ) : (
+                <span className="tc-cc__meta">{meta}</span>
+              )}
+              <div className="tc-cc__acts" onClick={(e) => e.stopPropagation()}>
+                {isRunning ? (
+                  <>
                     <button
                       type="button"
-                      className="tc-iconbtn"
+                      className="tc-btn tc-btn--sm"
                       disabled={locked}
-                      aria-label={`冒烟 ${c.label}`}
-                      title="冒烟"
-                      onClick={() => void onAction('smoke', { component: c.key })}
+                      aria-label={`停止 ${c.label}`}
+                      title={locked ? '动作进行中…' : undefined}
+                      onClick={() => fire(c, 'stop')}
                     >
-                      ◎
+                      停止
                     </button>
-                  ) : null}
-                  <a
-                    className="tc-iconbtn"
-                    aria-label={`日志 ${c.label}`}
-                    title="日志"
-                    href={`/log/${c.key}`}
+                    {c.key !== 'trainingLoop' ? (
+                      <button
+                        type="button"
+                        className="tc-iconbtn"
+                        disabled={locked}
+                        aria-label={`冒烟 ${c.label}`}
+                        title="冒烟"
+                        onClick={() => void onAction('smoke', { component: c.key })}
+                      >
+                        ◎
+                      </button>
+                    ) : null}
+                    <a
+                      className="tc-iconbtn"
+                      aria-label={`日志 ${c.label}`}
+                      title="日志"
+                      href={`/log/${c.key}`}
+                    >
+                      ≡
+                    </a>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    className="tc-btn tc-btn--sm tc-btn--primary"
+                    disabled={locked}
+                    aria-label={`启动 ${c.label}`}
+                    title={locked ? '动作进行中…' : undefined}
+                    onClick={c.key === 'trainingLoop' ? onLaunchTrainer : () => fire(c, 'start')}
                   >
-                    ≡
-                  </a>
-                </>
-              ) : (
-                <button
-                  type="button"
-                  className="tc-btn tc-btn--sm tc-btn--primary"
-                  disabled={locked}
-                  aria-label={`启动 ${c.label}`}
-                  title={locked ? '动作进行中…' : undefined}
-                  onClick={c.key === 'trainingLoop' ? onLaunchTrainer : () => fire(c, 'start')}
-                >
-                  启动
-                </button>
-              )}
-            </div>
-            {isOpen ? (
-              <pre className="tc-cc__detail">
-                {[
-                  c.error ? `exit-error: ${c.error}` : null,
-                  c.log ? `log: ${c.log}` : null,
-                  c.course ? `course: ${c.course}` : null,
-                  c.mode ? `mode: ${c.mode}` : null,
-                  c.url ? `endpoint: ${c.url}` : null,
-                  c.pid ? `pid: ${c.pid}` : null,
-                  c.logTail.length > 0 ? `tail:\n${c.logTail.join('\n')}` : null,
-                ]
-                  .filter(Boolean)
-                  .join('\n')}
-              </pre>
-            ) : null}
-            {c.status === 'exited' && c.error ? (
-              // §380：非正常退出原因直面展示（不再只有空洞的"已退出"）+ 一键进日志页
-              <div className="tc-cc__err" role="alert">
-                <a className="tc-cc__err-link" href={`/log/${c.key}`}>
-                  ⚠ {c.error} · 日志
-                </a>
+                    启动
+                  </button>
+                )}
               </div>
-            ) : null}
-          </section>
-        )
-      })}
-    </div>
+              {c.status === 'exited' && c.error ? (
+                // §380：非正常退出原因直面展示（不再只有空洞的"已退出"）+ 一键进日志页
+                <div className="tc-cc__err" role="alert">
+                  <a className="tc-cc__err-link" href={`/log/${c.key}`}>
+                    ⚠ {c.error} · 日志
+                  </a>
+                </div>
+              ) : null}
+            </section>
+          )
+        })}
+      </div>
+      {openCard ? (
+        // 点击展开卡：详情带**整行全宽**贴在卡网格下方（点击日志区域再次收起）。
+        <pre className="tc-cc__detail" onClick={() => setOpen(null)}>
+          {[
+            openCard.error ? `exit-error: ${openCard.error}` : null,
+            openCard.log ? `log: ${openCard.log}` : null,
+            openCard.course ? `course: ${openCard.course}` : null,
+            openCard.mode ? `mode: ${openCard.mode}` : null,
+            openCard.url ? `endpoint: ${openCard.url}` : null,
+            openCard.pid ? `pid: ${openCard.pid}` : null,
+            openCard.logTail.length > 0 ? `tail:\n${openCard.logTail.join('\n')}` : null,
+          ]
+            .filter(Boolean)
+            .join('\n')}
+        </pre>
+      ) : null}
+    </>
   )
 }

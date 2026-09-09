@@ -23,18 +23,14 @@ import { NodeStats } from './panels/NodeStats'
 import { LogNavCard } from './panels/LogNavCard'
 import { TrainLaunchModal } from './panels/TrainLaunchModal'
 import {
-  fmtPct,
   fmtTs,
-  klTone,
   latestRow,
   REFRESH_INTERVALS,
   refreshLabel,
   TC_GLOBAL_INTERVAL,
-  winTone,
   type ConsoleStateView,
   type PhaseInfo,
   type RefreshSec,
-  type ValueTone,
 } from '../../ui/view'
 
 export interface AppProps {
@@ -65,16 +61,6 @@ function initInterval(): RefreshSec {
   if (v === '60' || v === '180' || v === '300' || v === '600' || v === '1800')
     return Number(v) as RefreshSec
   return 300
-}
-
-/** 顶栏状态 chips 小件。 */
-function Chip({ lbl, val, tone }: { lbl?: string; val: string; tone?: ValueTone | 'a' }) {
-  return (
-    <span className={`tc-cchip${tone ? ` tc-cchip--${tone}` : ''}`}>
-      {lbl ? <span className="lbl">{lbl}</span> : null}
-      <b>{val}</b>
-    </span>
-  )
 }
 
 /** 阶段耗时格式化 'Xs' / 'Xm Ys' / 'Xh Ym'。 */
@@ -202,38 +188,8 @@ export function App({ initial }: AppProps) {
     (c) => c.key === 'hubServer' && c.status === 'running',
   )
 
-  // ── 顶栏状态 chips（最新迭代口径） ──
+  // ── 顶栏（标题行放到页面最顶端） ──
   const course = stateView?.course ?? ''
-  const iters = stateView?.metrics.iters ?? []
-  const head = latestRow(iters)
-  const headChips = head
-    ? [
-        <Chip key="it" lbl="it" val={String(head.iter)} tone="a" />,
-        <Chip key="ro" lbl="rollout" val={`${head.rolloutSec.toFixed(0)}s`} />,
-        <Chip key="ppo" lbl="ppo" val={`${head.ppoSec.toFixed(0)}s`} />,
-        <Chip key="wr" lbl="胜率" val={fmtPct(head.winRate)} tone={winTone(head.winRate)} />,
-        <Chip
-          key="kills"
-          lbl="击杀"
-          val={head.actuals ? `${head.actuals.totalKills}/${head.actuals.games}局` : '—'}
-        />,
-        head.evalData && head.evalData.winRate !== null ? (
-          <Chip
-            key="ev"
-            lbl="eval"
-            val={fmtPct(head.evalData.winRate)}
-            tone={winTone(head.evalData.winRate)}
-          />
-        ) : null,
-        <Chip key="kl" lbl="KL" val={head.kl.toFixed(4)} tone={klTone(head.kl)} />,
-        <Chip key="ent" lbl="熵" val={head.entropy.toFixed(3)} />,
-      ].filter(Boolean)
-    : [
-        <Chip
-          key="none"
-          val={stateView && stateView.metrics.available === false ? '本课程暂无迭代记录' : '—'}
-        />,
-      ]
 
   // 顶栏阶段耗时（至今；now 由 10s ticker 驱动，轮询间隙不冻结）。
   const phaseInfo: PhaseInfo | null = stateView?.phase ?? null
@@ -244,9 +200,14 @@ export function App({ initial }: AppProps) {
       <Flash flash={flash} onHide={() => setFlash(null)} />
 
       <header className="tc-topbar">
-        <div className="tc-status">
-          <label className="tc-toggle tc-small" style={{ margin: 0 }}>
-            课程
+        <div className="tc-topbar__row">
+          <h1>
+            <span className="dot" />
+            网训战役指挥部
+          </h1>
+          {/* 课程选择：标题行中部（最新 iter 指标 chips 已移除） */}
+          <label className="tc-topbar__course" title={undefined}>
+            <span className="tc-topbar__course-lbl">课程</span>
             <select
               id="courseSel"
               className="tc-sel"
@@ -274,13 +235,6 @@ export function App({ initial }: AppProps) {
               </span>
             ) : null}
           </label>
-          {headChips}
-        </div>
-        <div className="tc-topbar__row">
-          <h1>
-            <span className="dot" />
-            NN 训练控制台
-          </h1>
           <div className="tc-topbar__right">
             {phaseInfo && phaseInfo.phase !== 'idle' ? (
               <span
@@ -374,8 +328,9 @@ export function App({ initial }: AppProps) {
       </PanelErrorBoundary>
 
       <p className="tc-caption">
-        仅回环 127.0.0.1 无鉴权（DECISIONS §348）· /api/state {refreshInterval}s 轮询 · 池统计独立
-        /api/pool（抽屉内 5 分钟） · 详情进右侧抽屉 · Esc 关闭弹窗/抽屉 · r 立即刷新全部。
+        仅回环 127.0.0.1 无鉴权（DECISIONS §348）· /api/state {refreshInterval}s 轮询 ·
+        首页即训练态势：胜率焦点 + 组件卡（点击卡在下方展开全宽最近日志）+ 节点 pill 行 ·
+        详情进抽屉（指标 | 节点统计 | 日志）· Esc 关闭弹窗/抽屉 · r 立即刷新全部。
       </p>
 
       <Drawer

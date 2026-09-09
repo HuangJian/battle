@@ -265,20 +265,7 @@ export function MetricsTable({ stateView }: { stateView: ConsoleStateView | null
     }
   }
   return (
-    <div>
-      <div className="tc-toolbar" style={{ padding: '0 0 8px' }}>
-        <SegmentedControl<IterFilter>
-          value={filter}
-          ariaLabel="行过滤"
-          options={[
-            { value: 'all', label: '全部' },
-            { value: 'rollout', label: 'rollout only' },
-            { value: 'eval', label: 'eval only' },
-          ]}
-          onChange={setFilterPersist}
-        />
-        <span className="tc-muted tc-small">{rows.length} 轮</span>
-      </div>
+    <div className="tc-drawer__panel">
       <DataTable<MetricRow>
         rows={display}
         rowKey={(r) => (r.kind === 'main' ? `m${r.iter}` : `e${r.iter}`)}
@@ -288,6 +275,21 @@ export function MetricsTable({ stateView }: { stateView: ConsoleStateView | null
         initialSortDir="desc"
         emptyText="尚无完整迭代记录"
         ariaLabel="训练指标"
+        toolbarLeft={
+          <>
+            <SegmentedControl<IterFilter>
+              value={filter}
+              ariaLabel="行过滤"
+              options={[
+                { value: 'all', label: '全部' },
+                { value: 'rollout', label: 'rollout only' },
+                { value: 'eval', label: 'eval only' },
+              ]}
+              onChange={setFilterPersist}
+            />
+            <span className="tc-muted tc-small">{rows.length} 轮</span>
+          </>
+        }
       />
       <p className="tc-caption" style={{ border: 'none', padding: '8px 0 0' }}>
         存活/击杀/道具 = <b>实际值</b>（it&#123;N&#125;/**/manifest.json 逐局聚合，stage+seed

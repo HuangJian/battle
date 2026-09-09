@@ -33,6 +33,8 @@ export interface DataTableProps<T> {
   /** 趋势卡点选联动列高亮。 */
   highlightCol?: string | null
   ariaLabel?: string
+  /** 渲染在工具栏最左段（主过滤/状态区，其他表格面板可并入自己对表格的控制）。 */
+  toolbarLeft?: ComponentChildren
 }
 
 function loadPref<T>(
@@ -63,6 +65,7 @@ export function DataTable<T>(props: DataTableProps<T>) {
     emptyText = '无数据',
     highlightCol = null,
     ariaLabel,
+    toolbarLeft,
   } = props
 
   const [sortKey, setSortKey] = useState<string>(props.initialSortKey ?? '')
@@ -83,6 +86,12 @@ export function DataTable<T>(props: DataTableProps<T>) {
       ),
   )
   const menuRef = useRef<HTMLDivElement>(null)
+  const wrapRef = useRef<HTMLDivElement>(null)
+
+  /** 「返回顶部」：把表格滚动容器平滑滚回顶（长表/深抽屉快速回位）。 */
+  const scrollTop = (): void => {
+    if (wrapRef.current) wrapRef.current.scrollTo({ top: 0, behavior: 'smooth' })
+  }
 
   useEffect(() => {
     if (!storagePrefix || typeof localStorage === 'undefined') return
@@ -145,12 +154,13 @@ export function DataTable<T>(props: DataTableProps<T>) {
   }
 
   return (
-    <div>
+    <div className="tc-dtable">
       <div
         className="tc-toolbar"
         role="toolbar"
         aria-label={ariaLabel ? `${ariaLabel} 工具栏` : undefined}
       >
+        {toolbarLeft}
         <input
           type="text"
           placeholder="关键词过滤…"
@@ -182,17 +192,38 @@ export function DataTable<T>(props: DataTableProps<T>) {
             </div>
           ) : null}
         </div>
+        <div className="tc-segmented" role="group" aria-label="表格密度">
+          <button
+            type="button"
+            className={`tc-segmented__btn${dense ? '' : ' tc-segmented__btn--on'}`}
+            aria-pressed={!dense}
+            title="宽松行距"
+            onClick={() => setDense(false)}
+          >
+            舒适
+          </button>
+          <button
+            type="button"
+            className={`tc-segmented__btn${dense ? ' tc-segmented__btn--on' : ''}`}
+            aria-pressed={dense}
+            title="紧凑行距"
+            onClick={() => setDense(true)}
+          >
+            紧凑
+          </button>
+        </div>
+        <span className="tc-muted">{filtered.length} 行</span>
         <button
           type="button"
-          className="tc-btn tc-btn--sm"
-          aria-label="切换表格密度"
-          onClick={() => setDense((d) => !d)}
+          className="tc-btn tc-btn--sm tc-toolbar__totop"
+          aria-label="返回顶部"
+          title="返回顶部"
+          onClick={scrollTop}
         >
-          {dense ? '舒适' : '紧凑'}
+          ↑ 返回顶部
         </button>
-        <span className="tc-muted">{filtered.length} 行</span>
       </div>
-      <div className="tc-tablewrap">
+      <div className="tc-tablewrap" ref={wrapRef}>
         <table className={`tc-table${dense ? ' tc-table--dense' : ''}`}>
           <thead>
             <tr>

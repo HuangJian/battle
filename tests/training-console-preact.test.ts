@@ -370,15 +370,15 @@ describe('控制台 SSR（render.tsx renderConsolePage）', () => {
     const { buildStateView } = await import('../tools/training/console/api')
     const s = await buildStateView()
     const html = renderConsolePage(s)
-    expect(html).toContain('NN 训练控制台')
+    expect(html).toContain('网训战役指挥部')
     expect(html).toContain('window.__INITIAL__')
     expect(html).toContain('自动（最近活跃课程）')
     expect(html).toContain('tc-cc') // 组件小卡驱动
     expect(html).toContain('/app.js')
     expect(html).not.toContain('location.reload()') // 无整页 reload（§4.5）
     expect(html).not.toContain('<script>alert')
-    // 固定头部训练状态条 + 一屏仪表盘结构（DECISIONS §355）
-    expect(html).toContain('tc-status')
+    // 标题行置顶（§382：课程 select 并入标题行中部，指标 chips 已移除）+ 一屏仪表盘结构
+    expect(html).toContain('tc-topbar__course')
     expect(html).toContain('tc-hero')
     expect(html).toContain('tc-comps')
     expect(html).toContain('tc-npill')

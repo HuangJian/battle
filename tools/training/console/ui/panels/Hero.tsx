@@ -43,13 +43,19 @@ function TrendCell({
 }
 
 /** 最新 6 轮完整指标（紧凑表，iter 倒序）：主行口径与抽屉指标表一致（实际值优先、
- *  ≈ 为磁盘清理后的估算）；eval 列 = 干净评估（greedy 固定语料）。 */
-function LastIters({ iters }: { iters: IterRow[] }) {
+ *  ≈ 为磁盘清理后的估算）；eval 列 = 干净评估（greedy 固定语料）。表头行右侧
+ *  「完整指标表 ›」进指标抽屉（与标题同一行、右对齐）。 */
+function LastIters({ iters, onMore }: { iters: IterRow[]; onMore: () => void }) {
   const rows = [...iters].sort((a, b) => b.iter - a.iter).slice(0, 6)
   if (rows.length === 0) return null
   return (
     <div className="tc-hero__iters">
-      <span className="tc-hero__iters-hd">最新 {rows.length} 轮完整指标</span>
+      <div className="tc-hero__iters-hd">
+        <span>最新 {rows.length} 轮完整指标</span>
+        <button type="button" className="tc-link" onClick={onMore}>
+          完整指标表 ›
+        </button>
+      </div>
       <table className="tc-table tc-table--dense">
         <thead>
           <tr>
@@ -205,11 +211,8 @@ export function Hero({ stateView, onMore }: HeroProps) {
             fmt={fmtPct}
           />
         </div>
-        <button type="button" className="tc-link tc-hero__more" onClick={onMore}>
-          完整指标表 ›
-        </button>
       </div>
-      <LastIters iters={iters} />
+      <LastIters iters={iters} onMore={onMore} />
     </section>
   )
 }
