@@ -55,7 +55,20 @@ export class HudView {
   private frenzyEl: HTMLElement
   private sacrificeEl: HTMLElement
   private rewindEl: HTMLElement
+  /** Rail header stock total (`×N`, sum of all four inventories). */
+  private superTotalEl: HTMLElement
+  /**
+   * The super-item inventory — a SIDE RAIL beside the playfield (owned here,
+   * placed by UIManager next to the game container). Visible only when the
+   * mode has super items (non-classic) AND the HUD is up. Public so the host
+   * can measure it (resizeCanvas reserves its width) and place it.
+   */
+  readonly superRail: HTMLElement
   private superItems: HTMLElement[]
+  /** HUD bar visibility as of the last setVisible (mirrors .visible class). */
+  private hudVisible = false
+  /** Classic mode (no 强力道具) — last value written, drives the rail hide. */
+  private hideSuper = false
   /** Super item key labels (dynamic, reflect rebound keys + locale). */
   readonly guardLabel: HTMLElement | null
   readonly frenzyLabel: HTMLElement | null
@@ -84,6 +97,7 @@ export class HudView {
   private lastFrenzy = -1
   private lastSacrifice = -1
   private lastRewind = -1
+  private lastSuperTotal = -1
   // Buff countdowns: remaining whole seconds last written (-1 = chip hidden).
   private lastShieldSec = -1
   private lastFreezeSec = -1
@@ -99,99 +113,121 @@ export class HudView {
    * @param createElement shared element factory (owned by UIManager)
    * @param onTakeoverClick click handler for the Take Over button — the host
    *   routes it to the replay or spectate callback depending on active mode.
+   * @param onSuperRailToggle fired (change-guarded) whenever the super-item
+   *   rail's VISIBLE state flips — the host re-sizes the canvas because the
+   *   rail reserves real horizontal space beside the playfield.
    */
   constructor(
     createElement: (tag: string, className: string) => HTMLElement,
     onTakeoverClick: () => void,
+    private readonly onSuperRailToggle?: () => void,
   ) {
     this.createElement = createElement
     this.el = createElement('div', 'hud-bar')
     this.el.innerHTML = `
-      <div class="hud-group hud-left">
-        <div class="hud-item">
-          <span class="hud-label" data-i18n="hud.score">SCORE</span>
-          <span class="hud-value" data-hud="score">000000</span>
+      <div class="hud-top-row">
+        <div class="hud-group hud-left">
+          <div class="hud-item">
+            <span class="hud-label" data-i18n="hud.score">SCORE</span>
+            <span class="hud-value" data-hud="score">000000</span>
+          </div>
+          <div class="hud-item" data-hud="score2-wrap" style="display:none">
+            <span class="hud-label hud-p2-label" data-i18n="hud.god">GOD</span>
+            <span class="hud-value hud-p2-value" data-hud="score2">000000</span>
+          </div>
+          <div class="hud-item">
+            <span class="hud-label" data-i18n="hud.hi">HI</span>
+            <span class="hud-value hud-hi" data-hud="hiscore">000000</span>
+          </div>
+          <div class="hud-item">
+            <span class="hud-label" data-i18n="hud.star">STAR</span>
+            <span class="hud-value hud-star" data-hud="star"></span>
+          </div>
         </div>
-        <div class="hud-item" data-hud="score2-wrap" style="display:none">
-          <span class="hud-label" style="color:#f0c040" data-i18n="hud.god">GOD</span>
-          <span class="hud-value" data-hud="score2" style="color:#f0c040">000000</span>
-        </div>
-        <div class="hud-item">
-          <span class="hud-label" data-i18n="hud.hi">HI</span>
-          <span class="hud-value hud-hi" data-hud="hiscore">000000</span>
-        </div>
-        <div class="hud-item">
-          <span class="hud-label" data-i18n="hud.star">STAR</span>
-          <span class="hud-value hud-star" data-hud="star"></span>
-        </div>
-      </div>        <div class="hud-group hud-center">
-        <div class="hud-item hud-replay" data-hud="replay" hidden>
-          <span class="hud-label" data-i18n="hud.replayMode">REPLAY MODE</span>
-          <span class="hud-replay-difficulty" data-hud="replay-difficulty"></span>
-        </div>
-        <div class="hud-item hud-spectate" data-hud="spectate" hidden>
-          <span class="hud-label" data-i18n="hud.spectate">SPECTATE</span>
-        </div>
-        <div class="hud-item hud-speed" data-hud="speed" hidden>
-          <span class="hud-label" data-i18n="hud.speed">SPEED</span>
-          <span class="hud-value hud-speed-value" data-hud="speed-value">×1</span>
-        </div>
-        <div class="hud-item hud-stage">
-          <div class="hud-stage-head">
+        <div class="hud-group hud-center">
+          <div class="hud-item hud-replay" data-hud="replay" hidden>
+            <span class="hud-label" data-i18n="hud.replayMode">REPLAY MODE</span>
+            <span class="hud-replay-difficulty" data-hud="replay-difficulty"></span>
+          </div>
+          <div class="hud-item hud-spectate" data-hud="spectate" hidden>
+            <span class="hud-label" data-i18n="hud.spectate">SPECTATE</span>
+          </div>
+          <div class="hud-item hud-speed" data-hud="speed" hidden>
+            <span class="hud-label" data-i18n="hud.speed">SPEED</span>
+            <span class="hud-value hud-speed-value" data-hud="speed-value">×1</span>
+          </div>
+          <div class="hud-item hud-stage">
             <span class="hud-label" data-i18n="hud.stage">STAGE</span>
             <span class="hud-value" data-hud="stage">01</span>
+            <span class="hud-stage-name" data-hud="stage-name"></span>
           </div>
-          <span class="hud-stage-name" data-hud="stage-name"></span>
+          <div class="hud-buffs" data-hud="buffs">
+            <div class="buff-chip buff-shield" data-buff="shield" hidden>
+              <span class="buff-icon">🛡</span>
+              <span class="buff-time" data-buff-time="shield">0</span>
+            </div>
+            <div class="buff-chip buff-freeze" data-buff="freeze" hidden>
+              <span class="buff-icon">❄</span>
+              <span class="buff-time" data-buff-time="freeze">0</span>
+            </div>
+            <div class="buff-chip buff-fence" data-buff="fence" hidden>
+              <span class="buff-icon">🔧</span>
+              <span class="buff-time" data-buff-time="fence">0</span>
+            </div>
+          </div>
+          <div class="hud-pause" data-hud="pause">
+            <span class="hud-pause-title"><span class="hud-pause-dot"></span><span data-i18n="pause.title">PAUSED</span></span>
+            <span class="hud-pause-hint" data-i18n="hud.pauseHint">P Resume</span>
+            <button class="hud-takeover-btn" data-hud="takeover" type="button" hidden data-i18n="hud.takeover">🎮 Take Over</button>
+          </div>
         </div>
-        <div class="hud-buffs" data-hud="buffs">
-          <div class="buff-chip buff-shield" data-buff="shield" hidden>
-            <span class="buff-icon">🛡</span>
-            <span class="buff-time" data-buff-time="shield">0</span>
+        <div class="hud-group hud-right">
+          <div class="hud-item">
+            <span class="hud-label" data-i18n="hud.lives">LIVES</span>
+            <span class="hud-value hud-lives" data-hud="lives">♥♥♥</span>
           </div>
-          <div class="buff-chip buff-freeze" data-buff="freeze" hidden>
-            <span class="buff-icon">❄</span>
-            <span class="buff-time" data-buff-time="freeze">0</span>
+          <div class="hud-item" data-hud="coop-lives" style="display:none">
+            <span class="hud-label hud-p2-label" data-i18n="hud.god">GOD</span>
+            <span class="hud-value hud-lives hud-p2-value" data-hud="lives2">—</span>
           </div>
-          <div class="buff-chip buff-fence" data-buff="fence" hidden>
-            <span class="buff-icon">🔧</span>
-            <span class="buff-time" data-buff-time="fence">0</span>
+          <div class="hud-item">
+            <span class="hud-label" data-i18n="hud.enemy">ENEMY</span>
+            <span class="hud-value" data-hud="enemies">20</span>
           </div>
-        </div>
-        <div class="hud-pause" data-hud="pause">
-          <span class="hud-pause-title"><span class="hud-pause-dot"></span><span data-i18n="pause.title">PAUSED</span></span>
-          <span class="hud-pause-hint" data-i18n="hud.pauseHint">P Resume</span>
-          <button class="hud-takeover-btn" data-hud="takeover" type="button" hidden data-i18n="hud.takeover">🎮 Take Over</button>
         </div>
       </div>
-      <div class="hud-group hud-right">
-        <div class="hud-item">
-          <span class="hud-label" data-i18n="hud.lives">LIVES</span>
-          <span class="hud-value hud-lives" data-hud="lives">♥♥♥</span>
-        </div>
-        <div class="hud-item" data-hud="coop-lives" style="display:none">
-          <span class="hud-label" data-i18n="hud.god">GOD</span>
-          <span class="hud-value hud-lives" data-hud="lives2" style="color:#f0c040">—</span>
-        </div>
-        <div class="hud-item">
-          <span class="hud-label" data-i18n="hud.enemy">ENEMY</span>
-          <span class="hud-value" data-hud="enemies">20</span>
-        </div>
-        <div class="hud-item hud-super">
-          <span class="hud-label" data-hud-super-label="guard">Guardian&lt;F5&gt;</span>
-          <span class="hud-value" data-hud="guard">0</span>
-        </div>
-        <div class="hud-item hud-super">
-          <span class="hud-label" data-hud-super-label="frenzy">Frenzy&lt;F6&gt;</span>
-          <span class="hud-value" data-hud="frenzy">0</span>
-        </div>
-        <div class="hud-item hud-super">
-          <span class="hud-label" data-i18n="hud.sacrifice">同归</span>
-          <span class="hud-value" data-hud="sacrifice">0</span>
-        </div>
-        <div class="hud-item hud-super">
-          <span class="hud-label" data-hud-super-label="rewind">Time Box&lt;F7&gt;</span>
-          <span class="hud-value" data-hud="rewind">0</span>
-        </div>
+    `
+
+    // Super-item inventory — a SIDE RAIL beside the playfield (not part of the
+    // HUD bar): a real layout sibling of the canvas, visible only in non-
+    // classic modes (superDropChance > 0) while the HUD is up. Building it as
+    // a separate element lets UIManager place it next to the game container.
+    this.superRail = createElement('div', 'hud-super-rail')
+    this.superRail.hidden = true
+    this.superRail.innerHTML = `
+      <div class="hud-super-head">
+        <span class="hud-super-title" data-i18n="hud.superItems">SUPER ITEMS</span>
+        <span class="hud-super-total" data-hud="super-total">×0</span>
+      </div>
+      <div class="hud-item hud-super">
+        <span class="hud-super-icon">🛡</span>
+        <span class="hud-label" data-hud-super-label="guard">Guardian&lt;F5&gt;</span>
+        <span class="hud-value" data-hud="guard">0</span>
+      </div>
+      <div class="hud-item hud-super">
+        <span class="hud-super-icon">❄</span>
+        <span class="hud-label" data-hud-super-label="frenzy">Frenzy&lt;F6&gt;</span>
+        <span class="hud-value" data-hud="frenzy">0</span>
+      </div>
+      <div class="hud-item hud-super">
+        <span class="hud-super-icon">💥</span>
+        <span class="hud-label" data-i18n="hud.sacrifice">同归</span>
+        <span class="hud-value" data-hud="sacrifice">0</span>
+      </div>
+      <div class="hud-item hud-super">
+        <span class="hud-super-icon">⏱</span>
+        <span class="hud-label" data-hud-super-label="rewind">Time Box&lt;F7&gt;</span>
+        <span class="hud-value" data-hud="rewind">0</span>
       </div>
     `
 
@@ -214,14 +250,18 @@ export class HudView {
     this.takeoverBtn = q('[data-hud="takeover"]')
     this.speedChip = q('[data-hud="speed"]')
     this.speedValueEl = q('[data-hud="speed-value"]')
-    this.guardEl = q('[data-hud="guard"]')
-    this.frenzyEl = q('[data-hud="frenzy"]')
-    this.sacrificeEl = q('[data-hud="sacrifice"]')
-    this.rewindEl = q('[data-hud="rewind"]')
-    this.superItems = Array.from(this.el.querySelectorAll('.hud-super'))
-    this.guardLabel = this.el.querySelector('[data-hud-super-label="guard"]')
-    this.frenzyLabel = this.el.querySelector('[data-hud-super-label="frenzy"]')
-    this.rewindLabel = this.el.querySelector('[data-hud-super-label="rewind"]')
+    // The super-item stock counters live in the RAIL (beside the playfield),
+    // not in the hud-bar — query them there.
+    const rq = (sel: string) => this.superRail.querySelector(sel) as HTMLElement
+    this.guardEl = rq('[data-hud="guard"]')
+    this.frenzyEl = rq('[data-hud="frenzy"]')
+    this.sacrificeEl = rq('[data-hud="sacrifice"]')
+    this.rewindEl = rq('[data-hud="rewind"]')
+    this.superTotalEl = rq('[data-hud="super-total"]')
+    this.superItems = Array.from(this.superRail.querySelectorAll('.hud-super'))
+    this.guardLabel = this.superRail.querySelector('[data-hud-super-label="guard"]')
+    this.frenzyLabel = this.superRail.querySelector('[data-hud-super-label="frenzy"]')
+    this.rewindLabel = this.superRail.querySelector('[data-hud-super-label="rewind"]')
     this.buffShield = q('[data-buff="shield"]')
     this.buffShieldTime = q('[data-buff-time="shield"]')
     this.buffFreeze = q('[data-buff="freeze"]')
@@ -233,9 +273,28 @@ export class HudView {
     this.takeoverBtn.addEventListener('click', onTakeoverClick)
   }
 
-  /** Show/hide the whole HUD bar (menu & victory hide it). */
+  /** Show/hide the whole HUD bar (menu & victory hide it). The super-item
+   *  rail follows the same visibility (it is HUD chrome, not a menu widget). */
   setVisible(visible: boolean): void {
     this.el.classList.toggle('visible', visible)
+    if (this.hudVisible !== visible) {
+      this.hudVisible = visible
+      this.applySuperRailVisibility()
+    }
+  }
+
+  /**
+   * Single writer for the super-item rail's visibility: shown only while the
+   * HUD is up AND the mode actually has super items (non-classic). The change
+   * is change-guarded and fires the host callback — the rail reserves real
+   * horizontal space beside the playfield, so the canvas must be re-sized
+   * when it appears/disappears (classic ↔ non-classic, menu ↔ play).
+   */
+  private applySuperRailVisibility(): void {
+    const hidden = !this.hudVisible || this.hideSuper
+    if (this.superRail.hidden === hidden) return
+    this.superRail.hidden = hidden
+    this.onSuperRailToggle?.()
   }
 
   /** Show or hide the persistent REPLAY indicator in the HUD center area. */
@@ -285,19 +344,24 @@ export class HudView {
     // two-player mode; syncWorld mirrors the flag so a mode flip without a
     // label change still shows/hides the rows.
     if (bindings2) {
-      for (const [action, name] of actions) {
+      for (const [action] of actions) {
         const el2 = this.ensureP2Label(action)
         if (el2) {
-          el2.textContent = formatSuperKeyLabel(name, bindings2[action])
+          // The P2 chip shows only the bare KEY (gold chip after the stock
+          // counter) — P1's label already names the item, so a second full
+          // "Guardian<R>" row would only add vertical clutter (HUD redesign).
+          el2.textContent = formatKeyCode(parseBinding(bindings2[action]).code)
           el2.hidden = !this.twoPlayerLabels
         }
       }
     }
   }
 
-  /** Lazily create (and cache) the P2 super-key label inside the P1 item row.
-   *  Styled like the score2/GOD slot (#f0c040) so the second player's row is
-   *  visually distinct; created hidden and flipped by syncWorld/updates. */
+  /** Lazily create (and cache) the P2 release-key chip inside the super item.
+   *  A small gold key chip appended AFTER the stock counter — "Guardian<F5> 2
+   *  [R]" — so two-player mode gains the P2 hint on the SAME line instead of
+   *  a third stacked row (HUD redesign). Created hidden and flipped by
+   *  syncWorld/updates. */
   private ensureP2Label(action: 'guard' | 'frenzy' | 'rewind'): HTMLElement | null {
     const p1 =
       action === 'guard'
@@ -314,10 +378,12 @@ export class HudView {
     if (existing) return existing
     const item = p1?.parentElement
     if (!item) return null
-    const el = this.createElement('span', 'hud-label hud-super-p2')
-    el.style.color = '#f0c040'
+    const el = this.createElement('span', 'hud-super-p2')
     el.hidden = !this.twoPlayerLabels
-    item.appendChild(el)
+    // Insert after the stock counter so the P2 key reads as a trailing hint.
+    const valueEl = item.querySelector('.hud-value')
+    if (valueEl) valueEl.after(el)
+    else item.appendChild(el)
     if (action === 'guard') this.guardLabel2 = el
     else if (action === 'frenzy') this.frenzyLabel2 = el
     else this.rewindLabel2 = el
@@ -405,16 +471,21 @@ export class HudView {
     }
 
     // Player star level (★ power-up). Show only filled stars; no empty
-    // placeholders. If the player has no stars, show nothing.
+    // placeholders. If the player has no stars, show nothing. Levels beyond
+    // MAX_HUD_STARS are clamped to a compact "★★★★★+N" so an unbounded star
+    // string can never widen or wrap the HUD row (HUD redesign).
     if (world.playerLevel !== this.lastStar) {
-      const lvl = Math.max(0, world.playerLevel)
-      this.starEl.textContent = lvl > 0 ? '★'.repeat(lvl) : '--'
+      this.starEl.textContent = formatStarLevel(world.playerLevel)
       this.lastStar = world.playerLevel
     }
 
     // Super power-up inventory counters (DECISIONS.md §31). Written only when
-    // the count actually changes. Hidden in classic mode (no 强力道具).
+    // the count actually changes. In classic mode (no 强力道具) the whole rail
+    // is hidden — it lives beside the playfield, not in the HUD bar (HUD
+    // redesign follow-up: the rail appears only when the mode has super items).
     const hideSuper = world.rules.superDropChance === 0
+    this.hideSuper = hideSuper
+    this.applySuperRailVisibility()
     for (const el of this.superItems) {
       if (el.hidden !== hideSuper) el.hidden = hideSuper
     }
@@ -452,6 +523,13 @@ export class HudView {
       if (world.rewindStock !== this.lastRewind) {
         this.rewindEl.textContent = String(world.rewindStock)
         this.lastRewind = world.rewindStock
+      }
+      // Rail header total — the whole inventory at a glance (change-guarded).
+      const total =
+        world.guardStock + world.frenzyStock + world.sacrificeStock + world.rewindStock
+      if (total !== this.lastSuperTotal) {
+        this.superTotalEl.textContent = `×${total}`
+        this.lastSuperTotal = total
       }
     }
 
@@ -520,6 +598,26 @@ export class HudView {
  */
 export function formatSuperKeyLabel(name: string, binding: string): string {
   return `${name}<${formatKeyCode(parseBinding(binding).code)}>`
+}
+
+/**
+ * Maximum stars shown in the HUD before the overflow counter kicks in.
+ * Non-classic star levels accumulate WITHOUT bound, so an uncapped string of
+ * ★ would widen (and, in the old stacked layout, wrap) the HUD bar.
+ */
+export const MAX_HUD_STARS = 5
+
+/**
+ * Render the player star level compactly (HUD redesign): up to
+ * MAX_HUD_STARS stars, then a `+N` overflow counter — `★★★★★+7` for level 12.
+ * Level 0 renders as `--` (no stars, matching the pre-redesign HUD). Pure —
+ * headless-testable like formatSuperKeyLabel.
+ */
+export function formatStarLevel(level: number): string {
+  const lvl = Math.max(0, level)
+  if (lvl === 0) return '--'
+  if (lvl <= MAX_HUD_STARS) return '★'.repeat(lvl)
+  return '★'.repeat(MAX_HUD_STARS) + `+${lvl - MAX_HUD_STARS}`
 }
 
 /** Render a bare `KeyboardEvent.code` (no modifiers) into a short label. */

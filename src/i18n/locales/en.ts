@@ -51,6 +51,7 @@ export const en: Catalog = {
   'hud.frenzy': 'Frenzy',
   'hud.sacrifice': 'Sacrifice',
   'hud.rewind': 'Time Box',
+  'hud.superItems': 'SUPER ITEMS',
 
   // ---- Pause ----
   'pause.title': 'PAUSED',

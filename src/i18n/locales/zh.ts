@@ -47,6 +47,7 @@ export const zh: Catalog = {
   'hud.frenzy': '狂暴',
   'hud.sacrifice': '同归',
   'hud.rewind': '宝盒',
+  'hud.superItems': '强力道具',
 
   // ---- Pause ----
   'pause.title': '已暂停',

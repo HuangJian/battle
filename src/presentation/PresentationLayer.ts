@@ -211,6 +211,15 @@ export class PresentationLayer {
       }
     }
 
+    // Super-item rail (non-classic modes) is a REAL layout sibling beside the
+    // playfield — reserve its width so the canvas fits next to it instead of
+    // being overlapped. Hidden (classic / menu) → offsetWidth is 0 → no cost.
+    let railReserve = 0
+    const rail = this.ui.superRailEl
+    if (rail && !rail.hidden && rail.offsetWidth > 0) {
+      railReserve = rail.getBoundingClientRect().width + 12 // width + gap
+    }
+
     const hud = this.ui.hudBarEl
     const footer = this.ui.footerEl
 
@@ -222,15 +231,17 @@ export class PresentationLayer {
       const hudH = hud.offsetHeight
       const footerH = footer.offsetHeight
 
-      const availW = Math.max(0, window.innerWidth - PAD_X * 2 - leftReserve)
+      const availW = Math.max(0, window.innerWidth - PAD_X * 2 - leftReserve - railReserve)
       const availH = Math.max(0, window.innerHeight - PAD_Y * 2 - hudH - footerH)
       side = Math.max(1, Math.floor(Math.min(availW, availH)))
 
-      // HUD/footer match the canvas' framed width (canvas + 1px game-container
-      // border on each side), never the whole window.
+      // HUD/footer match the playfield unit's width (canvas + 1px container
+      // border on each side + the super-item rail when it is present), never
+      // the whole window — so the bar's edges stay aligned with the playfield.
       const frameW = side + 2
-      hud.style.width = frameW + 'px'
-      footer.style.width = frameW + 'px'
+      const bodyW = frameW + railReserve
+      hud.style.width = bodyW + 'px'
+      footer.style.width = bodyW + 'px'
       canvas.style.width = side + 'px'
       canvas.style.height = side + 'px'
     }
@@ -394,6 +405,10 @@ export class PresentationLayer {
    */
   updateUI(world: World): void {
     this.ui.update(world)
+    // The super-item rail's visibility flipped (classic ↔ non-classic, menu ↔
+    // play) → re-size the canvas around its reserved width. Change-guarded
+    // upstream, so this is a no-op on every other frame.
+    if (this.ui.consumeSuperRailDirty()) this.resizeCanvas()
   }
 
   /**

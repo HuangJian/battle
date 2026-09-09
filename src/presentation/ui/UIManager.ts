@@ -54,6 +54,23 @@ export class UIManager {
   /** Callback for the Take Over button while a replay is active (set by GameReplay). */
   onReplayTakeover: (() => void) | null = null
 
+  /** Set when the super-item rail's visibility flips — PresentationLayer
+   *  consumes it (per frame) to re-size the canvas around the rail. */
+  private superRailDirty = false
+
+  /** The super-item rail element — measured by resizeCanvas (its width is
+   *  reserved beside the playfield) and toggled by HudView. */
+  get superRailEl(): HTMLElement {
+    return this.hud.superRail
+  }
+
+  /** Read + clear the rail-visibility flip flag (cheap, called per frame). */
+  consumeSuperRailDirty(): boolean {
+    const dirty = this.superRailDirty
+    this.superRailDirty = false
+    return dirty
+  }
+
   private toastEl: HTMLElement
   private toastTimer = 0
 
@@ -86,14 +103,22 @@ export class UIManager {
     this.overlay = this.createElement('div', 'ui-overlay')
 
     // HUD bar (above canvas) — Take Over routes to replay or spectate
-    // depending on which mode is active at click time.
-    this.hud = new HudView(this.createElement.bind(this), () => {
-      if (this.replayController.isActive) {
-        this.onReplayTakeover?.()
-      } else {
-        this.onSpectateTakeover?.()
-      }
-    })
+    // depending on which mode is active at click time. The super-item rail's
+    // visibility flips (classic ↔ non-classic, menu ↔ play) flag a canvas
+    // re-size: the rail reserves real space beside the playfield.
+    this.hud = new HudView(
+      this.createElement.bind(this),
+      () => {
+        if (this.replayController.isActive) {
+          this.onReplayTakeover?.()
+        } else {
+          this.onSpectateTakeover?.()
+        }
+      },
+      () => {
+        this.superRailDirty = true
+      },
+    )
 
     // Menu screen (start screen)
     this.menu = new MenuScreen(this.createElement.bind(this), () => this.openControls())
@@ -143,10 +168,16 @@ export class UIManager {
     this.perfOverlay.onCopied = () => this.notify(t('toast.perfCopied'), 'info')
     this.root.appendChild(this.perfOverlay.el)
 
-    // Assemble
+    // Assemble — the super-item rail sits BESIDE the playfield (not inside
+    // the HUD bar): a .game-body row holds [game container][super rail]. The
+    // rail reserves real horizontal space, so resizeCanvas accounts for it.
+    const gameBody = document.createElement('div')
+    gameBody.className = 'game-body'
     this.root.appendChild(this.hud.el)
     gameContainer.appendChild(this.overlay)
-    this.root.appendChild(gameContainer)
+    gameBody.appendChild(gameContainer)
+    gameBody.appendChild(this.hud.superRail)
+    this.root.appendChild(gameBody)
     this.root.appendChild(this.footer)
 
     // Replay Controller (video player style)
