@@ -57,11 +57,15 @@ function writeLocal(key: string, v: string): void {
   }
 }
 
-function initInterval(): RefreshSec {
+/** 刷新间隔默认值——必须与 SSR 首帧一致（SSR 无 localStorage，恒为 300）。 */
+const DEFAULT_INTERVAL: RefreshSec = 300
+
+/** 已存刷新间隔（仅合法值；非法回退默认）。hydrate 后在 effect 里恢复，不参与首帧渲染。 */
+function storedInterval(): RefreshSec {
   const v = readLocal(TC_GLOBAL_INTERVAL)
   if (v === '60' || v === '180' || v === '300' || v === '600' || v === '1800')
     return Number(v) as RefreshSec
-  return 300
+  return DEFAULT_INTERVAL
 }
 
 /** 本机判定（局域网只读边界）：页面经 localhost/127.0.0.1 打开 = 本机，可执行动作；
@@ -100,7 +104,14 @@ function fmtElapsed(ms: number | null): string {
 export function App({ initial }: AppProps) {
   const [stateView, setStateView] = useState<ConsoleStateView | null>(initial)
   const [connError, setConnError] = useState<'off' | 'retry' | 'down'>('off')
-  const [refreshInterval, setRefreshInterval] = useState<RefreshSec>(initInterval)
+  // 首帧一律用 SSR 默认值（localStorage 服务端不可读）——首帧读本地存储会让客户端
+  // vnode 与 SSR HTML 不一致 → hydrate 错配 → 组件区 DOM 错位（§：只读横幅关闭后样式崩）。
+  const [refreshInterval, setRefreshInterval] = useState<RefreshSec>(DEFAULT_INTERVAL)
+  // 本地偏好在 hydrate 之后恢复（与 Hero 的 TC_HERO_ITER_VIEW 同款写法）。
+  useEffect(() => {
+    const v = storedInterval()
+    if (v !== DEFAULT_INTERVAL) setRefreshInterval(v)
+  }, [])
   const [flash, setFlash] = useState<FlashState | null>(null)
   const [documentVisible, setDocumentVisible] = useState(
     typeof document === 'undefined' || !document.hidden,
@@ -109,9 +120,11 @@ export function App({ initial }: AppProps) {
   const [trainOpen, setTrainOpen] = useState(false)
   const [poolFreshNonce, setPoolFreshNonce] = useState(0)
   // 只读横幅可关闭：localStorage 记住「不再显示」（仅局域网只读视图相关；tc. 前缀防误删）。
-  const [roBannerDismissed, setRoBannerDismissed] = useState(
-    () => readLocal(TC_RO_BANNER_DISMISSED) === '1',
-  )
+  // 首帧恒 false（与 SSR 一致），localStorage 偏好 hydrate 后恢复——见下方 effect。
+  const [roBannerDismissed, setRoBannerDismissed] = useState(false)
+  useEffect(() => {
+    if (readLocal(TC_RO_BANNER_DISMISSED) === '1') setRoBannerDismissed(true)
+  }, [])
   // 视图课程（局域网只读核心）：初始 = SSR 的 ?course= 覆盖或操作员课程；切换只改本浏览器
   // 的查看 + URL，本机才额外 POST setCourse 同步操作员课程（动作 WYSIWYG 走 body.course）。
   const isLocal = isLocalHost()
@@ -386,7 +399,7 @@ export function App({ initial }: AppProps) {
         <div className="tc-banner tc-banner--ro" role="status">
           <span>
             🔒 只读模式：可查看任意课程/日志/节点统计；启停组件、冒烟、模式开关与节点编辑 仅在本机
-            localhost 打开控制台时可用（本页动作按钮已禁用）。
+            localhost 打开控制台时可用（动作按钮可点击，执行时会被服务端拒绝并提示）。
           </span>
           <button
             type="button"
@@ -405,6 +418,7 @@ export function App({ initial }: AppProps) {
       <PanelErrorBoundary>
         <Hero stateView={stateView} onMore={() => setDrawerTab('metrics')} />
       </PanelErrorBoundary>
+      {/* ── 组件卡 4  row：在 LAN 只读视图里也正常交互样式（不在 banner 里、不 opacity 灰败） ── */}
       <PanelErrorBoundary>
         <ComponentCards
           stateView={stateView}

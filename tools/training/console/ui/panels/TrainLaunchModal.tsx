@@ -14,7 +14,7 @@ export interface TrainLaunchModalProps {
   onClose: () => void
   onAction: (act: string, body: Record<string, unknown>) => void
   onLaunch: (mode: 'pull' | 'push' | 'local') => void
-  /** 局域网只读视图：行为开关/预演/启动全部禁用（兜底——启动入口本已被组件卡禁用）。 */
+  /** 局域网只读视图：行为开关/预演/启动全部禁用（兜底——启动入口可点，弹窗内禁用以防误操作）。 */
   readOnly?: boolean
 }
 

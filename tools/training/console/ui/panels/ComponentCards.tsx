@@ -19,11 +19,12 @@ export interface ComponentCardsProps {
   onLaunchTrainer: () => void
   /** 当前查看课程（日志页链接带 ?course=，保持同课程查看）。 */
   course?: string
-  /** 局域网只读视图：启/停/冒烟按钮禁用并给提示（日志/详情仍可看）。 */
+  /** 局域网只读视图：按钮保持正常外观，悬停给只读提示；真点击由服务端 403 + flash 兜底
+   *  （物理禁用会让整个组件区看起来灰败破碎——只读是动作边界，不是按钮状态）。 */
   readOnly?: boolean
 }
 
-/** 只读视图的动作按钮提示（局域网用户误点前的说明）。 */
+/** 只读视图的动作按钮悬停提示（局域网用户误点前的说明）。 */
 const RO_TITLE = '只读模式：操作仅限本机 localhost'
 
 function dotClass(c: ComponentView): string {
@@ -98,7 +99,7 @@ export function ComponentCards({
           const isRunning = c.status === 'running'
           const locked = c.busy || pending[c.key] !== undefined
           const meta = c.pid ? `PID ${c.pid} · ${statusText(c)}` : statusText(c)
-          const roLocked = locked || !!readOnly
+          // 只读视图不禁用按钮（避免组件区灰败破碎感）；悬停 title 给提示，真点击 403 + flash。
           const roTitle = readOnly ? RO_TITLE : locked ? '动作进行中…' : undefined
           return (
             <section
@@ -148,7 +149,7 @@ export function ComponentCards({
                     <button
                       type="button"
                       className="tc-btn tc-btn--sm"
-                      disabled={roLocked}
+                      disabled={locked}
                       aria-label={`停止 ${c.label}`}
                       title={roTitle}
                       onClick={() => fire(c, 'stop')}
@@ -159,7 +160,7 @@ export function ComponentCards({
                       <button
                         type="button"
                         className="tc-iconbtn"
-                        disabled={roLocked}
+                        disabled={locked}
                         aria-label={`冒烟 ${c.label}`}
                         title={readOnly ? RO_TITLE : '冒烟'}
                         onClick={() => void onAction('smoke', { component: c.key })}
@@ -180,7 +181,7 @@ export function ComponentCards({
                   <button
                     type="button"
                     className="tc-btn tc-btn--sm tc-btn--primary"
-                    disabled={roLocked}
+                    disabled={locked}
                     aria-label={`启动 ${c.label}`}
                     title={roTitle}
                     onClick={c.key === 'trainingLoop' ? onLaunchTrainer : () => fire(c, 'start')}

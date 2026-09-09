@@ -339,20 +339,54 @@ describe('console 局域网只读边界（§…：LAN 查看 / localhost 控制�
     expect(s.components.find((c) => c.key === 'cloudflared')!.secret).toBeDefined()
   })
 
-  it('只读视图 SSR：readOnly=true 渲染只读角标 + 横幅，动作按钮禁用；false 不渲染', async () => {
+  it('只读视图 SSR：readOnly=true 渲染只读角标 + 横幅，动作按钮不禁用；false 不渲染', async () => {
     const base = await api.buildStateView()
-    const html = render.renderConsolePage({ ...base, readOnly: true })
+    // 组件 busy 置空：pending/busy 锁与只读无关，避免 base 状态干扰禁用断言
+    const clean = {
+      ...base,
+      components: base.components.map((c) => ({ ...c, busy: false })),
+    }
+    const html = render.renderConsolePage({ ...clean, readOnly: true })
     // 角标与横幅（类名断言避开 CSS 内联定义里的同名串）
     expect(html).toContain('class="tc-badge tc-badge--ro"')
     expect(html).toContain('class="tc-banner tc-banner--ro"')
     expect(html).toContain('🔒 只读模式')
-    // 只读视图的动作按钮 SSR 即禁用（无闪跳）：至少一个组件卡动作按钮带 disabled 属性
-    // （正则匹配 <button...disabled>，避开 <style> 内联 CSS 里的 :disabled 选择器）
-    expect(html).toMatch(/<button[^>]*disabled/)
-    const html2 = render.renderConsolePage({ ...base, readOnly: false })
+    // 只读视图不禁用动作按钮（物理禁用会让组件区灰败破碎——只读是动作边界，不是按钮状态）：
+    // 悬停提示 + 真点击由服务端 403 + flash 兜底，按钮保持正常外观可点击。
+    // （正则避开 <style> 内联 CSS 里的 :disabled 选择器）
+    expect(html).not.toMatch(/<button[^>]*disabled/)
+    // 动作按钮带只读悬停提示（说明动作仅限本机）
+    expect(html).toContain('title="只读模式：操作仅限本机 localhost"')
+    const html2 = render.renderConsolePage({ ...clean, readOnly: false })
     expect(html2).not.toContain('class="tc-badge tc-badge--ro"')
     expect(html2).not.toContain('class="tc-banner tc-banner--ro"')
     expect(html2).not.toContain('🔒 只读模式')
+    expect(html2).not.toContain('title="只读模式：操作仅限本机 localhost"')
+  })
+
+  it('hydrate 安全：首屏组件不得在 useState 初始化里读 localStorage（横幅关闭后样式崩的根因）', () => {
+    // 背景：SSR 无 localStorage，若首帧用「本地存储值」初始化 state，客户端 hydrate 的
+    // vnode 与 SSR HTML 不一致 → Preact 水合错配 → 组件区 DOM 错位（只读横幅被关闭后
+    // 首帧少一个兄弟节点，样式整体崩坏）。纪律：首帧用 SSR 默认值，本地偏好在
+    // useEffect（hydrate 之后）恢复——与 Hero 的 TC_HERO_ITER_VIEW 同款写法。
+    const files = [
+      path.join(import.meta.dir, '..', 'tools', 'training', 'console', 'ui', 'app.tsx'),
+      path.join(import.meta.dir, '..', 'tools', 'training', 'console', 'ui', 'panels', 'Hero.tsx'),
+    ]
+    for (const f of files) {
+      const flat = readFileSync(f, 'utf8').replace(/\s+/g, ' ')
+      // 匹配 useState(...)（容一层嵌套括号，覆盖 `() => readLocal(...)` 这类惰性初始化）
+      const inits = flat.match(/useState(?:<[^>]*>)?\((?:[^()]|\([^()]*\))*\)/g) ?? []
+      // 守卫：正则必须真匹配到（Hero 至少 2 处），否则断言会静默空跑
+      expect(inits.length).toBeGreaterThan(1)
+      for (const init of inits) {
+        expect(init).not.toMatch(/readLocal\(|localStorage/)
+      }
+    }
+    // 两个本地偏好必须走 hydrate 后的 effect 恢复
+    const app = readFileSync(files[0]!, 'utf8')
+    expect(app).toContain('TC_RO_BANNER_DISMISSED')
+    expect(app).toContain('storedInterval()')
   })
 
   it('课程 select：局域网只读下 hub 运行也不禁用（可切查看课程）；本机 hub 运行才锁定', async () => {
