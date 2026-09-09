@@ -17,10 +17,11 @@ import { appendFileSync } from 'fs'
 import { loadConfig } from '../config'
 import { warn } from '../log'
 import { pidAlive } from '../net'
+import { portOwnerPids } from '../proc'
 import { loadRegistry, saveComponent } from '../registry'
-import type { Component, Registry, RegistryEntry } from '../types'
+import type { Component, ProcSpec, Registry, RegistryEntry } from '../types'
 import { readLogTail, resolveComponentLog, discoverCourses, effectiveCourse } from './api'
-import { COMPONENT_LABELS, loadConsoleState } from './actions'
+import { COMPONENT_LABELS, loadConsoleState, restartSpecFor } from './actions'
 
 /** 扫描登记条目，返回「确证退出」的组件（两帧锁）。isAlive 可注入（测试用）。 */
 export function nextExitFailures(
@@ -89,18 +90,140 @@ export function recordExitFailure(
   return marker
 }
 
-/** 周期入口：读盘 → 扫描 → 落失败记录。返回本次记录数（-1 = 配置/状态读取失败）。 */
-export function runExitCheck(): number {
+/** 从 spec.cmd 取监听端口（--port N / --port=N）；无 → null。 */
+export function specPort(spec: ProcSpec | null): number | null {
+  if (!spec) return null
+  for (let i = 0; i < spec.cmd.length; i++) {
+    const a = spec.cmd[i]!
+    if (a === '--port' && i + 1 < spec.cmd.length) {
+      const n = Number(spec.cmd[i + 1])
+      return Number.isInteger(n) && n > 0 ? n : null
+    }
+    if (a.startsWith('--port=')) {
+      const n = Number(a.slice(7))
+      return Number.isInteger(n) && n > 0 ? n : null
+    }
+  }
+  return null
+}
+
+/** 端口当前占用者 pid（排除账本里那个已消失的旧 pid）。 */
+export function ownerPidOf(key: Component, stalePid: number): number | null {
+  const port = specPort(restartSpecFor(key))
+  const owners = port ? portOwnerPids(port) : []
+  return owners.find((p) => p !== stalePid) ?? owners[0] ?? null
+}
+
+export interface ClassifyIO {
+  /** 健康复核（注入用于测试）；默认用 restartSpecFor(key).healthy()。 */
+  healthyOf?: (key: Component) => Promise<boolean | null>
+  /** 账本 pid 修正（注入用于测试）；默认 saveComponent。 */
+  repair?: (key: Component, entry: RegistryEntry, newPid: number) => void
+  /** 端口占用者（注入用于测试）；默认 specPort + portOwnerPids。 */
+  ownerPidOf?: (key: Component, stalePid: number) => number | null
+  warnFn?: (text: string) => void
+}
+
+/** 判定一条「确证死 pid」是否只是**进程换代**（2026-09-09 selfNode 误报事故）。
+ *
+ * 成因：组件自我重启 / 热重载 / 被监督器换掉后，账本记的仍是**上一代** pid；旧 pid
+ * 消失会被两帧锁判成「意外退出」，而服务其实一直在应答（实测：agent 09:37:58 起来，
+ * 09:38:03 就给上一代 PID 8100 打标记）。
+ *
+ * 判死前先用组件自己的健康检查复核：仍在应答 ⇒ 'alive'——**不写失败标记**，并把账本
+ * pid 修正为端口当前占用者；检查不可用或确认不通 ⇒ 'exited'（走原失败记录路径）。
+ */
+export async function classifyExit(
+  key: Component,
+  entry: RegistryEntry,
+  io: ClassifyIO = {},
+): Promise<'alive' | 'exited'> {
+  const spec = restartSpecFor(key)
+  const healthy = io.healthyOf ?? (async () => (spec ? await spec.healthy() : null))
+  let alive = false
+  try {
+    alive = (await healthy(key)) === true
+  } catch {
+    alive = false
+  }
+  if (!alive) return 'exited'
+
+  const newPid = (io.ownerPidOf ?? ((k, stale) => ownerPidOf(k, stale)))(key, entry.pid)
+  const say = io.warnFn ?? warn
+  if (newPid && newPid !== entry.pid) {
+    ;(io.repair ?? ((k, e, p) => saveComponent(k, { ...e, pid: p })))(key, entry, newPid)
+    say(
+      `[console] ${COMPONENT_LABELS[key]} 进程换代：账本 PID ${entry.pid} 已消失，服务仍在应答` +
+        ` → 账本 pid 修正为 ${newPid}（不计意外退出）`,
+    )
+  } else {
+    say(
+      `[console] ${COMPONENT_LABELS[key]} 账本 PID ${entry.pid} 已消失，但服务仍在应答 → ` +
+        '视为进程换代，跳过意外退出标记',
+    )
+  }
+  return 'alive'
+}
+
+/** 自愈：已标「意外退出」但服务已恢复应答的条目 → 清标记 + 修 pid（2026-09-09）。
+ *
+ * 误报一旦写进账本，nextExitFailures 会因「已有 error」永久跳过它，UI 就一直挂着
+ * 「意外退出」——即使组件一直在正常服务。这里对仍健康的条目清除 error/exitAt，
+ * 让状态自恢复（真退出的组件 healthy=false，不受影响）。 */
+export async function healRecoveredErrors(
+  reg: Registry,
+  io: {
+    healthyOf?: (key: Component) => Promise<boolean | null>
+    ownerPidOf?: (key: Component, stalePid: number) => number | null
+    save?: (key: Component, entry: RegistryEntry) => void
+    warnFn?: (t: string) => void
+  } = {},
+): Promise<Component[]> {
+  const healed: Component[] = []
+  for (const key of Object.keys(reg) as Component[]) {
+    const e = reg[key]
+    if (!e?.error) continue
+    const healthy =
+      io.healthyOf ??
+      (async () => {
+        const spec = restartSpecFor(key)
+        return spec ? await spec.healthy() : null
+      })
+    let alive = false
+    try {
+      alive = (await healthy(key)) === true
+    } catch {
+      alive = false
+    }
+    if (!alive) continue
+    const pid = (io.ownerPidOf ?? ((k, stale) => ownerPidOf(k, stale)))(key, e.pid) ?? e.pid
+    const { error: _err, exitAt: _at, ...rest } = e
+    ;(io.save ?? saveComponent)(key, { ...rest, pid })
+    ;(io.warnFn ?? warn)(
+      `[console] ${COMPONENT_LABELS[key]} 服务已恢复应答 → 清除「${e.error}」标记`,
+    )
+    healed.push(key)
+  }
+  return healed
+}
+
+/** 周期入口：读盘 → 自愈 → 扫描 → 复核 → 落失败记录。返回本次记录数（-1 = 配置/状态读取失败）。 */
+export async function runExitCheck(): Promise<number> {
   try {
     const cfg = loadConfig()
     const course = effectiveCourse(loadConsoleState(), discoverCourses())
+    const reg = loadRegistry()
+    await healRecoveredErrors(reg)
     const hits = nextExitFailures(loadRegistry(), _deadSeen)
+    let recorded = 0
     for (const { key, entry } of hits) {
+      if ((await classifyExit(key, entry)) === 'alive') continue // 仅换代，非退出
       const logRel = resolveComponentLog(key, cfg, course) ?? entry.log ?? null
       const tail = logRel ? readLogTail(logRel, 12).lines : []
       recordExitFailure(key, entry, logRel, tail)
+      recorded++
     }
-    return hits.length
+    return recorded
   } catch {
     return -1
   }

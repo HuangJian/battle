@@ -142,11 +142,7 @@ async function main(): Promise<void> {
   // 不再静默（TrainingLoop 曾因缺 BC 参考 boot 崩溃，只有翻日志才知道原因）。4s 一轮，
   // 两帧确认（内部）避免监督器换 pid 的瞬时误报。
   const exitWatchdog = setInterval(() => {
-    try {
-      runExitCheck()
-    } catch {
-      /* 失败不炸循环 */
-    }
+    void runExitCheck() // async：内部已兜底（返回 -1），失败不炸循环
   }, 4000)
   exitWatchdog.unref?.()
 

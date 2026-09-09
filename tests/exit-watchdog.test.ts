@@ -27,11 +27,14 @@ afterAll(() => {
 })
 import {
   buildExitMarker,
+  classifyExit,
+  healRecoveredErrors,
   nextExitFailures,
   recordExitFailure,
+  specPort,
   type FailureLogIO,
 } from '../tools/training/console/exit-watchdog'
-import type { Component, Registry, RegistryEntry } from '../tools/training/types'
+import type { Component, ProcSpec, Registry, RegistryEntry } from '../tools/training/types'
 
 // ────────────────────────── nextExitFailures：两帧锁 ──────────────────────────
 
@@ -152,5 +155,133 @@ describe('buildExitMarker', () => {
     expect(m).toContain('意外退出 (PID 5)')
     expect(m).toContain('| a')
     expect(m).toContain('| b')
+  })
+})
+
+// ────────────────────── 进程换代护栏（2026-09-09 selfNode 误报事故） ──────────────────────
+
+function mkSpec(cmd: string[]): ProcSpec {
+  return {
+    key: 'selfNode',
+    name: 'self-node',
+    cmd,
+    log: 'l',
+    healthy: async () => true,
+  } as ProcSpec
+}
+
+describe('specPort', () => {
+  it('--port N / --port=N / 无端口 / 无 spec', () => {
+    expect(specPort(mkSpec(['bun', 'run', 'a.ts', '--port', '8443']))).toBe(8443)
+    expect(specPort(mkSpec(['bun', 'a.ts', '--port=8787']))).toBe(8787)
+    expect(specPort(mkSpec(['bun', 'a.ts']))).toBeNull()
+    expect(specPort(null)).toBeNull()
+  })
+})
+
+describe('classifyExit', () => {
+  it('服务仍在应答 → alive：修正账本 pid，不写失败标记', async () => {
+    const repaired: Array<[Component, number]> = []
+    const v = await classifyExit(
+      'selfNode',
+      { pid: 8100 },
+      {
+        healthyOf: async () => true,
+        ownerPidOf: () => 30332,
+        repair: (k, _e, p) => repaired.push([k, p]),
+        warnFn: () => {},
+      },
+    )
+    expect(v).toBe('alive')
+    expect(repaired).toEqual([['selfNode', 30332]])
+  })
+
+  it('健康检查不通 → exited（走原失败记录路径）', async () => {
+    let repaired = 0
+    const v = await classifyExit(
+      'selfNode',
+      { pid: 8100 },
+      {
+        healthyOf: async () => false,
+        ownerPidOf: () => 30332,
+        repair: () => {
+          repaired++
+        },
+        warnFn: () => {},
+      },
+    )
+    expect(v).toBe('exited')
+    expect(repaired).toBe(0)
+  })
+
+  it('健康但拿不到新 pid → 仍 alive（跳过标记，不改账本）', async () => {
+    let repaired = 0
+    const v = await classifyExit(
+      'selfNode',
+      { pid: 8100 },
+      {
+        healthyOf: async () => true,
+        ownerPidOf: () => null,
+        repair: () => {
+          repaired++
+        },
+        warnFn: () => {},
+      },
+    )
+    expect(v).toBe('alive')
+    expect(repaired).toBe(0)
+  })
+
+  it('健康检查抛异常 → exited（探测失败不得漏记真退出）', async () => {
+    const v = await classifyExit(
+      'selfNode',
+      { pid: 8100 },
+      {
+        healthyOf: async () => {
+          throw new Error('boom')
+        },
+        warnFn: () => {},
+      },
+    )
+    expect(v).toBe('exited')
+  })
+})
+
+describe('healRecoveredErrors（误报自愈）', () => {
+  it('带 error 且服务健康 → 清 error/exitAt + 修 pid', async () => {
+    const saved: Array<[Component, RegistryEntry]> = []
+    const healed = await healRecoveredErrors(
+      { selfNode: { pid: 8100, error: '意外退出 (PID 8100)', exitAt: 'T0' } },
+      {
+        healthyOf: async () => true,
+        ownerPidOf: () => 30332,
+        save: (k, e) => saved.push([k, e]),
+        warnFn: () => {},
+      },
+    )
+    expect(healed).toEqual(['selfNode'])
+    expect(saved[0]![1].pid).toBe(30332)
+    expect(saved[0]![1].error).toBeUndefined()
+    expect(saved[0]![1].exitAt).toBeUndefined()
+  })
+
+  it('服务不通 → 保留 error（真退出不被误清）', async () => {
+    const saved: Array<[Component, RegistryEntry]> = []
+    const healed = await healRecoveredErrors(
+      { trainingLoop: { pid: 1, error: '意外退出 (PID 1)' } },
+      { healthyOf: async () => false, save: (k, e) => saved.push([k, e]), warnFn: () => {} },
+    )
+    expect(healed).toEqual([])
+    expect(saved).toHaveLength(0)
+  })
+
+  it('无 error 的条目不动', async () => {
+    const saved: Array<[Component, RegistryEntry]> = []
+    const healed = await healRecoveredErrors(
+      { selfNode: { pid: 30332 } },
+      { healthyOf: async () => true, save: (k, e) => saved.push([k, e]), warnFn: () => {} },
+    )
+    expect(healed).toEqual([])
+    expect(saved).toHaveLength(0)
   })
 })
