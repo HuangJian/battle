@@ -42,7 +42,7 @@ body{font-family:ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,'PingFa
   border-radius:999px;padding:2px 10px;font-size:var(--fs-2);font-weight:600;white-space:nowrap}
 .tc-topbar h1{margin:0;font-size:var(--fs-5);font-weight:700;letter-spacing:.2px;display:flex;align-items:center;gap:var(--sp-2)}
 .tc-topbar h1 .dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--green)}
-.tc-topbar__right{display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap;font-size:var(--fs-25)}
+.tc-topbar__right{display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap;font-size:var(--fs-25);margin-left:auto} /* 右对齐到页面右侧（§367 UI） */
 .tc-topbar__ts{font-size:var(--fs-25);color:var(--muted);white-space:nowrap}
 .tc-topbar__anchors{display:flex;gap:var(--sp-2);flex-wrap:wrap;align-items:center;font-size:var(--fs-2)}
 .tc-anchor{color:var(--muted);text-decoration:none;cursor:pointer;padding:2px 8px;border-radius:999px}
@@ -52,6 +52,7 @@ body{font-family:ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,'PingFa
 .tc-stopall--arm{border-color:var(--red);background:var(--red);color:#fff}
 .tc-stopall:disabled{opacity:.5;cursor:not-allowed}
 select.tc-sel{padding:5px 9px;border:1px solid var(--border);border-radius:8px;background:var(--card);font-size:var(--fs-25);cursor:pointer}
+select.tc-sel:disabled{opacity:.55;cursor:not-allowed;background:var(--gray-bg)}
 button.tc-btn{padding:5px 12px;border:1px solid var(--border);border-radius:8px;background:var(--card);cursor:pointer;font-size:var(--fs-3)}
 button.tc-btn:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
 button.tc-btn:disabled{opacity:.45;cursor:not-allowed}
@@ -311,6 +312,13 @@ a.tc-preset{text-decoration:none;display:inline-block}
 .tc-phase__icon{font-size:13px;line-height:1}
 .tc-phase__label{letter-spacing:.3px}
 .tc-phase__elapsed{font-family:ui-monospace,'Cascadia Mono',Consolas,monospace;font-weight:700}
+
+/* hero 最新 6 轮完整指标（§367 UI：首页训练状态区直读最近趋势） */
+.tc-hero__iters{flex:1 1 100%;min-width:0;margin-top:var(--sp-3);border-top:1px dashed var(--border);padding-top:var(--sp-2);overflow-x:auto}
+.tc-hero__iters-hd{display:block;font-size:var(--fs-2);color:var(--muted);font-weight:600;margin-bottom:2px}
+.tc-hero__iters .tc-table thead th{position:static} /* 6 行紧凑表无需吸顶 */
+.tc-hero__iters .tc-table tbody td{padding:4px 10px;font-size:var(--fs-2)}
+.tc-hero__iters .tc-table thead th{padding:5px 10px}
 
 /* 组件 4 小卡 */
 .tc-comps{display:grid;grid-template-columns:repeat(4,1fr);gap:var(--sp-3);margin-bottom:var(--sp-4)}

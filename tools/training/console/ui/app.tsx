@@ -196,6 +196,12 @@ export function App({ initial }: AppProps) {
     await doAction('preset', { mode })
   }
 
+  // hub-server 运行中锁定课程：hub 按课程建 jobRoot/日志目录，切课程会打乱在途训练
+  // 状态——先停止 hub-server 再切换（§367 UI 交互）。
+  const hubRunning = (stateView?.components ?? []).some(
+    (c) => c.key === 'hubServer' && c.status === 'running',
+  )
+
   // ── 顶栏状态 chips（最新迭代口径） ──
   const course = stateView?.course ?? ''
   const iters = stateView?.metrics.iters ?? []
@@ -245,6 +251,12 @@ export function App({ initial }: AppProps) {
               id="courseSel"
               className="tc-sel"
               value={course}
+              disabled={hubRunning}
+              title={
+                hubRunning
+                  ? 'hub-server 运行中——切课程会打乱在途训练状态，先停止 hub-server 再切换'
+                  : undefined
+              }
               onChange={(e) =>
                 void doAction('setCourse', { course: (e.target as HTMLSelectElement).value })
               }
@@ -256,6 +268,11 @@ export function App({ initial }: AppProps) {
                 </option>
               ))}
             </select>
+            {hubRunning ? (
+              <span className="tc-muted tc-small" title="先停止 hub-server 再切换课程">
+                hub 运行中，课程已锁定
+              </span>
+            ) : null}
           </label>
           {headChips}
         </div>

@@ -1,16 +1,19 @@
 /** ComponentCards.tsx — 组件 4 小卡（一屏行）：点击卡展开详情，主按钮随状态换身。
  *  - 未启动：唯一「启动」（品牌色）；运行中：「停止」+ 冒烟/日志 小图标 + 详情。
- *  - cloudflared 常态缩略 endpoint + auth key，各带复制（CopyButton）。
- *  - TrainingLoop 的「启动」→ 打开 TrainLaunchModal（App 层），选模式后再预设。 */
+ *  - cloudflared 常态缩略 endpoint + auth key，各带复制（CopyButton）——复制点击不展开卡片。
+ *  - TrainingLoop 的「启动」→ 打开 TrainLaunchModal（App 层），选模式后再预设。
+ *  - 启/停 pending 锁（§367）：点击先本地 disable（不依赖下一轮轮询），等状态切换完成
+ *    或动作失败后再 enable——防双连击把组件状态打乱。 */
 
-import { useState } from 'preact/hooks'
+import { useEffect, useState } from 'preact/hooks'
 import type { ComponentView, ConsoleStateView } from '../../../ui/view'
-import { shortUrl } from '../../../ui/view'
+import { pendingLockReleases, shortUrl } from '../../../ui/view'
 import { CopyButton } from '../../../ui/components/CopyButton'
 
 export interface ComponentCardsProps {
   stateView: ConsoleStateView | null
-  onAction: (act: string, body: Record<string, unknown>) => void
+  /** 返回 POST 结果——失败时卡立即解锁（状态不会切换，效果判定会永远等下去）。 */
+  onAction: (act: string, body: Record<string, unknown>) => Promise<{ ok: boolean }>
   /** TrainingLoop 卡「启动」回调（App 打开模式弹窗）。 */
   onLaunchTrainer: () => void
 }
@@ -30,6 +33,42 @@ function statusText(c: ComponentView): string {
 
 export function ComponentCards({ stateView, onAction, onLaunchTrainer }: ComponentCardsProps) {
   const [open, setOpen] = useState<string | null>(null)
+  // §367：pending[key] = 点击时的 status；效果层在状态切换完成后移除（解锁）。
+  const [pending, setPending] = useState<Record<string, string>>({})
+
+  useEffect(() => {
+    if (!stateView || Object.keys(pending).length === 0) return
+    const statusOf = (key: string): string | undefined =>
+      stateView.components.find((c) => c.key === key)?.status
+    const released = pendingLockReleases(pending, statusOf)
+    if (released.length === 0) return
+    setPending((p) => {
+      const next = { ...p }
+      for (const k of released) delete next[k]
+      return next
+    })
+  }, [stateView, pending])
+
+  const release = (key: string): void =>
+    setPending((p) => {
+      if (p[key] === undefined) return p
+      const next = { ...p }
+      delete next[key]
+      return next
+    })
+
+  /** 启/停 统一入口：立即本地锁定（按钮随即 disable），等状态切换完成后由效果层解锁；
+   *  POST 失败直接解锁（状态不会切换，效果层判定会永远等不到差异）；另设 60s 安全网——
+   *  覆盖「幂等成功但状态不变」（registry/进程不一致的"已在运行"）等永不切换的角落。
+   *  60s 大于任何组件动作耗时（hubServer 就绪等待上限 45s），不会在动作中途误解锁。 */
+  const fire = (c: ComponentView, act: string): void => {
+    setPending((p) => (p[c.key] !== undefined ? p : { ...p, [c.key]: c.status }))
+    void onAction(act, { component: c.key }).then((r) => {
+      if (!r.ok) release(c.key)
+    })
+    setTimeout(() => release(c.key), 60_000)
+  }
+
   if (!stateView) return null
   const mains = stateView.components.filter((c) => c.key !== 'workerServe')
 
@@ -38,6 +77,7 @@ export function ComponentCards({ stateView, onAction, onLaunchTrainer }: Compone
       {mains.map((c) => {
         const isOpen = open === c.key
         const isRunning = c.status === 'running'
+        const locked = c.busy || pending[c.key] !== undefined
         const meta = c.pid ? `PID ${c.pid} · ${statusText(c)}` : statusText(c)
         return (
           <section
@@ -51,7 +91,8 @@ export function ComponentCards({ stateView, onAction, onLaunchTrainer }: Compone
               <span className="tc-cc__name">{c.key}</span>
             </div>
             {c.key === 'cloudflared' ? (
-              <div className="tc-cc__meta">
+              // 复制按键不展开卡片：meta 区（隧道/auth key + 复制）整体吞掉冒泡。
+              <div className="tc-cc__meta" onClick={(e) => e.stopPropagation()}>
                 <div className="tc-cc__sec">
                   {c.url ? (
                     <>
@@ -83,9 +124,10 @@ export function ComponentCards({ stateView, onAction, onLaunchTrainer }: Compone
                   <button
                     type="button"
                     className="tc-btn tc-btn--sm"
-                    disabled={c.busy}
+                    disabled={locked}
                     aria-label={`停止 ${c.label}`}
-                    onClick={() => onAction('stop', { component: c.key })}
+                    title={locked ? '动作进行中…' : undefined}
+                    onClick={() => fire(c, 'stop')}
                   >
                     停止
                   </button>
@@ -93,10 +135,10 @@ export function ComponentCards({ stateView, onAction, onLaunchTrainer }: Compone
                     <button
                       type="button"
                       className="tc-iconbtn"
-                      disabled={c.busy}
+                      disabled={locked}
                       aria-label={`冒烟 ${c.label}`}
                       title="冒烟"
-                      onClick={() => onAction('smoke', { component: c.key })}
+                      onClick={() => void onAction('smoke', { component: c.key })}
                     >
                       ◎
                     </button>
@@ -114,13 +156,10 @@ export function ComponentCards({ stateView, onAction, onLaunchTrainer }: Compone
                 <button
                   type="button"
                   className="tc-btn tc-btn--sm tc-btn--primary"
-                  disabled={c.busy}
+                  disabled={locked}
                   aria-label={`启动 ${c.label}`}
-                  onClick={
-                    c.key === 'trainingLoop'
-                      ? onLaunchTrainer
-                      : () => onAction('start', { component: c.key })
-                  }
+                  title={locked ? '动作进行中…' : undefined}
+                  onClick={c.key === 'trainingLoop' ? onLaunchTrainer : () => fire(c, 'start')}
                 >
                   启动
                 </button>

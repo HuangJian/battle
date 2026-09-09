@@ -597,6 +597,24 @@ export function keywordMatch(row: Record<string, unknown>, keys: string[], kw: s
   })
 }
 
+// ────────────────────────── 纯函数：组件动作 pending 锁（§367 UI 交互） ──────────────────────────
+
+/** 组件「启动/停止」按钮 pending 锁的释放判定：点击时把 (key -> 当时 status) 记入
+ *  pending；状态已从点击时值切换（如 stopped→running / running→stopped/exited）即视为
+ *  动作完成、可解锁。statusOf 查不到该组件（消失）或状态未变（如启动失败仍为 stopped）
+ *  不解锁——前者由调用方兜底（失败 flash 后直接释放）。 */
+export function pendingLockReleases(
+  pending: Record<string, string>,
+  statusOf: (key: string) => string | undefined,
+): string[] {
+  const out: string[] = []
+  for (const [key, from] of Object.entries(pending)) {
+    const cur = statusOf(key)
+    if (cur !== undefined && cur !== from) out.push(key)
+  }
+  return out
+}
+
 // ────────────────────────── 纯函数：节点池状态 ──────────────────────────
 
 export function statusFromRecent(recent: boolean[]): 'healthy' | 'warn' | 'bad' | 'nodata' {

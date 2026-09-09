@@ -1,14 +1,18 @@
-/** Hero.tsx — 训练状态 hero（一屏焦点）：胜率大数字 + 大走势图；右侧击杀/道具/eval 三格趋势。
- *  数据口径 = /api/state.metrics 最新迭代（latestRow）；「完整指标表 ›」进抽屉。 */
+/** Hero.tsx — 训练状态 hero（一屏焦点）：胜率大数字 + 大走势图；右侧击杀/道具/eval 三格趋势；
+ *  下方最新 6 轮完整指标（紧凑表）。数据口径 = /api/state.metrics；「完整指标表 ›」进抽屉。 */
 
 import {
   fmtPct,
+  klTone,
   latestRow,
   metricSeries,
+  retTone,
   winTone,
   type ConsoleStateView,
+  type IterRow,
   type Series,
 } from '../../../ui/view'
+import { Badge } from '../../../ui/components/Pill'
 import { Sparkline } from '../../../ui/components/Sparkline'
 
 export interface HeroProps {
@@ -34,6 +38,112 @@ function TrendCell({
         <b className={tone ? `tc-mtrend__val--${tone}` : undefined}>{fmt(last)}</b>
       </span>
       {series ? <Sparkline values={series.vals} width={120} height={26} /> : null}
+    </div>
+  )
+}
+
+/** 最新 6 轮完整指标（紧凑表，iter 倒序）：主行口径与抽屉指标表一致（实际值优先、
+ *  ≈ 为磁盘清理后的估算）；eval 列 = 干净评估（greedy 固定语料）。 */
+function LastIters({ iters }: { iters: IterRow[] }) {
+  const rows = [...iters].sort((a, b) => b.iter - a.iter).slice(0, 6)
+  if (rows.length === 0) return null
+  return (
+    <div className="tc-hero__iters">
+      <span className="tc-hero__iters-hd">最新 {rows.length} 轮完整指标</span>
+      <table className="tc-table tc-table--dense">
+        <thead>
+          <tr>
+            <th>iter</th>
+            <th>时间</th>
+            <th>胜率</th>
+            <th>eval</th>
+            <th className="tc-num">存活</th>
+            <th className="tc-num">击杀</th>
+            <th className="tc-num">道具</th>
+            <th className="tc-num">得分</th>
+            <th className="tc-num">rollout</th>
+            <th className="tc-num">PPO</th>
+            <th>KL</th>
+            <th className="tc-num">熵</th>
+            <th>mean_ret</th>
+            <th className="tc-num">lr</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.iter}>
+              <td>
+                <b>{r.iter}</b>
+                {r.halted ? (
+                  <span className="tc-pill tc-pill--note" title="该轮被 KL halt 中止">
+                    halted
+                  </span>
+                ) : null}
+              </td>
+              <td className="tc-muted" style={{ whiteSpace: 'nowrap' }}>
+                {r.time}
+              </td>
+              <td>
+                <Badge tone={winTone(r.winRate)}>{fmtPct(r.winRate)}</Badge>
+              </td>
+              <td>
+                {r.evalData && r.evalData.winRate !== null ? (
+                  <Badge tone={winTone(r.evalData.winRate)}>{fmtPct(r.evalData.winRate)}</Badge>
+                ) : (
+                  <span className="tc-muted">-</span>
+                )}
+              </td>
+              <td className="tc-num">
+                {r.actuals ? (
+                  r.actuals.avgTicks
+                ) : (
+                  <span className="tc-muted" title="该轮磁盘数据已清理，估算值">
+                    {r.avgTicks}≈
+                  </span>
+                )}
+              </td>
+              <td className="tc-num">
+                {r.actuals ? (
+                  <>
+                    {r.actuals.totalKills}
+                    <span className="tc-muted"> /{r.actuals.games}局</span>
+                  </>
+                ) : (
+                  <span className="tc-muted" title="该轮磁盘数据已清理，估算值">
+                    {r.kills.toFixed(1)}≈
+                  </span>
+                )}
+              </td>
+              <td className="tc-num">
+                {r.actuals ? (
+                  <>
+                    {r.actuals.totalPU}
+                    <span className="tc-muted"> /{r.actuals.games}局</span>
+                  </>
+                ) : (
+                  <span className="tc-muted" title="该轮磁盘数据已清理，估算值">
+                    {(r.loot * 100).toFixed(0)}%≈
+                  </span>
+                )}
+              </td>
+              <td className="tc-num">
+                {r.scoreMean.toFixed(4)}
+                <span className="tc-muted">±{r.scoreStd.toFixed(4)}</span>
+              </td>
+              <td className="tc-num">{r.rolloutSec.toFixed(0)}s</td>
+              <td className="tc-num">{r.ppoSec.toFixed(0)}s</td>
+              <td>
+                <Badge tone={klTone(r.kl)}>{r.kl.toFixed(4)}</Badge>
+              </td>
+              <td className="tc-num">{r.entropy.toFixed(3)}</td>
+              <td>
+                <Badge tone={retTone(r.meanRet)}>{r.meanRet.toFixed(3)}</Badge>
+              </td>
+              <td className="tc-num">{r.lr.toFixed(6)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   )
 }
@@ -99,6 +209,7 @@ export function Hero({ stateView, onMore }: HeroProps) {
           完整指标表 ›
         </button>
       </div>
+      <LastIters iters={iters} />
     </section>
   )
 }

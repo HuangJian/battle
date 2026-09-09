@@ -36,6 +36,7 @@ import {
   parseLogLine,
   parsePhaseFromLog,
   parseTrainingEvent,
+  pendingLockReleases,
   refreshLabel,
   shortUrl,
   shouldFollow,
@@ -107,6 +108,26 @@ describe('view sparkPoints / sparkline', () => {
         .split('/>')[0]!
         .match(/[\d.]+,[\d.]+/g) ?? []
     expect(pairs.length).toBe(2)
+  })
+})
+
+describe('组件动作 pending 锁（§367：启/停 点击先 disable，状态切换完成再 enable）', () => {
+  it('pendingLockReleases：状态从点击时值切换才解锁；未变 / 组件消失不解锁', () => {
+    // 当前状态：a=启动完成(running) / b=停止完成(stopped) / c=启动失败(still stopped)
+    const statusOf = (k: string): string | undefined =>
+      ({ a: 'running', b: 'stopped', c: 'stopped' })[k]
+    // 启动完成：stopped → running
+    expect(pendingLockReleases({ a: 'stopped' }, statusOf)).toEqual(['a'])
+    // 停止完成：running → stopped
+    expect(pendingLockReleases({ b: 'running' }, statusOf)).toEqual(['b'])
+    // 启动失败：状态仍是 stopped → 不解锁（由失败回调直接释放）
+    expect(pendingLockReleases({ c: 'stopped' }, statusOf)).toEqual([])
+    // 组件从 stateView 消失（statusOf 返回 undefined）→ 不解锁
+    expect(pendingLockReleases({ ghost: 'stopped' }, statusOf)).toEqual([])
+    // 混合：已切换的解锁，未变/消失的保留
+    expect(
+      pendingLockReleases({ a: 'stopped', b: 'running', c: 'stopped', ghost: 'x' }, statusOf),
+    ).toEqual(['a', 'b'])
   })
 })
 
@@ -368,6 +389,42 @@ describe('控制台 SSR（render.tsx renderConsolePage）', () => {
     // 弹窗本体不渲染（勿用 '启动 TrainingLoop' 裸子串——它与未运行时训练卡启动键的
     // aria-label '启动 TrainingLoop (trainer)' 撞词，训练态一停就误报）
     expect(html).not.toContain('class="tc-modal-mask"')
+  })
+})
+
+describe('Hero 训练状态区（§367：最新 6 轮完整指标）', () => {
+  it('渲染最新 6 轮（iter 倒序截断）；超过 6 轮不溢出；无数据不出表', async () => {
+    const { Hero } = await import('../tools/training/console/ui/panels/Hero')
+    const mkView = (iters: IterRow[]): ConsoleStateView => ({
+      time: 't',
+      course: 'kb1',
+      courses: [],
+      components: [],
+      nodes: [],
+      modes: { trainerPpo: 'pull', stream: 0, doubleBuffer: 0, precollectEarly: 0 },
+      metrics: { available: true, iters },
+      phase: { phase: 'idle', sinceMs: null, iter: null },
+    })
+    // 8 轮 → 只出 3..8（倒序前 6）
+    const html = renderToString(
+      h(Hero, {
+        stateView: mkView(Array.from({ length: 8 }, (_, i) => fakeRow(i + 1))),
+        onMore: () => {},
+      }),
+    )
+    expect(html).toContain('最新 6 轮完整指标')
+    for (const it of [8, 7, 6, 5, 4, 3]) expect(html).toContain(`<b>${it}</b>`)
+    for (const it of [2, 1]) expect(html).not.toContain(`<b>${it}</b>`)
+    // 不足 6 轮：全出，标题带实际行数
+    const html2 = renderToString(
+      h(Hero, { stateView: mkView([fakeRow(1), fakeRow(2)]), onMore: () => {} }),
+    )
+    expect(html2).toContain('最新 2 轮完整指标')
+    expect(html2).toContain('<b>2</b>')
+    expect(html2).toContain('<b>1</b>')
+    // 无数据：hero 空态无表
+    const html3 = renderToString(h(Hero, { stateView: mkView([]), onMore: () => {} }))
+    expect(html3).not.toContain('tc-hero__iters')
   })
 })
 
