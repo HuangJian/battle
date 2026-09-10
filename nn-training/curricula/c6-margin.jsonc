@@ -1,17 +1,21 @@
-// 课程 c4-margin —— 超老师双定价（plan/feasibility-map.md §10）：tempo＋chip
+// 课程 c6-margin —— c6 直攻（plan/feasibility-map.md §11 口径外推）：c5-it40 迁移＋缰绳
 //
-// 由 c4-kb1.jsonc 派生，仅改动以下 4 处，其余（地图/player/scale/schedule/eval/
-// 护栏/normalize/kickstart/warmup 0）全锁死——单变量 = reward（base vs margin 包）：
-//   1. name: c4-kb1 → c4-margin
-//   2. reward.formula += -wTick*ticks -wChip*playerDamageTaken；params += wTick/wChip
-//   3. bc/init/ref: kb1-it50 → c4-it150 归档（就地取材，最高 c4 实测 59）
-//   4. out/traj/backup_dir/backup_prefix → tmp/c4-margin（fresh）
+// 由 c5-margin.jsonc 派生，仅改动以下 4 处，其余（地图/player/reward margin 包/
+// scale/schedule/eval/护栏/normalize/kickstart/warmup 0）全锁死——单变量 = 敌数：
+//   1. name: c5-margin → c6-margin
+//   2. stages[0]: count 5 → 6（同图同 4 点，第 5/6 敌走波次；fmap-c6l1 同几何）
+//   3. bc/init/ref: c4-margin.it140 → c5-margin.it40 归档（c5 最佳 eval 49 权重，
+//      零样本 c6 26 已测 tmp/c5it40-c6probe.jsonl，同权重 c5 本档 49）
+//   4. out/traj/backup_dir/backup_prefix → tmp/c6-margin（fresh）
 //
-// 门：胜率 ≥50 不跌；胜局掉血中位 <120；超时 <10；命中率只看不判。
-// 熔断：胜率 ≤40 / 超时 ≥15 / 命中率断崖（闭嘴螺旋）。
+// 门（起点 26＝it40 零样本 c6；老师 c6 50；口径同 c5 腿：守住＝起点−4，停线＝起点−10，
+// 熔断胜率线＝起点−11）：胜率≥22 守住；it15≤16 → 停；hold（≥22）即及格；
+// ≥35（＋9，老师 70% 位）为突破；≥40 为超。
+// margin 门按 c6 重定（tick≤2000、掉血<160，首腿宽松档；c6 探针胜局中位 1950/151）；
+// 熔断：胜率≤15 / 超时≥12 / 命中率断崖。
 {
   "version": 5,
-  "name": "c4-margin",
+  "name": "c6-margin",
   "mode": "per-tick",
   "stages": [
     {
@@ -32,7 +36,7 @@
         [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
       ],
       "forces": "abcdabcdabcdabcdabcd",
-      "count": 4,
+      "count": 6,
       "player_spawn": { "col": 12, "row": 12 },
       "enemy_spawns": [
         { "col": 2, "row": 2 },
@@ -70,7 +74,7 @@
     "scheme": "toy",
   },
   "dodge": "",
-  "bc": "nn-training/weights/c4-kb1/c4-kb1.it150.20260909-161957.json",
+  "bc": "nn-training/weights/c5-margin/c5-margin.it40.20260910-112618.json",
   "iters": 0,
   "max_hours": 24,
   "workers": 8,
@@ -88,12 +92,12 @@
     { "until_iter": 40, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
     { "kl_coef": 0.0, "lr": 0.00005 },
   ],
-  "out": "tmp/c4-margin/weights.json",
-  "traj": "tmp/c4-margin",
+  "out": "tmp/c6-margin/weights.json",
+  "traj": "tmp/c6-margin",
   // F4 ENT 熔断：沿用 horizon 档 0.25（RL 腿启用时生效；探针不消费）。
   "ent_break": 0.25,
-  "backup_dir": "nn-training/weights/c4-margin",
-  "backup_prefix": "c4-margin",
+  "backup_dir": "nn-training/weights/c6-margin",
+  "backup_prefix": "c6-margin",
   // 自定义关 stage ID 从 2000 开始，p3-bc 仅 1 关 → ID 2000
   "eval_stages": "2000-2000",
   "eval_games_per_stage": 100,

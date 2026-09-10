@@ -66,7 +66,7 @@
         [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
         [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
         [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
-        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
       ],
       "forces": "abcdabcdabcdabcdabcd",
       "count": 10,
@@ -75,16 +75,16 @@
         { "col": 2, "row": 2 },
         { "col": 22, "row": 2 },
         { "col": 22, "row": 22 },
-        { "col": 2, "row": 22 }
-      ]
-    }
+        { "col": 2, "row": 22 },
+      ],
+    },
   ],
   "difficulty": "hard",
   "max_ticks": 3600,
   "seed_rotate": 50,
   "player": {
     "lives": 1,
-    "level": 0
+    "level": 0,
   },
   "reward": {
     "formula": "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots",
@@ -95,14 +95,14 @@
       "wStar": 1.0,
       "wDmg": 1.0,
       "wStuck": 0.02,
-      "wShot": 0.01
+      "wShot": 0.01,
     },
     "terminal": {
       "stage_clear": 2.0,
       "lives_exhausted": -1.0,
-      "timeout": -2.0
+      "timeout": -2.0,
     },
-    "scheme": "toy"
+    "scheme": "toy",
   },
   "dodge": "",
   "bc": "",
@@ -117,7 +117,7 @@
   "ppo_schedule": [
     { "until_iter": 15, "kl_coef": 0.6, "lr": 0.0003, "kl_cap": 1e9 },
     { "until_iter": 35, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
-    { "kl_coef": 0.0, "lr": 0.00005 }
+    { "kl_coef": 0.0, "lr": 0.00005 },
   ],
   "out": "tmp/p10-onset/weights.json",
   "traj": "tmp/p10-onset",
@@ -127,5 +127,5 @@
   // stageId = 2000 + stageLocal）——p10 单关 → ID 2000，与 p4 的 2000 不冲突。
   "eval_stages": "2000-2000",
   "eval_games_per_stage": 20,
-  "eval_every": 5
+  "eval_every": 5,
 }

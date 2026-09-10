@@ -50,7 +50,7 @@
         [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
         [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
         [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
-        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
       ],
       "forces": "aaaaaaaaaaaaaaaaaaaa",
       "count": 1,
@@ -62,8 +62,8 @@
         { "player_spawn": { "col": 4, "row": 12 }, "enemy_spawns": [{ "col": 20, "row": 12 }] },
         { "player_spawn": { "col": 20, "row": 12 }, "enemy_spawns": [{ "col": 4, "row": 12 }] },
         { "player_spawn": { "col": 12, "row": 4 }, "enemy_spawns": [{ "col": 12, "row": 20 }] },
-        { "player_spawn": { "col": 12, "row": 20 }, "enemy_spawns": [{ "col": 12, "row": 4 }] }
-      ]
+        { "player_spawn": { "col": 12, "row": 20 }, "enemy_spawns": [{ "col": 12, "row": 4 }] },
+      ],
     },
     {
       "name": "p1-onset-fast",
@@ -80,7 +80,7 @@
         [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
         [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
         [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
-        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
       ],
       "forces": "bbbbbbbbbbbbbbbbbbbb",
       "count": 1,
@@ -92,8 +92,8 @@
         { "player_spawn": { "col": 4, "row": 12 }, "enemy_spawns": [{ "col": 20, "row": 12 }] },
         { "player_spawn": { "col": 20, "row": 12 }, "enemy_spawns": [{ "col": 4, "row": 12 }] },
         { "player_spawn": { "col": 12, "row": 4 }, "enemy_spawns": [{ "col": 12, "row": 20 }] },
-        { "player_spawn": { "col": 12, "row": 20 }, "enemy_spawns": [{ "col": 12, "row": 4 }] }
-      ]
+        { "player_spawn": { "col": 12, "row": 20 }, "enemy_spawns": [{ "col": 12, "row": 4 }] },
+      ],
     },
     {
       "name": "p1-onset-power",
@@ -110,7 +110,7 @@
         [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
         [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
         [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
-        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
       ],
       "forces": "cccccccccccccccccccc",
       "count": 1,
@@ -122,8 +122,8 @@
         { "player_spawn": { "col": 4, "row": 12 }, "enemy_spawns": [{ "col": 20, "row": 12 }] },
         { "player_spawn": { "col": 20, "row": 12 }, "enemy_spawns": [{ "col": 4, "row": 12 }] },
         { "player_spawn": { "col": 12, "row": 4 }, "enemy_spawns": [{ "col": 12, "row": 20 }] },
-        { "player_spawn": { "col": 12, "row": 20 }, "enemy_spawns": [{ "col": 12, "row": 4 }] }
-      ]
+        { "player_spawn": { "col": 12, "row": 20 }, "enemy_spawns": [{ "col": 12, "row": 4 }] },
+      ],
     },
     {
       "name": "p1-onset-armor",
@@ -140,7 +140,7 @@
         [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
         [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
         [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
-        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
       ],
       "forces": "dddddddddddddddddddd",
       "count": 1,
@@ -152,16 +152,16 @@
         { "player_spawn": { "col": 4, "row": 12 }, "enemy_spawns": [{ "col": 20, "row": 12 }] },
         { "player_spawn": { "col": 20, "row": 12 }, "enemy_spawns": [{ "col": 4, "row": 12 }] },
         { "player_spawn": { "col": 12, "row": 4 }, "enemy_spawns": [{ "col": 12, "row": 20 }] },
-        { "player_spawn": { "col": 12, "row": 20 }, "enemy_spawns": [{ "col": 12, "row": 4 }] }
-      ]
-    }
+        { "player_spawn": { "col": 12, "row": 20 }, "enemy_spawns": [{ "col": 12, "row": 4 }] },
+      ],
+    },
   ],
   "difficulty": "hard",
   "max_ticks": 2400,
   "seed_rotate": 50,
   "player": {
     "lives": 1,
-    "level": 0
+    "level": 0,
   },
   "reward": {
     "formula": "wKill*kills + wHit*enemyHits - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots",
@@ -170,14 +170,14 @@
       "wHit": 0.3,
       "wDmg": 1.0,
       "wStuck": 0.02,
-      "wShot": 0.01
+      "wShot": 0.01,
     },
     "terminal": {
       "stage_clear": 2.0,
       "lives_exhausted": -1.0,
-      "timeout": -2.0
+      "timeout": -2.0,
     },
-    "scheme": "toy"
+    "scheme": "toy",
   },
   "dodge": "",
   "bc": "",
@@ -192,7 +192,7 @@
   "ppo_schedule": [
     { "until_iter": 15, "kl_coef": 0.6, "lr": 0.0003, "kl_cap": 1e9 },
     { "until_iter": 35, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
-    { "kl_coef": 0.0, "lr": 0.00005 }
+    { "kl_coef": 0.0, "lr": 0.00005 },
   ],
   "out": "tmp/p1-onset/weights.json",
   "traj": "tmp/p1-onset",
@@ -201,5 +201,5 @@
   // 课程的自定义关 stage ID 从 2000 开始编号，p1-onset 有 4 关，ID 就是 2000-2003
   "eval_stages": "2000-2003",
   "eval_games_per_stage": 20,
-  "eval_every": 5
+  "eval_every": 5,
 }

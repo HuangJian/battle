@@ -24,8 +24,8 @@ dev = [
   "ruff>=0.6.0",
   "mypy>=1.11.0",
   "pytest>=8.0.0",
-  "pytest-xdist>=3.6",    # Makefile `pytest -n 4` 与 tools/githook/nn-python-gate.sh 依赖
-  "pytest-timeout>=2.3",  # task.py `--timeout=50000` 依赖
+  "pytest-xdist>=3.6", # Makefile `pytest -n 4` 与 tools/githook/nn-python-gate.sh 依赖
+  "pytest-timeout>=2.3", # task.py `--timeout=50000` 依赖
 ]
 
 # torch 变体：互斥，须且只须选一个。变体名 → index 映射见 [tool.uv.sources]，
