@@ -27,7 +27,7 @@ from rl.course import build_pairs
 from rl.events import log_iter_error, write_run_start
 from rl.log import log
 from rl.loop_guards import TrainingGuards
-from rl.loop_steps import SmokeVoidRoundError, TrainingSteps
+from rl.loop_steps import SmokeVoidRoundError, TrainingSteps, kickstart_coef
 from rl.modes import get_backend
 from rl.queue import REPO_ROOT, RUN_ID
 from rl.resume import completed_pairs, last_completed_iter, last_rotate_seed, peak_entropy
@@ -88,6 +88,29 @@ def run_inspect(bun: str, it: int, traj_dir: Path) -> None:
         log(f"[run_rl] inspection HTML regenerated (up to it{it})")
     except Exception as e:
         log(f"[run_rl] WARN inspection failed (non-fatal): {e}")
+
+
+def _kickstart_startup_check(args: Any, start_it: int) -> float:
+    """BC 缰绳重启自检（纯逻辑，可单测；IO 仅读存在性 + 写一行日志）。
+
+    ① bc 文件启动期即查（换机器漏同步权重 ≠ 静默裸奔；失败指到 in-use 备份）；
+    ② 返回并落日志 kk(start_it)（衰减按 run 原点续算，重启不再回满额）。
+    kickstart 未启用时返回 0.0 且零副作用。
+    """
+    if not bool(getattr(args, "kickstart_ref", False)):
+        return 0.0
+    bc_path = str(getattr(args, "bc", "") or "")
+    if not bc_path or not Path(bc_path).exists():
+        raise SystemExit(
+            f"[run_rl] kickstart_ref 要求课程 bc 权重存在（换机器漏同步？）：{bc_path!r}——"
+            "从 nn-training/weights/in-use/ 常备备份恢复（§379），禁裸奔启动"
+        )
+    kk0 = kickstart_coef(args, start_it)
+    log(
+        f"[run_rl] kickstart: ref={bc_path} "
+        f"kk(start_it={start_it})={kk0:.6g}（run 原点衰减，resume 不复位）"
+    )
+    return kk0
 
 
 class TrainingLoop(TrainingSteps, TrainingGuards):
@@ -440,6 +463,7 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
             if self._ent_peak is not None:
                 log(f"[run_rl] resume: inherited entropy peak={self._ent_peak:.3f} (F4 ENT baseline)")
         self._start_it = start_it
+        _kickstart_startup_check(args, start_it)
         # 吞吐 T3：eval 稀疏化周期（默认 1 = 每轮，字节一致；>1 = 每 N 轮一次）。
         # 2026-09-03 修正：`or 1` 曾把显式 eval_every=0 吞成 1（想关闭 eval 却变成
         # 每轮都跑——课程 _s5t 测试期实测）。现在 0 表示关闭；默认（cli/rl-config

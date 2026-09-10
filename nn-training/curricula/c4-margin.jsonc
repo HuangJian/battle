@@ -1,0 +1,101 @@
+// 课程 c4-margin —— 超老师双定价（plan/feasibility-map.md §10）：tempo＋chip
+//
+// 由 c4-kb1.jsonc 派生，仅改动以下 4 处，其余（地图/player/scale/schedule/eval/
+// 护栏/normalize/kickstart/warmup 0）全锁死——单变量 = reward（base vs margin 包）：
+//   1. name: c4-kb1 → c4-margin
+//   2. reward.formula += -wTick*ticks -wChip*playerDamageTaken；params += wTick/wChip
+//   3. bc/init/ref: kb1-it50 → c4-it150 归档（就地取材，最高 c4 实测 59）
+//   4. out/traj/backup_dir/backup_prefix → tmp/c4-margin（fresh）
+//
+// 门：胜率 ≥50 不跌；胜局掉血中位 <120；超时 <10；命中率只看不判。
+// 熔断：胜率 ≤40 / 超时 ≥15 / 命中率断崖（闭嘴螺旋）。
+{
+  "version": 5,
+  "name": "c4-margin",
+  "mode": "per-tick",
+  "stages": [
+    {
+      "name": "p4-onset-mixed",
+      "grid": [
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+      ],
+      "forces": "abcdabcdabcdabcdabcd",
+      "count": 4,
+      "player_spawn": { "col": 12, "row": 12 },
+      "enemy_spawns": [
+        { "col": 2, "row": 2 },
+        { "col": 22, "row": 2 },
+        { "col": 22, "row": 22 },
+        { "col": 2, "row": 22 }
+      ]
+    }
+  ],
+  "difficulty": "hard",
+  "max_ticks": 2400,
+  "seed_rotate": 150,
+  "player": {
+    "lives": 1,
+    "level": 0
+  },
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots - wTick*ticks - wChip*playerDamageTaken",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.3,
+      "wPickup": 1.5,
+      "wStar": 1.0,
+      "wDmg": 1.0,
+      "wStuck": 0.02,
+      "wShot": 0.01,
+    "wTick": 0.01,
+    "wChip": 0.005
+    },
+    "terminal": {
+      "stage_clear": 2.0,
+      "lives_exhausted": -1.0,
+      "timeout": -2.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/c4-kb1/c4-kb1.it150.20260909-161957.json",
+  "iters": 0,
+  "max_hours": 24,
+  "workers": 8,
+  // §363 缰绳双闸：ref 取课程 bc；warmup 必须 0（validate_args 强制配对）。
+  "kickstart_ref": true,
+  "warmup_iters": 0,
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  // R5＋§363 双 flag（串行路径生效；默认 false 即历史行为）。
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.99,
+  "ppo_schedule": [
+    { "until_iter": 40, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
+    { "kl_coef": 0.0, "lr": 0.00005 }
+  ],
+  "out": "tmp/c4-margin/weights.json",
+  "traj": "tmp/c4-margin",
+  // F4 ENT 熔断：沿用 horizon 档 0.25（RL 腿启用时生效；探针不消费）。
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/c4-margin",
+  "backup_prefix": "c4-margin",
+  // 自定义关 stage ID 从 2000 开始，p3-bc 仅 1 关 → ID 2000
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 100,
+  "eval_every": 5
+}

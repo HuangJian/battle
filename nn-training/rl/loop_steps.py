@@ -104,6 +104,19 @@ def _remote_forward_agg(agg: dict) -> dict:
     }
 
 
+def kickstart_coef(args: Any, it: int) -> float:
+    """BC 缰绳系数：按 run 原点（it=1）衰减，loop 重启不复位。
+
+    背景：`update_kwargs` 的衰减锚点是 `start_it`，而 resume 会把 start_it
+    推到断点——直接复用导致 kk 在每次重启回到满额（c4-margin it31 manifest
+    kk=1.0 实证；kb1 复跑 it53 KL 0.315 同源）。warmup 恒 0（kickstart 腿
+    validate_args 强制配对），故原点恒为 1，与 intent/goal 的 warmup 语义无交集。
+    """
+    from run_rl import update_kwargs  # 延迟导入：run_rl 侧持有 loop 入口，顶层互引成环
+
+    return float(update_kwargs(args, it, 1, None)["kl_coef"])
+
+
 class TrainingSteps:
     """单轮结算与梯度步 mixin。"""
 
@@ -308,9 +321,7 @@ class TrainingSteps:
             kick = 0.0
             bc_ref = getattr(self, "_bc_ref", None)
             if bc_ref is not None:
-                kick = float(
-                    self.update_kwargs(args, it, self._start_it, bc_ref)["kl_coef"]
-                )
+                kick = kickstart_coef(args, it)
             agg = self._ppo_mod.ppo_update(
                 self._model,
                 self._opt,
@@ -405,11 +416,7 @@ class TrainingSteps:
         # BC-anchored kickstart（§363）：缰绳系数走 update_kwargs 衰减（ref 传 None——
         # 系数是纯数学，不需模型）；ref 权重读课程 bc 文件（一次，base64 进 manifest）。
         kick_on = bool(getattr(args, "kickstart_ref", False))
-        kick_kl = (
-            float(self.update_kwargs(args, it, self._start_it, None)["kl_coef"])
-            if kick_on
-            else 0.0
-        )
+        kick_kl = kickstart_coef(args, it) if kick_on else 0.0
         ref_b64, ref_fp = _kickstart_ref_payload(args) if kick_on else ("", "")
         manifest = publish_job(
             job_root=job_root,

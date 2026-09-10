@@ -245,6 +245,8 @@ def main() -> None:
     test_stop_loss_hit()
     test_update_kwargs()
     test_update_kwargs_kickstart_zerowarmup()
+    test_kickstart_coef_ignores_restart()
+    test_kickstart_startup_check()
     test_validate_args_kickstart_gates()
     print()
     if FAILS:
@@ -279,6 +281,65 @@ def test_update_kwargs_kickstart_zerowarmup() -> None:
         run_rl.update_kwargs(args1, 1, 1, object())["kl_coef"] == 0.0,
         "warmup 1 → it1 kl=0（footgun，validate_args 应拦截，见下）",
     )
+
+
+def test_kickstart_coef_ignores_restart() -> None:
+    print("[fast] kickstart_coef：resume 不复位缰绳（c4-margin it31 kk=1.0 事故）")
+    from rl.loop_steps import kickstart_coef
+
+    args = types.SimpleNamespace(
+        epochs=4, warmup_iters=0, kickstart_kl=1.0, kickstart_decay=0.5, seed=7
+    )
+    check(abs(kickstart_coef(args, 1) - 1.0) < 1e-9, "it1 满额 1.0（fresh 行为不变）")
+    check(abs(kickstart_coef(args, 2) - 0.5) < 1e-9, "it2 衰减 0.5")
+    check(
+        abs(kickstart_coef(args, 31) - 0.5**30) < 1e-12,
+        "it31 ≈ 0（resume 不得回到 1.0——旧代码传 start_it 会满额）",
+    )
+    args0 = types.SimpleNamespace(
+        epochs=4, warmup_iters=0, kickstart_kl=0.0, kickstart_decay=0.5, seed=7
+    )
+    check(kickstart_coef(args0, 31) == 0.0, "kickstart_kl=0 恒关")
+
+
+def test_kickstart_startup_check() -> None:
+    print("[fast] _kickstart_startup_check：换机器缺 bc 响亮拦截＋kk 落日志")
+    import tempfile
+
+    from rl.loop_core import _kickstart_startup_check
+
+    off = types.SimpleNamespace(kickstart_ref=False)
+    check(_kickstart_startup_check(off, 31) == 0.0, "未启用 → 0.0 零副作用")
+    with tempfile.TemporaryDirectory() as td:
+        bc = str(Path(td) / "w.json")
+        Path(bc).write_text("{}", encoding="utf-8")
+        args = types.SimpleNamespace(
+            epochs=4,
+            warmup_iters=0,
+            kickstart_kl=1.0,
+            kickstart_decay=0.5,
+            seed=7,
+            kickstart_ref=True,
+            bc=bc,
+        )
+        check(
+            abs(_kickstart_startup_check(args, 31) - 0.5**30) < 1e-12,
+            "resume it31 → kk≈0（不回满额）",
+        )
+        missing = types.SimpleNamespace(
+            epochs=4,
+            warmup_iters=0,
+            kickstart_kl=1.0,
+            kickstart_decay=0.5,
+            seed=7,
+            kickstart_ref=True,
+            bc=str(Path(td) / "nope.json"),
+        )
+        try:
+            _kickstart_startup_check(missing, 31)
+            check(False, "缺 bc 应拦截")
+        except SystemExit as e:
+            check("in-use" in str(e), "拦截信息指到 in-use 备份")
 
 
 def test_validate_args_kickstart_gates() -> None:

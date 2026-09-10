@@ -241,6 +241,7 @@ class EvalDispatcher:
                     "enemyHits": manifest.get("enemyHits"),
                     "hitRate": manifest.get("hitRate"),
                     "powerUpsCollected": manifest.get("powerUpsCollected"),
+                    "playerDamageTaken": manifest.get("playerDamageTaken"),
                     "elapsedSec": manifest.get("elapsedSec"),
                 }
                 with jsonl_lock:
