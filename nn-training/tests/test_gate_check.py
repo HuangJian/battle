@@ -216,6 +216,120 @@ def test_teacher_parity() -> None:
     assert evaluate(spec, _rows(2, wr=0.50), now=FROZEN_NOW).verdict == "HOLD"  # −10pp
 
 
+# --------------------------------------------------------------------------- effect size / duty（§12.4 评审新增）
+
+
+def test_min_gain_pp_requires_baseline() -> None:
+    """min_gain_pp 的参照系 = baseline_win_rate；缺参照系 → 解析期响亮报错。"""
+    with pytest.raises(Exception, match="baseline_win_rate"):
+        _spec(
+            [
+                {
+                    "id": "G1",
+                    "kind": "wins_mastery",
+                    "rel_teacher": 0.5,
+                    "min_gain_pp": 5.0,
+                    "verdict": "ADVANCE",
+                }
+            ],
+            sustain=2,
+        )
+
+
+def test_effect_size_blocks_meaningless_gain() -> None:
+    """§12.4：400 局下 1pp 也能"显著"，但无意义——ADVANCE 须相对起点 ≥+5pp。"""
+    spec = _spec(
+        [
+            {
+                "id": "G1",
+                "kind": "wins_mastery",
+                "rel_teacher": 0.5,
+                "min_gain_pp": 5.0,
+                "verdict": "ADVANCE",
+            }
+        ],
+        sustain=2,
+        baseline_win_rate=0.30,
+    )
+    # 教师线 0.5×0.6=0.30 达标，但相对起点 0.30 只 +0.5pp（≈噪声）→ 不放行
+    res = evaluate(spec, _rows(2, wr=0.32), now=FROZEN_NOW)
+    assert res.verdict == "HOLD"
+    assert "起点0.30+5.0pp" in res.readings[0].reason
+    assert evaluate(spec, _rows(2, wr=0.36), now=FROZEN_NOW).verdict == "ADVANCE"
+
+
+def test_require_rising_blocks_declining_window() -> None:
+    """同向性：窗口胜率斜率 < 0 → 不放行（哪怕末点绝对值达标）。"""
+    spec = _spec(
+        [
+            {
+                "id": "G1",
+                "kind": "wins_mastery",
+                "rel_teacher": 0.5,
+                "min_gain_pp": 5.0,
+                "require_rising": True,
+                "verdict": "ADVANCE",
+            }
+        ],
+        sustain=3,
+        baseline_win_rate=0.20,
+    )
+    down = [_row(1, wr=0.45), _row(2, wr=0.42), _row(3, wr=0.38)]
+    res = evaluate(spec, down, now=FROZEN_NOW)
+    assert res.verdict == "HOLD"
+    assert "非同向" in res.readings[0].reason
+    up = [_row(1, wr=0.38), _row(2, wr=0.42), _row(3, wr=0.45)]
+    assert evaluate(spec, up, now=FROZEN_NOW).verdict == "ADVANCE"
+
+
+def test_min_train_hours_blocks_premature_advance() -> None:
+    """ADVANCE 前置：有效训练 < min_train_hours → HOLD（数据不够下结论 ≠ 事故）。"""
+    spec = _spec(
+        [{"id": "G1", "kind": "wins_mastery", "rel_teacher": 0.6, "verdict": "ADVANCE"}],
+        sustain=2,
+        min_train_hours=2.0,
+    )
+    rows = _rows(2, wr=0.60)
+    little = BudgetInfo(started_at=FROZEN_NOW - 3600, train_sec=1800.0)  # 0.5h
+    res = evaluate(spec, rows, budget=little, now=FROZEN_NOW)
+    assert res.verdict == "HOLD"
+    assert "有效训练" in res.reason
+    enough = BudgetInfo(started_at=FROZEN_NOW - 3 * 3600, train_sec=7500.0)  # 2.08h
+    assert evaluate(spec, rows, budget=enough, now=FROZEN_NOW).verdict == "ADVANCE"
+
+
+def test_duty_gate_trips_on_accident_burn() -> None:
+    """G13：c6 病灶形态——6.5h 墙钟只有 1h 训练（占空比 0.15 < 0.35）→ REMEDIATE。"""
+    spec = _spec(
+        [{"id": "G13", "kind": "duty", "min_train_frac": 0.35, "verdict": "REMEDIATE"}],
+        sustain=1,
+    )
+    burned = BudgetInfo(started_at=FROZEN_NOW - 6.5 * 3600, train_sec=1.0 * 3600)
+    res = evaluate(spec, _rows(1), budget=burned, now=FROZEN_NOW)
+    assert res.verdict == "REMEDIATE"
+    assert "烧事故" in res.reason
+    healthy = BudgetInfo(started_at=FROZEN_NOW - 6.5 * 3600, train_sec=4.0 * 3600)
+    assert evaluate(spec, _rows(1), budget=healthy, now=FROZEN_NOW).verdict == "HOLD"
+    # 无墙钟基线 → unknown 不误停
+    assert evaluate(spec, _rows(1), budget=BudgetInfo(), now=FROZEN_NOW).verdict == "HOLD"
+
+
+def test_sum_train_sec_sums_iteration_events(tmp_path: Path) -> None:
+    """分子跨重启从账本重算（内存累计重启归零 → 占空比被低估 → 误报烧事故）。"""
+    from rl.gate_check import sum_train_sec
+
+    p = tmp_path / "training_log.jsonl"
+    rows = [
+        {"event": "iteration", "ppo_sec": 70},
+        {"event": "iter_error", "error": "boom"},  # 事故轮不计入
+        {"event": "iteration", "ppo_sec": 50},
+        {"event": "run_start"},
+    ]
+    p.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    assert sum_train_sec(p) == 120.0
+    assert sum_train_sec(tmp_path / "nope.jsonl") == 0.0
+
+
 # --------------------------------------------------------------------------- G4 / G5 分流
 
 

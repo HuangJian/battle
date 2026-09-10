@@ -128,6 +128,15 @@ class BudgetInfo:
     max_hours: float = 0.0
     iters: int = 0
     cur_iter: int = 0
+    #: 累计**有效**训练秒（Σ ppo_sec，跨重启从 iteration 事件重算）。
+    #: G13（duty）与 spec.min_train_hours 的分子（2026-09-11 评审新增）。
+    train_sec: float = 0.0
+
+    def wall_sec(self, now: float) -> float | None:
+        """墙钟秒（自首条 run_start 起）；基线不可知 → None。"""
+        if self.started_at is None:
+            return None
+        return max(0.0, float(now) - self.started_at)
 
     def exhaust_reason(self, now: float) -> str | None:
         """返回超预算的原因；None = 未超预算（或基线不可知）。"""
@@ -378,6 +387,32 @@ def first_run_start_ts(jsonl_path: Path) -> float | None:
     return None
 
 
+def sum_train_sec(jsonl_path: Path) -> float:
+    """累计有效训练秒（Σ iteration 事件的 ppo_sec；G13 duty / min_train_hours 的分子）。
+
+    跨重启口径：分子从**账本**重算而非进程内存——否则每次重启占空比被低估，
+    G13 会在重启后误报"在烧事故"。文件缺失 → 0.0（首启正常）。
+    """
+    total = 0.0
+    try:
+        with open(jsonl_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(r, dict) and r.get("event") == "iteration":
+                    v = r.get("ppo_sec")
+                    if isinstance(v, (int, float)):
+                        total += float(v)
+    except OSError:
+        return 0.0
+    return total
+
+
 def load_override(path: Path) -> dict[str, Any] | None:
     """读 G12 人工改向文件（§4.6）。不存在 → None；存在但非法 → 抛。"""
     if not path.exists():
@@ -465,18 +500,43 @@ def _halves(rule: GateRule, ctx: _Ctx, n: int) -> tuple[list[EvalRow], list[Eval
 
 
 def _eval_wins_mastery(rule: GateRule, ctx: _Ctx) -> _Partial:
-    """G1：窗口内胜率 ≥ rel_teacher × 教师胜率，连续 sustain 轮。"""
+    """G1：窗口内胜率 ≥ rel_teacher × 教师胜率，连续 sustain 轮。
+
+    2026-09-11 评审新增两个可选附加条件（§12.4 effect size）：
+      * `min_gain_pp`：还须 ≥ `spec.baseline_win_rate + min_gain_pp/100`——
+        防"400 局把 1pp 变成显著但无意义"；
+      * `require_rising`：sustain 窗口内胜率最小二乘斜率须 ≥ 0（同向）。
+    """
     rel = rule.rel_teacher if rule.rel_teacher is not None else 1.0
     thr = rel * ctx.teacher_win_rate
+    baseline = getattr(ctx.spec, "baseline_win_rate", None)
+    floor = (
+        (baseline + rule.min_gain_pp / 100.0)
+        if baseline is not None and rule.min_gain_pp is not None
+        else None
+    )
 
     def judge(r: EvalRow) -> str | None:
         if r.win_rate is None:
             return "本轮无 winRate"
         if r.win_rate < thr:
             return f"winRate {r.win_rate:.3f} < {thr:.3f}"
+        if floor is not None and r.win_rate < floor:
+            return f"winRate {r.win_rate:.3f} < 起点{baseline:.2f}+{rule.min_gain_pp}pp={floor:.3f}"
         return None
 
     completion, reason, unknown = _sustain(ctx, judge)
+    if rule.require_rising:
+        wrs = [
+            r.win_rate for r in ctx.rows[-max(1, int(ctx.spec.sustain)) :] if r.win_rate is not None
+        ]
+        if len(wrs) >= 2:
+            s = _slope(wrs)
+            if s < 0:
+                completion = min(completion, 1.0 - 1.0 / max(1, int(ctx.spec.sustain)))
+                reason += f"；窗口胜率斜率 {s:+.4f} < 0（非同向，§12.4）"
+        else:
+            reason += "；同向性待第二个数据点"
     return _Partial(
         fired=completion >= 1.0,
         completion=completion,
@@ -724,6 +784,34 @@ def _eval_dependency(rule: GateRule, ctx: _Ctx) -> _Partial:
     return _Partial(False, 0.0, dormant=True, reason="dependency 未实现（M3）")
 
 
+def _eval_duty(rule: GateRule, ctx: _Ctx) -> _Partial:
+    """G13 事故熔断（2026-09-11 评审新增）：有效训练占空比过低 → REMEDIATE。
+
+    c6 的病灶形态：6.5h 墙钟里只有 ~1h 训练（事故/排队吃掉 5.5h）。墙钟预算门
+    （G5）看不出来——"3h 全是事故、训练 40min"在 G5 眼里只是"还没到顶"。
+    duty = train_sec / wall_sec（分子跨重启从 iteration 事件重算，分母自首条
+    run_start 起）。占空比 < min_train_frac → 课程在烧事故，停车复诊。
+    """
+    frac = rule.min_train_frac if rule.min_train_frac is not None else 0.3
+    if ctx.budget is None or ctx.now is None:
+        return _Partial(False, 0.0, unknown=True, reason="缺 budget/now（duty 门不判）")
+    wall = ctx.budget.wall_sec(ctx.now)
+    if wall is None or wall <= 0:
+        return _Partial(False, 0.0, unknown=True, reason="无墙钟基线（duty 门不判）")
+    duty = ctx.budget.train_sec / wall
+    if duty >= frac:
+        return _Partial(False, 0.0, reason=f"有效训练占空比 {duty:.2f} ≥ {frac:.2f}（健康）")
+    hours = ctx.budget.train_sec / 3600.0
+    return _Partial(
+        True,
+        1.0,
+        reason=(
+            f"有效训练占空比 {duty:.2f} < {frac:.2f}"
+            f"（{hours:.2f}h 训练 / {wall / 3600.0:.2f}h 墙钟）——腿在烧事故，复诊"
+        ),
+    )
+
+
 def _route_by_completion(rule: GateRule, completions: Mapping[str, float]) -> str:
     """G4/G5 分流：advance_if 里**最弱一环**的完成度 ≥ advance_frac → ADVANCE。
 
@@ -745,6 +833,7 @@ _JUDGES_NO_TEACHER: dict[str, Callable[[GateRule, _Ctx], _Partial]] = {
     "teacher_parity": _eval_teacher_parity,
     "course_valid": _eval_course_valid,
     "hack": _eval_hack,
+    "duty": _eval_duty,
     "dependency": _eval_dependency,
 }
 
@@ -826,6 +915,16 @@ def evaluate(
         seeds_state = "insufficient"
     seeds_ok = seeds_state != "insufficient"
 
+    # ---- ADVANCE 附加条件之四：有效训练时长（§12.4：数据不够下结论 ≠ 事故）----
+    min_train = getattr(spec, "min_train_hours", None)
+    train_ok = True
+    train_note = ""
+    if min_train is not None and budget is not None:
+        got_h = budget.train_sec / 3600.0
+        if got_h < float(min_train):
+            train_ok = False
+            train_note = f"（有效训练 {got_h:.2f}h < {float(min_train)}h）"
+
     readings: list[RuleReading] = []
     #: 达标但被 ADVANCE 附加条件挡住的门（观测必须自带牙齿：HOLD 也要说清差在哪）。
     blocked_advance: list[str] = []
@@ -839,15 +938,17 @@ def evaluate(
         if not rule.enabled:
             released = False
         elif released and (p.route if rule.verdict == GATE_SPLIT else verdict) == "ADVANCE":
-            # ADVANCE 附加条件（§4.4）：advance_requires 全绿 + 窗口 ≥2 seed 集。
+            # ADVANCE 附加条件（§4.4 + §12.4）：advance_requires 全绿 + 窗口 ≥2 seed 集
+            # + 有效训练 ≥ min_train_hours。
             # 分流门按**实际 route** 判（route=REMEDIATE 不需 advance_requires 背书，
             # 否则平台期永远放不出 REMEDIATE——c6 回溯实测正是卡在这里）。
-            gates_ok = advance_ready and seeds_ok
+            gates_ok = advance_ready and seeds_ok and train_ok
             if not gates_ok:
                 blocked_advance.append(
                     f"{rule.id}"
                     + ("" if advance_ready else "(advance_requires 未全绿)")
                     + ("" if seeds_ok else f"(seed 集 {seeds_state})")
+                    + (train_note if not train_ok else "")
                 )
             released = gates_ok
         readings.append(

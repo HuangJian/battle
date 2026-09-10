@@ -375,6 +375,7 @@ GATE_KINDS: frozenset[str] = frozenset(
         "transfer",  # G3 横向准入（跨课探针；首期休眠）
         "plateau",  # G4 边际收益枯竭（前后半均值差 + SE 口径；可分流）
         "budget",  # G5 预算到顶（可分流）
+        "duty",  # G13 事故熔断：有效训练占空比过低（2026-09-11 评审新增，§12.4）
         "course_valid",  # G7 课程失效（超时超限 且 斜率>0）
         "retention",  # G8 回退守卫（首期休眠）
         "hack",  # G9 hack 熔断（双向条件，降级 PAUSE）
@@ -405,6 +406,7 @@ _GATE_FRAC_FIELDS: tuple[str, ...] = (
     "advance_frac",
     "max_timeout_frac",
     "min_win_rate",
+    "min_train_frac",  # G13 有效训练占空比（事故熔断）
 )
 #: 相对倍数参数：仅要求 ≥0（可 >1）。
 _GATE_REL_FIELDS: tuple[str, ...] = (
@@ -414,6 +416,8 @@ _GATE_REL_FIELDS: tuple[str, ...] = (
     "pickup_up_rel",
     "kills_down_rel",
 )
+#: 百分点（pp）参数：1.0 = 1pp，仅要求 ≥0（2026-09-11 评审：ADVANCE 需 effect size）。
+_GATE_PP_FIELDS: tuple[str, ...] = ("min_gain_pp",)
 
 
 class GateTeacher(BaseModel):
@@ -451,6 +455,11 @@ class GateRule(BaseModel):
     # wins_mastery / teacher_parity
     rel_teacher: float | None = None
     tol_pp: float | None = None
+    # wins_mastery 的 effect-size 附加条件（2026-09-11 评审，§12.4）
+    min_gain_pp: float | None = None
+    require_rising: bool = False
+    # duty（G13 事故熔断）
+    min_train_frac: float | None = None
     # skill_floor
     max_zero_kill_frac: float | None = None
     min_kills_rel: float | None = None
@@ -507,6 +516,12 @@ class GatesSpec(BaseModel):
     #: 可选：单轮迭代分钟数估计。仅用于 §3.4-8 预算可行性 WARNING（不断言）。
     est_iter_min: float | None = None
     rotation_rounds: int | None = None
+    #: 课程起点（零样本）胜率——`min_gain_pp` 的参照系（§12.4：ADVANCE 需 effect size）。
+    #: 开腿前须用同一批评估种子实测；开腿后改值 = course_fp 变 = 新实验。
+    baseline_win_rate: float | None = None
+    #: ADVANCE 附加条件：累计有效训练（Σ ppo_sec）不足此时长（小时）→ HOLD，
+    #: 不下 ADVANCE/STOP 判决（§12.4：数据还不够下结论 ≠ 事故）。
+    min_train_hours: float | None = None
     rules: list[GateRule] = []
 
     @model_validator(mode="after")
@@ -538,6 +553,10 @@ class GatesSpec(BaseModel):
                 )
             for f in _GATE_FRAC_FIELDS:
                 _gate_ratio(f, getattr(r, f), where)
+            for f in (*_GATE_PP_FIELDS,):
+                v = getattr(r, f)
+                if v is not None and v < 0:
+                    raise ValueError(f"{where}: {f}={v} 不得为负（百分点参数，5.0 = 5pp）")
             for f in (*_GATE_REL_FIELDS, "tol_pp", "tol_kills"):
                 v = getattr(r, f)
                 if v is not None and v < 0:
@@ -607,6 +626,22 @@ class GatesSpec(BaseModel):
             raise ValueError("gates.teacher.wins 必须在 [0, games] 内")
         _gate_ratio("zero_kill_frac", self.teacher.zero_kill_frac, "gates.teacher")
         _gate_ratio("timeout_frac", self.teacher.timeout_frac, "gates.teacher")
+
+        # ---- spec 级字段（2026-09-11 评审新增）----
+        _gate_ratio("baseline_win_rate", self.baseline_win_rate, "gates")
+        if self.min_train_hours is not None and self.min_train_hours < 0:
+            raise ValueError("gates.min_train_hours 不得为负（小时）")
+        # duty 门必须给阈值（与 plateau 必须给 metrics 同理）
+        for r in self.rules:
+            if r.kind == "duty" and r.min_train_frac is None:
+                raise ValueError(f"gates.rules[{r.id}]: duty 必须给 min_train_frac（[0,1]）")
+        # min_gain_pp 依赖 baseline（没有参照系的 effect size 是噪声）
+        for r in self.rules:
+            if r.min_gain_pp is not None and self.baseline_win_rate is None:
+                raise ValueError(
+                    f"gates.rules[{r.id}].min_gain_pp 需要 gates.baseline_win_rate "
+                    "（零样本起点，§12.4 effect size 的参照系）"
+                )
         return self
 
     def budget_warnings(self, max_hours: float, eval_every: int) -> list[str]:

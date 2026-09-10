@@ -403,6 +403,11 @@ R6 并入 Phase 1 的排程默认值，不单列（D6 未修时调 lr 无意义�
   新关若学生也是 0–20%，等于重造 c4→c6 的 24pp 鸿沟，先缩跨度再开腿。
 - 裁定：n ≥ 400 局、2 组种子集；ADVANCE 需"同向趋势 ×3 点 ＋ 配对 p<0.05"，
   **再加 effect size ≥ +5pp**（评审补充）——400 局下 1pp 也能"显著"，但无意义。
+  **已落码（2026-09-11）**：`wins_mastery` 新增 `min_gain_pp`（相对
+  `gates.baseline_win_rate` 的最小提升）与 `require_rising`（窗口斜率 ≥0）；
+  `GatesSpec` 新增 `baseline_win_rate` / `min_train_hours`（ADVANCE 需有效训练
+  ≥ 该值，否则 HOLD）；新增 kind **`duty`**（G13：Σ ppo_sec / 墙钟 < min_train_frac
+  → REMEDIATE，事故熔断——"3h 全是事故、训练 40min"从此机器可判）。
 - 预算：拆成两条（评审指正），不再是笼统的"单腿 ≤3h"：
   · **有效训练 ≥2h**（`Σ ppo_sec` 口径，事故/排队不计入）；
   · 墙钟上限与**事故熔断**分开——"3h 全是事故、训练 40min"必须判为事故熔断，

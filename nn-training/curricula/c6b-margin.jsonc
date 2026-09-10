@@ -52,7 +52,8 @@
 //   margin 门：tick≤2000、掉血<160（首腿宽松档）。熔断：胜率≤15 / 超时≥12 / 命中断崖。
 //
 // ── 机器门（gates 块，plan/course-exit-and-shutdown.md §3）─────────────────────
-//   G1 wins_mastery  rel_teacher 0.7  → 胜率 ≥35%（= 突破线）连续 3 轮 → ADVANCE
+//   G1 wins_mastery  rel_teacher 0.7 + min_gain_pp 5 + require_rising
+//                    → 胜率 ≥35% 且 相对起点 ≥+5pp 且 窗口同向，连续 3 轮 → ADVANCE
 //   G2 skill_floor   max_zero_kill_frac 0.30（教师 kills/phits 未测 → 两个相对子项
 //                    分母为 0 自动跳过，门只剩"不许靠躲着不打出击杀来刷胜率"）
 //   G4 plateau       window 6 轮 / tol_pp 8 / tol_kills 0.5 → 前后半无变化即枯竭，
@@ -60,6 +61,8 @@
 //   G5 budget        4h 或 iters=20 到顶 → STOP（route 按 G1 完成度填）
 //   G7 course_valid  超时占比 >0.15 且近 3 轮斜率>0 → REMEDIATE（课程失效，不算毕业）
 //   G9 hack          拾取↑≥50% 且 击杀↓≥20%（双向）→ PAUSE
+//   G13 duty         有效训练占空比 <0.35（Σppo_sec/墙钟）→ REMEDIATE（事故熔断）
+//   ADVANCE 前置：min_train_hours 2.0（有效训练不足 2h 不下 ADVANCE）
 //   G3/G8 首期休眠（跨课评估管线未通）；G10/G11 未配。
 //
 // 教师基线的诚实标注：wins=50/100 来自 c6 探针（tmp/c5it40-c6probe.jsonl 同关同种子
@@ -177,12 +180,27 @@
     },
     // ADVANCE 联判：G1 达标**且** G2 不靠"躲着不打"刷胜率
     "advance_requires": ["G1", "G2"],
+    // §12.4 effect size：起点（零样本）= c5-it40 在 c6 关的 26%。
+    // ⚠ 开腿前须用同一批评估种子重测本腿起点并回填（改值 = course_fp 变 = 新实验）。
+    "baseline_win_rate": 0.26,
+    // ADVANCE 前置：有效训练 ≥2h（Σ ppo_sec；事故/排队不计入）——
+    // "3h 全是事故、训练 40min"不允许下 ADVANCE（§12.4 评审补充）。
+    "min_train_hours": 2.0,
     "override_file": "GATE_OVERRIDE.json",
     // 单轮 ≈8 min（600 局采样 ≈2.1min + 远端 PPO ≈4.7min + eval 摊销）。
     // 仅用于 §3.4-8 预算可行性 WARNING（不断言）
     "est_iter_min": 8,
     "rules": [
-      { "id": "G1", "kind": "wins_mastery", "rel_teacher": 0.7, "verdict": "ADVANCE" },
+      {
+        "id": "G1",
+        "kind": "wins_mastery",
+        "rel_teacher": 0.7,
+        // effect size：相对起点至少 +5pp 且窗口同向（§12.4 评审）——
+        // 35% 阈值本身已含 +9pp，但显式声明让"换了起点也不失效"
+        "min_gain_pp": 5.0,
+        "require_rising": true,
+        "verdict": "ADVANCE",
+      },
       {
         "id": "G2",
         "kind": "skill_floor",
@@ -221,6 +239,14 @@
         "pickup_up_rel": 0.5,
         "kills_down_rel": 0.2,
         "verdict": "PAUSE",
+      },
+      // G13 事故熔断（§12.4 评审新增）：有效训练占空比 < 35% = 腿在烧事故
+      // （c6 的病灶形态：6.5h 墙钟只有 ~1h 训练）→ REMEDIATE 停车复诊
+      {
+        "id": "G13",
+        "kind": "duty",
+        "min_train_frac": 0.35,
+        "verdict": "REMEDIATE",
       },
       // 跨课门首期休眠（跨课 dispatch 管线未通，§3.3）
       {

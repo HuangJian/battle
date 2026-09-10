@@ -169,6 +169,9 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         self._remote_fail = 0
         self._remote_degraded = False
         self._leg_abort = False
+        # G13 duty / spec.min_train_hours 的分子：累计有效训练秒（Σ ppo_sec）。
+        # 初值从账本重算（跨重启不被低估——否则重启后占空比误报"在烧事故"）。
+        self._train_sec_total = 0.0
         self._dropped_games = None
         self._load_sec = None
         self._tail_drain_sec = None
@@ -219,6 +222,9 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 self._export_weights(it)
                 eval_rec = self._join_eval(it)
                 self._record_iteration(it)
+                # G13 duty 分子：本轮有效训练入账（事故轮走 iter_error，不经过这里
+                # → 不计入分子但计入墙钟分母 → 占空比下降，正是想要的语义）。
+                self._train_sec_total += float(self._ppo_sec or 0.0)
                 # M1c：每 iter 指标统计落盘（非致命）
                 self._write_iter_stats(it)
                 # 每轮 ppo_backend 写回后自动生成巡检 HTML（intent/goal 总是生成；
@@ -405,6 +411,11 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         else:
             rotate_seed = (args.seed * 1009 + 1 + int(time.time())) % (2**32)
         self._rotate_seed = rotate_seed
+        # G13 duty / min_train_hours 的分子：从账本重算累计有效训练（Σ ppo_sec）。
+        # 进程内存累计重启会归零 → 占空比被低估 → 误报"在烧事故"；账本是 SSOT。
+        from rl.gate_check import sum_train_sec
+
+        self._train_sec_total = sum_train_sec(self._jsonl_path)
         # build_pairs 是 (rotateSeed, it) 的纯函数：不持有任何跨迭代的随机流状态，
         # 同一 it 在任意时刻重启都得到完全相同的一批局（断点续跑剔除的前提）。
         write_run_start(self._jsonl_path, args, rotate_seed)

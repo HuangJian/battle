@@ -205,6 +205,7 @@ class TrainingGuards:
             max_hours=float(getattr(args, "max_hours", 0.0) or 0.0),
             iters=int(getattr(args, "iters", 0) or 0),
             cur_iter=it,
+            train_sec=float(getattr(self, "_train_sec_total", 0.0) or 0.0),
         )
         try:
             res = evaluate(

@@ -1042,5 +1042,13 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   设计如此"的指正成立，课程止损改由 gates 承担，不再动 `stop_loss_hit`。
 - **配置随之改动**：`c6b-margin.jsonc` 定位为 **Phase 1 探针腿** → `iters=20`、
   `max_hours=4`、`est_iter_min=8`；头注释写明"R3+R7 双变量，结论不可拆"，bc 不换。
+- **评审建议落码（2026-09-11 第二批）**：不止改文档——① `wins_mastery` 加
+  `min_gain_pp`（effect size，参照 `GatesSpec.baseline_win_rate` 零样本起点）与
+  `require_rising`（窗口斜率 ≥0，"≥3 点同向"机器化）；② `GatesSpec.min_train_hours`
+  （ADVANCE 前置：有效训练不足 → HOLD）；③ 新增 kind **`duty`**（G13 事故熔断：
+  `Σ ppo_sec / 墙钟 < min_train_frac` → REMEDIATE；分子跨重启从 iteration 账本重算，
+  事故轮走 iter_error 不入分子、入分母——占空比下降正是想要的语义）。
+  c6b 的 G1 配 5pp+同向、新增 G13 duty(0.35)、`min_train_hours=2.0`、
+  `baseline_win_rate=0.26`（⚠ 开腿前须重测回填，改值 = course_fp 变 = 新实验）。
 - **违反后果**：不查数据照单全收会把 105/31.4% 这类错数字写进复盘；把 R3/R4/R5 混在
   一条腿里开跑则违反单变量纪律，下一腿仍无法归因。

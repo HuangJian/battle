@@ -137,6 +137,7 @@ def test_gate_kinds_catalog_is_fixed() -> None:
         "hack",
         "teacher_parity",
         "dependency",
+        "duty",  # G13 事故熔断（2026-09-11 评审新增）
     } == GATE_KINDS
     assert GATE_SPLIT == "ADVANCE|REMEDIATE"
 
@@ -308,11 +309,17 @@ def test_c6b_course_gates_block_is_machine_readable() -> None:
         "G7": "course_valid",
         "G8": "retention",
         "G9": "hack",
+        "G13": "duty",
     }
     assert c.gates.teacher.corpus
     assert c.gates.teacher.games == 100 and c.gates.teacher.wins == 50
     assert c.gates.teacher.kills == 0.0 and c.gates.teacher.phits == 0.0
     assert c.gates.advance_requires == ["G1", "G2"]
+    # §12.4 effect size：G1 相对起点 ≥+5pp 且同向；baseline 不可缺
+    g1 = c.gates.rules[0]
+    assert g1.min_gain_pp == 5.0 and g1.require_rising is True
+    assert c.gates.baseline_win_rate == 0.26
+    assert c.gates.min_train_hours == 2.0
     # 休眠门（G8）不计入 ADVANCE 放行
     assert [r.id for r in c.gates.rules if not r.enabled] == ["G8"]
     # 预算可行：6 轮 × 3 iter × 58 min ≈ 17.4h < 24h → 无 WARNING
