@@ -655,6 +655,13 @@ body {
    ================================================================ */
 .ui-menu {
   background: var(--theme-overlay-bg);
+  /* No backdrop-filter here (unlike .ui-screen): the menu hosts an infinite
+     title animation, and every repaint inside a blurred screen forces a
+     fullscreen backdrop re-blur at 60fps — constant GPU load that spins
+     laptop fans while idling on the homepage. The dark overlay bg
+     (0.55–0.75 alpha) makes the blur nearly invisible anyway. */
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 /* Override text colours for dark overlay readability — applies only when
@@ -691,19 +698,28 @@ body.theme-modern .ui-menu {
   font-weight: 900;
   letter-spacing: 4px;
   color: var(--theme-accent-primary);
-  text-shadow: 0 0 20px var(--theme-accent-primary);
-  animation: title-glow 3s ease-in-out infinite;
+  text-shadow:
+    0 0 40px var(--theme-accent-primary),
+    0 0 8px var(--theme-accent-secondary);
+  /* Compositor-only pulse: animating text-shadow repaints every frame (and,
+     inside a blurred overlay, re-blurs the backdrop) — opacity animates on
+     the GPU at ~zero cost. Reduced-motion users get the static glow. */
+  animation: title-soft-pulse 3s ease-in-out infinite;
 }
 
-@keyframes title-glow {
+@keyframes title-soft-pulse {
   0%,
   100% {
-    text-shadow: 0 0 20px var(--theme-accent-primary);
+    opacity: 1;
   }
   50% {
-    text-shadow:
-      0 0 40px var(--theme-accent-primary),
-      0 0 8px var(--theme-accent-secondary);
+    opacity: 0.82;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .menu-title {
+    animation: none;
   }
 }
 
