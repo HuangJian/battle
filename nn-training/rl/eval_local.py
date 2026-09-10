@@ -153,6 +153,18 @@ def eval_done_keys(eval_jsonl: Path, wver16: str) -> set[tuple[int, int]]:
     return out
 
 
+def _acc(acc: list[float], v: object) -> None:
+    """累加器 (sum, count)：非数值（None/旧行缺字段）整条跳过，count 不涨。"""
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        acc[0] += float(v)
+        acc[1] += 1
+
+
+def _ratio(acc: list[float]) -> float | None:
+    """(sum, count) → 均值；count=0 → None（unknown，不伪装成 0）。"""
+    return round(acc[0] / acc[1], 4) if acc[1] else None
+
+
 def settle_eval_summary(
     eval_jsonl: Path,
     key16: str,
@@ -167,18 +179,31 @@ def settle_eval_summary(
     jsonl_lock: threading.Lock,
     t_eval_start: float,
     rollout_winrate: float | None,
+    course_fp: str | None = None,
 ) -> None:
     """评估窗口结束后的对账与 summary 落账（原 dispatch_eval_round 尾部，纯函数化）。
 
     断点续跑口径：summary 必须聚合台账中该 (iter,wver) 的全部逐局行——只统计本次
     补跑会低估分母（it29 实测教训：补跑 20 局写出 2/20）。ledger 无行时退回本次
     现场计数（wins/cleared_total/outcomes/node_games 由 record 闭包累积）。
+
+    门控读数（plan/course-exit-and-shutdown.md §8）：M1 顺手把**技能子指标均值**
+    累加进 summary 行（kills/zero_kill_frac/playerHits/powerUps/timeout），
+    与 wins 同分母、dropped 自洽——`rl/gate_check.py` 的趋势单源只读 summary 行，
+    不重扫逐局行（§3.3 v0.4）。缺字段（旧 agent/旧行）一律 None = unknown，
+    门侧按 unknown 处理而不是当成 0。
     """
     dropped = total - len(seen)
     led_wins = 0
     led_clears = 0
     led_outcomes: dict[str, int] = {}
     led_nodes: dict[str, int] = {}
+    # 技能子指标累加器（sum, count）——count 与分母 n 分离：旧行缺字段时该指标 None。
+    led_kills: list[float] = [0.0, 0.0]
+    led_phits: list[float] = [0.0, 0.0]
+    led_pu: list[float] = [0.0, 0.0]
+    led_zero_kill = 0
+    led_timeout = 0
     try:
         with open(eval_jsonl, encoding="utf-8") as jf:
             for ln in jf:
@@ -196,6 +221,13 @@ def settle_eval_summary(
                 led_outcomes[oc] = led_outcomes.get(oc, 0) + 1
                 ndm = str(r.get("node") or "?")
                 led_nodes[ndm] = led_nodes.get(ndm, 0) + 1
+                _acc(led_kills, r.get("kills"))
+                if isinstance(r.get("kills"), (int, float)) and float(r["kills"]) <= 0:
+                    led_zero_kill += 1
+                _acc(led_phits, r.get("playerHits"))
+                _acc(led_pu, r.get("powerUpsCollected"))
+                if oc == "timeout":
+                    led_timeout += 1
     except FileNotFoundError:
         pass
     if led_outcomes:
@@ -228,6 +260,16 @@ def settle_eval_summary(
         "rolloutWinRate": report_winrate_safe(rollout_winrate),
         # 每节点实际结算的评估局数（勿与并发槽位混淆——首版曾误写 nd["c"]）
         "nodes": dict(sorted(node_games.items())),
+        # ---- 门控技能子指标（§8；缺数据 None = unknown，门侧不当事）----
+        # 分母 = 该指标有值的局数（旧 agent 缺 playerHits 时 phits_mean 为 None，
+        # 不与 kills 混用一个分母——混用会把"没数据"伪装成"0 次被击中"）。
+        "kills_mean": _ratio(led_kills),
+        "zero_kill_frac": (round(led_zero_kill / led_kills[1], 4) if led_kills[1] else None),
+        "phits_mean": _ratio(led_phits),
+        "pickup_mean": _ratio(led_pu),
+        "timeout_frac": (round(led_timeout / n, 4) if n else None),
+        # D14 课程血缘：门按 course_fp 过滤趋势行（改课程 = 新实验，不与旧课混读）。
+        "course_fp": course_fp or "",
     }
     with jsonl_lock, open(eval_jsonl, "a", encoding="utf-8") as jf:
         jf.write(json.dumps(summary) + "\n")

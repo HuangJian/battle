@@ -6,6 +6,75 @@
 
 ---
 
+## §23 c6 判否后的修正落地：R1 门槛进代码 + R3/R7 重开腿 + R9 远端降级（2026-09-10 晚 → 09-11 晨）
+
+> 用户拍板：**c6 判否停腿，改设计后重开一腿**；优先级 R1 > R3+R7 > R9（R2/R4/R5 暂缓）。
+> 决策全文 → `DECISIONS.md` §2026-09-10-course-exit-gates。
+>
+> **R1 门槛进代码（M0+M1，全绿）**
+> - `rl/config.py`：`GateTeacher` / `GateRule` / `GatesSpec`（解析期强校验 §3.4 全 8 条；
+>   `*_frac` ∈[0,1] 与 `*_rel` ≥0 分家——§3.2 示例的 `max_phits_rel: 1.5` 本就是相对倍数）。
+> - **新增 `rl/gate_check.py`**：纯函数求值器 `evaluate(course, trend_rows, health, budget, now=None)`，
+>   9 种 kind + lattice `override>ABORT>PAUSE>STOP>REMEDIATE>ADVANCE>HOLD` + sustain 去重
+>   （按 `(course_fp, wver)`：同 wver 重跑不虚增连击）+ 薄壳 CLI（dry-run / 重放，exit 码 0/10/20/30/40/50）。
+>   禁 torch/numpy（单测在子进程断言；`rl.config` 延迟导入以避开 numpy 链）。
+> - `loop_guards._gate` = 第四守卫（每 eval_every 调一次），判决写 `gate_verdict` 事件；
+>   `_breaker` 熔断**同写 ABORT 行**（此前执行面在真 ABORT 场景读不到判决）＋补 NaN/inf 检测
+>   （NaN 与阈值比较恒 False → 旧代码永不熔断）。
+> - `settle_eval_summary` 顺带落 kills_mean / zero_kill_frac / phits_mean / pickup_mean /
+>   timeout_frac / course_fp（门控技能子指标单源；缺数据一律 None = unknown，不伪装成 0）。
+> - 单测：`tests/test_gate_config.py`（32）+ `tests/test_gate_check.py`（22）。
+>
+> **R3+R7 重开腿 `curricula/c6b-margin.jsonc`**（fresh out/traj，与 c6 单变量可归因）
+> - `wTick` 0.01 → **0.001**（满局 −24 → −2.4，不再压过击杀）；`terminal.stage_clear` 2.0 → **6.0**（＝2× wKill）。
+> - `seed_rotate` 150 → **600**（采样 48s → ≈3.2min；单轮瓶颈在远端 PPO 不在采样）；
+>   `eval_every` 5 → **3**（门要 3 轮才敢判，首判 it15 → it9）。
+> - 首个带 `gates` 块的在营课程：G1(0.7×教师=35%) / G2(0 杀占比≤30%) / G4(6 轮平台) /
+>   G5(预算) / G7(超时超限且斜率>0) / G9(hack 双向→PAUSE)，G8 休眠。
+>   教师块 wins=50/100 取 c6 探针；**kills/phits 未测 = 0**（相对子项按 §3.4-7 跳过，不编造）。
+>
+> **R9 远端失败自动降级**
+> - `wait_job` 轮询指数退避（5s×2^k，封顶 60s；404 = 正常排队不退避）。
+> - 新增 `--remote-degrade-after N`（默认 3）：连败达阈值 → `args.ppo="local"` + `remote_degrade`
+>   事件 + 本轮继续（训练活着）；`N=0` 连败 3 次 → 写 `gate_verdict: ABORT` 后停腿。
+> - 单测：`tests/test_remote_degrade.py`（6）。
+>
+> **还没做（用户明确暂缓 / 后续腿）**：R2 评估分辨率 100→400、R4 难度换轴（地形/出生点）、
+> R5 方差控制（1→2 命）、R6 排程按进展、R8 缰绳 ref 换目标关老师；M2 停机执行器与
+> 跨课门（G3/G8）仍休眠。
+>
+> **下一腿门槛（§12.4，待拍板）**：开腿前用 God AI 实测新关教师胜率，要求 55–75%
+> （c6 是 50%、跨度 24pp——学生拿到的梯度既弱又离分布远）。
+
+---
+
+## §22 c6-margin it50 事故终止：50 轮 8550 局零学习（2026-09-10）
+
+> 时间线：12:26:31 启动（runId `44853d429fb1cbf6`）→ **19:00:30 进程消失，停在 it50
+> eval 96/100 处**。6h34m 中可用训练 ≈1h；其余是三轮旧事故（it1 self ENOENT 熔断、
+> it2 中途重启致语料混装、it3 回合空转 2h10m）+ **it50 新事故**：远端 PPO job
+> `b9cd92e2ea9a0b88` 于 16:49 首发，17:27/17:57、18:28、18:59 四轮 pending、
+> **三次 `wait_job 超时（>1800s）`**，19:00:30 死在 eval 中途；19:14 该 job 仍
+> `/result` 404。hub 本体活着（本地控制台仍在轮询 `/ping`），不可达的是 cloud worker
+> 侧——cloudflared 日志持续 `region1.v2.argotunnel.com i/o timeout`。
+>
+> 成绩（只读 `tmp/c6-margin/*.jsonl` 可复核）：
+> - rollout 50 轮 **8550 局**：前半均值 0.359 / 后半 0.341 = **−1.8pp**（SE≈1.0pp）。
+> - eval 10 点（it5→it50，各 100 局、同一批 100 种子）：28/27/24/24/23/26/20/26/25/32.3，
+>   均值 25.4、σ 2.8；零样本 26、老师 50、突破线 35。
+> - **verdict：零学习信号**——不是"样本不够看不清"，8550 局给的是反向趋势。
+>
+> 设计缺陷与修正方案 → `plan/feasibility-map.md` §12（D1–D9 / R1–R9）。摘要：
+> ① 门不在代码里——全课程无 `gates` 键、exit-gates M0–M2 未动、三道护栏对 per-tick
+> 全失效（`stop_loss_hit` 对 per-tick 恒 False；kl_break 0.075 ≫ 实测 0.0057–0.0090；
+> ent_break 0.25 ≪ 实测熵 0.441–0.524），**这门课唯一的终止方式是事故**；
+> ② n=100 的判据带宽 ≈ 噪声（二项 SE 4.4pp、实测点间摆幅 12pp、判据带 13pp）；
+> ③ 训练集 ≡ 评估集 ≡ 单关且 100 个评估种子跨 50 轮不动；
+> ④ `wTick` 定价使"3 杀后 t800 阵亡(≈+5.1) > 5 杀拖到 t2400 超时(≈−6.4)"，差 11 分
+> ——即 §10 "杀/命中涨而胜不涨＝更激烈地输"的算术解释。
+
+---
+
 ## §21 RL EvalBench P0–P4 落地（2026-09-10，代码全绿，实测待标定）
 
 > P0 数据底座（EvalStore schema v1/幂等入账/可比性断言/覆盖率）+ 字段贯通
@@ -116,6 +185,42 @@
 > 全轨 46→72（＋26pp/140 轮）。腿非门限终结——OOM 重启杀死进程（it142 为末轮），
 > 账本权重归档完整。结业 verdict：成功＋突破（胜率超 God＋tick 过线），
 > 掉血持平老师。下一棒 c5（起点 it140 零样本 39）。
+>
+> **补记（c5-margin hold 结业＋c6-margin 开腿，2026-09-10）**：c5 全轨
+> rollout 均值 ~50% 无趋势；eval 14 点 40→45→39→35→39→41→39→49→43→42→
+> 37→41→45→38（it5→it70），中枢 ~41——hold（≥35）全程守住，突破（≥47）
+> 仅 it40 触达一次（it50 以 42% 证伪为上影线）。败局杀数峰恒 2 杀；
+> 命中率胜/败收敛（胜负手在生存）；超时 it20–25 爬 10–11 后 it40＋回 3–5。
+> verdict：及格未突破，70 轮 patience 尽，按用户指令转 c6。
+> c6-margin（4 改派生：改名/count 5→6/bc→c5-it40/fresh 目录；margin 包全锁）：
+> bc 取 c5 最佳 eval 权重 it40（非末轮——末轮 eval 已滑到 38），零样本 c6
+> 26/100 已测（tmp/c5it40-c6probe.jsonl；c4 系零样本仅 4，老师 50）。
+> 门：≥22 守住（起点−4）/it15≤16 停/≥35 突破/≥40 超；margin 按 c6 重定
+> （tick≤2000、掉血<160）；熔断 ≤15/超时≥12/命中率断崖。
+> 交接：c5 停在 it73 完成（it74/75 在途随 hub 切 job-root 废弃）；c6 it1
+> rollout 53/150＝35.3%（采样高于贪心零样本 26，口径差正常）。
+> 事故：c6 it1 开轮 self 本机 7 并发全灭（ENOENT 丢权重缓存，
+> weights-rollout-ef199a37.json——trainer 误判 kept 未下发），3 连败熔断，
+> it1＝local 33＋mac 117 全收；self 重启后 it2 下发 purged 但仍 0 结算、
+> 二度熔断（无新 FAILED，疑 MISS 计数误杀）——mac＋local 双腿容量足够，
+> 150/150 不缺数，self 待查（用户接管服务进程）。另 archive push 失败：
+> origin/goal-nn 被 fdc2a69（EvalBench）推前 1 commit，本地零独占提交、
+> 工作区另有他人未提交改动——腿中不合码，trainer 与在跑 agents 同旧码一致，
+> 无 mismatch；agent 若中途重启 pull 到新码将被排除，届时再处理。
+>
+> **补记（c6 it2 幽灵轮取证，2026-09-10）**：it2 行 134 通关/0 死/16 超时
+> （89%）系**报告假象＋语料混装**，非学习：① 首跑 it2 采集（12:28–12:29，
+> local 35＋mac 115）正常 64/76/10，落盘 payload（150 shards/19346 样本）为证；
+> ② 用户 12:34 重启 loop（runId 279c…），双远端被排除（self stale/mac 升级中），
+> 回退 local 串行重采 B（150 局 134/0/16，48s，同权重同图——0 死机制未解，
+> B shards 已清，无法复核）；③ 云端 PPO 吃的是 A＋B 并集（92 chunks×512＝
+> 47104 ≈ 19346＋27758，36min），行里却只报了 B 的战果和样本——"89% 轮"即 B 半。
+> it2 更新（KL 0.0078/熵 0.52，机械健康）不可解释；it3–7 新鲜采集 31–37%
+> 回到 it1 水平，无崩无涨，eval it5 28/100（≥22 守住过；tick 中位 1791≤2000 过、
+> 掉血中位 179＞160 挂、双过 5/28；超时 10/100 逼近熔断 12）。
+> 处置：不断腿，it10 再读（≥22 且稳则 it2 无害）；运维教训——**迭代中途永不重启
+> loop**（两 run 共用 tmp/remote-jobs 导致 shard 混装＋战果张冠李戴），停机只停在
+> iteration 行落账后。另 13:11→15:22 空转 2h10m（第三次 run_start 才续上）。
 
 ## §19 p3-kb1 突破：it15 55/100，p3 首条爬升曲线（2026-09-09，plan/feasibility-map.md §6）
 

@@ -146,6 +146,42 @@ def write_iteration(jsonl_path: Path, args, it: int, report: dict, m: dict) -> N
     )
 
 
+def write_gate_verdict(
+    jsonl_path: Path,
+    it: int,
+    verdict: str,
+    reason: str,
+    *,
+    route: str | None = None,
+    readings: list[dict] | None = None,
+    override: dict | None = None,
+    seeds: str = "unknown",
+    decider: str = "loop",
+) -> None:
+    """gate_verdict 事件：课程结束门判决落地（plan §4.3）。
+
+    两条来源（lattice 的 ABORT 项不能只有人工 override 一条路）：
+      1. `loop_guards._gate` 第四守卫——ADVANCE/REMEDIATE/STOP/PAUSE；
+      2. `_breaker` 熔断——ABORT（ds-P1-1：否则执行面在真正的 ABORT 场景读不到判决）。
+    读盘面（notebook/hub 运维）只读末个 gate_verdict，不自己算门。
+    """
+    write_event(
+        jsonl_path,
+        {
+            "event": "gate_verdict",
+            "iter": it,
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "verdict": verdict,
+            "route": route,
+            "reason": reason,
+            "seeds": seeds,
+            "decider": decider,
+            "readings": readings or [],
+            "override": override,
+        },
+    )
+
+
 def write_circuit_break(
     jsonl_path: Path,
     it: int,

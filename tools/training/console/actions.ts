@@ -158,10 +158,14 @@ export function resolveCourseBc(course: string): string {
   const legacy = path.join(REPO_ROOT, 'tmp/ep60/battle2-p1bc/run/weights.json')
   try {
     const raw = readFileSync(path.join(CURRICULA_DIR, `${course}.jsonc`), 'utf-8')
+    // JSONC 容尾逗号：oxfmt 给 curricula/*.jsonc 加的尾逗号是合法 JSONC、非法 JSON。
+    // 不剥掉 → JSON.parse 抛错 → 静默回退 legacy 种子路径（§384 的事故正是这个
+    // 静默回退：读不到课程 bc 就拿旧权重开腿）。剥完再解析，解析失败仍回退。
     const stripped = raw
       .split('\n')
       .filter((l) => !l.trimStart().startsWith('//'))
       .join('\n')
+      .replace(/,(\s*[}\]])/g, '$1')
     const bc: unknown = (JSON.parse(stripped) as { bc?: unknown }).bc
     if (typeof bc === 'string' && bc.length > 0) return path.join(REPO_ROOT, bc)
   } catch {

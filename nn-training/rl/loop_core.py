@@ -165,6 +165,10 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         self._eval_gate: threading.Event | None = None
         self._kl_cum = None
         self._halted_flag = False
+        # R9（2026-09-10 c6 it50 事故）：远端失败计数 / 已降级 / 停腿标记。
+        self._remote_fail = 0
+        self._remote_degraded = False
+        self._leg_abort = False
         self._dropped_games = None
         self._load_sec = None
         self._tail_drain_sec = None
@@ -208,6 +212,10 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 self._rollout_phase(it, pairs, dist_cfg, self._eval_on_round(it))
                 self._log_report(it, t_rollout)
                 self._serial_ppo(it)
+                # R9：远端连败且 --remote-degrade-after=0 → 已写 ABORT 判决，停腿。
+                if self._leg_abort:
+                    log(f"[run_rl] leg ABORTED at it{it}（远端不可用且禁用降级）")
+                    break
                 self._export_weights(it)
                 eval_rec = self._join_eval(it)
                 self._record_iteration(it)
@@ -223,6 +231,9 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 if self._agg is not None and self._breaker(it):
                     break
                 if self._stop_loss(it, eval_rec):
+                    break
+                # M1 第四守卫：课程结束门（无 gates 块的课程恒 False，零行为变化）
+                if self._gate(it):
                     break
                 self._rotate_cleanup(it)
                 # 吞吐 T4：双缓冲 spawn 下一轮预采（下一轮开头 join）

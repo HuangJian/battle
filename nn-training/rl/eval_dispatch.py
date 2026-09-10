@@ -494,6 +494,9 @@ class EvalDispatcher:
             for t_ in threads:
                 t_.join(timeout=max(30.0, window + task_timeout))
 
+            # 课程血缘进 summary 行（门控趋势过滤；延迟导入避免 rl.cmd ↔ 本模块环）。
+            from rl.cmd import course_fp_for_args
+
             settle_eval_summary(
                 eval_jsonl=eval_jsonl,
                 key16=key16,
@@ -508,6 +511,8 @@ class EvalDispatcher:
                 jsonl_lock=jsonl_lock,
                 t_eval_start=t_eval_start,
                 rollout_winrate=rollout_winrate,
+                # D14 课程血缘（门按 course_fp 过滤趋势行；无课程 = ""=不过滤）。
+                course_fp=course_fp_for_args(args),
             )
         except Exception as e:
             log(f"[eval] round error (ignored): {type(e).__name__}: {str(e)[:200]}")

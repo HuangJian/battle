@@ -1,0 +1,617 @@
+"""tests/test_gate_check.py —— 课程结束门求值器（M1，plan/course-exit-and-shutdown.md §9）。
+
+覆盖：禁 torch/numpy · 9 种 kind 的合成 fixture · 优先级 lattice · sustain 去重 ·
+确定性（now 注入，含预算门）· override 最高优先级与非法报错 · 跨课门休眠不挡路 ·
+数据缺失 = unknown 不伪装成 0 · 1 万行性能 · CLI 薄壳 exit 码。
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import pytest
+
+from rl.config import GatesSpec
+from rl.events import write_gate_verdict
+from rl.gate_check import (
+    EXIT_CODES,
+    BudgetInfo,
+    GateOverrideError,
+    evaluate,
+    first_run_start_ts,
+    load_override,
+    normalize_rows,
+    read_trend_rows,
+)
+
+ROOT = Path(__file__).resolve().parent.parent
+
+#: 教师基线：20 局 12 胜（胜率 0.60）、场均杀 2.95、被击中 0.40。
+TEACHER = {
+    "corpus": "EVAL_SEEDS:860001-860020",
+    "games": 20,
+    "wins": 12,
+    "kills": 2.95,
+    "phits": 0.40,
+}
+
+
+def _spec(rules: list[dict], **kw: object) -> GatesSpec:
+    d: dict = {"teacher": dict(TEACHER), "rules": rules}
+    d.update(kw)
+    return GatesSpec.model_validate(d)
+
+
+def _row(
+    i: int,
+    *,
+    wr: float = 0.60,
+    kills: float = 3.0,
+    phits: float = 0.40,
+    pu: float = 1.0,
+    timeout: float = 0.0,
+    zkf: float = 0.05,
+    wver: str | None = None,
+    seed: str | None = None,
+) -> dict:
+    r: dict = {
+        "event": "eval_summary",
+        "iter": i,
+        "wver": wver or f"w{i:03d}",
+        "games": 100,
+        "wins": round(wr * 100),
+        "winRate": wr,
+        "kills_mean": kills,
+        "zero_kill_frac": zkf,
+        "phits_mean": phits,
+        "pickup_mean": pu,
+        "timeout_frac": timeout,
+    }
+    if seed:
+        r["seed_fp"] = seed
+    return r
+
+
+def _rows(n: int, **kw: object) -> list[dict]:
+    return [_row(i + 1, **kw) for i in range(n)]  # type: ignore[arg-type]
+
+
+FROZEN_NOW = 1_700_000_000.0
+
+
+# --------------------------------------------------------------------------- 红线
+
+
+def test_module_import_has_no_torch_numpy() -> None:
+    """§3.3/§4.1 红线：求值器禁 torch/numpy（eval 线程与 CLI 都要轻量）。"""
+    code = (
+        "import sys, rl.gate_check; "
+        "print('torch=' + str('torch' in sys.modules)); "
+        "print('numpy=' + str('numpy' in sys.modules))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code], cwd=str(ROOT), capture_output=True, text=True, timeout=120
+    )
+    assert out.returncode == 0, out.stderr[-2000:]
+    kv = dict(line.split("=") for line in out.stdout.splitlines() if "=" in line)
+    assert kv["torch"] == "False"
+    assert kv["numpy"] == "False"
+
+
+def test_no_gates_block_holds() -> None:
+    """无 gates 块（老课程）→ HOLD，且读数为零（零行为变化）。"""
+    res = evaluate(object(), _rows(3))
+    assert res.verdict == "HOLD"
+    assert res.readings == ()
+    assert res.exit_code == 0
+
+
+# --------------------------------------------------------------------------- G1 / sustain
+
+
+def test_wins_mastery_advance_after_sustain() -> None:
+    """G1：连续 sustain 轮达标才放行；少一轮 = HOLD（迟滞）。"""
+    spec = _spec(
+        [{"id": "G1", "kind": "wins_mastery", "rel_teacher": 0.6, "verdict": "ADVANCE"}],
+        sustain=3,
+    )
+    thr = 0.6 * 0.6  # 0.36
+    hold = evaluate(spec, _rows(2, wr=0.40), now=FROZEN_NOW)
+    assert hold.verdict == "HOLD"  # 窗口仅 2/3
+    assert "数据不足" in hold.readings[0].reason
+    adv = evaluate(spec, _rows(3, wr=0.40), now=FROZEN_NOW)
+    assert adv.verdict == "ADVANCE"
+    assert adv.readings[0].completion == 1.0
+    # 阈值下方（0.35 < 0.36）不放行
+    assert evaluate(spec, _rows(3, wr=0.35), now=FROZEN_NOW).verdict == "HOLD"
+    del thr
+
+
+def test_same_wver_replay_does_not_inflate_streak() -> None:
+    """§4.4 去重键：同 wver 重跑（崩溃恢复）只算一次，凑不满 sustain。"""
+    spec = _spec(
+        [{"id": "G1", "kind": "wins_mastery", "rel_teacher": 0.6, "verdict": "ADVANCE"}],
+        sustain=3,
+    )
+    rows = [_row(1, wr=0.5), _row(2, wr=0.5, wver="w001"), _row(3, wr=0.5, wver="w001")]
+    res = evaluate(spec, rows, now=FROZEN_NOW)
+    assert res.verdict == "HOLD"
+    assert "数据不足" in res.readings[0].reason  # 去重后只有 2 个 wver
+
+
+def test_seeds_insufficient_blocks_advance() -> None:
+    """§4.4：ADVANCE 另需 ≥2 个不同 seed 集；全窗口同 seed → HOLD。"""
+    spec = _spec(
+        [{"id": "G1", "kind": "wins_mastery", "rel_teacher": 0.6, "verdict": "ADVANCE"}],
+        sustain=2,
+    )
+    same = [_row(1, wr=0.5, seed="s0"), _row(2, wr=0.5, seed="s0")]
+    res = evaluate(spec, same, now=FROZEN_NOW)
+    assert res.seeds == "insufficient"
+    assert res.verdict == "HOLD"
+    two = [_row(1, wr=0.5, seed="s0"), _row(2, wr=0.5, seed="s1")]
+    assert evaluate(spec, two, now=FROZEN_NOW).verdict == "ADVANCE"
+
+
+def test_seeds_unknown_does_not_block() -> None:
+    """历史语料无 seed 标识 → unknown，放行（否则 ADVANCE 永久不可达）。"""
+    spec = _spec(
+        [{"id": "G1", "kind": "wins_mastery", "rel_teacher": 0.6, "verdict": "ADVANCE"}],
+        sustain=2,
+    )
+    res = evaluate(spec, _rows(2, wr=0.5), now=FROZEN_NOW)
+    assert res.seeds == "unknown"
+    assert res.verdict == "ADVANCE"
+
+
+# --------------------------------------------------------------------------- G2 / G10
+
+
+def test_skill_floor_three_subconditions() -> None:
+    """G2：0 杀占比 / 场均杀（教师相对）/ 被击中 三项全过才计一轮。"""
+    spec = _spec(
+        [
+            {
+                "id": "G2",
+                "kind": "skill_floor",
+                "max_zero_kill_frac": 0.15,
+                "min_kills_rel": 0.7,  # ≥ 2.065
+                "max_phits_rel": 1.5,  # ≤ 0.60
+                "verdict": "ADVANCE",
+            }
+        ],
+        sustain=2,
+    )
+    good = _rows(2, kills=2.5, phits=0.5, zkf=0.10)
+    assert evaluate(spec, good, now=FROZEN_NOW).verdict == "ADVANCE"
+    bad_kills = _rows(2, kills=1.5, phits=0.5, zkf=0.10)
+    assert evaluate(spec, bad_kills, now=FROZEN_NOW).verdict == "HOLD"
+    bad_phits = _rows(2, kills=2.5, phits=0.9, zkf=0.10)
+    assert evaluate(spec, bad_phits, now=FROZEN_NOW).verdict == "HOLD"
+
+
+def test_skill_floor_missing_metric_is_unknown_not_zero() -> None:
+    """缺 kills_mean（旧行/旧 agent）→ unknown 不判，绝不伪装成 0 蒙混过关。"""
+    spec = _spec(
+        [{"id": "G2", "kind": "skill_floor", "min_kills_rel": 0.7, "verdict": "ADVANCE"}],
+        sustain=2,
+    )
+    rows = [{k: v for k, v in _row(i).items() if k != "kills_mean"} for i in (1, 2)]
+    res = evaluate(spec, rows, now=FROZEN_NOW)
+    assert res.readings[0].unknown is True
+    assert res.verdict == "HOLD"
+    assert "缺 kills_mean" in res.readings[0].reason
+
+
+def test_teacher_parity() -> None:
+    spec = _spec(
+        [{"id": "G10", "kind": "teacher_parity", "tol_pp": 5.0, "verdict": "ADVANCE"}],
+        sustain=2,
+    )
+    assert evaluate(spec, _rows(2, wr=0.60), now=FROZEN_NOW).verdict == "ADVANCE"
+    assert evaluate(spec, _rows(2, wr=0.50), now=FROZEN_NOW).verdict == "HOLD"  # −10pp
+
+
+# --------------------------------------------------------------------------- G4 / G5 分流
+
+
+def test_plateau_route_by_completion() -> None:
+    """G4 分流：advance_if 最弱一环完成度 ≥ advance_frac → ADVANCE，否则 REMEDIATE。"""
+    rules = [
+        {"id": "G1", "kind": "wins_mastery", "rel_teacher": 0.6, "verdict": "ADVANCE"},
+        {"id": "G2", "kind": "skill_floor", "min_kills_rel": 0.7, "verdict": "ADVANCE"},
+        {
+            "id": "G4",
+            "kind": "plateau",
+            "window_rounds": 4,
+            "tol_pp": 8.0,
+            "tol_kills": 0.5,
+            "metrics": ["win_rate", "kills_mean"],
+            "advance_if": ["G1", "G2"],
+            "advance_frac": 0.7,
+            "verdict": "ADVANCE|REMEDIATE",
+        },
+    ]
+    spec = _spec(rules, sustain=2)
+    # 前后半几乎无变化 → 枯竭；G1/G2 双绿 → ADVANCE
+    flat = [
+        _row(1, wr=0.50, kills=2.5),
+        _row(2, wr=0.51, kills=2.5),
+        _row(3, wr=0.50, kills=2.5),
+        _row(4, wr=0.51, kills=2.5),
+    ]
+    res = evaluate(spec, flat, now=FROZEN_NOW)
+    assert res.verdict == "ADVANCE"
+    assert res.route == "ADVANCE"
+    # 仍在爬升 → 未枯竭：G4 不放行（HOLD 的那一门），但 G1 单门仍可 ADVANCE
+    # （advance_requires 为空 = 无联判要求，见 §3.4-1）。
+    rising = [
+        _row(1, wr=0.20, kills=1.0),
+        _row(2, wr=0.30, kills=1.6),
+        _row(3, wr=0.40, kills=2.2),
+        _row(4, wr=0.50, kills=2.8),
+    ]
+    up = evaluate(spec, rising, now=FROZEN_NOW)
+    assert {r.rule_id: r.fired for r in up.readings}["G4"] is False
+    assert up.verdict == "ADVANCE"
+    # 枯竭但 G2 不达标（击杀 1.5 < 2.065）→ 完成度不足 → REMEDIATE
+    stalled_bad = [
+        _row(1, wr=0.50, kills=1.5),
+        _row(2, wr=0.51, kills=1.5),
+        _row(3, wr=0.50, kills=1.5),
+        _row(4, wr=0.51, kills=1.5),
+    ]
+    rem = evaluate(spec, stalled_bad, now=FROZEN_NOW)
+    assert rem.verdict == "REMEDIATE"
+    assert rem.route == "REMEDIATE"
+
+
+def test_plateau_skips_missing_metrics_but_needs_one() -> None:
+    """缺 kills_mean（旧语料）时只判 win_rate，不把平台门焊死。
+
+    c6 回溯实测：只看 win_rate 时 G4 在 it30 判枯竭 → REMEDIATE（腿省下 ~20 轮）；
+    若"缺任一 metric 就 unknown"，门全程 HOLD，等于没装。
+    """
+    rules = [
+        {"id": "G1", "kind": "wins_mastery", "rel_teacher": 1.2, "verdict": "ADVANCE"},
+        {
+            "id": "G4",
+            "kind": "plateau",
+            "window_rounds": 6,
+            "tol_pp": 8.0,
+            "tol_kills": 0.5,
+            "metrics": ["win_rate", "kills_mean"],
+            "advance_if": ["G1"],
+            "advance_frac": 0.7,
+            "verdict": "ADVANCE|REMEDIATE",
+        },
+    ]
+    spec = _spec(rules, sustain=3)
+    flat_no_kills = [
+        {k: v for k, v in _row(i, wr=wr).items() if k != "kills_mean"}
+        for i, wr in enumerate((0.28, 0.27, 0.24, 0.24, 0.23, 0.26), start=1)
+    ]
+    res = evaluate(spec, flat_no_kills, now=FROZEN_NOW)
+    # G1（rel 1.2 × 0.60 = 0.72）远未达标 → route REMEDIATE，且 REMEDIATE 不需
+    # advance_requires 背书（否则平台期永远放不出判决）
+    assert res.verdict == "REMEDIATE", res.reason
+    assert res.route == "REMEDIATE"
+
+
+def test_plateau_all_metrics_missing_is_unknown() -> None:
+    spec = _spec(
+        [
+            {
+                "id": "G4",
+                "kind": "plateau",
+                "window_rounds": 4,
+                "tol_pp": 8.0,
+                "metrics": ["kills_mean"],
+                "advance_if": [],
+                "advance_frac": 0.7,
+                "verdict": "ADVANCE|REMEDIATE",
+            }
+        ],
+        sustain=1,
+    )
+    rows = [{k: v for k, v in _row(i).items() if k != "kills_mean"} for i in (1, 2, 3, 4)]
+    res = evaluate(spec, rows, now=FROZEN_NOW)
+    assert res.readings[0].unknown is True
+    assert res.verdict == "HOLD"
+
+
+def test_budget_stop_with_frozen_now() -> None:
+    """G5：确定性（now 注入）+ 两条上限（max_hours / iters）。"""
+    # advance_if 引用 G1 → 门必须存在（解析期强校验，§3.4-1）
+    spec = _spec(
+        [
+            {"id": "G1", "kind": "wins_mastery", "rel_teacher": 0.6, "verdict": "ADVANCE"},
+            {
+                "id": "G5",
+                "kind": "budget",
+                "advance_if": ["G1"],
+                "advance_frac": 0.7,
+                "verdict": "STOP",
+            },
+        ],
+        sustain=1,
+    )
+    early = BudgetInfo(started_at=FROZEN_NOW - 60, max_hours=10.0, iters=0)
+    over = BudgetInfo(started_at=FROZEN_NOW - 11 * 3600, max_hours=10.0, iters=0)
+    # 未达标的行（wr 0.10 < 0.36）：G1 不放行，只有预算门能说话
+    weak = _rows(1, wr=0.10)
+    assert evaluate(spec, weak, budget=early, now=FROZEN_NOW).verdict == "HOLD"
+    res = evaluate(spec, weak, budget=over, now=FROZEN_NOW)
+    assert res.verdict == "STOP"
+    assert res.route == "REMEDIATE"  # G1 完成度 0 < 0.7
+    # 达标的行：STOP 的 route 指 ADVANCE（已完成度够，只是时间到了）
+    strong = _rows(1, wr=0.60)
+    res2 = evaluate(spec, strong, budget=over, now=FROZEN_NOW)
+    assert res2.verdict == "STOP"  # STOP(3) > ADVANCE(1)
+    assert res2.route == "ADVANCE"
+    iters_done = BudgetInfo(started_at=None, max_hours=0.0, iters=10, cur_iter=10)
+    assert evaluate(spec, weak, budget=iters_done, now=FROZEN_NOW).verdict == "STOP"
+    # 基线不可知（无 run_start）→ 预算门 unknown，不误停
+    unknown = BudgetInfo(started_at=None, max_hours=1.0, iters=0)
+    assert evaluate(spec, weak, budget=unknown, now=FROZEN_NOW).verdict == "HOLD"
+
+
+# --------------------------------------------------------------------------- G7 / G9 / G12
+
+
+def test_course_valid_needs_rising_timeout() -> None:
+    """G7：超时超限**且**斜率>0 才算课程失效（严格单调改斜率，ds-P2-1）。"""
+    spec = _spec(
+        [
+            {
+                "id": "G7",
+                "kind": "course_valid",
+                "max_timeout_frac": 0.15,
+                "rising_rounds": 3,
+                "verdict": "REMEDIATE",
+            }
+        ],
+        sustain=1,
+    )
+    rising = [_row(1, timeout=0.20), _row(2, timeout=0.26), _row(3, timeout=0.32)]
+    assert evaluate(spec, rising, now=FROZEN_NOW).verdict == "REMEDIATE"
+    flat = [_row(1, timeout=0.30), _row(2, timeout=0.30), _row(3, timeout=0.30)]
+    assert evaluate(spec, flat, now=FROZEN_NOW).verdict == "HOLD"  # 超限但不恶化
+    low = [_row(1, timeout=0.05), _row(2, timeout=0.10), _row(3, timeout=0.12)]
+    assert evaluate(spec, low, now=FROZEN_NOW).verdict == "HOLD"  # 上升但未超限
+
+
+def test_hack_is_pause_and_beats_advance() -> None:
+    """§4.2 lattice 回归：G1 绿 + G9 红 → PAUSE（G9 已由 ABORT 降级）。"""
+    rules = [
+        {"id": "G1", "kind": "wins_mastery", "rel_teacher": 0.6, "verdict": "ADVANCE"},
+        {
+            "id": "G9",
+            "kind": "hack",
+            "window_rounds": 4,
+            "pickup_up_rel": 0.5,
+            "kills_down_rel": 0.2,
+            "verdict": "PAUSE",
+        },
+    ]
+    spec = _spec(rules, sustain=3)
+    rows = [
+        _row(1, wr=0.50, kills=3.0, pu=1.0),
+        _row(2, wr=0.50, kills=3.0, pu=1.0),
+        _row(3, wr=0.50, kills=2.0, pu=2.0),
+        _row(4, wr=0.50, kills=2.0, pu=2.0),
+    ]
+    res = evaluate(spec, rows, now=FROZEN_NOW)
+    assert res.verdict == "PAUSE", res.reason
+    by_id = {r.rule_id: r for r in res.readings}
+    # 两门都放行，但 lattice 取最高优先级（PAUSE > ADVANCE）
+    assert by_id["G1"].released is True
+    assert by_id["G9"].released is True
+    assert by_id["G9"].fired is True
+    assert res.exit_code == EXIT_CODES["PAUSE"]
+    # 单向（只拾取涨、击杀不跌）不触发
+    one_way = [
+        _row(1, wr=0.50, kills=3.0, pu=1.0),
+        _row(2, wr=0.50, kills=3.0, pu=1.0),
+        _row(3, wr=0.50, kills=3.2, pu=2.0),
+        _row(4, wr=0.50, kills=3.2, pu=2.0),
+    ]
+    assert evaluate(spec, one_way, now=FROZEN_NOW).verdict == "ADVANCE"
+
+
+def test_override_is_highest_priority() -> None:
+    """G12：override 覆盖一切（lattice 最高），reason 记入结果供审计。"""
+    spec = _spec(
+        [{"id": "G1", "kind": "wins_mastery", "rel_teacher": 0.6, "verdict": "ADVANCE"}],
+        sustain=2,
+    )
+    res = evaluate(
+        spec,
+        _rows(2, wr=0.60),
+        now=FROZEN_NOW,
+        override={"verdict": "STOP", "reason": "人工改向：换课程"},
+    )
+    assert res.verdict == "STOP"
+    assert "人工改向" in res.reason
+    assert res.override == {"verdict": "STOP", "reason": "人工改向：换课程"}
+
+
+def test_load_override_invalid_raises(tmp_path: Path) -> None:
+    """§4.6：override 非法响亮报错（CLI exit 2），绝不静默忽略。"""
+    p = tmp_path / "GATE_OVERRIDE.json"
+    p.write_text('{"verdict": "MAYBE"}', encoding="utf-8")
+    with pytest.raises(GateOverrideError):
+        load_override(p)
+    (tmp_path / "G2.json").write_text("[1,2]", encoding="utf-8")
+    with pytest.raises(GateOverrideError):
+        load_override(tmp_path / "G2.json")
+    assert load_override(tmp_path / "nope.json") is None
+
+
+def test_advance_requires_all_enabled_gates() -> None:
+    """§3.4-1：advance_requires 里休眠门不计，启用门全绿才放行 ADVANCE。"""
+    rules = [
+        {"id": "G1", "kind": "wins_mastery", "rel_teacher": 0.6, "verdict": "ADVANCE"},
+        {"id": "G2", "kind": "skill_floor", "min_kills_rel": 0.7, "verdict": "ADVANCE"},
+    ]
+    spec = _spec(rules, sustain=2, advance_requires=["G1", "G2"])
+    good = _rows(2, wr=0.60, kills=2.5)
+    assert evaluate(spec, good, now=FROZEN_NOW).verdict == "ADVANCE"
+    bad = _rows(2, wr=0.60, kills=1.0)  # G2 不达标
+    res = evaluate(spec, bad, now=FROZEN_NOW)
+    assert res.verdict == "HOLD"
+    assert "advance_requires 未全绿" in res.reason
+
+
+def test_dormant_cross_course_gate_is_unknown_not_blocking() -> None:
+    """G3/G8 首期休眠：无该课行 = 值班缺勤 → unknown，不触发任何反向判决。"""
+    rules = [
+        {"id": "G1", "kind": "wins_mastery", "rel_teacher": 0.6, "verdict": "ADVANCE"},
+        {
+            "id": "G3",
+            "kind": "transfer",
+            "course": "c5-margin",
+            "min_wins": 5,
+            "min_kills": 150,
+            "verdict": "ADVANCE",
+            "enabled": False,
+        },
+    ]
+    spec = _spec(rules, sustain=2)
+    res = evaluate(spec, _rows(2, wr=0.60), now=FROZEN_NOW)
+    by_id = {r.rule_id: r for r in res.readings}
+    assert by_id["G3"].dormant is True
+    assert by_id["G3"].released is False
+    assert res.verdict == "ADVANCE"  # 休眠门不挡 ADVANCE
+
+
+# --------------------------------------------------------------------------- IO 助手
+
+
+def test_normalize_rows_dedup_and_filter() -> None:
+    rows = [
+        _row(1, wr=0.1),
+        _row(2, wr=0.9, wver="w001"),  # 同 wver 覆盖第 1 条
+        {"event": "iteration", "iter": 3},  # 非 summary 行丢弃
+    ]
+    out = normalize_rows(rows)
+    assert [r.wver for r in out] == ["w001"]
+    assert out[0].win_rate == pytest.approx(0.9)
+    # course_fp 过滤：异课行剔除，旧行（无字段）按全匹配保留
+    rows2 = [
+        {**_row(1), "course_fp": "aa"},
+        {**_row(2), "course_fp": "bb"},
+        _row(3),
+    ]
+    assert len(normalize_rows(rows2, course_fp="aa")) == 2
+
+
+def test_read_trend_rows_and_first_run_start(tmp_path: Path) -> None:
+    log = tmp_path / "eval_log.jsonl"
+    log.write_text(
+        "\n".join(
+            [
+                json.dumps(_row(1)),
+                "not-json",
+                json.dumps({**_row(2), "course_fp": "xx"}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert len(read_trend_rows(log)) == 2
+    assert len(read_trend_rows(log, course_fp="aa")) == 1  # 无 fp 的旧行保留
+    assert read_trend_rows(tmp_path / "nope.jsonl") == ()
+
+    tl = tmp_path / "training_log.jsonl"
+    t0 = "2026-09-01 10:00:00"
+    t1 = "2026-09-05 10:00:00"
+    tl.write_text(
+        json.dumps({"event": "run_start", "time": t0})
+        + "\n"
+        + json.dumps({"event": "run_start", "time": t1})
+        + "\n",
+        encoding="utf-8",
+    )
+    got = first_run_start_ts(tl)
+    assert got is not None
+    # §7：预算基线读**首条**（最后一条 = 每次重启续命）
+    assert got == time.mktime(time.strptime(t0, "%Y-%m-%d %H:%M:%S"))
+
+
+def test_write_gate_verdict_event_schema(tmp_path: Path) -> None:
+    """§4.3：gate_verdict 事件进 training_log.jsonl（读盘面只读末个该事件）。"""
+    p = tmp_path / "training_log.jsonl"
+    write_gate_verdict(p, 7, "STOP", "预算到顶", route="REMEDIATE", decider="loop")
+    row = json.loads(p.read_text(encoding="utf-8").strip())
+    assert row["event"] == "gate_verdict"
+    assert row["iter"] == 7
+    assert row["verdict"] == "STOP"
+    assert row["route"] == "REMEDIATE"
+    assert row["decider"] == "loop"
+    assert row["readings"] == []
+
+
+# --------------------------------------------------------------------------- 性能 / CLI
+
+
+def test_evaluate_10k_rows_is_fast() -> None:
+    """§9 M1：倒序窗口截断——1 万行 fixture 求值必须在秒级完成。"""
+    spec = _spec(
+        [
+            {"id": "G1", "kind": "wins_mastery", "rel_teacher": 0.6, "verdict": "ADVANCE"},
+            {
+                "id": "G4",
+                "kind": "plateau",
+                "window_rounds": 10,
+                "tol_pp": 8.0,
+                "tol_kills": 0.5,
+                "metrics": ["win_rate", "kills_mean"],
+                "advance_if": ["G1"],
+                "advance_frac": 0.7,
+                "verdict": "ADVANCE|REMEDIATE",
+            },
+            {
+                "id": "G7",
+                "kind": "course_valid",
+                "max_timeout_frac": 0.15,
+                "rising_rounds": 5,
+                "verdict": "REMEDIATE",
+            },
+        ],
+        sustain=3,
+    )
+    rows = [_row(i, wr=0.5, timeout=0.05 * (i % 3)) for i in range(10_000)]
+    t0 = time.perf_counter()
+    res = evaluate(spec, rows, now=FROZEN_NOW)
+    dt = time.perf_counter() - t0
+    assert res.verdict in EXIT_CODES
+    assert dt < 3.0, f"10k 行求值耗时 {dt:.2f}s（窗口截断失效？）"
+
+
+def test_cli_dry_run_exit_code(tmp_path: Path) -> None:
+    """CLI 薄壳：无 gates 块的课程 → HOLD → exit 0，且零写盘。"""
+    out = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "rl.gate_check",
+            "--course",
+            "c6-margin",
+            "--traj",
+            str(tmp_path),
+            "--json",
+        ],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert out.returncode == 0, out.stdout + out.stderr
+    payload = json.loads(out.stdout)
+    assert payload["verdict"] == "HOLD"
+    assert list(tmp_path.iterdir()) == []  # dry-run 零写盘

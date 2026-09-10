@@ -983,3 +983,34 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   read-through（训练循环零改动）；A/B 按 eval_on_round 确定性分配；agent taskKey 无 policy 分量 ←→
   iterId 命名空间隔离 god/nn（不动节点缓存键，避升级波外负担）。
 - **违反后果**：跨 policy 串键（同 iterId 混 god/nn）、stale 节点产出异构 gameplay 仍过门、2400 截断压胜率抬超时门。
+
+## §2026-09-10-course-exit-gates（2026-09-10 晚 / 09-11 晨，c6 判否后自主实施 R1/R3/R7/R9）
+
+- **背景**：c6-margin 跑满 50 轮 8550 局、eval 均值 25.4（老师 50、突破线 35）、**零学习信号**，且
+  it50 因远端 PPO job 三次 1800s 超时而进程消失（docs/rl.progress.md §22）。根因与修正清单在
+  `plan/feasibility-map.md` §12（D1–D9 / R1–R9）；用户拍板：**判否停腿，改设计后重开一腿**，
+  优先级 R1（门槛进代码）> R3（重定价）+ R7（每轮局数）> R9（远端失败降级）；R2/R4/R5 暂缓。
+- **决定（R1 门槛进代码，M0+M1）**：① `rl/config.py` 加 `GateTeacher/GateRule/GatesSpec`
+  （parser 强校验 §3.4 全 8 条，未知 kind 响亮报错，`_GATE_FRAC_FIELDS [0,1]` 与 `_GATE_REL_FIELDS ≥0`
+  分家——§3.2 示例的 `max_phits_rel: 1.5` 是相对倍数，本就 >1，计划原文按批注修正）；
+  ② 新增 `rl/gate_check.py` 纯函数求值器（`evaluate(course, trend_rows, health, budget, now=None)`），
+  9 种 kind + lattice `override > ABORT > PAUSE > STOP > REMEDIATE > ADVANCE > HOLD` + sustain 去重；
+  ③ `loop_guards._gate` 作第四守卫（每 eval_every 调一次），判决写 `gate_verdict` 事件；
+  `_breaker` 熔断同写 ABORT 行（否则执行面在真 ABORT 场景读不到判决）+ 补 NaN/inf 检测
+  （NaN 与阈值比较恒 False，旧代码永不熔断）；④ `settle_eval_summary` 顺带落
+  kills_mean/zero_kill_frac/phits_mean/pickup_mean/timeout_frac/course_fp（门控技能子指标单源）。
+- **与计划的两处偏差（严格增强）**：sustain **从 trend_rows 复算**（最近 sustain 个不同 wver 的
+  summary 行全达标）而非建在 gate_log 历史行上——求值器保持纯函数、崩溃重放幂等；
+  ADVANCE 的「≥2 seed 集」仅当行携带 `seed_fp` 时才校验，全缺记 unknown **且放行**（否则历史
+  语料让 ADVANCE 永久不可达）。
+- **决定（R3/R7，载体 `curricula/c6b-margin.jsonc`）**：`wTick` 0.01→0.001（满局 −24→−2.4，不再压过
+  击杀）、`terminal.stage_clear` 2.0→6.0（＝2× wKill，通关成最大单项）；`seed_rotate` 150→600
+  （采样侧 48s→≈3.2min，单轮瓶颈在远端 PPO 而非采样）；`eval_every` 5→3（门要 3 轮才敢判）。
+  教师块 wins=50/100 取 c6 探针值，**kills/phits 未测 = 0**——依赖它们的相对子项按 §3.4-7 跳过，
+  不编造。G3/G8 首期休眠。
+- **决定（R9 远端降级）**：`wait_job` 轮询指数退避（5s×2^k，封顶 60s；404 正常排队不退避）；
+  新增 `--remote-degrade-after N`（默认 3）：远端连败达 N 次 → `args.ppo="local"` +
+  `remote_degrade` 事件 + 本轮继续（训练活着）；`N=0`（禁降级）连败 3 次 → 写
+  `gate_verdict: ABORT` 后停腿。
+- **违反后果**：不落地 R1 则任何课程都只能靠事故终止（c6 已兑现一次）；不落地 R9 则云端不可达时
+  整条腿耗在轮询上（c6 it50 白烧 2h）；教师基线编造会让 ADVANCE 判决失真（门形同虚设）。

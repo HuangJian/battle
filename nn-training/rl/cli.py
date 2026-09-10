@@ -423,6 +423,14 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         "预采（stale 上限 30%，超量下轮现场重采）",
     )
     ap.add_argument(
+        "--remote-degrade-after",
+        type=int,
+        default=_d("remote_degrade_after", 3),
+        help="R9（2026-09-10 c6 it50 事故）：远端 PPO 连续失败这么多次后**自动降级本机 "
+        "PPO**（0 = 不降级，改为达 3 次后写 ABORT 停腿）。降级是本轮立即生效的"
+        "“先活着”路径——云端不可达时训练继续跑，而不是整条腿耗在轮询上",
+    )
+    ap.add_argument(
         "--echo-config",
         action="store_true",
         help="只打印生效配置 + 当轮公式与 params 指纹（AST dump），不训练——"

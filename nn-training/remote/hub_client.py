@@ -478,16 +478,19 @@ def wait_job(
     *,
     timeout_sec: float = 25 * 60,
     poll_sec: float = 5.0,
+    poll_max_sec: float = 60.0,
     log=lambda msg: print(f"[hub] {msg}", flush=True),
 ) -> dict:
     """阻塞等待 job 完成（worker 已 POST 结果）→ 返回结果 dict。超时抛 HubClientError。
 
-    H3（review-hy）：默认超时 25min **严格小于** LEASE_SEC=30min——否则 hub 判超时的
-    瞬间恰是 job 回池的瞬间，存在「hub 放弃 / 云恰好回传」的双花窗口。超时前先
-    GET /jobs/{id}/status 二次确认（done → 直接取结果；leased → 云还在跑，继续等）。
-    云 worker 侧有 60s 守护心跳续租（H1），正常 PPO 不会被 30min 租约打断。
+    R9（2026-09-10 c6 it50 事故，plan/feasibility-map.md §12）：**轮询退避**。
+    此前网络错误/5xx 一律固定 `poll_sec` 重试——隧道抖动期间这是固定频率猛敲一个
+    已经不可达的边缘（cloudflared `region1.v2.argotunnel.com i/o timeout` 持续
+    6h），既救不回 job 也放大噪声。连续错误按 2 的幂退避（`poll_max_sec` 封顶），
+    一次成功即复位。404（job 还没回）是**正常等待**，不走退避。
     """
     deadline = time.time() + timeout_sec
+    err_streak = 0
     while time.time() < deadline:
         try:
             status, body = _request(base_url, token, f"/jobs/{jid}/result", timeout=30.0)
@@ -495,8 +498,13 @@ def wait_job(
             # 瞬时网络错误（快速隧道抖动/DNS/连接重置）——与 404 同等处理，续等；
             # 2026-09-05：此前单次错误直接抛 HubClientError 会废掉整轮迭代
             # （loop 连击 retry），对 24/7 隧道运营是可靠性缺陷。
-            log(f"wait_job: job {jid} 轮询网络错误 ({type(e).__name__}) —— {poll_sec}s 后重试")
-            time.sleep(poll_sec)
+            err_streak += 1
+            backoff = min(poll_sec * (2 ** (err_streak - 1)), poll_max_sec)
+            log(
+                f"wait_job: job {jid} 轮询网络错误 ({type(e).__name__}) "
+                f"— 连续第 {err_streak} 次，{backoff:.0f}s 后退避重试"
+            )
+            time.sleep(backoff)
             continue
         if status == 200:
             loaded = json.loads(body.decode("utf-8"))
@@ -504,12 +512,18 @@ def wait_job(
                 return loaded
             raise HubClientError(f"wait_job: job {jid} 结果非对象: {type(loaded).__name__}")
         if status == 404:
+            err_streak = 0  # 还没回 = 正常排队，复位退避
             time.sleep(poll_sec)
             continue
         if status >= 500:
             # 隧道/边缘瞬时 5xx（Cloudflare 错误页等）——容忍至 deadline
-            log(f"wait_job: job {jid} HTTP {status}（瞬时错误）—— {poll_sec}s 后重试")
-            time.sleep(poll_sec)
+            err_streak += 1
+            backoff = min(poll_sec * (2 ** (err_streak - 1)), poll_max_sec)
+            log(
+                f"wait_job: job {jid} HTTP {status}（瞬时错误）— 连续第 {err_streak} 次，"
+                f"{backoff:.0f}s 后退避重试"
+            )
+            time.sleep(backoff)
             continue
         raise HubClientError(f"wait_job: HTTP {status}: {body[:200].decode('utf-8', 'replace')}")
     # H3：超时前二次确认——leased（云仍在跑）→ 延长等待；done → 直接取结果

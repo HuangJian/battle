@@ -357,6 +357,282 @@ class PpoScheduleEntry(BaseModel):
     kl_cap: float | None = None
 
 
+# ---------------------------------------------------------------------------
+# 课程结束门（plan/course-exit-and-shutdown.md §3；DECISIONS §337/§338）
+# ---------------------------------------------------------------------------
+#
+# 顶层可选块 `"gates"`：门从课程注释走进代码。缺席 = 关闭（老课程逐字节不变）。
+# 阈值随课程文件进 course_fp（§331-D14）——改阈值 = 新实验版本。
+#
+# 本模块只管**声明与解析期校验**（M0）；求值器在 `rl/gate_check.py`（M1），
+# in-loop 接线在 `rl/loop_guards.py` 第四守卫（M1）。
+
+#: 固定 catalog（§3.3）：每种 kind = 求值器一个函数；未知 kind 响亮报错。
+GATE_KINDS: frozenset[str] = frozenset(
+    {
+        "wins_mastery",  # G1 胜率轨（教师相对）
+        "skill_floor",  # G2 技能轨（0 杀占比 / 场均杀 / 被击中）
+        "transfer",  # G3 横向准入（跨课探针；首期休眠）
+        "plateau",  # G4 边际收益枯竭（前后半均值差 + SE 口径；可分流）
+        "budget",  # G5 预算到顶（可分流）
+        "course_valid",  # G7 课程失效（超时超限 且 斜率>0）
+        "retention",  # G8 回退守卫（首期休眠）
+        "hack",  # G9 hack 熔断（双向条件，降级 PAUSE）
+        "teacher_parity",  # G10 教师触顶
+        "dependency",  # G11 依赖就绪（kind 保留，M3 实现）
+    }
+)
+
+#: 判决字面量（§1）。
+GATE_VERDICTS: frozenset[str] = frozenset({"ADVANCE", "REMEDIATE", "ABORT", "PAUSE", "STOP"})
+#: G4/G5 的分流声明：verdict 本体单值，求值时填 `route`（§3.4-1）。
+GATE_SPLIT = "ADVANCE|REMEDIATE"
+GATE_SPLIT_KINDS: frozenset[str] = frozenset({"plateau", "budget"})
+#: plateau.metrics 允许的键（= summary 行里带分母的聚合量）。
+GATE_PLATEAU_METRICS: frozenset[str] = frozenset(
+    {"win_rate", "kills_mean", "phits_mean", "pickup_mean", "timeout_frac"}
+)
+#: 依赖跨课评估管线的 kind（p10 成稿前只能声明 enabled:false——§3.3 首期休眠）。
+GATE_CROSS_COURSE_KINDS: frozenset[str] = frozenset({"transfer", "retention", "dependency"})
+#: 分数类参数：值域 [0,1]。
+#:
+#: 2026-09-10 实现期修正：§3.4-5 原文写"比例类 ∈ [0,1]（rel_teacher 可 >1）"，
+#: 但同节 §3.2 的示例自身给出 G2 `max_phits_rel: 1.5`——**相对倍数**（× 教师）本
+#: 就允许 >1。故按语义拆两类：`*_frac`/`min_win_rate`/`advance_frac` 是分数（[0,1]），
+#: 一切 `*_rel` 是相对倍数（仅要求 ≥0）。计划原文按批注修正，不拦 1.5 这类合法值。
+_GATE_FRAC_FIELDS: tuple[str, ...] = (
+    "max_zero_kill_frac",
+    "advance_frac",
+    "max_timeout_frac",
+    "min_win_rate",
+)
+#: 相对倍数参数：仅要求 ≥0（可 >1）。
+_GATE_REL_FIELDS: tuple[str, ...] = (
+    "rel_teacher",
+    "min_kills_rel",
+    "max_phits_rel",
+    "pickup_up_rel",
+    "kills_down_rel",
+)
+
+
+class GateTeacher(BaseModel):
+    """本课教师基线（所有相对门的参照系）。
+
+    `corpus` 必填非空：相对线只在**同语料**下成立（§3.4-6）——语料扩池后本块
+    必须重测重填。人读版仍写在课程文件头注释。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    corpus: str
+    games: int
+    wins: int = 0
+    kills: float = 0.0
+    phits: float = 0.0
+    zero_kill_frac: float = 0.0
+    timeout_frac: float = 0.0
+
+
+class GateRule(BaseModel):
+    """单条门。kind 决定哪些参数有意义；**未知键响亮报错**（extra=forbid）。
+
+    参数按 kind 分组列出（不为每种 kind 造一个子模型：catalog 固定且求值器是
+    纯函数，扁平结构让课程文件保持可读、单测好写）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    kind: str
+    verdict: str
+    enabled: bool = True
+
+    # wins_mastery / teacher_parity
+    rel_teacher: float | None = None
+    tol_pp: float | None = None
+    # skill_floor
+    max_zero_kill_frac: float | None = None
+    min_kills_rel: float | None = None
+    max_phits_rel: float | None = None
+    # transfer / retention / dependency
+    course: str | None = None
+    courses: list[str] = []
+    min_wins: int | None = None
+    min_kills: int | None = None
+    every_rounds: int | None = None
+    min_win_rate: float | None = None
+    # plateau / course_valid / hack
+    window_rounds: int | None = None
+    window_iters: int | None = None
+    rising_rounds: int | None = None
+    tol_kills: float | None = None
+    metrics: list[str] = []
+    advance_if: list[str] = []
+    advance_frac: float | None = None
+    max_timeout_frac: float | None = None
+    pickup_up_rel: float | None = None
+    kills_down_rel: float | None = None
+
+    @property
+    def is_split(self) -> bool:
+        """G4/G5 的分流声明（verdict 本体仍是单值 ADVANCE）。"""
+        return self.verdict == GATE_SPLIT
+
+    @property
+    def base_verdict(self) -> str:
+        """单值判决（分流声明折叠为 ADVANCE，route 由求值器填）。"""
+        return "ADVANCE" if self.is_split else self.verdict
+
+
+def _gate_ratio(name: str, v: float | None, where: str) -> None:
+    if v is None:
+        return
+    if not 0.0 <= float(v) <= 1.0:
+        raise ValueError(f"{where}: {name}={v} 越界（比例类值域 [0,1]，§3.4-5）")
+
+
+class GatesSpec(BaseModel):
+    """课程 `gates` 块（§3.2）。解析期强校验 §3.4 全 8 条。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: 确认类门的连续通过次数（迟滞，§4.4 去重键终结重放污染）。
+    sustain: int = 3
+    teacher: GateTeacher
+    #: ADVANCE 放行所需门（只看其中 `enabled` 的门——休眠门不计，§3.4-1）。
+    advance_requires: list[str] = []
+    #: G12 人工通道（相对 traj 父目录；先落行、后消费，§4.6）。
+    override_file: str = "GATE_OVERRIDE.json"
+    #: 可选：单轮迭代分钟数估计。仅用于 §3.4-8 预算可行性 WARNING（不断言）。
+    est_iter_min: float | None = None
+    rotation_rounds: int | None = None
+    rules: list[GateRule] = []
+
+    @model_validator(mode="after")
+    def _check_rules(self) -> GatesSpec:
+        if not self.rules:
+            raise ValueError("gates: rules 非空（声明了 gates 块就必须有门）")
+        if self.sustain < 1:
+            raise ValueError(f"gates: sustain={self.sustain} 必须 ≥1（§3.4-5）")
+        if self.est_iter_min is not None and self.est_iter_min <= 0:
+            raise ValueError(f"gates: est_iter_min={self.est_iter_min} 必须 >0")
+
+        ids: dict[str, GateRule] = {}
+        for r in self.rules:
+            where = f"gates.rules[{r.id}]"
+            if not r.id:
+                raise ValueError("gates: rule.id 不得为空")
+            if r.id in ids:
+                raise ValueError(f"{where}: rule id 重复")
+            ids[r.id] = r
+            if r.kind not in GATE_KINDS:
+                raise ValueError(f"{where}: 未知 kind '{r.kind}'（catalog: {sorted(GATE_KINDS)}）")
+            if r.verdict not in GATE_VERDICTS and r.verdict != GATE_SPLIT:
+                raise ValueError(
+                    f"{where}: 未知 verdict '{r.verdict}'（{sorted(GATE_VERDICTS)} 或 '{GATE_SPLIT}'）"
+                )
+            if r.is_split and r.kind not in GATE_SPLIT_KINDS:
+                raise ValueError(
+                    f"{where}: 分流声明 '{GATE_SPLIT}' 只允许 {sorted(GATE_SPLIT_KINDS)}（§3.4-1）"
+                )
+            for f in _GATE_FRAC_FIELDS:
+                _gate_ratio(f, getattr(r, f), where)
+            for f in (*_GATE_REL_FIELDS, "tol_pp", "tol_kills"):
+                v = getattr(r, f)
+                if v is not None and v < 0:
+                    raise ValueError(f"{where}: {f}={v} 不得为负")
+            if (
+                not r.enabled
+                and r.kind not in GATE_CROSS_COURSE_KINDS
+                and r.kind != "teacher_parity"
+            ):
+                raise ValueError(
+                    f"{where}: 只有 {'/'.join(sorted(GATE_CROSS_COURSE_KINDS))}/teacher_parity "
+                    "可休眠（§3.3；其余门要么配、要么不写）"
+                )
+
+            # window/rounds 单位一律 = eval 轮（§3.4-3）
+            if r.window_rounds is not None and r.window_rounds < 2:
+                raise ValueError(f"{where}: window_rounds={r.window_rounds} 必须 ≥2（§3.4-5）")
+            if r.window_iters is not None and r.window_iters < 2:
+                raise ValueError(f"{where}: window_iters={r.window_iters} 必须 ≥2")
+            for f in ("rising_rounds", "every_rounds"):
+                v = getattr(r, f)
+                if v is not None and v < 1:
+                    raise ValueError(f"{where}: {f}={v} 必须 ≥1")
+
+            if r.kind == "plateau":
+                if not r.metrics:
+                    raise ValueError(f"{where}: plateau 必须给 metrics")
+                bad = [m for m in r.metrics if m not in GATE_PLATEAU_METRICS]
+                if bad:
+                    raise ValueError(
+                        f"{where}: metrics 含未知键 {bad}（{sorted(GATE_PLATEAU_METRICS)}）"
+                    )
+                if r.advance_frac is None:
+                    raise ValueError(f"{where}: plateau 必须给 advance_frac（§3.3 分流）")
+            if r.kind == "budget" and r.advance_frac is None:
+                raise ValueError(f"{where}: budget 必须给 advance_frac（§3.3 路由）")
+            if r.kind in GATE_CROSS_COURSE_KINDS:
+                targets = ([r.course] if r.course else []) + list(r.courses)
+                if not any(targets):
+                    raise ValueError(f"{where}: {r.kind} 必须给 course 或 courses")
+                _resolve_courses(targets, where)
+
+        # ---- §3.4-1 引用完整性 + verdict 相容 ----
+        for ref_field in ("advance_requires",):
+            for gid in getattr(self, ref_field):
+                if gid not in ids:
+                    raise ValueError(f"gates.{ref_field}: 引用了不存在的门 '{gid}'")
+                if ids[gid].base_verdict != "ADVANCE":
+                    raise ValueError(
+                        f"gates.{ref_field}: '{gid}' 的 verdict 不是 ADVANCE/分流（§3.4-1）"
+                    )
+        for r in self.rules:
+            for gid in r.advance_if:
+                if gid not in ids:
+                    raise ValueError(f"gates.rules[{r.id}].advance_if: 未定义的门 '{gid}'")
+                if ids[gid].base_verdict != "ADVANCE":
+                    raise ValueError(
+                        f"gates.rules[{r.id}].advance_if: '{gid}' 不是 ADVANCE/分流（§3.4-1）"
+                    )
+
+        # ---- §3.4-7 / §3.4-6 teacher 块 ----
+        if not str(self.teacher.corpus or "").strip():
+            raise ValueError("gates.teacher.corpus 必填非空（同语料才可比，§3.4-6）")
+        if self.teacher.games <= 0:
+            raise ValueError(f"gates.teacher.games={self.teacher.games} 必须 >0（§3.4-7）")
+        if not 0 <= self.teacher.wins <= self.teacher.games:
+            raise ValueError("gates.teacher.wins 必须在 [0, games] 内")
+        _gate_ratio("zero_kill_frac", self.teacher.zero_kill_frac, "gates.teacher")
+        _gate_ratio("timeout_frac", self.teacher.timeout_frac, "gates.teacher")
+        return self
+
+    def budget_warnings(self, max_hours: float, eval_every: int) -> list[str]:
+        """§3.4-8 预算可行性（warn-only，不断言）。调用方负责打印。"""
+        if self.est_iter_min is None or max_hours <= 0:
+            return []
+        rounds_needed = max(1, int(self.sustain)) * 2
+        iters_needed = rounds_needed * max(1, int(eval_every))
+        need_hours = iters_needed * float(self.est_iter_min) / 60.0
+        if need_hours > max_hours:
+            return [
+                f"gates 预算可行性：判定至少需要 {rounds_needed} 评估轮 ≈ {iters_needed} iter "
+                f"≈ {need_hours:.2f}h，而 max_hours={max_hours}——门可能在预算内无法触发（§3.4-8）"
+            ]
+        return []
+
+
+def _resolve_courses(names: list[str], where: str) -> None:
+    """§3.4-5：跨课门引用的 course 必须找得到文件（复用 resolve_course）。"""
+    for nm in names:
+        try:
+            resolve_course(nm)
+        except FileNotFoundError as e:
+            raise ValueError(f"{where}: 引用课程 '{nm}' 找不到（{e}）") from e
+
+
 class PlayerBlock(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -425,6 +701,9 @@ class CourseConfig(BaseModel):
     ent_break: float = 0.60
     ent_break_consec: int = 8
     ent_break_max_winrate: float = 0.5
+
+    # ---- 课程结束门（可选；缺席 = 关闭，老课程逐字节不变）----
+    gates: GatesSpec | None = None
 
     # ---- 运行 ----
     iters: int = 15

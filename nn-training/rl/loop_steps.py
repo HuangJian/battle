@@ -23,7 +23,7 @@ from remote.push_client import submit_job as _push_submit
 from remote.push_client import wait_result as _push_wait_result
 from rl.archive import backup_weights
 from rl.eval_m1 import read_eval_summary
-from rl.events import write_iteration
+from rl.events import write_event, write_gate_verdict, write_iteration
 from rl.log import log
 from rl.modes import _MODE_BACKUP_PREFIX
 
@@ -163,6 +163,11 @@ class TrainingSteps:
     _agg: Any
     _kl_cum: Any
     _halted_flag: bool
+    #: R9：远端连续失败且禁用降级 → 写 ABORT 后停腿（loop 在 _serial_ppo 后检查）。
+    _leg_abort: bool
+    #: R9：远端连续失败计数（成功即复位）与"已降级本机"标记。
+    _remote_fail: int
+    _remote_degraded: bool
     _dropped_games: Any
     _load_sec: Any
     _tail_drain_sec: Any
@@ -303,8 +308,8 @@ class TrainingSteps:
         """
         if self._stream_meta is not None:
             return
-        if getattr(self.args, "ppo", "local") == "remote":
-            self._remote_ppo(it)
+        # 远端：成功即 return；降级后 args.ppo 已改 local → 落到本地路径继续本轮。
+        if getattr(self.args, "ppo", "local") == "remote" and self._remote_ppo_or_degrade(it):
             return
         args = self.args
         traj_dir = self._traj_dir
@@ -354,6 +359,65 @@ class TrainingSteps:
         self._total_steps = total_steps
         self._agg = agg
         self._kl_cum = agg["kl"] if agg else None  # 串行：单次大更新，均值即累计口径
+
+    def _remote_ppo_or_degrade(self, it: int) -> bool:
+        """R9（plan/feasibility-map.md §12）：远端失败计数与自动降级。
+
+        c6 it50 事故：单个 job 三次 1800s 超时、进程最终死在 eval 中途——云端在
+        关键路径上却没有任何退路。本方法给三档处置：
+          · 成功 → 计数复位，True（调用方直接 return，语义与旧代码一致）；
+          · 失败且未达阈值 → 原样抛出，交给 loop 的「原地重试同一 iter」（既有语义）；
+          · 失败达阈值 → `--remote-degrade-after N>0`：改 `args.ppo = "local"`、
+            写 `remote_degrade` 事件、本轮起走本机 PPO（训练活着，慢但不死）；
+            `--remote-degrade-after 0`（显式禁降级）：写 ABORT 判决后停腿。
+
+        返回 True = 远端已出结果（本轮 PPO 结束）；False = 调用方改走本地路径。
+        """
+        args = self.args
+        try:
+            self._remote_ppo(it)
+        except (RetryableError, ProtocolError, OSError, TimeoutError) as e:
+            self._remote_fail += 1
+            limit = int(getattr(args, "remote_degrade_after", 3) or 0)
+            log(
+                f"[run_rl] remote ppo it{it} FAILED ({type(e).__name__}: {str(e)[:200]}) — "
+                f"consecutive={self._remote_fail}"
+                + (f"/{limit}" if limit > 0 else "（降级已禁用）")
+            )
+            if limit <= 0:
+                # 显式关闭降级：连败 3 次即停腿（§12-R9 末句：仍失败写 ABORT 行）
+                if self._remote_fail >= 3:
+                    write_gate_verdict(
+                        self._jsonl_path,
+                        it,
+                        "ABORT",
+                        f"远端 PPO 连续失败 {self._remote_fail} 次且 --remote-degrade-after=0",
+                        decider="loop",
+                    )
+                    log(f"[run_rl] GATE ABORT it{it}: 远端不可用且禁用降级——停腿")
+                    self._leg_abort = True
+                raise
+            if self._remote_fail < limit:
+                raise  # 未达阈值：按既有语义原地重试（同一 iter，不推进）
+            args.ppo = "local"
+            self._remote_degraded = True
+            write_event(
+                self._jsonl_path,
+                {
+                    "event": "remote_degrade",
+                    "iter": it,
+                    "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "after_failures": self._remote_fail,
+                    "reason": f"{type(e).__name__}: {str(e)[:300]}",
+                },
+            )
+            log(
+                f"[run_rl] R9 DEGRADE it{it}: 远端连续失败 {self._remote_fail} 次 —— "
+                f"本腿改走本机 PPO（args.ppo=local）。恢复远端需重启训练并修好链路。"
+            )
+            return False
+        self._remote_fail = 0
+        return True
 
     def _remote_ppo(self, it: int) -> None:
         """远程 PPO（--ppo remote，D11/D12）：打包 → 发布 job → 轮询等待 → 三重校验落位。
