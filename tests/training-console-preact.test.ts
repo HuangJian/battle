@@ -370,7 +370,8 @@ describe('控制台 SSR（render.tsx renderConsolePage）', () => {
     const { buildStateView } = await import('../tools/training/console/api')
     const s = await buildStateView()
     const html = renderConsolePage(s)
-    expect(html).toContain('网训战役指挥部')
+    expect(html).toContain('<title>炼丹炉</title>')
+    expect(html).toContain('rel="icon"')
     expect(html).toContain('window.__INITIAL__')
     expect(html).toContain('自动（最近活跃课程）')
     expect(html).toContain('tc-cc') // 组件小卡驱动

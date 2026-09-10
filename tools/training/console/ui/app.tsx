@@ -274,7 +274,7 @@ export function App({ initial }: AppProps) {
         <div className="tc-topbar__row">
           <h1>
             <span className="dot" />
-            网训战役指挥部
+            炼丹炉
           </h1>
           {readOnly ? (
             <span
@@ -308,7 +308,9 @@ export function App({ initial }: AppProps) {
               <option value="">自动（最近活跃课程）</option>
               {(stateView?.courses ?? []).map((c) => (
                 <option key={c} value={c}>
+                  {c === trainingCourse ? '🔥 ' : ''}
                   {c}
+                  {c === trainingCourse ? '（正在训练）' : ''}
                 </option>
               ))}
             </select>

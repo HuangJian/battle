@@ -592,7 +592,7 @@ describe('console SSR renderConsolePage', () => {
   it('渲染包含区块标题、动作按钮、开关键与转义', async () => {
     const s = await api.buildStateView()
     const html = render.renderConsolePage(s)
-    expect(html).toContain('网训战役指挥部')
+    expect(html).toContain('炼丹炉')
     expect(html).toContain('tc-cc__name') // 组件小卡（名称渲染体）
     expect(html).toContain('tc-hero') // 训练状态 hero
     expect(html).toContain('tc-comps') // 组件 4 小卡

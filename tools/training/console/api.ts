@@ -523,22 +523,18 @@ async function computeSlowSnapshot(cfg: RlConfig, course: string): Promise<SlowS
   const [components, nodes] = await Promise.all([componentViews(cfg, course), nodeViews(cfg)])
   // 节点上一轮贡献数（池历史聚合；无数据 = -1）。
   const contribById = new Map<string, number>()
-  let localNode: NodeLocalView | null = null
+  // local 节点：只由配置决定（配置缺失/非法才缺省）。池历史不可用只是贡献数拿不到（-1），
+  // 不能因此把 local 节点整块吞掉——此前它在 try 里，aggregateNodeHistory() 一抛就丢了。
+  const slots = Number(cfg.rl.local_slots)
+  let localNode: NodeLocalView | null =
+    Number.isInteger(slots) && slots >= 0 ? { id: 'local', slots, lastContrib: -1 } : null
   try {
     const { hist, globalMaxIt } = aggregateNodeHistory()
     for (const [id, h] of hist) contribById.set(id, globalMaxIt >= 0 ? h.lastIterOk : -1)
     const localH = hist.get('local')
-    const slots = Number(cfg.rl.local_slots)
-    // 显式 0（直跑未启用）也出芯片（slots=0）；配置缺失/非法（NaN）才整体缺省。
-    if (Number.isInteger(slots) && slots >= 0) {
-      localNode = {
-        id: 'local',
-        slots,
-        lastContrib: globalMaxIt >= 0 ? (localH?.lastIterOk ?? 0) : -1,
-      }
-    }
+    if (localNode) localNode.lastContrib = globalMaxIt >= 0 ? (localH?.lastIterOk ?? 0) : -1
   } catch {
-    /* 池历史不可用 → 全部 -1 */
+    /* 池历史不可用 → 贡献数保持 -1（local 节点仍按配置显示） */
   }
   for (const n of nodes) n.lastContrib = contribById.has(n.id) ? contribById.get(n.id)! : -1
   // 当前训练阶段（训练循环日志尾解析）。
