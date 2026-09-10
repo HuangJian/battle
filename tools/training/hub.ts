@@ -11,6 +11,7 @@ import {
   closeSync,
   readSync,
   readFileSync,
+  readdirSync,
   statSync,
   unlinkSync,
 } from 'fs'
@@ -317,8 +318,9 @@ export function printLogTail(logPath: string, offset = 0, lines = 5): void {
 }
 
 /** 下架陈旧 pending job：TrainingLoop 不在运行时，队列里所有未完成 job 都来自
- *  已死运行——真 Kaggle worker 会白白烧 GPU 租约去领它们。删除 payload.zip 使
- *  其不可被领取；账本 job_pending 保留真实历史。 */
+ *  已死运行——真 Kaggle worker 会白白烧 GPU 租约去领它们。删除 payload 容器文件
+ *  使其不可被领取（hub_server.claimable_job_ids 以 find_payload 的存在性判定）；
+ *  账本 job_pending 保留真实历史。 */
 export function drainStaleJobs(jobRoot: string, jsonlPath: string): void {
   const pending = new Set<string>()
   const completed = new Set<string>()
@@ -339,9 +341,19 @@ export function drainStaleJobs(jobRoot: string, jsonlPath: string): void {
   let n = 0
   for (const jid of pending) {
     if (completed.has(jid)) continue
+    const dir = path.join(jobRoot, jid)
     try {
-      unlinkSync(path.join(jobRoot, jid, 'payload.zip'))
-      n++
+      // 按前缀扫描而非硬编码单一名字：容器名由 nn-training/remote/protocol.py 的
+      // PAYLOAD_NAME 决定（zip/deflate → tar.xz(3)，2026-09-10），硬编码 'payload.zip'
+      // 的话 unlinkSync 恒抛 → 被下面的 catch 吞掉 → 陈旧 job 永不下架、真 worker
+      // 白烧租约（正是本函数要防的事）。扫描可免疫后续再次改名。
+      let removed = false
+      for (const name of readdirSync(dir)) {
+        if (!name.startsWith('payload.')) continue
+        unlinkSync(path.join(dir, name))
+        removed = true
+      }
+      if (removed) n++
     } catch {
       /* already gone */
     }

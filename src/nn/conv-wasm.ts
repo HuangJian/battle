@@ -8,13 +8,22 @@
  * StudentModel.features 骨架，卷积段布局一致）。不匹配 → 返回 false 走 TS 原路径。
  *
  * 内存布局（单例，线性内存自 1MB 起，避开模块 .bss scratch）：权重区一次性上传
- * （按实例引用变化重传），每 forward 只拷 in16（43KB）+ 读 pooled（256B）。
+ * （按实例引用变化重传），每 forward 拷 in16（43KB）+ 读回 pooled（256B）+ bufA
+ * （169KB，目标热图头消费）。bufA 回拷实测 +2.9 µs/次 ≈ features 的 0.04%——无条件
+ * 拷贝，以杜绝"某个头悄悄读到陈旧空间特征"这类静默 bug（2026-09-10 的 goalForward
+ * 常量热图即此因，见 run() 注释）。
  */
 
 import { readFileSync } from 'fs'
 
 interface WasmRunner {
-  /** 上传权重（实例变化时）并跑 features → pooled 已填。返回 true=本次成功。 */
+  /** 上传权重（实例变化时）并跑 features → pooled 与 bufA 均已填。返回 true=本次成功。
+   *
+   *  bufA = GAP 前的空间特征（h×26×26），**目标热图头唯一消费的空间张量**（infer.ts
+   *  goalForward：out[p] = bias + Σ_ic gw[ic]·bufA[ic·sp + p]）。wasm 侧 features()
+   *  把同一张量写在 offBufA，故必须与 pooled 一起回拷——2026-09-10 前只回拷 pooled，
+   *  导致生产档（h64/d8 必走 wasm）下 bufA 恒为陈旧值、热图退化成常量、argmax 恒选
+   *  同一格（实测对 py golden 误差 12.45；h16/d2 的 TS 路径正常故 golden 测试未暴露）。 */
   run(
     in16: Float32Array,
     stemW: Float32Array,
@@ -24,6 +33,7 @@ interface WasmRunner {
     pwW: Float32Array[],
     pwB: Float32Array[],
     pooled: Float32Array,
+    bufA: Float32Array,
   ): boolean
 }
 
@@ -80,7 +90,7 @@ function loadRunner(): WasmRunner | null {
     let uploaded: unknown = null
 
     const runner: WasmRunner = {
-      run(in16, stemW, stemB, dwW, dwB, pwW, pwB, pooled) {
+      run(in16, stemW, stemB, dwW, dwB, pwW, pwB, pooled, bufA) {
         const memNow = mem.buffer.byteLength
         const check = (name: string, off: number, len: number): void => {
           if (off + len * 4 > memNow)
@@ -109,6 +119,7 @@ function loadRunner(): WasmRunner | null {
         check('in16', offIn, in16.length)
         f32At(offIn).set(in16)
         check('pooled', offPooled, pooled.length)
+        check('bufA', offBufA, bufA.length)
         feats(
           offIn,
           offStemW,
@@ -124,6 +135,11 @@ function loadRunner(): WasmRunner | null {
         )
         // 目标 pooled(64) 短于 buffer 尾部 view —— 必须 subarray 限长，否则 set 抛 Range
         pooled.set(f32At(offPooled).subarray(0, pooled.length))
+        // bufA 同理限长。缺这一行 ⇒ 目标热图在生产档（h64/d8 必走 wasm）退化为常量：
+        // 热图头只消费 bufA，而 bufA 只在非 wasm 的 TS 分支被 conv3x3 填（见 infer.ts
+        // features/goalForward）。回归锚点：tests/nn/goal-infer.test.ts 的
+        // goal-golden-wasm.json（h=64/d=8）组。
+        bufA.set(f32At(offBufA).subarray(0, bufA.length))
         return true
       },
     }
@@ -142,7 +158,7 @@ export function studentConvWasm(): WasmRunner | null {
   return _runner
 }
 
-/** StudentModel.features 接入点：h64/d8/board26 时优先 wasm；返回 true=pooled 已填。 */
+/** StudentModel.features 接入点：h64/d8/board26 时优先 wasm；返回 true=pooled+bufA 已填。 */
 export function runStudentConvWasm(model: unknown): boolean {
   const m = model as {
     in16: Float32Array
@@ -153,12 +169,16 @@ export function runStudentConvWasm(model: unknown): boolean {
     pwW: Float32Array[]
     pwB: Float32Array[]
     pooled: Float32Array
+    bufA: Float32Array
   }
   if (m.dwW.length !== D) return false // 非 d=8（架构不符）
+  // bufA 尺寸是 h=64/board=26 的充分标识（StudentModel: bufA = Float32Array(h*sp)），
+  // 与本文件的固定通道布局一一对应；不符即退 TS 原路径（正确性优先于速度）。
+  if (!m.bufA || m.bufA.length !== H * SP) return false
   const r = studentConvWasm()
   if (!r) return false
   try {
-    return r.run(m.in16, m.stemW, m.stemB, m.dwW, m.dwB, m.pwW, m.pwB, m.pooled)
+    return r.run(m.in16, m.stemW, m.stemB, m.dwW, m.dwB, m.pwW, m.pwB, m.pooled, m.bufA)
   } catch (e) {
     console.error(
       `[conv-wasm] run 异常: ${e instanceof Error ? e.message : String(e)}\n${e instanceof Error ? e.stack : ''}`,

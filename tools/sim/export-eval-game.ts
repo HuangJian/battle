@@ -460,6 +460,12 @@ export function runEvalOne(
     }
   }
 
+  // 终局墙体完整性：此前只在 tel 初始化时赋一次 ⇒ 恒等于 baseWallTotal，下游
+  // godai-score 的 baseIntegrity = 0.55 + 0.45·clamp01(intact/total) 被钉死在 1.0，
+  // "墙被打秃但基地还活着"这一领先指标完全丢失。语义对齐 export-rl-rollout（每决策步
+  // 重算、末行即终局）与 export-observations（每 tick 重算）：此处取终局快照。
+  tel.baseWallIntact = countBaseWall(world)
+
   // ---- 纯 v7 打分（评估口径，无 F3 门控、败局带保留 lives）----
   const scorable = {
     outcome,

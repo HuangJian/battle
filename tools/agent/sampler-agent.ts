@@ -1338,6 +1338,9 @@ async function handle(req: Request): Promise<Response> {
     const key = taskKey(iterId, mode, kind, stage, seed, sjHash, courseFp)
     const cached = resultCache.get(key)
     if (cached) {
+      // 与提交端（resultCache 命中那一处）对齐：轮询命中也算一次缓存命中。
+      // 此前漏计 ⇒ 面板缓存命中率被系统性低估（trainer 轮询是主要取包路径）。
+      cacheHits++
       resultCache.delete(key)
       resultCache.set(key, cached)
       return new Response(new Uint8Array(cached.buf), {

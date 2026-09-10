@@ -5,6 +5,121 @@
 
 ---
 
+## §22 外围组件巡检：goal 热图静默常量（生产档目标策略失效）+ eval 墙损失测 + 我引入的 payload 回归（2026-09-10）
+
+用户指令："检查一下其它组件（sampler-agent, cloudflared, src/nn, export-rl-rollout,
+export-eval-game, ...）有没有 bug 或者可以优化的空间"。方法：3 个只读子代理并行 + **逐条回验**
+（子代理给的路径与行号一律自核——本轮 5 条外部结论里 3 条是假报，见 §22.5）。改动前先做决定性复现。
+
+### 22.1 ★`goalForward` 目标热图在生产架构下恒为常量（HIGH）
+
+**病根**：wasm 卷积段跑完只回拷 `pooled`（256 B），`offBufA` 写进 wasm 线性内存后**从不搬回 JS**。
+
+    conv-wasm.ts   feats(..., offBufA, offBufB, offBufC, offPooled)
+                   pooled.set(f32At(offPooled).subarray(0, pooled.length))  ← 只有这一行回拷
+    infer.ts       goalHeatmap[p] += w * this.bufA[...]                    ← bufA 只在非 wasm 分支被填
+
+**决定性复现**（合成 h16/d2 与 h64/d8 合法权重，同一份代码）：
+
+| 架构 | 主干路径 | 换输入后热图 max&#124;Δ&#124; | 热图不同取值 |
+|---|---|---|---|
+| h16/d2 | TS 手写循环 | 3.889e+2 | 676/676 |
+| h64/d8 | **conv-wasm** | **0.000e+0** | **1/676（常量）** |
+
+用真实生产 golden（`goal_net.py --golden --h 64 --d 8`，本次新增 fixture `goal-golden-wasm.json`）：
+热图对 py 期望 max&#124;Δ&#124; = **1.245e+1**，而 engage 头 7.6e-6 正常。
+
+**影响面**（生产必踩——`goal_net.py` 默认 `--h 64 --d 8`）：`export-eval-game.ts`（policy=goal 的
+评估）、`export-goal-rollout.ts`、`export-counterfactual-goals.ts`、`src/nn/goal-executor.ts`。
+
+**为何一直没被发现（结构性教训）**：TS 侧有**两套等价卷积实现**（TS 手写 / wasm），而 golden 是
+**按档位分工**覆盖的——`goal-golden.json` 是 `h=16/d=2` 瘦身档（注释自陈"主干不触发 wasm"），
+`student-golden-wasm.json` 是 `h=64/d=8` 生产档但**只覆盖 student 三头**（消费 pooled，回拷正常）。
+⇒ 测试跑 TS 路径、生产跑 wasm 路径，两条永不相交，wasm 专属缺陷零覆盖。**新增头/新架构时，
+必须同时补一条生产档 golden，别只补瘦身档。**
+
+**修法**：`run()` 补 `bufA.set(f32At(offBufA).subarray(0, bufA.length))`；`runStudentConvWasm` 以
+`bufA.length !== H*SP` 作为"架构不符"守卫（不符即退 TS 原路径，正确性优先）。回拷成本实测
+**2.9 µs/次 ≈ features(6.9 ms) 的 0.04%** ⇒ 无条件拷贝，换掉"某个头悄悄读陈旧空间特征"这类静默 bug。
+
+**回归**：新增 `tests/fixtures/goal-golden-wasm.json`（h=64/d=8，422 KB，同 student-wasm 量级）+
+`tests/nn/goal-infer.test.ts` 一组 5 例：三头对 py golden（热图 ≤1e-3，修复后实测 1.1e-5，修复前
+1.245e+1）+ **"热图随 obs 变化"**（通道 0/1 对调；修复前恒 0、676 格只剩 1 个取值）。
+
+### 22.2 eval `baseWallIntact` 恒等于 `baseWallTotal`，baseIntegrity 被钉死在 1.0（MED）
+
+`export-eval-game.ts` 只在 telemetry 初始化时赋值一次，循环内从不更新（对照：`export-rl-rollout`
+每决策步重算、`export-observations` 每 tick 重算）。下游 `godai-score.ts`：
+
+    baseIntegrity = 0.55 + 0.45·clamp01(baseWallIntact / baseWallTotal)   // 分子恒等分母 ⇒ 恒 1.0
+
+**实锤（两份独立证据）**：
+
+- **在野扫描**：`tmp/**/_eval_report.json` **173 份，100% `intact == total`**（含 100 个 gameover、
+  61 个 stage_clear）——真实对局里墙被打掉却从不记录。
+- **A/B（修复后重跑同一 stage/seed）**：s5/seed1 随机策略 → 终局 `5/8`（修复前必为 `8/8`）；
+  s5/seed5 基地存活、墙被打到 `1/8` ⇒ `baseIntegrity = 0.606`（**修复前 1.0**）——即注释里
+  "墙被打秃但基地还活着"这个领先指标此前完全丢失。
+
+**修法**：终局（循环退出后、构造 `scorable` 前）取一次 `tel.baseWallIntact = countBaseWall(world)`。
+
+### 22.3 我上一提交（`d183997`）引入的回归：陈旧 pending job 永不下架（MED，我的责任面）
+
+`tools/training/hub.ts` 的 `drainStaleJobs()` 仍硬编码 `unlinkSync('payload.zip')`，而同一提交把
+payload 容器改名 `payload.tar.xz`（`protocol.PAYLOAD_NAME`）⇒ `unlinkSync` 恒抛 → 被
+`catch { /* already gone */ }` 吞 → `n` 恒 0 → **账本里所有陈旧 pending job 保持可领**
+（`hub_server.claimable_job_ids` 以 `find_payload` 存在性判定），真 worker 会白烧 GPU 租约去跑
+已死运行的局——恰是该函数存在的唯一理由。
+
+**修法**：改为按前缀扫描 job 目录删 `payload.*`（而非硬编码全名），从根上免疫再次改名；`hub.ts`
+该处注释同步更正。**回归**：新增 `tests/training-drain-stale.test.ts` 5 例（新名/旧名/两名并存
+都被下架；非 payload 文件与已 completed job 不动；坏账本、缺目录不抛）。
+
+### 22.4 `cacheHits` 少计（LOW）
+
+`tools/agent/sampler-agent.ts` 的 `/v1/result` 轮询端命中 `resultCache` 时未累加 `cacheHits`
+（提交端有）。trainer 轮询是主要取包路径 ⇒ 缓存命中率被系统性低估。已补。注：该字段目前**只产出、
+仓内无消费方**（经 `/v1/status` 暴露），影响限于对外状态接口的口径正确性。
+
+### 22.5 被证伪的假报（记录以免重走）
+
+| 假报 | 证伪 |
+|---|---|
+| 子代理给的路径 `tools/dist/sampler-agent.ts` | **文件不存在**（只有 `tools/agent/`）——其行号与结论整体不可信 |
+| "异步提交路径缺 resultCache 短路" | 两条路径都有（提交端 / 轮询端各一处） |
+| "export-rl-rollout 每局重建模型，是可优化项" | `runOne` 确实逐局 `buildModelFromText`，但 `--pack`（生产路径）强制**一进程一局** ⇒ 只跑一次；实测 1.228 ms/次（90% 为 base64→f32），不值得改 |
+| "`npy.ts` 解析校验不严" | `npy.ts` 只有 `writeNpy/writeShard`，**无 reader** |
+| "cloudflared 日志泄漏" | `tmp/cloudflared-*.log` 归 `tools/tmp-clean.py`（`.log` 在后缀表内，保留 N 天） |
+
+### 22.6 巡检确认为健康（勿动）
+
+- `stepCloudflared`：隧道复用判定走**本地 cloudflared `/ready`**（而非穿隧道 ping）——避免 hub
+  出网劣化造成假阴性，是对的；3 次重试 + edge 20 s 确认 + "失败保留基础设施"均为刻意设计。
+- `src/nn/obs-encoder.ts`：`obs`/`scalars` 预分配 + `fill(0)`，无每 tick 分配。
+- `conv-wasm.ts`：权重上传用 `uploaded !== stemW` 实例指纹守卫，越界有显式 `check()` 抛错；
+  wasm 加载/运行异常**有** `console.error`——§22.1 之所以静默，是因为它发生在 wasm **成功**时。
+
+### 22.7 门禁
+
+`bun run check` 绿（tsc + check-decisions + `bun test --parallel`）；oxlint **0 error**（20 条既有
+warning，非本次引入）；oxfmt 对本次改动的 6 个源码/测试文件 clean。
+
+### 22.8 连带影响：`docs/goal-nn.progress.md` §3 的 goal 结论需重新解读
+
+§22.1 的缺陷**必须在历史结论里对账**。`docs/goal-nn.progress.md` §1「性能实测」自证 goal 前向
+探针跑的是 **h=64/d=8** ⇒ T9a 金丝雀那批 goal 策略实验**全部在 wasm 路径上**，即热图恒为常量、
+argmax 恒选同一格。
+
+- **`goal 0.05%`（canary ②）**：除已记录的 executor 短板，还叠加本缺陷 —— "目标选择轴从未生效"。
+  该节"执行层短板与**目标选择**、学习无关"的归因**需修正一半**。
+- **`goal-god 0.0%`**：零网络，**不受本缺陷影响** ⇒ "执行层无生存能力"这一结论**仍成立**。
+
+已在 `docs/goal-nn.progress.md` §3 追加该注记。**卡 A0 的 goal 重测必须在修复后的代码上做**，
+否则重测仍在测常量热图（原计划的重测因此不作数）。
+
+---
+
+
 ## §21 PPO 吞吐：三设备实测 + ref 缓存 / 传输压缩 / 多卡落地 + TPU 设备层（2026-09-10）
 
 同一会话四条线：**度量**（三设备实测矩阵）、**优化**（ref 缓存 / 传输压缩 / 多卡）、

@@ -102,6 +102,70 @@ describe('GoalNet TS/Py forward consistency (T7)', () => {
   })
 })
 
+/**
+ * 生产档（h=64/d=8）：主干**必走 conv-wasm**（DECISIONS §311），与上面 h16/d2 的 TS 路径
+ * 是两条独立实现。2026-09-10 修的 wasm 漏拷 offBufA 只在这条路径上暴露——h16/d2 永远走
+ * TS 路径，覆盖不到，于是热图头在生产档静默退化为常量（argmax 恒选同一格，目标策略失效）。
+ *
+ * golden 生成：
+ *   python models/goal_net.py --golden ../tests/fixtures/goal-golden-wasm.json --h 64 --d 8
+ */
+const GOLDEN_WASM = JSON.parse(
+  readFileSync(join(import.meta.dir, '..', 'fixtures', 'goal-golden-wasm.json'), 'utf8'),
+) as typeof GOLDEN
+
+describe('GoalNet 生产档 h=64/d=8（conv-wasm 主干）TS/Py 一致', () => {
+  const model = buildGoalModelFromText(
+    JSON.stringify({
+      arch: { kind: 'goal', h: GOLDEN_WASM.h, d: GOLDEN_WASM.d },
+      params: GOLDEN_WASM.params,
+    }),
+  )
+  const obs = new Uint8Array(GOLDEN_WASM.obs)
+  const scalars = new Float32Array(GOLDEN_WASM.scalars)
+  const inject = new Float32Array(GOLDEN_WASM.inject)
+
+  it('golden 确为生产档 h=64/d=8', () => {
+    expect(GOLDEN_WASM.format).toBe('goal-golden')
+    expect(GOLDEN_WASM.h).toBe(64)
+    expect(GOLDEN_WASM.d).toBe(8)
+  })
+
+  it('goal 热图 logits（676）与 py golden 一致（≤1e-3；修复后实测 1.1e-5）', () => {
+    model.goalForward(obs, scalars, inject)
+    // 修复前此值为 1.245e+1（陈旧 bufA → 热图整片偏掉），远超容差。
+    expect(maxAbsDiff(GOLDEN_WASM.goalLogits, model.goalHeatmap)).toBeLessThanOrEqual(1e-3)
+  })
+
+  it('engage 头 logits 与 py golden ≤1e-4 一致', () => {
+    model.goalForward(obs, scalars, inject)
+    expect(maxAbsDiff(GOLDEN_WASM.engageLogits, model.engageLogits)).toBeLessThanOrEqual(1e-4)
+  })
+
+  it('value 头 logits 与 py golden ≤1e-4 一致', () => {
+    model.goalForward(obs, scalars, inject)
+    expect(maxAbsDiff(GOLDEN_WASM.valueLogits, model.valueOut)).toBeLessThanOrEqual(1e-4)
+  })
+
+  it('热图随 obs 变化——wasm 漏拷 bufA 的回归锚点（此前恒为常量）', () => {
+    model.goalForward(obs, scalars, inject)
+    const h1 = Float32Array.from(model.goalHeatmap)
+    // 对调 obs 通道 0/1 的 676 个像素：确定性差异，不依赖随机数。
+    const obs2 = Uint8Array.from(obs)
+    const sp = 26 * 26
+    for (let i = 0; i < sp; i++) {
+      const a = obs2[i]
+      obs2[i] = obs2[sp + i]
+      obs2[sp + i] = a
+    }
+    model.goalForward(obs2, scalars, inject)
+    let spread = 0
+    for (let i = 0; i < sp; i++) spread = Math.max(spread, Math.abs(model.goalHeatmap[i] - h1[i]))
+    // 修复前恒 0.000e+0（陈旧 bufA，676 格只剩 1 个取值）；修复后实测 2.77。
+    expect(spread).toBeGreaterThan(1e-3)
+  })
+})
+
 describe('writeGoalInject 语义表（§8.1.1）', () => {
   it('9 维语义逐维正确（prev-goal 坐标 / duration / switches / arrived）', () => {
     const dst = new Float32Array(GOAL_INJECT_DIM)
