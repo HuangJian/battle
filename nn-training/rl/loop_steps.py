@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import dist_common
-from remote.protocol import RetryableError, coef_active
+from remote.protocol import ProtocolError, RetryableError, coef_active, find_payload
 from remote.push_client import submit_job as _push_submit
 from remote.push_client import wait_result as _push_wait_result
 from rl.archive import backup_weights
@@ -481,7 +481,10 @@ class TrainingSteps:
             # ---- HUB 推分支（DECISIONS §340 补充 4）：payload/code 直接 POST 到
             # GPU 节点的 worker_server（其 cloudflared 隧道暴露），HUB 只做出站
             # HTTPS——弱链路落在 Kaggle 网络。打包/账本/三重校验/落位与 pull 同构。
-            payload_bytes = (Path(job_root) / jid / "payload.zip").read_bytes()
+            _pl = find_payload(Path(job_root) / jid)
+            if _pl is None:
+                raise ProtocolError(f"job {jid}: payload 不在盘上（push 无法发送）")
+            payload_bytes = _pl.read_bytes()
             code_bytes = self._code_zip_path.read_bytes()
             result = _push_job_round(
                 gpu_nodes, manifest, jid, payload_bytes, code_bytes, args, timeout_sec, log

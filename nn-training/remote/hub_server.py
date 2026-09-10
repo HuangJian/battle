@@ -41,8 +41,10 @@ from remote._port_guard import ensure_port_free
 from remote.protocol import (
     AUTH_HEADER,
     LEASE_SEC,
+    PAYLOAD_NAME,
     WIRE_V2_MAGIC,
     ProtocolError,
+    find_payload,
     normalize_manifest,
     unpack_result_v2,
 )
@@ -131,7 +133,7 @@ class _JobStore:
         out = []
         for jid, _e in sorted(pending.items(), key=lambda kv: kv[1].get("ts", 0)):
             jd = self._job_dir(jid)
-            if not jd.exists() or not (jd / "payload.zip").exists():
+            if not jd.exists() or find_payload(jd) is None:
                 continue  # 目录不存在或 payload 未落盘——不可领取
             if (jd / "result").exists():
                 continue  # 结果已落盘待验收——竞速已分胜负，落后者不再领取（§343）
@@ -151,7 +153,7 @@ class _JobStore:
         with self._lock:
             jd = self._job_dir(job_id)
             jd.mkdir(parents=True, exist_ok=True)
-            (jd / "payload.zip").write_bytes(payload_zip)
+            (jd / PAYLOAD_NAME).write_bytes(payload_zip)
             (jd / "manifest.json").write_text(
                 json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
             )
@@ -379,8 +381,8 @@ class HubHandler(BaseHTTPRequestHandler):
         if jid is None:
             self._json({"error": "not found"}, 404)
             return
-        p = self.store._job_dir(jid) / "payload.zip"
-        if not p.exists():
+        p = find_payload(self.store._job_dir(jid))
+        if p is None:
             self._json({"error": "no payload"}, 404)
             return
         self._bytes(p.read_bytes())

@@ -31,6 +31,7 @@ from pathlib import Path
 from remote.protocol import (
     AUTH_HEADER,
     HEARTBEAT_SEC,
+    PAYLOAD_NAME,
     WIRE_V2_CONTENT_TYPE,
     ProtocolError,
     RetryableError,
@@ -399,7 +400,7 @@ def run_job(
 
         rmtree_best_effort(job_dir)
     job_dir.mkdir(parents=True)
-    zip_path = job_dir / "payload.zip"
+    zip_path = job_dir / PAYLOAD_NAME
     zip_path.write_bytes(raw)
     # zip 内 manifest 是占位副本，解包仅取 shard 目录；权威校验全走 job 记录 manifest。
     # init_weights.json / opt_init.tar.b64 与 shard 目录同落 job_dir 根（解包天然如此）。

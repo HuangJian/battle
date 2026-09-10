@@ -41,6 +41,7 @@ from remote.protocol import (
     AUTH_HEADER,
     LEASE_SEC,
     MANIFEST_REQUIRED,
+    PAYLOAD_NAME,
     WIRE_V2_CONTENT_TYPE,
     WIRE_V2_MAGIC,
     ProtocolError,
@@ -49,6 +50,7 @@ from remote.protocol import (
     decode_weights_json,
     encode_opt_tar,
     encode_weights_json,
+    find_payload,
     idempotency_key,
     job_seed,
     normalize_manifest,
@@ -315,6 +317,67 @@ def test_pack_unpack_payload_roundtrip(tmp_path: Path) -> None:
 def test_pack_payload_missing_shard_fails(tmp_path: Path) -> None:
     with pytest.raises(ProtocolError):
         pack_payload([tmp_path / "nope"], _mini_manifest(), tmp_path / "x.zip")
+
+
+def test_payload_container_is_tarxz_and_smaller(tmp_path: Path) -> None:
+    """payload 容器（2026-09-10）：tar.xz(preset=3) —— xz 魔数 + 比 deflate zip 更小。
+
+    实测口径（20 个真实 shard，裸 22.3 MB）：241,382 -> 123,788 B（−48.7%），打包耗时持平。
+    """
+    shard_dir = tmp_path / "rl_s1_seed10"
+    _write_shard(shard_dir, 1, 10)
+    m = _mini_manifest(data_fp=data_fp([shard_dir]))
+
+    out = tmp_path / PAYLOAD_NAME
+    pack_payload([shard_dir], m, out)
+    raw = out.read_bytes()
+    assert raw[:6] == b"\xfd7zXZ\x00", f"应为 xz 容器，实得魔数 {raw[:6]!r}"
+
+    # 同素材走旧 zip/deflate 比较体积
+    import io
+    import zipfile
+
+    zbuf = io.BytesIO()
+    with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as z:
+        for f in sorted(shard_dir.iterdir()):
+            if f.is_file():
+                z.write(f, arcname=f"{shard_dir.name}/{f.name}")
+        z.writestr("manifest.json", json.dumps(m, ensure_ascii=False, indent=2))
+    assert len(raw) < len(zbuf.getvalue()), (
+        f"tar.xz {len(raw)} 未小于 deflate zip {len(zbuf.getvalue())}"
+    )
+
+
+def test_payload_unpack_accepts_legacy_zip(tmp_path: Path) -> None:
+    """**双读**：旧 hub 产的 zip payload 必须仍能解 —— 新旧双向互通。"""
+    import zipfile
+
+    shard_dir = tmp_path / "rl_s1_seed10"
+    _write_shard(shard_dir, 1, 10)
+    legacy = tmp_path / "payload.zip"
+    with zipfile.ZipFile(legacy, "w", zipfile.ZIP_DEFLATED) as z:
+        for f in sorted(shard_dir.iterdir()):
+            if f.is_file():
+                z.write(f, arcname=f"{shard_dir.name}/{f.name}")
+        z.writestr("manifest.json", json.dumps({"legacy": True}))
+
+    manifest, shard_dirs = unpack_payload(legacy, tmp_path / "out")
+    assert manifest == {"legacy": True}
+    assert [Path(d).name for d in shard_dirs] == ["rl_s1_seed10"]
+    assert (tmp_path / "out" / "rl_s1_seed10" / "obs.npy").exists()
+
+
+def test_find_payload_prefers_new_name_then_legacy(tmp_path: Path) -> None:
+    """`find_payload` 优先 tar.xz、回退 zip（旧 job 目录在盘上时也能被认领）。"""
+    jd = tmp_path / "job"
+    jd.mkdir()
+    assert find_payload(jd) is None
+    (jd / "payload.zip").write_bytes(b"PK\x03\x04legacy")
+    found = find_payload(jd)
+    assert found is not None and found.name == "payload.zip"
+    (jd / PAYLOAD_NAME).write_bytes(b"new")
+    found = find_payload(jd)
+    assert found is not None and found.name == PAYLOAD_NAME, "新名应优先"
 
 
 # ------------------------------------------------------------------ result 校验（chaos）

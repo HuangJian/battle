@@ -108,11 +108,44 @@ CUDA→TPU→CPU 探测。**踩坑四条**（全部来自真机）：
 **兼容性**：新 hub + 旧 worker、旧 hub + 新 worker 两条组合都安全（精确 0.0 两侧都判"关"；
 微系数由 worker 侧阈值兜住）。
 
-### 21.6 待做
+### 21.6 payload 容器 zip/deflate → tar.xz（2026-09-10；「下行改 v2」不成立后的实测替代）
+
+**先更正一个误判**：我原以为 payload 下行也背着 base64（"可再省 ~0.6 s"）—— **错**。
+pull 模式下 `hub_server._get_payload()` 是 `self._bytes(p.read_bytes())`，**本来就是裸二进制**；
+`payload_b64` 只存在于 **push 模式**（`push_client.py` → `worker_server.py`）。所以"改 v2"无事可做。
+
+**顺路量出的真选项**（20 个真实 c5-margin shard，裸 22.3 MB；×7.5 折算 150 份）：
+
+| 方案 | 体积 | 相对 deflate | 打包耗时(150 份) |
+|---|---|---|---|
+| ZIP_DEFLATED(6)（原状） | 241,382 | — | 1.8 s |
+| ZIP_LZMA（只改一个参数） | 187,443 | −22.3% | **9.0 s**（慢 5×，净亏，否决） |
+| 单流 lzma(3) | 119,280 | −50.6% | 1.1 s |
+| **tar.xz(preset=3)（采纳）** | **123,788** | **−48.7%** | **1.9 s**（与现状持平） |
+
+折算真实 payload **3.83 MB → ~1.96 MB，下载 2.3 s → ~1.2 s（−1.1 s/轮）**；
+`tarfile`+`lzma` 都是 **stdlib，无新依赖**；打包 CPU 与现状持平（1.9 s vs 1.8 s）。
+`ZIP_LZMA` 被否是因为每个条目独立字典（只省 22%）且慢 5×。
+
+**实现（含新旧互通）**：
+
+- `PAYLOAD_NAME = "payload.tar.xz"` + `PAYLOAD_LEGACY_NAMES = ("payload.zip",)` +
+  `find_payload(job_dir)`（**优先新名、回退旧名**）；
+- 产侧：`protocol.pack_payload` 与 `hub_client.pack_payload_zip` 改写 tar.xz
+  （`PAYLOAD_XZ_PRESET: Literal[3]`——typeshed 的 `w:xz` 重载要求 `Literal[0..9]`）；
+- 消费侧**双读**：`_extract_archive()` 用 `zipfile.is_zipfile` 判别，zip 与 tar.xz 都能解
+  ⇒ 旧 hub 产的 `payload.zip` 对新 worker、新 hub 产的 `payload.tar.xz` 对旧 worker 都能工作；
+- 触点：`protocol.py`（容器+find_payload）/ `hub_client.py`（打包+落盘名）/
+  `hub_server.py`（存在性检查、落盘、服务三处）/ `worker.py`（落盘名）/ `rl/loop_steps.py`（push 读字节）。
+
+**验证**：tar.xz 往返逐文件一致；**双读**（旧 zip 仍可解）；`find_payload` 两名并存时优先新名；
+同素材体积 **−44.2%**（6 个真实 shard）。回归测试 3 项：容器魔数+体积、旧 zip 双读、find_payload 优先级。
+
+### 21.7 待做
 
 按实测收益排序：**`channels_last`**（同步被排除后升为第一优先；已验证 `cat(obs_cl, coords_nchw)` 会把 layout
-静默退回 NCHW，不是传个参数就行，且与 TF32 耦合）、**尾块固定 shape**（仅 TPU 有收益）、
-**payload 下行也改 v2**（同样是 base64(zip)，可再省 ~0.6 s）。
+静默退回 NCHW，不是传个参数就行，且与 TF32 耦合）、**尾块固定 shape**（仅 TPU 有收益）。
+~~payload 下行改 v2~~ → 不成立（pull 模式本就是裸二进制），已由 §21.6 的 tar.xz 替代。
 **DECISIONS 条目待补**（建议 `§2026-09-10-ppo-perf`）。
 
 ## §20 四项监控修复落地 + PPO job 竞速模型（§343）+ it24 孤儿租约事故复盘（2026-09-06）
