@@ -26,6 +26,7 @@ import base64
 import gzip
 import hashlib
 import json
+import struct
 import zipfile
 from collections.abc import Sequence
 from pathlib import Path
@@ -339,6 +340,67 @@ def coef_active(x: float) -> bool:
     从而省掉 ref 权重传输、worker 侧 ref 加载与预计算、engine 侧 ref 前向。
     """
     return float(x) > NEGLIGIBLE_COEF
+
+
+# ---- result 回传体的 v2 线格式（方案B：gzip 裸二进制，省掉 base64 的 33%）----
+# 布局:  MAGIC(5) | uint32 BE header_len | header_json | blob0 | blob1 | ...
+# header = {"result": <去掉二进制字段的 dict>, "blob_lens": [len0, len1]}
+# blob 顺序固定 = BLOB_FIELDS。
+# 动机（2026-09-10 实测）：方案A（gzip+base64）线上 1,150,292 B —— base64 白占 33%。
+# 改裸二进制后 862,717 B（再省 25%，相对未压缩的 1,634,596 省 47.2%），上行 ~5.2 -> ~3.9 s。
+# hub 只做 base64（stdlib），并把结果**还原成方案A 的字符串形态**再落盘
+# ⇒ result.json 格式与下游 hub_client.decode_* 零改动。
+WIRE_V2_MAGIC = b"BRV2\n"
+WIRE_V2_CONTENT_TYPE = "application/x-battle-result-v2"
+BLOB_FIELDS: tuple[str, ...] = ("weights_json", "opt_tar_b64")
+_HDR_LEN_BYTES = 4
+
+
+def pack_result_v2(result: dict) -> bytes:
+    """result dict（二进制字段为方案A 的 base64 串）-> v2 体。
+
+    只把 BLOB_FIELDS 从 JSON 里搬出来当二进制段，**不重新压缩**（入参已是 gzip 后的
+    base64，解开即是 gzip 字节）；JSON 头保留其余全部字段 ⇒ 还原后语义逐字段一致。
+    """
+    blobs = [base64.b64decode(str(result.get(f, "") or "").encode("ascii")) for f in BLOB_FIELDS]
+    head = {k: v for k, v in result.items() if k not in BLOB_FIELDS}
+    hdr = json.dumps(
+        {"result": head, "blob_lens": [len(b) for b in blobs]},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return WIRE_V2_MAGIC + struct.pack(">I", len(hdr)) + hdr + b"".join(blobs)
+
+
+def unpack_result_v2(body: bytes) -> dict:
+    """v2 体 -> result dict（二进制字段还原成方案A 的 base64 串）。hub 侧用。
+
+    只依赖 base64/json/struct，**不需要 gzip**（blob 原样重新 base64 即可）。
+    任何长度不符/尾部余料都响亮拒绝，不静默截断。
+    """
+    if not body.startswith(WIRE_V2_MAGIC):
+        raise ProtocolError("v2 体缺 BRV2 魔数")
+    off = len(WIRE_V2_MAGIC)
+    (hdr_len,) = struct.unpack(">I", body[off : off + _HDR_LEN_BYTES])
+    off += _HDR_LEN_BYTES
+    try:
+        hdr = json.loads(body[off : off + hdr_len].decode("utf-8"))
+        head: dict = hdr["result"]
+        lens = hdr["blob_lens"]
+    except (KeyError, ValueError, UnicodeDecodeError) as e:
+        raise ProtocolError(f"v2 头解析失败: {e}") from None
+    off += hdr_len
+    if len(lens) != len(BLOB_FIELDS):
+        raise ProtocolError(f"v2 blob_lens 长度 {len(lens)} != {len(BLOB_FIELDS)}")
+    for field, n in zip(BLOB_FIELDS, lens, strict=True):
+        blob = body[off : off + n]
+        if len(blob) != n:
+            raise ProtocolError(f"v2 体截断：{field} 期望 {n} 字节，实得 {len(blob)}")
+        off += n
+        head[field] = base64.b64encode(blob).decode("ascii")
+    if off != len(body):
+        raise ProtocolError(f"v2 体尾部有 {len(body) - off} 字节多余数据")
+    return head
 
 
 def _pack_wire(raw: bytes) -> str:

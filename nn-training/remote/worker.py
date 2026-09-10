@@ -31,6 +31,7 @@ from pathlib import Path
 from remote.protocol import (
     AUTH_HEADER,
     HEARTBEAT_SEC,
+    WIRE_V2_CONTENT_TYPE,
     ProtocolError,
     RetryableError,
     coef_active,
@@ -39,6 +40,7 @@ from remote.protocol import (
     encode_weights_json,
     job_seed,
     normalize_manifest,
+    pack_result_v2,
     unpack_payload,
     validate_result,
 )
@@ -154,7 +156,12 @@ def post_result(
     """POST 结果：瞬时失败（网络/5xx）指数退避重试（最贵产物不允许最后一米丢失）；
     4xx = 确定性拒绝立即抛 ProtocolError；409 = hub 已有同 job 结果（幂等，按成功）。"""
     last: str = ""
-    req_body = json.dumps(result, ensure_ascii=False).encode("utf-8")
+    # 方案B（2026-09-10）：v2 体 = gzip 裸二进制段（省掉 base64 的 33% 膨胀）。
+    # 实测线上 1,150,292 -> 862,717 B（相对未压缩的 1,634,596 省 47.2%），上行 ~5.2 -> ~3.9 s。
+    # JSON 体保留作**旧 hub 的退路**（见下方 4xx 分支）。
+    req_body = pack_result_v2(result)
+    ctype = WIRE_V2_CONTENT_TYPE
+    req_body_json = json.dumps(result, ensure_ascii=False).encode("utf-8")
     t0 = time.time()
     for attempt in range(1, attempts + 1):
         try:
@@ -166,7 +173,7 @@ def post_result(
                 data=req_body,
                 method="POST",
                 headers={
-                    "Content-Type": "application/json",
+                    "Content-Type": ctype,
                     # H2：结果回传须携带领取时下发的 lease_token（hub 校验后收）
                     **({"X-Lease-Token": lease_token} if lease_token else {}),
                 },
@@ -175,14 +182,25 @@ def post_result(
             status, body = None, repr(e).encode()
         if status in (200, 201):
             log(
-                f"result POST ok: {len(req_body)} bytes in {time.time() - t0:.1f}s"
-                f" (attempt {attempt})"
+                f"result POST ok: {len(req_body)} bytes ({ctype.rsplit('/', 1)[-1]})"
+                f" in {time.time() - t0:.1f}s (attempt {attempt})"
+                + (
+                    f"  [同内容 JSON 体为 {len(req_body_json)} bytes]"
+                    if ctype != "application/json"
+                    else ""
+                )
             )
             return status
         if status == 409:
             log("result POST 409（hub 已有同 job 结果）——按成功处理")
             return 409
         if status is not None and 400 <= status < 500:
+            if ctype == WIRE_V2_CONTENT_TYPE and attempt < attempts:
+                # 旧 hub 进程（只认 application/json）会 4xx —— 退回 JSON 重发一次。
+                # 绝不让最贵的产物因为一次协议不匹配丢在最后一米。
+                log(f"result POST 被拒（HTTP {status}）——退回 JSON 体重试（旧 hub？）")
+                req_body, ctype = req_body_json, "application/json"
+                continue
             raise ProtocolError(
                 f"result POST rejected: HTTP {status}: {body[:300].decode('utf-8', 'replace')}"
             )

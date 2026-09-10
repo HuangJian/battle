@@ -41,6 +41,8 @@ from remote.protocol import (
     AUTH_HEADER,
     LEASE_SEC,
     MANIFEST_REQUIRED,
+    WIRE_V2_CONTENT_TYPE,
+    WIRE_V2_MAGIC,
     ProtocolError,
     data_fp,
     decode_opt_tar,
@@ -51,7 +53,9 @@ from remote.protocol import (
     job_seed,
     normalize_manifest,
     pack_payload,
+    pack_result_v2,
     unpack_payload,
+    unpack_result_v2,
     validate_result,
 )
 from remote.protocol import (
@@ -64,6 +68,7 @@ REPO = ROOT.parent  # git 根（hub_client.REPO_ROOT 与 git_head 用）
 
 # ------------------------------------------------------------------ fixtures
 
+
 def _mini_manifest(**over) -> dict:
     """最小合法 manifest（必填齐全；over 覆盖任意字段）。"""
     m = {
@@ -73,7 +78,7 @@ def _mini_manifest(**over) -> dict:
         "job_id": "j" * 16,
         "commit": "c" * 40,
         "code_sha256": "z" * 64,
-        "course": "// course jsonc\n{\"reward\": {\"formula\": \"score\"}}",
+        "course": '// course jsonc\n{"reward": {"formula": "score"}}',
         "course_fp": "f" * 64,
         "reward_formula": "score",
         "formula_hash": "h" * 40,
@@ -93,8 +98,9 @@ def _mini_manifest(**over) -> dict:
     return m
 
 
-def _write_shard(dirpath: Path, stage: int, seed: int, wver: str = "w" * 64,
-                 course_fp: str | None = "f" * 64) -> dict:
+def _write_shard(
+    dirpath: Path, stage: int, seed: int, wver: str = "w" * 64, course_fp: str | None = "f" * 64
+) -> dict:
     """写一个最小完整 shard（obs.npy + metrics.npy + manifest.json）。"""
     dirpath.mkdir(parents=True, exist_ok=True)
     np.save(dirpath / "obs.npy", np.zeros((4, 14, 26, 26), dtype=np.uint8))
@@ -118,6 +124,7 @@ def _write_shard(dirpath: Path, stage: int, seed: int, wver: str = "w" * 64,
 
 
 # ------------------------------------------------------------------ 协议编解码
+
 
 def test_weights_json_b64_roundtrip() -> None:
     raw = b'{"format":"nn-weights-json","params":{}}' + b"\x00" * 37
@@ -145,7 +152,7 @@ def test_wire_encoding_is_actually_compressed() -> None:
     要求线上体积显著小于裸 base64。
     """
     # 模拟 weights.json：可压的 JSON 文本（真实样本 gzip 约 1.35×）
-    raw = (b'{"format":"nn-weights-json","params":{"w":' + b"0.123456789," * 20000 + b"}}")
+    raw = b'{"format":"nn-weights-json","params":{"w":' + b"0.123456789," * 20000 + b"}}"
     wire = encode_weights_json(raw)
     plain = base64.b64encode(raw).decode("ascii")
     assert len(wire) < len(plain) * 0.8, (
@@ -160,6 +167,57 @@ def test_wire_decoder_accepts_legacy_uncompressed() -> None:
     legacy_b64 = base64.b64encode(raw).decode("ascii")
     assert decode_weights_json(legacy_b64) == raw
     assert decode_opt_tar(legacy_b64) == raw
+
+
+def test_result_v2_wire_roundtrip_and_size() -> None:
+    """方案B：v2 体（gzip 裸二进制段）—— 逐字段往返一致，且线上体积显著小于 JSON 体。
+
+    实测（2026-09-10 真实产物）：方案A 的 JSON 体 1,150,615 B -> v2 863,023 B（再省 25.0%，
+    相对未压缩的 1,634,596 B 省 47.2%），上行 7.4 s 基准 -> ~3.9 s。
+    """
+    raw_wj = b'{"format":"nn-weights-json","params":{"w":' + b"0.123456789," * 20000 + b"}}"
+    raw_tar = b"\x00\x01\x02\x03" * 40000
+    result = {
+        "job_id": "j1",
+        "weights_json": encode_weights_json(raw_wj),
+        "opt_tar_b64": encode_opt_tar(raw_tar),
+        "agg": {"policy": 0.1},
+        "commit_echo": "c",
+    }
+    v1 = json.dumps(result, ensure_ascii=False).encode("utf-8")
+    v2 = pack_result_v2(result)
+    # hub 侧真实路径：逐字段还原（B1 —— 仍还原成方案A 的 base64 串，故下游零改动）
+    assert unpack_result_v2(v2) == result
+    # 真省：base64 的 33% 膨胀里能拿回大头
+    assert len(v2) < len(v1) * 0.9, f"v2 {len(v2)} 未显著小于 JSON 体 {len(v1)}"
+    # 魔数区分：v2 走 unpack，旧 JSON 体不会误判
+    assert v2.startswith(WIRE_V2_MAGIC)
+    assert not v1.startswith(WIRE_V2_MAGIC)
+    assert json.loads(v1.decode("utf-8")) == result  # 旧路径照常可用
+
+
+def test_result_v2_rejects_truncated_or_padded_body() -> None:
+    """v2 体必须**响亮拒绝**截断与尾部余料 —— 产物是最贵的字节，不许静默截断。"""
+    result = {
+        "job_id": "j1",
+        "weights_json": encode_weights_json(b"x" * 100),
+        "opt_tar_b64": encode_opt_tar(b"y" * 100),
+        "agg": {},
+    }
+    v2 = pack_result_v2(result)
+    for bad, why in ((v2[:-7], "截断"), (v2 + b"extra-tail", "尾部余料")):
+        try:
+            unpack_result_v2(bad)
+        except ProtocolError:
+            continue
+        raise AssertionError(f"{why} 未被拒绝")
+    # 长度自洽的残缺体也不能悄悄通过
+    try:
+        unpack_result_v2(b"NOT_BRV2" + v2[len(WIRE_V2_MAGIC) :])
+    except ProtocolError:
+        pass
+    else:
+        raise AssertionError("缺魔数未被拒绝")
 
 
 def test_manifest_normalize_required_and_defaults() -> None:
@@ -193,6 +251,7 @@ def test_manifest_normalize_mode_redline() -> None:
 
 
 # ------------------------------------------------------------------ data_fp / 幂等
+
 
 def test_data_fp_deterministic_and_order_independent(tmp_path: Path) -> None:
     d1 = tmp_path / "it1"
@@ -237,6 +296,7 @@ def test_job_seed_deterministic_and_distinct() -> None:
 
 # ------------------------------------------------------------------ payload zip
 
+
 def test_pack_unpack_payload_roundtrip(tmp_path: Path) -> None:
     shard_dir = tmp_path / "rl_s1_seed10"
     _write_shard(shard_dir, 1, 10)
@@ -258,6 +318,7 @@ def test_pack_payload_missing_shard_fails(tmp_path: Path) -> None:
 
 
 # ------------------------------------------------------------------ result 校验（chaos）
+
 
 def test_result_commit_mismatch_rejected() -> None:
     m = normalize_manifest(_mini_manifest())
@@ -318,6 +379,7 @@ def test_result_agg_missing_fields_rejected() -> None:
 
 # ------------------------------------------------------------------ D12 产出方锁死 + NaN fail-fast（torch 延迟导入）
 
+
 def test_weights_json_local_vs_cloud_byte_identical(tmp_path: Path) -> None:
     """D12：本地 _export_weights（save_weights_json）与云 worker 同一函数 → 字节+指纹一致。
 
@@ -329,18 +391,14 @@ def test_weights_json_local_vs_cloud_byte_identical(tmp_path: Path) -> None:
     from data.weights_io import save_weights_json
 
     torch.manual_seed(7)
-    net = torch.nn.Sequential(
-        torch.nn.Linear(8, 8), torch.nn.ReLU(), torch.nn.Linear(8, 4)
-    )
+    net = torch.nn.Sequential(torch.nn.Linear(8, 8), torch.nn.ReLU(), torch.nn.Linear(8, 4))
     out_local = tmp_path / "local.json"
     save_weights_json(net, str(out_local))
     # 协议传输：state_dict 以 base64 过 wire（等价云 worker 回传的 weights_json）
     buf = io.BytesIO()
     torch.save(net.state_dict(), buf)
     transmitted = encode_weights_json(buf.getvalue())
-    net2 = torch.nn.Sequential(
-        torch.nn.Linear(8, 8), torch.nn.ReLU(), torch.nn.Linear(8, 4)
-    )
+    net2 = torch.nn.Sequential(torch.nn.Linear(8, 8), torch.nn.ReLU(), torch.nn.Linear(8, 4))
     net2.load_state_dict(torch.load(io.BytesIO(decode_weights_json(transmitted))))
     out_cloud = tmp_path / "cloud.json"
     save_weights_json(net2, str(out_cloud))
@@ -392,6 +450,7 @@ def test_reward_nonfinite_rejected(tmp_path: Path) -> None:
 
 # ------------------------------------------------------------------ 账本 / resume 不破坏
 
+
 def test_ledger_new_events_do_not_break_last_completed_iter(tmp_path: Path) -> None:
     """job_pending/job_completed 事件混入 jsonl → last_completed_iter 不受影响。"""
     from rl.resume import last_completed_iter
@@ -440,6 +499,7 @@ def test_write_shard_single_write_indent2(tmp_path: Path) -> None:
 
 
 # ------------------------------------------------------------------ 发布端课程校验（免 torch）
+
 
 def test_publish_time_course_validation_bad_formula(tmp_path: Path) -> None:
     """D13：坏公式课程 publish 前必须被 load_course/build_reward_fn 响亮拒绝（免 torch）。"""
@@ -491,6 +551,7 @@ def test_course_path_mounted_on_args() -> None:
 
 # ------------------------------------------------------------------ hub-server 全链路（磁盘 IPC + HTTP）
 
+
 def _boot_server(tmp_path: Path, token: str = "sekret") -> tuple:
     """起一个 hub-server（随机端口），返回 (base_url, store, server, thread)。"""
     store = _JobStore(tmp_path / "jobs", tmp_path / "training_log.jsonl")
@@ -501,9 +562,14 @@ def _boot_server(tmp_path: Path, token: str = "sekret") -> tuple:
     return f"http://127.0.0.1:{port}", store, srv, th
 
 
-def _http(base_url: str, token: str, path: str, method: str = "GET",
-          data: bytes | None = None,
-          extra_headers: dict[str, str] | None = None) -> tuple[int, dict]:
+def _http(
+    base_url: str,
+    token: str,
+    path: str,
+    method: str = "GET",
+    data: bytes | None = None,
+    extra_headers: dict[str, str] | None = None,
+) -> tuple[int, dict]:
     import urllib.error
     import urllib.request
 
@@ -587,13 +653,67 @@ def test_hub_server_auth_and_job_lifecycle(tmp_path: Path) -> None:
             "agg": {"policy": 0.1, "value": 0.2, "entropy": 0.3, "kl": 0.4, "mean_ret": 0.5},
             "commit_echo": manifest["commit"],
         }
-        st4, _ = _http(base, "sekret", f"/jobs/{jid}/result", method="POST",
-                       data=json.dumps(result).encode("utf-8"))
+        st4, _ = _http(
+            base,
+            "sekret",
+            f"/jobs/{jid}/result",
+            method="POST",
+            data=json.dumps(result).encode("utf-8"),
+        )
         assert st4 in (200, 201)
         st5, body5 = _http(base, "sekret", f"/jobs/{jid}/status")
         assert st5 == 200 and body5["state"] == "done"
         st6, body6 = _http(base, "sekret", f"/jobs/{jid}/result")
         assert st6 == 200 and body6["weights_json"] == result["weights_json"]
+    finally:
+        srv.shutdown()
+        th.join(timeout=5)
+
+
+def test_hub_server_accepts_v2_result_body(tmp_path: Path) -> None:
+    """方案B：hub 按**魔数**识别 v2 体（不依赖 Content-Type），并把二进制段还原成方案A
+    的字符串形态落盘 —— 故 result.json 格式与下游 decode_* 零改动。"""
+    base, store, srv, th = _boot_server(tmp_path)
+    try:
+        manifest = normalize_manifest(_mini_manifest())
+        jid = manifest["job_id"]
+        jd = store._job_dir(jid)
+        jd.mkdir(parents=True, exist_ok=True)
+        (jd / "payload.zip").write_bytes(b"PK\x03\x04fake")
+        (jd / "manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        store.publish(jid, manifest, b"PK\x03\x04fake")
+
+        result = {
+            "job_id": jid,
+            "data_fp": manifest["data_fp"],
+            "init_weights_fp": manifest["init_weights_fp"],
+            "weights_json": encode_weights_json(b'{"ok":true}'),
+            "opt_tar_b64": encode_opt_tar(b"\x1f\x8b" + b"Z" * 500),
+            "agg": {"policy": 0.1, "value": 0.2, "entropy": 0.3, "kl": 0.4, "mean_ret": 0.5},
+            "commit_echo": manifest["commit"],
+        }
+        body = pack_result_v2(result)
+        assert body.startswith(WIRE_V2_MAGIC)
+        st, _ = _http(
+            base,
+            "sekret",
+            f"/jobs/{jid}/result",
+            method="POST",
+            data=body,
+            extra_headers={"Content-Type": WIRE_V2_CONTENT_TYPE},
+        )
+        assert st in (200, 201), f"v2 体应被接收，实得 HTTP {st}"
+        # 落盘形态 = 方案A（两字段仍是 base64 串），下游 decode_* 可直接用
+        st2, got = _http(base, "sekret", f"/jobs/{jid}/result")
+        assert st2 == 200
+        assert got["weights_json"] == result["weights_json"], "weights_json 还原不一致"
+        assert got["opt_tar_b64"] == result["opt_tar_b64"], "opt_tar_b64 还原不一致"
+        assert decode_weights_json(got["weights_json"]) == b'{"ok":true}'
+        assert decode_opt_tar(got["opt_tar_b64"]).startswith(b"\x1f\x8b")
+        # agg 等非二进制字段原样通过
+        assert got["agg"]["policy"] == 0.1
     finally:
         srv.shutdown()
         th.join(timeout=5)
@@ -615,11 +735,21 @@ def test_hub_server_late_worker_writeback_rejected(tmp_path: Path) -> None:
             "agg": {"policy": 0.1, "value": 0.2, "entropy": 0.3, "kl": 0.4, "mean_ret": 0.5},
             "commit_echo": manifest["commit"],
         }
-        st1, _ = _http(base, "sekret", f"/jobs/{jid}/result", method="POST",
-                       data=json.dumps(result).encode("utf-8"))
+        st1, _ = _http(
+            base,
+            "sekret",
+            f"/jobs/{jid}/result",
+            method="POST",
+            data=json.dumps(result).encode("utf-8"),
+        )
         assert st1 in (200, 201)
-        st2, body = _http(base, "sekret", f"/jobs/{jid}/result", method="POST",
-                          data=json.dumps(result).encode("utf-8"))
+        st2, body = _http(
+            base,
+            "sekret",
+            f"/jobs/{jid}/result",
+            method="POST",
+            data=json.dumps(result).encode("utf-8"),
+        )
         assert st2 == 409, f"迟到写回应 409（§343 落后者丢弃），收到 {st2} {body}"
     finally:
         srv.shutdown()
@@ -641,8 +771,13 @@ def test_hub_server_commit_mismatch_rejected_at_post(tmp_path: Path) -> None:
             "agg": {"policy": 0.1, "value": 0.2, "entropy": 0.3, "kl": 0.4, "mean_ret": 0.5},
             "commit_echo": "d" * 40,  # 旧 worker（不同 commit）迟到写回
         }
-        st, body = _http(base, "sekret", f"/jobs/{jid}/result", method="POST",
-                         data=json.dumps(result).encode("utf-8"))
+        st, body = _http(
+            base,
+            "sekret",
+            f"/jobs/{jid}/result",
+            method="POST",
+            data=json.dumps(result).encode("utf-8"),
+        )
         assert st == 400, f"commit 不一致应 400，收到 {st} {body}"
         assert store.get_result(jid) is None, "拒收的结果不得落盘"
     finally:
@@ -673,8 +808,13 @@ def test_hub_server_race_result_excludes_from_pool(tmp_path: Path) -> None:
             "agg": {"policy": 0.1, "value": 0.2, "entropy": 0.3, "kl": 0.4, "mean_ret": 0.5},
             "commit_echo": manifest["commit"],
         }
-        st3, _ = _http(base, "sekret", f"/jobs/{jid}/result", method="POST",
-                       data=json.dumps(result).encode("utf-8"))
+        st3, _ = _http(
+            base,
+            "sekret",
+            f"/jobs/{jid}/result",
+            method="POST",
+            data=json.dumps(result).encode("utf-8"),
+        )
         assert st3 in (200, 201)
         st4, body4 = _http(base, "sekret", "/jobs/next")
         assert st4 == 200 and body4["job_id"] is None, "结果已落盘：竞速已分胜负，不再派发"
@@ -696,9 +836,7 @@ def test_claimable_pool_rebuilt_from_ledger(tmp_path: Path) -> None:
     store2.mark_completed(jid)
     store2.mark_completed(jid)
     assert store2.claimable_job_ids() == []
-    completed = [
-        e for e in store2._read_ledger() if e.get("event") == "job_completed"
-    ]
+    completed = [e for e in store2._read_ledger() if e.get("event") == "job_completed"]
     assert len(completed) == 1
 
 
@@ -756,8 +894,12 @@ def test_post_result_retry_then_success(monkeypatch, _no_sleep) -> None:
 
     monkeypatch.setattr(worker_mod, "_request", fake_request)
     rc = worker_mod.post_result(
-        "http://hub", "t", "jid1",
-        {"job_id": "jid1"}, lease_token="L", log=lambda _m: None,
+        "http://hub",
+        "t",
+        "jid1",
+        {"job_id": "jid1"},
+        lease_token="L",
+        log=lambda _m: None,
     )
     assert rc == 200
 
@@ -765,22 +907,35 @@ def test_post_result_retry_then_success(monkeypatch, _no_sleep) -> None:
 def test_post_result_409_is_idempotent_success(monkeypatch, _no_sleep) -> None:
     monkeypatch.setattr(worker_mod, "_request", lambda *_a, **_k: (409, b"duplicate"))
     rc = worker_mod.post_result(
-        "http://hub", "t", "jid1", {"job_id": "jid1"}, log=lambda _m: None,
+        "http://hub",
+        "t",
+        "jid1",
+        {"job_id": "jid1"},
+        log=lambda _m: None,
     )
     assert rc == 409
 
 
 def test_post_result_4xx_rejected_no_retry(monkeypatch, _no_sleep) -> None:
-    calls = []
+    """4xx = 确定性拒绝 → 抛 ProtocolError，**不进退避重试环**。
+
+    2026-09-10 方案B 细化契约：v2 体遇 4xx 时允许**一次**内容协商退路（改发 JSON
+    体重发）——旧 hub 进程解析不了 v2 会回 400，而它换来的是救回**一整轮训练**（33 s
+    GPU 梯度 + 采集）。故 v2 起点计数为 2；**关键不变量是「最终仍抛 ProtocolError」
+    且「退一次即止、不成环」**（已退到 JSON 后 ctype 不再是 v2，不再触发退路）。
+    """
+    posted: list = []
 
     def fake_request(base_url, token, path, timeout=30.0, **kw):
-        calls.append(1)
+        posted.append(kw.get("data") or b"")
         return 400, b"result rejected: bad fingerprints"
 
     monkeypatch.setattr(worker_mod, "_request", fake_request)
     with pytest.raises(ProtocolError, match="400"):
         worker_mod.post_result("http://hub", "t", "jid1", {"x": 1}, log=lambda _m: None)
-    assert len(calls) == 1
+    assert len(posted) == 2, f"v2 -> 一次 JSON 退路 -> 抛错（实得 {len(posted)} 次）"
+    assert posted[0].startswith(b"BRV2"), "首次必须是 v2 体"
+    assert not posted[1].startswith(b"BRV2"), "退路必须是 JSON 体（否则就是空转）"
 
 
 def test_store_release_returns_to_pool(tmp_path: Path) -> None:
@@ -823,8 +978,12 @@ def test_run_job_result_cache_reuse(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(worker_mod, "download_payload", _boom)
     monkeypatch.setattr(worker_mod, "download_code", _boom)
     out = worker_mod.run_job(
-        "http://hub", "t", {"job_id": jid, "manifest": m},
-        work_dir=tmp_path, echo=False, log=lambda _m: None,
+        "http://hub",
+        "t",
+        {"job_id": jid, "manifest": m},
+        work_dir=tmp_path,
+        echo=False,
+        log=lambda _m: None,
     )
     assert out == cached
 
@@ -852,6 +1011,7 @@ def test_manifest_kickstart_defaults_and_reject() -> None:
 
 
 # ------------------------------------------------------------------ §381 悬空 job 清理
+
 
 def test_hub_pool_excludes_cancelled_job(tmp_path: Path) -> None:
     """§381：job_cancelled 账本事件 → 该 job 退出可领取池（悬空清理后不再派发给 worker）。"""

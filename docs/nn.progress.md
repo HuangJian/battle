@@ -39,7 +39,7 @@ claim 08:28:02 -> payload 下行 3.83 MB (2.3 s) -> code 缓存命中 + model/op
 |---|---|---|---|
 | **ref 前向缓存** | `ppo/engine.py`：kickstart 的 ref 输出只依赖 (obs,scalars,mask)，逐 chunk 固定且 ref 冻结（BN-free）⇒ 跨 epoch 不变；原「每梯度步重算」改为「按 chunk 预计算一次 + 索引复用」 | CPU +18.6% / **GPU +22.7%** / TPU +31.5%（比例随设备变快而升）；真实日志确认省 **~9 s/轮（20%）** | ✅ 逐位不变 |
 | **标量同步批量化** | `ppo/common.py::sync_scalars` + 三后端：每步 6-8 处 `.item()`/`float()` 合为 1 次 `stack().tolist()` | GPU **+2 ms（0.8%）⇒ 收益≈0**（见 21.1 #1） | ✅ 逐位不变 |
-| **传输压缩** | `remote/protocol.py` 的 4 个编解码函数改 gzip(level 6) + base64；解码端用 gzip 魔数自动判别 ⇒ 旧格式仍可解 | 上行 1,634,596 → **1,150,292 B（−29.6%）**，7.4 s → ~5.2 s；同一 tar 作为 `opt_init` 下行 **−31.3%** | ✅ 无损 |
+| **传输压缩** | `remote/protocol.py`：① 4 个编解码函数改 gzip(level 6)+base64（魔数自动判别，旧格式可解）；② **方案B v2 体**——result 上行改 `BRV2` 魔数 + JSON 头 + gzip **裸二进制段**，省掉 base64 的 33% | ① 上行 1,634,596 → 1,150,292 B（−29.6%）；② **再 → 863,023 B（合计 −47.2%）**，上行 7.4 s → **~3.9 s**；`opt_init` 下行 −31.3% | ✅ 无损；v2 往返逐字段一致 |
 | **多卡** | `remote/worker.py` opt-in `--device cuda-dp`（`nn.DataParallel`，单卡自动退化）；产物落盘一律用未包装的 `raw_model` | **B_new 192 → 100 ms/step = 1.92×**（接近线性） | ⚠ 归约顺序变 ⇒ ulp 变，属新开实验臂 |
 
 **三设备实测矩阵**（s/轮 = s/step x 148）：本机 CPU 3.607 s / Kaggle GPU T4x2 191 ms /
@@ -110,8 +110,9 @@ CUDA→TPU→CPU 探测。**踩坑四条**（全部来自真机）：
 
 ### 21.6 待做
 
-按实测收益排序：**传输方案B**（+1.3 s）、**`channels_last`**（同步被排除后升为第一优先；已验证 `cat(obs_cl, coords_nchw)` 会把 layout
-静默退回 NCHW，不是传个参数就行）、**尾块固定 shape**（仅 TPU 有收益）。
+按实测收益排序：**`channels_last`**（同步被排除后升为第一优先；已验证 `cat(obs_cl, coords_nchw)` 会把 layout
+静默退回 NCHW，不是传个参数就行，且与 TF32 耦合）、**尾块固定 shape**（仅 TPU 有收益）、
+**payload 下行也改 v2**（同样是 base64(zip)，可再省 ~0.6 s）。
 **DECISIONS 条目待补**（建议 `§2026-09-10-ppo-perf`）。
 
 ## §20 四项监控修复落地 + PPO job 竞速模型（§343）+ it24 孤儿租约事故复盘（2026-09-06）

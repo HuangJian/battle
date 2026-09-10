@@ -38,7 +38,14 @@ from pathlib import Path
 from threading import Lock
 
 from remote._port_guard import ensure_port_free
-from remote.protocol import AUTH_HEADER, LEASE_SEC, ProtocolError, normalize_manifest
+from remote.protocol import (
+    AUTH_HEADER,
+    LEASE_SEC,
+    WIRE_V2_MAGIC,
+    ProtocolError,
+    normalize_manifest,
+    unpack_result_v2,
+)
 
 # ------------------------------------------------------------------ state
 
@@ -482,7 +489,13 @@ class HubHandler(BaseHTTPRequestHandler):
             self._json({"error": f"read body failed: {e}"}, 400)
             return
         try:
-            result = json.loads(raw.decode("utf-8"))
+            # 方案B（2026-09-10）：v2 体（gzip 裸二进制段）**按魔数自动识别** —— 不依赖
+            # Content-Type，故旧 worker（纯 JSON）与新 worker（v2）都能收。还原出的 dict
+            # 与方案A 逐字段一致（二进制字段被重新 base64）⇒ 下游零改动。
+            if raw.startswith(WIRE_V2_MAGIC):
+                result = unpack_result_v2(raw)
+            else:
+                result = json.loads(raw.decode("utf-8"))
             # 与 manifest 对账（job_id/data_fp/init_weights_fp/commit_echo）
             manifest = json.loads((jd / "manifest.json").read_text(encoding="utf-8"))
             normalize_manifest(manifest)
