@@ -36,6 +36,12 @@ nn-training/archive
 # 分布式采样密钥（plan/distributed-rollout.md v3.3，严禁入库）
 tools/agent/agent.auth
 
+# RL EvalBench 账本（plan/rl-eval-system.md §3.1：gitignore + 人工备份，无 git 兜底；
+# 唯一例外 README.md 入库，写备份纪律；备份由 backup.ts 导出仓库外。
+# 写法注意：不能先整树排除父目录（被排除目录内的否定无效），只能逐项排除内容。）
+tools/training/data/evalboard/*
+!tools/training/data/evalboard/README.md
+
 *.lock
 *.lock.*
 *.log

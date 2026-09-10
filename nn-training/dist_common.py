@@ -195,6 +195,98 @@ def code_hash_report() -> str:
     return "\n".join(lines)
 
 
+# ---------------- engine_epoch（EvalBench §2.5/§6.6） ----------------
+# gameplay 文件集的表唯一源 = tools/agent/codehash-files.ts GAMEPLAY_SPECS
+# （集内文件，改表即触发升级波）。此处镜像同一张表——改表必须双侧同步
+# （与 codehash-files.txt SSOT 同纪律；偏离会被 epoch 拒派暴露为全员 stale）。
+GAMEPLAY_SPECS: tuple[str, ...] = (
+    "src/game/",
+    "src/config/",
+    "src/utils/",
+    "src/ai/",
+    "tools/sim/export-eval-game.ts",
+    "tools/det-golden.v1.sha256",
+)
+
+
+def _collect_gameplay_files() -> list[tuple[str, bytes]]:
+    """按 GAMEPLAY_SPECS 展开（目录递归受 F3 过滤；与 codehash-files.ts 同规则）。"""
+    out: list[tuple[str, bytes]] = []
+    for spec in GAMEPLAY_SPECS:
+        s = spec.replace("\\", "/")
+        if s.endswith("/"):
+            root = os.path.join(REPO_ROOT, *s.rstrip("/").split("/"))
+            for dirpath, dirnames, files in os.walk(root):
+                dirnames[:] = [d for d in dirnames if not _skip_codehash_dir(d)]
+                for name in files:
+                    if _skip_codehash_file(name):
+                        continue
+                    p = os.path.join(dirpath, name)
+                    rel = os.path.relpath(p, REPO_ROOT).replace("\\", "/")
+                    with open(p, "rb") as f:
+                        out.append((rel, f.read()))
+        else:
+            p = os.path.join(REPO_ROOT, *s.split("/"))
+            if os.path.isfile(p):
+                rel = os.path.relpath(p, REPO_ROOT).replace("\\", "/")
+                with open(p, "rb") as f:
+                    out.append((rel, f.read()))
+    out.sort(key=lambda e: e[0])
+    # 去重（与 TS 侧 Map 去重同语义）
+    seen: dict[str, bytes] = {}
+    for rel, content in out:
+        seen[rel] = content
+    return sorted(seen.items())
+
+
+def gameplay_fingerprint() -> str:
+    """gameplay 文件集指纹（与 dist codeHash 同配方；双侧审计可对）。"""
+    h = hashlib.sha256()
+    for rel, content in _collect_gameplay_files():
+        h.update(rel.encode())
+        h.update(hashlib.sha256(content).digest())
+    return h.hexdigest()
+
+
+def _git_head() -> str:
+    """训练机 git_commit；拿不到返回 'nogit'（跨机比较需配对 git_commit 字段）。"""
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            **_POPEN_NO_WINDOW,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()
+    except Exception:
+        pass
+    return "nogit"
+
+
+def compute_engine_epoch(git_commit: str | None = None) -> str:
+    """engine_epoch = sha256(git_commit + '\\n' + gameplay)[0:16]（§2.5）。"""
+    if git_commit is None:
+        git_commit = _git_head()
+    return hashlib.sha256(f"{git_commit}\n{gameplay_fingerprint()}".encode()).hexdigest()[:16]
+
+
+def check_engine_epoch(ping: dict, expected: str) -> str | None:
+    """eval 节点门 engine_epoch 项（§6.6）：None=通过，否则拒收原因。
+
+    旧 agent 无 engineEpoch 字段 → 返回原因（调用方决定：B/C 批严格拒派；
+    A 层过渡期记日志放行，待全员升级后收紧）。
+    """
+    got = ping.get("engineEpoch")
+    if not got:
+        return "missing engineEpoch (old agent — sync code + restart)"
+    if got != expected:
+        return f"engine_epoch mismatch: node={got} expected={expected}"
+    return None
+
+
 # ---------------- HTTP ----------------
 def _request(
     url: str,
@@ -587,6 +679,11 @@ def fetch_task(
     player_level: int | None = None,
     course_fp: str = "",
     abandon_event: threading.Event | None = None,
+    # T1.2 policy 透传（EvalBench）：'nn' | 'god'（C 层 God 基线）。
+    # agent 侧已就绪（sampler-agent.ts:1150 收 ?policy= → export-eval-game --policy）。
+    # 缓存键注意：agent taskKey 无 policy 分量——调用方必须用独立 iterId 命名空间
+    # 隔离不同 policy（A 层恒 nn；B/C 批用 batch 命名空间），否则 god/nn 同键串局。
+    policy: str = "nn",
 ) -> tuple[dict, dict]:
     """获取一局结果 → (manifest, files)；失败抛 DistError。
 
@@ -618,6 +715,8 @@ def fetch_task(
     }
     if mode:
         params["mode"] = mode
+    if policy and policy != "nn":
+        params["policy"] = policy
     if kind != "rollout":
         params["kind"] = kind
     if replan > 0:

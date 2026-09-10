@@ -51,6 +51,13 @@ export interface StageJson {
   player_spawn?: StageJsonSpawn
   enemy_spawns?: StageJsonSpawn[]
   /**
+   * 26×26 直传（EvalBench 阶梯 rung 载荷，§4.2）：26 个 26 字符行，字符集与
+   * StageData.tiles 相同（`.bswfiE`）。存在时短路 13×13 grid 解码（open13 竞技场
+   * 的 1 子块厚钢环不是 2×2 对齐，无法经数字瓦格无损往返）。grid 字段此时可为
+   * 空数组（类型保留必填以保旧载荷不变，运行时忽略）。
+   */
+  tiles26?: string[]
+  /**
    * 出生点变体池（2026-09-03，p1-onset 随机出生点）：
    * `seed` 给定时按确定性哈希在池中选一；无 seed / 未提供时退回 player_spawn /
    * enemy_spawns（或 variants[0]）。用途=语料与 rollout 的几何多样性（God-AI
@@ -114,24 +121,39 @@ export function decodeStageGrid(
   } else json = raw
 
   const grid = json.grid
-  if (
-    !Array.isArray(grid) ||
-    grid.length !== 13 ||
-    grid.some((r) => !Array.isArray(r) || r.length !== 13)
-  ) {
-    throw new Error(
-      `decodeStageGrid: grid 必须 13×13（stage ${stageId}，收到 ${Array.isArray(grid) ? `${grid.length} 行` : '非数组'}）`,
-    )
-  }
-  for (const row of grid) {
-    for (const code of row) {
-      if (!Number.isInteger(code) || code < 0 || code > 20) {
-        throw new Error(`decodeStageGrid: grid 含非法瓦码 ${code}（0..20，stage ${stageId}）`)
+  // tiles26 直传（EvalBench 阶梯）：跳过 13×13 校验与 decodeLevel。
+  let tiles: string[] | null = null
+  if (json.tiles26 !== undefined) {
+    const t26 = json.tiles26
+    const okChars = /^[.bswfiE]{26}$/
+    if (
+      !Array.isArray(t26) ||
+      t26.length !== 26 ||
+      t26.some((r) => typeof r !== 'string' || !okChars.test(r))
+    ) {
+      throw new Error(`decodeStageGrid: tiles26 必须 26×26（字符 .bswfiE，stage ${stageId}）`)
+    }
+    tiles = [...t26]
+  } else {
+    if (
+      !Array.isArray(grid) ||
+      grid.length !== 13 ||
+      grid.some((r) => !Array.isArray(r) || r.length !== 13)
+    ) {
+      throw new Error(
+        `decodeStageGrid: grid 必须 13×13（stage ${stageId}，收到 ${Array.isArray(grid) ? `${grid.length} 行` : '非数组'}）`,
+      )
+    }
+    for (const row of grid) {
+      for (const code of row) {
+        if (!Number.isInteger(code) || code < 0 || code > 20) {
+          throw new Error(`decodeStageGrid: grid 含非法瓦码 ${code}（0..20，stage ${stageId}）`)
+        }
       }
     }
+    tiles = decodeLevel(grid.map((r) => r.map(Number)))
   }
-
-  const tiles = decodeLevel(grid.map((r) => r.map(Number)))
+  const tilesFinal: string[] = tiles
   const forces = (json.forces ?? '').slice(0, 20)
   const enemies: TankKind[] = decodeForceString(forces)
   // 守卫③：enemyCount 恒显式（tel.enemyTotal 取 stage.enemyCount ?? 20）
@@ -154,14 +176,14 @@ export function decodeStageGrid(
     if (v.player_spawn) playerSpawn = v.player_spawn
     if (v.enemy_spawns) spawnList = v.enemy_spawns
   }
-  if (playerSpawn) assertSpawnClear(tiles, playerSpawn.col, playerSpawn.row, 'player')
+  if (playerSpawn) assertSpawnClear(tilesFinal, playerSpawn.col, playerSpawn.row, 'player')
   const enemySpawns = spawnList.map((s) => ({ col: s.col, row: s.row }))
-  for (const s of enemySpawns) assertSpawnClear(tiles, s.col, s.row, 'enemy')
+  for (const s of enemySpawns) assertSpawnClear(tilesFinal, s.col, s.row, 'enemy')
 
   const stage: StageData = {
     id: stageId,
     name: json.name || `custom-${stageId}`,
-    tiles,
+    tiles: tilesFinal,
     enemies,
     enemyCount,
     ...(playerSpawn ? { playerSpawn: { col: playerSpawn.col, row: playerSpawn.row } } : {}),

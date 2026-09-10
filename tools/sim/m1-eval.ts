@@ -505,6 +505,29 @@ async function main(): Promise<void> {
     avgTicks: nTicks > 0 ? Math.round(totalTicks / nTicks) : 0,
     scoreV7,
     perStage: stageReports,
+    /**
+     * 逐局行（EvalBench D5(a) 入账用：eval_m1.py 逐行写 eval_log.jsonl）。
+     * m1 跑的是 sim-worker（非 export-eval-game），天然缺 playerHits/enemyHits/
+     * playerDamageTaken/stuckTicks/pu 分类型/score——ingest 侧进豁免清单，不伪造。
+     */
+    perGame: results.map((r, i) => ({
+      stage: tasks[i]?.stageIndex ?? 0,
+      seed: tasks[i]?.seed ?? 0,
+      ok: r?.ok === true,
+      outcome: r?.outcome ?? 'error',
+      win: r?.outcome === 'stage_clear',
+      cleared: r?.cleared === true || r?.outcome === 'stage_clear',
+      ticks: r?.ticks ?? 0,
+      kills: r?.killCount ?? 0,
+      lives: r?.lives ?? null,
+      firstKillTick: r?.firstKillTick ?? null,
+      enemyTotal: r?.telemetry?.enemyTotal ?? null,
+      playerDeaths: r?.telemetry?.playerDeaths ?? null,
+      playerShots: r?.telemetry?.playerShots ?? null,
+      powerUpsCollected: r?.telemetry?.powerUpsCollected ?? null,
+      playerLevel: r?.telemetry?.finalPlayerLevel ?? null,
+      cellsVisited: r?.telemetry?.cellsVisited ?? null,
+    })),
   }
 
   console.log(JSON.stringify(report, null, 2))

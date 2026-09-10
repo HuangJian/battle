@@ -15,6 +15,8 @@ import { loadConfig } from '../config'
 import { COMPONENT_LABELS, loadConsoleState } from './actions'
 import { readIterMetrics } from './iters'
 import { aggregateNodeHistory, emptyHistory, poolStatus } from './pool-history'
+import { enqueueProbeRun } from './evalboard'
+export { buildEvalBoardView } from './evalboard'
 import type { Component, RlConfig } from '../types'
 // 视图类型单一源：ui/view.ts（api.ts 不再定义本地视图类型）
 import { parsePhaseFromLog, stripIsoPrefix } from '../ui/view'
@@ -951,6 +953,37 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
           })
         } finally {
           busy.delete(`node:${id}`)
+        }
+      }
+      case 'evalProbeRun': {
+        // EvalBench §8/§6.7：只 append 一行 pending（触发队列）；派发期节点配置
+        // 冻结——任一 node:* 动作进行中则 409（与 setNodeEnabled 共 busy 语义）。
+        for (const k of busy) {
+          if (k.startsWith('node:')) return errResp('节点配置调整中，稍后再触发评估批', 409)
+        }
+        if (busy.has('eval:probe')) return errResp('评估入队进行中', 409)
+        const rungFrom = str(body, 'rung_from') || str(body, 'rung') || 'c4l1'
+        const ckpt = str(body, 'ckpt')
+        if (!ckpt) return errResp('缺少 ckpt（权重文件路径）', 400)
+        const policy = str(body, 'policy') === 'god' ? 'god' : 'nn'
+        busy.add('eval:probe')
+        try {
+          const r = enqueueProbeRun({
+            course: ctx.course,
+            rung_from: rungFrom,
+            ckpt,
+            requester: str(body, 'requester') || 'web',
+            iter: Number(body.iter) || 0,
+            policy: policy as 'nn' | 'god',
+            ladder_pos: body.ladder_pos === undefined ? undefined : Number(body.ladder_pos),
+            k_seq: body.k_seq === undefined ? undefined : Number(body.k_seq),
+          })
+          return okResp({
+            ok: true,
+            message: `评估批已入队 ${r.batch_id}${r.deduped ? '（已在队列，去重）' : ''}`,
+          })
+        } finally {
+          busy.delete('eval:probe')
         }
       }
       default:

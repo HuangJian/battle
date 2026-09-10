@@ -320,6 +320,72 @@ export interface PoolView {
   localHash: string
 }
 
+// ────────────────────────── EvalBoard 视图类型（plan/rl-eval-system.md §8；实现 → console/evalboard.ts） ──────────────────────────
+
+export interface EvalGateView {
+  main: boolean
+  cost: boolean
+  style: boolean
+  credible: boolean
+  pass: boolean
+}
+
+export interface EvalLadderRow {
+  rung: string
+  dimension: string
+  lives: number
+  god: { winRate: number | null; lifePrice: number | null; n: number; provisional: boolean | null }
+  batches: number
+  n: number
+  latestWin: number | null
+  windowWin: number | null
+  deltaVsGod: number | null
+  gate: EvalGateView | null
+  partial: boolean
+}
+
+export interface EvalBatchRow {
+  batch_id: string
+  course: string
+  rung_from: string
+  status: string
+  iter: number
+  trigger: string
+  units: { of: number; done: number[] }
+  elapsed_sec: number | null
+  created_ts: string
+}
+
+export interface EvalAlert {
+  id: string
+  severity: 'red' | 'yellow' | 'note' | 'star'
+  message: string
+  blocksVerdict?: boolean
+  rejectBatch?: boolean
+}
+
+export interface EvalBoardView {
+  cachedAt: number
+  course: string
+  ingested: number
+  evalEvery: number | null
+  abWarn: string | null
+  ladder: EvalLadderRow[]
+  alerts: EvalAlert[]
+  batches: EvalBatchRow[]
+  flips: Array<{
+    rung: string
+    from: string
+    to: string
+    delta: number
+    paired: boolean
+    flips: number | null
+    rate: number | null
+  }>
+  rows: number
+  spaceCalibrated: boolean
+}
+
 // ────────────────────────── 纯函数：时间 ──────────────────────────
 
 const p = (x: number): string => String(x).padStart(2, '0')

@@ -970,3 +970,16 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 ## §2026-09-09-goalnn-console-lan-readonly（2026-09-09，用户指令：控制台改局域网只读）
 > **定案（局域网只读 + localhost 控制）**：训练控制台绑 0.0.0.0（局域网可达），POST /api/* 动作仅回环来源可执行（server.requestIP → isLoopbackAddress，fail closed：无法判定来源 = 拒绝，403）；GET 全开但 ?course= 只读课程覆盖（sanitizeViewCourse：真实课程 + 防路径穿越，绝不写 console-state）；客户端 isLocalHost 判定：本机切课程 = 查看 + POST setCourse 同步操作员课程，局域网切课程 = 仅查看 + 写 URL（?course= 可分享/刷新保持）；课程敏感动作统一带 body.course（所见即所控）。备选与否决：LAN 直通 POST —— 否，杀进程/改配置暴露给整网；每会话独立课程 —— 否，LAN 多 tab 本就共享视图。违反后果：局域网可启停组件/改 rl-config、?course= 路径穿越读任意文件。
 > **（2026-09-09 修订，用户指令）**：撤销数据脱敏——cloudflared token 行与复制键局域网照常展示（原「非回环 redactSecrets 剥 auth key」作废）；只读是动作边界，不是数据边界。
+
+## §2026-09-10-goalnn-rleval（2026-09-10，plan/rl-eval-system.md P0–P4 自主实施）
+
+- **背景**：跨课程 RL 评估从人工翻日志变为自动账本。P0 数据底座/入账/字段贯通、P1 阶梯+God 透传、
+  P2 批次派发、P3 统计/哨兵/网页、P4 回填验收工具链一次落地；T0.6/T1.3/P4 实测需集群+活腿，标 TBD(标定)。
+- **备选与否决**：扩 codehash-files.txt 纳 gameplay 集 —— 否，升级波前科+两套生命周期，另立 engine_epoch
+  （表与配方单源 codehash-files.ts 集内文件，TS/Python 双语指纹已对拍一致）；训练循环内改 A 层语料轮转 —— 否，
+  A 层钉死 EVAL_SEEDS 是历史可比基石，B 层 16 段轮转（§11-4）；TS 重写 fetch_task —— 否，双语协议维护翻倍，
+  执行侧走 Python 复用原语；阶梯 max_ticks 沿 §4.2 例 2400 —— 否，实测 god 在 s1 仅 6 杀被截断，改 12000 对齐训练口径。
+- **决定**：B/C 节点门 engine_epoch 严格拒派，A 层过渡期旧 agent 记日志放行（舰队升级完收紧）；W1 入账走控制台
+  read-through（训练循环零改动）；A/B 按 eval_on_round 确定性分配；agent taskKey 无 policy 分量 ←→
+  iterId 命名空间隔离 god/nn（不动节点缓存键，避升级波外负担）。
+- **违反后果**：跨 policy 串键（同 iterId 混 god/nn）、stale 节点产出异构 gameplay 仍过门、2400 截断压胜率抬超时门。

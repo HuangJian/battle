@@ -37,6 +37,7 @@ import { saveComponent } from '../registry'
 import { launchSpec } from '../proc'
 import { monitorTouch } from '../reload-touch'
 import {
+  buildEvalBoardView,
   buildPoolView,
   buildStateView,
   componentLogPayload,
@@ -202,6 +203,10 @@ async function main(): Promise<void> {
         if (req.method === 'GET' && url.pathname === '/api/pool') {
           const fresh = url.searchParams.get('fresh') === '1'
           return json(await buildPoolView(fresh, viewCourse || undefined))
+        }
+        if (req.method === 'GET' && url.pathname === '/api/evalboard') {
+          const fresh = url.searchParams.get('fresh') === '1'
+          return json(await buildEvalBoardView(viewCourse || undefined, fresh))
         }
         if (req.method === 'GET' && url.pathname.startsWith('/api/log/')) {
           const key = url.pathname.slice('/api/log/'.length) as Component

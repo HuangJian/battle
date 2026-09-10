@@ -134,7 +134,16 @@ def dispatch_rollout_phase(
                 # 分发前评估必已收官或到预算。positional args 创建即快照，
                 # 无闭包竞态。eval_gate 随闭包捕获：ppo_backend 收尾时 set 放行本地。
                 if not eval_on_round:
-                    return None
+                    # B 层轮次分配（EvalBench §6.4/stream 模态）：采集队列清空 =
+                    # 窗口开（on_queue_drained），传已置位事件，派一个 100 局单元。
+                    from rl.batch_eval import maybe_dispatch_batch
+
+                    _open = threading.Event()
+                    _open.set()
+                    return maybe_dispatch_batch(
+                        bun, args.out, traj_dir, args, dist_cfg, RUN_ID, it,
+                        window_event=_open,
+                    )
                 if args.mode == "per-tick":
                     return dispatch_eval_bg(
                         bun,
@@ -254,6 +263,16 @@ def dispatch_rollout_phase(
                     eval_thread = dispatch_eval_bg_m1(
                         bun, args.out, args, it, jsonl_path, args.baseline
                     )
+            else:
+                # B 层轮次分配（EvalBench §6.4）：A 在 eval 轮跑，B 在其余轮跑，
+                # 确定性分配、无饥饿。无 pending 批 → None（零开销）。
+                # 窗口 = 本轮（time-bounded by eval_window_sec）；join 预算外溢出
+                # 的在途局后台收完（wver/batch 键控，下窗按 units.done 续跑）。
+                from rl.batch_eval import maybe_dispatch_batch
+
+                eval_thread = maybe_dispatch_batch(
+                    bun, args.out, traj_dir, args, dist_cfg, RUN_ID, it
+                )
     else:
         report = run_rollout(bun, args.out, traj_dir, pairs, args)
     return report, stream_meta, eval_thread, eval_gate, collect_child, spawned_early

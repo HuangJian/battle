@@ -22,6 +22,7 @@ import { MetricsTable } from './panels/MetricsTable'
 import { NodeStats } from './panels/NodeStats'
 import { LogNavCard } from './panels/LogNavCard'
 import { TrainLaunchModal } from './panels/TrainLaunchModal'
+import { EvalBoard } from './panels/EvalBoard'
 import {
   fmtTs,
   latestRow,
@@ -38,7 +39,7 @@ export interface AppProps {
   initial: ConsoleStateView
 }
 
-type DrawerTabKey = 'metrics' | 'nodes' | 'log'
+type DrawerTabKey = 'metrics' | 'nodes' | 'log' | 'eval'
 
 function readLocal(key: string): string | null {
   try {
@@ -450,6 +451,7 @@ export function App({ initial }: AppProps) {
           { key: 'metrics', label: '指标' },
           { key: 'nodes', label: '节点统计' },
           { key: 'log', label: '日志' },
+          { key: 'eval', label: '评估' },
         ]}
         onTab={(k) => setDrawerTab(k as DrawerTabKey)}
         onClose={() => setDrawerTab(null)}
@@ -459,6 +461,9 @@ export function App({ initial }: AppProps) {
           <NodeStats enabled poolFreshNonce={poolFreshNonce} course={viewCourse} />
         ) : null}
         {drawerTab === 'log' ? <LogNavCard stateView={stateView} course={viewCourse} /> : null}
+        {drawerTab === 'eval' ? (
+          <EvalBoard enabled={drawerTab === 'eval'} course={viewCourse} readOnly={readOnly} />
+        ) : null}
       </Drawer>
       {stateView ? (
         <TrainLaunchModal

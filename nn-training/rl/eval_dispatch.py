@@ -132,6 +132,10 @@ class EvalDispatcher:
             # 收到 stage=2000 会走 arena/真实关解析 → stage null → 崩溃。无能力节点
             # 一律跳过，任务自然落回本机 local（已支持 stage-json 透传）。
             need_sj = bool(todo) and any(t[0] >= 2000 for t in todo)
+            # EvalBench §6.6 engine_epoch 门（过渡语义）：ping 自带 engineEpoch 且
+            # 不符 → 拒派；旧 agent 无该字段 → 记日志放行（A 层过渡，待舰队升级完
+            # 成后收紧为严格；B/C 批在 batch_eval 侧恒严格）。
+            epoch_expected = dist_common.compute_engine_epoch()
             alive = []
             for n in cfg.get("nodes", []):
                 if not n.get("enabled", True):
@@ -155,6 +159,13 @@ class EvalDispatcher:
                 if mm(str(ping.get("bunVersion", "?"))) != mm(local_bun):
                     log(f"[eval] node {nid}: bun version mismatch — skipped")
                     continue
+                eph_why = dist_common.check_engine_epoch(ping, epoch_expected)
+                if eph_why:
+                    if not ping.get("engineEpoch"):
+                        log(f"[eval] node {nid}: {eph_why} — allowed during fleet transition")
+                    else:
+                        log(f"[eval] node {nid}: {eph_why} — skipped")
+                        continue
                 c_n = max(1, int(n.get("concurrency") or ping.get("cpus") or 1))
                 alive.append({"id": nid, "url": n["url"], "key": n.get("authKey", ""), "c": c_n})
             if not alive and (local_gate is None or not snapshot_path):
@@ -242,6 +253,26 @@ class EvalDispatcher:
                     "hitRate": manifest.get("hitRate"),
                     "powerUpsCollected": manifest.get("powerUpsCollected"),
                     "playerDamageTaken": manifest.get("playerDamageTaken"),
+                    # T0.4 贯通（EvalBench §3.3 🟡🟠🔴）：export-eval-game 顶层直转，
+                    # 缺键（旧 agent/旧报告）= None，ingest 侧进覆盖率豁免清单。
+                    "playerHits": manifest.get("playerHits"),
+                    "policy": manifest.get("policy", "nn"),
+                    "enemyTotal": manifest.get("enemyTotal"),
+                    "playerDeaths": manifest.get("playerDeaths"),
+                    "playerShots": manifest.get("playerShots"),
+                    "playerLevel": manifest.get("playerLevel"),
+                    "cellsVisited": manifest.get("cellsVisited"),
+                    "firstKillTick": manifest.get("firstKillTick"),
+                    "stuckTicks": manifest.get("stuckTicks"),
+                    "puSpawnBomb": manifest.get("puSpawnBomb"),
+                    "puSpawnTank": manifest.get("puSpawnTank"),
+                    "puSpawnFreeze": manifest.get("puSpawnFreeze"),
+                    "puSpawnShield": manifest.get("puSpawnShield"),
+                    "puSpawnStar": manifest.get("puSpawnStar"),
+                    "puGotBomb": manifest.get("puGotBomb"),
+                    "puGotTank": manifest.get("puGotTank"),
+                    "puGotFreeze": manifest.get("puGotFreeze"),
+                    "puGotShield": manifest.get("puGotShield"),
                     "elapsedSec": manifest.get("elapsedSec"),
                 }
                 with jsonl_lock:

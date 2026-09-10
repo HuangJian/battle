@@ -39,6 +39,7 @@ def parse_m1_eval_report(text: str) -> dict:
         逐关 perStage 数组里的 "total" 后不跟 "outcomes"，不会被误匹配。
     """
     win = None
+    per_game: list = []
     for line in text.splitlines():
         # 大小写不敏感（横幅曾只匹配 'winRate' 漏掉 'WIN RATE'——§27 教训）。
         m = re.search(r"win[ -]?rate[=:\s]+([\d.]+)\s*%", line, re.IGNORECASE)
@@ -56,7 +57,16 @@ def parse_m1_eval_report(text: str) -> dict:
         cleared = int(m2.group(1)) if m2 else 0
         m3 = re.search(r'"error": (\d+)', oc)
         error = int(m3.group(1)) if m3 else 0
-    return {"winRate": win, "total": total, "cleared": cleared, "error": error}
+    # D5(a) 逐局行：stdout 是干净 JSON（m1-eval 进度走 stderr），整段解析取 perGame。
+    # 注意：本函数收的是 stdout+stderr 合并文本（横幅在 stderr），整段 json 必失败——
+    # perGame 由 run_clean_eval 从 proc.stdout 单独提取后并入（见下）。
+    try:
+        doc = json.loads(text)
+        if isinstance(doc, dict) and isinstance(doc.get("perGame"), list):
+            per_game = doc["perGame"]
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return {"winRate": win, "total": total, "cleared": cleared, "error": error, "perGame": per_game}
 
 
 # 干净评估最大重跑次数：error 局 > 0 就整批重跑（节点瞬态失败常见——it33 实测
@@ -121,6 +131,13 @@ def run_clean_eval(bun: str, rl_path: str, args, _runner=None) -> dict:
                     f"m1-eval rc={proc.returncode}: {(proc.stderr or proc.stdout)[-400:]}"
                 )
             res = parse_m1_eval_report(proc.stdout + "\n" + proc.stderr)
+            # D5(a)：逐局 perGame 只在干净 stdout 里（合并文本 json 必失败，见上）。
+            try:
+                _doc = json.loads(proc.stdout)
+                if isinstance(_doc, dict) and isinstance(_doc.get("perGame"), list):
+                    res["perGame"] = _doc["perGame"]
+            except (json.JSONDecodeError, ValueError):
+                pass
         err = res.get("error") or 0
         if err > 0 and attempts < CLEAN_EVAL_MAX_RETRY:
             log(
@@ -162,6 +179,22 @@ def dispatch_eval_bg_m1(
             }
             with open(jsonl_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec) + "\n")
+            # D5(a)：m1 逐局行落盘（与 per-tick 链路同文件同口径，wver+iter 对账）。
+            try:
+                import dist_common
+                from rl.eval_ingest import write_m1_game_rows
+
+                _wver16 = dist_common.weights_fingerprint(rl_path)[:16]
+                _n = write_m1_game_rows(
+                    Path(jsonl_path).parent / "eval_log.jsonl",
+                    list(er.get("perGame") or []),
+                    it=it,
+                    wver16=_wver16,
+                    policy="goal" if args.goal else "intent-exec",
+                )
+                log(f"eval it{it}: m1 per-game rows={_n} -> eval_log.jsonl")
+            except Exception as e_rows:
+                log(f"WARN m1 per-game rows failed (summary kept): {e_rows}")
             if ev is not None:
                 log(
                     f"eval it{it}: clean winRate={ev:.1%} ({er['games']} games) "

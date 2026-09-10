@@ -3,7 +3,7 @@
  *  动作语义不变（§1 硬约束 3）：POST → 服务端写回 → 客户端拉一次 state。409 busy
  *  互斥转译为人话（GLM-U4）。 */
 
-import type { ConsoleStateView, LogPayload, PoolView } from '../../../ui/view'
+import type { ConsoleStateView, EvalBoardView, LogPayload, PoolView } from '../../../ui/view'
 
 export interface ActionResult {
   ok: boolean
@@ -68,4 +68,14 @@ export async function fetchLog(
   const r = await fetch(`/api/log/${key}?${params.toString()}`)
   if (!r.ok) throw new Error(`/api/log/${key} HTTP ${r.status}`)
   return (await r.json()) as LogPayload
+}
+
+export async function fetchEvalBoard(fresh = false, course = ''): Promise<EvalBoardView> {
+  const params = new URLSearchParams()
+  if (fresh) params.set('fresh', '1')
+  if (course) params.set('course', course)
+  const q = params.toString()
+  const r = await fetch(`/api/evalboard${q ? `?${q}` : ''}`)
+  if (!r.ok) throw new Error(`/api/evalboard HTTP ${r.status}`)
+  return (await r.json()) as EvalBoardView
 }

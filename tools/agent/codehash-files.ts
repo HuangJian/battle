@@ -92,6 +92,65 @@ export function computeCodeHash(manifestPath?: string): string {
   return computeCodeHashFromFiles(collectCodeHashEntries(manifestPath))
 }
 
+// ---------------- engine_epoch gameplay 文件集（EvalBench §2.5） ----------------
+/**
+ * gameplay 文件集（EvalBench §2.5 唯一源）：src/game/** + src/config/** +
+ * src/utils/**（含 RNG）+ src/ai/**（God AI）+ tools/sim/export-eval-game.ts；
+ * God 侧借用 freeze golden tools/det-golden.v1.sha256 作行为指纹分量。
+ * 目录条目递归（F3 过滤同 codeHash）；单文件条目（'/' 不结尾）直接纳入。
+ * 本表与配方都在集内文件 ⇒ 改表/改配方即触发节点升级波（fail-closed 前提）。
+ */
+export const GAMEPLAY_SPECS: readonly string[] = [
+  'src/game/',
+  'src/config/',
+  'src/utils/',
+  'src/ai/',
+  'tools/sim/export-eval-game.ts',
+  'tools/det-golden.v1.sha256',
+]
+
+/** 按 spec 表展开文件集（root 缺省仓库根；排序确定性；缺失条目跳过）。 */
+export function collectSpecEntries(
+  specs: readonly string[],
+  root: string = REPO_ROOT,
+): { relPath: string; content: Buffer }[] {
+  const out: { relPath: string; content: Buffer }[] = []
+  const walk = (dir: string): void => {
+    if (!fs.existsSync(dir)) return
+    for (const name of [...fs.readdirSync(dir)].sort()) {
+      if (isSkippedCodeHashDir(name)) continue
+      const p = path.join(dir, name)
+      const st = fs.statSync(p)
+      if (st.isDirectory()) walk(p)
+      else if (!isSkippedCodeHashFile(name))
+        out.push({
+          relPath: path.relative(root, p).replace(/\\/g, '/'),
+          content: fs.readFileSync(p),
+        })
+    }
+  }
+  for (const raw of specs) {
+    const s = raw.replace(/\\/g, '/')
+    if (s.endsWith('/')) walk(path.join(root, ...s.slice(0, -1).split('/')))
+    else {
+      const p = path.join(root, ...s.split('/'))
+      if (fs.existsSync(p) && fs.statSync(p).isFile())
+        out.push({
+          relPath: path.relative(root, p).replace(/\\/g, '/'),
+          content: fs.readFileSync(p),
+        })
+    }
+  }
+  return [...new Map(out.map((e) => [e.relPath, e])).values()].sort((a, b) =>
+    a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0,
+  )
+}
+
+/** gameplay 文件集指纹（与 dist codeHash 同配方）。 */
+export function gameplayFingerprint(root: string = REPO_ROOT): string {
+  return computeCodeHashFromFiles(collectSpecEntries(GAMEPLAY_SPECS, root))
+}
+
 /** 诊断报告（F4，plan/dist-codehash-stale-fix.md）：`sha8\tsize\trelPath` 按 relPath
  * 排序，末行 `codeHash=<full>`——与 dist_common.code_hash_report() 同格式，双侧 diff
  * 直接看出多/少/改。 */

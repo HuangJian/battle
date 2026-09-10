@@ -46,6 +46,7 @@ import {
   collectCodeHashEntries,
   computeCodeHash,
   computeCodeHashFromFiles,
+  gameplayFingerprint,
   REPO_ROOT,
 } from './codehash-files'
 
@@ -251,6 +252,39 @@ function cachedGitShortHash(): string {
 
 /** 模块级 memo 单元：null=未算/已失效，非 null=缓存值，仅在 git pull 切换后置空。 */
 const gitShortMemo: { value: string | null } = { value: null }
+
+// ---------------- engine_epoch（EvalBench §2.5/§6.6：eval 节点门新增指纹） ----------------
+// engine_epoch = sha256(git_full_commit + '\n' + gameplayFingerprint)[0:16]，与
+// tools/training/evalboard/engine.ts 同式（表与配方唯一源 = codehash-files.ts
+// GAMEPLAY_SPECS，集内文件 ⇒ 改表即触发升级波）。节点 eval 门（dist_common /
+// eval_dispatch）比对该指纹：改引擎/config/RNG/God 不改名 codeHash 的 stale 节点
+// 会被拒派（fail-closed）。短 hash 不够——epoch 必须用全 commit。
+function gitFullHash(): string {
+  try {
+    const r = spawnSync('git', ['rev-parse', 'HEAD'], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      windowsHide: true,
+    })
+    return r.status === 0 ? r.stdout.trim() : 'nogit'
+  } catch {
+    return 'nogit'
+  }
+}
+
+/** memo 化 engine_epoch（与 codeHash/gitShort 同策略：仅 git pull 切换后置空）。 */
+function memoizedEngineEpoch(): string {
+  if (engineEpochMemo.value === null) {
+    engineEpochMemo.value = createHash('sha256')
+      .update(`${gitFullHash()}\n${gameplayFingerprint()}`)
+      .digest('hex')
+      .slice(0, 16)
+  }
+  return engineEpochMemo.value
+}
+
+/** 模块级 memo 单元（惰性）：null=未算/已失效，非 null=缓存值。 */
+const engineEpochMemo: { value: string | null } = { value: null }
 
 // ---------------- authKey ----------------
 function loadOrCreateAuthKey(): string {
@@ -1018,6 +1052,7 @@ async function handle(req: Request): Promise<Response> {
       if (r.changed) {
         codeHashMemo.value = null
         gitShortMemo.value = null
+        engineEpochMemo.value = null
         console.log(
           `[sampler-agent] pulled ${r.branch} ${r.oldSha.slice(0, 8)} -> ${r.newSha.slice(0, 8)}`,
         )
@@ -1367,6 +1402,9 @@ async function handle(req: Request): Promise<Response> {
       bunVersion: Bun.version,
       agentVersion: cachedGitShortHash(),
       cpus: CPUS,
+      // EvalBench §6.6：gameplay 指纹（训练机 engine_epoch 比对用；旧 agent 无此字段
+      // → 按 engine 未知处理，B/C 批任务拒派，A 层 nn 评估不受影响）。
+      engineEpoch: memoizedEngineEpoch(),
       // §353：rollout 引擎与 node 版本（纯观测；调度口径不变）
       rolloutEngine: rolloutRunner().engine,
       nodeVersion: rolloutRunner().node?.version ?? null,

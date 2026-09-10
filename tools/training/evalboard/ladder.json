@@ -1,0 +1,603 @@
+{
+  "version": "v1",
+  "rungs": [
+    {
+      "id": "c4l1",
+      "idx": 0,
+      "stage": {
+        "id": -1,
+        "name": "arena-13x13-4enemies",
+        "tiles": [
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss"
+        ],
+        "enemies": ["basic", "basic", "basic", "basic"],
+        "enemyCount": 4,
+        "playerSpawn": {
+          "col": 12,
+          "row": 17
+        },
+        "enemySpawns": [
+          {
+            "col": 7,
+            "row": 6
+          },
+          {
+            "col": 12,
+            "row": 6
+          },
+          {
+            "col": 17,
+            "row": 6
+          }
+        ]
+      },
+      "lives": 1,
+      "level": 0,
+      "difficulty": "hard",
+      "max_ticks": 12000,
+      "mapHash": "884348eb10a07d6d",
+      "god": {
+        "winRate": null,
+        "lifePrice": null,
+        "n": 0,
+        "provisional": null
+      },
+      "dimension": "基准（c4-margin 在此）"
+    },
+    {
+      "id": "c6l1",
+      "idx": 1,
+      "stage": {
+        "id": -1,
+        "name": "arena-13x13-6enemies",
+        "tiles": [
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss"
+        ],
+        "enemies": ["basic", "basic", "basic", "basic", "basic", "basic"],
+        "enemyCount": 6,
+        "playerSpawn": {
+          "col": 12,
+          "row": 17
+        },
+        "enemySpawns": [
+          {
+            "col": 7,
+            "row": 6
+          },
+          {
+            "col": 12,
+            "row": 6
+          },
+          {
+            "col": 17,
+            "row": 6
+          }
+        ]
+      },
+      "lives": 1,
+      "level": 0,
+      "difficulty": "hard",
+      "max_ticks": 12000,
+      "mapHash": "ad3a339f6277b22d",
+      "god": {
+        "winRate": null,
+        "lifePrice": null,
+        "n": 0,
+        "provisional": null
+      },
+      "dimension": "敌数"
+    },
+    {
+      "id": "c8l2",
+      "idx": 2,
+      "stage": {
+        "id": -1,
+        "name": "arena-13x13-8enemies",
+        "tiles": [
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss"
+        ],
+        "enemies": ["basic", "basic", "basic", "basic", "basic", "basic", "basic", "basic"],
+        "enemyCount": 8,
+        "playerSpawn": {
+          "col": 12,
+          "row": 17
+        },
+        "enemySpawns": [
+          {
+            "col": 7,
+            "row": 6
+          },
+          {
+            "col": 12,
+            "row": 6
+          },
+          {
+            "col": 17,
+            "row": 6
+          }
+        ]
+      },
+      "lives": 2,
+      "level": 0,
+      "difficulty": "hard",
+      "max_ticks": 12000,
+      "mapHash": "49838527a26a94da",
+      "god": {
+        "winRate": null,
+        "lifePrice": null,
+        "n": 0,
+        "provisional": null
+      },
+      "dimension": "敌数 + 命数"
+    },
+    {
+      "id": "c10l2",
+      "idx": 3,
+      "stage": {
+        "id": -1,
+        "name": "arena-13x13-10enemies",
+        "tiles": [
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss"
+        ],
+        "enemies": [
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic"
+        ],
+        "enemyCount": 10,
+        "playerSpawn": {
+          "col": 12,
+          "row": 17
+        },
+        "enemySpawns": [
+          {
+            "col": 7,
+            "row": 6
+          },
+          {
+            "col": 12,
+            "row": 6
+          },
+          {
+            "col": 17,
+            "row": 6
+          }
+        ]
+      },
+      "lives": 2,
+      "level": 0,
+      "difficulty": "hard",
+      "max_ticks": 12000,
+      "mapHash": "07c0701823c03edc",
+      "god": {
+        "winRate": null,
+        "lifePrice": null,
+        "n": 0,
+        "provisional": null
+      },
+      "dimension": "敌数"
+    },
+    {
+      "id": "c14l3",
+      "idx": 4,
+      "stage": {
+        "id": -1,
+        "name": "arena-13x13-14enemies",
+        "tiles": [
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss"
+        ],
+        "enemies": [
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic"
+        ],
+        "enemyCount": 14,
+        "playerSpawn": {
+          "col": 12,
+          "row": 17
+        },
+        "enemySpawns": [
+          {
+            "col": 7,
+            "row": 6
+          },
+          {
+            "col": 12,
+            "row": 6
+          },
+          {
+            "col": 17,
+            "row": 6
+          }
+        ]
+      },
+      "lives": 3,
+      "level": 0,
+      "difficulty": "hard",
+      "max_ticks": 12000,
+      "mapHash": "2ce2f115cf8c4cc4",
+      "god": {
+        "winRate": null,
+        "lifePrice": null,
+        "n": 0,
+        "provisional": null
+      },
+      "dimension": "敌数 + 命数"
+    },
+    {
+      "id": "c20l3",
+      "idx": 5,
+      "stage": {
+        "id": -1,
+        "name": "arena-13x13-20enemies",
+        "tiles": [
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssss.............sssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss",
+          "ssssssssssssssssssssssssss"
+        ],
+        "enemies": [
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic"
+        ],
+        "enemyCount": 20,
+        "playerSpawn": {
+          "col": 12,
+          "row": 17
+        },
+        "enemySpawns": [
+          {
+            "col": 7,
+            "row": 6
+          },
+          {
+            "col": 12,
+            "row": 6
+          },
+          {
+            "col": 17,
+            "row": 6
+          }
+        ]
+      },
+      "lives": 3,
+      "level": 0,
+      "difficulty": "hard",
+      "max_ticks": 12000,
+      "mapHash": "c5d489f5ac16cc46",
+      "god": {
+        "winRate": null,
+        "lifePrice": null,
+        "n": 0,
+        "provisional": null
+      },
+      "dimension": "经典关敌量级"
+    },
+    {
+      "id": "s1l3b0",
+      "idx": 6,
+      "stage": {
+        "id": 1,
+        "name": "Outpost-nobase",
+        "tiles": [
+          "..........................",
+          "..........................",
+          "..bb..bb..bb..bb..bb..bb..",
+          "..bb..bb..bb..bb..bb..bb..",
+          "..bb..bb..bb..bb..bb..bb..",
+          "..bb..bb..bb..bb..bb..bb..",
+          "..bb..bb..bbssbb..bb..bb..",
+          "..bb..bb..bbssbb..bb..bb..",
+          "..bb..bb..bb..bb..bb..bb..",
+          "..bb..bb..........bb..bb..",
+          "..bb..bb..........bb..bb..",
+          "..........bb..bb..........",
+          "..........bb..bb..........",
+          "bb..bbbb..........bbbb..bb",
+          "ss..bbbb..........bbbb..ss",
+          "..........bb..bb..........",
+          "..........bbbbbb..........",
+          "..bb..bb..bbbbbb..bb..bb..",
+          "..bb..bb..bb..bb..bb..bb..",
+          "..bb..bb..bb..bb..bb..bb..",
+          "..bb..bb..bb..bb..bb..bb..",
+          "..bb..bb..........bb..bb..",
+          "..bb..bb..........bb..bb..",
+          "..bb..bb...bbbb...bb..bb..",
+          "...........b..b...........",
+          "...........b..b..........."
+        ],
+        "enemies": [
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "fast",
+          "fast"
+        ],
+        "enemyCount": 20
+      },
+      "lives": 3,
+      "level": 0,
+      "difficulty": "hard",
+      "max_ticks": 12000,
+      "mapHash": "d82a05b900e02c2b",
+      "god": {
+        "winRate": null,
+        "lifePrice": null,
+        "n": 0,
+        "provisional": null
+      },
+      "dimension": "地形（基地关闭，隔离变量）"
+    },
+    {
+      "id": "s1l3b1",
+      "idx": 7,
+      "stage": {
+        "id": 1,
+        "name": "Outpost",
+        "tiles": [
+          "..........................",
+          "..........................",
+          "..bb..bb..bb..bb..bb..bb..",
+          "..bb..bb..bb..bb..bb..bb..",
+          "..bb..bb..bb..bb..bb..bb..",
+          "..bb..bb..bb..bb..bb..bb..",
+          "..bb..bb..bbssbb..bb..bb..",
+          "..bb..bb..bbssbb..bb..bb..",
+          "..bb..bb..bb..bb..bb..bb..",
+          "..bb..bb..........bb..bb..",
+          "..bb..bb..........bb..bb..",
+          "..........bb..bb..........",
+          "..........bb..bb..........",
+          "bb..bbbb..........bbbb..bb",
+          "ss..bbbb..........bbbb..ss",
+          "..........bb..bb..........",
+          "..........bbbbbb..........",
+          "..bb..bb..bbbbbb..bb..bb..",
+          "..bb..bb..bb..bb..bb..bb..",
+          "..bb..bb..bb..bb..bb..bb..",
+          "..bb..bb..bb..bb..bb..bb..",
+          "..bb..bb..........bb..bb..",
+          "..bb..bb..........bb..bb..",
+          "..bb..bb...bbbb...bb..bb..",
+          "...........bEEb...........",
+          "...........bEEb..........."
+        ],
+        "enemies": [
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "basic",
+          "fast",
+          "fast"
+        ],
+        "enemyCount": 20
+      },
+      "lives": 3,
+      "level": 0,
+      "difficulty": "hard",
+      "max_ticks": 12000,
+      "mapHash": "d2bbe96b56186b64",
+      "god": {
+        "winRate": null,
+        "lifePrice": null,
+        "n": 0,
+        "provisional": null
+      },
+      "dimension": "基地防守"
+    }
+  ],
+  "note": "c4l1 基准；维度 敌数→命数→地形→基地→关卡泛化（§4.1）。god 未填 = 基线未跑（P1 T1.3）。"
+}

@@ -68,6 +68,9 @@ def run_local_eval_game(
     stage_json: str = "",
     lives_override: int | None = None,
     player_level: int | None = None,
+    # T1.2 policy 透传（EvalBench C 层 God 基线；'god' → export-eval-game 真 God-AI，
+    # 权重快照不需存在但调用方仍传——本地直跑与节点同报告 schema）。
+    policy: str = "nn",
 ) -> dict:
     """本机直跑一局贪心评估（与节点 agent 同一 runner / 同一报告 schema）。
 
@@ -104,6 +107,9 @@ def run_local_eval_game(
         cmd += ["--lives-override", str(lives_override)]
     if player_level is not None:
         cmd += ["--player-level", str(player_level)]
+    # T1.2：非 nn 策略透传（god 局权重文件不需要，export 侧忽略 --weights）。
+    if policy and policy != "nn":
+        cmd += ["--policy", policy]
     t0 = time.time()
     proc = subprocess.run(
         cmd,

@@ -6,6 +6,23 @@
 
 ---
 
+## §21 RL EvalBench P0–P4 落地（2026-09-10，代码全绿，实测待标定）
+
+> P0 数据底座（EvalStore schema v1/幂等入账/可比性断言/覆盖率）+ 字段贯通
+> （export-eval-game 顶层 16 字段/stuck max-streak/pu 分类型；eval_dispatch 转发；
+> eval_m1 补 perGame 落盘）+ P1（ladder.json 8 关冻结、policy=god 端到端 1 局通过、
+> max_ticks 12000 对齐训练口径）+ P2（BatchEvalRunner/双模态 hook/队列文件桥/
+> engine_epoch 门）+ P3（stats/哨兵 S1–S12/EvalBoard 网页入抽屉）+ P4（backfill/verify-p4 工具）。
+> 决策 → DECISIONS §2026-09-10-goalnn-rleval。`bun run check` 1911 pass + build OK。
+>
+> **TBD(标定，须集群+活腿，代码路径已就绪）**：① 200 局打表（c4l1/c20l3/s1l3b1 分档 T）；
+> ② 真实训练中 B 单元墙钟 + 同窗等待（per-tick/serial）；③ Δ_space（God probe0 vs eval860k
+> 各 400 局 @c4l1）→ space_calibration.json；④ God 全阶梯 8×1600 局基线（放无训练时段，
+> 预期 ~15–16 min @15 并发）；⑤ P4 三腿回填（本机无 ckpt：p3-kb1/c4-kb1/c4-margin 权重不在盘）。
+> God c4l1 新基线若与 FMAP 旧值 64 对不上，先查 Δ_space 再继续（P1 DoD）。
+> 本机可跑：`EVALBOARD_DATA=<空目录> bun tools/training/evalboard/backfill.ts --dry` 演练入队；
+> 网页看板 `bun run train` → 抽屉「评估」。
+
 ## §20 c4-kb1 开腿：it5 43/100 过门，缰绳零张力正常（2026-09-09）
 
 > kb1 定格 it52 停腿 → c4-kb1 09:24 启动，交接干净无并行（kb1 孤儿 it53-job

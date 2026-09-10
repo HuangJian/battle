@@ -8,7 +8,9 @@
  *
  * 与训练 rollout 的语义差异（有意为之）：
  *   - 动作 = 掩码 argmax（无探索噪声）；整局零随机决策 → 同 (权重, 关, seed) 逐 tick 确定。
- *   - 只写 `_eval_report.json`（outcome/ticks/win/cleared/score/dims），不产 trajectory shards。
+ *   - 只写 `_eval_report.json`（outcome/ticks/win/cleared/score/dims/scorable +
+ *     T0.4 顶层：enemyTotal/playerDeaths/playerShots/playerLevel/cellsVisited/
+ *     firstKillTick/stuckTicks/puSpawn{5}/puGot{4}），不产 trajectory shards。
  *   - 报告同时携带 `playerHits`（player_hit 事件数：死亡 + 星盾消耗）与
  *     `playerDamageTaken`（player_damage 非致命扣血累计）——与 export-rl-rollout
  *     telemetry 同语义（评估报告 schema 变更，dist 哈希集节点须随新代码同步）。
@@ -140,6 +142,23 @@ interface Telemetry {
   playerHits: number
   /** 非致命扣血累计（player_damage 事件 damage 累计；致死/星盾不推）。 */
   playerDamageTaken: number
+  /** 道具掉落分类型（seen-ids census，与 export-rl-rollout 同语义）。 */
+  puSpawnBomb: number
+  puSpawnTank: number
+  puSpawnFreeze: number
+  puSpawnShield: number
+  puSpawnStar: number
+  /** 道具拾取分类型（powerup_collected 事件载荷自带类型，引擎不动）。 */
+  puGotBomb: number
+  puGotTank: number
+  puGotFreeze: number
+  puGotShield: number
+  /**
+   * 整局最大连续「原地 + 未命中」tick 数（EvalBench T0.4 新埋点，检出与
+   * export-rl-rollout 同式：中心 cell 不变且本 tick 未命中则 streak++ 否则清零；
+   * 上报取整局 max streak，供 T3 stuckP95）。
+   */
+  stuckTicks: number
 }
 
 function countBaseWall(world: World): number {
@@ -200,6 +219,24 @@ interface EvalResult {
   playerDamageTaken: number
   playerShots: number
   powerUpsCollected: number
+  /** T0.4 提顶层（scorable 有、需提顶层 §3.3 🟠）。 */
+  enemyTotal: number
+  playerDeaths: number
+  playerLevel: number
+  /** 采样口径（TELEMETRY_SAMPLE_TICKS，非精确覆盖，schema 注明）。 */
+  cellsVisited: number
+  firstKillTick: number | null
+  /** T0.4 新埋点（整局 max streak，见 Telemetry.stuckTicks）。 */
+  stuckTicks: number
+  puSpawnBomb: number
+  puSpawnTank: number
+  puSpawnFreeze: number
+  puSpawnShield: number
+  puSpawnStar: number
+  puGotBomb: number
+  puGotTank: number
+  puGotFreeze: number
+  puGotShield: number
 }
 
 export function runEvalOne(
@@ -296,9 +333,23 @@ export function runEvalOne(
     enemyHits: 0,
     playerHits: 0,
     playerDamageTaken: 0,
+    puSpawnBomb: 0,
+    puSpawnTank: 0,
+    puSpawnFreeze: 0,
+    puSpawnShield: 0,
+    puSpawnStar: 0,
+    puGotBomb: 0,
+    puGotTank: 0,
+    puGotFreeze: 0,
+    puGotShield: 0,
+    stuckTicks: 0,
   }
   const seenPuIds = new Set<number>()
   let prevLivePuIds = new Set<number>()
+  // stuck 检出状态（与 export-rl-rollout 同式；上报取 max streak）。
+  let stuckStreak = 0
+  let stuckMax = 0
+  let prevCell = { col: -1, row: -1 }
 
   let t = 0
   let outcome: SimOutcome = 'max_ticks'
@@ -327,6 +378,7 @@ export function runEvalOne(
 
     // ---- telemetry（语义对齐 simulation-runner / export-rl-rollout）----
     let collectedThisTick = 0
+    let hitThisTick = false
     for (const e of world.consumeEvents()) {
       if (e.type === 'tank_destroyed') {
         if ((e as any).by === 'player' && tel.firstKillTick === undefined) tel.firstKillTick = t - 1
@@ -339,10 +391,16 @@ export function runEvalOne(
         tel.playerShots++
       } else if (e.type === 'enemy_hit') {
         tel.enemyHits++
+        hitThisTick = true
       } else if (e.type === 'powerup_collected') {
         collectedThisTick++
         tel.powerUpsCollected++
         if ((e as any).powerUp === 'star') tel.starsCollected++
+        const put = (e as any).powerUp
+        if (put === 'bomb') tel.puGotBomb++
+        else if (put === 'tank') tel.puGotTank++
+        else if (put === 'freeze') tel.puGotFreeze++
+        else if (put === 'shield') tel.puGotShield++
       }
     }
     // power-up census（seen-ids + same-tick pickup 对账，镜像 runner）
@@ -353,12 +411,29 @@ export function runEvalOne(
         if (!seenPuIds.has(pu.id)) {
           seenPuIds.add(pu.id)
           tel.powerUpsSpawned++
+          if (pu.type === 'bomb') tel.puSpawnBomb++
+          else if (pu.type === 'tank') tel.puSpawnTank++
+          else if (pu.type === 'freeze') tel.puSpawnFreeze++
+          else if (pu.type === 'shield') tel.puSpawnShield++
+          else if (pu.type === 'star') tel.puSpawnStar++
         }
       }
       let vanished = 0
       for (const id of prevLivePuIds) if (!live.has(id)) vanished++
       tel.powerUpsSpawned += Math.max(0, collectedThisTick - vanished)
       prevLivePuIds = live
+    }
+    // 停滞检出（与 export-rl-rollout 同式；上报取整局 max streak）。
+    {
+      const pcx = Math.floor(((world.player?.x ?? 0) + 16) / CELL)
+      const pcy = Math.floor(((world.player?.y ?? 0) + 16) / CELL)
+      if (world.player?.alive && pcx === prevCell.col && pcy === prevCell.row && !hitThisTick) {
+        stuckStreak++
+        if (stuckStreak > stuckMax) stuckMax = stuckStreak
+      } else {
+        stuckStreak = 0
+      }
+      prevCell = { col: pcx, row: pcy }
     }
     if (t % TELEMETRY_SAMPLE_TICKS === 0) {
       tel.basePressureSum += sampleBasePressure(world)
@@ -419,6 +494,7 @@ export function runEvalOne(
   for (const k of Object.keys(scored.dims) as DimensionKey[]) {
     dims[k] = { value: scored.dims[k].value, raw: scored.dims[k].raw }
   }
+  tel.stuckTicks = stuckMax
   return {
     outcome,
     lossDetail,
@@ -441,6 +517,21 @@ export function runEvalOne(
     playerDamageTaken: tel.playerDamageTaken,
     playerShots: tel.playerShots,
     powerUpsCollected: tel.powerUpsCollected,
+    enemyTotal: tel.enemyTotal,
+    playerDeaths: tel.playerDeaths,
+    playerLevel: world.playerLevel,
+    cellsVisited: tel.cellsVisited.size,
+    firstKillTick: tel.firstKillTick ?? null,
+    stuckTicks: tel.stuckTicks,
+    puSpawnBomb: tel.puSpawnBomb,
+    puSpawnTank: tel.puSpawnTank,
+    puSpawnFreeze: tel.puSpawnFreeze,
+    puSpawnShield: tel.puSpawnShield,
+    puSpawnStar: tel.puSpawnStar,
+    puGotBomb: tel.puGotBomb,
+    puGotTank: tel.puGotTank,
+    puGotFreeze: tel.puGotFreeze,
+    puGotShield: tel.puGotShield,
   }
 }
 
@@ -544,6 +635,23 @@ function main(): void {
     playerDamageTaken: res.playerDamageTaken,
     hitRate: res.playerShots > 0 ? +(res.enemyHits / res.playerShots).toFixed(4) : 0,
     powerUpsCollected: res.powerUpsCollected,
+    // T0.4 顶层贯通（§3.3 🟠🔴）：EvalStore / eval_dispatch.record() 直读这些键。
+    enemyTotal: res.enemyTotal,
+    playerDeaths: res.playerDeaths,
+    playerShots: res.playerShots,
+    playerLevel: res.playerLevel,
+    cellsVisited: res.cellsVisited,
+    firstKillTick: res.firstKillTick,
+    stuckTicks: res.stuckTicks,
+    puSpawnBomb: res.puSpawnBomb,
+    puSpawnTank: res.puSpawnTank,
+    puSpawnFreeze: res.puSpawnFreeze,
+    puSpawnShield: res.puSpawnShield,
+    puSpawnStar: res.puSpawnStar,
+    puGotBomb: res.puGotBomb,
+    puGotTank: res.puGotTank,
+    puGotFreeze: res.puGotFreeze,
+    puGotShield: res.puGotShield,
     ...(wver ? { wver, node: nodeLabel } : {}),
   }
   writeFileSync(`${outDir}/_eval_report.json`, JSON.stringify(report, null, 2))
