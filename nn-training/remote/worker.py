@@ -376,9 +376,9 @@ def run_job(
 
     job_dir = work_dir / jid
     if job_dir.exists():
-        import shutil
+        from platform_utils import rmtree_best_effort
 
-        shutil.rmtree(job_dir)
+        rmtree_best_effort(job_dir)
     job_dir.mkdir(parents=True)
     zip_path = job_dir / "payload.zip"
     zip_path.write_bytes(raw)
@@ -530,7 +530,15 @@ def run_job(
     if not init_w.exists():
         raise ProtocolError("payload 缺 init_weights.json——无法构建模型")
     model = ppo_engine.build_ppo(str(init_w))
-    device_t = torch.device(device)
+    # 设备解析（2026-09-10 TPU 接力）：--device tpu/xla 走 torch_xla 的 xla_device()，
+    # 而不是 torch.device("xla")——后者在部分 torch_xla 版本上拿不到带序号的设备句柄。
+    # torch_xla 只在真的选了 TPU 时才 import（未装 torch_xla 的机器行为不变）。
+    if str(device).lower() in ("tpu", "xla"):
+        import torch_xla.core.xla_model as xm
+
+        device_t = xm.xla_device()
+    else:
+        device_t = torch.device(device)
     opt = None
     if manifest.get("opt_init"):
         opt_dir = job_dir / "opt_init"
@@ -539,7 +547,10 @@ def run_job(
         model.load_state_dict(torch.load(opt_dir / "model.pt", map_location="cpu"))
         model.to(device_t)
         opt = torch.optim.Adam(model.parameters(), lr=float(manifest["lr"]))
-        opt.load_state_dict(torch.load(opt_dir / "opt.pt", map_location=device_t))
+        # 统一 map_location="cpu"：Optimizer.load_state_dict 会把载入张量 cast 到
+        # param 所在设备，所以 XLA/CPU/CUDA 三条路都靠这一句完成搬迁（原先写死
+        # device_t 在 XLA 上会走 torch.load 的设备 hook，跨 runtime 不稳）。
+        opt.load_state_dict(torch.load(opt_dir / "opt.pt", map_location="cpu"))
         log(f"job {jid}: model/opt 从 opt_init tar 恢复（Adam 动量延续，D5）")
     else:
         # 首轮/无 tar：从 init 权重 warm-start（hub 打包时写入 payload 的 weights_json）
@@ -603,12 +614,15 @@ def run_job(
     )
 
     # ---- 产物：weights_json（save_weights_json，D12/G1）+ _ppo_save tar（D5） ----
+    # XLA：先落图执行边界再物化回主机。否则 state_dict() / save_weights_json 读到的是
+    # 尚未执行的惰性图（权重是最新一轮 `mark_step` 时的快照，不是本轮终态）。
+    from ppo.common import _ppo_save, xla_mark_step
+
+    xla_mark_step(device_t)
     model.to("cpu")
     wj_path = job_dir / "weights.json"
     save_weights_json(model, str(wj_path))
     ckpt_dir = job_dir / "ppo_final"
-    from ppo.common import _ppo_save
-
     _ppo_save(str(ckpt_dir), model, opt, int(manifest["epochs"]))
     opt_tar_b64 = encode_opt_tar(pack_opt_tar(ckpt_dir))
 
@@ -680,7 +694,9 @@ def worker_loop(
             # 每 60s 打一次 alive 日志，让用户知道 worker 在正常运行
             # （附带周期内请求数——验证轮询周期真在生效 + 附带连续空闲秒数便于判断孤儿 job）。
             if time.time() - _last_alive_log > 60:
-                log(f"polling hub (no job yet, {done} done, {_polls_since_log} polls, idle {int(time.time() - idle_since)}s)")
+                log(
+                    f"polling hub (no job yet, {done} done, {_polls_since_log} polls, idle {int(time.time() - idle_since)}s)"
+                )
                 _last_alive_log = time.time()
                 _polls_since_log = 0
             time.sleep(poll_sec)
@@ -689,7 +705,9 @@ def worker_loop(
         _polls_since_log = 0  # claim 即上报：alive 行下次只数 claim 之后的轮询，不与本行重复
         jid = job["job_id"]
         lease_token = str(job.get("lease_token", "") or "")
-        log(f"job {jid} claimed — downloading payload ({_polls_since_accept} polls since last accepted result)")
+        log(
+            f"job {jid} claimed — downloading payload ({_polls_since_accept} polls since last accepted result)"
+        )
         # 心跳线程仅在有租约时启动（§343 竞速 hub 不下发 lease_token——无租约可续，
         # 结果胜负由 hub store_result 首写锁定决定，落后者 409 丢弃）。
         # 旧租约模式 hub：H1（review-hy P0）job 执行期间 60s 周期续租，job 结束 join。

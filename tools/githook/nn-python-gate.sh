@@ -18,6 +18,22 @@
 #
 # 沙箱注意：脚本内部**不**把子进程输出重定向到 /dev/null——MSYS 伪设备与
 # Windows 子进程继承存在兼容问题（实测间歇性失败）。输出直通。
+#
+# 沙箱删除守卫（2026-09-10 实测，一次会话踩满两次）：
+#   本环境注入了 WorkBuddy safe-delete shim（改道回收站 + 每轮批量删除配额）。
+#   它会从两个方向打穿门禁，且**与被测代码无关**：
+#     1. mypy 自清理缓存（tmp/.mypy-cache/missing_stubs）被 SHFileOperationW 0x2
+#        拦截 → safe-delete FAIL_CLOSED 抛 SystemExit → mypy INTERNAL ERROR；
+#     2. 同一 turn 内累积删除数越过阈值（实测 count 56 > threshold 50,
+#        scope=turn）→ 之后所有删除被拒 → 依赖真实删除的用例（如
+#        tests/test_workdir_sweep.py）批量转红。
+#   典型触发场景：一个会话里反复跑全量（跑十几次必然踩满配额）。**单跑该文件
+#   会通过**——这就是判据：单跑绿、全量红，且日志里有 [safe-delete] 行 = 环境。
+#   干净验证方式（临时停用 shim，不改仓库）：
+#     CODEBUDDY_SAFE_DELETE_ENABLED=0 bash tools/githook/nn-python-gate.sh
+#   仓库侧的正交修复（已完成）：nn-training/platform_utils.rmtree_best_effort
+#   ——shutil 的 ignore_errors=True 挡不住 SystemExit（BaseException），会把调用
+#   线程打死；所有清理路径一律走该助手。
 set -u
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)

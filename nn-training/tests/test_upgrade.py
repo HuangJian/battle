@@ -22,6 +22,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+from platform_utils import rmtree_best_effort
+
 # 仓库根 battle2（tests/ 上溯 3 层，与 rl/queue_local.py 同约定）——bun 侧脚本在
 # tools/agent/ 下，旧 REPO=nn-training 让对拍测试的 bun 路径指向不存在的
 # nn-training/tools/agent/sampler-agent.ts（2026-09-09 修复）。
@@ -475,7 +477,7 @@ def test_codehash_f3_noise_filtering() -> None:
             )
     finally:
         dist_common.CODE_HASH_MANIFEST = real_manifest
-        shutil.rmtree(base, ignore_errors=True)
+        rmtree_best_effort(base, ignore_errors=True)
 
 
 def test_code_hash_report() -> None:

@@ -95,6 +95,7 @@ def build_model(
     if not resume and bc_path:
         try:
             from data.weights_io import load_weights_json
+
             _meta, _ = load_weights_json(bc_path)
             value_pretrained = float((_meta.get("args") or {}).get("value_coef", 0) or 0) > 0
             if value_pretrained:

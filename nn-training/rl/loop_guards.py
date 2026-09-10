@@ -12,10 +12,10 @@ _report、_kl_streak、_tripped 等）在 TrainingLoop.__init__/迭代方法中�
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
 from typing import Any
 
+from platform_utils import rmtree_best_effort
 from rl.breaker import (
     ENT_BREAK,
     ENT_BREAK_CONSEC,
@@ -149,12 +149,8 @@ class TrainingGuards:
                 except ValueError:
                     continue
                 if n_old <= it - args.keep_iters:
-                    try:
-                        shutil.rmtree(
-                            old, ignore_errors=True
-                        )  # 沙箱删除保护拦截时跳过（磁盘轮转降级）
-                    except BaseException:
-                        pass
+                    # 沙箱删除保护拦截时跳过（磁盘轮转降级）
+                    rmtree_best_effort(old, ignore_errors=True)
             # H9：清理旧 job 目录（已完成的 job 不再需要 payload 与结果文件）
             if getattr(args, "ppo", "local") == "remote":
                 job_root = Path(
@@ -176,10 +172,7 @@ class TrainingGuards:
                         if not isinstance(jit, int):
                             continue
                         if jit <= cutoff and (jd / "result" / "result.json").exists():
-                            try:
-                                shutil.rmtree(jd, ignore_errors=True)
-                            except BaseException:
-                                pass
+                            rmtree_best_effort(jd, ignore_errors=True)
             # §374 同步（2026-09-08）：本地采样波次目录收敛——本轮已全部结算（无在飞
             # 子进程），清失败/废弃局的孤儿 w* 目录（无 _rl_report.json：部分 shard +
             # rollout.log 是死重，PPO/resume 都不消费）。完整波次目录是语料，永不删

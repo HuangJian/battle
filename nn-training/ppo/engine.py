@@ -66,6 +66,8 @@ from ppo.common import (
     load_shard_fields,
     log,
     masked_logsoftmax,
+    optimizer_step,
+    sync_scalars,
 )
 from ppo.trainer import aggregate_stats, tensored_chunks
 from schema import FIRE_DIM, MOVE_DIM
@@ -281,6 +283,25 @@ def ppo_update(
     log(f"[ppo] update start: {len(tensored)} chunks x {epochs} epochs (~{total_steps} grad steps)")
     t0 = time.time()
     last_hb = t0
+    # ---- kickstart ref 前向预计算（2026-09-10，纯吞吐、数值逐位不变） ----
+    # ref_model 是冻结的（eval + requires_grad=False）且 StudentNet BN-free ⇒ 无状态；
+    # ref 输出只依赖 (obs, scalars, mask)，而这三者**逐 chunk 固定、跨 epoch 不变**
+    # （epoch 只重排 chunk 顺序，不改内容）。原实现在最内层每步重算一次完整前向 =
+    # epochs× 白烧：本机 CPU 实测 ref 前向占单步 ~44%（tmp/bench-ppo-throughput.py 的
+    # D-B 差：6.65 -> 9.59 s/step）。此处每个 chunk 只算一次并按索引复用，
+    # ref 成本降到 1/epochs，数值与原实现逐位相同。
+    # 内存代价：len(chunks) x B x 7 floats ≈ 37x512x7x4B ≈ 0.5MB（可忽略）。
+    ref_cache: list[tuple[torch.Tensor, torch.Tensor] | None] = [None] * len(tensored)
+    if ref_model is not None and kickstart_kl > 0:
+        with torch.no_grad():
+            for _i, _e in enumerate(tensored):
+                _rm, _rf, _ = ref_model(_e["obs"], _e["scalars"])
+                _m = _e["mask"]
+                ref_cache[_i] = (
+                    masked_logsoftmax(_rm, _m[:, :MOVE_DIM]),
+                    masked_logsoftmax(_rf, _m[:, MOVE_DIM : MOVE_DIM + FIRE_DIM]),
+                )
+        log(f"[ppo] kickstart ref 预计算完成：{len(tensored)} chunks（原每 epoch 重算）")
     start_epoch = _ppo_load(ckpt_path, model, opt)
     if start_epoch:
         log(
@@ -322,14 +343,11 @@ def ppo_update(
                 # 对采样策略的 KL 惩罚（与 approx_kl_est 同估计量，可微项）
                 loss = loss + kl_coef * ((ratio - 1.0) - (lp_new - lp_old)).mean()
             kick_mean = torch.zeros((), device=device)
-            if ref_model is not None and kickstart_kl > 0:
-                # BC-anchored kickstart（§363，intent.py:292-298 同构）：
-                # KL(π_curr ‖ π_ref) = Σ_a π_curr·(log π_curr − log π_ref)，
-                # 分头求和（与本文件 entropy 口径同构）。
-                with torch.no_grad():
-                    rm, rf, _ = ref_model(obs, sc)
-                    ref_move = masked_logsoftmax(rm, mask[:, :MOVE_DIM])
-                    ref_fire = masked_logsoftmax(rf, mask[:, MOVE_DIM : MOVE_DIM + FIRE_DIM])
+            _ref = ref_cache[int(i)]
+            if _ref is not None:
+                # 预计算缓存（见上方 ref_cache）：数值与「此处现算 ref_model」逐位相同，
+                # 但每 chunk 只付一次前向而非每 epoch 一次。
+                ref_move, ref_fire = _ref
                 kl_m = (move_logp.exp() * (move_logp - ref_move)).sum(dim=-1)
                 kl_f = (fire_logp.exp() * (fire_logp - ref_fire)).sum(dim=-1)
                 kick_mean = (kl_m + kl_f).mean()
@@ -338,23 +356,26 @@ def ppo_update(
             opt.zero_grad()
             loss.backward()
             gn = nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
-            opt.step()
+            optimizer_step(opt, device)
 
             with torch.no_grad():
-                approx_kl = approx_kl_est(lp_old, lp_new).item()
-                kick_log = float(kick_mean.item())
-            stats.append(
-                {
-                    "policy": float(policy_loss.item()),
-                    "value": float(value_loss.item()),
-                    "entropy": float(entropy.item()),
-                    "kl": float(approx_kl),
-                    "kickstart": kick_log,
-                    "mean_ret": float(ret.mean().item()),
-                    "mean_adv": float(adv.mean().item()),
-                    "gnorm": float(gn),
-                }
-            )
+                # 一次同步取全部 8 个标量。原实现逐项取 8 次 = CUDA 上 8 次全设备
+                # 同步（每次 drain 队列，把 CPU/GPU 流水线串起来）——详见
+                # ppo/common.sync_scalars 的说明。数值逐位不变。
+                stats.append(
+                    sync_scalars(
+                        {
+                            "policy": policy_loss,
+                            "value": value_loss,
+                            "entropy": entropy,
+                            "kl": approx_kl_est(lp_old, lp_new),
+                            "kickstart": kick_mean,
+                            "mean_ret": ret.mean(),
+                            "mean_adv": adv.mean(),
+                            "gnorm": gn,
+                        }
+                    )
+                )
             # Heartbeat: pure-print progress/health line; wall-clock only.
             now = time.time()
             if now - last_hb >= HB_SEC:

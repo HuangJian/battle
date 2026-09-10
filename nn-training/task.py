@@ -19,10 +19,11 @@ Targets:
 from __future__ import annotations
 
 import argparse
-import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+from platform_utils import rmtree_best_effort
 
 HERE = Path(__file__).resolve().parent
 PYTHON = sys.executable
@@ -75,7 +76,7 @@ def target_clean() -> int:
     cleaned = 0
     for pycache in HERE.rglob("__pycache__"):
         if pycache.is_dir():
-            shutil.rmtree(pycache, ignore_errors=True)
+            rmtree_best_effort(pycache, ignore_errors=True)
             cleaned += 1
     # 双 tmp 统一（2026-09-08）：临时产物只在仓库根 tmp/（HERE.parent / tmp）
     for log in list(HERE.glob("*.log")) + list((HERE.parent / "tmp").glob("*.log")):

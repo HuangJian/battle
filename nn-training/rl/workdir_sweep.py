@@ -20,9 +20,10 @@ queue_local.pick_tail_race / race_tier_ok）。sweep_failed_wave_dirs 在每轮�
 from __future__ import annotations
 
 import re
-import shutil
 from collections.abc import Callable
 from pathlib import Path
+
+from platform_utils import rmtree_best_effort
 
 REPORT_FILE = "_rl_report.json"
 WAVE_RE = re.compile(r"^w\d+$")
@@ -51,10 +52,13 @@ def sweep_failed_wave_dirs(iter_dir: Path, log: Callable[[str], None] = print) -
     """
     n = 0
     for p in plan_failed_wave_dirs(iter_dir):
+        # rmtree_best_effort 以**返回值**表达成败（不再抛异常），故计数必须挂在
+        # 返回值上——否则沙箱删除保护拦截时会把没删掉的目录也算进 n。
         try:
-            shutil.rmtree(p)
+            removed = rmtree_best_effort(p)
+        except BaseException:
+            removed = False
+        if removed:
             n += 1
             log(f"[workdir-sweep] removed failed wave dir {p.name} (no {REPORT_FILE})")
-        except BaseException:
-            pass
     return n

@@ -398,7 +398,7 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         "--smoke",
         action="store_true",
         help="冒烟预演（配 --ppo remote）：收到冒烟回显结果（remote_worker --echo）后"
-             "作废本轮并干净退出；it 不前进、不写 iteration 事件",
+        "作废本轮并干净退出；it 不前进、不写 iteration 事件",
     )
     ap.add_argument(
         "--remote-hub-url",

@@ -141,7 +141,13 @@ def dispatch_rollout_phase(
                     _open = threading.Event()
                     _open.set()
                     return maybe_dispatch_batch(
-                        bun, args.out, traj_dir, args, dist_cfg, RUN_ID, it,
+                        bun,
+                        args.out,
+                        traj_dir,
+                        args,
+                        dist_cfg,
+                        RUN_ID,
+                        it,
                         window_event=_open,
                     )
                 if args.mode == "per-tick":

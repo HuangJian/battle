@@ -141,12 +141,89 @@ def _unpack_np_state(packed: list) -> None:
     )
 
 
+# ---------------- 设备无关助手（TPU/XLA 接入，2026-09-10） ----------------
+# 背景：GPU 配额耗尽后要拿 Kaggle TPU 的**独立** 20h/周配额接力（net +20h/周）。
+# torch_xla 的语义与 CPU/CUDA 有两处硬差异，不显式处理会「静默不训练」或写坏 ckpt：
+#   1. 优化器步进必须落在显式图执行边界（xm.optimizer_step）——裸 opt.step() 在
+#      XRT/GSPMD 路径上会漏掉边界，梯度不回写参数；
+#   2. state_dict() 里的参数/动量是 XLATensor，torch.save 会 pickle 出设备张量，
+#      跨机 torch.load 还原即炸 —— 必须先物化到 CPU 再落盘。
+# 下面两个助手在 CPU/CUDA 上是**恒等操作**：数值、行为、落盘张量全部不变
+# （AGENTS §2.3 确定性承诺不受影响）。XLA 相关 import 全部延迟到调用点，
+# 保证「未装 torch_xla 的机器」行为与今日逐字节相同。
+
+
+def is_xla(device) -> bool:
+    """device 是否为 XLA/TPU（torch.device('xla') 或 xm.xla_device()）。"""
+    return getattr(device, "type", None) == "xla"
+
+
+def sync_scalars(values: dict[str, torch.Tensor]) -> dict[str, float]:
+    """把一组 device 标量张量用**一次**同步搬回主机（N 次 ``.item()`` → 1 次）。
+
+    为什么（2026-09-10）：三后端每个梯度步各有 6-8 处 ``.item()``/``float()``。CPU 上
+    近乎免费（数据已在主机内存，实测同步税仅 +4 ms/step），但 **CUDA 上每一次都是全设备
+    同步** —— 强制 drain 尚未执行的 kernel 队列，把 CPU 与 GPU 的流水线彻底串行化。
+    per-tick 每轮 148 个梯度步 × 8 次 = **1184 次强制同步/轮**；GPU 侧实测利用率仅
+    ~3%（236 GFLOP/s vs T4 fp32 峰值 8.1 TFLOPS），同步串行化是首要嫌疑，而 CPU 基准
+    对这个开销**完全失明**（这正是它必须按设备分别实测的原因）。
+
+    数值逐位不变：``torch.stack(...).tolist()`` 只 materialize 一次，每个元素与逐项
+    ``float(t.item())`` 返回**同一个 Python float**（float32 → double 无损；混合 dtype
+    由 torch 提升到公共 dtype，不会截断）。
+
+    入参张量会被 ``reshape(())`` 规整为标量；请只传 0 维或单元素张量。
+    """
+    if not values:
+        return {}
+    keys = list(values)
+    stacked = torch.stack([values[k].detach().reshape(()) for k in keys]).tolist()
+    return dict(zip(keys, stacked, strict=True))
+
+
+def optimizer_step(opt, device) -> None:
+    """设备感知的优化器步进：XLA 走 xm.optimizer_step，其余 == 裸 opt.step()。"""
+    if is_xla(device):
+        import torch_xla.core.xla_model as xm
+
+        xm.optimizer_step(opt)
+    else:
+        opt.step()
+
+
+def xla_mark_step(device) -> None:
+    """XLA 图执行边界（非 XLA 设备为 no-op）——保证 host 侧读到的权重是最新值。"""
+    if is_xla(device):
+        import torch_xla.core.xla_model as xm
+
+        xm.mark_step()
+
+
+def _to_cpu_state(obj):
+    """state_dict（可嵌套）→ 张量全部物化到 CPU 的副本，容器类型保持不变。
+
+    CPU/CUDA 上 .detach().cpu() 是 no-op（同一 storage）⇒ torch.save 输出不变；
+    XLA 上把 XLATensor 拉回主机，避免 pickle 设备张量导致跨机还原失败。
+    容器类型必须保留（state_dict 是 OrderedDict，改成 dict 会改变 pickle 字节）。
+    """
+    if isinstance(obj, dict):
+        out = obj.__class__()
+        for k, v in obj.items():
+            out[k] = _to_cpu_state(v)
+        return out
+    if isinstance(obj, (list, tuple)):
+        return obj.__class__(_to_cpu_state(v) for v in obj)
+    if torch.is_tensor(obj):
+        return obj.detach().cpu()
+    return obj
+
+
 def _ppo_save(ckpt_path: str, model, opt, epochs_done: int) -> None:
     """epoch 粒度 checkpoint：model+optimizer 状态 + 已完成 epoch 数 + numpy RNG。
     恢复粒度 = 一个 epoch（从最近 checkpoint 续，重跑该 epoch 的梯度步，秒级）。"""
     os.makedirs(ckpt_path, exist_ok=True)
-    torch.save(model.state_dict(), os.path.join(ckpt_path, "model.pt"))
-    torch.save(opt.state_dict(), os.path.join(ckpt_path, "opt.pt"))
+    torch.save(_to_cpu_state(model.state_dict()), os.path.join(ckpt_path, "model.pt"))
+    torch.save(_to_cpu_state(opt.state_dict()), os.path.join(ckpt_path, "opt.pt"))
     with open(os.path.join(ckpt_path, "state.json"), "w", encoding="utf-8") as f:
         json.dump({"epochs_done": epochs_done, "rng": _pack_np_state()}, f)
 
@@ -169,9 +246,7 @@ def _ppo_load(ckpt_path: str | None, model, opt) -> int:
 
 
 # ---------------- minibatch chunking ----------------
-def chunk_episodes(
-    episodes: list[dict], mb: int, shuffle: bool = True
-) -> list[dict]:
+def chunk_episodes(episodes: list[dict], mb: int, shuffle: bool = True) -> list[dict]:
     """Split per-episode dicts into fixed-size minibatch chunks (last chunk ragged).
 
     GAE is computed per-episode BEFORE chunking; chunks are only an update-
@@ -196,9 +271,7 @@ def chunk_episodes(
     flat = {k: np.concatenate([e[k] for e in episodes], axis=0) for k in keys}
     n = flat["obs"].shape[0]
     idx = np.random.permutation(n)
-    return [
-        {k: v[idx[s : s + mb]] for k, v in flat.items()} for s in range(0, n, mb)
-    ]
+    return [{k: v[idx[s : s + mb]] for k, v in flat.items()} for s in range(0, n, mb)]
 
 
 # ---------------- episode loading skeleton (ppo / ppo_intent 共用) ----------------

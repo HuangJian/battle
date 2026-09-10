@@ -79,8 +79,16 @@ def plan_units(ladder: dict, ladder_pos: int, k: int) -> list[dict]:
                 "tiles26": r["stage"]["tiles"],
                 "forces": _forces_of(r["stage"]),
                 "count": r["stage"].get("enemyCount") or len(r["stage"].get("enemies", [])),
-                **({"player_spawn": r["stage"]["playerSpawn"]} if r["stage"].get("playerSpawn") else {}),
-                **({"enemy_spawns": r["stage"]["enemySpawns"]} if r["stage"].get("enemySpawns") else {}),
+                **(
+                    {"player_spawn": r["stage"]["playerSpawn"]}
+                    if r["stage"].get("playerSpawn")
+                    else {}
+                ),
+                **(
+                    {"enemy_spawns": r["stage"]["enemySpawns"]}
+                    if r["stage"].get("enemySpawns")
+                    else {}
+                ),
             }
         )
         return {
@@ -293,7 +301,11 @@ class BatchEvalRunner:
             for nd in alive:
                 try:
                     dist_common.post_weights(
-                        nd["url"], nd["key"], iter_id, wver, weights_bytes,
+                        nd["url"],
+                        nd["key"],
+                        iter_id,
+                        wver,
+                        weights_bytes,
                         timeout=min(300.0, max(60.0, task_timeout)),
                     )
                     nodes_ok.append(nd)
@@ -312,7 +324,7 @@ class BatchEvalRunner:
             f"[batcheval] {unit['rung']} u{self.unit_idx}/{self.unit_of} "
             f"policy={self.policy}: dispatch {len(todo)} games "
             f"->{[(n['id'], n['c']) for n in nodes_ok]}"
-            + (" [local ×%d]" % local_slots if local_weights else "")
+            + (f" [local ×{local_slots}]" if local_weights else "")
         )
 
         pending: deque[tuple[int, int]] = deque(todo)
@@ -383,10 +395,17 @@ class BatchEvalRunner:
                     jf.write(json.dumps(row) + "\n")
                 _record_agent_meta(
                     self.eval_log.parent / "dist-agent-meta.jsonl",
-                    {"node": nd_id, "mode": "eval", "it": self.batch.get("iter", 0),
-                     "stage": task[0], "seed": task[1], "ok": True, "win": win,
-                     "elapsedSec": manifest.get("elapsedSec"),
-                     "ts": time.strftime("%Y-%m-%d %H:%M:%S")},
+                    {
+                        "node": nd_id,
+                        "mode": "eval",
+                        "it": self.batch.get("iter", 0),
+                        "stage": task[0],
+                        "seed": task[1],
+                        "ok": True,
+                        "win": win,
+                        "elapsedSec": manifest.get("elapsedSec"),
+                        "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    },
                 )
             with lock:
                 settled[0] += 1
@@ -396,21 +415,37 @@ class BatchEvalRunner:
             if nd["id"] == "local":
                 assert local_weights is not None
                 m = run_local_eval_game(
-                    self.bun, local_weights, task[0], task[1],
-                    self.eval_log.parent / "local-batcheval" / f"u{self.unit_idx}_s{task[0]}_seed{task[1]}",
-                    max_ticks=int(unit["maxTicks"]), difficulty=str(unit["difficulty"]),
-                    timeout_sec=task_timeout, wver=key16,
+                    self.bun,
+                    local_weights,
+                    task[0],
+                    task[1],
+                    self.eval_log.parent
+                    / "local-batcheval"
+                    / f"u{self.unit_idx}_s{task[0]}_seed{task[1]}",
+                    max_ticks=int(unit["maxTicks"]),
+                    difficulty=str(unit["difficulty"]),
+                    timeout_sec=task_timeout,
+                    wver=key16,
                     stage_json=str(unit["stageJson"]),
-                    lives_override=int(unit["lives"]), player_level=int(unit["level"]),
+                    lives_override=int(unit["lives"]),
+                    player_level=int(unit["level"]),
                     policy=self.policy,
                 )
             else:
                 m, _files = dist_common.fetch_task(
-                    nd["url"], nd["key"], iter_id=iter_id, wver=key16,
-                    stage=task[0], seed=task[1], max_ticks=int(unit["maxTicks"]),
-                    difficulty=str(unit["difficulty"]), timeout=task_timeout, mode="eval",
+                    nd["url"],
+                    nd["key"],
+                    iter_id=iter_id,
+                    wver=key16,
+                    stage=task[0],
+                    seed=task[1],
+                    max_ticks=int(unit["maxTicks"]),
+                    difficulty=str(unit["difficulty"]),
+                    timeout=task_timeout,
+                    mode="eval",
                     stage_json=str(unit["stageJson"]),
-                    lives_override=int(unit["lives"]), player_level=int(unit["level"]),
+                    lives_override=int(unit["lives"]),
+                    player_level=int(unit["level"]),
                     policy=self.policy,
                 )
             why = dist_common.validate_eval_result(m, key16)
@@ -462,7 +497,9 @@ class BatchEvalRunner:
                 threads.append(threading.Thread(target=worker, args=(nd,), daemon=True))
         if local_weights is not None and local_slots > 0:
             for _ in range(local_slots):
-                threads.append(threading.Thread(target=worker, args=({"id": "local"},), daemon=True))
+                threads.append(
+                    threading.Thread(target=worker, args=({"id": "local"},), daemon=True)
+                )
         for t_ in threads:
             t_.start()
         for t_ in threads:
@@ -474,7 +511,9 @@ class BatchEvalRunner:
             f"dropped={dropped} sec={round(time.time() - t_start, 1)}"
         )
         try:
-            mark_unit_done(data_root(), str(self.batch.get("batch_id")), self.unit_idx, dict(node_games))
+            mark_unit_done(
+                data_root(), str(self.batch.get("batch_id")), self.unit_idx, dict(node_games)
+            )
         except Exception as e:
             log(f"[batcheval] WARN mark_unit_done failed: {e}")
         return {"settled": len(seen), "total": len(todo), "dropped": dropped}
@@ -500,7 +539,8 @@ class BatchEvalRunner:
         return out
 
 
-def dispatch_batch_bg(    bun: str,
+def dispatch_batch_bg(
+    bun: str,
     rl_path: str | None,
     eval_log: Path,
     args,
@@ -517,8 +557,20 @@ def dispatch_batch_bg(    bun: str,
 ) -> threading.Thread:
     """后台起一个单元（调用方 join，语义同 dispatch_eval_bg）。"""
     runner = BatchEvalRunner(
-        bun, rl_path, eval_log, args, cfg, batch, unit, unit_idx, unit_of,
-        run_id, engine_epoch, policy, window_event, init_sha16,
+        bun,
+        rl_path,
+        eval_log,
+        args,
+        cfg,
+        batch,
+        unit,
+        unit_idx,
+        unit_of,
+        run_id,
+        engine_epoch,
+        policy,
+        window_event,
+        init_sha16,
     )
     t_ = threading.Thread(target=runner.run, daemon=True, name=f"batcheval-u{unit_idx}")
     t_.start()
@@ -548,7 +600,9 @@ def maybe_dispatch_batch(
         return None
     policy = str(batch.get("policy", "nn"))
     if policy == "nn" and getattr(args, "mode", "per-tick") != "per-tick":
-        log(f"[batcheval] batch {batch.get('batch_id')}: nn unit 不适用于 mode={args.mode} — 退回队列")
+        log(
+            f"[batcheval] batch {batch.get('batch_id')}: nn unit 不适用于 mode={args.mode} — 退回队列"
+        )
         _requeue(root, batch)
         return None
     try:
@@ -564,7 +618,8 @@ def maybe_dispatch_batch(
         _requeue(root, batch)
         return None
     units, nxt, unit = select_next_unit(
-        units, set((batch.get("units") or {}).get("done", [])), batch.get("only_rungs"))
+        units, set((batch.get("units") or {}).get("done", [])), batch.get("only_rungs")
+    )
     if nxt is None or unit is None:
         return None
     if policy == "nn" and not rl_path:
@@ -576,8 +631,20 @@ def maybe_dispatch_batch(
     batch.setdefault("units", {})["of"] = len(units)
     _persist_of(root, str(batch.get("batch_id")), len(units))
     return dispatch_batch_bg(
-        bun, rl_path, eval_log, args, cfg, batch, unit, nxt, len(units),
-        run_id, epoch, policy, window_event, str(batch.get("init_sha16", "")),
+        bun,
+        rl_path,
+        eval_log,
+        args,
+        cfg,
+        batch,
+        unit,
+        nxt,
+        len(units),
+        run_id,
+        epoch,
+        policy,
+        window_event,
+        str(batch.get("init_sha16", "")),
     )
 
 

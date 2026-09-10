@@ -12,14 +12,14 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rl.eval_ingest import (  # noqa: E402
+from rl.eval_ingest import (
     iter_eval_rows,
     m1_game_row,
-    segment_of_seed,
     seed_space_of,
+    segment_of_seed,
     write_m1_game_rows,
 )
-from rl.eval_m1 import parse_m1_eval_report  # noqa: E402
+from rl.eval_m1 import parse_m1_eval_report
 
 
 def test_segments_mirror_store_ts() -> None:
@@ -60,7 +60,7 @@ def test_write_m1_game_rows_idempotent(tmp_path: Path) -> None:
     assert {r["seed"] for r in rows} == {1, 2}
 
 
-def test_parse_m1_report_perGame_only_from_clean_stdout() -> None:
+def test_parse_m1_report_per_game_only_from_clean_stdout() -> None:
     doc = {"total": 2, "outcomes": {"stage_clear": 1, "gameover": 1},
            "perGame": [{"stage": 0, "seed": 1, "win": True}]}
     clean = json.dumps(doc)

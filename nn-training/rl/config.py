@@ -488,10 +488,16 @@ class CourseConfig(BaseModel):
         if spec.spawn_variants:
             payload["spawn_variants"] = [
                 {
-                    **({"player_spawn": {"col": v.player_spawn.col, "row": v.player_spawn.row}}
-                       if v.player_spawn is not None else {}),
-                    **({"enemy_spawns": [{"col": s.col, "row": s.row} for s in v.enemy_spawns]}
-                       if v.enemy_spawns else {}),
+                    **(
+                        {"player_spawn": {"col": v.player_spawn.col, "row": v.player_spawn.row}}
+                        if v.player_spawn is not None
+                        else {}
+                    ),
+                    **(
+                        {"enemy_spawns": [{"col": s.col, "row": s.row} for s in v.enemy_spawns]}
+                        if v.enemy_spawns
+                        else {}
+                    ),
                 }
                 for v in spec.spawn_variants
             ]

@@ -20,8 +20,6 @@ target_kl 早停：每个 epoch 后累计 KL 超阈值即停止剩余 epoch（�
 run_rl_intent.py 用它做 pace 护栏）。
 """
 
-
-
 from __future__ import annotations
 
 # 仓库根探测（B4，2026-09-02）：包已安装（pip install -e .）或 script-dir/cwd 在
@@ -59,6 +57,8 @@ from ppo.common import (
     load_shard_fields,
     log,
     masked_logsoftmax,
+    optimizer_step,
+    sync_scalars,
 )
 from ppo.trainer import tensored_chunks
 
@@ -300,20 +300,28 @@ def ppo_update_intent(
             opt.zero_grad()
             loss.backward()
             gn = torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
-            opt.step()
+            optimizer_step(opt, device)
 
             with torch.no_grad():
-                approx_kl = 0.0 if warmup else approx_kl_est(lp_old, lp_new_a).item()
-            stats.append(
-                {
-                    "policy": float(policy_loss.item()),
-                    "value": float(value_loss.item()),
-                    "entropy": float(entropy.item()),
-                    "kl": float(approx_kl),
-                    "mean_ret": float(ret.mean().item()),
-                    "gnorm": float(gn),
-                }
-            )
+                # warmup 期 kl 恒 0（原实现短路成 Python float 0.0）；这里用等价的
+                # 0 维零张量，保持「一次同步」路径统一。
+                kl_t = (
+                    torch.zeros((), device=device)
+                    if warmup
+                    else approx_kl_est(lp_old, lp_new_a)
+                )
+                stats.append(
+                    sync_scalars(
+                        {
+                            "policy": policy_loss,
+                            "value": value_loss,
+                            "entropy": entropy,
+                            "kl": kl_t,
+                            "mean_ret": ret.mean(),
+                            "gnorm": gn,
+                        }
+                    )
+                )
             now = time.time()
             if now - last_hb >= HB_SEC:
                 last_hb = now

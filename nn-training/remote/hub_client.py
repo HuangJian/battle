@@ -25,6 +25,7 @@ import time
 from pathlib import Path
 
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+from platform_utils import rmtree_best_effort
 from remote.protocol import (
     AUTH_HEADER,
     data_fp,
@@ -82,6 +83,7 @@ def _sha256_bytes(b: bytes) -> str:
 
 
 # ------------------------------------------------------------------ 打包
+
 
 def iter_shard_dirs(traj_dir: str | Path, it: int, log=lambda msg: None) -> list[Path]:
     """本轮应训 shard 集：it{it} 下全部 rl_s*_seed*/manifest.json 目录（与
@@ -159,7 +161,15 @@ def pack_code_zip(
     zip_path_p = Path(zip_path)
     zip_path_p.parent.mkdir(parents=True, exist_ok=True)
 
-    _exclude_dirs = {"tmp", "weights", ".venv", "__pycache__", "tests", ".mypy_cache", ".ruff_cache"}
+    _exclude_dirs = {
+        "tmp",
+        "weights",
+        ".venv",
+        "__pycache__",
+        "tests",
+        ".mypy_cache",
+        ".ruff_cache",
+    }
     _exclude_files = {"rl-config.json"}
 
     n_files = 0
@@ -185,7 +195,9 @@ def pack_code_zip(
                     continue
                 # 固定时间戳打包：sha 只由文件内容决定（否则 mtime 参与 →
                 # 同内容重打包 sha 漂移，云端代码缓存永远无法命中）
-                zi = zipfile.ZipInfo(str(rel / fn).replace("\\", "/"), date_time=(1980, 1, 1, 0, 0, 0))
+                zi = zipfile.ZipInfo(
+                    str(rel / fn).replace("\\", "/"), date_time=(1980, 1, 1, 0, 0, 0)
+                )
                 zi.compress_type = zipfile.ZIP_DEFLATED
                 zi.external_attr = 0o644 << 16
                 z.writestr(zi, f.read_bytes())
@@ -198,6 +210,7 @@ def pack_code_zip(
 
 
 # ------------------------------------------------------------------ 发布（磁盘 IPC）
+
 
 def publish_job(
     *,
@@ -307,7 +320,7 @@ def publish_job(
         if czp.exists():
             shutil.copy2(czp, jd / "code.zip")
     try:
-        shutil.rmtree(tmp_extra_dir)
+        rmtree_best_effort(tmp_extra_dir)
     except OSError:
         pass
     # 6) jsonl job_pending（磁盘 IPC；幂等去重——同 job_id 不重复追加）
@@ -317,14 +330,19 @@ def publish_job(
     _n_cancelled = cancel_stale_jobs(jsonl_path, it, jid)
     if _n_cancelled:
         log(f"cancelled {_n_cancelled} stale job(s) with it ≤ {it}（旧 runId 遗留，不再派发）")
-    _append_ledger(jsonl_path, {
-        "event": "job_pending",
-        "job_id": jid,
-        "runId": run_id,
-        "it": it,
-        "ts": time.time(),
-    })
-    log(f"published job {jid} it{it}: shards={len(shard_dirs)} data_fp={fp[:12]}… payload={sha[:12]}…")
+    _append_ledger(
+        jsonl_path,
+        {
+            "event": "job_pending",
+            "job_id": jid,
+            "runId": run_id,
+            "it": it,
+            "ts": time.time(),
+        },
+    )
+    log(
+        f"published job {jid} it{it}: shards={len(shard_dirs)} data_fp={fp[:12]}… payload={sha[:12]}…"
+    )
     return m
 
 
@@ -420,6 +438,7 @@ def cancel_stale_jobs(jsonl_path: str | Path, it: int, keep_job_id: str) -> int:
 
 # ------------------------------------------------------------------ 等待（HTTP）
 
+
 def _request(
     base_url: str,
     token: str,
@@ -498,11 +517,14 @@ def wait_job(
                     return loaded
         elif state == "leased":
             log(f"wait_job: job {jid} 仍在 leased（云 PPO 执行中）——再等 {timeout_sec}s")
-            return wait_job(base_url, token, jid, timeout_sec=timeout_sec, poll_sec=poll_sec, log=log)
+            return wait_job(
+                base_url, token, jid, timeout_sec=timeout_sec, poll_sec=poll_sec, log=log
+            )
     raise HubClientError(f"wait_job: job {jid} 超时（>{timeout_sec}s）未完成")
 
 
 # ------------------------------------------------------------------ 校验落位
+
 
 def verify_and_land(
     result: dict,
@@ -525,9 +547,7 @@ def verify_and_land(
     """
     m = normalize_manifest(manifest)
     if result["init_weights_fp"] != _sha256_file(init_weights_path):
-        raise HubClientError(
-            "三重校验失败: init_weights_fp 不匹配（云起点 ≠ 当前 args.out）——拒收"
-        )
+        raise HubClientError("三重校验失败: init_weights_fp 不匹配（云起点 ≠ 当前 args.out）——拒收")
     local_fp = data_fp(iter_shard_dirs(traj_dir, it, log=log))
     if result["data_fp"] != local_fp:
         raise HubClientError(

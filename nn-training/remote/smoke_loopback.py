@@ -33,6 +33,8 @@ import time
 import zipfile
 from pathlib import Path
 
+from platform_utils import rmtree_best_effort
+
 ROOT = Path(__file__).resolve().parent.parent  # nn-training/
 REPO = ROOT.parent  # git 根
 sys.path.insert(0, str(ROOT))
@@ -152,7 +154,7 @@ def main() -> int:
 
     work = REPO / args.work  # 2026-09-08 双 tmp 统一：锚定仓库根 tmp/，不用 ROOT(nn-training)/tmp
     if work.exists():
-        shutil.rmtree(work)  # 冒烟目录可整体重建（非训练产物）
+        rmtree_best_effort(work)  # 冒烟目录可整体重建（非训练产物）
     work.mkdir(parents=True)
 
     def log(msg: str) -> None:

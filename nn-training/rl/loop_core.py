@@ -11,7 +11,6 @@ mixin（rl/loop_guards.py）——mixin 方法以 self.* 共享 TrainingLoop 实
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 import sys
 import threading
@@ -21,6 +20,7 @@ from typing import Any
 
 import dist_common
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+from platform_utils import rmtree_best_effort
 from rl.breaker import CIRCUIT_EXIT_CODE
 from rl.collect_only import precollect_snapshot_wver
 from rl.course import build_pairs
@@ -461,7 +461,9 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
             # 直接按绝对电平白记一次连击。
             self._ent_peak = peak_entropy(self._jsonl_path)
             if self._ent_peak is not None:
-                log(f"[run_rl] resume: inherited entropy peak={self._ent_peak:.3f} (F4 ENT baseline)")
+                log(
+                    f"[run_rl] resume: inherited entropy peak={self._ent_peak:.3f} (F4 ENT baseline)"
+                )
         self._start_it = start_it
         _kickstart_startup_check(args, start_it)
         # 吞吐 T3：eval 稀疏化周期（默认 1 = 每轮，字节一致；>1 = 每 N 轮一次）。
@@ -511,10 +513,8 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
             )
         else:
             if traj_dir.exists():
-                try:
-                    shutil.rmtree(traj_dir)  # 沙箱删除保护拦截时跳过（保留旧目录，训练照常）
-                except BaseException:
-                    pass
+                # 沙箱删除保护拦截时跳过（保留旧目录，训练照常）
+                rmtree_best_effort(traj_dir)
             traj_dir.mkdir(parents=True)
 
     def _rollout_phase(

@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import random
 import secrets
-import shutil
 import subprocess
 import threading
 import time
@@ -18,6 +17,7 @@ import dist_common
 # 否则每个本地槽位都会开一个黑色 cmd 控制台窗口，反复弹出抢占焦点。stdout/stderr
 # 已重定向到文件，故隐藏窗口不影响日志落盘。（非 win32 平台此 dict 为空，无副作用）
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+from platform_utils import rmtree_best_effort
 from rl.log import log
 from rl.queue_local import (
     pick_race_target,
@@ -687,8 +687,11 @@ class RolloutDispatcher:
                         if _local_lane_ok and inflight:
                             # v3.16 使用 pick_race_target 排除当前节点 + 冷却黑名单
                             tail_cand = pick_race_target(
-                                inflight, tail_fanout_dup, nd_id,
-                                inflight_nodes, task_timeout_blocks,
+                                inflight,
+                                tail_fanout_dup,
+                                nd_id,
+                                inflight_nodes,
+                                task_timeout_blocks,
                             )
                             if tail_cand is not None:
                                 task = tail_cand
@@ -813,7 +816,7 @@ class RolloutDispatcher:
                                 shard_name = f"rl_s{task[0]}_seed{task[1]}"
                                 if vdir.name != shard_name:
                                     vdir = vdir / shard_name
-                                shutil.rmtree(vdir, ignore_errors=True)
+                                rmtree_best_effort(vdir, ignore_errors=True)
                             log(
                                 f"[dist] dup settle s{task[0]}/seed{task[1]} node={nd_id} — dropped"
                                 + (f" (+retired {vdir})" if victim else "")
@@ -1047,7 +1050,12 @@ class RolloutDispatcher:
         combined = combine_reports(
             [_ensure_games(r) for r in results]
             + resumed_manifests(
-                traj_dir, wver, exclude=seen, only=plan_set, extra_wver=extra_wver, course_fp=course_fp
+                traj_dir,
+                wver,
+                exclude=seen,
+                only=plan_set,
+                extra_wver=extra_wver,
+                course_fp=course_fp,
             )
         )
         combined["missing"] = [list(k) for k in missing]

@@ -992,7 +992,8 @@ def test_eval_local_gate(tmp: Path) -> None:
         }
 
     orig = ed.run_local_eval_game
-    ed.run_local_eval_game = fake_runner
+    # 测试替身：参数用 Any 收口，不必与生产签名逐参对齐。
+    ed.run_local_eval_game = fake_runner  # type: ignore[assignment]
     try:
         # 预留判定纯函数：gate/宽限期放行、余量边界、零预留回退旧路径
         check(not ed.hold_for_local(6, 2, True, False), "reserve: gate set → no hold")

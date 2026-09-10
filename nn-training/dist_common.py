@@ -260,7 +260,9 @@ def _git_head() -> str:
             **_POPEN_NO_WINDOW,
         )
         if proc.returncode == 0 and proc.stdout.strip():
-            return proc.stdout.strip()
+            # 显式落 str：stdout 是 Any，warn_return_any 不允许直接返回。
+            head: str = proc.stdout.strip()
+            return head
     except Exception:
         pass
     return "nogit"

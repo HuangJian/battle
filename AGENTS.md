@@ -11,6 +11,35 @@
 
 > Open the browser, play for five minutes, leave with a smile. (MANIFEST §1) — when unsure, this sentence decides.
 
+### 0.1 Rules that bite — read this even if you read nothing else
+
+The copy of this file injected into an agent's context is **truncated at ≈26%** (measured
+2026-09-10: the cut lands inside §4), so everything from §5 down is invisible unless you
+open the file. That is not a reason to skip those rules — it is the reason they are
+duplicated here. Each line below is an order, not advice; the bracketed section is the
+authority and is worth reading before you touch that area.
+
+1. **Never `git stash`** — any subcommand, any flag; it has destroyed this repo's object
+   store twice. A/B comparisons use `git worktree add --detach <dir> HEAD`. Any git write
+   that is not `add`/`commit`/`push`/`fetch`/`pull`: read §5.12 first. [details §5.12]
+2. **Git path arguments never contain `..`**; never `2>/dev/null` a git command; never
+   chain two git writes with `||`. Rename/delete with filesystem `mv`/`rm`, not `git mv`/
+   `git rm` (third incident, 2026-09-08: `git rm` deleted a whole directory). [§5]
+3. **Long tasks log to a file**: `> run.log 2>&1`, never a `| tail`/pipe. Capture **once**
+   and diagnose from that file — re-running just to watch output is the anti-pattern — and
+   delete the log on green unless it is the evidence. [§16.2, §16.7]
+4. **Don't re-run what you already ran**: iterate on the failure subset, not the full
+   sweep/suite. Single-file green + full-suite red (with `[safe-delete]` in the log) is the
+   environment, not a regression. [details §4.7, §16]
+5. **Verify every write landed** — this repo has "reported success, disk unchanged" cases;
+   grep the anchor or `ast.parse` after patching. [§17.4]
+6. **`pwsh`, never bare `powershell`** (5.1 is broken here and cannot be uninstalled). [§17.7]
+7. **Commit via a temp message file** (`git commit -F tmp/<ascii-file>`), then verify with
+   `git log -1 --pretty=fuller` — silent `-m` failures have happened. [details §5.7]
+8. **Never add an untracked `*.md` to git tracking.** [§5.8]
+9. **"Green" means the gate ran** — `bun run check` / `make python-gate` — not "looks fine". [§9]
+10. **One Author**: only `Simulation` mutates `World`; everything else observes read-only. [§2.1]
+
 ---
 
 ## 1. Read These Before Writing Any Code
@@ -37,65 +66,14 @@ Violating any of these is a bug even if the tests pass (details & gray-zone exem
 
 ## 3. Repository Map
 
-```
-src/
-  constants.ts            # CELL=16, GRID=26, FIELD=416, TANK=32, TICK_MS, direction vectors
-  types.ts                # root re-export hub; Tank/Bullet/WorldSnapshot/... live in the
-                          #   four-way split: types.ts (root) / config/types.ts (ThemeColors etc.)
-                          #   / ai/types.ts / presentation/types.ts — all re-exported here
-  main.ts                 # Entry: wires Game into #app
-  i18n/                   # zh/en localization
-  game/                   # SIMULATION LAYER (only layer that mutates World)
-    World.ts              #   complete runtime state + entity management
-    Simulation.ts         #   composition root: six subsystems via SimulationSystems registry
-    Simulation*.ts        #   the six subsystems: Spawn/Player/Enemies/Combat/PowerUps/Effects
-    systems.ts            #   SimulationSystems registry (tick order contract)
-    EventBus.ts  KillPipeline.ts  TankFactory.ts  GridQuery.ts   # event buffer / kill resolution / entity construction / grid lookups
-    UIState.ts  settings.ts  AutoFireInput.ts  battleSpeed.ts  uiFlowGates.ts
-    TileMap.ts            #   26×26 sub-block grid + cached base state
-    Input.ts              #   keyboard capture; never mutates World
-    Game.ts               #   top-level orchestrator; delegates to controllers below
-    GameLoop.ts           #   fixed-timestep loop + event wiring (LoopController)
-    GameMenu.ts  GameSnapshot.ts  GameReplay.ts   # menu/snapshot/replay controllers
-  ai/                     # AI LAYER (~half of src by line count)
-    GodAIInput.ts         #   player God AI facade (state + Impl delegates; normal code per §262)
-    god/                  #   think.ts (orchestrator), candidates/ (~20 candidate evaluators),
-                          #   params.ts / params.interface.ts / params.tables.ts / stage-adapt.ts,
-                          #   FireControl, ThreatAssessor, StrategyPlanner, Navigator, PathCarve,
-                          #   pathfind.ts, DecisionCore, ThreatBudget, SmartThreatModel, ...
-    TacticalIntelligence.ts + perception.ts      # enemy AI, invoked by Simulation
-  snapshot/               # SnapshotManager, WorldSerializer (spread clone/restore),
-                          #   RecoveryController, storage (IndexedDB)
-  replay/                 # InputRecorder, ReplayManager, PlaybackController, file/pack, storage
-  presentation/           # PRESENTATION LAYER (read-only on World)
-    PresentationLayer.ts  #   orchestrator: camera + anim + particles + effects + renderer + ui
-    renderer/             #   GameRenderer/SpriteArtist Core + slices, SpriteLibrary, SpriteCache
-    ui/                   #   UIManager facade over HudView / MenuScreen / ControlsPanel /
-                          #   OverlayManager; plus ControlCenter, PerfOverlay, ReplayBrowser,
-                          #   SnapshotBrowser, ReplayController (canvas is playfield-only, 416×416)
-    Camera.ts  AnimationSystem.ts  ParticleSystem.ts  EffectsSystem.ts
-  audio/AudioManager.ts   # Web Audio synthesis
-  config/                 # DATA: combat (tank profiles), stages+stageData, difficulty, theme,
-                          #   score+score-constants, rules, powerups, fire-rate, hp-level, speed,
-                          #   base, effects-config, types
-  assets/sprites/         # SVG sprite library + index.ts URL registry
-  utils/                  # RNG (seeded mulberry32), helpers (snap/aabb), direction, grid-search, idb-store
-  perf/                   # dev-only browser perf harness
-tests/                    # bun:test specs (mirrors src/ structure by concern)
-plan/                     # mvp.md, Snapshot-Management-Framework.md, presentation-upgrade.md, tasks.chat.md
-docs/                     # presentation-audit.md (2026-07-20 pre-upgrade baseline, historical)
-tools/
-  gen-sprites.mjs          # regenerates the SVG sprite library
-  lib/                     # SHARED tool infra: worker-pool.ts (the only Worker() site),
-                           #   stage-spec.ts (strict stage parsing — §213 guard), cli.ts (argv parsing)
-  sim/                     # headless batch sims: simulation-runner, sim-worker/pool
-  diag/                    # forensics + A/B tooling: run-forensics, per-seed-diff,
-                           #   decision-probe, ab-*, base-loss-* (§119/§120); archive/ = quarantined one-offs
-  eval/  perf/  level/  replay/  optimize/
-```
+> **The annotated tree lives in `docs/agents.details.md` §3.** It is reference data, not a
+> rule — and at 5.1K chars it was eating 63% of the context an agent actually receives
+> (this file is injected truncated at ≈26%; see §0.1). Look it up there when you need a
+> file's home. What stays here is the layer contract and the conventions you must not break.
 
-Key conventions:
-
+- **Layers**: `src/game/` = Simulation (the only writer of `World`) · `src/ai/` = God AI +
+  enemy AI · `src/presentation/` = read-only renderer/UI · `src/config/` = data rows (§2.4) ·
+  `src/{snapshot,replay,audio,utils,assets,perf}/` = support. `tests/` mirrors `src/` by concern.
 - **Canvas is playfield-only**: 416×416 logical, DPR-scaled via an offscreen buffer (`SpriteCache`, `GameRenderer`). HUD/menu/overlays are HTML/CSS in `UIManager`. Do not move UI back onto the canvas.
 - **Tank sprites face UP** in the SVG; the renderer rotates per direction. Preserve this convention when adding sprites.
 - **`genId()`** (`World.ts`) is the single source of entity IDs.
@@ -117,6 +95,17 @@ Handed a plan (`plan/*.md`, a `tasks.chat.md` directive, or an inline task), fol
 ---
 
 ## 5. Code Conventions
+
+### Hard rules (NEVER)
+
+- **Never `git stash`** — in this sandbox the stash's object writes get silently intercepted and can delete the whole object store. **TWO incidents**: 2026-08-28 (all packs vanished, 503 commits unreadable) and **2026-09-06 (`git stash push` deleted `objects/pack/*.pack` + `refs/` + branch reflogs)**. Any subcommand (`push`/`pop`/`apply`/`drop`/`clear`) is banned; for A/B comparisons use `git worktree add` or a scratch clone, never stash. Normal git flow (`add`/`commit`/`push`/`fetch`/`pull`) writes `.git` all the time and is safe — no backup needed; back up `.git/objects` only before a genuinely destructive command (`reset --hard`, `filter-branch`, `gc`, `repack`, `prune`). **Push after every commit** — the 2026-09-06 recovery was lossless only because every local commit already existed on `origin`. Remote access is HTTPS-only here (origin is already switched; SSH is unreachable from the sandbox). Recovery runbook + why "just this once" is never acceptable: `docs/agents.details.md` §5.12 (details: §5.12).
+- **Never start the dev server** (or spin up a browser) to validate your own changes — validation is the automated gates only (`bun run check` / `bun run build`; for UI work untestable by units: `tsc --noEmit` + oxlint + a successful `vite build`).
+- **Never launch NN training with raw `python`** — headless one-shots go via `bun tools/training/train.ts --script <name>.py` (venv setup, single-instance locking, smoke gates, `--check` / `--echo`)；日常训练组件管理（启/停/冒烟/模式/节点/变更检测重启）走训练控制台 `bun run train` → http://127.0.0.1:8900（局域网只读：可查看任意课程/日志/节点统计，启停/冒烟/模式/节点编辑仅本机 localhost，§2026-09-09-goalnn-console-lan-readonly；旧统一启动器 `tools/training/start.ts` 与 `nn-training/start-training.{sh,ps1}` 均已删除；details: `docs/agents.details.md` §5.6）。
+- **Record every NN-training architecture change/eval/lesson in `docs/nn.progress.md`** (top, numbered §) — and check it before architectural changes.
+
+- **On PowerShell, commit via a temp message file** — `git commit -F tmp/<ascii-file>` (delete after; `--amend -F` likewise); heredocs and non-ASCII `-m` args fail silently, and the pre-commit hook's failing output is swallowed — diagnose with `bash tools/githook/pre-commit > tmp/hook.txt 2>&1; echo "EXIT=$LASTEXITCODE"`, and verify every commit with `git log -1 --pretty=fuller` (full recipe: `docs/agents.details.md` §5.7).
+- **Never `git add` an untracked `*.md`** (and no blanket `git add -A`/`git add .`) — commit tracked markdown freely, and only the markdown the human explicitly requested (details: `docs/agents.details.md` §5.8).
+- **Never sleep-wait on a long task** — launch it in the background (the harness notifies on exit) and continue other work; while waiting only peek at the log with short non-blocking `tail` reads, and when a wait is unavoidable use a bounded marker-grep loop that exits the moment the done-marker appears (never a fixed `sleep N`; recipes: `docs/agents.details.md` §5.13).
 
 ### Language & tooling
 
@@ -147,17 +136,6 @@ bun run freeze:l2    # archived-candidate reachability audit over the same corpu
 
 - `bun run test` is the scoped token-saving runner (changed-file → basename-matched tests, prints only failures; the pre-commit hook uses it with a full-suite fallback); heavy gates (`godai-score-gate`, `calibration`) are excluded from it — run the full suite before landing God-AI changes, and keep `HEAVY_TESTS` in `tools/test-silent.ts` in sync with measured wall-time (details: `docs/agents.details.md` §5.3).
 - `bun test` always takes `--parallel --timeout=50000` — both flags mandatory (details: `docs/agents.details.md` §5.4).
-
-### Hard rules (NEVER)
-
-- **Never start the dev server** (or spin up a browser) to validate your own changes — validation is the automated gates only (`bun run check` / `bun run build`; for UI work untestable by units: `tsc --noEmit` + oxlint + a successful `vite build`).
-- **Never launch NN training with raw `python`** — headless one-shots go via `bun tools/training/train.ts --script <name>.py` (venv setup, single-instance locking, smoke gates, `--check` / `--echo`)；日常训练组件管理（启/停/冒烟/模式/节点/变更检测重启）走训练控制台 `bun run train` → http://127.0.0.1:8900（局域网只读：可查看任意课程/日志/节点统计，启停/冒烟/模式/节点编辑仅本机 localhost，§2026-09-09-goalnn-console-lan-readonly；旧统一启动器 `tools/training/start.ts` 与 `nn-training/start-training.{sh,ps1}` 均已删除；details: `docs/agents.details.md` §5.6）。
-- **Record every NN-training architecture change/eval/lesson in `docs/nn.progress.md`** (top, numbered §) — and check it before architectural changes.
-
-- **On PowerShell, commit via a temp message file** — `git commit -F tmp/<ascii-file>` (delete after; `--amend -F` likewise); heredocs and non-ASCII `-m` args fail silently, and the pre-commit hook's failing output is swallowed — diagnose with `bash tools/githook/pre-commit > tmp/hook.txt 2>&1; echo "EXIT=$LASTEXITCODE"`, and verify every commit with `git log -1 --pretty=fuller` (full recipe: `docs/agents.details.md` §5.7).
-- **Never `git add` an untracked `*.md`** (and no blanket `git add -A`/`git add .`) — commit tracked markdown freely, and only the markdown the human explicitly requested (details: `docs/agents.details.md` §5.8).
-- **Never `git stash`** — in this sandbox the stash's object writes get silently intercepted and can delete the whole object store. **TWO incidents**: 2026-08-28 (all packs vanished, 503 commits unreadable) and **2026-09-06 (`git stash push` deleted `objects/pack/*.pack` + `refs/` + branch reflogs)**. Any subcommand (`push`/`pop`/`apply`/`drop`/`clear`) is banned; for A/B comparisons use `git worktree add` or a scratch clone, never stash. Normal git flow (`add`/`commit`/`push`/`fetch`/`pull`) writes `.git` all the time and is safe — no backup needed; back up `.git/objects` only before a genuinely destructive command (`reset --hard`, `filter-branch`, `gc`, `repack`, `prune`). **Push after every commit** — the 2026-09-06 recovery was lossless only because every local commit already existed on `origin`. Remote access is HTTPS-only here (origin is already switched; SSH is unreachable from the sandbox). Recovery runbook + why "just this once" is never acceptable: `docs/agents.details.md` §5.12 (details: §5.12).
-- **Never sleep-wait on a long task** — launch it in the background (the harness notifies on exit) and continue other work; while waiting only peek at the log with short non-blocking `tail` reads, and when a wait is unavoidable use a bounded marker-grep loop that exits the moment the done-marker appears (never a fixed `sleep N`; recipes: `docs/agents.details.md` §5.13).
 
 ### Style
 
@@ -359,6 +337,12 @@ When this file and your instincts disagree, this file wins. When this file and t
 - **16.6 Verify parallel == serial once per tool**: before trusting a parallel
   path, byte-compare its output against a serial run on the same inputs (the
   worker-pool determinism note assumes pure tasks — confirm the tool honors it).
+- **16.7 Capture the log once, delete it on green**: every gate / sim / probe /
+  long run writes its full output to a log file and is diagnosed from that file
+  — never re-run the task just to watch the output again; when the run succeeded
+  and its log holds nothing worth keeping, delete the log in the same step.
+  `tools/githook/run-logged.sh <log> -- <cmd>` does both (red keeps + echoes the
+  tail, green deletes it); `KEEP_LOG=1` keeps it when the log is the evidence.
 
 ## 17. Editing Files on Windows — Text-Splicing Discipline
 

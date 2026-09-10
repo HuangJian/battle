@@ -123,8 +123,13 @@ def write_m1_game_rows(
     eval_log.parent.mkdir(parents=True, exist_ok=True)
     with open(eval_log, "a", encoding="utf-8") as f:
         for g in games:
+            # mypy：dict.get() 是 Any | None，显式挡掉 None（行为与原先
+            # int(None) 抛 TypeError 被下面 except 捕获完全一致）。
+            stage_v, seed_v = g.get("stage"), g.get("seed")
+            if stage_v is None or seed_v is None:
+                continue
             try:
-                key = (int(g.get("stage")), int(g.get("seed")))
+                key = (int(stage_v), int(seed_v))
             except (TypeError, ValueError):
                 continue
             if key in done:

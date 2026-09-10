@@ -23,8 +23,6 @@ shard 工具全部来自 ppo_common；网络类 / shard spec / 采集器为 goal
 engage 明定：**不是 PPO 动作**（shard 无 lp_engage）——rollout/部署均 argmax（k1）。
 """
 
-
-
 from __future__ import annotations
 
 # 仓库根探测（B4，2026-09-02）：包已安装（pip install -e .）或 script-dir/cwd 在
@@ -60,6 +58,8 @@ from ppo.common import (
     load_shard_fields,
     log,
     masked_logsoftmax,
+    optimizer_step,
+    sync_scalars,
 )
 from ppo.trainer import tensored_chunks
 from schema import BOARD
@@ -328,19 +328,34 @@ def ppo_update_goal(
             opt.zero_grad()
             loss.backward()
             gn = torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
-            opt.step()
+            optimizer_step(opt, device)
 
             with torch.no_grad():
-                approx_kl = 0.0 if warmup else approx_kl_est(lp_old, lp_new_a).item()
+                # warmup 期 kl 恒 0（同 intent）；一次同步取全部标量。
+                kl_t = (
+                    torch.zeros((), device=device)
+                    if warmup
+                    else approx_kl_est(lp_old, lp_new_a)
+                )
+                m = sync_scalars(
+                    {
+                        "policy": policy_loss,
+                        "value": value_loss,
+                        "entropy": entropy,
+                        "kl": kl_t,
+                        "mean_ret": ret.mean(),
+                        "gnorm": gn,
+                    }
+                )
             stats.append(
                 {
-                    "policy": float(policy_loss.item()),
-                    "value": float(value_loss.item()),
-                    "entropy": float(entropy.item()),
-                    "kl": float(approx_kl),
+                    "policy": m["policy"],
+                    "value": m["value"],
+                    "entropy": m["entropy"],
+                    "kl": m["kl"],
                     "bc": 0.0,  # bc 软目标已清理（P2-6a）；保留键保 schema 兼容
-                    "mean_ret": float(ret.mean().item()),
-                    "gnorm": float(gn),
+                    "mean_ret": m["mean_ret"],
+                    "gnorm": m["gnorm"],
                 }
             )
             now = time.time()

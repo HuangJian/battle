@@ -102,7 +102,75 @@ spirit of the original. Two of three is not enough.
 
 ## §3 Repository map & conventions
 
-The tree in `AGENTS.md` is reference data (kept there for navigation). The three conventions under it:
+The tree lives **here** rather than in `AGENTS.md`, deliberately. The copy of `AGENTS.md`
+that gets injected into an agent's context is truncated at ≈8.1K chars — 26% of the file,
+the cut landing inside §4 — and a 5.1K tree sitting at §3 was eating **63% of the only
+text an agent ever reads**, pushing §5–§17 (`never git stash`, long-run logging discipline,
+Windows editing rules) below the fold. Reference data does not belong in that budget; the
+rules do. Measured 2026-09-10, after two agents (human and otherwise) burned an hour on
+rules that were "already written down" but never visible.
+
+```
+src/
+  constants.ts            # CELL=16, GRID=26, FIELD=416, TANK=32, TICK_MS, direction vectors
+  types.ts                # root re-export hub; Tank/Bullet/WorldSnapshot/... live in the
+                          #   four-way split: types.ts (root) / config/types.ts (ThemeColors etc.)
+                          #   / ai/types.ts / presentation/types.ts — all re-exported here
+  main.ts                 # Entry: wires Game into #app
+  i18n/                   # zh/en localization
+  game/                   # SIMULATION LAYER (only layer that mutates World)
+    World.ts              #   complete runtime state + entity management
+    Simulation.ts         #   composition root: six subsystems via SimulationSystems registry
+    Simulation*.ts        #   the six subsystems: Spawn/Player/Enemies/Combat/PowerUps/Effects
+    systems.ts            #   SimulationSystems registry (tick order contract)
+    EventBus.ts  KillPipeline.ts  TankFactory.ts  GridQuery.ts   # event buffer / kill resolution / entity construction / grid lookups
+    UIState.ts  settings.ts  AutoFireInput.ts  battleSpeed.ts  uiFlowGates.ts
+    TileMap.ts            #   26×26 sub-block grid + cached base state
+    Input.ts              #   keyboard capture; never mutates World
+    Game.ts               #   top-level orchestrator; delegates to controllers below
+    GameLoop.ts           #   fixed-timestep loop + event wiring (LoopController)
+    GameMenu.ts  GameSnapshot.ts  GameReplay.ts   # menu/snapshot/replay controllers
+  ai/                     # AI LAYER (~half of src by line count)
+    GodAIInput.ts         #   player God AI facade (state + Impl delegates; normal code per §262)
+    god/                  #   think.ts (orchestrator), candidates/ (~20 candidate evaluators),
+                          #   params.ts / params.interface.ts / params.tables.ts / stage-adapt.ts,
+                          #   FireControl, ThreatAssessor, StrategyPlanner, Navigator, PathCarve,
+                          #   pathfind.ts, DecisionCore, ThreatBudget, SmartThreatModel, ...
+    TacticalIntelligence.ts + perception.ts      # enemy AI, invoked by Simulation
+  snapshot/               # SnapshotManager, WorldSerializer (spread clone/restore),
+                          #   RecoveryController, storage (IndexedDB)
+  replay/                 # InputRecorder, ReplayManager, PlaybackController, file/pack, storage
+  presentation/           # PRESENTATION LAYER (read-only on World)
+    PresentationLayer.ts  #   orchestrator: camera + anim + particles + effects + renderer + ui
+    renderer/             #   GameRenderer/SpriteArtist Core + slices, SpriteLibrary, SpriteCache
+    ui/                   #   UIManager facade over HudView / MenuScreen / ControlsPanel /
+                          #   OverlayManager; plus ControlCenter, PerfOverlay, ReplayBrowser,
+                          #   SnapshotBrowser, ReplayController (canvas is playfield-only, 416×416)
+    Camera.ts  AnimationSystem.ts  ParticleSystem.ts  EffectsSystem.ts
+  audio/AudioManager.ts   # Web Audio synthesis
+  config/                 # DATA: combat (tank profiles), stages+stageData, difficulty, theme,
+                          #   score+score-constants, rules, powerups, fire-rate, hp-level, speed,
+                          #   base, effects-config, types
+  assets/sprites/         # SVG sprite library + index.ts URL registry
+  utils/                  # RNG (seeded mulberry32), helpers (snap/aabb), direction, grid-search, idb-store
+  perf/                   # dev-only browser perf harness
+tests/                    # bun:test specs (mirrors src/ structure by concern)
+plan/                     # mvp.md, Snapshot-Management-Framework.md, presentation-upgrade.md, tasks.chat.md
+docs/                     # presentation-audit.md (2026-07-20 pre-upgrade baseline, historical)
+tools/
+  gen-sprites.mjs          # regenerates the SVG sprite library
+  lib/                     # SHARED tool infra: worker-pool.ts (the only Worker() site),
+                           #   stage-spec.ts (strict stage parsing — §213 guard), cli.ts (argv parsing)
+  sim/                     # headless batch sims: simulation-runner, sim-worker/pool
+  diag/                    # forensics + A/B tooling: run-forensics, per-seed-diff,
+                           #   decision-probe, ab-*, base-loss-* (§119/§120); archive/ = quarantined one-offs
+  eval/  perf/  level/  replay/  optimize/
+  githook/                 # git hooks + quality gates: pre-commit, nn-python-gate.sh
+                           #   (ruff+mypy+pytest, §16 note on the sandbox delete guard),
+                           #   run-logged.sh (16.7 capture-once logs), nn-clean-tmp.py
+```
+
+The three conventions under it (these stay in `AGENTS.md` — they are rules):
 
 - **Canvas is playfield-only:** 416×416 logical, DPR-scaled via an offscreen buffer (`SpriteCache`,
   `GameRenderer`). HUD/menu/overlays are HTML/CSS in `UIManager` — moving UI back onto the canvas was
@@ -788,6 +856,79 @@ both now rules (AGENTS 16.1-16.4).
   Serial is the exception, always with a stated reason: order-sensitive
   debugging/attribution, memory-bound single huge job, or a workload so small
   that spawn cost dominates.
+
+**Capture-once logs, self-cleaning (16.7).**
+
+*Case study (2026-09-10, gate/PPO debugging loop).* Two red gate runs cost ~15
+full-suite executions, because each run's output was only visible in that one
+tool call's scrollback — so every new hypothesis needed a fresh run to get a
+fresh log. Two bills came due: (a) wall time, and (b) the repeated runs blew
+through this sandbox's per-turn bulk-delete budget (`[safe-delete]
+{"count":56,"threshold":50,"scope":"turn"}`), after which every delete was
+refused and the delete-dependent tests went red — in a state where a
+single-file run proved them green. An environmental artifact that looks exactly
+like a regression, and it consumed an hour of forensic work. All of it
+disappears once the first run's output is on disk: run once, then `grep`/`tail`
+that file as many times as needed.
+
+The rule in three lines:
+
+1. **Every** long run (gate, sim, probe, batch eval, training smoke) redirects
+   its full output to a file **in the same tool call that starts it**.
+2. Diagnosis happens against that file — `grep -nE "FAILED|error:" log`,
+   `tail -n 40 log`. Re-running *just to see the output again* is the
+   anti-pattern.
+3. On success the log is deleted in the same step, unless it is the evidence
+   (benchmark numbers, a result you must cite). Red logs are always kept.
+
+Wrapper — `tools/githook/run-logged.sh` (verified: green deletes, red keeps and
+echoes the tail, exit code passes through):
+
+```sh
+sh tools/githook/run-logged.sh tmp/logs/gate.log -- bash tools/githook/nn-python-gate.sh
+KEEP_LOG=1 sh tools/githook/run-logged.sh tmp/logs/bench.log -- <cmd>   # 留档
+```
+
+Minimal inline form when a wrapper is overkill:
+
+```sh
+python -u -m pytest tests/ -n 4 -q > tmp/logs/pytest.log 2>&1
+rc=$?
+if [ "$rc" -eq 0 ]; then rm -f tmp/logs/pytest.log; else tail -n 40 tmp/logs/pytest.log; fi
+exit "$rc"
+```
+
+Same shape from python, for probes/sims that drive their own subprocesses:
+
+```python
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+def run_logged(cmd: list[str], log: Path, *, keep: bool = False) -> int:
+    """长任务执行器：全量落盘；失败留档并回显尾部，成功且 keep=False 时删除。"""
+    log.parent.mkdir(parents=True, exist_ok=True)
+    t0 = time.time()
+    with open(log, "w", encoding="utf-8") as f:
+        rc = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT).returncode
+    dt = time.time() - t0
+    if rc == 0:
+        if keep:
+            print(f"✓ {dt:.0f}s — log kept: {log}")
+        else:
+            log.unlink(missing_ok=True)
+            print(f"✓ {dt:.0f}s — log clean (keep=True 可留档)")
+    else:
+        print(f"✗ exit={rc} after {dt:.0f}s — log kept: {log}", file=sys.stderr)
+        lines = log.read_text(encoding="utf-8", errors="replace").splitlines()[-40:]
+        print("\n".join(lines), file=sys.stderr)
+    return rc
+```
+
+Rule of thumb that saves an hour: **single-file green + full-suite red, with
+`[safe-delete]` lines in the log = environment, not a regression.**
 
 
 ## §17 Editing files on Windows — text-splicing discipline (AGENTS §17)

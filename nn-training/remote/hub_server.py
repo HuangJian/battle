@@ -42,6 +42,7 @@ from remote.protocol import AUTH_HEADER, LEASE_SEC, ProtocolError, normalize_man
 
 # ------------------------------------------------------------------ state
 
+
 class _JobStore:
     """磁盘 job 存储 + 内存租约状态。
 
@@ -147,8 +148,12 @@ class _JobStore:
             (jd / "manifest.json").write_text(
                 json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
             )
-            pending_ids = {e.get("job_id") for e in self._read_ledger() if e.get("event") == "job_pending"}
-            completed_ids = {e.get("job_id") for e in self._read_ledger() if e.get("event") == "job_completed"}
+            pending_ids = {
+                e.get("job_id") for e in self._read_ledger() if e.get("event") == "job_pending"
+            }
+            completed_ids = {
+                e.get("job_id") for e in self._read_ledger() if e.get("event") == "job_completed"
+            }
             if job_id not in pending_ids and job_id not in completed_ids:
                 self._append_ledger(
                     {
@@ -216,11 +221,11 @@ class _JobStore:
         """训练主循环验收落位后写 job_completed 账本事件（§3.1）。幂等。"""
         with self._lock:
             self._leases.pop(job_id, None)
-            completed_ids = {e.get("job_id") for e in self._read_ledger() if e.get("event") == "job_completed"}
+            completed_ids = {
+                e.get("job_id") for e in self._read_ledger() if e.get("event") == "job_completed"
+            }
             if job_id not in completed_ids:
-                self._append_ledger(
-                    {"event": "job_completed", "job_id": job_id, "ts": self._now()}
-                )
+                self._append_ledger({"event": "job_completed", "job_id": job_id, "ts": self._now()})
 
     def get_result(self, job_id: str) -> dict | None:
         p = self._job_dir(job_id) / "result" / "result.json"
@@ -249,6 +254,7 @@ class _JobStore:
 
 
 # ------------------------------------------------------------------ HTTP
+
 
 class HubHandler(BaseHTTPRequestHandler):
     """单例 handler：类属性持共享 store（ThreadingHTTPServer 每请求新建实例）。"""
@@ -283,7 +289,9 @@ class HubHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _bytes(self, data: bytes, status: int = 200, ctype: str = "application/octet-stream") -> None:
+    def _bytes(
+        self, data: bytes, status: int = 200, ctype: str = "application/octet-stream"
+    ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
@@ -437,9 +445,7 @@ class HubHandler(BaseHTTPRequestHandler):
             self._json({"error": "not found"}, 404)
             return
         # H2：lease_token 必填且须与原租者一致（否则拒续）
-        lease_token = self.headers.get("X-Lease-Token", "") or self.headers.get(
-            "lease-token", ""
-        )
+        lease_token = self.headers.get("X-Lease-Token", "") or self.headers.get("lease-token", "")
         ok = self.store.heartbeat(jid, lease_token)
         self._json({"job_id": jid, "ok": ok}, 200 if ok else 404)
 
@@ -452,9 +458,7 @@ class HubHandler(BaseHTTPRequestHandler):
         if jid is None or not (self.store._job_dir(jid) / "manifest.json").exists():
             self._json({"error": "not found"}, 404)
             return
-        lease_token = self.headers.get("X-Lease-Token", "") or self.headers.get(
-            "lease-token", ""
-        )
+        lease_token = self.headers.get("X-Lease-Token", "") or self.headers.get("lease-token", "")
         if self.store.release(jid, lease_token):
             self._json({"job_id": jid, "status": "released"})
         else:
@@ -497,7 +501,9 @@ class HubHandler(BaseHTTPRequestHandler):
         self._json({"job_id": jid, "status": "accepted"})
 
 
-def make_server(store: _JobStore, port: int, token: str, host: str = "127.0.0.1") -> ThreadingHTTPServer:
+def make_server(
+    store: _JobStore, port: int, token: str, host: str = "127.0.0.1"
+) -> ThreadingHTTPServer:
     """构造 server（handler 注入 store + token）。"""
 
     class Server(ThreadingHTTPServer):
@@ -515,8 +521,12 @@ def main() -> None:
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--token", default="", help="Bearer token（云 worker 与训练主循环共享）")
     ap.add_argument("--token-file", default="", help="从文件读取 token（避免进程列表泄露，H10）")
-    ap.add_argument("--job-root", required=True, help="job 目录根（payload zip / 结果 / ppo_ckpt_remote）")
-    ap.add_argument("--jsonl", required=True, help="training_log.jsonl 路径（job_pending/job_completed 账本）")
+    ap.add_argument(
+        "--job-root", required=True, help="job 目录根（payload zip / 结果 / ppo_ckpt_remote）"
+    )
+    ap.add_argument(
+        "--jsonl", required=True, help="training_log.jsonl 路径（job_pending/job_completed 账本）"
+    )
     args = ap.parse_args()
     token = args.token
     if args.token_file:

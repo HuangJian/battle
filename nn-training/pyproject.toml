@@ -204,7 +204,7 @@ exclude = ["\\.venv/", "weights/", "tmp/"]
 
 # Third-party stubs (progressive enablement)
 [[tool.mypy.overrides]]
-module = ["torch.*", "numpy.*"]
+module = ["torch.*", "numpy.*", "torch_xla.*"]
 ignore_missing_imports = true
 
 # ---------------------------------------------------------------------------

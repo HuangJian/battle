@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rl.batch_eval import (  # noqa: E402
+from rl.batch_eval import (
     batch_iter_id,
     claim_pending,
     load_ladder,
@@ -100,36 +100,91 @@ def test_window_close_no_new_games(tmp_path: Path, monkeypatch) -> None:
     weights.write_text("{}", encoding="utf-8")
     eval_log = tmp_path / "eval_log.jsonl"
     epoch = dist_common.compute_engine_epoch()
-    ping = {"evalSupport": True, "stageJsonSupport": True, "bunVersion": "9.9.9",
-            "cpus": 1, "engineEpoch": epoch}
+    ping = {
+        "evalSupport": True,
+        "stageJsonSupport": True,
+        "bunVersion": "9.9.9",
+        "cpus": 1,
+        "engineEpoch": epoch,
+    }
     monkeypatch.setattr(dist_common, "node_ping", lambda *a, **k: dict(ping))
     monkeypatch.setattr(dist_common, "post_weights", lambda *a, **k: "kept")
     monkeypatch.setattr("rl.batch_eval.bun_version", lambda *a, **k: "9.9.9")
 
     def fake_fetch(url, key, **kw):
-        return ({"wver": kw["wver"], "mode": "eval", "outcome": "stage_clear",
-                 "ticks": 100, "win": True, "stage": kw["stage"], "seed": kw["seed"],
-                 "policy": kw.get("policy", "nn")}, {})
+        return (
+            {
+                "wver": kw["wver"],
+                "mode": "eval",
+                "outcome": "stage_clear",
+                "ticks": 100,
+                "win": True,
+                "stage": kw["stage"],
+                "seed": kw["seed"],
+                "policy": kw.get("policy", "nn"),
+            },
+            {},
+        )
 
     monkeypatch.setattr(dist_common, "fetch_task", fake_fetch)
     args = types.SimpleNamespace(eval_window_sec=2)
-    cfg = {"policy": {"statusTimeoutSec": 1, "taskTimeoutSec": 30, "nodeFailStreak": 1,
-                      "evalLocalSlots": 0},
-           "nodes": [{"id": "n1", "url": "http://x", "authKey": "", "enabled": True, "concurrency": 1}]}
+    cfg = {
+        "policy": {
+            "statusTimeoutSec": 1,
+            "taskTimeoutSec": 30,
+            "nodeFailStreak": 1,
+            "evalLocalSlots": 0,
+        },
+        "nodes": [
+            {"id": "n1", "url": "http://x", "authKey": "", "enabled": True, "concurrency": 1}
+        ],
+    }
     ladder = load_ladder()
     units = plan_units(ladder, 0, 0)
     batch = {"batch_id": "bw", "iter": 1, "units": {"of": 1, "done": []}}
     # 关窗：unset 事件 + 假 deadline 已过——用 window_event 未置位且 eval_window 很小
     closed = threading.Event()
-    r = be.BatchEvalRunner("bun", str(weights), eval_log, args, cfg, batch, units[0], 0, 1,
-                           "run1", epoch, "nn", closed, "")
+    r = be.BatchEvalRunner(
+        "bun",
+        str(weights),
+        eval_log,
+        args,
+        cfg,
+        batch,
+        units[0],
+        0,
+        1,
+        "run1",
+        epoch,
+        "nn",
+        closed,
+        "",
+    )
     out = r.run()
     assert out["settled"] == 0 and out["dropped"] == 100
-    # 开窗：同样 100 局全部结算
+    # 开窗：同样 100 局全部结算。
+    # eval_window_sec 必须给足 —— 它是**墙钟预算**，而 worker 在 pending 清空时立即返回，
+    # 所以宽窗口不会拖慢测试（正常 2-3s 就收完），却能在门禁并行（ruff+mypy+pytest 同时跑）
+    # 的 CPU 争用下不被误判成 dropped。实测：2s 窗口在门禁负载下会掉 5-18 局 → 假红。
+    args_open = types.SimpleNamespace(eval_window_sec=120)
     opened = threading.Event()
     opened.set()
     batch2 = {"batch_id": "bw2", "iter": 1, "units": {"of": 1, "done": []}}
-    r2 = be.BatchEvalRunner("bun", str(weights), eval_log, args, cfg, batch2, units[0], 0, 1,
-                            "run1", epoch, "nn", opened, "")
+    r2 = be.BatchEvalRunner(
+        "bun",
+        str(weights),
+        eval_log,
+        args_open,
+        cfg,
+        batch2,
+        units[0],
+        0,
+        1,
+        "run1",
+        epoch,
+        "nn",
+        opened,
+        "",
+    )
     out2 = r2.run()
     assert out2["settled"] == 100 and out2["dropped"] == 0
