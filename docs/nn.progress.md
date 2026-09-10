@@ -5,6 +5,91 @@
 
 ---
 
+## §21 PPO 吞吐：三设备实测 + ref 缓存 / 传输压缩 / 多卡落地 + TPU 设备层（2026-09-10）
+
+同一会话四条线：**度量**（三设备实测矩阵）、**优化**（ref 缓存 / 传输压缩 / 多卡）、
+**扩容**（TPU 设备层）、**基建**（门禁两项修复）。数字来自自包含探针
+`nn-training/tools/tpu-probe.py`（CPU/CUDA/TPU 通用）与一次真实 job 日志
+（`826081bcb840f76d`）。台账：`plan/ppo-optimization.plan.md`。
+
+### 21.1 性能画像，以及我三次被实测推翻的假设
+
+一轮 = 37 chunks x 4 epochs = **148 个梯度步**。真实日志逐段（GPU 单轮 47 s）：
+
+```
+claim 08:28:02 -> payload 下行 3.83 MB (2.3 s) -> code 缓存命中 + model/opt 恢复
+  + ref 加载 + 150 shards load + GAE（全部 <1 s）-> kickstart ref 预计算 3 s
+  -> PPO 4 epochs / 148 梯度步 33 s -> result 上行 1.63 MB (7.4 s)
+```
+
+**探针被这份日志验证**：真实梯度 33 s / 148 步 = **223 ms/step**，探针测 206 ms（差 8%，
+落在 epoch 级统计与心跳开销上）⇒ 以后不必每次上真机验证。
+
+**三次错误假设（留档，勿重走）**：
+
+| # | 假设 | 证伪证据 |
+|---|---|---|
+| 1 | 「GPU 利用率仅 2.9%，首要嫌疑是 `.item()` 同步串行化」 | A 段（**完全无同步**）就已 191 ms/step；同步税 B_old−A 仅 **+17 ms**；8 次合 1 次只省 **+2 ms**。按 A 段口径利用率 ≈ **7.2%**（旧 2.9% 用了含传输的 70 s 口径）⇒ **D2 结案**。 |
+| 2 | 「~40 s 差额是 `load_episodes` + GAE + 统计」 | 日志 `shard IO + GAE done for 150 episodes (0s)`，整段不到 1 s。真差额在**传输**。 |
+| 3 | 「探针 A 段在 CUDA 上是算力下限」 | `sync_mode="none"` 走 `Backend.mark()`，CUDA 上它是 **no-op** ⇒ 计时只含 CPU 入队（A=64 ms 而 B_new=192 ms）。已加真正的 `sync()`（`torch.cuda.synchronize()`）。 |
+
+### 21.2 已落地四项
+
+| 项 | 改动 | 实测 | 数值 |
+|---|---|---|---|
+| **ref 前向缓存** | `ppo/engine.py`：kickstart 的 ref 输出只依赖 (obs,scalars,mask)，逐 chunk 固定且 ref 冻结（BN-free）⇒ 跨 epoch 不变；原「每梯度步重算」改为「按 chunk 预计算一次 + 索引复用」 | CPU +18.6% / **GPU +22.7%** / TPU +31.5%（比例随设备变快而升）；真实日志确认省 **~9 s/轮（20%）** | ✅ 逐位不变 |
+| **标量同步批量化** | `ppo/common.py::sync_scalars` + 三后端：每步 6-8 处 `.item()`/`float()` 合为 1 次 `stack().tolist()` | GPU **+2 ms（0.8%）⇒ 收益≈0**（见 21.1 #1） | ✅ 逐位不变 |
+| **传输压缩** | `remote/protocol.py` 的 4 个编解码函数改 gzip(level 6) + base64；解码端用 gzip 魔数自动判别 ⇒ 旧格式仍可解 | 上行 1,634,596 → **1,150,292 B（−29.6%）**，7.4 s → ~5.2 s；同一 tar 作为 `opt_init` 下行 **−31.3%** | ✅ 无损 |
+| **多卡** | `remote/worker.py` opt-in `--device cuda-dp`（`nn.DataParallel`，单卡自动退化）；产物落盘一律用未包装的 `raw_model` | **B_new 192 → 100 ms/step = 1.92×**（接近线性） | ⚠ 归约顺序变 ⇒ ulp 变，属新开实验臂 |
+
+**三设备实测矩阵**（s/轮 = s/step x 148）：本机 CPU 3.607 s / Kaggle GPU T4x2 191 ms /
+**Kaggle+Colab TPU v5e-8 39 ms**（A 段）⇒ **TPU 快 GPU 4.7×**，不是「配额接力」的量级。
+
+**被否掉的两条路**（勿重走）：① 去掉重复权重（`result` 里 `weights_json` 与 `tar/model.pt`
+是同一份）—— **hub 刻意免 torch**，无法把 model.pt 转回 `init_weights.json`，去重会破坏
+`init_weights_fp` 对账；② 传输「方案B」（gzip 后传裸二进制）能再省到 47%，但要改 POST 体格式
++ hub 端 parser，增量仅 ~1.3 s。
+
+### 21.3 TPU 设备层（扩容，非提速）
+
+`ppo/common.py` 增 `is_xla / xla_device / optimizer_step / xla_mark_step / _to_cpu_state`；
+三后端 `opt.step()` → `optimizer_step(opt, device)`；`_ppo_save` 落盘前把 XLA 张量物化到 CPU；
+`remote/worker.py` 支持 `--device tpu|xla`；`ipynb/battle-rl.ipynb` cell3/4 改为
+CUDA→TPU→CPU 探测。**踩坑四条**（全部来自真机）：
+
+1. **API 改名**：`xm.xla_device()` → `torch_xla.device()`；`xm.mark_step()` → **`torch_xla.sync()`**
+   （按 `sync` → `mark_step` 顺序探测，兼容旧版）。
+2. **TPU 是独占 PCI 直通设备**（`/dev/vfio/*`）：notebook 探测 cell **禁止 import torch_xla**
+   （2.6+ 导入即自动探测 PJRT device、会占住设备），改用 `importlib.util.find_spec`；
+   探针必须在**内核进程内**跑（子进程抢不到设备 → `open(/dev/vfio/0): Device or resource busy`）。
+   占用者是**别的进程**可 kill 释放；是**本内核**则 Python 无 release API，只能重启 runtime。
+3. **`!python -u` 必须带 `-u`**：子进程 stdout 块缓冲 ⇒ 输出要等进程结束才吐，看起来像卡死。
+4. **慢段要能跳**：TPU 上 `.item()` 每步 = 整图 materialize（分钟级），C 段每个新尾块 shape
+   一次 XLA 编译（数十秒级）。探针新增 `--skip-sync-tax / --warmup / --repeat`，
+   notebook 拆成三段各自可完成。
+
+### 21.4 门禁两项修复
+
+- **`platform_utils.rmtree_best_effort`**：沙箱删除保护抛 `SystemExit`（BaseException），
+  `shutil.rmtree(..., ignore_errors=True)` **挡不住** ⇒ 直接打死调用线程（实证：`rl/dispatch.py`
+  派发线程被打死后不再派发，竞态日志缺失导致 `test_it_early_race_v314` 假红）。
+  全部清理路径改走该助手；`rl/workdir_sweep.py` 的计数改挂到返回值上。
+- **`test_it_early_race_v314` 假红的真根因（结构性）**：单节点配置下
+  `pick_race_target` 的 `nd_id not in inflight_nodes[task]` **恒假** ⇒ v3.10 race lane
+  **永不触发**（失败日志里一条 `— race lane` 都没有），断言只能靠 v3.7 fan-out 的
+  `next(iter(inflight))`（dict 插入序，取决于线程抢锁）偶然命中 seed111。
+  改 `cfg["nodes"]` **追加第二节点**（慢任务挂 A、B 空闲 ⇒ race lane 按 `sorted(inflight)`
+  确定性选中 `(0,111)`，全表最小键）；`took9` 由 12~15 s 降至 **2.0 s**，门禁连跑两次全绿。
+  修完还**提高**了真实覆盖 —— 原先那条路径在该配置下根本没被执行过。
+
+### 21.5 待做
+
+按实测收益排序：**传输方案B**（+1.3 s）、**`kick_kl ≈ 1.455e-11` 仍放行 ref 加载与预计算**
+（白付 3 s/轮 + ~0.36 MB payload；判据宜改 `> 1e-9`，但需确认课程是否还会回抬 kickstart）、
+**`channels_last`**（同步被排除后升为第一优先；已验证 `cat(obs_cl, coords_nchw)` 会把 layout
+静默退回 NCHW，不是传个参数就行）、**尾块固定 shape**（仅 TPU 有收益）。
+**DECISIONS 条目待补**（建议 `§2026-09-10-ppo-perf`）。
+
 ## §20 四项监控修复落地 + PPO job 竞速模型（§343）+ it24 孤儿租约事故复盘（2026-09-06）
 
 §19 的三处发现（+ backup_prefix 第④项）经用户拍板「修全部问题」后全部落地，

@@ -181,7 +181,9 @@ def run_rollout_stream(
     # 等待窗口（它们作为首波语料已注入 pend，collector 只补采真正缺失的局）。
     try:
         wver_start = dist_common.weights_fingerprint(rl_path)
-        _done_start = completed_pairs(traj_dir, wver_start, extra_wver=extra_wver, course_fp=course_fp)
+        _done_start = completed_pairs(
+            traj_dir, wver_start, extra_wver=extra_wver, course_fp=course_fp
+        )
         remaining_games = max(0, len(pairs) - len(_done_start))
     except OSError:
         remaining_games = None
@@ -254,7 +256,9 @@ def run_rollout_stream(
             if shard is None:
                 continue
             try:
-                ep = backend.load_episode_from_shard(shard, float(getattr(args, "gamma", 0.995)), float(getattr(args, "lam", 0.95)))
+                ep = backend.load_episode_from_shard(
+                    shard, float(getattr(args, "gamma", 0.995)), float(getattr(args, "lam", 0.95))
+                )
             except Exception as e:
                 log(f"[stream] skip bad shard {shard}: {str(e)[:100]}")
                 continue
@@ -335,7 +339,9 @@ def run_rollout_stream(
     _pre_seeded = 0
     if extra_wver and extra_wver != wver_start:
         plan_set_ = {(int(a), int(b)) for a, b in pairs}
-        for _pair, _dir in _scan_shards(traj_dir, wver_start, extra_wver=extra_wver, course_fp=course_fp):
+        for _pair, _dir in _scan_shards(
+            traj_dir, wver_start, extra_wver=extra_wver, course_fp=course_fp
+        ):
             if _pair not in plan_set_:
                 continue
             with lock:
@@ -395,7 +401,11 @@ def run_rollout_stream(
             )
         else:
             log("[stream] no fresh settles this round — falling back to full-disk update")
-            episodes = backend.load_episodes(str(traj_dir), float(getattr(args, "gamma", 0.995)), float(getattr(args, "lam", 0.95)))
+            episodes = backend.load_episodes(
+                str(traj_dir),
+                float(getattr(args, "gamma", 0.995)),
+                float(getattr(args, "lam", 0.95)),
+            )
             chunks = backend.chunk_episodes(episodes, args.mb)
             t_p = time.time()
             state["last_agg"] = backend.update(

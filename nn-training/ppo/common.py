@@ -181,6 +181,21 @@ def sync_scalars(values: dict[str, torch.Tensor]) -> dict[str, float]:
     return dict(zip(keys, stacked, strict=True))
 
 
+def xla_device():
+    """取 XLA 设备句柄。优先 `torch_xla.device()`（2.5+ 推荐），旧版回退 `xm.xla_device()`。
+
+    2026-09-10 实测：Kaggle TPU 镜像的 torch_xla 会给 `xm.xla_device()` 发
+    DeprecationWarning（"Use torch_xla.device instead"）。两条都保留是为了跨版本可用。
+    """
+    import torch_xla
+    import torch_xla.core.xla_model as xm
+
+    dev_fn = getattr(torch_xla, "device", None)
+    if callable(dev_fn):
+        return dev_fn()
+    return xm.xla_device()
+
+
 def optimizer_step(opt, device) -> None:
     """设备感知的优化器步进：XLA 走 xm.optimizer_step，其余 == 裸 opt.step()。"""
     if is_xla(device):
@@ -194,8 +209,15 @@ def optimizer_step(opt, device) -> None:
 def xla_mark_step(device) -> None:
     """XLA 图执行边界（非 XLA 设备为 no-op）——保证 host 侧读到的权重是最新值。"""
     if is_xla(device):
+        import torch_xla
         import torch_xla.core.xla_model as xm
 
+        # 2.5+ 把 mark_step 改名为 sync()；两个都探，兼容旧版。
+        for _name in ("sync", "mark_step"):
+            _fn = getattr(torch_xla, _name, None)
+            if callable(_fn):
+                _fn()
+                return
         xm.mark_step()
 
 

@@ -49,12 +49,22 @@ def _gpu_push_nodes(remote_token: str) -> list[dict]:
     cfg = dist_common.load_dist_config() or {}
     for n in cfg.get("nodes") or []:
         if n.get("gpu_push") and n.get("enabled", True):
-            out.append({"url": str(n.get("url", "")).rstrip("/"), "authKey": str(n.get("authKey", ""))})
+            out.append(
+                {"url": str(n.get("url", "")).rstrip("/"), "authKey": str(n.get("authKey", ""))}
+            )
     return out
 
 
-def _push_job_round(nodes: list[dict], manifest: dict, jid: str, payload_bytes: bytes,
-                    code_bytes: bytes, args: Any, timeout_sec: float, log: Any) -> dict:
+def _push_job_round(
+    nodes: list[dict],
+    manifest: dict,
+    jid: str,
+    payload_bytes: bytes,
+    code_bytes: bytes,
+    args: Any,
+    timeout_sec: float,
+    log: Any,
+) -> dict:
     """按序向 push 节点提交 job 并等待结果；单节点失败换下一个，全部失败抛
     RetryableError（loop 原地重试同迭代）。--smoke 经 X-Smoke-Echo 头触发节点侧
     冒烟回显（不跑 PPO，结果带 smoke 标记 → 共享尾部作废本轮）。"""
@@ -62,8 +72,15 @@ def _push_job_round(nodes: list[dict], manifest: dict, jid: str, payload_bytes: 
     for node in nodes:
         url, key = node["url"], node.get("authKey", "")
         try:
-            _push_submit(url, key, manifest, payload_bytes, code_bytes,
-                         echo=bool(getattr(args, "smoke", False)), log=log)
+            _push_submit(
+                url,
+                key,
+                manifest,
+                payload_bytes,
+                code_bytes,
+                echo=bool(getattr(args, "smoke", False)),
+                log=log,
+            )
             log(f"[run_rl] push: job {jid} 已提交 -> {url}（等待 GPU 完成）")
             return _push_wait_result(url, key, jid, timeout_sec=timeout_sec, log=log)
         except Exception as e:  # 单节点失败换下一个（含确定性拒绝）
@@ -80,8 +97,7 @@ def _kickstart_ref_payload(args: Any) -> tuple[str, str]:
     path = str(getattr(args, "bc", "") or "")
     if not path or not Path(path).exists():
         raise SystemExit(
-            f"[run_rl] kickstart_ref 要求课程 bc 权重存在（ref 尺子）：{path!r}——"
-            "检查课程 bc 路径"
+            f"[run_rl] kickstart_ref 要求课程 bc 权重存在（ref 尺子）：{path!r}——检查课程 bc 路径"
         )
     raw = Path(path).read_bytes()
     return base64.b64encode(raw).decode("ascii"), hashlib.sha256(raw).hexdigest()
@@ -375,7 +391,9 @@ class TrainingSteps:
         # 本轮应训 shard 集（与 _serial_ppo load_episodes 装载口径一致）
         shard_dirs = iter_shard_dirs(args.traj, it, log=log)
         if not shard_dirs:
-            raise SystemExit(f"[run_rl] remote it{it}: 无完整 shard（traj {it_dir} 空）——无法发布 job")
+            raise SystemExit(
+                f"[run_rl] remote it{it}: 无完整 shard（traj {it_dir} 空）——无法发布 job"
+            )
         # 课程快照（D13/D14）：课程文件全文 + course_fp = sha256(文件字节)
         course = getattr(args, "course_obj", None)
         if course is None:
@@ -462,8 +480,9 @@ class TrainingSteps:
             # HTTPS——弱链路落在 Kaggle 网络。打包/账本/三重校验/落位与 pull 同构。
             payload_bytes = (Path(job_root) / jid / "payload.zip").read_bytes()
             code_bytes = self._code_zip_path.read_bytes()
-            result = _push_job_round(gpu_nodes, manifest, jid, payload_bytes, code_bytes,
-                                     args, timeout_sec, log)
+            result = _push_job_round(
+                gpu_nodes, manifest, jid, payload_bytes, code_bytes, args, timeout_sec, log
+            )
         else:
             result = wait_job(hub_url, token, jid, timeout_sec=timeout_sec, log=log)
         # 三重校验 + 落位（D12）：任一不等响亮拒绝，不落盘
@@ -481,10 +500,7 @@ class TrainingSteps:
             # 冒烟回显（worker --echo）：全链路已验证，但权重 = init 回显非真 PPO——
             # 作废本轮。job_completed 已记账（审计链完整）；落位的 out 权重与
             # 发布时逐字节相同（init 回显），无需回滚；重试轮 _prepare_iter_dir 清场。
-            log(
-                f"[run_rl] remote ppo it{it}: job {jid} 是冒烟回显（result.smoke）"
-                "——本轮作废"
-            )
+            log(f"[run_rl] remote ppo it{it}: job {jid} 是冒烟回显（result.smoke）——本轮作废")
             raise SmokeVoidRoundError(jid)
         # H7（review-hy）：--remote-precollect 1 → 在 PPO 等待窗口后 spawn 下一轮首波
         # 预采（θ_N 快照，复用 spawn_collect_next 双缓冲机制）。默认 0（Q10 测后开）
@@ -497,7 +513,9 @@ class TrainingSteps:
             # 等待，预采首波可能尚未落盘即被 _prepare_iter_dir 清场。
             self._collect_child = spawn_collect_next(args, it)
             if self._collect_child is not None:
-                log(f"[run_rl] remote precollect: next-round first-wave spawned (pid={self._collect_child.pid})")
+                log(
+                    f"[run_rl] remote precollect: next-round first-wave spawned (pid={self._collect_child.pid})"
+                )
         # 结算字段（下游 breaker / stop-loss / events 账本原样消费，D4）
         self._agg = _remote_forward_agg(result.get("agg", {}))
         self._chunks_n = int(result.get("agg", {}).get("chunks", 0))

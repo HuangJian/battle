@@ -42,8 +42,14 @@ if [ "$RC" -eq 0 ]; then
   if [ "${KEEP_LOG:-0}" = "1" ]; then
     echo "✓ ${ELAPSED}s — log kept: $LOG"
   else
-    rm -f "$LOG"
-    echo "✓ ${ELAPSED}s — log clean (KEEP_LOG=1 to keep)"
+    rm -f "$LOG" 2>/dev/null
+    if [ -e "$LOG" ]; then
+      # 删除可能被沙箱批量删除守卫拦下（实测 rm 返回 0 但文件仍在）——
+      # 不能无条件宣称 "clean"，那是假声明。
+      echo "✓ ${ELAPSED}s — log KEPT (delete blocked by sandbox): $LOG"
+    else
+      echo "✓ ${ELAPSED}s — log clean (KEEP_LOG=1 to keep)"
+    fi
   fi
 else
   echo "✗ exit=$RC after ${ELAPSED}s — log kept: $LOG" >&2

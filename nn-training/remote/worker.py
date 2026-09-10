@@ -529,14 +529,24 @@ def run_job(
     init_w = job_dir / "init_weights.json"
     if not init_w.exists():
         raise ProtocolError("payload 缺 init_weights.json——无法构建模型")
-    model = ppo_engine.build_ppo(str(init_w))
+    # 标注为 torch.nn.Module（而非推断出的 PPOStudent）：多卡分支要把 model 换成
+    # DataParallel，且下游 save_weights_json / load_state_into 收的就是 Module。
+    model: torch.nn.Module = ppo_engine.build_ppo(str(init_w))
     # 设备解析（2026-09-10 TPU 接力）：--device tpu/xla 走 torch_xla 的 xla_device()，
     # 而不是 torch.device("xla")——后者在部分 torch_xla 版本上拿不到带序号的设备句柄。
     # torch_xla 只在真的选了 TPU 时才 import（未装 torch_xla 的机器行为不变）。
-    if str(device).lower() in ("tpu", "xla"):
-        import torch_xla.core.xla_model as xm
+    dev_str = str(device).lower()
+    use_dp = False
+    if dev_str in ("tpu", "xla"):
+        # 统一走 ppo.common.xla_device()（torch_xla.device() 优先，旧版回退 xm.xla_device()）
+        from ppo.common import xla_device
 
-        device_t = xm.xla_device()
+        device_t = xla_device()
+    elif dev_str in ("cuda-dp", "dp"):
+        # 多卡（2026-09-10 实测 1.92×）：torch.device("cuda-dp") 不是合法设备，
+        # 必须显式落到 cuda；真正的包装在 state_dict 装载之后（见下方 use_dp 段）。
+        device_t = torch.device("cuda")
+        use_dp = torch.cuda.is_available() and torch.cuda.device_count() > 1
     else:
         device_t = torch.device(device)
     opt = None
@@ -559,10 +569,32 @@ def run_job(
         opt = torch.optim.Adam(model.parameters(), lr=float(manifest["lr"]))
         log(f"job {jid}: 无 opt_init，从 init_weights warm-start + 新 Adam")
 
+    # ---- 多卡（--device cuda-dp）----
+    # 位置很重要：**必须在 load_state_dict / load_state_into + .to(device_t) 之后**再包，
+    # 否则 ckpt 的键会长出 "module." 前缀。raw_model 始终指向未包装模块，产物落盘用它。
+    # ⚠ DP 会改变梯度归约顺序 ⇒ 末位 ulp 变化，与单卡 run 的逐位 A/B 不可比；
+    #   它是新开一条实验臂的开关，不是透明加速（plan/ppo-optimization.plan.md §3.4）。
+    raw_model = model
+    if dev_str in ("cuda-dp", "dp"):
+        if use_dp:
+            _n = torch.cuda.device_count()
+            _mb = int(manifest.get("mb", 0) or 0)
+            model = torch.nn.DataParallel(model)
+            log(
+                f"job {jid}: DataParallel 生效（{_n} 卡"
+                + (f"，mb={_mb} -> 每卡 {_mb // _n}" if _mb else "")
+                + "）——梯度归约顺序变化，与单卡 run 数值不可逐位比"
+            )
+        else:
+            log(
+                f"job {jid}: 请求了 cuda-dp 但只可见 {torch.cuda.device_count()} 张卡"
+                " —— 退化为单卡（行为等同 --device cuda）"
+            )
+
     # ---- BC-anchored kickstart ref（§363）：有系数无尺子＝静默裸奔，不可接受——
     # 缺字节响亮拒绝；系数为 0 直接跳过（零开销，旧 manifest 行为不变）。
     kick_kl = float(manifest.get("kickstart_kl", 0.0) or 0.0)
-    ref_model = None
+    ref_model: torch.nn.Module | None = None
     if kick_kl > 0:
         import base64 as _b64
         import hashlib as _hl
@@ -582,6 +614,8 @@ def run_job(
             p.requires_grad = False
         ref_model.eval()
         ref_model.to(device_t)
+        if use_dp:
+            ref_model = torch.nn.DataParallel(ref_model)
         log(f"job {jid}: kickstart ref 已加载（BC 冻结 master，kl={kick_kl}）")
 
     # ---- PPO：load → chunk → update（同一 backend 调用链，D4） ----
@@ -619,11 +653,14 @@ def run_job(
     from ppo.common import _ppo_save, xla_mark_step
 
     xla_mark_step(device_t)
-    model.to("cpu")
+    # ⚠ 用 raw_model 而非 model：DP 包装的 state_dict 键带 "module." 前缀（已实证），
+    #   写出去会让 ckpt 与单卡路径互不兼容（课程 resume 会炸）。raw_model 与 DP 共享
+    #   同一批参数对象，.to("cpu") 对两者等价。
+    raw_model.to("cpu")
     wj_path = job_dir / "weights.json"
-    save_weights_json(model, str(wj_path))
+    save_weights_json(raw_model, str(wj_path))
     ckpt_dir = job_dir / "ppo_final"
-    _ppo_save(str(ckpt_dir), model, opt, int(manifest["epochs"]))
+    _ppo_save(str(ckpt_dir), raw_model, opt, int(manifest["epochs"]))
     opt_tar_b64 = encode_opt_tar(pack_opt_tar(ckpt_dir))
 
     result = {

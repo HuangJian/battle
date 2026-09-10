@@ -63,7 +63,11 @@ class WorkerServerState:
     def set_error(self, jid: str, error: str) -> None:
         with self._lock:
             prev = self.jobs.get(jid, {})
-            self.jobs[jid] = {"state": "failed", "error": error, **{k: v for k, v in prev.items() if k == "result"}}
+            self.jobs[jid] = {
+                "state": "failed",
+                "error": error,
+                **{k: v for k, v in prev.items() if k == "result"},
+            }
 
     def get(self, jid: str) -> dict | None:
         with self._lock:
@@ -74,17 +78,30 @@ class WorkerServerState:
             return any(j["state"] == "running" for j in self.jobs.values())
 
 
-def _execute_job(state: WorkerServerState, manifest: dict, payload_zip: bytes, code_zip: bytes | None,
-                 work_dir: Path, device: str, torch_threads: int, echo: bool,
-                 log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker-serve] {msg}", flush=True)) -> None:
+def _execute_job(
+    state: WorkerServerState,
+    manifest: dict,
+    payload_zip: bytes,
+    code_zip: bytes | None,
+    work_dir: Path,
+    device: str,
+    torch_threads: int,
+    echo: bool,
+    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker-serve] {msg}", flush=True),
+) -> None:
     """后台执行：run_job 全套（preloaded push 路径）→ 状态落表。异常进 failed（HUB 可见）。"""
     jid = manifest["job_id"]
     state.set_state(jid, "running")
     try:
         result = run_job(
-            "", "", {"job_id": jid, "manifest": manifest},
-            work_dir=work_dir, device=device, torch_threads=torch_threads,
-            echo=echo, preloaded={"payload_zip": payload_zip, "code_zip": code_zip},
+            "",
+            "",
+            {"job_id": jid, "manifest": manifest},
+            work_dir=work_dir,
+            device=device,
+            torch_threads=torch_threads,
+            echo=echo,
+            preloaded={"payload_zip": payload_zip, "code_zip": code_zip},
             log=log,
         )
         state.set_result(jid, result)
@@ -129,17 +146,24 @@ def make_worker_server(
                     self._json({"error": "unauthorized"}, 401)
                     return
                 if path == "/ping":
-                    self._json({"ok": True, "pid": os.getpid(), "busy": state.busy(), "done": state.done_total})
+                    self._json(
+                        {
+                            "ok": True,
+                            "pid": os.getpid(),
+                            "busy": state.busy(),
+                            "done": state.done_total,
+                        }
+                    )
                 elif path == "/code-sha":
                     qs = parse_qs(urlparse(self.path).query)
                     sha = (qs.get("sha") or [""])[0]
                     self._json({"sha": sha, "cached": state.code_cached(sha)})
                 elif path.startswith("/job/") and path.endswith("/status"):
-                    jid = path[len("/job/"):-len("/status")]
+                    jid = path[len("/job/") : -len("/status")]
                     rec = state.get(jid)
                     self._json({"state": rec["state"] if rec else "unknown"})
                 elif path.startswith("/job/") and path.endswith("/result"):
-                    jid = path[len("/job/"):-len("/result")]
+                    jid = path[len("/job/") : -len("/result")]
                     rec = state.get(jid)
                     if rec is None:
                         self._json({"error": "unknown job"}, 404)
@@ -178,13 +202,25 @@ def make_worker_server(
                 code_b64 = body.get("code_b64")
                 code_zip = base64.b64decode(code_b64) if code_b64 else None
                 if code_zip is None and not state.code_cached(manifest["code_sha256"]):
-                    self._json({"error": "code-missing", "code_sha256": manifest["code_sha256"]}, 428)
+                    self._json(
+                        {"error": "code-missing", "code_sha256": manifest["code_sha256"]}, 428
+                    )
                     return
                 echo = self.headers.get("X-Smoke-Echo", "") == "1"
                 state.set_state(jid, "running")
                 threading.Thread(
                     target=_execute_job,
-                    args=(state, manifest, payload_zip, code_zip, state.work_dir, device, torch_threads, echo, log),
+                    args=(
+                        state,
+                        manifest,
+                        payload_zip,
+                        code_zip,
+                        state.work_dir,
+                        device,
+                        torch_threads,
+                        echo,
+                        log,
+                    ),
                     daemon=True,
                     name=f"job-{jid[:8]}",
                 ).start()
@@ -199,8 +235,9 @@ def make_worker_server(
     return ThreadingHTTPServer((host, port), Handler)
 
 
-def serve_forever(port: int, token: str, work_dir: Path, *, device: str = "cpu",
-                  torch_threads: int = 0) -> None:
+def serve_forever(
+    port: int, token: str, work_dir: Path, *, device: str = "cpu", torch_threads: int = 0
+) -> None:
     """阻塞运行（调用方负责进程生命周期）；token 缺失响亮报错。"""
     if not token:
         raise SystemExit("[worker-serve] ERROR: 需要 --token（与 HUB 共享密钥）")
@@ -212,8 +249,11 @@ def serve_forever(port: int, token: str, work_dir: Path, *, device: str = "cpu",
         raise SystemExit(f"[worker-serve] ERROR: {e}") from None
     state = WorkerServerState(work_dir)
     srv = make_worker_server(state, port, token, device=device, torch_threads=torch_threads)
-    print(f"[{time.strftime('%H:%M:%S')}] [worker-serve] listening on 0.0.0.0:{port} "
-          f"work={state.work_dir} pid={os.getpid()}", flush=True)
+    print(
+        f"[{time.strftime('%H:%M:%S')}] [worker-serve] listening on 0.0.0.0:{port} "
+        f"work={state.work_dir} pid={os.getpid()}",
+        flush=True,
+    )
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

@@ -23,6 +23,7 @@ test_no_torch_on_import guards the `import run_rl` chain).
 from __future__ import annotations
 
 import base64
+import gzip
 import hashlib
 import json
 import zipfile
@@ -119,12 +120,24 @@ def normalize_manifest(m: dict) -> dict:
             raise ProtocolError(f"{k} 必须是 float，收到 {v!r}")
         if float(v) <= 0:
             raise ProtocolError(f"{k} 必须 > 0，收到 {v!r}")
-    for k in ("commit", "code_sha256", "course", "course_fp", "mode", "seed", "init_weights_fp",
-              "data_fp", "payload_sha256", "job_id"):
+    for k in (
+        "commit",
+        "code_sha256",
+        "course",
+        "course_fp",
+        "mode",
+        "seed",
+        "init_weights_fp",
+        "data_fp",
+        "payload_sha256",
+        "job_id",
+    ):
         if not isinstance(out[k], str) or not out[k]:
             raise ProtocolError(f"{k} 必须是非空 str")
     if out["mode"] != "per-tick":
-        raise ProtocolError(f"mode={out['mode']!r} != 'per-tick'（v1 红线：仅 per-tick 课程支持远程）")
+        raise ProtocolError(
+            f"mode={out['mode']!r} != 'per-tick'（v1 红线：仅 per-tick 课程支持远程）"
+        )
     if not isinstance(out.get("normalize_ret", False), bool):
         raise ProtocolError(f"normalize_ret 必须是 bool，收到 {out.get('normalize_ret')!r}")
     if not isinstance(out.get("kickstart_kl", 0.0), (int, float)) or isinstance(
@@ -137,6 +150,7 @@ def normalize_manifest(m: dict) -> dict:
 
 
 # ------------------------------------------------------------------ data_fp
+
 
 def data_fp(shard_dirs: Sequence[str | Path]) -> str:
     """D1 data_fp：sha256(按字典序排列的 shard 相对路径 + 各 manifest {wver,stage,seed})。
@@ -173,6 +187,7 @@ def data_fp(shard_dirs: Sequence[str | Path]) -> str:
 
 
 # ------------------------------------------------------------------ payload
+
 
 def pack_payload(shard_dirs: list[str | Path], manifest: dict, out_zip: str | Path) -> str:
     """把 shard 目录（npy + manifest.json）打成 zip，写 `out_zip`。
@@ -225,6 +240,7 @@ def unpack_payload(zip_path: str | Path, dest: str | Path) -> tuple[dict, list[s
 
 # ------------------------------------------------------------------ idempotency
 
+
 def idempotency_key(manifest: dict) -> tuple:
     """D1 幂等键 = (runId, it, init_weights_fp, data_fp)。云 worker 崩溃重拉同一
     job 时按此去重；hub 账本记 job 状态，不重复发包已完成 job。"""
@@ -260,6 +276,7 @@ def job_seed(run_id: str, it: int, init_weights_fp: str) -> str:
 
 
 # ------------------------------------------------------------------ result
+
 
 def validate_result(
     r: dict,
@@ -299,19 +316,45 @@ def validate_result(
     return r
 
 
+# ---- result 回传字段的传输编码 ----
+# 上行只有 220 KB/s（实测），而两字段都是 JSON 文本 / torch 张量，gzip level 6 实测省
+# 29.6%（weights.json 1.35×、opt tar 1.45×，CPU 仅 ~0.05 s）。level 9 换不到额外收益。
+_GZIP_MAGIC = b"\x1f\x8b"
+_WIRE_GZIP_LEVEL = 6
+
+
+def _pack_wire(raw: bytes) -> str:
+    """原始字节 → gzip → base64（JSON 安全的回传字段）。"""
+    return base64.b64encode(gzip.compress(raw, compresslevel=_WIRE_GZIP_LEVEL)).decode("ascii")
+
+
+def _unpack_wire(b64: str) -> bytes:
+    """base64 → (必要时 gunzip) → 原始字节。
+
+    靠 gzip 魔数自动判别，**兼容旧格式**（未压缩的 base64）—— 历史 result.json 与
+    已在途的 payload 都能照常解出。
+    """
+    raw = base64.b64decode(b64.encode("ascii"))
+    if raw[:2] == _GZIP_MAGIC:
+        return gzip.decompress(raw)
+    return raw
+
+
 def encode_weights_json(wj: bytes) -> str:
-    """weights_json 传输编码：原始字节 → base64（JSON 安全的回传字段）。"""
-    return base64.b64encode(wj).decode("ascii")
+    """weights_json 传输编码（gzip + base64）。"""
+    return _pack_wire(wj)
 
 
 def decode_weights_json(b64: str) -> bytes:
-    """weights_json 传输解码：base64 → 原始字节（hub 落盘 args.out 前用）。"""
-    return base64.b64decode(b64.encode("ascii"))
+    """weights_json 传输解码（hub 落盘 args.out 前用）；兼容未压缩的旧格式。"""
+    return _unpack_wire(b64)
 
 
 def encode_opt_tar(tar_bytes: bytes) -> str:
-    return base64.b64encode(tar_bytes).decode("ascii")
+    """opt tar 传输编码（gzip + base64）。"""
+    return _pack_wire(tar_bytes)
 
 
 def decode_opt_tar(b64: str) -> bytes:
-    return base64.b64decode(b64.encode("ascii"))
+    """opt tar 传输解码；兼容未压缩的旧格式。"""
+    return _unpack_wire(b64)

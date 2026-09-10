@@ -800,9 +800,30 @@ def test_it_early_race_v314(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     # 三类行之一。无竞速（回归）时慢主副本独占结算，上述行不会出现 → 判据失败。
     # 另：check() 只聚合不抛错（main() 专属语义），pytest 模式下静默放行曾掩盖失败——
     # 本测试结束时把本轮新增 FAILS 显式抛为 AssertionError。
+    #
+    # 2026-09-10 **结构性修复（加第二个节点）**：原配置只有单一节点 "fake"，而 v3.10 race
+    # lane 的 pick_race_target 会排除「当前节点已持有的任务」（`nd_id not in
+    # inflight_nodes[task]`）——单节点下每个任务的 inflight_nodes 都含 "fake"，4 个 worker
+    # 的 nd_id 也全是 "fake" ⇒ 该条件恒假、**race lane 永不触发**（失败日志里一条
+    # "— race lane" 都没有）。判据当时只能靠 v3.7 尾部 fan-out，而它的候选是
+    # `next(iter(inflight))`（dict 插入序第一个，取决于哪个线程先拿到锁，与 plan 顺序无关）
+    # ⇒ 断言退化成「seed111 恰好是首个 inflight 键」的抛硬币，xdist 负载下常红。
+    # 两个节点后：慢任务挂在其中一个上，另一个节点的空闲槽竞速时 nd_id 不在其
+    # inflight_nodes 里 ⇒ race lane 按 sorted(inflight) **确定性**选中 (0,111)（全表最小键）。
     import rl.dispatch as _dispatch_mod
 
     srv, WEIGHTS, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
+    # 第二个节点：同一 FakeServer、独立 id 与并发（节点线程按 nd["c"] 孵化，
+    # args.workers 只约束本机槽，故这里确实会多出 4 个远端 worker）。
+    cfg["nodes"].append(
+        {
+            "id": "fake2",
+            "url": f"http://127.0.0.1:{srv.server_address[1]}",
+            "authKey": "",
+            "concurrency": 4,
+            "enabled": True,
+        }
+    )
     f0 = len(FAILS)
     lines: list[str] = []
     _real_log = _dispatch_mod.log

@@ -50,7 +50,10 @@ def submit_job(
         raise RetryableError("节点无 code 缓存且本次未携带 code.zip")
     last: str = ""
     for attempt in range(1, attempts + 1):
-        body_obj: dict = {"manifest": manifest, "payload_b64": base64.b64encode(payload_zip).decode("ascii")}
+        body_obj: dict = {
+            "manifest": manifest,
+            "payload_b64": base64.b64encode(payload_zip).decode("ascii"),
+        }
         if need_code and code_zip is not None:
             body_obj["code_b64"] = base64.b64encode(code_zip).decode("ascii")
         try:
@@ -61,12 +64,17 @@ def submit_job(
                 timeout=timeout,
                 data=json.dumps(body_obj, ensure_ascii=False).encode("utf-8"),
                 method="POST",
-                headers={"Content-Type": "application/json", **({"X-Smoke-Echo": "1"} if echo else {})},
+                headers={
+                    "Content-Type": "application/json",
+                    **({"X-Smoke-Echo": "1"} if echo else {}),
+                },
             )
         except Exception as e:
             status, resp = None, repr(e).encode()
         if status in (200, 202):
-            log(f"job {manifest['job_id']} 已推送到 {base_url}（code 上传={'是' if need_code else '否，缓存命中'}）")
+            log(
+                f"job {manifest['job_id']} 已推送到 {base_url}（code 上传={'是' if need_code else '否，缓存命中'}）"
+            )
             return
         if status == 428:
             need_code = True  # 节点缓存未命中：下次重试带 code
@@ -74,11 +82,17 @@ def submit_job(
         elif status == 409:
             last = "409 busy"
         elif status is not None and 400 <= status < 500:
-            raise ProtocolError(f"job POST rejected: HTTP {status}: {resp[:300].decode('utf-8', 'replace')}")
+            raise ProtocolError(
+                f"job POST rejected: HTTP {status}: {resp[:300].decode('utf-8', 'replace')}"
+            )
         else:
-            last = f"HTTP {status}" if status is not None else repr(resp.decode("utf-8", "replace")[:120])
+            last = (
+                f"HTTP {status}"
+                if status is not None
+                else repr(resp.decode("utf-8", "replace")[:120])
+            )
         if attempt < attempts:
-            backoff = min(2 ** attempt, 8)
+            backoff = min(2**attempt, 8)
             log(f"job POST 瞬时失败({last}) — {backoff}s 后第 {attempt + 1}/{attempts} 次重试")
             time.sleep(backoff)
     raise RetryableError(f"job POST 重试 {attempts} 次仍失败: {last}")

@@ -138,6 +138,30 @@ def test_opt_tar_b64_roundtrip() -> None:
     assert decode_opt_tar(encode_opt_tar(raw)) == raw
 
 
+def test_wire_encoding_is_actually_compressed() -> None:
+    """回传字段必须真的被压缩（2026-09-10 起 result 上行省 29.6%）。
+
+    守着「有人把 gzip 去掉退化成裸 base64」这种回归：用高度可压的 float-ish 文本作样本，
+    要求线上体积显著小于裸 base64。
+    """
+    # 模拟 weights.json：可压的 JSON 文本（真实样本 gzip 约 1.35×）
+    raw = (b'{"format":"nn-weights-json","params":{"w":' + b"0.123456789," * 20000 + b"}}")
+    wire = encode_weights_json(raw)
+    plain = base64.b64encode(raw).decode("ascii")
+    assert len(wire) < len(plain) * 0.8, (
+        f"线上体积 {len(wire)} 未显著小于裸 base64 {len(plain)} —— 压缩被去掉了？"
+    )
+    assert decode_weights_json(wire) == raw
+
+
+def test_wire_decoder_accepts_legacy_uncompressed() -> None:
+    """兼容旧格式：未压缩的裸 base64 必须仍能解出（历史 result.json / 在途 payload）。"""
+    raw = b'{"format":"nn-weights-json","params":{"legacy":1}}'
+    legacy_b64 = base64.b64encode(raw).decode("ascii")
+    assert decode_weights_json(legacy_b64) == raw
+    assert decode_opt_tar(legacy_b64) == raw
+
+
 def test_manifest_normalize_required_and_defaults() -> None:
     m = normalize_manifest(_mini_manifest())
     for k in MANIFEST_REQUIRED:

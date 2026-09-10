@@ -18,9 +18,16 @@
      （数值逐位不变，见 tests/test_ppo_kickstart_cache.py）。
 
 用法：
-    Kaggle TPU：  !python tpu-probe.py --device tpu
-    本机对照：     python tpu-probe.py --device cpu --quick
-    只测优化效果：  python tpu-probe.py --device cpu --skip-shapes
+    本机对照：     python tools/tpu-probe.py --device cpu --quick
+    只测优化效果：  python tools/tpu-probe.py --device cpu --skip-shapes
+    Kaggle GPU：  python tools/tpu-probe.py --device cuda --skip-shapes
+    Kaggle TPU：  见 ipynb/tpu-probe.ipynb —— **必须在内核进程内跑**
+                  （%%writefile 后 import tpu_probe; tpu_probe.main()）。
+                  ⚠ 不要用 `!python tpu-probe.py`：TPU 是独占的 PCI 直通设备
+                  (/dev/vfio/*)，子进程抢不到它，会报
+                    RuntimeError: open(/dev/vfio/0): Device or resource busy
+                  （2026-09-10 实测踩到）。同理，notebook 的环境探测 cell 也不能调
+                  xla_device()，否则内核会先把设备占住，后续子进程必失败。
 
 模型与 models/student.py 逐位一致（BN-free ConvMixer-Lite h=64 d=8，stem 权重已折进
 1/255）；训练循环与 ppo/engine.py::ppo_update 的算子结构等价。
@@ -30,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 import time
 from typing import Any
 
@@ -156,18 +164,48 @@ class Backend:
     def __init__(self, kind: str):
         self.kind = kind
         self.xm: Any = None
+        self.dp = False
         if kind == "tpu":
             os.environ.setdefault("PJRT_DEVICE", "TPU")
+            import torch_xla
             import torch_xla.core.xla_model as xm
 
             self.xm = xm
-            self.device = xm.xla_device()
-        elif kind == "cuda":
+            self._torch_xla = torch_xla
+            # 2.5+ 推荐 torch_xla.device()；旧版只有 xm.xla_device()（会给 DeprecationWarning）
+            dev_fn = getattr(torch_xla, "device", None)
+            try:
+                self.device = dev_fn() if callable(dev_fn) else xm.xla_device()
+            except RuntimeError as e:
+                # 最常见：/dev/vfio/* 被占用 —— TPU 是**独占**的 PCI 直通设备。任何人
+                # （包括 notebook 内核里一次 import torch_xla 触发的 PJRT 自动探测）
+                # 先碰过它，后来者都会拿到 Device or resource busy。
+                print(
+                    f"\n[TPU 初始化失败] {e}\n"
+                    "  可能原因与处置：\n"
+                    "  1) /dev/vfio/* 已被占用（TPU 独占）—— 这是绝大多数情况。\n"
+                    "     Colab/Kaggle: Runtime -> Restart session（或 Disconnect and delete\n"
+                    "     runtime）释放设备后，从第一个 cell 重跑本 notebook。\n"
+                    "  2) 本 notebook 的探测 cell 不该 import torch_xla —— torch_xla 2.6+\n"
+                    "     导入时会自动探测 PJRT device，可能直接占住 TPU。用\n"
+                    "     importlib.util.find_spec 查安装状态即可。\n"
+                    "  3) 确认 Accelerator 选的是 TPU（Colab: TPU v5e-1 / Kaggle: TPU VM v3-8）。\n",
+                    file=sys.stderr,
+                )
+                raise
+        elif kind in ("cuda", "cuda-dp"):
             self.device = torch.device("cuda")
+            self.dp = kind == "cuda-dp"
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
         else:
             self.device = torch.device("cpu")
+
+    def wrap(self, model):
+        """cuda-dp 且可见 >1 卡 -> DataParallel；其余情况原样返回（零改动）。"""
+        if getattr(self, "dp", False) and torch.cuda.device_count() > 1:
+            return torch.nn.DataParallel(model)
+        return model
 
     def to(self, m):
         return m.to(self.device)
@@ -180,8 +218,24 @@ class Backend:
         else:
             opt.step()
 
+    def sync(self):
+        """**真正的**设备同步（等 GPU 算完）。mark() 在 CUDA 上是 no-op，
+        若不额外 sync，sync_mode="none" 测到的只是 CPU 入队时间 —— 无效测量
+        （2026-09-10 实测：A=64ms 而 B_new=192ms，差的不是同步税，是"A 根本没等"）。"""
+        if self.kind in ("cuda", "cuda-dp"):
+            torch.cuda.synchronize()
+        elif self.kind == "tpu":
+            self.mark()
+
     def mark(self):
         if self.kind == "tpu":
+            # torch_xla 2.5+ 起 mark_step 改名为 sync()（实测 Kaggle/Colab 都会给
+            # xm.mark_step() 发 "Use torch_xla.sync instead"）。按新名优先探测。
+            for _name in ("sync", "mark_step"):
+                _fn = getattr(self._torch_xla, _name, None)
+                if callable(_fn):
+                    _fn()
+                    return
             self.xm.mark_step()
 
 
@@ -191,7 +245,7 @@ def prepare(bk: Backend, chunks: list[dict]) -> list[dict]:
     out = []
     for c in chunks:
         out.append({k: torch.from_numpy(v).to(bk.device) for k, v in c.items()})
-    bk.mark()
+    bk.sync()
     return out
 
 
@@ -297,7 +351,7 @@ def run_steps(
                 ).tolist()
             else:
                 bk.mark()
-    bk.mark()
+    bk.sync()          # 真正的设备同步：CUDA 上必须等，否则计时不含 GPU 时间
     return time.time() - t0, n_steps
 
 
@@ -316,7 +370,7 @@ def bench_case(
     """warmup 掉 XLA 编译，再取 repeat 次最小值。"""
     torch.manual_seed(seed)
     np.random.seed(seed)
-    model = bk.to(PPOStudent())
+    model = bk.wrap(bk.to(PPOStudent()))
     opt = torch.optim.Adam(model.parameters(), lr=1.5e-4)
     dev_chunks = prepare(bk, chunks)
     for _ in range(warmup):
@@ -349,7 +403,7 @@ def bench_case(
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--device", default="tpu", choices=["tpu", "cuda", "cpu"])
+    ap.add_argument("--device", default="tpu", choices=["tpu", "cuda", "cuda-dp", "cpu"])
     ap.add_argument("--chunks", type=int, default=CHUNKS)
     ap.add_argument("--epochs", type=int, default=EPOCHS)
     ap.add_argument("--quick", action="store_true", help="本地自检：小规模（4 块 x 1 epoch）")
@@ -357,6 +411,24 @@ def main() -> None:
         "--skip-shapes", action="store_true", help="跳过 C 段（变化 shape，TPU 重编译税）"
     )
     ap.add_argument("--skip-ref", action="store_true", help="跳过 D1/D2 段（ref 双前向对照）")
+    ap.add_argument(
+        "--skip-sync-tax",
+        action="store_true",
+        help="跳过 B_old（逐项 .item() 同步税）。TPU 上这一段每步要 8 次整图 materialize，"
+        "慢到分钟级；只想要 A/B_new/D 段时用它。",
+    )
+    ap.add_argument(
+        "--warmup",
+        type=int,
+        default=1,
+        help="每个 case 的编译预热轮数（默认 1；TPU 想更快可给 0）",
+    )
+    ap.add_argument(
+        "--repeat",
+        type=int,
+        default=2,
+        help="每个 case 的计时重复次数，取最小值（默认 2；想更快可给 1）",
+    )
     args = ap.parse_args()
 
     if args.quick:
@@ -365,9 +437,19 @@ def main() -> None:
     bk = Backend(args.device)
     n_par = sum(p.numel() for p in PPOStudent().parameters())
     n_steps_iter = 148  # 37 x 4，用于把 s/step 折成 s/轮
+    def announce(tag: str, desc: str) -> None:
+        """case 级进度：TPU 上某些段慢到分钟级，不打印会误判成卡死。"""
+        print(f"  … 开始 {tag}: {desc}", flush=True)
+
     print("=" * 72)
     print(f"PPOStudent params={n_par:,}  device={args.device} -> {bk.device}")
     print(f"chunks={args.chunks} x epochs={args.epochs} = {args.chunks * args.epochs} steps")
+    if args.device.startswith("cuda") and torch.cuda.is_available():
+        _n = torch.cuda.device_count()
+        _names = ", ".join(torch.cuda.get_device_name(i) for i in range(_n))
+        print(f"可见 GPU: {_n} 张 [{_names}]" + ("  -> DataParallel 生效" if _n > 1 and args.device == "cuda-dp" else ""))
+        if _n > 1 and args.device == "cuda":
+            print("  ⚠ 你有多张卡但用了 --device cuda（只用第 0 张）。想跨卡跑用 --device cuda-dp。")
     print("=" * 72)
 
     rng = np.random.default_rng(20260910)
@@ -377,17 +459,27 @@ def main() -> None:
 
     cases: list[tuple[str, float]] = []
 
-    s, n = bench_case(bk, fixed, args.epochs, sync_mode="none")
+    announce("A", "纯 fwd+bwd+step（固定 shape, 无同步）")
+    s, n = bench_case(
+        bk, fixed, args.epochs, sync_mode="none", warmup=args.warmup, repeat=args.repeat
+    )
     cases.append(("A 纯 fwd+bwd+step（固定 shape, 无同步）", s))
-    print(f"  A: {s * 1000:7.0f} ms/step")
+    print(f"  A: {s * 1000:7.0f} ms/step", flush=True)
 
-    s, n = bench_case(bk, fixed, args.epochs, sync_mode="per-item")
-    cases.append(("B_old = A + 8x .item()/step（旧引擎）", s))
-    print(f"  B_old: {s * 1000:7.0f} ms/step")
+    if not args.skip_sync_tax:
+        announce("B_old", "8x .item()/step —— TPU 上每步 8 次整图 materialize，可能分钟级")
+        s, n = bench_case(
+            bk, fixed, args.epochs, sync_mode="per-item", warmup=args.warmup, repeat=args.repeat
+        )
+        cases.append(("B_old = A + 8x .item()/step（旧引擎）", s))
+        print(f"  B_old: {s * 1000:7.0f} ms/step", flush=True)
 
-    s, n = bench_case(bk, fixed, args.epochs, sync_mode="batched")
+    announce("B_new", "1x stack().tolist()（新引擎）")
+    s, n = bench_case(
+        bk, fixed, args.epochs, sync_mode="batched", warmup=args.warmup, repeat=args.repeat
+    )
     cases.append(("B_new = A + 1x stack().tolist()（新引擎）", s))
-    print(f"  B_new: {s * 1000:7.0f} ms/step")
+    print(f"  B_new: {s * 1000:7.0f} ms/step", flush=True)
 
     if not args.skip_shapes:
         worst = 0.0
@@ -395,27 +487,48 @@ def main() -> None:
             ch = [make_chunk(MB, rng) for _ in range(max(1, args.chunks - 1))] + [
                 make_chunk(tail, rng)
             ]
-            s, n = bench_case(bk, ch, args.epochs, sync_mode="batched", repeat=1)
+            announce("C", f"变化尾块 tail={tail}（新 shape -> XLA 重编译，慢）")
+            s, n = bench_case(
+                bk, ch, args.epochs, sync_mode="batched", warmup=args.warmup, repeat=1
+            )
             worst = max(worst, s)
-            print(f"  C tail={tail:4d}: {s * 1000:7.0f} ms/step")
+            print(f"  C tail={tail:4d}: {s * 1000:7.0f} ms/step", flush=True)
         cases.append(("C = B + 变化尾块（XLA 重编译最坏值）", worst))
 
     d1 = d2 = None
     if not args.skip_ref:
         torch.manual_seed(0)
-        ref = bk.to(PPOStudent()).eval()
+        ref = bk.wrap(bk.to(PPOStudent())).eval()
         for p in ref.parameters():
             p.requires_grad_(False)
         dev_fixed = prepare(bk, fixed)
         cache = build_ref_cache(bk, ref, dev_fixed)
 
-        d1, n = bench_case(bk, fixed, args.epochs, sync_mode="batched", ref_model=ref)
+        announce("D1", "ref 每步重算（旧 engine）")
+        d1, n = bench_case(
+            bk,
+            fixed,
+            args.epochs,
+            sync_mode="batched",
+            ref_model=ref,
+            warmup=args.warmup,
+            repeat=args.repeat,
+        )
         cases.append(("D1 = B + ref 每步重算（旧 engine）", d1))
-        print(f"  D1: {d1 * 1000:7.0f} ms/step  (ref 每步现算)")
+        print(f"  D1: {d1 * 1000:7.0f} ms/step  (ref 每步现算)", flush=True)
 
-        d2, n = bench_case(bk, fixed, args.epochs, sync_mode="batched", ref_cache=cache)
+        announce("D2", "ref 预计算缓存（新 engine）")
+        d2, n = bench_case(
+            bk,
+            fixed,
+            args.epochs,
+            sync_mode="batched",
+            ref_cache=cache,
+            warmup=args.warmup,
+            repeat=args.repeat,
+        )
         cases.append(("D2 = B + ref 预计算缓存（新 engine）", d2))
-        print(f"  D2: {d2 * 1000:7.0f} ms/step  (ref 每 chunk 一次)")
+        print(f"  D2: {d2 * 1000:7.0f} ms/step  (ref 每 chunk 一次)", flush=True)
 
     print("=" * 72)
     print(f"{'case':<44}{'s/step':>10}{'s/轮':>10}")
@@ -428,16 +541,19 @@ def main() -> None:
     print("=" * 72)
 
     got = dict(cases)
-    b_old = got["B_old = A + 8x .item()/step（旧引擎）"]
+    b_old = got.get("B_old = A + 8x .item()/step（旧引擎）")
     b = got["B_new = A + 1x stack().tolist()（新引擎）"]
     print()
     ga = got["A 纯 fwd+bwd+step（固定 shape, 无同步）"]
-    print(f"[优化效果]  同步税 旧 B_old-A = {(b_old - ga) * 1000:+.0f} ms/step")
     print(f"[优化效果]  同步税 新 B_new-A = {(b - ga) * 1000:+.0f} ms/step")
-    print(
-        f"[优化效果]  .item()->批量化   = {(b_old - b) * 1000:+.0f} ms/step "
-        f"({(b_old - b) / b_old * 100:.1f}% of B_old)"
-    )
+    if b_old is not None:
+        print(f"[优化效果]  同步税 旧 B_old-A = {(b_old - ga) * 1000:+.0f} ms/step")
+        print(
+            f"[优化效果]  .item()->批量化   = {(b_old - b) * 1000:+.0f} ms/step "
+            f"({(b_old - b) / b_old * 100:.1f}% of B_old)"
+        )
+    else:
+        print("[优化效果]  同步税 旧 B_old-A = （本次 --skip-sync-tax 跳过）")
     if d1 and d2:
         print(
             f"[优化效果]  ref 缓存 D1-D2 = {(d1 - d2) * 1000:+.0f} ms/step "
