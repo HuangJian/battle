@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+from remote.protocol import coef_active
 from rl.archive import ensure_current_branch_pushed
 from rl.cli import build_argparser
 from rl.collect_only import run_collect_only
@@ -40,14 +41,18 @@ def update_kwargs(args, it: int, start_it: int, ref_model) -> dict:
         if args.kickstart_kl > 0 and policy_iter >= 1
         else 0.0
     )
+    # 几何衰减永远到不了精确 0（实测 kl=2^-36=1.455e-11 时判据仍放行，白付 ref 权重
+    # 传输 + worker 每轮 3 s 预计算，而数学贡献 ≈1.8e-12 可忽略）。低于阈值直接归零。
+    # ⚠ 这一处是**唯一**的衰减源（`rl/loop_steps.kickstart_coef` 只是它的薄包装），
+    #   故归零后：loop_steps 不再附 ref 字节 -> worker 不再加载 -> engine 的 `> 0` 自然为假。
+    if not coef_active(kl_coef):
+        kl_coef = 0.0
     return {
         "value_warmup_epochs": warmup_epochs,
         "ref_model": ref_model,
         "kl_coef": kl_coef,
         "seed": args.seed,
     }
-
-
 
 
 def _setup_log_redirect(args) -> None:
@@ -69,8 +74,6 @@ def _setup_log_redirect(args) -> None:
             log(f"[launch] stderr -> {pe} (tee console+file, append)")
         except Exception as e:
             log(f"WARN cannot redirect stderr to {args.err_log}: {e}")
-
-
 
 
 def _log_rl_args(src: dict, merged: dict) -> None:
@@ -153,8 +156,6 @@ def _cleanup_run_rl_lock(lock_path: str) -> None:
         pass
 
 
-
-
 def main() -> None:
     # Anchor cwd to the repo root (parent of nn-training/): all default paths
     # (tmp/student-weights-dagger, tmp/rl-weights, tmp/rl-traj) are repo-root
@@ -172,7 +173,6 @@ def main() -> None:
     except Exception:
         _cfg = {}
     _rl_args, _rl_src = merged_mode_args(_cfg, mode)
-
 
     ap = build_argparser(mode, _rl_args)
     args = ap.parse_args()

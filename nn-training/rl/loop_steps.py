@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import dist_common
-from remote.protocol import RetryableError
+from remote.protocol import RetryableError, coef_active
 from remote.push_client import submit_job as _push_submit
 from remote.push_client import wait_result as _push_wait_result
 from rl.archive import backup_weights
@@ -435,7 +435,10 @@ class TrainingSteps:
         # 系数是纯数学，不需模型）；ref 权重读课程 bc 文件（一次，base64 进 manifest）。
         kick_on = bool(getattr(args, "kickstart_ref", False))
         kick_kl = kickstart_coef(args, it) if kick_on else 0.0
-        ref_b64, ref_fp = _kickstart_ref_payload(args) if kick_on else ("", "")
+        # 原先只看 kick_on 开关 ⇒ 缰绳早已松开、ref 权重还在每轮空运（~0.36 MB 原始，
+        # 是 payload 里可观的一块）。系数退火到阈值以下就不再附字节。
+        kick_live = kick_on and coef_active(kick_kl)
+        ref_b64, ref_fp = _kickstart_ref_payload(args) if kick_live else ("", "")
         manifest = publish_job(
             job_root=job_root,
             jsonl_path=str(self._jsonl_path),

@@ -82,11 +82,35 @@ CUDA→TPU→CPU 探测。**踩坑四条**（全部来自真机）：
   确定性选中 `(0,111)`，全表最小键）；`took9` 由 12~15 s 降至 **2.0 s**，门禁连跑两次全绿。
   修完还**提高**了真实覆盖 —— 原先那条路径在该配置下根本没被执行过。
 
-### 21.5 待做
+### 21.5 kickstart 系数阈值：退火到 ~0 后不再白付（2026-09-10 追加；用户确认课程不会回抬）
 
-按实测收益排序：**传输方案B**（+1.3 s）、**`kick_kl ≈ 1.455e-11` 仍放行 ref 加载与预计算**
-（白付 3 s/轮 + ~0.36 MB payload；判据宜改 `> 1e-9`，但需确认课程是否还会回抬 kickstart）、
-**`channels_last`**（同步被排除后升为第一优先；已验证 `cat(obs_cl, coords_nchw)` 会把 layout
+**发现（来自 21.1 的真实日志）**：`kickstart ref 已加载（kl=1.4551915228366852e-11）` ——
+系数已是 **2^-36 ≈ 0**，但判据是 `> 0` ⇒ 照付：ref 权重进 payload（~0.36 MB）+ worker 每轮
+预计算 **3 s** + engine 每轮算 ref 前向。而它的数学贡献 `1.46e-11 x 0.126 ≈ 1.8e-12`，相对
+`policy=0.0046` 完全可忽略。
+
+**根因**：系数按 `kickstart_kl * kickstart_decay ** N` **几何衰减**，永远到不了精确 0
+（2^-36 正是 0.5^36）。
+
+**修法（四处；源头单点归零 + 消费端兜底）**：
+
+| 位置 | 改动 |
+|---|---|
+| `remote/protocol.py` | 新增 `NEGLIGIBLE_COEF = 1e-9` + `coef_active()`（顶层免 torch，hub 侧也可 import） |
+| `run_rl.py::update_kwargs` | **唯一的衰减源**归零：低于阈值直接置 0.0。`rl/loop_steps.kickstart_coef` 只是它的薄包装 ⇒ 单点归零即贯通全链 |
+| `rl/loop_steps.py` | 附 ref 字节的条件由 `kick_on` 改为 `kick_on and coef_active(kick_kl)` —— 原先"缰绳早已松开、ref 权重还在每轮空运" |
+| `remote/worker.py` | 判据换 `coef_active` 并打日志，兜住"旧 hub 产出的、仍带微小系数的在途 manifest" |
+
+**行为**（decay=0.5）：`it=30` → 1.86e-9 仍活跃；**`it=31` 起精确 0.0**；实测踩到的 `it=37`
+现在精确为 0.0。回归测试 `tests/test_run_rl_m1.py::test_kickstart_coef_anneals_to_exact_zero`
+（含 1e-9 上下边界）。
+
+**兼容性**：新 hub + 旧 worker、旧 hub + 新 worker 两条组合都安全（精确 0.0 两侧都判"关"；
+微系数由 worker 侧阈值兜住）。
+
+### 21.6 待做
+
+按实测收益排序：**传输方案B**（+1.3 s）、**`channels_last`**（同步被排除后升为第一优先；已验证 `cat(obs_cl, coords_nchw)` 会把 layout
 静默退回 NCHW，不是传个参数就行）、**尾块固定 shape**（仅 TPU 有收益）。
 **DECISIONS 条目待补**（建议 `§2026-09-10-ppo-perf`）。
 

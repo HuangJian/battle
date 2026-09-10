@@ -174,12 +174,8 @@ def test_stop_loss_hit() -> None:
     from rl.stop_loss import stop_loss_hit
 
     print("[fast] stop_loss_hit：止损判门分模式（原 iter15 Δ≤0 泛化 + P1-9 统计化）")
-    check(
-        stop_loss_hit("per-tick", 15, 0.0, 20, {"delta": -0.1}) is False, "per-tick 永不触发"
-    )
-    check(
-        stop_loss_hit("intent", 0, 0.0, 20, {"delta": -0.1}) is False, "stop_loss_at=0 关闭"
-    )
+    check(stop_loss_hit("per-tick", 15, 0.0, 20, {"delta": -0.1}) is False, "per-tick 永不触发")
+    check(stop_loss_hit("intent", 0, 0.0, 20, {"delta": -0.1}) is False, "stop_loss_at=0 关闭")
     check(
         stop_loss_hit("intent", 15, 0.0, 10, {"delta": -0.1}) is False,
         "未到 stop-loss-at 不触发",
@@ -206,7 +202,9 @@ def test_stop_loss_hit() -> None:
         "Δ=−0.02 在噪声带内（−0.048, 0）→ 不触发",
     )
     check(
-        stop_loss_hit("intent", 15, 0.0, 20, {"delta": -0.02, "games": 350, "winRate": 0.72}, z_score=0.5)
+        stop_loss_hit(
+            "intent", 15, 0.0, 20, {"delta": -0.02, "games": 350, "winRate": 0.72}, z_score=0.5
+        )
         is True,
         "z 收紧（0.5σ）时 −0.02 也算显著——z 参数可调",
     )
@@ -235,6 +233,30 @@ def test_update_kwargs() -> None:
     check(run_rl.update_kwargs(args2, 3, 1, object())["kl_coef"] == 0.0, "kickstart_kl=0 关闭")
 
 
+def test_kickstart_coef_anneals_to_exact_zero() -> None:
+    """几何衰减永远到不了精确 0 —— 低于 NEGLIGIBLE_COEF 必须归零。
+
+    2026-09-10 实测：课程跑到 kl = 1.4551915228366852e-11（= 0.5^36），而旧判据 `> 0`
+    仍放行 ⇒ 白付 ref 权重进 payload（~0.36 MB）+ worker 每轮预计算 3 s + engine 每轮算
+    ref 前向；而数学贡献 ≈1.8e-12，相对 policy≈0.005 完全可忽略。
+    用户已确认课程不会回抬 kickstart。
+    """
+    from remote.protocol import NEGLIGIBLE_COEF, coef_active
+
+    args = types.SimpleNamespace(
+        epochs=4, warmup_iters=0, kickstart_kl=1.0, kickstart_decay=0.5, seed=7
+    )
+    # start_it=1 且 warmup=0 ⇒ policy_iter = it ⇒ kl_coef = 0.5^(it-1)
+    check(not coef_active(0.5**36), f"1e-11 量级不算活跃（阈值 {NEGLIGIBLE_COEF:g}）")
+    check(
+        run_rl.update_kwargs(args, 37, 1, None)["kl_coef"] == 0.0,
+        "it=37（0.5^36=1.455e-11）必须**精确**归零 —— 实测踩到的就是这一点",
+    )
+    # 边界：0.5^29=1.86e-9 > 1e-9 保留；0.5^30=9.31e-10 < 1e-9 归零
+    check(run_rl.update_kwargs(args, 30, 1, None)["kl_coef"] > 0.0, "阈值之上保留")
+    check(run_rl.update_kwargs(args, 31, 1, None)["kl_coef"] == 0.0, "阈值之下归零")
+
+
 def main() -> None:
     test_parse_m1_eval_report()
     test_run_clean_eval_rerun()
@@ -244,6 +266,7 @@ def main() -> None:
     test_merged_mode_args()
     test_stop_loss_hit()
     test_update_kwargs()
+    test_kickstart_coef_anneals_to_exact_zero()
     test_update_kwargs_kickstart_zerowarmup()
     test_kickstart_coef_ignores_restart()
     test_kickstart_startup_check()
@@ -352,17 +375,13 @@ def test_validate_args_kickstart_gates() -> None:
         check(True, "per-tick + ref + warmup 0 通过")
     except SystemExit as e:
         check(False, f"合法组合不应拦截：{e}")
-    bad_mode = types.SimpleNamespace(
-        mode="intent", kickstart_ref=True, warmup_iters=0
-    )
+    bad_mode = types.SimpleNamespace(mode="intent", kickstart_ref=True, warmup_iters=0)
     try:
         validate_args(bad_mode)
         check(False, "intent + ref 应拦截")
     except SystemExit:
         check(True, "intent + ref 拦截")
-    bad_warm = types.SimpleNamespace(
-        mode="per-tick", kickstart_ref=True, warmup_iters=1
-    )
+    bad_warm = types.SimpleNamespace(mode="per-tick", kickstart_ref=True, warmup_iters=1)
     try:
         validate_args(bad_warm)
         check(False, "warmup!=0 应拦截")

@@ -33,6 +33,7 @@ from remote.protocol import (
     HEARTBEAT_SEC,
     ProtocolError,
     RetryableError,
+    coef_active,
     decode_opt_tar,
     encode_opt_tar,
     encode_weights_json,
@@ -594,6 +595,12 @@ def run_job(
     # ---- BC-anchored kickstart ref（§363）：有系数无尺子＝静默裸奔，不可接受——
     # 缺字节响亮拒绝；系数为 0 直接跳过（零开销，旧 manifest 行为不变）。
     kick_kl = float(manifest.get("kickstart_kl", 0.0) or 0.0)
+    # 阈值判据（见 remote/protocol.NEGLIGIBLE_COEF）：课程按几何衰减永远到不了精确 0，
+    # 实测 1.455e-11 时旧判据 `> 0` 仍会加载 ref 并每轮预计算 3 s。用 coef_active 兜底，
+    # 也覆盖"旧 hub 产出的、仍带微小系数的在途 manifest"。
+    if kick_kl != 0.0 and not coef_active(kick_kl):
+        log(f"job {jid}: kickstart_kl={kick_kl:g} 低于阈值 —— 按关闭处理（省 ref 加载+预计算）")
+        kick_kl = 0.0
     ref_model: torch.nn.Module | None = None
     if kick_kl > 0:
         import base64 as _b64

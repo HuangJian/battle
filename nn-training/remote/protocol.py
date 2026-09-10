@@ -323,6 +323,24 @@ _GZIP_MAGIC = b"\x1f\x8b"
 _WIRE_GZIP_LEVEL = 6
 
 
+# ---- 会退火到 ~0 的系数：低于此阈值即视为"关" ----
+# 依据（2026-09-10 实测）：kickstart / kl 系数按 `kickstart_kl * decay ** N` 几何衰减，
+# **永远到不了精确 0** —— 实测课程跑到 kl = 1.4551915228366852e-11（= 2^-36）时，
+# 判据 `> 0` 仍放行，于是白付：ref 权重进 payload（~0.36 MB）+ worker 每轮预计算 3 s。
+# 而它的数学贡献 1.46e-11 x 0.126 ≈ 1.8e-12，相对 policy≈0.0046 完全可忽略。
+# 用户已确认课程不会回抬 kickstart（2026-09-10）。
+NEGLIGIBLE_COEF = 1e-9
+
+
+def coef_active(x: float) -> bool:
+    """系数是否值得付它的开销（> NEGLIGIBLE_COEF）。
+
+    用于 kickstart_kl / kl_coef 这类会退火到 ~0 的旋钮；阈值以下一律按"关"处理，
+    从而省掉 ref 权重传输、worker 侧 ref 加载与预计算、engine 侧 ref 前向。
+    """
+    return float(x) > NEGLIGIBLE_COEF
+
+
 def _pack_wire(raw: bytes) -> str:
     """原始字节 → gzip → base64（JSON 安全的回传字段）。"""
     return base64.b64encode(gzip.compress(raw, compresslevel=_WIRE_GZIP_LEVEL)).decode("ascii")
