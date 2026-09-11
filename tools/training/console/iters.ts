@@ -209,6 +209,9 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
     scoreSqSum: number
     residualSum: number
     residualN: number
+    /** 胜局累计耗时（ticks）与胜局数：「胜局耗时」口径（avgWinTicks）。 */
+    winTicks: number
+    winN: number
   }
   const games = new Map<number, Map<string, GameAgg>>()
   try {
@@ -238,6 +241,8 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
               scoreSqSum: 0,
               residualSum: 0,
               residualN: 0,
+              winTicks: 0,
+              winN: 0,
             }
             byWver.set(wver, agg)
           }
@@ -251,6 +256,12 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
           // 残血：仅胜局；(startLives + puGotTank − deaths) × maxHp − playerDamageTaken
           const won = r.win === true || r.win === 1
           if (won) {
+            // 胜局耗时：仅胜局累计 ticks（胜局缺 ticks/0 = 数据缺口，不计入分母）。
+            const wt = Number(r.ticks ?? 0) || 0
+            if (wt > 0) {
+              agg.winTicks += wt
+              agg.winN++
+            }
             const rh = residualHpFromFields({
               outcome: 'stage_clear',
               playerDamageTaken:
@@ -278,6 +289,7 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
           wver: String(r.wver ?? ''),
           outcomes: (r.outcomes ?? {}) as Record<string, number>,
           avgTicks: null,
+          avgWinTicks: null,
           totalKills: null,
           totalPU: null,
           avgResidualHp: null,
@@ -294,6 +306,7 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
       if (!agg || agg.n === 0) continue
       const mean = agg.scoreSum / agg.n
       s.avgTicks = Math.round(agg.ticks / agg.n)
+      s.avgWinTicks = agg.winN > 0 ? Math.round(agg.winTicks / agg.winN) : null
       s.totalKills = agg.kills
       s.totalPU = agg.pu
       s.avgResidualHp = agg.residualN > 0 ? Math.round(agg.residualSum / agg.residualN) : null

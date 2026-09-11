@@ -704,9 +704,10 @@ describe('console sparkline (ui/view)', () => {
                 wver: 'v1',
                 outcomes: {},
                 avgTicks: 100,
+                avgWinTicks: 100,
                 totalKills: i,
                 totalPU: 0,
-                avgResidualHp: null,
+                avgResidualHp: 150,
                 scoreMean: 0,
                 scoreStd: 0,
               }
@@ -772,6 +773,7 @@ describe('console sparkline (ui/view)', () => {
                 wver: 'v1',
                 outcomes: {},
                 avgTicks: 100,
+                avgWinTicks: 100,
                 totalKills: 0,
                 totalPU: 0,
                 avgResidualHp: null,
@@ -792,13 +794,85 @@ describe('console sparkline (ui/view)', () => {
       // 应为最后 10 个偶数 iter：32,34,...,50
       expect(last10.iters[0]).toBe(32)
       expect(last10.iters[9]).toBe(50)
+      // 胜局耗时（eval 胜局口径）共享稀疏语义：最近 10 = 最近 10 个有效点
+      const winTicksS = series.find((s) => s.key === 'winTicks')!
+      expect(winTicksS.label).toBe('胜局耗时')
+      expect(view.sliceSeries(winTicksS, 'all').vals.length).toBe(25)
+      expect(view.sliceSeries(winTicksS, '10').vals.length).toBe(10)
     })
 
-    it('hero 渲染 4 条走势图 + 范围档位开关', () => {
+    it('metricSeries：胜局耗时 / 胜局残血 = eval 胜局口径，缺 eval 轮为 NaN', () => {
+      const iters = Array.from({ length: 50 }, (_, i) => ({
+        iter: i + 1,
+        time: '',
+        winRate: 0.5,
+        scoreMean: 0,
+        scoreStd: 0,
+        samples: 1,
+        rolloutSec: 1,
+        ppoSec: 1,
+        kl: 0,
+        entropy: 1,
+        policyLoss: 0,
+        valueLoss: 0,
+        meanRet: 0,
+        lr: 0.0001,
+        expectedGames: 4,
+        halted: false,
+        topDims: '',
+        avgTicks: 100,
+        accuracy: 0,
+        loot: 0,
+        kills: 0,
+        actuals: null,
+        evalData:
+          (i + 1) % 2 === 0
+            ? {
+                time: '',
+                games: 10,
+                wins: 1,
+                winRate: 0.1,
+                clears: 0,
+                clearRate: 0,
+                dropped: 0,
+                sec: 30,
+                wver: 'v1',
+                outcomes: {},
+                avgTicks: 100,
+                avgWinTicks: 1300,
+                totalKills: 0,
+                totalPU: 0,
+                avgResidualHp: 180,
+                scoreMean: 0,
+                scoreStd: 0,
+              }
+            : null,
+      }))
+      const series = view.metricSeries(iters)
+      const ticks = series.find((s) => s.key === 'winTicks')!
+      expect(ticks.label).toBe('胜局耗时')
+      const hp = series.find((s) => s.key === 'winHp')!
+      expect(hp.label).toBe('胜局残血')
+      // 缺 eval 轮 = NaN；有效点逐位与 eval 对齐（奇数 iter 无 eval → NaN）
+      expect(Number.isFinite(ticks.vals[0])).toBe(false)
+      expect(ticks.vals[1]).toBeCloseTo(1300)
+      expect(Number.isFinite(hp.vals[0])).toBe(false)
+      expect(hp.vals[1]).toBeCloseTo(180)
+      // 全量档 = 只保留有效点；最近 10 = 最近 10 个有效胜局点
+      expect(view.sliceSeries(hp, 'all').vals.length).toBe(25)
+      expect(view.sliceSeries(ticks, '10').vals.length).toBe(10)
+    })
+
+    it('hero 渲染 6 条走势图（两行六格）+ 范围档位开关', () => {
       const html = render.renderConsolePage(mkView(30, true))
-      // 大胜率走势 1 + 击杀/道具/eval 三格 = 4 张走势图（匹配元素，排除 CSS 里的同名类定义）
+      // 行1 胜率/击杀/道具 + 行2 eval 胜率/胜局耗时/胜局残血 = 6 张走势图（匹配元素，排除 CSS 里的同名类定义）
       const charts = (html.match(/class="tc-trend__svg"/g) ?? []).length
-      expect(charts).toBe(4)
+      expect(charts).toBe(6)
+      // 新增胜局口径走势图标签与悬停提示
+      expect(html).toContain('胜局耗时')
+      expect(html).toContain('胜局残血')
+      expect(html).toContain('胜局平均耗时（ticks，仅胜局计入）')
+      expect(html).toContain('胜局平均剩余 hp（剩余命每命计满额）')
       // 范围档位渲染且默认最近 30
       expect(html).toContain('tc-trend-range__btn')
       expect(html).toContain('全量')
@@ -1066,6 +1140,7 @@ describe('console hero 最新 6 轮 eval toggle', () => {
           wver: 'v1',
           outcomes: {},
           avgTicks: 100,
+          avgWinTicks: null,
           totalKills: 1,
           totalPU: 0,
           avgResidualHp: null,

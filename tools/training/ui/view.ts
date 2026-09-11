@@ -239,6 +239,8 @@ export interface EvalSummary {
   wver: string
   outcomes: Record<string, number>
   avgTicks: number | null
+  /** 胜局平均耗时（ticks，仅胜局计入）；null = 无胜局或胜局缺 ticks。 */
+  avgWinTicks: number | null
   totalKills: number | null
   totalPU: number | null
   /** 胜局平均残血；null = 评估记录无 residualHp 字段。 */
@@ -531,8 +533,12 @@ export interface Series {
 /** 走势图范围档位：全量 / 最近 30 轮 / 最近 10 轮。 */
 export type TrendRange = 'all' | '30' | '10'
 
+/** eval 源稀疏序列（干净评估只在部分迭代出现，中间轮 = NaN 缺口）：
+ *  winTicks/winHp 同为 eval 胜局口径，共享「最近 N = 最近 N 个有效点」。 */
+const SPARSE_SERIES_KEYS: ReadonlySet<string> = new Set(['eval', 'winTicks', 'winHp'])
+
 /**
- * 按范围档位截取序列。eval 走势在有限轮里常带 NaN 缺口，
+ * 按范围档位截取序列。eval 源序列（eval / 胜局耗时 / 胜局残血）在有限轮里常带 NaN 缺口，
  * 其「最近 N」语义 = 最近 N 个**有效**评估点（而非最近 N 轮迭代），
  * 避免窗口内全是 NaN 画空图；「全量」档同样只保留有效点。
  * 其它指标 = 最近 N 轮迭代（按 iter 截取）。
@@ -540,8 +546,8 @@ export type TrendRange = 'all' | '30' | '10'
 export function sliceSeries(series: Series, range: TrendRange): Series {
   const { key, label, vals, iters } = series
   if (vals.length === 0) return { key, label, vals, iters }
-  // eval：先过滤到有效评估点，再按档位截取。
-  if (key === 'eval') {
+  // eval 源：先过滤到有效评估点，再按档位截取。
+  if (SPARSE_SERIES_KEYS.has(key)) {
     const pairs = vals.map((v, i) => ({ v, it: iters[i] })).filter((p) => Number.isFinite(p.v))
     const sliced = range === 'all' ? pairs : pairs.slice(-Number(range))
     return { key, label, vals: sliced.map((p) => p.v), iters: sliced.map((p) => p.it) }
@@ -580,6 +586,24 @@ export function metricSeries(rows: IterRow[]): Series[] {
       label: '道具',
       vals: chrono.map((r) =>
         r.actuals && r.actuals.games > 0 ? r.actuals.totalPU / r.actuals.games : Number.NaN,
+      ),
+      iters,
+    },
+    {
+      key: 'winTicks',
+      label: '胜局耗时',
+      // 胜局平均耗时（ticks，eval 胜局口径）；无评估/无胜局轮 = NaN 缺口。
+      vals: chrono.map((r) =>
+        r.evalData && r.evalData.avgWinTicks !== null ? r.evalData.avgWinTicks : Number.NaN,
+      ),
+      iters,
+    },
+    {
+      key: 'winHp',
+      label: '胜局残血',
+      // 胜局平均剩余 hp（eval 胜局口径）；无评估/无胜局轮 = NaN 缺口。
+      vals: chrono.map((r) =>
+        r.evalData && r.evalData.avgResidualHp !== null ? r.evalData.avgResidualHp : Number.NaN,
       ),
       iters,
     },

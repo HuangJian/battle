@@ -1,4 +1,5 @@
-/** Hero.tsx — 训练状态 hero（一屏焦点）：胜率大数字 + 大走势图；右侧击杀/道具/eval 三格趋势；
+/** Hero.tsx — 训练状态 hero（一屏焦点）：胜率大数字 + 两行六格走势图
+ *  （行1 = rollout：胜率/击杀/道具；行2 = eval：eval 胜率/胜局耗时/胜局残血）；
  *  下方最新 6 轮完整指标（紧凑表）。数据口径 = /api/state.metrics；「完整指标表 ›」进抽屉。
  *  走势图支持悬停显示坐标，并由统一档位开关切换 全量/最近30/最近10（持久化到 localStorage）。 */
 
@@ -35,6 +36,7 @@ function TrendCell({
   tone,
   range,
   yFloor,
+  title,
 }: {
   series: Series | undefined
   fmt: (v: number | null) => string
@@ -42,12 +44,16 @@ function TrendCell({
   range: TrendRange
   /** y 轴下界上限：击杀/道具 0；胜率 0.3（基底不得高于 30%）。 */
   yFloor?: number
+  /** 标签悬停提示（口径说明）。 */
+  title?: string
 }) {
   const last = series ? (series.vals.filter(Number.isFinite).slice(-1)[0] ?? null) : null
   return (
     <div className="tc-tcell">
       <span className="tc-tcell__hd">
-        <span className="tc-tcell__lbl">{series ? series.label : '—'}</span>
+        <span className="tc-tcell__lbl" title={title}>
+          {series ? series.label : '—'}
+        </span>
         <b className={tone ? `tc-mtrend__val--${tone}` : undefined}>{fmt(last)}</b>
       </span>
       {series ? (
@@ -72,6 +78,11 @@ function fmtPerGame(total: number, games: number): string {
 
 function fmtResidual(hp: number | null | undefined): string {
   return hp == null ? '-' : String(hp)
+}
+
+/** 胜局耗时（ticks）/ 胜局残血 展示：整数（平均值已四舍五入）。 */
+function fmtInt(v: number | null): string {
+  return v != null ? String(Math.round(v)) : '—'
 }
 
 /** 主行视图：最新 6 轮完整指标（紧凑表，iter 倒序）：主行口径与抽屉指标表一致（实际值优先、
@@ -369,6 +380,8 @@ export function Hero({ stateView, onMore }: HeroProps) {
   const killsSeries = series.find((m) => m.key === 'kills')
   const puSeries = series.find((m) => m.key === 'pu')
   const evalSeries = series.find((m) => m.key === 'eval')
+  const winTicksSeries = series.find((m) => m.key === 'winTicks')
+  const winHpSeries = series.find((m) => m.key === 'winHp')
 
   // 走势范围档位（全量 / 最近30 / 最近10）；持久化到 localStorage，hydrate 后恢复。
   const [range, setRange] = useState<TrendRange>('30')
@@ -412,7 +425,6 @@ export function Hero({ stateView, onMore }: HeroProps) {
     )
   }
 
-  const winVal = fmtPct(head.winRate)
   const tone = winTone(head.winRate)
 
   return (
@@ -432,40 +444,50 @@ export function Hero({ stateView, onMore }: HeroProps) {
           ))}
         </div>
         <div className="tc-trends">
-          <div className="tc-tcell">
-            <span className="tc-tcell__hd">
-              <span className="tc-tcell__lbl">胜率</span>
-              <b className={`tc-mtrend__val--${tone}`}>{winVal}</b>
-            </span>
-            {winSeries ? (
-              <TrendChart
-                series={winSeries}
-                range={range}
-                fmt={fmtPct}
-                tone={tone}
-                height={64}
-                yFloor={0.3}
-              />
-            ) : null}
-          </div>
+          {/* 行1：rollout 口径 — 胜率 / 击杀 / 道具 */}
+          <TrendCell
+            series={winSeries}
+            fmt={fmtPct}
+            tone={tone}
+            range={range}
+            yFloor={0.3}
+            title="rollout 采样胜率"
+          />
           <TrendCell
             series={killsSeries}
             fmt={(v) => (v != null ? `${v.toFixed(1)}` : '—')}
             range={range}
             yFloor={0}
+            title="每局平均击杀"
           />
           <TrendCell
             series={puSeries}
             fmt={(v) => (v != null ? `${v.toFixed(1)}` : '—')}
             range={range}
             yFloor={0}
+            title="每局平均道具"
           />
+          {/* 行2：eval 口径 — eval 胜率 / 胜局耗时 / 胜局残血 */}
           <TrendCell
             series={evalSeries}
             tone={winTone(evalSeries?.vals.filter(Number.isFinite).slice(-1)[0] ?? 0)}
             fmt={fmtPct}
             range={range}
             yFloor={0.3}
+            title="干净评估（greedy 固定语料）胜率"
+          />
+          <TrendCell
+            series={winTicksSeries}
+            fmt={fmtInt}
+            range={range}
+            title="胜局平均耗时（ticks，仅胜局计入）"
+          />
+          <TrendCell
+            series={winHpSeries}
+            fmt={fmtInt}
+            range={range}
+            yFloor={0}
+            title="胜局平均剩余 hp（剩余命每命计满额）"
           />
         </div>
       </div>
