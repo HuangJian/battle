@@ -273,6 +273,11 @@ def _persist_result(work_dir: Path, jid: str, result: dict) -> None:
 #: 保留 2 个：上一个 job 的 _result.json 要留给"回传失败后重领同 job"的幂等路径。
 JOB_DIR_KEEP = 2
 
+#: 热替换退出码：worker 子进程代码变更时以该码退出，**监督器**（supervise_worker /
+#: 新版 main()）收到后用同一套参数重新拉起子进程（fresh 进程 → sys.modules 必然为空
+#: → 新代码生效）。不用 0（=正常完成）：处理失败/退出原因必须可区分。
+HOT_RELOAD_EXIT = 86
+
 
 def prune_job_dirs(work_dir: Path, keep: int = JOB_DIR_KEEP, log=lambda msg: None) -> int:
     """按 mtime 保留最近 `keep` 个 job 目录，其余删除。返回删除个数。
@@ -782,29 +787,89 @@ def run_job(
 _ACTIVE_CODE_SHA: str | None = None
 
 
-def _self_restart(restart_argv: list[str] | None, log=lambda msg: None) -> bool:
-    """用同一套参数**原地重启**本进程（os.execve，不返回）。False = 没重启成。
+def _request_reload(restart_argv: list[str] | None, log=lambda msg: None) -> bool:
+    """热替换：有监督器 → 以 HOT_RELOAD_EXIT 干净退出，交监督器拉起新进程；无 → False。
 
-    只认**显式传入**的 restart_argv：notebook 里 sys.argv 是 kernel 自己的参数，
-    拿它 execv 等于把 kernel 干掉。main() 传 sys.argv[1:]；notebook 由调用方拼。
+    为什么不再 os.execve（2026-09-11 线上事故）：notebook 里 worker_loop 跑在 kernel
+    进程内，execv 会**原地替换 kernel 镜像**——ipykernel 对 sys.stdout 的重定向对象
+    随之丢失（单元格输出直接断流，只剩 kernel server 的控制台能看见），且 ZMQ 执行
+    服务不再应答，Jupyter 判定 kernel 死。用户看到"自重启"后单元格没下文 → 按停止 →
+    SIGINT 打断正在跑的 worker → kernel 重启 → 云端会话报废（本次事故的完整链条）。
 
-    为什么 execv 而不是重新 import：进程镜像替换后 sys.modules 必然为空，新代码
-    一定生效；PID 与 stdout fd 继承 —— notebook 单元格的输出流不断。
+    现统一契约：worker 以退出码 HOT_RELOAD_EXIT 退出，由 **监督器**（supervise_worker）
+    用同一套参数重新拉起子进程——fresh 进程里 sys.modules 必然为空，新代码一定生效；
+    监督器本身（notebook 的 kernel）不 execv、输出流不断、也不被判定死亡。
+
+    restart_argv 仍只认**显式传入**：notebook 里 sys.argv 是 kernel 自己的参数。
+    None = 没有监督器（裸 worker_loop 直调）→ 返回 False，调用方降级为提示人工重启。
     """
     if not restart_argv:
-        log("自重启不可用：未提供 restart_argv")
+        log("自重启不可用：未提供 restart_argv（无监督器可拉起新进程）")
         return False
+    log(f"代码已变更 —— 以退出码 {HOT_RELOAD_EXIT} 交监督器重启（fresh 进程加载新代码）")
+    raise SystemExit(HOT_RELOAD_EXIT)
+
+
+def supervise_worker(
+    restart_argv: list[str],
+    *,
+    cmd: list[str] | None = None,
+    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker-supervisor] {msg}", flush=True),
+) -> int:
+    """监督器：worker 跑在**子进程**里，热替换以 exit(HOT_RELOAD_EXIT) 请求重启。
+
+    - 输出转发：子进程 stdout/stderr → 本进程 stdout 逐行转发。notebook 里本函数在
+      kernel 进程内执行，转发让日志持续进单元格；CLI 下等价于直通。
+    - 热替换：子进程退 HOT_RELOAD_EXIT → 用同一套参数重新拉起（fresh 进程加载新代码）。
+      换代码从"打掉 kernel"变成一次无害的拉起重演，kernel/输出流永不中断。
+    - KeyboardInterrupt：先终止子进程再上抛（中断单元格不会留下孤儿 worker）。
+    - 返回子进程最终退出码（热替换已内部消化，不会带 86 返回）。
+
+    cmd：测试注入口（默认 [sys.executable, -u, -m, remote.worker, *restart_argv]）。
+    """
     nn_root = str(Path(__file__).resolve().parents[1])  # remote/ -> nn-training/
-    env = dict(os.environ)
-    env["PYTHONPATH"] = nn_root + os.pathsep + env.get("PYTHONPATH", "")
-    argv = [sys.executable, "-u", "-m", "remote.worker", *(str(a) for a in restart_argv)]
-    log(f"execv: {argv[0]} -u -m remote.worker ...（{len(argv) - 4} 个参数）")
-    try:
-        os.execve(sys.executable, argv, env)  # 成功则不返回
-    except BaseException as e:
-        log(f"execv 失败: {type(e).__name__}: {e}")
-        return False
-    return False  # pragma: no cover
+    if cmd is None:
+        cmd = [
+            sys.executable,
+            "-u",
+            "-m",
+            "remote.worker",
+            *(str(a) for a in restart_argv),
+        ]
+    while True:
+        env = dict(os.environ)
+        # 子进程要能 import remote.worker（notebook 的 sys.path 不进子进程，只能靠 PYTHONPATH）
+        env["PYTHONPATH"] = nn_root + os.pathsep + env.get("PYTHONPATH", "")
+        # 子进程 main() 看到该标记直跑 worker_loop，不再递归监督
+        env["REMOTE_WORKER_CHILD"] = "1"
+        log(f"spawn worker 子进程（{len(restart_argv)} 参数）")
+        proc = subprocess.Popen(
+            cmd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        try:
+            child_out = proc.stdout
+            if child_out is None:  # stdout=PIPE，结构化保证非空；只为让我 mypy 类型收窄
+                raise RuntimeError("supervise_worker: stdout=PIPE 却拿不到管道（不该发生）")
+            for line in child_out:  # `-u` 保证子进程每行即刷，转发不滞后
+                print(line, end="", flush=True)
+            rc = proc.wait()
+        except KeyboardInterrupt:
+            log("收到中断 —— 终止 worker 子进程")
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            raise
+        if rc == HOT_RELOAD_EXIT:
+            log("worker 代码已变更 —— 重新拉起子进程加载新代码（输出流不中断）")
+            continue
+        return rc
 
 
 def worker_loop(
@@ -825,8 +890,10 @@ def worker_loop(
 
     once=True：处理一个 job 后退出（M1 假云回环冒烟用）。
     max_idle_sec>0：连续空闲超过该时长退出（M2 会话活性观测用）。
-    restart_argv：代码热替换时自重启用的**参数列表**（不含解释器与 `-m remote.worker`）；
-      None = 不自重启（退化为要求人工重启）。
+    restart_argv：热替换时**监督器重启**用的参数列表（不含解释器与 `-m remote.worker`）；
+      传值 = 有监督器（supervise_worker / 新版 main()）→ 热替换以 HOT_RELOAD_EXIT
+      退出，由监督器用同一套参数重新拉起子进程加载新代码；
+      None = 无监督器 → 热替换降级为提示人工重启并返回。
     """
     done = 0
     idle_since = time.time()
@@ -907,13 +974,16 @@ def worker_loop(
             release_job(base_url, token, jid, lease_token, log=log)
         except CodeChangedError as e:
             # 热替换：本进程 sys.modules 是旧代码，继续跑 = 用旧逻辑产出"看着正常"的
-            # 结果。execv 原地重启（PID/stdout 不变）→ 新进程重新 import 新代码。
+            # 结果。有监督器 → 以 HOT_RELOAD_EXIT 干净退出，由 supervise_worker 用同一
+            # 套参数重新拉起子进程（fresh sys.modules → 新代码生效，输出流不断）。
+            # 无监督器（裸 worker_loop 直调）→ 降级为提示人工重启。
             log(f"job {jid}: {e}")
             release_job(base_url, token, jid, lease_token, log=log)  # 别占着租约等重启
-            log("代码已变更 —— 自重启 worker 进程以加载新代码（PID 与输出流不变）")
-            if not _self_restart(restart_argv, log=log):
-                log("自重启未执行 —— 请手动重启本进程"
-                    "（notebook: Runtime → Restart runtime 后重跑步骤 4）")
+            if not _request_reload(restart_argv, log=log):
+                log(
+                    "无监督器 —— 请手动重启本进程"
+                    "（notebook: Runtime → Restart runtime 后重跑步骤 4）"
+                )
                 return done
         except ProtocolError as e:
             log(f"job {jid} REJECTED: {e} — skip (not retried)")
@@ -967,23 +1037,34 @@ def main() -> None:
     if not out.is_absolute():
         out = Path(__file__).resolve().parents[2] / out
     out.mkdir(parents=True, exist_ok=True)
-    n = worker_loop(
-        args.poll,
-        token,
-        work_dir=out,
-        device=args.device,
-        torch_threads=args.threads,
-        poll_sec=args.poll_sec,
-        once=args.once,
-        echo=args.echo,
-        max_idle_sec=args.max_idle_sec,
-        # CLI 起：sys.argv[1:] 就是可重放的原始参数（argv[0] 可能是 -m 或脚本路径，
-        # 统一由 _self_restart 用 `-m remote.worker` 重建，故这里只取参数部分）
-        restart_argv=sys.argv[1:],
-    )
-    print(f"[worker] done: {n} job(s) processed")
-    # H8：--once 失败（返回 -1）→ 非零退出码
-    sys.exit(0 if n >= 0 else 1)
+    if os.environ.get("REMOTE_WORKER_CHILD") == "1":
+        # ── 子进程模式（由监督器 supervise_worker / 新版 main() 拉起）──
+        # 热替换以 HOT_RELOAD_EXIT 退出，监督器收到后用同一套参数重新拉起。
+        n = worker_loop(
+            args.poll,
+            token,
+            work_dir=out,
+            device=args.device,
+            torch_threads=args.threads,
+            poll_sec=args.poll_sec,
+            once=args.once,
+            echo=args.echo,
+            max_idle_sec=args.max_idle_sec,
+            # 监督器在 else 分支拿着 sys.argv[1:] 随时可重演，这里无需再自重启
+            restart_argv=None,
+        )
+        print(f"[worker] done: {n} job(s) processed")
+        # H8：--once 失败（返回 -1）→ 非零退出码
+        sys.exit(0 if n >= 0 else 1)
+    # ── 监督器模式（默认入口）──
+    # worker 由子进程承担（REMOTE_WORKER_CHILD=1 直跑上面的分支），输出逐行转发到
+    # 本进程 stdout —— notebook 里本进程是 kernel，转发保住单元格输出流，换代码不会
+    # 再打掉 kernel（2026-09-11 线上事故修复，见 _request_reload 的 docstring）。
+    # sys.argv[1:] 就是可重放的热替换参数（argv[0] 可能是 -m 或脚本路径，统一由
+    # supervise_worker 用 `-m remote.worker` 重建，故这里只取参数部分）。
+    rc = supervise_worker(sys.argv[1:])
+    print(f"[worker-supervisor] worker exited: rc={rc}")
+    sys.exit(rc)
 
 
 if __name__ == "__main__":

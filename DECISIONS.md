@@ -1123,3 +1123,47 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 - **违反后果**：任何 torch_xla 持续训练循环若每步只有 materialize 而无显式 mark，都会再现
   「单步递增、多步后爆炸」；TPU 吞吐评估必须以 ≥6 步持续循环口径，且读「引擎即有 44ms」前
   必须先确认每步有图边界。后续 TPU 端 ppo_sec 读数均须按此修正解读。
+
+## §2026-09-11-remote-worker-hotswap-supervisor（2026-09-11，云端热更新事故修复：os.execve 打掉 notebook kernel，改监督器+子进程）
+
+- **背景**：远程 worker 热更新（CodeChangedError → 重启换代码）原用 `os.execve` 原地替换进程
+  镜像。pull 模式 notebook（battle-rl.ipynb）把 `worker_loop` 跑在 **kernel 进程内**——execv 后
+  ipykernel 对 sys.stdout 的重定向对象丢失（日志只进 kernel server 控制台、单元格断流），ZMQ
+  执行服务不再应答、Jupyter 判定 kernel 死；用户看到「自重启」后单元格无下文 → 按停止 →
+  SIGINT → kernel 重启 → 云端会话报废。真实事故序列：ipynb 日志止于「自重启」行，系统日志显示
+  worker 仍在跑 job 却被中断 → kernel restarted。
+- **备选与否决**：保留 execv、仅让 notebook 拉子进程 —— 否，execv 替换的是 kernel 进程本体，
+  任何进程模型下都吃 stdout 重定向与 kernel 服务，属根本错误；notebook 裸跑子进程不转发 —— 否，
+  子进程 inherited stdout=fd1=server 控制台，单元格仍看不到（同一根因的另一面）。
+- **决定**：① 热替换统一改为「以退出码 HOT_RELOAD_EXIT=86 干净退出，由**监督器**用同一套参数
+  重新拉起子进程」——fresh 进程 sys.modules 必然为空，新代码一定生效；② worker.py 新增
+  `supervise_worker(restart_argv)`：worker 跑在子进程，stdout/stderr 逐行转发到本进程 stdout
+  （notebook 里本进程= kernel，转发保住单元格），退 86 → 同参重拉，KeyboardInterrupt → 先杀子
+  再上抛（不留孤儿 worker）；③ `main()` 拆两模式：默认监督器，env `REMOTE_WORKER_CHILD=1`
+  的子进程直跑 `worker_loop`；`worker_loop` 传 `restart_argv` = 有监督器（热替换退 86）、
+  None = 无监督器（提示人工重启并返回，旧降级行为保持）；④ battle-rl.ipynb `run_pull_worker`
+  改调 `supervise_worker(restart_argv)`；CLI `python -m remote_worker` 照常可用（supervisor 包
+  一层、rc 原样上浮，M1 冒烟与 `--once` 退出码语义不变）。
+- **违反后果**：任何人把热更新改回 execv、或把 worker_loop 直跑进 kernel 并 execv 自重启，都会
+  复现「单元格断流 + kernel 判定死亡 + 中断毁会话」；监督器必须由**不 execv 的进程**承担。
+
+## §2026-09-11-c4dodge-course（2026-09-11，用户拍板：c4 残血/闪避后继腿，wChip 单变量 0.005→0.02）
+
+- **背景**：c4-margin.it140（c4 上 72%）零样本 c5/c6 = 39%/18%；c5/c6 平台期的直接死因是
+  无闪避——胜局掉血中位 144（剩 119/263 ≈45% 血），败局掉血中位 216–228（≈3 发快弹磨死），
+  c6 连胜局都挨 200 血（margin 归零）。c5/c6/c6b 三腿已证"该关形态无梯度"，问题不在定价在
+  生存技能，而 c4 是唯一可教闪避的练兵场（已能清场，才有余力学"赢得干净"）。
+- **备选与否决**：再练 c5 —— 否，74 轮/14 点已充分表征为平台，且 reward 里没有闪避信号
+  （wChip 0.005 太小、wDmg 只计死亡、wTick 0.01 罚多活），续跑是负 ROI；c6b 只降 wTick 不
+  动 wChip → "多活不再是负债、闪避仍不赚钱"，正好解释其无效；R5（1→2 命）—— 否，是方差
+  控制不是闪避本身，留作后续。
+- **决定**：新建 `nn-training/curricula/c4-dodge.jsonc`（派生 c4-margin，单变量 = wChip
+  0.005→0.02，其余学习侧全锁；bc = c4-margin.it140；iters=160 + max_hours=10）。闪避目标 =
+  wChip 抬到"挨 144 血 ≈1 个击杀"开始值钱。门：机器 catalog 无 margin 类，故 G1 胜率轨
+  （池化 3 点 ≥77.5%）作 ADVANCE 代理 + G2/G7 防苟活 + G4/G5/G13 护栏，margin 门
+  （胜局掉血中位 <120，超老师一档；God 同语料实测 68%/144）留人读复核。**教师基线重测**：
+  in-loop 语料 = EVAL_SEEDS 860001-860100@stage2000（非 §2 的 seeds 0-99），God = 68/100
+  （旧 64 不可比，c6b 教训）。开腿前先跑 3 轮看 G13 duty 与 ppo_sec。
+- **违反后果**：任何人把 c4-dodge 的 wTick 一起改掉（c6b 已证 wTick 单测无效）或把 ADVANCE
+  判据只放胜率不等人读 margin，都会污染"wChip 教闪避"这一单变量归因；结业后必须做 c5/c6
+  零样本转移验证（残血可转移的唯一证明）。
