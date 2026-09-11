@@ -471,6 +471,33 @@ def _request(
         return e.code, e.read()
 
 
+def set_cloud_halt(
+    base_url: str,
+    token: str,
+    halt: bool,
+    timeout: float = 15.0,
+    log=lambda msg: print(f"[hub] {msg}", flush=True),
+) -> bool:
+    """§386：向 hub 下发/解除云端停机达令（console 与 TrainingLoop 共用一端点）。
+
+    返回 True = hub 已采纳。网络故障/非 200 → False（记录日志，**停机链路永不
+    阻断训练**）——local/push 模式无 hub 时会带空 url 进来，直接短路 False。
+    """
+    if not base_url or not token:
+        return False
+    path = "/admin/workers/halt" if halt else "/admin/workers/resume"
+    try:
+        st, _ = _request(base_url, token, path, timeout=timeout)
+    except Exception as e:  # 网络层（tunnel 抖动等）——基础设施不可用，不阻断训练
+        log(f"cloud {'halt' if halt else 'resume'} 下发失败（{type(e).__name__}: {e}）")
+        return False
+    if st != 200:
+        log(f"cloud {path} → HTTP {st}（不阻断训练）")
+        return False
+    log(f"cloud {'halt' if halt else 'resume'} 已下发（hub 采纳）")
+    return True
+
+
 def wait_job(
     base_url: str,
     token: str,

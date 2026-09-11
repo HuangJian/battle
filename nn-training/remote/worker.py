@@ -962,6 +962,15 @@ def worker_loop(
             continue
         if job.get("halt") is True and not job.get("job_id"):
             # 纯停机达令、无任务：不退出、继续等待（云机活着=随时可续训）。
+            # 这里 job 非 None → 上面的 None 分支存活日志会被吞——补一条同频日志，
+            # 否则停机期日志静默会被误读为"worker 罢工"（2026-09-11 现场）。
+            if time.time() - _last_alive_log > 60:
+                log(
+                    f"cloud halted, polling hub (no job yet, {done} done, "
+                    f"{_polls_since_log} polls, idle {int(time.time() - idle_since)}s)"
+                )
+                _last_alive_log = time.time()
+                _polls_since_log = 0
             time.sleep(poll_sec)
             continue
         idle_since = time.time()

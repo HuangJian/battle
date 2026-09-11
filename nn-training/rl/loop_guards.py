@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from platform_utils import rmtree_best_effort
+from remote.hub_client import set_cloud_halt
 from rl.breaker import (
     ENT_BREAK,
     ENT_BREAK_CONSEC,
@@ -88,6 +89,8 @@ class TrainingGuards:
     _traj_dir: Any
     _course_fp: Any
     _eval_on_round: Any
+    #: 云端停机达令当前置位态（门判决 → set_cloud_halt 联动；重启即复位）。
+    _cloud_halted: bool
 
     def _breaker(self, it: int) -> bool:
         """F4 熔断 + KL/熵漂移告警（纯逻辑在 rl/breaker.py）。返回 True = 熔断停车。"""
@@ -195,11 +198,13 @@ class TrainingGuards:
         评估轮跑完整求值（指标门读 eval_summary 行，没评估 = 没新数据，顺延
         一个节拍比用陈旧行硬判诚实）；**非评估轮只查 duty 门**（§385：G13 的
         输入每轮都更新，不该被 eval_every 节拍拖住——烧事故按轮数小时现形，
-        而不是等下一评估点才宣布停车）。判决 → 动作按 §4.3：HOLD 继续；其余写
-        `gate_verdict` 事件后优雅 break（在途 shard 已结算、账本对账完整）。
-        无 gates 块的课程（老课程）恒 False——零行为变化。
+        而不是等下一评估点才宣布停车）。判决 → 动作映射（§2026-09-11）：
+        **永不因门停车**——非 HOLD 只落 `gate_verdict` 事件作复盘记录，
+        停机/恢复动作全部发到**远端云机**（REMEDIATE/PAUSE/ABORT → halt；
+        HOLD/ADVANCE → resume）。真正停车只剩预算到顶（_budget_hard_cut）、
+        F4 熔断、止损 2σ 等硬边界。无 gates 块的课程（老课程）恒 False——零行为变化。
 
-        返回 True = 训练该停（调用方 break）。
+        返回 True = 训练该停（当前仅预算硬断等硬边界路径返回 True）。
         """
         args = self.args
         course = getattr(args, "course_obj", None)
@@ -258,8 +263,9 @@ class TrainingGuards:
                 log(f"[run_rl] gate it{it}: duty 求值异常（{type(e).__name__}: {e}）— 本轮跳过门")
                 return False
             if not res.terminal:
+                self._sync_cloud_halt(it, "HOLD")  # 停机条件消失 → 云机恢复
                 return False  # HOLD / duty-unknown（起步期、数据不足）→ 静默继续
-            return self._park_on_gate(it, res)
+            return self._apply_verdict(it, res)
 
         try:
             rows = read_trend_rows(traj_root / "eval_log.jsonl", course_fp=course_fp)
@@ -282,11 +288,46 @@ class TrainingGuards:
 
         if not res.terminal:
             log(f"[run_rl] gate it{it}: HOLD — {res.reason}")
+            self._sync_cloud_halt(it, "HOLD")  # 停机条件消失 → 云机恢复
             return False
-        return self._park_on_gate(it, res)
+        return self._apply_verdict(it, res)
 
-    def _park_on_gate(self, it: int, res: Any) -> bool:
-        """终端判决落账并停车（§4.3）。落盘失败也按判决停车——绝不带病续跑。"""
+    #: 需要下发云端停机达令的门判决（不包含预算 STOP——预算到顶是真正结束，走硬断）。
+    CLOUD_HALT_VERDICTS = frozenset({"REMEDIATE", "PAUSE", "ABORT"})
+
+    def _sync_cloud_halt(self, it: int, verdict: str) -> None:
+        """§386 联动：门判决只作用于远端云机，TrainingLoop 永不停车。
+
+        REMEDIATE/PAUSE/ABORT → 向 hub 下发停机达令（能自停的云机（Colab）
+        释放，停不掉的（Kaggle）照常干活）；HOLD/ADVANCE → 停机条件消失下发
+        resume。任何失败（tunnel 抖动、hub 没起）只记日志，绝不断训练。
+        local/push 模式无 hub（remote_hub_url 空）→ 直接短路，零行为。
+        """
+        args = self.args
+        hub_url = str(getattr(args, "remote_hub_url", "") or "")
+        token = str(getattr(args, "remote_token", "") or "")
+        if not hub_url or not token:
+            return
+        want_halt = verdict in self.CLOUD_HALT_VERDICTS
+        halted = bool(getattr(self, "_cloud_halted", False))
+        if want_halt == halted:
+            return  # 状态已一致（停机持续期/已恢复），幂等
+        set_cloud_halt(
+            hub_url,
+            token,
+            want_halt,
+            log=lambda m: log(f"[run_rl] gate it{it}: {m}"),
+        )
+        self._cloud_halted = want_halt
+
+    def _apply_verdict(self, it: int, res: Any) -> bool:
+        """终端判决落地：**永不因门停车**（§2026-09-11 用户定案）。
+
+        落盘 `gate_verdict` 事件（复盘记录 + exit-watchdog 的「已停车」分类源），
+        把停机/恢复动作映射到远端云机，然后**返回 False 继续训练**——停车只留给
+        预算到顶（_budget_hard_cut）、F4 熔断、止损等硬边界。落盘失败也照样继续
+        （记录日志，绝不带病停车）。
+        """
         try:
             write_gate_verdict(
                 self._jsonl_path,
@@ -300,9 +341,10 @@ class TrainingGuards:
                 decider="loop",
             )
         except OSError as e:
-            log(f"[run_rl] gate it{it}: gate_verdict 落盘失败（{e}）— 仍按判决停车")
+            log(f"[run_rl] gate it{it}: gate_verdict 落盘失败（{e}）— 记录缺失，继续训练")
         log(f"[run_rl] GATE {res.verdict} it{it}: {res.reason}")
-        return True
+        self._sync_cloud_halt(it, res.verdict)
+        return False
 
     def _budget_hard_cut(self, it: int) -> bool:
         """G5 每轮兜底：max_hours 到顶立即停车（§385 审计补洞）。

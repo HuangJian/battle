@@ -261,6 +261,24 @@ def test_worker_halt_attempt_once_then_reset_on_clear(
     assert calls["n"] == 2  # 段 1 一次 + 段 2 一次；停机持续期不重复
 
 
+def test_worker_halt_branch_still_logs_alive(monkeypatch: pytest.MonkeyPatch) -> None:
+    """§386 修复：纯停机达令期间存活日志不被吞（否则停机期日志静默=误读罢工）。"""
+    t = {"v": 0.0}
+    monkeypatch.setattr(W.time, "time", lambda: t["v"], raising=True)
+    monkeypatch.setattr(W.time, "sleep", lambda s: t.update(v=t["v"] + s), raising=True)
+    halts: list[dict | None] = [{"halt": True, "job_id": None}] * 8  # 8×10s→80s，跨过 60s 存活日志点
+    monkeypatch.setattr(
+        W, "poll_job", lambda *a, **k: halts.pop(0) if halts else None, raising=True
+    )
+    logs: list[str] = []
+    W.worker_loop(
+        "http://hub", "tok", work_dir=Path("/tmp/x"), poll_sec=10.0, once=True, log=logs.append
+    )
+    joined = "\n".join(logs)
+    assert "云端停机达令已送达" in joined
+    assert "cloud halted, polling hub" in joined  # 停机期存活日志照常输出
+
+
 def test_release_cloud_machine_prompts_manual_outside_colab(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

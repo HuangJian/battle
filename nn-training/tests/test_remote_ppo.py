@@ -704,6 +704,29 @@ def test_hub_workers_halt_flow(tmp_path: Path) -> None:
         th.join()
 
 
+def test_hub_admin_client_set_cloud_halt(tmp_path: Path) -> None:
+    """§386：hub_client.set_cloud_halt 与 /admin/workers/{halt,resume} 客户端链路。
+
+    TrainingLoop 与 console 都走该函数下发停机/恢复；无 hub（local/push）短路 False。
+    """
+    from remote.hub_client import set_cloud_halt
+
+    base, _store, srv, th = _boot_server(tmp_path)
+    try:
+        assert set_cloud_halt(base, "sekret", True, log=lambda m: None) is True
+        st, body = _http(base, "sekret", "/admin/workers/status")
+        assert st == 200 and body == {"halt": True}
+        assert set_cloud_halt(base, "sekret", False, log=lambda m: None) is True
+        st, body = _http(base, "sekret", "/admin/workers/status")
+        assert st == 200 and body == {"halt": False}
+        # 无 hub / 空 token → 短路 False，不抛（local/push 模式的归零路径）
+        assert set_cloud_halt("", "tok", True, log=lambda m: None) is False
+        assert set_cloud_halt(base, "", True, log=lambda m: None) is False
+    finally:
+        srv.shutdown()
+        th.join()
+
+
 def test_hub_server_auth_and_job_lifecycle(tmp_path: Path) -> None:
     """鉴权（401/闭锁）+ 发布（磁盘 IPC）→ 领取 → payload → 结果 → 状态全链路。"""
     base, store, srv, th = _boot_server(tmp_path)

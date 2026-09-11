@@ -1181,6 +1181,16 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   （150 局/轮 ppo_cloud_sec 太小撑不起 0.35 占空比）——600 局顺带解决 duty（~130s/350s≈0.37）。
   console cloud-resume + start 重启后已按 600 续跑（it4 权重保留，150 局 4 轮有效数据作废
   不可惜）。
+- **补记（转移阴性 + 停机轴修正，17:30）**：① 用 it18/21/30/33 跑 c5/c6 零样本转移——
+  **阴性**：胜率 c5 34–44%（基线 39）、c6 6–20%（基线 18）全部平，c5 胜局掉血不降反升
+  （128→144/158/172）——"残血→c5/c6 余地"假说被证伪。且在场敌数上限=4（MAX_ENEMIES_ALIVE），
+  c5/c6 难在**总清场队列 5→6 杀**（拖长暴露 25–50%），不是密度；c4 的 144→100 是节奏红利
+  （胜局 tick 1341→1231）非可泛化闪避，节奏不转移（c5 平均 tick 不降反升）。
+  ② **停机轴错误修正**：c4-dodge 目标=ticks/hp，但门系统趋势源无这两项，我原先 G1/G4
+  锚在 win_rate/kills_mean → G4 以错误指标判平台停车。修正 = 删 G1/G4，skill_floor 不能
+  休眠（§3.3）故 G2 也删（防苟活条件保留人读 DoD），仅留 G5/G7/G9/G13 护栏；毕业=人读
+  margin DoD（掉血<120 已稳定达标 6 点）。教训：**margin 腿的门必须锚 margin 轴，
+  门系统缺该轴时宁可不配机器 ADVANCE，也不要用 win_rate 当代理**。
 
 ## §2026-09-11-nntrain-cloud-halt-final（2026-09-11，用户五条语义：停机命令随任务同发、云机先试停机再干活、本地全不动、红灰双横幅）
 
@@ -1195,4 +1205,20 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   halt 清除后复位可再试；③ console-state cloudHalt 双态（halted 红横幅 / recovered 灰横幅保留历史，
   TrainingLoop 重启或手动即恢复）；④ 本地组件全程不动。
 - **违反后果**：回退到"停机=杀 worker"则恢复续跑要人工重启会话、停机期间真正闲置空烧；不清 halted/recovered
-  则操作员看不到"停机中/已恢复"的迁移，云机配额的处置失去可见性。
+  则操作员看不到"停机中/已恢复"的迁移，云机配额的处置失去可见性。## §2026-09-11-gates-never-park-loop（2026-09-11，用户定案：TrainingLoop 永不因门停车，该停的是远端云机）
+
+- **背景**：c4-dodge 连续两起"门停车"事故（it7/it8 G13 占空比 REMEDIATE、it29→it36 G4 plateau REMEDIATE），
+  每次停车 → console 按 §385 自动向云机下发停机 + 红横幅，loop 停着等人手重启。用户质疑两点：
+  kaggle 关不了机却"看着罢工"（实为停机达令分支吞了存活日志）；trainingloop 为何"还是停了"。
+- **备选与否决**：维持 §4.3"非 HOLD 即停车" —— 否（用户原话：trainingloop 永远不要停！该停的是远端云机）；
+  只对 G4 REMEDIATE 放行 —— 否（G13/G7/G9 同样会再犯，掩耳盗铃）。
+- **决定**：① 门判决**永不因门停车**：`_park_on_gate` 改为 `_apply_verdict`——任何非 HOLD 判决只落
+  `gate_verdict` 事件（复盘记录 + exit-watchdog「已停车」分类源）后**返回 False 继续训练**；
+  ② 停机/恢复动作全部映射到远端云机：REMEDIATE/PAUSE/ABORT → `set_cloud_halt(True)`
+  （走 hub /admin/workers/halt，console 同端点复用，`hub_client.set_cloud_halt` 新函数）；
+  HOLD/ADVANCE → resume；实例态 `_cloud_halted` 防重复下发，重启即复位；local/push 无 hub 短路零行为；
+  ③ 真正的停车只剩硬边界：预算到顶（_budget_hard_cut）、F4 熔断、止损 2σ、远端不可用 ABORT（leg 级）；
+  ④ worker 停机达令分支补 60s 存活日志（"cloud halted, polling hub …"），停机期不再被误读为罢工；
+  ⑤ 预算 STOP 不是停机达令，不触发云机停机。
+- **违反后果**：回退到"门即停车"→ 每 ~6-7 轮一次停线 + 云机连带停机 + 人手重启（本次现场连锁）；
+  停机期 worker 日志静默会继续被误判成罢工。
