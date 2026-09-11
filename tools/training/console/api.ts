@@ -12,7 +12,7 @@ import { CURRICULA_DIR, LOG_DIR, NN_TRAINING, REPO_ROOT } from '../paths'
 import { httpOk, pidAlive } from '../net'
 import { loadRegistry } from '../registry'
 import { loadConfig } from '../config'
-import { COMPONENT_LABELS, loadConsoleState, resumeCloud, triggerCloudHalt } from './actions'
+import { COMPONENT_LABELS, loadConsoleState, markCloudHaltRecovered, triggerCloudHalt } from './actions'
 import { readIterMetrics } from './iters'
 import { aggregateNodeHistory, emptyHistory, poolStatus } from './pool-history'
 import { enqueueProbeRun } from './evalboard'
@@ -875,12 +875,15 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
       case 'stopAll':
         return okResp(await stopAll())
       case 'cloud-halt': {
-        // 云端停机（手动）：只停云端 worker，本地进程不动（§385 复审）。
-        const reason = str(body, 'reason') || '手动停机（省 GPU 配额）'
+        // 手动下发停机命令（§386）：任务照常分发，云机先试停机停不掉继续干活。
+        const reason = str(body, 'reason') || '手动下发停机命令'
         return okResp(await triggerCloudHalt(loadConfigSafe(), reason))
       }
-      case 'cloud-resume':
-        return okResp(await resumeCloud(loadConfigSafe()))
+      case 'cloud-resume': {
+        // 停机条件消失（手动恢复）：hub resume + recovered（灰横幅保留历史）。
+        const clearReason = str(body, 'reason') || '手动恢复'
+        return okResp(await markCloudHaltRecovered(loadConfigSafe(), clearReason))
+      }
       case 'smoke': {
         const key = str(body, 'component') as Component
         if (!ALL_COMPONENTS.includes(key)) return errResp(`未知组件: ${key}`, 400)

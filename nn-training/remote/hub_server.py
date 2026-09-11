@@ -78,9 +78,9 @@ class _JobStore:
         self._auth_blocked_until: dict[str, float] = {}
         #: 账本增量读缓存（H6）：文件 size -> 已解析事件列表
         self._ledger_cache: tuple[int, list[dict]] = (0, [])
-        #: 云端停机标志（§385 复审：停云端省 GPU 配额，本地进程不动）。
-        #: 置位后 /jobs/next 下发 halt，worker 收到即退出（keepalive 停、cell 走完）。
-        #: 由 console 经 /admin/workers/{halt,resume} 控制；hub 重启即复位（volatile）。
+        #: 云端停机标志（§386：停机命令随任务同发；云机先试停机、停不掉照常干活）。
+        #: 置位后 /jobs/next 响应带 halt:true；由 console 经 /admin/workers/{halt,resume}
+        #: 控制；hub 重启即复位（volatile）。停机**不拦任务分发**。
         self.halt_workers = False
 
     # ---- jsonl 账本（job_pending / job_completed 双态，§3.1/D8） ----
@@ -373,22 +373,23 @@ class HubHandler(BaseHTTPRequestHandler):
     def _get_next(self) -> None:
         if not self._auth_ok():
             return
-        if self.store.halt_workers:  # 云端停机：下发达令，worker 收到即退出
-            self._json({"halt": True, "job_id": None}, 200)
-            return
+        # §386：停机达令随任务同发——云机取任务时同时拿到"停机命令"，先试停机、
+        # 停不掉（Kaggle 无 API）则照常执行任务。停机**不拦任务分发**（否则云机
+        # 闲置空烧反而是最大浪费）。空任务时也带 halt 标志，供空闲 worker 感知。
+        halt = self.store.halt_workers
         # §343 竞速：不设租约、不独占——同一 open job 对所有轮询者广播，
         # 先回传结果者胜（store_result 首写锁定），落后者 409 丢弃。
         jids = self.store.claimable_job_ids()
         for jid in jids:
             mp = self.store._job_dir(jid) / "manifest.json"
             manifest = json.loads(mp.read_text(encoding="utf-8"))
-            self._json({"job_id": jid, "manifest": manifest})
+            self._json({"job_id": jid, "manifest": manifest, "halt": halt})
             return
-        self._json({"job_id": None}, 200)  # 无可领取 job
+        self._json({"job_id": None, "halt": halt})  # 无可领取 job
 
-    # ---- 云端停机 / 恢复（§385 复审：停云端省 GPU 配额，本地进程不动） ----
-    # 用法：console 在 TrainingLoop 死亡/设计内停车时 GET /admin/workers/halt，
-    # 恢复训练 GET /admin/workers/resume。仅 Bearer 鉴权（同 worker），volatile。
+    # ---- 云端停机 / 恢复（§386：停机=发"停机命令"随任务同发；云机先试停机停不掉照常干活） ----
+    # 用法：console 在 TrainingLoop 死亡/设计内停车时 GET /admin/workers/halt 置停机态，
+    # 停机条件消失（恢复训练）GET /admin/workers/resume。仅 Bearer 鉴权（同 worker），volatile。
     def _admin_halt(self, halt: bool) -> None:
         if not self._auth_ok():
             return

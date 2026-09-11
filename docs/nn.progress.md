@@ -48,6 +48,15 @@ torch_xla 惰性模式下，`.tolist()` materialize 只断言其依赖子图；`
 - **验证**：test_hub_workers_halt_flow（hub 侧 401/halt/resume）/ worker_loop halts（worker 退出）/
   poll_job 上浮 halt / cloud-halt.test.ts（幂等跳过、失败不写标、恢复清标）。
 - 恢复路径：删停机标记 + hub resume 后，**必须重启云端 worker 会话**才重新入队（横幅明示）。
+- **修订（2026-09-11 用户确认"停机≠省配额"）**：worker 退出≠云机释放——Kaggle/Colab 宿主会话不因此停止计费
+  （Kaggle 无释放 API、Colab 空闲约 90min 才回收）。真释放只发生在：① Colab 部署下 halt 达令触发
+  `google.colab.runtime.unassign()`；② 人工断开。横幅/动作文案改为**诚实警告**（配额照烧→必须人工断开），
+  不再声称"省 GPU 配额"。测试断言同步（非 Colab 路径必须出现"手工断开"提示）。
+- **最终语义（2026-09-11 用户五条，DECISIONS §2026-09-11-nntrain-cloud-halt-final）**：停机=发布"停机命令"
+  而非杀 worker——{halt} 随 /jobs/next 同发（有任务同批、空闲单独）；worker 停机过渡**尝试一次**真释放
+  （Colab unassign / 其余提示人工断开），**不退出、照常执行任务**（云机不闲置）；halt 清除复位。
+  console-state cloudHalt 双态 halted/recovered：红横幅=停机中（含"停不掉继续干活"状态）；灰横幅=曾停机已恢复
+  （保留历史，TrainingLoop 重启或手动恢复触发）；本地组件全程不动。
 
 ---
 

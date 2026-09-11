@@ -29,6 +29,7 @@ import {
   latestRow,
   REFRESH_INTERVALS,
   refreshLabel,
+  TC_CLOUDHALT_ACK,
   TC_GLOBAL_INTERVAL,
   TC_RO_BANNER_DISMISSED,
   type ConsoleStateView,
@@ -126,6 +127,11 @@ export function App({ initial }: AppProps) {
   const [roBannerDismissed, setRoBannerDismissed] = useState(false)
   useEffect(() => {
     if (readLocal(TC_RO_BANNER_DISMISSED) === '1') setRoBannerDismissed(true)
+  }, [])
+  // 云端停机灰横幅已读（§386）：按 clearedAt 记，同一恢复事件只提示一次。
+  const [cloudHaltAck, setCloudHaltAck] = useState<string | null>(null)
+  useEffect(() => {
+    setCloudHaltAck(readLocal(TC_CLOUDHALT_ACK))
   }, [])
   // 视图课程（局域网只读核心）：初始 = SSR 的 ?course= 覆盖或操作员课程；切换只改本浏览器
   // 的查看 + URL，本机才额外 POST setCourse 同步操作员课程（动作 WYSIWYG 走 body.course）。
@@ -399,18 +405,42 @@ export function App({ initial }: AppProps) {
           </button>
         </div>
       ) : null}{' '}
-      {stateView?.cloudHalt ? (
+      {stateView?.cloudHalt?.status === 'halted' ? (
         <div className="tc-banner tc-banner--err" role="alert">
           <span>
-            ⚠ 云端已停机（省 GPU 配额）：{stateView.cloudHalt.reason} —— 本地 hub/console 未动；
-            恢复训练前请先重启云端 worker 会话（Kaggle/Colab），再点「恢复云端」。
+            ⚠ 停机中（{stateView.cloudHalt.reason}）：已向云机下发停机命令——云机先尝试停机；
+            停不掉则照常执行任务（不闲置空烧）。本地 hub/console
+            均正常。停机条件消失（如恢复训练）会自动解除。
           </span>
           <button
             type="button"
             className="tc-btn tc-btn--sm"
             onClick={() => void doAction('cloud-resume')}
           >
-            恢复云端
+            立即恢复
+          </button>
+        </div>
+      ) : null}
+      {stateView?.cloudHalt?.status === 'recovered' &&
+      stateView.cloudHalt.clearedAt &&
+      cloudHaltAck !== stateView.cloudHalt.clearedAt ? (
+        <div className="tc-banner tc-banner--muted" role="status">
+          <span>
+            曾停机（{stateView.cloudHalt.reason}）· 已恢复（
+            {stateView.cloudHalt.clearReason ?? '手动恢复'}，{' '}
+            {fmtTs(new Date(stateView.cloudHalt.clearedAt).getTime(), Date.now())}）；停机期间
+            停不掉的云机继续工作，未闲置浪费。
+          </span>
+          <button
+            type="button"
+            className="tc-btn tc-btn--sm"
+            onClick={() => {
+              const clearedAt = stateView.cloudHalt?.clearedAt ?? ''
+              writeLocal(TC_CLOUDHALT_ACK, clearedAt)
+              setCloudHaltAck(clearedAt)
+            }}
+          >
+            知道了
           </button>
         </div>
       ) : null}

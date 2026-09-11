@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import json
 import os
 import subprocess
@@ -27,6 +28,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 from remote.protocol import (
     AUTH_HEADER,
@@ -76,21 +78,21 @@ def _request(
 
 
 def poll_job(base_url: str, token: str, timeout: float = 30.0) -> dict | None:
-    """GET /jobs/next → {job_id, manifest} 或 None（无 job）。
+    """GET /jobs/next → {job_id, manifest, halt} 或 None（无任务且无停机达令）。
 
-    云端停机达令（§385 复审）：hub 返回 {"halt": true} → 原样上浮（worker_loop
-    据此退出省 GPU 配额）；其余无 job 形态返回 None。"""
+    停机达令（§386）随任务同发：有任务 → 原样上浮（含 halt 标志，worker 先试停机、
+    停不掉照常执行任务）；无任务但 halt → {"halt": True}；两者皆无 → None。"""
     status, body = _request(base_url, token, "/jobs/next", timeout=timeout)
     if status != 200:
         return None
     data = json.loads(body.decode("utf-8"))
     if not isinstance(data, dict):
         return None
+    if data.get("job_id"):
+        return data  # 有任务：halt 标志随任务同行（达令+任务同批）
     if data.get("halt") is True:
         return {"halt": True}
-    if not data.get("job_id"):
-        return None
-    return data
+    return None
 
 
 def _get_with_retry(
@@ -872,6 +874,28 @@ def supervise_worker(
         return rc
 
 
+def _release_cloud_machine(
+    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+) -> None:
+    """尽力真释放云机（§386，用户确认：worker 退出≠停机省钱）。
+
+    - Colab：`google.colab.runtime.unassign()` 可编程释放实例（真省配额）。
+    - 其它（Kaggle 等）：无释放 API——诚实提示必须人工在宿主页面断开/关闭会话。
+    任何失败都不抛（停机链路绝不能反过来崩 worker）。
+    """
+    try:
+        # importlib 动态导入：避免静态 mypy import-not-found（google.colab 无 stub）。
+        runtime_mod: Any = importlib.import_module("google.colab.runtime")
+        log("检测到 Colab 运行时 → 调用 runtime.unassign() 释放实例（真省配额）")
+        try:
+            runtime_mod.unassign()
+        except Exception as e:
+            log(f"Colab unassign 失败：{e}——请手工断开宿主会话")
+        return
+    except Exception:
+        log("非 Colab 运行时：无编程释放途径——请在宿主页面手工断开/关闭会话以真省配额")
+
+
 def worker_loop(
     base_url: str,
     token: str,
@@ -900,6 +924,8 @@ def worker_loop(
     _last_alive_log = time.time()
     _polls_since_log = 0
     _polls_since_accept = 0
+    # §386：停机状态感知（过渡尝试一次；halt 清除后复位，下次停机可再试）。
+    halt_seen = False
     while True:
         try:
             _polls_since_log += 1
@@ -909,6 +935,15 @@ def worker_loop(
             log(f"poll failed: {e} — retry in {poll_sec}s")
             time.sleep(poll_sec)
             continue
+        got_halt = isinstance(job, dict) and job.get("halt") is True
+        if got_halt and not halt_seen:
+            # §386：停机命令随任务同发——先尝试真停机（Colab unassign）；
+            # 停不掉（Kaggle 无 API）→ **照常执行下面的任务**（云机活着就不闲置，能继续训练）。
+            halt_seen = True
+            log("云端停机达令已送达：先尝试停机宿主实例（停不掉则照常执行任务）")
+            _release_cloud_machine(log)
+        elif not got_halt and halt_seen:
+            halt_seen = False  # 停机条件消失（hub resume）→ 复位
         if job is None:
             if once:
                 break  # --once：无 job 或已处理完都退出（冒烟/单发）
@@ -925,12 +960,10 @@ def worker_loop(
                 _polls_since_log = 0
             time.sleep(poll_sec)
             continue
-        if job.get("halt") is True:
-            # §385 复审：云端停机达令（hub /admin/workers/halt）——停云端省 GPU 配额，
-            # 本地进程不动。worker 退出后 keepalive 停、cell 走完；session 级释放
-            # 受云商限制（Kaggle/Colab 需手工断连或到时）。
-            log("云端停机达令（hub halt）→ 退出，省 GPU 配额")
-            break
+        if job.get("halt") is True and not job.get("job_id"):
+            # 纯停机达令、无任务：不退出、继续等待（云机活着=随时可续训）。
+            time.sleep(poll_sec)
+            continue
         idle_since = time.time()
         _polls_since_log = 0  # claim 即上报：alive 行下次只数 claim 之后的轮询，不与本行重复
         jid = job["job_id"]

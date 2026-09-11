@@ -201,32 +201,94 @@ def test_main_child_mode_forwards_restart_argv(monkeypatch: pytest.MonkeyPatch) 
     assert seen["restart_argv"] == ["--poll", "http://x", "--token", "t"]  # 非空=有监督器
 
 
-def test_worker_loop_exits_on_hub_halt(monkeypatch: pytest.MonkeyPatch) -> None:
-    """§385 复审：hub 下发达令 → worker 干净退出（省 GPU 配额、不 claim job）。"""
-    polls = [{"halt": True}]
+def test_worker_halt_attempts_stop_then_keeps_working(monkeypatch: pytest.MonkeyPatch) -> None:
+    """§386：停机达令先试停机，停不掉（非 Colab）→ 照常执行同批任务，绝不退出。"""
+    polls: list[dict | None] = [
+        {"halt": True, "job_id": None},  # 停机达令（无任务）
+        {"halt": True, "job_id": "j1", "manifest": {"a": 1}},  # 达令 + 任务同批发
+        None,  # 停机解除（真 poll_job 对 {"job_id":null,"halt":false} 返回 None）→ once 退出
+    ]
     monkeypatch.setattr(W, "poll_job", lambda *a, **k: polls.pop(0), raising=True)
+    ran: list[str] = []
+
+    def _run_job(*a: object, **k: object) -> dict:
+        ran.append("PRE")
+        return {"rc": 0}
+
+    monkeypatch.setattr(W, "run_job", _run_job, raising=True)
+    monkeypatch.setattr(W, "post_result", lambda *a, **k: None, raising=True)
     logs: list[str] = []
     n = W.worker_loop(
-        "http://hub", "tok", work_dir=Path("/tmp/whatever"), poll_sec=0.0, log=logs.append
+        "http://hub", "tok", work_dir=Path("/tmp/x"), poll_sec=0.0, once=True, log=logs.append
     )
-    assert n == 0  # 没处理任何 job 就退
+    assert ran == ["PRE"]  # 停不掉 → 任务照常执行（云机不闲置）
+    assert n == 1
     joined = "\n".join(logs)
-    assert "云端停机达令" in joined and "省 GPU 配额" in joined
+    assert "停机达令已送达" in joined
+    assert "手工断开" in joined  # 非 Colab：停机尝试失败只提示、不退出、不假装省了配额
+
+
+def test_worker_halt_attempt_once_then_reset_on_clear(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§386：停机期间只尝试停机一次；停机条件消失（hub resume）后复位，可再次尝试。"""
+    calls = {"n": 0}
+    monkeypatch.setattr(
+        W, "_release_cloud_machine", lambda log=None: calls.update(n=calls["n"] + 1), raising=True
+    )
+    # 假时钟：让 None 分支的 idle 判定确定性触发（job 重置 idle_since 后，末段 None 超限退出）。
+    t = {"v": 0.0}
+    monkeypatch.setattr(W.time, "time", lambda: t["v"], raising=True)
+    monkeypatch.setattr(W.time, "sleep", lambda s: t.update(v=t["v"] + s), raising=True)
+    polls: list[dict | None] = [
+        {"halt": True, "job_id": None},  # 段 1：停机达令 → 尝试(1)
+        {"halt": True, "job_id": "j1", "manifest": {"a": 1}},  # 达令+任务：干活并重置 idle
+        None,  # 停机解除（None 分支 sleep 前进时钟，重置 halt_seen）
+        {"halt": True, "job_id": None},  # 段 2：再次停机 → 复位后可再试(2)
+        None,  # 收尾 None → idle 超限（job 重置点在 t=5，此处 15-5=10 ≥ max_idle）
+    ]
+    monkeypatch.setattr(W, "poll_job", lambda *a, **k: polls.pop(0), raising=True)
+    monkeypatch.setattr(W, "run_job", lambda *a, **k: {"rc": 0}, raising=True)
+    monkeypatch.setattr(W, "post_result", lambda *a, **k: None, raising=True)
+    W.worker_loop(
+        "http://hub",
+        "tok",
+        work_dir=Path("/tmp/x"),
+        poll_sec=5.0,
+        max_idle_sec=1.0,
+        log=lambda m: None,
+    )
+    assert calls["n"] == 2  # 段 1 一次 + 段 2 一次；停机持续期不重复
+
+
+def test_release_cloud_machine_prompts_manual_outside_colab(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§386：非 Colab 运行时（CI/Kaggle）→ 提示人工断开，不抛、不假装省了配额。"""
+    logs: list[str] = []
+    W._release_cloud_machine(log=logs.append)
+    joined = "\n".join(logs)
+    assert "无编程释放途径" in joined and "手工断开" in joined
 
 
 def test_poll_job_surfaces_halt(monkeypatch: pytest.MonkeyPatch) -> None:
-    """§385 复审：/jobs/next 的 {"halt": true} 被 poll_job 原样上浮，不丢成无 job。"""
+    """§386：/jobs/next 的 halt 标志被 poll_job 原样上浮（含"达令+任务同批"形态）。"""
     monkeypatch.setattr(
         W, "_request", lambda *a, **k: (200, b'{"halt": true, "job_id": null}'), raising=True
     )
     assert W.poll_job("http://hub", "tok") == {"halt": True}
-    monkeypatch.setattr(W, "_request", lambda *a, **k: (200, b'{"job_id": null}'), raising=True)
-    assert W.poll_job("http://hub", "tok") is None
     monkeypatch.setattr(
         W,
         "_request",
-        lambda *a, **k: (200, b'{"job_id": "j1", "manifest": {"a": 1}}'),
+        lambda *a, **k: (200, b'{"job_id": "j2", "manifest": {"b": 2}, "halt": true}'),
         raising=True,
+    )
+    got = W.poll_job("http://hub", "tok")
+    assert got is not None and got["job_id"] == "j2" and got["halt"] is True
+    monkeypatch.setattr(W, "_request", lambda *a, **k: (200, b'{"job_id": null}'), raising=True)
+    assert W.poll_job("http://hub", "tok") is None
+    monkeypatch.setattr(
+        W, "_request", lambda *a, **k: (200, b'{"job_id": "j1", "manifest": {"a": 1}}'), raising=True
     )
     assert W.poll_job("http://hub", "tok") == {"job_id": "j1", "manifest": {"a": 1}}
 

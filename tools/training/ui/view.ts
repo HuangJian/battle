@@ -91,8 +91,14 @@ export interface ConsoleStateView {
   metrics: MetricsView
   /** 当前训练阶段（顶栏图标用）。 */
   phase: PhaseInfo
-  /** 云端停机记录（有值 = 处停机态，UI 出横幅；§385 复审：停云端省 GPU 配额）。 */
-  cloudHalt?: { at: string; reason: string } | null
+  /** 云端停机记录（§386：halted=红横幅停机中；recovered=灰横幅"曾停机已恢复"）。 */
+  cloudHalt?: {
+    at: string
+    reason: string
+    status: 'halted' | 'recovered'
+    clearedAt?: string
+    clearReason?: string
+  } | null
   /** 局域网只读视图（服务端按请求来源 stamp；true = 本页只读——动作按钮禁用 + 只读角标）。
    *  缺省（SSR/测试直构）时客户端回退 location.hostname 判定。 */
   readOnly?: boolean
@@ -787,6 +793,8 @@ export const TC_GLOBAL_INTERVAL = `${TC_KEY_PREFIX}globalInterval`
 export const TC_METRICS_FILTER = `${TC_KEY_PREFIX}metrics.filter`
 /** 局域网只读横幅关闭键（用户关闭后不再显示；tc. 前缀保证不被 cleanupNonTcKeys 误删）。 */
 export const TC_RO_BANNER_DISMISSED = `${TC_KEY_PREFIX}ro.bannerDismissed`
+/** 云端停机灰横幅已读键（§386：值=clearedAt，同一恢复事件只提示一次）。 */
+export const TC_CLOUDHALT_ACK = `${TC_KEY_PREFIX}cloudHalt.ack`
 /** hero 最新 6 轮区块视图（'main' 主行 / 'eval' 干净评估）。 */
 export const TC_HERO_ITER_VIEW = `${TC_KEY_PREFIX}hero.iters`
 export const TC_TREND_RANGE = `${TC_KEY_PREFIX}trend.range`

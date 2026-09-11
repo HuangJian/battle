@@ -63,6 +63,8 @@ a.tc-btn{display:inline-block;text-decoration:none;text-align:center}
 .tc-banner--err{background:var(--red-bg);color:var(--red);border:1px solid var(--red)}
 /* 局域网只读横幅（§2026-09-09-goalnn-console-lan-readonly 延伸）：琥珀色 + 加粗，一眼可见 */
 .tc-banner--ro{background:var(--yellow-bg);color:#9a3f00;border:1.5px solid var(--yellow);font-weight:600}
+/* 云端停机：已恢复（§386 灰横幅：曾停机但已恢复，历史提示非告警） */
+.tc-banner--muted{background:var(--gray-bg);color:#5b6472;border:1px solid #c9ced8}
 .tc-banner button{margin-left:auto}
 
 /* ── Card（折叠 / 最大化 / 陈旧度 / 卡级动作） ───────────── */

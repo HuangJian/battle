@@ -671,8 +671,8 @@ def _http_raw(base_url: str, token: str, path: str) -> tuple[int, bytes]:
 
 
 def test_hub_workers_halt_flow(tmp_path: Path) -> None:
-    """§385 复审：/admin/workers/halt → /jobs/next 下发 halt；resume 后恢复；未鉴权拒绝。"""
-    base, _store, srv, th = _boot_server(tmp_path)
+    """§386：halt 置位后——空任务带 halt / 任务与达令同批 / resume 复位且任务照常分发。"""
+    base, store, srv, th = _boot_server(tmp_path)
     try:
         # 未带 token → 401（管理端点与 worker 同鉴权边界）
         st, _ = _http(base, "", "/admin/workers/halt")
@@ -680,16 +680,25 @@ def test_hub_workers_halt_flow(tmp_path: Path) -> None:
         # 初始未停机
         st, body = _http(base, "sekret", "/admin/workers/status")
         assert st == 200 and body == {"halt": False}
-        # 停机 → /jobs/next 下发达令（worker 收到即退出，省 GPU 配额）
+
+        # 停机、无任务 → 达令仍送达（空闲 worker 也能感知停机）
         st, body = _http(base, "sekret", "/admin/workers/halt")
         assert st == 200 and body == {"halt": True}
         st, body = _http(base, "sekret", "/jobs/next")
-        assert st == 200 and body.get("halt") is True and body.get("job_id") is None
-        # 恢复 → 正常空返
+        assert st == 200 and body == {"job_id": None, "halt": True}
+
+        # 停机状态下发布任务 → 任务与停机达令同批下发（云机先试停机、停不掉照常干活）
+        manifest = normalize_manifest(_mini_manifest())
+        jid = manifest["job_id"]
+        store.publish(jid, manifest, b"PK\x03\x04fake")
+        st, body = _http(base, "sekret", "/jobs/next")
+        assert st == 200 and body["job_id"] == jid and body["halt"] is True
+
+        # resume → halt 复位；任务不受影响照常可领
         st, body = _http(base, "sekret", "/admin/workers/resume")
         assert st == 200 and body == {"halt": False}
         st, body = _http(base, "sekret", "/jobs/next")
-        assert st == 200 and body == {"job_id": None}
+        assert st == 200 and body["job_id"] == jid and body["halt"] is False
     finally:
         srv.shutdown()
         th.join()

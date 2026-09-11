@@ -95,6 +95,12 @@ export interface CloudHaltInfo {
   at: string
   /** 触发原因（训练停车/异常退出的判词，或手动）。 */
   reason: string
+  /** 停机状态：halted=停机中（红横幅）· recovered=已恢复（灰横幅，历史保留）。 */
+  status: 'halted' | 'recovered'
+  /** recovered 时刻（§386：恢复后记录保留→灰横幅"曾有停机但已恢复"）。 */
+  clearedAt?: string
+  /** 恢复原因（手动恢复 / TrainingLoop 重启=停机条件消失）。 */
+  clearReason?: string
 }
 
 export interface ConsoleState {
@@ -102,7 +108,7 @@ export interface ConsoleState {
   trainerPpo: 'pull' | 'push' | 'local'
   /** 当前课程（组件启动的 jobRoot/日志目录来源）。 */
   course: string
-  /** 云端停机记录（有值 = 处云端停机态，UI 出横幅；「恢复云端」后清除）。 */
+  /** 云端停机记录（§386：halted=红横幅；recovered=灰横幅历史，不复位删除，确保"曾停机"可见）。 */
   cloudHalt?: CloudHaltInfo
 }
 
@@ -138,31 +144,47 @@ export function hubAdminOk(cfg: RlConfig, pathSuffix: string): Promise<boolean> 
   return httpOk(`http://127.0.0.1:${cfg.rl.hub_port}${pathSuffix}`, cfg.rl.remote_token, 5000)
 }
 
-/** 云端停机（幂等）：hub 置 halt（worker 下轮轮询即退出）+ console-state 记原因。
- *  只停云端——hubServer/trainingLoop/console 一律不动（§385 复审语义）。 */
+/** 云端停机（§386，幂等）：置停机态——hub 置 halt（任务仍正常分发，达令随任务同发）
+ *  + console-state 记 halted（红横幅）。只影响"停机命令"，本地进程一律不动。 */
 export async function triggerCloudHalt(
   cfg: RlConfig,
   reason: string,
 ): Promise<{ ok: boolean; message: string }> {
-  if (loadConsoleState().cloudHalt) {
-    return { ok: true, message: '已是云端停机态（幂等跳过）' }
+  const prev = loadConsoleState().cloudHalt
+  if (prev?.status === 'halted') {
+    return { ok: true, message: '已是停机中状态（幂等跳过）' }
   }
   const ok = await hubAdminOk(cfg, '/admin/workers/halt')
   if (!ok) {
-    return { ok: false, message: '云端停机指令下发失败（hub 不可达或拒绝）' }
+    return { ok: false, message: '停机指令下发失败（hub 不可达或拒绝）' }
   }
-  saveConsoleState({ cloudHalt: { at: new Date().toISOString(), reason } })
-  return { ok: true, message: `云端已停机：${reason}` }
+  saveConsoleState({
+    cloudHalt: { at: new Date().toISOString(), reason, status: 'halted' },
+  })
+  return {
+    ok: true,
+    message: `训练已停止：${reason}（已发停机命令；云机先尝试停机，停不掉则继续干活）`,
+  }
 }
 
-/** 恢复云端：hub 复位 halt + 清 console-state 停机记录。worker 会话需另行重启才重新入队。 */
-export async function resumeCloud(cfg: RlConfig): Promise<{ ok: boolean; message: string }> {
-  const ok = await hubAdminOk(cfg, '/admin/workers/resume')
-  saveConsoleState({ cloudHalt: undefined })
-  if (!ok) {
-    return { ok: false, message: '恢复指令失败（hub 不可达或拒绝）；已清除本地停机标记' }
+/** 停机条件消失 → 恢复：hub 复位 halt + 标记 recovered（§386：记录保留→灰横幅历史）。
+ *  云机继续工作（停不掉的会话）此时恢复常态；TrainingLoop 重启也会自动走这里。 */
+export async function markCloudHaltRecovered(
+  cfg: RlConfig,
+  clearReason: string,
+): Promise<{ ok: boolean; message: string }> {
+  const prev = loadConsoleState().cloudHalt
+  if (!prev || prev.status === 'recovered') {
+    return { ok: true, message: '无停机记录或已恢复（幂等跳过）' }
   }
-  return { ok: true, message: '云端已恢复（停机标记清除）；worker 会话需重启后重新入队' }
+  const ok = await hubAdminOk(cfg, '/admin/workers/resume')
+  saveConsoleState({
+    cloudHalt: { ...prev, status: 'recovered', clearedAt: new Date().toISOString(), clearReason },
+  })
+  if (!ok) {
+    return { ok: false, message: '恢复指令失败（hub 不可达或拒绝）；停机记录已标已恢复' }
+  }
+  return { ok: true, message: '云端停机已解除（曾停机记录保留在灰横幅）' }
 }
 
 // ────────────────────────── 组件标签与就绪谓词 ──────────────────────────
@@ -350,7 +372,14 @@ export async function startComponent(key: Component, ctx: StartCtx): Promise<Act
           clearComponent('trainingLoop')
           return done(false, `TrainingLoop 启动即退出 (PID ${r.pid})`, tailLines(trainLog))
         }
-        return done(true, `TrainingLoop 已启动 (PID ${r.pid}, ppo=${ctx.trainerPpo})`)
+        // §386：TrainingLoop 重启 = 停机条件消失 → 自动恢复停机状态（hub resume + recovered）。
+        const rec = await markCloudHaltRecovered(cfg, 'TrainingLoop 已重启（停机条件消失）')
+        return done(
+          true,
+          rec.ok && rec.message.includes('解除')
+            ? `TrainingLoop 已启动 (PID ${r.pid}, ppo=${ctx.trainerPpo})；云端停机状态已自动恢复`
+            : `TrainingLoop 已启动 (PID ${r.pid}, ppo=${ctx.trainerPpo})`,
+        )
       }
     }
   } catch (e) {

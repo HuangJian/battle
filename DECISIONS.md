@@ -1105,6 +1105,12 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   云商无 release API 的事实（Kaggle/Colab 需手工断连或到 9h 上限）如实写进横幅文案与注释，不假装全释放。
 - **违反后果**：不加则 loop 一停云端照烧（事故复诊/崩溃期间都在空转烧配额）；恢复时漏重启 worker 会话会卡派发——
   横幅与「恢复云端」动作就是主介入路径。
+> **（2026-09-11 修订，用户确认＂停机≠省配额＂）**：worker 退出≠云机释放——Kaggle/Colab
+> 宿主会话不因此停止计费（Kaggle 无释放 API、Colab 空闲约 90min 才回收）。停机的真实边界：
+> ① Colab 部署下 halt 达令触发 `google.colab.runtime.unassign()` 真释放实例；② Kaggle 等无 API——
+> 横幅与动作文案改为**诚实警告**（worker 已离线、宿主会话仍在计费、必须人工断开），不再声称＂省 GPU 配额＂。
+> 恢复路径不变（hub resume + 重启云端 worker 会话）。
+
 
 ## §2026-09-11-ppo-tpu-step-mark（2026-09-11，c6b-margin 首个 TPU job 单步 45~52s / eta 5.9h 根因定案）
 
@@ -1167,3 +1173,26 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 - **违反后果**：任何人把 c4-dodge 的 wTick 一起改掉（c6b 已证 wTick 单测无效）或把 ADVANCE
   判据只放胜率不等人读 margin，都会污染"wChip 教闪避"这一单变量归因；结业后必须做 c5/c6
   零样本转移验证（残血可转移的唯一证明）。
+- **补记（R7 加样本量，13:30）**：用户拍板 GPU 余粮充足，`seed_rotate` 150→600（次变量）。
+  理由：①弱信号腿吃梯度质量（600 局/轮 advantage 噪声小）；②固定开销摊薄（同 2.1 万局
+  ≈4h vs 7h，省 ~40% 墙钟）；③R7 有 c6b 中性前科（600 vs 150 结局相同），归因仍落 wChip。
+  `eval_every` 5→3（测量侧）、`min_train_samples` 2M→4M（600 局下 2M 只挡 7 轮）。已声明
+  双变量。**实测踩坑**：腿 13:16 以旧文件（150 局）启动，it1-4 后 G13 duty=0.31 设计内停车
+  （150 局/轮 ppo_cloud_sec 太小撑不起 0.35 占空比）——600 局顺带解决 duty（~130s/350s≈0.37）。
+  console cloud-resume + start 重启后已按 600 续跑（it4 权重保留，150 局 4 轮有效数据作废
+  不可惜）。
+
+## §2026-09-11-nntrain-cloud-halt-final（2026-09-11，用户五条语义：停机命令随任务同发、云机先试停机再干活、本地全不动、红灰双横幅）
+
+- **背景**：前两版只解决"worker 退出≠停机"，存储层面仍无法编程释放 Kaggle 会话（Colab 可 unassign）。
+  用户定死停机操作语义五条：①云机取任务时任务与停机命令同发；②先尝试停机、停不掉就继续执行任务；
+  ③hub 本地所有组件进程正常；④控制台红横幅显示停机问题与状态；⑤云机继续跑、停机条件消失后一切回
+  正常、灰横幅显示"曾停机已恢复"。
+- **备选与否决**：停机=worker 退出 —— 否（上版已否，且 quit 后恢复要人工重启会话）；停机时停发任务让云机空转 —— 否，
+  空转才是最大的浪费；停机状态为一次性事件（不持久）—— 否，五条要求 halted/recovered 双态可迁移。
+- **决定**：① /jobs/next 恒带 halt:bool（有任务时与任务同批下发，空闲时单独送达）；② worker 停机过渡
+  尝试一次 _release_cloud_machine（Colab unassign / 其余提示人工断开），**不退出、照常执行任务**；
+  halt 清除后复位可再试；③ console-state cloudHalt 双态（halted 红横幅 / recovered 灰横幅保留历史，
+  TrainingLoop 重启或手动即恢复）；④ 本地组件全程不动。
+- **违反后果**：回退到"停机=杀 worker"则恢复续跑要人工重启会话、停机期间真正闲置空烧；不清 halted/recovered
+  则操作员看不到"停机中/已恢复"的迁移，云机配额的处置失去可见性。
