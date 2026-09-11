@@ -235,6 +235,14 @@ export interface IterActuals {
   /** 胜局平均残血（hp 单位：剩余命每命计满额 maxHp + 当前 hp）。
    *  null = 数据源无 residualHp（旧 manifest / 无胜局）。 */
   avgResidualHp: number | null
+  /** 胜局平均耗时（ticks，仅胜局计入）；null = 无胜局或胜局缺 ticks。
+   *  rollout 实际值口径（所有 iter 采样）；旧缓存/缺字段 = undefined。 */
+  avgWinTicks?: number | null
+  /** 败局平均耗时（ticks，仅败局计入）；null = 无败局或缺数据。
+   *  ⚠️ 方向警告同 EvalSummary.avgLossTicks：越高不代表越强。 */
+  avgLossTicks?: number | null
+  /** 每杀承伤（ΣplayerDamageTaken / Σkills，全样本口径）；null = 该轮无击杀。 */
+  dmgPerKill?: number | null
 }
 
 export interface EvalSummary {
@@ -747,20 +755,14 @@ export interface Series {
 export type TrendRange = 'all' | '30' | '10'
 
 /** eval 源稀疏序列（干净评估只在部分迭代出现，中间轮 = NaN 缺口）：
- *  winTicks/winHp/lossTicks/dmgPerKill 同为 eval 口径，共享「最近 N = 最近 N 个有效点」。 */
-const SPARSE_SERIES_KEYS: ReadonlySet<string> = new Set([
-  'eval',
-  'winTicks',
-  'winHp',
-  'lossTicks',
-  'dmgPerKill',
-])
+ *  「最近 N」语义 = 最近 N 个有效评估点。 */
+const SPARSE_SERIES_KEYS: ReadonlySet<string> = new Set(['eval'])
 
 /**
- * 按范围档位截取序列。eval 源序列（eval / 胜局耗时 / 胜局残血）在有限轮里常带 NaN 缺口，
+ * 按范围档位截取序列。eval 源序列（eval 胜率）在有限轮里常带 NaN 缺口，
  * 其「最近 N」语义 = 最近 N 个**有效**评估点（而非最近 N 轮迭代），
  * 避免窗口内全是 NaN 画空图；「全量」档同样只保留有效点。
- * 其它指标 = 最近 N 轮迭代（按 iter 截取）。
+ * 其它指标（含 rollout 口径的胜局耗时/胜局残血/承伤·杀/败局耗时）= 最近 N 轮迭代（按 iter 截取）。
  */
 export function sliceSeries(series: Series, range: TrendRange): Series {
   const { key, label, vals, iters } = series
@@ -811,37 +813,37 @@ export function metricSeries(rows: IterRow[]): Series[] {
     {
       key: 'winTicks',
       label: '胜局耗时',
-      // 胜局平均耗时（ticks，eval 胜局口径）；无评估/无胜局轮 = NaN 缺口。
+      // 胜局平均耗时（ticks，rollout 胜局口径，所有 iter 采样）；无胜局轮 = NaN 缺口。
       vals: chrono.map((r) =>
-        r.evalData && r.evalData.avgWinTicks !== null ? r.evalData.avgWinTicks : Number.NaN,
+        r.actuals && r.actuals.avgWinTicks != null ? r.actuals.avgWinTicks : Number.NaN,
       ),
       iters,
     },
     {
       key: 'winHp',
       label: '胜局残血',
-      // 胜局平均剩余 hp（eval 胜局口径）；无评估/无胜局轮 = NaN 缺口。
+      // 胜局平均剩余 hp（rollout 胜局口径，所有 iter 采样）；无胜局轮 = NaN 缺口。
       vals: chrono.map((r) =>
-        r.evalData && r.evalData.avgResidualHp !== null ? r.evalData.avgResidualHp : Number.NaN,
+        r.actuals && r.actuals.avgResidualHp !== null ? r.actuals.avgResidualHp : Number.NaN,
       ),
       iters,
     },
     {
       key: 'dmgPerKill',
       label: '承伤/杀',
-      // 每杀承伤（eval 全样本口径）；越小越会周旋。防苟活（不打 ⇒ 分母小 ⇒ 值爆炸）。
+      // 每杀承伤（rollout 全样本口径，所有 iter 采样）；越小越会周旋。防苟活（不打 ⇒ 分母小 ⇒ 值爆炸）。
       vals: chrono.map((r) =>
-        r.evalData && r.evalData.dmgPerKill !== null ? r.evalData.dmgPerKill : Number.NaN,
+        r.actuals && r.actuals.dmgPerKill != null ? r.actuals.dmgPerKill : Number.NaN,
       ),
       iters,
     },
     {
       key: 'lossTicks',
       label: '败局耗时',
-      // 败局平均耗时（ticks，eval 败局口径）；无评估/无败局轮 = NaN 缺口。
+      // 败局平均耗时（ticks，rollout 败局口径，所有 iter 采样）；无败局轮 = NaN 缺口。
       // ⚠️ 高 = 清场停滞（见 EvalSummary.avgLossTicks 的方向警告），必须与胜率并排读。
       vals: chrono.map((r) =>
-        r.evalData && r.evalData.avgLossTicks !== null ? r.evalData.avgLossTicks : Number.NaN,
+        r.actuals && r.actuals.avgLossTicks != null ? r.actuals.avgLossTicks : Number.NaN,
       ),
       iters,
     },

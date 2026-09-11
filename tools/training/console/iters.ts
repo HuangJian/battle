@@ -49,7 +49,17 @@ export function readIterActuals(trajDir: string, iter: number): IterActuals | nu
     if (!existsSync(itDir)) return null
     const best = new Map<
       string,
-      { nSamples: number; kills: number; pu: number; ticks: number; residualHp: number | null }
+      {
+        nSamples: number
+        kills: number
+        pu: number
+        ticks: number
+        residualHp: number | null
+        /** outcome（stage_clear=胜局；null=manifest 未落盘）。 */
+        outcome: string | null
+        /** playerDamageTaken（全样本承伤，null=字段缺失 → 不计入承伤/杀）。 */
+        dmgTaken: number | null
+      }
     >()
     const walk = (base: string, rel: string): void => {
       if (rel.split('/').length > 6) return
@@ -99,6 +109,11 @@ export function readIterActuals(trajDir: string, iter: number): IterActuals | nu
               pu: Number(m.powerUpsCollected ?? 0) || 0,
               ticks: Number(m.ticks ?? 0) || 0,
               residualHp: residualHpFromFields(m),
+              outcome: typeof m.outcome === 'string' && m.outcome.length > 0 ? m.outcome : null,
+              dmgTaken:
+                typeof m.playerDamageTaken === 'number' && Number.isFinite(m.playerDamageTaken)
+                  ? m.playerDamageTaken
+                  : null,
             })
           }
         } catch {
@@ -113,6 +128,14 @@ export function readIterActuals(trajDir: string, iter: number): IterActuals | nu
     let totalTicks = 0
     let residualSum = 0
     let residualN = 0
+    // 胜局/败局耗时（ticks）与 承伤/杀（全样本，分子分母同口径）
+    let winTickSum = 0
+    let winN = 0
+    let lossTickSum = 0
+    let lossN = 0
+    let dmgSum = 0
+    let dmgKills = 0
+    let dmgN = 0
     for (const v of best.values()) {
       totalKills += v.kills
       totalPU += v.pu
@@ -121,6 +144,21 @@ export function readIterActuals(trajDir: string, iter: number): IterActuals | nu
         residualSum += v.residualHp
         residualN++
       }
+      if (v.outcome) {
+        if (v.outcome === 'stage_clear' && v.ticks > 0) {
+          winTickSum += v.ticks
+          winN++
+        } else if (v.outcome !== 'stage_clear' && v.ticks > 0) {
+          lossTickSum += v.ticks
+          lossN++
+        }
+      }
+      // 承伤/杀：全样本、不区分胜负；分子分母同口径 = 仅累计带有 playerDamageTaken 的局。
+      if (v.dmgTaken !== null) {
+        dmgSum += v.dmgTaken
+        dmgKills += v.kills
+        dmgN++
+      }
     }
     return {
       games: best.size,
@@ -128,6 +166,9 @@ export function readIterActuals(trajDir: string, iter: number): IterActuals | nu
       totalPU,
       avgTicks: Math.round(totalTicks / best.size),
       avgResidualHp: residualN > 0 ? Math.round(residualSum / residualN) : null,
+      avgWinTicks: winN > 0 ? Math.round(winTickSum / winN) : null,
+      avgLossTicks: lossN > 0 ? Math.round(lossTickSum / lossN) : null,
+      dmgPerKill: dmgN > 0 && dmgKills > 0 ? +(dmgSum / dmgKills).toFixed(1) : null,
     }
   } catch {
     return null
@@ -164,7 +205,9 @@ function loadActualsCache(trajDir: string): Map<number, CachedActuals> {
         typeof v.games === 'number' &&
         typeof v.totalKills === 'number' &&
         typeof v.totalPU === 'number' &&
-        typeof v.avgTicks === 'number'
+        typeof v.avgTicks === 'number' &&
+        // schema 版本门闩：缺 avgWinTicks（旧缓存）→ 作废重建，带出新增 rollout 胜局/败局/承伤字段。
+        'avgWinTicks' in v
       ) {
         out.set(it, v)
       }
@@ -395,6 +438,12 @@ export function readIterMetrics(trajDir: string): { rows: IterRow[] } {
             avgTicks: cached.avgTicks,
             avgResidualHp:
               (cached as CachedActuals & { avgResidualHp?: number | null }).avgResidualHp ?? null,
+            avgWinTicks:
+              (cached as CachedActuals & { avgWinTicks?: number | null }).avgWinTicks ?? null,
+            avgLossTicks:
+              (cached as CachedActuals & { avgLossTicks?: number | null }).avgLossTicks ?? null,
+            dmgPerKill:
+              (cached as CachedActuals & { dmgPerKill?: number | null }).dmgPerKill ?? null,
           }
         } else {
           actuals = readIterActuals(trajDir, iter)

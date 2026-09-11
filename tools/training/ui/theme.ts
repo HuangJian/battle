@@ -333,8 +333,8 @@ a.tc-preset{text-decoration:none;display:inline-block}
 .tc-hero__sub{font-size:var(--fs-2);color:var(--muted)}
 .tc-hero__right{flex:1;display:flex;flex-direction:column;gap:var(--sp-2);min-width:300px}
 
-/* hero 右侧趋势网格：两行六格（行1 = rollout 胜率/击杀/道具；行2 = eval 胜率/胜局耗时/胜局残血），
- * 上「标签+值」下「走势图」（同行不换行） */
+/* hero 右侧趋势网格：三行八格（行1 = rollout 胜率/承伤·杀/击杀；行2 = eval 胜率+胜局耗时/胜局残血；
+ * 行3 = 败局耗时/道具；除 eval 胜率外均 rollout 所有 iter 平均口径），上「标签+值」下「走势图」 */
 .tc-trends{display:grid;grid-template-columns:repeat(3,1fr);gap:var(--sp-3);flex:1;min-width:300px}
 .tc-tcell{display:flex;flex-direction:column;gap:3px;padding:7px 10px;background:var(--row-hover);border:1px solid var(--border);border-radius:var(--r-2);min-width:0}
 .tc-tcell__hd{display:flex;align-items:baseline;justify-content:space-between;gap:var(--sp-2)}
