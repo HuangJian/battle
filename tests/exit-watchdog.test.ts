@@ -33,6 +33,7 @@ import {
   recentPlannedStop,
   recordExitFailure,
   specPort,
+  tailNormalCompletion,
   type FailureLogIO,
 } from '../tools/training/console/exit-watchdog'
 import type { Component, ProcSpec, Registry, RegistryEntry } from '../tools/training/types'
@@ -223,6 +224,36 @@ describe('recentPlannedStop（gate_verdict / circuit_break 识别）', () => {
     } finally {
       rmSync(path.dirname(j), { recursive: true, force: true })
     }
+  })
+})
+
+describe('tailNormalCompletion（iters 跑满 ALL DONE 识别）', () => {
+  it('日志尾行是 ALL DONE → 返回正常完成原因（2026-09-12 c5-ent it80 误报事故）', () => {
+    const tail = [
+      '[eval] it80 DONE wver=b922935d810f clean winRate=37.0% (37/100, dropped=0)',
+      '[run_rl] metrics_stats it80: shards=148 steps=16757 elapsed_ms=62.9',
+      '[run_rl] ALL DONE -> tmp/c5-ent/weights.json',
+    ]
+    expect(tailNormalCompletion(tail)).toContain('正常完成')
+    expect(tailNormalCompletion(tail)).toContain('ALL DONE')
+  })
+
+  it('无 ALL DONE → null（崩溃仍走意外路径）', () => {
+    expect(tailNormalCompletion(['[run_rl] boot...', 'FileNotFoundError: bc 缺'])).toBeNull()
+    expect(tailNormalCompletion([])).toBeNull()
+  })
+
+  it('ALL DONE 不在尾行（旧轮残留、之后还有输出）→ null（不得把新崩溃洗成完成）', () => {
+    const tail = ['[run_rl] ALL DONE -> tmp/x/weights.json', '[run_rl] boot...', 'Traceback: boom']
+    expect(tailNormalCompletion(tail)).toBeNull()
+  })
+
+  it('原因进 buildExitMarker → 「已停车」而非「意外退出」', () => {
+    const reason = tailNormalCompletion(['[run_rl] ALL DONE -> tmp/c5-ent/weights.json'])
+    expect(reason).not.toBeNull()
+    const m = buildExitMarker('trainingLoop', { pid: 28112 }, [], 'T1', reason)
+    expect(m).toContain('已停车（PID 28112）')
+    expect(m).not.toContain('意外退出')
   })
 })
 

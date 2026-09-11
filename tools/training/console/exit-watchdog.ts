@@ -140,6 +140,25 @@ export function recentPlannedStop(
   return null
 }
 
+/** 组件日志尾行是 ALL DONE → 正常完成（iters 跑满），返回停车原因；否则 null。
+ *
+ * 2026-09-12 c5-ent it80 事故：loop 跑满预设 iters 后打印 ALL DONE 正常退出
+ *（exit 0），但 recentPlannedStop 只认账本 gate_verdict/circuit_break，ALL DONE
+ * 不在识别范围 → 被误标「意外退出——非正常退出」，还连带触发了一次原因错误的
+ * 云停机。hub.ts 早已用 tailSince().includes('ALL DONE') 判完成，此处同口径。
+ *
+ * 严格只认**尾行**：同一日志文件可能含上一轮的 ALL DONE（重启 append），旧完成
+ * 行之后还有输出 = 新一轮又崩了，必须仍走意外路径，不得洗成完成。
+ * 调用方约定：账本 recentPlannedStop 优先（门判决的原因更具体），本函数兜底。 */
+export function tailNormalCompletion(tail: string[]): string | null {
+  for (let i = tail.length - 1; i >= 0; i--) {
+    const line = tail[i]!.trim()
+    if (!line) continue
+    return line.includes('ALL DONE') ? '正常完成（ALL DONE）' : null
+  }
+  return null
+}
+
 /** 从 spec.cmd 取监听端口（--port N / --port=N）；无 → null。 */
 export function specPort(spec: ProcSpec | null): number | null {
   if (!spec) return null
@@ -272,9 +291,12 @@ export async function runExitCheck(): Promise<number> {
       const tail = logRel ? readLogTail(logRel, 12).lines : []
       // §385：trainingLoop 账本有最近 gate_verdict/circuit_break → 设计内停车，
       // 标「已停车(原因)」而非「意外退出」；其余组件/无事件走原意外路径。
+      // 2026-09-12：账本无判决但日志尾行 ALL DONE（iters 跑满正常完成）→ 同样
+      // 是设计内停车（账本原因优先，tail 兜底）。
       const planned =
         key === 'trainingLoop' && logRel
-          ? recentPlannedStop(join(dirname(logRel), 'training_log.jsonl'))
+          ? (recentPlannedStop(join(dirname(logRel), 'training_log.jsonl')) ??
+            tailNormalCompletion(tail))
           : null
       recordExitFailure(key, entry, logRel, tail, {}, undefined, planned)
       // §385 复审：TrainingLoop 一死（设计内停车或崩溃）→ 云端停机省 GPU 配额；
