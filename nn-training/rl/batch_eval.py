@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import random
 import shutil
 import threading
 import time
@@ -159,12 +160,203 @@ def write_batches(root: Path, batches: list[dict]) -> None:
     )
 
 
+REQUESTS_FILE = "requests.jsonl"
+REQUESTS_DONE_FILE = "requests.done.jsonl"
+
+
+def _req_key(r: dict) -> str:
+    rid = r.get("req_id")
+    if isinstance(rid, str) and rid:
+        return rid
+    try:
+        return json.dumps(r, sort_keys=True, ensure_ascii=True)
+    except (TypeError, ValueError):
+        return repr(sorted(str(k) for k in r))
+
+
+def read_requests(root: Path) -> list[dict]:
+    """读 console 请求文件（append-only，console 唯一写者；坏行跳过）。"""
+    p = root / REQUESTS_FILE
+    if not p.exists():
+        return []
+    out = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(r, dict) and isinstance(r.get("kind"), str):
+            out.append(r)
+    return out
+
+
+def read_done_req_ids(root: Path) -> set[str]:
+    """已消费请求 id 集（requests.done.jsonl；缺失即空集）。"""
+    p = root / REQUESTS_DONE_FILE
+    if not p.exists():
+        return set()
+    out: set[str] = set()
+    for line in p.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(r, dict) and isinstance(r.get("req_id"), str):
+            out.add(str(r["req_id"]))
+    return out
+
+
+def mark_requests_done(root: Path, ids: set[str] | list[str]) -> None:
+    """已消费标记（append-only，runner 唯一写者；requests.jsonl 本体永不重写）。"""
+    ids = list(ids)
+    if not ids:
+        return
+    root.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+    with open(root / REQUESTS_DONE_FILE, "a", encoding="utf-8") as f:
+        for i in ids:
+            f.write(json.dumps({"req_id": i, "consumed_ts": ts}) + "\n")
+
+
+def _same_enq_key(b: dict, course: str, rung_from: str, ckpt: str) -> bool:
+    return (
+        b.get("course") == course
+        and b.get("rung_from") == rung_from
+        and b.get("ckpt") == ckpt
+    )
+
+
+def consume_requests(root: Path) -> dict:
+    """消费 console 请求文件（plan/evalboard-console-ux.md §5.3，P1/P4）。
+
+    console 是 requests.jsonl 的唯一写者（append-only），本函数是唯一消费方：
+      enqueue → 无同 key pending 批且未物化则建 pending 批；
+      abort → pending/running 批标 aborted（在途 unit 跑完即停，见 mark_unit_done 守卫）；
+      ladder_start/ladder_stop → 跳过（console ticker 持有，runner 不碰）。
+    幂等：重复消费无副作用（去重 + 物化检查 + abort 复用）。
+    在 claim_pending 头部调用 ⇒ idle 窗与 kick-once.py 自动覆盖。
+    任何失败只记日志，绝不抛出（训练主链零风险）。
+    """
+    counts = {"consumed": 0, "enqueued": 0, "aborted": 0, "skipped": 0}
+    try:
+        reqs = read_requests(root)
+        if not reqs:
+            return counts
+        done_ids = read_done_req_ids(root)
+        fresh = [r for r in reqs if _req_key(r) not in done_ids]
+        if not fresh:
+            return counts
+        batches = read_batches(root)
+        dirty = False
+        consumed: list[str] = []
+        for r in fresh:
+            kind = str(r.get("kind"))
+            key = _req_key(r)
+            if kind == "enqueue":
+                course = str(r.get("course", ""))
+                rung_from = str(r.get("rung_from", ""))
+                ckpt = str(r.get("ckpt", ""))
+                if not course or not rung_from or not ckpt:
+                    consumed.append(key)
+                    counts["skipped"] += 1
+                    continue
+                if any(
+                    b.get("status") == "pending"
+                    and _same_enq_key(b, course, rung_from, ckpt)
+                    for b in batches
+                ):
+                    consumed.append(key)
+                    counts["skipped"] += 1
+                    continue
+                req_ts = str(r.get("ts", ""))
+                if req_ts and any(
+                    _same_enq_key(b, course, rung_from, ckpt)
+                    and str(b.get("created_ts", "")) >= req_ts
+                    for b in batches
+                ):
+                    consumed.append(key)
+                    counts["skipped"] += 1
+                    continue
+                now = time.strftime("%Y-%m-%dT%H:%M:%S")
+                stamp = now.replace("-", "").replace(":", "").replace("T", "")
+                try:
+                    it = int(r.get("iter", 0))
+                except (TypeError, ValueError):
+                    it = 0
+                trig = str(r.get("trigger", "standalone"))
+                if trig not in ("main", "standalone", "auto-ladder"):
+                    trig = "standalone"
+                pol = str(r.get("policy", "nn"))
+                if pol not in ("nn", "god"):
+                    pol = "nn"
+                batch: dict = {
+                    "batch_id": f"b-{stamp}-{random.randrange(0x10000):04x}",
+                    "course": course,
+                    "rung_from": rung_from,
+                    "ckpt": ckpt,
+                    "requester": str(r.get("requester", "web")),
+                    "created_ts": now,
+                    "status": "pending",
+                    "units": {"of": 2, "done": []},
+                    "k_seq": 0,
+                    "window_seq": 0,
+                    "trigger": trig,
+                    "iter": it,
+                    "node_dist": {},
+                    "elapsed_sec": None,
+                    "policy": pol,
+                }
+                for opt in ("ladder_pos", "init_sha16", "only_rungs"):
+                    if r.get(opt) is not None:
+                        batch[opt] = r[opt]
+                batches.append(batch)
+                dirty = True
+                consumed.append(key)
+                counts["enqueued"] += 1
+            elif kind == "abort":
+                bid = str(r.get("batch_id", ""))
+                for b in batches:
+                    if b.get("batch_id") == bid and b.get("status") in (
+                        "pending",
+                        "running",
+                    ):
+                        b["status"] = "aborted"
+                        dirty = True
+                        counts["aborted"] += 1
+                        break
+                consumed.append(key)
+            elif kind in ("ladder_start", "ladder_stop"):
+                continue  # console ticker 持有——runner 不消费、不标记
+            else:
+                consumed.append(key)  # 未知 kind：标记消费，防反复扫描
+                counts["skipped"] += 1
+        if dirty:
+            write_batches(root, batches)
+        if consumed:
+            mark_requests_done(root, consumed)
+        counts["consumed"] = len(consumed)
+        if counts["enqueued"] or counts["aborted"]:
+            log(f"[batcheval] consume_requests: {counts}")
+        return counts
+    except Exception as e:
+        log(f"[batcheval] consume_requests failed (ignored): {type(e).__name__}: {e}")
+        return counts
+
+
 def claim_pending(root: Path) -> dict | None:
     """取最早可跑批并标 running。
 
     可跑 = pending，或 running 且仍有未完成 unit（进程重启 / yield 后孤儿批）。
-    console POST 只 append pending（§6.7）；续跑靠本函数的 running 分支。
+    console 请求先经 consume_requests 物化为批（§5.3）；续跑靠本函数的 running 分支。
     """
+    try:
+        consume_requests(root)
+    except Exception as e:
+        log(f"[batcheval] consume_requests failed (ignored): {type(e).__name__}: {e}")
     batches = read_batches(root)
     for b in batches:
         st = b.get("status")
@@ -183,6 +375,11 @@ def mark_unit_done(root: Path, batch_id: str, unit_idx: int, node_dist: dict) ->
     batches = read_batches(root)
     for b in batches:
         if b.get("batch_id") == batch_id:
+            if b.get("status") == "aborted":
+                # P4：在途 unit 收尾只回填 node_dist，不复活已中止批。
+                b["node_dist"] = node_dist
+                write_batches(root, batches)
+                return
             units = b.setdefault("units", {"of": 0, "done": []})
             if unit_idx not in units.get("done", []):
                 units["done"].append(unit_idx)
@@ -726,9 +923,10 @@ def _requeue(root: Path, batch: dict) -> None:
     batches = read_batches(root)
     for b in batches:
         if b.get("batch_id") == batch.get("batch_id"):
-            b["status"] = "pending"
+            if b.get("status") != "aborted":
+                b["status"] = "pending"
+                write_batches(root, batches)
             break
-    write_batches(root, batches)
 
 
 def _reopen_for_resume(root: Path, batch_id: str) -> None:
