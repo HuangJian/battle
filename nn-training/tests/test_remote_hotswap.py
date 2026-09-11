@@ -180,6 +180,27 @@ def test_supervise_worker_passthrough_exit_code(
     assert state.read_text() == "1"  # 一代即终结
 
 
+def test_main_child_mode_forwards_restart_argv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """子进程模式（REMOTE_WORKER_CHILD=1）的 main() 必须把 argv 传给 worker_loop。
+
+    回归护栏（2026-09-12）：曾传 restart_argv=None → 热替换误走「无监督器返回」降级
+    路径、子进程以 0 退出，监督器等不到 HOT_RELOAD_EXIT 不重拉 → 云端热更新整体失效
+    （session 被重启、cells 不续跑）。非空 argv = worker_loop 判「有监督器 → 退 86」。
+    """
+    seen: dict[str, object] = {}
+
+    def _fake_worker_loop(*a, restart_argv, **k):
+        seen["restart_argv"] = restart_argv
+        raise SystemExit(0)
+
+    monkeypatch.setattr(W, "worker_loop", _fake_worker_loop, raising=True)
+    monkeypatch.setenv("REMOTE_WORKER_CHILD", "1")
+    monkeypatch.setattr(sys, "argv", ["remote_worker", "--poll", "http://x", "--token", "t"])
+    with pytest.raises(SystemExit):
+        W.main()
+    assert seen["restart_argv"] == ["--poll", "http://x", "--token", "t"]  # 非空=有监督器
+
+
 def test_worker_loop_exits_on_hub_halt(monkeypatch: pytest.MonkeyPatch) -> None:
     """§385 复审：hub 下发达令 → worker 干净退出（省 GPU 配额、不 claim job）。"""
     polls = [{"halt": True}]

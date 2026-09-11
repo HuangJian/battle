@@ -1039,7 +1039,9 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     if os.environ.get("REMOTE_WORKER_CHILD") == "1":
         # ── 子进程模式（由监督器 supervise_worker / 新版 main() 拉起）──
-        # 热替换以 HOT_RELOAD_EXIT 退出，监督器收到后用同一套参数重新拉起。
+        # 热替换必须退 HOT_RELOAD_EXIT(86) 让监督器重拉：worker_loop 以
+        # restart_argv「非空 = 有监督器」判定走退出码（空 = 无监督器返回）。
+        # 这里传本进程的参数列表（与监督器那侧同源）即可，子进程不自己重拉。
         n = worker_loop(
             args.poll,
             token,
@@ -1050,8 +1052,7 @@ def main() -> None:
             once=args.once,
             echo=args.echo,
             max_idle_sec=args.max_idle_sec,
-            # 监督器在 else 分支拿着 sys.argv[1:] 随时可重演，这里无需再自重启
-            restart_argv=None,
+            restart_argv=sys.argv[1:],
         )
         print(f"[worker] done: {n} job(s) processed")
         # H8：--once 失败（返回 -1）→ 非零退出码
