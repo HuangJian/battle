@@ -158,6 +158,12 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         help="iterations to run; 0 = infinite (stop via --max-hours or Ctrl-C)",
     )
     ap.add_argument(
+        "--exit-on-done",
+        action="store_true",
+        help="收官（ALL DONE）后直接退出进程（默认停车不断进程：本地停采 + 云停机 + "
+        "等待重启；前台脚本/自动化等待退出码时用本旗）。",
+    )
+    ap.add_argument(
         "--start-it",
         type=int,
         default=None,

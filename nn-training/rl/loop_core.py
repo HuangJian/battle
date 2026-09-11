@@ -24,7 +24,7 @@ from platform_utils import rmtree_best_effort
 from rl.breaker import CIRCUIT_EXIT_CODE
 from rl.collect_only import precollect_snapshot_wver
 from rl.course import build_pairs
-from rl.events import log_iter_error, write_run_start
+from rl.events import log_iter_error, write_run_complete, write_run_start
 from rl.log import log
 from rl.loop_guards import TrainingGuards
 from rl.loop_steps import SmokeVoidRoundError, TrainingSteps, kickstart_coef
@@ -113,6 +113,14 @@ def _kickstart_startup_check(args: Any, start_it: int) -> float:
     return kk0
 
 
+def should_park_on_done(args, smoke_void: bool) -> bool:
+    """ALL DONE 后停车还是退出：--smoke 作废干净退出 / --exit-on-done → 退出
+    （旧行为：前台脚本/预演等待进程结束）；其余一律停车不断进程。"""
+    if smoke_void:
+        return False
+    return not bool(getattr(args, "exit_on_done", False))
+
+
 class TrainingLoop(TrainingSteps, TrainingGuards):
     """RL 迭代主循环（run_training 的 OO 化；run() 为入口，失败重试内置）。
 
@@ -190,6 +198,7 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         args = self.args
         self._setup()
         it = self._start_it - 1
+        smoke_void = False  # --smoke 作废干净退出：收官后仍退出进程（预演等待结束）
         while args.iters <= 0 or it < args.iters:
             it += 1
             # 吞吐 T4：本轮开头检查预采子进程产出（句柄消费后归零）
@@ -275,6 +284,7 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 # 未写 iteration 事件，重试轮 _prepare_iter_dir 清场重采）。
                 if getattr(args, "smoke", False):
                     log(f"[run_rl] smoke it{it}: 冒烟回显已作废——--smoke 干净退出")
+                    smoke_void = True
                     break
                 log(f"[run_rl] it{it} 收到冒烟回显结果——本轮作废，原地重试")
                 it -= 1
@@ -304,6 +314,65 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         if self._tripped is not None:
             sys.exit(CIRCUIT_EXIT_CODE)
         print(f"[{time.strftime('%H:%M:%S')}] [run_rl] ALL DONE -> {args.out}")
+        if not should_park_on_done(args, smoke_void):
+            return
+        self._park_after_completion(it)
+
+    def _park_after_completion(self, it: int) -> None:
+        """正常收官（ALL DONE）→ 停车不断进程（2026-09-12 用户定案）。
+
+        三件事：① 本地停止采集（循环已结束，不再开新 it/派新 job）；② 向云机下发
+        停机指示（PAUSE，能自停的释配额；此前预算 STOP 靠进程死亡间接触发云停，
+        现在收官路径统一显式下发）；③ 账本落 run_complete 事件（console「已完成」
+        横幅派生源）。随后停车等待重启（控制台 停止→启动；改大 iters 后重进），
+        期间 EvalBoard B 批照常认领（idle 窗常开、机器本就空闲；直连节点派发，
+        不受 hub 云停机影响）——本地训练采集已停，只服务评估。中断（Ctrl-C/
+        SIGTERM 语义）干净返回。冒烟/--exit-on-done 不进这里。
+        """
+        args = self.args
+        total = args.iters if args.iters > 0 else "∞"
+        # 在飞预采子进程（门判决等中途 break 时可能残留）：收敛掉，不留孤儿空烧。
+        # 正常跑满时 spawn_next_collect 已因 it==iters 短路，child 恒为 None。
+        child = getattr(self, "_collect_child", None)
+        if child is not None:
+            try:
+                if child.poll() is None:
+                    child.terminate()
+                    log(f"[run_rl] 停车：收敛在飞预采子进程（it{it + 1} 未开跑）")
+            except Exception as e:  # 收敛失败不阻断停车
+                log(f"[run_rl] 停车：预采子进程收敛失败（{type(e).__name__}: {e}）")
+            self._collect_child = None
+        self._sync_cloud_halt(it, "PAUSE")
+        reason = f"正常收官（it{it}/{total}），本地停采、云机已停机"
+        try:
+            write_run_complete(self._jsonl_path, it, int(args.iters or 0), reason)
+        except OSError as e:
+            log(f"[run_rl] 停车：run_complete 落账失败（{e}）— 仅横幅派生缺失，继续停车")
+        log(
+            f"[run_rl] 正常完成（it{it}/{total}）——本地停止采集，进程停车不断开；"
+            "EvalBoard B 批照常认领；改大 iters 后经控制台 停止→启动 以继续训练"
+        )
+        parked_min = 0
+        while True:
+            try:
+                time.sleep(60)
+            except KeyboardInterrupt:
+                log("[run_rl] 停车中收到中断——干净退出")
+                return
+            parked_min += 1
+            # 停车期认领（60s 粒度）：复用 idle 窗逻辑——窗常开（无 rollout 抢占），
+            # 有在途单元则只保窗不重复领，无则认领最早 pending 批；dist_cfg 每轮热读
+            #（节点变更下一分钟即生效）。异常自吞（认领失败不影响停车）。
+            try:
+                try:
+                    dist_cfg = dist_common.load_dist_config()
+                except Exception:
+                    dist_cfg = None
+                self._evalboard_idle(it, dist_cfg)
+            except Exception as e:
+                log(f"[run_rl] 停车期认领失败（忽略）：{type(e).__name__}: {e}")
+            if parked_min % 60 == 0:
+                log(f"[run_rl] parked（已停车 {parked_min // 60}h）：无采集，等待重启")
 
     # ---------------------------------------------------------------- 启动
 

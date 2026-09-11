@@ -82,6 +82,13 @@ export interface MetricsView {
   error?: string
 }
 
+/** 训练正常完成停车态（账本 run_complete 事件派生，api.ts 填充）。 */
+export interface LoopComplete {
+  at: string
+  reason: string
+  iters: number
+}
+
 export interface ConsoleStateView {
   time: string
   course: string
@@ -108,6 +115,9 @@ export interface ConsoleStateView {
     waitedSec: number
     it: number | null
   } | null
+  /** 训练正常完成且进程停车等待重启（账本尾行 run_complete + 进程仍存活时派生）：
+   *  info 横幅——本地已停采、云机已停机；resume（新 run_start/iteration）后自动消失。 */
+  loopComplete?: LoopComplete | null
   /** 局域网只读视图（服务端按请求来源 stamp；true = 本页只读——动作按钮禁用 + 只读角标）。
    *  缺省（SSR/测试直构）时客户端回退 location.hostname 判定。 */
   readOnly?: boolean

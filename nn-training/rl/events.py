@@ -211,3 +211,23 @@ def write_circuit_break(
             "weights": args.out,
         },
     )
+
+
+def write_run_complete(jsonl_path: Path, it: int, iters: int, reason: str) -> None:
+    """run_complete 事件：主循环正常收官（ALL DONE）→ 停车不断进程前的最后落账。
+
+    2026-09-12 用户定案：跑满后进程不再退出，而是本地停采 + 云停机 + 停车等待
+    重启。本事件是 console「已完成」横幅的派生源（账本尾行即本事件 ⇒ 横幅展示；
+    resume 后新 run_start/iteration 事件自然顶掉它 ⇒ 横幅消失）。读盘面只认已知
+    事件名（iteration/run_start/gate_verdict/…），新事件名对旧读者透明、无影响。
+    """
+    write_event(
+        jsonl_path,
+        {
+            "event": "run_complete",
+            "iter": it,
+            "iters": iters,
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "reason": reason,
+        },
+    )

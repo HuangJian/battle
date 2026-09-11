@@ -35,6 +35,7 @@ import type {
   ComponentView,
   ConsoleStateView,
   LogPayload,
+  LoopComplete,
   MetricsView,
   NodeHistoryRow,
   NodeLocalView,
@@ -519,6 +520,9 @@ export interface SlowSnapshot {
   nodes: NodeView[]
   localNode: NodeLocalView | null
   phase: PhaseInfo
+  /** 训练正常完成停车态（账本尾行 run_complete + trainingLoop 存活时派生；
+   *  resume 后新事件自然顶掉 → null）。 */
+  loopComplete: LoopComplete | null
 }
 
 const SNAPSHOT_REFRESH_MS = 5000
@@ -570,7 +574,48 @@ async function computeSlowSnapshot(cfg: RlConfig, course: string): Promise<SlowS
   // 当前训练阶段（训练循环日志尾解析）。
   const logTail = components.find((c) => c.key === 'trainingLoop')?.logTail ?? []
   const phase = parsePhaseFromLog(logTail)
-  return { components, nodes, localNode, phase }
+  // 正常完成停车态（2026-09-12）：账本尾行是 run_complete 且进程仍存活（停车
+  // 等待重启）→ 横幅派生源；进程已死走 exit-watchdog 路径；resume 后新事件
+  // 顶掉 → 自动消失。账本小文件 + 尾部窗口读，5s 快照周期内可忽略。
+  let loopComplete: LoopComplete | null = null
+  const loopAlive = components.some((c) => c.key === 'trainingLoop' && c.status === 'running')
+  if (course && loopAlive) {
+    try {
+      const ledgerTail = readLogTail(
+        path.join(REPO_ROOT, 'tmp', course, 'training_log.jsonl'),
+        8,
+      ).lines
+      loopComplete = loopCompleteFromLedgerTail(ledgerTail)
+    } catch {
+      loopComplete = null
+    }
+  }
+  return { components, nodes, localNode, phase, loopComplete }
+}
+
+/** 账本尾行是 run_complete → 正常完成停车态；否则 null（纯函数，可单测）。
+ *
+ * 严格只认**尾行**：resume 后新 run_start/iteration 事件追加在后 → 自动 null
+ *（横幅消失）；尾行非 JSON（写半行竞态）→ null（下周期再看，不误报）。 */
+export function loopCompleteFromLedgerTail(lines: string[]): LoopComplete | null {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!.trim()
+    if (!line) continue
+    let r: { event?: unknown; time?: unknown; reason?: unknown; iter?: unknown; iters?: unknown }
+    try {
+      r = JSON.parse(line) as typeof r
+    } catch {
+      return null
+    }
+    if (!r || typeof r !== 'object' || r.event !== 'run_complete') return null
+    const it = typeof r.iter === 'number' ? r.iter : 0
+    return {
+      at: typeof r.time === 'string' ? r.time : '',
+      reason: typeof r.reason === 'string' ? r.reason : '正常完成',
+      iters: typeof r.iters === 'number' ? r.iters : it,
+    }
+  }
+  return null
 }
 
 /** 取指定课程的快照：5s 内新鲜命中缓存；否则按课程单飞重算（并发共享同一次计算）。 */
@@ -735,7 +780,7 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
   const state = loadConsoleState()
   const courses = discoverCourses()
   const course = courseOverride || effectiveCourse(state, courses)
-  const { components, nodes, localNode, phase } = await getSlowSnapshot(cfg, course)
+  const { components, nodes, localNode, phase, loopComplete } = await getSlowSnapshot(cfg, course)
   let metrics: MetricsView = { available: false, iters: [] }
   if (course && existsSync(path.join(REPO_ROOT, 'tmp', course, 'training_log.jsonl'))) {
     try {
@@ -767,6 +812,7 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     phase,
     cloudHalt: state.cloudHalt ?? null,
     ppoQueueStall,
+    loopComplete,
   }
 }
 

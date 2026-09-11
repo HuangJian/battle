@@ -443,6 +443,14 @@ export function App({ initial }: AppProps) {
           </button>
         </div>
       ) : null}
+      {stateView?.loopComplete ? (
+        <div className="tc-banner tc-banner--muted" role="status">
+          <span>
+            ✅ 训练已完成（{stateView.loopComplete.reason}）：本地已停止采集，云机已停机省配额，
+            进程停车等待重启。改大 iters 后经「停止→启动」继续。
+          </span>
+        </div>
+      ) : null}
       {stateView?.ppoQueueStall ? (
         <div className="tc-banner tc-banner--err" role="alert">
           <span>
