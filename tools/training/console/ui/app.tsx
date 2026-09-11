@@ -399,6 +399,21 @@ export function App({ initial }: AppProps) {
           </button>
         </div>
       ) : null}{' '}
+      {stateView?.cloudHalt ? (
+        <div className="tc-banner tc-banner--err" role="alert">
+          <span>
+            ⚠ 云端已停机（省 GPU 配额）：{stateView.cloudHalt.reason} —— 本地 hub/console 未动；
+            恢复训练前请先重启云端 worker 会话（Kaggle/Colab），再点「恢复云端」。
+          </span>
+          <button
+            type="button"
+            className="tc-btn tc-btn--sm"
+            onClick={() => void doAction('cloud-resume')}
+          >
+            恢复云端
+          </button>
+        </div>
+      ) : null}
       {readOnly && !roBannerDismissed ? (
         <div className="tc-banner tc-banner--ro" role="status">
           <span>

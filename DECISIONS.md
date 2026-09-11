@@ -1090,3 +1090,18 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   max_hours 可过冲；不识别设计内停车则每次门停车都误导操作员翻崩溃日志。
 - **未决（另立决策）**：pull 模式停车只停派活、不省 Kaggle 配额（worker max-idle ≥1h），
   真省需「停车连带 hub 停机 + 释放云会话」动作链。
+
+## §2026-09-11-nntrain-cloud-halt（2026-09-11，用户指令：停机=停云端省 GPU 限额、本地进程都不停、console 出横幅）
+
+- **背景**：§385 只做了门口径修复，没动"停车不省云配额"：loop 一停只是不再派活，Kaggle/Colab worker 照烧
+  （max_idle ≥1h 才退）。用户明确语义：**停机 = 停云端机器省 GPU 配额，本地 hub/console/trainingLoop 一律不停**；
+  停机后 console 界面显示红色横幅。
+- **备选与否决**：训练进程内自行发停机 —— 否，SIGKILL/OOM 时执行不到、还多一份调用面；只靠 worker 空闲退出 —— 否，
+  要等 ≥1h、停机期间照烧；hub 拒发新 job 但不通知 worker —— 否，worker 继续空转轮询烧会话。
+- **决定**：① hub 新增管理端点 /admin/workers/halt|resume|status（Bearer 同 worker 鉴权；volatile），置位后
+  /jobs/next 下发 {"halt":true}；② worker 收到达令即干净退出（keepalive 停、cell 走完）；③ exit-watchdog 在
+  TrainingLoop 死亡（含设计内停车与崩溃）时自动调 hub halt（幂等）+ console-state.json cloudHalt{at,reason}
+  持久化；④ console 顶栏红色横幅显示停机原因 +「恢复云端」按钮（手动 cloud-halt/cloud-resume 动作随之提供）。
+  云商无 release API 的事实（Kaggle/Colab 需手工断连或到 9h 上限）如实写进横幅文案与注释，不假装全释放。
+- **违反后果**：不加则 loop 一停云端照烧（事故复诊/崩溃期间都在空转烧配额）；恢复时漏重启 worker 会话会卡派发——
+  横幅与「恢复云端」动作就是主介入路径。

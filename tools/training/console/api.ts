@@ -12,7 +12,7 @@ import { CURRICULA_DIR, LOG_DIR, NN_TRAINING, REPO_ROOT } from '../paths'
 import { httpOk, pidAlive } from '../net'
 import { loadRegistry } from '../registry'
 import { loadConfig } from '../config'
-import { COMPONENT_LABELS, loadConsoleState } from './actions'
+import { COMPONENT_LABELS, loadConsoleState, resumeCloud, triggerCloudHalt } from './actions'
 import { readIterMetrics } from './iters'
 import { aggregateNodeHistory, emptyHistory, poolStatus } from './pool-history'
 import { enqueueProbeRun } from './evalboard'
@@ -635,6 +635,7 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     },
     metrics,
     phase,
+    cloudHalt: state.cloudHalt ?? null,
   }
 }
 
@@ -873,6 +874,13 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
       }
       case 'stopAll':
         return okResp(await stopAll())
+      case 'cloud-halt': {
+        // 云端停机（手动）：只停云端 worker，本地进程不动（§385 复审）。
+        const reason = str(body, 'reason') || '手动停机（省 GPU 配额）'
+        return okResp(await triggerCloudHalt(loadConfigSafe(), reason))
+      }
+      case 'cloud-resume':
+        return okResp(await resumeCloud(loadConfigSafe()))
       case 'smoke': {
         const key = str(body, 'component') as Component
         if (!ALL_COMPONENTS.includes(key)) return errResp(`未知组件: ${key}`, 400)

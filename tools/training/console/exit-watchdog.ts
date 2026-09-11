@@ -22,7 +22,7 @@ import { portOwnerPids } from '../proc'
 import { loadRegistry, saveComponent } from '../registry'
 import type { Component, ProcSpec, Registry, RegistryEntry } from '../types'
 import { readLogTail, resolveComponentLog, discoverCourses, effectiveCourse } from './api'
-import { COMPONENT_LABELS, loadConsoleState, restartSpecFor } from './actions'
+import { COMPONENT_LABELS, loadConsoleState, restartSpecFor, triggerCloudHalt } from './actions'
 
 /** 扫描登记条目，返回「确证退出」的组件（两帧锁）。isAlive 可注入（测试用）。 */
 export function nextExitFailures(
@@ -277,6 +277,18 @@ export async function runExitCheck(): Promise<number> {
           ? recentPlannedStop(join(dirname(logRel), 'training_log.jsonl'))
           : null
       recordExitFailure(key, entry, logRel, tail, {}, undefined, planned)
+      // §385 复审：TrainingLoop 一死（设计内停车或崩溃）→ 云端停机省 GPU 配额；
+      // 本地 hubServer/console 一律不动。幂等由 triggerCloudHalt 守卫。
+      if (key === 'trainingLoop') {
+        const reason = planned
+          ? `TrainingLoop 设计内停车：${planned}`
+          : `TrainingLoop 意外退出 (PID ${entry.pid})`
+        try {
+          await triggerCloudHalt(cfg, reason)
+        } catch {
+          /* watchdog 永不被停机链路拖垮 */
+        }
+      }
       recorded++
     }
     return recorded

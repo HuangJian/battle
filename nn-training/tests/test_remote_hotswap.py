@@ -99,6 +99,33 @@ def test_worker_loop_hotswap_triggers_restart(monkeypatch: pytest.MonkeyPatch) -
     assert "REJECTED" not in joined  # 关键：没落进 ProtocolError 的 skip 分支
 
 
+def test_worker_loop_exits_on_hub_halt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """§385 复审：hub 下发达令 → worker 干净退出（省 GPU 配额、不 claim job）。"""
+    polls = [{"halt": True}]
+    monkeypatch.setattr(W, "poll_job", lambda *a, **k: polls.pop(0), raising=True)
+    logs: list[str] = []
+    n = W.worker_loop(
+        "http://hub", "tok", work_dir=Path("/tmp/whatever"), poll_sec=0.0, log=logs.append
+    )
+    assert n == 0  # 没处理任何 job 就退
+    joined = "\n".join(logs)
+    assert "云端停机达令" in joined and "省 GPU 配额" in joined
+
+
+def test_poll_job_surfaces_halt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """§385 复审：/jobs/next 的 {"halt": true} 被 poll_job 原样上浮，不丢成无 job。"""
+    monkeypatch.setattr(
+        W, "_request", lambda *a, **k: (200, b'{"halt": true, "job_id": null}'), raising=True
+    )
+    assert W.poll_job("http://hub", "tok") == {"halt": True}
+    monkeypatch.setattr(W, "_request", lambda *a, **k: (200, b'{"job_id": null}'), raising=True)
+    assert W.poll_job("http://hub", "tok") is None
+    monkeypatch.setattr(
+        W, "_request", lambda *a, **k: (200, b'{"job_id": "j1", "manifest": {"a": 1}}'), raising=True
+    )
+    assert W.poll_job("http://hub", "tok") == {"job_id": "j1", "manifest": {"a": 1}}
+
+
 def test_prune_job_dirs_keeps_recent_and_skips_code_cache(tmp_path: Path) -> None:
     """保留最近 N 个（含在跑的），code_cache 永不删。"""
     work = tmp_path / "remote-worker"

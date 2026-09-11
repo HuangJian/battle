@@ -85,13 +85,25 @@ function done(ok: boolean, message: string, detail?: string[]): ActionResult {
 
 // ────────────────────────── 控制台状态（trainer 模式 / 当前课程） ──────────────────────────
 
-const CONSOLE_STATE = path.join(START_LOG_DIR, 'console-state.json')
+// 测试注入位（同 registry.ts 的 BCITY_REGISTRY_FILE）：默认线上路径，
+// 单测置 env 重定向到临时目录，绝不写脏线上 console-state.json。
+const CONSOLE_STATE =
+  process.env.BCITY_CONSOLE_STATE || path.join(START_LOG_DIR, 'console-state.json')
+
+export interface CloudHaltInfo {
+  /** 停机时刻（ISO）。 */
+  at: string
+  /** 触发原因（训练停车/异常退出的判词，或手动）。 */
+  reason: string
+}
 
 export interface ConsoleState {
   /** trainer 基建编排模式：pull=remote+隧道 · push=remote 无本地隧道 · local=本机 PPO。 */
   trainerPpo: 'pull' | 'push' | 'local'
   /** 当前课程（组件启动的 jobRoot/日志目录来源）。 */
   course: string
+  /** 云端停机记录（有值 = 处云端停机态，UI 出横幅；「恢复云端」后清除）。 */
+  cloudHalt?: CloudHaltInfo
 }
 
 const DEFAULT_STATE: ConsoleState = { trainerPpo: 'pull', course: '' }
@@ -116,6 +128,41 @@ export function saveConsoleState(patch: Partial<ConsoleState>): ConsoleState {
     /* 非致命——内存态仍生效到本进程 */
   }
   return next
+}
+
+// ────────────────────────── 云端停机 / 恢复（§385 复审：停云端省 GPU 配额，本地进程不动） ──────────────────────────
+
+/** hub 管理端点（Bearer 同 worker）。hub 不可达/鉴权失败 → false（不抛）。 */
+export function hubAdminOk(cfg: RlConfig, pathSuffix: string): Promise<boolean> {
+  if (!cfg.rl.hub_port) return Promise.resolve(false)
+  return httpOk(`http://127.0.0.1:${cfg.rl.hub_port}${pathSuffix}`, cfg.rl.remote_token, 5000)
+}
+
+/** 云端停机（幂等）：hub 置 halt（worker 下轮轮询即退出）+ console-state 记原因。
+ *  只停云端——hubServer/trainingLoop/console 一律不动（§385 复审语义）。 */
+export async function triggerCloudHalt(
+  cfg: RlConfig,
+  reason: string,
+): Promise<{ ok: boolean; message: string }> {
+  if (loadConsoleState().cloudHalt) {
+    return { ok: true, message: '已是云端停机态（幂等跳过）' }
+  }
+  const ok = await hubAdminOk(cfg, '/admin/workers/halt')
+  if (!ok) {
+    return { ok: false, message: '云端停机指令下发失败（hub 不可达或拒绝）' }
+  }
+  saveConsoleState({ cloudHalt: { at: new Date().toISOString(), reason } })
+  return { ok: true, message: `云端已停机：${reason}` }
+}
+
+/** 恢复云端：hub 复位 halt + 清 console-state 停机记录。worker 会话需另行重启才重新入队。 */
+export async function resumeCloud(cfg: RlConfig): Promise<{ ok: boolean; message: string }> {
+  const ok = await hubAdminOk(cfg, '/admin/workers/resume')
+  saveConsoleState({ cloudHalt: undefined })
+  if (!ok) {
+    return { ok: false, message: '恢复指令失败（hub 不可达或拒绝）；已清除本地停机标记' }
+  }
+  return { ok: true, message: '云端已恢复（停机标记清除）；worker 会话需重启后重新入队' }
 }
 
 // ────────────────────────── 组件标签与就绪谓词 ──────────────────────────

@@ -91,6 +91,8 @@ export interface ConsoleStateView {
   metrics: MetricsView
   /** 当前训练阶段（顶栏图标用）。 */
   phase: PhaseInfo
+  /** 云端停机记录（有值 = 处停机态，UI 出横幅；§385 复审：停云端省 GPU 配额）。 */
+  cloudHalt?: { at: string; reason: string } | null
   /** 局域网只读视图（服务端按请求来源 stamp；true = 本页只读——动作按钮禁用 + 只读角标）。
    *  缺省（SSR/测试直构）时客户端回退 location.hostname 判定。 */
   readOnly?: boolean

@@ -78,6 +78,10 @@ class _JobStore:
         self._auth_blocked_until: dict[str, float] = {}
         #: 账本增量读缓存（H6）：文件 size -> 已解析事件列表
         self._ledger_cache: tuple[int, list[dict]] = (0, [])
+        #: 云端停机标志（§385 复审：停云端省 GPU 配额，本地进程不动）。
+        #: 置位后 /jobs/next 下发 halt，worker 收到即退出（keepalive 停、cell 走完）。
+        #: 由 console 经 /admin/workers/{halt,resume} 控制；hub 重启即复位（volatile）。
+        self.halt_workers = False
 
     # ---- jsonl 账本（job_pending / job_completed 双态，§3.1/D8） ----
     def _read_ledger(self) -> list[dict]:
@@ -326,6 +330,12 @@ class HubHandler(BaseHTTPRequestHandler):
                 self._get_shared_code()
             elif path == "/jobs/next":
                 self._get_next()
+            elif path == "/admin/workers/halt":
+                self._admin_halt(True)
+            elif path == "/admin/workers/resume":
+                self._admin_halt(False)
+            elif path == "/admin/workers/status":
+                self._admin_status()
             elif path.startswith("/jobs/") and path.endswith("/payload"):
                 self._get_payload()
             elif path.startswith("/jobs/") and path.endswith("/code"):
@@ -363,6 +373,9 @@ class HubHandler(BaseHTTPRequestHandler):
     def _get_next(self) -> None:
         if not self._auth_ok():
             return
+        if self.store.halt_workers:  # 云端停机：下发达令，worker 收到即退出
+            self._json({"halt": True, "job_id": None}, 200)
+            return
         # §343 竞速：不设租约、不独占——同一 open job 对所有轮询者广播，
         # 先回传结果者胜（store_result 首写锁定），落后者 409 丢弃。
         jids = self.store.claimable_job_ids()
@@ -372,6 +385,20 @@ class HubHandler(BaseHTTPRequestHandler):
             self._json({"job_id": jid, "manifest": manifest})
             return
         self._json({"job_id": None}, 200)  # 无可领取 job
+
+    # ---- 云端停机 / 恢复（§385 复审：停云端省 GPU 配额，本地进程不动） ----
+    # 用法：console 在 TrainingLoop 死亡/设计内停车时 GET /admin/workers/halt，
+    # 恢复训练 GET /admin/workers/resume。仅 Bearer 鉴权（同 worker），volatile。
+    def _admin_halt(self, halt: bool) -> None:
+        if not self._auth_ok():
+            return
+        self.store.halt_workers = halt
+        self._json({"halt": halt}, 200)
+
+    def _admin_status(self) -> None:
+        if not self._auth_ok():
+            return
+        self._json({"halt": self.store.halt_workers}, 200)
 
     # ---- GET /jobs/{id}/payload ----
     def _get_payload(self) -> None:

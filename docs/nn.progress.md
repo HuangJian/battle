@@ -5,6 +5,21 @@
 
 ---
 
+## §24 云端停机机制（2026-09-11，用户指令：停机 = 停云端省 GPU 配额，本地进程都不停）
+
+承接 §23 的"未决"：§385 只修了 G13 口径，停车仍不省云配额。用户确认语义后落地（DECISIONS §2026-09-11-nntrain-cloud-halt）：
+
+- **hub**：`/admin/workers/{halt,resume,status}`（Bearer 鉴权，volatile）→ 置位后 `/jobs/next` 下发 `{"halt":true}`。
+- **worker**：收到达令即干净退出（keepalive 停、cell 走完）——省配额的有效动作止于"worker 停 + 不再轮询空转"；
+  Kaggle/Colab 无 release API，session 释放需手工断连或到 9h 上限（tpu-probe 调研，横幅文案如实写明）。
+- **console**：exit-watchdog 在 TrainingLoop 死亡（含设计内停车与崩溃）时自动发 halt（幂等），
+  console-state `cloudHalt{at,reason}` 持久化 → 顶栏红色横幅 +「恢复云端」按钮（另提供手动 `cloud-halt`/`cloud-resume` 动作）。
+- **验证**：test_hub_workers_halt_flow（hub 侧 401/halt/resume）/ worker_loop halts（worker 退出）/
+  poll_job 上浮 halt / cloud-halt.test.ts（幂等跳过、失败不写标、恢复清标）。
+- 恢复路径：删停机标记 + hub resume 后，**必须重启云端 worker 会话**才重新入队（横幅明示）。
+
+---
+
 ## §23 训练停车机制审计 + G13 duty 门修复（2026-09-11，c6b-margin 事故：每小时自停 2 次）
 
 用户指令："TrainingLoop 近一个小时自行关闭了几次，请检查原因，分析问题" → 审计全部 11 个停车点 → 用户拍板"处理所有问题" → §385。

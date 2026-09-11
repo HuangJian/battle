@@ -670,6 +670,31 @@ def _http_raw(base_url: str, token: str, path: str) -> tuple[int, bytes]:
         return e.code, e.read()
 
 
+def test_hub_workers_halt_flow(tmp_path: Path) -> None:
+    """§385 复审：/admin/workers/halt → /jobs/next 下发 halt；resume 后恢复；未鉴权拒绝。"""
+    base, _store, srv, th = _boot_server(tmp_path)
+    try:
+        # 未带 token → 401（管理端点与 worker 同鉴权边界）
+        st, _ = _http(base, "", "/admin/workers/halt")
+        assert st == 401
+        # 初始未停机
+        st, body = _http(base, "sekret", "/admin/workers/status")
+        assert st == 200 and body == {"halt": False}
+        # 停机 → /jobs/next 下发达令（worker 收到即退出，省 GPU 配额）
+        st, body = _http(base, "sekret", "/admin/workers/halt")
+        assert st == 200 and body == {"halt": True}
+        st, body = _http(base, "sekret", "/jobs/next")
+        assert st == 200 and body.get("halt") is True and body.get("job_id") is None
+        # 恢复 → 正常空返
+        st, body = _http(base, "sekret", "/admin/workers/resume")
+        assert st == 200 and body == {"halt": False}
+        st, body = _http(base, "sekret", "/jobs/next")
+        assert st == 200 and body == {"job_id": None}
+    finally:
+        srv.shutdown()
+        th.join()
+
+
 def test_hub_server_auth_and_job_lifecycle(tmp_path: Path) -> None:
     """鉴权（401/闭锁）+ 发布（磁盘 IPC）→ 领取 → payload → 结果 → 状态全链路。"""
     base, store, srv, th = _boot_server(tmp_path)

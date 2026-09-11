@@ -76,12 +76,19 @@ def _request(
 
 
 def poll_job(base_url: str, token: str, timeout: float = 30.0) -> dict | None:
-    """GET /jobs/next → {job_id, manifest} 或 None（无 job）。"""
+    """GET /jobs/next → {job_id, manifest} 或 None（无 job）。
+
+    云端停机达令（§385 复审）：hub 返回 {"halt": true} → 原样上浮（worker_loop
+    据此退出省 GPU 配额）；其余无 job 形态返回 None。"""
     status, body = _request(base_url, token, "/jobs/next", timeout=timeout)
     if status != 200:
         return None
     data = json.loads(body.decode("utf-8"))
-    if not isinstance(data, dict) or not data.get("job_id"):
+    if not isinstance(data, dict):
+        return None
+    if data.get("halt") is True:
+        return {"halt": True}
+    if not data.get("job_id"):
         return None
     return data
 
@@ -849,6 +856,12 @@ def worker_loop(
                 _polls_since_log = 0
             time.sleep(poll_sec)
             continue
+        if job.get("halt") is True:
+            # §385 复审：云端停机达令（hub /admin/workers/halt）——停云端省 GPU 配额，
+            # 本地进程不动。worker 退出后 keepalive 停、cell 走完；session 级释放
+            # 受云商限制（Kaggle/Colab 需手工断连或到时）。
+            log("云端停机达令（hub halt）→ 退出，省 GPU 配额")
+            break
         idle_since = time.time()
         _polls_since_log = 0  # claim 即上报：alive 行下次只数 claim 之后的轮询，不与本行重复
         jid = job["job_id"]
