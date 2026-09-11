@@ -23,6 +23,7 @@ import { NodeStats } from './panels/NodeStats'
 import { LogNavCard } from './panels/LogNavCard'
 import { TrainLaunchModal } from './panels/TrainLaunchModal'
 import { EvalBoard } from './panels/EvalBoard'
+import { EvalSummary } from './panels/EvalSummary'
 import {
   fmtTs,
   latestRow,
@@ -440,11 +441,46 @@ export function App({ initial }: AppProps) {
           readOnly={readOnly}
         />
       </PanelErrorBoundary>
+      {/* 节点行下方简易 EvalBoard：列 = 阶梯 8 级；完整看板仍进抽屉。 */}
+      <PanelErrorBoundary>
+        <EvalSummary
+          course={viewCourse}
+          enabled={documentVisible}
+          readOnly={readOnly}
+          onMore={() => setDrawerTab('eval')}
+        />
+      </PanelErrorBoundary>
+      {/* 详情视图直连入口（2026-09-10）：此前「评估」只能先点 Hero/节点 pill 的「更多」
+          进抽屉、再切 tab —— 入口不可见（底部说明也只列了 3 个）。四视图平权直连。 */}
+      <nav
+        aria-label="详情视图"
+        style={{ display: 'flex', gap: 8, flexWrap: 'wrap', margin: '2px 0 10px' }}
+      >
+        {(
+          [
+            ['metrics', '指标'],
+            ['nodes', '节点统计'],
+            ['log', '日志'],
+            ['eval', '评估'],
+          ] as const
+        ).map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            className="tc-btn tc-btn--sm"
+            aria-label={`打开${label}`}
+            onClick={() => setDrawerTab(key)}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
       <p className="tc-caption">
-        局域网只读：可查看任意课程/日志/节点统计（课程▾仅本浏览器切换）；启停/冒烟/模式/节点编辑
+        局域网只读：可查看任意课程/日志/节点统计/评估（课程▾仅本浏览器切换）；启停/冒烟/模式/节点编辑
         仅本机 localhost 生效 · /api/state {refreshInterval}s 轮询 · 首页即训练态势：胜率焦点 +
-        组件卡 （点击卡在下方展开全宽最近日志）+ 节点 pill 行 · 详情进抽屉（指标 | 节点统计 |
-        日志）· Esc 关闭弹窗/抽屉 · r 立即刷新全部。
+        组件卡 （点击卡在下方展开全宽最近日志）+ 节点 pill 行 + EvalBoard 摘要（列=阶梯） ·
+        详情进抽屉（指标 | 节点统计 | 日志 | 评估，上方按钮可直连）· Esc 关闭弹窗/抽屉 · r
+        立即刷新全部。
       </p>
       <Drawer
         open={drawerTab !== null}

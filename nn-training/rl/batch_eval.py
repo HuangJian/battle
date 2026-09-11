@@ -150,10 +150,19 @@ def write_batches(root: Path, batches: list[dict]) -> None:
 
 
 def claim_pending(root: Path) -> dict | None:
-    """取最早 pending 批并标 running（console POST 只 append pending，§6.7）。"""
+    """取最早可跑批并标 running。
+
+    可跑 = pending，或 running 且仍有未完成 unit（进程重启 / yield 后孤儿批）。
+    console POST 只 append pending（§6.7）；续跑靠本函数的 running 分支。
+    """
     batches = read_batches(root)
     for b in batches:
-        if b.get("status") == "pending":
+        st = b.get("status")
+        units = b.get("units") or {}
+        done = units.get("done") or []
+        of = int(units.get("of") or 0)
+        incomplete = of > 0 and len(done) < of
+        if st == "pending" or (st == "running" and incomplete):
             b["status"] = "running"
             write_batches(root, batches)
             return b
@@ -168,8 +177,13 @@ def mark_unit_done(root: Path, batch_id: str, unit_idx: int, node_dist: dict) ->
             if unit_idx not in units.get("done", []):
                 units["done"].append(unit_idx)
             b["node_dist"] = node_dist
-            if len(units.get("done", [])) >= units.get("of", 0):
+            of = int(units.get("of") or 0)
+            ndone = len(units.get("done") or [])
+            if of > 0 and ndone >= of:
                 b["status"] = "done"
+            else:
+                # 单元未全完：回 pending，下一 idle 窗领剩余 unit（yield/重启安全）。
+                b["status"] = "pending"
             write_batches(root, batches)
             return
 
@@ -337,7 +351,8 @@ class BatchEvalRunner:
         jsonl_lock = threading.Lock()
 
         def window_open() -> bool:
-            # 关窗即停派新局（§6.5）；循环本就以 deadline 为界，在途局自然收完。
+            # 关窗即停派新局（§6.5 / 用户 2026-09-11：rollout 抢占让出集群）。
+            # window_event 置位 = evalboard 可派；清位 = yield。None 退化为 deadline。
             if self.window_event is None:
                 return time.time() < deadline
             return self.window_event.is_set()
@@ -454,21 +469,20 @@ class BatchEvalRunner:
             return m
 
         def worker(nd: dict) -> None:
-            is_local = nd["id"] == "local"
             while time.time() < deadline:
                 task = None
                 with lock:
                     if streaks.get(nd["id"], 0) >= fail_streak_max:
                         return
-                    if pending:
-                        # B 层本地/远端同快照，无预留；窗口关闭即停派新局（§6.5）。
-                        if not is_local and not window_open():
-                            pass
-                        else:
-                            task = pending.popleft()
-                            attempts[task] = attempts.get(task, 0) + 1
+                    # 关窗（rollout 抢占）本地与远端一并停派；在途局自然收完。
+                    if pending and window_open():
+                        task = pending.popleft()
+                        attempts[task] = attempts.get(task, 0) + 1
                 if task is None:
                     if not pending:
+                        return
+                    if not window_open():
+                        # yield：退出 worker，剩余 seed 留给下一次 idle 窗口续跑。
                         return
                     time.sleep(min(5.0, max(0.1, deadline - time.time())))
                     continue
@@ -511,9 +525,18 @@ class BatchEvalRunner:
             f"dropped={dropped} sec={round(time.time() - t_start, 1)}"
         )
         try:
-            mark_unit_done(
-                data_root(), str(self.batch.get("batch_id")), self.unit_idx, dict(node_games)
-            )
+            if dropped == 0:
+                mark_unit_done(
+                    data_root(), str(self.batch.get("batch_id")), self.unit_idx, dict(node_games)
+                )
+            else:
+                # 部分完成（yield/超时）：不标 unit done，批回 pending 供 idle 续跑；
+                # 已结算 seed 由 _done_keys 跳过，不重复计。
+                log(
+                    f"[batcheval] {unit['rung']} u{self.unit_idx}: partial "
+                    f"({dropped} left) — reopen batch for resume"
+                )
+                _reopen_for_resume(data_root(), str(self.batch.get("batch_id")))
         except Exception as e:
             log(f"[batcheval] WARN mark_unit_done failed: {e}")
         return {"settled": len(seen), "total": len(todo), "dropped": dropped}
@@ -677,6 +700,16 @@ def _requeue(root: Path, batch: dict) -> None:
     batches = read_batches(root)
     for b in batches:
         if b.get("batch_id") == batch.get("batch_id"):
+            b["status"] = "pending"
+            break
+    write_batches(root, batches)
+
+
+def _reopen_for_resume(root: Path, batch_id: str) -> None:
+    """部分完成（yield/超时）→ running 改回 pending，units.done 保留供续跑。"""
+    batches = read_batches(root)
+    for b in batches:
+        if b.get("batch_id") == batch_id and b.get("status") == "running":
             b["status"] = "pending"
             break
     write_batches(root, batches)

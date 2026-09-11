@@ -158,6 +158,10 @@ class TrainingSteps:
     _eval_gate: threading.Event | None
     _rollout_sec: float
     _ppo_sec: float
+    #: 云端 worker **自报**的真训练秒（load+chunk+update，不含上传/排队/下载）。
+    #: 与 `_ppo_sec`（往返墙钟）分开记——后者打包传输与排队，用于诊断/配额，
+    #: 不应当作"训练量"（排队越久越"达标"是错的，且本地采样期间云端空转它看不到）。
+    _ppo_cloud_sec: float
     _total_steps: int
     _chunks_n: int
     _agg: Any
@@ -268,6 +272,7 @@ class TrainingSteps:
             _sm = report.pop("_stream")
             self._rollout_sec = _sm["rollout_sec"]
             self._ppo_sec = _sm["ppo_sec"]
+            self._ppo_cloud_sec = float(_sm.get("ppo_sec") or 0.0) or self._ppo_sec
             self._total_steps = _sm["steps"]
             self._chunks_n = _sm["chunks"]
             self._agg = _sm["agg"]
@@ -354,7 +359,8 @@ class TrainingSteps:
                 ref_model=bc_ref,
                 kickstart_kl=kick,
             )
-        self._ppo_sec = round(time.time() - t_ppo, 1)
+        self._ppo_sec = round(time.time() - t_ppo, 1)  # 本机 PPO：真训练秒 == 往返秒
+        self._ppo_cloud_sec = self._ppo_sec
         self._chunks_n = len(chunks)
         self._total_steps = total_steps
         self._agg = agg
@@ -540,6 +546,10 @@ class TrainingSteps:
         jid = manifest["job_id"]
         # 阻塞等待云 worker 完成（与 _serial_ppo 同构；超时由 hub-server 租约吸收）
         timeout_sec = 30 * 60.0
+        # remote PPO 等待期集群空闲 —— 立即开 evalboard 窗领批（含等待期间新入队的）。
+        # 否则「rollout 后才 enqueue」的批要等 PPO 收官后的第二次 idle，卡数十分钟。
+        if hasattr(self, "_evalboard_idle"):
+            self._evalboard_idle(it, getattr(self, "_last_dist_cfg", None))
         gpu_nodes = _gpu_push_nodes(token)
         if gpu_nodes:
             # ---- HUB 推分支（DECISIONS §340 补充 4）：payload/code 直接 POST 到
@@ -591,7 +601,9 @@ class TrainingSteps:
         self._chunks_n = int(result.get("agg", {}).get("chunks", 0))
         self._total_steps = int(result.get("agg", {}).get("steps", 0))
         self._kl_cum = self._agg["kl"]
-        self._ppo_sec = round(time.time() - t_ppo, 1)
+        self._ppo_sec = round(time.time() - t_ppo, 1)  # 往返墙钟（含打包/上传/排队/下载）
+        # 真训练秒：云端 worker 自报的 load+chunk+update（旧 worker / echo 无此字段 → 回落往返）
+        self._ppo_cloud_sec = float(result.get("ppo_sec") or 0.0) or self._ppo_sec
         # 启动协议补丁（2026-09-08 vk1 事故）：kickstart_ref 已要求时，it1 校准把
         # 「缰绳真实落地」做进循环——云端 agg 无 kickstart 键或值恒 0 = worker 没跑
         # 缰绳（旧代码/模块钉住），响亮警示而非静默裸奔；正常值应为 0.1~0.6 量级。
@@ -703,6 +715,7 @@ class TrainingSteps:
             {
                 "rollout_sec": self._rollout_sec,
                 "ppo_sec": self._ppo_sec,
+                "ppo_cloud_sec": self._ppo_cloud_sec,
                 "total_steps": self._total_steps,
                 "chunks_n": self._chunks_n,
                 "agg": self._agg,

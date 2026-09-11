@@ -1050,5 +1050,26 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   事故轮走 iter_error 不入分子、入分母——占空比下降正是想要的语义）。
   c6b 的 G1 配 5pp+同向、新增 G13 duty(0.35)、`min_train_hours=2.0`、
   `baseline_win_rate=0.26`（⚠ 开腿前须重测回填，改值 = course_fp 变 = 新实验）。
+- **2026-09-11 后续（dated note）**：`min_train_hours` 已**移除**（字段 + 求值逻辑 +
+  测试 + 课程键全部清理），改由 `GatesSpec.min_train_samples`（Σ samples×epochs）承担
+  ADVANCE 的证据充分性判定。原因：远端模式的 `ppo_sec` 是往返墙钟（含打包上传/排队/
+  下载），排队越久越"达标"，且本地采样期间云端空转——照烧 Kaggle 配额——它看不见；
+  且 c6b 的 20 轮上限（Σppo ≈1.5h）根本够不到 2.0h，该门在本腿物理不可达。
+  同期 `train_sec` 改用云端自报的真训练秒 `ppo_cloud_sec`，G13 duty 的分子随之更准。
 - **违反后果**：不查数据照单全收会把 105/31.4% 这类错数字写进复盘；把 R3/R4/R5 混在
   一条腿里开跑则违反单变量纪律，下一腿仍无法归因。
+
+## §2026-09-11-goalnn-evalboard-idle-yield（2026-09-11，用户指令：evalboard 与训练 A-eval 解耦）
+
+- **背景**：`eval now` 只 append pending 批；旧接线在 `rollout_phase` 里且仅当
+  `not eval_on_round` 才 `maybe_dispatch_batch`——B/C 与 A-eval 轮绑定，训练停或
+  恒 eval 轮时队列永假「已入队」。
+- **备选与否决**：继续 A/B 轮次互斥 —— 否，两子系统不该耦合；console 起独立 worker
+  进程 —— 否，与 train 池争节点且多一套生命周期；只放宽为「任意 rollout 轮都可领」
+  —— 否，仍会在采集高峰抢集群。
+- **决定**：① 从 `rollout_phase` 去掉 B/C 领批；② TrainingLoop 每轮 `_join_eval` 后
+  开 idle 窗 `_evalboard_idle`（`window_event` 置位）领最早 pending 批；③ 下一轮
+  rollout 前 `_evalboard_yield` 关窗 + 短 join，在途局停派新 seed、已结算不丢
+  （`_reopen_for_resume` 把 partial 批回 pending，`_done_keys` 续跑）。
+- **违反后果**：不改则 God/学生 B 批在 A-eval 主导的课程上永远 pending；抢跑会拖慢
+  rollout 并放大尾延迟。

@@ -78,6 +78,22 @@ const ladderColumns: Col<EvalLadderRow>[] = [
     cell: (r) => <span>{r.n}</span>,
   },
   {
+    // §2.1：A 层只做趋势，不判能力 —— 列名与 tooltip 都标注清楚，避免误读为判定读数。
+    key: 'aTrend',
+    label: 'A 趋势',
+    align: 'num',
+    sortValue: (r) => r.aTrend?.winRate ?? -1,
+    cell: (r) =>
+      r.aTrend === null ? (
+        <span className="tc-muted">—</span>
+      ) : (
+        <span title={`A 层自动入账：it${r.aTrend.iter} / ${r.aTrend.n} 局（不判能力）`}>
+          {pct(r.aTrend.winRate)}
+          <span className="tc-muted"> it{r.aTrend.iter}</span>
+        </span>
+      ),
+  },
+  {
     key: 'latest',
     label: 'latest',
     sortValue: (r) => r.latestWin ?? -1,

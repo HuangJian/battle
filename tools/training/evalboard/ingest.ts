@@ -55,6 +55,10 @@ export interface RawEvalRow {
   stuckTicks?: number
   elapsedSec?: number
   policy?: string
+  /** B/C 批直写字段（batch_eval.record）：优先于 ctx。 */
+  source?: string
+  batch_id?: string
+  rung?: string
   [k: string]: unknown
 }
 
@@ -69,14 +73,18 @@ const toBool = (v: unknown): boolean => v === true || v === 1
 export function ingestEvalRow(raw: RawEvalRow, ctx: IngestCtx, ts?: string): EvalGameRow {
   const stage = raw.stage ?? 0
   const seed = toNum(raw.seed, 0)
-  const rung = ctx.rungOfStage(stage)
+  // B/C 批自带 rung/source/batch_id；A 层走 ctx（课程自定义 stage → rung 映射）。
+  const rung = typeof raw.rung === 'string' && raw.rung ? raw.rung : ctx.rungOfStage(stage)
+  const source: EvalGameRow['source'] =
+    raw.source === 'B' || raw.source === 'C' ? raw.source : ctx.source
+  const batchId = typeof raw.batch_id === 'string' && raw.batch_id ? raw.batch_id : ctx.batch_id
   const seedSpace = seed >= 860001 && seed <= 860100 ? ('eval860k' as const) : ('probe0' as const)
   const mapHash = ctx.mapHashOfStage?.(stage) ?? 'unknown'
   return {
     schema: 1,
     ts: ts ?? new Date().toISOString(),
-    source: ctx.source,
-    batch_id: ctx.batch_id,
+    source,
+    batch_id: batchId,
     batch_unit: { idx: 0, of: ctx.batch_of },
     run_id: ctx.run_id,
     course: ctx.course,

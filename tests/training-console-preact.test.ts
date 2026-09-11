@@ -732,3 +732,147 @@ describe('§361：icon 复制键 / cloudflared endpoint 截断与复制 / local 
     expect(html).toContain('本机直跑')
   })
 })
+
+// ────────────────────────── 首页 EvalBoard 摘要（列 = 阶梯；学生仅 B 层） ──────────────────────────
+
+describe('首页 EvalSummary（阶梯 God vs 学生 B 层）', () => {
+  const mockRung = (
+    id: string,
+    over: Partial<import('../tools/training/ui/view').EvalLadderRow> = {},
+  ): import('../tools/training/ui/view').EvalLadderRow => ({
+    rung: id,
+    dimension: '基准',
+    lives: 1,
+    god: { winRate: null, lifePrice: null, n: 0, provisional: null },
+    batches: 0,
+    n: 0,
+    latestWin: null,
+    windowWin: null,
+    aTrend: null,
+    deltaVsGod: null,
+    gate: null,
+    partial: false,
+    ...over,
+  })
+
+  it('SSR 首屏含摘要壳与抽屉入口（数据客户端拉，首帧 loading）', async () => {
+    const { buildStateView } = await import('../tools/training/console/api')
+    const html = renderConsolePage(await buildStateView())
+    expect(html).toContain('tc-eval-summary')
+    expect(html).toContain('EvalBoard 摘要')
+    expect(html).toContain('完整评估看板')
+    expect(html).toContain('加载评估摘要')
+  })
+
+  it('学生只读 B 层；A 层不混入；空列 God/学生都给 eval now；Δ 用 deltaVsGod', async () => {
+    const { EvalSummaryTable } = await import('../tools/training/console/ui/panels/EvalSummary')
+    const ladder = [
+      mockRung('c4l1', {
+        god: { winRate: 0.64, lifePrice: 0.1, n: 1600, provisional: false },
+        // A 层有数也不应上表（口径隔离）
+        aTrend: { n: 100, winRate: 0.59, iter: 12 },
+        n: 400,
+        windowWin: 0.61,
+        latestWin: 0.58,
+        deltaVsGod: -0.03,
+      }),
+      mockRung('c6l1', { dimension: '敌数' }),
+      mockRung('c8l2', {
+        god: { winRate: 0.2, lifePrice: 0.2, n: 1600, provisional: true },
+      }),
+    ]
+    const html = renderToString(
+      h(EvalSummaryTable, { ladder, course: 'c4-margin', onEval: () => {} }),
+    )
+    expect(html).toContain('c4l1')
+    expect(html).toContain('64.0%')
+    // B 窗均值，不是 A 层 59% / it12
+    expect(html).toContain('61.0%')
+    expect(html).not.toContain('59.0%')
+    expect(html).not.toContain('it12')
+    expect(html).toContain('-3.0pp')
+    // 无 B / 无 God → eval now 按钮（c6l1 双空；c8l2 仅学生空）
+    expect(html).toContain('eval now')
+    expect(html).not.toContain('待 eval')
+    expect(html).not.toContain('TBD') // God 空已是按钮，不再显示 TBD 字
+    expect(html).toContain('prov')
+    expect(html).toContain('B 层')
+    expect(html).toContain('c4-margin')
+  })
+
+  it('在途批（pending）显示「已入队」而不是 eval now（刷新后不回退）', async () => {
+    const { EvalSummaryTable } = await import('../tools/training/console/ui/panels/EvalSummary')
+    const html = renderToString(
+      h(EvalSummaryTable, {
+        ladder: [mockRung('c4l1')],
+        course: 'c6-margin',
+        onEval: () => {},
+        batches: [
+          {
+            batch_id: 'b-20260910T232202-ad27',
+            course: 'c6-margin',
+            rung_from: 'c4l1',
+            status: 'pending',
+            iter: 0,
+            trigger: 'standalone',
+            units: { of: 2, done: [] },
+            elapsed_sec: null,
+            created_ts: '2026-09-10T23:22:02.642Z',
+            policy: 'god',
+          },
+        ],
+      }),
+    )
+    expect(html).toContain('已入队')
+    expect(html).toContain('ad27')
+    // God 行有在途批；学生行无 nn 批仍可 eval now
+    expect(html).toContain('eval now')
+    // God 格 title 带 batch_id，不是按钮
+    expect(html).toContain('等训练 runner 拾取派发')
+  })
+
+  it('旧台账无 policy 字段时，ckpt=god 仍归 God 行（不串到学生）', async () => {
+    const { EvalSummaryTable } = await import('../tools/training/console/ui/panels/EvalSummary')
+    const html = renderToString(
+      h(EvalSummaryTable, {
+        ladder: [mockRung('c4l1')],
+        course: 'c6-margin',
+        onEval: () => {},
+        batches: [
+          {
+            batch_id: 'b-old-god-x',
+            course: 'c6-margin',
+            rung_from: 'c4l1',
+            status: 'pending',
+            iter: 0,
+            trigger: 'standalone',
+            units: { of: 2, done: [] },
+            elapsed_sec: null,
+            created_ts: '2026-09-10T20:00:00.000Z',
+            ckpt: 'god',
+            // 故意不写 policy
+          },
+        ],
+      }),
+    )
+    // God 行已入队；学生行仍 eval now（表头 title 也含「学生」，不能靠 split）
+    expect(html).toContain('已入队')
+    expect(html).toContain('b-old-god-x')
+    expect(html.match(/eval now/g)?.length).toBe(1)
+    expect(html).toContain('等训练 runner 拾取派发')
+  })
+
+  it('readOnly 时 eval now 禁用', async () => {
+    const { EvalSummaryTable } = await import('../tools/training/console/ui/panels/EvalSummary')
+    const html = renderToString(
+      h(EvalSummaryTable, {
+        ladder: [mockRung('c6l1')],
+        course: 'c4-margin',
+        readOnly: true,
+        onEval: () => {},
+      }),
+    )
+    expect(html).toContain('eval now')
+    expect(html).toContain('disabled')
+  })
+})

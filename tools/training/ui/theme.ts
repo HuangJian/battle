@@ -146,6 +146,14 @@ a.tc-btn{display:inline-block;text-decoration:none;text-align:center}
 .tc-caption{padding:var(--sp-2) var(--sp-4);border-top:1px solid #f0f2f6;font-size:var(--fs-2);color:var(--muted);line-height:1.8}
 .tc-caption b{color:#59606f}
 
+/* ── 首页节点行下方 EvalBoard 摘要（列 = 阶梯 8 级） ──────── */
+.tc-eval-summary{margin-top:var(--sp-3);background:var(--card);border:1px solid var(--border);border-radius:var(--r-2);box-shadow:var(--sh-1)}
+.tc-eval-summary__hd{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);flex-wrap:wrap;padding:var(--sp-3) var(--sp-4) 0}
+.tc-eval-summary__title{margin:0;font-size:var(--fs-4);font-weight:700;display:flex;align-items:baseline;gap:4px;flex-wrap:wrap}
+.tc-eval-summary__wrap{max-height:none;overflow:auto}
+.tc-eval-summary__note{padding:var(--sp-2) var(--sp-4) var(--sp-3);margin:0}
+.tc-eval-summary .tc-table tbody td{padding:6px 12px}
+
 /* ── 表格工具栏（过滤 / 列 / 密度 / 关键词 / 返回顶部） ──────── */
 .tc-toolbar{display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap;padding:var(--sp-3) var(--sp-4) 0;font-size:var(--fs-2);color:var(--muted)}
 .tc-toolbar input[type=text]{padding:4px 8px;border:1px solid var(--border);border-radius:8px;background:var(--card);font-size:var(--fs-2)}

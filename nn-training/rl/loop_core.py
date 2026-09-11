@@ -163,15 +163,21 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         self._stream_meta: dict | None = None
         self._eval_thread: threading.Thread | None = None
         self._eval_gate: threading.Event | None = None
+        # EvalBoard idle 窗（2026-09-11 用户）：置位 = 可派 B/C 批；清位 = yield 给 rollout。
+        # 与 A-eval 轮解耦——训练不在 rollout/eval 时才领取队列。
+        self._eb_window = threading.Event()
+        self._eb_thread: threading.Thread | None = None
         self._kl_cum = None
         self._halted_flag = False
         # R9（2026-09-10 c6 it50 事故）：远端失败计数 / 已降级 / 停腿标记。
         self._remote_fail = 0
         self._remote_degraded = False
         self._leg_abort = False
-        # G13 duty / spec.min_train_hours 的分子：累计有效训练秒（Σ ppo_sec）。
+        # G13 duty 的分子：累计有效训练秒（Σ 真训练秒 ppo_cloud_sec）。
         # 初值从账本重算（跨重启不被低估——否则重启后占空比误报"在烧事故"）。
         self._train_sec_total = 0.0
+        # min_train_samples 的分子：累计**样本通过量** Σ(samples × epochs)。
+        self._train_samples_total = 0.0
         self._dropped_games = None
         self._load_sec = None
         self._tail_drain_sec = None
@@ -203,6 +209,7 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 # 动态读取节点配置（每轮一次）：有 enabled 节点 → 队列调度模式；
                 # nodes=[] / 文件缺失 → 现有纯本地路径零改动（字节一致回归基线）。
                 dist_cfg = dist_common.load_dist_config()
+                self._last_dist_cfg = dist_cfg
                 # rl.local_slots 热读（2026-09-06 用户指令）：每轮从 rl-config 覆盖
                 # args.local_slots——改配置下一轮即生效，无需重启训练。CLI 显式
                 # --local-slots 同样被覆盖（该值以 rl-config 为 SSOT；rl.workers 的
@@ -212,8 +219,13 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 if _hot is not None:
                     args.local_slots = int(_hot)
                 t_rollout = time.time()
+                # yield：rollout 抢占集群 —— 关 evalboard 窗，在途 B/C 局停派新 seed。
+                self._evalboard_yield()
                 self._rollout_phase(it, pairs, dist_cfg, self._eval_on_round(it))
                 self._log_report(it, t_rollout)
+                # idle：采集已收官，PPO（本地/远端等待）期间集群空闲 —— 立即领批。
+                # 不能等到 join_eval 之后：remote PPO 可阻塞数十分钟，那时才开窗等于永假。
+                self._evalboard_idle(it, dist_cfg)
                 self._serial_ppo(it)
                 # R9：远端连败且 --remote-degrade-after=0 → 已写 ABORT 判决，停腿。
                 if self._leg_abort:
@@ -221,10 +233,16 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                     break
                 self._export_weights(it)
                 eval_rec = self._join_eval(it)
+                # A-eval 收官后再试一次（首窗被 yield/部分完成时补领）。
+                self._evalboard_idle(it, dist_cfg)
                 self._record_iteration(it)
                 # G13 duty 分子：本轮有效训练入账（事故轮走 iter_error，不经过这里
                 # → 不计入分子但计入墙钟分母 → 占空比下降，正是想要的语义）。
-                self._train_sec_total += float(self._ppo_sec or 0.0)
+                self._train_sec_total += float(self._ppo_cloud_sec or self._ppo_sec or 0.0)
+                # 样本通过量（证据充分性主判据，与硬件/排队无关）
+                self._train_samples_total += float(
+                    (self._report or {}).get("totalSamples") or self._total_steps or 0.0
+                ) * float(getattr(args, "epochs", 1) or 1)
                 # M1c：每 iter 指标统计落盘（非致命）
                 self._write_iter_stats(it)
                 # 每轮 ppo_backend 写回后自动生成巡检 HTML（intent/goal 总是生成；
@@ -411,11 +429,12 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         else:
             rotate_seed = (args.seed * 1009 + 1 + int(time.time())) % (2**32)
         self._rotate_seed = rotate_seed
-        # G13 duty / min_train_hours 的分子：从账本重算累计有效训练（Σ ppo_sec）。
+        # G13 duty 的分子：从账本重算累计有效训练（Σ 真训练秒）。
         # 进程内存累计重启会归零 → 占空比被低估 → 误报"在烧事故"；账本是 SSOT。
-        from rl.gate_check import sum_train_sec
+        from rl.gate_check import sum_train_samples, sum_train_sec
 
         self._train_sec_total = sum_train_sec(self._jsonl_path)
+        self._train_samples_total = sum_train_samples(self._jsonl_path)
         # build_pairs 是 (rotateSeed, it) 的纯函数：不持有任何跨迭代的随机流状态，
         # 同一 it 在任意时刻重启都得到完全相同的一批局（断点续跑剔除的前提）。
         write_run_start(self._jsonl_path, args, rotate_seed)
@@ -538,6 +557,44 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 # 沙箱删除保护拦截时跳过（保留旧目录，训练照常）
                 rmtree_best_effort(traj_dir)
             traj_dir.mkdir(parents=True)
+
+    def _evalboard_yield(self) -> None:
+        """rollout 抢占：关窗让出集群。在途 B/C 局停派新 seed（window_event 清位）。"""
+        self._eb_window.clear()
+        t = self._eb_thread
+        if t is not None and t.is_alive():
+            # 短等在途局收尾；不阻塞训练主链（超时即走，剩余 seed 下窗续跑）。
+            t.join(timeout=15.0)
+        self._eb_thread = None
+
+    def _evalboard_idle(self, it: int, dist_cfg: dict | None) -> None:
+        """训练空闲窗（rollout 收官后 / A-eval 收官后）：开窗并认领最早 pending 批。
+
+        与 A-eval 轮解耦（2026-09-11 用户）：采集结束后即可领（含 remote PPO
+        等待期）；rollout 开始时 _evalboard_yield 关窗暂停。已有在途单元则只开窗不重复领。
+        """
+        self._eb_window.set()
+        t_prev = self._eb_thread
+        if t_prev is not None and t_prev.is_alive():
+            return
+        try:
+            from rl.batch_eval import maybe_dispatch_batch
+
+            t = maybe_dispatch_batch(
+                self.bun,
+                self.args.out,
+                self._traj_dir,
+                self.args,
+                dist_cfg or {},
+                RUN_ID,
+                it,
+                window_event=self._eb_window,
+            )
+            self._eb_thread = t
+            if t is not None:
+                log(f"[batcheval] idle window it{it}: claimed unit (thread={t.name})")
+        except Exception as e:
+            log(f"[batcheval] idle claim failed (ignored): {type(e).__name__}: {e}")
 
     def _rollout_phase(
         self, it: int, pairs: list[tuple[int, int]], dist_cfg: dict | None, eval_on_round: bool

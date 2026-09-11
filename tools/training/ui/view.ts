@@ -339,6 +339,12 @@ export interface EvalLadderRow {
   n: number
   latestWin: number | null
   windowWin: number | null
+  /**
+   * A 层趋势（§2.1：每天训练内 eval 自动入账，**只做健康/趋势，不判能力**）。
+   * = 该 rung 最近一次 iter 的读数（A 层固定 EVAL_SEEDS，逐 iter 重复采样，
+   * 故只取最新 iter，绝不跨 iter 叠加 —— 叠加会重复计同一 seed）。
+   */
+  aTrend: { n: number; winRate: number; iter: number } | null
   deltaVsGod: number | null
   gate: EvalGateView | null
   partial: boolean
@@ -354,6 +360,10 @@ export interface EvalBatchRow {
   units: { of: number; done: number[] }
   elapsed_sec: number | null
   created_ts: string
+  /** B/C 执行语义：god = C 层基线（权重无关）；缺省按 nn。 */
+  policy?: 'nn' | 'god'
+  /** 权重路径；`god` 哨兵 = C 层基线（兼容未写 policy 的旧台账行）。 */
+  ckpt?: string
 }
 
 export interface EvalAlert {

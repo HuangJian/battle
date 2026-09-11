@@ -53,25 +53,52 @@ def test_queue_claim_done_cycle(tmp_path: Path, monkeypatch) -> None:
     write_batches(tmp_path, [b])
     claimed = claim_pending(tmp_path)
     assert claimed is not None and claimed["status"] == "running"
-    assert claim_pending(tmp_path) is None
+    # 单 unit 完成但 of=2：回 pending 供下一 idle 领 u1
     mark_unit_done(tmp_path, "b1", 0, {"self": 100})
+    (mid,) = read_batches(tmp_path)
+    assert mid["status"] == "pending"
+    assert mid["units"]["done"] == [0]
+    # running + incomplete 也可被 claim（重启/孤儿批续跑）
+    claimed2 = claim_pending(tmp_path)
+    assert claimed2 is not None and claimed2["status"] == "running"
+    assert claimed2["units"]["done"] == [0]
     mark_unit_done(tmp_path, "b1", 1, {"self": 100})
     (final,) = read_batches(tmp_path)
     assert final["status"] == "done"
     assert sorted(final["units"]["done"]) == [0, 1]
+    assert claim_pending(tmp_path) is None
 
 
-def test_hooks_wired_both_modes() -> None:
-    """P2 DoD：`if not eval_on_round` 分支生效（grep 断言，一轮内 A/B 不共存）。"""
+def test_hooks_decoupled_from_a_eval() -> None:
+    """B/C 批与 A-eval 解耦（2026-09-11）：rollout 不再领批；TrainingLoop idle 窗领取。"""
     src = (ROOT / "rl" / "rollout_phase.py").read_text(encoding="utf-8")
-    assert src.count("maybe_dispatch_batch") >= 2  # serial + stream 各一处
-    assert "if not eval_on_round" in src
+    assert "maybe_dispatch_batch" not in src
+    lc = (ROOT / "rl" / "loop_core.py").read_text(encoding="utf-8")
+    assert "_evalboard_idle" in lc
+    assert "_evalboard_yield" in lc
+    assert "maybe_dispatch_batch" in lc
+    assert "window_event=self._eb_window" in lc
     ed = (ROOT / "rl" / "eval_dispatch.py").read_text(encoding="utf-8")
     assert "check_engine_epoch" in ed
     import dist_common
 
     assert hasattr(dist_common, "compute_engine_epoch")
     assert hasattr(dist_common, "check_engine_epoch")
+
+
+def test_partial_unit_reopens_batch(tmp_path: Path, monkeypatch) -> None:
+    """yield/超时部分完成：不标 unit done，批回 pending 供续跑。"""
+    monkeypatch.setenv("EVALBOARD_DATA", str(tmp_path))
+    from rl.batch_eval import _reopen_for_resume, read_batches
+
+    write_batches(
+        tmp_path,
+        [{"batch_id": "b1", "status": "running", "units": {"of": 2, "done": []}}],
+    )
+    _reopen_for_resume(tmp_path, "b1")
+    (b,) = read_batches(tmp_path)
+    assert b["status"] == "pending"
+    assert b["units"]["done"] == []
 
 
 def test_select_next_unit_only_rungs() -> None:

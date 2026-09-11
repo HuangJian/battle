@@ -2,9 +2,12 @@
  *
  * - `GET /api/evalboard`：独立路由（不塞 /api/state），照抄 /api/pool 模板
  *   （首屏外异步拉 + 30s TTL + 课程键控）。
- * - W1 自动入账：每次构建视图时 read-through——扫描 `tmp/<course>/traj/`
- *   的 `eval_log.jsonl`，新行经 `ingestRows` 入 EvalStore（A 层 run_id 代理 =
- *   course；同 course/iter/wver/stage/seed 即同一局，去重天然正确）。
+ * - W1 自动入账：每次构建视图时 read-through——扫描 `tmp/<course>/eval_log.jsonl`
+ *   （真实布局：`loop_core.py:189` `_traj_dir = _traj_root/it<N>`，`eval_dispatch.py:93`
+ *   取 `traj_dir.parent` ⇒ 账本在 `<traj 根>/eval_log.jsonl`，**不是** `traj/` 子目录；
+ *   旧写法路径错误导致恒 0 入账 —— 2026-09-10 修复，保留 legacy 候选兼容），
+ *   新行经 `ingestRows` 入 EvalStore（A 层 run_id 代理 = course；
+ *   同 course/iter/wver/stage/seed 即同一局，去重天然正确）。
  *   训练循环零改动、零新增跑批成本。
  * - `POST /api/evalProbeRun`：只 append 一行 `status=pending` 到 batches.jsonl
  *  （§6.7 队列文件桥）；派发期节点配置冻结经 busy 前置检查（§8）。
@@ -80,11 +83,80 @@ function engineOfConsole(): EvalGameRow['engine'] {
   return engineMemo
 }
 
+let rungIdsMemo: Set<string> | null = null
+function ladderRungIds(): Set<string> {
+  if (!rungIdsMemo) {
+    try {
+      rungIdsMemo = new Set(trackedLadder().map((r) => r.id))
+    } catch {
+      rungIdsMemo = new Set()
+    }
+  }
+  return rungIdsMemo
+}
+
+/**
+ * 课程 → 阶梯 rung id（`c<count>l<lives>`）。
+ *
+ * A 层 eval 行的 `stage` 是课程自定义关 id（如 2000），与阶梯 rung id（`c4l1`）不同名；
+ * 若按 `stage-<id>` 落账，这些行永远 join 不上阶梯表（console 侧 `x.rung === r.id`），
+ * 面板恒空。课程几何（count/lives）与 rung 一一对应，故按 count/lives 反查。
+ * 无对应 rung 的课程（如 c5-margin）返回 null → 调用方回退 `stage-<id>`。
+ */
+export interface CourseRungMeta {
+  /** 匹配到的阶梯 rung id；无对应 rung（如 c5-margin）为 null。 */
+  rung: string | null
+  /** 课程**实际**跑关参数 —— probe_key 的三个可比性分量必须取自这里，不能硬编码。 */
+  maxTicks: number
+  mapHash: string
+}
+
+/**
+ * 课程 → 阶梯 rung 元信息（rung id / maxTicks / mapHash）。
+ *
+ * `probe_key = <rung>-<difficulty>-t<maxTicks>-<mapHash>-<seedSpace>` 是 §3.5 的
+ * **可比性键**，三个分量都必须来自课程实跑参数：
+ * - `maxTicks` 取自课程 jsonc（历史课程是 2400，阶梯 rung 是 12000 —— 两者不可比，
+ *   硬编码会让 A 行冒充 t12000 数据，跨档相减不被断言拦截）；
+ * - `mapHash` 取自阶梯 rung（原实现缺省 `mapHashOfStage` → 全部落成 `unknown`，
+ *   等于把"可比性键"退化成常量）。
+ */
+export function courseRungMeta(course: string): CourseRungMeta | null {
+  if (!course) return null
+  try {
+    const p = path.join(REPO_ROOT, 'nn-training', 'curricula', `${course}.jsonc`)
+    if (!existsSync(p)) return null
+    const text = readFileSync(p, 'utf-8').replace(/\/\/.*$/gm, '')
+    const count = Number(text.match(/"count"\s*:\s*(\d+)/)?.[1])
+    const lives = Number(text.match(/"lives"\s*:\s*(\d+)/)?.[1])
+    const maxTicks = Number(text.match(/"max_ticks"\s*:\s*(\d+)/)?.[1])
+    const id = Number.isInteger(count) && Number.isInteger(lives) ? `c${count}l${lives}` : null
+    const rung = id && ladderRungIds().has(id) ? id : null
+    let mapHash = 'unknown'
+    if (rung) {
+      mapHash = trackedLadder().find((r) => r.id === rung)?.mapHash ?? 'unknown'
+    }
+    return { rung, maxTicks: Number.isInteger(maxTicks) ? maxTicks : 12000, mapHash }
+  } catch {
+    return null
+  }
+}
+
+/** 便捷包装：只要 rung id（无对应 rung 返回 null）。 */
+export function courseRungId(course: string): string | null {
+  return courseRungMeta(course)?.rung ?? null
+}
+
 /** 课程 eval_log.jsonl（训练落盘处，tmp 缓冲）→ EvalStore。返回新入账行数。 */
 export function ingestCourseEvalLog(course: string): number {
   if (!course) return 0
-  const evalLog = path.join(REPO_ROOT, 'tmp', course, 'traj', 'eval_log.jsonl')
-  if (!existsSync(evalLog)) return 0
+  // 真实布局优先；legacy `traj/` 候选保留兼容（两者都不在则 0）。
+  const candidates = [
+    path.join(REPO_ROOT, 'tmp', course, 'eval_log.jsonl'),
+    path.join(REPO_ROOT, 'tmp', course, 'traj', 'eval_log.jsonl'),
+  ]
+  const evalLog = candidates.find((p) => existsSync(p))
+  if (!evalLog) return 0
   const raws: RawEvalRow[] = []
   for (const line of readFileSync(evalLog, 'utf-8').split('\n')) {
     if (!line.trim()) continue
@@ -96,25 +168,28 @@ export function ingestCourseEvalLog(course: string): number {
     }
   }
   if (raws.length === 0) return 0
+  // 课程 → 阶梯 rung 元信息（A 行 stage 是自定义关 id，必须映射；maxTicks/mapHash
+  // 取自课程实跑参数，不得硬编码，否则 probe_key 这个可比性键失真）。
+  const meta = courseRungMeta(course)
+  const rung = meta?.rung ?? null
+  const rungOfStage = (s: string | number): string => rung ?? `stage-${s}`
   const ctx: IngestCtx = {
     run_id: course,
     course,
     batch_id: `A-${course}`,
     batch_of: 1,
-    rungOfStage: (s) => `stage-${s}`,
+    rungOfStage,
     engine: engineOfConsole(),
     source: 'A',
     ckpt_path: '',
     ckpt_sha16: '',
     init_sha16: '',
     difficulty: 'hard',
-    maxTicks: 12000,
+    maxTicks: meta?.maxTicks ?? 12000,
+    mapHashOfStage: () => meta?.mapHash ?? 'unknown',
   }
   // wver/iter 逐行透传：ingestEvalRow 从 raw 取 iter/wver（A 行自带）。
-  const { appended } = ingestRows(evalDataRoot(), raws, {
-    ...ctx,
-    rungOfStage: (s) => `stage-${s}`,
-  })
+  const { appended } = ingestRows(evalDataRoot(), raws, ctx)
   return appended
 }
 
@@ -149,6 +224,8 @@ function toBatchView(b: ReturnType<typeof loadBatches>[number]): BatchView {
     units: b.units,
     elapsed_sec: b.elapsed_sec,
     created_ts: b.created_ts,
+    policy: b.policy ?? (b.ckpt === 'god' ? 'god' : 'nn'),
+    ckpt: b.ckpt,
   }
 }
 
@@ -166,15 +243,55 @@ export function buildEvalBoardView(course = '', fresh = false): EvalBoardView {
   const ladder = ladderWithGod()
   const spaceCalibrated = existsSync(path.join(root, 'space_calibration.json'))
 
+  // God 叠加：ladder 工作副本未写基线时，用已入账 C 层（policy=god）聚合补上——
+  // 否则批 done 后首页 God 仍 TBD / eval now（2026-09-11）。
+  const godOverlay = new Map<string, { winRate: number; n: number; provisional: boolean }>()
+  for (const x of allRows) {
+    if (x.source !== 'C' && x.policy !== 'god') continue
+    const cur = godOverlay.get(x.rung) ?? { winRate: 0, n: 0, provisional: false }
+    cur.n += 1
+    if (x.win) cur.winRate += 1
+    godOverlay.set(x.rung, cur)
+  }
+  for (const g of godOverlay.values()) {
+    if (g.n > 0) g.winRate = g.winRate / g.n
+    g.provisional = g.n > 0 && g.winRate < 0.3
+  }
+  const ladderMerged = ladder.map((r) =>
+    r.god.winRate === null && godOverlay.has(r.id)
+      ? {
+          ...r,
+          god: {
+            winRate: godOverlay.get(r.id)!.winRate,
+            lifePrice: r.god.lifePrice,
+            n: godOverlay.get(r.id)!.n,
+            provisional: godOverlay.get(r.id)!.provisional,
+          },
+        }
+      : r,
+  )
+
   // rung → 按批次分组的行（批次按 created_ts 序；窗 = 最近连续 4 批）。
   const alerts: EvalAlert[] = []
   const flips: EvalBoardView['flips'] = []
   // 窗 = 该 rung 最近连续 4 批（有行才算一批；台账顺序优先，未知 batch_id 殿后）。
   const batchOrder = new Map(batches.map((b, i) => [b.batch_id, i]))
-  const ladderViews: LadderRowView[] = ladder.map((r) => {
+  // A 层行按 rung 归集（§4.3：不进窗，只出"最近 iter 读数"作趋势；§2.1 不判能力）。
+  const aRows = allRows.filter((x) => x.source === 'A')
+  const aByRung = new Map<string, EvalGameRow[]>()
+  for (const x of aRows) {
+    const arr = aByRung.get(x.rung) ?? []
+    arr.push(x)
+    aByRung.set(x.rung, arr)
+  }
+  const ladderViews: LadderRowView[] = ladderMerged.map((r) => {
     const byBatch = new Map<string, EvalGameRow[]>()
     for (const x of allRows) {
       if (x.rung !== r.id) continue
+      // §4.3：窗 = **B 层批次**。A 行固定 EVAL_SEEDS 逐 iter 重复采样（同 100 seed ×N 次），
+      // 池进窗会重复计同一 seed（n 虚高、CI 失真），且 §2.1 规定 A 层只做健康/趋势不判能力。
+      // A 行仍参与下方 A 配对哨兵（S2–S5）与趋势展示。
+      if (x.source !== 'B') continue
       const arr = byBatch.get(x.batch_id) ?? []
       arr.push(x)
       byBatch.set(x.batch_id, arr)
@@ -245,6 +362,14 @@ export function buildEvalBoardView(course = '', fresh = false): EvalBoardView {
         })
       }
     }
+    // A 层趋势：该 rung 最近一次 iter 的 100 局读数（同 seed 组，故只取最新 iter 不叠加）。
+    const aList = aByRung.get(r.id) ?? []
+    let aTrend: LadderRowView['aTrend'] = null
+    if (aList.length > 0) {
+      const maxIter = Math.max(...aList.map((x) => x.iter))
+      const latestA = aList.filter((x) => x.iter === maxIter)
+      aTrend = { n: latestA.length, winRate: deriveMetrics(latestA).winRate, iter: maxIter }
+    }
     return {
       rung: r.id,
       dimension: r.dimension,
@@ -254,6 +379,7 @@ export function buildEvalBoardView(course = '', fresh = false): EvalBoardView {
       n: w.n,
       latestWin: w.latest ? w.latest.winRate : null,
       windowWin: w.partial ? null : w.metrics.winRate,
+      aTrend,
       deltaVsGod,
       gate,
       partial: w.partial,
@@ -261,7 +387,7 @@ export function buildEvalBoardView(course = '', fresh = false): EvalBoardView {
   })
 
   // A 层相邻 ckpt 配对哨兵（S2/S3/S4/S5/S6）：同 rung 同 seed 集的连续 wver 对。
-  const aRows = allRows.filter((r) => r.source === 'A')
+  // （aRows / aByRung 已在上方定义，此处复用。）
   const byRungWver = new Map<string, EvalGameRow[]>()
   for (const r of aRows) {
     const k = `${r.rung}\u0001${r.wver}\u0001${r.iter}`

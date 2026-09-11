@@ -127,29 +127,10 @@ def dispatch_rollout_phase(
             # 吞吐 T3：非 eval 轮不派发（返回 None → 无 eval_thread → 调用方
             # join 跳过，集群尾段留给下一轮采集/双缓冲）。
             def _fire_eval():
-                # 触发点在中央派发队列清空瞬间（on_queue_drained →
-                # _fire_eval_once）：全部采集任务已派到节点、结果仍在途，
-                # 评估局顺势填补收尾空槽（2026-08-25 用户修订）。
-                # 线程句柄经报告回传主循环，jsonl 写回前 join——下轮新权重
-                # 分发前评估必已收官或到预算。positional args 创建即快照，
-                # 无闭包竞态。eval_gate 随闭包捕获：ppo_backend 收尾时 set 放行本地。
+                # A 层：仅 eval 轮派发。B/C（evalboard）与 A-eval 解耦——
+                # 由 TrainingLoop 在「无 rollout/eval」的 idle 窗领取（2026-09-11 用户）。
                 if not eval_on_round:
-                    # B 层轮次分配（EvalBench §6.4/stream 模态）：采集队列清空 =
-                    # 窗口开（on_queue_drained），传已置位事件，派一个 100 局单元。
-                    from rl.batch_eval import maybe_dispatch_batch
-
-                    _open = threading.Event()
-                    _open.set()
-                    return maybe_dispatch_batch(
-                        bun,
-                        args.out,
-                        traj_dir,
-                        args,
-                        dist_cfg,
-                        RUN_ID,
-                        it,
-                        window_event=_open,
-                    )
+                    return None
                 if args.mode == "per-tick":
                     return dispatch_eval_bg(
                         bun,
@@ -251,7 +232,7 @@ def dispatch_rollout_phase(
                 course_fp=course_fp,
             )
             # 串行：rollout 返回即 collector 收官；后台评估藏进随后的长 ppo_backend 空窗
-            # 吞吐 T3：非 eval 轮不派发（eval_on_round 循环级统一门控）。
+            # 吞吐 T3：A-eval 仅 eval 轮。B/C（evalboard）由 TrainingLoop idle 窗领取。
             if eval_on_round:
                 if args.mode == "per-tick":
                     eval_thread = dispatch_eval_bg(
@@ -269,16 +250,6 @@ def dispatch_rollout_phase(
                     eval_thread = dispatch_eval_bg_m1(
                         bun, args.out, args, it, jsonl_path, args.baseline
                     )
-            else:
-                # B 层轮次分配（EvalBench §6.4）：A 在 eval 轮跑，B 在其余轮跑，
-                # 确定性分配、无饥饿。无 pending 批 → None（零开销）。
-                # 窗口 = 本轮（time-bounded by eval_window_sec）；join 预算外溢出
-                # 的在途局后台收完（wver/batch 键控，下窗按 units.done 续跑）。
-                from rl.batch_eval import maybe_dispatch_batch
-
-                eval_thread = maybe_dispatch_batch(
-                    bun, args.out, traj_dir, args, dist_cfg, RUN_ID, it
-                )
     else:
         report = run_rollout(bun, args.out, traj_dir, pairs, args)
     return report, stream_meta, eval_thread, eval_gate, collect_child, spawned_early
