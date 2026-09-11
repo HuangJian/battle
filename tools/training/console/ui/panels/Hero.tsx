@@ -1,7 +1,10 @@
-/** Hero.tsx — 训练状态 hero（一屏焦点）：胜率大数字 + 两行六格走势图
- *  （行1 = rollout：胜率/击杀/道具；行2 = eval：eval 胜率/胜局耗时/胜局残血）；
+/** Hero.tsx — 训练状态 hero（一屏焦点）：胜率大数字 + 走势图
+ *  （行1 = rollout：胜率/击杀/道具；行2 = eval 胜局：eval 胜率/胜局耗时/胜局残血；
+ *   行3 = eval 效率：承伤·杀/败局耗时）；
  *  下方最新 6 轮完整指标（紧凑表）。数据口径 = /api/state.metrics；「完整指标表 ›」进抽屉。
- *  走势图支持悬停显示坐标，并由统一档位开关切换 全量/最近30/最近10（持久化到 localStorage）。 */
+ *  走势图支持悬停显示坐标，并由统一档位开关切换 全量/最近30/最近10（持久化到 localStorage）。
+ *  ⚠️ 「败局耗时」单独看会误读：越高**不代表**越强（清场停滞的症状），必须与胜率并排读——
+ *  2026-09-11 c4 实测它与胜率负相关（rho +0.964 vs 迭代，而胜率 −0.893，符号相反）。 */
 
 import {
   filterGroups,
@@ -382,6 +385,8 @@ export function Hero({ stateView, onMore }: HeroProps) {
   const evalSeries = series.find((m) => m.key === 'eval')
   const winTicksSeries = series.find((m) => m.key === 'winTicks')
   const winHpSeries = series.find((m) => m.key === 'winHp')
+  const dmgPerKillSeries = series.find((m) => m.key === 'dmgPerKill')
+  const lossTicksSeries = series.find((m) => m.key === 'lossTicks')
 
   // 走势范围档位（全量 / 最近30 / 最近10）；持久化到 localStorage，hydrate 后恢复。
   const [range, setRange] = useState<TrendRange>('30')
@@ -488,6 +493,20 @@ export function Hero({ stateView, onMore }: HeroProps) {
             range={range}
             yFloor={0}
             title="胜局平均剩余 hp（剩余命每命计满额）"
+          />
+          {/* 行3：eval 效率 — 承伤·杀 / 败局耗时 */}
+          <TrendCell
+            series={dmgPerKillSeries}
+            fmt={(v) => (v != null ? v.toFixed(1) : '—')}
+            range={range}
+            yFloor={0}
+            title="每杀承伤 = 全样本总承伤 / 总击杀（越小越会周旋；防苟活：不打则分母小、值爆炸）"
+          />
+          <TrendCell
+            series={lossTicksSeries}
+            fmt={fmtInt}
+            range={range}
+            title="败局平均耗时（ticks，仅败局计入）⚠️ 越高不代表越强——同构关里「活得久」往往是打不死敌人的症状（清场停滞），须与胜率并排读"
           />
         </div>
       </div>

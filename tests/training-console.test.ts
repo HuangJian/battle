@@ -708,6 +708,8 @@ describe('console sparkline (ui/view)', () => {
                 totalKills: i,
                 totalPU: 0,
                 avgResidualHp: 150,
+                avgLossTicks: null,
+                dmgPerKill: null,
                 scoreMean: 0,
                 scoreStd: 0,
               }
@@ -777,6 +779,8 @@ describe('console sparkline (ui/view)', () => {
                 totalKills: 0,
                 totalPU: 0,
                 avgResidualHp: null,
+                avgLossTicks: null,
+                dmgPerKill: null,
                 scoreMean: 0,
                 scoreStd: 0,
               }
@@ -843,6 +847,8 @@ describe('console sparkline (ui/view)', () => {
                 totalKills: 0,
                 totalPU: 0,
                 avgResidualHp: 180,
+                avgLossTicks: null,
+                dmgPerKill: null,
                 scoreMean: 0,
                 scoreStd: 0,
               }
@@ -1144,6 +1150,8 @@ describe('console hero 最新 6 轮 eval toggle', () => {
           totalKills: 1,
           totalPU: 0,
           avgResidualHp: null,
+          avgLossTicks: null,
+          dmgPerKill: null,
           scoreMean: 0,
           scoreStd: 0,
         }

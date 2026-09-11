@@ -245,6 +245,15 @@ export interface EvalSummary {
   totalPU: number | null
   /** 胜局平均残血；null = 评估记录无 residualHp 字段。 */
   avgResidualHp: number | null
+  /** 败局平均耗时（ticks，仅败局计入）；null = 无败局或败局缺 ticks。
+   *  ⚠️ **方向警告**：越高**不代表**越强——在同构关里"活得久"往往是**打不死敌人**的症状
+   *  （清场停滞）。2026-09-11 实测：c4 上它与胜率**负相关**（vs 迭代 Spearman +0.964，
+   *  而胜率为 −0.893，二者符号相反）。必须与胜率并排解读。 */
+  avgLossTicks: number | null
+  /** 每杀承伤（ΣplayerDamageTaken / Σkills，**全样本**口径）：越小越会"周旋"。
+   *  自动防苟活——不打 ⇒ 分母小 ⇒ 值爆炸；自动防无脑冲——掉血多 ⇒ 值大。
+   *  null = 该轮无击杀。 */
+  dmgPerKill: number | null
   scoreMean: number | null
   scoreStd: number | null
 }
@@ -674,8 +683,14 @@ export interface Series {
 export type TrendRange = 'all' | '30' | '10'
 
 /** eval 源稀疏序列（干净评估只在部分迭代出现，中间轮 = NaN 缺口）：
- *  winTicks/winHp 同为 eval 胜局口径，共享「最近 N = 最近 N 个有效点」。 */
-const SPARSE_SERIES_KEYS: ReadonlySet<string> = new Set(['eval', 'winTicks', 'winHp'])
+ *  winTicks/winHp/lossTicks/dmgPerKill 同为 eval 口径，共享「最近 N = 最近 N 个有效点」。 */
+const SPARSE_SERIES_KEYS: ReadonlySet<string> = new Set([
+  'eval',
+  'winTicks',
+  'winHp',
+  'lossTicks',
+  'dmgPerKill',
+])
 
 /**
  * 按范围档位截取序列。eval 源序列（eval / 胜局耗时 / 胜局残血）在有限轮里常带 NaN 缺口，
@@ -744,6 +759,25 @@ export function metricSeries(rows: IterRow[]): Series[] {
       // 胜局平均剩余 hp（eval 胜局口径）；无评估/无胜局轮 = NaN 缺口。
       vals: chrono.map((r) =>
         r.evalData && r.evalData.avgResidualHp !== null ? r.evalData.avgResidualHp : Number.NaN,
+      ),
+      iters,
+    },
+    {
+      key: 'dmgPerKill',
+      label: '承伤/杀',
+      // 每杀承伤（eval 全样本口径）；越小越会周旋。防苟活（不打 ⇒ 分母小 ⇒ 值爆炸）。
+      vals: chrono.map((r) =>
+        r.evalData && r.evalData.dmgPerKill !== null ? r.evalData.dmgPerKill : Number.NaN,
+      ),
+      iters,
+    },
+    {
+      key: 'lossTicks',
+      label: '败局耗时',
+      // 败局平均耗时（ticks，eval 败局口径）；无评估/无败局轮 = NaN 缺口。
+      // ⚠️ 高 = 清场停滞（见 EvalSummary.avgLossTicks 的方向警告），必须与胜率并排读。
+      vals: chrono.map((r) =>
+        r.evalData && r.evalData.avgLossTicks !== null ? r.evalData.avgLossTicks : Number.NaN,
       ),
       iters,
     },

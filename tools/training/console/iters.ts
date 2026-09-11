@@ -212,6 +212,17 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
     /** 胜局累计耗时（ticks）与胜局数：「胜局耗时」口径（avgWinTicks）。 */
     winTicks: number
     winN: number
+    /** 败局累计耗时（ticks）与败局数：「败局耗时」口径（avgLossTicks）。
+     *  ⚠️ 该值高 = 清场停滞，不是"更会活"（见 EvalSummary.avgLossTicks 方向警告）。 */
+    lossTicks: number
+    lossN: number
+    /** 全样本累计承伤（dmgPerKill 的分子）。 */
+    dmg: number
+    /** dmgPerKill 的**配套分母**（仅累计"行内有 playerDamageTaken"的那些局的 kills）与
+     *  有效局数。分子分母必须同口径——否则老课程（eval_log 无该字段）会退化成假 0，
+     *  或"分子只覆盖部分局、分母覆盖全部局"造成系统性低估。 */
+    dmgKills: number
+    dmgN: number
   }
   const games = new Map<number, Map<string, GameAgg>>()
   try {
@@ -243,6 +254,11 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
               residualN: 0,
               winTicks: 0,
               winN: 0,
+              lossTicks: 0,
+              lossN: 0,
+              dmg: 0,
+              dmgKills: 0,
+              dmgN: 0,
             }
             byWver.set(wver, agg)
           }
@@ -253,6 +269,15 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
           agg.pu += Number(r.powerUpsCollected ?? 0) || 0
           agg.scoreSum += score
           agg.scoreSqSum += score * score
+          // 承伤（dmgPerKill 分子）：全样本累计，不区分胜负；**分子分母同口径**——
+          // 只有行内真有 playerDamageTaken 时才把该局计入（同时累计该局 kills），
+          // 否则老课程 eval_log 缺字段会退化成假 0、或分子分母覆盖范围不一致而低估。
+          const pd = Number(r.playerDamageTaken)
+          if (Number.isFinite(pd)) {
+            agg.dmg += pd
+            agg.dmgKills += Number(r.kills ?? 0) || 0
+            agg.dmgN++
+          }
           // 残血：仅胜局；(startLives + puGotTank − deaths) × maxHp − playerDamageTaken
           const won = r.win === true || r.win === 1
           if (won) {
@@ -272,6 +297,13 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
             if (rh !== null) {
               agg.residualSum += rh
               agg.residualN++
+            }
+          } else {
+            // 败局耗时：仅败局累计 ticks（败局缺 ticks/0 = 数据缺口，不计入分母）。
+            const lt = Number(r.ticks ?? 0) || 0
+            if (lt > 0) {
+              agg.lossTicks += lt
+              agg.lossN++
             }
           }
           continue
@@ -293,6 +325,8 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
           totalKills: null,
           totalPU: null,
           avgResidualHp: null,
+          avgLossTicks: null,
+          dmgPerKill: null,
           scoreMean: null,
           scoreStd: null,
         })
@@ -310,6 +344,10 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
       s.totalKills = agg.kills
       s.totalPU = agg.pu
       s.avgResidualHp = agg.residualN > 0 ? Math.round(agg.residualSum / agg.residualN) : null
+      s.avgLossTicks = agg.lossN > 0 ? Math.round(agg.lossTicks / agg.lossN) : null
+      // 承伤/杀：全样本口径（Σdmg / Σ同批 kills），保留 1 位小数（够看趋势）。
+      // 无任何带 playerDamageTaken 的局（老课程）→ null（显示 -），不是 0。
+      s.dmgPerKill = agg.dmgN > 0 && agg.dmgKills > 0 ? +(agg.dmg / agg.dmgKills).toFixed(1) : null
       s.scoreMean = +mean.toFixed(4)
       s.scoreStd = +Math.sqrt(Math.max(0, agg.scoreSqSum / agg.n - mean * mean)).toFixed(4)
     }

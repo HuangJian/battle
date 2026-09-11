@@ -186,6 +186,8 @@ describe('view 指标行分组 / 过滤 / 排序（DS-U1 13 列 + eval 子行语
     totalKills: 40,
     totalPU: 5,
     avgResidualHp: null,
+    avgLossTicks: null,
+    dmgPerKill: null,
     scoreMean: 0.5,
     scoreStd: 0.1,
   }
