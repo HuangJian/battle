@@ -50,6 +50,16 @@ def data_root() -> Path:
     return Path(os.environ.get("EVALBOARD_DATA", str(DEFAULT_DATA_ROOT)))
 
 
+def _heartbeat(**patch: object) -> None:
+    """R4-G1：写 EvalBoard 心跳（失败静默——心跳绝不打断单元）。"""
+    try:
+        from rl.eval_heartbeat import write_state
+
+        write_state(**patch)
+    except Exception:
+        pass
+
+
 def load_ladder() -> dict:
     with open(LADDER_JSON, encoding="utf-8") as f:
         doc = json.load(f)
@@ -266,6 +276,18 @@ class BatchEvalRunner:
             log(f"[batcheval] {unit['rung']} u{self.unit_idx}: already settled — skip")
             return {"settled": total, "total": total, "dropped": 0}
         t_start = time.time()
+        # R4-G1 心跳：单元开始（console 只读，显示当前批/单元/rung）。
+        _heartbeat(
+            window_open=(
+                self.window_event.is_set() if self.window_event is not None else True
+            ),
+            batch_id=str(self.batch.get("batch_id")),
+            unit_idx=self.unit_idx,
+            unit_of=self.unit_of,
+            rung=str(unit.get("rung", "")),
+            remaining_units=max(0, self.unit_of - self.unit_idx),
+            engine_epoch=self.engine_epoch,
+        )
 
         snapshot_path: str | None = None
         local_slots = max(0, int(policy_cfg.get("evalLocalSlots", EVAL_LOCAL_SLOTS_DEFAULT)))
@@ -539,6 +561,10 @@ class BatchEvalRunner:
                 _reopen_for_resume(data_root(), str(self.batch.get("batch_id")))
         except Exception as e:
             log(f"[batcheval] WARN mark_unit_done failed: {e}")
+        # R4-G1 心跳：单元结束（清 rung；window_open 留给 loop_core 的开关窗写点）。
+        _heartbeat(
+            batch_id=str(self.batch.get("batch_id")), rung=None, remaining_units=0
+        )
         return {"settled": len(seen), "total": len(todo), "dropped": dropped}
 
     def _done_keys(self, key16: str) -> set[tuple[int, int]]:

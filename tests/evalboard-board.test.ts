@@ -221,3 +221,34 @@ describe('R7 buildEvalCkptsView（只读元数据）', () => {
     }
   })
 })
+
+describe('R4-G1 runner_state 心跳读取', () => {
+  it('心跳文件 → view.runnerState 映射（snake → camel）', () => {
+    writeFileSync(
+      path.join(root, 'runner_state.json'),
+      JSON.stringify({
+        window_open: false,
+        updated_ts: 123,
+        batch_id: 'b-heartbeat',
+        unit_idx: 2,
+        unit_of: 3,
+        rung: 'c6l1',
+        remaining_units: 1,
+        last_window_closed_ts: 456,
+        engine_epoch: 'e0',
+      }),
+    )
+    const v = buildEvalBoardView('e2e', true)
+    expect(v.runnerState).not.toBeNull()
+    expect(v.runnerState?.windowOpen).toBe(false)
+    expect(v.runnerState?.batchId).toBe('b-heartbeat')
+    expect(v.runnerState?.unitIdx).toBe(2)
+    expect(v.runnerState?.unitOf).toBe(3)
+    expect(v.runnerState?.rung).toBe('c6l1')
+    expect(v.runnerState?.remainingUnits).toBe(1)
+    expect(v.runnerState?.lastWindowClosedTs).toBe(456)
+    expect(v.runnerState?.engineEpoch).toBe('e0')
+    rmSync(path.join(root, 'runner_state.json'), { force: true })
+    expect(buildEvalBoardView('e2e', true).runnerState).toBeNull()
+  })
+})

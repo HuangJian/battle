@@ -570,6 +570,13 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
             # 短等在途局收尾；不阻塞训练主链（超时即走，剩余 seed 下窗续跑）。
             t.join(timeout=15.0)
         self._eb_thread = None
+        # R4-G1 心跳：关窗 + 关窗时刻（console 只读，用来显示「训练忙碌中已等 N 分钟」）。
+        try:
+            from rl.eval_heartbeat import now_ms, write_state
+
+            write_state(window_open=False, last_window_closed_ts=now_ms())
+        except Exception:
+            pass
 
     def _evalboard_idle(self, it: int, dist_cfg: dict | None) -> None:
         """训练空闲窗（rollout 收官后 / A-eval 收官后）：开窗并认领最早 pending 批。
@@ -578,6 +585,13 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         等待期）；rollout 开始时 _evalboard_yield 关窗暂停。已有在途单元则只开窗不重复领。
         """
         self._eb_window.set()
+        # R4-G1 心跳：开窗（后续单元起止由 batch_eval 续写 batch/unit/rung）。
+        try:
+            from rl.eval_heartbeat import write_state
+
+            write_state(window_open=True)
+        except Exception:
+            pass
         t_prev = self._eb_thread
         if t_prev is not None and t_prev.is_alive():
             return

@@ -19,6 +19,7 @@ evalboard/
   README.md                  # 本文件（唯一入库文件）
   games/YYYY-MM.jsonl        # 逐局 append-only（唯一事实来源）
   batches.jsonl              # 批次台账（同时是 console → runner 的触发队列）
+  runner_state.json          # 训练侧心跳（R4-G1：窗口开关/当前批/单元；console 只读）
   ladder.json                # 阶梯定义工作副本（入库正本：tools/training/evalboard/ladder.json）
   baselines/god-<ladder-ver>.jsonl  # God 全阶梯基线（永久保留）
   space_calibration.json     # Δ_space 标定（永久保留）
