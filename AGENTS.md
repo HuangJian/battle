@@ -21,7 +21,8 @@ authority and is worth reading before you touch that area.
 
 1. **Never `git stash`** — any subcommand, any flag; it has destroyed this repo's object
    store twice. A/B comparisons use `git worktree add --detach <dir> HEAD`. Any git write
-   that is not `add`/`commit`/`push`/`fetch`/`pull`: read §5.12 first. [details §5.12]
+   that is not `add`/`commit`: read §5.12 first; **never `git push`** — pushing is the
+   human's job. [details §5.12]
 2. **Git path arguments never contain `..`**; never `2>/dev/null` a git command; never
    chain two git writes with `||`. Rename/delete with filesystem `mv`/`rm`, not `git mv`/
    `git rm` (third incident, 2026-09-08: `git rm` deleted a whole directory). [§5]
@@ -99,7 +100,7 @@ Handed a plan (`plan/*.md`, a `tasks.chat.md` directive, or an inline task), fol
 
 ### Hard rules (NEVER)
 
-- **Never `git stash`** — in this sandbox the stash's object writes get silently intercepted and can delete the whole object store. **TWO incidents**: 2026-08-28 (all packs vanished, 503 commits unreadable) and **2026-09-06 (`git stash push` deleted `objects/pack/*.pack` + `refs/` + branch reflogs)**. Any subcommand (`push`/`pop`/`apply`/`drop`/`clear`) is banned; for A/B comparisons use `git worktree add` or a scratch clone, never stash. Normal git flow (`add`/`commit`/`push`/`fetch`/`pull`) writes `.git` all the time and is safe — no backup needed; back up `.git/objects` only before a genuinely destructive command (`reset --hard`, `filter-branch`, `gc`, `repack`, `prune`). **Push after every commit** — the 2026-09-06 recovery was lossless only because every local commit already existed on `origin`. Remote access is HTTPS-only here (origin is already switched; SSH is unreachable from the sandbox). Recovery runbook + why "just this once" is never acceptable: `docs/agents.details.md` §5.12 (details: §5.12).
+- **Never `git stash`** — in this sandbox the stash's object writes get silently intercepted and can delete the whole object store. **TWO incidents**: 2026-08-28 (all packs vanished, 503 commits unreadable) and **2026-09-06 (`git stash push` deleted `objects/pack/*.pack` + `refs/` + branch reflogs)**. Any subcommand (`push`/`pop`/`apply`/`drop`/`clear`) is banned; for A/B comparisons use `git worktree add` or a scratch clone, never stash. Normal git flow (`add`/`commit`/`push`/`fetch`/`pull`) writes `.git` all the time and is safe — no backup needed; back up `.git/objects` only before a genuinely destructive command (`reset --hard`, `filter-branch`, `gc`, `repack`, `prune`). **Commit, never push** — pushing is the human's job; 2026-09-06 was lossless only because every commit already existed on `origin`. Remote access is HTTPS-only here (origin is already switched; SSH is unreachable from the sandbox). Recovery runbook + why "just this once" is never acceptable: `docs/agents.details.md` §5.12.
 - **Never start the dev server** (or spin up a browser) to validate your own changes — validation is the automated gates only (`bun run check` / `bun run build`; for UI work untestable by units: `tsc --noEmit` + oxlint + a successful `vite build`).
 - **Never launch NN training with raw `python`** — headless one-shots go via `bun tools/training/train.ts --script <name>.py` (venv setup, single-instance locking, smoke gates, `--check` / `--echo`)；日常训练组件管理（启/停/冒烟/模式/节点/变更检测重启）走训练控制台 `bun run train` → http://127.0.0.1:8900（局域网只读：可查看任意课程/日志/节点统计，启停/冒烟/模式/节点编辑仅本机 localhost，§2026-09-09-goalnn-console-lan-readonly；旧统一启动器 `tools/training/start.ts` 与 `nn-training/start-training.{sh,ps1}` 均已删除；details: `docs/agents.details.md` §5.6）。
 - **Record every NN-training architecture change/eval/lesson in `docs/nn.progress.md`** (top, numbered §) — and check it before architectural changes.

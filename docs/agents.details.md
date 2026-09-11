@@ -415,11 +415,14 @@ first** — the cost is seconds; the cost of not doing it was a full repo restor
   `-u`/`--keep-index`/pathspec). For before/after A/B comparisons use
   `git worktree add --detach <path> HEAD` (verified safe in this sandbox; remove with
   `git worktree remove <path>` when done) or a scratch clone. Never reach for stash.
-- Normal git usage (`add`/`commit`/`push`/`fetch`/`pull`) writes `.git` all the time and is safe —
+- Normal git usage (`add`/`commit`/`fetch`/`pull`; `push` is the human's) writes `.git` all the time and is safe —
   **no backup needed**. Back up the object store only before a genuinely destructive command
   (`reset --hard`, `filter-branch`, `gc`, `repack`, `prune`): `cp -r .git <tmp>/<name>-git-backup`.
-- **Push after every commit.** Both incidents were fully recoverable ONLY because all local commits
-  already existed on `origin`. Local-only commits are the only real loss vector — keep that set empty.
+- **Push after every commit — but that is the *human's* step, not the agent's** (2026-09-11 用户指令：
+  「我自己来push」). Agents stop at `commit` and report the hash; never run `git push` yourself — a push
+  is outward-facing and irreversible. Both incidents were fully recoverable ONLY because all local
+  commits already existed on `origin`; local-only commits are the only real loss vector, so keep
+  telling the human when a commit is waiting ("committing is yours, pushing is theirs").
 - Remote access in this sandbox is **HTTPS-only** (SSH port is blocked: "Connection closed by
   UNKNOWN port 65535"). `origin` is already switched to `https://github.com/HuangJian/battle.git`.
   Do not switch it back to SSH.
