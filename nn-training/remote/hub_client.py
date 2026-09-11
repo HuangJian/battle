@@ -248,6 +248,8 @@ def publish_job(
     adv_norm: str,
     normalize_ret: bool = False,
     kickstart_kl: float = 0.0,
+    # 熵正则系数（2026-09-11 接线）：None = 用引擎常量 ENT_COEF（0.01）。
+    ent_coef: float | None = None,
     ref_weights_b64: str = "",
     ref_weights_fp: str = "",
     shuffle: bool,
@@ -299,6 +301,7 @@ def publish_job(
         "adv_norm": adv_norm,
         "normalize_ret": bool(normalize_ret),
         "kickstart_kl": float(kickstart_kl),
+        "ent_coef": ent_coef,
         "ref_weights_b64": ref_weights_b64,
         "ref_weights_fp": ref_weights_fp,
         "shuffle": shuffle,

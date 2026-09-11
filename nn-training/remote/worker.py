@@ -734,6 +734,10 @@ def run_job(
         int(manifest["epochs"]),
         device_t,
         kl_coef=float(manifest["kl_coef"]),
+        # ent_coef：None（旧 hub / 未配）→ 引擎常量 ENT_COEF；0.0 是合法值，不能 `or` 兜底。
+        ent_coef=(
+            None if manifest.get("ent_coef") is None else float(manifest["ent_coef"])
+        ),
         ref_model=ref_model,
         kickstart_kl=kick_kl,
     )

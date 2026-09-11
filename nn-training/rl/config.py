@@ -356,6 +356,9 @@ class PpoScheduleEntry(BaseModel):
     mb: int | None = None
     kl_coef: float | None = None
     kl_cap: float | None = None
+    # 熵正则系数（2026-09-11 接线，缺省 None = 引擎常量 ENT_COEF=0.01）。
+    # 动机：per-tick 线熵坍缩（唯一学动的 c4-kb1 熵 0.71–0.74，其余四条卡 0.44–0.51）。
+    ent_coef: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -924,7 +927,7 @@ class CourseConfig(BaseModel):
             d: dict[str, Any] = {}
             if e.until_iter is not None:
                 d["until_iter"] = e.until_iter
-            for k in ("lr", "epochs", "mb", "kl_coef", "kl_cap"):
+            for k in ("lr", "epochs", "mb", "kl_coef", "kl_cap", "ent_coef"):
                 v = getattr(e, k)
                 if v is not None:
                     d[k] = v

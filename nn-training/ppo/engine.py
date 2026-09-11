@@ -84,6 +84,12 @@ GAMMA = 0.995
 LAM = 0.95
 CLIP_EPS = 0.2
 VF_COEF = 1.0
+# ★ ENT_COEF 只是**缺省值**（`ppo_update(ent_coef=None)` 时生效，缺省路径数学逐字节不变）。
+#   2026-09-11：课程 `ppo_schedule[].ent_coef` 已可覆盖本常量。
+#   动机（实测）：per-tick 五条腿里唯一学动的 c4-kb1 熵保持 0.71–0.74；其余四条
+#   （c4-margin 0.709→0.490 / c4-dodge / c5-margin / c6-margin）全卡在 0.44–0.51，
+#   合计 191 轮零趋势。同仓 intent 线在 2026-08-27 就因熵坍缩把熵正则 0.02→0.08
+#   （见 intent.py:70 注释）、goal 线同步 0.08 —— 只有 per-tick 还停在 0.01（低 8×）。
 ENT_COEF = 0.01
 LR = 3e-4
 MAX_GRAD_NORM = 1.0
@@ -255,6 +261,7 @@ def ppo_update(
     kl_coef: float = 0.0,
     ref_model=None,
     kickstart_kl: float = 0.0,
+    ent_coef: float | None = None,
 ):
     """chunks: list of minibatch dicts (obs (B,14,26,26) / scalars (B,24) / ...).
 
@@ -269,6 +276,10 @@ def ppo_update(
     （lp_old，即收集策略）的 KL 惩罚 `kl_coef · E[(r−1) − ln r]`——per-tick 的
     「初始 KL 大、稳定后衰减」由 ppo_schedule 显式传值落地。
 
+    ent_coef（2026-09-11 接线，与 kl_coef 同一路子）：熵正则系数。None = 用模块常量
+    ENT_COEF（0.01，缺省路径数学逐字节不变）；显式给值则 `loss -= ent_coef · entropy`。
+    动机：per-tick 线熵坍缩（唯一学动的 c4-kb1 熵 0.71–0.74，其余四条卡 0.44–0.51）。
+
     ref_model + kickstart_kl（R5§363，BC-anchored kickstart，mirror intent 数学）：
     ref = BC 冻结快照（调用方 freeze＋eval）；两者就绪时 loss +=
     kickstart_kl · KL(π_curr ‖ π_BC)，分头 exact-KL（move＋fire 求和，与 entropy
@@ -276,6 +287,8 @@ def ppo_update(
     """
     model.train()
     clip = CLIP_EPS
+    # 熵正则系数：None → 模块缺省（数学与接线前逐字节一致）；显式给值 → 该项被覆盖。
+    ent_c = ENT_COEF if ent_coef is None else float(ent_coef)
     stats: list[dict[str, float]] = []
     # Convert numpy -> torch ONCE per chunk (not once per epoch): identical
     # values, ~epochs× less conversion overhead.
@@ -345,7 +358,7 @@ def ppo_update(
             value_loss = F.mse_loss(val.squeeze(-1), ret)
             entropy = cat_entropy(move_logp) + cat_entropy(fire_logp)
 
-            loss = policy_loss + VF_COEF * value_loss - ENT_COEF * entropy
+            loss = policy_loss + VF_COEF * value_loss - ent_c * entropy
             if kl_coef > 0.0:
                 # 对采样策略的 KL 惩罚（与 approx_kl_est 同估计量，可微项）
                 loss = loss + kl_coef * ((ratio - 1.0) - (lp_new - lp_old)).mean()

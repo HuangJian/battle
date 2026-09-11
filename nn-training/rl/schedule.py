@@ -7,7 +7,8 @@
     最后迭代（升序）；末段可省略 `until_iter`（兜底，永远生效）；
   * `lr` 改 `opt.param_groups[0]['lr']`（Adam 动量在 opt.state，改 lr 不重置）；
     `epochs/mb` 每轮查表；`kl_coef` 是 `ppo_update` 新增的 update 期形参（默认
-    0.0 向后兼容），schedule 显式传值；
+    0.0 向后兼容），schedule 显式传值；`ent_coef`（2026-09-11）同为 update 期形参，
+    **默认 None = 引擎常量 ENT_COEF**（缺省路径逐字节不变）；
   * 缺省走固定 6 超参（schedule 缺省路径不触碰 engine.py 模块常量求值路径）。
 """
 
@@ -16,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-_SCHED_KEYS = ("lr", "epochs", "mb", "kl_coef", "kl_cap")
+_SCHED_KEYS = ("lr", "epochs", "mb", "kl_coef", "kl_cap", "ent_coef")
 
 
 class ScheduleError(ValueError):

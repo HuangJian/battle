@@ -230,10 +230,14 @@ class TrainingSteps:
         kl_coef = float(sch.get("kl_coef", 0.0) or 0.0)
         args._kl_coef = kl_coef
         args._kl_cap = sch.get("kl_cap")  # None = 不覆盖，由 policy.streamKlCap 决定
+        # ent_coef（2026-09-11）：None = 用引擎常量 ENT_COEF（0.01）。0.0 是合法值（关掉熵正则），
+        # 因此**不能**像 kl_coef 那样 `or 0.0` 兜底——那会把 None 与 0.0 混淆。
+        args._ent_coef = sch.get("ent_coef")
         if sch:
             log(
                 f"[course] ppo_schedule@it{it}: lr={sch.get('lr')} epochs={sch.get('epochs')} "
-                f"mb={sch.get('mb')} kl_coef={kl_coef} kl_cap={sch.get('kl_cap', 'default')}"
+                f"mb={sch.get('mb')} kl_coef={kl_coef} kl_cap={sch.get('kl_cap', 'default')} "
+                f"ent_coef={sch.get('ent_coef', 'default')}"
             )
 
     def _write_iter_stats(self, it: int) -> None:
@@ -356,6 +360,7 @@ class TrainingSteps:
                 self._device,
                 ckpt_path=str(traj_dir / "ppo_ckpt"),
                 kl_coef=float(getattr(args, "_kl_coef", 0.0) or 0.0),
+                ent_coef=getattr(args, "_ent_coef", None),
                 ref_model=bc_ref,
                 kickstart_kl=kick,
             )
@@ -534,6 +539,7 @@ class TrainingSteps:
             lr=float(args.lr),
             kl_coef=float(getattr(args, "_kl_coef", 0.0) or 0.0),
             kl_cap=getattr(args, "_kl_cap", None),
+            ent_coef=getattr(args, "_ent_coef", None),
             adv_norm=getattr(args, "adv_norm", "auto"),
             normalize_ret=bool(getattr(args, "normalize_ret", 0)),
             kickstart_kl=kick_kl,

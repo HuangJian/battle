@@ -73,6 +73,7 @@ MANIFEST_REQUIRED = (
 MANIFEST_OPTIONAL_DEFAULTS: dict[str, object] = {
     "kl_coef": 0.0,
     "kl_cap": None,  # None = 不覆盖，由 policy.streamKlCap 决定
+    "ent_coef": None,  # 2026-09-11：None = 用引擎常量 ENT_COEF（0.01）；0.0 是合法值
     "adv_norm": "auto",
     "normalize_ret": False,  # R5：ret 归一；缺失（旧 hub）= 关
     "kickstart_kl": 0.0,  # §363：BC 缰绳系数（已衰减）；0 = 关
