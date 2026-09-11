@@ -221,6 +221,23 @@ def xla_mark_step(device) -> None:
         xm.mark_step()
 
 
+def xla_world_size() -> int | None:
+    """TPU 核数（诊断/日志用，2026-09-11）。新版 torch_xla 挪到
+    torch_xla.runtime.world_size()；旧版 xm.xrt_world_size()。非 TPU 或读不到
+    返回 None（延迟 import，未装 torch_xla 的机器行为不变）。"""
+    try:
+        import torch_xla.runtime as xr
+
+        return int(xr.world_size())
+    except Exception:
+        try:
+            import torch_xla.core.xla_model as xm
+
+            return int(xm.xrt_world_size())
+        except Exception:
+            return None
+
+
 def _to_cpu_state(obj):
     """state_dict（可嵌套）→ 张量全部物化到 CPU 的副本，容器类型保持不变。
 

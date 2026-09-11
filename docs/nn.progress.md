@@ -5,6 +5,37 @@
 
 ---
 
+## §25 TPU PPO「单步递增爆炸」根因定案 + 修复（2026-09-11，c6b-margin 首个 TPU job 45~52s/step / eta 5.9h）
+
+**用户动作链**：贴远程 log（job 6c0a0424488e5b70）→ 探针 E 段复现（Colab）→ Kaggle TPU 三重否决 → `--step-mark` 收敛 44ms → engine 生产修复。
+
+### 25.1 现象
+
+- 真实 job：142 chunks × 4 ep = 568 步，单步 **24→45→52s 线性递增**（eta~5.9h），hub wait_job(1800s) 必超时。
+- 探针 E 段复现（Colab/Kaggle TPU）：E0/E1 均 1.7→13~24s 递增；**E2 干净基准（bench_case 已 warmup）亦 ~10s/step**；`--tail 0` 无尾块、3 chunks 固定 shape 仍递增 → 与 engine 结构 / ref / 尾块 / perm 全部无关。
+
+### 25.2 根因（mechanism）
+
+torch_xla 惰性模式下，`.tolist()` materialize 只断言其依赖子图；`backward()`/`optimizer_step()` 的在途节点不 drain，跨步骤累积 → **编译/执行的图线性变大 → 单步耗时 ∝ 已走步数**。CPU/CUDA eager 即时回收，本地永远看不见（所有"本地 OK、云端 TPU 爆炸"的旧困惑都源于此）。
+
+**连带修正**：`plan/ppo-optimization.plan.md` §0.5「TPU 快 GPU 4.7× / 44 ms/step」是**测量假象**——那次 `chunks=1 epochs=1` 总共 ≤3 个梯度步，递增尚未展开；44ms 真实吞吐需「每步有 mark」的形态（探针 E1+mark 实测 1803→109→71→44→41→42ms）。以往所有 TPU 端 ppo_sec 读数需按此重读。
+
+### 25.3 修复（生产落地）
+
+| 位置 | 改动 |
+|---|---|
+| `ppo/engine.py::ppo_update` | 每步 stats append 后 `xla_mark_step(device)`（图执行边界；非 XLA no-op，CPU/CUDA 逐位不变） |
+| `ppo/engine.py` | ref 预计算后一次性 mark（防首步巨图编译） |
+| `ppo/common.py` | `xla_world_size()` helper（新版 `torch_xla.runtime.world_size()` / 旧版 `xm.xrt_world_size()` 双探） |
+| `remote/worker.py` | TPU 分支日志：device + world_size（H2 诊断不再静默） |
+| `tools/tpu-probe.py` | E 段全套：`--engine/--per-step/--skip-e0/--tail 0/--step-mark` + XLA metrics 累计 + world_size 诊断 |
+
+**验证**：探针 Kaggle 闭环 44ms；58 项相关 python 测试全绿（kickstart_cache/scalar_sync/common/numerics/no_torch_on_import/remote_hotswap/run_rl_m1）。
+
+**待实证**：下一轮真实 TPU job（首步几十秒编译一次性，后续稳定 ~50ms，epoch 时长均匀）；hub 需重打包 code.zip 触发 worker sha 热替换。
+
+---
+
 ## §24 云端停机机制（2026-09-11，用户指令：停机 = 停云端省 GPU 配额，本地进程都不停）
 
 承接 §23 的"未决"：§385 只修了 G13 口径，停车仍不省云配额。用户确认语义后落地（DECISIONS §2026-09-11-nntrain-cloud-halt）：
@@ -165,6 +196,8 @@ argmax 恒选同一格。
 
 
 ## §21 PPO 吞吐：三设备实测 + ref 缓存 / 传输压缩 / 多卡落地 + TPU 设备层（2026-09-10）
+
+> ⚠ **2026-09-11 作废「TPU 快 GPU 4.7×」结论**：44ms/step 是 ≤3 步微基准的测量假象，详见 §25（根因 = torch_xla 惰性图不 drain → 单步线性递增；修复 = 每步 mark）。本节其余（ref 缓存/传输/多卡）结论不受影响。
 
 同一会话四条线：**度量**（三设备实测矩阵）、**优化**（ref 缓存 / 传输压缩 / 多卡）、
 **扩容**（TPU 设备层）、**基建**（门禁两项修复）。数字来自自包含探针

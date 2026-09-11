@@ -68,6 +68,7 @@ from ppo.common import (
     masked_logsoftmax,
     optimizer_step,
     sync_scalars,
+    xla_mark_step,
 )
 from ppo.trainer import aggregate_stats, tensored_chunks
 from schema import FIRE_DIM, MOVE_DIM
@@ -302,6 +303,12 @@ def ppo_update(
                     masked_logsoftmax(_rf, _m[:, MOVE_DIM : MOVE_DIM + FIRE_DIM]),
                 )
         log(f"[ppo] kickstart ref 预计算完成：{len(tensored)} chunks（原每 epoch 重算）")
+        # 2026-09-11 慢 job（TPU 45~52 s/step，eta~5.9h）修复候选：预计算后立即落
+        # 执行边界。对齐探针 build_ref_cache 的既有行为（tools/tpu-probe.py E 段）——
+        # 否则这段惰性图一直挂着，会与首个训练步的图拼成巨型图（首步 ~24s 编译 +
+        # 图签名漂移），TPU 上每一梯度步都可能在重编译。非 XLA 设备为 no-op，
+        # CPU/CUDA 数值逐位不变（执行时机对 eager 无感）。
+        xla_mark_step(device)
     start_epoch = _ppo_load(ckpt_path, model, opt)
     if start_epoch:
         log(
@@ -376,6 +383,13 @@ def ppo_update(
                         }
                     )
                 )
+            # 2026-09-11 根因修复（TPU）：每步强制图执行边界。torch_xla 惰性模式下
+            # materialize（.tolist()）只断言其依赖子图，backward/optimizer 环节的
+            # 在途节点不 drain，跨步骤累积 → 图线性膨胀 → 单步耗时随步数线性增长
+            # （实录：TPU 24→45→52s/step 递增；探针 E 段 1.7→13→23s；E2 10s）。
+            # 每步显式 mark 后 TPU 单步稳定 ~44ms（探针 E1+mark 实测收敛）。非 XLA
+            # 设备为 no-op，CPU/CUDA 数值与行为逐位不变。
+            xla_mark_step(device)
             # Heartbeat: pure-print progress/health line; wall-clock only.
             now = time.time()
             if now - last_hb >= HB_SEC:

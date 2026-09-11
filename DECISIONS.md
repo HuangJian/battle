@@ -1105,3 +1105,21 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   云商无 release API 的事实（Kaggle/Colab 需手工断连或到 9h 上限）如实写进横幅文案与注释，不假装全释放。
 - **违反后果**：不加则 loop 一停云端照烧（事故复诊/崩溃期间都在空转烧配额）；恢复时漏重启 worker 会话会卡派发——
   横幅与「恢复云端」动作就是主介入路径。
+
+## §2026-09-11-ppo-tpu-step-mark（2026-09-11，c6b-margin 首个 TPU job 单步 45~52s / eta 5.9h 根因定案）
+
+- **背景**：Colab worker PPO 每梯度步 24→45→52s **线性递增**（142 chunks × 4 ep ≈ 7h，hub
+  wait_job 1800s 必超时）；探针 E 段真机复现（Colab/Kaggle TPU）：E0/E1/E2（含已 warmup 的
+  干净基准）全部 ~10s+/step 递增，`--tail 0` 固定 shape 亦不例外。
+- **备选与否决**：ref 预计算执行时机 —— 否，E1≈E0 同速；尾块 shape 编译税 —— 否，
+  tail=0 仍慢；多 chunk/perm 结构 —— 否，E2（bench_case warmup 后）亦 10s+；归因设备
+  （PJRT 回退）—— 否，E1 + 每步 mark **收敛回 44ms**，正是旧微基准数字。
+- **决定**：根因 = torch_xla 惰性模式下 `.tolist()` materialize 只断言依赖子图，backward/
+  optimizer 在途节点不 drain、跨步骤累积 → 图线性变大 → 单步耗时 ∝ 步数。修复 =
+  `ppo/engine.py::ppo_update` 每步 stats 后 `xla_mark_step(device)`（图执行边界；非 XLA
+  no-op，CPU/CUDA 数值逐位不变）+ ref 预计算后一次 mark（防首步巨图）+ worker 日志打印
+  device/world_size。**修正旧结论**：`plan/ppo-optimization.plan.md` §0.5「TPU 快 GPU 4.7× /
+  44ms」是 ≤3 步微基准测量假象；44ms 只属于「每步有 mark」形态。
+- **违反后果**：任何 torch_xla 持续训练循环若每步只有 materialize 而无显式 mark，都会再现
+  「单步递增、多步后爆炸」；TPU 吞吐评估必须以 ≥6 步持续循环口径，且读「引擎即有 44ms」前
+  必须先确认每步有图边界。后续 TPU 端 ppo_sec 读数均须按此修正解读。

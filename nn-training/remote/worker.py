@@ -619,9 +619,11 @@ def run_job(
     use_dp = False
     if dev_str in ("tpu", "xla"):
         # 统一走 ppo.common.xla_device()（torch_xla.device() 优先，旧版回退 xm.xla_device()）
-        from ppo.common import xla_device
+        from ppo.common import xla_device, xla_world_size
 
         device_t = xla_device()
+        log(f"job {jid}: TPU/XLA 设备 {device_t}，world_size={xla_world_size()}"
+            "（8=8 核；None=读不到，诊断用）")
     elif dev_str in ("cuda-dp", "dp"):
         # 多卡（2026-09-10 实测 1.92×）：torch.device("cuda-dp") 不是合法设备，
         # 必须显式落到 cuda；真正的包装在 state_dict 装载之后（见下方 use_dp 段）。

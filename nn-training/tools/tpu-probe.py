@@ -17,6 +17,18 @@
      D1 vs D2 就是 ppo/engine.py 本次落地的 ref_cache 优化的实测收益
      （数值逐位不变，见 tests/test_ppo_kickstart_cache.py）。
 
+  ③ **E 段：真实 job 形态复现（2026-09-11）**：Kiwi c6b-margin 首个 TPU job
+     （Colab）PPO 单步 45~52 s（eta~5.9h、chunks 142 x 4 ep），而同模型同
+     循环的干净探针 B_new 在 TPU 上是 44 ms/step —— 慢约 1000×。E 段把
+     ppo/engine.py::ppo_update 主循环（乱序 perm + ref_cache + 8 标量 stats +
+     clip + optimizer_step）搬进探针，并把「clean 探针 ↔ engine 现役」的差异
+     做成同机 A/B，真机一跑即可分离：
+       * 每步都在 XLA 重编译  →  CompileTime 累计 ≈ 总耗时，per-step 曲线全平慢
+       * 只有首步慢（巨型图编译）→ per-step 前 1~3 步大山峰，随后回落到基准
+       * 设备吞吐本就有问题（如 PJRT 回退 CPU）→ CompileTime 小但每步 ExecuteTime 大
+     用法：python tools/tpu-probe.py --device tpu --engine [--per-step]
+                [--chunks 8] [--epochs 2] [--tail 235]
+
 用法：
     本机对照：     python tools/tpu-probe.py --device cpu --quick
     只测优化效果：  python tools/tpu-probe.py --device cpu --skip-shapes
@@ -249,8 +261,14 @@ def prepare(bk: Backend, chunks: list[dict]) -> list[dict]:
     return out
 
 
-def build_ref_cache(bk: Backend, ref_model, dev_chunks: list[dict]) -> list:
-    """新 engine 行为：每 chunk 只算一次 ref，按索引复用（跨 epoch 不变）。"""
+def build_ref_cache(bk: Backend, ref_model, dev_chunks: list[dict], mark: bool = True) -> list:
+    """新 engine 行为：每 chunk 只算一次 ref，按索引复用（跨 epoch 不变）。
+
+    mark=True（默认）：预计算后立即落执行边界（= 探针既有行为）。
+    mark=False：**不**执行，惰性图一直挂着（= ppo/engine.py 现役形态；
+    E 段用它复现 2026-09-11 的 TPU 慢 job——预计算图与首个训练步的图
+    会拼在一起算账，触发巨型图编译与图签名漂移）。
+    """
     out = []
     with torch.no_grad():
         for e in dev_chunks:
@@ -262,7 +280,8 @@ def build_ref_cache(bk: Backend, ref_model, dev_chunks: list[dict]) -> list:
                     masked_logsoftmax(rf, m[:, MOVE_DIM : MOVE_DIM + FIRE_DIM]),
                 )
             )
-    bk.mark()
+    if mark:
+        bk.mark()
     return out
 
 
@@ -355,6 +374,244 @@ def run_steps(
     return time.time() - t0, n_steps
 
 
+# ---------------------------------------------------------------- E 段：真实 job 形态复现 -------------------
+# 背景（2026-09-11）：c6b-margin 首个 TPU job（Colab）PPO 单步 45~52s（eta~5.9h），
+#   同模型同循环的干净探针 B_new 在该类 TPU 上是 44 ms/step —— 慢 ~1000×。
+#   E 段复刻 ppo/engine.py::ppo_update 的主循环，目标是把「clean 探针 ↔ engine
+#   现役」的差异做成同机 A/B，真机一跑分离三态：
+#     1) 每步都在 XLA 重编译      -> CompileTime 累计 ≈ 总耗时，per-step 曲线全平慢
+#     2) 仅首步巨图编译           -> per-step 前 1~3 步大山峰，随后回落到基准
+#     3) 设备吞吐本就有问题       -> CompileTime 小但每步 ExecuteTime 大
+def _xla_world_size() -> str:
+    """TPU 核数（诊断用）。新版 torch_xla 挪到 torch_xla.runtime.world_size()；
+    旧版 xm.xrt_world_size()（2026-09-11 Kaggle/Colab 实测新版已无 xm 上的该属性）。
+    读不到返回 '读不到（...）'。"""
+    try:
+        import torch_xla.runtime as xr
+
+        return str(xr.world_size())
+    except Exception as e1:
+        try:
+            import torch_xla.core.xla_model as xm
+
+            return str(xm.xrt_world_size())
+        except Exception as e2:
+            return f"读不到（{type(e1).__name__}: {e1} / {type(e2).__name__}: {e2}）"
+
+
+def _xla_metrics() -> dict | None:
+    """XLA 编译/执行统计（秒级累计）。非 XLA 设备或读不到时返回 None。"""
+    try:
+        import torch_xla.debug.metrics as met
+
+        def _s(name: str) -> float:
+            v = met.counter_value(name)
+            return v / 1e3 if isinstance(v, (int, float)) else 0.0  # counter 单位 ms
+
+        return {"compile_s": _s("CompileTime"), "execute_s": _s("ExecuteTime"), "graph_s": _s("GraphTime")}
+    except Exception:
+        return None
+
+
+def run_engine_steps(
+    bk: Backend,
+    model,
+    opt,
+    dev_chunks: list[dict],
+    epochs: int,
+    ref_cache: list | None = None,
+    per_step: bool = False,
+    step_mark: bool = False,
+) -> tuple[float, int, list[float]]:
+    """复刻 ppo/engine.py::ppo_update 主循环（2026-09-11 慢 job 复现）。
+
+    与探针 run_steps 的差异（= 真实 job 与"干净"探针的全部差异，逐项对应现役
+    engine 行为）：每 epoch np.random.permutation 打乱 chunk 顺序；每步构造
+    engine 同款 8 标量 stats 并一次性 .tolist()（= sync_scalars）；ref_cache 复用
+    跨 epoch 不变（= kickstart ref 预计算缓存）；clip_grad_norm_ 与 optimizer_step
+    与 engine 相同。
+
+    ref_cache=None：每步现算（旧 engine 行为，仅作对照）。
+    ref_cache=列表：按索引复用（现役 engine）；缓存的执行时机由调用方决定——
+    build_ref_cache(mark=False) 即现役（惰性图挂着），mark=True 即修复候选。
+
+    step_mark=True：每步末尾强制一次图执行边界（bk.mark()）。2026-09-11 实测：
+    持续循环每步 ~10s+ 且递增（.tolist() 只断言依赖子图，backward/opt 环节的
+    在途节点残留、与下一步的新图纠缠 → 图线性变大）。此开关验证「每步显式
+    drain」是否把递增压平——是则落生产（engine 每步补边界）。
+
+    per_step=True：打印每个梯度步 wall time（ms），直接看「每步都慢」还是
+    「首步慢后续快」。返回 (总秒, 步数, 步耗时 ms 序列)。
+    """
+    total = len(dev_chunks) * epochs
+    seq: list[float] = []
+    t0 = time.time()
+    for ep in range(epochs):
+        perm = np.random.permutation(len(dev_chunks))
+        for j, i in enumerate(perm):
+            e = dev_chunks[int(i)]
+            s0 = time.time()
+            obs, sc, mask = e["obs"], e["scalars"], e["mask"]
+            mv, fr, val = model(obs, sc)
+            move_logp = masked_logsoftmax(mv, mask[:, :MOVE_DIM])
+            fire_logp = masked_logsoftmax(fr, mask[:, MOVE_DIM : MOVE_DIM + FIRE_DIM])
+            lp_new = cat_logprob(e["a_move"], move_logp) + cat_logprob(e["a_fire"], fire_logp)
+            lp_old = e["lp_move"] + e["lp_fire"]
+            ratio = torch.exp(lp_new - lp_old)
+            adv = e["adv"]
+            surr1 = ratio * adv
+            surr2 = torch.clamp(ratio, 0.8, 1.2) * adv
+            policy_loss = -torch.min(surr1, surr2).mean()
+            value_loss = F.mse_loss(val.squeeze(-1), e["ret"])
+            entropy = cat_entropy(move_logp) + cat_entropy(fire_logp)
+            loss = policy_loss + 1.0 * value_loss - 0.01 * entropy
+            kick_mean = torch.zeros((), device=bk.device)
+            pair = ref_cache[int(i)] if ref_cache is not None else None
+            if pair is not None:
+                rm, rf = pair
+                kl_m = (move_logp.exp() * (move_logp - rm)).sum(dim=-1)
+                kl_f = (fire_logp.exp() * (fire_logp - rf)).sum(dim=-1)
+                kick_mean = (kl_m + kl_f).mean()
+                loss = loss + 1.0 * kick_mean
+            opt.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            bk.step(opt)
+            # 8 标量一次 stack().tolist()（= ppo/common.sync_scalars 形态）
+            _ = torch.stack(
+                [
+                    policy_loss.detach().reshape(()),
+                    value_loss.detach().reshape(()),
+                    entropy.detach().reshape(()),
+                    ratio.mean().detach().reshape(()),
+                    adv.mean().detach().reshape(()),
+                    e["ret"].mean().detach().reshape(()),
+                    lp_new.mean().detach().reshape(()),
+                    val.mean().detach().reshape(()),
+                ]
+            ).tolist()
+            dt = (time.time() - s0) * 1000.0
+            seq.append(dt)
+            if per_step:
+                done = ep * len(dev_chunks) + j + 1
+                print(f"      step {done:4d}/{total}: {dt:9.2f} ms", flush=True)
+            if step_mark:
+                # 每步强制图执行边界：drain 在途节点，验证「图累积 → 每步递增」假说
+                bk.mark()
+    bk.mark()
+    return time.time() - t0, total, seq
+
+
+def _engine_mode(bk: Backend, args) -> None:
+    """E 段入口：三组同机 A/B —— E0 现役（复现疑似慢）、E1 修复候选
+    （ref 预计算后立即执行）、E2 干净基准（bench_case batched，B_new 口径）。"""
+    world = "?"
+    if args.device == "tpu":
+        world = _xla_world_size()
+    n_par = sum(p.numel() for p in PPOStudent().parameters())
+    torch.manual_seed(0)
+    np.random.seed(0)
+    rng = np.random.default_rng(20260911)
+    chunks = [make_chunk(MB, rng) for _ in range(args.chunks)]
+    if args.tail and args.tail > 0:
+        chunks.append(make_chunk(args.tail, rng))
+    print("=" * 72)
+    print("[E 段] 真实 job 形态复现（复刻 ppo/engine.py 主循环）")
+    print(f"       chunks={args.chunks}"
+          + (f"(+尾块 {args.tail})" if args.tail and args.tail > 0 else "（无尾块，固定 shape）")
+          + f" x epochs={args.epochs} "
+          f"= {len(chunks) * args.epochs} 步")
+    print(f"       模型 params={n_par:,}  device={args.device} -> {bk.device}")
+    if args.device == "tpu":
+        print(f"       xrt_world_size={world}（8=8 核 TPU；1=单核；0/报错=PJRT 未挂真 TPU）")
+    print("=" * 72)
+
+    model = bk.wrap(bk.to(PPOStudent()))
+    opt = torch.optim.Adam(model.parameters(), lr=1.5e-4)
+    dev_chunks = prepare(bk, chunks)
+    ref = bk.wrap(bk.to(PPOStudent())).eval()
+    for p in ref.parameters():
+        p.requires_grad_(False)
+
+    # E0：现役 engine 形态 —— ref 预计算后**不**执行，惰性图挂着进首个训练步
+    if args.skip_e0:
+        print("  … E0 已跳过（--skip-e0）…", flush=True)
+        e0_s: float = float("nan")
+        seq0: list[float] = []
+        m0: dict | None = None
+    else:
+        cache_noexec = build_ref_cache(bk, ref, dev_chunks, mark=False)
+        print("  … E0 现役形态（perm + ref 预计算不执行）…", flush=True)
+        e0_s, _n0, seq0 = run_engine_steps(
+            bk, model, opt, dev_chunks, args.epochs, ref_cache=cache_noexec, per_step=args.per_step
+        )
+        m0 = _xla_metrics()
+
+    # E1：修复候选 —— ref 预计算后立即执行（对齐探针 build_ref_cache 默认行为）
+    cache_exec = build_ref_cache(bk, ref, dev_chunks, mark=True)
+    _tag1 = "（ref 预计算立即执行" + (" + 每步 mark 边界" if args.step_mark else "") + "）"
+    print(f"  … E1 {_tag1}…", flush=True)
+    e1_s, _n1, seq1 = run_engine_steps(
+        bk, model, opt, dev_chunks, args.epochs, ref_cache=cache_exec,
+        per_step=args.per_step, step_mark=args.step_mark,
+    )
+    m1 = _xla_metrics()
+
+    # E2：干净基准（顺序、无 ref、无 perm）—— bench_case batched 稳态
+    print("  … E2 干净基准（bench_case batched）…", flush=True)
+    e2_s, _n2 = bench_case(
+        bk, chunks, args.epochs, sync_mode="batched", warmup=1, repeat=1, seed=0
+    )
+
+    def _sum(x: list[float]) -> float:
+        return sum(x) / len(x) if x else 0.0
+
+    print("-" * 72)
+    print(f"{'组':<6}{'mean(ms/step)':>14}{'首步(ms)':>12}{'末步(ms)':>12}")
+    _f0 = seq0[0] if seq0 else float("nan")
+    _l0 = seq0[-1] if seq0 else float("nan")
+    e0_mean = _sum(seq0) if seq0 else float("nan")
+    print(f"{'E0 现役':<6}{e0_mean:>14.1f}{_f0:>12.1f}{_l0:>12.1f}")
+    print(f"{'E1 +ref执行':<10}" + ("+mark" if args.step_mark else "") + f"{_sum(seq1):>14.1f}{seq1[0]:>12.1f}{seq1[-1]:>12.1f}")
+    print(f"{'E2 干净':<6}{e2_s * 1000:>14.1f}{'-':>12}{'-':>12}")
+    print("-" * 72)
+    if m0 and m1:
+        print(f"XLA 累计   CompileTime: E0 后={m0['compile_s']:.1f}s → E1 后={m1['compile_s']:.1f}s"
+              f"（+{m1['compile_s'] - m0['compile_s']:.1f}s）")
+        print(f"           ExecuteTime: E0 后={m0['execute_s']:.1f}s → E1 后={m1['execute_s']:.1f}s"
+              f"（+{m1['execute_s'] - m0['execute_s']:.1f}s）")
+    print()
+    full = _sum(seq0) / max(e2_s * 1000.0, 1e-9) if seq0 else None
+    if full is not None:
+        print(f"[E 判据] E0/E2 倍率 = {full:.1f}x")
+        if args.device == "tpu" and (m0 is None or m0.get("compile_s", 0) == 0):
+            print("  ⚠ 读不到 XLA CompileTime —— 若 E0 均值仍远高于 E2，多半是设备吞吐问题：")
+            print("    查 PJRT_DEVICE / COLAB_TPU_ADDR，确认真连上了 TPU（xrt_world_size 应为 8）。")
+        if full < 3.0:
+            print("  → 现役形态与干净探针同量级：慢 job 与 engine 循环结构无关，")
+            print("    指向设备/环境（PJRT 回退、Colab TPU 没挂载）或 chunk 规模。复现需加 --chunks 142。")
+        else:
+            print("  → 复现成功：engine 现役形态显著慢于干净探针。")
+            if m0 and m0.get("compile_s", 0) > e0_s * 0.5:
+                print("     CompileTime 占大头 ⇒ 每步 XLA 重编译（图签名漂移）。")
+            print("     E1 vs E0 判断 ref 预计算执行时机是否是修复。（改 ppo/engine.py 对应处验证）")
+    else:
+        full1 = _sum(seq1) / max(e2_s * 1000.0, 1e-9)
+        print(f"[E 判据] （E0 已跳过）E1/E2 倍率 = {full1:.1f}x" + ("（E1 带每步 mark）" if args.step_mark else ""))
+        if full1 < 3.0:
+            if args.step_mark:
+                print("  → E1(每步 mark) ≈ E2 ⇒ 每步显式图边界修平了递增（in-flight 节点累积假说实锤）。")
+                print("    落生产：engine 每步补一次 xla_mark_step（或 optimizer_step(barrier=True)）。")
+            else:
+                print("  → E1 ≈ E2 ⇒ ref 预计算执行时机就是修复（H1 实锤）；engine.py 那行 xla_mark_step 生效。")
+        else:
+            if args.step_mark:
+                print("  → 每步 mark 仍未压平 ⇒ 不是 in-flight 节点累积；查设备/PJRT（H2）。")
+            else:
+                print("  → E1 仍显著慢于 E2 ⇒ 不是 ref 执行时机的问题（H1 否定），")
+                print("    指向 in-flight 节点累积或设备/PJRT（H2）—— 试 --step-mark 再判。")
+
+
 def bench_case(
     bk,
     chunks,
@@ -429,12 +686,44 @@ def main() -> None:
         default=2,
         help="每个 case 的计时重复次数，取最小值（默认 2；想更快可给 1）",
     )
+    ap.add_argument(
+        "--engine",
+        action="store_true",
+        help="E 段：真实 job（engine 主循环）形态复现 + 三组 A/B（E0 现役 / E1 ref 执行时机 / E2 干净基准）",
+    )
+    ap.add_argument(
+        "--tail",
+        type=int,
+        default=235,
+        help="E 段：尾块样本数（模拟 n mod mb；c5-margin 实测 74 轮出现 66 种尾尺寸）。"
+        "0/负数 = 无尾块（纯固定 shape，用于分离「尾块 shape 编译税」vs「设备本身慢」）",
+    )
+    ap.add_argument(
+        "--per-step",
+        action="store_true",
+        help="E 段：打印每个梯度步的 wall time（区分「每步重编译」与「首步巨图编译」）",
+    )
+    ap.add_argument(
+        "--skip-e0",
+        action="store_true",
+        help="E 段：跳过 E0（现役形态复现）只跑 E1 修复候选 + E2 干净基准——E0 把现象复现出来"
+        "之后就不用再跑它的完整 18 步，直接拿裁决数据更快",
+    )
+    ap.add_argument(
+        "--step-mark",
+        action="store_true",
+        help="E 段：E1 每步末尾强制一次图执行边界（bk.mark）。验证「每步在途节点未 drain → "
+        "图累积 → 单步递增」修复假说（2026-09-11 Kaggle TPU 实测 E2 亦 10s/step 后加入）。",
+    )
     args = ap.parse_args()
 
     if args.quick:
         args.chunks, args.epochs = 4, 1
 
     bk = Backend(args.device)
+    if args.engine:
+        _engine_mode(bk, args)
+        return
     n_par = sum(p.numel() for p in PPOStudent().parameters())
     n_steps_iter = 148  # 37 x 4，用于把 s/step 折成 s/轮
     def announce(tag: str, desc: str) -> None:
