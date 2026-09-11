@@ -283,7 +283,10 @@ def test_require_rising_blocks_declining_window() -> None:
 
 
 def test_duty_gate_trips_on_accident_burn() -> None:
-    """G13：c6 病灶形态——6.5h 墙钟只有 1h 训练（占空比 0.15 < 0.35）→ REMEDIATE。"""
+    """G13：c6 病灶形态——6.5h 墙钟只有 1h 训练（占空比 0.15 < 0.35）→ REMEDIATE。
+
+    本用例走**终身口径回退**（未给 duty_baseline_ts/duty_events）——验证旧调用方
+    （无 duty 数据）行为不变（§385）。"""
     spec = _spec(
         [{"id": "G13", "kind": "duty", "min_train_frac": 0.35, "verdict": "REMEDIATE"}],
         sustain=1,
@@ -296,6 +299,103 @@ def test_duty_gate_trips_on_accident_burn() -> None:
     assert evaluate(spec, _rows(1), budget=healthy, now=FROZEN_NOW).verdict == "HOLD"
     # 无墙钟基线 → unknown 不误停
     assert evaluate(spec, _rows(1), budget=BudgetInfo(), now=FROZEN_NOW).verdict == "HOLD"
+
+
+def test_duty_boot_cold_start_not_punished() -> None:
+    """§385 事故复现：分母基线 = 首个完成迭代 → 起步冷启动不误杀。
+
+    c6b-margin 真实读数：it1 磨了 47min 冷启动，但自首个迭代完成（基线 463s 前）
+    起已健康——213s 训练 / 463s 墙钟 = 0.46 ≥ 0.35 → HOLD。
+    终身口径是 213/3300 = 0.065 → 必停（就是 2026-09-11 那次每个评估轮必停的病根）。"""
+    spec = _spec(
+        [{"id": "G13", "kind": "duty", "min_train_frac": 0.35, "verdict": "REMEDIATE"}],
+        sustain=1,
+    )
+    b = BudgetInfo(
+        started_at=FROZEN_NOW - 55 * 60,  # run_start 更早（终身口径 ≈ 0.065，必停）
+        duty_baseline_ts=FROZEN_NOW - 463.0,
+        duty_events=3,
+        train_sec=213.0,
+    )
+    res = evaluate(spec, _rows(1), budget=b, now=FROZEN_NOW)
+    assert res.verdict == "HOLD"
+    assert "健康" in res.readings[0].reason
+
+
+def test_duty_chronic_burn_detected_with_baseline() -> None:
+    """§385：慢性烧在新基线下照抓——改口径不灭功（c6 形态仍 REMEDIATE）。"""
+    spec = _spec(
+        [{"id": "G13", "kind": "duty", "min_train_frac": 0.35, "verdict": "REMEDIATE"}],
+        sustain=1,
+    )
+    b = BudgetInfo(
+        started_at=FROZEN_NOW - 6.5 * 3600,
+        duty_baseline_ts=FROZEN_NOW - 6.3 * 3600,
+        duty_events=5,
+        train_sec=3600.0,
+    )
+    assert evaluate(spec, _rows(1), budget=b, now=FROZEN_NOW).verdict == "REMEDIATE"
+
+
+def test_duty_min_events_guard_holds_during_boot() -> None:
+    """§385：完成迭代 < DUTY_MIN_EVENTS → unknown（HOLD 不误停）——开门即响的防护。"""
+    spec = _spec(
+        [{"id": "G13", "kind": "duty", "min_train_frac": 0.35, "verdict": "REMEDIATE"}],
+        sustain=1,
+    )
+    b = BudgetInfo(
+        started_at=FROZEN_NOW - 60 * 60,
+        duty_baseline_ts=FROZEN_NOW - 60 * 60,
+        duty_events=1,  # 只完成 1 轮
+        train_sec=10.0,
+    )
+    res = evaluate(spec, _rows(1), budget=b, now=FROZEN_NOW)
+    assert res.verdict == "HOLD"
+    assert "起步期" in res.readings[0].reason
+
+
+def test_evaluate_only_kinds_filters_rules() -> None:
+    """§385：only_kinds=('duty',) 只让 duty 参与判决——非评估轮无 eval rows 也能查。"""
+    spec = _spec(
+        [
+            {"id": "G1", "kind": "wins_mastery", "rel_teacher": 0.6, "verdict": "ADVANCE"},
+            {"id": "G13", "kind": "duty", "min_train_frac": 0.35, "verdict": "REMEDIATE"},
+        ],
+        sustain=1,
+    )
+    healthy = BudgetInfo(duty_baseline_ts=FROZEN_NOW - 1000, duty_events=3, train_sec=600.0)
+    assert (
+        evaluate(spec, [], budget=healthy, now=FROZEN_NOW, only_kinds=("duty",)).verdict
+        == "HOLD"
+    )
+    burned = BudgetInfo(duty_baseline_ts=FROZEN_NOW - 7200, duty_events=3, train_sec=300.0)
+    assert (
+        evaluate(spec, [], budget=burned, now=FROZEN_NOW, only_kinds=("duty",)).verdict
+        == "REMEDIATE"
+    )
+
+
+def test_iter_ledger_helpers(tmp_path: Path) -> None:
+    """§385：first_iter_end_ts 返回**首个** iteration 事件结束时刻；count 数事件。"""
+    import rl.gate_check as gc
+
+    fmt: str = gc._TS_FMT
+    p = tmp_path / "training_log.jsonl"
+    t_first = time.strftime(fmt, time.localtime(FROZEN_NOW - 3600))
+    t_second = time.strftime(fmt, time.localtime(FROZEN_NOW - 1800))
+    rows = [
+        {"event": "run_start", "time": time.strftime(fmt, time.localtime(FROZEN_NOW - 7200))},
+        {"event": "iteration", "time": t_first, "ppo_sec": 70},
+        {"event": "iter_error", "error": "boom"},  # 事故轮不算完成
+        {"event": "iteration", "time": t_second, "ppo_sec": 50},
+    ]
+    p.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    assert gc.first_iter_end_ts(p) == pytest.approx(
+        time.mktime(time.strptime(t_first, fmt)), abs=2
+    )
+    assert gc.count_iteration_events(p) == 2
+    assert gc.first_iter_end_ts(tmp_path / "nope.jsonl") is None
+    assert gc.count_iteration_events(tmp_path / "nope.jsonl") == 0
 
 
 def test_sum_train_sec_sums_iteration_events(tmp_path: Path) -> None:

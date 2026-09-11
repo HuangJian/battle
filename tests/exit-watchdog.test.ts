@@ -30,6 +30,7 @@ import {
   classifyExit,
   healRecoveredErrors,
   nextExitFailures,
+  recentPlannedStop,
   recordExitFailure,
   specPort,
   type FailureLogIO,
@@ -155,6 +156,110 @@ describe('buildExitMarker', () => {
     expect(m).toContain('意外退出 (PID 5)')
     expect(m).toContain('| a')
     expect(m).toContain('| b')
+  })
+
+  it('planned 传入 → 「已停车」而非「意外退出」', () => {
+    const m = buildExitMarker('trainingLoop', { pid: 5 }, [], 'T1', 'REMEDIATE: 复诊')
+    expect(m).toContain('已停车（PID 5）')
+    expect(m).toContain('REMEDIATE: 复诊')
+    expect(m).not.toContain('意外退出')
+  })
+})
+
+// ────────────────────── 设计内停车识别（§385：门判决停车不标「意外退出」） ──────────────────────
+
+/** "YYYY-MM-DD HH:mm:ss" 本地时间串（与 training_log.jsonl 事件 time 同格式）。 */
+function localFmt(ts: number): string {
+  const d = new Date(ts)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
+describe('recentPlannedStop（gate_verdict / circuit_break 识别）', () => {
+  const NOW = new Date(2026, 8, 11, 10, 45, 20).getTime() // 本地 2026-09-11 10:45:20
+  function jsonl(rows: Record<string, unknown>[]): string {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'bcity-planned-'))
+    const j = path.join(dir, 'training_log.jsonl')
+    writeFileSync(j, rows.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf-8')
+    return j
+  }
+
+  it('近 300s 内 gate_verdict → 返回停车原因（设计内停车）', () => {
+    const j = jsonl([
+      { event: 'iteration', time: localFmt(NOW - 200_000), ppo_sec: 1 },
+      {
+        event: 'gate_verdict',
+        time: localFmt(NOW - 5_000),
+        verdict: 'REMEDIATE',
+        reason: '腿在烧事故',
+      },
+    ])
+    try {
+      expect(recentPlannedStop(j, 300_000, NOW)).toContain('REMEDIATE')
+      expect(recentPlannedStop(j, 300_000, NOW)).toContain('腿在烧事故')
+    } finally {
+      rmSync(path.dirname(j), { recursive: true, force: true })
+    }
+  })
+
+  it('最近相关事件太旧（>300s）→ null（与本次退出无关，仍走意外路径）', () => {
+    const j = jsonl([
+      { event: 'gate_verdict', time: localFmt(NOW - 400_000), verdict: 'STOP', reason: '旧判决' },
+    ])
+    try {
+      expect(recentPlannedStop(j, 300_000, NOW)).toBeNull()
+    } finally {
+      rmSync(path.dirname(j), { recursive: true, force: true })
+    }
+  })
+
+  it('circuit_break 也判为设计内停车；文件缺失 → null', () => {
+    const j = jsonl([
+      { event: 'circuit_break', time: localFmt(NOW - 1_000), reason: 'KL collapse' },
+    ])
+    try {
+      expect(recentPlannedStop(j, 300_000, NOW)).toContain('ABORT')
+      expect(recentPlannedStop(path.join(os.tmpdir(), 'no-such.jsonl'), 300_000, NOW)).toBeNull()
+    } finally {
+      rmSync(path.dirname(j), { recursive: true, force: true })
+    }
+  })
+})
+
+describe('recordExitFailure（设计内停车）', () => {
+  it('planned 传入 → 标记「已停车」且 save.error 以前缀「已停车」写账', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'bcity-watchdog-planned-'))
+    try {
+      const logAbs = path.join(dir, 'training-loop.log')
+      writeFileSync(logAbs, 'boot\n', 'utf-8')
+      const captured: { entry: RegistryEntry | null } = { entry: null }
+      const io: FailureLogIO = {
+        append: () => {},
+        warnFn: () => {},
+        save: (_k, e) => {
+          captured.entry = e
+        },
+      }
+      const marker = recordExitFailure(
+        'trainingLoop',
+        { pid: 99 },
+        logAbs,
+        [],
+        io,
+        '2026-09-11T02:45:20.000Z',
+        'REMEDIATE: 有效训练占空比过低，复诊',
+      )
+      expect(marker).toContain('已停车（PID 99）')
+      expect(marker).not.toContain('意外退出')
+      expect(captured.entry?.error).toBe('已停车：REMEDIATE: 有效训练占空比过低，复诊')
+      expect(captured.entry?.exitAt).toBe('2026-09-11T02:45:20.000Z')
+    } finally {
+      try {
+        rmSync(dir, { recursive: true, force: true })
+      } catch {
+        /* noop */
+      }
+    }
   })
 })
 

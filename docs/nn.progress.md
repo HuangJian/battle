@@ -5,6 +5,35 @@
 
 ---
 
+## §23 训练停车机制审计 + G13 duty 门修复（2026-09-11，c6b-margin 事故：每小时自停 2 次）
+
+用户指令："TrainingLoop 近一个小时自行关闭了几次，请检查原因，分析问题" → 审计全部 11 个停车点 → 用户拍板"处理所有问题" → §385。
+
+### 23.1 事故根因（数据核对）
+
+- 09:29:33 首启 → it1 冷启动 **47.2min**（占分母 62%，分子仅 68.9s）→ 10:24:25 G13 duty=0.065 停车；
+- 10:26:46 重启 → it4 首轮 9.4min（PPO 往返 8min/真训练 2min 排队）→ it6 duty=0.127 又停 → it9 必停 → **死亡螺旋**：
+  G13 用「首条 run_start、终身累计、跨重启」口径——冷启动与停车死时间永久锁进分母，任何评估轮必响。
+- 热态单轮占空比 42-53%（it5/it7/it8）其实都过 0.35——门不是阈值错，是**口径把"起步费"当事故**。
+
+### 23.2 修复（4 处，§385）
+
+| 位置 | 改动 | 验证 |
+|---|---|---|
+| rl/gate_check.py | G13 分母基线 = **首个完成迭代结束时刻**（起步热身不计账）+ 完成迭代 ≥2 守卫 + evaluate(only_kinds) | 事故读数回放：213s/463s=0.46 → HOLD（修前 0.065 必停）；c6 慢性 0.15 仍 REMEDIATE |
+| rl/loop_guards.py | `_gate` 非评估轮只查 duty（每轮现形）；`_budget_hard_cut` 轮级 max_hours 兜底 | test_train_loop_pure / test_run_rl_m1 通过 |
+| rl/loop_core.py | run() 接入轮级预算硬断 | — |
+| tools/training/console/exit-watchdog.ts | 账本近 300s 有 gate_verdict/circuit_break → 标「已停车(原因)」非「意外退出」 | tests/exit-watchdog.test.ts 20 通过 |
+
+实测口径：403/404 数字逐项对上（it3 Σcloud=213s/wall=3292s→0.065；it6 575s/4538s→0.127）。
+
+### 23.3 未决（另立决策）
+
+- **停车不省云配额**：pull 模式下停本机 loop 只停派活，Kaggle/Colab worker 按 max_idle(≥1h) 才退出——真省配额需要"停车连带 hub 停机 + 显式释放云会话"的动作链。
+- 探针腿 c6b-margin 当前以 GATE_OVERRIDE（HOLD）人工止血跑至 it20 或 4h 预算；删文件后 G13 新口径即时生效（下轮进程重启加载）。
+
+---
+
 ## §22 外围组件巡检：goal 热图静默常量（生产档目标策略失效）+ eval 墙损失测 + 我引入的 payload 回归（2026-09-10）
 
 用户指令："检查一下其它组件（sampler-agent, cloudflared, src/nn, export-rl-rollout,

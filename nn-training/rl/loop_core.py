@@ -259,6 +259,10 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 # M1 第四守卫：课程结束门（无 gates 块的课程恒 False，零行为变化）
                 if self._gate(it):
                     break
+                # G5 每轮兜底（§385 审计补洞）：max_hours 只在评估轮经门被查，
+                # 非评估轮会过冲——到顶立即停车，别让预算滑过。
+                if self._budget_hard_cut(it):
+                    break
                 self._rotate_cleanup(it)
                 # 吞吐 T4：双缓冲 spawn 下一轮预采（下一轮开头 join）
                 self._collect_child = spawn_next_collect(

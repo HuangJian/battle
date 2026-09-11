@@ -33,7 +33,9 @@ from rl.breaker import (
 from rl.events import write_circuit_break, write_gate_verdict
 from rl.gate_check import (
     BudgetInfo,
+    count_iteration_events,
     evaluate,
+    first_iter_end_ts,
     first_run_start_ts,
     load_override,
     read_trend_rows,
@@ -190,10 +192,12 @@ class TrainingGuards:
     def _gate(self, it: int) -> bool:
         """第四守卫：课程结束门（M1，plan/course-exit-and-shutdown.md §4）。
 
-        只在**本轮派发了干净评估**时求值（门读 eval_summary 行，没评估 = 没新数据，
-        顺延一个节拍比用陈旧行硬判诚实）。判决 → 动作按 §4.3：
-        HOLD 继续；其余写 `gate_verdict` 事件后优雅 break（在途 shard 已结算、
-        账本对账完整）。无 gates 块的课程（老课程）恒 False——零行为变化。
+        评估轮跑完整求值（指标门读 eval_summary 行，没评估 = 没新数据，顺延
+        一个节拍比用陈旧行硬判诚实）；**非评估轮只查 duty 门**（§385：G13 的
+        输入每轮都更新，不该被 eval_every 节拍拖住——烧事故按轮数小时现形，
+        而不是等下一评估点才宣布停车）。判决 → 动作按 §4.3：HOLD 继续；其余写
+        `gate_verdict` 事件后优雅 break（在途 shard 已结算、账本对账完整）。
+        无 gates 块的课程（老课程）恒 False——零行为变化。
 
         返回 True = 训练该停（调用方 break）。
         """
@@ -206,8 +210,6 @@ class TrainingGuards:
             eval_this_round = bool(self._eval_on_round(it))
         except AttributeError:
             eval_this_round = False
-        if not eval_this_round:
-            return False
 
         # 首轮把两条 warn-only 打一次（§3.4-8 预算可行性 / §12.4 判决力）：
         # 与门同源、只在有 gates 的课程上出现，不进判决、不影响任何分支。
@@ -223,7 +225,6 @@ class TrainingGuards:
         now = time.time()
         traj_root = Path(self._traj_root)
         try:
-            rows = read_trend_rows(traj_root / "eval_log.jsonl", course_fp=course_fp)
             override = load_override(traj_root.parent / str(spec.override_file))
         except Exception as e:
             log(f"[run_rl] gate it{it}: 求值输入读取失败（{type(e).__name__}: {e}）— 本轮跳过门")
@@ -236,7 +237,35 @@ class TrainingGuards:
             cur_iter=it,
             train_sec=float(getattr(self, "_train_sec_total", 0.0) or 0.0),
             train_samples=float(getattr(self, "_train_samples_total", 0.0) or 0.0),
+            # G13 duty 输入（§385）：分母基线 = 首个完成迭代（起步热身不计账）。
+            duty_baseline_ts=first_iter_end_ts(self._jsonl_path),
+            duty_events=count_iteration_events(self._jsonl_path),
         )
+        if not eval_this_round:
+            # 非评估轮：只查 duty（数据每轮皆新；指标门无新 eval 不判）。
+            try:
+                res = evaluate(
+                    course,
+                    [],
+                    budget=budget,
+                    now=now,
+                    override=override,
+                    course_fp=course_fp,
+                    decider="loop",
+                    only_kinds=("duty",),
+                )
+            except Exception as e:
+                log(f"[run_rl] gate it{it}: duty 求值异常（{type(e).__name__}: {e}）— 本轮跳过门")
+                return False
+            if not res.terminal:
+                return False  # HOLD / duty-unknown（起步期、数据不足）→ 静默继续
+            return self._park_on_gate(it, res)
+
+        try:
+            rows = read_trend_rows(traj_root / "eval_log.jsonl", course_fp=course_fp)
+        except Exception as e:
+            log(f"[run_rl] gate it{it}: 求值输入读取失败（{type(e).__name__}: {e}）— 本轮跳过门")
+            return False
         try:
             res = evaluate(
                 course,
@@ -254,7 +283,10 @@ class TrainingGuards:
         if not res.terminal:
             log(f"[run_rl] gate it{it}: HOLD — {res.reason}")
             return False
+        return self._park_on_gate(it, res)
 
+    def _park_on_gate(self, it: int, res: Any) -> bool:
+        """终端判决落账并停车（§4.3）。落盘失败也按判决停车——绝不带病续跑。"""
         try:
             write_gate_verdict(
                 self._jsonl_path,
@@ -270,6 +302,38 @@ class TrainingGuards:
         except OSError as e:
             log(f"[run_rl] gate it{it}: gate_verdict 落盘失败（{e}）— 仍按判决停车")
         log(f"[run_rl] GATE {res.verdict} it{it}: {res.reason}")
+        return True
+
+    def _budget_hard_cut(self, it: int) -> bool:
+        """G5 每轮兜底：max_hours 到顶立即停车（§385 审计补洞）。
+
+        G5 预算门本身只在**评估轮**求值（_gate → evaluate），非评估轮 max_hours
+        过了不会停、最多过冲 ~eval 周期（c6b 场合每 3 轮约 10-15min）。这里在
+        每轮结束后硬查一次墙钟，到顶 → 落 `gate_verdict`(STOP)（exit-watchdog
+        会识别为设计内停车，不标"意外退出"）→ True（调用方 break）。"""
+        args = self.args
+        if not getattr(args, "max_hours", 0.0):
+            return False
+        started = first_run_start_ts(self._jsonl_path)
+        if started is None:
+            return False
+        elapsed = time.time() - started
+        if elapsed < float(args.max_hours) * 3600:
+            return False
+        log(
+            f"[run_rl] max_hours {args.max_hours}h 到顶（轮级硬断）it{it} "
+            f"— wall {elapsed:.0f}s"
+        )
+        try:
+            write_gate_verdict(
+                self._jsonl_path,
+                it,
+                "STOP",
+                f"max_hours {args.max_hours}h 到顶（轮级硬断）",
+                decider="loop",
+            )
+        except OSError as e:
+            log(f"[run_rl] gate_verdict 落盘失败（{e}）— 仍按 max_hours 停车")
         return True
 
     def _rotate_cleanup(self, it: int) -> None:

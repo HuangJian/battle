@@ -87,6 +87,9 @@ _OVERRIDE_VERDICTS: frozenset[str] = frozenset(
 #: run_start 事件时间格式（rl/events.py:66）。
 _TS_FMT = "%Y-%m-%d %H:%M:%S"
 
+#: G13 duty 最小完成迭代数：不足不判（unknown）——开门即响的防护（§385）。
+DUTY_MIN_EVENTS = 2
+
 
 class GateOverrideError(ValueError):
     """override 文件存在但非法（§4.6：响亮报错，CLI exit 2，绝不静默忽略）。"""
@@ -135,6 +138,13 @@ class BudgetInfo:
     #: 累计**样本通过量** Σ(samples × epochs)：ADVANCE 的"证据充分性"判据
     #: （spec.min_train_samples，2026-09-11）。
     train_samples: float = 0.0
+    #: G13 duty 的分母基线：**首个完成迭代的结束时刻**（2026-09-11 事故修复 §385）。
+    #: 开腿到首个迭代完成之间的冷启动/换挡是常态起步成本，不算事故——否则 it1 的
+    #: 债会终身稀释占空比、门自激停车（2026-09-11 c6b-margin：0.06→0.13 每个评估轮必停）。
+    #: None → 回退 `started_at` 终身口径（无 duty 数据的旧调用方/测试，行为不变）。
+    duty_baseline_ts: float | None = None
+    #: 已完成 iteration 事件数（G13 最小样本守卫：不足不判，防开门即响）。
+    duty_events: int = 0
 
     def wall_sec(self, now: float) -> float | None:
         """墙钟秒（自首条 run_start 起）；基线不可知 → None。"""
@@ -389,6 +399,55 @@ def first_run_start_ts(jsonl_path: Path) -> float | None:
     except OSError:
         return None
     return None
+
+
+def first_iter_end_ts(jsonl_path: Path) -> float | None:
+    """首个完成迭代（iteration 事件）的结束时刻（epoch 秒）；无 → None。
+
+    G13 duty 的分母基线（§385）：开腿到首个迭代完成之间的冷启动/换挡算「起步
+    热身」，不计入事故分母——2026-09-11 c6b-margin 事故里 it1 的 47min 冷启动
+    不该让整条腿的「占空比」终身被稀释、每评估轮必停。
+    """
+    try:
+        with open(jsonl_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(r, dict) and r.get("event") == "iteration":
+                    ts = r.get("time")
+                    if isinstance(ts, str):
+                        try:
+                            return time.mktime(time.strptime(ts, _TS_FMT))
+                        except ValueError:
+                            continue
+    except OSError:
+        return None
+    return None
+
+
+def count_iteration_events(jsonl_path: Path) -> int:
+    """已完成 iteration 事件数（G13 最小样本守卫的分子）。文件缺失 → 0。"""
+    n = 0
+    try:
+        with open(jsonl_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(r, dict) and r.get("event") == "iteration":
+                    n += 1
+    except OSError:
+        return 0
+    return n
 
 
 def sum_train_samples(jsonl_path: Path) -> float:
@@ -883,29 +942,50 @@ def _eval_dependency(rule: GateRule, ctx: _Ctx) -> _Partial:
 
 
 def _eval_duty(rule: GateRule, ctx: _Ctx) -> _Partial:
-    """G13 事故熔断（2026-09-11 评审新增）：有效训练占空比过低 → REMEDIATE。
+    """G13 事故熔断（2026-09-11 评审新增；§385 修复口径）：有效训练占空比过低 → REMEDIATE。
 
     c6 的病灶形态：6.5h 墙钟里只有 ~1h 训练（事故/排队吃掉 5.5h）。墙钟预算门
     （G5）看不出来——"3h 全是事故、训练 40min"在 G5 眼里只是"还没到顶"。
-    duty = train_sec / wall_sec（分子跨重启从 iteration 事件重算，分母自首条
-    run_start 起）。占空比 < min_train_frac → 课程在烧事故，停车复诊。
+
+    口径（§385 修复）：
+      duty = Σ ppo_cloud_sec / (now − 首个完成迭代的结束时刻)
+      - 分母基线自**首个完成迭代**起算——开腿冷启动（it1 常磨数十分钟）与停车重启
+        死时间是常态起步成本，不写进事故分母；否则 it1 的债终身稀释占空比，门不停
+        自激（2026-09-11 c6b-margin：duty 0.06→0.13，每个评估轮必停）。
+      - 分子不变：Σ 云端自报真训练秒（跨重启从迭代事件重算）。
+      - 最小样本守卫：完成迭代 < `DUTY_MIN_EVENTS` → unknown（不判，防开门即响）。
+      - 无 duty 基线数据（旧调用方）→ 回退终身口径（started_at 起算），行为不变。
     """
     frac = rule.min_train_frac if rule.min_train_frac is not None else 0.3
     if ctx.budget is None or ctx.now is None:
         return _Partial(False, 0.0, unknown=True, reason="缺 budget/now（duty 门不判）")
-    wall = ctx.budget.wall_sec(ctx.now)
-    if wall is None or wall <= 0:
+    b = ctx.budget
+    if b.duty_baseline_ts is not None:
+        if b.duty_events < DUTY_MIN_EVENTS:
+            return _Partial(
+                False,
+                0.0,
+                unknown=True,
+                reason=f"完成迭代 {b.duty_events} < {DUTY_MIN_EVENTS}（起步期不判）",
+            )
+        baseline: float | None = b.duty_baseline_ts
+    else:
+        baseline = b.started_at  # 老调用方回退终身口径
+    if baseline is None:
+        return _Partial(False, 0.0, unknown=True, reason="无 duty 基线（duty 门不判）")
+    wall = float(ctx.now) - baseline
+    if wall <= 0:
         return _Partial(False, 0.0, unknown=True, reason="无墙钟基线（duty 门不判）")
-    duty = ctx.budget.train_sec / wall
+    duty = b.train_sec / wall
     if duty >= frac:
         return _Partial(False, 0.0, reason=f"有效训练占空比 {duty:.2f} ≥ {frac:.2f}（健康）")
-    hours = ctx.budget.train_sec / 3600.0
+    hours = b.train_sec / 3600.0
     return _Partial(
         True,
         1.0,
         reason=(
             f"有效训练占空比 {duty:.2f} < {frac:.2f}"
-            f"（{hours:.2f}h 训练 / {wall / 3600.0:.2f}h 墙钟）——腿在烧事故，复诊"
+            f"（{hours:.2f}h 训练 / {wall / 3600.0:.2f}h 墙钟·自首个完成迭代起）——腿在烧事故，复诊"
         ),
     )
 
@@ -946,6 +1026,7 @@ def evaluate(
     override: Mapping[str, Any] | None = None,
     course_fp: str = "",
     decider: str = "loop",
+    only_kinds: Sequence[str] | None = None,
 ) -> GateResult:
     """课程结束门求值（纯函数，§4.1）。
 
@@ -958,6 +1039,8 @@ def evaluate(
         override: G12 人工改向（最高优先级）；非法由 `load_override` 抛。
         course_fp: 本课课程指纹；用于行过滤与 sustain 去重键。
         decider: "loop" | "notebook" | "cli"（记入事件，血缘可归因）。
+        only_kinds: 非 None 时只求值这些 kind（§385：非评估轮单独查 duty）；
+            其余规则全部当作休眠跳过。eval rows 为空时依赖 rows 的门自然 unknown。
 
     Returns:
         GateResult：verdict ∈ {HOLD, ADVANCE, REMEDIATE, STOP, PAUSE, ABORT}。
@@ -985,12 +1068,16 @@ def evaluate(
     for rule in spec.rules:
         if rule.kind in ("plateau", "budget"):
             continue
+        if only_kinds is not None and rule.kind not in only_kinds:
+            continue
         partials[rule.id] = _eval_one(rule, ctx, trend_rows, spec)
         completions[rule.id] = partials[rule.id].completion
 
     # ---- pass 2：分流门（route 读 pass 1 的完成度）----
     for rule in spec.rules:
         if rule.kind not in ("plateau", "budget"):
+            continue
+        if only_kinds is not None and rule.kind not in only_kinds:
             continue
         p = _eval_one(rule, ctx, trend_rows, spec, completions)
         partials[rule.id] = p
@@ -1027,6 +1114,8 @@ def evaluate(
     #: 达标但被 ADVANCE 附加条件挡住的门（观测必须自带牙齿：HOLD 也要说清差在哪）。
     blocked_advance: list[str] = []
     for rule in spec.rules:
+        if rule.id not in partials:  # §385 only_kinds 过滤掉的规则不参与判决
+            continue
         p = partials[rule.id]
         verdict = "ADVANCE" if rule.verdict == GATE_SPLIT else rule.verdict
         released = p.fired and p.completion >= 1.0
@@ -1182,6 +1271,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_hours=float(getattr(course, "max_hours", 0.0) or 0.0),
         iters=int(getattr(course, "iters", 0) or 0),
         cur_iter=int(getattr(course, "_cur_iter", 0) or 0),
+        # G13 duty 输入（§385）：分子与分母基线都从账本取，CLI 与 loop 同源。
+        train_sec=sum_train_sec(traj / args.log),
+        duty_baseline_ts=first_iter_end_ts(traj / args.log),
+        duty_events=count_iteration_events(traj / args.log),
     )
     override = None
     if course.gates is not None:

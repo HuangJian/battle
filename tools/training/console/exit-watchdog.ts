@@ -13,7 +13,8 @@
  *   - 幂等：条目已带 error 不再重复写；正常 stop 会 clearComponent（条目消失）→ 不触发。
  */
 
-import { appendFileSync } from 'fs'
+import { appendFileSync, readFileSync } from 'fs'
+import { dirname, join } from 'node:path'
 import { loadConfig } from '../config'
 import { warn } from '../log'
 import { pidAlive } from '../net'
@@ -53,18 +54,19 @@ export interface FailureLogIO {
   save?: (key: Component, entry: RegistryEntry) => void
 }
 
-/** 构造「意外退出」标记文本（含日志尾），供落盘与测试断言。 */
+/** 构造「意外退出/已停车」标记文本（含日志尾），供落盘与测试断言。 */
 export function buildExitMarker(
   key: Component,
   entry: RegistryEntry,
   tail: string[],
   now: string,
+  planned?: string | null,
 ): string {
-  const lines = [
-    `[console] ${now} ${COMPONENT_LABELS[key]} 意外退出 (PID ${entry.pid})——非正常退出，` +
-      '请检查下列日志；用控制台「启动」恢复（原因尾段见上）：',
-    ...(tail.length ? tail.map((l) => `  | ${l}`) : ['  | (日志缺失或为空)']),
-  ]
+  const head = planned
+    ? `[console] ${now} ${COMPONENT_LABELS[key]} 已停车（PID ${entry.pid}）：${planned}`
+    : `[console] ${now} ${COMPONENT_LABELS[key]} 意外退出 (PID ${entry.pid})——非正常退出，` +
+      '请检查下列日志；用控制台「启动」恢复（原因尾段见上）：'
+  const lines = [head, ...(tail.length ? tail.map((l) => `  | ${l}`) : ['  | (日志缺失或为空)'])]
   return lines.join('\n')
 }
 
@@ -76,8 +78,9 @@ export function recordExitFailure(
   tail: string[],
   io: FailureLogIO = {},
   now: string = new Date().toISOString(),
+  planned?: string | null,
 ): string {
-  const marker = buildExitMarker(key, entry, tail, now)
+  const marker = buildExitMarker(key, entry, tail, now, planned)
   if (logAbs) {
     try {
       ;(io.append ?? ((p, t) => appendFileSync(p, t, 'utf-8')))(logAbs, `\n${marker}\n`)
@@ -86,8 +89,55 @@ export function recordExitFailure(
     }
   }
   ;(io.warnFn ?? warn)(marker.replace(/\n/g, ' '))
-  ;(io.save ?? saveComponent)(key, { ...entry, error: `意外退出 (PID ${entry.pid})`, exitAt: now })
+  ;(io.save ?? saveComponent)(key, {
+    ...entry,
+    error: planned ? `已停车：${planned}` : `意外退出 (PID ${entry.pid})`,
+    exitAt: now,
+  })
   return marker
+}
+
+/** 组件账本（training_log.jsonl）最近的「设计内停车」事件 → 停车原因；无 → null。
+ *
+ * §385：gate_verdict / circuit_break 事件意味着进程是**按判决停车**（G1/G5/G7/G13、
+ * F4 熔断…），不是意外崩溃——exit-watchdog 不该标「意外退出」误导操作员翻崩溃日志。
+ * 只在 withinMs 内的事件算数（门判决到进程退出是秒级，300s 余量足够；更早的旧判决
+ * 与本次退出无关）。JSON 损坏行跳过；文件缺失/不可读 → null（维持原意外路径）。 */
+export function recentPlannedStop(
+  jsonlAbs: string | null,
+  withinMs = 300_000,
+  now = Date.now(),
+): string | null {
+  if (!jsonlAbs) return null
+  let text = ''
+  try {
+    text = readFileSync(jsonlAbs, 'utf-8')
+  } catch {
+    return null
+  }
+  const lines = text.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!.trim()
+    if (!line) continue
+    let r: { event?: unknown; time?: unknown; verdict?: unknown; reason?: unknown }
+    try {
+      r = JSON.parse(line) as typeof r
+    } catch {
+      continue
+    }
+    if (!r || typeof r !== 'object') continue
+    if (r.event !== 'gate_verdict' && r.event !== 'circuit_break') continue
+    const t = r.time
+    if (typeof t !== 'string') continue
+    const ts = Date.parse(t.replace(' ', 'T')) // "YYYY-MM-DD HH:mm:ss" 按本地时间解析
+    if (Number.isNaN(ts)) continue
+    if (now - ts > withinMs) return null // 最近的相关事件太旧 → 本次退出与门无关
+    const verdict =
+      r.verdict === undefined ? (r.event === 'circuit_break' ? 'ABORT' : '') : String(r.verdict)
+    const reason = typeof r.reason === 'string' ? r.reason : ''
+    return reason ? `${verdict}: ${reason}`.slice(0, 220) : verdict || '停车判决'
+  }
+  return null
 }
 
 /** 从 spec.cmd 取监听端口（--port N / --port=N）；无 → null。 */
@@ -220,7 +270,13 @@ export async function runExitCheck(): Promise<number> {
       if ((await classifyExit(key, entry)) === 'alive') continue // 仅换代，非退出
       const logRel = resolveComponentLog(key, cfg, course) ?? entry.log ?? null
       const tail = logRel ? readLogTail(logRel, 12).lines : []
-      recordExitFailure(key, entry, logRel, tail)
+      // §385：trainingLoop 账本有最近 gate_verdict/circuit_break → 设计内停车，
+      // 标「已停车(原因)」而非「意外退出」；其余组件/无事件走原意外路径。
+      const planned =
+        key === 'trainingLoop' && logRel
+          ? recentPlannedStop(join(dirname(logRel), 'training_log.jsonl'))
+          : null
+      recordExitFailure(key, entry, logRel, tail, {}, undefined, planned)
       recorded++
     }
     return recorded
