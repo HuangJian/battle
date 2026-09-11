@@ -1,6 +1,7 @@
 # 如何给 DECISIONS.md 加一条（决策治理，2026-09-08 起执行）
 
-> 完整背景见 `plan/decisions-governance.md`。写之前先过下面的闸门——多数时候结论是「不写」。
+> 本文件即权威清单（`AGENTS.md` §6.3 与 `docs/agents.details.md` §6.3 都指向这里）。
+> 写之前先过下面的闸门——**多数时候结论是「不写」**。
 
 ## 0. 三问闸门（有一问答 No，就不写 DECISIONS.md）
 
@@ -36,3 +37,6 @@ ID：`§YYYY-MM-DD-<branch>-<slug>`（branch 去连字符，如 `god-ai` → `go
 - 只追加：新条目只写文件**末尾**，禁止中部插入（合并冲突靠 `.gitattributes` union）。
 - 被取代的条目标 `_(superseded by §ID)_`，永不删除。
 - 正确性由 `bun run check` 里的 `tools/check-decisions.ts` 强制（撞号 / 丢号 / 格式）。
+- 加条目**不需要**跑 `--write-baseline`：校验会自动把「基线里没有的新日期 ID」识别为新增；
+  重写基线只会制造机械 diff，并让已存在的撞号（count 2）永久合法化。
+- 判定的实际门槛见 §0 三问闸门：**能写进代码注释 / 测试断言 / commit message 的，不写这里**。

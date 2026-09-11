@@ -39,6 +39,7 @@ authority and is worth reading before you touch that area.
 8. **Never add an untracked `*.md` to git tracking.** [§5.8]
 9. **"Green" means the gate ran** — `bun run check` / `make python-gate` — not "looks fine". [§9]
 10. **One Author**: only `Simulation` mutates `World`; everything else observes read-only. [§2.1]
+11. **A `DECISIONS.md` entry is the exception, not the reflex** — derive, then pass §6.3's admission gates expecting "don't write". [§6.3]
 
 ---
 
@@ -149,23 +150,23 @@ bun run freeze:l2    # archived-candidate reachability audit over the same corpu
 
 ---
 
-## 6. When in Doubt — Derive From the MANIFEST, Record, Then Execute
+## 6. When in Doubt — Derive, Then Execute; Recording Is the Exception
 
-The autonomy contract: make judgment calls instead of stalling (full detail + DECISIONS entry template: `docs/agents.details.md` §6).
+The autonomy contract: make judgment calls instead of stalling (full detail + entry template: `docs/agents.details.md` §6).
 
 - **6.1 Identify the doubt** — plan silent on a design point / two reasonable implementations unpicked / plan-vs-MANIFEST conflict / unspecified tunable value.
 - **6.2 Derive the solution** in priority order: MANIFEST → DECISIONS precedent → existing-code consistency → classic Famicom authenticity → the plan's stated rationale.
-- **6.3 Record AFTER passing the three gates (decision governance, plan/decisions-governance.md)** — before any `DECISIONS.md` entry ask: ① 有无被否决的备选方案？ ② 未来会重犯/重查？ ③ 能否就近表达（注释/断言/配置/docstring）？ any No → don't write. 真决策/禁令/铁律 → `DECISIONS.md`; 实验记录/调优 → `docs/*.progress.md`（禁止双写）; bugfix/UI/运维 → commit message only. New entries use date IDs `§YYYY-MM-DD-<branch>-<slug>` (branch 去连字符; §1–§384 frozen contract, never renumber/delete; superseded marked `_(superseded by §ID)_`). Template ≤12 lines (背景/备选与否决/决定/违反后果); full process + template: `docs/decisions/HOW-TO-ADD.md`; `bun run check` enforces via `tools/check-decisions.ts`.
+- **6.3 Record only what survives the three admission gates** (rejected alternative · future re-offence · not-expressible-nearby) — most doubts are execution, not decisions, and are carried by a comment / test assertion / commit message instead; routing, entry template and the `--write-baseline` caveat: `docs/agents.details.md` §6.3.
 
 - **6.3b God-AI behavior changes = a new era** — required triple: new `DECISIONS.md` entry + 60-seed three-difficulty baseline (eval-suite v7; `hard` primary, classic/chaos reference) + frozen-signature golden update (`bun run freeze:check` going red is the forced explicit judgment, not an error); tune on `hard`, conclude only on ≥60 seeds — current official baseline: `docs/god-ai-tuning.progress.md` Part 0.1 (DECISIONS §293).
 
 ### 6.4 Execute
 
-Implement the recorded decision; if it proves wrong mid-way, update the `DECISIONS.md` entry with a dated note and proceed — never silently deviate.
+Implement the decision; if it proves wrong mid-way, update its record with a dated note and proceed — never silently deviate.
 
 ### 6.5 What NOT to decide alone
 
-Escalate to the human (ask, don't guess) only for: One-Author breaks the MANIFEST forbids · a new runtime dependency or build tool · public game-feel changes the plan did not contemplate (tank speed defaults, new game modes) · deleting/rewriting a system with no test coverage and no audit doc — everything else is yours to decide, record, and execute.
+Escalate to the human (ask, don't guess) only for: One-Author breaks the MANIFEST forbids · a new runtime dependency or build tool · public game-feel changes the plan did not contemplate (tank speed defaults, new game modes) · deleting/rewriting a system with no test coverage and no audit doc — everything else is yours to decide and execute.
 
 ---
 

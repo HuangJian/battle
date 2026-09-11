@@ -1,6 +1,9 @@
 #!/usr/bin/env bun
 /**
- * DECISIONS.md 决策治理校验（plan/decisions-governance.md P3，2026-09-08 落地）
+ * DECISIONS.md 决策治理校验（docs/decisions/HOW-TO-ADD.md，2026-09-08 落地）
+ *
+ * 报错时先读 `docs/decisions/HOW-TO-ADD.md`：**加条目不是默认动作**（三问闸门，多数结论是
+ * 「不写」），且加条目**不需要** `--write-baseline`（重写基线会把已有撞号合法化）。
  *
  * 四条校验：
  *  1. 编号集合不变式 —— 编号 multiset 与 tools/decisions-baseline.json 完全一致：
@@ -28,6 +31,8 @@ const DATE_ID_RE = /^\d{4}-\d{2}-\d{2}-[a-z0-9-]+$/
 const HEADER_KEY_RE = /^(\d{4}-\d{2}-\d{2}-[a-z0-9-]+|\d+(?:\.\d+)?(?:[A-Za-z]|-[A-Za-z0-9]+)?)/
 /** 单条正文行数上限（超过=该搬 progress 文档） */
 const BODY_LINE_LIMIT = 40
+/** 报错时指向的权威清单（三问闸门 + 模板 + 归属） */
+const HOWTO = 'docs/decisions/HOW-TO-ADD.md'
 
 /** 仓库根 = 调用目录（bun run check 从仓库根执行；被别的目录调用会先失败在存在性守卫） */
 const ROOT = process.cwd()
@@ -154,10 +159,15 @@ function main() {
   if (missing.length) {
     failed = true
     console.error(`[check-decisions] FAIL 编号丢失（外部引用断链）: ${missing.join(', ')}`)
+    console.error(
+      `  → 旧编号永不删除；要改口径请新增条目并在正文标注 _(superseded by §ID)_（${HOWTO} §3）`,
+    )
   }
   if (newDups.length) {
     failed = true
     console.error(`[check-decisions] FAIL 新撞号: ${newDups.join(', ')}`)
+    console.error(`  → 写前先 tail -200 查当日已有 ID（同日同分支第 N 条加 -N）；`)
+    console.error(`    不要用 --write-baseline 绕过——它会把撞号写进基线变成永久合法（${HOWTO}）`)
   }
 
   // 3. 新条目格式
@@ -169,6 +179,9 @@ function main() {
     failed = true
     console.error(
       `[check-decisions] FAIL 新条目未用日期 ID（应形如 §YYYY-MM-DD-<branch>-<slug>）: ${badFormat.join(', ')}`,
+    )
+    console.error(
+      `  → 但要先反问：这条真需要进 DECISIONS 吗？${HOWTO} §0 三问闸门里多数结论是「不写」`,
     )
   }
 

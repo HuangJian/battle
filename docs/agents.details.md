@@ -462,9 +462,9 @@ packed-refs write gotcha) — verify with `git show-ref`, not the fetch banner.
 
 ---
 
-## §6 When in doubt — derive from the MANIFEST, record, then execute
+## §6 When in doubt — derive, then execute; recording is the exception
 
-The autonomy contract: make judgment calls instead of stalling.
+The autonomy contract: make judgment calls instead of stalling. **A doubt is answered by deciding, not by filing an entry** — admission gates live in `docs/decisions/HOW-TO-ADD.md` and the default verdict is "don't write".
 
 ### 6.1 Identify the doubt
 A doubt is any of: the plan silent on a design point · two reasonable implementations and the plan
@@ -480,14 +480,31 @@ visual/tunable value (color, timing, count, threshold).
 5. **The plan's stated rationale** — if the plan gives a "why", honor it even when the "what" is
    ambiguous.
 
-### 6.3 Record the decision BEFORE executing
-- **Decision admission (决策治理, plan/decisions-governance.md, 2026-09-08)**: before opening
-  `DECISIONS.md` run the three gates: ① 有没有被否决的备选方案？ ② 未来 agent 会不会重犯/重查？
-  ③ 能不能就近表达（代码注释 / 测试断言 / 配置字段名 / docstring）？ — 有一问答 No 就不写。
-- **Three-way routing**: 真决策 / 禁令 / 铁律（不可逆、有被否决备选、防重犯）→ `DECISIONS.md`;
-  实验记录 / 参数调优 / 探针结论 → the matching `docs/*.progress.md`（**禁止双写**）;
-  bugfix / UI 调整 / 运维清理 → **commit message only**（要防重犯者落成测试断言）;
-  临时上下文 → `.workbuddy/memory/YYYY-MM-DD.md`.
+### 6.3 Record the decision BEFORE executing — but only if it survives admission
+
+**权威清单 = `docs/decisions/HOW-TO-ADD.md`；默认结论是「不写」。** 三问闸门（有一问答 No 就不写）：
+
+| # | 闸门 | 答 No 意味着 |
+|---|---|---|
+| ① | 有没有**被否决的备选方案**？ | 那是执行，不是决策（bugfix / UI 调整天然全灭）。 |
+| ② | 未来 agent 会不会**重犯或重查**？ | 不会 → 不记。会 → 记，但优先考虑「勿重提清单」。 |
+| ③ | **能不能就近表达**？ | 能 —— 代码注释 / 测试断言 / 配置字段名 / docstring 说清的，**一律不进中央文件**。 |
+
+**四类归属**：真决策 / 禁令 / 铁律（不可逆、有被否决备选、防重犯）→ `DECISIONS.md`;
+实验记录 / 参数调优 / 探针结论 → 对应 `docs/*.progress.md`（**禁止双写**）;
+bugfix / UI 调整 / 运维清理 → **commit message only**（要防重犯处落成测试断言）;
+临时上下文 → `.workbuddy/memory/YYYY-MM-DD.md`。
+
+**三个真实踩过的坑（2026-09-11，远程 worker 热替换护栏那次）**：
+1. **把「记录」当默认动作** —— 代码注释 + 5 个测试断言已经把事情说全了，仍然开了条目；
+   根因是本节旧标题写着 "…Record, Then Execute"，把闸门放在了标题之后。
+2. **顺手 `--write-baseline`** —— 加条目**不需要**重写基线（校验只查"编号丢失 / 新撞号 /
+   新日期 ID 格式"，基线里没有的新 ID 会被正常识别为 added）。重写基线 = 一个纯机械 diff，
+   且会把**已有的撞号合法化**（基线写入 count=2 后就再也不报）。
+3. **自创字段 / 超长** —— 模板是固定的 4 段（背景 / 备选与否决 / 决定 / 违反后果）且 **≤12 行**；
+   单条正文 >40 行会触发 `check-decisions` 告警（该搬 progress 文档了）。
+
+**真写才走的流程（只有过闸门才执行）**：
 - **New-entry ID (自治理生效起)**: `§YYYY-MM-DD-<branch>-<slug>`（branch 去连字符，如
   `god-ai` → `godai`；同日同分支第 N 条加 `-N`）. Old §1–§384 are a **frozen external-reference
   contract: never renumber, never delete**; superseded entries are marked `_(superseded by §ID)_`.
