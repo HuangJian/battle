@@ -11,6 +11,8 @@ rl/queue.py 各自维护了一份逐字节相同的 `_POPEN_NO_WINDOW`（Windows
   popen_kwargs(**extra) —— 便捷包装：返回 {**POPEN_NO_WINDOW, **extra}。
   rmtree_best_effort(path, ignore_errors=False) —— 递归删除目录，**沙箱删除保护
     （SystemExit）绝不外泄**；替代裸 shutil.rmtree / ignore_errors=True。
+  sandbox_delete_blocked(anchor) —— 探针：当前是否正被沙箱删除保护拦截真实删除
+    （门禁抖动归因用，见 docstring）。
 """
 
 from __future__ import annotations
@@ -58,6 +60,34 @@ def rmtree_best_effort(path: Any, *, ignore_errors: bool = False) -> bool:
             return False
         raise
     return True
+
+
+def sandbox_delete_blocked(anchor: Any) -> bool:
+    """探针：当前环境是否正在拦截真实删除（沙箱 safe-delete 配额耗尽）。
+
+    2026-09-12 门禁抖动根因：WorkBuddy safe-delete shim 按 turn 计批量删除配额
+    （阈值 50，见 tools/githook/nn-python-gate.sh 头注）；同一会话反复跑全量门禁
+    必然踩满，此后所有真实删除被拒并抛 SystemExit。rmtree_best_effort 把它转成
+    False（best-effort），于是「断言删除落地」的测试（test_workdir_sweep /
+    prune_job_dirs）转红——单跑（配额新鲜）又变绿，表现为偶发（实证：
+    tmp/pre-commit-nn-*.log，assert 1 == 2 + [safe-delete] 行）。
+
+    约定：**仅在删除断言已失败的路径调用**（绿路径零开销、零配额消耗）。在 anchor
+    下建一个探针目录并用裸 shutil.rmtree 删除——SystemExit = 正在被拦 → True；
+    删得掉 / OSError → False（失败是真回归，调用方测试应继续红）。必须用裸
+    rmtree：rmtree_best_effort 会吞掉 SystemExit，探针就失灵了。
+    """
+    from pathlib import Path
+
+    probe = Path(anchor) / "_shim_probe"
+    try:
+        probe.mkdir(parents=True, exist_ok=True)
+        shutil.rmtree(probe)
+    except SystemExit:
+        return True
+    except Exception:
+        return False
+    return False
 
 
 def popen_kwargs(**extra: Any) -> dict[str, Any]:

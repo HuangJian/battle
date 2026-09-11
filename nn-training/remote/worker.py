@@ -303,8 +303,10 @@ def prune_job_dirs(work_dir: Path, keep: int = JOB_DIR_KEEP, log=lambda msg: Non
     removed = 0
     for d in dirs[keep:]:
         try:
-            rmtree_best_effort(d, ignore_errors=True)
-            removed += 1
+            # 计数必须挂在返回值上（与 rl/workdir_sweep 同策略）：沙箱删除保护拦截
+            # 时 rmtree_best_effort 返回 False，无条件 +1 会把没删掉的也算进 n。
+            if rmtree_best_effort(d, ignore_errors=True):
+                removed += 1
         except BaseException as e:  # 含 SystemExit：沙箱删除守卫会打死调用线程
             log(f"prune: 跳过 {d.name}（{type(e).__name__}）")
     if removed:

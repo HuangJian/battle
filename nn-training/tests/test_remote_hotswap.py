@@ -35,6 +35,7 @@ from pathlib import Path
 import pytest
 
 import platform_utils
+from platform_utils import sandbox_delete_blocked
 from remote import worker as W
 from remote.protocol import CodeChangedError, ProtocolError
 from remote.worker import prune_job_dirs
@@ -325,6 +326,11 @@ def test_prune_job_dirs_keeps_recent_and_skips_code_cache(tmp_path: Path) -> Non
     logs: list[str] = []
     removed = prune_job_dirs(work, keep=2, log=logs.append)
 
+    if (removed != 2 or sorted(p.name for p in work.iterdir()) != ["code_cache", "j3", "j4"]) and sandbox_delete_blocked(work):
+        # 删除没落地 + 探针确认被拦：沙箱 safe-delete 配额拦截（环境）则 skip，
+        # 否则是真回归（探针删得掉），继续走断言红。and 短路保证探针只在已失败
+        # 路径跑，绿路径零开销。
+        pytest.skip("沙箱 safe-delete 配额耗尽拦截删除（环境，非回归）——换 turn 重跑即绿")
     assert removed == 2
     left = sorted(p.name for p in work.iterdir())
     assert left == ["code_cache", "j3", "j4"]  # 最近 2 个 job + 代码缓存
