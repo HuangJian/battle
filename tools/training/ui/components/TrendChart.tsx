@@ -13,6 +13,9 @@ export interface TrendChartProps {
   fmt: (v: number | null) => string
   tone?: 'g' | 'y' | 'r'
   height?: number
+  /** y 轴下界上限：实际下界 = min(dataMin, yFloor)。缺省贴 dataMin。
+   *  击杀/道具传 0（基底锁 0）；胜率传 0.3（基底不得高于 30%）。 */
+  yFloor?: number
 }
 
 const VB_W = 260
@@ -21,7 +24,7 @@ const PAD_R = 6
 const PAD_T = 6
 const PAD_B = 16
 
-export function TrendChart({ series, range, fmt, tone, height = 56 }: TrendChartProps) {
+export function TrendChart({ series, range, fmt, tone, height = 56, yFloor }: TrendChartProps) {
   const [hover, setHover] = useState<number | null>(null)
   const s = sliceSeries(series, range)
   const vals = s.vals
@@ -39,8 +42,10 @@ export function TrendChart({ series, range, fmt, tone, height = 56 }: TrendChart
 
   const plotW = VB_W - PAD_L - PAD_R
   const plotH = height - PAD_T - PAD_B
-  const min = Math.min(...valid)
+  const dataMin = Math.min(...valid)
   const max = Math.max(...valid)
+  // yFloor = 下界上限：min(数据最小, yFloor)——击杀/道具 0；胜率 ≤0.3
+  const min = yFloor !== undefined ? Math.min(dataMin, yFloor) : dataMin
   const span = max - min
 
   const px = (i: number): number => PAD_L + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW)

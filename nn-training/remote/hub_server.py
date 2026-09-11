@@ -383,6 +383,16 @@ class HubHandler(BaseHTTPRequestHandler):
         for jid in jids:
             mp = self.store._job_dir(jid) / "manifest.json"
             manifest = json.loads(mp.read_text(encoding="utf-8"))
+            # 领取标记：首次向 worker 下发即 touch（console 据此区分「排队等取」与「已在跑」）。
+            # 无 worker 轮询 /jobs/next 时不会出现 claimed → 排队超时可告警。
+            claim = self.store._job_dir(jid) / "claimed"
+            if not claim.exists():
+                try:
+                    # `_now` 属 _JobStore（handler 无此属性）——漏写 store. 会让
+                    # 每个 /jobs/next 在「有可领任务」路径抛 500，云 worker 全取不到 job
+                    claim.write_text(str(self.store._now()), encoding="utf-8")
+                except OSError:
+                    pass
             self._json({"job_id": jid, "manifest": manifest, "halt": halt})
             return
         self._json({"job_id": None, "halt": halt})  # 无可领取 job

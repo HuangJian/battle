@@ -41,6 +41,9 @@ export interface NodeView {
   concurrency: number
   /** /v1/ping 实时探测；null = 未探测（disabled 时跳过）。 */
   online: boolean | null
+  /** 慢节点（ping 失败但近期仍在成功结算，算力受限）：展示「慢」而非「离线」。
+   *  仅当 online === false 时有意义（在线节点无慢语义）。 */
+  slow: boolean
   codeHash: string | null
   cpus: number | null
   busy: boolean
@@ -98,6 +101,12 @@ export interface ConsoleStateView {
     status: 'halted' | 'recovered'
     clearedAt?: string
     clearReason?: string
+  } | null
+  /** PPO 任务排队超时（>5min 无 worker 领取）：warning 横幅——云端 worker 可能断连。 */
+  ppoQueueStall?: {
+    jobId: string
+    waitedSec: number
+    it: number | null
   } | null
   /** 局域网只读视图（服务端按请求来源 stamp；true = 本页只读——动作按钮禁用 + 只读角标）。
    *  缺省（SSR/测试直构）时客户端回退 location.hostname 判定。 */
@@ -213,6 +222,9 @@ export interface IterActuals {
   totalKills: number
   totalPU: number
   avgTicks: number
+  /** 胜局平均残血（hp 单位：剩余命每命计满额 maxHp + 当前 hp）。
+   *  null = 数据源无 residualHp（旧 manifest / 无胜局）。 */
+  avgResidualHp: number | null
 }
 
 export interface EvalSummary {
@@ -229,6 +241,8 @@ export interface EvalSummary {
   avgTicks: number | null
   totalKills: number | null
   totalPU: number | null
+  /** 胜局平均残血；null = 评估记录无 residualHp 字段。 */
+  avgResidualHp: number | null
   scoreMean: number | null
   scoreStd: number | null
 }
@@ -555,13 +569,18 @@ export function metricSeries(rows: IterRow[]): Series[] {
     {
       key: 'kills',
       label: '击杀',
-      vals: chrono.map((r) => (r.actuals ? r.actuals.totalKills : Number.NaN)),
+      // 击杀/道具趋势 = 每局平均（用户指令 2026-09-11：与表列同口径，不展示总和）
+      vals: chrono.map((r) =>
+        r.actuals && r.actuals.games > 0 ? r.actuals.totalKills / r.actuals.games : Number.NaN,
+      ),
       iters,
     },
     {
       key: 'pu',
       label: '道具',
-      vals: chrono.map((r) => (r.actuals ? r.actuals.totalPU : Number.NaN)),
+      vals: chrono.map((r) =>
+        r.actuals && r.actuals.games > 0 ? r.actuals.totalPU / r.actuals.games : Number.NaN,
+      ),
       iters,
     },
   ]

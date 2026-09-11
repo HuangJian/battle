@@ -223,7 +223,7 @@
       {
         "id": "G2",
         "kind": "skill_floor",
-        "max_zero_kill_frac": 0.30,
+        "max_zero_kill_frac": 0.3,
         "verdict": "ADVANCE",
       },
       {
@@ -272,7 +272,7 @@
         "id": "G8",
         "kind": "retention",
         "course": "c5-margin",
-        "min_win_rate": 0.40,
+        "min_win_rate": 0.4,
         "every_rounds": 2,
         "verdict": "PAUSE",
         "enabled": false,

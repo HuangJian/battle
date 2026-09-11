@@ -382,6 +382,15 @@ a.tc-preset{text-decoration:none;display:inline-block}
 .tc-dot--warn{background:var(--yellow)}
 .tc-dot--on{background:var(--green)}
 .tc-dot--dead{background:var(--red)}
+.tc-dot--empty{background:var(--border)}
+
+/* Switch（节点启停 toggle，role=switch；内嵌轨道 28×16） */
+.tc-switch{display:inline-flex;align-items:center;border:none;background:none;padding:2px;margin-left:2px;cursor:pointer;line-height:1}
+.tc-switch:disabled{opacity:.45;cursor:not-allowed}
+.tc-switch__track{display:inline-block;width:28px;height:16px;border-radius:999px;background:var(--gray-bg);border:1px solid var(--border);position:relative;transition:background .15s,border-color .15s}
+.tc-switch__thumb{position:absolute;top:1px;left:1px;width:12px;height:12px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(16,24,40,.25);transition:left .15s}
+.tc-switch--on .tc-switch__track{background:var(--green);border-color:var(--green)}
+.tc-switch--on .tc-switch__thumb{left:13px}
 
 /* 节点 pill 行 */
 .tc-nodes{display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap;background:var(--card);border:1px solid var(--border);border-radius:var(--r-3);padding:var(--sp-3) var(--sp-4);margin-bottom:var(--sp-4)}
@@ -391,6 +400,10 @@ a.tc-preset{text-decoration:none;display:inline-block}
 .tc-npill b{font-family:ui-monospace,'Cascadia Mono',Consolas,monospace;font-weight:600;font-size:var(--fs-2)}
 .tc-npill .v{color:var(--green);font-weight:600;font-size:var(--fs-2)}
 .tc-npill--off .v{color:var(--muted)}
+/* 停用节点 pill：灰点（tc-dot--empty）+ 灰字，与离线红点区分（2026-09-11 用户指令） */
+.tc-npill--off.tc-npill--disabled .v{color:var(--gray)}
+/* 慢节点 pill：琥珀字（与 tc-dot--warn 同色系）——仍在贡献，非掉线 */
+.tc-npill--off.tc-npill--slow .v{color:var(--yellow)}
 .tc-npill--dead{opacity:.72}
 .tc-npill--collapse{color:var(--accent);border-color:var(--accent);background:var(--accent-bg);font-weight:600}
 .tc-npill__contrib{font-family:ui-monospace,'Cascadia Mono',Consolas,monospace;font-weight:700;font-size:var(--fs-2);color:var(--green);border-left:1px solid var(--border);padding-left:var(--sp-2);margin-left:2px}

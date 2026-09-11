@@ -1,9 +1,16 @@
-/** NodePills.tsx — 节点 pill 行（一屏行）：在线 pill 一眼扫完；离线/停用默认折叠成计数 pill，
- *  点击展开（用户指令）；点在线 pill 就地编辑并发/启用/冒烟。完整统计进抽屉（节点统计 ›）。 */
+/** NodePills.tsx — 节点 pill 行（一屏行）：在线/慢/离线 pill 一眼扫完（慢与离线不折叠，
+ *  用户指令 2026-09-11 + 本批：慢节点和离线节点不要自动折叠）；仅停用默认折叠成计数 pill。
+ *  启停直接是 pill 上的 toggle 开关。
+ *  状态三分（用户指令：慢节点别标「离线」、停用别用红点）：
+ *    · 在线   — 绿点 ✓N（ping 200）
+ *    · 慢     — 琥珀点「慢」（ping 失败但近期仍在成功结算：算力受限，非掉线）
+ *    · 离线   — 红点「离线」（ping 失败且近期无结算 = 真掉线）
+ *    · 停用   — 灰点「停用」（rl-config enabled=false）— 仍默认折叠
+ *  点在线/慢 pill 就地编辑并发；冒烟与并发编辑仅本机（局域网只读无点击语义）。 */
 
 import { useState } from 'preact/hooks'
 import type { NodeLocalView, NodeView } from '../../../ui/view'
-import { Toggle } from '../../../ui/components/Toggle'
+import { Switch } from '../../../ui/components/Switch'
 
 export interface NodePillsProps {
   nodes: NodeView[]
@@ -18,13 +25,19 @@ export interface NodePillsProps {
 /** 只读视图的节点 pill 提示。 */
 const RO_TITLE = '只读模式：节点编辑/冒烟仅限本机 localhost'
 
+/** 停用折叠 pill 的计数文案。 */
+function disabledSummary(disabled: number): string {
+  return `停用 ${disabled}`
+}
+
 export function NodePills({ nodes, local, onAction, onMore, readOnly }: NodePillsProps) {
-  const [showOff, setShowOff] = useState(false)
+  const [showDisabled, setShowDisabled] = useState(false)
   const [editing, setEditing] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
 
   const online = nodes.filter((n) => n.enabled && n.online === true)
-  const offline = nodes.filter((n) => n.enabled && n.online === false)
+  const slow = nodes.filter((n) => n.enabled && n.online === false && n.slow)
+  const offline = nodes.filter((n) => n.enabled && n.online === false && !n.slow)
   const disabled = nodes.filter((n) => !n.enabled)
 
   return (
@@ -65,7 +78,7 @@ export function NodePills({ nodes, local, onAction, onMore, readOnly }: NodePill
             if (readOnly) return
             setEditing(n.id)
             setDraft(String(n.concurrency))
-            setShowOff(false)
+            setShowDisabled(false)
           }}
           onDraft={(v) => setDraft(v)}
           onSave={() => {
@@ -79,18 +92,44 @@ export function NodePills({ nodes, local, onAction, onMore, readOnly }: NodePill
           onSmoke={() => onAction('nodeSmoke', { id: n.id })}
         />
       ))}
-      {offline.length + disabled.length > 0 ? (
+      {/* 慢/离线始终展开（用户指令：不要自动折叠）；仅停用可折叠。 */}
+      {[...slow, ...offline].map((n) => (
+        <NodeEditPill
+          key={n.id}
+          n={n}
+          editing={editing === n.id}
+          draft={draft}
+          off
+          readOnly={readOnly}
+          onEdit={() => {
+            if (readOnly) return
+            setEditing(n.id)
+            setDraft(String(n.concurrency))
+          }}
+          onDraft={(v) => setDraft(v)}
+          onSave={() => {
+            const num = Number(draft)
+            if (Number.isInteger(num) && num >= 1 && num <= 64) {
+              onAction('setNodeConcurrency', { id: n.id, concurrency: num })
+            }
+            setEditing(null)
+          }}
+          onToggle={(v) => onAction('setNodeEnabled', { id: n.id, enabled: v })}
+          onSmoke={() => onAction('nodeSmoke', { id: n.id })}
+        />
+      ))}
+      {disabled.length > 0 ? (
         <button
           type="button"
           className="tc-npill tc-npill--collapse"
-          aria-expanded={showOff}
-          onClick={() => setShowOff((v) => !v)}
+          aria-expanded={showDisabled}
+          onClick={() => setShowDisabled((v) => !v)}
         >
-          {showOff ? '▾' : '▸'} 离线 {offline.length} · 停用 {disabled.length}
+          {showDisabled ? '▾' : '▸'} {disabledSummary(disabled.length)}
         </button>
       ) : null}
-      {showOff
-        ? [...offline, ...disabled].map((n) => (
+      {showDisabled
+        ? disabled.map((n) => (
             <NodeEditPill
               key={n.id}
               n={n}
@@ -136,6 +175,26 @@ interface NodeEditPillProps {
   onSmoke: () => void
 }
 
+export { NodeEditPill }
+
+/** 非 enabled 节点的折叠态标签（停用 ≠ 离线，颜色+文案双区分）。 */
+function offLabel(n: NodeView): string {
+  if (!n.enabled) return '停用'
+  return n.slow ? '慢' : '离线'
+}
+
+/** 停用/慢节点 pill 的 modifier：停用=灰字（--disabled），慢=琥珀字（--slow，仍在贡献）。 */
+function offPillCls(n: NodeView): string {
+  if (n.enabled) return n.slow ? ' tc-npill--slow' : ''
+  return ' tc-npill--disabled'
+}
+
+/** 非 enabled 节点的状态点样式：停用=灰（不可用），慢=琥珀（可用但慢），离线=红（掉线）。 */
+function offDotCls(n: NodeView): string {
+  if (!n.enabled) return 'tc-dot tc-dot--empty'
+  return n.slow ? 'tc-dot tc-dot--warn' : 'tc-dot tc-dot--dead'
+}
+
 function NodeEditPill({
   n,
   editing,
@@ -164,7 +223,13 @@ function NodeEditPill({
         <button type="button" className="tc-btn tc-btn--sm" disabled={n.busy} onClick={onSave}>
           保存
         </button>
-        <Toggle label={n.enabled ? '启用' : '停用'} checked={n.enabled} onChange={onToggle} />
+        <Switch
+          label={`${n.enabled ? '停用' : '启用'} ${n.id}`}
+          checked={n.enabled}
+          disabled={n.busy}
+          onChange={onToggle}
+        />
+        <span className="tc-muted tc-small">启用</span>
         {n.enabled ? (
           <button
             type="button"
@@ -183,16 +248,29 @@ function NodeEditPill({
   if (off) {
     return (
       <span
-        className={`tc-npill tc-npill--off tc-npill--dead${roCls}`}
+        className={`tc-npill tc-npill--off tc-npill--dead${offPillCls(n)}${roCls}`}
         role={readOnly ? undefined : 'button'}
         tabIndex={readOnly ? undefined : 0}
-        aria-label={`${n.id}，${n.enabled ? '离线' : '停用'}${readOnly ? '（只读）' : '，点击编辑'}`}
-        title={readOnly ? RO_TITLE : undefined}
+        aria-label={`${n.id}，${offLabel(n)}${readOnly ? '（只读）' : '，点击编辑'}`}
+        title={
+          readOnly
+            ? RO_TITLE
+            : n.slow
+              ? `节点响应慢（近期仍在成功结算，上轮贡献 ${n.lastContrib >= 0 ? n.lastContrib : '—'}）——ping 超时 ≠ 掉线；点击编辑`
+              : undefined
+        }
         onClick={readOnly ? undefined : onEdit}
       >
-        <span className="tc-dot tc-dot--dead" />
+        <span className={offDotCls(n)} />
         <b>{n.id}</b>
-        <span className="v">{n.enabled ? '离线' : '停用'}</span>
+        <span className="v">{offLabel(n)}</span>
+        {/* 启停 toggle 直接放 pill 上（用户指令：直观）——慢/离线/停用都可用开关启用 */}
+        <Switch
+          label={`${n.enabled ? '停用' : '启用'} ${n.id}`}
+          checked={n.enabled}
+          disabled={n.busy}
+          onChange={onToggle}
+        />
       </span>
     )
   }
@@ -221,6 +299,14 @@ function NodeEditPill({
           '—'
         )}
       </span>
+      {/* 启停 toggle 直接放 pill 上（用户指令：直观）——点开关即切，不再进编辑态找 checkbox。
+          只读模式下不禁用（与其它动作键同哲学：可点、服务端 403 + toast 提示）。 */}
+      <Switch
+        label={`${n.enabled ? '停用' : '启用'} ${n.id}`}
+        checked={n.enabled}
+        disabled={n.busy}
+        onChange={onToggle}
+      />
     </span>
   )
 }

@@ -34,6 +34,12 @@ function buildRows(rows: IterRow[], mode: IterFilter): MetricRow[] {
   return out
 }
 
+/** 击杀/道具每局平均展示。 */
+function fmtPerGame(total: number, games: number): string {
+  if (games <= 0) return String(total)
+  return (total / games).toFixed(1)
+}
+
 const metricCols: Col<MetricRow>[] = [
   {
     key: 'iter',
@@ -92,7 +98,7 @@ const metricCols: Col<MetricRow>[] = [
   },
   {
     key: 'avgTicks',
-    label: '存活',
+    label: '耗时',
     align: 'num',
     cell: (r) =>
       r.kind === 'main' ? (
@@ -116,23 +122,29 @@ const metricCols: Col<MetricRow>[] = [
     cell: (r) =>
       r.kind === 'main' ? (
         r.main.actuals ? (
-          <>
-            {r.main.actuals.totalKills}
-            <span className="tc-muted"> /{r.main.actuals.games}局</span>
-          </>
+          <span title="每局平均击杀">
+            {fmtPerGame(r.main.actuals.totalKills, r.main.actuals.games)}
+          </span>
         ) : (
           <span className="tc-muted" title="该轮磁盘数据已清理，估算值">
             {r.main.kills.toFixed(1)}≈
           </span>
         )
       ) : r.eval.totalKills !== null ? (
-        <>
-          {r.eval.totalKills}
-          <span className="tc-muted"> /{r.eval.games}局</span>
-        </>
+        <span title="每局平均击杀">{fmtPerGame(r.eval.totalKills, r.eval.games)}</span>
       ) : (
         <span className="tc-muted">-</span>
       ),
+  },
+  {
+    key: 'residualHp',
+    label: '残血',
+    align: 'num',
+    cell: (r) => {
+      const hp = r.kind === 'main' ? r.main.actuals?.avgResidualHp : r.eval.avgResidualHp
+      if (hp == null) return <span className="tc-muted">-</span>
+      return <span title="胜局平均剩余 hp；剩余多命时每命加满额 hp">{hp}</span>
+    },
   },
   {
     key: 'loot',
@@ -141,20 +153,16 @@ const metricCols: Col<MetricRow>[] = [
     cell: (r) =>
       r.kind === 'main' ? (
         r.main.actuals ? (
-          <>
-            {r.main.actuals.totalPU}
-            <span className="tc-muted"> /{r.main.actuals.games}局</span>
-          </>
+          <span title="每局平均道具">
+            {fmtPerGame(r.main.actuals.totalPU, r.main.actuals.games)}
+          </span>
         ) : (
           <span className="tc-muted" title="该轮磁盘数据已清理，估算值">
             {(r.main.loot * 100).toFixed(0)}%≈
           </span>
         )
       ) : r.eval.totalPU !== null ? (
-        <>
-          {r.eval.totalPU}
-          <span className="tc-muted"> /{r.eval.games}局</span>
-        </>
+        <span title="每局平均道具">{fmtPerGame(r.eval.totalPU, r.eval.games)}</span>
       ) : (
         <span className="tc-muted">-</span>
       ),
@@ -165,15 +173,9 @@ const metricCols: Col<MetricRow>[] = [
     align: 'num',
     cell: (r) =>
       r.kind === 'main' ? (
-        <>
-          {r.main.scoreMean.toFixed(4)}
-          <span className="tc-muted">±{r.main.scoreStd.toFixed(4)}</span>
-        </>
+        r.main.scoreMean.toFixed(4)
       ) : r.eval.scoreMean !== null ? (
-        <>
-          {r.eval.scoreMean.toFixed(4)}
-          <span className="tc-muted">±{(r.eval.scoreStd ?? 0).toFixed(4)}</span>
-        </>
+        r.eval.scoreMean.toFixed(4)
       ) : (
         <span className="tc-muted">-</span>
       ),
@@ -293,9 +295,10 @@ export function MetricsTable({ stateView }: { stateView: ConsoleStateView | null
         }
       />
       <p className="tc-caption" style={{ border: 'none', padding: '8px 0 0' }}>
-        存活/击杀/道具 = <b>实际值</b>（it&#123;N&#125;/**/manifest.json 逐局聚合，stage+seed
-        去重后留底缓存）；带 ≈ 为估算。 eval 行 = <b>干净评估</b>（greedy 固定语料），iter=N
-        评估的是第 N 轮 PPO 更新前的权重；缺N = 窗口内未收官被清场。
+        耗时/击杀/道具 = <b>实际值</b>（it&#123;N&#125;/**/manifest.json 逐局聚合，stage+seed
+        去重后留底缓存）；击杀/道具为每局平均，残血为胜局平均剩余 hp（剩余多命每命加满额）；带 ≈
+        为估算。 eval 行 = <b>干净评估</b>（greedy 固定语料），iter=N 评估的是第 N 轮 PPO
+        更新前的权重；缺N = 窗口内未收官被清场。
       </p>
     </div>
   )

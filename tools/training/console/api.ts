@@ -12,9 +12,20 @@ import { CURRICULA_DIR, LOG_DIR, NN_TRAINING, REPO_ROOT } from '../paths'
 import { httpOk, pidAlive } from '../net'
 import { loadRegistry } from '../registry'
 import { loadConfig } from '../config'
-import { COMPONENT_LABELS, loadConsoleState, markCloudHaltRecovered, triggerCloudHalt } from './actions'
+import {
+  COMPONENT_LABELS,
+  loadConsoleState,
+  markCloudHaltRecovered,
+  triggerCloudHalt,
+} from './actions'
 import { readIterMetrics } from './iters'
-import { aggregateNodeHistory, emptyHistory, poolStatus } from './pool-history'
+import {
+  aggregateNodeHistory,
+  emptyHistory,
+  isSlowNode,
+  poolStatus,
+  type NodeHistory,
+} from './pool-history'
 import { enqueueProbeRun } from './evalboard'
 export { buildEvalBoardView } from './evalboard'
 import type { Component, RlConfig } from '../types'
@@ -451,7 +462,10 @@ export async function componentViews(cfg: RlConfig, course: string): Promise<Com
  *  在节点离线时拖到 N×4s（2026-09-08 实测 5 启用节点 10.1s → 超过 Bun.serve 默认
  *  idleTimeout 10s，服务端关连接 → curl 空回复；DECISIONS §365）。Promise.all 保序，
  *  输出与串行一致。超时 1500ms：健康探测口径，1.5s 不应答即视为离线（§366 预算）。 */
-export async function nodeViews(cfg: RlConfig): Promise<NodeView[]> {
+export async function nodeViews(
+  cfg: RlConfig,
+  slowById?: ReadonlyMap<string, boolean>,
+): Promise<NodeView[]> {
   return Promise.all(
     cfg.nodes.map(async (n): Promise<NodeView> => {
       let online: boolean | null = null
@@ -480,6 +494,9 @@ export async function nodeViews(cfg: RlConfig): Promise<NodeView[]> {
         enabled: n.enabled,
         concurrency: n.concurrency,
         online,
+        // ping 失败但近期仍在成功结算（结算耗时表明算力受限）= 慢节点，
+        // 不标「离线」（2026-09-11 用户指令：慢节点 chip 误报离线的根治）。
+        slow: online === false && (slowById?.get(n.id) ?? false),
         codeHash,
         cpus,
         busy: busy.has(`node:${n.id}`),
@@ -520,7 +537,20 @@ const snapshotInFlight = new Map<string, Promise<SlowSnapshot>>()
 
 /** 重算指定课程的慢部件快照（不落缓存；落缓存由 getSlowSnapshot 负责）。 */
 async function computeSlowSnapshot(cfg: RlConfig, course: string): Promise<SlowSnapshot> {
-  const [components, nodes] = await Promise.all([componentViews(cfg, course), nodeViews(cfg)])
+  // 先聚合池历史（慢节点判定输入），再并行探测组件/节点——isSlowNode 依据「近期仍在
+  // 成功结算且单局耗时高」把 ping 超时的慢节点与真离线区分开。
+  let histById = new Map<string, NodeHistory>()
+  try {
+    histById = aggregateNodeHistory().hist
+  } catch {
+    /* 池历史不可用 → 慢节点判定退化为全 false（节点一律按 ping 口径展示） */
+  }
+  const slowById = new Map<string, boolean>()
+  for (const [id, h] of histById) slowById.set(id, isSlowNode(h))
+  const [components, nodes] = await Promise.all([
+    componentViews(cfg, course),
+    nodeViews(cfg, slowById),
+  ])
   // 节点上一轮贡献数（池历史聚合；无数据 = -1）。
   const contribById = new Map<string, number>()
   // local 节点：只由配置决定（配置缺失/非法才缺省）。池历史不可用只是贡献数拿不到（-1），
@@ -600,6 +630,103 @@ export function startSnapshotRefresher(intervalMs: number = SNAPSHOT_REFRESH_MS)
   t.unref?.()
 }
 
+// ────────────────────────── PPO 队列排队超时（无 worker 领取 >5min → warning） ──────────────────────────
+
+/** 排队超时阈值：job 发布后若无任何 worker 通过 /jobs/next 领取（无 claimed 标记）
+ *  超过该时长，控制台提示云端 worker 可能断连。 */
+export const PPO_QUEUE_STALL_MS = 5 * 60_000
+
+export interface PpoQueueStall {
+  jobId: string
+  waitedSec: number
+  it: number | null
+}
+
+const PAYLOAD_FILES = ['payload.tar.xz', 'payload.zip']
+
+/** 从 training_log.jsonl 读「仍开放」的 job：job_pending 且无 job_completed / job_cancelled。
+ *  悬空/已作废 job（§381 cancel_stale、hub 故障遗留）目录仍在盘上，但不应再告警。 */
+function loadOpenPpoJobs(logPath: string): Map<string, number | null> | null {
+  if (!existsSync(logPath)) return null
+  const pending = new Map<string, number | null>()
+  const terminal = new Set<string>()
+  try {
+    for (const line of readFileSync(logPath, 'utf8').split('\n')) {
+      if (!line.trim()) continue
+      let e: { event?: string; job_id?: string; it?: number }
+      try {
+        e = JSON.parse(line)
+      } catch {
+        continue
+      }
+      const jid = e.job_id
+      if (typeof jid !== 'string') continue
+      if (e.event === 'job_pending') {
+        pending.set(jid, typeof e.it === 'number' ? e.it : null)
+      } else if (e.event === 'job_completed' || e.event === 'job_cancelled') {
+        terminal.add(jid)
+      }
+    }
+  } catch {
+    return null
+  }
+  for (const jid of terminal) pending.delete(jid)
+  return pending
+}
+
+/** 扫描 remote-jobs：有 payload、无 result、无 claimed，且目录 mtime 超过阈值。
+ *  claimed 由 hub GET /jobs/next 首次下发时 touch——无 worker 轮询则永不出现。
+ *  必须同时在账本里仍是 open pending（无 completed/cancelled），否则悬空目录会永久误报。
+ *  返回等待最久的一条；全部正常/无队列 → null。 */
+export function detectPpoQueueStall(
+  jobRoot: string,
+  nowMs = Date.now(),
+  thresholdMs = PPO_QUEUE_STALL_MS,
+): PpoQueueStall | null {
+  if (!existsSync(jobRoot)) return null
+  // jobRoot = <traj>/remote-jobs → 账本在 <traj>/training_log.jsonl
+  const openJobs = loadOpenPpoJobs(path.join(path.dirname(jobRoot), 'training_log.jsonl'))
+  let names: string[]
+  try {
+    names = readdirSync(jobRoot, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name)
+  } catch {
+    return null
+  }
+  let worst: PpoQueueStall | null = null
+  for (const name of names) {
+    if (name === 'code.zip') continue
+    // 账本可读时：仅 open pending 才可能告警（cancelled/completed/未知 → 跳过）
+    if (openJobs && !openJobs.has(name)) continue
+    const jd = path.join(jobRoot, name)
+    try {
+      if (existsSync(path.join(jd, 'result'))) continue
+      if (existsSync(path.join(jd, 'claimed'))) continue
+      const hasPayload = PAYLOAD_FILES.some((f) => existsSync(path.join(jd, f)))
+      if (!hasPayload) continue
+      const waited = nowMs - statSync(jd).mtimeMs
+      if (waited < thresholdMs) continue
+      let it: number | null = openJobs?.get(name) ?? null
+      if (it == null) {
+        try {
+          const m = JSON.parse(readFileSync(path.join(jd, 'manifest.json'), 'utf8')) as {
+            it?: number
+          }
+          if (typeof m.it === 'number') it = m.it
+        } catch {
+          /* manifest 缺失/损坏不阻断告警 */
+        }
+      }
+      const stall: PpoQueueStall = { jobId: name, waitedSec: Math.round(waited / 1000), it }
+      if (!worst || stall.waitedSec > worst.waitedSec) worst = stall
+    } catch {
+      /* 单目录 IO 错误不拖垮快照 */
+    }
+  }
+  return worst
+}
+
 /** 完整状态快照（页面轮询的数据源）。慢部件（节点 ping/组件探测/池历史）走快照缓存。
  *  courseOverride 为只读视图课程（?course=，已 sanitize）；空则回退操作员课程。
  *  只读覆盖不写 console-state——LAN 切换查看课程绝不影响训练。 */
@@ -620,6 +747,9 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
       metrics = { available: false, iters: [], error: e instanceof Error ? e.message : String(e) }
     }
   }
+  const ppoQueueStall = course
+    ? detectPpoQueueStall(path.join(REPO_ROOT, 'tmp', course, 'remote-jobs'))
+    : null
   return {
     time: new Date().toISOString(),
     course,
@@ -636,6 +766,7 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     metrics,
     phase,
     cloudHalt: state.cloudHalt ?? null,
+    ppoQueueStall,
   }
 }
 

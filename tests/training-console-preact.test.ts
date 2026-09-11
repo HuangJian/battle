@@ -14,11 +14,18 @@ import { readdirSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { REPO_ROOT } from '../tools/training/paths'
 import { buildPoolView } from '../tools/training/console/api'
+import {
+  emptyHistory,
+  isSlowNode,
+  isSlowNodeRows,
+  parseTsMs,
+} from '../tools/training/console/pool-history'
 import { renderConsolePage, renderLogPage } from '../tools/training/console/render'
 import { h } from 'preact'
 import { renderToString } from 'preact-render-to-string'
 import { CopyButton } from '../tools/training/ui/components/CopyButton'
 import { PanelErrorBoundary } from '../tools/training/ui/components/PanelErrorBoundary'
+import { NodeEditPill, NodePills } from '../tools/training/console/ui/panels/NodePills'
 import {
   cleanupNonTcKeys,
   filterGroups,
@@ -47,6 +54,7 @@ import {
   stripIsoPrefix,
   type ConsoleStateView,
   type IterRow,
+  type NodeView,
 } from '../tools/training/ui/view'
 
 // ────────────────────────── 纯函数：时间 / 文本 ──────────────────────────
@@ -176,6 +184,7 @@ describe('view 指标行分组 / 过滤 / 排序（DS-U1 13 列 + eval 子行语
     avgTicks: 800,
     totalKills: 40,
     totalPU: 5,
+    avgResidualHp: null,
     scoreMean: 0.5,
     scoreStd: 0.1,
   }
@@ -874,5 +883,170 @@ describe('首页 EvalSummary（阶梯 God vs 学生 B 层）', () => {
     )
     expect(html).toContain('eval now')
     expect(html).toContain('disabled')
+  })
+})
+
+// ────────────────────────── 节点 pill 行（慢节点/停用/启停 toggle，2026-09-11 用户指令） ──────────────────────────
+
+describe('pool-history.isSlowNode（慢节点判定：1.5s ping 误报「离线」的根治）', () => {
+  it('近期有成功结算且耗时不高 → false；结算慢（中位>8s）或超 10 分钟无结算 → true', () => {
+    const now = Date.now()
+    const mk = (
+      over: Record<string, unknown>,
+    ): import('../tools/training/console/pool-history').NodeHistory => ({
+      ...emptyHistory(),
+      ...over,
+    })
+    // 健康节点：刚结算过且快
+    expect(
+      isSlowNode(mk({ lastOkTsMs: now - 30_000, avgElapsedSec: 1.2, lastOkElapsedSec: 1.5 })),
+    ).toBe(false)
+    // 慢节点：还在结算但单局要几十秒（Kaggle CPU 饱和 → 1.5s ping 必超时）
+    expect(
+      isSlowNode(mk({ lastOkTsMs: now - 60_000, avgElapsedSec: 19.9, lastOkElapsedSec: 41.9 })),
+    ).toBe(true)
+    // 快节点但偶发沉默 5 分钟（轮间隙）：不判慢（耗时没超阈值）
+    expect(
+      isSlowNode(mk({ lastOkTsMs: now - 5 * 60_000, avgElapsedSec: 1.2, lastOkElapsedSec: 1.5 })),
+    ).toBe(false)
+    // 历史从未结算过：不算慢节点（真离线照旧标离线）
+    expect(isSlowNode(mk({ lastOkTsMs: null, avgElapsedSec: null, lastOkElapsedSec: null }))).toBe(
+      false,
+    )
+    // 恰好在窗口边界内 + 耗时未知 → 不误判
+    expect(
+      isSlowNode(mk({ lastOkTsMs: now - 9 * 60_000, avgElapsedSec: null, lastOkElapsedSec: null })),
+    ).toBe(false)
+  })
+
+  it('独立重实现对拍：慢节点行样本 → isSlowNode(聚合) 与 isSlowNodeRows(逐行) 同判', () => {
+    const now = Date.parse('2026-09-11T12:00:00')
+    const rows = [
+      { node: 'a95', ok: true, elapsedSec: 41.9, ts: '2026-09-11T11:52:21' },
+      { node: 'self', ok: true, elapsedSec: 1.5, ts: '2026-09-11T11:52:21' },
+      { node: 'a95', ok: false, ts: '2026-09-11T11:55:00' },
+    ]
+    // a95：7.6 分钟前成功过且耗时 41.9s > 8s → 慢节点
+    expect(isSlowNodeRows(rows, 'a95', now)).toBe(true)
+    // self：快 → 非慢
+    expect(isSlowNodeRows(rows, 'self', now)).toBe(false)
+    // 无记录节点 → 非慢（真离线口径）
+    expect(isSlowNodeRows(rows, 'a98', now)).toBe(false)
+  })
+
+  it('窗口外交互：慢节点沉默超窗后回「离线」；健康快节点沉默同窗后也是「离线」', () => {
+    const now = Date.now()
+    const mk = (
+      over: Record<string, unknown>,
+    ): import('../tools/training/console/pool-history').NodeHistory => ({
+      ...emptyHistory(),
+      ...over,
+    })
+    // 慢节点最后一次成功在 31 分钟前：窗口外 → 真离线
+    expect(isSlowNode(mk({ lastOkTsMs: now - 31 * 60_000, lastOkElapsedSec: 41.9 }))).toBe(false)
+    // 同窗口内：慢节点（41.9s）成立
+    expect(isSlowNode(mk({ lastOkTsMs: now - 29 * 60_000, lastOkElapsedSec: 41.9 }))).toBe(true)
+    // 健康快节点沉默 31 分钟：窗口外 → 真离线（窗口不是慢节点的保护伞）
+    expect(isSlowNode(mk({ lastOkTsMs: now - 31 * 60_000, lastOkElapsedSec: 1.5 }))).toBe(false)
+  })
+
+  it('parseTsMs：ISO（T 分隔）与空格分隔两种写法都能解析', () => {
+    expect(parseTsMs('2026-09-11T11:52:21')).toBe(Date.parse('2026-09-11T11:52:21'))
+    expect(parseTsMs('2026-09-11 11:52:21')).toBe(Date.parse('2026-09-11T11:52:21'))
+    expect(parseTsMs(undefined)).toBeNull()
+    expect(parseTsMs('garbage')).toBeNull()
+  })
+})
+
+describe('NodePills（慢/离线不折叠 · 停用折叠 · 启停 toggle）', () => {
+  const mkNode = (over: Partial<NodeView>): NodeView => ({
+    id: 'a1',
+    url: 'http://a1',
+    gpuPush: false,
+    enabled: true,
+    concurrency: 2,
+    online: true,
+    codeHash: null,
+    cpus: 8,
+    busy: false,
+    lastContrib: 3,
+    slow: false,
+    ...over,
+  })
+
+  it('慢节点始终展开显示「慢」（琥珀点），不进折叠桶', () => {
+    const n = mkNode({ id: 'a95', online: false, slow: true, lastContrib: 5 })
+    const html = renderToString(h(NodePills, { nodes: [n], onAction: () => {}, onMore: () => {} }))
+    expect(html).not.toContain('慢 1')
+    expect(html).not.toContain('>离线<')
+    expect(html).toContain('tc-dot--warn')
+    expect(html).toContain('<b>a95</b>')
+    expect(html).toContain('>慢</span>')
+  })
+
+  it('停用节点：灰点（tc-dot--empty），文案「停用」，与离线红点区分', () => {
+    const n = mkNode({ id: 'a97', enabled: false, online: null })
+    const pill = renderToString(
+      h(NodeEditPill, {
+        n,
+        editing: false,
+        draft: '',
+        off: true,
+        onEdit: () => {},
+        onDraft: () => {},
+        onSave: () => {},
+        onToggle: () => {},
+        onSmoke: () => {},
+      }),
+    )
+    expect(pill).toContain('tc-dot--empty')
+    expect(pill).not.toContain('tc-dot--dead')
+    expect(pill).toContain('>停用</span>')
+    expect(pill).toContain('tc-npill--disabled')
+  })
+
+  it('真离线（无近期贡献）：始终展开显示红点 + 「离线」', () => {
+    const n = mkNode({ id: 'a98', online: false, slow: false, lastContrib: -1 })
+    const html = renderToString(h(NodePills, { nodes: [n], onAction: () => {}, onMore: () => {} }))
+    expect(html).toContain('tc-dot--dead')
+    expect(html).toContain('>离线</span>')
+    expect(html).not.toContain('离线 1')
+  })
+
+  it('启停为 toggle 开关：非编辑态 pill 上直接渲染 role=switch（aria 名 = 目标动作）', () => {
+    const html = renderToString(
+      h(NodePills, {
+        nodes: [mkNode({ id: 'a1', enabled: true })],
+        onAction: () => {},
+        onMore: () => {},
+      }),
+    )
+    // aria 压缩后按属性片段断言（preact-render-to-string 省略 boolean 值的 ="true"）
+    expect(html).toMatch(/role="switch"/)
+    expect(html).toContain('aria-checked="true"')
+    // aria 名描述目标动作（enabled pill 上的开关点下去 = 停用）——接线契约：
+    // Switch onClick → onChange(!checked) → onAction('setNodeEnabled', {id, enabled})
+    expect(html).toContain('aria-label="停用 a1"')
+    expect(html).toContain('tc-switch--on')
+  })
+
+  it('停用 pill 的开关同样在场（重新启用即点开）', () => {
+    const n = mkNode({ id: 'a2', enabled: false, online: null })
+    const pill = renderToString(
+      h(NodeEditPill, {
+        n,
+        editing: false,
+        draft: '',
+        off: true,
+        onEdit: () => {},
+        onDraft: () => {},
+        onSave: () => {},
+        onToggle: () => {},
+        onSmoke: () => {},
+      }),
+    )
+    expect(pill).toMatch(/role="switch"/)
+    expect(pill).toContain('aria-label="启用 a2"')
+    expect(pill).not.toContain('tc-switch--on')
   })
 })

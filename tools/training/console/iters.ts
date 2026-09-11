@@ -12,11 +12,45 @@ import type { EvalSummary, IterActuals, IterRow } from '../ui/view'
  * - 按 (stage,seed) 去重：fan-out 竞速副本会重复写盘，取 nSamples 最大者。
  * - 跳过 local-eval：干净评估局不是 rollout 局。
  * - 无任何 manifest / it 目录不存在（已被轮转删除）→ null。 */
+/** 玩家满额 HP（pool 模型 L0）：armor 50 × PLAYER_HP_MULT 1.05 × HP_SCALE 5 = 263。
+ *  hard/chaos/relax 走 DEFAULT_RULES（combatModel=pool）；classic instant 为 100，
+ *  训练课程几乎全是 hard → 统一 263（与 c4-dodge「剩 119/263」口径一致）。 */
+const PLAYER_MAX_HP = Math.round(50 * 1.05 * 5) // 263
+/** 训练课程常见 startLives（curricula 普遍 player.lives=1；难度表默认 3 但课程覆盖）。 */
+const ASSUMED_START_LIVES = 1
+
+/**
+ * 胜局残血（hp）：从已有字段推算，不改 export 写端。
+ *   (startLives + puGotTank - playerDeaths) × maxHp − playerDamageTaken
+ * - startLives 课程侧未落盘 → 取训练默认 1；puGotTank 仅 eval 行有（RL manifest 缺 → 0）
+ * - playerDeaths 仅 eval 行有（RL 缺 → 0）；playerDamageTaken 为非致命扣血累计
+ * - 仅胜局（stage_clear）计入；缺 playerDamageTaken 返回 null
+ */
+function residualHpFromFields(m: {
+  outcome?: unknown
+  playerDamageTaken?: number
+  playerDeaths?: number
+  puGotTank?: number
+}): number | null {
+  const outcome = String(m.outcome ?? '')
+  if (outcome && outcome !== 'stage_clear') return null
+  if (typeof m.playerDamageTaken !== 'number' || !Number.isFinite(m.playerDamageTaken)) {
+    return null
+  }
+  const deaths = typeof m.playerDeaths === 'number' ? m.playerDeaths : 0
+  const tank = typeof m.puGotTank === 'number' ? m.puGotTank : 0
+  const capacity = (ASSUMED_START_LIVES + tank - deaths) * PLAYER_MAX_HP
+  return Math.max(0, Math.round(capacity - m.playerDamageTaken))
+}
+
 export function readIterActuals(trajDir: string, iter: number): IterActuals | null {
   const itDir = join(trajDir, `it${iter}`)
   try {
     if (!existsSync(itDir)) return null
-    const best = new Map<string, { nSamples: number; kills: number; pu: number; ticks: number }>()
+    const best = new Map<
+      string,
+      { nSamples: number; kills: number; pu: number; ticks: number; residualHp: number | null }
+    >()
     const walk = (base: string, rel: string): void => {
       if (rel.split('/').length > 6) return
       let names: string[]
@@ -48,6 +82,10 @@ export function readIterActuals(trajDir: string, iter: number): IterActuals | nu
             powerUpsCollected?: number
             ticks?: number
             nSamples?: number
+            outcome?: string
+            playerDamageTaken?: number
+            playerDeaths?: number
+            puGotTank?: number
           }
           const stage = Number(m.stage)
           const seed = Number(m.seed)
@@ -60,6 +98,7 @@ export function readIterActuals(trajDir: string, iter: number): IterActuals | nu
               kills: Number(m.kills ?? 0) || 0,
               pu: Number(m.powerUpsCollected ?? 0) || 0,
               ticks: Number(m.ticks ?? 0) || 0,
+              residualHp: residualHpFromFields(m),
             })
           }
         } catch {
@@ -72,12 +111,24 @@ export function readIterActuals(trajDir: string, iter: number): IterActuals | nu
     let totalKills = 0
     let totalPU = 0
     let totalTicks = 0
+    let residualSum = 0
+    let residualN = 0
     for (const v of best.values()) {
       totalKills += v.kills
       totalPU += v.pu
       totalTicks += v.ticks
+      if (v.residualHp !== null) {
+        residualSum += v.residualHp
+        residualN++
+      }
     }
-    return { games: best.size, totalKills, totalPU, avgTicks: Math.round(totalTicks / best.size) }
+    return {
+      games: best.size,
+      totalKills,
+      totalPU,
+      avgTicks: Math.round(totalTicks / best.size),
+      avgResidualHp: residualN > 0 ? Math.round(residualSum / residualN) : null,
+    }
   } catch {
     return null
   }
@@ -156,6 +207,8 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
     pu: number
     scoreSum: number
     scoreSqSum: number
+    residualSum: number
+    residualN: number
   }
   const games = new Map<number, Map<string, GameAgg>>()
   try {
@@ -176,7 +229,16 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
           }
           let agg = byWver.get(wver)
           if (!agg) {
-            agg = { n: 0, ticks: 0, kills: 0, pu: 0, scoreSum: 0, scoreSqSum: 0 }
+            agg = {
+              n: 0,
+              ticks: 0,
+              kills: 0,
+              pu: 0,
+              scoreSum: 0,
+              scoreSqSum: 0,
+              residualSum: 0,
+              residualN: 0,
+            }
             byWver.set(wver, agg)
           }
           const score = Number(r.score ?? 0)
@@ -186,6 +248,21 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
           agg.pu += Number(r.powerUpsCollected ?? 0) || 0
           agg.scoreSum += score
           agg.scoreSqSum += score * score
+          // 残血：仅胜局；(startLives + puGotTank − deaths) × maxHp − playerDamageTaken
+          const won = r.win === true || r.win === 1
+          if (won) {
+            const rh = residualHpFromFields({
+              outcome: 'stage_clear',
+              playerDamageTaken:
+                typeof r.playerDamageTaken === 'number' ? r.playerDamageTaken : undefined,
+              playerDeaths: typeof r.playerDeaths === 'number' ? r.playerDeaths : undefined,
+              puGotTank: typeof r.puGotTank === 'number' ? r.puGotTank : undefined,
+            })
+            if (rh !== null) {
+              agg.residualSum += rh
+              agg.residualN++
+            }
+          }
           continue
         }
         if (r.event !== 'eval_summary') continue
@@ -203,6 +280,7 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
           avgTicks: null,
           totalKills: null,
           totalPU: null,
+          avgResidualHp: null,
           scoreMean: null,
           scoreStd: null,
         })
@@ -218,6 +296,7 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
       s.avgTicks = Math.round(agg.ticks / agg.n)
       s.totalKills = agg.kills
       s.totalPU = agg.pu
+      s.avgResidualHp = agg.residualN > 0 ? Math.round(agg.residualSum / agg.residualN) : null
       s.scoreMean = +mean.toFixed(4)
       s.scoreStd = +Math.sqrt(Math.max(0, agg.scoreSqSum / agg.n - mean * mean)).toFixed(4)
     }
@@ -263,6 +342,8 @@ export function readIterMetrics(trajDir: string): { rows: IterRow[] } {
             totalKills: cached.totalKills,
             totalPU: cached.totalPU,
             avgTicks: cached.avgTicks,
+            avgResidualHp:
+              (cached as CachedActuals & { avgResidualHp?: number | null }).avgResidualHp ?? null,
           }
         } else {
           actuals = readIterActuals(trajDir, iter)

@@ -57,6 +57,10 @@ export interface NodeHistory {
   lastIter: number
   /** 全局最新轮（globalMaxIt）该节点的成功结算局数（rollout + eval 合计）。 */
   lastIterOk: number
+  /** 最近一次成功结算的毫秒时刻（null = 从未结算）；isSlowNode 判定用。 */
+  lastOkTsMs: number | null
+  /** 最近一次成功结算的单局耗时（秒，null = 无样本）；isSlowNode 判定用。 */
+  lastOkElapsedSec: number | null
   /** 全局最新轮 rollout 成功局数（F5，plan/dist-codehash-stale-fix.md：贡献列按
    *  mode 分桶——"只跑 eval 的节点"不再看起来在贡献 rollout）。 */
   contribRollout: number
@@ -77,6 +81,8 @@ export function emptyHistory(): NodeHistory {
     recent: [],
     lastIter: -1,
     lastIterOk: 0,
+    lastOkTsMs: null,
+    lastOkElapsedSec: null,
     contribRollout: 0,
     contribEval: 0,
   }
@@ -198,6 +204,12 @@ export function aggregateNodeHistory(): HistoryAggregate {
           if (r.ok) {
             h.ok++
             if (nts >= h.lastOkTs) h.lastOkTs = nts
+            const okMs = parseTsMs(r.ts)
+            if (okMs != null && okMs >= (h.lastOkTsMs ?? 0)) {
+              h.lastOkTsMs = okMs
+              h.lastOkElapsedSec =
+                typeof r.elapsedSec === 'number' && r.elapsedSec > 0 ? r.elapsedSec : null
+            }
             const it = typeof r.it === 'number' && Number.isInteger(r.it) ? r.it : -1
             if (it >= 0) {
               let m = okByNodeIt.get(r.node)
@@ -270,4 +282,71 @@ export function poolStatus(h: NodeHistory): 'healthy' | 'warn' | 'bad' | 'nodata
   if (okN / n >= 0.9) return 'healthy'
   if (okN / n >= 0.7) return 'warn'
   return 'bad'
+}
+
+// ────────────────────────── 慢节点判定（2026-09-11 用户指令：慢节点误标「离线」） ──────────────────────────
+
+/** 单局耗时阈值（秒）：结算中位超过它 = 节点算力受限（Kaggle CPU 饱和），
+ *  其 agent 响应 /v1/ping 慢是常态，ping 失败 ≠ 掉线。
+ *  实测（2026-09-11 活跃流 c6b-margin）：健康节点 p50 ≤2.1s（local 1.25/self 0.7/mac 1.2），
+ *  慢节点 a95/a97/a98 p50 4.4-19.9s —— 8s 取「健康 p99（2.6）与慢节点 p50（4.4+）」之间的
+ *  一个量级间隔，不把偶尔排队慢一局的正常节点误判进来。 */
+export const SLOW_NODE_ELAPSED_SEC = 8
+
+/** 无成功结算多久后不再算「慢（仍有贡献）」（毫秒）：30 分钟 = 覆盖慢节点在轮内的
+ *  自然沉默间隙（轮节奏 10-40 分钟）；超过窗口 + ping 失败 → 真离线（训练机大概率
+ *  已不派活给它，如 codeHash 过期隔离），标「离线」才是可操作的语义。 */
+export const SLOW_NODE_STALE_MS = 30 * 60_000
+
+/** 慢节点判定（纯函数，NodePills/API 共用）：ping 探测失败（online=false）时，
+ *  节点近期仍在成功结算游戏（且结算耗时表明算力受限）= 慢节点而非离线。
+ *  @returns true = 「慢节点」（展示为琥珀点「慢」）；false = 维持离线语义。
+ *  判定输入（lastOkTsMs / lastOkElapsedSec）缺样本时保守回 false——
+ *  历史从未结算的节点保持「离线」口径不变。 */
+export function isSlowNode(h: {
+  lastOkTsMs: number | null
+  lastOkElapsedSec: number | null
+  avgElapsedSec?: number | null
+}): boolean {
+  if (h.lastOkTsMs == null) return false
+  if (Date.now() - h.lastOkTsMs > SLOW_NODE_STALE_MS) return false
+  return (h.lastOkElapsedSec ?? h.avgElapsedSec ?? 0) > SLOW_NODE_ELAPSED_SEC
+}
+
+/** meta 行 ts（'YYYY-MM-DD HH:MM:SS' 或 ISO）→ 毫秒；无效返回 null（测试共用）。 */
+export function parseTsMs(s: string | undefined): number | null {
+  if (!s) return null
+  const t = Date.parse(s.includes('T') ? s : s.replace(' ', 'T'))
+  return Number.isFinite(t) ? t : null
+}
+
+/**
+ * 慢节点判定（结构化重载）：键与 isSlowNode 完全一致，从活跃流 meta 行聚合的
+ * 原始行数据推导（逐行覆盖取最新一行）；测试用独立重实现的对拍基准。
+ * @returns true = 「慢节点」（展示为琥珀点「慢」）；false = 维持离线语义。
+ */
+export function isSlowNodeRows(
+  rows: Array<{
+    node?: string
+    ok?: boolean
+    elapsedSec?: number
+    ts?: string
+  }>,
+  id: string,
+  now: number,
+): boolean {
+  let lastOkTsMs: number | null = null
+  let lastOkElapsedSec: number | null = null
+  for (const r of rows) {
+    if (r.node !== id || !r.ok) continue
+    const t = parseTsMs(r.ts)
+    if (t == null) continue
+    if (lastOkTsMs == null || t >= lastOkTsMs) {
+      lastOkTsMs = t
+      lastOkElapsedSec = typeof r.elapsedSec === 'number' && r.elapsedSec > 0 ? r.elapsedSec : null
+    }
+  }
+  if (lastOkTsMs == null) return false
+  if (now - lastOkTsMs > SLOW_NODE_STALE_MS) return false
+  return (lastOkElapsedSec ?? 0) > SLOW_NODE_ELAPSED_SEC
 }

@@ -4,7 +4,7 @@
  *  → 组件 4 小卡 → 节点 pill 行 → 详情抽屉（指标 | 节点统计 | 日志）→ TrainingLoop 启动弹窗。
  *
  *  交互纪律：无「停止全部」（用户指令）· 无「暂停刷新」按钮（改刷新间隔 select）·
- *  离线节点默认折叠 · 工具行并入启动弹窗 · 详情一律进右侧抽屉（Esc / ✕ / 遮罩关闭）。
+ *  停用节点默认折叠（慢/离线始终展开）· 工具行并入启动弹窗 · 详情一律进右侧抽屉（Esc / ✕ / 遮罩关闭）。
  *
  *  polling 优先级（GLM-E6）：visibility(后台 tab) > 刷新间隔；客户端输入均为本地 state，
  *  3s 轮询不覆盖（不再需要全局 dirty 暂停）。 */
@@ -442,6 +442,21 @@ export function App({ initial }: AppProps) {
           >
             知道了
           </button>
+        </div>
+      ) : null}
+      {stateView?.ppoQueueStall ? (
+        <div className="tc-banner tc-banner--err" role="alert">
+          <span>
+            ⚠ PPO 任务排队超时：job{' '}
+            <code>
+              {stateView.ppoQueueStall.it != null
+                ? `it${stateView.ppoQueueStall.it}`
+                : stateView.ppoQueueStall.jobId.slice(0, 12)}
+            </code>{' '}
+            已等待 {Math.floor(stateView.ppoQueueStall.waitedSec / 60)} 分
+            {stateView.ppoQueueStall.waitedSec % 60} 秒仍无 worker 领取——云端 worker
+            可能断连或未在轮询 hub。检查 Colab/Kaggle worker 日志与 hub 是否在线。
+          </span>
         </div>
       ) : null}
       {readOnly && !roBannerDismissed ? (

@@ -34,11 +34,14 @@ function TrendCell({
   fmt,
   tone,
   range,
+  yFloor,
 }: {
   series: Series | undefined
   fmt: (v: number | null) => string
   tone?: 'g' | 'y' | 'r'
   range: TrendRange
+  /** y 轴下界上限：击杀/道具 0；胜率 0.3（基底不得高于 30%）。 */
+  yFloor?: number
 }) {
   const last = series ? (series.vals.filter(Number.isFinite).slice(-1)[0] ?? null) : null
   return (
@@ -48,14 +51,32 @@ function TrendCell({
         <b className={tone ? `tc-mtrend__val--${tone}` : undefined}>{fmt(last)}</b>
       </span>
       {series ? (
-        <TrendChart series={series} range={range} fmt={fmt} tone={tone} height={64} />
+        <TrendChart
+          series={series}
+          range={range}
+          fmt={fmt}
+          tone={tone}
+          height={64}
+          yFloor={yFloor}
+        />
       ) : null}
     </div>
   )
 }
 
+/** 击杀/道具/残血 展示辅助：每局平均；残血仅胜局，无数据显示 -。 */
+function fmtPerGame(total: number, games: number): string {
+  if (games <= 0) return String(total)
+  return (total / games).toFixed(1)
+}
+
+function fmtResidual(hp: number | null | undefined): string {
+  return hp == null ? '-' : String(hp)
+}
+
 /** 主行视图：最新 6 轮完整指标（紧凑表，iter 倒序）：主行口径与抽屉指标表一致（实际值优先、
- *  ≈ 为磁盘清理后的估算）；eval 列 = 干净评估（greedy 固定语料）。 */
+ *  ≈ 为磁盘清理后的估算）；eval 列 = 干净评估（greedy 固定语料）。
+ *  击杀/道具 = 每局平均；残血 = 胜局平均剩余 hp（多命每命计满额）；得分不显示 ±std。 */
 function MainTable({ rows }: { rows: IterRow[] }) {
   return (
     <table className="tc-table tc-table--dense">
@@ -65,9 +86,18 @@ function MainTable({ rows }: { rows: IterRow[] }) {
           <th>时间</th>
           <th>胜率</th>
           <th>eval</th>
-          <th className="tc-num">存活</th>
-          <th className="tc-num">击杀</th>
-          <th className="tc-num">道具</th>
+          <th className="tc-num" title="每局平均耗时（ticks）">
+            耗时
+          </th>
+          <th className="tc-num" title="每局平均击杀">
+            击杀
+          </th>
+          <th className="tc-num" title="胜局平均剩余 hp（剩余命每命计满额）">
+            残血
+          </th>
+          <th className="tc-num" title="每局平均道具">
+            道具
+          </th>
           <th className="tc-num">得分</th>
           <th className="tc-num">rollout</th>
           <th className="tc-num">PPO</th>
@@ -112,10 +142,7 @@ function MainTable({ rows }: { rows: IterRow[] }) {
             </td>
             <td className="tc-num">
               {r.actuals ? (
-                <>
-                  {r.actuals.totalKills}
-                  <span className="tc-muted"> /{r.actuals.games}局</span>
-                </>
+                fmtPerGame(r.actuals.totalKills, r.actuals.games)
               ) : (
                 <span className="tc-muted" title="该轮磁盘数据已清理，估算值">
                   {r.kills.toFixed(1)}≈
@@ -124,20 +151,23 @@ function MainTable({ rows }: { rows: IterRow[] }) {
             </td>
             <td className="tc-num">
               {r.actuals ? (
-                <>
-                  {r.actuals.totalPU}
-                  <span className="tc-muted"> /{r.actuals.games}局</span>
-                </>
+                <span title="胜局平均剩余 hp；剩余多命时每命加满额 hp">
+                  {fmtResidual(r.actuals.avgResidualHp)}
+                </span>
+              ) : (
+                <span className="tc-muted">-</span>
+              )}
+            </td>
+            <td className="tc-num">
+              {r.actuals ? (
+                fmtPerGame(r.actuals.totalPU, r.actuals.games)
               ) : (
                 <span className="tc-muted" title="该轮磁盘数据已清理，估算值">
                   {(r.loot * 100).toFixed(0)}%≈
                 </span>
               )}
             </td>
-            <td className="tc-num">
-              {r.scoreMean.toFixed(4)}
-              <span className="tc-muted">±{r.scoreStd.toFixed(4)}</span>
-            </td>
+            <td className="tc-num">{r.scoreMean.toFixed(4)}</td>
             <td className="tc-num">{r.rolloutSec.toFixed(0)}s</td>
             <td className="tc-num">{r.ppoSec.toFixed(0)}s</td>
             <td>
@@ -156,8 +186,8 @@ function MainTable({ rows }: { rows: IterRow[] }) {
 }
 
 /** eval 视图：最新 6 轮干净评估（有 evalData 的轮，iter 倒序；与抽屉 eval 过滤同口径）。
- *  列 = 评估专属字段：eval 胜率（含局数）、全歼、存活/击杀/道具/得分（评估实际值）、
- *  窗口用时、评估权重版本。无记录时给空态行。 */
+ *  列 = 评估专属字段：eval 胜率（含局数）、全歼、耗时/击杀/残血/道具/得分（评估实际值；
+ *  击杀/道具为每局平均，残血为胜局平均，得分无 ±std）、窗口用时、评估权重版本。 */
 function EvalTable({ rows }: { rows: IterRow[] }) {
   const groups = filterGroups(iterGroups(rows), 'eval').slice(0, 6)
   return (
@@ -168,9 +198,18 @@ function EvalTable({ rows }: { rows: IterRow[] }) {
           <th>时间</th>
           <th>eval 胜率</th>
           <th className="tc-num">全歼</th>
-          <th className="tc-num">存活</th>
-          <th className="tc-num">击杀</th>
-          <th className="tc-num">道具</th>
+          <th className="tc-num" title="每局平均耗时（ticks）">
+            耗时
+          </th>
+          <th className="tc-num" title="每局平均击杀">
+            击杀
+          </th>
+          <th className="tc-num" title="胜局平均剩余 hp（剩余命每命计满额）">
+            残血
+          </th>
+          <th className="tc-num" title="每局平均道具">
+            道具
+          </th>
           <th className="tc-num">得分</th>
           <th className="tc-num">用时</th>
           <th>wver</th>
@@ -179,7 +218,7 @@ function EvalTable({ rows }: { rows: IterRow[] }) {
       <tbody>
         {groups.length === 0 ? (
           <tr>
-            <td colSpan={10} className="tc-muted" style={{ textAlign: 'center' }}>
+            <td colSpan={11} className="tc-muted" style={{ textAlign: 'center' }}>
               该课程暂无 eval 评估记录
             </td>
           </tr>
@@ -233,30 +272,28 @@ function EvalTable({ rows }: { rows: IterRow[] }) {
                 </td>
                 <td className="tc-num">
                   {e.totalKills !== null ? (
-                    <>
-                      {e.totalKills}
-                      <span className="tc-muted"> /{e.games}局</span>
-                    </>
+                    fmtPerGame(e.totalKills, e.games)
+                  ) : (
+                    <span className="tc-muted">-</span>
+                  )}
+                </td>
+                <td className="tc-num">
+                  {e.avgResidualHp != null ? (
+                    <span title="胜局平均剩余 hp；剩余多命时每命加满额 hp">{e.avgResidualHp}</span>
                   ) : (
                     <span className="tc-muted">-</span>
                   )}
                 </td>
                 <td className="tc-num">
                   {e.totalPU !== null ? (
-                    <>
-                      {e.totalPU}
-                      <span className="tc-muted"> /{e.games}局</span>
-                    </>
+                    fmtPerGame(e.totalPU, e.games)
                   ) : (
                     <span className="tc-muted">-</span>
                   )}
                 </td>
                 <td className="tc-num">
                   {e.scoreMean !== null ? (
-                    <>
-                      {e.scoreMean.toFixed(4)}
-                      <span className="tc-muted">±{(e.scoreStd ?? 0).toFixed(4)}</span>
-                    </>
+                    e.scoreMean.toFixed(4)
                   ) : (
                     <span className="tc-muted">-</span>
                   )}
@@ -401,24 +438,34 @@ export function Hero({ stateView, onMore }: HeroProps) {
               <b className={`tc-mtrend__val--${tone}`}>{winVal}</b>
             </span>
             {winSeries ? (
-              <TrendChart series={winSeries} range={range} fmt={fmtPct} tone={tone} height={64} />
+              <TrendChart
+                series={winSeries}
+                range={range}
+                fmt={fmtPct}
+                tone={tone}
+                height={64}
+                yFloor={0.3}
+              />
             ) : null}
           </div>
           <TrendCell
             series={killsSeries}
-            fmt={(v) => (v != null ? `${v.toFixed(0)}` : '—')}
+            fmt={(v) => (v != null ? `${v.toFixed(1)}` : '—')}
             range={range}
+            yFloor={0}
           />
           <TrendCell
             series={puSeries}
-            fmt={(v) => (v != null ? `${v.toFixed(0)}` : '—')}
+            fmt={(v) => (v != null ? `${v.toFixed(1)}` : '—')}
             range={range}
+            yFloor={0}
           />
           <TrendCell
             series={evalSeries}
             tone={winTone(evalSeries?.vals.filter(Number.isFinite).slice(-1)[0] ?? 0)}
             fmt={fmtPct}
             range={range}
+            yFloor={0.3}
           />
         </div>
       </div>
