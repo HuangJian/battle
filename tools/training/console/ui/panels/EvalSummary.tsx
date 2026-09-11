@@ -370,6 +370,18 @@ export function EvalSummary({
           )}
         </p>
       ) : null}
+      {view?.ladderState ? (
+        <p className="tc-eval-summary__note tc-small" role="status">
+          <Pill tone={view.ladderState.stopped ? 'r' : 'a'}>
+            爬梯{view.ladderState.stopped ? '已停' : '进行中'}
+          </Pill>
+          {` · it${view.ladderState.iter}`}
+          {view.ladderState.reachedRung ? ` · 已达 ${view.ladderState.reachedRung}` : ''}
+          {view.ladderState.stoppedReason ? ` · ${view.ladderState.stoppedReason}` : ''}
+          {' · '}
+          <span className="tc-muted">启停去完整评估看板</span>
+        </p>
+      ) : null}
       {view?.abWarn ? (
         <div className="tc-banner tc-banner--err" role="alert">
           {view.abWarn}

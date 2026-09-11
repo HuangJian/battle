@@ -26,8 +26,8 @@ import {
   poolStatus,
   type NodeHistory,
 } from './pool-history'
-import { enqueueProbeRun, iterFromCkpt } from './evalboard'
-export { buildEvalBoardView, buildEvalCkptsView } from './evalboard'
+import { abortEvalBatch, enqueueProbeRun, iterFromCkpt, startLadder, stopLadder } from './evalboard'
+export { buildEvalBoardView, buildEvalCkptsView, ladderTickAll } from './evalboard'
 import type { Component, RlConfig } from '../types'
 // 视图类型单一源：ui/view.ts（api.ts 不再定义本地视图类型）
 import { parsePhaseFromLog, stripIsoPrefix } from '../ui/view'
@@ -1094,7 +1094,7 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
         }
       }
       case 'evalProbeRun': {
-        // EvalBench §8/§6.7：只 append 一行 pending（触发队列）；派发期节点配置
+        // EvalBench §5.3：只写请求文件（runner 下窗物化为批）；派发期节点配置
         // 冻结——任一 node:* 动作进行中则 409（与 setNodeEnabled 共 busy 语义）。
         for (const k of busy) {
           if (k.startsWith('node:')) return errResp('节点配置调整中，稍后再触发评估批', 409)
@@ -1119,13 +1119,71 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
             ladder_pos: body.ladder_pos === undefined ? undefined : Number(body.ladder_pos),
             k_seq: body.k_seq === undefined ? undefined : Number(body.k_seq),
           })
+          if (r.deduped) {
+            return okResp({ ok: true, message: '评估请求已在队列（去重，不重复入队）' })
+          }
           return okResp({
             ok: true,
-            message: `评估批已入队 ${r.batch_id}${r.deduped ? '（已在队列，去重）' : ''}`,
+            message: `评估请求已入队 ${r.req_id}（runner 下窗认领；训练忙碌时可本机运行 kick-once.py 手动执行）`,
           })
         } finally {
           busy.delete('eval:probe')
         }
+      }
+      case 'evalBatchAbort': {
+        // P4 温和中止：只写 abort 请求；在途单元跑完即停（runner 消费后标 aborted）。
+        const batchId = str(body, 'batch_id')
+        if (!batchId) return errResp('缺少 batch_id', 400)
+        try {
+          const r = abortEvalBatch(batchId, str(body, 'requester') || 'web')
+          return okResp({
+            ok: true,
+            message: r.deduped
+              ? `中止请求已在队列 ${r.req_id}（去重）`
+              : `已请求中止 ${batchId}（在途单元跑完即停，runner 下窗生效）`,
+          })
+        } catch (e) {
+          return errResp(e instanceof Error ? e.message : String(e), 400)
+        }
+      }
+      case 'evalLadderStart': {
+        // R4 自动爬梯启动：只写 ladder_start 请求；推进由 console ticker 执行。
+        for (const k of busy) {
+          if (k.startsWith('node:')) return errResp('节点配置调整中，稍后再启动爬梯', 409)
+        }
+        const ckpt = str(body, 'ckpt')
+        if (!ckpt) return errResp('缺少 ckpt（权重文件路径）', 400)
+        const iterRaw = Number(body.iter)
+        const iter = Number.isFinite(iterRaw) && iterRaw > 0 ? iterRaw : (iterFromCkpt(ckpt) ?? 0)
+        const thRaw = Number(body.threshold)
+        const threshold = Number.isFinite(thRaw) && thRaw > 0 && thRaw < 1 ? thRaw : 0.2
+        const r = startLadder({
+          course: ctx.course,
+          iter,
+          threshold,
+          start_rung: str(body, 'start_rung') || str(body, 'rung_from') || 'c4l1',
+          ckpt,
+          requester: str(body, 'requester') || 'web',
+        })
+        if (r.deduped) {
+          return okResp({ ok: true, message: '爬梯任务已在进行（去重，不重复启动）' })
+        }
+        return okResp({
+          ok: true,
+          message: `自动爬梯已启动 ${r.req_id}（it${iter}，阈值 ${threshold}）`,
+        })
+      }
+      case 'evalLadderStop': {
+        // R4 爬梯停止：只写 ladder_stop 请求；ticker 见 stop 即停（无状态推导）。
+        const iterRaw = Number(body.iter)
+        const iter = Number.isFinite(iterRaw) && iterRaw > 0 ? iterRaw : 0
+        const r = stopLadder({
+          course: ctx.course,
+          iter,
+          reason: str(body, 'reason') || undefined,
+          requester: str(body, 'requester') || 'web',
+        })
+        return okResp({ ok: true, message: `爬梯已停止 ${r.req_id}` })
       }
       default:
         return null

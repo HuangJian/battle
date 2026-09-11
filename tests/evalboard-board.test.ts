@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import path from 'path'
 import { appendRow, type EvalGameRow } from '../tools/training/evalboard/store'
+import { enqueueBatch } from '../tools/training/evalboard/batches'
 import {
   buildEvalBoardView,
   buildEvalCkptsView,
@@ -90,7 +91,7 @@ describe('看板合成端到端', () => {
       requester: 't',
       iter: 30,
     })
-    expect(q.batch_id.length).toBeGreaterThan(0)
+    expect(q.req_id.startsWith('q-')).toBe(true)
     const q2 = enqueueProbeRun({
       course: 'e2e',
       rung_from: 'c4l1',
@@ -99,6 +100,15 @@ describe('看板合成端到端', () => {
       iter: 30,
     })
     expect(q2.deduped).toBe(true)
+    // runner 物化（测试内模拟 consume_requests 建批；console 只写请求）。
+    enqueueBatch(root, {
+      course: 'e2e',
+      rung_from: 'c4l1',
+      ckpt: 'w',
+      requester: 't',
+      trigger: 'standalone',
+      iter: 30,
+    })
 
     // God 基线工作副本。
     const lad = JSON.parse(readFileSync('tools/training/evalboard/ladder.json', 'utf-8')) as {

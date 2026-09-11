@@ -550,6 +550,7 @@ export interface EvalRunnerState {
 /** R4 自动爬梯任务态（请求文件持久化，无状态推导）。 */
 export interface EvalLadderState {
   course: string
+  iter: number
   threshold: number
   reachedRung: string | null
   stopped: boolean

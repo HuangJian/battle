@@ -192,6 +192,8 @@ export function EvalApp({
   const [rung, setRung] = useState('c4l1')
   const [ckpt, setCkpt] = useState('')
   const [policy, setPolicy] = useState<'nn' | 'god'>('nn')
+  const [ladderIter, setLadderIter] = useState('')
+  const [threshold, setThreshold] = useState('0.2')
 
   useEffect(() => {
     try {
@@ -278,6 +280,46 @@ export function EvalApp({
     void refresh()
   }, [ckpt, options.readOnly, policy, refresh, rung, triggerCourse])
 
+  const onAbort = useCallback(
+    async (batchId: string) => {
+      if (options.readOnly) return
+      const r = await postAction('evalBatchAbort', { batch_id: batchId, requester: 'eval-page' })
+      setFlash(r.message)
+      void refresh()
+    },
+    [options.readOnly, refresh],
+  )
+
+  const onLadderStart = useCallback(async () => {
+    if (options.readOnly) return
+    if (!triggerCourse || !ckpt.trim()) {
+      setFlash('先选课程并填 ckpt 路径')
+      return
+    }
+    const r = await postAction('evalLadderStart', {
+      course: triggerCourse,
+      ckpt: ckpt.trim(),
+      ...(ladderIter.trim() ? { iter: Number(ladderIter) } : {}),
+      threshold: Number(threshold) || 0.2,
+      start_rung: rung,
+      requester: 'eval-page',
+    })
+    setFlash(r.message)
+    void refresh()
+  }, [ckpt, ladderIter, options.readOnly, refresh, rung, threshold, triggerCourse])
+
+  const onLadderStop = useCallback(async () => {
+    if (options.readOnly) return
+    if (!triggerCourse) return
+    const r = await postAction('evalLadderStop', {
+      course: triggerCourse,
+      ...(ladderIter.trim() ? { iter: Number(ladderIter) } : {}),
+      requester: 'eval-page',
+    })
+    setFlash(r.message)
+    void refresh()
+  }, [ladderIter, options.readOnly, refresh, triggerCourse])
+
   return (
     <div className="tc-evalpage">
       <header className="tc-evalpage__hd">
@@ -338,6 +380,19 @@ export function EvalApp({
           <code> python tools/training/evalboard/kick-once.py</code>）
         </div>
       )}
+
+      {primary?.ladderState ? (
+        <div className="tc-banner tc-banner--info" role="status">
+          <Pill tone={primary.ladderState.stopped ? 'r' : 'a'}>
+            爬梯{primary.ladderState.stopped ? '已停' : '进行中'}
+          </Pill>
+          {` · it${primary.ladderState.iter} · 阈值 ${(primary.ladderState.threshold * 100).toFixed(0)}%`}
+          {primary.ladderState.reachedRung
+            ? ` · 已达 ${primary.ladderState.reachedRung}`
+            : ' · 尚未完成首关'}
+          {primary.ladderState.stoppedReason ? ` · ${primary.ladderState.stoppedReason}` : ''}
+        </div>
+      ) : null}
 
       {flash ? (
         <p className="tc-small" role="status">
@@ -445,6 +500,24 @@ export function EvalApp({
               key: 'trigger',
               label: '触发',
               cell: (r) => <span className="tc-small">{r.trigger}</span>,
+            },
+            {
+              key: 'op',
+              label: '操作',
+              cell: (r: EvalBatchRow) =>
+                r.status === 'pending' || r.status === 'running' ? (
+                  <button
+                    type="button"
+                    className="tc-btn tc-btn--sm"
+                    disabled={options.readOnly}
+                    title="温和中止：在途单元跑完即停"
+                    onClick={() => void onAbort(r.batch_id)}
+                  >
+                    中止
+                  </button>
+                ) : (
+                  <span className="tc-muted tc-small">—</span>
+                ),
             },
           ]}
           rows={mergedBatches}
@@ -560,6 +633,44 @@ export function EvalApp({
         <p className="tc-muted tc-small">
           入队 ≠ 执行：批由训练空闲窗认领，或本机 <code>kick-once.py</code>。
         </p>
+        <div className="tc-row tc-small">
+          <label>
+            iter{' '}
+            <input
+              type="text"
+              size={6}
+              placeholder="同 ckpt"
+              value={ladderIter}
+              onInput={(e) => setLadderIter((e.target as HTMLInputElement).value)}
+            />
+          </label>{' '}
+          <label>
+            阈值{' '}
+            <input
+              type="text"
+              size={5}
+              value={threshold}
+              onInput={(e) => setThreshold((e.target as HTMLInputElement).value)}
+            />
+          </label>{' '}
+          <button
+            type="button"
+            className="tc-btn tc-btn--sm"
+            disabled={options.readOnly}
+            title="从起始 rung 顺序推进，胜率低于阈值自动停（筛查级，不作 verdict）"
+            onClick={() => void onLadderStart()}
+          >
+            启动爬梯
+          </button>
+          <button
+            type="button"
+            className="tc-btn tc-btn--sm"
+            disabled={options.readOnly}
+            onClick={() => void onLadderStop()}
+          >
+            停止爬梯
+          </button>
+        </div>
       </section>
     </div>
   )

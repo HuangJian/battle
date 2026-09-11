@@ -8,7 +8,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import path from 'path'
 
 export type BatchStatus = 'pending' | 'running' | 'done' | 'aborted'
-export type BatchTrigger = 'main' | 'standalone'
+export type BatchTrigger = 'main' | 'standalone' | 'auto-ladder'
 
 export interface EvalBatch {
   batch_id: string

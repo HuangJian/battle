@@ -44,6 +44,7 @@ import {
   componentLogPayload,
   discoverCourses,
   invalidateSlowSnapshot,
+  ladderTickAll,
   routeAction,
   sanitizeViewCourse,
   startSnapshotRefresher,
@@ -147,6 +148,18 @@ async function main(): Promise<void> {
   await reconcileWatch()
   const reconcileTimer = setInterval(() => void reconcileWatch(), 15000)
   reconcileTimer.unref?.()
+  // R4 自动爬梯 ticker（A3：console 服务端常驻；无状态推导，重启不丢进度；
+  // 无 ladder 请求时 ladderTickAll 直接返回，零重扫描）。
+  const ladderTimer = setInterval(() => {
+    try {
+      const r = ladderTickAll(discoverCourses())
+      if (r.enqueued.length > 0)
+        console.log(`[ladder] tick tasks=${r.tasks} enqueued=${r.enqueued.join(',')}`)
+    } catch {
+      /* ticker 永不炸循环 */
+    }
+  }, 30000)
+  ladderTimer.unref?.()
   // 慢部件快照后台刷新（§366：节点 ping/组件探测/池历史移出请求路径，页面加载 <1s）。
   // reconcileWatch 已冷算一次暖缓存；此后每 5s 后台重算，请求只读缓存。
   startSnapshotRefresher()

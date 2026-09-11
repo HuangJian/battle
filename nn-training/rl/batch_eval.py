@@ -310,7 +310,7 @@ def consume_requests(root: Path) -> dict:
                     "elapsed_sec": None,
                     "policy": pol,
                 }
-                for opt in ("ladder_pos", "init_sha16", "only_rungs"):
+                for opt in ("ladder_pos", "k_seq", "init_sha16", "only_rungs"):
                     if r.get(opt) is not None:
                         batch[opt] = r[opt]
                 batches.append(batch)
