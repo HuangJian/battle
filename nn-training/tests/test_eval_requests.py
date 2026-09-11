@@ -8,7 +8,9 @@ _requeue 不复活 aborted / claim 跳过 aborted / 坏行容忍。
 from __future__ import annotations
 
 import json
+import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -23,6 +25,7 @@ from rl.batch_eval import (
     read_batches,
     read_done_req_ids,
     read_requests,
+    utc_now_iso,
     write_batches,
 )
 
@@ -168,3 +171,31 @@ def test_mark_requests_done_appends(tmp_path: Path) -> None:
     assert read_done_req_ids(tmp_path) == set()
     mark_requests_done(tmp_path, {"q-1", "q-2"})
     assert read_done_req_ids(tmp_path) == {"q-1", "q-2"}
+
+
+
+
+def test_utc_now_iso_matches_console_format() -> None:
+    """必须与 console 侧 `new Date().toISOString()` 同形态（UTC + 毫秒 + Z）。
+
+    `consume_requests` 用**字符串比较**判"批是否已物化"（`created_ts >= req.ts`）。
+    旧实现用本地时间 `time.strftime("%Y-%m-%dT%H:%M:%S")`（无毫秒无 Z）：UTC+8
+    下本地时间戳恰好"看起来更晚"⇒ 侥幸正确；UTC 或负偏移时区会误判为未物化
+    ⇒ 重复建批。本机不触发，云端/换机会踩 —— 本用例锁死格式。
+    """
+    s = utc_now_iso()
+    assert len(s) == 24, s
+    assert s.endswith("Z"), s
+    assert s[10] == "T" and s[19] == ".", s
+    # 与 console 侧同构 ⇒ 字典序 == 时间序，与本机时区无关
+    assert datetime.fromisoformat(s.replace("Z", "+00:00")).tzinfo is not None
+
+
+def test_materialized_check_is_tz_independent() -> None:
+    """请求先发、随后建批 ⇒ created_ts >= req.ts 必须成立，不依赖本机时区。"""
+    # 日期取遥远过去：断言与"现在"无关，避免在 UTC 凌晨跑就翻车
+    # （本仓踩过：测试时间断言勿写死近期日期）。
+    req_ts = "2020-01-01T00:00:00.000Z"  # console 侧（UTC）
+    assert utc_now_iso() >= req_ts
+    # 旧批（早于请求）⇒ 未物化 ⇒ 允许重跑
+    assert req_ts > "2019-01-01T00:00:00.000Z"

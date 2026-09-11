@@ -25,6 +25,7 @@ import shutil
 import threading
 import time
 from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
 
 import dist_common
@@ -44,6 +45,17 @@ REGRESSION_EVERY = 3  # 与 runner.ts 同值（双侧镜像，改一侧必须同
 BATCH_STAGE_BASE = 2000
 EVAL_SEED0 = 860001
 SEGMENT_LEN = 100
+
+
+def utc_now_iso() -> str:
+    """UTC ISO-8601 带毫秒 + Z —— 与 console 侧 `new Date().toISOString()` 同格式。
+
+    `consume_requests` / `enqueueCovered` 用**字符串比较**判断"批是否已物化"
+    （`batch.created_ts >= req.ts`），两侧格式必须逐字符可比。本地时间的
+    `time.strftime` 不带毫秒不带 Z，在 UTC+8 下恰好"看起来更晚"而侥幸正确，
+    换到 UTC 或负偏移时区就会误判为未物化 ⇒ 重复建批。
+    """
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def data_root() -> Path:
@@ -281,8 +293,13 @@ def consume_requests(root: Path) -> dict:
                     consumed.append(key)
                     counts["skipped"] += 1
                     continue
-                now = time.strftime("%Y-%m-%dT%H:%M:%S")
+                # 必须与 console 侧（TS `new Date().toISOString()`）同格式：UTC +
+                # 毫秒 + Z。此前用本地时间 strftime（无毫秒无 Z），而
+                # enqueueCovered/consume_requests 用**字符串比较**判"是否已物化"
+                # ⇒ UTC+8 恰好成立、UTC/负偏移时区会误判为未物化而重复建批。
+                now = utc_now_iso()
                 stamp = now.replace("-", "").replace(":", "").replace("T", "")
+                stamp = stamp.replace(".", "").replace("Z", "")
                 try:
                     it = int(r.get("iter", 0))
                 except (TypeError, ValueError):
