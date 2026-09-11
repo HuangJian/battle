@@ -103,6 +103,49 @@ describe('deriveMetrics (§5.1)', () => {
   })
 })
 
+describe('R2 二级指标', () => {
+  it('meanKills / meanPowerUps / winTickMean / winHpLeftMean（L0 maxHp = 263）', () => {
+    const m = deriveMetrics([
+      row({
+        win: true,
+        kills: 4,
+        powerUpsCollected: 2,
+        ticks: 1000,
+        playerLevel: 0,
+        playerDamageTaken: 10,
+      }),
+      row({
+        win: false,
+        outcome: 'gameover',
+        kills: 2,
+        powerUpsCollected: 0,
+        ticks: 800,
+        playerLevel: 0,
+        playerDamageTaken: 5,
+      }),
+    ])
+    expect(m.meanKills).toBe(3)
+    expect(m.meanPowerUps).toBe(1)
+    expect(m.winTickMean).toBe(1000)
+    expect(m.winHpLeftMean).toBe(263 - 10)
+  })
+  it('空集 ⇒ 0/null；无胜局 ⇒ winTickMean/winHpLeftMean 均 null', () => {
+    const empty = deriveMetrics([])
+    expect(empty.meanKills).toBe(0)
+    expect(empty.meanPowerUps).toBe(0)
+    expect(empty.winTickMean).toBeNull()
+    expect(empty.winHpLeftMean).toBeNull()
+    const noWin = deriveMetrics([row({ win: false, outcome: 'gameover' })])
+    expect(noWin.winTickMean).toBeNull()
+    expect(noWin.winHpLeftMean).toBeNull()
+  })
+  it('maxHp 随星位增长（L1 > L0）', () => {
+    const l0 = deriveMetrics([row({ win: true, playerLevel: 0, playerDamageTaken: 0 })])
+    const l1 = deriveMetrics([row({ win: true, playerLevel: 1, playerDamageTaken: 0 })])
+    expect(l1.winHpLeftMean!).toBeGreaterThan(l0.winHpLeftMean!)
+  })
+})
+
 describe('flipRate', () => {
   it('同 seed 对齐计数', () => {
     const a = new Map([

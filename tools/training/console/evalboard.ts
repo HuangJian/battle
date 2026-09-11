@@ -13,7 +13,7 @@
  *  （§6.7 队列文件桥）；派发期节点配置冻结经 busy 前置检查（§8）。
  */
 
-import { existsSync, readFileSync } from 'fs'
+import { existsSync, readdirSync, readFileSync, statSync } from 'fs'
 import path from 'path'
 import { REPO_ROOT } from '../paths'
 import { loadBatches, enqueueBatch } from '../evalboard/batches'
@@ -35,8 +35,130 @@ import {
   type PairedDelta,
 } from '../evalboard/sentinels'
 import { loadRows, type EvalGameRow } from '../evalboard/store'
+import { DIFFICULTIES } from '../../../src/config/difficulty'
 // 视图类型唯一源：ui/view.ts（本文件实现与面板共用形态）。
-import type { EvalAlert, EvalBatchRow, EvalBoardView, EvalLadderRow } from '../ui/view'
+import type {
+  EvalAlert,
+  EvalBatchRow,
+  EvalBoardView,
+  EvalCkptFile,
+  EvalCkptsView,
+  EvalLadderRow,
+} from '../ui/view'
+
+/** `*.it<N>.*.json` 文件名 → N（R3/D-b：iter 不靠前端手传）。无匹配 ⇒ null。 */
+export function iterFromCkpt(ckpt: string): number | null {
+  const m = /\.it(\d+)\./.exec(path.basename(ckpt))
+  return m ? Number(m[1]) : null
+}
+
+// ────────────────────────── R7 ckpt/iter 发现（只读元数据，不读内容） ──────────────────────────
+
+const WEIGHTS_DIR = path.join(REPO_ROOT, 'nn-training', 'weights')
+/** 单次返回文件数上限（腿很大时防 payload 爆）。 */
+const CKPT_MAX_FILES = 500
+
+/**
+ * GET /api/evalCkpts（R7）：扫 `nn-training/weights/<leg>/` + `tmp/<course>/weights.json`。
+ * 硬约束：**只 stat，不读内容**（996 文件 / 434MB，读内容会把 TTL 打穿）。
+ * 懒加载：无 `leg` 时只返回腿列表；`leg` = 某腿名时返回该腿文件明细；
+ * `course` 与某腿同名则默认取该腿（首页 iter select 一次请求）。
+ */
+export function buildEvalCkptsView(course = '', leg = ''): EvalCkptsView {
+  const legs: EvalCkptsView['legs'] = []
+  let names: string[] = []
+  try {
+    names = readdirSync(WEIGHTS_DIR, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name)
+      .sort()
+  } catch {
+    names = []
+  }
+  for (const name of names) {
+    let count = 0
+    try {
+      count = readdirSync(path.join(WEIGHTS_DIR, name)).filter((f) => f.endsWith('.json')).length
+    } catch {
+      /* 不可读腿跳过明细，仅计 0 */
+    }
+    legs.push({ leg: name, count })
+  }
+  // 路径安全：leg 必须命中已知腿名（防 ../ 穿越）。
+  const target =
+    (leg && names.includes(leg) ? leg : '') || (course && names.includes(course) ? course : '')
+  const files: EvalCkptFile[] = []
+  let truncated = false
+  if (target) {
+    let jsonFiles: string[] = []
+    try {
+      jsonFiles = readdirSync(path.join(WEIGHTS_DIR, target)).filter((f) => f.endsWith('.json'))
+    } catch {
+      jsonFiles = []
+    }
+    for (const f of jsonFiles) {
+      if (files.length >= CKPT_MAX_FILES) {
+        truncated = true
+        break
+      }
+      const abs = path.join(WEIGHTS_DIR, target, f)
+      let st: ReturnType<typeof statSync>
+      try {
+        st = statSync(abs)
+      } catch {
+        continue
+      }
+      files.push({
+        leg: target,
+        path: path.relative(REPO_ROOT, abs).replace(/\\/g, '/'),
+        mtime: st.mtimeMs,
+        sizeBytes: st.size,
+        iter: iterFromCkpt(f),
+      })
+    }
+    files.sort((a, b) => b.mtime - a.mtime)
+  }
+  // 活动权重兜底（tmp/<course>/weights.json，若存在）。
+  if (course) {
+    const act = path.join(REPO_ROOT, 'tmp', course, 'weights.json')
+    try {
+      const st = statSync(act)
+      files.unshift({
+        leg: '(active)',
+        path: path.relative(REPO_ROOT, act).replace(/\\/g, '/'),
+        mtime: st.mtimeMs,
+        sizeBytes: st.size,
+        iter: iterFromCkpt(act),
+      })
+    } catch {
+      /* 无活动权重 */
+    }
+  }
+  return { course, legs, files, truncated }
+}
+
+/** R4-G1 心跳（runner_state.json）：训练侧唯一写者，console 只读；缺失 ⇒ null。 */
+function readRunnerState(): EvalBoardView['runnerState'] {
+  const p = path.join(evalDataRoot(), 'runner_state.json')
+  try {
+    if (!existsSync(p)) return null
+    const j = JSON.parse(readFileSync(p, 'utf-8')) as Record<string, unknown>
+    const num = (v: unknown): number | null => (Number.isFinite(Number(v)) ? Number(v) : null)
+    return {
+      windowOpen: j.window_open === true,
+      updatedTs: Number(j.updated_ts) || 0,
+      batchId: typeof j.batch_id === 'string' ? j.batch_id : null,
+      unitIdx: num(j.unit_idx),
+      unitOf: num(j.unit_of),
+      rung: typeof j.rung === 'string' ? j.rung : null,
+      remainingUnits: Number(j.remaining_units) || 0,
+      lastWindowClosedTs: num(j.last_window_closed_ts),
+      engineEpoch: typeof j.engine_epoch === 'string' ? j.engine_epoch : '',
+    }
+  } catch {
+    return null
+  }
+}
 
 export function evalDataRoot(): string {
   return (
@@ -370,10 +492,21 @@ export function buildEvalBoardView(course = '', fresh = false): EvalBoardView {
       const latestA = aList.filter((x) => x.iter === maxIter)
       aTrend = { n: latestA.length, winRate: deriveMetrics(latestA).winRate, iter: maxIter }
     }
+    const tiles = r.stage.tiles ?? []
+    const tileText = tiles.join('')
+    const enemies = r.stage.enemies ?? []
     return {
       rung: r.id,
       dimension: r.dimension,
       lives: r.lives,
+      starLevel: DIFFICULTIES[r.difficulty]?.playerStartLevel ?? 0,
+      stageBrief: {
+        name: r.stage.name,
+        enemies,
+        enemyCount: r.stage.enemyCount ?? enemies.length,
+        hasBase: tileText.includes('E'),
+        hasTerrain: /[bswfi]/.test(tileText),
+      },
       god: r.god,
       batches: recent.length,
       n: w.n,
@@ -385,6 +518,66 @@ export function buildEvalBoardView(course = '', fresh = false): EvalBoardView {
       partial: w.partial,
     }
   })
+
+  // ── R5 iter 矩阵：行 = God + 各 B 层 iter（cells key = `${rung}.${metric}`） ──
+  const bRows = allRows.filter(
+    (x) => x.source === 'B' && !!x.batch_id && !x.batch_id.startsWith('A-'),
+  )
+  const iterRows: EvalBoardView['iterRows'] = []
+  // God 行：只填 winRate（God 基线只产 winRate/lifePrice，§4-R5④）。
+  const godCells: Record<string, number | null> = {}
+  for (const r of ladder) godCells[`${r.id}.winRate`] = r.god.winRate
+  iterRows.push({
+    kind: 'god',
+    course,
+    iter: -1,
+    cells: godCells,
+    n: 0,
+    batchIds: [],
+    screening: false,
+  })
+  if (bRows.length > 0) {
+    const byIter = new Map<number, EvalGameRow[]>()
+    for (const x of bRows) {
+      const a = byIter.get(x.iter) ?? []
+      a.push(x)
+      byIter.set(x.iter, a)
+    }
+    // 仅有批（尚无行）的 nn iter 也出行，供用户看到「已入队」；A12 空态另在 UI 判定。
+    for (const b of batches) {
+      const pol = b.policy ?? (b.ckpt === 'god' ? 'god' : 'nn')
+      if (pol === 'nn' && !byIter.has(b.iter)) byIter.set(b.iter, [])
+    }
+    for (const [it, rows] of [...byIter.entries()].sort((a, b) => b[0] - a[0])) {
+      const cells: Record<string, number | null> = {}
+      const byRung = new Map<string, EvalGameRow[]>()
+      for (const x of rows) {
+        const a = byRung.get(x.rung) ?? []
+        a.push(x)
+        byRung.set(x.rung, a)
+      }
+      for (const [rungId, rs] of byRung) {
+        const m = deriveMetrics(rs)
+        cells[`${rungId}.winRate`] = m.winRate
+        cells[`${rungId}.clearRate`] = m.clearRate
+        cells[`${rungId}.killCompletion`] = m.killCompletion
+        cells[`${rungId}.meanKills`] = m.meanKills
+        cells[`${rungId}.meanPowerUps`] = m.meanPowerUps
+        cells[`${rungId}.winTickMean`] = m.winTickMean
+        cells[`${rungId}.winHpLeftMean`] = m.winHpLeftMean
+      }
+      iterRows.push({
+        kind: 'iter',
+        course,
+        iter: it,
+        cells,
+        n: rows.length,
+        batchIds: [...new Set(rows.map((x) => x.batch_id))],
+        // A4：单批判/未过窗均属筛查级，不作 verdict。
+        screening: true,
+      })
+    }
+  }
 
   // A 层相邻 ckpt 配对哨兵（S2/S3/S4/S5/S6）：同 rung 同 seed 集的连续 wver 对。
   // （aRows / aByRung 已在上方定义，此处复用。）
@@ -479,6 +672,9 @@ export function buildEvalBoardView(course = '', fresh = false): EvalBoardView {
     flips,
     rows: allRows.length,
     spaceCalibrated,
+    iterRows,
+    runnerState: readRunnerState(),
+    ladderState: null,
   }
   viewCache.set(key, { at: view.cachedAt, view })
   return view

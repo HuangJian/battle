@@ -3,7 +3,13 @@
  *  动作语义不变（§1 硬约束 3）：POST → 服务端写回 → 客户端拉一次 state。409 busy
  *  互斥转译为人话（GLM-U4）。 */
 
-import type { ConsoleStateView, EvalBoardView, LogPayload, PoolView } from '../../../ui/view'
+import type {
+  ConsoleStateView,
+  EvalBoardView,
+  EvalCkptsView,
+  LogPayload,
+  PoolView,
+} from '../../../ui/view'
 
 export interface ActionResult {
   ok: boolean
@@ -78,4 +84,15 @@ export async function fetchEvalBoard(fresh = false, course = ''): Promise<EvalBo
   const r = await fetch(`/api/evalboard${q ? `?${q}` : ''}`)
   if (!r.ok) throw new Error(`/api/evalboard HTTP ${r.status}`)
   return (await r.json()) as EvalBoardView
+}
+
+/** R7：ckpt/iter 发现（?leg= 懒加载单腿明细）。 */
+export async function fetchEvalCkpts(course = '', leg = ''): Promise<EvalCkptsView> {
+  const params = new URLSearchParams()
+  if (course) params.set('course', course)
+  if (leg) params.set('leg', leg)
+  const q = params.toString()
+  const r = await fetch(`/api/evalCkpts${q ? `?${q}` : ''}`)
+  if (!r.ok) throw new Error(`/api/evalCkpts HTTP ${r.status}`)
+  return (await r.json()) as EvalCkptsView
 }

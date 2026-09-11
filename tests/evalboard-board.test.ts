@@ -4,7 +4,13 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import path from 'path'
 import { appendRow, type EvalGameRow } from '../tools/training/evalboard/store'
-import { buildEvalBoardView, enqueueProbeRun } from '../tools/training/console/evalboard'
+import {
+  buildEvalBoardView,
+  buildEvalCkptsView,
+  enqueueProbeRun,
+  iterFromCkpt,
+} from '../tools/training/console/evalboard'
+import { enemyBreakdown, rungLabel } from '../tools/training/ui/view'
 
 let root = ''
 beforeAll(() => {
@@ -145,5 +151,73 @@ describe('看板合成端到端', () => {
     expect(c4?.gate?.pass).toBe(true)
     expect(v.alerts.some((a) => a.id === 'S1' && a.message.startsWith('c6l1'))).toBe(true)
     expect(v.batches.length).toBeGreaterThan(0)
+
+    // R5 iter 矩阵：God 行 + it30 学生行；God 只填胜率列。
+    const god = v.iterRows.find((r) => r.kind === 'god')
+    expect(god).toBeTruthy()
+    expect(god!.cells['c4l1.winRate']).toBeCloseTo(0.64, 5)
+    expect(god!.cells['c4l1.meanKills']).toBeUndefined()
+    const it30 = v.iterRows.find((r) => r.kind === 'iter' && r.iter === 30)
+    expect(it30).toBeTruthy()
+    expect(it30!.cells['c4l1.winRate']).toBeCloseTo(0.5, 5)
+    expect(it30!.n).toBe(800)
+    expect(it30!.screening).toBe(true)
+    expect(it30!.batchIds).toContain('b-e2e-0')
+  })
+})
+
+describe('R1 rungLabel / D-b iterFromCkpt', () => {
+  const brief = {
+    name: 'arena-13x13-4enemies',
+    enemies: ['basic', 'basic', 'basic', 'basic'],
+    enemyCount: 4,
+    hasBase: false,
+    hasTerrain: false,
+  }
+  it('全同敌型 · 无地形无基地', () => {
+    expect(
+      rungLabel({ rung: 'c4l1', dimension: '基准', lives: 1, starLevel: 1, stageBrief: brief }),
+    ).toBe('c4l1 · 4敌(全basic) · 1命 · 1★ · 无地形 · 无基地｜基准')
+  })
+  it('多型敌 · 有地形 · 有基地(可摧毁)', () => {
+    const enemies = [...Array(18).fill('basic'), 'fast', 'fast']
+    expect(
+      rungLabel({
+        rung: 's1l3b1',
+        dimension: '基地防守',
+        lives: 3,
+        starLevel: 1,
+        stageBrief: { ...brief, enemies, enemyCount: 20, hasBase: true, hasTerrain: true },
+      }),
+    ).toBe('s1l3b1 · 20敌(18basic+2fast) · 3命 · 1★ · 有地形 · 有基地(可摧毁)｜基地防守')
+  })
+  it('enemyBreakdown 首现序分组', () => {
+    expect(enemyBreakdown(['fast', 'basic', 'fast'])).toBe('2fast+1basic')
+  })
+  it('iterFromCkpt 解析 weights.it<N>.*.json，无 it ⇒ null', () => {
+    expect(iterFromCkpt('tmp/c4-margin/weights.it30.20260911.json')).toBe(30)
+    expect(iterFromCkpt('D:\\go\\weights.it7.abc.json')).toBe(7)
+    expect(iterFromCkpt('tmp/c4-margin/weights.json')).toBeNull()
+  })
+})
+
+describe('R7 buildEvalCkptsView（只读元数据）', () => {
+  it('返回腿列表 + 元数据文件；不含内容/张量字段', () => {
+    const v = buildEvalCkptsView('c4-margin')
+    expect(Array.isArray(v.legs)).toBe(true)
+    expect(Array.isArray(v.files)).toBe(true)
+    for (const f of v.files) {
+      expect(f.path).not.toContain('\\') // 仓库相对路径统一 / 分隔
+      expect(typeof f.sizeBytes).toBe('number')
+      expect(typeof f.mtime).toBe('number')
+    }
+    expect(JSON.stringify(v)).not.toContain('"tensors"')
+    // 有 c4-margin 腿时，iter 解析正确（文件名 c4-margin.it<N>.<ts>.json）。
+    const leg = v.legs.find((l) => l.leg === 'c4-margin')
+    if (leg && leg.count > 0) {
+      const withIter = v.files.filter((f) => f.iter !== null)
+      expect(withIter.length).toBeGreaterThan(0)
+      for (const f of withIter) expect(f.iter).toBeGreaterThan(0)
+    }
   })
 })

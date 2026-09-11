@@ -1,293 +1,211 @@
-/** EvalSummary.tsx — 首页节点行下方简易 EvalBoard（列 = 阶梯 8 级）。
+/** EvalSummary.tsx — 首页 EvalBoard 摘要（plan/evalboard-console-ux.md §4）。
  *
- * 口径（用户拍板 2026-09-10；行列互换 / 去维度行 / 学生仅 B 层 2026-09-10）：
- * - 列 = 阶梯 rung；行 = 指标（God/学生/n/Δ）；维度见表头 title
- * - God = ladder 工作副本基线；TBD = 基线未跑 →「eval now」(policy=god)
- * - 学生 = **EvalBoard B 层**窗均值（有则 latest）——训练 rollout / A 层 eval
- *   与 evalboard 不同口径，**禁止混入**（用户指令）
- * - 无数据的格：God/学生各自「eval now」——**入队后立即返回**，后台轮询批次
- *   直至 done/abort 再刷表，不阻塞首页（用户指令 2026-09-10）
- * - 门控/批次/翻转矩阵进抽屉「评估」——本表只做一眼扫读
+ * 口径（用户 2026-09-11 拍板 A1/A2/A9/A12/A13，**推翻** 2026-09-10「行列互换 / 去维度行」）：
+ * - 矩阵：**行(iter) × 列(rung×指标)**；iter 层级 = **B 层**（God 行独立）。
+ * - 列 = 扁平 key `${rung}.${metric}`，两段文本（rung / 指标）挂在表头 title。
+ * - B 层 0 行时显示**空态 + 引导**（A12），不用 A 层数据充数。
+ * - 头部：**iter select + 「评估」按钮**（A13，用户核心诉求：自己点出数据）。
+ *   按钮 = **入队**，≠ 执行：批要跑起来需训练空闲窗或手动 `kick-once.py`（见运行态提示）。
+ * - A 层（训练内自动 eval）仍不混入本表，只做趋势（§2.1）。
  */
 
-import { useCallback, useEffect, useRef, useState } from 'preact/hooks'
-import type { EvalBatchRow, EvalBoardView, EvalLadderRow } from '../../../ui/view'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
+import type {
+  EvalBatchRow,
+  EvalBoardView,
+  EvalCkptFile,
+  EvalIterRow,
+  EvalLadderRow,
+  EvalMetricKey,
+} from '../../../ui/view'
+import { EVAL_METRIC_KEYS, EVAL_METRIC_LABELS, rungLabel } from '../../../ui/view'
 import { Pill } from '../../../ui/components/Pill'
+import { DataTable, type Col } from '../../../ui/components/DataTable'
 import { usePolling } from '../lib/usePolling'
-import { fetchEvalBoard, postAction } from '../lib/api-client'
+import { fetchEvalBoard, fetchEvalCkpts, postAction } from '../lib/api-client'
 
 export interface EvalSummaryProps {
-  /** 当前查看课程（学生列按课程过滤 + eval now 入队课程）。 */
+  /** 当前查看课程。 */
   course?: string
   /** 首页可见时才轮询（后台 tab 停链）。 */
   enabled?: boolean
   /** LAN 只读：按钮禁用。 */
   readOnly?: boolean
-  /** 打开抽屉「评估」完整看板。 */
+  /** 打开完整评估页（/eval）。 */
   onMore: () => void
 }
 
 const pct = (v: number | null): string => (v === null ? '—' : `${(v * 100).toFixed(1)}%`)
 
-const pp = (v: number | null): string =>
-  v === null ? '—' : `${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)}pp`
-
-/** 学生读数：只取 B 层（窗均值优先；partial 窗回退 latest）。训练 A 层不参与。 */
-function studentWin(row: EvalLadderRow): { win: number | null; n: number; note: string } {
-  if (!row.partial && row.windowWin !== null && row.n > 0)
-    return { win: row.windowWin, n: row.n, note: `B 层窗均值 n=${row.n}` }
-  if (row.latestWin !== null)
-    return { win: row.latestWin, n: row.n, note: `B 层 latest（窗 partial，n=${row.n}）` }
-  return { win: null, n: 0, note: '尚无 EvalBoard B 层入账' }
+/** 指标值格式化（列渲染 + 后续导出共用口径）。 */
+export function fmtMetric(metric: EvalMetricKey, v: number | null): string {
+  if (v === null || v === undefined) return '—'
+  switch (metric) {
+    case 'winRate':
+    case 'clearRate':
+    case 'killCompletion':
+      return pct(v)
+    case 'meanKills':
+    case 'meanPowerUps':
+      return v.toFixed(2)
+    case 'winTickMean':
+      return `${Math.round(v)}t`
+    case 'winHpLeftMean':
+      return String(Math.round(v))
+  }
 }
 
-/** 批次 policy：字段优先；旧台账/旧 API 无 policy 时用 ckpt==='god' 回退。 */
+/** 批次 policy：字段优先；旧台账无 policy 时用 ckpt==='god' 回退。 */
 function batchPolicy(b: EvalBatchRow): 'nn' | 'god' {
   if (b.policy === 'god' || b.policy === 'nn') return b.policy
   return b.ckpt === 'god' ? 'god' : 'nn'
 }
 
-/** 在途批（pending/running）：刷新后仍可见，避免再点一遍 eval now。 */
-function activeBatch(
-  batches: EvalBatchRow[],
-  rung: string,
-  policy: 'nn' | 'god',
-  course: string,
-): EvalBatchRow | null {
-  for (let i = batches.length - 1; i >= 0; i--) {
-    const b = batches[i]!
-    if (b.rung_from !== rung) continue
-    if (b.status !== 'pending' && b.status !== 'running') continue
-    if (batchPolicy(b) !== policy) continue
-    // 学生批必须对上当前查看课程；God 基线与权重无关，不绑课程。
-    if (policy === 'nn' && course && b.course !== course) continue
-    return b
+/** 矩阵列（扁平 key = `${rung}.${metric}`）。 */
+function matrixColumns(ladder: EvalLadderRow[], metricKeys: EvalMetricKey[]): Col<EvalIterRow>[] {
+  const cols: Col<EvalIterRow>[] = [
+    {
+      key: 'iter',
+      label: 'iter',
+      cell: (r) => (r.kind === 'god' ? <b>God</b> : <b>it{r.iter}</b>),
+      sortValue: (r) => (r.kind === 'god' ? Number.POSITIVE_INFINITY : r.iter),
+    },
+    {
+      key: 'n',
+      label: 'n',
+      align: 'num',
+      cell: (r) => (r.n > 0 ? String(r.n) : '—'),
+      sortValue: (r) => r.n,
+    },
+  ]
+  for (const rung of ladder) {
+    for (const metric of metricKeys) {
+      const key = `${rung.rung}.${metric}`
+      cols.push({
+        key,
+        label: `${rung.rung} ${EVAL_METRIC_LABELS[metric]}`,
+        align: 'num',
+        thTitle: `${rungLabel(rung)} · 指标：${EVAL_METRIC_LABELS[metric]}`,
+        sortValue: (r) => r.cells[key] ?? Number.NEGATIVE_INFINITY,
+        cell: (r) =>
+          r.cells[key] === undefined ? (
+            <span className="tc-muted">·</span>
+          ) : (
+            fmtMetric(metric, r.cells[key]!)
+          ),
+      })
+    }
   }
-  return null
+  return cols
 }
 
-/** 在途批状态条（不阻塞、可刷新后恢复）。 */
-function QueuedChip({ batch, pending }: { batch: EvalBatchRow | null; pending: boolean }) {
-  if (batch) {
-    const label = batch.status === 'running' ? '批执行中' : '已入队'
-    return (
-      <Pill
-        tone={batch.status === 'running' ? 'a' : 'gray'}
-        title={`${batch.batch_id} · ${batch.status} · units ${batch.units.done.length}/${batch.units.of} · 等训练 runner 拾取派发`}
-      >
-        {label}
-        <span className="tc-small"> {batch.batch_id.slice(-6)}</span>
-      </Pill>
-    )
-  }
-  return (
-    <Pill tone="gray" title="本页刚触发，台账尚未回读">
-      {pending ? '入队中…' : '已入队'}
-    </Pill>
-  )
-}
-
-function GodCell({
-  rung,
-  god,
-  readOnly,
-  onEval,
-  pending,
-  queued,
+/** 指标显隐 checkbox（toolbarLeft 插槽；勾掉 = 该指标全部 rung 列消失）。 */
+function MetricToggles({
+  metricKeys,
+  onToggle,
 }: {
-  rung: string
-  god: EvalLadderRow['god']
-  readOnly: boolean
-  onEval: (rung: string, policy: 'nn' | 'god') => void
-  pending: boolean
-  queued: EvalBatchRow | null
+  metricKeys: EvalMetricKey[]
+  onToggle: (k: EvalMetricKey) => void
 }) {
-  if (god.winRate !== null) {
-    return (
-      <span title={`n=${god.n}${god.provisional ? ' · provisional（God<30% 穿过不判）' : ''}`}>
-        {pct(god.winRate)}
-        {god.provisional ? <span className="tc-muted"> prov</span> : null}
-      </span>
-    )
-  }
-  if (queued || pending) return <QueuedChip batch={queued} pending={pending} />
   return (
-    <button
-      type="button"
-      className="tc-btn tc-btn--sm"
-      disabled={readOnly}
-      title={
-        readOnly
-          ? '局域网只读：仅本机 localhost 可入队'
-          : `入队 God 基线批（policy=god）@ ${rung}；入队后等 runner 派发，不阻塞页面`
-      }
-      onClick={() => onEval(rung, 'god')}
-    >
-      eval now
-    </button>
+    <div className="tc-metric-toggles" role="group" aria-label="指标显隐">
+      {EVAL_METRIC_KEYS.map((k) => (
+        <label key={k} className="tc-small">
+          <input type="checkbox" checked={metricKeys.includes(k)} onChange={() => onToggle(k)} />
+          <span>{EVAL_METRIC_LABELS[k]}</span>
+        </label>
+      ))}
+    </div>
   )
 }
 
-/** 学生格：有 B 读数 → win%；无 → 在途批或「eval now」。 */
-function StudentCell({
-  row,
-  course,
-  readOnly,
-  onEval,
-  pending,
-  queued,
-}: {
-  row: EvalLadderRow
-  course: string
-  readOnly: boolean
-  onEval: (rung: string, policy: 'nn' | 'god') => void
-  pending: boolean
-  queued: EvalBatchRow | null
-}) {
-  const s = studentWin(row)
-  if (s.win !== null) {
-    return (
-      <span title={s.note}>
-        <b>{pct(s.win)}</b>
-        {s.n > 0 ? <span className="tc-muted tc-small"> n={s.n}</span> : null}
-      </span>
-    )
-  }
-  if (queued || pending) return <QueuedChip batch={queued} pending={pending} />
+/** 空态（A12）：B 层 0 行 → 明确引导，不显示误导性空数据行。 */
+function EmptyState({ course, batches }: { course: string; batches: EvalBatchRow[] }) {
+  const pending = batches.filter(
+    (b) => batchPolicy(b) === 'nn' && (b.status === 'pending' || b.status === 'running'),
+  )
   return (
-    <button
-      type="button"
-      className="tc-btn tc-btn--sm"
-      disabled={readOnly || !course}
-      title={
-        readOnly
-          ? '局域网只读：仅本机 localhost 可入队'
-          : course
-            ? `入队 B 层评估批：${course} @ ${row.rung}`
-            : '先选择课程'
-      }
-      onClick={() => onEval(row.rung, 'nn')}
-    >
-      eval now
-    </button>
+    <div className="tc-empty tc-eval-summary__empty">
+      <p>
+        <b>尚无 B 层数据（至今未执行过任何 evalB）。</b>
+      </p>
+      <p className="tc-muted tc-small">
+        ① 选 iter → 点上方「评估」入队；批由训练空闲窗（rollout/A-eval 收官后）或本机手动执行，
+        <b>入队 ≠ 立即执行</b>。
+      </p>
+      <p className="tc-muted tc-small">
+        ② 或本机手动跑一次：
+        <code> python tools/training/evalboard/kick-once.py</code>
+      </p>
+      {pending.length > 0 ? (
+        <p className="tc-small">
+          当前在途 nn 批 {pending.length} 个：
+          {pending.map((b) => (
+            <span key={b.batch_id}>
+              {' '}
+              <Pill tone="gray" title={`${b.batch_id} · ${b.status}`}>
+                it{b.iter} {b.status}
+              </Pill>
+            </span>
+          ))}
+        </p>
+      ) : null}
+      {course ? null : <p className="tc-muted tc-small">未选课程。</p>}
+    </div>
   )
 }
 
-/** 纯展示表（可单测：注入 view，不碰 fetch）。列 = rung，行 = 指标。 */
+/** 纯展示矩阵（可单测：注入 view，不碰 fetch）。 */
 export function EvalSummaryTable({
   ladder,
+  iterRows,
   course,
-  cachedCourse,
-  readOnly = false,
-  onEval,
-  pendingKeys,
+  metricKeys,
+  onToggleMetric,
   batches,
 }: {
   ladder: EvalLadderRow[]
+  iterRows: EvalIterRow[]
   course?: string
-  cachedCourse?: string
+  /** 兼容旧调用方（本表只读，无按钮）。 */
   readOnly?: boolean
-  onEval: (rung: string, policy: 'nn' | 'god') => void
-  /** key = `${policy}:${rung}`；true = 本页刚触发、台账尚未回读。 */
-  pendingKeys?: Record<string, boolean>
-  /** 台账在途批（刷新后仍显示「已入队」，不再变回 eval now）。 */
+  metricKeys: EvalMetricKey[]
+  onToggleMetric?: (k: EvalMetricKey) => void
   batches?: EvalBatchRow[]
 }) {
-  const isPend = (policy: 'nn' | 'god', rung: string): boolean =>
-    !!pendingKeys?.[`${policy}:${rung}`]
   const list = batches ?? []
+  const hasBData = iterRows.some((r) => r.kind === 'iter' && r.n > 0)
+  const columns = useMemo(() => matrixColumns(ladder, metricKeys), [ladder, metricKeys])
+
+  // A12：B 层 0 行 ⇒ 空态 + 引导（绝不显示误导性空数据行，也不拿 A 层充数）。
+  if (!hasBData) return <EmptyState course={course ?? ''} batches={list} />
+
   return (
     <>
-      <div className="tc-tablewrap tc-eval-summary__wrap">
-        <table className="tc-table tc-table--dense" aria-label="评估阶梯摘要">
-          <thead>
-            <tr>
-              <th className="tc-firstcol">指标</th>
-              {ladder.map((r) => (
-                <th key={r.rung} title={r.dimension}>
-                  {r.rung}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <th className="tc-firstcol" scope="row" title="God 全阶梯基线（ladder 工作副本）">
-                God
-              </th>
-              {ladder.map((r) => (
-                <td key={r.rung}>
-                  <GodCell
-                    rung={r.rung}
-                    god={r.god}
-                    readOnly={readOnly}
-                    onEval={onEval}
-                    pending={isPend('god', r.rung)}
-                    queued={activeBatch(list, r.rung, 'god', course ?? '')}
-                  />
-                </td>
-              ))}
-            </tr>
-            <tr>
-              <th
-                className="tc-firstcol"
-                scope="row"
-                title="EvalBoard B 层学生窗均值（不含训练 rollout / A 层）"
-              >
-                学生
-              </th>
-              {ladder.map((r) => (
-                <td key={r.rung}>
-                  <StudentCell
-                    row={r}
-                    course={course ?? ''}
-                    readOnly={readOnly}
-                    onEval={onEval}
-                    pending={isPend('nn', r.rung)}
-                    queued={activeBatch(list, r.rung, 'nn', course ?? '')}
-                  />
-                </td>
-              ))}
-            </tr>
-            <tr>
-              <th className="tc-firstcol tc-muted" scope="row" title="B 层入账局数">
-                n
-              </th>
-              {ladder.map((r) => (
-                <td key={r.rung} className="tc-num tc-muted">
-                  {r.n > 0 ? r.n : '—'}
-                </td>
-              ))}
-            </tr>
-            <tr>
-              <th className="tc-firstcol" scope="row" title="学生 B − God">
-                Δ
-              </th>
-              {ladder.map((r) => {
-                const d = r.deltaVsGod
-                return (
-                  <td key={r.rung}>
-                    {d === null || d === undefined ? (
-                      <span className="tc-muted">—</span>
-                    ) : (
-                      <span title="Δ = B 层窗 win − God win（与抽屉门控同口径）">{pp(d)}</span>
-                    )}
-                  </td>
-                )
-              })}
-            </tr>
-          </tbody>
-        </table>
-      </div>
+      {iterRows.some((r) => r.screening && r.kind === 'iter') ? (
+        <p className="tc-muted tc-small">
+          「筛查级」：单批/未满窗阈值读数，不作 verdict、不写门控。
+        </p>
+      ) : null}
+      <DataTable<EvalIterRow>
+        columns={columns}
+        rows={iterRows}
+        rowKey={(r) => `${r.kind}:${r.iter}`}
+        searchKeys={['iter']}
+        storagePrefix="tc.eval.summary"
+        emptyText="无匹配行"
+        ariaLabel="评估 iter 矩阵"
+        toolbarLeft={
+          onToggleMetric ? (
+            <MetricToggles metricKeys={metricKeys} onToggle={onToggleMetric} />
+          ) : null
+        }
+      />
       <p className="tc-eval-summary__note tc-muted tc-small">
-        学生 = EvalBoard <b>B 层</b>窗均值；训练 rollout / A 层 eval 与本表不同口径，不混入。
-        「已入队/批执行中」= 台账在途；训练空闲窗（本轮 rollout/A-eval 收官后）自动领取， 新 rollout
-        会抢占暂停让出集群。God 数字写在 ladder 工作副本，批完成后才会出现。
-        门控与批次见抽屉「评估」。
+        行 = B 层 iter（含 God 基线行，仅填胜率列）；列 = rung×指标（hover 表头看关卡画像）。 学生 =
+        EvalBoard <b>B 层</b>；训练 rollout / A 层 eval 与本表不同口径，不混入。
         {course ? <> · 课程 {course}</> : null}
-        {cachedCourse && cachedCourse !== course ? (
-          <span className="tc-muted"> · 缓存课程 {cachedCourse}</span>
-        ) : null}
+        {list.length > 0 ? ` · 台账 ${list.length} 批` : ''}
       </p>
     </>
   )
@@ -295,9 +213,26 @@ export function EvalSummaryTable({
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
-/** 后台盯批：每 15s fresh 拉一次 /api/evalboard，直到该 batch 终态或超时。 */
+/** 后台盯批：每 15s fresh 拉一次 /api/evalboard，直到该 batch 终态（无硬超时）。 */
 const WATCH_POLL_MS = 15_000
-const WATCH_TIMEOUT_MS = 20 * 60_000
+
+/** 指标显隐持久化 key（与其他 tc.* 表一致）。 */
+const METRICS_STORE = 'tc.eval.summary.metrics'
+
+function loadMetricKeys(): EvalMetricKey[] {
+  try {
+    const raw = localStorage.getItem(METRICS_STORE)
+    if (!raw) return [...EVAL_METRIC_KEYS]
+    const arr = JSON.parse(raw) as unknown
+    if (!Array.isArray(arr)) return [...EVAL_METRIC_KEYS]
+    const valid = arr.filter((k): k is EvalMetricKey =>
+      (EVAL_METRIC_KEYS as readonly string[]).includes(String(k)),
+    )
+    return valid.length > 0 ? valid : [...EVAL_METRIC_KEYS]
+  } catch {
+    return [...EVAL_METRIC_KEYS]
+  }
+}
 
 export function EvalSummary({
   course = '',
@@ -306,9 +241,12 @@ export function EvalSummary({
   onMore,
 }: EvalSummaryProps) {
   const [view, setView] = useState<EvalBoardView | null>(null)
+  const [ckpts, setCkpts] = useState<EvalCkptFile[]>([])
+  const [ckpt, setCkpt] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [flash, setFlash] = useState<string | null>(null)
-  const [pendingKeys, setPendingKeys] = useState<Record<string, boolean>>({})
+  const [submitting, setSubmitting] = useState(false)
+  const [metricKeys, setMetricKeys] = useState<EvalMetricKey[]>(() => loadMetricKeys())
   /** 取消旗标：卸载 / 换课程时置位，后台 watch 立即退出。 */
   const watchAlive = useRef(true)
 
@@ -319,13 +257,16 @@ export function EvalSummary({
     }
   }, [])
 
-  const setPend = useCallback((key: string, on: boolean) => {
-    setPendingKeys((p) => {
-      const n = { ...p }
-      if (on) n[key] = true
-      else delete n[key]
-      return n
-    })
+  useEffect(() => {
+    try {
+      localStorage.setItem(METRICS_STORE, JSON.stringify(metricKeys))
+    } catch {
+      /* 不可写不致命 */
+    }
+  }, [metricKeys])
+
+  const toggleMetric = useCallback((k: EvalMetricKey) => {
+    setMetricKeys((prev) => (prev.includes(k) ? prev.filter((x) => x !== k) : [...prev, k]))
   }, [])
 
   const refresh = useCallback(async () => {
@@ -340,107 +281,184 @@ export function EvalSummary({
     }
   }, [course])
 
+  // iter 候选（R7 发现端点）；课程切换重新拉。
+  useEffect(() => {
+    let alive = true
+    if (!course) {
+      setCkpts([])
+      setCkpt('')
+      return () => {
+        alive = false
+      }
+    }
+    void fetchEvalCkpts(course)
+      .then((c) => {
+        if (!alive) return
+        setCkpts(c.files)
+        // 默认选活动权重；没有则选最新归档。
+        const active = c.files.find((f) => f.leg === '(active)')
+        const first = c.files.find((f) => f.iter !== null)
+        setCkpt(active?.path ?? first?.path ?? `tmp/${course}/weights.json`)
+      })
+      .catch(() => {
+        /* 端点失败 → 手填兜底 */
+      })
+    return () => {
+      alive = false
+    }
+  }, [course])
+
   useEffect(() => {
     if (enabled) void refresh()
   }, [enabled, refresh])
-  // 首页慢轮询：与抽屉评估同 300s（服务端另有 30s TTL 缓存）。
   usePolling({ enabled, intervalSec: 300, fetch: refresh })
 
-  /** 入队成功后异步等批结束并刷表——不 await 阻塞 UI。 */
+  /** 入队成功后异步等批结束并刷表——不 await 阻塞 UI；无硬超时（仍在跑就继续等）。 */
   const watchBatch = useCallback(
-    async (key: string, batchId: string | null) => {
-      const deadline = Date.now() + WATCH_TIMEOUT_MS
-      while (watchAlive.current && Date.now() < deadline) {
+    async (batchId: string | null) => {
+      let waited = 0
+      while (watchAlive.current) {
         await sleep(WATCH_POLL_MS)
+        waited += WATCH_POLL_MS
         if (!watchAlive.current) return
         try {
-          // fresh=1 绕过 30s TTL，批状态及时可见。
           const v = await fetchEvalBoard(true, course)
           if (!watchAlive.current) return
           setView(v)
           const target = batchId ? v.batches.find((b) => b.batch_id === batchId) : null
-          // 无 batchId（解析失败）时：该 rung 是否还有 pending/running。
-          // 有 batchId：必须看到该批且已终态；未见 = 仍在途（或缓存），继续等。
           const done = batchId
             ? !!target && (target.status === 'done' || target.status === 'aborted')
             : !v.batches.some(
-                (b) =>
-                  b.course === course &&
-                  b.rung_from === key.split(':').slice(1).join(':') &&
-                  (b.status === 'pending' || b.status === 'running'),
+                (b) => batchPolicy(b) === 'nn' && b.status !== 'done' && b.status !== 'aborted',
               )
           if (done) {
-            setPend(key, false)
             setFlash(batchId ? `评估批 ${batchId} 已结束，表已刷新` : '评估批已结束，表已刷新')
             return
+          }
+          if (waited >= 20 * 60_000) {
+            setFlash('评估批仍在排队（训练忙碌中）——可本机运行 kick-once.py 立即执行')
+            waited = 0
           }
         } catch {
           /* 单次拉取失败继续盯 */
         }
       }
-      if (watchAlive.current) {
-        setPend(key, false)
-        setFlash('评估批仍在跑，已停止等待（详情见抽屉批次台账）')
-      }
     },
-    [course, setPend],
+    [course],
   )
 
-  /** 点击：立刻标 pending → fire 入队 → 后台 watch；绝不 await 整批结果。 */
-  const onEval = useCallback(
-    (rung: string, policy: 'nn' | 'god') => {
-      if (readOnly) return
-      if (policy === 'nn' && !course) return
-      const key = `${policy}:${rung}`
-      if (pendingKeys[key]) return
-      setPend(key, true)
-      setFlash(`已入队 ${rung}（${policy}），后台等待中…`)
-      void (async () => {
-        try {
-          const ckpt = policy === 'god' ? 'god' : `tmp/${course}/weights.json`
-          const r = await postAction('evalProbeRun', {
-            course,
-            ckpt,
-            rung_from: rung,
-            policy,
-            requester: 'eval-summary',
-          })
-          if (!watchAlive.current) return
-          if (!r.ok) {
-            setPend(key, false)
-            setFlash(r.message)
-            return
-          }
-          setFlash(r.message)
-          // 从「评估批已入队 <id>」抠 batch_id；失败则 watch 退化为按 rung 轮询。
-          const m = /评估批已入队\s+(\S+)/.exec(r.message)
-          void watchBatch(key, m ? m[1]! : null)
-        } catch (e) {
-          if (!watchAlive.current) return
-          setPend(key, false)
-          setFlash(e instanceof Error ? e.message : String(e))
+  const onSubmit = useCallback(() => {
+    if (readOnly || !course) return
+    if (!ckpt.trim()) {
+      setFlash('先选 iter（或手填 ckpt 路径）')
+      return
+    }
+    setSubmitting(true)
+    setFlash(`已入队 ${ckpt.trim()}，后台等待中…`)
+    void (async () => {
+      try {
+        const iter = iterValue(ckpts, ckpt)
+        const r = await postAction('evalProbeRun', {
+          course,
+          ckpt: ckpt.trim(),
+          rung_from: 'c4l1',
+          policy: 'nn',
+          requester: 'eval-summary',
+          ...(iter !== null ? { iter } : {}),
+        })
+        if (!watchAlive.current) return
+        setFlash(r.message)
+        if (!r.ok) {
+          setSubmitting(false)
+          return
         }
-      })()
-    },
-    [course, pendingKeys, readOnly, setPend, watchBatch],
-  )
+        const m = /评估批已入队\s+(\S+)/.exec(r.message)
+        setSubmitting(false)
+        void watchBatch(m ? m[1]! : null)
+      } catch (e) {
+        if (!watchAlive.current) return
+        setSubmitting(false)
+        setFlash(e instanceof Error ? e.message : String(e))
+      }
+    })()
+  }, [ckpt, course, ckpts, readOnly, watchBatch])
+
+  const runner = view?.runnerState ?? null
+  const busyMin =
+    runner && !runner.windowOpen && runner.lastWindowClosedTs !== null
+      ? Math.max(0, Math.round((Date.now() - runner.lastWindowClosedTs) / 60000))
+      : 0
 
   return (
-    <section className="tc-eval-summary" aria-label="评估摘要（阶梯）">
+    <section className="tc-eval-summary" aria-label="评估摘要（iter 矩阵）">
       <header className="tc-eval-summary__hd">
         <h2 className="tc-eval-summary__title">
           EvalBoard 摘要
           <span className="tc-muted tc-small">
             {' '}
-            · 列 = 阶梯 8 级 · God vs 学生（
-            {course || '当前课程'}
-            ）B 层
+            · 行 = B 层 iter · 列 = rung×指标（{course || '当前课程'}）
           </span>
         </h2>
-        <button type="button" className="tc-btn tc-btn--sm" onClick={onMore}>
-          完整评估看板 ›
-        </button>
+        <div className="tc-row tc-small">
+          <label>
+            iter{' '}
+            <select
+              aria-label="选择评估 iter"
+              value={ckpt}
+              disabled={!course}
+              onChange={(e) => setCkpt((e.target as HTMLSelectElement).value)}
+            >
+              {ckpts.length === 0 ? <option value="">（无发现结果）</option> : null}
+              {ckpts.map((f) => (
+                <option key={`${f.leg}:${f.path}:${f.mtime}`} value={f.path}>
+                  {f.iter !== null ? `it${f.iter}` : f.leg === '(active)' ? '活动权重' : '—'}
+                  {` · ${f.path.split('/').pop()}`}
+                </option>
+              ))}
+            </select>
+          </label>
+          {/* 只读不物理禁用按钮（只读是动作边界，点击由服务端 403 + flash 兜底）。 */}
+          <button
+            type="button"
+            className="tc-btn tc-btn--sm"
+            disabled={!course || submitting}
+            title={
+              readOnly
+                ? '只读模式：操作仅限本机 localhost'
+                : '入队 B 层评估批（＝入队，不等于立即执行；由训练空闲窗或 kick-once.py 执行）'
+            }
+            onClick={onSubmit}
+          >
+            评估
+          </button>
+          <button type="button" className="tc-btn tc-btn--sm" onClick={onMore}>
+            完整评估看板 ›
+          </button>
+        </div>
       </header>
+      {runner ? (
+        <p className="tc-eval-summary__note tc-small" role="status">
+          {runner.windowOpen ? (
+            <>
+              <Pill tone="g">窗口开启中</Pill>
+              {runner.rung ? ` · ${runner.rung}` : ''}
+              {runner.unitIdx !== null ? ` u${runner.unitIdx}` : ''}
+              {runner.remainingUnits > 0 ? ` · 剩余 ${runner.remainingUnits} 单元` : ''}
+            </>
+          ) : (
+            <>
+              <Pill tone="y">训练忙碌中</Pill>
+              {busyMin > 0 ? ` · 已等 ${busyMin} 分钟` : ''}
+              {runner.remainingUnits > 0 ? ` · 队列排位 ${runner.remainingUnits}` : ''}
+            </>
+          )}
+        </p>
+      ) : null}
+      {view?.abWarn ? (
+        <div className="tc-banner tc-banner--err" role="alert">
+          {view.abWarn}
+        </div>
+      ) : null}
       {flash ? (
         <p className="tc-eval-summary__note tc-small" role="status">
           {flash}
@@ -455,11 +473,11 @@ export function EvalSummary({
       ) : (
         <EvalSummaryTable
           ladder={view.ladder}
+          iterRows={view.iterRows}
           course={course}
-          cachedCourse={view.course}
           readOnly={readOnly}
-          onEval={onEval}
-          pendingKeys={pendingKeys}
+          metricKeys={metricKeys}
+          onToggleMetric={toggleMetric}
           batches={view.batches}
         />
       )}
@@ -467,4 +485,8 @@ export function EvalSummary({
   )
 }
 
-void null
+/** ckpt 路径 → iter（活动权重 = null；归档文件取元数据里的 iter）。 */
+function iterValue(files: EvalCkptFile[], ckpt: string): number | null {
+  const f = files.find((x) => x.path === ckpt)
+  return f ? f.iter : null
+}

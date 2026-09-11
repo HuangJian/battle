@@ -354,10 +354,26 @@ export interface EvalGateView {
   pass: boolean
 }
 
+export interface EvalStageBrief {
+  /** stage.name，如 arena-13x13-4enemies。 */
+  name: string
+  /** 敌人 kind 队列（可重复），用于 hover 敌型构成。 */
+  enemies: string[]
+  enemyCount: number
+  /** tiles 含 'E'（基地）。 */
+  hasBase: boolean
+  /** tiles 含 b/s/w/f/i 任一（砖/钢/水/树/冰）。 */
+  hasTerrain: boolean
+}
+
 export interface EvalLadderRow {
   rung: string
   dimension: string
   lives: number
+  /** DIFFICULTIES[difficulty].playerStartLevel（hard ⇒ 1）—— hover 「N★」来源。 */
+  starLevel: number
+  /** 该 rung 关卡画像（R1 hover 人类可读描述的数据源）。 */
+  stageBrief: EvalStageBrief
   god: { winRate: number | null; lifePrice: number | null; n: number; provisional: boolean | null }
   batches: number
   n: number
@@ -418,6 +434,130 @@ export interface EvalBoardView {
   }>
   rows: number
   spaceCalibrated: boolean
+  // ── plan/evalboard-console-ux.md §5.1 扩展（R5 iter 矩阵 / R4-G1 运行态 / R4 爬梯态） ──
+  /** 行 = God + 各 B 层 iter（按 course），cells key = `${rung}.${metric}`。 */
+  iterRows: EvalIterRow[]
+  /** 训练侧心跳（runner_state.json，缺失 ⇒ null）。 */
+  runnerState: EvalRunnerState | null
+  /** 自动爬梯任务态（无任务 ⇒ null）。 */
+  ladderState: EvalLadderState | null
+}
+
+/** B 层 iter 矩阵一行（R5）：iter 的累积 B 层读数。 */
+export interface EvalIterRow {
+  /** 'god' = C 层基线行（只填胜率类列）；'iter' = B 层学生行。 */
+  kind: 'god' | 'iter'
+  course: string
+  iter: number
+  /** key = `${rung}.${metric}`（见 EvalMetricKey）；无数据 ⇒ null。 */
+  cells: Record<string, number | null>
+  /** 该 iter 的 B 层累积局数。 */
+  n: number
+  /** 溯源（导出用）。 */
+  batchIds: string[]
+  /** A4：单批判阈值判定属筛查级，不作 verdict。 */
+  screening: boolean
+}
+
+/** R2 可选指标 key（UI 显隐 + CSV 列名共用）。 */
+export type EvalMetricKey =
+  | 'winRate'
+  | 'clearRate'
+  | 'killCompletion'
+  | 'meanKills'
+  | 'meanPowerUps'
+  | 'winTickMean'
+  | 'winHpLeftMean'
+
+export const EVAL_METRIC_KEYS: readonly EvalMetricKey[] = [
+  'winRate',
+  'clearRate',
+  'killCompletion',
+  'meanKills',
+  'meanPowerUps',
+  'winTickMean',
+  'winHpLeftMean',
+]
+
+/** 指标中文短名（列头/CSV）。 */
+export const EVAL_METRIC_LABELS: Record<EvalMetricKey, string> = {
+  winRate: '胜率',
+  clearRate: '全歼率',
+  killCompletion: '完成度',
+  meanKills: '平均击杀',
+  meanPowerUps: '平均道具',
+  winTickMean: '胜局耗时',
+  winHpLeftMean: '胜局残血',
+}
+
+/** R7 ckpt 发现：单个权重文件元数据（**不读内容**，不算 ckpt_sha16）。 */
+export interface EvalCkptFile {
+  leg: string
+  /** 仓库相对路径（/ 分隔）。 */
+  path: string
+  mtime: number
+  sizeBytes: number
+  /** 文件名 `*.it<N>.*.json` → N；无匹配 ⇒ null。 */
+  iter: number | null
+}
+
+/** R7 发现端点返回（GET /api/evalCkpts）。 */
+export interface EvalCkptsView {
+  course: string
+  /** 可展开的腿（目录名 + json 数）；不返回文件明细（懒加载）。 */
+  legs: Array<{ leg: string; count: number }>
+  /** 目标腿（显式 leg / 课程同名腿 / 活动权重）的文件明细。 */
+  files: EvalCkptFile[]
+  truncated: boolean
+}
+
+/** R4-G1 训练侧心跳（runner_state.json）。 */
+export interface EvalRunnerState {
+  windowOpen: boolean
+  updatedTs: number
+  batchId: string | null
+  unitIdx: number | null
+  unitOf: number | null
+  rung: string | null
+  remainingUnits: number
+  lastWindowClosedTs: number | null
+  engineEpoch: string
+}
+
+/** R4 自动爬梯任务态（请求文件持久化，无状态推导）。 */
+export interface EvalLadderState {
+  course: string
+  threshold: number
+  reachedRung: string | null
+  stopped: boolean
+  stoppedReason: string | null
+}
+
+/**
+ * R1：rung 表头 hover 人类可读描述（纯函数，可单测）。
+ * 例：`s1l3b1 · 20敌(18basic+2fast) · 3命 · 1★ · 有地形 · 有基地(可摧毁)｜基地防守`
+ */
+export function rungLabel(
+  row: Pick<EvalLadderRow, 'rung' | 'lives' | 'starLevel' | 'stageBrief' | 'dimension'>,
+): string {
+  const b = row.stageBrief
+  const enemyStr =
+    b.enemies.length === 0
+      ? `${b.enemyCount || 0}敌`
+      : `${b.enemies.length}敌(${enemyBreakdown(b.enemies)})`
+  return (
+    `${row.rung} · ${enemyStr} · ${row.lives}命 · ${row.starLevel}★ · ` +
+    `${b.hasTerrain ? '有地形' : '无地形'} · ${b.hasBase ? '有基地(可摧毁)' : '无基地'}｜${row.dimension}`
+  )
+}
+
+/** 敌型构成：全同 ⇒ `全kind`；多型 ⇒ `Nkind+Mkind`（首现序）。 */
+export function enemyBreakdown(enemies: string[]): string {
+  const counts = new Map<string, number>()
+  for (const k of enemies) counts.set(k, (counts.get(k) ?? 0) + 1)
+  const parts = [...counts.entries()]
+  if (parts.length === 1) return `全${parts[0]![0]}`
+  return parts.map(([k, n]) => `${n}${k}`).join('+')
 }
 
 // ────────────────────────── 纯函数：时间 ──────────────────────────

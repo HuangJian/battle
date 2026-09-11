@@ -38,6 +38,7 @@ import { launchSpec } from '../proc'
 import { monitorTouch } from '../reload-touch'
 import {
   buildEvalBoardView,
+  buildEvalCkptsView,
   buildPoolView,
   buildStateView,
   componentLogPayload,
@@ -207,6 +208,11 @@ async function main(): Promise<void> {
         if (req.method === 'GET' && url.pathname === '/api/evalboard') {
           const fresh = url.searchParams.get('fresh') === '1'
           return json(await buildEvalBoardView(viewCourse || undefined, fresh))
+        }
+        // R7：ckpt/iter 发现（只 stat 不读内容；?leg= 懒加载单腿明细）。
+        if (req.method === 'GET' && url.pathname === '/api/evalCkpts') {
+          const leg = url.searchParams.get('leg') ?? ''
+          return json(buildEvalCkptsView(viewCourse || undefined, leg))
         }
         if (req.method === 'GET' && url.pathname.startsWith('/api/log/')) {
           const key = url.pathname.slice('/api/log/'.length) as Component

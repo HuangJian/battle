@@ -155,6 +155,10 @@ a.tc-btn{display:inline-block;text-decoration:none;text-align:center}
 .tc-eval-summary__wrap{max-height:none;overflow:auto}
 .tc-eval-summary__note{padding:var(--sp-2) var(--sp-4) var(--sp-3);margin:0}
 .tc-eval-summary .tc-table tbody td{padding:6px 12px}
+.tc-eval-summary__empty{padding:var(--sp-4)}
+.tc-eval-summary__empty p{margin:4px 0}
+.tc-metric-toggles{display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap;margin-right:var(--sp-2)}
+.tc-metric-toggles label{display:inline-flex;align-items:center;gap:3px;white-space:nowrap}
 
 /* ── 表格工具栏（过滤 / 列 / 密度 / 关键词 / 返回顶部） ──────── */
 .tc-toolbar{display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap;padding:var(--sp-3) var(--sp-4) 0;font-size:var(--fs-2);color:var(--muted)}

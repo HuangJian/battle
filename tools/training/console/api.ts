@@ -26,8 +26,8 @@ import {
   poolStatus,
   type NodeHistory,
 } from './pool-history'
-import { enqueueProbeRun } from './evalboard'
-export { buildEvalBoardView } from './evalboard'
+import { enqueueProbeRun, iterFromCkpt } from './evalboard'
+export { buildEvalBoardView, buildEvalCkptsView } from './evalboard'
 import type { Component, RlConfig } from '../types'
 // 视图类型单一源：ui/view.ts（api.ts 不再定义本地视图类型）
 import { parsePhaseFromLog, stripIsoPrefix } from '../ui/view'
@@ -1106,12 +1106,15 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
         const policy = str(body, 'policy') === 'god' ? 'god' : 'nn'
         busy.add('eval:probe')
         try {
+          // D-b：iter 优先取显式入参，否则从 `weights.it<N>.json` 解析（不靠前端）。
+          const iterRaw = Number(body.iter)
+          const iter = Number.isFinite(iterRaw) && iterRaw > 0 ? iterRaw : (iterFromCkpt(ckpt) ?? 0)
           const r = enqueueProbeRun({
             course: ctx.course,
             rung_from: rungFrom,
             ckpt,
             requester: str(body, 'requester') || 'web',
-            iter: Number(body.iter) || 0,
+            iter,
             policy: policy as 'nn' | 'god',
             ladder_pos: body.ladder_pos === undefined ? undefined : Number(body.ladder_pos),
             k_seq: body.k_seq === undefined ? undefined : Number(body.k_seq),

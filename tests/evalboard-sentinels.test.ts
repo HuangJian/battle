@@ -45,6 +45,10 @@ const m = (over: Record<string, number | null> = {}) => ({
   firstKillTickMedian: 200,
   stuckP95: 5,
   cellsVisitedMean: 30,
+  meanKills: 3,
+  meanPowerUps: 0,
+  winTickMean: 1000,
+  winHpLeftMean: 100,
   ...over,
 })
 
