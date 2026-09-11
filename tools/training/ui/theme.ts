@@ -61,6 +61,7 @@ a.tc-btn{display:inline-block;text-decoration:none;text-align:center}
   font-size:var(--fs-2);margin-bottom:var(--sp-3);flex-wrap:wrap}
 .tc-banner--dirty{background:var(--yellow-bg);color:var(--yellow);border:1px solid var(--yellow)}
 .tc-banner--err{background:var(--red-bg);color:var(--red);border:1px solid var(--red)}
+.tc-banner--info{background:var(--card);color:var(--muted);border:1px solid var(--border)}
 /* 局域网只读横幅（§2026-09-09-goalnn-console-lan-readonly 延伸）：琥珀色 + 加粗，一眼可见 */
 .tc-banner--ro{background:var(--yellow-bg);color:#9a3f00;border:1.5px solid var(--yellow);font-weight:600}
 /* 云端停机：已恢复（§386 灰横幅：曾停机但已恢复，历史提示非告警） */

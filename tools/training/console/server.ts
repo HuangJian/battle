@@ -42,6 +42,7 @@ import {
   buildPoolView,
   buildStateView,
   componentLogPayload,
+  discoverCourses,
   invalidateSlowSnapshot,
   routeAction,
   sanitizeViewCourse,
@@ -50,7 +51,7 @@ import {
 import { restartSpecFor } from './actions'
 import { runExitCheck } from './exit-watchdog'
 import { ensureBundle, type BundleTarget } from './build'
-import { renderConsolePage, renderLogPage } from './render'
+import { renderConsolePage, renderEvalPage, renderLogPage } from './render'
 import type { Component } from '../types'
 
 interface ServeOpts {
@@ -213,6 +214,24 @@ async function main(): Promise<void> {
         if (req.method === 'GET' && url.pathname === '/api/evalCkpts') {
           const leg = url.searchParams.get('leg') ?? ''
           return json(buildEvalCkptsView(viewCourse || undefined, leg))
+        }
+        // R8：/eval 独立评估页（?courses=a,b 可分享 URL；?course= 兼容）。
+        if (req.method === 'GET' && url.pathname === '/eval') {
+          const all = discoverCourses()
+          const raw = url.searchParams.get('courses') ?? url.searchParams.get('course') ?? ''
+          const selected = raw
+            .split(',')
+            .map((s) => s.trim())
+            .filter((c) => c && all.includes(c))
+          const eff = selected.length > 0 ? selected : viewCourse ? [viewCourse] : all.slice(0, 1)
+          const views = eff.map((c) => buildEvalBoardView(c, false))
+          const payload = {
+            views,
+            options: { courses: eff, allCourses: all, readOnly: !loopback },
+          }
+          return new Response(renderEvalPage(payload), {
+            headers: { 'Content-Type': 'text/html; charset=utf-8' },
+          })
         }
         if (req.method === 'GET' && url.pathname.startsWith('/api/log/')) {
           const key = url.pathname.slice('/api/log/'.length) as Component

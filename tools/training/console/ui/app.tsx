@@ -22,7 +22,6 @@ import { MetricsTable } from './panels/MetricsTable'
 import { NodeStats } from './panels/NodeStats'
 import { LogNavCard } from './panels/LogNavCard'
 import { TrainLaunchModal } from './panels/TrainLaunchModal'
-import { EvalBoard } from './panels/EvalBoard'
 import { EvalSummary } from './panels/EvalSummary'
 import {
   fmtTs,
@@ -41,7 +40,7 @@ export interface AppProps {
   initial: ConsoleStateView
 }
 
-type DrawerTabKey = 'metrics' | 'nodes' | 'log' | 'eval'
+type DrawerTabKey = 'metrics' | 'nodes' | 'log'
 
 function readLocal(key: string): string | null {
   try {
@@ -501,13 +500,17 @@ export function App({ initial }: AppProps) {
           readOnly={readOnly}
         />
       </PanelErrorBoundary>
-      {/* 节点行下方简易 EvalBoard：列 = 阶梯 8 级；完整看板仍进抽屉。 */}
+      {/* 节点行下方 EvalBoard 摘要：行 = B 层 iter × 列 = rung×指标；完整看板独立成页 /eval。 */}
       <PanelErrorBoundary>
         <EvalSummary
           course={viewCourse}
           enabled={documentVisible}
           readOnly={readOnly}
-          onMore={() => setDrawerTab('eval')}
+          onMore={() => {
+            window.location.href = viewCourse
+              ? `/eval?course=${encodeURIComponent(viewCourse)}`
+              : '/eval'
+          }}
         />
       </PanelErrorBoundary>
       {/* 详情视图直连入口（2026-09-10）：此前「评估」只能先点 Hero/节点 pill 的「更多」
@@ -521,7 +524,6 @@ export function App({ initial }: AppProps) {
             ['metrics', '指标'],
             ['nodes', '节点统计'],
             ['log', '日志'],
-            ['eval', '评估'],
           ] as const
         ).map(([key, label]) => (
           <button
@@ -538,9 +540,9 @@ export function App({ initial }: AppProps) {
       <p className="tc-caption">
         局域网只读：可查看任意课程/日志/节点统计/评估（课程▾仅本浏览器切换）；启停/冒烟/模式/节点编辑
         仅本机 localhost 生效 · /api/state {refreshInterval}s 轮询 · 首页即训练态势：胜率焦点 +
-        组件卡 （点击卡在下方展开全宽最近日志）+ 节点 pill 行 + EvalBoard 摘要（列=阶梯） ·
-        详情进抽屉（指标 | 节点统计 | 日志 | 评估，上方按钮可直连）· Esc 关闭弹窗/抽屉 · r
-        立即刷新全部。
+        组件卡 （点击卡在下方展开全宽最近日志）+ 节点 pill 行 + EvalBoard
+        摘要（行=iter×列=rung×指标） · 详情进抽屉（指标 | 节点统计 | 日志，上方按钮可直连）·
+        评估已独立成页 /eval（上方「完整评估看板」）· Esc 关闭弹窗/抽屉 · r 立即刷新全部。
       </p>
       <Drawer
         open={drawerTab !== null}
@@ -549,7 +551,6 @@ export function App({ initial }: AppProps) {
           { key: 'metrics', label: '指标' },
           { key: 'nodes', label: '节点统计' },
           { key: 'log', label: '日志' },
-          { key: 'eval', label: '评估' },
         ]}
         onTab={(k) => setDrawerTab(k as DrawerTabKey)}
         onClose={() => setDrawerTab(null)}
@@ -559,9 +560,6 @@ export function App({ initial }: AppProps) {
           <NodeStats enabled poolFreshNonce={poolFreshNonce} course={viewCourse} />
         ) : null}
         {drawerTab === 'log' ? <LogNavCard stateView={stateView} course={viewCourse} /> : null}
-        {drawerTab === 'eval' ? (
-          <EvalBoard enabled={drawerTab === 'eval'} course={viewCourse} readOnly={readOnly} />
-        ) : null}
       </Drawer>
       {stateView ? (
         <TrainLaunchModal

@@ -32,6 +32,11 @@ export const BUNDLES: BundleTarget[] = [
     entry: path.join(CONSOLE_DIR, 'ui', 'log-index.tsx'),
     out: path.join(BUNDLE_DIR, 'log.js'),
   },
+  {
+    key: 'eval',
+    entry: path.join(CONSOLE_DIR, 'ui', 'eval-index.tsx'),
+    out: path.join(BUNDLE_DIR, 'eval.js'),
+  },
 ]
 
 /** 客户端禁词（分层铁律 R1）：打到 bundle 文本里的服务端能力即违规。 */

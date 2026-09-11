@@ -9,7 +9,7 @@
  * - A 层（训练内自动 eval）仍不混入本表，只做趋势（§2.1）。
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
+import { useCallback, useEffect, useRef, useState } from 'preact/hooks'
 import type {
   EvalBatchRow,
   EvalBoardView,
@@ -18,9 +18,9 @@ import type {
   EvalLadderRow,
   EvalMetricKey,
 } from '../../../ui/view'
-import { EVAL_METRIC_KEYS, EVAL_METRIC_LABELS, rungLabel } from '../../../ui/view'
+import { EVAL_METRIC_KEYS } from '../../../ui/view'
 import { Pill } from '../../../ui/components/Pill'
-import { DataTable, type Col } from '../../../ui/components/DataTable'
+import { EvalMatrix } from './eval-matrix'
 import { usePolling } from '../lib/usePolling'
 import { fetchEvalBoard, fetchEvalCkpts, postAction } from '../lib/api-client'
 
@@ -35,88 +35,10 @@ export interface EvalSummaryProps {
   onMore: () => void
 }
 
-const pct = (v: number | null): string => (v === null ? '—' : `${(v * 100).toFixed(1)}%`)
-
-/** 指标值格式化（列渲染 + 后续导出共用口径）。 */
-export function fmtMetric(metric: EvalMetricKey, v: number | null): string {
-  if (v === null || v === undefined) return '—'
-  switch (metric) {
-    case 'winRate':
-    case 'clearRate':
-    case 'killCompletion':
-      return pct(v)
-    case 'meanKills':
-    case 'meanPowerUps':
-      return v.toFixed(2)
-    case 'winTickMean':
-      return `${Math.round(v)}t`
-    case 'winHpLeftMean':
-      return String(Math.round(v))
-  }
-}
-
 /** 批次 policy：字段优先；旧台账无 policy 时用 ckpt==='god' 回退。 */
 function batchPolicy(b: EvalBatchRow): 'nn' | 'god' {
   if (b.policy === 'god' || b.policy === 'nn') return b.policy
   return b.ckpt === 'god' ? 'god' : 'nn'
-}
-
-/** 矩阵列（扁平 key = `${rung}.${metric}`）。 */
-function matrixColumns(ladder: EvalLadderRow[], metricKeys: EvalMetricKey[]): Col<EvalIterRow>[] {
-  const cols: Col<EvalIterRow>[] = [
-    {
-      key: 'iter',
-      label: 'iter',
-      cell: (r) => (r.kind === 'god' ? <b>God</b> : <b>it{r.iter}</b>),
-      sortValue: (r) => (r.kind === 'god' ? Number.POSITIVE_INFINITY : r.iter),
-    },
-    {
-      key: 'n',
-      label: 'n',
-      align: 'num',
-      cell: (r) => (r.n > 0 ? String(r.n) : '—'),
-      sortValue: (r) => r.n,
-    },
-  ]
-  for (const rung of ladder) {
-    for (const metric of metricKeys) {
-      const key = `${rung.rung}.${metric}`
-      cols.push({
-        key,
-        label: `${rung.rung} ${EVAL_METRIC_LABELS[metric]}`,
-        align: 'num',
-        thTitle: `${rungLabel(rung)} · 指标：${EVAL_METRIC_LABELS[metric]}`,
-        sortValue: (r) => r.cells[key] ?? Number.NEGATIVE_INFINITY,
-        cell: (r) =>
-          r.cells[key] === undefined ? (
-            <span className="tc-muted">·</span>
-          ) : (
-            fmtMetric(metric, r.cells[key]!)
-          ),
-      })
-    }
-  }
-  return cols
-}
-
-/** 指标显隐 checkbox（toolbarLeft 插槽；勾掉 = 该指标全部 rung 列消失）。 */
-function MetricToggles({
-  metricKeys,
-  onToggle,
-}: {
-  metricKeys: EvalMetricKey[]
-  onToggle: (k: EvalMetricKey) => void
-}) {
-  return (
-    <div className="tc-metric-toggles" role="group" aria-label="指标显隐">
-      {EVAL_METRIC_KEYS.map((k) => (
-        <label key={k} className="tc-small">
-          <input type="checkbox" checked={metricKeys.includes(k)} onChange={() => onToggle(k)} />
-          <span>{EVAL_METRIC_LABELS[k]}</span>
-        </label>
-      ))}
-    </div>
-  )
 }
 
 /** 空态（A12）：B 层 0 行 → 明确引导，不显示误导性空数据行。 */
@@ -175,7 +97,6 @@ export function EvalSummaryTable({
 }) {
   const list = batches ?? []
   const hasBData = iterRows.some((r) => r.kind === 'iter' && r.n > 0)
-  const columns = useMemo(() => matrixColumns(ladder, metricKeys), [ladder, metricKeys])
 
   // A12：B 层 0 行 ⇒ 空态 + 引导（绝不显示误导性空数据行，也不拿 A 层充数）。
   if (!hasBData) return <EmptyState course={course ?? ''} batches={list} />
@@ -187,19 +108,14 @@ export function EvalSummaryTable({
           「筛查级」：单批/未满窗阈值读数，不作 verdict、不写门控。
         </p>
       ) : null}
-      <DataTable<EvalIterRow>
-        columns={columns}
+      <EvalMatrix
+        ladder={ladder}
         rows={iterRows}
-        rowKey={(r) => `${r.kind}:${r.iter}`}
-        searchKeys={['iter']}
+        metricKeys={metricKeys}
+        onToggleMetric={(k) => onToggleMetric?.(k)}
         storagePrefix="tc.eval.summary"
-        emptyText="无匹配行"
         ariaLabel="评估 iter 矩阵"
-        toolbarLeft={
-          onToggleMetric ? (
-            <MetricToggles metricKeys={metricKeys} onToggle={onToggleMetric} />
-          ) : null
-        }
+        emptyText="无匹配行"
       />
       <p className="tc-eval-summary__note tc-muted tc-small">
         行 = B 层 iter（含 God 基线行，仅填胜率列）；列 = rung×指标（hover 表头看关卡画像）。 学生 =

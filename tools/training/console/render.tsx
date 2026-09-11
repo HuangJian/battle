@@ -6,8 +6,9 @@ import { renderToString } from 'preact-render-to-string'
 import { options } from 'preact'
 import { pageCss } from '../ui/theme'
 import { App } from './ui/app'
+import { EvalApp } from './ui/eval-app'
 import { LogApp } from './ui/log-app'
-import type { ConsoleStateView, LogPageOptions, LogPayload } from '../ui/view'
+import type { ConsoleStateView, EvalPagePayload, LogPageOptions, LogPayload } from '../ui/view'
 
 // preact-render-to-string v6：SSR 期 ErrorBoundary 默认关闭，需显式开（DS-E3 服务端隔离）。
 ;(options as { errorBoundaries?: boolean }).errorBoundaries = true
@@ -57,6 +58,12 @@ function shell(title: string, bodyHtml: string, initialJson: string, scriptSrc: 
 export function renderConsolePage(state: ConsoleStateView, scriptSrc = '/app.js'): string {
   const html = renderToString(<App initial={state} />)
   return shell('炼丹炉', html, JSON.stringify(state), scriptSrc)
+}
+
+/** 评估页（/eval，独立成页 R8）：SSR 首帧 + hydrate，bundle = /eval.js。 */
+export function renderEvalPage(payload: EvalPagePayload, scriptSrc = '/eval.js'): string {
+  const html = renderToString(<EvalApp initial={payload} options={payload.options} />)
+  return shell('评估页 — EvalBoard', html, JSON.stringify(payload), scriptSrc)
 }
 
 /** 日志页（/log/<key>，SSR 首帧 + hydrate）。bundle 与 /app.js 同目录：/log.js（§371：旧默认
