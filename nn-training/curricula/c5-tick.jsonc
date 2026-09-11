@@ -1,0 +1,156 @@
+// 课程 c5-tick —— 回报方差修复腿（2026-09-12）：验证「降 wTick 能否让 value 头 fit 上」
+//
+// 由 **c5-margin.jsonc** 派生（**不用 c5-ent**：ent_coef=0.05 已证伪）。
+// **相对 c5-margin 只改 1 处**，其余（stage/敌数/命数/max_ticks/player/其余 reward 参数/
+// scale/lr/epochs/mb/workers/缰绳/eval 配置）全锁死：
+//
+//   1. name/out/traj/backup_dir/backup_prefix → c5-tick（fresh，绝不复用别腿目录）
+//   2. reward.params.**wTick: 0.01 → 0.003**（主变量，唯一改动）
+//
+//   附：`ppo_schedule` 末段 `kl_coef` 写成 0.03（c5-margin 是 0.0）——这是**护栏不是变量**：
+//   c4-dodge 的退化起点正是 it41 的 kl_coef 归零；c5-ent 用它后 it41–60 未退化且回升到 36%
+//   （对比 c4-dodge it41 后 −15 点崩塌）。**不写 `ent_coef`**（用引擎缺省 0.01）。
+//
+// ── 为什么（2026-09-12 诊断，全文见 .workbuddy/memory/2026-09-12.md）────────────────
+//   根因链（定量）：
+//     `-wTick*ticks` 主导回报、贡献 ~57% 方差，而"局长"在战斗中途不可预测
+//       ⇒ value 头 R² 只有 24% ⇒ advantage 高噪声 ⇒ policy 梯度净效应≈0 ⇒ 策略不动
+//       ⇒ 熵正则成为损失里唯一系统性梯度 ⇒ 熵失控上涨、性能不动。
+//   实测支撑：
+//   · 真实局间分布（起点权重，c5 关，100 局）：**ticks mean 1146 / std 619（=均值的 54%）**；
+//     kills std 1.72；damage std 70。
+//   · 回报方差按项分解（σ² 占比）：**`-wTick*ticks` 56.5%** / `wKill*kills` 39.1% /
+//     终局 ±2/−1 4.3% / `-wChip*dmg` 0.2%。
+//     且量级上 `-wTick*ticks` 均值 ≈ **−11.5**，比 `wKill*kills` 的 **+9.5** 还大
+//     ⇒ 当前回报函数的主体是"打多久"，不是"杀敌"。
+//   · value loss → R²：c4-kb1（**全项目唯一学动的腿**）0.534 → **46.6%**；
+//     c4-margin 0.732 → 26.8% / c4-dodge 0.718 → 28.2% / c5-margin 0.751 → 24.9% /
+//     c5-ent 0.756 → 24.4%。**⇒ kb1 的 reward 里没有 `-wTick`/`-wChip`，这就是它唯一学动的原因。**
+//   次因（本腿不动）：`lam=0.99` 让 GAE 视野 = 100 步/1000 tick（一局的 87%，≈整局 Monte Carlo），
+//   相对 λ=0.95 使 advantage 标准差 **+25%**（`engine.py:84` 默认 LAM 就是 0.95）。留作下一变量。
+//
+// ── 起点（c5 本关，2026-09-11 实测 tmp/c4it140-c5probe.jsonl，seeds 0-99，100 局）────────
+//   `c4-margin.it140` 零样本 → c5：**胜率 39%**、胜局掉血中位 128、胜局 tick 中位 1671、击杀 3.15。
+//   value loss 基线 ≈ **0.75**（c5-margin 全程均值 0.7507）。
+//
+// ── 门（本腿主目标是**让 value 头 fit 上**，进而让策略动起来）──────────────────────────
+//   一级（先决；前 20 轮即判）：训练内 **`value` ≤ 0.65**（从 ~0.75 降 0.10+）
+//     **且** `winRate` 出现趋势（不再是 0.38–0.45 那种纯噪声）。
+//     ✅ 达标 ⇒ 继续跑，验收二级门
+//     ❌ 20 轮后 value 仍 >0.72 ⇒ wTick 不是主因 ⇒ 停腿，改试 `lam 0.99→0.95`
+//   二级（性能；配对验收）：c5 上配对 Δwin 相对起点 39% 有提升（McNemar p<0.05）。
+//   熔断：① 超时占比 >0.15（wTick 降低后苟活可能回潮——这是本腿**唯一新增的风险**）
+//         ② 配对 Δwin ≤ −10 且 p<0.05   ③ 命中率断崖（闭嘴螺旋）
+//   机器门：**不配 `gates` 块**（c4-dodge 教训：G1/G4 锚 win_rate 会判错轴），
+//   护栏由「人读 + 预算到顶 STOP」承担。
+//
+// ── 验收节奏（每 10 轮）──────────────────────────────────────────────────────────
+//   配对探针（**不要只看训练内 eval**，它的单一种子集给出过相反结论）：
+//     bun tools/sim/eval-course-ckpt.ts --course tmp/fmap-c5l1.jsonc \
+//       --weights nn-training/weights/c5-tick/<ckpt>.json \
+//       --weights nn-training/weights/c4-margin/c4-margin.it140.20260910-093506.json \
+//       --games 100 --workers 6 --out tmp/c5tick-it<N>-probe.jsonl
+//   主要看三个数：`value`（是否降到 0.65 以下）、`entropy`（应在 0.45–0.55 **稳住**，不再失控上涨）、
+//   配对胜率（是否超过 39%）。
+{
+  "version": 5,
+  "name": "c5-tick",
+  "mode": "per-tick",
+  "stages": [
+    {
+      "name": "p4-onset-mixed",
+      "grid": [
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+      ],
+      "forces": "abcdabcdabcdabcdabcd",
+      "count": 5,
+      "player_spawn": { "col": 12, "row": 12 },
+      "enemy_spawns": [
+        { "col": 2, "row": 2 },
+        { "col": 22, "row": 2 },
+        { "col": 22, "row": 22 },
+        { "col": 2, "row": 22 },
+      ],
+    },
+  ],
+  "difficulty": "hard",
+  "max_ticks": 2400,
+  // 150 局/轮（唯一学动的 c4-kb1 用的就是 150；用 600 的两条腿都没学动）。
+  // 远端算力加速的是 PPO 段（150 局轮次里占 ~70%），收益应体现为「轮次更快」而非「每轮更多样本」；
+  // rollout 是 CPU 模拟，TPU 帮不上（600 局时 rollout 从 33s 线性涨到 109s）。
+  "seed_rotate": 150,
+  "player": {
+    "lives": 1,
+    "level": 0,
+  },
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots - wTick*ticks - wChip*playerDamageTaken",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.3,
+      "wPickup": 1.5,
+      "wStar": 1.0,
+      "wDmg": 1.0,
+      "wStuck": 0.02,
+      "wShot": 0.01,
+      // ★ 主变量：0.01 → 0.003。
+      //   原式下 `-wTick*ticks` 均值 ≈ −11.5（比 wKill*kills 的 +9.5 还大）、贡献回报方差 ~57%，
+      //   而「局长」std 619 ≈ 均值的 54%，中途不可预测 ⇒ value 头 R² 只有 24%。
+      //   降到 0.003 后：σ 6.19→1.86，方差占比 57%→~10%，回报重新由 `wKill*kills` 主导。
+      //   防苟活改由 max_ticks=2400 硬边界 + timeout −2.0 兜底（实测超时率仅 4–6%）。
+      //   ⚠️ 本腿唯一新增风险 = 拖延回潮，故熔断加了「超时占比 >0.15」。
+      "wTick": 0.003,
+      "wChip": 0.005,
+    },
+    "terminal": {
+      "stage_clear": 2.0,
+      "lives_exhausted": -1.0,
+      "timeout": -2.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/c4-margin/c4-margin.it140.20260910-093506.json",
+  // 80 轮 / 12h（与 c5-ent 同，便于对照；一级门前 20 轮即可判）。
+  "iters": 80,
+  "max_hours": 12,
+  "workers": 8,
+  // §363 缰绳双闸：ref 取课程 bc；warmup 必须 0（validate_args 强制配对）。
+  "kickstart_ref": true,
+  "warmup_iters": 0,
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  // R5＋§363 双 flag（串行路径生效；默认 false 即历史行为）。
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.99,
+  // 末段 kl_coef 0.03 = **护栏**（c5-margin 是 0.0）；主变量只有 wTick，此处不要同时改。
+  // **不写 ent_coef** ⇒ 用引擎缺省 0.01（ent_coef=0.05 已由 c5-ent 80 轮证伪）。
+  "ppo_schedule": [
+    { "until_iter": 40, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
+    { "kl_coef": 0.03, "lr": 0.00005 },
+  ],
+  "out": "tmp/c5-tick/weights.json",
+  "traj": "tmp/c5-tick",
+  // F4 ENT 熔断：沿用 horizon 档 0.25（本腿期望 entropy 稳在 0.45–0.55，远离线，不误触）。
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/c5-tick",
+  "backup_prefix": "c5-tick",
+  // 自定义关 stage ID 从 2000 开始，仅 1 关 → ID 2000
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 100,
+  "eval_every": 5,
+}

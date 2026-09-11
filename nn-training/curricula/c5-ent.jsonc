@@ -1,0 +1,156 @@
+// 课程 c5-ent —— 熵正则修复腿（2026-09-11）：验证「抬 ent_coef 能否把探索救回来」
+//
+// 由 c5-margin.jsonc 派生。**相对 c5-margin 只改 2 处**，其余（stage/敌数/命数/max_ticks/
+// player/reward 全参/scale/lr/epochs/mb/workers/缰绳/eval 配置）全锁死：
+//
+//   1. name/out/traj/backup_dir/backup_prefix → c5-ent（fresh，绝不复用 c5-margin 目录）
+//   2. `ppo_schedule` 两段各加一个键，并改末段 kl_coef：
+//      · **主变量 `ent_coef` = 0.05**（引擎缺省 0.01 的 5×）——熵正则
+//      · `kl_coef` 末段 0.0 → **0.03**（**护栏，非变量**：修 it41 归零后的无约束漂移）
+//
+// ── 为什么（2026-09-11 实测；全文见 reports/c4-dodge-verdict-2026-09-11.md §11）──────
+//   五条腿的动力学对比（training_log.jsonl）：
+//     · **c4-kb1**   熵 0.711 → **0.736**，winRate 四等分 0.635→0.715（**+0.080**） ← 唯一学动的
+//     · c4-margin    熵 0.709 → **0.490**，winRate 0.799→0.682（−0.117）
+//     · c4-dodge     熵 0.510 → 0.494
+//     · c5-margin    熵 0.457 → 0.453
+//     · c6-margin    熵 0.458 → 0.439
+//   **分水岭就是 entropy**：唯一学动的腿稳在 0.71–0.74，其余四条**全部卡在 0.44–0.51，合计
+//   191 轮零趋势**（winRate 无趋势、kl 恒 0.007、mean_ret 恒 0）。
+//   **且熵是在 `c4-margin` 上崩的，而 c4-dodge / c5-margin / c6-margin / c6b-margin 的 bc
+//   全是 `c4-margin.it140` 或其下游** ⇒ 四条腿共享同一个「探索已死」的起点。
+//   根因：per-tick 线 `ppo/engine.py::ENT_COEF = 0.01`；而 intent 线在 2026-08-27 就因**同款
+//   熵坍缩**把熵正则 0.02→0.08（`intent.py:70` 注释「M8 坍缩修复」）、goal 线同步 0.08 ——
+//   **只有 per-tick 这条线没修**。`ent_coef` 已于 2026-09-11 接线到 `ppo_schedule`。
+//
+//   已排除的其他候选：① `kl_coef=0.2` 压住更新（it41 起归零后 KL 仍恒 0.008、离 cap 0.2 差 28×）
+//   ② 缰绳 `kickstart_ref`（`kickstart` 字段 it25 就衰减到 0，之后 23 轮照样无变化）
+//   ③ 换机 TPU→GPU（it34 = 75%、it38 = 75%，均**高于**基线 69%）。
+//
+// ── 起点（c5 本关；2026-09-11 实测 tmp/c4it140-c5probe.jsonl，seeds 0-99，100 局）────────
+//   `c4-margin.it140` 零样本 → c5：**胜率 39%**、胜局掉血中位 128、胜局 tick 中位 1671、击杀 3.15。
+//   （同权重 c4 本关 69%。备选起点 c4-kb1.it158 熵 0.736 但 c4 上仅 59% ——
+//    用户 2026-09-11 拍板取 margin.it140 保性能，走「抬熵」而非「换低性能高熵起点」。）
+//   ⚠️ 本腿 it1 的熵预期就从 **0.49 附近**起步（继承自低熵 bc），不是从 0.7 起步。
+//
+// ── 门（本腿主目标是**恢复可学性**，不是具体胜率）─────────────────────────────────
+//   一级（先决；前 10 轮即可判）：
+//     · 训练内 `entropy` 从 ~0.49 **回升**（目标 ≥0.58）
+//     · **且** `winRate` 出现趋势（不再是 0.68–0.75 那种纯噪声来回）
+//     ❌ 若 10 轮后 entropy 仍贴 0.49 ⇒ 低熵态被局部最优锁住：**停腿**，按序退
+//        ① 把 `ent_coef` 再抬到 0.08
+//        ② 仍不动则换 bc 到 `c4-kb1` 线末期（熵 0.74，代价是 c4 上 59% 起点）
+//   二级（性能；配对验收）：c5 上 **配对 Δwin 相对起点 39%** 有提升（McNemar p<0.05）。
+//   熔断：配对 Δwin ≤ −10 且 p<0.05；超时占比 >0.15；命中率断崖（闭嘴螺旋）。
+//   机器门：**不配 `gates` 块**——c4-dodge 的教训是 G1/G4 锚 win_rate 会判错轴
+//   （margin 腿的目标轴是 ticks/hp/熵，门系统趋势源里没有）。护栏由「人读 + 预算到顶 STOP」承担。
+//
+// ── 验收节奏（每 5 轮）──────────────────────────────────────────────────────────
+//   配对探针（**不要只看训练内 eval**：它的单一种子集给出过相反结论——
+//   c4-dodge it48 训练内 70% vs 配对 54%）：
+//     bun tools/sim/eval-course-ckpt.ts --course tmp/fmap-c5l1.jsonc \
+//       --weights nn-training/weights/c5-ent/<ckpt> \
+//       --weights nn-training/weights/c4-margin/c4-margin.it140.20260910-093506.json \
+//       --games 100 --workers 6 --out tmp/c5ent-<it>.jsonl
+{
+  "version": 5,
+  "name": "c5-ent",
+  "mode": "per-tick",
+  "stages": [
+    {
+      "name": "p4-onset-mixed",
+      "grid": [
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+      ],
+      "forces": "abcdabcdabcdabcdabcd",
+      "count": 5,
+      "player_spawn": { "col": 12, "row": 12 },
+      "enemy_spawns": [
+        { "col": 2, "row": 2 },
+        { "col": 22, "row": 2 },
+        { "col": 22, "row": 22 },
+        { "col": 2, "row": 22 },
+      ],
+    },
+  ],
+  "difficulty": "hard",
+  "max_ticks": 2400,
+  // 150 局/轮（与 c5-margin 同）。**刻意不加到 600**，四条依据：
+  //   ① 全项目唯一学动的腿 `c4-kb1` 用的就是 **150**（样本/轮 ≈19.6K，与本腿同档，winRate +0.078）；
+  //   ② 用 600 的两条腿（c4-dodge 48 轮 / c6b-margin 20 轮）**都没学动**；
+  //   ③ 本腿是**诊断腿**——前 10 轮判 entropy 能否回升：150 下 ≈17min，600 下 ≈53min（实测均轮
+  //      103s vs 321s，样本/轮 18.3K vs 69.4K）；
+  //   ④ 远端算力加速的是 **PPO 段**（占 150 局轮次约 70%：ppo 72s vs rollout 33s），
+  //      收益应体现为「轮次更快、反馈更密」，而非「每轮塞更多样本」——rollout 是 CPU 模拟，
+  //      TPU 帮不上，600 局时 rollout 从 33s 线性涨到 109s。
+  //   若 10 轮后 entropy 回升但 winRate 噪声仍大，再**单变量**加到 300–600。
+  "seed_rotate": 150,
+  "player": {
+    "lives": 1,
+    "level": 0,
+  },
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots - wTick*ticks - wChip*playerDamageTaken",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.3,
+      "wPickup": 1.5,
+      "wStar": 1.0,
+      "wDmg": 1.0,
+      "wStuck": 0.02,
+      "wShot": 0.01,
+      "wTick": 0.01,
+      "wChip": 0.005,
+    },
+    "terminal": {
+      "stage_clear": 2.0,
+      "lives_exhausted": -1.0,
+      "timeout": -2.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/c4-margin/c4-margin.it140.20260910-093506.json",
+  // 80 轮（c5-margin 跑 74 轮才平；本腿前 10 轮即可判一级门）+ 12h 预算先到顶停。
+  "iters": 80,
+  "max_hours": 12,
+  "workers": 8,
+  // §363 缰绳双闸：ref 取课程 bc；warmup 必须 0（validate_args 强制配对）。
+  "kickstart_ref": true,
+  "warmup_iters": 0,
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  // R5＋§363 双 flag（串行路径生效；默认 false 即历史行为）。
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.99,
+  // ★ 本腿核心：ent_coef 0.01(缺省) → 0.05（5×）；末段 kl_coef 0.0 → 0.03（护栏，不归零）。
+  "ppo_schedule": [
+    { "until_iter": 40, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2, "ent_coef": 0.05 },
+    { "kl_coef": 0.03, "lr": 0.00005, "ent_coef": 0.05 },
+  ],
+  "out": "tmp/c5-ent/weights.json",
+  "traj": "tmp/c5-ent",
+  // F4 ENT 熔断：沿用 horizon 档 0.25（RL 腿启用时生效）。注意本腿目标是把熵抬回来，
+  // 熔断线 0.25 远低于预期回升区间（0.5–0.7），不会误触。
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/c5-ent",
+  "backup_prefix": "c5-ent",
+  // 自定义关 stage ID 从 2000 开始，p3-bc 仅 1 关 → ID 2000
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 100,
+  "eval_every": 5,
+}
