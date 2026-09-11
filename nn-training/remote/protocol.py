@@ -96,6 +96,27 @@ class RetryableError(Exception):
     RetryableError 后主动 release 租约回池，立即可重领（不再干等 30min 过期）。"""
 
 
+class CodeChangedError(RuntimeError):
+    """本进程已 import 的代码与 job 携带的 code_sha256 不一致（热替换事件）。
+
+    成因（2026-09-11 review）：worker 常驻进程在首 job 才 import 代码进 sys.modules；
+    本地改代码后 hub 重打 code.zip（sha 变），后续 job 解压新代码、sys.path.insert(0,
+    新目录)，但 import 只查 sys.modules → 跑的还是旧代码**且零报错**。
+
+    ⚠ 刻意不继承 ProtocolError：worker_loop 对 ProtocolError 是 "skip (not retried)"
+    ——会把该 job 永久跳过，hub 侧干等到 1800s 超时、触发 R9 连败降级/停腿。本异常
+    必须走"重启进程"这条独立分支。
+    """
+
+    def __init__(self, loaded_sha: str, job_sha: str) -> None:
+        self.loaded_sha = loaded_sha
+        self.job_sha = job_sha
+        super().__init__(
+            f"代码已变更：本进程加载 {loaded_sha[:12]}… != job 要求 {job_sha[:12]}…"
+            "（继续跑会用旧代码产出看似正常的结果）"
+        )
+
+
 def normalize_manifest(m: dict) -> dict:
     """校验 + 归一化 job manifest（proto=1：缺失必填 fail fast，未知字段忽略）。
 

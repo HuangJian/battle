@@ -33,6 +33,7 @@ from remote.protocol import (
     HEARTBEAT_SEC,
     PAYLOAD_NAME,
     WIRE_V2_CONTENT_TYPE,
+    CodeChangedError,
     ProtocolError,
     RetryableError,
     coef_active,
@@ -258,6 +259,45 @@ def _persist_result(work_dir: Path, jid: str, result: dict) -> None:
     rpath.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
 
 
+#: worker 侧保留的 job 目录数（含在跑的本 job）。2026-09-11：c6b 单 job ≈280 MB
+#: （600 shard × 439 KB 解包后 + payload 归档 + code.zip），20 轮 ≈5.6 GB。
+#: ⚠ hub 侧 keep_iters=3 只轮转本地 it* 与 remote-jobs——**管不到**这里的
+#:   /tmp/remote-worker（云）与 tmp/remote-worker-serve（本机 self 节点）。
+#: 保留 2 个：上一个 job 的 _result.json 要留给"回传失败后重领同 job"的幂等路径。
+JOB_DIR_KEEP = 2
+
+
+def prune_job_dirs(work_dir: Path, keep: int = JOB_DIR_KEEP, log=lambda msg: None) -> int:
+    """按 mtime 保留最近 `keep` 个 job 目录，其余删除。返回删除个数。
+
+    只动 work_dir 下的 job 目录（按 jid 命名），**跳过 code_cache**（按 sha 内容寻址，
+    命中即省一次下载）。删除失败（占用/沙箱保护）跳过，不抛。
+    """
+    try:
+        dirs = [
+            d
+            for d in work_dir.iterdir()
+            if d.is_dir() and d.name != "code_cache"
+        ]
+    except OSError:
+        return 0
+    if len(dirs) <= keep:
+        return 0
+    dirs.sort(key=lambda d: d.stat().st_mtime, reverse=True)
+    from platform_utils import rmtree_best_effort
+
+    removed = 0
+    for d in dirs[keep:]:
+        try:
+            rmtree_best_effort(d, ignore_errors=True)
+            removed += 1
+        except BaseException as e:  # 含 SystemExit：沙箱删除守卫会打死调用线程
+            log(f"prune: 跳过 {d.name}（{type(e).__name__}）")
+    if removed:
+        log(f"prune: 删除 {removed} 个旧 job 目录（保留最近 {keep} 个）")
+    return removed
+
+
 # ------------------------------------------------------------------ PPO 执行
 
 
@@ -400,6 +440,8 @@ def run_job(
 
         rmtree_best_effort(job_dir)
     job_dir.mkdir(parents=True)
+    # 磁盘：本 job 之后最多留 JOB_DIR_KEEP 个目录（放开头 = 失败轮也照样清理）
+    prune_job_dirs(work_dir, JOB_DIR_KEEP, log=log)
     zip_path = job_dir / PAYLOAD_NAME
     zip_path.write_bytes(raw)
     # zip 内 manifest 是占位副本，解包仅取 shard 目录；权威校验全走 job 记录 manifest。
@@ -438,6 +480,17 @@ def run_job(
             f"job {jid}: code.zip unpacked ({len(code_raw)} bytes, "
             f"{len(list(code_cache_dir.rglob('*.py')))} .py files) -> sys.path[0]"
         )
+
+    # ---- 热替换护栏（2026-09-11）：本进程已 import 的代码版本必须 == 本 job 要求 ----
+    # sys.path.insert 只影响**尚未导入**的模块；已进 sys.modules 的 ppo/rl 不会重读。
+    # 不查就会用旧代码跑出新结果：零报错、commit_echo 也照样回显，只有 sha 能揭穿。
+    global _ACTIVE_CODE_SHA
+    _job_sha = str(manifest["code_sha256"])
+    if _ACTIVE_CODE_SHA is None:
+        _ACTIVE_CODE_SHA = _job_sha
+        log(f"job {jid}: 本进程加载代码 sha={_job_sha[:12]}…（后续 job 若变化将自重启）")
+    elif _job_sha != _ACTIVE_CODE_SHA:
+        raise CodeChangedError(_ACTIVE_CODE_SHA, _job_sha)
 
     # ---- mode 红线（v1：仅 per-tick） ----
     if manifest["mode"] != "per-tick":
@@ -716,6 +769,35 @@ def run_job(
 # ------------------------------------------------------------------ 主循环
 
 
+#: 本进程**已 import 的**代码 sha（对比 manifest["code_sha256"] 揭穿热替换）
+_ACTIVE_CODE_SHA: str | None = None
+
+
+def _self_restart(restart_argv: list[str] | None, log=lambda msg: None) -> bool:
+    """用同一套参数**原地重启**本进程（os.execve，不返回）。False = 没重启成。
+
+    只认**显式传入**的 restart_argv：notebook 里 sys.argv 是 kernel 自己的参数，
+    拿它 execv 等于把 kernel 干掉。main() 传 sys.argv[1:]；notebook 由调用方拼。
+
+    为什么 execv 而不是重新 import：进程镜像替换后 sys.modules 必然为空，新代码
+    一定生效；PID 与 stdout fd 继承 —— notebook 单元格的输出流不断。
+    """
+    if not restart_argv:
+        log("自重启不可用：未提供 restart_argv")
+        return False
+    nn_root = str(Path(__file__).resolve().parents[1])  # remote/ -> nn-training/
+    env = dict(os.environ)
+    env["PYTHONPATH"] = nn_root + os.pathsep + env.get("PYTHONPATH", "")
+    argv = [sys.executable, "-u", "-m", "remote.worker", *(str(a) for a in restart_argv)]
+    log(f"execv: {argv[0]} -u -m remote.worker ...（{len(argv) - 4} 个参数）")
+    try:
+        os.execve(sys.executable, argv, env)  # 成功则不返回
+    except BaseException as e:
+        log(f"execv 失败: {type(e).__name__}: {e}")
+        return False
+    return False  # pragma: no cover
+
+
 def worker_loop(
     base_url: str,
     token: str,
@@ -727,12 +809,15 @@ def worker_loop(
     once: bool = False,
     echo: bool = False,
     max_idle_sec: float = 0.0,
+    restart_argv: list[str] | None = None,
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
 ) -> int:
     """无状态轮询主循环。返回处理的 job 数。
 
     once=True：处理一个 job 后退出（M1 假云回环冒烟用）。
     max_idle_sec>0：连续空闲超过该时长退出（M2 会话活性观测用）。
+    restart_argv：代码热替换时自重启用的**参数列表**（不含解释器与 `-m remote.worker`）；
+      None = 不自重启（退化为要求人工重启）。
     """
     done = 0
     idle_since = time.time()
@@ -805,6 +890,16 @@ def worker_loop(
             # 瞬时失败（网络/5xx/传输损坏）：主动还租约立即回池——不再付 30min 过期等待
             log(f"job {jid} 瞬时失败: {e} — release 租约回池，立即可重领")
             release_job(base_url, token, jid, lease_token, log=log)
+        except CodeChangedError as e:
+            # 热替换：本进程 sys.modules 是旧代码，继续跑 = 用旧逻辑产出"看着正常"的
+            # 结果。execv 原地重启（PID/stdout 不变）→ 新进程重新 import 新代码。
+            log(f"job {jid}: {e}")
+            release_job(base_url, token, jid, lease_token, log=log)  # 别占着租约等重启
+            log("代码已变更 —— 自重启 worker 进程以加载新代码（PID 与输出流不变）")
+            if not _self_restart(restart_argv, log=log):
+                log("自重启未执行 —— 请手动重启本进程"
+                    "（notebook: Runtime → Restart runtime 后重跑步骤 4）")
+                return done
         except ProtocolError as e:
             log(f"job {jid} REJECTED: {e} — skip (not retried)")
             # 确定性拒绝（commit 不符/模式不符）不重试——轮询下一个
@@ -867,6 +962,9 @@ def main() -> None:
         once=args.once,
         echo=args.echo,
         max_idle_sec=args.max_idle_sec,
+        # CLI 起：sys.argv[1:] 就是可重放的原始参数（argv[0] 可能是 -m 或脚本路径，
+        # 统一由 _self_restart 用 `-m remote.worker` 重建，故这里只取参数部分）
+        restart_argv=sys.argv[1:],
     )
     print(f"[worker] done: {n} job(s) processed")
     # H8：--once 失败（返回 -1）→ 非零退出码

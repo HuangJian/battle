@@ -32,7 +32,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from remote._port_guard import ensure_port_free
-from remote.protocol import ProtocolError, normalize_manifest
+from remote.protocol import CodeChangedError, ProtocolError, normalize_manifest
 from remote.worker import run_job
 
 AUTH_HEADER = "Authorization"
@@ -106,6 +106,12 @@ def _execute_job(
         )
         state.set_result(jid, result)
         log(f"job {jid} done — result ready for pickup")
+    except CodeChangedError as e:
+        # push 模式是长驻服务进程：execv 自重启会打断在跑的 job —— 只能拒收 + 喊人。
+        state.set_error(jid, f"{type(e).__name__}: {e}")
+        log(f"job {jid} REJECTED: {e}")
+        log("  → 代码已变更：本服务进程无法热替换。请**重启 worker_server 进程**"
+            "（notebook 重跑 push 单元格 / 本机重起 workerServe），再重发本 job。")
     except Exception as e:
         state.set_error(jid, f"{type(e).__name__}: {e}")
         log(f"job {jid} FAILED: {e}")
