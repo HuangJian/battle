@@ -57,6 +57,35 @@ describe('ingestRows 幂等', () => {
   })
 })
 
+describe('A11 god 身份透传（DoD#5：账本 batch_id 真实，非 A-<course>）', () => {
+  // 生产 ctx（console/evalboard.ts ingestCourseEvalLog）：A 行回退值。
+  const aCtx: IngestCtx = { ...ctx, batch_id: 'A-c4-margin', source: 'A' }
+  const base = { iter: 1, wver: 'w1', stage: 0, seed: 860001, win: 1, outcome: 'stage_clear' }
+  it('C 行保留真实 source/batch_id/rung（不被 A 回退覆盖）', () => {
+    const r = ingestEvalRow(
+      { ...base, policy: 'god', source: 'C', batch_id: 'b-god123', rung: 'c4l1' },
+      aCtx,
+    )
+    expect(r.source).toBe('C')
+    expect(r.batch_id).toBe('b-god123')
+    expect(r.rung).toBe('c4l1')
+  })
+  it('B 行保留真实 source/batch_id/rung', () => {
+    const r = ingestEvalRow(
+      { ...base, policy: 'nn', source: 'B', batch_id: 'b-nn456', rung: 'c6l1' },
+      aCtx,
+    )
+    expect(r.source).toBe('B')
+    expect(r.batch_id).toBe('b-nn456')
+    expect(r.rung).toBe('c6l1')
+  })
+  it('A 行（无自带身份）回退 ctx', () => {
+    const r = ingestEvalRow({ ...base, policy: 'nn' }, aCtx)
+    expect(r.source).toBe('A')
+    expect(r.batch_id).toBe('A-c4-margin')
+  })
+})
+
 describe('batches 队列 (§3.7/§6.7)', () => {
   it('入队 → 认领 → 更新；重复入队去重', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'evalbatch-'))
