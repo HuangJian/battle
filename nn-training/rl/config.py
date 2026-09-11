@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any, Literal
 
@@ -458,6 +459,14 @@ class GateRule(BaseModel):
     # wins_mastery 的 effect-size 附加条件（2026-09-11 评审，§12.4）
     min_gain_pp: float | None = None
     require_rising: bool = False
+    # 判决力（2026-09-11）：池化判据 + 噪声带——逐点判在 100 局/点下 SE=4.3pp，
+    # 根本分辨不出 min_gain_pp=5pp（细节见 docs/agents.details.md 无关；依据在
+    # gates 块的 pool_window/conf_z 注释与 tests/test_gate_check.py）。
+    #: 用最近 N 个评估点**合并局数**判（p=Σwins/Σgames，SE=√(p(1-p)/N)）。
+    #: None = 逐点判（历史行为，其它课程零变化）。
+    pool_window: int | None = None
+    #: 效应须高于噪声：p − conf_z×SE ≥ baseline + min_gain_pp/100（需 pool_window≥1）。
+    conf_z: float | None = None
     # duty（G13 事故熔断）
     min_train_frac: float | None = None
     # skill_floor
@@ -519,9 +528,14 @@ class GatesSpec(BaseModel):
     #: 课程起点（零样本）胜率——`min_gain_pp` 的参照系（§12.4：ADVANCE 需 effect size）。
     #: 开腿前须用同一批评估种子实测；开腿后改值 = course_fp 变 = 新实验。
     baseline_win_rate: float | None = None
-    #: ADVANCE 附加条件：累计有效训练（Σ ppo_sec）不足此时长（小时）→ HOLD，
-    #: 不下 ADVANCE/STOP 判决（§12.4：数据还不够下结论 ≠ 事故）。
-    min_train_hours: float | None = None
+    #: ADVANCE 附加条件（§12.4：数据还不够下结论 ≠ 事故）：累计**样本通过量**
+    #: Σ(samples × epochs) 不足此值 → HOLD，不下 ADVANCE/STOP 判决。
+    #: 这是"证据充分性"的直接度量：与硬件/网络/事故无关，且能在开腿前按
+    #: seed_rotate × 样本/局 × epochs × iters 预先算出。
+    #: （2026-09-11 用它取代了 `min_train_hours`：时间口径夹带打包上传/排队/下载，
+    #:  排队越久越"达标"，而本地采样期间云端空转——照烧 Kaggle 配额——它又看不见。
+    #:  事故拦截归 G13 duty。）
+    min_train_samples: float | None = None
     rules: list[GateRule] = []
 
     @model_validator(mode="after")
@@ -629,8 +643,8 @@ class GatesSpec(BaseModel):
 
         # ---- spec 级字段（2026-09-11 评审新增）----
         _gate_ratio("baseline_win_rate", self.baseline_win_rate, "gates")
-        if self.min_train_hours is not None and self.min_train_hours < 0:
-            raise ValueError("gates.min_train_hours 不得为负（小时）")
+        if self.min_train_samples is not None and self.min_train_samples <= 0:
+            raise ValueError("gates.min_train_samples 必须 >0（样本通过量）")
         # duty 门必须给阈值（与 plateau 必须给 metrics 同理）
         for r in self.rules:
             if r.kind == "duty" and r.min_train_frac is None:
@@ -642,7 +656,59 @@ class GatesSpec(BaseModel):
                     f"gates.rules[{r.id}].min_gain_pp 需要 gates.baseline_win_rate "
                     "（零样本起点，§12.4 effect size 的参照系）"
                 )
+        # 池化判据 + 噪声带（2026-09-11 判决力修复）
+        for r in self.rules:
+            if r.pool_window is not None:
+                if r.kind != "wins_mastery":
+                    raise ValueError(
+                        f"gates.rules[{r.id}]: pool_window 只适用于 wins_mastery"
+                        "（池化读的是 games/wins 合并局数）"
+                    )
+                if int(r.pool_window) < 1:
+                    raise ValueError(f"gates.rules[{r.id}].pool_window 必须 ≥1")
+            if r.conf_z is not None:
+                if int(r.pool_window or 0) < 1:
+                    raise ValueError(
+                        f"gates.rules[{r.id}].conf_z 需要 pool_window≥1"
+                        "（单点 100 局的 SE≈4.3pp，撑不起显著性判定）"
+                    )
+                if float(r.conf_z) < 0:
+                    raise ValueError(f"gates.rules[{r.id}].conf_z 不得为负")
+                if r.min_gain_pp is None or self.baseline_win_rate is None:
+                    raise ValueError(
+                        f"gates.rules[{r.id}].conf_z 需要 min_gain_pp + gates.baseline_win_rate"
+                        "（要比的正是「高于起点的效应量」）"
+                    )
         return self
+
+    def power_notes(self, games_per_point: int) -> list[str]:
+        """§12.4 判决力（warn-only）：门要求的效果量必须**大于自身噪声**才可能判出来。
+
+        判据 `SE(p) = √(p(1-p)/N) ≤ min_gain_pp/2`（效果 ≥ 2×标准误），
+        N = games_per_point × pool_window（池化把多个评估点的局数合并）。
+        games_per_point<=0（还没有 summary 行）→ 不判、不告警。
+        """
+        if int(games_per_point) <= 0:
+            return []
+        out: list[str] = []
+        for r in self.rules:
+            if r.kind != "wins_mastery" or r.min_gain_pp is None:
+                continue
+            delta = float(r.min_gain_pp) / 100.0
+            p = min(0.999, float(self.baseline_win_rate or 0.0) + delta / 2.0)
+            window = max(1, int(r.pool_window or 1))
+            n = int(games_per_point) * window
+            se_pp = 100.0 * math.sqrt(p * (1.0 - p) / n)
+            if se_pp <= float(r.min_gain_pp) / 2.0:
+                continue
+            need = math.ceil(4.0 * p * (1.0 - p) / (delta * delta)) if delta > 0 else 0
+            out.append(
+                f"gates 判决力({r.id}): 要求 {r.min_gain_pp:g}pp，但 {n} 局"
+                f"（{games_per_point}×pool_window={window}）的 SE={se_pp:.1f}pp >"
+                f" {float(r.min_gain_pp) / 2.0:g}pp —— 该门分辨不出自己要求的效果（§12.4）："
+                f"开 pool_window、把 eval_games_per_stage 提到 ≥{need}，或降 min_gain_pp"
+            )
+        return out
 
     def budget_warnings(self, max_hours: float, eval_every: int) -> list[str]:
         """§3.4-8 预算可行性（warn-only，不断言）。调用方负责打印。"""

@@ -101,6 +101,9 @@ def write_iteration(jsonl_path: Path, args, it: int, report: dict, m: dict) -> N
             "ticks": report["totalTicks"],
             "rollout_sec": m["rollout_sec"],
             "ppo_sec": m["ppo_sec"],
+            # 2026-09-11 新增（additive，旧行无此键 → None）：云端/本机 **真训练秒**；
+            # ppo_sec 在远端模式是往返墙钟，不可当作训练量。
+            "ppo_cloud_sec": m.get("ppo_cloud_sec"),
             "steps": m["total_steps"],
             "chunks": m["chunks_n"],
             "policy": agg["policy"] if agg else None,

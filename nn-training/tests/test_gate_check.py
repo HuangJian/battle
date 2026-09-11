@@ -282,22 +282,6 @@ def test_require_rising_blocks_declining_window() -> None:
     assert evaluate(spec, up, now=FROZEN_NOW).verdict == "ADVANCE"
 
 
-def test_min_train_hours_blocks_premature_advance() -> None:
-    """ADVANCE 前置：有效训练 < min_train_hours → HOLD（数据不够下结论 ≠ 事故）。"""
-    spec = _spec(
-        [{"id": "G1", "kind": "wins_mastery", "rel_teacher": 0.6, "verdict": "ADVANCE"}],
-        sustain=2,
-        min_train_hours=2.0,
-    )
-    rows = _rows(2, wr=0.60)
-    little = BudgetInfo(started_at=FROZEN_NOW - 3600, train_sec=1800.0)  # 0.5h
-    res = evaluate(spec, rows, budget=little, now=FROZEN_NOW)
-    assert res.verdict == "HOLD"
-    assert "有效训练" in res.reason
-    enough = BudgetInfo(started_at=FROZEN_NOW - 3 * 3600, train_sec=7500.0)  # 2.08h
-    assert evaluate(spec, rows, budget=enough, now=FROZEN_NOW).verdict == "ADVANCE"
-
-
 def test_duty_gate_trips_on_accident_burn() -> None:
     """G13：c6 病灶形态——6.5h 墙钟只有 1h 训练（占空比 0.15 < 0.35）→ REMEDIATE。"""
     spec = _spec(
@@ -729,3 +713,195 @@ def test_cli_dry_run_exit_code(tmp_path: Path) -> None:
     payload = json.loads(out.stdout)
     assert payload["verdict"] == "HOLD"
     assert list(tmp_path.iterdir()) == []  # dry-run 零写盘
+
+
+# --------------------------------------------------------------------- 判决力（2026-09-11）
+
+def test_pooled_window_survives_a_single_noisy_dip() -> None:
+    """池化 vs 逐点：真实效果达标时，单点抖动不该把整条腿判成"没爬坡"。
+
+    实测背景：100 局/点的 SE≈4.3pp，而门要求 5pp 的效果量——逐点判 = 用噪声判噪声
+    （真 +7pp 也只有约 12% 概率三连过）。池化 3 点（300 局，SE≈2.6pp）后同一条曲线
+    能被正确判出。这里固定 thr=0.36：窗口 (0.35, 0.42, 0.43) 池化 400/1000=0.40。
+    """
+    rule = {
+        "id": "G1",
+        "kind": "wins_mastery",
+        "rel_teacher": 0.6,
+        "verdict": "ADVANCE",
+    }
+    wrs = (0.35, 0.42, 0.43)
+
+    per_point = _spec([dict(rule)], sustain=3)
+    hold = evaluate(per_point, [_row(i + 1, wr=w) for i, w in enumerate(wrs)], now=FROZEN_NOW)
+    assert hold.verdict == "HOLD"  # 第一个点 0.35 < 0.36 → 2/3，判不出爬坡
+    assert hold.readings[0].completion == 2 / 3
+
+    pooled = _spec([dict(rule, pool_window=3)], sustain=3)
+    adv = evaluate(pooled, [_row(i + 1, wr=w) for i, w in enumerate(wrs)], now=FROZEN_NOW)
+    assert adv.verdict == "ADVANCE"
+    assert adv.readings[0].completion == 1.0
+    assert "池化 3 轮 300 局 120 胜 = 0.400" in adv.readings[0].reason
+    assert "SE 2.8pp" in adv.readings[0].reason  # 噪声带进 reason（审计可见）
+
+
+def test_pooled_window_still_blocks_a_genuinely_low_policy() -> None:
+    """池化只压噪声、不放水：窗口聚合仍低于门槛就是 HOLD（不许"某一点高就放行"）。"""
+    spec = _spec(
+        [
+            {
+                "id": "G1",
+                "kind": "wins_mastery",
+                "rel_teacher": 0.6,
+                "pool_window": 3,
+                "verdict": "ADVANCE",
+            }
+        ],
+        sustain=3,
+    )
+    rows = [_row(1, wr=0.50), _row(2, wr=0.20), _row(3, wr=0.20)]  # 池化 0.30 < 0.36
+    res = evaluate(spec, rows, now=FROZEN_NOW)
+    assert res.verdict == "HOLD"
+    assert res.readings[0].completion == 0.0
+    assert "未达标" in res.readings[0].reason
+
+
+def test_pooled_conf_z_requires_effect_above_noise() -> None:
+    """conf_z：效应必须高于 1σ 噪声带，不接受"点估计刚好压线"。"""
+    spec = _spec(
+        [
+            {
+                "id": "G1",
+                "kind": "wins_mastery",
+                "rel_teacher": 0.0,  # 教师线让位，只看 effect size
+                "min_gain_pp": 5.0,
+                "pool_window": 3,
+                "conf_z": 1.0,
+                "verdict": "ADVANCE",
+            }
+        ],
+        sustain=3,
+        baseline_win_rate=0.30,
+    )
+    # 池化 p=0.35 恰等于 floor=0.35：点估计达标，但 0.35-1×SE < 0.35 → 噪声里，不放行
+    edge = [_row(1, wr=0.33), _row(2, wr=0.35), _row(3, wr=0.37)]
+    assert evaluate(spec, edge, now=FROZEN_NOW).verdict == "HOLD"
+    # p=0.38 > floor 且高于噪声带 → 放行
+    clear = [_row(1, wr=0.36), _row(2, wr=0.38), _row(3, wr=0.40)]
+    res = evaluate(spec, clear, now=FROZEN_NOW)
+    assert res.verdict == "ADVANCE"
+    assert "效应未高于噪声" not in res.readings[0].reason
+
+
+def test_pooled_insufficient_window_is_unknown_not_negative() -> None:
+    """窗口不足 pool_window：unknown（阻塞 ADVANCE）而非"策略不行"（§4.5）。"""
+    spec = _spec(
+        [
+            {
+                "id": "G1",
+                "kind": "wins_mastery",
+                "rel_teacher": 0.6,
+                "pool_window": 3,
+                "verdict": "ADVANCE",
+            }
+        ],
+        sustain=3,
+    )
+    res = evaluate(spec, _rows(2, wr=0.9), now=FROZEN_NOW)
+    assert res.verdict == "HOLD"
+    assert res.readings[0].unknown is True
+    assert "数据不足" in res.readings[0].reason
+
+
+def test_pooled_require_rising_blocks_downtrend() -> None:
+    """池化窗口内仍要求同向（sustain 的复现语义由窗口 + 斜率承担）。"""
+    spec = _spec(
+        [
+            {
+                "id": "G1",
+                "kind": "wins_mastery",
+                "rel_teacher": 0.6,
+                "pool_window": 3,
+                "require_rising": True,
+                "verdict": "ADVANCE",
+            }
+        ],
+        sustain=3,
+    )
+    rows = [_row(1, wr=0.45), _row(2, wr=0.42), _row(3, wr=0.39)]  # 池化 0.42 ≥ 0.36 但下降
+    res = evaluate(spec, rows, now=FROZEN_NOW)
+    assert res.verdict == "HOLD"
+    assert "非同向" in res.readings[0].reason
+
+
+def test_without_pool_window_behaviour_is_unchanged() -> None:
+    """回归护栏：不写 pool_window = 逐点历史行为（其它课程的 gates 零变化）。"""
+    spec = _spec(
+        [{"id": "G1", "kind": "wins_mastery", "rel_teacher": 0.6, "verdict": "ADVANCE"}],
+        sustain=3,
+    )
+    assert evaluate(spec, _rows(3, wr=0.40), now=FROZEN_NOW).verdict == "ADVANCE"
+    res = evaluate(spec, _rows(3, wr=0.35), now=FROZEN_NOW)
+    assert res.verdict == "HOLD"
+    assert "轮达标" in res.readings[0].reason  # 逐点口径的 reason
+
+
+# ------------------------------------------- min_train_samples（2026-09-11 重做）
+
+def _write_iterations(path: Path, rows: list[dict]) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+
+def test_sum_train_samples_counts_sample_passes(tmp_path: Path) -> None:
+    """样本通过量 = Σ(samples × epochs)；缺 epochs 按 1 计（旧行兼容）。"""
+    from rl.gate_check import sum_train_samples
+
+    p = tmp_path / "training_log.jsonl"
+    _write_iterations(
+        p,
+        [
+            {"event": "iteration", "iter": 1, "samples": 1000, "epochs": 4},
+            {"event": "iteration", "iter": 2, "samples": 2000, "epochs": 4},
+            {"event": "iteration", "iter": 3, "samples": 500},  # 无 epochs
+            {"event": "iter_error", "iter": 4, "samples": 999999, "epochs": 4},
+            {"event": "iteration", "iter": 5},  # 无 samples
+        ],
+    )
+    assert sum_train_samples(p) == 1000 * 4 + 2000 * 4 + 500 * 1
+    assert sum_train_samples(tmp_path / "missing.jsonl") == 0.0
+
+
+def test_min_train_samples_blocks_advance_with_note() -> None:
+    """样本通过量不足 → ADVANCE 不放行，且 note 说清差多少（观测自带牙齿）。"""
+    spec = _spec(
+        [{"id": "G1", "kind": "wins_mastery", "rel_teacher": 0.6, "verdict": "ADVANCE"}],
+        sustain=3,
+        min_train_samples=4_000_000,
+    )
+    budget = BudgetInfo(train_sec=99999.0, train_samples=3_000_000.0)
+    res = evaluate(spec, _rows(3, wr=0.5), budget=budget, now=FROZEN_NOW)
+    assert res.verdict == "HOLD"
+    assert "样本通过量" in res.reason and "3.00M < 4.00M" in res.reason
+    ok = evaluate(
+        spec, _rows(3, wr=0.5), budget=BudgetInfo(train_sec=1.0, train_samples=4_000_000.0),
+        now=FROZEN_NOW,
+    )
+    assert ok.verdict == "ADVANCE"
+
+
+def test_sum_train_sec_prefers_cloud_reported_seconds(tmp_path: Path) -> None:
+    """真训练秒优先（ppo_cloud_sec），旧行回落 ppo_sec —— 传输/排队不再冒充训练。"""
+    from rl.gate_check import sum_train_sec
+
+    p = tmp_path / "training_log.jsonl"
+    _write_iterations(
+        p,
+        [
+            {"event": "iteration", "iter": 1, "ppo_sec": 600.0, "ppo_cloud_sec": 100.0},
+            {"event": "iteration", "iter": 2, "ppo_sec": 200.0},  # 旧行：回落
+            {"event": "iter_error", "iter": 3, "ppo_sec": 9999.0},
+        ],
+    )
+    assert sum_train_sec(p) == 300.0

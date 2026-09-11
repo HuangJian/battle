@@ -49,6 +49,25 @@ def _is_nonfinite(v: Any) -> bool:
     return isinstance(v, float) and (math.isnan(v) or math.isinf(v))
 
 
+def _gate_startup_notes(args: Any, course: Any, spec: Any) -> list[str]:
+    """课程门的启动期告警（预算可行性 + 判决力）。空列表 = 都健康。
+
+    games_per_point 取**课程配置**（eval_games_per_stage），不是已落盘的行——启动时
+    还没有 summary 行，而告警的意义正是"开跑前就知道这门的眼睛够不够亮"。
+    """
+    games = int(getattr(args, "eval_games_per_stage", 0) or 0)
+    if games <= 0:
+        games = int(getattr(course, "eval_games_per_stage", 0) or 0)
+    notes = list(
+        spec.budget_warnings(
+            float(getattr(args, "max_hours", 0.0) or 0.0),
+            int(getattr(args, "eval_every", 0) or 0),
+        )
+    )
+    notes += list(spec.power_notes(games))
+    return notes
+
+
 class TrainingGuards:
     """训练护栏 mixin：熔断 / 止损 / 目录轮转。"""
 
@@ -190,6 +209,16 @@ class TrainingGuards:
         if not eval_this_round:
             return False
 
+        # 首轮把两条 warn-only 打一次（§3.4-8 预算可行性 / §12.4 判决力）：
+        # 与门同源、只在有 gates 的课程上出现，不进判决、不影响任何分支。
+        if not getattr(self, "_gate_notes_logged", False):
+            try:
+                self._gate_notes_logged = True
+                for note in _gate_startup_notes(args, course, spec):
+                    log(f"[run_rl] {note}")
+            except Exception as e:  # 告警永不影响训练
+                log(f"[run_rl] gate notes skipped（{type(e).__name__}: {e}）")
+
         course_fp = str(self._course_fp or "")
         now = time.time()
         traj_root = Path(self._traj_root)
@@ -206,6 +235,7 @@ class TrainingGuards:
             iters=int(getattr(args, "iters", 0) or 0),
             cur_iter=it,
             train_sec=float(getattr(self, "_train_sec_total", 0.0) or 0.0),
+            train_samples=float(getattr(self, "_train_samples_total", 0.0) or 0.0),
         )
         try:
             res = evaluate(

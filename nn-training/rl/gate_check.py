@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -128,9 +129,12 @@ class BudgetInfo:
     max_hours: float = 0.0
     iters: int = 0
     cur_iter: int = 0
-    #: 累计**有效**训练秒（Σ ppo_sec，跨重启从 iteration 事件重算）。
-    #: G13（duty）与 spec.min_train_hours 的分子（2026-09-11 评审新增）。
+    #: 累计**有效**训练秒（Σ ppo_cloud_sec，跨重启从 iteration 事件重算）。
+    #: G13（duty 事故熔断）的分子（2026-09-11 评审新增）。
     train_sec: float = 0.0
+    #: 累计**样本通过量** Σ(samples × epochs)：ADVANCE 的"证据充分性"判据
+    #: （spec.min_train_samples，2026-09-11）。
+    train_samples: float = 0.0
 
     def wall_sec(self, now: float) -> float | None:
         """墙钟秒（自首条 run_start 起）；基线不可知 → None。"""
@@ -387,8 +391,39 @@ def first_run_start_ts(jsonl_path: Path) -> float | None:
     return None
 
 
+def sum_train_samples(jsonl_path: Path) -> float:
+    """累计**样本通过量** Σ(samples × epochs)（min_train_samples 的分子，跨重启重算）。
+
+    为什么用样本而不是秒（2026-09-11）：时间口径在远端模式是"往返墙钟"，含打包上传、
+    排队领活、结果下载——排队越久越"达标"，而本地采样期间云端空转（照烧 Kaggle 配额）
+    它又完全看不到。样本通过量 = 优化器真正吃进去的样本数，与硬件/网络/事故无关，
+    且能在开腿前由 seed_rotate × 样本/局 × epochs × iters 预先算出。
+    """
+    total = 0.0
+    try:
+        with open(jsonl_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not (isinstance(r, dict) and r.get("event") == "iteration"):
+                    continue
+                s = r.get("samples")
+                if not isinstance(s, (int, float)):
+                    continue
+                ep = r.get("epochs")
+                total += float(s) * (float(ep) if isinstance(ep, (int, float)) else 1.0)
+    except OSError:
+        return 0.0
+    return total
+
+
 def sum_train_sec(jsonl_path: Path) -> float:
-    """累计有效训练秒（Σ iteration 事件的 ppo_sec；G13 duty / min_train_hours 的分子）。
+    """累计有效训练秒（Σ iteration 事件的真训练秒；G13 duty 的分子）。
 
     跨重启口径：分子从**账本**重算而非进程内存——否则每次重启占空比被低估，
     G13 会在重启后误报"在烧事故"。文件缺失 → 0.0（首启正常）。
@@ -405,7 +440,11 @@ def sum_train_sec(jsonl_path: Path) -> float:
                 except json.JSONDecodeError:
                     continue
                 if isinstance(r, dict) and r.get("event") == "iteration":
-                    v = r.get("ppo_sec")
+                    # 2026-09-11：优先**云端自报的真训练秒**（ppo_cloud_sec）；
+                    # 旧账本无此键 → 回落 ppo_sec（远端模式那是往返墙钟，历史口径不变）。
+                    v = r.get("ppo_cloud_sec")
+                    if not isinstance(v, (int, float)):
+                        v = r.get("ppo_sec")
                     if isinstance(v, (int, float)):
                         total += float(v)
     except OSError:
@@ -525,6 +564,9 @@ def _eval_wins_mastery(rule: GateRule, ctx: _Ctx) -> _Partial:
             return f"winRate {r.win_rate:.3f} < 起点{baseline:.2f}+{rule.min_gain_pp}pp={floor:.3f}"
         return None
 
+    if rule.pool_window is not None:
+        return _wins_mastery_pooled(rule, ctx, thr=thr, floor=floor, baseline=baseline)
+
     completion, reason, unknown = _sustain(ctx, judge)
     if rule.require_rising:
         wrs = [
@@ -543,6 +585,62 @@ def _eval_wins_mastery(rule: GateRule, ctx: _Ctx) -> _Partial:
         reason=f"胜率 ≥ {thr:.3f}（{rel}×教师 {ctx.teacher_win_rate:.3f}）：{reason}",
         unknown=unknown,
     )
+
+
+def _wins_mastery_pooled(
+    rule: GateRule,
+    ctx: _Ctx,
+    *,
+    thr: float,
+    floor: float | None,
+    baseline: float | None,
+) -> _Partial:
+    """G1 池化判据（2026-09-11 判决力修复）：合并最近 `pool_window` 个点的局数再判。
+
+    为什么必须池化：100 局/点的 SE≈4.3pp，而门要求的效果量只有 5pp —— 逐点判等于
+    用噪声判噪声（真 +7pp 也仅约 12% 概率三连过）。池化不花一分额外评估时间：
+    3×100 局 ⇒ SE≈2.6pp。sustain 的"复现"语义靠**窗口证据 + 斜率同向**保留。
+    """
+    k = max(1, int(rule.pool_window or 1))
+    rows = list(ctx.rows[-k:])
+    if len(rows) < k:
+        return _Partial(
+            False, 0.0, f"池化窗口仅 {len(rows)}/{k} 轮（数据不足，不判）", unknown=True
+        )
+    games = sum(int(r.games or 0) for r in rows)
+    if games <= 0:
+        return _Partial(False, 0.0, "池化窗口缺 games/wins（不判）", unknown=True)
+    wins = sum(int(r.wins or 0) for r in rows)
+    p = wins / games
+    se = math.sqrt(max(0.0, p * (1.0 - p)) / games)
+    head = (
+        f"池化 {k} 轮 {games} 局 {wins} 胜 = {p:.3f}"
+        f"（SE {100 * se:.1f}pp，95%CI ±{196 * se:.1f}pp）"
+    )
+    fails: list[str] = []
+    if p < thr:
+        fails.append(f"{p:.3f} < 教师线 {thr:.3f}")
+    target: float | None = None
+    if floor is not None:
+        target = floor
+        if p < floor:
+            fails.append(f"{p:.3f} < 起点 {float(baseline or 0.0):.2f}+{rule.min_gain_pp}pp={floor:.3f}")
+    z = float(rule.conf_z or 0.0)
+    if z > 0 and target is not None and p - z * se < target:
+        fails.append(
+            f"效应未高于噪声：{p:.3f} − {z:g}×{se:.3f} = {p - z * se:.3f} < {target:.3f}"
+        )
+    if rule.require_rising:
+        wrs = [r.win_rate for r in rows if r.win_rate is not None]
+        if len(wrs) >= 2:
+            s = _slope(wrs)
+            if s < 0:
+                fails.append(f"窗口胜率斜率 {s:+.4f} < 0（非同向，§12.4）")
+        else:
+            fails.append("同向性待第二个数据点")
+    if fails:
+        return _Partial(False, 0.0, f"{head}；未达标：{'；'.join(fails)}")
+    return _Partial(True, 1.0, f"{head}；达标（教师线 {thr:.3f}）")
 
 
 def _eval_skill_floor(rule: GateRule, ctx: _Ctx, teacher: Any) -> _Partial:
@@ -915,15 +1013,15 @@ def evaluate(
         seeds_state = "insufficient"
     seeds_ok = seeds_state != "insufficient"
 
-    # ---- ADVANCE 附加条件之四：有效训练时长（§12.4：数据不够下结论 ≠ 事故）----
-    min_train = getattr(spec, "min_train_hours", None)
+    # ---- ADVANCE 附加条件之四：样本通过量（§12.4：数据不够下结论 ≠ 事故）----
+    min_samples = getattr(spec, "min_train_samples", None)
     train_ok = True
     train_note = ""
-    if min_train is not None and budget is not None:
-        got_h = budget.train_sec / 3600.0
-        if got_h < float(min_train):
+    if budget is not None and min_samples is not None:
+        got = budget.train_samples
+        if got < float(min_samples):
             train_ok = False
-            train_note = f"（有效训练 {got_h:.2f}h < {float(min_train)}h）"
+            train_note = f"（样本通过量 {got / 1e6:.2f}M < {float(min_samples) / 1e6:.2f}M）"
 
     readings: list[RuleReading] = []
     #: 达标但被 ADVANCE 附加条件挡住的门（观测必须自带牙齿：HOLD 也要说清差在哪）。
@@ -939,7 +1037,7 @@ def evaluate(
             released = False
         elif released and (p.route if rule.verdict == GATE_SPLIT else verdict) == "ADVANCE":
             # ADVANCE 附加条件（§4.4 + §12.4）：advance_requires 全绿 + 窗口 ≥2 seed 集
-            # + 有效训练 ≥ min_train_hours。
+            # + 样本通过量 ≥ min_train_samples。
             # 分流门按**实际 route** 判（route=REMEDIATE 不需 advance_requires 背书，
             # 否则平台期永远放不出 REMEDIATE——c6 回溯实测正是卡在这里）。
             gates_ok = advance_ready and seeds_ok and train_ok
@@ -1114,7 +1212,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"  - {r.rule_id:<4} {r.kind:<14} fired={r.fired!s:<5} "
                 f"released={r.released!s:<5} completion={r.completion:.2f} {r.reason}"
             )
+        for note in _notes(course, rows):
+            print(f"  ! {note}")
     return res.exit_code
+
+
+def _notes(course: Any, rows: Sequence[Mapping[str, Any]]) -> list[str]:
+    """§3.4-8 预算可行性 + §12.4 判决力（两条 warn-only，调用方负责打印）。
+
+    `budget_warnings` 自 2026-09-11 前**从未接线**（只有单测在调）——这里一并接上。
+    """
+    spec = getattr(course, "gates", None)
+    if spec is None:
+        return []
+    games_per_point = int(rows[-1].get("games") or 0) if rows else 0  # 原始行 dict
+    notes = list(
+        spec.budget_warnings(
+            float(getattr(course, "max_hours", 0.0) or 0.0),
+            int(getattr(course, "eval_every", 0) or 0),
+        )
+    )
+    notes += list(spec.power_notes(games_per_point))
+    return notes
 
 
 if __name__ == "__main__":

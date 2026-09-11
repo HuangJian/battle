@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from rl.config import GATE_KINDS, GATE_SPLIT, CourseConfig
+from rl.config import GATE_KINDS, GATE_SPLIT, CourseConfig, GatesSpec
 
 BASE: dict[str, Any] = {
     "version": 5,
@@ -312,15 +312,109 @@ def test_c6b_course_gates_block_is_machine_readable() -> None:
         "G13": "duty",
     }
     assert c.gates.teacher.corpus
-    assert c.gates.teacher.games == 100 and c.gates.teacher.wins == 50
-    assert c.gates.teacher.kills == 0.0 and c.gates.teacher.phits == 0.0
+    # 2026-09-11 实测回填（旧值 50 用的是 seeds 0–99 的另一批语料）
+    assert c.gates.teacher.games == 100 and c.gates.teacher.wins == 42
+    assert c.gates.teacher.kills == 3.54 and c.gates.teacher.phits == 0.57
     assert c.gates.advance_requires == ["G1", "G2"]
     # §12.4 effect size：G1 相对起点 ≥+5pp 且同向；baseline 不可缺
     g1 = c.gates.rules[0]
     assert g1.min_gain_pp == 5.0 and g1.require_rising is True
-    assert c.gates.baseline_win_rate == 0.26
-    assert c.gates.min_train_hours == 2.0
+    # 判决力：池化 3 点（300 局）+ 效应高于 1σ 噪声带
+    assert g1.pool_window == 3 and g1.conf_z == 1.0
+    assert c.gates.baseline_win_rate == 0.22
+    # 2026-09-11 重做：主判据换成样本通过量（4.0M ≈ 13.4 轮，> c6 整腿 3.67M）；
+    assert c.gates.min_train_samples == 4_000_000
     # 休眠门（G8）不计入 ADVANCE 放行
     assert [r.id for r in c.gates.rules if not r.enabled] == ["G8"]
     # 预算可行：6 轮 × 3 iter × 58 min ≈ 17.4h < 24h → 无 WARNING
     assert c.gates.budget_warnings(max_hours=c.max_hours, eval_every=c.eval_every) == []
+    # 判决力：池化 300 局后 SE≈2.5pp ≤ 5pp/2 → 不再告警（加局/降 pp 才需要）
+    assert c.gates.power_notes(100) == []
+    assert c.gates.power_notes(50)  # 砍半局数就该喊出来
+
+
+# --------------------------------------------------------- 判决力（2026-09-11）
+
+def test_power_notes_warn_when_gate_cannot_resolve_its_own_effect() -> None:
+    """§12.4 判决力：要求 5pp 但只有 100 局/点（SE 4.3pp）⇒ 必须告警并给所需局数。"""
+    g = GatesSpec.model_validate(
+        {
+            "teacher": {"corpus": "EVAL_SEEDS:860001-860020", "games": 20, "wins": 12},
+            "baseline_win_rate": 0.22,
+            "rules": [
+                {
+                    "id": "G1",
+                    "kind": "wins_mastery",
+                    "rel_teacher": 0.7,
+                    "min_gain_pp": 5.0,
+                    "verdict": "ADVANCE",
+                }
+            ],
+        }
+    )
+    notes = g.power_notes(100)
+    assert len(notes) == 1 and "判决力" in notes[0]
+    assert "SE=2.5pp" in notes[0] or "SE=" in notes[0]
+    assert "≥296" in notes[0]  # 4p(1-p)/δ² = 296（p=0.245, δ=0.05）
+    # 池化 3×100 = 300 局正好压线 → 不再告警
+    g2 = GatesSpec.model_validate(
+        {
+            "teacher": {"corpus": "EVAL_SEEDS:860001-860020", "games": 20, "wins": 12},
+            "baseline_win_rate": 0.22,
+            "rules": [
+                {
+                    "id": "G1",
+                    "kind": "wins_mastery",
+                    "rel_teacher": 0.7,
+                    "min_gain_pp": 5.0,
+                    "pool_window": 3,
+                    "verdict": "ADVANCE",
+                }
+            ],
+        }
+    )
+    assert g2.power_notes(100) == []
+    assert g2.power_notes(0) == []  # 还没评估行 → 不判不告警
+
+
+def test_pool_window_and_conf_z_are_validated() -> None:
+    """池化字段的非法组合必须解析期报错（extra=forbid 风格：拼错/放错 kind 都响亮）。"""
+    base = {
+        "teacher": {"corpus": "EVAL_SEEDS:860001-860020", "games": 20, "wins": 12},
+        "baseline_win_rate": 0.3,
+    }
+
+    def spec(rule: dict) -> None:
+        GatesSpec.model_validate({**base, "rules": [rule]})
+
+    with pytest.raises(ValueError, match="只适用于 wins_mastery"):
+        spec(
+            {"id": "G2", "kind": "duty", "min_train_frac": 0.35, "pool_window": 3,
+             "verdict": "REMEDIATE"}
+        )
+    with pytest.raises(ValueError, match="pool_window 必须 ≥1"):
+        spec({"id": "G1", "kind": "wins_mastery", "pool_window": 0, "verdict": "ADVANCE"})
+    with pytest.raises(ValueError, match="conf_z 需要 pool_window"):
+        spec(
+            {
+                "id": "G1",
+                "kind": "wins_mastery",
+                "min_gain_pp": 5.0,
+                "conf_z": 1.0,
+                "verdict": "ADVANCE",
+            }
+        )
+    with pytest.raises(ValueError, match="conf_z 需要 min_gain_pp"):
+        spec({"id": "G1", "kind": "wins_mastery", "pool_window": 3, "conf_z": 1.0,
+              "verdict": "ADVANCE"})
+    with pytest.raises(ValueError, match="conf_z 不得为负"):
+        spec(
+            {
+                "id": "G1",
+                "kind": "wins_mastery",
+                "min_gain_pp": 5.0,
+                "pool_window": 3,
+                "conf_z": -1.0,
+                "verdict": "ADVANCE",
+            }
+        )
