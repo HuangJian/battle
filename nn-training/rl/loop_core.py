@@ -23,6 +23,7 @@ from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from platform_utils import rmtree_best_effort
 from rl.breaker import CIRCUIT_EXIT_CODE
 from rl.collect_only import precollect_snapshot_wver
+from rl.config import course_key_of, resolve_course_quota
 from rl.course import build_pairs
 from rl.events import log_iter_error, write_run_start
 from rl.log import log
@@ -183,6 +184,27 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         self._tail_drain_sec = None
         self._waves_n = None
         self._eval_join_sec = 0.0
+        # 配额事故计数（plan P4-W3）：连续零 shard 落盘的轮数（每课一进程一本）。
+        self._zero_shard_streak = 0
+
+    def _check_quota_incident(self, it: int) -> None:
+        """配额事故告警（plan P4-W3 / §3.4）：连续 2 轮零 shard 落盘 → 响亮警告行。
+
+        多课程切分下若某课本机槽位被压到 0（或与别课抢核失败），表现为该课 traj
+        连续无 shard：训练看似在跑、实则在烧空转墙钟。计数是 per-course 的（每个
+        trainer 进程一本课），console 日志页直接可见本行（不建新通道）。
+        """
+        try:
+            n = sum(1 for _ in self._traj_dir.rglob("rl_s*_seed*"))
+        except OSError:
+            n = 0
+        self._zero_shard_streak = 0 if n else self._zero_shard_streak + 1
+        if self._zero_shard_streak >= 2:
+            log(
+                f"[quota] WARN it{it}: 连续 {self._zero_shard_streak} 轮零 shard 落盘 "
+                f"(course={getattr(self.args, 'course_name', '') or 'nocourse'}) — "
+                "检查 courses.<课>.workers/local_slots 配额或节点可用性"
+            )
 
     # ------------------------------------------------------------------ 编排
 
@@ -210,14 +232,18 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 # nodes=[] / 文件缺失 → 现有纯本地路径零改动（字节一致回归基线）。
                 dist_cfg = dist_common.load_dist_config()
                 self._last_dist_cfg = dist_cfg
-                # rl.local_slots 热读（2026-09-06 用户指令）：每轮从 rl-config 覆盖
-                # args.local_slots——改配置下一轮即生效，无需重启训练。CLI 显式
-                # --local-slots 同样被覆盖（该值以 rl-config 为 SSOT；rl.workers 的
-                # 既有语义不变）。0 = 关闭本机直跑（2026-09-09 语义统一）；无 key
-                # 不覆盖（保留 CLI/默认值）。
-                _hot = (dist_cfg or {}).get("rl", {}).get("local_slots")
-                if _hot is not None:
-                    args.local_slots = int(_hot)
+                # 本机并发配额热读（每轮一次，改 rl-config 下一轮即生效，无需重启）。
+                # 多课程（plan multi-course-parallel-training P4-W1 / §3.4）：
+                # `courses.<课>.{workers,local_slots}` 优先、`rl.*` 回退（纯解析在
+                # rl.config::resolve_course_quota，torch-free 可单测）。原语义保留：
+                # CLI 显式 --local-slots 同样被 rl-config 覆盖（SSOT），0 = 关闭本机直跑
+                # （2026-09-09 语义统一），无 key 不覆盖。workers 被课程配额改写时打响亮
+                # 行——「课程声明 8、实跑 4」的分叉必须有人可见（DoD 断言该行）。
+                args.workers, args.local_slots, _quota_line = resolve_course_quota(
+                    dist_cfg, course_key_of(args), args.workers, args.local_slots
+                )
+                if _quota_line:
+                    log(_quota_line)
                 t_rollout = time.time()
                 # yield：rollout 抢占集群 —— 关 evalboard 窗，在途 B/C 局停派新 seed。
                 self._evalboard_yield()
@@ -236,6 +262,7 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 # A-eval 收官后再试一次（首窗被 yield/部分完成时补领）。
                 self._evalboard_idle(it, dist_cfg)
                 self._record_iteration(it)
+                self._check_quota_incident(it)
                 # G13 duty 分子：本轮有效训练入账（事故轮走 iter_error，不经过这里
                 # → 不计入分子但计入墙钟分母 → 占空比下降，正是想要的语义）。
                 self._train_sec_total += float(self._ppo_cloud_sec or self._ppo_sec or 0.0)

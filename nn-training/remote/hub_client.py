@@ -234,6 +234,10 @@ def publish_job(
     code_zip_path: str | Path | None = None,
     course: str,
     course_fp: str,
+    # 课程短名（plan P4-W2 / S9 归属）：`args.course_name`。三字段分工——`course` =
+    # 课程 jsonc 全文快照（D6 重建输入）；`course_name` = 可读短名（审计冗余）；
+    # `course_fp` = 血缘（D14 熔断）。空串 = 旧调用，manifest 不添键（字节不变）。
+    course_name: str = "",
     reward_formula: str,
     formula_hash: str,
     metrics_version: int,
@@ -313,6 +317,10 @@ def publish_job(
     }
     m["seed"] = job_seed(run_id, it, init_weights_fp)
     m["job_id"] = make_job_id(m)
+    if course_name:
+        # P4-W2 归属（S9）：在 job_id 计算**之后**注入——幂等键不含短名，旧链字节不变；
+        # normalize_manifest 允许未知/可选键，wire 兼容（D1：未知字段忽略）。
+        m["course_name"] = str(course_name)
     # 5) 落盘 job 目录：payload.zip（zip 内 manifest 为占位副本——payload_sha256 尚
     #    未算出）→ 回填真实 sha → 权威 manifest.json（worker 以 job 记录校验，D1）。
     #    normalize_manifest 在回填后调用：payload_sha256 必填非空，占位空串会误拒。

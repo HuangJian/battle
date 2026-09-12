@@ -1080,6 +1080,52 @@ def apply_course(args, course: CourseConfig) -> None:
         )
 
 
+# ────────────── 多课程本机并发配额（plan multi-course-parallel-training §3.4 / P4-W1） ──
+# 机器配额只住 rl-config 的 `courses.<课>` 块，**永不写进 curricula/*.jsonc**：课程文件
+# 参与 course_fp 血缘（D14），改一下配额就让熔断把同一份语料误判成新语料。课程文件里
+# 的 `workers` 是「课程声明」，`courses.<课>.workers` 是「本机实际切分」；两者分叉时
+# 必须打响亮行（C1），不能静默顶替。后来者：不要把覆盖逻辑"顺手"搬进 apply_course——
+# 那会让课程覆盖与机器配额重新纠缠（plan C1 ③）。
+
+
+def course_key_of(args) -> str:
+    """课程命名空间键（课程文件 stem）；无课程 → ''。与 TS slots.ts / 账本同键。"""
+    try:
+        from train.loop_util import course_key_from_path
+
+        return course_key_from_path(str(getattr(args, "course_path", "") or ""))
+    except Exception:
+        return ""
+
+
+def resolve_course_quota(
+    dist_cfg: dict | None,
+    course_key: str,
+    workers: int,
+    local_slots: int,
+) -> tuple[int, int, str | None]:
+    """按课程热读覆盖本机并发配额（纯函数）。返回 (workers, local_slots, 响亮行)。
+
+    优先级：`courses.<课>.{workers,local_slots}` > `rl.{workers,local_slots}` > 现状值。
+    `workers` 变化时返回 `[quota] workers 8 -> 4 (multi-course split)`（DoD 断言其
+    存在）；无覆盖 → 原值 + None。0 是合法值（语义 = 关闭本课本机直跑）。
+    """
+    cfg = dist_cfg or {}
+    rl_block = cfg.get("rl") or {}
+    cblock = ((cfg.get("courses") or {}).get(course_key) or {}) if course_key else {}
+    if not isinstance(cblock, dict):
+        cblock = {}
+    new_workers = int(workers)
+    loud: str | None = None
+    hot_workers = cblock.get("workers")
+    if hot_workers is not None and int(hot_workers) != int(workers):
+        loud = f"[quota] workers {workers} -> {hot_workers} (multi-course split)"
+        new_workers = int(hot_workers)
+    hot_ls = cblock.get("local_slots", rl_block.get("local_slots"))
+    new_ls = int(local_slots) if hot_ls is None else int(hot_ls)
+    return new_workers, new_ls, loud
+
+
 def stage_json_for_args(args, stage: int) -> str | None:
     """args 携带的课程 → stage 的 stageJson（非自定义关返回 None）。"""
     course = getattr(args, "course_obj", None)

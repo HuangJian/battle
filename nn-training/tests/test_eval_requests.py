@@ -191,6 +191,32 @@ def test_utc_now_iso_matches_console_format() -> None:
     assert datetime.fromisoformat(s.replace("Z", "+00:00")).tzinfo is not None
 
 
+# ────────────────────── P4-W4：EvalBoard 批队列跨进程互斥 ──────────────────────
+
+
+def test_claim_lock_released_after_write(tmp_path: Path) -> None:
+    """读改写完成后必须释放 claim.lock（否则下一进程永远认领不到）。"""
+    _wreq(tmp_path, _enq())
+    claimed = claim_pending(tmp_path)
+    assert claimed is not None
+    assert not (tmp_path / "claim.lock").exists()
+
+
+def test_claim_lock_busy_skips_without_deleting_holder(tmp_path: Path, monkeypatch) -> None:
+    """另一进程持锁 → 本轮跳过（返回 None），且绝不删掉别人的锁文件。"""
+    import os
+
+    import rl.batch_eval as batch_eval
+
+    monkeypatch.setattr(batch_eval, "_CLAIM_WAIT_SEC", 0.2)  # 不真等 2s
+    lp = tmp_path / "claim.lock"
+    # 写本进程 PID（_pid_alive 为真）模拟「另一活进程持锁」
+    lp.write_text(f"{os.getpid()}|{sys.executable}|0", encoding="utf-8")
+    _wreq(tmp_path, _enq())
+    assert claim_pending(tmp_path) is None
+    assert lp.exists(), "未取得锁不得删除持有人文件"
+
+
 def test_materialized_check_is_tz_independent() -> None:
     """请求先发、随后建批 ⇒ created_ts >= req.ts 必须成立，不依赖本机时区。"""
     # 日期取遥远过去：断言与"现在"无关，避免在 UTC 凌晨跑就翻车

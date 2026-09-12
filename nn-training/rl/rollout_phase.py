@@ -252,6 +252,11 @@ def dispatch_rollout_phase(
                     )
     else:
         report = run_rollout(bun, args.out, traj_dir, pairs, args)
+    # P4-W2 归属（S9 收窄）：dispatch 报告带 course（短名）——跨课对账/审计用，
+    # **不参与调度**（调度只看 shard 路径与 course_fp 血缘）。
+    _cn = str(getattr(args, "course_name", "") or "")
+    if _cn and isinstance(report, dict):
+        report["course"] = _cn
     return report, stream_meta, eval_thread, eval_gate, collect_child, spawned_early
 
 

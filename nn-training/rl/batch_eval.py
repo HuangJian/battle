@@ -17,6 +17,7 @@ BatchEvalRunner：结构参考 EvalDispatcher，复用 `fetch_task(mode='eval')`
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
@@ -25,6 +26,7 @@ import shutil
 import threading
 import time
 from collections import deque
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -36,6 +38,7 @@ from rl.eval_local import (
 )
 from rl.log import log
 from rl.queue import _record_agent_meta, bun_version, mm
+from train.loop_util import acquire_lock, cleanup_lock
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATA_ROOT = REPO_ROOT / "tools" / "training" / "data" / "evalboard"
@@ -150,6 +153,61 @@ def batch_iter_id(run_id: str, batch_id: str) -> str:
     return f"{run_id}.b{short}"
 
 
+# ────────────────────── EvalBoard 批队列跨进程互斥（plan P4-W4 / A1） ──────────────────
+# 多课程并行 = 多个 trainer 进程各自的 EvalBoard 线程读写同一 store 的
+# `batches.jsonl`，而认领/标记全是 read-modify-write；无锁时两个进程会同时认领同一
+# 批（双花）或互相覆盖 units.done（丢批）。这里复用 `train.loop_util` 的 PID 锁
+# （**拒绝第三套锁实现**，plan P4-W4）：跨进程用文件锁 `claim.lock`，进程内另用
+# RLock 串行化（同一进程的 eval 线程 / 主循环 idle 窗本就并发）。
+# 拿不到锁（另一进程正在认领）→ 跳过本轮，下一 idle 窗重试，_que_ 绝不无锁写。
+_CLAIM_LOCK_NAME = "claim.lock"
+_CLAIM_WAIT_SEC = 2.0
+_claim_local = threading.RLock()
+_claim_held = threading.local()
+
+
+@contextmanager
+def _claim_guard(root: Path):
+    """yield True = 已持锁；False = 2s 内未取得（调用方跳过本轮）。可重入。"""
+    with _claim_local:
+        key = str(root)
+        if getattr(_claim_held, "key", "") == key:
+            yield True  # 本线程已持锁（嵌套调用：claim_pending → consume_requests）
+            return
+        root.mkdir(parents=True, exist_ok=True)
+        lock_path = str(root / _CLAIM_LOCK_NAME)
+        deadline = time.time() + _CLAIM_WAIT_SEC
+        ok = False
+        while True:
+            if acquire_lock(lock_path, tag="batcheval claim"):
+                ok = True
+                break
+            if time.time() >= deadline:
+                break
+            time.sleep(0.2)
+        _claim_held.key = key if ok else ""
+        try:
+            yield ok
+        finally:
+            _claim_held.key = ""
+            if ok:
+                cleanup_lock(lock_path)
+
+
+def _claim_locked(fn):
+    """把 batches.jsonl 读改写入口包进跨进程锁；未取得锁 → 返回 None（跳过本轮）。"""
+
+    @functools.wraps(fn)
+    def wrapper(root, *args, **kwargs):
+        with _claim_guard(Path(root)) as ok:
+            if not ok:
+                log(f"[batcheval] claim.lock 忙——跳过本轮 {fn.__name__}（下一 idle 窗重试）")
+                return None
+            return fn(root, *args, **kwargs)
+
+    return wrapper
+
+
 def read_batches(root: Path) -> list[dict]:
     p = root / "batches.jsonl"
     if not p.exists():
@@ -242,6 +300,7 @@ def _same_enq_key(b: dict, course: str, rung_from: str, ckpt: str) -> bool:
     )
 
 
+@_claim_locked
 def consume_requests(root: Path) -> dict:
     """消费 console 请求文件（plan/evalboard-console-ux.md §5.3，P1/P4）。
 
@@ -364,6 +423,7 @@ def consume_requests(root: Path) -> dict:
         return counts
 
 
+@_claim_locked
 def claim_pending(root: Path) -> dict | None:
     """取最早可跑批并标 running。
 
@@ -388,6 +448,7 @@ def claim_pending(root: Path) -> dict | None:
     return None
 
 
+@_claim_locked
 def mark_unit_done(root: Path, batch_id: str, unit_idx: int, node_dist: dict) -> None:
     batches = read_batches(root)
     for b in batches:
@@ -925,6 +986,7 @@ def select_next_unit(
     return units, None, None
 
 
+@_claim_locked
 def _persist_of(root: Path, batch_id: str, of: int) -> None:
     """plan 展开后 units.of 回写台账（回归位使 of 2→3；defer 时也不丢）。"""
     batches = read_batches(root)
@@ -935,6 +997,7 @@ def _persist_of(root: Path, batch_id: str, of: int) -> None:
     write_batches(root, batches)
 
 
+@_claim_locked
 def _requeue(root: Path, batch: dict) -> None:
     """认领后发现跑不了 → 状态改回 pending（§3.7 台账是队列，状态流转合法）。"""
     batches = read_batches(root)
@@ -946,6 +1009,7 @@ def _requeue(root: Path, batch: dict) -> None:
             break
 
 
+@_claim_locked
 def _reopen_for_resume(root: Path, batch_id: str) -> None:
     """部分完成（yield/超时）→ running 改回 pending，units.done 保留供续跑。"""
     batches = read_batches(root)
