@@ -275,9 +275,19 @@ class HubHandler(BaseHTTPRequestHandler):
     store: _JobStore = None  # type: ignore[assignment]  # 由 factory 注入
 
     # ---- 基础 ----
-    def log_message(self, fmt: str, *args: object) -> None:  # 简洁日志（含时间戳）
+    def log_message(self, fmt: str, *args: object) -> None:  # 只打非常规事件
+        # 静默高频只读访问（/ping 健康检查、/jobs/next 拉活、result/payload 轮询含 404）
+        # ——这些在多 worker 下每秒可打多行，把 hub-server.out 刷爆。POST result、
+        # ERROR、/admin、/code 仍保留。
+        line = fmt % args
+        if (
+            '"GET /ping ' in line
+            or '"GET /jobs/next ' in line
+            or ('"GET /jobs/' in line and ('/result ' in line or '/payload ' in line))
+        ):
+            return
         print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server {self.client_address[0]}] {fmt % args}",
+            f"[{time.strftime('%H:%M:%S')}] [hub-server {self.client_address[0]}] {line}",
             flush=True,
         )
 

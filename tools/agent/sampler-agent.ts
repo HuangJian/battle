@@ -90,6 +90,9 @@ let forceBun = false
 let persistEnabled = true
 let persistFailStreak = 0
 const PERSIST_DISABLE_STREAK = 3
+/** /v1/result 404 调试：轮询高峰可刷屏——30s 窗口只打首条+suppressed 汇总。 */
+let missLogWindowAt = 0
+let missLogSuppressed = 0
 {
   const argv = process.argv.slice(2)
   for (let i = 0; i < argv.length; i++) {
@@ -602,9 +605,12 @@ function persistSpawn(plan: LaunchPlan): PoolWorker | null {
     })
     child.on('error', () => settle(false, 'spawn error'))
     child.on('close', (code, signal) => {
-      console.log(
-        `[sampler-agent] persist worker closed code=${code} signal=${signal} (was busy=${w.busy})`,
-      )
+      // 正常关池（SIGTERM idle / restart）不刷屏；busy 中途被杀或异常退出才留痕
+      if (w.busy || (code !== 0 && code !== null) || signal != null) {
+        console.log(
+          `[sampler-agent] persist worker closed code=${code} signal=${signal} (was busy=${w.busy})`,
+        )
+      }
       settle(false, 'worker exited')
       const i = persistPool.indexOf(w)
       if (i >= 0) persistPool.splice(i, 1)
@@ -639,7 +645,7 @@ async function runViaPersistWorker(
     if (persistPool.length >= workers) return false // 全忙（并发门应阻止）→ 一次性兜底
     w = persistSpawn(plan) ?? undefined
     if (w) console.log(`[sampler-agent] persist worker spawned (${path.basename(key)})`)
-  } else console.log(`[sampler-agent] persist worker reused (${path.basename(key)})`)
+  }
   if (!w) return false
   w.busy = true
   const result = new Promise<boolean>((resolve) => {
@@ -916,10 +922,8 @@ function beginTask(
 ): void {
   activeWorkers++
   inflight.set(key, { stage, seed, startedAt: Date.now() })
-  console.log(
-    `[sampler-agent] beginTask key=${key} iterId=${iterId} stage=${stage} seed=${seed} ` +
-      `inflight.size=${inflight.size} activeWorkers=${activeWorkers}`,
-  )
+  // 每局 beginTask/done/finally 不打日志：多 worker RL 采样下会刷爆 tmp/sampler-agent.log。
+  // 进度看 /v1/status（gamesDoneTotal/inflight）；失败走 task FAILED。
   runGame(
     stage,
     seed,
@@ -942,10 +946,6 @@ function beginTask(
       lruPut(key, stampServiceSec(key, buf))
       gamesDoneTotal++
       gamesDoneByIter.set(iterId, (gamesDoneByIter.get(iterId) ?? 0) + 1)
-      console.log(
-        `[sampler-agent] task done key=${key} stage=${stage} seed=${seed} ` +
-          `buf.len=${buf.length} resultCache.size=${resultCache.size}`,
-      )
     })
     .catch((e: unknown) => {
       const msg = e instanceof Error ? e.message : String(e)
@@ -959,10 +959,6 @@ function beginTask(
     .finally(() => {
       activeWorkers--
       inflight.delete(key)
-      console.log(
-        `[sampler-agent] task finally key=${key} stage=${stage} seed=${seed} ` +
-          `inflight.has=${inflight.has(key)} activeWorkers=${activeWorkers}`,
-      )
     })
 }
 
@@ -1358,13 +1354,21 @@ async function handle(req: Request): Promise<Response> {
         { status: 'running', elapsedSec: +((Date.now() - running.startedAt) / 1000).toFixed(1) },
         202,
       )
-    // 404 调试日志：记录 key 和所有集合状态，用于定位 D14 courseFp 类问题
-    console.log(
-      `[sampler-agent] /v1/result MISS key=${key} iterId=${iterId} ` +
-        `stage=${stage} seed=${seed} mode=${mode} kind=${kind} ` +
-        `sjHash=${sjHash} courseFp=${courseFp} ` +
-        `resultCache.size=${resultCache.size} failedTasks.size=${failedTasks.size} inflight.size=${inflight.size}`,
-    )
+    // 404 调试：D14 courseFp 类问题——轮询高峰不刷屏，30s 窗口内只打首条+汇总
+    const nowMs = Date.now()
+    if (nowMs - missLogWindowAt >= 30_000) {
+      console.log(
+        `[sampler-agent] /v1/result MISS key=${key} iterId=${iterId} ` +
+          `stage=${stage} seed=${seed} mode=${mode} kind=${kind} ` +
+          `sjHash=${sjHash} courseFp=${courseFp} ` +
+          `resultCache.size=${resultCache.size} failedTasks.size=${failedTasks.size} inflight.size=${inflight.size}` +
+          (missLogSuppressed > 0 ? ` suppressed=${missLogSuppressed}` : ''),
+      )
+      missLogWindowAt = nowMs
+      missLogSuppressed = 0
+    } else {
+      missLogSuppressed++
+    }
     return jsonResponse({ error: 'unknown task (expired/purged/restart)' }, 404)
   }
 

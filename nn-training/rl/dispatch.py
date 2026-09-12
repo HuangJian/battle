@@ -43,6 +43,7 @@ MAX_TASK_ATTEMPTS = (
     3  # 单局失败回队重试上限；超限计入 missing 当轮放弃（rotate 新鲜种子自然补覆盖）
 )
 ROLLOUT_LOG_EVERY = 10  # 本地 rollout 每 N 局结算打一条进度行
+RACE_LOG_SAMPLE = 2  # 竞速输家/dup settle 每类最多打前 N 条，其余进 round-done 汇总
 
 
 def _ensure_games(m: dict) -> dict:
@@ -410,6 +411,14 @@ class RolloutDispatcher:
         streaks = {nd["id"]: 0 for nd in alive}
         results: list[dict] = []
         stats = {"retried": 0}
+        # 竞速输家/dup settle 是 fan-out 的正常结局，逐条打会刷爆 training-loop.log
+        # （实测单轮数百行）。每类只留前 RACE_LOG_SAMPLE 条作证据，其余进 round-done 汇总。
+        race_drops = {
+            "dup_settle": 0,
+            "fanout_settled": 0,
+            "fanout_inflight": 0,
+            "main_by_fanout": 0,
+        }
         missing_keys: set[tuple[int, int]] = set()
         all_settled = threading.Event()  # 成功+永久缺失 == 总局数 时置位，worker 立即收工
         deadline = time.time() + window
@@ -817,10 +826,12 @@ class RolloutDispatcher:
                                 if vdir.name != shard_name:
                                     vdir = vdir / shard_name
                                 rmtree_best_effort(vdir, ignore_errors=True)
-                            log(
-                                f"[dist] dup settle s{task[0]}/seed{task[1]} node={nd_id} — dropped"
-                                + (f" (+retired {vdir})" if victim else "")
-                            )
+                            race_drops["dup_settle"] += 1
+                            if race_drops["dup_settle"] <= RACE_LOG_SAMPLE:
+                                log(
+                                    f"[dist] dup settle s{task[0]}/seed{task[1]} node={nd_id} — dropped"
+                                    + (f" (+retired {vdir})" if victim else "")
+                                )
                             continue
                         seen.add(task)
                         if task in inflight:
@@ -860,11 +871,13 @@ class RolloutDispatcher:
                                 on_result(summary)
                             except Exception as cb_err:
                                 log(f"[dist] on_result callback error: {str(cb_err)[:120]}")
-                        log(
-                            f"[dist] {len(seen) + len(missing_keys)}/{n_total_tasks} settled "
-                            f"node={nd_id} s{task[0]}/seed{task[1]} "
-                            f"elapsed={str(el) + 's' if el is not None else '-'}"
-                        )
+                        n_settled = len(seen) + len(missing_keys)
+                        if n_settled % ROLLOUT_LOG_EVERY == 0 or n_settled == n_total_tasks:
+                            log(
+                                f"[dist] {n_settled}/{n_total_tasks} settled "
+                                f"node={nd_id} s{task[0]}/seed{task[1]} "
+                                f"elapsed={str(el) + 's' if el is not None else '-'}"
+                            )
                         if len(seen) + len(missing_keys) >= n_total_tasks:
                             all_settled.set()
                         continue
@@ -880,13 +893,17 @@ class RolloutDispatcher:
                                 inflight_ts.pop(task, None)
                                 inflight_nodes.pop(task, None)
                         if task in seen or task in missing_keys:
-                            log(
-                                f"[dist] fanout copy s{task[0]}/seed{task[1]} failed ({err}) — settled, dropped"
-                            )
+                            race_drops["fanout_settled"] += 1
+                            if race_drops["fanout_settled"] <= RACE_LOG_SAMPLE:
+                                log(
+                                    f"[dist] fanout copy s{task[0]}/seed{task[1]} failed ({err}) — settled, dropped"
+                                )
                         else:
-                            log(
-                                f"[dist] fanout copy s{task[0]}/seed{task[1]} failed ({err}) — main in flight, dropped"
-                            )
+                            race_drops["fanout_inflight"] += 1
+                            if race_drops["fanout_inflight"] <= RACE_LOG_SAMPLE:
+                                log(
+                                    f"[dist] fanout copy s{task[0]}/seed{task[1]} failed ({err}) — main in flight, dropped"
+                                )
                         continue
                     # v3.7 反向竞速：fan-out 副本抢先结算、主副本迟到被判 duplicate——
                     # 主副本 fanout_copy=False，若不拦截会落入正常回队分支，把已结算任务
@@ -898,9 +915,11 @@ class RolloutDispatcher:
                                 inflight.pop(task, None)
                                 inflight_ts.pop(task, None)
                                 inflight_nodes.pop(task, None)
-                        log(
-                            f"[dist] main s{task[0]}/seed{task[1]} failed ({err}) — settled by fanout copy, dropped"
-                        )
+                        race_drops["main_by_fanout"] += 1
+                        if race_drops["main_by_fanout"] <= RACE_LOG_SAMPLE:
+                            log(
+                                f"[dist] main s{task[0]}/seed{task[1]} failed ({err}) — settled by fanout copy, dropped"
+                            )
                         continue
                     # 503（busy）不计熔断连击、不计重试上限（小批量突发提交防误熔断）。
                     if nd is not None and not busy503:
@@ -1044,6 +1063,12 @@ class RolloutDispatcher:
             f"[dist] round done: ok={len(results)}/{n_total_tasks} missing={len(missing)} "
             f"retried={stats['retried']} byNode={json.dumps(by_node)}"
         )
+        race_total = sum(race_drops.values())
+        if race_total:
+            log(
+                f"[dist] race drops (expected, sampled≤{RACE_LOG_SAMPLE}/kind): "
+                + " ".join(f"{k}={v}" for k, v in race_drops.items() if v)
+            )
         if missing:
             log(f"[dist] missing pairs: {[list(k) for k in missing]}")
 
