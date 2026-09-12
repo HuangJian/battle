@@ -4,7 +4,6 @@
  */
 
 import {
-  copyFileSync,
   existsSync,
   mkdirSync,
   openSync,
@@ -16,9 +15,9 @@ import {
   unlinkSync,
 } from 'fs'
 import path from 'path'
-import { LOG_DIR, REPO_ROOT, fmtStamp } from './paths'
+import { LOG_DIR, fmtStamp } from './paths'
 import { httpOk, killPid, pidAlive, portListen, waitUntil } from './net'
-import { loadRegistry, saveComponent } from './registry'
+import { entryForView, loadRegistry, saveAnyComponent, saveComponent } from './registry'
 import { launchSpec, spawnBg } from './proc'
 import { writeRemoteHubUrl } from './config'
 import { fail, info, log, ok, warn } from './log'
@@ -32,6 +31,8 @@ import {
   selfNodeSpec,
   trainingLoopSpec,
 } from './specs'
+import { slotOf, slotPort } from './slots'
+import { seedWeightsFromBc } from './courses'
 import type { RlConfig } from './types'
 
 // ──────────────────────────────────────────────────── cloudflared 辅助 ──────────────────────────
@@ -59,9 +60,10 @@ export async function selfNodeHealthy(cfg: RlConfig): Promise<boolean> {
   return httpOk(`http://127.0.0.1:${cfg.rl.agent_port}/v1/ping`, selfKey)
 }
 
-export async function hubServerHealthy(cfg: RlConfig): Promise<boolean> {
-  if (!(await portListen(cfg.rl.hub_port))) return false
-  return httpOk(`http://127.0.0.1:${cfg.rl.hub_port}/ping`, cfg.rl.remote_token)
+export async function hubServerHealthy(cfg: RlConfig, course = ''): Promise<boolean> {
+  const port = slotPort(cfg, course, 'hub')
+  if (!(await portListen(port))) return false
+  return httpOk(`http://127.0.0.1:${port}/ping`, cfg.rl.remote_token)
 }
 
 // ────────────────────────── 组件步骤 ──────────────────────────
@@ -93,34 +95,49 @@ function courseOf(jobRoot: string): string {
 
 /** hub-server（python remote.hub_server）步骤。 */
 export async function stepHubServer(cfg: RlConfig, jobRoot: string): Promise<void> {
+  const course = courseOf(jobRoot)
+  const port = slotPort(cfg, course, 'hub')
   log('检查 hub-server...')
-  if (await hubServerHealthy(cfg)) {
-    ok(`hub-server 已在运行 (port ${cfg.rl.hub_port})`)
+  if (await hubServerHealthy(cfg, course)) {
+    ok(`hub-server 已在运行 (port ${port})`)
     return
   }
   mkdirSync(jobRoot, { recursive: true })
   log('启动 hub-server...')
-  const spec = hubServerSpec(cfg, courseOf(jobRoot))
+  const spec = hubServerSpec(cfg, course)
   const r = launchSpec(spec)
-  saveComponent('hubServer', { pid: r.pid, entry: HUB_SERVER_ENTRY })
+  saveAnyComponent('hubServer', course, {
+    pid: r.pid,
+    entry: HUB_SERVER_ENTRY,
+    course,
+    slot: slotOf(cfg, course),
+    jobRoot,
+    log: spec.log,
+    url: `http://127.0.0.1:${port}`,
+  })
   monitorTouch()
   // Python 冷启动（import 链）可达 10s+，以 /ping 探测为准，上限 45s
-  if (await waitUntil(() => hubServerHealthy(cfg), 45000)) {
-    ok(`hub-server 启动成功 (port ${cfg.rl.hub_port}, PID ${r.pid})`)
+  if (await waitUntil(() => hubServerHealthy(cfg, course), 45000)) {
+    ok(`hub-server 启动成功 (port ${port}, PID ${r.pid})`)
   } else {
-    fail('hub-server 启动失败（45s 内未就绪，见 tmp/hub-server.out）')
+    fail(`hub-server 启动失败（45s 内未就绪，见 ${spec.log}）`)
     throw new Error('hub-server 启动失败')
   }
 }
 
-/** cloudflared tunnel 步骤（3 次申请重试；URL 以日志输出为触发）。 */
-export async function stepCloudflared(cfg: RlConfig, noTunnel = false): Promise<string> {
+/** cloudflared tunnel 步骤（3 次申请重试；URL 以日志输出为触发）。
+ *  course 决定登记归属（P1b 按课程键控）；隧道自身的 per-course 端口/URL 是 P3。 */
+export async function stepCloudflared(
+  cfg: RlConfig,
+  noTunnel = false,
+  course = '',
+): Promise<string> {
   log('检查 cloudflared tunnel...')
   if (noTunnel) {
     info('已指定 --no-tunnel——跳过隧道（Kaggle 路径本轮不验证）')
     return ''
   }
-  const reg = loadRegistry()
+  const prev = entryForView(loadRegistry(), 'cloudflared', course)
   const cfBin = specsResolveCloudflaredBin()
   if (!cfBin) {
     fail('cloudflared 不在 PATH 中——Kaggle 无法接入（安装 cloudflared，或显式 --no-tunnel 跳过）')
@@ -129,19 +146,23 @@ export async function stepCloudflared(cfg: RlConfig, noTunnel = false): Promise<
 
   // 已有登记的隧道：edge 就绪（本地 /ready）即复用；穿隧道 ping 失败可能是
   // hub 出网劣化——只有 edge 未注册才重启
-  if (reg.cloudflared && pidAlive(reg.cloudflared.pid) && reg.cloudflared.url) {
-    const url = reg.cloudflared.url
-    const edgeReady = await tunnelEdgeReady(reg.cloudflared.metrics)
+  if (prev && pidAlive(prev.pid) && prev.url) {
+    const url = prev.url
+    const edgeReady = await tunnelEdgeReady(prev.metrics)
     if (edgeReady || (await httpOk(`${url}/ping`, cfg.rl.remote_token, 10000))) {
       if (edgeReady) ok(`cloudflared 已在运行（edge 在线）: ${url}`)
       else ok(`cloudflared 已在运行: ${url}`)
       return url
     }
     warn('cloudflared 进程存在但 edge 未连接，重启中...')
-    await killPid(reg.cloudflared.pid)
+    await killPid(prev.pid)
   }
 
-  const metricsPort = cfg.rl.hub_port + 1
+  // 隧道 per-course（P3）：槽位取自 rl-config courses 块（未配置 → 0 = 旧单课行为）；
+  // 每课独立 cloudflared 进程，各自指向本课 hub 端口。
+  const slot = slotOf(cfg, course)
+  const metricsPort = slotPort(cfg, slot, 'metrics')
+  const hubPort = slotPort(cfg, slot, 'hub')
   let url: string | null = null
   let procPid = 0
   let cfLog = ''
@@ -153,7 +174,7 @@ export async function stepCloudflared(cfg: RlConfig, noTunnel = false): Promise<
         cfBin,
         'tunnel',
         '--url',
-        `http://localhost:${cfg.rl.hub_port}`,
+        `http://localhost:${hubPort}`,
         '--metrics',
         `127.0.0.1:${metricsPort}`,
         '--logfile',
@@ -162,7 +183,13 @@ export async function stepCloudflared(cfg: RlConfig, noTunnel = false): Promise<
       { log: cfLog },
     )
     procPid = r.pid
-    saveComponent('cloudflared', { pid: r.pid, log: cfLog, metrics: metricsPort })
+    saveAnyComponent('cloudflared', course, {
+      pid: r.pid,
+      log: cfLog,
+      metrics: metricsPort,
+      slot,
+      course,
+    })
     monitorTouch()
 
     // URL 以 cloudflared 日志输出为触发（取最后一个），单次上限 45s
@@ -192,7 +219,14 @@ export async function stepCloudflared(cfg: RlConfig, noTunnel = false): Promise<
     throw new Error('cloudflared tunnel URL 获取失败')
   }
 
-  saveComponent('cloudflared', { pid: procPid, url, log: cfLog, metrics: metricsPort })
+  saveAnyComponent('cloudflared', course, {
+    pid: procPid,
+    url,
+    log: cfLog,
+    metrics: metricsPort,
+    slot,
+    course,
+  })
 
   // 隧道死活以本地 /ready 为准（不依赖出网）；穿隧道 ping 失败只降级为警告。
   const edgeReady = await waitUntil(() => tunnelEdgeReady(metricsPort), 20000, 500)
@@ -209,7 +243,7 @@ export async function stepCloudflared(cfg: RlConfig, noTunnel = false): Promise<
       '隧道 edge 在线，但 hub 出网探测未通过（hub→CF 劣化）——Kaggle 入站路径不受影响，继续（预演阶段实测连通性）',
     )
 
-  writeRemoteHubUrl(url)
+  writeRemoteHubUrl(url, course)
   return url
 }
 
@@ -251,9 +285,13 @@ export async function stepSmokeTest(
   cfg: RlConfig,
   cfUrl: string | null,
   noTunnel = false,
+  course = '',
 ): Promise<void> {
   log('运行基础设施冒烟测试...')
-  const hubOk = await httpOk(`http://127.0.0.1:${cfg.rl.hub_port}/ping`, cfg.rl.remote_token)
+  const hubOk = await httpOk(
+    `http://127.0.0.1:${slotPort(cfg, course, 'hub')}/ping`,
+    cfg.rl.remote_token,
+  )
   if (!hubOk) {
     fail('hub-server 不可达')
     throw new Error('hub-server 不可达')
@@ -272,7 +310,9 @@ export async function stepSmokeTest(
   // 隧道判定分两级：穿隧道 ping 失败但 edge 在线 = hub 出网劣化 → 警告继续；
   // edge 未建立 = 隧道真死 → 硬失败。code.zip 走同一出网路径，ping 失败时跳过。
   const pingOk = await httpOk(`${cfUrl}/ping`, cfg.rl.remote_token, 10000)
-  const edgeReady = pingOk ? true : await tunnelEdgeReady(loadRegistry().cloudflared?.metrics)
+  const edgeReady = pingOk
+    ? true
+    : await tunnelEdgeReady(entryForView(loadRegistry(), 'cloudflared', course)?.metrics)
   if (!pingOk && !edgeReady) {
     fail('cloudflared tunnel 不可达（edge 未建立）——Kaggle 无法连接')
     throw new Error('cloudflared tunnel 不可达')
@@ -379,23 +419,17 @@ export interface TrainingLoopSpec {
 /** TrainingLoop 步骤（新启动返回 true；已在运行返回 false）。 */
 export async function stepTrainingLoop(cfg: RlConfig, s: TrainingLoopSpec): Promise<boolean> {
   log('检查 TrainingLoop...')
-  const reg = loadRegistry()
-  if (pidAlive(reg.trainingLoop?.pid)) {
-    ok(`TrainingLoop 已在运行 (PID ${reg.trainingLoop!.pid})`)
+  const prevTl = entryForView(loadRegistry(), 'trainingLoop', s.course)
+  if (pidAlive(prevTl?.pid)) {
+    ok(`TrainingLoop 已在运行 (PID ${prevTl!.pid}, course=${s.course})`)
     return false
   }
   drainStaleJobs(s.jobRoot, s.jsonlPath)
 
-  // 确保初始权重存在（缺省从 BC 产物复制）
+  // 确保初始权重存在（课程 BC 种子唯一复制点经 seedWeightsFromBc；缺文件抛错 fail loud）。
   if (!existsSync(s.weightsPath)) {
-    const bcPath = path.join(REPO_ROOT, 'tmp/ep60/battle2-p1bc/run/weights.json')
-    mkdirSync(path.dirname(s.weightsPath), { recursive: true })
-    if (existsSync(bcPath)) {
-      copyFileSync(bcPath, s.weightsPath)
-      ok(`初始权重已复制到 ${s.weightsPath}`)
-    } else {
-      warn(`初始权重文件不存在: ${bcPath}`)
-    }
+    seedWeightsFromBc(s.course, s.weightsPath)
+    ok(`初始权重已播种到 ${s.weightsPath}`)
   }
 
   log(`启动 TrainingLoop (course=${s.course})...`)
@@ -418,7 +452,15 @@ export async function stepTrainingLoop(cfg: RlConfig, s: TrainingLoopSpec): Prom
     venv: s.venv,
   })
   const r = launchSpec(spec)
-  saveComponent('trainingLoop', { pid: r.pid, course: s.course, entry: TRAINING_LOOP_ENTRY })
+  saveAnyComponent('trainingLoop', s.course, {
+    pid: r.pid,
+    course: s.course,
+    slot: 0,
+    entry: TRAINING_LOOP_ENTRY,
+    mode: s.ppo ?? 'remote',
+    pushNodeUrl: s.pushNodeUrl,
+    log: trainLog,
+  })
   monitorTouch()
 
   // 就绪以进程存活 + 本次启动的日志产出为触发（上限 20s），无固定等待。

@@ -38,20 +38,54 @@ class SmokeVoidRoundError(Exception):
     """
 
 
-def _gpu_push_nodes(remote_token: str) -> list[dict]:
+def _course_push_url(args: Any) -> str:
+    """本课 push 节点 URL（rl-config `courses.<stem>.push_node_url`；多课同值 = N:1 共享）。
+
+    缺省空 = 沿用旧逻辑（全取 gpu_push 节点）。C1：URL 住 rl-config，永不进
+    curricula（否则 course_fp 血缘漂移，D14 熔断误判）。
+    """
+    try:
+        from train.loop_util import course_key_from_path
+
+        stem = course_key_from_path(str(getattr(args, "course_path", "") or ""))
+    except Exception:
+        return ""
+    if not stem:
+        return ""
+    try:
+        cfg = dist_common.load_dist_config() or {}
+        url = ((cfg.get("courses") or {}).get(stem) or {}).get("push_node_url") or ""
+        return str(url).rstrip("/")
+    except Exception:
+        return ""
+
+
+def _gpu_push_nodes(remote_token: str, course_push_url: str = "") -> list[dict]:
     """GPU push 节点清单（HUB 推模式，DECISIONS §340 补充 4）：
     环境变量 REMOTE_PUSH_NODE（hub-start 冒烟注入本机伪节点，优先）→
-    rl-config nodes[].gpu_push=true（真 GPU 机器，URL 指向其 worker_server 隧道）。"""
+    rl-config nodes[].gpu_push=true（真 GPU 机器，URL 指向其 worker_server 隧道）。
+
+    多课程（plan multi-course-parallel-training P3-W1b）：`course_push_url` 非空时
+    只取 URL 与之匹配的节点（N:1 共享天然成立——同 URL 多课同取）；为空时沿用旧逻辑
+    （全取）。env 注入永远保留（显式冒烟覆盖，不受课程过滤影响）。
+    非空但匹配 0 个的响亮失败在调用方（WARN + manifest 打标，不抛异常）。"""
     out: list[dict] = []
     env_node = os.environ.get("REMOTE_PUSH_NODE")
     if env_node:
         out.append({"url": env_node.rstrip("/"), "authKey": remote_token})
     cfg = dist_common.load_dist_config() or {}
-    for n in cfg.get("nodes") or []:
-        if n.get("gpu_push") and n.get("enabled", True):
-            out.append(
-                {"url": str(n.get("url", "")).rstrip("/"), "authKey": str(n.get("authKey", ""))}
-            )
+    nodes = [
+        n
+        for n in cfg.get("nodes") or []
+        if n.get("gpu_push") and n.get("enabled", True)
+    ]
+    want = (course_push_url or "").rstrip("/")
+    if want:
+        nodes = [n for n in nodes if str(n.get("url", "")).rstrip("/") == want]
+    for n in nodes:
+        out.append(
+            {"url": str(n.get("url", "")).rstrip("/"), "authKey": str(n.get("authKey", ""))}
+        )
     return out
 
 
@@ -528,6 +562,8 @@ class TrainingSteps:
             code_zip_path=self._code_zip_path,
             course=course_text,
             course_fp=course_fp,
+            # P4-W2 归属：课程短名（args.course_name，apply_course 挂上）；无课程为 ""。
+            course_name=str(getattr(args, "course_name", "") or ""),
             reward_formula=course.reward.formula,
             formula_hash=course.reward_spec().identity(),
             metrics_version=METRICS_VERSION,
@@ -556,7 +592,21 @@ class TrainingSteps:
         # 否则「rollout 后才 enqueue」的批要等 PPO 收官后的第二次 idle，卡数十分钟。
         if hasattr(self, "_evalboard_idle"):
             self._evalboard_idle(it, getattr(self, "_last_dist_cfg", None))
-        gpu_nodes = _gpu_push_nodes(token)
+        # P3-W1b：本课 push_node_url 非空时只取 URL 匹配项（N:1 共享天然成立）；
+        # 为空时沿用旧逻辑（全取，默认行为零变化）。
+        push_url = _course_push_url(args)
+        gpu_nodes = _gpu_push_nodes(token, push_url)
+        if push_url and not os.environ.get("REMOTE_PUSH_NODE") and len(gpu_nodes) == 0:
+            # F-B5：非空但匹配 0 个且无 env 注入 → 响亮失败（WARN + manifest 打标，
+            # 不抛异常——抛异常致 loop 无限原地重试 hang；静默回落 pull 仍能正确训练，
+            # 危险在误诊不在停机，配错 URL 必须一眼可见）。
+            msg = (
+                f"[run_rl] WARN: courses push_node_url={push_url} 匹配到 0 个 "
+                "gpu_push 节点——本轮回落 pull（remote_hub_url），请检查 rl-config "
+                "courses 块或节点 gpu_push 标记"
+            )
+            log(msg)
+            manifest["push_filter_warn"] = msg
         if gpu_nodes:
             # ---- HUB 推分支（DECISIONS §340 补充 4）：payload/code 直接 POST 到
             # GPU 节点的 worker_server（其 cloudflared 隧道暴露），HUB 只做出站

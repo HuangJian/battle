@@ -2,27 +2,43 @@
 
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'fs'
 import path from 'path'
-import { CONFIG_PATH, CURRICULA_DIR } from './paths'
+import { CURRICULA_DIR, configPath } from './paths'
+import { capacityError } from './slots'
 import type { RlConfig } from './types'
 
-export function loadConfig(): RlConfig {
-  return JSON.parse(readFileSync(CONFIG_PATH, 'utf-8')) as RlConfig
+export function loadConfig(cfgPath = configPath()): RlConfig {
+  return JSON.parse(readFileSync(cfgPath, 'utf-8')) as RlConfig
 }
 
-/** 写回整份 rl-config.json（控制台模式开关/节点编辑；保持调用方传入对象原样落盘）。 */
-export function saveConfig(cfg: RlConfig, cfgPath = CONFIG_PATH): void {
+/** 写回整份 rl-config.json（控制台模式开关/节点编辑；保持调用方传入对象原样落盘）。
+ *
+ *  多课程（plan P4-W1）：落盘前过 `capacityError` 加法校验——`Σ eff(course) ≤ 裸机
+ *  容量`，超量 fail-fast 并点名超量课程（绝不把超量配额写到磁盘再靠运行时补救）。
+ *  无 `courses` 块时为空操作（默认行为零变化，§0.5-4）。 */
+export function saveConfig(cfg: RlConfig, cfgPath = configPath()): void {
+  const cap = capacityError(cfg)
+  if (cap) throw new Error(cap)
   writeFileSync(cfgPath, JSON.stringify(cfg, null, 2), 'utf-8')
 }
 
-/** 写回 rl-config.json 的 rl.remote_hub_url（隧道 URL 变更时）。 */
-export function writeRemoteHubUrl(url: string): void {
+/** 写回隧道 URL（隧道重建时）。
+ *
+ *  多课程（plan §3.3，P3）：URL 住 `rl.remote_hubs[course]`（每课一隧道）；
+ *  单课键 `rl.remote_hub_url` 同步写一份作兼容读（notebook 手工路径/Q2 回退读它）。
+ *  无课程时只写单键（默认行为零变化）。 */
+export function writeRemoteHubUrl(url: string, course = ''): void {
   const cfg = loadConfig()
-  const old = cfg.rl?.remote_hub_url
+  const old = course
+    ? cfg.rl?.remote_hubs?.[course]
+    : cfg.rl?.remote_hub_url
   if (url && url !== old) {
     cfg.rl = cfg.rl || ({} as RlConfig['rl'])
     cfg.rl.remote_hub_url = url
-    writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), 'utf-8')
-    console.log(`  remote_hub_url updated: ${old} -> ${url}`)
+    if (course) {
+      cfg.rl.remote_hubs = { ...(cfg.rl.remote_hubs ?? {}), [course]: url }
+    }
+    writeFileSync(configPath(), JSON.stringify(cfg, null, 2), 'utf-8')
+    console.log(`  remote_hub_url updated: ${old} -> ${url}${course ? ` (course=${course})` : ''}`)
   }
 }
 

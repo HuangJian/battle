@@ -12,8 +12,14 @@ import { LOG_DIR, NN_TRAINING, REPO_ROOT } from './paths'
 import { httpOk, pidAlive, portListen } from './net'
 import { loadRegistry } from './registry'
 import { agentSentinels, pySentinels } from './sentinels'
+import { slotPort } from './slots'
 import { resolveVenvPython } from './venv'
 import type { ProcSpec, RegistryEntry, RlConfig } from './types'
+
+/** 课程日志目录（per-course；无课程走 `nocourse`——与旧单课路径同构）。 */
+export function courseLogDir(course: string): string {
+  return path.join(LOG_DIR, course || 'nocourse')
+}
 
 /** cloudflared 真身路径（Chocolatey 的 bin\cloudflared.exe 是 shim——另起真身子进程、
  *  不透传 stdio 句柄、被杀留孤儿；优先直取 lib\<name>\tools\ 真身 exe）。 */
@@ -40,6 +46,7 @@ export function selfNodeSpec(cfg: RlConfig): ProcSpec {
   return {
     key: 'selfNode',
     name: 'self-node',
+    course: '',
     cmd: [process.execPath, 'run', SELF_NODE_ENTRY, '--port', String(cfg.rl.agent_port)],
     log: path.join(LOG_DIR, 'sampler-agent.log'),
     healthy: async () =>
@@ -55,16 +62,18 @@ export const HUB_SERVER_ENTRY = 'nn-training/remote/hub_server.py'
 
 export function hubServerSpec(cfg: RlConfig, course: string): ProcSpec {
   const trajDir = path.join(REPO_ROOT, 'tmp', course || 'nocourse')
+  const port = slotPort(cfg, course, 'hub')
   return {
     key: 'hubServer',
     name: 'hub-server',
+    course,
     cmd: [
       resolveVenvPython().python,
       '-u',
       '-m',
       'remote.hub_server',
       '--port',
-      String(cfg.rl.hub_port),
+      String(port),
       '--token',
       cfg.rl.remote_token,
       '--job-root',
@@ -73,8 +82,9 @@ export function hubServerSpec(cfg: RlConfig, course: string): ProcSpec {
       path.join(trajDir, 'training_log.jsonl'),
     ],
     env: { PYTHONPATH: NN_TRAINING },
-    log: path.join(LOG_DIR, 'hub-server.out'),
-    healthy: () => httpOk(`http://127.0.0.1:${cfg.rl.hub_port}/ping`, cfg.rl.remote_token),
+    // 日志 per-course（M6：spec 侧 + api.ts resolver 两半同步）
+    log: path.join(courseLogDir(course), 'hub-server.out'),
+    healthy: () => httpOk(`http://127.0.0.1:${port}/ping`, cfg.rl.remote_token),
     sentinels: pySentinels(HUB_SERVER_ENTRY),
   }
 }
@@ -83,16 +93,19 @@ export function hubServerSpec(cfg: RlConfig, course: string): ProcSpec {
 
 export function cloudflaredSpec(cfg: RlConfig, entry?: RegistryEntry): ProcSpec {
   const cfBin = resolveCloudflaredBin()
-  const metricsPort = entry?.metrics ?? cfg.rl.hub_port + 1
+  const slot = entry?.slot ?? 0
+  const course = entry?.course ?? ''
+  const metricsPort = entry?.metrics ?? slotPort(cfg, slot, 'metrics')
   const cfLog = entry?.log ?? path.join(LOG_DIR, `cloudflared-${Date.now()}.log`)
   return {
     key: 'cloudflared',
     name: 'cloudflared',
+    course,
     cmd: [
       cfBin ?? 'cloudflared',
       'tunnel',
       '--url',
-      `http://localhost:${cfg.rl.hub_port}`,
+      `http://localhost:${slotPort(cfg, slot, 'hub')}`,
       '--metrics',
       `127.0.0.1:${metricsPort}`,
       '--logfile',
@@ -112,12 +125,17 @@ export const WORKER_SERVE_ENTRY = 'nn-training/remote_worker_serve.py'
 export function workerServeSpec(
   cfg: RlConfig,
   venv: { python: string; sitePackages: string },
+  course = '',
 ): ProcSpec {
-  const pushPort = cfg.rl.hub_port + 2
+  const pushPort = slotPort(cfg, course, 'push')
   const pushUrl = `http://127.0.0.1:${pushPort}`
+  // work 目录 per-course（Q9：硬编码单值在双课冒烟时会让两个伪节点互相踩 payload）；
+  // 无课程沿用旧路径（默认行为零变化）。
+  const workDir = course ? `tmp/remote-worker-serve-${course}` : 'tmp/remote-worker-serve'
   return {
     key: 'workerServe',
     name: 'worker_server (本机伪 GPU 节点)',
+    course,
     cmd: [
       venv.python,
       '-u',
@@ -128,11 +146,11 @@ export function workerServeSpec(
       '--token',
       cfg.rl.remote_token,
       '--work',
-      'tmp/remote-worker-serve',
+      workDir,
     ],
     cwd: NN_TRAINING,
     env: { PYTHONPATH: `${venv.sitePackages}${path.delimiter}${NN_TRAINING}` },
-    log: path.join(LOG_DIR, 'remote-worker-serve.log'),
+    log: path.join(course ? courseLogDir(course) : LOG_DIR, 'remote-worker-serve.log'),
     healthy: () => httpOk(`${pushUrl}/ping`, cfg.rl.remote_token, 3000),
     sentinels: pySentinels(WORKER_SERVE_ENTRY, 'nn-training/remote/worker_server.py'),
   }
@@ -159,6 +177,7 @@ export function trainingLoopSpec(cfg: RlConfig, s: TrainingLoopSpecOpts): ProcSp
   return {
     key: 'trainingLoop',
     name: 'TrainingLoop',
+    course: s.course,
     cmd: [
       s.venv.python,
       '-u',
