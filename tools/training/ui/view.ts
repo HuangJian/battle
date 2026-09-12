@@ -755,8 +755,17 @@ export interface Series {
 export type TrendRange = 'all' | '30' | '10'
 
 /** eval 源稀疏序列（干净评估只在部分迭代出现，中间轮 = NaN 缺口）：
- *  「最近 N」语义 = 最近 N 个有效评估点。 */
-const SPARSE_SERIES_KEYS: ReadonlySet<string> = new Set(['eval'])
+ *  「最近 N」语义 = 最近 N 个有效评估点。双序列叠加时由 TrendChart 按主序列 iters 对齐。 */
+const SPARSE_SERIES_KEYS: ReadonlySet<string> = new Set([
+  'eval',
+  'evalTicks',
+  'evalKills',
+  'evalPu',
+  'evalWinTicks',
+  'evalWinHp',
+  'evalDmgPerKill',
+  'evalLossTicks',
+])
 
 /**
  * 按范围档位截取序列。eval 源序列（eval 胜率）在有限轮里常带 NaN 缺口，
@@ -811,6 +820,12 @@ export function metricSeries(rows: IterRow[]): Series[] {
       iters,
     },
     {
+      key: 'avgTicks',
+      label: '耗时',
+      vals: chrono.map((r) => (r.actuals ? r.actuals.avgTicks : Number.NaN)),
+      iters,
+    },
+    {
       key: 'winTicks',
       label: '胜局耗时',
       // 胜局平均耗时（ticks，rollout 胜局口径，所有 iter 采样）；无胜局轮 = NaN 缺口。
@@ -844,6 +859,65 @@ export function metricSeries(rows: IterRow[]): Series[] {
       // ⚠️ 高 = 清场停滞（见 EvalSummary.avgLossTicks 的方向警告），必须与胜率并排读。
       vals: chrono.map((r) =>
         r.actuals && r.actuals.avgLossTicks != null ? r.actuals.avgLossTicks : Number.NaN,
+      ),
+      iters,
+    },
+    // ── eval 叠加序列（与主序列同 iters 网格；无评估轮 = NaN，TrendChart 按 iter 对齐） ──
+    {
+      key: 'evalTicks',
+      label: 'eval 耗时',
+      vals: chrono.map((r) => (r.evalData?.avgTicks != null ? r.evalData.avgTicks : Number.NaN)),
+      iters,
+    },
+    {
+      key: 'evalKills',
+      label: 'eval 击杀',
+      vals: chrono.map((r) =>
+        r.evalData && r.evalData.games > 0 && r.evalData.totalKills != null
+          ? r.evalData.totalKills / r.evalData.games
+          : Number.NaN,
+      ),
+      iters,
+    },
+    {
+      key: 'evalPu',
+      label: 'eval 道具',
+      vals: chrono.map((r) =>
+        r.evalData && r.evalData.games > 0 && r.evalData.totalPU != null
+          ? r.evalData.totalPU / r.evalData.games
+          : Number.NaN,
+      ),
+      iters,
+    },
+    {
+      key: 'evalWinTicks',
+      label: 'eval 胜局耗时',
+      vals: chrono.map((r) =>
+        r.evalData?.avgWinTicks != null ? r.evalData.avgWinTicks : Number.NaN,
+      ),
+      iters,
+    },
+    {
+      key: 'evalWinHp',
+      label: 'eval 胜局残血',
+      vals: chrono.map((r) =>
+        r.evalData?.avgResidualHp != null ? r.evalData.avgResidualHp : Number.NaN,
+      ),
+      iters,
+    },
+    {
+      key: 'evalDmgPerKill',
+      label: 'eval 承伤/杀',
+      vals: chrono.map((r) =>
+        r.evalData?.dmgPerKill != null ? r.evalData.dmgPerKill : Number.NaN,
+      ),
+      iters,
+    },
+    {
+      key: 'evalLossTicks',
+      label: 'eval 败局耗时',
+      vals: chrono.map((r) =>
+        r.evalData?.avgLossTicks != null ? r.evalData.avgLossTicks : Number.NaN,
       ),
       iters,
     },

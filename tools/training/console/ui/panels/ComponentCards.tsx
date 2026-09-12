@@ -1,14 +1,14 @@
 /** ComponentCards.tsx — 组件 chips 行（样式对齐节点行：一行内 pill，点击 pill 在**下方**
  *  展开整行全宽日志详情）。主按钮随状态换身。
  *  - 未启动：唯一「启动」（品牌色）；运行中：「停止」+ 冒烟/日志 小图标。
- *  - cloudflared：隧道截断展示（title 留全量）+ auth key 复制钮直接进 chip（CopyButton，复制点击不展开详情）。
+ *  - cloudflared：url / key 复制钮（文案即 url/key，不展示完整字符串；复制点击不展开详情）。
  *  - TrainingLoop 的「启动」→ 打开 TrainLaunchModal（App 层），选模式后再预设。
  *  - 启/停 pending 锁（§367）：点击先本地 disable（不依赖下一轮轮询），等状态切换完成
  *    或动作失败后再 enable——防双连击把组件状态打乱。 */
 
 import { useEffect, useState } from 'preact/hooks'
 import type { ComponentView, ConsoleStateView } from '../../../ui/view'
-import { pendingLockReleases, shortUrl } from '../../../ui/view'
+import { pendingLockReleases } from '../../../ui/view'
 import { CopyButton } from '../../../ui/components/CopyButton'
 
 export interface ComponentCardsProps {
@@ -134,9 +134,8 @@ export function ComponentCards({
                   }
                   onClick={(e) => e.stopPropagation()}
                 >
-                  {c.url ? <code title={c.url}>{shortUrl(c.url)}</code> : null}
-                  {c.url ? <CopyButton text={c.url} label="隧道" icon small /> : null}
-                  {c.secret ? <CopyButton text={c.secret} label="auth key" icon small /> : null}
+                  {c.url ? <CopyButton text={c.url} label="url" small /> : null}
+                  {c.secret ? <CopyButton text={c.secret} label="key" small /> : null}
                 </span>
               ) : null}
               {c.status === 'exited' && c.error ? (

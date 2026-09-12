@@ -331,8 +331,8 @@ describe('console 局域网只读边界（§…：LAN 查看 / localhost 控制�
     // 只读 SSR 与正常 SSR 一样渲染 token 行与复制键（secret 经 buildStateView 透传）
     for (const readOnly of [true, false]) {
       const html = render.renderConsolePage({ ...base, readOnly })
-      expect(html).toContain('aria-label="复制auth key"') // cloudflared token 复制键
-      expect(html).toContain('token') // token 行本体
+      expect(html).toContain('aria-label="复制key"') // cloudflared token 复制键
+      expect(html).toContain('⧉ key') // 按钮文案即 key 字样
     }
     // 数据源确认：快照里 cloudflared 恒带 secret
     const s = await api.buildStateView()
@@ -884,26 +884,15 @@ describe('console sparkline (ui/view)', () => {
       expect(view.sliceSeries(ticks, '10').vals.length).toBe(10)
     })
 
-    it('hero 渲染 8 条走势图（三行）+ 范围档位开关', () => {
+    it('hero 渲染 6 条走势图（rollout+eval 叠加，无耗时/败局耗时）+ 范围档位开关', () => {
       const html = render.renderConsolePage(mkView(30, true))
       const charts = (html.match(/class="tc-trend__svg"/g) ?? []).length
-      expect(charts).toBe(8)
-      // 8 格顺序（覆盖「承伤/杀 图移第二位」「道具 图移到最后」）：
-      // 胜率 / 承伤·杀 / 击杀 / eval 胜率 / 胜局耗时 / 胜局残血 / 败局耗时 / 道具
+      expect(charts).toBe(6)
+      // 6 格：胜率 / 承伤·杀 / 击杀 / 胜局耗时 / 胜局残血 / 道具
       const labels = [...html.matchAll(/tc-tcell__lbl[^>]*>([^<]+)<\/span>/g)].map((m) => m[1])
-      expect(labels).toEqual([
-        '胜率',
-        '承伤/杀',
-        '击杀',
-        'eval 胜率',
-        '胜局耗时',
-        '胜局残血',
-        '败局耗时',
-        '道具',
-      ])
-      // 悬停口径提示（rollout 所有 iter 平均）
-      expect(html).toContain('胜局平均耗时（ticks，仅胜局计入，rollout 所有 iter 平均）')
-      expect(html).toContain('胜局平均剩余 hp（rollout 所有 iter 平均；剩余命每命计满额）')
+      expect(labels).toEqual(['胜率', '承伤/杀', '击杀', '胜局耗时', '胜局残血', '道具'])
+      // 双序列叠加：eval 橙线（#ea580c）在有 eval 数据时出现
+      expect(html).toContain('#ea580c')
       // 范围档位渲染且默认最近 30
       expect(html).toContain('tc-trend-range__btn')
       expect(html).toContain('全量')

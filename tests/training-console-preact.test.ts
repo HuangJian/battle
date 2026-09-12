@@ -691,7 +691,7 @@ describe('§361：icon 复制键 / cloudflared endpoint 截断与复制 / local 
     expect(plain).toContain('复制')
   })
 
-  it('cloudflared endpoint 截断展示 + 全量复制（title 留全量）', () => {
+  it('cloudflared endpoint：复制钮显示 url 字样（不展示完整 URL 字符串）', () => {
     const longUrl = 'https://abc-def.trycloudflare.com/abcdefgh/%2F%2F%2F%2F%2F'
     const s = {
       time: 't',
@@ -720,9 +720,12 @@ describe('§361：icon 复制键 / cloudflared endpoint 截断与复制 / local 
       localNode: null,
     } as ConsoleStateView
     const html = renderConsolePage(s)
-    expect(html).toContain(shortUrl(longUrl))
-    expect(html).toContain(`title="${longUrl}"`) // 截断展示，hover 留全量
-    expect(html).toContain('⧉') // icon 复制键在
+    expect(html).toContain('⧉ url')
+    expect(html).toContain('⧉ key')
+    expect(html).not.toContain(shortUrl(longUrl))
+    // 可见组件区不得出现完整 URL（__INITIAL__ 脚本里的初始 state 另论）
+    const body = html.replace(/<script[\s\S]*?<\/script>/g, '')
+    expect(body).not.toContain('trycloudflare.com')
   })
 
   it('local pill：只读展示（槽位 + 上轮贡献）', () => {

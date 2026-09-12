@@ -6,7 +6,16 @@
  *  ActionError → 409，参数错误 → 400，动作失败（业务）→ 200 + ok:false。
  */
 
-import { closeSync, existsSync, openSync, readFileSync, readdirSync, readSync, statSync } from 'fs'
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  readSync,
+  statSync,
+} from 'fs'
 import path from 'path'
 import { CURRICULA_DIR, LOG_DIR, NN_TRAINING, REPO_ROOT } from '../paths'
 import { httpOk, pidAlive } from '../net'
@@ -1174,6 +1183,84 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
           })
         } finally {
           busy.delete('eval:probe')
+        }
+      }
+      case 'evalA': {
+        // 课程设计评估（A 层）：用该 iter 权重跑与训练每 eval_every 轮相同的干净评估，
+        // 写 tmp/<course>/eval_log.jsonl（与 EvalBoard B 层 evalProbeRun 无关）。
+        const ckpt = str(body, 'ckpt')
+        if (!ckpt) return errResp('缺少 ckpt（权重文件路径）', 400)
+        const iterRaw = Number(body.iter)
+        const iter = Number.isFinite(iterRaw) && iterRaw > 0 ? iterRaw : (iterFromCkpt(ckpt) ?? 0)
+        if (busy.has('eval:A')) return errResp('evalA 已在运行', 409)
+        busy.add('eval:A')
+        const resolved = (await import('../venv')).resolveVenvPython()
+        // 优先 venv 自带入口（.venv\Scripts\python.exe 已含依赖）；uv 跳板解析出的
+        // 基础解释器须靠 PYTHONPATH 挂 site-packages，否则 pydantic 缺失。
+        const venvEntry =
+          process.platform === 'win32'
+            ? path.join(NN_TRAINING, '.venv', 'Scripts', 'python.exe')
+            : path.join(NN_TRAINING, '.venv', 'bin', 'python3')
+        const pyBin = existsSync(venvEntry) ? venvEntry : resolved.python
+        const sitePackages = resolved.sitePackages
+        const script = path.join(NN_TRAINING, 'rl', 'eval_a_once.py')
+        const logFile = path.join(REPO_ROOT, 'tmp', ctx.course, 'evalA.log')
+        try {
+          const { spawn } = await import('child_process')
+          mkdirSync(path.dirname(logFile), { recursive: true })
+          const out = openSync(logFile, 'a')
+          // uv venv 跳板解析出的是基础解释器——必须 PYTHONPATH 挂 site-packages，
+          // 否则 `import pydantic` 直接 ModuleNotFoundError（2026-09-12 实测）。
+          const env = { ...process.env } as Record<string, string>
+          if (sitePackages) {
+            const prev = env.PYTHONPATH || env.PYTHONHOME || ''
+            env.PYTHONPATH = prev ? `${sitePackages}${path.delimiter}${prev}` : sitePackages
+          }
+          const child = spawn(
+            pyBin,
+            [
+              script,
+              '--course',
+              ctx.course,
+              '--ckpt',
+              ckpt,
+              '--iter',
+              String(iter),
+              '--bun',
+              'bun',
+            ],
+            {
+              cwd: path.join(REPO_ROOT, 'nn-training'),
+              detached: true,
+              stdio: ['ignore', out, out],
+              windowsHide: true,
+              env,
+            },
+          )
+          child.on('exit', () => {
+            busy.delete('eval:A')
+            try {
+              closeSync(out)
+            } catch {
+              /* ignore */
+            }
+          })
+          child.on('error', () => {
+            busy.delete('eval:A')
+            try {
+              closeSync(out)
+            } catch {
+              /* ignore */
+            }
+          })
+          child.unref()
+          return okResp({
+            ok: true,
+            message: `evalA 已启动 it${iter}（课程干净评估 → eval_log；日志 tmp/${ctx.course}/evalA.log）`,
+          })
+        } catch (e) {
+          busy.delete('eval:A')
+          return errResp(e instanceof Error ? e.message : String(e), 500)
         }
       }
       case 'evalBatchAbort': {

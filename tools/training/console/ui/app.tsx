@@ -487,7 +487,12 @@ export function App({ initial }: AppProps) {
         </div>
       ) : null}
       <PanelErrorBoundary>
-        <Hero stateView={stateView} onMore={() => setDrawerTab('metrics')} />
+        <Hero
+          stateView={stateView}
+          onMore={() => setDrawerTab('metrics')}
+          onRefresh={() => void refreshState()}
+          readOnly={readOnly}
+        />
       </PanelErrorBoundary>
       {/* ── 组件卡 4  row：在 LAN 只读视图里也正常交互样式（不在 banner 里、不 opacity 灰败） ── */}
       <PanelErrorBoundary>
@@ -563,7 +568,13 @@ export function App({ initial }: AppProps) {
         onTab={(k) => setDrawerTab(k as DrawerTabKey)}
         onClose={() => setDrawerTab(null)}
       >
-        {drawerTab === 'metrics' ? <MetricsTable stateView={stateView} /> : null}
+        {drawerTab === 'metrics' ? (
+          <MetricsTable
+            stateView={stateView}
+            onRefresh={() => void refreshState()}
+            readOnly={readOnly}
+          />
+        ) : null}
         {drawerTab === 'nodes' ? (
           <NodeStats enabled poolFreshNonce={poolFreshNonce} course={viewCourse} />
         ) : null}
