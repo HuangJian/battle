@@ -1,3 +1,17 @@
+// ⛔ DEPRECATED 2026-09-13（P0 清理）—— **已废弃，禁止开腿**。
+//
+// 理由：
+//   ① 与 `c6-pickup3.jsonc` 是同一设计的两个副本（只差 `eval_games_per_stage` 120 vs 100），
+//      两份并存极易误开（2026-09-12 20:30 审阅已列，今日清理）。
+//   ② 实测退化：`c6-pickup3` 配对轨迹 it5 37.5% → it10 31.5% → it30 35.0% → it61 **29.0%**
+//      （净 −9pp，McNemar p=0.050 边界显著）—— 继 c4-margin / c4-dodge 之后第三个
+//      「从好起点出发越训越差」的案例。
+//   ③ 其 gates 块的 G4(plateau) 会反复下发 cloud halt 杀云端 PPO worker（实测 6 次）。
+//      该机制已于 2026-09-13 P0 修复（`loop_guards.NO_CLOUD_HALT_KINDS`），但本腿不再启用。
+//
+// 接班：`c4-chip01` / `c4-chip02`（wChip 剂量快筛）→ 计划中的 `c6-chip`（c6 主腿）。
+// 保留本文件仅作历史留存（course_fp 血缘 / 复盘取证），**不要作为 `--course` 参数**。
+//
 // 课程 c6-pickup2 —— 道具杠杆 warm-start 腿（2026-09-12 起草，c6-pickup it35 分支）
 //
 // 由 **c6-pickup.jsonc** 派生。**相对 c6-pickup 只改 2 处**（bc + 新增 gates 块），

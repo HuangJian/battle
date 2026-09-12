@@ -287,7 +287,12 @@ def settle_eval_summary(
                     led_zero_kill += 1
                 _acc(led_phits, r.get("playerHits"))
                 _acc(led_pu, r.get("powerUpsCollected"))
-                if oc == "timeout":
+                # 2026-09-13 P0 止血：rollout/探针落盘的 outcome 值是 **`max_ticks`**，
+                # 不是 `timeout`（`timeout` 只存在于 reward 引擎的 `is_timeout` 虚拟符号里，
+                # 它才把两者都当超时）。旧判据 `oc == "timeout"` 恒 False ⇒ `timeout_frac`
+                # 永远是 0.0 ⇒ G7（course_valid）形同虚设（c6-bonus 实测真超时 11/100，
+                # summary 仍报 0.0）。口径同 `evalboard/stats.ts`：已清场的局不算超时。
+                if oc in ("timeout", "max_ticks") and not r.get("cleared"):
                     led_timeout += 1
     except FileNotFoundError:
         pass

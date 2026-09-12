@@ -407,6 +407,15 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         "作废本轮并干净退出；it 不前进、不写 iteration 事件",
     )
     ap.add_argument(
+        "--gate-halt-mode",
+        default=_d("gate_halt_mode", "halt"),
+        choices=("halt", "notify"),
+        help="门禁触发时对云端 PPO worker 的动作："
+        "halt = 下发停机达令（默认，历史行为）；"
+        "notify = 只记录 gate_verdict + 控制台横幅提示，**不停机**。"
+        "运行时可由控制台顶部开关热切（写 <traj>/gate-halt-mode.txt，每轮判定读一次）",
+    )
+    ap.add_argument(
         "--remote-hub-url",
         default=_d("remote_hub_url", ""),
         help="远程模式：hub-server base URL（如 http://127.0.0.1:8787）",

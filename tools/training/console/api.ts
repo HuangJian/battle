@@ -1090,6 +1090,29 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
         const value = str(body, 'value')
         return okResp(await setMode(key, value))
       }
+      case 'getGateHaltMode': {
+        // 门禁动作模式（2026-09-13）：halt = 触发门禁时下发云端停机达令（默认）；
+        // notify = 只记录 verdict + 横幅提示，绝不停云机。
+        const { readGateHaltMode } = await import('../specs')
+        // okResp 的载荷是 ActionResult（ok/message/detail）——模式值走 message 回传，
+        // 客户端据此校准开关（不为此扩 ActionResult 类型，避免污染所有动作返回值）。
+        return okResp({ ok: true, message: readGateHaltMode(ctx.course) })
+      }
+      case 'setGateHaltMode': {
+        // 写 `<traj>/gate-halt-mode.txt`；Python 侧每轮门判定读它（优先于启动参数）
+        // ⇒ 训练途中切换**立即生效**，无需重启。
+        const mode = str(body, 'mode')
+        if (mode !== 'halt' && mode !== 'notify') {
+          return errResp(`未知门禁模式: ${mode}（只接受 halt|notify）`, 400)
+        }
+        if (!ctx.course) return errResp('未指定课程（无法定位 traj 目录）', 400)
+        const { writeGateHaltMode } = await import('../specs')
+        const written = writeGateHaltMode(ctx.course, mode)
+        return okResp({
+          ok: true,
+          message: written === 'notify' ? 'notify（只提示，不下发停机令）' : 'halt（下发停机令）',
+        })
+      }
       case 'setCourse': {
         const { saveConsoleState, ActionError } = await import('./actions')
         const course = str(body, 'course')

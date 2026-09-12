@@ -684,6 +684,20 @@ def _wins_mastery_pooled(
         f"池化 {k} 轮 {games} 局 {wins} 胜 = {p:.3f}"
         f"（SE {100 * se:.1f}pp，95%CI ±{196 * se:.1f}pp）"
     )
+    # 2026-09-13 P0：判决力自检（历史事故——c6-pickup3 启动时就报过「要求 5pp，但 300 局的
+    # SE=2.7pp > 2.5pp，该门分辨不出自己要求的效果」，却只当提示放过；c6-bonus 沿用同款
+    # G1，全程 0.275–0.302 离门槛差 7–10pp，从未有希望达标，白烧 74 轮）。
+    # 现在把「要求的效果量 vs 当前样本量能分辨的最小效应」写进每次判定的 reason。
+    z_pe = float(rule.conf_z or 1.645)
+    gain = float(rule.min_gain_pp or 0.0) / 100.0
+    if gain > 0:
+        mde = z_pe * se  # 当前样本量下可分辨的最小效应（单侧 conf_z）
+        if gain < mde:
+            need = math.ceil(p * (1.0 - p) * (z_pe / gain) ** 2) if gain > 0 else 0
+            head += (
+                f"；⚠ 判决力不足：要求 +{rule.min_gain_pp}pp，但 {games} 局只分辨得出"
+                f" ≥{100 * mde:.1f}pp（需 ≈{need} 局，即 eval_games×pool_window 提到该量级）"
+            )
     fails: list[str] = []
     if p < thr:
         fails.append(f"{p:.3f} < 教师线 {thr:.3f}")

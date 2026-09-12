@@ -1,0 +1,356 @@
+// 课程 c4-chip02 —— wChip 剂量快筛腿（2026-09-13）：便宜地测「给承伤定价」是否有效
+//
+// 由 **c6-pickup.jsonc** 派生。相对它只改 5 处，其余（地图/forces/spawn/max_ticks/player/
+// 其余 reward 参数/λ/lr/epochs/mb/workers/缰绳/ppo_schedule）逐字锁死：
+//
+//   1. name/out/traj/backup_dir/backup_prefix → c4-chip02（fresh，绝不复用别腿目录）
+//   2. stages[0].count: 6 → 4（换成 **c4 关**；grid/forces/spawn 与 c6 逐字段相同，已核验）
+//   3. bc: c5-gae.it160 → **c6-pickup.it35**（与计划中的 c6-chip **同 bc** ⇒ 跨关剂量对照成立）
+//   4. reward.params.**wChip: 0.005 → 0.02**（唯一变量）
+//   5. iters: 160 → **30**（快筛，不是主腿）
+//
+//   **不配 `gates` 块**（c4-dodge / c6-pickup3 教训：G4 判 plateau 会下发 cloud halt 杀 PPO
+//   worker，且判据用训练内 win_rate 判错轴）。护栏由「人读 + 预算到顶 STOP」承担。
+//
+// ── 为什么在 c4 上做（2026-09-13 用户拍板：先 c4 快筛 30 轮再定 c6）──────────────────
+//   ① **便宜**：c4 局更短（平均 1099 tick vs c6 的 1225）、同权重起点 60% ⇒ 30 轮约 1 小时。
+//   ② **同变量跨关对照可量化迁移损失**：本腿与 c6-chip 同 bc、同 wChip、只差关卡 ⇒ 能第一次
+//      量出「c4 递减密度 → c6 恒定满压」到底损失多少（c4-dodge 当年就是没做这一步才翻车）。
+//   ③ **定位是「证否筛子」不是「证实捷径」**：c4 上有效 ≠ c6 上有效（形状不同构）；
+//      但 c4 上**无效** ⇒ c6 上大概率也无效 ⇒ 可以便宜地排除坏主意。
+//      ⚠️ 「c4 更容易收敛」目前**无证据**：c4-margin 142 轮 0.78→0.62（跌）、c4-dodge 48 轮
+//      先升后崩；全项目唯一真正收敛的是 c5-gae（c5 关）。别指望在 c4 出成绩。
+//
+// ── ★ 本轮最重要的机制发现：`playerHits` 不是挨打次数，wDmg 是个失效的死项 ──────────
+//   `combat.ts:599` hits-to-kill = ceil(maxHp / bullet.damage)：
+//     · **非致命**命中 → `player_damage` 事件 → 累加 `playerDamageTaken`
+//     · **致命**命中   → `player_hit` 事件 → `playerHits++`（并 killTank）
+//   ⇒ **1 命课程里 `playerHits` 恒等于死亡指示**（败局 1、胜局 0；实测 c6 败局分布
+//     `{1:110, 2:1}`）。所以 reward 里的 `- wDmg*playerHits`（wDmg=1.0）既**不承载任何挨打信息**，
+//     又与 `terminal.lives_exhausted = -1.0` **重复扣了一次败局分** —— 它是个伪装成
+//     「挨打惩罚」的死项。唯一真实的承伤信号是 `playerDamageTaken`，而它当前只挂 wChip=0.005。
+//   ⇒ **抬 wChip 不是调参，是修复一个失效的机制。**
+//   （本腿不动 wDmg —— 单变量纪律；只记录，待 c6 主腿后单独处置。）
+//
+// ── 剂量换算（c6 实测：败局承伤均值 218）─────────────────────────────────────────
+//     wChip 0.005（现状）→ 承伤项 -1.09 ≈ 0.36 个击杀（wKill 3.0）
+//     wChip 0.01        → -2.18 ≈ 0.73 个击杀
+//     wChip 0.02        → -4.36 ≈ 1.45 个击杀
+//   **本腿 = 0.02**。两条腿（0.01 / 0.02）并列跑 ⇒ 看剂量-响应是线性还是饱和，避免一上来过冲。
+//
+// ── 对症的病灶：败局是「白挨打」，不是「打得猛」────────────────────────────────
+//   同权重 c6-pickup.it35，c6 关 200 局：
+//     胜局 6.00 kills / 承伤 142 ⇒ **23.7 dmg per kill**
+//     败局 2.06 kills / 承伤 218 ⇒ **106 dmg per kill**（差 4.5 倍，且 kills 更低）
+//   ⇒ 败局不是"拼得太凶死的"，是**用 2 次多的承伤只换到 2 个击杀**——典型的承伤无定价。
+//
+// ── 已知反向风险（本腿最该盯的）───────────────────────────────────────────────
+//   wChip 抬高 = 挨打更痛 ⇒ 策略可能**更怕挨打、更倾向躲避**，而这正是 c6 诊断出的
+//   「策略保守化」签名（c6-pickup3 entropy 掉到 0.319、越训越差 −9pp）。
+//   ⇒ **保守化的假象 = 承伤降了、kills 也降了、胜率没变**。所以主判据不能只看胜率。
+//
+// ── 判据（人读 + 配对探针）───────────────────────────────────────────────────
+//   主判据（**效率**，不是胜率）：**dmg per kill（承伤/杀）**相对起点下降，且不牺牲 kills。
+//     · ✅ 杠杆成立：dmg/kill ↓ 且 kills 不降（最好 ↑）
+//     · ❌ 保守化：dmg/kill ↓ 但 kills ↓、avgTicks ↑（躲着不打）⇒ 抬价方向错，改试
+//                 「满压击杀加成」(min(4, enemyTotal - kills) 作权重，零代码可表达)
+//   参考：配对胜率（c4 关 200 局 seeds 0-199，起点 = bc 零样本 **60.0%** 已实测）、
+//         entropy（跌破 0.32 = 坍缩信号，停）、超时占比（>0.15 熔断）。
+//   验收节奏：每 10 轮配对探针
+//     bun tools/sim/eval-course-ckpt.ts --course tmp/fmap-c4l1.jsonc \
+//       --weights nn-training/weights/c4-chip02/<ckpt>.json \
+//       --weights nn-training/weights/c6-pickup/c6-pickup.it35.20260912-165846.json \
+//       --games 200 --workers 6 --out tmp/c4chip02-it<N>-probe.jsonl
+//   注：**hazard 要按 k 分档看**（`hazard(已杀k→死)`），别只看总胜率（200 局 SE≈3.4pp）。
+
+{
+  "version": 5,
+  "name": "c4-chip02",
+  "mode": "per-tick",
+  "stages": [
+    {
+      "name": "p4-onset-mixed",
+      "grid": [
+        [
+          6,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6
+        ],
+        [
+          6,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          6
+        ],
+        [
+          6,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          6
+        ],
+        [
+          6,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          6
+        ],
+        [
+          6,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          6
+        ],
+        [
+          6,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          6
+        ],
+        [
+          6,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          6
+        ],
+        [
+          6,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          6
+        ],
+        [
+          6,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          6
+        ],
+        [
+          6,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          6
+        ],
+        [
+          6,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          6
+        ],
+        [
+          6,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          6
+        ],
+        [
+          6,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6
+        ]
+      ],
+      "forces": "abcdabcdabcdabcdabcd",
+      "count": 4,
+      "player_spawn": {
+        "col": 12,
+        "row": 12
+      },
+      "enemy_spawns": [
+        {
+          "col": 2,
+          "row": 2
+        },
+        {
+          "col": 22,
+          "row": 2
+        },
+        {
+          "col": 22,
+          "row": 22
+        },
+        {
+          "col": 2,
+          "row": 22
+        }
+      ]
+    }
+  ],
+  "difficulty": "hard",
+  "max_ticks": 2400,
+  "seed_rotate": 150,
+  "player": {
+    "lives": 1,
+    "level": 0
+  },
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots - wTick*ticks - wChip*playerDamageTaken",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.3,
+      "wPickup": 3.0,
+      "wStar": 1.0,
+      "wDmg": 1.0,
+      "wStuck": 0.02,
+      "wShot": 0.01,
+      "wTick": 0.01,
+      "wChip": 0.02
+    },
+    "terminal": {
+      "stage_clear": 2.0,
+      "lives_exhausted": -1.0,
+      "timeout": -2.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/c6-pickup/c6-pickup.it35.20260912-165846.json",
+  "iters": 30,
+  "max_hours": 12,
+  "workers": 8,
+  "kickstart_ref": true,
+  "warmup_iters": 0,
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "until_iter": 40,
+      "kl_coef": 0.2,
+      "lr": 0.00015,
+      "kl_cap": 0.2
+    },
+    {
+      "kl_coef": 0.03,
+      "lr": 5e-05
+    }
+  ],
+  "out": "tmp/c4-chip02/weights.json",
+  "traj": "tmp/c4-chip02",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/c4-chip02",
+  "backup_prefix": "c4-chip02",
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 100,
+  "eval_every": 5
+}
