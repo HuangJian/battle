@@ -13,6 +13,7 @@ import path from 'path'
 import { gunzipSync } from 'zlib'
 import { buildPack, PACK_MAGIC } from '../sim/pack-container'
 import { REPO_ROOT } from './paths'
+import { hubBasePort } from './slots'
 import { fail, info, log, ok, warn } from './log'
 import { httpOk, sha256Hex } from './net'
 import { portListen } from './net'
@@ -63,7 +64,9 @@ export function containerSmoke(): SmokeItem {
 /** rl-config 契约冒烟：端口/token/nodes 条目齐全。 */
 export function rlConfigSmoke(cfg: RlConfig): SmokeItem {
   const problems: string[] = []
-  if (!cfg.rl?.hub_port || !cfg.rl?.agent_port) problems.push('rl.hub_port / rl.agent_port 缺失')
+  // 注：本文件不得直接读端口基数字段——门禁①（tests/training-multi-course.test.ts）
+  // 扫属性访问，端口基数只有 slots.ts::hubBasePort 一处允许读取。
+  if (!hubBasePort(cfg) || !cfg.rl?.agent_port) problems.push('rl 配置缺 hub_port / agent_port')
   if (!cfg.rl?.remote_token) problems.push('rl.remote_token 缺失')
   if (!Array.isArray(cfg.nodes) || cfg.nodes.length === 0) problems.push('nodes 为空')
   else {

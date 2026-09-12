@@ -23,10 +23,11 @@
 import { closeSync, existsSync, openSync, readdirSync, readFileSync } from 'fs'
 import path from 'path'
 import { LOG_DIR, NN_TRAINING, fmtStamp } from './paths'
-import { pidAlive, shapeLoopbackNoProxy } from './net'
+import { pidAlive, portListen, shapeLoopbackNoProxy } from './net'
 import { ensureVenv, resolveTorchThreads, resolveVenvPython, torchThreadEnv } from './venv'
 import { loadConfig } from './config'
-import { fail, info, initLog, log, ok } from './log'
+import { allSlotPorts, lockName, lockPathFor, slotOf, slotPort, validateCourseName } from './slots'
+import { fail, info, initLog, log, ok, warn } from './log'
 import { containerSmoke, summarizeSmoke, weightsSmoke } from './smoke'
 
 /** --script 旧扁平名别名（DECISIONS §324，2026-09-04；与旧启动器同一映射）。 */
@@ -78,28 +79,101 @@ export function resolveTrainScript(raw: string): string {
   return s
 }
 
-/** train_loop.py 的 pre-flight：锁文件持有人存活 → 已在训练，退出 0（--force 跳过）。 */
-export function preflightTrainLoopLock(force: boolean, script: string): void {
-  if (force || script !== 'train_loop.py') return
-  const lockFile = path.join(NN_TRAINING, '.train_loop.lock')
-  if (!existsSync(lockFile)) return
-  try {
-    const raw = readFileSync(lockFile, 'utf-8')
-    const oldPid = Number.parseInt(raw.split('|')[0] ?? '', 10)
-    if (Number.isInteger(oldPid) && pidAlive(oldPid)) {
-      log(`训练已在运行（PID ${oldPid}），已退出。（--force 强制重启）`)
-      process.exit(0)
+/** 从透传参数里 peek 课程名（`--course <v>` / `--course=<v>`；**不消费**，
+ *  原样继续透传给训练脚本）。路径形式的取值（`--course-file x.jsonc` / 带分隔符的
+ *  `--course` 路径）返回空串：课程名由 python 侧从课程文件解析，launcher 不猜。 */
+export function peekCourse(scriptArgs: string[]): string {
+  for (let i = 0; i < scriptArgs.length; i++) {
+    const a = scriptArgs[i] ?? ''
+    if (a.startsWith('--course') && a.includes('=')) {
+      const v = a.slice(a.indexOf('=') + 1)
+      return v.includes('/') || v.includes('\\') ? '' : v.replace(/\.jsonc$/, '')
     }
-    // stale 锁：交给 train_loop.py 的 acquire_lock() 清除
-  } catch {
-    /* unreadable lock — let python side handle */
+    if (a === '--course') {
+      const v = scriptArgs[i + 1] ?? ''
+      return v.includes('/') || v.includes('\\') ? '' : v.replace(/\.jsonc$/, '')
+    }
+    if (a.startsWith('--course-file')) return '' // 路径形式：锁名由 python 侧解析决定
   }
+  return ''
+}
+
+/** 锁文件持有人（pid 存活才认；stale 锁交给 python 侧自清）。 */
+function lockHolderOf(lockPath: string): number | null {
+  if (!existsSync(lockPath)) return null
+  try {
+    const oldPid = Number.parseInt(readFileSync(lockPath, 'utf-8').split('|')[0] ?? '', 10)
+    return Number.isInteger(oldPid) && pidAlive(oldPid) ? oldPid : null
+  } catch {
+    return null // unreadable lock — let python side handle
+  }
+}
+
+/** pre-flight：**按课程**的实例锁预检——本课已在跑则退出 0（--force 跳过）。
+ *
+ *  单实例护栏的权威在 python 侧（`run_rl.py::_acquire_run_rl_lock` /
+ *  `train_loop.py::acquire_lock`）；本函数只是让无头通道早退、不白启 venv。
+ *  锁名唯一来源 slots.ts::lockName（与 python `train.loop_util::course_lock_path`
+ *  同构）。无课程时沿用旧全局锁名（默认行为零变化）。 */
+export function preflightCourseLocks(force: boolean, script: string, course = ''): void {
+  if (force) return
+  const kind = script === 'train_loop.py' ? 'train_loop' : script === 'run_rl.py' ? 'run_rl' : null
+  if (!kind) return
+  const name = lockName(course, kind)
+  const holder = lockHolderOf(lockPathFor(course, kind))
+  if (holder) {
+    log(
+      `${script} 已在运行（PID ${holder}${course ? `, course=${course}` : ''}，锁 ${name}）` +
+        '，已退出。（--force 强制重启；双课并行请带上 --course）',
+    )
+    process.exit(0)
+  }
+}
+
+/** 端口预检（槽位化）：本课槽位的 hub/metrics/push 有占用时响亮提示。
+ *  不阻停（trainer 不绑这些端口；hub 由控制台起）——静默才是最危险的形态。 */
+export async function preflightSlotPorts(course: string): Promise<void> {
+  if (!course) return
+  let cfg
+  try {
+    cfg = loadConfig()
+  } catch {
+    return
+  }
+  const slot = slotOf(cfg, course)
+  const occupied: string[] = []
+  for (const kind of ['hub', 'metrics', 'push'] as const) {
+    const port = slotPort(cfg, course, kind)
+    if (await portListen(port)) occupied.push(`${kind}=${port}`)
+  }
+  if (occupied.length > 0) {
+    warn(
+      `[preflight] 课程 ${course}（槽位 ${slot}）端口已占用: ${occupied.join(' ')}` +
+        '——本课 hub 若未启动，可能是人工进程或槽位配错（config 的 courses 块）',
+    )
+  }
+  // allSlotPorts 是唯一的槽位端口清单（这里只用来提示总范围，便于人工排查）
+  void allSlotPorts(cfg)
 }
 
 interface ProcCmdline {
   pid: number
   name: string
   cmdline: string
+}
+
+/** 纯匹配谓词（可单测，不用真实进程表）：该命令行是否属于 (script, course) 的训练进程。
+ *
+ *  course 语义（S14/R3）：带课 → 只匹配 `--course[ =]<course>`（词边界，避免
+ *  `s1` 命中 `s10`）；不带课 → 只匹配**同样不带课**的命令行（不能把双课时代的
+ *  B 课进程当“旧调用”杀掉）。 */
+export function isTrainerFor(cmdline: string, script: string, course = ''): boolean {
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  if (!new RegExp(`(?<![A-Za-z0-9_])${esc(script)}(?![A-Za-z0-9_])`).test(cmdline)) return false
+  if (course) {
+    return new RegExp(`--course(?:=|\\s+)${esc(course)}(?![A-Za-z0-9._-])`).test(cmdline)
+  }
+  return !/--course(?:=|\s+)\S/.test(cmdline)
 }
 
 /** 进程命令行快照（Bun 原生尽力实现）：POSIX 读 /proc；Windows 用 wmic 单次调用
@@ -152,21 +226,22 @@ function listPythonProcesses(): ProcCmdline[] {
   return out
 }
 
-/** --kill-previous：按脚本名清杀上一轮训练进程。仅匹配 python* 进程、命令行含
- *  脚本名（词边界），排除自身/父进程。bun 在途局子进程不杀——自然结算落盘。 */
-export async function killPreviousTrainers(script: string): Promise<void> {
-  const pat = new RegExp(
-    `(?<![A-Za-z0-9_])${script.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9_])`,
-  )
+/** --kill-previous：清杀**本课（script, course）**上一轮训练进程。仅匹配 python*
+ *  进程、命令行含脚本名（词边界），排除自身/父进程。
+ *
+ *  course 匹配（plan S14/R3）：带课只杀 `--course[ =]X` 命中本课的进程；不带课只杀
+ *  同样不带课的老调用——重启 A 课绝不掐掉 B 课（多课时代的致命事故面）。
+ *  bun 在途局子进程不杀——自然结算落盘。 */
+export async function killPreviousTrainers(script: string, course = ''): Promise<void> {
   const procs = listPythonProcesses().filter(
     (p) =>
       p.pid !== process.pid &&
       p.pid !== process.ppid &&
       p.name.startsWith('python') &&
-      pat.test(p.cmdline),
+      isTrainerFor(p.cmdline, script, course),
   )
   if (procs.length === 0) {
-    log(`kill-previous: no previous trainer matched (${script})`)
+    log(`kill-previous: no previous trainer matched (${script}${course ? `, ${course}` : ''})`)
     return
   }
   for (const p of procs) {
@@ -221,7 +296,21 @@ export function launchTraining(opts: TrainOptions): TrainLaunchResult {
     process.exit(0)
   }
 
-  preflightTrainLoopLock(opts.force, script)
+  // 课程从透传参数 peek（不消费）；per-course 双锁预检 + 槽位端口提示。
+  // 课程名 `..`/越界字符在启动任何基础设施之前响亮拒启（plan §1.1 小问题 2）：
+  // 课程名会拼进锁文件名，上跳即写到目录外。
+  let course = ''
+  try {
+    course = validateCourseName(peekCourse(opts.scriptArgs))
+  } catch (e) {
+    fail(e instanceof Error ? e.message : String(e))
+    process.exit(2)
+  }
+  if (!course && opts.scriptArgs.some((a) => a === '--course' || a.startsWith('--course-'))) {
+    info('课程以路径/jsonc 形式给出——实例锁预检交给 python 侧（锁名由课程 name 决定）')
+  }
+  preflightCourseLocks(opts.force, script, course)
+  if (course) void preflightSlotPorts(course)
 
   // venv+torch（缺了委派 bootstrap.py；失败退出码 4 对齐旧启动器）
   if (!ensureVenv()) process.exit(4)
@@ -270,8 +359,8 @@ export function launchTraining(opts: TrainOptions): TrainLaunchResult {
     process.exit(1)
   }
 
-  // --kill-previous（排除自身/父进程；bun 在途局不杀）
-  if (opts.killPrevious) void killPreviousTrainers(script)
+  // --kill-previous（排除自身/父进程；bun 在途局不杀；只杀本课——S14/R3）
+  if (opts.killPrevious) void killPreviousTrainers(script, course)
 
   // Windows + 显式 --detach：分离启动（detached；日志按时间戳落盘）
   if (opts.detach) {
@@ -325,13 +414,17 @@ function usage(): void {
   训练组件的日常 启/停/冒烟/模式 管理走控制台 bun run train）。
 
   --script <name>.py   训练脚本（相对 nn-training/；缺省 train_loop.py；旧扁平名自动别名）
-  --force              跳过 train_loop.py 单实例锁检查
-  --kill-previous      按脚本名清杀上一轮训练进程
+  --force              跳过本课单实例锁检查（只接管本课锁，绝不跨课抢占）
+  --kill-previous      清杀本课上一轮训练进程（按 (script, --course) 匹配；
+                       不带 --course 只杀同样不带课的老进程）
   --detach             分离启动（后台隐藏窗口，stdout/stderr 落盘）
   --torch-threads N    torch 线程档（缺省 rl-config rl.torch_threads，再缺省 CPU 数）
   --check              校验 venv+torch 可用即退出（打印解释器路径）
   --echo               只打印将执行的命令，不执行
-  其余参数原样透传给训练脚本。`)
+  其余参数原样透传给训练脚本。
+
+  多课程并行：请总是带上 --course <name>（锁/日志/traj 均按课程隔离）；
+  不带 --course 的调用沿用旧全局锁 .run_rl.lock / .train_loop.lock。`)
 }
 
 /**

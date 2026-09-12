@@ -166,6 +166,55 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
+# ────────────────────────── per-course 锁路径（plan multi-course-parallel-training §1.2/§3.1） ──
+# 2026-09-12：单实例护栏本身不能删（2026-09-06 双 trainer 并行写同一 traj 的事故），
+# 但必须按**课程**实例化——否则第二门课程永远启不来。本文件是课程名 → 锁文件名的
+# 唯一归宿；TS 侧同构实现在 tools/training/slots.ts::lockName（两处必须同步）。
+
+_COURSE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def validate_course_name(course: str) -> str:
+    """课程名合法性（运行时命名空间 + 锁文件名的安全前提）。空串 = 无课程（合法）。
+
+    字符集与 `api.sanitizeViewCourse` 同约束，另禁 `..`——课程名会拼进文件名，
+    越界字符/上跳会直接把锁写到目录外（plan §1.1）。
+    """
+    c = str(course or "")
+    if not c:
+        return ""
+    if ".." in c or not _COURSE_NAME_RE.match(c):
+        raise ValueError(
+            f"课程名非法: {c!r}——只允许 [A-Za-z0-9._-] 且不含 '..'（plan §1.1）"
+        )
+    return c
+
+
+def course_lock_path(base_dir: str, course: str, kind: str) -> str:
+    """课程 → 锁文件路径：``.run_rl.<course>.lock`` / ``.train_loop.<course>.lock``。
+
+    course 为空时沿用旧全局文件名（``.run_rl.lock``）——无 ``--course`` 的老调用
+    默认行为零变化（plan §0.5-4）。
+    """
+    c = validate_course_name(course)
+    name = f".{kind}.{c}.lock" if c else f".{kind}.lock"
+    return os.path.join(base_dir, name)
+
+
+def course_key_from_path(course_path: str) -> str:
+    """课程文件路径 → 命名空间键（stem）：``curricula/s-dodge.jsonc`` → ``s-dodge``。
+
+    命名空间键是锁/账本/槽位/日志目录的统一键（plan §1.1：课程 = ``curricula/<name>.jsonc``；
+    与 TS 侧 ``slots.ts::slotOf/peekCourse`` 用的短名同一键）。课程文件**内部**的
+    ``name``（如 s-dodge.jsonc 里写 ``s-dodge-mix``）只是归属标注，不进命名空间。
+    空串 → ``""``（无课程，老调用）；非法 stem → ``ValueError``（响亮拒启）。
+    """
+    if not course_path:
+        return ""
+    stem = os.path.splitext(os.path.basename(course_path))[0]
+    return validate_course_name(stem)
+
+
 def _write_lock(lock_path: str) -> None:
     """Write our lock info: ``PID|EXE|START_TS``."""
     fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
@@ -196,7 +245,7 @@ def _read_lock(lock_path: str) -> tuple[int | None, str | None, int | None]:
         return None, None, None
 
 
-def acquire_lock(lock_path: str, *, force: bool = False) -> bool:
+def acquire_lock(lock_path: str, *, force: bool = False, tag: str = "train_loop") -> bool:
     """PID-file based single-instance lock with stale lock auto-cleanup.
 
     Lock file format: ``PID|EXE_PATH|START_TIMESTAMP`` (pipe-delimited).
@@ -204,6 +253,10 @@ def acquire_lock(lock_path: str, *, force: bool = False) -> bool:
 
     When *force* is True, any existing lock is broken regardless of
     whether the holder is alive (operator-initiated restart).
+
+    *tag* only names the holder in the contention message (default keeps the
+    historical train_loop wording); mechanics are identical for every caller —
+    there is exactly one lock implementation in this file.
     """
     # --- Force mode: destroy any existing lock first. ---
     if force:
@@ -225,7 +278,7 @@ def acquire_lock(lock_path: str, *, force: bool = False) -> bool:
     if old_pid is not None and _pid_alive(old_pid):
         exe_note = f" ({old_exe})" if old_exe else ""
         print(
-            f"[loop] another train_loop is running (PID {old_pid}{exe_note}); exiting.",
+            f"[loop] another {tag} is running (PID {old_pid}{exe_note}); exiting.",
             flush=True,
         )
         return False

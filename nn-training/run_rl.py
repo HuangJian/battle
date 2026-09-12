@@ -28,6 +28,12 @@ from rl.resume import (
     peak_entropy,  # noqa: F401 — F4 ENT 相对崩塌基线回读（§339），re-exported for tests
     resumed_manifests,  # noqa: F401 — re-exported for tests
 )
+from train.loop_util import (
+    acquire_lock,
+    cleanup_lock,
+    course_key_from_path,
+    course_lock_path,  # per-course 锁名（plan §1.2）
+)
 
 
 def update_kwargs(args, it: int, start_it: int, ref_model) -> dict:
@@ -205,6 +211,31 @@ def main() -> None:
         echo_config(args, course)
         log("[run_rl] --echo-config done — exit")
         return
+    # 多课程 P3-W2：--ppo remote 的 hub URL 按课程回填——`rl.remote_hubs[<stem>]` 优先，
+    # 单键 `rl.remote_hub_url` 回退（Q2；手工 notebook 路径照旧读单键）。course 在 parse
+    # 后才确定，argparse default 填不了，故在这里回填（apply_course 后、validate_args 前）。
+    # 显式 --remote-hub-url 优先（operator 意图压过配置）。
+    # 注：变量名 _hub_course_key（与锁段共用一次推导）；非法 stem 在此即响亮拒启。
+    try:
+        _hub_course_key = course_key_from_path(str(getattr(args, "course_path", "") or ""))
+    except ValueError as e:
+        raise SystemExit(f"[run_rl] {e}") from e
+    if _hub_course_key:
+        import dist_common as _dc_hub
+
+        _hubs = (((_dc_hub.load_dist_config() or {}).get("rl") or {}).get("remote_hubs") or {})
+        _per_course_hub = str(_hubs.get(_hub_course_key) or "")
+        if _per_course_hub:
+            _cli_dft = ap.parse_args([])
+            if str(getattr(args, "remote_hub_url", "") or "") == str(
+                getattr(_cli_dft, "remote_hub_url", "") or ""
+            ):
+                args.remote_hub_url = _per_course_hub
+                log(f"[run_rl] remote_hub_url <= remote_hubs[{_hub_course_key}]（课程隧道）")
+            else:
+                log(
+                    f"[run_rl] 显式 --remote-hub-url 压过 remote_hubs[{_hub_course_key}]（operator 意图优先）"
+                )
     # P1-3（2026-09-02）：启动期配置校验（互斥/范围 fail fast——此前这些错误
     # 要等训练中途才暴露）。课程覆盖后校验（课程值是单一事实来源）。
     # 远程模式（--ppo remote）的 stream/double-buffer 显式互斥判定需要区分
@@ -231,7 +262,22 @@ def main() -> None:
     # 2026-08-30 事故修复（用户指令）：节点的远控升级分支**永远用训练机当前分支**，
     # 不再读 rl-config 的 upgradeBranch（残留旧战役分支名曾把全部节点 reset 回
     # 31 个提交前的 intent-ai）。config 键仅作 push 失败时的最后回退。
-    ensure_current_branch_pushed(REPO_ROOT)  # side-effect: push current branch
+    # 并发 push 串行化（plan multi-course-parallel-training P1c F-C5）：.git 是双课
+    # 共享的，双 trainer 同时 `git push` 会顶成 non-fast-forward/锁竞争。repo 级
+    # O_EXCL 锁串行化（与单实例锁同一实现）；拿不到锁 → 响亮日志后跳过本次推送
+    # （节点沿用远端已有分支继续——§30 同步靠"至少一课 push 成功"维持）。
+    # 拒 --no-push 开关：静默不推比显式跳过更难排查。
+    _push_lock = str(REPO_ROOT / ".git_push.lock")
+    if acquire_lock(_push_lock, tag="git push"):
+        try:
+            ensure_current_branch_pushed(REPO_ROOT)  # side-effect: push current branch
+        finally:
+            cleanup_lock(_push_lock)
+    else:
+        log(
+            "[run_rl] WARN: 另一进程正在 git push（.git_push.lock 被占）——跳过本次"
+            "启动前推送，节点沿用远端已有分支；如远端长期无新提交请检查持锁进程"
+        )
     _current_branch = subprocess.run(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
         cwd=str(REPO_ROOT),
@@ -265,11 +311,25 @@ def main() -> None:
     # ===== 单实例锁（2026-09-06 事故：--kill-previous 漏杀 → 双 trainer 并行写同一
     # traj 7 分钟，it57-59 各被两遍训练/落账）===== 仅训练主循环持锁；collect-only
     # 预采子进程（spawn_collect_next 的子代）不参与竞争。双开 = 响亮拒启。
-    lock_path = str(Path(__file__).resolve().parent / ".run_rl.lock")
+    # 锁按课程实例化（plan multi-course-parallel-training §3.1）：双课各自持锁并行，
+    # 同课双开仍响亮拒启（2026-09-06 双 trainer 并行写同一 traj 事故的护栏不删，
+    # 只是文件按课程命名）；无 --course 的老调用沿用旧全局锁名（默认行为零变化）。
+    # 命名空间键 = 课程文件 stem（`--course s-dodge` → `s-dodge`）：与控制台课程选择/
+    # tmp/<course>/out 路径/TS launcher 的 peekCourse 同一键。课程文件内部的 `name`
+    #（如 s-dodge-mix）只是归属标注（S9 attribution），不进命名空间——否则两边锁
+    # 文件名对不上，preflight 与 kill 全部错位。键在 main 前部已推导（_hub_course_key，
+    # 与 remote_hubs 回填共用一次推导）。
+    try:
+        lock_path = course_lock_path(
+            str(Path(__file__).resolve().parent), _hub_course_key, "run_rl"
+        )
+    except ValueError as e:
+        raise SystemExit(f"[run_rl] {e}") from e
     if not _acquire_run_rl_lock(lock_path, force=bool(getattr(args, "force", False))):
         raise SystemExit(
-            "[run_rl] another run_rl is running (holder pid in nn-training/.run_rl.lock) "
-            "— refusing to start; kill the holder or pass --force to take over"
+            f"[run_rl] another run_rl is running for this course "
+            f"(holder pid in {lock_path}) — refusing to start; "
+            "kill the holder or pass --force to take over"
         )
     atexit.register(_cleanup_run_rl_lock, lock_path)
 

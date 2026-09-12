@@ -13,6 +13,7 @@ import { closeSync, mkdirSync, openSync } from 'fs'
 import path from 'path'
 import { CONFIG_PATH } from './paths'
 import { loadConfig } from './config'
+import { allSlotPorts, hubBasePort } from './slots'
 import { clearRegistry, registryComponents } from './registry'
 import { killPid, pidAlive, portListen, waitUntil } from './net'
 import { info, log, ok, warn } from './log'
@@ -87,15 +88,16 @@ export async function stopAllManaged(): Promise<void> {
   const entries = registryComponents()
   let attempted = 0
   await Promise.all(
-    entries.map(async ([name, entry]) => {
+    entries.map(async ({ key: name, course, entry }) => {
       attempted++
+      const tag = `${name}${course ? `[${course}]` : ''}`
       if (!pidAlive(entry.pid)) {
-        info(`${name} (PID ${entry.pid}) 已不在运行`)
+        info(`${tag} (PID ${entry.pid}) 已不在运行`)
         return
       }
       const dead = await killPid(entry.pid)
-      if (dead) ok(`${name} (PID ${entry.pid}) 已停止`)
-      else warn(`${name} (PID ${entry.pid}) 未能停止`)
+      if (dead) ok(`${tag} (PID ${entry.pid}) 已停止`)
+      else warn(`${tag} (PID ${entry.pid}) 未能停止`)
     }),
   )
   clearRegistry()
@@ -109,7 +111,9 @@ export async function stopAllManaged(): Promise<void> {
     /* no config — skip port sweep */
   }
   if (config) {
-    for (const port of [config.rl.hub_port, config.rl.agent_port]) {
+    // 全部槽位端口（slot0–3 × hub/metrics/push）+ agent：多课时代按单槽扫会漏掉别课。
+    const ports = allSlotPorts(config)
+    for (const port of ports) {
       for (const pid of portOwnerPids(port)) {
         if (pid === process.pid) continue
         await killPid(pid)
@@ -118,8 +122,10 @@ export async function stopAllManaged(): Promise<void> {
     }
     // 端口释放以探测为准，不做固定等待
     const freed = await waitUntil(
-      async () =>
-        !(await portListen(config!.rl.hub_port)) && !(await portListen(config!.rl.agent_port)),
+      async () => {
+        const busy = await Promise.all(ports.map((p) => portListen(p)))
+        return !busy.some(Boolean)
+      },
       5000,
       300,
     )
@@ -127,7 +133,7 @@ export async function stopAllManaged(): Promise<void> {
       ok('所有端口已释放')
     } else {
       warn(
-        `仍有端口占用: hub=${config.rl.hub_port} agent=${config.rl.agent_port}（终止失败或权限不足，请手动排查）`,
+        `仍有端口占用: hub=${hubBasePort(config)}+slot… agent=${config.rl.agent_port}（终止失败或权限不足，请手动排查）`,
       )
     }
   }

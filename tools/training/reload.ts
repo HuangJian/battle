@@ -69,10 +69,14 @@ export function createSupervisor(
   let running = true
   let ticking = false
 
+  /** 监督键 = (key, course)——多课程下同一组件有多份进程，按 key 单键会互相顶掉。 */
+  const watchKeyOf = (spec: ProcSpec): string => `${spec.key}|${spec.course ?? ''}`
+
   function watch(spec: ProcSpec, pid: number): void {
     const last = new Map<string, Snap | null>()
     for (const f of spec.sentinels) last.set(f, snap(f))
-    watches.set(spec.key, { spec, pid, last, restarts: watches.get(spec.key)?.restarts ?? 0 })
+    const wkey = watchKeyOf(spec)
+    watches.set(wkey, { spec, pid, last, restarts: watches.get(wkey)?.restarts ?? 0 })
   }
 
   /** 一轮检测：哨兵变化 → 重启。 */

@@ -72,6 +72,7 @@ from train.loop_util import (
     acquire_lock,
     auto_export_corpus,
     cleanup_lock,
+    course_lock_path,
     heartbeat,
     parse_val_loss_from_output,  # noqa: F401 — re-exported（tests 引用）
 )
@@ -110,9 +111,18 @@ def main() -> None:
         "which hangs this training (workers fail to start); keep 0 on Windows.",
     )
     ap.add_argument(
+        "--course",
+        default="",
+        help="Course name — scopes the single-instance lock to .train_loop.<course>.lock "
+        "(multi-course parallel training). Pass the curriculum short name "
+        "(same spelling as run_rl.py --course, e.g. s-dodge — NOT the inner "
+        "`name` field inside the jsonc). Empty = legacy global .train_loop.lock.",
+    )
+    ap.add_argument(
         "--force",
         action="store_true",
-        help="Break any existing lock and start (for manual restart after a crash).",
+        help="Break any existing lock and start (for manual restart after a crash). "
+        "Takes over THIS course's lock only.",
     )
     ap.add_argument(
         "--no-auto-export",
@@ -126,7 +136,15 @@ def main() -> None:
     # Single-instance guard: PID-file based, stale-lock auto-cleanup.
     # Anchor the lock to the SCRIPT directory (HERE), NOT to cwd-relative
     # args.weights_dir — the launcher may dispatch from different working dirs.
-    lock_path = os.path.join(HERE, ".train_loop.lock")
+    # Per-course (2026-09-12, plan multi-course-parallel-training §3.1): the guard
+    # stays (2026-09-06 double-trainer事故护栏) but the file name is course-keyed, so
+    # two courses can run side by side while a same-course double start is still
+    # loudly refused. No --course → legacy .train_loop.lock (zero behavior change).
+    try:
+        lock_path = course_lock_path(HERE, str(args.course or ""), "train_loop")
+    except ValueError as e:
+        print(f"[loop] {e}", flush=True)
+        sys.exit(2)
     if not acquire_lock(lock_path, force=args.force):
         sys.exit(0)
     atexit.register(cleanup_lock, lock_path)
