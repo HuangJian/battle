@@ -471,7 +471,7 @@ export function compareSeedMaps(
   }
 }
 
-/** 配对裁判（只读哨子，不进门判）：最新 eval vs 开腿首轮 / vs 上一 eval 轮。
+/** 配对裁判（只读哨子，不进门判）：最新 eval vs it0 基线（bc 权重）/ vs 上一 eval 轮。
  *
  * 同 (stage,seed) 逐局配对，比较的是同一语料下两个 checkpoint 的贪心胜负——
  * 跨语料（bc 在 0-99 vs 新权重在 860001+）时差分把卷面难度抵消掉。一边缺席的
@@ -481,7 +481,8 @@ export function readPairedReferee(trajDir: string): PairedReferee | null {
   const iters = [...byIter.keys()].sort((a, b) => a - b)
   if (iters.length === 0) return null
   const latest = iters[iters.length - 1]
-  const first = iters[0]
+  // 开腿基准同上：优先 it0（bc 权重基线），无则退回首个 eval 轮。
+  const first = iters.includes(0) ? 0 : iters[0]
   const get = (it: number): Map<string, boolean> => byIter.get(it) ?? new Map<string, boolean>()
   const vsFirst = first === latest ? null : compareSeedMaps(get(first), get(latest), first, latest)
   const vsPrev =
@@ -513,7 +514,10 @@ export function readIterMetrics(trajDir: string): { rows: IterRow[] } {
   // 逐轮 vs 开腿配对：同趟扫描的副产品，每轮 evalData 自带（表格配对列的数据源）。
   const evalWins = readEvalGameWins(trajDir)
   const evalIters = [...evalWins.keys()].sort((a, b) => a - b)
-  const evalBaseline = evalIters.length > 0 ? evalIters[0] : null
+  // 配对基线 = it0（课程 bc 权重的干净评估，trainer 在本 run 首次 rollout 收官后补派）
+  // ——恒定、跨腿可比。无 it0 时退回首个 eval 轮（兼容 it0 上线前已跑完的腿）：
+  // "首条 eval" 会随 run 起点漂移（resume 时首条可能是 it50，配对比的是中途两点）。
+  const evalBaseline = evalIters.length === 0 ? null : evalIters.includes(0) ? 0 : evalIters[0]
   const pairedByIter = new Map<number, PairedCompare | null>()
   if (evalBaseline !== null) {
     for (const it of evalIters) {
@@ -610,6 +614,40 @@ export function readIterMetrics(trajDir: string): { rows: IterRow[] } {
     for (const r of rows) byIter.set(r.iter, r)
     const merged = [...byIter.values()]
     merged.sort((a, b) => b.iter - a.iter)
+    // it0 基线行（bc 权重评估）：它没有 rollout 采样、只有干净评估 ⇒ 合成一行；
+    // rollout 派生字段一律 NaN（趋势图的缺口约定——写成 0 会在图上多画一个假零点）。
+    // 表格只在 eval 子行渲染它（MetricsTable.buildRows 跳过 iter<=0 的主行）。
+    // 必须先有 ≥1 条真实 iteration 行才合成：否则 latestRow 会把基线当成"最新轮"。
+    const base0 = evalSummaries.get(0)
+    if (base0 && merged.some((r) => r.iter > 0) && !merged.some((r) => r.iter === 0)) {
+      merged.push({
+        iter: 0,
+        time: base0.time,
+        winRate: Number.NaN,
+        scoreMean: Number.NaN,
+        scoreStd: Number.NaN,
+        samples: 0,
+        rolloutSec: 0,
+        ppoSec: 0,
+        kl: Number.NaN,
+        entropy: Number.NaN,
+        policyLoss: Number.NaN,
+        valueLoss: Number.NaN,
+        meanRet: Number.NaN,
+        lr: 0,
+        expectedGames: 0,
+        halted: false,
+        topDims: '',
+        avgTicks: 0,
+        accuracy: Number.NaN,
+        loot: Number.NaN,
+        kills: Number.NaN,
+        actuals: null,
+        // 基线自己：vs 自己不判（pairedVsFirst = null → UI 标"基线"）
+        evalData: withPaired(base0, null),
+      })
+      merged.sort((a, b) => b.iter - a.iter)
+    }
     if (cacheDirty) saveActualsCache(trajDir, actualsCache)
     return { rows: merged.slice(0, MAX) }
   } catch {

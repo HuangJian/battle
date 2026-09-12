@@ -19,6 +19,7 @@ import dist_common
 
 # 同 queue.py：Windows 下隐藏本地评估子进程的控制台窗口（避免反复弹黑窗抢焦点）。
 from rl.eval_local import (
+    BASELINE_EVAL_ITER,
     EVAL_ITER_SUFFIX,
     EVAL_LOCAL_RELEASE_GRACE,
     EVAL_LOCAL_SLOTS_DEFAULT,
@@ -58,6 +59,7 @@ class EvalDispatcher:
         it: int,
         rollout_winrate: float | None = None,
         local_gate: threading.Event | None = None,
+        baseline: bool = False,
     ) -> None:
         self.bun = bun
         self.rl_path = rl_path
@@ -68,6 +70,9 @@ class EvalDispatcher:
         self.it = it
         self.rollout_winrate = rollout_winrate
         self.local_gate = local_gate
+        #: it0 基线模式：`rl_path` 是课程 bc 权重、`it` 是 0；已评估账本按 iter 去重
+        #: （见 eval_done_keys 的 iter_filter），不与 A-eval 共用 wver 键发生互吞。
+        self.baseline = baseline
 
     def run(self) -> None:
         """原 dispatch_eval_round 主体：run() 内局部别名，行为逐字节不变。"""
@@ -80,6 +85,7 @@ class EvalDispatcher:
         it = self.it
         rollout_winrate = self.rollout_winrate
         local_gate = self.local_gate
+        baseline = self.baseline
         try:
             policy = cfg.get("policy", {})
             status_timeout = float(policy.get("statusTimeoutSec", 3))
@@ -107,20 +113,38 @@ class EvalDispatcher:
             pairs = [(s, sd) for s in eval_stages for sd in EVAL_SEEDS[:n_seeds]]
             if not pairs:
                 return
-            todo = [p for p in pairs if p not in eval_done_keys(eval_jsonl, key16)]
+            # it0 基线：账本按 iter 隔离（baseline 行的 iter 恒 0），否则同指纹的
+            # A-eval 行会把基线局算成"已评估"——it0 行永远不落盘、控制台退回旧基准。
+            # A-eval 反向同理：min_iter=1 把 it0 基线行挡在 A-eval 去重外（bc 与
+            # it1 的 args.out 指纹偶同时，it1 的 A-eval 不得被 it0 行整轮跳过）。
+            done = (
+                eval_done_keys(eval_jsonl, key16, BASELINE_EVAL_ITER)
+                if baseline
+                else eval_done_keys(eval_jsonl, key16, min_iter=1)
+            )
+            todo = [p for p in pairs if p not in done]
             if not todo:
-                log(f"[eval] it{it}: wver={key16[:12]}… already evaluated — skip")
+                log(
+                    f"[eval] it{it}: wver={key16[:12]}… already evaluated — skip"
+                    + ("（it0 基线）" if baseline else "")
+                )
                 return
             t_eval_start = time.time()
 
             # 本地参与前提：冻结权重快照。主循环在 PPO 收尾后会原地覆盖 rl_path，
             # 本地局必须读派发时刻的 W(N)——赌时序读新权重 = 对账灾难。
+            # 快照文件按评估流分流：it0 基线与 A-eval 可并发（基线落账前的重试轮
+            # 撞上 eval 轮），同盘同名会互相覆写、后启动的本地局读到错权重。
             snapshot_path: str | None = None
             local_slots = max(0, int(policy.get("evalLocalSlots", EVAL_LOCAL_SLOTS_DEFAULT)))
             if local_gate is not None and local_slots > 0:
                 try:
                     traj_dir.mkdir(parents=True, exist_ok=True)
-                    snap = traj_dir / "_eval_frozen_weights.json"
+                    snap = traj_dir / (
+                        "_eval_frozen_weights-baseline.json"
+                        if baseline
+                        else "_eval_frozen_weights.json"
+                    )
                     shutil.copyfile(rl_path, snap)
                     snapshot_path = str(snap)
                 except OSError as e:
@@ -207,8 +231,9 @@ class EvalDispatcher:
             )
             log(
                 f"[eval] it{it}: dispatch {total} greedy games "
-                f"(corpus={len(pairs)}, done={len(pairs) - total}) -> "
-                f"{[(n['id'], n['c']) for n in nodes_ok]}"
+                f"(corpus={len(pairs)}, done={len(pairs) - total})"
+                + (" [it0 基线 · bc 权重]" if baseline else "")
+                + f" -> {[(n['id'], n['c']) for n in nodes_ok]}"
                 + (f" [local tail-reserved ×{reserved}]" if reserved else "")
             )
 
@@ -528,6 +553,7 @@ def dispatch_eval_round(
     it: int,
     rollout_winrate: float | None = None,
     local_gate: threading.Event | None = None,
+    baseline: bool = False,
 ) -> None:
     """固定语料干净评估（阻塞版，调用方放后台线程跑）。任何失败只记日志，绝不抛出。
 
@@ -535,7 +561,7 @@ def dispatch_eval_round(
     runner 的 monkeypatch 需落在本模块全局名上，见 tests/test_run_rl.py）。
     """
     EvalDispatcher(
-        bun, rl_path, traj_dir, args, cfg, iter_id, it, rollout_winrate, local_gate
+        bun, rl_path, traj_dir, args, cfg, iter_id, it, rollout_winrate, local_gate, baseline
     ).run()
 
 
@@ -549,12 +575,13 @@ def dispatch_eval_bg(
     it: int,
     rollout_winrate: float | None = None,
     local_gate: threading.Event | None = None,
+    baseline: bool = False,
 ) -> threading.Thread:
     t_ = threading.Thread(
         target=dispatch_eval_round,
-        args=(bun, rl_path, traj_dir, args, cfg, iter_id, it, rollout_winrate, local_gate),
+        args=(bun, rl_path, traj_dir, args, cfg, iter_id, it, rollout_winrate, local_gate, baseline),
         daemon=True,
-        name=f"eval-it{it}",
+        name=f"eval-it{it}" + ("-baseline" if baseline else ""),
     )
     t_.start()
     return t_

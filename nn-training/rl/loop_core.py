@@ -171,6 +171,11 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         self._stream_meta: dict | None = None
         self._eval_thread: threading.Thread | None = None
         self._eval_gate: threading.Event | None = None
+        # it0 基线评估（bc 权重）：rollout 收官后派发、落账前每轮重试（见
+        # _maybe_dispatch_baseline_eval）。线程只作在飞守卫，不参与 join；
+        # _baseline_landed_wver = 已落账基线的权重指纹（命中即不再派）。
+        self._baseline_eval_thread: threading.Thread | None = None
+        self._baseline_landed_wver: str | None = None
         # EvalBoard idle 窗（2026-09-11 用户）：置位 = 可派 B/C 批；清位 = yield 给 rollout。
         # 与 A-eval 轮解耦——训练不在 rollout/eval 时才领取队列。
         self._eb_window = threading.Event()
@@ -231,6 +236,8 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 # yield：rollout 抢占集群 —— 关 evalboard 窗，在途 B/C 局停派新 seed。
                 self._evalboard_yield()
                 self._rollout_phase(it, pairs, dist_cfg, self._eval_on_round(it))
+                # it0 基线（bc 权重）：rollout 收官后派发，落账前每轮重试（2026-09-12 用户）
+                self._maybe_dispatch_baseline_eval(dist_cfg)
                 self._log_report(it, t_rollout)
                 # idle：采集已收官，PPO（本地/远端等待）期间集群空闲 —— 立即领批。
                 # 不能等到 join_eval 之后：remote PPO 可阻塞数十分钟，那时才开窗等于永假。
@@ -605,6 +612,93 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 and (not self._eval_at_set or it in self._eval_at_set)
             )
         return it in self._eval_at_set
+
+    def _baseline_eval_weights(self, dist_cfg: dict | None) -> str | None:
+        """it0 基线可用的 bc 权重路径；前置条件不足返回 None（纯判断，零副作用）。
+
+        条件：per-tick 课程 / 有课程上下文 / in-loop eval 已开启 / dist 有 enabled
+        节点（`nodes=[]` 的纯本地路径本就不派 A-eval）/ bc 权重文件在盘上。
+        """
+        args = self.args
+        if args.mode != "per-tick":
+            return None
+        if getattr(args, "course_obj", None) is None:
+            return None
+        if int(getattr(args, "eval_games_per_stage", 0) or 0) <= 0:
+            return None
+        if self._eval_every <= 0:
+            return None
+        nodes = (dist_cfg or {}).get("nodes") or []
+        if not any(n.get("enabled", True) for n in nodes):
+            return None
+        bc = str(getattr(args, "bc", "") or "")
+        if not bc or not Path(bc).exists():
+            return None
+        return bc
+
+    def _maybe_dispatch_baseline_eval(self, dist_cfg: dict | None) -> None:
+        """it0 基线评估（bc 权重）——rollout 收官后派发，**落账前每轮重试**。
+
+        为什么（2026-09-12 用户）：in-loop eval 的配对基准此前恒取日志里**第一条**
+        eval 行，而那条基准随 run 起点漂移（resume 时首条可能是 it50，配对比的是
+        中途两点，不是"学会了多少"）。改为恒定补一条 it0 = 课程 bc 权重的干净评估：
+        跨腿可比，且与 `gates.baseline_win_rate` 同口径。
+
+        重试语义（2026-09-13 评审修订）：只要 eval_log 里尚无**同 bc 指纹**的 it0
+        summary（`baseline_summary_landed`），每轮 rollout 收官后都尝试派发——首次
+        派发撞上节点瞬时全挂/权重 POST 全失败时（EvalDispatcher 只记日志跳过），
+        下一轮自动补派，而不是等进程重启。落账即停（wver 缓存于
+        `_baseline_landed_wver`）；summary 带 dropped 也算落账（缺口在控制台诚实
+        显示为「缺N」，不为填缺口无限重跑失败局）。
+
+        本地参与：复用当轮 `self._eval_gate`（与 A-eval 同一把门，PPO 收官
+        `_join_eval` 置位）——基线本地局与 A-eval 一样让位 PPO，且快照文件名按流
+        分流（eval_dispatch 侧），并发重试轮不互相覆写。
+
+        幂等：在飞线程即跳过；跨重启/重试由 `iter == 0` 的已评估键去重，只补缺口。
+        失败绝不抛出——基线是观测设施，不得拖垮训练主线。
+        """
+        t_prev = self._baseline_eval_thread
+        if t_prev is not None and t_prev.is_alive():
+            return
+        try:
+            bc = self._baseline_eval_weights(dist_cfg)
+            if bc is None:
+                return
+            from rl.eval_local import baseline_summary_landed
+
+            try:
+                wver16 = dist_common.weights_fingerprint(bc)[:16]
+            except OSError:
+                return  # bc 读不了（检查后被删？）：不派，派发侧同样会失败
+            if wver16 == self._baseline_landed_wver:
+                return
+            if baseline_summary_landed(self._traj_dir, wver16):
+                self._baseline_landed_wver = wver16
+                return
+            from rl.eval_dispatch import dispatch_eval_bg
+            from rl.eval_local import BASELINE_EVAL_ITER
+
+            self._baseline_eval_thread = dispatch_eval_bg(
+                self.bun,
+                bc,
+                self._traj_dir,
+                self.args,
+                dist_cfg or {},
+                iter_id=f"{RUN_ID}.{BASELINE_EVAL_ITER}",
+                it=BASELINE_EVAL_ITER,
+                local_gate=self._eval_gate,
+                baseline=True,
+            )
+            log(
+                f"[eval] it0 baseline dispatched（bc 权重：{bc}）——"
+                "落账前每轮重试，结果见后续 [eval] 行"
+            )
+        except Exception as e:  # 基线派发失败不影响训练
+            log(
+                f"[eval] WARN it0 baseline dispatch failed (non-fatal): "
+                f"{type(e).__name__}: {e}"
+            )
 
     def _prepare_iter_dir(self, it: int) -> None:
         """rollout/ppo_backend 断点感知：若该迭代已有 wver 匹配的完整 shard（中途崩过），

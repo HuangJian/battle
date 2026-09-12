@@ -5,6 +5,40 @@
 
 ---
 
+## §29 it0 基线评审修订：重试语义 + 账本双向隔离 + Hero NaN 行（2026-09-13 评审）
+
+对 §28 的 staged 实现做评审后发现三处问题，本条为修复记录（评审 + 修复同一批完成）。
+
+**问题与修法**
+
+- **P1（鲁棒性）基线派发是「单次尝试 + 纯远端」**：原实现只在 `it == _start_it` 派一次且不传 `local_gate`——`EvalDispatcher` 无 gate 时不建权重快照、不启本地 worker（纯远端），若首派时刻节点瞬时全挂/权重 POST 全失败，只记日志跳过，进程内永不重试（docstring 的「失败重试轮」只有跨重启才成立）。改为**落账前每轮重试**：`baseline_summary_landed(traj_dir, wver16)`（eval_local）查 eval_log 是否已有**同 bc 指纹**的 `iter=0` summary，未落账则每轮 rollout 收官后重派，账本去重保证重试只补缺口；落账 wver 缓存于 `_baseline_landed_wver`（bc 换文件 → 新指纹 → 重派新基线）。同时复用当轮 `self._eval_gate`（与 A-eval 同一把门，`_join_eval` PPO 收官置位）——基线本地局与 A-eval 一样让位 PPO；快照文件按流分流（`_eval_frozen_weights-baseline.json`），基线与 A-eval 并发重试轮不互相覆写快照（覆写会让 A-eval 本地局读错权重）。summary 带 `dropped` 也算落账：缺口在控制台诚实显示「缺N」，不为填缺口无限重跑失败局。
+- **P2（潜伏）账本互吞只防了单方向**：基线账本按 `iter==0` 隔离了「A-eval 行吞基线」，但 A-eval 账本仍无过滤——若 bc 与 it1 的 `args.out` 指纹偶同（手动拷贝 bc 为 `--out` 启动等路径），it1 中途崩溃重启后 A-eval 会被同 wver 的 it0 行整轮跳过。`eval_done_keys` 新增 `min_iter` 参数：A-eval 传 `min_iter=1`，把 int iter<1 的行挡在去重外；缺 `iter` 的旧行与同 wver 跨 iter 复用（零梯度轮 args.out 未变 → 下轮免重评）照旧保留。顺带发现 **B/C evalboard 行与 A-eval 同册同 `event:"eval"`**（batch_eval 写 `source:"B"/"C"`，畸形批的 iter 缺省还是 0）——基线账本额外排除带 `source` 字段的行，B/C 局不得被当成基线已评估。
+- **P3（用户可见 UI）Hero 主表漏入 it0 合成行**：`MetricsTable.buildRows` 有 `iter>0` 守卫，但 Hero「最新 6 轮完整指标」是另一套渲染（`[...iters].sort(desc).slice(0,6)`），腿的前 ~5 轮 it0 必进前 6——合成行的 NaN 字段直接渲染成红色 "NaN%" 徽章、"NaN" 单元格（`fmtPct(NaN)` 只判 `typeof number`）。抽纯函数 `heroMainRows(iters)`（view.ts：过滤 iter>0、倒序、截 6）供 Hero 使用，测试三例钉死。
+- **nit**：显式 `--start-it 0` 会与基线的 dist 键空间 `{runId}.0` 撞键（采集/A-eval 任务键 = `{runId}.{it}`）——`validate_args` 启动期拒绝 `<1`；Hero 配对裁判文案 `vs开腿itN` 在 baseIter=0 时改为 `vs bc基线`（it0 是训练前基准，不是开腿首轮）。
+
+**验证**：`test_baseline_eval.py` 重写派发语义测试（落账前重试/在飞跳过/local_gate 复用钉死/落账停/bc 换文件重派）+ `eval_done_keys` 双向隔离（含 B/C source 行与缺 iter 旧行）+ `baseline_summary_landed` 直测 + `--start-it 0` 启动期拒绝；`console-paired.test.ts` 新增 `heroMainRows` 三例（it0 排除/截 6/端到端合成行进不了主表行集）。`bun run check` 绿（2028 pass）；nn-python-gate（ruff + mypy 145 文件 + pytest 全量）绿。
+
+**遗留（未修，已评级）**：console `readEvalGameWins` 仍按 iter 合并 B/C 行（iter≥1 的既有口径，B/C 批恰与 A-eval 同 iter 时配对图混源）——影响面在 evalboard 触发路径，与基线无涉，留作后续单独处理。
+
+---
+
+## §28 it0 bc 权重基线评估：配对基准不再随 run 起点漂移（2026-09-12，用户指令）
+
+**症状**：控制台的 in-loop eval 配对基准恒取 `eval_log.jsonl` 里**第一条** eval 行（`console/iters.ts` 的 `evalIters[0]`）。那条基准随 run 起点漂移：resume 时首条可能是 it50，于是 `vs开腿it50` 实际比的是中途两点，而不是「从起点学会了多少」。
+
+**改法（纯增量，训练侧与 console 两侧）**
+
+- **训练侧**（`rl/loop_core.py::_maybe_dispatch_baseline_eval`）：在本 run **首次 rollout 收官后**（`it == _start_it`；全新腿 = it1）立刻用课程 `args.bc` 派一条 `iter=0` 的干净评估作恒定基线。守卫 `_baseline_eval_weights`：per-tick / 有课程 / `eval_games_per_stage>0` / `eval_every>0` / 有 enabled dist 节点（`nodes=[]` 纯本地路径本就不派 A-eval）/ bc 文件在盘；幂等（在飞跳过 + 跨重启按 `iter==0` 去重）；**失败自吞**（基线是观测设施，不得拖垮主线）。课程默认 `eval_every>1`（c6-bonus=5）⇒ 该轮本无 A-eval，**零重复计算**。
+- **`eval_done_keys` 新增 `iter_filter`**（`rl/eval_local.py`）：it0 的已评估账本按 `iter==0` 隔离。必须如此——bc 与 it1 的 `args.out` 指纹**可能相同**（it1 就是 PPO 前的 bc 初始化权重），只按 wver 去重会让 it1 的 A-eval 把基线局吞成「已评估」，it0 行永远不落盘。`dispatch_eval_round/bg` 与 `EvalDispatcher` 加尾参 `baseline=False`；it0 用独立 `iter_id = {runId}.0`（与 A-eval 的 `{runId}.N` 在 agent 结果缓存里键空间隔离）。
+- **门判据排除 it0**（`gate_check.read_trend_rows`）：`iter <= 0` 的 summary 不进趋势（用户定案：只当监控/配对基线）。否则会虚增 sustain 的「连续通过」计数、把 plateau 的上升趋势起点拉回 PPO 前。缺 `iter` 字段的旧行照旧保留（不过度收口）。
+- **Console**（`console/iters.ts`）：配对基线改为「有 it0 取 0，否则退回首个 eval 轮」（老腿逐字节兼容）；`readIterMetrics` 在有 ≥1 条真实 iteration 行时合成一条 it0 行（只有 `evalData`，rollout 派生字段一律 `NaN` —— 趋势图的缺口约定，写 0 会在图上多画一个假零点）；`MetricsTable.buildRows` 跳过 `iter<=0` 的主行，只出 eval 子行（UI 标「基线」）。
+
+**验证**：`tests/test_baseline_eval.py`（新，6 例：iter 隔离 / 守卫逐条反证 / 只在 `_start_it` 派一次 / 失败不抛 / **端到端** baseline 派发把逐局行与 summary 都写成 `iter=0` 且预置同 wver 的 it1 行不吞它 / 幂等）+ `tests/console-paired.test.ts`（新增 3 例：it0 为开腿基准、无 it0 退回首个 eval 轮、合成行与老腿兼容）+ `test_gate_check.py` 的 `read_trend_rows` 过滤。门禁：nn-python-gate（ruff + mypy 145 文件 + pytest 全量）绿；`bun run check` / `bun run build` 绿。
+
+**遗留**：`eval_every == 1` 的课程在 it1 既有 A-eval 又有 it0 基线（测的是同一套 PPO 前权重）⇒ 会多跑一遍语料（账本按 iter 隔离，it0 行仍落盘）；本腿 c6-bonus 为 `eval_every=5`，不受影响。
+
+---
+
 ## §27 metrics v5（`clearTick`）+ outcome 虚拟符号：修复加列只改了一半（2026-09-12）
 
 **背景**：c6-bonus 修「清场后 BONUS TIME 窗口被 max_ticks 截断 ⇒ 歼灭局吃 `terminal.timeout=−2`」需要两个新能力：指标列 `clearTick`（idx30，哨兵 −1）与公式可访问 outcome（虚拟符号 `is_timeout` 等，不占列）。设计侧验证通过：`wClear=4.0` + `wBonusTicks=600` 让「清场+超时」与 `stage_clear` 总回报相等（实测两边均 −14.0）。

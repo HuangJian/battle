@@ -218,6 +218,14 @@ def validate_args(args) -> None:
                 "[run_rl] kickstart_ref 要求 warmup_iters=0（缰绳 it1 必须生效；"
                 f"当前 {getattr(args, 'warmup_iters', 1)} 会让首轮系数归零）"
             )
+    # ===== it0 键空间保留给 bc 权重基线评估（2026-09-12 用户）：采集/A-eval 的
+    # dist 任务键 = {runId}.{it}，显式 --start-it 0 会与基线的 {runId}.0 撞键
+    # （权重互覆、任务互吞）。auto 路径（日志末迭代+1）天然 ≥ 1，无需处理。=====
+    if getattr(args, "start_it", None) is not None and int(args.start_it) < 1:
+        raise SystemExit(
+            "[run_rl] --start-it 必须 ≥ 1（0 保留给 it0 bc 基线评估的 dist 键空间）："
+            f"{args.start_it}"
+        )
 
 
 # ================================================================== 课程配置

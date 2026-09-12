@@ -6,6 +6,7 @@ import {
   filterGroups,
   fmtPaired,
   fmtPct,
+  heroMainRows,
   iterGroups,
   klTone,
   latestRow,
@@ -128,7 +129,15 @@ function PairedRefereeLine({ ref }: { ref: PairedReferee | null | undefined }) {
     <div className="tc-muted tc-small" title={title} style={{ marginBottom: 4 }} role="status">
       配对裁判（贪心同卷）
       {ref.vsFirst ? (
-        <span> · {fmtPaired(ref.vsFirst, `vs开腿it${ref.vsFirst.baseIter}`)}</span>
+        <span>
+          {' '}
+          ·{' '}
+          {fmtPaired(
+            ref.vsFirst,
+            // it0 = 训练前 bc 权重基线（不是开腿首轮）——文案分开，防止误读成中途两点
+            ref.vsFirst.baseIter === 0 ? 'vs bc基线' : `vs开腿it${ref.vsFirst.baseIter}`,
+          )}
+        </span>
       ) : null}
       {ref.vsPrev ? (
         <span> · {fmtPaired(ref.vsPrev, `vs上一轮it${ref.vsPrev.baseIter}`)}</span>
@@ -538,7 +547,7 @@ function LastIters({
     })
   }
 
-  const mains = [...iters].sort((a, b) => b.iter - a.iter).slice(0, 6)
+  const mains = heroMainRows(iters)
   if (mains.length === 0) return null
   const ev = view === 'eval'
   const n = ev ? filterGroups(iterGroups(iters), 'eval').length : mains.length

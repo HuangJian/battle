@@ -1106,6 +1106,17 @@ export function filterGroups(
   return groups.filter((g) => g.eval === null)
 }
 
+/** Hero「最新 6 轮完整指标」主表行：真实迭代（iter>0）倒序前 6。
+ *  it0 合成行（bc 权重基线，console/iters.ts 合成）只有干净评估，rollout 派生字段是
+ *  NaN 缺口——主表单元格直接 `.toFixed()` 会渲染出 "NaN" 垃圾行，故只收真实迭代
+ *  （eval 视图与 MetricsTable 各自已处理 it0：前者只渲染 eval 子行，后者跳过主行）。 */
+export function heroMainRows(iters: IterRow[]): IterRow[] {
+  return iters
+    .filter((r) => r.iter > 0)
+    .sort((a, b) => b.iter - a.iter)
+    .slice(0, 6)
+}
+
 // ────────────────────────── 纯函数：通用排序 / 过滤 ──────────────────────────
 
 export type SortDir = 'asc' | 'desc'

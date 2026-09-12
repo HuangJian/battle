@@ -35,7 +35,10 @@ type MetricRow =
 function buildRows(rows: IterRow[], mode: IterFilter): MetricRow[] {
   const out: MetricRow[] = []
   for (const g of filterGroups(iterGroups(rows), mode)) {
-    if (mode !== 'eval') out.push({ kind: 'main', iter: g.iter, time: g.main.time, main: g.main })
+    // it0 = bc 权重基线（训练前）：只有干净评估、没有 rollout 采样，不渲染主行
+    // （合成行在 console/iters.ts；rollout 派生字段是 NaN 缺口，不是 0）。
+    if (mode !== 'eval' && g.iter > 0)
+      out.push({ kind: 'main', iter: g.iter, time: g.main.time, main: g.main })
     if (mode !== 'rollout' && g.eval)
       out.push({ kind: 'eval', iter: g.iter, time: g.eval.time, eval: g.eval })
   }

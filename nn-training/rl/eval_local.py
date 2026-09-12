@@ -27,6 +27,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]  # 仓库根 battle2（rl/ 上�
 # 14%）。消费方一律 EVAL_SEEDS[:n_seeds] 前缀切片，前缀不变 = 旧口径逐字节兼容。
 EVAL_SEEDS = tuple(range(860001, 860101))
 EVAL_ITER_SUFFIX = "ev"  # eval iterId = {runId}.{it}ev → 与采集任务在 agent 结果缓存中键空间隔离
+# it0 基线评估（2026-09-12 用户）：in-loop eval 的配对基准恒为课程 bc 权重的
+# 干净评估，由主循环在 rollout 收官后派发、落账前每轮重试（baseline_summary_landed）。
+# 它不是训练迭代（没有 iteration 事件）⇒ 课程结束门的趋势判据按 `iter <= 0` 把它
+# 排除（gate_check.read_trend_rows），控制台/配对裁判仍用它当基线。账本双向隔离：
+# 基线按 iter==0（且排除 B/C source 行）去重，A-eval 按 min_iter=1 去重。
+BASELINE_EVAL_ITER = 0
 EVAL_TASK_ATTEMPTS = 2  # 单局重试上限；超限放弃并计数（权重切换后未完成局自然作废）
 EVAL_LOCAL_SLOTS_DEFAULT = 4  # 本地直跑槽位默认值（policy.evalLocalSlots 可覆写；0=禁用）
 EVAL_LOCAL_RELEASE_GRACE = 300  # 距窗口截止剩这些秒时强制释放本地预留（本地失效也不空转到超时）
@@ -131,8 +137,22 @@ def run_local_eval_game(
     return manifest
 
 
-def eval_done_keys(eval_jsonl: Path, wver16: str) -> set[tuple[int, int]]:
-    """已评估账本：eval_log.jsonl 中同 wver 的 (stage,seed) 集（断点/重启不重评）。"""
+def eval_done_keys(
+    eval_jsonl: Path,
+    wver16: str,
+    iter_filter: int | None = None,
+    *,
+    min_iter: int | None = None,
+) -> set[tuple[int, int]]:
+    """已评估账本：eval_log.jsonl 中同 wver 的 (stage,seed) 集（断点/重启不重评）。
+
+    `iter_filter` 非 None 时只认该 iter 的逐局行——it0 基线（`BASELINE_EVAL_ITER`）
+    用，并同时排除带 `source` 字段的行（B/C evalboard 行与 EvalDispatcher 行同册
+    `event:"eval"`，若 B/C 批恰好评过 bc 权重，其行不得被当成基线已评估）。
+    `min_iter` 非 None 时排除 int iter < min_iter 的行——A-eval 账本传 1：把 it0
+    基线行挡在 A-eval 去重之外（账本互吞只防单方向 = 另一半漏洞）；缺 `iter`
+    字段的旧行与同 wver 跨 iter 复用（零梯度轮 args.out 未变 → 下轮免重评）照旧保留。
+    """
     out: set[tuple[int, int]] = set()
     try:
         if eval_jsonl.exists():
@@ -143,14 +163,55 @@ def eval_done_keys(eval_jsonl: Path, wver16: str) -> set[tuple[int, int]]:
                     r = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if isinstance(r, dict) and r.get("event") == "eval" and r.get("wver") == wver16:
-                    try:
-                        out.add((int(r["stage"]), int(r["seed"])))
-                    except (KeyError, TypeError, ValueError):
+                if not isinstance(r, dict) or r.get("event") != "eval":
+                    continue
+                if r.get("wver") != wver16:
+                    continue
+                if iter_filter is not None:
+                    if r.get("iter") != iter_filter:
                         continue
+                    if "source" in r:
+                        continue
+                if min_iter is not None:
+                    it_v = r.get("iter")
+                    if isinstance(it_v, int) and it_v < min_iter:
+                        continue
+                try:
+                    out.add((int(r["stage"]), int(r["seed"])))
+                except (KeyError, TypeError, ValueError):
+                    continue
     except OSError:
         pass
     return out
+
+
+def baseline_summary_landed(traj_dir: Path, wver16: str) -> bool:
+    """it0 基线是否已落账：eval_log.jsonl 里存在**同权重指纹**的 `iter=0` summary 行。
+
+    主循环据此决定是否（重）派基线——落账即停，未落账（进程首派、节点瞬时全挂
+    被跳过、bc 换文件）每轮重试，账本去重让重试天然只补缺口。按 wver 匹配：bc
+    换文件后旧基线不算数，控制台合成行取的也是最后一条 it0 summary。
+    """
+    eval_jsonl = traj_dir.parent / "eval_log.jsonl"
+    try:
+        if eval_jsonl.exists():
+            for line in eval_jsonl.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    r = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if (
+                    isinstance(r, dict)
+                    and r.get("event") == "eval_summary"
+                    and r.get("iter") == BASELINE_EVAL_ITER
+                    and r.get("wver") == wver16
+                ):
+                    return True
+    except OSError:
+        pass
+    return False
 
 
 def _acc(acc: list[float], v: object) -> None:

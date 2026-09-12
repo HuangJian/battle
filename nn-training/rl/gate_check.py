@@ -347,6 +347,11 @@ def normalize_rows(
 def read_trend_rows(jsonl_path: Path, course_fp: str = "", limit: int = 0) -> tuple[dict, ...]:
     """读 `eval_log.jsonl`（per-tick 课程）里的 eval_summary 行；文件缺失返回 ()。
 
+    **it0 基线行（`iter <= 0`）不进趋势**：那一行是课程 bc 权重的干净评估（主循环在
+    首次 rollout 收官后补派，见 `loop_core._maybe_dispatch_baseline_eval`），它是监控/
+    配对基准而不是训练进展——让它进判据会虚增 sustain 的"连续通过"计数、也会把 plateau
+    的上升趋势起点拉回 PPO 前。控制台（`console/iters.ts`）不过滤，仍按它当配对基准。
+
     `limit > 0` 时只读末尾 `limit` 条 summary 行（大文件防护）。
     """
     out: list[dict] = []
@@ -362,6 +367,9 @@ def read_trend_rows(jsonl_path: Path, course_fp: str = "", limit: int = 0) -> tu
                     continue
                 if not isinstance(r, dict) or r.get("event") != "eval_summary":
                     continue
+                it = r.get("iter")
+                if isinstance(it, int) and it <= 0:
+                    continue  # it0 基线（bc 权重）：只作监控/配对参照，不进判据
                 fp = str(r.get("course_fp") or "")
                 if course_fp and fp and fp != course_fp:
                     continue
