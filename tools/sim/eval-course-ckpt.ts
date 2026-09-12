@@ -131,13 +131,33 @@ async function main(): Promise<void> {
     process.exit(2)
   }
   const policy = arg('policy') ?? 'nn'
-  if (policy !== 'nn' && policy !== 'god') {
-    console.error(`[eval-course-ckpt] unknown --policy '${policy}' (nn|god)`)
+  if (policy !== 'nn' && policy !== 'god' && policy !== 'nn-goal') {
+    console.error(`[eval-course-ckpt] unknown --policy '${policy}' (nn|god|nn-goal)`)
     process.exit(2)
   }
+  // goal 层测试：nn-goal 的外部目标源（god|heuristic）+ 软偏置强度，透传 env/payload。
+  if (policy === 'nn-goal') {
+    const src = arg('goal-source') ?? 'god'
+    if (src !== 'god' && src !== 'heuristic') {
+      console.error(`[eval-course-ckpt] --goal-source must be 'god'|'heuristic'`)
+      process.exit(2)
+    }
+    process.env.GOAL_SOURCE = src
+    const bias = arg('goal-bias')
+    if (bias !== undefined) {
+      const b = Number(bias)
+      if (!Number.isFinite(b) || b <= 0) {
+        console.error(`[eval-course-ckpt] --goal-bias must be a positive number`)
+        process.exit(2)
+      }
+      process.env.GOAL_BIAS = String(b)
+    }
+  }
   const weightPaths = argAll('weights')
-  if (policy === 'nn' && weightPaths.length === 0) {
-    console.error('[eval-course-ckpt] --weights <file> required for --policy nn (repeatable)')
+  if ((policy === 'nn' || policy === 'nn-goal') && weightPaths.length === 0) {
+    console.error(
+      `[eval-course-ckpt] --weights <file> required for --policy ${policy} (repeatable)`,
+    )
     process.exit(2)
   }
   const weights =
@@ -197,6 +217,8 @@ async function main(): Promise<void> {
         weightsPath: weights[wi].path,
         label: weights[wi].label,
         policy,
+        goalSource: policy === 'nn-goal' ? (process.env.GOAL_SOURCE ?? 'god') : undefined,
+        goalBias: policy === 'nn-goal' ? (process.env.GOAL_BIAS ?? undefined) : undefined,
         difficulty,
         maxTicks,
         lives,

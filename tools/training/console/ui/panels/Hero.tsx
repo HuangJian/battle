@@ -63,7 +63,7 @@ function TrendCell({
           range={range}
           fmt={fmt}
           tone={tone}
-          height={64}
+          height={56}
           yFloor={yFloor}
         />
       ) : null}

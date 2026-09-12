@@ -34,6 +34,10 @@ export interface EvalCourseWorkerPayload {
   maxTicks: number
   lives: number
   level: number
+  /** nn-goal 的外部目标源（god|heuristic）；其余 policy 忽略。 */
+  goalSource?: string
+  /** nn-goal 的 1b-posthoc 软偏置强度（正数）；缺省 = 1a 硬掩码。 */
+  goalBias?: string
   stages: Array<{ name: string; json: string }>
   jobs: EvalJob[]
 }
@@ -60,7 +64,11 @@ export interface EvalCourseRow {
 self.onmessage = (ev: MessageEvent<EvalCourseWorkerPayload>): void => {
   const p = ev.data
   try {
-    const weightsText = p.policy === 'nn' ? readFileSync(p.weightsPath, 'utf8') : ''
+    // nn-goal 的目标源/软偏置显式透传（不依赖 Worker env 继承语义）。
+    if (p.goalSource) process.env.GOAL_SOURCE = p.goalSource
+    if (p.goalBias) process.env.GOAL_BIAS = p.goalBias
+    const weightsText =
+      p.policy === 'nn' || p.policy === 'nn-goal' ? readFileSync(p.weightsPath, 'utf8') : ''
     const rows: EvalCourseRow[] = []
     for (const job of p.jobs) {
       const s = p.stages[job.stageLocal]

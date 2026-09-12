@@ -1222,3 +1222,48 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   ⑤ 预算 STOP 不是停机达令，不触发云机停机。
 - **违反后果**：回退到"门即停车"→ 每 ~6-7 轮一次停线 + 云机连带停机 + 人手重启（本次现场连锁）；
   停机期 worker 日志静默会继续被误判成罢工。
+
+## §2026-09-12-c5-gae（2026-09-12，用户指令：先建 c5-gae，c5-tick 继续跑）
+
+- **背景**：c5-tick（wTick 0.01→0.003 单变量）it20 判一级门 FAIL：value loss 纹丝不动（~0.75，
+  目标 ≤0.65），eval 32/43/47/35 无趋势——**"wTick 方差主导 ⇒ value 头不 fit"被自己数据证伪**
+  （降 57%→10% 方差占比后 value 不动；熵稳定 0.49 也否定了"value 欠拟合 ⇒ 熵失控"的链条，
+  熵失控是 c5-ent 的 ent_coef=0.05 吹出来的）。按预注册转进 λ 轴。
+- **备选与否决**：停 c5-tick —— 用户否（继续跑着）；同轮再试 wTick=0 或 wChip 抬升 —— 否，
+  单变量纪律，c5-tick 还没跑完；直接改 normalize_ret —— 否，变量太多。
+- **决定**：新建 `nn-training/curricula/c5-gae.jsonc`（c5-margin 派生，唯一变量 lam 0.99→0.95，
+  wTick 锁 0.01 不回继承 c5-tick；kl_coef 末段 0.03 护栏非变量；不写 ent_coef；bc=c4-margin.it140；
+  80 轮/12h；无 gates 块）。诚实声明：λ 只测"advantage 方差 ↓ ⇒ 策略动起来"，不声称救 value 头。
+  判据：配对胜率 >39%（起点）+ McNemar p<0.05 为主；value/entropy 作参考。
+- **违反后果**：若 c5-gae 又顺手改 wTick/ent_coef/normalize_ret，λ 的归因被污染；若把 value loss
+  当主判据，会重蹈 c5-tick"假说与数据不符"的覆辙——value 欠拟合的成因在关卡随机结构，
+  不是任何单一超参能救的。
+
+## §2026-09-12-goal-layer-test（2026-09-12，用户拍板两套目标源；goal 硬 mask 实证为负）
+
+- **背景**：c5-gae（λ=0.95）修好机制后执行器配对 +7pp 但封顶 ~46%（in-loop ~40%），40 轮
+  平台。用户提出解冻 goal 头 → 澄清 goal≠intent（intent 骑 God 执行器已证伪；goal=空间目标
+  热图+独立执行器，T9a 证执行器是瓶颈，goal-nn-action 定"最后才解冻"）。当前 per-tick 模型
+  就是 goal-nn 的执行器本体。评估后用户拍板：做 goal 层测试（两套目标源都测）+ c5-gae 续跑。
+- **实现**：新增 `src/nn/goal-mask.ts`（BFS 距离硬掩码"禁背离目标" + God 导航目标源（读
+  `god._navTargetCol/Row`）+ 手写启发式源（血低撤退/追最近敌）+ GoalSteering 承诺重选）；
+  `export-eval-game.ts` 加 `--policy nn-goal`（frozen StudentNet move logits 应用硬掩码，
+  `mask[i]!==1 → -1e9`，只禁不禁劝）；goal-source 显式走 worker payload（env 继承不可靠，两
+  冒烟逐字节相同后改为显式传参）；测试 `tests/nn/goal-mask.test.ts` 10 项全绿 + tsc 过。
+- **结果（c5 关，frozen c5-gae.it100，seeds 0-99）**：**nn 10/20=50% → nn-goal(god) 1/20=5%、
+  100 局 1%**；heuristic 源逐字节同崩（God 导航目标≈最近敌启发式）。机制：距离硬掩码砍掉
+  执行器的战术机动（后撤装填/走位闪避都涉及"暂时背离目标"）→ 被迫直线冲火线 → 被击 9→19、
+  击杀 3.7→0.57、局时 30% 更短。
+- **结论**：**goal 硬 mask（1a）在"已会打"的执行器（~50%）上是灾难（→1%）**——goal-nn-action
+  标注的"只能禁止不能鼓励、弱控制"局限实证。目标意识的价值**不能**用 1a 注入成熟执行器验证；
+  若 goal 层要测，注入机制须换（1b 软偏置诱导 / goal 编进 reward 重训）。也解释了 1a 原设计
+  配给"从零练的弱执行器"——弱执行器没有机动可被砍。
+- **违反后果**：任何人把 1a 硬 mask 当"验证 goal 价值"的现成工具，会在成熟执行器上得到
+  "goal 无用"的错误结论；goal 层测试必须先定注入机制（硬 mask 只适用于从零练的弱执行器）。
+- **补记（1b-posthoc 软偏置，无信号）**：`goalMoveBias`（logits += β·align，align∈{-1,0,1}，
+  诱导不禁止）接 `--goal-bias`。c5 关 frozen it100、seeds 0-19：β=0.3 9/20、β=1.0 9/20、
+  β=2.0 5/20（退化逼近硬 mask）；**β=1.0 全量 100 局 = 46% vs nn 47%（无信号）**。结论：
+  c5 执行器已"朝目标走"，commitment nudge 与既有行为重合 ⇒ 无增益；β 加大才崩。**两个外部
+  注入机制（1a mask / 1b bias）在成熟执行器上都不能抬平台**——c5 瓶颈不在"目标方向/承诺"，
+  在清场吞吐/生存层（杀不完第 5 敌就死）；1b-input（网络通道+重训）不乐观（学的也是同一
+  个"往目标走"偏置），需另寻杠杆。
