@@ -1,7 +1,7 @@
-/** ComponentCards.tsx — 组件 4 小卡（一屏行）：点击卡展开详情，详情带在卡片网格**下方**
- *  整行全宽显示（不复用卡宽）。主按钮随状态换身。
- *  - 未启动：唯一「启动」（品牌色）；运行中：「停止」+ 冒烟/日志 小图标 + 详情。
- *  - cloudflared 常态缩略 endpoint + auth key，各带复制（CopyButton）——复制点击不展开卡片。
+/** ComponentCards.tsx — 组件 chips 行（样式对齐节点行：一行内 pill，点击 pill 在**下方**
+ *  展开整行全宽日志详情）。主按钮随状态换身。
+ *  - 未启动：唯一「启动」（品牌色）；运行中：「停止」+ 冒烟/日志 小图标。
+ *  - cloudflared：隧道截断展示（title 留全量）+ auth key 复制钮直接进 chip（CopyButton，复制点击不展开详情）。
  *  - TrainingLoop 的「启动」→ 打开 TrainLaunchModal（App 层），选模式后再预设。
  *  - 启/停 pending 锁（§367）：点击先本地 disable（不依赖下一轮轮询），等状态切换完成
  *    或动作失败后再 enable——防双连击把组件状态打乱。 */
@@ -32,12 +32,6 @@ function dotClass(c: ComponentView): string {
   if (c.status === 'running') return c.healthy === false ? 'tc-dot--warn' : 'tc-dot--on'
   if (c.status === 'exited') return 'tc-dot--dead'
   return 'tc-dot--empty'
-}
-
-function statusText(c: ComponentView): string {
-  if (c.status === 'running') return c.healthy === false ? '未就绪' : '运行中'
-  if (c.status === 'exited') return '已退出'
-  return '未启动'
 }
 
 export function ComponentCards({
@@ -94,56 +88,70 @@ export function ComponentCards({
   return (
     <>
       <div className="tc-comps" aria-label="组件">
+        <span className="lbl">组件</span>
         {mains.map((c) => {
           const isOpen = open === c.key
           const isRunning = c.status === 'running'
           const locked = c.busy || pending[c.key] !== undefined
-          const meta = c.pid ? `PID ${c.pid} · ${statusText(c)}` : statusText(c)
-          // 只读视图不禁用按钮（避免组件区灰败破碎感）；悬停 title 给提示，真点击 403 + flash。
-          const roTitle = readOnly ? RO_TITLE : locked ? '动作进行中…' : undefined
+          // 只读视图不禁用按钮（与其它动作键同哲学：可点、服务端 403 + flash 提示）。
+          const roDisabledCls = readOnly ? ' tc-npill--ro' : ''
+          const toggle = (): void => setOpen(isOpen ? null : c.key)
+          const logHref = `/log/${c.key}${course ? `?course=${encodeURIComponent(course)}` : ''}`
           return (
-            <section
+            <span
               key={c.key}
-              className={`tc-cc${isOpen ? ' tc-cc--open' : ''}`}
+              className={`tc-npill${roDisabledCls}${isOpen ? ' tc-npill--collapse' : ''}`}
+              role={readOnly ? undefined : 'button'}
+              tabIndex={readOnly ? undefined : 0}
               aria-label={c.label}
-              onClick={() => setOpen(isOpen ? null : c.key)}
+              aria-expanded={isOpen}
+              title={readOnly ? '（只读）' : `${c.label}·点击展开日志详情`}
+              onClick={readOnly ? undefined : toggle}
+              onKeyDown={
+                readOnly
+                  ? undefined
+                  : (e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        toggle()
+                      }
+                    }
+              }
             >
-              <div className="tc-cc__hd">
-                <span className={`tc-dot ${dotClass(c)}`} />
-                <span className="tc-cc__name">{c.key}</span>
-              </div>
-              {c.key === 'cloudflared' ? (
-                // 复制按键不展开卡片：meta 区（隧道/auth key + 复制）整体吞掉冒泡。
-                <div className="tc-cc__meta" onClick={(e) => e.stopPropagation()}>
-                  <div className="tc-cc__sec">
-                    {c.url ? (
-                      <>
-                        <code title={c.url}>{shortUrl(c.url)}</code>
-                        <CopyButton text={c.url} label="隧道" icon small />
-                      </>
-                    ) : (
-                      <span className="tc-muted">未建立隧道</span>
-                    )}
-                  </div>
-                  <div className="tc-cc__sec">
-                    <code>
-                      token{' '}
-                      {c.secret
-                        ? c.secret.length > 14
-                          ? `${c.secret.slice(0, 7)}…${c.secret.slice(-4)}`
-                          : (c.secret ?? '-')
-                        : '-'}
-                    </code>
-                    {c.secret ? <CopyButton text={c.secret} label="auth key" icon small /> : null}
-                  </div>
-                </div>
-              ) : (
-                <span className="tc-cc__meta">
-                  {meta}
-                  {c.mode ? <b className="tc-cc__mode">{c.mode}</b> : null}
+              <span className={`tc-dot ${dotClass(c)}`} />
+              <b>{c.key}</b>
+              {c.mode ? <b className="tc-cc__mode">{c.mode}</b> : null}
+              {c.key === 'cloudflared' && (c.url || c.secret) ? (
+                // 截断展示 + 全量复制（§361：title 留全量，复制钮拿全量）；复制点击不展开日志详情。
+                <span
+                  role="group"
+                  aria-label={
+                    c.url && c.secret
+                      ? '隧道 + auth key 复制钮'
+                      : c.url
+                        ? '隧道复制钮'
+                        : 'auth key复制钮'
+                  }
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {c.url ? <code title={c.url}>{shortUrl(c.url)}</code> : null}
+                  {c.url ? <CopyButton text={c.url} label="隧道" icon small /> : null}
+                  {c.secret ? <CopyButton text={c.secret} label="auth key" icon small /> : null}
                 </span>
-              )}
-              <div className="tc-cc__acts" onClick={(e) => e.stopPropagation()}>
+              ) : null}
+              {c.status === 'exited' && c.error ? (
+                // §380：退出原因放在日志详情里展示全文；chip 内只放 ⚠ 入口。
+                <a
+                  className="tc-cc__err-link"
+                  href={logHref}
+                  title={c.error}
+                  aria-label={`${c.label} 退出原因：${c.error}`}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  ⚠
+                </a>
+              ) : null}
+              <span className="tc-cc__acts" onClick={(e) => e.stopPropagation()}>
                 {isRunning ? (
                   <>
                     <button
@@ -151,7 +159,7 @@ export function ComponentCards({
                       className="tc-btn tc-btn--sm"
                       disabled={locked}
                       aria-label={`停止 ${c.label}`}
-                      title={roTitle}
+                      title={roDisabledCls ? undefined : '动作进行中…'}
                       onClick={() => fire(c, 'stop')}
                     >
                       停止
@@ -172,7 +180,7 @@ export function ComponentCards({
                       className="tc-iconbtn"
                       aria-label={`日志 ${c.label}`}
                       title="日志"
-                      href={`/log/${c.key}${course ? `?course=${encodeURIComponent(course)}` : ''}`}
+                      href={logHref}
                     >
                       ≡
                     </a>
@@ -183,30 +191,19 @@ export function ComponentCards({
                     className="tc-btn tc-btn--sm tc-btn--primary"
                     disabled={locked}
                     aria-label={`启动 ${c.label}`}
-                    title={roTitle}
+                    title={roDisabledCls ? undefined : '动作进行中…'}
                     onClick={c.key === 'trainingLoop' ? onLaunchTrainer : () => fire(c, 'start')}
                   >
                     启动
                   </button>
                 )}
-              </div>
-              {c.status === 'exited' && c.error ? (
-                // §380：非正常退出原因直面展示（不再只有空洞的"已退出"）+ 一键进日志页
-                <div className="tc-cc__err" role="alert">
-                  <a
-                    className="tc-cc__err-link"
-                    href={`/log/${c.key}${course ? `?course=${encodeURIComponent(course)}` : ''}`}
-                  >
-                    ⚠ {c.error} · 日志
-                  </a>
-                </div>
-              ) : null}
-            </section>
+              </span>
+            </span>
           )
         })}
       </div>
       {openCard ? (
-        // 点击展开卡：详情带**整行全宽**贴在卡网格下方（点击日志区域再次收起）。
+        // 点击展开 chip：详情带**整行全宽**贴在 chips 行下方（点击日志区域再次收起）。
         <pre className="tc-cc__detail" onClick={() => setOpen(null)}>
           {[
             openCard.error ? `exit-error: ${openCard.error}` : null,

@@ -13,6 +13,7 @@ import {
   metricSeries,
   retTone,
   TC_HERO_ITER_VIEW,
+  TC_HERO_ITERS_COLLAPSED,
   TC_TREND_RANGE,
   winTone,
   type ConsoleStateView,
@@ -342,6 +343,26 @@ function LastIters({ iters, onMore }: { iters: IterRow[]; onMore: () => void }) 
       /* ignore */
     }
   }
+  // 折叠/展开（持久化；SSR 首帧恒展开，与 hydrate 一致，偏好 hydrate 后恢复）。
+  const [collapsed, setCollapsed] = useState(false)
+  useEffect(() => {
+    try {
+      if (localStorage.getItem(TC_HERO_ITERS_COLLAPSED) === '1') setCollapsed(true)
+    } catch {
+      /* 隐私模式等不可写场景忽略 */
+    }
+  }, [])
+  const onToggleCollapsed = (): void => {
+    setCollapsed((c) => {
+      const next = !c
+      try {
+        localStorage.setItem(TC_HERO_ITERS_COLLAPSED, next ? '1' : '0')
+      } catch {
+        /* ignore */
+      }
+      return next
+    })
+  }
 
   const mains = [...iters].sort((a, b) => b.iter - a.iter).slice(0, 6)
   if (mains.length === 0) return null
@@ -351,6 +372,16 @@ function LastIters({ iters, onMore }: { iters: IterRow[]; onMore: () => void }) 
     <div className="tc-hero__iters">
       <div className="tc-hero__iters-hd">
         <span className="tc-hero__iters-left">
+          <button
+            type="button"
+            className="tc-hero__iters-toggle"
+            aria-expanded={!collapsed}
+            aria-label={collapsed ? '展开最新指标表' : '折叠最新指标表'}
+            title={collapsed ? '展开' : '折叠'}
+            onClick={onToggleCollapsed}
+          >
+            {collapsed ? '▸' : '▾'}
+          </button>
           <span>
             最新 {Math.min(n, 6)} 轮{ev ? ' eval 评估' : '完整指标'}
           </span>
@@ -368,7 +399,7 @@ function LastIters({ iters, onMore }: { iters: IterRow[]; onMore: () => void }) 
           完整指标表 ›
         </button>
       </div>
-      {ev ? <EvalTable rows={iters} /> : <MainTable rows={mains} />}
+      {collapsed ? null : ev ? <EvalTable rows={iters} /> : <MainTable rows={mains} />}
     </div>
   )
 }

@@ -353,8 +353,9 @@ a.tc-preset{text-decoration:none;display:inline-block}
 .tc-phase__elapsed{font-family:ui-monospace,'Cascadia Mono',Consolas,monospace;font-weight:700}
 
 /* hero 最新 6 轮完整指标（§367 UI：首页训练状态区直读最近趋势） */
-.tc-hero__iters{flex:1 1 100%;min-width:0;margin-top:8px;border-top:1px dashed var(--border);padding-top:6px;overflow-x:auto}
+.tc-hero__iters{flex:1 1 100%;min-width:0;margin-top:0;border-top:1px dashed var(--border);padding-top:6px;overflow-x:auto}
 .tc-hero__iters-hd{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);font-size:var(--fs-2);color:var(--muted);font-weight:600;margin-bottom:2px}
+.tc-hero__iters-toggle{border:none;background:none;color:var(--accent);font-size:var(--fs-3);cursor:pointer;padding:0 2px;line-height:1}
 /* 标题 + 主行/eval toggle 左侧一组（「完整指标表 ›」保持右对齐） */
 .tc-hero__iters-left{display:flex;align-items:center;gap:10px;min-width:0}
 
@@ -367,18 +368,14 @@ a.tc-preset{text-decoration:none;display:inline-block}
 .tc-hero__iters .tc-table thead th{padding:4px 8px}
 
 /* 组件 4 小卡 */
-.tc-comps{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px}
-@media (max-width:900px){.tc-comps{grid-template-columns:repeat(2,1fr)}}
-.tc-cc{display:grid;gap:6px;padding:8px 10px;background:var(--card);border:1px solid var(--border);border-radius:var(--r-3);cursor:pointer;align-content:start}
-.tc-cc:hover{border-color:var(--accent)}
-.tc-cc__hd{display:flex;align-items:center;gap:var(--sp-2)}
-.tc-cc__name{font-size:var(--fs-3);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.tc-cc__meta{font-size:11.5px;color:var(--muted);min-height:16px;word-break:break-all;font-family:ui-monospace,'Cascadia Mono',Consolas,monospace}
+/* 组件 chips 行（原 4 小卡 → 一行 chips，复用节点 pill 风格） */
+.tc-comps{display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap;background:var(--card);border:1px solid var(--border);border-radius:var(--r-3);padding:6px 12px;margin-bottom:10px}
+.tc-comps .lbl{font-size:var(--fs-2);color:var(--muted);margin-right:var(--sp-1)}
+.tc-cc__name{font-size:var(--fs-2);font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* trainingLoop 运行模式高亮徽章 */
 .tc-cc__mode{display:inline-block;margin-left:6px;padding:0 7px;border-radius:999px;background:var(--accent-bg);color:var(--accent);font-weight:700;font-size:10.5px;white-space:nowrap;line-height:18px;font-family:ui-monospace,'Cascadia Mono',Consolas,monospace}
 .tc-cc__acts{display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap}
 .tc-cc__detail{display:block;background:var(--gray-bg);border:1px solid var(--border);border-radius:var(--r-1);padding:var(--sp-2) var(--sp-3);font-size:11px;font-family:ui-monospace,'Cascadia Mono',Consolas,monospace;color:var(--muted);white-space:pre-wrap;word-break:break-all;max-height:200px;overflow-y:auto;margin-bottom:var(--sp-4)}
-.tc-cc__err{display:flex;align-items:center;gap:8px;background:var(--red-bg);border:1px solid #ecc8c8;border-radius:var(--r-2);padding:8px 12px;font-size:var(--fs-2)}
 .tc-cc__err-link{color:var(--red);font-weight:700;text-decoration:none}
 .tc-cc__err-link:hover{text-decoration:underline}
 .tc-cc__sec{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);word-break:break-all;min-width:0}
@@ -401,7 +398,7 @@ a.tc-preset{text-decoration:none;display:inline-block}
 /* 节点 pill 行 */
 .tc-nodes{display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap;background:var(--card);border:1px solid var(--border);border-radius:var(--r-3);padding:6px 12px;margin-bottom:10px}
 .tc-nodes .lbl{font-size:var(--fs-2);color:var(--muted);margin-right:var(--sp-1)}
-.tc-npill{display:inline-flex;align-items:center;gap:var(--sp-2);border:1px solid var(--border);border-radius:999px;padding:3px 12px;font-size:var(--fs-2);background:var(--card);cursor:pointer}
+.tc-npill{display:inline-flex;align-items:center;gap:var(--sp-2);border:1px solid var(--border);border-radius:999px;padding:3px 12px;font-size:var(--fs-2);background:var(--card);cursor:pointer;flex-shrink:0;user-select:none}
 .tc-npill:hover{border-color:var(--accent)}
 .tc-npill b{font-family:ui-monospace,'Cascadia Mono',Consolas,monospace;font-weight:600;font-size:var(--fs-2)}
 .tc-npill .v{color:var(--green);font-weight:600;font-size:var(--fs-2)}

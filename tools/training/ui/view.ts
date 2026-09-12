@@ -1080,6 +1080,8 @@ export const TC_RO_BANNER_DISMISSED = `${TC_KEY_PREFIX}ro.bannerDismissed`
 export const TC_CLOUDHALT_ACK = `${TC_KEY_PREFIX}cloudHalt.ack`
 /** hero 最新 6 轮区块视图（'main' 主行 / 'eval' 干净评估）。 */
 export const TC_HERO_ITER_VIEW = `${TC_KEY_PREFIX}hero.iters`
+/** hero 最新 6 轮区块折叠态（'1' = 折叠只留标题行）。 */
+export const TC_HERO_ITERS_COLLAPSED = `${TC_KEY_PREFIX}hero.iters.collapsed`
 export const TC_TREND_RANGE = `${TC_KEY_PREFIX}trend.range`
 export const TC_TRAIN_MODE = `${TC_KEY_PREFIX}train.mode`
 export const TC_TRAIN_TOGGLES = `${TC_KEY_PREFIX}train.toggles`
