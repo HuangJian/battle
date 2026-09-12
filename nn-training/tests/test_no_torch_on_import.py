@@ -11,10 +11,11 @@ import 加回顶层，本测试立即变红——子进程每轮多付 3-8s 且�
 """
 from __future__ import annotations
 
-import subprocess
 import sys
 import textwrap
 from pathlib import Path
+
+from tests.subproc_util import run_utf8
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -35,13 +36,7 @@ def _run_probe() -> str:
         print("torch-after-stream=" + str("torch" in sys.modules))
         """
     )
-    out = subprocess.run(
-        [sys.executable, "-c", code],
-        cwd=str(ROOT),
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
+    out = run_utf8([sys.executable, "-c", code], cwd=str(ROOT), timeout=120)
     assert out.returncode == 0, f"probe failed: {out.stderr[-2000:]}"
     return out.stdout
 
@@ -73,13 +68,7 @@ def test_modes_import_does_not_load_torch() -> None:
         print("per-tick-ok=" + str(importlib.import_module("ppo.engine") is not None))
         """
     )
-    out = subprocess.run(
-        [sys.executable, "-c", code],
-        cwd=str(ROOT),
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
+    out = run_utf8([sys.executable, "-c", code], cwd=str(ROOT), timeout=120)
     assert out.returncode == 0, f"modes probe failed: {out.stderr[-2000:]}"
     kv = dict(line.split("=") for line in out.stdout.splitlines() if "=" in line)
     assert kv.get("torch") == "False"

@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+from platform_utils import force_utf8_stdio
 from remote.protocol import coef_active
 from rl.archive import ensure_current_branch_pushed
 from rl.cli import build_argparser
@@ -157,6 +158,9 @@ def _cleanup_run_rl_lock(lock_path: str) -> None:
 
 
 def main() -> None:
+    # 子进程字节流恒 UTF-8（压过 PYTHONIOENCODING/PYTHONUTF8/代码页）——validate_args
+    # 等的中文 SystemExit/日志对任何捕获方都是确定编码；配对消费方显式 utf-8 解码。
+    force_utf8_stdio()
     # Anchor cwd to the repo root (parent of nn-training/): all default paths
     # (tmp/student-weights-dagger, tmp/rl-weights, tmp/rl-traj) are repo-root
     # relative. Required for the unified launcher's --detach (tools/training/train.ts), whose

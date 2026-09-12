@@ -39,6 +39,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from platform_utils import force_utf8_stdio
+
 if TYPE_CHECKING:  # 运行时期望零 rl.config 依赖，见 `_lazy_config()`。
     from rl.config import GateRule, GatesSpec
 
@@ -1274,6 +1276,9 @@ def build_cli() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """薄壳 CLI（§4.1）。exit 码 = `EXIT_CODES`；override 非法 = 2。"""
+    # 子进程字节流恒 UTF-8（压过 PYTHONIOENCODING/PYTHONUTF8/代码页）——配对消费方
+    # （tests/subproc_util.run_utf8 / agent）的显式 utf-8 解码，跨沙箱确定性契约。
+    force_utf8_stdio()
     from rl.config import load_course  # 延迟导入：CLI 路径才需要
 
     args = build_cli().parse_args(argv)
@@ -1315,7 +1320,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "seeds": res.seeds,
                     "readings": [r.to_dict() for r in res.readings],
                 },
-                ensure_ascii=False,
+                # 机器通道 = 纯 ASCII（\uXXXX 转义）：对消费方的解码编码完全免疫
+                # （裸 text=True 父进程 / agent 自带解码器都读不坏）；人类可读走
+                # 非 --json 分支。曾用 ensure_ascii=False 在 zh-CN Windows 上与
+                # GBK 解码父进程互炸——见 docs/nn.progress.md §30。
+                ensure_ascii=True,
                 indent=2,
             )
         )

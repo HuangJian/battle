@@ -5,6 +5,37 @@
 
 ---
 
+## §30 CLI 子进程编码契约：环境无关的三层修（2026-09-13 复核 `python-cli.issue.md`）
+
+**问题（复核确认真实）**：`test_gate_check.py::test_cli_dry_run_exit_code` 用裸
+`subprocess.run(..., text=True)` 捕获 `rl.gate_check --json`——父侧解码编码 =
+`locale.getpreferredencoding(False)`（**解释器启动期决定，运行时改不了**；zh-CN
+Windows = cp936），子侧却由启动环境任意决定（`ensure_ascii=False` 把中文直排进
+stdout）。子进程 UTF-8（agent 沙箱常设 `PYTHONIOENCODING=utf-8` 且无 `PYTHONUTF8`）
+× 父进程 cp936 → 读线程在 `subprocess._readerthread` 死亡 → `stdout=None` →
+`json.loads(None)` TypeError。本机复现矩阵证实：仅 `PYTHONIOENCODING=utf-8` 必红；
+`PYTHONUTF8=1` 两侧都 UTF-8 则绿（**它掩蔽而非修复**）——不同 agent 沙箱 env/代码页/
+Python 版本（3.15 起 PEP 686 默认 UTF-8）各异，环境解不可能通用。
+
+**修（契约从环境移进代码，三层）**：
+1. **`--json` 机器通道改 `ensure_ascii=True`**（`rl/gate_check.py`）——纯 ASCII 字节对
+   任何解码器免疫（含我们控制的裸 text=True 父进程与不控制的第三方 agent）；中文经
+   `\uXXXX` 传输，`json.loads` 还原无损。人类可读走非 `--json` 分支。
+2. **子侧入口钉死**：`platform_utils.force_utf8_stdio()`（运行时 `reconfigure`
+   stdout/stderr 为 UTF-8，实测压过强设的 `PYTHONIOENCODING=gbk`），`gate_check.main`
+   与 `run_rl.main` 接入——被测 CLI 的字节流恒 UTF-8，与环境解耦。
+3. **父侧测试统一出口**：`tests/subproc_util.run_utf8()`（强制 `encoding="utf-8"` +
+   `stdout is None` 就地断言），扫掉全部 7 处裸 `text=True`（test_gate_check ×2、
+   test_run_rl、test_upgrade ×2——后两处 spawn 的 **bun 管道恒 UTF-8**，本就是同型
+   雷点、test_no_torch_on_import ×2）。
+
+**验证**：四场景矩阵（无强制/仅 PYTHONIOENCODING/PYTHONUTF8/沙箱原样）全绿；对抗
+探针（子进程强设 GBK env）下 `--json` 输出纯 ASCII、verdict/report 无损；nn-python-gate
+全绿。生产侧同模式捕获点（`dist_common` ×2 / `run_rl` 的 git 调用 = ASCII 输出、
+`bootstrap` 已 `errors="replace"`）不急；新 subprocess 测试一律用 `run_utf8`。
+
+---
+
 ## §29 it0 基线评审修订：重试语义 + 账本双向隔离 + Hero NaN 行（2026-09-13 评审）
 
 对 §28 的 staged 实现做评审后发现三处问题，本条为修复记录（评审 + 修复同一批完成）。

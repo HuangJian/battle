@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -27,6 +26,7 @@ from rl.gate_check import (
     normalize_rows,
     read_trend_rows,
 )
+from tests.subproc_util import run_utf8
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -93,9 +93,7 @@ def test_module_import_has_no_torch_numpy() -> None:
         "print('torch=' + str('torch' in sys.modules)); "
         "print('numpy=' + str('numpy' in sys.modules))"
     )
-    out = subprocess.run(
-        [sys.executable, "-c", code], cwd=str(ROOT), capture_output=True, text=True, timeout=120
-    )
+    out = run_utf8([sys.executable, "-c", code], cwd=str(ROOT), timeout=120)
     assert out.returncode == 0, out.stderr[-2000:]
     kv = dict(line.split("=") for line in out.stdout.splitlines() if "=" in line)
     assert kv["torch"] == "False"
@@ -810,7 +808,7 @@ def test_evaluate_10k_rows_is_fast() -> None:
 
 def test_cli_dry_run_exit_code(tmp_path: Path) -> None:
     """CLI 薄壳：无 gates 块的课程 → HOLD → exit 0，且零写盘。"""
-    out = subprocess.run(
+    out = run_utf8(
         [
             sys.executable,
             "-m",
@@ -822,8 +820,6 @@ def test_cli_dry_run_exit_code(tmp_path: Path) -> None:
             "--json",
         ],
         cwd=str(ROOT),
-        capture_output=True,
-        text=True,
         timeout=180,
     )
     assert out.returncode == 0, out.stdout + out.stderr

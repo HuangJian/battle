@@ -26,7 +26,6 @@ import json
 import os
 import shutil
 import struct
-import subprocess
 import sys
 import threading
 import time
@@ -49,6 +48,7 @@ from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from rl.reward_library import METRICS_DIM  # fake shard 与落盘同维（metric v3）
 from rl.stream import run_rollout_stream as _run_rollout_stream  # B7：run_rl 模块级不再 re-export
 from schema import BOARD, FIRE_DIM, MASK_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM
+from tests.subproc_util import run_utf8
 
 FAILS: list[str] = []
 ITEST = os.environ.get("RUN_RL_ITEST") == "1" or "--itest" in sys.argv
@@ -319,13 +319,8 @@ class FakeAgent(BaseHTTPRequestHandler):
                 bun = shutil.which("bun")
                 if bun is not None:
                     cache["bun"] = (
-                        subprocess.run(
-                            [bun, "--version"],
-                            capture_output=True,
-                            text=True,
-                            timeout=10,
-                            **_POPEN_NO_WINDOW,
-                        ).stdout.strip()
+                        run_utf8([bun, "--version"], timeout=10, **_POPEN_NO_WINDOW)
+                        .stdout.strip()
                         or "?"
                     )
                 else:

@@ -13,6 +13,8 @@ rl/queue.py 各自维护了一份逐字节相同的 `_POPEN_NO_WINDOW`（Windows
     （SystemExit）绝不外泄**；替代裸 shutil.rmtree / ignore_errors=True。
   sandbox_delete_blocked(anchor) —— 探针：当前是否正被沙箱删除保护拦截真实删除
     （门禁抖动归因用，见 docstring）。
+  force_utf8_stdio() —— CLI 入口调用：把本进程 stdout/stderr 运行时钉成 UTF-8
+    （压过 PYTHONIOENCODING / PYTHONUTF8 / 控制台代码页；详见 docstring）。
 """
 
 from __future__ import annotations
@@ -26,6 +28,27 @@ from typing import Any
 POPEN_NO_WINDOW: dict[str, Any] = {}
 if sys.platform == "win32":
     POPEN_NO_WINDOW = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+
+
+def force_utf8_stdio() -> None:
+    """CLI 入口调用：把本进程 stdout/stderr 运行时钉成 UTF-8。
+
+    为什么（2026-09-13 python-cli 编码问题复核）：被捕获的子进程字节流此前取决于
+    启动环境的 locale——coding agent 沙箱间 PYTHONUTF8 / PYTHONIOENCODING 各异、
+    zh-CN Windows 默认 cp936、Python 3.15 起（PEP 686）又默认 UTF-8。父进程的
+    subprocess 解码默认值是启动期决定的、运行时改不了 ⇒ 唯一通用的做法是把「子进程
+    输出什么编码」在子进程自己的入口处钉死：reconfigure 运行时覆盖 stdio 包装器，
+    压过一切环境变量。消费方（测试 ``tests/subproc_util.run_utf8`` / agent）按
+    utf-8 显式解码即可，无需任何环境变量协调。3.7+；3.15 下与运行时默认一致（no-op）。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue  # 非 TextIOWrapper（被捕获替换等）——保持现状，打印不该因此崩溃
+        try:
+            reconfigure(encoding="utf-8")
+        except (ValueError, OSError):
+            pass  # 流已关闭/底层不可重配——同上，尽力而为
 
 
 def rmtree_best_effort(path: Any, *, ignore_errors: bool = False) -> bool:
