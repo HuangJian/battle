@@ -273,6 +273,18 @@ def main() -> None:
         )
     atexit.register(_cleanup_run_rl_lock, lock_path)
 
+    # ===== 启动即清空 hub 停机态（2026-09-12 it17 复盘）：上轮门判/人工停机残留的
+    # halt 若带进新 run，首轮 PPO job 直接进无人区（训练机空等 30min 超时）。
+    # 只读+幂等 resume，读回确认；失败只告警不阻断（local/push 无 hub 直接短路）。
+    # 注意放锁后：只有真正持锁训练的进程才清，预采子进程/旁观者不动 hub。
+    from remote.hub_client import clear_halt_on_startup
+
+    clear_halt_on_startup(
+        str(getattr(args, "remote_hub_url", "") or ""),
+        str(getattr(args, "remote_token", "") or ""),
+        log=log,
+    )
+
     # ===== 主循环（rl/loop.py::run_training）=====
     from rl.loop import run_training
 

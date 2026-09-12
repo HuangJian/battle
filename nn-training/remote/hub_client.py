@@ -501,6 +501,61 @@ def set_cloud_halt(
     return True
 
 
+def hub_halted(base_url: str, token: str, timeout: float = 10.0) -> bool | None:
+    """读 /admin/workers/status → True=停机中 / False=已清除 / None=未知。
+
+    未配置 hub（local/push）或不可达/非 200/体裁不对 → None（呼叫方按未知处理，
+    绝不把"问不到"当成"没停机"）。
+    """
+    if not base_url or not token:
+        return None
+    try:
+        st, body = _request(base_url, token, "/admin/workers/status", timeout=timeout)
+    except Exception:
+        return None
+    if st != 200:
+        return None
+    try:
+        v = json.loads(body.decode("utf-8")).get("halt")
+    except ValueError:
+        return None
+    return bool(v) if isinstance(v, bool) else None
+
+
+def clear_halt_on_startup(
+    base_url: str,
+    token: str,
+    log=lambda msg: print(f"[hub] {msg}", flush=True),
+) -> bool:
+    """TrainingLoop 启动即清空 hub 停机态（2026-09-12 it17 事故复盘）。
+
+    上轮门判 REMEDIATE / 人工停机后未恢复 / worker 自杀残留的 halt 若带进新 run，
+    首轮 PPO job 直接进无人区（训练机空等 30min 超时）。启动=需要算力=停机条件
+    作废：先读后清，读回确认才算数。
+
+    返回 True = 已确认清除（或本无 halt、无 hub）；False = 仍停机/未知（只告警，
+    **永不阻断启动**——PPO 等待期会再次表面化，控制台 PPO 排队告警是第二道网）。
+    """
+    if not base_url or not token:
+        return True  # local/push 无 hub——无事可做即成功
+    cur = hub_halted(base_url, token)
+    if cur is False:
+        log("[run_rl] hub 停机态：启动时检查，本已清除，无事可做")
+        return True
+    if cur is True:
+        log("[run_rl] hub 停机态：检测到遗留 halt（上轮门判/人工停机残留）——启动即清空")
+    else:
+        log("[run_rl] hub 停机态未知（不可达？）——仍尝试 resume（幂等），失败不阻断启动")
+    if not set_cloud_halt(base_url, token, False, log=log):
+        log("[run_rl] WARN: hub resume 下发失败——首轮 PPO 可能排队超时，盯控制台 PPO 告警")
+        return False
+    if hub_halted(base_url, token) is False:
+        log("[run_rl] hub 停机态：已清除并回读确认")
+        return True
+    log("[run_rl] WARN: hub resume 已下发但回读仍为 halt——首轮 PPO 可能排队超时")
+    return False
+
+
 def wait_job(
     base_url: str,
     token: str,

@@ -30,6 +30,7 @@ afterAll(() => {
 })
 
 import {
+  consoleStatePath,
   loadConsoleState,
   markCloudHaltRecovered,
   saveConsoleState,
@@ -97,5 +98,20 @@ describe('markCloudHaltRecovered（停机条件消失 → recovered，灰横幅�
     await triggerCloudHalt(CFG, '新一轮')
     expect(loadConsoleState().cloudHalt?.status).toBe('recovered')
     expect(loadConsoleState().cloudHalt?.reason).toBe('旧')
+  })
+})
+
+describe('consoleStatePath 惰性求值（2026-09-12 线上污染回归）', () => {
+  it('import 之后再改 env 也生效（模块级 const 会冻结线上路径）', () => {
+    const other = mkdtempSync(path.join(os.tmpdir(), 'bcity-cstate-lazy-'))
+    try {
+      process.env.BCITY_CONSOLE_STATE = path.join(other, 'console-state.json')
+      expect(consoleStatePath()).toBe(path.join(other, 'console-state.json'))
+      saveConsoleState({ course: 'lazy-probe' })
+      expect(loadConsoleState().course).toBe('lazy-probe')
+    } finally {
+      process.env.BCITY_CONSOLE_STATE = path.join(CSTATE_DIR, 'console-state.json')
+      rmSync(other, { recursive: true, force: true })
+    }
   })
 })

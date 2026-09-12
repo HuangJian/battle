@@ -727,6 +727,37 @@ def test_hub_admin_client_set_cloud_halt(tmp_path: Path) -> None:
         th.join()
 
 
+def test_clear_halt_on_startup(tmp_path: Path) -> None:
+    """2026-09-12 it17 复盘：TrainingLoop 启动即清空 hub 遗留 halt（读回确认才算数）。
+
+    遗留 halt → 清除并验证；本已清除 → True（顺手验证读回链路）；
+    不可达 → False 且不抛（永不阻断启动）；无 hub → True（无事可做）。
+    """
+    from remote.hub_client import clear_halt_on_startup, hub_halted, set_cloud_halt
+
+    base, _store, srv, th = _boot_server(tmp_path)
+    try:
+        logs: list[str] = []
+        # 本已清除：True（读回链路本身也被断言）
+        assert hub_halted(base, "sekret") is False
+        assert clear_halt_on_startup(base, "sekret", log=logs.append) is True
+        # 遗留 halt：清除 + 回读确认
+        assert set_cloud_halt(base, "sekret", True, log=lambda m: None) is True
+        assert hub_halted(base, "sekret") is True
+        logs.clear()
+        assert clear_halt_on_startup(base, "sekret", log=logs.append) is True
+        assert hub_halted(base, "sekret") is False
+        assert any("清空" in m for m in logs)
+        # 不可达 → False，不抛；空 url/token → True/None，不抛
+        assert clear_halt_on_startup("http://127.0.0.1:1", "sekret", log=lambda m: None) is False
+        assert hub_halted("http://127.0.0.1:1", "sekret") is None
+        assert clear_halt_on_startup("", "sekret", log=lambda m: None) is True
+        assert hub_halted(base, "") is None
+    finally:
+        srv.shutdown()
+        th.join()
+
+
 def test_hub_server_auth_and_job_lifecycle(tmp_path: Path) -> None:
     """鉴权（401/闭锁）+ 发布（磁盘 IPC）→ 领取 → payload → 结果 → 状态全链路。"""
     base, store, srv, th = _boot_server(tmp_path)

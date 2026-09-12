@@ -87,8 +87,12 @@ function done(ok: boolean, message: string, detail?: string[]): ActionResult {
 
 // 测试注入位（同 registry.ts 的 BCITY_REGISTRY_FILE）：默认线上路径，
 // 单测置 env 重定向到临时目录，绝不写脏线上 console-state.json。
-const CONSOLE_STATE =
-  process.env.BCITY_CONSOLE_STATE || path.join(START_LOG_DIR, 'console-state.json')
+// 必须是函数（调用时求值）：模块级 const 会在 import 提升时冻结线上路径，
+// 单测文件的 env 赋值永远追不上——2026-09-12 实测线上 console-state.json 被
+// cloud-halt.test.ts 的 fixture（{at:'T3',...}）污染，hub 真实 halt 记录丢失。
+export function consoleStatePath(): string {
+  return process.env.BCITY_CONSOLE_STATE || path.join(START_LOG_DIR, 'console-state.json')
+}
 
 export interface CloudHaltInfo {
   /** 停机时刻（ISO）。 */
@@ -118,7 +122,7 @@ export function loadConsoleState(): ConsoleState {
   try {
     return {
       ...DEFAULT_STATE,
-      ...(JSON.parse(readFileSync(CONSOLE_STATE, 'utf-8')) as ConsoleState),
+      ...(JSON.parse(readFileSync(consoleStatePath(), 'utf-8')) as ConsoleState),
     }
   } catch {
     return { ...DEFAULT_STATE }
@@ -128,8 +132,8 @@ export function loadConsoleState(): ConsoleState {
 export function saveConsoleState(patch: Partial<ConsoleState>): ConsoleState {
   const next = { ...loadConsoleState(), ...patch }
   try {
-    mkdirSync(path.dirname(CONSOLE_STATE), { recursive: true })
-    writeFileSync(CONSOLE_STATE, JSON.stringify(next, null, 2), 'utf-8')
+    mkdirSync(path.dirname(consoleStatePath()), { recursive: true })
+    writeFileSync(consoleStatePath(), JSON.stringify(next, null, 2), 'utf-8')
   } catch {
     /* 非致命——内存态仍生效到本进程 */
   }

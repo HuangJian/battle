@@ -1285,3 +1285,33 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 - **下一条腿**：`c6-gae`（c6-margin 派生：bc=c5-gae.it160、λ=0.95、wPickup=1.5 锁定、
   seed_rotate 150、无 gates 块；起点基线 23%）。问题：机制修复后 c6 能否从 23% 爬 +
   策略是否自发多捡。
+
+## §2026-09-12-rollout-flag-bug（2026-09-12，local rollout 3命1星污染事件；已修、已记录、暂不重训）
+
+- **背景**：`nn-training/rl/cmd.py` `build_rollout_cmd` 用 `f"--{k}"` 拼 override 键
+  （`lives_override`/`player_level` 下划线），而 `tools/sim/export-rl-rollout.ts` 只认连字符
+  `--lives-override`/`--player-level`（未知 flag 静默忽略）⇒ **local 直跑全程以 hard 缺省
+  （3命1星）执行，远端节点以课程覆盖（1命0星）执行**。commit `1ee8955`（2026-09-12 16:55）
+  修复（下划线→连字符，`tests/test_rl_cmd.py` 锁死口径）。bug 自 `e828331`（2026-09-02 22:55，
+  M1 配置化）引入。
+- **污染范围**：e828331 → 1ee8955 之间所有课程的 **local 直跑 rollout 轨迹**（PPO 吃进
+  3命1星环境的样本）。各课程 local 局占比实测（`tmp/<course>/dist-agent-meta.jsonl`）：
+  c4-kb1 **39.1%**、c4-margin 28.3%、c6-gae 21.1%、c5-gae/c5-margin/c5-ent ~14-15%、
+  c6-margin/c6b-margin 11-13.6%、c5-tick/c6-pickup 13.3-13.8%。**样本量权重更高**：it160
+  local 45 局 7204 样本（avgTicks 1595）vs remote 105 局 11631 样本（avgTicks 1103）⇒
+  c6-gae 污染在 PPO 中的实际权重 ≈ **38%**（> 局数占比 21%，3命局活更久）。
+- **关键事实（判定可信的依据）**：eval 链路（`export-eval-game.ts` + `run_local_eval_game` +
+  sampler-agent）与 rollout 命令模板（cmd.py）是**两套独立代码**，eval 一直用正确连字符
+  flag ⇒ **所有 eval 口径结论（c5-gae 55% 爬升、c6-gae +7pp 等）未被污染**。修复后实测
+  it160 归档权重 1命0星采样 rollout = 27% ≈ eval 29% ≈ 配对 30%，三口径回归一致。
+- **c6-pickup 探针（污染窗口内训的 it35，修复后评估）**：c6 关 seeds 0-99 配对
+  **38% vs 起点 23% = +15pp，McNemar p=0.025 显著**；且高于 c6-gae 160 轮的 30%（in-loop
+  eval it5=38%/it35=34% 同步确认，非单点假象）。污染排除：污染更重的 c6-gae 反而不如它 ⇒
+  **38% 落在 wPickup 1.5→3.0 杠杆上（唯一变量）**，道具杠杆真效初证。
+- **处置（用户拍板）**：① 已收官课程（c5-gae/c6-gae/c5-tick 等）**不重训**——判定全走 eval
+  （干净），权重保留作 bc/参考，但出身含 X% 多命样本需知情；② c6-pickup **暂不重启**
+  （it36 权重 PPO 未完成即停，归档停在 it35；训练进程内存旧 cmd.py，修复不会热更新）；
+  重启时须用修复后代码、以 c6-pickup.it35 为 bc 续跑 it36+。
+- **违反后果**：任何人拿 training_log 的 rollout winRate 当能力口径（虚高 17pp 量级）；
+  任何人把污染窗口课程的权重当作"纯 1命0星数据"训出的（引用前必须查本条目占比表）；
+  任何人未经"修复后代码 + 冻结快照"就用本地直跑出教训性结论。
