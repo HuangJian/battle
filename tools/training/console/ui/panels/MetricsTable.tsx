@@ -2,11 +2,16 @@
  *  iter 列：无 eval 的主行可点 evalA（课程设计评估 → eval_log，与 Hero 最新 6 轮同路径）。 */
 
 import { useEffect, useRef, useState } from 'preact/hooks'
+import type { ComponentChildren } from 'preact'
 import {
   filterGroups,
   fmtPct,
   iterGroups,
   klTone,
+  PAIRED_COL_TITLES,
+  pairedBaselineOf,
+  pairedTone,
+  pairedVerdictText,
   retTone,
   TC_METRICS_FILTER,
   winTone,
@@ -14,6 +19,7 @@ import {
   type EvalSummary,
   type IterFilter,
   type IterRow,
+  type PairedCompare,
 } from '../../../ui/view'
 import type { ConsoleStateView } from '../../../ui/view'
 import { Badge } from '../../../ui/components/Pill'
@@ -50,8 +56,87 @@ type EvalACols = {
   onEvalA: (iter: number) => void
 }
 
+/** eval 行配对单元格：null → 基线轮标“基线”，否则“—”（与基线无交集等）。 */
+function pairedCell(
+  p: PairedCompare | null | undefined,
+  isBaseline: boolean,
+  pick: (c: PairedCompare) => ComponentChildren,
+): ComponentChildren {
+  if (!p) {
+    return isBaseline ? (
+      <span className="tc-muted" title="配对基线本轮：vs自己不判">
+        基线
+      </span>
+    ) : (
+      <span className="tc-muted">-</span>
+    )
+  }
+  return pick(p)
+}
+
+/** eval-only 模式的替换列：b01/b10/p/delta（PPO 诊断列在 eval 行恒为—，换成裁判）。 */
+function pairedCols(baselineIter: number | null): Col<MetricRow>[] {
+  const isBase = (r: MetricRow): boolean =>
+    r.kind === 'eval' && baselineIter !== null && r.iter === baselineIter
+  const get = (r: MetricRow): PairedCompare | null | undefined =>
+    r.kind === 'eval' ? r.eval.pairedVsFirst : undefined
+  return [
+    {
+      key: 'b01',
+      label: 'b01',
+      align: 'num',
+      thTitle: PAIRED_COL_TITLES.b01,
+      sortValue: (r) => get(r)?.b01 ?? null,
+      cell: (r) =>
+        pairedCell(get(r), isBase(r), (c) => <span title={PAIRED_COL_TITLES.b01}>{c.b01}</span>),
+    },
+    {
+      key: 'b10',
+      label: 'b10',
+      align: 'num',
+      thTitle: PAIRED_COL_TITLES.b10,
+      sortValue: (r) => get(r)?.b10 ?? null,
+      cell: (r) =>
+        pairedCell(get(r), isBase(r), (c) => <span title={PAIRED_COL_TITLES.b10}>{c.b10}</span>),
+    },
+    {
+      key: 'pairedP',
+      label: 'p',
+      align: 'num',
+      thTitle: PAIRED_COL_TITLES.p,
+      sortValue: (r) => get(r)?.p ?? null,
+      cell: (r) =>
+        pairedCell(get(r), isBase(r), (c) => (
+          <Badge
+            tone={pairedTone(c.verdict)}
+            title={`${PAIRED_COL_TITLES.p}；${pairedVerdictText(c.verdict)}`}
+          >
+            {c.p.toFixed(2)}
+          </Badge>
+        )),
+    },
+    {
+      key: 'delta',
+      label: 'delta',
+      align: 'num',
+      thTitle: PAIRED_COL_TITLES.delta,
+      sortValue: (r) => get(r)?.deltaPp ?? null,
+      cell: (r) =>
+        pairedCell(get(r), isBase(r), (c) => (
+          <span title={`${PAIRED_COL_TITLES.delta}；${pairedVerdictText(c.verdict)}`}>
+            {(c.deltaPp > 0 ? '+' : '') + c.deltaPp.toFixed(1)}pp
+          </span>
+        )),
+    },
+  ]
+}
+
 /** 列工厂：iter 列在无 eval 主行旁挂 evalA（课程 A 层，非 EvalBoard B）。 */
-function buildMetricCols(ea: EvalACols): Col<MetricRow>[] {
+function buildMetricCols(
+  ea: EvalACols,
+  mode: IterFilter,
+  baselineIter: number | null,
+): Col<MetricRow>[] {
   return [
     {
       key: 'iter',
@@ -250,6 +335,14 @@ function buildMetricCols(ea: EvalACols): Col<MetricRow>[] {
           <span className="tc-muted">-</span>
         ),
     },
+    // eval-only 下 PPO 诊断四列恒为—，换成配对裁判列；其余模式保持原样。
+    ...(mode === 'eval' ? pairedCols(baselineIter) : klEntropyCols()),
+  ]
+}
+
+/** PPO 诊断列（rollout 行专属；eval-only 模式下整列是—，由配对列替换）。 */
+function klEntropyCols(): Col<MetricRow>[] {
+  return [
     {
       key: 'kl',
       label: 'KL',
@@ -390,13 +483,18 @@ export function MetricsTable({
     })()
   }
 
-  const metricCols = buildMetricCols({
-    course,
-    ckpts,
-    readOnly,
-    busyIters,
-    onEvalA,
-  })
+  const metricCols = buildMetricCols(
+    {
+      course,
+      ckpts,
+      readOnly,
+      busyIters,
+      onEvalA,
+    },
+    filter,
+    // 配对基线轮：任一非空 pairedVsFirst 的 baseIter（全空 → null，配对列标—）。
+    pairedBaselineOf((stateView?.metrics.iters ?? []).map((r) => r.evalData?.pairedVsFirst)),
+  )
 
   if (!stateView?.metrics.available) {
     return (

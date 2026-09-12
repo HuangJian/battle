@@ -401,16 +401,13 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
   return out
 }
 
-/** 配对裁判（只读哨子，不进门判）：最新 eval vs 开腿首轮 / vs 上一 eval 轮。
- *
- * 同 (stage,seed) 逐局配对，比较的是同一语料下两个 checkpoint 的贪心胜负——
- * 跨语料（bc 在 0-99 vs 新权重在 860001+）时差分把卷面难度抵消掉。一边缺席的
- * 局只计 unpaired 诚实披露。单轮/无数据 → 对应项 null（UI 空态）。 */
-export function readPairedReferee(trajDir: string): PairedReferee | null {
-  const logPath = join(trajDir, 'eval_log.jsonl')
+/** eval 逐局胜负表：iter → `stage:seed` → win（同键重复落账取最后一条）。
+ * 配对裁判与逐轮装配共用这一次扫描。 */
+export function readEvalGameWins(trajDir: string): Map<number, Map<string, boolean>> {
   const byIter = new Map<number, Map<string, boolean>>()
+  const logPath = join(trajDir, 'eval_log.jsonl')
   try {
-    if (!existsSync(logPath)) return null
+    if (!existsSync(logPath)) return byIter
     for (const line of readFileSync(logPath, 'utf8').split(String.fromCharCode(10))) {
       if (!line.trim()) continue
       try {
@@ -432,49 +429,76 @@ export function readPairedReferee(trajDir: string): PairedReferee | null {
           m = new Map()
           byIter.set(iter, m)
         }
-        // 同 (iter,stage,seed) 重复落账取最后一条（文件序即时间序）。
         m.set(`${stage}:${seed}`, r.win === true || r.win === 1)
       } catch {
         /* skip bad line */
       }
     }
   } catch {
-    return null
+    /* unreadable */
   }
+  return byIter
+}
+
+/** 两轮胜负表配对比较（baseIter → ckptIter）：b01/b10 只看不一致对。 */
+export function compareSeedMaps(
+  ma: Map<string, boolean>,
+  mb: Map<string, boolean>,
+  baseIter: number,
+  ckptIter: number,
+): PairedCompare {
+  let b01 = 0
+  let b10 = 0
+  let paired = 0
+  for (const [k, wa] of ma) {
+    const wb = mb.get(k)
+    if (wb === undefined) continue
+    paired++
+    if (!wa && wb) b01++
+    else if (wa && !wb) b10++
+  }
+  const union = new Set([...ma.keys(), ...mb.keys()])
+  return {
+    baseIter,
+    ckptIter,
+    paired,
+    unpaired: union.size - paired,
+    b01,
+    b10,
+    deltaPp: paired > 0 ? +((100 * (b01 - b10)) / paired).toFixed(1) : 0,
+    p: mcnemarP(b01, b10),
+    verdict: pairedVerdict({ b01, b10, b11: 0, b00: 0 }),
+  }
+}
+
+/** 配对裁判（只读哨子，不进门判）：最新 eval vs 开腿首轮 / vs 上一 eval 轮。
+ *
+ * 同 (stage,seed) 逐局配对，比较的是同一语料下两个 checkpoint 的贪心胜负——
+ * 跨语料（bc 在 0-99 vs 新权重在 860001+）时差分把卷面难度抵消掉。一边缺席的
+ * 局只计 unpaired 诚实披露。单轮/无数据 → 对应项 null（UI 空态）。 */
+export function readPairedReferee(trajDir: string): PairedReferee | null {
+  const byIter = readEvalGameWins(trajDir)
   const iters = [...byIter.keys()].sort((a, b) => a - b)
   if (iters.length === 0) return null
   const latest = iters[iters.length - 1]
   const first = iters[0]
-  const compare = (a: number, b: number): PairedCompare => {
-    const ma = byIter.get(a) ?? new Map<string, boolean>()
-    const mb = byIter.get(b) ?? new Map<string, boolean>()
-    let b01 = 0
-    let b10 = 0
-    let paired = 0
-    for (const [k, wa] of ma) {
-      const wb = mb.get(k)
-      if (wb === undefined) continue
-      paired++
-      if (!wa && wb) b01++
-      else if (wa && !wb) b10++
-    }
-    const union = new Set([...ma.keys(), ...mb.keys()])
-    return {
-      baseIter: a,
-      ckptIter: b,
-      paired,
-      unpaired: union.size - paired,
-      b01,
-      b10,
-      deltaPp: paired > 0 ? +((100 * (b01 - b10)) / paired).toFixed(1) : 0,
-      p: mcnemarP(b01, b10),
-      verdict: pairedVerdict({ b01, b10, b11: 0, b00: 0 }),
-    }
-  }
-  const vsFirst = first === latest ? null : compare(first, latest)
-  const vsPrev = iters.length < 2 ? null : compare(iters[iters.length - 2], latest)
+  const get = (it: number): Map<string, boolean> => byIter.get(it) ?? new Map<string, boolean>()
+  const vsFirst = first === latest ? null : compareSeedMaps(get(first), get(latest), first, latest)
+  const vsPrev =
+    iters.length < 2
+      ? null
+      : compareSeedMaps(get(iters[iters.length - 2]), get(latest), iters[iters.length - 2], latest)
   if (!vsFirst && !vsPrev) return null
   return { vsFirst, vsPrev }
+}
+
+/** evalData 挂载逐轮配对（无 evalData 原样返回 null；浅拷贝不污染共享表）。 */
+function withPaired(
+  s: EvalSummary | undefined,
+  pairedVsFirst: PairedCompare | null,
+): EvalSummary | null {
+  if (!s) return null
+  return { ...s, pairedVsFirst }
 }
 
 /** 从 training_log.jsonl 读取最近 MAX_ITER_ROWS 轮迭代指标（实际值缓存优先：
@@ -486,6 +510,26 @@ export function readIterMetrics(trajDir: string): { rows: IterRow[] } {
   const logPath = join(trajDir, 'training_log.jsonl')
   // eval 汇总整册读一次（按 iter 键控），逐行查表——不在循环里反复开文件。
   const evalSummaries = readEvalSummaries(trajDir)
+  // 逐轮 vs 开腿配对：同趟扫描的副产品，每轮 evalData 自带（表格配对列的数据源）。
+  const evalWins = readEvalGameWins(trajDir)
+  const evalIters = [...evalWins.keys()].sort((a, b) => a - b)
+  const evalBaseline = evalIters.length > 0 ? evalIters[0] : null
+  const pairedByIter = new Map<number, PairedCompare | null>()
+  if (evalBaseline !== null) {
+    for (const it of evalIters) {
+      if (it === evalBaseline) {
+        pairedByIter.set(it, null) // 基线本轮：vs自己不判，UI 显示“基线”
+        continue
+      }
+      const c = compareSeedMaps(
+        evalWins.get(evalBaseline) ?? new Map<string, boolean>(),
+        evalWins.get(it) ?? new Map<string, boolean>(),
+        evalBaseline,
+        it,
+      )
+      pairedByIter.set(it, c.paired > 0 ? c : null)
+    }
+  }
   const actualsCache = loadActualsCache(trajDir)
   let cacheDirty = false
   try {
@@ -555,7 +599,7 @@ export function readIterMetrics(trajDir: string): { rows: IterRow[] } {
           loot: Number(dm.loot ?? 0),
           kills: +(Number(dm.progress ?? 0) * 20).toFixed(2),
           actuals,
-          evalData: evalSummaries.get(iter) ?? null,
+          evalData: withPaired(evalSummaries.get(iter), pairedByIter.get(iter) ?? null),
         })
       } catch {
         /* skip bad line */

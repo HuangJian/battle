@@ -276,6 +276,8 @@ export interface EvalSummary {
   dmgPerKill: number | null
   scoreMean: number | null
   scoreStd: number | null
+  /** 本轮 vs 开腿首轮的配对比较（同语料逐 seed；基线轮/无数据为 null）。 */
+  pairedVsFirst?: PairedCompare | null
 }
 
 export interface IterRow {
@@ -724,6 +726,27 @@ export function fmtPaired(c: PairedCompare | null, label: string): string {
     `${label} ${sign}${c.deltaPp.toFixed(1)}pp p=${c.p.toFixed(2)} ` +
     `(${c.b01}/${c.b10},n=${c.paired}) ${pairedVerdictText(c.verdict)}`
   )
+}
+
+/** 配对列头 hover 文案（大白话；MetricsTable 与 Hero 共用同一份，防两处分化）。 */
+export const PAIRED_COL_TITLES = {
+  b01: '基线输、新权重赢的局数——新学会的本事，涨没涨看它',
+  b10: '基线赢、新权重输的局数——学费（遗忘/漂移），只看涨幅会漏掉它',
+  p: '假设没进步、纯靠运气搞出这份比分的概率；<0.05才算数，灰色=证据不够',
+  delta: '净涨幅=b01−b10；不告诉你有多硬——7-0和21-14都是+7，硬度看p',
+} as const
+
+/** p 值徽章色：显著涨绿/显著跌红/其余灰（灰是正常态，不是故障）。 */
+export function pairedTone(v: PairedCompare['verdict']): 'g' | 'r' | 'gray' {
+  if (v === 'up') return 'g'
+  if (v === 'down') return 'r'
+  return 'gray'
+}
+
+/** 表格配对列的基线轮：任一非空 pairedVsFirst 的 baseIter（全空 → null）。 */
+export function pairedBaselineOf(vals: Array<PairedCompare | null | undefined>): number | null {
+  for (const v of vals) if (v) return v.baseIter
+  return null
 }
 
 export function fmtBytes(b: number | null | undefined): string {

@@ -2,8 +2,14 @@ import { afterAll, describe, expect, it } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
-import { readPairedReferee } from '../tools/training/console/iters'
-import { fmtPaired, pairedVerdictText } from '../tools/training/ui/view'
+import { readIterMetrics, readPairedReferee } from '../tools/training/console/iters'
+import {
+  fmtPaired,
+  PAIRED_COL_TITLES,
+  pairedBaselineOf,
+  pairedTone,
+  pairedVerdictText,
+} from '../tools/training/ui/view'
 
 /** fixture eval_log.jsonl：rows = [{iter, stage, seed, win}]。 */
 function fixtureDir(
@@ -119,5 +125,106 @@ describe('配对文案 fmtPaired', () => {
     expect(fmtPaired(null, 'vs开腿')).toContain('数据不足')
     expect(pairedVerdictText('up')).toBe('显著涨')
     expect(pairedVerdictText('down')).toBe('显著跌')
+  })
+})
+
+describe('列头 tooltip 文案 PAIRED_COL_TITLES', () => {
+  it('四键齐全、大白话、非空', () => {
+    expect(Object.keys(PAIRED_COL_TITLES).sort()).toEqual(['b01', 'b10', 'delta', 'p'])
+    for (const v of Object.values(PAIRED_COL_TITLES)) {
+      expect(v.length).toBeGreaterThan(10)
+    }
+    expect(PAIRED_COL_TITLES.b01).toContain('新学会')
+    expect(PAIRED_COL_TITLES.b10).toContain('学费')
+    expect(PAIRED_COL_TITLES.p).toContain('0.05')
+    expect(PAIRED_COL_TITLES.delta).toContain('b01−b10')
+  })
+
+  it('pairedTone：up绿/down红/flat灰；baseline 定位', () => {
+    expect(pairedTone('up')).toBe('g')
+    expect(pairedTone('down')).toBe('r')
+    expect(pairedTone('flat')).toBe('gray')
+    expect(pairedBaselineOf([null, undefined])).toBeNull()
+    expect(
+      pairedBaselineOf([
+        null,
+        {
+          baseIter: 5,
+          ckptIter: 10,
+          paired: 3,
+          unpaired: 0,
+          b01: 1,
+          b10: 1,
+          deltaPp: 0,
+          p: 1,
+          verdict: 'flat',
+        },
+      ]),
+    ).toBe(5)
+  })
+})
+
+describe('逐轮 pairedVsFirst 装配 readIterMetrics', () => {
+  const mkTraj = (): string => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'paired-rows-'))
+    dirs.push(dir)
+    const T = (iter: number) =>
+      JSON.stringify({
+        event: 'iteration',
+        iter,
+        time: `2026-09-12 1${iter}:00:00`,
+        winRate: 0.4,
+        score_mean: 0.5,
+        score_std: 0.1,
+        samples: 100,
+        rollout_sec: 10,
+        ppo_sec: 10,
+        kl: 0.01,
+        entropy: 0.4,
+        policy: 0.001,
+        value: 0.5,
+        mean_ret: 0,
+        lr: 0.00005,
+        expectedGames: 10,
+        halted: false,
+        dim_means: {},
+        ticks: 1000,
+      })
+    // it5: F,T,T · it10: T,T,F → b01=1(seed0) b10=1(seed2)
+    const E = (iter: number, seed: number, win: boolean) =>
+      JSON.stringify({ event: 'eval', iter, wver: `w${iter}`, stage: 2000, seed, win })
+    const S = (iter: number, wins: number) =>
+      JSON.stringify({
+        event: 'eval_summary',
+        iter,
+        wver: `w${iter}`,
+        games: 3,
+        wins,
+        winRate: wins / 3,
+      })
+    writeFileSync(path.join(dir, 'training_log.jsonl'), [T(5), T(10)].join('\n') + '\n')
+    writeFileSync(
+      path.join(dir, 'eval_log.jsonl'),
+      [
+        E(5, 0, false),
+        E(5, 1, true),
+        E(5, 2, true),
+        E(10, 0, true),
+        E(10, 1, true),
+        E(10, 2, false),
+        S(5, 2),
+        S(10, 2),
+      ].join('\n') + '\n',
+    )
+    return dir
+  }
+
+  it('基线轮 null、后轮挂 b01/b10', () => {
+    const { rows } = readIterMetrics(mkTraj())
+    const r5 = rows.find((r) => r.iter === 5)
+    const r10 = rows.find((r) => r.iter === 10)
+    expect(r5?.evalData?.pairedVsFirst ?? null).toBeNull()
+    expect(r10?.evalData?.pairedVsFirst).toMatchObject({ b01: 1, b10: 1, paired: 3, deltaPp: 0 })
+    expect(r10?.evalData?.pairedVsFirst?.verdict).toBe('flat')
   })
 })

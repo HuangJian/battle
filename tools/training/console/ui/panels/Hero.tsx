@@ -10,6 +10,10 @@ import {
   klTone,
   latestRow,
   metricSeries,
+  PAIRED_COL_TITLES,
+  pairedBaselineOf,
+  pairedTone,
+  pairedVerdictText,
   retTone,
   TC_HERO_ITER_VIEW,
   TC_HERO_ITERS_COLLAPSED,
@@ -284,6 +288,8 @@ function MainTable({
  *  击杀/道具为每局平均，残血为胜局平均，得分无 ±std）、窗口用时、评估权重版本。 */
 function EvalTable({ rows }: { rows: IterRow[] }) {
   const groups = filterGroups(iterGroups(rows), 'eval').slice(0, 6)
+  // 配对基线轮：全量行里任一非空 pairedVsFirst 的 baseIter（只看前 6 行会误判）。
+  const baseIter = pairedBaselineOf(rows.map((r) => r.evalData?.pairedVsFirst))
   return (
     <table className="tc-table tc-table--dense">
       <thead>
@@ -291,6 +297,18 @@ function EvalTable({ rows }: { rows: IterRow[] }) {
           <th>iter</th>
           <th>时间</th>
           <th>eval 胜率</th>
+          <th className="tc-num" title={PAIRED_COL_TITLES.b01}>
+            b01
+          </th>
+          <th className="tc-num" title={PAIRED_COL_TITLES.b10}>
+            b10
+          </th>
+          <th className="tc-num" title={PAIRED_COL_TITLES.p}>
+            p
+          </th>
+          <th className="tc-num" title={PAIRED_COL_TITLES.delta}>
+            delta
+          </th>
           <th className="tc-num">全歼</th>
           <th className="tc-num" title="胜局平均耗时（ticks）">
             胜局耗时
@@ -315,13 +333,15 @@ function EvalTable({ rows }: { rows: IterRow[] }) {
       <tbody>
         {groups.length === 0 ? (
           <tr>
-            <td colSpan={11} className="tc-muted" style={{ textAlign: 'center' }}>
+            <td colSpan={15} className="tc-muted" style={{ textAlign: 'center' }}>
               该课程暂无 eval 评估记录
             </td>
           </tr>
         ) : (
           groups.map((g) => {
             const e = g.eval!
+            const p = e.pairedVsFirst ?? null
+            const isBase = !p && baseIter !== null && g.iter === baseIter
             return (
               <tr key={`e${g.iter}`}>
                 <td>
@@ -355,6 +375,47 @@ function EvalTable({ rows }: { rows: IterRow[] }) {
                     </>
                   ) : (
                     <span className="tc-muted">-</span>
+                  )}
+                </td>
+                <td className="tc-num">
+                  {!p ? (
+                    isBase ? (
+                      <span className="tc-muted" title="配对基线本轮：vs自己不判">
+                        基线
+                      </span>
+                    ) : (
+                      <span className="tc-muted">-</span>
+                    )
+                  ) : (
+                    <span title={PAIRED_COL_TITLES.b01}>{p.b01}</span>
+                  )}
+                </td>
+                <td className="tc-num">
+                  {!p ? (
+                    <span className="tc-muted">-</span>
+                  ) : (
+                    <span title={PAIRED_COL_TITLES.b10}>{p.b10}</span>
+                  )}
+                </td>
+                <td className="tc-num">
+                  {!p ? (
+                    <span className="tc-muted">-</span>
+                  ) : (
+                    <Badge
+                      tone={pairedTone(p.verdict)}
+                      title={`${PAIRED_COL_TITLES.p}；${pairedVerdictText(p.verdict)}`}
+                    >
+                      {p.p.toFixed(2)}
+                    </Badge>
+                  )}
+                </td>
+                <td className="tc-num">
+                  {!p ? (
+                    <span className="tc-muted">-</span>
+                  ) : (
+                    <span title={`${PAIRED_COL_TITLES.delta}；${pairedVerdictText(p.verdict)}`}>
+                      {(p.deltaPp > 0 ? '+' : '') + p.deltaPp.toFixed(1)}pp
+                    </span>
                   )}
                 </td>
                 <td className="tc-num">
