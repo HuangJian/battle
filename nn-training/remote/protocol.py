@@ -37,11 +37,15 @@ from typing import Literal
 # ------------------------------------------------------------------ constants
 
 PROTO = 1  # 协议版本：未知字段忽略，缺失必填 fail fast（D1）
-# §343（2026-09-06）：job 分发改为竞速广播（先回传结果者胜，store_result 首写锁定，
-# 落后者 409 丢弃），租约/心跳不再参与调度。LEASE_SEC/HEARTBEAT_SEC 仅剩兼容职责：
-# 旧租约路径（_JobStore.claim/heartbeat/release + worker 心跳线程守卫）仍在，hub
-# 重启即丢租约、D8 账本重建语义不变。
-LEASE_SEC = 30 * 60  # （兼容）旧租约时长；竞速模型下无调度职责
+# §343（2026-09-06）竞速广播 → P3b（2026-09-12，DECISIONS supersede §343）改回
+# 独占加超时：领取即设租约（CLAIM_TTL_SEC），心跳续租，过期回池。LEASE_SEC 只留
+# 旧租约兼容读；HEARTBEAT_SEC 仍是 worker 心跳周期。hub 重启即丢租约（首写锁定兜底）、
+# D8 账本重建语义不变。
+LEASE_SEC = 30 * 60  # （兼容）旧租约时长；现行调度只认 CLAIM_TTL_SEC
+#: 独占租约 TTL（plan multi-course-parallel-training P3b §3.9：supersede §343——
+#: 多 worker 时竞速广播改独占加超时）。领取即设租约（owner + expiry 同时置），
+#: 心跳 60s 续租，TTL 内无心跳 → 回池。LEASE_SEC 只留旧租约兼容读。
+CLAIM_TTL_SEC = 300
 HEARTBEAT_SEC = 60  # （兼容）旧心跳周期；仅旧租约模式 hub 的 worker 心跳线程使用
 AUTH_HEADER = "Authorization"  # Bearer <token>（D9；token 永不落盘/落日志）
 

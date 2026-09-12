@@ -6,10 +6,12 @@ job（manifest + payload.zip + code.zip）POST 到本服务端；本机后台跑
 落在 Kaggle 网络，HUB 只做出站 HTTPS——不再依赖 HUB 侧隧道。
 
 端点（全部 Bearer token 鉴权）：
-  GET  /ping                 存活 + 忙闲
+  GET  /ping                 存活 + 忙闲 + 排队深度 queued
   GET  /code-sha?sha=X       本机 code 缓存是否已有 sha=X 的代码（HUB 决定是否随 job 上传）
   POST /job                  {manifest, payload_b64, code_b64?} → 202 受理（后台 PPO）
-                             409 busy（单 GPU 串行）| 428 code-missing（请重传带 code）| 400 校验失败
+                              202 queued（在跑：入队，position 告知排位）
+                              202 幂等（同 jid 重发：不重复 spawn）
+                              409 busy（仅队满 WORKER_QUEUE_MAX=8）| 428 code-missing | 400 校验失败
   GET  /job/{id}/status      {"state": "running" | "done" | "failed" | "unknown"}
   GET  /job/{id}/result      200 结果 JSON（幂等可重复读）| 202 在跑 | 500 失败 | 404 未知
 
@@ -27,6 +29,8 @@ import os
 import secrets
 import threading
 import time
+from collections import deque
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -37,9 +41,21 @@ from remote.worker import run_job
 
 AUTH_HEADER = "Authorization"
 
+#: submit/kick 起后台线程的回调（state 构造后由 make 侧注入）。
+Starter = Callable[[str, dict], None]
+
+#: 共享 worker 有界 FIFO 上界（plan P3b §3.8）。单 GPU 一次只跑一个，多的排队；
+#: 队满才 409（常态队深 ≤2；频发 409 → 加 worker/降课数，不放大队列）。
+WORKER_QUEUE_MAX = 8
+
 
 class WorkerServerState:
-    """job 状态表（单 GPU 串行：同一时刻至多一个在跑）。"""
+    """job 状态表（单 GPU 串行：同一时刻至多一个在跑，多出的进有界 FIFO）。
+
+    多课程共享（plan P3b §3.8）：N:1 共享时 A 课跑、B 课排队——排队代替 409，
+    worker 零空闲（流水线 ≈ R + 2P）。队满才 409；同 jid 重发幂等（超时重试
+    不重复 spawn，顺带修旧 busy-409 下的重传风暴）。
+    """
 
     def __init__(self, work_dir: Path) -> None:
         self.work_dir = work_dir
@@ -47,6 +63,9 @@ class WorkerServerState:
         self._lock = threading.Lock()
         self.jobs: dict[str, dict] = {}  # jid -> {"state", "result"?, "error"?}
         self.done_total = 0
+        self._queue: deque[str] = deque()  # 等待执行的 jid（FIFO）
+        self._pending: dict[str, dict] = {}  # jid -> {manifest, payload_zip, code_zip, echo}
+        self._starter: Starter | None = None  # make 侧注入
 
     def code_cached(self, code_sha256: str) -> bool:
         return (self.work_dir / "code_cache" / code_sha256).exists()
@@ -76,6 +95,54 @@ class WorkerServerState:
     def busy(self) -> bool:
         with self._lock:
             return any(j["state"] == "running" for j in self.jobs.values())
+
+    def queued(self) -> int:
+        """排队深度（/ping 可观测；console 冒烟沿用）。"""
+        with self._lock:
+            return len(self._queue)
+
+    def set_starter(self, starter) -> None:
+        self._starter = starter
+
+    def submit(self, jid: str, item: dict) -> dict:
+        """提交 job：已知 jid → 幂等（不重复 spawn）；空闲 → 立即起跑；
+        忙 → 入队（返回 position）；队满 → 满（调用方回 409）。
+
+        返回 {"action": "run"|"queue"|"duplicate"|"full", "position"?: int}。
+        """
+        with self._lock:
+            if jid in self.jobs or jid in self._pending:
+                return {"action": "duplicate"}
+            if self._queue or any(j["state"] == "running" for j in self.jobs.values()):
+                if len(self._queue) >= WORKER_QUEUE_MAX:
+                    return {"action": "full"}
+                self._pending[jid] = item
+                self._queue.append(jid)
+                return {"action": "queue", "position": len(self._queue)}
+            self.jobs[jid] = {"state": "running"}
+            starter, pending_item = self._starter, item
+        assert starter is not None, "starter 未注入（make_worker_server 负责）"
+        # 锁外起线程：spawn 不阻塞，但启动路径不持锁最干净。
+        starter(jid, pending_item)
+        return {"action": "run"}
+
+    def kick(self) -> None:
+        """一个 job 终结（成功/失败都调——失败不堵队）后拉起队首。"""
+        with self._lock:
+            if any(j["state"] == "running" for j in self.jobs.values()):
+                return
+            while self._queue:
+                jid = self._queue.popleft()
+                item = self._pending.pop(jid, None)
+                if item is None:
+                    continue
+                self.jobs[jid] = {"state": "running"}
+                starter = self._starter
+                break
+            else:
+                return
+        assert starter is not None, "starter 未注入（make_worker_server 负责）"
+        starter(jid, item)
 
 
 def _execute_job(
@@ -115,6 +182,8 @@ def _execute_job(
     except Exception as e:
         state.set_error(jid, f"{type(e).__name__}: {e}")
         log(f"job {jid} FAILED: {e}")
+    finally:
+        state.kick()  # 失败不堵队：队首立即顶上（流水线无间隙）
 
 
 def make_worker_server(
@@ -157,6 +226,7 @@ def make_worker_server(
                             "ok": True,
                             "pid": os.getpid(),
                             "busy": state.busy(),
+                            "queued": state.queued(),
                             "done": state.done_total,
                         }
                     )
@@ -194,9 +264,6 @@ def make_worker_server(
                 if path != "/job":
                     self._json({"error": "not found"}, 404)
                     return
-                if state.busy():
-                    self._json({"error": "busy — 单 GPU 串行，稍后重试"}, 409)
-                    return
                 raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
                 body = json.loads(raw.decode("utf-8"))
                 manifest = normalize_manifest(body["manifest"])
@@ -213,31 +280,55 @@ def make_worker_server(
                     )
                     return
                 echo = self.headers.get("X-Smoke-Echo", "") == "1"
-                state.set_state(jid, "running")
-                threading.Thread(
-                    target=_execute_job,
-                    args=(
-                        state,
-                        manifest,
-                        payload_zip,
-                        code_zip,
-                        state.work_dir,
-                        device,
-                        torch_threads,
-                        echo,
-                        log,
-                    ),
-                    daemon=True,
-                    name=f"job-{jid[:8]}",
-                ).start()
-                log(f"job {jid} accepted（echo={echo}）— PPO 后台执行")
-                self._json({"job_id": jid, "status": "accepted"}, 202)
+                item = {
+                    "manifest": manifest,
+                    "payload_zip": payload_zip,
+                    "code_zip": code_zip,
+                    "echo": echo,
+                }
+                verdict = state.submit(jid, item)
+                if verdict["action"] == "duplicate":
+                    # 幂等：超时重试/重复 POST 不重复 spawn（修旧 busy-409 下的重传风暴）。
+                    rec = state.get(jid) or {"state": "queued"}
+                    log(f"job {jid} 重复提交——幂等受理（当前 {rec.get('state')}），不重复执行")
+                    self._json({"job_id": jid, "status": rec.get("state", "queued")}, 202)
+                elif verdict["action"] == "queue":
+                    log(f"job {jid} 入队（position={verdict['position']}）— 在跑 job 结束后即顶上")
+                    self._json(
+                        {"job_id": jid, "status": "queued", "position": verdict["position"]}, 202
+                    )
+                elif verdict["action"] == "full":
+                    self._json(
+                        {"error": f"busy — 队列已满（{WORKER_QUEUE_MAX}），稍后重试"}, 409
+                    )
+                else:
+                    log(f"job {jid} accepted（echo={echo}）— PPO 后台执行")
+                    self._json({"job_id": jid, "status": "accepted"}, 202)
             except (ProtocolError, ValueError, KeyError) as e:
                 self._json({"error": str(e)}, 400)
             except Exception as e:
                 log(f"POST {path} ERROR: {e}")
                 self._json({"error": "internal"}, 500)
 
+    def _starter(jid: str, item: dict) -> None:
+        threading.Thread(
+            target=_execute_job,
+            args=(
+                state,
+                item["manifest"],
+                item["payload_zip"],
+                item["code_zip"],
+                state.work_dir,
+                device,
+                torch_threads,
+                item["echo"],
+                log,
+            ),
+            daemon=True,
+            name=f"job-{jid[:8]}",
+        ).start()
+
+    state.set_starter(_starter)
     return ThreadingHTTPServer((host, port), Handler)
 
 

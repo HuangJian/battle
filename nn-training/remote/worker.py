@@ -407,6 +407,7 @@ def run_job(
     torch_threads: int = 0,
     echo: bool = False,
     preloaded: dict | None = None,
+    code_cache_dir: Path | None = None,
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
 ) -> dict:
     """执行单个 job：下载 → 校验 → PPO → 产出 weights_json + opt tar → POST。
@@ -467,7 +468,10 @@ def run_job(
     # ---- code.zip 内容寻址缓存（2026-09-05）：同 sha 只下载/解压一次 ----
     # code 在多次迭代间通常不变（sha 只由源码内容决定，pack 侧时间戳已固定化），
     # 缓存命中即省一次隧道下载 + 解压。缓存目录按 sha 隔离，tmp 原子改名防半截。
-    code_cache_dir = work_dir / "code_cache" / manifest["code_sha256"]
+    # 多课程共享 worker（P3b C3）：code_cache 留共享根（按 sha 内容寻址，跨课复用），
+    # 只有 job 目录按源分区——调用方经 code_cache_dir 传入共享根。
+    code_root = code_cache_dir if code_cache_dir is not None else work_dir / "code_cache"
+    code_cache_dir = code_root / manifest["code_sha256"]
     if code_cache_dir.exists():
         sys.path.insert(0, str(code_cache_dir))
         log(f"job {jid}: code cache 命中（{manifest['code_sha256'][:12]}…）——跳过下载解压")
@@ -481,7 +485,7 @@ def run_job(
             raise RetryableError("code_sha256 不匹配——传输损坏（重下可修复）")
         import zipfile
 
-        code_extract_tmp = work_dir / "code_cache" / (manifest["code_sha256"] + ".tmp")
+        code_extract_tmp = code_root / (manifest["code_sha256"] + ".tmp")
         code_extract_tmp.mkdir(parents=True, exist_ok=True)
         code_zip_path = job_dir / "code.zip"
         code_zip_path.write_bytes(code_raw)
@@ -912,6 +916,7 @@ def worker_loop(
     echo: bool = False,
     max_idle_sec: float = 0.0,
     restart_argv: list[str] | None = None,
+    hub_urls: list[str] | None = None,
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
 ) -> int:
     """无状态轮询主循环。返回处理的 job 数。
@@ -922,15 +927,32 @@ def worker_loop(
       传值 = 有监督器（supervise_worker / 新版 main()）→ 热替换以 HOT_RELOAD_EXIT
       退出，由监督器用同一套参数重新拉起子进程加载新代码；
       None = 无监督器 → 热替换降级为提示人工重启并返回。
+    hub_urls：多 hub 轮询（P3b §3.8：`--poll` 可重复/逗号分隔，同 token）。
+      None/空 → [base_url]（默认行为零变化）。多 hub 时 round-robin 串行 run_job
+      （单 GPU 互挤否决项），work_dir 按 hub 索引分区（`hub0/<jid>`…），code_cache
+      留共享根。异 commit job 由既有 _ACTIVE_CODE_SHA 守卫转 86 + 监督器重拉。
     """
     done = 0
     idle_since = time.time()
     _last_alive_log = time.time()
     _polls_since_log = 0
     _polls_since_accept = 0
-    # §386：停机状态感知（过渡尝试一次；halt 清除后复位，下次停机可再试）。
-    halt_seen = False
+    # 多 hub 轮询（P3b §3.8）：None/空 → 单 hub（默认行为零变化）；多 hub round-robin。
+    hubs = [u for u in (hub_urls or [base_url]) if u]
+    if not hubs:
+        hubs = [base_url]
+    multi = len(hubs) > 1
+    shared_code_cache = work_dir / "code_cache"
+    hi = 0
+    # §386：停机状态感知（过渡尝试一次；halt 清除后复位，下次停机可再试）——按 hub 独立。
+    halt_seen: dict[int, bool] = {}
     while True:
+        base_url = hubs[hi]
+        # work 分区（P3b C3）：多 hub 按源分区 hub0/<jid>…（分区才语义正确）；
+        # 单 hub 沿用旧根（默认行为零变化）。code_cache 永远共享根。
+        part_dir = work_dir / f"hub{hi}" if multi else work_dir
+        if multi:
+            part_dir.mkdir(parents=True, exist_ok=True)
         try:
             _polls_since_log += 1
             _polls_since_accept += 1
@@ -938,16 +960,17 @@ def worker_loop(
         except Exception as e:
             log(f"poll failed: {e} — retry in {poll_sec}s")
             time.sleep(poll_sec)
+            hi = (hi + 1) % len(hubs)
             continue
         got_halt = isinstance(job, dict) and job.get("halt") is True
-        if got_halt and not halt_seen:
+        if got_halt and not halt_seen.get(hi):
             # §386：停机命令随任务同发——先尝试真停机（Colab unassign）；
             # 停不掉（Kaggle 无 API）→ **照常执行下面的任务**（云机活着就不闲置，能继续训练）。
-            halt_seen = True
+            halt_seen[hi] = True
             log("云端停机达令已送达：先尝试停机宿主实例（停不掉则照常执行任务）")
             _release_cloud_machine(log)
-        elif not got_halt and halt_seen:
-            halt_seen = False  # 停机条件消失（hub resume）→ 复位
+        elif not got_halt and halt_seen.get(hi):
+            halt_seen[hi] = False  # 停机条件消失（hub resume）→ 复位
         if job is None:
             if once:
                 break  # --once：无 job 或已处理完都退出（冒烟/单发）
@@ -963,6 +986,7 @@ def worker_loop(
                 _last_alive_log = time.time()
                 _polls_since_log = 0
             time.sleep(poll_sec)
+            hi = (hi + 1) % len(hubs)  # 空闲也轮转：多 hub 下一个也得被问到
             continue
         if job.get("halt") is True and not job.get("job_id"):
             # 纯停机达令、无任务：不退出、继续等待（云机活着=随时可续训）。
@@ -976,6 +1000,7 @@ def worker_loop(
                 _last_alive_log = time.time()
                 _polls_since_log = 0
             time.sleep(poll_sec)
+            hi = (hi + 1) % len(hubs)  # 纯停机达令也轮转
             continue
         idle_since = time.time()
         _polls_since_log = 0  # claim 即上报：alive 行下次只数 claim 之后的轮询，不与本行重复
@@ -984,9 +1009,9 @@ def worker_loop(
         log(
             f"job {jid} claimed — downloading payload ({_polls_since_accept} polls since last accepted result)"
         )
-        # 心跳线程仅在有租约时启动（§343 竞速 hub 不下发 lease_token——无租约可续，
-        # 结果胜负由 hub store_result 首写锁定决定，落后者 409 丢弃）。
-        # 旧租约模式 hub：H1（review-hy P0）job 执行期间 60s 周期续租，job 结束 join。
+        # 心跳线程仅在有租约时启动（P3b 独占 hub 下发 lease_token；无租约
+        # （旧 hub/§343 时代）则不续租，结果胜负由首写锁定决定）。
+        # job 执行期间 60s 周期续租（长 job 靠它活过 CLAIM_TTL_SEC），job 结束 join。
         _hb_stop = threading.Event()
         hb_thread = None
         if lease_token:
@@ -1003,10 +1028,11 @@ def worker_loop(
                 base_url,
                 token,
                 job,
-                work_dir=work_dir,
+                work_dir=part_dir,
                 device=device,
                 torch_threads=torch_threads,
                 echo=echo,
+                code_cache_dir=shared_code_cache if multi else None,
                 log=log,
             )
             post_result(base_url, token, jid, result, lease_token=lease_token)
@@ -1045,13 +1071,18 @@ def worker_loop(
             # H8（review-hy）：--once 模式 job 失败必须非零退出——冒烟/单发场景
             # 退出码 0 会静默掩盖失败（smoke 只判 returncode）
             return -1 if not job_ok else done
+        hi = (hi + 1) % len(hubs)  # 跑完一个换下一 hub（round-robin 公平）
     return done
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="remote PPO worker (cloud, stateless)")
     ap.add_argument(
-        "--poll", required=True, help="hub-server base URL, e.g. https://hub.example.com"
+        "--poll",
+        required=True,
+        action="append",
+        help="hub-server base URL（可重复/逗号分隔多 hub，同 token；"
+        "P3b 多课程共享 worker：本地采集与云端 PPO 可执行不同课程任务）",
     )
     ap.add_argument("--token", default="", help="bearer token（与 hub-server 一致）")
     ap.add_argument("--token-file", default="", help="从文件读取 token（避免进程列表泄露，H10）")
@@ -1083,13 +1114,21 @@ def main() -> None:
     if not out.is_absolute():
         out = Path(__file__).resolve().parents[2] / out
     out.mkdir(parents=True, exist_ok=True)
+    # P3b：--poll 可重复/逗号分隔（同 token）；单值 = 旧行为。顺序即轮询顺序。
+    raw_polls = args.poll if isinstance(args.poll, list) else [args.poll]
+    hub_urls = [u.strip().rstrip("/") for p in raw_polls for u in str(p).split(",") if u.strip()]
+    if not hub_urls:
+        print("[worker] ERROR: --poll 为空", flush=True)
+        sys.exit(1)
+    if len(hub_urls) > 1:
+        print(f"[worker] 多 hub 轮询（round-robin）：{hub_urls}", flush=True)
     if os.environ.get("REMOTE_WORKER_CHILD") == "1":
         # ── 子进程模式（由监督器 supervise_worker / 新版 main() 拉起）──
         # 热替换必须退 HOT_RELOAD_EXIT(86) 让监督器重拉：worker_loop 以
         # restart_argv「非空 = 有监督器」判定走退出码（空 = 无监督器返回）。
         # 这里传本进程的参数列表（与监督器那侧同源）即可，子进程不自己重拉。
         n = worker_loop(
-            args.poll,
+            hub_urls[0],
             token,
             work_dir=out,
             device=args.device,
@@ -1099,6 +1138,7 @@ def main() -> None:
             echo=args.echo,
             max_idle_sec=args.max_idle_sec,
             restart_argv=sys.argv[1:],
+            hub_urls=hub_urls,
         )
         print(f"[worker] done: {n} job(s) processed")
         # H8：--once 失败（返回 -1）→ 非零退出码

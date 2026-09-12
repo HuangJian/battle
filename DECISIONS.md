@@ -1222,3 +1222,39 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   ⑤ 预算 STOP 不是停机达令，不触发云机停机。
 - **违反后果**：回退到"门即停车"→ 每 ~6-7 轮一次停线 + 云机连带停机 + 人手重启（本次现场连锁）；
   停机期 worker 日志静默会继续被误判成罢工。
+
+## §2026-09-12-multi-course-key-is-stem（多课程命名空间键 = 课程文件 stem，不是内部 name）
+
+- **背景**：P1 活体验收前发现 `s-dodge.jsonc` 内部 `name` 是 `s-dodge-mix`，而控制台课程选择 /
+  `tmp/<course>/` / `out` 路径 / TS launcher `peekCourse` 全用文件名 stem（`s-dodge`）。
+  `run_rl.py` 锁曾用 `args.course_name`（内部名）→ `.run_rl.s-dodge-mix.lock`，与 TS 预检查的
+  `.run_rl.s-dodge.lock` 对不上：preflight 永远查不到在跑进程，同课双开只能靠 python 侧兜底。
+- **备选与否决**：锁用内部名、TS 侧改读内部名 —— 否（内部名要解析课程文件才知道，launcher
+  preflight/kill 匹配全要变重；且 `tmp/`、`out`、`courses` 块全是 stem，改一边不如统一到多数方）。
+- **决定**：命名空间键 = 课程文件 stem。`train/loop_util.py::course_key_from_path()` 为唯一推导点；
+  `run_rl.py` 锁改调它；`train_loop.py --course` 文档写明传短名（与 `--course s-dodge` 同拼写）；
+  内部 `name` 退为 S9 归属标注（events/gate 内用，不参与调度）。回归测试
+  `test_course_key_is_file_stem_not_inner_name` 锁死 stem 规则。
+- **违反后果**：回到内部名 → 双课 preflight/kill/账本课程键三方错位（静默错位，最难查的一类）。
+
+## §2026-09-12-multi-course-p3b-supersedes-343（多课程：独占加超时租约重启用 §343；worker 侧有界 FIFO）
+
+- **supersedes §343**：PPO job 分发从"竞速广播"改回**独占加超时**——`GET /jobs/next` 领取即设
+  租约（owner + expiry + last_heartbeat **同时置**）并下发 `lease_token`；`claimable_job_ids` 排除
+  持有未过期租约的 job；`POST /jobs/{id}/result` 有活租约时验 `X-Lease-Token`（无租约照收，兼容
+  旧 worker/重发）；首写锁定保留（hub 重启丢租约的兜底）。新常量 `CLAIM_TTL_SEC = 300`；心跳
+  60s 续租，且 `heartbeat()` 必须以它为**唯一** TTL 来源（沿用 `LEASE_SEC = 1800` 会让死 worker
+  隐身 30min）。hub 记 `last_heartbeat` 并在 `/jobs/status` 暴露 `lease_expires_in`/
+  `last_heartbeat_ago`（worker 侧吞错保持现状）。
+- **为何敢重启租约**：§343 的竞速广播在多 worker 下让同 job 被重复算、慢者 409 白烧；单 worker
+  时代它靠"孤儿零等待重领"避开 it24 白等 30min，但多课程并行需要 worker 之间不撞车。it24 的教训
+  由四道闸抵消：TTL 300s + 60s 心跳续租 + 主动 release + 首写锁定兜底；大抖动双算/hub 重启丢租约
+  属已知 edge，结果一致。halt 与租约正交（停机不拦分发、不清租约）。
+- **备选与否决**：HUB 侧等待（状态应住执行方，竞态）/ worker 多线程并发 PPO（单 GPU 互挤）——
+  均否；选 worker 侧**有界 FIFO**（`WORKER_QUEUE_MAX = 8`，满才 409）+ 同 jid 幂等（顺带修超时
+  重试重复执行）+ 失败不堵队 + `/ping queued`；HUB 传输语义零改动。pull 侧 `--poll` 可多 hub
+  轮询、`work_dir` 按源分区（`work_dir/<hub_id>/<jid>`），共享课程须同 commit（异 commit 走既有
+  86 + 监督器重拉）。
+- **违反后果**：回退到竞速广播 → 多 worker 重复算 PPO + 慢者白烧；TTL 调大 → it24 倒车（死 worker
+  回收失灵）。plan：`plan/multi-course-parallel-training.md` §3.8/§3.9、P3b；实现见
+  `nn-training/remote/{protocol,hub_server,worker_server}.py`。

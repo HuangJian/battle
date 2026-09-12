@@ -288,6 +288,21 @@ def test_idempotency_key_and_job_id_stable() -> None:
     assert make_job_id(m3) != make_job_id(m1)
 
 
+def test_manifest_course_name_is_optional_and_job_id_stable() -> None:
+    """P4-W2：course_name 是可选审计键（wire 兼容），且不进幂等键/job_id。
+
+    `course`（全文快照）/`course_name`（短名）/`course_fp`（血缘）三字段分工：
+    短名只做可读归属，绝不影响 job 幂等（否则旧 job 全部换 jid 重发）。
+    """
+    m = _mini_manifest()
+    tagged = normalize_manifest({**m, "course_name": "s-dodge-mix"})
+    assert tagged["course_name"] == "s-dodge-mix"
+    # 旧 manifest（无 course_name）逐字段通过：未知/可选键不阻塞 wire 兼容
+    assert "course_name" not in normalize_manifest(dict(m))
+    # 短名不进幂等键 → job_id 不变
+    assert make_job_id(tagged) == make_job_id(m)
+
+
 def test_job_seed_deterministic_and_distinct() -> None:
     s1 = job_seed("run", 1, "w" * 64)
     s2 = job_seed("run", 1, "w" * 64)
@@ -693,12 +708,13 @@ def test_hub_workers_halt_flow(tmp_path: Path) -> None:
         store.publish(jid, manifest, b"PK\x03\x04fake")
         st, body = _http(base, "sekret", "/jobs/next")
         assert st == 200 and body["job_id"] == jid and body["halt"] is True
+        assert body.get("lease_token"), "独占发放必须下发 lease_token（P3b）"
 
-        # resume → halt 复位；任务不受影响照常可领
+        # resume → halt 复位；已领走的任务不重发（P3b 独占：租约期内 job_id None）
         st, body = _http(base, "sekret", "/admin/workers/resume")
         assert st == 200 and body == {"halt": False}
         st, body = _http(base, "sekret", "/jobs/next")
-        assert st == 200 and body["job_id"] == jid and body["halt"] is False
+        assert st == 200 and body["job_id"] is None and body["halt"] is False
     finally:
         srv.shutdown()
         th.join()
@@ -752,16 +768,17 @@ def test_hub_server_auth_and_job_lifecycle(tmp_path: Path) -> None:
         )
         store.publish(jid, manifest, b"PK\x03\x04fake")
 
-        # §343 竞速：无租约——所有轮询者领到同一 open job（广播）
+        # P3b 独占加超时（supersede §343）：首个 open job 领取即设租约 + 下发 lease_token
         st, body = _http(base, "sekret", "/jobs/next")
         assert st == 200 and body["job_id"] == jid
         assert body["manifest"]["data_fp"] == manifest["data_fp"]
-        assert "lease_token" not in body, "§343：竞速模型不再下发 lease_token"
+        lease_token = body.get("lease_token")
+        assert lease_token, "P3b 独占发放必须下发 lease_token"
         st2, payload_bytes = _http_raw(base, "sekret", f"/jobs/{jid}/payload")
         assert st2 == 200 and payload_bytes == b"PK\x03\x04fake"
-        # 再次轮询 → 同一 job 仍可领（竞速广播，先回传结果者胜）
+        # 租约期内再次轮询 → 不再重发（独占，非竞速广播）
         st3, body3 = _http(base, "sekret", "/jobs/next")
-        assert st3 == 200 and body3["job_id"] == jid, "§343：广播不独占，重复轮询返回同一 job"
+        assert st3 == 200 and body3["job_id"] is None, "P3b 独占：租约期内不重发同一 job"
 
         # 结果 POST（带 lease_token + 正确 commit_echo）→ status done → 取回
         result = {
@@ -779,6 +796,7 @@ def test_hub_server_auth_and_job_lifecycle(tmp_path: Path) -> None:
             f"/jobs/{jid}/result",
             method="POST",
             data=json.dumps(result).encode("utf-8"),
+            extra_headers={"X-Lease-Token": lease_token},
         )
         assert st4 in (200, 201)
         st5, body5 = _http(base, "sekret", f"/jobs/{jid}/status")
@@ -905,21 +923,23 @@ def test_hub_server_commit_mismatch_rejected_at_post(tmp_path: Path) -> None:
         th.join(timeout=5)
 
 
-def test_hub_server_race_result_excludes_from_pool(tmp_path: Path) -> None:
-    """§343 竞速收口：结果已落盘（未验收）的 job 从可领取池剔除——落后 worker
-    重连后不再重算已分胜负的 job；孤儿租约（断连杀进程）零等待重领。"""
+def test_hub_server_result_excludes_from_pool(tmp_path: Path) -> None:
+    """P3b（supersede §343）：领取即独占——租约期内其他 worker 领不到；
+    结果落盘后（未验收）同样从可领取池剔除，迟到写回由首写锁定拒绝。"""
     base, store, srv, th = _boot_server(tmp_path)
     try:
         manifest = normalize_manifest(_mini_manifest())
         jid = manifest["job_id"]
         store.publish(jid, manifest, b"PK\x03\x04fake")
-        # worker A 领走后 session 死亡（竞速模型没有孤儿租约概念）
+        # worker A 领取 → 设独占租约
         st, body = _http(base, "sekret", "/jobs/next")
         assert body["job_id"] == jid
-        # worker B（重连）立即重领同一 job——零等待
+        lease_token = body.get("lease_token")
+        assert lease_token, "独占发放必须下发 lease_token"
+        # worker B 立即轮询 → 租约期内不重发（P3b 独占，非 §343 广播竞速）
         st2, body2 = _http(base, "sekret", "/jobs/next")
-        assert st2 == 200 and body2["job_id"] == jid, "竞速广播：重连即重领，不等租约过期"
-        # B 先回传结果 → 结果落盘 → job 从池中剔除（A 的迟到写回已无意义）
+        assert st2 == 200 and body2["job_id"] is None, "P3b 独占：租约期内不重发同一 job"
+        # A 回传结果 → 结果落盘 → job 从池中剔除
         result = {
             "job_id": jid,
             "data_fp": manifest["data_fp"],
@@ -934,10 +954,11 @@ def test_hub_server_race_result_excludes_from_pool(tmp_path: Path) -> None:
             f"/jobs/{jid}/result",
             method="POST",
             data=json.dumps(result).encode("utf-8"),
+            extra_headers={"X-Lease-Token": lease_token},
         )
         assert st3 in (200, 201)
         st4, body4 = _http(base, "sekret", "/jobs/next")
-        assert st4 == 200 and body4["job_id"] is None, "结果已落盘：竞速已分胜负，不再派发"
+        assert st4 == 200 and body4["job_id"] is None, "结果已落盘：不再派发"
     finally:
         srv.shutdown()
         th.join(timeout=5)
@@ -1059,17 +1080,17 @@ def test_post_result_4xx_rejected_no_retry(monkeypatch, _no_sleep) -> None:
 
 
 def test_store_release_returns_to_pool(tmp_path: Path) -> None:
-    """§343 竞速：租约不再参与调度——claim 与 release 均为兼容保留，
-    可领取池只看「pending + payload 在盘 + 结果未落盘」。"""
+    """P3b 独占加超时（supersede §343）：claim 后活租约内不在池中；
+    release 立即回池；过期回池（CLAIM_TTL_SEC）。"""
     store = _JobStore(tmp_path / "jobs", tmp_path / "ledger.jsonl")
     store.publish("jid-r", {"job_id": "jid-r"}, b"payload")
     token = store.claim("jid-r")
-    assert token is not None  # 兼容接口仍在
-    assert store.claimable_job_ids() == ["jid-r"]  # §343：租约不阻止广播
-    # release 兼容路径保留：H2 非持有人拒释放 / 幂等拒绝，但对调度无影响
+    assert token is not None
+    assert store.claimable_job_ids() == []  # 独占：超时前不重发
+    # release：H2 非持有人拒释放 / 幂等拒绝；持有人释放立即回池
     assert store.release("jid-r", "wrong-token") is False
     assert store.release("jid-r", token) is True
-    assert store.claimable_job_ids() == ["jid-r"]  # 竞速模型：始终可领（结果未落盘）
+    assert store.claimable_job_ids() == ["jid-r"]
     assert store.release("jid-r", token) is False  # 已释放：幂等拒绝
 
 

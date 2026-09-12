@@ -10,7 +10,8 @@
     重建（D8），不依赖进程内状态。
 
 端点（附录 C）：
-  GET  /jobs/next               云 worker 轮询领取（§343 竞速：广播同一 open job，无租约）
+  GET  /jobs/next               云 worker 轮询领取（P3b 独占加超时：首个 open job
+                                设租约 + 下发 lease_token；超时前不重发）
   GET  /jobs/{id}/payload       下载 payload zip
   POST /jobs/{id}/heartbeat     心跳续租（60s）
   POST /jobs/{id}/result        worker 回传结果（weights_json + opt_tar + agg）
@@ -40,7 +41,7 @@ from threading import Lock
 from remote._port_guard import ensure_port_free
 from remote.protocol import (
     AUTH_HEADER,
-    LEASE_SEC,
+    CLAIM_TTL_SEC,
     PAYLOAD_NAME,
     WIRE_V2_MAGIC,
     ProtocolError,
@@ -72,6 +73,8 @@ class _JobStore:
         self._leases: dict[str, float] = {}
         #: job_id -> 租约持有人 lease_token（H2；重启即丢，随租约重建）
         self._lease_owners: dict[str, str] = {}
+        #: job_id -> 最近一次心跳（领取算一次）墙钟（P3b 可观测；/jobs/status 暴露）
+        self._last_heartbeat: dict[str, float] = {}
         self._now = now_fn or time.time
         #: job_id -> 401 失败计数（闭锁用，D9）
         self._auth_fail: dict[str, int] = {}
@@ -119,11 +122,10 @@ class _JobStore:
     def claimable_job_ids(self) -> list[str]:
         """job_pending 且未 job_completed 且 payload 在盘且**结果未落盘**的 job_id，按发布序。
 
-        §343 竞速语义（2026-09-06 用户指令）：不再有租约独占——同一 open job 对
-        所有轮询 worker 广播，先回传结果者胜（store_result 首写锁定，迟到写回 409
-        丢弃）。实际部署单 worker，竞速只发生在 session 断开重连：重连后立即重领
-        同一 job 重算，不再付 LEASE_SEC 孤儿租约等待（it24 实测白等 30min）。
-        已有结果未验收的 job 从池中剔除——防落后 worker 死循环重算同一 job。
+        P3b 独占加超时（supersede §343）：持有**未过期租约**的 job 不在池中——
+        worker 领到 PPO 任务后超时前不被别 worker 重领。过期租约自动回池
+        （死 worker 回收只管这一条，不管调大 TTL——it24 倒车禁令）。
+        已有结果未验收的 job 从池中剔除——首写锁定兜底（hub 重启丢租约时用）。
         """
         pending: dict[str, dict] = {}
         for e in self._read_ledger():
@@ -134,13 +136,16 @@ class _JobStore:
                 pending[jid] = e
             elif e["event"] in ("job_completed", "job_cancelled"):
                 pending.pop(jid, None)
+        now = self._now()
         out = []
         for jid, _e in sorted(pending.items(), key=lambda kv: kv[1].get("ts", 0)):
+            if self._leases.get(jid, 0) > now:
+                continue  # 活租约：已被某 worker 独占，超时前不重发
             jd = self._job_dir(jid)
             if not jd.exists() or find_payload(jd) is None:
                 continue  # 目录不存在或 payload 未落盘——不可领取
             if (jd / "result").exists():
-                continue  # 结果已落盘待验收——竞速已分胜负，落后者不再领取（§343）
+                continue  # 结果已落盘待验收——首写已分胜负，不再领取
             out.append(jid)
         return out
 
@@ -178,9 +183,14 @@ class _JobStore:
                     }
                 )
 
-    # ---- 租约（H2 旧路径，§343 起仅兼容保留——调度不再消费租约） ----
-    def claim(self, job_id: str) -> str | None:
-        """（兼容）领取（设租约）。§343 竞速模型下 _get_next 不再调用。"""
+    # ---- 租约（P3b 独占加超时：领取即设租约，心跳续租，过期回池） ----
+    def claim(self, job_id: str, ttl: float = CLAIM_TTL_SEC) -> str | None:
+        """领取（设租约 + owner + last_heartbeat 三件套**同时置**）。
+
+        B3 必杀细节：只写 `_leases` 不写 `_lease_owners` 会导致 heartbeat 恒 False，
+        300s 后长 job 被重广播——故领取必须走本函数，不许手写 `_leases[jid] = ...`。
+        活租约在持 → 返回 None（调用方跳过本 jid，不是阻塞等）。
+        """
         import secrets
 
         with self._lock:
@@ -189,20 +199,27 @@ class _JobStore:
             if lease is not None and lease > now:
                 return None
             token = secrets.token_hex(16)
-            self._leases[job_id] = now + LEASE_SEC
+            self._leases[job_id] = now + ttl
             self._lease_owners[job_id] = token
+            self._last_heartbeat[job_id] = now
             return token
 
     def heartbeat(self, job_id: str, lease_token: str) -> bool:
         """心跳续租（60s 节奏；H2：非原租者拒续）。
-        返回 True = 续租成功；False = job 不存在 / lease_token 不符。"""
+        返回 True = 续租成功；False = job 不存在 / lease_token 不符。
+
+        B3 必杀细节：续租必须改用 CLAIM_TTL_SEC（本函数是 claim/heartbeat/
+        _get_status 的**唯一** TTL 来源）——否则死 worker 隐身 30min（LEASE_SEC）。
+        """
         with self._lock:
             if not (self._job_dir(job_id) / "manifest.json").exists():
                 return False
             owner = self._lease_owners.get(job_id)
             if owner is None or owner != lease_token:
                 return False
-            self._leases[job_id] = self._now() + LEASE_SEC
+            now = self._now()
+            self._leases[job_id] = now + CLAIM_TTL_SEC
+            self._last_heartbeat[job_id] = now
             return True
 
     def release(self, job_id: str, lease_token: str) -> bool:
@@ -214,6 +231,16 @@ class _JobStore:
                 return False
             self._leases.pop(job_id, None)
             self._lease_owners.pop(job_id, None)
+            self._last_heartbeat.pop(job_id, None)
+            return True
+
+    def result_token_ok(self, job_id: str, lease_token: str) -> bool:
+        """结果回传鉴权（P3b）：有活租约 → 须持有人 token；无租约（过期/释放/
+        从未领取/旧 worker）→ 照收。HTTP 层薄调用本函数。"""
+        with self._lock:
+            if self._leases.get(job_id, 0) > self._now():
+                owner = self._lease_owners.get(job_id)
+                return bool(lease_token) and owner == lease_token
             return True
 
     # ---- 结果 ----
@@ -234,6 +261,8 @@ class _JobStore:
         """训练主循环验收落位后写 job_completed 账本事件（§3.1）。幂等。"""
         with self._lock:
             self._leases.pop(job_id, None)
+            self._lease_owners.pop(job_id, None)
+            self._last_heartbeat.pop(job_id, None)
             completed_ids = {
                 e.get("job_id") for e in self._read_ledger() if e.get("event") == "job_completed"
             }
@@ -377,10 +406,14 @@ class HubHandler(BaseHTTPRequestHandler):
         # 停不掉（Kaggle 无 API）则照常执行任务。停机**不拦任务分发**（否则云机
         # 闲置空烧反而是最大浪费）。空任务时也带 halt 标志，供空闲 worker 感知。
         halt = self.store.halt_workers
-        # §343 竞速：不设租约、不独占——同一 open job 对所有轮询者广播，
-        # 先回传结果者胜（store_result 首写锁定），落后者 409 丢弃。
+        # P3b 独占加超时（supersede §343）：首个 open job 领取即设租约并下发
+        # lease_token；活租约 job 已被 claimable_job_ids 排除。worker 零改动
+        # （本就读取 lease_token 并走心跳/回传携带链路）。
         jids = self.store.claimable_job_ids()
         for jid in jids:
+            lease_token = self.store.claim(jid)
+            if lease_token is None:
+                continue  # 并发领取竞负：本轮跳过（下次轮询回池见）
             mp = self.store._job_dir(jid) / "manifest.json"
             manifest = json.loads(mp.read_text(encoding="utf-8"))
             # 领取标记：首次向 worker 下发即 touch（console 据此区分「排队等取」与「已在跑」）。
@@ -393,7 +426,7 @@ class HubHandler(BaseHTTPRequestHandler):
                     claim.write_text(str(self.store._now()), encoding="utf-8")
                 except OSError:
                     pass
-            self._json({"job_id": jid, "manifest": manifest, "halt": halt})
+            self._json({"job_id": jid, "manifest": manifest, "halt": halt, "lease_token": lease_token})
             return
         self._json({"job_id": None, "halt": halt})  # 无可领取 job
 
@@ -461,13 +494,20 @@ class HubHandler(BaseHTTPRequestHandler):
         if not (jd / "manifest.json").exists():
             self._json({"error": "unknown job"}, 404)
             return
+        now = self.store._now()
         if (jd / "result" / "result.json").exists():
             state = "done"
-        elif self.store._leases.get(jid, 0) > self.store._now():
+        elif self.store._leases.get(jid, 0) > now:
             state = "leased"
         else:
             state = "pending"
-        self._json({"job_id": jid, "state": state})
+        # P3b 可观测：租约剩余秒 + 距上次心跳秒（worker 吞错保持现状，文档化——
+        # 心跳 5xx 时 worker 侧只记日志不抛，见 worker._hb_loop）。
+        resp: dict = {"job_id": jid, "state": state}
+        if state == "leased":
+            resp["lease_expires_in"] = round(self.store._leases.get(jid, 0) - now, 1)
+            resp["last_heartbeat_ago"] = round(now - self.store._last_heartbeat.get(jid, now), 1)
+        self._json(resp)
 
     # ---- GET /jobs/{id}/result ----
     def _get_result(self) -> None:
@@ -545,9 +585,15 @@ class HubHandler(BaseHTTPRequestHandler):
         except (ValueError, ProtocolError) as e:
             self._json({"error": f"result rejected: {e}"}, 400)
             return
-        # §343 竞速：不再校验 lease_token（H2 租约已废）——鉴权边界 = Bearer token，
-        # 结果内容 = validate_result 对账（job_id/data_fp/init_weights_fp/commit_echo）；
-        # 先回传者 store_result 首写锁定，迟到写回 409 丢弃（防重复写回测试覆盖）。
+        # P3b 独占加超时：有活租约时验 X-Lease-Token（恢复 H2 检查）——错 token/
+        # 缺 token → 403（非持有人不得写回）；无租约照收（兼容旧 worker/重发）；
+        # 首写锁定保留（hub 重启丢租约 → 首写胜，结果一致）。
+        lease_token = self.headers.get("X-Lease-Token", "") or self.headers.get(
+            "lease-token", ""
+        )
+        if not self.store.result_token_ok(jid, lease_token):
+            self._json({"error": "lease mismatch — 非本 job 租约持有人"}, 403)
+            return
         if not self.store.store_result(jid, result):
             self._json({"error": "result already stored (duplicate write-back)"}, 409)
             return
@@ -602,7 +648,7 @@ def main() -> None:
     srv = make_server(store, args.port, token, host=args.host)
     print(
         f"[hub-server] listening on {args.host}:{args.port} "
-        f"job_root={args.job_root} jsonl={args.jsonl} lease={LEASE_SEC}s",
+        f"job_root={args.job_root} jsonl={args.jsonl} claim_ttl={CLAIM_TTL_SEC}s",
         flush=True,
     )
     try:
