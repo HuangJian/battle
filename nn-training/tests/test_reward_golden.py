@@ -35,6 +35,7 @@ from rl.reward_library import (
     METRIC_INDEX,
     METRICS,
     METRICS_DIM,
+    METRICS_VERSION,
     TIME_AXIS_REDUCERS,
     CompiledFormula,
     FormulaError,
@@ -44,7 +45,7 @@ from rl.reward_library import (
     compile_formula,
     parse_formula,
 )
-from rl.reward_validation import symbolic_envelope, validate_reward
+from rl.reward_validation import DEFAULT_RANGES, symbolic_envelope, validate_reward
 
 GOLDEN_DIR = Path(__file__).resolve().parent / "golden"
 
@@ -439,15 +440,46 @@ def _v7_corpus(n: int, seed: int) -> np.ndarray:
     m[:, METRIC_INDEX["basePressureSamples"]] = rng.integers(0, 6000, n)
     m[:, METRIC_INDEX["firstKillTick"]] = rng.choice([-1.0, 0.0, 500.0, 2000.0, 36000.0], n)
     m[:, METRIC_INDEX["enemyTotal"]] = rng.integers(1, 21, n)
+    # clearTick 显式写哨兵 -1（= 本局未清场）。此前留 np.zeros 的默认 0.0 —— 而 0.0 是
+    # **合法值**（"第 0 tick 就已清场"），会被任何读该列的公式当成"已清场"：这里写的
+    # 是「未清场」的诚实取值（2026-09-12）。清场分支由 `_clear_metrics` 的行序列覆盖。
+    m[:, METRIC_INDEX["clearTick"]] = -1.0
     return m
+
+
+def _clear_metrics(ticks: list[float], clear_from: int | None) -> np.ndarray:
+    """单调 tick 序列 + 「自 `clear_from` 行起 clearTick 恒为该行 tick」的指标矩阵。
+
+    `clear_from=None` ⇒ 全程 `clearTick=-1`（未清场）。真实语料里 clearTick 是**每行同值
+    的标量**（一旦清场就固定），所以只有这种"前段 -1、后段恒 C"的形状才能同时触发
+    "清场前按 ticks 罚 / 清场后按 C+wBonusTicks 封顶"两个分支。
+    """
+    m = np.zeros((len(ticks), METRICS_DIM), dtype=np.float64)
+    m[:, METRIC_INDEX["ticks"]] = ticks
+    m[:, METRIC_INDEX["clearTick"]] = -1.0
+    if clear_from is not None:
+        m[clear_from:, METRIC_INDEX["clearTick"]] = float(ticks[clear_from])
+    return m
+
+
+#: c6-bonus 专属行序列（2026-09-12 补）：tick 0→3000 步长 600，清场于第 1 行（tick=600）
+#: ⇒ 窗口上界 clearTick+wBonusTicks = 1200，正好落在第 2 行的 tick 上（边界可读）。
+_C6_TICKS = [0.0, 600.0, 1200.0, 1800.0, 2400.0, 3000.0]
 
 
 def _golden_vectors() -> list[dict]:
     """固定 counter 向量 + outcome 组合（golden 回归的输入；**不得随意改动**——
-    改动 = 奖励语义变化，需重生成 golden 并在 DECISIONS 记录）。"""
+    改动 = 奖励语义变化，需重生成 golden 并在 DECISIONS 记录）。
+
+    语料两类：
+      1. `_v7_corpus` 随机行 × 5 门课 × 4 outcome × 3 it（含 s1/s2/s3-balanced/s-dodge/s4b）；
+      2. **c6-bonus 专属手写序列**（下方）：`_v7_corpus` 的随机行 tick 非单调、clearTick
+         恒 -1，测不到 `wClear*(is_timeout and clearTick>=0)`（常数项 diff 恒 0）与
+         `wBonusTicks` 封顶 —— 故用单调行序列补上真实覆盖。
+    """
     rng = np.random.default_rng(20260902)
     m = _v7_corpus(n=32, seed=20260902)
-    return [
+    cases = [
         {
             "course": name,
             "outcome": outcome,
@@ -459,6 +491,56 @@ def _golden_vectors() -> list[dict]:
         for outcome in ("stage_clear", "lives_exhausted", "timeout", "base_destroyed")
         for it in (1, 7, 20)
     ]
+    # c6-bonus：清场（中途置位）/ 未清场 两种行序列 × 各自现实的 outcome 组合
+    for label, clear_from, outcomes in (
+        ("cleared", 1, ("timeout", "stage_clear")),
+        ("uncleared", None, ("timeout", "lives_exhausted")),
+    ):
+        matrix = _clear_metrics(_C6_TICKS, clear_from)
+        for outcome in outcomes:
+            cases.append(
+                {
+                    "course": "c6-bonus",
+                    "outcome": outcome,
+                    "gated": 0.0,
+                    "it": 1,
+                    "metrics": matrix.tolist(),
+                    "note": f"clearTick={label}",
+                }
+            )
+    return cases
+
+
+def test_c6_bonus_clear_compensation() -> None:
+    """清场补偿与 `wBonusTicks` 豁免边界（c6-bonus，2026-09-12）。
+
+    语义（`c6-bonus.jsonc`）：
+      Φ = … − wTick·(min(ticks, clearTick+wBonusTicks) if clearTick ≥ 0 else ticks)
+             + wClear·[is_timeout ∧ clearTick ≥ 0]
+    期望值这里**手算**出来（wTick=0.01, wBonusTicks=600, wClear=4.0, terminal
+    stage_clear=+2 / timeout=−2；r = diff(Φ) 且终局额挂最后一步），不从引擎反推。
+    """
+    fn = build_reward_fn(load_course("c6-bonus").reward_spec())
+    cleared = _clear_metrics(_C6_TICKS, 1)  # 清场于 tick=600 ⇒ 封顶上界 1200
+    uncleared = _clear_metrics(_C6_TICKS, None)
+
+    r_clear_to = fn(cleared, "timeout", 0.0, 1)
+    r_clear_sc = fn(cleared, "stage_clear", 0.0, 1)
+    r_no_to = fn(uncleared, "timeout", 0.0, 1)
+
+    # 清场+被截断：Φ=[0,−2,−8,−8,−8,−8]（第 1 步含 +4 补偿，其后 tick 罚封顶）
+    np.testing.assert_allclose(r_clear_to, [-2.0, -6.0, 0.0, 0.0, -2.0], atol=1e-12)
+    # 正常过关：同样封顶但不拿 +4（只拿 terminal +2）⇒ **两者总额相等**
+    np.testing.assert_allclose(r_clear_sc, [-6.0, -6.0, 0.0, 0.0, 2.0], atol=1e-12)
+    assert r_clear_to.sum() == pytest.approx(r_clear_sc.sum())
+    # 未清场：全额计时 + 无补偿（比清场局差得多）
+    np.testing.assert_allclose(r_no_to, [-6.0, -6.0, -6.0, -6.0, -8.0], atol=1e-12)
+    assert r_no_to.sum() < r_clear_to.sum()
+
+    # 边界：豁免止于 clearTick + wBonusTicks（**含端点**）—— 1199→1200 还计费、
+    # 1200→1201 之后不再计费。
+    boundary = fn(_clear_metrics([600.0, 1199.0, 1200.0, 1201.0, 1300.0], 0), "timeout", 0.0, 1)
+    np.testing.assert_allclose(boundary, [-5.99, -0.01, 0.0, -2.0], atol=1e-12)
 
 
 def test_golden_file() -> None:
@@ -467,7 +549,11 @@ def test_golden_file() -> None:
     if not path.exists():
         pytest.skip(f"golden 文件不存在（用 scripts/regen_reward_golden.py 生成）：{path}")
     golden = json.loads(path.read_text(encoding="utf-8"))
-    assert golden.get("metrics_version") == 4, "golden 与指标向量版本不匹配——需重新生成"
+    # 版本号读 SSOT（`reward_library.METRICS_VERSION`），不再硬编码 —— 2026-09-12 修：
+    # 此前写死 4，metrics v5 重生成后 golden 内容正确却被该断言误判为"需重新生成"。
+    assert golden.get("metrics_version") == METRICS_VERSION, (
+        "golden 与指标向量版本不匹配——需重新生成"
+    )
     cache: dict[str, Any] = {}
     for case in golden["cases"]:
         name = case["course"]
@@ -602,7 +688,11 @@ def test_spread_course_plumbing() -> None:
 
 
 def test_item_metrics_layout_locked() -> None:
-    """v3 锁步：0–20 列号永久不动，新 8 列追加在尾部（TS metricsRow 同序）。"""
+    """v3/v4/v5 锁步：0–20 列号永久不动，新列一律追加在尾部（TS metricsRow 同序）。
+
+    尾部清单是**穷举**断言 ⇒ 每次加列都必须来这里登记（v5 加 `clearTick` 时漏登记过，
+    这正是本测试存在的意义）。
+    """
     from rl.reward_library import METRIC_INDEX, METRICS
 
     assert METRICS[20] == "enemyTotal"
@@ -616,10 +706,12 @@ def test_item_metrics_layout_locked() -> None:
         "puGotFreeze",
         "puGotShield",
         "puSpawnStar",
+        "clearTick",  # idx30（v5：敌人首次全灭的 tick，哨兵 -1）
     ]
     assert METRIC_INDEX["puGotBomb"] == 25
     assert METRIC_INDEX["puSpawnShield"] == 24
     assert METRIC_INDEX["puSpawnStar"] == 29
+    assert METRIC_INDEX["clearTick"] == 30
 
 
 def test_item_metrics_formula_and_envelope() -> None:
@@ -644,6 +736,55 @@ def test_item_metrics_formula_and_envelope() -> None:
     assert r[-1] == pytest.approx(dense[-1] - 2.0)
 
 
+def test_all_metrics_have_envelope_range() -> None:
+    """每个指标列都必须登记包络取值域（2026-09-12 v5 回归）。
+
+    `symbolic_envelope` 逐项枚举指标角点，缺取值域会让 `validate_reward(course)`
+    直接崩（当时是裸 KeyError 穿过异常分支）——加列必须同步登记，这里就拦住。
+    """
+    assert set(METRICS) == set(DEFAULT_RANGES), (
+        f"未登记取值域的指标列：{sorted(set(METRICS) - set(DEFAULT_RANGES))}"
+    )
+
+
+def test_envelope_handles_outcome_virtual_terms() -> None:
+    """引用 outcome 虚拟符号的加性项不得被包络误判为数值爆炸（2026-09-12 回归）。
+
+    成因：`phi` 在公式引用虚拟符号时**必须**收到 outcome，而 `symbolic_envelope`
+    原先不带 outcome 调它 ⇒ 抛 FormulaError ⇒ 被当成除零/溢出记成 inf/超限。
+    """
+    spec = RewardSpec(
+        formula=(
+            "wKill*kills + wClear*(1.0 if (is_timeout and clearTick >= 0) else 0.0)"
+        ),
+        params={"wKill": 3.0, "wClear": 4.0},
+        terminal={"timeout": -2.0},
+    )
+    rep = validate_reward(spec)
+    assert rep.ok, rep.errors
+    assert rep.warnings == (), rep.warnings
+    term = next(t for t in rep.envelope if "wClear" in t.src)
+    # 峰值 = wClear（只在 timeout+已清场成立），既没漏算也没爆
+    assert term.ok
+    assert term.max_abs == pytest.approx(4.0)
+
+
+def test_envelope_virtual_term_evaluates_zero_outside_outcome() -> None:
+    """非 timeout 的结局在包络里取 0（不被算成负值/爆值）。"""
+    spec = RewardSpec(
+        formula="wClear*(1.0 if (is_timeout and clearTick >= 0) else 0.0)",
+        params={"wClear": 4.0},
+        terminal={"timeout": -2.0},
+    )
+    rep = validate_reward(spec)
+    assert rep.ok, rep.errors
+    (term,) = rep.envelope
+    assert term.max_abs == pytest.approx(4.0)
+    # 角点上的 clearTick 取上界（36000 ≥ 0）⇒ 成立分支被枚举到
+    assert term.vars == ("clearTick",)
+    assert term.at == (36000.0,)
+
+
 if __name__ == "__main__":
     for fn in (
         test_no_time_axis_reducers,
@@ -659,6 +800,10 @@ if __name__ == "__main__":
         test_spread_course_plumbing,
         test_item_metrics_layout_locked,
         test_item_metrics_formula_and_envelope,
+        test_all_metrics_have_envelope_range,
+        test_envelope_handles_outcome_virtual_terms,
+        test_envelope_virtual_term_evaluates_zero_outside_outcome,
+        test_c6_bonus_clear_compensation,
         test_param_schedule_linear_and_step,
         test_v7_formula_matches_builtin_bitwise,
         test_v7_first_kill_sentinel,

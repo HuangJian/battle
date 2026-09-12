@@ -201,7 +201,8 @@ interface EvalResult {
   /** 失败细分（仅 gameover：'base_destroyed' | 'lives_exhausted'；其余 undefined）。 */
   lossDetail?: 'base_destroyed' | 'lives_exhausted'
   /** 全灭（歼灭率口径，方案 §2.1「全歼率」门）：敌人队列已空且场上无存活非 extra
-   *  敌人（SimulationEffects.allEnemiesCleared）。与 win 不同——win 要求 stage_clear
+   *  敌人（SimulationEffects.allEnemiesCleared）。2026-09-12 起 `win` = stage_clear ∪ cleared
+   *  （单关训练场景二者等价，见 `win:` 处注释）；`cleared` 字段保留原义供「全歼率」门使用。
    *  （地上无存活道具，BONUS TIME 窗口 600 tick 内截断即 max_ticks）。分布式 eval
    *  门判定全歼必须读它，否则 BONUS 截断局被系统性少算（P0-1 同源口径，§15）。 */
   cleared: boolean
@@ -546,12 +547,18 @@ export function runEvalOne(
     dims[k] = { value: scored.dims[k].value, raw: scored.dims[k].raw }
   }
   tel.stuckTicks = stuckMax
+  // 过关口径（2026-09-12 用户裁定）：**敌人全灭即算过关**（win ∪ cleared）。
+  // 全灭后若场上还有道具会进 BONUS TIME 窗口（`POWERUP_PICKUP_WINDOW_MS = 10000ms ≈ 600 tick`）
+  // 才 stage_clear，而 `max_ticks` 可能在窗口结束前截断 ⇒ `outcome='max_ticks'` 却已歼灭。
+  // 单关训练场景下二者等价（道具跨关累积的增益只在多关训练时才存在）⇒ 统一为 win ∪ cleared。
+  // `cleared` 字段保留原义，供「全歼率」门单独使用；`outcome` 亦保留原始值。
+  const cleared = allEnemiesCleared(world)
   return {
     outcome,
     lossDetail,
-    cleared: allEnemiesCleared(world),
+    cleared,
     ticks: t,
-    win: outcome === 'stage_clear',
+    win: outcome === 'stage_clear' || cleared,
     score: scored.score,
     quality: scored.quality,
     dims,

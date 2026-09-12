@@ -21,7 +21,7 @@ if str(ROOT) not in sys.path:
 import numpy as np
 
 from rl.config import load_course
-from rl.reward_library import METRICS_DIM, build_reward_fn
+from rl.reward_library import METRICS_DIM, METRICS_VERSION, build_reward_fn
 
 GOLDEN_DIR = ROOT / "tests" / "golden"
 GOLDEN_PATH = GOLDEN_DIR / "reward_golden.json"
@@ -64,17 +64,26 @@ def main() -> None:
             case["gated"],
             case["it"],
         )
-        cases.append(
-            {
-                "course": name,
-                "outcome": case["outcome"],
-                "gated": case["gated"],
-                "it": case["it"],
-                "metrics": case["metrics"],
-                "reward": [float(x) for x in r],
-            }
-        )
-    doc = {"metrics_version": 4, "generated_by": "scripts/regen_reward_golden.py", "cases": cases}
+        entry = {
+            "course": name,
+            "outcome": case["outcome"],
+            "gated": case["gated"],
+            "it": case["it"],
+            "metrics": case["metrics"],
+            "reward": [float(x) for x in r],
+        }
+        # 可选标签（`_golden_vectors` 的值标签，如 c6-bonus 的 cleared/uncleared）：
+        # 同名 (course, outcome, it) 的多个 case 靠它区分，方便人眼核对。
+        if case.get("note"):
+            entry["note"] = case["note"]
+        cases.append(entry)
+    # 版本号读 SSOT（`reward_library.METRICS_VERSION`），不再硬编码 —— 2026-09-12 修：
+    # 此前写死 4，导致 metrics v5 重生成后 doc 仍标 4（与列数不符，且 pytest 会静默放行）。
+    doc = {
+        "metrics_version": METRICS_VERSION,
+        "generated_by": "scripts/regen_reward_golden.py",
+        "cases": cases,
+    }
     GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
     GOLDEN_PATH.write_text(json.dumps(doc, indent=1), encoding="utf-8")
     print(f"golden regenerated: {GOLDEN_PATH} ({len(cases)} cases)")

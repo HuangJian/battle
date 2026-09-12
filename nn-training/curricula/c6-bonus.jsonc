@@ -1,0 +1,432 @@
+// 课程 c6-bonus —— BONUS TIME 信号修正腿（2026-09-12）
+//
+// 由 **c6-pickup3.jsonc** 派生。相对 c6-pickup3 的**实际差异共 3 组**（2026-09-12 复核订正：
+// 早期注释写「只改 2 处、gates 全锁死」，与磁盘 diff 不符）：
+//
+//   1. 身份/落盘：name/out/traj/backup_dir/backup_prefix → c6-bonus（fresh，绝不复用旧腿目录）
+//   2. **`reward.formula` 改两处** + **`params` 新增 `wClear` / `wBonusTicks`**
+//   3. **`gates.rules` 3 个字段**（见下方「起点与门」末段；若非有意动门，应回退这 3 处）
+// 其余（stage/敌数/命数/max_ticks/player/lr/epochs/mb/workers/缰绳/bc/λ/seed_rotate/eval 配置）
+// 逐字锁死。
+//
+// ── 为什么（2026-09-12 实测，见 reports/c6-review-2026-09-12.md 与本日 memory）──────
+//   病灶 A（信号错）：敌人全灭后若场上还有道具，游戏进入 **BONUS TIME** 窗口
+//     （`POWERUP_PICKUP_WINDOW_MS = 10000ms ≈ 600 tick`，`SimulationEffects.ts:214-262`），
+//     窗口走完才 `stage_clear`。但 `max_ticks=2400` 可能在此之前截断 ⇒ `outcome='timeout'`
+//     ⇒ 训练侧 `terminal.timeout = −2.0`。**即：已完成歼灭的局被负奖励惩罚。**
+//     （源码注释早就写着「那类局应算歼灭成功」，`allEnemiesCleared` 也已实现，只是 reward 没用它。）
+//     c6 实测：400 局里 8 局如此（kills=6 / ticks=2400 / beHit=0）。
+//   病灶 B（结构反常）：`-wTick*ticks` 让"清场后去捡道具"要付时间费，而清场本身已经
+//     拿到了奖励 ⇒ 边际上"不动"最优。实测那 8 局**捡了 1-2 个就停**（不是 0），
+//     平均只差 ~0.6 个道具就过关 —— 半途而废。对照：gameover 局 0.254 个/局、
+//     清场超时局 1.567、stage_clear 局 2.142。
+//   病灶 C（打平距离）：捡一个远处道具的净收益 ≈ `wPickup − wTick×Δtick`，
+//     **打平距离 ≈ wPickup/wTick**：1.5/0.01 = 150 tick ⇒ 3.0/0.01 = 300 tick。
+//     c6-pickup 抬 wPickup 到 3.0 后打平距离翻倍，实测道具/局 0.925→1.045（+13%）、
+//     胜局承伤速率 −20% —— 机制有效但胜率增益 +5pp 不显著（p=0.33，种子依赖强）。
+//
+// ── 改法（纯公式，**零代码改动**；已用 `rl.reward_library.parse_formula` 实测通过）────
+//   · 清场补偿：`+ wClear*(1.0 if (is_timeout and clearTick >= 0) else 0.0)`
+//     **`wClear = 4.0`** 恰好补上 `stage_clear(+2.0)` 与 `timeout(−2.0)` 的差
+//     ⇒ **「清场+超时」的有效终局奖励 = −2.0 + 4.0 = +2.0 = 与正常过关等价** ✅
+//     ✅ 已精确化（2026-09-12 补代码后）：条件由 `is_timeout and clearTick >= 0` 组成，
+//        即**只在该局确实被 max_ticks 截断且已清场时**补偿 —— 正常过关的局不再多拿 4.0
+//        （此前 `kills >= enemyTotal` 无条件补偿的副作用已消除）。
+//        `is_timeout` 是 reward 引擎的 outcome 虚拟符号（`VIRTUAL_OUTCOME_NAMES`），
+//        `clearTick` 是新增的 metrics 列 idx30（metrics v5）。
+//   · tick 豁免：`- wTick*(min(ticks, clearTick + wBonusTicks) if clearTick >= 0 else ticks)`
+//     —— 清场局的 tick 惩罚只算到「清场 tick + `wBonusTicks`(600)」，**非清场局照常罚全部**。
+//     ✅ 已精确化：`wBonusTicks = 600` 就是 BONUS TIME 窗口长度
+//        （`POWERUP_PICKUP_WINDOW_MS = 10000ms ≈ 600 tick`，`src/constants.ts:151`）
+//        ⇒ **恰好豁免窗口那一段**，不再像早期近似那样"清场后一律不罚"（那会轻微鼓励拖延）。
+//   · 道具分照旧（`wPickup*powerUpsCollected` 已在式内）：配合上面的 tick 豁免，
+//     **"清场后去捡道具"从"要付费"变成"纯正收益"** ⇒ 这才是解决半途而废的关键。
+//   · ⚠️ **依赖 metrics v5**：`clearTick` 列由 `export-rl-rollout.ts` 落盘（codeHash 集内 ⇒
+//     触发一次节点重建）；`METRICS_VERSION 4→5`、`METRICS` 追加 idx30。旧 v4 语料与本公式
+//     不兼容（`CompiledFormula.phi` 会按 `METRICS_DIM` 形状校验报错，不会静默错读）。
+//
+// ── 起点与门（2026-09-12 在**新 `win` 口径**下重测；**不是**原样继承）─────────────────
+//   `win` 口径同日改为 **`stage_clear ∪ cleared`**（`export-eval-game.ts`；单关场景二者等价）
+//   ⇒ 起点与教师两个基准都必须同口径重测：否则"学生读数被抬高、基准仍是旧口径"，G1 会白过门。
+//   实测（`eval-course-ckpt.ts --course tmp/c6-pickup-strict.jsonc --seed0 860001 --games 100`；
+//   旧记录的 kills 3.54 / phits 0.57 / zero_kill_frac 0.14 **逐位复现** ⇒ 同种子同关卡，只口径变）：
+//     · bc = `c6-pickup.it35`：旧口径 31/100 ⇒ **新口径 32/100 ⇒ `baseline_win_rate: 0.32`**
+//     · 教师（`--policy god`）：旧口径 42/100 ⇒ **新口径 43/100 ⇒ `gates.teacher.wins: 43`**
+//     两处都只差 1 局（就是"已清场但没走到 stage_clear"那一局）；逐局证据 = `tmp/c6bonus-{teacher,bc}.jsonl`。
+//     教师块 `timeout_frac` 随之 0.03→0.02（新口径把"已清场被截断"剔出超时，同 `evalboard/stats.ts`）。
+//   G1 门槛随之：`floor = 0.32 + 0.05 = 0.37`、`rel_teacher×教师 = 0.7×0.43 = 0.301` ⇒ 有效要求 0.37。
+//   ⚠️ `gates.rules` 相对 c6-pickup3 另有 3 处**未在早期注释里声明**的改动：G1 `pool_window 3→4`、
+//     G4 `tol_pp 8.0→5.0`、G4 `metrics` 增 `pickup_mean`。加 `pickup_mean` 与本腿"看道具"的观察项
+//     一致，但 `tol_pp` 收紧会让 plateau 更容易触发 REMEDIATE ⇒ 若非有意，回退这 3 处。
+//   主判据仍是 **配对探针 > 起点 + McNemar p<0.05**；**附加观察项**：
+//   `powerUpsCollected`/局（应在 1.05 基础上继续升）、"清场+超时"局数应下降（说明真去过关了）。
+//
+// ── 验收探针（每 10 轮；**不要只看训练内 eval**）──────────────────────────────────
+//   bun tools/sim/eval-course-ckpt.ts --course tmp/c6-pickup-strict.jsonc \
+//     --weights nn-training/weights/c6-bonus/<ckpt>.json \
+//     --weights nn-training/weights/c6-pickup/c6-pickup.it35.20260912-165846.json \
+//     --games 200 --workers 6 --out tmp/c6bonus-it<N>-probe.jsonl
+//   ⚠️ 该工具现在打的是 **`pass`（= `win ∪ cleared`）**，不再单独打 `win`；两个口径都在 JSONL
+//      里（每行 `win`/`cleared`/`outcome` 齐全，可离线细分）。报数时请注明用的是哪个口径
+//      （训练信号已把"清场+截断"补成过关，但评估侧 max_ticks 截断仍在）。
+{
+  "version": 5,
+  "name": "c6-bonus",
+  "mode": "per-tick",
+  "stages": [
+    {
+      "name": "p4-onset-mixed",
+      "grid": [
+        [
+          6,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6
+        ],
+        [
+          6,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          6
+        ],
+        [
+          6,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          6
+        ],
+        [
+          6,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          6
+        ],
+        [
+          6,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          6
+        ],
+        [
+          6,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          6
+        ],
+        [
+          6,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          6
+        ],
+        [
+          6,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          6
+        ],
+        [
+          6,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          6
+        ],
+        [
+          6,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          6
+        ],
+        [
+          6,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          6
+        ],
+        [
+          6,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          6
+        ],
+        [
+          6,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6,
+          6
+        ]
+      ],
+      "forces": "abcdabcdabcdabcdabcd",
+      "count": 6,
+      "player_spawn": {
+        "col": 12,
+        "row": 12
+      },
+      "enemy_spawns": [
+        {
+          "col": 2,
+          "row": 2
+        },
+        {
+          "col": 22,
+          "row": 2
+        },
+        {
+          "col": 22,
+          "row": 22
+        },
+        {
+          "col": 2,
+          "row": 22
+        }
+      ]
+    }
+  ],
+  "difficulty": "hard",
+  "max_ticks": 2400,
+  "seed_rotate": 150,
+  "player": {
+    "lives": 1,
+    "level": 0
+  },
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots - wTick*(min(ticks, clearTick + wBonusTicks) if clearTick >= 0 else ticks) - wChip*playerDamageTaken + wClear*(1.0 if (is_timeout and clearTick >= 0) else 0.0)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.3,
+      "wPickup": 3.0,
+      "wStar": 1.0,
+      "wDmg": 1.0,
+      "wStuck": 0.02,
+      "wShot": 0.01,
+      "wTick": 0.01,
+      "wChip": 0.005,
+      "wClear": 4.0,
+      "wBonusTicks": 600.0
+    },
+    "terminal": {
+      "stage_clear": 2.0,
+      "lives_exhausted": -1.0,
+      "timeout": -2.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/c6-pickup/c6-pickup.it35.20260912-165846.json",
+  "iters": 160,
+  "max_hours": 12,
+  "workers": 8,
+  "kickstart_ref": true,
+  "warmup_iters": 0,
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "until_iter": 40,
+      "kl_coef": 0.2,
+      "lr": 0.00015,
+      "kl_cap": 0.2
+    },
+    {
+      "kl_coef": 0.03,
+      "lr": 5e-05
+    }
+  ],
+  "out": "tmp/c6-bonus/weights.json",
+  "traj": "tmp/c6-bonus",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/c6-bonus",
+  "backup_prefix": "c6-bonus",
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 100,
+  "eval_every": 5,
+  "gates": {
+    "sustain": 2,
+    "baseline_win_rate": 0.32,
+    "teacher": {
+      "corpus": "EVAL_SEEDS:860001-860100@stage2000",
+      "games": 100,
+      "wins": 43,
+      "kills": 3.54,
+      "phits": 0.57,
+      "zero_kill_frac": 0.14,
+      "timeout_frac": 0.02
+    },
+    "advance_requires": [
+      "G1",
+      "G2"
+    ],
+    "min_train_samples": 4000000,
+    "est_iter_min": 3,
+    "rules": [
+      {
+        "id": "G1",
+        "kind": "wins_mastery",
+        "verdict": "ADVANCE",
+        "rel_teacher": 0.7,
+        "min_gain_pp": 5.0,
+        "require_rising": true,
+        "pool_window": 4,
+        "conf_z": 1.645
+      },
+      {
+        "id": "G2",
+        "kind": "skill_floor",
+        "verdict": "ADVANCE",
+        "max_zero_kill_frac": 0.3
+      },
+      {
+        "id": "G4",
+        "kind": "plateau",
+        "verdict": "ADVANCE|REMEDIATE",
+        "window_rounds": 6,
+        "tol_pp": 5.0,
+        "tol_kills": 0.5,
+        "metrics": [
+          "win_rate",
+          "kills_mean",
+          "pickup_mean"
+        ],
+        "advance_if": [
+          "G1",
+          "G2"
+        ],
+        "advance_frac": 0.7
+      },
+      {
+        "id": "G7",
+        "kind": "course_valid",
+        "verdict": "REMEDIATE",
+        "max_timeout_frac": 0.15,
+        "rising_rounds": 3
+      },
+      {
+        "id": "G13",
+        "kind": "duty",
+        "verdict": "REMEDIATE",
+        "min_train_frac": 0.1
+      }
+    ]
+  }
+}

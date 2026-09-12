@@ -164,6 +164,11 @@ interface LabelAgg {
   games: number
   wins: number
   cleared: number
+  /** 单关训练场景下 `win`(stage_clear) 与 `cleared`(歼灭) 等价，统一算「过关」。
+   *  敌人全灭后若场上还有道具，游戏进 BONUS TIME 窗口（≈600 tick）才 stage_clear，
+   *  而 max_ticks 可能在窗口结束前截断 ⇒ outcome=max_ticks 但实际已歼灭。
+   *  （2026-09-12 用户裁定：单关场景不区分二者；道具跨关累积的增益只在多关训练时才存在。） */
+  passed: number
   outcomes: Record<string, number>
   kills: number
   enemyHits: number
@@ -302,6 +307,7 @@ async function main(): Promise<void> {
         games: 0,
         wins: 0,
         cleared: 0,
+        passed: 0,
         outcomes: {},
         kills: 0,
         enemyHits: 0,
@@ -315,6 +321,7 @@ async function main(): Promise<void> {
     a.games++
     if (r.win) a.wins++
     if (r.cleared) a.cleared++
+    if (r.win || r.cleared) a.passed++
     a.outcomes[r.outcome] = (a.outcomes[r.outcome] ?? 0) + 1
     a.kills += r.kills
     a.enemyHits += r.enemyHits
@@ -328,11 +335,11 @@ async function main(): Promise<void> {
     `\n[eval-course-ckpt] ${rows.length} games in ${el}s (${(rows.length / Number(el) || 0).toFixed(1)} games/s)\n`,
   )
   process.stderr.write(
-    `${'label'.padEnd(28)} win    kills  hit(敌) beHit(玩家) dmg     shots  avgTicks  max_ticks gameover\n`,
+    `${'label'.padEnd(28)} pass   kills  hit(敌) beHit(玩家) dmg     shots  avgTicks  max_ticks gameover\n`,
   )
   for (const a of agg.values()) {
     process.stderr.write(
-      `${a.label.padEnd(28)} ${`${a.wins}/${a.games}`.padEnd(6)} ${String(a.kills).padEnd(6)} ` +
+      `${a.label.padEnd(28)} ${`${a.passed}/${a.games}`.padEnd(6)} ${String(a.kills).padEnd(6)} ` +
         `${String(a.enemyHits).padEnd(7)} ${String(a.playerHits).padEnd(10)} ` +
         `${String(a.playerDamageTaken).padEnd(7)} ${String(a.playerShots).padEnd(6)} ` +
         `${Math.round(a.ticks / Math.max(1, a.games))
@@ -342,7 +349,10 @@ async function main(): Promise<void> {
     )
   }
   process.stderr.write(
-    `[eval-course-ckpt] win rate per checkpoint above; full JSONL ${outPath ? `-> ${outPath}` : 'on stdout'}\n`,
+    // `pass` = win ∪ cleared（单关场景二者等价，见 LabelAgg.passed 注释）；
+    // win/cleared 的原始计数仍逐局落在 JSONL 里，需要细分时可离线重算。
+    `[eval-course-ckpt] pass rate (= win ∪ cleared) per checkpoint above; ` +
+      `full JSONL ${outPath ? `-> ${outPath}` : 'on stdout'}\n`,
   )
 }
 
