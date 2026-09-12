@@ -404,45 +404,49 @@ export function App({ initial }: AppProps) {
           </button>
         </div>
       ) : null}{' '}
-      {stateView?.cloudHalt?.status === 'halted' ? (
-        <div className="tc-banner tc-banner--err" role="alert">
-          <span>
-            ⚠ 停机中（{stateView.cloudHalt.reason}）：已向云机下发停机命令——云机先尝试停机；
-            停不掉则照常执行任务（不闲置空烧）。本地 hub/console
-            均正常。停机条件消失（如恢复训练）会自动解除。
-          </span>
-          <button
-            type="button"
-            className="tc-btn tc-btn--sm"
-            onClick={() => void doAction('cloud-resume')}
-          >
-            立即恢复
-          </button>
-        </div>
-      ) : null}
-      {stateView?.cloudHalt?.status === 'recovered' &&
-      stateView.cloudHalt.clearedAt &&
-      cloudHaltAck !== stateView.cloudHalt.clearedAt ? (
-        <div className="tc-banner tc-banner--muted" role="status">
-          <span>
-            曾停机（{stateView.cloudHalt.reason}）· 已恢复（
-            {stateView.cloudHalt.clearReason ?? '手动恢复'}，{' '}
-            {fmtTs(new Date(stateView.cloudHalt.clearedAt).getTime(), Date.now())}）；停机期间
-            停不掉的云机继续工作，未闲置浪费。
-          </span>
-          <button
-            type="button"
-            className="tc-btn tc-btn--sm"
-            onClick={() => {
-              const clearedAt = stateView.cloudHalt?.clearedAt ?? ''
-              writeLocal(TC_CLOUDHALT_ACK, clearedAt)
-              setCloudHaltAck(clearedAt)
-            }}
-          >
-            知道了
-          </button>
-        </div>
-      ) : null}
+      {Object.entries(stateView?.cloudHalts ?? {})
+        .filter(([, h]) => h.status === 'halted')
+        .map(([courseName, h]) => (
+          <div key={`halt-${courseName}`} className="tc-banner tc-banner--err" role="alert">
+            <span>
+              ⚠ {courseName ? `课程 ${courseName} ` : ''}停机中（{h.reason}）
+              ：已向云机下发停机命令——云机先尝试停机；
+              停不掉则照常执行任务（不闲置空烧）。本地 hub/console
+              均正常。停机条件消失（如恢复训练）会自动解除。
+            </span>
+            <button
+              type="button"
+              className="tc-btn tc-btn--sm"
+              onClick={() => void doAction('cloud-resume', { course: courseName })}
+            >
+              立即恢复
+            </button>
+          </div>
+        ))}
+      {Object.entries(stateView?.cloudHalts ?? {})
+        .filter(([, h]) => h.status === 'recovered' && !!h.clearedAt)
+        .filter(([courseName, h]) => cloudHaltAck !== `${courseName}|${h.clearedAt}`)
+        .map(([courseName, h]) => (
+          <div key={`rec-${courseName}`} className="tc-banner tc-banner--muted" role="status">
+            <span>
+              {courseName ? `课程 ${courseName} ` : ''}曾停机（{h.reason}）· 已恢复（
+              {h.clearReason ?? '手动恢复'}，{' '}
+              {fmtTs(new Date(h.clearedAt ?? '').getTime(), Date.now())}）；停机期间
+              停不掉的云机继续工作，未闲置浪费。
+            </span>
+            <button
+              type="button"
+              className="tc-btn tc-btn--sm"
+              onClick={() => {
+                const ack = `${courseName}|${h.clearedAt ?? ''}`
+                writeLocal(TC_CLOUDHALT_ACK, ack)
+                setCloudHaltAck(ack)
+              }}
+            >
+              知道了
+            </button>
+          </div>
+        ))}
       {stateView?.ppoQueueStall ? (
         <div className="tc-banner tc-banner--err" role="alert">
           <span>

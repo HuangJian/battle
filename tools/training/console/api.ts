@@ -10,8 +10,10 @@ import { closeSync, existsSync, openSync, readFileSync, readdirSync, readSync, s
 import path from 'path'
 import { CURRICULA_DIR, LOG_DIR, NN_TRAINING, REPO_ROOT } from '../paths'
 import { httpOk, pidAlive } from '../net'
-import { loadRegistry } from '../registry'
+import { entryForView, loadRegistry } from '../registry'
 import { loadConfig } from '../config'
+import { courseLogDir } from '../specs'
+import { slotPort } from '../slots'
 import {
   COMPONENT_LABELS,
   loadConsoleState,
@@ -181,18 +183,22 @@ export function actionCtx(body: PostBody): StartCtx {
 
 // 组件日志统一读 LOG_DIR（仓库根 tmp/，2026-09-08 双 tmp 统一）——绝对路径，
 // 与组件启动写入路径（specs.ts log:）同源，不依赖控制台自身 cwd。
+// M6：hub/workerServe 日志 per-course（spec 侧 specs.ts + 本 resolver 两半必须同步，
+// 否则组件表日志尾扫到别课的文件）。无课程时沿用旧单课路径。
 const COMPONENT_LOGS: Partial<Record<Component, (cfg: RlConfig, course: string) => string>> = {
   selfNode: () => path.join(LOG_DIR, 'sampler-agent.log'),
-  hubServer: () => path.join(LOG_DIR, 'hub-server.out'),
+  hubServer: (_c, course) => path.join(courseLogDir(course), 'hub-server.out'),
   cloudflared: (_c) => path.join(LOG_DIR, 'cloudflared.log'),
-  trainingLoop: (_cfg, course) => path.join(LOG_DIR, course || 'nocourse', 'training-loop.log'),
-  workerServe: () => path.join(LOG_DIR, 'remote-worker-serve.log'),
+  trainingLoop: (_cfg, course) => path.join(courseLogDir(course), 'training-loop.log'),
+  workerServe: (_c, course) =>
+    path.join(course ? courseLogDir(course) : LOG_DIR, 'remote-worker-serve.log'),
 }
 
-const HEALTHY_PORTS: Partial<Record<Component, (cfg: RlConfig) => string>> = {
+/** 组件健康探测 URL（端口一律经槽位算术；course 决定槽位）。 */
+const HEALTHY_PORTS: Partial<Record<Component, (cfg: RlConfig, course: string) => string>> = {
   selfNode: (c) => `http://127.0.0.1:${c.rl.agent_port}/v1/ping`,
-  hubServer: (c) => `http://127.0.0.1:${c.rl.hub_port}/ping`,
-  workerServe: (c) => `http://127.0.0.1:${c.rl.hub_port + 2}/ping`,
+  hubServer: (c, course) => `http://127.0.0.1:${slotPort(c, course, 'hub')}/ping`,
+  workerServe: (c, course) => `http://127.0.0.1:${slotPort(c, course, 'push')}/ping`,
 }
 
 const ALL_COMPONENTS: Component[] = [
@@ -255,7 +261,7 @@ export function logTail(nnRel: string, n = 5): string[] {
 export function resolveComponentLog(key: Component, cfg: RlConfig, course: string): string | null {
   const mapped = COMPONENT_LOGS[key]?.(cfg, course)
   if (mapped && existsSync(mapped)) return mapped
-  const entryLog = loadRegistry()[key]?.log
+  const entryLog = entryForView(loadRegistry(), key, course)?.log
   if (entryLog && existsSync(entryLog)) return entryLog
   const found = findLatestLog(key, course)
   if (found) return found
@@ -415,11 +421,12 @@ export async function componentViews(cfg: RlConfig, course: string): Promise<Com
   const reg = loadRegistry()
   return Promise.all(
     ALL_COMPONENTS.map(async (key): Promise<ComponentView> => {
-      const e = reg[key]
+      // 展示路径：per-course 优先，旧单键兜底（R1 读兼容窗口）
+      const e = entryForView(reg, key, course)
       const alive = pidAlive(e?.pid)
       const status: ComponentView['status'] = e ? (alive ? 'running' : 'exited') : 'stopped'
       let healthy: boolean | null = null
-      const probe = HEALTHY_PORTS[key]?.(cfg)
+      const probe = HEALTHY_PORTS[key]?.(cfg, course)
       if (status === 'running' && probe) {
         healthy = await httpOk(
           probe,
@@ -753,6 +760,7 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
   return {
     time: new Date().toISOString(),
     course,
+    activeCourse: state.activeCourse || state.course || course,
     courses,
     components,
     nodes,
@@ -765,7 +773,7 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     },
     metrics,
     phase,
-    cloudHalt: state.cloudHalt ?? null,
+    cloudHalts: state.cloudHalts ?? {},
     ppoQueueStall,
   }
 }
@@ -1001,19 +1009,19 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
       case 'stop': {
         const key = str(body, 'component') as Component
         if (!ALL_COMPONENTS.includes(key)) return errResp(`未知组件: ${key}`, 400)
-        return okResp(await stopComponent(key))
+        return okResp(await stopComponent(key, ctx.course))
       }
       case 'stopAll':
         return okResp(await stopAll())
       case 'cloud-halt': {
-        // 手动下发停机命令（§386）：任务照常分发，云机先试停机停不掉继续干活。
+        // 手动下发停机命令（§386 + S17）：按当前课程下发，任务照常分发。
         const reason = str(body, 'reason') || '手动下发停机命令'
-        return okResp(await triggerCloudHalt(loadConfigSafe(), reason))
+        return okResp(await triggerCloudHalt(loadConfigSafe(), reason, ctx.course))
       }
       case 'cloud-resume': {
-        // 停机条件消失（手动恢复）：hub resume + recovered（灰横幅保留历史）。
+        // 停机条件消失（手动恢复）：本课 hub resume + recovered（灰横幅保留历史）。
         const clearReason = str(body, 'reason') || '手动恢复'
-        return okResp(await markCloudHaltRecovered(loadConfigSafe(), clearReason))
+        return okResp(await markCloudHaltRecovered(loadConfigSafe(), clearReason, ctx.course))
       }
       case 'smoke': {
         const key = str(body, 'component') as Component

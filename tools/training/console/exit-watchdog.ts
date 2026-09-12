@@ -19,31 +19,43 @@ import { loadConfig } from '../config'
 import { warn } from '../log'
 import { pidAlive } from '../net'
 import { portOwnerPids } from '../proc'
-import { loadRegistry, saveComponent } from '../registry'
+import {
+  loadRegistry,
+  registryTriples,
+  saveAnyComponent,
+  type WatchedEntry,
+} from '../registry'
 import type { Component, ProcSpec, Registry, RegistryEntry } from '../types'
 import { readLogTail, resolveComponentLog, discoverCourses, effectiveCourse } from './api'
 import { COMPONENT_LABELS, loadConsoleState, restartSpecFor, triggerCloudHalt } from './actions'
 
-/** 扫描登记条目，返回「确证退出」的组件（两帧锁）。isAlive 可注入（测试用）。 */
+/** 监督/看护的归属键：`key|course`（多课下同一组件有多份进程）。 */
+export function watchIdOf(item: { key: Component; course: string }): string {
+  return `${item.key}|${item.course}`
+}
+
+/** 扫描登记条目，返回「确证退出」的条目（两帧锁）。isAlive 可注入（测试用）。
+ *  枚举走 registryTriples（三元组，含 course）——不直接枚举账本对象。 */
 export function nextExitFailures(
   reg: Registry,
-  deadSeen: Set<Component>,
+  deadSeen: Set<string>,
   isAlive: (pid: number) => boolean = pidAlive,
-): Array<{ key: Component; entry: RegistryEntry }> {
-  const out: Array<{ key: Component; entry: RegistryEntry }> = []
-  for (const key of Object.keys(reg) as Component[]) {
-    const e = reg[key]
-    if (!e || typeof e.pid !== 'number' || e.error) continue
-    if (isAlive(e.pid)) {
-      deadSeen.delete(key) // 复活/换 pid：帧计数清零
+): WatchedEntry[] {
+  const out: WatchedEntry[] = []
+  for (const item of registryTriples(reg)) {
+    const { entry } = item
+    const id = watchIdOf(item)
+    if (typeof entry.pid !== 'number' || entry.error) continue
+    if (isAlive(entry.pid)) {
+      deadSeen.delete(id) // 复活/换 pid：帧计数清零
       continue
     }
-    if (!deadSeen.has(key)) {
-      deadSeen.add(key) // 第一帧：仅记
+    if (!deadSeen.has(id)) {
+      deadSeen.add(id) // 第一帧：仅记
       continue
     }
-    deadSeen.delete(key) // 第二帧：确证
-    out.push({ key, entry: e })
+    deadSeen.delete(id) // 第二帧：确证
+    out.push(item)
   }
   return out
 }
@@ -51,20 +63,28 @@ export function nextExitFailures(
 export interface FailureLogIO {
   append?: (abs: string, text: string) => void
   warnFn?: (text: string) => void
-  save?: (key: Component, entry: RegistryEntry) => void
+  /** 回写条目（多课：同一条目回原课程槽位；默认 saveAnyComponent）。 */
+  save?: (key: Component, course: string, entry: RegistryEntry) => void
+}
+
+/** 组件展示名 + 归属课程后缀（多课日志/横幅里必须能看出是哪门课）。 */
+export function labelOf(key: Component, course = ''): string {
+  return `${COMPONENT_LABELS[key]}${course ? `[${course}]` : ''}`
 }
 
 /** 构造「意外退出/已停车」标记文本（含日志尾），供落盘与测试断言。 */
 export function buildExitMarker(
   key: Component,
+  course: string,
   entry: RegistryEntry,
   tail: string[],
   now: string,
   planned?: string | null,
 ): string {
+  const label = labelOf(key, course)
   const head = planned
-    ? `[console] ${now} ${COMPONENT_LABELS[key]} 已停车（PID ${entry.pid}）：${planned}`
-    : `[console] ${now} ${COMPONENT_LABELS[key]} 意外退出 (PID ${entry.pid})——非正常退出，` +
+    ? `[console] ${now} ${label} 已停车（PID ${entry.pid}）：${planned}`
+    : `[console] ${now} ${label} 意外退出 (PID ${entry.pid})——非正常退出，` +
       '请检查下列日志；用控制台「启动」恢复（原因尾段见上）：'
   const lines = [head, ...(tail.length ? tail.map((l) => `  | ${l}`) : ['  | (日志缺失或为空)'])]
   return lines.join('\n')
@@ -73,6 +93,7 @@ export function buildExitMarker(
 /** 记录一次确证退出：追加标记到组件日志 + console warn + 写 registry.error（幂等由调用方保证）。 */
 export function recordExitFailure(
   key: Component,
+  course: string,
   entry: RegistryEntry,
   logAbs: string | null,
   tail: string[],
@@ -80,7 +101,7 @@ export function recordExitFailure(
   now: string = new Date().toISOString(),
   planned?: string | null,
 ): string {
-  const marker = buildExitMarker(key, entry, tail, now, planned)
+  const marker = buildExitMarker(key, course, entry, tail, now, planned)
   if (logAbs) {
     try {
       ;(io.append ?? ((p, t) => appendFileSync(p, t, 'utf-8')))(logAbs, `\n${marker}\n`)
@@ -89,8 +110,9 @@ export function recordExitFailure(
     }
   }
   ;(io.warnFn ?? warn)(marker.replace(/\n/g, ' '))
-  ;(io.save ?? saveComponent)(key, {
+  ;(io.save ?? saveAnyComponent)(key, course, {
     ...entry,
+    course: entry.course ?? course,
     error: planned ? `已停车：${planned}` : `意外退出 (PID ${entry.pid})`,
     exitAt: now,
   })
@@ -158,19 +180,19 @@ export function specPort(spec: ProcSpec | null): number | null {
 }
 
 /** 端口当前占用者 pid（排除账本里那个已消失的旧 pid）。 */
-export function ownerPidOf(key: Component, stalePid: number): number | null {
-  const port = specPort(restartSpecFor(key))
+export function ownerPidOf(key: Component, course: string, stalePid: number): number | null {
+  const port = specPort(restartSpecFor(key, course))
   const owners = port ? portOwnerPids(port) : []
   return owners.find((p) => p !== stalePid) ?? owners[0] ?? null
 }
 
 export interface ClassifyIO {
-  /** 健康复核（注入用于测试）；默认用 restartSpecFor(key).healthy()。 */
-  healthyOf?: (key: Component) => Promise<boolean | null>
-  /** 账本 pid 修正（注入用于测试）；默认 saveComponent。 */
-  repair?: (key: Component, entry: RegistryEntry, newPid: number) => void
+  /** 健康复核（注入用于测试）；默认用 restartSpecFor(key, course).healthy()。 */
+  healthyOf?: (item: WatchedEntry) => Promise<boolean | null>
+  /** 账本 pid 修正（注入用于测试）；默认 saveAnyComponent。 */
+  repair?: (item: WatchedEntry, newPid: number) => void
   /** 端口占用者（注入用于测试）；默认 specPort + portOwnerPids。 */
-  ownerPidOf?: (key: Component, stalePid: number) => number | null
+  ownerPidOf?: (item: WatchedEntry, stalePid: number) => number | null
   warnFn?: (text: string) => void
 }
 
@@ -184,31 +206,37 @@ export interface ClassifyIO {
  * pid 修正为端口当前占用者；检查不可用或确认不通 ⇒ 'exited'（走原失败记录路径）。
  */
 export async function classifyExit(
-  key: Component,
-  entry: RegistryEntry,
+  item: WatchedEntry,
   io: ClassifyIO = {},
 ): Promise<'alive' | 'exited'> {
-  const spec = restartSpecFor(key)
+  const { key, course, entry } = item
+  const spec = restartSpecFor(key, course)
   const healthy = io.healthyOf ?? (async () => (spec ? await spec.healthy() : null))
   let alive = false
   try {
-    alive = (await healthy(key)) === true
+    alive = (await healthy(item)) === true
   } catch {
     alive = false
   }
   if (!alive) return 'exited'
 
-  const newPid = (io.ownerPidOf ?? ((k, stale) => ownerPidOf(k, stale)))(key, entry.pid)
+  const newPid = (io.ownerPidOf ?? ((it, stale) => ownerPidOf(it.key, it.course, stale)))(
+    item,
+    entry.pid,
+  )
   const say = io.warnFn ?? warn
   if (newPid && newPid !== entry.pid) {
-    ;(io.repair ?? ((k, e, p) => saveComponent(k, { ...e, pid: p })))(key, entry, newPid)
+    ;(io.repair ?? ((it, p) => saveAnyComponent(it.key, it.course, { ...it.entry, pid: p })))(
+      item,
+      newPid,
+    )
     say(
-      `[console] ${COMPONENT_LABELS[key]} 进程换代：账本 PID ${entry.pid} 已消失，服务仍在应答` +
+      `[console] ${labelOf(key, course)} 进程换代：账本 PID ${entry.pid} 已消失，服务仍在应答` +
         ` → 账本 pid 修正为 ${newPid}（不计意外退出）`,
     )
   } else {
     say(
-      `[console] ${COMPONENT_LABELS[key]} 账本 PID ${entry.pid} 已消失，但服务仍在应答 → ` +
+      `[console] ${labelOf(key, course)} 账本 PID ${entry.pid} 已消失，但服务仍在应答 → ` +
         '视为进程换代，跳过意外退出标记',
     )
   }
@@ -223,36 +251,37 @@ export async function classifyExit(
 export async function healRecoveredErrors(
   reg: Registry,
   io: {
-    healthyOf?: (key: Component) => Promise<boolean | null>
-    ownerPidOf?: (key: Component, stalePid: number) => number | null
-    save?: (key: Component, entry: RegistryEntry) => void
+    healthyOf?: (item: WatchedEntry) => Promise<boolean | null>
+    ownerPidOf?: (item: WatchedEntry, stalePid: number) => number | null
+    save?: (key: Component, course: string, entry: RegistryEntry) => void
     warnFn?: (t: string) => void
   } = {},
-): Promise<Component[]> {
-  const healed: Component[] = []
-  for (const key of Object.keys(reg) as Component[]) {
-    const e = reg[key]
-    if (!e?.error) continue
+): Promise<string[]> {
+  const healed: string[] = []
+  for (const item of registryTriples(reg)) {
+    const { key, course, entry: e } = item
+    if (!e.error) continue
     const healthy =
       io.healthyOf ??
       (async () => {
-        const spec = restartSpecFor(key)
+        const spec = restartSpecFor(key, course)
         return spec ? await spec.healthy() : null
       })
     let alive = false
     try {
-      alive = (await healthy(key)) === true
+      alive = (await healthy(item)) === true
     } catch {
       alive = false
     }
     if (!alive) continue
-    const pid = (io.ownerPidOf ?? ((k, stale) => ownerPidOf(k, stale)))(key, e.pid) ?? e.pid
+    const pid =
+      (io.ownerPidOf ?? ((it, stale) => ownerPidOf(it.key, it.course, stale)))(item, e.pid) ?? e.pid
     const { error: _err, exitAt: _at, ...rest } = e
-    ;(io.save ?? saveComponent)(key, { ...rest, pid })
+    ;(io.save ?? saveAnyComponent)(key, course, { ...rest, pid })
     ;(io.warnFn ?? warn)(
-      `[console] ${COMPONENT_LABELS[key]} 服务已恢复应答 → 清除「${e.error}」标记`,
+      `[console] ${labelOf(key, course)} 服务已恢复应答 → 清除「${e.error}」标记`,
     )
-    healed.push(key)
+    healed.push(watchIdOf(item))
   }
   return healed
 }
@@ -266,9 +295,12 @@ export async function runExitCheck(): Promise<number> {
     await healRecoveredErrors(reg)
     const hits = nextExitFailures(loadRegistry(), _deadSeen)
     let recorded = 0
-    for (const { key, entry } of hits) {
-      if ((await classifyExit(key, entry)) === 'alive') continue // 仅换代，非退出
-      const logRel = resolveComponentLog(key, cfg, course) ?? entry.log ?? null
+    for (const hit of hits) {
+      const { key, entry } = hit
+      if ((await classifyExit(hit)) === 'alive') continue // 仅换代，非退出
+      // 日志按**条目自身的课程**取（operator 课程 ≠ 该条目课程时不能串）
+      const logRel =
+        resolveComponentLog(key, cfg, hit.course || course) ?? entry.log ?? null
       const tail = logRel ? readLogTail(logRel, 12).lines : []
       // §385：trainingLoop 账本有最近 gate_verdict/circuit_break → 设计内停车，
       // 标「已停车(原因)」而非「意外退出」；其余组件/无事件走原意外路径。
@@ -276,15 +308,16 @@ export async function runExitCheck(): Promise<number> {
         key === 'trainingLoop' && logRel
           ? recentPlannedStop(join(dirname(logRel), 'training_log.jsonl'))
           : null
-      recordExitFailure(key, entry, logRel, tail, {}, undefined, planned)
+      recordExitFailure(key, hit.course, entry, logRel, tail, {}, undefined, planned)
       // §385 复审：TrainingLoop 一死（设计内停车或崩溃）→ 云端停机省 GPU 配额；
-      // 本地 hubServer/console 一律不动。幂等由 triggerCloudHalt 守卫。
+      // 本地 hubServer/console 一律不动。幂等由 triggerCloudHalt 守卫；
+      // 停机命令按**该条目的课程**下发（多课下不得误停别课 hub）。
       if (key === 'trainingLoop') {
         const reason = planned
           ? `TrainingLoop 设计内停车：${planned}`
           : `TrainingLoop 意外退出 (PID ${entry.pid})`
         try {
-          await triggerCloudHalt(cfg, reason)
+          await triggerCloudHalt(cfg, reason, hit.course)
         } catch {
           /* watchdog 永不被停机链路拖垮 */
         }
@@ -297,5 +330,5 @@ export async function runExitCheck(): Promise<number> {
   }
 }
 
-/** 两帧锁状态（模块级；单 console 进程生命周期内有效）。 */
-const _deadSeen = new Set<Component>()
+/** 两帧锁状态（模块级；单 console 进程生命周期内有效）。键 = `key|course`。 */
+const _deadSeen = new Set<string>()

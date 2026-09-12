@@ -85,6 +85,8 @@ export interface MetricsView {
 export interface ConsoleStateView {
   time: string
   course: string
+  /** 控制台当前课程（P5-W1 additive；旧视图无此字段 → 回退 `course`）。 */
+  activeCourse?: string
   courses: string[]
   components: ComponentView[]
   nodes: NodeView[]
@@ -94,14 +96,17 @@ export interface ConsoleStateView {
   metrics: MetricsView
   /** 当前训练阶段（顶栏图标用）。 */
   phase: PhaseInfo
-  /** 云端停机记录（§386：halted=红横幅停机中；recovered=灰横幅"曾停机已恢复"）。 */
-  cloudHalt?: {
-    at: string
-    reason: string
-    status: 'halted' | 'recovered'
-    clearedAt?: string
-    clearReason?: string
-  } | null
+  /** 每课云端停机记录（§386 + S17：键 = 课程名；halted=红横幅，recovered=灰横幅历史）。 */
+  cloudHalts?: Record<
+    string,
+    {
+      at: string
+      reason: string
+      status: 'halted' | 'recovered'
+      clearedAt?: string
+      clearReason?: string
+    }
+  >
   /** PPO 任务排队超时（>5min 无 worker 领取）：warning 横幅——云端 worker 可能断连。 */
   ppoQueueStall?: {
     jobId: string

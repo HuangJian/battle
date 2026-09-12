@@ -33,7 +33,7 @@ import path from 'path'
 import { CONFIG_PATH, REPO_ROOT } from '../paths'
 import { createSupervisor } from '../reload'
 import { isLoopbackAddress, killPid, shapeLoopbackNoProxy, waitUntil } from '../net'
-import { saveComponent } from '../registry'
+import { entryForCourse, loadRegistry, saveAnyComponent } from '../registry'
 import { launchSpec } from '../proc'
 import { monitorTouch } from '../reload-touch'
 import {
@@ -88,18 +88,31 @@ function startSupervisor(): ReturnType<typeof createSupervisor> {
     oldPid: number,
   ): Promise<number> => {
     const key = spec.key
-    const fresh = restartSpecFor(key)
+    const course = spec.course ?? ''
+    const tag = `${key}${course ? `[${course}]` : ''}`
+    // fail-closed（M5）：按 (key, course) 精确重建，绝不用 console-state 猜课程。
+    const fresh = restartSpecFor(key, course)
     if (!fresh) {
-      console.warn(`[supervisor] ${key}: 无法重建 spec（未登记或缺元数据）——跳过重启`)
+      // 放弃重建必须可见（F-A4）：null 是「放弃」不是「没事发生」。
+      console.warn(
+        `[supervisor] ${tag}: 无法重建 spec（该 (key, course) 未登记或缺元数据）——跳过重启`,
+      )
       return oldPid
     }
     await killPid(oldPid)
     const r = launchSpec(fresh)
-    saveComponent(key, { pid: r.pid, entry: fresh.sentinels[fresh.sentinels.length - 1] })
+    // 回灌原槽位（per-course）；无课程走旧扁平键
+    saveAnyComponent(key, course, {
+      ...(entryForCourse(loadRegistry(), key, course) ?? {}),
+      pid: r.pid,
+      course: course,
+      entry: fresh.sentinels[fresh.sentinels.length - 1],
+      log: fresh.log,
+    })
     monitorTouch()
     const ready = await waitUntil(fresh.healthy, 45000, 500)
     console.log(
-      `[supervisor] ${key} 已应用最新代码 (PID ${r.pid}${ready ? '' : '，45s 未就绪，继续观察'})`,
+      `[supervisor] ${tag} 已应用最新代码 (PID ${r.pid}${ready ? '' : '，45s 未就绪，继续观察'})`,
     )
     return r.pid
   }
@@ -133,16 +146,19 @@ async function main(): Promise<void> {
 
   // 变更检测监督：跟踪账本中已登记的全部组件。
   const sup = startSupervisor()
-  const watched = new Set<Component>()
+  // 监督单位 = (key, course)：多课程下同一组件有多份进程，按 key 单键会互相顶掉。
+  const watched = new Set<string>()
   const reconcileWatch = async (): Promise<void> => {
     const state = await buildStateView()
     for (const c of state.components) {
-      if (c.status !== 'running' || watched.has(c.key as Component)) continue
-      const spec = restartSpecFor(c.key as Component)
+      const course = c.course ?? ''
+      const id = `${c.key}|${course}`
+      if (c.status !== 'running' || watched.has(id)) continue
+      const spec = restartSpecFor(c.key as Component, course)
       if (!spec) continue
       sup.watch(spec, c.pid ?? 0)
-      watched.add(c.key as Component)
-      console.log(`[supervisor] 监督 ${c.key} (PID ${c.pid})`)
+      watched.add(id)
+      console.log(`[supervisor] 监督 ${c.key}${course ? `[${course}]` : ''} (PID ${c.pid})`)
     }
   }
   await reconcileWatch()

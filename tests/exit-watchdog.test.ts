@@ -5,9 +5,13 @@
  *  - recordExitFailure：标记文本（label/PID/日志尾）落盘 + save(error/exitAt) 记录。
  * 纯函数 + 注入 —— 不碰磁盘 registry / 不拉真实组件日志。
  *
- * 真实 io 的默认 save（saveComponent）会把条目写进 tmp/training-start/registry.json——
+ * 真实 io 的默认 save（saveAnyComponent）会把条目写进 tmp/training-start/registry.json——
  * 必须先把账本重定向到临时目录（BCITY_REGISTRY_FILE），否则测试覆写线上账本、
  * 运行中的控制台会全部误报「已退出」（2026-09-09 事故根因）。
+ *
+ * 多课程（plan multi-course-parallel-training P1b）：监督单位是 (key, course)
+ * 三元组——deadSeen 键为 `key|course`，classify/heal 的 io 钩子吃条目整体；
+ * heal 返回 watchId（`key|course`）而非 Component。
  */
 
 import { afterAll, afterEach, describe, expect, it } from 'bun:test'
@@ -46,7 +50,7 @@ function mkEntry(pid: number): RegistryEntry {
 describe('nextExitFailures（两帧确认）', () => {
   it('同一死 pid 连续两帧才判定退出；第一帧只记状态', () => {
     const reg: Registry = { trainingLoop: mkEntry(999) }
-    const seen = new Set<Component>()
+    const seen = new Set<string>()
     expect(nextExitFailures(reg, seen, () => false)).toEqual([]) // 帧 1：仅记
     const hit = nextExitFailures(reg, seen, () => false) // 帧 2：确证
     expect(hit).toHaveLength(1)
@@ -57,7 +61,7 @@ describe('nextExitFailures（两帧确认）', () => {
 
   it('进程存活时清零帧计数；之后死亡需重新两帧', () => {
     const reg: Registry = { trainingLoop: mkEntry(999) }
-    const seen = new Set<Component>()
+    const seen = new Set<string>()
     expect(nextExitFailures(reg, seen, () => false)).toEqual([]) // 帧1（死）
     expect(nextExitFailures(reg, seen, () => true)).toEqual([]) // 复活 → 清帧
     expect(seen.size).toBe(0)
@@ -66,7 +70,7 @@ describe('nextExitFailures（两帧确认）', () => {
   })
 
   it('条目已带 error（此前已记录）→ 跳过；两次轮询只确证无 error 的死 pid', () => {
-    const seen = new Set<Component>()
+    const seen = new Set<string>()
     const reg: Registry = {
       trainingLoop: { pid: 1, error: '意外退出 (PID 1)' },
       hubServer: { pid: 2 },
@@ -75,6 +79,19 @@ describe('nextExitFailures（两帧确认）', () => {
     const hits = nextExitFailures(reg, seen, () => false) // 帧2：确证（error 的仍跳过）
     expect(hits).toHaveLength(1)
     expect(hits[0]!.key).toBe('hubServer')
+  })
+
+  it('多课程：两课同组件各走各的两帧锁，命中条目带归属 course', () => {
+    const seen = new Set<string>()
+    const reg: Registry = {
+      trainingLoops: { a: mkEntry(11), b: mkEntry(22) },
+    }
+    expect(nextExitFailures(reg, seen, () => false)).toEqual([]) // 帧1：两课仅记
+    expect([...seen].sort()).toEqual(['trainingLoop|a', 'trainingLoop|b'])
+    const hits = nextExitFailures(reg, seen, () => false) // 帧2：两课确证
+    expect(hits).toHaveLength(2)
+    expect(hits.map((h) => h.course).sort()).toEqual(['a', 'b'])
+    expect(hits.every((h) => h.key === 'trainingLoop')).toBe(true)
   })
 })
 
@@ -100,13 +117,14 @@ describe('recordExitFailure', () => {
     const io: FailureLogIO = {
       append: (p, t) => appended.push([p, t]),
       warnFn: () => {},
-      save: (_k, e) => {
+      save: (_k, _c, e) => {
         captured.entry = e
       },
     }
     const tail = ['[run_rl] boot...', '[run_rl] FileNotFoundError: bc 缺']
     const marker = recordExitFailure(
       'trainingLoop',
+      '',
       { pid: 4242, log: logAbs },
       logAbs,
       tail,
@@ -130,6 +148,7 @@ describe('recordExitFailure', () => {
     writeFileSync(logAbs, 'before\n', 'utf-8')
     recordExitFailure(
       'trainingLoop',
+      '',
       { pid: 7 },
       logAbs,
       ['cause line'],
@@ -144,14 +163,19 @@ describe('recordExitFailure', () => {
   })
 
   it('logAbs 为 null：不落盘也正常返回标记（组件无日志语义）', () => {
-    const marker = recordExitFailure('hubServer', { pid: 1 }, null, [], {}, 'T')
+    const marker = recordExitFailure('hubServer', '', { pid: 1 }, null, [], {}, 'T')
     expect(marker).toContain('-')
+  })
+
+  it('多课程：标记带课程归属后缀', () => {
+    const marker = recordExitFailure('trainingLoop', 'b', { pid: 1 }, null, [], {}, 'T')
+    expect(marker).toContain('(trainer)[b]')
   })
 })
 
 describe('buildExitMarker', () => {
   it('还原可读单块文案', () => {
-    const m = buildExitMarker('trainingLoop', { pid: 5 }, ['a', 'b'], 'T1')
+    const m = buildExitMarker('trainingLoop', '', { pid: 5 }, ['a', 'b'], 'T1')
     expect(m).toContain('[console] T1 ')
     expect(m).toContain('意外退出 (PID 5)')
     expect(m).toContain('| a')
@@ -159,7 +183,7 @@ describe('buildExitMarker', () => {
   })
 
   it('planned 传入 → 「已停车」而非「意外退出」', () => {
-    const m = buildExitMarker('trainingLoop', { pid: 5 }, [], 'T1', 'REMEDIATE: 复诊')
+    const m = buildExitMarker('trainingLoop', '', { pid: 5 }, [], 'T1', 'REMEDIATE: 复诊')
     expect(m).toContain('已停车（PID 5）')
     expect(m).toContain('REMEDIATE: 复诊')
     expect(m).not.toContain('意外退出')
@@ -236,12 +260,13 @@ describe('recordExitFailure（设计内停车）', () => {
       const io: FailureLogIO = {
         append: () => {},
         warnFn: () => {},
-        save: (_k, e) => {
+        save: (_k, _c, e) => {
           captured.entry = e
         },
       }
       const marker = recordExitFailure(
         'trainingLoop',
+        '',
         { pid: 99 },
         logAbs,
         [],
@@ -288,12 +313,11 @@ describe('classifyExit', () => {
   it('服务仍在应答 → alive：修正账本 pid，不写失败标记', async () => {
     const repaired: Array<[Component, number]> = []
     const v = await classifyExit(
-      'selfNode',
-      { pid: 8100 },
+      { key: 'selfNode', course: '', entry: { pid: 8100 } },
       {
         healthyOf: async () => true,
         ownerPidOf: () => 30332,
-        repair: (k, _e, p) => repaired.push([k, p]),
+        repair: (item, p) => repaired.push([item.key, p]),
         warnFn: () => {},
       },
     )
@@ -304,8 +328,7 @@ describe('classifyExit', () => {
   it('健康检查不通 → exited（走原失败记录路径）', async () => {
     let repaired = 0
     const v = await classifyExit(
-      'selfNode',
-      { pid: 8100 },
+      { key: 'selfNode', course: '', entry: { pid: 8100 } },
       {
         healthyOf: async () => false,
         ownerPidOf: () => 30332,
@@ -322,8 +345,7 @@ describe('classifyExit', () => {
   it('健康但拿不到新 pid → 仍 alive（跳过标记，不改账本）', async () => {
     let repaired = 0
     const v = await classifyExit(
-      'selfNode',
-      { pid: 8100 },
+      { key: 'selfNode', course: '', entry: { pid: 8100 } },
       {
         healthyOf: async () => true,
         ownerPidOf: () => null,
@@ -339,8 +361,7 @@ describe('classifyExit', () => {
 
   it('健康检查抛异常 → exited（探测失败不得漏记真退出）', async () => {
     const v = await classifyExit(
-      'selfNode',
-      { pid: 8100 },
+      { key: 'selfNode', course: '', entry: { pid: 8100 } },
       {
         healthyOf: async () => {
           throw new Error('boom')
@@ -360,11 +381,11 @@ describe('healRecoveredErrors（误报自愈）', () => {
       {
         healthyOf: async () => true,
         ownerPidOf: () => 30332,
-        save: (k, e) => saved.push([k, e]),
+        save: (k, _c, e) => saved.push([k, e]),
         warnFn: () => {},
       },
     )
-    expect(healed).toEqual(['selfNode'])
+    expect(healed).toEqual(['selfNode|'])
     expect(saved[0]![1].pid).toBe(30332)
     expect(saved[0]![1].error).toBeUndefined()
     expect(saved[0]![1].exitAt).toBeUndefined()
@@ -374,7 +395,11 @@ describe('healRecoveredErrors（误报自愈）', () => {
     const saved: Array<[Component, RegistryEntry]> = []
     const healed = await healRecoveredErrors(
       { trainingLoop: { pid: 1, error: '意外退出 (PID 1)' } },
-      { healthyOf: async () => false, save: (k, e) => saved.push([k, e]), warnFn: () => {} },
+      {
+        healthyOf: async () => false,
+        save: (k, _c, e) => saved.push([k, e]),
+        warnFn: () => {},
+      },
     )
     expect(healed).toEqual([])
     expect(saved).toHaveLength(0)
@@ -384,7 +409,11 @@ describe('healRecoveredErrors（误报自愈）', () => {
     const saved: Array<[Component, RegistryEntry]> = []
     const healed = await healRecoveredErrors(
       { selfNode: { pid: 30332 } },
-      { healthyOf: async () => true, save: (k, e) => saved.push([k, e]), warnFn: () => {} },
+      {
+        healthyOf: async () => true,
+        save: (k, _c, e) => saved.push([k, e]),
+        warnFn: () => {},
+      },
     )
     expect(healed).toEqual([])
     expect(saved).toHaveLength(0)

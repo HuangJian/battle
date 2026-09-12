@@ -17,7 +17,6 @@
 
 import {
   appendFileSync,
-  copyFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -25,11 +24,22 @@ import {
   writeFileSync,
 } from 'fs'
 import path from 'path'
-import { CURRICULA_DIR, LOG_DIR, NN_TRAINING, REPO_ROOT, START_LOG_DIR } from '../paths'
+import { LOG_DIR, REPO_ROOT, consoleStatePath } from '../paths'
+import { resolveCourseBc, seedWeightsFromBc } from '../courses'
+export { resolveCourseBc } // hub.ts 侧从 ../courses 直引；老调用方经 actions 零改动。
 import { httpOk, killPid, pidAlive, waitUntil } from '../net'
-import { clearComponent, loadRegistry, saveComponent } from '../registry'
+import { warn as logWarn } from '../log'
+import {
+  clearAnyComponent,
+  entryForCourse,
+  entryForView,
+  isCourseComponent,
+  loadRegistry,
+  saveAnyComponent,
+} from '../registry'
 import { loadConfig, saveConfig, validateCourseArg } from '../config'
 import { launchSpec, portOwnerPids, stopAllManaged } from '../proc'
+import { lockName, lockPathFor, slotOf, slotPort, validateCourseName } from '../slots'
 import { resolveVenvPython } from '../venv'
 import { monitorTouch } from '../reload-touch'
 import {
@@ -72,6 +82,12 @@ function release(key: string): void {
   busy.delete(key)
 }
 
+/** 动作 busy 键（S10/P5-W3）：按课程键控的组件带 course——两课可同时启/停/冒烟同一
+ *  组件类型，不再互相 409；selfNode（全局单例）与无课程调用沿用旧键（默认行为零变化）。 */
+function busyKey(op: string, key: Component, course = ''): string {
+  return isCourseComponent(key) && course ? `${op}:${key}:${course}` : `${op}:${key}`
+}
+
 export interface ActionResult {
   ok: boolean
   message: string
@@ -85,10 +101,10 @@ function done(ok: boolean, message: string, detail?: string[]): ActionResult {
 
 // ────────────────────────── 控制台状态（trainer 模式 / 当前课程） ──────────────────────────
 
-// 测试注入位（同 registry.ts 的 BCITY_REGISTRY_FILE）：默认线上路径，
-// 单测置 env 重定向到临时目录，绝不写脏线上 console-state.json。
-const CONSOLE_STATE =
-  process.env.BCITY_CONSOLE_STATE || path.join(START_LOG_DIR, 'console-state.json')
+// 路径惰性取自 paths.consoleStatePath()（同 registry.ts 的 BCITY_REGISTRY_FILE）：
+// 默认线上路径，单测置 env 重定向到临时目录，绝不写脏线上 console-state.json。
+// 惰性求值很关键——ES import 会被提升到测试文件的 env 赋值之前，模块初始化时
+// 抓取的常量会忽略重定向（本仓踩过：测试写脏了线上 console-state.json）。
 
 export interface CloudHaltInfo {
   /** 停机时刻（ISO）。 */
@@ -108,18 +124,31 @@ export interface ConsoleState {
   trainerPpo: 'pull' | 'push' | 'local'
   /** 当前课程（组件启动的 jobRoot/日志目录来源）。 */
   course: string
-  /** 云端停机记录（§386：halted=红横幅；recovered=灰横幅历史，不复位删除，确保"曾停机"可见）。 */
-  cloudHalt?: CloudHaltInfo
+  /** 控制台当前课程（P5-W1 additive）——读取优先它，写入与 `course` 同值。
+   *  旧写入只有 `course`，加载时回填（R4：additive、无迁移阻塞）。 */
+  activeCourse: string
+  /** 每课云端停机记录（S17：键 = 课程名；'' = 无课程）。§386：halted=红横幅；
+   *  recovered=灰横幅历史，不复位删除，确保"曾停机"可见。旧单键 `cloudHalt`
+   *  在加载时一次性折叠进本表（键取当时的 `course`）。 */
+  cloudHalts?: Record<string, CloudHaltInfo>
 }
 
-const DEFAULT_STATE: ConsoleState = { trainerPpo: 'pull', course: '' }
+const DEFAULT_STATE: ConsoleState = { trainerPpo: 'pull', course: '', activeCourse: '' }
 
 export function loadConsoleState(): ConsoleState {
   try {
-    return {
-      ...DEFAULT_STATE,
-      ...(JSON.parse(readFileSync(CONSOLE_STATE, 'utf-8')) as ConsoleState),
+    const raw = JSON.parse(readFileSync(consoleStatePath(), 'utf-8')) as Partial<ConsoleState> & {
+      cloudHalt?: CloudHaltInfo
     }
+    const merged = { ...DEFAULT_STATE, ...raw } as ConsoleState
+    merged.activeCourse = raw.activeCourse || merged.course
+    if (raw.cloudHalts === undefined) {
+      // 一次性迁移：旧单键 → per-course 表（键 = 当时课程）。已写新表后不再复活。
+      merged.cloudHalts = raw.cloudHalt ? { [merged.course || '']: raw.cloudHalt } : {}
+    }
+    merged.cloudHalts = merged.cloudHalts ?? {}
+    delete (merged as unknown as Record<string, unknown>).cloudHalt
+    return merged
   } catch {
     return { ...DEFAULT_STATE }
   }
@@ -128,8 +157,8 @@ export function loadConsoleState(): ConsoleState {
 export function saveConsoleState(patch: Partial<ConsoleState>): ConsoleState {
   const next = { ...loadConsoleState(), ...patch }
   try {
-    mkdirSync(path.dirname(CONSOLE_STATE), { recursive: true })
-    writeFileSync(CONSOLE_STATE, JSON.stringify(next, null, 2), 'utf-8')
+    mkdirSync(path.dirname(consoleStatePath()), { recursive: true })
+    writeFileSync(consoleStatePath(), JSON.stringify(next, null, 2), 'utf-8')
   } catch {
     /* 非致命——内存态仍生效到本进程 */
   }
@@ -138,10 +167,18 @@ export function saveConsoleState(patch: Partial<ConsoleState>): ConsoleState {
 
 // ────────────────────────── 云端停机 / 恢复（§385 复审：停云端省 GPU 配额，本地进程不动） ──────────────────────────
 
-/** hub 管理端点（Bearer 同 worker）。hub 不可达/鉴权失败 → false（不抛）。 */
-export function hubAdminOk(cfg: RlConfig, pathSuffix: string): Promise<boolean> {
-  if (!cfg.rl.hub_port) return Promise.resolve(false)
-  return httpOk(`http://127.0.0.1:${cfg.rl.hub_port}${pathSuffix}`, cfg.rl.remote_token, 5000)
+/** hub 管理端点（Bearer 同 worker）。hub 不可达/鉴权失败 → false（不抛）。
+ *  course 决定槽位端口（S17 的多课 halt 化在 P5 接上：现在已按槽位取端口，
+ *  不再硬编码 slot0）。 */
+export function hubAdminOk(cfg: RlConfig, pathSuffix: string, course = ''): Promise<boolean> {
+  const port = slotPort(cfg, course, 'hub')
+  if (!port) return Promise.resolve(false)
+  return httpOk(`http://127.0.0.1:${port}${pathSuffix}`, cfg.rl.remote_token, 5000)
+}
+
+/** 取某组件在某课程下的登记条目（展示路径：per-course 优先，旧单键兜底 R1）。 */
+export function entryOf(key: Component, course = ''): ReturnType<typeof entryForView> {
+  return entryForView(loadRegistry(), key, course)
 }
 
 /** 云端停机（§386，幂等）：置停机态——hub 置 halt（任务仍正常分发，达令随任务同发）
@@ -149,17 +186,22 @@ export function hubAdminOk(cfg: RlConfig, pathSuffix: string): Promise<boolean> 
 export async function triggerCloudHalt(
   cfg: RlConfig,
   reason: string,
+  course = '',
 ): Promise<{ ok: boolean; message: string }> {
-  const prev = loadConsoleState().cloudHalt
+  const state = loadConsoleState()
+  const prev = state.cloudHalts?.[course]
   if (prev?.status === 'halted') {
     return { ok: true, message: '已是停机中状态（幂等跳过）' }
   }
-  const ok = await hubAdminOk(cfg, '/admin/workers/halt')
+  const ok = await hubAdminOk(cfg, '/admin/workers/halt', course)
   if (!ok) {
     return { ok: false, message: '停机指令下发失败（hub 不可达或拒绝）' }
   }
   saveConsoleState({
-    cloudHalt: { at: new Date().toISOString(), reason, status: 'halted' },
+    cloudHalts: {
+      ...(state.cloudHalts ?? {}),
+      [course]: { at: new Date().toISOString(), reason, status: 'halted' },
+    },
   })
   return {
     ok: true,
@@ -172,14 +214,24 @@ export async function triggerCloudHalt(
 export async function markCloudHaltRecovered(
   cfg: RlConfig,
   clearReason: string,
+  course = '',
 ): Promise<{ ok: boolean; message: string }> {
-  const prev = loadConsoleState().cloudHalt
+  const state = loadConsoleState()
+  const prev = state.cloudHalts?.[course]
   if (!prev || prev.status === 'recovered') {
     return { ok: true, message: '无停机记录或已恢复（幂等跳过）' }
   }
-  const ok = await hubAdminOk(cfg, '/admin/workers/resume')
+  const ok = await hubAdminOk(cfg, '/admin/workers/resume', course)
   saveConsoleState({
-    cloudHalt: { ...prev, status: 'recovered', clearedAt: new Date().toISOString(), clearReason },
+    cloudHalts: {
+      ...(state.cloudHalts ?? {}),
+      [course]: {
+        ...prev,
+        status: 'recovered',
+        clearedAt: new Date().toISOString(),
+        clearReason,
+      },
+    },
   })
   if (!ok) {
     return { ok: false, message: '恢复指令失败（hub 不可达或拒绝）；停机记录已标已恢复' }
@@ -209,9 +261,10 @@ function tailLines(p: string, n = 8): string[] {
   }
 }
 
-/** run_rl 单实例锁持有人（与 start.ts preflight 同语义；null = 无存活持有人）。 */
-function runRlLockHolder(): number | null {
-  const lockPath = path.join(NN_TRAINING, '.run_rl.lock')
+/** run_rl 单实例锁持有人（与 train.ts preflight 同语义；null = 无存活持有人/无锁）。
+ *  锁按课程实例化（plan §3.1）：课程名由调用方给，锁路径唯一来源 slots.ts::lockPathFor。 */
+export function runRlLockHolder(course = ''): number | null {
+  const lockPath = lockPathFor(validateCourseName(course), 'run_rl')
   if (!existsSync(lockPath)) return null
   try {
     const holder = Number.parseInt((readFileSync(lockPath, 'utf-8').split('|')[0] ?? '').trim(), 10)
@@ -219,28 +272,6 @@ function runRlLockHolder(): number | null {
   } catch {
     return null
   }
-}
-
-/** 课程 BC 种子路径（§384）：读课程 jsonc 的 `bc` 字段（相对仓库根解析）；
- *  文件缺失/解析失败/无 bc 键时回退 legacy 硬编码（旧课程兼容）。 */
-export function resolveCourseBc(course: string): string {
-  const legacy = path.join(REPO_ROOT, 'tmp/ep60/battle2-p1bc/run/weights.json')
-  try {
-    const raw = readFileSync(path.join(CURRICULA_DIR, `${course}.jsonc`), 'utf-8')
-    // JSONC 容尾逗号：oxfmt 给 curricula/*.jsonc 加的尾逗号是合法 JSONC、非法 JSON。
-    // 不剥掉 → JSON.parse 抛错 → 静默回退 legacy 种子路径（§384 的事故正是这个
-    // 静默回退：读不到课程 bc 就拿旧权重开腿）。剥完再解析，解析失败仍回退。
-    const stripped = raw
-      .split('\n')
-      .filter((l) => !l.trimStart().startsWith('//'))
-      .join('\n')
-      .replace(/,(\s*[}\]])/g, '$1')
-    const bc: unknown = (JSON.parse(stripped) as { bc?: unknown }).bc
-    if (typeof bc === 'string' && bc.length > 0) return path.join(REPO_ROOT, bc)
-  } catch {
-    /* 回退 legacy */
-  }
-  return legacy
 }
 
 // ────────────────────────── 组件启动 ──────────────────────────
@@ -253,11 +284,10 @@ export interface StartCtx {
 
 /** 启动单个组件（已在运行 = 幂等成功；依赖缺失 = ActionError/失败结果）。 */
 export async function startComponent(key: Component, ctx: StartCtx): Promise<ActionResult> {
-  guard(`start:${key}`)
+  guard(busyKey('start', key, ctx.course))
   try {
     const cfg = loadConfig()
     const venv = resolveVenvPython()
-    const reg = loadRegistry()
 
     switch (key) {
       case 'selfNode': {
@@ -269,29 +299,30 @@ export async function startComponent(key: Component, ctx: StartCtx): Promise<Act
       case 'hubServer': {
         if (!ctx.course) throw new ActionError('hub-server 需要 course（先在顶部设置课程）')
         validateCourseArg(ctx.course)
-        if (await hubServerHealthy(cfg))
-          return done(true, `hub-server 已在运行 (port ${cfg.rl.hub_port})`)
+        const hubPort = slotPort(cfg, ctx.course, 'hub')
+        if (await hubServerHealthy(cfg, ctx.course))
+          return done(true, `hub-server 已在运行 (port ${hubPort})`)
         const trajDir = path.join(REPO_ROOT, 'tmp', ctx.course)
         await stepHubServer(cfg, path.join(trajDir, 'remote-jobs'))
-        return done(true, 'hub-server 已启动')
+        return done(true, `hub-server 已启动 (port ${hubPort})`)
       }
       case 'cloudflared': {
-        const url = await stepCloudflared(cfg, false)
+        // 登记按课程键控（P1b）；隧道本身的 per-course 端口/URL 留 P3。
+        const url = await stepCloudflared(cfg, false, ctx.course)
         return done(true, `隧道已就绪: ${url}`)
       }
       case 'workerServe': {
-        if (reg.workerServe?.pid && pidAlive(reg.workerServe.pid))
-          await killPid(reg.workerServe.pid)
-        const { pushUrl, servePid } = await startLocalWorkerServer({
-          course: ctx.course || 'smoke',
-          cfgToken: cfg.rl.remote_token,
-          hubPort: cfg.rl.hub_port,
-          venv,
-        })
-        saveComponent('workerServe', {
+        const course = ctx.course || 'smoke'
+        const prev = entryOf('workerServe', course)
+        if (prev?.pid && pidAlive(prev.pid)) await killPid(prev.pid)
+        const { pushUrl, servePid } = await startLocalWorkerServer({ course, cfg, venv })
+        saveAnyComponent('workerServe', course, {
           pid: servePid,
           url: pushUrl,
           entry: 'nn-training/remote_worker_serve.py',
+          course,
+          slot: slotOf(cfg, course),
+          log: workerServeSpec(cfg, venv, course).log,
         })
         monitorTouch()
         return done(true, `本机伪 GPU 节点就绪: ${pushUrl}`)
@@ -299,24 +330,24 @@ export async function startComponent(key: Component, ctx: StartCtx): Promise<Act
       case 'trainingLoop': {
         if (!ctx.course) throw new ActionError('trainer 需要 course（先在顶部设置课程）')
         validateCourseArg(ctx.course)
-        if (pidAlive(reg.trainingLoop?.pid))
-          return done(false, `TrainingLoop 已在运行 (PID ${reg.trainingLoop!.pid})——先停止再启动`)
-        const holder = runRlLockHolder()
+        const prevTl = entryOf('trainingLoop', ctx.course)
+        if (pidAlive(prevTl?.pid))
+          return done(false, `TrainingLoop 已在运行 (PID ${prevTl!.pid})——先停止再启动`)
+        const holder = runRlLockHolder(ctx.course)
         if (holder)
           return done(
             false,
-            `run_rl 锁被 PID ${holder} 持有——先停止在跑训练（或删除 nn-training/.run_rl.lock）`,
+            `run_rl 锁被 PID ${holder} 持有（${path.join('nn-training', lockName(ctx.course, 'run_rl'))}）` +
+              '——先停止在跑训练（或删除该锁文件）',
           )
 
         const trajDir = path.join(REPO_ROOT, 'tmp', ctx.course)
         const weightsPath = path.join(trajDir, 'weights.json')
         if (!existsSync(weightsPath)) {
-          const bcPath = resolveCourseBc(ctx.course)
-          mkdirSync(trajDir, { recursive: true })
-          if (existsSync(bcPath)) {
-            copyFileSync(bcPath, weightsPath)
-          } else {
-            return done(false, `初始权重缺失且 BC 产物不存在: ${bcPath}`)
+          try {
+            seedWeightsFromBc(ctx.course, weightsPath)
+          } catch (e) {
+            return done(false, e instanceof Error ? e.message : String(e))
           }
         }
         const trainLog = path.join(LOG_DIR, ctx.course, 'training-loop.log')
@@ -330,14 +361,20 @@ export async function startComponent(key: Component, ctx: StartCtx): Promise<Act
         const spec = trainingLoopSpec(cfg, {
           course: ctx.course,
           ppo: ctx.trainerPpo,
+          // P3：REMOTE_PUSH_NODE 按课注入（取 courses.<课>.push_node_url；缺省空 =
+          // 沿用旧 env/gpu_push 节点逻辑）。多课同值 = N:1 共享（§3.8）。
+          pushNodeUrl: cfg.courses?.[ctx.course]?.push_node_url,
           venv,
         })
         const r = launchSpec(spec)
-        saveComponent('trainingLoop', {
+        saveAnyComponent('trainingLoop', ctx.course, {
           pid: r.pid,
           course: ctx.course,
+          slot: slotOf(cfg, ctx.course),
           entry: TRAINING_LOOP_ENTRY,
           mode: ctx.trainerPpo,
+          pushNodeUrl: cfg.courses?.[ctx.course]?.push_node_url,
+          log: trainLog,
         })
         monitorTouch()
         await waitUntil(
@@ -369,7 +406,7 @@ export async function startComponent(key: Component, ctx: StartCtx): Promise<Act
           } catch {
             /* best-effort */
           }
-          clearComponent('trainingLoop')
+          clearAnyComponent('trainingLoop', ctx.course)
           return done(false, `TrainingLoop 启动即退出 (PID ${r.pid})`, tailLines(trainLog))
         }
         // §386：TrainingLoop 重启 = 停机条件消失 → 自动恢复停机状态（hub resume + recovered）。
@@ -392,28 +429,42 @@ export async function startComponent(key: Component, ctx: StartCtx): Promise<Act
 
 // ────────────────────────── 组件停止 ──────────────────────────
 
-/** 停止单个组件（按账本；无登记时按端口兜底清场——与 --kill 同语义）。 */
-export async function stopComponent(key: Component): Promise<ActionResult> {
-  guard(`stop:${key}`)
+/** 停止单个组件（按账本；无登记时按端口兜底清场——与 --kill 同语义）。
+ *
+ *  fail-closed（plan P1「兜底规则」）：多课时代按端口盲扫 = 杀错课（本仓前科×2），
+ *  故 hubServer/workerServe 在**无登记且无课程上下文**时拒绝兜底并响亮告警，
+ *  指引操作员指定课程或走 stopAll（紧急总闸）。selfNode 是全局单例（agent_port），
+ *  不受此限。 */
+export async function stopComponent(key: Component, course = ''): Promise<ActionResult> {
+  guard(busyKey('stop', key, course))
   try {
-    const entry = loadRegistry()[key]
+    const entry = entryOf(key, course)
     if (entry?.pid) {
       if (pidAlive(entry.pid)) {
         const dead = await killPid(entry.pid)
         if (!dead) return done(false, `${COMPONENT_LABELS[key]} (PID ${entry.pid}) 未能停止`)
       }
-      clearComponent(key)
-      return done(true, `${COMPONENT_LABELS[key]} 已停止`)
+      clearAnyComponent(key, course || entry.course || '')
+      return done(true, `${COMPONENT_LABELS[key]} 已停止${course ? ` (course=${course})` : ''}`)
     }
-    // 无登记：端口兜底（selfNode=agent_port；hubServer=hub_port；workerServe=hub_port+2）
-    const ports: Record<string, (cfg: RlConfig) => number> = {
+    // 无登记：端口兜底（端口一律经槽位算术，不再手写偏移）
+    const ports: Record<string, (cfg: RlConfig, course: string) => number> = {
       selfNode: (c) => c.rl.agent_port,
-      hubServer: (c) => c.rl.hub_port,
-      workerServe: (c) => c.rl.hub_port + 2,
+      hubServer: (c, crs) => slotPort(c, crs, 'hub'),
+      workerServe: (c, crs) => slotPort(c, crs, 'push'),
     }
-    if (ports[key]) {
+    const portOf = ports[key]
+    if (portOf) {
+      const known = course || entry?.course || ''
+      if (!known && key !== 'selfNode') {
+        const msg =
+          `${COMPONENT_LABELS[key]} 无注册且未指定课程——拒绝按端口兜底` +
+          '（多课程下按端口盲扫可能停错课）；请在指定课程后重试，或用「全部停止」'
+        logWarn(`[console] ${msg}`)
+        return done(false, msg)
+      }
       const cfg = loadConfig()
-      const pids = portOwnerPids(ports[key]!(cfg))
+      const pids = portOwnerPids(portOf(cfg, known))
       for (const pid of pids) await killPid(pid)
       return done(true, pids.length > 0 ? `已按端口兜底停止 ${pids.length} 个进程` : '未在运行')
     }
@@ -442,7 +493,7 @@ export async function stopAll(): Promise<ActionResult> {
 
 /** 单组件冒烟（各组件子集不同：轻量 ping / 真 rollout 一局）。 */
 export async function smokeComponent(key: Component, ctx: StartCtx): Promise<ActionResult> {
-  guard(`smoke:${key}`)
+  guard(busyKey('smoke', key, ctx.course))
   try {
     const cfg = loadConfig()
     const items: SmokeItem[] = []
@@ -461,17 +512,19 @@ export async function smokeComponent(key: Component, ctx: StartCtx): Promise<Act
         break
       }
       case 'hubServer': {
-        const hubOk = await hubServerHealthy(cfg)
+        const hubPort = slotPort(cfg, ctx.course, 'hub')
+        const hubOk = await hubServerHealthy(cfg, ctx.course)
         items.push({
           name: 'hub-server /ping',
           passed: hubOk,
           fatal: true,
-          detail: hubOk ? `port ${cfg.rl.hub_port}` : '未运行或 token 不匹配',
+          detail: hubOk ? `port ${hubPort}` : '未运行或 token 不匹配',
         })
         break
       }
       case 'cloudflared': {
-        const url = loadRegistry().cloudflared?.url ?? ''
+        // 展示路径：per-course 优先，旧单键兜底（R1 读兼容窗口到 P5）。
+        const url = entryOf('cloudflared', ctx.course)?.url ?? ''
         if (!url) {
           items.push({ name: 'cloudflared', passed: false, fatal: false, detail: '未建立隧道' })
           break
@@ -487,7 +540,7 @@ export async function smokeComponent(key: Component, ctx: StartCtx): Promise<Act
       }
       case 'workerServe': {
         const ping = await httpOk(
-          `http://127.0.0.1:${cfg.rl.hub_port + 2}/ping`,
+          `http://127.0.0.1:${slotPort(cfg, ctx.course, 'push')}/ping`,
           cfg.rl.remote_token,
           3000,
         )
@@ -495,8 +548,7 @@ export async function smokeComponent(key: Component, ctx: StartCtx): Promise<Act
         break
       }
       case 'trainingLoop': {
-        const reg = loadRegistry()
-        const alive = pidAlive(reg.trainingLoop?.pid)
+        const alive = pidAlive(entryOf('trainingLoop', ctx.course)?.pid)
         items.push({ name: 'TrainingLoop 进程存活', passed: alive, fatal: false })
         const logPath = path.join(
           LOG_DIR,
@@ -647,32 +699,29 @@ export async function setNodeConcurrency(id: string, concurrency: number): Promi
  *  作废本轮干净退出（it 不前进、账本零污染，DECISIONS §340）。不跑真 PPO。
  *  完成/失败后都停掉预演用 TrainingLoop（--smoke 进程没有 echo 结果会一直等待）。 */
 export async function smokeTrain(course: string): Promise<ActionResult> {
-  guard('smoke:train')
+  // M2：busy 键按课（两课可同时冒烟；全局键会第二次 409）。P5 才全量 course-keyed，
+  // smokeTrain 是提前的那一个（P3 全链路验收要双课同冒）。
+  guard(`smoke:train:${course}`)
   let servePid = 0
   try {
     if (!course) throw new ActionError('需要 course（先在顶部设置课程）')
     validateCourseArg(course)
     const cfg = loadConfig()
-    const reg = loadRegistry()
-    if (pidAlive(reg.trainingLoop?.pid))
+    if (pidAlive(entryOf('trainingLoop', course)?.pid))
       return done(false, 'TrainingLoop 已在运行（可能是真训练）——预演会干扰在途 job，先停止')
     const venv = resolveVenvPython()
     const trajDir = path.join(REPO_ROOT, 'tmp', course)
     const weightsPath = path.join(trajDir, 'weights.json')
     if (!existsSync(weightsPath)) {
-      const bcPath = resolveCourseBc(course)
-      mkdirSync(trajDir, { recursive: true })
-      if (!existsSync(bcPath)) return done(false, `初始权重缺失且 BC 产物不存在: ${bcPath}`)
-      copyFileSync(bcPath, weightsPath)
+      try {
+        seedWeightsFromBc(course, weightsPath)
+      } catch (e) {
+        return done(false, e instanceof Error ? e.message : String(e))
+      }
     }
 
     // 1) 本机伪 GPU 节点
-    const { pushUrl, servePid: pid } = await startLocalWorkerServer({
-      course,
-      cfgToken: cfg.rl.remote_token,
-      hubPort: cfg.rl.hub_port,
-      venv,
-    })
+    const { pushUrl, servePid: pid } = await startLocalWorkerServer({ course, cfg, venv })
     servePid = pid
 
     // 2) 真课程 TrainingLoop --smoke（REMOTE_PUSH_NODE 注入伪节点）
@@ -685,11 +734,13 @@ export async function smokeTrain(course: string): Promise<ActionResult> {
       venv,
     })
     const r = launchSpec(spec)
-    saveComponent('trainingLoop', {
+    saveAnyComponent('trainingLoop', course, {
       pid: r.pid,
       course,
+      slot: slotOf(cfg, course),
       entry: TRAINING_LOOP_ENTRY,
       mode: 'remote',
+      log: trainLog,
     })
     monitorTouch()
 
@@ -699,7 +750,7 @@ export async function smokeTrain(course: string): Promise<ActionResult> {
     } catch (e) {
       if (pidAlive(r.pid)) {
         await killPid(r.pid)
-        clearComponent('trainingLoop')
+        clearAnyComponent('trainingLoop', course)
       }
       return done(
         false,
@@ -726,27 +777,33 @@ export async function smokeTrain(course: string): Promise<ActionResult> {
 // ────────────────────────── 变更检测重启（监督器回调） ──────────────────────────
 
 /** 按账本元数据 + 当前 rl-config 重建组件 spec（监督器 restartProc 的数据源）。
- *  返回 null = 该组件没有可重建的 spec（未登记或缺元数据）。 */
-export function restartSpecFor(key: Component): ProcSpec | null {
-  const entry = loadRegistry()[key]
+ *
+ *  **fail-closed（M5）**：只认 `(key, course)` 精确命中到的条目；不带 fallback、
+ *  不用 console-state 的当前课程猜——A 课进程被 B 课配置拉起是多课时代最危险的
+ *  串味（会把 A 的 hub 换成 B 的 jobRoot）。返回 null = 该组件没有可重建的 spec。
+ *  旧账本条目在 loadRegistry 的一次性回填里已补上 `course`，故不会因缺字段失监督。 */
+export function restartSpecFor(key: Component, course = ''): ProcSpec | null {
+  const entry = entryForCourse(loadRegistry(), key, course)
   if (!entry) return null
   const cfg = loadConfig()
   const venv = resolveVenvPython()
-  const state = loadConsoleState()
-  const course = entry.course || state.course
+  const c = entry.course ?? course
+  // 课程键控组件缺 course 且非无课程语义 → 拒绝重建（响亮告警在调用方）
+  if (isCourseComponent(key) && course && !entry.course) return null
   switch (key) {
     case 'selfNode':
       return selfNodeSpec(cfg)
     case 'hubServer':
-      return hubServerSpec(cfg, course)
+      return hubServerSpec(cfg, c)
     case 'cloudflared':
-      return cloudflaredSpec(cfg, entry)
+      return cloudflaredSpec(cfg, { ...entry, course: c, slot: entry.slot ?? 0 })
     case 'workerServe':
-      return workerServeSpec(cfg, venv)
+      return workerServeSpec(cfg, venv, c)
     case 'trainingLoop':
       return trainingLoopSpec(cfg, {
-        course,
+        course: c,
         ppo: entry.mode,
+        pushNodeUrl: entry.pushNodeUrl,
         venv,
       })
   }
