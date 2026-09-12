@@ -82,12 +82,45 @@ export interface MetricsView {
   error?: string
 }
 
+/** 单课总览里的组件状态（P5-W2 同屏多课；**不含 selfNode**——它是全局单例，只出一次）。 */
+export interface CourseOverviewComponent {
+  key: string
+  status: 'running' | 'stopped' | 'exited'
+  pid: number | null
+}
+
+/** 同屏多课总览的单行（P5-W2）：只读，不参与动作路由（动作仍在选中课程的组件卡）。
+ *  数据源 = 账本（进程状态）+ 该课 training_log 的最近一轮 + console-state 的按课 halt。 */
+export interface CourseOverview {
+  course: string
+  /** hubServer/trainingLoop/workerServe/cloudflared 四件（无 selfNode）。 */
+  components: CourseOverviewComponent[]
+  /** 当前训练阶段（训练循环日志尾解析）。 */
+  phase: PhaseInfo
+  /** 最近一轮关键指标（无日志 → null）。 */
+  last: {
+    iter: number
+    winRate: number
+    rolloutSec: number
+    ppoSec: number
+    halted: boolean
+  } | null
+  /** 日志轮数（≈已训练迭代数）。 */
+  iters: number
+  /** 该课云端停机记录（有则展示徽标）。 */
+  cloudHalt: { status: 'halted' | 'recovered'; reason: string } | null
+  /** 该课 PPO 队列排队超时。 */
+  ppoQueueStall: { jobId: string; waitedSec: number; it: number | null } | null
+}
+
 export interface ConsoleStateView {
   time: string
   course: string
   /** 控制台当前课程（P5-W1 additive；旧视图无此字段 → 回退 `course`）。 */
   activeCourse?: string
   courses: string[]
+  /** 同屏多课总览（P5-W2；单课/旧视图缺省 — 仅当发现多课才填充）。 */
+  courseOverviews?: CourseOverview[]
   components: ComponentView[]
   nodes: NodeView[]
   /** 本机直跑节点（§361⑤：pill 行只读展示；无池/无槽位时缺省）。 */

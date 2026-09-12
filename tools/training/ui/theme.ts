@@ -385,6 +385,23 @@ a.tc-preset{text-decoration:none;display:inline-block}
 .tc-cc__sec code{font-family:ui-monospace,'Cascadia Mono',Consolas,monospace;background:var(--gray-bg);border-radius:6px;padding:1px 6px;flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap} /* code 铺满剩余宽、复制键贴右缘 */
 
 /* 状态点 */
+/* 多课程总览（P5-W2）：每课一行，只读；点课程名 = 切换查看 */
+.tc-cov{margin-bottom:var(--sp-4);border:1px solid var(--border);border-radius:var(--r-3);background:var(--card);overflow:hidden}
+.tc-cov__hd{padding:6px 12px;font-size:var(--fs-2);color:var(--muted);border-bottom:1px solid var(--border);background:var(--gray-bg)}
+.tc-cov__rows{display:grid}
+.tc-cov__row{display:flex;align-items:center;gap:var(--sp-3);padding:6px 12px;border-top:1px solid var(--border);flex-wrap:wrap}
+.tc-cov__row:first-child{border-top:0}
+.tc-cov__row--on{background:var(--accent-bg)}
+.tc-cov__name{background:none;border:0;color:var(--accent);font-weight:700;font-size:var(--fs-2);cursor:pointer;padding:0;font-family:ui-monospace,'Cascadia Mono',Consolas,monospace}
+.tc-cov__name:hover{text-decoration:underline}
+.tc-cov__phase{font-size:var(--fs-2);color:var(--muted);min-width:52px}
+.tc-cov__comps{display:flex;gap:10px;flex-wrap:wrap}
+.tc-cov__comp{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--muted)}
+.tc-cov__compname{font-family:ui-monospace,'Cascadia Mono',Consolas,monospace}
+.tc-cov__metrics{display:flex;gap:10px;align-items:center;font-size:var(--fs-2);color:var(--muted);flex:1 1 auto;flex-wrap:wrap}
+.tc-cov__metrics b{color:var(--text)}
+.tc-cov__halted{color:var(--yellow)}
+.tc-cov__badges{display:flex;gap:6px;align-items:center;margin-left:auto}
 .tc-dot--warn{background:var(--yellow)}
 .tc-dot--on{background:var(--green)}
 .tc-dot--dead{background:var(--red)}

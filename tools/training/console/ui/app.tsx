@@ -23,6 +23,7 @@ import { NodeStats } from './panels/NodeStats'
 import { LogNavCard } from './panels/LogNavCard'
 import { TrainLaunchModal } from './panels/TrainLaunchModal'
 import { EvalSummary } from './panels/EvalSummary'
+import { MultiCourseOverview } from './panels/MultiCourseOverview'
 import {
   fmtTs,
   latestRow,
@@ -251,15 +252,21 @@ export function App({ initial }: AppProps) {
   // 课程下拉 onChange：本机 = 查看 + POST setCourse 同步操作员课程；局域网 = 仅查看 + 写 URL。
   // 注意：ref 须在此同步更新（setState 后下一渲染才赋值）——随后的 refreshState/doAction
   // 立即读到的必须已是新课程，否则轮询仍拉旧课程。
+  const selectCourse = useCallback(
+    (c: string): void => {
+      viewCourseRef.current = c
+      setViewCourse(c)
+      writeUrlCourse(c)
+      void refreshState()
+      setPoolFreshNonce((n) => n + 1)
+      // 只读视图不 POST（服务端也会 403 兜底）；用服务端 stamp 的 readOnly 而非 isLocal。
+      if (!readOnly) void doAction('setCourse', { course: c })
+    },
+    [readOnly, refreshState, doAction],
+  )
+
   const onCourseChange = (e: Event): void => {
-    const c = (e.target as HTMLSelectElement).value
-    viewCourseRef.current = c
-    setViewCourse(c)
-    writeUrlCourse(c)
-    void refreshState()
-    setPoolFreshNonce((n) => n + 1)
-    // 只读视图不 POST（服务端也会 403 兜底）；用服务端 stamp 的 readOnly 而非 isLocal。
-    if (!readOnly) void doAction('setCourse', { course: c })
+    selectCourse((e.target as HTMLSelectElement).value)
   }
 
   // 顶栏阶段耗时（至今；now 由 10s ticker 驱动，轮询间隙不冻结）。
@@ -484,6 +491,10 @@ export function App({ initial }: AppProps) {
       ) : null}
       <PanelErrorBoundary>
         <Hero stateView={stateView} onMore={() => setDrawerTab('metrics')} />
+      </PanelErrorBoundary>
+      {/* ── 多课程总览（P5-W2）：单课自动不渲染；只读展示，切换=改查看课程 ── */}
+      <PanelErrorBoundary>
+        <MultiCourseOverview stateView={stateView} onSelectCourse={selectCourse} />
       </PanelErrorBoundary>
       {/* ── 组件卡 4  row：在 LAN 只读视图里也正常交互样式（不在 banner 里、不 opacity 灰败） ── */}
       <PanelErrorBoundary>

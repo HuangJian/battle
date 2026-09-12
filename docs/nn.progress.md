@@ -16,7 +16,8 @@
   - **P3b**（DECISIONS §2026-09-12-multi-course-p3b-supersedes-343）：hub 独占租约 `CLAIM_TTL_SEC=300`（领取即设 owner+expiry+heartbeat，心跳续租，过期回池，有活租约验 `X-Lease-Token`）；worker_server 有界 FIFO `WORKER_QUEUE_MAX=8` + 同 jid 幂等 + `/ping queued`。
   - **P4**：`saveConfig` 落盘前 `capacityError` 加法校验（`Σ eff ≤ max(rl.workers, rl.local_slots)`）；`rl/config.py::resolve_course_quota` 热读 `courses.<课>` 优先 + 响亮行 `[quota] workers X -> Y (multi-course split)`；连续 2 轮零 shard 落盘告警；manifest `course_name`（审计短名，不进幂等键） + dispatch 报告带 course；EvalBoard `batches.jsonl` 跨进程 `claim.lock`（复用 `train.loop_util` 锁，拒绝第三套实现）。
 - **P5 已完成部分**：`ConsoleState.activeCourse`（additive + 旧 `course` 回填）；`cloudHalts` per-course（S17，旧 `cloudHalt` 一次性迁移）+ 横幅按课 `立即恢复`；busy 键按课程（S10）+ 监督/watchdog 三元组；`restartSpecFor(key, course)` fail-closed。
-- **P5 待做**：组件卡片/iters/metrics/pool-history 的「同屏多课」视图（现为课程选择器逐课查看，功能可用但非同屏）；R2 旧扁平账本键的读写移除（现保留读兼容，安全但冗余）；LAN 只读回归。
+- **P5-W2 同屏多课总览**（已做）：`/api/state` 新增 `courseOverviews`（每课一行：阶段 + 四组件状态点 + 最近一轮 it/胜率/采集·训练耗时 + 停机/排队超时徽标，账本判定进程状态、**不发健康探测**，与慢快照同拍 5s 缓存、课程上限 = 槽位数 4）；新面板 `console/ui/panels/MultiCourseOverview.tsx`（单课自动不渲染，点课程名即切换查看）。完整指标表/节点池仍为「选中课程」视图——总览一行点开即钻取，避免 N 课 × 每拍节点 ping。`/eval` 页已原生支持多课程（checkboxes + 逐课视图 + CSV 归属），无需改。
+- **P5 待做**：R2 旧扁平账本键的读写移除（现保留读兼容，安全但冗余）；LAN 只读回归。
 - **纪律**：配额只住 `rl-config.json` 的 `courses` 块，**永不写 `curricula/*.jsonc`**（一改 `course_fp` 即触发 D14 熔断误判，plan C1）。
 - **门禁**：`bun run check` 2001 pass、`bun run build`、`make -C nn-training python-gate` 全绿。
 
