@@ -1,0 +1,216 @@
+// 课程 c4-dodge —— c4 残血/闪避后继腿（承 c4-margin 结业，为 c5/c6 提供生存余地）
+//
+// 由 c4-margin.jsonc 派生。**相对 c4-margin 只改 2 处学习侧变量（用户拍板两者同腿）**，
+// 其余（地图/敌数/spawn/difficulty/max_ticks/player/其余 reward 参数/scale/schedule/
+// eval_stages/workers/缰绳）全锁死：
+//
+//   1. name/out/traj/backup_dir/backup_prefix → c4-dodge（fresh，绝不复用 c4-margin 目录）
+//   2. reward.params.wChip：0.005 → **0.02**（主变量 = 闪避价格）
+//      · 病灶（c5/c6 平台期的直接死因，2026-09-11 实测 c4it140 零样本）：
+//        c4 胜局掉血中位 144（剩 119/263 ≈ 45% 血）→ 进 c5/c6 敌多弹密，
+//        败局掉血中位 216–228（≈3 发快弹磨死）、c6 连胜局都要挨 200 血——
+//        "被磨血磨死"，无闪避技能。
+//      · 改后：挨 144 血 = −0.72 → **−2.88 ≈ 1 个击杀**，闪避开始"值钱"；
+//        wTick=0.01 保留（快清场仍被奖励，与闪避不冲突——"赢得快且少挨打"）。
+//      · 为何不抬 wDmg：wDmg 作用在 playerHits 上（hard 口径只计死亡/星盾），
+//        非致命挨打不扣——教不了闪避；且 p4-wdmg 前车（wDmg×2 → 超时苟活）。
+//      · 为何不动 wTick：c6b 已单测过 wTick（0.01→0.001，无效果），本腿不再碰。
+//   3. seed_rotate 150 → **600**（次变量 = 每轮样本量，用户拍板：GPU 余粮充足求快）
+//      · 理由（2026-09-11）：① 弱信号腿吃梯度质量——wChip 税很弱，150 局/轮的
+//        advantage 噪声大，600 局让每条梯度更干净（这是 c6b 没答到的问题）；
+//        ② 固定开销摊薄——同 2.1 万局总量：140 轮×~3min ≈ 7h vs 35 轮×~7min ≈ 4h，
+//        省 ~40% 墙钟且 eval 开销少 4 倍（实测 rollout 32s@150→2.1min@600、
+//        远端 PPO 70s@150→4.7min@600）。
+//      · **双变量诚实声明**：本腿结论不可拆成"wChip 还是样本量起效"；但 R7 已有
+//        c6b 前科（600 vs 150 结局相同，均平线）——变量本身被证明中性，归因仍可
+//        落到 wChip。要拆归因需另开单变量腿（同 c6b §331-D14 纪律）。
+//   4. 新增 `gates` 块——见文件末尾 §门。
+//
+// ── 定位：c4 结业后的技能腿（不是新关，是"赢得干净"）────────────────────────
+//   bc = c4-margin.it140（c4 上 72% 同语料实测；God 同语料 68%——学生已超老师，
+//   再往上走的是 margin）。c4 是唯一可教闪避的练兵场：已能清场，才有余力学
+//   "残血清场"；c6b 直接在 c6 上加课（连赢都赢不了）是反面教训。
+//   iters=160 + max_hours=10：600 局/轮 ≈7min，10h 预算先到顶（≈85 轮 ≈5.1 万局 ≈
+//   2.4× c4-margin 总量，足够）；G5 到顶 STOP。
+//
+// ── 人读门（margin 门；机器 catalog 无 margin 类，ADVANCE 后须人读复核）───────
+//   教师（2026-09-11 同语料实测，tmp/c4probe/god-c4-evalseeds.jsonl）：
+//     wins=68/100、kills=3.13、beHit=36、胜局掉血中位 **144**（学生也是 144——
+//     <120 是"超老师"的 stretch 目标，不是跟随老师）、tick 中位 ~1225、超时 0。
+//   起点（c4-margin.it140 本关）：72/100、胜局掉血 144、胜局 tick 中位 1341。
+//   DoD（全部满足才毕业）：
+//     · 胜率 ≥65（hold，不得因闪避取向而跌出）
+//     · **胜局掉血中位 <120**（主目标；God 144，学生需反超老师一档）
+//     · 胜局 tick 中位 ≤1400（已达标，守住）
+//     · 0 杀占比 ≤30% 且 超时 <10（防"苟活刷分"，p4-wdmg 教训）
+//   熔断：胜率 ≤55 / 超时 ≥15 / 命中率断崖 / 掉血中位不降反升（>180 两连）。
+//
+// ── 机器门（gates 块；2026-09-11 修正：本腿目标=ticks/hp，不进 win_rate/kills_mean）──
+//   毕业=人读 margin DoD（掉血<120 / tick≤1400 / 胜率≥65 仅作 hold 参考），无机器
+//   ADVANCE 源（门系统趋势源只有 win_rate/kills_mean/phits/pickup/timeout，无
+//   ticks/hp——监控 margin 需人读）。机器门只剩护栏：
+//   G5 budget        160 轮或 10h 到顶 → STOP（route 恒 REMEDIATE）
+//   G7 course_valid  超时占比 >0.15 且近 3 轮斜率>0 → REMEDIATE
+//   G9 hack          拾取↑≥50% 且 击杀↓≥20%（双向）→ PAUSE
+//   G13 duty         有效训练占空比 <0.10（用户 2026-09-11 下调）→ REMEDIATE
+//   注：G1(胜率)/G4(win/kills 平台)/G2(0杀地板) 全部移除——skill_floor 不能休眠，
+//   且其 ADVANCE 在无联判时误毕业；防苟活条件保留在人读 DoD（0杀≤30%、超时<10）。
+//   eval_every 5→3（测量侧）：600 局/轮下 margin 人读节奏不变，评估 100 局仅占单轮 ~2%
+//
+// ── 转移验证（结业后必做，残血可转移的唯一证明）──────────────────────────────
+//   2026-09-11 实测基线（c4-margin.it140 零样本）：→ c5 39/100（胜局掉血 128）、
+//   → c6 18/100（胜局掉血 200、贴死线）。结业权重复测 c5/c6：
+//   要求胜率 ≥39/18 之上提升 **且** 胜局掉血中位较基线下降（<128 / <200）。
+{
+  "version": 5,
+  "name": "c4-dodge",
+  "mode": "per-tick",
+  "stages": [
+    {
+      "name": "p4-onset-mixed",
+      "grid": [
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+      ],
+      "forces": "abcdabcdabcdabcdabcd",
+      "count": 4,
+      "player_spawn": { "col": 12, "row": 12 },
+      "enemy_spawns": [
+        { "col": 2, "row": 2 },
+        { "col": 22, "row": 2 },
+        { "col": 22, "row": 22 },
+        { "col": 2, "row": 22 },
+      ],
+    },
+  ],
+  "difficulty": "hard",
+  "max_ticks": 2400,
+  // R7（用户拍板）：150 → 600 局/轮（弱信号腿吃梯度质量 + 固定开销摊薄，见头注释）
+  "seed_rotate": 600,
+  "player": {
+    "lives": 1,
+    "level": 0,
+  },
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots - wTick*ticks - wChip*playerDamageTaken",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.3,
+      "wPickup": 1.5,
+      "wStar": 1.0,
+      "wDmg": 1.0,
+      "wStuck": 0.02,
+      "wShot": 0.01,
+      "wTick": 0.01,
+      // 单变量：0.005 → 0.02（闪避 144 血 = −2.88 ≈ 1 个击杀，开始"值钱"）
+      "wChip": 0.02,
+    },
+    "terminal": {
+      "stage_clear": 2.0,
+      "lives_exhausted": -1.0,
+      "timeout": -2.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/c4-margin/c4-margin.it140.20260910-093506.json",
+  // 技能腿：160 轮 patience（c4-margin 140 轮才到 72）+ 10h 预算（G5 到顶 STOP）。
+  "iters": 160,
+  "max_hours": 10,
+  "workers": 8,
+  // §363 缰绳双闸：ref 取课程 bc；warmup 必须 0（validate_args 强制配对）。
+  "kickstart_ref": true,
+  "warmup_iters": 0,
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  // R5＋§363 双 flag（串行路径生效；默认 false 即历史行为）。
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.99,
+  "ppo_schedule": [
+    { "until_iter": 40, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
+    { "kl_coef": 0.0, "lr": 0.00005 },
+  ],
+  "out": "tmp/c4-dodge/weights.json",
+  "traj": "tmp/c4-dodge",
+  // F4 ENT 熔断：沿用 horizon 档 0.25（RL 腿启用时生效）。
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/c4-dodge",
+  "backup_prefix": "c4-dodge",
+  // 自定义关 stage ID 从 2000 开始 → ID 2000
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 100,
+  "eval_every": 3,
+  // ── 课程结束门（plan/course-exit-and-shutdown.md §3.2）────────────────────
+  "gates": {
+    "sustain": 3,
+    "teacher": {
+      // 语料必须与 in-loop 评估语料一致：stage 2000 × EVAL_SEEDS 860001-860100
+      // 2026-09-11 同语料实测（tmp/c4probe/god-c4-evalseeds.jsonl）：
+      // 旧值 64 是 seeds 0-99 的另一批，不可比（c6b 教训）。
+      "corpus": "EVAL_SEEDS:860001-860100@stage2000",
+      "games": 100,
+      "wins": 68,
+      "kills": 3.13,
+      "phits": 0.36,
+      "zero_kill_frac": 0.06,
+      "timeout_frac": 0.0,
+    },
+    // 本腿无机器 ADVANCE 源：目标（掉血/tick）不在门系统趋势源里，毕业=人读 margin
+    // DoD（2026-09-11 修正：不再监控 win_rate/kills_mean 作为停机/晋级轴）
+    "advance_requires": [],
+    // 起点 = c4-margin.it140 本关实测 72/100（同语料，tmp/c4-margin/eval_log.jsonl）；
+    // 仅作记录，不再进任何门（G1 已删）。
+    "baseline_win_rate": 0.72,
+    "override_file": "GATE_OVERRIDE.json",
+    // 单轮 ≈7 min（600 局采样 ≈2.1min + 远端 PPO ≈4.7min + eval 摊销）；
+    // 仅用于预算可行性 WARNING（不断言）
+    "est_iter_min": 7,
+    "rules": [
+      {
+        // G5：预算——160 轮或 10h 到顶（route 恒 REMEDIATE：无胜率门可判 ADVANCE）
+        "id": "G5",
+        "kind": "budget",
+        "advance_if": [],
+        "advance_frac": 0.7,
+        "verdict": "STOP",
+      },
+      {
+        // G7：课程失效——超时占比 >0.15 且斜率>0（苟活上升）→ REMEDIATE
+        "id": "G7",
+        "kind": "course_valid",
+        "max_timeout_frac": 0.15,
+        "rising_rounds": 3,
+        "verdict": "REMEDIATE",
+      },
+      {
+        // G9：hack——拾取↑≥50% 且 击杀↓≥20%（双向）→ PAUSE
+        "id": "G9",
+        "kind": "hack",
+        "window_rounds": 6,
+        "pickup_up_rel": 0.5,
+        "kills_down_rel": 0.2,
+        "verdict": "PAUSE",
+      },
+      {
+        // G13 事故熔断：有效训练占空比 < 10% → REMEDIATE 停车复诊
+        "id": "G13",
+        "kind": "duty",
+        "min_train_frac": 0.1,
+        "verdict": "REMEDIATE",
+      },
+    ],
+  },
+}

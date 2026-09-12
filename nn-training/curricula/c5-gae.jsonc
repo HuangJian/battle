@@ -1,0 +1,134 @@
+// 课程 c5-gae —— GAE 视野修复腿（2026-09-12）：验证「λ 0.99→0.95 能否让策略动起来」
+//
+// 由 **c5-margin.jsonc** 派生（不用 c5-tick：wTick 已证伪非 value 主因；不用 c5-ent：
+// ent_coef=0.05 已证伪）。**相对 c5-margin 只改 1 处学习变量**，其余（stage/敌数/命数/
+// max_ticks/player/reward 全参数/scale/lr/epochs/mb/workers/缰绳/eval 配置）全锁死：
+//
+//   1. name/out/traj/backup_dir/backup_prefix → c5-gae（fresh，绝不复用别腿目录）
+//   2. **lam: 0.99 → 0.95**（唯一变量；ppo/engine.py:84 默认 LAM 就是 0.95——
+//      所有课程都覆盖成 0.99，本腿只是回归默认值，不是新超参）
+//
+//   附：`ppo_schedule` 末段 `kl_coef` 写成 0.03（c5-margin 是 0.0）——**护栏不是变量**：
+//      c4-dodge 的退化起点正是 it41 的 kl_coef 归零（−15 点崩塌）；c5-tick/c5-ent 用它后
+//      it41–60 未退化。**不写 `ent_coef`**（用引擎缺省 0.01）。
+//
+// ── 为什么（2026-09-12 诊断 + c5-tick it20 判负后转进）────────────────────────
+//   λ=0.99 时 GAE 视野 = 100 步 / 1000 tick ≈ 一局的 87%（≈整局 Monte Carlo）；
+//   advantage 标准差比 λ=0.95 高 **+25%**（compute_gae 实扫：0.961 → 1.199，R²≈0.25 水平下）。
+//   c5-tick 已证伪「wTick 方差主导 ⇒ value 头不 fit」：降 wTick 方差占比 57%→~10% 后
+//   value loss 纹丝不动（~0.75）——value 欠拟合另有成因（疑似关卡随机结构 + normalize_ret
+//   吸收尺度效应），不再追 value 拟合。本轮直接砍 advantage 方差：policy 梯度净效应应 ↑。
+//   ⚠️ 诚实声明：λ 是 GAE 偏差-方差权衡参数，本腿只测「advantage 方差 ↓ ⇒ 策略动起来」，
+//      不声称能救 value 头。
+//
+// ── 起点（同 c5-margin/c5-tick）──────────────────────────────────────────────
+//   bc = c4-margin.it140；零样本 c5（seeds 0-99，100 局）：**胜率 39%**、胜局掉血中位 128、
+//   胜局 tick 中位 1671、击杀 3.15。value loss 基线 ~0.75（仅参考，不作主判据）。
+//
+// ── 门（人读 + 配对探针；不配 `gates` 块——c4-dodge 教训：G1/G4 锚 win_rate 判错轴）──
+//   主判据（配对验收）：c5 关 seeds 0-99 配对探针，胜率 **>39%**（起点）且 McNemar p<0.05。
+//   参考（训练内，不作主判）：winRate 出现趋势（不再是 0.38–0.45 纯噪声）；
+//                             value loss 若降 <0.7 仅作辅助证据。
+//   熔断：① 超时占比 >0.15  ② 配对 Δwin ≤ −10 且 p<0.05  ③ 命中率断崖
+//         ④ entropy 失控（>0.7 且无回升——c5-ent 签名）
+//   验收节奏（每 10 轮，配对探针不要只看训练内 eval）：
+//     bun tools/sim/eval-course-ckpt.ts --course tmp/fmap-c5l1.jsonc \
+//       --weights nn-training/weights/c5-gae/<ckpt>.json \
+//       --weights nn-training/weights/c4-margin/c4-margin.it140.20260910-093506.json \
+//       --games 100 --workers 6 --out tmp/c5gae-it<N>-probe.jsonl
+//   主要看：配对胜率（>39%）、entropy（应稳 0.45–0.55）、value（辅助）。
+{
+  "version": 5,
+  "name": "c5-gae",
+  "mode": "per-tick",
+  "stages": [
+    {
+      "name": "p4-onset-mixed",
+      "grid": [
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+      ],
+      "forces": "abcdabcdabcdabcdabcd",
+      "count": 5,
+      "player_spawn": { "col": 12, "row": 12 },
+      "enemy_spawns": [
+        { "col": 2, "row": 2 },
+        { "col": 22, "row": 2 },
+        { "col": 22, "row": 22 },
+        { "col": 2, "row": 22 },
+      ],
+    },
+  ],
+  "difficulty": "hard",
+  "max_ticks": 2400,
+  "seed_rotate": 150,
+  "player": {
+    "lives": 1,
+    "level": 0,
+  },
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots - wTick*ticks - wChip*playerDamageTaken",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.3,
+      "wPickup": 1.5,
+      "wStar": 1.0,
+      "wDmg": 1.0,
+      "wStuck": 0.02,
+      "wShot": 0.01,
+      // 与 c5-margin 全同（不继承 c5-tick 的 0.003——本腿只测 λ，reward 锁死）
+      "wTick": 0.01,
+      "wChip": 0.005,
+    },
+    "terminal": {
+      "stage_clear": 2.0,
+      "lives_exhausted": -1.0,
+      "timeout": -2.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/c4-margin/c4-margin.it140.20260910-093506.json",
+  // 80 轮 / 12h（与 c5-tick/c5-ent 同，便于对照）。
+  "iters": 160,
+  "max_hours": 12,
+  "workers": 8,
+  // §363 缰绳双闸：ref 取课程 bc；warmup 必须 0（validate_args 强制配对）。
+  "kickstart_ref": true,
+  "warmup_iters": 0,
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  // R5＋§363 双 flag（串行路径生效；默认 false 即历史行为）。
+  "normalize_ret": true,
+  "gamma": 0.998,
+  // ★ 唯一变量：0.99 → 0.95（回归引擎默认，砍 GAE advantage 方差 ~25%）
+  "lam": 0.95,
+  // 末段 kl_coef 0.03 = **护栏**（c5-margin 是 0.0）；主变量只有 lam，此处不要同时改。
+  // **不写 ent_coef** ⇒ 用引擎缺省 0.01（ent_coef=0.05 已由 c5-ent 80 轮证伪）。
+  "ppo_schedule": [
+    { "until_iter": 40, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
+    { "kl_coef": 0.03, "lr": 0.00005 },
+  ],
+  "out": "tmp/c5-gae/weights.json",
+  "traj": "tmp/c5-gae",
+  // F4 ENT 熔断：沿用 horizon 档 0.25（本腿期望 entropy 稳在 0.45–0.55，远离线）。
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/c5-gae",
+  "backup_prefix": "c5-gae",
+  // 自定义关 stage ID 从 2000 开始，仅 1 关 → ID 2000
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 100,
+  "eval_every": 5,
+}

@@ -16,6 +16,32 @@
 - MANIFEST §13 "The Three Gates" (enjoyable · simple · faithful) is the operational form of this
   sentence; AGENTS §2.7 repeats it because it is the final arbiter for ambiguity.
 
+### 0.2 Training-objective discipline — God is not a ceiling
+
+**Rule (AGENTS §0.2):** God-AI is a flawed rule system; training the NN exists to surpass it. The
+teacher's only job is getting the NN started (BC distillation corpus + scaffolding).
+
+- **Four prohibitions** — never use teacher performance to: ① judge whether a stage "still has
+  something learnable"; ② set or evaluate DoD thresholds; ③ rate stage difficulty or optimization
+  targets; ④ design difficulty gradients.
+- **The only difficulty yardstick is skilled human play.** Current courses are easily cleared by a
+  skilled player ⇒ NN sitting at single-digit-to-60% win rate is an **NN/training problem, not stage
+  difficulty** ⇒ levers live on the training side; do not lower difficulty.
+- **"Surpassing the teacher" is the start, not the end**; teacher win rates (c4 68% / c5 47% /
+  c6 50%) are **not a ceiling in any form** and must not gate course verdicts.
+- **Task definition must not be degraded for training convenience**: `player.lives: 1` (goal
+  "clear with 1 life") is part of the task; no enemy-count cuts, no stage relaxation, no lowering of
+  the terminal bar. Sparse terminal signals are an inherent difficulty of the task.
+  **Training side is movable** (reward shaping, GAE λ, value head, algorithm); **task side is fixed**
+  (lives, enemy count, stage shape, terminal bar).
+- **Known teacher flaws** (authoritative: `plan/Intent-Policy-NN-Plan.md:437` §12.1; all in the
+  executor layer, not repairable by intent-head training): ① swings between targets during freeze;
+  ② doesn't clear walls to open paths (NN rarely picks CLEAR, 0.4–3%); ③ chases along parallel lanes
+  firing sideways instead of merging behind the target. §12.2 archives 20+ measured negatives as the
+  control baseline.
+- First written into memory 2026-09-11/12 (user-level + project MEMORY.md); promoted to AGENTS §0.2
+  and this detail 2026-09-12 after two sessions misused teacher win rate as a ceiling.
+
 ---
 
 ## §1 What to read before writing code
