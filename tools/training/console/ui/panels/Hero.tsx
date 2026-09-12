@@ -4,6 +4,7 @@
 
 import {
   filterGroups,
+  fmtPaired,
   fmtPct,
   iterGroups,
   klTone,
@@ -17,6 +18,7 @@ import {
   type ConsoleStateView,
   type EvalCkptFile,
   type IterRow,
+  type PairedReferee,
   type Series,
   type TrendRange,
 } from '../../../ui/view'
@@ -109,6 +111,26 @@ function winTicksCell(r: IterRow): string {
   if (r.actuals?.avgWinTicks != null) return String(r.actuals.avgWinTicks)
   if (r.actuals) return `${r.actuals.avgTicks}≈`
   return `${r.avgTicks}≈`
+}
+
+/** 配对裁判行（只读哨子，不进门判）：最新 eval vs 开腿 / vs 上一轮，同语料逐 seed 配对。
+ * 灰（flat）是正常态——100 对下 99% 时间证据不够，不是故障。 */
+function PairedRefereeLine({ ref }: { ref: PairedReferee | null | undefined }) {
+  if (!ref || (!ref.vsFirst && !ref.vsPrev)) return null
+  const title =
+    '同语料逐 seed 配对（McNemar）：b01=基线输新权重赢（政绩）/b10=反之（学费）；' +
+    '只看不一致对。灰=证据不够（正常态），不是故障；显著跌也只变色，不触发任何动作。'
+  return (
+    <div className="tc-muted tc-small" title={title} style={{ marginBottom: 4 }} role="status">
+      配对裁判（贪心同卷）
+      {ref.vsFirst ? (
+        <span> · {fmtPaired(ref.vsFirst, `vs开腿it${ref.vsFirst.baseIter}`)}</span>
+      ) : null}
+      {ref.vsPrev ? (
+        <span> · {fmtPaired(ref.vsPrev, `vs上一轮it${ref.vsPrev.baseIter}`)}</span>
+      ) : null}
+    </div>
+  )
 }
 
 /** 按 iter 解析权重路径 → 见 lib/eval-a.ts */
@@ -720,6 +742,7 @@ export function Hero({ stateView, onMore, onRefresh, readOnly = false }: HeroPro
             title="每局平均道具（rollout 实线 · eval 橙点）"
           />
         </div>
+        <PairedRefereeLine ref={stateView?.metrics.pairedReferee} />
       </div>
       <LastIters
         iters={iters}

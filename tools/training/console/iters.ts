@@ -3,7 +3,8 @@
 
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'fs'
 import { join } from 'path'
-import type { EvalSummary, IterActuals, IterRow } from '../ui/view'
+import type { EvalSummary, IterActuals, IterRow, PairedCompare, PairedReferee } from '../ui/view'
+import { mcnemarP, pairedVerdict } from '../../eval/mcnemar'
 
 // ---------------- 每轮实际值（it{N}/**/manifest.json 聚合） ----------------
 
@@ -398,6 +399,82 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
     /* unreadable */
   }
   return out
+}
+
+/** 配对裁判（只读哨子，不进门判）：最新 eval vs 开腿首轮 / vs 上一 eval 轮。
+ *
+ * 同 (stage,seed) 逐局配对，比较的是同一语料下两个 checkpoint 的贪心胜负——
+ * 跨语料（bc 在 0-99 vs 新权重在 860001+）时差分把卷面难度抵消掉。一边缺席的
+ * 局只计 unpaired 诚实披露。单轮/无数据 → 对应项 null（UI 空态）。 */
+export function readPairedReferee(trajDir: string): PairedReferee | null {
+  const logPath = join(trajDir, 'eval_log.jsonl')
+  const byIter = new Map<number, Map<string, boolean>>()
+  try {
+    if (!existsSync(logPath)) return null
+    for (const line of readFileSync(logPath, 'utf8').split(String.fromCharCode(10))) {
+      if (!line.trim()) continue
+      try {
+        const r = JSON.parse(line) as Record<string, unknown>
+        if (r.event !== 'eval') continue
+        const iter = Number(r.iter ?? -1)
+        const stage = Number(r.stage)
+        const seed = Number(r.seed)
+        if (
+          !Number.isInteger(iter) ||
+          iter < 0 ||
+          !Number.isInteger(stage) ||
+          !Number.isInteger(seed)
+        ) {
+          continue
+        }
+        let m = byIter.get(iter)
+        if (!m) {
+          m = new Map()
+          byIter.set(iter, m)
+        }
+        // 同 (iter,stage,seed) 重复落账取最后一条（文件序即时间序）。
+        m.set(`${stage}:${seed}`, r.win === true || r.win === 1)
+      } catch {
+        /* skip bad line */
+      }
+    }
+  } catch {
+    return null
+  }
+  const iters = [...byIter.keys()].sort((a, b) => a - b)
+  if (iters.length === 0) return null
+  const latest = iters[iters.length - 1]
+  const first = iters[0]
+  const compare = (a: number, b: number): PairedCompare => {
+    const ma = byIter.get(a) ?? new Map<string, boolean>()
+    const mb = byIter.get(b) ?? new Map<string, boolean>()
+    let b01 = 0
+    let b10 = 0
+    let paired = 0
+    for (const [k, wa] of ma) {
+      const wb = mb.get(k)
+      if (wb === undefined) continue
+      paired++
+      if (!wa && wb) b01++
+      else if (wa && !wb) b10++
+    }
+    const union = new Set([...ma.keys(), ...mb.keys()])
+    return {
+      baseIter: a,
+      ckptIter: b,
+      paired,
+      unpaired: union.size - paired,
+      b01,
+      b10,
+      deltaPp: paired > 0 ? +((100 * (b01 - b10)) / paired).toFixed(1) : 0,
+      p: mcnemarP(b01, b10),
+      verdict: pairedVerdict({ b01, b10, b11: 0, b00: 0 }),
+    }
+  }
+  const vsFirst = first === latest ? null : compare(first, latest)
+  const vsPrev = iters.length < 2 ? null : compare(iters[iters.length - 2], latest)
+  if (!vsFirst && !vsPrev) return null
+  return { vsFirst, vsPrev }
 }
 
 /** 从 training_log.jsonl 读取最近 MAX_ITER_ROWS 轮迭代指标（实际值缓存优先：

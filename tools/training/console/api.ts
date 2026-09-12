@@ -27,7 +27,7 @@ import {
   markCloudHaltRecovered,
   triggerCloudHalt,
 } from './actions'
-import { readIterMetrics } from './iters'
+import { readIterMetrics, readPairedReferee } from './iters'
 import {
   aggregateNodeHistory,
   emptyHistory,
@@ -793,9 +793,12 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
   let metrics: MetricsView = { available: false, iters: [] }
   if (course && existsSync(path.join(REPO_ROOT, 'tmp', course, 'training_log.jsonl'))) {
     try {
+      const trajDir = path.join(REPO_ROOT, 'tmp', course)
       metrics = {
         available: true,
-        iters: readIterMetrics(path.join(REPO_ROOT, 'tmp', course)).rows,
+        iters: readIterMetrics(trajDir).rows,
+        // 配对裁判：同趟 eval_log 扫描的副产品，纯读，失败即 null 不阻断 state。
+        pairedReferee: readPairedReferee(trajDir),
       }
     } catch (e) {
       metrics = { available: false, iters: [], error: e instanceof Error ? e.message : String(e) }

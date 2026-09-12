@@ -80,6 +80,8 @@ export interface MetricsView {
   available: boolean
   iters: IterRow[]
   error?: string
+  /** 配对裁判（只读；缺数据/单轮时为 null，UI 显示空态）。 */
+  pairedReferee?: PairedReferee | null
 }
 
 /** 训练正常完成停车态（账本 run_complete 事件派生，api.ts 填充）。 */
@@ -300,6 +302,31 @@ export interface IterRow {
   kills: number
   actuals: IterActuals | null
   evalData: EvalSummary | null
+}
+
+/** 配对裁判单组对比（同语料逐 seed 配对，见 tools/eval/mcnemar.ts）。 */
+export interface PairedCompare {
+  baseIter: number
+  ckptIter: number
+  /** 配上对的局数（只看 b01/b10 的分母）。 */
+  paired: number
+  /** 一边缺席而丢弃的局数（失败/重试口径差异所致，只诚实披露不参与判定）。 */
+  unpaired: number
+  /** 基线输、新权重赢（政绩）。 */
+  b01: number
+  /** 基线赢、新权重输（学费）。 */
+  b10: number
+  /** 净涨幅百分点（1 位小数）。 */
+  deltaPp: number
+  /** McNemar 精确二项双侧 p 值。 */
+  p: number
+  verdict: 'up' | 'down' | 'flat'
+}
+
+/** 配对裁判（只读哨子，不进门判）：最新 eval vs 开腿首轮 / vs 上一 eval 轮。 */
+export interface PairedReferee {
+  vsFirst: PairedCompare | null
+  vsPrev: PairedCompare | null
 }
 
 // ────────────────────────── /api/pool 视图类型 ──────────────────────────
@@ -680,6 +707,23 @@ export function fmtRel(ms: number, now = Date.now()): string {
 
 export function fmtPct(v: number | null | undefined): string {
   return typeof v === 'number' ? `${(v * 100).toFixed(1)}%` : '—'
+}
+
+/** 配对裁判 verdict 文案：灰是正常态（100 对下 99% 时间证据不够），不是故障。 */
+export function pairedVerdictText(v: 'up' | 'down' | 'flat'): string {
+  if (v === 'up') return '显著涨'
+  if (v === 'down') return '显著跌'
+  return '方向对，证据不够'
+}
+
+/** 配对裁判单行文案（Hero 趋势旁）：`vs开腿 +7.0pp p=0.31 (21/14,n=100) 方向对，证据不够`。 */
+export function fmtPaired(c: PairedCompare | null, label: string): string {
+  if (!c) return `${label} 数据不足`
+  const sign = c.deltaPp > 0 ? '+' : ''
+  return (
+    `${label} ${sign}${c.deltaPp.toFixed(1)}pp p=${c.p.toFixed(2)} ` +
+    `(${c.b01}/${c.b10},n=${c.paired}) ${pairedVerdictText(c.verdict)}`
+  )
 }
 
 export function fmtBytes(b: number | null | undefined): string {

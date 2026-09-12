@@ -1,0 +1,130 @@
+// 课程 c6-gae —— c6 直攻腿（2026-09-12）：把 c5-gae 验证通的机制（λ=0.95）推进到 c6
+//
+// 由 **c6-margin.jsonc** 派生。**相对 c6-margin 只改 2 处学习侧变量**，其余（stage/敌数/命数/
+// max_ticks/player/reward 全参数/scale/lr/epochs/mb/workers/缰绳/eval 配置）全锁死：
+//
+//   1. name/out/traj/backup_dir/backup_prefix → c6-gae（fresh，绝不复用别腿目录）
+//   2. **lam: 0.99 → 0.95**（机制变量——c5-gae 实证：修好 value 头后 160 轮配对
+//      57%/55% 显著破平台，全项目第一条爬升腿）
+//   3. bc: c4-margin.it140 → **c5-gae.it160**（c5 结业权重，零样本 c6 = 23% 实测）
+//
+//   附：`ppo_schedule` 末段 `kl_coef` 0.03（c6-margin 是 0.0）——**护栏不是变量**。
+//   **不写 `ent_coef`**（引擎缺省 0.01）。**wPickup=1.5 锁定不动**（道具缺口分析见
+//   DECISIONS §c5-gae-finale：c6 上学生 0.82/局未跟上道具密度，但 wPickup 是 c6 基线腿
+//   **之后**的单变量，不混进本腿的 bc/λ——单变量纪律）。
+//
+// ── 为什么（2026-09-12，DECISIONS §c5-gae-finale）─────────────────────────────
+//   c5-gae 已证：λ=0.95 修好 value 头（0.75→0.50-0.62），配对胜率 39%→55-57%（it145/160
+//   2p<0.05）。c5 执行器零样本 c6 = 23-29%（池化 2p=0.027 稳定，击杀 2.64→3.34 大涨但
+//   收不了 6 敌关）。本腿问题：**机制修复后，c6 直接训练能否从 23% 爬**（c6b 当年 22%
+//   平线是坏 value 下训的，机制不同）+ 策略在 c6 密道具下**是否自发多捡**（"道具→star→
+//   击杀吞吐→破 c6/c7/c8 清场瓶颈"任务级假设）。
+//
+// ── 起点（c6 关，2026-09-12 实测 tmp/c5gae160-c6probe.jsonl，seeds 0-99）──────────
+//   c5-gae.it160 零样本 c6：**胜率 23%**、击杀 3.34、道具 0.82/局。基线 c4-margin.it140
+//   → c6 = 18%。教师数据只作参考（§0.2：God 不是天花板）。
+//
+// ── 门（人读 + 配对探针；不配 `gates` 块——c4-dodge 教训 + λ 腿先例）───────────
+//   主判据（配对验收）：c6 关 seeds 0-99 配对探针，胜率 **>23%**（本腿起点，c6-margin
+//   的 39% 起点不适用——bc 不同）且 McNemar p<0.05。
+//   参考（训练内）：winRate 出现趋势；value loss ≤0.65（机制健康的既有口径）；
+//                 **道具/局**（若自发升到 ~1.2+ 说明策略自己会捡，wPickup 腿可省）。
+//   熔断：① 超时占比 >0.15  ② 配对 Δwin ≤ −10 且 p<0.05  ③ 命中率断崖
+//         ④ entropy 失控（>0.7 且无回升）
+//   验收节奏（每 10 轮配对探针，同 c5-gae 命令、course 换 c6 strict 副本）。
+//
+// ── 预算 ──────────────────────────────────────────────────────────────────────
+//   iters=160（c5-gae 教训：爬升在 it100-160 段，80 轮不够）+ max_hours=12。
+{
+  "version": 5,
+  "name": "c6-gae",
+  "mode": "per-tick",
+  "stages": [
+    {
+      "name": "p4-onset-mixed",
+      "grid": [
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+      ],
+      "forces": "abcdabcdabcdabcdabcd",
+      "count": 6,
+      "player_spawn": { "col": 12, "row": 12 },
+      "enemy_spawns": [
+        { "col": 2, "row": 2 },
+        { "col": 22, "row": 2 },
+        { "col": 22, "row": 22 },
+        { "col": 2, "row": 22 },
+      ],
+    },
+  ],
+  "difficulty": "hard",
+  "max_ticks": 2400,
+  "seed_rotate": 150,
+  "player": {
+    "lives": 1,
+    "level": 0,
+  },
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots - wTick*ticks - wChip*playerDamageTaken",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.3,
+      // 锁定 1.5：道具缺口是 c6 基线腿之后的单变量，不混进本腿（单变量纪律）
+      "wPickup": 1.5,
+      "wStar": 1.0,
+      "wDmg": 1.0,
+      "wStuck": 0.02,
+      "wShot": 0.01,
+      "wTick": 0.01,
+      "wChip": 0.005,
+    },
+    "terminal": {
+      "stage_clear": 2.0,
+      "lives_exhausted": -1.0,
+      "timeout": -2.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/c5-gae/c5-gae.it160.20260912-102739.json",
+  "iters": 160,
+  "max_hours": 12,
+  "workers": 8,
+  // §363 缰绳双闸：ref 取课程 bc；warmup 必须 0（validate_args 强制配对）。
+  "kickstart_ref": true,
+  "warmup_iters": 0,
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  // R5＋§363 双 flag（串行路径生效；默认 false 即历史行为）。
+  "normalize_ret": true,
+  "gamma": 0.998,
+  // ★ 机制变量：0.99 → 0.95（c5-gae 实证的 value 头修复）
+  "lam": 0.95,
+  // 末段 kl_coef 0.03 = **护栏**（c6-margin 是 0.0）；**不写 ent_coef**（缺省 0.01）。
+  "ppo_schedule": [
+    { "until_iter": 40, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
+    { "kl_coef": 0.03, "lr": 0.00005 },
+  ],
+  "out": "tmp/c6-gae/weights.json",
+  "traj": "tmp/c6-gae",
+  // F4 ENT 熔断：沿用 horizon 档 0.25。
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/c6-gae",
+  "backup_prefix": "c6-gae",
+  // 自定义关 stage ID 从 2000 开始，仅 1 关 → ID 2000
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 100,
+  "eval_every": 5,
+}

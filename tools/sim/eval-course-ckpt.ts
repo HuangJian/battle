@@ -58,8 +58,57 @@ function argAll(name: string): string[] {
   return out
 }
 
+/**
+ * 去尾逗号（`,]` / `,}`，含跨行）：逐字符扫描，字符串内原样保留（转义感知）。
+ * 背景：Python 侧 rl/jsonc.py 容忍尾逗号，课程文件（c6-pickup 起）普遍带尾逗号
+ * （oxfmt `trailingComma: all` 还会主动加）；本函数让 TS 侧与 Python 同口径，
+ * 否则探针读课程文件直接崩（2026-09-12 实测）。只删 `]`/`}` 前的逗号，中部逗号不动。
+ */
+export function stripTrailingCommas(text: string): string {
+  let out = ''
+  let i = 0
+  let inStr = false
+  while (i < text.length) {
+    const c = text[i]
+    if (inStr) {
+      out += c
+      if (c === '\\') {
+        out += text[i + 1] ?? ''
+        i += 2
+        continue
+      }
+      if (c === '"') inStr = false
+      i++
+      continue
+    }
+    if (c === '"') {
+      inStr = true
+      out += c
+      i++
+      continue
+    }
+    if (c === ',') {
+      let j = i + 1
+      while (j < text.length && /\s/.test(text[j] ?? '')) j++
+      const n = text[j] ?? ''
+      if (n === ']' || n === '}') {
+        i++
+        continue
+      }
+    }
+    out += c
+    i++
+  }
+  return out
+}
+
+/** 课程文件完整管线：去注释 → 去尾逗号 → JSON.parse 可直读。 */
+export function parseCourseJsonc(text: string): unknown {
+  return JSON.parse(stripTrailingCommas(stripJsonc(text)))
+}
+
 /** Strip // and block comments from JSONC, respecting strings (course files). */
-function stripJsonc(text: string): string {
+export function stripJsonc(text: string): string {
   let out = ''
   let i = 0
   let inStr = false
@@ -170,9 +219,7 @@ async function main(): Promise<void> {
   const workers = workersArg > 0 ? workersArg : defaultWorkerCount()
   const outPath = arg('out')
 
-  const course = JSON.parse(
-    stripJsonc(readFileSync(resolveCourse(courseArg), 'utf8')),
-  ) as CourseJson
+  const course = parseCourseJsonc(readFileSync(resolveCourse(courseArg), 'utf8')) as CourseJson
   const stages = course.stages
   if (!Array.isArray(stages) || stages.length === 0) {
     console.error(`[eval-course-ckpt] course has no custom stages: ${courseArg}`)
@@ -329,4 +376,4 @@ async function runChunks(
   return settled
 }
 
-await main()
+if (import.meta.main) await main()

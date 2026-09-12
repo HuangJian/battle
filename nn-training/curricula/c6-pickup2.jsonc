@@ -1,0 +1,182 @@
+// 课程 c6-pickup2 —— 道具杠杆 warm-start 腿（2026-09-12 起草，c6-pickup it35 分支）
+//
+// 由 **c6-pickup.jsonc** 派生。**相对 c6-pickup 只改 2 处**（bc + 新增 gates 块），
+// 其余（stage/敌数/命数/max_ticks/player/reward 全参数/λ/scale/lr/epochs/mb/workers/
+// 缰绳/eval 配置）全锁死，wPickup = 3.0 保持：
+//
+//   1. name/out/traj/backup_dir/backup_prefix → c6-pickup2（fresh，绝不复用旧腿目录）
+//   2. bc: c5-gae.it160 → **c6-pickup.it35**（见下“为什么换 bc”）
+//   3. 新增 `gates` 块（本仓第一条课程内显著性门；字段逐项对过 rl/config.py 校验器，
+//      模板取 c6b-margin：sustain/teacher/verdict/tol_pp/advance_frac 全必填项齐备）
+//
+// ── 为什么换 bc（2026-09-12 实测）────────────────────────────────────────────
+//   c6-pickup.it35 同种子配对（seeds 0-99，贪心）：38% vs 自身起点 23% = +15pp，
+//   McNemar b01=27/b10=12，p=0.025 显著（tmp/c6pickup-it35-probe.jsonl +
+//   tmp/mcnamar-c6pickup.py）。新种子 100-199 确认跑：34% vs 26% = +8pp，p=0.22
+//   不显著——38% 含种子运气，真水平 ≈34-36%（合并 200 对：+11.5pp，p≈0.01）。
+//   结论：it35 显著超起点，值得立为新起点；但“超 c6-gae.it160 的 30%”未显著
+//   （同种子配对 p=0.30），杠杆叙事只认“超自身起点”，不认“超 gae”。
+//   污染说明：it35 在 rollout flag bug 窗口内训出（local 槽 3命1星，占比 ~14%），
+//   但探针是正确 1命0星 MDP 下的干净实测——污染只在“练出的路”里，不在“测出的数”里。
+//
+// ── 起点（EVAL_SEEDS 实测，不借用 0-99 数）────────────────────────────────────
+//   it35 在 EVAL_SEEDS（860001-860100）零样本 = **31%**（tmp/c6pickup-it35-evalseeds.jsonl）
+//   ⇒ gates.baseline_win_rate = 0.31。
+//   God-AI 同语料（同关同种子）= 42%，kills 3.54，phits 0.57，zkf 0.14，tof 0.03
+//   （tmp/c6pickup-god-evalseeds.jsonl）⇒ teacher 块；跨关/跨语料禁借用（§0.2/D14）。
+//   rel_teacher 取 0.7（c6b-margin 判例）：教师线 0.294，floor 0.36 生效绑定。
+//
+// ── 门（课程内自动判）─────────────────────────────────────────────────────────
+//   G1 pooled：pool_window=3 × eval_games_per_stage=120 = 360 局池化（power_notes
+//     要求 ≥357 局才覆盖 min_gain_pp=5 的功效——100局/点不够，120局/点刚好），
+//     SE≈2.5pp，conf_z=1.645。名义线 36%，实际点火 ≈40%（floor + 噪声余量）。
+//     起点 31% → 问的是“再涨 5-9pp”，不是“保住 38%”。
+//   G2/G4/G7/G13 沿 c6b-margin 口径（ plateau 用 tol_pp + advance_frac 分流）。
+//   配对探针退为离线裁判（每 10-20 轮手跑，不进训练循环）。
+//
+// ── 预算 ──────────────────────────────────────────────────────────────────────
+//   iters=160 + max_hours=12。旧 c6-pickup 腿保持不动（对照组不断粮）。
+{
+  "version": 5,
+  "name": "c6-pickup2",
+  "mode": "per-tick",
+  "stages": [
+    {
+      "name": "p4-onset-mixed",
+      "grid": [
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+      ],
+      "forces": "abcdabcdabcdabcdabcd",
+      "count": 6,
+      "player_spawn": { "col": 12, "row": 12 },
+      "enemy_spawns": [
+        { "col": 2, "row": 2 },
+        { "col": 22, "row": 2 },
+        { "col": 22, "row": 22 },
+        { "col": 2, "row": 22 },
+      ],
+    },
+  ],
+  "difficulty": "hard",
+  "max_ticks": 2400,
+  "seed_rotate": 150,
+  "player": {
+    "lives": 1,
+    "level": 0,
+  },
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots - wTick*ticks - wChip*playerDamageTaken",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.3,
+      "wPickup": 3.0,
+      "wStar": 1.0,
+      "wDmg": 1.0,
+      "wStuck": 0.02,
+      "wShot": 0.01,
+      "wTick": 0.01,
+      "wChip": 0.005,
+    },
+    "terminal": {
+      "stage_clear": 2.0,
+      "lives_exhausted": -1.0,
+      "timeout": -2.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/c6-pickup/c6-pickup.it35.20260912-165846.json",
+  "iters": 160,
+  "max_hours": 12,
+  "workers": 8,
+  "kickstart_ref": true,
+  "warmup_iters": 0,
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    { "until_iter": 40, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
+    { "kl_coef": 0.03, "lr": 0.00005 },
+  ],
+  "out": "tmp/c6-pickup2/weights.json",
+  "traj": "tmp/c6-pickup2",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/c6-pickup2",
+  "backup_prefix": "c6-pickup2",
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 120,
+  "eval_every": 5,
+  "gates": {
+    "sustain": 2,
+    "baseline_win_rate": 0.31,
+    "teacher": {
+      "corpus": "EVAL_SEEDS:860001-860100@stage2000",
+      "games": 100,
+      "wins": 42,
+      "kills": 3.54,
+      "phits": 0.57,
+      "zero_kill_frac": 0.14,
+      "timeout_frac": 0.03,
+    },
+    "advance_requires": ["G1", "G2"],
+    "min_train_samples": 4000000,
+    "est_iter_min": 3,
+    "rules": [
+      {
+        "id": "G1",
+        "kind": "wins_mastery",
+        "verdict": "ADVANCE",
+        "rel_teacher": 0.7,
+        "min_gain_pp": 5.0,
+        "require_rising": true,
+        "pool_window": 3,
+        "conf_z": 1.645,
+      },
+      {
+        "id": "G2",
+        "kind": "skill_floor",
+        "verdict": "ADVANCE",
+        "max_zero_kill_frac": 0.3,
+      },
+      {
+        "id": "G4",
+        "kind": "plateau",
+        "verdict": "ADVANCE|REMEDIATE",
+        "window_rounds": 6,
+        "tol_pp": 8.0,
+        "tol_kills": 0.5,
+        "metrics": ["win_rate", "kills_mean"],
+        "advance_if": ["G1", "G2"],
+        "advance_frac": 0.7,
+      },
+      {
+        "id": "G7",
+        "kind": "course_valid",
+        "verdict": "REMEDIATE",
+        "max_timeout_frac": 0.15,
+        "rising_rounds": 3,
+      },
+      {
+        "id": "G13",
+        "kind": "duty",
+        "verdict": "REMEDIATE",
+        "min_train_frac": 0.35,
+      },
+    ],
+  },
+}
