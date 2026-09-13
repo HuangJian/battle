@@ -18,6 +18,11 @@
   自动安装 + bootstrap 优先 hub /code（GitHub tarball 兜底）。中断 = 干净停机。
 - **E2E 实证**：本地 hub + 抽取 cell 源码 headless 执行——worker 先起等 /code 重试
   → trainer 后起发布 → cell 引导代码、领 kind=bc 任务、真训练 5.5s、回传 accepted。
+- **二次精简（同日）**：运行时逻辑再搬进 code.zip——新模块 `remote/notebook_runtime.py`
+  （设备探测/pull/push/崩溃退避重启，入库受 ruff+mypy 门禁），cell 降到 **134 行** =
+  参数 + 保活 + /code 引导 + `run_notebook(CFG)` 委托。修运行时不再重发 notebook
+  （重跑 cell 即拉新版）；push 的 GitHub tarball 兜底随之删除（/code 等待重试已覆盖）。
+  headless E2E 复验 PASS（code.zip 100 个 .py 含本模块）。
 - 新夹具课程 `curricula/bc-e2e.bc.jsonc`（BC 管线流校验，对齐 tiny-a 定位；wins_only=false
   适配 300-tick 冒烟）。
 
