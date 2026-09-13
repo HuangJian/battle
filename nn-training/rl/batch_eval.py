@@ -41,8 +41,8 @@ from rl.queue import _record_agent_meta, bun_version, mm
 from train.loop_util import acquire_lock, cleanup_lock
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_DATA_ROOT = REPO_ROOT / "tools" / "training" / "data" / "evalboard"
-LADDER_JSON = REPO_ROOT / "tools" / "training" / "evalboard" / "ladder.json"
+DEFAULT_DATA_ROOT = REPO_ROOT / "dashboard" / "data" / "evalboard"
+LADDER_JSON = REPO_ROOT / "dashboard" / "src" / "evalboard" / "ladder.json"
 
 REGRESSION_EVERY = 3  # 与 runner.ts 同值（双侧镜像，改一侧必须同步另一侧）
 BATCH_STAGE_BASE = 2000
@@ -62,7 +62,7 @@ def utc_now_iso() -> str:
 
 
 def data_root() -> Path:
-    """EvalStore 数据根（EVALBOARD_DATA 覆盖；默认 tools/training/data/evalboard）。"""
+    """EvalStore 数据根（EVALBOARD_DATA 覆盖；默认 dashboard/data/evalboard）。"""
     return Path(os.environ.get("EVALBOARD_DATA", str(DEFAULT_DATA_ROOT)))
 
 

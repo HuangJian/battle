@@ -2,7 +2,7 @@
 
 定位：per-tick 链路（eval_dispatch.record）与 m1 链路（eval_m1 逐局行）共用的
 行构造/读取 helpers。EvalStore 归档写入的唯一路径是 TS 侧 `ingestRows`
-（tools/training/evalboard/ingest.ts，经 ingest-cli.ts 调用）——本模块只产
+（dashboard/src/evalboard/ingest.ts，经 ingest-cli.ts 调用）——本模块只产
 与 `RawEvalRow` 兼容的 dict，不自建第二条写入路径（附录 P1-1）。
 
 m1 链路逐局行落盘（D5 取 a）：m1-eval stdout JSON 自带 `perGame` 数组；

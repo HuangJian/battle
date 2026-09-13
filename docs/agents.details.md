@@ -319,21 +319,30 @@ spin up a browser) to validate its own changes.
   "proof" of work, and never present a localhost URL as a validation step.
 
 ### 5.6 NEVER launch NN training by running `python` directly
-Two sanctioned entries (DECISIONS §349 — the former unified CLI launcher `tools/training/start.ts`
+Two sanctioned entries (DECISIONS §349 — the former unified CLI launcher `start.ts`
 was folded into them; it had already replaced `nn-training/start-training.{sh,ps1}` +
 `tools/hub-start.ts` in DECISIONS §346):
 
 - **Training console** (daily management of all training components):
-  `bun run train` → http://127.0.0.1:8900 (LAN read-only + loopback control, §2026-09-09-goalnn-console-lan-readonly):
+  `bun run dashboard` → http://127.0.0.1:8900 (LAN read-only + loopback control, §2026-09-09-goalnn-console-lan-readonly):
   binds 0.0.0.0 so the LAN can view any course/logs/node stats (`?course=` read-only override, never
   writes console-state), while every POST action (start/stop/smoke, pull/push/local presets,
   `rl.stream`/`rl.double_buffer`/`rl.precollect_early` toggles, rollout-node enable/concurrency,
   writes back rl-config.json) is gated to loopback callers only (403 otherwise; LAN responses strip
   the cloudflared tunnel auth key). Per-iteration metrics + sparklines, per-component log viewer,
   and change-detection supervision (sentinel mtime → auto-restart) are all read paths, open to LAN.
-- **Headless one-shot runner**: `bun tools/training/train.ts --script <name>.py [args]`
+- **Headless one-shot runner**: `bun dashboard/src/launch/cli.ts --script <name>.py [args]`
   (venv setup, single-instance locking, smoke gates, `--force`, `--kill-previous`, `--detach`,
   `--torch-threads`, `--check`, `--echo`).
+- **Dependency isolation** (2026-09-14, DECISIONS §2026-09-14-goalnn-dashboard-project):
+  `dashboard/` is self-contained — its own `node_modules/` + committed `bun.lock`
+  (`cd dashboard && bun install`), and it is absent from the root `package.json` (no `preact`),
+  the root `tsconfig.json` `include`, and the root suite (which passes
+  `--path-ignore-patterns='dashboard/**'`; note `bun test <dir>` positional args are **substring
+  filters**, so a directory can only be excluded this way). Its gate is
+  `cd dashboard && bun run typecheck && bun run test`, wired into pre-commit whenever `dashboard/`
+  is staged (escape hatch `SKIP_DASHBOARD_GATE=1`). Both directions verified: the root can no
+  longer resolve `preact`, dashboard can.
 
 - Raw `python train_loop.py` / `python train_bc.py` bypasses pre-flight checks and can spawn
   duplicate training processes competing for the same lock file and weights.
@@ -344,9 +353,9 @@ was folded into them; it had already replaced `nn-training/start-training.{sh,ps
 - **torch lives only in `nn-training/.venv`** (per-platform venv) — the system `python` has no torch
   (`ModuleNotFoundError: torch`). Do NOT probe with `python -c "import torch"`; use the runner's
   idempotent self-check:
-  - `bun tools/training/train.ts --check` — verifies venv+torch and prints the absolute
+  - `bun dashboard/src/launch/cli.ts --check` — verifies venv+torch and prints the absolute
     torch interpreter path; exit 0 = usable.
-  - Print the exact command without running it: `bun tools/training/train.ts --echo --script <name>.py [args]`.
+  - Print the exact command without running it: `bun dashboard/src/launch/cli.ts --echo --script <name>.py [args]`.
 - The runner is not just `train_loop.py`: `--script <path>.py [args]` (path relative to
   `nn-training/`) runs root runners
   (`run_rl.py`, `train_loop.py`, `smoke_test.py`) or subpackage entries (`train/bc.py --arch student`,

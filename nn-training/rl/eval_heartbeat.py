@@ -1,10 +1,10 @@
 """eval_heartbeat — EvalBoard runner 心跳（plan/evalboard-console-ux.md §5.4 R4-G1）。
 
 单文件覆盖写（原子替换），训练侧唯一写者，console 只读。
-落 `tools/training/data/evalboard/runner_state.json`（**不放 tmp/**：`tools/tmp-clean.py`
+落 `dashboard/data/evalboard/runner_state.json`（**不放 tmp/**：`tools/tmp-clean.py`
 会回收 tmp ⇒ 长跑时心跳 stale）。
 
-字段（console 读侧映射见 `tools/training/console/evalboard.ts:readRunnerState`）：
+字段（console 读侧映射见 `dashboard/src/server/eval-board.ts:readRunnerState`）：
   window_open / updated_ts / batch_id / unit_idx / unit_of / rung /
   remaining_units / last_window_closed_ts / engine_epoch
 """
@@ -16,7 +16,7 @@ import os
 import time
 from pathlib import Path
 
-_DEFAULT_ROOT = Path(__file__).resolve().parents[2] / "tools" / "training" / "data" / "evalboard"
+_DEFAULT_ROOT = Path(__file__).resolve().parents[2] / "dashboard" / "data" / "evalboard"
 
 
 def data_root() -> Path:

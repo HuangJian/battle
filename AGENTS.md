@@ -91,6 +91,17 @@ Violating any of these is a bug even if the tests pass (details & gray-zone exem
 - **Canvas is playfield-only**: 416×416 logical, DPR-scaled via an offscreen buffer (`SpriteCache`, `GameRenderer`). HUD/menu/overlays are HTML/CSS in `UIManager`. Do not move UI back onto the canvas.
 - **Tank sprites face UP** in the SVG; the renderer rotates per direction. Preserve this convention when adding sprites.
 - **`genId()`** (`World.ts`) is the single source of entity IDs.
+- **`dashboard/` = 训练控制台（独立 bun 项目）** — 自带 `package.json` / `tsconfig.json` / `tests/`；
+  **启动命令 = `bun run dashboard`**（= `cd dashboard && bun run start`，:8900）。内部按职责分层：
+  `src/core/` 基础原语 · `src/stack/` 训练栈组件 · `src/launch/` python 无头启动器 ·
+  `src/evalboard/` 评估板领域 · `src/server/` HTTP 与服务端逻辑 · `src/web/` SSR + 浏览器 UI。
+  它是仓库内**唯一**允许跨项目 import 的边界：只读消费 `src/` 的游戏契约（stages / arena-ladder /
+  config-stage / difficulty）与 `tools/agent/codehash-files`；反向（`src/` 依赖 dashboard）永远禁止。
+  调用方一律 import 各目录的 `index.ts` 桶，不直连内部文件。
+  **依赖自包含**：自带 `node_modules/` 与**入库**的 `bun.lock`（`cd dashboard && bun install`
+  一次即可）；根 `package.json`、根 `tsconfig.json`、根套件**都不含** dashboard ——
+  它的门禁是 `cd dashboard && bun run typecheck && bun run test`，pre-commit 在 staged 含
+  `dashboard/` 时自动跑（§9）。
 
 ---
 
@@ -114,7 +125,7 @@ Handed a plan (`plan/*.md`, a `tasks.chat.md` directive, or an inline task), fol
 
 - **Never `git stash`** — in this sandbox the stash's object writes get silently intercepted and can delete the whole object store. **TWO incidents**: 2026-08-28 (all packs vanished, 503 commits unreadable) and **2026-09-06 (`git stash push` deleted `objects/pack/*.pack` + `refs/` + branch reflogs)**. Any subcommand (`push`/`pop`/`apply`/`drop`/`clear`) is banned; for A/B comparisons use `git worktree add` or a scratch clone, never stash. Normal git flow (`add`/`commit`/`push`/`fetch`/`pull`) writes `.git` all the time and is safe — no backup needed; back up `.git/objects` only before a genuinely destructive command (`reset --hard`, `filter-branch`, `gc`, `repack`, `prune`). **Commit, never push** — pushing is the human's job; 2026-09-06 was lossless only because every commit already existed on `origin`. Remote access is HTTPS-only here (origin is already switched; SSH is unreachable from the sandbox). Recovery runbook + why "just this once" is never acceptable: `docs/agents.details.md` §5.12.
 - **Never start the dev server** (or spin up a browser) to validate your own changes — validation is the automated gates only (`bun run check` / `bun run build`; for UI work untestable by units: `tsc --noEmit` + oxlint + a successful `vite build`).
-- **Never launch NN training with raw `python`** — headless one-shots go via `bun tools/training/train.ts --script <name>.py` (venv setup, single-instance locking, smoke gates, `--check` / `--echo`)；日常训练组件管理（启/停/冒烟/模式/节点/变更检测重启）走训练控制台 `bun run train` → http://127.0.0.1:8900（局域网只读：可查看任意课程/日志/节点统计，启停/冒烟/模式/节点编辑仅本机 localhost，§2026-09-09-goalnn-console-lan-readonly；旧统一启动器 `tools/training/start.ts` 与 `nn-training/start-training.{sh,ps1}` 均已删除；details: `docs/agents.details.md` §5.6）。
+- **Never launch NN training with raw `python`** — headless one-shots go via `bun dashboard/src/launch/cli.ts --script <name>.py` (venv setup, single-instance locking, smoke gates, `--check` / `--echo`)；日常训练组件管理（启/停/冒烟/模式/节点/变更检测重启）走训练控制台 `bun run dashboard` → http://127.0.0.1:8900（局域网只读：可查看任意课程/日志/节点统计，启停/冒烟/模式/节点编辑仅本机 localhost，§2026-09-09-goalnn-console-lan-readonly；旧统一启动器 `start.ts` 与 `nn-training/start-training.{sh,ps1}` 均已删除；控制台是**独立 bun 项目** `dashboard/`（自带 package.json/tsconfig/tests/**node_modules**，`cd dashboard && bun install`，详见 `dashboard/README.md`）；details: `docs/agents.details.md` §5.6）。
 - **Record every NN-training architecture change/eval/lesson in `docs/nn.progress.md`** (top, numbered §) — and check it before architectural changes.
 
 - **On PowerShell, commit via a temp message file** — `git commit -F tmp/<ascii-file>` (delete after; `--amend -F` likewise); heredocs and non-ASCII `-m` args fail silently, and the pre-commit hook's failing output is swallowed — diagnose with `bash tools/githook/pre-commit > tmp/hook.txt 2>&1; echo "EXIT=$LASTEXITCODE"`, and verify every commit with `git log -1 --pretty=fuller` (full recipe: `docs/agents.details.md` §5.7).
@@ -131,12 +142,22 @@ Handed a plan (`plan/*.md`, a `tasks.chat.md` directive, or an inline task), fol
 bun run dev          # vite dev server on :8956
 bun run build        # oxlint && tsc && vite build  (the gate before merge)
 bun run test         # SCOPED: runs only tests tied to local git changes, prints only failures
-bun test --parallel --timeout=50000   # full suite, all tests — ALWAYS pass these flags
+bun test --parallel --timeout=50000 --path-ignore-patterns='dashboard/**'   # full ROOT suite — ALWAYS pass these flags
 bun run typecheck    # tsc --noEmit --incremental
 bun run lint         # oxlint
 bun run format       # oxfmt
-bun run check        # full gate: tsc --noEmit --incremental && bun test --parallel --timeout=50000
+bun run check        # full gate (ROOT only): tsc --noEmit --incremental && bun test --parallel --timeout=50000 --path-ignore-patterns='dashboard/**'
 bun run setup        # git config core.hooksPath tools/githook  (enables pre-commit hook)
+```
+
+`dashboard/` 是**独立 bun 项目**，用**它自己**的 `node_modules` 与门禁（根 `check` 不含它；
+`tests` 之类的**位置参数是子串过滤**，排除目录只能用 `--path-ignore-patterns`）：
+
+```
+cd dashboard && bun install     # 一次性；从入库的 dashboard/bun.lock 还原
+cd dashboard && bun run typecheck
+cd dashboard && bun run test    # 306 用例（staged 含 dashboard/ 时 pre-commit 自动跑）
+bun run dashboard               # 启动控制台 → http://127.0.0.1:8900
 ```
 
 God AI freeze gates (DECISIONS §272/§293; pre-commit runs the first one):
@@ -208,8 +229,10 @@ Mandatory, no exceptions: **a bug is not fixed until a failing test proves it ex
 
 A task is done when **all** of these hold:
 
-- [ ] `bun run check` is green (test + typecheck + lint + format).
+- [ ] `bun run check` is green (test + typecheck + lint + format)。它**只判根项目**：根 `tsconfig.json` 的 `include` 无 `dashboard`，根 `bun test` 用 `--path-ignore-patterns='dashboard/**'` 排除 `dashboard/tests/`。
+- [ ] 动过 `dashboard/**` 时，`cd dashboard && bun run typecheck && bun run test` 也绿（它有自己的 `node_modules` 与门禁；pre-commit 在 staged 含 `dashboard/` 时会自动跑，即交付前不必依赖手动记得）。
 - [ ] `bun run build` succeeds (this is what ships).
+- [ ] 改动 `dashboard/src/web/**` 时，`bun dashboard/src/server/build.ts` 三份 bundle 均构建通过（gzip 预算 + 客户端禁词门禁）。
 - [ ] No new `Math.random()` in Simulation paths (§2.3).
 - [ ] No new module-level mutable gameplay state (§2.2).
 - [ ] No new UI drawn on the game canvas (§2.5 — UI is HTML/CSS).

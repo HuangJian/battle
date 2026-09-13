@@ -1,0 +1,722 @@
+/** app.tsx — 训练控制台根组件（SSR + hydrate；一屏仪表盘布局，DECISIONS §355）。
+ *
+ *  布局：顶栏（课程▾ + 训练状态 chips + 刷新间隔 select + ⟳）→ Hero（胜率焦点 + 迷你条）
+ *  → 组件 4 小卡 → 节点 pill 行 → 详情抽屉（指标 | 节点统计 | 日志）→ TrainingLoop 启动弹窗。
+ *
+ *  交互纪律：无「停止全部」（用户指令）· 无「暂停刷新」按钮（改刷新间隔 select）·
+ *  停用节点默认折叠（慢/离线始终展开）· 工具行并入启动弹窗 · 详情一律进右侧抽屉（Esc / ✕ / 遮罩关闭）。
+ *
+ *  polling 优先级（GLM-E6）：visibility(后台 tab) > 刷新间隔；客户端输入均为本地 state，
+ *  3s 轮询不覆盖（不再需要全局 dirty 暂停）。 */
+
+import { useCallback, useEffect, useRef, useState } from 'preact/hooks'
+import { Flash, type FlashState } from '../components/Flash'
+import { Drawer } from '../components/Drawer'
+import { PanelErrorBoundary } from '../components/PanelErrorBoundary'
+import { usePolling } from './lib/usePolling'
+import { fetchState, postAction } from './lib/api-client'
+import { Hero } from './panels/Hero'
+import { ComponentCards } from './panels/ComponentCards'
+import { NodePills } from './panels/NodePills'
+import { MetricsTable } from './panels/MetricsTable'
+import { NodeStats } from './panels/NodeStats'
+import { LogNavCard } from './panels/LogNavCard'
+import { TrainLaunchModal } from './panels/TrainLaunchModal'
+import { BcPanel } from './panels/BcPanel'
+import { EvalSummary } from './panels/EvalSummary'
+import { MultiCourseOverview } from './panels/MultiCourseOverview'
+import {
+  fmtTs,
+  latestRow,
+  REFRESH_INTERVALS,
+  refreshLabel,
+  TC_CLOUDHALT_ACK,
+  TC_GLOBAL_INTERVAL,
+  TC_RO_BANNER_DISMISSED,
+  cloudHaltAckKey,
+  parseCloudHaltAcks,
+  type ConsoleStateView,
+  type PhaseInfo,
+  type RefreshSec,
+  visibleCloudHalts,
+} from '../view'
+
+export interface AppProps {
+  initial: ConsoleStateView
+}
+
+type DrawerTabKey = 'metrics' | 'nodes' | 'log'
+
+function readLocal(key: string): string | null {
+  try {
+    if (typeof localStorage === 'undefined') return null
+    return localStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
+function writeLocal(key: string, v: string): void {
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(key, v)
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 刷新间隔默认值——必须与 SSR 首帧一致（SSR 无 localStorage，恒为 300）。 */
+const DEFAULT_INTERVAL: RefreshSec = 300
+
+/** 已存刷新间隔（仅合法值；非法回退默认）。hydrate 后在 effect 里恢复，不参与首帧渲染。 */
+function storedInterval(): RefreshSec {
+  const v = readLocal(TC_GLOBAL_INTERVAL)
+  if (v === '60' || v === '180' || v === '300' || v === '600' || v === '1800')
+    return Number(v) as RefreshSec
+  return DEFAULT_INTERVAL
+}
+
+/** 本机判定（局域网只读边界）：页面经 localhost/127.0.0.1 打开 = 本机，可执行动作；
+ *  经局域网 IP 打开 = 只读查看（服务端 POST 还会 403 兜底，双保险）。 */
+function isLocalHost(): boolean {
+  if (typeof location === 'undefined') return true // SSR 首帧无 location，按本机渲染
+  const h = location.hostname
+  return h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]'
+}
+
+/** 把查看课程写入 URL（?course=，history.replaceState）：局域网刷新/分享链接保持所选课程。 */
+function writeUrlCourse(c: string): void {
+  try {
+    const u = new URL(location.href)
+    if (c) u.searchParams.set('course', c)
+    else u.searchParams.delete('course')
+    history.replaceState(null, '', u.pathname + u.search)
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 阶段耗时格式化 'Xs' / 'Xm Ys' / 'Xh Ym'。 */
+function fmtElapsed(ms: number | null): string {
+  if (ms == null || ms < 0) return '—'
+  const s = Math.floor(ms / 1000)
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  const rs = s % 60
+  if (m < 60) return `${m}m${rs > 0 ? ` ${rs}s` : ''}`
+  const h = Math.floor(m / 60)
+  const rm = m % 60
+  return `${h}h${rm > 0 ? ` ${rm}m` : ''}`
+}
+
+export function App({ initial }: AppProps) {
+  const [stateView, setStateView] = useState<ConsoleStateView | null>(initial)
+  const [connError, setConnError] = useState<'off' | 'retry' | 'down'>('off')
+  // 首帧一律用 SSR 默认值（localStorage 服务端不可读）——首帧读本地存储会让客户端
+  // vnode 与 SSR HTML 不一致 → hydrate 错配 → 组件区 DOM 错位（§：只读横幅关闭后样式崩）。
+  const [refreshInterval, setRefreshInterval] = useState<RefreshSec>(DEFAULT_INTERVAL)
+  // 本地偏好在 hydrate 之后恢复（与 Hero 的 TC_HERO_ITER_VIEW 同款写法）。
+  useEffect(() => {
+    const v = storedInterval()
+    if (v !== DEFAULT_INTERVAL) setRefreshInterval(v)
+  }, [])
+  const [flash, setFlash] = useState<FlashState | null>(null)
+  const [documentVisible, setDocumentVisible] = useState(
+    typeof document === 'undefined' || !document.hidden,
+  )
+  const [drawerTab, setDrawerTab] = useState<DrawerTabKey | null>(null)
+  const [trainOpen, setTrainOpen] = useState(false)
+  const [poolFreshNonce, setPoolFreshNonce] = useState(0)
+  // 只读横幅可关闭：localStorage 记住「不再显示」（仅局域网只读视图相关；tc. 前缀防误删）。
+  // 首帧恒 false（与 SSR 一致），localStorage 偏好 hydrate 后恢复——见下方 effect。
+  const [roBannerDismissed, setRoBannerDismissed] = useState(false)
+  useEffect(() => {
+    if (readLocal(TC_RO_BANNER_DISMISSED) === '1') setRoBannerDismissed(true)
+  }, [])
+  // 云端停机横幅已读（§386；2026-09-14 扩到 halted）：按「事件身份」记（课程+时刻），
+  // 同一事件只提示一次，新一次停机/恢复会重新弹。
+  const [cloudHaltAcks, setCloudHaltAcks] = useState<string[]>([])
+  useEffect(() => {
+    setCloudHaltAcks(parseCloudHaltAcks(readLocal(TC_CLOUDHALT_ACK)))
+  }, [])
+  /** 记住「知道了」：写入 localStorage（数组格式，旧单值格式兼容）。 */
+  const ackCloudHalt = useCallback((key: string): void => {
+    setCloudHaltAcks((prev) => {
+      const next = prev.includes(key) ? prev : [...prev, key]
+      writeLocal(TC_CLOUDHALT_ACK, JSON.stringify(next))
+      return next
+    })
+  }, [])
+  // 视图课程（局域网只读核心）：初始 = SSR 的 ?course= 覆盖或操作员课程；切换只改本浏览器
+  // 的查看 + URL，本机才额外 POST setCourse 同步操作员课程（动作 WYSIWYG 走 body.course）。
+  const isLocal = isLocalHost()
+  // 只读视图标记：服务端按请求来源 stamp（SSR 首帧即正确，无闪跳）；缺省回退 hostname 判定。
+  const readOnly = initial.readOnly ?? !isLocal
+  const [viewCourse, setViewCourse] = useState<string>(initial.course)
+  const viewCourseRef = useRef(viewCourse)
+  viewCourseRef.current = viewCourse
+  // ── 门禁动作模式（2026-09-13）：halt = 触发门禁就下发 cloud halt（默认）；
+  //    notify = 只横幅告警、绝不杀云端 PPO worker。
+  //    为什么需要它：G4(plateau) 的 REMEDIATE 在平台期**每 5 轮必然复现**，历史上
+  //    c6-pickup3（6 次）/ c6-bonus（10 次）就是被它反复杀掉云机，后半程全在中断态下训练。
+  //    注意 hydrate 安全：初始值**恒为 'halt'**（服务端标志文件 + localStorage 都在
+  //    挂载后的 effect 里校准）——在 useState 初始化里读 localStorage 会让 SSR 首帧与
+  //    客户端不一致（横幅关闭后样式崩的根因，见 tests/console-lan.test.ts）。
+  const [gateHaltMode, setGateHaltMode] = useState<'halt' | 'notify'>('halt')
+  // 阶段耗时段 10s 客户端自走（sinceMs 是服务器锚点；两次轮询之间显示不冻结）。
+  const [now, setNow] = useState(() => Date.now())
+
+  const wasError = useRef(false)
+  const failCount = useRef(0)
+
+  // ── 拉取 /api/state（刷新间隔；单次失败 retry，连续 3 次 down） ──
+  // 始终带当前查看课程（?course= 只读覆盖）——切课程后轮询/iter 加速/可见性恢复都取同一课程。
+  const refreshState = useCallback(async (): Promise<void> => {
+    try {
+      const s = await fetchState(viewCourseRef.current)
+      setStateView(s)
+      setConnError('off')
+      failCount.current = 0
+      if (wasError.current) setPoolFreshNonce((n) => n + 1)
+      wasError.current = false
+    } catch {
+      wasError.current = true
+      failCount.current += 1
+      setConnError(failCount.current >= 3 ? 'down' : 'retry')
+    }
+  }, [])
+
+  usePolling({
+    enabled: documentVisible,
+    intervalSec: refreshInterval,
+    fetch: refreshState,
+  })
+
+  useEffect(() => {
+    const onVis = (): void => {
+      const vis = !document.hidden
+      setDocumentVisible(vis)
+      setNow(Date.now())
+      if (vis) void refreshState()
+    }
+    document.addEventListener('visibilitychange', onVis)
+    return () => document.removeEventListener('visibilitychange', onVis)
+  }, [refreshState])
+
+  // 阶段耗时自走：可见时 10s 一跳（后台 tab 靠 visibilitychange 回来时校正）。
+  useEffect(() => {
+    if (!documentVisible) return
+    const t = setInterval(() => setNow(Date.now()), 10_000)
+    return () => clearInterval(t)
+  }, [documentVisible])
+
+  // iter 结束自动刷新（§361④）：SSR __INITIAL__ 已注入最新 iter；观测到迭代号增长
+  // 即立即补拉一次 + 池统计 nonce++（10s 去抖，防 eval 尾巴/同 iter 重写连跳）。轮询间隔不变。
+  const headIter = latestRow(stateView?.metrics.iters ?? [])?.iter ?? null
+  const lastIterSeen = useRef<number | null>(latestRow(initial.metrics.iters)?.iter ?? null)
+  const lastBoostAt = useRef(0)
+  useEffect(() => {
+    if (headIter == null || !documentVisible) return
+    const prev = lastIterSeen.current ?? -1
+    lastIterSeen.current = headIter
+    if (headIter <= prev) return
+    const now = Date.now()
+    if (now - lastBoostAt.current < 10_000) return
+    lastBoostAt.current = now
+    void refreshState()
+    setPoolFreshNonce((n) => n + 1)
+  }, [headIter, documentVisible, refreshState])
+
+  // 键盘：Esc 依次关 TrainingLoop 弹窗 / 抽屉；r 立即刷新（输入框聚焦时禁用）
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      const t = e.target as HTMLElement | null
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) return
+      if (e.key === 'Escape') {
+        setTrainOpen(false)
+        setDrawerTab(null)
+      } else if (e.key.toLowerCase() === 'r') {
+        void refreshState()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [refreshState])
+
+  // ── 动作派发（POST → flash → 重拉 state） ──
+  // 课程敏感动作（start/preset/smoke/smokeTrain/nodeSmoke/setCourse）统一带上当前查看课程：
+  // 「所见即所控」——操作员启动的 trainer/hub 一定用他正在看的课程，不依赖全局 console-state。
+  // 局域网来源 POST 会被服务端 403（只读门控），此处只是本机路径的语义保证。
+  const doAction = useCallback(
+    async (act: string, body: Record<string, unknown> = {}): Promise<{ ok: boolean }> => {
+      const course = viewCourseRef.current
+      const fullBody = course ? { course, ...body } : body
+      const r = await postAction(act, fullBody)
+      setFlash({ ok: r.ok, message: r.message })
+      void refreshState()
+      return { ok: r.ok }
+    },
+    [refreshState],
+  )
+
+  // 首次进入/切课程时，用**服务端标志文件**校准本地开关（文件是真相，localStorage 只是记忆）。
+  useEffect(() => {
+    void (async () => {
+      let v: 'halt' | 'notify' | null = null
+      try {
+        const r = await postAction('getGateHaltMode', {})
+        if (r.ok && (r.message === 'halt' || r.message === 'notify')) v = r.message
+      } catch {
+        /* 拉取失败 → 退到 localStorage */
+      }
+      if (!v) {
+        try {
+          if (localStorage.getItem('tc.gateHaltMode') === 'notify') v = 'notify'
+        } catch {
+          /* 隐私模式下读不了 */
+        }
+      }
+      if (v) setGateHaltMode(v)
+    })()
+  }, [viewCourse])
+
+  const onGateHaltModeChange = useCallback(
+    (e: Event) => {
+      const el = e.target as HTMLSelectElement | null
+      const v: 'halt' | 'notify' = el?.value === 'notify' ? 'notify' : 'halt'
+      setGateHaltMode(v)
+      try {
+        localStorage.setItem('tc.gateHaltMode', v)
+      } catch {
+        /* 隐私模式下写不了就算了 */
+      }
+      // 写 <traj>/gate-halt-mode.txt ⇒ Python 下一轮门判定即生效，无需重启训练。
+      void doAction('setGateHaltMode', { mode: v })
+    },
+    [doAction],
+  )
+
+  const handleLaunch = async (mode: 'pull' | 'push' | 'local'): Promise<void> => {
+    setTrainOpen(false)
+    await doAction('preset', { mode })
+  }
+
+  // hub-server 运行中锁定课程（仅本机）：hub 按课程建 jobRoot/日志目录，切操作员课程会打乱
+  // 在途训练状态——先停止 hub-server 再切换（§367 UI 交互）。局域网查看不受此限：只读切换
+  // 课程不影响任何训练状态。
+  const hubRunning = (stateView?.components ?? []).some(
+    (c) => c.key === 'hubServer' && c.status === 'running',
+  )
+
+  // 课程下拉 onChange：本机 = 查看 + POST setCourse 同步操作员课程；局域网 = 仅查看 + 写 URL。
+  // 注意：ref 须在此同步更新（setState 后下一渲染才赋值）——随后的 refreshState/doAction
+  // 立即读到的必须已是新课程，否则轮询仍拉旧课程。
+  const selectCourse = useCallback(
+    (c: string): void => {
+      viewCourseRef.current = c
+      setViewCourse(c)
+      writeUrlCourse(c)
+      void refreshState()
+      setPoolFreshNonce((n) => n + 1)
+      // 只读视图不 POST（服务端也会 403 兜底）；用服务端 stamp 的 readOnly 而非 isLocal。
+      if (!readOnly) void doAction('setCourse', { course: c })
+    },
+    [readOnly, refreshState, doAction],
+  )
+
+  const onCourseChange = (e: Event): void => {
+    selectCourse((e.target as HTMLSelectElement).value)
+  }
+
+  // 顶栏阶段耗时（至今；now 由 10s ticker 驱动，轮询间隙不冻结）。
+  const phaseInfo: PhaseInfo | null = stateView?.phase ?? null
+  const phaseElapsed = phaseInfo && phaseInfo.sinceMs != null ? now - phaseInfo.sinceMs : null
+
+  // 正在训练的课程：trainingLoop 运行时的注册课程（启动即记账）；监督重启丢 course 时
+  // 回退服务端生效课程（console-state，正常流程与训练课程一致）。查看课程 ≠ 训练课程时，
+  // 在课程 select 后高亮提示——局域网切去查看其它课程也能一眼看到训练在哪个课程上。
+  const trainingLoop = (stateView?.components ?? []).find((c) => c.key === 'trainingLoop')
+  const trainingCourse =
+    trainingLoop?.status === 'running' ? trainingLoop.course || stateView?.course || '' : ''
+
+  return (
+    <div className="tc-wrap">
+      <Flash flash={flash} onHide={() => setFlash(null)} />
+      <header className="tc-topbar">
+        <div className="tc-topbar__row">
+          <h1>
+            <span className="dot" />
+            炼丹炉
+          </h1>
+          {readOnly ? (
+            <span
+              className="tc-badge tc-badge--ro"
+              title="本页面为局域网只读视图；启停/冒烟/模式开关/节点编辑仅在本机 localhost 打开控制台时可用"
+            >
+              🔒 局域网只读
+            </span>
+          ) : null}
+          {/* 课程选择：标题行中部（最新 iter 指标 chips 已移除）——本机可切操作员课程，
+              局域网只读切换查看课程（不落盘、不影响训练） */}
+          <label className="tc-topbar__course" title={undefined}>
+            <span className="tc-topbar__course-lbl">课程</span>
+            <select
+              id="courseSel"
+              className="tc-sel"
+              value={viewCourse}
+              // 课程锁只对本机生效：用服务端 stamp 的 readOnly（SSR 首帧即正确）而非客户端 isLocal——
+              // 后者 SSR 期恒 true，会渲染出局域网首帧 disabled 的 select（靠 hydration 纠正不可靠）。
+              // 局域网只读切换课程不影响训练，任何训练状态下都可切。
+              disabled={hubRunning && !readOnly}
+              title={
+                hubRunning && !readOnly
+                  ? 'hub-server 运行中——切课程会打乱在途训练状态，先停止 hub-server 再切换'
+                  : readOnly
+                    ? '局域网只读：切换仅影响当前浏览器的查看课程，不影响训练'
+                    : undefined
+              }
+              onChange={onCourseChange}
+            >
+              <option value="">自动（最近活跃课程）</option>
+              {(stateView?.courses ?? []).map((c) => (
+                <option key={c} value={c}>
+                  {c === trainingCourse ? '🔥 ' : ''}
+                  {c}
+                  {c === trainingCourse ? '（正在训练）' : ''}
+                </option>
+              ))}
+            </select>
+            {trainingCourse && trainingCourse !== viewCourse ? (
+              <span
+                className="tc-training-tag"
+                title={`正在训练 ${trainingCourse}；当前查看 ${viewCourse || '(自动)'}——切换查看不影响训练`}
+              >
+                <span className="tc-dot tc-dot--on" />
+                正在训练：{trainingCourse}
+              </span>
+            ) : null}
+            {hubRunning && !readOnly ? (
+              <span className="tc-muted tc-small" title="先停止 hub-server 再切换课程">
+                hub 运行中，课程已锁定
+              </span>
+            ) : null}
+          </label>
+          {/* 门禁动作（**仅在有训练时显示**）：停机 = 触发门禁即下发 cloud halt；
+              提示 = 只横幅告警，绝不杀云端 PPO worker。
+              背景：G4(plateau) 的 REMEDIATE 每 5 轮必复现，c6-pickup3 / c6-bonus
+              被它反复停机 6 次 / 10 次，后半程训练全在中断态下进行。切换**即时生效**。 */}
+          {trainingCourse ? (
+            <label
+              className="tc-topbar__course"
+              title={
+                '门禁触发时对云端 PPO worker 的动作。\n' +
+                '· 停机（默认）：下发停机达令，云机释放。\n' +
+                '· 提示：只记录 verdict 并显示横幅，不停机——平台期（G4）会每 5 轮复现，' +
+                '停机等于反复杀掉 PPO worker。\n' +
+                '切换后立即对下一轮门判定生效，无需重启训练。'
+              }
+            >
+              <span className="tc-topbar__course-lbl">触发门禁</span>
+              <select
+                id="gateHaltSel"
+                className="tc-sel"
+                value={gateHaltMode}
+                disabled={!isLocal || readOnly}
+                onChange={onGateHaltModeChange}
+              >
+                <option value="halt">停机</option>
+                <option value="notify">提示</option>
+              </select>
+            </label>
+          ) : null}
+          <div className="tc-topbar__right">
+            {phaseInfo && phaseInfo.phase !== 'idle' ? (
+              <span
+                className={`tc-phase tc-phase--${phaseInfo.phase}`}
+                title={
+                  phaseInfo.iter != null
+                    ? `it${phaseInfo.iter} ${phaseInfo.phase === 'rollout' ? '采集' : 'PPO'} 阶段`
+                    : phaseInfo.phase === 'rollout'
+                      ? '采集阶段'
+                      : 'PPO 阶段'
+                }
+              >
+                <span className="tc-phase__icon" aria-hidden="true">
+                  {phaseInfo.phase === 'rollout' ? '◎' : '⬡'}
+                </span>
+                <span className="tc-phase__label">
+                  {phaseInfo.phase === 'rollout' ? 'rollout' : 'ppo'}
+                </span>
+                <span className="tc-phase__elapsed">{fmtElapsed(phaseElapsed)}</span>
+              </span>
+            ) : null}
+            <label className="tc-toggle tc-small">
+              刷新
+              <select
+                className="tc-sel"
+                aria-label="刷新间隔"
+                value={refreshInterval}
+                onChange={(e) => {
+                  const v = Number((e.target as HTMLSelectElement).value) as RefreshSec
+                  setRefreshInterval(v)
+                  writeLocal(TC_GLOBAL_INTERVAL, String(v))
+                }}
+              >
+                {REFRESH_INTERVALS.map((s) => (
+                  <option key={s} value={s}>
+                    {refreshLabel(s)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              className="tc-btn tc-btn--sm"
+              aria-label="立即刷新全部 (r)"
+              onClick={() => {
+                void refreshState()
+                setPoolFreshNonce((n) => n + 1)
+              }}
+            >
+              ⟳
+            </button>
+            <span className="tc-topbar__ts">
+              {stateView ? `更新于 ${fmtTs(new Date(stateView.time).getTime(), Date.now())}` : ''}
+            </span>
+          </div>
+        </div>
+      </header>
+      {connError !== 'off' ? (
+        <div className="tc-banner tc-banner--err" role="alert">
+          <span>
+            {connError === 'down'
+              ? '控制台无响应（服务端可能已退出）——检查 `bun run dashboard` 进程'
+              : '刷新失败，正在重试'}
+          </span>
+          <button type="button" className="tc-btn tc-btn--sm" onClick={() => void refreshState()}>
+            重试
+          </button>
+        </div>
+      ) : null}{' '}
+      {visibleCloudHalts(stateView?.cloudHalts, stateView?.course ?? '')
+        .filter(([, h]) => h.status === 'halted')
+        .filter(
+          ([courseName, h]) => !cloudHaltAcks.includes(cloudHaltAckKey('halted', courseName, h.at)),
+        )
+        .map(([courseName, h]) => (
+          <div key={`halt-${courseName}`} className="tc-banner tc-banner--err" role="alert">
+            <span>
+              ⚠ {courseName ? `课程 ${courseName} ` : ''}停机中（{h.reason}
+              ）：已向云机下发停机命令——云机先尝试停机； 停不掉则照常执行任务（不闲置空烧）。本地
+              hub/console 均正常。本课恢复训练会自动解除；其它课的停机状态见「多课总览」徽标。
+            </span>
+            <button
+              type="button"
+              className="tc-btn tc-btn--sm"
+              onClick={() => void doAction('cloud-resume', { course: courseName })}
+            >
+              立即恢复
+            </button>
+            <button
+              type="button"
+              className="tc-btn tc-btn--sm"
+              onClick={() => ackCloudHalt(cloudHaltAckKey('halted', courseName, h.at))}
+            >
+              知道了
+            </button>
+          </div>
+        ))}
+      {visibleCloudHalts(stateView?.cloudHalts, stateView?.course ?? '')
+        .filter(([, h]) => h.status === 'recovered' && !!h.clearedAt)
+        .filter(
+          ([courseName, h]) =>
+            !cloudHaltAcks.includes(cloudHaltAckKey('recovered', courseName, h.clearedAt ?? '')),
+        )
+        .map(([courseName, h]) => (
+          <div key={`rec-${courseName}`} className="tc-banner tc-banner--muted" role="status">
+            <span>
+              {courseName ? `课程 ${courseName} ` : ''}曾停机（{h.reason}）· 已恢复（
+              {h.clearReason ?? '手动恢复'}，{' '}
+              {fmtTs(new Date(h.clearedAt ?? '').getTime(), Date.now())}）；停机期间
+              停不掉的云机继续工作，未闲置浪费。
+            </span>
+            <button
+              type="button"
+              className="tc-btn tc-btn--sm"
+              onClick={() =>
+                ackCloudHalt(cloudHaltAckKey('recovered', courseName, h.clearedAt ?? ''))
+              }
+            >
+              知道了
+            </button>
+          </div>
+        ))}
+      {stateView?.loopComplete ? (
+        <div className="tc-banner tc-banner--muted" role="status">
+          <span>
+            ✅ 训练已完成（{stateView.loopComplete.reason}）：本地已停止采集，云机已停机省配额，
+            进程停车等待重启。改大 iters 后经「停止→启动」继续。
+          </span>
+        </div>
+      ) : null}
+      {stateView?.ppoQueueStall ? (
+        <div className="tc-banner tc-banner--err" role="alert">
+          <span>
+            ⚠ PPO 任务排队超时：job{' '}
+            <code>
+              {stateView.ppoQueueStall.it != null
+                ? `it${stateView.ppoQueueStall.it}`
+                : stateView.ppoQueueStall.jobId.slice(0, 12)}
+            </code>{' '}
+            已等待 {Math.floor(stateView.ppoQueueStall.waitedSec / 60)} 分
+            {stateView.ppoQueueStall.waitedSec % 60} 秒仍无 worker 领取——云端 worker
+            可能断连或未在轮询 hub。检查 Colab/Kaggle worker 日志与 hub 是否在线。
+          </span>
+        </div>
+      ) : null}
+      {stateView?.courseEdit?.verdict === 'rejected' ? (
+        <div className="tc-banner tc-banner--err" role="alert">
+          <span>
+            ⚠ 课程文件含<strong>语料身份</strong>改动（
+            {stateView.courseEdit.fields.join('、') || '未识别字段'}
+            ）——热加载已拒绝：沿用启动配置继续训练，编辑内容不进云端 payload。
+            要应用请派生新关卡/新课程（D14 语料血缘不可 mid-run 破坏）；改回原文件后自动解除。
+          </span>
+        </div>
+      ) : null}
+      {readOnly && !roBannerDismissed ? (
+        <div className="tc-banner tc-banner--ro" role="status">
+          <span>
+            🔒 只读模式：可查看任意课程/日志/节点统计；启停组件、冒烟、模式开关与节点编辑 仅在本机
+            localhost 打开控制台时可用（动作按钮可点击，执行时会被服务端拒绝并提示）。
+          </span>
+          <button
+            type="button"
+            className="tc-btn tc-btn--sm"
+            aria-label="关闭只读提示"
+            title="关闭后不再显示（清 tc.* localStorage 可恢复）"
+            onClick={() => {
+              writeLocal(TC_RO_BANNER_DISMISSED, '1')
+              setRoBannerDismissed(true)
+            }}
+          >
+            ✕
+          </button>
+        </div>
+      ) : null}
+      <PanelErrorBoundary>
+        <Hero
+          stateView={stateView}
+          onMore={() => setDrawerTab('metrics')}
+          onRefresh={() => void refreshState()}
+          readOnly={readOnly}
+        />
+      </PanelErrorBoundary>
+      {/* ── 多课程总览（P5-W2）：单课自动不渲染；只读展示，切换=改查看课程 ── */}
+      <PanelErrorBoundary>
+        <MultiCourseOverview stateView={stateView} onSelectCourse={selectCourse} />
+      </PanelErrorBoundary>
+      {/* ── 组件卡 4  row：在 LAN 只读视图里也正常交互样式（不在 banner 里、不 opacity 灰败） ── */}
+      <PanelErrorBoundary>
+        <ComponentCards
+          stateView={stateView}
+          onAction={doAction}
+          onLaunchTrainer={() => setTrainOpen(true)}
+          course={viewCourse}
+          readOnly={readOnly}
+        />
+      </PanelErrorBoundary>
+      <PanelErrorBoundary>
+        <NodePills
+          nodes={stateView?.nodes ?? []}
+          local={stateView?.localNode ?? null}
+          onAction={doAction}
+          onMore={() => setDrawerTab('nodes')}
+          readOnly={readOnly}
+        />
+      </PanelErrorBoundary>
+      {/* 节点行下方 EvalBoard 摘要：行 = B 层 iter × 列 = rung×指标；完整看板独立成页 /eval。 */}
+      <PanelErrorBoundary>
+        <EvalSummary
+          course={viewCourse}
+          enabled={documentVisible}
+          readOnly={readOnly}
+          onMore={() => {
+            window.location.href = viewCourse
+              ? `/eval?course=${encodeURIComponent(viewCourse)}`
+              : '/eval'
+          }}
+        />
+      </PanelErrorBoundary>
+      {/* ── BC epoch 指标 + 多地图 eval（*.bc.jsonc 课程训练时自动出现数据）── */}
+      <PanelErrorBoundary>
+        <BcPanel course={viewCourse} enabled={documentVisible} />
+      </PanelErrorBoundary>
+      {/* 详情视图直连入口（2026-09-10）：此前「评估」只能先点 Hero/节点 pill 的「更多」
+          进抽屉、再切 tab —— 入口不可见（底部说明也只列了 3 个）。四视图平权直连。 */}
+      <nav
+        aria-label="详情视图"
+        style={{ display: 'flex', gap: 8, flexWrap: 'wrap', margin: '2px 0 10px' }}
+      >
+        {(
+          [
+            ['metrics', '指标'],
+            ['nodes', '节点统计'],
+            ['log', '日志'],
+          ] as const
+        ).map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            className="tc-btn tc-btn--sm"
+            aria-label={`打开${label}`}
+            onClick={() => setDrawerTab(key)}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
+      <p className="tc-caption">
+        局域网只读：可查看任意课程/日志/节点统计/评估（课程▾仅本浏览器切换）；启停/冒烟/模式/节点编辑
+        仅本机 localhost 生效 · /api/state {refreshInterval}s 轮询 · 首页即训练态势：胜率焦点 +
+        组件卡 （点击卡在下方展开全宽最近日志）+ 节点 pill 行 + EvalBoard
+        摘要（行=iter×列=rung×指标） · 详情进抽屉（指标 | 节点统计 | 日志，上方按钮可直连）·
+        评估已独立成页 /eval（上方「完整评估看板」）· Esc 关闭弹窗/抽屉 · r 立即刷新全部。
+      </p>
+      <Drawer
+        open={drawerTab !== null}
+        activeTab={drawerTab ?? 'metrics'}
+        tabs={[
+          { key: 'metrics', label: '指标' },
+          { key: 'nodes', label: '节点统计' },
+          { key: 'log', label: '日志' },
+        ]}
+        onTab={(k) => setDrawerTab(k as DrawerTabKey)}
+        onClose={() => setDrawerTab(null)}
+      >
+        {drawerTab === 'metrics' ? (
+          <MetricsTable
+            stateView={stateView}
+            onRefresh={() => void refreshState()}
+            readOnly={readOnly}
+          />
+        ) : null}
+        {drawerTab === 'nodes' ? (
+          <NodeStats enabled poolFreshNonce={poolFreshNonce} course={viewCourse} />
+        ) : null}
+        {drawerTab === 'log' ? <LogNavCard stateView={stateView} course={viewCourse} /> : null}
+      </Drawer>
+      {stateView ? (
+        <TrainLaunchModal
+          open={trainOpen}
+          modes={stateView.modes}
+          onClose={() => setTrainOpen(false)}
+          onAction={doAction}
+          onLaunch={(m) => void handleLaunch(m)}
+          readOnly={readOnly}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+void null

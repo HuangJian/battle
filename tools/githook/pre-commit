@@ -15,6 +15,10 @@
 #                   定向跳过重试 NN_GATE_SKIP=pytest）
 #   tsc             全量运行；报错按文件归因，staged → 拦；全部未暂存/未跟踪
 #                   → 放行；无法归因到文件的错误 → 拦（保守）
+#   dashboard       仅 staged 含 dashboard/ 时运行（dashboard 是独立 bun
+#                   项目，不属根 tsconfig / 根套件 —— 见 DECISIONS
+#                   §2026-09-14-goalnn-dashboard-project）；tsc 报错前缀
+#                   dashboard/ 归因，staged → 拦；bun test 红 → 拦 + 归因指引
 #   bun test        红 → 拦 + 归因指引（SKIP_BUN_TEST=1 定向跳过重试）
 #   oxfmt           逐 staged 文件格式化 + re-add；**另有未暂存改动（MM）的
 #                   文件跳过** —— 格式化工作树内容会把未暂存编辑折进提交
@@ -24,7 +28,7 @@
 #                   纯 python 提交物理上不可能改变 det 签名
 #
 #   逃生口：NN_GATE_SKIP=<tools>（python 单工具，已有）、SKIP_BUN_TEST=1、
-#   --no-verify（全跳，最后手段）。
+#   SKIP_DASHBOARD_GATE=1、--no-verify（全跳，最后手段）。
 #   --selftest：不跑门禁，只对归因解析器跑内置断言（改本 hook 必跑）。
 #
 #   铁律：除 oxfmt 对「无未暂存改动的 staged 文件」的精确格式化外，本 hook
@@ -136,6 +140,25 @@ hook_selftest() {
   if [ -n "$HITS2" ]; then
     echo "selftest FAIL: 非 staged 命中应为空"; FAIL=1
   fi
+  # dashboard 门禁块（独立 bun 项目）：dashboard 内 tsc 输出的是**相对它自己**的
+  # 路径，必须前缀 dashboard/ 才能与 staged 清单（仓库相对）求交 —— 漏了这一步，
+  # 归因永远为空，dashboard 的 tsc 红会被当成「他人未暂存改动」而放行。
+  printf '%s\n' \
+    'src/server/build.ts(12,3): error TS2345: Argument of type x is not assignable' \
+    'tests/evalboard-board.test.ts(4,1): error TS2554: Expected 1 arguments' \
+    > "$D/dash-tsc.log"
+  DASH_FILES=$(attrib_tsc "$D/dash-tsc.log" | sed 's|^|dashboard/|' | sort -u)
+  if ! printf '%s\n' "$DASH_FILES" | grep -Fqx 'dashboard/src/server/build.ts'; then
+    echo "selftest FAIL: dashboard 前缀归因缺失（src/server/build.ts）"; FAIL=1
+  fi
+  printf '%s\n' 'dashboard/src/server/build.ts' > "$D/dash-staged.txt"
+  if [ -z "$(printf '%s\n' "$DASH_FILES" | attrib_staged_hits "$D/dash-staged.txt")" ]; then
+    echo "selftest FAIL: dashboard 归因应与 staged 清单有交集"; FAIL=1
+  fi
+  printf '%s\n' 'src/server/build.ts' > "$D/dash-other.txt"
+  if [ -n "$(printf '%s\n' "$DASH_FILES" | attrib_staged_hits "$D/dash-other.txt")" ]; then
+    echo "selftest FAIL: dashboard 归因与非 staged 路径不得有交集"; FAIL=1
+  fi
   rm -rf "$D"
   if [ "$FAIL" -eq 0 ]; then
     echo "✓ hook selftest 全部通过"
@@ -155,7 +178,8 @@ STAGED_LIST="tmp/pre-commit-staged-$$.txt"
 DIRTY_LIST="tmp/pre-commit-dirty-$$.txt"
 TSC_LOG="tmp/pre-commit-tsc-$$.log"
 GATE_LOG="tmp/pre-commit-nn-$$.log"
-trap 'rm -f "$STAGED_LIST" "$DIRTY_LIST" "$TSC_LOG" "$GATE_LOG"' EXIT
+DASH_TSC_LOG="tmp/pre-commit-dash-$$.log"
+trap 'rm -f "$STAGED_LIST" "$DIRTY_LIST" "$TSC_LOG" "$GATE_LOG" "$DASH_TSC_LOG"' EXIT
 git diff --cached --name-only > "$STAGED_LIST"
 git diff --name-only > "$DIRTY_LIST"
 STAGED_N=$(wc -l < "$STAGED_LIST" | tr -d ' ')
@@ -216,6 +240,53 @@ if [ -n "$NN_STAGED" ]; then
         exit 1
       fi
     fi
+  fi
+fi
+
+# ---------- dashboard 门禁（独立 bun 项目；仅在 staged 含 dashboard/ 时跑） ----------
+# dashboard/ 自带 package.json / bun.lock / node_modules，且**不在**根 tsconfig 与根
+# 套件之内（DECISIONS §2026-09-14-goalnn-dashboard-project）。因此它必须有自己的
+# 门禁块：否则「把 dashboard 切出根门禁」会静默降级为「没人跑 dashboard 门禁」。
+# 归因语义与上方 mypy / 下方 tsc 块一致：报错前缀 dashboard/ 后与 staged 求交。
+DASH_STAGED=$(grep '^dashboard/' "$STAGED_LIST" || true)
+if [ -z "$DASH_STAGED" ]; then
+  echo " ▸ dashboard gate skipped（staged 无 dashboard/ 改动）"
+elif [ -n "$SKIP_DASHBOARD_GATE" ]; then
+  echo "▸ skip dashboard gate (SKIP_DASHBOARD_GATE set——请确保失败已归因并汇报)"
+else
+  DASH_N=$(printf '%s\n' "$DASH_STAGED" | wc -l | tr -d ' ')
+  if [ -d "$TOP/dashboard/node_modules" ]; then
+    echo " ▸ dashboard gate（独立项目，$DASH_N staged 文件）"
+  else
+    echo " ▸ dashboard gate（独立项目，$DASH_N staged 文件）"
+    echo "   ⚠ dashboard/node_modules 缺失——先 cd dashboard && bun install（其依赖不再来自仓库根）"
+  fi
+
+  DASH_TSC_RC=0
+  ( cd "$TOP/dashboard" && "$BUN" run typecheck ) > "$DASH_TSC_LOG" 2>&1 || DASH_TSC_RC=$?
+  if [ "$DASH_TSC_RC" -ne 0 ]; then
+    cat "$DASH_TSC_LOG"
+    DASH_TSC_TOTAL=$(grep -cE ': error TS[0-9]+:' "$DASH_TSC_LOG" || true)
+    if [ "$DASH_TSC_TOTAL" -eq 0 ]; then
+      echo "✗ dashboard typecheck 失败但无 TS 错误行（无法归因，保守拦截）"
+      exit 1
+    fi
+    DASH_TS_FILES=$(attrib_tsc "$DASH_TSC_LOG" | sed 's|^|dashboard/|' | sort -u)
+    DASH_TSC_BLOCK=$(printf '%s\n' "$DASH_TS_FILES" | attrib_staged_hits "$STAGED_LIST")
+    if [ -n "$DASH_TSC_BLOCK" ]; then
+      echo "✗ dashboard tsc 错误落在 staged 文件（提交被拦）:"
+      printf '    %s\n' $DASH_TSC_BLOCK
+      exit 1
+    fi
+    echo "⚠ dashboard tsc 错误全部落在未暂存/未跟踪文件（他人改动，本次不拦；对方后继自理）:"
+    printf '    %s\n' $DASH_TS_FILES
+  fi
+
+  if ! ( cd "$TOP/dashboard" && "$BUN" run test ); then
+    echo "✗ dashboard bun test 红——按多 agent 协作语义判定归因后重试："
+    echo "   · 失败由你 staged 的改动造成 → 修复后重新 commit；"
+    echo "   · 失败源自他人未暂存改动 → 汇报对方，并以 SKIP_DASHBOARD_GATE=1 重试本次 commit。"
+    exit 1
   fi
 fi
 

@@ -169,7 +169,7 @@ def _pid_alive(pid: int) -> bool:
 # ────────────────────────── per-course 锁路径（plan multi-course-parallel-training §1.2/§3.1） ──
 # 2026-09-12：单实例护栏本身不能删（2026-09-06 双 trainer 并行写同一 traj 的事故），
 # 但必须按**课程**实例化——否则第二门课程永远启不来。本文件是课程名 → 锁文件名的
-# 唯一归宿；TS 侧同构实现在 tools/training/slots.ts::lockName（两处必须同步）。
+# 唯一归宿；TS 侧同构实现在 dashboard/src/core/slots.ts::lockName（两处必须同步）。
 
 _COURSE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 

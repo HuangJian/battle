@@ -40,7 +40,16 @@ interface Failure {
 }
 
 const TEST_RE = /\.test\.(ts|tsx|js|jsx)$/
-const SKIP_RE = /^(tmp|node_modules|dist|\.git)([\\/]|$)/
+/**
+ * 不参与根套件的路径前缀。
+ *
+ * `dashboard/` 是**独立 bun 项目**（自带 package.json / bun.lock / node_modules，
+ * 见 DECISIONS §2026-09-14-goalnn-dashboard-project），它的测试由自己的门禁跑
+ * （`cd dashboard && bun run test`，pre-commit 里的 dashboard 门禁块）。根套件若
+ * 继续枚举它，就会把「两份 node_modules 互不重叠」重新耦合回去 —— 根门禁将反过来
+ * 依赖 dashboard 的安装状态。镜像关系：根 tsconfig 的 include 同样不含 dashboard。
+ */
+const SKIP_RE = /^(tmp|node_modules|dist|\.git|dashboard)([\\/]|$)/
 
 /**
  * Heavy "gate"/acceptance tests that run full-game simulations (hundreds–thousands
@@ -78,17 +87,32 @@ function isTestInertFile(rel: string): boolean {
   return TEST_INERT_RE.some((re) => re.test(rel))
 }
 
-/** Enumerate every test file in the repo (repo-relative, forward slashes). */
-function allTestFiles(cwd: string): string[] {
-  const collect = (raw: string[]): string[] => {
-    const out: string[] = []
-    for (const f of raw) {
-      if (!TEST_RE.test(f)) continue
-      if (SKIP_RE.test(f)) continue
-      out.push(f)
-    }
-    return out
-  }
+/**
+ * 根套件是否应该跑这个测试文件（见 SKIP_RE 注释）。
+ *
+ * 抽成导出函数是为了可测 —— 这条排除一旦失灵，根门禁就会反向依赖 dashboard 的
+ * 安装状态，"两份 node_modules 互不重叠" 静默回退。
+ */
+export function isRootSuiteTestPath(rel: string): boolean {
+  const p = rel.split('\\').join('/')
+  return TEST_RE.test(p) && !SKIP_RE.test(p)
+}
+
+/**
+ * 改动是否**全部**落在 `dashboard/` 下（独立 bun 项目）。
+ *
+ * 命中时代替 "fallback:all" —— 否则一个只改 dashboard 的提交会白烧一整轮根套件。
+ * 空集不算（没改动≠只改 dashboard）。
+ */
+export function isDashboardOnly(changed: string[]): boolean {
+  return (
+    changed.length > 0 && changed.every((f) => f.split('\\').join('/').startsWith('dashboard/'))
+  )
+}
+
+/** Enumerate every root-suite test file (repo-relative, forward slashes). */
+export function allTestFiles(cwd: string): string[] {
+  const collect = (raw: string[]): string[] => raw.filter(isRootSuiteTestPath)
   try {
     const out = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard'], {
       cwd,
@@ -262,6 +286,19 @@ export async function runSilentTest(
         ok: true,
         summary: 'no relevant tests',
         detail: `${label}: no tests map to local changes (strict mode)\n`,
+      }
+    } else if (isDashboardOnly(changed) && !process.env.BATTLE_TEST_FORCE_ALL) {
+      // dashboard 专属改动：根套件与它无关（见 SKIP_RE 注释），而且**绝不能**走
+      // fallback 全量 —— 一个只改 dashboard 的提交会白烧一整轮根套件，撞上那些
+      // spawn 真实 CLI 的慢测试。dashboard 的门禁由它自己承担（pre-commit 已挂）。
+      return {
+        ok: true,
+        summary: 'no relevant tests (dashboard-only)',
+        detail:
+          `${label}: ${changed.length} changed file(s) are all under dashboard/ — a separate\n` +
+          `  bun project the root suite does not cover.\n` +
+          `  Run its gate instead:  cd dashboard && bun run test\n` +
+          `  Set BATTLE_TEST_FORCE_ALL=1 to run the root suite anyway.\n`,
       }
     } else if (
       changed.length > 0 &&

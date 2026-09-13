@@ -16,7 +16,7 @@ nn-training/
 ├── task.py                  # 跨平台 task runner  ("make check" 等价；含 setup)
 ├── Makefile                 # 同上的 make 封装（Git Bash 用户）
 ├── rl-config.json           # RL 训练配置（rl-mode 默认值、workers、eval-seeds 等）
-├── ../tools/training/       # 训练控制台 server.ts（bun run train；组件启/停/冒烟/模式/节点/
+├── ../dashboard/src/       # 训练控制台 server.ts（bun run dashboard；组件启/停/冒烟/模式/节点/
 │                             #   变更检测重启）+ train.ts 无头单次启动器（venv 未就绪委派
 │                             #   bootstrap.py；DECISIONS §346/§349）
 │
@@ -136,7 +136,7 @@ make weights-prune-apply # 实际裁剪权重文件
 make weights-update-md   # 重新生成 weights/WEIGHTS.md 目录清单
 
 # ── 训练启动器（venv 由它 bootstrap；取代旧 start-training.sh/.ps1）──
-bun tools/training/train.ts --script run_rl.py --mode intent-rl --stream 1
+bun dashboard/src/launch/cli.ts --script run_rl.py --mode intent-rl --stream 1
 ```
 
 ---
@@ -168,7 +168,7 @@ python bootstrap.py          # 探测 → 装 → 自检，全自动
 帧/epoch ≈ 36 TFLOPs）。rollout 已由 bun 分布式集群承担（节点零 Python，GPU 无
 用武之地），GPU 只属于 orchestrator —— 设备层（P2，`rl/device.py`）会让 PPO/BC
 自动 `cuda` + TF32 + AMP，无 GPU 机器自动回落 CPU + 线程数自适配。在 P2 落地前，
-统一启动器（`tools/training/train.ts`）仍以 CPU + OMP 线程档运行（OMP≤8 时 `PROC_BIND=close`）。
+统一启动器（`dashboard/src/launch/cli.ts`）仍以 CPU + OMP 线程档运行（OMP≤8 时 `PROC_BIND=close`）。
 
 **机器画像**：bootstrap 把探测结果写入 `.venv/machine-profile.json`
 （platform / python / gpu / variant / probe），`bootstrap.py --check` 只读展示。

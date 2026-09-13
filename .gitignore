@@ -19,8 +19,8 @@ generated-stages.json
 replays/
 *.cpuprofile
 
-# 控制台客户端 bundle（build.ts 启动自动构建，产物不入库；plan/Training-Console-Preact.md 未决项 3）
-tools/training/console/.build/
+# 控制台客户端 bundle（dashboard/src/server/build.ts 启动自动构建，产物不入库）
+dashboard/.build/
 
 # God AI 调优一次性诊断产物（progress doc §0.C：A/B 脚本不入库，临时数据 commit 前删除）
 tmp/
@@ -39,8 +39,8 @@ tools/agent/agent.auth
 # RL EvalBench 账本（plan/rl-eval-system.md §3.1：gitignore + 人工备份，无 git 兜底；
 # 唯一例外 README.md 入库，写备份纪律；备份由 backup.ts 导出仓库外。
 # 写法注意：不能先整树排除父目录（被排除目录内的否定无效），只能逐项排除内容。）
-tools/training/data/evalboard/*
-!tools/training/data/evalboard/README.md
+dashboard/data/evalboard/*
+!dashboard/data/evalboard/README.md
 
 *.lock
 *.lock.*
@@ -49,4 +49,8 @@ tools/training/data/evalboard/*
 
 # uv.lock 是 universal 锁文件，必须入库（2026-09-04 决策：uv + uv.lock 真锁）
 !nn-training/uv.lock
+
+# dashboard 是独立 bun 项目，bun.lock 是它可复现安装的唯一保证（同上条逻辑：
+# 上面的 *.lock 本意是运行时 PID 锁文件，不该连带把真依赖锁文件也挡在外面）。
+!dashboard/bun.lock
 nn-training/rl-config.json

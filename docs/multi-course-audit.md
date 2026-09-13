@@ -30,7 +30,7 @@
 - 一切单例按课程实例化：锁 `.run_rl.<course>.lock`、账本 `Record<course, Entry>`、
   端口 `hub_port(slot) = base + slot*10`、隧道 `rl.remote_hubs[course]`、halt
   `cloudHalts[course]`。槽位 0–3（常态 2 课，4 槽留余量）。
-- 端口算术**只有一个归宿**：`tools/training/slots.ts`（`portForSlot` / `slotPort` /
+- 端口算术**只有一个归宿**：`dashboard/src/core/slots.ts`（`portForSlot` / `slotPort` /
   `checkCapacity` / `allocateSlot` / `allSlotPorts`）。调用方永远不给偏移量。
 - 本机并发按加法校验：`eff(course) = max(workers_c, local_slots_c)`，
   `Σ eff ≤ max(rl.workers, rl.local_slots)`（本分支 8/10 → 容量 10），超量 fail-fast

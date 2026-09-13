@@ -286,7 +286,7 @@ const gitShortMemo: { value: string | null } = { value: null }
 
 // ---------------- engine_epoch（EvalBench §2.5/§6.6：eval 节点门新增指纹） ----------------
 // engine_epoch = sha256(git_full_commit + '\n' + gameplayFingerprint)[0:16]，与
-// tools/training/evalboard/engine.ts 同式（表与配方唯一源 = codehash-files.ts
+// dashboard/src/evalboard/engine.ts 同式（表与配方唯一源 = codehash-files.ts
 // GAMEPLAY_SPECS，集内文件 ⇒ 改表即触发升级波）。节点 eval 门（dist_common /
 // eval_dispatch）比对该指纹：改引擎/config/RNG/God 不改名 codeHash 的 stale 节点
 // 会被拒派（fail-closed）。短 hash 不够——epoch 必须用全 commit。

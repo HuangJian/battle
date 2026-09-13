@@ -830,16 +830,16 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 ## §345 / p4-horizon 新实验：视野假设 γ+λ（2026-09-06，用户拍板"γ+λ一起动"）
 > **结论（视野假设 γ+λ，p4-horizon）**：warm-start it70，γ0.998/λ0.99（GAE 视野 29→83 步）；其余与 onset 逐字节同义；判定：贪心持续 >35% 为成、≤30% 横盘 40 轮为败；启动纠正：必须 `bun tools/training/start.ts hub p4-horizon`（--ppo remote）且切课程必须重启 hub-server。详见 docs/rl.progress.md §4。
 
-## §346 / tools/training/ 统一启动器：hub-start.ts 与 start-training.{sh,ps1} 三合一（2026-09-06，用户指令）
+## §346 / tools/training/ 统一启动器：hub-start.ts 与 start-training.{sh,ps1} 三合一（2026-09-06，用户指令） _（路径已失效：`tools/training/**` → `dashboard/`，见 §2026-09-14-goalnn-dashboard-project）_
 > **定案**：tools/training/ 模块族拆分（paths/types/log/config/net/proc/.../smoke/hub/push/train/start + monitor/）；全 Bun 原生 API 纪律（§339 延续，唯 wmic/netstat 论证例外）；变更检测监督（codehash-files.txt 哨兵 mtime/size）；冒烟门禁三模式全覆盖；vite/svelte 不引入。
 
-## §348 / NN 训练控制台：tools/training/console（本地网页，2026-09-06，用户指令）
+## §348 / NN 训练控制台：tools/training/console（本地网页，2026-09-06，用户指令） _（路径已失效：`tools/training/**` → `dashboard/`，见 §2026-09-14-goalnn-dashboard-project）_
 > **定案（训练控制台）**：tools/training/console 四模块（server/api/actions/page）；零新依赖；动作层与 CLI 同一套原语；模式开关两级落点（rl.stream 等写 rl-config，pull/push/local 持久化 console-state）；写回即冒烟；并发 per-key busy 互斥；setCourse 改抛 ActionError→409（不再 process.exit）。补充：指标 sparkline、/log/<key> 组件日志页（尾部窗口读 + 定点替换 + follow）。
 
 ## §347 / pre-commit oxfmt 循环跳过 staged 删除源（2026-09-06，§7 复现→修复）
 > **结论**：pre-commit oxfmt 循环对 staged 删除源先 continue（git add 对不存在文件 fatal）；本提交实弹验证。
 
-## §349 / 删除一键启动器 start.ts——控制台 + train.ts 双入口（2026-09-06，用户指令）
+## §349 / 删除一键启动器 start.ts——控制台 + train.ts 双入口（2026-09-06，用户指令） _（路径已失效：`tools/training/**` → `dashboard/`，见 §2026-09-14-goalnn-dashboard-project）_
 > **定案（用户指令删除 start.ts）**：能力全量归并——train 模式 → tools/training/train.ts 真 CLI（if(import.meta.main) 守卫教训）；hub/push → 控制台预设；push 预演 → smokeTrain 动作；监督 → 控制台 createSupervisor；新 SSOT tools/training/specs.ts；入口 bun run train = console，train.ts --script 无头。
 
 ## §350 / p4-fast 加速课程：GPU 吃满 + 语料×2（2026-09-07，用户指令）
@@ -1536,3 +1536,77 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   由 `nn-training/tests/test_ladder_factory.py` 钉死。
 - **违反后果**：低 count 端截断会把可赢局记成超时 ⇒ 门（pooled 400 ≥80%）构造性不可达，或超时率被
   误读成能力信号去调训练侧；终局标准反复改则 §6「现线证据沿用」与跨级/跨版本可比性失效。
+## §2026-09-14-goalnn-dashboard-project（2026-09-14，用户指令：训练控制台独立为 `dashboard/` bun 项目；启动命令改 `bun run dashboard`）
+
+- **决策**：`tools/training/**` **整棵**（core 领域模块 + console 网站 + ui 组件 + evalboard
+  评估板 + `train.ts` python 启动器）搬到仓库根 `dashboard/`，成为一个**独立 bun 项目**
+  ——自带 `package.json`（`start` / `launch` / `build:ui` / `typecheck` / `test` / `lint` /
+  `format`）、`tsconfig.json`、`tests/`、`README.md`；20 个覆盖它的测试文件从根 `tests/`
+  一并迁入 `dashboard/tests/`。根 `tools/training/` 目录**删除**，不再保留任何兼容壳。
+  根 `package.json` 的启动脚本 `train` → **`dashboard`**（= `cd dashboard && bun run start`，
+  仍听 :8900）。python 无头启动通道改为 `bun dashboard/src/launch/cli.ts --script <name>.py`
+  （AGENTS §5.6 的 "never raw python" 语义不变，只是路径变）。
+- **内部结构**（职责分层，调用方只 import 各目录 `index.ts` 桶，不直连内部文件）：
+  `src/core/` 路径/日志/网络/进程/venv/账本/槽位等基础原语 · `src/stack/` 训练栈组件编排
+  （specs/hub/courses/smoke/push）· `src/launch/` python 无头启动器 · `src/evalboard/`
+  评估板领域（store/ladder/ingest/stats/…）· `src/server/` HTTP 与服务端逻辑
+  （`api/` 17 模块 · `actions/` 11 模块 · `eval-board/` 6 模块 · iters/pool-history/
+  exit-watchdog/build/server）· `src/web/` SSR + 浏览器 UI（`view/` 16 模块 · components ·
+  app）。四个原巨型文件按职责拆开：`api.ts` 1913→17、`actions.ts` 973→11、
+  `evalboard.ts` 1046→6、`ui/view.ts` 1513→16，单文件上限由 ~1900 行降到 444 行。
+- **路径事实唯一来源**：`dashboard/src/core/paths.ts` 是全项目**唯一**用 `import.meta.dir`
+  上溯推导路径的地方（`DASHBOARD_ROOT` / `REPO_ROOT` / `NN_TRAINING` / `LOG_DIR` /
+  `BUNDLE_DIR` / `EVALBOARD_DATA_DIR` / `LADDER_CANON_PATH`）；其余模块一律 import 常量，
+  绝不自算相对深度（搬迁时只有这一处会错，且一错即立刻暴露）。
+- **跨项目读边界（唯一例外，写入即契约）**：`dashboard/` 只读消费 `src/` 的游戏契约
+  （`config/stages`、`nn/arena-ladder`、`nn/config-stage`、`config/difficulty`、
+  `config/combat`）与 `tools/agent/codehash-files`，用相对路径 import。**反向永远禁止**——
+  `src/` 或游戏侧测试不得 import `dashboard/`（dashboard 是观测与控制面，不是游戏依赖）。
+  这三四个契约是权威唯一源，复制进 dashboard 才是真错（漂移即错局/错门）。
+- **拒绝的替代方案**：① 只搬 console/ui、core 留在 `tools/training/`（用户裁定的备选）——
+  dashboard 仍靠相对路径反向 import 旧位置，"独立项目"是名义上的，且搬迁后两侧目录语义
+  割裂（一半工具在 tools/、一半在 dashboard/）；② 保留 `tools/training/train.ts` 兼容壳
+  转发到新路径——AGENTS 铁律「不留读兼容后门」的反面，双份入口必然漂移；③ 在
+  `dashboard/` 里复制 `src/` 的游戏配置契约——单一事实源被复制，漂移即错关卡/错门禁。
+- **边界与遗留**：根 `tsconfig.json` 的 `include` 增加 `dashboard`（`bun run check` 仍是一
+  条总闸：tsc 覆盖 dashboard + 根 `bun test` 连带跑 `dashboard/tests/`，实测 2114 用例）
+  **_（2026-09-14 同日反转：这三项是搬迁期过渡态，已被下一条追加取代）_**；
+  `tools/test-silent.ts` 的兜底全量遍历目录表补 `dashboard`；`.gitignore` 的
+  `console/.build/` 与 evalboard 数据根改指 `dashboard/`。**历史记录类文档不改**：
+  `docs/*.progress.md` 与 `plan/*.md` 记的是当时的事实，改写等于伪造历史；权威手册
+  （`AGENTS.md`、`docs/agents.details.md`）与可直接复制执行的操作文档
+  （`docs/goal-nn-*.md`、`nn-training/README.md`、python docstring）已全部改到新路径。
+
+- **追加（2026-09-14，同日，用户指令：「给 `dashboard/` 做自己的 `bun install`，让它的依赖
+  不再依赖仓库根的 `node_modules`」）—— 依赖与门禁彻底切断**（上一条 bullet 中三项过渡态声明
+  至此全部反转）：
+  - ① **依赖**：dashboard 自带 `node_modules/` + **入库**的 `bun.lock`（`.gitignore` 给
+    `!dashboard/bun.lock` 开例外，与 `!nn-training/uv.lock` 同一逻辑：`*.lock` 本意是运行时
+    PID 锁文件）；根 `package.json` 删除只有 dashboard 用的 `preact` /
+    `preact-render-to-string`（根游戏代码零 `preact`、零 `.tsx`，32 个 `.tsx` 全在 dashboard/）。
+    **`bun install` 只更新 lockfile、不删已装目录** —— 陈旧目录仍可被解析，等于留后门，
+    必须 `rm -rf node_modules/{preact,preact-render-to-string}` 才真切断。
+  - ② **门禁边界**：根 `tsconfig.json` 的 `include` 移除 `dashboard`；根套件改用
+    `bun test --parallel --timeout=50000 --path-ignore-patterns='dashboard/**'`。教训：**位置参数
+    是子串过滤**，`bun test tests` 会把 `dashboard/tests/` 一并跑掉（实测 194 文件）——
+    排除目录只能靠 `--path-ignore-patterns`。`tools/test-silent.ts` 的 `SKIP_RE` 加 `dashboard`
+    （并删掉兜底遍历表里的 `dashboard`），另加一条分支：**改动全在 `dashboard/` 下 ⇒ 不
+    fallback 全量**（否则只改 dashboard 的提交会白烧一整轮根套件，撞上 spawn 真实 CLI 的慢测试）。
+  - ③ **门禁不降级**：pre-commit 新增 **dashboard 门禁块** —— staged 含 `dashboard/` 时跑
+    `cd dashboard && bun run typecheck` + `bun run test`；tsc 报错前缀 `dashboard/` 后与 staged
+    求交（dashboard 内 tsc 输出的是相对它自己的路径，漏了前缀归因永远为空 → 红会被当「他人
+    未暂存改动」放行），`--selftest` 已加该归因断言；逃生口 `SKIP_DASHBOARD_GATE=1`。
+    没有这一块，「把 dashboard 切出根门禁」会静默退化成「没人跑 dashboard 门禁」。
+  - ④ **验证（双向硬证据）**：dashboard `tsc` 干净 + **306 pass / 0 fail**（20 文件）；根
+    `check` **1807 pass / 4 skip / 0 fail**（174 文件，日志零 `dashboard/tests/`）；
+    忽略前后的 A/B 差值 = **306 用例 / 20 文件**，与 dashboard 独立套件完全一致（排除精确，
+    无过杀）；146 个 dashboard 源文件用 `Bun.Transpiler.scan()` 取裸包名逐一解析 **零泄漏**；
+    根解析 `preact` 失败而 dashboard 正常（供给关系已反转）。4 个 skip 是环境型
+    （`it.skipIf(files.length === 0)`，沙箱 `replays/` 无生成物），非覆盖丢失。
+  - **拒绝的替代方案**：只做 `bun install` 不做切断（根仍留 `preact`、根 check 继续覆盖
+    dashboard）——两份依赖重叠，dashboard 文件仍能从根 `node_modules` 回退解析，「独立项目」
+    是名义上的；以及「切断但不加 pre-commit 门禁块」——hook 更简单统一，但代价是 dashboard
+    改动提交时不再被任何自动门禁覆盖（静默降级），用户选择不承担。
+  - **仍然保留的耦合（设计，非缺陷）**：dashboard 与根之间仍有**源码级**相对 import
+    （`src/config/*`、`tools/agent/*`、`tools/eval/mcnemar`、`tools/sim/pack-container`）——
+    观测面只读消费游戏契约，权威唯一源在根，复制进 dashboard 才是真错。切断的只有包依赖方向。
