@@ -39,9 +39,8 @@ def test_mark_merges_fields_without_clobber(ledger: LadderLedger) -> None:
     assert "updated_at" in entry
 
 
-def test_escalate_sets_stuck_status() -> None:
-    led = LadderLedger("/nonexistent-dir-ledger/LEDGER.jsonc")
-    entry = led.mark("ladder-c06", status="stuck", escalate_reason="卡门 3 周期")
+def test_escalate_sets_stuck_status(ledger: LadderLedger) -> None:
+    entry = ledger.mark("ladder-c06", status="stuck", escalate_reason="卡门 3 周期")
     assert entry["status"] == "stuck"
 
 
