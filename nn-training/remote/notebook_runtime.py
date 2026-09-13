@@ -10,7 +10,8 @@ cfg 键（cell 的 CFG dict）：
   cloudflared_path · device ("auto"|cuda|cuda-dp|tpu|cpu) · use_multi_gpu ·
   max_session_hours · poll_interval_sec · idle_floor_sec · max_worker_restarts ·
   keepalive_stop (threading.Event，cell 的保活线程停机柄) · log (callable) ·
-  code_dir (已解包的 code.zip 目录，push 模式起服务用)
+  code_dir (已解包的 code.zip 目录，push 模式起服务用) ·
+  work_dir (可选覆盖 /tmp 工作目录——单测注入 tmp_path 用)
 
 TPU 硬约束（2026-09-10/11 线上事故，勿退化）：
   1. torch / torch_xla 版本严格配对（镜像自带）——绝不 pip 覆盖；
@@ -82,15 +83,23 @@ def resolve_device(cfg: dict[str, Any], log) -> str:
         log(f"torch {torch.__version__}, CUDA 可见 {n_gpu} 张 GPU")
         for i in range(n_gpu):
             log(f"  [{i}] {torch.cuda.get_device_name(i)}")
-        if cfg["device"] not in ("auto", "cuda", "cuda-dp"):
-            log(f"  显式指定 {cfg['device']} 与 CUDA 环境不符——按指定执行")
-            return str(cfg["device"])
-        if cfg["use_multi_gpu"] and n_gpu > 1:
-            log(f"  -> DataParallel 跨 {n_gpu} 卡（梯度归约顺序变化，与单卡 run 数值不可逐位比）")
-            return "cuda-dp"
-        if n_gpu > 1:
-            log("  -> 只用第 0 张卡（要跨卡把 use_multi_gpu 改 True）")
-        return "cuda"
+        d = str(cfg["device"])
+        if d == "cuda-dp":
+            if n_gpu > 1:
+                log(f"  -> DataParallel 跨 {n_gpu} 卡（梯度归约顺序变化，与单卡 run 数值不可逐位比）")
+                return "cuda-dp"
+            log(f"  -> 指定 cuda-dp 但只可见 {n_gpu} 张卡——退化为单卡 cuda（与 worker 同语义）")
+            return "cuda"
+        if d in ("auto", "cuda"):
+            # DP 只在 auto + use_multi_gpu + 真多卡时启用——显式 "cuda" 绝不悄悄升级
+            if d == "auto" and cfg["use_multi_gpu"] and n_gpu > 1:
+                log(f"  -> DataParallel 跨 {n_gpu} 卡（梯度归约顺序变化，与单卡 run 数值不可逐位比）")
+                return "cuda-dp"
+            if n_gpu > 1:
+                log("  -> 只用第 0 张卡（要跨卡把 use_multi_gpu 改 True 或显式 cuda-dp）")
+            return "cuda"
+        log(f"  显式指定 {d} 与 CUDA 环境不符——按指定执行")
+        return d
 
     import importlib.metadata as md
     import importlib.util as iu
@@ -131,7 +140,8 @@ def run_pull_worker(cfg: dict[str, Any], log) -> int:
 
     hub_url = str(cfg["hub_url"])
     hub_token = str(cfg["hub_token"])
-    work_dir = Path("/tmp/remote-worker")
+    # work_dir 可被 cfg 覆盖（单测注入 tmp 目录；缺省 /tmp——Kaggle/Colab 语义）
+    work_dir = Path(str(cfg.get("work_dir") or "/tmp/remote-worker"))
     work_dir.mkdir(parents=True, exist_ok=True)
 
     log(f"连接 hub: {hub_url}（/ping 探测…）")
@@ -185,7 +195,8 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
     bootstrap 语义：cell 已经从 hub /code 解包好代码（cfg["code_dir"]）——服务进程
     的 PYTHONPATH 指向它；job 真正执行用的是 hub 随 job 下发的 code.zip（worker_server
     收下后入 sys.path、在新进程里跑）。"""
-    work_dir = Path("/tmp/remote-worker-serve")
+    # work_dir 可被 cfg 覆盖（单测注入 tmp 目录；缺省 /tmp——Kaggle/Colab 语义）
+    work_dir = Path(str(cfg.get("work_dir") or "/tmp/remote-worker-serve"))
     work_dir.mkdir(parents=True, exist_ok=True)
     boot_dir = Path(str(cfg.get("code_dir") or "/tmp/worker-code"))
 
