@@ -1,0 +1,501 @@
+{
+  "version": 1,
+  "name": "nn-ladder",
+  "drop_profile": "modern (bonusEnemyEveryNSpawns=4 + score milestone; D9)",
+  "geometry": {
+    "source": "levels/arena4.jsonc",
+    "grid": "empty arena, steel border only (D3)",
+    "spawn_points": 4,
+    "player_spawn": {
+      "col": 12,
+      "row": 12
+    }
+  },
+  "max_ticks_rule": "ceil(2400 * count / 4) — DECISIONS 立案候选（D7 一次性）",
+  "shard_keep_policy": "keep latest 2 iters per leg; archive graduated weights (.xz 惯例)",
+  "gates": null,
+  "levels": [
+    {
+      "level": "ladder-c01",
+      "count": 1,
+      "lives": 1,
+      "max_ticks": 600,
+      "rollout_games": 600,
+      "legs": {
+        "count": 2,
+        "kinds": [
+          "bc",
+          "hypothesis"
+        ]
+      },
+      "dose": {
+        "damage_base": 48.0,
+        "wChip": null,
+        "recalibrate_at": null
+      },
+      "eval_seed_batches": {
+        "grad_round1": "0-199",
+        "grad_round2": "200-399"
+      },
+      "status": "pending"
+    },
+    {
+      "level": "ladder-c02",
+      "count": 2,
+      "lives": 1,
+      "max_ticks": 1200,
+      "rollout_games": 600,
+      "legs": {
+        "count": 2,
+        "kinds": [
+          "bc",
+          "hypothesis"
+        ]
+      },
+      "dose": {
+        "damage_base": 82.0,
+        "wChip": null,
+        "recalibrate_at": null
+      },
+      "eval_seed_batches": {
+        "grad_round1": "0-199",
+        "grad_round2": "200-399"
+      },
+      "status": "pending"
+    },
+    {
+      "level": "ladder-c03",
+      "count": 3,
+      "lives": 1,
+      "max_ticks": 1800,
+      "rollout_games": 600,
+      "legs": {
+        "count": 2,
+        "kinds": [
+          "bc",
+          "hypothesis"
+        ]
+      },
+      "dose": {
+        "damage_base": 116.0,
+        "wChip": null,
+        "recalibrate_at": null
+      },
+      "eval_seed_batches": {
+        "grad_round1": "0-199",
+        "grad_round2": "200-399"
+      },
+      "status": "pending"
+    },
+    {
+      "level": "ladder-c04",
+      "count": 4,
+      "lives": 1,
+      "max_ticks": 2400,
+      "rollout_games": 150,
+      "legs": {
+        "count": 2,
+        "kinds": [
+          "bc",
+          "hypothesis"
+        ]
+      },
+      "dose": {
+        "damage_base": 150.0,
+        "wChip": 0.03,
+        "recalibrate_at": null
+      },
+      "eval_seed_batches": {
+        "grad_round1": "0-199",
+        "grad_round2": "200-399"
+      },
+      "status": "pending"
+    },
+    {
+      "level": "ladder-c05",
+      "count": 5,
+      "lives": 1,
+      "max_ticks": 3000,
+      "rollout_games": 150,
+      "legs": {
+        "count": 2,
+        "kinds": [
+          "warm",
+          "hypothesis"
+        ]
+      },
+      "dose": {
+        "damage_base": 184.0,
+        "wChip": 0.0245,
+        "recalibrate_at": "c05 two-dose scan (hy R5)"
+      },
+      "eval_seed_batches": {
+        "grad_round1": "0-199",
+        "grad_round2": "200-399"
+      },
+      "status": "pending"
+    },
+    {
+      "level": "ladder-c06",
+      "count": 6,
+      "lives": 1,
+      "max_ticks": 3600,
+      "rollout_games": 150,
+      "legs": {
+        "count": 3,
+        "kinds": [
+          "warm",
+          "bc-restart",
+          "hypothesis"
+        ]
+      },
+      "dose": {
+        "damage_base": 218.0,
+        "wChip": 0.0206,
+        "recalibrate_at": null
+      },
+      "eval_seed_batches": {
+        "grad_round1": "0-199",
+        "grad_round2": "200-399"
+      },
+      "status": "pending"
+    },
+    {
+      "level": "ladder-c07",
+      "count": 7,
+      "lives": 1,
+      "max_ticks": 4200,
+      "rollout_games": 150,
+      "legs": {
+        "count": 3,
+        "kinds": [
+          "warm",
+          "bc-restart",
+          "hypothesis"
+        ]
+      },
+      "dose": {
+        "damage_base": 252.0,
+        "wChip": 0.0179,
+        "recalibrate_at": null
+      },
+      "eval_seed_batches": {
+        "grad_round1": "0-199",
+        "grad_round2": "200-399"
+      },
+      "status": "pending"
+    },
+    {
+      "level": "ladder-c08",
+      "count": 8,
+      "lives": 2,
+      "max_ticks": 4800,
+      "rollout_games": 150,
+      "legs": {
+        "count": 2,
+        "kinds": [
+          "warm",
+          "hypothesis"
+        ]
+      },
+      "dose": {
+        "damage_base": 286.0,
+        "wChip": 0.0157,
+        "recalibrate_at": null
+      },
+      "eval_seed_batches": {
+        "grad_round1": "0-199",
+        "grad_round2": "200-399"
+      },
+      "status": "pending"
+    },
+    {
+      "level": "ladder-c09",
+      "count": 9,
+      "lives": 2,
+      "max_ticks": 5400,
+      "rollout_games": 150,
+      "legs": {
+        "count": 2,
+        "kinds": [
+          "warm",
+          "hypothesis"
+        ]
+      },
+      "dose": {
+        "damage_base": 320.0,
+        "wChip": 0.0141,
+        "recalibrate_at": null
+      },
+      "eval_seed_batches": {
+        "grad_round1": "0-199",
+        "grad_round2": "200-399"
+      },
+      "status": "pending"
+    },
+    {
+      "level": "ladder-c10",
+      "count": 10,
+      "lives": 2,
+      "max_ticks": 6000,
+      "rollout_games": 150,
+      "legs": {
+        "count": 2,
+        "kinds": [
+          "warm",
+          "hypothesis"
+        ]
+      },
+      "dose": {
+        "damage_base": 354.0,
+        "wChip": 0.0127,
+        "recalibrate_at": null
+      },
+      "eval_seed_batches": {
+        "grad_round1": "0-199",
+        "grad_round2": "200-399"
+      },
+      "status": "pending"
+    },
+    {
+      "level": "ladder-c11",
+      "count": 11,
+      "lives": 2,
+      "max_ticks": 6600,
+      "rollout_games": 150,
+      "legs": {
+        "count": 2,
+        "kinds": [
+          "warm",
+          "hypothesis"
+        ]
+      },
+      "dose": {
+        "damage_base": 388.0,
+        "wChip": 0.0116,
+        "recalibrate_at": null
+      },
+      "eval_seed_batches": {
+        "grad_round1": "0-199",
+        "grad_round2": "200-399"
+      },
+      "status": "pending"
+    },
+    {
+      "level": "ladder-c12",
+      "count": 12,
+      "lives": 2,
+      "max_ticks": 7200,
+      "rollout_games": 150,
+      "legs": {
+        "count": 2,
+        "kinds": [
+          "warm",
+          "hypothesis"
+        ]
+      },
+      "dose": {
+        "damage_base": 422.0,
+        "wChip": 0.0107,
+        "recalibrate_at": null
+      },
+      "eval_seed_batches": {
+        "grad_round1": "0-199",
+        "grad_round2": "200-399"
+      },
+      "status": "pending"
+    },
+    {
+      "level": "ladder-c13",
+      "count": 13,
+      "lives": 2,
+      "max_ticks": 7800,
+      "rollout_games": 150,
+      "legs": {
+        "count": 2,
+        "kinds": [
+          "warm",
+          "hypothesis"
+        ]
+      },
+      "dose": {
+        "damage_base": 456.0,
+        "wChip": 0.0099,
+        "recalibrate_at": null
+      },
+      "eval_seed_batches": {
+        "grad_round1": "0-199",
+        "grad_round2": "200-399"
+      },
+      "status": "pending"
+    },
+    {
+      "level": "ladder-c14",
+      "count": 14,
+      "lives": 2,
+      "max_ticks": 8400,
+      "rollout_games": 150,
+      "legs": {
+        "count": 2,
+        "kinds": [
+          "warm",
+          "hypothesis"
+        ]
+      },
+      "dose": {
+        "damage_base": 490.0,
+        "wChip": 0.0092,
+        "recalibrate_at": null
+      },
+      "eval_seed_batches": {
+        "grad_round1": "0-199",
+        "grad_round2": "200-399"
+      },
+      "status": "pending"
+    },
+    {
+      "level": "ladder-c15",
+      "count": 15,
+      "lives": 3,
+      "max_ticks": 9000,
+      "rollout_games": 150,
+      "legs": {
+        "count": 2,
+        "kinds": [
+          "warm",
+          "hypothesis"
+        ]
+      },
+      "dose": {
+        "damage_base": 524.0,
+        "wChip": 0.0086,
+        "recalibrate_at": null
+      },
+      "eval_seed_batches": {
+        "grad_round1": "0-199",
+        "grad_round2": "200-399"
+      },
+      "status": "pending"
+    },
+    {
+      "level": "ladder-c16",
+      "count": 16,
+      "lives": 3,
+      "max_ticks": 9600,
+      "rollout_games": 150,
+      "legs": {
+        "count": 2,
+        "kinds": [
+          "warm",
+          "hypothesis"
+        ]
+      },
+      "dose": {
+        "damage_base": 558.0,
+        "wChip": 0.0081,
+        "recalibrate_at": null
+      },
+      "eval_seed_batches": {
+        "grad_round1": "0-199",
+        "grad_round2": "200-399"
+      },
+      "status": "pending"
+    },
+    {
+      "level": "ladder-c17",
+      "count": 17,
+      "lives": 3,
+      "max_ticks": 10200,
+      "rollout_games": 150,
+      "legs": {
+        "count": 2,
+        "kinds": [
+          "warm",
+          "hypothesis"
+        ]
+      },
+      "dose": {
+        "damage_base": 592.0,
+        "wChip": 0.0076,
+        "recalibrate_at": null
+      },
+      "eval_seed_batches": {
+        "grad_round1": "0-199",
+        "grad_round2": "200-399"
+      },
+      "status": "pending"
+    },
+    {
+      "level": "ladder-c18",
+      "count": 18,
+      "lives": 3,
+      "max_ticks": 10800,
+      "rollout_games": 150,
+      "legs": {
+        "count": 2,
+        "kinds": [
+          "warm",
+          "hypothesis"
+        ]
+      },
+      "dose": {
+        "damage_base": 626.0,
+        "wChip": 0.0072,
+        "recalibrate_at": null
+      },
+      "eval_seed_batches": {
+        "grad_round1": "0-199",
+        "grad_round2": "200-399"
+      },
+      "status": "pending"
+    },
+    {
+      "level": "ladder-c19",
+      "count": 19,
+      "lives": 3,
+      "max_ticks": 11400,
+      "rollout_games": 150,
+      "legs": {
+        "count": 2,
+        "kinds": [
+          "warm",
+          "hypothesis"
+        ]
+      },
+      "dose": {
+        "damage_base": 660.0,
+        "wChip": 0.0068,
+        "recalibrate_at": null
+      },
+      "eval_seed_batches": {
+        "grad_round1": "0-199",
+        "grad_round2": "200-399"
+      },
+      "status": "pending"
+    },
+    {
+      "level": "ladder-c20",
+      "count": 20,
+      "lives": 3,
+      "max_ticks": 12000,
+      "rollout_games": 150,
+      "legs": {
+        "count": 2,
+        "kinds": [
+          "warm",
+          "hypothesis"
+        ]
+      },
+      "dose": {
+        "damage_base": 694.0,
+        "wChip": 0.0065,
+        "recalibrate_at": null
+      },
+      "eval_seed_batches": {
+        "grad_round1": "0-199",
+        "grad_round2": "200-399"
+      },
+      "status": "pending"
+    }
+  ]
+}

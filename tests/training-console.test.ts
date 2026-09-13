@@ -120,7 +120,9 @@ describe('console/api.buildStateView', () => {
   })
 
   it('课程发现含 curricula/*.jsonc（即使 tmp 无日志）', () => {
-    const courses = api.discoverCourses(50) // max 越 12 上限：环境课程目录增长会把 p4-fast 挤出
+    // max 用足量窗口（500）：课程目录随阶梯（+20）与经典（+35）持续增长，
+    // 固定小窗口会把任何固定课程名挤出断言范围（p4-fast 曾在 12/50 窗口两次被挤出）。
+    const courses = api.discoverCourses(500)
     // curricula/ 至少有 p4-fast.jsonc 等；不强制非空，但类型必须对
     for (const c of courses) expect(typeof c).toBe('string')
     // p4-fast 在 curricula/ 有定义但 tmp/ 可能无日志——应被补充进列表

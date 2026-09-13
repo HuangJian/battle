@@ -1,0 +1,59 @@
+{
+  "version": 5,
+  "name": "ladder-c15",
+  "mode": "per-tick",
+  "level": "ladder-c15",
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots - wTick*ticks - wChip*playerDamageTaken",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.3,
+      "wPickup": 2.5,
+      "wStar": 1.0,
+      "wStuck": 0.02,
+      "wShot": 0.01,
+      "wTick": 0.01,
+      "wChip": 0.0086
+    },
+    "terminal": {
+      "stage_clear": 2.0,
+      "lives_exhausted": -1.0,
+      "timeout": -2.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/ladder-c15-bc/bc-latest.json",
+  "iters": 60,
+  "max_hours": 12,
+  "workers": 8,
+  "kickstart_ref": true,
+  "warmup_iters": 0,
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "until_iter": 40,
+      "kl_coef": 0.2,
+      "lr": 0.00015,
+      "kl_cap": 0.2
+    },
+    {
+      "kl_coef": 0.03,
+      "lr": 5e-05
+    }
+  ],
+  "out": "tmp/ladder-c15/weights.json",
+  "traj": "tmp/ladder-c15",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/ladder-c15",
+  "backup_prefix": "ladder-c15",
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 200,
+  "eval_every": 5,
+  "seed_rotate": 150
+}
