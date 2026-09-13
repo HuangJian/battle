@@ -5,6 +5,33 @@
 
 ---
 
+## §33 python 门禁 flake 全面审计：静态扫雷 + 负载轰炸（2026-09-13，§31 后续）
+
+**方法**：① 静态扫雷——全测试目录 grep 紧墙钟（sleep/wait/timeout 断言）、被采样日志行
+依赖（RACE_LOG_SAMPLE 类）、固定端口、mtime 排序、xdist 共享 tmp 撞路径；② 历史证据——
+git log 的历次 flake 修复（`82cc6d6` I9 假红、`b0317ad` 沙箱删除配额、§31）+ tmp 红跑
+日志；③ 实证——全量 541 项 × 5 轮禁用 `-x`（首败不停、收全部失败）轰炸，其中 2 轮带
+4 spinner、叠加真机 c4-chip03 训练负载；I7 定向 10 连跑（6 spinner）。
+
+**发现与处置**：
+- **I7（`test_it_eval_deferred`）set-then-clear 竞态 + 3s 紧等待 → 已修**：
+  `eval_th.start()` 之后才 `eval_dispatched.clear()`——负载下主线程若在 start→clear
+  之间被调度延迟数秒，eval 线程先置位再被清掉 → 必假红（与 I9 §31 同族）。修法：
+  clear 提前到 start 之前（置位必属真实派发）+ 等待 3s→30s（正常 ~10-100ms，覆盖
+  ping→POST 权重→worker 孵化→首局 fetch 全链路的负载放大）。
+- **I10（tail join grace）`took10 < 15s`**：对设计的 2s grace 有 ~4× 余量，观察保留。
+- **其余全部干净**：端口全 bind 0（ephemeral）；mtime 仅等值断言；tmp_path 已由
+  conftest 唯一化（pid 参与命名）；`test_dist_common_poll` 的 `dt < 5s` 有 4-5× 余量；
+  test_upgrade 的短超时是故意触发降级路径的合法输入；I1/I3 的排序断言走真实回调与
+  服务器事件、不经过可采样日志；P0 新增 test_loop_gate_soft_remediate 纯逻辑零时序。
+
+**实证结果**：5 轮全量 2705 次执行零失败（19.4s / 21.3s / 19.8s / 24.8s / 54.4s——
+末两轮带 spinner + 真机训练负载）；I7 定向 10/10 绿。结合 §31 修复前的历史红跑，
+目前门禁内已知 flake 清零；`-x` 首败即停是门禁的有意设计（快速反馈），审计口径
+须用 `-o addopts=` 覆盖。
+
+---
+
 ## §31 I9 长尾竞速测试 flake：两条失败路径 + 双通道断言修（2026-09-13 复核 `python-flaky.issue.md`）
 
 **问题（复核确认真实并复现）**：`test_run_rl.py::test_it_early_race_v314` 在 xdist -n 4

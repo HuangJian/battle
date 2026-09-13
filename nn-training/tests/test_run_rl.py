@@ -729,9 +729,14 @@ def test_it_eval_deferred(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
             daemon=True,
             name="eval-it10",
         )
-        eval_th.start()
+        # 先 clear 再 start：若 eval 线程在主线程 clear 之前就完成首局派发（负载下
+        # 主线程可能被调度延迟数秒），事件会被「先置位后清除」抹掉 → 假红（§31 同族
+        # 的墙钟 flake）。clear 在前，置位必属真实派发。
         srv.eval_dispatched.clear()
-        if not srv.eval_dispatched.wait(timeout=3.0):
+        eval_th.start()
+        # 等待上界 30s：正常 ~10-100ms，但 eval 线程要走完 ping→POST 权重→worker
+        # 孵化→首局 fetch 全链路，xdist/沙箱负载下可被拉长数十倍——3s 曾是同族 flake 点。
+        if not srv.eval_dispatched.wait(timeout=30.0):
             raise AssertionError("I7 eval round never dispatched a game")
         t_collect = time.time()
         rep7 = run_rl.run_rollout_queue(
