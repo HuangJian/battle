@@ -289,6 +289,10 @@ class FakeServer(ThreadingHTTPServer):
         # 只能靠 dispatcher 的 tailGraceJoinSec 收尾兜底，否则整轮被拖到满超时。
         self.dup_hang: float = 0.0
         self.dispatched: set[tuple[int, int]] = set()
+        # 慢窗提前放行（§31）：同键并发 fetch 计数——第二个 fetch 到达 = 竞速副本
+        # 已派出（被测性质已成立），慢 handler 即可提前放行，不必让整轮陪睡满窗。
+        self.fetch_n: dict[tuple[int, int], int] = {}
+        self._fetch_lock = threading.Lock()
         super().__init__(*args, **kwargs)
 
 
@@ -339,6 +343,8 @@ class FakeAgent(BaseHTTPRequestHandler):
         elif u.path == "/v1/task":
             q = {k: v[0] for k, v in parse_qs(u.query).items()}
             key = (int(q["stage"]), int(q["seed"]))
+            with self._srv._fetch_lock:
+                self._srv.fetch_n[key] = self._srv.fetch_n.get(key, 0) + 1
             self._srv.events.append(("dispatch", time.time(), key))
             # 重复派发 = 竞速副本：挂住 dup_hang 秒（慢节点 + 同步 agent 的不可中断路径）
             if self._srv.dup_hang > 0 and key in self._srv.dispatched:
@@ -346,7 +352,20 @@ class FakeAgent(BaseHTTPRequestHandler):
             self._srv.dispatched.add(key)
             if key in self._srv.slow_first and key not in self._srv._slowed_once:
                 self._srv._slowed_once.add(key)
-                time.sleep(0.4)  # 慢主副本窗口（v3.15 2.0→0.4，判据不依赖窗长）
+                # 慢主副本窗口（**上限** 3.0s）：必须远大于「空闲槽走到竞速分支」的
+                # 最坏墙钟延迟——派发循环无任务可派时按 all_settled.wait(0.5) 空转
+                # （轮询粒度本身 0.5s），xdist/沙箱负载下首个竞速检查实测可晚至 +1s。
+                # 0.4s 曾被整个睡过 → seed111 结算离场、竞速与采样两条证据通道都拿
+                # 不到 → I9 flake（§31）。（v3.15 曾 2.0→0.4 并注释"判据不依赖窗长"
+                # ——该断言是错的。）
+                # 提前放行：同键第二个并发 fetch 到达 = 竞速副本已派出（被测性质已
+                # 成立）→ 立即返回，整轮不陪睡满窗（正常路径单轮回到亚秒级）。回归
+                # （竞速断）时无第二 fetch → 照旧睡满上限 → 断言红，只是红得慢些。
+                deadline = time.time() + 3.0
+                while time.time() < deadline:
+                    if self._srv.fetch_n.get(key, 0) >= 2:
+                        break
+                    time.sleep(0.05)
             if q.get("mode") == "eval" and self._srv.eval_delay > 0:
                 self._srv.eval_dispatched.set()  # I7 栅栏：eval 已派发（首局即置位）
                 time.sleep(self._srv.eval_delay)  # I7 慢 eval（后台消化模拟）
@@ -805,6 +824,18 @@ def test_it_early_race_v314(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     # ⇒ 断言退化成「seed111 恰好是首个 inflight 键」的抛硬币，xdist 负载下常红。
     # 两个节点后：慢任务挂在其中一个上，另一个节点的空闲槽竞速时 nd_id 不在其
     # inflight_nodes 里 ⇒ race lane 按 sorted(inflight) **确定性**选中 (0,111)（全表最小键）。
+    #
+    # 2026-09-13 **flake 修复（§31）**：上两次修复消除了「选谁」的不确定性，但没消除
+    # 「还有没有得选」——竞速检查的**墙钟时刻**仍依赖两个隐性前提，负载高时全翻：
+    #   ① 空闲槽必须在 0.4s 慢窗内走到竞速分支——派发循环空转按 all_settled.wait(0.5)
+    #      轮询（粒度本身就 > 慢窗），xdist/沙箱负载下首个竞速检查实测晚至 +1s；
+    #   ② 证据行必须仍在——741c395 起 race drops 每类只打前 RACE_LOG_SAMPLE=2 条，而
+    #      突发 fanout（不打派发日志）会在派发期抢走慢任务的 dup 槽，快副本获胜即把
+    #      任务弹出 inflight，race lane 结构性选不中它，证据只剩被采样挤掉的 dup/main 行。
+    # 修法：慢窗 0.4→3.0s **上限** + 竞速副本 fetch 到达即提前放行（窗口只在回归时
+    # 才睡满；正常路径单轮亚秒级）；本测试关 tailFanoutN（竞速成唯一复制通道）；
+    # 断言改双通道 OR——日志行或 FakeAgent 派发计数 ≥2 任一即过（后者对采样免疫；
+    # 2026-09-06 的"事件缺席"教训由 OR 化吸收，不再单独硬断言）。
     import rl.dispatch as _dispatch_mod
 
     srv, WEIGHTS, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
@@ -819,6 +850,10 @@ def test_it_early_race_v314(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
             "enabled": True,
         }
     )
+    # §31 flake 修复：关掉 v3.7 突发 fanout——它不打派发日志、在派发突发期抢占慢任务
+    # 的 dup 槽（快副本获胜即把任务弹出 inflight → race lane 结构性选不中它）。本测试
+    # 只测 race lane，让它成为唯一复制通道（fanout 语义由 I6/longtail 等测试覆盖）。
+    cfg["policy"]["tailFanoutN"] = 0
     f0 = len(FAILS)
     lines: list[str] = []
     _real_log = _dispatch_mod.log
@@ -840,18 +875,28 @@ def test_it_early_race_v314(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
         )
         took9 = time.time() - t0
         check(rep9["games"] == 8 and rep9["missing"] == [], "I9 all 8 settled")
-        # 竞速证据：调度器日志中 seed111 出现过 tail-race / dup settle / fanout copy。
-        # 这三类行只可能在任务已在 in-flight（主副本已派发）时由竞速副本触发 ——
-        # 故 raced=True 已蕴含「慢任务主副本确实被派发」，无需再单独断言 dispatch 计数
-        # （2026-09-06 实测：慢主副本的 HTTP 事件偶发缺席，raced 仍为 True —— 计数断言
-        # 是多余的、且制造 flake）。
+        # 竞速证据（§31 起**双通道 OR**，任一成立即过）：
+        #   ① 日志通道：seed111 出现过 tail-race / dup settle / fanout copy 行——
+        #      只可能在任务已在 in-flight 时由竞速副本触发；tail-race 派发行不采样，
+        #      是主证据通道。
+        #   ② FakeAgent 通道：(0,111) 实际派发 ≥2 次（主副本 + 竞速副本）——对
+        #      RACE_LOG_SAMPLE=2 采样免疫（741c395 后 dup settle/main_by_fanout 每类
+        #      只打前 2 条，慢任务证据行可能被挤出）。2026-09-06 曾硬断言计数而
+        #      "HTTP 事件偶发缺席"制造 flake——故两通道取 OR：任一在即判过，且在
+        #      本测试的受控配置下（无失败 ⇒ 无重试；fanout 关 ⇒ 无突发复制），
+        #      计数 ≥2 仍严格蕴含「慢任务被竞速复制过」。回归（pick_race_target 断）
+        #      时两通道同时缺席 → 必红。
         raced = any(
             "seed111" in ln and ("race lane" in ln or "dup settle" in ln or "fanout copy" in ln)
             for ln in lines
         )
+        dup_dispatches = sum(
+            1 for kind, _t, p in srv.events if kind == "dispatch" and p == (0, 111)
+        )
         check(
-            raced,
-            "I9 slow in-flight task re-raced by idle slot (log has tail-race/dup/fanout for seed111)",
+            raced or dup_dispatches >= 2,
+            f"I9 slow in-flight task re-raced by idle slot "
+            f"(log evidence={raced}, dispatches={dup_dispatches})",
         )
         # 死锁兜底（非性能上界）：健康轮 ~0.1-4s（含竞速 churn）；xdist 并行/高负载下实测
         # 可超 5s（2026-09-06 hook 门禁实测）→ 放宽到 30s，仍能抓住 queueWindowSec=120 的
