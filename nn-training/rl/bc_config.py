@@ -272,17 +272,29 @@ def load_bc_course(path_or_name: str | Path) -> BcCourseConfig:
 def bc_corpus_identity_fp(course: BcCourseConfig) -> str:
     """语料身份指纹（D14 语义版，BC 口径）：sha256(canonical(env + corpus 参数))。
 
-    覆盖 = 决定「一个样本是什么」的全部字段：stages（解析后）/ difficulty / max_ticks /
-    player / corpus{games_per_stage, wins_only, near_miss_times, seed_rotate}。
+    覆盖 = 决定「一个样本是什么」的全部字段：**obs 编码布局（schema major + 指纹）** /
+    stages（解析后）/ difficulty / max_ticks / player /
+    corpus{games_per_stage, wins_only, near_miss_times, seed_rotate}。
     **刻意排除** train 超参 / iters / workers / out / traj / backup 等预算、优化器与路径键
     （与 rl.config.corpus_identity_fp 同分类学：这些改动不构成语料混入，不得触发
     云端 D14 拒收）。哈希**解析后**的值：关卡文件注释/格式变动不影响身份。
+
+    ⚠ schema 必须在内（2026-09-13 补）：**agent 结果缓存键 = `iterId:mode:kind:stage:seed`
+    （dist_common.py:813），不含 codehash；而 BC 的 iterId = `bc-it{it}-{fp12}`（bc_dispatch.py:109）
+    既不含课程名、也不含 runId**。所以 fp 里漏掉 schema 的后果是：v2→v3 的 MAJOR bump 之后
+    重跑同一课程，fp 逐字不变（实测 bc-c4 / bc-c4-v3 均为 f60406b20e78…）⇒ 同一 iterId ⇒
+    节点直接**回放旧 era 的 shard**，v3 编码器一次都跑不到。RL 侧因为 runId 每次启动重新生成
+    （dispatch.py:34）而不受影响，BC 侧没有这层保护，只能靠身份指纹本身含 schema。
     """
+    from schema import OBS_SCHEMA_MAJOR, SCHEMA_FINGERPRINT
     stages = (
         list(course.stages) if isinstance(course.stages, list) else course.stages
     )
     payload = {
         "kind": "bc",
+        # 编码布局：schema bump / 指纹变化 ⇒ 「一个样本是什么」已变，身份必须跟着变
+        "obs_schema_major": OBS_SCHEMA_MAJOR,
+        "obs_schema_fingerprint": SCHEMA_FINGERPRINT,
         "stages": stages,
         "difficulty": course.difficulty,
         "max_ticks": course.max_ticks,

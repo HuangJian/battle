@@ -1,0 +1,75 @@
+// BC 课程 bc-c4-v3 —— obs v3 上的 c4 教师语料 + 蒸馏（2026-09-13，为 R1 供 v3 暖启）
+//
+// 与 bc-c4.bc.jsonc **参数全同**，这不是一条新的能力腿，是同一件事在 obs v3 上的重跑：
+//   · 语料 = God-AI 教师在 arena4（c4 空场，count=4、四角 4 出生点）自对弈，wins-only；
+//     答案是「可以直接 God 跑 c4 关卡」——bc-c4 本来就是这么做的，c1-c3 一个都不涉及。
+//   · v3 形状来自**代码**（obs-encoder/schema.py = OBS_SCHEMA_MAJOR 3），课程文件里没有
+//     任何 schema 键，所以 v3 重跑不需要改语料/关卡/训练参数，只需要换命名空间（见下）。
+//
+// ── 为什么必须换名字（两个会在云端静默空转的坑，2026-09-13 实测）─────────────
+//   ① **账本跳过**：tmp/bc-c4/training_log.jsonl 已有 `bc_round_completed(it=1)`，
+//      而 run_bc 的断点续跑正是按它跳轮 → 沿用 bc-c4 会「开机即无事发生」，白烧云端。
+//      （本课程的 traj=tmp/bc-c4-v3 是空的，不受影响。）
+//   ② **语料缓存回放**（已在本轮修掉，见下）：bc_corpus_identity_fp 原先只哈希
+//      {kind, stages, difficulty, max_ticks, player, corpus{...}}——**不含 obs schema**。
+//      而 agent 结果缓存键 = `iterId:mode:kind:stage:seed`（无 codehash），BC 的
+//      iterId = `bc-it{it}-{fp12}`（无课程名、无 runId）⇒ 同 fp ⇒ 直接回放 **v2 旧 shard**，
+//      导出器根本不会被调用（v3 编码器一次都跑不到）。实测 bc-c4 与 bc-c4-v3 当时 fp 逐字
+//      相同（f60406b20e78…），**所以光换课程名是救不了的**。修复 = 把 schema
+//      （OBS_SCHEMA_MAJOR + SCHEMA_FINGERPRINT）加进 bc_corpus_identity_fp 的 payload
+//      → 旧 era fp 自动失效，重跑必然重新导出（回归锁：test_bc_course.py
+//      ::test_bc_corpus_identity_fp_covers_obs_schema）。
+//   ⇒ 换 name/out/traj/backup_dir/backup_prefix 仍然要做（新账本 + 新归档目录，别覆盖 v2 产物），
+//     但**不再**承担「防缓存回放」的责任——那件事由身份指纹负责。
+//
+// ── value_coef = 0（**刻意**，不是漏配）──────────────────────────────────────
+//   N4-E2 想要「BC 同训 value 头」，但 §15 M3（2026-08-26）实测：returns 终局锚定
+//   （Σ ≡ REWARD_SCALE×gatedScore ≈ O(9)）使 value MSE 爆方差——coef 1.0 时 train_loss ~1e4、
+//   move acc 卡在多数线 0.23；coef 0.05 仍 ep-1 loss 6867 且 move 不学。当时的结论是
+//   「先走纯 BC，value 预置留待 M4 前用**逐关规范化 returns** 再启」——那个工程项至今没做。
+//   （注：`train/bc.py` 需要 arch=student + 语料带 returns.npy；export-godai-bc 确实写
+//    returns.npy，所以是**能力就绪但尺度未标定**，不是缺数据。）
+//   对 R1 而言 value_coef=0 反而是正解：model_build 会读 BC 元数据里的 `args.value_coef`，
+//   为 0 ⇒ value 头**清零**后由 PPO 现训 ⇒ **两臂对称**，value R² 的差异才归因到 obs，
+//   而不是被一个坏掉的 BC value 头污染。N4-E2 的兜底项 (b) 正是这条路径。
+{
+  "version": 1,
+  "name": "bc-c4-v3-distill",
+  "kind": "bc",
+  "level": "arena4",
+
+  "corpus": {
+    "games_per_stage": 40,
+    "wins_only": true,
+    "near_miss_times": 3,
+    "seed_rotate": 64,
+  },
+
+  "train": {
+    "arch": "student",
+    "epochs": 60,
+    "batch": 512,
+    "lr": 3e-3,
+    "mirror_p": 0.5,
+    "val_split": 0.1,
+    // 刻意 0：见文件头「value_coef = 0」——M3 尺度未修，且 R1 需要两臂 value 头对称。
+    "value_coef": 0.0,
+    "seed": 1234,
+    "ckpt_every": 10,
+  },
+
+  // 与 bc-c4 同口径：每 10 epoch 在 arena4 + arena6 各 10 局干净评估，
+  // 指标对齐 RL eval（win_rate/kills_mean/phits_mean/pickup_mean/timeout_frac）→ bc_eval 入账。
+  "eval": {
+    "every_epochs": 10,
+    "games_per_stage": 10,
+    "levels": ["arena4", "arena6"],
+  },
+
+  "iters": 1,
+  "workers": 8,
+  "out": "tmp/bc-c4-v3/weights.json",
+  "traj": "tmp/bc-c4-v3",
+  "backup_dir": "nn-training/weights/bc-c4-v3",
+  "backup_prefix": "bc-c4-v3",
+}

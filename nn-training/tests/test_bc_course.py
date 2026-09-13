@@ -74,6 +74,33 @@ def test_bc_corpus_identity_fp_semantics() -> None:
     assert bc_corpus_identity_fp(c3) != fp
 
 
+def test_bc_corpus_identity_fp_covers_obs_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    """★ schema 必须在语料身份里（2026-09-13 修复的回归锁）。
+
+    为什么致命：agent 结果缓存键 = `iterId:mode:kind:stage:seed`（dist_common.py:813，
+    不含 codehash），而 BC 的 iterId = `bc-it{it}-{fp12}`（bc_dispatch.py:109）**既不含
+    课程名也不含 runId**。身份里漏掉 schema ⇒ v2→v3 的 MAJOR bump 后重跑同一课程 fp 逐字
+    不变 ⇒ 同一 iterId ⇒ 节点直接回放旧 era 的 shard，v3 编码器一次都跑不到。
+    """
+    import schema
+
+    c = load_bc_course("bc-c4")
+    fp = bc_corpus_identity_fp(c)
+
+    # ① 旧（不含 schema）时代的 fp —— 就是会被回放的那个 iterId 分量。修复后必须不同。
+    assert not fp.startswith("f60406b20e78"), "fp 仍是旧 era 值 ⇒ 旧缓存会被回放"
+
+    # ② 语料参数相同 ⇒ 同一身份（bc-c4-v3 就是 bc-c4 在 v3 上的重跑，不是新语料）。
+    # 必须在 monkeypatch **之前**算：补丁一改指纹，两边算出的 fp 就不同了。
+    assert bc_corpus_identity_fp(load_bc_course("bc-c4-v3")) == fp
+
+    # ③ schema 的两个分量各自都在 payload 里（改任一个，身份必须变）。
+    monkeypatch.setattr(schema, "OBS_SCHEMA_MAJOR", schema.OBS_SCHEMA_MAJOR + 1)
+    assert bc_corpus_identity_fp(c) != fp
+    monkeypatch.setattr(schema, "SCHEMA_FINGERPRINT", "deadbeef")
+    assert bc_corpus_identity_fp(c) != fp
+
+
 def test_round_seeds_rotation() -> None:
     c = load_bc_course("bc-c4")
     r1 = round_seeds(c, 1)
