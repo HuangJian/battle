@@ -24,7 +24,13 @@
 import { writeFileSync, mkdirSync } from 'fs'
 import path from 'path'
 import { exportGame } from './export-godai-labels'
-import { OBS_SCHEMA_MAJOR } from '../../src/nn/obs-encoder'
+import {
+  OBS_SCHEMA_MAJOR,
+  OBS_CHANNELS,
+  BOARD,
+  SCALAR_DIM,
+  SCHEMA_FINGERPRINT,
+} from '../../src/nn/obs-encoder'
 import { npyBytes } from '../../src/nn/npy'
 import { buildPack } from './pack-container'
 
@@ -102,8 +108,7 @@ function main(): void {
   // 条目清单与 nn-training/dist_common.BC_SHARD_FILES 逐一对齐（manifest.json 由
   // Python 侧 write_shard 落盘时重写补血缘键，不随容器携带）。
   const N = res.samples.length
-  const OBS_N = 14 * 26 * 26
-  const SCALAR_DIM = 19
+  const OBS_N = OBS_CHANNELS * BOARD * BOARD
   const MASK_DIM = 7
   const obs = new Uint8Array(N * OBS_N)
   const scalars = new Float32Array(N * SCALAR_DIM)
@@ -124,6 +129,7 @@ function main(): void {
   const manifest = {
     schemaMajor: OBS_SCHEMA_MAJOR,
     obsSchemaMajor: OBS_SCHEMA_MAJOR,
+    schemaFingerprint: SCHEMA_FINGERPRINT,
     exporterVersion: EXPORTER_VERSION,
     mode: 'bc',
     collector: 'BC-GOD',
@@ -143,7 +149,7 @@ function main(): void {
     elapsedSec: +((Date.now() - t0) / 1000).toFixed(1),
   }
   const entries = [
-    { name: 'obs.npy', data: npyBytes(obs, [N, 14, 26, 26], 'u1') },
+    { name: 'obs.npy', data: npyBytes(obs, [N, OBS_CHANNELS, BOARD, BOARD], 'u1') },
     { name: 'scalars.npy', data: npyBytes(scalars, [N, SCALAR_DIM], 'f4') },
     { name: 'actions.npy', data: npyBytes(actions, [N, 2], 'u1') },
     { name: 'masks.npy', data: npyBytes(masks, [N, MASK_DIM], 'u1') },

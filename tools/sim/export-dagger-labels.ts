@@ -52,6 +52,9 @@ import {
   actionFromFrame,
   computeMasks,
   OBS_SCHEMA_MAJOR,
+  OBS_CHANNELS,
+  BOARD,
+  SCALAR_DIM,
 } from '../../src/nn/obs-encoder'
 import { NNInput, type NNInputOptions } from '../../src/nn/policy-input'
 import { isArenaId, resolveArenaStage } from '../../src/nn/arena-ladder'
@@ -201,14 +204,16 @@ function flushShard(acc: Acc, dir: string, manifest: unknown): void {
   // 只从 godai 半学到东西；纯策略重训建议 coef 0（§15 value 压制策略头前科）。
   const N = acc.n
   if (N === 0) return
-  const obs = new Uint8Array(N * 14 * 26 * 26)
-  const scalars = new Float32Array(N * 19)
+  // v3（obs-schema-v3.plan.md v4.0）：形状从 schema 常量派生，勿写死（14/19 是 v2 遗留）。
+  const OBS_N = OBS_CHANNELS * BOARD * BOARD
+  const obs = new Uint8Array(N * OBS_N)
+  const scalars = new Float32Array(N * SCALAR_DIM)
   const actions = new Uint8Array(N * 2)
   const masks = new Uint8Array(N * 7)
   const conditions = new Uint8Array(N)
   for (let i = 0; i < N; i++) {
-    obs.set(acc.obs[i], i * 14 * 26 * 26)
-    scalars.set(acc.scalars[i], i * 19)
+    obs.set(acc.obs[i], i * OBS_N)
+    scalars.set(acc.scalars[i], i * SCALAR_DIM)
     actions[i * 2] = acc.actions[i * 2]
     actions[i * 2 + 1] = acc.actions[i * 2 + 1]
     for (let j = 0; j < 7; j++) masks[i * 7 + j] = acc.masks[i * 7 + j]

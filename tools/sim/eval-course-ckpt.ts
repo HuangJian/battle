@@ -59,6 +59,21 @@ function argAll(name: string): string[] {
 }
 
 /**
+ * 解析一个 `--weights` 值：支持可选 `label=path` 形式（I4 晋级门 runner 用它对腿
+ * 命名），缺省 label = 路径文件名（既有裸路径调用逐字不变）。label 侧不得含路径
+ * 分隔符，避免把文件名里带 `=` 的裸路径误拆。
+ */
+export function parseWeightSpec(spec: string): { path: string; label: string } {
+  const eq = spec.indexOf('=')
+  if (eq > 0) {
+    const label = spec.slice(0, eq)
+    const p = spec.slice(eq + 1)
+    if (p && !label.includes('/') && !label.includes('\\')) return { path: p, label }
+  }
+  return { path: spec, label: spec.split(/[\\/]/).pop() ?? spec }
+}
+
+/**
  * 去尾逗号（`,]` / `,}`，含跨行）：逐字符扫描，字符串内原样保留（转义感知）。
  * 背景：Python 侧 rl/jsonc.py 容忍尾逗号，课程文件（c6-pickup 起）普遍带尾逗号
  * （oxfmt `trailingComma: all` 还会主动加）；本函数让 TS 侧与 Python 同口径，
@@ -214,10 +229,7 @@ async function main(): Promise<void> {
     )
     process.exit(2)
   }
-  const weights =
-    policy === 'god'
-      ? [{ path: '', label: 'god' }]
-      : weightPaths.map((p) => ({ path: p, label: p.split(/[\\/]/).pop() ?? p }))
+  const weights = policy === 'god' ? [{ path: '', label: 'god' }] : weightPaths.map(parseWeightSpec)
   const games = parseRangeInt(arg('games'), 100)
   const seed0 = parseRangeInt(arg('seed0'), 0)
   const workersArg = parseInt(arg('workers') ?? '0', 10)

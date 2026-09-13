@@ -27,8 +27,20 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync } from 'fs'
 import { join, dirname } from 'path'
 
-const NN_ROOT = join(import.meta.dir, '..', '..')
-const LEDGER_PATH = join(NN_ROOT, 'ladder', 'LEDGER.jsonc')
+const REPO_ROOT = join(import.meta.dir, '..', '..')
+// 阶梯资产（curricula / levels / ladder）都在 nn-training/ 下；子进程 cwd 用 REPO_ROOT。
+const NN_DIR = join(REPO_ROOT, 'nn-training')
+const LEDGER_PATH = join(NN_DIR, 'ladder', 'LEDGER.jsonc')
+
+/**
+ * 晋级门评估的关卡文件：`levels/<level>.jsonc`（关卡配置持有 stages/difficulty/
+ * max_ticks/player，eval-course-ckpt 直接吃它）。**不是** `curricula/<level>.jsonc`
+ * ——课程文件只以 `"level"` 引用关卡、没有内联 stages（eval-course-ckpt 会以
+ * "course has no custom stages" 退出）。
+ */
+export function levelFilePath(level: string, nnDir = NN_DIR): string {
+  return join(nnDir, 'levels', `${level}.jsonc`)
+}
 
 export interface GateRow {
   label: string
@@ -207,7 +219,7 @@ export function runRound(
   const args = [
     'tools/sim/eval-course-ckpt.ts',
     '--course',
-    join(NN_ROOT, 'curricula', `${level}.jsonc`),
+    levelFilePath(level),
     '--games',
     String(games),
     '--seed0',
@@ -216,7 +228,7 @@ export function runRound(
     String(workers),
   ]
   for (const w of weights) args.push('--weights', `${w.label}=${w.path}`)
-  const proc = Bun.spawnSync(['bun', ...args], { cwd: NN_ROOT, stdout: 'pipe', stderr: 'pipe' })
+  const proc = Bun.spawnSync(['bun', ...args], { cwd: REPO_ROOT, stdout: 'pipe', stderr: 'pipe' })
   if (proc.exitCode !== 0) {
     throw new Error(
       `eval-course-ckpt failed: ${new TextDecoder().decode(proc.stderr).slice(0, 500)}`,

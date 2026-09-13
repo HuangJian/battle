@@ -18,7 +18,7 @@ import { ReplayInput } from '../../src/replay/ReplayInput'
 import { parseReplayFile } from '../../src/replay/file'
 import { restoreWorld } from '../../src/snapshot/WorldSerializer'
 import { unpackFrames } from '../../src/replay/pack'
-import { ObsEncoder, SCALAR_DIM } from '../../src/nn/obs-encoder'
+import { ObsEncoder, OBS_CHANNELS, BOARD, SCALAR_DIM } from '../../src/nn/obs-encoder'
 import { writeNpy } from '../../src/nn/npy'
 import { signatureIntent } from '../../src/ai/intent/signature'
 import { segmentIntentSeq, INTENT_IDS, type IntentId } from '../../src/ai/intent/vocab'
@@ -33,7 +33,7 @@ import { mkdirSync, writeFileSync } from 'fs'
 const GRID = 26
 const CELL = 16
 const REPLAN_EVERY = 30
-const OBS_N = 14 * GRID * GRID
+const OBS_N = OBS_CHANNELS * BOARD * BOARD
 
 function ctxOf(
   world: import('../../src/game/World').World,
@@ -169,7 +169,7 @@ async function main(): Promise<void> {
           buckets[k] = bucketIdx[oi]
           fIdx[k] = idxSel[k]
         }
-        writeNpy(`${dirName}/obs.npy`, obs, [n, 14, GRID, GRID], 'u1')
+        writeNpy(`${dirName}/obs.npy`, obs, [n, OBS_CHANNELS, BOARD, BOARD], 'u1')
         writeNpy(`${dirName}/scalars.npy`, scalars, [n, SCALAR_DIM], 'f4')
         writeNpy(`${dirName}/intent.npy`, intents, [n], 'u1')
         writeNpy(`${dirName}/bucket.npy`, buckets, [n], 'u1')

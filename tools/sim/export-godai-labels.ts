@@ -54,7 +54,10 @@ import {
   actionFromFrame,
   computeMasks,
   OBS_SCHEMA_MAJOR,
+  OBS_CHANNELS,
+  BOARD,
   SCALAR_DIM,
+  SCHEMA_FINGERPRINT,
 } from '../../src/nn/obs-encoder'
 import { decodeStageGrid, CUSTOM_STAGE_BASE } from '../../src/nn/config-stage'
 import { writeNpy } from '../../src/nn/npy'
@@ -75,7 +78,7 @@ import type { RunTelemetry } from './simulation-runner'
 
 const EXPORTER_VERSION = '2.0.0'
 const K = 10
-const OBS_N = 14 * 26 * 26
+const OBS_N = OBS_CHANNELS * BOARD * BOARD
 const MASK_DIM = 7
 
 const ENV = {
@@ -455,6 +458,7 @@ function flushShard(
   const manifest = {
     schemaMajor: OBS_SCHEMA_MAJOR,
     obsSchemaMajor: OBS_SCHEMA_MAJOR,
+    schemaFingerprint: SCHEMA_FINGERPRINT,
     exporterVersion: EXPORTER_VERSION,
     shard: name,
     teacher: 'god-ai',
@@ -462,7 +466,7 @@ function flushShard(
     ...baseManifest,
   }
   mkdirSync(dir, { recursive: true })
-  writeNpy(`${dir}/obs.npy`, obs, [N, 14, 26, 26], 'u1')
+  writeNpy(`${dir}/obs.npy`, obs, [N, OBS_CHANNELS, BOARD, BOARD], 'u1')
   writeNpy(`${dir}/scalars.npy`, scalars, [N, SCALAR_DIM], 'f4')
   writeNpy(`${dir}/actions.npy`, actions, [N, 2], 'u1')
   writeNpy(`${dir}/masks.npy`, masks, [N, MASK_DIM], 'u1')

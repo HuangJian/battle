@@ -19,7 +19,7 @@
 
 import { writeFileSync, mkdirSync } from 'fs'
 import { dirname } from 'path'
-import { OBS_CHANNELS, BOARD, SCALAR_DIM } from './obs-encoder'
+import { OBS_CHANNELS, BOARD, SCALAR_DIM, SCHEMA_FINGERPRINT } from './obs-encoder'
 
 export type NpyDtype = 'u1' | 'u2' | 'i1' | 'f4' | 'f8'
 
@@ -95,5 +95,10 @@ export function writeShard(dir: string, a: ShardArrays, manifest: unknown): void
   writeNpy(`${dir}/actions.npy`, a.actions, [N, 2], 'u1')
   writeNpy(`${dir}/masks.npy`, a.masks, [N, 7], 'u1')
   writeNpy(`${dir}/conditions.npy`, a.conditions, [N], 'u1')
-  writeFileSync(`${dir}/manifest.json`, JSON.stringify(manifest, null, 2))
+  // schema 自述（obs spec §3.5-3）：指纹随 shard 落盘，加载方一眼确认语料 schema。
+  const stamped =
+    manifest !== null && typeof manifest === 'object' && !Array.isArray(manifest)
+      ? { ...(manifest as Record<string, unknown>), schemaFingerprint: SCHEMA_FINGERPRINT }
+      : manifest
+  writeFileSync(`${dir}/manifest.json`, JSON.stringify(stamped, null, 2))
 }

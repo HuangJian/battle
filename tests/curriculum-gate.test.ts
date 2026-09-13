@@ -1,6 +1,7 @@
 /** I4（roadmap §4-I4）晋级门 runner 的统计与判定单测。 */
 
 import { describe, expect, it } from 'bun:test'
+import { join } from 'path'
 import {
   decideVerdict,
   hazardBuckets,
@@ -10,8 +11,10 @@ import {
   wilsonLowerBound,
   upsertLedgerEntry,
   loadLedger,
+  levelFilePath,
   type GateRow,
 } from '../tools/sim/curriculum-gate'
+import { parseWeightSpec } from '../tools/sim/eval-course-ckpt'
 
 function row(over: Partial<GateRow>): GateRow {
   return {
@@ -126,6 +129,25 @@ describe('decideVerdict（D4 单轨门）', () => {
     const v = decideVerdict(170, 200, 0.05)
     expect(v.verdict).toBe('stay')
     expect(v.reason).toContain('样本不足')
+  })
+})
+
+describe('I4 路径/权重规格（subprocess 接口契约）', () => {
+  it('levelFilePath 指向 levels/<level>.jsonc（关卡文件持有 stages，课程文件没有）', () => {
+    expect(levelFilePath('ladder-c04', 'X')).toBe(join('X', 'levels', 'ladder-c04.jsonc'))
+  })
+
+  it('parseWeightSpec 支持 label=path（I4 腿命名），裸路径回退文件名', () => {
+    expect(parseWeightSpec('it30=nn-training/weights/a/it30.json')).toEqual({
+      path: 'nn-training/weights/a/it30.json',
+      label: 'it30',
+    })
+    expect(parseWeightSpec('nn-training/weights/a/it30.json')).toEqual({
+      path: 'nn-training/weights/a/it30.json',
+      label: 'it30.json',
+    })
+    // 含 '=' 但左侧像路径 ⇒ 不当 label 拆（避免破坏含 '=' 的裸路径）
+    expect(parseWeightSpec('a/b=weird.json').label).toBe('b=weird.json')
   })
 })
 

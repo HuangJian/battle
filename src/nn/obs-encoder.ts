@@ -232,8 +232,12 @@ export class ObsEncoder {
   }
 
   private encodeEnemies(world: World): void {
-    // 敌车两态分编码（v3）：激活敌 → ch7-10（bonus<<6 + tier<<3 + dir）；
-    // 生成中敌（spawnTimer>0，v2 直接 continue 跳过 = C6 缺口）→ ch15 倒计时幅值。
+    // 敌车两态分编码（v3）：激活敌 → ch7-10（bonus<<6 + tier<<3 + dir）+ ch14
+    //（剩余命中数）；生成中敌（spawnTimer>0，v2 直接 continue 跳过 = C6 缺口）→ ch15
+    // 倒计时幅值。
+    // ch14 的分母 = live player.damage（随星级变，combat.ts:334-355）——整轮只读一次
+    //（§14：禁 per-enemy 属性查找）；无玩家/伤害非正 ⇒ 0（域外安全）。
+    const playerDamage = world.player?.damage ?? 0
     for (const t of world.tanks) {
       if (!t.alive) continue
       if (t.allegiance !== 'enemy') continue
@@ -254,6 +258,12 @@ export class ObsEncoder {
       const bonus = t.bonus ? 1 : 0
       const val = (bonus << 6) + (tier << 3) + (d + 1) // 1..100
       this.writeBox(CH.enemyBasic + kindOffset, t.x, t.y, TANK, TANK, val)
+      // C5 ch14：敌剩余命中数 = min(9, ceil(enemy.hp / player.damage))——每帧
+      // 从 live 伤害现算、禁缓存（obs spec §3.2 ch14；所有兵种，非 armor 专利）。
+      if (playerDamage > 0) {
+        const hits = Math.min(9, Math.ceil((t.hp ?? 0) / playerDamage))
+        this.writeBox(CH.hitToKill, t.x, t.y, TANK, TANK, hits)
+      }
     }
   }
 

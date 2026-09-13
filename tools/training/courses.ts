@@ -26,7 +26,10 @@ export function resolveCourseBc(course: string): string {
       .join('\n')
       .replace(/,(\s*[}\]])/g, '$1')
     const bc: unknown = (JSON.parse(stripped) as { bc?: unknown }).bc
-    if (typeof bc === 'string' && bc.length > 0) return path.join(REPO_ROOT, bc)
+    // 绝对路径原样返回（跨盘符的 path.relative 会产出绝对路径；Windows 上
+    // path.join(repo, 'C:\\...') 会把盘符拼成非法中间段——§2026-09-13 回归）。
+    if (typeof bc === 'string' && bc.length > 0)
+      return path.isAbsolute(bc) ? bc : path.join(REPO_ROOT, bc)
   } catch {
     /* 回退 legacy */
   }

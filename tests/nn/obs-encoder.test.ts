@@ -26,6 +26,7 @@ import {
 } from '../../src/nn/obs-encoder'
 import type { World } from '../../src/game/World'
 import type { Direction } from '../../src/constants'
+import { placeEnemy, seedWorld } from '../helpers'
 
 // ---- channel cell accessor ----
 function chCell(obs: Uint8Array, ch: number, col: number, row: number): number {
@@ -288,5 +289,44 @@ describe('ObsEncoder.encode — spatial channels', () => {
     expect(s[8]).toBeCloseTo(3 / 20, 4)
     // tier block renumbered to 9..13 (was 14..18); with no enemies all 0
     for (let i = 9; i <= 13; i++) expect(s[i]).toBe(0)
+  })
+})
+
+describe('ObsEncoder.encode — v3 ch14 hit-to-kill / ch15 spawning (obs spec §3.2)', () => {
+  it('ch15 生成中敌倒计时 = round(255*spawnTimer/1000)：1000→255 / 500→128 / 无→0', () => {
+    const full = new ObsEncoder()
+    full.encode(mkWorld({ tanks: [mkTank({ spawnTimer: 1000, x: 96, y: 96 })] }))
+    expect(chCell(full.obs, CH.spawning, 6, 6)).toBe(255)
+    const half = new ObsEncoder()
+    half.encode(mkWorld({ tanks: [mkTank({ spawnTimer: 500, x: 96, y: 96 })] }))
+    expect(chCell(half.obs, CH.spawning, 6, 6)).toBe(128)
+    const none = new ObsEncoder()
+    none.encode(mkWorld({ tanks: [] }))
+    expect(chMax(none.obs, CH.spawning)).toBe(0)
+  })
+
+  it('生成中敌只进 ch15，不进激活敌通道 ch7-10', () => {
+    const enc = new ObsEncoder()
+    enc.encode(mkWorld({ tanks: [mkTank({ spawnTimer: 1000, x: 96, y: 96 })] }))
+    expect(chMax(enc.obs, CH.enemyBasic)).toBe(0)
+  })
+
+  it('ch14 = min(9, ceil(enemy.hp / player.damage))，且随 hp 每帧现算（禁缓存）', () => {
+    const world = seedWorld(11)
+    world.startGame('hard', 'modern', 0)
+    const enemy = placeEnemy(world, 6, 6, 'basic')
+    enemy.spawnTimer = 0
+    const player = world.player!
+    expect(player.damage).toBeGreaterThan(0)
+    const enc = new ObsEncoder()
+    enc.encode(world)
+    // 满血：ceil(maxHp / player.damage)
+    expect(chCell(enc.obs, CH.hitToKill, 6, 6)).toBe(
+      Math.min(9, Math.ceil(enemy.hp / player.damage)),
+    )
+    // 残血：同一 World 重编码 → 立即反映新 hp（缓存实现会停在旧值）
+    enemy.hp = player.damage
+    enc.encode(world)
+    expect(chCell(enc.obs, CH.hitToKill, 6, 6)).toBe(1)
   })
 })
