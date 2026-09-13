@@ -1258,3 +1258,30 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 - **违反后果**：回退到竞速广播 → 多 worker 重复算 PPO + 慢者白烧；TTL 调大 → it24 倒车（死 worker
   回收失灵）。plan：`plan/multi-course-parallel-training.md` §3.8/§3.9、P3b；实现见
   `nn-training/remote/{protocol,hub_server,worker_server}.py`。
+
+## §2026-09-13-multi-course-course-keyed-singletons（多课程并行：课程 = 并行单元，一切单例按课实例化）
+
+- **背景**：GPU 资源增加要求 N 课同跑（常态 2 课、4 槽位留余量）。原链路住着一组同构
+  单例假设——全局实例锁（`.run_rl.lock`）、账本 5 个扁平单键、`rl.hub_port` 一处 base、
+  隧道/`remote_hub_url` 单键、监督器猜课程、halt 单键、`--kill-previous` 按脚本名全杀
+  （差距全表：`docs/multi-course-audit.md`；约束清单 S1–S17：plan §2）。
+- **备选与否决**：发现服务/调度器进程（否——Simple beats clever：算术槽位
+  `hub_base + slot*10` + 每事实一归宿就够）；两课共用一 hub（否——jobRoot/jsonl 串味，
+  hub per-course 后调用方传参即隔离）；配额写进 `curricula/*.jsonc`（否——一改课程文件
+  `course_fp` 就变，触发 D14 熔断误判：机器配额只住 `rl-config.json` 的 `courses` 块）；
+  监督重建时用全局状态猜课程（否——fail-closed，查不到 = 放弃重建 + 响亮告警，绝不猜）。
+- **决定**：①锁/账本条目/端口/隧道/trainer/日志/监督/halt 全部 course-keyed，命名空间键
+  = 课程文件 stem（§2026-09-12-multi-course-key-is-stem）；②端口算术唯一归宿
+  `tools/training/slots.ts`（`portForSlot`/`allocateSlot` busy 锁内分配 + `checkCapacity`
+  加法校验 `Σ max(workers_c, local_slots_c) ≤ max(rl.workers, rl.local_slots)`，超量
+  fail-fast 点名课程，拆分值允许 0 = 关闭该课本机直跑）；③账本 = `Record<course, Entry>`
+  四新键，重建契约完备字段（Q4）+ 旧扁平键在 P5 由 `loadRegistry` 一次性搬迁后删读写
+  （R2）；④本机并发配额热读 `courses.<课>` 优先 + 覆盖生效打响亮行
+  `[quota] workers X -> Y (multi-course split)`；⑤控制台按课启/停/冒烟/日志/halt
+  （`activeCourse`/`cloudHalts`/busy 键按课），LAN 只读不变，`stopAll` 保留全局总闸语义；
+  ⑥remote 侧每课一隧道 + worker 有界 FIFO + 独占租约（§2026-09-12-multi-course-p3b-
+  supersedes-343）；⑦归属字段（manifest `course_name`/dispatch course）只做对账审计，
+  不参与调度，`course_fp` 血缘不动。
+- **违反后果**：新单例回落全局键/端口 → B 课覆盖 A 课登记（杀错/停错/连错 hub）；
+  配额进课程文件 → D14 熔断误判；重建时拿全局状态猜课程 → A 课进程被 B 课配置拉起；
+  删 per-course 锁文件 → 2026-09-06 双 trainer 写同一 traj 事故重演。
