@@ -26,6 +26,7 @@
 - **P5 状态**：**全部完成**（W1–W5）；余 P6 归档（DECISIONS 总条目 + DoD 勾选）。
 - **纪律**：配额只住 `rl-config.json` 的 `courses` 块，**永不写 `curricula/*.jsonc`**（一改 `course_fp` 即触发 D14 熔断误判，plan C1）。
 - **门禁**：`bun run check` 2009 pass、`bun run build`、`make -C nn-training python-gate` 全绿。
+- **merge 复核（85e740d，origin/goal-nn 并入）**：冲突 3 文件（进度日志节号撞车 → 我方改 §36；consoleStatePath 归宿取 paths.ts；停机横幅取按课版 + 追加对方 loopComplete 完训横幅）；两处测试随合并 API 修正（consoleStatePath 导入源、buildExitMarker 补 course 参）。合并后全套门禁绿（check/python-gate/build），**tiny-a/b 双课 5 轮流程验证重跑 PASS**（隔离证据与首次一致：stage 互斥/course_fp/rotateSeed 独立/零错误）。**行为变化知悉**：对方分支把「跑满 iters」从进程退出改为**停车不断开**（等待控制台重启 / EvalBoard B 批认领）——锁在停车期保持持有，验证完需按课停止（S14 kill-previous 被 preflight 挡住时直接 SIGTERM 停车 PID，残留 stale 锁由下次启动的接管路径自动清理）。
 
 ---
 
