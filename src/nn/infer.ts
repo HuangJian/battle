@@ -279,7 +279,7 @@ export class StudentModel implements ModelLike {
   readonly d: number
   readonly headHidden: number
 
-  private stemW: Float32Array // [h, 16, 3, 3]
+  private stemW: Float32Array // [h, inCh+2, 3, 3]
   private stemB: Float32Array // [h]
   private dwW: Float32Array[] // per block [h, 1, 5, 5]
   private dwB: Float32Array[] // per block [h]
@@ -315,7 +315,7 @@ export class StudentModel implements ModelLike {
   private engageB: Float32Array | null // [2]
 
   // ---- reusable buffers (no per-tick allocation) ----
-  private in16: Float32Array // [16 * board * board] (14 obs + 2 coords)
+  private in16: Float32Array // [(inCh+2) * board * board] (obs 全通道 + 2 coords)
   private coords: Float32Array // [2 * board * board] precomputed coord channels
   private bufA: Float32Array // [h * board * board] (block input / residual out)
   private bufB: Float32Array // [h * board * board] (depthwise out)
@@ -420,7 +420,9 @@ export class StudentModel implements ModelLike {
       this.engageB = null
     }
 
-    this.in16 = new Float32Array(16 * sp)
+    // v3：in_ch = OBS_CHANNELS(16) + 2 coord 通道（原名 in16 保留——缓冲语义是
+    // 「obs 全通道 + 2 coord」，尺寸随 schema 常量走，勿写死）。
+    this.in16 = new Float32Array((OBS_CHANNELS + 2) * sp)
     // Coord channels: ch14[r*B+c] = round(c/(B-1)*255), ch15[r*B+c] = round(r/(B-1)*255).
     // MUST match nn-training/student_model.py coord_channels() exactly.
     this.coords = new Float32Array(2 * sp)
@@ -549,16 +551,17 @@ export class StudentModel implements ModelLike {
   private features(obs: Uint8Array, scalars: Float32Array): void {
     const sp = this.board * this.board
     const h = this.h
-    // 16ch input: copy 14 obs channels then append the precomputed coords.
-    for (let i = 0; i < 14 * sp; i++) this.in16[i] = obs[i]
-    this.in16.set(this.coords, 14 * sp)
+    // v3: copy all OBS_CHANNELS(16) obs channels then append the precomputed coords.
+    const oc = this.inCh
+    for (let i = 0; i < oc * sp; i++) this.in16[i] = obs[i]
+    this.in16.set(this.coords, oc * sp)
 
     // 2026-09-03 wasm32 SIMD 后端（conv_feats.wasm，h64/d8/board26，DECISIONS §311）：
     // 卷积段 ~6× 加速（probe pooled max|Δ|≈4.8e-6）。失败/架构不符 → false → TS 原路径。
     const wasmOk = this.h === 64 && this.d === 8 && runStudentConvWasm(this as never)
     if (!wasmOk) {
-      // stem: conv 3x3 16->h + ReLU
-      this.conv3x3(this.in16, 16, this.stemW, this.stemB, this.bufA)
+      // stem: conv 3x3 (inCh+2=18)->h + ReLU
+      this.conv3x3(this.in16, this.inCh + 2, this.stemW, this.stemB, this.bufA)
       this.reluInPlace(this.bufA)
 
       // d ConvMixer blocks: depthwise 5x5 + pointwise 1x1 + residual.

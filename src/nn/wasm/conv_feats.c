@@ -17,7 +17,10 @@ typedef float f32;
 #define SP (B * B)
 #define H 64
 #define D 8
-#define PAD3 (28 * 28 * 16)     /* stem pad: 16ch x 28x28 */
+/* v3（obs-schema-v3.plan.md v4.0）：stem 输入 = 16 obs + 2 coord = 18 通道
+ * （16→18 随 OBS_CHANNELS 14→16 同步；重编命令见文件尾注释）。 */
+#define IN_CH 18
+#define PAD3 (28 * 28 * IN_CH)  /* stem pad: 18ch x 28x28 */
 #define PAD5 (30 * 30 * H)      /* dw pad: 64ch x 30x30 */
 static f32 __attribute__((aligned(64))) scratch[PAD3 + PAD5];
 
@@ -150,8 +153,8 @@ void features(const f32* in16, const f32* stemW, const f32* stemB,
               f32* bufA, f32* bufB, f32* bufC, f32* pooled) {
   f32* pad3_ = scratch;
   f32* pad5_ = scratch + PAD3;
-  pad3(in16, 16, pad3_);
-  conv3(pad3_, stemW, stemB, bufA, 16, H);
+  pad3(in16, IN_CH, pad3_);
+  conv3(pad3_, stemW, stemB, bufA, IN_CH, H);
   for (int i = 0; i < D; i++) {
     pad5(bufA, pad5_);
     conv5dw(pad5_, dwW + i * H * 25, dwB + i * H, bufB);

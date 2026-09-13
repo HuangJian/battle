@@ -23,6 +23,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from schema import OBS_CHANNELS, SCALAR_DIM
+
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
@@ -121,8 +123,8 @@ def _fake_chunks(coarse: bool):
     torch.manual_seed(11)
     N = 64
     dim = ppo_goal.COARSE_DIM if coarse else ppo_goal.FINE_DIM
-    obs = rng.randint(0, 256, (N, 14, 26, 26)).astype(np.uint8)
-    scalars = rng.randn(N, 19).astype(np.float32) * 0.5
+    obs = rng.randint(0, 256, (N, OBS_CHANNELS, 26, 26)).astype(np.uint8)
+    scalars = rng.randn(N, SCALAR_DIM).astype(np.float32) * 0.5
     inject = np.zeros((N, 9), dtype=np.float32)
     inject[:, 0] = 12 / 26
     inject[:, 1] = 9 / 26
@@ -158,8 +160,8 @@ def _fake_chunks(coarse: bool):
 
 def test_policy_logprobs_dims() -> None:
     model = ppo_goal.GoalRLNet(h=32, d=2)
-    obs = torch.randint(0, 256, (4, 14, 26, 26), dtype=torch.uint8)
-    sc = torch.randn(4, 19)
+    obs = torch.randint(0, 256, (4, OBS_CHANNELS, 26, 26), dtype=torch.uint8)
+    sc = torch.randn(4, SCALAR_DIM)
     inj = torch.rand(4, 9)
     lp_f, eng, val = ppo_goal.policy_logprobs(model, obs, sc, inj, torch.ones(4, ppo_goal.FINE_DIM))
     check(tuple(lp_f.shape) == (4, 676), "fine logp (4,676)")

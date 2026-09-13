@@ -187,8 +187,8 @@ def export_golden(path: str, h: int, d: int, seed: int) -> None:
 
     输出 JSON 顶层结构：
       { h, d, seed,
-        obs:     [14*26*26]  (u1, 0..255),
-        scalars: [19]        (f4),
+        obs:     [OBS_CHANNELS*26*26]  (u1, 0..255),
+        scalars: [SCALAR_DIM]        (f4),
         inject:  [9]         (f4),
         intentLogits: [8], enemyLogits: [5], anchorLogits: [16],
         valueLogits: [1]  (M8：value 头 137→1 与三头并列，with_value=True),
@@ -198,9 +198,12 @@ def export_golden(path: str, h: int, d: int, seed: int) -> None:
     """
     torch.manual_seed(seed)
     # 输入：确定性伪随机 obs（0..255）+ 非零 scalars/inject（覆盖注入路径）。
+    # v3（obs-schema-v3.plan.md v4.0）：14/19 硬编码 → schema 常量（OBS_CHANNELS/SCALAR_DIM）。
+    from schema import BOARD, OBS_CHANNELS, SCALAR_DIM
+
     rng = torch.Generator().manual_seed(seed)
-    obs = torch.randint(0, 256, (1, 14, 26, 26), generator=rng, dtype=torch.uint8)
-    sc = (torch.rand(1, 19, generator=rng) - 0.5) * 4  # 有正有负
+    obs = torch.randint(0, 256, (1, OBS_CHANNELS, BOARD, BOARD), generator=rng, dtype=torch.uint8)
+    sc = (torch.rand(1, SCALAR_DIM, generator=rng) - 0.5) * 4  # 有正有负
     inj = torch.rand(1, INJECT_DIM, generator=rng)  # 非 one-hot 更严（时长非整数路径）
     inj[0, 0] = 1.0  # prev 类 0 热
 

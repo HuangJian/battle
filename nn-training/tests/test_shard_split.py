@@ -20,6 +20,8 @@ import numpy as np
 import pytest
 import torch
 
+from schema import OBS_CHANNELS, SCALAR_DIM
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -36,8 +38,8 @@ def _make_corpus(tmp_path: Path, n_shards: int = 6, frames_per_shard: int = 40) 
         d.mkdir(parents=True, exist_ok=True)
         n = frames_per_shard
         arrays: dict[str, np.ndarray] = {
-            "obs": rng.integers(0, 256, (n, 14, 26, 26), dtype=np.uint8),
-            "scalars": rng.standard_normal((n, 19)).astype(np.float32),
+            "obs": rng.integers(0, 256, (n, OBS_CHANNELS, 26, 26), dtype=np.uint8),
+            "scalars": rng.standard_normal((n, SCALAR_DIM)).astype(np.float32),
             "actions": rng.integers(0, 5, (n, 2), dtype=np.int64),
             "masks": np.ones((n, 7), dtype=np.float32),
             "conditions": np.zeros(n, dtype=np.int64),

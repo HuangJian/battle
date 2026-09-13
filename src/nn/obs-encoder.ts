@@ -26,6 +26,10 @@ import {
   ENEMY_SPAWNS,
   TICK_MS,
   MAX_ENEMIES_ALIVE,
+  EMP_DURATION_MS,
+  POWERUP_DURATION_MS,
+  POWERUP_TIMEOUT_MS,
+  RESPAWN_SHIELD_MS,
   Direction,
 } from '../constants'
 import type { World } from '../game/World'
@@ -39,12 +43,12 @@ import {
 } from '../ai/god/ThreatBudget'
 
 // ---- Canonical dimensions (mirror nn-training/schema.py) ----
-export const OBS_CHANNELS = 14
+export const OBS_CHANNELS = 16
 export const BOARD = GRID // 26
-export const SCALAR_DIM = 19
-export const OBS_SCHEMA_MAJOR = 2
+export const SCALAR_DIM = 30
+export const OBS_SCHEMA_MAJOR = 3
 
-// ---- Channel index map (plan §1.1) ----
+// ---- Channel index map (plan §1.1 + obs-schema-v3.plan.md v4.0 §3.2) ----
 export const CH = {
   terrainBrick: 0,
   terrainSteel: 1,
@@ -57,9 +61,11 @@ export const CH = {
   enemyFast: 8,
   enemyPower: 9,
   enemyArmor: 10,
-  bullet: 11, // enemy bullet 1-4, player bullet 5-8
-  powerup: 12, // on-field, value = 1 + enumIndex
-  waveHeat: 13, // projected spawns in next K ticks per spawn point
+  bullet: 11, // 混合基记法：(speedBucket<<3) + (owner<<2) + (d+1)，1..32——加法非位域
+  powerup: 12, // (lifeBucket<<4) | (1+enumIndex)，1..63
+  waveHeat: 13, // projected spawns in next K ticks per spawn point（N 点通用）
+  hitToKill: 14, // min(9, ceil(hp/damage))——随玩家星级重算（live damage，禁缓存）
+  spawning: 15, // 生成中敌倒计时 Math.round(255*clamp01(spawnTimer/1000))（uint8 规则）
 } as const
 
 // ---- PowerUpType declaration order (src/types.ts:20-38) ----
@@ -97,23 +103,40 @@ const TIER_INDEX: Record<string, number> = {
 const DIR_INDEX: Record<Direction, number> = { up: 0, down: 1, left: 2, right: 3 }
 
 // Scalar indices that flip sign under mirrorX (relative-direction x-components).
-// v2 (OBS_SCHEMA_MAJOR=2): item inventory scalars removed (24→19), the two
-// rel-x components renumbered [20,23] → [15,18].
-export const SCALAR_X_INDICES = [15, 18]
+// v3 (OBS_SCHEMA_MAJOR=3): 保留 15/18，新增 29（vx 冰面横向速度，s28 vy 不翻）。
+export const SCALAR_X_INDICES = [15, 18, 29]
+
+// ---- v3 ch11 弹速档（C10）：live bulletSpeed（px/tick）→ 4 序数档 ----
+// 真弹速源 = bulletSpeedCps 表（config/speed.ts baseBulletSpeedPxPerTick），
+// **不是** profile.projectileSpeed（规格初稿 {40,45,50,70} 前提的勘误——projectileSpeed
+// 是能力维度，与实际弹速脱钩）。modern 实测分布：armor 3.60 / power 3.80 /
+// basic 4.00 / fast+player 4.20-4.60 px/tick；classic power 重弹 8.0 自然落最高档。
+// 桶边界按「慢→快」序数划分，2 bit（与镜像 LUT 尺寸契约一致）。
+export const BULLET_SPEED_BUCKETS_PX = [3.7, 3.9, 4.1]
+export function bulletSpeedBucket(speedPxPerTick: number): number {
+  let b = 0
+  for (const bound of BULLET_SPEED_BUCKETS_PX) if (speedPxPerTick >= bound) b++
+  return b
+}
+
+// v3 ch15 生成中敌倒计时分母（SimulationEnemies 置 1000ms）。
+export const SPAWN_COUNTDOWN_MS = 1000
+
+const WAVE_HEAT_TICKS = 600 // K = 600 ticks (10s), plan §1.1 ch13
+/** waveHeat 轮转计数复用缓冲（§14.1：v2 为每次 encode 分配 [0,0,0]）。 */
+const WAVE_HEAT_COUNTS = new Array<number>(8).fill(0)
 
 if (POWERUP_COUNT !== 15) {
   throw new Error(`POWERUP_ORDER must have exactly 15 members, got ${POWERUP_COUNT}`)
 }
-
-const WAVE_HEAT_TICKS = 600 // K = 600 ticks (10s), plan §1.1 ch13
 
 function clamp01(x: number): number {
   return x < 0 ? 0 : x > 1 ? 1 : x
 }
 
 /**
- * Observation encoder. Reuses its internal obs (Uint8 14*26*26) and scalar
- * (Float32 24) buffers across calls — the caller must COPY out what it needs
+ * Observation encoder. Reuses its internal obs (Uint8 16*26*26) and scalar
+ * (Float32 30) buffers across calls — the caller must COPY out what it needs
  * (the exporter does, into the npy shard).
  */
 export class ObsEncoder {
@@ -209,16 +232,27 @@ export class ObsEncoder {
   }
 
   private encodeEnemies(world: World): void {
-    // Only allegiance 'enemy' tanks are encoded; 'ally' (guard) is v1-excluded
-    // (plan nn3 N7). Spawn-in-progress (spawnTimer>0) are not yet active.
+    // 敌车两态分编码（v3）：激活敌 → ch7-10（bonus<<6 + tier<<3 + dir）；
+    // 生成中敌（spawnTimer>0，v2 直接 continue 跳过 = C6 缺口）→ ch15 倒计时幅值。
     for (const t of world.tanks) {
-      if (!t.alive || t.spawnTimer > 0) continue
+      if (!t.alive) continue
       if (t.allegiance !== 'enemy') continue
+      if (t.spawnTimer > 0) {
+        // C6：生成中敌人可见 + 「还有多久激活」倒计时。uint8 规则（hy E1）：幅值
+        // 必须 ×255 取整后写入，clamp01 浮点直写会截断成恒 0。幅值 mirror 无关；
+        // 不编码 kind/朝向（出生闪灯阶段人类也只看到位置与闪烁）。
+        const cd = Math.round(255 * clamp01(t.spawnTimer / SPAWN_COUNTDOWN_MS))
+        this.writeBox(CH.spawning, t.x, t.y, TANK, TANK, cd)
+        continue
+      }
       const kindOffset = KIND_INDEX[t.kind]
       if (kindOffset === undefined) continue
       const tier = TIER_INDEX[t.aiState?.level ?? 'none'] ?? 0
       const d = DIR_INDEX[t.dir]
-      const val = (tier << 3) | (d + 1) // range 1-36
+      // C8 奖励车位在 bit6（v3.2 A1：bit4 与 tier 字段逐位碰撞——tier≥2 时
+      // tier<<3 占 bit4）。加法组装；mirror 只翻低 3 位，bit6 自动保留。
+      const bonus = t.bonus ? 1 : 0
+      const val = (bonus << 6) + (tier << 3) + (d + 1) // 1..100
       this.writeBox(CH.enemyBasic + kindOffset, t.x, t.y, TANK, TANK, val)
     }
   }
@@ -228,7 +262,12 @@ export class ObsEncoder {
       if (!b.alive) continue
       if (b.allegiance === 'ally') continue // plan nn3 N7: ignore ally bullets
       const d = DIR_INDEX[b.dir]
-      const val = b.allegiance === 'enemy' ? d + 1 : d + 1 + 4 // 1-4 enemy, 5-8 player
+      const owner = b.allegiance === 'enemy' ? 0 : 1
+      // C10 弹速档：live Bullet.speed（px/tick）→ 4 序数档（桶边界见模块头）。
+      // 加法编码（dsf A2）：d+1=4 占 bit2 与 owner<<2 重叠，字面 OR 会令
+      // player-right ≡ enemy-right——**全程加法**，混合基（位权 8/4 + 加法）非位域。
+      const sb = bulletSpeedBucket(b.speed)
+      const val = (sb << 3) + (owner << 2) + (d + 1) // 1..32
       // Bullet is ~6px: write its CENTER cell (plan §1.1 格锚点).
       const cc = Math.floor((b.x + b.w / 2) / CELL)
       const cr = Math.floor((b.y + b.h / 2) / CELL)
@@ -241,7 +280,11 @@ export class ObsEncoder {
       if (!pu.alive) continue
       const idx = POWERUP_ENUM.get(pu.type)
       if (idx === undefined) continue
-      const val = idx + 1 // 1-15
+      // C9 剩余寿命档（dsf 复核无冲突：typeIdx+1≤15 占位 0-3，lifeBucket 占位 4-5）：
+      // 新刷=3 → 将消失=0（2 bit 四档）。
+      const remaining = POWERUP_TIMEOUT_MS - pu.lifeTimer
+      const lifeBucket = Math.min(3, Math.floor(Math.max(0, remaining) / 5000))
+      const val = (lifeBucket << 4) | (idx + 1) // 1..63
       const c = Math.floor(pu.x / CELL)
       const r = Math.floor(pu.y / CELL)
       this.setCell(CH.powerup, c, r, val)
@@ -249,19 +292,21 @@ export class ObsEncoder {
   }
 
   private encodeWaveHeat(world: World): void {
-    // Projected spawns in the next K=600 ticks (plan §1.1 ch13).
+    // Projected spawns in the next K=600 ticks (plan §1.1 ch13). v3：**N 点通用**
+    // （ms F1 勘误——v2 硬编码 3 点而 arena 是 4 点，第 4 点热量丢失且轮转错位）。
     // Approximation (documented): bounded by the spawn INTERVAL (not the raw
     // queue length, which overestimates), capped by enemies still unspawned.
     const remaining = world.spawnQueue.length
     const intervalMs = world.rules?.spawnIntervalMs ?? 1500
     const projK = Math.floor((WAVE_HEAT_TICKS * TICK_MS) / intervalMs)
     const proj = Math.max(0, Math.min(remaining, projK))
-    // Distribute round-robin across the 3 spawn points so the summed heat
-    // equals `proj` (matches the true projected-spawn total, not 3x).
-    const counts = [0, 0, 0]
-    for (let i = 0; i < proj; i++) counts[i % 3]++
     const points = world.enemySpawnPoints
-    for (let i = 0; i < 3; i++) {
+    const n = points.length
+    if (n === 0) return
+    const counts = WAVE_HEAT_COUNTS // §14.1：模块级复用缓冲，禁 per-tick 分配
+    counts.fill(0, 0, n)
+    for (let i = 0; i < proj; i++) counts[i % n]++
+    for (let i = 0; i < n; i++) {
       const px = points[i]?.x ?? ENEMY_SPAWNS[i].col * CELL
       const py = points[i]?.y ?? ENEMY_SPAWNS[i].row * CELL
       this.setCell(CH.waveHeat, Math.floor(px / CELL), Math.floor(py / CELL), counts[i])
@@ -385,6 +430,38 @@ export class ObsEncoder {
         s[18] = 0
       }
     }
+
+    // ---- v3 新增 s19..s29（obs-schema-v3.plan.md v4.0 §3.3 定稿）----
+
+    // s19 玩家 HP（ratio 定案：raw≈263 量纲离群；maxHp 阶段内恒定 ⇒ 与 raw 信息等价）
+    s[19] = p ? clamp01(p.hp / p.maxHp) : 0
+    // s20 玩家无敌盾：道具盾会把 shieldTimer 拉到 20000ms —— 先 min 到重生盾窗口
+    // 再归一，防瞬间饱和（C2）
+    s[20] = p ? clamp01(Math.min(p.shieldTimer ?? 0, RESPAWN_SHIELD_MS) / RESPAWN_SHIELD_MS) : 0
+    // s21 敌冰冻（world 级计时器，可叠加，POWERUP_DURATION_MS=20000）
+    s[21] = clamp01(world.freezeTimer / POWERUP_DURATION_MS)
+    // s22 卡死计时（World.stuckTicks 由 Simulation 末尾维护，与导出器同源 stuck-detect.ts）
+    s[22] = clamp01(world.stuckTicks / 900) // 分母 = reward 封顶（c4-margin.jsonc:53）
+    // s23 水陆两栖 active（C7，classic 预留）
+    s[23] = p && (p.boatTimer ?? 0) > 0 ? 1 : 0
+    // s24 base HP —— **无条件编码**（v3.1 定案：baseHp/baseMaxHp 无基地关恒置满
+    // 1.0 不变化，World.ts:484-485；恒 0 会与「基地被毁=0」碰撞）
+    s[24] = clamp01(world.baseHp / world.baseMaxHp)
+    // s25 fence 钢圈 active（A2；undefined = 无）
+    s[25] = world.fenceExpireFrame !== undefined ? 1 : 0
+    // s26 分数（全难度计分非恒 0；基准 20000 档避开 5000 倍频混淆）
+    s[26] = clamp01(world.score / 20000)
+    // s27 EMP 静默剩余（§8.6 定案并入；EMP_DURATION_MS=8000）
+    s[27] = clamp01(world.empTimer / EMP_DURATION_MS)
+    // s28/s29 冰面速度分量（vx/vy，px/tick / 玩家速度 ⇒ [-1,1]；普通地面恒 ±1 或 0，
+    // 冰面 glide 才携带隐藏态）。vx 是 x 方向分量 ⇒ SCALAR_X_INDICES 含 29。
+    if (p && p.speed > 0) {
+      s[28] = p.vy / p.speed
+      s[29] = p.vx / p.speed
+    } else {
+      s[28] = 0
+      s[29] = 0
+    }
   }
 }
 
@@ -489,3 +566,51 @@ function isFireReady(world: World): boolean {
 }
 
 export { ticksUntilFire, ticksUntilLegalTurn }
+
+// ================================================================
+// SCHEMA_FINGERPRINT（hy X4）—— 双端一致性断言的机器锚。
+// 覆盖 = 决定观测字节的全部常量；任何一项变动指纹必变 ⇒ 双端单测红 ⇒ 漏同步
+// 现形，并写进 npy shard manifest（数据自述其 schema）。派生公式的正确性由
+// 单测另锁（见 obs spec §4 测试清单），指纹只钉「常量身份」。
+// 序列化 = 显式字段序 `|`/`,` 连接（语言中立，schema.py 逐字对齐）。
+// ================================================================
+
+function fnv1a(str: string): string {
+  let h = 0x811c9dc5
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i)
+    h = Math.imul(h, 0x01000193) >>> 0
+  }
+  return h.toString(16).padStart(8, '0')
+}
+
+export const SCHEMA_FINGERPRINT = fnv1a(
+  [
+    'v3',
+    OBS_SCHEMA_MAJOR,
+    OBS_CHANNELS,
+    SCALAR_DIM,
+    BOARD,
+    SCALAR_X_INDICES.join(','),
+    CH.terrainBrick,
+    CH.terrainSteel,
+    CH.terrainWater,
+    CH.terrainForest,
+    CH.terrainIce,
+    CH.base,
+    CH.self,
+    CH.enemyBasic,
+    CH.enemyFast,
+    CH.enemyPower,
+    CH.enemyArmor,
+    CH.bullet,
+    CH.powerup,
+    CH.waveHeat,
+    CH.hitToKill,
+    CH.spawning,
+    POWERUP_ORDER.join(','),
+    BULLET_SPEED_BUCKETS_PX.join(','),
+    SPAWN_COUNTDOWN_MS,
+    WAVE_HEAT_TICKS,
+  ].join('|'),
+)

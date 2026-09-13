@@ -21,6 +21,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from schema import OBS_CHANNELS, SCALAR_DIM
+
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
@@ -104,8 +106,8 @@ def test_rl_net_roundtrip_value_head(tmp_path: Path) -> None:
     check(tuple(vw.shape) == (1, 137), f"value_head.weight shape {tuple(vw.shape)} == (1,137)")
 
     # 前向：inject 必须消费。
-    obs = torch.zeros(2, 14, 26, 26, dtype=torch.uint8)
-    sc = torch.zeros(2, 19)
+    obs = torch.zeros(2, OBS_CHANNELS, 26, 26, dtype=torch.uint8)
+    sc = torch.zeros(2, SCALAR_DIM)
     inj_a = torch.zeros(2, 9)
     inj_b = torch.zeros(2, 9)
     inj_b[:, 7] = 1.0
@@ -134,8 +136,8 @@ def test_ppo_update_smoke() -> None:
     rng = np.random.RandomState(11)
     torch.manual_seed(11)
     N = 64
-    obs = rng.randint(0, 256, (N, 14, 26, 26)).astype(np.uint8)
-    scalars = rng.randn(N, 19).astype(np.float32) * 0.5
+    obs = rng.randint(0, 256, (N, OBS_CHANNELS, 26, 26)).astype(np.uint8)
+    scalars = rng.randn(N, SCALAR_DIM).astype(np.float32) * 0.5
     inject = np.zeros((N, 9), dtype=np.float32)
     inject[:, 2] = 1.0
     inject[:, 8] = 0.3

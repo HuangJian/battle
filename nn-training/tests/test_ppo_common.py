@@ -25,6 +25,8 @@ import numpy as np
 import numpy.typing as npt
 import torch
 
+from schema import OBS_CHANNELS, SCALAR_DIM
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import ppo.common as ppo_common
@@ -171,7 +173,7 @@ def test_discover_and_load_shard_fields(tmp_path: Path) -> None:
     root = Path(td)
     shard = root / "s1"
     shard.mkdir()
-    np.save(shard / "obs.npy", np.zeros((4, 14, 26, 26), dtype=np.uint8))
+    np.save(shard / "obs.npy", np.zeros((4, OBS_CHANNELS, 26, 26), dtype=np.uint8))
     np.save(shard / "reward.npy", np.zeros(4, dtype=np.float32))
     np.save(shard / "dt.npy", np.ones(4, dtype=np.int64))
     # 缺 marker 的目录被过滤
@@ -220,10 +222,10 @@ def test_chunk_episodes_shuffle_preserves_data() -> None:
 
     rng = np.random.RandomState(7)
     eps: list[dict] = [
-        {"obs": rng.randint(0, 255, (12, 14, 26, 26)).astype(np.uint8),
+        {"obs": rng.randint(0, 255, (12, OBS_CHANNELS, 26, 26)).astype(np.uint8),
          "adv": rng.randn(12).astype(np.float32),
          "ret": rng.randn(12).astype(np.float32)},
-        {"obs": rng.randint(0, 255, (20, 14, 26, 26)).astype(np.uint8),
+        {"obs": rng.randint(0, 255, (20, OBS_CHANNELS, 26, 26)).astype(np.uint8),
          "adv": rng.randn(20).astype(np.float32),
          "ret": rng.randn(20).astype(np.float32)},
     ]
@@ -261,7 +263,7 @@ def _ret_norm_shards(tmp_path: Path) -> dict[str, dict[str, npt.NDArray]]:
         (d / "obs.npy").write_bytes(b"0")
         rng = np.random.RandomState(11)
         payloads[name] = {
-            "obs": rng.randint(0, 255, (n, 14, 26, 26)).astype(np.uint8),
+            "obs": rng.randint(0, 255, (n, OBS_CHANNELS, 26, 26)).astype(np.uint8),
             "scalars": rng.randn(n, 24).astype(np.float32),
             "a_move": rng.randint(0, 5, n).astype(np.int64),
             "a_fire": rng.randint(0, 2, n).astype(np.int64),
@@ -332,8 +334,8 @@ def _kick_chunks() -> list[dict]:
     n = 8
     return [
         {
-            "obs": rng.randint(0, 255, (n, 14, 26, 26)).astype(np.uint8),
-            "scalars": (rng.randn(n, 19)).astype(np.float32),
+            "obs": rng.randint(0, 255, (n, OBS_CHANNELS, 26, 26)).astype(np.uint8),
+            "scalars": (rng.randn(n, SCALAR_DIM)).astype(np.float32),
             "a_move": rng.randint(0, 5, n).astype(np.int64),
             "a_fire": rng.randint(0, 2, n).astype(np.int64),
             "lp_move": (rng.randn(n) * 0.2).astype(np.float32),

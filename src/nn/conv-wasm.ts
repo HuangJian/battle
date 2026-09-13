@@ -38,6 +38,8 @@ interface WasmRunner {
 }
 
 const BOARD = 26
+// v3：stem 输入通道 = 16 obs + 2 coord（obs-schema-v3.plan.md v4.0；hy E4 链）
+const IN_CH = 18
 const SP = BOARD * BOARD
 const H = 64
 const D = 8
@@ -52,8 +54,8 @@ function loadRunner(): WasmRunner | null {
     const mem = inst.exports.memory as WebAssembly.Memory
     const need =
       (1 << 20) +
-      (9216 + 8 * (1600 + 64 + 4096 + 64)) * 4 + // 权重（stem/dw/pw + biases）
-      16 * SP * 4 + // in16
+      (IN_CH * 576 + 8 * (1600 + 64 + 4096 + 64)) * 4 + // 权重（stem/dw/pw + biases）
+      IN_CH * SP * 4 + // in16（v3：18 通道 = 16 obs + 2 coord）
       3 * H * SP * 4 + // bufA/B/C
       H * 4 // pooled
     const grow = Math.ceil((need - mem.buffer.byteLength) / 65536)
@@ -76,13 +78,13 @@ function loadRunner(): WasmRunner | null {
 
     // 固定字节偏移布局
     const offStemW = base
-    const offStemB = offStemW + 9216 * 4
+    const offStemB = offStemW + IN_CH * 576 * 4
     const offDwW = offStemB + 64 * 4
     const offDwB = offDwW + D * H * 25 * 4
     const offPwW = offDwB + D * H * 4
     const offPwB = offPwW + D * H * H * 4
     const offIn = offPwB + D * H * 4
-    const offBufA = offIn + 16 * SP * 4
+    const offBufA = offIn + IN_CH * SP * 4
     const offBufB = offBufA + H * SP * 4
     const offBufC = offBufB + H * SP * 4
     const offPooled = offBufC + H * SP * 4

@@ -45,34 +45,70 @@ from schema import (
 
 _MOVE_FLIP = np.array([0, 1, 2, 4, 3], dtype=np.int64)  # none,up,down,left<->right
 
+# ---- v3 mirror LUT（dsf A2 / hy E6：显式查表，不依赖位运算巧合）----
+# 翻转表按 **d+1 值空间**（1..4）索引：left(d=2)↔right(d=3) ⇒ 值 3↔4 互换，
+# up/down（1/2）与其余槽位原样。与 _MOVE_FLIP（left=3↔right=4 标签空间）同构不同域，
+# 勿混用。
+_LOW3_FLIP = np.array([0, 1, 2, 4, 3, 5, 6, 7], dtype=np.int32)
+
+
+def _build_enemy_lut() -> np.ndarray:
+    """ch6(self)/ch7-10(敌车) v3 布局：val = (hi<<3) + (d+1)。
+
+    hi = bonus<<3 | tier（敌，v3.2 A1 bit6 布局的 (col>>3) 分解）或 star（self）——
+    高位翻转不变、低 3 位翻转。256 项全值域查表。
+    """
+    lut = np.arange(256, dtype=np.int32)
+    low = lut & 7
+    hi = lut >> 3
+    flipped = (hi << 3) + _LOW3_FLIP[low]
+    flipped[lut == 0] = 0
+    return np.asarray(flipped, dtype=np.uint8)
+
+
+def _build_bullet_lut() -> np.ndarray:
+    """ch11(子弹) v3 混合基布局：val = (sb<<3) + (owner<<2) + (d+1)，合法域 1..32。
+
+    解码注意：rest = owner*4 + (d+1) ∈ **1..8**，player-right 的 rest=8 会溢出
+    bit3 ⇒ sb 必须按 `sb = (v-1) >> 3` 解（`v>>3` 在 rest=8 时错一档——hy E6
+    伪码同错，本测试 test_player_bullet_direction_flip 先于实现抓到）。
+    owner 判定 **rest >= 5**（`rest>>2` 在 rest=4——敌 right——会误判成玩家）；
+    sb 与 owner 翻转不变，仅 d 翻转（speedBucket 翻转前后不变，单测断言）。
+    域外值（0 / >32）原样返回。
+    """
+    lut = np.arange(256, dtype=np.int32)
+    sb = (lut - 1) >> 3
+    rest = lut - (sb << 3)
+    owner = (rest >= 5).astype(np.int32)
+    low = rest - (owner << 2)  # d+1 ∈ 1..4
+    new_d1 = _LOW3_FLIP[low]
+    val = (sb << 3) + (owner << 2) + new_d1
+    out = np.where((lut >= 1) & (lut <= 32), val, lut)
+    out[lut == 0] = 0
+    return np.asarray(out, dtype=np.uint8)
+
+
+ENEMY_MIRROR_LUT = _build_enemy_lut()
+BULLET_MIRROR_LUT = _build_bullet_lut()
+
 
 def _flip_direction(channel: np.ndarray, is_bullet: bool) -> np.ndarray:
-    """左右翻转方向编码 `(hi<<3)|dirIdx+1`；bullet 通道按敌我区分编码。
+    """左右翻转方向编码——v3 显式 LUT 查表（dsf A2 / hy E6）。
 
-    编码（src/nn/obs-encoder.ts，dirIdx 顺序见 schema.DIR_INDEX up/down/left/right）：
-      坦克/敌车：val = (hi << 3) | (d + 1)      低 3 位 ∈ 1..4（hi = star/tier）
-      敌弹     ：val = d + 1                    低 3 位 ∈ 1..4
-      玩家子弹 ：val = d + 1 + 4                低 3 位 ∈ 5..7，**right=8 → slot=0**
+    布局（obs-schema-v3.plan.md v4.0 §3.2 定稿）：
+      敌车 ch7-10 / self ch6：val = (hi<<3) + (d+1)；hi=bonus<<3|tier（敌）/ star(self)
+        —— 高位保留、低 3 位方向翻转。
+      子弹 ch11（**混合基**，全程加法）：val = (sb<<3) + (owner<<2) + (d+1)；
+        sb/owner 翻转不变，仅 d 翻转。
+      `mirror(mirror(v))==v` 与「speedBucket 翻转前后不变」由
+      tests/test_dataset_mirror.py 全值域断言（敌机 (bonus,tier,d) 全组合、子弹 32 值）。
 
-    旧实现只翻转 d∈{2,3}（`(col&7)-1`），玩家子弹低 3 位 ∈ {5,6,7,0} 恒不命中，
-    且 right=8 的 slot=0 被解成 d=-1 原样保留——玩家子弹方向**从不翻转**，镜像后
-    obs 与 move 标签自相矛盾（plan/python-refactor.md P0-2，2026-09-02 修复）。
-
-    修复：按 slot 解出方向 d（slot=0 → d=3 即 right），翻转 left↔right 后
-    按通道语义重编码；`mirror(mirror(x)) == x` 对全部 8 方向 × 敌我成立
-    （tests/test_dataset_mirror.py 逐例断言）。
+    历史（v2 修复记录，P0-2）：旧实现只翻 d∈{2,3}，玩家子弹（5..7/0 槽）从不翻转——
+    修复改为 slot 解码 + 加法重编码；v3 升 LUT（敌机 hi 位侥幸保 bonus 属巧合，
+    不依赖巧合）。
     """
-    col = channel.astype(np.int32)
-    slot = col & 7
-    d = (slot - 1) & 3  # slot∈1..4→0..3；5..7→0..2；0(player right)→3
-    newd = np.where(d == 2, 3, np.where(d == 3, 2, d))
-    if is_bullet:
-        # 敌弹 hi=0；玩家 right=8 的 bit3 是 d+1+4 的溢出伪影，重编码时用加法还原
-        player = (slot >= 5) | (slot == 0)
-        val = np.where(player, newd + 1 + 4, newd + 1)
-        return np.where(col > 0, val, 0).astype(np.uint8)
-    hi = (col >> 3) & 0x1F
-    return np.where(col > 0, (hi << 3) | (newd + 1), 0).astype(np.uint8)
+    lut = BULLET_MIRROR_LUT if is_bullet else ENEMY_MIRROR_LUT
+    return np.asarray(lut[channel], dtype=np.uint8)
 
 
 def mirror_x(obs: np.ndarray, scalars: np.ndarray, move_label: int):

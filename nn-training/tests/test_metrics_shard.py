@@ -16,6 +16,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from schema import OBS_CHANNELS, SCALAR_DIM
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -31,8 +33,8 @@ def _write_shard(root: Path, name: str, n: int, metrics: np.ndarray, manifest: d
     d = root / name
     d.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(n * 31 + 7)
-    np.save(d / "obs.npy", rng.integers(0, 256, (n, 14, 26, 26), dtype=np.uint8))
-    np.save(d / "scalars.npy", rng.random((n, 19), dtype=np.float32))
+    np.save(d / "obs.npy", rng.integers(0, 256, (n, OBS_CHANNELS, 26, 26), dtype=np.uint8))
+    np.save(d / "scalars.npy", rng.random((n, SCALAR_DIM), dtype=np.float32))
     np.save(d / "a_move.npy", rng.integers(0, 5, n))
     np.save(d / "a_fire.npy", rng.integers(0, 2, n))
     np.save(d / "lp_move.npy", rng.random(n).astype(np.float32) - 2)

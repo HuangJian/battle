@@ -102,7 +102,7 @@ function tsFeatures(
   const bufA = new Float32Array(H * SP),
     bufB = new Float32Array(H * SP),
     bufC = new Float32Array(H * SP)
-  conv3(in16, stemW, stemB, bufA, 16, H)
+  conv3(in16, stemW, stemB, bufA, 18, H)
   for (let i = 0; i < D; i++) {
     dw5(bufA, dwW[i], dwB[i], bufB)
     pw1(bufB, pwW[i], pwB[i], bufC)
@@ -123,19 +123,19 @@ describe('conv_feats.wasm vs TS naive（数值对拍）', () => {
     const inst = new WebAssembly.Instance(new WebAssembly.Module(wasmBytes))
     const mem = inst.exports.memory as WebAssembly.Memory
     const need =
-      (1 << 20) + (9216 + 8 * (1600 + 64 + 4096 + 64)) * 4 + 16 * SP * 4 + 3 * H * SP * 4 + H * 4
+      (1 << 20) + (10368 + 8 * (1600 + 64 + 4096 + 64)) * 4 + 18 * SP * 4 + 3 * H * SP * 4 + H * 4
     const grow = Math.ceil((need - mem.buffer.byteLength) / 65536)
     if (grow > 0) mem.grow(grow)
     const base = 1 << 20
     const f32At = (o: number) => new Float32Array(mem.buffer, o)
     const oStemW = base,
-      oStemB = oStemW + 9216 * 4,
+      oStemB = oStemW + 10368 * 4,
       oDwW = oStemB + 64 * 4
     const oDwB = oDwW + D * H * 25 * 4,
       oPwW = oDwB + D * H * 4,
       oPwB = oPwW + D * H * H * 4
     const oIn = oPwB + D * H * 4,
-      oBufA = oIn + 16 * SP * 4,
+      oBufA = oIn + 18 * SP * 4,
       oBufB = oBufA + H * SP * 4
     const oBufC = oBufB + H * SP * 4,
       oPool = oBufC + H * SP * 4
@@ -143,7 +143,7 @@ describe('conv_feats.wasm vs TS naive（数值对拍）', () => {
 
     for (let frame = 0; frame < 3; frame++) {
       const rnd = mulberry(0xc0ffee + frame * 97)
-      const stemW = randArr(rnd, 9216),
+      const stemW = randArr(rnd, 10368),
         stemB = randArr(rnd, 64)
       const dwW: Float32Array[] = [],
         dwB: Float32Array[] = [],
@@ -157,7 +157,7 @@ describe('conv_feats.wasm vs TS naive（数值对拍）', () => {
         pwW.push(randArr(rnd, H * H))
         pwB.push(randArr(rnd, H))
       }
-      const in16 = randArr(rnd, 16 * SP)
+      const in16 = randArr(rnd, 18 * SP)
 
       const ts = tsFeatures(in16, stemW, stemB, dwW, dwB, pwW, pwB)
       // 上传

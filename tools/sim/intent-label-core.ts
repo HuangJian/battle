@@ -22,12 +22,12 @@ import {
   INTENT_IDS,
   type TagFrame,
 } from '../../src/ai/intent/vocab'
-import { ObsEncoder, SCALAR_DIM } from '../../src/nn/obs-encoder'
+import { ObsEncoder, OBS_CHANNELS, BOARD, SCALAR_DIM } from '../../src/nn/obs-encoder'
 import { writeNpy } from '../../src/nn/npy'
 import { mkdirSync, writeFileSync, existsSync } from 'fs'
 import { CELL } from '../../src/constants'
 
-const OBS_N = 14 * 26 * 26
+const OBS_N = OBS_CHANNELS * BOARD * BOARD
 
 // ─── divergence-probe 三桶（同款谓词/半径/优先级，禁两份口径漂移）──────────
 // tools/diag/divergence-probe.ts：base(环损∨敌距基地≤12 Manhattan) > combat

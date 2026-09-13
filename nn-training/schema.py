@@ -11,7 +11,7 @@ all npy shards (plan NN-M0 exit rule, nn2 P0-2).
 """
 
 # ---- Observation spatial tensor ----
-OBS_CHANNELS = 14  # plan §1.1: channels 0..13
+OBS_CHANNELS = 16  # plan §1.1 (0..13) + v3: 14 hit_to_kill, 15 spawning
 BOARD = 26  # GRID — 26x26 sub-block grid
 OBS_SHAPE = (OBS_CHANNELS, BOARD, BOARD)
 
@@ -19,7 +19,8 @@ OBS_SHAPE = (OBS_CHANNELS, BOARD, BOARD)
 # v2 (OBS_SCHEMA_MAJOR=2): item-inventory scalars removed (guard/frenzy/
 # rewind stock, frenzyActive, frenzyShotsLeft) — 24 → 19 (plan AI-No-Items
 # Warmstart M2 ②). SCALAR_X_INDICES renumbered [20,23] → [15,18].
-SCALAR_DIM = 19
+# v3 (OBS_SCHEMA_MAJOR=3): 19 → 30 (s19..s29，obs-schema-v3.plan.md v4.0 §3.3 定稿)。
+SCALAR_DIM = 30
 
 # ---- Action heads (v2: item head REMOVED — AI 不使用主动道具) ----
 MOVE_DIM = 5  # none/up/down/left/right
@@ -28,9 +29,14 @@ MASK_DIM = MOVE_DIM + FIRE_DIM  # 7
 
 # Schema major version. Written into every npy shard manifest and into the
 # exported weights file. Bump +1 on ANY channel/scalar/action layout change.
-OBS_SCHEMA_MAJOR = 2
+OBS_SCHEMA_MAJOR = 3
 
-# ---- Channel index map (plan §1.1) ----
+# ---- Channel index map (plan §1.1 + v3: 14/15) ----
+# 全局规则（hy E1 / dsf A2，实施者必读）：
+#   · 所有 grid 通道是 uint8——浮点幅值必须 ×255 取整（或量化成档）后写入；
+#   · bullet 通道是**混合基记法** (speedBucket<<3) + (owner<<2) + (d+1)——
+#     **全程加法**（d+1=4 占 bit2 与 owner 位重叠，字面 OR 会令 player-right
+#     ≡ enemy-right），禁止照抄位域直觉用 OR。
 CH = {
     "terrain_brick": 0,
     "terrain_steel": 1,
@@ -39,13 +45,15 @@ CH = {
     "terrain_ice": 4,
     "base": 5,  # eagle (=2) + ring cells (=1)
     "self": 6,  # player tank
-    "enemy_basic": 7,
+    "enemy_basic": 7,  # (bonus<<6) + (tier<<3) + (d+1)，1..100——bonus 位在 bit6（A1）
     "enemy_fast": 8,
     "enemy_power": 9,
     "enemy_armor": 10,
-    "bullet": 11,  # enemy bullet 1-4, player bullet 5-8
-    "powerup": 12,  # on-field power-up, value = 1+enumIndex
-    "wave_heat": 13,  # projected spawns in next K ticks per spawn point
+    "bullet": 11,  # 混合基：1..32（speedBucket 见 BULLET_SPEED_BUCKETS_PX）
+    "powerup": 12,  # (lifeBucket<<4) | (1+enumIndex)，1..63
+    "wave_heat": 13,  # projected spawns in next K ticks per spawn point（N 点通用）
+    "hit_to_kill": 14,  # min(9, ceil(hp/damage))——随玩家星级重算（live damage，禁缓存）
+    "spawning": 15,  # 生成中敌倒计时 0..255
 }
 
 # ---- PowerUpType declaration order (src/types.ts:20-38, plan §1.1 ch12) ----
@@ -80,21 +88,22 @@ TIER_INDEX = {"none": 0, "rookie": 1, "soldier": 2, "veteran": 3, "commander": 4
 DIR_INDEX = {"up": 0, "down": 1, "left": 2, "right": 3}
 DIR_FROM_INDEX = ["up", "down", "left", "right"]
 
-# ---- Scalar layout (plan §1.2, v2: 19 floats; item inventory scalars removed). ----
+# ---- Scalar layout (plan §1.2 + v3: 30 floats，定稿 obs-schema-v3.plan.md §3.3) ----
 # Indices that flip sign under mirrorX (relative-direction x-components).
-SCALAR_X_INDICES = [15, 18]
+# v3：15/18 保留，29 = vx 冰面横向速度（s28 vy 不翻）。
+SCALAR_X_INDICES = [15, 18, 29]
 
 SCALAR_LAYOUT = [
     (0, "slack"),  # min enemy killSlack, normalized 0..1
     (1, "baseDeadline"),  # min enemyDamageDeadline, normalized 0..1
-    (2, "lives"),  # lives / START_LIVES
+    (2, "lives"),  # lives / 3（跨 tier OOD 注记：1 命 tier 恒 0.333、2 命起手 0.667）
     (3, "level"),  # player star level, clamped /3
     (4, "fireProgress"),  # 0..1 cooldown progress (nextFireInterval)
     (5, "turnCooldownRemaining"),  # 0..1 (turnCooldownMs - elapsed)/cd
     (6, "ringCompleteness"),  # intact ring cells / 8
-    (7, "enemiesOnField"),  # alive enemies / MAX_ENEMIES_ALIVE
+    (7, "enemiesOnField"),  # alive enemies / MAX_ENEMIES_ALIVE（生成中敌不算）
     (8, "spawnQueueRemaining"),  # remaining queue / enemiesTotal
-    (9, "tier_none"),  # fraction of enemies at tier none
+    (9, "tier_none"),  # fraction of enemies at tier none（生成中敌不算——定案）
     (10, "tier_rookie"),
     (11, "tier_soldier"),
     (12, "tier_veteran"),
@@ -104,6 +113,18 @@ SCALAR_LAYOUT = [
     (16, "nearestEnemyRelY"),  # dy/dist, -1..1
     (17, "nearestBaseDist"),  # normalized 0..1
     (18, "nearestBaseRelX"),  # dx/dist, -1..1  (FLIPS on mirrorX)
+    # ---- v3 新增（obs-schema-v3.plan.md v4.0 §3.3 定稿）----
+    (19, "playerHp"),  # clamp01(hp/maxHp)——ratio 定案（raw 量纲离群）
+    (20, "playerShield"),  # clamp01(min(shieldTimer, RESPAWN_SHIELD_MS)/RESPAWN_SHIELD_MS)
+    (21, "freeze"),  # clamp01(freezeTimer / POWERUP_DURATION_MS)
+    (22, "stuck"),  # clamp01(stuckTicks / 900)——World 字段，共享判定 stuck-detect.ts
+    (23, "boat"),  # boatTimer > 0 ? 1 : 0
+    (24, "baseHp"),  # clamp01(baseHp/baseMaxHp) 无条件——无基地关恒 1.0 不变化（v3.1）
+    (25, "fence"),  # fenceExpireFrame !== undefined ? 1 : 0
+    (26, "score"),  # clamp01(score / 20000)（全难度计分非恒 0）
+    (27, "emp"),  # clamp01(empTimer / EMP_DURATION_MS)
+    (28, "iceVy"),  # vy/speed，[-1,1]（不 clamp01，同 s15/16 惯例）
+    (29, "iceVx"),  # vx/speed，[-1,1]（x 分量 ⇒ SCALAR_X_INDICES）
 ]
 assert len(SCALAR_LAYOUT) == SCALAR_DIM
 assert sorted(i for i, _ in SCALAR_LAYOUT) == list(range(SCALAR_DIM))
@@ -123,3 +144,38 @@ DIRECTION_CHANNELS = {
     CH["enemy_armor"],
     CH["bullet"],
 }
+
+# ---- v3 弹速档（ch11 混合基高位，C10）----
+# 真弹速源 = bulletSpeedCps 表（config/speed.ts baseBulletSpeedPxPerTick），
+# **非** profile.projectileSpeed——规格初稿 {40,45,50,70} 前提勘误（那是能力维度，
+# 与实际弹速脱钩）。桶边界按 px/tick「慢→快」序数划分：
+#   modern 实测：armor 3.60 / power 3.80 / basic 4.00 / fast+player 4.20-4.60 px/tick；
+#   classic power 重弹 8.0 px/tick 自然落最高档（快弹语义，方向正确）。
+BULLET_SPEED_BUCKETS_PX = [3.7, 3.9, 4.1]
+SPAWN_COUNTDOWN_MS = 1000
+
+
+def _fnv1a(s: str) -> str:
+    h = 0x811C9DC5
+    for ch in s:
+        h = ((h ^ ord(ch)) * 0x01000193) & 0xFFFFFFFF
+    return format(h, "08x")
+
+
+# SCHEMA_FINGERPRINT（hy X4）：双端一致性机器锚——TS 侧 obs-encoder.ts 逐字对齐
+# 同一 payload（字段序/连接符一致）；任何常量变动指纹必变 ⇒ 双端单测红 +
+# 写进 npy shard manifest。派生公式的正确性由单测另锁，指纹只钉「常量身份」。
+_FINGERPRINT_PARTS = [
+    "v3",
+    str(OBS_SCHEMA_MAJOR),
+    str(OBS_CHANNELS),
+    str(SCALAR_DIM),
+    str(BOARD),
+    ",".join(str(i) for i in SCALAR_X_INDICES),
+    "|".join(str(v) for v in CH.values()),  # TS 侧逐元素 push → '|' 连接（勿改 ','）
+    ",".join(POWERUP_ORDER),
+    ",".join(str(b) for b in BULLET_SPEED_BUCKETS_PX),
+    str(SPAWN_COUNTDOWN_MS),
+    str(600),  # WAVE_HEAT_TICKS（TS const，plan §1.1 ch13）
+]
+SCHEMA_FINGERPRINT = _fnv1a("|".join(_FINGERPRINT_PARTS))

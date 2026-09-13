@@ -19,6 +19,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from schema import OBS_CHANNELS, SCALAR_DIM
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -99,8 +101,8 @@ def _chunks(n_chunks: int = 3, b: int = 8, seed: int = 0) -> list[dict]:
     for _ in range(n_chunks):
         out.append(
             {
-                "obs": rng.integers(0, 256, (b, 14, 26, 26), dtype=np.uint8),
-                "scalars": rng.standard_normal((b, 19)).astype(np.float32),
+                "obs": rng.integers(0, 256, (b, OBS_CHANNELS, 26, 26), dtype=np.uint8),
+                "scalars": rng.standard_normal((b, SCALAR_DIM)).astype(np.float32),
                 "a_move": rng.integers(0, 5, (b,), dtype=np.int64),
                 "a_fire": rng.integers(0, 2, (b,), dtype=np.int64),
                 "lp_move": rng.standard_normal(b).astype(np.float32),
@@ -130,8 +132,8 @@ def _intent_fixture(n: int = 64, seed: int = 11):
     import ppo.intent as ppo_intent
 
     rng = np.random.RandomState(seed)
-    obs = rng.randint(0, 256, (n, 14, 26, 26)).astype(np.uint8)
-    scalars = rng.randn(n, 19).astype(np.float32) * 0.5
+    obs = rng.randint(0, 256, (n, OBS_CHANNELS, 26, 26)).astype(np.uint8)
+    scalars = rng.randn(n, SCALAR_DIM).astype(np.float32) * 0.5
     inject = np.zeros((n, 9), dtype=np.float32)
     inject[:, 2] = 1.0
     inject[:, 8] = 0.3
@@ -222,8 +224,8 @@ def test_goal_stats_keys_include_bc() -> None:
     rng = np.random.RandomState(12)
     n = 64
     dim = ppo_goal.FINE_DIM
-    obs = rng.randint(0, 256, (n, 14, 26, 26)).astype(np.uint8)
-    scalars = rng.randn(n, 19).astype(np.float32) * 0.5
+    obs = rng.randint(0, 256, (n, OBS_CHANNELS, 26, 26)).astype(np.uint8)
+    scalars = rng.randn(n, SCALAR_DIM).astype(np.float32) * 0.5
     inject = np.zeros((n, 9), dtype=np.float32)
     inject[:, 0] = 12 / 26
     inject[:, 1] = 9 / 26

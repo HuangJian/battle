@@ -19,6 +19,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from schema import OBS_CHANNELS, SCALAR_DIM
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -48,8 +50,8 @@ def _chunks(n_chunks: int = 3, b: int = 8, seed: int = 0) -> list[dict]:
     for _ in range(n_chunks):
         out.append(
             {
-                "obs": rng.integers(0, 256, (b, 14, 26, 26), dtype=np.uint8),
-                "scalars": rng.standard_normal((b, 19)).astype(np.float32),
+                "obs": rng.integers(0, 256, (b, OBS_CHANNELS, 26, 26), dtype=np.uint8),
+                "scalars": rng.standard_normal((b, SCALAR_DIM)).astype(np.float32),
                 "a_move": rng.integers(0, 5, (b,), dtype=np.int64),
                 "a_fire": rng.integers(0, 2, (b,), dtype=np.int64),
                 "lp_move": rng.standard_normal(b).astype(np.float32),

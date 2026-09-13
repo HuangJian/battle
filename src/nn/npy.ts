@@ -19,6 +19,7 @@
 
 import { writeFileSync, mkdirSync } from 'fs'
 import { dirname } from 'path'
+import { OBS_CHANNELS, BOARD, SCALAR_DIM } from './obs-encoder'
 
 export type NpyDtype = 'u1' | 'u2' | 'i1' | 'f4' | 'f8'
 
@@ -75,8 +76,8 @@ export function writeNpy(
 
 /** Per-shard arrays (flat, row-major). */
 export interface ShardArrays {
-  obs: Uint8Array // N * 14 * 26 * 26
-  scalars: Float32Array // N * 19
+  obs: Uint8Array // N * OBS_CHANNELS * 26 * 26
+  scalars: Float32Array // N * SCALAR_DIM
   actions: Uint8Array // N * 2   [move, fire]  (v2: item head removed)
   masks: Uint8Array // N * 7  [move5, fire2], 1 = valid
   conditions: Uint8Array // N * 1 (uint8 category)
@@ -87,8 +88,10 @@ export function writeShard(dir: string, a: ShardArrays, manifest: unknown): void
   mkdirSync(dir, { recursive: true })
   const N = a.conditions.length
   if (N === 0) return
-  writeNpy(`${dir}/obs.npy`, a.obs, [N, 14, 26, 26], 'u1')
-  writeNpy(`${dir}/scalars.npy`, a.scalars, [N, 19], 'f4')
+  // v3（obs-schema-v3.plan.md v4.0 §3.5-3）：shape 从 schema 常量派生，勿写死
+  // ——major bump 曾三次漏改这里（14/19 硬编码）。
+  writeNpy(`${dir}/obs.npy`, a.obs, [N, OBS_CHANNELS, BOARD, BOARD], 'u1')
+  writeNpy(`${dir}/scalars.npy`, a.scalars, [N, SCALAR_DIM], 'f4')
   writeNpy(`${dir}/actions.npy`, a.actions, [N, 2], 'u1')
   writeNpy(`${dir}/masks.npy`, a.masks, [N, 7], 'u1')
   writeNpy(`${dir}/conditions.npy`, a.conditions, [N], 'u1')

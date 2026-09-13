@@ -18,6 +18,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from schema import OBS_CHANNELS, SCALAR_DIM
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -116,8 +118,8 @@ def _make_corpus(tmp_path: Path, n: int = 60) -> Path:
     d = tmp_path / "shard0"
     d.mkdir(parents=True, exist_ok=True)
     arrays: dict[str, np.ndarray] = {
-        "obs": rng.integers(0, 256, (n, 14, 26, 26), dtype=np.uint8),
-        "scalars": rng.standard_normal((n, 19)).astype(np.float32),
+        "obs": rng.integers(0, 256, (n, OBS_CHANNELS, 26, 26), dtype=np.uint8),
+        "scalars": rng.standard_normal((n, SCALAR_DIM)).astype(np.float32),
         # move ∈ 0..4；fire ∈ 0..1（FIRE_DIM=2——随机 0..4 会让 masked CE 目标越界）
         "actions": np.stack(
             [rng.integers(0, 5, n), rng.integers(0, 2, n)], axis=1
