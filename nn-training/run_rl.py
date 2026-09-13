@@ -92,25 +92,37 @@ def _log_rl_args(src: dict, merged: dict) -> None:
 
 
 def _runrl_pid_alive(pid: int) -> bool:
-    """Windows 安全的进程存活探测（GetExitCodeProcess == STILL_ACTIVE）。
+    """跨平台的进程存活探测。
 
-    不用 os.kill(pid, 0)——Windows 上那是 TerminateProcess(handle, 0)，会把锁
-    持有人直接杀掉（train/loop_util._pid_alive 的隐患，此处不复用）。"""
-    import ctypes
+    Windows 走 GetExitCodeProcess == STILL_ACTIVE——os.kill(pid, 0) 在 Windows 上
+    是 TerminateProcess(handle, 0)，会把锁持有人直接杀掉（train/loop_util._pid_alive
+    的隐患，不复用）。POSIX 上 signal 0 只是存在性探测，安全。
 
-    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-    STILL_ACTIVE = 259
-    k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-    handle = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-    if not handle:
-        return False
-    try:
-        exit_code = ctypes.c_ulong()
-        if not k32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+    2026-09-13 修复：原实现把 Windows 分支写成了无条件路径，Linux 一遇**已存在**
+    的锁文件就 AttributeError——陈旧锁永不清理、同课双开变成崩溃而非响亮拒启
+    （P1 验收遗留的 stale 锁让双课验收当场两连崩）。POSIX 分支与 loop_util._pid_alive
+    同款宽捕获：任何探测失败都按"不存活"处理，stale 锁总能被清理。"""
+    if os.name == "nt":
+        import ctypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        handle = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
             return False
-        return exit_code.value == STILL_ACTIVE
-    finally:
-        k32.CloseHandle(handle)
+        try:
+            exit_code = ctypes.c_ulong()
+            if not k32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return False
+            return exit_code.value == STILL_ACTIVE
+        finally:
+            k32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)  # signal 0 = 不发信号，仅探测存在性/权限
+        return True
+    except Exception:
+        return False
 
 
 def _acquire_run_rl_lock(lock_path: str, *, force: bool = False) -> bool:

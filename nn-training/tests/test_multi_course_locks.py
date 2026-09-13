@@ -117,6 +117,45 @@ def test_train_loop_cli_accepts_course_flag() -> None:
     assert "--course" in proc.stdout
 
 
+# ────────────────────────── run_rl 锁原语（stale 接管 + 同课拒启，跨平台） ──────────────────────────
+
+
+def _dead_pid() -> int:
+    """确定已退出的 PID（spawn 后立即 wait）——stale 锁的确定性持有者。"""
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    return proc.pid
+
+
+def test_runrl_stale_lock_taken_over(tmp_path: Path) -> None:
+    """锁持有人已死 → 自动接管（stale 清理后重持，不拒启）。
+
+    回归：`run_rl._runrl_pid_alive` 曾把 Windows 的 ctypes.windll 分支写成无条件
+    路径——Linux 上凡遇**已存在**的锁文件（无论持有者死活）一律 AttributeError，
+    陈旧锁永不清理、同课双开变成崩溃而非响亮拒启（2026-09-13 s1/s-dodge 双课
+    验收实测：P1 验收遗留的 stale 锁让第二次启动当场崩）。"""
+    from run_rl import _acquire_run_rl_lock, _cleanup_run_rl_lock
+
+    p = str(tmp_path / ".run_rl.course-a.lock")
+    Path(p).write_text(f"{_dead_pid()}|python|0", encoding="utf-8")
+    try:
+        assert _acquire_run_rl_lock(p) is True
+    finally:
+        _cleanup_run_rl_lock(p)
+
+
+def test_runrl_same_course_refused_while_holder_alive(tmp_path: Path) -> None:
+    """同课双开且持有人活着 → 响亮拒启（返回 False），不是异常崩溃。"""
+    from run_rl import _acquire_run_rl_lock, _cleanup_run_rl_lock
+
+    p = str(tmp_path / ".run_rl.course-a.lock")
+    Path(p).write_text(f"{os.getpid()}|python|0", encoding="utf-8")
+    try:
+        assert _acquire_run_rl_lock(p) is False
+    finally:
+        _cleanup_run_rl_lock(p)
+
+
 # ────────────────────────── 命名空间键 = 文件 stem（P1c 修正） ──────────────────────────
 
 
