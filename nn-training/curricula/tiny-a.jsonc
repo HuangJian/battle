@@ -1,0 +1,41 @@
+{
+  // tiny-a — 多课程并行「流程验证」微型课程（2026-09-13，plan multi-course P2 验收）。
+  // 同类先例：s1（公式引擎验收夹具，用户 2026-09-02 决策「不再实际训练」）——
+  // 本课程同理只作流程夹具：秒级 rollout/PPO 跑通真实 5 轮状态机
+  // （采集→PPO→导出→记账→轮转），验证 per-course 隔离；**不是能力训练**
+  // （§15.2 哨兵，不读胜率曲线）。全部为课程数据行（§2.4），训练算法代码零改动；
+  // stage 1000 与 tiny-b(1051) 互斥——并行时 shard stage 前缀即隔离证据。
+  "version": 5,
+  "name": "tiny-a-flowcheck",
+  "mode": "per-tick",
+
+  "stages": "1000",
+  "difficulty": "hard",
+  "max_ticks": 150,
+  "seed_rotate": 2,
+  "player": { "lives": 3, "level": 1 },
+
+  // 奖励 = s1 同款配置公式（夹具用途；Φ = 势，reward[i] = Φ[i+1] − Φ[i]）
+  "reward": {
+    "formula": "1.0*(kills+1) - 0.15*playerHits",
+    "params": {},
+    "terminal": { "stage_clear": 2.0, "lives_exhausted": -0.5 },
+  },
+
+  "bc": "tmp/s2-cap/weights.json",
+  "freeze": [],
+  "freeze_heads": [],
+  "iters": 5,
+  "workers": 2,
+  "out": "tmp/tiny-a/weights.json",
+  "traj": "tmp/tiny-a",
+  "epochs": 1,
+  "mb": 64,
+  "lr": 3e-5,
+  "warmup_iters": 0,
+  "stream": 1,
+  "keep_iters": 6,
+  "eval_stages": "",
+  "eval_games_per_stage": 0,
+  "eval_every": 99,
+}

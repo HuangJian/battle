@@ -1,0 +1,38 @@
+{
+  // tiny-b — 多课程并行「流程验证」微型课程（2026-09-13，plan multi-course P2 验收）。
+  // 与 tiny-a 同构（见该文件头注释）；stage 1051 与 tiny-a(1000) 互斥——
+  // 两课并行时 shard stage 前缀即隔离证据。秒级 rollout/PPO；**不是能力训练**。
+  "version": 5,
+  "name": "tiny-b-flowcheck",
+  "mode": "per-tick",
+
+  "stages": "1051",
+  "difficulty": "hard",
+  "max_ticks": 150,
+  "seed_rotate": 2,
+  "player": { "lives": 3, "level": 1 },
+
+  // 奖励 = s1 同款配置公式（夹具用途）
+  "reward": {
+    "formula": "1.0*(kills+1) - 0.15*playerHits",
+    "params": {},
+    "terminal": { "stage_clear": 2.0, "lives_exhausted": -0.5 },
+  },
+
+  "bc": "tmp/s2-cap/weights.json",
+  "freeze": [],
+  "freeze_heads": [],
+  "iters": 5,
+  "workers": 2,
+  "out": "tmp/tiny-b/weights.json",
+  "traj": "tmp/tiny-b",
+  "epochs": 1,
+  "mb": 64,
+  "lr": 3e-5,
+  "warmup_iters": 0,
+  "stream": 1,
+  "keep_iters": 6,
+  "eval_stages": "",
+  "eval_games_per_stage": 0,
+  "eval_every": 99,
+}
