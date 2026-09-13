@@ -413,14 +413,13 @@ def d14_corpus_match(job_course_fp: str, job_corpus_fp: str, shard_manifest: dic
 
 
 def _bc_device(dev_str: str) -> str:
-    """BC 任务的设备映射（plan/bc-cloud-integration.plan.md §3）：cuda-dp → cuda
-    （BC 网络小，DP 包装无必要）；tpu/xla 确定性拒绝（train/bc.py 无 xla 路径），
-    绝不静默降级——设备语义错了的 benchmark 数据比没有更糟。"""
+    """BC 任务的设备透传（2026-09-13 多卡：train/bc.py 自带 cuda-dp 语义与
+    单卡/无卡响亮退化——worker 不再代为砍成单卡）；tpu/xla 确定性拒绝
+    （train/bc.py 无 xla 路径），绝不静默降级——设备语义错了的 benchmark
+    数据比没有更糟。"""
     s = str(dev_str).lower()
-    if s in ("cuda-dp", "dp"):
-        return "cuda"
     if s in ("tpu", "xla"):
-        raise ProtocolError(f"bc 任务不支持设备 {dev_str!r}（v1 仅 cpu/cuda）")
+        raise ProtocolError(f"bc 任务不支持设备 {dev_str!r}（v1 仅 cpu/cuda/cuda-dp）")
     return s or "cpu"
 
 

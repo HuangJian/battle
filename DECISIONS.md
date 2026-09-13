@@ -1468,3 +1468,17 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 - **教训入册**（docs/nn.progress.md §39）：单 shard 语料 shard 级切分 train=0 崩溃
   （make_loaders 回退样本级）；agent 结果缓存键不含任务参数 → smoke 独立 iterId 命名空间；
   LAN 节点需升级（git pull + restart）才有 `bcSupport` 能力位——升级前 fail-closed 不派。
+
+
+## §2026-09-13-multi-gpu-default（2026-09-13，云端多卡默认启用 DataParallel：PPO + BC；用户指令）
+
+- **决策**：battle-rl.ipynb 单 cell 的 `use_multi_gpu` 默认 **True**——云端 2+ GPU 时
+  PPO 与 BC 都真跑多卡（PPO 走 worker 既有 DP 分支；BC 由 bc.py 新增 `_resolve_bc_device`
+  + `_bc_raw` 支撑）。opt-out 保留：要与历史单卡 run 逐位 A/B 的腿把
+  `use_multi_gpu` 改 `False`（或 device 显式 "cuda"）。
+- **拒绝的替代方案**：维持 opt-in 默认 False——用户指令「双/多卡时训练跑在双/多卡上」
+  直接否决「第二张卡闲置」；改为 opt-out 后，逐位可比性从默认诉求降级为显式诉求
+  （等价于把「新实验臂」的判断权交给操作员的显式开关）。
+- **边界**：单卡机器行为零变化；TPU 拒收链不变（bc 任务 tpu/xla 仍 ProtocolError）；
+  DP 激活时 worker/bc.py 双侧响亮日志「梯度归约顺序变化，与单卡 run 不可逐位比」；
+  DP state_dict 的 "module." 前缀防线 = bc.py `_bc_raw` + worker 既有 raw_model 模式。

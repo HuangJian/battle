@@ -5,6 +5,29 @@
 
 ---
 
+## §41 云端多卡确认：PPO/BC 双卡默认真用上（2026-09-13，用户指令「双/多卡时训练跑在双/多卡上」）
+
+**缺口**：PPO 的 DP 能力在（worker run_job 对 --device cuda-dp 包 DataParallel，
+T4x2 实测 1.92×，§21）但 cell 默认 `use_multi_gpu: False`（多卡机器第二张卡闲置）；
+BC 更是完全单卡（worker `_bc_device` 把 cuda-dp 砍成 cuda，bc.py 无 DP）。
+
+**补齐（默认反转）**：
+
+- **cell 默认 `use_multi_gpu: True`**：auto + 2+ 卡 → cuda-dp（响亮日志）。opt-out
+  保留（要逐位可比改 False）——多卡机器重跑 cell 后新会话即生效；在跑腿中途换 DP
+  = 数值不可逐位比，操作员须知（markdown/日志双提示）。
+- **bc.py 补 DP**：`_resolve_bc_device`（cuda-dp：2+ 卡真 DP；单卡/无卡**响亮退化**
+  cuda/cpu——与 worker 同语义）+ `_bc_raw`（DP state_dict 的 "module." 前缀绝不进
+  weights.json——TS 运行时格式防线）；train() 经 raw_model 落盘/恢复/计数（DP 与 raw
+  共享参数对象，训练原地更新终态即 raw 终态）。
+- **worker `_bc_device` 改透传**（不再代砍单卡）；tpu/xla 拒收不变。
+- **单卡机器零变化**：resolve 尊重 1 卡现实（cuda），退化路径响亮。
+
+**验证**：`test_bc_dp.py`（12 例：cuda-dp 多卡/单卡退化/无卡退化/透传、_bc_raw 解包
++ "module." 前缀真实存在性断言 + 参数对象同一性、worker 透传/tpu 拒收）+
+`test_notebook_runtime.py`（24 例既有）全绿；nn-python-gate 全量绿。
+真 2 卡行为由 worker 既有 DP 分支 + §21 T4x2 实测背书（本机无 2 卡，DP 转发无法本地跑）。
+
 ## §40 自主审查轮：battle-rl.ipynb 单 cell 化 + 真跑暴露四缺陷修复 + bc-c4 it1 真实产物（2026-09-13）
 
 **BC 云端 notebook 重构（用户指令：网页只执行一个 cell 建连，其余完全自主）**——

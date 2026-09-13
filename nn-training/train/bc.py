@@ -41,6 +41,7 @@ import subprocess
 import sys
 import time
 from collections import Counter
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -55,6 +56,38 @@ from data.weights_io import load_state_into, save_weights_json
 from models.core import NNPolicy, param_count
 from models.student import PPOStudent, StudentNet
 from schema import OBS_SCHEMA_MAJOR
+
+
+def _resolve_bc_device(device: str) -> tuple[str, torch.device, bool]:
+    """设备解析（BC 多卡 2026-09-13）：
+
+      * cuda-dp：可见 2+ 卡 → DataParallel（梯度归约顺序变化，与单卡 run 数值
+        不可逐位比——与 remote/worker 的 PPO DP 同一口径）；单卡/无卡**响亮退化**
+        （cuda / cpu），绝不静默；
+      * 其余（cuda / cpu / cuda:N）原样。
+
+    → (规范化 device 串, torch.device, use_dp)。
+    """
+    s = str(device or "cpu").lower()
+    if s in ("cuda-dp", "dp"):
+        n = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        if n > 1:
+            return "cuda-dp", torch.device("cuda"), True
+        print(
+            f"[train] WARNING: 请求 cuda-dp 但可见 {n} 张卡——退化为单卡 "
+            f"{'cuda' if n else 'cpu'}（与 remote/worker 的 cuda-dp 退化语义一致）",
+            flush=True,
+        )
+        if n:
+            return "cuda", torch.device("cuda"), False
+        return "cpu", torch.device("cpu"), False
+    return s or "cpu", torch.device(s or "cpu"), False
+
+
+def _bc_raw(model: torch.nn.Module) -> torch.nn.Module:
+    """DataParallel 包装 → 解包。DP 的 state_dict 键带 "module." 前缀，落进
+    weights.json 会破坏 TS 运行时格式——**落盘/恢复/计数一律用 raw**。"""
+    return model.module if isinstance(model, torch.nn.DataParallel) else model
 
 
 def _masked_ce(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -223,14 +256,26 @@ def train(args) -> dict:
     # v2（M3）：语料带 returns.npy 且 --arch student 时构建 PPOStudent，按
     # `--value-coef` 把 MC return 作为 value 头回归目标（M2 ⑥ 的 value MC 预置）。
     # 纯 BC（无 returns）沿用 StudentNet / NNPolicy 双头。
-    dev = torch.device(getattr(args, "device", "cpu") or "cpu")
+    dev_str, dev, use_dp = _resolve_bc_device(getattr(args, "device", "cpu"))
     use_value = getattr(args, "value_coef", 0.0) > 0 and args.arch == "student"
     model = PPOStudent() if use_value else (StudentNet() if args.arch == "student" else NNPolicy())  # type: ignore
     if getattr(args, "resume", None):
         print(f"[train] resuming from {args.resume}")
         load_state_into(model, args.resume)
     model = model.to(dev)
-    n_params = param_count(model)
+    raw_model = model
+    if use_dp:
+        # DP 包装：前向/反向跨卡分发（batch 均分），参数共享原地更新——raw_model
+        # 的 state_dict 始终是训练终态；落盘/恢复/参数计数一律走 raw（防 "module." 前缀）。
+        # cast Any：包装后经 model 走前向；落盘/恢复走 raw_model（保持具体类型，.arch() 可用）
+        model = cast(Any, torch.nn.DataParallel(raw_model))
+        n_dp = torch.cuda.device_count()
+        print(
+            f"[train] DataParallel 生效（{n_dp} 卡，batch {args.batch} → 每卡 ~{args.batch // n_dp}）"
+            "——梯度归约顺序变化，与单卡 run 数值不可逐位比",
+            flush=True,
+        )
+    n_params = param_count(raw_model)
     print(
         f"[train] model params={n_params} (~{n_params / 1000:.1f}K) budget<=200K: {n_params <= 200_000}"
     )
@@ -322,7 +367,7 @@ def train(args) -> dict:
         )
         if val_loss < best_val:
             best_val = val_loss
-            best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+            best_state = {k: v.detach().clone() for k, v in raw_model.state_dict().items()}
         # Mid-run checkpoint (--ckpt-every N): save current weights (not best, for resume).
         ckpt_every = int(getattr(args, "ckpt_every", 0) or 0)
         if ckpt_every > 0 and epoch % ckpt_every == 0:
@@ -337,7 +382,8 @@ def train(args) -> dict:
     # Restore best on CPU (weights export/registry must be bitwise-stable
     # regardless of training device).
     model.to("cpu")
-    model.load_state_dict(best_state)
+    # raw_model 恢复：DP 包装的 state_dict 键带 "module." 前缀，weights.json 必须是裸键
+    raw_model.load_state_dict(best_state)
     trained_at = time.strftime("%Y-%m-%dT%H:%M:%S")
     meta = {
         "trained_at": trained_at,
@@ -353,12 +399,12 @@ def train(args) -> dict:
     versioned = os.path.join(
         out_dir, f"weights.{stamp}_ep{epoch_total}_val{float(best_val):.4f}.json"
     )
-    save_weights_json(model, versioned, extra_meta=meta)
+    save_weights_json(raw_model, versioned, extra_meta=meta)
     _safe_copy(versioned, args.out)  # active pointer for the TS runtime (read-only tolerant)
     _append_weights_md(out_dir, versioned, trained_at, args, sizes, float(best_val), history)
     if args.checkpoint:
         torch.save(
-            {"state_dict": model.state_dict(), "arch": model.arch(), "meta": meta}, args.checkpoint
+            {"state_dict": raw_model.state_dict(), "arch": raw_model.arch(), "meta": meta}, args.checkpoint
         )
     print(
         f"[train] done in {time.time() - t0:.1f}s -> archive: {versioned} (active: {args.out}) schema_major={OBS_SCHEMA_MAJOR}"
