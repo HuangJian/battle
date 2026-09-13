@@ -111,6 +111,34 @@ let missLogSuppressed = 0
 // agent 自身仍在 bun（Bun.serve / bunVersion 版本门 / codeHash 口径不变），只把
 // 采样子进程交给 node：预打包 exporter（--target=node）+ 产物同级放 conv_feats.wasm。
 let _runner: RolloutRunner | null = null
+/** 子进程失败摘要（2026-09-14 mac 节点 BC 语料事故）。
+ *
+ *  bun/node 的崩溃输出以**源码帧**开头（`111 |   const masks = new Uint8Array(...)`），
+ *  真正的 `TypeError: ...` 行在其后，栈顶帧再后。回传给训练机的 reason 只保留 tail 的
+ *  **前** 300 字符（见 failedTasks）⇒ 恰好只剩源码片段：17 局失败在训练机侧只表现为
+ *  无错误类型的乱码。本函数优先提取「源码帧 + 错误类型行 + 栈顶帧」，都取不到才退回尾部。 */
+export function summarizeChildFailure(output: string): string {
+  const lines = output.split('\n')
+  const errIdx = lines.findIndex(
+    (l) => /^\s*(?:error: )?(?:\w*Error|Error)\b/.test(l) || /^\s*error:/.test(l),
+  )
+  if (errIdx >= 0) {
+    const errLine = lines[errIdx].trim()
+    const frame = lines
+      .slice(errIdx + 1)
+      .find((l) => /^\s+at /.test(l))
+      ?.trim()
+    // 错误行上方的源码帧（bun 打印 "行号 | 源码"）——保留可定位到具体行
+    const where = lines
+      .slice(Math.max(0, errIdx - 4), errIdx)
+      .reverse()
+      .find((l) => /^\s*\d+ \|/.test(l))
+      ?.trim()
+    return [errLine, frame, where].filter(Boolean).join(' | ')
+  }
+  return output.trim().slice(-500)
+}
+
 function rolloutRunner(): RolloutRunner {
   if (!_runner) {
     _runner = createRolloutRunner({
@@ -861,11 +889,13 @@ async function runGame(
         child.on('error', reject)
         child.on('close', (code) => resolve(code ?? -1))
       })
+
       if (rc !== 0) {
         // 引擎级降级判定：node 连续 NODE_FAIL_LIMIT 次失败 → 该进程余生回退 bun。
         runner.noteFailure(plan.engine, `rc=${rc} ${tail.slice(-200)}`)
-        throw new Error(`${scriptName} exited ${rc}: ${tail}`)
+        throw new Error(`${scriptName} exited ${rc}: ${summarizeChildFailure(tail)}`)
       }
+
       runner.noteSuccess(plan.engine)
       // 子进程已把结果打成 BCV2 容器（manifest 含 stage/seed/mode/elapsedSec 溯源戳），
       // 主线程只做一次顺序读——不再读 12 个 shard + base64 + gzip。
@@ -987,7 +1017,9 @@ function beginTask(
     })
     .catch((e: unknown) => {
       const msg = e instanceof Error ? e.message : String(e)
-      failedTasks.set(key, msg.slice(0, 300))
+      // 600：摘要已把错误类型行排在最前（summarizeChildFailure），留足余量让
+      // 栈顶帧也进得来（原 300 会在长源码帧上切掉诊断本体）。
+      failedTasks.set(key, msg.slice(0, 600))
       lastError = `${new Date().toISOString()} s${stage}/seed${seed}: ${msg}`
       console.error(
         `[sampler-agent] task FAILED key=${key} stage=${stage} seed=${seed} ` +

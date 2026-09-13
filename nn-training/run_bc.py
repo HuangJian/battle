@@ -256,8 +256,15 @@ def collect_corpus(
         log=log,
     )
     if stats["failed"] > 0:
+        tripped = stats.get("failed_nodes") or []
         raise BcDispatchError(
             f"it{it}: {stats['failed']} 个语料任务彻底失败（重跑 run_bc 断点续跑补齐）"
+            + (
+                f"；已熔断节点：{'、'.join(tripped)}——先 /v1/ping 看该节点 codeHash"
+                " 与节点侧日志，再决定 /v1/update 或停用"
+                if tripped
+                else ""
+            )
         )
 
 
@@ -830,9 +837,35 @@ def main() -> None:
             if args.smoke:
                 log("BC SMOKE PASS")
                 return
-        log("[run_bc] all rounds done")
+        _finish_all_rounds(jsonl_path, int(course.iters), log=log)
     finally:
         _cleanup_run_rl_lock(lock_path)
+
+
+def _finish_all_rounds(jsonl_path: str | Path, iters: int, *, log=lambda _m: None) -> None:
+    """全轮完成的收尾（2026-09-14 bc-c4-v3 事故修复）——两件事缺一不可：
+
+    1. 打含 `ALL DONE` 的**尾行**：console 的 exit-watchdog 用
+       `tailNormalCompletion`（日志尾行 includes('ALL DONE')，大小写敏感）判「正常完成」。
+       原来只打小写 `all rounds done` ⇒ BC 正常跑完被标成「TrainingLoop 意外退出——
+       非正常退出」红告警（实测 2026-09-14 07:32，训练其实已全部成功归档）。
+    2. 落 `run_complete` 账本事件（RL 侧 `loop_core._park_after_completion` 同款）：
+       console 的「✅ 训练已完成」info 横幅由账本尾行派生。
+
+    BC 完成即退出进程（不学 RL 的 parking：BC 无 idle 期评估业务），故仅需上述两处。
+    """
+    log("[run_bc] ALL DONE — 全轮完成，weights 已落位归档")
+    try:
+        from rl.events import write_run_complete
+
+        write_run_complete(
+            Path(jsonl_path),
+            int(iters),
+            int(iters),
+            f"BC 全轮完成（it{iters}/{iters}），weights 已落位归档",
+        )
+    except Exception as e:  # 落账失败只影响 console 横幅派生，不改变训练结果
+        log(f"[run_bc] run_complete 落账失败（仅 console 横幅派生缺失）: {e}")
 
 
 def _archive_round(

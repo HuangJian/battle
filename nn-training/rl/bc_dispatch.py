@@ -80,6 +80,15 @@ def dispatch_bc_corpus(
     max_slots: int = 64,
     task_timeout_sec: float = 600.0,
     iter_suffix: str = "",
+    #: 节点熔断阈值（同一节点连续 N 次「真失败」后本轮摘掉它，任务改派其它节点）。
+    #: 0 = 关闭。2026-09-14 事故：mac 节点胜局一律崩（17 局全废），训练直接
+    #: BcDispatchError 挂掉——有熔断则 3 次就摘掉它，剩余任务重排给健康节点。
+    node_fail_limit: int = 3,
+    #: busy（节点并发槽满，503）背压重排上限与退避步长（2026-09-14：40 局瞬推时
+    #: 溢出任务两次撞 busy 即被判失败，整轮训练退出）。busy 不是故障：不计 streak、
+    #: 不消耗 attempt 配额，只放回队列 + 线性退避；超上限才认失败。
+    busy_retry_limit: int = 6,
+    busy_backoff_sec: float = 0.25,
     log=lambda msg: print(msg, flush=True),
 ) -> dict:
     """并发派发 BC 语料任务到节点，落盘 shard 目录。返回统计 dict。
@@ -120,17 +129,53 @@ def dispatch_bc_corpus(
         "nodes": len(nodes),
     }
     lock = threading.Lock()
+    # 节点健康（本轮内）：连续真失败计数 / 已熔断节点 / 已放回队列一次的 (stage,seed)。
+    # 放回只做一次 —— 否则全节点熔断后任务会在队列里被反复放回，静默漏采。
+    node_fail_streak: dict[str, int] = {str(n.get("id") or n["url"]): 0 for n in nodes}
+    tripped: set[str] = set()
+    requeued: set[tuple[int, int]] = set()
+    #: 每任务的 busy 重排次数（跨 worker 共享——否则任务在节点间来回被推会无限重排）。
+    busy_tries: dict[tuple[int, int], int] = {}
+
+    def is_busy_hint(reason: str) -> bool:
+        """节点回 503 busy（并发槽满）不算节点故障——不能据此熔断。"""
+        return "busy" in reason[:64].lower()
 
     def slot_worker(node: dict) -> None:
         url = node["url"]
         auth = node.get("authKey", "")
         nid = str(node.get("id") or url)
+        empty_waits = 0
         while True:
             try:
                 stage, seed = work.get_nowait()
             except queue.Empty:
+                # 熔断发生后，被放回的任务要等健康节点接手：队列暂空时多等一会儿再退
+                # （最多 2s）。无熔断的正常轮次零开销——直接退出。
+                if tripped and empty_waits < 40:
+                    empty_waits += 1
+                    time.sleep(0.05)
+                    continue
+                return
+            # 熔断：本节点已摘掉 → 手上这个任务**无条件放回**队列，然后本 worker 退出。
+            # 不能 continue（否则放回的任务会被自己立刻重新拾起，等于没熔断）；放回是安全的，
+            # 因为本 worker 立即 return，不存在"放回→自取"死循环。队列若最终无人消费，
+            # 主线程末尾对账会把差额计 failed（不静默漏采）。
+            if node_fail_limit > 0 and nid in tripped:
+                with lock:
+                    others = [k for k in node_fail_streak if k not in tripped]
+                    first = (stage, seed) not in requeued
+                    requeued.add((stage, seed))
+                work.put((stage, seed))
+                if first:
+                    log(
+                        f"[bc-dispatch] {nid} 已熔断 → s{stage} seed{seed} 改派其它节点"
+                        f"（健康节点：{'、'.join(others) if others else '无'}）"
+                    )
                 return
             ok = False
+            busy_hint = False
+            requeue_busy = False
             for attempt in (1, 2):  # 局失败重试一次（可能换节点）
                 try:
                     manifest, files = fetch_task(
@@ -180,21 +225,59 @@ def dispatch_bc_corpus(
                         )
                     with lock:
                         seen_keys.add((stage, seed))
+                        busy_tries.pop((stage, seed), None)
+                    node_fail_streak[nid] = 0  # 一次成功即清零连续失败
                     ok = True
                     break
                 except dist_common.DistError as e:
+                    reason = str(e.reason)
+                    busy_hint = is_busy_hint(reason)
+                    if busy_hint:
+                        # 背压（2026-09-14 事故）：节点并发槽占满时回 503 busy。原实现把它
+                        # 当普通失败「立刻重试一次」——同一瞬的 40 局里溢出的那批两次都撞
+                        # busy，直接计 failed 并把整轮训练打死（实测 7 局）。busy 是限流信号
+                        # 而非故障：任务放回队列（让空闲节点接手）+ 退避后再抢，且**不消耗**
+                        # attempt 配额、**不计**节点失败 streak。退避上限后仍 busy 才认失败。
+                        with lock:
+                            n = busy_tries.get((stage, seed), 0)
+                            if n < busy_retry_limit:
+                                busy_tries[(stage, seed)] = n + 1
+                                work.put((stage, seed))
+                                requeue_busy = True
+                        if requeue_busy:
+                            if n == 0:
+                                log(
+                                    f"[bc-dispatch] {nid} 并发槽满（busy）→ 退避重排"
+                                    f"（背压，不计失败；上限 {busy_retry_limit} 次）"
+                                )
+                            time.sleep(busy_backoff_sec * (n + 1))
+                            break
+                    # 截断放宽到 600：节点回传的 reason 已做「错误类型行 + 栈顶帧」摘要
+                    # （sampler-agent.summarizeChildFailure），原文截断会把诊断信息切掉。
                     log(
                         f"[bc-dispatch] {nid} s{stage} seed{seed} attempt {attempt} "
-                        f"failed: {e.reason[:200]}"
+                        f"failed: {reason[:600]}"
                     )
                 except Exception as e:  # 未知异常同样重试一次后放弃
+                    busy_hint = False
                     log(
                         f"[bc-dispatch] {nid} s{stage} seed{seed} attempt {attempt} "
-                        f"error: {type(e).__name__}: {e}"
+                        f"error: {type(e).__name__}: {str(e)[:600]}"
                     )
+            if requeue_busy:
+                continue  # 已被背压重排，本任务不计失败、本 worker 去取下一个
             if not ok:
                 with lock:
                     stats["failed"] += 1
+                    if node_fail_limit > 0 and not busy_hint:
+                        node_fail_streak[nid] = node_fail_streak.get(nid, 0) + 1
+                        if node_fail_streak[nid] >= node_fail_limit and nid not in tripped:
+                            tripped.add(nid)
+                            log(
+                                f"[bc-dispatch] ⚠ 节点 {nid} 连续 {node_fail_limit} 次任务失败"
+                                " → 本轮熔断（剩余任务只派其它节点；请 /v1/ping 看 codeHash"
+                                " 与节点日志定位）"
+                            )
 
     threads = [
         threading.Thread(target=slot_worker, args=(node,), daemon=True, name=f"bc-{idx}")
@@ -206,10 +289,22 @@ def dispatch_bc_corpus(
     for t in threads:
         t.join()
     stats["elapsed_sec"] = round(time.time() - t0, 1)
+    stats["failed_nodes"] = sorted(tripped)
+    # 对账：熔断节点退出后可能留下无人消费的任务 —— 计 failed，绝不静默漏采
+    # （run_bc 侧按 landed_pairs 判定缺口，差额必须出现在 failed 里否则会“少采却以为齐”）。
+    consumed = stats["games"] + stats["failed"]
+    if consumed < len(tasks):
+        missing = len(tasks) - consumed
+        stats["failed"] += missing
+        log(
+            f"[bc-dispatch] ⚠ {missing} 个任务未被任何节点消费（熔断后队列无人接管）"
+            "——已计 failed，重跑本课程即可断点续补"
+        )
     log(
         f"[bc-dispatch] round it{it} done in {stats['elapsed_sec']}s: games={stats['games']} "
         f"kept={stats['kept']} loss_skipped={stats['loss_skipped']} failed={stats['failed']} "
         f"nodes={stats['nodes']}"
+        + (f" tripped={'、'.join(stats['failed_nodes'])}" if tripped else "")
     )
     return stats
 

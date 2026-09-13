@@ -161,3 +161,193 @@ def test_run_bc_smoke_overrides() -> None:
     assert ov["games_per_stage"] == 1
     assert ov["max_ticks"] <= 300
     assert ov["epochs"] == 1
+
+
+# ------------------------------------------------------------------ 节点熔断
+
+
+def _loss_skipped_manifest(stage: int, seed: int):
+    """合法的 wins-only 败局容器（validate_result 的 loss-skip 分支）。"""
+    from dist_common import BC_COLLECTOR, BC_WVER
+
+    return {
+        "wver": BC_WVER,
+        "collector": BC_COLLECTOR,
+        "kept": False,
+        "stage": stage,
+        "seed": seed,
+        "outcome": "loss",
+        "nSamples": 0,
+    }
+
+
+def test_bc_dispatch_trips_broken_node_and_requeues(tmp_path: Path, monkeypatch) -> None:
+    """2026-09-14 mac 事故回归：单节点连续真失败 → 本轮熔断，剩余任务改派健康节点。"""
+    from rl import bc_dispatch as D
+
+    calls: dict[str, int] = {"bad": 0, "good": 0}
+
+    def fake_fetch(url: str, _auth: str, **kw):
+        nid = "bad" if "bad" in url else "good"
+        calls[nid] += 1
+        if nid == "bad":
+            raise D.dist_common.DistError(
+                0, "TypeError: undefined is not an object (evaluating 's.obs')"
+            )
+        return _loss_skipped_manifest(int(kw["stage"]), int(kw["seed"])), {}
+
+    monkeypatch.setattr(D, "fetch_task", fake_fetch)
+    msgs: list[str] = []
+    tasks = [(2000, s) for s in range(1, 13)]
+    nodes = [
+        {"id": "bad", "url": "http://bad", "concurrency": 2, "enabled": True},
+        {"id": "good", "url": "http://good", "concurrency": 2, "enabled": True},
+    ]
+    stats = D.dispatch_bc_corpus(
+        tasks=tasks,
+        out_dir=tmp_path,
+        it=1,
+        corpus_fp="cfp",
+        course_fp="xfp",
+        difficulty="hard",
+        max_ticks=100,
+        nodes=nodes,
+        node_fail_limit=3,
+        log=msgs.append,
+    )
+    # 熔断：坏节点被摘掉并在统计里点名
+    assert stats["failed_nodes"] == ["bad"]
+    assert any("熔断" in m for m in msgs)
+    # 全部任务有归宿（games + failed == 任务数），没有静默漏采
+    assert stats["games"] + stats["failed"] == len(tasks)
+    # 熔断生效：坏节点最多吃掉「阈值 × 槽位」个任务（每次 2 attempt），不再霸占整轮
+    assert calls["bad"] <= 3 * 2 * 2, f"熔断太晚：bad 被调用 {calls['bad']} 次"
+    assert calls["bad"] < len(tasks) * 2, "熔断后坏节点仍在霸占任务"
+    # 全部任务有归宿（成功 + 失败 == 任务数），没有静默漏采
+    assert stats["games"] + stats["failed"] == len(tasks)
+    # 熔断后的任务改派给了健康节点
+    assert calls["good"] == stats["games"]
+    assert stats["games"] >= len(tasks) - calls["bad"]
+
+
+def test_bc_dispatch_failfast_disabled_keeps_old_behavior(tmp_path: Path, monkeypatch) -> None:
+    """node_fail_limit=0：关闭熔断（所有节点都试，行为与旧版一致）。"""
+    from rl import bc_dispatch as D
+
+    seen: list[str] = []
+
+    def fake_fetch(url: str, _auth: str, **kw):
+        seen.append(url)
+        raise D.dist_common.DistError(0, "boom")
+
+    monkeypatch.setattr(D, "fetch_task", fake_fetch)
+    stats = D.dispatch_bc_corpus(
+        tasks=[(2000, 1)],
+        out_dir=tmp_path,
+        it=1,
+        corpus_fp="cfp",
+        course_fp="xfp",
+        difficulty="hard",
+        max_ticks=100,
+        nodes=[{"id": "bad", "url": "http://bad", "concurrency": 1, "enabled": True}],
+        node_fail_limit=0,
+        log=lambda _m: None,
+    )
+    assert stats["failed"] == 1
+    assert stats["failed_nodes"] == []
+    assert len(seen) == 2  # attempt 1 + 2
+
+
+def test_bc_dispatch_busy_is_not_a_node_fault(tmp_path: Path, monkeypatch) -> None:
+    """busy（并发槽满）不计入失败 streak —— 否则健康节点会被误熔断。"""
+    from rl import bc_dispatch as D
+
+    calls = {"n": 0}
+
+    def fake_fetch(_url: str, _auth: str, **kw):
+        calls["n"] += 1
+        if int(kw["seed"]) == 1:  # seed1 一直 busy；其余正常
+            raise D.dist_common.DistError(0, "busy")
+        return _loss_skipped_manifest(int(kw["stage"]), int(kw["seed"])), {}
+
+    monkeypatch.setattr(D, "fetch_task", fake_fetch)
+    stats = D.dispatch_bc_corpus(
+        tasks=[(2000, 1), (2000, 2), (2000, 3)],
+        out_dir=tmp_path,
+        it=1,
+        corpus_fp="cfp",
+        course_fp="xfp",
+        difficulty="hard",
+        max_ticks=100,
+        nodes=[{"id": "n1", "url": "http://n1", "concurrency": 1, "enabled": True}],
+        node_fail_limit=2,
+        busy_retry_limit=2,  # 背压上限（测试提速）
+        busy_backoff_sec=0.01,
+        log=lambda _m: None,
+    )
+    # busy 不计入节点故障 ⇒ 不熔断（否则并发槽满的健康节点会被误摘）
+    assert stats["failed_nodes"] == []
+    assert stats["failed"] == 1  # 背压上限用尽后仍 busy 才算失败
+    assert stats["games"] == 2
+
+
+def test_bc_dispatch_busy_backpressure_then_success(tmp_path: Path, monkeypatch) -> None:
+    """背压回归（2026-09-14）：短暂槽满 → 退避重排后成功，绝不记 failed。
+
+    事故形态：40 局瞬间推送，节点并发槽占满，溢出任务两次「立刻重试」都撞 busy
+    ⇒ 直接计 failed（实测 7 局）⇒ BcDispatchError 把整轮训练打死。
+    """
+    from rl import bc_dispatch as D
+
+    state = {"busy": 3}
+
+    def fake_fetch(_url: str, _auth: str, **kw):
+        if state["busy"] > 0:
+            state["busy"] -= 1
+            raise D.dist_common.DistError(0, "busy")
+        return _loss_skipped_manifest(int(kw["stage"]), int(kw["seed"])), {}
+
+    monkeypatch.setattr(D, "fetch_task", fake_fetch)
+    msgs: list[str] = []
+    stats = D.dispatch_bc_corpus(
+        tasks=[(2000, 1), (2000, 2)],
+        out_dir=tmp_path,
+        it=1,
+        corpus_fp="cfp",
+        course_fp="xfp",
+        difficulty="hard",
+        max_ticks=100,
+        nodes=[{"id": "n1", "url": "http://n1", "concurrency": 1, "enabled": True}],
+        node_fail_limit=2,
+        busy_retry_limit=6,
+        busy_backoff_sec=0.01,
+        log=msgs.append,
+    )
+    assert stats["failed"] == 0
+    assert stats["games"] == 2
+    assert stats["failed_nodes"] == []
+    assert any("背压" in m for m in msgs)
+
+
+def test_run_bc_finish_all_rounds_writes_run_complete(tmp_path: Path) -> None:
+    """2026-09-14 回归：BC 全轮完成的收尾必须同时做两件事 ——
+
+    ① 打含 `ALL DONE` 的**尾行**：console exit-watchdog 用 `tailNormalCompletion`
+      （日志尾行 includes('ALL DONE')，大小写敏感）判「正常完成」；原来只打小写
+      `all rounds done` ⇒ BC 正常跑完被标「TrainingLoop 意外退出」（实测 07:32）。
+    ② 落 `run_complete` 账本事件：console「✅ 训练已完成」横幅的派生源。
+    """
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import run_bc
+
+    j = tmp_path / "training_log.jsonl"
+    msgs: list[str] = []
+    run_bc._finish_all_rounds(j, 3, log=msgs.append)
+    assert any("ALL DONE" in m for m in msgs)
+    last = [ln for ln in j.read_text(encoding="utf-8").splitlines() if ln.strip()][-1]
+    e = json.loads(last)
+    assert e["event"] == "run_complete"
+    assert e["iter"] == 3 and e["iters"] == 3
+    assert "BC" in e["reason"]
