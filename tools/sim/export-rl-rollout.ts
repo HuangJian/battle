@@ -46,6 +46,7 @@
 import { World } from '../../src/game/World'
 import { Simulation } from '../../src/game/Simulation'
 import { allEnemiesCleared } from '../../src/game/SimulationEffects'
+import { isStuckTick, playerCenterCell } from '../../src/game/stuck-detect'
 import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { STAGES } from '../../src/config/stages'
@@ -650,15 +651,16 @@ function runOne(
       tel.powerUpsSpawned += Math.max(0, collectedThisTick - vanished)
       prevLivePuIds = live
     }
-    // 停滞判定：中心 cell 不变 且 本 tick 未命中 → stuckTicks++；否则清零。
-    const pcx = Math.floor(((world.player?.x ?? 0) + 16) / CELL)
-    const pcy = Math.floor(((world.player?.y ?? 0) + 16) / CELL)
-    if (world.player?.alive && pcx === prevCell.col && pcy === prevCell.row && !hitThisTick) {
+    // 停滞判定（obs v3 sN4 / reward 同源，dsf A4）：中心 cell 不变 且 本 tick 未
+    // 命中敌车 → stuckTicks++；否则清零。实现 = src/game/stuck-detect.ts 共享纯
+    // 函数（与 Simulation.updatePlaying 末尾的 World.stuckTicks 维护同一实现）。
+    const cur = playerCenterCell(world.player)
+    if (isStuckTick(world.player?.alive ?? false, cur, prevCell, hitThisTick)) {
       tel.stuckTicks++
     } else {
       tel.stuckTicks = 0
     }
-    prevCell = { col: pcx, row: pcy }
+    prevCell = cur ?? { col: -1, row: -1 }
 
     if (t % TELEMETRY_SAMPLE_TICKS === 0) {
       tel.basePressureSum += sampleBasePressure(world)

@@ -56,6 +56,8 @@ const EXCLUDED: Record<string, string> = {
   _allTanksBuf: 'getter cache rebuilt on demand',
   _hasActiveMines: 'derived from mines array contents',
   _needsCleanup: 'per-tick entity-compaction signal',
+  playerHitEnemyThisTick:
+    'intra-tick transient (obs v3 sN4, dsf A4): consumed+cleared at the end of every updatePlaying, so it is always false at snapshot boundaries; the cross-tick inputs it feeds (stuckTicks/prevStuckCell) ARE serialized',
 
   // Session-scoped signal & identity.
   rewindPending: 'one-tick signal consumed by Game.ts within the same session',

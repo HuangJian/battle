@@ -106,6 +106,10 @@ export function cloneWorld(world: World): WorldSnapshot {
     frenzyStock: world.frenzyStock,
     sacrificeStock: world.sacrificeStock,
     fenceExpireFrame: world.fenceExpireFrame,
+    // obs v3 sN4 / reward stuckTicks（dsf A4 同源）：跨 tick 状态入快照。
+    // playerHitEnemyThisTick 是 intra-tick 瞬态（快照边界恒 false），不入快照。
+    stuckTicks: world.stuckTicks,
+    prevStuckCell: world.prevStuckCell,
     // New power-ups (new-powerups-plan.md)
     empTimer: world.empTimer,
     rewindStock: world.rewindStock,
@@ -235,6 +239,10 @@ export function restoreWorld(world: World, snap: WorldSnapshot): void {
   world.frenzyStock = snap.frenzyStock ?? 0
   world.sacrificeStock = snap.sacrificeStock ?? 0
   world.fenceExpireFrame = snap.fenceExpireFrame
+  // obs v3 sN4：旧快照（无该字段）默认 0/null（ms F3 快照兼容）
+  world.stuckTicks = snap.stuckTicks ?? 0
+  world.prevStuckCell = snap.prevStuckCell ?? null
+  world.playerHitEnemyThisTick = false
 
   // New power-ups (new-powerups-plan.md)
   world.empTimer = snap.empTimer ?? 0

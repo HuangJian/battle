@@ -612,6 +612,9 @@ export class CombatSystem {
       // 叠加是有意义的记账，非 double counting。
       if (bullet.isPlayer && tank.allegiance === 'enemy') {
         this.d.world.pushEvent({ type: 'enemy_hit', damage: bullet.damage })
+        // obs v3 sN4 / reward stuckTicks（dsf A4 同源）：本 tick 玩家命中敌车——
+        // stuck 判定在 updatePlaying 末尾消费此标记后清零（不与导出器抢事件流）。
+        this.d.world.playerHitEnemyThisTick = true
       }
 
       if (tank.hp <= 0) {

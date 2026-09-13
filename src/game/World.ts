@@ -267,6 +267,17 @@ export class World {
   // base reverts to brick. undefined = no active fence. Snapshot-safe.
   fenceExpireFrame?: number
 
+  // --- obs v3 sN4 / reward stuckTicks（dsf A4 同源，判定 = stuck-detect.ts）---
+  /** 连续停滞 tick 数：中心 cell 不变且本 tick 未命中敌车 ⇒ +1，否则清零。
+   *  由 Simulation.updatePlaying 末尾固定调用点维护（§2.1 唯一写者）；快照字段。 */
+  stuckTicks = 0
+  /** 上一 tick 的玩家中心 cell——stuck 判定的跨 tick 输入；快照字段。 */
+  prevStuckCell: { col: number; row: number } | null = null
+  /** 本 tick 玩家命中敌车标记：SimulationCombat push `enemy_hit` 时置位，
+   *  updatePlaying 末尾 stuck 判定消费后清零。intra-tick 瞬态——快照边界恒 false，
+   *  不入快照（stuckTicks/prevStuckCell 才是跨 tick 状态）。 */
+  playerHitEnemyThisTick = false
+
   // --- New power-ups (new-powerups-plan.md) ---
   /** EMP timer: when > 0, all enemy tanks are silenced (can move but not fire). */
   empTimer: number

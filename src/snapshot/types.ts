@@ -186,6 +186,10 @@ export interface WorldSnapshot {
   frenzyDir?: Direction
   fenceExpireFrame?: number // 栅栏道具: 钢墙到期帧（之后恢复为砖墙）
 
+  // ---- obs v3 sN4 / reward stuckTicks（dsf A4 同源）----
+  stuckTicks: number // 连续停滞 tick 数（旧快照缺省 0，ms F3 兼容）
+  prevStuckCell: { col: number; row: number } | null // 上一 tick 玩家中心 cell
+
   // ---- New power-ups (new-powerups-plan.md) ----
   empTimer: number // 电磁静默: enemy silence timer
   rewindStock: number // 时光宝盒: inventory count

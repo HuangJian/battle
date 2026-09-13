@@ -8,6 +8,7 @@ import { EnemiesSystem } from './SimulationEnemies'
 import { CombatSystem } from './SimulationCombat'
 import { PowerUpSystem } from './SimulationPowerUps'
 import { EffectsSystem } from './SimulationEffects'
+import { nextStuckTicks, playerCenterCell } from './stuck-detect'
 import type { SimulationSystems } from './systems'
 
 /**
@@ -272,6 +273,23 @@ export class Simulation {
 
     // Check game conditions
     s.effects.checkConditions()
+
+    // obs v3 sN4 / reward stuckTicks（dsf A4 同源）：停滞判定固定调用点——
+    // 所有能推 enemy_hit / 改玩家位置的阶段之后，与导出器「tick 完成后判定」语义
+    // 逐一对齐。判定实现 = src/game/stuck-detect.ts（共享纯函数，导出器同源）。
+    {
+      const player = w.player
+      const cur = playerCenterCell(player)
+      w.stuckTicks = nextStuckTicks(
+        w.stuckTicks,
+        player?.alive ?? false,
+        cur,
+        w.prevStuckCell,
+        w.playerHitEnemyThisTick,
+      )
+      w.prevStuckCell = cur
+      w.playerHitEnemyThisTick = false
+    }
 
     // Cleanup
     w.removeDeadEntities()
