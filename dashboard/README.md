@@ -70,9 +70,29 @@ src/
     components/     通用 UI 原子（DataTable / TrendChart / Pill …）
     app/            SSR 首屏 + hydrate 的浏览器应用（app / log / eval 三入口 + panels）
     render.tsx theme.ts
-tests/        20 个本子系统的测试（原根 tests/ 中的同名文件迁入）
+tests/        52 个本子系统的测试（原根 tests/ 的同名文件迁入 + 两巨型文件按分层拆开）
 data/evalboard/  EvalBoard 账本数据根（默认值；EVALBOARD_DATA 可覆盖）
 ```
+
+## 测试分层
+
+测试**镜像 `src/` 的模块**（AGENTS §8）：一个测试文件对应它覆盖的那个模块，
+文件名形如 `web-view-rows` ↔ `src/web/view/rows.ts`、`server-api-pool` ↔
+`src/server/api`。dashboard 侧的 306 个用例在 52 个文件里，拆分产出的文件最大 264 行
+（单节走势图；其余均 <170 行）。
+
+按关注点聚合的两个巨型测试文件已按上表分层拆完：`training-console-preact.test.ts`
+（1234 行 / 19 个 describe）与 `training-console.test.ts`（1354 行 / 17 个 describe，
+含趋势图嵌套 describe）合计占原目录 42% 行数。拆分的唯一可接受判据是**用例与断言逐一不变**：
+拆分前后 `bun run test` 都是 `306 pass / 0 fail` 且 `1907 expect()` 调用数一致 ——
+计数对不上就说明有块搬漏或重复（实测抓到过一次：第二轮同名文件覆盖了首轮的 3 个
+describe / 6 个用例，靠 `it(` 标题逐项 diff 找回）。
+
+测试夹具**留在各自文件内**，唯一例外是 `tests/helpers/console-fixture.ts`：
+`training-console.test.ts` 的旧夹具是 `beforeAll`/`afterAll` 级别的真实文件备份还原，
+多文件 `--parallel` 下会互踩，且它的顶层 `await import()` 要求 env 重定向先就位——
+该 helper 把「独立 scratch 目录 + env 重定向 + 被测模块 import」封成一次，
+调用方只 import 它就不可能搞错顺序。纯函数测试不需要它（如 `web-view-format` 系）。
 
 ## 纪律
 
