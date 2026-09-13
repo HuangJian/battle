@@ -1285,3 +1285,111 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 - **违反后果**：新单例回落全局键/端口 → B 课覆盖 A 课登记（杀错/停错/连错 hub）；
   配额进课程文件 → D14 熔断误判；重建时拿全局状态猜课程 → A 课进程被 B 课配置拉起；
   删 per-course 锁文件 → 2026-09-06 双 trainer 写同一 traj 事故重演。
+## §2026-09-12-c5-gae（2026-09-12，用户指令：先建 c5-gae，c5-tick 继续跑）
+
+- **背景**：c5-tick（wTick 0.01→0.003 单变量）it20 判一级门 FAIL：value loss 纹丝不动（~0.75，
+  目标 ≤0.65），eval 32/43/47/35 无趋势——**"wTick 方差主导 ⇒ value 头不 fit"被自己数据证伪**
+  （降 57%→10% 方差占比后 value 不动；熵稳定 0.49 也否定了"value 欠拟合 ⇒ 熵失控"的链条，
+  熵失控是 c5-ent 的 ent_coef=0.05 吹出来的）。按预注册转进 λ 轴。
+- **备选与否决**：停 c5-tick —— 用户否（继续跑着）；同轮再试 wTick=0 或 wChip 抬升 —— 否，
+  单变量纪律，c5-tick 还没跑完；直接改 normalize_ret —— 否，变量太多。
+- **决定**：新建 `nn-training/curricula/c5-gae.jsonc`（c5-margin 派生，唯一变量 lam 0.99→0.95，
+  wTick 锁 0.01 不回继承 c5-tick；kl_coef 末段 0.03 护栏非变量；不写 ent_coef；bc=c4-margin.it140；
+  80 轮/12h；无 gates 块）。诚实声明：λ 只测"advantage 方差 ↓ ⇒ 策略动起来"，不声称救 value 头。
+  判据：配对胜率 >39%（起点）+ McNemar p<0.05 为主；value/entropy 作参考。
+- **违反后果**：若 c5-gae 又顺手改 wTick/ent_coef/normalize_ret，λ 的归因被污染；若把 value loss
+  当主判据，会重蹈 c5-tick"假说与数据不符"的覆辙——value 欠拟合的成因在关卡随机结构，
+  不是任何单一超参能救的。
+
+## §2026-09-12-goal-layer-test（2026-09-12，用户拍板两套目标源；goal 硬 mask 实证为负）
+
+- **背景**：c5-gae（λ=0.95）修好机制后执行器配对 +7pp 但封顶 ~46%（in-loop ~40%），40 轮
+  平台。用户提出解冻 goal 头 → 澄清 goal≠intent（intent 骑 God 执行器已证伪；goal=空间目标
+  热图+独立执行器，T9a 证执行器是瓶颈，goal-nn-action 定"最后才解冻"）。当前 per-tick 模型
+  就是 goal-nn 的执行器本体。评估后用户拍板：做 goal 层测试（两套目标源都测）+ c5-gae 续跑。
+- **实现**：新增 `src/nn/goal-mask.ts`（BFS 距离硬掩码"禁背离目标" + God 导航目标源（读
+  `god._navTargetCol/Row`）+ 手写启发式源（血低撤退/追最近敌）+ GoalSteering 承诺重选）；
+  `export-eval-game.ts` 加 `--policy nn-goal`（frozen StudentNet move logits 应用硬掩码，
+  `mask[i]!==1 → -1e9`，只禁不禁劝）；goal-source 显式走 worker payload（env 继承不可靠，两
+  冒烟逐字节相同后改为显式传参）；测试 `tests/nn/goal-mask.test.ts` 10 项全绿 + tsc 过。
+- **结果（c5 关，frozen c5-gae.it100，seeds 0-99）**：**nn 10/20=50% → nn-goal(god) 1/20=5%、
+  100 局 1%**；heuristic 源逐字节同崩（God 导航目标≈最近敌启发式）。机制：距离硬掩码砍掉
+  执行器的战术机动（后撤装填/走位闪避都涉及"暂时背离目标"）→ 被迫直线冲火线 → 被击 9→19、
+  击杀 3.7→0.57、局时 30% 更短。
+- **结论**：**goal 硬 mask（1a）在"已会打"的执行器（~50%）上是灾难（→1%）**——goal-nn-action
+  标注的"只能禁止不能鼓励、弱控制"局限实证。目标意识的价值**不能**用 1a 注入成熟执行器验证；
+  若 goal 层要测，注入机制须换（1b 软偏置诱导 / goal 编进 reward 重训）。也解释了 1a 原设计
+  配给"从零练的弱执行器"——弱执行器没有机动可被砍。
+- **违反后果**：任何人把 1a 硬 mask 当"验证 goal 价值"的现成工具，会在成熟执行器上得到
+  "goal 无用"的错误结论；goal 层测试必须先定注入机制（硬 mask 只适用于从零练的弱执行器）。
+- **补记（1b-posthoc 软偏置，无信号）**：`goalMoveBias`（logits += β·align，align∈{-1,0,1}，
+  诱导不禁止）接 `--goal-bias`。c5 关 frozen it100、seeds 0-19：β=0.3 9/20、β=1.0 9/20、
+  β=2.0 5/20（退化逼近硬 mask）；**β=1.0 全量 100 局 = 46% vs nn 47%（无信号）**。结论：
+  c5 执行器已"朝目标走"，commitment nudge 与既有行为重合 ⇒ 无增益；β 加大才崩。**两个外部
+  注入机制（1a mask / 1b bias）在成熟执行器上都不能抬平台**——c5 瓶颈不在"目标方向/承诺"，
+  在清场吞吐/生存层（杀不完第 5 敌就死）；1b-input（网络通道+重训）不乐观（学的也是同一
+  个"往目标走"偏置），需另寻杠杆。
+
+## §2026-09-12-c5-gae-finale（2026-09-12，λ 修复 160 轮显著破平台；c6 转移稳定）
+
+- **c5-gae 终判（it160 收官）**：λ=0.95 修好 value 头后，160 轮配对语料（seeds 0-99 vs
+  起点 39%）**it145=57%（2p=0.010）/ it160=55%（2p=0.023）——统计显著 +16-18pp**，全项目
+  第一条 hard 5 敌关显著爬升腿。战斗质量全面升级（击杀 3.15→3.7+、被击 60→42-44）。in-loop
+  中枢 ~40%→~44-45%（it125 53% 是尖峰）。机制全程健康（value 0.50-0.62、熵稳定 0.33-0.40）。
+  全轨：腿初 28-37% → 中段 40-52% → 终局 55-57%。此前所有"c5 平台"判断 = 机制坏+训练不足。
+- **c5→c6 转移（稳定弱阳性）**：c5-gae it100/145/160 零样本 c6 = 29/27/23% vs 基线 18%
+  （池化不一致对 72:47，2p=0.027）；击杀 2.64→3.34 大涨但收不了 6 敌关。零样本 ~26% ≈
+  c6b 直接训 20 轮的 22%——强 c5 执行器跨关能力 ≈ c6 自己训一点，卡点全在"6 敌收关"。
+- **道具（pickup）缺口分析（任务口径，教师只作参考 §0.2）**：c5 上平坦不是缺陷的判据
+  = 任务目标而非教师水平；c6 上学生 0.82/局（God 参考 1.26）未跟上道具密度（c5 0.88 → c6
+  0.82 反降）。"道具→star→击杀吞吐→破 c6/c7/c8 清场瓶颈"任务级假设成立 ⇒ wPickup 作为
+  **c6 基线腿之后**的单变量（不混进 c6 腿的 bc/λ）。
+- **下一条腿**：`c6-gae`（c6-margin 派生：bc=c5-gae.it160、λ=0.95、wPickup=1.5 锁定、
+  seed_rotate 150、无 gates 块；起点基线 23%）。问题：机制修复后 c6 能否从 23% 爬 +
+  策略是否自发多捡。
+
+## §2026-09-12-rollout-flag-bug（2026-09-12，local rollout 3命1星污染事件；已修、已记录、暂不重训）
+
+- **背景**：`nn-training/rl/cmd.py` `build_rollout_cmd` 用 `f"--{k}"` 拼 override 键
+  （`lives_override`/`player_level` 下划线），而 `tools/sim/export-rl-rollout.ts` 只认连字符
+  `--lives-override`/`--player-level`（未知 flag 静默忽略）⇒ **local 直跑全程以 hard 缺省
+  （3命1星）执行，远端节点以课程覆盖（1命0星）执行**。commit `1ee8955`（2026-09-12 16:55）
+  修复（下划线→连字符，`tests/test_rl_cmd.py` 锁死口径）。bug 自 `e828331`（2026-09-02 22:55，
+  M1 配置化）引入。
+- **污染范围**：e828331 → 1ee8955 之间所有课程的 **local 直跑 rollout 轨迹**（PPO 吃进
+  3命1星环境的样本）。各课程 local 局占比实测（`tmp/<course>/dist-agent-meta.jsonl`）：
+  c4-kb1 **39.1%**、c4-margin 28.3%、c6-gae 21.1%、c5-gae/c5-margin/c5-ent ~14-15%、
+  c6-margin/c6b-margin 11-13.6%、c5-tick/c6-pickup 13.3-13.8%。**样本量权重更高**：it160
+  local 45 局 7204 样本（avgTicks 1595）vs remote 105 局 11631 样本（avgTicks 1103）⇒
+  c6-gae 污染在 PPO 中的实际权重 ≈ **38%**（> 局数占比 21%，3命局活更久）。
+- **关键事实（判定可信的依据）**：eval 链路（`export-eval-game.ts` + `run_local_eval_game` +
+  sampler-agent）与 rollout 命令模板（cmd.py）是**两套独立代码**，eval 一直用正确连字符
+  flag ⇒ **所有 eval 口径结论（c5-gae 55% 爬升、c6-gae +7pp 等）未被污染**。修复后实测
+  it160 归档权重 1命0星采样 rollout = 27% ≈ eval 29% ≈ 配对 30%，三口径回归一致。
+- **c6-pickup 探针（污染窗口内训的 it35，修复后评估）**：c6 关 seeds 0-99 配对
+  **38% vs 起点 23% = +15pp，McNemar p=0.025 显著**；且高于 c6-gae 160 轮的 30%（in-loop
+  eval it5=38%/it35=34% 同步确认，非单点假象）。污染排除：污染更重的 c6-gae 反而不如它 ⇒
+  **38% 落在 wPickup 1.5→3.0 杠杆上（唯一变量）**，道具杠杆真效初证。
+- **处置（用户拍板）**：① 已收官课程（c5-gae/c6-gae/c5-tick 等）**不重训**——判定全走 eval
+  （干净），权重保留作 bc/参考，但出身含 X% 多命样本需知情；② c6-pickup **暂不重启**
+  （it36 权重 PPO 未完成即停，归档停在 it35；训练进程内存旧 cmd.py，修复不会热更新）；
+  重启时须用修复后代码、以 c6-pickup.it35 为 bc 续跑 it36+。
+- **违反后果**：任何人拿 training_log 的 rollout winRate 当能力口径（虚高 17pp 量级）；
+  任何人把污染窗口课程的权重当作"纯 1命0星数据"训出的（引用前必须查本条目占比表）；
+  任何人未经"修复后代码 + 冻结快照"就用本地直跑出教训性结论。
+
+## §2026-09-13-reward-wdmg-dead-term（2026-09-13，wDmg 死项修复：击杀/承伤/死亡语义各归其位）
+
+- **机制（代码核验）**：`src/game/SimulationCombat.ts:599` 口径下，玩家**非致命**命中推
+  `player_damage`（累计入 `playerDamageTaken`），**致命**命中推 `player_hit`（`playerHits++`；
+  另一触发 = 3★ 星盾消耗，本族课程 level=0 起步不可达）。⇒ **1 命课程里 `playerHits` 恒等于
+  败局指示器**（胜局 0 / 败局 1，c6 实测败局分布 {1:110, 2:1}）。
+- **判决**：reward 里的 `- wDmg*playerHits` 是**死项**——不承载挨打信息、与
+  `terminal.lives_exhausted=-1.0` 重复扣败局分（败局合计 −2）、且伪装成「挨打惩罚」
+  （历史上对 wDmg 的任何调参实际都是在调死刑）。修复 = **新课程删除该项与 `params.wDmg`**；
+  承伤定价唯一归 `wChip*playerDamageTaken`，死亡定价唯一归 `terminal.lives_exhausted`。
+  历史课程**不回改**（死项是每败局常数 −1，只平移败局回报、不改局内 credit assignment 时序，
+  已收官结论仍成立）；自本条起新课程模板不再含 wDmg。基座课程 = `c6-dmgfix.jsonc`
+  （由 c6-pickup 派生，单变量删死项，wChip 保持 0.005，bc=c6-pickup.it35，iters=60，eval 200）。
+- **后果**：此后任何课程若再引用 `playerHits` 作「承伤」语义 = 违反本条；调「挨打痛感」
+  只允许动 `wChip`（或后续承伤项），调「死刑」只允许动 `terminal.lives_exhausted`。

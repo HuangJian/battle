@@ -81,7 +81,9 @@ function p95(xs: number[]): number {
   return s[Math.min(s.length - 1, Math.ceil(0.95 * s.length) - 1)]
 }
 
-/** 同 outcome 家族判定（与 export-eval-game.ts 枚举对齐：win='stage_clear'）。 */
+/** 同 outcome 家族判定（与 export-eval-game.ts 枚举对齐）。
+ *  注：2026-09-12 起上游 `win` 口径 = `stage_clear ∪ cleared`（单关训练场景二者等价），
+ *  但本函数按**原始 outcome 值**分类（timeout / gameover），不受该口径变更影响。 */
 export function isTimeoutOutcome(outcome: string): boolean {
   return outcome === 'max_ticks' || outcome === 'timeout'
 }
@@ -133,7 +135,10 @@ export function deriveMetrics(rows: EvalGameRow[]): TierMetrics {
     winDmgMedian: median(wins.map((r) => r.playerDamageTaken)),
     winTickMedian: median(wins.map((r) => r.ticks)),
     deathRate: rows.filter((r) => isDeathOutcome(r.outcome)).length / n,
-    timeoutRate: rows.filter((r) => isTimeoutOutcome(r.outcome)).length / n,
+    // 「清场后 BONUS TIME 未走完而被 max_ticks 截断」的局不算超时（2026-09-12 口径统一）：
+    // 它们已被计为胜（win = stage_clear ∪ cleared），若同时计进 timeoutRate 会自相矛盾，
+    // 也可能误触发以 timeout_frac 为判据的熔断。
+    timeoutRate: rows.filter((r) => !r.cleared && isTimeoutOutcome(r.outcome)).length / n,
     accuracy: playerShots > 0 ? enemyHits / playerShots : 0,
     shotsPerGame: playerShots / n,
     firstKillTickMedian: median(

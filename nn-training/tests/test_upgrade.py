@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -32,6 +31,7 @@ NN_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(NN_DIR))
 
 import dist_common
+from tests.subproc_util import run_utf8
 
 FAILS: list[str] = []
 
@@ -528,13 +528,7 @@ def test_codehash_bilingual_contract() -> None:
         return
     agent = REPO / "tools" / "agent" / "sampler-agent.ts"
     try:
-        proc = subprocess.run(
-            [bun, str(agent), "--print-code-hash"],
-            cwd=str(REPO),
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
+        proc = run_utf8([bun, str(agent), "--print-code-hash"], cwd=str(REPO), timeout=120)
     except Exception as e:
         check(False, f"bun --print-code-hash 执行失败: {e}")
         return
@@ -550,13 +544,7 @@ def test_codehash_bilingual_contract() -> None:
     )
     # F3/F4 文件集逐文件对拍（2026-09-01 事故防线：hash 相同但集不同由这里兜底）——
     # --print-code-hash-files 输出与 Python 侧 _collect_code_hash_files 全等。
-    proc2 = subprocess.run(
-        [bun, str(agent), "--print-code-hash-files"],
-        cwd=str(REPO),
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
+    proc2 = run_utf8([bun, str(agent), "--print-code-hash-files"], cwd=str(REPO), timeout=120)
     if proc2.returncode != 0:
         check(False, f"bun --print-code-hash-files 非零退出: {proc2.stderr.strip()}")
         return

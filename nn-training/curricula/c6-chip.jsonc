@@ -1,0 +1,148 @@
+// 课程 c6-chip —— wChip 剂量主腿（2026-09-13 起草，c4 快筛收官后启用）
+//
+// 由 **c6-pickup.jsonc** 派生（与 c4-chip01/c4-chip03 同一模板）。相对 c6-pickup 只改 4 处，
+// 其余（stage grid/forces/spawn/count=6/max_ticks/player/其余 reward 参数/λ/lr/epochs/mb/
+// workers/缰绳/ppo_schedule/eval_every）逐字锁死：
+//
+//   1. name/out/traj/backup_dir/backup_prefix → c6-chip（fresh，绝不复用别腿目录）
+//   2. bc: c5-gae.it160 → **c6-pickup.it35**（与 c4-chip01/03 同 bc ⇒ 三腿跨关剂量对照成立）
+//   3. reward.params.**wChip: 0.005 → 0.03**（唯一训练变量；定档规则见下）
+//   4. iters: 160 → **60**（40 热相 + 20 冷却 = ppo_schedule 完整形状；见下「为什么 60」）
+//
+//   **不配 `gates` 块**（c4-dodge / c6-pickup3 / c4-chip01 先例：门判 PAUSE 只 notify，
+//   G4 plateau 会误杀 PPO worker；护栏 = 人读 + 预算到顶 STOP + F4 熵熔断 0.25）。
+//
+// ── 为什么 60 不是 30（2026-09-13 定稿，用户质疑后核证据）────────────────────
+//   ① c4 教训 = 效应慢热：chip01（0.01）dmg 配对差 it10 仅 −2.3（z=−0.27 不可见）→
+//      it30 才 −13.7（z=−2.13）；30 轮硬停有**假阴性风险**，会让整个 c4 快筛白做。
+//   ② c6 无 30 轮出结论先例：c6-pickup 前 35 轮 in-loop 全是噪声（27-38% 摆动），
+//      c6-gae 判决用 110 轮 ⇒ c6 学习时间尺度 > c4。
+//   ③ 60 = 去掉硬停不是承诺：探针每 10 轮出趋势 + 熵熔断/止损/人读护栏，
+//      证据坏了随时早停；正收益则 60 轮终点判决（或继续经 停止→启动 续跑）。
+//   成本 ~2.2h（max_hours 12 内）；探针场地/判据不受影响。
+//
+// ── 定档规则（已应用，2026-09-13：chip03 it30 探针判入线性档 ⇒ 本腿 0.03 定档）────
+//   c4-chip01（0.01）已定案：200 局配对 dmg −13.7（z=−2.13），dmg/kill −9.2%，kills/ticks/胜率
+//   全平 ⇒ 小而真、无保守化。c4-chip03（0.03）it30 探针实测：dmg差 −24.8（z=−3.29）、
+//   dmg/kill 39.4（≤42）、kills 微升 ⇒ 三档规则判入「线性」⇒ 本腿 **0.03**（当前值，不改）。
+//
+// ── 为什么 c6 是主腿（c4 只是便宜筛子）────────────────────────────────────────
+//   病灶在 c6 量得：同权重（c6-pickup.it35）c6 关 200 局，
+//     胜局 6.00 kills / 承伤 142 ⇒ 23.7 dmg/kill
+//     败局 2.06 kills / 承伤 218 ⇒ **106 dmg/kill（差 4.5 倍）**
+//   ⇒ 败局是「白挨打」：用 2 次多的承伤只换 2 个击杀。wChip 给承伤定价直接打这个病灶。
+//   c6 剂量换算（wKill=3.0）：0.03 ⇒ 胜局 −4.26 ≈ 1.4 击杀、败局 −6.54 ≈ 2.2 击杀。
+//
+// ── 起点与判据（同 c4-chip01 协议，换 c6 场地）────────────────────────────────
+//   起点：bc=c6-pickup.it35 零样本 c6 关 = **32%**（§27 实测 32/100，win=clear∪cleared 口径）。
+//   主判据（效率，不是胜率）：**dmg/kill 相对 it0 下降且不牺牲 kills**。
+//     · ✅ 杠杆迁移成立：dmg/kill ↓ 且 kills 不降（最好 ↑）⇒ 考虑续跑 + 剂量继续上行
+//     · ❌ 保守化：dmg/kill ↓ 但 kills ↓、avgTicks ↑ ⇒ 停，回头做 wDmg 死项修复
+//   参考：entropy（<0.32 坍缩信号，停）、超时占比（>0.15 熔断）、道具/局（wPickup 3.0 仍在）。
+//   验收节奏：每 10 轮配对探针（**c6 场地用 fmap-c6l1，与 c6-pickup-strict 同场地已核验**）：
+//     bun tools/sim/eval-course-ckpt.ts --course tmp/fmap-c6l1.jsonc \
+//       --weights nn-training/weights/c6-chip/<ckpt>.json \
+//       --weights nn-training/weights/c6-pickup/c6-pickup.it35.20260912-165846.json \
+//       --games 200 --workers 6 --out tmp/c6chip-it<N>-probe.jsonl
+//   注：hazard 按 k 分档看；200 局 SE≈3.4pp，100 局解析不了 −9% 量级（c4-chip01 教训 §32）。
+//
+// ── 已知基建缺口（开跑前修）─────────────────────────────────────────────────
+//   eval_games_per_stage 写 200，但 `rl/eval_local.py EVAL_SEEDS` 只有 100 个种子，
+//   in-loop 会被 `[:200]` **静默截回 100**（c4-chip03 实测；2026-09-06 同型坑再现）。
+//   正式探针（--games 200）不受影响。开跑前先落 EVAL_SEEDS 100→200 修复（前缀兼容 + 测试），
+//   本腿 in-loop 才真正拿到 200 局精度；修不落则此 200 只表达意图。
+{
+  "version": 5,
+  "name": "c6-chip",
+  "mode": "per-tick",
+  "stages": [
+    {
+      "name": "p4-onset-mixed",
+      "grid": [
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+      ],
+      "forces": "abcdabcdabcdabcdabcd",
+      "count": 6,
+      "player_spawn": { "col": 12, "row": 12 },
+      "enemy_spawns": [
+        { "col": 2, "row": 2 },
+        { "col": 22, "row": 2 },
+        { "col": 22, "row": 22 },
+        { "col": 2, "row": 22 },
+      ],
+    },
+  ],
+  "difficulty": "hard",
+  "max_ticks": 2400,
+  "seed_rotate": 150,
+  "player": {
+    "lives": 1,
+    "level": 0,
+  },
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots - wTick*ticks - wChip*playerDamageTaken",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.3,
+      "wPickup": 3.0,
+      "wStar": 1.0,
+      "wDmg": 1.0,
+      "wStuck": 0.02,
+      "wShot": 0.01,
+      "wTick": 0.01,
+      // ★ 唯一变量：0.005 → 0.03（定档规则见头注释；若 chip03 判饱和/保守化改 0.01）
+      "wChip": 0.03,
+    },
+    "terminal": {
+      "stage_clear": 2.0,
+      "lives_exhausted": -1.0,
+      "timeout": -2.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  // 与 c4-chip01/03 同 bc（三腿跨关剂量对照的对照轴）
+  "bc": "nn-training/weights/c6-pickup/c6-pickup.it35.20260912-165846.json",
+  "iters": 60,
+  "max_hours": 12,
+  "workers": 8,
+  // §363 缰绳双闸：ref 取课程 bc；warmup 必须 0（validate_args 强制配对）。
+  "kickstart_ref": true,
+  "warmup_iters": 0,
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  // R5＋§363 双 flag（串行路径生效；默认 false 即历史行为）。
+  "normalize_ret": true,
+  "gamma": 0.998,
+  // 继承 λ=0.95（c5-gae 验证的 value 头修复机制）
+  "lam": 0.95,
+  // 末段 kl_coef 0.03 = **护栏**；**不写 ent_coef**（缺省 0.01）。
+  "ppo_schedule": [
+    { "until_iter": 40, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
+    { "kl_coef": 0.03, "lr": 0.00005 },
+  ],
+  "out": "tmp/c6-chip/weights.json",
+  "traj": "tmp/c6-chip",
+  // F4 ENT 熔断：沿用 horizon 档 0.25。
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/c6-chip",
+  "backup_prefix": "c6-chip",
+  // 自定义关 stage ID 从 2000 开始，仅 1 关 → ID 2000。
+  // ⚠️ 200 局需 EVAL_SEEDS 扩容（见头注释），否则 in-loop 静默按 100 跑。
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 200,
+  "eval_every": 5,
+}

@@ -359,8 +359,8 @@ describe('console 局域网只读边界（§…：LAN 查看 / localhost 控制�
     // 只读 SSR 与正常 SSR 一样渲染 token 行与复制键（secret 经 buildStateView 透传）
     for (const readOnly of [true, false]) {
       const html = render.renderConsolePage({ ...base, readOnly })
-      expect(html).toContain('aria-label="复制auth key"') // cloudflared token 复制键
-      expect(html).toContain('token') // token 行本体
+      expect(html).toContain('aria-label="复制key"') // cloudflared token 复制键
+      expect(html).toContain('⧉ key') // 按钮文案即 key 字样
     }
     // 数据源确认：快照里 cloudflared 恒带 secret
     const s = await api.buildStateView()
@@ -717,7 +717,10 @@ describe('console sparkline (ui/view)', () => {
             totalKills: i,
             totalPU: i % 3,
             avgTicks: 100,
-            avgResidualHp: null,
+            avgResidualHp: 150,
+            avgWinTicks: 800,
+            avgLossTicks: 900,
+            dmgPerKill: 3,
           },
           evalData: withEval
             ? {
@@ -816,7 +819,7 @@ describe('console sparkline (ui/view)', () => {
       }))
       const series = view.metricSeries(iters)
       const evalS = series.find((s) => s.key === 'eval')!
-      // 全量 eval：只保留非 NaN（25 个有效点），iters 逐位对齐
+      // eval 胜率：只保留非 NaN（25 个有效点），iters 逐位对齐
       const all = view.sliceSeries(evalS, 'all')
       expect(all.vals.length).toBe(25)
       expect(all.iters.length).toBe(25)
@@ -826,14 +829,11 @@ describe('console sparkline (ui/view)', () => {
       // 应为最后 10 个偶数 iter：32,34,...,50
       expect(last10.iters[0]).toBe(32)
       expect(last10.iters[9]).toBe(50)
-      // 胜局耗时（eval 胜局口径）共享稀疏语义：最近 10 = 最近 10 个有效点
-      const winTicksS = series.find((s) => s.key === 'winTicks')!
-      expect(winTicksS.label).toBe('胜局耗时')
-      expect(view.sliceSeries(winTicksS, 'all').vals.length).toBe(25)
-      expect(view.sliceSeries(winTicksS, '10').vals.length).toBe(10)
     })
 
-    it('metricSeries：胜局耗时 / 胜局残血 = eval 胜局口径，缺 eval 轮为 NaN', () => {
+    it('metricSeries：胜局耗时/胜局残血/承伤·杀/败局耗时 = rollout「所有 iter」平均，非 eval 口径', () => {
+      // actuals 提供 rollout 实际值；evalData 仅偶数 iter 有、且给了不同数值（1300/180）——
+      // 四张图取 actuals（800/150/3/900），证明不再用 eval 100 局平均。
       const iters = Array.from({ length: 50 }, (_, i) => ({
         iter: i + 1,
         time: '',
@@ -856,7 +856,16 @@ describe('console sparkline (ui/view)', () => {
         accuracy: 0,
         loot: 0,
         kills: 0,
-        actuals: null,
+        actuals: {
+          games: 4,
+          totalKills: i,
+          totalPU: i % 3,
+          avgTicks: 100,
+          avgResidualHp: 150,
+          avgWinTicks: 800,
+          avgLossTicks: 900,
+          dmgPerKill: 3,
+        },
         evalData:
           (i + 1) % 2 === 0
             ? {
@@ -887,26 +896,31 @@ describe('console sparkline (ui/view)', () => {
       expect(ticks.label).toBe('胜局耗时')
       const hp = series.find((s) => s.key === 'winHp')!
       expect(hp.label).toBe('胜局残血')
-      // 缺 eval 轮 = NaN；有效点逐位与 eval 对齐（奇数 iter 无 eval → NaN）
-      expect(Number.isFinite(ticks.vals[0])).toBe(false)
-      expect(ticks.vals[1]).toBeCloseTo(1300)
-      expect(Number.isFinite(hp.vals[0])).toBe(false)
-      expect(hp.vals[1]).toBeCloseTo(180)
-      // 全量档 = 只保留有效点；最近 10 = 最近 10 个有效胜局点
-      expect(view.sliceSeries(hp, 'all').vals.length).toBe(25)
+      const dmg = series.find((s) => s.key === 'dmgPerKill')!
+      expect(dmg.label).toBe('承伤/杀')
+      const loss = series.find((s) => s.key === 'lossTicks')!
+      expect(loss.label).toBe('败局耗时')
+      // rollout 口径：取 actuals（800/150/3/900），evalData 同轮给出 1300/180 亦被忽略；
+      // 奇数 iter 无 evalData 仍是有效 rollout 点（非 NaN）。
+      expect(ticks.vals[0]).toBeCloseTo(800)
+      expect(hp.vals[0]).toBeCloseTo(150)
+      expect(dmg.vals[0]).toBeCloseTo(3)
+      expect(loss.vals[0]).toBeCloseTo(900)
+      expect(Number.isFinite(ticks.vals[1])).toBe(true)
+      // 所有 iter 均为 rollout 有效点（不再随 eval 缺口稀疏）→ 全量 = 50 点，最近 10 = 10 点
+      expect(view.sliceSeries(hp, 'all').vals.length).toBe(50)
       expect(view.sliceSeries(ticks, '10').vals.length).toBe(10)
     })
 
-    it('hero 渲染 6 条走势图（两行六格）+ 范围档位开关', () => {
+    it('hero 渲染 6 条走势图（rollout+eval 叠加，无耗时/败局耗时）+ 范围档位开关', () => {
       const html = render.renderConsolePage(mkView(30, true))
-      // 行1 胜率/击杀/道具 + 行2 eval 胜率/胜局耗时/胜局残血 = 6 张走势图（匹配元素，排除 CSS 里的同名类定义）
       const charts = (html.match(/class="tc-trend__svg"/g) ?? []).length
       expect(charts).toBe(6)
-      // 新增胜局口径走势图标签与悬停提示
-      expect(html).toContain('胜局耗时')
-      expect(html).toContain('胜局残血')
-      expect(html).toContain('胜局平均耗时（ticks，仅胜局计入）')
-      expect(html).toContain('胜局平均剩余 hp（剩余命每命计满额）')
+      // 6 格：胜率 / 承伤·杀 / 击杀 / 胜局耗时 / 胜局残血 / 道具
+      const labels = [...html.matchAll(/tc-tcell__lbl[^>]*>([^<]+)<\/span>/g)].map((m) => m[1])
+      expect(labels).toEqual(['胜率', '承伤/杀', '击杀', '胜局耗时', '胜局残血', '道具'])
+      // 双序列叠加：eval 橙线（#ea580c）在有 eval 数据时出现
+      expect(html).toContain('#ea580c')
       // 范围档位渲染且默认最近 30
       expect(html).toContain('tc-trend-range__btn')
       expect(html).toContain('全量')
@@ -1301,5 +1315,40 @@ describe('detectPpoQueueStall（PPO 队列 >5min 无 worker 领取 → warning�
 
   it('空目录 / 不存在 → null', () => {
     expect(api.detectPpoQueueStall(path.join(jobRoot, 'nope'))).toBeNull()
+  })
+})
+
+describe('console/api.loopCompleteFromLedgerTail（正常完成停车横幅派生）', () => {
+  const complete = (reason: string) =>
+    JSON.stringify({
+      event: 'run_complete',
+      iter: 80,
+      iters: 80,
+      time: '2026-09-12 01:59:45',
+      reason,
+    })
+
+  it('账本尾行 run_complete → 停车态（2026-09-12 c5-ent it80 不再误报意外退出）', () => {
+    const v = api.loopCompleteFromLedgerTail([
+      JSON.stringify({ event: 'iteration', iter: 80, time: '2026-09-12 01:59:45' }),
+      complete('iters 跑满（it80/80），本地停采、云机已停机'),
+    ])
+    expect(v).not.toBeNull()
+    expect(v!.iters).toBe(80)
+    expect(v!.reason).toContain('本地停采')
+  })
+
+  it('尾行是 iteration（resume 后）→ null（横幅自动消失）', () => {
+    expect(
+      api.loopCompleteFromLedgerTail([
+        complete('iters 跑满'),
+        JSON.stringify({ event: 'run_start', time: '2026-09-12 03:00:00' }),
+      ]),
+    ).toBeNull()
+  })
+
+  it('空账本 / 尾行非 JSON → null（不误报）', () => {
+    expect(api.loopCompleteFromLedgerTail([])).toBeNull()
+    expect(api.loopCompleteFromLedgerTail(['[run_rl] boot...'])).toBeNull()
   })
 })

@@ -295,14 +295,92 @@ class TrainingGuards:
     #: 需要下发云端停机达令的门判决（不包含预算 STOP——预算到顶是真正结束，走硬断）。
     CLOUD_HALT_VERDICTS = frozenset({"REMEDIATE", "PAUSE", "ABORT"})
 
-    def _sync_cloud_halt(self, it: int, verdict: str) -> None:
+    #: ★ 只提示、不该杀云机的门种类（2026-09-13 P0 止血）。
+    #: `plateau`(G4) 的 REMEDIATE 语义是"**边际收益枯竭**"，不是"课程失效"——它每 5 轮
+    #: 必然复现一次（平台期本来就长），下发 cloud halt 就会反复杀掉云端 PPO worker。
+    #: 实测事故：`c6-pickup3` it35–it60 共 6 次、`c6-bonus` it25–it70 共 **10 次**
+    #: cloud halt，全部由 G4 触发 ⇒ 两条腿后半程（c6-bonus 是 60% 的轮次）都在
+    #: "PPO worker 被反复杀"的环境下训练，且 G4 用**训练内** win_rate 判，
+    #: 根本看不见配对口径下的退化（c4-dodge 同一个判错轴教训）。
+    #: ⇒ plateau 只记录 verdict，不下达停机令；真需要停的场景由 G7/G13/PAUSE/ABORT 覆盖。
+    NO_CLOUD_HALT_KINDS = frozenset({"plateau"})
+
+    #: 门禁触发的动作模式（控制台顶部「触发门禁：停机/提示」开关，2026-09-13）。
+    #: halt = 下发 cloud halt（默认，历史行为）；notify = 只提示不停机。
+    GATE_HALT_MODES = ("halt", "notify")
+
+    def _is_soft_verdict(self, verdict: str, readings: Any) -> bool:
+        """REMEDIATE 是否**只**由提示类门（plateau）触发 ⇒ 不该下发 cloud halt。
+
+        保守原则：readings 缺失/没有任何门 released 时返回 False（维持既有停机行为），
+        避免因读不到明细而漏停真正需要干预的情况。
+        """
+        if verdict != "REMEDIATE" or not readings:
+            return False
+        released = [r for r in readings if getattr(r, "released", False)]
+        if not released:
+            return False
+        return all(getattr(r, "kind", "") in self.NO_CLOUD_HALT_KINDS for r in released)
+
+    def _gate_halt_mode(self) -> str:
+        """门禁动作模式：**标志文件 > 启动参数 > 默认 halt**。
+
+        标志文件 = `<traj>/gate-halt-mode.txt`（内容 halt|notify），由控制台顶部开关写。
+        放在文件里是为了**运行时可热切**：训练中改主意不必重启（每轮门判定只读一次，
+        一轮 ~100s，开销可忽略）。读不到/内容非法一律回退启动参数，再回退 halt（保守）。
+        """
+        try:
+            root = self._traj_root
+            if root is not None:
+                p = Path(root) / "gate-halt-mode.txt"
+                v = p.read_text(encoding="utf-8").strip().lower()
+                if v in self.GATE_HALT_MODES:
+                    return v
+        except OSError:
+            pass
+        except Exception:  # 任何意外（属性缺失/权限）都退化到启动参数，绝不影响训练
+            pass
+        v = str(getattr(self.args, "gate_halt_mode", "") or "halt").strip().lower()
+        return v if v in self.GATE_HALT_MODES else "halt"
+
+    def _sync_cloud_halt(self, it: int, verdict: str, readings: Any = None) -> None:
         """§386 联动：门判决只作用于远端云机，TrainingLoop 永不停车。
 
         REMEDIATE/PAUSE/ABORT → 向 hub 下发停机达令（能自停的云机（Colab）
         释放，停不掉的（Kaggle）照常干活）；HOLD/ADVANCE → 停机条件消失下发
         resume。任何失败（tunnel 抖动、hub 没起）只记日志，绝不断训练。
         local/push 模式无 hub（remote_hub_url 空）→ 直接短路，零行为。
+
+        2026-09-13 修正：`REMEDIATE` 若**只**由提示类门（G4 plateau）触发则**跳过**停机
+        （见 `NO_CLOUD_HALT_KINDS`）——否则平台期每 5 轮杀一次云 worker。
         """
+        args = self.args
+        hub_url = str(getattr(args, "remote_hub_url", "") or "")
+        token = str(getattr(args, "remote_token", "") or "")
+        if not hub_url or not token:
+            return
+        want_halt = verdict in self.CLOUD_HALT_VERDICTS
+        if want_halt and self._is_soft_verdict(verdict, readings):
+            kinds = sorted(
+                {
+                    str(getattr(r, "kind", "?"))
+                    for r in (readings or [])
+                    if getattr(r, "released", False)
+                }
+            )
+            log(
+                f"[run_rl] gate it{it}: {verdict} 仅由提示类门 {kinds} 触发 "
+                f"→ 不下发 cloud halt（避免杀掉云端 PPO worker）"
+            )
+            # 提示类判决不改变停机态：既不下达，也不主动 resume。
+            return
+        if want_halt and self._gate_halt_mode() == "notify":
+            # 操作员把顶部开关拨到「提示」：只记录 verdict（上面已落账），不停云机。
+            log(
+                f"[run_rl] gate it{it}: {verdict} —— 门禁动作为 notify（控制台开关）"
+                f"→ 只提示，不下发 cloud halt"
+            )
+            return
         args = self.args
         hub_url = str(getattr(args, "remote_hub_url", "") or "")
         token = str(getattr(args, "remote_token", "") or "")
@@ -343,7 +421,7 @@ class TrainingGuards:
         except OSError as e:
             log(f"[run_rl] gate it{it}: gate_verdict 落盘失败（{e}）— 记录缺失，继续训练")
         log(f"[run_rl] GATE {res.verdict} it{it}: {res.reason}")
-        self._sync_cloud_halt(it, res.verdict)
+        self._sync_cloud_halt(it, res.verdict, getattr(res, "readings", None))
         return False
 
     def _budget_hard_cut(self, it: int) -> bool:

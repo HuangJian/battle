@@ -3,7 +3,8 @@
 
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'fs'
 import { join } from 'path'
-import type { EvalSummary, IterActuals, IterRow } from '../ui/view'
+import type { EvalSummary, IterActuals, IterRow, PairedCompare, PairedReferee } from '../ui/view'
+import { mcnemarP, pairedVerdict } from '../../eval/mcnemar'
 
 // ---------------- 每轮实际值（it{N}/**/manifest.json 聚合） ----------------
 
@@ -49,7 +50,17 @@ export function readIterActuals(trajDir: string, iter: number): IterActuals | nu
     if (!existsSync(itDir)) return null
     const best = new Map<
       string,
-      { nSamples: number; kills: number; pu: number; ticks: number; residualHp: number | null }
+      {
+        nSamples: number
+        kills: number
+        pu: number
+        ticks: number
+        residualHp: number | null
+        /** outcome（stage_clear=胜局；null=manifest 未落盘）。 */
+        outcome: string | null
+        /** playerDamageTaken（全样本承伤，null=字段缺失 → 不计入承伤/杀）。 */
+        dmgTaken: number | null
+      }
     >()
     const walk = (base: string, rel: string): void => {
       if (rel.split('/').length > 6) return
@@ -99,6 +110,11 @@ export function readIterActuals(trajDir: string, iter: number): IterActuals | nu
               pu: Number(m.powerUpsCollected ?? 0) || 0,
               ticks: Number(m.ticks ?? 0) || 0,
               residualHp: residualHpFromFields(m),
+              outcome: typeof m.outcome === 'string' && m.outcome.length > 0 ? m.outcome : null,
+              dmgTaken:
+                typeof m.playerDamageTaken === 'number' && Number.isFinite(m.playerDamageTaken)
+                  ? m.playerDamageTaken
+                  : null,
             })
           }
         } catch {
@@ -113,6 +129,14 @@ export function readIterActuals(trajDir: string, iter: number): IterActuals | nu
     let totalTicks = 0
     let residualSum = 0
     let residualN = 0
+    // 胜局/败局耗时（ticks）与 承伤/杀（全样本，分子分母同口径）
+    let winTickSum = 0
+    let winN = 0
+    let lossTickSum = 0
+    let lossN = 0
+    let dmgSum = 0
+    let dmgKills = 0
+    let dmgN = 0
     for (const v of best.values()) {
       totalKills += v.kills
       totalPU += v.pu
@@ -121,6 +145,21 @@ export function readIterActuals(trajDir: string, iter: number): IterActuals | nu
         residualSum += v.residualHp
         residualN++
       }
+      if (v.outcome) {
+        if (v.outcome === 'stage_clear' && v.ticks > 0) {
+          winTickSum += v.ticks
+          winN++
+        } else if (v.outcome !== 'stage_clear' && v.ticks > 0) {
+          lossTickSum += v.ticks
+          lossN++
+        }
+      }
+      // 承伤/杀：全样本、不区分胜负；分子分母同口径 = 仅累计带有 playerDamageTaken 的局。
+      if (v.dmgTaken !== null) {
+        dmgSum += v.dmgTaken
+        dmgKills += v.kills
+        dmgN++
+      }
     }
     return {
       games: best.size,
@@ -128,6 +167,9 @@ export function readIterActuals(trajDir: string, iter: number): IterActuals | nu
       totalPU,
       avgTicks: Math.round(totalTicks / best.size),
       avgResidualHp: residualN > 0 ? Math.round(residualSum / residualN) : null,
+      avgWinTicks: winN > 0 ? Math.round(winTickSum / winN) : null,
+      avgLossTicks: lossN > 0 ? Math.round(lossTickSum / lossN) : null,
+      dmgPerKill: dmgN > 0 && dmgKills > 0 ? +(dmgSum / dmgKills).toFixed(1) : null,
     }
   } catch {
     return null
@@ -164,7 +206,9 @@ function loadActualsCache(trajDir: string): Map<number, CachedActuals> {
         typeof v.games === 'number' &&
         typeof v.totalKills === 'number' &&
         typeof v.totalPU === 'number' &&
-        typeof v.avgTicks === 'number'
+        typeof v.avgTicks === 'number' &&
+        // schema 版本门闩：缺 avgWinTicks（旧缓存）→ 作废重建，带出新增 rollout 胜局/败局/承伤字段。
+        'avgWinTicks' in v
       ) {
         out.set(it, v)
       }
@@ -357,6 +401,107 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
   return out
 }
 
+/** eval 逐局胜负表：iter → `stage:seed` → win（同键重复落账取最后一条）。
+ * 配对裁判与逐轮装配共用这一次扫描。 */
+export function readEvalGameWins(trajDir: string): Map<number, Map<string, boolean>> {
+  const byIter = new Map<number, Map<string, boolean>>()
+  const logPath = join(trajDir, 'eval_log.jsonl')
+  try {
+    if (!existsSync(logPath)) return byIter
+    for (const line of readFileSync(logPath, 'utf8').split(String.fromCharCode(10))) {
+      if (!line.trim()) continue
+      try {
+        const r = JSON.parse(line) as Record<string, unknown>
+        if (r.event !== 'eval') continue
+        const iter = Number(r.iter ?? -1)
+        const stage = Number(r.stage)
+        const seed = Number(r.seed)
+        if (
+          !Number.isInteger(iter) ||
+          iter < 0 ||
+          !Number.isInteger(stage) ||
+          !Number.isInteger(seed)
+        ) {
+          continue
+        }
+        let m = byIter.get(iter)
+        if (!m) {
+          m = new Map()
+          byIter.set(iter, m)
+        }
+        m.set(`${stage}:${seed}`, r.win === true || r.win === 1)
+      } catch {
+        /* skip bad line */
+      }
+    }
+  } catch {
+    /* unreadable */
+  }
+  return byIter
+}
+
+/** 两轮胜负表配对比较（baseIter → ckptIter）：b01/b10 只看不一致对。 */
+export function compareSeedMaps(
+  ma: Map<string, boolean>,
+  mb: Map<string, boolean>,
+  baseIter: number,
+  ckptIter: number,
+): PairedCompare {
+  let b01 = 0
+  let b10 = 0
+  let paired = 0
+  for (const [k, wa] of ma) {
+    const wb = mb.get(k)
+    if (wb === undefined) continue
+    paired++
+    if (!wa && wb) b01++
+    else if (wa && !wb) b10++
+  }
+  const union = new Set([...ma.keys(), ...mb.keys()])
+  return {
+    baseIter,
+    ckptIter,
+    paired,
+    unpaired: union.size - paired,
+    b01,
+    b10,
+    deltaPp: paired > 0 ? +((100 * (b01 - b10)) / paired).toFixed(1) : 0,
+    p: mcnemarP(b01, b10),
+    verdict: pairedVerdict({ b01, b10, b11: 0, b00: 0 }),
+  }
+}
+
+/** 配对裁判（只读哨子，不进门判）：最新 eval vs it0 基线（bc 权重）/ vs 上一 eval 轮。
+ *
+ * 同 (stage,seed) 逐局配对，比较的是同一语料下两个 checkpoint 的贪心胜负——
+ * 跨语料（bc 在 0-99 vs 新权重在 860001+）时差分把卷面难度抵消掉。一边缺席的
+ * 局只计 unpaired 诚实披露。单轮/无数据 → 对应项 null（UI 空态）。 */
+export function readPairedReferee(trajDir: string): PairedReferee | null {
+  const byIter = readEvalGameWins(trajDir)
+  const iters = [...byIter.keys()].sort((a, b) => a - b)
+  if (iters.length === 0) return null
+  const latest = iters[iters.length - 1]
+  // 开腿基准同上：优先 it0（bc 权重基线），无则退回首个 eval 轮。
+  const first = iters.includes(0) ? 0 : iters[0]
+  const get = (it: number): Map<string, boolean> => byIter.get(it) ?? new Map<string, boolean>()
+  const vsFirst = first === latest ? null : compareSeedMaps(get(first), get(latest), first, latest)
+  const vsPrev =
+    iters.length < 2
+      ? null
+      : compareSeedMaps(get(iters[iters.length - 2]), get(latest), iters[iters.length - 2], latest)
+  if (!vsFirst && !vsPrev) return null
+  return { vsFirst, vsPrev }
+}
+
+/** evalData 挂载逐轮配对（无 evalData 原样返回 null；浅拷贝不污染共享表）。 */
+function withPaired(
+  s: EvalSummary | undefined,
+  pairedVsFirst: PairedCompare | null,
+): EvalSummary | null {
+  if (!s) return null
+  return { ...s, pairedVsFirst }
+}
+
 /** 从 training_log.jsonl 读取最近 MAX_ITER_ROWS 轮迭代指标（实际值缓存优先：
  *  manifest 聚合只做一次，落 .pool-actuals-cache.json；time 门闩匹配才命中）。 */
 export function readIterMetrics(trajDir: string): { rows: IterRow[] } {
@@ -366,6 +511,29 @@ export function readIterMetrics(trajDir: string): { rows: IterRow[] } {
   const logPath = join(trajDir, 'training_log.jsonl')
   // eval 汇总整册读一次（按 iter 键控），逐行查表——不在循环里反复开文件。
   const evalSummaries = readEvalSummaries(trajDir)
+  // 逐轮 vs 开腿配对：同趟扫描的副产品，每轮 evalData 自带（表格配对列的数据源）。
+  const evalWins = readEvalGameWins(trajDir)
+  const evalIters = [...evalWins.keys()].sort((a, b) => a - b)
+  // 配对基线 = it0（课程 bc 权重的干净评估，trainer 在本 run 首次 rollout 收官后补派）
+  // ——恒定、跨腿可比。无 it0 时退回首个 eval 轮（兼容 it0 上线前已跑完的腿）：
+  // "首条 eval" 会随 run 起点漂移（resume 时首条可能是 it50，配对比的是中途两点）。
+  const evalBaseline = evalIters.length === 0 ? null : evalIters.includes(0) ? 0 : evalIters[0]
+  const pairedByIter = new Map<number, PairedCompare | null>()
+  if (evalBaseline !== null) {
+    for (const it of evalIters) {
+      if (it === evalBaseline) {
+        pairedByIter.set(it, null) // 基线本轮：vs自己不判，UI 显示“基线”
+        continue
+      }
+      const c = compareSeedMaps(
+        evalWins.get(evalBaseline) ?? new Map<string, boolean>(),
+        evalWins.get(it) ?? new Map<string, boolean>(),
+        evalBaseline,
+        it,
+      )
+      pairedByIter.set(it, c.paired > 0 ? c : null)
+    }
+  }
   const actualsCache = loadActualsCache(trajDir)
   let cacheDirty = false
   try {
@@ -395,6 +563,12 @@ export function readIterMetrics(trajDir: string): { rows: IterRow[] } {
             avgTicks: cached.avgTicks,
             avgResidualHp:
               (cached as CachedActuals & { avgResidualHp?: number | null }).avgResidualHp ?? null,
+            avgWinTicks:
+              (cached as CachedActuals & { avgWinTicks?: number | null }).avgWinTicks ?? null,
+            avgLossTicks:
+              (cached as CachedActuals & { avgLossTicks?: number | null }).avgLossTicks ?? null,
+            dmgPerKill:
+              (cached as CachedActuals & { dmgPerKill?: number | null }).dmgPerKill ?? null,
           }
         } else {
           actuals = readIterActuals(trajDir, iter)
@@ -429,7 +603,7 @@ export function readIterMetrics(trajDir: string): { rows: IterRow[] } {
           loot: Number(dm.loot ?? 0),
           kills: +(Number(dm.progress ?? 0) * 20).toFixed(2),
           actuals,
-          evalData: evalSummaries.get(iter) ?? null,
+          evalData: withPaired(evalSummaries.get(iter), pairedByIter.get(iter) ?? null),
         })
       } catch {
         /* skip bad line */
@@ -440,6 +614,40 @@ export function readIterMetrics(trajDir: string): { rows: IterRow[] } {
     for (const r of rows) byIter.set(r.iter, r)
     const merged = [...byIter.values()]
     merged.sort((a, b) => b.iter - a.iter)
+    // it0 基线行（bc 权重评估）：它没有 rollout 采样、只有干净评估 ⇒ 合成一行；
+    // rollout 派生字段一律 NaN（趋势图的缺口约定——写成 0 会在图上多画一个假零点）。
+    // 表格只在 eval 子行渲染它（MetricsTable.buildRows 跳过 iter<=0 的主行）。
+    // 必须先有 ≥1 条真实 iteration 行才合成：否则 latestRow 会把基线当成"最新轮"。
+    const base0 = evalSummaries.get(0)
+    if (base0 && merged.some((r) => r.iter > 0) && !merged.some((r) => r.iter === 0)) {
+      merged.push({
+        iter: 0,
+        time: base0.time,
+        winRate: Number.NaN,
+        scoreMean: Number.NaN,
+        scoreStd: Number.NaN,
+        samples: 0,
+        rolloutSec: 0,
+        ppoSec: 0,
+        kl: Number.NaN,
+        entropy: Number.NaN,
+        policyLoss: Number.NaN,
+        valueLoss: Number.NaN,
+        meanRet: Number.NaN,
+        lr: 0,
+        expectedGames: 0,
+        halted: false,
+        topDims: '',
+        avgTicks: 0,
+        accuracy: Number.NaN,
+        loot: Number.NaN,
+        kills: Number.NaN,
+        actuals: null,
+        // 基线自己：vs 自己不判（pairedVsFirst = null → UI 标"基线"）
+        evalData: withPaired(base0, null),
+      })
+      merged.sort((a, b) => b.iter - a.iter)
+    }
     if (cacheDirty) saveActualsCache(trajDir, actualsCache)
     return { rows: merged.slice(0, MAX) }
   } catch {

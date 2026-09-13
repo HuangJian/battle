@@ -58,8 +58,57 @@ function argAll(name: string): string[] {
   return out
 }
 
+/**
+ * 去尾逗号（`,]` / `,}`，含跨行）：逐字符扫描，字符串内原样保留（转义感知）。
+ * 背景：Python 侧 rl/jsonc.py 容忍尾逗号，课程文件（c6-pickup 起）普遍带尾逗号
+ * （oxfmt `trailingComma: all` 还会主动加）；本函数让 TS 侧与 Python 同口径，
+ * 否则探针读课程文件直接崩（2026-09-12 实测）。只删 `]`/`}` 前的逗号，中部逗号不动。
+ */
+export function stripTrailingCommas(text: string): string {
+  let out = ''
+  let i = 0
+  let inStr = false
+  while (i < text.length) {
+    const c = text[i]
+    if (inStr) {
+      out += c
+      if (c === '\\') {
+        out += text[i + 1] ?? ''
+        i += 2
+        continue
+      }
+      if (c === '"') inStr = false
+      i++
+      continue
+    }
+    if (c === '"') {
+      inStr = true
+      out += c
+      i++
+      continue
+    }
+    if (c === ',') {
+      let j = i + 1
+      while (j < text.length && /\s/.test(text[j] ?? '')) j++
+      const n = text[j] ?? ''
+      if (n === ']' || n === '}') {
+        i++
+        continue
+      }
+    }
+    out += c
+    i++
+  }
+  return out
+}
+
+/** 课程文件完整管线：去注释 → 去尾逗号 → JSON.parse 可直读。 */
+export function parseCourseJsonc(text: string): unknown {
+  return JSON.parse(stripTrailingCommas(stripJsonc(text)))
+}
+
 /** Strip // and block comments from JSONC, respecting strings (course files). */
-function stripJsonc(text: string): string {
+export function stripJsonc(text: string): string {
   let out = ''
   let i = 0
   let inStr = false
@@ -115,6 +164,11 @@ interface LabelAgg {
   games: number
   wins: number
   cleared: number
+  /** 单关训练场景下 `win`(stage_clear) 与 `cleared`(歼灭) 等价，统一算「过关」。
+   *  敌人全灭后若场上还有道具，游戏进 BONUS TIME 窗口（≈600 tick）才 stage_clear，
+   *  而 max_ticks 可能在窗口结束前截断 ⇒ outcome=max_ticks 但实际已歼灭。
+   *  （2026-09-12 用户裁定：单关场景不区分二者；道具跨关累积的增益只在多关训练时才存在。） */
+  passed: number
   outcomes: Record<string, number>
   kills: number
   enemyHits: number
@@ -131,13 +185,33 @@ async function main(): Promise<void> {
     process.exit(2)
   }
   const policy = arg('policy') ?? 'nn'
-  if (policy !== 'nn' && policy !== 'god') {
-    console.error(`[eval-course-ckpt] unknown --policy '${policy}' (nn|god)`)
+  if (policy !== 'nn' && policy !== 'god' && policy !== 'nn-goal') {
+    console.error(`[eval-course-ckpt] unknown --policy '${policy}' (nn|god|nn-goal)`)
     process.exit(2)
   }
+  // goal 层测试：nn-goal 的外部目标源（god|heuristic）+ 软偏置强度，透传 env/payload。
+  if (policy === 'nn-goal') {
+    const src = arg('goal-source') ?? 'god'
+    if (src !== 'god' && src !== 'heuristic') {
+      console.error(`[eval-course-ckpt] --goal-source must be 'god'|'heuristic'`)
+      process.exit(2)
+    }
+    process.env.GOAL_SOURCE = src
+    const bias = arg('goal-bias')
+    if (bias !== undefined) {
+      const b = Number(bias)
+      if (!Number.isFinite(b) || b <= 0) {
+        console.error(`[eval-course-ckpt] --goal-bias must be a positive number`)
+        process.exit(2)
+      }
+      process.env.GOAL_BIAS = String(b)
+    }
+  }
   const weightPaths = argAll('weights')
-  if (policy === 'nn' && weightPaths.length === 0) {
-    console.error('[eval-course-ckpt] --weights <file> required for --policy nn (repeatable)')
+  if ((policy === 'nn' || policy === 'nn-goal') && weightPaths.length === 0) {
+    console.error(
+      `[eval-course-ckpt] --weights <file> required for --policy ${policy} (repeatable)`,
+    )
     process.exit(2)
   }
   const weights =
@@ -150,9 +224,7 @@ async function main(): Promise<void> {
   const workers = workersArg > 0 ? workersArg : defaultWorkerCount()
   const outPath = arg('out')
 
-  const course = JSON.parse(
-    stripJsonc(readFileSync(resolveCourse(courseArg), 'utf8')),
-  ) as CourseJson
+  const course = parseCourseJsonc(readFileSync(resolveCourse(courseArg), 'utf8')) as CourseJson
   const stages = course.stages
   if (!Array.isArray(stages) || stages.length === 0) {
     console.error(`[eval-course-ckpt] course has no custom stages: ${courseArg}`)
@@ -197,6 +269,8 @@ async function main(): Promise<void> {
         weightsPath: weights[wi].path,
         label: weights[wi].label,
         policy,
+        goalSource: policy === 'nn-goal' ? (process.env.GOAL_SOURCE ?? 'god') : undefined,
+        goalBias: policy === 'nn-goal' ? (process.env.GOAL_BIAS ?? undefined) : undefined,
         difficulty,
         maxTicks,
         lives,
@@ -233,6 +307,7 @@ async function main(): Promise<void> {
         games: 0,
         wins: 0,
         cleared: 0,
+        passed: 0,
         outcomes: {},
         kills: 0,
         enemyHits: 0,
@@ -246,6 +321,7 @@ async function main(): Promise<void> {
     a.games++
     if (r.win) a.wins++
     if (r.cleared) a.cleared++
+    if (r.win || r.cleared) a.passed++
     a.outcomes[r.outcome] = (a.outcomes[r.outcome] ?? 0) + 1
     a.kills += r.kills
     a.enemyHits += r.enemyHits
@@ -259,11 +335,11 @@ async function main(): Promise<void> {
     `\n[eval-course-ckpt] ${rows.length} games in ${el}s (${(rows.length / Number(el) || 0).toFixed(1)} games/s)\n`,
   )
   process.stderr.write(
-    `${'label'.padEnd(28)} win    kills  hit(敌) beHit(玩家) dmg     shots  avgTicks  max_ticks gameover\n`,
+    `${'label'.padEnd(28)} pass   kills  hit(敌) beHit(玩家) dmg     shots  avgTicks  max_ticks gameover\n`,
   )
   for (const a of agg.values()) {
     process.stderr.write(
-      `${a.label.padEnd(28)} ${`${a.wins}/${a.games}`.padEnd(6)} ${String(a.kills).padEnd(6)} ` +
+      `${a.label.padEnd(28)} ${`${a.passed}/${a.games}`.padEnd(6)} ${String(a.kills).padEnd(6)} ` +
         `${String(a.enemyHits).padEnd(7)} ${String(a.playerHits).padEnd(10)} ` +
         `${String(a.playerDamageTaken).padEnd(7)} ${String(a.playerShots).padEnd(6)} ` +
         `${Math.round(a.ticks / Math.max(1, a.games))
@@ -273,7 +349,10 @@ async function main(): Promise<void> {
     )
   }
   process.stderr.write(
-    `[eval-course-ckpt] win rate per checkpoint above; full JSONL ${outPath ? `-> ${outPath}` : 'on stdout'}\n`,
+    // `pass` = win ∪ cleared（单关场景二者等价，见 LabelAgg.passed 注释）；
+    // win/cleared 的原始计数仍逐局落在 JSONL 里，需要细分时可离线重算。
+    `[eval-course-ckpt] pass rate (= win ∪ cleared) per checkpoint above; ` +
+      `full JSONL ${outPath ? `-> ${outPath}` : 'on stdout'}\n`,
   )
 }
 
@@ -307,4 +386,4 @@ async function runChunks(
   return settled
 }
 
-await main()
+if (import.meta.main) await main()

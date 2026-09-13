@@ -1,0 +1,131 @@
+// 课程 c6-pickup —— 道具杠杆腿（2026-09-12 起草，c6-gae it110 判决后启用）
+//
+// 由 **c6-gae.jsonc** 派生。**相对 c6-gae 只改 1 处学习变量**，其余（stage/敌数/命数/
+// max_ticks/player/bc/λ/scale/lr/epochs/mb/workers/缰绳/eval 配置）全锁死：
+//
+//   1. name/out/traj/backup_dir/backup_prefix → c6-pickup（fresh）
+//   2. reward.params.**wPickup: 1.5 → 3.0**（唯一变量 = 道具价格）
+//
+//   bc 与 c6-gae **同取 c5-gae.it160**（同起点、单变量 A/B 对照，归因干净）。
+//   lam=0.95 继承（c5-gae 验证的机制，value 头修好后策略才读得懂道具的长期价值）。
+//
+// ── 为什么（2026-09-12，DECISIONS §c5-gae-finale 道具分析 + c6-gae it60 判决）────
+//   病灶：c6 道具比 c4/c5 更密更稳，但学生 0.82/局（c6-gae 0.75-1.05）未跟上密度，
+//   且"道具→star→火力→击杀吞吐→收第 6 敌"是破 c6/c7/c8 清场瓶颈的任务级假设。
+//   当前 wPickup=1.5 = 0.5 个击杀——绕路捡一个道具的成本（~200-400 tick × −0.01 =
+//   −2~−4，外加暴露风险）轻松盖过 1.5 ⇒ 策略只"顺路才捡"（机会主义）。
+//   改 3.0 = 1 个击杀：单次捡取大致覆盖绕路成本，配合 value 头对 star 未来吞吐的
+//   估值（λ 修好后 value 能看到下游击杀），策略才可能**主动绕路捡**。
+//
+// ⚠️ 依赖关系（本腿是 c6-gae 的"如果"分支）：
+//   c6-gae 跑到 it110 的判决决定本腿是否启用——
+//   · it110 配对 >30% 且在爬 ⇒ c6-gae 自己会涨，本腿搁置；
+//   · it110 配对 ≤30% 平 ⇒ "c6 无道具学习天花板 ≈ 28%"成立 ⇒ 启用本腿。
+//   启用前先跑 c6-gae.it110 权重在此课程口径下的零样本（应 ≈23% 起点）。
+//
+// ── 起点（同 c6-gae，seeds 0-99）──────────────────────────────────────────────
+//   c5-gae.it160 零样本 c6 = 23%（配对基准）。wPickup 改动不改变起点权重行为
+//   （推理不吃 reward），所以起点 = 23% 不变。
+//
+// ── 门（人读 + 配对探针；不配 `gates` 块——λ 腿先例）──────────────────────────
+//   主判据（配对验收）：c6 关 seeds 0-99 配对探针 vs 起点 23%，
+//     **胜率 >28%（c6-gae 的配对平台）且 McNemar p<0.05** —— 必须打破"无道具天花板"。
+//   参考（训练内）：**道具/局**（若升到 ~1.5+ 说明杠杆生效）；value ≤0.65；winRate 趋势。
+//   熔断：① 超时占比 >0.15  ② 配对 Δwin ≤ −10 且 p<0.05  ③ 命中率断崖  ④ 熵失控 >0.7。
+//   验收节奏：每 10 轮配对探针 + 道具/局统计（同 c6-gae 命令）。
+//
+// ── 预算 ──────────────────────────────────────────────────────────────────────
+//   iters=160 + max_hours=12（与 c6-gae 同；若 c6-gae it110 后还在爬，可先让它跑完）。
+{
+  "version": 5,
+  "name": "c6-pickup",
+  "mode": "per-tick",
+  "stages": [
+    {
+      "name": "p4-onset-mixed",
+      "grid": [
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+      ],
+      "forces": "abcdabcdabcdabcdabcd",
+      "count": 6,
+      "player_spawn": { "col": 12, "row": 12 },
+      "enemy_spawns": [
+        { "col": 2, "row": 2 },
+        { "col": 22, "row": 2 },
+        { "col": 22, "row": 22 },
+        { "col": 2, "row": 22 },
+      ],
+    },
+  ],
+  "difficulty": "hard",
+  "max_ticks": 2400,
+  "seed_rotate": 150,
+  "player": {
+    "lives": 1,
+    "level": 0,
+  },
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots - wTick*ticks - wChip*playerDamageTaken",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.3,
+      // ★ 单变量：1.5 → 3.0（= 1 个击杀；让绕路捡道具的成本大致被覆盖）
+      "wPickup": 3.0,
+      "wStar": 1.0,
+      "wDmg": 1.0,
+      "wStuck": 0.02,
+      "wShot": 0.01,
+      "wTick": 0.01,
+      "wChip": 0.005,
+    },
+    "terminal": {
+      "stage_clear": 2.0,
+      "lives_exhausted": -1.0,
+      "timeout": -2.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/c5-gae/c5-gae.it160.20260912-102739.json",
+  "iters": 160,
+  "max_hours": 12,
+  "workers": 8,
+  // §363 缰绳双闸：ref 取课程 bc；warmup 必须 0（validate_args 强制配对）。
+  "kickstart_ref": true,
+  "warmup_iters": 0,
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  // R5＋§363 双 flag（串行路径生效；默认 false 即历史行为）。
+  "normalize_ret": true,
+  "gamma": 0.998,
+  // 继承 λ=0.95（c5-gae 验证的 value 头修复机制）
+  "lam": 0.95,
+  // 末段 kl_coef 0.03 = **护栏**；**不写 ent_coef**（缺省 0.01）。
+  "ppo_schedule": [
+    { "until_iter": 40, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
+    { "kl_coef": 0.03, "lr": 0.00005 },
+  ],
+  "out": "tmp/c6-pickup/weights.json",
+  "traj": "tmp/c6-pickup",
+  // F4 ENT 熔断：沿用 horizon 档 0.25。
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/c6-pickup",
+  "backup_prefix": "c6-pickup",
+  // 自定义关 stage ID 从 2000 开始，仅 1 关 → ID 2000
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 100,
+  "eval_every": 5,
+}

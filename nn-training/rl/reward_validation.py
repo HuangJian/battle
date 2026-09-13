@@ -20,6 +20,7 @@ import numpy as np
 from rl.reward_library import (
     METRIC_INDEX,
     METRICS,
+    OUTCOMES,
     CompiledFormula,
     FormulaDegradeError,
     FormulaError,
@@ -49,6 +50,7 @@ DEFAULT_RANGES: dict[str, tuple[float, float]] = {
     "basePressureSamples": (0.0, 6000.0),
     "firstKillTick": (-1.0, 36000.0),
     "playerDeaths": (0.0, 9.0),
+    "clearTick": (-1.0, 36000.0),  # v5：哨兵 -1（未清场）与 firstKillTick 同构
     "cellsVisited": (0.0, 676.0),
     "playerLevel": (0.0, 4.0),
     "enemyTotal": (0.0, 40.0),
@@ -104,6 +106,22 @@ def _term_metrics(node: ast.AST) -> list[str]:
     return names
 
 
+def _corner_range(rng: Mapping[str, tuple[float, float]], name: str) -> tuple[float, float]:
+    """指标缺取值域 ⇒ **硬错**（配置遗漏），不得静默取默认。
+
+    2026-09-12：metrics v5 新增 `clearTick` 时忘了在本模块登记，`rng[name]` 抛裸
+    `KeyError` 穿过 `validate_reward` 的异常分支直接崩调用方；现在改成带列名的
+    `FormulaError`，由 `validate_reward` 归入 errors（配置错误 = 启动期硬失败）。
+    """
+    r = rng.get(name)
+    if r is None:
+        raise FormulaError(
+            f"指标 '{name}' 未登记取值域（DEFAULT_RANGES/ranges）——"
+            "新增指标列必须同步登记，否则包络角点无法求值"
+        )
+    return r
+
+
 def symbolic_envelope(
     parsed: ParsedFormula,
     params: Mapping[str, float],
@@ -129,14 +147,17 @@ def symbolic_envelope(
         if k > MAX_ENVELOPE_VARS:
             # 引用变量太多 → 只取全下界/全上界两点粗筛（不枚举 2^n）
             corners = [
-                tuple(rng[n][0] for n in names),
-                tuple(rng[n][1] for n in names),
+                tuple(_corner_range(rng, n)[0] for n in names),
+                tuple(_corner_range(rng, n)[1] for n in names),
             ]
         else:
             corners = []
             for mask in range(1 << k):
                 corners.append(
-                    tuple(rng[n][1 if (mask >> b) & 1 else 0] for b, n in enumerate(names))
+                    tuple(
+                        _corner_range(rng, n)[1 if (mask >> b) & 1 else 0]
+                        for b, n in enumerate(names)
+                    )
                 )
         met = np.zeros((len(corners), len(METRICS)), dtype=np.float64)
         for j, corner in enumerate(corners):
@@ -144,7 +165,14 @@ def symbolic_envelope(
                 met[j, METRIC_INDEX[name]] = val
         try:
             sub = compile_formula(ast.unparse(term), params, allow_extended_funcs)
-            vals = sub.phi(met, params)
+            if sub.parsed.virtual_names:
+                # 引用 outcome 虚拟符号（`is_timeout` 等）的项：取值取决于本局结局，
+                # `phi` 缺 outcome 会响亮报错 —— 那不是爆炸，别让它变成假临界。
+                # 对**每个真实 outcome** 各求一遍再取峰值（每个 outcome 都是真实可发生的
+                # 组合，比「全 0 虚拟」那种不可达组合忠实）。
+                vals = np.concatenate([sub.phi(met, params, oc) for oc in OUTCOMES])
+            else:
+                vals = sub.phi(met, params)
         except (FormulaError, SyntaxError, ZeroDivisionError, FloatingPointError):
             # 角点上的除零/溢出本身就是要拦的信号 → 记为超限
             out.append(EnvelopeTerm(ast.unparse(term)[:80], tuple(names), float("inf"), ()))
@@ -157,7 +185,8 @@ def symbolic_envelope(
                 src=ast.unparse(term)[:80],
                 vars=tuple(names),
                 max_abs=peak,
-                at=corners[j] if corners else (),
+                # 虚拟符号让 vals 变成「outcomes × corners」的拼接 ⇒ 取模回到角点
+                at=corners[j % len(corners)] if corners else (),
             )
         )
     return out

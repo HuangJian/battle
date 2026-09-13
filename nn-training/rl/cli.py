@@ -158,6 +158,12 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         help="iterations to run; 0 = infinite (stop via --max-hours or Ctrl-C)",
     )
     ap.add_argument(
+        "--exit-on-done",
+        action="store_true",
+        help="收官（ALL DONE）后直接退出进程（默认停车不断进程：本地停采 + 云停机 + "
+        "等待重启；前台脚本/自动化等待退出码时用本旗）。",
+    )
+    ap.add_argument(
         "--start-it",
         type=int,
         default=None,
@@ -399,6 +405,15 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         action="store_true",
         help="冒烟预演（配 --ppo remote）：收到冒烟回显结果（remote_worker --echo）后"
         "作废本轮并干净退出；it 不前进、不写 iteration 事件",
+    )
+    ap.add_argument(
+        "--gate-halt-mode",
+        default=_d("gate_halt_mode", "halt"),
+        choices=("halt", "notify"),
+        help="门禁触发时对云端 PPO worker 的动作："
+        "halt = 下发停机达令（默认，历史行为）；"
+        "notify = 只记录 gate_verdict + 控制台横幅提示，**不停机**。"
+        "运行时可由控制台顶部开关热切（写 <traj>/gate-halt-mode.txt，每轮判定读一次）",
     )
     ap.add_argument(
         "--remote-hub-url",

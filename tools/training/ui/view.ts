@@ -80,6 +80,15 @@ export interface MetricsView {
   available: boolean
   iters: IterRow[]
   error?: string
+  /** 配对裁判（只读；缺数据/单轮时为 null，UI 显示空态）。 */
+  pairedReferee?: PairedReferee | null
+}
+
+/** 训练正常完成停车态（账本 run_complete 事件派生，api.ts 填充）。 */
+export interface LoopComplete {
+  at: string
+  reason: string
+  iters: number
 }
 
 /** 单课总览里的组件状态（P5-W2 同屏多课；**不含 selfNode**——它是全局单例，只出一次）。 */
@@ -146,6 +155,9 @@ export interface ConsoleStateView {
     waitedSec: number
     it: number | null
   } | null
+  /** 训练正常完成且进程停车等待重启（账本尾行 run_complete + 进程仍存活时派生）：
+   *  info 横幅——本地已停采、云机已停机；resume（新 run_start/iteration）后自动消失。 */
+  loopComplete?: LoopComplete | null
   /** 局域网只读视图（服务端按请求来源 stamp；true = 本页只读——动作按钮禁用 + 只读角标）。
    *  缺省（SSR/测试直构）时客户端回退 location.hostname 判定。 */
   readOnly?: boolean
@@ -263,6 +275,14 @@ export interface IterActuals {
   /** 胜局平均残血（hp 单位：剩余命每命计满额 maxHp + 当前 hp）。
    *  null = 数据源无 residualHp（旧 manifest / 无胜局）。 */
   avgResidualHp: number | null
+  /** 胜局平均耗时（ticks，仅胜局计入）；null = 无胜局或胜局缺 ticks。
+   *  rollout 实际值口径（所有 iter 采样）；旧缓存/缺字段 = undefined。 */
+  avgWinTicks?: number | null
+  /** 败局平均耗时（ticks，仅败局计入）；null = 无败局或缺数据。
+   *  ⚠️ 方向警告同 EvalSummary.avgLossTicks：越高不代表越强。 */
+  avgLossTicks?: number | null
+  /** 每杀承伤（ΣplayerDamageTaken / Σkills，全样本口径）；null = 该轮无击杀。 */
+  dmgPerKill?: number | null
 }
 
 export interface EvalSummary {
@@ -294,6 +314,8 @@ export interface EvalSummary {
   dmgPerKill: number | null
   scoreMean: number | null
   scoreStd: number | null
+  /** 本轮 vs 开腿首轮的配对比较（同语料逐 seed；基线轮/无数据为 null）。 */
+  pairedVsFirst?: PairedCompare | null
 }
 
 export interface IterRow {
@@ -320,6 +342,31 @@ export interface IterRow {
   kills: number
   actuals: IterActuals | null
   evalData: EvalSummary | null
+}
+
+/** 配对裁判单组对比（同语料逐 seed 配对，见 tools/eval/mcnemar.ts）。 */
+export interface PairedCompare {
+  baseIter: number
+  ckptIter: number
+  /** 配上对的局数（只看 b01/b10 的分母）。 */
+  paired: number
+  /** 一边缺席而丢弃的局数（失败/重试口径差异所致，只诚实披露不参与判定）。 */
+  unpaired: number
+  /** 基线输、新权重赢（政绩）。 */
+  b01: number
+  /** 基线赢、新权重输（学费）。 */
+  b10: number
+  /** 净涨幅百分点（1 位小数）。 */
+  deltaPp: number
+  /** McNemar 精确二项双侧 p 值。 */
+  p: number
+  verdict: 'up' | 'down' | 'flat'
+}
+
+/** 配对裁判（只读哨子，不进门判）：最新 eval vs 开腿首轮 / vs 上一 eval 轮。 */
+export interface PairedReferee {
+  vsFirst: PairedCompare | null
+  vsPrev: PairedCompare | null
 }
 
 // ────────────────────────── /api/pool 视图类型 ──────────────────────────
@@ -702,6 +749,44 @@ export function fmtPct(v: number | null | undefined): string {
   return typeof v === 'number' ? `${(v * 100).toFixed(1)}%` : '—'
 }
 
+/** 配对裁判 verdict 文案：灰是正常态（100 对下 99% 时间证据不够），不是故障。 */
+export function pairedVerdictText(v: 'up' | 'down' | 'flat'): string {
+  if (v === 'up') return '显著涨'
+  if (v === 'down') return '显著跌'
+  return '方向对，证据不够'
+}
+
+/** 配对裁判单行文案（Hero 趋势旁）：`vs开腿 +7.0pp p=0.31 (21/14,n=100) 方向对，证据不够`。 */
+export function fmtPaired(c: PairedCompare | null, label: string): string {
+  if (!c) return `${label} 数据不足`
+  const sign = c.deltaPp > 0 ? '+' : ''
+  return (
+    `${label} ${sign}${c.deltaPp.toFixed(1)}pp p=${c.p.toFixed(2)} ` +
+    `(${c.b01}/${c.b10},n=${c.paired}) ${pairedVerdictText(c.verdict)}`
+  )
+}
+
+/** 配对列头 hover 文案（大白话；MetricsTable 与 Hero 共用同一份，防两处分化）。 */
+export const PAIRED_COL_TITLES = {
+  b01: '基线输、新权重赢的局数——新学会的本事，涨没涨看它',
+  b10: '基线赢、新权重输的局数——学费（遗忘/漂移），只看涨幅会漏掉它',
+  p: '假设没进步、纯靠运气搞出这份比分的概率；<0.05才算数，灰色=证据不够',
+  delta: '净涨幅=b01−b10；不告诉你有多硬——7-0和21-14都是+7，硬度看p',
+} as const
+
+/** p 值徽章色：显著涨绿/显著跌红/其余灰（灰是正常态，不是故障）。 */
+export function pairedTone(v: PairedCompare['verdict']): 'g' | 'r' | 'gray' {
+  if (v === 'up') return 'g'
+  if (v === 'down') return 'r'
+  return 'gray'
+}
+
+/** 表格配对列的基线轮：任一非空 pairedVsFirst 的 baseIter（全空 → null）。 */
+export function pairedBaselineOf(vals: Array<PairedCompare | null | undefined>): number | null {
+  for (const v of vals) if (v) return v.baseIter
+  return null
+}
+
 export function fmtBytes(b: number | null | undefined): string {
   if (typeof b !== 'number' || !Number.isFinite(b)) return '—'
   if (b < 1024) return `${b} B`
@@ -775,20 +860,23 @@ export interface Series {
 export type TrendRange = 'all' | '30' | '10'
 
 /** eval 源稀疏序列（干净评估只在部分迭代出现，中间轮 = NaN 缺口）：
- *  winTicks/winHp/lossTicks/dmgPerKill 同为 eval 口径，共享「最近 N = 最近 N 个有效点」。 */
+ *  「最近 N」语义 = 最近 N 个有效评估点。双序列叠加时由 TrendChart 按主序列 iters 对齐。 */
 const SPARSE_SERIES_KEYS: ReadonlySet<string> = new Set([
   'eval',
-  'winTicks',
-  'winHp',
-  'lossTicks',
-  'dmgPerKill',
+  'evalTicks',
+  'evalKills',
+  'evalPu',
+  'evalWinTicks',
+  'evalWinHp',
+  'evalDmgPerKill',
+  'evalLossTicks',
 ])
 
 /**
- * 按范围档位截取序列。eval 源序列（eval / 胜局耗时 / 胜局残血）在有限轮里常带 NaN 缺口，
+ * 按范围档位截取序列。eval 源序列（eval 胜率）在有限轮里常带 NaN 缺口，
  * 其「最近 N」语义 = 最近 N 个**有效**评估点（而非最近 N 轮迭代），
  * 避免窗口内全是 NaN 画空图；「全量」档同样只保留有效点。
- * 其它指标 = 最近 N 轮迭代（按 iter 截取）。
+ * 其它指标（含 rollout 口径的胜局耗时/胜局残血/承伤·杀/败局耗时）= 最近 N 轮迭代（按 iter 截取）。
  */
 export function sliceSeries(series: Series, range: TrendRange): Series {
   const { key, label, vals, iters } = series
@@ -837,39 +925,104 @@ export function metricSeries(rows: IterRow[]): Series[] {
       iters,
     },
     {
+      key: 'avgTicks',
+      label: '耗时',
+      vals: chrono.map((r) => (r.actuals ? r.actuals.avgTicks : Number.NaN)),
+      iters,
+    },
+    {
       key: 'winTicks',
       label: '胜局耗时',
-      // 胜局平均耗时（ticks，eval 胜局口径）；无评估/无胜局轮 = NaN 缺口。
+      // 胜局平均耗时（ticks，rollout 胜局口径，所有 iter 采样）；无胜局轮 = NaN 缺口。
       vals: chrono.map((r) =>
-        r.evalData && r.evalData.avgWinTicks !== null ? r.evalData.avgWinTicks : Number.NaN,
+        r.actuals && r.actuals.avgWinTicks != null ? r.actuals.avgWinTicks : Number.NaN,
       ),
       iters,
     },
     {
       key: 'winHp',
       label: '胜局残血',
-      // 胜局平均剩余 hp（eval 胜局口径）；无评估/无胜局轮 = NaN 缺口。
+      // 胜局平均剩余 hp（rollout 胜局口径，所有 iter 采样）；无胜局轮 = NaN 缺口。
       vals: chrono.map((r) =>
-        r.evalData && r.evalData.avgResidualHp !== null ? r.evalData.avgResidualHp : Number.NaN,
+        r.actuals && r.actuals.avgResidualHp !== null ? r.actuals.avgResidualHp : Number.NaN,
       ),
       iters,
     },
     {
       key: 'dmgPerKill',
       label: '承伤/杀',
-      // 每杀承伤（eval 全样本口径）；越小越会周旋。防苟活（不打 ⇒ 分母小 ⇒ 值爆炸）。
+      // 每杀承伤（rollout 全样本口径，所有 iter 采样）；越小越会周旋。防苟活（不打 ⇒ 分母小 ⇒ 值爆炸）。
       vals: chrono.map((r) =>
-        r.evalData && r.evalData.dmgPerKill !== null ? r.evalData.dmgPerKill : Number.NaN,
+        r.actuals && r.actuals.dmgPerKill != null ? r.actuals.dmgPerKill : Number.NaN,
       ),
       iters,
     },
     {
       key: 'lossTicks',
       label: '败局耗时',
-      // 败局平均耗时（ticks，eval 败局口径）；无评估/无败局轮 = NaN 缺口。
+      // 败局平均耗时（ticks，rollout 败局口径，所有 iter 采样）；无败局轮 = NaN 缺口。
       // ⚠️ 高 = 清场停滞（见 EvalSummary.avgLossTicks 的方向警告），必须与胜率并排读。
       vals: chrono.map((r) =>
-        r.evalData && r.evalData.avgLossTicks !== null ? r.evalData.avgLossTicks : Number.NaN,
+        r.actuals && r.actuals.avgLossTicks != null ? r.actuals.avgLossTicks : Number.NaN,
+      ),
+      iters,
+    },
+    // ── eval 叠加序列（与主序列同 iters 网格；无评估轮 = NaN，TrendChart 按 iter 对齐） ──
+    {
+      key: 'evalTicks',
+      label: 'eval 耗时',
+      vals: chrono.map((r) => (r.evalData?.avgTicks != null ? r.evalData.avgTicks : Number.NaN)),
+      iters,
+    },
+    {
+      key: 'evalKills',
+      label: 'eval 击杀',
+      vals: chrono.map((r) =>
+        r.evalData && r.evalData.games > 0 && r.evalData.totalKills != null
+          ? r.evalData.totalKills / r.evalData.games
+          : Number.NaN,
+      ),
+      iters,
+    },
+    {
+      key: 'evalPu',
+      label: 'eval 道具',
+      vals: chrono.map((r) =>
+        r.evalData && r.evalData.games > 0 && r.evalData.totalPU != null
+          ? r.evalData.totalPU / r.evalData.games
+          : Number.NaN,
+      ),
+      iters,
+    },
+    {
+      key: 'evalWinTicks',
+      label: 'eval 胜局耗时',
+      vals: chrono.map((r) =>
+        r.evalData?.avgWinTicks != null ? r.evalData.avgWinTicks : Number.NaN,
+      ),
+      iters,
+    },
+    {
+      key: 'evalWinHp',
+      label: 'eval 胜局残血',
+      vals: chrono.map((r) =>
+        r.evalData?.avgResidualHp != null ? r.evalData.avgResidualHp : Number.NaN,
+      ),
+      iters,
+    },
+    {
+      key: 'evalDmgPerKill',
+      label: 'eval 承伤/杀',
+      vals: chrono.map((r) =>
+        r.evalData?.dmgPerKill != null ? r.evalData.dmgPerKill : Number.NaN,
+      ),
+      iters,
+    },
+    {
+      key: 'evalLossTicks',
+      label: 'eval 败局耗时',
+      vals: chrono.map((r) =>
+        r.evalData?.avgLossTicks != null ? r.evalData.avgLossTicks : Number.NaN,
       ),
       iters,
     },
@@ -991,6 +1144,17 @@ export function filterGroups(
   return groups.filter((g) => g.eval === null)
 }
 
+/** Hero「最新 6 轮完整指标」主表行：真实迭代（iter>0）倒序前 6。
+ *  it0 合成行（bc 权重基线，console/iters.ts 合成）只有干净评估，rollout 派生字段是
+ *  NaN 缺口——主表单元格直接 `.toFixed()` 会渲染出 "NaN" 垃圾行，故只收真实迭代
+ *  （eval 视图与 MetricsTable 各自已处理 it0：前者只渲染 eval 子行，后者跳过主行）。 */
+export function heroMainRows(iters: IterRow[]): IterRow[] {
+  return iters
+    .filter((r) => r.iter > 0)
+    .sort((a, b) => b.iter - a.iter)
+    .slice(0, 6)
+}
+
 // ────────────────────────── 纯函数：通用排序 / 过滤 ──────────────────────────
 
 export type SortDir = 'asc' | 'desc'
@@ -1106,6 +1270,8 @@ export const TC_RO_BANNER_DISMISSED = `${TC_KEY_PREFIX}ro.bannerDismissed`
 export const TC_CLOUDHALT_ACK = `${TC_KEY_PREFIX}cloudHalt.ack`
 /** hero 最新 6 轮区块视图（'main' 主行 / 'eval' 干净评估）。 */
 export const TC_HERO_ITER_VIEW = `${TC_KEY_PREFIX}hero.iters`
+/** hero 最新 6 轮区块折叠态（'1' = 折叠只留标题行）。 */
+export const TC_HERO_ITERS_COLLAPSED = `${TC_KEY_PREFIX}hero.iters.collapsed`
 export const TC_TREND_RANGE = `${TC_KEY_PREFIX}trend.range`
 export const TC_TRAIN_MODE = `${TC_KEY_PREFIX}train.mode`
 export const TC_TRAIN_TOGGLES = `${TC_KEY_PREFIX}train.toggles`

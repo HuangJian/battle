@@ -6,7 +6,7 @@
  *  重建 spec，因此重启永远用最新配置与最新哨兵。
  */
 
-import { existsSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import path from 'path'
 import { LOG_DIR, NN_TRAINING, REPO_ROOT } from './paths'
 import { httpOk, pidAlive, portListen } from './net'
@@ -169,6 +169,44 @@ export interface TrainingLoopSpecOpts {
   /** 冒烟注入：REMOTE_PUSH_NODE（本机伪 GPU 节点 URL）。 */
   pushNodeUrl?: string
   venv: { python: string; sitePackages: string }
+  /** 门禁触发时的动作：halt = 下发云端停机达令（默认）；notify = 只提示不停机。 */
+  gateHaltMode?: GateHaltMode
+}
+
+/**
+ * 门禁动作模式（2026-09-13）：`halt` = 下发 cloud halt（历史默认）；
+ * `notify` = 只记录 gate_verdict + 控制台横幅，**停掉云机这件事不做**。
+ *
+ * 为什么是文件而不是纯启动参数：G4(plateau) 的 REMEDIATE 每 5 轮就复现一次，
+ * 历史上 c6-pickup3 / c6-bonus 就是被它反复杀掉云端 PPO worker（6 次 / 10 次）。
+ * 操作员在训练途中改主意必须能热切，不能重启一轮（重启 = 丢进度）。
+ */
+export type GateHaltMode = 'halt' | 'notify'
+
+/**
+ * 标志文件路径：`<traj>/gate-halt-mode.txt`。
+ * Python 侧 `rl/loop_guards.py::_gate_halt_mode` 每轮门判定读它（优先于启动参数）。
+ * traj 在课程里恒写作 `tmp/<name>`，故这里按 course 拼即可与 Python 对齐。
+ */
+export function gateHaltModePath(course: string): string {
+  return path.join(LOG_DIR, course || 'nocourse', 'gate-halt-mode.txt')
+}
+
+export function readGateHaltMode(course: string): GateHaltMode {
+  try {
+    const v = readFileSync(gateHaltModePath(course), 'utf8').trim().toLowerCase()
+    if (v === 'notify' || v === 'halt') return v
+  } catch {
+    /* 无文件/不可读 = 用默认 */
+  }
+  return 'halt'
+}
+
+export function writeGateHaltMode(course: string, mode: GateHaltMode): GateHaltMode {
+  const p = gateHaltModePath(course)
+  mkdirSync(path.dirname(p), { recursive: true })
+  writeFileSync(p, `${mode}\n`, 'utf8')
+  return mode
 }
 
 export function trainingLoopSpec(cfg: RlConfig, s: TrainingLoopSpecOpts): ProcSpec {
@@ -188,6 +226,7 @@ export function trainingLoopSpec(cfg: RlConfig, s: TrainingLoopSpecOpts): ProcSp
       s.course,
       ...(s.ppo === 'local' ? [] : ['--ppo', 'remote']),
       ...(s.smoke ? ['--smoke'] : []),
+      ...(s.gateHaltMode ? ['--gate-halt-mode', s.gateHaltMode] : []),
     ],
     env: {
       PYTHONPATH: `${s.venv.sitePackages}${path.delimiter}${NN_TRAINING}`,

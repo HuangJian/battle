@@ -5,7 +5,7 @@
 
 ---
 
-## §27 多课程并行训练（multi-course parallel training，plan/multi-course-parallel-training.md）
+## §36 多课程并行训练（multi-course parallel training，plan/multi-course-parallel-training.md）
 
 - **性质**：纯工程化改造（课程 = 并行单元），不碰任何训练算法；PPO/BC/课程/熔断/奖励公式零改动。
 - **已落地**：
@@ -26,6 +26,250 @@
 - **P5 状态**：**全部完成**（W1–W5）；余 P6 归档（DECISIONS 总条目 + DoD 勾选）。
 - **纪律**：配额只住 `rl-config.json` 的 `courses` 块，**永不写 `curricula/*.jsonc`**（一改 `course_fp` 即触发 D14 熔断误判，plan C1）。
 - **门禁**：`bun run check` 2009 pass、`bun run build`、`make -C nn-training python-gate` 全绿。
+
+---
+
+## §35 wDmg 死项修复：c6-dmgfix 基座腿就绪（2026-09-13，用户拍板「先做」）
+
+**机制定案（代码核验，DECISIONS §2026-09-13-reward-wdmg-dead-term）**：玩家非致命命中推
+`player_damage`（累计 `playerDamageTaken`）、致命命中推 `player_hit`（`playerHits++`；
+另一触发 = 3★ 星盾消耗，本族课程不可达）⇒ **1 命课程 `playerHits` 恒等于败局指示器**
+（实测败局分布 {1:110, 2:1}）。`- wDmg*playerHits` 因此是死项：零挨打信息 + 与
+`terminal.lives_exhausted` 重复扣败局分（败局 −2 而非 −1）+ 伪装承伤惩罚（调它 = 调死刑）。
+
+**修复（c6-dmgfix.jsonc，预检 validate_reward ok/零警告）**：
+
+- 由 c6-pickup 派生、**唯一训练变量 = 删 `- wDmg*playerHits` 项 + 删 `params.wDmg`**；
+  wChip 保持 0.005（剂量轴不碰——0.03 已被 c6-chip 判保守化，0.01-on-c6 留待后续腿）；
+  bc=c6-pickup.it35（与 chip 三腿同起点）、iters=60（同 c6-chip 依据）、eval 200。
+- 历史课程**不回改**：死项是每败局常数 −1，只平移败局回报、不改局内 credit assignment
+  时序结构，已收官结论仍成立；自本腿起新课程模板不再含 wDmg。
+- 定位诚实声明：机制修复 ≠ 能力突破，预期效应温和（败局回报 +1.0 的梯度软化）；
+  本腿同时是**后续腿的诚实模板基座**（plan-B「满压击杀加成」将派生自本配置）。
+- 判据（守门轴来自 c6-chip 的教训）：配对 kills/pickups/shots **不降**（z<−2 即警）、
+  dmg/kill 不恶化、胜率 ≥ 平；entropy<0.32 / timeout>0.15 熔断；探针场地 fmap-c6l1。
+
+**背景**：c6-chip（wChip 0.03 on c6）it15 配对已现保守化——kills −0.36（z=−2.38）、
+pickups −0.27（z=−2.91）、shots −1.8（z=−2.03）显著降，胜局内 dmg 158→135（−15%，杠杆
+本意生效）但败局占比 134→149 席：**0.03 的承伤价格在 c6 经济（6 敌/长局/高道具密度）里
+把 wPickup/wKill 激励挤出去了**——c4→c6 迁移损失量得，0.03 不可迁移；该腿跑完 it30 收
+正式探针后关账，不续 60。
+
+---
+
+## §34 c4-chip03 关账 + c6-chip 主腿备好（wChip 剂量-响应定案）（2026-09-13）
+
+**c4-chip03（wChip 0.03）it30/30 收官，正式配对探针**（同 §32 协议，200 局 seeds 0-199，
+it30 vs bc，逐局证据 `tmp/c4chip03-it30-probe.jsonl`）：
+
+- **dmg 配对差 −24.8±7.6（z=−3.29）**，dmg/kill 49.9→**39.4（−21%）**——主判据大幅成立。
+- kills **+0.2（z=+1.68，微升）**、ticks 平（z=+0.87）、胜率 +7pp（McNemar 净 +14，p≈0.17）——
+  **无保守化**；探针零超时；胜局内部 dmg/kill 32.1→24.6（−23%），败局 dmg −6.2（z=−0.69）
+  不恶化；hazard 无新失败模式（k1 桶 31→22 收窄）。
+- **剂量-响应定案**：0.01→−13.7 / 0.03→−24.8（3× 剂量 ≈ 1.8× 效应，单调、未饱和、无坍缩）
+  ⇒ wChip 杠杆在 c4 上**确认有效且还有上行空间**，两腿均达标。
+- 附：in-loop eval 的「100→200 局」升级在 chip03 全程**未生效**——`EVAL_SEEDS` 仅 100 个
+  种子，`[:200]` 静默截回 100（2026-09-06 同型坑：100 曾被截成 20）；判决依赖正式探针未受损。
+
+**EVAL_SEEDS 100→200 修复**（§7 测试先行，nn-python-gate 绿）：
+
+- `rl/eval_local.py`：语料扩至 `range(860001, 860201)`；前 100 seed 逐字节不变 = 旧口径兼容
+  （消费方全部 `[:n_seeds]` 前缀切片，已核验）。`tests/test_rl_remote_fixes.py` 钉新契约
+  （len 200 + 前缀 100 逐字节 + 860101/860200 边界），红→绿。
+
+**c6-chip 主腿已备好**（`nn-training/curricula/c6-chip.jsonc`，启动前预检通过：
+`load_course('c6-chip')` + `validate_reward` ok/零警告）：
+
+- 由 c6-pickup 派生，4 处改动：名/out/traj/backup → c6-chip（fresh）、bc → c6-pickup.it35
+  （与 c4 两腿同 bc，三腿跨关对照）、**wChip 0.005 → 0.03**（按头注释三档定档规则判入线性档，
+  chip03 dmg差 −24.8 ≤ −20 且 dmg/kill 39.4 ≤ 42 且 kills 不降）、iters 160 → 30（首读段，
+  正收益经控制台停止→启动改大续跑）。不配 `gates` 块（先例：notify 不停车）。
+- 起点 = bc 零样本 c6 关 **32%**（§27 实测口径）；主判据同 §32：dmg/kill ↓ 且 kills 不降；
+  探针场地 `tmp/fmap-c6l1.jsonc`（与 c6-pickup stage 逐字段核验一致）。
+- 下一步判读：c6 上剂量-响应若迁移成立（dmg/kill 显著降 + kills 不降）⇒ 续跑 + 剂量继续上行；
+  若保守化 ⇒ 停，转 wDmg 死项修复（`-wDmg*playerHits` 在 1 命课程 = 重复计败局分，§32 背景已记）。
+- **修订（2026-09-13，启动前用户质疑 iters=30 偏少，核证据后采纳）**：iters 30 → **60**
+  （40 热相 + 20 冷却 = ppo_schedule 完整形状）。依据：① c4 证据表明效应慢热
+  （chip01 dmg 差 it10 z=−0.27 → it30 才 z=−2.13），30 轮硬停在 c6 上有假阴性风险；
+  ② c6 无 30 轮出结论先例（c6-pickup 前 35 轮 in-loop 全是 27-38% 噪声摆动，c6-gae 判决
+  用 110 轮）；③ 60 = 去掉硬停不是承诺——探针每 10 轮出趋势 + 熵熔断/止损/人读护栏，
+  证据坏了随时早停。成本 ~2.2h；定档规则段同步改为「已应用」时态。
+
+---
+
+## §33 python 门禁 flake 全面审计：静态扫雷 + 负载轰炸（2026-09-13，§31 后续）
+
+**方法**：① 静态扫雷——全测试目录 grep 紧墙钟（sleep/wait/timeout 断言）、被采样日志行
+依赖（RACE_LOG_SAMPLE 类）、固定端口、mtime 排序、xdist 共享 tmp 撞路径；② 历史证据——
+git log 的历次 flake 修复（`82cc6d6` I9 假红、`b0317ad` 沙箱删除配额、§31）+ tmp 红跑
+日志；③ 实证——全量 541 项 × 5 轮禁用 `-x`（首败不停、收全部失败）轰炸，其中 2 轮带
+4 spinner、叠加真机 c4-chip03 训练负载；I7 定向 10 连跑（6 spinner）。
+
+**发现与处置**：
+- **I7（`test_it_eval_deferred`）set-then-clear 竞态 + 3s 紧等待 → 已修**：
+  `eval_th.start()` 之后才 `eval_dispatched.clear()`——负载下主线程若在 start→clear
+  之间被调度延迟数秒，eval 线程先置位再被清掉 → 必假红（与 I9 §31 同族）。修法：
+  clear 提前到 start 之前（置位必属真实派发）+ 等待 3s→30s（正常 ~10-100ms，覆盖
+  ping→POST 权重→worker 孵化→首局 fetch 全链路的负载放大）。
+- **I10（tail join grace）`took10 < 15s`**：对设计的 2s grace 有 ~4× 余量，观察保留。
+- **其余全部干净**：端口全 bind 0（ephemeral）；mtime 仅等值断言；tmp_path 已由
+  conftest 唯一化（pid 参与命名）；`test_dist_common_poll` 的 `dt < 5s` 有 4-5× 余量；
+  test_upgrade 的短超时是故意触发降级路径的合法输入；I1/I3 的排序断言走真实回调与
+  服务器事件、不经过可采样日志；P0 新增 test_loop_gate_soft_remediate 纯逻辑零时序。
+
+**实证结果**：5 轮全量 2705 次执行零失败（19.4s / 21.3s / 19.8s / 24.8s / 54.4s——
+末两轮带 spinner + 真机训练负载）；I7 定向 10/10 绿。结合 §31 修复前的历史红跑，
+目前门禁内已知 flake 清零；`-x` 首败即停是门禁的有意设计（快速反馈），审计口径
+须用 `-o addopts=` 覆盖。
+
+---
+
+## §32 c4-chip01 关账：wChip 0.01 主判据「小但真」成立（2026-09-13）
+
+**腿**：wChip 0.005→0.01 剂量快筛（c4 关，bc=c6-pickup.it35，30 iters）。it30/30 正常收官
+（~57 min；门判 PAUSE→notify 不停车；全程 KL≤0.007、entropy≥0.329、500 局 eval 零超时）。
+
+**正式配对探针**（`eval-course-ckpt.ts`，fmap-c4l1，200 局 seeds 0-199，it30 vs bc 逐局配对，
+逐局证据 `tmp/c4chip01-it30-probe.jsonl`）：
+
+- 胜率 62.5% vs 60.0%——McNemar 翻盘 35/40，净 −5（z≈0.46）⇒ **持平**。
+- **dmg 配对差 −13.7±6.4（z=−2.13）**；kills +0.0（z=+0.10）；ticks +9.8（z=+0.23）。
+- **dmg/kill 49.9→45.3（−9.2%）⇒ 主判据 ✅ 成立（小效应）**，且 kills 不降、ticks 不升
+  ⇒ 非保守化，也不是 `-wTick` 伪影（it10 时唯一显著项是 ticks，it30 已消失）。
+- **分桶排除构成混杂**：both_win dmg −13.6（z=−1.27，n=85）、both_lose dmg −16.9
+  （z=−1.99，n=40）——胜局、败局两类内部都降价；both_win dmg/kill 28.7→25.3、
+  both_lose 141.6→132.4；hazard 结构不变（胜局全 k4）。
+- in-loop eval（100 局 860xxx）中段横盘（47.8→43.9→…→47.9）但 **it30 终点 44.8 与探针
+  45.3 相互印证**——100 局单点 SE≈±5 解析不了这个量级，中段波动是噪声；200 局配对+分桶
+  是最低配置（c4-chip03 把 eval 提到 200 局正是为此）。
+
+**修正 it10 中期判读**（c4-chip03 头注释「0.01 弱到策略可直接忽略」）：那是 it10 时点读数
+（dmg 配对差 −2.3，z=−0.27）。it30 时 dmg 效应长到 −13.7 ⇒ **0.01 = 弱信号但非零，效应随
+训练慢涨**。chip03（0.03，已于 08:21 经控制台开跑）的剂量-响应问题（线性 vs 饱和）以本条
+为基线判读；训练中的课程文件不动（变更检测会重启腿），故修正只记此处。
+
+**经验**：快筛腿的「每 10 轮配对探针」协议有效——in-loop 100 局 eval 三轮完全相同（65/65/65）
++ McNemar 翻盘 32 局的「在动但净零」读数，到 200 局口径收敛为「dmg 显著降、胜率平」；
+小效应判据必须配大 n 配对 + 分桶，否则会在 it10 误判为「零信号」。
+
+---
+
+## §31 I9 长尾竞速测试 flake：两条失败路径 + 双通道断言修（2026-09-13 复核 `python-flaky.issue.md`）
+
+**问题（复核确认真实并复现）**：`test_run_rl.py::test_it_early_race_v314` 在 xdist -n 4
+门禁下偶发红（他机 2/3；本机 8 CPU spinner 负载下复现，`tmp/pygate-flaky-repro2.log`；
+4 spinner 与单跑 ×8 均绿）。与 P0 提交 `d17e9f0` 无关（stat 确认未触及调度路径）。
+
+**根因（比原 issue 的分析多一条路径）**：断言的证据链有两层隐性依赖，负载下各自翻车——
+
+- **路径 1（原 issue 发现）**：竞速检查的墙钟时刻。空闲槽无任务可派时按
+  `all_settled.wait(0.5)` 空转——**轮询粒度 0.5s 本身 > 0.4s 慢窗**；xdist/沙箱负载下
+  首个竞速检查实测晚至 +1s，seed111 已结算离场，race lane 只能命中剩余任务（红跑日志
+  命中 `(3,9006)`）。
+- **路径 2（本次复核新发现）**：证据通道被采样。`741c395` 起 race drops 每类只打前
+  `RACE_LOG_SAMPLE=2` 条；而 v3.7 突发 fanout **不打派发日志**，会在派发突发期抢占
+  慢任务的 dup 槽——快副本 0.01s 获胜即把任务弹出 inflight，race lane 从此**结构性
+  选不中它**，慢主副本的证据行（`main_by_fanout` 类）落在第 3 条后被采样挤掉。
+  复现红跑（repro2）正是此形态：race 命中 `(2,9005)`，`main_by_fanout=3` 只打 2 条。
+
+**修（test_run_rl.py，三处）**：
+1. **慢窗 0.4→3.0s 上限（FakeAgent）+ 竞速副本到达即提前放行**：远大于轮询粒度 +
+   观测抖动（+1s）；慢 handler 每 50ms 轮询同键并发 fetch 计数，≥2（= 竞速副本已
+   派出、被测性质已成立）即提前返回——窗口只在回归（无副本）时才睡满，正常路径单轮
+   回到**亚秒级**（实测 I9 0.38s / I6 0.4s，比 0.4s 窗时代还快，门禁墙钟无净增）。
+   修掉「v3.15 判据不依赖窗长」的错误注释。round 仍远低于 30s 死锁兜底。
+2. **I9 测试 cfg 设 `tailFanoutN: 0`**：突发 fanout 是唯一不打日志的复制通道，关掉它
+   让 race lane 成为唯一复制路径（fanout 语义由 I6/longtail 测试覆盖）——证据不再
+   依赖「seed111 未被突发复制」的时序运气。
+3. **断言改双通道 OR**：日志行（tail-race 等，不采样）**或** FakeAgent 派发计数
+   `(0,111) ≥2`（对采样免疫，与 I6/longtail 既有断言同款式）。2026-09-06 曾硬断言
+   计数而"HTTP 事件偶发缺席"——OR 化吸收该教训；回归（`pick_race_target` 断）时两
+   通道同时缺席必红（已反验：patch `return None` → 红 → 还原；提前放行下仍成立，
+   因无副本时慢窗照旧睡满）。
+
+**验证**：单跑绿（`log evidence=True, dispatches=2`；提前放行后 I9 0.38s / I6 0.4s，
+较 0.4s 窗时代还快）；反验红（两种窗口形态下各验一次）；门禁 5 连（第 2/4 次带
+6 spinner 负载）+ 优化后 3 连全绿。教训：**「结构确定性」判据仍可能依赖墙钟
+时序**——写竞速/超时类测试时，慢窗必须按「轮询粒度 × 安全系数」取值；改日志采样
+（RACE_LOG_SAMPLE）前必须 grep 测试对被采样行的依赖。
+
+---
+
+## §30 CLI 子进程编码契约：环境无关的三层修（2026-09-13 复核 `python-cli.issue.md`）
+
+**问题（复核确认真实）**：`test_gate_check.py::test_cli_dry_run_exit_code` 用裸
+`subprocess.run(..., text=True)` 捕获 `rl.gate_check --json`——父侧解码编码 =
+`locale.getpreferredencoding(False)`（**解释器启动期决定，运行时改不了**；zh-CN
+Windows = cp936），子侧却由启动环境任意决定（`ensure_ascii=False` 把中文直排进
+stdout）。子进程 UTF-8（agent 沙箱常设 `PYTHONIOENCODING=utf-8` 且无 `PYTHONUTF8`）
+× 父进程 cp936 → 读线程在 `subprocess._readerthread` 死亡 → `stdout=None` →
+`json.loads(None)` TypeError。本机复现矩阵证实：仅 `PYTHONIOENCODING=utf-8` 必红；
+`PYTHONUTF8=1` 两侧都 UTF-8 则绿（**它掩蔽而非修复**）——不同 agent 沙箱 env/代码页/
+Python 版本（3.15 起 PEP 686 默认 UTF-8）各异，环境解不可能通用。
+
+**修（契约从环境移进代码，三层）**：
+1. **`--json` 机器通道改 `ensure_ascii=True`**（`rl/gate_check.py`）——纯 ASCII 字节对
+   任何解码器免疫（含我们控制的裸 text=True 父进程与不控制的第三方 agent）；中文经
+   `\uXXXX` 传输，`json.loads` 还原无损。人类可读走非 `--json` 分支。
+2. **子侧入口钉死**：`platform_utils.force_utf8_stdio()`（运行时 `reconfigure`
+   stdout/stderr 为 UTF-8，实测压过强设的 `PYTHONIOENCODING=gbk`），`gate_check.main`
+   与 `run_rl.main` 接入——被测 CLI 的字节流恒 UTF-8，与环境解耦。
+3. **父侧测试统一出口**：`tests/subproc_util.run_utf8()`（强制 `encoding="utf-8"` +
+   `stdout is None` 就地断言），扫掉全部 7 处裸 `text=True`（test_gate_check ×2、
+   test_run_rl、test_upgrade ×2——后两处 spawn 的 **bun 管道恒 UTF-8**，本就是同型
+   雷点、test_no_torch_on_import ×2）。
+
+**验证**：四场景矩阵（无强制/仅 PYTHONIOENCODING/PYTHONUTF8/沙箱原样）全绿；对抗
+探针（子进程强设 GBK env）下 `--json` 输出纯 ASCII、verdict/report 无损；nn-python-gate
+全绿。生产侧同模式捕获点（`dist_common` ×2 / `run_rl` 的 git 调用 = ASCII 输出、
+`bootstrap` 已 `errors="replace"`）不急；新 subprocess 测试一律用 `run_utf8`。
+
+---
+
+## §29 it0 基线评审修订：重试语义 + 账本双向隔离 + Hero NaN 行（2026-09-13 评审）
+
+对 §28 的 staged 实现做评审后发现三处问题，本条为修复记录（评审 + 修复同一批完成）。
+
+**问题与修法**
+
+- **P1（鲁棒性）基线派发是「单次尝试 + 纯远端」**：原实现只在 `it == _start_it` 派一次且不传 `local_gate`——`EvalDispatcher` 无 gate 时不建权重快照、不启本地 worker（纯远端），若首派时刻节点瞬时全挂/权重 POST 全失败，只记日志跳过，进程内永不重试（docstring 的「失败重试轮」只有跨重启才成立）。改为**落账前每轮重试**：`baseline_summary_landed(traj_dir, wver16)`（eval_local）查 eval_log 是否已有**同 bc 指纹**的 `iter=0` summary，未落账则每轮 rollout 收官后重派，账本去重保证重试只补缺口；落账 wver 缓存于 `_baseline_landed_wver`（bc 换文件 → 新指纹 → 重派新基线）。同时复用当轮 `self._eval_gate`（与 A-eval 同一把门，`_join_eval` PPO 收官置位）——基线本地局与 A-eval 一样让位 PPO；快照文件按流分流（`_eval_frozen_weights-baseline.json`），基线与 A-eval 并发重试轮不互相覆写快照（覆写会让 A-eval 本地局读错权重）。summary 带 `dropped` 也算落账：缺口在控制台诚实显示「缺N」，不为填缺口无限重跑失败局。
+- **P2（潜伏）账本互吞只防了单方向**：基线账本按 `iter==0` 隔离了「A-eval 行吞基线」，但 A-eval 账本仍无过滤——若 bc 与 it1 的 `args.out` 指纹偶同（手动拷贝 bc 为 `--out` 启动等路径），it1 中途崩溃重启后 A-eval 会被同 wver 的 it0 行整轮跳过。`eval_done_keys` 新增 `min_iter` 参数：A-eval 传 `min_iter=1`，把 int iter<1 的行挡在去重外；缺 `iter` 的旧行与同 wver 跨 iter 复用（零梯度轮 args.out 未变 → 下轮免重评）照旧保留。顺带发现 **B/C evalboard 行与 A-eval 同册同 `event:"eval"`**（batch_eval 写 `source:"B"/"C"`，畸形批的 iter 缺省还是 0）——基线账本额外排除带 `source` 字段的行，B/C 局不得被当成基线已评估。
+- **P3（用户可见 UI）Hero 主表漏入 it0 合成行**：`MetricsTable.buildRows` 有 `iter>0` 守卫，但 Hero「最新 6 轮完整指标」是另一套渲染（`[...iters].sort(desc).slice(0,6)`），腿的前 ~5 轮 it0 必进前 6——合成行的 NaN 字段直接渲染成红色 "NaN%" 徽章、"NaN" 单元格（`fmtPct(NaN)` 只判 `typeof number`）。抽纯函数 `heroMainRows(iters)`（view.ts：过滤 iter>0、倒序、截 6）供 Hero 使用，测试三例钉死。
+- **nit**：显式 `--start-it 0` 会与基线的 dist 键空间 `{runId}.0` 撞键（采集/A-eval 任务键 = `{runId}.{it}`）——`validate_args` 启动期拒绝 `<1`；Hero 配对裁判文案 `vs开腿itN` 在 baseIter=0 时改为 `vs bc基线`（it0 是训练前基准，不是开腿首轮）。
+
+**验证**：`test_baseline_eval.py` 重写派发语义测试（落账前重试/在飞跳过/local_gate 复用钉死/落账停/bc 换文件重派）+ `eval_done_keys` 双向隔离（含 B/C source 行与缺 iter 旧行）+ `baseline_summary_landed` 直测 + `--start-it 0` 启动期拒绝；`console-paired.test.ts` 新增 `heroMainRows` 三例（it0 排除/截 6/端到端合成行进不了主表行集）。`bun run check` 绿（2028 pass）；nn-python-gate（ruff + mypy 145 文件 + pytest 全量）绿。
+
+**遗留（未修，已评级）**：console `readEvalGameWins` 仍按 iter 合并 B/C 行（iter≥1 的既有口径，B/C 批恰与 A-eval 同 iter 时配对图混源）——影响面在 evalboard 触发路径，与基线无涉，留作后续单独处理。
+
+---
+
+## §28 it0 bc 权重基线评估：配对基准不再随 run 起点漂移（2026-09-12，用户指令）
+
+**症状**：控制台的 in-loop eval 配对基准恒取 `eval_log.jsonl` 里**第一条** eval 行（`console/iters.ts` 的 `evalIters[0]`）。那条基准随 run 起点漂移：resume 时首条可能是 it50，于是 `vs开腿it50` 实际比的是中途两点，而不是「从起点学会了多少」。
+
+**改法（纯增量，训练侧与 console 两侧）**
+
+- **训练侧**（`rl/loop_core.py::_maybe_dispatch_baseline_eval`）：在本 run **首次 rollout 收官后**（`it == _start_it`；全新腿 = it1）立刻用课程 `args.bc` 派一条 `iter=0` 的干净评估作恒定基线。守卫 `_baseline_eval_weights`：per-tick / 有课程 / `eval_games_per_stage>0` / `eval_every>0` / 有 enabled dist 节点（`nodes=[]` 纯本地路径本就不派 A-eval）/ bc 文件在盘；幂等（在飞跳过 + 跨重启按 `iter==0` 去重）；**失败自吞**（基线是观测设施，不得拖垮主线）。课程默认 `eval_every>1`（c6-bonus=5）⇒ 该轮本无 A-eval，**零重复计算**。
+- **`eval_done_keys` 新增 `iter_filter`**（`rl/eval_local.py`）：it0 的已评估账本按 `iter==0` 隔离。必须如此——bc 与 it1 的 `args.out` 指纹**可能相同**（it1 就是 PPO 前的 bc 初始化权重），只按 wver 去重会让 it1 的 A-eval 把基线局吞成「已评估」，it0 行永远不落盘。`dispatch_eval_round/bg` 与 `EvalDispatcher` 加尾参 `baseline=False`；it0 用独立 `iter_id = {runId}.0`（与 A-eval 的 `{runId}.N` 在 agent 结果缓存里键空间隔离）。
+- **门判据排除 it0**（`gate_check.read_trend_rows`）：`iter <= 0` 的 summary 不进趋势（用户定案：只当监控/配对基线）。否则会虚增 sustain 的「连续通过」计数、把 plateau 的上升趋势起点拉回 PPO 前。缺 `iter` 字段的旧行照旧保留（不过度收口）。
+- **Console**（`console/iters.ts`）：配对基线改为「有 it0 取 0，否则退回首个 eval 轮」（老腿逐字节兼容）；`readIterMetrics` 在有 ≥1 条真实 iteration 行时合成一条 it0 行（只有 `evalData`，rollout 派生字段一律 `NaN` —— 趋势图的缺口约定，写 0 会在图上多画一个假零点）；`MetricsTable.buildRows` 跳过 `iter<=0` 的主行，只出 eval 子行（UI 标「基线」）。
+
+**验证**：`tests/test_baseline_eval.py`（新，6 例：iter 隔离 / 守卫逐条反证 / 只在 `_start_it` 派一次 / 失败不抛 / **端到端** baseline 派发把逐局行与 summary 都写成 `iter=0` 且预置同 wver 的 it1 行不吞它 / 幂等）+ `tests/console-paired.test.ts`（新增 3 例：it0 为开腿基准、无 it0 退回首个 eval 轮、合成行与老腿兼容）+ `test_gate_check.py` 的 `read_trend_rows` 过滤。门禁：nn-python-gate（ruff + mypy 145 文件 + pytest 全量）绿；`bun run check` / `bun run build` 绿。
+
+**遗留**：`eval_every == 1` 的课程在 it1 既有 A-eval 又有 it0 基线（测的是同一套 PPO 前权重）⇒ 会多跑一遍语料（账本按 iter 隔离，it0 行仍落盘）；本腿 c6-bonus 为 `eval_every=5`，不受影响。
+
+---
+
+## §27 metrics v5（`clearTick`）+ outcome 虚拟符号：修复加列只改了一半（2026-09-12）
+
+**背景**：c6-bonus 修「清场后 BONUS TIME 窗口被 max_ticks 截断 ⇒ 歼灭局吃 `terminal.timeout=−2`」需要两个新能力：指标列 `clearTick`（idx30，哨兵 −1）与公式可访问 outcome（虚拟符号 `is_timeout` 等，不占列）。设计侧验证通过：`wClear=4.0` + `wBonusTicks=600` 让「清场+超时」与 `stage_clear` 总回报相等（实测两边均 −14.0）。
+
+- **P0（已修）**：`tools/sim/export-rl-rollout.ts` 只改 `metricsRow()` 的行、`METRICS_DIM` 仍为 30 ⇒ `writeRlShard` 的 `metrics.set(row, i*30)` 在**每局终局行**越界 `RangeError`，整条 RL 采集腿零产出；`tsc`/TS 测试全看不见（`number[]` 无长度类型、无行宽断言）。修：常量改 31 + 行构造提为 `export function buildMetricsRow` + 新增 `tests/export-rl-rollout-metrics.test.ts`（行宽 / 两种哨兵 / 与 Python `METRICS` 条目数跨语言对账）。e2e 复核：1 局 → `metrics.npy (41,31)`、`metrics_version=5`、未清场列 −1。
+- **Python 门（已修）**：① `reward_validation.DEFAULT_RANGES` 缺 `clearTick` ⇒ `validate_reward(course)` 抛未捕获 `KeyError`；现改为带列名的 `FormulaError`（由 `validate_reward` 归入 errors），并新增 `test_all_metrics_have_envelope_range` 锁「加列必须登记域」。② `symbolic_envelope` 对引用虚拟符号的加性项不带 outcome 调 `phi` ⇒ FormulaError 被当成数值爆炸记 `inf/超限`（假临界）；现按**每个真实 outcome** 各求一遍取峰值（比「全 0 虚拟」忠实），角点回映加取模。③ `tests/golden/v7_phi_ts_oracle.json` 仍是 30 列 ⇒ 重生成；**`phi` 逐位不变**（v7 不读 clearTick），纯宽度同步，非重新标定。④ `test_item_metrics_layout_locked` 尾部清单补 `clearTick`(idx30)。
+- **门禁**：nn-python-gate（ruff + mypy 144 文件 + pytest 全量）**绿**；`bun run check` **2022 pass / 3 skip / 0 fail**；`validate_reward(c6-bonus)` = ok、errors/warnings 均空，`wClear` 项 max_abs=4.0。
+- **reward golden 补真实覆盖（已做）**：原先 60 个 case 的 `clearTick` 全是 `0.0` ⇒ `wClear` 是常数项、diff 恒 0，补偿/豁免**零覆盖**；且 `0.0` 是合法值（「第 0 tick 已清场」）而非「未清场」。改：① `_v7_corpus` 显式写哨兵 `-1.0`（对不读该列的 5 门课 reward **逐位无影响**，已验证 60/60 不变）；② 新增 `_clear_metrics()` + c6-bonus 专属单调行序列（tick 0→3000、清场于 tick=600 ⇒ 封顶上界 1200）共 4 case（cleared × {timeout, stage_clear}、uncleared × {timeout, lives_exhausted}）；③ 差分验证：`timeout/cleared` 去掉 `wClear` 项 Δ=**+4.0**、去掉 tick 豁免 Δ=**+18.0**，其余三种 Δ=0 ⇒ 两个新机制都真正参与；④ `cleared-timeout` 总额 == `stage_clear` 总额（均 −10.0），设计意图入 golden。golden 60→64 case，原有 60 个 reward 逐位不变。
+- **c6-bonus 起点/教师在新口径下重测（已做）**：新 `win = stage_clear ∪ cleared` 抬高同一权重的读数，而 `gate_check.py` 直接吃 `teacher.wins/games` + eval 行 win_rate ⇒ 两个基准必须同口径重测，否则"学生被抬高、基准仍旧"会白过门。实测（`eval-course-ckpt.ts --course tmp/c6-pickup-strict.jsonc --seed0 860001 --games 100`；旧记录的 kills 3.54 / phits 0.57 / zero_kill_frac 0.14 **逐位复现** ⇒ 只口径变）：bc `c6-pickup.it35` 31/100→**32/100**（`baseline_win_rate 0.31→0.32`）、教师 42/100→**43/100**（`teacher.wins 42→43`）、教师 `timeout_frac 0.03→0.02`（剔除"已清场被截断"，同 `evalboard/stats.ts`）。G1 有效门槛随之 0.36→**0.37**。逐局证据 `tmp/c6bonus-{teacher,bc}.jsonl`。同时订正 c6-bonus 头注释 4 处与磁盘不符的说法（"只改 2 处 / gates 全锁死"、"gates 原样继承"、"报数并列 win/cleared 两口径"、params 名 `wTickFree`→`wBonusTicks`）。
+- **仍欠**：① metrics v5 + `win` 口径变更的 `DECISIONS.md` 条目（含 golden 覆盖扩充与 `_v7_corpus` 哨兵改写的理由）。② **其余课程的基准仍是旧口径**：`c6-pickup2`/`c6-pickup3`（0.31 / 42）、`c4-dodge`（0.72 / 68）、`c6b-margin`（0.22 / 42）——凡还有在跑的腿，需按各自 stage 重测；`gate_check.py:293-298` 的 timeout_frac 回退分支仍按**原始 outcome** 算（与 TS 侧新口径不一致，旧行才走到该分支）。
 
 ---
 

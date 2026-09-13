@@ -39,6 +39,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from platform_utils import force_utf8_stdio
+
 if TYPE_CHECKING:  # 运行时期望零 rl.config 依赖，见 `_lazy_config()`。
     from rl.config import GateRule, GatesSpec
 
@@ -347,6 +349,11 @@ def normalize_rows(
 def read_trend_rows(jsonl_path: Path, course_fp: str = "", limit: int = 0) -> tuple[dict, ...]:
     """读 `eval_log.jsonl`（per-tick 课程）里的 eval_summary 行；文件缺失返回 ()。
 
+    **it0 基线行（`iter <= 0`）不进趋势**：那一行是课程 bc 权重的干净评估（主循环在
+    首次 rollout 收官后补派，见 `loop_core._maybe_dispatch_baseline_eval`），它是监控/
+    配对基准而不是训练进展——让它进判据会虚增 sustain 的"连续通过"计数、也会把 plateau
+    的上升趋势起点拉回 PPO 前。控制台（`console/iters.ts`）不过滤，仍按它当配对基准。
+
     `limit > 0` 时只读末尾 `limit` 条 summary 行（大文件防护）。
     """
     out: list[dict] = []
@@ -362,6 +369,9 @@ def read_trend_rows(jsonl_path: Path, course_fp: str = "", limit: int = 0) -> tu
                     continue
                 if not isinstance(r, dict) or r.get("event") != "eval_summary":
                     continue
+                it = r.get("iter")
+                if isinstance(it, int) and it <= 0:
+                    continue  # it0 基线（bc 权重）：只作监控/配对参照，不进判据
                 fp = str(r.get("course_fp") or "")
                 if course_fp and fp and fp != course_fp:
                     continue
@@ -676,6 +686,20 @@ def _wins_mastery_pooled(
         f"池化 {k} 轮 {games} 局 {wins} 胜 = {p:.3f}"
         f"（SE {100 * se:.1f}pp，95%CI ±{196 * se:.1f}pp）"
     )
+    # 2026-09-13 P0：判决力自检（历史事故——c6-pickup3 启动时就报过「要求 5pp，但 300 局的
+    # SE=2.7pp > 2.5pp，该门分辨不出自己要求的效果」，却只当提示放过；c6-bonus 沿用同款
+    # G1，全程 0.275–0.302 离门槛差 7–10pp，从未有希望达标，白烧 74 轮）。
+    # 现在把「要求的效果量 vs 当前样本量能分辨的最小效应」写进每次判定的 reason。
+    z_pe = float(rule.conf_z or 1.645)
+    gain = float(rule.min_gain_pp or 0.0) / 100.0
+    if gain > 0:
+        mde = z_pe * se  # 当前样本量下可分辨的最小效应（单侧 conf_z）
+        if gain < mde:
+            need = math.ceil(p * (1.0 - p) * (z_pe / gain) ** 2) if gain > 0 else 0
+            head += (
+                f"；⚠ 判决力不足：要求 +{rule.min_gain_pp}pp，但 {games} 局只分辨得出"
+                f" ≥{100 * mde:.1f}pp（需 ≈{need} 局，即 eval_games×pool_window 提到该量级）"
+            )
     fails: list[str] = []
     if p < thr:
         fails.append(f"{p:.3f} < 教师线 {thr:.3f}")
@@ -1252,6 +1276,9 @@ def build_cli() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """薄壳 CLI（§4.1）。exit 码 = `EXIT_CODES`；override 非法 = 2。"""
+    # 子进程字节流恒 UTF-8（压过 PYTHONIOENCODING/PYTHONUTF8/代码页）——配对消费方
+    # （tests/subproc_util.run_utf8 / agent）的显式 utf-8 解码，跨沙箱确定性契约。
+    force_utf8_stdio()
     from rl.config import load_course  # 延迟导入：CLI 路径才需要
 
     args = build_cli().parse_args(argv)
@@ -1293,7 +1320,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "seeds": res.seeds,
                     "readings": [r.to_dict() for r in res.readings],
                 },
-                ensure_ascii=False,
+                # 机器通道 = 纯 ASCII（\uXXXX 转义）：对消费方的解码编码完全免疫
+                # （裸 text=True 父进程 / agent 自带解码器都读不坏）；人类可读走
+                # 非 --json 分支。曾用 ensure_ascii=False 在 zh-CN Windows 上与
+                # GBK 解码父进程互炸——见 docs/nn.progress.md §30。
+                ensure_ascii=True,
                 indent=2,
             )
         )

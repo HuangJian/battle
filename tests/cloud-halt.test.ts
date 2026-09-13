@@ -37,6 +37,7 @@ import {
   saveConsoleState,
   triggerCloudHalt,
 } from '../tools/training/console/actions'
+import { consoleStatePath } from '../tools/training/paths'
 import type { RlConfig } from '../tools/training/types'
 
 // hub 不可达（port 1 → 立即连接拒绝）→ 下发失败路径可离线断言。
@@ -150,5 +151,20 @@ describe('旧单键 cloudHalt 迁移（R4 additive）', () => {
     expect(s.activeCourse).toBe('legacy-c') // activeCourse 由旧 course 回填
     expect(s.cloudHalts?.['legacy-c']?.reason).toBe('旧事故')
     expect(readFileSync(process.env.BCITY_CONSOLE_STATE!, 'utf-8')).toContain('cloudHalt')
+  })
+})
+
+describe('consoleStatePath 惰性求值（2026-09-12 线上污染回归）', () => {
+  it('import 之后再改 env 也生效（模块级 const 会冻结线上路径）', () => {
+    const other = mkdtempSync(path.join(os.tmpdir(), 'bcity-cstate-lazy-'))
+    try {
+      process.env.BCITY_CONSOLE_STATE = path.join(other, 'console-state.json')
+      expect(consoleStatePath()).toBe(path.join(other, 'console-state.json'))
+      saveConsoleState({ course: 'lazy-probe' })
+      expect(loadConsoleState().course).toBe('lazy-probe')
+    } finally {
+      process.env.BCITY_CONSOLE_STATE = path.join(CSTATE_DIR, 'console-state.json')
+      rmSync(other, { recursive: true, force: true })
+    }
   })
 })

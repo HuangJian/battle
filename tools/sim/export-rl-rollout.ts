@@ -45,6 +45,7 @@
  */
 import { World } from '../../src/game/World'
 import { Simulation } from '../../src/game/Simulation'
+import { allEnemiesCleared } from '../../src/game/SimulationEffects'
 import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { STAGES } from '../../src/config/stages'
@@ -96,12 +97,16 @@ const RL_SHARD_FILES = [
   'mask.npy',
 ] as const
 
-// ---- 30 维指标列序（MUST mirror `nn-training/rl/reward_library.py::METRICS`）----
+// ---- 31 维指标列序（MUST mirror `nn-training/rl/reward_library.py::METRICS`）----
 // 改任一侧必须同步另一侧 + manifest metrics_version 不变则任何 shape[0] 下游
 // 会静默错读。idx10=starsCollected 补 plan §4.1 表的空槽（连续编号 0..20）。
 // idx21–28=道具流分类型计数（§9，metric v3：spawn/got × bomb/tank/freeze/shield，
 // 追加在尾部，老列号不动）。idx29=puSpawnStar（v4：star 供给列，拾取列 idx10 已有）。
-const METRICS_DIM = 30
+// idx30=clearTick（v5：敌人首次全灭的 tick，哨兵 -1 = 本局未清场）。
+// **本常量必须与 `buildMetricsRow` 的行宽一致** —— 2026-09-12 的 P0：只改了行、没改
+// 这里，`metrics.set(row, i * METRICS_DIM)` 每局越界抛 RangeError，整条采集腿零产出。
+// 导出仅供测试断言行宽（tests/export-rl-rollout-metrics.test.ts）。
+export const METRICS_DIM = 31
 
 // F3：基地失守局终局 score ×= BASE_LOSS_MULT。旧值 0.25 让「投降」太便宜——
 // it1–it68 审计发现 agent 卡在「会动不会守家」局部最优（eval base_destroyed 占
@@ -182,7 +187,7 @@ interface RolloutModel {
 }
 
 // ---- per-game telemetry（语义逐字段对齐 simulation-runner）----
-interface Telemetry {
+export interface Telemetry {
   enemyTotal: number
   startLives: number
   playerDeaths: number
@@ -213,6 +218,12 @@ interface Telemetry {
   basePressureSamples: number
   cellsVisited: Set<number>
   firstKillTick: number | undefined
+  /** 敌人**首次全灭**的 tick（`allEnemiesCleared` 首次为真）；undefined = 本局未清场。
+   *  2026-09-12 新增：敌人全灭后若场上还有道具会进 BONUS TIME 窗口（≈600 tick）才
+   *  stage_clear，而 max_ticks 可能在窗口结束前截断。reward 侧需要「清场 tick」才能
+   *  只豁免该窗口的 tick 惩罚（此前只能用 `min(ticks, wTickFree)` 近似）。
+   *  与 firstKillTick 同构：标量、每行 metrics 写同值、未成立时哨兵 -1。 */
+  clearTick: number | undefined
   /** 命中敌方累计（enemy_hit 事件数，含致死命中）。 */
   enemyHits: number
   /** 连续「原地 + 未命中」tick 数。 */
@@ -237,6 +248,50 @@ function countBaseWall(world: World): number {
 function isSolid(world: World, col: number, row: number): boolean {
   const t = world.tileMap.get(col, row)
   return t === 'brick' || t === 'steel'
+}
+
+/**
+ * 单行 metrics 快照（列序 = 文件头 `METRICS_DIM` 的 SSOT 实现）。
+ *
+ * 语义 = 旧 countersPhi 的同刻状态（tick t 决策前）；行宽必须恒为 `METRICS_DIM`。
+ * 提为模块级导出函数（而非 `runOne` 内的闭包）只为让测试能直接断言行宽 —— 这条
+ * 断言正是 2026-09-12 那次「加列忘改 `METRICS_DIM`」P0 的护栏。
+ */
+export function buildMetricsRow(t: number, world: World, tel: Telemetry): number[] {
+  tel.baseWallIntact = countBaseWall(world) // 与旧 countersPhi 同侧效应
+  return [
+    t, // 0 ticks
+    world.killCount, // 1 kills
+    world.lives, // 2 lives
+    tel.playerHits, // 3 playerHits
+    tel.playerDamageTaken, // 4 playerDamageTaken
+    tel.playerShots, // 5 playerShots
+    tel.enemyHits, // 6 enemyHits
+    tel.powerUpsCollected, // 7 powerUpsCollected
+    tel.powerUpsSpawned, // 8 powerUpsSpawned
+    tel.stuckTicks, // 9 stuckTicks
+    tel.starsCollected, // 10 starsCollected
+    world.tileMap.isBaseDestroyed() ? 0 : 1, // 11 baseAlive
+    tel.baseWallTotal, // 12 baseWallTotal
+    tel.baseWallIntact, // 13 baseWallIntact
+    tel.basePressureSum, // 14 basePressureSum
+    tel.basePressureSamples, // 15 basePressureSamples
+    tel.firstKillTick === undefined ? -1 : tel.firstKillTick, // 16 firstKillTick（哨兵 -1）
+    tel.playerDeaths, // 17 playerDeaths
+    tel.cellsVisited.size, // 18 cellsVisited
+    world.playerLevel, // 19 playerLevel
+    tel.enemyTotal, // 20 enemyTotal
+    tel.puSpawnBomb, // 21 puSpawnBomb
+    tel.puSpawnTank, // 22 puSpawnTank
+    tel.puSpawnFreeze, // 23 puSpawnFreeze
+    tel.puSpawnShield, // 24 puSpawnShield
+    tel.puGotBomb, // 25 puGotBomb
+    tel.puGotTank, // 26 puGotTank
+    tel.puGotFreeze, // 27 puGotFreeze
+    tel.puGotShield, // 28 puGotShield
+    tel.puSpawnStar, // 29 puSpawnStar
+    tel.clearTick === undefined ? -1 : tel.clearTick, // 30 clearTick（v5；-1 = 未清场）
+  ]
 }
 
 function sampleBasePressure(world: World): number {
@@ -443,6 +498,7 @@ function runOne(
     basePressureSamples: 0,
     cellsVisited: new Set<number>(),
     firstKillTick: undefined,
+    clearTick: undefined,
     enemyHits: 0,
     stuckTicks: 0,
   }
@@ -465,44 +521,9 @@ function runOne(
   let decisionTicks = 0 // 决策 tick 数（K 间隔）
   let dodgeTicks = 0 // L0/保底层覆盖采样动作的决策 tick 数（§3.5 覆盖率口径）
 
-  // 30 维指标快照（列序 MUST mirror rl/reward_library.py::METRICS —— 见文件头
-  // METRICS_DIM 注释）。语义 = 旧 countersPhi 的同刻状态（tick t 决策前）。
-  // 每决策步推一行 + 终局再推一行 ⇒ shard.metrics 恒为 [N+1] 行。
-  const metricsRow = (): number[] => {
-    tel.baseWallIntact = countBaseWall(world) // 与旧 countersPhi 同侧效应
-    return [
-      t, // 0 ticks
-      world.killCount, // 1 kills
-      world.lives, // 2 lives
-      tel.playerHits, // 3 playerHits
-      tel.playerDamageTaken, // 4 playerDamageTaken
-      tel.playerShots, // 5 playerShots
-      tel.enemyHits, // 6 enemyHits
-      tel.powerUpsCollected, // 7 powerUpsCollected
-      tel.powerUpsSpawned, // 8 powerUpsSpawned
-      tel.stuckTicks, // 9 stuckTicks
-      tel.starsCollected, // 10 starsCollected
-      world.tileMap.isBaseDestroyed() ? 0 : 1, // 11 baseAlive
-      tel.baseWallTotal, // 12 baseWallTotal
-      tel.baseWallIntact, // 13 baseWallIntact
-      tel.basePressureSum, // 14 basePressureSum
-      tel.basePressureSamples, // 15 basePressureSamples
-      tel.firstKillTick === undefined ? -1 : tel.firstKillTick, // 16 firstKillTick（哨兵 -1）
-      tel.playerDeaths, // 17 playerDeaths
-      tel.cellsVisited.size, // 18 cellsVisited
-      world.playerLevel, // 19 playerLevel
-      tel.enemyTotal, // 20 enemyTotal
-      tel.puSpawnBomb, // 21 puSpawnBomb
-      tel.puSpawnTank, // 22 puSpawnTank
-      tel.puSpawnFreeze, // 23 puSpawnFreeze
-      tel.puSpawnShield, // 24 puSpawnShield
-      tel.puGotBomb, // 25 puGotBomb
-      tel.puGotTank, // 26 puGotTank
-      tel.puGotFreeze, // 27 puGotFreeze
-      tel.puGotShield, // 28 puGotShield
-      tel.puSpawnStar, // 29 puSpawnStar
-    ]
-  }
+  // 每决策步推一行 + 终局再推一行 ⇒ shard.metrics 恒为 [N+1] 行、每行 METRICS_DIM 列
+  // （行宽 SSOT 在模块级 `buildMetricsRow`，见文件头 METRICS_DIM 注释）。
+  const metricsRow = (): number[] => buildMetricsRow(t, world, tel)
 
   const flushPending = (term: boolean): void => {
     if (!pending) return
@@ -576,6 +597,11 @@ function runOne(
     sim.tick()
     scripted.endFrame()
     t++
+
+    // 清场 tick（2026-09-12）：敌人**首次全灭**的 tick。`allEnemiesCleared` 首行即
+    // `enemiesRemaining <= 0` 短路，配合 `clearTick === undefined` 守卫 ⇒ 一旦记录
+    // 就不再调用，每 tick 开销可忽略。
+    if (tel.clearTick === undefined && allEnemiesCleared(world)) tel.clearTick = t
 
     // ---- telemetry（语义对齐 simulation-runner）----
     let collectedThisTick = 0
@@ -671,6 +697,7 @@ function runOne(
       baseAlive: !world.tileMap.isBaseDestroyed(),
     },
     firstKillTick: tel.firstKillTick,
+    clearTick: tel.clearTick,
     telemetry: {
       enemyTotal: tel.enemyTotal,
       startLives: tel.startLives,
@@ -693,7 +720,13 @@ function runOne(
   // F3 终局锚点：base_destroyed 局 gatedScore ×= M（manifest.score 即 gated 值）。
   const gatedScore = outcome === 'base_destroyed' ? scored.score * BASE_LOSS_MULT : scored.score
 
-  const win = outcome === 'stage_clear'
+  // 过关口径（2026-09-12 用户裁定）：**敌人全灭即算过关**，不要求拿到 `stage_clear` 事件。
+  // 成因：全灭后若场上还有道具会进 BONUS TIME 窗口（`POWERUP_PICKUP_WINDOW_MS = 10000ms
+  // ≈ 600 tick`），窗口走完才 stage_clear；而 `max_ticks` 可能在窗口结束前截断 ⇒
+  // `outcome='max_ticks'` 却已歼灭。单关训练场景下二者等价（道具跨关累积的增益只在多关
+  // 训练时才存在），故 `win` 统一为 win ∪ cleared。`outcome` 字段保留原始值不受影响
+  // （reward 仍按 `terminal[outcome]` 结算，见 c6-bonus.jsonc 的补偿项）。
+  const win = outcome === 'stage_clear' || allEnemiesCleared(world)
   const dims: Record<string, { value: number | null; raw: number }> = {}
   for (const k of Object.keys(scored.dims) as DimensionKey[]) {
     dims[k] = { value: scored.dims[k].value, raw: scored.dims[k].raw }
@@ -896,7 +929,7 @@ function main(argv: string[] = process.argv.slice(2)): void {
         schemaMajor: OBS_SCHEMA_MAJOR,
         collector: 'RL',
         policy: 'nn-student-rl',
-        metrics_version: 4, // [N+1,30] f8 —— shape[0] 下游据此分版本，防静默错读
+        metrics_version: 5, // [N+1,31] f8 —— v5 追加 idx30 clearTick；shape[0] 下游据此分版本，防静默错读
         difficulty,
         stage: si,
         seed,
@@ -968,7 +1001,7 @@ function main(argv: string[] = process.argv.slice(2)): void {
     dimMeans[k] = +(xs.reduce((a, b) => a + b, 0) / xs.length).toFixed(4)
   const summary = {
     collector: 'RL',
-    metrics_version: 4, // [N+1,30] f8 —— 与 manifest 同版（下游分版本读取）
+    metrics_version: 5, // [N+1,31] f8 —— 与 manifest 同版（下游分版本读取）
     customStages: stageJson ? '1' : '0', // 自定义关（Python 课程）标记
     difficulty,
     stages,

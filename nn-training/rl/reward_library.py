@@ -87,16 +87,43 @@ METRICS: tuple[str, ...] = (
     "puGotFreeze",  # 27
     "puGotShield",  # 28
     "puSpawnStar",  # 29  ← v4：star 供给列（拾取列 idx10 已有；c4 基线发现供给不可测）
+    "clearTick",  # 30  ← v5：敌人**首次全灭**的 tick（哨兵 -1 = 本局未清场）。
+    #                    用途：全灭后若场上还有道具会进 BONUS TIME 窗口（≈600 tick）才
+    #                    stage_clear；reward 需要「清场 tick」才能只豁免该窗口的 tick 惩罚。
+    #                    与 firstKillTick(16) 同构（标量、每行同值、未成立时 -1）。
 )
 
 METRIC_INDEX: dict[str, int] = {name: i for i, name in enumerate(METRICS)}
 METRICS_DIM = len(METRICS)
 #: shard manifest 版本：`[N+1,30]` 布局。任何用 `shape[0]` 推 episode 长度的
 #: 下游在版本不匹配时必须响亮报错，而非静默错读（评审 LC §1.1）。
-METRICS_VERSION = 4
+METRICS_VERSION = 5
 
 #: 终局 outcome 名（与 TS `manifest.outcome` 同源）；未列出的 terminal 键 = 0。
 OUTCOMES: tuple[str, ...] = ("stage_clear", "lives_exhausted", "timeout", "base_destroyed")
+
+#: outcome 派生的**虚拟符号**（2026-09-12）：不占 METRICS 列，由 `RewardFn` 在求值前
+#: 按本局 outcome 注入 env，值恒为 0.0/1.0。用途：公式需要「只在某种结局下生效」的项，
+#: 例如「清场但被 max_ticks 截断 ⇒ 按过关补偿」 —— 此前 outcome 只喂给 `terminal` 查表，
+#: 公式里访问不到，只能靠无条件补偿近似。
+VIRTUAL_OUTCOME_NAMES: frozenset[str] = frozenset(
+    {"is_stage_clear", "is_timeout", "is_lives_exhausted", "is_base_destroyed"}
+)
+
+
+def outcome_virtuals(outcome: str) -> dict[str, float]:
+    """本局 outcome → 虚拟符号取值表（0.0/1.0）。
+
+    `is_timeout` 同时接受 `'timeout'`（训练侧 `export-rl-rollout` 的初值/哨兵）与
+    `'max_ticks'`（评估侧 `export-eval-game` 的 outcome 名）—— 两处同义，都表示
+    「跑满 max_ticks 被截断」。
+    """
+    return {
+        "is_stage_clear": 1.0 if outcome == "stage_clear" else 0.0,
+        "is_timeout": 1.0 if outcome in ("timeout", "max_ticks") else 0.0,
+        "is_lives_exhausted": 1.0 if outcome == "lives_exhausted" else 0.0,
+        "is_base_destroyed": 1.0 if outcome == "base_destroyed" else 0.0,
+    }
 
 # ---------------------------------------------------------------- 白名单
 
@@ -354,6 +381,9 @@ class ParsedFormula:
     metric_names: frozenset[str] = frozenset()
     param_names: frozenset[str] = frozenset()
     func_names: frozenset[str] = frozenset()
+    #: 公式引用的 outcome 虚拟符号（见 `VIRTUAL_OUTCOME_NAMES`），由求值期按本局
+    #: outcome 注入 env；不占 METRICS 列。
+    virtual_names: frozenset[str] = frozenset()
     depth: int = 0
 
 
@@ -377,6 +407,7 @@ def parse_formula(
     metrics: set[str] = set()
     params_used: set[str] = set()
     funcs_used: set[str] = set()
+    virtuals: set[str] = set()
 
     def check(node: ast.AST, depth: int, is_func: bool) -> int:
         if depth > MAX_AST_DEPTH:
@@ -402,9 +433,12 @@ def parse_formula(
                 params_used.add(name)
             elif name in CONST_NAMES:
                 pass
+            elif name in VIRTUAL_OUTCOME_NAMES:
+                virtuals.add(name)
             else:
                 raise FormulaError(
-                    f"未知符号 '{name}'：只允许指标变量 / params 键 / pi,e"
+                    f"未知符号 '{name}'：只允许指标变量 / params 键 / pi,e / outcome 虚拟符号"
+                    f" {sorted(VIRTUAL_OUTCOME_NAMES)}"
                     f"（当前 params 键 = {sorted(params)}）"
                 )
         elif isinstance(node, ast.BinOp):
@@ -461,6 +495,7 @@ def parse_formula(
         metric_names=frozenset(metrics),
         param_names=frozenset(params_used),
         func_names=frozenset(funcs_used),
+        virtual_names=frozenset(virtuals),
         depth=depth,
     )
 
@@ -508,8 +543,14 @@ class CompiledFormula:
         """AST 可读 dump（`--echo-config` 用；非哈希，人眼可核对）。"""
         return ast.dump(self._parsed.tree, annotate_fields=True, indent=1)
 
-    def phi(self, metrics: np.ndarray, params: Mapping[str, float]) -> np.ndarray:
-        """`metrics [K,21]` → `Φ [K]`（float64）。"""
+    def phi(
+        self, metrics: np.ndarray, params: Mapping[str, float], outcome: str | None = None
+    ) -> np.ndarray:
+        """`metrics [K,31]` → `Φ [K]`（float64）。
+
+        `outcome` 仅当公式引用了 outcome 虚拟符号（`VIRTUAL_OUTCOME_NAMES`）时才需要；
+        缺席且公式确实引用 ⇒ 响亮报错（而不是静默当 0，那会埋掉「只在某结局生效」的语义）。
+        """
         m = np.asarray(metrics, dtype=np.float64)
         if m.ndim != 2 or m.shape[1] != METRICS_DIM:
             raise FormulaError(
@@ -523,6 +564,13 @@ class CompiledFormula:
             if name not in params:
                 raise FormulaError(f"公式引用的 params 键 '{name}' 缺失")
             env[name] = float(params[name])
+        if self._parsed.virtual_names:
+            if outcome is None:
+                raise FormulaError(
+                    f"公式引用了 outcome 虚拟符号 {sorted(self._parsed.virtual_names)}，"
+                    "但求值未提供 outcome"
+                )
+            env.update(outcome_virtuals(outcome))
         with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
             out = self._eval(self._parsed.tree.body, env)
         out = np.asarray(out, dtype=np.float64)
@@ -707,10 +755,10 @@ class RewardFn:
             out[key] = sch.value_at(it)
         return out
 
-    def phi(self, metrics: np.ndarray, it: int) -> np.ndarray:
+    def phi(self, metrics: np.ndarray, it: int, outcome: str | None = None) -> np.ndarray:
         params = self.resolve_params(it)
         if self._compiled is not None:
-            return self._compiled.phi(metrics, params)
+            return self._compiled.phi(metrics, params, outcome)
         assert self._builtin is not None
         return self._builtin(metrics, params)
 
@@ -727,7 +775,7 @@ class RewardFn:
         m = np.asarray(metrics, dtype=np.float64)
         if m.ndim != 2 or m.shape[0] < 2:
             raise FormulaError(f"metrics 至少 2 行（N 个决策快照 + 1 个终局快照），收到 {m.shape}")
-        phi = self.phi(m, it)
+        phi = self.phi(m, it, outcome)
         r = np.diff(phi)  # r[i] = Φ[i+1] − Φ[i]，共 N 个样本
         if self.spec.scheme == "score_reconcile":
             tail = self.spec.reward_scale * float(gated_score) - (phi[-1] - phi[0])
@@ -769,7 +817,7 @@ def assert_no_time_axis_reducers() -> None:
 
 def _self_check() -> None:
     assert_no_time_axis_reducers()
-    assert len(METRICS) == METRICS_DIM == 30, METRICS_DIM
+    assert len(METRICS) == METRICS_DIM == 31, METRICS_DIM  # v5：追加 idx30 clearTick
     assert len(set(METRICS)) == METRICS_DIM
 
 

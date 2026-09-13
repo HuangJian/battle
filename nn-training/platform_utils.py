@@ -11,6 +11,10 @@ rl/queue.py 各自维护了一份逐字节相同的 `_POPEN_NO_WINDOW`（Windows
   popen_kwargs(**extra) —— 便捷包装：返回 {**POPEN_NO_WINDOW, **extra}。
   rmtree_best_effort(path, ignore_errors=False) —— 递归删除目录，**沙箱删除保护
     （SystemExit）绝不外泄**；替代裸 shutil.rmtree / ignore_errors=True。
+  sandbox_delete_blocked(anchor) —— 探针：当前是否正被沙箱删除保护拦截真实删除
+    （门禁抖动归因用，见 docstring）。
+  force_utf8_stdio() —— CLI 入口调用：把本进程 stdout/stderr 运行时钉成 UTF-8
+    （压过 PYTHONIOENCODING / PYTHONUTF8 / 控制台代码页；详见 docstring）。
 """
 
 from __future__ import annotations
@@ -24,6 +28,27 @@ from typing import Any
 POPEN_NO_WINDOW: dict[str, Any] = {}
 if sys.platform == "win32":
     POPEN_NO_WINDOW = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+
+
+def force_utf8_stdio() -> None:
+    """CLI 入口调用：把本进程 stdout/stderr 运行时钉成 UTF-8。
+
+    为什么（2026-09-13 python-cli 编码问题复核）：被捕获的子进程字节流此前取决于
+    启动环境的 locale——coding agent 沙箱间 PYTHONUTF8 / PYTHONIOENCODING 各异、
+    zh-CN Windows 默认 cp936、Python 3.15 起（PEP 686）又默认 UTF-8。父进程的
+    subprocess 解码默认值是启动期决定的、运行时改不了 ⇒ 唯一通用的做法是把「子进程
+    输出什么编码」在子进程自己的入口处钉死：reconfigure 运行时覆盖 stdio 包装器，
+    压过一切环境变量。消费方（测试 ``tests/subproc_util.run_utf8`` / agent）按
+    utf-8 显式解码即可，无需任何环境变量协调。3.7+；3.15 下与运行时默认一致（no-op）。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue  # 非 TextIOWrapper（被捕获替换等）——保持现状，打印不该因此崩溃
+        try:
+            reconfigure(encoding="utf-8")
+        except (ValueError, OSError):
+            pass  # 流已关闭/底层不可重配——同上，尽力而为
 
 
 def rmtree_best_effort(path: Any, *, ignore_errors: bool = False) -> bool:
@@ -58,6 +83,34 @@ def rmtree_best_effort(path: Any, *, ignore_errors: bool = False) -> bool:
             return False
         raise
     return True
+
+
+def sandbox_delete_blocked(anchor: Any) -> bool:
+    """探针：当前环境是否正在拦截真实删除（沙箱 safe-delete 配额耗尽）。
+
+    2026-09-12 门禁抖动根因：WorkBuddy safe-delete shim 按 turn 计批量删除配额
+    （阈值 50，见 tools/githook/nn-python-gate.sh 头注）；同一会话反复跑全量门禁
+    必然踩满，此后所有真实删除被拒并抛 SystemExit。rmtree_best_effort 把它转成
+    False（best-effort），于是「断言删除落地」的测试（test_workdir_sweep /
+    prune_job_dirs）转红——单跑（配额新鲜）又变绿，表现为偶发（实证：
+    tmp/pre-commit-nn-*.log，assert 1 == 2 + [safe-delete] 行）。
+
+    约定：**仅在删除断言已失败的路径调用**（绿路径零开销、零配额消耗）。在 anchor
+    下建一个探针目录并用裸 shutil.rmtree 删除——SystemExit = 正在被拦 → True；
+    删得掉 / OSError → False（失败是真回归，调用方测试应继续红）。必须用裸
+    rmtree：rmtree_best_effort 会吞掉 SystemExit，探针就失灵了。
+    """
+    from pathlib import Path
+
+    probe = Path(anchor) / "_shim_probe"
+    try:
+        probe.mkdir(parents=True, exist_ok=True)
+        shutil.rmtree(probe)
+    except SystemExit:
+        return True
+    except Exception:
+        return False
+    return False
 
 
 def popen_kwargs(**extra: Any) -> dict[str, Any]:

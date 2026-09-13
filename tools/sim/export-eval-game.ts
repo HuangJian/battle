@@ -49,6 +49,7 @@ import { GoalExecutor } from '../../src/nn/goal-executor'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import type { InputLike } from '../../src/game/Input'
 import { IntentExecutor } from '../../src/nn/intent-executor'
+import { GoalSteering, goalMoveBias } from '../../src/nn/goal-mask'
 import { RNG } from '../../src/utils/RNG'
 import { writeFileSync, mkdirSync, readFileSync } from 'fs'
 import { scoreRun, V7_SCORE_CONFIG, type DimensionKey } from '../eval/godai-score'
@@ -200,7 +201,8 @@ interface EvalResult {
   /** 失败细分（仅 gameover：'base_destroyed' | 'lives_exhausted'；其余 undefined）。 */
   lossDetail?: 'base_destroyed' | 'lives_exhausted'
   /** 全灭（歼灭率口径，方案 §2.1「全歼率」门）：敌人队列已空且场上无存活非 extra
-   *  敌人（SimulationEffects.allEnemiesCleared）。与 win 不同——win 要求 stage_clear
+   *  敌人（SimulationEffects.allEnemiesCleared）。2026-09-12 起 `win` = stage_clear ∪ cleared
+   *  （单关训练场景二者等价，见 `win:` 处注释）；`cleared` 字段保留原义供「全歼率」门使用。
    *  （地上无存活道具，BONUS TIME 窗口 600 tick 内截断即 max_ticks）。分布式 eval
    *  门判定全歼必须读它，否则 BONUS 截断局被系统性少算（P0-1 同源口径，§15）。 */
   cleared: boolean
@@ -286,8 +288,12 @@ export function runEvalOne(
   // RNG 派生与 simulation-runner.runSimulation 逐字节一致（seed ^ 0x9e3779b9），
   // 远程局与本地局结果可对账。
   const isGod = policy === 'god'
+  // goal 层测试（goal-nn-action 1a）：frozen StudentNet + 外部目标硬掩码。
+  const isGoalMasked = policy === 'nn-goal'
   const model =
-    policy === 'nn' ? (buildModelFromText(weightsText) as unknown as RolloutModel) : null
+    policy === 'nn' || isGoalMasked
+      ? (buildModelFromText(weightsText) as unknown as RolloutModel)
+      : null
   const scripted = new ScriptedInput()
   let exec: IntentExecutor | GoalExecutor | GodAIInput | null = null
   if (isIntent) {
@@ -306,6 +312,24 @@ export function runEvalOne(
   } else if (isGod) {
     exec = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS }, new RNG((seed ^ 0x9e3779b9) >>> 0))
   }
+  // goal 层测试：nn-goal 的转向器（外部目标源 = GOAL_SOURCE env，缺省 'god'）。
+  // GOAL_BIAS > 0 ⇒ 1b-posthoc 软偏置（logits += β·align），否则 1a 硬掩码。
+  let goalSteering: GoalSteering | null = null
+  let goalGod: GodAIInput | null = null
+  let goalBias = Number.NaN
+  if (isGoalMasked) {
+    const src = process.env.GOAL_SOURCE === 'heuristic' ? 'heuristic' : 'god'
+    if (src === 'god') {
+      goalGod = new GodAIInput(
+        world,
+        { ...DEFAULT_GOD_AI_PARAMS },
+        new RNG((seed ^ 0x9e3779b9) >>> 0),
+      )
+    }
+    goalSteering = new GoalSteering(src, goalGod)
+    const rawBias = Number(process.env.GOAL_BIAS)
+    if (Number.isFinite(rawBias) && rawBias > 0) goalBias = rawBias
+  }
   const ai = (exec ?? scripted) as InputLike
   const sim = new Simulation(world, ai as any)
   // 调用方已对 arena 传 loadIndex=0（killScore 缩放不进 arena，见 main 解析处）
@@ -313,6 +337,7 @@ export function runEvalOne(
   // v4.0：reset 当前输入（GodAIInput 的关卡自适应在 reset() 里做——此前固定
   // scripted.reset() 使远程 god 局用默认参数打，与本地 runSimulation 不等价）。
   ai.reset()
+  if (goalGod) goalGod.reset()
 
   const encoder = new ObsEncoder()
 
@@ -357,7 +382,7 @@ export function runEvalOne(
 
   while (t < maxTicks) {
     // v3.7：意图执行器每 tick 内部自决（replan 帧跑 NN），无需手动 forward。
-    if (policy === 'nn') {
+    if (policy === 'nn' || policy === 'nn-goal') {
       encoder.encode(world)
       if (t % K === 0) {
         model!.forward(encoder.obs, encoder.scalars)
@@ -367,7 +392,28 @@ export function runEvalOne(
           )
         }
         const masks = computeMasks(world)
-        const mv = argmaxCat(model!.moveLogits, masks.move)
+        let mv = argmaxCat(model!.moveLogits, masks.move)
+        if (isGoalMasked && goalSteering) {
+          // 每 tick 先跑 God 全链（reflex 层 + 导航目标刷新）；eval 期可接受。
+          if (goalGod) {
+            goalGod.getMoveDirection()
+            goalGod.isFiring()
+          }
+          const goal = goalSteering.maskForTick(world, t),
+            goalCell = goalSteering.currentGoal
+          if (goalBias > 0 && goalCell) {
+            // 1b-posthoc：软偏置 logits += β·align（诱导不禁止，保留机动）。
+            const align = goalMoveBias(world, goalCell.col, goalCell.row)
+            const biased = new Float32Array(model!.moveLogits.length)
+            for (let i = 0; i < 5; i++) biased[i] = model!.moveLogits[i] + goalBias * align[i]
+            mv = argmaxCat(biased, masks.move)
+          } else {
+            // 1a：硬掩码，禁背离目标。
+            const combined: number[] = [0, 0, 0, 0, 0]
+            for (let i = 0; i < 5; i++) combined[i] = masks.move[i] === 1 && goal[i] === 1 ? 1 : 0
+            mv = argmaxCat(model!.moveLogits, combined)
+          }
+        }
         const fr = argmaxCat(model!.fireLogits, masks.fire)
         scripted.setAction(mv, fr)
       }
@@ -501,12 +547,18 @@ export function runEvalOne(
     dims[k] = { value: scored.dims[k].value, raw: scored.dims[k].raw }
   }
   tel.stuckTicks = stuckMax
+  // 过关口径（2026-09-12 用户裁定）：**敌人全灭即算过关**（win ∪ cleared）。
+  // 全灭后若场上还有道具会进 BONUS TIME 窗口（`POWERUP_PICKUP_WINDOW_MS = 10000ms ≈ 600 tick`）
+  // 才 stage_clear，而 `max_ticks` 可能在窗口结束前截断 ⇒ `outcome='max_ticks'` 却已歼灭。
+  // 单关训练场景下二者等价（道具跨关累积的增益只在多关训练时才存在）⇒ 统一为 win ∪ cleared。
+  // `cleared` 字段保留原义，供「全歼率」门单独使用；`outcome` 亦保留原始值。
+  const cleared = allEnemiesCleared(world)
   return {
     outcome,
     lossDetail,
-    cleared: allEnemiesCleared(world),
+    cleared,
     ticks: t,
-    win: outcome === 'stage_clear',
+    win: outcome === 'stage_clear' || cleared,
     score: scored.score,
     quality: scored.quality,
     dims,

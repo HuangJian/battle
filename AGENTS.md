@@ -41,6 +41,18 @@ authority and is worth reading before you touch that area.
 9. **"Green" means the gate ran** — `bun run check` / `make python-gate` — not "looks fine". [§9]
 10. **One Author**: only `Simulation` mutates `World`; everything else observes read-only. [§2.1]
 11. **A `DECISIONS.md` entry is the exception, not the reflex** — derive, then pass §6.3's admission gates expecting "don't write". [§6.3]
+12. **God-AI is a flawed teacher, never a ceiling** — the whole point of training the NN is to surpass it; never judge stage learnability, DoD thresholds, stage difficulty, or difficulty gradients by teacher performance. Human skilled play is the only difficulty yardstick. [§0.2]
+
+---
+
+### 0.2 训练目标最高纪律 — God 不是天花板（用户 2026-09-11/12 多次强调）
+
+God AI 是**有缺陷的规则系统**。训练 NN 的目的就是**超越它、达到它永远无法触及的目标**。教师只承担一件事——**帮 NN 顺利起步**（BC 蒸馏语料源 + 脚手架）。教师已知缺陷（`plan/Intent-Policy-NN-Plan.md:437` §12.1，均属执行器实施层，意图头训练无法直接修复；move/fire 层级学习已被判死）：① 冰冻期间在不同目标间摇摆；② 不会清墙开路（NN 极少选 CLEAR 0.4–3%）；③ 追击走并行车道横向开火不并入目标后方。§12.2 另有 20+ 项实测阴性归档作对照基线。
+
+- **四条禁令**（不得用教师表现做）：① 判定关卡"还有没有可学的"；② 设定/评估 DoD 阈值；③ 评定关卡难度或优化目标；④ 设计难度梯度。
+- **关卡难度的唯一评级口径 = 人类熟练玩家的体验**。用户口径：当前课程熟练玩家都能轻松通关 ⇒ NN 只到个位数～六成胜率 = **NN/训练问题，不是关卡难** ⇒ **杠杆在训练侧，不降难度**。
+- **"超越教师"是起点不是终点**；教师胜率（c4 68% / c5 47% / c6 50%）**不是任何形式的天花板**，不得用于判决课程成败。
+- **任务定义不得为训练方便降级**：`player.lives: 1`（目标「1 命杀 20 敌」）是任务定义的一部分；禁减敌数 / 放松关卡形态 / 降终局标准。稀疏终局信号是任务固有难点。**训练侧可动**（奖励塑形、GAE λ、value 头、算法），**任务侧不可动**（命数、敌数、关卡形态、终局标准）。
 
 ---
 

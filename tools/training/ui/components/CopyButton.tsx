@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'preact/hooks'
 
 export interface CopyButtonProps {
   text: string
-  /** 复制按钮的语意（如「隧道」）。 */
+  /** 复制按钮的语意（如「隧道」）；非 icon 模式下按钮文案显示该 label。 */
   label?: string
   small?: boolean
   /** 无字图标模式（§361①：只显示 ⧉ 图标，不显示「复制」字样；语义走 title/aria）。 */
@@ -30,15 +30,16 @@ export function CopyButton({ text, label, small, icon }: CopyButtonProps) {
       })
       .catch(() => setDone(false))
   }
+  const caption = label && label !== '内容' ? label : '复制'
   return (
     <button
       type="button"
       className={`tc-copy${done ? ' tc-copy--done' : ''}${small ? ' tc-copy--sm' : ''}${icon ? ' tc-copy--icon' : ''}`}
       aria-label={`复制${label ?? '内容'}`}
-      title={done ? '已复制' : `复制${label ? ` ${label}` : ''}`}
+      title={done ? '已复制' : `复制${label && label !== '内容' ? ` ${label}` : ''}`}
       onClick={copy}
     >
-      {icon ? (done ? '✓' : '⧉') : done ? '已复制 ✓' : '⧉ 复制'}
+      {icon ? (done ? '✓' : '⧉') : done ? `✓ ${caption}` : `⧉ ${caption}`}
     </button>
   )
 }

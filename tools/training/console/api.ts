@@ -6,7 +6,16 @@
  *  ActionError → 409，参数错误 → 400，动作失败（业务）→ 200 + ok:false。
  */
 
-import { closeSync, existsSync, openSync, readFileSync, readdirSync, readSync, statSync } from 'fs'
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  readSync,
+  statSync,
+} from 'fs'
 import path from 'path'
 import { CURRICULA_DIR, LOG_DIR, NN_TRAINING, REPO_ROOT } from '../paths'
 import { httpOk, pidAlive } from '../net'
@@ -20,7 +29,7 @@ import {
   markCloudHaltRecovered,
   triggerCloudHalt,
 } from './actions'
-import { readIterMetrics } from './iters'
+import { readIterMetrics, readPairedReferee } from './iters'
 import {
   aggregateNodeHistory,
   emptyHistory,
@@ -39,6 +48,7 @@ import type {
   CourseOverview,
   CourseOverviewComponent,
   LogPayload,
+  LoopComplete,
   MetricsView,
   NodeHistoryRow,
   NodeLocalView,
@@ -528,6 +538,9 @@ export interface SlowSnapshot {
   nodes: NodeView[]
   localNode: NodeLocalView | null
   phase: PhaseInfo
+  /** 训练正常完成停车态（账本尾行 run_complete + trainingLoop 存活时派生；
+   *  resume 后新事件自然顶掉 → null）。 */
+  loopComplete: LoopComplete | null
 }
 
 const SNAPSHOT_REFRESH_MS = 5000
@@ -579,7 +592,48 @@ async function computeSlowSnapshot(cfg: RlConfig, course: string): Promise<SlowS
   // 当前训练阶段（训练循环日志尾解析）。
   const logTail = components.find((c) => c.key === 'trainingLoop')?.logTail ?? []
   const phase = parsePhaseFromLog(logTail)
-  return { components, nodes, localNode, phase }
+  // 正常完成停车态（2026-09-12）：账本尾行是 run_complete 且进程仍存活（停车
+  // 等待重启）→ 横幅派生源；进程已死走 exit-watchdog 路径；resume 后新事件
+  // 顶掉 → 自动消失。账本小文件 + 尾部窗口读，5s 快照周期内可忽略。
+  let loopComplete: LoopComplete | null = null
+  const loopAlive = components.some((c) => c.key === 'trainingLoop' && c.status === 'running')
+  if (course && loopAlive) {
+    try {
+      const ledgerTail = readLogTail(
+        path.join(REPO_ROOT, 'tmp', course, 'training_log.jsonl'),
+        8,
+      ).lines
+      loopComplete = loopCompleteFromLedgerTail(ledgerTail)
+    } catch {
+      loopComplete = null
+    }
+  }
+  return { components, nodes, localNode, phase, loopComplete }
+}
+
+/** 账本尾行是 run_complete → 正常完成停车态；否则 null（纯函数，可单测）。
+ *
+ * 严格只认**尾行**：resume 后新 run_start/iteration 事件追加在后 → 自动 null
+ *（横幅消失）；尾行非 JSON（写半行竞态）→ null（下周期再看，不误报）。 */
+export function loopCompleteFromLedgerTail(lines: string[]): LoopComplete | null {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!.trim()
+    if (!line) continue
+    let r: { event?: unknown; time?: unknown; reason?: unknown; iter?: unknown; iters?: unknown }
+    try {
+      r = JSON.parse(line) as typeof r
+    } catch {
+      return null
+    }
+    if (!r || typeof r !== 'object' || r.event !== 'run_complete') return null
+    const it = typeof r.iter === 'number' ? r.iter : 0
+    return {
+      at: typeof r.time === 'string' ? r.time : '',
+      reason: typeof r.reason === 'string' ? r.reason : '正常完成',
+      iters: typeof r.iters === 'number' ? r.iters : it,
+    }
+  }
+  return null
 }
 
 /** 取指定课程的快照：5s 内新鲜命中缓存；否则按课程单飞重算（并发共享同一次计算）。 */
@@ -745,13 +799,16 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
   const state = loadConsoleState()
   const courses = discoverCourses()
   const course = courseOverride || effectiveCourse(state, courses)
-  const { components, nodes, localNode, phase } = await getSlowSnapshot(cfg, course)
+  const { components, nodes, localNode, phase, loopComplete } = await getSlowSnapshot(cfg, course)
   let metrics: MetricsView = { available: false, iters: [] }
   if (course && existsSync(path.join(REPO_ROOT, 'tmp', course, 'training_log.jsonl'))) {
     try {
+      const trajDir = path.join(REPO_ROOT, 'tmp', course)
       metrics = {
         available: true,
-        iters: readIterMetrics(path.join(REPO_ROOT, 'tmp', course)).rows,
+        iters: readIterMetrics(trajDir).rows,
+        // 配对裁判：同趟 eval_log 扫描的副产品，纯读，失败即 null 不阻断 state。
+        pairedReferee: readPairedReferee(trajDir),
       }
     } catch (e) {
       metrics = { available: false, iters: [], error: e instanceof Error ? e.message : String(e) }
@@ -784,6 +841,7 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     phase,
     cloudHalts: state.cloudHalts ?? {},
     ppoQueueStall,
+    loopComplete,
   }
 }
 
@@ -1130,6 +1188,29 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
         const value = str(body, 'value')
         return okResp(await setMode(key, value))
       }
+      case 'getGateHaltMode': {
+        // 门禁动作模式（2026-09-13）：halt = 触发门禁时下发云端停机达令（默认）；
+        // notify = 只记录 verdict + 横幅提示，绝不停云机。
+        const { readGateHaltMode } = await import('../specs')
+        // okResp 的载荷是 ActionResult（ok/message/detail）——模式值走 message 回传，
+        // 客户端据此校准开关（不为此扩 ActionResult 类型，避免污染所有动作返回值）。
+        return okResp({ ok: true, message: readGateHaltMode(ctx.course) })
+      }
+      case 'setGateHaltMode': {
+        // 写 `<traj>/gate-halt-mode.txt`；Python 侧每轮门判定读它（优先于启动参数）
+        // ⇒ 训练途中切换**立即生效**，无需重启。
+        const mode = str(body, 'mode')
+        if (mode !== 'halt' && mode !== 'notify') {
+          return errResp(`未知门禁模式: ${mode}（只接受 halt|notify）`, 400)
+        }
+        if (!ctx.course) return errResp('未指定课程（无法定位 traj 目录）', 400)
+        const { writeGateHaltMode } = await import('../specs')
+        const written = writeGateHaltMode(ctx.course, mode)
+        return okResp({
+          ok: true,
+          message: written === 'notify' ? 'notify（只提示，不下发停机令）' : 'halt（下发停机令）',
+        })
+      }
       case 'setCourse': {
         const { saveConsoleState, ActionError } = await import('./actions')
         const course = str(body, 'course')
@@ -1226,6 +1307,84 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
           })
         } finally {
           busy.delete('eval:probe')
+        }
+      }
+      case 'evalA': {
+        // 课程设计评估（A 层）：用该 iter 权重跑与训练每 eval_every 轮相同的干净评估，
+        // 写 tmp/<course>/eval_log.jsonl（与 EvalBoard B 层 evalProbeRun 无关）。
+        const ckpt = str(body, 'ckpt')
+        if (!ckpt) return errResp('缺少 ckpt（权重文件路径）', 400)
+        const iterRaw = Number(body.iter)
+        const iter = Number.isFinite(iterRaw) && iterRaw > 0 ? iterRaw : (iterFromCkpt(ckpt) ?? 0)
+        if (busy.has('eval:A')) return errResp('evalA 已在运行', 409)
+        busy.add('eval:A')
+        const resolved = (await import('../venv')).resolveVenvPython()
+        // 优先 venv 自带入口（.venv\Scripts\python.exe 已含依赖）；uv 跳板解析出的
+        // 基础解释器须靠 PYTHONPATH 挂 site-packages，否则 pydantic 缺失。
+        const venvEntry =
+          process.platform === 'win32'
+            ? path.join(NN_TRAINING, '.venv', 'Scripts', 'python.exe')
+            : path.join(NN_TRAINING, '.venv', 'bin', 'python3')
+        const pyBin = existsSync(venvEntry) ? venvEntry : resolved.python
+        const sitePackages = resolved.sitePackages
+        const script = path.join(NN_TRAINING, 'rl', 'eval_a_once.py')
+        const logFile = path.join(REPO_ROOT, 'tmp', ctx.course, 'evalA.log')
+        try {
+          const { spawn } = await import('child_process')
+          mkdirSync(path.dirname(logFile), { recursive: true })
+          const out = openSync(logFile, 'a')
+          // uv venv 跳板解析出的是基础解释器——必须 PYTHONPATH 挂 site-packages，
+          // 否则 `import pydantic` 直接 ModuleNotFoundError（2026-09-12 实测）。
+          const env = { ...process.env } as Record<string, string>
+          if (sitePackages) {
+            const prev = env.PYTHONPATH || env.PYTHONHOME || ''
+            env.PYTHONPATH = prev ? `${sitePackages}${path.delimiter}${prev}` : sitePackages
+          }
+          const child = spawn(
+            pyBin,
+            [
+              script,
+              '--course',
+              ctx.course,
+              '--ckpt',
+              ckpt,
+              '--iter',
+              String(iter),
+              '--bun',
+              'bun',
+            ],
+            {
+              cwd: path.join(REPO_ROOT, 'nn-training'),
+              detached: true,
+              stdio: ['ignore', out, out],
+              windowsHide: true,
+              env,
+            },
+          )
+          child.on('exit', () => {
+            busy.delete('eval:A')
+            try {
+              closeSync(out)
+            } catch {
+              /* ignore */
+            }
+          })
+          child.on('error', () => {
+            busy.delete('eval:A')
+            try {
+              closeSync(out)
+            } catch {
+              /* ignore */
+            }
+          })
+          child.unref()
+          return okResp({
+            ok: true,
+            message: `evalA 已启动 it${iter}（课程干净评估 → eval_log；日志 tmp/${ctx.course}/evalA.log）`,
+          })
+        } catch (e) {
+          busy.delete('eval:A')
+          return errResp(e instanceof Error ? e.message : String(e), 500)
         }
       }
       case 'evalBatchAbort': {

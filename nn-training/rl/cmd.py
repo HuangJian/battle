@@ -105,7 +105,9 @@ def build_rollout_cmd(
         if cfp:
             cmd += ["--course-fp", cfp]
         for k, v in args_rollout_overrides(args).items():
-            cmd += [f"--{k}", v]
+            # 键是下划线（lives_override），导出器只认连字符（--lives-override，
+            # 未知 flag 静默忽略）——c6-gae 本地 3命1星事故根因，见 tests/test_rl_cmd.py。
+            cmd += [f"--{k.replace('_', '-')}", v]
     return cmd
 
 

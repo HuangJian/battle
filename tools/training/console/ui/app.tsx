@@ -141,6 +141,14 @@ export function App({ initial }: AppProps) {
   const [viewCourse, setViewCourse] = useState<string>(initial.course)
   const viewCourseRef = useRef(viewCourse)
   viewCourseRef.current = viewCourse
+  // ── 门禁动作模式（2026-09-13）：halt = 触发门禁就下发 cloud halt（默认）；
+  //    notify = 只横幅告警、绝不杀云端 PPO worker。
+  //    为什么需要它：G4(plateau) 的 REMEDIATE 在平台期**每 5 轮必然复现**，历史上
+  //    c6-pickup3（6 次）/ c6-bonus（10 次）就是被它反复杀掉云机，后半程全在中断态下训练。
+  //    注意 hydrate 安全：初始值**恒为 'halt'**（服务端标志文件 + localStorage 都在
+  //    挂载后的 effect 里校准）——在 useState 初始化里读 localStorage 会让 SSR 首帧与
+  //    客户端不一致（横幅关闭后样式崩的根因，见 tests/console-lan.test.ts）。
+  const [gateHaltMode, setGateHaltMode] = useState<'halt' | 'notify'>('halt')
   // 阶段耗时段 10s 客户端自走（sinceMs 是服务器锚点；两次轮询之间显示不冻结）。
   const [now, setNow] = useState(() => Date.now())
 
@@ -235,6 +243,43 @@ export function App({ initial }: AppProps) {
       return { ok: r.ok }
     },
     [refreshState],
+  )
+
+  // 首次进入/切课程时，用**服务端标志文件**校准本地开关（文件是真相，localStorage 只是记忆）。
+  useEffect(() => {
+    void (async () => {
+      let v: 'halt' | 'notify' | null = null
+      try {
+        const r = await postAction('getGateHaltMode', {})
+        if (r.ok && (r.message === 'halt' || r.message === 'notify')) v = r.message
+      } catch {
+        /* 拉取失败 → 退到 localStorage */
+      }
+      if (!v) {
+        try {
+          if (localStorage.getItem('tc.gateHaltMode') === 'notify') v = 'notify'
+        } catch {
+          /* 隐私模式下读不了 */
+        }
+      }
+      if (v) setGateHaltMode(v)
+    })()
+  }, [viewCourse])
+
+  const onGateHaltModeChange = useCallback(
+    (e: Event) => {
+      const el = e.target as HTMLSelectElement | null
+      const v: 'halt' | 'notify' = el?.value === 'notify' ? 'notify' : 'halt'
+      setGateHaltMode(v)
+      try {
+        localStorage.setItem('tc.gateHaltMode', v)
+      } catch {
+        /* 隐私模式下写不了就算了 */
+      }
+      // 写 <traj>/gate-halt-mode.txt ⇒ Python 下一轮门判定即生效，无需重启训练。
+      void doAction('setGateHaltMode', { mode: v })
+    },
+    [doAction],
   )
 
   const handleLaunch = async (mode: 'pull' | 'push' | 'local'): Promise<void> => {
@@ -342,6 +387,34 @@ export function App({ initial }: AppProps) {
               </span>
             ) : null}
           </label>
+          {/* 门禁动作（**仅在有训练时显示**）：停机 = 触发门禁即下发 cloud halt；
+              提示 = 只横幅告警，绝不杀云端 PPO worker。
+              背景：G4(plateau) 的 REMEDIATE 每 5 轮必复现，c6-pickup3 / c6-bonus
+              被它反复停机 6 次 / 10 次，后半程训练全在中断态下进行。切换**即时生效**。 */}
+          {trainingCourse ? (
+            <label
+              className="tc-topbar__course"
+              title={
+                '门禁触发时对云端 PPO worker 的动作。\n' +
+                '· 停机（默认）：下发停机达令，云机释放。\n' +
+                '· 提示：只记录 verdict 并显示横幅，不停机——平台期（G4）会每 5 轮复现，' +
+                '停机等于反复杀掉 PPO worker。\n' +
+                '切换后立即对下一轮门判定生效，无需重启训练。'
+              }
+            >
+              <span className="tc-topbar__course-lbl">触发门禁</span>
+              <select
+                id="gateHaltSel"
+                className="tc-sel"
+                value={gateHaltMode}
+                disabled={!isLocal || readOnly}
+                onChange={onGateHaltModeChange}
+              >
+                <option value="halt">停机</option>
+                <option value="notify">提示</option>
+              </select>
+            </label>
+          ) : null}
           <div className="tc-topbar__right">
             {phaseInfo && phaseInfo.phase !== 'idle' ? (
               <span
@@ -454,6 +527,14 @@ export function App({ initial }: AppProps) {
             </button>
           </div>
         ))}
+      {stateView?.loopComplete ? (
+        <div className="tc-banner tc-banner--muted" role="status">
+          <span>
+            ✅ 训练已完成（{stateView.loopComplete.reason}）：本地已停止采集，云机已停机省配额，
+            进程停车等待重启。改大 iters 后经「停止→启动」继续。
+          </span>
+        </div>
+      ) : null}
       {stateView?.ppoQueueStall ? (
         <div className="tc-banner tc-banner--err" role="alert">
           <span>
@@ -490,7 +571,12 @@ export function App({ initial }: AppProps) {
         </div>
       ) : null}
       <PanelErrorBoundary>
-        <Hero stateView={stateView} onMore={() => setDrawerTab('metrics')} />
+        <Hero
+          stateView={stateView}
+          onMore={() => setDrawerTab('metrics')}
+          onRefresh={() => void refreshState()}
+          readOnly={readOnly}
+        />
       </PanelErrorBoundary>
       {/* ── 多课程总览（P5-W2）：单课自动不渲染；只读展示，切换=改查看课程 ── */}
       <PanelErrorBoundary>
@@ -570,7 +656,13 @@ export function App({ initial }: AppProps) {
         onTab={(k) => setDrawerTab(k as DrawerTabKey)}
         onClose={() => setDrawerTab(null)}
       >
-        {drawerTab === 'metrics' ? <MetricsTable stateView={stateView} /> : null}
+        {drawerTab === 'metrics' ? (
+          <MetricsTable
+            stateView={stateView}
+            onRefresh={() => void refreshState()}
+            readOnly={readOnly}
+          />
+        ) : null}
         {drawerTab === 'nodes' ? (
           <NodeStats enabled poolFreshNonce={poolFreshNonce} course={viewCourse} />
         ) : null}

@@ -103,7 +103,8 @@ function done(ok: boolean, message: string, detail?: string[]): ActionResult {
 // 路径惰性取自 paths.consoleStatePath()（同 registry.ts 的 BCITY_REGISTRY_FILE）：
 // 默认线上路径，单测置 env 重定向到临时目录，绝不写脏线上 console-state.json。
 // 惰性求值很关键——ES import 会被提升到测试文件的 env 赋值之前，模块初始化时
-// 抓取的常量会忽略重定向（本仓踩过：测试写脏了线上 console-state.json）。
+// 抓取的常量会忽略重定向（本仓踩过：2026-09-12 线上 console-state.json 被
+// cloud-halt.test.ts 的 fixture（{at:'T3',...}）污染，hub 真实 halt 记录丢失）。
 
 export interface CloudHaltInfo {
   /** 停机时刻（ISO）。 */

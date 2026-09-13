@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -27,6 +26,7 @@ from rl.gate_check import (
     normalize_rows,
     read_trend_rows,
 )
+from tests.subproc_util import run_utf8
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -93,9 +93,7 @@ def test_module_import_has_no_torch_numpy() -> None:
         "print('torch=' + str('torch' in sys.modules)); "
         "print('numpy=' + str('numpy' in sys.modules))"
     )
-    out = subprocess.run(
-        [sys.executable, "-c", code], cwd=str(ROOT), capture_output=True, text=True, timeout=120
-    )
+    out = run_utf8([sys.executable, "-c", code], cwd=str(ROOT), timeout=120)
     assert out.returncode == 0, out.stderr[-2000:]
     kv = dict(line.split("=") for line in out.stdout.splitlines() if "=" in line)
     assert kv["torch"] == "False"
@@ -725,6 +723,23 @@ def test_read_trend_rows_and_first_run_start(tmp_path: Path) -> None:
     assert len(read_trend_rows(log, course_fp="aa")) == 1  # 无 fp 的旧行保留
     assert read_trend_rows(tmp_path / "nope.jsonl") == ()
 
+    # it0 = bc 权重基线（主循环在首次 rollout 收官后补派）：只作监控/配对参照，
+    # 不进趋势判据（否则虚增 sustain 的"连续通过"计数、把 plateau 起点拉回 PPO 前）。
+    log0 = tmp_path / "eval_log0.jsonl"
+    log0.write_text(
+        "\n".join([json.dumps(_row(0)), json.dumps(_row(5))]) + "\n", encoding="utf-8"
+    )
+    kept = read_trend_rows(log0)
+    assert [r["iter"] for r in kept] == [5]
+    # 缺 iter 字段的旧行照旧保留（不过度收口）
+    log_missing = tmp_path / "eval_log_missing.jsonl"
+    log_missing.write_text(
+        json.dumps({"event": "eval_summary", "wver": "w1", "games": 10, "wins": 5})
+        + "\n",
+        encoding="utf-8",
+    )
+    assert len(read_trend_rows(log_missing)) == 1
+
     tl = tmp_path / "training_log.jsonl"
     t0 = "2026-09-01 10:00:00"
     t1 = "2026-09-05 10:00:00"
@@ -793,7 +808,7 @@ def test_evaluate_10k_rows_is_fast() -> None:
 
 def test_cli_dry_run_exit_code(tmp_path: Path) -> None:
     """CLI 薄壳：无 gates 块的课程 → HOLD → exit 0，且零写盘。"""
-    out = subprocess.run(
+    out = run_utf8(
         [
             sys.executable,
             "-m",
@@ -805,8 +820,6 @@ def test_cli_dry_run_exit_code(tmp_path: Path) -> None:
             "--json",
         ],
         cwd=str(ROOT),
-        capture_output=True,
-        text=True,
         timeout=180,
     )
     assert out.returncode == 0, out.stdout + out.stderr
