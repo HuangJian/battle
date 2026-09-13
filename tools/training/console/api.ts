@@ -1615,3 +1615,67 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
     return errResp(e instanceof Error ? e.message : String(e), 500)
   }
 }
+
+// ================================================================
+// curriculumLadderView —— I5（roadmap v2.0 §4-I5）：阶梯统一 identity 台账的
+// 控制台 LAN 只读渲染。读 nn-training/ladder/LEDGER.jsonc（I4 gate runner 与
+// rl/ladder_ledger.py 双写方，字段级 merge），返回 20 级 + 经典的 status /
+// lastGate / hypothesis / teacherWR 摘要。与 God-AI evalboard 的 ladder.json
+// （LadderRung）完全无关——命名特意区分。
+// ================================================================
+
+export interface CurriculumLadderLevel {
+  level: string
+  status: string
+  count?: number
+  hypothesis?: string
+  teacherWR?: number
+  lastGate?: { verdict?: string; pooledPassRate?: number; wilsonLB?: number; date?: string }
+  diskBytes?: number
+  escalateReason?: string
+}
+
+export function readCurriculumLedger(
+  ledgerPath = path.join(NN_TRAINING, 'ladder', 'LEDGER.jsonc'),
+): {
+  levels: Record<string, CurriculumLadderLevel>
+  updatedAt?: string
+} {
+  try {
+    const raw = readFileSync(ledgerPath, 'utf8')
+    // LEDGER 由程序生成（纯 JSON）；容错剥掉潜在注释行后解析。
+    const cleaned = raw
+      .split('\n')
+      .filter((l) => !l.trim().startsWith('//'))
+      .join('\n')
+    const data = JSON.parse(cleaned) as {
+      levels?: Record<string, Record<string, unknown>>
+      updated_at?: string
+    }
+    const levels: Record<string, CurriculumLadderLevel> = {}
+    for (const [k, v] of Object.entries(data.levels ?? {})) {
+      levels[k] = {
+        level: k,
+        status: String(v.status ?? 'pending'),
+        count: typeof v.count === 'number' ? v.count : undefined,
+        hypothesis: typeof v.hypothesis === 'string' ? v.hypothesis : undefined,
+        teacherWR: typeof v.teacherWR === 'number' ? v.teacherWR : undefined,
+        lastGate: (v.lastGate as CurriculumLadderLevel['lastGate']) ?? undefined,
+        diskBytes: typeof v.disk_bytes === 'number' ? v.disk_bytes : undefined,
+        escalateReason: typeof v.escalate_reason === 'string' ? v.escalate_reason : undefined,
+      }
+    }
+    return { levels, updatedAt: data.updated_at }
+  } catch (e) {
+    // 台账缺席/损坏不挡控制台——返回空视图（LAN 只读，绝不反杀训练）。
+    return { levels: {} }
+  }
+}
+
+export function curriculumLadderView(): {
+  levels: CurriculumLadderLevel[]
+  updatedAt?: string
+} {
+  const { levels, updatedAt } = readCurriculumLedger()
+  return { levels: Object.values(levels).sort((a, b) => a.level.localeCompare(b.level)), updatedAt }
+}

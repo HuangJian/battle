@@ -49,6 +49,7 @@ import {
   buildPoolView,
   buildStateView,
   componentLogPayload,
+  curriculumLadderView,
   discoverCourses,
   invalidateSlowSnapshot,
   ladderTickAll,
@@ -255,6 +256,11 @@ async function main(): Promise<void> {
         if (req.method === 'GET' && url.pathname === '/api/evalCkpts') {
           const leg = url.searchParams.get('leg') ?? ''
           return json(buildEvalCkptsView(viewCourse || undefined, leg))
+        }
+        // I5（roadmap v2.0）：阶梯统一 identity 台账 LAN 只读渲染（与 God-AI
+        // evalboard ladder 无关）。
+        if (req.method === 'GET' && url.pathname === '/api/curriculumLadder') {
+          return json(curriculumLadderView())
         }
         // R8：/eval 独立评估页（?courses=a,b 可分享 URL；?course= 兼容）。
         if (req.method === 'GET' && url.pathname === '/eval') {
