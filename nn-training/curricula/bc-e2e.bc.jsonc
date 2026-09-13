@@ -1,0 +1,37 @@
+// BC 管线流校验夹具课程（2026-09-13，对齐 PPO 侧 tiny-a/tiny-b 的定位——
+// **不是能力训练**，只验证 BC 云-HUB-LAN 全链：采语料 → 发布 kind=bc job →
+// 云端 BC 训练 → 回传落位 → 作废/归档）。§15.2 哨兵：不读它的任何学习曲线。
+// wins_only=false：E2E 冒烟把 max_ticks 压到 300，wins-only 会把唯一一局也过滤掉
+// （run_bc.smoke_overrides 已在 smoke 时自动关闭 wins_only——本夹具直接配 false，
+// 让手工单跑 `run_bc.py --course bc-e2e --smoke` 不依赖覆盖逻辑也能产出 shard）。
+{
+  "version": 1,
+  "name": "bc-e2e-flowcheck",
+  "kind": "bc",
+  "level": "arena4",
+
+  "corpus": {
+    "games_per_stage": 1,
+    "wins_only": false,
+    "near_miss_times": 1,
+    "seed_rotate": 0,
+  },
+
+  "train": {
+    "arch": "student",
+    "epochs": 1,
+    "batch": 128,
+    "lr": 3e-3,
+    "mirror_p": 0.5,
+    "val_split": 0.1,
+    "value_coef": 0.0,
+    "seed": 1234,
+    "ckpt_every": 0,
+  },
+
+  "iters": 1,
+  "workers": 2,
+  "out": "tmp/bc-e2e/weights.json",
+  "traj": "tmp/bc-e2e",
+  "backup_prefix": "bc-e2e",
+}

@@ -5,6 +5,41 @@
 
 ---
 
+## §40 自主审查轮：battle-rl.ipynb 单 cell 化 + 真跑暴露四缺陷修复 + bc-c4 it1 真实产物（2026-09-13）
+
+**BC 云端 notebook 重构（用户指令：网页只执行一个 cell 建连，其余完全自主）**——
+`nn-training/ipynb/battle-rl.ipynb` 从 8 代码 cell 顺序流程改为 **markdown + 单代码 cell**：
+
+- 参数置顶（MODE/HUB_URL/HUB_TOKEN + 行为参数）；自动 = 平台/设备探测（CUDA/TPU/CPU，
+  TPU 独占设备约束全保留：内核绝不 import torch_xla，占用者诊断在）、保活、
+  `/code` 代码引导（**404 = 每 30s 等待重试**——旧版硬失败，顺序敏感；现在先起 worker
+  后起 trainer 完全合法）、worker 监督（热替换 86 自动重启 + **崩溃指数退避重启**
+  ≤MAX_WORKER_RESTARTS；rc=0 干净退出/-2 配置致命不重启）、push 模式 cloudflared
+  自动安装 + bootstrap 优先 hub /code（GitHub tarball 兜底）。中断 = 干净停机。
+- **E2E 实证**：本地 hub + 抽取 cell 源码 headless 执行——worker 先起等 /code 重试
+  → trainer 后起发布 → cell 引导代码、领 kind=bc 任务、真训练 5.5s、回传 accepted。
+- 新夹具课程 `curricula/bc-e2e.bc.jsonc`（BC 管线流校验，对齐 tiny-a 定位；wins_only=false
+  适配 300-tick 冒烟）。
+
+**真跑暴露四缺陷（全部修复）**：
+
+1. **smoke 语料污染真轮**：smoke shard 落 `bc-data/it1` 被真跑断点续跑复用（40 局里混进
+   1 局 300-tick timeout 局）→ smoke 落 `bc-data/smoke` + 全量重采不复用；`round_name`
+   贯通采集/发布/落位三处（iter_bc_shard_dirs/verify_and_land_bc/publish_bc_job）。
+2. **本地训练路径根错位**：run_bc chdir 仓库根但子进程 cwd=nn-training，相对路径
+   FileNotFoundError → 全 resolve 绝对路径；子进程输出 capture 缓冲到结束（§16.3 违例）
+   → Popen 逐行流式中继。
+3. **本地 ckpt_every 死键**：train_local_bc 漏传 --ckpt-every（云端 manifest 有）→ 接上；
+   真跑 ckpt.10..60 全落盘。
+4. **本地 WEIGHTS.md 行全 0**：extra_meta 是 weights JSON **顶层合并**（sizes/best_val_loss/
+   history），误读 `meta` 子键 → 修读法 + it1 注册行已人工订正。
+
+**真实产物（bc-c4 it1，全链本地实证）**：arena4 语料 40 局（29 胜保留/11 败过滤，
+6442 帧，18.6s 采集）→ CPU 6 线程 60 epoch 37 分钟（val_loss 2.24→1.6260，move acc
+0.236→0.566，fire acc 0.761→0.764）→ 归档 `nn-training/weights/bc-c4/bc-c4.it1.20260913-161311.json`
++ 中央 WEIGHTS.md 行 + 活跃指针 `tmp/bc-c4/weights.json`。该权重可直接作 RL 课程
+`bc` 种子 / `kickstart_ref` 快照。
+
 ## §39 BC 训练整合进 云-HUB-LAN：kind=bc 第二任务类型全链（2026-09-13，用户指令五步）
 
 **目标**：BC 从本地手工流程（export-godai-labels + train/bc.py 手工串）升级为与 PPO 同构的

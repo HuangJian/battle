@@ -118,13 +118,16 @@ def iter_shard_dirs(traj_dir: str | Path, it: int, log=lambda msg: None) -> list
     return dirs
 
 
-def iter_bc_shard_dirs(traj_dir: str | Path, it: int, log=lambda msg: None) -> list[Path]:
+def iter_bc_shard_dirs(
+    traj_dir: str | Path, it: int, round_name: str = "", log=lambda msg: None
+) -> list[Path]:
     """本轮 BC 语料 shard 集（plan/bc-cloud-integration.plan.md §4）：
-    `<traj>/bc-data/it{it}/bc_s*_seed*/`（含 manifest.json）。
+    `<traj>/bc-data/<round>/bc_s*_seed*/`（含 manifest.json）；round 缺省 = `it{it}`，
+    smoke 轮传 "smoke"（冒烟语料与真轮隔离，2026-09-13）。
 
     同名 shard 去重与 PPO（iter_shard_dirs）同策略：按 manifest mtime 保留最早一份
     （先写盘者 = 结算赢家），退役者响亮日志。"""
-    data_root = Path(traj_dir) / "bc-data" / f"it{it}"
+    data_root = Path(traj_dir) / "bc-data" / (round_name or f"it{it}")
     if not data_root.exists():
         return []
     groups: dict[str, list[Path]] = {}
@@ -750,6 +753,7 @@ def verify_and_land_bc(
     traj_dir: str | Path,
     it: int,
     out_weights: str,
+    round_name: str = "",
     log=lambda msg: print(f"[hub] {msg}", flush=True),
 ) -> str:
     """BC 结果校验 + 落盘（plan/bc-cloud-integration.plan.md §4；verify_and_land 的 BC 版）。
@@ -766,7 +770,7 @@ def verify_and_land_bc(
         raise HubClientError(
             "BC 校验失败: init_weights_fp 不匹配（result 与 manifest 错配）——拒收"
         )
-    local_fp = data_fp(iter_bc_shard_dirs(traj_dir, it, log=log))
+    local_fp = data_fp(iter_bc_shard_dirs(traj_dir, it, round_name, log=log))
     if result["data_fp"] != local_fp:
         raise HubClientError(
             f"BC 校验失败: data_fp 不匹配（云={result['data_fp'][:12]}… "

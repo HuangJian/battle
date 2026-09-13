@@ -214,6 +214,7 @@ def collect_corpus(
     seeds = round_seeds(course, it)
     stages = course.stage_ids
     want = {(s, seed) for s in stages for seed in seeds}
+    have = landed_pairs(data_round_dir)
     max_ticks = int(course.max_ticks)
     wins_only = bool(course.corpus.wins_only)
     near_miss = int(course.corpus.near_miss_times)
@@ -224,9 +225,8 @@ def collect_corpus(
         near_miss = ov["near_miss_times"]
         seeds = seeds[:1]
         want = {(s, seeds[0]) for s in stages}
-        todo = sorted(want)  # smoke 全量重采
+        todo = sorted(want)  # smoke 全量重采（不复用盘上 shard，见 docstring）
     else:
-        have = landed_pairs(data_round_dir)
         todo = sorted(want - have)
         if not todo:
             log(f"[run_bc] it{it}: 语料已齐（{len(have)} shards on disk）— 跳过采集")
@@ -273,11 +273,14 @@ def publish_bc_job(
     traj: Path,
     job_root: Path,
     jsonl_path: Path,
-    smoke: bool,
+    round_name: str = "",
     log=log,
 ) -> dict:
-    """打包 + 发布 BC job（hub/push 共用；返回归一化 manifest）。"""
-    shard_dirs = iter_bc_shard_dirs(traj, it, log=log)
+    """打包 + 发布 BC job（hub/push 共用；返回归一化 manifest）。
+
+    round_name：语料轮目录名（真轮缺省 it{it}；smoke 轮 "smoke"——采集/发布/落位
+    三处必须同目录，否则发布找不到 shard）。"""
+    shard_dirs = iter_bc_shard_dirs(traj, it, round_name, log=log)
     if not shard_dirs:
         raise SystemExit(
             f"[run_bc] it{it}: 无完整 BC shard（{traj / 'bc-data' / f'it{it}'} 空）——无法发布"
@@ -285,8 +288,9 @@ def publish_bc_job(
     commit = git_head()
     code_zip_path = job_root / "code.zip"
     code_sha = pack_code_zip(NN_ROOT, code_zip_path, log=log)
-    epochs = 1 if smoke else int(course.train.epochs)
-    batch = min(int(course.train.batch), 256) if smoke else int(course.train.batch)
+    is_smoke = round_name == "smoke"
+    epochs = 1 if is_smoke else int(course.train.epochs)
+    batch = min(int(course.train.batch), 256) if is_smoke else int(course.train.batch)
     manifest = publish_job(
         job_root=job_root,
         jsonl_path=jsonl_path,
@@ -312,7 +316,7 @@ def publish_bc_job(
             "mirror_p": float(course.train.mirror_p),
             "value_coef": float(course.train.value_coef),
             "ckpt_every": int(course.train.ckpt_every),
-            "notes": f"bc course={course.name} it={it} smoke={smoke}",
+            "notes": f"bc course={course.name} it={it} smoke={is_smoke}",
         },
         log=log,
     )
@@ -395,17 +399,18 @@ def train_local_bc(
         tail = "\n".join(out_lines[-12:])
         log(f"[run_bc] local bc.py 退出码 {rc}——训练失败，子进程尾段：\n{tail}")
         raise SystemExit(f"[run_bc] local bc.py 退出码 {rc}——训练失败")
-    # bc.py 落盘 versioned archive + active pointer；回读 metrics（sizes/best_val）
+    # bc.py 落盘 versioned archive + active pointer；回读 metrics——注意 extra_meta
+    # 是**顶层合并**（sizes/best_val_loss/history 都是 JSON 顶层键，weights_io.save_weights_json）。
     out_p = Path(out_weights)
     with open(out_p, encoding="utf-8") as f:
         wj = json.load(f)
-    meta = wj.get("meta", {})
-    hist = meta.get("history", {})
+    hist = wj.get("history", {})
+    sizes = wj.get("sizes", {})
     metrics = {
         "epochs": epochs,
-        "train_samples": int(meta.get("sizes", {}).get("train", 0) or 0),
-        "val_samples": int(meta.get("sizes", {}).get("val", 0) or 0),
-        "best_val_loss": float(meta.get("best_val_loss", 0.0) or 0.0),
+        "train_samples": int(sizes.get("train", 0) or 0),
+        "val_samples": int(sizes.get("val", 0) or 0),
+        "best_val_loss": float(wj.get("best_val_loss", 0.0) or 0.0),
         "move_acc": float(hist.get("move_acc", [0.0])[-1]) if hist.get("move_acc") else 0.0,
         "fire_acc": float(hist.get("fire_acc", [0.0])[-1]) if hist.get("fire_acc") else 0.0,
         "local_sec": round(time.time() - t0, 1),
@@ -555,7 +560,7 @@ def main() -> None:
                     traj=traj,
                     job_root=job_root,
                     jsonl_path=jsonl_path,
-                    smoke=args.smoke,
+                    round_name=("smoke" if args.smoke else ""),
                     log=log,
                 )
                 jid = str(manifest["job_id"])
@@ -595,6 +600,7 @@ def main() -> None:
                     traj_dir=str(traj),
                     it=it,
                     out_weights=out_weights,
+                    round_name=("smoke" if args.smoke else ""),
                     log=log,
                 )
                 mark_job_completed(jsonl_path, jid)

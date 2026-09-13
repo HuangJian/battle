@@ -54,4 +54,4 @@
 * **`--resume` 是权重 warm-start（DECISIONS §325）**：AdamW / 余弦 LR 调度不随
   权重延续，续跑时 LR 从头再来。要接近原调度，尽量一次跑长，仅在中断后走 resume。
 * **多敌课程（p4-onset）cap 语义**：`max_ticks 2400` 原为单敌标定，4 敌局若
-  超时占比过高需按实测重标定（DECISIONS §327 / docs/rl.progress.md §2）。
+  超时占比过高需按实测重标定（DECISIONS §327 / docs/rl.progress.md §2）。| 2026-09-13T16:13:11 | `bc-c4.it1.20260913-161311.json` | 60 | 5575/867 | 1.6260 | 0.566/0.764/n/a | d3ce96c | bc bc-c4-distill it1 |
