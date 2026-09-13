@@ -260,7 +260,6 @@ def collect_corpus(
 def publish_bc_job(
     *,
     course: BcCourseConfig,
-    course_key: str,
     course_fp: str,
     corpus_fp: str,
     course_text: str,
@@ -311,7 +310,6 @@ def publish_bc_job(
         },
         log=log,
     )
-    _ = course_key
     return manifest
 
 
@@ -394,6 +392,11 @@ def main() -> None:
     ap.add_argument("--local", action="store_true", help="语料就绪后本机 train/bc.py 训练")
     ap.add_argument("--smoke", action="store_true", help="冒烟：尺寸压缩真一轮，落位即作废")
     ap.add_argument("--wait-sec", type=float, default=DEFAULT_WAIT_SEC)
+    # hub 传输覆盖（对齐 run_rl：显式传参压过 rl-config remote_hubs[course]；本地
+    # hub_server E2E / 多 hub 实验用）
+    ap.add_argument("--remote-hub-url", default="", help="hub-server base URL（覆盖 rl-config）")
+    ap.add_argument("--remote-token", default="", help="bearer token（覆盖 rl-config）")
+    ap.add_argument("--remote-job-root", default="", help="job 根目录（覆盖 <traj>/remote-jobs）")
     args = ap.parse_args()
 
     course_path = resolve_bc_course(args.course)
@@ -408,7 +411,7 @@ def main() -> None:
         Path(traj / "weights.smoke.json") if args.smoke else Path(course.resolve_out(course_key))
     )
     jsonl_path = traj / "training_log.jsonl"
-    job_root = traj / "remote-jobs"
+    job_root = Path(args.remote_job_root) if args.remote_job_root else traj / "remote-jobs"
     data_root = Path(course.resolve_data_dir(course_key))
     log(
         f"[run_bc] course={course.name} key={course_key} iters={course.iters} "
@@ -457,8 +460,13 @@ def main() -> None:
         or ((cfg or {}).get("courses", {}).get(course_key, {}) or {}).get("push_node_url")
         or ""
     )
-    token = str(rl_block.get("remote_token") or "")
-    hub_url = str((rl_block.get("remote_hubs") or {}).get(course_key) or rl_block.get("remote_hub_url") or "")
+    token = str(args.remote_token or rl_block.get("remote_token") or "")
+    hub_url = str(
+        args.remote_hub_url
+        or (rl_block.get("remote_hubs") or {}).get(course_key)
+        or rl_block.get("remote_hub_url")
+        or ""
+    )
     if args.local:
         transport = "local"
     elif push_url:
@@ -504,7 +512,6 @@ def main() -> None:
             else:
                 manifest = publish_bc_job(
                     course=course,
-                    course_key=course_key,
                     course_fp=course_fp,
                     corpus_fp=corpus_fp,
                     course_text=course_text,
@@ -592,8 +599,10 @@ def _archive_round(
     if dst:
         log(f"[run_bc] it{it}: weights archived -> {dst}")
         m = metrics or {}
+        # 注册行进**中央** registry（nn-training/weights/WEIGHTS.md，与 bc.py 本地
+        # 训练同表）——backup_dir 子目录只是归档桶，不是注册表
         append_weights_md_row(
-            Path(dst).parent,
+            REPO_ROOT / "nn-training" / "weights",
             dst,
             epochs=int(m.get("epochs", 0) or 0),
             samples=(int(m.get("train_samples", 0) or 0), int(m.get("val_samples", 0) or 0)),

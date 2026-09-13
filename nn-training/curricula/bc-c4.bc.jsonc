@@ -33,7 +33,7 @@
     "val_split": 0.1,
     "value_coef": 0.0,
     "seed": 1234,
-    "ckpt_every": 0,
+    "ckpt_every": 10,
   },
 
   "iters": 1,
