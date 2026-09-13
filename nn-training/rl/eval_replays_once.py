@@ -38,7 +38,7 @@ _SCRIPT_DIR = str(Path(__file__).resolve().parent)
 while _SCRIPT_DIR in sys.path:
     sys.path.remove(_SCRIPT_DIR)
 
-from concurrent.futures import ThreadPoolExecutor  # noqa: E402 — 必须在 scrub 之后
+from concurrent.futures import ThreadPoolExecutor  # 必须在 scrub 之后
 
 _FILENAME_RE = re.compile(r"-s(\d+)-[a-z]+-l\d+-t\d+-seed(\d+)\.replay$")
 
@@ -250,7 +250,7 @@ def main() -> int:
                 policy="nn",
                 replay_dir=str(out_dir),
             )
-        except Exception as e:  # noqa: BLE001 — 单局失败不拖垮整批
+        except Exception as e:  # 单局失败不拖垮整批
             failed += 1
             log(f"[replay-exp] fail s{stage} seed{seed}: {e}")
             return

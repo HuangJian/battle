@@ -779,7 +779,7 @@ export function buildBcEpochsView(course: string | undefined): {
   }
   let evalEveryEpochs: number | null = null
   try {
-    const raw = readFileSync(path.join(CURRICULA_DIR, `${course}.bc.jsonc`), 'utf-8')
+    const raw = readFileSync(path.join(curriculaDir(), `${course}.bc.jsonc`), 'utf-8')
     const m = /"every_epochs"\s*:\s*(\d+)/.exec(raw)
     if (m) evalEveryEpochs = Number(m[1])
   } catch {

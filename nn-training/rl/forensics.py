@@ -62,10 +62,26 @@ def _rss_mb_windows() -> tuple[float, float] | None:
 
 
 def _rss_mb_posix() -> tuple[float, float] | None:
+    # 首选 /proc/self/status：VmRSS/VmHWM 出自同一 mm 账本快照，peak >= cur 由
+    # 内核保证。getrusage 的 ru_maxrss 在部分内核（WSL2 实测）会持续滞后于实际
+    # 常驻集，与 statm 混用会出现 peak < cur 的假象（test_rss_mb_sane 曾确定性红）。
+    try:
+        cur = peak = 0.0
+        with open("/proc/self/status", encoding="ascii") as f:
+            for ln in f:
+                if ln.startswith("VmRSS:"):
+                    cur = float(ln.split()[1])  # kB
+                elif ln.startswith("VmHWM:"):
+                    peak = float(ln.split()[1])
+        if cur > 0 and peak > 0:
+            return cur / _MB, peak / _MB
+    except Exception:
+        pass
+    # 降级路径（非 Linux POSIX，如 macOS：无 /proc）
     try:
         import resource
 
-        ru = resource.getrusage(resource.RUSAGE_SELF)  # type: ignore[attr-defined]
+        ru = resource.getrusage(resource.RUSAGE_SELF)  # type: ignore[attr-defined]  # POSIX 专用
         # ru_maxrss：Linux 单位 KB，macOS 单位字节
         scale = 1024.0 if sys.platform.startswith("linux") else 1.0
         peak = float(ru.ru_maxrss) * scale
