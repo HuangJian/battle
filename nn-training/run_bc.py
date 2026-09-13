@@ -354,6 +354,8 @@ def train_local_bc(
         str(course.train.value_coef),
         "--seed",
         str(course.train.seed),
+        "--ckpt-every",
+        str(0 if smoke else int(course.train.ckpt_every)),
         "--device",
         "cpu",
         "--notes",
