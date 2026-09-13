@@ -33,9 +33,12 @@ import {
   TC_CLOUDHALT_ACK,
   TC_GLOBAL_INTERVAL,
   TC_RO_BANNER_DISMISSED,
+  cloudHaltAckKey,
+  parseCloudHaltAcks,
   type ConsoleStateView,
   type PhaseInfo,
   type RefreshSec,
+  visibleCloudHalts,
 } from '../../ui/view'
 
 export interface AppProps {
@@ -129,10 +132,19 @@ export function App({ initial }: AppProps) {
   useEffect(() => {
     if (readLocal(TC_RO_BANNER_DISMISSED) === '1') setRoBannerDismissed(true)
   }, [])
-  // 云端停机灰横幅已读（§386）：按 clearedAt 记，同一恢复事件只提示一次。
-  const [cloudHaltAck, setCloudHaltAck] = useState<string | null>(null)
+  // 云端停机横幅已读（§386；2026-09-14 扩到 halted）：按「事件身份」记（课程+时刻），
+  // 同一事件只提示一次，新一次停机/恢复会重新弹。
+  const [cloudHaltAcks, setCloudHaltAcks] = useState<string[]>([])
   useEffect(() => {
-    setCloudHaltAck(readLocal(TC_CLOUDHALT_ACK))
+    setCloudHaltAcks(parseCloudHaltAcks(readLocal(TC_CLOUDHALT_ACK)))
+  }, [])
+  /** 记住「知道了」：写入 localStorage（数组格式，旧单值格式兼容）。 */
+  const ackCloudHalt = useCallback((key: string): void => {
+    setCloudHaltAcks((prev) => {
+      const next = prev.includes(key) ? prev : [...prev, key]
+      writeLocal(TC_CLOUDHALT_ACK, JSON.stringify(next))
+      return next
+    })
   }, [])
   // 视图课程（局域网只读核心）：初始 = SSR 的 ?course= 覆盖或操作员课程；切换只改本浏览器
   // 的查看 + URL，本机才额外 POST setCourse 同步操作员课程（动作 WYSIWYG 走 body.course）。
@@ -485,14 +497,17 @@ export function App({ initial }: AppProps) {
           </button>
         </div>
       ) : null}{' '}
-      {Object.entries(stateView?.cloudHalts ?? {})
+      {visibleCloudHalts(stateView?.cloudHalts, stateView?.course ?? '')
         .filter(([, h]) => h.status === 'halted')
+        .filter(
+          ([courseName, h]) => !cloudHaltAcks.includes(cloudHaltAckKey('halted', courseName, h.at)),
+        )
         .map(([courseName, h]) => (
           <div key={`halt-${courseName}`} className="tc-banner tc-banner--err" role="alert">
             <span>
-              ⚠ {courseName ? `课程 ${courseName} ` : ''}停机中（{h.reason}）
-              ：已向云机下发停机命令——云机先尝试停机； 停不掉则照常执行任务（不闲置空烧）。本地
-              hub/console 均正常。停机条件消失（如恢复训练）会自动解除。
+              ⚠ {courseName ? `课程 ${courseName} ` : ''}停机中（{h.reason}
+              ）：已向云机下发停机命令——云机先尝试停机； 停不掉则照常执行任务（不闲置空烧）。本地
+              hub/console 均正常。本课恢复训练会自动解除；其它课的停机状态见「多课总览」徽标。
             </span>
             <button
               type="button"
@@ -501,11 +516,21 @@ export function App({ initial }: AppProps) {
             >
               立即恢复
             </button>
+            <button
+              type="button"
+              className="tc-btn tc-btn--sm"
+              onClick={() => ackCloudHalt(cloudHaltAckKey('halted', courseName, h.at))}
+            >
+              知道了
+            </button>
           </div>
         ))}
-      {Object.entries(stateView?.cloudHalts ?? {})
+      {visibleCloudHalts(stateView?.cloudHalts, stateView?.course ?? '')
         .filter(([, h]) => h.status === 'recovered' && !!h.clearedAt)
-        .filter(([courseName, h]) => cloudHaltAck !== `${courseName}|${h.clearedAt}`)
+        .filter(
+          ([courseName, h]) =>
+            !cloudHaltAcks.includes(cloudHaltAckKey('recovered', courseName, h.clearedAt ?? '')),
+        )
         .map(([courseName, h]) => (
           <div key={`rec-${courseName}`} className="tc-banner tc-banner--muted" role="status">
             <span>
@@ -517,11 +542,9 @@ export function App({ initial }: AppProps) {
             <button
               type="button"
               className="tc-btn tc-btn--sm"
-              onClick={() => {
-                const ack = `${courseName}|${h.clearedAt ?? ''}`
-                writeLocal(TC_CLOUDHALT_ACK, ack)
-                setCloudHaltAck(ack)
-              }}
+              onClick={() =>
+                ackCloudHalt(cloudHaltAckKey('recovered', courseName, h.clearedAt ?? ''))
+              }
             >
               知道了
             </button>

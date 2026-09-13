@@ -132,6 +132,15 @@ export interface CourseOverview {
   ppoQueueStall: { jobId: string; waitedSec: number; it: number | null } | null
 }
 
+/** 单课云端停机记录（§386 + S17：halted=红横幅，recovered=灰横幅历史）。 */
+export interface CloudHaltView {
+  at: string
+  reason: string
+  status: 'halted' | 'recovered'
+  clearedAt?: string
+  clearReason?: string
+}
+
 export interface ConsoleStateView {
   time: string
   course: string
@@ -149,16 +158,7 @@ export interface ConsoleStateView {
   /** 当前训练阶段（顶栏图标用）。 */
   phase: PhaseInfo
   /** 每课云端停机记录（§386 + S17：键 = 课程名；halted=红横幅，recovered=灰横幅历史）。 */
-  cloudHalts?: Record<
-    string,
-    {
-      at: string
-      reason: string
-      status: 'halted' | 'recovered'
-      clearedAt?: string
-      clearReason?: string
-    }
-  >
+  cloudHalts?: Record<string, CloudHaltView>
   /** PPO 任务排队超时（>5min 无 worker 领取）：warning 横幅——云端 worker 可能断连。 */
   ppoQueueStall?: {
     jobId: string
@@ -1334,6 +1334,42 @@ export function pendingLockReleases(
     if (cur !== undefined && cur !== from) out.push(key)
   }
   return out
+}
+
+// ────────────────────────── 纯函数：云端停机横幅（2026-09-14：只弹当前课） ──────────────────────────
+
+/** 首页横幅可见的停机记录：**只取当前视图课程**那条；本课无记录时回退旧无课键 ''。
+ *
+ *  为什么必须过滤：`cloudHalts` 是全量表，而「停机条件消失（恢复训练）自动解除」
+ *  只在本课程的 TrainingLoop 重启时触发（actions.startComponent → markCloudHaltRecovered）。
+ *  2026-09-14 事故：切到 bc-c4-v3 后，c6-chip 的 halted 红横幅仍霸屏，且在本课**永远
+ *  解不掉**（自动解除不会发生，只剩「立即恢复」这一条只能作用于那门课的出口）。
+ *  其它课程的停机状态由多课总览徽标承载（CourseOverview.cloudHalt），不占首页横幅。 */
+export function visibleCloudHalts(
+  halts: Readonly<Record<string, CloudHaltView>> | undefined,
+  course: string,
+): Array<[string, CloudHaltView]> {
+  if (!halts) return []
+  const own = halts[course]
+  if (own) return [[course, own]]
+  const legacy = halts['']
+  return legacy ? [['', legacy]] : []
+}
+
+/** 横幅已读键：事件身份（课程 + 触发/恢复时刻）——同一事件只提示一次，新事件重新弹。 */
+export function cloudHaltAckKey(kind: 'halted' | 'recovered', course: string, at: string): string {
+  return `${kind}|${course}|${at}`
+}
+
+/** 解析 localStorage 里的已读集合：新格式是 JSON 数组；旧格式是单个字符串（兼容）。 */
+export function parseCloudHaltAcks(raw: string | null): string[] {
+  if (!raw) return []
+  try {
+    const v: unknown = JSON.parse(raw)
+    return Array.isArray(v) ? v.map((x) => String(x)) : [raw]
+  } catch {
+    return [raw]
+  }
 }
 
 // ────────────────────────── 纯函数：节点池状态 ──────────────────────────

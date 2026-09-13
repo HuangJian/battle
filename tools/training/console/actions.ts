@@ -69,18 +69,52 @@ export class ActionError extends Error {}
 /** 进行中的动作 key（`start:trainingLoop` / `node:mac` / `mode:rl.stream`）。 */
 export const busy = new Set<string>()
 
+/** busy 上锁时刻（自愈用，见 sweepStaleBusy）。只有经 guard 加的键才有记录；
+ *  测试/外部手动塞进 busy 的键无记录，不参与 TTL 清扫（语义不变）。 */
+export const busySince = new Map<string, number>()
+/** 单动作 TTL：最长合法动作是 trainer 启动的 20s 等日志 + 停机恢复，冒烟最多跑一局
+ *  仿真——5 分钟是宽裕上界。超过即视为「漏 release」，自动解锁。 */
+const BUSY_TTL_MS = 5 * 60 * 1000
+
+/** 清扫过期 busy 键：guard 释放错键/异常路径漏释放时，组件会被永久锁死（只能重启
+ *  控制台）——2026-09-14 事故：start/stop/smoke 的 release 用旧无课程键，导致
+ *  trainingLoop 每次启动后 `start:trainingLoop:<课>` 永久残留，之后一律 409。
+ *  TTL 是第二道防线：即使再出现漏释放，5 分钟后自动恢复，无需重启进程。 */
+function sweepStaleBusy(now = Date.now()): void {
+  for (const [k, at] of busySince) {
+    if (now - at <= BUSY_TTL_MS) continue
+    busy.delete(k)
+    busySince.delete(k)
+    logWarn(`[console] busy 键 ${k} 超过 ${BUSY_TTL_MS / 1000}s 未释放——自动解锁（疑似漏 release）`)
+  }
+}
+
 function guard(key: string): void {
+  sweepStaleBusy()
   if (busy.has(key)) throw new ActionError('动作进行中，请稍候')
   busy.add(key)
+  busySince.set(key, Date.now())
 }
 function release(key: string): void {
   busy.delete(key)
+  busySince.delete(key)
 }
 
 /** 动作 busy 键（S10/P5-W3）：按课程键控的组件带 course——两课可同时启/停/冒烟同一
- *  组件类型，不再互相 409；selfNode（全局单例）与无课程调用沿用旧键（默认行为零变化）。 */
-function busyKey(op: string, key: Component, course = ''): string {
+ *  组件类型，不再互相 409；selfNode（全局单例）与无课程调用沿用旧键（默认行为零变化）。
+ *  导出给 api 层做组件 busy 展示——**必须与动作实际加的键同源**，否则页面显示
+ *  「未忙碌」而服务端 409（2026-09-14 事故的同源根因）。 */
+export function busyKey(op: string, key: Component, course = ''): string {
   return isCourseComponent(key) && course ? `${op}:${key}:${course}` : `${op}:${key}`
+}
+
+/** 组件是否正在执行动作（页面禁用按钮 = 服务端 409 判定，同源）。 */
+export function componentBusy(key: Component, course = ''): boolean {
+  return (
+    busy.has(busyKey('start', key, course)) ||
+    busy.has(busyKey('stop', key, course)) ||
+    busy.has(busyKey('smoke', key, course))
+  )
 }
 
 export interface ActionResult {
@@ -368,7 +402,10 @@ async function startBcLoop(
 
 /** 启动单个组件（已在运行 = 幂等成功；依赖缺失 = ActionError/失败结果）。 */
 export async function startComponent(key: Component, ctx: StartCtx): Promise<ActionResult> {
-  guard(busyKey('start', key, ctx.course))
+  // 键必须与 finally 释放的键同源（2026-09-14 事故：guard 用按课键、release 用旧无课键
+  // ⇒ 按课键永不释放 ⇒ 该课程组件的启动/停止/冒烟永久 409）。
+  const bk = busyKey('start', key, ctx.course)
+  guard(bk)
   try {
     const cfg = loadConfig()
     const venv = resolveVenvPython()
@@ -509,7 +546,7 @@ export async function startComponent(key: Component, ctx: StartCtx): Promise<Act
     if (e instanceof ActionError) throw e
     return done(false, `${COMPONENT_LABELS[key]} 启动失败: ${e instanceof Error ? e.message : e}`)
   } finally {
-    release(`start:${key}`)
+    release(bk)
   }
 }
 
@@ -522,7 +559,9 @@ export async function startComponent(key: Component, ctx: StartCtx): Promise<Act
  *  指引操作员指定课程或走 stopAll（紧急总闸）。selfNode 是全局单例（agent_port），
  *  不受此限。 */
 export async function stopComponent(key: Component, course = ''): Promise<ActionResult> {
-  guard(busyKey('stop', key, course))
+  // 键必须与 finally 释放的键同源（同上，2026-09-14 事故）。
+  const bk = busyKey('stop', key, course)
+  guard(bk)
   try {
     const entry = entryOf(key, course)
     if (entry?.pid) {
@@ -558,7 +597,7 @@ export async function stopComponent(key: Component, course = ''): Promise<Action
   } catch (e) {
     return done(false, `停止失败: ${e instanceof Error ? e.message : e}`)
   } finally {
-    release(`stop:${key}`)
+    release(bk)
   }
 }
 
@@ -579,7 +618,8 @@ export async function stopAll(): Promise<ActionResult> {
 
 /** 单组件冒烟（各组件子集不同：轻量 ping / 真 rollout 一局）。 */
 export async function smokeComponent(key: Component, ctx: StartCtx): Promise<ActionResult> {
-  guard(busyKey('smoke', key, ctx.course))
+  const bk = busyKey('smoke', key, ctx.course)
+  guard(bk)
   try {
     const cfg = loadConfig()
     const items: SmokeItem[] = []
@@ -659,7 +699,7 @@ export async function smokeComponent(key: Component, ctx: StartCtx): Promise<Act
   } catch (e) {
     return done(false, `冒烟失败: ${e instanceof Error ? e.message : e}`)
   } finally {
-    release(`smoke:${key}`)
+    release(bk)
   }
 }
 
@@ -846,14 +886,18 @@ async function smokeTrainBc(course: string): Promise<ActionResult> {
       const { killPid } = await import('../net')
       await killPid(servePid)
     }
-    release('smoke:train')
+    // 与 smokeTrain 的 guard 同键（按课）：旧代码 release('smoke:train') 与按课
+    // guard 键不同源 ⇒ 该课程第一次预演后永久 409（2026-09-14 事故同源）。
+    release(`smoke:train:${course}`)
   }
 }
 
 export async function smokeTrain(course: string): Promise<ActionResult> {
   // M2：busy 键按课（两课可同时冒烟；全局键会第二次 409）。P5 才全量 course-keyed，
   // smokeTrain 是提前的那一个（P3 全链路验收要双课同冒）。
-  guard(`smoke:train:${course}`)
+  // guard / release 必须同键（见上）。
+  const smokeKey = `smoke:train:${course}`
+  guard(smokeKey)
   // BC 课程 → BcLoop 冒烟预演（真 BC 训练 1 epoch，无 echo）
   if (isBcCourse(course)) return await smokeTrainBc(course)
   let servePid = 0
@@ -924,7 +968,7 @@ export async function smokeTrain(course: string): Promise<ActionResult> {
       const { killPid } = await import('../net')
       await killPid(servePid)
     }
-    release('smoke:train')
+    release(smokeKey)
   }
 }
 
