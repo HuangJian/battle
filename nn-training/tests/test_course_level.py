@@ -70,6 +70,25 @@ def _write_course(tmp_path: Path, d: dict) -> Path:
     return p
 
 
+def test_corpus_fp_covers_obs_schema(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """★ schema 必须在 RL 语料身份里（2026-09-13 补，与 BC 侧同一坑的对称回归锁）。
+
+    D14 混训分流按 corpus_fp 判定：身份里漏掉 schema ⇒ v2(14ch) 与 v3(16ch) 语料被
+    判为**同一身份**，D14 放行 ⇒ 形状不同的 shard 混进同一次训练（加载侧
+    data.npyio.verify_shard_schema 只能事后 raise，那时已经在崩）。
+    """
+    import schema
+
+    base = _course_from(C6_DMGFIX)
+    c = load_course(_write_course(tmp_path, base))
+    fp = corpus_identity_fp(c)
+
+    monkeypatch.setattr(schema, "OBS_SCHEMA_MAJOR", schema.OBS_SCHEMA_MAJOR + 1)
+    assert corpus_identity_fp(c) != fp
+    monkeypatch.setattr(schema, "SCHEMA_FINGERPRINT", "deadbeef")
+    assert corpus_identity_fp(c) != fp
+
+
 def test_corpus_fp_ignores_budget_fields(tmp_path: Path) -> None:
     """iters/eval_*/out/traj 编辑不改 corpus_fp（C 类：随时可改、不破坏血缘）。"""
     base = _course_from(C6_DMGFIX)

@@ -50,6 +50,7 @@ from remote.hub_client import (
 from remote.hub_server import _JobStore, make_server
 from rl.config import load_course
 from rl.reward_library import METRICS_VERSION
+from schema import BOARD, OBS_CHANNELS, SCALAR_DIM  # v3：合成语料形状随 schema
 
 # ------------------------------------------------------------------ shard 合成
 
@@ -109,8 +110,8 @@ def _write_synthetic_shard(
     d = dirpath
     d.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(seed * 131 + 7)
-    np.save(d / "obs.npy", rng.integers(0, 256, (n, 14, 26, 26), dtype=np.uint8))
-    np.save(d / "scalars.npy", rng.random((n, 19), dtype=np.float32))
+    np.save(d / "obs.npy", rng.integers(0, 256, (n, OBS_CHANNELS, BOARD, BOARD), dtype=np.uint8))
+    np.save(d / "scalars.npy", rng.random((n, SCALAR_DIM), dtype=np.float32))
     np.save(d / "a_move.npy", rng.integers(0, 5, n).astype(np.int64))
     np.save(d / "a_fire.npy", rng.integers(0, 2, n).astype(np.int64))
     np.save(d / "lp_move.npy", (rng.random(n) - 2).astype(np.float32))

@@ -2,6 +2,7 @@
   "version": 1,
   "name": "nn-ladder",
   "drop_profile": "modern (bonusEnemyEveryNSpawns=4 + score milestone; D9)",
+  "drop_profile_enforced_by": "difficulty=hard → rules.ts modern defaults（无显式 rules 键）",
   "geometry": {
     "source": "levels/arena4.jsonc",
     "grid": "empty arena, steel border only (D3)",
@@ -21,6 +22,7 @@
       "lives": 1,
       "max_ticks": 1500,
       "rollout_games": 600,
+      "spawn_points": 1,
       "legs": {
         "count": 2,
         "kinds": [
@@ -45,6 +47,7 @@
       "lives": 1,
       "max_ticks": 2100,
       "rollout_games": 600,
+      "spawn_points": 4,
       "legs": {
         "count": 2,
         "kinds": [
@@ -69,6 +72,7 @@
       "lives": 1,
       "max_ticks": 2700,
       "rollout_games": 600,
+      "spawn_points": 4,
       "legs": {
         "count": 2,
         "kinds": [
@@ -93,6 +97,7 @@
       "lives": 1,
       "max_ticks": 3300,
       "rollout_games": 150,
+      "spawn_points": 4,
       "legs": {
         "count": 2,
         "kinds": [
@@ -117,6 +122,7 @@
       "lives": 1,
       "max_ticks": 3900,
       "rollout_games": 150,
+      "spawn_points": 4,
       "legs": {
         "count": 2,
         "kinds": [
@@ -141,6 +147,7 @@
       "lives": 1,
       "max_ticks": 4500,
       "rollout_games": 150,
+      "spawn_points": 4,
       "legs": {
         "count": 3,
         "kinds": [
@@ -166,6 +173,7 @@
       "lives": 1,
       "max_ticks": 5100,
       "rollout_games": 150,
+      "spawn_points": 4,
       "legs": {
         "count": 3,
         "kinds": [
@@ -191,6 +199,7 @@
       "lives": 2,
       "max_ticks": 5700,
       "rollout_games": 150,
+      "spawn_points": 4,
       "legs": {
         "count": 2,
         "kinds": [
@@ -215,6 +224,7 @@
       "lives": 2,
       "max_ticks": 6300,
       "rollout_games": 150,
+      "spawn_points": 4,
       "legs": {
         "count": 2,
         "kinds": [
@@ -239,6 +249,7 @@
       "lives": 2,
       "max_ticks": 6900,
       "rollout_games": 150,
+      "spawn_points": 4,
       "legs": {
         "count": 2,
         "kinds": [
@@ -263,6 +274,7 @@
       "lives": 2,
       "max_ticks": 7500,
       "rollout_games": 150,
+      "spawn_points": 4,
       "legs": {
         "count": 2,
         "kinds": [
@@ -287,6 +299,7 @@
       "lives": 2,
       "max_ticks": 8100,
       "rollout_games": 150,
+      "spawn_points": 4,
       "legs": {
         "count": 2,
         "kinds": [
@@ -311,6 +324,7 @@
       "lives": 2,
       "max_ticks": 8700,
       "rollout_games": 150,
+      "spawn_points": 4,
       "legs": {
         "count": 2,
         "kinds": [
@@ -335,6 +349,7 @@
       "lives": 2,
       "max_ticks": 9300,
       "rollout_games": 150,
+      "spawn_points": 4,
       "legs": {
         "count": 2,
         "kinds": [
@@ -359,6 +374,7 @@
       "lives": 3,
       "max_ticks": 9900,
       "rollout_games": 150,
+      "spawn_points": 4,
       "legs": {
         "count": 2,
         "kinds": [
@@ -383,6 +399,7 @@
       "lives": 3,
       "max_ticks": 10500,
       "rollout_games": 150,
+      "spawn_points": 4,
       "legs": {
         "count": 2,
         "kinds": [
@@ -407,6 +424,7 @@
       "lives": 3,
       "max_ticks": 11100,
       "rollout_games": 150,
+      "spawn_points": 4,
       "legs": {
         "count": 2,
         "kinds": [
@@ -431,6 +449,7 @@
       "lives": 3,
       "max_ticks": 11700,
       "rollout_games": 150,
+      "spawn_points": 4,
       "legs": {
         "count": 2,
         "kinds": [
@@ -455,6 +474,7 @@
       "lives": 3,
       "max_ticks": 12300,
       "rollout_games": 150,
+      "spawn_points": 4,
       "legs": {
         "count": 2,
         "kinds": [
@@ -479,6 +499,7 @@
       "lives": 3,
       "max_ticks": 12900,
       "rollout_games": 150,
+      "spawn_points": 4,
       "legs": {
         "count": 2,
         "kinds": [

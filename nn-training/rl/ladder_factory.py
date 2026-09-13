@@ -125,6 +125,17 @@ def seed_rotate_for(count: int) -> int:
     return 600 if count <= 3 else 150
 
 
+def spawn_points_for(count: int, arena: dict[str, Any]) -> list[dict[str, int]]:
+    """出生点数（总纲 §5.3 / §4-I3 参数④）：**c01 = 单出生点**（单敌决斗——
+    出生点随机性在这级是纯噪声，会稀释"接敌-开火节奏-躲单弹"这一个学习目标）；
+    其余级沿用 arena 四角（c03+ 多出生点合围，ms F1 勘误：arena 是 4 点不是 3 点）。
+    """
+    pts = arena["enemy_spawns"]
+    if count <= 1:
+        return [pts[0]]
+    return list(pts)
+
+
 def legs_for(count: int) -> dict[str, Any]:
     """腿矩阵（hy X1 + D5）：攻坚级 c06/c07 3 腿；c01-c04 首腿 = bc（BC 优先写死）。"""
     first = "bc" if count <= 4 else "warm"
@@ -170,7 +181,7 @@ def emit_level(count: int, arena: dict[str, Any]) -> dict[str, Any]:
                 "forces": arena["forces"],
                 "count": count,
                 "player_spawn": arena["player_spawn"],
-                "enemy_spawns": arena["enemy_spawns"],
+                "enemy_spawns": spawn_points_for(count, arena),
             }
         ],
         "difficulty": arena["difficulty"],
@@ -236,6 +247,7 @@ def plan_doc(arena: dict[str, Any]) -> dict[str, Any]:
                 "lives": tier_lives(c),
                 "max_ticks": max_ticks_for(c),
                 "rollout_games": seed_rotate_for(c),
+                "spawn_points": len(spawn_points_for(c, arena)),
                 "legs": legs_for(c),
                 "dose": {
                     "damage_base": damage_base(c),
@@ -250,6 +262,11 @@ def plan_doc(arena: dict[str, Any]) -> dict[str, Any]:
         "version": 1,
         "name": "nn-ladder",
         "drop_profile": "modern (bonusEnemyEveryNSpawns=4 + score milestone; D9)",
+        # D9 落点 = 关卡未声明 rules ⇒ 走 difficulty='hard' 的默认 modern 规则集
+        # （src/config/rules.ts:230 bonusEnemyEveryNSpawns=4；classic 关才切
+        # fixedDropKillIndices）。**隐式依赖**：改难度或给关卡加 rules 覆盖即漂移，
+        # 起腿前用 `bun tools/sim/export-godai-bc.ts` 抽一局看 manifest/掉落确认。
+        "drop_profile_enforced_by": "difficulty=hard → rules.ts modern defaults（无显式 rules 键）",
         "geometry": {
             "source": "levels/arena4.jsonc",
             "grid": "empty arena, steel border only (D3)",

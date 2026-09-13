@@ -23,8 +23,8 @@ import numpy as np
 
 # Per-shard file names produced by the TS exporter.
 SHARD_FILES = {
-    "obs": "obs.npy",  # uint8  (N, 14, 26, 26)
-    "scalars": "scalars.npy",  # float32 (N, 19)
+    "obs": "obs.npy",  # uint8  (N, OBS_CHANNELS, BOARD, BOARD) — v3: (N, 16, 26, 26)
+    "scalars": "scalars.npy",  # float32 (N, SCALAR_DIM) — v3: (N, 30)
     "actions": "actions.npy",  # uint8  (N, 2)  [move, fire] (v2: item 头删除)
     "masks": "masks.npy",  # uint8  (N, 7) [move5, fire2], 1=valid
     "conditions": "conditions.npy",  # uint8 (N,) decision condition
@@ -57,6 +57,48 @@ def load_shard(shard_dir: str) -> dict[str, np.ndarray]:
     return out
 
 
+def verify_shard_schema(shard_dir: str, arrays: dict[str, np.ndarray]) -> None:
+    """语料身份校验（v3，obs spec §3.4-7）：形状 + shard manifest 指纹。
+
+    major bump 后旧语料**全部作废**（权重同理）。两道判据：
+      · 形状（最硬，无 manifest 也判）：obs 必须 (N, OBS_CHANNELS, BOARD, BOARD)、
+        scalars 必须 (N, SCALAR_DIM)；
+      · 指纹（manifest 有 `schemaFingerprint` 时判）：与当前 schema 常量不符即错。
+    manifest 缺指纹（v2 及更早产物）不豁免形状判据——形状不符同样 raise。
+    """
+    from schema import BOARD, OBS_CHANNELS, SCALAR_DIM, SCHEMA_FINGERPRINT
+
+    obs = arrays.get("obs")
+    if obs is not None and (obs.ndim != 4 or tuple(obs.shape[1:]) != (OBS_CHANNELS, BOARD, BOARD)):
+        raise ValueError(
+            f"[npyio] {shard_dir}: obs 形状 {tuple(obs.shape)} 与当前 schema 不符"
+            f"（期望 (N, {OBS_CHANNELS}, {BOARD}, {BOARD})）——该 shard 来自另一个"
+            f"schema major，语料已作废，请重新导出（major bump ⇒ 旧 shard 全废）"
+        )
+    sc = arrays.get("scalars")
+    if sc is not None and (sc.ndim != 2 or sc.shape[1] != SCALAR_DIM):
+        raise ValueError(
+            f"[npyio] {shard_dir}: scalars 形状 {tuple(sc.shape)} 与当前 schema 不符"
+            f"（期望 (N, {SCALAR_DIM})）——请重新导出该 shard"
+        )
+    mpath = os.path.join(shard_dir, MANIFEST_FILE)
+    if not os.path.exists(mpath):
+        return
+    try:
+        with open(mpath, encoding="utf-8") as f:
+            manifest = json.load(f)
+    except (OSError, ValueError):
+        return
+    if not isinstance(manifest, dict):
+        return
+    fp = manifest.get("schemaFingerprint")
+    if isinstance(fp, str) and fp and fp != SCHEMA_FINGERPRINT:
+        raise ValueError(
+            f"[npyio] {shard_dir}: manifest 指纹 {fp} != 当前 schema {SCHEMA_FINGERPRINT}"
+            "——该 shard 来自另一个 schema 版本，语料已作废，请重新导出"
+        )
+
+
 def scan_shards(data_dir: str) -> list[str]:
     """Find all shard directories under `data_dir` (each contains obs.npy)."""
     shards: list[str] = []
@@ -72,6 +114,11 @@ def load_dataset(data_dir: str) -> dict[str, np.ndarray]:
     P2-6d（2026-09-02）：额外产出 **"shard_ids"**（(N,) int64，每样本所属 shard
     索引）——让 dataset 层能做 **shard 级 train/val 切分**，杜绝"同局相邻帧跨集
     泄漏 → val 虚高"。旧调用方只读已知键，不受影响。
+
+    v3（obs-schema-v3.plan.md v4.0 §3.4-7）：逐个 shard 跑 **语料身份校验**
+    （`verify_shard_schema`）——v2 的 14ch/19sc shard 混进 v3 语料会静默错位成
+    一张「半张脸」的观测（major bump 全旧权重失效 ⇒ 同理旧语料全废），必须先
+    炸在加载处而不是等训练曲线发疯。
     """
     shards = scan_shards(data_dir)
     if not shards:
@@ -80,6 +127,7 @@ def load_dataset(data_dir: str) -> dict[str, np.ndarray]:
     opt_parts: dict[str, list[np.ndarray]] = {k: [] for k in OPTIONAL_FILES}
     for s in shards:
         d = load_shard(s)
+        verify_shard_schema(s, d)
         for k in SHARD_FILES:
             parts[k].append(d[k])
         for k in OPTIONAL_FILES:

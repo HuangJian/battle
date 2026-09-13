@@ -172,6 +172,9 @@ _FINGERPRINT_PARTS = [
     str(SCALAR_DIM),
     str(BOARD),
     ",".join(str(i) for i in SCALAR_X_INDICES),
+    # 标量**语义**序列（hy X4 / obs spec §3.4-7）：只钉维度会让「交换 s19/s20 含义」
+    # 这类漏同步指纹不变——30 个名字进 payload，TS 侧 SCALAR_NAMES 逐字对齐。
+    ",".join(name for _, name in SCALAR_LAYOUT),
     "|".join(str(v) for v in CH.values()),  # TS 侧逐元素 push → '|' 连接（勿改 ','）
     ",".join(POWERUP_ORDER),
     ",".join(str(b) for b in BULLET_SPEED_BUCKETS_PX),

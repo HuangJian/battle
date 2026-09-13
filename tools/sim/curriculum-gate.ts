@@ -14,7 +14,7 @@
  *   · c01/c02 行为探针：首杀 tick（遥测就位前 null）+ dmg/kill。
  *
  * 用法：
- *   bun tools/sim/ladder-gate.ts --level ladder-c04 \
+ *   bun tools/sim/curriculum-gate.ts --level ladder-c04 \
  *     --weight it30=nn-training/weights/.../it30.json --weight bc=<bc.json> \
  *     --out nn-training/ladder/reports/ladder-c04-it30 [--recall ladder-c03=<w>] \
  *     [--games 200] [--rounds 2]
@@ -77,12 +77,21 @@ export interface LegPair {
 }
 
 export interface GateVerdict {
-  verdict: 'graduate' | 'stay'
+  /**
+   * graduate = 过门（自动起下一级）；stay = 继续练；escalate = 卡门超阈值，
+   * 升报用户 + 训练侧杠杆清单逐项过（roadmap §5.7：卡门 >3 个门周期 ⇒ 升报）。
+   */
+  verdict: 'graduate' | 'stay' | 'escalate'
   reason: string
   pooledPassRate: number
   wilsonLB: number
   gate: number
+  /** 含本轮在内的连续未过门次数（graduate ⇒ 0）。 */
+  stayAttempts: number
 }
+
+/** 卡门升报阈值（roadmap §5.7）：连续 N 个门周期未过门 ⇒ escalate 人工介入。 */
+export const ESCALATE_AFTER_STAYS = 3
 
 /** Wilson 95% 下界（z=1.96）——比点估计保守的通过率区间下沿。 */
 export function wilsonLowerBound(passed: number, n: number, z = 1.96): number {
@@ -175,37 +184,44 @@ export function decideVerdict(
   timeoutFrac: number,
   gate = 0.8,
   minGames = 400,
+  priorStays = 0,
 ): GateVerdict {
   const lb = wilsonLowerBound(pooledPassed, pooledGames)
   const rate = pooledGames > 0 ? pooledPassed / pooledGames : 0
   // 哨兵：超时占比 >15% = 苟活信号（c4-margin 门线；口径已修 d17e9f0）。
-  if (timeoutFrac > 0.15) {
-    return {
-      verdict: 'stay',
-      reason: `哨兵红：超时占比 ${(timeoutFrac * 100).toFixed(1)}% > 15%（pooled ${(rate * 100).toFixed(1)}%）`,
-      pooledPassRate: rate,
-      wilsonLB: lb,
-      gate,
-    }
-  }
-  if (rate >= gate && pooledGames >= minGames) {
+  // 哨兵红**不毕业**（即使点估计达标），且同样计入门周期——否则可以靠苟活无限续命。
+  const sentinelRed = timeoutFrac > 0.15
+  const sentinelNote = sentinelRed
+    ? `哨兵红：超时占比 ${(timeoutFrac * 100).toFixed(1)}% > 15%，本轮不判毕业；`
+    : ''
+  const short =
+    rate < gate
+      ? `pooled ${(rate * 100).toFixed(1)}% < ${(gate * 100).toFixed(0)}%（Wilson LB ${(lb * 100).toFixed(1)}%）`
+      : `样本不足（${pooledGames} < ${minGames}，双轮各 200）`
+
+  if (!sentinelRed && rate >= gate && pooledGames >= minGames) {
     return {
       verdict: 'graduate',
       reason: `pooled ${pooledPassed}/${pooledGames} = ${(rate * 100).toFixed(1)}% ≥ ${gate * 100}%`,
       pooledPassRate: rate,
       wilsonLB: lb,
       gate,
+      stayAttempts: 0,
     }
   }
+  const stays = priorStays + 1
   return {
-    verdict: 'stay',
+    // 卡门 >3 个门周期 ⇒ escalate（roadmap §5.7）：不再盲跑第 4 个周期，
+    // 交人工按「先查观测信息 → 再查奖励 → 再查算法」清单处置。
+    verdict: stays >= ESCALATE_AFTER_STAYS ? 'escalate' : 'stay',
     reason:
-      rate < gate
-        ? `pooled ${(rate * 100).toFixed(1)}% < ${(gate * 100).toFixed(0)}%（Wilson LB ${(lb * 100).toFixed(1)}%）`
-        : `样本不足（${pooledGames} < ${minGames}，双轮各 200）`,
+      stays >= ESCALATE_AFTER_STAYS
+        ? `${sentinelNote}连续 ${stays} 个门周期未过门 ⇒ escalate（人工介入 / 训练侧杠杆清单）；${short}`
+        : `${sentinelNote}${short}`,
     pooledPassRate: rate,
     wilsonLB: lb,
     gate,
+    stayAttempts: stays,
   }
 }
 
@@ -334,11 +350,19 @@ export async function main(): Promise<void> {
     }
   }
 
+  // 卡门周期计数（escalate 判据）：从台账读上一轮，本轮 verdict 回写。
+  // 多写方共用同一 entry —— 只读 gateAttempts 一个字段，不整条覆盖。
+  const priorEntry = (loadLedger().levels as Record<string, unknown> | undefined)?.[level] as
+    | Record<string, unknown>
+    | undefined
+  const priorStays =
+    typeof priorEntry?.gateAttempts === 'number' ? (priorEntry.gateAttempts as number) : 0
+
   // 候选腿（第一个 --weight）= 毕业判定对象；其余腿与它做同种子 McNemar。
   const candidate = weights[0].label
   const pooledRows = perLabelRows[candidate] ?? []
   const stat = roundStat(pooledRows)
-  const verdict = decideVerdict(stat.passed, stat.games, stat.timeoutFrac)
+  const verdict = decideVerdict(stat.passed, stat.games, stat.timeoutFrac, 0.8, 400, priorStays)
 
   const mcnemar: Record<string, LegPair | null> = {}
   for (const w of weights.slice(1)) {
@@ -379,11 +403,27 @@ export async function main(): Promise<void> {
       wilsonLB: verdict.wilsonLB,
       report: join(outDir, 'report.json'),
     },
+    // escalate 计数：graduate 归零、stay/escalate 累加 ⇒ 下次 runner 能判卡门周期。
+    gateAttempts: verdict.stayAttempts,
+    // escalate 时同步置 stuck，控制台/人工一眼可见（Python CLI 亦可置位）。
+    ...(verdict.verdict === 'escalate'
+      ? { status: 'stuck', escalate_reason: verdict.reason }
+      : verdict.verdict === 'graduate'
+        ? { status: 'graduated' }
+        : {}),
   })
   console.log(
     `[ladder-gate] ${level} ${candidate}: ${verdict.verdict.toUpperCase()} — ${verdict.reason} ` +
       `(timeout ${(stat.timeoutFrac * 100).toFixed(1)}%, ticks p50 ${stat.ticksP50}/p90 ${stat.ticksP90}, dmg/kill ${stat.dmgPerKill ?? 'n/a'})`,
   )
+  if (verdict.verdict === 'escalate') {
+    // 人工处置清单（roadmap §5.7）：先查观测信息 → 再查奖励 → 再查算法；
+    // 永不减敌/放松形态/中途加命（D7/D12）。
+    console.log(
+      '[ladder-gate] ESCALATE：卡门超阈值，升报用户 —— 按「观测信息 → 奖励剂量 → 算法（λ/GAE/批量）」' +
+        '清单逐项过，并核对本轮报告的 hazard-by-k / 局长分布 / dmg-per-kill 三行。',
+    )
+  }
 }
 
 if (import.meta.main) void main()

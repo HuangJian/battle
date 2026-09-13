@@ -19,6 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from rl.log import log
 from rl.modes import get_backend
+from schema import BOARD, OBS_CHANNELS, SCALAR_DIM
 
 if TYPE_CHECKING:  # build_model 返回注解（future annotations 下不运行时求值）
     import torch
@@ -129,11 +130,14 @@ def build_model(
             for p_ in paths:
                 try:
                     arr = np.load(p_, mmap_mode="r")
-                    if arr.ndim == 4 and arr.shape[1] == 14 and arr.shape[0] >= 1:
+                    # v3（obs-schema-v3.plan.md v4.0）：通道数从 schema 常量判——
+                    # 写死 14 会让全部 v3 shard 被静默过滤，只剩合成样本 ⇒
+                    # trunk 校准量级失真（卡 A4 校准的真实 obs 来源丢失）。
+                    if arr.ndim == 4 and arr.shape[1] == OBS_CHANNELS and arr.shape[0] >= 1:
                         chunks.append(torch.from_numpy(np.ascontiguousarray(arr[:n])))
                 except Exception:
                     continue
-            synth = torch.zeros(3, 14, 26, 26, dtype=torch.uint8)
+            synth = torch.zeros(3, OBS_CHANNELS, BOARD, BOARD, dtype=torch.uint8)
             synth[1] = 255
             synth[2, :, ::2] = 255
             chunks.append(synth)
@@ -142,7 +146,7 @@ def build_model(
         def warm_start_normalize(model: PPOStudent, keep_value: bool = False) -> None:
             TRUNK = ("stem.", "blocks.", "fc.")
             sample = _sample_real_obs(32)
-            sc = torch.zeros(sample.shape[0], 19)
+            sc = torch.zeros(sample.shape[0], SCALAR_DIM)
 
             def _feat_max() -> float:
                 with torch.no_grad():

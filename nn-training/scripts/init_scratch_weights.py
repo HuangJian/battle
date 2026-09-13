@@ -37,6 +37,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from data.weights_io import save_weights_json
 from ppo.engine import build_ppo
+from schema import BOARD, OBS_CHANNELS, SCALAR_DIM  # v3：dummy 前向形状随 schema 常量
 
 TRUNK_SCALE = 0.1
 HEAD_SCALE = 0.01
@@ -74,8 +75,8 @@ def main() -> None:
     save_weights_json(model, args.out)
 
     # 自检（零 obs 前向）：logits 必须近均匀、value 必须与回报同量级。
-    obs = torch.zeros(1, 14, 26, 26, dtype=torch.uint8)
-    sc = torch.zeros(1, 19)
+    obs = torch.zeros(1, OBS_CHANNELS, BOARD, BOARD, dtype=torch.uint8)
+    sc = torch.zeros(1, SCALAR_DIM)
     with torch.no_grad():
         mv, fr, val = model(obs, sc)
     mmax = float(mv.abs().max())

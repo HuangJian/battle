@@ -13,10 +13,46 @@ import {
   OBS_CHANNELS,
   SCALAR_DIM,
   SCALAR_X_INDICES,
+  SCALAR_NAMES,
 } from '../../src/nn/obs-encoder'
 
 // 必须与 nn-training/schema.py::SCHEMA_FINGERPRINT 逐字相同（两边单测共锚）。
-const FINGERPRINT = 'ccf8bfab'
+const FINGERPRINT = '06142cb1'
+
+// 必须与 nn-training/schema.py::SCALAR_LAYOUT 的第二元逐字同序（双端共锚）。
+// 只钉维度挡不住「交换两个标量含义」——语义序列进指纹后这种漏同步才现形。
+const SCALAR_LAYOUT_NAMES: (typeof SCALAR_NAMES)[number][] = [
+  'slack',
+  'baseDeadline',
+  'lives',
+  'level',
+  'fireProgress',
+  'turnCooldownRemaining',
+  'ringCompleteness',
+  'enemiesOnField',
+  'spawnQueueRemaining',
+  'tier_none',
+  'tier_rookie',
+  'tier_soldier',
+  'tier_veteran',
+  'tier_commander',
+  'nearestEnemyDist',
+  'nearestEnemyRelX',
+  'nearestEnemyRelY',
+  'nearestBaseDist',
+  'nearestBaseRelX',
+  'playerHp',
+  'playerShield',
+  'freeze',
+  'stuck',
+  'boat',
+  'baseHp',
+  'fence',
+  'score',
+  'emp',
+  'iceVy',
+  'iceVx',
+]
 
 describe('SCHEMA_FINGERPRINT (obs v3 双端锚)', () => {
   it('TS 指纹 == Python schema.SCHEMA_FINGERPRINT（共享字面锚）', () => {
@@ -28,5 +64,10 @@ describe('SCHEMA_FINGERPRINT (obs v3 双端锚)', () => {
     expect(OBS_CHANNELS).toBe(16)
     expect(SCALAR_DIM).toBe(30)
     expect(SCALAR_X_INDICES).toEqual([15, 18, 29])
+  })
+
+  it('标量语义序列与 schema.py SCALAR_LAYOUT 逐字同序（指纹已含）', () => {
+    expect(SCALAR_NAMES.length).toBe(SCALAR_DIM)
+    expect([...SCALAR_NAMES]).toEqual(SCALAR_LAYOUT_NAMES)
   })
 })

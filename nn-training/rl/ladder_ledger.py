@@ -18,7 +18,9 @@
 CLI（runbook 消费）：
   python -m rl.ladder_ledger show [--level ladder-c04]
   python -m rl.ladder_ledger hypothesis --level ladder-c04 --text "wDmg=0 + wChip 0.03，预期 dmg/kill ↓"
-  python -m rl.ladder_ledger escalate --level ladder-c04 --reason "卡门 3 周期"
+  python -m rl.ladder_ledger escalate --level ladder-c04 --text "卡门 3 周期"
+  python -m rl.ladder_ledger graduate --level ladder-c04 --weights <w> [--ack]
+        （--ack 仅 tier 边界 c07/c14/c20 需要：缺 --ack 直接拒绝毕业 = D11 人工放行）
   python -m rl.ladder_ledger disk --level ladder-c04 --traj tmp/ladder-c04
 """
 
@@ -91,9 +93,19 @@ def main() -> None:
     ap.add_argument("--text", default="")
     ap.add_argument("--weights", default="")
     ap.add_argument("--traj", default="")
+    ap.add_argument(
+        "--ack",
+        action="store_true",
+        help="tier 边界（c07/c14/c20）毕业的人工放行位（D11 立案后由人置位）",
+    )
+    ap.add_argument(
+        "--ledger",
+        default=str(DEFAULT_LEDGER),
+        help="台账路径（默认 nn-training/ladder/LEDGER.jsonc；测试/演练用临时路径）",
+    )
     args = ap.parse_args()
 
-    led = LadderLedger()
+    led = LadderLedger(args.ledger)
     if args.cmd == "show":
         data = led.load()
         levels = data.get("levels", {})
@@ -110,16 +122,29 @@ def main() -> None:
         led.mark(args.level, hypothesis=args.text, status="ppo")
         print(f"[ladder-ledger] {args.level}: hypothesis 已登记")
     elif args.cmd == "escalate":
+        if not args.text:
+            raise SystemExit("escalate 需要 --text（卡门原因，供用户复盘）")
         led.mark(args.level, status="stuck", escalate_reason=args.text)
         print(f"[ladder-ledger] {args.level}: stuck（{args.text}）——上报用户")
     elif args.cmd == "graduate":
+        # D11 人工放行护栏：tier 边界（c07/c14/c20）**必须**显式 --ack 才能毕业。
+        # 旧实现按「level ∈ TIER_BOUNDARIES」自动置 True —— 恰好把唯一需要人工确认的
+        # 那三级自动放行了，护栏形同虚设（ms C2 自动晋级在此停的意义被抹掉）。
+        if args.level in TIER_BOUNDARIES and not args.ack:
+            raise SystemExit(
+                f"[ladder-ledger] {args.level} 是 tier 边界（D11 立案处）："
+                "毕业需人工放行 —— 确认 DECISIONS 已立案后重跑并加 --ack"
+            )
         led.mark(
             args.level,
             status="graduated",
             graduate_weights=args.weights,
-            tier_boundary_ack=args.level in TIER_BOUNDARIES,
+            tier_boundary_ack=bool(args.ack),
         )
-        print(f"[ladder-ledger] {args.level}: graduated（weights={args.weights or '见 lastGate'}）")
+        print(
+            f"[ladder-ledger] {args.level}: graduated（weights={args.weights or '见 lastGate'}"
+            f"{'，tier 边界已人工放行' if args.ack else ''}）"
+        )
     elif args.cmd == "disk":
         if not args.traj:
             raise SystemExit("disk 需要 --traj")

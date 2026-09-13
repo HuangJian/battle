@@ -5,13 +5,16 @@ validate_export.py — network-independent proof of the TS->Python npy contract.
 The Battle City exporter (src/nn/npy.ts) writes *raw* .npy (magic + v1/v2 header +
 C-order bytes). This script reads those files with a from-scratch parser (no numpy,
 no torch — pure stdlib) and asserts:
-  * obs            : (N,14,26,26) uint8
-  * scalars        : (N,24)      float32
-  * actions        : (N,3)       uint8   (move, fire, item)
-  * masks          : (N,10)      uint8   (move5, fire2, item3 — 0/1)
+  * obs            : (N,OBS_CHANNELS,BOARD,BOARD) uint8   (v3: 16,26,26)
+  * scalars        : (N,SCALAR_DIM)      float32          (v3: 30)
+  * actions        : (N,2)       uint8   (move, fire)
+  * masks          : (N,7)       uint8   (move5, fire2 — 0/1)
   * conditions     : (N,)        uint8   (0 turn / 1 fire / 2 item / 3 subsample)
 plus label-range / mask-consistency sanity. If this passes, numpy.load (and the
 trainer) will read the same bytes identically.
+
+形状一律从 `schema.py` 派生（obs-schema-v3.plan.md v4.0 §3.5-3）：14/19 是 v2
+遗留硬编码，v3 后会让本契约校验对正确产物报错。
 
 Usage:
   python validate_export.py <path-to-shards-root>
@@ -23,9 +26,13 @@ import re
 import struct
 import sys
 
+# v3：形状常量单一事实来源（nn-training/schema.py），本脚本 nn-training/scripts/ 下。
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from schema import BOARD, OBS_CHANNELS, SCALAR_DIM
+
 EXPECT = {
-    "obs.npy": ("<u1", (14, 26, 26)),
-    "scalars.npy": ("<f4", (19,)),
+    "obs.npy": ("<u1", (OBS_CHANNELS, BOARD, BOARD)),
+    "scalars.npy": ("<f4", (SCALAR_DIM,)),
     "actions.npy": ("<u1", (2,)),  # v2: [move, fire]，item 头删除
     "masks.npy": ("<u1", (7,)),  # v2: [move5, fire2]
     "conditions.npy": ("<u1", ()),
@@ -145,7 +152,7 @@ def main():
 
         # obs non-empty check: at least one non-zero cell per sample
         obs = arrays["obs.npy"]
-        L = 14 * 26 * 26
+        L = OBS_CHANNELS * BOARD * BOARD
         for i in range(N):
             if any(obs[i * L : i * L + L]):
                 obs_nonempty += 1

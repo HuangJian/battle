@@ -130,6 +130,19 @@ describe('decideVerdict（D4 单轨门）', () => {
     expect(v.verdict).toBe('stay')
     expect(v.reason).toContain('样本不足')
   })
+  it('连续 3 个门周期未过门 → escalate（roadmap §5.7 卡门升报）', () => {
+    const v = decideVerdict(300, 400, 0.05, 0.8, 400, 2)
+    expect(v.verdict).toBe('escalate')
+    expect(v.stayAttempts).toBe(3)
+    expect(v.reason).toContain('连续 3')
+  })
+  it('graduate ⇒ 卡门计数归零；stay ⇒ 累加', () => {
+    expect(decideVerdict(322, 400, 0.05, 0.8, 400, 5).stayAttempts).toBe(0)
+    expect(decideVerdict(300, 400, 0.05, 0.8, 400, 0).stayAttempts).toBe(1)
+  })
+  it('哨兵红（超时 >15%）也计入门周期，避免靠苟活无限续命', () => {
+    expect(decideVerdict(390, 400, 0.2, 0.8, 400, 2).verdict).toBe('escalate')
+  })
 })
 
 describe('I4 路径/权重规格（subprocess 接口契约）', () => {

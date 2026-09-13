@@ -1087,15 +1087,25 @@ def resolve_course(name_or_path: str) -> Path:
 def corpus_identity_fp(course: CourseConfig) -> str:
     """语料身份指纹（D14 语义版）：sha256(canonical(env+reward))。
 
-    覆盖 = 决定「一个样本是什么」的全部字段：mode / stages（解析后）/ difficulty /
-    max_ticks / seed_rotate / seeds / player / dodge / reward(formula+params+terminal+scheme)。
+    覆盖 = 决定「一个样本是什么」的全部字段：**obs 编码布局（schema major + 指纹）** /
+    mode / stages（解析后）/ difficulty / max_ticks / seed_rotate / seeds / player /
+    dodge / reward(formula+params+terminal+scheme)。
     **刻意排除** iters/max_hours/eval_*/out/traj/bc/optimizer/schedule 等预算、测量、
     路径与优化器键——这些改动不构成语料混入，mid-run 编辑课程不得触发 D14 拒收
     （DECISIONS §2026-09-13-level-extraction 的配置修改分类学）。哈希**解析后**的值：
     内联 stages 与 level 引用同形同指纹；关卡文件内的注释/格式变动不影响身份。
+
+    ⚠ schema 必须在内（2026-09-13 补，与 BC 侧 bc_corpus_identity_fp 同一坑）：
+    身份决定 D14 混训分流——漏掉 schema ⇒ v2(14ch) 与 v3(16ch) 语料被判为同一身份
+    ⇒ 允许混入同一训练（形状不同的 shard 拼一起）。远端结果缓存键虽含 runId（RL 侧
+    每次启动新 runId，续跑复用 runId 时同 BC 一样裸奔），但 D14 分流不看 runId，
+    只有身份本身含 schema 才能把跨 era 语料挡在**混入之前**（加载侧
+    data.npyio.verify_shard_schema 是最后一道，到那一步已经在崩了）。
     """
     import hashlib
     import json
+
+    from schema import OBS_SCHEMA_MAJOR, SCHEMA_FINGERPRINT
 
     stages = (
         [s.model_dump() for s in course.stages]
@@ -1103,6 +1113,9 @@ def corpus_identity_fp(course: CourseConfig) -> str:
         else course.stages
     )
     payload = {
+        # 编码布局：schema bump / 指纹变化 ⇒ 「一个样本是什么」已变，身份必须跟着变
+        "obs_schema_major": OBS_SCHEMA_MAJOR,
+        "obs_schema_fingerprint": SCHEMA_FINGERPRINT,
         "mode": course.mode,
         "stages": stages,
         "difficulty": course.difficulty,

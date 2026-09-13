@@ -33,6 +33,7 @@ if _ilu.find_spec("schema") is None:
     _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 
 from models.student import StudentNet
+from schema import BOARD, OBS_CHANNELS, SCALAR_DIM
 
 # 仓库根（models/ 上溯 3 层；2026-09-08 双 tmp 统一：相对 tmp/ 一律锚定仓库根 tmp/）
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -173,8 +174,8 @@ def main() -> None:
     m = IntentNet(h=args.h, d=args.d)
     n = sum(int(p.numel()) for p in m.parameters())
     print(f"IntentNet params: {n} (~{n / 1000:.1f}K)")
-    obs = torch.zeros(2, 14, 26, 26, dtype=torch.uint8)
-    sc = torch.zeros(2, 19)
+    obs = torch.zeros(2, OBS_CHANNELS, BOARD, BOARD, dtype=torch.uint8)
+    sc = torch.zeros(2, SCALAR_DIM)
     inj = torch.zeros(2, INJECT_DIM)
     i, e, a = m(obs, sc, inj)
     print("intent", tuple(i.shape), "enemy", tuple(e.shape), "anchor", tuple(a.shape))

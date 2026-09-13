@@ -106,6 +106,50 @@ const DIR_INDEX: Record<Direction, number> = { up: 0, down: 1, left: 2, right: 3
 // v3 (OBS_SCHEMA_MAJOR=3): 保留 15/18，新增 29（vx 冰面横向速度，s28 vy 不翻）。
 export const SCALAR_X_INDICES = [15, 18, 29]
 
+/**
+ * 标量名序列（**逐字镜像** nn-training/schema.py::SCALAR_LAYOUT 的第二元）。
+ *
+ * 进 SCHEMA_FINGERPRINT（hy X4 / obs spec §3.4-7）：只钉 SCALAR_DIM 挡不住「交换
+ * 两个标量含义」这种漏同步（维度不变、指纹不变、golden 前向仍绿，但语义错位）。
+ * 改任一端 ⇒ 指纹变 ⇒ tests/nn/schema-fingerprint.test.ts 与
+ * nn-training/tests/test_schema_fingerprint.py 双端同红。
+ */
+export const SCALAR_NAMES = [
+  'slack',
+  'baseDeadline',
+  'lives',
+  'level',
+  'fireProgress',
+  'turnCooldownRemaining',
+  'ringCompleteness',
+  'enemiesOnField',
+  'spawnQueueRemaining',
+  'tier_none',
+  'tier_rookie',
+  'tier_soldier',
+  'tier_veteran',
+  'tier_commander',
+  'nearestEnemyDist',
+  'nearestEnemyRelX',
+  'nearestEnemyRelY',
+  'nearestBaseDist',
+  'nearestBaseRelX',
+  'playerHp',
+  'playerShield',
+  'freeze',
+  'stuck',
+  'boat',
+  'baseHp',
+  'fence',
+  'score',
+  'emp',
+  'iceVy',
+  'iceVx',
+] as const
+if (SCALAR_NAMES.length !== SCALAR_DIM) {
+  throw new Error(`SCALAR_NAMES must have ${SCALAR_DIM} entries, got ${SCALAR_NAMES.length}`)
+}
+
 // ---- v3 ch11 弹速档（C10）：live bulletSpeed（px/tick）→ 4 序数档 ----
 // 真弹速源 = bulletSpeedCps 表（config/speed.ts baseBulletSpeedPxPerTick），
 // **不是** profile.projectileSpeed（规格初稿 {40,45,50,70} 前提的勘误——projectileSpeed
@@ -602,6 +646,7 @@ export const SCHEMA_FINGERPRINT = fnv1a(
     SCALAR_DIM,
     BOARD,
     SCALAR_X_INDICES.join(','),
+    SCALAR_NAMES.join(','), // 标量语义序列（schema.py SCALAR_LAYOUT 第二元同名同序）
     CH.terrainBrick,
     CH.terrainSteel,
     CH.terrainWater,

@@ -41,6 +41,7 @@
  */
 import { World } from '../../src/game/World'
 import { Simulation } from '../../src/game/Simulation'
+import { allEnemiesCleared } from '../../src/game/SimulationEffects'
 import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { STAGES } from '../../src/config/stages'
@@ -360,7 +361,11 @@ export function exportGame(
   }
 
   // ---- wins-only 过滤 ----
-  if (winsOnly && outcome !== 'stage_clear') return 'loss-skipped'
+  // 过关口径 = win ∪ cleared（用户 2026-09-12 裁定，同 export-rl-rollout.ts:731 /
+  // export-eval-game.ts:645）：歼灭全部敌人也算过关。**只认 stage_clear 会静默丢掉
+  // 「清场但没触发 stage_clear」的胜局**——语料白白变少，且在 count 小/有增援延迟的
+  // 关卡上丢的正是打得最干净的那批样本。
+  if (winsOnly && !(outcome === 'stage_clear' || allEnemiesCleared(world))) return 'loss-skipped'
 
   // ---- 终局打分 + reward/returns（telescoping：Σr ≡ REWARD_SCALE × gatedScore）----
   const baseAliveFinal = !world.tileMap.isBaseDestroyed()
