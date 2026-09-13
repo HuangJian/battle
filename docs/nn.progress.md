@@ -52,6 +52,13 @@ C 预算测量路径（iters/eval_*/out 等，随时可改）。
 - **纪律**：配额只住 `rl-config.json` 的 `courses` 块，**永不写 `curricula/*.jsonc`**（一改 `course_fp` 即触发 D14 熔断误判，plan C1）。
 - **门禁**：`bun run check` 2009 pass、`bun run build`、`make -C nn-training python-gate` 全绿。
 - **merge 复核（85e740d，origin/goal-nn 并入）**：冲突 3 文件（进度日志节号撞车 → 我方改 §36；consoleStatePath 归宿取 paths.ts；停机横幅取按课版 + 追加对方 loopComplete 完训横幅）；两处测试随合并 API 修正（consoleStatePath 导入源、buildExitMarker 补 course 参）。合并后全套门禁绿（check/python-gate/build），**tiny-a/b 双课 5 轮流程验证重跑 PASS**（隔离证据与首次一致：stage 互斥/course_fp/rotateSeed 独立/零错误）。**行为变化知悉**：对方分支把「跑满 iters」从进程退出改为**停车不断开**（等待控制台重启 / EvalBoard B 批认领）——锁在停车期保持持有，验证完需按课停止（S14 kill-previous 被 preflight 挡住时直接 SIGTERM 停车 PID，残留 stale 锁由下次启动的接管路径自动清理）。
+- **merge 复核 2（00e387d，关卡抽离 + corpus_fp 语义血缘并入）**：publish_job 的
+  `course_name`（归属短名）与 `corpus_fp`（D14 语义血缘）两 kwarg 并存，调用点双传；
+  进度日志节号二次撞车 → 对方节改 §37 置顶。合并后 check/python-gate/build 全绿；
+  **tiny-a/b 双课 5 轮重跑 PASS（24 秒）**，且新字段全链落位：shard manifest 同时携带
+  course_fp（761b29…/9e33ef…，与历次隔离证据同值）与 corpus_fp（4bd04f…/674cdf…，互异）
+  ——归属审计与语义熔断两套字段互不干扰。预算类课程编辑不再触发 D14 拒收（§37 分类学）
+  不改变本节纪律：机器配额仍只住 rl-config 的 courses 块。停车进程验证完即 SIGTERM 清理。
 
 ---
 
