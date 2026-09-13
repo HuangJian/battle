@@ -1,0 +1,179 @@
+{
+  "levels": {
+    "ladder-c01": {
+      "teacherWR": 0.69,
+      "teacherProbe": {
+        "date": "2026-09-13T14:37:19.131Z",
+        "games": 200,
+        "wins": 138,
+        "cleared": 138,
+        "seeds": "860001-860200",
+        "source": "god-ai eval-course-ckpt",
+        "outcomes": {
+          "stage_clear": 138,
+          "max_ticks": 61,
+          "gameover": 1
+        },
+        "score": {
+          "mean": 0.733,
+          "p50": 0.976,
+          "p90": 0.978,
+          "std": 0.365,
+          "var": 0.133,
+          "min": 0.086,
+          "max": 0.98
+        }
+      }
+    },
+    "ladder-c02": {
+      "teacherWR": 0.83,
+      "teacherProbe": {
+        "date": "2026-09-13T14:37:19.131Z",
+        "games": 200,
+        "wins": 166,
+        "cleared": 166,
+        "seeds": "860001-860200",
+        "source": "god-ai eval-course-ckpt",
+        "outcomes": {
+          "gameover": 32,
+          "stage_clear": 165,
+          "max_ticks": 3
+        },
+        "score": {
+          "mean": 0.833,
+          "p50": 0.98,
+          "p90": 0.982,
+          "std": 0.323,
+          "var": 0.104,
+          "min": 0.086,
+          "max": 0.988
+        }
+      }
+    },
+    "ladder-c03": {
+      "teacherWR": 0.79,
+      "teacherProbe": {
+        "date": "2026-09-13T14:37:19.131Z",
+        "games": 200,
+        "wins": 158,
+        "cleared": 158,
+        "seeds": "860001-860200",
+        "source": "god-ai eval-course-ckpt",
+        "outcomes": {
+          "stage_clear": 157,
+          "gameover": 43
+        },
+        "score": {
+          "mean": 0.801,
+          "p50": 0.98,
+          "p90": 0.983,
+          "std": 0.346,
+          "var": 0.12,
+          "min": 0.086,
+          "max": 0.988
+        }
+      }
+    },
+    "ladder-c04": {
+      "teacherWR": 0.635,
+      "teacherProbe": {
+        "date": "2026-09-13T14:37:19.131Z",
+        "games": 200,
+        "wins": 127,
+        "cleared": 127,
+        "seeds": "860001-860200",
+        "source": "god-ai eval-course-ckpt",
+        "outcomes": {
+          "gameover": 72,
+          "stage_clear": 127,
+          "max_ticks": 1
+        },
+        "score": {
+          "mean": 0.679,
+          "p50": 0.978,
+          "p90": 0.982,
+          "std": 0.398,
+          "var": 0.159,
+          "min": 0.086,
+          "max": 0.993
+        }
+      }
+    },
+    "ladder-c05": {
+      "teacherWR": 0.48,
+      "teacherProbe": {
+        "date": "2026-09-13T14:37:19.131Z",
+        "games": 200,
+        "wins": 96,
+        "cleared": 96,
+        "seeds": "860001-860200",
+        "source": "god-ai eval-course-ckpt",
+        "outcomes": {
+          "gameover": 103,
+          "stage_clear": 96,
+          "max_ticks": 1
+        },
+        "score": {
+          "mean": 0.553,
+          "p50": 0.257,
+          "p90": 0.982,
+          "std": 0.413,
+          "var": 0.171,
+          "min": 0.086,
+          "max": 0.992
+        }
+      }
+    },
+    "ladder-c06": {
+      "teacherWR": 0.435,
+      "teacherProbe": {
+        "date": "2026-09-13T14:37:19.131Z",
+        "games": 200,
+        "wins": 87,
+        "cleared": 87,
+        "seeds": "860001-860200",
+        "source": "god-ai eval-course-ckpt",
+        "outcomes": {
+          "gameover": 112,
+          "stage_clear": 87,
+          "max_ticks": 1
+        },
+        "score": {
+          "mean": 0.515,
+          "p50": 0.229,
+          "p90": 0.986,
+          "std": 0.412,
+          "var": 0.17,
+          "min": 0.086,
+          "max": 0.993
+        }
+      }
+    },
+    "ladder-c07": {
+      "teacherWR": 0.435,
+      "teacherProbe": {
+        "date": "2026-09-13T14:37:19.131Z",
+        "games": 200,
+        "wins": 87,
+        "cleared": 87,
+        "seeds": "860001-860200",
+        "source": "god-ai eval-course-ckpt",
+        "outcomes": {
+          "stage_clear": 87,
+          "gameover": 113
+        },
+        "score": {
+          "mean": 0.509,
+          "p50": 0.209,
+          "p90": 0.982,
+          "std": 0.416,
+          "var": 0.173,
+          "min": 0.086,
+          "max": 0.994
+        }
+      }
+    }
+  },
+  "version": 1,
+  "updated_at": "2026-09-13T14:37:32.719Z"
+}

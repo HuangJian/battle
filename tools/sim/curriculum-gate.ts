@@ -54,6 +54,7 @@ export interface GateRow {
   playerDamageTaken: number
   playerShots: number
   powerUpsCollected: number
+  score?: number
   [k: string]: unknown
 }
 
@@ -208,13 +209,17 @@ export function decideVerdict(
   }
 }
 
-/** 跑一轮 eval-course-ckpt（多 weight 同 seed 配对），返回 rows。 */
+/** 跑一轮 eval-course-ckpt（多 weight 同 seed 配对），返回 rows。
+ *
+ *  policy='god' 时不传 --weights（教师探针：免权重 headless God 扫描）。
+ */
 export function runRound(
   level: string,
   weights: Array<{ label: string; path: string }>,
   seed0: number,
   games: number,
   workers: number,
+  policy: 'nn' | 'god' = 'nn',
 ): GateRow[] {
   const args = [
     'tools/sim/eval-course-ckpt.ts',
@@ -226,6 +231,8 @@ export function runRound(
     String(seed0),
     '--workers',
     String(workers),
+    '--policy',
+    policy,
   ]
   for (const w of weights) args.push('--weights', `${w.label}=${w.path}`)
   const proc = Bun.spawnSync(['bun', ...args], { cwd: REPO_ROOT, stdout: 'pipe', stderr: 'pipe' })
@@ -266,6 +273,9 @@ export function upsertLedgerEntry(
   const entry = (levels[level] as Record<string, unknown>) ?? {}
   levels[level] = { ...entry, ...patch }
   ledger.levels = levels
+  // 与 Python 侧 rl/ladder_ledger.py 同形（version/updated_at），控制台读 updated_at。
+  ledger.version = ledger.version ?? 1
+  ledger.updated_at = new Date().toISOString()
   saveLedger(ledger, ledgerPath)
 }
 
