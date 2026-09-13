@@ -40,6 +40,7 @@ from remote.protocol import (
     RetryableError,
     coef_active,
     decode_opt_tar,
+    decode_weights_json,
     encode_opt_tar,
     encode_weights_json,
     job_seed,
@@ -412,6 +413,121 @@ def d14_corpus_match(job_course_fp: str, job_corpus_fp: str, shard_manifest: dic
     return str(shard_manifest.get("course_fp", "")) == job_course_fp
 
 
+def _bc_fetch_resume(
+    base_url: str,
+    token: str,
+    jid: str,
+    *,
+    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+) -> tuple[int, bytes] | None:
+    """GET /jobs/{id}/resume → (epoch, weights_bytes) | None（404 = 全新训练）。
+
+    网络错误/5xx → RetryableError（release 后重领再查——resume 未知就开训可能
+    白扔已有进度，一致性优先）；4xx 其它 = 确定性拒收。"""
+    last = ""
+    for attempt in range(1, 4):
+        try:
+            status, body = _request(base_url, token, f"/jobs/{jid}/resume", timeout=30.0)
+        except Exception as e:
+            status, body = None, repr(e).encode()
+        if status == 200:
+            try:
+                d = json.loads(body.decode("utf-8"))
+                return int(d["epoch"]), decode_weights_json(str(d["weights"]))
+            except (ValueError, KeyError, TypeError) as e:
+                raise ProtocolError(f"bc resume 体非法: {e}") from e
+        if status == 404:
+            return None
+        last = f"HTTP {status}" if status is not None else repr(body.decode("utf-8", "replace")[:120])
+        if attempt < 3:
+            log(f"bc resume 查询瞬时失败({last})——退避重试 {attempt}/3")
+            time.sleep(min(2**attempt, 8))
+    raise RetryableError(f"bc resume 查询 3 次仍失败: {last}")
+
+
+def _bc_local_resume_dir(work_dir: Path) -> Path:
+    """worker 本地 resume 存储（push 模式无 hub 时的持久层；pull 模式作缓存）。
+    ⚠ 独立于 job_dir——job_dir 被重领清场，resume 必须在它外面才能活过重领。"""
+    d = Path(work_dir) / "bc-resume"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _bc_store_local_resume(work_dir: Path, jid: str, body: dict) -> None:
+    """本地 resume 原子覆盖写 + 目录收敛（保留最近 2 个 job 的 resume）。"""
+    import os as _os
+
+    d = _bc_local_resume_dir(work_dir)
+    tmp = d / f"{jid}.json.tmp"
+    tmp.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+    _os.replace(tmp, d / f"{jid}.json")
+    files = sorted(
+        (f for f in d.glob("*.json") if not f.name.endswith(".tmp")),
+        key=lambda f: f.stat().st_mtime,
+        reverse=True,
+    )
+    for stale in files[2:]:
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+
+
+def _bc_load_local_resume(work_dir: Path, jid: str) -> tuple[int, bytes] | None:
+    p = _bc_local_resume_dir(work_dir) / f"{jid}.json"
+    if not p.exists():
+        return None
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+        return int(d["epoch"]), decode_weights_json(str(d["weights"]))
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        print(f"[{time.strftime('%H:%M:%S')}] [worker] bc local resume 损坏（忽略，全新训练）: {e}", flush=True)
+        return None
+
+
+def _bc_post_epoch(
+    base_url: str,
+    token: str,
+    jid: str,
+    body: dict,
+    lease_token: str,
+    *,
+    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+) -> None:
+    """POST /jobs/{id}/epoch（每 epoch 权重+指标回传；租约校验在 hub 侧）。
+
+    best-effort：2 次退避重试后仍失败只 WARN——resume 停在最后成功 epoch，
+    下个 epoch 自带重试；绝不因回传失败打断训练。"""
+    data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    last = ""
+    for attempt in range(1, 3):
+        try:
+            status, resp = _request(
+                base_url,
+                token,
+                f"/jobs/{jid}/epoch",
+                timeout=60.0,
+                data=data,
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    **({"X-Lease-Token": lease_token} if lease_token else {}),
+                },
+            )
+        except Exception as e:
+            status, resp = None, repr(e).encode()
+        if status in (200, 201):
+            return
+        last = (
+            f"HTTP {status}"
+            if status is not None
+            else repr(resp.decode("utf-8", "replace")[:120])
+        )
+        if attempt < 2:
+            time.sleep(2)
+    log(f"WARN: epoch {body.get('epoch')} 回传失败({last})——resume 停留在上一成功 epoch")
+
+
 def _bc_device(dev_str: str) -> str:
     """BC 任务的设备透传（2026-09-13 多卡：train/bc.py 自带 cuda-dp 语义与
     单卡/无卡响亮退化——worker 不再代为砍成单卡）；tpu/xla 确定性拒绝
@@ -432,11 +548,17 @@ def _run_bc_job(
     device: str,
     torch_threads: int,
     echo: bool,
+    base_url: str = "",
+    token: str = "",
+    lease_token: str = "",
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
 ) -> dict:
-    """云端 BC job（plan/bc-cloud-integration.plan.md §3）：
-    D14 语料血缘校验 →（--echo 冒烟回显）→ 复用 `train/bc.py::train` 训练 →
-    BC 权重（版本化归档字节）+ metrics 回传。torch 延迟到真训练才 import。
+    """云端 BC job（plan/bc-cloud-integration.plan.md §3；每 epoch 回传 2026-09-13）：
+    D14 语料血缘校验 →（--echo 冒烟回显）→ **resume 接续**（hub bc-resume 优先，
+    本地 bc-resume/ 兜底——中断重领同 job 从最后完成的 epoch 接着训，绝不从头重训）
+    → 复用 `train/bc.py::train` 训练（on_epoch 回调每 epoch 回传权重+指标：hub
+    POST /jobs/{id}/epoch 租约校验防旧 worker 覆盖新 resume + 本地原子覆盖）→
+    BC 权重 + metrics 回传。
 
     语料 = payload 解包出的 npy shard 目录（obs/scalars/actions/masks/conditions/
     returns + manifest），bc.py 的 scan_shards 对 job_dir 递归扫描即全部装载。
@@ -490,62 +612,112 @@ def _run_bc_job(
         torch.set_num_threads(torch_threads)
     from types import SimpleNamespace
 
+    from data.weights_io import save_weights_json
     from train.bc import train as bc_train
 
     # per-job 确定性种子（D5 同式）：bc.train 内部播种 torch/numpy/random
     seed_hex = job_seed(manifest["runId"], int(manifest["it"]), manifest["init_weights_fp"])
     dev = _bc_device(device)
     out_path = job_dir / "bc-weights.json"
-    ns = SimpleNamespace(
-        data_dir=str(job_dir),
-        arch=str(manifest["arch"]),
-        out=str(out_path),
-        notes=f"bc-job {jid} course={manifest.get('course_name', '')}",
-        resume=None,
-        epoch_offset=0,
-        ckpt_every=int(manifest.get("ckpt_every", 0) or 0),
-        checkpoint=None,
-        epochs=int(manifest["epochs"]),
-        batch=int(manifest["mb"]),
-        lr=float(manifest["lr"]),
-        val_split=float(manifest.get("val_split", 0.1)),
-        mirror_p=float(manifest.get("mirror_p", 0.5)),
-        seed=int(seed_hex[:8], 16),
-        num_workers=0,
-        device=dev,
-        value_coef=float(manifest.get("value_coef", 0.0) or 0.0),
-    )
-    log(
-        f"job {jid}: BC start arch={ns.arch} epochs={ns.epochs} batch={ns.batch} "
-        f"lr={ns.lr} device={dev} shards={len(shard_dirs)}"
-    )
-    metrics = bc_train(ns)
-    bc_sec = round(time.time() - t0, 1)
-    hist = metrics.get("history", {})
-    sizes = metrics.get("sizes", {})
-    log(
-        f"job {jid}: BC done in {bc_sec}s best_val={metrics.get('best_val_loss')} "
-        f"train={sizes.get('train')} val={sizes.get('val')}"
-    )
+    total_epochs = int(manifest["epochs"])
 
-    # ---- 产物：weights_json = 版本化归档字节（含 meta/history；云端不落 opt tar——
-    # BC v1 不跨轮续训，Adam 动量无往返价值）----
-    wfile = Path(str(metrics["out"]))
-    result = {
-        "job_id": jid,
-        "data_fp": manifest["data_fp"],
-        "init_weights_fp": manifest["init_weights_fp"],
-        "weights_json": encode_weights_json(wfile.read_bytes()),
-        "opt_tar_b64": "",
-        "metrics": {
-            "epochs": int(ns.epochs),
+    # ---- resume 接续：hub 优先（跨会话/跨 worker 持久），本地 bc-resume/ 兜底 ----
+    resume: tuple[int, bytes] | None = None
+    if base_url:
+        resume = _bc_fetch_resume(base_url, token, jid, log=log)
+    if resume is None:
+        resume = _bc_load_local_resume(job_dir.parent, jid)
+    resume_epoch, resume_weights = resume if resume else (0, b"")
+    if resume_epoch:
+        log(f"job {jid}: resume 接续——从 epoch {resume_epoch} 继续（共 {total_epochs}）")
+
+    # 每 epoch 回传回调：本地原子覆盖 + hub POST（均 best-effort——失败只 WARN，
+    # resume 停在最后一次成功回传的 epoch，下个 epoch 重试）。
+    def _on_epoch(gepoch: int, raw_model: Any, m: dict) -> None:
+        tmp = job_dir / "bc-epoch-tmp.json"
+        save_weights_json(raw_model, str(tmp), extra_meta={"epoch": gepoch, "ckpt": True})
+        body = {
+            "epoch": int(gepoch),
+            "weights": encode_weights_json(tmp.read_bytes()),
+            "metrics": dict(m),
+        }
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        _bc_store_local_resume(job_dir.parent, jid, body)
+        if base_url:
+            _bc_post_epoch(base_url, token, jid, body, lease_token, log=log)
+
+    if resume_epoch >= total_epochs > 0:
+        # 上轮已完成全部 epoch、只差最终回传（epoch POST 成功但 result 丢失）：
+        # resume 权重即终态——零重训直接产出。
+        log(f"job {jid}: resume 已达 {resume_epoch}/{total_epochs} —— 零重训直接回传终态")
+        wj_bytes = resume_weights
+        result_metrics: dict[str, Any] = {
+            "epochs": total_epochs,
+            "train_samples": 0,
+            "val_samples": 0,
+            "best_val_loss": 0.0,
+            "resumed_complete": True,
+        }
+    else:
+        ns = SimpleNamespace(
+            data_dir=str(job_dir),
+            arch=str(manifest["arch"]),
+            out=str(out_path),
+            notes=f"bc-job {jid} course={manifest.get('course_name', '')}",
+            resume=None,
+            epoch_offset=0,
+            ckpt_every=0,  # 云端持久化走 on_epoch 回传（job_dir 重领即清场，盘上 ckpt 无意义）
+            checkpoint=None,
+            epochs=total_epochs - resume_epoch,
+            batch=int(manifest["mb"]),
+            lr=float(manifest["lr"]),
+            val_split=float(manifest.get("val_split", 0.1)),
+            mirror_p=float(manifest.get("mirror_p", 0.5)),
+            seed=int(seed_hex[:8], 16),
+            num_workers=0,
+            device=dev,
+            value_coef=float(manifest.get("value_coef", 0.0) or 0.0),
+            on_epoch=_on_epoch,
+        )
+        if resume_epoch:
+            resume_in = job_dir / "bc-resume-in.json"
+            resume_in.write_bytes(resume_weights)
+            ns.resume = str(resume_in)
+            ns.epoch_offset = resume_epoch
+        log(
+            f"job {jid}: BC start arch={ns.arch} epochs={ns.epochs} batch={ns.batch} "
+            f"lr={ns.lr} device={dev} shards={len(shard_dirs)}"
+            + (f" resume@{resume_epoch}" if resume_epoch else "")
+        )
+        metrics = bc_train(ns)
+        hist = metrics.get("history", {})
+        sizes = metrics.get("sizes", {})
+        result_metrics = {
+            "epochs": total_epochs,
             "train_samples": int(sizes.get("train", 0) or 0),
             "val_samples": int(sizes.get("val", 0) or 0),
             "best_val_loss": float(metrics.get("best_val_loss", 0.0) or 0.0),
             "move_acc": float(hist.get("move_acc", [0.0])[-1]) if hist.get("move_acc") else 0.0,
             "fire_acc": float(hist.get("fire_acc", [0.0])[-1]) if hist.get("fire_acc") else 0.0,
             "params": int(metrics.get("params", 0) or 0),
-        },
+        }
+        if resume_epoch:
+            result_metrics["resumed_from"] = resume_epoch
+        wj_bytes = Path(str(metrics["out"])).read_bytes()
+
+    bc_sec = round(time.time() - t0, 1)
+    if "metrics" in dir():
+        pass
+    result = {
+        "job_id": jid,
+        "data_fp": manifest["data_fp"],
+        "init_weights_fp": manifest["init_weights_fp"],
+        "weights_json": encode_weights_json(wj_bytes),
+        "opt_tar_b64": "",
+        "metrics": result_metrics,
         "commit_echo": manifest["commit"],
         "bc_sec": bc_sec,
     }
@@ -567,6 +739,7 @@ def run_job(
     echo: bool = False,
     preloaded: dict | None = None,
     code_cache_dir: Path | None = None,
+    lease_token: str = "",
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
 ) -> dict:
     """执行单个 job：下载 → 校验 → PPO → 产出 weights_json + opt tar → POST。
@@ -681,6 +854,9 @@ def run_job(
             device=device,
             torch_threads=torch_threads,
             echo=echo,
+            base_url=base_url,
+            token=token,
+            lease_token=lease_token,
             log=log,
         )
 
@@ -1208,6 +1384,7 @@ def worker_loop(
                 torch_threads=torch_threads,
                 echo=echo,
                 code_cache_dir=shared_code_cache if multi else None,
+                lease_token=lease_token,
                 log=log,
             )
             post_result(base_url, token, jid, result, lease_token=lease_token)

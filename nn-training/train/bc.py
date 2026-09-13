@@ -373,11 +373,26 @@ def train(args) -> dict:
         if ckpt_every > 0 and epoch % ckpt_every == 0:
             ckpt_path = f"{args.out}.ckpt.{gepoch}"
             save_weights_json(
-                model,
+                raw_model,
                 ckpt_path,
                 extra_meta={"epoch": gepoch, "best_val_loss": round(best_val, 4), "ckpt": True},
             )
             print(f"[train] checkpoint epoch {gepoch}/{epoch_total} -> {ckpt_path}")
+        # Per-epoch hook（BC 云端回传 2026-09-13）：worker/run_bc 以回调持久化/回传
+        # 每 epoch 权重与指标——中断接续训练的落点。传 raw_model（裸键 state_dict）。
+        on_epoch = getattr(args, "on_epoch", None)
+        if on_epoch is not None:
+            on_epoch(
+                gepoch,
+                raw_model,
+                {
+                    "train_loss": round(train_loss, 4),
+                    "val_loss": round(val_loss, 4),
+                    "move_acc": round(ma, 4),
+                    "fire_acc": round(fa, 4),
+                    "lr": float(opt.param_groups[0]["lr"]),
+                },
+            )
 
     # Restore best on CPU (weights export/registry must be bitwise-stable
     # regardless of training device).
@@ -388,7 +403,8 @@ def train(args) -> dict:
     meta = {
         "trained_at": trained_at,
         "schema_major": OBS_SCHEMA_MAJOR,
-        "args": vars(args),
+        # on_epoch 回调不可序列化（worker/run_bc 经 SimpleNamespace 注入）——排除出 meta
+        "args": {k: v for k, v in vars(args).items() if k != "on_epoch"},
         "sizes": sizes,
         "best_val_loss": round(float(best_val), 4),
         "history": history,

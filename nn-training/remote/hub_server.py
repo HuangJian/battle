@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 import urllib.parse
@@ -257,6 +258,67 @@ class _JobStore:
             # weights_json / opt_tar 以 base64 存于 result.json（< 数 MB，可接受）
             return True
 
+    # ---- BC 每 epoch 回传（2026-09-13，plan/bc-cloud-integration.plan.md）----
+    #: 单文件覆盖存最新 resume（磁盘有界：每 job 恒 1 份权重，~0.5MB）；指标追加 jsonl。
+    BC_RESUME_NAME = "bc-resume.json"
+    BC_METRICS_NAME = "bc-metrics.jsonl"
+    #: epoch POST 体上限（weights ~0.5MB b64 后 ~0.7MB；4MB 已极宽裕）
+    BC_EPOCH_BODY_MAX = 4 * 1024 * 1024
+
+    def store_bc_epoch(self, job_id: str, body: dict) -> bool:
+        """BC epoch 回传落盘：bc-resume.json（单文件原子覆盖 = 最新 epoch 权重）+
+        bc-metrics.jsonl（追加一行指标）。返回 False = 体非法。调用方已验租约。"""
+        with self._lock:
+            epoch = body.get("epoch")
+            if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 1:
+                return False
+            if not isinstance(body.get("weights"), str) or not body["weights"]:
+                return False
+            jd = self._job_dir(job_id)
+            jd.mkdir(parents=True, exist_ok=True)
+            # 原子覆盖：tmp + replace——中断的 POST 不留半截 resume
+            tmp = jd / (self.BC_RESUME_NAME + ".tmp")
+            tmp.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, jd / self.BC_RESUME_NAME)
+            metrics = body.get("metrics")
+            if isinstance(metrics, dict):
+                row = {"epoch": epoch, **metrics, "ts": self._now()}
+                with open(jd / self.BC_METRICS_NAME, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            return True
+
+    def get_bc_resume(self, job_id: str) -> dict | None:
+        p = self._job_dir(job_id) / self.BC_RESUME_NAME
+        if not p.exists():
+            return None
+        try:
+            with open(p, encoding="utf-8") as f:
+                loaded = json.load(f)
+                return loaded if isinstance(loaded, dict) else None
+        except (OSError, ValueError):
+            return None
+
+    def get_bc_metrics(self, job_id: str) -> list[dict]:
+        p = self._job_dir(job_id) / self.BC_METRICS_NAME
+        if not p.exists():
+            return []
+        out: list[dict] = []
+        try:
+            with open(p, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        e = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(e, dict):
+                        out.append(e)
+        except OSError:
+            return []
+        return out
+
     def mark_completed(self, job_id: str) -> None:
         """训练主循环验收落位后写 job_completed 账本事件（§3.1）。幂等。"""
         with self._lock:
@@ -383,6 +445,10 @@ class HubHandler(BaseHTTPRequestHandler):
                 self._get_status()
             elif path.startswith("/jobs/") and path.endswith("/result"):
                 self._get_result()
+            elif path.startswith("/jobs/") and path.endswith("/resume"):
+                self._get_bc_resume()
+            elif path.startswith("/jobs/") and path.endswith("/bc-metrics"):
+                self._get_bc_metrics()
             else:
                 self._json({"error": "not found"}, 404)
         except (ProtocolError, ValueError) as e:
@@ -400,6 +466,8 @@ class HubHandler(BaseHTTPRequestHandler):
                 self._post_release()
             elif path.startswith("/jobs/") and path.endswith("/result"):
                 self._post_result()
+            elif path.startswith("/jobs/") and path.endswith("/epoch"):
+                self._post_bc_epoch()
             else:
                 self._json({"error": "not found"}, 404)
         except (ProtocolError, ValueError) as e:
@@ -608,6 +676,64 @@ class HubHandler(BaseHTTPRequestHandler):
             self._json({"error": "result already stored (duplicate write-back)"}, 409)
             return
         self._json({"job_id": jid, "status": "accepted"})
+
+    # ---- POST /jobs/{id}/epoch（BC 每 epoch 回传：权重 resume + 指标行，2026-09-13）----
+    def _post_bc_epoch(self) -> None:
+        if not self._auth_ok():
+            return
+        jid = self._job_id()
+        if jid is None or not (self.store._job_dir(jid) / "manifest.json").exists():
+            self._json({"error": "not found"}, 404)
+            return
+        try:
+            raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        except Exception as e:
+            self._json({"error": f"read body failed: {e}"}, 400)
+            return
+        if len(raw) > self.store.BC_EPOCH_BODY_MAX:
+            self._json({"error": "epoch body too large"}, 400)
+            return
+        try:
+            body = json.loads(raw.decode("utf-8"))
+        except ValueError as e:
+            self._json({"error": f"bad json: {e}"}, 400)
+            return
+        # 租约口径与 result 相同：活租约须持有人（防被顶掉的旧 worker 用旧 epoch
+        # 覆盖新 resume）；无租约（过期/释放/重启后）照收——resume 是幂等覆盖存最新。
+        lease_token = self.headers.get("X-Lease-Token", "") or self.headers.get(
+            "lease-token", ""
+        )
+        if not self.store.result_token_ok(jid, lease_token):
+            self._json({"error": "lease mismatch — 非本 job 租约持有人"}, 403)
+            return
+        if not self.store.store_bc_epoch(jid, body):
+            self._json({"error": "invalid epoch body"}, 400)
+            return
+        self._json({"job_id": jid, "status": "accepted"})
+
+    # ---- GET /jobs/{id}/resume（最新 epoch 权重——worker 重领时接续训练）----
+    def _get_bc_resume(self) -> None:
+        if not self._auth_ok():
+            return
+        jid = self._job_id()
+        if jid is None:
+            self._json({"error": "not found"}, 404)
+            return
+        r = self.store.get_bc_resume(jid)
+        if r is None:
+            self._json({"error": "no resume checkpoint"}, 404)
+            return
+        self._json(r)
+
+    # ---- GET /jobs/{id}/bc-metrics（训练机/run_bc 轮询每 epoch 指标行）----
+    def _get_bc_metrics(self) -> None:
+        if not self._auth_ok():
+            return
+        jid = self._job_id()
+        if jid is None:
+            self._json({"error": "not found"}, 404)
+            return
+        self._json({"job_id": jid, "rows": self.store.get_bc_metrics(jid)})
 
 
 def make_server(

@@ -36,6 +36,15 @@
     "ckpt_every": 10,
   },
 
+  // 每 10 epoch 在 arena4 + arena6 上各 10 局干净评估（策略 = 被评 BC 权重），
+  // 指标对齐 RL eval 口径（win_rate/kills_mean/phits_mean/pickup_mean/timeout_frac），
+  // 结果进账本 bc_eval 事件 → 控制台分图展示。评估地图与训练语料 level 互不约束。
+  "eval": {
+    "every_epochs": 10,
+    "games_per_stage": 10,
+    "levels": ["arena4", "arena6"],
+  },
+
   "iters": 1,
   "workers": 8,
   "out": "tmp/bc-c4/weights.json",

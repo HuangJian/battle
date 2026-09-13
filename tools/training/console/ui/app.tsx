@@ -22,6 +22,7 @@ import { MetricsTable } from './panels/MetricsTable'
 import { NodeStats } from './panels/NodeStats'
 import { LogNavCard } from './panels/LogNavCard'
 import { TrainLaunchModal } from './panels/TrainLaunchModal'
+import { BcPanel } from './panels/BcPanel'
 import { EvalSummary } from './panels/EvalSummary'
 import { MultiCourseOverview } from './panels/MultiCourseOverview'
 import {
@@ -622,6 +623,10 @@ export function App({ initial }: AppProps) {
               : '/eval'
           }}
         />
+      </PanelErrorBoundary>
+      {/* ── BC epoch 指标 + 多地图 eval（*.bc.jsonc 课程训练时自动出现数据）── */}
+      <PanelErrorBoundary>
+        <BcPanel course={viewCourse} enabled={documentVisible} />
       </PanelErrorBoundary>
       {/* 详情视图直连入口（2026-09-10）：此前「评估」只能先点 Hero/节点 pill 的「更多」
           进抽屉、再切 tab —— 入口不可见（底部说明也只列了 3 个）。四视图平权直连。 */}

@@ -43,6 +43,7 @@ import { entryForCourse, loadRegistry, saveAnyComponent } from '../registry'
 import { launchSpec } from '../proc'
 import { monitorTouch } from '../reload-touch'
 import {
+  buildBcEpochsView,
   buildEvalBoardView,
   buildEvalCkptsView,
   buildPoolView,
@@ -245,6 +246,10 @@ async function main(): Promise<void> {
         if (req.method === 'GET' && url.pathname === '/api/evalboard') {
           const fresh = url.searchParams.get('fresh') === '1'
           return json(await buildEvalBoardView(viewCourse || undefined, fresh))
+        }
+        // BC epoch 指标 / 多地图 eval（2026-09-13；bcRowsFromLedgerTail 解析，只读）。
+        if (req.method === 'GET' && url.pathname === '/api/bcEpochs') {
+          return json(buildBcEpochsView(viewCourse || undefined))
         }
         // R7：ckpt/iter 发现（只 stat 不读内容；?leg= 懒加载单腿明细）。
         if (req.method === 'GET' && url.pathname === '/api/evalCkpts') {

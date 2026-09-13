@@ -65,6 +65,36 @@ class BcCorpusBlock(BaseModel):
         return v
 
 
+class BcEvalBlock(BaseModel):
+    """BC 每 N epoch 的多地图干净评估（对齐 RL eval 展示口径：
+    win_rate / kills_mean / phits_mean / pickup_mean / timeout_frac）。
+
+    levels = 关卡文件名列表（`nn-training/levels/<name>.jsonc` 或路径）——eval 地图
+    与训练语料的 level 解引用**互不约束**（bc-c4 训 arena4、eval arena4+arena6 是
+    合法配置）；每张图按其关卡文件的 stages/difficulty/max_ticks/player 逐 stage
+    × games_per_stage 派 mode=eval 任务（策略 = 被评 BC 权重本身）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: 每 N epoch 评估一次；0 = 关（默认——不配置 eval 块行为零变化）
+    every_epochs: int = 0
+    #: 每张图每个 stage 的评估局数（种子 1..games_per_stage）
+    games_per_stage: int = 10
+    #: 评估地图（关卡引用；多张图各自出结果，控制台分图展示）
+    levels: list[str] = []
+
+    @field_validator("every_epochs", "games_per_stage")
+    @classmethod
+    def _nonneg(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("eval 计数类字段必须 ≥ 0")
+        return v
+
+    @property
+    def enabled(self) -> bool:
+        return self.every_epochs > 0 and bool(self.levels) and self.games_per_stage > 0
+
+
 class BcTrainBlock(BaseModel):
     """BC 训练超参（→ 云端 train/bc.py train() 的 SimpleNamespace 参数）。"""
 
@@ -119,9 +149,10 @@ class BcCourseConfig(BaseModel):
     max_ticks: int = 12000
     player: BcPlayerBlock = BcPlayerBlock()
 
-    # ---- 语料 / 训练 ----
+    # ---- 语料 / 训练 / 评估 ----
     corpus: BcCorpusBlock = BcCorpusBlock()
     train: BcTrainBlock = BcTrainBlock()
+    eval: BcEvalBlock = BcEvalBlock()
 
     # ---- 运行 ----
     #: BC 轮数（每轮：新语料（种子轮转）→ 云端 BC 训练 → 权重归档）
