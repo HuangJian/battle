@@ -168,3 +168,64 @@ def test_pause_and_abort_not_affected_by_soft_logic(
         readings = (_reading("G4", "plateau", released=True),)
         TrainingGuards._apply_verdict(fake, 1, _res(v, readings))
     assert halt_calls == [True, True]
+
+
+# ---- I2：提示类门 REMEDIATE N 次即停（2026-09-13 roadmap）----
+
+
+def test_soft_remediate_n_times_stops_leg(tmp_path: Path, halt_calls: list[bool]) -> None:
+    """★ I2 核心回归：plateau REMEDIATE 连续 N 次（默认 4）⇒ 第 N 次停腿。
+
+    c6-pickup3 6 次 / c6-bonus 10 次 cloud halt 的教训：平台期每 5 轮必然复现
+    REMEDIATE——反复确认的「边际收益枯竭」就是停腿信号，不是继续烧钱的理由。
+    """
+    fake = _fake(jsonl=tmp_path / "tl.jsonl")
+    fake.args.gate_remediate_stop_after = 4
+    readings = (_reading("G4", "plateau", released=True),)
+    for i in range(3):
+        assert TrainingGuards._apply_verdict(fake, 25 + i * 5, _res("REMEDIATE", readings)) is False
+    assert getattr(fake, "_leg_abort", False) is False  # 未达阈值：照常继续
+    # 第 4 次：停腿（返回 True = 训练该停）+ ABORT 落账
+    assert TrainingGuards._apply_verdict(fake, 40, _res("REMEDIATE", readings)) is True
+    assert fake._leg_abort is True
+    txt = (tmp_path / "tl.jsonl").read_text(encoding="utf-8")
+    assert '"verdict": "ABORT"' in txt  # 停腿落账（write_gate_verdict 为 ensure_ascii，
+    # 中文 reason 是 \u 转义——按结构断言，不按字面子串）
+
+
+def test_soft_remediate_counter_resets_on_hard_verdict(
+    tmp_path: Path, halt_calls: list[bool]
+) -> None:
+    """硬门 REMEDIATE 不进软计数（_is_soft_verdict=False），计数不被稀释。"""
+    fake = _fake(jsonl=tmp_path / "tl.jsonl")
+    fake.args.gate_remediate_stop_after = 2
+    soft = (_reading("G4", "plateau", released=True),)
+    hard = (_reading("G7", "course_valid", released=True),)
+    TrainingGuards._apply_verdict(fake, 10, _res("REMEDIATE", soft))  # 计数=1
+    TrainingGuards._apply_verdict(fake, 15, _res("REMEDIATE", hard))  # 硬门：不计数
+    assert getattr(fake, "_soft_remediate_count", 0) == 1
+    assert getattr(fake, "_leg_abort", False) is False
+    assert TrainingGuards._apply_verdict(fake, 20, _res("REMEDIATE", soft)) is True  # 计数=2 → 停
+
+
+def test_soft_remediate_stop_disabled_with_zero(tmp_path: Path, halt_calls: list[bool]) -> None:
+    """0 = 关（旧行为）：任意多次软 REMEDIATE 都不停腿。"""
+    fake = _fake(jsonl=tmp_path / "tl.jsonl")
+    fake.args.gate_remediate_stop_after = 0
+    readings = (_reading("G4", "plateau", released=True),)
+    for i in range(10):
+        assert TrainingGuards._apply_verdict(fake, i, _res("REMEDIATE", readings)) is False
+    assert getattr(fake, "_leg_abort", False) is False
+
+
+def test_soft_remediate_counter_is_per_leg(tmp_path: Path) -> None:
+    """计数挂在 TrainingGuards 实例上——一腿一实例，换腿自然清零（无跨腿污染）。"""
+    a = _fake(jsonl=tmp_path / "a.jsonl")
+    b = _fake(jsonl=tmp_path / "b.jsonl")
+    a.args.gate_remediate_stop_after = 2
+    readings = (_reading("G4", "plateau", released=True),)
+    TrainingGuards._apply_verdict(a, 5, _res("REMEDIATE", readings))
+    TrainingGuards._apply_verdict(a, 10, _res("REMEDIATE", readings))
+    assert a._leg_abort is True
+    assert getattr(b, "_soft_remediate_count", 0) == 0  # 新腿从零起算
+    assert getattr(b, "_leg_abort", False) is False

@@ -15,7 +15,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import dist_common
 from remote.protocol import ProtocolError, RetryableError, coef_active, find_payload
@@ -26,6 +26,9 @@ from rl.eval_m1 import read_eval_summary
 from rl.events import write_event, write_gate_verdict, write_iteration
 from rl.log import log
 from rl.modes import _MODE_BACKUP_PREFIX
+
+if TYPE_CHECKING:
+    from rl.commit_journal import CommitJournal
 
 
 class SmokeVoidRoundError(Exception):
@@ -436,6 +439,42 @@ class TrainingSteps:
         if "dimMeans" in report:
             log(f"[run_rl] dims it{it}: {json.dumps(report['dimMeans'])}")
 
+    def _commit_journal(self) -> CommitJournal:
+        """I1 WAL（hy E4/dsf）：PPO 提交序列的 started/done 台账（懒建）。
+
+        路径 <traj>/commit_journal.jsonl。首次创建时扫描 pending——重启后见
+        started 无 done 的轮次就大声报（本地轮靠 ppo_ckpt epoch 级断点续跑、
+        远端轮按同 it 重发 job），把「上一轮提交到哪了」从事故考古变成一条日志。
+        """
+        j = getattr(self, "_commit_journal_obj", None)
+        if j is None:
+            from rl.commit_journal import CommitJournal
+
+            j = CommitJournal(Path(self._traj_dir) / "commit_journal.jsonl")
+            self._commit_journal_obj = j
+            pending = j.pending()
+            if pending:
+                log(
+                    f"[run_rl] WAL replay-check: {len(pending)} 个未完成提交轮次 "
+                    f"{[(p['phase'], p['round']) for p in pending]} —— "
+                    "本地轮由 ppo_ckpt 续跑、远端轮重发同 it job（幂等）"
+                )
+        return j
+
+    def _forensics(self, tag: str) -> None:
+        """I1 第 0 步取证（hy E4）：内存/磁盘快照进 run jsonl。
+
+        OOM killer 与写盘失败不留 Python 堆栈、faulthandler 也不落盘——提交边界的
+        最后一条 forensics 快照就是临终状态（RSS 峰值贴顶 = OOM 实锤；disk_free ≈ 0
+        = 写盘失败实锤）。任何失败只记日志，绝不反杀训练。
+        """
+        try:
+            from rl.forensics import log_snapshot
+
+            log_snapshot(tag, self._jsonl_path, paths=[self._traj_dir])
+        except Exception as e:  # 取证失败不阻断训练（诊断手段不是新故障面）
+            log(f"[forensics] {tag} 快照失败（{type(e).__name__}: {e}）")
+
     def _serial_ppo(self, it: int) -> None:
         """串行路径（stream_meta 为空）的 PPO 更新：load → chunk → update。
 
@@ -450,6 +489,10 @@ class TrainingSteps:
             return
         args = self.args
         traj_dir = self._traj_dir
+        # I1 WAL（hy E4/dsf）：提交序列 started/done 台账——重启后 pending() 即
+        # 「上一轮提交未完成」的账；本地路径由下方 ppo_ckpt epoch 级断点续跑。
+        self._commit_journal().start("ppo_local", str(it))
+        self._forensics(f"ppo_local_pre it{it}")
         t_ppo = time.time()
         # P1-7：--adv-norm none 时串行路径跳过 global 归一（对照实验）
         episodes = self.ppo_backend.load_episodes(
@@ -461,6 +504,8 @@ class TrainingSteps:
         )
         total_steps = sum(e["obs"].shape[0] for e in episodes)
         chunks = self.ppo_backend.chunk_episodes(episodes, args.mb)
+        # I1 取证：load 全量 episodes 是内存峰值点——贴顶即 OOM 候选实锤。
+        self._forensics(f"ppo_local_loaded it{it} steps={total_steps}")
         # ppo_backend epoch 级断点续跑：崩溃重启后从最近 checkpoint 继续未完成批次
         if args.mode in ("intent", "goal"):
             agg = self.ppo_backend.update(
@@ -498,6 +543,9 @@ class TrainingSteps:
         self._total_steps = total_steps
         self._agg = agg
         self._kl_cum = agg["kl"] if agg else None  # 串行：单次大更新，均值即累计口径
+        # I1：提交序列完成（权重已由 backend 落盘、agg 已结算）——WAL 收口 + 临终对照快照。
+        self._forensics(f"ppo_local_post it{it}")
+        self._commit_journal().finish("ppo_local", str(it))
 
     def _remote_ppo_or_degrade(self, it: int) -> bool:
         """R9（plan/feasibility-map.md §12）：远端失败计数与自动降级。
@@ -571,6 +619,11 @@ class TrainingSteps:
         args = self.args
         it_dir = self._traj_dir
         t_ppo = time.time()
+        # I1 WAL：远端提交序列（打包→发布→等待→校验→落位）的 started/done 台账；
+        # 重启后见 pending ⇒ 按同 it 重发 job（publish 幂等键 = run_id+it+wver，
+        # verify_and_land 三重校验防错位落盘）。
+        self._commit_journal().start("ppo_remote", str(it))
+        self._forensics(f"remote_pre it{it}")
         from remote.hub_client import (
             git_head,
             iter_shard_dirs,
@@ -650,6 +703,8 @@ class TrainingSteps:
         # 是 payload 里可观的一块）。系数退火到阈值以下就不再附字节。
         kick_live = kick_on and coef_active(kick_kl)
         ref_b64, ref_fp = _kickstart_ref_payload(args) if kick_live else ("", "")
+        # I1 取证：publish 前的临终对照点（上传大 payload 前的 RSS/磁盘基线）。
+        self._forensics(f"remote_pre_publish it{it}")
         manifest = publish_job(
             job_root=job_root,
             jsonl_path=str(self._jsonl_path),
@@ -735,6 +790,10 @@ class TrainingSteps:
             log=log,
         )
         mark_job_completed(self._jsonl_path, jid)
+        # I1：远端提交序列完成（校验落位 + job 记账）——WAL 收口。冒烟作废轮也算
+        # 完成（commit 本身成功了；作废轮由 _prepare_iter_dir 清场后重试新轮）。
+        self._commit_journal().finish("ppo_remote", str(it), jid=jid)
+        self._forensics(f"remote_post it{it}")
         if result.get("smoke"):
             # 冒烟回显（worker --echo）：全链路已验证，但权重 = init 回显非真 PPO——
             # 作废本轮。job_completed 已记账（审计链完整）；落位的 out 权重与

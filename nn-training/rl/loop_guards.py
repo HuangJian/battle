@@ -246,6 +246,10 @@ class TrainingGuards:
             duty_baseline_ts=first_iter_end_ts(self._jsonl_path),
             duty_events=count_iteration_events(self._jsonl_path),
         )
+        # I2（roadmap I-P1）：min_train_samples 可达性投影——c6-bonus 教训（门要 4M、
+        # 实测 ~1.67 万样本/轮，160 轮也到不了）。开腿 ≥10 轮后用实测速率外推全腿，
+        # 明显不可达就 log once/leg 大声说，让配置矛盾在烧完预算前现形（只提示不停车）。
+        self._warn_min_train_unreachable(it, spec, budget)
         if not eval_this_round:
             # 非评估轮：只查 duty（数据每轮皆新；指标门无新 eval 不判）。
             try:
@@ -398,6 +402,31 @@ class TrainingGuards:
         )
         self._cloud_halted = want_halt
 
+    def _warn_min_train_unreachable(self, it: int, spec: Any, budget: Any) -> None:
+        """I2（roadmap I-P1）：min_train_samples 可达性投影（log once/leg，只提示不停车）。
+
+        c6-bonus 教训：门要 4M 样本、实测 ~1.67 万/轮，160 轮也到不了——账本好看的
+        累计曲线掩盖了「阈值物理不可达」。开腿 ≥10 轮后用实测速率外推全腿，明显
+        不可达就大声说，让配置矛盾在烧完预算前现形（修配置或提前停腿，由人决策）。
+        """
+        min_samples = getattr(spec, "min_train_samples", None)
+        if not min_samples or getattr(self, "_min_train_warned", False):
+            return
+        total_iters = int(getattr(budget, "iters", 0) or 0)
+        cur = int(getattr(budget, "cur_iter", 0) or 0)
+        got = float(getattr(budget, "train_samples", 0.0) or 0.0)
+        if total_iters <= 0 or cur < 10 or got <= 0:
+            return
+        projected = got / cur * total_iters
+        if projected < float(min_samples):
+            self._min_train_warned = True
+            log(
+                f"[run_rl] WARN it{it}: gates.min_train_samples 疑似不可达——实测速率 "
+                f"{got / cur:.0f}/轮 × {total_iters} 轮 ≈ {projected / 1e6:.2f}M < "
+                f"{float(min_samples) / 1e6:.2f}M。修配置（降阈值/加批量/加 iters）"
+                "或提前停腿，别烧到顶才发现。"
+            )
+
     def _apply_verdict(self, it: int, res: Any) -> bool:
         """终端判决落地：**永不因门停车**（§2026-09-11 用户定案）。
 
@@ -422,6 +451,33 @@ class TrainingGuards:
             log(f"[run_rl] gate it{it}: gate_verdict 落盘失败（{e}）— 记录缺失，继续训练")
         log(f"[run_rl] GATE {res.verdict} it{it}: {res.reason}")
         self._sync_cloud_halt(it, res.verdict, getattr(res, "readings", None))
+        # I2（roadmap）：提示类门（plateau）REMEDIATE N 次即停。c6-pickup3 6 次 /
+        # c6-bonus 10 次 cloud halt 的教训：平台期每 5 轮必然复现 REMEDIATE——
+        # 反复确认的"边际收益枯竭"就是停腿信号，不是继续烧钱的理由
+        # （NO_CLOUD_HALT_KINDS 只是不杀云机，腿本身该停）。默认 4 次；0 = 关（旧行为）。
+        if res.verdict == "REMEDIATE" and self._is_soft_verdict(
+            res.verdict, getattr(res, "readings", None)
+        ):
+            self._soft_remediate_count = int(getattr(self, "_soft_remediate_count", 0)) + 1
+            limit = int(getattr(self.args, "gate_remediate_stop_after", 4) or 0)
+            if 0 < limit <= self._soft_remediate_count:
+                try:
+                    write_gate_verdict(
+                        self._jsonl_path,
+                        it,
+                        "ABORT",
+                        f"提示类门 REMEDIATE 已 {self._soft_remediate_count} 次（≥{limit}）"
+                        "——边际收益枯竭确认，停腿（I2）",
+                        decider="loop",
+                    )
+                except OSError as e:
+                    log(f"[run_rl] gate it{it}: ABORT 落盘失败（{e}）")
+                log(
+                    f"[run_rl] I2 REMEDIATE-STOP it{it}: 软判决 ×{self._soft_remediate_count} "
+                    f"≥ {limit} —— 停腿（gate_remediate_stop_after）"
+                )
+                self._leg_abort = True
+                return True
         return False
 
     def _budget_hard_cut(self, it: int) -> bool:

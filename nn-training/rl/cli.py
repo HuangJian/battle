@@ -446,6 +446,14 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         "“先活着”路径——云端不可达时训练继续跑，而不是整条腿耗在轮询上",
     )
     ap.add_argument(
+        "--gate-remediate-stop-after",
+        type=int,
+        default=_d("gate_remediate_stop_after", 4),
+        help="I2（2026-09-13）：提示类门（plateau）REMEDIATE 连续这么多次后**停腿**"
+        "（0 = 关，保留旧行为）。c6-pickup3 6 次 / c6-bonus 10 次 cloud halt 的教训："
+        "平台期每 5 轮必然复现 REMEDIATE，反复确认的「边际收益枯竭」就是停腿信号",
+    )
+    ap.add_argument(
         "--echo-config",
         action="store_true",
         help="只打印生效配置 + 当轮公式与 params 指纹（AST dump），不训练——"

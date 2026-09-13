@@ -179,6 +179,13 @@ def main() -> None:
     # 子进程字节流恒 UTF-8（压过 PYTHONIOENCODING/PYTHONUTF8/代码页）——validate_args
     # 等的中文 SystemExit/日志对任何捕获方都是确定编码；配对消费方显式 utf-8 解码。
     force_utf8_stdio()
+    # I1 快速缓解（hy E4/dsf）：fatal 信号（SIGSEGV/SIGABRT/SIGFPE…）时把 Python 栈
+    # 倾倒到 stderr——随 §16.2 的 run.log 落文件，两起「无堆栈消失」事故不再完全盲区。
+    # OOM killer（SIGKILL）不经过信号处理器——那种死法由 rl/forensics.py 的提交边界
+    # 快照兜底取证（最后一条 forensics = 临终状态）。
+    import faulthandler
+
+    faulthandler.enable()
     # Anchor cwd to the repo root (parent of nn-training/): all default paths
     # (tmp/student-weights-dagger, tmp/rl-weights, tmp/rl-traj) are repo-root
     # relative. Required for the unified launcher's --detach (tools/training/train.ts), whose
