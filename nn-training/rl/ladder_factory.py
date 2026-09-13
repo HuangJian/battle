@@ -5,7 +5,7 @@
   · 几何 = 空场 arena 常量（源 = levels/arena4.jsonc：边界钢环 + 四角 4 出生点 + 中央
     player_spawn；无基地无掩体——用户定案 D3）
   · count / lives / max_ticks 每级参数化；lives：count≤7→1、8-14→2、15-20→3（D1/D2）；
-    max_ticks = ceil(2400 × count / 4)（终局标准一次性立案候选，Phase 1 DECISIONS 过会）
+    max_ticks = 600 × count + 900（终局标准一次性立案，见 DECISIONS §2026-09-13-goalnn-max-ticks-rule）
   · forces 长**恒 20**（断言；spawn 取循环 `enemies[i % len]`，World.ts:501-505，
     count≤20 时与截断等价——ms F4）
   · 掉落规则全阶梯 modern（D9）：bonusEnemyEveryNpawns=4 + score 里程碑掉宝，
@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 from pathlib import Path
 from typing import Any
 
@@ -53,7 +52,11 @@ W_CHIP_K = 4.5
 #: v2 时代承伤基数线性拟合（c4=150 实测锚点，c5/c6 由 +34/敌 拟合）
 DAMAGE_BASE_C04 = 150.0
 DAMAGE_BASE_SLOPE = 34.0
-MAX_TICKS_C04 = 2400
+#: 终局标准（D7 一次性立案）：max_ticks = MAX_TICKS_PER_ENEMY×count + MAX_TICKS_OVERHEAD
+MAX_TICKS_PER_ENEMY = 600
+#: 固定项 = 接敌 / 穿场 / 生成节奏的一次性开销；纯比例式在低 count 端会塌缩（c01→600
+#: 会截断教师 30% 的局），实测饱和点见 DECISIONS §2026-09-13-goalnn-max-ticks-rule
+MAX_TICKS_OVERHEAD = 900
 
 
 def tier_lives(count: int) -> int:
@@ -68,8 +71,13 @@ def tier_lives(count: int) -> int:
 
 
 def max_ticks_for(count: int) -> int:
-    """终局标准（D7）：与 count 线性比例，c04 = 2400（现线锚点）。一次性立案后不再逐调。"""
-    return math.ceil(MAX_TICKS_C04 * count / 4)
+    """终局标准（D7 一次性立案）：`600×count + 900`（c01=1500 … c20=12900）。
+
+    斜率 600 = roadmap 原式 `ceil(2400×count/4)` 的斜率（c04-c06 现线证据沿用，实测
+    该斜率在 c05-c07 恰好解除截断）；固定项 900 补上原式缺失的接敌/穿场开销。
+    饱和点实测与判据见 DECISIONS §2026-09-13-goalnn-max-ticks-rule。
+    """
+    return MAX_TICKS_PER_ENEMY * count + MAX_TICKS_OVERHEAD
 
 
 def damage_base(count: int) -> float:
@@ -248,11 +256,17 @@ def plan_doc(arena: dict[str, Any]) -> dict[str, Any]:
             "spawn_points": len(arena["enemy_spawns"]),
             "player_spawn": arena["player_spawn"],
         },
-        "max_ticks_rule": "ceil(2400 * count / 4) — DECISIONS 立案候选（D7 一次性）",
+        "max_ticks_rule": "600 * count + 900 — DECISIONS §2026-09-13-goalnn-max-ticks-rule（D7 一次性）",
         "shard_keep_policy": "keep latest 2 iters per leg; archive graduated weights (.xz 惯例)",
         "gates": None,  # I2：阶梯课程一律不配 gates
         "levels": levels,
     }
+
+
+def write_jsonc(path: Path, doc: Any) -> None:
+    """LF 写盘（**不用 write_text**：Windows 文本模式把 \\n 翻成 \\r\\n，产物字节与
+    仓库 LF 惯例不符，每次重生成都会抖出整文件 diff + CRLF 警告）。"""
+    path.write_bytes((json.dumps(doc, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
 
 
 def generate(
@@ -275,15 +289,11 @@ def generate(
         ]
         for path, doc in targets:
             if not dry_run:
-                path.write_text(
-                    json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-                )
+                write_jsonc(path, doc)
             written.append(str(path))
     if not dry_run:
         plan_path.parent.mkdir(parents=True, exist_ok=True)
-        plan_path.write_text(
-            json.dumps(plan_doc(arena), ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-        )
+        write_jsonc(plan_path, plan_doc(arena))
     written.append(str(plan_path))
     return written
 

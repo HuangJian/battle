@@ -11,7 +11,7 @@
       "row": 12
     }
   },
-  "max_ticks_rule": "ceil(2400 * count / 4) — DECISIONS 立案候选（D7 一次性）",
+  "max_ticks_rule": "600 * count + 900 — DECISIONS §2026-09-13-goalnn-max-ticks-rule（D7 一次性）",
   "shard_keep_policy": "keep latest 2 iters per leg; archive graduated weights (.xz 惯例)",
   "gates": null,
   "levels": [
@@ -19,7 +19,7 @@
       "level": "ladder-c01",
       "count": 1,
       "lives": 1,
-      "max_ticks": 600,
+      "max_ticks": 1500,
       "rollout_games": 600,
       "legs": {
         "count": 2,
@@ -43,7 +43,7 @@
       "level": "ladder-c02",
       "count": 2,
       "lives": 1,
-      "max_ticks": 1200,
+      "max_ticks": 2100,
       "rollout_games": 600,
       "legs": {
         "count": 2,
@@ -67,7 +67,7 @@
       "level": "ladder-c03",
       "count": 3,
       "lives": 1,
-      "max_ticks": 1800,
+      "max_ticks": 2700,
       "rollout_games": 600,
       "legs": {
         "count": 2,
@@ -91,7 +91,7 @@
       "level": "ladder-c04",
       "count": 4,
       "lives": 1,
-      "max_ticks": 2400,
+      "max_ticks": 3300,
       "rollout_games": 150,
       "legs": {
         "count": 2,
@@ -115,7 +115,7 @@
       "level": "ladder-c05",
       "count": 5,
       "lives": 1,
-      "max_ticks": 3000,
+      "max_ticks": 3900,
       "rollout_games": 150,
       "legs": {
         "count": 2,
@@ -139,7 +139,7 @@
       "level": "ladder-c06",
       "count": 6,
       "lives": 1,
-      "max_ticks": 3600,
+      "max_ticks": 4500,
       "rollout_games": 150,
       "legs": {
         "count": 3,
@@ -164,7 +164,7 @@
       "level": "ladder-c07",
       "count": 7,
       "lives": 1,
-      "max_ticks": 4200,
+      "max_ticks": 5100,
       "rollout_games": 150,
       "legs": {
         "count": 3,
@@ -189,7 +189,7 @@
       "level": "ladder-c08",
       "count": 8,
       "lives": 2,
-      "max_ticks": 4800,
+      "max_ticks": 5700,
       "rollout_games": 150,
       "legs": {
         "count": 2,
@@ -213,7 +213,7 @@
       "level": "ladder-c09",
       "count": 9,
       "lives": 2,
-      "max_ticks": 5400,
+      "max_ticks": 6300,
       "rollout_games": 150,
       "legs": {
         "count": 2,
@@ -237,7 +237,7 @@
       "level": "ladder-c10",
       "count": 10,
       "lives": 2,
-      "max_ticks": 6000,
+      "max_ticks": 6900,
       "rollout_games": 150,
       "legs": {
         "count": 2,
@@ -261,7 +261,7 @@
       "level": "ladder-c11",
       "count": 11,
       "lives": 2,
-      "max_ticks": 6600,
+      "max_ticks": 7500,
       "rollout_games": 150,
       "legs": {
         "count": 2,
@@ -285,7 +285,7 @@
       "level": "ladder-c12",
       "count": 12,
       "lives": 2,
-      "max_ticks": 7200,
+      "max_ticks": 8100,
       "rollout_games": 150,
       "legs": {
         "count": 2,
@@ -309,7 +309,7 @@
       "level": "ladder-c13",
       "count": 13,
       "lives": 2,
-      "max_ticks": 7800,
+      "max_ticks": 8700,
       "rollout_games": 150,
       "legs": {
         "count": 2,
@@ -333,7 +333,7 @@
       "level": "ladder-c14",
       "count": 14,
       "lives": 2,
-      "max_ticks": 8400,
+      "max_ticks": 9300,
       "rollout_games": 150,
       "legs": {
         "count": 2,
@@ -357,7 +357,7 @@
       "level": "ladder-c15",
       "count": 15,
       "lives": 3,
-      "max_ticks": 9000,
+      "max_ticks": 9900,
       "rollout_games": 150,
       "legs": {
         "count": 2,
@@ -381,7 +381,7 @@
       "level": "ladder-c16",
       "count": 16,
       "lives": 3,
-      "max_ticks": 9600,
+      "max_ticks": 10500,
       "rollout_games": 150,
       "legs": {
         "count": 2,
@@ -405,7 +405,7 @@
       "level": "ladder-c17",
       "count": 17,
       "lives": 3,
-      "max_ticks": 10200,
+      "max_ticks": 11100,
       "rollout_games": 150,
       "legs": {
         "count": 2,
@@ -429,7 +429,7 @@
       "level": "ladder-c18",
       "count": 18,
       "lives": 3,
-      "max_ticks": 10800,
+      "max_ticks": 11700,
       "rollout_games": 150,
       "legs": {
         "count": 2,
@@ -453,7 +453,7 @@
       "level": "ladder-c19",
       "count": 19,
       "lives": 3,
-      "max_ticks": 11400,
+      "max_ticks": 12300,
       "rollout_games": 150,
       "legs": {
         "count": 2,
@@ -477,7 +477,7 @@
       "level": "ladder-c20",
       "count": 20,
       "lives": 3,
-      "max_ticks": 12000,
+      "max_ticks": 12900,
       "rollout_games": 150,
       "legs": {
         "count": 2,

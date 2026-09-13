@@ -42,11 +42,20 @@ def test_tier_lives_rejects_out_of_ladder() -> None:
         lf.tier_lives(21)
 
 
-def test_max_ticks_linear_from_c04_anchor() -> None:
-    assert lf.max_ticks_for(4) == 2400  # 现线锚点
-    assert lf.max_ticks_for(1) == 600
-    assert lf.max_ticks_for(20) == 12000  # c20 = 5×c04（roadmap §5 局长预期）
-    assert lf.max_ticks_for(5) == 3000  # 2400×5/4 = 3000 整除
+def test_max_ticks_fixed_overhead_plus_per_enemy() -> None:
+    """D7 立案规则 `600×count + 900`（DECISIONS §2026-09-13-goalnn-max-ticks-rule）。
+
+    斜率 600 沿用 roadmap 原式；固定项 900 修原式在低 count 端的塌缩——原式 c01=600
+    实测截断教师 61/200 局（0 击杀），低 count 端不可用。
+    """
+    assert lf.max_ticks_for(1) == 1500
+    assert lf.max_ticks_for(2) == 2100
+    assert lf.max_ticks_for(4) == 3300
+    assert lf.max_ticks_for(5) == 3900
+    assert lf.max_ticks_for(20) == 12900  # ≥ 原式 12000（上界不缩）
+    # 相对原式：c01-c03 抬升（修截断），c04+ 同斜率平移
+    assert lf.max_ticks_for(1) > 600
+    assert all(lf.max_ticks_for(c) - lf.max_ticks_for(c - 1) == 600 for c in range(2, 21))
 
 
 def test_damage_base_fits_measured_anchors() -> None:
@@ -167,8 +176,18 @@ def test_plan_doc_invariants(tmp_path: Path) -> None:
     assert len(plan["levels"]) == 20
     by_name = {lv["level"]: lv for lv in plan["levels"]}
     assert by_name["ladder-c05"]["dose"]["recalibrate_at"] is not None  # R5 重标定点
-    assert by_name["ladder-c20"]["max_ticks"] == 12000
+    assert by_name["ladder-c20"]["max_ticks"] == 12900
     assert by_name["ladder-c01"]["eval_seed_batches"]["grad_round2"] == "200-399"  # 双轮门种子不重叠
+
+
+def test_generated_files_are_lf(tmp_path: Path) -> None:
+    """产物一律 LF 换行（`write_jsonc`）。Windows 文本模式 w/r 会把 \\n 翻成 \\r\\n，
+    产物与仓库 LF 惯例不符：每次重生成抖出整文件 diff + CRLF 警告（2026-09-13 实测）。"""
+    lf.generate(
+        out_levels=tmp_path / "lv", out_courses=tmp_path / "cu", plan_path=tmp_path / "p.jsonc"
+    )
+    for rel in ("lv/ladder-c01.jsonc", "cu/ladder-c05.jsonc", "p.jsonc"):
+        assert b"\r\n" not in (tmp_path / rel).read_bytes(), rel
 
 
 def test_preflight_green_on_generated(generated: Path, tmp_path: Path) -> None:

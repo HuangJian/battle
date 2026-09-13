@@ -227,7 +227,7 @@
     }
   ],
   "difficulty": "hard",
-  "max_ticks": 600,
+  "max_ticks": 1500,
   "player": {
     "lives": 1,
     "level": 0

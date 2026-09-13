@@ -17,9 +17,25 @@
  *     [--ledger nn-training/ladder/LEDGER.jsonc]
  */
 
-import { mkdirSync, writeFileSync } from 'fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { dirname } from 'path'
-import { percentile, runRound, upsertLedgerEntry, type GateRow } from './curriculum-gate'
+import {
+  levelFilePath,
+  percentile,
+  runRound,
+  upsertLedgerEntry,
+  type GateRow,
+} from './curriculum-gate'
+
+/** 该级当前 max_ticks（读关卡文件=单一事实来源）：teacherWR 离开 cap 就不可比。 */
+export function levelMaxTicks(level: string): number | null {
+  try {
+    const doc = JSON.parse(readFileSync(levelFilePath(level), 'utf-8'))
+    return typeof doc.max_ticks === 'number' ? doc.max_ticks : null
+  } catch {
+    return null
+  }
+}
 
 /** N4：先补 c01-c07（1 命 tier 全部）——BC 优先级的探针域。 */
 export const TEACHER_LEVELS = [
@@ -121,6 +137,9 @@ export function runTeacherProbe(opts: {
           wins: s.wins,
           cleared: s.cleared,
           seeds: `${seed0}-${seed0 + games - 1}`,
+          // 诊断必需：2026-09-13 立案前 c01 的 teacherWR 就是被 600-tick 截断污染的
+          // （69.0% → 99.0%），无 cap 字段的 teacherWR 不可比、不可复查。
+          maxTicks: levelMaxTicks(level),
           source: 'god-ai eval-course-ckpt',
           outcomes: s.outcomes,
           score: {

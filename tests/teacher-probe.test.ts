@@ -4,6 +4,7 @@ import { describe, it, expect } from 'bun:test'
 import {
   EVAL_SEED0,
   TEACHER_LEVELS,
+  levelMaxTicks,
   normalizeLevelArg,
   scoreStats,
 } from '../tools/sim/teacher-probe'
@@ -74,6 +75,18 @@ describe('normalizeLevelArg', () => {
   it('all 展开成 7 个探针级；逗号可用', () => {
     expect(normalizeLevelArg('all')).toEqual([...TEACHER_LEVELS])
     expect(normalizeLevelArg('c01, c07')).toEqual(['ladder-c01', 'ladder-c07'])
+  })
+})
+
+describe('levelMaxTicks（teacherWR 的 cap 自描述）', () => {
+  it('读关卡文件的 max_ticks = D7 立案式 600×count+900 的产物', () => {
+    // DECISIONS §2026-09-13-goalnn-max-ticks-rule：c01=1500 / c07=5100
+    expect(levelMaxTicks('ladder-c01')).toBe(1500)
+    expect(levelMaxTicks('ladder-c07')).toBe(5100)
+  })
+
+  it('缺关卡文件 → null（探针不因缺一项就崩）', () => {
+    expect(levelMaxTicks('ladder-c99')).toBeNull()
   })
 })
 
