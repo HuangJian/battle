@@ -1448,3 +1448,23 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 - **夹具迁移**：`training-multi-course.test.ts` F-B6 的 bc 夹具 s-dodge→c6-dmgfix（原
   tmp/s2-cap/weights.json 已被 tmp 清理移除，属环境性失败；新夹具指向 nn-training/weights/
   稳定备份）。
+
+
+## §2026-09-13-bc-cloud-integration（2026-09-13，BC 训练整合进 云-HUB-LAN：云端第二任务类型 kind=bc；用户指令五步）
+
+- **决策**：远程任务协议引入 `kind` 维度（"ppo" 缺省 wire 兼容 | "bc"），BC job 复用
+  HUB job 全套（发布/租约/账本/回传/落位）与 LAN 节点协议（/v1/task ?mode=bc），
+  云端 worker 按 kind 分叉执行（bc → `train/bc.py::train`），控制台 BC 课程复用
+  trainingLoop 组件键（spec 分叉为 run_bc.py）。设计全量：`plan/bc-cloud-integration.plan.md`。
+- **拒绝的替代方案**：为 BC 建独立管线（第二个 hub/job 协议/独立控制台组件）——重复
+  鉴权/租约/账本/落位/冒烟五套已验证机制，维护面翻倍；BC 用 Colab notebook 手工跑
+  （现况）——无断点续跑、无节点并发、无归档纪律，且与多课程体系脱节。kind-branch 让
+  "第三种任务类型"（如 offline eval job）有先例可循。
+- **边界**：bc manifest 免必填 reward/γ/λ（无 RL 语义）；mode 红线 ppo↔bc 互斥（串型
+  拒收）；BC 无 init-weights（`init_weights_fp` 恒 "bc"）、无 opt tar 往返（不跨轮续训）；
+  wins-only 败局 = `kept:false` 空容器（合法结果非失败）；BC 课程独立文件种类
+  `.bc.jsonc`（rl/bc_config.py，D14 同规 `bc_corpus_identity_fp`）；smoke = 尺寸压缩
+  真一轮 + scratch 落位 + 账本零污染（不覆盖 out、不写 bc_round_completed）。
+- **教训入册**（docs/nn.progress.md §39）：单 shard 语料 shard 级切分 train=0 崩溃
+  （make_loaders 回退样本级）；agent 结果缓存键不含任务参数 → smoke 独立 iterId 命名空间；
+  LAN 节点需升级（git pull + restart）才有 `bcSupport` 能力位——升级前 fail-closed 不派。

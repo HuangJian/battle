@@ -73,6 +73,24 @@ INTENT_SHARD_FILES = (
     "dt.npy",
 )
 
+# BC 语料 shard 清单（export-godai-bc.ts 产物，BC 整合 2026-09-13；与
+# nn-training/data/npyio.py SHARD_FILES + OPTIONAL_FILES 同表——bc.py 装载口径）。
+# manifest.json 不在此表（write_shard 单独落）。
+BC_SHARD_FILES = (
+    "obs.npy",
+    "scalars.npy",
+    "actions.npy",
+    "masks.npy",
+    "conditions.npy",
+    "returns.npy",
+)
+
+#: BC 语料任务的模式/能力标识：agent /v1/task ?mode=bc；shard manifest collector。
+BC_MODE = "bc"
+BC_COLLECTOR = "BC-GOD"
+#: BC 任务 wver 常量（无权重语义——God-AI 教师自对弈不需要策略权重）。
+BC_WVER = "bc"
+
 
 class DistError(RuntimeError):
     """节点交互失败：status=HTTP 状态码（0=本地校验拒绝），reason=可读原因。"""
@@ -680,6 +698,9 @@ def fetch_task(
     lives_override: int | None = None,
     player_level: int | None = None,
     course_fp: str = "",
+    # BC 语料任务（mode="bc"）的 God-AI 教师参数（export-godai-bc 透传）。
+    wins: int | None = None,
+    near_miss_times: int | None = None,
     abandon_event: threading.Event | None = None,
     # T1.2 policy 透传（EvalBench）：'nn' | 'god'（C 层 God 基线）。
     # agent 侧已就绪（sampler-agent.ts:1150 收 ?policy= → export-eval-game --policy）。
@@ -738,6 +759,10 @@ def fetch_task(
         params["playerLevel"] = player_level
     if course_fp:
         params["courseFp"] = course_fp
+    if wins is not None:
+        params["wins"] = wins
+    if near_miss_times is not None:
+        params["nearMissTimes"] = near_miss_times
     qs = urllib.parse.urlencode(params)
     base = url.rstrip("/")
     started = time.monotonic()
@@ -837,7 +862,10 @@ def _poll_result(
 
 # ---------------- 结果校验（先验后落盘的红线所在） ----------------
 def _shard_files_for(manifest: dict) -> tuple:
-    """意图 RL shard（collector=INTENT-RL）用 INTENT_SHARD_FILES，否则 per-tick SHARD_FILES。"""
+    """BC 语料 shard（collector=BC-GOD）用 BC_SHARD_FILES；意图 RL shard（collector=
+    INTENT-RL）用 INTENT_SHARD_FILES；其余 per-tick SHARD_FILES。"""
+    if manifest.get("collector") == BC_COLLECTOR:
+        return BC_SHARD_FILES
     if manifest.get("collector") == "INTENT-RL" or "a_intent.npy" in manifest:
         return INTENT_SHARD_FILES
     return SHARD_FILES
@@ -860,6 +888,11 @@ def validate_result(
         return f"unexpected (stage,seed)={key}"
     if key in seen_keys:
         return f"duplicate (stage,seed)={key}"
+    # BC wins-only 败局：合法"跳过"结果（kept:false 空容器），不是任务失败。
+    if manifest.get("collector") == BC_COLLECTOR and manifest.get("kept") is False:
+        if files:
+            return f"bc loss-skip shard must carry no files (got {sorted(files)})"
+        return None
     want = _shard_files_for(manifest)
     if set(files.keys()) != set(want):
         extra = sorted(set(files) - set(want))

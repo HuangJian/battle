@@ -412,6 +412,151 @@ def d14_corpus_match(job_course_fp: str, job_corpus_fp: str, shard_manifest: dic
     return str(shard_manifest.get("course_fp", "")) == job_course_fp
 
 
+def _bc_device(dev_str: str) -> str:
+    """BC 任务的设备映射（plan/bc-cloud-integration.plan.md §3）：cuda-dp → cuda
+    （BC 网络小，DP 包装无必要）；tpu/xla 确定性拒绝（train/bc.py 无 xla 路径），
+    绝不静默降级——设备语义错了的 benchmark 数据比没有更糟。"""
+    s = str(dev_str).lower()
+    if s in ("cuda-dp", "dp"):
+        return "cuda"
+    if s in ("tpu", "xla"):
+        raise ProtocolError(f"bc 任务不支持设备 {dev_str!r}（v1 仅 cpu/cuda）")
+    return s or "cpu"
+
+
+def _run_bc_job(
+    *,
+    jid: str,
+    manifest: dict,
+    job_dir: Path,
+    shard_dirs: list[str],
+    device: str,
+    torch_threads: int,
+    echo: bool,
+    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+) -> dict:
+    """云端 BC job（plan/bc-cloud-integration.plan.md §3）：
+    D14 语料血缘校验 →（--echo 冒烟回显）→ 复用 `train/bc.py::train` 训练 →
+    BC 权重（版本化归档字节）+ metrics 回传。torch 延迟到真训练才 import。
+
+    语料 = payload 解包出的 npy shard 目录（obs/scalars/actions/masks/conditions/
+    returns + manifest），bc.py 的 scan_shards 对 job_dir 递归扫描即全部装载。
+    """
+    # ---- D14 语料血缘：与 PPO 同规（BC shard manifest 同样携带 course_fp/corpus_fp）----
+    _cfp = str(manifest["course_fp"])
+    _corpus = str(manifest.get("corpus_fp", "") or "")
+    for _sd in shard_dirs:
+        try:
+            with open(os.path.join(_sd, "manifest.json"), encoding="utf-8") as _f:
+                _sm = json.load(_f)
+        except (OSError, ValueError) as _e:
+            raise ProtocolError(f"D14 course_fp: 读 shard manifest 失败 {_sd}: {_e}") from _e
+        if not d14_corpus_match(_cfp, _corpus, _sm):
+            raise ProtocolError(
+                f"D14 corpus_fp 不匹配：job={_corpus[:12] or _cfp[:12]}… "
+                f"shard={str(_sm.get('corpus_fp') or _sm.get('course_fp'))[:12]}… "
+                f"（{_sd}）——跨课程语料混入，拒收"
+            )
+
+    t0 = time.time()
+
+    # ---- 冒烟回显（--echo，2026-09-05 同语义）：不拉 torch 不训练——占位 weights +
+    # smoke 标记（消费方 run_bc 作废轮，不落盘不归档）。三重校验按构造必过。
+    if echo:
+        result = {
+            "job_id": jid,
+            "data_fp": manifest["data_fp"],
+            "init_weights_fp": manifest["init_weights_fp"],
+            "weights_json": encode_weights_json(b'{"smoke-placeholder":true}'),
+            "opt_tar_b64": "",
+            "metrics": {
+                "epochs": 0,
+                "train_samples": 0,
+                "val_samples": 0,
+                "best_val_loss": 0.0,
+            },
+            "commit_echo": manifest["commit"],
+            "bc_sec": 0.0,
+            "smoke": True,
+        }
+        validate_result(result, manifest, commit_echo_must_match=False)
+        _persist_result(job_dir.parent, jid, result)
+        log(f"job {jid}: ECHO (bc smoke) — 占位权重回传（未跑 BC）")
+        return result
+
+    # ---- 延迟 import torch + BC 训练器（B7 同款；本模块顶层零 torch）----
+    import torch
+
+    if torch_threads > 0:
+        torch.set_num_threads(torch_threads)
+    from types import SimpleNamespace
+
+    from train.bc import train as bc_train
+
+    # per-job 确定性种子（D5 同式）：bc.train 内部播种 torch/numpy/random
+    seed_hex = job_seed(manifest["runId"], int(manifest["it"]), manifest["init_weights_fp"])
+    dev = _bc_device(device)
+    out_path = job_dir / "bc-weights.json"
+    ns = SimpleNamespace(
+        data_dir=str(job_dir),
+        arch=str(manifest["arch"]),
+        out=str(out_path),
+        notes=f"bc-job {jid} course={manifest.get('course_name', '')}",
+        resume=None,
+        epoch_offset=0,
+        ckpt_every=int(manifest.get("ckpt_every", 0) or 0),
+        checkpoint=None,
+        epochs=int(manifest["epochs"]),
+        batch=int(manifest["mb"]),
+        lr=float(manifest["lr"]),
+        val_split=float(manifest.get("val_split", 0.1)),
+        mirror_p=float(manifest.get("mirror_p", 0.5)),
+        seed=int(seed_hex[:8], 16),
+        num_workers=0,
+        device=dev,
+        value_coef=float(manifest.get("value_coef", 0.0) or 0.0),
+    )
+    log(
+        f"job {jid}: BC start arch={ns.arch} epochs={ns.epochs} batch={ns.batch} "
+        f"lr={ns.lr} device={dev} shards={len(shard_dirs)}"
+    )
+    metrics = bc_train(ns)
+    bc_sec = round(time.time() - t0, 1)
+    hist = metrics.get("history", {})
+    sizes = metrics.get("sizes", {})
+    log(
+        f"job {jid}: BC done in {bc_sec}s best_val={metrics.get('best_val_loss')} "
+        f"train={sizes.get('train')} val={sizes.get('val')}"
+    )
+
+    # ---- 产物：weights_json = 版本化归档字节（含 meta/history；云端不落 opt tar——
+    # BC v1 不跨轮续训，Adam 动量无往返价值）----
+    wfile = Path(str(metrics["out"]))
+    result = {
+        "job_id": jid,
+        "data_fp": manifest["data_fp"],
+        "init_weights_fp": manifest["init_weights_fp"],
+        "weights_json": encode_weights_json(wfile.read_bytes()),
+        "opt_tar_b64": "",
+        "metrics": {
+            "epochs": int(ns.epochs),
+            "train_samples": int(sizes.get("train", 0) or 0),
+            "val_samples": int(sizes.get("val", 0) or 0),
+            "best_val_loss": float(metrics.get("best_val_loss", 0.0) or 0.0),
+            "move_acc": float(hist.get("move_acc", [0.0])[-1]) if hist.get("move_acc") else 0.0,
+            "fire_acc": float(hist.get("fire_acc", [0.0])[-1]) if hist.get("fire_acc") else 0.0,
+            "params": int(metrics.get("params", 0) or 0),
+        },
+        "commit_echo": manifest["commit"],
+        "bc_sec": bc_sec,
+    }
+    validate_result(result, manifest, commit_echo_must_match=False)  # 自查
+    # _persist_result 落 work_dir/<jid>/_result.json —— job_dir.parent 即 run_job 语义
+    # 里的 work_dir（pull 与 push 两条路径同构），重领同 job 的缓存复用才能读到。
+    _persist_result(job_dir.parent, jid, result)
+    return result
+
+
 def run_job(
     base_url: str,
     token: str,
@@ -524,6 +669,21 @@ def run_job(
         log(f"job {jid}: 本进程加载代码 sha={_job_sha[:12]}…（后续 job 若变化将自重启）")
     elif _job_sha != _ACTIVE_CODE_SHA:
         raise CodeChangedError(_ACTIVE_CODE_SHA, _job_sha)
+
+    # ---- kind 分叉（BC 整合，plan/bc-cloud-integration.plan.md §3）：bc 任务走独立
+    # 执行链（语料 npy shard 训练，无 reward/γ/λ/init-weights 语义）；ppo 任务继续
+    # 走下方 per-tick 红线 + PPO 链路（默认行为零变化）。
+    if str(manifest["kind"]) == "bc":
+        return _run_bc_job(
+            jid=jid,
+            manifest=manifest,
+            job_dir=job_dir,
+            shard_dirs=shard_dirs,
+            device=device,
+            torch_threads=torch_threads,
+            echo=echo,
+            log=log,
+        )
 
     # ---- mode 红线（v1：仅 per-tick） ----
     if manifest["mode"] != "per-tick":

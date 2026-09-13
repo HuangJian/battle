@@ -156,6 +156,57 @@ export function workerServeSpec(
   }
 }
 
+// ────────────────────────── BcLoop（BC 编排器，2026-09-13） ──────────────────────────
+
+export const BC_LOOP_ENTRY = 'nn-training/run_bc.py'
+
+export interface BcLoopSpecOpts {
+  course: string
+  /** 远程：发布到 per-course hub（pull preset）/ 直推 push 节点（push preset，
+   *  run_bc 读 REMOTE_PUSH_NODE/push_node_url）。local preset → --local（本机 torch）。 */
+  ppo?: 'pull' | 'push' | 'local' | 'remote'
+  /** 冒烟：尺寸压缩真一轮，落位即作废（不覆盖 out、不归档、账本零污染）。 */
+  smoke?: boolean
+  /** 冒烟/push 注入：REMOTE_PUSH_NODE（本机伪 GPU 节点 URL）。 */
+  pushNodeUrl?: string
+  venv: { python: string; sitePackages: string }
+}
+
+/** BC 课程编排器 spec：复用 trainingLoop 组件键（registry/监督/停止全链零改动），
+ *  仅 cmd/哨兵分叉；日志沿用 training-loop.log（api.ts 组件表解析无需感知）。 */
+export function bcLoopSpec(cfg: RlConfig, s: BcLoopSpecOpts): ProcSpec {
+  void cfg
+  const trainLog = path.join(LOG_DIR, s.course || 'nocourse', 'training-loop.log')
+  return {
+    key: 'trainingLoop',
+    name: 'BcLoop (trainer)',
+    course: s.course,
+    cmd: [
+      s.venv.python,
+      '-u',
+      path.join(REPO_ROOT, BC_LOOP_ENTRY),
+      '--course',
+      s.course,
+      ...(s.ppo === 'local' ? ['--local'] : ['--remote']),
+      ...(s.smoke ? ['--smoke'] : []),
+    ],
+    env: {
+      PYTHONPATH: `${s.venv.sitePackages}${path.delimiter}${NN_TRAINING}`,
+      ...(s.pushNodeUrl ? { REMOTE_PUSH_NODE: s.pushNodeUrl } : {}),
+    },
+    log: trainLog,
+    healthy: async () => pidAlive(entryForCourse(loadRegistry(), 'trainingLoop', s.course)?.pid),
+    sentinels: pySentinels(
+      BC_LOOP_ENTRY,
+      'nn-training/rl/bc_config.py',
+      'nn-training/rl/bc_dispatch.py',
+      'nn-training/remote/protocol.py',
+      'nn-training/remote/worker.py',
+      'nn-training/remote/hub_client.py',
+    ),
+  }
+}
+
 // ────────────────────────── TrainingLoop ──────────────────────────
 
 export const TRAINING_LOOP_ENTRY = 'nn-training/run_rl.py'

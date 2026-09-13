@@ -509,6 +509,55 @@ function tailText(logPath: string, offset: number): string {
   }
 }
 
+// ────────────────────────── BC 冒烟预演（BcLoop --smoke 专属，2026-09-13） ──────────────────────────
+
+/** BC 冒烟预演：真 BC 课程 run_bc.py --smoke（REMOTE_PUSH_NODE=本机伪 GPU 节点）
+ *  走全链 —— 语料采集（1 局 God-AI）→ 发布 kind=bc job → 伪节点**真 BC 训练**
+ *  1 epoch → 回传落位 → 落位即作废退出（不覆盖 out、不归档、账本零污染）。
+ *  三里程碑：published job → weights landed → BC SMOKE PASS + 进程退出。 */
+export async function stepBcSmokeRehearsal(course: string, tlPid: number): Promise<void> {
+  log('── BC 冒烟预演（BcLoop：语料采集 → kind=bc job → 伪 GPU 节点真 BC 训练 → 作废）──')
+  const trainLog = path.join(LOG_DIR, course, 'training-loop.log')
+  let baseline = 0
+  try {
+    baseline = statSync(trainLog).size
+  } catch {
+    /* 新课程 */
+  }
+  const tailSince = (): string => tailText(trainLog, baseline)
+
+  // 1) 语料采集 + 发布（BC 采集 1 局 God-AI 为秒级；180s 预算含节点升级波）
+  const published = await waitUntil(async () => tailSince().includes('published job'), 180000, 2000)
+  if (!published) {
+    fail('BcLoop 180s 内未发布 bc job——见 training-loop.log（语料采集/节点可用性）')
+    printLogTail(trainLog, baseline)
+    throw new Error('BC 预演失败：job 未发布')
+  }
+  ok('BcLoop 已采集语料并发布真 bc job')
+
+  // 2) 等 BC 结果回传 + verify_and_land_bc 落位（伪节点含 torch 导入 + 1 epoch）
+  const landed = await waitUntil(async () => tailSince().includes('weights landed'), 300000, 1000)
+  if (!landed) {
+    fail('300s 内未见 weights landed——推送/BC 训练/回传链路有断点')
+    printLogTail(trainLog, baseline)
+    throw new Error('BC 预演失败：结果未落位')
+  }
+  ok('BC 权重回传落位（push → 云端 BC 分支 → verify_and_land_bc 全通过）')
+
+  // 3) 作废退出确认：BC SMOKE PASS 且进程干净退出
+  const passed = await waitUntil(
+    async () => tailSince().includes('BC SMOKE PASS') && !pidAlive(tlPid),
+    120000,
+    1000,
+  )
+  if (!passed) {
+    fail('未确认 BC SMOKE PASS 退出（--smoke 应在落位后作废退出）')
+    printLogTail(trainLog, baseline)
+    throw new Error('BC 预演失败：作废退出未确认')
+  }
+  ok('BcLoop 已作废 smoke 轮并干净退出（不覆盖 out、不归档、账本零污染）')
+}
+
 // ────────────────────────── Kaggle 交互预演（--smoke-only 专属） ──────────────────────────
 
 /** Kaggle 交互预演：真课程 TrainingLoop（--smoke）发布 job 后，用与 Kaggle notebook

@@ -124,6 +124,7 @@ export function sanitizeViewCourse(raw: string | null): string {
   try {
     if (existsSync(path.join(REPO_ROOT, 'tmp', raw))) return raw
     if (existsSync(path.join(CURRICULA_DIR, `${raw}.jsonc`))) return raw
+    if (existsSync(path.join(CURRICULA_DIR, `${raw}.bc.jsonc`))) return raw
   } catch {
     /* 回退自动课程 */
   }
@@ -156,7 +157,10 @@ export function discoverCourses(max = 12): string[] {
       withFileTypes: true,
     })) {
       if (ent.isDirectory() || !ent.name.endsWith('.jsonc')) continue
-      const name = ent.name.replace(/\.jsonc$/, '')
+      // BC 课程（<name>.bc.jsonc，2026-09-13）：课程键 = 去掉 .bc.jsonc 后缀
+      const name = ent.name.endsWith('.bc.jsonc')
+        ? ent.name.slice(0, -'.bc.jsonc'.length)
+        : ent.name.replace(/\.jsonc$/, '')
       if (seen.has(name)) continue
       const cp = path.join(REPO_ROOT, 'nn-training', 'curricula', ent.name)
       out.push({ name, mtime: statSync(cp).mtimeMs })
@@ -1262,10 +1266,11 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
           const pathMod = await import('path')
           if (
             !existsSync(course) &&
-            !existsSync(pathMod.default.join(CURRICULA_DIR, `${course}.jsonc`))
+            !existsSync(pathMod.default.join(CURRICULA_DIR, `${course}.jsonc`)) &&
+            !existsSync(pathMod.default.join(CURRICULA_DIR, `${course}.bc.jsonc`))
           ) {
             throw new ActionError(
-              `课程不存在: ${course}（curricula/ 下无同名 .jsonc，或传已存在的课程文件路径）`,
+              `课程不存在: ${course}（curricula/ 下无同名 .jsonc/.bc.jsonc，或传已存在的课程文件路径）`,
             )
           }
         }

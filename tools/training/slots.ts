@@ -39,9 +39,7 @@ export function portForSlot(base: number, slot: number, offset = 0): number {
 /** 课程 → 槽位（未配置/越界 → 0 = 旧单课行为，绝不静默顶替到别的槽位）。 */
 export function slotOf(cfg: RlConfig, course: string): number {
   const s = cfg.courses?.[course]?.slot
-  return Number.isInteger(s) && (s as number) >= 0 && (s as number) < SLOT_COUNT
-    ? (s as number)
-    : 0
+  return Number.isInteger(s) && (s as number) >= 0 && (s as number) < SLOT_COUNT ? (s as number) : 0
 }
 
 /** 槽位端口：按课程（或显式槽位）+ 用途取端口。唯一的调用面。 */
@@ -166,7 +164,7 @@ export function validateCourseName(course: string): string {
   return c
 }
 
-export type LockKind = 'run_rl' | 'train_loop'
+export type LockKind = 'run_rl' | 'train_loop' | 'run_bc'
 
 /** per-course 单实例锁名；无课程沿用旧全局文件名（默认行为零变化，plan §0.5-4）。 */
 export function lockName(course: string, kind: LockKind): string {

@@ -5,6 +5,54 @@
 
 ---
 
+## §39 BC 训练整合进 云-HUB-LAN：kind=bc 第二任务类型全链（2026-09-13，用户指令五步）
+
+**目标**：BC 从本地手工流程（export-godai-labels + train/bc.py 手工串）升级为与 PPO 同构的
+分布式管线：控制台启动 → LAN 集群生成语料 → 云机 poll/接收任务训练 → 权重回传归档。
+设计：`plan/bc-cloud-integration.plan.md`；**全部复用既有管线，只加任务类型，不建第二套体系**。
+
+- **协议（remote/protocol.py）**：manifest 可选 `kind`（缺省 "ppo" wire 兼容）；bc 免必填
+  reward/γ/λ、追加必填 `arch`、mode 红线 "bc"（串型互斥）；bc result 校验走 `metrics`
+  （无 agg）。幂等键/job_id/data_fp 公式不变（bc `init_weights_fp` 恒 "bc"）。
+- **云端（remote/worker.py::_run_bc_job）**：run_job 在 code 守卫后按 kind 分叉——D14 血缘
+  校验共用 → import `train/bc.py::train`（code.zip 已含 nn-training 全部 .py）→ BC 权重
+  （版本化归档字节）+ metrics 回传；cuda-dp→cuda、tpu 拒收；`--echo` 占位回传。
+- **HUB 客户端**：publish_job 增 `kind/extra`，init_weights_path 可选（bc 不拷 init 文件）；
+  `iter_bc_shard_dirs` + `verify_and_land_bc`（data_fp 重算/commit 对账，无 opt tar）。
+  push 模式零改动（worker_server 同 normalize/run_job）。
+- **LAN 语料（mode=bc）**：新导出器 `tools/sim/export-godai-bc.ts`（单局复用
+  export-godai-labels.exportGame 纯函数 → npyBytes 内存序列化 → BCV2 容器；wins-only 败局
+  = `kept:false` 空容器合法结果）；agent `/v1/task` 收 mode=bc（免权重桶）、ping 加
+  `bcSupport` 能力位（fail-closed，旧 agent 不派）；入 codehash-files.txt（升级波）。
+  `dist_common`：BC_SHARD_FILES/validate 分支/fetch_task wins+nearMissTimes 透传。
+- **派发（rl/bc_dispatch.py）**：紧凑调度器——bcSupport 探活门 → (stage,seed) 队列 →
+  节点槽位线程 → fetch_task(mode=bc) → 落盘 `<traj>/bc-data/it{r}/bc_s{stage}_seed{seed}/`
+  （manifest 补 course_fp/corpus_fp 血缘）。无竞速（语料不需要最快者胜）；局失败重试一次。
+- **BC 课程（rl/bc_config.py + curricula/*.bc.jsonc）**：独立文件种类（RL CourseConfig
+  extra=forbid 不兼容、mode/gates/schedule 全不适用）；level 引用复用关卡抽离语义；
+  `bc_corpus_identity_fp`（env+corpus 参数；train 超参刻意排除）；轮 r 种子
+  `[1+(r-1)*seed_rotate, …]`（§15.1 轮转）。首课 **bc-c4.bc.jsonc**（level=arena4，
+  student/60ep/wins-only/near-miss 3×，value_coef=0——§15 M3 教训）。
+- **编排器（run_bc.py，torch-free）**：per-course run_bc 锁；账本 `bc_round_completed`
+  断点续跑；语料补采 → publish(kind=bc) → push/hub 等待 → verify_and_land_bc →
+  backup_weights 归档（`nn-training/weights/<prefix>/<prefix>.it<N>.<ts>.json`）+
+  WEIGHTS.md 行（torch-free 复刻）；bc-data 旧轮收敛。--smoke：1 局/max_ticks≤300/
+  epochs=1 真一轮，落位即作废（`weights.smoke.json` scratch、不归档、账本零污染）。
+- **控制台**：`.bc.jsonc` 全链认课（validateCourseArg/discoverCourses/setCourse/
+  sanitizeViewCourse）；BC 课程复用 trainingLoop 组件键 → `bcLoopSpec`（run_bc.py，
+  哨兵含 remote 四件套）——启停/监督/退出看门狗零改动；startBcLoop（无 BC 种子播种）；
+  smokeTrainBc 三里程碑预演（published job → weights landed → BC SMOKE PASS，伪节点
+  **真 BC 训练**非 echo）。
+- **E2E 冒烟 PASS**（本机全链实测）：self 节点采语料（arena4 单局）→ push 发布 → 伪 GPU
+  节点真 BC 训练（student 67.5K params，1 epoch，2.8s）→ 回传 → verify_and_land_bc 落位 →
+  作废退出。回归：nn-python-gate 相关子集 162 绿 + `bun run check` 绿。
+- **踩坑三则**：① 单 shard 语料 shard 级切分把全部样本划进 val（train=0 → DataLoader
+  num_samples=0 崩）——`make_loaders` 回退样本级切分（test_shard_split 回归锁）；② smoke
+  300 tick 内不可能 wins → smoke 关 wins_only；③ agent 结果缓存键不含 wins/nearMiss——
+  smoke 轮用独立 iterId 命名空间（`-smoke` 后缀）防缓存回放假结果。
+- **运维注意**：LAN 远端节点需 git pull 升级后才有 bcSupport（push 合并后人升）；升级前
+  bc 语料只由 self/已升级节点承担（fail-closed 不污染）。
+
 ## §38 课程热加载：非语料改动下一 iter 应用；语料改动拒绝+横幅+不泄漏云端（2026-09-13，用户拍板）
 
 **机制**（DECISIONS §2026-09-13-hot-reload）：trainer 每 iter（rollout 前）重读课程文件，按

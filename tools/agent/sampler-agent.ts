@@ -708,16 +708,22 @@ async function runGame(
   livesOverride = '',
   playerLevel = '',
   courseFp = '',
+  wins = '1',
+  nearMiss = '3',
 ): Promise<Buffer> {
-  // 多桶：按 (kind, wver) 精确取——同节点可同时服务多个不同权重的训练流
-  const ws = weightsOf(kind, wver)
-  if (!ws) throw new Error(`no weights cached for kind=${kind} wver=${wver.slice(0, 12)}…`)
-  const wfile = ws.file
+  // 多桶：按 (kind, wver) 精确取——同节点可同时服务多个不同权重的训练流。
+  // mode=bc（BC 语料任务，2026-09-13）：God-AI 教师自对弈，无策略权重语义——
+  // 跳过权重桶查找（调用方 /v1/task 已保证只有 bcSupport 节点会收到该模式）。
+  const isBc = mode === 'bc'
+  const ws = isBc ? null : weightsOf(kind, wver)
+  if (!ws && !isBc) throw new Error(`no weights cached for kind=${kind} wver=${wver.slice(0, 12)}…`)
+  const wfile = ws?.file ?? ''
   // 干净评估走独立贪心 runner（不在 codeHash 集内，见 export-eval-game.ts 头注释）；
   // 只产 _eval_report.json，无 npy shards。v3.7：mode=eval 支持 policy=intent-exec
   // （意图网络选意图 + God-AI 白名单子链），意图权重经 kind='intent' 单独缓存。
   // M8（v3.10）：kind='intent' 且 mode='rollout' → export-intent-rollout.ts（意图步
   // semi-MDP 采样，reward/dt/mask/inject 全变）——意图 RL 分布式 rollout。
+  // BC（2026-09-13）：mode='bc' → export-godai-bc.ts（God-AI 单局 → BCV2 npy shard）。
   const isEval = mode === 'eval'
   const isIntentRollout = kind === 'intent' && !isEval
   // T7.2：kind='goal' 且 mode='rollout' → export-goal-rollout.ts（goal 承诺步采样）。
@@ -730,68 +736,96 @@ async function runGame(
     // §353：exporter 入口先取出，交给 runner 决定用 bun 直跑 TS 还是 node 跑打包产物。
     const entryTs = isEval
       ? 'tools/sim/export-eval-game.ts'
-      : isGoalRollout
-        ? 'tools/sim/export-goal-rollout.ts'
-        : isIntentRollout
-          ? 'tools/sim/export-intent-rollout.ts'
-          : 'tools/sim/export-rl-rollout.ts'
-    const args = [entryTs, '--weights', wfile, '--out', gameDir]
-    if (isEval) {
-      // export-eval-game.ts 用单数形式 --stage/--seed
-      args.push('--stage', String(stage), '--seed', String(seed))
-      if (policy && policy !== 'nn') {
-        args.push('--policy', policy)
-        const iw = latestWeightsOfKind('intent')
-        if (policy === 'intent-exec' && iw) args.push('--intent-weights', iw.file)
-        // T8.5：goal 策略权重经 kind='goal' 桶缓存。
-        const gw = latestWeightsOfKind('goal')
-        if (policy === 'goal' && gw) args.push('--goal-weights', gw.file)
-      }
-      // M1d 双侧同规：eval 也支持课程自定义关 stageJson + lives/level 覆盖
-      if (stageJson) args.push('--stage-json', stageJson)
-      if (livesOverride) args.push('--lives-override', livesOverride)
-      if (playerLevel) args.push('--player-level', playerLevel)
-    } else {
-      args.push('--stages', String(stage), '--seeds', String(seed))
-      if (isIntentRollout && replan > 0) args.push('--replan', String(replan))
-      if (isGoalRollout) {
-        args.push('--heartbeat', String(heartbeat))
-        if (goalCoarse) args.push('--coarse')
-      }
-      // goal-nn 卡 A3：dodge 模式覆盖（''=不传，导出器按 stage 解析默认）。
-      if (dodge) args.push('--dodge', dodge)
-      // M1d：课程自定义关 stageJson + 命数/星级覆盖（plan §5.2，导出器端四守卫）。
-      if (stageJson) args.push('--stage-json', stageJson)
-      if (livesOverride) args.push('--lives-override', livesOverride)
-      if (playerLevel) args.push('--player-level', playerLevel)
-      // D14：语料血缘 course_fp 进 shard manifest（仅 per-tick rollout——
-      // goal/intent exporter 不认识该参数）
-      if (courseFp && !isGoalRollout && !isIntentRollout) args.push('--course-fp', courseFp)
-    }
-    // §353：rollout 子进程运行时（node 跑打包产物 / bun 直跑 TS 源码）。
-    // 先取 runner 实例定 node-label，args 全部就位后再 launch（argv 快照须完整）。
-    const runner = rolloutRunner()
-    args.push(
-      '--max-ticks',
-      String(maxTicks),
-      '--difficulty',
-      difficulty,
-      '--wver',
-      ws.sha,
-      '--node-label',
-      `${runner.engine}-${process.pid}`,
-      // v3.6：容器在子进程内组装（BCV2，tools/sim/pack-container.ts）——base64+gzip+JSON
-      // 拼装与仿真并行，不再阻塞 agent 主线程（8 workers 串行打包曾是吞吐瓶颈）。
-      '--pack',
-      path.join(gameDir, '_result.pack'),
-    )
-    const plan = runner.launch(entryTs, args)
+      : isBc
+        ? 'tools/sim/export-godai-bc.ts'
+        : isGoalRollout
+          ? 'tools/sim/export-goal-rollout.ts'
+          : isIntentRollout
+            ? 'tools/sim/export-intent-rollout.ts'
+            : 'tools/sim/export-rl-rollout.ts'
+    const packFile = path.join(gameDir, '_result.pack')
     const scriptName = isEval
       ? 'export-eval-game'
-      : isIntentRollout
-        ? 'export-intent-rollout'
-        : 'export-rl-rollout'
-    const packFile = path.join(gameDir, '_result.pack')
+      : isBc
+        ? 'export-godai-bc'
+        : isGoalRollout
+          ? 'export-goal-rollout'
+          : isIntentRollout
+            ? 'export-intent-rollout'
+            : 'export-rl-rollout'
+    const runner = rolloutRunner()
+    const nodeLabel = `${runner.engine}-${process.pid}`
+    let args: string[]
+    if (isBc) {
+      // BC 任务参数（export-godai-bc.ts）：单局 stage/seed + 教师口径，无权重。
+      args = [entryTs, '--stage', String(stage), '--seed', String(seed)]
+      if (stageJson) args.push('--stage-json', stageJson)
+      if (livesOverride) args.push('--lives-override', livesOverride)
+      if (playerLevel) args.push('--player-level', playerLevel)
+      args.push(
+        '--difficulty',
+        difficulty,
+        '--max-ticks',
+        String(maxTicks),
+        '--wins',
+        wins,
+        '--near-miss-times',
+        nearMiss,
+        '--node-label',
+        nodeLabel,
+        '--pack',
+        packFile,
+      )
+    } else {
+      args = [entryTs, '--weights', wfile, '--out', gameDir]
+      if (isEval) {
+        // export-eval-game.ts 用单数形式 --stage/--seed
+        args.push('--stage', String(stage), '--seed', String(seed))
+        if (policy && policy !== 'nn') {
+          args.push('--policy', policy)
+          const iw = latestWeightsOfKind('intent')
+          if (policy === 'intent-exec' && iw) args.push('--intent-weights', iw.file)
+          // T8.5：goal 策略权重经 kind='goal' 桶缓存。
+          const gw = latestWeightsOfKind('goal')
+          if (policy === 'goal' && gw) args.push('--goal-weights', gw.file)
+        }
+        // M1d 双侧同规：eval 也支持课程自定义关 stageJson + lives/level 覆盖
+        if (stageJson) args.push('--stage-json', stageJson)
+        if (livesOverride) args.push('--lives-override', livesOverride)
+        if (playerLevel) args.push('--player-level', playerLevel)
+      } else {
+        args.push('--stages', String(stage), '--seeds', String(seed))
+        if (isIntentRollout && replan > 0) args.push('--replan', String(replan))
+        if (isGoalRollout) {
+          args.push('--heartbeat', String(heartbeat))
+          if (goalCoarse) args.push('--coarse')
+        }
+        // goal-nn 卡 A3：dodge 模式覆盖（''=不传，导出器按 stage 解析默认）。
+        if (dodge) args.push('--dodge', dodge)
+        // M1d：课程自定义关 stageJson + 命数/星级覆盖（plan §5.2，导出器端四守卫）。
+        if (stageJson) args.push('--stage-json', stageJson)
+        if (livesOverride) args.push('--lives-override', livesOverride)
+        if (playerLevel) args.push('--player-level', playerLevel)
+        // D14：语料血缘 course_fp 进 shard manifest（仅 per-tick rollout——
+        // goal/intent exporter 不认识该参数）
+        if (courseFp && !isGoalRollout && !isIntentRollout) args.push('--course-fp', courseFp)
+      }
+      args.push(
+        '--max-ticks',
+        String(maxTicks),
+        '--difficulty',
+        difficulty,
+        '--wver',
+        ws!.sha,
+        '--node-label',
+        nodeLabel,
+        // v3.6：容器在子进程内组装（BCV2，tools/sim/pack-container.ts）——base64+gzip+JSON
+        // 拼装与仿真并行，不再阻塞 agent 主线程（8 workers 串行打包曾是吞吐瓶颈）。
+        '--pack',
+        packFile,
+      )
+    }
+    const plan = runner.launch(entryTs, args)
     let packBuf: Buffer | null = null
     // §368：--persist 时 per-tick rollout 走长驻 worker（省每局进程启动/JIT 预热/wasm 编译），
     // 失败自动回退一次性 spawn（本局不丢）。
@@ -919,6 +953,8 @@ function beginTask(
   livesOverride = '',
   playerLevel = '',
   courseFp = '',
+  wins = '1',
+  nearMiss = '3',
 ): void {
   activeWorkers++
   inflight.set(key, { stage, seed, startedAt: Date.now() })
@@ -941,6 +977,8 @@ function beginTask(
     livesOverride,
     playerLevel,
     courseFp,
+    wins,
+    nearMiss,
   )
     .then((buf) => {
       lruPut(key, stampServiceSec(key, buf))
@@ -1181,8 +1219,13 @@ async function handle(req: Request): Promise<Response> {
     const policy = url.searchParams.get('policy') ?? 'nn'
     // M8：意图 rollout 的 replan cadence（export-intent-rollout --replan；缺省 0=不传）。
     const replan = parseInt(url.searchParams.get('replan') ?? '0', 10)
-    const ws = weightsOf(kind, wver)
-    if (!ws) return jsonResponse({ error: 'wver not cached here' }, 409)
+    // BC 语料任务（2026-09-13）：mode=bc 无权重语义——跳过权重桶检查；
+    // wins/nearMissTimes = God-AI 教师口径参数（export-godai-bc 透传）。
+    const isBc = mode === 'bc'
+    const wins = url.searchParams.get('wins') ?? '1'
+    const nearMissTimes = url.searchParams.get('nearMissTimes') ?? '3'
+    const ws = isBc ? null : weightsOf(kind, wver)
+    if (!ws && !isBc) return jsonResponse({ error: 'wver not cached here' }, 409)
     // M1d：课程自定义关参数（仅 per-tick rollout 消费；eval/其它 kind 忽略）。
     const stageJson = url.searchParams.get('stageJson') ?? ''
     const livesOverride = url.searchParams.get('livesOverride') ?? ''
@@ -1246,6 +1289,8 @@ async function handle(req: Request): Promise<Response> {
         livesOverride,
         playerLevel,
         courseFp,
+        wins,
+        nearMissTimes,
       )
       return jsonResponse({ status: 'accepted', token: key }, 202)
     }
@@ -1284,6 +1329,8 @@ async function handle(req: Request): Promise<Response> {
           livesOverride,
           playerLevel,
           courseFp,
+          wins,
+          nearMissTimes,
         )
           .then((buf) => {
             if (hb) clearInterval(hb)
@@ -1419,6 +1466,9 @@ async function handle(req: Request): Promise<Response> {
       evalSupport: true,
       // M1d：课程自定义关（stageJson）支持位——不支持的节点绝不派 stageJson 任务
       stageJsonSupport: true,
+      // BC 语料任务支持位（2026-09-13）：/v1/task ?mode=bc（God-AI 单局 → BCV2 npy
+      // shard）。旧 agent 无此字段 → bc_dispatch 不派（fail-closed，同 stageJsonSupport）。
+      bcSupport: true,
     })
   }
 

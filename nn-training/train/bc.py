@@ -369,6 +369,9 @@ def train(args) -> dict:
         "best_val_loss": best_val,
         "params": n_params,
         "history": history,
+        # 远程 BC job（plan/bc-cloud-integration.plan.md §3）回传 metrics 用；
+        # 本地 CLI 消费方忽略此键（行为不变）。
+        "sizes": dict(sizes),
     }
 
 

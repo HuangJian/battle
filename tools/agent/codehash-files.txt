@@ -33,5 +33,6 @@ tools/agent/codehash-files.ts
 tools/sim/export-rl-rollout.ts
 tools/sim/export-intent-rollout.ts
 tools/sim/export-eval-game.ts
+tools/sim/export-godai-bc.ts
 src/types.ts
 src/game/SimulationCombat.ts

@@ -33,6 +33,17 @@ export function resolveCourseBc(course: string): string {
   return legacy
 }
 
+/** 课程种类判定（BC 整合 2026-09-13）：`.bc.jsonc` = BC 课程（编排器 run_bc.py），
+ *  其余 `.jsonc` = RL 课程（run_rl.py）。控制台按此分流 spec / 冒烟 / 种子播种。 */
+export function isBcCourse(course: string): boolean {
+  if (!course) return false
+  try {
+    return existsSync(path.join(CURRICULA_DIR, `${course}.bc.jsonc`))
+  } catch {
+    return false
+  }
+}
+
 /** 按课程播种初始权重（console 与 hub 双路的实际 seeding 路径，DoD F-B6）。
  *
  *  `sha256(weightsPath) == sha256(课程 bc 声明的文件)` 由调用链保证——这里是唯一的

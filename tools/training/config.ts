@@ -28,9 +28,7 @@ export function saveConfig(cfg: RlConfig, cfgPath = configPath()): void {
  *  无课程时只写单键（默认行为零变化）。 */
 export function writeRemoteHubUrl(url: string, course = ''): void {
   const cfg = loadConfig()
-  const old = course
-    ? cfg.rl?.remote_hubs?.[course]
-    : cfg.rl?.remote_hub_url
+  const old = course ? cfg.rl?.remote_hubs?.[course] : cfg.rl?.remote_hub_url
   if (url && url !== old) {
     cfg.rl = cfg.rl || ({} as RlConfig['rl'])
     cfg.rl.remote_hub_url = url
@@ -66,13 +64,16 @@ export function printRecentCourses(): void {
   }
 }
 
-/** 课程参数快速失败：先按路径、再按 curricula/<name>.jsonc。拼错在启动任何
+/** 课程参数快速失败：先按路径、再按 curricula/<name>.jsonc（RL 课程）或
+ *  curricula/<name>.bc.jsonc（BC 课程，2026-09-13）。拼错在启动任何
  *  基础设施之前响亮报错（DECISIONS §340 补充 2）。 */
 export function validateCourseArg(name: string): void {
   if (!name || existsSync(name)) return
   if (existsSync(path.join(CURRICULA_DIR, `${name}.jsonc`))) return
+  if (existsSync(path.join(CURRICULA_DIR, `${name}.bc.jsonc`))) return
   console.error(
-    `\n课程 '${name}' 不存在（查找 ${path.join(CURRICULA_DIR, name)}.jsonc，或传已存在的课程文件路径）。`,
+    `\n课程 '${name}' 不存在（查找 ${path.join(CURRICULA_DIR, name)}.jsonc / ` +
+      `${name}.bc.jsonc，或传已存在的课程文件路径）。`,
   )
   printRecentCourses()
   process.exit(1)

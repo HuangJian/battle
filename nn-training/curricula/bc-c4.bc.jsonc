@@ -1,0 +1,45 @@
+// BC 课程 bc-c4 —— 云-HUB-LAN 行为克隆（2026-09-13，plan/bc-cloud-integration.plan.md §2）
+//
+// 这是**BC 课程**（curricula/<name>.bc.jsonc），与 RL 课程（<name>.jsonc）分文件种类：
+//   · 环境语义（stages/difficulty/max_ticks/player）经 `"level": "arena4"` 引用关卡文件
+//     注入（DECISIONS §2026-09-13-level-extraction：关卡 = 环境语义唯一来源）；
+//   · 语料 = God-AI 教师在 arena4 上自对弈（wins-only），LAN 集群分 (stage,seed) 采集；
+//   · 训练 = 云端 train/bc.py（arch=student 蒸馏主线；value_coef=0——历史教训
+//     docs/nn.progress.md §15 M3：value MC 回归在 coef 0.05 下都爆，纯 BC 起步）；
+//   · 产物 = tmp/bc-c4/weights.json + 归档 nn-training/weights/bc-c4/bc-c4.it<N>.<ts>.json，
+//     可直接作为 RL 课程的 `bc` 种子 / kickstart_ref 冻结快照。
+//
+// 配置修改分类学（同关卡文件头部）：corpus/level 改动 = 语料破裂（corpus_fp 变，
+// 禁止对在跑腿修改）；train 改动 = 新实验（stop→start）；out/traj/iters = 预算路径。
+{
+  "version": 1,
+  "name": "bc-c4-distill",
+  "kind": "bc",
+  "level": "arena4",
+
+  "corpus": {
+    "games_per_stage": 40,
+    "wins_only": true,
+    "near_miss_times": 3,
+    "seed_rotate": 64,
+  },
+
+  "train": {
+    "arch": "student",
+    "epochs": 60,
+    "batch": 512,
+    "lr": 3e-3,
+    "mirror_p": 0.5,
+    "val_split": 0.1,
+    "value_coef": 0.0,
+    "seed": 1234,
+    "ckpt_every": 0,
+  },
+
+  "iters": 1,
+  "workers": 8,
+  "out": "tmp/bc-c4/weights.json",
+  "traj": "tmp/bc-c4",
+  "backup_dir": "nn-training/weights/bc-c4",
+  "backup_prefix": "bc-c4",
+}

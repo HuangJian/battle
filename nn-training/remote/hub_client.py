@@ -118,6 +118,30 @@ def iter_shard_dirs(traj_dir: str | Path, it: int, log=lambda msg: None) -> list
     return dirs
 
 
+def iter_bc_shard_dirs(traj_dir: str | Path, it: int, log=lambda msg: None) -> list[Path]:
+    """本轮 BC 语料 shard 集（plan/bc-cloud-integration.plan.md §4）：
+    `<traj>/bc-data/it{it}/bc_s*_seed*/`（含 manifest.json）。
+
+    同名 shard 去重与 PPO（iter_shard_dirs）同策略：按 manifest mtime 保留最早一份
+    （先写盘者 = 结算赢家），退役者响亮日志。"""
+    data_root = Path(traj_dir) / "bc-data" / f"it{it}"
+    if not data_root.exists():
+        return []
+    groups: dict[str, list[Path]] = {}
+    for p in data_root.glob("bc_s*_seed*"):
+        if p.is_dir() and (p / "manifest.json").is_file():
+            groups.setdefault(p.name, []).append(p)
+    dirs: list[Path] = []
+    for name in sorted(groups):
+        ds = groups[name]
+        if len(ds) > 1:
+            ds.sort(key=lambda d: ((d / "manifest.json").stat().st_mtime, str(d)))
+            for loser in ds[1:]:
+                log(f"[publish] duplicate bc shard {name}: retire {loser} (keep {ds[0]})")
+        dirs.append(ds[0])
+    return dirs
+
+
 def pack_payload_zip(
     shard_dirs: list[Path],
     extra_files: list[Path],
@@ -227,8 +251,6 @@ def publish_job(
     it: int,
     traj_dir: str | Path,
     shard_dirs: list[Path],
-    init_weights_path: str,
-    ckpt_remote_dir: str | Path | None,
     commit: str,
     code_sha256: str,
     code_zip_path: str | Path | None = None,
@@ -242,26 +264,35 @@ def publish_job(
     # 与 course_fp 并存进 manifest；worker 装载校验优先比它（预算/路径类课程编辑
     # 只动 course_fp，不得触发 shard 拒收）。空 = 缺席（worker 回退 legacy 比对）。
     corpus_fp: str = "",
-    reward_formula: str,
-    formula_hash: str,
-    metrics_version: int,
-    gamma: float,
-    lam: float,
+    init_weights_path: str = "",
+    ckpt_remote_dir: str | Path | None = None,
+    reward_formula: str = "",
+    formula_hash: str = "",
+    metrics_version: int = 0,
+    gamma: float = 0.0,
+    lam: float = 0.0,
     mode: str,
     epochs: int,
     mb: int,
     lr: float,
-    kl_coef: float,
-    kl_cap: float | None,
-    adv_norm: str,
+    kl_coef: float = 0.0,
+    kl_cap: float | None = None,
+    adv_norm: str = "auto",
     normalize_ret: bool = False,
     kickstart_kl: float = 0.0,
     # 熵正则系数（2026-09-11 接线）：None = 用引擎常量 ENT_COEF（0.01）。
     ent_coef: float | None = None,
     ref_weights_b64: str = "",
     ref_weights_fp: str = "",
-    shuffle: bool,
-    schedule_raw: list,
+    shuffle: bool = True,
+    schedule_raw: list | None = None,
+    # 任务类型（BC 整合，plan/bc-cloud-integration.plan.md §4）：缺省 "ppo" =
+    # 原行为逐字节不变；"bc" = 行为克隆 job——manifest 免除 PPO 专有键
+    # （protocol.MANIFEST_BC_EXEMPT）并并入 `extra`（arch/val_split/mirror_p/
+    # value_coef/ckpt_every）。init_weights_path 空 = BC 无 warm-start（不拷 init
+    # 文件，init_weights_fp 恒 "bc"——幂等键分量仍稳定）。
+    kind: str = "ppo",
+    extra: dict | None = None,
     log=lambda msg: print(f"[hub] {msg}", flush=True),
 ) -> dict:
     """打包 + 发布 job（磁盘 IPC）：job_root/<job_id>/ + jsonl job_pending 事件。
@@ -270,23 +301,19 @@ def publish_job(
     （幂等键相同）已发布 → 覆盖 payload、不重复追加 pending。
     """
     job_root_p = Path(job_root)
+    kind = str(kind or "ppo")
+    schedule_raw = schedule_raw if schedule_raw is not None else []
     # 1) data_fp（D1：排序 shard 路径 + manifest {wver,stage,seed}）
     fp = data_fp(shard_dirs)
-    # 2) init_weights_fp（fencing：云返回的 init_weights_fp 必须等于当前 args.out 指纹）
-    init_weights_fp = _sha256_file(init_weights_path)
+    # 2) init_weights_fp（fencing：云回传的 init_weights_fp 必须等于当前 args.out 指纹；
+    #    BC 无 warm-start → 恒 "bc" 占位）
+    init_weights_fp = _sha256_file(init_weights_path) if init_weights_path else "bc"
     # 3) opt_init tar（上轮 ppo_ckpt_remote；空 = 首轮，D5）
     opt_init = _pack_opt_init(ckpt_remote_dir)
     # 4) manifest 预建（payload_sha256 占位）→ 打包（zip 内 manifest 为占位副本）
     extra_files: list[Path] = []
     tmp_extra_dir = job_root_p / ".extra_tmp"
     tmp_extra_dir.mkdir(parents=True, exist_ok=True)
-    init_copy = tmp_extra_dir / "init_weights.json"
-    shutil.copyfile(init_weights_path, init_copy)
-    extra_files.append(init_copy)
-    if opt_init:
-        opt_copy = tmp_extra_dir / "opt_init.tar.b64"
-        opt_copy.write_text(opt_init, encoding="utf-8")
-        extra_files.append(opt_copy)
     m = {
         "proto": 1,
         "runId": run_id,
@@ -296,11 +323,6 @@ def publish_job(
         "course": course,
         "course_fp": course_fp,
         "corpus_fp": corpus_fp,
-        "reward_formula": reward_formula,
-        "formula_hash": formula_hash,
-        "metrics_version": metrics_version,
-        "gamma": gamma,
-        "lam": lam,
         "mode": mode,
         "epochs": epochs,
         "mb": mb,
@@ -320,6 +342,31 @@ def publish_job(
         "data_fp": fp,
         "payload_sha256": "",
     }
+    if init_weights_path:
+        init_copy = tmp_extra_dir / "init_weights.json"
+        shutil.copyfile(init_weights_path, init_copy)
+        extra_files.append(init_copy)
+    if opt_init:
+        opt_copy = tmp_extra_dir / "opt_init.tar.b64"
+        opt_copy.write_text(opt_init, encoding="utf-8")
+        extra_files.append(opt_copy)
+    if kind == "bc":
+        # BC manifest：免除 PPO 专有键（与 protocol.MANIFEST_BC_EXEMPT 同表），并入 extra
+        for k in ("kl_coef", "kl_cap", "adv_norm", "normalize_ret", "kickstart_kl", "ent_coef"):
+            m.pop(k, None)
+        m.pop("ref_weights_b64", None)
+        m.pop("ref_weights_fp", None)
+        m.pop("opt_init", None)
+        m.pop("schedule_raw", None)
+        for k, v in (extra or {}).items():
+            m[k] = v
+    else:
+        m["reward_formula"] = reward_formula
+        m["formula_hash"] = formula_hash
+        m["metrics_version"] = metrics_version
+        m["gamma"] = gamma
+        m["lam"] = lam
+    m["kind"] = kind
     m["seed"] = job_seed(run_id, it, init_weights_fp)
     m["job_id"] = make_job_id(m)
     if course_name:
@@ -693,6 +740,51 @@ def verify_and_land(
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     _extract_tar(opt_tar, ckpt_dir)
     log(f"opt ckpt landed -> {ckpt_dir}")
+    return wver
+
+
+def verify_and_land_bc(
+    result: dict,
+    manifest: dict,
+    *,
+    traj_dir: str | Path,
+    it: int,
+    out_weights: str,
+    log=lambda msg: print(f"[hub] {msg}", flush=True),
+) -> str:
+    """BC 结果校验 + 落盘（plan/bc-cloud-integration.plan.md §4；verify_and_land 的 BC 版）。
+
+    校验（无 init-weights fencing——BC 无 warm-start，改对账 manifest 自带指纹）：
+      1. init_weights_fp == manifest 值（防 result 错配 job）；
+      2. data_fp == 本地对当前轮 bc shard 集重算（防云训练了别的语料，D12 同语义）；
+      3. commit_echo == manifest.commit（代码版本一致）。
+    落盘：weights_json 原子写 out_weights（无 opt tar——BC v1 不跨轮续训）。
+    返回落盘 weights 的指纹（wver）。
+    """
+    m = normalize_manifest(manifest)
+    if result["init_weights_fp"] != m["init_weights_fp"]:
+        raise HubClientError(
+            "BC 校验失败: init_weights_fp 不匹配（result 与 manifest 错配）——拒收"
+        )
+    local_fp = data_fp(iter_bc_shard_dirs(traj_dir, it, log=log))
+    if result["data_fp"] != local_fp:
+        raise HubClientError(
+            f"BC 校验失败: data_fp 不匹配（云={result['data_fp'][:12]}… "
+            f"本地={local_fp[:12]}…）——拒收"
+        )
+    if result["commit_echo"] != m["commit"]:
+        raise HubClientError(
+            f"BC 校验失败: commit_echo={result['commit_echo'][:12]}… != "
+            f"manifest.commit={m['commit'][:12]}…——拒收"
+        )
+    wj = decode_weights_json(str(result["weights_json"]))
+    out_p = Path(out_weights)
+    out_p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out_p.with_suffix(out_p.suffix + ".bc.tmp")
+    tmp.write_bytes(wj)
+    os.replace(tmp, out_p)
+    wver = _sha256_file(str(out_p))
+    log(f"weights landed -> {out_weights} ({len(wj)} bytes, wver={wver[:12]}…)")
     return wver
 
 

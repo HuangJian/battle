@@ -171,12 +171,11 @@ def make_loaders(
     full = NNDataset(data, augment=False)
     n = len(full)
     n_val = int(n * val_split)
-    n_tr = n - n_val
     gen = torch.Generator().manual_seed(seed)
     shard_ids = data.get("shard_ids")
-    if shard_ids is not None:
+    n_shards = 0 if shard_ids is None else int(shard_ids.max()) + 1
+    if shard_ids is not None and n_shards >= 2:
         # P2-6d：shard 级切分——val 取整 shard，样本数累计 ≥ n_val 即停
-        n_shards = int(shard_ids.max()) + 1
         shard_sizes = [int((shard_ids == s).sum()) for s in range(n_shards)]
         val_shards: list[int] = []
         acc = 0
@@ -193,10 +192,16 @@ def make_loaders(
         # sizes 用**实际**切分大小（shard 级切分后 val 是整 shard，可能略超 n_val）
         sizes = {"train": len(train_ds), "val": len(val_ds), "total": n}
     else:
-        # 旧语料（无 shard 元数据）：样本级 random_split
-        train_sub, val_ds = random_split(full, [n_tr, n_val], generator=gen)
+        # 旧语料（无 shard 元数据）或**单 shard 微语料**：样本级 random_split。
+        # 单 shard 走 shard 级切分会把全部样本划进 val（train=0 → DataLoader
+        # num_samples=0 崩溃，2026-09-13 bc 冒烟实测）；样本级对 1 shard 是唯一
+        # 能给出非空 train 的切法。
+        if n < 2:
+            raise ValueError(f"语料样本数 {n} < 2——无法切分 train/val（{data_dir}）")
+        n_val = max(0, min(n - 1, n_val))
+        train_sub, val_ds = random_split(full, [n - n_val, n_val], generator=gen)
         train_ds = _AugWrapper(data, list(train_sub.indices), mirror_p, seed)
-        sizes = {"train": n_tr, "val": n_val, "total": n}
+        sizes = {"train": n - n_val, "val": n_val, "total": n}
     return (
         DataLoader(
             train_ds,

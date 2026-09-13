@@ -98,3 +98,18 @@ def test_make_loaders_old_corpus_falls_back(tmp_path: Path) -> None:
     )
     assert sizes["total"] == 240
     assert sizes["train"] + sizes["val"] == 240
+
+
+def test_single_shard_corpus_falls_back_to_sample_split(tmp_path: Path) -> None:
+    """单 shard 微语料：shard 级切分会把全部样本划进 val（train=0 → DataLoader
+    num_samples=0 崩溃，2026-09-13 bc 云端冒烟实测）——必须回退样本级切分，
+    train/val 两边都非空。"""
+    corpus = _make_corpus(tmp_path, n_shards=1, frames_per_shard=181)
+    train_dl, val_dl, sizes = make_loaders(str(corpus), batch_size=64, val_split=0.1, seed=1234)
+    assert sizes["total"] == 181
+    assert sizes["train"] > 0, "单 shard 语料 train 不得为空"
+    assert sizes["val"] > 0, "单 shard 语料 val 不得为空"
+    assert sizes["train"] + sizes["val"] == 181
+    # 两个 loader 都能真正迭代出批次（崩溃点回归）
+    next(iter(train_dl))
+    next(iter(val_dl))

@@ -73,8 +73,22 @@ MANIFEST_REQUIRED = (
     "data_fp",
     "payload_sha256",
 )
-#: 可选字段（缺失给默认；未知字段忽略——proto=1 语义）
+#: kind=bc（行为克隆 job）免除的 PPO 专有必填（BC 无 reward/γ/λ 语义）；
+#: 追加必填 `arch`（bc|student）。plan/bc-cloud-integration.plan.md §1。
+MANIFEST_BC_EXEMPT: tuple[str, ...] = (
+    "reward_formula",
+    "formula_hash",
+    "metrics_version",
+    "gamma",
+    "lam",
+)
+MANIFEST_BC_EXTRA: tuple[str, ...] = ("arch",)
+#: 任务类型（2026-09-13 BC 整合）：缺省 "ppo" = 既有 per-tick PPO job（wire 兼容——
+#: 旧 hub 产出的 manifest 无此键，一律按 ppo 校验）。"bc" = 行为克隆 job（语料 npy
+#: shard 进 payload，云端跑 train/bc.py，回传 BC 权重；无 reward/γ/λ 语义）。
+#: plan/bc-cloud-integration.plan.md §1。
 MANIFEST_OPTIONAL_DEFAULTS: dict[str, object] = {
+    "kind": "ppo",
     "kl_coef": 0.0,
     "kl_cap": None,  # None = 不覆盖，由 policy.streamKlCap 决定
     "ent_coef": None,  # 2026-09-11：None = 用引擎常量 ENT_COEF（0.01）；0.0 是合法值
@@ -130,7 +144,13 @@ def normalize_manifest(m: dict) -> dict:
     """
     if not isinstance(m, dict):
         raise ProtocolError(f"manifest 必须是对象，收到 {type(m).__name__}")
-    missing = [k for k in MANIFEST_REQUIRED if k not in m]
+    kind = str(m.get("kind", "ppo") or "ppo")
+    required = [
+        k for k in MANIFEST_REQUIRED if not (kind == "bc" and k in MANIFEST_BC_EXEMPT)
+    ]
+    if kind == "bc":
+        required += list(MANIFEST_BC_EXTRA)
+    missing = [k for k in required if k not in m]
     if missing:
         raise ProtocolError(f"manifest 缺失必填字段: {missing}")
     if int(m.get("proto", -1)) != PROTO:
@@ -138,14 +158,18 @@ def normalize_manifest(m: dict) -> dict:
     out = dict(m)
     for k, v in MANIFEST_OPTIONAL_DEFAULTS.items():
         out.setdefault(k, v)
-    # 标量类型校验（fail fast，防拼错/串位）
+    # 标量类型校验（fail fast，防拼错/串位）——按 kind 实际持有的键校验
     if not isinstance(out["runId"], str) or not out["runId"]:
         raise ProtocolError("runId 必须是非空 str")
     for k in ("it", "epochs", "mb", "metrics_version"):
+        if k not in out:
+            continue
         if not isinstance(out[k], int) or isinstance(out[k], bool):
             raise ProtocolError(f"{k} 必须是 int，收到 {out[k]!r}")
     for k in ("gamma", "lam", "lr"):
-        v = out[k]
+        v = out.get(k)
+        if v is None:
+            continue
         if not isinstance(v, (int, float)) or isinstance(v, bool):
             raise ProtocolError(f"{k} 必须是 float，收到 {v!r}")
         if float(v) <= 0:
@@ -164,10 +188,18 @@ def normalize_manifest(m: dict) -> dict:
     ):
         if not isinstance(out[k], str) or not out[k]:
             raise ProtocolError(f"{k} 必须是非空 str")
-    if out["mode"] != "per-tick":
-        raise ProtocolError(
-            f"mode={out['mode']!r} != 'per-tick'（v1 红线：仅 per-tick 课程支持远程）"
-        )
+    # kind 红线（plan/bc-cloud-integration.plan.md §1）：ppo 仅 per-tick（v1 原红线），
+    # bc 仅 mode="bc"——两种任务类型在 mode 通道上互斥，杜绝串型。
+    if kind == "bc":
+        if out["mode"] != "bc":
+            raise ProtocolError(f"kind=bc 要求 mode='bc'，收到 {out['mode']!r}（拒收）")
+        if out["arch"] not in ("bc", "student"):
+            raise ProtocolError(f"bc manifest arch 必须是 'bc'|'student'，收到 {out['arch']!r}")
+    else:
+        if out["mode"] != "per-tick":
+            raise ProtocolError(
+                f"mode={out['mode']!r} != 'per-tick'（v1 红线：仅 per-tick 课程支持远程）"
+            )
     if not isinstance(out.get("normalize_ret", False), bool):
         raise ProtocolError(f"normalize_ret 必须是 bool，收到 {out.get('normalize_ret')!r}")
     if not isinstance(out.get("kickstart_kl", 0.0), (int, float)) or isinstance(
@@ -381,6 +413,14 @@ def validate_result(
     wj = r["weights_json"]
     if not isinstance(wj, (str, bytes)) or len(wj) == 0:
         raise ProtocolError("result.weights_json 必须非空（base64 或原始字节）")
+    if str(manifest.get("kind", "ppo") or "ppo") == "bc":
+        # BC 结果：无 agg（PPO 训练指标），改查 metrics（train/bc.py 产出的训练汇总）。
+        metrics = r.get("metrics")
+        if not isinstance(metrics, dict) or not all(
+            k in metrics for k in ("epochs", "train_samples", "val_samples", "best_val_loss")
+        ):
+            raise ProtocolError(f"bc result.metrics 缺关键字段: {metrics!r}")
+        return r
     agg = r.get("agg")
     if not isinstance(agg, dict) or not all(
         k in agg for k in ("policy", "value", "entropy", "kl", "mean_ret")

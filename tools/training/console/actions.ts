@@ -15,17 +15,10 @@
  *  --ppo/--env 与基建组件组合。
  */
 
-import {
-  appendFileSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  statSync,
-  writeFileSync,
-} from 'fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'fs'
 import path from 'path'
 import { LOG_DIR, REPO_ROOT, consoleStatePath } from '../paths'
-import { resolveCourseBc, seedWeightsFromBc } from '../courses'
+import { isBcCourse, resolveCourseBc, seedWeightsFromBc } from '../courses'
 export { resolveCourseBc } // hub.ts 侧从 ../courses 直引；老调用方经 actions 零改动。
 import { httpOk, killPid, pidAlive, waitUntil } from '../net'
 import { warn as logWarn } from '../log'
@@ -42,7 +35,9 @@ import { lockName, lockPathFor, slotOf, slotPort, validateCourseName } from '../
 import { resolveVenvPython } from '../venv'
 import { monitorTouch } from '../reload-touch'
 import {
+  BC_LOOP_ENTRY,
   TRAINING_LOOP_ENTRY,
+  bcLoopSpec,
   cloudflaredSpec,
   hubServerSpec,
   selfNodeSpec,
@@ -59,6 +54,7 @@ import {
 import {
   hubServerHealthy,
   selfNodeHealthy,
+  stepBcSmokeRehearsal,
   stepCloudflared,
   stepHubServer,
   stepKaggleRehearsal,
@@ -282,6 +278,94 @@ export interface StartCtx {
   trainerPpo: ConsoleState['trainerPpo']
 }
 
+/** run_bc 单实例锁持有人（BC 课程；与 runRlLockHolder 同语义，锁名 run_bc）。 */
+export function runBcLockHolder(course = ''): number | null {
+  const lockPath = lockPathFor(validateCourseName(course), 'run_bc')
+  if (!existsSync(lockPath)) return null
+  try {
+    const holder = Number.parseInt((readFileSync(lockPath, 'utf-8').split('|')[0] ?? '').trim(), 10)
+    return Number.isInteger(holder) && holder > 0 && pidAlive(holder) ? holder : null
+  } catch {
+    return null
+  }
+}
+
+/** 启动 BC 编排器（run_bc.py）：BC 课程的 trainingLoop 分支——无 BC 种子权重播种
+ *  （BC 无 warm-start）、锁名 run_bc、spec = bcLoopSpec（REMOTE_PUSH_NODE 注入
+ *  courses.<课>.push_node_url，smoke 由动作层 --smoke 预演覆盖）。 */
+async function startBcLoop(
+  cfg: RlConfig,
+  venv: { python: string; sitePackages: string },
+  course: string,
+  trainerPpo: ConsoleState['trainerPpo'],
+): Promise<ActionResult> {
+  const prev = entryOf('trainingLoop', course)
+  if (pidAlive(prev?.pid)) return done(false, `BcLoop 已在运行 (PID ${prev!.pid})——先停止再启动`)
+  const holder = runBcLockHolder(course)
+  if (holder)
+    return done(
+      false,
+      `run_bc 锁被 PID ${holder} 持有（${path.join('nn-training', lockName(course, 'run_bc'))}）` +
+        '——先停止在跑训练（或删除该锁文件）',
+    )
+  const trainLog = path.join(LOG_DIR, course, 'training-loop.log')
+  const baseline = (() => {
+    try {
+      return statSync(trainLog).size
+    } catch {
+      return 0
+    }
+  })()
+  const spec = bcLoopSpec(cfg, {
+    course,
+    ppo: trainerPpo,
+    pushNodeUrl: cfg.courses?.[course]?.push_node_url,
+    venv,
+  })
+  const r = launchSpec(spec)
+  saveAnyComponent('trainingLoop', course, {
+    pid: r.pid,
+    course,
+    slot: slotOf(cfg, course),
+    entry: BC_LOOP_ENTRY,
+    mode: trainerPpo,
+    pushNodeUrl: cfg.courses?.[course]?.push_node_url,
+    log: trainLog,
+  })
+  monitorTouch()
+  await waitUntil(
+    async () => {
+      if (!pidAlive(r.pid)) return true
+      try {
+        return statSync(trainLog).size > baseline
+      } catch {
+        return false
+      }
+    },
+    20000,
+    500,
+  )
+  if (!pidAlive(r.pid)) {
+    try {
+      appendFileSync(
+        trainLog,
+        `\n[console] ${new Date().toISOString()} BcLoop 启动即退出 (PID ${r.pid})——` +
+          `启动失败，原因见上方日志尾段：\n` +
+          tailLines(trainLog)
+            .map((l) => `  | ${l}`)
+            .join('\n') +
+          '\n',
+        'utf-8',
+      )
+    } catch {
+      /* best-effort */
+    }
+    clearAnyComponent('trainingLoop', course)
+    return done(false, `BcLoop 启动即退出 (PID ${r.pid})`, tailLines(trainLog))
+  }
+  return done(true, `BcLoop 已启动 (PID ${r.pid}, ppo=${trainerPpo})`)
+}
+
 /** 启动单个组件（已在运行 = 幂等成功；依赖缺失 = ActionError/失败结果）。 */
 export async function startComponent(key: Component, ctx: StartCtx): Promise<ActionResult> {
   guard(busyKey('start', key, ctx.course))
@@ -330,6 +414,8 @@ export async function startComponent(key: Component, ctx: StartCtx): Promise<Act
       case 'trainingLoop': {
         if (!ctx.course) throw new ActionError('trainer 需要 course（先在顶部设置课程）')
         validateCourseArg(ctx.course)
+        // BC 课程 → run_bc.py 编排器（无 BC 种子播种；run_bc 锁）
+        if (isBcCourse(ctx.course)) return await startBcLoop(cfg, venv, ctx.course, ctx.trainerPpo)
         const prevTl = entryOf('trainingLoop', ctx.course)
         if (pidAlive(prevTl?.pid))
           return done(false, `TrainingLoop 已在运行 (PID ${prevTl!.pid})——先停止再启动`)
@@ -698,10 +784,78 @@ export async function setNodeConcurrency(id: string, concurrency: number): Promi
  *  TrainingLoop（--smoke）发布真 job 并推送 → 伪节点 echo 回显 → 三重校验落位 →
  *  作废本轮干净退出（it 不前进、账本零污染，DECISIONS §340）。不跑真 PPO。
  *  完成/失败后都停掉预演用 TrainingLoop（--smoke 进程没有 echo 结果会一直等待）。 */
+/** BC 冒烟预演（BcLoop）：语料 1 局 God-AI → kind=bc job → 本机伪 GPU 节点
+ *  **真 BC 训练 1 epoch** → 回传落位 → 作废退出。与 RL smokeTrain 的差异：
+ *  无 BC 种子播种（BC 无 warm-start）、无 echo（伪节点跑真训练）、
+ *  三里程碑 = published job → weights landed → BC SMOKE PASS。 */
+async function smokeTrainBc(course: string): Promise<ActionResult> {
+  let servePid = 0
+  try {
+    const cfg = loadConfig()
+    if (pidAlive(entryOf('trainingLoop', course)?.pid))
+      return done(false, 'BcLoop 已在运行（可能是真训练）——预演会干扰在途 job，先停止')
+    const venv = resolveVenvPython()
+
+    // 1) 本机伪 GPU 节点
+    const { pushUrl, servePid: pid } = await startLocalWorkerServer({ course, cfg, venv })
+    servePid = pid
+
+    // 2) 真 BC 课程 run_bc.py --smoke（REMOTE_PUSH_NODE 注入伪节点）
+    const trainLog = path.join(LOG_DIR, course, 'training-loop.log')
+    const spec = bcLoopSpec(cfg, {
+      course,
+      ppo: 'remote',
+      smoke: true,
+      pushNodeUrl: pushUrl,
+      venv,
+    })
+    const r = launchSpec(spec)
+    saveAnyComponent('trainingLoop', course, {
+      pid: r.pid,
+      course,
+      slot: slotOf(cfg, course),
+      entry: BC_LOOP_ENTRY,
+      mode: 'remote',
+      log: trainLog,
+    })
+    monitorTouch()
+
+    // 3) 预演等三段里程碑，任何一段失败都停预演进程
+    try {
+      await stepBcSmokeRehearsal(course, r.pid)
+    } catch (e) {
+      if (pidAlive(r.pid)) {
+        await killPid(r.pid)
+        clearAnyComponent('trainingLoop', course)
+      }
+      return done(
+        false,
+        `BC 冒烟预演未通过: ${e instanceof Error ? e.message : e}`,
+        tailLines(trainLog, 6),
+      )
+    }
+    return done(
+      true,
+      'BC 冒烟预演全通过（采集→发布→真 BC 训练→回传→落位→作废；真训练零污染）',
+      tailLines(trainLog, 4),
+    )
+  } catch (e) {
+    return done(false, `BC 预演失败: ${e instanceof Error ? e.message : e}`)
+  } finally {
+    if (servePid) {
+      const { killPid } = await import('../net')
+      await killPid(servePid)
+    }
+    release('smoke:train')
+  }
+}
+
 export async function smokeTrain(course: string): Promise<ActionResult> {
   // M2：busy 键按课（两课可同时冒烟；全局键会第二次 409）。P5 才全量 course-keyed，
   // smokeTrain 是提前的那一个（P3 全链路验收要双课同冒）。
   guard(`smoke:train:${course}`)
+  // BC 课程 → BcLoop 冒烟预演（真 BC 训练 1 epoch，无 echo）
+  if (isBcCourse(course)) return await smokeTrainBc(course)
   let servePid = 0
   try {
     if (!course) throw new ActionError('需要 course（先在顶部设置课程）')
@@ -800,6 +954,15 @@ export function restartSpecFor(key: Component, course = ''): ProcSpec | null {
     case 'workerServe':
       return workerServeSpec(cfg, venv, c)
     case 'trainingLoop':
+      // BC 课程 → run_bc 编排器 spec（2026-09-13；entry 区分 rl/bc 入口）
+      if (isBcCourse(c)) {
+        return bcLoopSpec(cfg, {
+          course: c,
+          ppo: entry.mode,
+          pushNodeUrl: entry.pushNodeUrl,
+          venv,
+        })
+      }
       return trainingLoopSpec(cfg, {
         course: c,
         ppo: entry.mode,

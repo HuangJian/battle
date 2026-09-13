@@ -367,6 +367,13 @@ def test_jsonc_courses_load() -> None:
     files = sorted(CURRICULA_DIR.glob("*.jsonc"))
     assert len(files) >= 5, f"课程配置太少：{files}"
     for f in files:
+        if f.name.endswith(".bc.jsonc"):
+            # BC 课程（2026-09-13）：独立文件种类，BcCourseConfig 校验
+            from rl.bc_config import load_bc_course
+
+            bc = load_bc_course(f)
+            assert bc.kind == "bc" and bc.name
+            continue
         c = load_course(f)
         assert isinstance(c, CourseConfig)
         assert c.name

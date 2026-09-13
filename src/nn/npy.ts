@@ -31,16 +31,11 @@ const DESCR: Record<NpyDtype, string> = {
 }
 
 /**
- * Write a raw `.npy` file. `view` is the typed-array view of the data
- * (e.g. Uint8Array for obs, Float32Array for scalars). `shape` is the logical
- * tensor shape (e.g. [N, 14, 26, 26]).
+ * Serialize one array to raw `.npy` bytes (in memory). Same byte layout as
+ * `writeNpy` — callers that don't want a temp file (e.g. the distributed BC
+ * exporter packing shards straight into a BCV2 container) use this directly.
  */
-export function writeNpy(
-  path: string,
-  view: ArrayBufferView,
-  shape: number[],
-  dtype: NpyDtype,
-): void {
+export function npyBytes(view: ArrayBufferView, shape: number[], dtype: NpyDtype): Buffer {
   // A 1-D shape like [N] must serialize as "(N,)" — Python parses "(N)" as a
   // bare integer, not a tuple, and numpy.load rejects it. Multi-dim is fine
   // either way, so always add the trailing comma for the single-dim case.
@@ -60,9 +55,22 @@ export function writeNpy(
   lenBuf.writeUInt16LE(headerBytes.length + pad, 0)
   const padBuf = Buffer.alloc(pad, 0x20) // spaces, like numpy
   const dataBuf = Buffer.from(view.buffer, view.byteOffset, view.byteLength)
-  const out = Buffer.concat([magic, version, lenBuf, headerBytes, padBuf, dataBuf])
+  return Buffer.concat([magic, version, lenBuf, headerBytes, padBuf, dataBuf])
+}
+
+/**
+ * Write a raw `.npy` file. `view` is the typed-array view of the data
+ * (e.g. Uint8Array for obs, Float32Array for scalars). `shape` is the logical
+ * tensor shape (e.g. [N, 14, 26, 26]).
+ */
+export function writeNpy(
+  path: string,
+  view: ArrayBufferView,
+  shape: number[],
+  dtype: NpyDtype,
+): void {
   mkdirSync(dirname(path), { recursive: true })
-  writeFileSync(path, out)
+  writeFileSync(path, npyBytes(view, shape, dtype))
 }
 
 /** Per-shard arrays (flat, row-major). */
