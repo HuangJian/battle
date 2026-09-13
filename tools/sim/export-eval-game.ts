@@ -31,6 +31,7 @@
  *   bun tools/sim/export-eval-game.ts --weights <weights.json> \
  *       --stage 7 --seed 860001 --difficulty hard --max-ticks 12000 \
  *       --wver <sha> [--node-label self] --out <gameDir>
+ *       [--replay <dir>]   # 可选：整局输入录制成 <dir>/<canonical>.replay（评估语义零变化）
  */
 import { World } from '../../src/game/World'
 import { Simulation } from '../../src/game/Simulation'
@@ -42,7 +43,10 @@ import { STAGES } from '../../src/config/stages'
 import { isArenaId, resolveArenaStage, arenaLevelOfId } from '../../src/nn/arena-ladder'
 import { decodeStageGrid } from '../../src/nn/config-stage'
 import { START_LIVES, ENEMIES_PER_STAGE, BASE_POS, CELL, GRID } from '../../src/constants'
-import { type Direction } from '../../src/constants'
+import { type Direction, TICK_MS } from '../../src/constants'
+import { InputRecorder } from '../../src/replay/InputRecorder'
+import { buildReplayFilename, serializeReplayFile } from '../../src/replay/file'
+import type { ReplayType } from '../../src/replay/types'
 import { ObsEncoder, computeMasks } from '../../src/nn/obs-encoder'
 import { buildModelFromText } from '../../src/nn/infer'
 import { GoalExecutor } from '../../src/nn/goal-executor'
@@ -239,6 +243,16 @@ interface EvalResult {
   puGotTank: number
   puGotFreeze: number
   puGotShield: number
+  /** 终局剩余命数（replay 元数据用；报告口径不变——报告顶层本就无 lives，勿消费）。 */
+  finalLives: number
+}
+
+/** 结果 → .replay 状态位（与 replay-writer.statusFromResult 同映射）。 */
+function replayStatusOf(outcome: SimOutcome, lossDetail?: string): ReplayType {
+  if (outcome === 'stage_clear') return 'clear'
+  if (lossDetail === 'base_destroyed') return 'base'
+  if (lossDetail === 'lives_exhausted') return 'died'
+  return 'timeout'
 }
 
 export function runEvalOne(
@@ -255,6 +269,14 @@ export function runEvalOne(
   arenaId = 0,
   livesOverride: number | null = null,
   playerLevelOverride: number | null = null,
+  /** 非空 = 额外把整局输入录成 .replay 写入该目录（文件名 canonical；评估语义零变化
+   *  ——recorder 被动采样，不进仿真循环。训练控制台「导出 replay」用，见
+   *  rl/eval_replays_once.py）。 */
+  replayDir = '',
+  /** replay 文件名/元数据用的**原始关卡 id**（--stage 原值）：本参数 stageIdx 对
+   *  自定义关/arena 传的是 loadIndex（0），文件名须带账本口径的原始 id 才能映射回
+   *  (stage, seed)。缺省 = 沿用 stageIdx（真实关两者相等）。 */
+  replayStageId: number | null = null,
 ): EvalResult {
   const world = new World()
   world.rng.reseed(seed)
@@ -338,6 +360,10 @@ export function runEvalOne(
   // scripted.reset() 使远程 god 局用默认参数打，与本地 runSimulation 不等价）。
   ai.reset()
   if (goalGod) goalGod.reset()
+  // 录制（可选）：采样点契约与 simulation-runner 一致——loadStageData → reset →
+  // startNew（克隆初始快照），循环内 sim.tick() → recordFrame → endFrame。
+  const recorder = replayDir ? new InputRecorder() : null
+  if (recorder) recorder.startNew(world)
 
   const encoder = new ObsEncoder()
 
@@ -419,6 +445,8 @@ export function runEvalOne(
       }
     }
     sim.tick()
+    // 录制须在 endFrame 前（endFrame 会清掉本 tick 的决策态）——与 runner 同采样点。
+    if (recorder) recorder.recordFrame(ai, null)
     ai.endFrame()
     t++
 
@@ -553,6 +581,62 @@ export function runEvalOne(
   // 单关训练场景下二者等价（道具跨关累积的增益只在多关训练时才存在）⇒ 统一为 win ∪ cleared。
   // `cleared` 字段保留原义，供「全歼率」门单独使用；`outcome` 亦保留原始值。
   const cleared = allEnemiesCleared(world)
+  // 可选录制落盘（canonical 文件名，ReplayBrowser 可直接导入回放）。
+  if (recorder) {
+    const rec = recorder.finalize()
+    if (rec) {
+      // 库调用方（测试/编排器）不经过 main 的 mkdir——写前兜底建目录（幂等）。
+      mkdirSync(replayDir, { recursive: true })
+      const status = replayStatusOf(outcome, lossDetail)
+      const stageId = replayStageId ?? stageIdx
+      const stageName = String((stage as { name?: string })?.name ?? '')
+      const filename = buildReplayFilename({
+        difficulty,
+        stageIndex: stageId,
+        status,
+        lives: world.lives,
+        totalTicks: rec.tickCount,
+        seed,
+      })
+      writeFileSync(
+        `${replayDir}/${filename}`,
+        serializeReplayFile({
+          source: 'sim',
+          seed,
+          sim: {
+            seed,
+            difficulty,
+            stageIndex: stageId,
+            stageName,
+            outcome,
+            status,
+            maxTicks,
+          },
+          finalState: {
+            score: scored.score,
+            lives: world.lives,
+            killCount: world.killCount,
+            ticks: t,
+          },
+          initialSnapshot: rec.snapshot,
+          frames: rec.frames,
+          totalTicks: rec.tickCount,
+          metadata: {
+            stage: stageId,
+            stageName,
+            difficulty,
+            lives: world.lives,
+            playerLevel: world.playerLevel,
+            score: scored.score,
+            killCount: world.killCount,
+            enemiesTotal: tel.enemyTotal,
+            playTimeMs: t * TICK_MS,
+          },
+          tickHashes: rec.tickHashes,
+        }),
+      )
+    }
+  }
   return {
     outcome,
     lossDetail,
@@ -590,6 +674,7 @@ export function runEvalOne(
     puGotTank: tel.puGotTank,
     puGotFreeze: tel.puGotFreeze,
     puGotShield: tel.puGotShield,
+    finalLives: world.lives,
   }
 }
 
@@ -614,6 +699,8 @@ function main(): void {
   let stageJson = ''
   let livesOverride = ''
   let playerLevelOverride = ''
+  // 可选：整局输入录制 → .replay 目录（训练控制台「导出 replay」）。报告 schema 零变化。
+  let replayDir = ''
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--out') outDir = argv[++i]
     else if (argv[i] === '--difficulty') difficulty = argv[++i]
@@ -632,6 +719,7 @@ function main(): void {
     else if (argv[i] === '--stage-json') stageJson = argv[++i]
     else if (argv[i] === '--lives-override') livesOverride = argv[++i]
     else if (argv[i] === '--player-level') playerLevelOverride = argv[++i]
+    else if (argv[i] === '--replay') replayDir = argv[++i]
   }
   if (!Number.isInteger(stageIdx) || !Number.isInteger(seed)) {
     console.error('[export-eval-game] --stage/--seed required')
@@ -645,6 +733,7 @@ function main(): void {
   const stage = custom ?? (isArenaId(stageIdx) ? resolveArenaStage(stageIdx)! : STAGES[stageIdx])
   const loadIndex = custom ? 0 : isArenaId(stageIdx) ? 0 : stageIdx
   mkdirSync(outDir, { recursive: true })
+  if (replayDir) mkdirSync(replayDir, { recursive: true })
   // v4.0：仅 'nn' 策略需要权重文件（god/goal-god/intent/goal 各自携带自己的权重源）。
   const weightsText = policy === 'nn' ? readFileSync(weightsPath, 'utf8') : '{}'
   const intentWeightsText = intentWeightsPath ? readFileSync(intentWeightsPath, 'utf8') : ''
@@ -667,6 +756,8 @@ function main(): void {
     isArenaId(stageIdx) ? stageIdx : 0,
     livesOverride ? parseInt(livesOverride, 10) : null,
     playerLevelOverride ? parseInt(playerLevelOverride, 10) : null,
+    replayDir,
+    stageIdx,
   )
   // 权重指纹：eval 报告必须自带"用的是哪份权重"（2026-08-30 A4/A5 评估
   // 排查教训——无指纹时静默回退无法被发现）。

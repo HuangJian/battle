@@ -15,9 +15,10 @@ import {
   readdirSync,
   readSync,
   statSync,
+  writeFileSync,
 } from 'fs'
 import path from 'path'
-import { CURRICULA_DIR, LOG_DIR, NN_TRAINING, REPO_ROOT } from '../paths'
+import { curriculaDir, LOG_DIR, NN_TRAINING, REPO_ROOT } from '../paths'
 import { httpOk, pidAlive } from '../net'
 import { entryForCourse, loadRegistry } from '../registry'
 import { loadConfig } from '../config'
@@ -29,7 +30,10 @@ import {
   markCloudHaltRecovered,
   triggerCloudHalt,
 } from './actions'
-import { readIterMetrics, readPairedReferee } from './iters'
+import { readIterMetrics, readLatestEvalGames, readPairedReferee } from './iters'
+import { CUSTOM_STAGE_BASE } from '../../../src/nn/config-stage'
+import { isArenaId, resolveArenaStage } from '../../../src/nn/arena-ladder'
+import { STAGES } from '../../../src/config/stages'
 import {
   aggregateNodeHistory,
   emptyHistory,
@@ -48,6 +52,10 @@ import type {
   CourseEdit,
   CourseOverview,
   CourseOverviewComponent,
+  EvalGamesData,
+  EvalGamesView,
+  EvalReplayJobView,
+  EvalReplayManifest,
   LogPayload,
   LoopComplete,
   MetricsView,
@@ -123,8 +131,8 @@ export function sanitizeViewCourse(raw: string | null): string {
   if (!/^[A-Za-z0-9._-]+$/.test(raw)) return ''
   try {
     if (existsSync(path.join(REPO_ROOT, 'tmp', raw))) return raw
-    if (existsSync(path.join(CURRICULA_DIR, `${raw}.jsonc`))) return raw
-    if (existsSync(path.join(CURRICULA_DIR, `${raw}.bc.jsonc`))) return raw
+    if (existsSync(path.join(curriculaDir(), `${raw}.jsonc`))) return raw
+    if (existsSync(path.join(curriculaDir(), `${raw}.bc.jsonc`))) return raw
   } catch {
     /* 回退自动课程 */
   }
@@ -1286,6 +1294,136 @@ export async function buildPoolView(fresh = false, courseOverride?: string): Pro
   return view
 }
 
+// ────────────────────────── 导出 replay（最新 in-loop eval 逐局视图 + 确定性重放任务） ──────────────────────────
+
+const REPLAY_EXPORT_BUSY_KEY = 'eval:replays'
+/** 单次导出上限（每局 = 一次完整确定性重放；400 局 × ~2-5s / 4 并行 ≈ 数分钟）。 */
+const REPLAY_EXPORT_MAX_GAMES = 400
+
+/** stage id → 人类可读关名（课程自定义关 / arena / 真实关）。
+ *  注意判定顺序：isArenaId = id ≥ 1000 恒含自定义关段（2000+），自定义关必须先判。 */
+function stageDisplayName(stage: number): string {
+  if (stage >= CUSTOM_STAGE_BASE) return `自定义关 ${stage}`
+  if (isArenaId(stage)) return resolveArenaStage(stage)?.name ?? `arena ${stage}`
+  if (stage >= 0 && stage < STAGES.length) return STAGES[stage]?.name ?? `s${stage}`
+  return `s${stage}`
+}
+
+function emptyEvalGamesView(course: string): EvalGamesView {
+  return {
+    course,
+    available: false,
+    iter: -1,
+    wver: '',
+    time: '',
+    games: 0,
+    wins: 0,
+    winRate: null,
+    clears: 0,
+    outcomes: {},
+    rows: [],
+  }
+}
+
+/** GET /api/evalGames：最新 in-loop eval 概要 + 逐局行（「导出 replay」弹窗数据源）。
+ *  逐次读 eval_log.jsonl（弹窗打开时一次 + 手动刷新，不进 3s 轮询路径）。 */
+export function buildEvalGamesView(course = ''): EvalGamesView {
+  if (!course) return emptyEvalGamesView(course)
+  const trajDir = path.join(REPO_ROOT, 'tmp', course)
+  if (!existsSync(path.join(trajDir, 'eval_log.jsonl'))) return emptyEvalGamesView(course)
+  let data: EvalGamesData | null = null
+  try {
+    data = readLatestEvalGames(trajDir)
+  } catch {
+    data = null
+  }
+  if (!data) return emptyEvalGamesView(course)
+  return {
+    course,
+    available: true,
+    ...data,
+    rows: data.rows.map((r) => ({ ...r, stageName: stageDisplayName(r.stage) })),
+  }
+}
+
+function replayExportPaths(course: string): { manifest: string; outDir: string; log: string; gamesFile: string } {
+  return {
+    manifest: path.join(REPO_ROOT, 'tmp', course, 'replay-export.json'),
+    outDir: path.join(REPO_ROOT, 'tmp', course, 'replay-export'),
+    log: path.join(REPO_ROOT, 'tmp', course, 'replay-export.log'),
+    gamesFile: path.join(REPO_ROOT, 'tmp', course, 'replay-export-games.json'),
+  }
+}
+
+/** manifest JSON → 类型化视图（解析失败/缺字段 = null，诚实显示「无产物」）。 */
+function readReplayManifest(manifestPath: string): EvalReplayManifest | null {
+  try {
+    if (!existsSync(manifestPath)) return null
+    const raw = JSON.parse(readFileSync(manifestPath, 'utf8')) as Partial<EvalReplayManifest>
+    if (!raw || typeof raw !== 'object' || typeof raw.ok !== 'boolean') return null
+    return {
+      ok: raw.ok,
+      course: String(raw.course ?? ''),
+      iter: Number(raw.iter ?? -1),
+      wver: String(raw.wver ?? ''),
+      weightsPath: String(raw.weightsPath ?? ''),
+      difficulty: String(raw.difficulty ?? ''),
+      maxTicks: Number(raw.maxTicks ?? 0),
+      generatedAt: String(raw.generatedAt ?? ''),
+      sec: Number(raw.sec ?? 0),
+      requested: Number(raw.requested ?? 0),
+      files: Array.isArray(raw.files) ? raw.files : [],
+      errors: Array.isArray(raw.errors) ? raw.errors : [],
+      mismatches: Array.isArray(raw.mismatches) ? raw.mismatches : [],
+    }
+  } catch {
+    return null
+  }
+}
+
+/** GET /api/evalReplayJob：导出任务态（running = busy 互斥；manifest = 上一轮产物）。 */
+export function buildEvalReplayJobView(course = ''): EvalReplayJobView {
+  const running = busy.has(REPLAY_EXPORT_BUSY_KEY)
+  let manifest: EvalReplayManifest | null = null
+  let logTail: string[] = []
+  if (course) {
+    const p = replayExportPaths(course)
+    manifest = readReplayManifest(p.manifest)
+    try {
+      if (existsSync(p.log)) {
+        logTail = readFileSync(p.log, 'utf8').split(String.fromCharCode(10)).slice(-40)
+      }
+    } catch {
+      /* log 不可读不致命 */
+    }
+  }
+  return { course, running, manifest, logTail }
+}
+
+/** GET /api/evalReplayFile：**单局** .replay 下载（用户裁定 2026-09-13：不打 tar.gz，
+ *  每局一个文件交由浏览器/目录选择器落盘）。file 白名单 = manifest.files 精确匹配 +
+ *  文件名形态校验，杜绝路径穿越。返回 null = course 缺失。 */
+export async function evalReplayFileResponse(
+  course: string,
+  file: string,
+): Promise<Response | null> {
+  if (!course) return null
+  if (!/^[\w.-]+\.replay$/.test(file)) return errResp('file 名非法', 400)
+  const p = replayExportPaths(course)
+  const manifest = readReplayManifest(p.manifest)
+  if (!manifest || !manifest.files.some((f) => f.file === file)) {
+    return errResp('该 .replay 不在最近一次导出清单中——先执行一次导出', 404)
+  }
+  const fp = path.join(p.outDir, file)
+  if (!existsSync(fp)) return errResp('导出文件已清理——请重新导出', 404)
+  return new Response(new Uint8Array(readFileSync(fp)), {
+    headers: {
+      'Content-Type': 'application/octet-stream',
+      'Content-Disposition': `attachment; filename="${file}"`,
+    },
+  })
+}
+
 // ────────────────────────── 动作路由 ──────────────────────────
 
 interface PostBody {
@@ -1381,12 +1519,12 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
         if (course) {
           // validateCourseArg 会 process.exit（CLI 语义）——控制台改抛 ActionError。
           const { existsSync } = await import('fs')
-          const { CURRICULA_DIR } = await import('../paths')
+          const { curriculaDir } = await import('../paths')
           const pathMod = await import('path')
           if (
             !existsSync(course) &&
-            !existsSync(pathMod.default.join(CURRICULA_DIR, `${course}.jsonc`)) &&
-            !existsSync(pathMod.default.join(CURRICULA_DIR, `${course}.bc.jsonc`))
+            !existsSync(pathMod.default.join(curriculaDir(), `${course}.jsonc`)) &&
+            !existsSync(pathMod.default.join(curriculaDir(), `${course}.bc.jsonc`))
           ) {
             throw new ActionError(
               `课程不存在: ${course}（curricula/ 下无同名 .jsonc/.bc.jsonc，或传已存在的课程文件路径）`,
@@ -1549,6 +1687,100 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
           })
         } catch (e) {
           busy.delete('eval:A')
+          return errResp(e instanceof Error ? e.message : String(e), 500)
+        }
+      }
+      case 'evalReplays': {
+        // 导出 replay：确定性重放所选 eval 局 → .replay（rl/eval_replays_once.py；
+        // 同 evalA 的 spawn-detached + 日志 + busy 互斥模式，弹窗轮询 /api/evalReplayJob）。
+        if (!ctx.course) return errResp('缺少 course', 400)
+        const iterRaw = Number(body.iter)
+        if (!Number.isInteger(iterRaw) || iterRaw < 0) return errResp('iter 非法', 400)
+        const wver = str(body, 'wver')
+        if (!/^[0-9a-f]{16}$/.test(wver)) return errResp('wver 非法（需 16 位 hex）', 400)
+        const gamesRaw = body.games
+        if (!Array.isArray(gamesRaw) || gamesRaw.length === 0)
+          return errResp('缺少 games（勾选至少一局）', 400)
+        if (gamesRaw.length > REPLAY_EXPORT_MAX_GAMES)
+          return errResp(`单次导出上限 ${REPLAY_EXPORT_MAX_GAMES} 局——请缩小勾选范围`, 400)
+        const games: Array<{ stage: number; seed: number }> = []
+        for (const g of gamesRaw) {
+          const o = g as Record<string, unknown>
+          const stage = Number(o.stage)
+          const seed = Number(o.seed)
+          if (!Number.isInteger(stage) || !Number.isInteger(seed) || stage < 0 || seed < 0) {
+            return errResp('games 行非法（stage/seed 须为非负整数）', 400)
+          }
+          games.push({ stage, seed })
+        }
+        if (busy.has(REPLAY_EXPORT_BUSY_KEY)) return errResp('已有 replay 导出在进行', 409)
+        busy.add(REPLAY_EXPORT_BUSY_KEY)
+        const resolved = (await import('../venv')).resolveVenvPython()
+        const venvEntry =
+          process.platform === 'win32'
+            ? path.join(NN_TRAINING, '.venv', 'Scripts', 'python.exe')
+            : path.join(NN_TRAINING, '.venv', 'bin', 'python3')
+        const pyBin = existsSync(venvEntry) ? venvEntry : resolved.python
+        const sitePackages = resolved.sitePackages
+        const script = path.join(NN_TRAINING, 'rl', 'eval_replays_once.py')
+        const p = replayExportPaths(ctx.course)
+        try {
+          mkdirSync(path.dirname(p.gamesFile), { recursive: true })
+          writeFileSync(p.gamesFile, JSON.stringify(games))
+          const { spawn } = await import('child_process')
+          mkdirSync(path.dirname(p.log), { recursive: true })
+          const out = openSync(p.log, 'w')
+          // 同 evalA：uv 跳板解析的基础解释器须 PYTHONPATH 挂 site-packages（pydantic）。
+          const env = { ...process.env } as Record<string, string>
+          if (sitePackages) {
+            const prev = env.PYTHONPATH || env.PYTHONHOME || ''
+            env.PYTHONPATH = prev ? `${sitePackages}${path.delimiter}${prev}` : sitePackages
+          }
+          const child = spawn(
+            pyBin,
+            [
+              '-u',
+              script,
+              '--course',
+              ctx.course,
+              '--iter',
+              String(iterRaw),
+              '--wver',
+              wver,
+              '--games',
+              p.gamesFile,
+              '--out-dir',
+              p.outDir,
+              '--manifest',
+              p.manifest,
+              '--bun',
+              'bun',
+            ],
+            {
+              cwd: path.join(REPO_ROOT, 'nn-training'),
+              detached: true,
+              stdio: ['ignore', out, out],
+              windowsHide: true,
+              env,
+            },
+          )
+          const release = (): void => {
+            busy.delete(REPLAY_EXPORT_BUSY_KEY)
+            try {
+              closeSync(out)
+            } catch {
+              /* ignore */
+            }
+          }
+          child.on('exit', release)
+          child.on('error', release)
+          child.unref()
+          return okResp({
+            ok: true,
+            message: `replay 导出已启动（${games.length} 局，确定性重放 it${iterRaw} 的 eval）——弹窗自动跟踪进度；日志 tmp/${ctx.course}/replay-export.log`,
+          })
+        } catch (e) {
+          busy.delete(REPLAY_EXPORT_BUSY_KEY)
           return errResp(e instanceof Error ? e.message : String(e), 500)
         }
       }

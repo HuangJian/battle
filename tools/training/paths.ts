@@ -16,6 +16,11 @@ export function configPath(): string {
 }
 /** 课程目录。 */
 export const CURRICULA_DIR = path.join(NN_TRAINING, 'curricula')
+/** 课程目录（单测以 BCITY_CURRICULA_DIR 重定向到临时目录——课程夹具不再依赖
+ *  机器上真实存在的权重/课程文件（F-B6 教训）；默认行为零变化，故**惰性**取值）。 */
+export function curriculaDir(): string {
+  return process.env.BCITY_CURRICULA_DIR ?? CURRICULA_DIR
+}
 /** 运行日志/登记/临时文件根（仓库根 tmp/——2026-09-08 统一：全项目只使用 ./tmp，
  *  不再用 nn-training/tmp，消除双 tmp 混淆）。 */
 export const LOG_DIR = path.join(REPO_ROOT, 'tmp')

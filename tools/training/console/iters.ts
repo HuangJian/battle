@@ -3,7 +3,16 @@
 
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'fs'
 import { join } from 'path'
-import type { EvalSummary, IterActuals, IterRow, PairedCompare, PairedReferee } from '../ui/view'
+import type {
+  EvalGameClass,
+  EvalGameRow,
+  EvalGamesData,
+  EvalSummary,
+  IterActuals,
+  IterRow,
+  PairedCompare,
+  PairedReferee,
+} from '../ui/view'
 import { mcnemarP, pairedVerdict } from '../../eval/mcnemar'
 
 // ---------------- 每轮实际值（it{N}/**/manifest.json 聚合） ----------------
@@ -401,10 +410,127 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
   return out
 }
 
+// ---------------- 最新 in-loop eval 逐局视图（导出 replay 弹窗数据源） ----------------
+
+/** 单局类型判定：win→胜利；outcome=max_ticks→超时；其余（gameover）→失败。
+ *  BONUS 截断局（cleared 但 outcome=max_ticks）按 win=true 归「胜利」，cleared 徽标单独披露。 */
+function evalGameClass(win: boolean, outcome: string): EvalGameClass {
+  if (win) return 'win'
+  return outcome === 'max_ticks' ? 'timeout' : 'fail'
+}
+
+/** 读取最新 in-loop eval 的逐局行：latest = eval_summary 的最大 iter（与指标表
+ *  「eval」视图同口径），行 = 该 (iter, wver) 的全部 event=eval 行。
+ *
+ *  - 排除带 `source` 字段的行（EvalBoard B/C 批与 A 层同册不同源，见 eval_done_keys）。
+ *  - 同键重复落账取最后一条（断点重试诚实覆盖）。
+ *  - 无任何 summary / 文件不可读 → null（弹窗显示「暂无 eval 评估记录」）。 */
+export function readLatestEvalGames(trajDir: string): EvalGamesData | null {
+  const logPath = join(trajDir, 'eval_log.jsonl')
+  if (!existsSync(logPath)) return null
+  // 第一趟：summary 按 iter 归并（同 iter 重复 = 补跑后的重复落账，取最后一条）。
+  const summaries = new Map<number, { wver: string; time: string }>()
+  try {
+    for (const line of readFileSync(logPath, 'utf8').split(String.fromCharCode(10))) {
+      if (!line.trim()) continue
+      try {
+        const r = JSON.parse(line) as Record<string, unknown>
+        if (r.event !== 'eval_summary') continue
+        const iter = Number(r.iter ?? -1)
+        if (!Number.isInteger(iter) || iter < 0) continue
+        summaries.set(iter, { wver: String(r.wver ?? ''), time: String(r.time ?? '') })
+      } catch {
+        /* skip bad line */
+      }
+    }
+  } catch {
+    return null
+  }
+  if (summaries.size === 0) return null
+  let latest = -1
+  for (const it of summaries.keys()) if (it > latest) latest = it
+  const head = summaries.get(latest)
+  if (!head || !head.wver) return null
+
+  // 第二趟：收集该 (iter, wver) 的逐局行（同键覆盖；B/C source 行排除）。
+  const rows = new Map<string, EvalGameRow>()
+  const outcomes: Record<string, number> = {}
+  try {
+    for (const line of readFileSync(logPath, 'utf8').split(String.fromCharCode(10))) {
+      if (!line.trim()) continue
+      try {
+        const r = JSON.parse(line) as Record<string, unknown>
+        if (r.event !== 'eval' || 'source' in r) continue
+        if (Number(r.iter ?? -1) !== latest || String(r.wver ?? '') !== head.wver) continue
+        const stage = Number(r.stage)
+        const seed = Number(r.seed)
+        if (!Number.isInteger(stage) || !Number.isInteger(seed)) continue
+        const outcome = String(r.outcome ?? '')
+        const win = r.win === true || r.win === 1
+        const cleared = r.cleared === true || r.cleared === 1
+        const kills = Number(r.kills ?? 0) || 0
+        const dmgTaken =
+          typeof r.playerDamageTaken === 'number' && Number.isFinite(r.playerDamageTaken)
+            ? r.playerDamageTaken
+            : null
+        // 残血：与 readEvalSummaries 聚合同口径——胜局按 stage_clear 推算
+        // （BONUS 截断胜局 outcome=max_ticks，容量公式同样成立），败局恒 null。
+        const residualHp = win
+          ? residualHpFromFields({
+              outcome: 'stage_clear',
+              playerDamageTaken: dmgTaken ?? undefined,
+              playerDeaths: typeof r.playerDeaths === 'number' ? r.playerDeaths : undefined,
+              puGotTank: typeof r.puGotTank === 'number' ? r.puGotTank : undefined,
+            })
+          : null
+        rows.set(`${stage}:${seed}`, {
+          stage,
+          seed,
+          stageName: '', // api.buildEvalGamesView 按 stage id 解析（本层不 import src/config）
+          cls: evalGameClass(win, outcome),
+          cleared,
+          outcome,
+          ticks: Number(r.ticks ?? 0) || 0,
+          kills,
+          dmgTaken,
+          dmgPerKill: dmgTaken != null && kills > 0 ? +(dmgTaken / kills).toFixed(1) : null,
+          residualHp,
+          pu: Number(r.powerUpsCollected ?? 0) || 0,
+          score: typeof r.score === 'number' ? r.score : null,
+          node: String(r.node ?? ''),
+          time: String(r.time ?? ''),
+        })
+        outcomes[outcome] = (outcomes[outcome] ?? 0) + 1
+      } catch {
+        /* skip bad line */
+      }
+    }
+  } catch {
+    /* unreadable → 有 summary 无行也照常返回（rows 空，弹窗只显示概要） */
+  }
+  const all = [...rows.values()].sort((a, b) => a.stage - b.stage || a.seed - b.seed)
+  let wins = 0
+  let clears = 0
+  for (const row of all) {
+    if (row.cls === 'win') wins++
+    if (row.cleared) clears++
+  }
+  return {
+    iter: latest,
+    wver: head.wver,
+    time: head.time,
+    games: all.length,
+    wins,
+    winRate: all.length > 0 ? wins / all.length : null,
+    clears,
+    outcomes,
+    rows: all,
+  }
+}
+
 /** eval 逐局胜负表：iter → `stage:seed` → win（同键重复落账取最后一条）。
  * 配对裁判与逐轮装配共用这一次扫描。 */
-export function readEvalGameWins(trajDir: string): Map<number, Map<string, boolean>> {
-  const byIter = new Map<number, Map<string, boolean>>()
+export function readEvalGameWins(trajDir: string): Map<number, Map<string, boolean>> {  const byIter = new Map<number, Map<string, boolean>>()
   const logPath = join(trajDir, 'eval_log.jsonl')
   try {
     if (!existsSync(logPath)) return byIter

@@ -31,6 +31,7 @@ import { Badge } from '../../../ui/components/Pill'
 import { SegmentedControl } from '../../../ui/components/SegmentedControl'
 import { TrendChart } from '../../../ui/components/TrendChart'
 import { ckptForIter, loadCourseCkpts, startEvalA } from '../lib/eval-a'
+import { ReplayExportModal } from './ReplayExportModal'
 import { useEffect, useRef, useState } from 'preact/hooks'
 
 export interface HeroProps {
@@ -490,7 +491,7 @@ function EvalTable({ rows }: { rows: IterRow[] }) {
 }
 
 /** 最新 6 轮区块：主行 / eval 双视图 toggle（持久化 localStorage）；表头行右侧
- *  「完整指标表 ›」进指标抽屉（与标题同一行、右对齐）。 */
+ *  「导出 replay」+「完整指标表 ›」进指标抽屉（与标题同一行、右对齐）。 */
 function LastIters({
   iters,
   onMore,
@@ -509,6 +510,7 @@ function LastIters({
   busyIters: Set<number>
 }) {
   const [view, setView] = useState<'main' | 'eval'>('main')
+  const [replayOpen, setReplayOpen] = useState(false)
   // hydrate 后从 localStorage 恢复视图（SSR 首帧恒主行，避免 hydration 不一致）。
   useEffect(() => {
     try {
@@ -578,10 +580,26 @@ function LastIters({
             onChange={onView}
           />
         </span>
-        <button type="button" className="tc-link" onClick={onMore}>
-          完整指标表 ›
-        </button>
+        <span className="tc-hero__iters-right">
+          <button
+            type="button"
+            className="tc-btn tc-btn--sm"
+            title="从训练的最新 in-loop eval 导出仿真 replay（勾选局 → 确定性重放 → .replay 下载）"
+            onClick={() => setReplayOpen(true)}
+          >
+            导出 replay
+          </button>
+          <button type="button" className="tc-link" onClick={onMore}>
+            完整指标表 ›
+          </button>
+        </span>
       </div>
+      <ReplayExportModal
+        open={replayOpen}
+        course={course}
+        readOnly={readOnly}
+        onClose={() => setReplayOpen(false)}
+      />
       {collapsed ? null : ev ? (
         <EvalTable rows={iters} />
       ) : (

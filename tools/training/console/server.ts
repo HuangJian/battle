@@ -8,6 +8,9 @@
  *    - GET  /api/pool    → 池数据端点（api.buildPoolView：节点历史/selfStatus/localHash，
  *                          独立慢节奏 + 课程键控 30s TTL 缓存，?fresh=1 强制）
  *    - GET  /api/log/<key> → 日志载荷（日志页 2s/4s 轮询）
+ *    - GET  /api/evalGames            → 最新 in-loop eval 逐局视图（导出 replay 弹窗）
+ *    - GET  /api/evalReplayJob        → replay 导出任务态（busy + manifest + 日志尾）
+ *    - GET  /api/evalReplayFile       → 单局 .replay 下载（manifest 白名单）
  *    - POST /api/<act>   → 动作（api.routeAction → actions：启/停/冒烟/预设/开关/节点编辑）
  *
  *  课程只读覆盖：/api/state /api/pool /api/log/<key> /log/<key> 均接受 ?course=<name>
@@ -46,11 +49,14 @@ import {
   buildBcEpochsView,
   buildEvalBoardView,
   buildEvalCkptsView,
+  buildEvalGamesView,
+  buildEvalReplayJobView,
   buildPoolView,
   buildStateView,
   componentLogPayload,
   curriculumLadderView,
   discoverCourses,
+  evalReplayFileResponse,
   invalidateSlowSnapshot,
   ladderTickAll,
   routeAction,
@@ -261,6 +267,20 @@ async function main(): Promise<void> {
         // evalboard ladder 无关）。
         if (req.method === 'GET' && url.pathname === '/api/curriculumLadder') {
           return json(curriculumLadderView())
+        }
+        // 导出 replay：最新 in-loop eval 逐局视图 / 导出任务态 / tar.gz 下载。
+        if (req.method === 'GET' && url.pathname === '/api/evalGames') {
+          return json(buildEvalGamesView(viewCourse || ''))
+        }
+        if (req.method === 'GET' && url.pathname === '/api/evalReplayJob') {
+          return json(buildEvalReplayJobView(viewCourse || ''))
+        }
+        if (req.method === 'GET' && url.pathname === '/api/evalReplayFile') {
+          const file = url.searchParams.get('file') ?? ''
+          return (
+            (await evalReplayFileResponse(viewCourse || '', file)) ??
+            json({ ok: false, message: '缺少 course' }, 400)
+          )
         }
         // R8：/eval 独立评估页（?courses=a,b 可分享 URL；?course= 兼容）。
         if (req.method === 'GET' && url.pathname === '/eval') {

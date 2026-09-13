@@ -454,8 +454,18 @@ a.tc-preset{text-decoration:none;display:inline-block}
 .tc-modal-mask{position:fixed;inset:0;background:rgba(16,24,40,.35);z-index:80;display:flex;align-items:center;justify-content:center}
 .tc-modal{background:var(--card);border:1px solid var(--border);border-radius:var(--r-3);box-shadow:0 8px 32px rgba(16,24,40,.18);width:min(440px,92vw);padding:var(--sp-4);display:grid;gap:var(--sp-3);max-height:86vh;overflow:auto}
 .tc-modal h3{margin:0;font-size:var(--fs-4);font-weight:700}
-.tc-modal__foot{display:flex;align-items:center;gap:var(--sp-3)}
 .tc-modal__foot .sp{flex:1}
+/* 导出 replay 弹窗：宽版（逐局表 ~11 列）+ 内部滚动表体 + 批量选择行 */
+.tc-modal--wide{width:min(1120px,95vw);display:flex;flex-direction:column;overflow:hidden}
+.tc-modal--wide .tc-dtable{display:flex;flex-direction:column;min-height:0;flex:1}
+.tc-modal--wide .tc-tablewrap{flex:1 1 auto;min-height:0;max-height:none}
+.tc-replay-modal__hd{display:flex;align-items:baseline;justify-content:space-between;gap:var(--sp-3);flex-wrap:wrap}
+.tc-replay-batch{display:inline-flex;align-items:center;gap:4px;flex-wrap:wrap}
+.tc-replay-batch .tc-segmented__btn{padding:1px 8px;font-size:11px}
+.tc-replay-batch__sep{width:1px;height:16px;background:var(--border);margin:0 2px}
+.tc-replay-cls--win{color:var(--green)}
+.tc-replay-cls--fail{color:var(--red)}
+.tc-replay-cls--timeout{color:var(--yellow)}
 
 /* 复制 */
 .tc-copy{display:inline-flex;align-items:center;gap:4px;border:1px solid var(--border);border-radius:var(--r-1);padding:2px 8px;font-size:11px;color:var(--muted);cursor:pointer;background:var(--card);white-space:nowrap}

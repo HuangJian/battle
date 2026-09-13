@@ -7,6 +7,8 @@ import type {
   ConsoleStateView,
   EvalBoardView,
   EvalCkptsView,
+  EvalGamesView,
+  EvalReplayJobView,
   LogPayload,
   PoolView,
 } from '../../../ui/view'
@@ -95,4 +97,73 @@ export async function fetchEvalCkpts(course = '', leg = ''): Promise<EvalCkptsVi
   const r = await fetch(`/api/evalCkpts${q ? `?${q}` : ''}`)
   if (!r.ok) throw new Error(`/api/evalCkpts HTTP ${r.status}`)
   return (await r.json()) as EvalCkptsView
+}
+
+/** 导出 replay：最新 in-loop eval 逐局视图（弹窗打开时拉取）。 */
+export async function fetchEvalGames(course = ''): Promise<EvalGamesView> {
+  const q = course ? `?course=${encodeURIComponent(course)}` : ''
+  const r = await fetch(`/api/evalGames${q}`)
+  if (!r.ok) throw new Error(`/api/evalGames HTTP ${r.status}`)
+  return (await r.json()) as EvalGamesView
+}
+
+/** 导出 replay：任务态轮询（running / manifest / 日志尾）。 */
+export async function fetchEvalReplayJob(course = ''): Promise<EvalReplayJobView> {
+  const q = course ? `?course=${encodeURIComponent(course)}` : ''
+  const r = await fetch(`/api/evalReplayJob${q}`)
+  if (!r.ok) throw new Error(`/api/evalReplayJob HTTP ${r.status}`)
+  return (await r.json()) as EvalReplayJobView
+}
+
+/** 导出 replay：**单局** .replay 拉取（Blob；写入选定目录或触发下载由调用方决定）。 */
+export async function fetchEvalReplayFile(course: string, file: string): Promise<Blob> {
+  const params = new URLSearchParams({ file })
+  if (course) params.set('course', course)
+  const r = await fetch(`/api/evalReplayFile?${params.toString()}`)
+  if (!r.ok) {
+    let message = `/api/evalReplayFile HTTP ${r.status}`
+    try {
+      const d = (await r.json()) as { message?: string }
+      if (d.message) message = d.message
+    } catch {
+      /* non-json */
+    }
+    throw new Error(message)
+  }
+  return r.blob()
+}
+
+/** 逐局写入用户指定目录/下载（File System Access API 结构最小面——
+ *  TS DOM lib 未收录 showDirectoryPicker，这里只声明用到的三个方法，零 any）。 */
+export interface ReplayDirHandle {
+  name: string
+  getFileHandle: (
+    name: string,
+    opts?: { create?: boolean },
+  ) => Promise<{
+    createWritable: () => Promise<{
+      write: (data: Blob) => Promise<void>
+      close: () => Promise<void>
+    }>
+  }>
+}
+
+/** 目录选择器可用性（Chromium；Firefox/Safari 无 → 退化为逐文件浏览器下载）。 */
+export function canPickDirectory(): boolean {
+  return typeof window !== 'undefined' && 'showDirectoryPicker' in window
+}
+
+/** 弹目录选择器；用户取消/拒绝 → null。 */
+export async function pickReplayDirectory(): Promise<ReplayDirHandle | null> {
+  const fn = (
+    window as unknown as {
+      showDirectoryPicker?: (opts?: { mode?: string }) => Promise<ReplayDirHandle>
+    }
+  ).showDirectoryPicker
+  if (!fn) return null
+  try {
+    return await fn({ mode: 'readwrite' })
+  } catch {
+    return null
+  }
 }

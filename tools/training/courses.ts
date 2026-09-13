@@ -9,14 +9,14 @@
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'fs'
 import path from 'path'
-import { CURRICULA_DIR, REPO_ROOT } from './paths'
+import { curriculaDir, REPO_ROOT } from './paths'
 
 /** 课程 BC 种子路径（§384）：读课程 jsonc 的 `bc` 字段（相对仓库根解析）；
  *  文件缺失/解析失败/无 bc 键时回退 legacy 硬编码（旧课程兼容）。 */
 export function resolveCourseBc(course: string): string {
   const legacy = path.join(REPO_ROOT, 'tmp/ep60/battle2-p1bc/run/weights.json')
   try {
-    const raw = readFileSync(path.join(CURRICULA_DIR, `${course}.jsonc`), 'utf-8')
+    const raw = readFileSync(path.join(curriculaDir(), `${course}.jsonc`), 'utf-8')
     // JSONC 容尾逗号：oxfmt 给 curricula/*.jsonc 加的尾逗号是合法 JSONC、非法 JSON。
     // 不剥掉 → JSON.parse 抛错 → 静默回退 legacy 种子路径（§384 的事故正是这个
     // 静默回退：读不到课程 bc 就拿旧权重开腿）。剥完再解析，解析失败仍回退。
@@ -38,7 +38,7 @@ export function resolveCourseBc(course: string): string {
 export function isBcCourse(course: string): boolean {
   if (!course) return false
   try {
-    return existsSync(path.join(CURRICULA_DIR, `${course}.bc.jsonc`))
+    return existsSync(path.join(curriculaDir(), `${course}.bc.jsonc`))
   } catch {
     return false
   }

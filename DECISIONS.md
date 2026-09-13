@@ -1482,3 +1482,36 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 - **边界**：单卡机器行为零变化；TPU 拒收链不变（bc 任务 tpu/xla 仍 ProtocolError）；
   DP 激活时 worker/bc.py 双侧响亮日志「梯度归约顺序变化，与单卡 run 不可逐位比」；
   DP state_dict 的 "module." 前缀防线 = bc.py `_bc_raw` + worker 既有 raw_model 模式。
+
+
+## §2026-09-13-eval-replay-export（2026-09-13，控制台「导出 replay」：in-loop eval 局的确定性重放导出）
+
+- **决策**：训练控制台首页「最新 6 轮完整指标」行新增「导出 replay」——弹窗列出最新
+  in-loop eval（= eval_summary 最大 iter，与指标表 eval 视图同口径）的全部逐局行
+  （类型/击杀/承伤/杀/残血/道具/得分/耗时，表头排序 + 行勾选 + 全部/胜利/失败/超时/
+  kills=N 批量选择），导出 = **按需确定性重放**：`rl/eval_replays_once.py` 以课程
+  curricula（load_course+apply_course 单一事实来源）重建 difficulty/max_ticks/
+  stageJson/lives/level，按 wver（sha256[:16]）解析冻结权重快照（it*/_eval_frozen_weights*
+  → 活动权重 → weights/<course> 归档），并行调 `export-eval-game.ts --replay` 重放并录制
+  输入 → canonical `.replay`（ReplayBrowser 可直接导入）+ manifest（含逐局 vs eval_log
+  账本的 outcome/ticks/kills 确定性对账）→ 控制台 GET /api/evalReplayDownload 打 tar.gz。
+  API：GET /api/evalGames、POST /api/evalReplays（loopback-only，busy 互斥同 evalA）、
+  GET /api/evalReplayJob、GET /api/evalReplayDownload。
+- **拒绝的替代方案**：评估时同步录制 replay 随局落盘（export-eval-game 常开录制）——
+  每轮数百局 × 整局帧字节随 pack 传输/落盘，账本与传输面翻倍，且救不了历史 eval；
+  TS 侧解析 curricula 重建课程参数——apply_course 的课程语义（自定义关/等级覆盖/
+  param schedule）出现第二份实现，漂移即错局。
+- **边界**：export-eval-game 的 `--replay` 为可选附加（recorder 被动采样，缺省路径
+  行为逐字节不变），但该文件在 dist 哈希集内——变更后节点须随新 code 同步（常规流程）；
+  权重归档被清理导致 wver 无匹配时 fail loud（错版本 replay 比没有更糟）；重放局与账本
+  不一致（理论不该发生）在 manifest 里诚实标记，不静默；单次导出上限 400 局；
+  replay 文件名 stage 段 = 原始 --stage id（自定义关 2000+ 非映射前 loadIndex）+1
+  （buildReplayFilename 1-based 显示口径），python 映射时减回。
+- **教训入册**：nn-training 内脚本目录 rl/ 会遮蔽 stdlib `queue`（rl/queue.py）——
+  顶层 `from concurrent.futures import ...` 必须在移除 sys.path 脚本目录项之后
+  （eval_replays_once.py 头部 scrub，实测循环 import 崩）。
+- **同日注记（用户裁定）**：交付形态改为**逐文件**——不打 tar.gz；完成后每局一个
+  .replay 写入用户指定目录（Chromium showDirectoryPicker，导出启动时先选目录、
+  完成后逐文件写入；无该 API 的浏览器退化为逐文件浏览器下载）。服务端
+  /api/evalReplayDownload(tar) 移除，改 GET /api/evalReplayFile（manifest.files
+  白名单 + 文件名形态校验防穿越）。

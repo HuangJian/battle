@@ -396,6 +396,83 @@ export interface IterRow {
   evalData: EvalSummary | null
 }
 
+/** eval 逐局类型（导出 replay 弹窗「类型」列）：win→胜利；outcome=max_ticks→超时；其余→失败。 */
+export type EvalGameClass = 'win' | 'fail' | 'timeout'
+
+export const EVAL_GAME_CLASS_LABEL: Record<EvalGameClass, string> = {
+  win: '胜利',
+  fail: '失败',
+  timeout: '超时',
+}
+
+/** 单局 eval 行（最新 in-loop eval 逐局视图；iters.readLatestEvalGames 产出）。 */
+export interface EvalGameRow {
+  stage: number
+  seed: number
+  /** 人类可读关名（真实关 = STAGES.name；arena = 阶名；自定义 = 自定义关 <id>）。 */
+  stageName: string
+  cls: EvalGameClass
+  /** 全歼（win 的超时截断局可能 cleared——口径差异诚实披露）。 */
+  cleared: boolean
+  outcome: string
+  ticks: number
+  kills: number
+  /** 非致命扣血累计（null = 账本行无该字段——老课程）。 */
+  dmgTaken: number | null
+  /** 承伤/杀（kills>0 且 dmgTaken 非空才有定义）。 */
+  dmgPerKill: number | null
+  /** 胜局残血（败局恒 null——聚合口径只计胜局）。 */
+  residualHp: number | null
+  pu: number
+  score: number | null
+  node: string
+  time: string
+}
+
+/** GET /api/evalGames 载荷：最新 in-loop eval 概要 + 逐局行（导出 replay 弹窗）。 */
+export interface EvalGamesData {
+  iter: number
+  wver: string
+  time: string
+  games: number
+  wins: number
+  winRate: number | null
+  clears: number
+  outcomes: Record<string, number>
+  rows: EvalGameRow[]
+}
+
+export interface EvalGamesView extends EvalGamesData {
+  course: string
+  available: boolean
+}
+
+/** POST evalReplays 产物清单（python rl/eval_replays_once.py 落盘的 manifest JSON）。 */
+export interface EvalReplayManifest {
+  ok: boolean
+  course: string
+  iter: number
+  wver: string
+  weightsPath: string
+  difficulty: string
+  maxTicks: number
+  generatedAt: string
+  sec: number
+  requested: number
+  files: Array<{ stage: number; seed: number; file: string }>
+  errors: Array<{ stage: number; seed: number; error: string }>
+  /** 重放局 vs eval_log 账本逐字段对账（outcome/ticks/kills）——确定性契约的对账项。 */
+  mismatches: Array<{ stage: number; seed: number; field: string; ledger: unknown; resim: unknown }>
+}
+
+/** GET /api/evalReplayJob 载荷：导出任务态（running = busy 互斥；manifest = 落盘产物）。 */
+export interface EvalReplayJobView {
+  course: string
+  running: boolean
+  manifest: EvalReplayManifest | null
+  logTail: string[]
+}
+
 /** 配对裁判单组对比（同语料逐 seed 配对，见 tools/eval/mcnemar.ts）。 */
 export interface PairedCompare {
   baseIter: number

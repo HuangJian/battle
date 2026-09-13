@@ -2,7 +2,7 @@
 
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'fs'
 import path from 'path'
-import { CURRICULA_DIR, configPath } from './paths'
+import { configPath, curriculaDir } from './paths'
 import { capacityError } from './slots'
 import type { RlConfig } from './types'
 
@@ -44,19 +44,19 @@ export function writeRemoteHubUrl(url: string, course = ''): void {
 export function printRecentCourses(): void {
   let files: string[] = []
   try {
-    files = readdirSync(CURRICULA_DIR).filter((f) => f.endsWith('.jsonc'))
+    files = readdirSync(curriculaDir()).filter((f) => f.endsWith('.jsonc'))
   } catch {
     /* dir missing */
   }
   if (files.length === 0) {
-    console.error(`课程目录无 .jsonc 文件: ${CURRICULA_DIR}`)
+    console.error(`课程目录无 .jsonc 文件: ${curriculaDir()}`)
     return
   }
   const recent = files
-    .map((f) => ({ f, m: statSync(path.join(CURRICULA_DIR, f)).mtimeMs }))
+    .map((f) => ({ f, m: statSync(path.join(curriculaDir(), f)).mtimeMs }))
     .sort((a, b) => b.m - a.m)
     .slice(0, 5)
-  console.error(`\n课程目录最近更新的 5 个课程 (${CURRICULA_DIR}):`)
+  console.error(`\n课程目录最近更新的 5 个课程 (${curriculaDir()}):`)
   for (const { f, m } of recent) {
     console.error(
       `  ${f.replace(/\.jsonc$/, '').padEnd(20)} (${new Date(m).toLocaleString('sv-SE')})`,
@@ -69,10 +69,10 @@ export function printRecentCourses(): void {
  *  基础设施之前响亮报错（DECISIONS §340 补充 2）。 */
 export function validateCourseArg(name: string): void {
   if (!name || existsSync(name)) return
-  if (existsSync(path.join(CURRICULA_DIR, `${name}.jsonc`))) return
-  if (existsSync(path.join(CURRICULA_DIR, `${name}.bc.jsonc`))) return
+  if (existsSync(path.join(curriculaDir(), `${name}.jsonc`))) return
+  if (existsSync(path.join(curriculaDir(), `${name}.bc.jsonc`))) return
   console.error(
-    `\n课程 '${name}' 不存在（查找 ${path.join(CURRICULA_DIR, name)}.jsonc / ` +
+    `\n课程 '${name}' 不存在（查找 ${path.join(curriculaDir(), name)}.jsonc / ` +
       `${name}.bc.jsonc，或传已存在的课程文件路径）。`,
   )
   printRecentCourses()

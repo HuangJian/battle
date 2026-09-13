@@ -17,6 +17,13 @@ export interface Col<T> {
   thTitle?: string
 }
 
+export interface DataTableSelection<T> {
+  isSelected: (row: T) => boolean
+  onToggleRow: (row: T) => void
+  /** 表头复选框：收到当前过滤+排序后的可见行——已全选则全清，否则全选。 */
+  onToggleAll: (visibleRows: T[]) => void
+}
+
 export interface DataTableProps<T> {
   columns: Col<T>[]
   rows: T[]
@@ -35,6 +42,8 @@ export interface DataTableProps<T> {
   ariaLabel?: string
   /** 渲染在工具栏最左段（主过滤/状态区，其他表格面板可并入自己对表格的控制）。 */
   toolbarLeft?: ComponentChildren
+  /** 可选勾选列（行复选框 + 表头全选）：勾选态由调用方持有，本组件只转发事件。 */
+  selection?: DataTableSelection<T>
 }
 
 function loadPref<T>(
@@ -66,6 +75,7 @@ export function DataTable<T>(props: DataTableProps<T>) {
     highlightCol = null,
     ariaLabel,
     toolbarLeft,
+    selection,
   } = props
 
   const [sortKey, setSortKey] = useState<string>(props.initialSortKey ?? '')
@@ -87,6 +97,7 @@ export function DataTable<T>(props: DataTableProps<T>) {
   )
   const menuRef = useRef<HTMLDivElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
+  const headerCheckRef = useRef<HTMLInputElement>(null)
 
   /** 「返回顶部」：把表格滚动容器平滑滚回顶（长表/深抽屉快速回位）。 */
   const scrollTop = (): void => {
@@ -116,6 +127,18 @@ export function DataTable<T>(props: DataTableProps<T>) {
   const filtered = rows.filter((r) =>
     keywordMatch(r as unknown as Record<string, unknown>, searchKeys as string[], keyword),
   )
+
+  // 表头全选框三态：checked = 可见行全选；indeterminate = 部分选中（Preact 需手动置 DOM 属性）。
+  const sel =
+    selection && filtered.length > 0
+      ? {
+          all: filtered.every((r) => selection.isSelected(r)),
+          some: filtered.some((r) => selection.isSelected(r)),
+        }
+      : null
+  useEffect(() => {
+    if (headerCheckRef.current) headerCheckRef.current.indeterminate = !!sel?.some && !sel?.all
+  }, [sel?.all, sel?.some])
 
   const sorted = (() => {
     if (rows.length <= 1 || !sortKey) return filtered
@@ -227,6 +250,17 @@ export function DataTable<T>(props: DataTableProps<T>) {
         <table className={`tc-table${dense ? ' tc-table--dense' : ''}`}>
           <thead>
             <tr>
+              {selection ? (
+                <th aria-label="全选" className="tc-firstcol">
+                  <input
+                    ref={headerCheckRef}
+                    type="checkbox"
+                    aria-label="全选可见行"
+                    checked={!!sel?.all}
+                    onChange={() => selection.onToggleAll(sorted)}
+                  />
+                </th>
+              ) : null}
               {expandRender ? <th aria-label="展开" /> : null}
               {visible.map((c, i) => (
                 <th
@@ -245,7 +279,10 @@ export function DataTable<T>(props: DataTableProps<T>) {
           <tbody>
             {sorted.length === 0 ? (
               <tr>
-                <td colSpan={visible.length + (expandRender ? 1 : 0)} className="tc-empty">
+                <td
+                  colSpan={visible.length + (expandRender ? 1 : 0) + (selection ? 1 : 0)}
+                  className="tc-empty"
+                >
                   {emptyText}
                 </td>
               </tr>
@@ -256,6 +293,16 @@ export function DataTable<T>(props: DataTableProps<T>) {
                 return (
                   <>
                     <tr key={`${k}-main`}>
+                      {selection ? (
+                        <td className="tc-firstcol">
+                          <input
+                            type="checkbox"
+                            aria-label={`选择 ${k}`}
+                            checked={selection.isSelected(row)}
+                            onChange={() => selection.onToggleRow(row)}
+                          />
+                        </td>
+                      ) : null}
                       {expandRender ? (
                         <td>
                           <button
@@ -281,7 +328,9 @@ export function DataTable<T>(props: DataTableProps<T>) {
                     </tr>
                     {isExpanded && expandRender ? (
                       <tr key={`${k}-detail`} className="tc-row-expand">
-                        <td colSpan={visible.length + 1}>{expandRender(row)}</td>
+                        <td colSpan={visible.length + 1 + (selection ? 1 : 0)}>
+                          {expandRender(row)}
+                        </td>
                       </tr>
                     ) : null}
                   </>

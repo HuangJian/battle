@@ -77,6 +77,9 @@ def run_local_eval_game(
     # T1.2 policy 透传（EvalBench C 层 God 基线；'god' → export-eval-game 真 God-AI，
     # 权重快照不需存在但调用方仍传——本地直跑与节点同报告 schema）。
     policy: str = "nn",
+    # 控制台「导出 replay」（rl/eval_replays_once.py）：非空 = 整局输入录成 .replay
+    # 写入该目录（export-eval-game --replay；评估语义零变化）。
+    replay_dir: str = "",
 ) -> dict:
     """本机直跑一局贪心评估（与节点 agent 同一 runner / 同一报告 schema）。
 
@@ -116,6 +119,8 @@ def run_local_eval_game(
     # T1.2：非 nn 策略透传（god 局权重文件不需要，export 侧忽略 --weights）。
     if policy and policy != "nn":
         cmd += ["--policy", policy]
+    if replay_dir:
+        cmd += ["--replay", replay_dir]
     t0 = time.time()
     proc = subprocess.run(
         cmd,

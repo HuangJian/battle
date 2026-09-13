@@ -296,14 +296,36 @@ describe('P2 双 hub 隔离', () => {
   })
 
   it('F-B6：seedWeightsFromBc 逐字节复制（sha 相等），缺文件 fail loud', () => {
+    // 夹具全自造（BCITY_CURRICULA_DIR 注入临时课程目录，paths.ts 惰性取值）：
+    // 此前引用真实课程 c6-dmgfix 的 bc → weights/c6-pickup/it35（仅训练机存在），
+    // 其余机器全红——测试不得依赖机器上的真实数据文件。
     const root = mkdtempSync(path.join(os.tmpdir(), 'bcity-p2w3-'))
     SCRATCH_DIRS.push(root)
-    const dst = path.join(root, 'weights.json')
-    // c6-dmgfix 的 bc 指向 nn-training/weights/c6-pickup/…（稳定备份，非 tmp/ 易失件；
-    // 原夹具 s-dodge 的 bc 在 tmp/s2-cap/weights.json，已被 tmp 清理移除——2026-09-13）。
-    const bc = seedWeightsFromBc('c6-dmgfix', dst)
-    expect(readFileSync(dst).equals(readFileSync(bc))).toBe(true)
-    expect(() => seedWeightsFromBc('no-such-course-xyz', path.join(root, 'w2.json'))).toThrow()
+    const curricula = path.join(root, 'curricula')
+    mkdirSync(curricula, { recursive: true })
+    const prev = process.env.BCITY_CURRICULA_DIR
+    process.env.BCITY_CURRICULA_DIR = curricula
+    try {
+      const bc = path.join(root, 'bc-seed.json')
+      writeFileSync(bc, '{"fake":"weights-bytes"}')
+      // resolveCourseBc 以 REPO_ROOT 为基准 join bc 字段 → 用 REPO_ROOT 相对路径
+      writeFileSync(
+        path.join(curricula, 'f-b6-fake.jsonc'),
+        JSON.stringify({ bc: path.relative(REPO_ROOT, bc) }),
+      )
+      const dst = path.join(root, 'weights.json')
+      const used = seedWeightsFromBc('f-b6-fake', dst)
+      expect(readFileSync(dst).equals(readFileSync(used))).toBe(true)
+      // bc 声明的文件缺失 → fail loud（§384 事故回归防线），绝不静默回退
+      writeFileSync(
+        path.join(curricula, 'f-b6-missing.jsonc'),
+        JSON.stringify({ bc: path.join(root, 'nope.json') }),
+      )
+      expect(() => seedWeightsFromBc('f-b6-missing', path.join(root, 'w2.json'))).toThrow()
+    } finally {
+      if (prev === undefined) delete process.env.BCITY_CURRICULA_DIR
+      else process.env.BCITY_CURRICULA_DIR = prev
+    }
   })
 })
 
