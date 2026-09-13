@@ -17,7 +17,13 @@ import {
 import path from 'path'
 import { LOG_DIR, fmtStamp } from './paths'
 import { httpOk, killPid, pidAlive, portListen, waitUntil } from './net'
-import { entryForCourse, loadRegistry, saveAnyComponent, saveComponent } from './registry'
+import {
+  entryForCourse,
+  loadRegistry,
+  saveAnyComponent,
+  saveComponent,
+  clearAnyComponent,
+} from './registry'
 import { launchSpec, spawnBg } from './proc'
 import { writeRemoteHubUrl } from './config'
 import { fail, info, log, ok, warn } from './log'
@@ -125,6 +131,30 @@ export async function stepHubServer(cfg: RlConfig, jobRoot: string): Promise<voi
   }
 }
 
+/** 同槽位隧道接管（2026-09-14 事故修复）：槽位是端口独占单位（同 slot = 同 hub 目标），
+ *  绝不允许两门课程的隧道同时占同一槽。某课程停训后残留的存活隧道（如 c6-chip）会
+ *  长期占死该槽 metrics 端口——新课程隧道 `--metrics` bind 失败即退（"Only one usage
+ *  of each socket address"）→ 控制台「启动失败」。启动新隧道前，先杀掉并清账同槽位
+ *  其它课程的存活隧道，保证「启动即就绪」。
+ *
+ *  返回被接管课程的清单（日志/测试断言用）；异槽位/死 pid/同课自身条目一律不动。 */
+export async function supersedeSlotTunnels(course: string, slot: number): Promise<string[]> {
+  const struck: string[] = []
+  const reg = loadRegistry()
+  for (const [owner, ent] of Object.entries(reg.cloudflareds ?? {})) {
+    if (owner === course) continue
+    if ((ent.slot ?? 0) !== slot) continue
+    if (!pidAlive(ent.pid)) continue
+    warn(
+      `slot ${slot} 的隧道由课程 ${owner} 占用（PID ${ent.pid}）——先停止旧隧道，为 ${course} 接管`,
+    )
+    await killPid(ent.pid)
+    clearAnyComponent('cloudflared', owner)
+    struck.push(owner)
+  }
+  return struck
+}
+
 /** cloudflared tunnel 步骤（3 次申请重试；URL 以日志输出为触发）。
  *  course 决定登记归属（P1b 按课程键控）；隧道自身的 per-course 端口/URL 是 P3。 */
 export async function stepCloudflared(
@@ -163,6 +193,10 @@ export async function stepCloudflared(
   const slot = slotOf(cfg, course)
   const metricsPort = slotPort(cfg, slot, 'metrics')
   const hubPort = slotPort(cfg, slot, 'hub')
+  // 同槽位接管（2026-09-14 事故）：先杀其它课程残留占同一槽的存活隧道，避免本课隧道
+  // `--metrics` bind 失败即退。监督器只重启被哨兵变化的活进程，杀掉 + 清账后就无复活。
+  const superseded = await supersedeSlotTunnels(course, slot)
+  if (superseded.length > 0) ok(`已接管 slot ${slot} 的隧道（原属 ${superseded.join('、')}）`)
   let url: string | null = null
   let procPid = 0
   let cfLog = ''

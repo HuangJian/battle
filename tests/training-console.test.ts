@@ -128,6 +128,48 @@ describe('console/api.buildStateView', () => {
     // p4-fast 在 curricula/ 有定义但 tmp/ 可能无日志——应被补充进列表
     expect(courses).toContain('p4-fast')
   })
+
+  it('默认窗口必须包含新建 BC 课程 bc-c4-v3（不被更晚写入的课程挤出）', () => {
+    // 回归（2026-09-14）：课程目录随阶梯（+20）/经典（+35）/BC（*.bc.jsonc）持续增长，
+    // discoverCourses 默认 12 的小窗口被 ladder-*（mtime 23:32 的 20 个课程）占满，
+    // bc-c4-v3（23:14）连 bc-c4/c6-chip 一并从课程 select 消失——BC 训练无法在控制台开启。
+    const courses = api.discoverCourses()
+    expect(courses).toContain('bc-c4-v3')
+  })
+
+  it('课程发现目录可重定向：新 BC 课程在大量更新课程中不被默认窗口挤出', () => {
+    const prevTmp = process.env.BCITY_TMP_LOGS_DIR
+    const prevCur = process.env.BCITY_CURRICULA_DIR
+    const tmpRoot = mkdtempSync(path.join(os.tmpdir(), 'bcity-discover-tmp-'))
+    const curRoot = mkdtempSync(path.join(os.tmpdir(), 'bcity-discover-cur-'))
+    try {
+      // tmp/：25 个带 training_log.jsonl 的课程目录（超过旧默认窗口 12 就能把新课程挤出）
+      for (let i = 0; i < 25; i++) {
+        const d = path.join(tmpRoot, `run-c${String(i).padStart(2, '0')}`)
+        mkdirSync(d, { recursive: true })
+        writeFileSync(path.join(d, 'training_log.jsonl'), 'x\n')
+      }
+      // curricula/：再多 30 个更新课程 + 一个新创建的 BC 课程（.bc.jsonc 后缀即课程键）
+      for (let i = 0; i < 30; i++) {
+        writeFileSync(path.join(curRoot, `z-new-${String(i).padStart(2, '0')}.jsonc`), '{}\n')
+      }
+      const bcCourse = 'bc-c4-v3'
+      writeFileSync(path.join(curRoot, `${bcCourse}.bc.jsonc`), '{}\n')
+      process.env.BCITY_TMP_LOGS_DIR = tmpRoot
+      process.env.BCITY_CURRICULA_DIR = curRoot
+      const courses = api.discoverCourses()
+      expect(courses).toContain(bcCourse)
+      expect(courses.length).toBeGreaterThan(30) // 不被固定小窗口截断
+      expect(courses.map((c) => c.replace(/\.bc\.jsonc$/, ''))).toContain(bcCourse) // 键已去后缀
+    } finally {
+      rmSync(tmpRoot, { recursive: true, force: true })
+      rmSync(curRoot, { recursive: true, force: true })
+      if (prevTmp === undefined) delete process.env.BCITY_TMP_LOGS_DIR
+      else process.env.BCITY_TMP_LOGS_DIR = prevTmp
+      if (prevCur === undefined) delete process.env.BCITY_CURRICULA_DIR
+      else process.env.BCITY_CURRICULA_DIR = prevCur
+    }
+  })
 })
 
 describe('console/api.nodeViews 并行 ping（§365：串行导致 /api/state 超时空回复）', () => {

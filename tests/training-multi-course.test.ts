@@ -42,7 +42,8 @@ import {
   saveCourseComponent,
 } from '../tools/training/registry'
 import { loadConfig, saveConfig, writeRemoteHubUrl } from '../tools/training/config'
-import { drainStaleJobs } from '../tools/training/hub'
+import { drainStaleJobs, supersedeSlotTunnels } from '../tools/training/hub'
+import { killPid, pidAlive } from '../tools/training/net'
 import { seedWeightsFromBc } from '../tools/training/courses'
 import { restartSpecFor } from '../tools/training/console/actions'
 import { capacityError, checkCapacity, lockName, slotOf, slotPort } from '../tools/training/slots'
@@ -194,6 +195,91 @@ describe('W4 spec 重建逐字段一致（旧占位）', () => {
       else process.env.BCITY_REGISTRY_FILE = prev
       rmSync(scratch, { recursive: true, force: true })
     }
+  })
+})
+
+// ────────────────────────── W6：同槽位 cloudflared 隧道接管（2026-09-14 事故） ──────────────────────────
+
+describe('W6 同槽位 cloudflared 隧道接管', () => {
+  /** 真实存活子进程（pidAlive 为真），充当「旧隧道进程」。 */
+  function livePid(): { proc: Bun.Subprocess; pid: number } {
+    const proc = Bun.spawn([process.execPath, '-e', 'setInterval(() => {}, 1000)'], {
+      stdout: 'ignore',
+      stderr: 'ignore',
+      windowsHide: true,
+    })
+    return { proc, pid: proc.pid }
+  }
+
+  it('接管并杀同槽位残留隧道；异槽位/死 pid 不动；同课自身条目保留', async () => {
+    // 复现（2026-09-14）：c6-chip 残留隧道长期占住 slot0 metrics 口，bc-c4-v3 隧道
+    // bind 失败 12s 退出、控制台「启动失败」。修复 = 启动前接管同槽位其它课程的存活隧道。
+    const scratch = mkdtempSync(path.join(os.tmpdir(), 'bcity-p0w6-'))
+    const prev = process.env.BCITY_REGISTRY_FILE
+    process.env.BCITY_REGISTRY_FILE = path.join(scratch, 'registry.json')
+    const stale = livePid() // c6-chip 残留：同槽位 0 —— 必须被接管杀掉
+    const other = livePid() // bc-c4：异槽位 1 —— 不得误伤
+    try {
+      const cfg = loadRealConfig()
+      const m0 = slotPort(cfg, 0, 'metrics')
+      const m1 = slotPort(cfg, 1, 'metrics')
+      saveCourseComponent('cloudflared', 'c6-chip', {
+        pid: stale.pid,
+        course: 'c6-chip',
+        slot: 0,
+        metrics: m0,
+        log: '',
+      })
+      saveCourseComponent('cloudflared', 'bc-c4', {
+        pid: other.pid,
+        course: 'bc-c4',
+        slot: 1,
+        metrics: m1,
+        log: '',
+      })
+      // 待启动课程自己的旧死条目（真实 world：bc-c4-v3 前次失败 PID 8628）不应被本轮处理
+      saveCourseComponent('cloudflared', 'bc-c4-v3', {
+        pid: 8628,
+        course: 'bc-c4-v3',
+        slot: 0,
+        metrics: m0,
+        log: '',
+      })
+
+      const killed = await supersedeSlotTunnels('bc-c4-v3', 0)
+      expect(killed.sort()).toEqual(['c6-chip'])
+
+      const reg = loadRegistry()
+      expect(reg.cloudflareds?.['c6-chip']).toBeUndefined() // 已清账
+      expect(reg.cloudflareds?.['bc-c4']).toBeDefined() // 异槽位保留
+      expect(reg.cloudflareds?.['bc-c4-v3']).toBeDefined() // 同课条目不动
+      expect(pidAlive(stale.pid)).toBe(false) // 残留进程已死
+      expect(pidAlive(other.pid)).toBe(true) // 异槽位进程存活
+    } finally {
+      try {
+        await killPid(stale.pid)
+      } catch {
+        /* already dead */
+      }
+      try {
+        await killPid(other.pid)
+      } catch {
+        /* already dead */
+      }
+      if (prev === undefined) delete process.env.BCITY_REGISTRY_FILE
+      else process.env.BCITY_REGISTRY_FILE = prev
+      rmSync(scratch, { recursive: true, force: true })
+    }
+  })
+
+  it('接线：stepCloudflared 在 spawn 前调用 supersedeSlotTunnels（防只管 helper 忘接线）', () => {
+    // 功能由上面的单测覆盖，但调用点被删会让 helper 形同虚设——grep 门禁守住接线。
+    const src = readFileSync(path.join(REPO_ROOT, 'tools', 'training', 'hub.ts'), 'utf-8')
+    const step = src.slice(src.indexOf('export async function stepCloudflared'))
+    const spawnIdx = step.indexOf('spawnBg')
+    const callIdx = step.indexOf('supersedeSlotTunnels')
+    expect(callIdx).toBeGreaterThan(-1)
+    expect(callIdx).toBeLessThan(spawnIdx) // 必须早于 spawn 循环（先清口再起新隧道）
   })
 })
 

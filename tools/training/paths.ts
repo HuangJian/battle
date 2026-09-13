@@ -24,6 +24,12 @@ export function curriculaDir(): string {
 /** 运行日志/登记/临时文件根（仓库根 tmp/——2026-09-08 统一：全项目只使用 ./tmp，
  *  不再用 nn-training/tmp，消除双 tmp 混淆）。 */
 export const LOG_DIR = path.join(REPO_ROOT, 'tmp')
+
+/** 课程运行日志根（与 LOG_DIR 同；单测以 BCITY_TMP_LOGS_DIR 重定向到临时目录——课程
+ *  发现/总览测试不再依赖机器上 tmp/ 的真实课程数据；默认行为零变化，故**惰性**取值）。 */
+export function tmpLogsDir(): string {
+  return process.env.BCITY_TMP_LOGS_DIR || LOG_DIR
+}
 /** 本模块的运行日志目录（tmp/training-start）。 */
 export const START_LOG_DIR = path.join(LOG_DIR, 'training-start')
 /** 监控页热加载元数据文件（变更检测哨兵，实义为最后实际变更时间戳）。 */

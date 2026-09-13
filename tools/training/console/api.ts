@@ -18,7 +18,7 @@ import {
   writeFileSync,
 } from 'fs'
 import path from 'path'
-import { curriculaDir, LOG_DIR, NN_TRAINING, REPO_ROOT } from '../paths'
+import { curriculaDir, LOG_DIR, NN_TRAINING, REPO_ROOT, tmpLogsDir } from '../paths'
 import { httpOk, pidAlive } from '../net'
 import { entryForCourse, loadRegistry } from '../registry'
 import { loadConfig } from '../config'
@@ -69,6 +69,7 @@ import type {
 import {
   ActionError,
   busy,
+  componentBusy,
   smokeComponent,
   smokeTrain,
   setMode,
@@ -141,14 +142,18 @@ export function sanitizeViewCourse(raw: string | null): string {
 
 // ────────────────────────── 课程发现 ──────────────────────────
 
-/** 发现可监控课程：tmp/ 下含 training_log.jsonl 的目录（按日志 mtime 新→旧）+ curricula/*.jsonc 中尚未落盘的课程。 */
-export function discoverCourses(max = 12): string[] {
+/** 发现可监控课程：tmp/ 下含 training_log.jsonl 的目录（按日志 mtime 新→旧）+ curricula/*.jsonc 中尚未落盘的课程。
+ *
+ *  窗口（max）默认取足量 500：课程目录随阶梯（+20）/经典（+35）/BC（*.bc.jsonc）持续
+ *  增长，小窗口会把课程挤出课程 select——2026-09-14 回归：20 个 ladder-*（mtime 23:32）
+ *  占满 12 窗口，bc-c4-v3（23:14）连 bc-c4/c6-chip 一并消失，无法在控制台开启 BC 训练。 */
+export function discoverCourses(max = 500): string[] {
   const out: Array<{ name: string; mtime: number }> = []
   const seen = new Set<string>()
   try {
-    for (const ent of readdirSync(path.join(REPO_ROOT, 'tmp'), { withFileTypes: true })) {
+    for (const ent of readdirSync(tmpLogsDir(), { withFileTypes: true })) {
       if (!ent.isDirectory()) continue
-      const lp = path.join(REPO_ROOT, 'tmp', ent.name, 'training_log.jsonl')
+      const lp = path.join(tmpLogsDir(), ent.name, 'training_log.jsonl')
       try {
         out.push({ name: ent.name, mtime: statSync(lp).mtimeMs })
         seen.add(ent.name)
@@ -161,16 +166,14 @@ export function discoverCourses(max = 12): string[] {
   }
   // 补充 curricula/ 中尚未跑过的课程（按 jsonc mtime 新→旧），使新 course 首次选择有 UI 路径
   try {
-    for (const ent of readdirSync(path.join(REPO_ROOT, 'nn-training', 'curricula'), {
-      withFileTypes: true,
-    })) {
+    for (const ent of readdirSync(curriculaDir(), { withFileTypes: true })) {
       if (ent.isDirectory() || !ent.name.endsWith('.jsonc')) continue
       // BC 课程（<name>.bc.jsonc，2026-09-13）：课程键 = 去掉 .bc.jsonc 后缀
       const name = ent.name.endsWith('.bc.jsonc')
         ? ent.name.slice(0, -'.bc.jsonc'.length)
         : ent.name.replace(/\.jsonc$/, '')
       if (seen.has(name)) continue
-      const cp = path.join(REPO_ROOT, 'nn-training', 'curricula', ent.name)
+      const cp = path.join(curriculaDir(), ent.name)
       out.push({ name, mtime: statSync(cp).mtimeMs })
     }
   } catch {
@@ -481,7 +484,9 @@ export async function componentViews(cfg: RlConfig, course: string): Promise<Com
         logTail: logRel ? logTail(logRel) : [],
         /** §380：非正常退出原因（exit-watchdog 记录），UI 显示"已退出"处展示。 */
         error: e?.error ?? null,
-        busy: busy.has(`start:${key}`) || busy.has(`stop:${key}`) || busy.has(`smoke:${key}`),
+        // 与动作实际加的 busy 键同源（按课键控组件带 course）；否则页面显示「未忙碌」
+        // 而服务端 409（2026-09-14 事故：trainingLoop 启动永远返回 409）。
+        busy: componentBusy(key, course),
         // cloudflared 卡展示隧道 auth key（复制用）；其余组件无密钥字段
         ...(key === 'cloudflared' ? { secret: cfg.rl.remote_token } : {}),
       }
@@ -1346,7 +1351,12 @@ export function buildEvalGamesView(course = ''): EvalGamesView {
   }
 }
 
-function replayExportPaths(course: string): { manifest: string; outDir: string; log: string; gamesFile: string } {
+function replayExportPaths(course: string): {
+  manifest: string
+  outDir: string
+  log: string
+  gamesFile: string
+} {
   return {
     manifest: path.join(REPO_ROOT, 'tmp', course, 'replay-export.json'),
     outDir: path.join(REPO_ROOT, 'tmp', course, 'replay-export'),
