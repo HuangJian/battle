@@ -1331,3 +1331,32 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   （由 c6-pickup 派生，单变量删死项，wChip 保持 0.005，bc=c6-pickup.it35，iters=60，eval 200）。
 - **后果**：此后任何课程若再引用 `playerHits` 作「承伤」语义 = 违反本条；调「挨打痛感」
   只允许动 `wChip`（或后续承伤项），调「死刑」只允许动 `terminal.lives_exhausted`。
+
+## §2026-09-13-level-extraction（2026-09-13，关卡配置抽离 + D14 语料身份改语义哈希；用户拍板）
+
+- **触发**：mid-run 编辑课程文件（iters 30→60）把 c6-chip 打成指纹脑裂——shard manifest 的
+  course_fp 与 job envelope 的 course_fp 都在各自时刻重读文件字节（`cmd.course_fp_for_args` /
+  `loop_steps` 发布），编辑落在采样与发布之间 ⇒ D14 整轮 shard 拒收（job=abbf… shard=e6c6…）。
+  原则确认：**iters 这类预算/测量旋钮不改变训练契约，mid-run 编辑不应要求新课程**。
+- **配置修改分类学**（此后所有课程/关卡变更按此归类）：
+  - **A 语料身份**（改动 = 语料破裂，禁止对在跑腿修改；要变 = 新关卡/新课程）：地图/敌人
+    队列/敌数/出生点/**命/星**（→ 抽离到关卡文件）、difficulty/max_ticks、mode/dodge、
+    seed_rotate/seeds、reward（formula/params/terminal/scheme——PPO 端按 manifest 公式重算
+    回报，混入不同 reward 语义的 shard = 错账）。
+  - **B 训练语义、非语料**（改动 = §15.5 新实验，stop→start 生效，不破坏 shard 血缘）：
+    bc、γ/λ/clip/vf/ent/max_grad_norm、epochs/mb/lr、ppo_schedule、normalize_ret、kickstart。
+  - **C 预算/测量/路径**（随时可改，stop→start 热应用）：iters/max_hours/workers/stream/
+    keep_iters、eval_stages/eval_games_per_stage/eval_every、out/traj/backup_*、ent_break*。
+- **第一步（本条）——关卡抽离**：`nn-training/levels/*.jsonc` 持有环境语义
+  （stages/difficulty/max_ticks/player），课程以 `"level": "<name>"` 引用；课程侧内联重复
+  声明四类环境键 = 配置冲突 raise（`rl/config.load_course` 合并）。内联 stages 旧用法逐字节
+  兼容（在跑课程不迁移照常跑）。首两份：arena6（c6 家族）/ arena4（c4 家族）。
+- **D14 升级为双指纹**：新增 **corpus_fp** = `config.corpus_identity_fp`（env+reward **解析值**
+  规范化 JSON 的 sha256；内联与 level 引用同形同指纹，文件内注释/格式不敏感），经 rollout cmd
+  `--corpus-fp` 进 shard manifest、publish_job 进 job manifest；worker 装载校验
+  `d14_corpus_match` **优先比 corpus_fp**，任一侧缺席回退 legacy course_fp（旧 payload 兼容）。
+  course_fp（文件字节哈希）保留作血缘/快照（D13）与 resume 对账不变。
+- **复用**：关卡文件与 evalB/探针同形 schema——`eval-course-ckpt.ts --course
+  nn-training/levels/arena6.jsonc` 直接可跑（不再需要 tmp/fmap-*.jsonc 复制品）。
+- **迁移状态**：c6-dmgfix 已引用 arena6；c6-chip 在跑不迁移（其 legacy course_fp 校验在
+  stop→start 后自然恢复一致）；其余历史课程按需渐进迁移。

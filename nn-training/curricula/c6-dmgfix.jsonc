@@ -23,6 +23,11 @@
 //   **wChip 保持 0.005 不动**（c6-pickup 原值）——单变量纪律：本腿只修死项，不碰剂量轴
 //   （0.03 已被 c6-chip 判保守化；0.01-on-c6 是另一条腿的事）。
 //
+// ── level 引用（§2026-09-13-level-extraction）─────────────────────────────────
+//   环境语义（地图/敌人队列/命/星/difficulty/max_ticks）已抽离到 `levels/arena6.jsonc`，
+//   本课程以 `"level": "arena6"` 引用、不得内联重复声明。预算/测量字段（iters/eval_*/
+//   out/traj）的编辑从此与语料血缘解耦（corpus_fp 只哈希 env+reward 语义）。
+//
 // ── 历史课程不回改 ─────────────────────────────────────────────────────────────
 //   c4-*/c5-*/c6-* 等已收官课程是实验记录，**不改**（它们带着死项跑出的结论仍然成立，
 //   死项是每败局常数 −1，只平移败局回报、不改变局内 credit assignment 的时序结构）。
@@ -47,42 +52,7 @@
   "version": 5,
   "name": "c6-dmgfix",
   "mode": "per-tick",
-  "stages": [
-    {
-      "name": "p4-onset-mixed",
-      "grid": [
-        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
-        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
-        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
-        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
-        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
-        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
-        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
-        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
-        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
-        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
-        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
-        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
-        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
-      ],
-      "forces": "abcdabcdabcdabcdabcd",
-      "count": 6,
-      "player_spawn": { "col": 12, "row": 12 },
-      "enemy_spawns": [
-        { "col": 2, "row": 2 },
-        { "col": 22, "row": 2 },
-        { "col": 22, "row": 22 },
-        { "col": 2, "row": 22 },
-      ],
-    },
-  ],
-  "difficulty": "hard",
-  "max_ticks": 2400,
-  "seed_rotate": 150,
-  "player": {
-    "lives": 1,
-    "level": 0,
-  },
+  "level": "arena6",
   "reward": {
     // ★ 唯一变量：删除 "- wDmg*playerHits"（死项：1 命课程 = 每败局常数 −1，与 terminal 重复）
     "formula": "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots - wTick*ticks - wChip*playerDamageTaken",

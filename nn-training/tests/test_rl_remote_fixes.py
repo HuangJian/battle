@@ -153,6 +153,23 @@ def test_eval_seeds_support_200_games() -> None:
     assert EVAL_SEEDS[:100] == tuple(range(860001, 860101))
 
 
+def test_d14_corpus_match_prefers_semantic_identity() -> None:
+    """D14 比对规则（§2026-09-13-level-extraction）：双侧有 corpus_fp 比语义身份；
+    任一侧缺（legacy shard / 旧 job）回退文件血缘 course_fp。"""
+    from remote.worker import d14_corpus_match
+
+    # 双侧 corpus_fp 一致 ⇒ 过（即使 course_fp 因注释/预算字段编辑而不同）
+    assert d14_corpus_match("cA", "X", {"corpus_fp": "X", "course_fp": "cB"})
+    # 双侧 corpus_fp 不一致 ⇒ 拒（真跨语料）
+    assert not d14_corpus_match("cA", "X", {"corpus_fp": "Y", "course_fp": "cA"})
+    # legacy shard（无 corpus_fp）⇒ 回退 course_fp 比对
+    assert d14_corpus_match("cA", "X", {"course_fp": "cA"})
+    assert not d14_corpus_match("cA", "X", {"course_fp": "cB"})
+    # legacy job（无 corpus_fp）⇒ 同样回退文件血缘
+    assert d14_corpus_match("cC", "", {"course_fp": "cC"})
+    assert not d14_corpus_match("cC", "", {"corpus_fp": "Z", "course_fp": "cD"})
+
+
 def test_backup_weights_honors_course_dir(tmp_path: Path) -> None:
     from rl.archive import backup_weights
 

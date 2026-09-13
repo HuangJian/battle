@@ -5,6 +5,33 @@
 
 ---
 
+## §36 关卡配置抽离 + D14 语料身份改语义哈希（2026-09-13，用户拍板）
+
+**事故**：mid-run 编辑 c6-chip 课程（iters 30→60）触发指纹脑裂——shard manifest 与 job
+envelope 各自在采样/发布时刻重读课程文件字节，D14 把 mismatched shard 整轮拒收（job=abbf…
+shard=e6c6…，rollout 卡 it16）。原则修正：**iters 类预算旋钮不改训练契约，mid-run 编辑不应
+要求新课程**（我此前把「改文件」与「改语义」混为一谈）。
+
+**分类学**（DECISIONS §2026-09-13-level-extraction，全量版）：A 语料身份（关卡 env + reward
+语义，改动=破裂）／B 训练语义非语料（bc/优化器/λ，改动=§15.5 新实验，stop→start 生效）／
+C 预算测量路径（iters/eval_*/out 等，随时可改）。
+
+**第一步落地**：
+
+- `nn-training/levels/arena6.jsonc` / `arena4.jsonc`：环境语义（地图/敌人队列/敌数/出生点/
+  **命/星**/difficulty/max_ticks）独立成关；课程以 `"level": "arena6"` 引用，内联重复声明 =
+  raise；内联旧用法逐字节兼容。
+- `corpus_identity_fp`（rl/config.py）：语料身份 = env+reward **解析值**规范化哈希（内联与
+  level 引用同形同指纹）；经 `--corpus-fp` 进 shard manifest（exporter TS 双写点）、经
+  publish_job 进 job manifest；worker `d14_corpus_match` 优先比 corpus_fp、任一侧缺席回退
+  legacy course_fp。course_fp 文件血缘保留（D13 快照/resume 对账不变）。
+- c6-dmgfix 已迁移引用 arena6（预检 validate_reward ok）；c6-chip 在跑不迁移。evalB/探针
+  直接吃关卡文件（`eval-course-ckpt.ts --course nn-training/levels/arena6.jsonc`）。
+- 门禁：nn-python-gate 绿（21s）+ `bun run check` 绿（2031 pass）；新测试
+  `test_course_level.py`（合并/冲突/兼容/fp 分类学/同形同指纹）+ `test_d14_corpus_match`。
+
+---
+
 ## §35 wDmg 死项修复：c6-dmgfix 基座腿就绪（2026-09-13，用户拍板「先做」）
 
 **机制定案（代码核验，DECISIONS §2026-09-13-reward-wdmg-dead-term）**：玩家非致命命中推

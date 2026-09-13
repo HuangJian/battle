@@ -489,6 +489,12 @@ class TrainingSteps:
         course_bytes = course_path.read_bytes()
         course_text = course_bytes.decode("utf-8")
         course_fp = hashlib.sha256(course_bytes).hexdigest()
+        # D14 语义版：corpus_fp = 语料身份（env+reward 解析值哈希，rl/config.corpus_identity_fp）。
+        # 与 course_fp（文件血缘）并存进 manifest；worker 装载校验优先比 corpus_fp——
+        # 预算/路径类 mid-run 课程编辑只动 course_fp，不再触发整轮 shard 拒收。
+        from rl.config import corpus_identity_fp
+
+        corpus_fp = corpus_identity_fp(course)
         # ppo_schedule 解析后值（执行用）——_course_iter 已按 it 折算进 args
         from rl.reward_library import METRICS_VERSION
 
@@ -528,6 +534,7 @@ class TrainingSteps:
             code_zip_path=self._code_zip_path,
             course=course_text,
             course_fp=course_fp,
+            corpus_fp=corpus_fp,
             reward_formula=course.reward.formula,
             formula_hash=course.reward_spec().identity(),
             metrics_version=METRICS_VERSION,

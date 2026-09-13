@@ -104,6 +104,12 @@ def build_rollout_cmd(
         cfp = course_fp_for_args(args)
         if cfp:
             cmd += ["--course-fp", cfp]
+        # D14 语义版：corpus_fp = 语料身份（env+reward 解析值哈希）与文件血缘并存。
+        # 预算/路径/注释类编辑只动 course_fp，不动 corpus_fp ⇒ 不触发混训拒收
+        # （DECISIONS §2026-09-13-level-extraction；worker 侧优先比 corpus_fp）。
+        cfp2 = corpus_fp_for_args(args)
+        if cfp2:
+            cmd += ["--corpus-fp", cfp2]
         for k, v in args_rollout_overrides(args).items():
             # 键是下划线（lives_override），导出器只认连字符（--lives-override，
             # 未知 flag 静默忽略）——c6-gae 本地 3命1星事故根因，见 tests/test_rl_cmd.py。
@@ -133,4 +139,22 @@ def course_fp_for_args(args) -> str:
         with open(path, "rb") as f:
             return hashlib.sha256(f.read()).hexdigest()
     except OSError:
+        return ""
+
+
+def corpus_fp_for_args(args) -> str:
+    """语料身份指纹（D14 语义版，config.corpus_identity_fp）。无课程返回 ""。
+
+    与远程发布（loop_steps → hub_client.publish_job 的 corpus_fp）同源：都基于
+    **解析后**的 CourseConfig 语义哈希，与文件字节无关（课程内注释/预算字段编辑
+    不改变本值）。异常回退 ""（= manifest 缺该字段，worker 走 legacy course_fp）。
+    """
+    course = getattr(args, "course_obj", None)
+    if course is None:
+        return ""
+    from rl.config import corpus_identity_fp
+
+    try:
+        return corpus_identity_fp(course)
+    except Exception:
         return ""

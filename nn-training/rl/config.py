@@ -25,6 +25,9 @@ from rl.reward_library import OUTCOMES
 
 #: 课程配置目录（nn-training/curricula/*.jsonc）
 CURRICULA_DIR = Path(__file__).resolve().parent.parent / "curricula"
+#: 关卡配置目录（nn-training/levels/*.jsonc）——地图/敌人队列/命/星等**环境语义**，
+#: 课程以 `"level": "<name>"` 引用（DECISIONS §2026-09-13-level-extraction）。
+LEVELS_DIR = Path(__file__).resolve().parent.parent / "levels"
 #: stageJson 查询串上限（评审 LC §4.4）：13×13 grid ~700 字节，4KB 留足余量
 STAGE_JSON_MAX_BYTES = 4096
 #: 自定义关（配置内 grid）起始 ID：第 i 个 → 2000+i（plan §5.2）
@@ -763,6 +766,10 @@ class CourseConfig(BaseModel):
     version: int = 5
     name: str = "unnamed"
     mode: Literal["per-tick", "intent", "goal"] = "per-tick"
+    #: 关卡引用（`nn-training/levels/<name>.jsonc` 或路径）。设置后 stages/difficulty/
+    #: max_ticks/player 四类环境键**只能**来自关卡文件（load_course 合并；课程侧重复
+    #: 声明 = 配置冲突 raise）。缺席 = 内联 stages 旧用法，逐字节兼容。
+    level: str = ""
 
     # ---- 环境 ----
     #: str = 关卡范围规格（透传 --stages）；list[StageSpec] = 自定义关（→ 2000+i）
@@ -1015,8 +1022,31 @@ def _default_lives(difficulty: str) -> int:
     return 3
 
 
+def resolve_level(name_or_path: str) -> Path:
+    """`level: arena6` → `levels/arena6.jsonc`；路径存在则原样。"""
+    p = Path(name_or_path)
+    if p.exists():
+        return p
+    cand = LEVELS_DIR / f"{name_or_path}.jsonc"
+    if not cand.exists():
+        raise FileNotFoundError(
+            f"关卡 '{name_or_path}' 不存在（查找 {cand}）；可用："
+            f"{[f.stem for f in sorted(LEVELS_DIR.glob('*.jsonc'))]}"
+        )
+    return cand
+
+
+#: level 引用持有后、课程侧禁止重复声明的环境键（关卡文件 = 环境语义唯一来源）
+_LEVEL_ENV_KEYS = ("stages", "difficulty", "max_ticks", "player")
+
+
 def load_course(path: str | Path) -> CourseConfig:
-    """读 JSONC 课程配置 → `CourseConfig`（pydantic 校验，非法即 raise）。"""
+    """读 JSONC 课程配置 → `CourseConfig`（pydantic 校验，非法即 raise）。
+
+    `"level": "<name|path>"` 引用关卡文件（levels/*.jsonc）：stages/difficulty/
+    max_ticks/player 由关卡文件注入；课程侧显式声明其中任一键 = 配置冲突 raise
+    （关卡 = 环境语义唯一来源，DECISIONS §2026-09-13-level-extraction）。
+    """
     from rl.jsonc import load as _load_jsonc
 
     p = Path(path)
@@ -1026,7 +1056,18 @@ def load_course(path: str | Path) -> CourseConfig:
             p = cand
         else:
             raise FileNotFoundError(f"课程配置不存在：{path}（亦未在 {CURRICULA_DIR} 下找到）")
-    return CourseConfig(**_load_jsonc(str(p)))
+    d = _load_jsonc(str(p))
+    if d.get("level"):
+        lvl = _load_jsonc(str(resolve_level(str(d["level"]))))
+        for k in _LEVEL_ENV_KEYS:
+            if k in d:
+                raise ValueError(
+                    f"课程 '{d.get('name', path)}' 引用 level='{d['level']}' 后不得再声明 "
+                    f"`{k}`（环境语义归关卡文件唯一持有）"
+                )
+            if k in lvl:
+                d[k] = lvl[k]
+    return CourseConfig(**d)
 
 
 def resolve_course(name_or_path: str) -> Path:
@@ -1041,6 +1082,39 @@ def resolve_course(name_or_path: str) -> Path:
             f"{[f.stem for f in sorted(CURRICULA_DIR.glob('*.jsonc'))]}"
         )
     return cand
+
+
+def corpus_identity_fp(course: CourseConfig) -> str:
+    """语料身份指纹（D14 语义版）：sha256(canonical(env+reward))。
+
+    覆盖 = 决定「一个样本是什么」的全部字段：mode / stages（解析后）/ difficulty /
+    max_ticks / seed_rotate / seeds / player / dodge / reward(formula+params+terminal+scheme)。
+    **刻意排除** iters/max_hours/eval_*/out/traj/bc/optimizer/schedule 等预算、测量、
+    路径与优化器键——这些改动不构成语料混入，mid-run 编辑课程不得触发 D14 拒收
+    （DECISIONS §2026-09-13-level-extraction 的配置修改分类学）。哈希**解析后**的值：
+    内联 stages 与 level 引用同形同指纹；关卡文件内的注释/格式变动不影响身份。
+    """
+    import hashlib
+    import json
+
+    stages = (
+        [s.model_dump() for s in course.stages]
+        if isinstance(course.stages, list)
+        else course.stages
+    )
+    payload = {
+        "mode": course.mode,
+        "stages": stages,
+        "difficulty": course.difficulty,
+        "max_ticks": course.max_ticks,
+        "seed_rotate": course.seed_rotate,
+        "seeds": course.seeds,
+        "player": course.player.model_dump(),
+        "dodge": course.dodge,
+        "reward": course.reward.model_dump(),
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
 def course_from_args(args) -> CourseConfig | None:

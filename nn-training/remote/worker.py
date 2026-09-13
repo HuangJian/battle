@@ -399,6 +399,19 @@ def _ensure_commit(target: str, repo_root: Path = REPO_ROOT, log=lambda msg: Non
     return head == target
 
 
+def d14_corpus_match(job_course_fp: str, job_corpus_fp: str, shard_manifest: dict) -> bool:
+    """D14 装载校验的比对规则（DECISIONS §2026-09-13-level-extraction）。
+
+    双侧都有 corpus_fp（语料身份 = env+reward 解析值语义哈希）⇒ 比 corpus_fp——
+    预算/路径/注释类课程 mid-run 编辑只动 course_fp（文件血缘），不得触发拒收。
+    任一侧缺 corpus_fp（legacy shard / 旧 job）⇒ 回退文件血缘 course_fp 逐字比对。
+    """
+    s_corpus = str(shard_manifest.get("corpus_fp", "") or "")
+    if job_corpus_fp and s_corpus:
+        return job_corpus_fp == s_corpus
+    return str(shard_manifest.get("course_fp", "")) == job_course_fp
+
+
 def run_job(
     base_url: str,
     token: str,
@@ -515,13 +528,14 @@ def run_job(
     # ---- D14 语料血缘：job.course_fp == 每个 shard 的 manifest.course_fp ----
     # （跨课程语料绝不混训——发布端已保证 shard 集按 course_fp 过滤，这里再校验一次）
     _cfp = str(manifest["course_fp"])
+    _corpus = str(manifest.get("corpus_fp", "") or "")
     for _sd in shard_dirs:
         try:
             with open(os.path.join(_sd, "manifest.json"), encoding="utf-8") as _f:
                 _sm = json.load(_f)
         except (OSError, ValueError) as _e:
             raise ProtocolError(f"D14 course_fp: 读 shard manifest 失败 {_sd}: {_e}") from _e
-        if str(_sm.get("course_fp", "")) != _cfp:
+        if not d14_corpus_match(_cfp, _corpus, _sm):
             raise ProtocolError(
                 f"D14 course_fp 不匹配：job={_cfp[:12]}… shard={str(_sm.get('course_fp'))[:12]}… "
                 f"（{_sd}）——跨课程语料混入，拒收"
