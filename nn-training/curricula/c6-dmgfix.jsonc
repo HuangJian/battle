@@ -1,0 +1,138 @@
+// 课程 c6-dmgfix —— wDmg 死项修复腿（2026-09-13，用户拍板「先做 wDmg 死项修复」）
+//
+// ── 机制发现（代码核验，非推测）────────────────────────────────────────────────
+//   `src/game/SimulationCombat.ts:599` hits-to-kill = ceil(maxHp / bullet.damage)：
+//     · **非致命**命中玩家 → `player_damage` 事件 → 累加 `playerDamageTaken`
+//     · **致命**命中       → `player_hit` 事件 → `playerHits++`（并 killTank；
+//       另一触发 = 3★ 星盾消耗，本族课程 player.level=0 起步实测 playerLevel≤1，不可达）
+//   ⇒ **1 命课程里 `playerHits` 恒等于败局指示器**（胜局 0、败局 1；c6 实测败局分布
+//     {1:110, 2:1}）。所以 reward 里的 `- wDmg*playerHits`（wDmg=1.0）：
+//     ① 不承载任何挨打信息（真实的承伤信号是 `playerDamageTaken`，挂 wChip）；
+//     ② 与 `terminal.lives_exhausted = -1.0` **重复扣一次败局分**（败局合计 −2 而非 −1）；
+//     ③ 伪装成「挨打惩罚」——历史上任何对 wDmg 的调参实际都是在调死刑，死项。
+//   ⇒ **修复 = 删除该项**：击杀/承伤/死亡三个语义各归其位（wKill / wChip / terminal）。
+//
+// ── 派生（由 **c6-pickup.jsonc**，相对它只改 3 处，其余逐字锁死）────────────────
+//   1. name/out/traj/backup_dir/backup_prefix → c6-dmgfix（fresh，§15.5 新实验）
+//   2. **删 `- wDmg*playerHits` 项 + 删 `params.wDmg`**（唯一训练变量）
+//   3. bc: c5-gae.it160 → **c6-pickup.it35**（与 c4-chip01/03、c6-chip 同 bc ⇒
+//      四腿同起点跨关对照；it0 基线 = bc 零样本 c6 关 32%，§27 口径）
+//   另 iters 160 → **60**（同 c6-chip 依据：40 热相 + 20 冷却完整形状，30 轮硬停有
+//   假阴性风险；探针每 10 轮 + 熵熔断护栏，证据坏了随时早停）、eval_games_per_stage
+//   100 → **200**（EVAL_SEEDS 已扩容，in-loop 真拿 200 局精度）。
+//   **wChip 保持 0.005 不动**（c6-pickup 原值）——单变量纪律：本腿只修死项，不碰剂量轴
+//   （0.03 已被 c6-chip 判保守化；0.01-on-c6 是另一条腿的事）。
+//
+// ── 历史课程不回改 ─────────────────────────────────────────────────────────────
+//   c4-*/c5-*/c6-* 等已收官课程是实验记录，**不改**（它们带着死项跑出的结论仍然成立，
+//   死项是每败局常数 −1，只平移败局回报、不改变局内 credit assignment 的时序结构）。
+//   自本腿起新课程模板不再含 wDmg。
+//
+// ── 判据（人读 + 配对探针，不配 `gates` 块——家族先例）──────────────────────────
+//   定位要诚实：机制修复 ≠ 能力突破。死项是每败局常数 −1，预期效应温和；
+//   本腿同时是**后续腿的诚实模板基座**（plan-B「满压击杀加成」等将派生自本配置）。
+//   主判据（配对 vs bc，200 局 seeds 0-199）：
+//     · 守门轴（c6-chip 暴露的挤车轴）：**kills / pickups / shots 不降**（z<−2 即警）
+//     · dmg/kill 不恶化；胜率 ≥ 平（防进一步保守化）
+//   参考：entropy（<0.32 坍缩停）、超时占比（>0.15 熔断）、value。
+//   验收节奏：每 10 轮配对探针（场地 fmap-c6l1，与 c6-pickup stage 逐字段一致已核验）：
+//     bun tools/sim/eval-course-ckpt.ts --course tmp/fmap-c6l1.jsonc \
+//       --weights nn-training/weights/c6-dmgfix/<ckpt>.json \
+//       --weights nn-training/weights/c6-pickup/c6-pickup.it35.20260912-165846.json \
+//       --games 200 --workers 6 --out tmp/c6dmgfix-it<N>-probe.jsonl
+//
+// ── 预算 ──────────────────────────────────────────────────────────────────────
+//   60 轮 ≈ 2.2h（max_hours 12 内）。
+{
+  "version": 5,
+  "name": "c6-dmgfix",
+  "mode": "per-tick",
+  "stages": [
+    {
+      "name": "p4-onset-mixed",
+      "grid": [
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+      ],
+      "forces": "abcdabcdabcdabcdabcd",
+      "count": 6,
+      "player_spawn": { "col": 12, "row": 12 },
+      "enemy_spawns": [
+        { "col": 2, "row": 2 },
+        { "col": 22, "row": 2 },
+        { "col": 22, "row": 22 },
+        { "col": 2, "row": 22 },
+      ],
+    },
+  ],
+  "difficulty": "hard",
+  "max_ticks": 2400,
+  "seed_rotate": 150,
+  "player": {
+    "lives": 1,
+    "level": 0,
+  },
+  "reward": {
+    // ★ 唯一变量：删除 "- wDmg*playerHits"（死项：1 命课程 = 每败局常数 −1，与 terminal 重复）
+    "formula": "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots - wTick*ticks - wChip*playerDamageTaken",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.3,
+      "wPickup": 3.0,
+      "wStar": 1.0,
+      "wStuck": 0.02,
+      "wShot": 0.01,
+      "wTick": 0.01,
+      "wChip": 0.005,
+    },
+    "terminal": {
+      "stage_clear": 2.0,
+      "lives_exhausted": -1.0,
+      "timeout": -2.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  // 与 c4-chip01/03、c6-chip 同 bc（家族同起点对照轴）
+  "bc": "nn-training/weights/c6-pickup/c6-pickup.it35.20260912-165846.json",
+  "iters": 60,
+  "max_hours": 12,
+  "workers": 8,
+  // §363 缰绳双闸：ref 取课程 bc；warmup 必须 0（validate_args 强制配对）。
+  "kickstart_ref": true,
+  "warmup_iters": 0,
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  // R5＋§363 双 flag（串行路径生效；默认 false 即历史行为）。
+  "normalize_ret": true,
+  "gamma": 0.998,
+  // 继承 λ=0.95（c5-gae 验证的 value 头修复机制）
+  "lam": 0.95,
+  // 末段 kl_coef 0.03 = **护栏**；**不写 ent_coef**（缺省 0.01）。
+  "ppo_schedule": [
+    { "until_iter": 40, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
+    { "kl_coef": 0.03, "lr": 0.00005 },
+  ],
+  "out": "tmp/c6-dmgfix/weights.json",
+  "traj": "tmp/c6-dmgfix",
+  // F4 ENT 熔断：沿用 horizon 档 0.25。
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/c6-dmgfix",
+  "backup_prefix": "c6-dmgfix",
+  // 自定义关 stage ID 从 2000 开始，仅 1 关 → ID 2000；EVAL_SEEDS 已扩 200，in-loop 真 200 局。
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 200,
+  "eval_every": 5,
+}

@@ -5,6 +5,34 @@
 
 ---
 
+## §35 wDmg 死项修复：c6-dmgfix 基座腿就绪（2026-09-13，用户拍板「先做」）
+
+**机制定案（代码核验，DECISIONS §2026-09-13-reward-wdmg-dead-term）**：玩家非致命命中推
+`player_damage`（累计 `playerDamageTaken`）、致命命中推 `player_hit`（`playerHits++`；
+另一触发 = 3★ 星盾消耗，本族课程不可达）⇒ **1 命课程 `playerHits` 恒等于败局指示器**
+（实测败局分布 {1:110, 2:1}）。`- wDmg*playerHits` 因此是死项：零挨打信息 + 与
+`terminal.lives_exhausted` 重复扣败局分（败局 −2 而非 −1）+ 伪装承伤惩罚（调它 = 调死刑）。
+
+**修复（c6-dmgfix.jsonc，预检 validate_reward ok/零警告）**：
+
+- 由 c6-pickup 派生、**唯一训练变量 = 删 `- wDmg*playerHits` 项 + 删 `params.wDmg`**；
+  wChip 保持 0.005（剂量轴不碰——0.03 已被 c6-chip 判保守化，0.01-on-c6 留待后续腿）；
+  bc=c6-pickup.it35（与 chip 三腿同起点）、iters=60（同 c6-chip 依据）、eval 200。
+- 历史课程**不回改**：死项是每败局常数 −1，只平移败局回报、不改局内 credit assignment
+  时序结构，已收官结论仍成立；自本腿起新课程模板不再含 wDmg。
+- 定位诚实声明：机制修复 ≠ 能力突破，预期效应温和（败局回报 +1.0 的梯度软化）；
+  本腿同时是**后续腿的诚实模板基座**（plan-B「满压击杀加成」将派生自本配置）。
+- 判据（守门轴来自 c6-chip 的教训）：配对 kills/pickups/shots **不降**（z<−2 即警）、
+  dmg/kill 不恶化、胜率 ≥ 平；entropy<0.32 / timeout>0.15 熔断；探针场地 fmap-c6l1。
+
+**背景**：c6-chip（wChip 0.03 on c6）it15 配对已现保守化——kills −0.36（z=−2.38）、
+pickups −0.27（z=−2.91）、shots −1.8（z=−2.03）显著降，胜局内 dmg 158→135（−15%，杠杆
+本意生效）但败局占比 134→149 席：**0.03 的承伤价格在 c6 经济（6 敌/长局/高道具密度）里
+把 wPickup/wKill 激励挤出去了**——c4→c6 迁移损失量得，0.03 不可迁移；该腿跑完 it30 收
+正式探针后关账，不续 60。
+
+---
+
 ## §34 c4-chip03 关账 + c6-chip 主腿备好（wChip 剂量-响应定案）（2026-09-13）
 
 **c4-chip03（wChip 0.03）it30/30 收官，正式配对探针**（同 §32 协议，200 局 seeds 0-199，

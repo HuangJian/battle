@@ -1315,3 +1315,19 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 - **违反后果**：任何人拿 training_log 的 rollout winRate 当能力口径（虚高 17pp 量级）；
   任何人把污染窗口课程的权重当作"纯 1命0星数据"训出的（引用前必须查本条目占比表）；
   任何人未经"修复后代码 + 冻结快照"就用本地直跑出教训性结论。
+
+## §2026-09-13-reward-wdmg-dead-term（2026-09-13，wDmg 死项修复：击杀/承伤/死亡语义各归其位）
+
+- **机制（代码核验）**：`src/game/SimulationCombat.ts:599` 口径下，玩家**非致命**命中推
+  `player_damage`（累计入 `playerDamageTaken`），**致命**命中推 `player_hit`（`playerHits++`；
+  另一触发 = 3★ 星盾消耗，本族课程 level=0 起步不可达）。⇒ **1 命课程里 `playerHits` 恒等于
+  败局指示器**（胜局 0 / 败局 1，c6 实测败局分布 {1:110, 2:1}）。
+- **判决**：reward 里的 `- wDmg*playerHits` 是**死项**——不承载挨打信息、与
+  `terminal.lives_exhausted=-1.0` 重复扣败局分（败局合计 −2）、且伪装成「挨打惩罚」
+  （历史上对 wDmg 的任何调参实际都是在调死刑）。修复 = **新课程删除该项与 `params.wDmg`**；
+  承伤定价唯一归 `wChip*playerDamageTaken`，死亡定价唯一归 `terminal.lives_exhausted`。
+  历史课程**不回改**（死项是每败局常数 −1，只平移败局回报、不改局内 credit assignment 时序，
+  已收官结论仍成立）；自本条起新课程模板不再含 wDmg。基座课程 = `c6-dmgfix.jsonc`
+  （由 c6-pickup 派生，单变量删死项，wChip 保持 0.005，bc=c6-pickup.it35，iters=60，eval 200）。
+- **后果**：此后任何课程若再引用 `playerHits` 作「承伤」语义 = 违反本条；调「挨打痛感」
+  只允许动 `wChip`（或后续承伤项），调「死刑」只允许动 `terminal.lives_exhausted`。
