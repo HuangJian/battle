@@ -829,6 +829,9 @@ function main(argv: string[] = process.argv.slice(2)): void {
   // hub 侧在发布 rollout 时透传——写进每局 shard manifest，远程 PPO 装载校验
   // job.course_fp == shard.course_fp（跨课程语料绝不混训）。空 = 非课程路径，不写。
   let courseFp = ''
+  // D14 语义版：corpus_fp = 语料身份（env+reward 解析值哈希，Python config.corpus_identity_fp）。
+  // 与 course_fp 并存；worker 装载校验优先比 corpus_fp（预算/路径编辑不动它 → 不误拒）。
+  let corpusFp = ''
   // plan/rl-training-config.md §5：自定义关 stageJson（课程配置 grid，13×13 瓦格）
   let stageJson = ''
   let livesOverride = ''
@@ -856,6 +859,7 @@ function main(argv: string[] = process.argv.slice(2)): void {
     else if (args[i] === '--wver') wver = args[++i]
     else if (args[i] === '--node-label') nodeLabel = args[++i]
     else if (args[i] === '--course-fp') courseFp = args[++i]
+    else if (args[i] === '--corpus-fp') corpusFp = args[++i]
     else if (args[i] === '--pack') packPath = args[++i]
   }
   const stages = parseRange(stagesStr)
@@ -967,6 +971,7 @@ function main(argv: string[] = process.argv.slice(2)): void {
         stuckTicks: res.stuckTicks,
         ...(wver ? { wver, node: nodeLabel } : {}),
         ...(courseFp ? { course_fp: courseFp } : {}),
+        ...(corpusFp ? { corpus_fp: corpusFp } : {}),
       }
       if (res.shard.n > 0) {
         writeRlShard(`${outDir}/${shardName}`, res.shard, manifest)
@@ -1038,6 +1043,7 @@ function main(argv: string[] = process.argv.slice(2)): void {
     ),
     ...(wver ? { wver, node: nodeLabel } : {}),
     ...(courseFp ? { course_fp: courseFp } : {}),
+    ...(corpusFp ? { corpus_fp: corpusFp } : {}),
   }
   console.log(perGame.join('\n'))
   console.log(`\n=== RL on-policy rollout (R3 v7-aligned-f3) ===`)

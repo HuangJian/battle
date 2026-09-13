@@ -238,6 +238,10 @@ def publish_job(
     # 课程 jsonc 全文快照（D6 重建输入）；`course_name` = 可读短名（审计冗余）；
     # `course_fp` = 血缘（D14 熔断）。空串 = 旧调用，manifest 不添键（字节不变）。
     course_name: str = "",
+    # D14 语义版（§2026-09-13-level-extraction）：语料身份 = env+reward 解析值哈希。
+    # 与 course_fp 并存进 manifest；worker 装载校验优先比它（预算/路径类课程编辑
+    # 只动 course_fp，不得触发 shard 拒收）。空 = 缺席（worker 回退 legacy 比对）。
+    corpus_fp: str = "",
     reward_formula: str,
     formula_hash: str,
     metrics_version: int,
@@ -291,6 +295,7 @@ def publish_job(
         "code_sha256": code_sha256,
         "course": course,
         "course_fp": course_fp,
+        "corpus_fp": corpus_fp,
         "reward_formula": reward_formula,
         "formula_hash": formula_hash,
         "metrics_version": metrics_version,
