@@ -206,15 +206,14 @@ def collect_corpus(
     cfg: dict | None,
     log=log,
 ) -> None:
-    """补齐本轮语料：断点续跑过滤 → bc_dispatch 并发派发 → 无 shard 则响亮失败。"""
+    """补齐本轮语料：断点续跑过滤 → bc_dispatch 并发派发 → 无 shard 则响亮失败。
+
+    smoke 轮**不做断点续跑**（todo = 全量重采）——smoke 覆盖（wins_only/max_ticks）
+    与真跑口径不同，复用盘上 shard 会拿冒烟语料冒充真语料（2026-09-13 实测：
+    smoke 的 timeout shard 落进 it1 被真跑复用，语料污染）。"""
     seeds = round_seeds(course, it)
     stages = course.stage_ids
     want = {(s, seed) for s in stages for seed in seeds}
-    have = landed_pairs(data_round_dir)
-    todo = sorted(want - have)
-    if not todo:
-        log(f"[run_bc] it{it}: 语料已齐（{len(have)} shards on disk）— 跳过采集")
-        return
     max_ticks = int(course.max_ticks)
     wins_only = bool(course.corpus.wins_only)
     near_miss = int(course.corpus.near_miss_times)
@@ -224,7 +223,14 @@ def collect_corpus(
         wins_only = ov["wins_only"]
         near_miss = ov["near_miss_times"]
         seeds = seeds[:1]
-        todo = sorted({(s, seeds[0]) for s in stages} - have)
+        want = {(s, seeds[0]) for s in stages}
+        todo = sorted(want)  # smoke 全量重采
+    else:
+        have = landed_pairs(data_round_dir)
+        todo = sorted(want - have)
+        if not todo:
+            log(f"[run_bc] it{it}: 语料已齐（{len(have)} shards on disk）— 跳过采集")
+            return
     log(
         f"[run_bc] it{it}: 需采 {len(todo)} 局（已有 {len(have)}）stages={stages} "
         f"seeds={seeds[0]}..{seeds[-1]} wins_only={wins_only}"
@@ -353,13 +359,40 @@ def train_local_bc(
         "--notes",
         f"run_bc local course={course.name}",
     ]
+    # 路径一律**绝对**：run_bc 本体 chdir 仓库根，而子进程 cwd=NN_ROOT——相对路径
+    # 会在 nn-training/ 下找语料（2026-09-13 实测 FileNotFoundError）。
+    cmd[cmd.index("--data-dir") + 1] = str(Path(cmd[cmd.index("--data-dir") + 1]).resolve())
+    cmd[cmd.index("--out") + 1] = str(Path(cmd[cmd.index("--out") + 1]).resolve())
     log(f"[run_bc] local BC: {' '.join(cmd[:6])} … (epochs={epochs} batch={batch})")
     t0 = time.time()
-    proc = subprocess.run(
-        cmd, cwd=str(NN_ROOT), timeout=6 * 3600, **_POPEN_NO_WINDOW
+    # §16.3 进度可观测：Popen 逐行**流式**中继（capture_output 会缓冲到进程结束——
+    # 60 epoch 的训练跑中零输出 = 无法验证进度/无法预算判活）。
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(NN_ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        **_POPEN_NO_WINDOW,
     )
-    if proc.returncode != 0:
-        raise SystemExit(f"[run_bc] local bc.py 退出码 {proc.returncode}——训练失败")
+    out_lines: list[str] = []
+    if proc.stdout is None:  # pragma: no cover — stdout=PIPE 结构性保证非空
+        raise SystemExit("[run_bc] local bc.py: 拿不到子进程 stdout（不该发生）")
+    for raw in proc.stdout:
+        line = raw.rstrip()
+        out_lines.append(line)
+        if line.startswith(
+            ("[epoch", "[train] done", "[train] samples", "[train] majority", "[train] checkpoint")
+        ):
+            log(f"[bc.py] {line}")
+    rc = proc.wait()
+    if rc != 0:
+        # 失败把尾段响亮带出（全量输出已随流中继进日志，这里只补尾部定位）
+        tail = "\n".join(out_lines[-12:])
+        log(f"[run_bc] local bc.py 退出码 {rc}——训练失败，子进程尾段：\n{tail}")
+        raise SystemExit(f"[run_bc] local bc.py 退出码 {rc}——训练失败")
     # bc.py 落盘 versioned archive + active pointer；回读 metrics（sizes/best_val）
     out_p = Path(out_weights)
     with open(out_p, encoding="utf-8") as f:
@@ -493,7 +526,8 @@ def main() -> None:
             if it in done_rounds:
                 log(f"[run_bc] it{it}: 账本已有 bc_round_completed — 跳过（断点续跑）")
                 continue
-            data_round_dir = data_root / f"it{it}"
+            # smoke 轮语料落独立目录——真轮目录（断点续跑语义）永不接触冒烟 shard
+            data_round_dir = data_root / ("smoke" if args.smoke else f"it{it}")
             collect_corpus(
                 course,
                 course_fp,
