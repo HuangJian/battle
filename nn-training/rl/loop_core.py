@@ -44,12 +44,16 @@ def _course_file_fp(args) -> str | None:
 
     torch-free（hub 远程分支也调用——只读文件字节）。与
     remote/hub_client.publish_job 的 course_fp 同算法，两端必须一致。
+    字节源 = 启动期冻结（args.course_frozen_bytes）——mid-run 热加载编辑不改血缘。
     """
     import hashlib
 
     course = getattr(args, "course_obj", None)
     if course is None:
         return None
+    frozen = getattr(args, "course_frozen_bytes", None)
+    if frozen:
+        return hashlib.sha256(frozen).hexdigest()
     path = getattr(args, "course_path", "") or ""
     if not path:
         from rl.config import resolve_course
@@ -238,6 +242,9 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
             self._traj_dir = self._traj_root / f"it{it}"
             try:
                 self._prepare_iter_dir(it)
+                # 课程热加载（§2026-09-13-hot-reload）：rollout 前重读课程文件——
+                # 非语料编辑下一 iter 应用；语料身份编辑拒绝 + 控制台横幅 + 沿用启动配置。
+                self._hot_reload_course(it)
                 # M1c：本轮课程上下文（holder + ppo_schedule）——先于任何 shard 加载
                 self._course_iter(it)
                 log(f"[run_rl] === iteration {it}/{self._total} ===")

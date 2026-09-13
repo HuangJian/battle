@@ -1422,3 +1422,29 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   nn-training/levels/arena6.jsonc` 直接可跑（不再需要 tmp/fmap-*.jsonc 复制品）。
 - **迁移状态**：c6-dmgfix 已引用 arena6；c6-chip 在跑不迁移（其 legacy course_fp 校验在
   stop→start 后自然恢复一致）；其余历史课程按需渐进迁移。
+
+## §2026-09-13-hot-reload（2026-09-13，课程热加载：非语料改动下一 iter 应用；语料改动拒绝+横幅+不泄漏云端；用户拍板）
+
+- **机制**：trainer 每 iter（rollout 前，`loop_core.run` → `_hot_reload_course`）重读课程文件，
+  以 `corpus_identity_fp` 分流（§2026-09-13-level-extraction 分类学的机制化）：
+  - **未变（B/C 类）**：`rl/hot_reload.apply_hot_fields` 把白名单字段写回 args——消费点每轮
+    活读（iters `loop_core:207` / gamma,lam / lr,epochs,mb / eval_* / ent_break*，
+    `loop_steps._course_iter`），**下一 iter 即生效**；结构绑定字段（bc/workers/stream/
+    out/traj/backup_*/freeze*/clip/vf/ent_coef/normalize_ret/warmup_iters/kickstart_ref）
+    记 restart-only（`*` 后缀账），响亮日志「停止→启动后生效」，不静默吞。max_hours 热应用
+    时重算 `self._deadline`。
+  - **变了（A 类破坏性）**：拒绝热应用，写 `course_edit` 事件（verdict=rejected，本地账本）+
+    响亮日志；控制台读账本渲染错误横幅（`courseEditFromLedgerTail`，取尾部窗口内最近一条，
+    跨后续 iteration 事件持久；改回文件后 trainer 写 restored → 横幅自然消失）。**沿用启动
+    配置继续训练**。
+- **不泄漏云端**：课程文件字节在启动期冻结（`args.course_frozen_bytes`）——D13 全文快照、
+  course_fp、shard `--course-fp` 一律用冻结字节（`loop_steps` 发布 / `cmd.course_fp_for_args` /
+  `loop_core._course_file_fp` 三处统一）。mid-run 的任何编辑（含被拒的语料身份改动）永不进
+  job payload / 代码包 / 远端日志。
+- **§15.5 修订**：B 类字段（γ/λ/lr/epochs/mb/ppo_schedule）经热加载 mid-run 修改自此**允许**，
+  记账 = `course_edit` 事件（applied，含字段清单）自动进账本；corpus/reward 语义仍禁止 mid-run
+  （拒绝分支）。`plan_reload` 对「iters+wChip 同改」整单拒绝，不做部分应用（防半新半旧配置）。
+- **文件半行写/瞬时坏档**：沿用旧配置静默重试（一次日志），不打横幅。
+- **夹具迁移**：`training-multi-course.test.ts` F-B6 的 bc 夹具 s-dodge→c6-dmgfix（原
+  tmp/s2-cap/weights.json 已被 tmp 清理移除，属环境性失败；新夹具指向 nn-training/weights/
+  稳定备份）。

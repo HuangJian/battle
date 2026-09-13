@@ -212,6 +212,100 @@ class TrainingSteps:
     _waves_n: Any
     _eval_join_sec: float
 
+    def _hot_reload_course(self, it: int) -> None:
+        """课程热加载（§2026-09-13-hot-reload）：每 iter 重读课程文件，rollout 前执行。
+
+        - 语料身份未变（B/C 类编辑）→ 白名单字段写回 args，下一 iter 生效；
+          结构绑定字段（bc/workers/out 等）响亮日志「停止→启动后生效」。
+        - 语料身份变了（A 类破坏性）→ `course_edit` 事件（控制台横幅）+ 响亮日志，
+          **沿用启动配置继续训练**；D13/指纹用启动冻结字节 ⇒ 编辑不进云端 payload。
+        - 文件半行写/瞬时坏档 → 沿用旧配置静默等到能读，不打横幅。
+        """
+        args = self.args
+        course = getattr(args, "course_obj", None)
+        path = str(getattr(args, "course_path", "") or "")
+        if course is None or not path:
+            return
+        from rl.hot_reload import apply_hot_fields, changed_field_names, plan_reload
+
+        try:
+            from rl.config import load_course
+
+            new_course = load_course(path)
+        except Exception as e:  # 半行写/编码竞态——下轮重试
+            if not getattr(self, "_hr_broken", False):
+                log(f"[hot-reload] it{it}: 课程文件暂不可读（沿用启动配置）：{e}")
+            self._hr_broken = True
+            return
+        self._hr_broken = False
+
+        verdict, hot, restart = plan_reload(course, new_course)
+        if verdict == "same":
+            if getattr(self, "_hr_verdict", "") == "rejected":
+                from rl.events import write_event
+
+                write_event(
+                    self._jsonl_path,
+                    {"event": "course_edit", "verdict": "restored", "it": it},
+                )
+                log(f"[hot-reload] it{it}: 课程文件已恢复启动配置——拒绝横幅解除")
+            self._hr_verdict = "same"
+            return
+
+        if verdict == "rejected":
+            from rl.config import corpus_identity_fp
+            from rl.events import write_event
+
+            new_fp = corpus_identity_fp(new_course)
+            if getattr(self, "_hr_reject_fp", "") != new_fp:
+                fields = changed_field_names(course, new_course)
+                write_event(
+                    self._jsonl_path,
+                    {
+                        "event": "course_edit",
+                        "verdict": "rejected",
+                        "it": it,
+                        "fields": fields,
+                        "detail": "语料身份（关卡环境/奖励语义）被编辑",
+                    },
+                )
+                log(
+                    f"[hot-reload] it{it}: ⚠ 拒绝热加载——语料身份被编辑"
+                    f"（{','.join(fields)}）。沿用启动配置继续训练，"
+                    f"编辑内容不进云端 payload；要应用请派生新课程/新关卡"
+                    f"（D14 语料血缘不可 mid-run 破坏）"
+                )
+                self._hr_reject_fp = new_fp
+            self._hr_verdict = "rejected"
+            return
+
+        from rl.events import write_event
+
+        changed = apply_hot_fields(args, new_course)
+        if "max_hours" in changed:
+            self._deadline = (
+                time.time() + args.max_hours * 3600 if args.max_hours > 0 else None
+            )
+        write_event(
+            self._jsonl_path,
+            {
+                "event": "course_edit",
+                "verdict": "applied",
+                "it": it,
+                "fields": changed,
+            },
+        )
+        log(
+            f"[hot-reload] it{it}: 课程编辑已热应用（{','.join(changed) or '无'}）"
+            f"——下一 iter 生效"
+            + (
+                f"；restart-only 字段（{','.join(r for r in restart)}）停止→启动后生效"
+                if restart
+                else ""
+            )
+        )
+        self._hr_verdict = "apply"
+
     def _course_iter(self, it: int) -> None:
         """M1c：每 iter 注入课程配置的加载期上下文（holder）与超参 schedule。
 
@@ -517,10 +611,12 @@ class TrainingSteps:
             from rl.config import resolve_course
 
             course_path = resolve_course(course.name)
-        # 课程全文快照 + course_fp = sha256(**原始文件字节**)——与
-        # rl/cmd.course_fp_for_args / rl/loop_core._course_file_fp 同算法（D14），
+        # 课程全文快照 + course_fp = sha256(**启动冻结字节**)——与
+        # rl/cmd.course_fp_for_args / rl/loop_core._course_file_fp 同算法同字节源（D14），
         # 否则 CRLF 换行下 read_text 的通用换行翻译会使指纹不一致、血缘断裂。
-        course_bytes = course_path.read_bytes()
+        # 冻结 = 热加载编辑（含被拒的语料身份改动）永不进 D13 快照/指纹（不泄漏云端）。
+        frozen = getattr(args, "course_frozen_bytes", None)
+        course_bytes = frozen if frozen else course_path.read_bytes()
         course_text = course_bytes.decode("utf-8")
         course_fp = hashlib.sha256(course_bytes).hexdigest()
         # D14 语义版：corpus_fp = 语料身份（env+reward 解析值哈希，rl/config.corpus_identity_fp）。

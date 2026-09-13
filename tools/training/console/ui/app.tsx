@@ -490,9 +490,8 @@ export function App({ initial }: AppProps) {
           <div key={`halt-${courseName}`} className="tc-banner tc-banner--err" role="alert">
             <span>
               ⚠ {courseName ? `课程 ${courseName} ` : ''}停机中（{h.reason}）
-              ：已向云机下发停机命令——云机先尝试停机；
-              停不掉则照常执行任务（不闲置空烧）。本地 hub/console
-              均正常。停机条件消失（如恢复训练）会自动解除。
+              ：已向云机下发停机命令——云机先尝试停机； 停不掉则照常执行任务（不闲置空烧）。本地
+              hub/console 均正常。停机条件消失（如恢复训练）会自动解除。
             </span>
             <button
               type="button"
@@ -547,6 +546,16 @@ export function App({ initial }: AppProps) {
             已等待 {Math.floor(stateView.ppoQueueStall.waitedSec / 60)} 分
             {stateView.ppoQueueStall.waitedSec % 60} 秒仍无 worker 领取——云端 worker
             可能断连或未在轮询 hub。检查 Colab/Kaggle worker 日志与 hub 是否在线。
+          </span>
+        </div>
+      ) : null}
+      {stateView?.courseEdit?.verdict === 'rejected' ? (
+        <div className="tc-banner tc-banner--err" role="alert">
+          <span>
+            ⚠ 课程文件含<strong>语料身份</strong>改动（
+            {stateView.courseEdit.fields.join('、') || '未识别字段'}
+            ）——热加载已拒绝：沿用启动配置继续训练，编辑内容不进云端 payload。
+            要应用请派生新关卡/新课程（D14 语料血缘不可 mid-run 破坏）；改回原文件后自动解除。
           </span>
         </div>
       ) : null}

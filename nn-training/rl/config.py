@@ -1131,6 +1131,10 @@ def course_from_args(args) -> CourseConfig | None:
         return None
     p = resolve_course(path if path else name)
     args.course_path = str(p)
+    # 启动期冻结课程文件字节：D13 全文快照 / course_fp / shard --course-fp 一律用
+    # 冻结字节——mid-run 的热加载编辑（含被拒绝的语料身份改动）永不进云端 payload
+    # （DECISIONS §2026-09-13-hot-reload「不要泄漏到云端」）。
+    args.course_frozen_bytes = p.read_bytes()
     return load_course(p)
 
 

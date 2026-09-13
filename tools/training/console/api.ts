@@ -45,6 +45,7 @@ import { parsePhaseFromLog, stripIsoPrefix } from '../ui/view'
 import type {
   ComponentView,
   ConsoleStateView,
+  CourseEdit,
   CourseOverview,
   CourseOverviewComponent,
   LogPayload,
@@ -541,6 +542,9 @@ export interface SlowSnapshot {
   /** 训练正常完成停车态（账本尾行 run_complete + trainingLoop 存活时派生；
    *  resume 后新事件自然顶掉 → null）。 */
   loopComplete: LoopComplete | null
+  /** 课程热加载最新判决（§2026-09-13-hot-reload；账本最近一条 course_edit 事件。
+   *  rejected = 语料身份编辑被拒 → 错误横幅；restored/applied 不上横幅）。 */
+  courseEdit: CourseEdit | null
 }
 
 const SNAPSHOT_REFRESH_MS = 5000
@@ -596,25 +600,69 @@ async function computeSlowSnapshot(cfg: RlConfig, course: string): Promise<SlowS
   // 等待重启）→ 横幅派生源；进程已死走 exit-watchdog 路径；resume 后新事件
   // 顶掉 → 自动消失。账本小文件 + 尾部窗口读，5s 快照周期内可忽略。
   let loopComplete: LoopComplete | null = null
+  let courseEdit: CourseEdit | null = null
   const loopAlive = components.some((c) => c.key === 'trainingLoop' && c.status === 'running')
   if (course && loopAlive) {
     try {
       const ledgerTail = readLogTail(
         path.join(REPO_ROOT, 'tmp', course, 'training_log.jsonl'),
-        8,
+        1000,
       ).lines
       loopComplete = loopCompleteFromLedgerTail(ledgerTail)
+      courseEdit = courseEditFromLedgerTail(ledgerTail)
     } catch {
       loopComplete = null
+      courseEdit = null
     }
   }
-  return { components, nodes, localNode, phase, loopComplete }
+  return { components, nodes, localNode, phase, loopComplete, courseEdit }
+}
+
+/** 账本中最近一条 course_edit 事件 → 热加载判决；无则 null（纯函数，可单测）。
+ *
+ * 事件是**状态**不是瞬时告警：rejected 横幅要跨后续 iteration 事件持久（用户改回
+ * 文件后 trainer 写 restored → 覆盖为 restored → 横幅自然消失），所以取尾部窗口内
+ * 最后一条，而非只看尾行。窗口 1000 行（每 iter ~5 事件 ≈ 200 iter 覆盖）。 */
+export function courseEditFromLedgerTail(lines: string[]): CourseEdit | null {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!.trim()
+    if (!line) continue
+    let r: {
+      event?: unknown
+      verdict?: unknown
+      fields?: unknown
+      detail?: unknown
+      time?: unknown
+      it?: unknown
+    }
+    try {
+      r = JSON.parse(line) as typeof r
+    } catch {
+      continue
+    }
+    if (!r || typeof r !== 'object' || r.event !== 'course_edit') continue
+    const verdict =
+      r.verdict === 'applied' || r.verdict === 'rejected' || r.verdict === 'restored'
+        ? r.verdict
+        : null
+    if (!verdict) return null
+    return {
+      verdict,
+      fields: Array.isArray(r.fields) ? (r.fields as unknown[]).map(String) : [],
+      detail: typeof r.detail === 'string' ? r.detail : '',
+      at: typeof r.time === 'string' ? r.time : '',
+      it: typeof r.it === 'number' ? r.it : 0,
+    }
+  }
+  return null
 }
 
 /** 账本尾行是 run_complete → 正常完成停车态；否则 null（纯函数，可单测）。
  *
  * 严格只认**尾行**：resume 后新 run_start/iteration 事件追加在后 → 自动 null
  *（横幅消失）；尾行非 JSON（写半行竞态）→ null（下周期再看，不误报）。 */
+export type { CourseEdit }
+
 export function loopCompleteFromLedgerTail(lines: string[]): LoopComplete | null {
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i]!.trim()
@@ -819,9 +867,7 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     : null
   // 同屏多课总览（P5-W2）：单课时不出（不制造无效面板）。
   const courseOverviews =
-    courses.length > 1
-      ? await getCourseOverviews(cfg, courses, state.cloudHalts ?? {})
-      : []
+    courses.length > 1 ? await getCourseOverviews(cfg, courses, state.cloudHalts ?? {}) : []
   return {
     time: new Date().toISOString(),
     course,
@@ -848,12 +894,7 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
 // ────────────────────────── 同屏多课总览（P5-W2） ──────────────────────────
 
 /** 总览列的组件（selfNode 全局单例不入——它不属任何课程）。 */
-const OVERVIEW_COMPONENTS: Component[] = [
-  'hubServer',
-  'cloudflared',
-  'workerServe',
-  'trainingLoop',
-]
+const OVERVIEW_COMPONENTS: Component[] = ['hubServer', 'cloudflared', 'workerServe', 'trainingLoop']
 
 const courseOverviewCache = new Map<string, { at: number; rows: CourseOverview[] }>()
 

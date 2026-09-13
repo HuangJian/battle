@@ -14,11 +14,26 @@
  */
 
 import { afterAll, describe, expect, it } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'fs'
 import os from 'os'
 import path from 'path'
 import { CONFIG_PATH, REPO_ROOT } from '../tools/training/paths'
-import { HUB_SERVER_ENTRY, cloudflaredSpec, hubServerSpec, trainingLoopSpec, workerServeSpec } from '../tools/training/specs'
+import {
+  HUB_SERVER_ENTRY,
+  cloudflaredSpec,
+  hubServerSpec,
+  trainingLoopSpec,
+  workerServeSpec,
+} from '../tools/training/specs'
 import {
   entryForCourse,
   loadRegistry,
@@ -284,8 +299,9 @@ describe('P2 双 hub 隔离', () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'bcity-p2w3-'))
     SCRATCH_DIRS.push(root)
     const dst = path.join(root, 'weights.json')
-    // s-dodge 的 bc 指向真实存在的权重文件（环境准备，见 memory 2026-09-12）。
-    const bc = seedWeightsFromBc('s-dodge', dst)
+    // c6-dmgfix 的 bc 指向 nn-training/weights/c6-pickup/…（稳定备份，非 tmp/ 易失件；
+    // 原夹具 s-dodge 的 bc 在 tmp/s2-cap/weights.json，已被 tmp 清理移除——2026-09-13）。
+    const bc = seedWeightsFromBc('c6-dmgfix', dst)
     expect(readFileSync(dst).equals(readFileSync(bc))).toBe(true)
     expect(() => seedWeightsFromBc('no-such-course-xyz', path.join(root, 'w2.json'))).toThrow()
   })
@@ -434,7 +450,9 @@ describe('P5-R2 旧扁平账本键搬迁（migration）+ 读兼容移除', () =>
       expect(entryForCourse(reg, 'trainingLoop', 'p3-rd1')?.pid).toBe(33)
       // 枚举不丢监督：搬迁后的条目全部可见（含三元组归属）
       const triples = registryComponents()
-      expect(triples.some((t) => t.key === 'hubServer' && t.course === '' && t.entry.pid === 22)).toBe(true)
+      expect(
+        triples.some((t) => t.key === 'hubServer' && t.course === '' && t.entry.pid === 22),
+      ).toBe(true)
       expect(triples.some((t) => t.key === 'trainingLoop' && t.course === 'p3-rd1')).toBe(true)
     })
   })

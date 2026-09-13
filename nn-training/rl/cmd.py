@@ -121,12 +121,17 @@ def course_fp_for_args(args) -> str:
     """课程文件 sha256（D14 语料血缘）。无课程返回 ""（非课程路径不写 course_fp）。
 
     与远程发布（remote/hub_client.publish_job）同一算法：sha256(课程 jsonc 文件字节)。
+    字节源 = **启动期冻结**（`args.course_frozen_bytes`，course_from_args 落）——
+    mid-run 热加载编辑（含被拒的语料身份改动）不改变血缘，不进云端 payload。
     """
     import hashlib
 
     course = getattr(args, "course_obj", None)
     if course is None:
         return ""
+    frozen = getattr(args, "course_frozen_bytes", None)
+    if frozen:
+        return hashlib.sha256(frozen).hexdigest()
     path = getattr(args, "course_path", "") or ""
     if not path:
         from rl.config import resolve_course

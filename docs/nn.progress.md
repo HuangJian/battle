@@ -5,6 +5,29 @@
 
 ---
 
+## §38 课程热加载：非语料改动下一 iter 应用；语料改动拒绝+横幅+不泄漏云端（2026-09-13，用户拍板）
+
+**机制**（DECISIONS §2026-09-13-hot-reload）：trainer 每 iter（rollout 前）重读课程文件，按
+`corpus_identity_fp` 分流——
+
+- **未变（B/C 类）**：`rl/hot_reload.apply_hot_fields` 白名单写回 args（消费点每轮活读：
+  iters/gamma/lam/lr/epochs/mb/eval_*/ent_break*），**下一 iter 生效**；结构绑定字段
+  （bc/workers/out/traj/backup_*/freeze*/update_kwargs 一次构建族）记 restart-only（`*`），
+  响亮日志不静默；max_hours 热应用重算 deadline。
+- **变了（A 类）**：拒绝 + `course_edit` 事件（本地账本）+ 控制台错误横幅
+  （`courseEditFromLedgerTail` 取尾部窗口最近一条，持久显示；改回文件 → trainer 写
+  restored → 横幅消失）；**沿用启动配置继续训练**。整单拒绝（iters+wChip 同改不部分应用）。
+- **不泄漏云端**：课程字节启动期冻结（`args.course_frozen_bytes`），D13 快照/course_fp/
+  shard `--course-fp` 三处统一用冻结源——任何 mid-run 编辑永不进 job payload。
+- 半行写/坏档：沿用旧配置静默重试，不打横幅。
+
+**验证**：`test_hot_reload.py`（分类学/整单拒绝/restart-only 记账/冻结 fp 免疫编辑/字段清单）
++ `console-course-edit.test.ts`（最近一条胜出/restored 顶掉 rejected/半行竞态/防御）；nn-python-gate
+绿 + `bun run check` 绿（2067 pass）。**顺带**：F-B6 夹具 s-dodge→c6-dmgfix（原 bc 文件
+tmp/s2-cap/weights.json 已被 tmp 清理移除，环境性失败——tmp/ 不该被测试当稳定依赖）。
+
+---
+
 ## §37 关卡配置抽离 + D14 语料身份改语义哈希（2026-09-13，用户拍板）
 
 **事故**：mid-run 编辑 c6-chip 课程（iters 30→60）触发指纹脑裂——shard manifest 与 job
