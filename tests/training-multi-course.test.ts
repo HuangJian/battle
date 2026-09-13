@@ -19,13 +19,19 @@ import os from 'os'
 import path from 'path'
 import { CONFIG_PATH, REPO_ROOT } from '../tools/training/paths'
 import { HUB_SERVER_ENTRY, cloudflaredSpec, hubServerSpec, trainingLoopSpec, workerServeSpec } from '../tools/training/specs'
-import { entryForCourse, loadRegistry, saveCourseComponent } from '../tools/training/registry'
+import {
+  entryForCourse,
+  loadRegistry,
+  registryComponents,
+  registryTriples,
+  saveCourseComponent,
+} from '../tools/training/registry'
 import { loadConfig, saveConfig, writeRemoteHubUrl } from '../tools/training/config'
 import { drainStaleJobs } from '../tools/training/hub'
 import { seedWeightsFromBc } from '../tools/training/courses'
 import { restartSpecFor } from '../tools/training/console/actions'
 import { capacityError, checkCapacity, lockName, slotOf, slotPort } from '../tools/training/slots'
-import type { RlConfig } from '../tools/training/types'
+import type { Registry, RlConfig } from '../tools/training/types'
 
 /** 测试用临时目录（账本/控制台状态重定向——绝不写线上 tmp/training-start）。 */
 const SCRATCH_DIRS: string[] = []
@@ -378,5 +384,97 @@ describe('P4 控制台保存路径接 checkCapacity', () => {
     const valid: RlConfig = { ...loadRealConfig(), courses: { a: { workers: 1, local_slots: 1 } } }
     saveConfig(valid, p)
     expect(JSON.parse(readFileSync(p, 'utf-8')).courses.a.workers).toBe(1)
+  })
+})
+
+// ────────────────────────── P5-R2：旧扁平账本键搬迁 + 读兼容移除 ──────────────────────────
+
+/** 在临时账本上跑一段，并确保不读线上 console-state（否则 no-course 回填取真实课程，非确定）。 */
+function withScratchRegistry<T>(fn: (file: string) => T): T {
+  const scratch = mkdtempSync(path.join(os.tmpdir(), 'bcity-r2-'))
+  SCRATCH_DIRS.push(scratch)
+  const file = path.join(scratch, 'registry.json')
+  const prevReg = process.env.BCITY_REGISTRY_FILE
+  const prevState = process.env.BCITY_CONSOLE_STATE
+  process.env.BCITY_REGISTRY_FILE = file
+  process.env.BCITY_CONSOLE_STATE = path.join(scratch, 'absent-console-state.json')
+  try {
+    return fn(file)
+  } finally {
+    if (prevReg === undefined) delete process.env.BCITY_REGISTRY_FILE
+    else process.env.BCITY_REGISTRY_FILE = prevReg
+    if (prevState === undefined) delete process.env.BCITY_CONSOLE_STATE
+    else process.env.BCITY_CONSOLE_STATE = prevState
+  }
+}
+
+describe('P5-R2 旧扁平账本键搬迁（migration）+ 读兼容移除', () => {
+  it('升级机旧账本（仅扁平单键）：首尝 loadRegistry 搬进 per-course 表、删键并补 course/slot', () => {
+    withScratchRegistry((file) => {
+      // 旧形状：无 course/slot 的扁平单键（无 console-state → course 回填 ''）
+      writeFileSync(
+        file,
+        JSON.stringify({
+          selfNode: { pid: 11 },
+          hubServer: { pid: 22, log: 'hub.log' },
+          trainingLoop: { pid: 33, course: 'p3-rd1' },
+        }),
+        'utf-8',
+      )
+      const reg = loadRegistry()
+      // 落盘形状：扁平键消失，per-course 表就位（slot 缺省 0），selfNode 单例不动
+      const onDisk = JSON.parse(readFileSync(file, 'utf-8')) as Record<string, unknown>
+      expect(onDisk.hubServer).toBeUndefined()
+      expect(onDisk.trainingLoop).toBeUndefined()
+      expect(onDisk.selfNode).toMatchObject({ pid: 11 })
+      expect(onDisk.hubServers).toMatchObject({ '': { pid: 22, slot: 0, course: '' } })
+      expect(onDisk.trainingLoops).toMatchObject({ 'p3-rd1': { pid: 33, slot: 0 } })
+      // 读路径严格按课：无课程 = '' 槽（不是猜课程）
+      expect(entryForCourse(reg, 'hubServer', '')?.pid).toBe(22)
+      expect(entryForCourse(reg, 'trainingLoop', 'p3-rd1')?.pid).toBe(33)
+      // 枚举不丢监督：搬迁后的条目全部可见（含三元组归属）
+      const triples = registryComponents()
+      expect(triples.some((t) => t.key === 'hubServer' && t.course === '' && t.entry.pid === 22)).toBe(true)
+      expect(triples.some((t) => t.key === 'trainingLoop' && t.course === 'p3-rd1')).toBe(true)
+    })
+  })
+
+  it('幂等：二次 loadRegistry 不再改写（搬迁只发生一次，无重复落盘）', () => {
+    withScratchRegistry((file) => {
+      writeFileSync(file, JSON.stringify({ hubServer: { pid: 7 } }), 'utf-8')
+      loadRegistry()
+      const afterFirst = readFileSync(file, 'utf-8')
+      loadRegistry()
+      expect(readFileSync(file, 'utf-8')).toBe(afterFirst)
+      // 二次读到的依然是 per-course 条目
+      expect(entryForCourse(loadRegistry(), 'hubServer', '')?.pid).toBe(7)
+    })
+  })
+
+  it('per-course 表已有同课新条目时：保留新条目、只丢陈旧扁平键（升级不倒退）', () => {
+    withScratchRegistry((file) => {
+      writeFileSync(
+        file,
+        JSON.stringify({
+          hubServer: { pid: 1 }, // 陈旧
+          hubServers: { '': { pid: 2, course: '', slot: 0 } }, // 新写入路径
+        }),
+        'utf-8',
+      )
+      const reg = loadRegistry()
+      expect(entryForCourse(reg, 'hubServer', '')?.pid).toBe(2)
+      const onDisk = JSON.parse(readFileSync(file, 'utf-8')) as Record<string, unknown>
+      expect(onDisk.hubServer).toBeUndefined()
+    })
+  })
+
+  it('读兼容移除：账本里残留的扁平键不再被任何读路径看见（严格 per-course）', () => {
+    const stale = { hubServer: { pid: 99 } } as unknown as Registry
+    expect(entryForCourse(stale, 'hubServer', '')).toBeUndefined()
+    expect(entryForCourse(stale, 'hubServer', 'a')).toBeUndefined()
+    expect(registryTriples(stale)).toEqual([])
+    const good: Registry = { hubServers: { '': { pid: 1 }, a: { pid: 2 } } }
+    expect(entryForCourse(good, 'hubServer', '')?.pid).toBe(1)
+    expect(entryForCourse(good, 'hubServer', 'a')?.pid).toBe(2)
   })
 })

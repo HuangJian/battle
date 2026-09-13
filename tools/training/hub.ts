@@ -17,7 +17,7 @@ import {
 import path from 'path'
 import { LOG_DIR, fmtStamp } from './paths'
 import { httpOk, killPid, pidAlive, portListen, waitUntil } from './net'
-import { entryForView, loadRegistry, saveAnyComponent, saveComponent } from './registry'
+import { entryForCourse, loadRegistry, saveAnyComponent, saveComponent } from './registry'
 import { launchSpec, spawnBg } from './proc'
 import { writeRemoteHubUrl } from './config'
 import { fail, info, log, ok, warn } from './log'
@@ -137,7 +137,7 @@ export async function stepCloudflared(
     info('已指定 --no-tunnel——跳过隧道（Kaggle 路径本轮不验证）')
     return ''
   }
-  const prev = entryForView(loadRegistry(), 'cloudflared', course)
+  const prev = entryForCourse(loadRegistry(), 'cloudflared', course)
   const cfBin = specsResolveCloudflaredBin()
   if (!cfBin) {
     fail('cloudflared 不在 PATH 中——Kaggle 无法接入（安装 cloudflared，或显式 --no-tunnel 跳过）')
@@ -312,7 +312,7 @@ export async function stepSmokeTest(
   const pingOk = await httpOk(`${cfUrl}/ping`, cfg.rl.remote_token, 10000)
   const edgeReady = pingOk
     ? true
-    : await tunnelEdgeReady(entryForView(loadRegistry(), 'cloudflared', course)?.metrics)
+    : await tunnelEdgeReady(entryForCourse(loadRegistry(), 'cloudflared', course)?.metrics)
   if (!pingOk && !edgeReady) {
     fail('cloudflared tunnel 不可达（edge 未建立）——Kaggle 无法连接')
     throw new Error('cloudflared tunnel 不可达')
@@ -419,7 +419,7 @@ export interface TrainingLoopSpec {
 /** TrainingLoop 步骤（新启动返回 true；已在运行返回 false）。 */
 export async function stepTrainingLoop(cfg: RlConfig, s: TrainingLoopSpec): Promise<boolean> {
   log('检查 TrainingLoop...')
-  const prevTl = entryForView(loadRegistry(), 'trainingLoop', s.course)
+  const prevTl = entryForCourse(loadRegistry(), 'trainingLoop', s.course)
   if (pidAlive(prevTl?.pid)) {
     ok(`TrainingLoop 已在运行 (PID ${prevTl!.pid}, course=${s.course})`)
     return false

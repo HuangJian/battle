@@ -8,17 +8,24 @@
  *  ── 多课程形状（plan multi-course-parallel-training §1.4，P1b） ──
  *  课程 = 并行单元，故 hubServer/cloudflared/trainingLoop/workerServe 四条按课程键控：
  *    `hubServers: Record<course, Entry>` 等；`selfNode` 保持单例（agent 全局一份）。
- *  旧扁平单键（`hubServer`/…）**保留读兼容到 P5**（R1）——P1–P4 区间新旧共存，
- *  否则线上正在跑的旧账本会瞬间失去监督。P5 起删旧键读写。
- *  写入端**只走** `saveCourseComponent` / `clearCourseComponent`；`saveComponent`
- *  只剩 selfNode 与旧键兼容写（约定 + P0 门禁②守枚举路径）。
+ *  旧扁平单键（`hubServer`/…）**已在 P5 移除读写**（R1 读兼容 + R2 删键）：
+ *  `loadRegistry()` 每次加载都会把扁平键**一次性搬迁**进 per-course 表再删键
+ *  （`migrateFlatCourseEntries`）——不搬就删 = 线上旧进程永久失监督，静默失监督是事故。
+ *  写入端**只走** `saveCourseComponent` / `clearCourseComponent`（+ `saveAnyComponent`
+ *  门面）；`saveComponent`/`clearComponent` 只剩 selfNode（`SingletonComponent`，
+ *  类型层面挡掉课程组件——约定 + P0 门禁②守枚举路径）。
  */
 
 import { readFileSync, unlinkSync, writeFileSync } from 'fs'
 import path from 'path'
 import { LOG_DIR, START_LOG_DIR, consoleStatePath } from './paths'
 import { log } from './log'
-import type { Component, Registry, RegistryEntry } from './types'
+import type {
+  Component,
+  LegacyFlatRegistry,
+  Registry,
+  RegistryEntry,
+} from './types'
 
 /** 账本路径（每次调用现取）。默认 tmp/training-start/registry.json；
  *  BCITY_REGISTRY_FILE 显式指定时用它——单测把账本指向临时目录，
@@ -33,7 +40,8 @@ const LEGACY_DIR = path.join(LOG_DIR, 'hub-start')
 const LEGACY_COMPS: Component[] = ['selfNode', 'hubServer', 'cloudflared', 'trainingLoop']
 
 /** 单例组件（agent 全局一份，不按课程键控）。 */
-export const SINGLETON_COMPONENTS: Component[] = ['selfNode']
+export const SINGLETON_COMPONENTS = ['selfNode'] as const
+export type SingletonComponent = (typeof SINGLETON_COMPONENTS)[number]
 /** 按课程键控的组件（顺序即遍历顺序：hub 先于 trainer——M7）。 */
 export const COURSE_COMPONENTS = [
   'hubServer',
@@ -74,23 +82,32 @@ function consoleCourse(): string {
   }
 }
 
-/** 一次性回填迁移（F-A4）：扁平旧条目缺 `course` 时补 `course` + `slot: 0`。
+/** 一次性搬迁 + 回填（F-A4 / R2）：把旧扁平单键条目搬进 per-course 表，再删掉扁平键。
  *
- *  旧单课时代恒为 slot0，故补值是确定性的正确值；不补则 `restartSpecFor` 的
- *  fail-closed（无 course → null，M5）会让线上正在跑的旧进程**永久失去监督**——
- *  静默失监督是事故，自愈才是本迁移的目的。回填结果落盘一次，之后不再重复。 */
-function backfill(reg: Registry): boolean {
+ *  旧条目缺 `course` 时取 console-state 的当前课程、缺 `slot` 时取 0——旧单课时代恒为
+ *  slot0，故补值是确定性的正确值；不补则 `entryForCourse`/`restartSpecFor` 的
+ *  fail-closed（无 course → 查不到，M5）会让线上正在跑的旧进程**永久失去监督**——
+ *  静默失监督是事故，自愈才是本迁移的目的。搬迁结果落盘一次，之后不再重复（幂等）。
+ *
+ *  per-course 表已有同课条目时**保留新条目**（新写入路径的数据更新），只丢陈旧扁平键。 */
+function migrateFlatCourseEntries(reg: Registry): boolean {
+  const legacy = reg as Registry & LegacyFlatRegistry
   const fallback = consoleCourse()
   let changed = false
   for (const key of COURSE_COMPONENTS) {
-    const e = reg[key]
-    if (!e || typeof e.pid !== 'number' || e.course !== undefined) continue
-    e.course = fallback
-    e.slot = e.slot ?? 0
+    const e = legacy[key]
+    if (!e || typeof e.pid !== 'number') continue
+    const course = typeof e.course === 'string' ? e.course : fallback
+    const plural = PLURAL[key]
+    const map = (reg[plural] ??= {})
+    if (!map[course]) {
+      map[course] = { ...e, course, slot: e.slot ?? 0 }
+      log(
+        `[registry] 旧账本搬迁: ${key} (PID ${e.pid}) → ${plural}[${JSON.stringify(course)}] slot=${e.slot ?? 0}（一次性迁移 R2）`,
+      )
+    }
+    delete legacy[key]
     changed = true
-    log(
-      `[registry] 旧账本回填: ${key} (PID ${e.pid}) → course=${JSON.stringify(fallback)} slot=0（一次性迁移）`,
-    )
   }
   return changed
 }
@@ -102,19 +119,24 @@ export function loadRegistry(): Registry {
   } catch {
     /* not started */
   }
-  // legacy 迁移：新账本缺的组件从 hub-start 分文件账本补齐（一次性收编旧进程）。
+  // 旧扁平键的唯一入口：registry.json 的历史键 + hub-start 分文件账本（一次性收编旧进程）。
+  // 两者都在 `migrateFlatCourseEntries` 里搬进 per-course 表后删除——此处只汇拢，不做读兼容。
+  const legacy = reg as Registry & LegacyFlatRegistry
   for (const name of LEGACY_COMPS) {
-    if (reg[name]) continue
+    if (name === 'selfNode' ? reg.selfNode : legacy[name]) continue
     try {
       const e = JSON.parse(
         readFileSync(path.join(LEGACY_DIR, `registry.${name}.json`), 'utf-8'),
       ) as RegistryEntry
-      if (e && typeof e.pid === 'number') reg[name] = e
+      if (e && typeof e.pid === 'number') {
+        if (name === 'selfNode') reg.selfNode = e
+        else legacy[name] = e
+      }
     } catch {
       /* absent */
     }
   }
-  if (backfill(reg)) {
+  if (migrateFlatCourseEntries(reg)) {
     try {
       saveRegistry(reg)
     } catch {
@@ -125,25 +147,19 @@ export function loadRegistry(): Registry {
 }
 
 /** 严格按课取条目（**重建/监督**路径；查不到 = undefined，绝不用全局状态猜——M5）。
- *  course 为空串时取旧扁平单键（无课程 = 旧单课语义，不是「猜课程」）。 */
+ *  课程组件恒读 per-course 表（course 为空串时读 `course=''` 槽——无课程≠猜课程）；
+ *  单例组件读同名扁平键。旧扁平键已由 `migrateFlatCourseEntries` 搬空，这里不再兜底（R2）。 */
 export function entryForCourse(
   reg: Registry,
   key: Component,
   course = '',
 ): RegistryEntry | undefined {
-  if (!isCourseComponent(key)) return reg[key]
-  if (!course) return reg[key]
-  return reg[PLURAL[key]]?.[course]
-}
-
-/** 展示路径取条目：per-course 优先，旧扁平单键兜底（R1 读兼容窗口到 P5）。 */
-export function entryForView(reg: Registry, key: Component, course = ''): RegistryEntry | undefined {
-  return entryForCourse(reg, key, course) ?? reg[key]
+  return isCourseComponent(key) ? reg[PLURAL[key]]?.[course] : reg[key]
 }
 
 /** 有序三元组 `(key, course, entry)`——**枚举账本的唯一路径**（门禁②）。
  *  顺序：selfNode → 每课程内 hubServer/cloudflared/workerServe/trainingLoop
- *  （同课 hub 先于 trainer，M7；课程名排序保证稳定）→ 旧扁平单键（course=''）。 */
+ *  （同课 hub 先于 trainer，M7；课程名排序保证稳定）。旧扁平键不再枚举（R2 已搬迁）。 */
 export function registryTriples(reg: Registry): WatchedEntry[] {
   const out: WatchedEntry[] = []
   if (reg.selfNode) out.push({ key: 'selfNode', course: '', entry: reg.selfNode })
@@ -156,11 +172,6 @@ export function registryTriples(reg: Registry): WatchedEntry[] {
       const e = reg[PLURAL[key]]?.[c]
       if (e) out.push({ key, course: c, entry: e })
     }
-  }
-  // 旧扁平单键（读兼容 R1）：course 取条目自带值（回填后非空），缺失时按 '' 处理。
-  for (const key of COURSE_COMPONENTS) {
-    const e = reg[key]
-    if (e) out.push({ key, course: e.course ?? '', entry: e })
   }
   return out
 }
@@ -209,35 +220,33 @@ export function clearCourseComponent(key: CourseComponent, course: string): void
   saveRegistry(reg)
 }
 
-/** 登记或更新一个组件条目。**只允许 selfNode（单例）与旧键兼容写**
- *  （多课时代一律用 `saveCourseComponent`；约定由 P0 门禁②与文件清单守护）。 */
-export function saveComponent(name: Component, entry: RegistryEntry): void {
+/** 登记或更新**单例**组件条目（selfNode；类型层面拒绝课程组件——多课一律
+ *  `saveCourseComponent`）。 */
+export function saveComponent(name: SingletonComponent, entry: RegistryEntry): void {
   const reg = loadRegistry()
   reg[name] = entry
   saveRegistry(reg)
 }
 
-/** 清除单个组件条目（停止后；其余组件登记不受影响）。 */
-export function clearComponent(name: Component): void {
+/** 清除**单例**组件条目（停止后；其余组件登记不受影响）。 */
+export function clearComponent(name: SingletonComponent): void {
   const reg = loadRegistry()
   if (!reg[name]) return
   delete reg[name]
   saveRegistry(reg)
 }
 
-/** 登记组件条目：按课程键控的走 per-course 键，无课程走旧扁平键（监督器重启回灌用）。 */
+/** 登记组件条目：课程组件恒走 per-course 键（course 为空串 = 无课程槽，语义明确）；
+ *  单例走扁平键（监督器重启回灌用）。 */
 export function saveAnyComponent(name: Component, course: string, entry: RegistryEntry): void {
-  if (isCourseComponent(name) && course) saveCourseComponent(name, course, entry)
+  if (isCourseComponent(name)) saveCourseComponent(name, course, entry)
   else saveComponent(name, entry)
 }
 
-/** 清除一个组件的登记：按课程键控的走 per-course 键，其余走旧扁平键。 */
+/** 清除一个组件的登记：课程组件恒走 per-course 键，单例走扁平键。 */
 export function clearAnyComponent(name: Component, course = ''): void {
-  if (isCourseComponent(name) && course) {
-    clearCourseComponent(name, course)
-    return
-  }
-  clearComponent(name)
+  if (isCourseComponent(name)) clearCourseComponent(name, course)
+  else clearComponent(name)
 }
 
 export function clearRegistry(): void {

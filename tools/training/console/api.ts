@@ -10,7 +10,7 @@ import { closeSync, existsSync, openSync, readFileSync, readdirSync, readSync, s
 import path from 'path'
 import { CURRICULA_DIR, LOG_DIR, NN_TRAINING, REPO_ROOT } from '../paths'
 import { httpOk, pidAlive } from '../net'
-import { entryForCourse, entryForView, loadRegistry } from '../registry'
+import { entryForCourse, loadRegistry } from '../registry'
 import { loadConfig } from '../config'
 import { courseLogDir } from '../specs'
 import { SLOT_COUNT, slotPort } from '../slots'
@@ -263,7 +263,7 @@ export function logTail(nnRel: string, n = 5): string[] {
 export function resolveComponentLog(key: Component, cfg: RlConfig, course: string): string | null {
   const mapped = COMPONENT_LOGS[key]?.(cfg, course)
   if (mapped && existsSync(mapped)) return mapped
-  const entryLog = entryForView(loadRegistry(), key, course)?.log
+  const entryLog = entryForCourse(loadRegistry(), key, course)?.log
   if (entryLog && existsSync(entryLog)) return entryLog
   const found = findLatestLog(key, course)
   if (found) return found
@@ -423,8 +423,8 @@ export async function componentViews(cfg: RlConfig, course: string): Promise<Com
   const reg = loadRegistry()
   return Promise.all(
     ALL_COMPONENTS.map(async (key): Promise<ComponentView> => {
-      // 展示路径：per-course 优先，旧单键兜底（R1 读兼容窗口）
-      const e = entryForView(reg, key, course)
+      // 展示路径：严格按课取条目（旧扁平键已在 P5 移除，R2）
+      const e = entryForCourse(reg, key, course)
       const alive = pidAlive(e?.pid)
       const status: ComponentView['status'] = e ? (alive ? 'running' : 'exited') : 'stopped'
       let healthy: boolean | null = null

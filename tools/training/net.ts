@@ -115,3 +115,10 @@ export function isLoopbackAddress(ip: string | null | undefined): boolean {
   if (ip.startsWith('::ffff:127.')) return true // IPv4-mapped 回环
   return false
 }
+
+/** 只读动作门控（局域网只读边界）：写动作（POST）仅限回环来源，其余方法（查看）一律放行。
+ *  服务端唯一门控点（`console/server.ts` 的 fetch 首行）——把「方法 + 来源」的判定抽成纯函数，
+ *  好让「LAN 的 POST 必 403」成为可回归测试的断言（fail closed：来源不可得 = 非回环 → 拒）。 */
+export function isReadonlyAction(method: string, ip: string | null | undefined): boolean {
+  return method === 'POST' && !isLoopbackAddress(ip)
+}

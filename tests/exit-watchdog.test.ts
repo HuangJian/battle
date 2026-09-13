@@ -49,7 +49,8 @@ function mkEntry(pid: number): RegistryEntry {
 
 describe('nextExitFailures（两帧确认）', () => {
   it('同一死 pid 连续两帧才判定退出；第一帧只记状态', () => {
-    const reg: Registry = { trainingLoop: mkEntry(999) }
+    // R2：扁平单键已移除——无课程条目住在 per-course 表的 `''` 槽。
+    const reg: Registry = { trainingLoops: { '': mkEntry(999) } }
     const seen = new Set<string>()
     expect(nextExitFailures(reg, seen, () => false)).toEqual([]) // 帧 1：仅记
     const hit = nextExitFailures(reg, seen, () => false) // 帧 2：确证
@@ -60,7 +61,7 @@ describe('nextExitFailures（两帧确认）', () => {
   })
 
   it('进程存活时清零帧计数；之后死亡需重新两帧', () => {
-    const reg: Registry = { trainingLoop: mkEntry(999) }
+    const reg: Registry = { trainingLoops: { '': mkEntry(999) } }
     const seen = new Set<string>()
     expect(nextExitFailures(reg, seen, () => false)).toEqual([]) // 帧1（死）
     expect(nextExitFailures(reg, seen, () => true)).toEqual([]) // 复活 → 清帧
@@ -72,8 +73,8 @@ describe('nextExitFailures（两帧确认）', () => {
   it('条目已带 error（此前已记录）→ 跳过；两次轮询只确证无 error 的死 pid', () => {
     const seen = new Set<string>()
     const reg: Registry = {
-      trainingLoop: { pid: 1, error: '意外退出 (PID 1)' },
-      hubServer: { pid: 2 },
+      trainingLoops: { '': { pid: 1, error: '意外退出 (PID 1)' } },
+      hubServers: { '': { pid: 2 } },
     }
     expect(nextExitFailures(reg, seen, () => false)).toEqual([]) // 帧1：hubServer 仅记
     const hits = nextExitFailures(reg, seen, () => false) // 帧2：确证（error 的仍跳过）
@@ -394,7 +395,7 @@ describe('healRecoveredErrors（误报自愈）', () => {
   it('服务不通 → 保留 error（真退出不被误清）', async () => {
     const saved: Array<[Component, RegistryEntry]> = []
     const healed = await healRecoveredErrors(
-      { trainingLoop: { pid: 1, error: '意外退出 (PID 1)' } },
+      { trainingLoops: { '': { pid: 1, error: '意外退出 (PID 1)' } } },
       {
         healthyOf: async () => false,
         save: (k, _c, e) => saved.push([k, e]),

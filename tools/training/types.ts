@@ -68,23 +68,26 @@ export interface RegistryEntry {
 
 /** registry.json：全部组件条目（缺省组件 = 未启动）。
  *
- *  多课程形状（plan §1.4，P1b）：按课程键控的四个组件各有一份 `Record<course, Entry>`；
- *  同时保留旧扁平单键**读兼容到 P5**（R1）——期间新旧共存，线上旧账本不丢监督。
+ *  多课程形状（plan §1.4，P1b）：按课程键控的四个组件各有一份 `Record<course, Entry>`。
+ *  旧扁平单键（`hubServer`/…）**已在 P5 移除**（R2）：类型里不再声明，唯一读点是
+ *  `registry.ts::migrateFlatCourseEntries` 的一次性搬迁（把旧条目搬进 per-course 表再删键），
+ *  写入路径不再产生扁平键（`saveComponent` 只服务 selfNode）。
  *  枚举一律走 `registry.ts::registryComponents()`（三元组），不要直接按 key 枚举账本对象。 */
 export interface Registry {
   /** 单例（agent 全局一份）。 */
   selfNode?: RegistryEntry
-  /** 旧扁平单键（P1–P4 读兼容，P5 移除读写）。 */
-  hubServer?: RegistryEntry
-  cloudflared?: RegistryEntry
-  trainingLoop?: RegistryEntry
-  workerServe?: RegistryEntry
-  /** per-course 键（P1b 起写入路径）。 */
+  /** per-course 键（P1b 起唯一写入路径）。 */
   hubServers?: Record<string, RegistryEntry>
   cloudflareds?: Record<string, RegistryEntry>
   workerServes?: Record<string, RegistryEntry>
   trainingLoops?: Record<string, RegistryEntry>
 }
+
+/** 旧扁平账本键（P1–P4 的历史形状）——**仅**供 `registry.ts` 的一次性搬迁读取（R2）。
+ *  任何其它代码不得读它：编译期把它们挡在 `Registry` 之外，正是为了不留读兼容后门。 */
+export type LegacyFlatRegistry = Partial<
+  Record<'hubServer' | 'cloudflared' | 'trainingLoop' | 'workerServe', RegistryEntry>
+>
 
 /** 受管进程的描述（spawn + 监督 + 变更检测的统一载体）。 */
 export interface ProcSpec {

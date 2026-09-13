@@ -32,7 +32,6 @@ import { warn as logWarn } from '../log'
 import {
   clearAnyComponent,
   entryForCourse,
-  entryForView,
   isCourseComponent,
   loadRegistry,
   saveAnyComponent,
@@ -176,9 +175,9 @@ export function hubAdminOk(cfg: RlConfig, pathSuffix: string, course = ''): Prom
   return httpOk(`http://127.0.0.1:${port}${pathSuffix}`, cfg.rl.remote_token, 5000)
 }
 
-/** 取某组件在某课程下的登记条目（展示路径：per-course 优先，旧单键兜底 R1）。 */
-export function entryOf(key: Component, course = ''): ReturnType<typeof entryForView> {
-  return entryForView(loadRegistry(), key, course)
+/** 取某组件在某课程下的登记条目（严格按课；旧扁平键已移除，R2）。 */
+export function entryOf(key: Component, course = ''): ReturnType<typeof entryForCourse> {
+  return entryForCourse(loadRegistry(), key, course)
 }
 
 /** 云端停机（§386，幂等）：置停机态——hub 置 halt（任务仍正常分发，达令随任务同发）

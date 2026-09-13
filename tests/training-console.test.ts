@@ -284,6 +284,34 @@ describe('console 局域网只读边界（§…：LAN 查看 / localhost 控制�
     expect(net.isLoopbackAddress(undefined)).toBe(false)
   })
 
+  it('isReadonlyAction：LAN 的 POST 必拒（→403），回环 POST 放行，GET 一律放行', async () => {
+    const net = await import('../tools/training/net')
+    // 写动作（POST）：仅回环放行
+    expect(net.isReadonlyAction('POST', '127.0.0.1')).toBe(false)
+    expect(net.isReadonlyAction('POST', '::1')).toBe(false)
+    expect(net.isReadonlyAction('POST', '::ffff:127.0.0.1')).toBe(false)
+    expect(net.isReadonlyAction('POST', '192.168.1.23')).toBe(true)
+    expect(net.isReadonlyAction('POST', '10.0.0.5')).toBe(true)
+    // fail closed：来源不可得 = 非回环 → 拒
+    expect(net.isReadonlyAction('POST', null)).toBe(true)
+    expect(net.isReadonlyAction('POST', undefined)).toBe(true)
+    // 查看（GET 等）：局域网同权
+    expect(net.isReadonlyAction('GET', '192.168.1.23')).toBe(false)
+    expect(net.isReadonlyAction('GET', null)).toBe(false)
+    expect(net.isReadonlyAction('HEAD', '10.0.0.5')).toBe(false)
+  })
+
+  it('服务端确实接了这个门控（回归：删掉门控/改成放行 LAN 会被这条抓住）', () => {
+    // 纯函数对不等于接线对——真正要守的是「server.ts 的 fetch 首行用它判 403」。
+    const src = readFileSync(
+      path.join(import.meta.dir, '..', 'tools', 'training', 'console', 'server.ts'),
+      'utf-8',
+    )
+    expect(src).toContain('isReadonlyAction(req.method')
+    expect(src).toMatch(/只读模式：动作仅限本机/) // 403 文案就在门控分支里
+    expect(src).toMatch(/\},\s*403\b/) // 拒绝响应状态码
+  })
+
   it('sanitizeViewCourse：放行真实课程，拒绝路径穿越与不存在的课程', () => {
     const courses = api.discoverCourses(50)
     const real = courses[0]

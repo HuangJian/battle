@@ -10,7 +10,7 @@ import { existsSync } from 'fs'
 import path from 'path'
 import { LOG_DIR, NN_TRAINING, REPO_ROOT } from './paths'
 import { httpOk, pidAlive, portListen } from './net'
-import { loadRegistry } from './registry'
+import { entryForCourse, loadRegistry } from './registry'
 import { agentSentinels, pySentinels } from './sentinels'
 import { slotPort } from './slots'
 import { resolveVenvPython } from './venv'
@@ -194,8 +194,8 @@ export function trainingLoopSpec(cfg: RlConfig, s: TrainingLoopSpecOpts): ProcSp
       ...(s.pushNodeUrl ? { REMOTE_PUSH_NODE: s.pushNodeUrl } : {}),
     },
     log: trainLog,
-    // 账本 pid 即真相（saveComponent 在 spawn 后立即回灌新 pid）
-    healthy: async () => pidAlive(loadRegistry().trainingLoop?.pid),
+    // 账本 pid 即真相（saveAnyComponent 在 spawn 后立即回灌新 pid）；严格按课取（R2）。
+    healthy: async () => pidAlive(entryForCourse(loadRegistry(), 'trainingLoop', s.course)?.pid),
     sentinels: pySentinels(TRAINING_LOOP_ENTRY),
   }
 }
