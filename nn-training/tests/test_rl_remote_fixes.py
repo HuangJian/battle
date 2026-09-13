@@ -141,14 +141,16 @@ def test_iter_shard_dirs_dedupes_same_name(tmp_path: Path) -> None:
     assert len(dirs) == len({d.name for d in dirs}), "payload 不再含重复 arcname"
 
 
-def test_eval_seeds_support_100_games() -> None:
-    """eval_games_per_stage:100 不再被常量截断；前 2 seed 历史前缀不变。"""
+def test_eval_seeds_support_200_games() -> None:
+    """eval_games_per_stage:200 不再被常量截断；前 100 seed 历史前缀逐字节不变。"""
     from rl.eval_local import EVAL_SEEDS
 
-    assert len(EVAL_SEEDS) == 100
+    assert len(EVAL_SEEDS) == 200
     assert EVAL_SEEDS[0] == 860001 and EVAL_SEEDS[1] == 860002
-    assert EVAL_SEEDS[-1] == 860100
-    assert EVAL_SEEDS[:100] == EVAL_SEEDS
+    assert EVAL_SEEDS[99] == 860100
+    assert EVAL_SEEDS[100] == 860101 and EVAL_SEEDS[-1] == 860200
+    # 旧口径（≤100）逐字节兼容：前缀切片不变
+    assert EVAL_SEEDS[:100] == tuple(range(860001, 860101))
 
 
 def test_backup_weights_honors_course_dir(tmp_path: Path) -> None:

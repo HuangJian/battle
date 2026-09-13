@@ -22,10 +22,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]  # 仓库根 battle2（rl/ 上�
 
 # 固定语料种子——前 2 个承载历史可比性（永不改动）；860003+ 为 goal-nn 扩展
 # （arena 自评需要 20 seed/关的 trend 精度，纯增量、不影响旧口径）。
-# 2026-09-06 扩到 100：课程 eval_games_per_stage:100 此前被 [:n_seeds] 静默截成
-# 20——20 局胜率 95% CI ±13pp 无法分辨爬坡（p4-onset it5/it10 的 10% vs 起点
-# 14%）。消费方一律 EVAL_SEEDS[:n_seeds] 前缀切片，前缀不变 = 旧口径逐字节兼容。
-EVAL_SEEDS = tuple(range(860001, 860101))
+# 2026-09-13 扩到 200：c6-chip 起课程 eval_games_per_stage:200（快筛教训 §32——100 局
+# SE≈±5 解析不了 −9% 量级的小效应），此前被 [:n_seeds] 静默截回 100（2026-09-06 同型坑：
+# 100 曾被截成 20）。消费方一律 EVAL_SEEDS[:n_seeds] 前缀切片，前 100 不变 = 旧口径逐字节兼容。
+EVAL_SEEDS = tuple(range(860001, 860201))
 EVAL_ITER_SUFFIX = "ev"  # eval iterId = {runId}.{it}ev → 与采集任务在 agent 结果缓存中键空间隔离
 # it0 基线评估（2026-09-12 用户）：in-loop eval 的配对基准恒为课程 bc 权重的
 # 干净评估，由主循环在 rollout 收官后派发、落账前每轮重试（baseline_summary_landed）。
