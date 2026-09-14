@@ -18,6 +18,12 @@
     c05 两档小剂量扫描重标定。c01-c03 承伤基数极小 **不上 wChip**（公式项不出现）
   · **wDmg 全阶梯移除**（N3 定案：1 命下致死命中归 terminal 计价；非致命星盾命中
     待事件子类拆分后再计价）
+  · c01-c03 干净奖励（B 案吸收 xN 试点语义，DECISIONS §2026-09-15-goalnn-xn-absorb）：
+    公式/params/terminal 与 x2/x3-start 逐字同构（杀/中/过关 + 死亡 terminal）；
+    c04+ 沿用 v2 词干（_FORMULA_LEGACY_V2，有意不动，技术债见 DECISIONS）。
+  · c01-c03 多变体（B 案）：C(4,1/2/3) = 4/6/4 关（arena2 六对 / arena3 四组试点）；
+    c04+ 单关沿用。seed_rotate 保持 600（roadmap 合规；xN 试点的 240 **不吸收**，
+    量级争议见 x3-power.jsonc 批量附录）。
   · rollout_games（课程键 = seed_rotate）：c01-c03 = **600**（hy E3：短局 transition
     量反推，c04 的 1/5~1/10 局长必须放大批量），c04+ = 150
   · 腿矩阵（hy X1）：c06/c07 = **3 腿**（暖启 / BC 重起 / 假说），其余 = 2 腿
@@ -93,19 +99,30 @@ def wchip_for(count: int) -> float | None:
     return round(W_CHIP_K / damage_base(count), 4)
 
 
-_FORMULA_BASE = (
+#: c01-c03 干净奖励（B 案吸收 xN 语义，DECISIONS §2026-09-15-goalnn-xn-absorb）：
+#: 只保留击杀/命中/统一过关 + 死亡 terminal——codex 第 1 条（不用 wDmg/wChip/
+#: wTick/wStuck）+ 第 21 行（只保留击杀/命中/终局）。与 x2/x3-start 逐字同构。
+_FORMULA_CLEAN_EARLY = "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0)"
+_PARAMS_CLEAN_EARLY: dict[str, float] = {"wKill": 3.0, "wHit": 0.3, "wWin": 2.0}
+_TERMINAL_CLEAN_EARLY: dict[str, float] = {"lives_exhausted": -1.0}
+
+#: v2 残留词干（仅 c04+ 沿用；B 案有意不动——17 级的语义回归超出本次范围，
+#: 技术债见 DECISIONS §2026-09-15-goalnn-xn-absorb）。
+_FORMULA_LEGACY_V2 = (
     "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected"
     " - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots - wTick*ticks"
 )
-_FORMULA_CHIP = _FORMULA_BASE + " - wChip*playerDamageTaken"
+_FORMULA_CHIP = _FORMULA_LEGACY_V2 + " - wChip*playerDamageTaken"
 
 
 def formula_for(count: int) -> str:
-    """c01-c03：无 wChip 项（R5）；c04+：含 wChip。wDmg 全阶梯移除（N3）。"""
-    return _FORMULA_CHIP if count >= 4 else _FORMULA_BASE
+    """c01-c03：干净公式（B 案）；c04+：沿用 v2 词干 + wChip（R5）。wDmg 全阶梯移除（N3）。"""
+    return _FORMULA_CHIP if count >= 4 else _FORMULA_CLEAN_EARLY
 
 
 def params_for(count: int) -> dict[str, float]:
+    if count <= 3:
+        return dict(_PARAMS_CLEAN_EARLY)
     params: dict[str, float] = {
         "wKill": 3.0,
         "wHit": 0.3,
@@ -119,6 +136,14 @@ def params_for(count: int) -> dict[str, float]:
     if chip is not None:
         params["wChip"] = chip
     return params
+
+
+def terminal_for(count: int) -> dict[str, float]:
+    """c01-c03：只有死亡 terminal（timeout 刻意 0：速度靠 max_ticks）；
+    c04+：沿用 v2 三 terminal。"""
+    if count <= 3:
+        return dict(_TERMINAL_CLEAN_EARLY)
+    return {"stage_clear": 2.0, "lives_exhausted": -1.0, "timeout": -2.0}
 
 
 def seed_rotate_for(count: int) -> int:
@@ -171,11 +196,60 @@ def level_name(count: int) -> str:
     return f"ladder-c{count:02d}"
 
 
+#: 类型字母（src/config/stages.ts 映射：a=basic b=fast c=power d=armor）。
+_TYPE_LETTERS = "abcd"
+
+
+def type_combos(count: int) -> list[str]:
+    """c01-c03 类型变体 = C(4,count) 全覆盖（B 案吸收 xN：arena2 六对 / arena3
+    四组；c01 按同模式展开为四单体）。count≥4 不调用（单关沿用，见 emit_level）。
+    """
+    if not 1 <= count <= 3:
+        raise ValueError(f"type_combos 只覆盖 c01-c03（count={count}）")
+    import itertools
+
+    return ["".join(c) for c in itertools.combinations(_TYPE_LETTERS, count)]
+
+
+def forces_for_combo(combo: str) -> str:
+    """变体 forces：combo 循环铺满 FORCES_LEN（与 arena2/3 逐字同构：ab→ab×10、
+    abc→abc×6+ab）。count 取前 N 个即该变体（World.ts:515 spawn 队列语义）。"""
+    rep = (combo * (FORCES_LEN // len(combo) + 1))[:FORCES_LEN]
+    assert len(rep) == FORCES_LEN
+    return rep
+
+
+def stage_count_for(count: int) -> int:
+    """本级关数：c01-c03 = 变体数（4/6/4），c04+ = 1（单关沿用）。"""
+    return len(type_combos(count)) if count <= 3 else 1
+
+
+def eval_stages_for(count: int) -> str:
+    """自定义关 ID 段（关卡内序号 2000+i）：c01/c03 = 2000-2003，c02 = 2000-2005，
+    c04+ = 2000-2000（单关沿用）。"""
+    n = stage_count_for(count)
+    return f"2000-{2000 + n - 1}" if n > 1 else "2000-2000"
+
+
 def emit_level(count: int, arena: dict[str, Any]) -> dict[str, Any]:
-    """关卡文件（环境语义唯一持有者）：D3 空场常量几何 + count/lives/max_ticks 参数。"""
-    return {
-        "name": level_name(count),
-        "stages": [
+    """关卡文件（环境语义唯一持有者）：D3 空场常量几何 + count/lives/max_ticks 参数。
+
+    c01-c03：多变体（B 案）；c04+：单关沿用（arena forces 原样，零改动）。
+    """
+    if count <= 3:
+        stages = [
+            {
+                "name": f"{level_name(count)}-{combo}",
+                "grid": arena["grid"],
+                "forces": forces_for_combo(combo),
+                "count": count,
+                "player_spawn": arena["player_spawn"],
+                "enemy_spawns": spawn_points_for(count, arena),
+            }
+            for combo in type_combos(count)
+        ]
+    else:
+        stages = [
             {
                 "name": level_name(count),
                 "grid": arena["grid"],
@@ -184,7 +258,10 @@ def emit_level(count: int, arena: dict[str, Any]) -> dict[str, Any]:
                 "player_spawn": arena["player_spawn"],
                 "enemy_spawns": spawn_points_for(count, arena),
             }
-        ],
+        ]
+    return {
+        "name": level_name(count),
+        "stages": stages,
         "difficulty": arena["difficulty"],
         "max_ticks": max_ticks_for(count),
         "player": {"lives": tier_lives(count), "level": 0},
@@ -202,7 +279,7 @@ def emit_course(count: int) -> dict[str, Any]:
         "reward": {
             "formula": formula_for(count),
             "params": params_for(count),
-            "terminal": {"stage_clear": 2.0, "lives_exhausted": -1.0, "timeout": -2.0},
+            "terminal": terminal_for(count),
             "scheme": "toy",
         },
         "dodge": "",
@@ -229,7 +306,7 @@ def emit_course(count: int) -> dict[str, Any]:
         "ent_break": 0.25,
         "backup_dir": f"nn-training/weights/{name}",
         "backup_prefix": name,
-        "eval_stages": "2000-2000",
+        "eval_stages": eval_stages_for(count),
         "eval_games_per_stage": 200,
         "eval_every": 5,
         "seed_rotate": seed_rotate_for(count),

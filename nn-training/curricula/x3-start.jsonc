@@ -4,8 +4,9 @@
 // x3-start <=> count=3 · RL 起步。对照：roadmap §5.3「c03 破包围」+ I3 工厂
 // emit_course(count=3)；奖励按 N3 + rewards.codex.md；c01-c03 不上 wChip
 // （roadmap 总规则优先，表内「轻剂量」作废，以总规则为准）。
-// xN 与 levels/ladder-c03（单关循环）是两套 count=3 任务定义并存；
-// x3-start 是一次性起步腿，转工厂线的条件待 DECISIONS 立案（评审 2026-09-14 §4）。
+// xN 与工厂 ladder-c03 曾是两套 count=3 任务定义并存；B 案落地后工厂已吸收
+// xN 语义（多变体 + 干净奖励，DECISIONS §2026-09-15-goalnn-xn-absorb），
+// ladder-c03 与 arena3 逐关同形（单测钉死），x3-start 转为试点存档腿（权重链保留）。
 //
 // 环境：`"level": "arena3"` —— 空场 3 敌，**四种三元组**（abc/abd/acd/bcd，
 //   a=basic b=fast c=power d=armor），自定义关 ID 2000-2003。max_ticks=2700。
@@ -51,6 +52,20 @@
 //   降开销（4×50=200 局/次），门前才跑 200/关。
 // 开工假说（§5.7）：kill/hit 稠密信号 + wWin 清场尖峰驱动，it40 前 pooled 爬升；
 //   60 轮内无爬升即证伪停腿（防 c6-bonus 式盲跑）。
+//
+// 收官总结（2026-09-15，it333 收账：云机用户已停，loop 无进展；60 轮证伪条款
+//   已触发，停腿待用户一句话）：
+//   曲线：零样本 53.8% → it10 日常 67.5%（+14pp，假说前半兑现），之后 320 轮
+//   横盘 0.65-0.72（67 个日常点 mean 0.669，800 局三锚点 it180/it280/it333 =
+//   69.4/67.8/69.5，带宽 1.7pp）——后半未兑现，证伪条款已触发（停腿待决断）。
+//   正式门一（it333，种子 0-199）：pooled 556/800=69.5%
+//  （abc 73.5/abd 76.0/acd 60.0/bcd 68.5），距 80% 差 10pp，无趋势。
+//   机器健康（value 0.23/熵 0.58/KL 0.002，无 halt）—— plateau 是信号配方到顶，
+//   不是训练事故。acd 被钉死 59-60（三锚点），power+armor 为跨 count 稳定病灶。
+//   教训：① 同配方加轮/加密度不搬运偏科关（x2-acbc 已证一次，本腿证第二次）；
+//   ② 量纲按 transitions/轮记账（本腿 60×4×967≈23 万；c4-dodge 线 ~66 万+）；
+//   ③ 在途 eval 行 iter=权重轮（P0 事后口径），日常数右移一轮读。
+//   后续：x3-power（杀/中信用比）接棒；本腿归档保留 it180/it333 双点。
 //
 // 启动（§5.6：禁裸 python，一律走启动器）：
 //   bun dashboard/src/launch/cli.ts --script run_rl.py --course x3-start

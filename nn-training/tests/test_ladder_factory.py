@@ -141,7 +141,85 @@ def test_generated_course_invariants(generated: Path) -> None:
         assert course.seed_rotate == lf.seed_rotate_for(c)  # E3
         assert course.gates is None  # I2：阶梯课程一律不配 gates
         assert "wDmg" not in course.reward.formula  # N3
+        assert isinstance(course.stages, list)  # level 引用合并后必为列表
+    # c04+ 单关沿用（B 案零改动）：arena forces 原样
+    for c in (4, 7, 20):
+        course = load_course(generated / f"{lf.level_name(c)}.jsonc")
+        assert isinstance(course.stages, list)
+        assert len(course.stages) == 1
         assert course.stages[0].forces == "abcdabcdabcdabcdabcd"  # 几何常量（F4 长 20）
+
+
+def test_early_levels_multi_variant(generated: Path) -> None:
+    """B 案：c01-c03 = C(4,1/2/3) = 4/6/4 关（xN 试点语义入厂）；
+    c01 单出生点降噪保持（spawn_points_for 原样）。"""
+    from rl.config import load_course
+
+    for c, n in ((1, 4), (2, 6), (3, 4)):
+        course = load_course(generated / f"{lf.level_name(c)}.jsonc")
+        assert isinstance(course.stages, list)
+        assert len(course.stages) == n
+        assert all(s.count == c for s in course.stages)
+        assert all(len(s.forces) == 20 for s in course.stages)
+        combos = [s.forces[:c] for s in course.stages]
+        assert sorted(combos) == sorted(lf.type_combos(c))
+    assert lf.eval_stages_for(1) == "2000-2003"
+    assert lf.eval_stages_for(2) == "2000-2005"
+    assert lf.eval_stages_for(3) == "2000-2003"
+    assert lf.eval_stages_for(4) == "2000-2000"  # 单关沿用
+
+
+def test_type_combos_cover_all() -> None:
+    """C(4,1/2/3) 全覆盖；count≥4 拒绝（单关沿用，不归本函数管）。"""
+    assert lf.type_combos(1) == ["a", "b", "c", "d"]
+    assert lf.type_combos(2) == ["ab", "ac", "ad", "bc", "bd", "cd"]
+    assert lf.type_combos(3) == ["abc", "abd", "acd", "bcd"]
+    with pytest.raises(ValueError):
+        lf.type_combos(4)
+    assert lf.forces_for_combo("ab") == "ab" * 10
+    assert lf.forces_for_combo("abc") == "abcabcabcabcabcabcab"
+    assert all(len(lf.forces_for_combo(t)) == 20 for t in lf.type_combos(3))
+
+
+def test_early_reward_is_clean_and_legacy_untouched() -> None:
+    """B 案奖励分叉：c01-c03 与 x2/x3-start 逐字同构；c04+ v2 词干逐字不动."""
+    assert lf.formula_for(2) == "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0)"
+    assert lf.params_for(2) == {"wKill": 3.0, "wHit": 0.3, "wWin": 2.0}
+    assert lf.terminal_for(2) == {"lives_exhausted": -1.0}
+    assert lf.terminal_for(1) == {"lives_exhausted": -1.0}
+    for banned in ("wTick", "wPickup", "wStuck", "wShot", "wChip", "wDmg"):
+        assert banned not in lf.formula_for(3)
+        assert banned not in lf.params_for(3)
+    # c04+ 沿用（回归锁：B 案不得漂移这 17 级）
+    assert "wTick" in lf.formula_for(4) and "wChip" in lf.formula_for(4)
+    assert lf.params_for(4)["wShot"] == 0.01
+    assert lf.terminal_for(4) == {"stage_clear": 2.0, "lives_exhausted": -1.0, "timeout": -2.0}
+
+
+def test_ladder_matches_xn_pilot() -> None:
+    """B 案核心契约：ladder-c02/c03 关卡与 xN 试点（arena2/arena3）逐关同形。
+    （工厂产物纯 JSON 无注释，探针表头仍住 xN 文件；语义等价由本测试钉死。）"""
+    from rl.jsonc import load as _load_jsonc
+
+    repo_levels = Path(__file__).resolve().parent.parent / "levels"
+    pairs = [("ladder-c02", "arena2"), ("ladder-c03", "arena3")]
+    for fac, pilot in pairs:
+        f_stages = _load_jsonc(str(repo_levels / f"{fac}.jsonc"))["stages"]
+        p_stages = _load_jsonc(str(repo_levels / f"{pilot}.jsonc"))["stages"]
+        assert len(f_stages) == len(p_stages) == (6 if fac == "ladder-c02" else 4)
+        for fs, ps in zip(f_stages, p_stages, strict=True):
+            assert fs["forces"] == ps["forces"] and fs["count"] == ps["count"]
+            assert fs["player_spawn"] == ps["player_spawn"]
+            assert fs["enemy_spawns"] == ps["enemy_spawns"]
+            assert fs["grid"] == ps["grid"]
+
+
+def test_early_seed_rotate_stays_600() -> None:
+    """seed_rotate 保持 600（roadmap 合规；xN 试点的 240 本次不吸收，
+    争议见 x3-power.jsonc 批量附录——改这个数另立项）。"""
+    assert lf.seed_rotate_for(1) == 600
+    assert lf.seed_rotate_for(2) == 600
+    assert lf.seed_rotate_for(3) == 600
 
 
 def test_level_file_geometry_is_constant_empty_arena(generated: Path) -> None:

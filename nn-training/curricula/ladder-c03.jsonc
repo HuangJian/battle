@@ -4,20 +4,14 @@
   "mode": "per-tick",
   "level": "ladder-c03",
   "reward": {
-    "formula": "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots - wTick*ticks",
+    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0)",
     "params": {
       "wKill": 3.0,
       "wHit": 0.3,
-      "wPickup": 1.5,
-      "wStar": 1.0,
-      "wStuck": 0.02,
-      "wShot": 0.01,
-      "wTick": 0.01
+      "wWin": 2.0
     },
     "terminal": {
-      "stage_clear": 2.0,
-      "lives_exhausted": -1.0,
-      "timeout": -2.0
+      "lives_exhausted": -1.0
     },
     "scheme": "toy"
   },
@@ -51,7 +45,7 @@
   "ent_break": 0.25,
   "backup_dir": "nn-training/weights/ladder-c03",
   "backup_prefix": "ladder-c03",
-  "eval_stages": "2000-2000",
+  "eval_stages": "2000-2003",
   "eval_games_per_stage": 200,
   "eval_every": 5,
   "seed_rotate": 600
