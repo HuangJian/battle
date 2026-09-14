@@ -37,6 +37,9 @@ export interface StartCtx {
   course: string
   /** trainer 模式（pull/push → --ppo remote；local → 不带 --ppo）。 */
   trainerPpo: ConsoleState['trainerPpo']
+  /** 显式 REMOTE_PUSH_NODE（仅冒烟/本机伪 GPU；真实 Push 走 rl-config gpu_push 节点，
+   *  不注入 env——env 会强制 remote_token，覆盖用户填写的 authKey）。 */
+  pushNodeUrl?: string
 }
 
 /** run_bc 单实例锁持有人（BC 课程；与 runRlLockHolder 同语义，锁名 run_bc）。 */
@@ -211,9 +214,9 @@ export async function startComponent(key: Component, ctx: StartCtx): Promise<Act
         const spec = trainingLoopSpec(cfg, {
           course: ctx.course,
           ppo: ctx.trainerPpo,
-          // P3：REMOTE_PUSH_NODE 按课注入（取 courses.<课>.push_node_url；缺省空 =
-          // 沿用旧 env/gpu_push 节点逻辑）。多课同值 = N:1 共享（§3.8）。
-          pushNodeUrl: cfg.courses?.[ctx.course]?.push_node_url,
+          // 真实 Push：不注入 REMOTE_PUSH_NODE（见 StartCtx.pushNodeUrl）。
+          // Python 从 rl-config nodes[].gpu_push 读 URL+authKey（控制台 configurePush 已写回）。
+          pushNodeUrl: ctx.pushNodeUrl,
           venv,
         })
         const r = launchSpec(spec)
@@ -223,7 +226,7 @@ export async function startComponent(key: Component, ctx: StartCtx): Promise<Act
           slot: slotOf(cfg, ctx.course),
           entry: TRAINING_LOOP_ENTRY,
           mode: ctx.trainerPpo,
-          pushNodeUrl: cfg.courses?.[ctx.course]?.push_node_url,
+          pushNodeUrl: ctx.pushNodeUrl ?? cfg.courses?.[ctx.course]?.push_node_url,
           log: trainLog,
         })
         monitorTouch()

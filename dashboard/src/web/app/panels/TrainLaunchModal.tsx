@@ -1,5 +1,6 @@
 /** TrainLaunchModal.tsx — 启动 TrainingLoop 的弹窗（工具行并入此处，用户指令）：
  *  选择 trainer 模式（Pull/Push/Local）+ rl-config 行为开关（即时写）+ 推送链路预演入口。
+ *  Push 模式：必填 cloudflared endpoint + auth key（服务端 ping 通才启动并回写 rl-config）。
  *  Esc / 遮罩关闭由 App 全局处理。 */
 
 import { useEffect, useRef, useState } from 'preact/hooks'
@@ -8,14 +9,38 @@ import { SegmentedControl } from '../../components/SegmentedControl'
 import { Toggle } from '../../components/Toggle'
 import { TC_TRAIN_MODE, TC_TRAIN_TOGGLES } from '../../view'
 
+export interface PushCredentials {
+  endpoint: string
+  authKey: string
+}
+
 export interface TrainLaunchModalProps {
   open: boolean
   modes: ModeView
   onClose: () => void
   onAction: (act: string, body: Record<string, unknown>) => void
-  onLaunch: (mode: 'pull' | 'push' | 'local') => void
+  onLaunch: (mode: 'pull' | 'push' | 'local', push?: PushCredentials) => void
   /** 局域网只读视图：行为开关/预演/启动全部禁用（兜底——启动入口可点，弹窗内禁用以防误操作）。 */
   readOnly?: boolean
+}
+
+const TC_PUSH_ENDPOINT = 'tc.pushEndpoint'
+const TC_PUSH_AUTH = 'tc.pushAuthKey'
+
+function readLocal(key: string): string {
+  try {
+    return localStorage.getItem(key) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+function writeLocal(key: string, v: string): void {
+  try {
+    localStorage.setItem(key, v)
+  } catch {
+    /* ignore */
+  }
 }
 
 export function TrainLaunchModal({
@@ -38,6 +63,10 @@ export function TrainLaunchModal({
     }
     return modes.trainerPpo
   })
+
+  const [pushEndpoint, setPushEndpoint] = useState(() => readLocal(TC_PUSH_ENDPOINT))
+  const [pushAuthKey, setPushAuthKey] = useState(() => readLocal(TC_PUSH_AUTH))
+  const [pushErr, setPushErr] = useState('')
 
   // 行为开关偏好：localStorage 优先 → 服务端 modes 兜底
   const [toggles, setToggles] = useState<{
@@ -93,10 +122,31 @@ export function TrainLaunchModal({
     }
   }, [mode])
 
+  useEffect(() => {
+    if (!open) setPushErr('')
+  }, [open])
+
   const applyToggle = (key: string, v: boolean): void => {
     const next = { ...toggles, [key]: v }
     setToggles(next)
     onAction('setMode', { key, value: v ? '1' : '0' })
+  }
+
+  const handleLaunchClick = (): void => {
+    if (mode !== 'push') {
+      onLaunch(mode)
+      return
+    }
+    const endpoint = pushEndpoint.trim()
+    const authKey = pushAuthKey.trim()
+    if (!endpoint || !authKey) {
+      setPushErr('Push 模式必须填写 cloudflared endpoint 与 auth key')
+      return
+    }
+    setPushErr('')
+    writeLocal(TC_PUSH_ENDPOINT, endpoint)
+    writeLocal(TC_PUSH_AUTH, authKey)
+    onLaunch(mode, { endpoint, authKey })
   }
 
   if (!open) return null
@@ -129,6 +179,43 @@ export function TrainLaunchModal({
             onChange={setMode}
           />
         </div>
+        {mode === 'push' ? (
+          <div className="tc-push-creds" style={{ display: 'grid', gap: 8, marginTop: 4 }}>
+            <label className="tc-line" style={{ display: 'grid', gap: 4 }}>
+              <span className="tc-muted tc-small">
+                cloudflared / worker_server endpoint（必填，启动前 ping）
+              </span>
+              <input
+                type="url"
+                className="tc-input"
+                placeholder="https://xxxx.trycloudflare.com"
+                value={pushEndpoint}
+                disabled={readOnly}
+                onChange={(e) => setPushEndpoint((e.target as HTMLInputElement).value)}
+              />
+            </label>
+            <label className="tc-line" style={{ display: 'grid', gap: 4 }}>
+              <span className="tc-muted tc-small">auth key（worker_server --token，必填）</span>
+              <input
+                type="password"
+                className="tc-input"
+                placeholder="Bearer token"
+                value={pushAuthKey}
+                disabled={readOnly}
+                onChange={(e) => setPushAuthKey((e.target as HTMLInputElement).value)}
+              />
+            </label>
+            {pushErr ? (
+              <p className="tc-banner tc-banner--err" style={{ margin: 0 }} role="alert">
+                {pushErr}
+              </p>
+            ) : (
+              <p className="tc-muted tc-small" style={{ margin: 0 }}>
+                服务端将 GET {'{url}'}/ping 校验连通性，通过后回写 rl-config.json 再启动训练。
+              </p>
+            )}
+          </div>
+        ) : null}
         <div className="tc-line tc-toggle-group" ref={togglesRef}>
           <span className="tc-muted tc-small">行为开关</span>
           <Toggle
@@ -177,8 +264,10 @@ export function TrainLaunchModal({
             type="button"
             className="tc-btn tc-btn--primary"
             aria-label={`按 ${mode} 模式启动 TrainingLoop`}
-            disabled={readOnly}
-            onClick={() => onLaunch(mode)}
+            disabled={
+              readOnly || (mode === 'push' && (!pushEndpoint.trim() || !pushAuthKey.trim()))
+            }
+            onClick={handleLaunchClick}
           >
             启动（{mode}）
           </button>

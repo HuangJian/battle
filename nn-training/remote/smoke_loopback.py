@@ -159,7 +159,7 @@ def main() -> int:
     work.mkdir(parents=True)
 
     def log(msg: str) -> None:
-        print(f"[smoke] {msg}", flush=True)
+        print(f"[{time.strftime('%H:%M:%S')}] [smoke] {msg}", flush=True)
 
     # ---- 0) 课程 + course_fp（D14：sha256 of 课程文件字节） ----
     course_path = ROOT / "curricula" / "p4-onset.jsonc"

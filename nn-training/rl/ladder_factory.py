@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -347,12 +348,12 @@ def main() -> None:
 
     written = generate(args.out_levels, args.out_courses, args.plan, args.arena, args.dry_run)
     mode = "DRY-RUN" if args.dry_run else "WROTE"
-    print(f"[ladder-factory] {mode} {len(written)} files")
+    print(f"[{time.strftime('%H:%M:%S')}] [ladder-factory] {mode} {len(written)} files")
     if not args.dry_run:
         errs = preflight(args.out_levels, args.out_courses)
         if errs:
             for e in errs:
-                print(f"[ladder-factory] PREFLIGHT FAIL: {e}")
+                print(f"[{time.strftime('%H:%M:%S')}] [ladder-factory] PREFLIGHT FAIL: {e}")
             raise SystemExit(1)
         print("[ladder-factory] preflight OK：load_course + validate_reward 全绿（20 级）")
 

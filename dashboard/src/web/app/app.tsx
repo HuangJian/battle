@@ -21,7 +21,7 @@ import { NodePills } from './panels/NodePills'
 import { MetricsTable } from './panels/MetricsTable'
 import { NodeStats } from './panels/NodeStats'
 import { LogNavCard } from './panels/LogNavCard'
-import { TrainLaunchModal } from './panels/TrainLaunchModal'
+import { TrainLaunchModal, type PushCredentials } from './panels/TrainLaunchModal'
 import { BcPanel } from './panels/BcPanel'
 import { EvalSummary } from './panels/EvalSummary'
 import {
@@ -294,9 +294,18 @@ export function App({ initial }: AppProps) {
     [doAction],
   )
 
-  const handleLaunch = async (mode: 'pull' | 'push' | 'local'): Promise<void> => {
+  const handleLaunch = async (
+    mode: 'pull' | 'push' | 'local',
+    push?: PushCredentials,
+  ): Promise<void> => {
+    // Push：先关弹窗再 POST（服务端 ping 门；失败走 flash，不启动进程）。
     setTrainOpen(false)
-    await doAction('preset', { mode })
+    const body: Record<string, unknown> = { mode }
+    if (mode === 'push' && push) {
+      body.pushEndpoint = push.endpoint
+      body.pushAuthKey = push.authKey
+    }
+    await doAction('preset', body)
   }
 
   // hub-server 运行中锁定课程（仅本机）：hub 按课程建 jobRoot/日志目录，切操作员课程会打乱

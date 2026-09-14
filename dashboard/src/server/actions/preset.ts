@@ -1,5 +1,6 @@
 /** preset.ts — 模式预设与开关（stream / double_buffer / trainer pull|push|local）。 */
 import { loadConfig, saveConfig, validateCourseArg } from '../../core/config'
+import { configurePushEndpoint } from '../../stack/push-config'
 import type { Component } from '../../core/types'
 import { rlConfigSmoke } from '../../stack/smoke'
 import { ConsoleState, saveConsoleState } from './console-state'
@@ -8,18 +9,37 @@ import { startComponent, StartCtx } from './start'
 
 // ────────────────────────── 模式预设与开关 ──────────────────────────
 
+export interface PresetOpts {
+  /** Push：worker_server / cloudflared endpoint（必填；ping 通才启动）。 */
+  pushEndpoint?: string
+  /** Push：worker_server Bearer token（必填；与 --token 一致）。 */
+  pushAuthKey?: string
+}
+
 /** 按 trainer 模式顺序拉起组件组合：pull = selfNode→hubServer→cloudflared→trainer；
- *  push = selfNode→hubServer→trainer；local = trainer。任一步失败即中断（已完成
- *  的组件保留，页面可单独停止）。 */
+ *  push = （ping 门 + 回写 rl-config）→ selfNode→hubServer→trainer；local = trainer。
+ *  任一步失败即中断（已完成的组件保留，页面可单独停止）。 */
 export async function startPreset(
   mode: ConsoleState['trainerPpo'],
   course: string,
+  opts: PresetOpts = {},
 ): Promise<ActionResult> {
   guard(`preset:${mode}`)
   try {
     if (!course) throw new ActionError('需要 course（先在顶部设置课程）')
     validateCourseArg(course)
     saveConsoleState({ trainerPpo: mode, course })
+    let pushNote = ''
+    if (mode === 'push') {
+      // ① ping 门 ② 回写 rl-config（gpu_push 节点 + courses.push_node_url）——
+      // 失败抛 ActionError，**绝不启动** trainingLoop。
+      const { url } = await configurePushEndpoint(
+        course,
+        opts.pushEndpoint ?? '',
+        opts.pushAuthKey ?? '',
+      )
+      pushNote = `; push endpoint 已验证并回写 rl-config (${url})`
+    }
     const order: Component[] =
       mode === 'pull'
         ? ['selfNode', 'hubServer', 'cloudflared', 'trainingLoop']
@@ -33,10 +53,15 @@ export async function startPreset(
       detail.push(`${k}: ${r.message}${r.detail && !r.ok ? ` — ${r.detail[0] ?? ''}` : ''}`)
       if (!r.ok) return done(false, `${mode} 预设启动中断于 ${k}`, detail)
     }
-    return done(true, `已按 ${mode} 模式启动 ${order.length} 个组件 (course=${course})`, detail)
+    return done(
+      true,
+      `已按 ${mode} 模式启动 ${order.length} 个组件 (course=${course})${pushNote}`,
+      detail,
+    )
   } catch (e) {
     if (e instanceof ActionError) throw e
-    return done(false, `预设启动失败: ${e instanceof Error ? e.message : e}`)
+    // configurePushEndpoint 的 ping/校验失败 → ActionError（响亮，不启动）
+    throw new ActionError(e instanceof Error ? e.message : String(e))
   } finally {
     release(`preset:${mode}`)
   }

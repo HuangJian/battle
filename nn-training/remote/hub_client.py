@@ -296,7 +296,7 @@ def publish_job(
     # 文件，init_weights_fp 恒 "bc"——幂等键分量仍稳定）。
     kind: str = "ppo",
     extra: dict | None = None,
-    log=lambda msg: print(f"[hub] {msg}", flush=True),
+    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
 ) -> dict:
     """打包 + 发布 job（磁盘 IPC）：job_root/<job_id>/ + jsonl job_pending 事件。
 
@@ -542,7 +542,7 @@ def set_cloud_halt(
     token: str,
     halt: bool,
     timeout: float = 15.0,
-    log=lambda msg: print(f"[hub] {msg}", flush=True),
+    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
 ) -> bool:
     """§386：向 hub 下发/解除云端停机达令（console 与 TrainingLoop 共用一端点）。
 
@@ -588,7 +588,7 @@ def hub_halted(base_url: str, token: str, timeout: float = 10.0) -> bool | None:
 def clear_halt_on_startup(
     base_url: str,
     token: str,
-    log=lambda msg: print(f"[hub] {msg}", flush=True),
+    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
 ) -> bool:
     """TrainingLoop 启动即清空 hub 停机态（2026-09-12 it17 事故复盘）。
 
@@ -627,7 +627,7 @@ def wait_job(
     timeout_sec: float = 25 * 60,
     poll_sec: float = 5.0,
     poll_max_sec: float = 60.0,
-    log=lambda msg: print(f"[hub] {msg}", flush=True),
+    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
 ) -> dict:
     """阻塞等待 job 完成（worker 已 POST 结果）→ 返回结果 dict。超时抛 HubClientError。
 
@@ -703,7 +703,7 @@ def verify_and_land(
     traj_dir: str | Path,
     it: int,
     out_weights: str,
-    log=lambda msg: print(f"[hub] {msg}", flush=True),
+    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
 ) -> str:
     """三重校验（D12）+ 落盘（weights_json → args.out；opt tar → ppo_ckpt_remote）。
 
@@ -754,7 +754,7 @@ def verify_and_land_bc(
     it: int,
     out_weights: str,
     round_name: str = "",
-    log=lambda msg: print(f"[hub] {msg}", flush=True),
+    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
 ) -> str:
     """BC 结果校验 + 落盘（plan/bc-cloud-integration.plan.md §4；verify_and_land 的 BC 版）。
 

@@ -1478,10 +1478,10 @@ def main() -> None:
         try:
             token = Path(args.token_file).read_text(encoding="utf-8").strip()
         except OSError as e:
-            print(f"[worker] ERROR: 读 --token-file 失败: {e}", flush=True)
+            print(f"[{time.strftime('%H:%M:%S')}] [worker] ERROR: 读 --token-file 失败: {e}", flush=True)
             sys.exit(1)
     if not token:
-        print("[worker] ERROR: 需要 --token 或 --token-file", flush=True)
+        print(f"[{time.strftime('%H:%M:%S')}] [worker] ERROR: 需要 --token 或 --token-file", flush=True)
         sys.exit(1)
     # 2026-09-08 双 tmp 统一：相对 work 路径锚定仓库根（remote/ 上溯 3 层），
     # 不再落到 nn-training/tmp（此前 spawn cwd=nn-training 时相对路径走偏）。
@@ -1493,10 +1493,10 @@ def main() -> None:
     raw_polls = args.poll if isinstance(args.poll, list) else [args.poll]
     hub_urls = [u.strip().rstrip("/") for p in raw_polls for u in str(p).split(",") if u.strip()]
     if not hub_urls:
-        print("[worker] ERROR: --poll 为空", flush=True)
+        print(f"[{time.strftime('%H:%M:%S')}] [worker] ERROR: --poll 为空", flush=True)
         sys.exit(1)
     if len(hub_urls) > 1:
-        print(f"[worker] 多 hub 轮询（round-robin）：{hub_urls}", flush=True)
+        print(f"[{time.strftime('%H:%M:%S')}] [worker] 多 hub 轮询（round-robin）：{hub_urls}", flush=True)
     if os.environ.get("REMOTE_WORKER_CHILD") == "1":
         # ── 子进程模式（由监督器 supervise_worker / 新版 main() 拉起）──
         # 热替换必须退 HOT_RELOAD_EXIT(86) 让监督器重拉：worker_loop 以
@@ -1515,7 +1515,7 @@ def main() -> None:
             restart_argv=sys.argv[1:],
             hub_urls=hub_urls,
         )
-        print(f"[worker] done: {n} job(s) processed")
+        print(f"[{time.strftime('%H:%M:%S')}] [worker] done: {n} job(s) processed", flush=True)
         # H8：--once 失败（返回 -1）→ 非零退出码
         sys.exit(0 if n >= 0 else 1)
     # ── 监督器模式（默认入口）──
@@ -1525,7 +1525,7 @@ def main() -> None:
     # sys.argv[1:] 就是可重放的热替换参数（argv[0] 可能是 -m 或脚本路径，统一由
     # supervise_worker 用 `-m remote.worker` 重建，故这里只取参数部分）。
     rc = supervise_worker(sys.argv[1:])
-    print(f"[worker-supervisor] worker exited: rc={rc}")
+    print(f"[{time.strftime('%H:%M:%S')}] [worker-supervisor] worker exited: rc={rc}", flush=True)
     sys.exit(rc)
 
 

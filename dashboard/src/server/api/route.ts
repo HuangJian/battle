@@ -91,7 +91,12 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
       case 'preset': {
         const mode = bodyStr(body, 'mode')
         if (!['pull', 'push', 'local'].includes(mode)) return errResp(`未知预设: ${mode}`, 400)
-        return okResp(await startPreset(mode as 'pull' | 'push' | 'local', ctx.course))
+        return okResp(
+          await startPreset(mode as 'pull' | 'push' | 'local', ctx.course, {
+            pushEndpoint: bodyStr(body, 'pushEndpoint'),
+            pushAuthKey: bodyStr(body, 'pushAuthKey'),
+          }),
+        )
       }
       case 'setMode': {
         const key = bodyStr(body, 'key')

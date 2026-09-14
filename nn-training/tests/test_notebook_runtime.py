@@ -397,6 +397,40 @@ def test_push_serve_exits_with_rc_passthrough(
     assert serve.killed is False  # 已退出，无需 kill
 
 
+def test_push_wait_loop_logs_status_and_serve_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """隧道就绪后守候循环必须持续打日志（/ping 状态 + serve.log 转发）——
+    修「push 建隧道后 notebook 一直静默」。"""
+    clock = _FakeClock(step=20.0)  # >15s status 周期，一进循环就 ping
+    monkeypatch.setattr(nbr, "time", clock)
+    monkeypatch.setattr(nbr.subprocess, "getoutput", lambda cmd: "/usr/bin/cloudflared")
+    serve = _FakeProc(poll_seq=[None, None, 0])  # 两拍守候后退出
+
+    def fake_popen(cmd: list[str], **kw: Any) -> _FakeProc:
+        if "--logfile" in cmd:
+            Path(cmd[cmd.index("--logfile") + 1]).write_text(
+                "x https://abc-def.trycloudflare.com", encoding="utf-8"
+            )
+        if "--port" in cmd:
+            # 伪 serve.log：守候循环应转发这些行
+            (tmp_path / "work" / "serve.log").write_text(
+                "[00:00:00] [worker-serve] job j1 accepted\n", encoding="utf-8"
+            )
+        return serve if "--port" in cmd else _FakeProc(poll_seq=[None])
+
+    monkeypatch.setattr(nbr.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=0: _FakeResp(200))
+    logs: list[str] = []
+    rc = nbr.run_push_worker(
+        _base_cfg(tmp_path, cloudflared_path="/usr/bin/cloudflared"), logs.append
+    )
+    assert rc == 0
+    assert any("进入推送守候" in m for m in logs)
+    assert any("[serve]" in m and "job j1 accepted" in m for m in logs)
+    assert any("worker 状态" in m or "守候中" in m for m in logs)
+
+
 # ------------------------------------------------------------------ run_notebook
 
 

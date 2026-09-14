@@ -285,17 +285,87 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
     else:
         log(f"⚠ 隧道 URL 未取得（超时/出错）——hub 推送将不可达；日志见 {cf_log}")
 
-    # ── 等待 job（会话上限内守着）──
+    # ── 等待 job（会话上限内守着 + 持续日志，对齐 pull 模式可观测性）──
+    # 历史：隧道 URL 打完后只剩 sleep(30)——notebook cell 上看起来「挂死」。
+    # 现在：① 转发 serve.log 新行（job 受理/执行/完成都在里面，worker_server 已带时间戳）
+    #       ② 周期 /ping 状态（busy/queued/done）③ 空闲心跳，与 pull 的轮询日志同节奏。
     deadline = time.time() + int(cfg["max_session_hours"]) * 3600
+    t_wait0 = time.time()
+    serve_tail_off = 0
+    last_status_at = 0.0
+    last_done = -1
+    last_busy: bool | None = None
+
+    def _drain_serve_log() -> None:
+        nonlocal serve_tail_off
+        try:
+            size = serve_log.stat().st_size
+        except OSError:
+            return
+        if size < serve_tail_off:
+            serve_tail_off = 0  # 日志被截断/重开
+        if size <= serve_tail_off:
+            return
+        try:
+            with open(serve_log, encoding="utf-8", errors="replace") as f:
+                f.seek(serve_tail_off)
+                chunk = f.read()
+            serve_tail_off = size
+        except OSError:
+            return
+        for line in chunk.splitlines():
+            line = line.rstrip()
+            if line:
+                log(f"[serve] {line}")
+
+    def _ping_status() -> dict | None:
+        try:
+            req = Request(
+                f"http://127.0.0.1:{cfg['push_port']}/ping",
+                headers={"Authorization": f"Bearer {cfg['push_token']}"},
+            )
+            with urlopen(req, timeout=4) as r:
+                body = r.read()
+            import json as _json
+
+            obj = _json.loads(body.decode("utf-8", "replace"))
+            return obj if isinstance(obj, dict) else None
+        except Exception:
+            return None
+
+    log("进入推送守候（转发 serve.log + /ping 状态；中断本 cell 停机）")
     try:
         while True:
             if serve_proc.poll() is not None:
+                _drain_serve_log()
                 log(f"worker_server 退出 (code {serve_proc.returncode})")
                 return serve_proc.returncode or 0
+            _drain_serve_log()
+            now = time.time()
+            if now - last_status_at >= 15:
+                st = _ping_status()
+                if st is not None:
+                    busy = bool(st.get("busy"))
+                    queued = int(st.get("queued") or 0)
+                    done = int(st.get("done") or 0)
+                    if done != last_done or busy != last_busy or queued > 0:
+                        log(
+                            f"worker 状态: busy={busy} queued={queued} done={done}"
+                            + ("（在跑 job）" if busy else "（空闲，等 hub 推送）")
+                        )
+                        last_done, last_busy = done, busy
+                    else:
+                        log(
+                            f"守候中… busy={busy} queued={queued} done={done}"
+                            f" wait={int(now - t_wait0)}s"
+                        )
+                else:
+                    log("worker /ping 暂不可达（瞬断/重启中）——继续守候")
+                last_status_at = now
             if time.time() > deadline:
                 log(f"会话到顶 ({cfg['max_session_hours']}h)——干净收摊")
                 return 0
-            time.sleep(30)
+            time.sleep(5)
     except KeyboardInterrupt:
         log("收到中断")
         return 0
