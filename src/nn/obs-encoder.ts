@@ -168,7 +168,7 @@ export const SPAWN_COUNTDOWN_MS = 1000
 
 const WAVE_HEAT_TICKS = 600 // K = 600 ticks (10s), plan §1.1 ch13
 /** waveHeat 轮转计数复用缓冲（§14.1：v2 为每次 encode 分配 [0,0,0]）。 */
-const WAVE_HEAT_COUNTS = new Array<number>(8).fill(0)
+const WAVE_HEAT_COUNTS = Array.from({ length: 8 }, () => 0)
 
 if (POWERUP_COUNT !== 15) {
   throw new Error(`POWERUP_ORDER must have exactly 15 members, got ${POWERUP_COUNT}`)

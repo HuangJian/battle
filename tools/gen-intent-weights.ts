@@ -84,5 +84,3 @@ if (import.meta.main) {
   await Bun.write(out, genIntentWeights(H, D))
   console.log(`wrote ${out} (weights layers: stem/blocks/fc + 4 heads)`)
 }
-
-export {}

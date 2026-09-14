@@ -750,7 +750,7 @@ function buildHtml(
         +'<td>'+avg+'</td>'
         +'<td>'+r.lastGames+'</td>'
         +'<td>'+r.wins+'</td>'
-        +'<td class="win-cell" style="'+heat(wr)+'\">'+(wr>0?(wr*100).toFixed(1)+'%':'-')+'</td>'
+        +'<td class="win-cell" style="'+heat(wr)+'">'+(wr>0?(wr*100).toFixed(1)+'%':'-')+'</td>'
         +'<td>'+(r.lastIt?('it'+r.lastIt):'-')+'</td>'
         +'<td class="txt na">'+r.lastError+'</td>'
       +'</tr>';

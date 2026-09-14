@@ -157,7 +157,7 @@ export function phiNow(c: PhiCounters): number {
  */
 export function discountReturns(rewards: number[], gamma = RL_GAMMA): number[] {
   const n = rewards.length
-  const out = new Array<number>(n)
+  const out = Array.from({ length: n }, () => 0)
   let acc = 0
   for (let i = n - 1; i >= 0; i--) {
     acc = rewards[i] + gamma * acc

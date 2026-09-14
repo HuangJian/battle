@@ -147,7 +147,7 @@ async function main(): Promise<void> {
         }
 
         const segs = segmentIntentSeq(intentSeq)
-        const expanded = new Array<IntentId | null>(intentSeq.length).fill(null)
+        const expanded: (IntentId | null)[] = Array.from({ length: intentSeq.length }, () => null)
         for (const s of segs) for (let t = s.start; t <= s.end; t++) expanded[t] = s.intent
 
         const idxSel = frameIdx.filter((t) => expanded[t] != null)

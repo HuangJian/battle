@@ -442,7 +442,7 @@ export function expandSegments(
   segments: readonly IntentSegment[],
   frameCount: number,
 ): (IntentId | null)[] {
-  const out: (IntentId | null)[] = new Array(frameCount).fill(null)
+  const out: (IntentId | null)[] = Array.from({ length: frameCount }, () => null)
   for (const s of segments) for (let t = s.start; t <= s.end; t++) out[t] = s.intent
   return out
 }

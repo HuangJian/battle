@@ -44,20 +44,20 @@ function makeShard(n: number): ShardData {
     const s = new Float32Array(SCALAR_DIM)
     s.fill(i + 0.5)
     scalars.push(s)
-    metrics.push(new Array(METRICS_DIM).fill(i))
+    metrics.push(Array.from({ length: METRICS_DIM }, () => i))
   }
-  metrics.push(new Array(METRICS_DIM).fill(9))
+  metrics.push(Array.from({ length: METRICS_DIM }, () => 9))
   return {
     obs,
     scalars,
-    aMove: new Array(n).fill(1),
-    aFire: new Array(n).fill(0),
-    lpMove: new Array(n).fill(-0.5),
-    lpFire: new Array(n).fill(-0.25),
-    value: new Array(n).fill(0.1),
+    aMove: Array.from({ length: n }, () => 1),
+    aFire: Array.from({ length: n }, () => 0),
+    lpMove: Array.from({ length: n }, () => -0.5),
+    lpFire: Array.from({ length: n }, () => -0.25),
+    value: Array.from({ length: n }, () => 0.1),
     metrics,
-    done: [...new Array(n - 1).fill(0), 1],
-    mask: new Array(n * MASK_DIM).fill(1),
+    done: [...Array.from({ length: n - 1 }, () => 0), 1],
+    mask: Array.from({ length: n * MASK_DIM }, () => 1),
     n,
   }
 }

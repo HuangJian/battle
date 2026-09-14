@@ -609,7 +609,7 @@ function main(): void {
   let totalTicks = 0
   let wins = 0
   let totalKills = 0
-  const actionCounts = new Array<number>(coarse ? COARSE_DIM : FINE_DIM).fill(0)
+  const actionCounts = Array.from({ length: coarse ? COARSE_DIM : FINE_DIM }, () => 0)
   const scoreList: number[] = []
   const dimAcc: Record<string, number[]> = {}
 

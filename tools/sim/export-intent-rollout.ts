@@ -278,7 +278,7 @@ export function runOne(
   const sim = new Simulation(world, executor as never)
   world.loadStageData(stage as never, stageIdx)
 
-  const intentCounts = new Array<number>(INTENT_DIM).fill(0)
+  const intentCounts = Array.from({ length: INTENT_DIM }, () => 0)
   let kills = 0
   let prevWalls = countBaseWall(world)
   const baseWallTotalInitial = prevWalls // 初始保护环格数（baseIntegrity 分母）
@@ -523,7 +523,7 @@ function main(): void {
   let totalTicks = 0
   let wins = 0
   let totalKills = 0
-  const intentAcc = new Array<number>(INTENT_DIM).fill(0)
+  const intentAcc = Array.from({ length: INTENT_DIM }, () => 0)
   const perGame: string[] = []
   const scoreList: number[] = []
   const dimAcc: Record<string, number[]> = {}

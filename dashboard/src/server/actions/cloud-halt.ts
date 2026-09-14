@@ -39,7 +39,7 @@ export async function triggerCloudHalt(
   }
   saveConsoleState({
     cloudHalts: {
-      ...(state.cloudHalts ?? {}),
+      ...state.cloudHalts,
       [course]: { at: new Date().toISOString(), reason, status: 'halted' },
     },
   })
@@ -64,7 +64,7 @@ export async function markCloudHaltRecovered(
   const ok = await hubAdminOk(cfg, '/admin/workers/resume', course)
   saveConsoleState({
     cloudHalts: {
-      ...(state.cloudHalts ?? {}),
+      ...state.cloudHalts,
       [course]: {
         ...prev,
         status: 'recovered',

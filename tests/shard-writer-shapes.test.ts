@@ -117,7 +117,7 @@ describe('shard writer 行宽（v3 编码器行）', () => {
       obs: [v3obs(11), v3obs(12)],
       scalars: [v3scalars(11), v3scalars(12)],
       actions: [1, 0, 2, 1],
-      masks: new Array(2 * 7).fill(1),
+      masks: Array.from({ length: 2 * 7 }, () => 1),
       conditions: [0, 0],
       rewards: [0.1, 0.2],
       nTurn: 0,

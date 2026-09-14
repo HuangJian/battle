@@ -33,7 +33,7 @@ export function writeRemoteHubUrl(url: string, course = ''): void {
     cfg.rl = cfg.rl || ({} as RlConfig['rl'])
     cfg.rl.remote_hub_url = url
     if (course) {
-      cfg.rl.remote_hubs = { ...(cfg.rl.remote_hubs ?? {}), [course]: url }
+      cfg.rl.remote_hubs = { ...cfg.rl.remote_hubs, [course]: url }
     }
     writeFileSync(configPath(), JSON.stringify(cfg, null, 2), 'utf-8')
     console.log(`  remote_hub_url updated: ${old} -> ${url}${course ? ` (course=${course})` : ''}`)
