@@ -183,7 +183,12 @@ DIRTY_LIST="tmp/pre-commit-dirty-$$.txt"
 TSC_LOG="tmp/pre-commit-tsc-$$.log"
 GATE_LOG="tmp/pre-commit-nn-$$.log"
 DASH_TSC_LOG="tmp/pre-commit-dash-$$.log"
-trap 'rm -f "$STAGED_LIST" "$DIRTY_LIST" "$TSC_LOG" "$GATE_LOG" "$DASH_TSC_LOG"' EXIT
+# EXIT 清理必须 best-effort（`|| true`）：沙箱的每回合删除配额用尽时，这句 `rm -f`
+# 会被 [safe-delete] FAIL_CLOSED 拒绝并让 hook 以非 0 退出 —— 于是**门禁全绿、提交却
+# 被 git 丢弃**（2026-09-14 实测：`✓ All pre-commit checks passed` 紧跟
+# `[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED] count=182 threshold=50`，提交静默消失）。
+# 清理自己的临时文件失败，没有任何理由决定一次提交的成败。
+trap 'rm -f "$STAGED_LIST" "$DIRTY_LIST" "$TSC_LOG" "$GATE_LOG" "$DASH_TSC_LOG" || true' EXIT
 git diff --cached --name-only > "$STAGED_LIST"
 git diff --name-only > "$DIRTY_LIST"
 STAGED_N=$(wc -l < "$STAGED_LIST" | tr -d ' ')

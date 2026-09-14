@@ -21,6 +21,7 @@ print(shutil.rmtree.__module__)"` 正常模式输出 `sitecustomize`）。`-S` �
 
 from __future__ import annotations
 
+import argparse
 import os
 import shutil
 import time
@@ -31,9 +32,60 @@ KEEP_DAYS = float(os.environ.get("NN_TMP_KEEP_DAYS", "1"))
 TARGET = Path(__file__).resolve().parents[2] / "tmp" / "pytest-tmp"
 
 
-def main() -> int:
+def remove_listed(list_path: Path) -> int:
+    """按清单删除（2026-09-14：测试 session 结束时交来「通过测试的临时目录」）。
+
+    与 KEEP_DAYS 全量清理的分工：那是**兜底**（1 天窗口，扫全目录，忙一天就来不及——
+    实测堆到 15612 个目录 / 1.8 GB，把门禁前置清理拖成 5 分钟）；这是**随手清**，
+    测试通过即删自己那份，失败的留给 debug。
+
+    安全边界（即使清单被污染也删不到 tmp/ 之外）：只接受 **TARGET 正下方一层** 的
+    真实目录 —— 父目录必须等于 TARGET（大小写不敏感比较，适配 Windows）。
+    """
+    if not list_path.is_file():
+        return 0
+    base = str(TARGET.resolve()).lower()
+    removed = skipped = 0
+    for raw in list_path.read_text(encoding="utf-8").splitlines():
+        s = raw.strip()
+        if not s:
+            continue
+        try:
+            rp = Path(s).resolve()
+        except OSError:
+            skipped += 1
+            continue
+        if str(rp.parent).lower() != base or not rp.is_dir():
+            skipped += 1
+            continue
+        try:
+            shutil.rmtree(rp)  # -S 下为原版 rmtree（沙箱保护未注入）
+            removed += 1
+        except OSError:
+            skipped += 1
+    if removed or skipped:
+        print(f"[nn-clean-tmp] listed-pass removed {removed}, skipped {skipped}")
+    try:
+        # 清单由本进程负责删：调用方（conftest.sessionfinish）是 **detached 起进程后
+        # 立即返回**、不等也不回收，所以删除责任在消费方这边。
+        list_path.unlink()
+    except OSError:
+        pass
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="清理 tmp/pytest-tmp（过期 / 按清单）")
+    ap.add_argument(
+        "--paths",
+        default="",
+        help="只删清单文件里列出的目录（每行一个绝对路径）；缺省 = 按 KEEP_DAYS 全量清理",
+    )
+    args = ap.parse_args(argv)
     if not TARGET.is_dir():
         return 0
+    if args.paths:
+        return remove_listed(Path(args.paths))
     cutoff = time.time() - KEEP_DAYS * 86400
     removed = kept = 0
     for child in TARGET.iterdir():
@@ -52,10 +104,7 @@ def main() -> int:
         else:
             kept += 1
     if removed:
-        print(
-            f"[nn-clean-tmp] removed {removed} expired dir(s) "
-            f"(keep {KEEP_DAYS:g}d), kept {kept}"
-        )
+        print(f"[nn-clean-tmp] removed {removed} expired dir(s) (keep {KEEP_DAYS:g}d), kept {kept}")
     return 0
 
 

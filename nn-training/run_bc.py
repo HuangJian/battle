@@ -59,8 +59,13 @@ from rl.log import log
 REPO_ROOT = Path(__file__).resolve().parents[1]
 NN_ROOT = Path(__file__).resolve().parent
 
-#: per-job 等待上限（BC 训练时长方差大：epochs × 语料量；默认 2h，--wait-sec 可调）
-DEFAULT_WAIT_SEC = 2 * 3600.0
+#: per-job 等待上限（秒）。**0 = 无上限**（2026-09-14 用户定案）。
+#: 为什么默认不设上限：超时中断的代价不是"少训一点"——重跑会 publish **新 job**
+#: （新 jid），而 bc-resume 按 jid 存（hub `/jobs/{jid}/resume` 与 worker 本地
+#: `bc-resume/<jid>`）⇒ 新 job 取不到旧进度 ⇒ **从头训**，那一轮 GPU 时间白烧。
+#: 唯一真实需要上限的场景是"云机始终没起来"——那个交给 wait_bc_round 的
+#: 「无进展告警」兜底（而不是砍掉一条正常在训的 job）。
+DEFAULT_WAIT_SEC = 0.0
 
 #: bc-data 轮目录保留数（磁盘有界性；PPO 侧 keep_iters 同语义）
 BC_DATA_KEEP = 3
@@ -425,17 +430,24 @@ def wait_bc_round(
 
     404 = 正常等待；5xx/网络错误按 2 的幂退避（wait_job 同款）；轮询间隙拉
     /jobs/{id}/bc-metrics 增量行 → bc_epoch 账本事件（控制台可见）；新 epoch 命中
-    `eval.every_epochs` 边界 → hub resume 权重快照 → 多地图干净评估 → bc_eval 事件。"""
+    `eval.every_epochs` 边界 → hub resume 权重快照 → 多地图干净评估 → bc_eval 事件。
+
+    `wait_sec <= 0` = **无上限**（默认，见 DEFAULT_WAIT_SEC）：BC 时长不可预测，
+    超时中断要重发 job ⇒ resume 失效 ⇒ 从头训。为免"云机没起来却永远静默挂着"，
+    超过 IDLE_WARN_SEC 没有任何新 epoch 入账时打印一次排查提示。"""
     eval_cfg = course.eval
     seen_metrics = 0
     evaluated: set[int] = set()
-    deadline = time.time() + wait_sec
+    deadline = None if wait_sec <= 0 else time.time() + wait_sec
+    idle_warned = False
+    last_progress = time.time()
+    idle_warn_sec = 900.0  # 15 分钟无进展 → 提示检查云机 worker（只提示一次）
     err_streak = 0
     poll_sec = 5.0
     poll_max_sec = 60.0
     from remote.hub_client import _request
 
-    while time.time() < deadline:
+    while deadline is None or time.time() < deadline:
         try:
             status, body = _request(hub_url, token, f"/jobs/{jid}/result", timeout=30.0)
         except Exception as e:
@@ -458,7 +470,9 @@ def wait_bc_round(
             time.sleep(backoff)
             continue
         else:
-            raise RuntimeError(f"wait_bc_round: HTTP {status}: {body[:200].decode('utf-8', 'replace')}")
+            raise RuntimeError(
+                f"wait_bc_round: HTTP {status}: {body[:200].decode('utf-8', 'replace')}"
+            )
         # ---- job 在跑：拉每 epoch 指标增量 ----
         try:
             mstatus, mbody = _request(hub_url, token, f"/jobs/{jid}/bc-metrics", timeout=15.0)
@@ -467,6 +481,8 @@ def wait_bc_round(
                 new_rows = rows[seen_metrics:]
                 if new_rows:
                     seen_metrics = len(rows)
+                    last_progress = time.time()
+                    idle_warned = False
                     for r in new_rows:
                         _ledger_bc_epoch(jsonl_path, it, r)
                     latest = int(rows[-1].get("epoch", 0) or 0)
@@ -481,6 +497,16 @@ def wait_bc_round(
                                 )
         except Exception as e:
             log(f"[run_bc] WARN 指标轮询失败（不致命）: {type(e).__name__}: {e}")
+        # 无上限模式下唯一需要人介入的情形：云机没起来 ⇒ 永远等不到 epoch。
+        # 只提示一次（避免刷屏），进程继续等。
+        if not idle_warned and time.time() - last_progress > idle_warn_sec:
+            idle_warned = True
+            log(
+                f"[run_bc] ⚠ job {jid} 已 {int(idle_warn_sec / 60)} 分钟无新 epoch 入账"
+                "——确认云机 GPU worker 是否已启动并连上 hub："
+                "`python -m remote.worker --poll <hub_url> --token <token> --device cuda`"
+                f"（job 仍在此等待，wait_sec={wait_sec or '∞'}）"
+            )
         time.sleep(poll_sec)
     raise RuntimeError(f"wait_bc_round: job {jid} 超时（>{wait_sec}s）未完成")
 
@@ -501,7 +527,9 @@ def train_local_bc(
     batch = min(int(course.train.batch), 256) if smoke else int(course.train.batch)
     eval_on = course.eval.enabled and not smoke
     # 本地 eval 权重源 = bc.py 的 ckpt 文件——ckpt_every 对齐 eval 边界
-    ckpt_every = int(course.eval.every_epochs) if (eval_on and not smoke) else int(course.train.ckpt_every)
+    ckpt_every = (
+        int(course.eval.every_epochs) if (eval_on and not smoke) else int(course.train.ckpt_every)
+    )
     cmd = [
         sys.executable,
         "-u",
@@ -654,7 +682,12 @@ def main() -> None:
     )
     ap.add_argument("--local", action="store_true", help="语料就绪后本机 train/bc.py 训练")
     ap.add_argument("--smoke", action="store_true", help="冒烟：尺寸压缩真一轮，落位即作废")
-    ap.add_argument("--wait-sec", type=float, default=DEFAULT_WAIT_SEC)
+    ap.add_argument(
+        "--wait-sec",
+        type=float,
+        default=DEFAULT_WAIT_SEC,
+        help="单 job 等待上限（秒）；0 = 无上限（默认——超时重发 job 会让 bc-resume 失效、从头训）",
+    )
     # hub 传输覆盖（对齐 run_rl：显式传参压过 rl-config remote_hubs[course]；本地
     # hub_server E2E / 多 hub 实验用）
     ap.add_argument("--remote-hub-url", default="", help="hub-server base URL（覆盖 rl-config）")
@@ -860,13 +893,26 @@ def main() -> None:
             if args.smoke:
                 log("BC SMOKE PASS")
                 return
-        _finish_all_rounds(jsonl_path, int(course.iters), log=log)
+        _finish_all_rounds(
+            jsonl_path,
+            int(course.iters),
+            hub_url=hub_url if transport == "hub" else "",
+            token=token,
+            log=log,
+        )
     finally:
         _cleanup_run_rl_lock(lock_path)
 
 
-def _finish_all_rounds(jsonl_path: str | Path, iters: int, *, log=lambda _m: None) -> None:
-    """全轮完成的收尾（2026-09-14 bc-c4-v3 事故修复）——两件事缺一不可：
+def _finish_all_rounds(
+    jsonl_path: str | Path,
+    iters: int,
+    *,
+    hub_url: str = "",
+    token: str = "",
+    log=lambda _m: None,
+) -> None:
+    """全轮完成的收尾（2026-09-14）——三件事：
 
     1. 打含 `ALL DONE` 的**尾行**：console 的 exit-watchdog 用
        `tailNormalCompletion`（日志尾行 includes('ALL DONE')，大小写敏感）判「正常完成」。
@@ -874,17 +920,33 @@ def _finish_all_rounds(jsonl_path: str | Path, iters: int, *, log=lambda _m: Non
        非正常退出」红告警（实测 2026-09-14 07:32，训练其实已全部成功归档）。
     2. 落 `run_complete` 账本事件（RL 侧 `loop_core._park_after_completion` 同款）：
        console 的「✅ 训练已完成」info 横幅由账本尾行派生。
+    3. **停机操作**：向本课 hub 下发停机达令（用户 2026-09-14 定案「任务完成后执行
+       停机提示/操作」）。效力说明（不粉饰）：
+         · 对**已在轮询、当前无 job 可领**的 pull worker：达令随 job 下发，此刻无 job
+           ⇒ 它收不到、不会因此停机。这类 worker 的真实释放姿势 = 云机侧 `--once`
+           （跑完即退出）或人工关机，日志里明确提示。
+         · 对**此后**领取本课 job 的 worker：达令生效（不再空烧配额）。
+         · 同时让 hub 的停机态与「训练已结束」一致（`/admin/workers/halt` 是
+           console 停机横幅的同一端点），避免"训练结束但 hub 仍是运行态"的漂移。
 
-    BC 完成即退出进程（不学 RL 的 parking：BC 无 idle 期评估业务），故仅需上述两处。
+    BC 完成即退出进程（不学 RL 的 parking：BC 无 idle 期评估业务），故收敛在以上三件。
     """
     log("[run_bc] ALL DONE — 全轮完成，weights 已落位归档")
-    # 云机配额提示（2026-09-14）：BC 完成后本课程的 hub 不再有 job —— pull 模式的
-    # worker 只会空轮询（不烧 GPU，但占着机器）⇒ 明确提示释放。
-    # 注意：这里**不**下发 hub halt 达令 —— 达令是随 job 下发给领活 worker 的，
-    # 无 job 时收不到，下发只会造成"已停机"的假象（真实省配额姿势 = 云机侧 --once）。
+    if hub_url and token:
+        try:
+            from remote.hub_client import set_cloud_halt
+
+            if set_cloud_halt(hub_url, token, True, log=log):
+                log("[run_bc] 停机操作已执行：hub 停机达令下发成功（本课不再需要 worker）")
+            else:
+                log("[run_bc] 停机操作未生效：hub 不可达/拒绝（不阻断收尾）")
+        except Exception as e:  # 停机链路永不阻断收尾
+            log(f"[run_bc] 停机操作异常（不阻断收尾）: {type(e).__name__}: {e}")
+    else:
+        log("[run_bc] 停机操作跳过：非 hub 传输（local/push 无 hub 可下发）")
     log(
-        "[run_bc] 云机可释放：本轮语料与训练 job 均已完成，本课程不会再派 job"
-        "（云机侧用 `--once` 可在处理完一个 job 后自动退出，或直接关机）"
+        "[run_bc] 云机可释放：本轮语料与训练 job 均已结束，本课程不会再派 job"
+        "（云机侧用 `--once` 可在处理完一个 job 后自动退出；否则请直接关机）"
     )
     try:
         from rl.events import write_run_complete

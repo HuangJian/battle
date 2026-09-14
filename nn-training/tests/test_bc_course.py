@@ -121,9 +121,7 @@ def test_landed_pairs_reads_manifest(tmp_path: Path) -> None:
     d = tmp_path / "it1"
     shard = d / "bc_s2000_seed7"
     shard.mkdir(parents=True)
-    (shard / "manifest.json").write_text(
-        json.dumps({"stage": 2000, "seed": 7}), encoding="utf-8"
-    )
+    (shard / "manifest.json").write_text(json.dumps({"stage": 2000, "seed": 7}), encoding="utf-8")
     (d / "bc_s2000_seed8").mkdir()  # 缺 manifest → 不算落盘
     assert landed_pairs(d) == {(2000, 7)}
 
@@ -358,6 +356,75 @@ def test_run_bc_finish_all_rounds_writes_run_complete(tmp_path: Path) -> None:
 
 
 # ------------------------------------------------------- 2026-09-14 可行动项
+
+
+def test_wait_bc_round_zero_wait_sec_means_unlimited(tmp_path: Path, monkeypatch) -> None:
+    """`--wait-sec 0` = 无上限（2026-09-14 用户定案）：排队中的 job 不能被"0 秒"判死。
+
+    背景：BC 时长不可预测（语料 × epochs），而超时中断要重发 job ⇒ bc-resume 按 jid
+    存 ⇒ 拿不到旧进度 ⇒ 从头训。所以默认改成无上限，用「无进展告警」兜底。
+    """
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import run_bc
+    from remote import hub_client
+
+    calls = {"n": 0}
+
+    def fake_request(_base: str, _token: str, path: str, timeout: float = 0.0):
+        if path.endswith("/result"):
+            calls["n"] += 1
+            if calls["n"] < 3:  # 头两轮：仍在排队（404）
+                return 404, b"{}"
+            return 200, json.dumps({"job_id": "j1", "metrics": {}}).encode("utf-8")
+        return 404, b"{}"
+
+    monkeypatch.setattr(hub_client, "_request", fake_request)
+    monkeypatch.setattr(run_bc.time, "sleep", lambda _s: None)  # 免真等 poll_sec
+
+    out = run_bc.wait_bc_round(
+        hub_url="http://hub",
+        token="t",
+        jid="j1",
+        jsonl_path=tmp_path / "training_log.jsonl",
+        it=1,
+        course=load_bc_course("bc-c4-v3"),
+        cfg=None,
+        wait_sec=0.0,
+        log=lambda _m: None,
+    )
+    assert out["job_id"] == "j1"
+    assert calls["n"] == 3
+
+
+def test_finish_all_rounds_issues_cloud_halt(tmp_path: Path, monkeypatch) -> None:
+    """任务完成后执行停机操作（2026-09-14 用户定案）：向本课 hub 下发 halt=True。"""
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import run_bc
+    from remote import hub_client
+
+    seen: dict = {}
+
+    def fake_halt(base_url: str, token: str, halt: bool, timeout: float = 15.0, log=None) -> bool:
+        seen.update(base=base_url, token=token, halt=halt)
+        return True
+
+    monkeypatch.setattr(hub_client, "set_cloud_halt", fake_halt)
+    msgs: list[str] = []
+    run_bc._finish_all_rounds(
+        tmp_path / "training_log.jsonl", 1, hub_url="http://hub", token="t", log=msgs.append
+    )
+    assert seen == {"base": "http://hub", "token": "t", "halt": True}
+    assert any("停机操作已执行" in m for m in msgs)
+    assert any("云机可释放" in m for m in msgs)
+
+    # 非 hub 传输（local/push）不得假装停机
+    msgs2: list[str] = []
+    run_bc._finish_all_rounds(tmp_path / "l2.jsonl", 1, log=msgs2.append)
+    assert any("停机操作跳过" in m for m in msgs2)
 
 
 def test_bc_job_extra_keeps_auto_fire_pos_weight() -> None:
