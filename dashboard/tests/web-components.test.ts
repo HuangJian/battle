@@ -14,7 +14,37 @@ import { h } from 'preact'
 import { renderToString } from 'preact-render-to-string'
 import { CopyButton } from '../src/web/components/CopyButton'
 import { PanelErrorBoundary } from '../src/web/components/PanelErrorBoundary'
-import { shortUrl, type ConsoleStateView } from '../src/web/view'
+import { shortUrl, type ConsoleStateView, type PushTargetView } from '../src/web/view'
+
+/** 构造一个带 trainingLoop 卡（+可选 push 执行面）的整页状态，SSR 渲染成 HTML。 */
+function pageWithPushTarget(pushTarget: PushTargetView | null): string {
+  return renderConsolePage({
+    time: 't',
+    course: 'c',
+    courses: [],
+    components: [
+      {
+        key: 'trainingLoop',
+        label: '训练循环',
+        status: 'running',
+        pid: 1,
+        url: null,
+        course: 'c',
+        mode: 'push',
+        healthy: true,
+        log: null,
+        logTail: [],
+        busy: false,
+      },
+    ],
+    nodes: [],
+    modes: { trainerPpo: 'push' as const, stream: 0, doubleBuffer: 0, precollectEarly: 0 },
+    metrics: { available: false, iters: [] },
+    phase: { phase: 'idle' as const, sinceMs: null, iter: null },
+    localNode: null,
+    pushTarget,
+  } as ConsoleStateView)
+}
 
 describe('PanelErrorBoundary SSR 隔离（DS-E3）', () => {
   it('单 panel render 崩溃 → 错误占位 + 兄弟节点正常，不整页断', () => {
@@ -85,6 +115,47 @@ describe('§361：icon 复制键 / cloudflared endpoint 截断与复制 / local 
     // 可见组件区不得出现完整 URL（__INITIAL__ 脚本里的初始 state 另论）
     const body = html.replace(/<script[\s\S]*?<\/script>/g, '')
     expect(body).not.toContain('trycloudflare.com')
+  })
+
+  it('push 执行面徽章：贴在 trainingLoop 卡上，区分本机 / 云机 / 未匹配', () => {
+    // 绿色 = 本机 worker_server（active=正在用的执行面）
+    const local = pageWithPushTarget({
+      kind: 'local',
+      url: 'http://127.0.0.1:8790',
+      nodeId: 'local-push',
+      healthy: true,
+      active: true,
+    })
+    expect(local).toContain('class="tc-cc__push tc-cc__push--local"')
+    expect(local).toContain('push→本机')
+    expect(local).not.toContain('tc-cc__push--idle"') // active → 不降调
+    expect(local).toContain('http://127.0.0.1:8790') // 悬停详情留全量 URL
+
+    // 蓝色 = 云 GPU 节点
+    const cloud = pageWithPushTarget({
+      kind: 'cloud',
+      url: 'https://gpu.example',
+      nodeId: 'gpu-push',
+      healthy: true,
+      active: true,
+    })
+    expect(cloud).toContain('class="tc-cc__push tc-cc__push--cloud"')
+    expect(cloud).toContain('push→云机')
+
+    // 红色 = 指向 config 里不存在的节点（python 会回落 pull）――必须醒目；探测不通也上后缀
+    const unresolved = pageWithPushTarget({
+      kind: 'unresolved',
+      url: 'https://ghost.example',
+      nodeId: null,
+      healthy: false,
+      active: false,
+    })
+    expect(unresolved).toContain('class="tc-cc__push tc-cc__push--unresolved tc-cc__push--idle"')
+    expect(unresolved).toContain('push→未匹配·不通')
+  })
+
+  it('未配置 push 目标 → 卡片不出徽章', () => {
+    expect(pageWithPushTarget(null)).not.toContain('class="tc-cc__push')
   })
 
   it('local pill：只读展示（槽位 + 上轮贡献）', () => {

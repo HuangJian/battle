@@ -16,6 +16,8 @@ export const COMPONENT_LOGS: Partial<Record<Component, (cfg: RlConfig, course: s
     selfNode: () => path.join(LOG_DIR, 'sampler-agent.log'),
     hubServer: (_c, course) => path.join(courseLogDir(course), 'hub-server.out'),
     cloudflared: (_c) => path.join(LOG_DIR, 'cloudflared.log'),
+    localWorker: (_c, course) =>
+      path.join(course ? courseLogDir(course) : LOG_DIR, 'local-worker.log'),
     trainingLoop: (_cfg, course) => path.join(courseLogDir(course), 'training-loop.log'),
     workerServe: (_c, course) =>
       path.join(course ? courseLogDir(course) : LOG_DIR, 'remote-worker-serve.log'),
@@ -32,6 +34,7 @@ export const HEALTHY_PORTS: Partial<Record<Component, (cfg: RlConfig, course: st
 export const ALL_COMPONENTS: Component[] = [
   'selfNode',
   'hubServer',
+  'localWorker',
   'cloudflared',
   'trainingLoop',
   'workerServe',

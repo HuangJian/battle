@@ -1,10 +1,11 @@
 /** stop.ts — 组件停止与全停（端口兜底清场在 core/proc）。 */
 import { loadConfig } from '../../core/config'
 import { warn as logWarn } from '../../core/log'
-import { killPid, pidAlive } from '../../core/net'
+import { killPid, killPidTree, pidAlive } from '../../core/net'
 import { portOwnerPids, stopAllManaged } from '../../core/proc'
 import { clearAnyComponent } from '../../core/registry'
 import { slotPort } from '../../core/slots'
+import { COMPONENT_KILL_TREE } from '../../core/types'
 import type { Component, RlConfig } from '../../core/types'
 import { entryOf } from './cloud-halt'
 import { COMPONENT_LABELS } from './labels'
@@ -16,6 +17,7 @@ import { ActionResult, busyKey, done, guard, release } from './result'
  *
  *  fail-closed（plan P1「兜底规则」）：多课时代按端口盲扫 = 杀错课（本仓前科×2），
  *  故 hubServer/workerServe 在**无登记且无课程上下文**时拒绝兜底并响亮告警，
+ *  （localWorker 不监听任何端口，无登记就是「未在运行」——无需兜底。）
  *  指引操作员指定课程或走 stopAll（紧急总闸）。selfNode 是全局单例（agent_port），
  *  不受此限。 */
 export async function stopComponent(key: Component, course = ''): Promise<ActionResult> {
@@ -26,7 +28,11 @@ export async function stopComponent(key: Component, course = ''): Promise<Action
     const entry = entryOf(key, course)
     if (entry?.pid) {
       if (pidAlive(entry.pid)) {
-        const dead = await killPid(entry.pid)
+        // 带子进程监督器的组件（localWorker）必须整树停：只杀父进程会留下继续轮询 hub
+        // 抢 job 的孤儿，「随时启停」形同虚设（判定唯一来源 types.COMPONENT_KILL_TREE）。
+        const dead = COMPONENT_KILL_TREE.has(key)
+          ? await killPidTree(entry.pid)
+          : await killPid(entry.pid)
         if (!dead) return done(false, `${COMPONENT_LABELS[key]} (PID ${entry.pid}) 未能停止`)
       }
       clearAnyComponent(key, course || entry.course || '')

@@ -28,6 +28,25 @@ export interface ComponentView {
   error?: string | null
 }
 
+/** 本课 push 执行面的探测结果（慢快照；纯 config 解析 + 一次 `/ping` 直探）。 */
+export interface PushTargetProbe {
+  /** local = 本机 worker_server（local_push 节点）；cloud = 云 GPU 节点；
+   *  unresolved = 课程 `push_node_url` 指向 config 里不存在的节点（python 侧「匹配 0 个」
+   *  → 静默回落 pull，必须显式暴露）。 */
+  kind: 'local' | 'cloud' | 'unresolved'
+  url: string
+  nodeId: string | null
+  /** `/ping` 直探结果；null = 未探（无鉴权键）。 */
+  healthy: boolean | null
+}
+
+/** 本课 push 执行面视图（2026-09-15）：trainer 的 job 现在推给谁——本机 worker_server
+ *  还是云 GPU。kind 由 config 解析（`push_node_url` → 认领节点），active = 本课 trainer
+ *  正以 push 模式在跑（执行面此刻真的生效；false 时徽章是「配置指向」而非「正在用」）。 */
+export interface PushTargetView extends PushTargetProbe {
+  active: boolean
+}
+
 export interface NodeView {
   id: string
   url: string
@@ -115,6 +134,8 @@ export interface ConsoleStateView {
   nodes: NodeView[]
   /** 本机直跑节点（§361⑤：pill 行只读展示；无池/无槽位时缺省）。 */
   localNode?: NodeLocalView | null
+  /** 本课 push 执行面（2026-09-15）：未配置 push 目标时为 null/缺省。 */
+  pushTarget?: PushTargetView | null
   modes: ModeView
   metrics: MetricsView
   /** 当前训练阶段（顶栏图标用）。 */

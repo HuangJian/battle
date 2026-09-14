@@ -7,7 +7,7 @@
  *    或动作失败后再 enable——防双连击把组件状态打乱。 */
 
 import { useEffect, useState } from 'preact/hooks'
-import type { ComponentView, ConsoleStateView } from '../../view'
+import type { ComponentView, ConsoleStateView, PushTargetView } from '../../view'
 import { pendingLockReleases } from '../../view'
 import { CopyButton } from '../../components/CopyButton'
 
@@ -26,6 +26,26 @@ export interface ComponentCardsProps {
 
 /** 只读视图的动作按钮悬停提示（局域网用户误点前的说明）。 */
 const RO_TITLE = '只读模式：操作仅限本机 localhost'
+
+/** push 执行面徽章文案：本机/云机/未匹配（+ 探测不通后缀）。 */
+function pushBadgeText(t: PushTargetView): string {
+  const what = t.kind === 'local' ? '本机' : t.kind === 'cloud' ? '云机' : '未匹配'
+  return `push→${what}${t.healthy === false ? '·不通' : ''}`
+}
+
+/** 徽章悬停详情：URL / 认领节点 / 探测结果 / 此刻是否真的生效。 */
+function pushBadgeTitle(t: PushTargetView): string {
+  const probe = t.healthy === true ? '通' : t.healthy === false ? '不通' : '未探（无鉴权键）'
+  const node = t.nodeId ?? '未认领到节点（python 会回落 pull，不会推到该 URL）'
+  return [
+    `push 执行面：${t.url}`,
+    `节点：${node}`,
+    `探测：${probe}`,
+    t.active
+      ? '本课 trainer 正以 push 模式在跑——job 就推到这里'
+      : '当前未以 push 模式在跑（这是配置指向；push 预设会推到这里）',
+  ].join('\n')
+}
 
 function dotClass(c: ComponentView): string {
   if (c.busy) return 'tc-dot--warn'
@@ -80,8 +100,9 @@ export function ComponentCards({
 
   if (!stateView) return null
   const mains = stateView.components.filter((c) => c.key !== 'workerServe')
-  // 组件卡片固定顺序：hubServer > trainingLoop > selfNode > cloudflared
-  const ORDER: string[] = ['hubServer', 'trainingLoop', 'selfNode', 'cloudflared']
+  // 组件卡片固定顺序：hubServer > localWorker > trainingLoop > selfNode > cloudflared
+  // （localWorker 紧跟 hubServer：它消费的就是 hub 的作业队列；两者都可在训练途中独立启停）。
+  const ORDER: string[] = ['hubServer', 'localWorker', 'trainingLoop', 'selfNode', 'cloudflared']
   mains.sort((a, b) => ORDER.indexOf(a.key) - ORDER.indexOf(b.key))
   const openCard = mains.find((c) => c.key === open) ?? null
 
@@ -121,6 +142,16 @@ export function ComponentCards({
               <span className={`tc-dot ${dotClass(c)}`} />
               <b>{c.key}</b>
               {c.mode ? <b className="tc-cc__mode">{c.mode}</b> : null}
+              {c.key === 'trainingLoop' && stateView.pushTarget ? (
+                // push 执行面徽章（2026-09-15）：贴在 trainer 卡的模式徽章旁——「job 现在推给谁」
+                // 只有这一个卡上问得出口；active=false 时降调成「配置指向」。
+                <b
+                  className={`tc-cc__push tc-cc__push--${stateView.pushTarget.kind}${stateView.pushTarget.active ? '' : ' tc-cc__push--idle'}`}
+                  title={pushBadgeTitle(stateView.pushTarget)}
+                >
+                  {pushBadgeText(stateView.pushTarget)}
+                </b>
+              ) : null}
               {c.key === 'cloudflared' && (c.url || c.secret) ? (
                 // 截断展示 + 全量复制（§361：title 留全量，复制钮拿全量）；复制点击不展开日志详情。
                 <span

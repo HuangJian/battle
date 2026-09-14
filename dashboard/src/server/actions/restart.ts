@@ -8,10 +8,12 @@ import {
   bcLoopSpec,
   cloudflaredSpec,
   hubServerSpec,
+  localWorkerSpec,
   selfNodeSpec,
   trainingLoopSpec,
   workerServeSpec,
 } from '../../stack/specs'
+import { slotPort } from '../../core/slots'
 
 // ────────────────────────── 变更检测重启（监督器回调） ──────────────────────────
 
@@ -38,13 +40,20 @@ export function restartSpecFor(key: Component, course = ''): ProcSpec | null {
       return cloudflaredSpec(cfg, { ...entry, course: c, slot: entry.slot ?? 0 })
     case 'workerServe':
       return workerServeSpec(cfg, venv, c)
-    case 'trainingLoop':
+    case 'localWorker':
+      return localWorkerSpec(cfg, venv, c)
+    case 'trainingLoop': {
+      // local 模式（本机独立 worker）的 pull 目标是本机 hub——与 start.ts 同一条
+      // 推导（rebuild 必须逐字段等于原 spec，否则监督重启会把 hub 打回配置里的隧道）。
+      const hubUrl =
+        entry.mode === 'local' ? `http://127.0.0.1:${slotPort(cfg, c, 'hub')}` : undefined
       // BC 课程 → run_bc 编排器 spec（2026-09-13；entry 区分 rl/bc 入口）
       if (isBcCourse(c)) {
         return bcLoopSpec(cfg, {
           course: c,
           ppo: entry.mode,
           pushNodeUrl: entry.pushNodeUrl,
+          hubUrl,
           venv,
         })
       }
@@ -52,7 +61,9 @@ export function restartSpecFor(key: Component, course = ''): ProcSpec | null {
         course: c,
         ppo: entry.mode,
         pushNodeUrl: entry.pushNodeUrl,
+        hubUrl,
         venv,
       })
+    }
   }
 }

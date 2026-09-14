@@ -421,6 +421,14 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         help="远程模式：hub-server base URL（如 http://127.0.0.1:8787）",
     )
     ap.add_argument(
+        "--remote-transport",
+        default=_d("remote_transport", "auto"),
+        choices=("auto", "pull", "push"),
+        help="远程 PPO 传输裁决：auto=历史优先级（本课 gpu_push 节点 > hub）；"
+        "pull=强制走 hub（本机独立 localWorker 场景——否则 courses.push_node_url "
+        "一配就把 job 推去云机）；push=强制直推 gpu_push 节点（无节点则响亮失败）",
+    )
+    ap.add_argument(
         "--remote-token",
         default=_d("remote_token", ""),
         help="远程模式：hub-server Bearer token（云 worker 与训练主循环共享）",

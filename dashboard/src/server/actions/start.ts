@@ -2,7 +2,7 @@
 import { appendFileSync, existsSync, readFileSync, statSync } from 'fs'
 import path from 'path'
 import { loadConfig, validateCourseArg } from '../../core/config'
-import { killPid, pidAlive, waitUntil } from '../../core/net'
+import { httpOk, pidAlive, waitUntil } from '../../core/net'
 import { LOG_DIR, REPO_ROOT } from '../../core/paths'
 import { launchSpec } from '../../core/proc'
 import { clearAnyComponent, saveAnyComponent } from '../../core/registry'
@@ -18,6 +18,7 @@ import {
   stepHubServer,
   stepSelfNode,
 } from '../../stack/hub'
+import { startLocalWorker } from '../../stack/local-worker'
 import { startLocalWorkerServer } from '../../stack/push'
 import {
   BC_LOOP_ENTRY,
@@ -35,7 +36,7 @@ import { ActionError, ActionResult, busyKey, done, guard, release } from './resu
 
 export interface StartCtx {
   course: string
-  /** trainer 模式（pull/push → --ppo remote；local → 不带 --ppo）。 */
+  /** trainer 模式（pull/push → 云端 worker；local → 本机独立 localWorker 的 pull 模式）。 */
   trainerPpo: ConsoleState['trainerPpo']
   /** 显式 REMOTE_PUSH_NODE（仅冒烟/本机伪 GPU；真实 Push 走 rl-config gpu_push 节点，
    *  不注入 env——env 会强制 remote_token，覆盖用户填写的 authKey）。 */
@@ -84,6 +85,7 @@ async function startBcLoop(
     course,
     ppo: trainerPpo,
     pushNodeUrl: cfg.courses?.[course]?.push_node_url,
+    hubUrl: localHubUrl(cfg, course, trainerPpo),
     venv,
   })
   const r = launchSpec(spec)
@@ -130,6 +132,20 @@ async function startBcLoop(
   return done(true, `BcLoop 已启动 (PID ${r.pid}, ppo=${trainerPpo})`)
 }
 
+/** local 模式（本机独立 worker）下 trainer 的 pull 目标 = 本机 hub（槽位算术取端口）。
+ *
+ *  **不改 rl-config 的 remote_hubs**（刻意）：那一个键同时是「pull preset 的隧道 URL」的
+ *  家，而 stepCloudflared 复用已有隧道时**不会重写**它——本机 hub 写进去就会把 pull
+ *  preset 悄悄改成打本机 hub。显式 --remote-hub-url 压过配置（run_rl 既有语义），
+ *  既不动配置也能保证本机 worker 是唯一执行面。 */
+function localHubUrl(
+  cfg: RlConfig,
+  course: string,
+  mode: ConsoleState['trainerPpo'],
+): string | undefined {
+  return mode === 'local' ? `http://127.0.0.1:${slotPort(cfg, course, 'hub')}` : undefined
+}
+
 /** 启动单个组件（已在运行 = 幂等成功；依赖缺失 = ActionError/失败结果）。 */
 export async function startComponent(key: Component, ctx: StartCtx): Promise<ActionResult> {
   // 键必须与 finally 释放的键同源（2026-09-14 事故：guard 用按课键、release 用旧无课键
@@ -162,10 +178,33 @@ export async function startComponent(key: Component, ctx: StartCtx): Promise<Act
         const url = await stepCloudflared(cfg, false, ctx.course)
         return done(true, `隧道已就绪: ${url}`)
       }
+      case 'localWorker': {
+        if (!ctx.course) throw new ActionError('local-worker 需要 course（先在顶部设置课程）')
+        validateCourseArg(ctx.course)
+        const prev = entryOf('localWorker', ctx.course)
+        if (prev?.pid && pidAlive(prev.pid))
+          return done(true, `local-worker 已在运行 (PID ${prev.pid})`)
+        const r = await startLocalWorker({ course: ctx.course, cfg, venv })
+        return done(
+          r.ready,
+          r.ready
+            ? `local-worker 已启动 (PID ${r.pid}, poll 127.0.0.1:${slotPort(cfg, ctx.course, 'hub')})`
+            : `local-worker 启动即退出 (PID ${r.pid})`,
+          r.tail,
+        )
+      }
       case 'workerServe': {
         const course = ctx.course || 'smoke'
         const prev = entryOf('workerServe', course)
-        if (prev?.pid && pidAlive(prev.pid)) await killPid(prev.pid)
+        // 幂等（与其它组件同规，2026-09-15）：已在运行则不动它。push 预设回落本机时
+        // 也会把 workerServe 排进顺序（复用路径下它本来就活着）——旧实现无条件 kill+重起，
+        // 会把正在跑 PPO job 的 server 当场打死。
+        if (prev?.pid && pidAlive(prev.pid))
+          return done(true, `本机伪 GPU 节点已在运行 (PID ${prev.pid}, ${prev.url ?? ''})`)
+        // 端口级兜底：未登记但在服务的 worker_server 同样不抢端口（不重起、不 bind 失败）。
+        const pushUrl0 = `http://127.0.0.1:${slotPort(cfg, course, 'push')}`
+        if (await httpOk(`${pushUrl0}/ping`, cfg.rl.remote_token, 3000))
+          return done(true, `本机 worker_server 已在服务 (${pushUrl0})`)
         const { pushUrl, servePid } = await startLocalWorkerServer({ course, cfg, venv })
         saveAnyComponent('workerServe', course, {
           pid: servePid,
@@ -217,6 +256,8 @@ export async function startComponent(key: Component, ctx: StartCtx): Promise<Act
           // 真实 Push：不注入 REMOTE_PUSH_NODE（见 StartCtx.pushNodeUrl）。
           // Python 从 rl-config nodes[].gpu_push 读 URL+authKey（控制台 configurePush 已写回）。
           pushNodeUrl: ctx.pushNodeUrl,
+          // local 模式：指名本机 hub（worker 是独立进程，训练器只负责发布+等待）
+          hubUrl: localHubUrl(cfg, ctx.course, ctx.trainerPpo),
           venv,
         })
         const r = launchSpec(spec)

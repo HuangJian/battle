@@ -9,6 +9,11 @@ export interface NodeConf {
   enabled: boolean
   /** GPU push 节点（DECISIONS §340 补充 4：URL 指向其 worker_server 隧道）。 */
   gpu_push?: boolean
+  /** **本机** worker_server 回落节点（2026-09-15）：endpoint 留空且 config 里没有任何
+   *  ping 通的 gpu_push 时，控制台 push 预设把本课 push 目标改指本机的 `workerServe`
+   *  组件（`http://127.0.0.1:<push 端口>`）。与云节点**并存**：`applyPushNodeConfig` 只
+   *  认非本机节点，回落也绝不覆盖用户填的云 URL（两种节点可随时互相切换）。 */
+  local_push?: boolean
 }
 
 /** 课程配置块（plan multi-course-parallel-training §1.3）。
@@ -42,7 +47,13 @@ export interface RlConfig {
 }
 
 /** 受管组件（registry 分文件账本的键）。 */
-export type Component = 'selfNode' | 'hubServer' | 'cloudflared' | 'trainingLoop' | 'workerServe'
+export type Component =
+  | 'selfNode'
+  | 'hubServer'
+  | 'cloudflared'
+  | 'localWorker'
+  | 'trainingLoop'
+  | 'workerServe'
 
 /** 单组件登记条目（PID 账本 + 可选元数据）。 */
 export interface RegistryEntry {
@@ -50,7 +61,7 @@ export interface RegistryEntry {
   /** 进程入口（监督重启/变更检测用）。 */
   entry?: string
   course?: string
-  /** 槽位（§1.4 重建契约：hubServer/cloudflared/workerServe 重启时必须知道自己占哪槽）。 */
+  /** 槽位（§1.4 重建契约：hubServer/cloudflared/localWorker/workerServe 重启时必须知道自己占哪槽）。 */
   slot?: number
   url?: string
   log?: string
@@ -68,7 +79,7 @@ export interface RegistryEntry {
 
 /** registry.json：全部组件条目（缺省组件 = 未启动）。
  *
- *  多课程形状（plan §1.4，P1b）：按课程键控的四个组件各有一份 `Record<course, Entry>`。
+ *  多课程形状（plan §1.4，P1b）：按课程键控的五个组件各有一份 `Record<course, Entry>`。
  *  旧扁平单键（`hubServer`/…）**已在 P5 移除**（R2）：类型里不再声明，唯一读点是
  *  `registry.ts::migrateFlatCourseEntries` 的一次性搬迁（把旧条目搬进 per-course 表再删键），
  *  写入路径不再产生扁平键（`saveComponent` 只服务 selfNode）。
@@ -80,6 +91,7 @@ export interface Registry {
   hubServers?: Record<string, RegistryEntry>
   cloudflareds?: Record<string, RegistryEntry>
   workerServes?: Record<string, RegistryEntry>
+  localWorkers?: Record<string, RegistryEntry>
   trainingLoops?: Record<string, RegistryEntry>
 }
 
@@ -88,6 +100,14 @@ export interface Registry {
 export type LegacyFlatRegistry = Partial<
   Record<'hubServer' | 'cloudflared' | 'trainingLoop' | 'workerServe', RegistryEntry>
 >
+
+/** 需要**整树停止**的组件（stop / 全部停止 / 监督重启三处共用，实现见 net.ts::killPidTree）。
+ *
+ *  只有「自身还带一个子进程监督器」的组件在内：localWorker 跑的就是云端那条
+ *  `remote.worker` 入口——父 `supervise_worker` + 子 `worker_loop`（子进程 60s 心跳续租、
+ *  长期轮询 hub 抢 job）。只杀父进程 = 留一个继续抢 job 的孤儿，「随时启停」形同虚设。
+ *  其余组件都是单进程，不进此集合（默认 False 路径行为不变）。 */
+export const COMPONENT_KILL_TREE: ReadonlySet<string> = new Set(['localWorker'])
 
 /** 受管进程的描述（spawn + 监督 + 变更检测的统一载体）。 */
 export interface ProcSpec {
@@ -108,4 +128,9 @@ export interface ProcSpec {
   sentinels: string[]
   /** 归属课程（多课监督以 (key, course) 为单位；空串 = 无课程）。 */
   course?: string
+  /** 停止/重启时是否连**整棵进程树**一起杀（默认 false = 只杀登记的那个 PID）。
+   *  true 只给「自身还带着一个子进程监督器」的组件（localWorker 跑云端同款
+   *  `remote.worker`：父进程 supervise_worker + 子进程 worker_loop）——只杀父进程会
+   *  留下继续轮询 hub 抢 job 的孤儿，停止/重启就形同虚设。 */
+  killTree?: boolean
 }

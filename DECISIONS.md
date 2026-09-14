@@ -1610,3 +1610,89 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   - **仍然保留的耦合（设计，非缺陷）**：dashboard 与根之间仍有**源码级**相对 import
     （`src/config/*`、`tools/agent/*`、`tools/eval/mcnemar`、`tools/sim/pack-container`）——
     观测面只读消费游戏契约，权威唯一源在根，复制进 dashboard 才是真错。切断的只有包依赖方向。
+
+## §2026-09-15-goalnn-local-ppo-worker（2026-09-15，本机 PPO 拆成独立 worker：控制台 `local` 预设 = hub-server + local-worker + trainer；用户指令）
+
+- **背景（用户指令）**：「把本地 PPO 拆分为一个独立 worker，可以随时启停，与云端 worker 一致，
+  同样支持 pull/push 模式。」此前 `--ppo local` 是**进程内**执行：`TrainingLoop`（run_rl）在自己的
+  进程里 `load_episodes → chunk_episodes → ppo_update`，整轮阻塞——PPO 不能单独停、不能单独换代码、
+  不能挪到另一台机器；而云端 worker（`remote_worker`）早就是无状态、可重连、可随时启停的独立进程。
+- **决定（三条，用户逐项拍板）**：
+  - ① **本机 PPO = 新的受管组件 `localWorker`**，跑的就是**云端同一个入口**
+    `python -m remote_worker --poll http://127.0.0.1:<本课 hub> --out tmp/local-worker-<课>
+    --device cpu`（+ 配了 `rl.torch_threads` 才透传 `--threads`）。协议、租约、心跳、幂等重拉、
+    热替换退出码 86 + 内部监督器重拉**全部继承、零分叉**（用户选「完整继承」）。push 侧不新增实现：
+    执行面就是既有 `workerServe` 组件（`remote_worker_serve`）。
+  - ② **控制台 `local` 预设改义**：`hubServer → localWorker → trainingLoop(--ppo remote
+    --remote-transport pull --remote-hub-url 本机 hub)`，并新增 `--remote-transport` 开关（run_rl 与
+    run_bc 同步）把传输**钉死 pull**；控制台**不再提供进程内 PPO 入口**（run_rl `--ppo local` /
+    run_bc `--local` 保留给直调 CLI 与 R9 远端失败降级落点，只是不再被预设编排）。
+  - ③ **整树停止**：`localWorker` 是「父 supervise_worker + 子 worker_loop」两进程，停止/重启走
+    `core/net.ts::killPidTree`（Windows `taskkill /T /F`；POSIX 先验 `pgid === pid` 再组杀，否则退回
+    单进程 stop），判定唯一来源 `stack/specs.ts::COMPONENT_KILL_TREE`。
+- **为什么必须 `--remote-transport pull`（本次唯一的新语义，也是最贵的一个坑）**：`_remote_ppo` 的
+  历史优先级是「rl-config 里本课 `gpu_push` 节点 > hub」——某课用 push 跑过一次后
+  `courses.<课>.push_node_url` 就留在配置里，此时 `local` 预设会把 job **静默推去云机**，本机 worker
+  永远领不到活，而账本/日志看起来「训练正常」。`auto`（默认）保持历史行为零变化，`pull`/`push`
+  是显式裁决，非法组合响亮 `SystemExit`（不静默回落）。
+- **拒绝的替代方案**：① **不新增组件，只给 `workerServe` 加 pull 能力**（用户裁定的备选）——
+  同一个进程既被推送又轮询会让「push 服务端」与「pull 轮询者」的生命周期/健康语义混在一起，
+  而两者的失败形态与日志完全不同（无法一眼定位）；② **新增 `local-pull`/`local-push` 预设、
+  `local` 保持进程内**（用户否）——两套本机 PPO 语义长期并存，等于把「已拆干净」这件事半途而废；
+  ③ **控制台把 `courses.<课>.push_node_url` 清空来实现 pull**——该键是 push preset 的用户配置，
+  静默改写别人的配置是比多传一个旗标严重得多的事故面；④ **让本机 worker 也走 `--local` 的进程内
+  回退**——那就没有「随时启停」，正是本次要消灭的东西。
+- **刻意不做的事**：不动 `rl.remote_hubs[<课>]`（它是 pull preset 隧道 URL 的家，`stepCloudflared`
+  复用已建隧道时**不会重写**它，写本机 hub 进去会把 pull preset 悄悄改成打本机 hub）——本机 hub
+  只经显式 `--remote-hub-url` 注入；不动 pull/push preset 的传输语义（`auto`，行为零变化）；
+  不动 `rl/loop_steps._serial_ppo`（R9 降级与直调 CLI 仍走进程内路径）。
+- **副产物（顺手修的一处既有红）**：`dashboard/tests/training-selfnode-cwd.test.ts` 在 HEAD 上就是
+  红的——`selfNodeSpec` 缺 `cwd: REPO_ROOT`，控制台以 `dashboard/` 为 cwd 启动时
+  `bun run tools/agent/sampler-agent.ts` 会 Module not found（2026-09-14 回归的护栏先落了红测试）。
+  本次补上该字段（一行，spec 与测试同时在线）。
+- **违反后果**：local 预设若不钉 pull ⇒「训练在跑但 PPO 其实在云机」的静默错位（最贵的一类）；
+  停在 localWorker 上若不整树杀 ⇒ 孤儿 worker 继续轮询 hub 抢 job、抢租约，「随时启停」名存实亡；
+  把本机 hub 写进 `rl.remote_hubs` ⇒ pull preset 的隧道 URL 被偷偷改写，云机再也领不到 job。
+- **追加（2026-09-15，用户指令：「让 push 模式也能一键用本机 worker_server 作执行面（config
+  无 gpu_push 时自动回落到本机 workerServe）」）—— push 的第三种执行面来源**：
+  `configurePushEndpoint` 改为三档裁决，返回 `PushTarget {url, source: manual|config|local,
+  viaLocalWorker}`：① 用户填 endpoint（ping 门 + upsert **云**节点）；② 留空且 config 有 ping 通的
+  gpu_push → 只写课程 `push_node_url`；③ 都没有 → **回落本机 worker_server**：写 `nodes[]` 的
+  `local_push` 节点（`gpu_push: true` + `local_push: true`，authKey = `rl.remote_token`，与本机
+  `worker_server --token` 同源）+ 课程 `push_node_url` 指向 `http://127.0.0.1:<push 端口>`。
+  预设顺序在 `viaLocalWorker` 时多一步 `workerServe`（本机 worker_server 是受管组件）。
+  - **为什么必须落 config 而不只注入 `REMOTE_PUSH_NODE` env**：python `_gpu_push_nodes` 的
+    gpu_push 分支要求 `push_node_url` 能**匹配到一个节点**——只给 env 而课程键仍指旧/空，
+    会走到「匹配 0 个 → WARN → 回落 pull」，而 push 模式没有 hub（`wait_job` 空 URL）直接卡死。
+  - **与云节点共存（拒绝的替代）**：直接复用 `applyPushNodeConfig` 覆盖唯一的 `gpu_push` 条目
+    更简单，但会把用户填的云 URL 静默吃掉（本仓反复出现过“静默改写别人配置”类事故）。故云/本机
+    各一份条目：`applyPushNodeConfig` 的 findIndex 加 `!n.local_push`，回落也从不碰云条目；
+    `enabledGpuPushNodes`（复用门/健康探测）**含**本机节点——它同样是真执行面。
+  - **`workerServe` 启动改幂等**：回落/复用路径下它可能已经活着，旧实现对每次「启动」都
+    kill+重起，会把正在跑 PPO job 的 server 当场打死（还会撞端口）；改为「账本存活或 `/ping`
+    通 → 已在运行，不动它」——与 hubServer/trainingLoop/localWorker 同规。
+  - **验证**：dashboard `tsc` 干净 + **358 pass / 0 fail**（含 push-config 新增 7 用例：返回
+    `source=local` 且写盘 URL 能被 python 过滤命中、两种执行面共存互不覆盖、`allowLocal:false`
+    仍响亮报错、预设把 `workerServe` 排进顺序、workerServe 启动幂等的源码级接线门禁）。
+- **追加（2026-09-15，用户指令：「把『本机 push 执行面』的当前指向显示出来——卡片上标出本课 job
+  现在推给本机还是云机」）—— 执行面可见化**：新增 `pushTargetFromConfig(cfg, course)`（纯函数；唯一指针 =
+  `courses.<课>.push_node_url` → 认领 `nodes[]` 条目 → `local | cloud | unresolved`）；慢快照做一次
+  `{url}/ping` 直探（`PushTargetProbe{kind,url,nodeId,healthy}`，1500ms，后台刷新同一拍，不进请求路径）；
+  `buildStateView` 再补 `active`（trainer 正以 push 模式在跑）。UI = trainingLoop 卡模式徽章旁的
+  `tc-cc__push` 徽章（绿=本机 worker_server / 蓝=云 GPU / 红=未匹配；`--idle` = 当前未以 push 在跑，
+  只是「配置指向」）。
+  - **为什么直探 `/ping` 而不复用节点 pill 的 `/v1/ping`**：判据必须与 python `_gpu_push_nodes` 同一条
+    URL——复用会造成两个真相（节点在线 ≠ 能被 push 到）。
+  - **`unresolved` 必须显式上屏**：`push_node_url` 指向 config 里不存在的节点时，python 侧「匹配 0 个 →
+    WARN → 回落 pull」，而 push 模式无 hub（`wait_job` 卡死）——旧界面看起来完全正常，这正是本次可见化
+    的动机。
+- **验证（2026-09-15，执行面可见化）**：dashboard `tsc` 干净 + **366 pass / 0 fail**（新增
+  `pushTargetFromConfig` 5 用例 + `buildStateView.pushTarget` 快照 1 用例 + SSR 徽章 2 用例）；
+  `bun dashboard/src/server/build.ts` 三份 bundle 通过（app gzip 51016B）。
+- **验证（2026-09-15）**：dashboard `tsc` 干净 + **358 pass / 0 fail**（59 文件，含追加上面的
+  push 回落 7 用例后计数；本条目首落时 351；含新增
+  `tests/local-worker.test.ts` 11 用例：spec 形态/poll 目标/killTree/双课隔离/`--remote-transport pull`
+  注射/重建逐字段一致/接线 grep 门禁）；根 `bun run check` **1819 pass / 4 skip / 0 fail**；
+  nn-training python gate（ruff + mypy + pytest xdist -n 4）绿，含新增
+  `tests/test_remote_transport.py`（run_rl 与 run_bc 两侧裁决 + argparse 接线）；
+  `bun dashboard/src/server/build.ts` 三份 bundle 与根 `bun run build` 均通过。

@@ -14,6 +14,7 @@ import { entryForCourse, loadRegistry } from '../core/registry'
 import { agentSentinels, pySentinels } from '../core/sentinels'
 import { slotPort } from '../core/slots'
 import { resolveVenvPython } from '../core/venv'
+import { COMPONENT_KILL_TREE } from '../core/types'
 import type { ProcSpec, RegistryEntry, RlConfig } from '../core/types'
 
 /** 课程日志目录（per-course；无课程走 `nocourse`——与旧单课路径同构）。 */
@@ -48,6 +49,10 @@ export function selfNodeSpec(cfg: RlConfig): ProcSpec {
     name: 'self-node',
     course: '',
     cmd: [process.execPath, 'run', SELF_NODE_ENTRY, '--port', String(cfg.rl.agent_port)],
+    // 入口是仓库相对路径（bun run tools/agent/sampler-agent.ts），必须钉 cwd——控制台以
+    // dashboard/ 为 cwd 启动时，不钉就 Module not found 直接退出（2026-09-14 回归，
+    // 护栏 tests/training-selfnode-cwd.test.ts）。
+    cwd: REPO_ROOT,
     log: path.join(LOG_DIR, 'sampler-agent.log'),
     healthy: async () =>
       (await portListen(cfg.rl.agent_port)) &&
@@ -118,6 +123,67 @@ export function cloudflaredSpec(cfg: RlConfig, entry?: RegistryEntry): ProcSpec 
   }
 }
 
+// ────────────────────────── localWorker（本机独立 PPO worker，2026-09-15） ──────────────────────────
+
+/** localWorker 的入口 = 云端 worker 的同一个入口（`python -m remote_worker` 薄包装）。 */
+export const LOCAL_WORKER_ENTRY = 'nn-training/remote_worker.py'
+
+/** 本机 PPO worker（pull 模式）：`remote_worker --poll 本课 hub`。
+ *
+ *  与云端 worker **同一份代码/同一套协议**（租约/心跳/幂等重拉/热替换退出码 86 +
+ *  内部监督器重拉），差别只有 `--poll` 指向本机 hub、`--device cpu`。控制台只负责
+ *  启停（与其它受管组件同规：账本 + 变更检测重启 + 整树停止）。
+ *
+ *  语义注意：push（worker_server）不在这里——push 模式的执行面就是既有 `workerServe`
+ *  组件（同一台机器两个模式各占半边，不重复实现）。 */
+export function localWorkerSpec(
+  cfg: RlConfig,
+  venv: { python: string; sitePackages: string },
+  course = '',
+): ProcSpec {
+  const hubUrl = `http://127.0.0.1:${slotPort(cfg, course, 'hub')}`
+  // torch 线程：0/缺省 = torch 默认（云端 worker 同语义）；配了 rl.torch_threads 就透传——
+  // 本机 worker 与 rollout 子进程抢核，这时它是唯一能限核的旋钮。
+  const threads = Math.round(Number(cfg.rl?.torch_threads ?? 0) || 0)
+  // work 目录 per-course（与 workerServe 同规：双课同机时两个 worker 的 job 目录/payload
+  // 归档不得互相踩）；无课程沿用旧路径。--out 由 python 侧按仓库根解析（worker main）。
+  return {
+    key: 'localWorker',
+    name: 'local-worker (本机 PPO worker)',
+    course,
+    cmd: [
+      venv.python,
+      '-u',
+      '-m',
+      'remote_worker',
+      '--poll',
+      hubUrl,
+      '--token',
+      cfg.rl.remote_token,
+      '--out',
+      course ? `tmp/local-worker-${course}` : 'tmp/local-worker',
+      '--device',
+      'cpu',
+      ...(threads > 0 ? ['--threads', String(threads)] : []),
+    ],
+    cwd: NN_TRAINING,
+    env: { PYTHONPATH: `${venv.sitePackages}${path.delimiter}${NN_TRAINING}` },
+    log: path.join(course ? courseLogDir(course) : LOG_DIR, 'local-worker.log'),
+    // 无 HTTP 端点可探（它是出站轮询者）——存活即健康，与 trainingLoop 同口径。
+    healthy: async () => pidAlive(entryForCourse(loadRegistry(), 'localWorker', course)?.pid),
+    // 入口 + 实际执行链（remote/worker.py 是全部逻辑、protocol.py 是线路格式）：
+    // 手工哨兵补足 codehash-files.txt 之外的依赖面（漏报 = worker 用旧协议跑新 job）。
+    sentinels: pySentinels(
+      LOCAL_WORKER_ENTRY,
+      'nn-training/remote/worker.py',
+      'nn-training/remote/protocol.py',
+    ),
+    // 整树停止：父 supervise_worker + 子 worker_loop（判定唯一来源 core/types.ts，
+    // stop / 全部停止 / 监督重启三处共用）
+    killTree: COMPONENT_KILL_TREE.has('localWorker'),
+  }
+}
+
 // ────────────────────────── worker_server（本机伪 GPU 节点） ──────────────────────────
 
 export const WORKER_SERVE_ENTRY = 'nn-training/remote_worker_serve.py'
@@ -163,12 +229,15 @@ export const BC_LOOP_ENTRY = 'nn-training/run_bc.py'
 export interface BcLoopSpecOpts {
   course: string
   /** 远程：发布到 per-course hub（pull preset）/ 直推 push 节点（push preset，
-   *  run_bc 读 REMOTE_PUSH_NODE/push_node_url）。local preset → --local（本机 torch）。 */
+   *  run_bc 读 REMOTE_PUSH_NODE/push_node_url）。local preset（2026-09-15 起）
+   *  = 本机独立 localWorker pull 模式：仍走 hub，但传输钉死 pull 并指名本机 hub。 */
   ppo?: 'pull' | 'push' | 'local' | 'remote'
   /** 冒烟：尺寸压缩真一轮，落位即作废（不覆盖 out、不归档、账本零污染）。 */
   smoke?: boolean
   /** 冒烟/push 注入：REMOTE_PUSH_NODE（本机伪 GPU 节点 URL）。 */
   pushNodeUrl?: string
+  /** pull 目标 hub（local preset 注入本机 hub；其余模式缺省=读 rl-config remote_hubs）。 */
+  hubUrl?: string
   venv: { python: string; sitePackages: string }
 }
 
@@ -177,6 +246,7 @@ export interface BcLoopSpecOpts {
 export function bcLoopSpec(cfg: RlConfig, s: BcLoopSpecOpts): ProcSpec {
   void cfg
   const trainLog = path.join(LOG_DIR, s.course || 'nocourse', 'training-loop.log')
+  const hubFlags = s.hubUrl ? ['--remote-hub-url', s.hubUrl] : []
   return {
     key: 'trainingLoop',
     name: 'BcLoop (trainer)',
@@ -187,7 +257,11 @@ export function bcLoopSpec(cfg: RlConfig, s: BcLoopSpecOpts): ProcSpec {
       path.join(REPO_ROOT, BC_LOOP_ENTRY),
       '--course',
       s.course,
-      ...(s.ppo === 'local' ? ['--local'] : ['--remote']),
+      '--remote',
+      // local preset = 本机独立 worker（pull）：传输钉死 pull，否则 run_bc 的
+      // 「push（env/config）> hub」优先级会把 job 推去云机，本机 worker 永远领不到活。
+      ...(s.ppo === 'local' ? ['--remote-transport', 'pull'] : []),
+      ...hubFlags,
       ...(s.smoke ? ['--smoke'] : []),
     ],
     env: {
@@ -213,12 +287,16 @@ export const TRAINING_LOOP_ENTRY = 'nn-training/run_rl.py'
 
 export interface TrainingLoopSpecOpts {
   course: string
-  /** PPO 模式：local → 不带 --ppo；pull/push/remote → --ppo remote。 */
+  /** PPO 执行面：pull/push → --ppo remote（云端 worker）；local（2026-09-15 起）
+   *  = 本机独立 localWorker 的 pull 模式（--ppo remote --remote-transport pull
+   *  --remote-hub-url 本机 hub）——进程内 PPO 不再是控制台可选项。 */
   ppo?: 'pull' | 'push' | 'local' | 'remote'
   /** 冒烟预演：--smoke（作废本轮、账本零污染）。 */
   smoke?: boolean
   /** 冒烟注入：REMOTE_PUSH_NODE（本机伪 GPU 节点 URL）。 */
   pushNodeUrl?: string
+  /** pull 目标 hub（local preset 注入本机 hub；其余模式缺省=读 rl-config remote_hubs）。 */
+  hubUrl?: string
   venv: { python: string; sitePackages: string }
   /** 门禁触发时的动作：halt = 下发云端停机达令（默认）；notify = 只提示不停机。 */
   gateHaltMode?: GateHaltMode
@@ -263,6 +341,7 @@ export function writeGateHaltMode(course: string, mode: GateHaltMode): GateHaltM
 export function trainingLoopSpec(cfg: RlConfig, s: TrainingLoopSpecOpts): ProcSpec {
   void cfg
   const trainLog = path.join(LOG_DIR, s.course || 'nocourse', 'training-loop.log')
+  const hubFlags = s.hubUrl ? ['--remote-hub-url', s.hubUrl] : []
   return {
     key: 'trainingLoop',
     name: 'TrainingLoop',
@@ -275,7 +354,14 @@ export function trainingLoopSpec(cfg: RlConfig, s: TrainingLoopSpecOpts): ProcSp
       path.join(REPO_ROOT, TRAINING_LOOP_ENTRY),
       '--course',
       s.course,
-      ...(s.ppo === 'local' ? [] : ['--ppo', 'remote']),
+      '--ppo',
+      'remote',
+      // local preset = 本机独立 worker pull 模式。**必须钉死 pull**：_remote_ppo 的
+      // 传输优先级是「config 里本课 gpu_push 节点 > hub」，某课用 push 跑过一次后
+      // `courses.<课>.push_node_url` 就留在 rl-config 里——不钉死就会把 job 推给云机，
+      // 本机 localWorker 永远空转（且看起来「训练正常」）。
+      ...(s.ppo === 'local' ? ['--remote-transport', 'pull'] : []),
+      ...hubFlags,
       ...(s.smoke ? ['--smoke'] : []),
       ...(s.gateHaltMode ? ['--gate-halt-mode', s.gateHaltMode] : []),
     ],

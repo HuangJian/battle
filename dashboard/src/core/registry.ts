@@ -6,7 +6,7 @@
  *  load/clear 时一并消费，保证旧账本里的进程也能被 --kill 收编。
  *
  *  ── 多课程形状（plan multi-course-parallel-training §1.4，P1b） ──
- *  课程 = 并行单元，故 hubServer/cloudflared/trainingLoop/workerServe 四条按课程键控：
+ *  课程 = 并行单元，故 hubServer/cloudflared/localWorker/trainingLoop/workerServe 五条按课程键控：
  *    `hubServers: Record<course, Entry>` 等；`selfNode` 保持单例（agent 全局一份）。
  *  旧扁平单键（`hubServer`/…）**已在 P5 移除读写**（R1 读兼容 + R2 删键）：
  *  `loadRegistry()` 每次加载都会把扁平键**一次性搬迁**进 per-course 表再删键
@@ -32,23 +32,34 @@ function registryPath(): string {
 
 /** hub-start 旧账本目录（legacy 迁移读取）。 */
 const LEGACY_DIR = path.join(LOG_DIR, 'hub-start')
-const LEGACY_COMPS: Component[] = ['selfNode', 'hubServer', 'cloudflared', 'trainingLoop']
+// 历史扁平形状存在过的组件（**不含** localWorker——它 2026-09-15 才加入，从未有过
+// hub-start 分文件账本）。窄类型让 `legacy[name]` 在类型层就限定在可读面里。
+const LEGACY_COMPS: readonly (keyof LegacyFlatRegistry | 'selfNode')[] = [
+  'selfNode',
+  'hubServer',
+  'cloudflared',
+  'trainingLoop',
+]
 
 /** 单例组件（agent 全局一份，不按课程键控）。 */
 export const SINGLETON_COMPONENTS = ['selfNode'] as const
 export type SingletonComponent = (typeof SINGLETON_COMPONENTS)[number]
-/** 按课程键控的组件（顺序即遍历顺序：hub 先于 trainer——M7）。 */
+/** 按课程键控的组件（顺序即遍历顺序：hub 先于 localWorker 先于 trainer——M7）。
+ *  localWorker = 本机独立 PPO worker（云端 remote_worker 同款，poll 本课 hub）；
+ *  它排在 cloudflared 前：同课内「作业中枢 → 作业执行者 → 入站隧道 → 训练器」。 */
 export const COURSE_COMPONENTS = [
   'hubServer',
+  'localWorker',
   'cloudflared',
   'workerServe',
   'trainingLoop',
 ] as const
 export type CourseComponent = (typeof COURSE_COMPONENTS)[number]
 
-type PluralKey = 'hubServers' | 'cloudflareds' | 'workerServes' | 'trainingLoops'
+type PluralKey = 'hubServers' | 'localWorkers' | 'cloudflareds' | 'workerServes' | 'trainingLoops'
 const PLURAL: Record<CourseComponent, PluralKey> = {
   hubServer: 'hubServers',
+  localWorker: 'localWorkers',
   cloudflared: 'cloudflareds',
   workerServe: 'workerServes',
   trainingLoop: 'trainingLoops',
@@ -84,13 +95,23 @@ function consoleCourse(): string {
  *  fail-closed（无 course → 查不到，M5）会让线上正在跑的旧进程**永久失去监督**——
  *  静默失监督是事故，自愈才是本迁移的目的。搬迁结果落盘一次，之后不再重复（幂等）。
  *
- *  per-course 表已有同课条目时**保留新条目**（新写入路径的数据更新），只丢陈旧扁平键。 */
+ *  per-course 表已有同课条目时**保留新条目**（新写入路径的数据更新），只丢陈旧扁平键。
+ *
+ *  搬迁面 = `LEGACY_FLAT_COURSE_COMPONENTS`，**不是** COURSE_COMPONENTS：localWorker
+ *  （2026-09-15）从来没有扁平单键形状，把它放进搬迁循环只会让类型契约变宽。 */
+const LEGACY_FLAT_COURSE_COMPONENTS: readonly CourseComponent[] = [
+  'hubServer',
+  'cloudflared',
+  'workerServe',
+  'trainingLoop',
+]
+
 function migrateFlatCourseEntries(reg: Registry): boolean {
   const legacy = reg as Registry & LegacyFlatRegistry
   const fallback = consoleCourse()
   let changed = false
-  for (const key of COURSE_COMPONENTS) {
-    const e = legacy[key]
+  for (const key of LEGACY_FLAT_COURSE_COMPONENTS) {
+    const e = legacy[key as keyof LegacyFlatRegistry]
     if (!e || typeof e.pid !== 'number') continue
     const course = typeof e.course === 'string' ? e.course : fallback
     const plural = PLURAL[key]
@@ -101,7 +122,7 @@ function migrateFlatCourseEntries(reg: Registry): boolean {
         `[registry] 旧账本搬迁: ${key} (PID ${e.pid}) → ${plural}[${JSON.stringify(course)}] slot=${e.slot ?? 0}（一次性迁移 R2）`,
       )
     }
-    delete legacy[key]
+    delete legacy[key as keyof LegacyFlatRegistry]
     changed = true
   }
   return changed
@@ -153,8 +174,8 @@ export function entryForCourse(
 }
 
 /** 有序三元组 `(key, course, entry)`——**枚举账本的唯一路径**（门禁②）。
- *  顺序：selfNode → 每课程内 hubServer/cloudflared/workerServe/trainingLoop
- *  （同课 hub 先于 trainer，M7；课程名排序保证稳定）。旧扁平键不再枚举（R2 已搬迁）。 */
+ *  顺序：selfNode → 每课程内 hubServer/localWorker/cloudflared/workerServe/trainingLoop
+ *  （同课 hub 先于 localWorker 先于 trainer，M7；课程名排序保证稳定）。旧扁平键不再枚举（R2 已搬迁）。 */
 export function registryTriples(reg: Registry): WatchedEntry[] {
   const out: WatchedEntry[] = []
   if (reg.selfNode) out.push({ key: 'selfNode', course: '', entry: reg.selfNode })

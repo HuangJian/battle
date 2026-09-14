@@ -1694,6 +1694,36 @@ a.tc-preset {
   line-height: 18px;
   font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
 }
+/* push 执行面徽章（2026-09-15）：本课 job 现在推给本机还是云机——
+   绿=本机 worker_server / 蓝=云 GPU / 红=未匹配（python 会回落 pull）；
+   --idle = 当前模式不是 push（徽章只是「配置指向」，不抢模式徽章的视觉权重）。 */
+.tc-cc__push {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-weight: 700;
+  font-size: 10.5px;
+  white-space: nowrap;
+  line-height: 18px;
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+}
+.tc-cc__push--local {
+  background: var(--green-bg);
+  color: var(--green);
+}
+.tc-cc__push--cloud {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+.tc-cc__push--unresolved {
+  background: var(--red-bg);
+  color: var(--red);
+}
+.tc-cc__push--idle {
+  background: var(--gray-bg);
+  color: var(--muted);
+}
 .tc-cc__acts {
   display: flex;
   align-items: center;

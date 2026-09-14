@@ -16,7 +16,10 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
   const state = loadConsoleState()
   const courses = discoverCourses()
   const course = courseOverride || effectiveCourse(state, courses)
-  const { components, nodes, localNode, phase, loopComplete } = await getSlowSnapshot(cfg, course)
+  const { components, nodes, localNode, phase, loopComplete, pushTarget } = await getSlowSnapshot(
+    cfg,
+    course,
+  )
   let metrics: MetricsView = { available: false, iters: [] }
   if (course && existsSync(path.join(REPO_ROOT, 'tmp', course, 'training_log.jsonl'))) {
     try {
@@ -44,6 +47,16 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     components,
     nodes,
     localNode,
+    // push 执行面「此刻真的在生效」= 本课 trainer 以 push 模式在跑（模式来自控制台状态，
+    // 存活来自组件探测）——徽章据此从「配置指向」切换为「正在用」。
+    pushTarget: pushTarget
+      ? {
+          ...pushTarget,
+          active:
+            state.trainerPpo === 'push' &&
+            components.some((c) => c.key === 'trainingLoop' && c.status === 'running'),
+        }
+      : null,
     modes: {
       trainerPpo: state.trainerPpo,
       stream: Number(cfg.rl.stream ?? 0),

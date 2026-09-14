@@ -5,6 +5,46 @@
 
 ---
 
+## §43 本机 PPO 拆分为独立 worker（2026-09-15，用户指令「把本地 PPO 拆分为一个独立 worker，可以随时启停，与云端 worker 一致，同样支持 pull/push 模式」）
+
+**变更**：本机 PPO 不再是 `TrainingLoop`（run_rl）进程内的阻塞调用，而是新的受管组件
+`localWorker`——跑的就是**云端同一个入口** `python -m remote_worker --poll
+http://127.0.0.1:<本课 hub> --out tmp/local-worker-<课> --device cpu`（配了
+`rl.torch_threads` 才透传 `--threads`）。协议/租约/心跳/幂等重拉/热替换退出码 86 + 内部
+监督器重拉**零分叉继承**；push 侧不新增实现（执行面 = 既有 `workerServe`）。控制台 `local`
+预设改义为 `hubServer → localWorker → trainingLoop(--ppo remote)`，进程内 PPO 不再是
+控制台选项（`--ppo local` / run_bc `--local` 保留给直调 CLI 与 R9 远端失败降级落点）。
+决策与拒绝的备选：`DECISIONS.md §2026-09-15-goalnn-local-ppo-worker`。
+
+**唯一的新语义（也是最贵的一个坑）：`--remote-transport {auto,pull,push}`**。`_remote_ppo`
+的历史优先级是「rl-config 里本课 `gpu_push` 节点 > hub」——某课用 push 跑过一次后
+`courses.<课>.push_node_url` 就留在配置里，于是 `local` 预设会把 job **静默推去云机**，
+本机 worker 永远领不到活，而账本/日志看起来「训练正常」。所以 local preset 必须钉
+`--remote-transport pull`（run_rl 与 run_bc 同步支持；`auto` = 历史行为零变化，非法组合
+响亮 `SystemExit`）。刻意**不**动 `rl.remote_hubs[<课>]`：它是 pull preset 隧道 URL 的家，
+而 `stepCloudflared` 复用已建隧道时不会重写它——写本机 hub 进去会把 pull preset 悄悄改成
+打本机 hub；本机 hub 只经显式 `--remote-hub-url` 注入。
+
+**push 侧同样可用本机执行面（同日追加，用户指令）**：`configurePushEndpoint` 改为三档裁决
+（用户填 endpoint / 复用 config 可用 `gpu_push` / **回落本机 worker_server**），回落时写
+`local_push` 节点 + 课程 `push_node_url` 指向本机、预设多起一个 `workerServe`——云/本机两份节点
+条目共存互不覆盖（绝不静默吃掉用户填的云 URL）。详见 `DECISIONS.md` 同条目的「追加」bullet。
+
+**整树停止**：`localWorker` 是「父 supervise_worker + 子 worker_loop」两进程，停/重启走
+`dashboard/src/core/net.ts::killPidTree`（Windows `taskkill /T /F`；POSIX 先验 `pgid === pid`
+再组杀，否则退回单进程 stop），判定唯一来源 `stack/specs.ts::COMPONENT_KILL_TREE`——只杀
+父进程会留下继续轮询 hub 抢 job/抢租约的孤儿，「随时启停」名存实亡。
+
+**验证（2026-09-15）**：dashboard `tsc` 干净 + 351 pass / 0 fail（59 文件，新增
+`tests/local-worker.test.ts` 11 用例：spec 形态 / poll 目标 / killTree / 双课隔离 / pull 注射 /
+重建逐字段一致 / 接线 grep 门禁）；根 `bun run check` 1819 pass / 4 skip / 0 fail；
+nn-training python gate 绿（新增 `tests/test_remote_transport.py`：run_rl 与 run_bc 两侧裁决
++ argparse 默认值与 choices）；`bun dashboard/src/server/build.ts` 三份 bundle 与根 `bun run build`
+均通过。顺手补了 HEAD 上已红的 `selfNodeSpec.cwd`（控制台以 dashboard/ 为 cwd 启动时的
+`Module not found` 回归护栏）。
+
+---
+
 ## §42 ipynb 清场 + tpu-probe 单源化（2026-09-13，用户指令「重构 ipynb：删无用 notebook，重新整理 tpu-probe 使其更模块化并保持独立性」）
 
 - **删三个被取代的旧 notebook**（均无活引用，文档中的历史提及保留为史实）：`p4-onset.ipynb`（课程专用 BC → 通用 `battle-bc.ipynb`）、`m2_colab_worker.ipynb` + `p4-onset-rl.ipynb`（旧式内联 worker → 单 cell `battle-rl.ipynb`，运行时已迁 code.zip）。现存三个：battle-rl（云端 worker）、battle-bc（通用 BC 蒸馏）、tpu-probe（吞吐探针）。

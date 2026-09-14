@@ -7,18 +7,18 @@
  * 夹具（env 重定向 + 被测模块）见 ./helpers/console-fixture.ts。
  */
 
-import { api } from './helpers/console-fixture'
+import { api, readConfigText, scratchConfig } from './helpers/console-fixture'
 import { describe, expect, it } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
 
 describe('console/api.buildStateView', () => {
-  it('快照包含五个组件、节点表与模式区块', async () => {
+  it('快照包含六个组件（含 2026-09-15 独立出来的 localWorker）、节点表与模式区块', async () => {
     const s = await api.buildStateView()
     const keys = s.components.map((c) => c.key) as string[]
     expect(keys.sort()).toEqual(
-      ['cloudflared', 'hubServer', 'selfNode', 'trainingLoop', 'workerServe'].sort(),
+      ['cloudflared', 'hubServer', 'localWorker', 'selfNode', 'trainingLoop', 'workerServe'].sort(),
     )
     for (const c of s.components) {
       expect(['running', 'stopped', 'exited']).toContain(c.status)
@@ -80,6 +80,45 @@ describe('console/api.buildStateView', () => {
       else process.env.BCITY_TMP_LOGS_DIR = prevTmp
       if (prevCur === undefined) delete process.env.BCITY_CURRICULA_DIR
       else process.env.BCITY_CURRICULA_DIR = prevCur
+    }
+  })
+
+  it('push 执行面（2026-09-15）：快照给出「job 推给本机还是云机」的数据源', async () => {
+    // 在 scratch 配置上临时种一个云 push 节点 + 两个课程键（course 名唯一，不与他人争缓存）。
+    const prev = readConfigText()
+    const cloud = 'push-probe-cloud'
+    const none = 'push-probe-none'
+    try {
+      const cfg = JSON.parse(prev) as Record<string, unknown>
+      cfg.courses = {
+        ...((cfg.courses as Record<string, unknown>) ?? {}),
+        [cloud]: { push_node_url: 'https://127.0.0.1:1' },
+        [none]: { slot: 1 },
+      }
+      cfg.nodes = [
+        ...((cfg.nodes as unknown[]) ?? []),
+        {
+          id: 'probe-cloud',
+          url: 'https://127.0.0.1:1',
+          authKey: 'k',
+          concurrency: 1,
+          enabled: true,
+          gpu_push: true,
+        },
+      ]
+      writeFileSync(scratchConfig, JSON.stringify(cfg, null, 2))
+      const s = await api.buildStateView(cloud)
+      // kind 由 config 认领（`push_node_url` → gpu_push 节点）；healthy 是 /ping 直探
+      // （127.0.0.1:1 无人监听 → false）；active=false（trainer 未以 push 模式在跑）。
+      expect(s.pushTarget?.kind).toBe('cloud')
+      expect(s.pushTarget?.nodeId).toBe('probe-cloud')
+      expect(s.pushTarget?.healthy).toBe(false)
+      expect(s.pushTarget?.active).toBe(false)
+      // 未配置 push 目标 → null（非 push 场景卡片不出徽章）
+      const s2 = await api.buildStateView(none)
+      expect(s2.pushTarget ?? null).toBeNull()
+    } finally {
+      writeFileSync(scratchConfig, prev)
     }
   })
 

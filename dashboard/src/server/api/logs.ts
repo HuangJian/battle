@@ -73,6 +73,7 @@ const LOG_NAME_MATCH: Record<Component, (name: string) => boolean> = {
   selfNode: (n) => n.startsWith('sampler-agent') && n.endsWith('.log'),
   hubServer: (n) => n.startsWith('hub-server'),
   cloudflared: (n) => n.startsWith('cloudflared') && n.endsWith('.log'),
+  localWorker: (n) => n.startsWith('local-worker') && n.endsWith('.log'),
   trainingLoop: (n) => n === 'training-loop.log',
   workerServe: (n) => n.startsWith('remote-worker-serve') && n.endsWith('.log'),
 }
