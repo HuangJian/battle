@@ -91,6 +91,12 @@ def aggregate_eval_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+#: busy（节点并发槽满 503）背压上限与退避步长（2026-09-14，与 rl/bc_dispatch 同语义）。
+#: 评估单局很短（~6s），退避不必大；上限 4 次足够等到槽位释放，超过才认失败。
+BUSY_RETRY_LIMIT = 4
+BUSY_BACKOFF_SEC = 0.5
+
+
 def dispatch_bc_eval(
     *,
     weights_bytes: bytes,
@@ -150,7 +156,17 @@ def dispatch_bc_eval(
         failed = 0
 
         def _run_one(node: dict, stage: int, seed: int) -> dict[str, Any] | None:
-            for attempt in (1, 2):
+            """单局评估；**busy 走退避重排**（2026-09-14，与 rl/bc_dispatch 同语义）。
+
+            为什么加：节点并发槽满时回 503 busy，旧实现把它当普通失败「立刻重试一次」，
+            两次都撞 busy 就丢弃该局 —— 实测 10:38 那轮 mac 的 busy 让 arena6 只跑成
+            n=14/30（评估样本不足 ⇒ 均值噪声大，误判能力变化）。busy 是**限流信号**，
+            不是节点故障：退避等槽位释放，且**不消耗** attempt 配额。
+            """
+            attempts = 0
+            busy_tries = 0
+            while attempts < 2:
+                attempts += 1
                 try:
                     manifest, _files = fetch_task(
                         node["url"],
@@ -173,14 +189,20 @@ def dispatch_bc_eval(
                         raise dist_common.DistError(0, f"validate: {reason}")
                     return manifest
                 except dist_common.DistError as e:
+                    reason = str(e.reason)
+                    if "busy" in reason[:64].lower() and busy_tries < BUSY_RETRY_LIMIT:
+                        busy_tries += 1
+                        attempts -= 1  # busy 不消耗 attempt 配额
+                        time.sleep(BUSY_BACKOFF_SEC * busy_tries)
+                        continue
                     log(
                         f"[bc-eval] {node.get('id')} {level_name} s{stage} seed{seed} "
-                        f"attempt {attempt} failed: {e.reason[:140]}"
+                        f"attempt {attempts} failed: {reason[:140]}"
                     )
                 except Exception as e:
                     log(
                         f"[bc-eval] {node.get('id')} {level_name} s{stage} seed{seed} "
-                        f"attempt {attempt} error: {type(e).__name__}: {e}"
+                        f"attempt {attempts} error: {type(e).__name__}: {e}"
                     )
             return None
 
