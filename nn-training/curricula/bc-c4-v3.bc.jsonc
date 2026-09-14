@@ -39,15 +39,21 @@
   "level": "arena4",
 
   "corpus": {
-    "games_per_stage": 40,
+    // 2026-09-14 放大 40 → 300（用户：CPU/GPU 资源充裕，尽情加语料）。
+    // 依据：40 局 × 72.5% 教师胜率 = 29 kept / 6442 样本，70k 参数的学生 11 轮就进平台
+    // （val_loss 后 40 轮只降 0.077）。300 局 ⇒ ≈217 kept / ≈4.8 万样本（7.5×）。
+    "games_per_stage": 300,
     "wins_only": true,
     "near_miss_times": 3,
-    "seed_rotate": 64,
+    // seed_rotate 必须 ≥ games_per_stage：多轮（iters>1）时各轮种子不重叠
+    "seed_rotate": 300,
   },
 
   "train": {
     "arch": "student",
-    "epochs": 60,
+    // 60 → 150：语料 ×7.5，配套拉长 cosine 调度（T_max=epochs），否则 lr 在数据
+    // 还没学完时就衰减到 0。
+    "epochs": 150,
     "batch": 512,
     "lr": 3e-3,
     "mirror_p": 0.5,
@@ -55,14 +61,19 @@
     // 刻意 0：见文件头「value_coef = 0」——M3 尺度未修，且 R1 需要两臂 value 头对称。
     "value_coef": 0.0,
     "seed": 1234,
+    // 2026-09-14 新增：fire 正例仅 ~7%（1:12.6），不补偿则 fire_acc（0.770）低于
+    // "永不发射"常数基线（0.927）——该头是负增益。auto = 按训练集 neg/pos 自动定。
+    "fire_pos_weight": "auto",
     "ckpt_every": 10,
   },
 
-  // 与 bc-c4 同口径：每 10 epoch 在 arena4 + arena6 各 10 局干净评估，
+  // 与 bc-c4 同口径：每 25 epoch 在 arena4 + arena6 各 30 局干净评估，
   // 指标对齐 RL eval（win_rate/kills_mean/phits_mean/pickup_mean/timeout_frac）→ bc_eval 入账。
+  // 2026-09-14：10 → 30 局/关（10 局下 win_rate 恒 0 无分辨力，需 kills/phits 的稳定均值），
+  // 边界 25 epoch（150/25 = 6 次，与旧的 60/10 同频）。
   "eval": {
-    "every_epochs": 10,
-    "games_per_stage": 10,
+    "every_epochs": 25,
+    "games_per_stage": 30,
     "levels": ["arena4", "arena6"],
   },
 
