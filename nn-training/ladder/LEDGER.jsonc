@@ -174,6 +174,29 @@
           "max": 0.994
         }
       }
+    },
+    "x2": {
+      "hypothesis": "kill/hit 稠密信号 + wWin 清场尖峰驱动，it40 前 pooled 爬升；60 轮无爬升证伪",
+      "status": "stopped-it80",
+      "stop_reason": "用户手工停训（2026-09-14）；训练侧 it40 后 40 轮统计平线",
+      "gates": "正式门 80.6/79.2/79.7（it50/60/75 归档，种子 0/1000/2000，1200局/轮）——仅第一轮过 80%，未毕业",
+      "verdict": "not-graduated",
+      "updated_at": "2026-09-15 05:34:23",
+      "disk_bytes": 914753327
+    },
+    "x2-acbc": {
+      "hypothesis": "双关密度x3 + kill/hit 信号，it20 前 ac/bc pooled +5pp；30 轮无爬升证伪",
+      "status": "closed-falsified",
+      "verdict": "配对（种子4000+）ac 131->134、bc 122->116、pooled 253->250（-3/400），判负关账不续",
+      "updated_at": "2026-09-15 05:34:24",
+      "disk_bytes": 556491835
+    },
+    "x3": {
+      "hypothesis": "kill/hit + wWin 驱动，it40 前 pooled 爬升；60 轮无爬升证伪",
+      "status": "running",
+      "gates": "正式门一 it333 800局 69.5%（abc73.5/abd76.0/acd60.0/bcd68.5）；日常67轮横盘0.65-0.72",
+      "updated_at": "2026-09-15 05:34:26",
+      "disk_bytes": 2359046877
     }
   },
   "version": 1,

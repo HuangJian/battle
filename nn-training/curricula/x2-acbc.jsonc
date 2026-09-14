@@ -15,6 +15,14 @@
 // verdict（主判据）：终点权重 vs it75 基线配对探针（ac+bc 各 200 局新种子，
 // tmp/x2-bc-diag.jsonl 的种子 3000+ 不得复用）pooled Δ≥+5pp 且不同时跌任一关；
 // 通过后回测 x2 六关 pooled（200/关）确认无召回丢失，再谈 x2 毕业。
+// verdict 结果（2026-09-14，it30 收账）：
+//   配对（种子 4000+，tmp/x2-acbc-verdict.jsonl）：ac 131→134（+3），
+//   bc 122→116（−6），pooled 253→250（Δ=−3/400）——判负，关账不续。
+//   （对照口径：腿内 it0→it30 日常 66→71/100，+5pp，McNemar p=0.125 不显著；
+//   两口径同指向零净移动。评审 reports/x-curricula-review-2026-09-14.md §2.2
+//   独立复算一致。）
+// 教训：失败是 k=1→k=2 过渡段能力缺陷（败局画像），非样本覆盖不足——
+// 密度×3 只是让同一批失败重复 3 遍（评审 §2.2 同断）。
 //
 // 启动（§5.6：禁裸 python，一律走启动器；用户手工开训）：
 //   bun dashboard/src/launch/cli.ts --script run_rl.py --course x2-acbc

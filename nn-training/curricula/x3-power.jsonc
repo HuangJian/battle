@@ -1,0 +1,106 @@
+// 课程 x3-power —— power 关命中信用重定价腿（standby，2026-09-14 起草，开工待命）
+//
+// 背景：跨 count 稳定结构——含 power 关差 ~15-20pp（x2 门 ac/bc 0.63-0.66；
+// x3 it20 分关 acd 0.56/bcd 0.60 vs abc/abd 0.76-0.78；god 亦然）。败局画像
+// （x2-gate3）：ac 55% 败局 0 杀死（接战了：中位 3 发/1.52 命中/37 40 打中过，
+// ~293t 先倒），bc 91% 败局 1 杀死（残局 1v1 vs power 死）。共同机制：伤害摊薄
+// 零代价——wHit 按次给分，打中两个各一枪与打死一个，在账上几乎没区别，而 power
+// 必须集火秒掉（否则它的快弹先赢）。
+//
+// ※ 表达力边界（诚实声明）：真·按敌种/按伤害归一写不出来——metrics 只有总数
+//   （kills/enemyHits，无分敌种、无伤害量；firstKillTick 是整局常量，toy diff
+//   下恒零）。本腿是现有语言下的可表达代理：**杀/中信用比**（wKill↑/wHit↓），
+//   把“打中就行”的 satisficing 地板抽掉，逼梯度指向终结。若证伪，下一步是
+//   metrics v6（分敌种命中列，TS+Python 全链）——不是继续调剂量。
+// 另注：当前 wKill:wHit 已是 10:1 仍摊薄，故瓶颈可能是执行（活着打完第二枪）
+// 而非信用——本腿同时是这个二选一的判决实验：比值陡峭化后若仍摊薄，判执行瓶颈。
+//
+// 与 x3-start 单变量对照：环境/优化器/日程/护栏逐字同构；唯一训练变量 = 奖励
+// params（wKill 3.0→4.0，wHit 0.3→0.15；wWin/terminal/scheme 不动）。
+// 开工假说（§5.7）：信用比×2（10:1→27:1）后，acd/bcd pooled it20 前 +5pp；
+// 30 轮跑满无爬升即证伪停腿（防 c6-bonus 式盲跑）。
+// verdict：终点 vs 暖启基线配对（acd+bcd 各 200 新种子）pooled Δ≥+5pp；
+// 熔断轴（s-dodge 教训）：shots 崩（开火被吓没）或 kills 不升反降即停——
+// wHit 降≠开火惩罚，但盯 fire/shots/kill 三数是铁律。
+// 门统计口径（对账 reports/x-curricula-review-2026-09-14.md §3.2/P1.5）：
+// 正式门除点估计≥80% 外，加 Wald 95% 下限 LB=p−1.645·SE≥77%（n=800 时
+// SE≈1.4pp，LB≈点估计−2.3pp；该 n 下 Wald≈Wilson，二阶差可忽略），两轮都过。
+// 新 gate kind 不用加代码——gate_check 的 pooled+conf_z 已是同一检验，
+// 本腿（无 gates 块，走离线正式门）只采用数口径。
+// 行标签口径（P0 事后）：8db1f88 起 in-loop eval 行 iter=真权重轮；verdict
+// 探针一律用归档文件显式离线重跑，不读在途数字。
+// 日常 eval（50/关）只做趋势，不做判决（SE≈4.6pp 分辨不了 +5pp）。
+//
+// 环境：`"level": "arena3"`（与 x3-start 同环境；课程侧禁写环境键）。
+// 暖启：x3-start 当前最优归档（开工前填——x3 在跑，见下 bc 行占位）。
+// 开工上下文（2026-09-15 05:30）：x3 it333 正式门一（800 局）69.5%
+// （abc 73.5/abd 76.0/acd 60.0/bcd 68.5），67 轮日常 eval 横盘 0.65-0.72——
+// x3-start 按自设 60 轮证伪条款已触发判负条件；本腿开工时是否停 x3 主腿待用户决断。
+//
+// 启动（§5.6：禁裸 python，一律走启动器；用户手工开训）：
+//   bun dashboard/src/launch/cli.ts --script run_rl.py --course x3-power
+{
+  "version": 5,
+  "name": "x3-power",
+  "mode": "per-tick",
+  "level": "arena3",
+
+  // 双关还是四关？四关（与 x3-start 同分布，verdict 可比；power 三关天然占 3/4
+  // 权重，abc 作对照关——若 abc 跌而 power 关涨，说明信用比拆东墙补西墙）。
+  // 全轮 = seed_rotate × 关数 = 60 × 4 = 240 局/轮（与 x3-start 同成本）。
+  "seed_rotate": 60,
+  "workers": 8,
+
+  // ── 奖励（公式/scheme/terminal 与 x3-start 同构；唯一变量 = params 比值）───
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0)",
+    "params": {
+      // 3.0→4.0：终结信用 +33%。
+      "wKill": 4.0,
+      // 0.3→0.15：命中地板减半。摊薄 3 枪 0.9→0.45，集火 2 枪+杀 3.6→4.3。
+      "wHit": 0.15,
+      "wWin": 2.0,
+    },
+    "terminal": {
+      "lives_exhausted": -1.0,
+    },
+    "scheme": "toy",
+  },
+
+  // ※ 占位：填 x3-start 最优归档后开工（如 nn-training/weights/x3-start/x3-start.itN.<ts>.json）。
+  "bc": "nn-training/weights/x3-start/REPLACE-WITH-BEST-AT-LAUNCH.json",
+  "kickstart_ref": true,
+  // 必须为 0（config 硬校验；改 1 启动失败）。
+  "warmup_iters": 0,
+
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 40, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
+    { "kl_coef": 0.03, "lr": 0.00005 },
+  ],
+
+  // 短腿 30 轮：跑满即 verdict，不过关账不续。
+  "iters": 30,
+  "max_hours": 12,
+  "out": "tmp/x3-power/weights.json",
+  // reward params 进语义身份（与 x3-start 不同 identity），必须新目录，禁止续跑。
+  "traj": "tmp/x3-power",
+  "backup_dir": "nn-training/weights/x3-power",
+  "backup_prefix": "x3-power",
+
+  // 护栏校准说明（对账评审 §2.1.3/8：kl_cap 0.2 vs 实测 KL 0.001-0.004 从未咬合；
+  // ent_break 0.25 碰上胜率>max_winrate(0.5) 按 breaker.py:123 结构性不触发）。
+  //  standby 阶段不盲调数值：开工前取 x3 同分布前 5 轮实测 KL 最大值×5 定 kl_cap，
+  // ent 沿用 0.25 地板 + 在此注明“胜局中不触发是设计如此（观察线），非故障”。
+  "ent_break": 0.25,
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5,
+}
