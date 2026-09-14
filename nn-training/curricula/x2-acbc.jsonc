@@ -1,0 +1,122 @@
+// 课程 x2-acbc —— x2 偏科专项腿：ac/bc 双关加压（2026-09-14，用户拍板「诊断再定」后立项）
+//
+// 背景：x2 三轮正式门 80.6%/79.2%/79.7% 卡线；配对诊断（tmp/x2-bc-diag.jsonl，
+// it50 vs it75 同 400 局新种子）证伪「能力退化」（合计 260→267；ac 133→149 显著
+// 进步，bc 127→118 小幅摆动）——真问题是 ac/bc 真值 ~63-66% 拖 pooled，门线 80%
+// 轮轮抛硬币。本腿单变量加压：环境换双关子集 + 暖启换 it75，其余（奖励/优化器/
+// 日程/护栏）与 x2-start 逐字同构，结论可归因。
+//
+// 环境：`"level": "arena2-acbc"` —— ac/bc 双关，自定义关 ID 2000-2001，
+// max_ticks=2100（与 x2 同）。关卡派生原因见 levels/arena2-acbc.jsonc 文件头。
+// 起步权重：x2-start.it75（不用 it80：it75 在目标双关上有配对证据 +7/400 且
+// 日常 eval 0.847 与 it80 持平；it80 在 ac/bc 上无配对证据）。
+// 开工假说（§5.7）：双关密度×3（同 240 局/轮全砸 ac/bc）+ kill/hit 稠密信号，
+// it20 前 ac/bc pooled 爬升 ≥+5pp（McNemar）；30 轮跑满无爬升即证伪停腿。
+// verdict（主判据）：终点权重 vs it75 基线配对探针（ac+bc 各 200 局新种子，
+// tmp/x2-bc-diag.jsonl 的种子 3000+ 不得复用）pooled Δ≥+5pp 且不同时跌任一关；
+// 通过后回测 x2 六关 pooled（200/关）确认无召回丢失，再谈 x2 毕业。
+//
+// 启动（§5.6：禁裸 python，一律走启动器；用户手工开训）：
+//   bun dashboard/src/launch/cli.ts --script run_rl.py --course x2-acbc
+// 后台常驻加 --detach；日常启停走控制台 bun run dashboard。
+// 注意：x2-start 主腿已停（it80），本腿独立锁/账本，并行无冲突。
+{
+  "version": 5,
+  "name": "x2-acbc",
+  // 每一决策步一条样本（非 intent/goal 窗口）。与 Student 双头 BC / 当前 PPO 管线匹配。
+  "mode": "per-tick",
+  // 环境唯一来源 = levels/arena2-acbc.jsonc。课程侧禁止再写 stages/difficulty/max_ticks/player。
+  "level": "arena2-acbc",
+
+  // ── 采集 / 语料 ────────────────────────────────────────────────────────────
+  // 每关每轮 rollout 局数（实现语义：每关抽 seed_rotate 个新 seed，
+  // 全轮 = seed_rotate × 关数；见 rl/course.py build_pairs）。
+  // 双关 × 120 = 240 局/轮（与 x2-start 同成本，密度×3 全砸偏科关）。
+  "seed_rotate": 120,
+  // 并发采样 worker 数（LAN 节点槽位合计；8 = 本机+局域网常见配额）。
+  "workers": 8,
+
+  // ── 奖励（与 x2-start 逐字同构；语义变更 = 新 reward_identity，禁止续旧 traj）─
+  "reward": {
+    // 只保留：击杀 + 命中 + 统一过关（公式内阶跃项）+ 死亡 terminal。
+    // 不上：wDmg（与死亡重复）/ wChip（c01-c03 承伤基数过小）/ wTick（线性时间会
+    // 压过通关）/ wStuck / wShot / 泛化 wPickup。
+    // toy 力学注意：outcome 虚拟量（is_lives_exhausted 等）是全 episode 常量，
+    // 经 diff(Φ) 后恒为零——终局信号必须走 terminal，禁止写进 formula。
+    // 反之 clearTick 是阶跃函数（清场前 -1、后恒 C），where 项经 diff 后在清场步
+    // 打出 +wWin 尖峰（含清场后被 max_ticks 截断的 BONUS 局），故留公式内。
+    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0)",
+    "params": {
+      // 杀一个敌人的主要信用。完成目标的锚点（roadmap：wKill 固定，早期关主信号）。
+      "wKill": 3.0,
+      // 打中一发的稠密信用。与 wKill 不重复：一个管「打死」，一个管「打得准」。
+      // 血量偏差已知（pool 模型 0 星玩家每杀所需命中：armor 4 vs basic 3、
+      // fast/power 2——classic 的 4:1 口径不适用）：I4 报告须按关拆 shots/kill 与命中率。
+      "wHit": 0.3,
+      // 统一过关奖：clearTick>=0 即发（含清场后被 max_ticks 截断的 BONUS 局）。
+      // 对应 win = stage_clear ∪ cleared，避免「做对了却按超时罚」。
+      "wWin": 2.0,
+    },
+    // 死亡罚进 terminal（公式内写恒为零，见上）。timeout 刻意 0：速度靠关卡 max_ticks；
+    // 死亡 -1 < 超时 0，「1 杀后活到超时」优于「1 杀后阵亡」。
+    "terminal": {
+      "lives_exhausted": -1.0,
+    },
+    // Phi 势差 + 末样本 terminal 的玩具场方案（非 score_reconcile 对账）。
+    "scheme": "toy",
+  },
+
+  // ── 策略起点 / 缰绳 ────────────────────────────────────────────────────────
+  // x2-start.it75 暖启（见文件头选点理由）。暖启 = 初始化手段，不是能力继承（D10）。
+  "bc": "nn-training/weights/x2-start/x2-start.it75.20260914-210959.json",
+  // 开：冻结 BC 作 kickstart 参考策略，PPO 前期用 KL 缰绳防止冲掉暖启。
+  "kickstart_ref": true,
+  // 必须为 0：kickstart 要求 it1 就上缰绳；非 0 会把首轮系数归零（config 硬校验，
+  // 改 1 直接启动失败——故 warmup_iters=1 不是可选项）。
+  // 注：BC 无 value 头；it1 必须记录 value loss 起始值（I4 报告字段）。若 >0.8，
+  // 救济只能是离线 value 预训或接受尖峰（normalize_ret 已开），禁改本字段。
+  "warmup_iters": 0,
+
+  // ── PPO 优化器（与 x2-start 同值）──────────────────────────────────────────
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  "normalize_ret": true,
+  // 折扣因子。0.998 偏长视野（对齐工厂）；2 敌局一般 500~1500 tick 结束。
+  "gamma": 0.998,
+  // GAE lambda。工厂定 0.95（bias-variance 折中）。
+  "lam": 0.95,
+
+  // ── 学习率 / KL 日程（与 x2-start 同形；本腿 iters=30，日程后段达不到=全程缰绳）─
+  "ppo_schedule": [
+    // 前 40 轮：稳住缰绳。kl_coef 0.2 = 允许偏离暖启但不乱飞；kl_cap 0.2 = KL 硬顶。
+    { "until_iter": 40, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
+    // 40 轮后：放缰 + 更小步长精修（本腿 30 轮跑满也够不到，留形备续）。
+    { "kl_coef": 0.03, "lr": 0.00005 },
+  ],
+
+  // ── 预算 / 路径 ────────────────────────────────────────────────────────────
+  // 本腿总轮数：30（短腿，跑满即 verdict，不过即关账不续）。
+  "iters": 30,
+  // 墙钟上限（小时）。0 = 不按墙钟砍；12 = 工厂默认一班岗。
+  "max_hours": 12,
+  // 输出权重指针（每轮覆盖写）。
+  "out": "tmp/x2-acbc/weights.json",
+  // 轨迹/账本目录。关子集≠x2 语料身份（stages 进 corpus_fp），必须新目录，禁止续跑。
+  "traj": "tmp/x2-acbc",
+  // 归档目录与文件名前缀（it 后自动接 .itN.timestamp.json）。
+  "backup_dir": "nn-training/weights/x2-acbc",
+  "backup_prefix": "x2-acbc",
+
+  // ── 护栏 ───────────────────────────────────────────────────────────────────
+  // 熵熔断：entropy 连续低于阈值过多轮则停车（与 x2-start 同值）。
+  "ent_break": 0.25,
+
+  // ── 评估 ───────────────────────────────────────────────────────────────────
+  // ac/bc 双关：本关卡内 ID 2000-2001。每关各 eval_games_per_stage 局。
+  // 日常 50/关（2×50=100 局/次）；verdict 配对探针才上 200/关（见文件头）。
+  "eval_stages": "2000-2001",
+  "eval_games_per_stage": 50,
+  // 每 N 轮 eval 一次。
+  "eval_every": 5,
+}

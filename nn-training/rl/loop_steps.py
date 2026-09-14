@@ -157,6 +157,26 @@ def _remote_forward_agg(agg: dict) -> dict:
     }
 
 
+def kickstart_warn_kind(
+    *, kick_on: bool, smoke: bool, agg_kickstart: float, kick_coef: float
+) -> str:
+    """云端 kickstart 遥测为 0 时的定性：'warn' | 'expired' | 'ok'。
+
+    2026-09-08 vk1 事故的启动协议补丁只看了"遥测是不是 0"，没看"系数是不是
+    已到期"——x2-start it31 起系数按 0.5**30<NEGLIGIBLE_COEF 正常归零、训练侧
+    不再附 ref（loop_steps kick_live），worker 老实回 0 却被判"未执行缰绳"
+    误报。系数已不活跃时的 0 是预期行为（'expired'），只在系数仍活跃却无
+    遥测时判 'warn'（旧代码/会话钉住的真事故）。
+    """
+    if not kick_on or smoke:
+        return "ok"
+    if float(agg_kickstart) != 0.0:
+        return "ok"
+    if not coef_active(kick_coef):
+        return "expired"
+    return "warn"
+
+
 def kickstart_coef(args: Any, it: int) -> float:
     """BC 缰绳系数：按 run 原点（it=1）衰减，loop 重启不复位。
 
@@ -825,10 +845,23 @@ class TrainingSteps:
         # 启动协议补丁（2026-09-08 vk1 事故）：kickstart_ref 已要求时，it1 校准把
         # 「缰绳真实落地」做进循环——云端 agg 无 kickstart 键或值恒 0 = worker 没跑
         # 缰绳（旧代码/模块钉住），响亮警示而非静默裸奔；正常值应为 0.1~0.6 量级。
-        if kick_on and not result.get("smoke") and float(self._agg.get("kickstart", 0.0)) == 0.0:
+        # 2026-09-14 x2-start it31 豁免：系数按几何衰减到期归零后（kick_kl 不活跃、
+        # 训练侧不再附 ref），worker 回 0 是预期行为，不得误报（kickstart_warn_kind）。
+        _kick_kind = kickstart_warn_kind(
+            kick_on=kick_on,
+            smoke=bool(result.get("smoke")),
+            agg_kickstart=float(self._agg.get("kickstart", 0.0)),
+            kick_coef=kick_kl,
+        )
+        if _kick_kind == "warn":
             log(
                 f"[run_rl] WARN remote it{it}: kickstart_ref 已要求（kk 衰减调度激活）"
                 "但云端结果 kickstart=0——worker 未执行缰绳？查 worker 代码/会话新鲜度"
+            )
+        elif _kick_kind == "expired":
+            log(
+                f"[run_rl] remote it{it}: kickstart 系数已衰减到期（kk={kick_kl:g}）——"
+                "worker 未上报距离属预期，不告警"
             )
         log(
             f"[run_rl] remote ppo it{it}: job {jid} accepted — "

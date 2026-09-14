@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from rl.config import CourseConfig, PpoScheduleEntry, RewardBlock
-from rl.loop_steps import TrainingSteps, _remote_forward_agg
+from rl.loop_steps import TrainingSteps, _remote_forward_agg, kickstart_warn_kind
 
 # 与 p4-onset 课程同形的分段表 + 已知可编译的奖励公式（build_reward_fn 白名单内）。
 SCHEDULE = [
@@ -89,6 +89,21 @@ def test_remote_forward_agg_old_worker_defaults() -> None:
     out = _remote_forward_agg(agg)
     assert out["kickstart"] == 0.0
     assert out["kl"] == 0.4
+
+
+def test_kickstart_warn_kind() -> None:
+    """x2-start it31 误报回归：系数衰减到期后的 agg kickstart=0 是预期行为，
+    不得判 warn（只在系数仍活跃却无遥测时告警 worker 未执行缰绳）。"""
+    # 系数活跃 + 无遥测 = 真事故（2026-09-08 vk1 案）→ warn
+    assert kickstart_warn_kind(kick_on=True, smoke=False, agg_kickstart=0.0, kick_coef=0.5) == "warn"
+    assert kickstart_warn_kind(kick_on=True, smoke=False, agg_kickstart=0.0, kick_coef=1.0) == "warn"
+    # 系数已到期（x2-start it31 实测 0.5**30=9.3e-10 < NEGLIGIBLE_COEF）→ expired，不告警
+    assert kickstart_warn_kind(kick_on=True, smoke=False, agg_kickstart=0.0, kick_coef=0.5**30) == "expired"
+    assert kickstart_warn_kind(kick_on=True, smoke=False, agg_kickstart=0.0, kick_coef=0.0) == "expired"
+    # 有遥测 / 未要求缰绳 / 冒烟轮 → ok（与旧行为一致：不告警）
+    assert kickstart_warn_kind(kick_on=True, smoke=False, agg_kickstart=0.18, kick_coef=0.5) == "ok"
+    assert kickstart_warn_kind(kick_on=False, smoke=False, agg_kickstart=0.0, kick_coef=0.5) == "ok"
+    assert kickstart_warn_kind(kick_on=True, smoke=True, agg_kickstart=0.0, kick_coef=0.5) == "ok"
 
 
 def test_course_iter_folds_lr_into_args_remote() -> None:

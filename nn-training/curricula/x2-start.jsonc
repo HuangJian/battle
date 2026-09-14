@@ -58,9 +58,13 @@
   "level": "arena2",
 
   // ── 采集 / 语料 ────────────────────────────────────────────────────────────
-  // 每轮 rollout 局数（= seed_rotate）。c01-c03 局短、transition 少，
-  // 工厂定 600：一轮才够凑 mini-batch，避免「一轮几千帧学不动」（hy E3）。
-  "seed_rotate": 600,
+  // 每关每轮 rollout 局数（实现语义：每关抽 seed_rotate 个新 seed，
+  // 全轮 = seed_rotate × 关数；见 rl/course.py build_pairs）。
+  // arena2 六关 × 40 = 240 局/轮（v2 实测 150~300 局差别不大，先按小批量快迭代；
+  // 若 advantage/value 噪声大再往上加）。
+  // 注意：单关课 seed_rotate 即总量，多关课必须除以关数——600 在此会采 3600/轮
+  // （2026-09-14 it1 实测教训）。
+  "seed_rotate": 40,
   // 并发采样 worker 数（LAN 节点槽位合计；8 = 本机+局域网常见配额）。
   "workers": 8,
 
