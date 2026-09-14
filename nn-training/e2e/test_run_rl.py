@@ -762,6 +762,69 @@ def test_it_eval_deferred(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
 
 
 @pytest.mark.heavy
+def test_it_eval_post_ppo_weights(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """P0 回归：延迟派发评估的是归档 W(M)（标权重轮 M），不是活指针。
+
+    旧语义在第 N 轮派发读活指针（= W(N-1)）却标 itN；新语义第 N 轮为 W(N-1)
+    派发，读不可变归档。本用例把活指针与归档写成不同字节：若实现回退到读活
+    指针，行 wver 即与归档指纹分叉，测试变红。
+    """
+    from rl.loop_steps import TrainingSteps
+
+    srv, WEIGHTS, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
+    try:
+        traj = tmp_path / "i10"
+        traj.mkdir()
+        bak = tmp_path / "bak"
+        bak.mkdir()
+        WEIGHTS.write_text('{"w": 6}')  # 活指针 = W6（模拟第 6 轮 PPO 尚未覆盖…实为已前移态）
+        arch5 = bak / "x.it5.20260101-000000.json"
+        arch5.write_text('{"w": 5}')  # 归档 W5：派发必须读这份
+        cfg["policy"]["evalLocalSlots"] = 0  # 纯远端断言，不跑本机直跑
+        a = types.SimpleNamespace(
+            **{
+                **vars(args),
+                "mode": "per-tick",
+                "out": str(WEIGHTS),
+                "backup_dir": str(bak),
+                "backup_prefix": "x",
+                "eval_games_per_stage": 1,
+                "eval_stages": "0-1",
+                "eval_window_sec": 120,
+                "smoke": False,
+            }
+        )
+        ts = TrainingSteps()
+        ts.args = a
+        ts.bun = bun
+        ts._traj_dir = traj / "it6"
+        ts._traj_dir.mkdir(parents=True)
+        ts._jsonl_path = traj / "training_log.jsonl"
+        ts._report = {"winRate": 0.5}
+        ts._eval_on_round = lambda m: m % 5 == 0  # type: ignore[method-assign,assignment]
+        ts._dispatch_delayed_eval(6, cfg)
+        check(ts._eval_thread is not None, "I10 delayed eval dispatched for round 6")
+        assert ts._eval_thread is not None
+        ts._eval_thread.join(timeout=120)
+        fp5 = dist_common.weights_fingerprint(str(arch5))
+        fp6 = dist_common.weights_fingerprint(str(WEIGHTS))
+        check(fp5 != fp6, "I10 fixture sanity: archive/live bytes differ")
+        rows = [
+            json.loads(line)
+            for line in (traj / "eval_log.jsonl").read_text(encoding="utf-8").splitlines()
+            if '"event": "eval"' in line
+        ]
+        check(len(rows) == 2, f"I10 2 eval games landed (got {len(rows)})")
+        check(all(r["iter"] == 5 for r in rows), "I10 rows labeled weights-round 5")
+        check(
+            all(r["wver"] == fp5[:16] for r in rows),
+            "I10 rows ran archive W5 bytes (not live pointer)",
+        )
+    finally:
+        srv.shutdown()
+
+
+@pytest.mark.heavy
 def test_it_precollect_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     srv, WEIGHTS, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
     try:

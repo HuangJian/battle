@@ -14,6 +14,7 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
+from typing import Any
 
 import dist_common
 
@@ -33,6 +34,51 @@ from rl.eval_local import (
 )
 from rl.log import log
 from rl.queue import _record_agent_meta, bun_version, mm
+
+
+def select_delayed_eval_it(dispatch_it: int, is_eval_round) -> int | None:
+    """延迟 eval 派发轮选择（P0 修复：in-loop eval 曾恒取 W(N-1) 却标 itN）。
+
+    第 dispatch_it 轮采集收官后，可评估的最新已完成权重是 W(dispatch_it-1)
+    （本轮 PPO 尚未跑）。返回应评估的权重轮 M，无则 None。
+    M 从 1 起：W(0)=init 权重由 it0 基线流覆盖，A-eval 不重复。
+    纯函数（可单测）；调用方（loop）负责实际派发与对账。
+    """
+    m = dispatch_it - 1
+    if m < 1:
+        return None
+    return m if is_eval_round(m) else None
+
+
+def find_archive_weights(backup_dir: str, backup_prefix: str, it: int) -> str | None:
+    """归档目录里定位 itN 权重（`{prefix}.it{N}.*.json`，取最新）。
+
+    P0 修复：延迟派发读不可变归档而非活指针——wver 与离线复跑同源，
+    且天然免疫 PPO 落盘竞态与断点续跑后的指针前移。缺席返回 None
+    （归档失败是非致命的；调用方回落活指针 + 响亮日志）。
+    """
+    if not backup_dir or not backup_prefix:
+        return None
+    _repo_root: Any = None
+    try:
+        from rl.archive import REPO_ROOT
+
+        _repo_root = REPO_ROOT
+    except Exception:
+        pass
+    import os
+
+    bdir = backup_dir
+    if _repo_root is not None and not os.path.isabs(bdir):
+        bdir = str(_repo_root / bdir)
+    try:
+        cands = sorted(
+            Path(bdir).glob(f"{backup_prefix}.it{it}.*.json"),
+            key=lambda p: p.stat().st_mtime,
+        )
+    except OSError:
+        return None
+    return str(cands[-1]) if cands else None
 
 
 class EvalDispatcher:

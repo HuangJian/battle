@@ -269,6 +269,10 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 # yield：rollout 抢占集群 —— 关 evalboard 窗，在途 B/C 局停派新 seed。
                 self._evalboard_yield()
                 self._rollout_phase(it, pairs, dist_cfg, self._eval_on_round(it))
+                # P0 修复：为上一轮已完成权重 W(it-1) 派发干净评估（读归档、标权重轮），
+                # 游戏藏进随后 PPO(it) 空窗。串行路径此前在此处派发读活指针 = W(it-1)
+                # 却标 itN（标签超前一轮）；stream/intent/m1/基线路径维持原语义。
+                self._dispatch_delayed_eval(it, dist_cfg)
                 # it0 基线（bc 权重）：rollout 收官后派发，落账前每轮重试（2026-09-12 用户）
                 self._maybe_dispatch_baseline_eval(dist_cfg)
                 self._log_report(it, t_rollout)
@@ -352,6 +356,10 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 time.sleep(30)
                 it -= 1  # 同上：失败迭代不前跳，杜绝静默跳轮丢语料
 
+        # P0 收官 drain（用户指令：最终轮立即 eval）：循环结束（跑满/break/预算）
+        # 后，为最新已完成且无完整 summary 的评估轮权重派发并等收官。smoke 轮跳过。
+        if not smoke_void:
+            self._drain_pending_eval()
         if self._tripped is not None:
             sys.exit(CIRCUIT_EXIT_CODE)
         print(f"[{time.strftime('%H:%M:%S')}] [run_rl] ALL DONE -> {args.out}")

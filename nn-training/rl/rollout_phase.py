@@ -231,25 +231,17 @@ def dispatch_rollout_phase(
                 local_slots_max=local_slots_max_of(args),
                 course_fp=course_fp,
             )
-            # 串行：rollout 返回即 collector 收官；后台评估藏进随后的长 ppo_backend 空窗
-            # 吞吐 T3：A-eval 仅 eval 轮。B/C（evalboard）由 TrainingLoop idle 窗领取。
-            if eval_on_round:
-                if args.mode == "per-tick":
-                    eval_thread = dispatch_eval_bg(
-                        bun,
-                        args.out,
-                        traj_dir,
-                        args,
-                        dist_cfg,
-                        iter_id,
-                        it,
-                        report["winRate"],
-                        local_gate=eval_gate,
-                    )
-                else:
-                    eval_thread = dispatch_eval_bg_m1(
-                        bun, args.out, args, it, jsonl_path, args.baseline
-                    )
+            # 串行：rollout 返回即 collector 收官。per-tick A-eval 不在此派发——
+            # P0 修复：此处派发读到的活指针还是 W(it-1)（本轮 PPO 未跑）却标 itN。
+            # 改由 loop 主循环在采集收官后调 _dispatch_delayed_eval：为上一轮权重
+            # W(it-1) 派发（读不可变归档，标权重轮），游戏仍藏进随后 PPO 空窗。
+            # （stream 路径的 _fire_eval 维持原语义；eval_on_round 参数保留给它用，
+            # 串行 per-tick 分支不再消费。）
+            # intent/goal 走 m1 独立语义（止损判门依赖同轮 summary），原样保留。
+            if eval_on_round and args.mode in ("intent", "goal"):
+                eval_thread = dispatch_eval_bg_m1(
+                    bun, args.out, args, it, jsonl_path, args.baseline
+                )
     else:
         report = run_rollout(bun, args.out, traj_dir, pairs, args)
     # P4-W2 归属（S9 收窄）：dispatch 报告带 course（短名）——跨课对账/审计用，
