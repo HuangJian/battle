@@ -122,7 +122,7 @@ function startSupervisor(): ReturnType<typeof createSupervisor> {
     const r = launchSpec(fresh)
     // 回灌原槽位（per-course）；无课程走旧扁平键
     saveAnyComponent(key, course, {
-      ...(entryForCourse(loadRegistry(), key, course) ?? {}),
+      ...entryForCourse(loadRegistry(), key, course),
       pid: r.pid,
       course: course,
       entry: fresh.sentinels[fresh.sentinels.length - 1],

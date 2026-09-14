@@ -87,9 +87,10 @@ export function applyPushNodeConfig(
   if (idx >= 0) nodes[idx] = { ...nodes[idx], ...base }
   else nodes.push(base)
   cfg.nodes = nodes
-  cfg.courses = { ...(cfg.courses ?? {}) }
+  // 展开可能为 undefined 的旧值即得新副本（spread 忽略 undefined，无需 `?? {}` 回退）。
+  cfg.courses = { ...cfg.courses }
   cfg.courses[course] = {
-    ...(cfg.courses[course] ?? {}),
+    ...cfg.courses[course],
     push_node_url: url,
   }
   return cfg
@@ -125,8 +126,8 @@ export function applyLocalPushNodeConfig(
   if (idx >= 0) nodes[idx] = { ...nodes[idx], ...base }
   else nodes.push(base)
   cfg.nodes = nodes
-  cfg.courses = { ...(cfg.courses ?? {}) }
-  cfg.courses[course] = { ...(cfg.courses[course] ?? {}), push_node_url: url }
+  cfg.courses = { ...cfg.courses }
+  cfg.courses[course] = { ...cfg.courses[course], push_node_url: url }
   return cfg
 }
 
@@ -226,8 +227,8 @@ export async function configurePushEndpoint(
     const hit = await findHealthyGpuPushNode(cfg)
     if (hit) {
       const url = String(hit.url).replace(/\/+$/, '')
-      cfg.courses = { ...(cfg.courses ?? {}) }
-      cfg.courses[course] = { ...(cfg.courses[course] ?? {}), push_node_url: url }
+      cfg.courses = { ...cfg.courses }
+      cfg.courses[course] = { ...cfg.courses[course], push_node_url: url }
       saveConfig(cfg)
       return { url, source: 'config', viaLocalWorker: hit.local_push === true }
     }

@@ -222,7 +222,7 @@ export function saveCourseComponent(
 ): void {
   const reg = loadRegistry()
   const plural = PLURAL[key]
-  reg[plural] = { ...(reg[plural] ?? {}), [course]: { ...entry, course } }
+  reg[plural] = { ...reg[plural], [course]: { ...entry, course } }
   saveRegistry(reg)
 }
 

@@ -90,8 +90,9 @@ describe('console/api.buildStateView', () => {
     const none = 'push-probe-none'
     try {
       const cfg = JSON.parse(prev) as Record<string, unknown>
+      const courses = (cfg.courses as Record<string, unknown>) ?? {}
       cfg.courses = {
-        ...((cfg.courses as Record<string, unknown>) ?? {}),
+        ...courses,
         [cloud]: { push_node_url: 'https://127.0.0.1:1' },
         [none]: { slot: 1 },
       }

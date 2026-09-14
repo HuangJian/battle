@@ -173,7 +173,10 @@ export function readLogTail(
       const whole = readFileSync(abs)
       let n = 0
       let idx = whole.indexOf(10)
-      while (idx !== -1) (n++, (idx = whole.indexOf(10, idx + 1)))
+      while (idx !== -1) {
+        n++
+        idx = whole.indexOf(10, idx + 1)
+      }
       if (whole.length > 0 && whole[whole.length - 1] !== 10) n++
       totalLines = n
     } catch {
