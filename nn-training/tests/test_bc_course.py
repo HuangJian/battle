@@ -427,6 +427,29 @@ def test_finish_all_rounds_issues_cloud_halt(tmp_path: Path, monkeypatch) -> Non
     assert any("停机操作跳过" in m for m in msgs2)
 
 
+def test_bc_run_start_event_is_segmentation_anchor() -> None:
+    """2026-09-14 混轮修复：`run_start` 是 console 的**分段锚**。
+
+    同一份 training_log.jsonl 被多轮复用（traj 不变、只换语料口径）⇒ 两轮 bc_epoch
+    同挂 it=1 ⇒ console 面板把它们拼成一条曲线（实测上一轮 59 行 + 本轮 150 行）。
+    console 侧靠本事件的 `event` 定位最后一段，故字段不能随意改名。
+    """
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import run_bc
+
+    c = load_bc_course("bc-c4-v3")
+    e = run_bc.bc_run_start_event(c, "bc-c4-v3", run_id="bc-unit-test")
+    assert e["event"] == "run_start"
+    assert e["runId"] == "bc-unit-test"
+    assert e["course"] == "bc-c4-v3"
+    assert e["epochs"] == int(c.train.epochs)
+    assert e["seed"] == int(c.train.seed)  # R1 两臂的同一口径锚
+    assert e["fire_pos_weight"] == c.train.fire_pos_weight
+    assert isinstance(e["ts"], float)
+
+
 def test_bc_job_extra_keeps_auto_fire_pos_weight() -> None:
     """2026-09-14 事故回归：job `extra` 必须**原值直传**课程配置。
 

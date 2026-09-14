@@ -81,9 +81,27 @@ export function bcRowsFromLedgerTail(lines: string[]): {
 } {
   const epochs: BcEpochRow[] = []
   const evals: BcEvalRow[] = []
+  // 只认**最近一次 run_start 之后**的行（2026-09-14 混轮修复）。run_bc 每轮启动写
+  // run_start（含 runId/epochs/seed），而 bc_epoch / bc_eval 全部留在同一份账本里：
+  // traj 目录不变、只换语料口径时，两轮的数据会挂同一个 it=1 —— 不过滤就会把上一轮
+  // 的 59 行与本轮的 150 行拼成一条曲线（实测 10:38 那轮）。无 run_start（旧账本、
+  // 纯 local 训练）⇒ 不过滤，保持原行为。
+  let from = 0
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const t = lines[i]!.trim()
+    if (!t) continue
+    try {
+      if ((JSON.parse(t) as { event?: string }).event === 'run_start') {
+        from = i
+        break
+      }
+    } catch {
+      /* 坏行跳过 */
+    }
+  }
   const num = (v: unknown): number | null =>
     typeof v === 'number' && Number.isFinite(v) ? v : null
-  for (const line of lines) {
+  for (const line of lines.slice(from)) {
     const t = line.trim()
     if (!t) continue
     let r: Record<string, unknown>

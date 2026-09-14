@@ -357,6 +357,27 @@ def bc_job_extra(course: BcCourseConfig, it: int, *, smoke: bool = False) -> dic
     }
 
 
+def bc_run_start_event(course: BcCourseConfig, course_key: str, run_id: str = "") -> dict:
+    """`run_start` 事件载荷（2026-09-14 分段锚）。
+
+    console 的 epoch/eval 面板按「最后一次 run_start 之后」过滤 bc_epoch / bc_eval
+    （`dashboard/src/server/api/ledger.ts::bcRowsFromLedgerTail`）。为什么需要它：同一份
+    training_log.jsonl 会被多轮复用（traj 不变、只换语料口径），两轮数据同挂 `it=1`
+    —— 不分段就会被拼成一条曲线（实测：上一轮 59 行 + 本轮 150 行）。
+    抽成纯函数以便单测锁住字段（console 侧依赖 `event` 与 `runId`）。
+    """
+    return {
+        "event": "run_start",
+        "runId": run_id or RUN_ID,
+        "course": course_key,
+        "iters": int(course.iters),
+        "epochs": int(course.train.epochs),
+        "seed": int(course.train.seed),
+        "fire_pos_weight": course.train.fire_pos_weight,
+        "ts": time.time(),
+    }
+
+
 def _ledger_bc_epoch(jsonl_path: Path, it: int, row: dict) -> None:
     """bc_epoch 账本事件（控制台 epoch 指标面板数据源）。"""
     _append_ledger(
@@ -785,6 +806,13 @@ def main() -> None:
     code_bytes: bytes | None = None
     try:
         done_rounds = completed_rounds(jsonl_path)
+        # run_start：本轮启动的**分段锚**（2026-09-14 混轮修复）。同一份 training_log.jsonl
+        # 会被多轮复用（traj 不变、只换语料口径），若不分段，console 的 epoch/eval 面板会把
+        # 两轮拼成一条曲线 —— 实测 09:5x：旧轮 59 行 bc_epoch 与新轮 150 行同挂 it=1。
+        # console 侧按「最后一次 run_start 之后」过滤（dashboard ledger.ts::bcRowsFromLedgerTail）；
+        # smoke 轮不写（冒烟不得污染真轮的账本语义）。
+        if not args.smoke:
+            _append_ledger(jsonl_path, bc_run_start_event(course, course_key))
         for it in range(1, int(course.iters) + 1):
             if it in done_rounds:
                 log(f"[run_bc] it{it}: 账本已有 bc_round_completed — 跳过（断点续跑）")
@@ -931,7 +959,6 @@ def _finish_all_rounds(
 
     BC 完成即退出进程（不学 RL 的 parking：BC 无 idle 期评估业务），故收敛在以上三件。
     """
-    log("[run_bc] ALL DONE — 全轮完成，weights 已落位归档")
     if hub_url and token:
         try:
             from remote.hub_client import set_cloud_halt
@@ -959,6 +986,11 @@ def _finish_all_rounds(
         )
     except Exception as e:  # 落账失败只影响 console 横幅派生，不改变训练结果
         log(f"[run_bc] run_complete 落账失败（仅 console 横幅派生缺失）: {e}")
+    # ⚠️ `ALL DONE` 必须是**最后一行**（2026-09-14 实测踩坑）：console 的
+    # `exit-watchdog.tailNormalCompletion` 只取日志的**最后一个非空行**判断是否正常完成
+    # ——把它写在停机提示之前 ⇒ 尾行是"云机可释放…" ⇒ 明明跑完仍被标「意外退出」
+    # （第一版就是这样：10:38:30 完成、10:38:35 console 依旧弹红告警）。
+    log("[run_bc] ALL DONE — 全轮完成，weights 已落位归档")
 
 
 def _archive_round(
