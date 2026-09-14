@@ -90,9 +90,11 @@ def test_bc_corpus_identity_fp_covers_obs_schema(monkeypatch: pytest.MonkeyPatch
     # ① 旧（不含 schema）时代的 fp —— 就是会被回放的那个 iterId 分量。修复后必须不同。
     assert not fp.startswith("f60406b20e78"), "fp 仍是旧 era 值 ⇒ 旧缓存会被回放"
 
-    # ② 语料参数相同 ⇒ 同一身份（bc-c4-v3 就是 bc-c4 在 v3 上的重跑，不是新语料）。
-    # 必须在 monkeypatch **之前**算：补丁一改指纹，两边算出的 fp 就不同了。
-    assert bc_corpus_identity_fp(load_bc_course("bc-c4-v3")) == fp
+    # ② 语料参数不同 ⇒ 身份必须不同。2026-09-14 前 bc-c4-v3 与 bc-c4 参数逐字相同
+    #    （同一语料在 v3 上重跑 ⇒ 同 fp）；此后 bc-c4-v3 按「资源充裕」放大到
+    #    300 局 / 150 epoch / auto fire_pos_weight —— 已是**另一份语料**，fp 必须变。
+    #    （若将来把两者参数改回全同，本断言应改回 `==`。）
+    assert bc_corpus_identity_fp(load_bc_course("bc-c4-v3")) != fp
 
     # ③ schema 的两个分量各自都在 payload 里（改任一个，身份必须变）。
     monkeypatch.setattr(schema, "OBS_SCHEMA_MAJOR", schema.OBS_SCHEMA_MAJOR + 1)
@@ -351,3 +353,92 @@ def test_run_bc_finish_all_rounds_writes_run_complete(tmp_path: Path) -> None:
     assert e["event"] == "run_complete"
     assert e["iter"] == 3 and e["iters"] == 3
     assert "BC" in e["reason"]
+    # 2026-09-14：收尾必须提示「云机可释放」（pull 架构下不给无 job 的 worker 发假停机令）
+    assert any("云机可释放" in m for m in msgs)
+
+
+# ------------------------------------------------------- 2026-09-14 可行动项
+
+
+def test_bc_job_extra_keeps_auto_fire_pos_weight() -> None:
+    """2026-09-14 事故回归：job `extra` 必须**原值直传**课程配置。
+
+    `fire_pos_weight` 曾被写成 `float(course.train.fire_pos_weight)`，而课程值允许
+    `"auto"` ⇒ `float("auto")` 抛 ValueError ⇒ BC 采完语料 publish 时直接崩。
+    """
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import run_bc
+
+    c = load_bc_course("bc-c4-v3")
+    ex = run_bc.bc_job_extra(c, 2)
+    assert ex["fire_pos_weight"] == "auto"  # 原值，不被 float 化
+    assert ex["train_seed"] == int(c.train.seed)
+    assert ex["arch"] == str(c.train.arch)
+    assert ex["notes"].endswith("it=2 smoke=False")
+    # 数字型配置同样原样透传
+    c2 = c.model_copy(update={"train": c.train.model_copy(update={"fire_pos_weight": 3.5})})
+    assert run_bc.bc_job_extra(c2, 1)["fire_pos_weight"] == 3.5
+
+
+def test_resolve_bc_seed_prefers_course_seed() -> None:
+    """R1 前置：BC job 的 `train_seed`（课程 train.seed）必须优先于 per-job 种子。
+
+    旧行为下云端 BC 用 `job_seed(runId, it, init_weights_fp)`，runId 每轮都变 ⇒
+    ① 同课程重跑不可复现；② v2/v3 两臂 seed 不同 ⇒ val 划分不同 ⇒ val_loss 不可比。
+    键名用 `train_seed`：manifest 里 `seed` 已有 hex per-job 占位的历史口径
+    （tests/test_bc_epoch_e2e.py 的 fixture），不复用避免歧义。
+    """
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from remote.worker import resolve_bc_seed
+
+    base = {"runId": "bc-abc", "it": 1, "init_weights_fp": "bc", "seed": "1a2b3c4d"}
+    per_job, src1 = resolve_bc_seed(dict(base))
+    assert src1 == "per-job" and isinstance(per_job, int)
+    # 同 runId 重发 → 同一种子（D5 幂等语义保持不变）
+    assert resolve_bc_seed(dict(base)) == (per_job, "per-job")
+    # 显式课程 seed 优先且稳定
+    with_seed = dict(base, train_seed=1234)
+    assert resolve_bc_seed(with_seed) == (1234, "course")
+    assert resolve_bc_seed(dict(with_seed)) == (1234, "course")
+    # seed=0 也要被当作"显式指定"（0 是合法种子，不能用 falsy 判断吞掉）
+    assert resolve_bc_seed(dict(base, train_seed=0)) == (0, "course")
+
+
+def test_resolve_fire_pos_weight() -> None:
+    """fire 头正例权重解析：auto = 训练集 neg/pos；数字直用；0/None 关闭。"""
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from train.bc import resolve_fire_pos_weight
+
+    counts = {"move": {}, "fire": {0: 5969, 1: 473}}
+    assert abs(resolve_fire_pos_weight("auto", counts) - 5969 / 473) < 1e-9
+    assert resolve_fire_pos_weight("auto", counts) == resolve_fire_pos_weight("AUTO", counts)
+    assert resolve_fire_pos_weight(3.5, counts) == 3.5
+    # 本机 CLI 路径把配置值 str() 后传参 ⇒ 字符串数字必须能用（"0.0"/"3.5"）
+    assert resolve_fire_pos_weight("3.5", counts) == 3.5
+    assert resolve_fire_pos_weight("0.0", counts) == 0.0
+    assert resolve_fire_pos_weight(0, counts) == 0.0
+    assert resolve_fire_pos_weight(None, counts) == 0.0
+    with pytest.raises(ValueError):
+        resolve_fire_pos_weight("nope", counts)
+    # 没有正例时不炸（权重退化为 0 = 关闭）
+    assert resolve_fire_pos_weight("auto", {"fire": {0: 10}}) == 0.0
+
+
+def test_bc_c4_v3_corpus_scaled_up() -> None:
+    """2026-09-14：bc-c4-v3 课程按用户指令放大语料与轮次（CPU/GPU 资源充裕）。
+
+    原口径 40 局 × 60 epoch ⇒ kept 29 局 / 6442 样本，70k 参数学生 11 轮进平台。
+    """
+    c = load_bc_course("bc-c4-v3")
+    assert c.corpus.games_per_stage >= 300
+    assert c.corpus.seed_rotate >= c.corpus.games_per_stage  # 多轮种子不重叠
+    assert c.train.epochs >= 150
+    assert str(c.train.fire_pos_weight) == "auto"
+    assert c.eval.games_per_stage >= 30
+    assert c.train.seed == 1234  # R1 两臂统一口径的锚

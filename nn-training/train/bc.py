@@ -90,7 +90,12 @@ def _bc_raw(model: torch.nn.Module) -> torch.nn.Module:
     return model.module if isinstance(model, torch.nn.DataParallel) else model
 
 
-def _masked_ce(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+def _masked_ce(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    class_weight: torch.Tensor | None = None,
+) -> torch.Tensor:
     """合法类掩码 CE（P1-8 修复，2026-09-02）。
 
     旧实现 `(per * m) / m.clamp(min=1)` 是**恒等式**：m≥1 时 = per，mask 100% 无效
@@ -107,7 +112,7 @@ def _masked_ce(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -
     if not keep.any():
         return logits.sum() * 0.0  # 无可训练样本（全为单合法类）
     z = logits.masked_fill(~m, -1e9)
-    per = F.cross_entropy(z[keep], target[keep], reduction="none")
+    per = F.cross_entropy(z[keep], target[keep], reduction="none", weight=class_weight)
     return per.mean()
 
 
@@ -200,12 +205,8 @@ def _append_weights_md(
         f.write(row)
 
 
-def _majority_baseline(dl) -> dict:
-    """CE if we always predict the most frequent class per head.
-
-    Provides a floor to interpret the trained val_loss against (audit gap #2):
-    is 1.2431 near the majority-class ceiling, or is there real signal learned?
-    """
+def _class_counts(dl) -> dict:
+    """训练集各头类别计数（2026-09-14 抽出）：多数类基线与 fire 正例权重的共同数据源。"""
     c_m: Counter[int] = Counter()
     c_f: Counter[int] = Counter()
     for batch in dl:
@@ -213,8 +214,17 @@ def _majority_baseline(dl) -> dict:
         for t, c in ((mv, c_m), (fr, c_f)):
             for v in t.tolist():
                 c[v] += 1
+    return {"move": c_m, "fire": c_f}
+
+
+def _majority_baseline(dl) -> dict:
+    """CE if we always predict the most frequent class per head.
+
+    Provides a floor to interpret the trained val_loss against (audit gap #2):
+    is 1.2431 near the majority-class ceiling, or is there real signal learned?
+    """
     out = {}
-    for name, c in (("move", c_m), ("fire", c_f)):
+    for name, c in _class_counts(dl).items():
         total = sum(c.values())
         if total == 0:
             out[name] = float("nan")
@@ -222,6 +232,32 @@ def _majority_baseline(dl) -> dict:
         maj = c.most_common(1)[0][1]
         out[name] = -math.log(maj / total)  # CE of constant majority prediction
     return out
+
+
+def resolve_fire_pos_weight(raw: object, counts: dict) -> float:
+    """fire 头正例权重（2026-09-14）：`"auto"` = 训练集 neg/pos（≈12.6）；数 = 直接用；
+    0/None = 关闭。为什么需要它：语料 fire 正例仅 ~7%，不加权的 CE 下 fire 头实测
+    accuracy 0.770 < "永不发射"常数基线 0.927 —— 即该头是负增益。
+
+    `raw` 来自三处：课程 JSONC（pydantic 已收窄为 float|"auto"）、本机 CLI（字符串）、
+    云端 manifest（float|"auto"）—— 故字符串分支同时接受 "auto" 与数字字面量。
+    """
+    c_f = counts.get("fire") or {}
+    if isinstance(raw, str):
+        s = raw.strip().lower()
+        if s == "auto":
+            pos = int(c_f.get(1, 0))
+            neg = int(c_f.get(0, 0))
+            return (neg / pos) if pos > 0 else 0.0
+        try:
+            return float(s)
+        except ValueError:
+            raise ValueError(f"fire_pos_weight 只接受数字或 'auto'，收到 {raw!r}") from None
+    if raw is None:
+        return 0.0
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise ValueError(f"fire_pos_weight 非法: {raw!r}")
+    return float(raw)
 
 
 def _sanitize_json(o):
@@ -257,6 +293,18 @@ def train(args) -> dict:
     # `--value-coef` 把 MC return 作为 value 头回归目标（M2 ⑥ 的 value MC 预置）。
     # 纯 BC（无 returns）沿用 StudentNet / NNPolicy 双头。
     dev_str, dev, use_dp = _resolve_bc_device(getattr(args, "device", "cpu"))
+    # fire 头正例权重（2026-09-14）：默认 auto = 训练集 neg/pos。放 dev 之后构造，
+    # 保证权重张量与 logits 同设备。
+    counts = _class_counts(train_dl)
+    fire_pos_weight = resolve_fire_pos_weight(getattr(args, "fire_pos_weight", 0.0), counts)
+    fire_class_weight = (
+        torch.tensor([1.0, float(fire_pos_weight)], device=dev) if fire_pos_weight > 0 else None
+    )
+    print(
+        f"[train] fire_pos_weight={fire_pos_weight:.2f}"
+        f"{'（正例加权开启）' if fire_class_weight is not None else '（关闭）'}"
+        f" fire counts neg={counts['fire'].get(0, 0)} pos={counts['fire'].get(1, 0)}"
+    )
     use_value = getattr(args, "value_coef", 0.0) > 0 and args.arch == "student"
     model = PPOStudent() if use_value else (StudentNet() if args.arch == "student" else NNPolicy())  # type: ignore
     if getattr(args, "resume", None):
@@ -308,7 +356,9 @@ def train(args) -> dict:
             opt.zero_grad()
             if use_value:
                 lm, lf, vpred = model(obs, sc)
-                loss = _masked_ce(lm, mv, mm) + _masked_ce(lf, fr, mf)
+                loss = _masked_ce(lm, mv, mm) + _masked_ce(
+                    lf, fr, mf, class_weight=fire_class_weight
+                )
                 valid = ~torch.isnan(ret)
                 if valid.any():
                     vloss = F.mse_loss(vpred.squeeze(-1)[valid], ret[valid])
@@ -317,7 +367,9 @@ def train(args) -> dict:
                     run["vn"] += int(valid.sum())
             else:
                 lm, lf = model(obs, sc)
-                loss = _masked_ce(lm, mv, mm) + _masked_ce(lf, fr, mf)
+                loss = _masked_ce(lm, mv, mm) + _masked_ce(
+                    lf, fr, mf, class_weight=fire_class_weight
+                )
             loss.backward()
             # P2-6f：梯度裁剪（与 ppo/engine.py、goal_bc.py 一致，max_norm=1.0）——
             # 此前 bc 无裁剪，坏批次（标注噪声）可一步炸权重。
@@ -339,6 +391,8 @@ def train(args) -> dict:
                 else:
                     lm, lf = model(obs, sc)
                 loss = _masked_ce(lm, mv, mm) + _masked_ce(lf, fr, mf)
+                # val 刻意**不计** fire 正例权重：val_loss 是"真实分布下的 CE"，
+                # 要能与 `_majority_baseline`（未加权）同尺度比较；加权只作用于优化目标。
                 if use_value:
                     valid = ~torch.isnan(ret)
                     if valid.any():
@@ -408,6 +462,10 @@ def train(args) -> dict:
         "sizes": sizes,
         "best_val_loss": round(float(best_val), 4),
         "history": history,
+        # 2026-09-14：把"地板"和补偿系数写进 checkpoint —— 只看 fire_acc 会误判
+        # （它可能低于"永不发射"的常数基线），必须能随权重回看这两个参照量。
+        "majority_ce": {k: _sanitize_json(v) for k, v in mb.items()},
+        "fire_pos_weight": float(fire_pos_weight),
     }
     meta = _sanitize_json(meta)
     out_dir = os.path.dirname(os.path.abspath(args.out))
@@ -434,6 +492,10 @@ def train(args) -> dict:
         # 远程 BC job（plan/bc-cloud-integration.plan.md §3）回传 metrics 用；
         # 本地 CLI 消费方忽略此键（行为不变）。
         "sizes": dict(sizes),
+        # 2026-09-14：多数类地板 + fire 补偿系数随 metrics 回传（console/账本可见）。
+        "majority_ce": {k: _sanitize_json(v) for k, v in mb.items()},
+        "fire_pos_weight": float(fire_pos_weight),
+        "class_counts": {k: dict(c) for k, c in counts.items()},
     }
 
 
@@ -509,6 +571,11 @@ def main():
     ap.add_argument("--val-split", type=float, default=0.1)
     ap.add_argument("--mirror-p", type=float, default=0.5, help="mirrorX augmentation prob")
     ap.add_argument("--seed", type=int, default=1234)
+    ap.add_argument(
+        "--fire-pos-weight",
+        default="auto",
+        help="fire 头 BCE 正例权重：'auto'（按训练集 neg/pos，≈12.6）/ 数字 / 0=关（默认 auto）",
+    )
     ap.add_argument("--num-workers", type=int, default=0)
     ap.add_argument(
         "--device",

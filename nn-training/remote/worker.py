@@ -539,6 +539,26 @@ def _bc_device(dev_str: str) -> str:
     return s or "cpu"
 
 
+def resolve_bc_seed(manifest: dict) -> tuple[int, str]:
+    """BC job 训练种子 → (seed, 来源标签)。
+
+    2026-09-14：`manifest["train_seed"]`（来自课程 `train.seed`，run_bc 经 extra 注入）
+    **优先**——R1（v2 vs v3 obs 对照）必须两臂同 seed 才能得到同一 val 划分
+    （`train/bc.py` 用 seed 做 `make_loaders` 的切分），否则 best_val_loss 不可比；
+    同时让同课程云端重跑可复现。
+    缺省（旧 job 无该键）回退 per-job 确定性种子（D5：同一 job 重发 chunk 逐字节一致
+    —— 但它含 runId，而 runId 每轮启动都变 ⇒ 复现性只限同一 job 的重发）。
+
+    键名刻意不用 `seed`：manifest 里 `seed` 已有历史口径（hex per-job 种子占位，
+    见 tests/test_bc_epoch_e2e.py 的 fixture，以及 dist_common 的 stage/seed 语义）。
+    """
+    explicit = manifest.get("train_seed")
+    if explicit is None:
+        seed_hex = job_seed(manifest["runId"], int(manifest["it"]), manifest["init_weights_fp"])
+        return int(seed_hex[:8], 16), "per-job"
+    return int(explicit), "course"
+
+
 def _run_bc_job(
     *,
     jid: str,
@@ -615,8 +635,8 @@ def _run_bc_job(
     from data.weights_io import save_weights_json
     from train.bc import train as bc_train
 
-    # per-job 确定性种子（D5 同式）：bc.train 内部播种 torch/numpy/random
-    seed_hex = job_seed(manifest["runId"], int(manifest["it"]), manifest["init_weights_fp"])
+    # 训练种子（2026-09-14 修正）：课程/调用方指定优先 —— 见 resolve_bc_seed。
+    seed_int, seed_src = resolve_bc_seed(manifest)
     dev = _bc_device(device)
     out_path = job_dir / "bc-weights.json"
     total_epochs = int(manifest["epochs"])
@@ -676,10 +696,13 @@ def _run_bc_job(
             lr=float(manifest["lr"]),
             val_split=float(manifest.get("val_split", 0.1)),
             mirror_p=float(manifest.get("mirror_p", 0.5)),
-            seed=int(seed_hex[:8], 16),
+            seed=seed_int,
             num_workers=0,
             device=dev,
             value_coef=float(manifest.get("value_coef", 0.0) or 0.0),
+            # fire 头正例权重（2026-09-14）：'auto' 或数字；旧 job 无此键 → 0.0
+            # （关闭 = 历史语义，重放旧 job 行为不变）。
+            fire_pos_weight=manifest.get("fire_pos_weight", 0.0),
             on_epoch=_on_epoch,
         )
         if resume_epoch:
@@ -689,7 +712,7 @@ def _run_bc_job(
             ns.epoch_offset = resume_epoch
         log(
             f"job {jid}: BC start arch={ns.arch} epochs={ns.epochs} batch={ns.batch} "
-            f"lr={ns.lr} device={dev} shards={len(shard_dirs)}"
+            f"lr={ns.lr} device={dev} seed={seed_int}({seed_src}) shards={len(shard_dirs)}"
             + (f" resume@{resume_epoch}" if resume_epoch else "")
         )
         metrics = bc_train(ns)

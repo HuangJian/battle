@@ -318,17 +318,38 @@ def publish_bc_job(
         mb=batch,
         lr=float(course.train.lr),
         kind="bc",
-        extra={
-            "arch": str(course.train.arch),
-            "val_split": float(course.train.val_split),
-            "mirror_p": float(course.train.mirror_p),
-            "value_coef": float(course.train.value_coef),
-            "ckpt_every": int(course.train.ckpt_every),
-            "notes": f"bc course={course.name} it={it} smoke={is_smoke}",
-        },
+        extra=bc_job_extra(course, it, smoke=is_smoke),
         log=log,
     )
     return manifest
+
+
+def bc_job_extra(course: BcCourseConfig, it: int, *, smoke: bool = False) -> dict:
+    """BC job manifest 的 `extra`（worker 侧消费：arch/val_split/mirror_p/value_coef/
+    ckpt_every/train_seed/fire_pos_weight/notes）。
+
+    抽成纯函数是为了让单测锁住「**原值直传**」这条纪律：2026-09-14 事故 ——
+    `fire_pos_weight` 曾被写成 `float(course.train.fire_pos_weight)`，而课程值允许
+    `"auto"` ⇒ `float("auto")` 直接 ValueError、BC 启动即崩。同理 `train_seed` 必须
+    int()（worker 用 int() 消费），其余数值键照旧收窄。
+    """
+    return {
+        "arch": str(course.train.arch),
+        "val_split": float(course.train.val_split),
+        "mirror_p": float(course.train.mirror_p),
+        "value_coef": float(course.train.value_coef),
+        "ckpt_every": int(course.train.ckpt_every),
+        # 训练种子（2026-09-14）：课程 `train.seed` 显式下发到云端 job ——
+        # ① 同课程重跑可复现；② R1（v2/v3 obs 对照）两臂能同 seed ⇒ 同 val 划分
+        # ⇒ val_loss 可比。键名用 `train_seed` 而非 `seed`：manifest 里 `seed` 已有
+        # hex per-job 占位的历史口径（tests/test_bc_epoch_e2e.py fixture），不复用。
+        "train_seed": int(course.train.seed),
+        # fire 头正例权重（2026-09-14）：语料 fire 正例仅 ~7%，不补偿则 fire_acc
+        # 低于"永不发射"常数基线（实测 0.770 < 0.927）。**原值直传**：数字或 "auto"
+        # （由 worker → train/bc.py::resolve_fire_pos_weight 解析）。
+        "fire_pos_weight": course.train.fire_pos_weight,
+        "notes": f"bc course={course.name} it={it} smoke={smoke}",
+    }
 
 
 def _ledger_bc_epoch(jsonl_path: Path, it: int, row: dict) -> None:
@@ -505,6 +526,8 @@ def train_local_bc(
         str(course.train.value_coef),
         "--seed",
         str(course.train.seed),
+        "--fire-pos-weight",
+        str(course.train.fire_pos_weight),
         "--ckpt-every",
         str(ckpt_every),
         "--device",
@@ -855,6 +878,14 @@ def _finish_all_rounds(jsonl_path: str | Path, iters: int, *, log=lambda _m: Non
     BC 完成即退出进程（不学 RL 的 parking：BC 无 idle 期评估业务），故仅需上述两处。
     """
     log("[run_bc] ALL DONE — 全轮完成，weights 已落位归档")
+    # 云机配额提示（2026-09-14）：BC 完成后本课程的 hub 不再有 job —— pull 模式的
+    # worker 只会空轮询（不烧 GPU，但占着机器）⇒ 明确提示释放。
+    # 注意：这里**不**下发 hub halt 达令 —— 达令是随 job 下发给领活 worker 的，
+    # 无 job 时收不到，下发只会造成"已停机"的假象（真实省配额姿势 = 云机侧 --once）。
+    log(
+        "[run_bc] 云机可释放：本轮语料与训练 job 均已完成，本课程不会再派 job"
+        "（云机侧用 `--once` 可在处理完一个 job 后自动退出，或直接关机）"
+    )
     try:
         from rl.events import write_run_complete
 

@@ -115,6 +115,11 @@ class BcTrainBlock(BaseModel):
     seed: int = 1234
     #: 每 N epoch 中途 checkpoint（{out}.ckpt.{epoch}）；0 = 关
     ckpt_every: int = 0
+    #: fire 头 BCE 的正例权重（2026-09-14）。语料 fire 正例仅 ~7%（1:12.6），不加权的
+    #: BCE 会让 fire 头退化成"几乎不发/乱发"：实测 fire_acc 0.770 < "永不发射"常数
+    #: 基线 0.927。`auto` = 按训练集 neg/pos 自动定（≈12.6）；显式数 = 直接用；
+    #: 0 = 关闭（旧行为，保持历史 checkpoint 语义）。
+    fire_pos_weight: float | Literal["auto"] = "auto"
 
     @field_validator("epochs")
     @classmethod
