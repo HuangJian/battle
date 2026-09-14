@@ -27,8 +27,10 @@ export async function componentViews(cfg: RlConfig, course: string): Promise<Com
         )
       } else if (status === 'running' && key === 'cloudflared') {
         healthy = e?.url ? await httpOk(`${e.url}/ping`, cfg.rl.remote_token, 2500) : null
-      } else if (status === 'running' && key === 'trainingLoop') {
-        healthy = true // 存活即健康（就绪以日志产出为准，见 iters 指标）
+      } else if (status === 'running' && (key === 'trainingLoop' || key === 'localWorker')) {
+        // 存活即健康：trainingLoop 就绪以日志产出为准（iters 指标）；localWorker 是
+        // 出站轮询者（没有 HTTP 端点可探），存活即它在轮询。
+        healthy = true
       }
       // 运行时动态查找（§374）：静态映射 ≠ 实际落盘文件（cloudflared 动态文件名、
       // 课程子目录日志、tmp 清理后重建）——组件表日志/尾行与 /log/<key> 页同源。

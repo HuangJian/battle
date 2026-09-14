@@ -92,6 +92,47 @@ def _gpu_push_nodes(remote_token: str, course_push_url: str = "") -> list[dict]:
     return out
 
 
+#: `--remote-transport` 的合法值（auto = 历史优先级：本课 gpu_push 节点 > hub）。
+REMOTE_TRANSPORTS: tuple[str, ...] = ("auto", "pull", "push")
+
+
+def resolve_transport(
+    mode: str,
+    hub_url: str,
+    token: str,
+    gpu_nodes: list[dict],
+) -> list[dict]:
+    """传输裁决（2026-09-15）→ **生效的 gpu_push 节点清单**（空 = 走 hub pull）。
+
+    `--remote-transport` 是**唯一**能压过「config 里有本课 gpu_push 节点就静默推云机」
+    的开关。控制台 local preset（本机独立 localWorker）必须钉 pull：某课用 push 跑过
+    一次后 `courses.<课>.push_node_url` 就留在 rl-config 里，不钉死则 job 全被推去云机，
+    本机 worker 永远领不到活——而且日志看起来「训练正常」（最贵的那种错误）。
+    auto 保持历史行为零变化（云机 pull/push preset 均不受影响）。
+
+    非法组合响亮 SystemExit（与 require_remote_transport 同风格：绝不静默回落）。
+    """
+    if mode == "auto":
+        return gpu_nodes
+    if mode == "pull":
+        if not hub_url or not token:
+            raise SystemExit(
+                "[run_rl] --remote-transport pull 需要 --remote-hub-url 与 --remote-token"
+                "（本地 hub 场景：控制台 local preset 会注入本机 hub）"
+            )
+        return []
+    if mode == "push":
+        if not gpu_nodes:
+            raise SystemExit(
+                "[run_rl] --remote-transport push 但没有可用的 gpu_push 节点——"
+                "检查 rl-config nodes[].gpu_push / courses.<课>.push_node_url / REMOTE_PUSH_NODE"
+            )
+        return gpu_nodes
+    raise SystemExit(
+        f"[run_rl] 未知 --remote-transport {mode!r}（只接受 {'|'.join(REMOTE_TRANSPORTS)}）"
+    )
+
+
 def require_remote_transport(
     hub_url: str,
     token: str,
@@ -696,8 +737,15 @@ class TrainingSteps:
         # 有 gpu_push 节点或 REMOTE_PUSH_NODE 时，payload/code 直推云机隧道，
         # hub_url 可缺省。token 仍要（pull 回落 / env 节点鉴权）；配置节点自带 authKey。
         push_url = _course_push_url(args)
-        gpu_nodes = _gpu_push_nodes(token, push_url)
+        transport = str(getattr(args, "remote_transport", "auto") or "auto")
+        gpu_nodes = resolve_transport(
+            transport, hub_url, token, _gpu_push_nodes(token, push_url)
+        )
         require_remote_transport(hub_url, token, gpu_nodes)
+        log(
+            f"[run_rl] remote ppo transport={transport} push_nodes={len(gpu_nodes)} "
+            f"hub={hub_url or '-'}"
+        )
         job_root = str(getattr(args, "remote_job_root", "") or "") or str(
             Path(args.traj) / "remote-jobs"
         )
@@ -809,7 +857,7 @@ class TrainingSteps:
             self._evalboard_idle(it, getattr(self, "_last_dist_cfg", None))
         # P3-W1b：本课 push_node_url 非空时只取 URL 匹配项（N:1 共享天然成立）；
         # 为空时沿用旧逻辑（全取，默认行为零变化）。gpu_nodes 已在上方解析。
-        if push_url and not os.environ.get("REMOTE_PUSH_NODE") and len(gpu_nodes) == 0:
+        if transport == "auto" and push_url and not os.environ.get("REMOTE_PUSH_NODE") and len(gpu_nodes) == 0:
             # F-B5：非空但匹配 0 个且无 env 注入 → 响亮失败（WARN + manifest 打标，
             # 不抛异常——抛异常致 loop 无限原地重试 hang；静默回落 pull 仍能正确训练，
             # 危险在误诊不在停机，配错 URL 必须一眼可见）。

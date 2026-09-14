@@ -39,9 +39,11 @@ import {
   isLoopbackAddress,
   isReadonlyAction,
   killPid,
+  killPidTree,
   shapeLoopbackNoProxy,
   waitUntil,
 } from '../core/net'
+import { COMPONENT_KILL_TREE } from '../core/types'
 import { entryForCourse, loadRegistry, saveAnyComponent } from '../core/registry'
 import { launchSpec } from '../core/proc'
 import { monitorTouch } from '../core/reload-touch'
@@ -113,11 +115,14 @@ function startSupervisor(): ReturnType<typeof createSupervisor> {
       )
       return oldPid
     }
-    await killPid(oldPid)
+    // 带子进程监督器的组件（localWorker）必须整树停：只杀父进程会给重启后的新实例
+    // 留一个抢同一 hub job 的孤儿（判定唯一来源 types.COMPONENT_KILL_TREE）。
+    if (COMPONENT_KILL_TREE.has(key)) await killPidTree(oldPid)
+    else await killPid(oldPid)
     const r = launchSpec(fresh)
     // 回灌原槽位（per-course）；无课程走旧扁平键
     saveAnyComponent(key, course, {
-      ...(entryForCourse(loadRegistry(), key, course) ?? {}),
+      ...entryForCourse(loadRegistry(), key, course),
       pid: r.pid,
       course: course,
       entry: fresh.sentinels[fresh.sentinels.length - 1],

@@ -34,7 +34,7 @@ export class TailRaceBatch {
     this.total = total
     this.fanoutN = fanoutN
     this.fanoutDup = fanoutDup
-    this.settled = new Array<boolean>(total).fill(false)
+    this.settled = Array.from({ length: total }, () => false)
     this.all = new Promise<void>((r) => (this.resolveAll = r))
   }
 

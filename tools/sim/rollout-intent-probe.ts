@@ -58,7 +58,7 @@ function aggregate(
   huntShare: number
   frames: number
 } {
-  const counts = new Array<number>(size).fill(0)
+  const counts = Array.from({ length: size }, () => 0)
   let frames = 0
   for (const t of traces) {
     for (const it of t) {

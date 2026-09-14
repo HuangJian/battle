@@ -10,6 +10,7 @@ export const COMPONENT_LABELS: Record<Component, string> = {
   selfNode: 'self-node (采集节点)',
   hubServer: 'hub-server (作业中枢)',
   cloudflared: 'cloudflared (入站隧道)',
+  localWorker: 'local-worker (本机 PPO worker)',
   trainingLoop: 'TrainingLoop (trainer)',
   workerServe: 'worker_server (本机伪 GPU 节点)',
 }

@@ -25,7 +25,8 @@ export interface CloudHaltInfo {
 }
 
 export interface ConsoleState {
-  /** trainer 基建编排模式：pull=remote+隧道 · push=remote 无本地隧道 · local=本机 PPO。 */
+  /** trainer 基建编排模式：pull=remote+隧道（云机 poll）· push=remote 无本地隧道 ·
+   *  local=本机独立 localWorker（pull 本机 hub，与云端 worker 同一份代码）。 */
   trainerPpo: 'pull' | 'push' | 'local'
   /** 当前课程（组件启动的 jobRoot/日志目录来源）。 */
   course: string

@@ -15,8 +15,9 @@ import { CONFIG_PATH } from './paths'
 import { loadConfig } from './config'
 import { allSlotPorts, hubBasePort } from './slots'
 import { clearRegistry, registryComponents } from './registry'
-import { killPid, pidAlive, portListen, waitUntil } from './net'
+import { killPid, killPidTree, pidAlive, portListen, waitUntil } from './net'
 import { info, log, ok, warn } from './log'
+import { COMPONENT_KILL_TREE } from './types'
 import type { ProcSpec, RlConfig } from './types'
 
 export interface SpawnBgResult {
@@ -95,7 +96,11 @@ export async function stopAllManaged(): Promise<void> {
         info(`${tag} (PID ${entry.pid}) 已不在运行`)
         return
       }
-      const dead = await killPid(entry.pid)
+      // 带子进程监督器的组件（localWorker）整树停——否则「全部停止」后仍有孤儿在轮询
+      // hub 抢 job（判定唯一来源 types.COMPONENT_KILL_TREE）。
+      const dead = COMPONENT_KILL_TREE.has(name)
+        ? await killPidTree(entry.pid)
+        : await killPid(entry.pid)
       if (dead) ok(`${tag} (PID ${entry.pid}) 已停止`)
       else warn(`${tag} (PID ${entry.pid}) 未能停止`)
     }),

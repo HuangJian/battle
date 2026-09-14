@@ -1,6 +1,9 @@
 /** TrainLaunchModal.tsx — 启动 TrainingLoop 的弹窗（工具行并入此处，用户指令）：
  *  选择 trainer 模式（Pull/Push/Local）+ rl-config 行为开关（即时写）+ 推送链路预演入口。
- *  Push 模式：必填 cloudflared endpoint + auth key（服务端 ping 通才启动并回写 rl-config）。
+ *  Push 模式：endpoint + auth key 可选（填了才 ping 门 + 回写 rl-config）；留空依次尝试
+ *  复用 config 的 gpu_push、回落本机 worker_server（2026-09-15 一键本机 push）。
+ *  Local 模式（2026-09-15 起）：本机 PPO 独立成进程——预设会先起 hub-server 与
+ *  local-worker，trainer 走 --ppo remote + 本机 hub（进程内 PPO 已不是控制台选项）。
  *  Esc / 遮罩关闭由 App 全局处理。 */
 
 import { useEffect, useRef, useState } from 'preact/hooks'
@@ -183,11 +186,18 @@ export function TrainLaunchModal({
             onChange={setMode}
           />
         </div>
+        {mode === 'local' ? (
+          <p className="tc-muted tc-small" style={{ marginTop: 4 }}>
+            Local = 本机独立 PPO worker（与云端 worker 同一份代码）：预设依次拉起 hub-server →
+            local-worker → trainer（--ppo remote，pull 本机 hub）。worker
+            是独立进程，训练途中可单独启停/换代码重启。
+          </p>
+        ) : null}
         {mode === 'push' ? (
           <div className="tc-push-creds" style={{ display: 'grid', gap: 8, marginTop: 4 }}>
             <label className="tc-line" style={{ display: 'grid', gap: 4 }}>
               <span className="tc-muted tc-small">
-                endpoint（留空 = 复用 rl-config 已启用 gpu_push）
+                endpoint（留空 = 复用 config 可用 gpu_push，否则回落本机 worker_server）
               </span>
               <input
                 type="url"
@@ -215,8 +225,9 @@ export function TrainLaunchModal({
               </p>
             ) : (
               <p className="tc-muted tc-small" style={{ margin: 0 }}>
-                云机自起 cloudflared；本机不启 hub-server。留空则检查 config 中 enabled gpu_push 的
-                /ping，通了直接启动。
+                云机自起 cloudflared；本机不启 hub-server。留空先检 config 中 enabled gpu_push 的
+                /ping，通了直接启动；都没有则回落本机 worker_server（自动拉起 workerServer
+                组件并把本课 push 目标指到本机，不动你配置里的云节点）。
               </p>
             )}
           </div>

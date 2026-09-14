@@ -115,8 +115,8 @@ interface ObsCensus {
 
 function emptyCensus(): ObsCensus {
   return {
-    channelOccupancy: new Array(OBS_CHANNELS).fill(0),
-    scalarMeans: new Array(SCALAR_DIM).fill(0),
+    channelOccupancy: Array.from({ length: OBS_CHANNELS }, () => 0),
+    scalarMeans: Array.from({ length: SCALAR_DIM }, () => 0),
     samples: 0,
   }
 }

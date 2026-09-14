@@ -77,6 +77,54 @@ export async function killPid(pid: number): Promise<boolean> {
   return !pidAlive(pid)
 }
 
+/** 停止单个 PID **及其整棵进程树**。
+ *
+ *  只有「自身还带一个子进程监督器」的组件需要它（localWorker 跑云端同款
+ *  `remote.worker`：父 supervise_worker + 子 worker_loop）——只杀父进程会留下仍在
+ *  轮询 hub 抢 job 的孤儿，「随时启停」就形同虚设。判定唯一来源见
+ *  `core/types.ts::COMPONENT_KILL_TREE`（本函数不自作主张选组件）。
+ *
+ *  Windows：`taskkill /T /F`（SIGTERM 在 Windows 上没有进程树语义）；POSIX：spawnBg
+ *  的 `detached` 让被启动进程自成进程组（setsid），但**先校验 pgid === pid** 才敢
+ *  组杀（否则可能误伤同组的控制台自己），核对不上就退回单进程 stop。任何一步失败都
+ *  退化为 killPid(pid)：保守 = 至少把登记的那个进程停掉。 */
+export async function killPidTree(pid: number): Promise<boolean> {
+  if (!pid) return true
+  try {
+    if (process.platform === 'win32') {
+      Bun.spawnSync(['taskkill', '/F', '/T', '/PID', String(pid)], {
+        stdout: 'ignore',
+        stderr: 'ignore',
+        windowsHide: true,
+      })
+      if (!pidAlive(pid)) return true
+    } else {
+      const pgid = Number.parseInt(
+        Bun.spawnSync(['ps', '-o', 'pgid=', '-p', String(pid)])
+          .stdout.toString()
+          .trim(),
+        10,
+      )
+      if (Number.isInteger(pgid) && pgid === pid) {
+        const signal = (sig: 'SIGTERM' | 'SIGKILL'): void => {
+          try {
+            process.kill(-pid, sig)
+          } catch {
+            /* 组已空/已死 */
+          }
+        }
+        signal('SIGTERM')
+        const gone = await waitUntil(() => Promise.resolve(!pidAlive(pid)), 3000, 100)
+        if (!gone) signal('SIGKILL')
+        if (!pidAlive(pid)) return true
+      }
+    }
+  } catch {
+    /* 落到下面的单进程兜底 */
+  }
+  return killPid(pid)
+}
+
 /** 代理环境整形（回环流量永远直连）：检测到 HTTP(S)_PROXY 时把 localhost /
  *  127.0.0.1 / .trycloudflare.com 追加进 NO_PROXY——本机健康探测、rollout 预演与
  *  隧道回环流量一旦被代理规则截走就全是假阴性（原 start.ts shapeProxyEnv 语义）。 */

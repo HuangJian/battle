@@ -690,6 +690,53 @@ def train_local_bc(
     return metrics
 
 
+# ------------------------------------------------------------------ 传输裁决
+def resolve_transport(
+    *,
+    local: bool,
+    mode: str,
+    remote: bool,
+    push_url: str,
+    hub_url: str,
+    token: str,
+) -> str:
+    """BC 传输裁决（纯函数，2026-09-15 对齐 run_rl）→ 'local' | 'push' | 'hub'。
+
+    历史优先级是「push（env/config）> hub」：本课用 push 跑过一次后
+    `courses.<课>.push_node_url` 就留在 rl-config 里，之后任何 --remote 都会被静默推去
+    云机。`--remote-transport pull` 是唯一能压过它的开关——控制台 local preset 用的正是
+    它（本机独立 localWorker 必须领到 job）。auto = 历史行为零变化。
+
+    非法组合响亮 SystemExit（不静默回落）。
+    """
+    if local or mode == "local":
+        return "local"
+    if mode == "pull":
+        if not (remote and hub_url and token):
+            raise SystemExit(
+                "[run_bc] --remote-transport pull 需要 --remote + hub_url + token"
+                "（本地 hub：控制台 local preset 注入本机 hub）"
+            )
+        return "hub"
+    if mode == "push":
+        if not push_url:
+            raise SystemExit(
+                "[run_bc] --remote-transport push 但没有 push 节点"
+                "（courses.<课>.push_node_url / REMOTE_PUSH_NODE 均空）"
+            )
+        return "push"
+    if mode != "auto":
+        raise SystemExit(f"[run_bc] 未知 --remote-transport {mode!r}")
+    if push_url:
+        return "push"
+    if remote and hub_url and token:
+        return "hub"
+    raise SystemExit(
+        "[run_bc] 无法确定传输：--local / REMOTE_PUSH_NODE|push_node_url / "
+        "--remote + rl.remote_hubs[course] 三选一（控制台 preset 会注入）"
+    )
+
+
 # ------------------------------------------------------------------ 主流程
 
 
@@ -714,6 +761,15 @@ def main() -> None:
     ap.add_argument("--remote-hub-url", default="", help="hub-server base URL（覆盖 rl-config）")
     ap.add_argument("--remote-token", default="", help="bearer token（覆盖 rl-config）")
     ap.add_argument("--remote-job-root", default="", help="job 根目录（覆盖 <traj>/remote-jobs）")
+    ap.add_argument(
+        "--remote-transport",
+        default="auto",
+        choices=("auto", "pull", "push", "local"),
+        help="传输裁决（对齐 run_rl，2026-09-15）：auto=历史优先级（push > hub）；"
+        "pull=强制走 hub（本机独立 localWorker 场景——否则 courses.push_node_url "
+        "一配就把 job 推去云机）；push=强制直推 push 节点（无节点则响亮失败）；"
+        "local=本机 train/bc.py（同 --local）",
+    )
     args = ap.parse_args()
 
     course_path = resolve_bc_course(args.course)
@@ -784,17 +840,17 @@ def main() -> None:
         or rl_block.get("remote_hub_url")
         or ""
     )
-    if args.local:
-        transport = "local"
-    elif push_url:
-        transport = "push"
-    elif args.remote and hub_url and token:
-        transport = "hub"
-    else:
-        raise SystemExit(
-            "[run_bc] 无法确定传输：--local / REMOTE_PUSH_NODE|push_node_url / "
-            "--remote + rl.remote_hubs[course] 三选一（控制台 preset 会注入）"
-        )
+    # 传输裁决（2026-09-15）：--remote-transport 是唯一能压过「本课配了 push_node_url
+    # 就推云机」的开关——控制台 local preset（本机独立 localWorker）必须钉 pull，否则
+    # job 全被推去云机、本机 worker 永远领不到活（且日志看起来「训练正常」）。
+    transport = resolve_transport(
+        local=args.local,
+        mode=str(getattr(args, "remote_transport", "auto") or "auto"),
+        remote=args.remote,
+        push_url=push_url,
+        hub_url=hub_url,
+        token=token,
+    )
     log(f"[run_bc] transport={transport} push_url={push_url or '-'} hub_url={hub_url or '-'}")
 
     if transport == "hub":

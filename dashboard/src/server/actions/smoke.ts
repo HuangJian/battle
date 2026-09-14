@@ -72,6 +72,26 @@ export async function smokeComponent(key: Component, ctx: StartCtx): Promise<Act
         items.push({ name: '本机伪 GPU 节点 /ping', passed: ping, fatal: false })
         break
       }
+      case 'localWorker': {
+        // 本机 PPO worker（独立进程，pull 本课 hub）：存活 + 轮询目标可达 + 日志尾。
+        // 「hub 通不通」是它能不能领到活的唯一外部依赖，故按 fatal:false 提示（worker
+        // 会自己重连；hub 后起也能自愈）。
+        const entry = entryOf('localWorker', ctx.course)
+        items.push({ name: 'local-worker 进程存活', passed: pidAlive(entry?.pid), fatal: true })
+        const hubPort = slotPort(cfg, ctx.course, 'hub')
+        const hubUp = await httpOk(`http://127.0.0.1:${hubPort}/ping`, cfg.rl.remote_token, 3000)
+        items.push({
+          name: 'poll 目标 hub-server /ping',
+          passed: hubUp,
+          fatal: false,
+          detail: hubUp ? `port ${hubPort}` : 'hub 未就绪（worker 会持续重试轮询）',
+        })
+        const logPath =
+          entry?.log ??
+          path.join(LOG_DIR, ctx.course || loadConsoleState().course, 'local-worker.log')
+        extraDetail.push(...tailLines(logPath, 6).map((l) => `日志│ ${l}`))
+        break
+      }
       case 'trainingLoop': {
         const alive = pidAlive(entryOf('trainingLoop', ctx.course)?.pid)
         items.push({ name: 'TrainingLoop 进程存活', passed: alive, fatal: false })

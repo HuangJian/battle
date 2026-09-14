@@ -405,8 +405,8 @@ export function exportGame(
   const rawNearMiss = samples.filter((s) => s.nearMiss).length // 覆盖统计（扩张前）
   const dupCount = samples.map((s) => (nearMissTimes > 1 && s.nearMiss ? nearMissTimes : 1))
   const n2 = dupCount.reduce((a, b) => a + b, 0)
-  const expandedSamples = new Array<Sample>(n2)
-  const expandedPhi = new Array<number>(n2)
+  const expandedSamples: Sample[] = Array.from({ length: n2 })
+  const expandedPhi = Array.from({ length: n2 }, () => 0)
   let idx = 0
   for (let i = 0; i < samples.length; i++) {
     for (let d = 0; d < dupCount[i]; d++) {
@@ -416,7 +416,7 @@ export function exportGame(
     }
   }
   const n = n2
-  const rewards = new Array<number>(n).fill(0)
+  const rewards = Array.from({ length: n }, () => 0)
   if (n > 0) {
     for (let i = 0; i < n - 1; i++) rewards[i] = expandedPhi[i + 1] - expandedPhi[i]
     // 末帧：ΦFinal − Φ(n−1) + 锚定项（使 Σ ≡ REWARD_SCALE × gatedScore）

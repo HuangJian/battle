@@ -45,7 +45,7 @@ export function readCurriculumLedger(
       }
     }
     return { levels, updatedAt: data.updated_at }
-  } catch (e) {
+  } catch {
     // 台账缺席/损坏不挡控制台——返回空视图（LAN 只读，绝不反杀训练）。
     return { levels: {} }
   }

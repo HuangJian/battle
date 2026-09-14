@@ -192,7 +192,11 @@ async function main(): Promise<void> {
   const ledgerDone = ledger ? ledger.loadDone() : new Map()
   const milestone: Record<string, boolean> = {}
 
-  const results: import('./sim-worker').SimTaskResult[] = new Array(tasks.length)
+  // 按 id 归位的占位数组：未结算/账本跳过的任务必须是**空洞**（不是 undefined）——
+  // 下面的 `results.map` 靠空洞跳过产生 JSON null 行；填成 undefined 会改成「默认值行」，
+  // 静默改变 perGame/eval_log 的逐局口径。故用 `length` 预置而不能用 Array.from。
+  const results: import('./sim-worker').SimTaskResult[] = []
+  results.length = tasks.length
   const tasksTodo: SimTask[] = []
   for (const t of tasks) {
     const key = ledgerKey(t.stageIndex ?? 0, t.seed)
@@ -655,7 +659,9 @@ async function runHybrid(
   const bytes = distKind === 'none' ? Buffer.from('{}') : readFileSync(weightsPath)
   const wver = createHash('sha256').update(bytes).digest('hex')
 
-  const results: import('./sim-worker').SimTaskResult[] = new Array(tasks.length)
+  // 按 id 归位的占位数组（未结算槽位保持空洞，与主循环同约定；返回值交调用方消费）。
+  const results: import('./sim-worker').SimTaskResult[] = []
+  results.length = tasks.length
   const total = tasks.length
   const fail = (id: number): import('./sim-worker').SimTaskResult => ({
     id,
