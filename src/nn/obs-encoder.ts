@@ -603,6 +603,23 @@ export interface Masks {
  *   move : v1 = all valid (turn-lock refinement deferred; noted in plan).
  * v2: item head removed — guard/frenzy (and their masks) no longer exist.
  */
+/** 动作合法性掩码（7 位 = move[5] + fire[2]）。
+ *
+ *  ⚠️ **信息量提示（2026-09-14，bc-c4-v3 语料实测）**：当前动作空间里**移动永远合法**、
+ *  开火只受冷却约束，所以本函数返回的是——
+ *    move = [1,1,1,1,1]   恒 1（5 位全常量）
+ *    fire = [1, ready?1:0] 第 1 位恒 1，**只有第 2 位（fire-ready）携带信息**
+ *  ⇒ 7 位里 6 位是死信息，整段 mask 的唯一语义 = 「这一帧能不能开火」。
+ *  实测语料 `masks.npy` 各位均值 `[1,1,1,1,1,1,0.374]`：最后一位 37.4% ⇒ 教师
+ *  「能开火时只有 19.5% 的帧真的开火」（fire 正例 7.3%）。
+ *
+ *  推论：**不要指望 mask 教策略"避开非法动作"**（没有非法动作），也别把它当
+ *  独立特征通道评估；学习信号只在 obs/scalars 里。若将来动作空间引入非法动作
+ *  （如转向锁定），必须同时更新本函数与 `SCHEMA_FINGERPRINT` 常量表。
+ *
+ *  改动纪律：本函数返回的**内容**不是指纹输入（指纹只钉上方常量表），但改了
+ *  mask 语义 = 改了「一个样本是什么」⇒ 必须走 schema bump 与新语料轮次。
+ */
 export function computeMasks(world: World): Masks {
   const p = world.player
   const ready = p ? isFireReady(world) : false

@@ -150,6 +150,25 @@ C7 船（boatTimer）· C8 奖励车 `tank.bonus`（modern `bonusEnemyEveryNSpaw
 - 字节数两笔：宿主 in16 拷贝 16ch 43,264B → 18ch **48,672B（≈47.5KB）**；wasm 内部 PAD3
   scratch 16ch 50,176B → 18ch **56,448B（≈55KB）**（`#define` 改后自动扩，线性内存预留同步核）。
 
+### 3.7 掩码（mask）语义与信息量（2026-09-14 补记）
+
+mask 不在 obs 字节里，而是随 shard 单独落盘（`masks.npy`，7 位 = move[5] + fire[2]），
+由 `src/nn/obs-encoder.ts::computeMasks` 产出。bc-c4-v3 it1 语料的实测分布：
+
+| 位 | 语义 | 实测均值 |
+|---|---|---|
+| move[0..4] | 5 个移动方向是否合法 | 恒 1（当前动作空间没有非法移动） |
+| fire[0] | fire 动作是否合法 | 恒 1 |
+| fire[1] | **fire-ready**（开火冷却是否结束） | 0.374 |
+
+⇒ **7 位里 6 位是死信息**，唯一携带语义的是 fire-ready（37.4% 的帧可开火；而教师只在
+7.3% 的帧真的开火 ⇒ 能开火时 19.5% 才开）。
+
+推论（勿再议）：① 别把 mask 当"帮助策略避开非法动作"的通道——没有非法动作；
+② 别用 mask 的位数评估观测信息量，学习信号只在 obs/scalars；
+③ mask 与 obs 分开落盘，改 mask **不影响** `SCHEMA_FINGERPRINT`（指纹只钉 §3.1/§3.2/§3.3
+的常量表），但改 mask 语义 = 改「一个样本是什么」⇒ 同样必须走 schema bump + 新语料轮次。
+
 ## 4. 测试清单（全部）
 
 | 测试 | 断言 |
