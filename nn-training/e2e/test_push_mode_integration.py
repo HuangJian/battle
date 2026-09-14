@@ -1,16 +1,13 @@
-"""e2e/test_push_mode_integration.py —— HUB 推模式集成测试（无真 rollout/PPO/eval）。
+"""e2e/test_push_mode_integration.py —— 纯 Push 集成测试（无真 rollout/PPO/eval）。
 
-覆盖训练主循环 push 腿此前缺失的三段：
+覆盖：
+  1. `push_client.submit_job` / `wait_result` 线协议（428 补传 code、4xx 拒绝、轮询）；
+  2. `_push_job_round` 多节点 failover；
+  3. 真 `worker_server` × 真 `push_client`（fake starter，不跑 PPO）；
+  4. `require_remote_transport`：有 gpu_push 时 hub_url 可空（无本地 hub-server）；
+  5. push-first bootstrap HTTP：/ping、无 code 428、code_b64 升级解包。
 
-  1. `push_client.submit_job` / `wait_result` 线协议（428 补传 code、409 退避重试、
-     4xx 确定性拒绝、轮询 202→200）；
-  2. `_push_job_round` 多节点 failover（节点 1 失败换节点 2；全灭 → RetryableError）；
-  3. 真 `worker_server` + 真 `push_client` 对接（fake starter 注入结果，不跑 PPO）。
-
-另锁 `_remote_ppo` 分支选择：gpu_nodes 非空必须走 push、不得调用 pull 的 `wait_job`。
-
-纪律：全程不 spawn bun/node、不加载 torch、不跑游戏仿真。starter 一律覆盖为
-确定性回调；HTTP 面协议用本机 127.0.0.1 临时端口。
+纪律：不 spawn bun/node、不加载 torch；HTTP 用本机临时端口。
 """
 
 from __future__ import annotations
@@ -34,7 +31,7 @@ if str(ROOT) not in sys.path:
 from remote.protocol import ProtocolError, RetryableError
 from remote.push_client import submit_job, wait_result
 from remote.worker_server import WorkerServerState, make_worker_server
-from rl.loop_steps import _push_job_round
+from rl.loop_steps import _push_job_round, require_remote_transport
 
 
 def _sha(data: bytes) -> str:
@@ -326,15 +323,79 @@ def test_e2e_missing_code_rejected_before_queue(tmp_path: Path) -> None:
         w.close()
 
 
-# ────────────────────────── 分支谓词（与 loop_steps 对齐的护栏） ──────────────────────────
+# ────────────────────────── 纯 push 传输门 + bootstrap 升级 ──────────────────────────
 
 
-def test_push_filter_warn_predicate() -> None:
-    """F-B5：push_node_url 非空 + 无 env + 0 匹配节点 → WARN（回落 pull），不抛。"""
-    push_url = "https://miss.example"
-    env = None
-    gpu_nodes: list[dict] = []
-    assert bool(push_url and not env and len(gpu_nodes) == 0) is True
-    # 有匹配节点时不得 WARN
-    gpu_nodes = [{"url": push_url}]
-    assert bool(push_url and not env and len(gpu_nodes) == 0) is False
+def test_require_remote_transport_push_without_hub() -> None:
+    """纯 push：有 gpu_push 节点时 hub_url 可空（不再依赖本地 hub-server）。"""
+    require_remote_transport(
+        hub_url="",
+        token="tok",
+        gpu_nodes=[{"url": "https://gpu", "authKey": "k"}],
+        env_push=None,
+    )
+    with pytest.raises(SystemExit, match=r"hub_url|gpu_push"):
+        require_remote_transport("", "tok", [], env_push=None)
+
+
+def test_bootstrap_http_upgrade_and_428(tmp_path: Path) -> None:
+    """push-first bootstrap：/ping、无 code 428、带 code_b64 升级并解包。"""
+    import base64 as b64
+    import io as _io
+    import zipfile
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+
+    from remote.push_bootstrap import start_bootstrap_server
+
+    upgraded: list[bytes] = []
+    code_dir = tmp_path / "code"
+    srv = start_bootstrap_server(
+        0, "tok", code_dir, on_upgrade=lambda raw: upgraded.append(raw)
+    )
+    port = srv.server_address[1]
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    try:
+
+        def _req(path, data=None):
+            r = Request(
+                f"http://127.0.0.1:{port}{path}",
+                data=data,
+                headers={"Authorization": "Bearer tok", "Content-Type": "application/json"},
+                method="POST" if data else "GET",
+            )
+            with urlopen(r, timeout=5) as resp:
+                return resp.status, json.loads(resp.read().decode())
+
+        st, ping = _req("/ping")
+        assert st == 200 and ping.get("bootstrap") is True
+        st, sha = _req("/code-sha?sha=abc")
+        assert st == 200 and sha.get("cached") is False
+
+        # 无 code → 428
+        body = json.dumps({"manifest": {"job_id": "j"}, "payload_b64": "e30="}).encode()
+        try:
+            _req("/job", body)
+            raise AssertionError("expected 428")
+        except HTTPError as e:
+            assert e.code == 428
+
+        # 带 code_b64 → 202 + 解包 + on_upgrade
+        zbuf = _io.BytesIO()
+        with zipfile.ZipFile(zbuf, "w") as z:
+            z.writestr("hello.txt", "hi")
+        payload = json.dumps(
+            {
+                "manifest": {"job_id": "j1"},
+                "payload_b64": "e30=",
+                "code_b64": b64.b64encode(zbuf.getvalue()).decode(),
+            }
+        ).encode()
+        st, out = _req("/job", payload)
+        assert st == 202 and out.get("upgrading") is True
+        assert (code_dir / "hello.txt").read_text(encoding="utf-8") == "hi"
+        assert upgraded and upgraded[0] == payload
+    finally:
+        srv.shutdown()
+        srv.server_close()

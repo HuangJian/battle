@@ -431,6 +431,46 @@ def test_push_wait_loop_logs_status_and_serve_tail(
     assert any("worker 状态" in m or "守候中" in m for m in logs)
 
 
+def test_push_already_serving_skips_reinstall_and_logs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """push-first 升级后（already_serving）：不重复起 cloudflared/worker_server，
+    只守候 + 转发 serve.log + /ping 心跳。"""
+    clock = _FakeClock(step=20.0)
+    monkeypatch.setattr(nbr, "time", clock)
+    pops: list[list[str]] = []
+
+    def _fake_popen(cmd: list[str], **kw: Any) -> _FakeProc:
+        pops.append(list(cmd))
+        return _FakeProc(poll_seq=[None])
+
+    monkeypatch.setattr(nbr.subprocess, "Popen", _fake_popen)
+    kills: list[int] = []
+
+    def fake_kill(pid: int, sig: int) -> None:
+        kills.append(int(pid))
+        if len(kills) >= 2:
+            raise OSError("dead")  # 第二次探测判死 → 干净退出
+
+    monkeypatch.setattr(nbr.os, "kill", fake_kill)
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=0: _FakeResp(200))
+    work = tmp_path / "work"
+    work.mkdir(parents=True, exist_ok=True)
+    (work / "serve.log").write_text("[00:00:00] [worker-serve] boot done\n", encoding="utf-8")
+    cfg = _base_cfg(tmp_path)
+    cfg["already_serving"] = {
+        "serve_pid": 424242,
+        "cf_pid": None,
+        "cf_url": "https://abc-def.trycloudflare.com",
+    }
+    logs: list[str] = []
+    rc = nbr.run_push_worker(cfg, logs.append)
+    assert rc == 0
+    assert pops == []  # 绝不重复 spawn cloudflared / worker_server
+    assert any("接管已就绪 push 服务" in m for m in logs)
+    assert any("[serve]" in m and "boot done" in m for m in logs)
+
+
 # ------------------------------------------------------------------ run_notebook
 
 

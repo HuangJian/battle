@@ -82,17 +82,58 @@ export function applyPushNodeConfig(
   return cfg
 }
 
-/** 控制台 Push 启动前置：ping 门 → 回写 rl-config。失败抛 Error（不写盘）。 */
+/** enabled 且 gpu_push 的节点（config 扫描；enabled 缺省视为 true）。 */
+export function enabledGpuPushNodes(cfg: RlConfig): NodeConf[] {
+  return (cfg.nodes ?? []).filter((n) => n.gpu_push && n.enabled !== false)
+}
+
+/** 遍历 enabled gpu_push，返回第一个 GET /ping 通的节点；全不通 → null。 */
+export async function findHealthyGpuPushNode(
+  cfg: RlConfig,
+  timeoutMs = 5000,
+): Promise<NodeConf | null> {
+  for (const n of enabledGpuPushNodes(cfg)) {
+    const url = String(n.url ?? '').trim()
+    const key = String(n.authKey ?? '').trim()
+    if (!url || !key) continue
+    try {
+      const ok = await httpOk(`${url.replace(/\/+$/, '')}/ping`, key, timeoutMs)
+      if (ok) return n
+    } catch {
+      /* 下一个 */
+    }
+  }
+  return null
+}
+
+/** 控制台 Push 启动前置：
+ *  ① endpoint 留空 → 复用 rl-config 中 enabled 且 ping 通的 gpu_push（无需手填）；
+ *  ② 否则 ping 用户填写的 endpoint，通过后 upsert 节点 + 课程 push_node_url。
+ *  失败抛 Error（不写盘、不启动）。 */
 export async function configurePushEndpoint(
   course: string,
   endpoint: string,
   authKey: string,
-): Promise<{ url: string }> {
+): Promise<{ url: string; reused: boolean }> {
   if (!course) throw new Error('Push 配置需要 course（先在顶部设置课程）')
-  const url = normalizePushUrl(endpoint)
-  await pingPushEndpoint(url, authKey)
   const cfg = loadConfig()
+  const manual = (endpoint ?? '').trim()
+  if (!manual) {
+    const hit = await findHealthyGpuPushNode(cfg)
+    if (!hit) {
+      throw new Error(
+        'rl-config 无可用的 enabled gpu_push 节点（或均 ping 不通）——请填写 endpoint 与 auth key',
+      )
+    }
+    const url = String(hit.url).replace(/\/+$/, '')
+    cfg.courses = { ...(cfg.courses ?? {}) }
+    cfg.courses[course] = { ...(cfg.courses[course] ?? {}), push_node_url: url }
+    saveConfig(cfg)
+    return { url, reused: true }
+  }
+  const url = normalizePushUrl(manual)
+  await pingPushEndpoint(url, authKey)
   applyPushNodeConfig(cfg, course, url, authKey)
   saveConfig(cfg)
-  return { url }
+  return { url, reused: false }
 }

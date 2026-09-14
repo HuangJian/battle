@@ -92,6 +92,32 @@ def _gpu_push_nodes(remote_token: str, course_push_url: str = "") -> list[dict]:
     return out
 
 
+def require_remote_transport(
+    hub_url: str,
+    token: str,
+    gpu_nodes: list[dict],
+    env_push: str | None = None,
+) -> None:
+    """`--ppo remote` 传输可用性门（纯 push 不再强制本地 hub-server/cloudflared）。
+
+    - 鉴权：token 非空，或 env 节点，或任一 gpu_push 节点带 authKey；
+    - 传输：hub_url（pull）**或** gpu_nodes/env（push 直推云机隧道）。
+    不满足 → SystemExit（响亮，不静默回落）。
+    """
+    env = env_push if env_push is not None else os.environ.get("REMOTE_PUSH_NODE")
+    if not token and not env and not any(n.get("authKey") for n in gpu_nodes):
+        raise SystemExit(
+            "[run_rl] --ppo remote 需要 --remote-token"
+            "（或 rl-config gpu_push 节点 authKey / REMOTE_PUSH_NODE）"
+        )
+    if not hub_url and not gpu_nodes and not env:
+        raise SystemExit(
+            "[run_rl] --ppo remote 需要 remote_hub_url（pull）"
+            "或 rl-config nodes[].gpu_push（push 直推云机隧道）——"
+            "纯 push 模式不依赖本地 hub-server/cloudflared"
+        )
+
+
 def _push_job_round(
     nodes: list[dict],
     manifest: dict,
@@ -234,6 +260,16 @@ class TrainingSteps:
     _tail_drain_sec: Any
     _waves_n: Any
     _eval_join_sec: float
+    #: bun 可执行文件路径（TrainingLoop 持有；延迟 eval 派发传给评估子进程）。
+    bun: str
+    #: 上轮节点配置快照（loop 每轮热读；drain 复用最近一份）。
+    _last_dist_cfg: Any
+    #: 本轮是否评估轮——真实现在 TrainingLoop 本体（loop_core.py），MRO 胜过
+    #: 此处占位。body 用 raise 而不用 `...`：万一 MRO 被改坏，响亮失败而不是
+    #: 静默返回 falsy 把 eval 全关掉。
+
+    def _eval_on_round(self, it: int) -> bool:
+        raise NotImplementedError("TrainingSteps._eval_on_round 被直接调用——MRO 破坏")
 
     def _hot_reload_course(self, it: int) -> None:
         """课程热加载（§2026-09-13-hot-reload）：每 iter 重读课程文件，rollout 前执行。
@@ -656,11 +692,12 @@ class TrainingSteps:
 
         hub_url = str(getattr(args, "remote_hub_url", "") or "")
         token = str(getattr(args, "remote_token", "") or "")
-        if not hub_url or not token:
-            raise SystemExit(
-                "[run_rl] --ppo remote 需要 --remote-hub-url 与 --remote-token "
-                "（hub-server 端点 + Bearer token，D9）"
-            )
+        # Push 优先解析（纯 push 不再依赖本地 hub-server / cloudflared）：
+        # 有 gpu_push 节点或 REMOTE_PUSH_NODE 时，payload/code 直推云机隧道，
+        # hub_url 可缺省。token 仍要（pull 回落 / env 节点鉴权）；配置节点自带 authKey。
+        push_url = _course_push_url(args)
+        gpu_nodes = _gpu_push_nodes(token, push_url)
+        require_remote_transport(hub_url, token, gpu_nodes)
         job_root = str(getattr(args, "remote_job_root", "") or "") or str(
             Path(args.traj) / "remote-jobs"
         )
@@ -771,9 +808,7 @@ class TrainingSteps:
         if hasattr(self, "_evalboard_idle"):
             self._evalboard_idle(it, getattr(self, "_last_dist_cfg", None))
         # P3-W1b：本课 push_node_url 非空时只取 URL 匹配项（N:1 共享天然成立）；
-        # 为空时沿用旧逻辑（全取，默认行为零变化）。
-        push_url = _course_push_url(args)
-        gpu_nodes = _gpu_push_nodes(token, push_url)
+        # 为空时沿用旧逻辑（全取，默认行为零变化）。gpu_nodes 已在上方解析。
         if push_url and not os.environ.get("REMOTE_PUSH_NODE") and len(gpu_nodes) == 0:
             # F-B5：非空但匹配 0 个且无 env 注入 → 响亮失败（WARN + manifest 打标，
             # 不抛异常——抛异常致 loop 无限原地重试 hang；静默回落 pull 仍能正确训练，
@@ -955,6 +990,146 @@ class TrainingSteps:
         if args.mode in ("intent", "goal") and it == 5 and self._report["winRate"] <= 0:
             log("WARN pace: no clear by iter5 (rollout winRate=0) — investigate")
         return eval_rec
+
+    def _dispatch_delayed_eval(self, it: int, dist_cfg: dict | None) -> None:
+        """延迟 eval 派发（P0 修复）：本轮采集收官后，为上一轮已完成权重 W(it-1) 派发。
+
+        旧语义在此处派发读活指针 = W(it-1) 却标 itN（标签超前一轮）；新语义标
+        权重轮 M=it-1，读不可变归档（回落活指针 + WARN）。游戏仍藏进随后 PPO(it)
+        空窗，wall 不变。未覆盖的对局由派发内幂等续跑；全覆盖即空转返回。
+        仅 per-tick（intent/goal 走 m1 路径，it0 基线走独立流，均不动）。
+        """
+        from rl.eval_dispatch import dispatch_eval_bg, find_archive_weights, select_delayed_eval_it
+        from rl.queue import RUN_ID
+
+        args = self.args
+        if getattr(args, "mode", "per-tick") != "per-tick":
+            # intent/goal m1 与 it0 基线走各自派发流，此处不碰（rollout_phase 已处理）。
+            return
+        self._eval_thread = None
+        self._eval_gate = None
+        m = select_delayed_eval_it(it, self._eval_on_round)
+        if m is None:
+            return
+        src = find_archive_weights(
+            str(getattr(args, "backup_dir", "") or ""),
+            str(getattr(args, "backup_prefix", "") or ""),
+            m,
+        )
+        from_archive = src is not None
+        src_path = src if src is not None else str(args.out)
+        if not from_archive:
+            log(
+                f"[eval] it{m}: 归档缺席（backup 失败？）——回落活指针 {src_path} 派发"
+                "（wver 与离线复跑不可比，本轮 eval 仅供参考）"
+            )
+        self._eval_gate = threading.Event()
+        self._eval_thread = dispatch_eval_bg(
+            self.bun,
+            src_path,
+            self._traj_dir,
+            args,
+            dist_cfg or {},
+            f"{RUN_ID}.{it}",
+            m,
+            (self._report or {}).get("winRate"),
+            local_gate=self._eval_gate,
+        )
+        log(
+            f"[eval] it{m} dispatched from "
+            f"{'archive' if from_archive else 'LIVE pointer'} {src_path} "
+            f"(round it{it} PPO window)"
+        )
+
+    def _eval_covered(self, m: int, summaries: dict[int, list[dict]]) -> bool:
+        """drain 覆盖判定：存在 dropped==0 的 summary 即完整（缺字段旧行按未覆盖）。"""
+        rows = summaries.get(m, [])
+        if not rows:
+            return False
+        return any(r.get("dropped") == 0 for r in rows)
+
+    def _drain_pending_eval(self) -> None:
+        """收官 drain（用户指令：最终轮立即 eval）：为最新已完成且无完整 summary
+        的评估轮权重派发并等收官。串行执行（无 PPO 空窗可藏），等收官预算
+        min(eval_window_sec + 60, 600)s，全程 best-effort 只记日志。
+        smoke 轮 / 非 per-tick 直接跳过。
+        """
+        from rl.eval_dispatch import dispatch_eval_bg
+        from rl.queue import RUN_ID
+
+        args = self.args
+        try:
+            if getattr(args, "mode", "per-tick") != "per-tick" or getattr(args, "smoke", False):
+                return
+            eval_log = Path(self._traj_dir).parent / "eval_log.jsonl"
+            summaries: dict[int, list[dict]] = {}
+            try:
+                with open(eval_log, encoding="utf-8") as jf:
+                    for line in jf:
+                        try:
+                            r = json.loads(line)
+                        except Exception:
+                            continue
+                        if r.get("event") == "eval_summary" and isinstance(r.get("iter"), int):
+                            summaries.setdefault(int(r["iter"]), []).append(r)
+            except OSError:
+                pass
+            arch_m: dict[int, str] = {}
+            bdir = str(getattr(args, "backup_dir", "") or "")
+            bpre = str(getattr(args, "backup_prefix", "") or "")
+            if bdir and bpre:
+                try:
+                    from rl.archive import REPO_ROOT
+
+                    root = REPO_ROOT
+                except Exception:
+                    root = None
+                import os as _os
+                import re as _re
+
+                base = str(root / bdir) if root is not None and not _os.path.isabs(bdir) else bdir
+                try:
+                    pat = _re.compile(rf"^{_re.escape(bpre)}\.it(\d+)\..*\.json$")
+                    for p in Path(base).glob(f"{bpre}.it*.*.json"):
+                        mt = pat.match(p.name)
+                        if mt:
+                            kk, vv = int(mt.group(1)), str(p)
+                            if kk not in arch_m:
+                                arch_m[kk] = vv
+                except OSError:
+                    pass
+            if not arch_m:
+                log("[eval] drain: 无归档权重可评估——跳过")
+                return
+            cand = sorted(
+                m
+                for m in arch_m
+                if m >= 1 and self._eval_on_round(m) and not self._eval_covered(m, summaries)
+            )
+            if not cand:
+                log("[eval] drain: 评估轮权重均已完整 summary——无需收尾 eval")
+                return
+            if len(cand) > 1:
+                log(f"[eval] drain: 旧缺口 {cand[:-1]} 留档（只收尾最新 it{cand[-1]}）")
+            m = cand[-1]
+            self._eval_gate = threading.Event()
+            self._eval_thread = dispatch_eval_bg(
+                self.bun,
+                arch_m[m],
+                self._traj_dir,
+                args,
+                getattr(self, "_last_dist_cfg", None) or {},
+                f"{RUN_ID}.{m}",
+                m,
+                None,
+                local_gate=self._eval_gate,
+            )
+            budget = min(float(getattr(args, "eval_window_sec", 1800) or 1800) + 60.0, 600.0)
+            log(f"[eval] drain: it{m} 收尾派发（archive），等收官 ≤{budget:.0f}s")
+            self._eval_thread.join(timeout=budget)
+            log(f"[eval] drain: it{m} 收尾结束（alive={self._eval_thread.is_alive()}）")
+        except Exception as e:
+            log(f"[eval] drain: 收尾 eval 失败（{type(e).__name__}: {e}）——不阻断收官")
 
     def _record_iteration(self, it: int) -> None:
         """iteration 事件落账（字段契约在 rl/events.py::write_iteration）。"""

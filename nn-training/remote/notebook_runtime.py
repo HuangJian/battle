@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import glob
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -194,11 +195,117 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
 
     bootstrap 语义：cell 已经从 hub /code 解包好代码（cfg["code_dir"]）——服务进程
     的 PYTHONPATH 指向它；job 真正执行用的是 hub 随 job 下发的 code.zip（worker_server
-    收下后入 sys.path、在新进程里跑）。"""
-    # work_dir 可被 cfg 覆盖（单测注入 tmp 目录；缺省 /tmp——Kaggle/Colab 语义）
+    收下后入 sys.path、在新进程里跑）。
+
+    already_serving（push-first 升级后）：bootstrap 已起好 worker_server/cloudflared，
+    本函数只做守候 + 日志，**不再**重复安装/拉起。"""
+    already = cfg.get("already_serving") or None
     work_dir = Path(str(cfg.get("work_dir") or "/tmp/remote-worker-serve"))
     work_dir.mkdir(parents=True, exist_ok=True)
     boot_dir = Path(str(cfg.get("code_dir") or "/tmp/worker-code"))
+    serve_log = work_dir / "serve.log"
+
+    def _pid_alive(pid: int | None) -> bool:
+        if not pid:
+            return False
+        try:
+            os.kill(int(pid), 0)
+            return True
+        except OSError:
+            return False
+
+    if already:
+        serve_pid = int(already.get("serve_pid") or 0)
+        cf_pid = already.get("cf_pid")
+        cf_url = already.get("cf_url")
+        log(f"接管已就绪 push 服务（serve_pid={serve_pid} tunnel={cf_url or '?'}）")
+        serve_tail_off = 0
+        last_status_at = 0.0
+        as_last_done = -1
+        as_last_busy: bool | None = None
+        deadline = time.time() + int(cfg["max_session_hours"]) * 3600
+        t0 = time.time()
+
+        def _drain() -> None:
+            nonlocal serve_tail_off
+            try:
+                size = serve_log.stat().st_size
+            except OSError:
+                return
+            if size < serve_tail_off:
+                serve_tail_off = 0
+            if size <= serve_tail_off:
+                return
+            try:
+                with open(serve_log, encoding="utf-8", errors="replace") as f:
+                    f.seek(serve_tail_off)
+                    chunk = f.read()
+                serve_tail_off = size
+            except OSError:
+                return
+            for line in chunk.splitlines():
+                if line.strip():
+                    log(f"[serve] {line.rstrip()}")
+
+        def _ping() -> dict | None:
+            try:
+                from urllib.request import Request, urlopen
+
+                req = Request(
+                    f"http://127.0.0.1:{cfg['push_port']}/ping",
+                    headers={"Authorization": f"Bearer {cfg['push_token']}"},
+                )
+                with urlopen(req, timeout=4) as r:
+                    obj = json.loads(r.read().decode("utf-8", "replace"))
+                return obj if isinstance(obj, dict) else None
+            except Exception:
+                return None
+
+        try:
+            while True:
+                if not _pid_alive(serve_pid):
+                    _drain()
+                    log(f"worker_server 退出 (pid {serve_pid})")
+                    return 0
+                _drain()
+                now = time.time()
+                if now - last_status_at >= 15:
+                    st = _ping()
+                    if st is not None:
+                        busy = bool(st.get("busy"))
+                        queued = int(st.get("queued") or 0)
+                        done = int(st.get("done") or 0)
+                        if done != as_last_done or busy != as_last_busy or queued > 0:
+                            log(
+                                f"worker 状态: busy={busy} queued={queued} done={done}"
+                                + ("（在跑 job）" if busy else "（空闲，等 hub 推送）")
+                            )
+                            as_last_done, as_last_busy = done, busy
+                        else:
+                            log(
+                                f"守候中… busy={busy} queued={queued} done={done}"
+                                f" wait={int(now - t0)}s"
+                            )
+                    else:
+                        log("worker /ping 暂不可达（瞬断/重启中）——继续守候")
+                    last_status_at = now
+                if time.time() > deadline:
+                    log(f"会话到顶 ({cfg['max_session_hours']}h)——干净收摊")
+                    return 0
+                time.sleep(5)
+        except KeyboardInterrupt:
+            log("收到中断")
+            if _pid_alive(serve_pid):
+                try:
+                    os.kill(serve_pid, 15)
+                except OSError:
+                    pass
+            if cf_pid:
+                try:
+                    os.kill(int(cf_pid), 15)
+                except OSError:
+                    pass
+            return 0
 
     # ── cloudflared 查找 / 自动安装 ──
     cf_bin = str(cfg.get("cloudflared_path") or "") or subprocess.getoutput(
@@ -221,7 +328,6 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
             return -2
 
     # ── 启动 worker_server ──
-    serve_log = work_dir / "serve.log"
     serve_env = dict(os.environ)
     serve_env["PYTHONPATH"] = (str(boot_dir) + os.pathsep + serve_env.get("PYTHONPATH", "")).rstrip(os.pathsep)
     with open(serve_log, "w") as log_f:

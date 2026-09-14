@@ -10,14 +10,17 @@ import { startComponent, StartCtx } from './start'
 // ────────────────────────── 模式预设与开关 ──────────────────────────
 
 export interface PresetOpts {
-  /** Push：worker_server / cloudflared endpoint（必填；ping 通才启动）。 */
+  /** Push：worker_server / cloudflared endpoint。留空 = 复用 rl-config 中 enabled 且 ping 通的 gpu_push。 */
   pushEndpoint?: string
-  /** Push：worker_server Bearer token（必填；与 --token 一致）。 */
+  /** Push：worker_server Bearer token（显式填写时必填；复用 config 时用节点 authKey）。 */
   pushAuthKey?: string
 }
 
-/** 按 trainer 模式顺序拉起组件组合：pull = selfNode→hubServer→cloudflared→trainer；
- *  push = （ping 门 + 回写 rl-config）→ selfNode→hubServer→trainer；local = trainer。
+/** 按 trainer 模式顺序拉起组件组合：
+ *  pull = selfNode→hubServer→cloudflared→trainer；
+ *  push = （ping 门 + 回写 rl-config）→ selfNode→trainer
+ *         （云机自起 cloudflared；hub 直推 code.zip/job，**不启本地 hubServer/cloudflared**）；
+ *  local = trainer。
  *  任一步失败即中断（已完成的组件保留，页面可单独停止）。 */
 export async function startPreset(
   mode: ConsoleState['trainerPpo'],
@@ -31,20 +34,22 @@ export async function startPreset(
     saveConsoleState({ trainerPpo: mode, course })
     let pushNote = ''
     if (mode === 'push') {
-      // ① ping 门 ② 回写 rl-config（gpu_push 节点 + courses.push_node_url）——
+      // ① ping 门（留空则复用 config 已启用 gpu_push）② 必要时回写 rl-config ——
       // 失败抛 ActionError，**绝不启动** trainingLoop。
-      const { url } = await configurePushEndpoint(
+      const { url, reused } = await configurePushEndpoint(
         course,
         opts.pushEndpoint ?? '',
         opts.pushAuthKey ?? '',
       )
-      pushNote = `; push endpoint 已验证并回写 rl-config (${url})`
+      pushNote = reused
+        ? `; 复用 rl-config gpu_push (${url}) 已 ping 通；无本地 hub-server/cloudflared`
+        : `; push endpoint 已验证并回写 rl-config (${url})；无本地 hub-server/cloudflared`
     }
     const order: Component[] =
       mode === 'pull'
         ? ['selfNode', 'hubServer', 'cloudflared', 'trainingLoop']
         : mode === 'push'
-          ? ['selfNode', 'hubServer', 'trainingLoop']
+          ? ['selfNode', 'trainingLoop']
           : ['trainingLoop']
     const ctx: StartCtx = { course, trainerPpo: mode }
     const detail: string[] = []

@@ -1,6 +1,11 @@
 /** push-config.test.ts — Push 启动前置：URL 归一化 + rl-config 回写（无真实 HTTP）。 */
 import { describe, expect, it } from 'bun:test'
-import { applyPushNodeConfig, normalizePushUrl } from '../src/stack/push-config'
+import {
+  applyPushNodeConfig,
+  enabledGpuPushNodes,
+  findHealthyGpuPushNode,
+  normalizePushUrl,
+} from '../src/stack/push-config'
 import type { RlConfig } from '../src/core/types'
 
 function baseCfg(): RlConfig {
@@ -55,5 +60,36 @@ describe('applyPushNodeConfig', () => {
     expect(pushes[0]!.authKey).toBe('tok2')
     expect(cfg.courses?.['a']?.push_node_url).toBe('https://gpu.example')
     expect(cfg.courses?.['b']?.push_node_url).toBe('https://gpu.example')
+  })
+})
+
+describe('enabledGpuPushNodes / findHealthyGpuPushNode', () => {
+  it('只取 enabled 的 gpu_push（enabled 缺省视为 true）', () => {
+    const cfg = baseCfg()
+    cfg.nodes.push(
+      {
+        id: 'g1',
+        url: 'https://a',
+        authKey: 'k',
+        concurrency: 1,
+        enabled: false,
+        gpu_push: true,
+      },
+      { id: 'g2', url: 'https://b', authKey: 'k', concurrency: 1, enabled: true, gpu_push: true },
+    )
+    expect(enabledGpuPushNodes(cfg).map((n) => n.id)).toEqual(['g2'])
+  })
+
+  it('ping 全不通 → null（调用方再要求手填）', async () => {
+    const cfg = baseCfg()
+    cfg.nodes.push({
+      id: 'g1',
+      url: 'https://127.0.0.1:1',
+      authKey: 'k',
+      concurrency: 1,
+      enabled: true,
+      gpu_push: true,
+    })
+    expect(await findHealthyGpuPushNode(cfg, 200)).toBeNull()
   })
 })

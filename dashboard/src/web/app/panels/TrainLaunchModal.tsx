@@ -139,13 +139,17 @@ export function TrainLaunchModal({
     }
     const endpoint = pushEndpoint.trim()
     const authKey = pushAuthKey.trim()
-    if (!endpoint || !authKey) {
-      setPushErr('Push 模式必须填写 cloudflared endpoint 与 auth key')
+    // 留空合法：服务端复用 rl-config 中 enabled 且 ping 通的 gpu_push。
+    // 填了 endpoint 则必须同时给 auth key。
+    if (endpoint && !authKey) {
+      setPushErr('填写 endpoint 时必须同时填写 auth key')
       return
     }
     setPushErr('')
-    writeLocal(TC_PUSH_ENDPOINT, endpoint)
-    writeLocal(TC_PUSH_AUTH, authKey)
+    if (endpoint) {
+      writeLocal(TC_PUSH_ENDPOINT, endpoint)
+      writeLocal(TC_PUSH_AUTH, authKey)
+    }
     onLaunch(mode, { endpoint, authKey })
   }
 
@@ -183,7 +187,7 @@ export function TrainLaunchModal({
           <div className="tc-push-creds" style={{ display: 'grid', gap: 8, marginTop: 4 }}>
             <label className="tc-line" style={{ display: 'grid', gap: 4 }}>
               <span className="tc-muted tc-small">
-                cloudflared / worker_server endpoint（必填，启动前 ping）
+                endpoint（留空 = 复用 rl-config 已启用 gpu_push）
               </span>
               <input
                 type="url"
@@ -211,7 +215,8 @@ export function TrainLaunchModal({
               </p>
             ) : (
               <p className="tc-muted tc-small" style={{ margin: 0 }}>
-                服务端将 GET {'{url}'}/ping 校验连通性，通过后回写 rl-config.json 再启动训练。
+                云机自起 cloudflared；本机不启 hub-server。留空则检查 config 中 enabled gpu_push 的
+                /ping，通了直接启动。
               </p>
             )}
           </div>
@@ -264,9 +269,7 @@ export function TrainLaunchModal({
             type="button"
             className="tc-btn tc-btn--primary"
             aria-label={`按 ${mode} 模式启动 TrainingLoop`}
-            disabled={
-              readOnly || (mode === 'push' && (!pushEndpoint.trim() || !pushAuthKey.trim()))
-            }
+            disabled={readOnly || (mode === 'push' && !!pushEndpoint.trim() && !pushAuthKey.trim())}
             onClick={handleLaunchClick}
           >
             启动（{mode}）
