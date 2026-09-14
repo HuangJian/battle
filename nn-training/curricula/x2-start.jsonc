@@ -1,0 +1,156 @@
+// 课程 x2-start —— v3 阶梯 2 敌 RL 起步课（对齐 roadmap c02 / ladder_factory）
+//
+// 命名：v3 用 **xN** 前缀，避免与 v2 的 cN/pN 混淆（有意为之，不改回 cN）。
+// x2-start <=> count=2 · RL 起步。对照：roadmap §5.3「c02 多敌」+ I3 工厂
+// emit_course(count=2)；奖励按 N3 + rewards.codex.md；c01-c03 不上 wChip
+// （roadmap 总规则优先，表内「轻剂量」作废，以总规则为准）。
+// xN 与 levels/ladder-c02（单关 ab 循环）是两套 count=2 任务定义并存；
+// x2-start 是一次性起步腿，转工厂线的条件待 DECISIONS 立案（评审 2026-09-14 §4）。
+//
+// 环境：`"level": "arena2"` —— 空场 2 敌，**六种类型对**（ab/ac/ad/bc/bd/cd，
+//   a=basic b=fast c=power d=armor），自定义关 ID 2000-2005。max_ticks=2100。
+// 起步权重：bc-c4-v3 best@ep77（schema_major=3；无 value 头）。
+// 起点探针（2026-09-14，贪心各 600 局=每关 100 局种子 0-99：
+//   tmp/r1-arena2/arena2-{best77,god}.jsonl）：
+//   best77（bc-c4-v3 best@ep77）：
+//   ┌────────┬─────────────┬───────┬─────────┬───────────┬─────────┬────────┐
+//   │ 关     │ 类型对        │ pass  │ kills均 │ 被击中/局  │ 开枪/局   │ 均tick │
+//   ├────────┼─────────────┼───────┼─────────┼───────────┼─────────┼────────┤
+//   │ ab     │ basic+fast  │ 47%   │ 1.34    │ 0.24      │ 13.5    │ 1457   │
+//   │ bd     │ fast+armor  │ 44%   │ 1.24    │ 0.31      │ 16.5    │ 1551   │
+//   │ cd     │ power+armor │ 39%   │ 1.05    │ 0.57      │ 9.7     │ 924    │
+//   │ ad     │ basic+armor │ 37%   │ 1.05    │ 0.49      │ 13.7    │ 1210   │
+//   │ ac     │ basic+power │ 25%   │ 0.66    │ 0.71      │ 8.2     │ 798    │
+//   │ bc     │ fast+power  │ 21%   │ 0.77    │ 0.63      │ 9.8     │ 1023   │
+//   │ pooled │ 全部         │ 35.5% │ 1.02    │ 0.49      │ 11.9    │ 1160   │
+//   └────────┴─────────────┴───────┴─────────┴───────────┴─────────┴────────┘
+//   god：
+//   ┌────────┬─────────────┬───────┬─────────┬───────────┬─────────┬────────┐
+//   │ 关     │ 类型对        │ pass  │ kills均 │ 被击中/局  │ 开枪/局   │ 均tick │
+//   ├────────┼─────────────┼───────┼─────────┼───────────┼─────────┼────────┤
+//   │ ab     │ basic+fast  │ 86%   │ 1.75    │ 0.16      │ 7.2     │ 698    │
+//   │ bd     │ fast+armor  │ 95%   │ 1.90    │ 0.05      │ 10.1    │ 917    │
+//   │ cd     │ power+armor │ 65%   │ 1.34    │ 0.34      │ 7.6     │ 670    │
+//   │ ad     │ basic+armor │ 70%   │ 1.48    │ 0.30      │ 9.3     │ 884    │
+//   │ ac     │ basic+power │ 63%   │ 1.32    │ 0.39      │ 5.6     │ 584    │
+//   │ bc     │ fast+power  │ 69%   │ 1.53    │ 0.31      │ 5.2     │ 537    │
+//   │ pooled │ 全部         │ 74.7% │ 1.55    │ 0.26      │ 7.5     │ 715    │
+//   └────────┴─────────────┴───────┴─────────┴───────────┴─────────┴────────┘
+// 解读：起点约三成五，未饱和，可开腿；最弱关 best77=bc、god=ac（都与 power
+//   相关但排序不同——教师只管 BC 起步，不判难度/门 §0.2）；god pooled 74.7%
+//   < 80% 门是常态（教师有缺陷非天花板），学生靠级内 PPO 超越。
+// 晋级门（roadmap D4，数值不降；r1 报告 §4 的 60%/50% 作废）：
+//   两次正式门评估 pooled 点估计 >=80%（每次 6 关×200=1200 局，共 2400；
+//   两轮种子不重叠、间隔 >=5 训练轮，pass=win ∪ cleared）。日常 eval 用 50/关
+//   降开销（6×50=300 局/次），门前才跑 200/关。起步约三成五，卡门是常态。
+// 开工假说（§5.7）：kill/hit 稠密信号 + wWin 清场尖峰驱动，it40 前 pooled 爬升；
+//   60 轮内无爬升即证伪停腿（防 c6-bonus 式盲跑）。
+//
+// 启动（§5.6：禁裸 python，一律走启动器）：
+//   bun dashboard/src/launch/cli.ts --script run_rl.py --course x2-start
+// 后台常驻加 --detach；日常启停走控制台 bun run dashboard。
+{
+  "version": 5,
+  "name": "x2-start",
+  // 每一决策步一条样本（非 intent/goal 窗口）。与 Student 双头 BC / 当前 PPO 管线匹配。
+  "mode": "per-tick",
+  // 环境唯一来源 = levels/arena2.jsonc。课程侧禁止再写 stages/difficulty/max_ticks/player。
+  "level": "arena2",
+
+  // ── 采集 / 语料 ────────────────────────────────────────────────────────────
+  // 每轮 rollout 局数（= seed_rotate）。c01-c03 局短、transition 少，
+  // 工厂定 600：一轮才够凑 mini-batch，避免「一轮几千帧学不动」（hy E3）。
+  "seed_rotate": 600,
+  // 并发采样 worker 数（LAN 节点槽位合计；8 = 本机+局域网常见配额）。
+  "workers": 8,
+
+  // ── 奖励（v3 早期关；语义变更 = 新 reward_identity，禁止续旧 traj）─────────
+  "reward": {
+    // 只保留：击杀 + 命中 + 统一过关（公式内阶跃项）+ 死亡 terminal。
+    // 不上：wDmg（与死亡重复）/ wChip（c01-c03 承伤基数过小）/ wTick（线性时间会
+    // 压过通关）/ wStuck / wShot / 泛化 wPickup。
+    // toy 力学注意：outcome 虚拟量（is_lives_exhausted 等）是全 episode 常量，
+    // 经 diff(Φ) 后恒为零——终局信号必须走 terminal，禁止写进 formula。
+    // 反之 clearTick 是阶跃函数（清场前 -1、后恒 C），where 项经 diff 后在清场步
+    // 打出 +wWin 尖峰（含清场后被 max_ticks 截断的 BONUS 局），故留公式内。
+    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0)",
+    "params": {
+      // 杀一个敌人的主要信用。完成目标的锚点（roadmap：wKill 固定，早期关主信号）。
+      "wKill": 3.0,
+      // 打中一发的稠密信用。与 wKill 不重复：一个管「打死」，一个管「打得准」。
+      // 血量偏差已知（pool 模型 0 星玩家每杀所需命中：armor 4 vs basic 3、
+      // fast/power 2——classic 的 4:1 口径不适用）：I4 报告须按关拆 shots/kill 与命中率。
+      "wHit": 0.3,
+      // 统一过关奖：clearTick>=0 即发（含清场后被 max_ticks 截断的 BONUS 局）。
+      // 对应 win = stage_clear ∪ cleared，避免「做对了却按超时罚」。
+      "wWin": 2.0,
+    },
+    // 死亡罚进 terminal（公式内写恒为零，见上）。timeout 刻意 0：速度靠关卡 max_ticks；
+    // 死亡 -1 < 超时 0，「1 杀后活到超时」优于「1 杀后阵亡」。
+    "terminal": {
+      "lives_exhausted": -1.0,
+    },
+    // Phi 势差 + 末样本 terminal 的玩具场方案（非 score_reconcile 对账）。
+    "scheme": "toy",
+  },
+
+  // ── 策略起点 / 缰绳 ────────────────────────────────────────────────────────
+  // BC 暖启权重。暖启 = 初始化手段，不是能力继承（D10）——80% 仍靠级内训练拉。
+  "bc": "nn-training/weights/bc-c4-v3/bc-c4-v3.it1.20260914-103830.json",
+  // 开：冻结 BC 作 kickstart 参考策略，PPO 前期用 KL 缰绳防止冲掉暖启。
+  "kickstart_ref": true,
+  // 必须为 0：kickstart 要求 it1 就上缰绳；非 0 会把首轮系数归零（config 硬校验，
+  // 改 1 直接启动失败——故 warmup_iters=1 不是可选项）。
+  // 注：BC 无 value 头；it1 必须记录 value loss 起始值（I4 报告字段）。若 >0.8，
+  // 救济只能是离线 value 预训或接受尖峰（normalize_ret 已开），禁改本字段。
+  "warmup_iters": 0,
+
+  // ── PPO 优化器 ─────────────────────────────────────────────────────────────
+  // 学习率。热启偏保守，防一步冲掉 BC 特征（工厂默认 1.5e-4）。
+  "lr": 0.00015,
+  // 每轮把采到的 transition 过几遍。4 = 短局下兼顾样本利用与 off-policy 程度。
+  "epochs": 4,
+  // mini-batch 大小。512 与历史课程一致；短局轮里再大容易抬 KL 噪声。
+  "mb": 512,
+  // 把本轮 return 在 batch 内标准化。工厂默认开：短局回报尺度波动大，归一后 value 更稳。
+  "normalize_ret": true,
+  // 折扣因子。0.998 偏长视野（对齐工厂）；2 敌局一般 500~1500 tick 结束。
+  "gamma": 0.998,
+  // GAE lambda。工厂定 0.95（bias-variance 折中）；比旧 p2-step 的 0.99 更偏低方差。
+  "lam": 0.95,
+
+  // ── 学习率 / KL 日程（按轮分段；直到 until_iter 含端点）────────────────────
+  "ppo_schedule": [
+    // 前 40 轮：稳住缰绳。kl_coef 0.2 = 允许偏离 BC 但不乱飞；kl_cap 0.2 = KL 硬顶。
+    { "until_iter": 40, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
+    // 40 轮后：放缰 + 更小步长精修。kl_coef 0.03（工厂；不是 0——完全松开容易漂）。
+    { "kl_coef": 0.03, "lr": 0.00005 },
+  ],
+
+  // ── 预算 / 路径 ────────────────────────────────────────────────────────────
+  // 本腿总轮数。0 = 无限轮。
+  "iters": 0,
+  // 墙钟上限（小时）。0 = 不按墙钟砍；12 = 工厂默认一班岗。
+  "max_hours": 12,
+  // 输出权重指针（每轮覆盖写）。
+  "out": "tmp/x2-start/weights.json",
+  // 轨迹/账本目录。reward 或语料语义变更后必须换新目录（§15.5），禁止续跑。
+  "traj": "tmp/x2-start",
+  // 归档目录与文件名前缀（it 后自动接 .itN.timestamp.json）。
+  "backup_dir": "nn-training/weights/x2-start",
+  "backup_prefix": "x2-start",
+
+  // ── 护栏 ───────────────────────────────────────────────────────────────────
+  // 熵熔断：entropy 连续低于阈值过多轮则停车。0.25 比默认 0.60 更紧——
+  // BC 热启策略天生低熵，防「假性坍塌」误停要用相对崩塌语义（breaker 配套）。
+  "ent_break": 0.25,
+
+  // ── 评估 ───────────────────────────────────────────────────────────────────
+  // arena2 六种类型对：ID 2000-2005（ab/ac/ad/bc/bd/cd）。每关各 eval_games_per_stage 局。
+  // 日常 50/关（6×50=300 局/次，降开销）；正式门评估才上 200/关（6×200=1200 局/次，
+  // 两轮 pooled 2400 局判 ≥80%，种子不重叠、间隔 ≥5 轮——见文件头晋级门）。
+  "eval_stages": "2000-2005",
+  "eval_games_per_stage": 50,
+  // 每 N 轮 eval 一次。
+  "eval_every": 5,
+}

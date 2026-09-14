@@ -46,6 +46,8 @@ import {
   actionFromFrame,
   computeMasks,
   OBS_SCHEMA_MAJOR,
+  OBS_CHANNELS,
+  BOARD,
   SCALAR_DIM,
 } from '../../src/nn/obs-encoder'
 import { writeNpy } from '../../src/nn/npy'
@@ -81,7 +83,7 @@ const RL_SCORE_CONFIG = {
   } as Weights,
 }
 
-interface Accumulator {
+export interface Accumulator {
   obs: Uint8Array[]
   scalars: Float32Array[]
   actions: number[] // [move, fire] pairs, flattened
@@ -391,7 +393,7 @@ export function exportReplay(text: string, fileLabel: string, skipVerify: boolea
   return { acc, meta: out, ok: true, reason: 'exported' }
 }
 
-function flushShard(
+export function flushShard(
   acc: Accumulator,
   dir: string,
   name: string,
@@ -399,7 +401,9 @@ function flushShard(
 ): void {
   const N = acc.nSamples
   if (N === 0) return
-  const obs = new Uint8Array(N * 14 * 26 * 26)
+  // 行宽 SSOT = 编码器常量（2026-09-14 x2-start it1 全灭回归同类：obs 曾手写 v2
+  // 字面量 14，编码器升 v3 后每局 obs.set 越界；scalars 早已是 SCALAR_DIM）。
+  const obs = new Uint8Array(N * OBS_CHANNELS * BOARD * BOARD)
   const scalars = new Float32Array(N * SCALAR_DIM)
   const actions = new Uint8Array(N * 2)
   const masks = new Uint8Array(N * MASK_DIM)
@@ -407,7 +411,7 @@ function flushShard(
   const returns = new Float32Array(N)
   const ret = discountReturns(acc.rewards)
   for (let i = 0; i < N; i++) {
-    obs.set(acc.obs[i], i * 14 * 26 * 26)
+    obs.set(acc.obs[i], i * OBS_CHANNELS * BOARD * BOARD)
     scalars.set(acc.scalars[i], i * SCALAR_DIM)
     actions[i * 2] = acc.actions[i * 2]
     actions[i * 2 + 1] = acc.actions[i * 2 + 1]
@@ -425,7 +429,7 @@ function flushShard(
     ...baseManifest,
   }
   mkdirSync(dir, { recursive: true })
-  writeNpy(`${dir}/obs.npy`, obs, [N, 14, 26, 26], 'u1')
+  writeNpy(`${dir}/obs.npy`, obs, [N, OBS_CHANNELS, BOARD, BOARD], 'u1')
   writeNpy(`${dir}/scalars.npy`, scalars, [N, SCALAR_DIM], 'f4')
   writeNpy(`${dir}/actions.npy`, actions, [N, 2], 'u1')
   writeNpy(`${dir}/masks.npy`, masks, [N, MASK_DIM], 'u1')

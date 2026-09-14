@@ -21,8 +21,9 @@
  *             守家 0.5 × (γ^dt·Φ(窗末) − Φ(窗初))（potential telescoping，§12.2 变步长式）
  *             交战效率 0.3 × (窗口命中/开火)（自伤否决率项 T9 全量期补）
  *
- * 输出 shards（每局一个目录，npy + manifest）：
- *   obs (N,14,26,26) u1 | scalars (N,19) f4 | inject (N,9) f4
+ * 输出 shards（每局一个目录，npy + manifest；行宽 SSOT = 编码器常量
+ * OBS_CHANNELS/BOARD/SCALAR_DIM，加/减通道只改编码器，禁止回字面量）：
+ *   obs (N,C,H,W) u1 | scalars (N,S) f4 | inject (N,9) f4
  *   a_goal (N,) i64 | lp_goal (N,) f4 | value (N,) f4 | reward (N,) f4
  *   done (N,) u8→i64 | goal_mask (N,676|169) u1 | dt (N,) u2 | engage (N,) i64
  *
@@ -39,7 +40,7 @@ import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { STAGES } from '../../src/config/stages'
 import { START_LIVES, GRID, CELL, ENEMIES_PER_STAGE, BASE_POS } from '../../src/constants'
-import { OBS_SCHEMA_MAJOR } from '../../src/nn/obs-encoder'
+import { OBS_SCHEMA_MAJOR, OBS_CHANNELS, BOARD, SCALAR_DIM } from '../../src/nn/obs-encoder'
 import { buildGoalModelFromText, type GoalModelLike } from '../../src/nn/infer'
 import { GOAL_INJECT_DIM } from '../../src/nn/goal-inject'
 import { GoalExecutor } from '../../src/nn/goal-executor'
@@ -147,7 +148,7 @@ function isBaseRingCell(col: number, row: number): boolean {
   return false
 }
 
-interface Step {
+export interface Step {
   obs: Uint8Array
   scalars: Float32Array
   inject: Float32Array
@@ -512,12 +513,17 @@ export function runOne(
   }
 }
 
-function writeGoalShard(dir: string, d: { steps: Step[]; n: number }, manifest: unknown): void {
+export function writeGoalShard(
+  dir: string,
+  d: { steps: Step[]; n: number },
+  manifest: unknown,
+): void {
   const N = d.n
   if (N === 0) return
   const actionDim = d.steps[0].mask.length
-  const obs = new Uint8Array(N * 14 * 26 * 26)
-  const scalars = new Float32Array(N * 19)
+  // 行宽 SSOT = 编码器常量（2026-09-14 x2-start it1 全灭回归同类）。
+  const obs = new Uint8Array(N * OBS_CHANNELS * BOARD * BOARD)
+  const scalars = new Float32Array(N * SCALAR_DIM)
   const inject = new Float32Array(N * GOAL_INJECT_DIM)
   const a = new Uint16Array(N)
   const lp = new Float32Array(N)
@@ -529,8 +535,8 @@ function writeGoalShard(dir: string, d: { steps: Step[]; n: number }, manifest: 
   const engage = new Uint8Array(N)
   for (let i = 0; i < N; i++) {
     const s = d.steps[i]
-    obs.set(s.obs, i * 14 * 26 * 26)
-    scalars.set(s.scalars, i * 19)
+    obs.set(s.obs, i * OBS_CHANNELS * BOARD * BOARD)
+    scalars.set(s.scalars, i * SCALAR_DIM)
     inject.set(s.inject, i * GOAL_INJECT_DIM)
     a[i] = s.a
     lp[i] = s.lp
@@ -541,8 +547,8 @@ function writeGoalShard(dir: string, d: { steps: Step[]; n: number }, manifest: 
     dt[i] = s.dt
     engage[i] = s.engage
   }
-  writeNpy(`${dir}/obs.npy`, obs, [N, 14, 26, 26], 'u1')
-  writeNpy(`${dir}/scalars.npy`, scalars, [N, 19], 'f4')
+  writeNpy(`${dir}/obs.npy`, obs, [N, OBS_CHANNELS, BOARD, BOARD], 'u1')
+  writeNpy(`${dir}/scalars.npy`, scalars, [N, SCALAR_DIM], 'f4')
   writeNpy(`${dir}/inject.npy`, inject, [N, GOAL_INJECT_DIM], 'f4')
   writeNpy(`${dir}/a_goal.npy`, a, [N], 'u2')
   writeNpy(`${dir}/lp_goal.npy`, lp, [N], 'f4')

@@ -7,8 +7,9 @@
  *   子链共享委托）；奖励按窗口累计（intent-rl-reward.ts：击杀/清砖/拾取/阵亡/基地墙损
  *   + potential shaping + 无产出切换成本 + 终局）。
  *
- * 输出 shards（每局一个目录，npy + manifest）：
- *   obs (N,14,26,26) u1 | scalars (N,19) f4 | inject (N,9) f4（prev one-hot 8 + duration）
+ * 输出 shards（每局一个目录，npy + manifest；行宽 SSOT = 编码器常量
+ * OBS_CHANNELS/BOARD/SCALAR_DIM，加/减通道只改编码器，禁止回字面量）：
+ *   obs (N,C,H,W) u1 | scalars (N,S) f4 | inject (N,9) f4（prev one-hot 8 + duration）
  *   a_intent (N,) u1 | lp_intent (N,) f4 | value (N,) f4 | reward (N,) f4
  *   done (N,) u1 | mask (N,8) u1（死类掩码）| dt (N,) u2（窗口时长 tick，GAE 变步长 γ）
  * ——ppo_intent.py 消费（γ_step = γ_tick^Δt）。
@@ -26,7 +27,7 @@ import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { STAGES } from '../../src/config/stages'
 import { START_LIVES, BASE_POS } from '../../src/constants'
-import { OBS_SCHEMA_MAJOR } from '../../src/nn/obs-encoder'
+import { OBS_SCHEMA_MAJOR, OBS_CHANNELS, BOARD, SCALAR_DIM } from '../../src/nn/obs-encoder'
 import { buildIntentModelFromText, type IntentModelLike } from '../../src/nn/infer'
 import { IntentExecutor } from '../../src/nn/intent-executor'
 import { writeNpy } from '../../src/nn/npy'
@@ -143,7 +144,7 @@ function isBaseRingCell(col: number, row: number): boolean {
   return false
 }
 
-interface Step {
+export interface Step {
   obs: Uint8Array
   scalars: Float32Array
   inject: Float32Array
@@ -436,11 +437,12 @@ export function runOne(
   }
 }
 
-function writeIntentShard(dir: string, d: ShardData, manifest: unknown): void {
+export function writeIntentShard(dir: string, d: ShardData, manifest: unknown): void {
   const N = d.n
   if (N === 0) return
-  const obs = new Uint8Array(N * 14 * 26 * 26)
-  const scalars = new Float32Array(N * 19)
+  // 行宽 SSOT = 编码器常量（2026-09-14 x2-start it1 全灭回归同类）。
+  const obs = new Uint8Array(N * OBS_CHANNELS * BOARD * BOARD)
+  const scalars = new Float32Array(N * SCALAR_DIM)
   const inject = new Float32Array(N * 9)
   const a = new Uint8Array(N)
   const lp = new Float32Array(N)
@@ -451,8 +453,8 @@ function writeIntentShard(dir: string, d: ShardData, manifest: unknown): void {
   const dt = new Uint16Array(N)
   for (let i = 0; i < N; i++) {
     const s = d.steps[i]
-    obs.set(s.obs, i * 14 * 26 * 26)
-    scalars.set(s.scalars, i * 19)
+    obs.set(s.obs, i * OBS_CHANNELS * BOARD * BOARD)
+    scalars.set(s.scalars, i * SCALAR_DIM)
     inject.set(s.inject, i * 9)
     a[i] = s.a
     lp[i] = s.lp
@@ -462,8 +464,8 @@ function writeIntentShard(dir: string, d: ShardData, manifest: unknown): void {
     for (let j = 0; j < INTENT_DIM; j++) mask[i * INTENT_DIM + j] = INTENT_MASK[j]
     dt[i] = s.dt
   }
-  writeNpy(`${dir}/obs.npy`, obs, [N, 14, 26, 26], 'u1')
-  writeNpy(`${dir}/scalars.npy`, scalars, [N, 19], 'f4')
+  writeNpy(`${dir}/obs.npy`, obs, [N, OBS_CHANNELS, BOARD, BOARD], 'u1')
+  writeNpy(`${dir}/scalars.npy`, scalars, [N, SCALAR_DIM], 'f4')
   writeNpy(`${dir}/inject.npy`, inject, [N, 9], 'f4')
   writeNpy(`${dir}/a_intent.npy`, a, [N], 'u1')
   writeNpy(`${dir}/lp_intent.npy`, lp, [N], 'f4')

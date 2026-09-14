@@ -16,8 +16,9 @@
  *   候选间比较只反映目标选择。开火 = FireControl 规则（God-AI-fire-conditioned，
  *   §11.3.1 ⇒ manifest 记 firePolicy 版本）。
  *
- * shard（每局一个目录；λ 不入库，k_i 必存 —— §9.4.3）：
- *   obs (N,14,26,26) u1 | scalars (N,19) f4
+ * shard（每局一个目录；λ 不入库，k_i 必存 —— §9.4.3；行宽 SSOT = 编码器常量
+ * OBS_CHANNELS/BOARD/SCALAR_DIM，加/减通道只改编码器，禁止回字面量）：
+ *   obs (N,C,H,W) u1 | scalars (N,S) f4
  *   cand_cell (N,K) u2（padding 65535）| cand_k (N,K) u2 | cand_s (N,K) f4
  *   engage (N) u1 | manifest.json（H/K/replan/firePolicy/难度/开销统计）
  *
@@ -37,7 +38,7 @@ import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import { GoalExecutor } from '../../src/nn/goal-executor'
 import { ReachMasker } from '../../src/ai/goal/reach-mask'
 import { basePressure } from '../../src/nn/intent-rl-reward'
-import { ObsEncoder } from '../../src/nn/obs-encoder'
+import { ObsEncoder, OBS_CHANNELS, BOARD, SCALAR_DIM } from '../../src/nn/obs-encoder'
 import { writeGoalInject, GOAL_INJECT_DIM } from '../../src/nn/goal-inject'
 import {
   computeBaseGuardAnchorImpl,
@@ -742,8 +743,9 @@ export function writeCfShard(
   const N = res.decisions.length
   if (N === 0) return
   const windows = res.windows
-  const obs = new Uint8Array(N * 14 * 26 * 26)
-  const scalars = new Float32Array(N * 19)
+  // 行宽 SSOT = 编码器常量（2026-09-14 x2-start it1 全灭回归同类）。
+  const obs = new Uint8Array(N * OBS_CHANNELS * BOARD * BOARD)
+  const scalars = new Float32Array(N * SCALAR_DIM)
   const injects = new Float32Array(N * GOAL_INJECT_DIM)
   const cells = new Uint16Array(N * K).fill(UNREACH)
   const srcs = new Uint8Array(N * K)
@@ -752,8 +754,8 @@ export function writeCfShard(
   const engage = windows.map(() => new Uint8Array(N))
   for (let i = 0; i < N; i++) {
     const d = res.decisions[i]
-    obs.set(res.obs[i], i * 14 * 26 * 26)
-    scalars.set(res.scalars[i], i * 19)
+    obs.set(res.obs[i], i * OBS_CHANNELS * BOARD * BOARD)
+    scalars.set(res.scalars[i], i * SCALAR_DIM)
     injects.set(res.injects[i], i * GOAL_INJECT_DIM)
     for (let j = 0; j < d.candidates.length && j < K; j++) {
       cells[i * K + j] = d.candidates[j]
@@ -763,8 +765,8 @@ export function writeCfShard(
     }
     for (let w = 0; w < windows.length; w++) engage[w][i] = d.engageW[w]
   }
-  writeNpy(`${dir}/obs.npy`, obs, [N, 14, 26, 26], 'u1')
-  writeNpy(`${dir}/scalars.npy`, scalars, [N, 19], 'f4')
+  writeNpy(`${dir}/obs.npy`, obs, [N, OBS_CHANNELS, BOARD, BOARD], 'u1')
+  writeNpy(`${dir}/scalars.npy`, scalars, [N, SCALAR_DIM], 'f4')
   writeNpy(`${dir}/inject.npy`, injects, [N, GOAL_INJECT_DIM], 'f4')
   writeNpy(`${dir}/cand_cell.npy`, cells, [N, K], 'u2')
   writeNpy(`${dir}/cand_src.npy`, srcs, [N, K], 'u1')

@@ -34,8 +34,9 @@
  * tank_destroyed/bullet_fired/powerup_collected），因此每局的维度指标与
  * godai-score 对同一局打分完全可互换。
  *
- * 输出 shards（每局一个目录，npy + manifest）：
- *   obs (N,14,26,26) u1 | scalars (N,24) f4 | a_x / lp_x / value/reward (N,) | done | mask (N,10)
+ * 输出 shards（每局一个目录，npy + manifest；行宽 SSOT = 编码器常量
+ * OBS_CHANNELS/BOARD/SCALAR_DIM，加/减通道只改编码器，禁止回字面量）：
+ *   obs (N,C,H,W) u1 | scalars (N,S) f4 | a_x / lp_x / value (N,) | done | mask (N,7)
  * manifest 记录 outcome/ticks + score/quality + 全部 11 维 dims{value,raw}
  * ——训练侧与事后分析可直接用同一套数字。
  *
@@ -52,7 +53,14 @@ import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { STAGES } from '../../src/config/stages'
 import { START_LIVES, ENEMIES_PER_STAGE, BASE_POS, CELL, GRID } from '../../src/constants'
 import { type Direction } from '../../src/constants'
-import { ObsEncoder, computeMasks, OBS_SCHEMA_MAJOR } from '../../src/nn/obs-encoder'
+import {
+  ObsEncoder,
+  computeMasks,
+  OBS_SCHEMA_MAJOR,
+  OBS_CHANNELS,
+  BOARD,
+  SCALAR_DIM,
+} from '../../src/nn/obs-encoder'
 import {
   isArenaId,
   resolveArenaStage,
@@ -80,7 +88,7 @@ const MAX_TICKS = 36000
 const K = 10
 const MOVE_DIM = 5
 const FIRE_DIM = 2
-const MASK_DIM = MOVE_DIM + FIRE_DIM // 7 (v2: item head removed)
+export const MASK_DIM = MOVE_DIM + FIRE_DIM // 7 (v2: item head removed)
 
 // shard 文件名清单（与 writeRlShard 的 writeNpy 调用一一对应；--pack 打容器时按此顺序）。
 const RL_SHARD_FILES = [
@@ -368,7 +376,7 @@ function logProbAt(logits: Float32Array, mask: number[] | null, idx: number): nu
   return Math.log(_logpBuf[idx] / sum + 1e-8)
 }
 
-interface ShardData {
+export interface ShardData {
   obs: Uint8Array[]
   scalars: Float32Array[]
   aMove: number[]
@@ -759,7 +767,7 @@ function visitedCellsAdd(set: Set<number>, col: number, row: number): void {
   set.add(row * GRID + col)
 }
 
-function writeRlShard(dir: string, d: ShardData, manifest: unknown): void {
+export function writeRlShard(dir: string, d: ShardData, manifest: unknown): void {
   const N = d.n
   if (N === 0) return
   // 指标行数必须 = N+1（N 个决策快照 + 1 个终局快照）——reward 的 diff 基。
@@ -768,8 +776,10 @@ function writeRlShard(dir: string, d: ShardData, manifest: unknown): void {
       `metrics row count ${d.metrics.length} != n+1=${N + 1} (${dir}) —— 指标行失配，拒绝写盘`,
     )
   }
-  const obs = new Uint8Array(N * 14 * 26 * 26)
-  const scalars = new Float32Array(N * 19)
+  // 行宽 SSOT = 编码器常量（2026-09-14 x2-start it1 全灭回归：此处曾手写
+  // v2 字面量 14/19，编码器升 v3 后每局终局行 obs.set 越界，整腿零产出）。
+  const obs = new Uint8Array(N * OBS_CHANNELS * BOARD * BOARD)
+  const scalars = new Float32Array(N * SCALAR_DIM)
   const aMove = new Uint8Array(N)
   const aFire = new Uint8Array(N)
   const lpMove = new Float32Array(N)
@@ -779,8 +789,8 @@ function writeRlShard(dir: string, d: ShardData, manifest: unknown): void {
   const done = new Uint8Array(N)
   const mask = new Uint8Array(N * MASK_DIM)
   for (let i = 0; i < N; i++) {
-    obs.set(d.obs[i], i * 14 * 26 * 26)
-    scalars.set(d.scalars[i], i * 19)
+    obs.set(d.obs[i], i * OBS_CHANNELS * BOARD * BOARD)
+    scalars.set(d.scalars[i], i * SCALAR_DIM)
     aMove[i] = d.aMove[i]
     aFire[i] = d.aFire[i]
     lpMove[i] = d.lpMove[i]
@@ -792,8 +802,8 @@ function writeRlShard(dir: string, d: ShardData, manifest: unknown): void {
   for (let i = 0; i <= N; i++) {
     metrics.set(d.metrics[i], i * METRICS_DIM)
   }
-  writeNpy(`${dir}/obs.npy`, obs, [N, 14, 26, 26], 'u1')
-  writeNpy(`${dir}/scalars.npy`, scalars, [N, 19], 'f4')
+  writeNpy(`${dir}/obs.npy`, obs, [N, OBS_CHANNELS, BOARD, BOARD], 'u1')
+  writeNpy(`${dir}/scalars.npy`, scalars, [N, SCALAR_DIM], 'f4')
   writeNpy(`${dir}/a_move.npy`, aMove, [N], 'u1')
   writeNpy(`${dir}/a_fire.npy`, aFire, [N], 'u1')
   writeNpy(`${dir}/lp_move.npy`, lpMove, [N], 'f4')

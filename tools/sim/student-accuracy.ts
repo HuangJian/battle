@@ -50,6 +50,32 @@ function readNpy(path: string): Npy {
   }
 }
 
+/**
+ * shard 样本步长（2026-09-14 x2-start it1 全灭回归的静默变体）。
+ *
+ * 此处曾手写 v2 字面量（obs 行 `14*C` / 标量行 19）：读 v3 shard 不抛错，
+ * 只是静默错位喂模型、输出垃圾准确率。步长一律从 npy 形状派生，
+ * 与模型输入维度不一致时由调用方响亮拒绝。
+ */
+export function shardSampleStrides(
+  obsShape: number[],
+  scShape: number[],
+): { obsStride: number; scStride: number } {
+  const [n, c, h, w] = obsShape
+  const [n2, s] = scShape
+  if (
+    obsShape.length !== 4 ||
+    scShape.length !== 2 ||
+    !Number.isInteger(n) ||
+    n < 0 ||
+    ![c, h, w, s].every((v) => Number.isInteger(v) && v > 0) ||
+    n !== n2
+  ) {
+    throw new Error(`shard 形状非法（obs=[${obsShape}] scalars=[${scShape}]），拒绝静默错读`)
+  }
+  return { obsStride: c * h * w, scStride: s }
+}
+
 function argmax(a: Float32Array, n: number): number {
   let b = 0
   let bv = a[0]
@@ -95,7 +121,6 @@ function main(): void {
   let fireOk = 0
   const movePredDist = [0, 0, 0, 0, 0]
   const moveLabDist = [0, 0, 0, 0, 0]
-  const C = 26 * 26
   let logged = 0
 
   for (const dir of shardDirs) {
@@ -105,15 +130,28 @@ function main(): void {
       join(dir, 'scalars' + (existsSync(join(dir, 'scalars.npy')) ? '.npy' : '')),
     )
     const actNpy = readNpy(join(dir, 'actions.npy'))
+    // shard 维度必须 == 模型输入维度，否则是跨 schema 误读（静默垃圾更贵）——响亮拒绝。
+    const [, nCh, nH, nW] = obsNpy.shape
+    if (nCh !== model.inCh || nH !== model.board || nW !== model.board)
+      throw new Error(
+        `[student-accuracy] ${dir} obs 形状 [${obsNpy.shape}] 与模型输入 ` +
+          `(inCh=${model.inCh} board=${model.board}) 不一致，拒绝评估`,
+      )
+    if (scNpy.shape[1] !== model.scalarDim)
+      throw new Error(
+        `[student-accuracy] ${dir} scalars 形状 [${scNpy.shape}] 与模型输入 ` +
+          `(scalarDim=${model.scalarDim}) 不一致，拒绝评估`,
+      )
+    const { obsStride, scStride } = shardSampleStrides(obsNpy.shape, scNpy.shape)
     const N = obsNpy.shape[0]
     const obs = obsNpy.u8
     const sc = scNpy.f32
     const act = actNpy.u8
     for (let i = 0; i < N && n < maxSamples; i++) {
-      const oBase = i * 14 * C
-      const obsSample = obs.subarray(oBase, oBase + 14 * C)
-      const sBase = i * 19
-      const scSample = sc.subarray(sBase, sBase + 19)
+      const oBase = i * obsStride
+      const obsSample = obs.subarray(oBase, oBase + obsStride)
+      const sBase = i * scStride
+      const scSample = sc.subarray(sBase, sBase + scStride)
       model.forward(obsSample, scSample)
       const mv = argmax(model.moveLogits, 5)
       const fr = argmax(model.fireLogits, 2)
@@ -145,4 +183,4 @@ function main(): void {
   process.stderr.write(`[student-accuracy] DONE move=${pct(moveOk)} fire=${pct(fireOk)}\n`)
 }
 
-main()
+if (import.meta.main) main()

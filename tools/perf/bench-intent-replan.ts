@@ -11,7 +11,7 @@ import { START_LIVES } from '../../src/constants'
 import { RNG } from '../../src/utils/RNG'
 import { readFileSync } from 'node:fs'
 import { IntentExecutor } from '../../src/nn/intent-executor'
-import { ObsEncoder } from '../../src/nn/obs-encoder'
+import { ObsEncoder, OBS_CHANNELS, BOARD, SCALAR_DIM } from '../../src/nn/obs-encoder'
 
 const weightsText = readFileSync('tmp/intent-weights-Bp.json', 'utf8')
 
@@ -36,8 +36,10 @@ function run(seed: number, ticks: number) {
 
   // 2) forward 单次耗时（模型 internal intentForward）
   const model = exec['model']!
-  const obs = new Uint8Array(14 * 26 * 26)
-  const scal = new Float32Array(19)
+  // bench 输入形状必须 == 编码器常量（2026-09-14 同类：曾手写 v2 字面量 14/19，
+  // 测的不是真实前向形状）。内容全零，只测耗时。
+  const obs = new Uint8Array(OBS_CHANNELS * BOARD * BOARD)
+  const scal = new Float32Array(SCALAR_DIM)
   const inj = new Float32Array(9)
   t0 = performance.now()
   for (let i = 0; i < 50; i++) model.intentForward(obs, scal, inj)
