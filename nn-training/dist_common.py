@@ -12,9 +12,11 @@ dist_common.py — 分布式采样 trainer 侧公共工具（stdlib-only，可�
     子进程打包，无 base64。files 值为 bytes。
   - v1（旧 agent 兼容）：gzip(JSON {manifest, files:{name: base64}})。files 值为 str。
   解码端 unpack_container() 按 magic 自动识别，validate/write_shard 双模兼容。
-- 任务获取：fetch_task() 带 x-async 头提交——新 agent 立即 202+token，转 /v1/result
-  轮询（瞬断可重试，结果在 agent 缓存里不丢）；旧 agent 忽略该头同步返回整包，
-  行为与 v3.5 完全一致。两种响应在同一函数内消化。
+- 任务获取：fetch_task() **缺省 sync**（不带 x-async）——agent 跑完一局后在同一
+  连接上直接回 BCV2 包（v3.5 路径；2026-09-14 实测 arena2 局均 ~0.4s，3s 异步
+  轮询把吞吐打成 ~1/3，sync 与 poll=0.2 同速且实现更简单）。竞速输家副本仍传
+  abandon_event → 自动回退 x-async+轮询，保留「all_settled 立即放弃」语义
+  （2026-09-06 竞速收尾洞修复）。DIST_TASK_ASYNC=1 可全局强制旧异步路径。
 - 权重下发：POST body = gzip(weights.json 字节)，头部 X-Iter-Id / X-Weights-Sha256；
   agent 校验 sha 一致后，同 sha 幂等不动、异 sha 原子切换并清空结果缓存。
 
@@ -723,10 +725,13 @@ def fetch_task(
     --player-level）。stageJson 非空时只派给 ping.stageJsonSupport=true 的节点
     （旧 agent 不认识该参数会静默丢弃跑默认关——数据污染，绝不降级）。
 
-    v3.6：提交带 x-async 头。新 agent 立即 202 → 转 /v1/result 轮询（轮询期网络瞬断
-    不丢局：结果在 agent 结果缓存里，恢复后继续拉）；旧 agent 无视该头同步阻塞返回
-    整包（与 v3.5 行为逐字节一致）。注意 submit 必须用完整 timeout——对旧 agent 而言
-    这就是原来的长连接等待，短超时会把同步模式误杀。
+    缺省 **sync**（不带 x-async）：agent 跑完直接在同一连接回整包。timeout 必须
+    覆盖整局墙钟（arena2 ~1s；经典关可到数十秒）——短超时会把同步请求误杀。
+
+    仍走 x-async+轮询的例外：
+      · abandon_event 非 None（竞速输家）——轮询阶段可在 all_settled 时立刻放弃；
+        sync 长连接无法中断，会把注定丢弃的局等满。
+      · 环境变量 DIST_TASK_ASYNC=1（运维强制旧异步路径 / WAN 抖动排查）。
     """
     params = {
         "iterId": iter_id,
@@ -767,7 +772,9 @@ def fetch_task(
     base = url.rstrip("/")
     started = time.monotonic()
     try:
-        status, body = _request(f"{base}/v1/task?{qs}", auth_key, timeout, headers={"x-async": "1"})
+        use_async = abandon_event is not None or os.environ.get("DIST_TASK_ASYNC") == "1"
+        hdrs = {"x-async": "1"} if use_async else None
+        status, body = _request(f"{base}/v1/task?{qs}", auth_key, timeout, headers=hdrs)
         if status == 202:
             return _poll_result(
                 base,
