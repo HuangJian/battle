@@ -2,7 +2,6 @@
 import type { RlConfig } from '../../core/types'
 import { loadConsoleState } from '../actions'
 import { loadConfigSafe } from './config'
-import { courseOverviewCache } from './course-overview'
 import { discoverCourses, effectiveCourse } from './courses'
 import {
   SNAPSHOT_REFRESH_MS,
@@ -39,7 +38,6 @@ export function getSlowSnapshot(cfg: RlConfig, course: string): Promise<SlowSnap
  *  （不主动后台刷新，避免与请求竞争）。 */
 export function invalidateSlowSnapshot(): void {
   slowSnapshots.clear()
-  courseOverviewCache.clear() // 总览与慢快照同拍失效（动作结果即时上屏）
 }
 
 /** 后台刷新器：立即暖一次 + 每 intervalMs 重算（unref，不阻止进程退出）。服务端启动时

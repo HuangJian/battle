@@ -1,17 +1,18 @@
 /**
- * web-app-hero-overview.test.ts — Hero 最新 6 轮完整指标（§367）+ 同屏多课总览（P5-W2）
+ * web-app-hero-overview.test.ts — Hero 最新 6 轮完整指标（§367）
  *
- * 分层：src/web/app/panels/Hero.tsx + MultiCourseOverview.tsx
+ * 分层：src/web/app/panels/Hero.tsx
  *
  * 依据 plan/Training-Console-Preact.md（§7 交互纯函数化 / R13 ③ 分层 / DS-E1 pool 契约）。
  * 自 training-console-preact.test.ts 按 src 分层拆出；用例逐一不变
  * （拆分前后 dashboard 合计 306 pass 对账）。
+ * 2026-09-14：同屏多课总览（P5-W2）面板随用户指令整体下线，相关用例删除。
  */
 
 import { describe, expect, it } from 'bun:test'
 import { h } from 'preact'
 import { renderToString } from 'preact-render-to-string'
-import { type ConsoleStateView, type CourseOverview, type IterRow } from '../src/web/view'
+import { type ConsoleStateView, type IterRow } from '../src/web/view'
 
 // ────────────────────────── 纯函数：指标行 / 排序 / 过滤 ──────────────────────────
 function fakeRow(iter: number, evalData: IterRow['evalData'] = null): IterRow {
@@ -75,88 +76,5 @@ describe('Hero 训练状态区（§367：最新 6 轮完整指标）', () => {
     // 无数据：hero 空态无表
     const html3 = renderToString(h(Hero, { stateView: mkView([]), onMore: () => {} }))
     expect(html3).not.toContain('tc-hero__iters')
-  })
-})
-
-// ────────────────────────── 多课程总览（P5-W2） ──────────────────────────
-function covOf(course: string, over: Partial<CourseOverview> = {}): CourseOverview {
-  return {
-    course,
-    components: [
-      { key: 'hubServer', status: 'running', pid: 11 },
-      { key: 'cloudflared', status: 'stopped', pid: null },
-      { key: 'workerServe', status: 'exited', pid: 22 },
-      { key: 'trainingLoop', status: 'running', pid: 33 },
-    ],
-    phase: { phase: 'rollout', sinceMs: null, iter: 12 },
-    last: { iter: 12, winRate: 0.42, rolloutSec: 82, ppoSec: 240, halted: false },
-    iters: 12,
-    cloudHalt: null,
-    ppoQueueStall: null,
-    ...over,
-  }
-}
-
-describe('MultiCourseOverview 同屏多课总览（P5-W2）', () => {
-  it('单课不渲染；多课每课一行（组件状态点 + 最近指标 + 停机徽标）', async () => {
-    const { MultiCourseOverview } = await import('../src/web/app/panels/MultiCourseOverview')
-    const base: ConsoleStateView = {
-      time: 't',
-      course: 'a',
-      courses: ['a', 'b'],
-      components: [],
-      nodes: [],
-      modes: { trainerPpo: 'pull', stream: 0, doubleBuffer: 0, precollectEarly: 0 },
-      metrics: { available: false, iters: [] },
-      phase: { phase: 'idle', sinceMs: null, iter: null },
-    }
-    // 单课（只有 1 行）→ 不制造与组件卡重复的面板
-    const single = renderToString(
-      h(MultiCourseOverview, {
-        stateView: { ...base, courseOverviews: [covOf('a')] },
-        onSelectCourse: () => {},
-      }),
-    )
-    expect(single).not.toContain('多课程总览')
-
-    const html = renderToString(
-      h(MultiCourseOverview, {
-        stateView: {
-          ...base,
-          courseOverviews: [
-            covOf('a'),
-            covOf('b', {
-              phase: { phase: 'ppo', sinceMs: null, iter: 3 },
-              last: { iter: 3, winRate: 0.1, rolloutSec: 30, ppoSec: 0, halted: true },
-              iters: 3,
-              cloudHalt: { status: 'halted', reason: 'TrainingLoop 停车' },
-              ppoQueueStall: { jobId: 'j1', waitedSec: 400, it: 3 },
-            }),
-          ],
-        },
-        onSelectCourse: () => {},
-      }),
-    )
-    expect(html).toContain('多课程总览（2 课')
-    expect(html).toContain('查看课程 a')
-    expect(html).toContain('查看课程 b')
-    // 指标：a 课 it12 / 42% / 采集耗时
-    expect(html).toContain('it12')
-    expect(html).toContain('胜 42.0%')
-    expect(html).toContain('采 1m22s')
-    // 组件短名 + 状态点（running=on / exited=dead / stopped=empty）
-    expect(html).toContain('trainer')
-    expect(html).toContain('tc-dot tc-dot--on')
-    expect(html).toContain('tc-dot tc-dot--dead')
-    // b 课：阶段 PPO、本轮停车、停机红徽标、排队超时黄徽标
-    expect(html).toContain('PPO')
-    expect(html).toContain('本轮停车')
-    expect(html).toContain('停机中')
-    expect(html).toContain('排队超时')
-  })
-
-  it('getCourseOverviews：空课程清单 → 空数组（不碰账本/日志）', async () => {
-    const { getCourseOverviews } = await import('../src/server/api')
-    expect(getCourseOverviews({} as never, [], {})).toEqual([])
   })
 })

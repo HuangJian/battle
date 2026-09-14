@@ -16,5 +16,6 @@
     "jsx": "react-jsx",
     "jsxImportSource": "preact"
   },
-  "include": ["src", "tests"]
+  "include": ["src", "tests"],
+  "files": ["src/web/theme.d.ts"]
 }

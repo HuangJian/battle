@@ -82,4 +82,12 @@ describe('console/api.buildStateView', () => {
       else process.env.BCITY_CURRICULA_DIR = prevCur
     }
   })
+
+  it('isBc stamp（2026-09-14 首页 BC/RL 分流）：BC 课 true / RL 课 false', async () => {
+    // bc-c4-v3 = *.bc.jsonc 课程（真实仓库 curricula/）；p4-fast = 经典 RL 课程。
+    const bc = await api.buildStateView('bc-c4-v3')
+    expect(bc.isBc).toBe(true)
+    const rl = await api.buildStateView('p4-fast')
+    expect(rl.isBc).toBe(false)
+  })
 })

@@ -10,7 +10,7 @@
  *    state-view          主快照组装      |  snapshot-cache / snapshot-refresher  慢部件缓存
  *    views               组件与节点视图  |  component-meta  组件元数据表（日志路径/端口）
  *    logs                日志读取与解码  |  ledger / loop-complete  账本尾派生
- *    courses             课程发现与上下文|  course-overview  同屏多课总览
+ *    courses             课程发现与上下文|
  *    pool / eval-games   端点专属视图    |  ppo-queue / curriculum  专项派生
  *    config              配置读取兜底    |  view-types  视图类型透传
  *
@@ -34,7 +34,6 @@ export * from './loop-complete'
 export * from './snapshot-refresher'
 export * from './ppo-queue'
 export * from './state-view'
-export * from './course-overview'
 export * from './pool'
 export * from './eval-games'
 export * from './route'

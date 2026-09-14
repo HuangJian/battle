@@ -6,10 +6,10 @@ import type { ConsoleStateView, MetricsView } from '../../web/view'
 import { loadConsoleState } from '../actions'
 import { readIterMetrics, readPairedReferee } from '../iters'
 import { loadConfigSafe } from './config'
-import { getCourseOverviews } from './course-overview'
 import { discoverCourses, effectiveCourse } from './courses'
 import { detectPpoQueueStall } from './ppo-queue'
 import { getSlowSnapshot } from './snapshot-refresher'
+import { isBcCourse } from '../../stack/courses'
 
 export async function buildStateView(courseOverride?: string): Promise<ConsoleStateView> {
   const cfg = loadConfigSafe()
@@ -34,15 +34,13 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
   const ppoQueueStall = course
     ? detectPpoQueueStall(path.join(REPO_ROOT, 'tmp', course, 'remote-jobs'))
     : null
-  // 同屏多课总览（P5-W2）：单课时不出（不制造无效面板）。
-  const courseOverviews =
-    courses.length > 1 ? await getCourseOverviews(cfg, courses, state.cloudHalts ?? {}) : []
   return {
     time: new Date().toISOString(),
     course,
+    // 首页 BC/RL 区互斥分流（2026-09-14）：isBc = 查看课程是否 *.bc.jsonc 课程。
+    isBc: isBcCourse(course),
     activeCourse: state.activeCourse || state.course || course,
     courses,
-    courseOverviews,
     components,
     nodes,
     localNode,

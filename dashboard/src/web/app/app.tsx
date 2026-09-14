@@ -24,7 +24,6 @@ import { LogNavCard } from './panels/LogNavCard'
 import { TrainLaunchModal } from './panels/TrainLaunchModal'
 import { BcPanel } from './panels/BcPanel'
 import { EvalSummary } from './panels/EvalSummary'
-import { MultiCourseOverview } from './panels/MultiCourseOverview'
 import {
   fmtTs,
   latestRow,
@@ -603,18 +602,17 @@ export function App({ initial }: AppProps) {
           </button>
         </div>
       ) : null}
-      <PanelErrorBoundary>
-        <Hero
-          stateView={stateView}
-          onMore={() => setDrawerTab('metrics')}
-          onRefresh={() => void refreshState()}
-          readOnly={readOnly}
-        />
-      </PanelErrorBoundary>
-      {/* ── 多课程总览（P5-W2）：单课自动不渲染；只读展示，切换=改查看课程 ── */}
-      <PanelErrorBoundary>
-        <MultiCourseOverview stateView={stateView} onSelectCourse={selectCourse} />
-      </PanelErrorBoundary>
+      {/* ── RL 区（2026-09-14 与 BC 区互斥：isBc 课只出 BC 区，Hero/EvalBoard 只属 RL） ── */}
+      {stateView?.isBc ? null : (
+        <PanelErrorBoundary>
+          <Hero
+            stateView={stateView}
+            onMore={() => setDrawerTab('metrics')}
+            onRefresh={() => void refreshState()}
+            readOnly={readOnly}
+          />
+        </PanelErrorBoundary>
+      )}
       {/* ── 组件卡 4  row：在 LAN 只读视图里也正常交互样式（不在 banner 里、不 opacity 灰败） ── */}
       <PanelErrorBoundary>
         <ComponentCards
@@ -634,23 +632,27 @@ export function App({ initial }: AppProps) {
           readOnly={readOnly}
         />
       </PanelErrorBoundary>
-      {/* 节点行下方 EvalBoard 摘要：行 = B 层 iter × 列 = rung×指标；完整看板独立成页 /eval。 */}
-      <PanelErrorBoundary>
-        <EvalSummary
-          course={viewCourse}
-          enabled={documentVisible}
-          readOnly={readOnly}
-          onMore={() => {
-            window.location.href = viewCourse
-              ? `/eval?course=${encodeURIComponent(viewCourse)}`
-              : '/eval'
-          }}
-        />
-      </PanelErrorBoundary>
-      {/* ── BC epoch 指标 + 多地图 eval（*.bc.jsonc 课程训练时自动出现数据）── */}
-      <PanelErrorBoundary>
-        <BcPanel course={viewCourse} enabled={documentVisible} />
-      </PanelErrorBoundary>
+      {/* ── EvalBoard 摘要（RL 区）：行 = B 层 iter × 列 = rung×指标；完整看板独立成页 /eval。 ── */}
+      {stateView?.isBc ? null : (
+        <PanelErrorBoundary>
+          <EvalSummary
+            course={viewCourse}
+            enabled={documentVisible}
+            readOnly={readOnly}
+            onMore={() => {
+              window.location.href = viewCourse
+                ? `/eval?course=${encodeURIComponent(viewCourse)}`
+                : '/eval'
+            }}
+          />
+        </PanelErrorBoundary>
+      )}
+      {/* ── BC 区（与 RL 区互斥）：仅 *.bc.jsonc 课程显示；epoch/eval 数据由 BcPanel 拉取 ── */}
+      {stateView?.isBc ? (
+        <PanelErrorBoundary>
+          <BcPanel course={viewCourse} enabled={documentVisible} />
+        </PanelErrorBoundary>
+      ) : null}
       {/* 详情视图直连入口（2026-09-10）：此前「评估」只能先点 Hero/节点 pill 的「更多」
           进抽屉、再切 tab —— 入口不可见（底部说明也只列了 3 个）。四视图平权直连。 */}
       <nav
@@ -677,10 +679,11 @@ export function App({ initial }: AppProps) {
       </nav>
       <p className="tc-caption">
         局域网只读：可查看任意课程/日志/节点统计/评估（课程▾仅本浏览器切换）；启停/冒烟/模式/节点编辑
-        仅本机 localhost 生效 · /api/state {refreshInterval}s 轮询 · 首页即训练态势：胜率焦点 +
-        组件卡 （点击卡在下方展开全宽最近日志）+ 节点 pill 行 + EvalBoard
-        摘要（行=iter×列=rung×指标） · 详情进抽屉（指标 | 节点统计 | 日志，上方按钮可直连）·
-        评估已独立成页 /eval（上方「完整评估看板」）· Esc 关闭弹窗/抽屉 · r 立即刷新全部。
+        仅本机 localhost 生效 · /api/state {refreshInterval}s 轮询 · 首页按课程分流（互斥）：RL 课 =
+        胜率焦点 + EvalBoard 摘要（行=iter×列=rung×指标），BC 课 = BC Epoch 区 ·
+        组件卡（点击卡在下方展开全宽最近日志）+ 节点 pill 行 + 详情抽屉（指标 | 节点统计 |
+        日志，上方按钮可直连）两课通用 · 评估已独立成页 /eval（RL 课上方「完整评估看板」）· Esc
+        关闭弹窗/抽屉 · r 立即刷新全部。
       </p>
       <Drawer
         open={drawerTab !== null}

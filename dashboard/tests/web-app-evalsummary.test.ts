@@ -43,8 +43,10 @@ describe('首页 EvalSummary（阶梯 God vs 学生 B 层）', () => {
   })
 
   it('SSR 首屏含摘要壳与抽屉入口（数据客户端拉，首帧 loading）', async () => {
+    // 2026-09-14 首页 BC/RL 区互斥：EvalBoard 摘要只属 RL 区，必须用 RL 课渲染
+    //（默认 effectiveCourse 是 bc-c4-v3 = BC 课 → EvalSummary 正确不渲染）。
     const { buildStateView } = await import('../src/server/api')
-    const html = renderConsolePage(await buildStateView())
+    const html = renderConsolePage(await buildStateView('p4-fast'))
     expect(html).toContain('tc-eval-summary')
     expect(html).toContain('EvalBoard 摘要')
     expect(html).toContain('完整评估看板')

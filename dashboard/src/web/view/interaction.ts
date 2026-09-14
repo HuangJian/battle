@@ -9,7 +9,7 @@ import type { CloudHaltView } from './console-types'
  *  只在本课程的 TrainingLoop 重启时触发（actions.startComponent → markCloudHaltRecovered）。
  *  2026-09-14 事故：切到 bc-c4-v3 后，c6-chip 的 halted 红横幅仍霸屏，且在本课**永远
  *  解不掉**（自动解除不会发生，只剩「立即恢复」这一条只能作用于那门课的出口）。
- *  其它课程的停机状态由多课总览徽标承载（CourseOverview.cloudHalt），不占首页横幅。 */
+ *  其它课程的停机横幅在切到该课时展示（visibleCloudHalts 只取当前课）。 */
 export function visibleCloudHalts(
   halts: Readonly<Record<string, CloudHaltView>> | undefined,
   course: string,
