@@ -75,8 +75,9 @@
   "name": "x3-start",
   // 每一决策步一条样本（非 intent/goal 窗口）。与 Student 双头 BC / 当前 PPO 管线匹配。
   "mode": "per-tick",
-  // 环境唯一来源 = levels/arena3.jsonc。课程侧禁止再写 stages/difficulty/max_ticks/player。
-  "level": "arena3",
+  // 环境唯一来源 = levels/ladder-c03.jsonc（与 arena3 逐关同形，arena3 已退役删除）。
+  // 课程侧禁止再写 stages/difficulty/max_ticks/player。
+  "level": "ladder-c03",
 
   // ── 采集 / 语料 ────────────────────────────────────────────────────────────
   // 每关每轮 rollout 局数（实现语义：每关抽 seed_rotate 个新 seed，

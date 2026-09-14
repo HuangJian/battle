@@ -196,22 +196,15 @@ def test_early_reward_is_clean_and_legacy_untouched() -> None:
     assert lf.terminal_for(4) == {"stage_clear": 2.0, "lives_exhausted": -1.0, "timeout": -2.0}
 
 
-def test_ladder_matches_xn_pilot() -> None:
-    """B 案核心契约：ladder-c02/c03 关卡与 xN 试点（arena2/arena3）逐关同形。
-    （工厂产物纯 JSON 无注释，探针表头仍住 xN 文件；语义等价由本测试钉死。）"""
-    from rl.jsonc import load as _load_jsonc
-
+def test_arena_retired_single_source() -> None:
+    """关卡单源锁：arena2/arena3 已退役删除（B 案后续：ladder-c02/c03 为唯一
+    count=2/3 关卡定义）。等价性证据留 git 历史 + DECISIONS
+    §2026-09-15-goalnn-xn-absorb；本测试防有人把 pilot 文件复活造成二次分叉。
+    （例外：arena2-acbc 是偏科子集关，无工厂等价物，保留。）"""
     repo_levels = Path(__file__).resolve().parent.parent / "levels"
-    pairs = [("ladder-c02", "arena2"), ("ladder-c03", "arena3")]
-    for fac, pilot in pairs:
-        f_stages = _load_jsonc(str(repo_levels / f"{fac}.jsonc"))["stages"]
-        p_stages = _load_jsonc(str(repo_levels / f"{pilot}.jsonc"))["stages"]
-        assert len(f_stages) == len(p_stages) == (6 if fac == "ladder-c02" else 4)
-        for fs, ps in zip(f_stages, p_stages, strict=True):
-            assert fs["forces"] == ps["forces"] and fs["count"] == ps["count"]
-            assert fs["player_spawn"] == ps["player_spawn"]
-            assert fs["enemy_spawns"] == ps["enemy_spawns"]
-            assert fs["grid"] == ps["grid"]
+    assert not (repo_levels / "arena2.jsonc").exists()
+    assert not (repo_levels / "arena3.jsonc").exists()
+    assert (repo_levels / "arena2-acbc.jsonc").exists()
 
 
 def test_early_seed_rotate_stays_600() -> None:

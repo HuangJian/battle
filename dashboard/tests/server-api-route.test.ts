@@ -38,7 +38,10 @@ describe('console/api.routeAction', () => {
 
   it('节点并发回写 rl-config.json（写后还原）', async () => {
     const cfg = loadConfig()
-    const target = cfg.nodes.find((n) => n.enabled) ?? cfg.nodes[0]!
+    // 必须挑**有 concurrency 的** enabled 节点：gpu_push 节点线上就没有该字段
+    // （不参与并发配额），拿它算 orig + 1 会得 NaN（2026-09-15）。
+    const target = cfg.nodes.find((n) => n.enabled && typeof n.concurrency === 'number')!
+    expect(target).toBeTruthy()
     const orig = target.concurrency
     const r = await postJson('setNodeConcurrency', { id: target.id, concurrency: orig + 1 })
     expect(r.ok).toBe(true)

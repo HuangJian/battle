@@ -4,10 +4,11 @@
 // x2-start <=> count=2 · RL 起步。对照：roadmap §5.3「c02 多敌」+ I3 工厂
 // emit_course(count=2)；奖励按 N3 + rewards.codex.md；c01-c03 不上 wChip
 // （roadmap 总规则优先，表内「轻剂量」作废，以总规则为准）。
-// xN 与 levels/ladder-c02（单关 ab 循环）是两套 count=2 任务定义并存；
-// x2-start 是一次性起步腿，转工厂线的条件待 DECISIONS 立案（评审 2026-09-14 §4）。
+// xN 与工厂 ladder-c02 曾是两套 count=2 任务定义并存；B 案落地后工厂已吸收
+// xN 语义（DECISIONS §2026-09-15-goalnn-xn-absorb），本课 level 已切到
+// ladder-c02（与 arena2 逐关同形；arena2 退役删除）。试点存档腿，权重链保留。
 //
-// 环境：`"level": "arena2"` —— 空场 2 敌，**六种类型对**（ab/ac/ad/bc/bd/cd，
+// 环境：`"level": "ladder-c02"` —— 空场 2 敌，**六种类型对**（ab/ac/ad/bc/bd/cd，
 //   a=basic b=fast c=power d=armor），自定义关 ID 2000-2005。max_ticks=2100。
 // 起步权重：bc-c4-v3 best@ep77（schema_major=3；无 value 头）。
 // 起点探针（2026-09-14，贪心各 600 局=每关 100 局种子 0-99：
@@ -54,8 +55,8 @@
   "name": "x2-start",
   // 每一决策步一条样本（非 intent/goal 窗口）。与 Student 双头 BC / 当前 PPO 管线匹配。
   "mode": "per-tick",
-  // 环境唯一来源 = levels/arena2.jsonc。课程侧禁止再写 stages/difficulty/max_ticks/player。
-  "level": "arena2",
+  // 环境唯一来源 = levels/ladder-c02.jsonc。课程侧禁止再写 stages/difficulty/max_ticks/player。
+  "level": "ladder-c02",
 
   // ── 采集 / 语料 ────────────────────────────────────────────────────────────
   // 每关每轮 rollout 局数（实现语义：每关抽 seed_rotate 个新 seed，

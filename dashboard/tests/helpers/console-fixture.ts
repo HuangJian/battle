@@ -11,8 +11,9 @@
  *
  * 因此改用 `core/paths.ts` 已有的**惰性** env 重定向（`BCITY_RL_CONFIG` /
  * `BCITY_CONSOLE_STATE`，与 `cloud-halt.test.ts` 同一惯例）：每个测试文件一个独立
- * 临时目录，配置以真实 `rl-config.json` 为蓝本播种 —— 写盘分支照常真实执行，但只落在
- * 临时目录，跑完随进程消失，真实配置**整轮零写入**（连崩溃都不可能污染）。
+ * 临时目录，配置由**本文件自造的种子**播种（不读线上配置，见 `SEED_CONFIG`）——
+ * 写盘分支照常真实执行，但只落在临时目录，跑完随进程消失，真实配置**整轮零读零写**
+ * （既不污染，也不把断言挂在本机工作配置上）。
  *
  * **顺序不变量**（本模块存在的第二个意义）：env 必须早于被测模块的 import。这里把
  * 「先重定向 → 再 await import」封装成一次，调用方只要 import 本模块就不可能搞错顺序
@@ -28,7 +29,6 @@ import { afterAll } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
-import { CONFIG_PATH } from '../../src/core/paths'
 
 /** rl-config.json 的节点行（测试补丁用；线上 schema 以 src/core/config.ts 为准）。 */
 export interface TestNode {
@@ -54,9 +54,56 @@ export const scratchConfig = path.join(scratchDir, 'rl-config.json')
 /** 重定向后的 console-state.json。 */
 export const scratchState = path.join(scratchDir, 'console-state.json')
 
-// 以真实配置为蓝本播种：节点表 / rl 段 / local_slots 等与线上同形，
-// 因此「放行真实课程」「节点并发回写」这类断言读到的仍是真实形态。
-writeFileSync(scratchConfig, readFileSync(CONFIG_PATH, 'utf-8'))
+// 自造种子配置——**绝不读**线上 `nn-training/rl-config.json`：那是本机工作配置
+// （真实隧道 URL / 真实节点表，随时被人手改），拿它当断言基准等于把测试挂在一台
+// 机器上（2026-09-15 事故：线上首个 enabled 节点是 gpu_push 节点、没有 concurrency
+// 字段 ⇒ 「并发回写」用例算出 NaN 直接红）。字段只留测试真正读到的那些：
+// nodes（push-only / 采集 / 停用 三种形态）+ rl（端口、local_slots、stream、token）。
+const SEED_CONFIG = {
+  version: 1,
+  nodes: [
+    // 线上形态：gpu_push 节点不参与并发配额，故没有 concurrency 字段
+    {
+      id: 'gpu1',
+      url: 'https://push.fixture.invalid',
+      authKey: 'fixture-push-key',
+      gpu_push: true,
+      enabled: true,
+    },
+    {
+      id: 'self',
+      url: 'http://127.0.0.1:8443',
+      authKey: 'fixture-self-key',
+      concurrency: 4,
+      enabled: true,
+    },
+    {
+      id: 'mac',
+      url: 'http://127.0.0.1:8444',
+      authKey: 'fixture-mac-key',
+      concurrency: 2,
+      enabled: true,
+    },
+    {
+      id: 'lite',
+      url: 'http://127.0.0.1:8445',
+      authKey: 'fixture-lite-key',
+      concurrency: 1,
+      enabled: false,
+    },
+  ],
+  rl: {
+    hub_port: 18787,
+    agent_port: 8443,
+    local_slots: 0,
+    stream: 0,
+    double_buffer: 0,
+    workers: 8,
+    torch_threads: 8,
+    remote_token: 'fixture-token',
+  },
+}
+writeFileSync(scratchConfig, JSON.stringify(SEED_CONFIG, null, 2))
 process.env.BCITY_RL_CONFIG = scratchConfig
 process.env.BCITY_CONSOLE_STATE = scratchState
 

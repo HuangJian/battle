@@ -48,6 +48,9 @@ export function selfNodeSpec(cfg: RlConfig): ProcSpec {
     name: 'self-node',
     course: '',
     cmd: [process.execPath, 'run', SELF_NODE_ENTRY, '--port', String(cfg.rl.agent_port)],
+    // 入口是仓库相对路径 —— cwd 必须钉死 REPO_ROOT，否则控制台以 dashboard/
+    // 为 cwd 启动时 bun 解析不到入口，直接 Module not found（2026-09-14）。
+    cwd: REPO_ROOT,
     log: path.join(LOG_DIR, 'sampler-agent.log'),
     healthy: async () =>
       (await portListen(cfg.rl.agent_port)) &&

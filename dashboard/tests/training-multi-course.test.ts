@@ -9,8 +9,9 @@
  *    - W4 spec 重建快照（逐字段一致）               → **P1b 已绿**；
  *    - W5② 账本枚举单一归宿                         → **P1b 已绿**。
  *
- *  纪律：断言里的容量/端口一律从真实 `rl-config.json` 读值推导，**不写死数字**
- *  （F-B2：分支间配置会漂，写死即谎言）。
+ *  纪律：断言里的容量/端口一律从**测试自造的配置夹具**推导，**不写死数字**
+ *  （F-B2：配置会漂，写死即谎言），也**不读**线上 `nn-training/rl-config.json`
+ *  （本机工作配置不是测试基准，2026-09-15）。
  */
 
 import { afterAll, describe, expect, it } from 'bun:test'
@@ -26,7 +27,7 @@ import {
 } from 'fs'
 import os from 'os'
 import path from 'path'
-import { CONFIG_PATH, DASHBOARD_ROOT, REPO_ROOT } from '../src/core/paths'
+import { DASHBOARD_ROOT, REPO_ROOT } from '../src/core/paths'
 import {
   HUB_SERVER_ENTRY,
   cloudflaredSpec,
@@ -61,10 +62,46 @@ afterAll(() => {
   }
 })
 
-// ────────────────────────── rl-config 实测值（禁止写死） ──────────────────────────
+// ────────────────────────── 测试自造 rl-config（**不读**线上配置） ──────────────────────────
 
-function loadRealConfig(): RlConfig {
-  return JSON.parse(readFileSync(CONFIG_PATH, 'utf-8')) as RlConfig
+/**
+ * 2026-09-15：这里原本读本机 `nn-training/rl-config.json`（真实隧道 URL / 节点表 /
+ * 配额，随人手改动而漂）——测试等于挂在一台机器的工作配置上（F-B2 只想避免「写死
+ * 会漂的数字」，但把夹具换成生产文件是更糟的解）。改为测试自持的常量夹具：
+ * 值由本文件钉死（workers=8 ⇒ 裸机容量 8），断言仍从夹具推导，不写死数字。
+ */
+const FIXTURE_CFG = {
+  version: 1,
+  nodes: [
+    {
+      id: 'self',
+      url: 'http://127.0.0.1:8443',
+      authKey: 'fixture-self-key',
+      concurrency: 4,
+      enabled: true,
+    },
+    {
+      id: 'mac',
+      url: 'http://127.0.0.1:8444',
+      authKey: 'fixture-mac-key',
+      concurrency: 2,
+      enabled: true,
+    },
+  ],
+  rl: {
+    hub_port: 18787,
+    agent_port: 18443,
+    local_slots: 0,
+    workers: 8,
+    torch_threads: 8,
+    stream: 0,
+    remote_token: 'fixture-token',
+  },
+}
+
+/** 一份全新夹具（深拷贝，调用方随意改，不串味）。 */
+function cfgFixture(): RlConfig {
+  return JSON.parse(JSON.stringify(FIXTURE_CFG)) as RlConfig
 }
 
 /** 裸机容量 = max(rl.workers, rl.local_slots)（plan §1.1「裸机容量」）。 */
@@ -75,7 +112,7 @@ function bareCapacity(cfg: RlConfig): number {
 
 /** 双课程测试配置：两课各占一个槽位（§1.3 配置 schema）。 */
 function dualCourseCfg(): RlConfig {
-  const cfg = loadRealConfig()
+  const cfg = cfgFixture()
   return {
     ...cfg,
     courses: {
@@ -130,7 +167,7 @@ describe('W1 双课程 spec 隔离', () => {
 
 describe('W3 checkCapacity 加法校验', () => {
   it('两课各占满裸机容量 → 超量拒绝，并点名超量课程', () => {
-    const cap = bareCapacity(loadRealConfig())
+    const cap = bareCapacity(cfgFixture())
     expect(cap).toBeGreaterThan(1)
     const r = checkCapacity(
       { a: { workers: cap, local_slots: 0 }, b: { workers: 0, local_slots: cap } },
@@ -143,7 +180,7 @@ describe('W3 checkCapacity 加法校验', () => {
   })
 
   it('Σ max(workers, local_slots) 恰等于容量 → 放行（eff 取 max 再求和）', () => {
-    const cap = bareCapacity(loadRealConfig())
+    const cap = bareCapacity(cfgFixture())
     const r = checkCapacity({ a: { workers: cap, local_slots: 0 } }, cap)
     expect(r.ok).toBe(true)
     expect(r.used).toBe(cap)
@@ -162,9 +199,14 @@ describe('W4 spec 重建逐字段一致（旧占位）', () => {
     // 用内联 set/restore（不用模块顶层赋值），与并行跑的其它测试文件互不干扰。
     const scratch = mkdtempSync(path.join(os.tmpdir(), 'bcity-p0w4-'))
     const prev = process.env.BCITY_REGISTRY_FILE
+    const prevCfg = process.env.BCITY_RL_CONFIG
     process.env.BCITY_REGISTRY_FILE = path.join(scratch, 'registry.json')
+    // restartSpecFor 从**磁盘** loadConfig 重建 spec —— 配置也必须重定向到临时文件，
+    // 否则重建侧读的是线上 rl-config（端口/token 与夹具不同 ⇒ 逐字段比对必然红）。
+    process.env.BCITY_RL_CONFIG = path.join(scratch, 'rl-config.json')
     try {
-      const cfg = loadRealConfig()
+      const cfg = cfgFixture()
+      writeFileSync(process.env.BCITY_RL_CONFIG, JSON.stringify(cfg, null, 2))
       const course = 'course-a'
       const jobRoot = path.join(REPO_ROOT, 'tmp', course, 'remote-jobs')
       const spec = hubServerSpec(cfg, course)
@@ -193,6 +235,8 @@ describe('W4 spec 重建逐字段一致（旧占位）', () => {
     } finally {
       if (prev === undefined) delete process.env.BCITY_REGISTRY_FILE
       else process.env.BCITY_REGISTRY_FILE = prev
+      if (prevCfg === undefined) delete process.env.BCITY_RL_CONFIG
+      else process.env.BCITY_RL_CONFIG = prevCfg
       rmSync(scratch, { recursive: true, force: true })
     }
   })
@@ -220,7 +264,7 @@ describe('W6 同槽位 cloudflared 隧道接管', () => {
     const stale = livePid() // c6-chip 残留：同槽位 0 —— 必须被接管杀掉
     const other = livePid() // bc-c4：异槽位 1 —— 不得误伤
     try {
-      const cfg = loadRealConfig()
+      const cfg = cfgFixture()
       const m0 = slotPort(cfg, 0, 'metrics')
       const m1 = slotPort(cfg, 1, 'metrics')
       saveCourseComponent('cloudflared', 'c6-chip', {
@@ -422,7 +466,7 @@ describe('P3 每课一隧道', () => {
     const prev = process.env.BCITY_RL_CONFIG
     process.env.BCITY_RL_CONFIG = path.join(scratch, 'rl-config.json')
     try {
-      writeFileSync(process.env.BCITY_RL_CONFIG, JSON.stringify(loadRealConfig()))
+      writeFileSync(process.env.BCITY_RL_CONFIG, JSON.stringify(cfgFixture()))
       writeRemoteHubUrl('https://a-tunnel.trycloudflare.com', 'course-a')
       writeRemoteHubUrl('https://b-tunnel.trycloudflare.com', 'course-b')
       const cfg = loadConfig()
@@ -469,8 +513,8 @@ describe('P3 每课一隧道', () => {
 
 describe('P4 控制台保存路径接 checkCapacity', () => {
   it('超量配额：capacityError 点名超量课程并含超量数', () => {
-    const cap = bareCapacity(loadRealConfig())
-    const cfg = loadRealConfig()
+    const cap = bareCapacity(cfgFixture())
+    const cfg = cfgFixture()
     const over: RlConfig = {
       ...cfg,
       courses: { a: { workers: cap, local_slots: 0 }, b: { workers: 0, local_slots: cap } },
@@ -482,28 +526,28 @@ describe('P4 控制台保存路径接 checkCapacity', () => {
   })
 
   it('恰等于容量：capacityError 通过；无 courses 块为空操作', () => {
-    const cap = bareCapacity(loadRealConfig())
-    const cfg = loadRealConfig()
+    const cap = bareCapacity(cfgFixture())
+    const cfg = cfgFixture()
     expect(capacityError({ ...cfg, courses: { a: { workers: cap, local_slots: 0 } } })).toBeNull()
     expect(capacityError({ ...cfg, courses: {} })).toBeNull()
     expect(capacityError(cfg)).toBeNull()
   })
 
   it('saveConfig 超量时拒绝落盘（fail-fast，磁盘保持原样）', () => {
-    const cap = bareCapacity(loadRealConfig())
+    const cap = bareCapacity(cfgFixture())
     const scratch = mkdtempSync(path.join(os.tmpdir(), 'bcity-p4cfg-'))
     SCRATCH_DIRS.push(scratch)
     const p = path.join(scratch, 'rl-config.json')
-    const base = JSON.stringify(loadRealConfig(), null, 2)
+    const base = JSON.stringify(cfgFixture(), null, 2)
     writeFileSync(p, base)
     const over: RlConfig = {
-      ...loadRealConfig(),
+      ...cfgFixture(),
       courses: { a: { workers: cap, local_slots: 0 }, b: { workers: cap, local_slots: 0 } },
     }
     expect(() => saveConfig(over, p)).toThrow()
     expect(readFileSync(p, 'utf-8')).toBe(base) // 没有半截/超量落盘
     // 合法配置正常写回
-    const valid: RlConfig = { ...loadRealConfig(), courses: { a: { workers: 1, local_slots: 1 } } }
+    const valid: RlConfig = { ...cfgFixture(), courses: { a: { workers: 1, local_slots: 1 } } }
     saveConfig(valid, p)
     expect(JSON.parse(readFileSync(p, 'utf-8')).courses.a.workers).toBe(1)
   })

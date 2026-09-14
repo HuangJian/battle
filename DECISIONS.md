@@ -1631,3 +1631,7 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   同形由单测钉死；xN 转试点存档（权重链保留，探针表头仍住 xN 文件，JSON 无注释位）。
 - **违反后果**：再手造第四套任务定义 ⇒ 对账地狱；改 c04+ 奖励不经单独立项 ⇒
   17 级语义漂移无人察觉。遗留债：c04+ v2 残留奖励、BC 腿权重缺失、工厂探针表头无位。
+- **追加（2026-09-15）：arena2/arena3 已退役删除**（与 ladder-c02/c03 除名字外
+  逐字节同、顺序一致；x2-start/x3-start/x3-power 的 `level` 已切过去，stage ID
+  段不变；`test_arena_retired_single_source` 锁死不再复活；arena2-acbc 是偏科
+  子集、无工厂等价物，保留）。
