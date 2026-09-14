@@ -9,10 +9,14 @@
 #   --------------  -----------------------------------------------------------
 #   ruff            只对 staged 的 nn-training/**/*.py 运行，红即拦
 #                   （范围化 = 归因化：未暂存文件根本不参与判定）
-#   mypy + pytest   nn-python-gate.sh 全量运行；mypy 报错按文件归因——
-#                   staged 归因 → 拦；全部未暂存 → 放行；pytest 红 → 拦 +
-#                   归因指引（因果由提交 agent 判定：自己的修，他人的汇报后
-#                   定向跳过重试 NN_GATE_SKIP=pytest）
+#   mypy + pytest   nn-python-gate.sh 全量运行；**仅当 staged 里存在
+#                   nn-training/**/*.py 时才跑** —— 无 staged py 时，mypy/pytest
+#                   的报错归因交集必然为空（全部落在未暂存/他人文件上 ⇒ 本来就放行），
+#                   跑它零拦截收益、白烧 25s+（2026-09-14：一个只改
+#                   nn-training/weights/WEIGHTS.md 的提交触发了全量 python 门禁）。
+#                   mypy 报错按文件归因：staged 归因 → 拦；全部未暂存 → 放行；
+#                   pytest 红 → 拦 + 归因指引（因果由提交 agent 判定：自己的修，
+#                   他人的汇报后定向跳过重试 NN_GATE_SKIP=pytest）
 #   tsc             全量运行；报错按文件归因，staged → 拦；全部未暂存/未跟踪
 #                   → 放行；无法归因到文件的错误 → 拦（保守）
 #   dashboard       仅 staged 含 dashboard/ 时运行（dashboard 是独立 bun
@@ -187,7 +191,12 @@ DIRTY_N=$(wc -l < "$DIRTY_LIST" | tr -d ' ')
 echo "  staged ${STAGED_N} 文件（门禁拦截归因集）；未暂存 ${DIRTY_N} 文件（他人改动，不参与拦截）"
 
 # ---------- nn-training python 门禁（ruff staged 范围 + mypy/pytest 全量归因） ----
-NN_STAGED=$(grep '^nn-training/' "$STAGED_LIST" || true)
+# 触发条件收窄到 **staged 的 nn-training python 文件**（2026-09-14）：原判定是
+# `^nn-training/`，于是纯数据/文档提交（nn-training/weights/WEIGHTS.md、
+# curricula/*.jsonc、manifest 等）也会跑全量 mypy + pytest。而该门禁的拦截语义是
+# 「报错落在 staged 文件上」—— staged 无 py 时这个交集恒为空（按既定语义本来就
+# 全部放行），跑它只有开销没有拦截收益。python 代码提交的行为**逐字不变**。
+NN_STAGED=$(grep '^nn-training/.*\.py$' "$STAGED_LIST" || true)
 if [ -n "$NN_STAGED" ]; then
   if [ -n "$SKIP_NN_TRAINING_GATE" ]; then
     echo "▸ skip nn-training python gate (SKIP_NN_TRAINING_GATE set)"
