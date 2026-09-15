@@ -307,6 +307,20 @@ def ppo_update(
     # 内存代价：len(chunks) x B x 7 floats ≈ 37x512x7x4B ≈ 0.5MB（可忽略）。
     ref_cache: list[tuple[torch.Tensor, torch.Tensor] | None] = [None] * len(tensored)
     if ref_model is not None and kickstart_kl > 0:
+        # 2026-09-11 慢 job（TPU 45~52 s/step，eta~5.9h）修复：落执行边界，否则
+        # 这段惰性图一直挂着，会与首个训练步的图拼成巨型图（首步 ~24s 编译 +
+        # 图签名漂移）。对齐探针 build_ref_cache 的既有行为（tools/tpu-probe.py E 段）。
+        # 2026-09-16 修正：边界从「整段一次」改为「**每 chunk 一次**」。整段一次时
+        # XLA 把 Python 循环里 N 次前向拼成**一张**图，图签名含 len(chunks)——每轮
+        # transition 数不同 ⇒ chunk 数（实录 47/48/46/45）每轮都变 ⇒ **每个 job
+        # 冷编译一次 ~50-80s**（同轮 epoch1 83s vs epoch2-4 合计 7s，即编译后飞快）。
+        # 每 chunk 一次后图退化为「单 chunk 前向」，shape 恒定 (B,14,26,26)，首次
+        # 编译后命中缓存，与 chunk 数无关。非 XLA 设备为 no-op，CPU/CUDA 数值
+        # 逐位不变（执行时机对 eager 无感）；XLA 上 ref_model 冻结 + no_grad ⇒
+        # 逐位不变（只改变图切分，不改变算子与数据）。
+        # 例外：末 chunk ragged（见 chunk_episodes）——tail 的 B' = n % mb 仍随每轮
+        # transition 数漂移，故每个 job 最多再付一次小 shape 编译（full-B + tail 各一）。
+        _t_ref = time.time()
         with torch.no_grad():
             for _i, _e in enumerate(tensored):
                 _rm, _rf, _ = ref_model(_e["obs"], _e["scalars"])
@@ -315,13 +329,13 @@ def ppo_update(
                     masked_logsoftmax(_rm, _m[:, :MOVE_DIM]),
                     masked_logsoftmax(_rf, _m[:, MOVE_DIM : MOVE_DIM + FIRE_DIM]),
                 )
-        log(f"[ppo] kickstart ref 预计算完成：{len(tensored)} chunks（原每 epoch 重算）")
-        # 2026-09-11 慢 job（TPU 45~52 s/step，eta~5.9h）修复候选：预计算后立即落
-        # 执行边界。对齐探针 build_ref_cache 的既有行为（tools/tpu-probe.py E 段）——
-        # 否则这段惰性图一直挂着，会与首个训练步的图拼成巨型图（首步 ~24s 编译 +
-        # 图签名漂移），TPU 上每一梯度步都可能在重编译。非 XLA 设备为 no-op，
-        # CPU/CUDA 数值逐位不变（执行时机对 eager 无感）。
-        xla_mark_step(device)
+                xla_mark_step(device)
+        # 注意：日志必须在 mark_step **之后**打——惰性 XLA 下循环里一次前向都没真跑，
+        # 打在前面得到的是 0s 的假数字（这正是本次误判的由来）。
+        log(
+            f"[ppo] kickstart ref 预计算完成：{len(tensored)} chunks（原每 epoch 重算）"
+            f"，{time.time() - _t_ref:.1f}s（{device} 执行实耗，XLA 含编译）"
+        )
     start_epoch = _ppo_load(ckpt_path, model, opt)
     if start_epoch:
         log(
