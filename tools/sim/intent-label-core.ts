@@ -68,6 +68,8 @@ export interface TaggerJob {
 }
 
 export interface TaggerPayload {
+  /** WorkerPool batch identity (echoed on TaggerAggregate); usually jobs[0].id. */
+  id: number
   jobs: TaggerJob[]
   difficulty: string
   maxTicks: number

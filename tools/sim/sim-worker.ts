@@ -20,7 +20,11 @@ import type { GodAIParams } from '../../src/ai/GodAIInput'
 import type { StageData } from '../../src/types'
 
 export interface SimTask {
-  /** Index into the batch's task array — results are re-ordered by this. */
+  /**
+   * Stable task identity. Results echo this id and the adaptive pool maps it
+   * to the batch-local slot — ids need not be 0..n-1 (ledger-resume subsets
+   * keep global ids).
+   */
   id: number
   seed: number
   stage: StageData

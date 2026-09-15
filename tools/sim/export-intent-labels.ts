@@ -76,7 +76,7 @@ async function main(): Promise<void> {
       `difficulty=${difficulty} gridPeriod=${gridPeriod} workers=${workers}`,
   )
 
-  const payload: Omit<TaggerPayload, 'jobs'> = {
+  const payload: Omit<TaggerPayload, 'jobs' | 'id'> = {
     difficulty,
     maxTicks,
     gridPeriod,
@@ -90,7 +90,7 @@ async function main(): Promise<void> {
     workers,
     'intent-tagger',
   )
-  const tasks: TaggerPayload[] = jobs.map((j) => ({ ...payload, jobs: [j] }))
+  const tasks: TaggerPayload[] = jobs.map((j) => ({ ...payload, id: j.id, jobs: [j] }))
   let lastPct = -1
   const aggs = await pool.runBatch(tasks, (done) => {
     const pct = Math.floor((done / jobs.length) * 100)

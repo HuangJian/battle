@@ -73,9 +73,10 @@ export function splitRoundRobin<T>(jobs: T[], n: number): T[][] {
 
 /**
  * Persistent pool of `size` workers running `TTask` → `TResult` jobs.
- * Results carry an `id` field indexing into the submitted task order.
+ * Results carry an `id` field that echoes the submitted task's id; the pool
+ * maps id → batch-local slot so ids need not be 0..n-1.
  */
-export class WorkerPool<TTask, TResult extends { id: number }> {
+export class WorkerPool<TTask extends { id: number }, TResult extends { id: number }> {
   private workers: Worker[] = []
   readonly size: number
 
@@ -93,13 +94,21 @@ export class WorkerPool<TTask, TResult extends { id: number }> {
   }
 
   /**
-   * Run a batch of tasks across the pool. Resolves with results ordered by
-   * task id (0..n-1) — identical ordering to a serial for-loop over `tasks`.
+   * Run a batch of tasks across the pool. Resolves with a dense array of
+   * results ordered by batch slot (identical ordering to a serial for-loop
+   * over `tasks`). Each result keeps the original task id — ids need not be
+   * 0..n-1 (ledger-resume sub-batches reuse global ids).
    */
   runBatch(tasks: TTask[], onProgress?: (done: number) => void): Promise<TResult[]> {
     if (tasks.length === 0) return Promise.resolve([])
     return new Promise((resolve, reject) => {
       const results: TResult[] = Array.from({ length: tasks.length })
+      // Batch-local slot for each task id — writing results[res.id] into a
+      // batch-length array left holes when ids were not 0..n-1 (resume 6,7).
+      const idToSlot = new Map<number, number>()
+      for (let i = 0; i < tasks.length; i++) {
+        idToSlot.set(tasks[i]!.id, i)
+      }
       let nextTask = 0
       let done = 0
 
@@ -114,7 +123,12 @@ export class WorkerPool<TTask, TResult extends { id: number }> {
       for (const worker of this.workers) {
         worker.addEventListener('message', (event: MessageEvent<TResult>) => {
           const res = event.data
-          results[res.id] = res
+          const slot = idToSlot.get(res.id)
+          if (slot === undefined) {
+            reject(new Error(`${this.label}: result id ${res.id} is not in the current batch`))
+            return
+          }
+          results[slot] = res
           done++
           onProgress?.(done)
           if (done === tasks.length) {

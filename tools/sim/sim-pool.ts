@@ -133,6 +133,8 @@ export class AdaptiveSimWorkerPool {
   private idle: Worker[] = []
   private tasks: SimTask[] = []
   private results: SimTaskResult[] = []
+  /** Batch-local slot for each task id (ledger-resume ids need not be 0..n-1). */
+  private idToSlot = new Map<number, number>()
   private nextTask = 0
   private done = 0
   private total = 0
@@ -201,7 +203,16 @@ export class AdaptiveSimWorkerPool {
 
   private onResult(w: Worker, res: SimTaskResult): void {
     if (this.failed) return
-    this.results[res.id] = res
+    // Store by batch-local slot, not raw task id: a ledger-resume sub-batch
+    // keeps global ids (6,7,…) while results is only tasks.length long.
+    // Writing results[res.id] stretched the array and left holes; the caller
+    // then crashed on `for (const r of sub) r.id` (undefined).
+    const slot = this.idToSlot.get(res.id)
+    if (slot === undefined) {
+      this.fail(new Error(`sim-pool: result id ${res.id} is not in the current batch`))
+      return
+    }
+    this.results[slot] = res
     this.done++
     this.onProgress?.(this.done, this.total)
     if (this.done >= this.total) {
@@ -218,8 +229,10 @@ export class AdaptiveSimWorkerPool {
   }
 
   /**
-   * Run all tasks with adaptive concurrency. Resolves with results ordered by
-   * task id (same ordering as a serial loop).
+   * Run all tasks with adaptive concurrency. Resolves with a dense array of
+   * results ordered by batch slot (same ordering as a serial loop over
+   * `tasks`). Each result keeps the original task id — ids need not be 0..n-1
+   * (ledger-resume sub-batches reuse global ids).
    */
   runAdaptive(
     tasks: SimTask[],
@@ -232,7 +245,11 @@ export class AdaptiveSimWorkerPool {
     const sampleMs = opts.sampleMs ?? 2500
     this.tasks = tasks
     this.total = tasks.length
-    this.results = Array.from({ length: tasks.length })
+    this.results = Array.from({ length: tasks.length }) as SimTaskResult[]
+    this.idToSlot = new Map()
+    for (let i = 0; i < tasks.length; i++) {
+      this.idToSlot.set(tasks[i]!.id, i)
+    }
     this.nextTask = 0
     this.done = 0
     this.onProgress = onProgress

@@ -73,6 +73,7 @@ describe('probeBucketOf — divergence-probe 三桶（同款谓词）', () => {
 
 describe('processJob — 两遍法确定性（预注册 #15 同源纪律）', () => {
   const payload: TaggerPayload = {
+    id: 0,
     jobs: [{ id: 0, si: 0, seed: 3 }],
     difficulty: 'hard',
     maxTicks: 3000,
