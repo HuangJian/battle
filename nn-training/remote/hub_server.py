@@ -25,6 +25,11 @@
 启动：
   python -m remote.hub_server --port 8787 --token <token> \
       --job-root <traj_root>/remote-jobs --jsonl <traj_root>/training_log.jsonl
+
+监听地址（2026-09-16）：默认 `0.0.0.0`。原因是 Tailscale 内网直连场景下，云 worker
+是从 tailnet 侧**入站**访问本 hub（以前 cloudflared 是本机主动外连，绑 127.0.0.1 就够）；
+绑回环时 tailnet 根本连不上，表现为对端一直超时。只想听 tailnet 就显式
+`--host <本机 Tailscale IP>`；单测/冒烟仍然各自显式传 `host="127.0.0.1"`。
 """
 
 from __future__ import annotations
@@ -737,9 +742,13 @@ class HubHandler(BaseHTTPRequestHandler):
 
 
 def make_server(
-    store: _JobStore, port: int, token: str, host: str = "127.0.0.1"
+    store: _JobStore, port: int, token: str, host: str = "0.0.0.0"
 ) -> ThreadingHTTPServer:
-    """构造 server（handler 注入 store + token）。"""
+    """构造 server（handler 注入 store + token）。
+
+    host 默认 0.0.0.0（2026-09-16）：Tailscale 直连时云 worker 从 tailnet 入站访问，
+    绑 127.0.0.1 会导致对端超时。单测/冒烟需回环时显式传 host="127.0.0.1"。
+    """
 
     class Server(ThreadingHTTPServer):
         def __init__(self) -> None:
@@ -753,7 +762,7 @@ def make_server(
 def main() -> None:
     ap = argparse.ArgumentParser(description="hub-server: remote PPO job queue (stdlib)")
     ap.add_argument("--port", type=int, default=8787)
-    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--token", default="", help="Bearer token（云 worker 与训练主循环共享）")
     ap.add_argument("--token-file", default="", help="从文件读取 token（避免进程列表泄露，H10）")
     ap.add_argument(
@@ -775,8 +784,11 @@ def main() -> None:
         sys.exit(1)
     # §双监听守卫：Windows SO_REUSEADDR 允许双绑同端口（后启动者静默变僵尸）——
     # bind 前探测，端口已有活监听者即拒绝启动（2026-09-09 8787 双实例事故）。
+    # 通配地址（0.0.0.0 / :: / ""）没有可连的语义 ⇒ 统一探回环，避免 0.0.0.0 在
+    # Windows 上直接 WSAEADDRNOTAVAIL 而让守卫形同虚设。
+    _probe_host = args.host if args.host not in ("0.0.0.0", "::", "") else "127.0.0.1"
     try:
-        ensure_port_free(args.host, args.port)
+        ensure_port_free(_probe_host, args.port)
     except RuntimeError as e:
         print(f"[hub-server] ERROR: {e}", flush=True)
         sys.exit(1)
