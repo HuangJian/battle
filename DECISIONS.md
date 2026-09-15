@@ -1858,7 +1858,11 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
      `src/config/stages.ts` → 1 个（而 **50** 个测试直接 import 它）、`difficulty.ts` → 1（39 个）、
      `combat.ts` → 3（13 个）⇒ 改配置类文件能绿着过去而 49 个依赖测试一个没跑；
      **映射为空才 fallback 全量** ⇒ 反倒比命中更安全。非 heavy 全量实测 **6s**、tools 子集 5s。
-  2. freeze 触发按扩展名判（`\.(ts|js|mjs|cjs|tsx|jsx)$|^src/`）⇒ `tests/**` 与 `src/assets/**` 也各付 ~100s。
+  2. freeze 触发按扩展名判（`\.(ts|js|mjs|cjs|tsx|jsx)$|^src/`）⇒ `tests/**` 与 `src/assets/**` 也各付
+     ~100s。**（2026-09-15 当日实测更正：实为 ~3.7s／21 组合全网格（16 核 Linux），旧数字错 ~27×。
+     成本现由 `tools/probe-det-baseline.sh` 与 pre-commit 自报 elapsed；豁免的**安全论据（签名闭包）
+     不受影响**，但收益从「百秒级」降为「秒级」——是否还值得留这套豁免（及其 freeze-scope 断言）
+     属独立待决项。）**
   3. `dashboard/` 只读消费仓根 10 个模块，却**三条防线同时失效**：hook 只在 staged 含 `dashboard/**` 时
      跑它、根套件 `SKIP_RE` 排除它、CI 里没有它的 workflow ⇒ src/tools 改断契约会静默落地。
 - **备选与否决**：保留 basename 窄跑并「修正确性」（补 import 图 / 传递闭包）—— 否，为省 1s 引入一个

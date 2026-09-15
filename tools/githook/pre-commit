@@ -39,10 +39,11 @@
 #   freeze          仅 staged 含 **根项目** TS/游戏代码（*.ts 等 / src/，
 #                   排除 dashboard/）时运行；dashboard TS 与纯 md/nn-training
 #                   不可能改变 det 签名。
-#                   2026-09-15 再收窄：`tests/**` 与 `src/assets/**` 也豁免（各
-#                   省 ~100s）——签名闭包只含 src/** 与 tools/lib/**，不可能被测试
-#                   文件或精灵图移动。该理由由 tests/freeze-scope.test.ts 钉住（算
-#                   传递闭包并断言与这两个目录零交集，且断非空防假通过）。
+#                   2026-09-15 再收窄：`tests/**` 与 `src/assets/**` 也豁免——签名闭包
+#                   只含 src/** 与 tools/lib/**，不可能被测试文件或精灵图移动。该理由由
+#                   tests/freeze-scope.test.ts 钉住（算传递闭包并断言与这两个目录零交集，
+#                   且断非空防假通过）。**注意收益**：豁免当初按「各省 ~100s」立项，
+#                   实测只省 ~3.7s（旧数字错 ~27×）——见下方 freeze 块。
 #
 #   逃生口：NN_GATE_SKIP=<tools>（python 单工具，已有）、NN_GATE_SKIP_E2E=1
 #   （只退 python 门禁里的 e2e 集成层，单测层照跑——e2e 有竞速/负载敏感用例，
@@ -229,8 +230,10 @@ ROOT_TS_STAGED=$(grep -E '\.(ts|js|mjs|cjs|tsx|jsx)$' "$STAGED_LIST" | grep -v '
 # freeze 敏感面：根项目 TS/JS + src/（游戏/det 路径），同样排除 dashboard/
 # 豁免 tests/** 与 src/assets/**（2026-09-15）：签名 = tools/probe-det-baseline.sh 跑
 # tools/diag/per-seed-diff.ts dump 出的文本哈希，其 import 传递闭包只含 src/**（游戏/
-# 配置）与 tools/lib/**——测试文件与精灵图改不动它，却各要付 ~100s。
-# 安全性不靠注释：tests/freeze-scope.test.ts 算闭包并断言与这两个目录零交集。
+# 配置）与 tools/lib/**——测试文件与精灵图改不动它。
+# **成本实测 ~3.7s（21 组合全网格，16 核 Linux，2026-09-15），而非原先注释写的 ~100s**
+# （错 ~27×）。旧数字正是「豁免值不值」的唯一论据，所以别再引用它——下方 freeze 块会
+# 自报每次的真实 elapsed。安全性不靠注释：tests/freeze-scope.test.ts 算闭包并断言零交集。
 FREEZE_STAGED=$(grep -E '\.(ts|js|mjs|cjs|tsx|jsx)$|^src/' "$STAGED_LIST" \
   | grep -v '^dashboard/' | grep -vE '^(tests/|src/assets/)' || true)
 
@@ -423,12 +426,18 @@ fi
 
 # ---------- freeze gate（det signature vs golden — DECISIONS §272） ----------
 # FREEZE_STAGED 已排除 dashboard/（见上）：dashboard TS 与纯 md/nn-training
-# 改不动 det 签名，白烧 ~100s。
+# 改不动 det 签名。成本实测 ~3.7s（21 组合，16 核 Linux，2026-09-15），下面自报 elapsed
+# ——不要在任何注释/文档里写死这个数字，它已经错过一次（~100s，差 27×）。
 if [ -z "$FREEZE_STAGED" ]; then
   echo " ▸ freeze gate skipped（staged 无根项目 TS/游戏代码——det 签名不可能受本次提交影响）"
 else
-  echo " ▸ freeze gate (det signature vs golden — DECISIONS §272; ~100s)"
+  echo " ▸ freeze gate (det signature vs golden — DECISIONS §272)"
+  _FZ0=$(date +%s%N 2>/dev/null || true)
+  case "$_FZ0" in '' | *N*) _FZ0='' ;; esac
   bash tools/probe-det-baseline.sh --golden </dev/null
+  if [ -n "$_FZ0" ]; then
+    echo "   ✔ freeze gate $(( ($(date +%s%N) - _FZ0) / 1000000 ))ms"
+  fi
 fi
 
 # ---------- 并发提示：门禁期间暂存区是否被他人追加 ----------

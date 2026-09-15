@@ -273,9 +273,17 @@ bun run lint         # oxlint
 bun run format       # oxfmt
 bun run check        # full gate: tsc --noEmit --incremental && bun test --parallel --timeout=50000
 bun run setup        # git config core.hooksPath tools/githook  (enables pre-commit hook)
-bun run freeze:check # det 21-combo signature vs tools/det-golden.v1.sha256 (~100s) — red ⇒ new-era triple
-bun run freeze:l2    # archived-candidate reachability audit over the same corpus (~100s)
+bun run freeze:check # det 21-combo signature vs tools/det-golden.v1.sha256 (~4s) — red ⇒ new-era triple
+bun run freeze:l2    # archived-candidate reachability audit over the same corpus (~1s)
 ```
+
+**Freeze-gate cost, measured 2026-09-15** (21-combo full grid, 16-core Linux): `freeze:check` **3.6–5.0s**,
+`freeze:l2` **1.1–1.2s**. Both were documented as `~100s` and that figure drove real decisions (the
+`tests/**` + `src/assets/**` freeze exemptions were justified as "saving ~100s") — it was wrong by
+**~27×**. Neither gate "dominates" a root-TS commit; that commit costs tsc (~0.2s) + the non-heavy suite
+(~6s) + freeze (~3.7s) + lint/format (~1s) ≈ **11s**. The cost is now **self-reported**: the probe prints
+`elapsed: …ms`, pre-commit prints `✔ freeze gate …ms`, so never hard-code the number again — it already
+rotted once.
 
 `bun run check` is the definition of "green" — run it before declaring a task done.
 

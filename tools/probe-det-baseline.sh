@@ -6,8 +6,9 @@
 # after each AI-touching refactor step: MUST be byte-identical unless the change
 # intentionally alters behavior (then re-run godai gates + re-capture truth).
 #
-# Runtime ~100s for the full grid (was ~35s at 7 rows) — run once per batch,
-# not per micro-edit.
+# Runtime: 实测 3.6–5.0s（21 组合全网格，16 核 Linux，2026-09-15）——**旧注释写的 ~100s 是错的
+# （差 ~27×）**，且它驱动过真实决策（hook 的 freeze 触发豁免以为自己省 100s）。脚本末尾自报
+# elapsed，别再往注释里写死数字。原注释猜的「~35s at 7 rows」同样无从复核。
 #
 # Corpus rationale (rows marked `idx=` take the RAW STAGES index that
 # per-seed-diff consumes; comments cite the incident each row guards):
@@ -35,6 +36,10 @@ set -e
 cd "$(dirname "$0")/.."
 OUT=tmp/det-batch.txt
 GOLDEN=tools/det-golden.v1.sha256
+
+# 自报运行时长（防「~100s」这类记错的数字再次出现）。date 不支持 %N 时自动省略。
+_t0=$(date +%s%N 2>/dev/null || true)
+case "$_t0" in '' | *N*) _t0='' ;; esac
 
 # Portable sha256: git's bundled-sh hook environment on Windows often lacks
 # shasum/sha256sum — fall back to bun (already a hard dependency of this script).
@@ -84,6 +89,9 @@ for combo in "${COMBOS[@]}"; do
 done
 
 echo "corpus: ${#COMBOS[@]} runs, $(wc -l < "$OUT") signature lines"
+if [ -n "$_t0" ]; then
+  echo "elapsed: $(( ($(date +%s%N) - _t0) / 1000000 ))ms"
+fi
 HASH=$(hash256 "$OUT")
 echo "$HASH  $OUT"
 

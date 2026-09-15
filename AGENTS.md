@@ -167,8 +167,8 @@ bun run dashboard               # 启动控制台 → http://127.0.0.1:8900
 God AI freeze gates (DECISIONS §272/§293; pre-commit runs the first one):
 
 ```
-bun run freeze:check # det 21-combo signature vs frozen golden (~100s) — red ⇒ new-era triple
-bun run freeze:l2    # archived-candidate reachability audit over the same corpus (~100s)
+bun run freeze:check # det 21-combo signature vs frozen golden (~4s) — red ⇒ new-era triple
+bun run freeze:l2    # archived-candidate reachability audit over the same corpus (~1s)
 ```
 
 `bun run check` is the definition of "green". Run it before declaring a task done.
