@@ -25,6 +25,12 @@
 # 沙箱注意：脚本内部**不**把子进程输出重定向到 /dev/null——MSYS 伪设备与
 # Windows 子进程继承存在兼容问题（实测间歇性失败）。输出直通。
 #
+# Hook 模式（stdout 非 tty，2026-09-15）：后台 ruff/mypy/pytest 经 detach-run.py
+# 启动——stdio 进独立日志 + DETACHED_PROCESS（无控制台）。否则 Windows git 会
+# 等 hook stdout pipe 的 EOF（门禁全绿后 commit 仍卡死），且共享控制台会吃到
+# 幽灵 CTRL_C_EVENT（git.exe 中途退出、MSYS hook 继续跑）。交互模式（tty）仍
+# 实时输出，不脱管。
+#
 # 沙箱删除守卫（2026-09-10 实测，一次会话踩满两次）：
 #   本环境注入了 WorkBuddy safe-delete shim（改道回收站 + 每轮批量删除配额）。
 #   它会从两个方向打穿门禁，且**与被测代码无关**：
@@ -69,22 +75,55 @@ echo "▶ nn-training python gate（ruff + mypy + pytest xdist -n 4, parallel）
 # 下 KEEP_DAYS 天前的子目录；NN_TMP_KEEP_DAYS 可调，默认 7）。失败静默（清理
 # 是锦上添花，不阻塞门禁）。
 "$NN_PY" -S ../tools/githook/nn-clean-tmp.py >/dev/null 2>&1 || true
+
+DETACH="$REPO_ROOT/tools/githook/detach-run.py"
+if [ -t 1 ]; then
+  LIVE=1
+  GATE_TMP=""
+else
+  LIVE=0
+  # 放在 pytest-tmp 下：既有 nn-clean-tmp KEEP_DAYS 清扫会带走空目录
+  GATE_TMP="$REPO_ROOT/tmp/pytest-tmp/nn-gate-$$"
+  mkdir -p "$GATE_TMP"
+  # 截断不删除（沙箱删除配额铁律，同 pre-commit EXIT trap）
+  trap 'for __f in "$GATE_TMP"/*.log "$GATE_TMP"/*.err; do [ -e "$__f" ] && : > "$__f"; done' EXIT
+fi
+
 PIDS=""
+RAN=""
 if has_skip ruff; then
   echo " ▸ ruff skipped（NN_GATE_SKIP=$SKIP_LIST）"
 else
-  "$NN_PY" -m ruff check . & PIDS="$PIDS $!"
+  if [ "$LIVE" = "1" ]; then
+    "$NN_PY" -m ruff check . & PIDS="$PIDS $!"
+  else
+    "$NN_PY" "$DETACH" --stdout "$GATE_TMP/ruff.log" --stderr "$GATE_TMP/ruff.err" \
+      -- "$NN_PY" -m ruff check . & PIDS="$PIDS $!"
+  fi
+  RAN="$RAN ruff"
 fi
 if has_skip mypy; then
   echo " ▸ mypy skipped（NN_GATE_SKIP=$SKIP_LIST）"
 else
-  "$NN_PY" -m mypy . --config-file pyproject.toml & PIDS="$PIDS $!"
+  if [ "$LIVE" = "1" ]; then
+    "$NN_PY" -m mypy . --config-file pyproject.toml & PIDS="$PIDS $!"
+  else
+    "$NN_PY" "$DETACH" --stdout "$GATE_TMP/mypy.log" --stderr "$GATE_TMP/mypy.err" \
+      -- "$NN_PY" -m mypy . --config-file pyproject.toml & PIDS="$PIDS $!"
+  fi
+  RAN="$RAN mypy"
 fi
 if has_skip pytest; then
   echo " ▸ pytest skipped（NN_GATE_SKIP=$SKIP_LIST）"
 else
   # 全量：xdist -n 4，带单测墙钟护栏（--timeout，见文件头）。
-  "$NN_PY" -m pytest tests/ -n 4 -q --timeout="${NN_PYTEST_TIMEOUT_S:-50000}" & PIDS="$PIDS $!"
+  if [ "$LIVE" = "1" ]; then
+    "$NN_PY" -m pytest tests/ -n 4 -q --timeout="${NN_PYTEST_TIMEOUT_S:-50000}" & PIDS="$PIDS $!"
+  else
+    "$NN_PY" "$DETACH" --stdout "$GATE_TMP/pytest.log" --stderr "$GATE_TMP/pytest.err" \
+      -- "$NN_PY" -m pytest tests/ -n 4 -q --timeout="${NN_PYTEST_TIMEOUT_S:-50000}" & PIDS="$PIDS $!"
+  fi
+  RAN="$RAN pytest"
 fi
 
 t0=$(date +%s)
@@ -93,6 +132,12 @@ for p in $PIDS; do
   wait "$p" || RC=1
 done
 t1=$(date +%s)
+if [ "$LIVE" = "0" ]; then
+  for name in $RAN; do
+    [ -f "$GATE_TMP/$name.log" ] && cat "$GATE_TMP/$name.log"
+    [ -f "$GATE_TMP/$name.err" ] && cat "$GATE_TMP/$name.err" >&2
+  done
+fi
 if [ "$RC" -eq 0 ]; then
   echo "✓ nn-training python gate done in $((t1 - t0))s"
 else

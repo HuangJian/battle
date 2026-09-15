@@ -17,19 +17,25 @@
 #                   mypy 报错按文件归因：staged 归因 → 拦；全部未暂存 → 放行；
 #                   pytest 红 → 拦 + 归因指引（因果由提交 agent 判定：自己的修，
 #                   他人的汇报后定向跳过重试 NN_GATE_SKIP=pytest）
-#   tsc             全量运行；报错按文件归因，staged → 拦；全部未暂存/未跟踪
-#                   → 放行；无法归因到文件的错误 → 拦（保守）
+#   tsc             **仅当 staged 含根项目 TS/JS（排除 dashboard/）时**全量运行；
+#                   纯 md / nn-training / 仅 dashboard 提交不触发（2026-09-15）。
+#                   报错按文件归因，staged → 拦；全部未暂存/未跟踪 → 放行；
+#                   无法归因到文件的错误 → 拦（保守）
 #   dashboard       仅 staged 含 dashboard/ 时运行（dashboard 是独立 bun
 #                   项目，不属根 tsconfig / 根套件 —— 见 DECISIONS
 #                   §2026-09-14-goalnn-dashboard-project）；tsc 报错前缀
-#                   dashboard/ 归因，staged → 拦；bun test 红 → 拦 + 归因指引
-#   bun test        红 → 拦 + 归因指引（SKIP_BUN_TEST=1 定向跳过重试）
+#                   dashboard/ 归因，staged → 拦；bun test 红 → 拦 + 归因指引。
+#                   **只改 dashboard 时不会连带跑根 bun test / 根 tsc / python /
+#                   freeze**（外部套件与 dashboard 无归因交集）
+#   bun test        仅当 staged 含根项目 TS/JS（排除 dashboard/）时运行；
+#                   红 → 拦 + 归因指引（SKIP_BUN_TEST=1 定向跳过重试）
 #   oxfmt           逐 staged 文件格式化 + re-add；**另有未暂存改动（MM）的
 #                   文件跳过** —— 格式化工作树内容会把未暂存编辑折进提交
 #                   （2026-09-06 v1 事故教训）。永不阻断。
 #   oxlint          staged 文件，红即拦（不变）
-#   freeze          仅 staged 含 TS/游戏代码（*.ts 等 / src/）时运行；
-#                   纯 python 提交物理上不可能改变 det 签名
+#   freeze          仅 staged 含 **根项目** TS/游戏代码（*.ts 等 / src/，
+#                   排除 dashboard/）时运行；dashboard TS 与纯 md/nn-training
+#                   不可能改变 det 签名
 #
 #   逃生口：NN_GATE_SKIP=<tools>（python 单工具，已有）、SKIP_BUN_TEST=1、
 #   SKIP_DASHBOARD_GATE=1、--no-verify（全跳，最后手段）。
@@ -207,6 +213,13 @@ STAGED_N=$(wc -l < "$STAGED_LIST" | tr -d ' ')
 DIRTY_N=$(wc -l < "$DIRTY_LIST" | tr -d ' ')
 echo "  staged ${STAGED_N} 文件（门禁拦截归因集）；未暂存 ${DIRTY_N} 文件（他人改动，不参与拦截）"
 
+# 根项目 TS/JS（**排除 dashboard/**）：dashboard 是独立 bun 项目；只改
+# dashboard / 纯 md / nn-training 时根 tsc、根 bun test、freeze 都无归因
+# 交集，不应触发（2026-09-15 用户口径）。
+ROOT_TS_STAGED=$(grep -E '\.(ts|js|mjs|cjs|tsx|jsx)$' "$STAGED_LIST" | grep -v '^dashboard/' || true)
+# freeze 敏感面：根项目 TS/JS + src/（游戏/det 路径），同样排除 dashboard/
+FREEZE_STAGED=$(grep -E '\.(ts|js|mjs|cjs|tsx|jsx)$|^src/' "$STAGED_LIST" | grep -v '^dashboard/' || true)
+
 # ---------- nn-training python 门禁（ruff staged 范围 + mypy/pytest 全量归因） ----
 # 触发条件收窄到 **staged 的 nn-training python 文件**（2026-09-14）：原判定是
 # `^nn-training/`，于是纯数据/文档提交（nn-training/weights/WEIGHTS.md、
@@ -236,8 +249,10 @@ if [ -n "$NN_STAGED" ]; then
     if [ -n "$NN_GATE_SKIP" ]; then GATE_SKIP="ruff,$NN_GATE_SKIP"; fi
     echo " ▸ mypy + pytest（nn-python-gate 全量；mypy 按文件归因，pytest 红走因果判定）"
     GATE_RC=0
+    # stdin 丢弃：避免任何子进程继承 git 的 stdio 管道（Windows 上 git 会一直
+    # 等 pipe EOF → 门禁全绿后 commit 卡死，2026-09-15）。
     NN_GATE_SKIP="$GATE_SKIP" sh "$TOP/tools/githook/nn-python-gate.sh" 4 \
-      > "$GATE_LOG" 2>&1 || GATE_RC=$?
+      > "$GATE_LOG" 2>&1 < /dev/null || GATE_RC=$?
     cat "$GATE_LOG"
     if [ "$GATE_RC" -ne 0 ]; then
       PYTEST_RED=0
@@ -316,8 +331,10 @@ else
   fi
 fi
 
-# ---------- typecheck（tsc 全量；报错按文件归因） ----------
-if [ -n "$SKIP_TSC" ]; then
+# ---------- typecheck（tsc 全量；报错按文件归因；无根 TS 时跳过） ----------
+if [ -z "$ROOT_TS_STAGED" ]; then
+  echo " ▸ typecheck skipped（staged 无根项目 TS/JS——dashboard/ 与纯 md/nn-training 不触发）"
+elif [ -n "$SKIP_TSC" ]; then
   echo "▸ skip typecheck (SKIP_TSC set)"
 else
   echo " ▸ typecheck (tsc --noEmit) — 报错按文件归因，staged 才拦"
@@ -342,8 +359,10 @@ else
   fi
 fi
 
-# ---------- tests（bun scoped；红走因果判定） ----------
-if [ -n "$SKIP_BUN_TEST" ]; then
+# ---------- tests（bun scoped；红走因果判定；无根 TS 时跳过） ----------
+if [ -z "$ROOT_TS_STAGED" ]; then
+  echo " ▸ tests skipped（staged 无根项目 TS/JS——不触发根 bun test）"
+elif [ -n "$SKIP_BUN_TEST" ]; then
   echo "▸ skip bun test (SKIP_BUN_TEST set——请确保失败已归因并汇报)"
 else
   echo " ▸ tests (bun run test — scoped to local changes)"
@@ -387,12 +406,13 @@ if [ -n "$STAGED_LINT" ]; then
 fi
 
 # ---------- freeze gate（det signature vs golden — DECISIONS §272） ----------
-FREEZE_RELEVANT=$(grep -E '\.(ts|js|mjs|cjs|tsx|jsx)$|^src/' "$STAGED_LIST" || true)
-if [ -z "$FREEZE_RELEVANT" ]; then
-  echo " ▸ freeze gate skipped（staged 无 TS/游戏代码——det 签名不可能受本次提交影响）"
+# FREEZE_STAGED 已排除 dashboard/（见上）：dashboard TS 与纯 md/nn-training
+# 改不动 det 签名，白烧 ~100s。
+if [ -z "$FREEZE_STAGED" ]; then
+  echo " ▸ freeze gate skipped（staged 无根项目 TS/游戏代码——det 签名不可能受本次提交影响）"
 else
   echo " ▸ freeze gate (det signature vs golden — DECISIONS §272; ~100s)"
-  bash tools/probe-det-baseline.sh --golden
+  bash tools/probe-det-baseline.sh --golden </dev/null
 fi
 
 # ---------- 并发提示：门禁期间暂存区是否被他人追加 ----------

@@ -152,13 +152,30 @@ def pytest_sessionfinish(session, exitstatus):
         try:
             from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 
+            # 比 CREATE_NO_WINDOW 更强：DETACHED_PROCESS 脱离父控制台，清理器
+            # 既吃不到 git hook 控制台的幽灵 CTRL_C_EVENT，也不会向该控制台
+            # 广播（2026-09-15 commit 卡死 / 幽灵 Ctrl-C）。CREATE_NO_WINDOW 在
+            # DETACHED 下会被忽略，故再用 STARTUPINFO SW_HIDE 防黑窗闪烁。
+            _flags = dict(_POPEN_NO_WINDOW)
+            _si = None
+            if sys.platform == "win32":
+                _flags["creationflags"] = (
+                    getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                    | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+                    | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+                )
+                _si = subprocess.STARTUPINFO()
+                _si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                _si.wShowWindow = subprocess.SW_HIDE
+
             log_path = cleaner.parent.parent.parent / "tmp" / "pytest-tmp" / ".cleanup.log"
             with log_path.open("a", encoding="utf-8") as log_fh:
                 log_fh.write(f"--- spawn {list_path} ({len(victims)} dirs)\n")
                 log_fh.flush()
                 subprocess.Popen(
                     [sys.executable, "-S", str(cleaner), "--paths", list_path],
-                    **_POPEN_NO_WINDOW,  # dict：Windows 下 {"creationflags": CREATE_NO_WINDOW}
+                    **_flags,
+                    startupinfo=_si,
                     stdin=subprocess.DEVNULL,
                     stdout=log_fh,
                     stderr=subprocess.STDOUT,
