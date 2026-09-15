@@ -122,15 +122,20 @@ def settled_stage_totals(
     return out
 
 
-def trailing_ticks_per_game(jsonl_path: Path, window: int = 5, fallback: int = 0) -> int:
-    """最近 `window` 轮 iteration 的局均 tick（Σticks / Σgames）——动态采集的 est。
+def trailing_samples_per_game(jsonl_path: Path, window: int = 5, fallback: int = 0) -> int:
+    """最近 `window` 轮 iteration 的局均 **samples**（Σsamples / Σgames）——动态采集的 est。
+
+    ★ 量纲（2026-09-15 T9）：读 jsonl 的 **`samples`**（= `report.totalSamples` = 已结算
+    shard 的 `nSamples` 之和），**绝不读 `ticks`**。两者差 K 倍（x3 实测 samples/ticks
+    ≈ 0.1007）；读 ticks 会让「首轮按声明值采对、第二轮起采量偏离 10×」——与旧键名
+    `est_ticks_per_game` 是同一条 bug 的两半（见 rl/volume_waves.py 文件头量纲节）。
 
     决策可 replay 的基础（plan §2.3.1）：est 是 jsonl 历史的**纯函数**（同一份 jsonl
     ⇒ 同一 est），重启后重算一致，不靠 WAL 重放。games 口径 = Σ outcomes（掉局也
     占一局——它确实花了墙钟）；无可用历史 → `fallback`（课程声明的首轮估计）；
     两者都缺 → 响亮 ValueError，绝不静默拿一个假值去反解局数。
     """
-    rows: list[tuple[int, int]] = []  # (games, ticks)
+    rows: list[tuple[int, int]] = []  # (games, samples)
     try:
         with open(jsonl_path, encoding="utf-8") as f:
             for line in f:
@@ -143,25 +148,26 @@ def trailing_ticks_per_game(jsonl_path: Path, window: int = 5, fallback: int = 0
                     continue
                 if e.get("event") != "iteration":
                     continue
-                ticks = e.get("ticks")
+                # 量纲红线：samples（不是 ticks）。旧行无 samples 键则跳过（不用 ticks 顶）。
+                samples = e.get("samples")
                 outs = e.get("outcomes")
-                if not isinstance(ticks, int) or not isinstance(outs, dict):
+                if not isinstance(samples, int) or not isinstance(outs, dict):
                     continue
                 games = sum(v for v in outs.values() if isinstance(v, int))
-                if games > 0 and ticks > 0:
-                    rows.append((games, ticks))
+                if games > 0 and samples > 0:
+                    rows.append((games, samples))
     except OSError:
         rows = []
     last = rows[-window:] if window > 0 else []
     total_games = sum(g for g, _ in last)
-    total_ticks = sum(t for _, t in last)
-    if total_games > 0 and total_ticks > 0:
-        return max(1, round(total_ticks / total_games))
+    total_samples = sum(s for _, s in last)
+    if total_games > 0 and total_samples > 0:
+        return max(1, round(total_samples / total_games))
     if fallback > 0:
         return int(fallback)
     raise ValueError(
-        "trailing_ticks_per_game: 无 iteration 历史且未给 est_ticks_per_game 兜底——"
-        "动态采集无法反解局数（检查课程 target_transitions/est_ticks_per_game 配对）"
+        "trailing_samples_per_game: 无 iteration 历史且未给 est_samples_per_game 兜底——"
+        "动态采集无法反解局数（检查课程 target_transitions/est_samples_per_game 配对）"
     )
 
 

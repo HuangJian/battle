@@ -23,11 +23,13 @@ dashboard 必改项、gate 改动、minibatch/PPO 超参联动。
 
 ## 1. 背景与动机（证据链，执行者勿重证，直接引用）
 
-1. PPO 吃的是 transitions，不是局数。x3：240 局×967t ≈ 23 万/轮；
-   c4-dodge 先例 600 局×1100+t ≈ 66 万+/轮。roadmap“600-1000 局”实为
-   transition parity 要求（对账结论）。
-2. 固定局数下 transitions/轮随局长漂移（x3 局均 700-1150t），PPO 更新量、
-   advantage 归一稳定性跟着漂。
+1. PPO 吃的是 transitions，不是局数。**量纲（2026-09-15 T9 勘误）**：账本口径的
+   transitions = `nSamples` 之和（samples，不是 ticks）。x3：240 局/轮、局均 967 ticks
+   但 samples/ticks≈0.1007 ⇒ **≈2.33 万 transitions/轮**（不是 23 万——那是 ticks）；
+   c4-dodge 先例 600 局×1100+t ≈ **6.6 万** transitions/轮（原写 66 万+ 同为 ticks）。
+   roadmap“600-1000 局”实为 transition parity 要求（对账结论）。
+2. 固定局数下 transitions/轮随局长漂移（x3 局均 700-1150t ↔ 70-115 samples/局），
+   PPO 更新量、advantage 归一稳定性跟着漂。
 3. 反例在先：x2-acbc 3 倍密度 30 轮 pooled −3/400——**加量解决的是方差，
    不是信号**。本计划只承诺“量准”，不承诺“涨点”，DoD 里不许写胜率条款。
 
@@ -39,10 +41,13 @@ dashboard 必改项、gate 改动、minibatch/PPO 超参联动。
 
 ```jsonc
 {
-  // 本轮目标 transitions（已结算 shard 的 nSamples 之和口径）。
+  // 本轮目标 transitions（已结算 shard 的 nSamples 之和口径 = samples，不是 ticks）。
   "target_transitions": 600000,
-  // 局均 tick 估计（首轮/无历史时用；之后用 trailing 均值覆盖）。
-  "est_ticks_per_game": 900,
+  // 局均 **samples** 估计 = 局均 ticks / K（首轮/无历史时用；之后用 jsonl 的
+  // trailing **samples** 均值覆盖）。⚠ 旧键名 est_ticks_per_game 把 ticks 填进
+  // samples 分母 = 10× 误采（600000 目标只兑现 ~35% 就触 wave_cap）——2026-09-15
+  // T9 已改名；照写旧键会在启动期响亮报错（extra=forbid）。
+  "est_samples_per_game": 90,
   // 单关单轮局数硬顶（防短局 pathological 下局数爆炸；默认 = 初波×4）。
   // "max_games_per_stage": 0,  // 0 = 按默认规则（初波×4）
 }
@@ -50,14 +55,17 @@ dashboard 必改项、gate 改动、minibatch/PPO 超参联动。
 
 ### 2.2 波次协议（核心）
 
-1. **初波**：每关 `G0 = max(1, ceil(target/n_stages/est))` 局，种子流与今日
+1. **初波**：每关 `G0 = max(1, ceil(target/n_stages/est))` 局（`est` = **samples/局**，
+   与 `target` 同单位——见 §1 量纲勘误），种子流与今日
    `build_pairs` 同键（`(rotateSeed, it)`），老课程行为是其特例。
 2. **结算计数**：只计已结算 shard 的 `nSamples` 之和（分关累加）。
    - 掉局（dropped）：零样本，**不计入**（天然触发补采——这是特性）。
    - 超时局：transitions 是真实 on-policy 数据，**计入**。
 3. **补波**：某关未达 `target/n_stages` 即补一波，波大小
-   `ceil(剩余/est)`，**每关独立**（短局关淹不了长局关；x3 acd 733t vs
-   abd 989t 差 35% 就是前车）。
+   `ceil(剩余/est)`（同单位 samples），**每关独立**（短局关淹不了长局关；
+   x3 acd 733t vs abd 989t ↔ samples/局差 35% 就是前车）。
+   ⚠ 3 波只够抹平 **est 偏差**，抹不平 **est 量纲错**——后者是 10×，补波量
+   按同一个错估缩放，永远追不上配额（T9 的成因）。
 4. **终止**：各关达标即停；波次数封顶（建议 ≤3 波，防长尾抖动）；触
    `max_games_per_stage` 即停并响亮日志（配额未满，iteration 事件打标）。
 5. **种子派生**：补波种子流必须与初波**独立**——

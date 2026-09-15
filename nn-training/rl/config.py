@@ -775,7 +775,7 @@ class CourseConfig(BaseModel):
     #: str = 关卡范围规格（透传 --stages）；list[StageSpec] = 自定义关（→ 2000+i）
     stages: str | list[StageSpec] = "0-3"
 
-    @field_validator("target_transitions", "est_ticks_per_game", "max_games_per_stage")
+    @field_validator("target_transitions", "est_samples_per_game", "max_games_per_stage")
     @classmethod
     def _volume_nonneg(cls, v: int) -> int:
         if v < 0:
@@ -784,11 +784,12 @@ class CourseConfig(BaseModel):
 
     @model_validator(mode="after")
     def _check_volume_keys(self) -> CourseConfig:
-        """`target_transitions > 0` 必须带局均 tick 估计（D1：反解没有估计值 = 乱采）。"""
-        if self.target_transitions > 0 and self.est_ticks_per_game <= 0:
+        """`target_transitions > 0` 必须带局均 **samples** 估计（D1：反解没有估计值 = 乱采）。"""
+        if self.target_transitions > 0 and self.est_samples_per_game <= 0:
             raise ValueError(
-                "target_transitions > 0 时必须给 est_ticks_per_game（≥1）——"
-                "配额反解初波局数需要局均 tick 估计（之后由 trailing 均值覆盖）"
+                "target_transitions > 0 时必须给 est_samples_per_game（≥1，单位=samples/局"
+                "= 局均 ticks / K）——配额反解初波局数需要与账本同单位的估计"
+                "（旧键名 est_ticks_per_game 是 10× 量纲错，2026-09-15 T9 改名）"
             )
         return self
 
@@ -808,9 +809,12 @@ class CourseConfig(BaseModel):
     #: 0 = 关闭：走 seed_rotate 固定局数旧语义，`rl/volume_waves.py` 一个函数都不被调用。
     #: 进 corpus_identity_fp（量纲变更 = 采样参数变更，与 seed_rotate 同待遇）。
     target_transitions: int = 0
-    #: 局均 tick 估计（首轮/无历史时反解局数用；之后由 trailing 均值覆盖）。
+    #: 局均 **samples** 估计（= 局均 ticks / K；首轮/无历史时反解局数用；之后由
+    #: trailing 均值覆盖）。与 `target_transitions` 同单位 = 已结算 shard 的 nSamples。
     #: `target_transitions > 0` 时必填——配额反解没有估计值就是静默乱采（响亮报错）。
-    est_ticks_per_game: int = 0
+    #: ⚠ 旧键名 `est_ticks_per_game`（ticks 填进 samples 分母 = 10× 误采，评审复算
+    #: 「兑现 37% 触顶」）已停用；extra="forbid" ⇒ 照写旧键会启动期响亮报错。
+    est_samples_per_game: int = 0
     #: 单关单轮局数硬顶（0 = 默认规则：初波 G0 × DEFAULT_GAME_CAP_MULT）。
     #: 防短局 pathological 下局数爆炸；触顶 = 配额未满但停采 + 响亮日志。
     max_games_per_stage: int = 0
@@ -993,7 +997,7 @@ class CourseConfig(BaseModel):
             "seed_rotate": "seed_rotate",
             # 动态采集三键（缺席 = 老行为：args 走 rl-config/argparse 默认值 0）
             "target_transitions": "target_transitions",
-            "est_ticks_per_game": "est_ticks_per_game",
+            "est_samples_per_game": "est_samples_per_game",
             "max_games_per_stage": "max_games_per_stage",
             "seeds": "seeds",
             "dodge": "dodge",

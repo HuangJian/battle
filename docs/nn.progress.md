@@ -5,6 +5,39 @@
 
 ---
 
+## §48 采集配额量纲 10× 修（T9）：`est_ticks_per_game` → `est_samples_per_game`（2026-09-15；`plan/x3-power-followup.plan.md` §T9）
+
+**为什么**：§46 的判负把「transitions = samples」定为口径令，但实现层分母仍是 ticks ——
+`target_transitions`（已结算 `nSamples` 之和）÷ `est_ticks_per_game`（ticks/局）⇒ 初波反解出的
+局数只有应采量的 ~⅒；补波量按同一个错估缩放（`ceil(缺口/980)`），**补满 3 波仍是零头**，
+终以 `wave_cap` 收场（评审复算的「兑现 37% 触顶」用例）。同错另蔓延到三处文档（已一并修）。
+
+**决定**（计划 §T9 的「二选一并写明」）：**键改名** `est_ticks_per_game` → `est_samples_per_game`
+（值 = 局均 ticks / K；x3 实测 samples/ticks ≈ 0.1007 ⇒ 980 ticks ≈ 98 samples），
+**不取**「公式里显式 `/K`」。理由：K 是 exporter 侧实现细节，课程文件不该编码它（K 变 = 全部课程文件改）；
+键名自带单位 + `CourseConfig(extra="forbid")` ⇒ 旧键照写即启动期响亮报错，不可能静默复辟。
+（DECISIONS 的 `goalnn-dynamic-rollout-volume` 条目已加日期化修订。）
+
+**落到代码的四处**（全部在 `nn-training/rl/`，数学一行未动）：
+- `volume_waves.py`：`initial_games` / `topup_games` / `plan_topup` 形参改 `est_samples_per_game`
+  （`G0 = max(1, ceil(达标线/est))` 原式）；文件头新增「量纲」节写死 samples/ticks 换算与 K。
+- `resume.py`：`trailing_samples_per_game` 只读 jsonl 的 **`samples`**（**绝不读 `ticks`**）——
+  这是同一条 bug 的另一半（首轮按声明值采对、第二轮起又 10×）；无历史且无声明值 ⇒ 响亮 ValueError。
+- `loop_core.py`：`_volume_est_ticks` → `_volume_est_samples`（兜底读 `args.est_samples_per_game`）。
+- `cli.py` / `config.py`：argparse dest 与课程字段同步改名（旧键走 `extra="forbid"` 响亮报错）。
+
+**同批修掉的文档/注释**：`curricula/x3-start.jsonc`（收官总结「23 万 transitions/轮」勘误 = ticks）、
+`curricula/_example-custom-stage.jsonc`（量纲节 + 示例键名）、`plan/dynamic-rollout-volume.plan.md` §1/§2.1。
+
+**钉死单测**（`tests/test_rollout_volume.py`）：新增「① T9 量纲钉死（600000/4/980）」——
+同一条 target=600000、4 关：新语义（est=98 samples）`G0=1531` **一波达标**；旧语义（est=980 ticks）
+`G0=154` **补满 `DEFAULT_MAX_WAVES`=3 波仍 < 达标线的 1/3**。另加
+`test_t9_old_ticks_key_name_is_rejected`（改名护栏：旧键照写必须响亮报错）。桩里 `totalTicks` 刻意写成
+`10×samples`，任何误读 ticks 的路径都会 10× 暴露。回归：`tests/test_rollout_volume.py` 52 用例 + 
+`e2e/test_volume_e2e.py` 10 用例（真调度器/真 shard）绿，nn python gate + 根 `bun run check` 绿。
+
+---
+
 ## §47 Phase 0 逐敌种画像（T3）：**败局 = 从不碰 power**，判决 T5（2026-09-15；`plan/x3-power-followup.plan.md` §T3）
 
 **为什么**：800 局探针显示败局 = 早死少开火且「摊薄画像」仅占 2%，x2 时代的机制假设在本批不成立；

@@ -188,11 +188,13 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         "0 = 关闭，走 --seed-rotate 固定局数旧语义",
     )
     ap.add_argument(
-        "--est-ticks-per-game",
+        # 2026-09-15 T9：旧名 --est-ticks-per-game 是 10× 量纲错（ticks 填进 samples
+        # 分母），改名后无兼容别名——旧名会在 argparse 层直接报错（响亮优于静默）。
+        "--est-samples-per-game",
         type=int,
-        default=_d("est_ticks_per_game", 0),
-        help="局均 tick 估计（--target-transitions > 0 时必填）：首轮反解局数用，"
-        "之后由 jsonl 的 trailing 均值覆盖",
+        default=_d("est_samples_per_game", 0),
+        help="局均 samples 估计（--target-transitions > 0 时必填，单位与 nSamples 一致"
+        "= 局均 ticks / K）：首轮反解局数用，之后由 jsonl 的 trailing samples 均值覆盖",
     )
     ap.add_argument(
         "--max-games-per-stage",

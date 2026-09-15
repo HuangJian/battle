@@ -243,8 +243,8 @@ class _Loop:
     def _volume_stages(self) -> list[int]:
         return TrainingLoop._volume_stages(cast(Any, self))
 
-    def _volume_est_ticks(self) -> int:
-        return TrainingLoop._volume_est_ticks(cast(Any, self))
+    def _volume_est_samples(self) -> int:
+        return TrainingLoop._volume_est_samples(cast(Any, self))
 
     def _iteration_pairs(self, it: int) -> list[tuple[int, int]]:
         return TrainingLoop._iteration_pairs(cast(Any, self), it)
@@ -275,7 +275,7 @@ class _Loop:
             out.write_text('{"stub": true}', encoding="utf-8")
         self.args = types.SimpleNamespace(
             target_transitions=target,
-            est_ticks_per_game=est,
+            est_samples_per_game=est,
             max_games_per_stage=max_games_per_stage,
             stages=stages,
             seeds="0-1",

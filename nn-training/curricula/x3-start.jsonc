@@ -63,7 +63,10 @@
 //   机器健康（value 0.23/熵 0.58/KL 0.002，无 halt）—— plateau 是信号配方到顶，
 //   不是训练事故。acd 被钉死 59-60（三锚点），power+armor 为跨 count 稳定病灶。
 //   教训：① 同配方加轮/加密度不搬运偏科关（x2-acbc 已证一次，本腿证第二次）；
-//   ② 量纲按 transitions/轮记账（本腿 60×4×967≈23 万；c4-dodge 线 ~66 万+）；
+//   ② 量纲按 transitions/轮记账（※ 2026-09-15 勘误：transitions=samples，本腿
+//      60×4×97 ≈ 2.33 万/轮，原写「60×4×967≈23 万」是 ticks，10×；c4-dodge
+//      原写 ~66 万+ 同为 ticks ⇒ 实际 ~6.6 万 samples。见 DECISIONS
+//      §2026-09-15-goalnn-x3-power-negative 与 plan/dynamic-rollout-volume §1）；
 //   ③ 在途 eval 行 iter=权重轮（P0 事后口径），日常数右移一轮读。
 //   后续：x3-power（杀/中信用比）接棒；本腿归档保留 it180/it333 双点。
 //

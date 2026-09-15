@@ -16,11 +16,12 @@
   "stages": "1000-1001",
   "difficulty": "hard",
   "max_ticks": 120,
-  // 分关达标线 = 400/2 = 200t；est 40 ⇒ 初波 G0 = 5/关。
+  // 分关达标线 = 400/2 = 200 samples；est=40 **samples/局**（与账本 nSamples 同单位，
+  // = 局均 ticks / K；不是 ticks）⇒ 初波 G0 = 5/关。
   // 注意：真 bun 下若 max_ticks 过短、样本/局远低于 est，会正确触 wave_cap
   // （2026-09-15 实测：timeout 局 ~12 samples/game ⇒ 3 波仍不满 200/关）。
   "target_transitions": 400,
-  "est_ticks_per_game": 40,
+  "est_samples_per_game": 40,
   "max_games_per_stage": 20,
   "player": { "lives": 3, "level": 1 },
 

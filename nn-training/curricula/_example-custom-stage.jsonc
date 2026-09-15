@@ -68,18 +68,24 @@
   "seed_rotate": 20,
 
   // ── 按样本量动态采集（可选；缺席 = 用 seed_rotate 固定局数，老行为逐字节不变）──
-  // 什么时候用：想让「每轮采多少」以 transitions 计而非局数计时（PPO 吃的是 transitions；
+  // 什么时候用：想让「每轮采多少」以 samples 计而非局数计时（PPO 吃的是 transitions；
   // 固定局数下样本量会随局长漂移）。语义、边界与决策见 DECISIONS
   // §2026-09-15-goalnn-dynamic-rollout-volume；纯逻辑在 rl/volume_waves.py。
   //   分关达标线 = ceil(target_transitions / 关数)；初波每关 G0 = max(1, ceil(达标线/est))；
   //   结算后逐关补波 ceil(缺口/est)，每关至多 3 波；掉局零样本不计（天然触发补采）。
-  // **开工校准公式**：seed_rotate（当量局数）≈ target_transitions ÷ 关数 ÷ 局均tick
-  //   —— x3 实测 967t/局 ⇒ 60 万 ÷ 4 关 ÷ 967 ≈ 155/关。est 只用于首轮反解，
-  //   之后由 training_log.jsonl 的 trailing 均值（近 5 轮）自动覆盖。
+  // ⚠ **量纲（2026-09-15 T9）**：`target_transitions` 与 `est_samples_per_game` **同单位**
+  //   = 已结算 shard 的 `nSamples` 之和（= 决策步数），**不是 ticks**（exporter 按 K
+  //   降采样，x3 实测 samples/ticks ≈ 0.1007）。旧键名 `est_ticks_per_game` 把 ticks
+  //   填进 samples 分母 = 10× 误采（600000 目标只兑现 ~35% 就触 wave_cap）——已停用，
+  //   照写旧键会在启动期响亮报错（extra=forbid）。
+  // **开工校准公式**：seed_rotate（当量局数）≈ target_transitions ÷ 关数 ÷ 局均 samples
+  //   —— x3 实测 980 ticks/局 × 0.1007 ≈ **99 samples/局** ⇒ 60 万 ÷ 4 关 ÷ 99 ≈ **1516/关**
+  //   （≈6064 局/轮）。est 只用于首轮反解，之后由 training_log.jsonl 的 trailing
+  //   **samples** 均值（近 5 轮）自动覆盖。
   // **v1 边界**：只接串行采集路径；与 --curriculum-stages/--rotate-stages 的门控窗口不兼容
   //   （配额按课程声明的关集分关，窗口会让分母与真实采样关不符——命中即响亮报错）。
   // "target_transitions": 600000,
-  // "est_ticks_per_game": 967,
+  // "est_samples_per_game": 99,
   // "max_games_per_stage": 0,   // 0 = 默认「初波 × 4」；触顶 = 停采 + 响亮日志 + 事件打标
 
   "player": { "lives": 2, "level": 2 },

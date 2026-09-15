@@ -38,7 +38,7 @@ from rl.resume import (
     last_rotate_seed,
     peak_entropy,
     settled_stage_totals,
-    trailing_ticks_per_game,
+    trailing_samples_per_game,
 )
 from rl.rollout_phase import (
     dispatch_rollout_phase,
@@ -928,10 +928,15 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
             )
         return stages
 
-    def _volume_est_ticks(self) -> int:
-        """局均 tick 估计：jsonl 的 trailing 均值（可 replay），无历史落课程声明值。"""
-        declared = int(getattr(self.args, "est_ticks_per_game", 0) or 0)
-        return trailing_ticks_per_game(self._jsonl_path, window=5, fallback=declared)
+    def _volume_est_samples(self) -> int:
+        """局均 **samples** 估计：jsonl 的 trailing 均值（可 replay），无历史落课程声明值。
+
+        量纲（2026-09-15 T9）：samples（jsonl 的 `samples` 字段 = nSamples 之和），
+        **不是 ticks**——后者差 K 倍（x3 实测 samples/ticks≈0.1007），会让第二轮起
+        采量偏离 10×（旧 `trailing_ticks_per_game` 就是这条 bug 的一半）。
+        """
+        declared = int(getattr(self.args, "est_samples_per_game", 0) or 0)
+        return trailing_samples_per_game(self._jsonl_path, window=5, fallback=declared)
 
     def _iteration_pairs(self, it: int) -> list[tuple[int, int]]:
         """本轮初波 (stage, seed)：动态采集走 volume，其余逐字节走 build_pairs。
@@ -946,7 +951,7 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
 
         args = self.args
         stages = self._volume_stages()
-        est = self._volume_est_ticks()
+        est = self._volume_est_samples()
         target = int(args.target_transitions)
         g0 = initial_games(target, len(stages), est)
         self._volume_target = target
@@ -960,7 +965,8 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         pairs = wave_pairs(self._rotate_seed, it, {s: g0 for s in stages}, 0)
         log(
             f"[volume] it{it}: 初波 G0={g0}/关 × {len(stages)} 关 = {len(pairs)} 局 "
-            f"（target={target}t est={est}t/局 分关达标线={-(-target // len(stages))}t）"
+            f"（target={target} samples est={est} samples/局 "
+            f"分关达标线={-(-target // len(stages))} samples）"
         )
         return pairs
 
@@ -1078,7 +1084,7 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 stages=stages,
                 collected=collected,
                 target_transitions=target,
-                est_ticks_per_game=est,
+                est_samples_per_game=est,
                 waves_done=self._volume_waves,
                 games_done=games_done,
                 max_waves=DEFAULT_MAX_WAVES,
@@ -1099,7 +1105,8 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                     )
                 log(
                     f"[volume] it{it}: 补波收官 waves={self._volume_waves} "
-                    f"collected={collected_total}/{target}t 达标关={len(met)}/{len(stages)}"
+                    f"collected={collected_total}/{target} samples "
+                    f"达标关={len(met)}/{len(stages)}"
                     + (f" 未达标={unmet}" if unmet else "")
                 )
                 break

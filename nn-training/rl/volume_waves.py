@@ -4,8 +4,21 @@
 结算后按**已结算 transitions** 逐关补波，直到达标或触硬顶。
 
 本模块只有纯函数与常量（无 IO、无 torch）：配额数学、波次种子流、终止谓词、补波计划。
-shard 账本读取在 `rl/resume.py`（settled_stage_totals / trailing_ticks_per_game），
+shard 账本读取在 `rl/resume.py`（settled_stage_totals / trailing_samples_per_game），
 loop 接线在 `rl/loop_core.py::_volume_topup`。
+
+## 量纲（★ 2026-09-15 T9 定案；改这条 = 新实验 §15.5）
+
+`target_transitions`（分子）与 `est_samples_per_game`（分母）**必须是同一个单位**：
+**已结算 shard 的 `nSamples` 之和**（= 决策步数，PPO 真正吃的东西）。
+**不是 ticks**：exporter 按 K 降采样（x3-power 实测 samples/ticks ≈ 0.1007），ticks 只是
+clocks。旧键名 `est_ticks_per_game` 正是把 ticks 填进 samples 分母 —— 10× 误采：
+target=600000 / 4 关 / est=980（ticks）时初波只采到目标的 ~⅒，3 波补波后仍停在 ~35%
+触 `wave_cap`（结课评审复算的「兑现 37% 触顶」用例）。键名改后换算：
+`est_samples_per_game = 局均 ticks × (samples/ticks)`（x3：980 × 0.1007 ≈ 98.7 ⇒ 取 99），
+或等价地 `局均 ticks / K`（K = 降采样倍数；x3 实测 K ≈ 10 ⇒ 980 ticks ≈ 98 samples）。
+⚠ 自动 est（`trailing_samples_per_game`）也必须读 jsonl 的 `samples` 字段，**不能读
+`ticks`**——否则首轮正确、第二轮起又变成 10×（这是同一条 bug 的另一半）。
 
 ## 语义要点（改动任何一条 = 新实验，§15.5）
 
@@ -45,14 +58,16 @@ import numpy as np
 VOLUME_RULE_V1 = 1
 
 #: 每轮每关波次数上限（防长尾抖动：补波收益递减，3 波够抹平 est 偏差）。
+#: ⚠ 3 波只够抹平「est 偏差」，不够抹平「est 量纲错」——量纲错是 10×，
+#: 补波的绝对量也按同一个错估缩放，永远追不上（见文件头量纲节）。
 DEFAULT_MAX_WAVES = 3
 
 #: 单关单轮局数硬顶的默认倍数：默认 = 初波 G0 × 本值。
 DEFAULT_GAME_CAP_MULT = 4
 
-#: 这里**故意没有** `est_ticks_per_game` 的绝对下限（2026-09-15 回退 P2-b）。
+#: 这里**故意没有** `est_samples_per_game` 的绝对下限（2026-09-15 回退 P2-b）。
 #:
-#: 曾加过 `MIN_EST_TICKS_PER_GAME = 100`，动机：`cap = G0 × 4` 与
+#: 曾加过 `MIN_EST_SAMPLES_PER_GAME = 100`，动机：`cap = G0 × 4` 与
 #: `G0 = ceil(target/关数/est)` 同源，est 越小两者一起放大，"硬顶"追不上 G0。
 #: **但那个前提是错的** —— 它假定 est 必然是三位数、`est < 100` 只能是故障值。
 #: `e2e/test_volume_e2e.py::test_quota_converges_within_one_wave` 用 **est=20 的合法小值**
@@ -99,35 +114,38 @@ def target_per_stage(target_transitions: int, n_stages: int) -> int:
     return _ceil_div(int(target_transitions), int(n_stages))
 
 
-def initial_games(target_transitions: int, n_stages: int, est_ticks_per_game: int) -> int:
+def initial_games(target_transitions: int, n_stages: int, est_samples_per_game: int) -> int:
     """初波每关局数 `G0 = max(1, ceil(target / n_stages / est))`（计划 §2.2.1）。
 
-    `est_ticks_per_game` ≤ 0 响亮报错——配额反解没有估计值就是静默乱采（配置校验在
-    CourseConfig 层已经拦一次，这里再拦是为了纯函数自洽）。**est 不被钳到任何下限**
-    （2026-09-15 回退 P2-b；理由见文件头那段长注释）。
+    `est_samples_per_game` = **samples/局**（= 局均 ticks / K；见文件头量纲节），
+    与 `target_transitions` 同单位。≤ 0 响亮报错——配额反解没有估计值就是静默乱采
+    （配置校验在 CourseConfig 层已经拦一次，这里再拦是为了纯函数自洽）。
+    **est 不被钳到任何下限**（2026-09-15 回退 P2-b；理由见文件头那段长注释）。
     """
-    if est_ticks_per_game <= 0:
-        raise ValueError(f"initial_games 需要 est_ticks_per_game ≥ 1，得到 {est_ticks_per_game}")
+    if est_samples_per_game <= 0:
+        raise ValueError(
+            f"initial_games 需要 est_samples_per_game ≥ 1，得到 {est_samples_per_game}"
+        )
     return max(
         1,
         _ceil_div(
             target_per_stage(target_transitions, n_stages),
-            int(est_ticks_per_game),
+            int(est_samples_per_game),
         ),
     )
 
 
-def topup_games(remaining_transitions: int, est_ticks_per_game: int) -> int:
+def topup_games(remaining_transitions: int, est_samples_per_game: int) -> int:
     """补波大小 = `ceil(剩余 / est)`；剩余 ≤ 0 → 0（无波可补）。
 
-    与 `initial_games` 同口径：est **不钳**（见文件头长注释，2026-09-15 回退 P2-b）。
+    与 `initial_games` 同口径（est = samples/局）；est **不钳**（见文件头长注释）。
     """
-    if est_ticks_per_game <= 0:
-        raise ValueError(f"topup_games 需要 est_ticks_per_game ≥ 1，得到 {est_ticks_per_game}")
+    if est_samples_per_game <= 0:
+        raise ValueError(f"topup_games 需要 est_samples_per_game ≥ 1，得到 {est_samples_per_game}")
     remaining = int(remaining_transitions)
     if remaining <= 0:
         return 0
-    return _ceil_div(remaining, int(est_ticks_per_game))
+    return _ceil_div(remaining, int(est_samples_per_game))
 
 
 def default_game_cap(initial_g0: int) -> int:
@@ -204,7 +222,7 @@ def plan_topup(
     stages: Sequence[int],
     collected: Mapping[int, int],
     target_transitions: int,
-    est_ticks_per_game: int,
+    est_samples_per_game: int,
     waves_done: int,
     games_done: Mapping[int, int],
     max_waves: int = DEFAULT_MAX_WAVES,
@@ -217,6 +235,7 @@ def plan_topup(
     且不占波次预算；未达标的关按 `ceil(shortfall / est)` 补一波，并在**不越硬顶**
     的前提下截断（计划要求硬顶是硬顶，不是「下一波才停」）。`max_games_per_stage=0`
     → 用 `default_game_cap(initial_g0)`。
+    `collected`（账本 nSamples 之和）与 `est_samples_per_game` 同单位（见文件头量纲节）。
     """
     stage_list = [int(s) for s in stages]
     if not stage_list:
@@ -249,7 +268,7 @@ def plan_topup(
         if why is not None:
             stopped[stage] = why
             continue
-        games = topup_games(short, est_ticks_per_game)
+        games = topup_games(short, est_samples_per_game)
         if cap > 0:
             # 硬顶是硬顶：本波也不许越（越界就是「下波才停」的软顶）。
             room = cap - done

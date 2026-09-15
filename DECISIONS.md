@@ -1762,6 +1762,15 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   副本共享 `out_dir`，double-settle 的 rmtree 连赢家数据一起删（报告仍记 `ok=N/N`）——单独立项修，取证见 §44。
 - **未做（勿当已验）**：微课 5 轮试点与补波 overhead 实测（需真实 bun sim / 训练，未跑）；
   dashboard 展示 `transitions_collected/target` 未动。
+- **修订（2026-09-15 T9，plan/x3-power-followup §T9 的「二选一并写明」已定）**：第二键
+  **改名 `est_ticks_per_game` → `est_samples_per_game`**，值 = 局均 ticks × (samples/ticks)
+  = 局均 ticks / K（x3 实测 0.1007 ⇒ 980 ticks ≈ 98 samples）。旧名把 ticks 填进 samples 分母
+  ⇒ 初波只反解出目标的 ~⅒，补波按同一错估缩放、补满 3 波仍不达标（评审「兑现 37% 触顶」用例）。
+  **不取另一选路「公式显式 /K」**：K 是 exporter 侧实现细节，课程文件不该编码它（K 一变
+  所有课程文件都要改）；键名自带单位 + `extra="forbid"` 使旧键照写即启动期响亮报错，静默复辟不可能。
+  同批修三处 ticks-as-transitions 文档，并让 `trailing_samples_per_game` 只读 jsonl 的 `samples`
+  （不读 `ticks`）——两半缺一即「首轮对、第二轮起 10×」；单测「① T9 量纲钉死（600000/4/980）」
+  把新（一波达标）/旧（补满 3 波 < 1/3）两读数一起钉死。
 
 ## §2026-09-15-sandbox-precommit-immunity（2026-09-15，用户指令：杜绝编码 agent 删除保护沙箱反复拦截 pre-commit / 反复弹删除审批；hook 进程树级免疫 + 零删除纪律）
 

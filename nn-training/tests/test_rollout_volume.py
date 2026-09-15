@@ -54,7 +54,7 @@ def test_target_per_stage_ceil() -> None:
 
 
 def test_initial_games_ceil_and_floor() -> None:
-    # x3-power 剧本：60 万 ÷ 4 关 ÷ 967 ≈ 155.1 ⇒ ceil 156/关（计划写「≈155」是取整口语）
+    # 60 万 samples ÷ 4 关 ÷ 967 samples/局 ≈ 155.1 ⇒ ceil 156/关（「≈155」是取整口语）
     assert initial_games(600000, 4, 967) == 156
     assert initial_games(600000, 4, 900) == 167
     # 目标小于一局 ⇒ 地板 1（永远至少采一局，否则初波为空）
@@ -76,7 +76,7 @@ def test_initial_games_ceil_and_floor() -> None:
 def test_est_is_not_floored() -> None:
     """est **不得**被钳到任何下限 —— 配额反解就是 `G0 = ceil(每关目标 / est)` 的原式。
 
-    2026-09-15 回退 P2-b：曾加过 `MIN_EST_TICKS_PER_GAME = 100`，理由是"est 过小会让
+    2026-09-15 回退 P2-b：曾加过 `MIN_EST_SAMPLES_PER_GAME = 100`，理由是"est 过小会让
     G0 与 cap 同步爆炸、硬顶追不上"。但那个前提把**合法的小 est** 误当成故障值：
     `e2e/test_volume_e2e.py::test_quota_converges_within_one_wave` 用 est=20 的合法值
     证伪了它 —— 钳到 100 后 `G0 = ceil(100/100) = 1`，初波 1 局/关补不到达标线，
@@ -92,7 +92,7 @@ def test_est_is_not_floored() -> None:
     assert initial_games(600000, 4, 1) == 150000
     # topup 同口径不钳：剩余 1000 / est 20 = 50
     assert topup_games(1000, 20) == 50
-    # 真值不受影响（三位数 est 是常态，不是特例）
+    # 真值不受影响（六位数 target / 两位数 est 是常态）
     assert initial_games(600000, 4, 967) == 156
     # cap 按设计随 G0 缩放（×DEFAULT_GAME_CAP_MULT）——它是"单波上限"，**不是**给 G0 封顶的
     assert default_game_cap(initial_games(200, 2, 20)) == 5 * 4
@@ -118,6 +118,67 @@ def test_target_per_stage_rejects_nonpositive_target() -> None:
     assert target_per_stage(600000, 4) == 150000
     with pytest.raises(ValueError):
         target_per_stage(-100, 4)
+
+
+# ─────────────────── ① T9 量纲钉死（600000 / 4 / 980） ───────────────────
+
+
+def test_t9_dims_pinned_600000_4_980() -> None:
+    """★ T9：`target_transitions` 与 `est_samples_per_game` **同单位 = samples**（= ticks/K）。
+
+    评审复算用例（plan/x3-power-followup §T9）：`target=600000`、4 关、x3 腿局均
+    **980 ticks**。exporter 按 K 降采样（x3 实测 samples/ticks ≈ 0.1007 ⇒ K≈10）
+    ⇒ 局均 samples ≈ 98。**新语义**（分母 = samples）：
+
+        G0 = ceil(150000/98) = 1531 局/关 ⇒ 1531×98 = 150038 ≥ 150000 —— 一波即达标。
+
+    **旧语义**（分母 = ticks 980）给出 G0=154 局/关 ⇒ 单波只采 154×98 = 15092
+    （达标线的 ~10%）；而补波量同样按那个错估缩放（`ceil(缺口/980)`），补满波次
+    上限仍是零头 ⇒ 终以 `wave_cap` 收场（评审的「兑现 37% 触顶」用例）。本测试不
+    钉那个小数（它取决于 K 与 est 的细节），只钉**方向与量级**：新语义一波收敛、
+    旧语义补满法定波次仍不达标。
+    """
+    target, n_stages = 600000, 4
+    per_stage = target_per_stage(target, n_stages)
+    est_samples = 98  # = 980 ticks / K，K=10
+
+    # 新语义：一波达标，且过冲 < 1 局（ceil 的必然）
+    g0 = initial_games(target, n_stages, est_samples)
+    assert g0 == 1531
+    assert g0 * est_samples >= per_stage
+    assert (g0 - 1) * est_samples < per_stage
+
+    # plan/dynamic-rollout-volume §2.1 的示例读数（900 ticks ≈ 90 samples）同样一波收敛
+    assert initial_games(target, n_stages, 90) == 1667
+    assert per_stage <= 1667 * 90
+
+    # 旧语义（ticks 填进 samples 分母）：初波只采到达标线的 ~10%
+    g0_ticks = initial_games(target, n_stages, 980)
+    assert g0_ticks == 154
+    got = g0_ticks * est_samples
+    assert got < per_stage // 5
+    # 补满波次上限也追不上（补波同样按 ticks 尺度缩放 ⇒ 永远落后一个量级）
+    waves = 1
+    while waves < DEFAULT_MAX_WAVES:
+        got += topup_games(per_stage - got, 980) * est_samples
+        waves += 1
+    assert waves == DEFAULT_MAX_WAVES == 3
+    assert got * 3 < per_stage  # 终局仍不到达标线的 1/3
+
+
+def test_t9_old_ticks_key_name_is_rejected() -> None:
+    """旧键名照写 = 启动期响亮报错（`extra="forbid"`）——绝不静默当 samples 用掉。
+
+    这是「改名」这条选路的护栏：若旧键被静默接受，10× 误采会无声复辟（既有课程
+    文件一个字不改就继续跑错量纲）。
+    """
+    # 走 `model_validate`（与 `load_course` 同一条「原始 dict → 校验」路径），
+    # 免得 mypy 把「故意传旧键」当成调用错误。
+    with pytest.raises(ValidationError):
+        CourseConfig.model_validate({"target_transitions": 600000, "est_ticks_per_game": 980})
+    # 对照：换成新键名、同一个数值就是合法的（报错来自键名，不是数值）
+    ok = CourseConfig(target_transitions=600000, est_samples_per_game=980)
+    assert ok.est_samples_per_game == 980
 
 
 # ─────────────────── ① 终止谓词 ───────────────────
@@ -208,7 +269,7 @@ def _plan(**kw: object) -> TopUpPlan:
         stages=[0, 1, 2, 3],
         collected={0: 0, 1: 0, 2: 0, 3: 0},
         target_transitions=600000,
-        est_ticks_per_game=967,
+        est_samples_per_game=967,
         waves_done=1,
         games_done={0: 155, 1: 155, 2: 155, 3: 155},
         initial_g0=155,
@@ -218,7 +279,7 @@ def _plan(**kw: object) -> TopUpPlan:
 
 
 def test_plan_topup_shortfall_math() -> None:
-    # 每关达标线 150000t；已结算 100000 ⇒ 缺口 50000 ⇒ ceil(50000/967) = 52 局
+    # 每关达标线 150000 samples；已结算 100000 ⇒ 缺口 50000 ⇒ ceil(50000/967) = 52 局
     plan = _plan(collected={0: 100000, 1: 100000, 2: 100000, 3: 100000})
     assert plan.games_by_stage == {0: 52, 1: 52, 2: 52, 3: 52}
     assert plan.games_total == 208
@@ -369,15 +430,15 @@ def test_build_pairs_frozen_deltas_are_still_behavioral() -> None:
 
 def test_course_volume_keys_default_off() -> None:
     c = CourseConfig()
-    assert (c.target_transitions, c.est_ticks_per_game, c.max_games_per_stage) == (0, 0, 0)
+    assert (c.target_transitions, c.est_samples_per_game, c.max_games_per_stage) == (0, 0, 0)
     assert "target_transitions" not in c.flat_overrides()  # 缺席 = 不覆盖 argparse
 
 
 def test_course_volume_keys_flat_overrides_when_explicit() -> None:
-    c = CourseConfig(target_transitions=600000, est_ticks_per_game=967, max_games_per_stage=0)
+    c = CourseConfig(target_transitions=600000, est_samples_per_game=967, max_games_per_stage=0)
     ov = c.flat_overrides()
     assert ov["target_transitions"] == 600000
-    assert ov["est_ticks_per_game"] == 967
+    assert ov["est_samples_per_game"] == 967
     assert ov["max_games_per_stage"] == 0  # 显式出现在 JSON 里就照写（含 0）
 
 
@@ -385,16 +446,16 @@ def test_course_volume_requires_est() -> None:
     with pytest.raises(ValidationError):
         CourseConfig(target_transitions=600000)  # est 缺失 = 配额无法反解
     with pytest.raises(ValidationError):
-        CourseConfig(target_transitions=600000, est_ticks_per_game=0)
+        CourseConfig(target_transitions=600000, est_samples_per_game=0)
     # 关掉模式时 est 无意义，允许缺席
-    assert CourseConfig(target_transitions=0, est_ticks_per_game=0).target_transitions == 0
+    assert CourseConfig(target_transitions=0, est_samples_per_game=0).target_transitions == 0
 
 
 def test_course_volume_keys_reject_negative() -> None:
     with pytest.raises(ValidationError):
         CourseConfig(target_transitions=-1)
     with pytest.raises(ValidationError):
-        CourseConfig(est_ticks_per_game=-5)
+        CourseConfig(est_samples_per_game=-5)
     with pytest.raises(ValidationError):
         CourseConfig(max_games_per_stage=-2)
 
@@ -439,7 +500,7 @@ def test_corpus_fp_unchanged_for_courses_without_volume_keys() -> None:
 
 
 def test_corpus_fp_carries_volume_keys_when_active() -> None:
-    c = CourseConfig(target_transitions=600000, est_ticks_per_game=967)
+    c = CourseConfig(target_transitions=600000, est_samples_per_game=967)
     ref = _payload_ref(c)
     ref["volume_rule"] = VOLUME_RULE_V1
     ref["target_transitions"] = 600000
@@ -449,8 +510,8 @@ def test_corpus_fp_carries_volume_keys_when_active() -> None:
 
 def test_corpus_fp_ignores_volume_tuning_knobs() -> None:
     """est（运行期被 trailing 均值覆盖的兜底估计）与 max_games（硬顶）不进身份。"""
-    a = CourseConfig(target_transitions=600000, est_ticks_per_game=967)
-    b = CourseConfig(target_transitions=600000, est_ticks_per_game=1400, max_games_per_stage=99)
+    a = CourseConfig(target_transitions=600000, est_samples_per_game=967)
+    b = CourseConfig(target_transitions=600000, est_samples_per_game=1400, max_games_per_stage=99)
     assert corpus_identity_fp(a) == corpus_identity_fp(b)
 
 
@@ -474,7 +535,7 @@ def _manifest(d: Path, stage: int, seed: int, wver: str, n_samples: int) -> None
 class _StubLoop:
     """最小 TrainingLoop 替身：只带动态采集接线用得着的属性/方法。
 
-    `_dispatch_volume_wave` 用假 shard 模拟结算（每局 `ticks` 个 transitions），
+    `_dispatch_volume_wave` 用假 shard 模拟结算（每局 `samples` 个 transitions），
     其余全部是生产实现。
     """
 
@@ -488,8 +549,8 @@ class _StubLoop:
     def _volume_stages(self) -> list[int]:
         return TrainingLoop._volume_stages(cast(Any, self))
 
-    def _volume_est_ticks(self) -> int:
-        return TrainingLoop._volume_est_ticks(cast(Any, self))
+    def _volume_est_samples(self) -> int:
+        return TrainingLoop._volume_est_samples(cast(Any, self))
 
     def _iteration_pairs(self, it: int) -> list[tuple[int, int]]:
         return TrainingLoop._iteration_pairs(cast(Any, self), it)
@@ -506,14 +567,14 @@ class _StubLoop:
         *,
         target: int = 0,
         est: int = 967,
-        ticks: int = 500,
+        samples: int = 500,
         max_games_per_stage: int = 0,
         curriculum_stages: str = "",
         it: int = 1,
     ) -> None:
         self.args = types.SimpleNamespace(
             target_transitions=target,
-            est_ticks_per_game=est,
+            est_samples_per_game=est,
             max_games_per_stage=max_games_per_stage,
             stages="0-3",
             seeds="0-3",
@@ -530,7 +591,7 @@ class _StubLoop:
             traj=str(tmp / "traj"),
         )
         self.it = it
-        self.ticks = ticks
+        self.samples = samples
         self._rotate_seed = 4242
         self._traj_root = Path(self.args.traj)
         self._jsonl_path = self._traj_root / "training_log.jsonl"
@@ -566,14 +627,16 @@ class _StubLoop:
     ) -> dict:
         self.dispatched.append(list(pairs))
         for stage, seed in pairs:
-            _manifest(self._traj_dir, stage, seed, _WVER, self.ticks)
-        samples = len(pairs) * self.ticks
+            _manifest(self._traj_dir, stage, seed, _WVER, self.samples)
+        samples = len(pairs) * self.samples
         return {
             "games": len(pairs),
             "winRate": 0.0,
             "outcomes": {"timeout": len(pairs)},
             "totalSamples": samples,
-            "totalTicks": samples,
+            # K=10 的 stub 惯例：ticks = 10×samples。配额只认 samples，所以故意让
+            # 两者不同——任何误读 ticks 的路径都会在断言里 10× 暴露。
+            "totalTicks": samples * 10,
             "scoreList": [],
             "dimLists": {},
         }
@@ -662,7 +725,7 @@ def test_volume_stages_uses_explicit_stages(tmp_path: Path) -> None:
 
 def test_volume_topup_quota_met_in_first_wave(tmp_path: Path, _patch_wver: None) -> None:
     """初波就达标：不补波，只记账（est 估准的正常情形）。"""
-    stub = _StubLoop(tmp_path, target=600000, est=967, ticks=967)
+    stub = _StubLoop(tmp_path, target=600000, est=967, samples=967)
     stub._iteration_pairs(1)
     _settle_first_wave(stub)
     stub._volume_topup(1, None)
@@ -672,13 +735,13 @@ def test_volume_topup_quota_met_in_first_wave(tmp_path: Path, _patch_wver: None)
 
 
 def test_volume_topup_iterates_until_wave_cap(tmp_path: Path, _patch_wver: None) -> None:
-    """局长偏短（est 偏大）⇒ 逐关补波，至多 3 波后停（不无限补）。"""
-    stub = _StubLoop(tmp_path, target=600000, est=967, ticks=500)
+    """每局 samples 偏少（est 声明值偏大）⇒ 逐关补波，至多 3 波后停（不无限补）。"""
+    stub = _StubLoop(tmp_path, target=600000, est=967, samples=500)
     stub._iteration_pairs(1)
     _settle_first_wave(stub)
     stub._volume_topup(1, None)
     sizes = [len(w) for w in stub.dispatched]
-    assert sizes == [4 * 75, 4 * 36]  # w1 ceil(72000/967)，w2 ceil(34500/967)
+    assert sizes == [4 * 75, 4 * 36]  # w1 ceil(72000/967)=75，w2 ceil(34500/967)=36（samples 口径）
     assert stub._volume_waves == 3
     assert stub._volume_collected == 4 * (156 + 75 + 36) * 500
     assert stub._volume_capped is False
@@ -690,7 +753,7 @@ def test_volume_topup_iterates_until_wave_cap(tmp_path: Path, _patch_wver: None)
 
 def test_volume_topup_hard_cap_marks_capped(tmp_path: Path, _patch_wver: None) -> None:
     """局数硬顶：本波截断到剩余额度，触顶后停采并打标（配额未满但停）。"""
-    stub = _StubLoop(tmp_path, target=600000, est=967, ticks=500, max_games_per_stage=200)
+    stub = _StubLoop(tmp_path, target=600000, est=967, samples=500, max_games_per_stage=200)
     stub._iteration_pairs(1)
     _settle_first_wave(stub)
     stub._volume_topup(1, None)
@@ -707,7 +770,7 @@ def test_volume_topup_partial_ledger_replays_same_continuation(
     plan §2.3 的三条一起验：(a) 同账本 ⇒ 同续跑（可 replay）；(b) 续跑派的每一签都
     出自该关该波同一条种子流（同源，不重抽）；(c) 已结算多的关补得少（分关独立）。
     """
-    full = _StubLoop(tmp_path / "full", target=600000, est=967, ticks=500)
+    full = _StubLoop(tmp_path / "full", target=600000, est=967, samples=500)
     full._iteration_pairs(1)
     _settle_first_wave(full)
     full._volume_topup(1, None)
@@ -759,7 +822,7 @@ def test_volume_topup_replays_unfinished_wave(tmp_path: Path, _patch_wver: None)
     """
     from rl.volume_waves import WAVE_PHASE, wave_round_key
 
-    stub = _StubLoop(tmp_path, target=600000, est=967, ticks=500)
+    stub = _StubLoop(tmp_path, target=600000, est=967, samples=500)
     stub._iteration_pairs(1)
     _settle_first_wave(stub)
     # 造「崩在 w2 中间」的 WAL：w2 有 start、无 finish（对局表 = 每关 36 局）
@@ -779,7 +842,7 @@ def test_volume_topup_does_not_replay_finished_wave(tmp_path: Path, _patch_wver:
     """已闭环的波不重放（WAL 只在「停在波中」时才作判据）。"""
     from rl.volume_waves import WAVE_PHASE, wave_round_key
 
-    stub = _StubLoop(tmp_path, target=600000, est=967, ticks=500)
+    stub = _StubLoop(tmp_path, target=600000, est=967, samples=500)
     stub._iteration_pairs(1)
     _settle_first_wave(stub)
     stub._journal.start(WAVE_PHASE, wave_round_key(1, 2), games={"0": 36})
@@ -791,7 +854,7 @@ def test_volume_topup_does_not_replay_finished_wave(tmp_path: Path, _patch_wver:
 
 def test_volume_topup_skips_stream_path(tmp_path: Path, _patch_wver: None) -> None:
     """v1 边界：stream 路径保持老语义（只记日志，不补波）。"""
-    stub = _StubLoop(tmp_path, target=600000, est=967, ticks=500)
+    stub = _StubLoop(tmp_path, target=600000, est=967, samples=500)
     stub._iteration_pairs(1)
     _settle_first_wave(stub)
     stub._stream_meta = {"rollout_sec": 1.0}
@@ -808,11 +871,11 @@ def test_volume_topup_skips_when_disabled(tmp_path: Path, _patch_wver: None) -> 
 
 def _topup_from_ledger(tmp: Path, half: list[tuple[int, int]]) -> _StubLoop:
     """造一个「初波已结算 + 第二波只落了一半」的循环桩，然后跑补波（崩后续跑）。"""
-    stub = _StubLoop(tmp, target=600000, est=967, ticks=500)
+    stub = _StubLoop(tmp, target=600000, est=967, samples=500)
     stub._iteration_pairs(1)
     _settle_first_wave(stub)
     for stage, seed in half:
-        _manifest(stub._traj_dir, stage, seed, _WVER, stub.ticks)
+        _manifest(stub._traj_dir, stage, seed, _WVER, stub.samples)
     stub._volume_topup(1, None)
     return stub
 
