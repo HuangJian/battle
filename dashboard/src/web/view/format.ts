@@ -80,6 +80,42 @@ export function pairedBaselineOf(vals: Array<PairedCompare | null | undefined>):
   return null
 }
 
+/** 过拟合列头 hover（大白话；Hero EvalTable 与 MetricsTable 共用）。 */
+export const OVERFIT_COL_TITLE =
+  '过拟合 gap = 锚点胜率 − 轮转胜率（百分点）。' +
+  '锚点=固定老种子（熟题），轮转=周期性换的新种子（生题）。' +
+  '正值越大越可疑：熟题分高、生题分低 = 可能背题了。' +
+  '单轮 ≥5pp 才值得警惕，且要看近 3 轮是否持续；' +
+  '未开双轨 / 无轮转数据时显示 —。'
+
+/** 过拟合徽章色：≥8 红 / ≥5 黄 / 其余灰（含负 gap=轮转更高，正常）。 */
+export function overfitTone(gapPp: number): 'r' | 'y' | 'gray' {
+  if (gapPp >= 8) return 'r'
+  if (gapPp >= 5) return 'y'
+  return 'gray'
+}
+
+/** 过拟合 gap 展示：带符号 1 位小数 + pp（如 `+3.2pp` / `-8.0pp`）。 */
+export function fmtOverfitGap(gapPp: number): string {
+  return (gapPp > 0 ? '+' : '') + gapPp.toFixed(1) + 'pp'
+}
+
+/** 过拟合单元格 hover：有双轨时展开锚/轮读数；否则缺数据说明。 */
+export function overfitCellTitle(e: {
+  anchorWr?: number | null
+  rotorWr?: number | null
+  overfitGapPp?: number | null
+}): string {
+  if (e.overfitGapPp == null) return '未开双轨，或本轮无轮转数据（it0 基线恒 —）'
+  if (e.anchorWr != null && e.rotorWr != null) {
+    return (
+      `锚点 ${fmtPct(e.anchorWr)} − 轮转 ${fmtPct(e.rotorWr)} = ${fmtOverfitGap(e.overfitGapPp)}` +
+      '；≥5pp 且近 3 轮持续才报警'
+    )
+  }
+  return '过拟合 gap（锚点 − 轮转）'
+}
+
 export function fmtBytes(b: number | null | undefined): string {
   if (typeof b !== 'number' || !Number.isFinite(b)) return '—'
   if (b < 1024) return `${b} B`

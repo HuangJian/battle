@@ -73,6 +73,17 @@ def dual_track_seeds(it: int) -> tuple[int, ...]:
     return EVAL_SEEDS[:DUAL_TRACK_ANCHOR] + tuple(EVAL_SEEDS[i] for i in rotor_span(it))
 
 
+def a_eval_seed_list(it: int, n_seeds: int, *, baseline: bool = False) -> tuple[int, ...]:
+    """A 层语料种子（in-loop 与 evalA 共用，防两侧口径漂移）。
+
+    双轨课（n_seeds==50 且非 baseline）→ 锚点 50 + `dual_track_seeds(it)` 的当轮
+    轮转 50；其余 → `EVAL_SEEDS[:n_seeds]` 前缀切片（it0 基线 / 大 n 正式前缀）。
+    """
+    if should_dual_track(n_seeds, baseline):
+        return dual_track_seeds(it)
+    return EVAL_SEEDS[:n_seeds]
+
+
 def is_anchor_seed(seed: int) -> bool:
     """`seed` 是否落在锚点段（池内**下标**集合，不是数值区间猜的）。
 
@@ -156,6 +167,19 @@ def hold_for_local(pending_len: int, reserved: int, gate_set: bool, past_release
     if reserved <= 0 or gate_set or past_release:
         return False
     return 0 < pending_len <= reserved
+
+
+def release_local_gate_if_starved(local_gate, nodes_ok: list) -> bool:
+    """无远端节点时立刻开闸本机 eval。
+
+    2026-09-15 x3-power it30：engine_epoch 全员 mismatch → nodes_ok=[] →
+    local_worker 空等 gate 到 deadline（600s 零局），drain 超时后才写 run_complete
+    ——控制台「训练已完成」横幅被拖到 10 分钟后，且终轮 eval 缺失。
+    """
+    if local_gate is None or nodes_ok:
+        return False
+    local_gate.set()
+    return True
 
 
 def report_winrate_safe(wr: float | None) -> float | None:

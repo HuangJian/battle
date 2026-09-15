@@ -382,6 +382,9 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
           dmgPerKill: null,
           scoreMean: null,
           scoreStd: null,
+          anchorWr: typeof r.anchor_wr === 'number' ? r.anchor_wr : null,
+          rotorWr: typeof r.rotor_wr === 'number' ? r.rotor_wr : null,
+          overfitGapPp: typeof r.overfit_gap_pp === 'number' ? r.overfit_gap_pp : null,
         })
       } catch {
         /* skip bad line */

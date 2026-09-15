@@ -180,6 +180,9 @@ describe('pool data layers (dashboard/src/server/pool-history + iters)', () => {
             sec: 60,
             wver: 'w1',
             outcomes: { win: 4, loss: 6 },
+            anchor_wr: 0.5,
+            rotor_wr: 0.3,
+            overfit_gap_pp: 20.0,
           }) +
           '\n',
       )
@@ -193,6 +196,10 @@ describe('pool data layers (dashboard/src/server/pool-history + iters)', () => {
       expect(r.evalData).not.toBeNull()
       expect(r.evalData!.wins).toBe(4)
       expect(r.evalData!.scoreMean).toBe(1)
+      // 双轨过拟合字段（eval_summary → EvalSummary 透传）
+      expect(r.evalData!.anchorWr).toBe(0.5)
+      expect(r.evalData!.rotorWr).toBe(0.3)
+      expect(r.evalData!.overfitGapPp).toBe(20.0)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

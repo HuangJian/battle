@@ -6,11 +6,15 @@ import {
   filterGroups,
   fmtPaired,
   fmtPct,
+  fmtOverfitGap,
   heroMainRows,
   iterGroups,
   klTone,
   latestRow,
   metricSeries,
+  OVERFIT_COL_TITLE,
+  overfitCellTitle,
+  overfitTone,
   PAIRED_COL_TITLES,
   pairedBaselineOf,
   pairedTone,
@@ -294,8 +298,8 @@ function MainTable({
 }
 
 /** eval 视图：最新 6 轮干净评估（有 evalData 的轮，iter 倒序；与抽屉 eval 过滤同口径）。
- *  列 = 评估专属字段：eval 胜率（含局数）、全歼、耗时/击杀/残血/道具/得分（评估实际值；
- *  击杀/道具为每局平均，残血为胜局平均，得分无 ±std）、窗口用时、评估权重版本。 */
+ *  列 = 评估专属字段：eval 胜率（含局数）、过拟合（锚−轮 gap）、耗时/击杀/残血/道具/得分
+ *  （评估实际值；击杀/道具为每局平均，残血为胜局平均，得分无 ±std）、窗口用时、评估权重版本。 */
 function EvalTable({ rows }: { rows: IterRow[] }) {
   const groups = filterGroups(iterGroups(rows), 'eval').slice(0, 6)
   // 配对基线轮：全量行里任一非空 pairedVsFirst 的 baseIter（只看前 6 行会误判）。
@@ -319,7 +323,9 @@ function EvalTable({ rows }: { rows: IterRow[] }) {
           <th className="tc-num" title={PAIRED_COL_TITLES.delta}>
             delta
           </th>
-          <th className="tc-num">全歼</th>
+          <th className="tc-num" title={OVERFIT_COL_TITLE}>
+            过拟合
+          </th>
           <th className="tc-num" title="胜局平均耗时（ticks）">
             胜局耗时
           </th>
@@ -429,10 +435,14 @@ function EvalTable({ rows }: { rows: IterRow[] }) {
                   )}
                 </td>
                 <td className="tc-num">
-                  {e.clearRate !== null ? (
-                    <span title={`全歼率 ${fmtPct(e.clearRate)}`}>{e.clears}</span>
+                  {e.overfitGapPp != null ? (
+                    <Badge tone={overfitTone(e.overfitGapPp)} title={overfitCellTitle(e)}>
+                      {fmtOverfitGap(e.overfitGapPp)}
+                    </Badge>
                   ) : (
-                    <span className="tc-muted">{e.clears || '-'}</span>
+                    <span className="tc-muted" title={overfitCellTitle(e)}>
+                      -
+                    </span>
                   )}
                 </td>
                 <td className="tc-num">

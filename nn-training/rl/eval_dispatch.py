@@ -24,11 +24,11 @@ from rl.eval_local import (
     EVAL_ITER_SUFFIX,
     EVAL_LOCAL_RELEASE_GRACE,
     EVAL_LOCAL_SLOTS_DEFAULT,
-    EVAL_SEEDS,
     EVAL_TASK_ATTEMPTS,
-    dual_track_seeds,
+    a_eval_seed_list,
     eval_done_keys,
     hold_for_local,
+    release_local_gate_if_starved,
     report_winrate_safe,  # noqa: F401 — re-exported（旧模块成员，兼容外部引用）
     run_local_eval_game,
     settle_eval_summary,
@@ -161,10 +161,7 @@ class EvalDispatcher:
             # 双轨日常评估（plan/dual-track-eval-seeds）：A-eval 且 n_seeds==50 时
             # 锚点 50 + 轮转 50（总量翻倍）；it0 基线与更大正式前缀（100/200）保持
             # EVAL_SEEDS[:n_seeds] 逐字节兼容。小 n_seeds（冒烟/单测）仍走前缀切片。
-            if should_dual_track(n_seeds, baseline):
-                seed_list = dual_track_seeds(it)
-            else:
-                seed_list = EVAL_SEEDS[:n_seeds]
+            seed_list = a_eval_seed_list(it, n_seeds, baseline=baseline)
             pairs = [(s, sd) for s in eval_stages for sd in seed_list]
             if not pairs:
                 return
@@ -574,6 +571,13 @@ class EvalDispatcher:
                     threads.append(
                         threading.Thread(target=local_worker, daemon=True, name="eval-local")
                     )
+            # 收官 drain / 远端全员 mismatch 时：gate 若仍关着，local_worker 会空等到
+            # deadline 才放行——终轮 eval 等 600s 却 0 局。没有节点可派时立刻开闸。
+            if release_local_gate_if_starved(local_gate, nodes_ok):
+                log(
+                    f"[eval] it{it}: no remote nodes — local_gate released immediately"
+                    f"（local_slots={local_slots} snapshot={'yes' if snapshot_path else 'no'}）"
+                )
             for t_ in threads:
                 t_.start()
             for t_ in threads:

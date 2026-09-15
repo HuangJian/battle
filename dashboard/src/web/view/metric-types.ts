@@ -49,6 +49,12 @@ export interface EvalSummary {
   dmgPerKill: number | null
   scoreMean: number | null
   scoreStd: number | null
+  /** 锚点轨胜率（双轨日常评估；非双轨 / 无锚点局 → null）。 */
+  anchorWr?: number | null
+  /** 轮转轨胜率（双轨日常评估；it0 基线 / 无轮转局 → null）。 */
+  rotorWr?: number | null
+  /** 过拟合 gap = 锚点 − 轮转（百分点）；任一轨缺失 → null。 */
+  overfitGapPp?: number | null
   /** 本轮 vs 开腿首轮的配对比较（同语料逐 seed；基线轮/无数据为 null）。 */
   pairedVsFirst?: PairedCompare | null
 }

@@ -25,18 +25,45 @@ from rl.eval_local import (
     EVAL_SEEDS,
     OVERFIT_GAP_PP,
     OVERFIT_PERSIST_ROUNDS,
+    a_eval_seed_list,
     dual_track_seeds,
     eval_done_keys,
     is_anchor_seed,
     is_rotor_seed,
     overfit_fires,
     overfit_gap_pp,
+    release_local_gate_if_starved,
     rotor_offset,
     rotor_span,
     settle_eval_summary,
     should_dual_track,
     split_anchor_rotor,
 )
+
+
+def test_release_local_gate_if_starved() -> None:
+    """2026-09-15 x3-power it30：无远端节点时立刻开闸，否则 local 空等到 deadline。"""
+    gate = threading.Event()
+    assert release_local_gate_if_starved(gate, []) is True
+    assert gate.is_set()
+    gate2 = threading.Event()
+    assert release_local_gate_if_starved(gate2, [{"id": "self"}]) is False
+    assert not gate2.is_set()
+    assert release_local_gate_if_starved(None, []) is False
+
+
+def test_a_eval_seed_list_matches_in_loop_and_evala() -> None:
+    """evalA 与 in-loop 共用 a_eval_seed_list：双轨 n=50 → 锚点+当轮轮转。"""
+    # it0 基线：不双轨，前缀 50
+    assert a_eval_seed_list(0, 50, baseline=True) == EVAL_SEEDS[:50]
+    # 双轨日常轮：与 dual_track_seeds(it) 逐字节一致
+    for it in (5, 10, 15):
+        assert a_eval_seed_list(it, 50, baseline=False) == dual_track_seeds(it)
+        assert len(a_eval_seed_list(it, 50, baseline=False)) == 100
+    # 大 n 正式前缀：不双轨
+    assert a_eval_seed_list(5, 200, baseline=False) == EVAL_SEEDS[:200]
+    # 冒烟小 n：前缀切片
+    assert a_eval_seed_list(5, 8, baseline=False) == EVAL_SEEDS[:8]
 
 WVER = "b" * 16
 

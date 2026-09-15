@@ -1165,6 +1165,9 @@ class TrainingSteps:
                 log(f"[eval] drain: 旧缺口 {cand[:-1]} 留档（只收尾最新 it{cand[-1]}）")
             m = cand[-1]
             self._eval_gate = threading.Event()
+            # 收官 drain 没有并发训练：立刻开闸，否则 local_worker 会等 gate 到 deadline
+            # （2026-09-15 x3-power it30：远端 engine_epoch 全 mismatch + gate 未开 → 600s 零局）。
+            self._eval_gate.set()
             self._eval_thread = dispatch_eval_bg(
                 self.bun,
                 arch_m[m],

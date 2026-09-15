@@ -5,9 +5,13 @@ import { useEffect, useRef, useState } from 'preact/hooks'
 import type { ComponentChildren } from 'preact'
 import {
   filterGroups,
+  fmtOverfitGap,
   fmtPct,
   iterGroups,
   klTone,
+  OVERFIT_COL_TITLE,
+  overfitCellTitle,
+  overfitTone,
   PAIRED_COL_TITLES,
   pairedBaselineOf,
   pairedTone,
@@ -134,92 +138,60 @@ function pairedCols(baselineIter: number | null): Col<MetricRow>[] {
   ]
 }
 
-/** 列工厂：iter 列在无 eval 主行旁挂 evalA（课程 A 层，非 EvalBoard B）。 */
-function buildMetricCols(
-  ea: EvalACols,
-  mode: IterFilter,
-  baselineIter: number | null,
-): Col<MetricRow>[] {
-  return [
-    {
-      key: 'iter',
-      label: 'iter',
-      align: 'num',
-      cell: (r) =>
-        r.kind === 'main' ? (
-          <span style={{ whiteSpace: 'nowrap' }}>
-            <b>
-              {r.main.iter}
-              {r.main.halted ? <span className="tc-pill tc-pill--note">halted</span> : null}
-            </b>
-            {!ea.readOnly && ea.course && !r.main.evalData ? (
-              <button
-                type="button"
-                className="tc-btn tc-btn--sm"
-                style={{ marginLeft: 6 }}
-                disabled={ea.busyIters.has(r.main.iter) || !ckptForIter(ea.ckpts, r.main.iter)}
-                title={
-                  ckptForIter(ea.ckpts, r.main.iter)
-                    ? `为 it${r.main.iter} 启动课程设计评估（evalA）`
-                    : `未发现 it${r.main.iter} 权重归档`
-                }
-                onClick={() => ea.onEvalA(r.main.iter)}
-              >
-                {ea.busyIters.has(r.main.iter) ? '…' : 'evalA'}
-              </button>
-            ) : null}
-          </span>
-        ) : (
-          <span className="tc-muted" style={{ whiteSpace: 'nowrap' }}>
-            eval it{r.iter}
-            {r.eval.dropped > 0 ? (
-              <span
-                className="tc-pill tc-pill--note"
-                title="评估窗口内未收官、被下轮权重分发清场的评估局数"
-              >
-                缺{r.eval.dropped}
-              </span>
-            ) : null}
-          </span>
-        ),
-    },
-    {
-      key: 'time',
-      label: '时间',
-      cell: (r) => (
-        <span className="tc-muted">{r.kind === 'main' ? r.main.time : r.eval.time}</span>
-      ),
-    },
-    {
-      key: 'winRate',
-      label: '胜率',
-      cell: (r) =>
-        r.kind === 'main' ? (
-          <Badge tone={winTone(r.main.winRate)}>{fmtPct(r.main.winRate)}</Badge>
-        ) : r.eval.winRate !== null ? (
-          <>
-            <Badge
-              tone={winTone(r.eval.winRate)}
-              title={`干净评估（greedy 固定语料）· 评估权重 = 第 ${r.iter} 轮 PPO 更新前 · ${r.eval.games} 局 ${r.eval.wins} 胜 · 全歼 ${r.eval.clears} · outcomes: ${
-                Object.entries(r.eval.outcomes)
-                  .map(([k, v]) => `${k}×${v}`)
-                  .join(' ') || '-'
-              } · 用时 ${r.eval.sec}s · wver ${r.eval.wver.slice(0, 12)}…`}
+/** 共享列：iter（eval 行旁无 evalA——eval-only 只有 eval 子行）。 */
+function iterCol(ea: EvalACols): Col<MetricRow> {
+  return {
+    key: 'iter',
+    label: 'iter',
+    align: 'num',
+    cell: (r) =>
+      r.kind === 'main' ? (
+        <span style={{ whiteSpace: 'nowrap' }}>
+          <b>
+            {r.main.iter}
+            {r.main.halted ? <span className="tc-pill tc-pill--note">halted</span> : null}
+          </b>
+          {!ea.readOnly && ea.course && !r.main.evalData ? (
+            <button
+              type="button"
+              className="tc-btn tc-btn--sm"
+              style={{ marginLeft: 6 }}
+              disabled={ea.busyIters.has(r.main.iter) || !ckptForIter(ea.ckpts, r.main.iter)}
+              title={
+                ckptForIter(ea.ckpts, r.main.iter)
+                  ? `为 it${r.main.iter} 启动课程设计评估（evalA）`
+                  : `未发现 it${r.main.iter} 权重归档`
+              }
+              onClick={() => ea.onEvalA(r.main.iter)}
             >
-              {fmtPct(r.eval.winRate)}
-            </Badge>{' '}
-            <span className="tc-muted">
-              {r.eval.wins}/{r.eval.games}
+              {ea.busyIters.has(r.main.iter) ? '…' : 'evalA'}
+            </button>
+          ) : null}
+        </span>
+      ) : (
+        <span className="tc-muted" style={{ whiteSpace: 'nowrap' }}>
+          eval it{r.iter}
+          {r.eval.dropped > 0 ? (
+            <span
+              className="tc-pill tc-pill--note"
+              title="评估窗口内未收官、被下轮权重分发清场的评估局数"
+            >
+              缺{r.eval.dropped}
             </span>
-          </>
-        ) : (
-          <span className="tc-muted">-</span>
-        ),
-    },
+          ) : null}
+        </span>
+      ),
+  }
+}
+
+/** 共享列：技能读数（主行走 rollout 实际值；eval 行走干净评估实际值）。 */
+function skillCols(): Col<MetricRow>[] {
+  return [
     {
       key: 'avgWinTicks',
       label: '胜局耗时',
       align: 'num',
+      thTitle: '胜局平均耗时（ticks）',
       cell: (r) =>
         r.kind === 'main' ? (
           r.main.actuals?.avgWinTicks != null ? (
@@ -243,6 +215,7 @@ function buildMetricCols(
       key: 'kills',
       label: '击杀',
       align: 'num',
+      thTitle: '每局平均击杀',
       cell: (r) =>
         r.kind === 'main' ? (
           r.main.actuals ? (
@@ -264,6 +237,7 @@ function buildMetricCols(
       key: 'dmgPerKill',
       label: '承伤/杀',
       align: 'num',
+      thTitle: '总承伤 / 总击杀',
       cell: (r) => {
         const v = r.kind === 'main' ? r.main.actuals?.dmgPerKill : r.eval.dmgPerKill
         if (v == null) return <span className="tc-muted">-</span>
@@ -274,6 +248,7 @@ function buildMetricCols(
       key: 'residualHp',
       label: '残血',
       align: 'num',
+      thTitle: '胜局平均剩余 hp（剩余命每命计满额）',
       cell: (r) => {
         const hp = r.kind === 'main' ? r.main.actuals?.avgResidualHp : r.eval.avgResidualHp
         if (hp == null) return <span className="tc-muted">-</span>
@@ -284,6 +259,7 @@ function buildMetricCols(
       key: 'loot',
       label: '道具',
       align: 'num',
+      thTitle: '每局平均道具',
       cell: (r) =>
         r.kind === 'main' ? (
           r.main.actuals ? (
@@ -301,6 +277,128 @@ function buildMetricCols(
           <span className="tc-muted">-</span>
         ),
     },
+  ]
+}
+
+function overfitCol(): Col<MetricRow> {
+  return {
+    key: 'overfit',
+    label: '过拟合',
+    align: 'num',
+    thTitle: OVERFIT_COL_TITLE,
+    sortValue: (r) => (r.kind === 'eval' ? (r.eval.overfitGapPp ?? null) : null),
+    cell: (r) => {
+      if (r.kind !== 'eval') return <span className="tc-muted">-</span>
+      const gap = r.eval.overfitGapPp
+      if (gap == null) {
+        return (
+          <span className="tc-muted" title={overfitCellTitle(r.eval)}>
+            -
+          </span>
+        )
+      }
+      return (
+        <Badge tone={overfitTone(gap)} title={overfitCellTitle(r.eval)}>
+          {fmtOverfitGap(gap)}
+        </Badge>
+      )
+    },
+  }
+}
+
+/**
+ * 列工厂。
+ * - eval-only：列结构与顺序与首页 Hero EvalTable 逐列一致
+ *   （iter / 时间 / eval 胜率 / b01 / b10 / p / delta / 过拟合 / 技能列 / 得分 / 用时 / wver）。
+ * - all / rollout：主行诊断列（rollout / PPO / KL…）；eval 子行同技能读数。
+ */
+function buildMetricCols(
+  ea: EvalACols,
+  mode: IterFilter,
+  baselineIter: number | null,
+): Col<MetricRow>[] {
+  const timeCol: Col<MetricRow> = {
+    key: 'time',
+    label: '时间',
+    cell: (r) => <span className="tc-muted">{r.kind === 'main' ? r.main.time : r.eval.time}</span>,
+  }
+  const winRateCol = (label: string): Col<MetricRow> => ({
+    key: 'winRate',
+    label,
+    cell: (r) =>
+      r.kind === 'main' ? (
+        <Badge tone={winTone(r.main.winRate)}>{fmtPct(r.main.winRate)}</Badge>
+      ) : r.eval.winRate !== null ? (
+        <>
+          <Badge
+            tone={winTone(r.eval.winRate)}
+            title={`干净评估（greedy 固定语料）· 评估权重 = 第 ${r.iter} 轮 PPO 更新前 · ${r.eval.games} 局 ${r.eval.wins} 胜 · 全歼 ${r.eval.clears} · outcomes: ${
+              Object.entries(r.eval.outcomes)
+                .map(([k, v]) => `${k}×${v}`)
+                .join(' ') || '-'
+            } · 用时 ${r.eval.sec}s · wver ${r.eval.wver.slice(0, 12)}…`}
+          >
+            {fmtPct(r.eval.winRate)}
+          </Badge>{' '}
+          <span className="tc-muted">
+            {r.eval.wins}/{r.eval.games}
+          </span>
+        </>
+      ) : (
+        <span className="tc-muted">-</span>
+      ),
+  })
+  const scoreCol: Col<MetricRow> = {
+    key: 'scoreMean',
+    label: '得分',
+    align: 'num',
+    cell: (r) =>
+      r.kind === 'main' ? (
+        r.main.scoreMean.toFixed(4)
+      ) : r.eval.scoreMean !== null ? (
+        r.eval.scoreMean.toFixed(4)
+      ) : (
+        <span className="tc-muted">-</span>
+      ),
+  }
+
+  if (mode === 'eval') {
+    return [
+      iterCol(ea),
+      timeCol,
+      winRateCol('eval 胜率'),
+      ...pairedCols(baselineIter),
+      overfitCol(),
+      ...skillCols(),
+      scoreCol,
+      {
+        key: 'evalSec',
+        label: '用时',
+        align: 'num',
+        cell: (r) =>
+          r.kind === 'eval' ? `${r.eval.sec.toFixed(0)}s` : <span className="tc-muted">-</span>,
+      },
+      {
+        key: 'wver',
+        label: 'wver',
+        cell: (r) =>
+          r.kind === 'eval' ? (
+            <span className="tc-mono tc-muted tc-small" title={r.eval.wver}>
+              {r.eval.wver.slice(0, 7)}
+            </span>
+          ) : (
+            <span className="tc-muted">-</span>
+          ),
+      },
+    ]
+  }
+
+  return [
+    iterCol(ea),
+    timeCol,
+    winRateCol('胜率'),
+    overfitCol(),
+    ...skillCols(),
     {
       key: 'rolloutSec',
       label: 'rollout',
@@ -325,21 +423,8 @@ function buildMetricCols(
           </span>
         ),
     },
-    {
-      key: 'scoreMean',
-      label: '得分',
-      align: 'num',
-      cell: (r) =>
-        r.kind === 'main' ? (
-          r.main.scoreMean.toFixed(4)
-        ) : r.eval.scoreMean !== null ? (
-          r.eval.scoreMean.toFixed(4)
-        ) : (
-          <span className="tc-muted">-</span>
-        ),
-    },
-    // eval-only 下 PPO 诊断四列恒为—，换成配对裁判列；其余模式保持原样。
-    ...(mode === 'eval' ? pairedCols(baselineIter) : klEntropyCols()),
+    scoreCol,
+    ...klEntropyCols(),
   ]
 }
 

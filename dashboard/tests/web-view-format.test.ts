@@ -9,7 +9,16 @@
  */
 
 import { describe, expect, it } from 'bun:test'
-import { fmtFullTs, fmtPct, fmtTs, stripIsoPrefix } from '../src/web/view'
+import {
+  fmtFullTs,
+  fmtOverfitGap,
+  fmtPct,
+  fmtTs,
+  OVERFIT_COL_TITLE,
+  overfitCellTitle,
+  overfitTone,
+  stripIsoPrefix,
+} from '../src/web/view'
 
 // ────────────────────────── 纯函数：时间 / 文本 ──────────────────────────
 describe('view 纯函数：时间与文本', () => {
@@ -31,5 +40,25 @@ describe('view 纯函数：时间与文本', () => {
     expect(stripIsoPrefix('2026-09-07T02:03:04Z s5: boom')).toBe('s5: boom')
     expect(stripIsoPrefix('2026-09-07T02:03:04 s5: boom')).toBe('s5: boom')
     expect(stripIsoPrefix('plain error')).toBe('plain error')
+  })
+
+  it('过拟合列：大白话表头 + tone 档位 + gap 展示 + cell hover', () => {
+    expect(OVERFIT_COL_TITLE).toContain('锚点')
+    expect(OVERFIT_COL_TITLE).toContain('轮转')
+    expect(OVERFIT_COL_TITLE).toContain('5pp')
+    expect(overfitTone(2.5)).toBe('gray')
+    expect(overfitTone(-8)).toBe('gray')
+    expect(overfitTone(5)).toBe('y')
+    expect(overfitTone(8)).toBe('r')
+    expect(fmtOverfitGap(-8)).toBe('-8.0pp')
+    expect(fmtOverfitGap(2.5)).toBe('+2.5pp')
+    expect(fmtOverfitGap(0)).toBe('0.0pp')
+    // it0 基线 / 未开双轨：无轮转 → gap null
+    expect(overfitCellTitle({ anchorWr: 0.65, rotorWr: null, overfitGapPp: null })).toContain(
+      '无轮转',
+    )
+    expect(overfitCellTitle({ anchorWr: 0.655, rotorWr: 0.735, overfitGapPp: -8 })).toContain(
+      '锚点',
+    )
   })
 })

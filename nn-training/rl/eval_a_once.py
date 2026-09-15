@@ -1,7 +1,10 @@
 """eval_a_once — 手动触发课程设计评估（A 层），写 eval_log.jsonl。
 
-与训练主循环每 eval_every 轮跑的干净评估同口径：
-  固定语料 (eval_stages × EVAL_SEEDS[:n]) · 贪心 export-eval-game · 逐局 + summary 落账。
+与训练主循环每 eval_every 轮跑的干净评估**同口径**（含双轨）：
+  固定语料 · 贪心 export-eval-game · 逐局 + summary 落账。
+  `should_dual_track(n_seeds)` 为真时种子 = `dual_track_seeds(it)`（锚点 50 +
+  当轮轮转 50，与 in-loop A-eval 逐字节同语料），summary 带 anchor_wr/rotor_wr/
+  overfit_gap_pp；否则退回 `EVAL_SEEDS[:n]` 前缀切片（it0 基线 / 大 n 正式前缀）。
 
 用法（console evalA 按钮 / 本机）：
   python nn-training/rl/eval_a_once.py --course c4-dodge \
@@ -29,12 +32,16 @@ def _write_summary_for_wver(eval_jsonl: Path, key16: str, it: int, t0: float) ->
 
     用于「同权重已在别轮评完」：控制台按 iter 挂 evalData，缺本 iter 的 summary
     则指标表永远显示空。行归属仍是原 iter，summary 只是本 iter 的读数入口。
+    双轨：按 seed 落段拆出 anchor_wr/rotor_wr/overfit_gap_pp（与 settle 同口径）。
     """
+    from rl.eval_local import is_anchor_seed, is_rotor_seed, overfit_gap_pp
+
     wins = 0
     clears = 0
     n = 0
     outcomes: dict[str, int] = {}
     nodes: dict[str, int] = {}
+    a_wins = a_n = r_wins = r_n = 0
     try:
         with open(eval_jsonl, encoding="utf-8") as f:
             for line in f:
@@ -46,17 +53,32 @@ def _write_summary_for_wver(eval_jsonl: Path, key16: str, it: int, t0: float) ->
                     continue
                 if r.get("event") != "eval" or r.get("wver") != key16:
                     continue
+                if "source" in r:
+                    continue
                 n += 1
-                wins += 1 if r.get("win") else 0
+                w = 1 if r.get("win") else 0
+                wins += w
                 clears += 1 if r.get("cleared") else 0
                 oc = str(r.get("outcome") or "?")
                 outcomes[oc] = outcomes.get(oc, 0) + 1
                 nd = str(r.get("node") or "?")
                 nodes[nd] = nodes.get(nd, 0) + 1
+                try:
+                    sd = int(r.get("seed"))
+                except (TypeError, ValueError):
+                    continue
+                if is_anchor_seed(sd):
+                    a_n += 1
+                    a_wins += w
+                elif is_rotor_seed(sd):
+                    r_n += 1
+                    r_wins += w
     except OSError:
         return 0
     if n == 0:
         return 0
+    a_wr = (a_wins / a_n) if a_n else None
+    r_wr = (r_wins / r_n) if r_n else None
     summary = {
         "event": "eval_summary",
         "iter": it,
@@ -78,6 +100,9 @@ def _write_summary_for_wver(eval_jsonl: Path, key16: str, it: int, t0: float) ->
         "pickup_mean": None,
         "timeout_frac": None,
         "course_fp": "",
+        "anchor_wr": round(a_wr, 4) if a_wr is not None else None,
+        "rotor_wr": round(r_wr, 4) if r_wr is not None else None,
+        "overfit_gap_pp": overfit_gap_pp(a_wr, r_wr),
         "reused_wver": True,
     }
     with open(eval_jsonl, "a", encoding="utf-8") as jf:
@@ -97,7 +122,13 @@ def main() -> int:
     import dist_common
     from platform_utils import POPEN_NO_WINDOW  # noqa: F401  # win32 子进程窗口
     from rl.config import apply_course, load_course, stage_json_for_args
-    from rl.eval_local import EVAL_SEEDS, eval_done_keys, run_local_eval_game, settle_eval_summary
+    from rl.eval_local import (
+        a_eval_seed_list,
+        eval_done_keys,
+        run_local_eval_game,
+        settle_eval_summary,
+        should_dual_track,
+    )
     from rl.log import log
 
     course_path = REPO / "nn-training" / "curricula" / f"{args.course}.jsonc"
@@ -139,7 +170,10 @@ def main() -> int:
         stages = parse_range(spec)
     else:
         stages = list(range(int(getattr(ns, "total_stages", 35))))
-    pairs = [(s, sd) for s in stages for sd in EVAL_SEEDS[:n_seeds]]
+    # 与 in-loop A-eval 同口径（2026-09-15 用户）：双轨课 n_seeds==50 → 锚点+当轮轮转。
+    dual = should_dual_track(n_seeds, baseline=False)
+    seed_list = a_eval_seed_list(args.iter, n_seeds, baseline=False)
+    pairs = [(s, sd) for s in stages for sd in seed_list]
     if not pairs:
         log("[evalA] 课程未配置 eval 语料（eval_stages/eval_games_per_stage）")
         return 2
@@ -147,8 +181,12 @@ def main() -> int:
         pairs = pairs[: args.max_games]
 
     todo = [p for p in pairs if p not in eval_done_keys(eval_jsonl, key16)]
-    log(f"[evalA] it{args.iter} course={course.name} wver={key16[:12]}… "
-        f"pairs={len(pairs)} todo={len(todo)} → {eval_jsonl}")
+    log(
+        f"[evalA] it{args.iter} course={course.name} wver={key16[:12]}… "
+        f"pairs={len(pairs)} todo={len(todo)}"
+        + (" [dual-track anchor+rotor]" if dual else "")
+        + f" → {eval_jsonl}"
+    )
     if not todo:
         # 同 wver 已在别轮评完（归档 itN 权重常与 itN+1 的 A 层评估同指纹）。
         # 控制台按 iter 挂 evalData——不为本 iter 写 summary 则表上永远是空。
