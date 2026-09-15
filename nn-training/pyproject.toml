@@ -187,7 +187,9 @@ indent-style = "space"
 # mypy - static type checking
 # ---------------------------------------------------------------------------
 [tool.mypy]
-python_version = "3.10"
+# 2026-09-15：随解释器升级 3.10 → 3.12。3.12 的 numpy wheel 用了 PEP 695 `type` 语法
+# （3.12+），钉 3.10 会让 mypy 对 site-packages 报假红。
+python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false

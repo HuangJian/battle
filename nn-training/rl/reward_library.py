@@ -37,7 +37,7 @@ import json
 import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -573,7 +573,9 @@ class CompiledFormula:
             env.update(outcome_virtuals(outcome))
         with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
             out = self._eval(self._parsed.tree.body, env)
-        out = np.asarray(out, dtype=np.float64)
+        out = cast(np.ndarray, np.asarray(out, dtype=np.float64))
+        # numpy 2.x 桩对 Any 入参返回 Any（_eval 是 Any）；运行时 asarray 必为 ndarray，
+        # cast 是类型层承诺，无运行时行为。
         if out.shape != (m.shape[0],):
             out = np.broadcast_to(out, (m.shape[0],)).astype(np.float64)
         if not np.all(np.isfinite(out)):
