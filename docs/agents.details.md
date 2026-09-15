@@ -279,20 +279,25 @@ bun run freeze:l2    # archived-candidate reachability audit over the same corpu
 
 `bun run check` is the definition of "green" — run it before declaring a task done.
 
-### 5.3 Scoped vs full test runs
-`bun run test` invokes `tools/test-silent.ts`, a token-saving runner: it finds changed/untracked
-files via git, maps each to relevant `tests/*.test.ts` files by basename (incl. `base`/`base-*`/
-`*-base` patterns), runs **only** those, and prints **only failing-test logs** (a passing scoped run
-prints one summary line; `--strict` skips entirely when nothing maps). The pre-commit hook uses the
-same scoped runner and falls back to the full suite when a change maps to no test file — so it never
-silently skips. `tools/runner.ts` holds the shared `spawnCapture`/`gitChangedFiles`/printing helpers.
+### 5.3 Full vs skipped test runs
+`bun run test` invokes `tools/test-silent.ts`, a token-saving runner: it finds changed/untracked files
+via git, then **runs the full (non-heavy) suite** and prints **only failing-test logs** (a passing run
+prints one summary line). It skips entirely only when the change set is provably irrelevant —
+docs/notebook/course-config only, or all-dashboard. `tools/runner.ts` holds the shared
+`spawnCapture`/`gitChangedFiles`/printing helpers.
+
+**Basename-based narrowing was removed 2026-09-15** (DECISIONS §2026-09-15-gate-trigger-scope). The old
+heuristic ran only the tests whose basename matched a changed file, and it **under-sampled**: editing
+`src/config/stages.ts` ran 1 test while 50 files import it; `src/config/difficulty.ts` ran 1 of 39;
+`src/config/combat.ts` 3 of 13. A non-heavy full run costs ~6s (tools-only subset ~5s), so narrowing
+bought ~1s in exchange for a silent blind spot. **Do not re-add it** — make the suite faster instead.
 
 **Heavy gate/integration tests are excluded by default:** the fast runner skips files that run
 hundreds–thousands of full-game simulations (`godai-score-gate` — the worker-pool score gate, and
 `calibration`). Exercise them with `bun run test --heavy` or the full suite. Keep the `HEAVY_TESTS`
 list in `tools/test-silent.ts` in sync with measured wall-time (add any file whose standalone run
-exceeds a few seconds). Because these gates are standalone files (not basename-matched to source
-changes), they are essentially only exercised by the full suite — **if a God-AI change is landing,
+exceeds a few seconds). Because these gates are standalone files, they are only exercised by the full
+suite or `--heavy` — **if a God-AI change is landing,
 run `bun test --parallel --timeout=50000` before committing** to validate the floors.
 
 ### 5.4 `bun test` flags are mandatory

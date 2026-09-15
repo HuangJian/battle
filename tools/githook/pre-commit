@@ -28,14 +28,21 @@
 #                   **只改 dashboard 时不会连带跑根 bun test / 根 tsc / python /
 #                   freeze**（外部套件与 dashboard 无归因交集）
 #   bun test        仅当 staged 含根项目 TS/JS（排除 dashboard/）时运行；
-#                   红 → 拦 + 归因指引（SKIP_BUN_TEST=1 定向跳过重试）
+#                   跑的是**全量**（非 heavy）——test-silent 已删除 basename 窄跑
+#                   （它欠采样：改 stages.ts 只跑 1 个而 50 个依赖它；
+#                   DECISIONS §2026-09-15-gate-trigger-scope）；纯文档/课程配置与
+#                   只改 dashboard 仍直接跳过。红 → 拦 + 归因指引（SKIP_BUN_TEST=1 定向跳过重试）
 #   oxfmt           逐 staged 文件格式化 + re-add；**另有未暂存改动（MM）的
 #                   文件跳过** —— 格式化工作树内容会把未暂存编辑折进提交
 #                   （2026-09-06 v1 事故教训）。永不阻断。
 #   oxlint          staged 文件，红即拦（不变）
 #   freeze          仅 staged 含 **根项目** TS/游戏代码（*.ts 等 / src/，
 #                   排除 dashboard/）时运行；dashboard TS 与纯 md/nn-training
-#                   不可能改变 det 签名
+#                   不可能改变 det 签名。
+#                   2026-09-15 再收窄：`tests/**` 与 `src/assets/**` 也豁免（各
+#                   省 ~100s）——签名闭包只含 src/** 与 tools/lib/**，不可能被测试
+#                   文件或精灵图移动。该理由由 tests/freeze-scope.test.ts 钉住（算
+#                   传递闭包并断言与这两个目录零交集，且断非空防假通过）。
 #
 #   逃生口：NN_GATE_SKIP=<tools>（python 单工具，已有）、NN_GATE_SKIP_E2E=1
 #   （只退 python 门禁里的 e2e 集成层，单测层照跑——e2e 有竞速/负载敏感用例，
@@ -220,7 +227,12 @@ echo "  staged ${STAGED_N} 文件（门禁拦截归因集）；未暂存 ${DIRTY
 # 交集，不应触发（2026-09-15 用户口径）。
 ROOT_TS_STAGED=$(grep -E '\.(ts|js|mjs|cjs|tsx|jsx)$' "$STAGED_LIST" | grep -v '^dashboard/' || true)
 # freeze 敏感面：根项目 TS/JS + src/（游戏/det 路径），同样排除 dashboard/
-FREEZE_STAGED=$(grep -E '\.(ts|js|mjs|cjs|tsx|jsx)$|^src/' "$STAGED_LIST" | grep -v '^dashboard/' || true)
+# 豁免 tests/** 与 src/assets/**（2026-09-15）：签名 = tools/probe-det-baseline.sh 跑
+# tools/diag/per-seed-diff.ts dump 出的文本哈希，其 import 传递闭包只含 src/**（游戏/
+# 配置）与 tools/lib/**——测试文件与精灵图改不动它，却各要付 ~100s。
+# 安全性不靠注释：tests/freeze-scope.test.ts 算闭包并断言与这两个目录零交集。
+FREEZE_STAGED=$(grep -E '\.(ts|js|mjs|cjs|tsx|jsx)$|^src/' "$STAGED_LIST" \
+  | grep -v '^dashboard/' | grep -vE '^(tests/|src/assets/)' || true)
 
 # ---------- nn-training python 门禁（ruff staged 范围 + mypy/pytest 全量归因） ----
 # 触发条件收窄到 **staged 的 nn-training python 文件**（2026-09-14）：原判定是

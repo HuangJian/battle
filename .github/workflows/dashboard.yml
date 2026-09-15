@@ -1,0 +1,81 @@
+# CI for dashboard: typecheck + unit tests + UI bundle (gzip budget) gate.
+#
+# 为什么需要它（2026-09-15）：`dashboard/` 是**独立 bun 项目**（自带
+# package.json / bun.lock / node_modules，DECISIONS §2026-09-14-goalnn-dashboard-project），
+# 不在根 tsconfig / 根套件之内。它只读消费仓根的若干模块，而那些模块改动时**三条防线
+# 同时失效**：
+#   · pre-commit 的 dashboard 门禁只在 staged 含 `dashboard/**` 时跑；
+#   · 根套件的 SKIP_RE 明确排除 `dashboard/`（179 个根测试文件里没有一个 import 它）；
+#   · CI 里原本**只有** nn-training.yml —— 没有 dashboard 的 workflow。
+# ⇒ 改 `src/config/stages.ts` / `tools/agent/codehash-files.ts` 打断 dashboard 契约，
+# 会静默落地，直到下次有人碰 dashboard 才炸。本 workflow 就是补这条边。
+#
+# 触发 = `dashboard/**` ∪ 它实际 import 的仓根模块 ∪ 本文件自身（自触发，改触发清单
+# 也会跑一次验证）。这份清单必须与 dashboard 的真实 import 同步 —— 由
+# `dashboard/tests/ci-scope.test.ts` 自动核对（新增 import 没加进 paths ⇒ 该测试红，
+# 而它正好在 dashboard 门禁里跑）。**允许**清单比 import 宽（多触发是浪费，不是漏洞）。
+#
+# 只跑 ubuntu：这三步（tsc / bun test / bundle 预算）与平台无关，而 Windows 侧的
+# dashboard 门禁由开发者本机的 pre-commit 承担（staged 含 dashboard/ 时自动跑）。
+name: dashboard
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'dashboard/**'
+      - '.github/workflows/dashboard.yml'
+      # dashboard 只读消费的仓根模块（10 个，见 dashboard/tests/ci-scope.test.ts）
+      - 'src/config/combat.ts'
+      - 'src/config/difficulty.ts'
+      - 'src/config/stages.ts'
+      - 'src/config/types.ts'
+      - 'src/nn/arena-ladder.ts'
+      - 'src/nn/config-stage.ts'
+      - 'src/types.ts'
+      - 'tools/agent/codehash-files.ts'
+      - 'tools/eval/mcnemar.ts'
+      - 'tools/sim/pack-container.ts'
+  pull_request:
+    paths:
+      - 'dashboard/**'
+      - '.github/workflows/dashboard.yml'
+      - 'src/config/combat.ts'
+      - 'src/config/difficulty.ts'
+      - 'src/config/stages.ts'
+      - 'src/config/types.ts'
+      - 'src/nn/arena-ladder.ts'
+      - 'src/nn/config-stage.ts'
+      - 'src/types.ts'
+      - 'tools/agent/codehash-files.ts'
+      - 'tools/eval/mcnemar.ts'
+      - 'tools/sim/pack-container.ts'
+
+concurrency:
+  group: dashboard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install deps (dashboard 自己的 node_modules；不入根)
+        # bun.lock 已入库（dashboard 依赖自包含）⇒ --frozen-lockfile 保证可复现。
+        run: bun install --frozen-lockfile
+
+      - name: typecheck
+        run: bun run typecheck
+
+      - name: unit tests
+        run: bun run test
+
+      - name: UI bundles（gzip 预算 + 客户端禁词门禁）
+        run: bun run build:ui

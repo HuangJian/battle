@@ -1850,3 +1850,29 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 - **违反后果**：按 ticks 口径规划采集量 ⇒ 下一腿照抄 10× 误差、配额缺口 90%；把判负外推成
   「信用比有害」⇒ 错误回滚奖励语义、丢掉「执行瓶颈」这一真信号；未立案开 wChip ⇒
   N3/R5 被静默架空，日后无从追溯何时因何破了哪条规则。
+
+## §2026-09-15-gate-trigger-scope（2026-09-15，用户提问「tools 改动有必要跑 src 的测试吗 / src 改动能不触发 dashboard 吗」⇒ 三处触发面重排）
+
+- **背景（全部实测）**：
+  1. 根 `bun run test`（`tools/test-silent.ts`）按 basename 把改动映射到同名测试，**命中就只跑那几个**：
+     `src/config/stages.ts` → 1 个（而 **50** 个测试直接 import 它）、`difficulty.ts` → 1（39 个）、
+     `combat.ts` → 3（13 个）⇒ 改配置类文件能绿着过去而 49 个依赖测试一个没跑；
+     **映射为空才 fallback 全量** ⇒ 反倒比命中更安全。非 heavy 全量实测 **6s**、tools 子集 5s。
+  2. freeze 触发按扩展名判（`\.(ts|js|mjs|cjs|tsx|jsx)$|^src/`）⇒ `tests/**` 与 `src/assets/**` 也各付 ~100s。
+  3. `dashboard/` 只读消费仓根 10 个模块，却**三条防线同时失效**：hook 只在 staged 含 `dashboard/**` 时
+     跑它、根套件 `SKIP_RE` 排除它、CI 里没有它的 workflow ⇒ src/tools 改断契约会静默落地。
+- **备选与否决**：保留 basename 窄跑并「修正确性」（补 import 图 / 传递闭包）—— 否，为省 1s 引入一个
+  失败模式是**漏跑（假绿）**的启发式不划算；把 `tools/**` 一律豁免 freeze —— 否，签名由
+  `tools/diag/per-seed-diff.ts` 生产，探针口径改动**真会**移动签名；把 dashboard 门禁也挂进 hook
+  （按消费清单触发）—— 否，那会把「每人都必付」的路径变成依赖清单维护点，CI 才是它该有的节拍。
+- **决定**：① `test-silent` 删除 basename 映射与 `--strict`：**代码改动一律跑全量**（仍保留 heavy 排除、
+  静默输出、失败单跑取详情，以及「跳过无关改动」= 纯文档/课程配置/dashboard-only）。② `FREEZE_STAGED`
+  豁免 `^tests/` 与 `^src/assets/`，理由由 `tests/freeze-scope.test.ts` 钉住（算 `per-seed-diff.ts` 的
+  import 传递闭包，断言与这两目录零交集、且非空防假通过）。③ 新增 CI `.github/workflows/dashboard.yml`：
+  触发 = `dashboard/**` ∪ 它消费的 10 个仓根模块，清单不得落后于真实 import
+  （`dashboard/tests/ci-scope.test.ts` 自动核对，拼错的路径也拦）。
+- **三问门（通过）**：① 被否决备选见上；② 未来再犯——「只跑受影响的测试」是每个 agent 都会想做的优化
+  （本仓历史上正是这么写的），而「tools 改动要不要跑 src 测试」的直觉也会反复出现；
+  ③ 无法就近表达——跨「根 runner 语义 / hook 触发 / CI 范围」三个面，代码注释各说一半。
+- **违反后果**：恢复 basename 窄跑 ⇒ 改配置类文件只跑 1 个测试即绿灯（静默漏测）；放宽 freeze 到
+  `tools/**` ⇒ 改探针即可绕签名门禁；dashboard CI 触发清单不跟 import ⇒ 契约破坏重新回到静默落地。

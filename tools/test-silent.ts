@@ -1,20 +1,30 @@
 /**
  * Silent test runner for Battle City Web.
  *
- * Purpose: run only the tests related to local changes, and emit *only* the
+ * Purpose: run the tests that local changes can affect, and emit *only* the
  * failing-test logs (so an LLM/CI step does not burn tokens on the full,
  * passing output). Passing runs produce a one-line summary; failing runs
  * re-run each failing test individually to capture just its error detail.
  *
  * Copied from another project; adapted to this single-package repo:
  *  - relies on `bun test` (the project's test runner) instead of vitest
- *  - discovers the changed file set from git and maps it to test files
+ *  - discovers the changed file set from git; **代码改动一律跑全套**（见下）
  *  - keeps the bun-compatible failure parsers (file header, `(fail)` lines,
  *    and the `N pass` / `M fail` summary)
  *
+ * **为什么不再「按 basename 窄跑」（2026-09-15）**：旧版把改动文件按 basename 映射到
+ * 同名测试、命中就只跑那几个。命中方向是**欠采样**，实测：
+ *   src/config/stages.ts     → 命中 1 个测试，但 50 个测试直接 import 它
+ *   src/config/difficulty.ts → 命中 1 个测试，但 39 个
+ *   src/config/combat.ts     → 命中 3 个，但 13 个
+ * 即：改 `stages.ts` 只跑 `stages.test.ts` 就能让门禁变绿，而另外 49 个依赖它的测试
+ * 一个没跑；反倒是「映射为空 → fallback 全量」更安全。代价也几乎不存在：非 heavy
+ * 全量实测 ~6s，只跑「import tools 的 39 个文件」~5s —— 为 1s 留一个静默漏测面是坏
+ * 交易（AGENTS §13 simple beats clever）。仍然保留的省法是**跳过无关改动**（纯文档/
+ * 课程配置、只改 dashboard），那不是窄跑。
+ *
  * Usage:
- *   bun tools/test-silent.ts                 # auto-scope to local changes
- *   bun tools/test-silent.ts --strict        # exit clean (no tests) if nothing maps
+ *   bun tools/test-silent.ts                 # 代码改动 → 全量（非 heavy）；无关改动 → 跳过
  *   bun tools/test-silent.ts --heavy         # also run heavy gate/integration sims
  *   bun tools/test-silent.ts -- fileA.test.ts fileB.test.ts   # explicit files
  *
@@ -151,43 +161,6 @@ function walk(dir: string, out: string[]): void {
   }
 }
 
-/**
- * Map changed files to the test files that should run.
- *  - a changed test file is included directly
- *  - a changed source file is matched to tests by basename, including common
- *    suffixes/prefixes this repo uses (e.g. World.ts → world-snapshot.test.ts)
- */
-function mapToTests(changed: string[], allTests: string[]): string[] {
-  const byBase = new Map<string, string[]>()
-  for (const t of allTests) {
-    const base = baseName(t)
-    if (!byBase.has(base)) byBase.set(base, [])
-    byBase.get(base)!.push(t)
-  }
-
-  const out = new Set<string>()
-  for (const f of changed) {
-    if (TEST_RE.test(f)) {
-      out.add(f)
-      continue
-    }
-    const srcBase = baseName(f)
-    if (!srcBase) continue
-    for (const [testBase, files] of byBase) {
-      if (
-        testBase === srcBase ||
-        testBase.startsWith(srcBase + '-') ||
-        testBase.startsWith(srcBase + '.') ||
-        testBase.endsWith('-' + srcBase) ||
-        testBase.endsWith('.' + srcBase)
-      ) {
-        for (const tf of files) out.add(tf)
-      }
-    }
-  }
-  return [...out]
-}
-
 function baseName(path: string): string {
   const noExt = path.replace(/\.(ts|tsx|js|jsx|mjs|cjs)$/, '')
   const last = noExt.split(/[\\/]/).pop() ?? noExt
@@ -242,8 +215,6 @@ export interface SilentTestOptions {
   label?: string
   /** Explicit test files to run; overrides git-based discovery. */
   files?: string[]
-  /** If true, run nothing (and report clean) when no tests map to changes. */
-  strict?: boolean
   /** If true, include heavy gate/integration sim tests that are skipped by default. */
   heavy?: boolean
   timeoutMs?: number
@@ -269,7 +240,6 @@ export async function runSilentTest(
   } else {
     const allTests = allTestFiles(cwd)
     const changed = gitChangedFiles(cwd)
-    const mapped = mapToTests(changed, allTests)
     // §1.4 guard: a HEAVY_TESTS entry that matches no existing test file means
     // the exclusion list went stale (heavy test renamed/deleted) — the heavy
     // file would silently start running in every fast scoped pass.
@@ -278,16 +248,7 @@ export async function runSilentTest(
     if (staleHeavy.length > 0) {
       advisory += ` ⚠ HEAVY_TESTS stale (no matching test file): ${staleHeavy.join(', ')}`
     }
-    if (mapped.length) {
-      files = mapped
-      mode = `changed (${changed.length} changed → ${mapped.length} test file(s))`
-    } else if (opts.strict) {
-      return {
-        ok: true,
-        summary: 'no relevant tests',
-        detail: `${label}: no tests map to local changes (strict mode)\n`,
-      }
-    } else if (isDashboardOnly(changed) && !process.env.BATTLE_TEST_FORCE_ALL) {
+    if (isDashboardOnly(changed) && !process.env.BATTLE_TEST_FORCE_ALL) {
       // dashboard 专属改动：根套件与它无关（见 SKIP_RE 注释），而且**绝不能**走
       // fallback 全量 —— 一个只改 dashboard 的提交会白烧一整轮根套件，撞上那些
       // spawn 真实 CLI 的慢测试。dashboard 的门禁由它自己承担（pre-commit 已挂）。
@@ -315,10 +276,9 @@ export async function runSilentTest(
           `  Set BATTLE_TEST_FORCE_ALL=1 to run the full suite anyway.\n`,
       }
     } else {
+      // 代码改动 → 全量（不再按 basename 窄跑：命中的方向是欠采样，理由见文件头）。
       files = allTests
-      mode = changed.length
-        ? `⚠ fallback:all (${changed.length} changed file(s) mapped to no tests — full suite)`
-        : 'all (clean tree)'
+      mode = changed.length ? `all (${changed.length} changed → full)` : 'all (clean tree)'
     }
   }
 
@@ -380,21 +340,19 @@ export async function runSilentTest(
   return { ok: false, summary, detail }
 }
 
-// Direct CLI invocation: `bun tools/test-silent.ts [--strict] [-- file ...]`.
+// Direct CLI invocation: `bun tools/test-silent.ts [--heavy] [-- file ...]`.
 const isMain: boolean = (import.meta as { main?: boolean }).main === true
 if (isMain) {
   const argv = process.argv.slice(2)
-  const strict = argv.includes('--strict')
   const heavy = argv.includes('--heavy')
   // Collect non-flag positional args as explicit files. `--` is only a separator;
   // `bun run` strips it when invoked as `bun run test -- file`, so we must not
   // rely on it being present.
-  const explicit = argv.filter((a) => a !== '--' && a !== '--strict' && a !== '--heavy')
+  const explicit = argv.filter((a) => a !== '--' && a !== '--heavy')
   const result = await runSilentTest({
     cwd: CWD,
     label: 'local tests',
     files: explicit,
-    strict,
     heavy,
   })
   if (result.ok) {
