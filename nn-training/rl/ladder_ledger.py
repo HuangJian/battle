@@ -33,6 +33,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from platform_utils import force_utf8_stdio
+
 NN_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_LEDGER = NN_ROOT / "ladder" / "LEDGER.jsonc"
 
@@ -87,6 +89,12 @@ class LadderLedger:
 
 
 def main() -> None:
+    # CLI 入口钉 UTF-8（2026-09-15）：本模块的 SystemExit/日志含中文（如 tier 边界
+    # 拒绝语），原先漏了这行 ⇒ 无 PYTHONIOENCODING 的环境下按 zh-CN 代码页 cp936
+    # 输出，父进程 tests/subproc_util.run_utf8 严格按 UTF-8 解码即读线程死亡、
+    # stdout/stderr 变 None（test_ladder_ledger 直接 TypeError）。契约见
+    # tests/subproc_util.py docstring：**每个 CLI 入口**都要调，不只是被捕获的那些。
+    force_utf8_stdio()
     ap = argparse.ArgumentParser(description="I5 阶梯台账 CLI（runbook 消费）")
     ap.add_argument("cmd", choices=("show", "hypothesis", "escalate", "graduate", "disk"))
     ap.add_argument("--level", required=True)

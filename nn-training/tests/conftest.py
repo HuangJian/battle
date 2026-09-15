@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ctypes
+import os
 import sys
 import types
 from collections.abc import Iterator
@@ -12,6 +14,18 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+# ---- 幽灵 KeyboardInterrupt 免疫（2026-09-15）----
+# 本机（zh-CN Windows）pytest 树会间歇收到**无人按键**的 CTRL_C_EVENT 控制台组广播：
+# threading 等待处 KeyboardInterrupt、python 门禁 ~7s 即败且卡在 ~33-36% 段（2026-09-14
+# 与 2026-09-15（升级 3.12 后）各复现，Git Bash / VS Code / agent 沙箱都中）。来源是
+# Windows 控制台进程组语义（某子进程/工具对组广播 Ctrl+C），不是用户按键。
+# 对策：SetConsoleCtrlHandler(NULL, TRUE) 让本进程忽略控制台 Ctrl+C/CTRL_BREAK 广播
+# （调用方进程组内任意来源），幽灵再无法打断门禁。
+# 代价：本 pytest 进程不再响应 Ctrl+C（硬停需 taskkill /T）；门禁很短（~25s），可接受。
+# 逃生口：NN_NO_IGNORE_CTRL_C=1 恢复响应（调试长套件时的例外）。
+if sys.platform == "win32" and os.environ.get("NN_NO_IGNORE_CTRL_C") != "1":
+    ctypes.windll.kernel32.SetConsoleCtrlHandler(None, True)
 
 
 def bp_args(

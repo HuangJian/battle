@@ -419,6 +419,14 @@ When this file and your instincts disagree, this file wins. When this file and t
   `[Console]::OutputEncoding` and `$OutputEncoding` to UTF-8 first, or (better)
   route text through the python channel of 17.1 with explicit
   `encoding='utf-8'`. Never rely on a user profile to fix this.
+  **User env (2026-09-15)**: `PYTHONIOENCODING=UTF-8` is set at the **user level**
+  (`HKCU\Environment`; `setx`-equivalent) — NEW python processes inherit it, so
+  stdout/stderr written to files/logs are UTF-8 by default; do NOT add per-file
+  `PYTHONIOENCODING`/reconfigure hacks in scripts. Caveats: only affects
+  processes started AFTER the env change (restart stale terminals/agents);
+  console *display* is still gb2312-codepage-bound (redirect to a file for clean
+  UTF-8); the entry-point reconfigure in `platform_utils.py` is the repo's
+  per-subprocess pin and coexists (overrides env).
 
 - **17.7 PowerShell invocations use `pwsh` only — never bare `powershell`**
   (2026-09-04, DECISIONS §323): repo scripts, run-books, Makefiles, and examples
