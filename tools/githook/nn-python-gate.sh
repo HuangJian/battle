@@ -6,21 +6,38 @@
 # pre-commit hook（tools/githook/pre-commit）复用同一入口——提交前与日常跑
 # 的是同一套门禁，不会出现"hook 严、日常松"的漂移。
 #
-# 并行架构（v3.15 2026-09-03）：
-#   ruff(~1s) / mypy(~4s 热缓存) / pytest xdist -n 4 全量(~17s) 三路并行，总 ~17s。
-#   全量含 heavy/integration（xdist worker 各自 FakeServer 实例隔离，无竞态）。
-#   换用 pytest-xdist（colorama 已修复 + conftest tmp_path 覆盖消除沙箱问题）。
+# 并行架构（v3.15 2026-09-03；v3.16 2026-09-15 起 pytest 目标含 e2e/）：
+#   ruff(~1s) / mypy(~4s 热缓存) / pytest xdist -n 4 全量 三路并行。
+#   全量 = tests/（单测层）+ e2e/（集成层）。**两层同一次 xdist 调用**：实测（16 核）
+#   tests/ 22s → tests/+e2e/ 27s，只 +5s（另外单跑一次要重复付 torch import 与
+#   worker 启动成本）。e2e/ 自 60e5f69 起 hermetic（FakeServer + tmp 落盘，不需要
+#   bun / 真节点 / weights fixture），因此可以进门禁。
+#   层 = **路径**（tests/ = 单测层、e2e/ = 集成层），不再用 `-m "not heavy"`：
+#   tests/ 里 heavy 标记实测 0 个（该过滤早已空转），全仓唯一模块级 heavy 标记在 e2e。
+#   xdist worker 各自 FakeServer 实例隔离，无竞态。
 #   4 worker 为本机最优点（16 核，但 torch import 开销 + 单函数 test_integration
-#   13.9s 不可再分，更多 worker 反而更慢）。
-# 单测墙钟护栏（2026-09-15）：pytest 加 `--timeout=${NN_PYTEST_TIMEOUT_S:-50000}`
-#  ——与 task.py check 同款 50s/用例（本仓最慢单测实测 22s，5 万 ms 有 2 倍余量）。
+#   13.9s 不可再分，更多 worker 反而更慢）；NN_GATE_NPROC 可覆盖。
+#   注：e2e 里有竞速 / 真 HTTP / 线程用例，对负载天生比单测敏感。已知的那一条
+#   （docs/nn.progress.md §313：test_bc_epoch_e2e 满编 -n 4 偶发红）已 2026-09-15
+#   修根因：fake_worker 只等 bc_epoch 入账就回 result，漏等了随后要断言的 bc_eval
+#   ⇒ 满负荷时断言 [2,4] 偶发拿到 [2]。修后本机连跑 8/8 绿。
+#   NN_GATE_SKIP_E2E=1 仍保留：只退集成层、单测层照跑，作为将来再遇 flake 的定向
+#   出口（flake 时用它重试，不要长期关）。
+# 单测墙钟护栏（2026-09-15）：pytest 加 `--timeout=${NN_PYTEST_TIMEOUT_S:-60}`
+#  ——与 task.py check 同款 60s/用例（本仓最慢单测实测 22s，有 ~2.7× 余量）。
 #   背景：编码 agent 沙箱里全量曾「~34% 处 hang」（2026-09-15 Mimo；2026-09-14 无按键
 #   KeyboardInterrupt 见 memory 记录）——无超时时门禁永远挂着，agent 反复重试 commit。
-#   现在超时 → 响亮超时报错 + 调用栈，可诊断可重试；被误伤（慢机超 50s）可
-#   NN_PYTEST_TIMEOUT_S=120000 调大，勿直接删超时。
+#   现在超时 → 响亮超时报错 + 调用栈，可诊断可重试；被误伤（慢机超 60s）用
+#   NN_PYTEST_TIMEOUT_S=120 调大，勿直接删超时。
+#   ⚠ 单位是**秒**（pytest-timeout: "Timeout in seconds"）——2026-09-15 发现原值
+#   `50000` 是从 **bun** 的 `--timeout=50000`（那才是毫秒）误搬过来的，等于把上限
+#   抬到 13.9 小时并**覆盖掉** addopts 的 60s ⇒ 护栏名存实亡。改回秒制后才是
+#   「>1 分钟即红旗」的用户口径；禁止再加 ms 量级的值（tests/test_githook_scripts.py 有回归）。
 #
 # 跳过单个工具（逗号分隔）：
 #   NN_GATE_SKIP=ruff,mypy bash tools/githook/nn-python-gate.sh
+# 只退 e2e 集成层（保留单测层）——负载型 flake 时的定向出口：
+#   NN_GATE_SKIP_E2E=1 bash tools/githook/nn-python-gate.sh
 #
 # 沙箱注意：脚本内部**不**把子进程输出重定向到 /dev/null——MSYS 伪设备与
 # Windows 子进程继承存在兼容问题（实测间歇性失败）。输出直通。
@@ -89,6 +106,15 @@ else
   trap 'for __f in "$GATE_TMP"/*.log "$GATE_TMP"/*.err; do [ -e "$__f" ] && : > "$__f"; done' EXIT
 fi
 
+NPROC=${NN_GATE_NPROC:-4}
+# pytest 目标（层 = 路径；不加引号是有意的：需要词分割成两个参数）。
+PYTEST_TARGETS="tests/"
+if [ "${NN_GATE_SKIP_E2E:-0}" = "1" ]; then
+  echo " ▸ e2e 集成层已退出（NN_GATE_SKIP_E2E=1）——本次只跑 tests/ 单测层"
+else
+  PYTEST_TARGETS="tests/ e2e/"
+fi
+
 PIDS=""
 RAN=""
 if has_skip ruff; then
@@ -116,12 +142,14 @@ fi
 if has_skip pytest; then
   echo " ▸ pytest skipped（NN_GATE_SKIP=$SKIP_LIST）"
 else
-  # 全量：xdist -n 4，带单测墙钟护栏（--timeout，见文件头）。
+  # 全量：xdist -n $NPROC，带单测墙钟护栏（--timeout，见文件头）。
   if [ "$LIVE" = "1" ]; then
-    "$NN_PY" -m pytest tests/ -n 4 -q --timeout="${NN_PYTEST_TIMEOUT_S:-50000}" & PIDS="$PIDS $!"
+    # shellcheck disable=SC2086
+    "$NN_PY" -m pytest $PYTEST_TARGETS -n "$NPROC" -q --timeout="${NN_PYTEST_TIMEOUT_S:-60}" & PIDS="$PIDS $!"
   else
+    # shellcheck disable=SC2086
     "$NN_PY" "$DETACH" --stdout "$GATE_TMP/pytest.log" --stderr "$GATE_TMP/pytest.err" \
-      -- "$NN_PY" -m pytest tests/ -n 4 -q --timeout="${NN_PYTEST_TIMEOUT_S:-50000}" & PIDS="$PIDS $!"
+      -- "$NN_PY" -m pytest $PYTEST_TARGETS -n "$NPROC" -q --timeout="${NN_PYTEST_TIMEOUT_S:-60}" & PIDS="$PIDS $!"
   fi
   RAN="$RAN pytest"
 fi

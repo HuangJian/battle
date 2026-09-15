@@ -6,9 +6,10 @@ Usage:
 
 Targets:
     setup       - one-command env bootstrap (detect GPU -> pick torch -> sync)
-    check       - lint + typecheck + test-fast
-    test        - full test suite
-    test-fast   - fast layer only (no torch/bun)
+    check       - lint + typecheck + 全量测试（== pre-commit 门禁目标集）
+    test        - full test suite（单测层 tests/ + 集成层 e2e/）
+    test-fast   - unit layer only（tests/）
+    test-e2e    - integration layer only（e2e/）
     smoke       - torch import check + smoke_test
     clean       - remove temporary artifacts (preserves weights/)
     format      - auto-format with ruff
@@ -112,14 +113,17 @@ def target_setup() -> int:
 
 
 def target_check() -> int:
-    # 并行 + fail-fast（2026-09-15）：lint/typecheck/test-fast 三者互相独立，
+    # 并行 + fail-fast（2026-09-15）：lint/typecheck/test 三者互相独立，
     # 任一红立即终止其余（与 nn-python-gate.sh 并行语义同构）；env=clean_env()
     # 关删除保护沙箱守卫。
+    # 目标集 = 门禁同一套：tests/（单测层）+ e2e/（集成层）——e2e 自 60e5f69 起
+    # hermetic（FakeServer + tmp 落盘，不需 bun / 真节点 / weights），因此进得了门禁。
+    # 旧 `-m "not heavy"` 已删：层由路径决定（tests/ 里 heavy 标记实测 0 个，过滤空转）。
     return run_parallel(
         [
             [PYTHON, "-m", "ruff", "check", "."],
             [PYTHON, "-m", "mypy", ".", "--config-file", str(HERE / "pyproject.toml")],
-            [PYTHON, "-m", "pytest", "tests/", "-n", "4", "-q", "-m", "not heavy", "--timeout=50000"],
+            [PYTHON, "-m", "pytest", "tests/", "e2e/", "-n", "4", "-q", "--timeout=60"],
         ],
         env=clean_env(),
     )
@@ -130,17 +134,26 @@ def target_test() -> int:
     # 「~34% 停滞」的头号嫌疑（nn-python-gate.sh 头注释实测：torch import 开销使
     # 4 worker 才是本机最优点）；对齐 gate 用 -n 4。env=clean_env() 关掉删除沙箱守卫。
     return run(
-        [PYTHON, "-m", "pytest", "tests/", "-n", "4", "-v", "--timeout=50000"],
+        [PYTHON, "-m", "pytest", "tests/", "e2e/", "-n", "4", "-v", "--timeout=60"],
         env=clean_env(),
     )
 
 
 def target_test_fast() -> int:
-    # -n 4 + --timeout=50000（与 target_test / nn-python-gate.sh 对齐，2026-09-15）：
-    # `task.py check`（=lint+typecheck+test-fast）此前是 -n auto 且无超时——沙箱里
-    # hang 则无限挂；看门禁/日常两侧护栏必须一致，只改一处就是破口。
+    # -n 4 + --timeout=60（与 target_test / nn-python-gate.sh 对齐，2026-09-15）：
+    # `task.py check` 此前是 -n auto 且无超时——沙箱里 hang 则无限挂；看门禁/日常
+    # 两侧护栏必须一致，只改一处就是破口。层 = 路径：这里是单测层（tests/）。
+    # 单位是**秒**（pytest-timeout）——原值 50000 是从 bun 的毫秒制误搬的，= 无护栏。
     return run(
-        [PYTHON, "-m", "pytest", "tests/", "-n", "4", "-q", "-m", "not heavy", "--timeout=50000"],
+        [PYTHON, "-m", "pytest", "tests/", "-n", "4", "-q", "--timeout=60"],
+        env=clean_env(),
+    )
+
+
+def target_test_e2e() -> int:
+    # 集成层单独入口（e2e/）：调试 / 复核时只跑这一层，不付全量单测的钱。
+    return run(
+        [PYTHON, "-m", "pytest", "e2e/", "-n", "4", "-q", "--timeout=60"],
         env=clean_env(),
     )
 
@@ -205,6 +218,7 @@ TARGETS = {
     "check": target_check,
     "test": target_test,
     "test-fast": target_test_fast,
+    "test-e2e": target_test_e2e,
     "smoke": target_smoke,
     "clean": target_clean,
     "format": target_format,

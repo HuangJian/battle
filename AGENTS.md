@@ -101,8 +101,10 @@ Violating any of these is a bug even if the tests pass (details & gray-zone exem
   调用方一律 import 各目录的 `index.ts` 桶，不直连内部文件。
   **依赖自包含**：自带 `node_modules/` 与**入库**的 `bun.lock`（`cd dashboard && bun install`
   一次即可）；根 `package.json`、根 `tsconfig.json`、根套件**都不含** dashboard ——
-  它的门禁是 `cd dashboard && bun run typecheck && bun run test`，pre-commit 在 staged 含
-  `dashboard/` 时自动跑（§9）。
+  它的门禁是 `cd dashboard && bun run typecheck && bun run test`（+ `bun run build:ui` 三份 bundle 预算），
+  pre-commit 在 staged 含 `dashboard/` 时自动跑，CI 侧由 `.github/workflows/dashboard.yml` 承担 ——
+  后者**同时**按它只读消费的 10 个仓根模块触发（触发清单不落后于真实 import 由
+  `dashboard/tests/ci-scope.test.ts` 核对；见 DECISIONS §2026-09-15-gate-trigger-scope）。
 
 ---
 
@@ -165,13 +167,13 @@ bun run dashboard               # 启动控制台 → http://127.0.0.1:8900
 God AI freeze gates (DECISIONS §272/§293; pre-commit runs the first one):
 
 ```
-bun run freeze:check # det 21-combo signature vs frozen golden (~100s) — red ⇒ new-era triple
-bun run freeze:l2    # archived-candidate reachability audit over the same corpus (~100s)
+bun run freeze:check # det 21-combo signature vs frozen golden (~4s) — red ⇒ new-era triple
+bun run freeze:l2    # archived-candidate reachability audit over the same corpus (~1s)
 ```
 
 `bun run check` is the definition of "green". Run it before declaring a task done.
 
-- `bun run test` is the scoped token-saving runner (changed-file → basename-matched tests, prints only failures; the pre-commit hook uses it with a full-suite fallback); heavy gates (`godai-score-gate`, `calibration`) are excluded from it — run the full suite before landing God-AI changes, and keep `HEAVY_TESTS` in `tools/test-silent.ts` in sync with measured wall-time (details: `docs/agents.details.md` §5.3).
+- `bun run test` is the token-saving runner: **code changes run the full suite** (it prints only failures, and skips entirely for doc-only / dashboard-only changes); the one heavy gate (`godai-score-gate`, ~12s) is excluded from it — run the full suite before landing God-AI changes. `HEAVY_TESTS` (`tools/test-silent.ts`) excludes a file only when its **standalone wall time ≥ the whole non-heavy suite's** (~6s), i.e. it alone costs as much as the entire suite; re-measure with `bun tools/measure-suite.ts` before editing the list (`calibration` was removed from it 2026-09-15 — measured 0.7s, far below the bar). Basename-based narrowing was **removed 2026-09-15** (it under-sampled: a `src/config/stages.ts` edit ran 1 of the 50 tests that import it) — do not re-add it (details: `docs/agents.details.md` §5.3, DECISIONS §2026-09-15-gate-trigger-scope).
 - `bun test` always takes `--parallel --timeout=50000` — both flags mandatory (details: `docs/agents.details.md` §5.4).
 
 ### Style
@@ -232,7 +234,7 @@ Mandatory, no exceptions: **a bug is not fixed until a failing test proves it ex
 A task is done when **all** of these hold:
 
 - [ ] `bun run check` is green (test + typecheck + lint + format)。它**只判根项目**：根 `tsconfig.json` 的 `include` 无 `dashboard`，根 `bun test` 用 `--path-ignore-patterns='dashboard/**'` 排除 `dashboard/tests/`。
-- [ ] 动过 `dashboard/**` 时，`cd dashboard && bun run typecheck && bun run test` 也绿（它有自己的 `node_modules` 与门禁；pre-commit 在 staged 含 `dashboard/` 时会自动跑，即交付前不必依赖手动记得）。
+- [ ] 动过 `dashboard/**`（或 CI `dashboard.yml` 触发清单里的那 10 个仓根模块）时，`cd dashboard && bun run typecheck && bun run test` 也绿（它有自己的 `node_modules` 与门禁；pre-commit 在 staged 含 `dashboard/` 时会自动跑，CI `dashboard.yml` 覆盖 src/tools 侧触发）。
 - [ ] `bun run build` succeeds (this is what ships).
 - [ ] 改动 `dashboard/src/web/**` 时，`bun dashboard/src/server/build.ts` 三份 bundle 均构建通过（gzip 预算 + 客户端禁词门禁）。
 - [ ] No new `Math.random()` in Simulation paths (§2.3).

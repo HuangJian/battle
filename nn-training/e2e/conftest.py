@@ -1,10 +1,14 @@
-"""e2e conftest — 集成/e2e 测试目录（不在 python-gate 的 pytest 路径内）。
+"""e2e conftest — 集成层（tests/ 单测层的下一层，同属 python-gate）。
 
-门禁只跑 `pytest tests/`（见 tools/githook/nn-python-gate.sh 与 pyproject
-testpaths）。本目录需显式指定：
+层 = 路径（2026-09-15）：门禁与 CI 的目标是 `tests/` + `e2e/`（见
+tools/githook/nn-python-gate.sh）——本目录自 60e5f69 起 hermetic（FakeServer +
+tmp 落盘，不需要 bun / 真节点 / weights fixture），所以能进门禁。
+只跑这一层：
 
-    cd nn-training && .venv/Scripts/python.exe -m pytest e2e/ -q
+    bash tools/githook/nn-py-safe.sh -m pytest e2e/ -n 4 -q
+    # 或：make test-e2e / python task.py test-e2e
 
+（勿用裸 `python -m pytest`——AGENTS §0.1-13：沙箱删除守卫下会静默挂死。）
 夹具与 tests/conftest.py 共用（tmp_path 覆盖、通过即清、失败保留）。
 """
 

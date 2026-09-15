@@ -273,27 +273,51 @@ bun run lint         # oxlint
 bun run format       # oxfmt
 bun run check        # full gate: tsc --noEmit --incremental && bun test --parallel --timeout=50000
 bun run setup        # git config core.hooksPath tools/githook  (enables pre-commit hook)
-bun run freeze:check # det 21-combo signature vs tools/det-golden.v1.sha256 (~100s) — red ⇒ new-era triple
-bun run freeze:l2    # archived-candidate reachability audit over the same corpus (~100s)
+bun run freeze:check # det 21-combo signature vs tools/det-golden.v1.sha256 (~4s) — red ⇒ new-era triple
+bun run freeze:l2    # archived-candidate reachability audit over the same corpus (~1s)
 ```
+
+**Freeze-gate cost, measured 2026-09-15** (21-combo full grid, 16-core Linux): `freeze:check` **3.6–5.0s**,
+`freeze:l2` **1.1–1.2s**. Both were documented as `~100s` and that figure drove real decisions (the
+`tests/**` + `src/assets/**` freeze exemptions were justified as "saving ~100s") — it was wrong by
+**~27×**. Neither gate "dominates" a root-TS commit; that commit costs tsc (~0.2s) + the non-heavy suite
+(~6s) + freeze (~3.7s) + lint/format (~1s) ≈ **11s**. The cost is now **self-reported**: the probe prints
+`elapsed: …ms`, pre-commit prints `✔ freeze gate …ms`, so never hard-code the number again — it already
+rotted once.
 
 `bun run check` is the definition of "green" — run it before declaring a task done.
 
-### 5.3 Scoped vs full test runs
-`bun run test` invokes `tools/test-silent.ts`, a token-saving runner: it finds changed/untracked
-files via git, maps each to relevant `tests/*.test.ts` files by basename (incl. `base`/`base-*`/
-`*-base` patterns), runs **only** those, and prints **only failing-test logs** (a passing scoped run
-prints one summary line; `--strict` skips entirely when nothing maps). The pre-commit hook uses the
-same scoped runner and falls back to the full suite when a change maps to no test file — so it never
-silently skips. `tools/runner.ts` holds the shared `spawnCapture`/`gitChangedFiles`/printing helpers.
+### 5.3 Full vs skipped test runs
+`bun run test` invokes `tools/test-silent.ts`, a token-saving runner: it finds changed/untracked files
+via git, then **runs the full (non-heavy) suite** and prints **only failing-test logs** (a passing run
+prints one summary line). It skips entirely only when the change set is provably irrelevant —
+docs/notebook/course-config only, or all-dashboard. `tools/runner.ts` holds the shared
+`spawnCapture`/`gitChangedFiles`/printing helpers.
 
-**Heavy gate/integration tests are excluded by default:** the fast runner skips files that run
-hundreds–thousands of full-game simulations (`godai-score-gate` — the worker-pool score gate, and
-`calibration`). Exercise them with `bun run test --heavy` or the full suite. Keep the `HEAVY_TESTS`
-list in `tools/test-silent.ts` in sync with measured wall-time (add any file whose standalone run
-exceeds a few seconds). Because these gates are standalone files (not basename-matched to source
-changes), they are essentially only exercised by the full suite — **if a God-AI change is landing,
-run `bun test --parallel --timeout=50000` before committing** to validate the floors.
+**Basename-based narrowing was removed 2026-09-15** (DECISIONS §2026-09-15-gate-trigger-scope). The old
+heuristic ran only the tests whose basename matched a changed file, and it **under-sampled**: editing
+`src/config/stages.ts` ran 1 test while 50 files import it; `src/config/difficulty.ts` ran 1 of 39;
+`src/config/combat.ts` 3 of 13. A non-heavy full run costs ~6s (tools-only subset ~5s), so narrowing
+bought ~1s in exchange for a silent blind spot. **Do not re-add it** — make the suite faster instead.
+
+**Heavy gate tests are excluded by default:** the fast runner skips `godai-score-gate` — the
+worker-pool score gate (3 difficulties × 35 stages × 10 seeds). Exercise it with `bun run test --heavy`
+or the full suite.
+
+**The criterion is measured, not "slow"** (`bun tools/measure-suite.ts` re-measures it): a file is
+excluded only when its **standalone wall time ≥ the whole non-heavy suite's**, i.e. it alone costs as
+much as the entire suite. Measured 2026-09-15 (16 vCPU; suite floor = 179 files in 6.1s):
+`godai-score-gate` 11.7–13.1s (**2.0×** — excluding it is what keeps the step at 6s instead of 19s);
+`nn/intent-rl-rollout` 3.8s/1.7s and `calibration` 0.66–0.71s are both *below* the bar — `--parallel`
+absorbs them into the existing tail, so excluding them buys ≲1s while giving up the coverage (and CI
+has **no** root-suite workflow, so the local hook is their only automated path). `calibration` was
+removed from the list 2026-09-15 on exactly this measurement (its own comment says the full sweep runs
+via the CLI now); the previous entry claimed ~2.5s and the score gate's ~19.5s — both numbers had
+rotted, which is why the judgement must come from a re-measure, not a hard-coded figure. Because the
+gate is a standalone file, it is only exercised by the full suite or `--heavy` — **if a God-AI change
+is landing, run `bun test --parallel --timeout=50000` before committing** to validate the floors.
+`tests/test-silent-scope.test.ts` hard-fails if a `HEAVY_TESTS` name no longer matches a real test file
+(the in-runner ⚠ hint alone is invisible: it rides on a green summary line).
 
 ### 5.4 `bun test` flags are mandatory
 - **`--parallel`**: bun does not parallelize files by default; per-FILE parallelism across the suite

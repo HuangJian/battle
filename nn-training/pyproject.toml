@@ -25,7 +25,7 @@ dev = [
   "mypy>=1.11.0",
   "pytest>=8.0.0",
   "pytest-xdist>=3.6", # Makefile `pytest -n 4` 与 tools/githook/nn-python-gate.sh 依赖
-  "pytest-timeout>=2.3", # task.py `--timeout=50000` 依赖
+  "pytest-timeout>=2.3", # task.py / nn-python-gate.sh 的 `--timeout=60`（**秒**）依赖
 ]
 
 # torch 变体：互斥，须且只须选一个。变体名 → index 映射见 [tool.uv.sources]，
@@ -214,9 +214,11 @@ ignore_missing_imports = true
 # pytest
 # ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
-# 门禁/日常 pytest 只收集 tests/（单测）。集成/e2e 在 e2e/，显式跑：
-#   .venv/Scripts/python.exe -m pytest e2e/ -q
-# 不要把 e2e 加进 testpaths——python-gate 的 `pytest tests/` 必须保持轻量。
+# 层 = 路径（2026-09-15）：tests/ = 单测层 · e2e/ = 集成层。
+# 门禁（tools/githook/nn-python-gate.sh）与 CI 都**显式传目标**：门禁跑
+# `pytest tests/ e2e/`（同一次 xdist 调用，实测只 +5s），CI 分两步。
+# 因此 testpaths 保持 ["tests"] —— 它只是「裸 pytest」的默认，不参与门禁判定集；
+# 裸跑只收单测层，想跑集成层用 make test-e2e / 显式路径。
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
@@ -233,12 +235,14 @@ addopts = "-ra -q --tb=short -x --timeout=60"
 # 临时目录落在项目内 tmp/pytest-tmp/ 唯一子目录、从不删除——pytest 不创建 basetemp、
 # 全程零删除。旧累积目录可手动清理（一次性确认）。
 
-# NOTE: tests/test_run_rl.py is ALSO runnable as a standalone script
-# (python tests/test_run_rl.py). This is intentional for ad-hoc regression
-# without pytest overhead. The pytest collection path is the canonical CI one.
-# Markers:
-#   @pytest.mark.heavy  → excluded from fast-gate (integration / torch training)
+# NOTE: e2e/test_run_rl.py is ALSO runnable as a standalone script
+# (bun dashboard/src/launch/cli.ts --script e2e/test_run_rl.py). This is
+# intentional for ad-hoc regression without pytest overhead. The pytest
+# collection path is the canonical CI one.
+# Markers（2026-09-15：标记**不再承担分层职责** —— 层由路径决定，tests/ = 单测层、
+# e2e/ = 集成层；全仓已无 `-m "not heavy"` 调用方，原 tests/ 里 heavy 标记实测 0 个。
+# 保留注册只为「将来再引入标记时不报 unknown marker」，不要在 gate/CI 里拿它分层）：
 markers = [
-  "heavy: marks tests that require the heavy test gate (torch full-train, integration)",
-  "slow: marks slow tests (full determinism corpus)",
+  "heavy: (legacy, 无人过滤) 重型/集成用例的说明性标记",
+  "slow: (legacy, 无人过滤) 慢用例的说明性标记",
 ]

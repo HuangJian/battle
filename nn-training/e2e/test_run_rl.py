@@ -11,7 +11,9 @@
       （wver=文件指纹），bunVersion 与 dispatch 同源计算（bun 缺失恒匹配），
       本地直跑 run_local_rollout 打桩 —— 不依赖 PATH 上有 bun、不需要真实权重。
 
-运行（经统一启动器，venv/torch 由它保证）：
+运行（pytest 路径 —— 门禁/CI 走的是这条；本文件属集成层 e2e/）：
+  bash tools/githook/nn-py-safe.sh -m pytest e2e/test_run_rl.py -n 4 -q
+运行（standalone 入口，经统一启动器，venv/torch 由它保证）：
   bun dashboard/src/launch/cli.ts --script e2e/test_run_rl.py
   （集成层不再需要 RUN_RL_ITEST 门禁与环境 fixture；RUN_RL_ITEST=1 仍可强制 standalone 入口跑集成层）
 
@@ -500,7 +502,6 @@ def _itest_env(
     return srv, weights, cfg, args, bun
 
 
-@pytest.mark.heavy
 def test_it_queue_normal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     srv, WEIGHTS, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
     try:
@@ -531,7 +532,6 @@ def test_it_queue_normal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
         srv.shutdown()
 
 
-@pytest.mark.heavy
 def test_it_halt_preset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     srv, WEIGHTS, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
     try:
@@ -559,7 +559,6 @@ def test_it_halt_preset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
         srv.shutdown()
 
 
-@pytest.mark.heavy
 def test_it_stream_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     srv, WEIGHTS, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
     try:
@@ -605,7 +604,6 @@ def test_it_stream_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
         srv.shutdown()
 
 
-@pytest.mark.heavy
 def test_it_stream_halt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     srv, WEIGHTS, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
     try:
@@ -636,7 +634,6 @@ def test_it_stream_halt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
         srv.shutdown()
 
 
-@pytest.mark.heavy
 def test_it_local_suspend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     srv, WEIGHTS, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
     try:
@@ -680,7 +677,6 @@ def test_it_local_suspend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
         srv.shutdown()
 
 
-@pytest.mark.heavy
 def test_it_longtail_race(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     srv, WEIGHTS, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
     try:
@@ -710,7 +706,6 @@ def test_it_longtail_race(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
         srv.shutdown()
 
 
-@pytest.mark.heavy
 def test_it_eval_deferred(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import rl.eval_dispatch as ed
 
@@ -761,7 +756,6 @@ def test_it_eval_deferred(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
         srv.shutdown()
 
 
-@pytest.mark.heavy
 def test_it_eval_post_ppo_weights(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """P0 回归：延迟派发评估的是归档 W(M)（标权重轮 M），不是活指针。
 
@@ -824,7 +818,6 @@ def test_it_eval_post_ppo_weights(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         srv.shutdown()
 
 
-@pytest.mark.heavy
 def test_it_precollect_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     srv, WEIGHTS, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
     try:
@@ -867,7 +860,6 @@ def test_it_precollect_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
         srv.shutdown()
 
 
-@pytest.mark.heavy
 def test_it_early_race_v314(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # v3.14/v3.10 回归：早派到慢副本的尾部任务，必须在 pending 清空后由空闲槽竞速复制，
     # 不能干等慢主副本（FakeAgent 慢窗 0.4s）。
@@ -978,7 +970,6 @@ def test_it_early_race_v314(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
         srv.shutdown()
 
 
-@pytest.mark.heavy
 def test_it_tail_join_grace_v317(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """v3.17 收尾兜底：竞速输家副本卡在不可中断的 HTTP 调用时，整轮不得被拖到满超时。
 
