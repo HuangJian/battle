@@ -87,6 +87,84 @@ def _scan_shards(
     return res
 
 
+def settled_stage_totals(
+    traj_dir: Path,
+    wver: str,
+    extra_wver: str | None = None,
+    course_fp: str | None = None,
+) -> dict[int, tuple[int, int]]:
+    """stage → (games, transitions)：已结算 shard 的局数与 `nSamples` 之和。
+
+    动态采集配额（plan/dynamic-rollout-volume §2.2.2）的**唯一**账本口径：只数已结算
+    （manifest 落盘）的 shard。掉局零样本 ⇒ transitions 不涨（天然触发补采，这是特性），
+    但它仍占一个派发名额（games 计入硬顶——硬顶管「派了多少局」，不是「落了多少样本」）。
+
+    复用 `_scan_shards` 的目录签名缓存 ⇒ 补波循环内反复调用零额外扫描（只有每个
+    shard 一份小的 manifest.json 读，且仅补波时发生）。
+
+    transitions 字段**两种落盘 schema 都要认**（`dist_common.write_shard` 原样写 agent
+    返回的 manifest，所以盘上两种都可能有）：单局 schema `nSamples`（TS exporter
+    `export-rl-rollout.ts` 生产的正规形）与远端/队列 path 的聚合单局 schema
+    `totalSamples`（一局一份 shard ⇒ 它就是这局的 transitions）。只认前者会让后者
+    的关永远“零样本” ⇒ 补波永不达标（白烧到波次上限）。
+    """
+    out: dict[int, tuple[int, int]] = {}
+    for (stage, _seed), d in _scan_shards(traj_dir, wver, extra_wver, course_fp):
+        try:
+            mm = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        n = mm.get("nSamples")
+        if not isinstance(n, int):
+            n = mm.get("totalSamples")
+        games, trans = out.get(stage, (0, 0))
+        out[stage] = (games + 1, trans + (int(n) if isinstance(n, int) else 0))
+    return out
+
+
+def trailing_ticks_per_game(jsonl_path: Path, window: int = 5, fallback: int = 0) -> int:
+    """最近 `window` 轮 iteration 的局均 tick（Σticks / Σgames）——动态采集的 est。
+
+    决策可 replay 的基础（plan §2.3.1）：est 是 jsonl 历史的**纯函数**（同一份 jsonl
+    ⇒ 同一 est），重启后重算一致，不靠 WAL 重放。games 口径 = Σ outcomes（掉局也
+    占一局——它确实花了墙钟）；无可用历史 → `fallback`（课程声明的首轮估计）；
+    两者都缺 → 响亮 ValueError，绝不静默拿一个假值去反解局数。
+    """
+    rows: list[tuple[int, int]] = []  # (games, ticks)
+    try:
+        with open(jsonl_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if e.get("event") != "iteration":
+                    continue
+                ticks = e.get("ticks")
+                outs = e.get("outcomes")
+                if not isinstance(ticks, int) or not isinstance(outs, dict):
+                    continue
+                games = sum(v for v in outs.values() if isinstance(v, int))
+                if games > 0 and ticks > 0:
+                    rows.append((games, ticks))
+    except OSError:
+        rows = []
+    last = rows[-window:] if window > 0 else []
+    total_games = sum(g for g, _ in last)
+    total_ticks = sum(t for _, t in last)
+    if total_games > 0 and total_ticks > 0:
+        return max(1, round(total_ticks / total_games))
+    if fallback > 0:
+        return int(fallback)
+    raise ValueError(
+        "trailing_ticks_per_game: 无 iteration 历史且未给 est_ticks_per_game 兜底——"
+        "动态采集无法反解局数（检查课程 target_transitions/est_ticks_per_game 配对）"
+    )
+
+
 def resumed_manifests(
     traj_dir: Path,
     wver: str,

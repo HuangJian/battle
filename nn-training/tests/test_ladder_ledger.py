@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from rl.ladder_ledger import TIER_BOUNDARIES, LadderLedger
+from tests.subproc_util import run_utf8
 
 
 @pytest.fixture
@@ -66,12 +67,11 @@ def test_graduate_tier_boundary_requires_ack(tmp_path: Path) -> None:
 
     走真实 CLI（被修的判定在 argparse/main 层），台账落在 tmp_path 不污染真台账。
     """
-    import subprocess
     import sys
 
     root = Path(__file__).resolve().parent.parent
     ledger = tmp_path / "LEDGER.jsonc"
-    r = subprocess.run(
+    r = run_utf8(
         [
             sys.executable,
             "-m",
@@ -83,15 +83,13 @@ def test_graduate_tier_boundary_requires_ack(tmp_path: Path) -> None:
             str(ledger),
         ],
         cwd=str(root),
-        capture_output=True,
-        text=True,
     )
     assert r.returncode != 0
     assert "tier 边界" in (r.stdout + r.stderr)
     assert not ledger.exists()  # 未放行 ⇒ 不得落台账
 
     # 显式 --ack ⇒ 放行并落 ack 位
-    r2 = subprocess.run(
+    r2 = run_utf8(
         [
             sys.executable,
             "-m",
@@ -106,8 +104,6 @@ def test_graduate_tier_boundary_requires_ack(tmp_path: Path) -> None:
             str(ledger),
         ],
         cwd=str(root),
-        capture_output=True,
-        text=True,
         check=True,
     )
     assert "人工放行" in r2.stdout
@@ -118,12 +114,11 @@ def test_graduate_tier_boundary_requires_ack(tmp_path: Path) -> None:
 
 def test_graduate_non_boundary_has_no_ack(tmp_path: Path) -> None:
     """非边界级（c04）无需 --ack 即可毕业，且不写 ack 位。"""
-    import subprocess
     import sys
 
     root = Path(__file__).resolve().parent.parent
     ledger = tmp_path / "LEDGER.jsonc"
-    subprocess.run(
+    run_utf8(
         [
             sys.executable,
             "-m",
@@ -135,8 +130,6 @@ def test_graduate_non_boundary_has_no_ack(tmp_path: Path) -> None:
             str(ledger),
         ],
         cwd=str(root),
-        capture_output=True,
-        text=True,
         check=True,
     )
     entry = json.loads(ledger.read_text(encoding="utf-8"))["levels"]["ladder-c04"]

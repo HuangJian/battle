@@ -23,6 +23,7 @@ NN_ROOT = Path(__file__).resolve().parent.parent
 if str(NN_ROOT) not in sys.path:
     sys.path.insert(0, str(NN_ROOT))
 
+from tests.subproc_util import run_utf8
 from train.loop_util import (
     acquire_lock,
     cleanup_lock,
@@ -106,11 +107,9 @@ def test_train_loop_cli_accepts_course_flag() -> None:
     没有 `--course` 参数时，CLI 层永远到不了 per-course 锁路径——这条断言就是
     「参数已接线」的证据（F-B4）。
     """
-    proc = subprocess.run(
+    proc = run_utf8(
         [sys.executable, str(NN_ROOT / "train_loop.py"), "--course", "s1", "--help"],
         cwd=str(NN_ROOT),
-        capture_output=True,
-        text=True,
         timeout=180,
     )
     assert proc.returncode == 0, proc.stderr[-2000:]

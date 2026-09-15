@@ -1720,3 +1720,45 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   nn-training python gate（ruff + mypy + pytest xdist -n 4）绿，含新增
   `tests/test_remote_transport.py`（run_rl 与 run_bc 两侧裁决 + argparse 接线）；
   `bun dashboard/src/server/build.ts` 三份 bundle 与根 `bun run build` 均通过。
+## §2026-09-15-goalnn-dynamic-rollout-volume（2026-09-15，采集配额量纲从「局」切「transitions」；plan/dynamic-rollout-volume.plan.md §2）
+
+- **背景**：PPO 吃的是 transitions 而不是局数（x3 240 局 × 967t ≈ 23 万/轮；c4-dodge 600 局 × 1100+t
+  ≈ 66 万+/轮），而课程至今用 `seed_rotate`（每关局数）配采集量——固定局数下 transitions/轮随局长漂移
+  （x3 局均 700–1150t），PPO 更新量与 advantage 归一稳定性跟着漂。反例在先：x2-acbc 3 倍密度 30 轮
+  pooled −3/400 ⇒ 加量解决的是方差、不是信号；**本决策只承诺「量准」，不承诺涨点**（DoD 里不许写胜率条款）。
+- **决定**：课程新增三键（全可选；**缺席 = 老行为逐字节不变**）：`target_transitions`（/轮，口径 = 已结算
+  shard 的 `nSamples` 之和）、`est_ticks_per_game`（首轮反解局数用，之后由 jsonl trailing 均值覆盖）、
+  `max_games_per_stage`（0 = 默认「初波 × 4」）。语义：分关达标线 `ceil(target/关数)`；初波
+  `G0 = max(1, ceil(关达标线/est))`；结算后**逐关独立**补波 `ceil(缺口/est)`，每关至多 3 波；掉局零样本不计
+  （天然触发补采——特性）、超时局计入；触硬顶 = 停采 + 响亮日志 + iteration 事件 `transitions_capped`。
+  纯逻辑住 `rl/volume_waves.py`，账本口径 `rl/resume.settled_stage_totals`，接线 `rl/loop_core.py::_volume_topup`；
+  iteration 事件追加 `transitions_target` / `transitions_collected`（additive，旧行无此键）。
+- **两条派生偏离计划的地方（本决策的实质）**：
+  1. **种子流按 (stage, wave) 独立**，不是「初波沿用今日单条顺序流」。计划 §2.2.1 说「种子流与今日
+     `build_pairs` 同键（rotateSeed, it）」——取**同键族**（同 rotate_seed/it、初波同 tag 0x5EED）
+     但按 stage 拆独立流。理由：单流下「每关抽几签」会随 est/配额变化而移动**后续关**的流位置，
+     §2.2.5 的跨关独立性（给 A 关加波不改 B 关任何一局种子）直接失守。带 key 的课程本就是新实验
+     （§15.5 要求 fresh `--out/--traj`），不需要与老流逐字节同构。
+  2. **身份键条件进 payload**：仅当 `target_transitions > 0` 才把 `volume_rule`(=VOLUME_RULE_V1) +
+     `target_transitions` 加进 `corpus_identity_fp`。无条件加会让**所有**既有课程指纹一起漂移
+     （D14 血缘断裂、在跑的腿把已落盘 shard 判成异身份、云端 job 全拒），与「缺席 = 老行为逐字节不变」
+     直接矛盾。`est` / `max_games_per_stage` 刻意**不进**（同 iters/max_hours 分类学：估计与硬顶不是语料身份）。
+- **被否决的备选**：① 走**折中版**（轮首按 trailing 均值反解局数，x3-power「批量附录」）——保留为回落线，
+  但仍是「一轮一锤子」，est 偏了整轮就偏；② 全局池配额（不分关）—— 否，短局关淹长局关
+  （x3 acd 733t vs abd 989t 差 35% 就是前车）；③ 让补波也走 stream/双缓冲路径 —— v1 不做（动那套墙钟优化
+  收益为负、风险为正），stream 课程本轮只按初波结算并**写日志说明**；④ 补波决策靠 WAL 重放 —— 否，
+**首版确实这么想过，被 P2 的 e2e 证伪**：波次序号 `wave_idx` 是决策而不是账本的函数
+  （它同时是种子流的键），只按账本重算会在重启后把计数器拉回 1、用 wave-1 的种子补 wave-3 的缺口。
+  现设计：纯函数负责「给定 (账本, wave_idx) 算同一波」，`wave_idx` 本身从 commit journal 回读
+  （预算续算 + 停在波中的那一波原样重放）。
+- **违反后果**：把 `target_transitions` 无条件塞进 `corpus_identity_fp` ⇒ 全库血缘断裂、云端 job 全拒；
+  把 volume 初波改回单条顺序流 ⇒ 跨关种子耦合，补波会静默改掉别的关的对局；补波不看硬顶就无限补 ⇒
+  短局关吃光墙钟（`max_hours` 是最后一道闸）；给 volume 课程硬配 curriculum/rotate 门控窗口 ⇒ 配额分母
+  与真实采样关不符（代码响亮 SystemExit，**勿放宽成静默取一个关集**）。
+- **验证**：单测 46 用例（配额数学 / 跨关独立性 / 终止优先级 / 硬顶截断 / WAL 解析 / 冻结 `build_pairs` 摘要 /
+  桩 self 调 **真方法** 的接线）；P2 e2e 10 用例（`e2e/test_volume_e2e.py`：真调度器落地真 shard——定额收敛 /
+  跨重启重放 / 长短局独立 / 掉局补采 / 硬顶打标 / **尾部竞速 4 例**：副本不污染账本、double-settle 不重复计数、
+  丢局被补回、预算耗尽要响亮）；nn python gate + 根 `bun run check` 绿。**遗留（调度器侧，未修）**：同节点 fan-out
+  副本共享 `out_dir`，double-settle 的 rmtree 连赢家数据一起删（报告仍记 `ok=N/N`）——单独立项修，取证见 §44。
+- **未做（勿当已验）**：微课 5 轮试点与补波 overhead 实测（需真实 bun sim / 训练，未跑）；
+  dashboard 展示 `transitions_collected/target` 未动。

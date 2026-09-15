@@ -180,6 +180,27 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         "seed（(rotateSeed,it) 键控、断点复现）；0 = 固定 --seeds（旧行为）",
     )
     ap.add_argument(
+        "--target-transitions",
+        type=int,
+        default=_d("target_transitions", 0),
+        help="按样本量动态采集（plan/dynamic-rollout-volume）：本轮目标 transitions"
+        "（已结算 shard 的 nSamples 之和，分关达标线 = ceil(/关数)）；"
+        "0 = 关闭，走 --seed-rotate 固定局数旧语义",
+    )
+    ap.add_argument(
+        "--est-ticks-per-game",
+        type=int,
+        default=_d("est_ticks_per_game", 0),
+        help="局均 tick 估计（--target-transitions > 0 时必填）：首轮反解局数用，"
+        "之后由 jsonl 的 trailing 均值覆盖",
+    )
+    ap.add_argument(
+        "--max-games-per-stage",
+        type=int,
+        default=_d("max_games_per_stage", 0),
+        help="单关单轮局数硬顶（0 = 默认规则 初波 G0 × 4）；触顶 = 停采 + 响亮日志",
+    )
+    ap.add_argument(
         "--rotate-stages",
         type=int,
         default=_d("rotate_stages", 0),

@@ -5,6 +5,93 @@
 
 ---
 
+## §44 按样本量动态采集（Dynamic Rollout Volume）：P0+P1 实现与 P2 端到端验证
+（2026-09-15；计划 `plan/dynamic-rollout-volume.plan.md`；决策 `DECISIONS.md §2026-09-15-goalnn-dynamic-rollout-volume`）
+
+**为什么**：PPO 吃的是 transitions，不是局数（x3 240 局×967t ≈ 23 万/轮，c4-dodge 600 局×1100+t
+≈ 66 万+/轮），而课程至今用 `seed_rotate`（每关局数）配采集量——固定局数下 transitions/轮随局长
+漂移（x3 局均 700–1150t）。**只承诺「量准」，不承诺涨点**（反例：x2-acbc 3 倍密度 30 轮 pooled −3/400
+——加量解决的是方差不是信号）。
+
+**实现**：课程三键 `target_transitions` / `est_ticks_per_game` / `max_games_per_stage`（缺席 = 老行为
+逐字节不变）。纯逻辑 `rl/volume_waves.py`（配额数学 + 按 (stage,wave) 独立种子流 + 终止谓词 +
+补波计划 + WAL 行解析）；账本 `rl/resume.settled_stage_totals`；est 来自 jsonl trailing 均值
+（`rl/resume.trailing_ticks_per_game`，纯函数可 replay）；接线 `rl/loop_core.py::{_iteration_pairs,
+_volume_topup,_dispatch_volume_wave,_volume_journal_replay}`；iteration 事件追加
+`transitions_target/_collected/_capped`。**v1 边界**：只接串行路径（stream 保持老语义 + 写日志说明），
+与 curriculum/rotate 门控窗口不兼容（响亮 SystemExit）。
+
+**P2 端到端验证**（`nn-training/e2e/test_volume_e2e.py`，10 用例；假 sim 节点 HTTP 经**真调度器**
+`run_rollout_queue` 落真 shard，再走真账本与真补波循环；跑法 `cd nn-training && .venv/Scripts/python
+-m pytest e2e/test_volume_e2e.py -q`）：
+
+| 用例 | 场景 | 观测（日志原话） |
+|---|---|---|
+| 定额收敛 | est 高估 20 vs 实际 14，达标线 100/关 | `G0=5/关` → `w1 {0:2,1:2}`（缺 30）→ `w2 {0:1,1:1}`（缺 2）→ `收官 waves=3 collected=224/200 达标关=2/2`；过冲 12t/关 < 1 波 |
+| 初波即达标 | est 与实际都是 20 | `waves=1 collected=200/200`，零补波、零额外派发 |
+| 跨重启重放 | 3 波收敛后崩在 w2 中间（删其 shard + 抹 WAL 的 finish） | 重启日志：`WAL 重放未完成的补波 w2 games={0:1,1:1} → 2 局`；初波 pairs 与重放 pairs 与首跑**逐字节同一**；预算不重领（重放后即波次上限） |
+| 长短局独立 | stage 0 = 5t/局、stage 1 = 50t/局 | 长局关一次到位后**零补波打扰**（`w1 games={0:5}`，stage 1 缺口 0）；短局关被补到 `wave_cap`（`未达标={0:'wave_cap'}`） |
+| 掉局补采 | stage 0 前 2 局零样本（真派发真落盘 transitions=0） | `w1 games={0:2}` 补回；该关 `(games=10, transitions=112)` ≥ 100（零样本局占局数不入配额）；正常关不被牵连 |
+| 硬顶打标 | `max_games_per_stage=12` | `WARN 触单关局数硬顶（cap=12）但配额未满 shortfall={0:40}` + 事件 `capped`；该关停采 |
+
+**④ 尾部竞速（tail fan-out）下的配额算术**（2026-09-15 追加，4 用例，`tailFanoutN/Dup=4/2`）：
+
+| 用例 | 场景 | 观测（日志原话） |
+|---|---|---|
+| 副本不污染账本 | `dup_hang=0.35`（副本稳定后到、静默丢弃） | 账本与无竞速**逐值相同**（`(8,112)`/关），`dup_copies>0`，`fanout_settled=3` |
+| double-settle 边界 | `dup_hang=0`（副本同速） | 账本**绝不重复计数**（`settled = games×14`、`games ≤ 去重派发对数`）；缺口只允许出现在预算耗尽时（`波次预算未耗尽却未达标` 是本用例最硬一条）；`_volume_collected` 与账本一致 |
+| 丢局被补回 | 手工落「dup_settle 那一刀」（rmtree 共享 shard 目录），派发关竞速 ⇒ 损失是唯一变量 | 初波 `(8,112)`/关 → 退休 2 局/关 ⇒ 账本 `(6,84)` → `缺口 16t/关` ⇒ `w1 {0:2,1:1}` 补回 `(8,112)` 且 `waves=2`、WAL 无 pending |
+| 预算耗尽要响亮 | 短局关（5t/局）+ 竞速 + `wave_cap` | `wave_cap` 停采时日志给出 `未达标={0:'wave_cap'}`（不是假装达标）；长局关 500t 一次到位不被拖累 |
+
+**竞速取证（新发现，值得后续跟进）**：同节点 fan-out 的两份副本 `out_dir` **逐字相同**
+（`traj/itN/dist/<node>/rl_s{stage}_seed{seed}`）——两份结果若都在对方进 `seen` 前通过锁外
+`validate_result`（窗口 = 一次 `write_shard`），后到者走 `dup_settle` 分支 rmtree **共享目录**，
+那一局数据被删（两行日志坐实：`dup settle s0/seed… — dropped (+retired …\rl_s0_seed…)`）。
+单节点 + `dup_hang=0` 下实测每轮 3–5 局被退休（`DEFAULT` 多份副本时更常见）：
+`dispatched=25 unique=19 settled={0:(8,112),1:(8,112)}`，即 3 局白跑、补波补回 2 局、
+预算被吃到 `wave_cap`。**方向性结论**：丢局只会让账本变短（绝不膨胀），配额达标性由补波兜住，
+代价是墙钟——与「宁可多采几局，不可静默少采」一致。跨节点竞速（race lane）不共享目录，
+不存在这种损失。
+
+**e2e 拓出的两个真 bug（P2 的全部价值就在这里）**：
+
+1. **账本只认一种 manifest schema**：`settled_stage_totals` 原先只读 `nSamples`（TS exporter 的正规单局形），
+   而队列/远端 path 的 shard 是聚合单局形（`totalSamples`，`dist_common.write_shard` **原样写** agent 返回的
+   manifest）⇒ 那些关在账本里永远「零样本」、补波永不达标，只会白烧墙钟到波次上限。修：两种都认
+   （`nSamples` → 回退 `totalSamples`），两者都缺则计 0（不猜）。单测钉死（`test_settled_totals_accept_both_manifest_schemas`）。
+2. **波次序号 `wave_idx` 是决策，不是账本的函数**——它同时是种子流的键。首版设计假定「全部决策都是
+   (配置, it, 账本, jsonl) 的纯函数 ⇒ 重算即 replay、无需 WAL」，**该假说被 e2e 证伪**：崩在 w2 中间后重启，
+   计数器回到 1，会拿 **wave-1 的种子去补 wave-3 的缺口**（同观测史、不同波次序列——正是计划 §2.3.1 要禁止的
+   「重新抛硬币」）。修：`wave_idx` 从 commit journal 回读（`parse_wave_records`）——预算按 WAL 续算
+   （跨重启**不重领额度**，防「崩一次就再领 3 波」），停在波中（有 start 无 finish）的那一波按 WAL 的
+   对局表**原样重放**，其余继续按账本推进。
+
+**验证**：单测 46 用例 + P2 e2e 10 用例（含 4 个竞速用例）全绿；e2e 全量 70 用例绿；
+nn python gate（ruff + mypy 188 文件 + pytest xdist）、根 `bun run check` 1826 用例绿。
+
+**补波决策 overhead 实测（2026-09-15 微基准，纯函数）**：`plan_topup` 6.1µs ·
+`parse_wave_records` 28µs · `wave_pairs`(80 seeds) 236µs；典型 3 波决策包 ≈ **754µs**，
+相对真 bun 试点单轮 wall ~24s = **0.003%**（DoD 预算 <1%，过两个数量级）。脚本一次性，
+已删。
+
+**真 bun 微课试点（2026-09-15，串行路径 + 真 sim；教训见下）**：5 轮跑通，volume
+初波/补波/WAL/收官日志全链在位。观测：S1 + `max_ticks=120` 下 timeout 局只产出
+~12 samples/game（远低于 est=40）⇒ 3 波后 `collected=144/400`，正确触 `wave_cap`
+并响亮打标（`未达标={1000,1001:'wave_cap'}`）——**不是静默少采**。est 用 trailing
+均值后它被抬到 120t/局（jsonl 口径是 tick 不是 nSamples），说明生产课的 est 必须
+按 **nSamples/局** 校准，不能拿 max_ticks/局长 tick 顶替。
+
+**污染教训（用户 2026-09-15 指令，铁律）**：集成/微课试点用的模拟课程**禁止**
+写进 `nn-training/curricula/`（生产课程表）或把试点权重归档进 `weights/`；一律
+落在 **`nn-training/e2e/fixtures/`**，经 `--course-file e2e/fixtures/...` 启动且
+out/traj 指到测试 tmp。本次误把 `tiny-vol.jsonc` 放进 curricula 并归档了
+`rl-weights.it1-5.*`，已全部清除；模拟课程规范落点 =
+`e2e/fixtures/tiny-vol.jsonc`。另：真 bun 试点会打真实 dist 节点（self/mac ping、
+甚至触发 mac 升级请求）——**隔离未就绪时不得再对生产节点跑试点**；接线验收以
+`e2e/test_volume_e2e.py`（FakeAgent，不读生产课程表）为准。
+
+---
+
 ## §43 本机 PPO 拆分为独立 worker（2026-09-15，用户指令「把本地 PPO 拆分为一个独立 worker，可以随时启停，与云端 worker 一致，同样支持 pull/push 模式」）
 
 **变更**：本机 PPO 不再是 `TrainingLoop`（run_rl）进程内的阻塞调用，而是新的受管组件

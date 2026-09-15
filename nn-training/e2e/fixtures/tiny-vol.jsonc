@@ -1,0 +1,50 @@
+{
+  // tiny-vol — 按样本量动态采集的**集成测试专用**模拟课程
+  // （plan/dynamic-rollout-volume §3-P2；DECISIONS §2026-09-15-goalnn-dynamic-rollout-volume）。
+  //
+  // 归属纪律（用户 2026-09-15 指令）：集成/微课试点用的模拟课程一律写在本目录，
+  // **禁止**落入 `nn-training/curricula/`（那是生产课程表）或写进生产 weights 归档。
+  // 启动方式：`--course-file e2e/fixtures/tiny-vol.jsonc`，并用 CLI 覆盖 out/traj 到
+  // 测试 tmp；默认接线验收走 `e2e/test_volume_e2e.py`（FakeAgent + 真调度器，不读本文件）。
+  //
+  // 与 tiny-a 的差异：stream=0（volume v1 只接串行路径）+ 三键动态配额。
+  // stage 1000-1001 = S1 两布局变异（arena 命名空间）。
+  "version": 5,
+  "name": "tiny-vol",
+  "mode": "per-tick",
+
+  "stages": "1000-1001",
+  "difficulty": "hard",
+  "max_ticks": 120,
+  // 分关达标线 = 400/2 = 200t；est 40 ⇒ 初波 G0 = 5/关。
+  // 注意：真 bun 下若 max_ticks 过短、样本/局远低于 est，会正确触 wave_cap
+  // （2026-09-15 实测：timeout 局 ~12 samples/game ⇒ 3 波仍不满 200/关）。
+  "target_transitions": 400,
+  "est_ticks_per_game": 40,
+  "max_games_per_stage": 20,
+  "player": { "lives": 3, "level": 1 },
+
+  "reward": {
+    "formula": "1.0*(kills+1) - 0.15*playerHits",
+    "params": {},
+    "terminal": { "stage_clear": 2.0, "lives_exhausted": -0.5 },
+  },
+
+  // schema_major=3 契约（in-use/c4-margin 等仍是 schema 2，不能热启）。
+  "bc": "nn-training/weights/x3-start/x3-start.it333.20260915-052649.json",
+  "freeze": [],
+  "freeze_heads": [],
+  "iters": 5,
+  "workers": 2,
+  "out": "tmp/e2e-tiny-vol/weights.json",
+  "traj": "tmp/e2e-tiny-vol",
+  "epochs": 1,
+  "mb": 64,
+  "lr": 3e-5,
+  "warmup_iters": 0,
+  "stream": 0,
+  "keep_iters": 6,
+  "eval_stages": "",
+  "eval_games_per_stage": 0,
+  "eval_every": 99,
+}

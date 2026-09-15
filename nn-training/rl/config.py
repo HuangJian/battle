@@ -775,6 +775,23 @@ class CourseConfig(BaseModel):
     #: str = 关卡范围规格（透传 --stages）；list[StageSpec] = 自定义关（→ 2000+i）
     stages: str | list[StageSpec] = "0-3"
 
+    @field_validator("target_transitions", "est_ticks_per_game", "max_games_per_stage")
+    @classmethod
+    def _volume_nonneg(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("动态采集键非法（≥0；0 = 关闭/默认规则）")
+        return v
+
+    @model_validator(mode="after")
+    def _check_volume_keys(self) -> CourseConfig:
+        """`target_transitions > 0` 必须带局均 tick 估计（D1：反解没有估计值 = 乱采）。"""
+        if self.target_transitions > 0 and self.est_ticks_per_game <= 0:
+            raise ValueError(
+                "target_transitions > 0 时必须给 est_ticks_per_game（≥1）——"
+                "配额反解初波局数需要局均 tick 估计（之后由 trailing 均值覆盖）"
+            )
+        return self
+
     @field_validator("stages", mode="before")
     @classmethod
     def _stages_before(cls, v: Any) -> Any:
@@ -786,6 +803,17 @@ class CourseConfig(BaseModel):
     difficulty: str = "hard"
     max_ticks: int = 12000
     seed_rotate: int = 0
+    # ---- 按样本量动态采集（plan/dynamic-rollout-volume.plan.md；缺席 = 老行为逐字节不变）----
+    #: 每轮目标 transitions（已结算 shard 的 nSamples 之和；分关达标线 = ceil(/关数)）。
+    #: 0 = 关闭：走 seed_rotate 固定局数旧语义，`rl/volume_waves.py` 一个函数都不被调用。
+    #: 进 corpus_identity_fp（量纲变更 = 采样参数变更，与 seed_rotate 同待遇）。
+    target_transitions: int = 0
+    #: 局均 tick 估计（首轮/无历史时反解局数用；之后由 trailing 均值覆盖）。
+    #: `target_transitions > 0` 时必填——配额反解没有估计值就是静默乱采（响亮报错）。
+    est_ticks_per_game: int = 0
+    #: 单关单轮局数硬顶（0 = 默认规则：初波 G0 × DEFAULT_GAME_CAP_MULT）。
+    #: 防短局 pathological 下局数爆炸；触顶 = 配额未满但停采 + 响亮日志。
+    max_games_per_stage: int = 0
     seeds: str = "0-3"
     player: PlayerBlock = PlayerBlock()
     dodge: Literal["", "off", "l0", "god"] = ""
@@ -963,6 +991,10 @@ class CourseConfig(BaseModel):
             "difficulty": "difficulty",
             "max_ticks": "max_ticks",
             "seed_rotate": "seed_rotate",
+            # 动态采集三键（缺席 = 老行为：args 走 rl-config/argparse 默认值 0）
+            "target_transitions": "target_transitions",
+            "est_ticks_per_game": "est_ticks_per_game",
+            "max_games_per_stage": "max_games_per_stage",
             "seeds": "seeds",
             "dodge": "dodge",
             "bc": "bc",
@@ -1126,6 +1158,17 @@ def corpus_identity_fp(course: CourseConfig) -> str:
         "dodge": course.dodge,
         "reward": course.reward.model_dump(),
     }
+    # 动态采集（2026-09-15）：target_transitions 与 seed_rotate 同类（决定**抽哪些**
+    # 样本），进身份；规则版本常量随之进（规则变更必须能让 D14 一眼分辨）。
+    # ⚠ **仅在键激活时进 payload**：无条件加入会让每一条既有课程的指纹全体漂移
+    # （D14 血缘断裂、在跑的腿 shard 被当异身份），与「缺席 = 老行为逐字节不变」
+    # （§2.1）直接矛盾。est/max_games 刻意**不进**：前者是首轮兜底估计、运行期由
+    # trailing 均值覆盖（预算/参数类，同 iters/max_hours 分类学），后者是硬顶不是语料。
+    if course.target_transitions > 0:
+        from rl.volume_waves import VOLUME_RULE_V1
+
+        payload["volume_rule"] = VOLUME_RULE_V1
+        payload["target_transitions"] = course.target_transitions
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 

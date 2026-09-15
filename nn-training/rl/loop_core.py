@@ -31,7 +31,15 @@ from rl.loop_guards import TrainingGuards
 from rl.loop_steps import SmokeVoidRoundError, TrainingSteps, kickstart_coef
 from rl.modes import get_backend
 from rl.queue import REPO_ROOT, RUN_ID
-from rl.resume import completed_pairs, last_completed_iter, last_rotate_seed, peak_entropy
+from rl.reports import combine_reports
+from rl.resume import (
+    completed_pairs,
+    last_completed_iter,
+    last_rotate_seed,
+    peak_entropy,
+    settled_stage_totals,
+    trailing_ticks_per_game,
+)
 from rl.rollout_phase import (
     dispatch_rollout_phase,
     join_precollect_child,
@@ -165,6 +173,15 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         self._traj_root = Path(args.traj)
         self._jsonl_path: Path = self._traj_root / "training_log.jsonl"
         self._rotate_seed = 0
+        # 动态采集（plan/dynamic-rollout-volume）：None = 本轮课程未开该模式，
+        # 事件字段随之留空（additive，旧行无此键）；开启时 = 目标/已结算 transitions。
+        self._volume_target: int | None = None
+        self._volume_collected: int | None = None
+        #: 本轮已跑的波次数（初波 = 1）与初波每关局数（硬顶默认值依赖它）。
+        self._volume_waves = 0
+        self._volume_g0 = 0
+        self._volume_est = 0
+        self._volume_capped = False
         self._rollout_sec = 0.0
         self._ppo_sec = 0.0
         self._total_steps = 0
@@ -248,7 +265,7 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 # M1c：本轮课程上下文（holder + ppo_schedule）——先于任何 shard 加载
                 self._course_iter(it)
                 log(f"[run_rl] === iteration {it}/{self._total} ===")
-                pairs = build_pairs(args, it, self._rotate_seed)
+                pairs = self._iteration_pairs(it)
                 # 动态读取节点配置（每轮一次）：有 enabled 节点 → 队列调度模式；
                 # nodes=[] / 文件缺失 → 现有纯本地路径零改动（字节一致回归基线）。
                 dist_cfg = dist_common.load_dist_config()
@@ -269,6 +286,9 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 # yield：rollout 抢占集群 —— 关 evalboard 窗，在途 B/C 局停派新 seed。
                 self._evalboard_yield()
                 self._rollout_phase(it, pairs, dist_cfg, self._eval_on_round(it))
+                # 动态采集：结算后按已落盘 transitions 逐关补波（v1 串行路径 only）。
+                # 补波属本轮的**采集**阶段，必须坐在 _log_report 之前（本轮报告要含补波）。
+                self._volume_topup(it, dist_cfg)
                 # P0 修复：为上一轮已完成权重 W(it-1) 派发干净评估（读归档、标权重轮），
                 # 游戏藏进随后 PPO(it) 空窗。串行路径此前在此处派发读活指针 = W(it-1)
                 # 却标 itN（标签超前一轮）；stream/intent/m1/基线路径维持原语义。
@@ -851,3 +871,250 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         self._eval_gate = eval_gate
         self._collect_child = collect_child
         self._spawned_early = spawned_early
+
+    # ------------------------------------------------- 动态采集（按样本量）
+    #
+    # plan/dynamic-rollout-volume.plan.md：课程用 target_transitions 代替固定局数做
+    # 配额，轮中按**已结算 transitions** 逐关补波。纯逻辑在 rl/volume_waves.py，
+    # 账本在 rl/resume.settled_stage_totals；本节只做接线 + 日志 + WAL。
+    #
+    # v1 边界（计划 §3-P0/P1 明确）：只接串行路径；stream/double-buffer 保持老语义
+    # （不再动它是为了让双缓冲那套墙钟优化不被这一版搅动）。
+
+    def _volume_active(self) -> bool:
+        """本课程是否开了动态采集（`target_transitions > 0`；缺席 = 一个函数都不调）。"""
+        return int(getattr(self.args, "target_transitions", 0) or 0) > 0
+
+    def _volume_stages(self) -> list[int]:
+        """动态采集的关集 = 课程声明的 stages（分关配额的分母）。
+
+        门控窗口（curriculum/rotate）与配额分关 v1 不兼容：两者的「本轮实际采样关」
+        是 it 的函数，而配额按固定关集反解——硬凑会让分关达标线与现实不符。响亮
+        SystemExit 而不是静默取一个关集（静默错分 = 采集量对不上目标，最难发现那种）。
+        """
+        args = self.args
+        if (
+            str(getattr(args, "curriculum_stages", "") or "")
+            or int(getattr(args, "rotate_stages", 0) or 0) > 0
+        ):
+            raise SystemExit(
+                "[volume] target_transitions 与 --curriculum-stages / --rotate-stages 的"
+                "门控窗口 v1 不兼容（配额按课程声明的关集分关）——改用显式 --stages"
+            )
+        from rl.course import parse_range
+
+        stages = parse_range(str(getattr(args, "stages", "0-3") or "0-3"))
+        if not stages:
+            raise SystemExit("[volume] --stages 解析为空集，无法分关配额")
+        return stages
+
+    def _volume_est_ticks(self) -> int:
+        """局均 tick 估计：jsonl 的 trailing 均值（可 replay），无历史落课程声明值。"""
+        declared = int(getattr(self.args, "est_ticks_per_game", 0) or 0)
+        return trailing_ticks_per_game(self._jsonl_path, window=5, fallback=declared)
+
+    def _iteration_pairs(self, it: int) -> list[tuple[int, int]]:
+        """本轮初波 (stage, seed)：动态采集走 volume，其余逐字节走 build_pairs。
+
+        老课程（无 target_transitions）= `build_pairs` 原路，逐字节不变（DoD 第一条）。
+        """
+        if not self._volume_active():
+            self._volume_target = None
+            self._volume_collected = None
+            return build_pairs(self.args, it, self._rotate_seed)
+        from rl.volume_waves import initial_games, wave_pairs
+
+        args = self.args
+        stages = self._volume_stages()
+        est = self._volume_est_ticks()
+        target = int(args.target_transitions)
+        g0 = initial_games(target, len(stages), est)
+        self._volume_target = target
+        self._volume_g0 = g0
+        self._volume_est = est
+        self._volume_waves = 1  # 初波已排上（下面的补波从 wave 1 起算）
+        self._volume_capped = False
+        # 初波**不进 WAL**：WAL 记的是「进入提交序列」的相位（plan §2.3.1 要求的是
+        # **补波决策**进账），而初波由 build 期一次性排定；给它开一个 start 而补波
+        # 之外无人 finish，只会让重启后的 pending 常驻一条假未完成。
+        pairs = wave_pairs(self._rotate_seed, it, {s: g0 for s in stages}, 0)
+        log(
+            f"[volume] it{it}: 初波 G0={g0}/关 × {len(stages)} 关 = {len(pairs)} 局 "
+            f"（target={target}t est={est}t/局 分关达标线={-(-target // len(stages))}t）"
+        )
+        return pairs
+
+    def _dispatch_volume_wave(
+        self, it: int, pairs: list[tuple[int, int]], dist_cfg: dict | None
+    ) -> dict:
+        """补波派发（复用首波同一派发路径，不另起调度器——计划 §3-P1）。
+
+        `eval_on_round=False`：补波不重复派 eval（本轮评估已在首波派发/延迟派发处理，
+        多派一次 = 重复评估 + 重复占集群）。stream 句柄一律丢弃（补波只走串行路径）。
+        """
+        (report, stream_meta, _thread, _gate, _child, _early) = dispatch_rollout_phase(
+            self.args,
+            self.bun,
+            dist_cfg,
+            it,
+            self._traj_dir,
+            pairs,
+            self._jsonl_path,
+            self._model,
+            self._opt,
+            self._device,
+            self.ppo_backend,
+            self.update_kwargs,
+            self._start_it,
+            self._ref_model,
+            self._extra_wver,
+            False,
+            course_fp=self._course_fp,
+        )
+        if stream_meta is not None:
+            raise SystemExit("[volume] 补波落到 stream 路径——v1 只支持串行路径")
+        return report
+
+    def _volume_journal_replay(self, it: int) -> Any:
+        """读 WAL：把本迭代的波次预算推到现在，并返回**未闭环**的那一波（待重放）。
+
+        为何不能只靠账本重算（2026-09-15 e2e 证伪）：`wave_idx` 是**决策**而不是账本的
+        函数——它同时是种子流的键（`[rotate_seed, tag, it, stage, wave]`）。重启后计数器
+        若从 1 重头，就会用 wave-1 的种子去补 wave-3 的缺口 = 同观测史、不同波次序列
+        （正是 plan §2.3.1 要禁止的「重新抛硬币」）。所以：
+          · 波次预算按 WAL 续算（跨重启**不重领额度**，防「崩了就拿新一轮 3 波」）；
+          · 停在波次中间（有 start 无 finish 的最后那一波）→ 原样重放它的对局表
+            （同 wave_idx ⇒ 同种子流；已结算的由调度器剔除，缺口原样补齐）。
+        """
+        from rl.volume_waves import parse_wave_records
+
+        path = Path(self._traj_dir) / "commit_journal.jsonl"
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return None
+        recs = parse_wave_records(lines, it)
+        if not recs:
+            return None
+        last = recs[max(recs)]
+        self._volume_waves = max(self._volume_waves, last.wave_idx + 1)
+        return None if last.finished else last
+
+    def _volume_topup(self, it: int, dist_cfg: dict | None) -> None:
+        """按已结算 transitions 逐关补波直到达标/触顶（计划 §2.2.3/2.2.4）。
+
+        账本口径：`settled_stage_totals`（只数已落盘 manifest 的 nSamples）——掉局零
+        样本天然触发补采；超时局的 transitions 是真实 on-policy 数据，计入。
+        每波决策进 WAL（`volume_wave` 相位）：预算跨重启续算（不重领额度），停在波次
+        中间的那一波按 WAL 的对局表原样重放。**不能只按账本重算**——`wave_idx` 是决策
+        而非账本的函数，它同时是种子流的键（首版「纯函数就够、无需重放」的假设已被
+        e2e 证伪，见 `_volume_journal_replay`）。
+        """
+        if not self._volume_active():
+            return
+        args = self.args
+        if self._stream_meta is not None:
+            log("[volume] 流式路径 v1 不补波（保持老语义）——本轮只按初波结算，配额缺口不在本轮补齐")
+            return
+        if int(getattr(args, "collect_only", 0) or 0):
+            return
+        import dist_common
+        from rl.volume_waves import (
+            DEFAULT_MAX_WAVES,
+            WAVE_PHASE,
+            plan_topup,
+            wave_pairs,
+            wave_round_key,
+        )
+
+        stages = self._volume_stages()
+        est = self._volume_est
+        cap = int(getattr(args, "max_games_per_stage", 0) or 0)
+        target = int(args.target_transitions)
+        journal = self._commit_journal()
+        collected_total = 0
+        # 重启续跑：先重放 WAL 里那一波未完成的决策（同 wave_idx + 同对局表 ⇒ 同种子流；
+        # 已结算的由调度器剔除），再按账本继续后面的波。
+        replay = self._volume_journal_replay(it)
+        if replay is not None and replay.games:
+            replay_pairs = wave_pairs(
+                self._rotate_seed, it, replay.games, replay.wave_idx
+            )
+            log(
+                f"[volume] it{it}: WAL 重放未完成的补波 w{replay.wave_idx} "
+                f"games={replay.games} → {len(replay_pairs)} 局（同种子流，不重抛硬币）"
+            )
+            replay_report = self._dispatch_volume_wave(it, replay_pairs, dist_cfg)
+            self._report = combine_reports([self._report, replay_report])
+        while True:
+            wver = dist_common.weights_fingerprint(args.out)
+            totals = settled_stage_totals(
+                self._traj_dir, wver, extra_wver=self._extra_wver, course_fp=self._course_fp
+            )
+            collected = {s: totals.get(s, (0, 0))[1] for s in stages}
+            games_done = {s: totals.get(s, (0, 0))[0] for s in stages}
+            collected_total = sum(collected.values())
+            plan = plan_topup(
+                stages=stages,
+                collected=collected,
+                target_transitions=target,
+                est_ticks_per_game=est,
+                waves_done=self._volume_waves,
+                games_done=games_done,
+                max_waves=DEFAULT_MAX_WAVES,
+                max_games_per_stage=cap,
+                initial_g0=self._volume_g0,
+            )
+            if not plan.games_by_stage:
+                met = [s for s, why in plan.stopped.items() if why == "quota_met"]
+                unmet = {s: why for s, why in plan.stopped.items() if why != "quota_met"}
+                if any(why == "game_cap" for why in unmet.values()):
+                    # 硬顶 = 配额未满但停采。必须响亮：否则「采够了」与「踩顶了」在
+                    # 日志上长得一模一样，而这正是长短局失衡 + est 偏差的指纹。
+                    self._volume_capped = True
+                    log(
+                        f"[volume] WARN it{it}: 触单关局数硬顶"
+                        f"（cap={cap or self._volume_g0 * 4}）但配额未满——"
+                        f"shortfall={plan.shortfall}；已停采，iteration 事件打 capped 标"
+                    )
+                log(
+                    f"[volume] it{it}: 补波收官 waves={self._volume_waves} "
+                    f"collected={collected_total}/{target}t 达标关={len(met)}/{len(stages)}"
+                    + (f" 未达标={unmet}" if unmet else "")
+                )
+                break
+            pairs = wave_pairs(self._rotate_seed, it, plan.games_by_stage, plan.wave_idx)
+            round_key = wave_round_key(it, plan.wave_idx)
+            journal.start(
+                WAVE_PHASE,
+                round_key,
+                wave_idx=plan.wave_idx,
+                games={str(s): n for s, n in plan.games_by_stage.items()},
+                collected={str(s): collected[s] for s in stages},
+                shortfall={str(s): plan.shortfall.get(s, 0) for s in stages},
+                target=target,
+                est=est,
+            )
+            log(
+                f"[volume] it{it}: 补波 w{plan.wave_idx} "
+                f"games={plan.games_by_stage}（缺口 {plan.shortfall}）→ {len(pairs)} 局"
+            )
+            wave_report = self._dispatch_volume_wave(it, pairs, dist_cfg)
+            # 报告合并（既有多轮聚合口径：combine_reports 吃单轮报告，与远端单局摘要同构）
+            self._report = combine_reports([self._report, wave_report])
+            self._volume_waves = plan.wave_idx + 1
+            journal.finish(
+                WAVE_PHASE,
+                round_key,
+                games={str(s): n for s, n in plan.games_by_stage.items()},
+            )
+            if plan.capped:
+                # 硬顶 = 配额未满但停采：必须响亮（否则「采够了」与「踩顶了」在日志上
+                # 长得一模一样，而这正是长短局失衡 + est 偏差的指纹）。
+                self._volume_capped = True
+                log(
+                    f"[volume] WARN it{it}: 触单关局数硬顶（cap={cap or self._volume_g0 * 4}）"
+                    f"但配额未满——shortfall={plan.shortfall}；已停采该关，"
+                    "iteration 事件打 transitions_capped"
+                )
+        self._volume_collected = collected_total

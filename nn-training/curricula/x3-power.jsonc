@@ -1,4 +1,6 @@
-// 课程 x3-power —— power 关命中信用重定价腿（standby，2026-09-14 起草，开工待命）
+// 课程 x3-power —— power 关命中信用重定价腿
+// 状态：**2026-09-15 07:15 核验就绪**（原 standby 待命项已全部落地：bc 已填、
+//   kl_cap 已按自定公式校准、开工前校准已登记、死段已声明）。开工阻塞见文件末「开工阻塞」。
 //
 // 背景：跨 count 稳定结构——含 power 关差 ~15-20pp（x2 门 ac/bc 0.63-0.66；
 // x3 it20 分关 acd 0.56/bcd 0.60 vs abc/abd 0.76-0.78；god 亦然）。败局画像
@@ -57,17 +59,19 @@
 //   按 codex 用阈值式 -wLate·max(0,ticks−target)（禁线性 wTick），另立项；
 // ③ 跨种子比较只认同一种子配对（评审 §1.4），日常 EVAL_SEEDS 数与门种子数永不混读。
 //
-// 环境：`"level": "arena3"`（与 x3-start 同环境；课程侧禁写环境键）。
-// 暖启：x3-start 当前最优归档（开工前填——x3 在跑，见下 bc 行占位）。
-// 开工上下文（2026-09-15 05:30）：x3 it333 正式门一（800 局）69.5%
+// 环境：`"level": "ladder-c03"`（与 arena3 逐关同形，arena3 已退役删除；
+//   探针表内关名仍写 abc…三元组（与 ladder-c03-abc…同内容），课程侧禁写环境键）。
+// 暖启：已填 = x3-start.it333（见下 bc 行；x3 主腿已于 05:34 人工停，归档 it1–it333 完整）。
+// 开工上下文（2026-09-15 05:30 实测）：x3 it333 正式门一（800 局）69.5%
 // （abc 73.5/abd 76.0/acd 60.0/bcd 68.5），67 轮日常 eval 横盘 0.65-0.72——
-// x3-start 按自设 60 轮证伪条款已触发判负条件；本腿开工时是否停 x3 主腿待用户决断。
+// x3-start 按自设 60 轮证伪条款已触发判负；**x3 主腿已停（用户 2026-09-15 决断）**，
+// 本腿由用户拍板接棒（同批 800 局对照：it180 69.375% / it280 67.75%，三点统计无差别）。
 //
-// 开工前校准（必做）：先跑一轮 rollout，读实测局均 tick，反推本腿 transitions/轮
-//   并登记（seed_rotate × 关数 × 局均tick）。x3 实测 967t/局 ⇒ 本腿
-//   60×4×967 ≈ 23 万 transitions/轮（登记基线）。日后若起加量腿，同式反解
-//   seed_rotate ＝ 目标量 ÷ 关数 ÷ 局均tick（如 60 万 ÷4÷967 ≈ 155/关），
-//   不许拍脑袋定局数。
+// 开工前校准（2026-09-15 07:15 **已登记**，取 it333 正式门一实测值）：
+//   局均 tick = **980**（x3-gate1.log：avgTicks 980；旧登记 967 来自早期探针，已更新）
+//   ⇒ 本腿 transitions/轮 = seed_rotate × 关数 × 局均tick = 60 × 4 × 980 ≈ **23.5 万**
+//   日后若起加量腿，同式反解 seed_rotate ＝ 目标量 ÷ 关数 ÷ 局均tick
+//   （如 60 万 ÷4÷980 ≈ 153/关），不许拍脑袋定局数。
 //
 // 启动（§5.6：禁裸 python，一律走启动器；用户手工开训）：
 //   bun dashboard/src/launch/cli.ts --script run_rl.py --course x3-power
@@ -75,7 +79,7 @@
   "version": 5,
   "name": "x3-power",
   "mode": "per-tick",
-  "level": "arena3",
+  "level": "ladder-c03",
 
   // 双关还是四关？四关（与 x3-start 同分布，verdict 可比；power 三关天然占 3/4
   // 权重，abc 作对照关——若 abc 跌而 power 关涨，说明信用比拆东墙补西墙）。
@@ -99,8 +103,14 @@
     "scheme": "toy",
   },
 
-  // ※ 占位：填 x3-start 最优归档后开工（如 nn-training/weights/x3-start/x3-start.itN.<ts>.json）。
-  "bc": "nn-training/weights/x3-start/REPLACE-WITH-BEST-AT-LAUNCH.json",
+  // 已填（2026-09-15 07:05）：x3-start 正式门一 800 局三点对照——
+  //   it333 556/800 = 69.5%（abc 73.5 / abd 76.0 / acd 60.0 / bcd 68.5）
+  //   it180 555/800 = 69.375% ; it280 542/800 = 67.75%
+  // it180 与 it333 差 1 局（800 局 SE≈1.6pp，统计上无差别）⇒ 选 it333：
+  // 末点、最新、与开工上下文的「正式门一」口径同源，verdict 配对基线即它本身。
+  // ※ it180 在日常 eval（50/关）显示 72.0% 是噪声峰，800 局口径下已证伪——
+  //   再次坐实「日常 50/关只做趋势不判决」（SE≈4.6pp 分辨不了 +5pp）。
+  "bc": "nn-training/weights/x3-start/x3-start.it333.20260915-052649.json",
   "kickstart_ref": true,
   // 必须为 0（config 硬校验；改 1 启动失败）。
   "warmup_iters": 0,
@@ -113,7 +123,10 @@
   "lam": 0.95,
 
   "ppo_schedule": [
-    { "until_iter": 40, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
+    // ※ 死段声明（2026-09-15 核验）：本腿 iters=30，第二段 until_iter=40 **永不触发**
+    // ⇒ 30 轮全程 lr 1.5e-4 + kl_coef 0.2 紧缰。这是与 x3-start「日程逐字同构」
+    // （单变量对照要求）的代价，有意保留，不是笔误。若用户选择放缰，改 40→20。
+    { "until_iter": 40, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.006 },
     { "kl_coef": 0.03, "lr": 0.00005 },
   ],
 
@@ -126,13 +139,69 @@
   "backup_dir": "nn-training/weights/x3-power",
   "backup_prefix": "x3-power",
 
-  // 护栏校准说明（对账评审 §2.1.3/8：kl_cap 0.2 vs 实测 KL 0.001-0.004 从未咬合；
-  // ent_break 0.25 碰上胜率>max_winrate(0.5) 按 breaker.py:123 结构性不触发）。
-  //  standby 阶段不盲调数值：开工前取 x3 同分布前 5 轮实测 KL 最大值×5 定 kl_cap，
-  // ent 沿用 0.25 地板 + 在此注明“胜局中不触发是设计如此（观察线），非故障”。
+  // 护栏校准 —— **已实测落地**（2026-09-15 07:15，不再是 standby 空话）：
+  // kl_cap：按本文件原定公式「x3 同分布前 5 轮实测 KL 最大值 × 5」定档。
+  //   实测（tmp/x3-start/training_log.jsonl）：it1-5 KL =
+  //   0.000505 / 0.000770 / 0.000769 / 0.001113 / 0.000936 ⇒ max = 0.001113
+  //   ⇒ kl_cap = 0.001113 × 5 = **0.0056 ⇒ 取 0.006**。
+  //   旧值 0.2 是 x2 沿用的工厂默认，比实测 KL 峰值（全 333 轮 max 0.00353）大
+  //   两个数量级 ⇒ 330 轮从未咬合，等同死护栏（对账评审 §2.1.3 结论）。
+  //   收紧到 0.006 后它仍是「几乎不触发」的量级（0.006 ≈ 实测峰值 0.0035 的 1.7 倍），
+  //   但一旦出现真正的策略跳变（如信用比改写引发的分布迁移）能立刻截住。
+  // ent_break 0.25：胜率 > max_winrate(0.5) 时按 breaker.py:123 结构性不触发——
+  //   **这是设计如此的观察线，不是故障**；本腿起点 69.5% > 0.5，故它整腿不触发。
   "ent_break": 0.25,
 
   "eval_stages": "2000-2003",
   "eval_games_per_stage": 50,
   "eval_every": 5,
 }
+
+// ── 开工阻塞（2026-09-15 07:15 核验）────────────────────────────────────────
+// ⚠ P0：唯一 enabled 的 GPU push 节点指向**已死 tunnel**。
+//   nn-training/rl-config.json 节点表：
+//     [0] https://dictionary-adrian-publishers-satisfactory.trycloudflare.com  enabled=true  ← 死
+//     [1] http://127.0.0.1:8443      (self) concurrency 8  enabled=true  ← 采集可用
+//     [2] http://192.168.0.88:8443   (mac)  concurrency 8  enabled=true  ← 采集可用
+//     其余 6 个节点 enabled=false
+//   节点[0] 自 05:27 起持续 HTTP 530（云机 worker 掉线），本机 cloudflared 进程
+//   已于 07:15 关闭 ⇒ **它现在必然 100% 失败**。
+//   开工前二选一（未做则必然重现 x3-start it334 的 wait_result 无限重试）：
+//     (a) 修云机 worker + 重起 cloudflared（tunnel URL 会变，需同步改 rl-config 节点[0]）；
+//     (b) 把节点[0] enabled 改 false，PPO 退回本地（ppo 段变慢，但 30 轮短腿可承受）。
+//   采集侧 self+mac 共 16 并发 ≥ workers 8，不受影响。
+//
+// ── 已验证（2026-09-15 07:15）──────────────────────────────────────────────
+//   探针：bun tools/sim/eval-course-ckpt.ts --course nn-training/levels/ladder-c03.jsonc
+//         --weights <it333 归档> --games 8 --seed0 860001   （1.4s，6/8，仅验管线）
+//   结论：ladder-c03 可加载；**stage 段确认为 2000=abc / 2001=abd / 2002=acd /
+//   2003=bcd**（与 eval_stages "2000-2003" 一致，与 arena3 同段）；暖启权重可正常推理。
+//   ⇒ verdict 的「acd+bcd 各 200 新种子」离线探针应指定 stages 2002,2003。
+//   局均 tick：探针 8 局 1026（n 太小），以 it333 正式门一 n=800 的 **980** 为准。
+//
+// ── verdict 执行规格（2026-09-15 预注册，开工后照此执行，禁止临场改口径）──────
+// 规模：**四关全跑 200/关 = 800 局 × 2（基线 it333 + 终点 it30）= 1600 局**，
+//   同批新种子（不得复用 x3-gate1 的 800 局——那是四关混跑且基线已含在 verdict 内）。
+//   成本 ≈ 5 分钟（实测 5.7 games/s），相对整腿 32 分钟可忽略。
+//   为何不只跑 acd+bcd（400×2）：(a) 200/关符合量级宪法（DECISIONS §…-gate-pooled）；
+//   (b) 能看 abc/abd 对照关是否「拆东墙补西墙」（本文件立项理由之一）；
+//   (c) 功效更硬，见下。
+// 判据：pooled Δ ≥ +5pp **且** McNemar 单侧 p < 0.05（点估计 alone 不算——
+//   x2-acbc 教训：+5pp 点估计在 n=100 下 p=0.125，是样本不足不是无效果）。
+// 功效（配对设计，只取决于 discordant 比例 pd；脚本 tmp/x3-power/power-analysis.py）：
+//     pd= 7%（x2-acbc 实测先例）⇒ power 98%，MDE(power80%) = +3.29pp
+//     pd=15%                    ⇒ power 83%
+//     pd=20%                    ⇒ power 72%
+//     pd=37%                    ⇒ power 50%（临界；但 pd 这么大时 Δ 不会只有 5pp）
+//   ⇒ Δ=+5pp 判据下功效充足（判据 5pp > MDE 3.29pp）。
+// **数学硬约束：Δ ≤ pd。** 若 30 轮后策略几乎没动（复现 x3-start 的 KL≈0.002 病根），
+//   pd < 5% ⇒ 根本观测不到 +5pp ⇒ 判负。此时结论**不得**写成「信用比无效」。
+//
+// 中途观察点（预注册，不用于提前判决）：it15 用同一批种子跑一次 800 局，
+//   配对 vs 基线，只看形状与方向；判决权只在 it30。
+//   目的：本腿日常 eval（50/关，SE≈4.6pp）分辨不了 +5pp ⇒ 若无中途点，
+//   整腿只有结尾一次判决机会、中途零纠偏。
+// 必读伴随量（缺一不可）：
+//   ① **KL**：it30 的 KL 若仍 ~0.002 ⇒ 判「梯度无方向 / 执行瓶颈」，指向 metrics v6；
+//      只有 KL 显著放大（如 ≥0.01）而 Δ 仍 ≈0，才能说「信用比无效」。
+//   ② shots/kills：熔断轴——shots 崩或 kills 不升反降即停（s-dodge 教训）。

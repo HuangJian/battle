@@ -114,6 +114,12 @@ def write_iteration(jsonl_path: Path, args, it: int, report: dict, m: dict) -> N
             # R5§363：缰绳遥测（旧 agg 无此键 → None，不破兼容）。
             "kickstart": (agg.get("kickstart") if agg else None),
             "lr": args.lr,
+            # 动态采集（plan/dynamic-rollout-volume §2.4.3）：本轮配额与已结算量；
+            # 未开该模式的课程为 None（additive，旧行无此键）。
+            "transitions_target": m.get("transitions_target"),
+            "transitions_collected": m.get("transitions_collected"),
+            #: 触单关局数硬顶而配额未满（长短局失衡 / est 偏差的指纹）。
+            "transitions_capped": m.get("transitions_capped"),
             # P1-12：reward/dodge 臂版本落盘（历史实验可归因——
             # 此前奖励规格无记录，复盘无法区分 v7/toy 臂）
             "reward": getattr(args, "reward", ""),

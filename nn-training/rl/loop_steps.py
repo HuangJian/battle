@@ -301,6 +301,10 @@ class TrainingSteps:
     _tail_drain_sec: Any
     _waves_n: Any
     _eval_join_sec: float
+    #: 动态采集（plan/dynamic-rollout-volume）：None = 本轮课程未开该模式。
+    _volume_target: int | None
+    _volume_collected: int | None
+    _volume_capped: bool
     #: bun 可执行文件路径（TrainingLoop 持有；延迟 eval 派发传给评估子进程）。
     bun: str
     #: 上轮节点配置快照（loop 每轮热读；drain 复用最近一份）。
@@ -1200,5 +1204,9 @@ class TrainingSteps:
                 "load_sec": self._load_sec,
                 "tail_drain_sec": self._tail_drain_sec,
                 "eval_join_sec": self._eval_join_sec,
+                # 动态采集（None = 未开该模式；additive 字段，旧行无此键）
+                "transitions_target": self._volume_target,
+                "transitions_collected": self._volume_collected,
+                "transitions_capped": True if self._volume_capped else None,
             },
         )
