@@ -66,8 +66,16 @@ export interface IterRow {
   scoreMean: number
   scoreStd: number
   samples: number
+  /** 采集窗口墙钟（collector 退出锚点；流式含与 PPO 重叠的墙钟）。 */
   rolloutSec: number
+  /** 更新墙钟：本机/流式 = 纯训练；远端 = 往返（含打包/上传/排队/下载）。 */
   ppoSec: number
+  /** 纯采集秒（末局结算 − 权重分发完毕）；旧账本无此键 → null（回退 rolloutSec）。 */
+  pureCollectSec: number | null
+  /** 云端/本机真训练秒；旧账本无此键 → null（回退 ppoSec）。 */
+  ppoCloudSec: number | null
+  /** 权重下发阶段（ping+POST）秒；旧账本无此键 → null（按 0 计）。 */
+  distPhaseSec: number | null
   kl: number
   entropy: number
   policyLoss: number

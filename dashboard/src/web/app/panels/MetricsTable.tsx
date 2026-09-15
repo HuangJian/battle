@@ -7,6 +7,7 @@ import {
   filterGroups,
   fmtOverfitGap,
   fmtPct,
+  fmtPhaseSecs,
   iterGroups,
   klTone,
   OVERFIT_COL_TITLE,
@@ -16,6 +17,8 @@ import {
   pairedBaselineOf,
   pairedTone,
   pairedVerdictText,
+  phaseSecs,
+  phaseSecsTitle,
   retTone,
   TC_METRICS_FILTER,
   winTone,
@@ -400,23 +403,12 @@ function buildMetricCols(
     overfitCol(),
     ...skillCols(),
     {
-      key: 'rolloutSec',
-      label: 'rollout',
+      key: 'phaseSecs',
+      label: 'rollout/ppo/net',
       align: 'num',
       cell: (r) =>
         r.kind === 'main' ? (
-          `${r.main.rolloutSec.toFixed(0)}s`
-        ) : (
-          <span className="tc-muted">-</span>
-        ),
-    },
-    {
-      key: 'ppoSec',
-      label: 'PPO/eval',
-      align: 'num',
-      cell: (r) =>
-        r.kind === 'main' ? (
-          `${r.main.ppoSec.toFixed(0)}s`
+          <span title={phaseSecsTitle(phaseSecs(r.main))}>{fmtPhaseSecs(phaseSecs(r.main))}</span>
         ) : (
           <span title="eval 窗口用时" className="tc-num">
             {r.eval.sec.toFixed(0)}s

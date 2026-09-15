@@ -123,6 +123,48 @@ export function fmtBytes(b: number | null | undefined): string {
   return `${(b / 1024 / 1024).toFixed(1)} MB`
 }
 
+/** 阶段耗时三元组（rollout=纯采集 · ppo=真训练 · net=网络/传输/排队）。 */
+export interface PhaseSecs {
+  rollout: number
+  ppo: number
+  net: number
+}
+
+/**
+ * 从 IterRow 拆出准确阶段耗时。
+ * - rollout：优先 pureCollectSec（末局结算−权重下发完毕）；旧账本回退 rolloutSec。
+ * - ppo：优先 ppoCloudSec（云端自报真训练秒）；旧账本/本机回退 ppoSec。
+ * - net：权重下发（distPhaseSec）+ 远端往返超出真训练的部分（ppoSec−ppoCloudSec）。
+ *   本机/流式（ppoCloudSec 缺失或 == ppoSec）时 ppo 侧净开销为 0。
+ */
+export function phaseSecs(r: {
+  rolloutSec: number
+  ppoSec: number
+  pureCollectSec?: number | null
+  ppoCloudSec?: number | null
+  distPhaseSec?: number | null
+}): PhaseSecs {
+  const rollout = r.pureCollectSec != null ? r.pureCollectSec : r.rolloutSec
+  const ppo = r.ppoCloudSec != null ? r.ppoCloudSec : r.ppoSec
+  const dist = r.distPhaseSec ?? 0
+  const ppoNet = r.ppoCloudSec != null ? Math.max(0, r.ppoSec - r.ppoCloudSec) : 0
+  return { rollout, ppo, net: dist + ppoNet }
+}
+
+/** 阶段耗时展示：`120/80/15s`（rollout/ppo/net，整秒）。 */
+export function fmtPhaseSecs(p: PhaseSecs): string {
+  return `${p.rollout.toFixed(0)}/${p.ppo.toFixed(0)}/${p.net.toFixed(0)}s`
+}
+
+/** 阶段耗时 hover：把三段拆开写清楚，避免再把网络算进训练。 */
+export function phaseSecsTitle(p: PhaseSecs): string {
+  return (
+    `rollout 纯采集 ${p.rollout.toFixed(0)}s · ` +
+    `ppo 真训练 ${p.ppo.toFixed(0)}s · ` +
+    `net 网络/排队 ${p.net.toFixed(0)}s`
+  )
+}
+
 /** 剥离文本开头的 ISO 时间戳前缀（sampler-agent lastError 的 `new Date().toISOString()` 前缀）。 */
 export function stripIsoPrefix(text: string): string {
   return text.replace(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z?\s*/, '')

@@ -7,6 +7,7 @@ import {
   fmtPaired,
   fmtPct,
   fmtOverfitGap,
+  fmtPhaseSecs,
   heroMainRows,
   iterGroups,
   klTone,
@@ -19,6 +20,8 @@ import {
   pairedBaselineOf,
   pairedTone,
   pairedVerdictText,
+  phaseSecs,
+  phaseSecsTitle,
   retTone,
   TC_HERO_ITER_VIEW,
   TC_HERO_ITERS_COLLAPSED,
@@ -192,8 +195,9 @@ function MainTable({
           <th className="tc-num" title="每局平均道具">
             道具
           </th>
-          <th className="tc-num">rollout</th>
-          <th className="tc-num">PPO</th>
+          <th className="tc-num" title="rollout 纯采集 / ppo 真训练 / net 网络·排队">
+            rollout/ppo/net
+          </th>
           <th className="tc-num">得分</th>
           <th>KL</th>
           <th className="tc-num">熵</th>
@@ -279,8 +283,9 @@ function MainTable({
                 </span>
               )}
             </td>
-            <td className="tc-num">{r.rolloutSec.toFixed(0)}s</td>
-            <td className="tc-num">{r.ppoSec.toFixed(0)}s</td>
+            <td className="tc-num" title={phaseSecsTitle(phaseSecs(r))}>
+              {fmtPhaseSecs(phaseSecs(r))}
+            </td>
             <td className="tc-num">{r.scoreMean.toFixed(4)}</td>
             <td>
               <Badge tone={klTone(r.kl)}>{r.kl.toFixed(4)}</Badge>

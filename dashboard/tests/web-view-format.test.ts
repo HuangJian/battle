@@ -13,10 +13,13 @@ import {
   fmtFullTs,
   fmtOverfitGap,
   fmtPct,
+  fmtPhaseSecs,
   fmtTs,
   OVERFIT_COL_TITLE,
   overfitCellTitle,
   overfitTone,
+  phaseSecs,
+  phaseSecsTitle,
   stripIsoPrefix,
 } from '../src/web/view'
 
@@ -60,5 +63,44 @@ describe('view 纯函数：时间与文本', () => {
     expect(overfitCellTitle({ anchorWr: 0.655, rotorWr: 0.735, overfitGapPp: -8 })).toContain(
       '锚点',
     )
+  })
+})
+
+describe('phaseSecs：rollout/ppo/net 准确拆分', () => {
+  it('远端 pull：纯采集 + 真训练 + 网络（下发 + 往返超出）', () => {
+    const p = phaseSecs({
+      rolloutSec: 400,
+      ppoSec: 120,
+      pureCollectSec: 350,
+      ppoCloudSec: 80,
+      distPhaseSec: 20,
+    })
+    expect(p).toEqual({ rollout: 350, ppo: 80, net: 60 }) // 20 dist + 40 (120-80)
+    expect(fmtPhaseSecs(p)).toBe('350/80/60s')
+    expect(phaseSecsTitle(p)).toContain('纯采集')
+  })
+
+  it('本机/流式：无 cloud 拆分 → net 仅 dist；ppo 回退 ppoSec', () => {
+    expect(
+      phaseSecs({
+        rolloutSec: 200,
+        ppoSec: 90,
+        pureCollectSec: null,
+        ppoCloudSec: null,
+        distPhaseSec: 5,
+      }),
+    ).toEqual({ rollout: 200, ppo: 90, net: 5 })
+  })
+
+  it('旧账本（全缺）→ 回退 rollout/ppo，net=0', () => {
+    expect(
+      phaseSecs({
+        rolloutSec: 60,
+        ppoSec: 40,
+        pureCollectSec: null,
+        ppoCloudSec: null,
+        distPhaseSec: null,
+      }),
+    ).toEqual({ rollout: 60, ppo: 40, net: 0 })
   })
 })
