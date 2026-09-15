@@ -12,6 +12,12 @@
 #   换用 pytest-xdist（colorama 已修复 + conftest tmp_path 覆盖消除沙箱问题）。
 #   4 worker 为本机最优点（16 核，但 torch import 开销 + 单函数 test_integration
 #   13.9s 不可再分，更多 worker 反而更慢）。
+# 单测墙钟护栏（2026-09-15）：pytest 加 `--timeout=${NN_PYTEST_TIMEOUT_S:-50000}`
+#  ——与 task.py check 同款 50s/用例（本仓最慢单测实测 22s，5 万 ms 有 2 倍余量）。
+#   背景：编码 agent 沙箱里全量曾「~34% 处 hang」（2026-09-15 Mimo；2026-09-14 无按键
+#   KeyboardInterrupt 见 memory 记录）——无超时时门禁永远挂着，agent 反复重试 commit。
+#   现在超时 → 响亮超时报错 + 调用栈，可诊断可重试；被误伤（慢机超 50s）可
+#   NN_PYTEST_TIMEOUT_S=120000 调大，勿直接删超时。
 #
 # 跳过单个工具（逗号分隔）：
 #   NN_GATE_SKIP=ruff,mypy bash tools/githook/nn-python-gate.sh
@@ -77,8 +83,8 @@ fi
 if has_skip pytest; then
   echo " ▸ pytest skipped（NN_GATE_SKIP=$SKIP_LIST）"
 else
-  # v3.15 全量：xdist -n 4 跑全量（含 heavy/integration），~17s。
-  "$NN_PY" -m pytest tests/ -n 4 -q & PIDS="$PIDS $!"
+  # 全量：xdist -n 4，带单测墙钟护栏（--timeout，见文件头）。
+  "$NN_PY" -m pytest tests/ -n 4 -q --timeout="${NN_PYTEST_TIMEOUT_S:-50000}" & PIDS="$PIDS $!"
 fi
 
 t0=$(date +%s)
