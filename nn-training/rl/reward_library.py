@@ -572,12 +572,15 @@ class CompiledFormula:
                 )
             env.update(outcome_virtuals(outcome))
         with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-            out = self._eval(self._parsed.tree.body, env)
-        out = cast(np.ndarray, np.asarray(out, dtype=np.float64))
+            raw = self._eval(self._parsed.tree.body, env)
         # numpy 2.x 桩对 Any 入参返回 Any（_eval 是 Any）；运行时 asarray 必为 ndarray，
-        # cast 是类型层承诺，无运行时行为。
+        # cast 是类型层承诺，无运行时行为。原始值先落 `raw`（Any），再以**显式标注**的
+        # `out` 承接 —— 标注不能直接写在上面那句上（out 会与 raw 同名重定义，mypy
+        # no-redef）；下面分支里的 broadcast_to(...).astype(...) 在桩里同样返回 Any，
+        # 所以也要 cast（2026-09-15：这是 CI mypy 清零的最后一处 no-any-return）。
+        out: np.ndarray = cast(np.ndarray, np.asarray(raw, dtype=np.float64))
         if out.shape != (m.shape[0],):
-            out = np.broadcast_to(out, (m.shape[0],)).astype(np.float64)
+            out = cast(np.ndarray, np.broadcast_to(out, (m.shape[0],)).astype(np.float64))
         if not np.all(np.isfinite(out)):
             raise FormulaError("Φ 求值出现非有限值（除零/溢出）——拒绝污染 GAE")
         return out

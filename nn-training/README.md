@@ -121,11 +121,11 @@ make check               # 或:  python task.py check
 make lint                # 或:  python task.py lint
 make typecheck           # 或:  python task.py typecheck
 
-# ── 测试分层 ──
-make test-fast           # 快速层（纯逻辑 + 无 torch/bun） ≈ 2 s
-make test                # 全量 pytest（含 torch 测试）
-python tests/test_run_rl.py    # 常驻回归（集成层，可单独运行）
-RUN_RL_ITEST=1 python tests/test_run_rl.py   # 启用假 HTTP agent 集成层
+# ── 测试分层（层 = 路径：tests/ 单测层 · e2e/ 集成层）──
+make test-fast           # 单测层（tests/）
+make test-e2e            # 集成层（e2e/，hermetic：不需 bun/真节点/weights）
+make test                # 全量（tests/ + e2e/）
+make check               # lint + typecheck + 全量 —— 与 pre-commit 同一套判定集
 
 # ── 清理 ──
 make clean               # 删除 __pycache__ / *.log / 临时产物，保留 weights/
@@ -178,7 +178,8 @@ python bootstrap.py          # 探测 → 装 → 自检，全自动
 ## 改动红线（本目录内有效，不得突破）
 
 1. **不碰生产算法**：PPO / BC / 课程 / 熔断 / 镜像增强的逻辑行不在此工程化范围内。
-2. **不新增运行时行为**：commit 不改变 `python tests/test_run_rl.py` 的输出（ALL PASS 集合）。
+2. **不新增运行时行为**：commit 不改变集成层回归（`e2e/test_run_rl.py`）的输出
+   （ALL PASS 集合）。
 3. **不删测试**：搬迁后的原函数体必须同步从 test_run_rl.py 中删除以避免重复定义。
 4. **不引入新依赖**：Python 侧仅用 torch / numpy + stdlib；工具链（ruff/mypy/pytest）是 dev-only。
 5. **不扩大 scope**：Mermaid 图入口（`run_rl.py` 的 CLI 解析块）暂不拆——改动影响三模式调度。
@@ -187,18 +188,14 @@ python bootstrap.py          # 探测 → 装 → 自检，全自动
 
 ## 分层测试策略
 
-| 文件 | 触发 | 速度 | 依赖 |
+| 文件 | 层（路径） | 触发 | 依赖 |
 |------|------|------|------|
-| `tests/test_rl_*.py` | `make test-fast` / pytest | < 2 s | 仅 stdlib |
-| `tests/test_run_rl.py` | `python tests/test_run_rl.py` | ≈ 5 s | numpy + run_rl 编排 |
-| `tests/test_run_rl.py --itest` | `RUN_RL_ITEST=1` | ≈ 30 s | bun + tmp fixture |
-| `tests/test_ppo_*.py` | pytest | ≈ 5 s | torch |
-| `tests/test_rl_model.py` | pytest | ≈ 5 s | torch |
-| `tests/test_student_model.py` | pytest | ≈ 5 s | torch |
-| `tests/test_train_loop_pure.py` | pytest | < 2 s | stdlib |
-| `tests/test_upgrade.py` | pytest | < 2 s | stdlib |
+| `tests/**` | 单测层 | `make test-fast` / 门禁 / CI | stdlib + torch |
+| `e2e/test_run_rl.py` | 集成层 | 门禁 / CI（`pytest e2e/`） | numpy + run_rl 编排（不需 bun） |
+| `e2e/test_run_rl.py --itest` | 集成层 | `RUN_RL_ITEST=1`（standalone 入口） | 同上 |
+| `e2e/test_volume_e2e.py` 等 | 集成层 | 门禁 / CI（`pytest e2e/`） | numpy + 本机假 HTTP 节点 |
 
-先跑 make test-fast，再跑 python tests/test_run_rl.py，最后集成层。
+两层是同一次 xdist 调用（门禁）或 CI 的两步；单跑某层用 `make test-fast` / `make test-e2e`。
 
 ---
 
@@ -262,7 +259,7 @@ TS 门禁（typecheck / bun test / oxfmt / oxlint / freeze gate）外，额外�
 ```sh
 python -m ruff check .              # lint
 python -m mypy . --config-file pyproject.toml   # typecheck
-python -m pytest tests/             # 全量测试
+python -m pytest tests/ e2e/        # 全量：单测层 + 集成层
 ```
 
 任一失败即阻止提交。跳过方式（二选一）：
@@ -281,15 +278,17 @@ git commit --no-verify ...               # 跳过全部门禁
 自定位 nn-training 与 venv，从仓库根或任意目录执行）：
 
 ```sh
-bash tools/githook/nn-python-gate.sh [n_shards]   # 默认 4 路分片，~12s
-make -C nn-training python-gate                    # Makefile 入口（SHARDS 可调）
+bash tools/githook/nn-python-gate.sh        # 默认 xdist -n 4，NN_GATE_NPROC 可调
+make -C nn-training python-gate             # Makefile 入口（= make check）
 ```
 
-并行架构：ruff + mypy（热缓存 ~4s）+ pytest 4 路分片（`nn-gate-shards.py`
-独立进程并行，~12s）同时跑。跳过单项：
+并行架构：ruff + mypy（热缓存 ~4s）+ pytest xdist（`-n 4`，目标 `tests/ e2e/`）
+三路并行；pytest 步的墙钟由最慢的单个用例与 xdist 分发决定（实测本机 16 核 ~27s）。
+跳过单项：
 
 ```sh
 NN_GATE_SKIP=ruff,mypy bash tools/githook/nn-python-gate.sh
+NN_GATE_SKIP_E2E=1 bash tools/githook/nn-python-gate.sh   # 只退集成层（保单测层）
 ```
 
 ### 测试临时目录自动清理

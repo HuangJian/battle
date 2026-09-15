@@ -1,5 +1,8 @@
-# CI for nn-training: lint + typecheck + fast tests
-# Integration tests (RUN_RL_ITEST=1) require bun + weights fixture - skipped in CI.
+# CI for nn-training: lint + typecheck + unit tests + e2e tests
+# 2026-09-15：旧的「Integration tests (RUN_RL_ITEST=1) require bun + weights
+# fixture - skipped in CI」说明**已过期**。e2e/ 自 60e5f69 起是 hermetic 的
+# （FakeServer + tmp 落盘；不需要 bun / 真节点 / weights fixture，实测把 bun 从
+# PATH 摘掉仍 70 例全绿），因此它现在是 CI 的一等层。
 name: nn-training
 
 on:
@@ -47,11 +50,26 @@ jobs:
       - name: ruff lint
         run: uv run ruff check . --config pyproject.toml
 
+      # 2026-09-15：原为 `continue-on-error: true` + 一句注释里的错误数快照。
+      # 那个数字是 733b66f（首次加 CI）时的快照，此后 mypy 目标升到 3.12（正是那次
+      # 消灭了大批 site-packages 假红）+ 几处放宽，真实错误数一路降到 1；最后一条
+      # （rl/reward_library.py 的 no-any-return）也已修掉 ⇒ 现在要求**零错误**。
+      # 零容忍比「计数基线」更强（换一个错误也算红），也不再要一份会腐烂的数字。
+      # **不要再加 continue-on-error** —— 那等于把会腐烂的基线又请回来。
       - name: mypy typecheck
         run: uv run mypy . --config-file pyproject.toml
-        continue-on-error: true # baseline: 121 pre-existing errors; reported not blocked
 
-      - name: fast test layer
-        run: |
-          uv run pytest tests/ -v -q --no-header
-          uv run python test_run_rl.py
+      # 层 = 路径：tests/ 单测层、e2e/ 集成层（本机 python-gate 同一划分）。
+      # 旧版末步是 `uv run python test_run_rl.py` —— cwd 是 nn-training，而该文件在
+      # 60e5f69 已被搬到 e2e/，于是这一步自那以后每跑必挂（且无 continue-on-error）。
+      # 其覆盖已包含在下面的 e2e 层里（pytest 收集同一批用例）。
+      - name: unit layer (tests/)
+        run: uv run pytest tests/ -q --no-header
+
+      - name: e2e layer (e2e/)
+        # -n 2：GitHub runner 只有 2-4 vCPU（本机 python-gate 用 -n 4 是 16 核下的最优点，
+        # 照抄到 runner 就是超订）。备注：仓库记录过的 test_bc_epoch_e2e 负载型 flake
+        # （docs/nn.progress.md §313）已于 2026-09-15 修根因（该测试只等 bc_epoch 就回
+        # result，漏等了随后断言的 bc_eval），所以这里的 -n 2 是**按机器规模**选的，
+        # 不是为了绕 flake。
+        run: uv run pytest e2e/ -n 2 -q

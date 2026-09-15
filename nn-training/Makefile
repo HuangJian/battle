@@ -2,9 +2,10 @@
 #
 # Usage:
 #   make setup          One-command env bootstrap (GPU detect -> torch variant -> uv sync)
-#   make check          Lint + typecheck + test-fast
-#   make test           Full test suite
-#   make test-fast      Fast layer only
+#   make check          Lint + typecheck + 全量测试（== pre-commit 门禁，同一套）
+#   make test           Full test suite（单测层 + 集成层）
+#   make test-fast      Unit layer only（tests/，无 e2e）
+#   make test-e2e       Integration layer only（e2e/）
 #   make smoke          Torch import check + smoke_test
 #   make clean          Remove temporary artifacts (preserves weights/)
 #   make format         Auto-format with ruff
@@ -16,7 +17,11 @@
 #
 # Note: Windows users without `make` can use `python task.py <target>` instead.
 
-.PHONY: check test test-fast smoke clean format lint typecheck setup
+.PHONY: check test test-fast test-e2e smoke clean format lint typecheck setup
+# 层 = 路径（2026-09-15）：tests/ = 单测层、e2e/ = 集成层。旧 `-m "not heavy"` 已删——
+# tests/ 里 heavy 标记实测 0 个，那个过滤早已空转（标记唯一的家 e2e/ 又从未被过滤）。
+# e2e/ 自 60e5f69 起 hermetic（FakeServer + tmp 落盘，不需 bun / 真节点 / weights），
+# 因此它进了门禁：`make check` 与 pre-commit 判定集完全一致，不会“hook 严、日常松”。
 .PHONY: weights-prune weights-prune-apply weights-update-md
 
 PYTHON        ?= python
@@ -52,19 +57,23 @@ endif
 setup:
 	python bootstrap.py
 
-check: lint typecheck test-fast
+# check 直接委派给门禁脚本——单一实现，杜绝“日常命令”与“提交门禁”漂移。
+check: python-gate
 
-# 并行门禁（v3.15 2026-09-03）：ruff + mypy + pytest xdist -n 4 同时跑，~8s。
-# 与 pre-commit hook 共用同一入口（tools/githook/nn-python-gate.sh），日常开发
-# 用 make python-gate 即可获得与提交时一致的质量门禁。
+# 并行门禁（v3.15 2026-09-03）：ruff + mypy + pytest xdist -n 4 同时跑。
+# 与 pre-commit hook 共用同一入口（tools/githook/nn-python-gate.sh）——
+# 目标 = tests/（单测层）+ e2e/（集成层），NN_GATE_NPROC 可调 worker 数。
 python-gate:
 	bash ../tools/githook/nn-python-gate.sh
 
-test: 
-	$(PREFIX) $(PYTHON) -m pytest tests/ -n auto -q
+test:
+	$(PREFIX) $(PYTHON) -m pytest tests/ e2e/ -n 4 -q
 
 test-fast:
-	$(PREFIX) $(PYTHON) -m pytest tests/ -n auto -q -m "not heavy"
+	$(PREFIX) $(PYTHON) -m pytest tests/ -n 4 -q
+
+test-e2e:
+	$(PREFIX) $(PYTHON) -m pytest e2e/ -n 4 -q
 
 smoke:
 	$(PREFIX) $(PYTHON) -c "import torch; print('torch', torch.__version__)"

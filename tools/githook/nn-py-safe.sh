@@ -36,14 +36,30 @@ fi
 # pytest 专属：外层再加**墙钟 watchdog**（NN_PYTEST_WALL_S 默认 480s）——60s per-test
 # 超时兜不住 C 层原生阻塞（subprocess.wait/文件锁，实测沙箱下 test_rollout_volume 卡住
 # 不触发），进程外 watchdog 连树杀才兜得住（tools/githook/nn-wall.py）。非 pytest 透传。
-if [ "$1" = "-m" ] && [ "${2:-}" = "pytest" ]; then
+if [ "${1:-}" = "-m" ] && [ "${2:-}" = "pytest" ]; then
   # MSYS 把 /mnt/d、/d 这类 POSIX 路径传给原生 python.exe 时会映射错（实测 → D:\mnt\d\…）
   # 用纯 sed 转 Windows 盘符路径，不依赖 pwd -W；内层命令经 wall(python) 再 spawn 时
   # 的 exe 路径也必须 Windows 形态，否则 CreateProcess 找不到文件。
-  _hdir_win=$(printf '%s' "$_hdir" | sed -E 's|^/mnt/([a-z])|\1:|; s|^/([a-z])|\1:|; s|/|\\|g')
-  _py_win=$(printf '%s' "$PY_BIN" | sed -E 's|^/mnt/([a-z])|\1:|; s|^/([a-z])|\1:|; s|/|\\|g')
+  # 2026-09-15：**仅在 MSYS/MINGW 下改写**。该 sed 是无条件套用的，于是原生 Linux 的
+  #   /home/<user>/battle/tools/githook 被 `s|^/([a-z])|\1:|` 误伤成 h:ome/hj/…
+  #   ⇒ exit 2「can't open file '…/nn-wall.py'」——钦定的唯一 pytest 入口在 Linux 上
+  #   直接不可用（实测本机）。原生平台下 POSIX 路径本来就是对的（python 也是原生二进制），
+  #   原样透传即可。
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) _win_paths=1 ;;
+    *) _win_paths=0 ;;
+  esac
+  _sep='/'
+  if [ "$_win_paths" = "1" ]; then
+    _sep='\'
+    _hdir_win=$(printf '%s' "$_hdir" | sed -E 's|^/mnt/([a-z])|\1:|; s|^/([a-z])|\1:|; s|/|\\|g')
+    _py_win=$(printf '%s' "$PY_BIN" | sed -E 's|^/mnt/([a-z])|\1:|; s|^/([a-z])|\1:|; s|/|\\|g')
+  else
+    _hdir_win=$_hdir
+    _py_win=$PY_BIN
+  fi
   # exec 用 MSYS 路径（bash 不认 d:\ 形态）；wall 内层再 spawn 的 exe 用 Windows 反斜杠形态
-  exec "$PY_BIN" -S "$_hdir_win\\nn-wall.py" --wall "${NN_PYTEST_WALL_S:-480}" -- "$_py_win" "$@"
+  exec "$PY_BIN" -S "${_hdir_win}${_sep}nn-wall.py" --wall "${NN_PYTEST_WALL_S:-480}" -- "$_py_win" "$@"
 fi
 
 exec "$PY_BIN" "$@"

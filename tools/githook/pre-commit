@@ -37,8 +37,10 @@
 #                   排除 dashboard/）时运行；dashboard TS 与纯 md/nn-training
 #                   不可能改变 det 签名
 #
-#   逃生口：NN_GATE_SKIP=<tools>（python 单工具，已有）、SKIP_BUN_TEST=1、
-#   SKIP_DASHBOARD_GATE=1、--no-verify（全跳，最后手段）。
+#   逃生口：NN_GATE_SKIP=<tools>（python 单工具，已有）、NN_GATE_SKIP_E2E=1
+#   （只退 python 门禁里的 e2e 集成层，单测层照跑——e2e 有竞速/负载敏感用例，
+#   见 docs/nn.progress.md §313）、SKIP_BUN_TEST=1、SKIP_DASHBOARD_GATE=1、
+#   --no-verify（全跳，最后手段）。
 #   --selftest：不跑门禁，只对归因解析器跑内置断言（改本 hook 必跑）。
 #
 #   铁律：除 oxfmt 对「无未暂存改动的 staged 文件」的精确格式化外，本 hook
@@ -251,7 +253,9 @@ if [ -n "$NN_STAGED" ]; then
     GATE_RC=0
     # stdin 丢弃：避免任何子进程继承 git 的 stdio 管道（Windows 上 git 会一直
     # 等 pipe EOF → 门禁全绿后 commit 卡死，2026-09-15）。
-    NN_GATE_SKIP="$GATE_SKIP" sh "$TOP/tools/githook/nn-python-gate.sh" 4 \
+    # 不再传位置参数（历史上那个 `4` = 旧 nn-gate-shards.py 的分片数，工具已删）：
+    # xdist worker 数现由 NN_GATE_NPROC 控制（脚本默认 4）。
+    NN_GATE_SKIP="$GATE_SKIP" sh "$TOP/tools/githook/nn-python-gate.sh" \
       > "$GATE_LOG" 2>&1 < /dev/null || GATE_RC=$?
     cat "$GATE_LOG"
     if [ "$GATE_RC" -ne 0 ]; then

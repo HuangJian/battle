@@ -16,9 +16,11 @@ PPO 不参与（本验证只覆盖「采多少」）。
   ④ 尾部竞速下的配额算术（tail fan-out + dup 副本）：绝不重复计数；白跑的局（dup_settle
      把共享 shard 目录退休）按掉局处理、被补波补回；补不回必须响亮（未达标清单）。
 
-运行（不进 python-gate，需显式指定）：
+运行（集成层；2026-09-15 起随 e2e/ 一并进入 python-gate 与 CI）：
 
-    cd nn-training && .venv/Scripts/python -m pytest e2e/test_volume_e2e.py -q
+    bash tools/githook/nn-py-safe.sh -m pytest e2e/test_volume_e2e.py -n 4 -q
+
+（勿用裸 `python -m pytest`——AGENTS §0.1-13：沙箱删除守卫下会静默挂死。）
 """
 
 from __future__ import annotations
@@ -49,8 +51,6 @@ from platform_utils import rmtree_best_effort
 from rl.loop_core import TrainingLoop
 from rl.reward_library import METRICS_DIM
 from schema import BOARD, FIRE_DIM, MASK_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM
-
-pytestmark = pytest.mark.heavy
 
 #: 假节点的 ping 门（与 dispatch.bun_version / compute_code_hash 同源）。
 _BUN = shutil.which("bun")

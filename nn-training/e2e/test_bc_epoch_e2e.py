@@ -414,12 +414,20 @@ def test_e2e_wait_bc_round_ledger_ingest_and_eval(
             for ep in (1, 2, 3, 4):
                 worker_mod._bc_post_epoch(base, TOKEN, jid, _epoch_body(ep), tok, log=_quiet)
                 real_sleep(0.05)
-            # 等 wait 环把 4 行全部入账（含两次边界 eval）再回 result——
-            # result 200 会立即返回，不入账的行就永远丢了
+            # 等 wait 环把 4 行 epoch **与两次边界 eval** 全部入账再回 result——
+            # result 200 会立即返回，不入账的行就永远丢了。
+            # 2026-09-15 修：原条件只看 bc_epoch，于是「4 行 epoch 已入账」就回 result，
+            # 而 epoch 4 的 eval 结果可能还在飞行中 ⇒ 断言 `[e["epoch"]] == [2, 4]`
+            # 在满负荷下（python-gate -n 4 / CI）偶发只拿到 [2]。这就是
+            # docs/nn.progress.md §313 记的「负载型 flake」的真根因：不是被测代码
+            # 有 bug，而是测试自己的同步条件漏了它随后要断言的那部分状态。
             deadline = time.time() + 20
             while time.time() < deadline:
                 try:
-                    if len(_read_ledger_events(ledger, "bc_epoch")) >= 4:
+                    if (
+                        len(_read_ledger_events(ledger, "bc_epoch")) >= 4
+                        and len(_read_ledger_events(ledger, "bc_eval")) >= 2
+                    ):
                         break
                 except OSError:
                     pass
