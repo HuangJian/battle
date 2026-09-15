@@ -39,9 +39,22 @@ EVAL_ITER_SUFFIX = "ev"  # eval iterId = {runId}.{it}ev → 与采集任务在 a
 DUAL_TRACK_ANCHOR = 50
 DUAL_TRACK_ROTOR = 50
 # 过拟合报警：mean(锚点近3轮) − mean(轮转近3轮) ≥ 5pp 且持续 3 轮。
-# 5pp = 锚点 SE（50 局 ≈4.6pp）之上取整，防抖；3 轮防单轮噪声。
+# 5pp 的取法（2026-09-15 订正 SE 口径，原注释把 100 局的 SE 当成了 50 局的）：
+#   SE = sqrt(0.25/n)（p≈0.5 最坏情形）= 单侧 50 局 6.65pp / pooled 100 局 4.60pp /
+#   pooled 200 局 3.32pp。报警量是**两轨各 3 轮均值**之差 ⇒ 有效样本各 ≈250 局、
+#   SE ≈ 2.97pp，5pp ≈ 1.68σ。取整到 5pp 是防抖与灵敏度的折中，不是「50 局 SE 之上取整」。
 OVERFIT_GAP_PP = 5.0
 OVERFIT_PERSIST_ROUNDS = 3
+
+# 段成员集（预计算；P2-7：用**下标集合**判定归属，不用数值区间猜）。
+# 池子必须连续且严格递增——不满足就在这里响亮炸掉，而不是让门/台账静默算错段。
+if tuple(sorted(set(EVAL_SEEDS))) != EVAL_SEEDS:
+    raise ValueError(
+        "EVAL_SEEDS 必须严格递增且无重复（双轨锚点/轮转段按**下标**切分，"
+        "池子有洞或乱序会让段成员集错位）"
+    )
+_ANCHOR_SEED_SET = frozenset(EVAL_SEEDS[:DUAL_TRACK_ANCHOR])
+_ROTOR_SEED_SET = frozenset(EVAL_SEEDS[DUAL_TRACK_ANCHOR:])
 
 
 def rotor_offset(it: int) -> int:
@@ -61,11 +74,19 @@ def dual_track_seeds(it: int) -> tuple[int, ...]:
 
 
 def is_anchor_seed(seed: int) -> bool:
-    return EVAL_SEEDS[0] <= seed <= EVAL_SEEDS[DUAL_TRACK_ANCHOR - 1]
+    """`seed` 是否落在锚点段（池内**下标**集合，不是数值区间猜的）。
+
+    P2-7（2026-09-15）：原先写成数值区间 `EVAL_SEEDS[0] <= s <= EVAL_SEEDS[49]`——
+    在**当前**连续种子池下与下标集合等价，但池子一旦出现空洞或非单调扩展（历史
+    上扩过两次：2→100→200），数值区间会比真实成员集**更宽**，把不属于锚点的局
+    悄悄算进锚点轨。改成显式成员集判断。
+    """
+    return int(seed) in _ANCHOR_SEED_SET
 
 
 def is_rotor_seed(seed: int) -> bool:
-    return EVAL_SEEDS[DUAL_TRACK_ANCHOR] <= seed <= EVAL_SEEDS[-1]
+    """`seed` 是否落在轮转段（池内下标 [50, END)；同 `is_anchor_seed` 的理由）。"""
+    return int(seed) in _ROTOR_SEED_SET
 
 
 def split_anchor_rotor(
@@ -438,7 +459,12 @@ def settle_eval_summary(
                     r = json.loads(ln)
                 except Exception:
                     continue
+                # 只认本调度器落的局：B/C evalboard 行（`batch_eval.py:703`）同为
+                # `event:"eval"`，且 iter=0 畸形批能撞上同 (iter,wver) —— 不滤 source
+                # 会把 B/C 的局混进本臂胜率与双轨拆段（P2-7，2026-09-15）。
                 if r.get("event") != "eval" or r.get("wver") != key16 or r.get("iter") != it:
+                    continue
+                if "source" in r:
                     continue
                 led_wins += 1 if r.get("win") else 0
                 # 全歼率（方案 A 口径）：旧行（cleared 缺省）视为未全歼——新 schema

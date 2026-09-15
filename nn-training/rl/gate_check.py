@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from platform_utils import force_utf8_stdio
+from rl.eval_local import rotor_offset
 
 if TYPE_CHECKING:  # 运行时期望零 rl.config 依赖，见 `_lazy_config()`。
     from rl.config import GateRule, GatesSpec
@@ -277,12 +278,21 @@ class _Ctx:
 
 
 def _row_from_summary(r: Mapping[str, Any]) -> EvalRow | None:
-    """summary 行 → EvalRow；非 eval_summary / 无 games 的行丢弃。"""
+    """summary 行 → EvalRow；非 eval_summary / 无 games 的行丢弃。
+
+    胜率口径（2026-09-15，P1-a）：日常 A-eval 起 summary 带 `anchor_wr`
+    （锚点段 50 局，固定种子、跨轮配对可比），此时**门按锚点轨判**；
+    `winRate` 是 200 局混轨口径（锚点 + 当轮轮转段），跨轮换段 ⇒ 逐点趋势
+    不可比，只作展示与旧行回退。旧行（双轨上线前）无 `anchor_wr` → 回退 `winRate`。
+    这里是门内**唯一**的胜率入口 ⇒ G1 / G10 / plateau / pool 全部随之跟到锚点轨。
+    """
     if r.get("event") != "eval_summary":
         return None
     games = r.get("games")
     wins = r.get("wins")
-    wr = r.get("winRate")
+    wr = r.get("anchor_wr")
+    if not isinstance(wr, (int, float)):
+        wr = r.get("winRate")
     if not isinstance(games, int) or games <= 0:
         return None
     if not isinstance(wins, int):
@@ -1357,7 +1367,38 @@ def _notes(course: Any, rows: Sequence[Mapping[str, Any]]) -> list[str]:
         )
     )
     notes += list(spec.power_notes(games_per_point))
+    notes += _rotation_notes(rows)
     return notes
+
+
+def _rotation_notes(rows: Sequence[Mapping[str, Any]]) -> list[str]:
+    """双轨轮转退化告警（P2-a，2026-09-15；warn-only）。
+
+    `rotor_offset` 周期 3 ⇒ 轮转轨要真正转起来，两次 A-eval 的 iter 间隔必须**不**是
+    3 的倍数。`--eval-every 3/6/9` 或 `--eval-at '30,60,90'` 会让每次落到同一段 ⇒
+    轮转轨退化为固定段、"没见过"的那部分种子永远没被评估（过拟合报警失去对照）。
+    只在确实能看出病灶时报警（≥3 个评估点、全落同一段），不误伤正常腿。
+    """
+    points: list[tuple[int, int]] = []
+    for r in rows:
+        if r.get("event") != "eval_summary":
+            continue
+        it = r.get("iter")
+        wr = r.get("rotor_wr")
+        if not isinstance(it, int) or not isinstance(wr, (int, float)):
+            continue
+        points.append((it, rotor_offset(max(1, it))))
+    if len(points) < 3:
+        return []
+    if len({off for _, off in points}) > 1:
+        return []
+    its = [it for it, _ in points]
+    return [
+        f"双轨轮转退化：{len(points)} 个评估点（iter {its[0]}..{its[-1]}）全部落在同一轮转段 "
+        f"(下标 {points[0][1]})——两次 eval 的 iter 间隔是 3 的倍数（--eval-every / "
+        "--eval-at 所致）。轮转轨形同固定段，过拟合报警失去对照；改用非 3 倍数的间隔"
+        "（如 eval_every=2/4/5）"
+    ]
 
 
 if __name__ == "__main__":

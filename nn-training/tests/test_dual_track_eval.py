@@ -73,6 +73,33 @@ def test_anchor_rotor_membership() -> None:
     assert r == [(2000, 860051), (2001, 860100)]
 
 
+def test_segment_membership_is_index_based_not_numeric_range() -> None:
+    """P2-7：段归属按**池内下标集合**判，不按数值区间猜。
+
+    数值区间版在池子有洞/乱序时比真实成员集更宽——会把不属于锚点的局算进锚点轨。
+    """
+    from rl.eval_local import _ANCHOR_SEED_SET, _ROTOR_SEED_SET
+
+    assert len(_ANCHOR_SEED_SET) == DUAL_TRACK_ANCHOR
+    assert len(_ROTOR_SEED_SET) == len(EVAL_SEEDS) - DUAL_TRACK_ANCHOR
+    # 池内精确成员
+    assert set(EVAL_SEEDS[:DUAL_TRACK_ANCHOR]) == _ANCHOR_SEED_SET
+    assert set(EVAL_SEEDS[DUAL_TRACK_ANCHOR:]) == _ROTOR_SEED_SET
+    # 池外的值（数值上"夹在"锚点区间或轮转区间之内/之间）一律不属于任何段
+    for out_of_pool in (860000, 860201, 400000, 0, 999):
+        assert not is_anchor_seed(out_of_pool)
+        assert not is_rotor_seed(out_of_pool)
+
+
+def test_eval_seeds_pool_must_be_contiguous_ascending() -> None:
+    """P2-7 前提：段成员集按下标切分 ⇒ 池子必须严格递增无重复（否则加载即炸）。"""
+    import rl.eval_local as m
+
+    assert tuple(sorted(set(m.EVAL_SEEDS))) == m.EVAL_SEEDS
+    assert len(m.EVAL_SEEDS) == 200
+    assert m.EVAL_SEEDS[0] == 860001 and m.EVAL_SEEDS[-1] == 860200
+
+
 def test_should_dual_track_gates() -> None:
     assert should_dual_track(50, baseline=False) is True
     assert should_dual_track(50, baseline=True) is False
@@ -165,6 +192,73 @@ def test_settle_summary_dual_track_fields(tmp_path: Path) -> None:
     assert summ["rotor_wr"] == 0.0
     assert summ["overfit_gap_pp"] == 100.0
     # 单轮不触发 3 轮报警（无 WARN 依赖；报警谓词已单测）
+
+
+def test_settle_summary_ignores_bc_evalboard_rows(tmp_path: Path) -> None:
+    """P2-7：B/C evalboard 行（同为 `event:"eval"`）不得混进本臂胜率与双轨拆段。
+
+    病根：台账过滤只有 (event, wver, iter)，而 `batch_eval.py:703` 落的 B/C 行
+    同样满足这三条（畸形批 iter=0 能撞上同 (iter,wver)）⇒ 混进来既抬高胜率分母、
+    又把 B/C 的种子算进锚点/轮转段。
+    """
+    elog = tmp_path / "eval_log.jsonl"
+    _write_eval_rows(
+        elog,
+        [
+            _eval_row(3, 2000, 860001, 1),
+            _eval_row(3, 2000, 860002, 1),
+            # B 层行：同 iter / 同 wver，但带 source 字段（且是败局，会拉低读数）
+            {**_eval_row(3, 2000, 860001, 0), "source": "B"},
+            {**_eval_row(3, 2000, 860002, 0), "source": "C"},
+        ],
+    )
+    settle_eval_summary(
+        eval_jsonl=elog,
+        key16=WVER,
+        it=3,
+        pairs=[(2000, 860001), (2000, 860002)],
+        total=2,
+        seen={(2000, 860001), (2000, 860002)},
+        wins=[2],
+        cleared_total=[2],
+        outcomes={},
+        node_games={},
+        jsonl_lock=threading.Lock(),
+        t_eval_start=0.0,
+        rollout_winrate=None,
+    )
+    summ = next(
+        json.loads(ln)
+        for ln in elog.read_text(encoding="utf-8").splitlines()
+        if '"eval_summary"' in ln
+    )
+    assert summ["games"] == 2, "B/C 行不得计入分母"
+    assert summ["wins"] == 2, "B/C 的败局不得污染胜场"
+    assert summ["winRate"] == 1.0
+    assert summ["anchor_wr"] == 1.0
+
+
+def test_rotation_notes_fires_only_on_real_degeneracy() -> None:
+    """P2-a：eval 间隔是 3 的倍数 ⇒ 轮转轨退化为固定段（warn-only）。
+
+    `rotor_offset` 周期 3，两次 eval 的 iter 间隔若恒为 3 的倍数，每轮落同一段。
+    """
+    from rl.gate_check import _rotation_notes
+
+    def _rows(its: list[int]) -> list[dict]:
+        return [{"event": "eval_summary", "iter": i, "rotor_wr": 0.5} for i in its]
+
+    # 退化：全落同段（下标恒 150）⇒ 报警
+    notes = _rotation_notes(_rows([3, 6, 9, 12]))
+    assert len(notes) == 1 and "轮转退化" in notes[0]
+    # 健康：it5,10,15,20 → 段 1,0,2,1 ⇒ 静默
+    assert _rotation_notes(_rows([5, 10, 15, 20])) == []
+    # 不足 3 个点 ⇒ 静默（看不出病灶就不报）
+    assert _rotation_notes(_rows([3, 6])) == []
+    # 非双轨腿（summary 无 rotor_wr）⇒ 静默
+    assert _rotation_notes([{"event": "eval_summary", "iter": i} for i in (3, 6, 9)]) == []
+    # 非 eval_summary 行不参与
+    assert _rotation_notes([{"event": "eval", "iter": i, "rotor_wr": 0.5} for i in (3, 6, 9)]) == []
 
 
 def test_settle_summary_non_dual_track_rotor_none(tmp_path: Path) -> None:

@@ -50,6 +50,17 @@ DEFAULT_MAX_WAVES = 3
 #: 单关单轮局数硬顶的默认倍数：默认 = 初波 G0 × 本值。
 DEFAULT_GAME_CAP_MULT = 4
 
+#: `est_ticks_per_game` 的绝对下限（P2-b，2026-09-15）。
+#:
+#: 病根：`cap = G0 × 4` 与 `G0 = ceil(target/关数/est)` **同源**——est 估得越小，
+#: G0 越大、cap 也同步放大，硬顶**永远追不上** G0（4 倍关系与 est 无关），于是
+#: "硬顶"形同虚设。est=1 时 target=600000 / 4 关 ⇒ G0=150000 局/关、cap=600000：
+#: 单关一个初波就能跑几十小时，且**不会**触发任何停因告警。
+#: 真实局均 tick 是三位数（max_ticks = 600×count+900，实际局多在数百 tick），
+#: est < 100 只可能是账本空窗/单位错（ticks↔局数）之类的故障值 ⇒ 直接钳到下限，
+#: 让 G0 与 cap 都停在同一量级的**上界**内，而不是让故障值无限放大采集量。
+MIN_EST_TICKS_PER_GAME = 100
+
 #: 初波种子流 tag（= build_pairs 显式轮转路径的 0x5EED）。
 _INITIAL_WAVE_TAG = 0x5EED
 #: 补波种子流 tag（计划 §2.2.5 的 `0xWA9E` → 合法字面量）。
@@ -69,37 +80,58 @@ def _ceil_div(a: int, b: int) -> int:
 
 
 def target_per_stage(target_transitions: int, n_stages: int) -> int:
-    """分关达标线 = ceil(target / n_stages)（n_stages ≤ 0 响亮报错）。"""
+    """分关达标线 = ceil(target / n_stages)（n_stages ≤ 0 响亮报错）。
+
+    P2-6（2026-09-15）：`target_transitions ≤ 0` 也响亮报错。原先 `max(0, target)`
+    把 0 静默变成「达标线 0」⇒ 每关第一波就 `quota_met` 立即停，采集量掉到 G0
+    而不报错——是那种最难发现的静默失效。开动态采集的前提就是 target > 0
+    （`loop_core._volume_active` 同口径），所以这里报错不会误伤老课程：
+    老课程根本不会调到本函数。
+    """
     if n_stages <= 0:
         raise ValueError(f"target_per_stage 需要 n_stages ≥ 1，得到 {n_stages}")
-    return _ceil_div(max(0, int(target_transitions)), int(n_stages))
+    if int(target_transitions) <= 0:
+        raise ValueError(
+            f"target_per_stage 需要 target_transitions ≥ 1，得到 {target_transitions}"
+            "（≤0 会让每关立即 quota_met 静默停采；动态采集应确保 target > 0）"
+        )
+    return _ceil_div(int(target_transitions), int(n_stages))
 
 
 def initial_games(target_transitions: int, n_stages: int, est_ticks_per_game: int) -> int:
     """初波每关局数 `G0 = max(1, ceil(target / n_stages / est))`（计划 §2.2.1）。
 
-    `est_ticks_per_game`（局均 tick 估计）≤ 0 响亮报错——配额反解没有估计值就是
-    静默乱采（配置校验在 CourseConfig 层已经拦一次，这里再拦是为了纯函数自洽）。
+    `est_ticks_per_game` ≤ 0 响亮报错——配额反解没有估计值就是静默乱采（配置校验在
+    CourseConfig 层已经拦一次，这里再拦是为了纯函数自洽）；0 < est < 下限时**钳到
+    `MIN_EST_TICKS_PER_GAME`**（P2-b：`cap = G0×4` 与 G0 同源，不钳则 est→0 时二者
+    一起爆炸，硬顶永远追不上 G0）。
     """
     if est_ticks_per_game <= 0:
         raise ValueError(f"initial_games 需要 est_ticks_per_game ≥ 1，得到 {est_ticks_per_game}")
     return max(
-        1, _ceil_div(target_per_stage(target_transitions, n_stages), int(est_ticks_per_game))
+        1,
+        _ceil_div(
+            target_per_stage(target_transitions, n_stages),
+            max(MIN_EST_TICKS_PER_GAME, int(est_ticks_per_game)),
+        ),
     )
 
 
 def topup_games(remaining_transitions: int, est_ticks_per_game: int) -> int:
-    """补波大小 = `ceil(剩余 / est)`；剩余 ≤ 0 → 0（无波可补）。"""
+    """补波大小 = `ceil(剩余 / est)`；剩余 ≤ 0 → 0（无波可补）。
+
+    与 `initial_games` 同口径：est 钳到 `MIN_EST_TICKS_PER_GAME`（P2-b）。
+    """
     if est_ticks_per_game <= 0:
         raise ValueError(f"topup_games 需要 est_ticks_per_game ≥ 1，得到 {est_ticks_per_game}")
     remaining = int(remaining_transitions)
     if remaining <= 0:
         return 0
-    return _ceil_div(remaining, int(est_ticks_per_game))
+    return _ceil_div(remaining, max(MIN_EST_TICKS_PER_GAME, int(est_ticks_per_game)))
 
 
 def default_game_cap(initial_g0: int) -> int:
-    """默认单关局数硬顶 = 初波 × `DEFAULT_GAME_CAP_MULT`（≥1）。"""
+    """默认单关局数硬顶 = 初波 × `DEFAULT_GAME_CAP_MULT`（≥1；初波已被 est 下限约束）。"""
     return max(1, int(initial_g0) * DEFAULT_GAME_CAP_MULT)
 
 

@@ -46,7 +46,9 @@ def test_target_per_stage_ceil() -> None:
     assert target_per_stage(600000, 4) == 150000
     assert target_per_stage(10, 3) == 4  # ceil(10/3)
     assert target_per_stage(9, 3) == 3
-    assert target_per_stage(0, 4) == 0
+    # P2-6：target=0 不再静默返回 0，改响亮报错（见 test_target_per_stage_rejects_*）
+    with pytest.raises(ValueError):
+        target_per_stage(0, 4)
     with pytest.raises(ValueError):
         target_per_stage(100, 0)
 
@@ -64,6 +66,27 @@ def test_initial_games_ceil_and_floor() -> None:
         initial_games(600000, 4, 0)
     with pytest.raises(ValueError):
         initial_games(600000, 0, 900)
+    # P2-6：target ≤ 0 响亮报错（原先静默 → 每关立即 quota_met 停采）
+    with pytest.raises(ValueError):
+        initial_games(0, 4, 900)
+    with pytest.raises(ValueError):
+        initial_games(-1, 4, 900)
+
+
+def test_est_floor_prevents_g0_and_cap_blowup() -> None:
+    """P2-b：故障 est（< 下限）钳到 100，G0 与 cap 停在同一量级的上界内。
+
+    病根是 `cap = G0 × 4` 与 G0 **同源**——不钳则 est→0 时两者一起放大，
+    硬顶永远追不上 G0。est=1 时未修版：G0=150000、cap=600000（单关一个初波跑几十小时）。
+    """
+    # est=1 与 est=100 必须给出同一个 G0（钳位生效）
+    assert initial_games(600000, 4, 1) == initial_games(600000, 4, 100) == 1500
+    # 钳住之后 cap 也就是 1500×4，而不是随 est 无限放大
+    assert default_game_cap(initial_games(600000, 4, 1)) == 6000
+    # 真值（est=967 三位数）不受下限影响，逐字节不变
+    assert initial_games(600000, 4, 967) == 156
+    # topup 同口径钳位
+    assert topup_games(150000, 1) == topup_games(150000, 100) == 1500
 
 
 def test_topup_games_ceil_and_zero() -> None:
@@ -79,6 +102,13 @@ def test_topup_games_ceil_and_zero() -> None:
 def test_default_game_cap() -> None:
     assert default_game_cap(155) == 155 * 4
     assert default_game_cap(0) == 1  # 不产生 0 帽（0 在 terminate 里 = 无帽语义）
+
+
+def test_target_per_stage_rejects_nonpositive_target() -> None:
+    """P2-6：`target_transitions ≤ 0` 响亮报错（原先 max(0,·) 静默降级）。"""
+    assert target_per_stage(600000, 4) == 150000
+    with pytest.raises(ValueError):
+        target_per_stage(-100, 4)
 
 
 # ─────────────────── ① 终止谓词 ───────────────────
@@ -598,6 +628,27 @@ def test_iteration_pairs_rejects_gated_window_modes(tmp_path: Path, _patch_wver:
     stub = _StubLoop(tmp_path, target=600000, curriculum_stages="13,1,16")
     with pytest.raises(SystemExit):
         stub._iteration_pairs(1)
+
+
+def test_volume_stages_rejects_missing_or_empty_stages(tmp_path: Path) -> None:
+    """P2-c：`--stages` 缺席/空集 → 响亮退出，不再静默退成硬编码 4 关。
+
+    原先 fallback `parse_range(str(... or "0-3"))`：缺 --stages 时静默猜 4 关 ⇒
+    分关配额分母错、采集量对不上目标而不报错（实测本腿恒有值所以没踩到，
+    但静默猜关数正是最难发现那类失效）。
+    """
+    for bad in ("", "   ", "junk", "5-4"):  # 空 / 空白 / 不可解析 / 逆序区间
+        stub = _StubLoop(tmp_path, target=600000)
+        stub.args.stages = bad
+        with pytest.raises(SystemExit):
+            stub._volume_stages()
+
+
+def test_volume_stages_uses_explicit_stages(tmp_path: Path) -> None:
+    """显式 --stages 正常解析（回归：P2-c 改动不得误伤正常路径）。"""
+    stub = _StubLoop(tmp_path, target=600000)
+    stub.args.stages = "2000-2003"
+    assert stub._volume_stages() == [2000, 2001, 2002, 2003]
 
 
 def test_volume_topup_quota_met_in_first_wave(tmp_path: Path, _patch_wver: None) -> None:
