@@ -5,6 +5,37 @@
 
 ---
 
+## §45 双轨日常评估（Dual-Track Eval Seeds）：P0+P1+P2 单测/本地 e2e
+（2026-09-15；计划 `plan/dual-track-eval-seeds.plan.md`）
+
+**为什么**：日常 eval 恒取 `EVAL_SEEDS[:50]`，17 轮零轮换 ⇒ 选点对这 50 种子过拟合
+（实测日常 85% vs 全量 80%）。正式门仍用池外段（0-199/1000+/…），本计划只改日常趋势读数。
+
+**语义（v1）**：
+- 锚点轨 `EVAL_SEEDS[:50]`（与历史逐字节可比）+ 轮转轨 `EVAL_SEEDS[50+((it-1)%3)*50 : +50]`
+  （池内 50-199 三段轮换，周期 3，与锚点无重叠）。
+- **仅** A-eval 且 `eval_games_per_stage==50` 时拼双轨（每关 50→100 局）；it0 基线与
+  n_seeds=100/200 正式前缀、冒烟小 n_seeds 一律保持 `EVAL_SEEDS[:n]` 逐字节兼容。
+- summary 单行 `wins/games` 口径不变，另加 `anchor_wr` / `rotor_wr` / `overfit_gap_pp`。
+- 过拟合报警：近 **3** 轮 `mean(anchor)−mean(rotor) ≥ 5pp` ⇒ WARN（选点看轮转线）；
+  单轮 gap 只落账。历史窗按 course_fp 收窄、**不按 wver**（过拟合是跨迭代现象）。
+
+**实现**：纯函数在 `rl/eval_local.py`（`rotor_offset` / `rotor_span` / `dual_track_seeds` /
+`should_dual_track` / `split_anchor_rotor` / `overfit_gap_pp` / `overfit_fires` +
+种子段注册表注释）；`settle_eval_summary` 拆分台账 seed 落段并写三字段；
+`EvalDispatcher.run` pairs 构造处接线（日志带 `[dual-track anchor+rotor]`）。
+
+**验证**：`tests/test_dual_track_eval.py` 10 用例（周期/无重叠/报警 4.9 静默・5.0×3 响・
+2 轮不响/summary 三字段/续跑去重/本地 runner 注入 100 局双轨 + it=2 换段 + n_seeds=2
+前缀不扩）；相关 eval 回归 53 用例绿；ruff+mypy 189 文件绿；根 `bun run check` 1825 pass。
+**全量 nn pytest xdist 在本机环境 ~34% 处稳定 KeyboardInterrupt（排除本测试文件后复现）**
+= 环境问题，非本改动；单文件/相关子集绿。
+
+**未做（按计划非目标/后续）**：EVAL_SEEDS 扩池、正式门口径、dashboard 必改、
+试点 10 轮 wall/gap 基线（需集群无在跑腿时实弹）、课程头模板批量改写。
+
+---
+
 ## §44 按样本量动态采集（Dynamic Rollout Volume）：P0+P1 实现与 P2 端到端验证
 （2026-09-15；计划 `plan/dynamic-rollout-volume.plan.md`；决策 `DECISIONS.md §2026-09-15-goalnn-dynamic-rollout-volume`）
 

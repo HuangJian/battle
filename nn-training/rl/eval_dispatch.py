@@ -26,11 +26,13 @@ from rl.eval_local import (
     EVAL_LOCAL_SLOTS_DEFAULT,
     EVAL_SEEDS,
     EVAL_TASK_ATTEMPTS,
+    dual_track_seeds,
     eval_done_keys,
     hold_for_local,
     report_winrate_safe,  # noqa: F401 — re-exported（旧模块成员，兼容外部引用）
     run_local_eval_game,
     settle_eval_summary,
+    should_dual_track,
 )
 from rl.log import log
 from rl.queue import _record_agent_meta, bun_version, mm
@@ -156,7 +158,14 @@ class EvalDispatcher:
                 eval_stages = parse_range(eval_stage_spec)
             else:
                 eval_stages = list(range(args.total_stages))
-            pairs = [(s, sd) for s in eval_stages for sd in EVAL_SEEDS[:n_seeds]]
+            # 双轨日常评估（plan/dual-track-eval-seeds）：A-eval 且 n_seeds==50 时
+            # 锚点 50 + 轮转 50（总量翻倍）；it0 基线与更大正式前缀（100/200）保持
+            # EVAL_SEEDS[:n_seeds] 逐字节兼容。小 n_seeds（冒烟/单测）仍走前缀切片。
+            if should_dual_track(n_seeds, baseline):
+                seed_list = dual_track_seeds(it)
+            else:
+                seed_list = EVAL_SEEDS[:n_seeds]
+            pairs = [(s, sd) for s in eval_stages for sd in seed_list]
             if not pairs:
                 return
             # it0 基线：账本按 iter 隔离（baseline 行的 iter 恒 0），否则同指纹的
@@ -279,6 +288,11 @@ class EvalDispatcher:
                 f"[eval] it{it}: dispatch {total} greedy games "
                 f"(corpus={len(pairs)}, done={len(pairs) - total})"
                 + (" [it0 基线 · bc 权重]" if baseline else "")
+                + (
+                    " [dual-track anchor+rotor]"
+                    if should_dual_track(n_seeds, baseline)
+                    else ""
+                )
                 + f" -> {[(n['id'], n['c']) for n in nodes_ok]}"
                 + (f" [local tail-reserved ×{reserved}]" if reserved else "")
             )
