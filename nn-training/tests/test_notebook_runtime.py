@@ -560,6 +560,42 @@ def test_notebook_zero_rc_no_restart(
     assert len(calls) == 1  # 干净退出不重启
 
 
+def test_notebook_reuses_preset_device_resolved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """已预置的 device_resolved 不得被重解析（2026-09-15：cell 要先解析再 spawn）。
+
+    push-first 的 spawn 走 `--device`，cell 必须在 spawn **之前**解析好设备 ——
+    否则字面量 "auto" 会被传给 worker，`torch.device("auto")` 当场炸掉整轮 job。
+    cell 解析后写进 CFG["device_resolved"]，run_notebook 必须**复用**：重复探测既慢
+    又刷日志，而且 TPU 分支的 PJRT_DEVICE 环境位会晚于 spawn 才打上（子进程继承不到）。
+    """
+    calls: list[int] = []
+
+    def spy(cfg: dict[str, Any], log: Any) -> str:
+        calls.append(1)
+        return "cuda"
+
+    monkeypatch.setattr(nbr, "resolve_device", spy)
+    monkeypatch.setattr(nbr, "run_pull_worker", lambda cfg, log: 0)
+    cfg = _base_cfg(tmp_path)  # 已含 device_resolved="cpu"
+    assert nbr.run_notebook(cfg) == 0
+    assert calls == []  # 预置 ⇒ 完全不重解析
+    assert cfg["device_resolved"] == "cpu"  # 原值保留，不被覆盖
+
+
+def test_notebook_resolves_when_device_resolved_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未预置时仍要解析（pull 路径 / 老 cell 不能因此失去设备探测）。"""
+    monkeypatch.setattr(nbr, "resolve_device", lambda cfg, log: "cuda")
+    monkeypatch.setattr(nbr, "run_pull_worker", lambda cfg, log: 0)
+    cfg = _base_cfg(tmp_path)
+    cfg.pop("device_resolved")
+    assert nbr.run_notebook(cfg) == 0
+    assert cfg["device_resolved"] == "cuda"
+
+
 # ------------------------------------------------------------------ sha12
 
 

@@ -498,7 +498,12 @@ def run_notebook(cfg: dict[str, Any]) -> int:
     code_dir = cfg.get("code_dir")
     if code_dir:
         log(f"运行时代码: {code_dir}")
-    cfg["device_resolved"] = resolve_device(cfg, log)
+    # 已解析则复用：push-first 的 cell 会在 **spawn worker_server 之前**先解析一次
+    # （spawn 走的是 `--device`，不先解析就会把字面量 "auto" 传给 worker —— 2026-09-15 事故）。
+    # 复用同时保证：① 设备探测只跑一次、日志只出一份；② resolve_device 在 TPU 分支打的
+    # PJRT_DEVICE 环境位发生在 spawn **之前**，能被 worker 子进程继承。
+    if not cfg.get("device_resolved"):
+        cfg["device_resolved"] = resolve_device(cfg, log)
     t_session = time.time()
     rc = 0
     print("\n" + "=" * 62)

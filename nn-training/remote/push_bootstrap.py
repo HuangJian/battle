@@ -159,6 +159,26 @@ def start_bootstrap_server(
     return srv
 
 
+def close_bootstrap_server(srv: ThreadingHTTPServer) -> None:
+    """关掉引导服务并**释放监听端口**（升级到完整 worker_server 前的必经一步）。
+
+    为什么必须 `server_close()`（2026-09-15 Colab push-first 全链路卡死事故）：
+    `socketserver.BaseServer.shutdown()` 只让 `serve_forever()` 退出循环，
+    **不关监听套接字**——那是 `server_close()` 的职责（它还会把 `self.socket` 置 None）。
+    而 push-first 的设计是引导服务与升级后的完整 worker_server **共用同一个
+    `push_port`**：`run_push_first` 先 bind 该端口，收到首个 job 后再起
+    `remote_worker_serve` 绑**同一个端口**。只 `shutdown()` 不 `server_close()` ⇒
+    父进程一直占着端口 ⇒ 子进程被 `remote/_port_guard.py` 拒绝
+    （"端口 ... 已被占用——拒绝启动（禁止双监听）"）⇒ `wait_ping` 30s 超时 ⇒
+    `SystemExit: -1` ⇒ cell 挂、隧道下线 ⇒ 控制台侧只看到「推送成功但状态查询 530」，
+    而真因藏在 `<work>/serve.log` 里，极难定位。
+    本仓库其它处（`tests/test_upgrade.py`、`tests/test_port_guard.py`、
+    `e2e/test_push_mode_integration.py`）都是 shutdown+server_close 成对写，此处曾遗漏。
+    """
+    srv.shutdown()
+    srv.server_close()
+
+
 def spawn_full_worker_server(
     port: int,
     token: str,
@@ -209,6 +229,25 @@ def wait_ping(port: int, token: str, timeout_s: float = 30.0) -> bool:
             pass
         time.sleep(0.5)
     return False
+
+
+def tail_text_lines(path: Path, n: int = 40) -> list[str]:
+    """读文件末尾 n 行；缺失/不可读则返回一行说明（**不抛异常**）。
+
+    为什么需要（2026-09-15 Colab 事故复盘）：`spawn_full_worker_server` 把子进程的
+    stdout/stderr 重定向到 `<work>/serve.log`，因此 30s 就绪检查失败时 cell 里
+    **只有干巴巴一句「未就绪」**，真因（当时是 `端口 ... 已被占用——拒绝启动`）
+    全藏在那个文件里，操作员得自己知道去 `!cat` 它。把尾部直接摊到 cell 输出里，
+    失败就自解释。
+    """
+    try:
+        data = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        return [f"(无法读取 {path}：{e})"]
+    lines = data.splitlines()
+    if len(lines) > n:
+        return [f"...(以上略去前 {len(lines) - n} 行)", *lines[-n:]]
+    return lines
 
 
 def requeue_job(port: int, token: str, raw_body: bytes) -> None:
@@ -293,14 +332,20 @@ def run_push_first(cfg: dict[str, Any], log: Callable[[str], None]) -> int:
         log("收到中断")
         return 0
     finally:
-        srv.shutdown()
+        # 必须连监听套接字一起释放：随后完整 worker_server 要 bind **同一个端口**
+        # （见 close_bootstrap_server docstring 的 2026-09-15 事故）。
+        close_bootstrap_server(srv)
         time.sleep(0.5)
     device = str(cfg.get("device_resolved") or cfg.get("device") or "cpu")
     real = spawn_full_worker_server(
         port, token, work, device, code_dir, work / "serve.log"
     )
     if not wait_ping(port, token, 30):
-        log("完整 worker_server 30s 未就绪")
+        # 失败必须自解释：真因在子进程的 stdout/stderr 里（被重定向到 serve.log），
+        # 不摊出来操作员在 cell 里什么都看不到（2026-09-15 事故）。
+        log("完整 worker_server 30s 未就绪——下面是 serve.log 尾部（真因通常在这）：")
+        for line in tail_text_lines(work / "serve.log", 40):
+            log(f"  | {line}")
         real.kill()
         return -1
     log("完整 worker_server 就绪——重放首个 job")

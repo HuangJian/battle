@@ -184,8 +184,10 @@ def pack_code_zip(
     """打包 nn-training Python 源文件为 code.zip（hub 启动时一次打包，避免后继
     并行修改干扰云端代码一致性）。
 
-    包含：所有 .py + .jsonc 文件（递归），排除 tmp/ weights/ .venv/ __pycache__/
-    tests/ rl-config.json。
+    包含：所有 .py + .jsonc 文件（递归）。
+    排除：`tmp/` `weights/` `__pycache__/` `tests/` `rl-config.json`，
+    **以及任何以 `.` 开头的目录**（`.venv` / `.venv310bak` / `.mypy_cache` /
+    `.ruff_cache` / `.pytest_cache` / `.git` … —— 一网打尽，不靠逐个列举）。
 
     返回 zip 字节 sha256。
     """
@@ -195,14 +197,12 @@ def pack_code_zip(
     zip_path_p = Path(zip_path)
     zip_path_p.parent.mkdir(parents=True, exist_ok=True)
 
+    # 非点目录的显式名单；点目录由下面的 `startswith(".")` 统一覆盖
     _exclude_dirs = {
         "tmp",
         "weights",
-        ".venv",
         "__pycache__",
         "tests",
-        ".mypy_cache",
-        ".ruff_cache",
     }
     _exclude_files = {"rl-config.json"}
 
@@ -213,7 +213,11 @@ def pack_code_zip(
             # 跳过排除目录（os.walk 修改 dirnames 原地剪枝，避免遍历进入）
             rel = dir_p.relative_to(nn_root_p)
             parts = rel.parts
-            if any(p in _exclude_dirs for p in parts):
+            # 显式名单 ∪ **任何点目录**。2026-09-15 实测事故：名单里只写了 `.venv`，
+            # 于是解释器升级留下的 `.venv310bak` 被整棵打进 code.zip —— 4584 个 .py /
+            # 80.6 MB（占 97% 字节），每次 push 白传 20 MB，云端还解包出一个假 venv
+            # 放在 sys.path[0]。逐个列举名字防不住下一个 `.venv312bak`，故一律排除点目录。
+            if any(p in _exclude_dirs or p.startswith(".") for p in parts):
                 dirnames[:] = []
                 continue
             for fn in sorted(filenames):

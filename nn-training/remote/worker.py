@@ -539,6 +539,33 @@ def _bc_device(dev_str: str) -> str:
     return s or "cpu"
 
 
+def normalize_ppo_device(device: object, *, cuda_available: bool | None = None) -> str:
+    """把 PPO 的 ``--device`` 归一化成 torch 认得的字符串；``auto`` 在此兜底解析。
+
+    为什么需要（2026-09-15 Colab push-first 事故）：push-first 引导在
+    `notebook_runtime.resolve_device()` 解析设备**之前**就把 worker spawn 起来了
+    （cell 与 `push_bootstrap.run_push_first` 都只做 `device_resolved or device` 兜底），
+    于是字面量 ``"auto"`` 被一路送到 `torch.device("auto")`，整轮 job 报
+    ``Expected one of cpu, cuda, ... device type at start of device string: auto``。
+
+    兜底规则：``auto`` → 有 CUDA 用 ``cuda``（**单卡**），否则 ``cpu``。
+    **刻意不自动升 ``cuda-dp``**：DataParallel 会改变梯度归约顺序，是"新开一条实验臂"
+    的开关而非透明加速（见 `run_job` 多卡段注释，以及 `notebook_runtime.resolve_device`
+    的「显式 cuda 绝不悄悄升级」纪律）。要多卡必须显式 ``--device cuda-dp``。
+    """
+    s = str(device or "cpu").strip().lower()
+    if s != "auto":
+        return s
+    if cuda_available is None:
+        try:
+            import torch
+
+            cuda_available = bool(torch.cuda.is_available())
+        except Exception:  # torch 缺失 / 驱动异常 → 按无 CUDA 处理
+            cuda_available = False
+    return "cuda" if cuda_available else "cpu"
+
+
 def resolve_bc_seed(manifest: dict) -> tuple[int, str]:
     """BC job 训练种子 → (seed, 来源标签)。
 
@@ -865,6 +892,21 @@ def run_job(
     elif _job_sha != _ACTIVE_CODE_SHA:
         raise CodeChangedError(_ACTIVE_CODE_SHA, _job_sha)
 
+    # ---- 设备归一化（**必须在 kind 分叉之前**）----
+    # BC 与 PPO 两条链都要用 device，且都要能接住未经解析的 "auto"：push-first 引导在
+    # `notebook_runtime.resolve_device()` 之前就把 worker spawn 了（只做
+    # `device_resolved or device` 兜底），字面量 "auto" 会一路传进来。
+    # 只归一化一次、放在分叉前，两条链共用 —— 2026-09-15 两次事故的教训：
+    # 第一次只改了 PPO 的分派条件（else 仍 `torch.device(device)`），第二次才发现
+    # BC 分叉也是直接透传原始 device。
+    _raw_dev = str(device or "cpu").strip().lower()
+    device = normalize_ppo_device(device)
+    if device != _raw_dev:
+        log(
+            f"job {jid}: --device {_raw_dev!r} 未经解析，worker 兜底为 {device}"
+            "（调用方应先 resolve_device；要多卡须显式 --device cuda-dp）"
+        )
+
     # ---- kind 分叉（BC 整合，plan/bc-cloud-integration.plan.md §3）：bc 任务走独立
     # 执行链（语料 npy shard 训练，无 reward/γ/λ/init-weights 语义）；ppo 任务继续
     # 走下方 per-tick 红线 + PPO 链路（默认行为零变化）。
@@ -1000,7 +1042,8 @@ def run_job(
     # 设备解析（2026-09-10 TPU 接力）：--device tpu/xla 走 torch_xla 的 xla_device()，
     # 而不是 torch.device("xla")——后者在部分 torch_xla 版本上拿不到带序号的设备句柄。
     # torch_xla 只在真的选了 TPU 时才 import（未装 torch_xla 的机器行为不变）。
-    dev_str = str(device).lower()
+    # `device` 已在 run_job 入口（kind 分叉之前）过 normalize_ppo_device，"auto" 不再可能到达这里。
+    dev_str = str(device)
     use_dp = False
     if dev_str in ("tpu", "xla"):
         # 统一走 ppo.common.xla_device()（torch_xla.device() 优先，旧版回退 xm.xla_device()）
@@ -1015,7 +1058,10 @@ def run_job(
         device_t = torch.device("cuda")
         use_dp = torch.cuda.is_available() and torch.cuda.device_count() > 1
     else:
-        device_t = torch.device(device)
+        # 必须用**归一化后**的 dev_str，不是原始 device —— 2026-09-15 二次事故：
+        # 上一版只把分派条件换成 dev_str，这里仍写 `torch.device(device)`，
+        # 于是 auto 照样被喂进 torch.device（日志上「兜底为 cuda」打了、job 仍炸 auto）。
+        device_t = torch.device(dev_str)
     opt = None
     if manifest.get("opt_init"):
         opt_dir = job_dir / "opt_init"
