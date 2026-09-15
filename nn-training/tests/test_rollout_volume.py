@@ -73,20 +73,29 @@ def test_initial_games_ceil_and_floor() -> None:
         initial_games(-1, 4, 900)
 
 
-def test_est_floor_prevents_g0_and_cap_blowup() -> None:
-    """P2-b：故障 est（< 下限）钳到 100，G0 与 cap 停在同一量级的上界内。
+def test_est_is_not_floored() -> None:
+    """est **不得**被钳到任何下限 —— 配额反解就是 `G0 = ceil(每关目标 / est)` 的原式。
 
-    病根是 `cap = G0 × 4` 与 G0 **同源**——不钳则 est→0 时两者一起放大，
-    硬顶永远追不上 G0。est=1 时未修版：G0=150000、cap=600000（单关一个初波跑几十小时）。
+    2026-09-15 回退 P2-b：曾加过 `MIN_EST_TICKS_PER_GAME = 100`，理由是"est 过小会让
+    G0 与 cap 同步爆炸、硬顶追不上"。但那个前提把**合法的小 est** 误当成故障值：
+    `e2e/test_volume_e2e.py::test_quota_converges_within_one_wave` 用 est=20 的合法值
+    证伪了它 —— 钳到 100 后 `G0 = ceil(100/100) = 1`，初波 1 局/关补不到达标线，
+    集成测试当场红（该测试的契约正是 `G0 = 5`）。
+
+    若真要在乎"est 配得过小 ⇒ G0 爆炸"，正确位置是**配置层校验**（CourseConfig 解析时
+    判 est 与关卡量级是否相称），而不是在这个纯函数里一刀切 —— 那会连带改掉合法路径。
     """
-    # est=1 与 est=100 必须给出同一个 G0（钳位生效）
-    assert initial_games(600000, 4, 1) == initial_games(600000, 4, 100) == 1500
-    # 钳住之后 cap 也就是 1500×4，而不是随 est 无限放大
-    assert default_game_cap(initial_games(600000, 4, 1)) == 6000
-    # 真值（est=967 三位数）不受下限影响，逐字节不变
+    # est=20 是 e2e 用的合法小值：每关目标 100 ⇒ 恰好 5 局（钳位会把它变成 1）
+    assert initial_games(200, 2, 20) == 5
+    # est 越小 G0 按原式越大，**不封顶**
+    assert initial_games(600000, 4, 10) == 15000
+    assert initial_games(600000, 4, 1) == 150000
+    # topup 同口径不钳：剩余 1000 / est 20 = 50
+    assert topup_games(1000, 20) == 50
+    # 真值不受影响（三位数 est 是常态，不是特例）
     assert initial_games(600000, 4, 967) == 156
-    # topup 同口径钳位
-    assert topup_games(150000, 1) == topup_games(150000, 100) == 1500
+    # cap 按设计随 G0 缩放（×DEFAULT_GAME_CAP_MULT）——它是"单波上限"，**不是**给 G0 封顶的
+    assert default_game_cap(initial_games(200, 2, 20)) == 5 * 4
 
 
 def test_topup_games_ceil_and_zero() -> None:

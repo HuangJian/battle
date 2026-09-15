@@ -50,16 +50,17 @@ DEFAULT_MAX_WAVES = 3
 #: 单关单轮局数硬顶的默认倍数：默认 = 初波 G0 × 本值。
 DEFAULT_GAME_CAP_MULT = 4
 
-#: `est_ticks_per_game` 的绝对下限（P2-b，2026-09-15）。
+#: 这里**故意没有** `est_ticks_per_game` 的绝对下限（2026-09-15 回退 P2-b）。
 #:
-#: 病根：`cap = G0 × 4` 与 `G0 = ceil(target/关数/est)` **同源**——est 估得越小，
-#: G0 越大、cap 也同步放大，硬顶**永远追不上** G0（4 倍关系与 est 无关），于是
-#: "硬顶"形同虚设。est=1 时 target=600000 / 4 关 ⇒ G0=150000 局/关、cap=600000：
-#: 单关一个初波就能跑几十小时，且**不会**触发任何停因告警。
-#: 真实局均 tick 是三位数（max_ticks = 600×count+900，实际局多在数百 tick），
-#: est < 100 只可能是账本空窗/单位错（ticks↔局数）之类的故障值 ⇒ 直接钳到下限，
-#: 让 G0 与 cap 都停在同一量级的**上界**内，而不是让故障值无限放大采集量。
-MIN_EST_TICKS_PER_GAME = 100
+#: 曾加过 `MIN_EST_TICKS_PER_GAME = 100`，动机：`cap = G0 × 4` 与
+#: `G0 = ceil(target/关数/est)` 同源，est 越小两者一起放大，"硬顶"追不上 G0。
+#: **但那个前提是错的** —— 它假定 est 必然是三位数、`est < 100` 只能是故障值。
+#: `e2e/test_volume_e2e.py::test_quota_converges_within_one_wave` 用 **est=20 的合法小值**
+#: 证伪了它：钳到 100 后 `G0 = ceil(100/100) = 1`，初波 1 局/关补不到达标线，
+#: 集成测试当场红（该测试的契约就是 `G0 = ceil(每关目标/est) = 5`）。
+#: ⇒ 配额反解的数学**保持计划 §2.2.1 原状**；`est ≤ 0` 已由各自的 ValueError 拦下。
+#: 若真在意"est 配得过小导致 G0 爆炸"，正确位置是**配置层校验**（CourseConfig 解析时
+#: 判 est 与关卡量级是否相称），而不是在纯函数里一刀切 —— 那会连带改掉合法路径的行为。
 
 #: 初波种子流 tag（= build_pairs 显式轮转路径的 0x5EED）。
 _INITIAL_WAVE_TAG = 0x5EED
@@ -102,9 +103,8 @@ def initial_games(target_transitions: int, n_stages: int, est_ticks_per_game: in
     """初波每关局数 `G0 = max(1, ceil(target / n_stages / est))`（计划 §2.2.1）。
 
     `est_ticks_per_game` ≤ 0 响亮报错——配额反解没有估计值就是静默乱采（配置校验在
-    CourseConfig 层已经拦一次，这里再拦是为了纯函数自洽）；0 < est < 下限时**钳到
-    `MIN_EST_TICKS_PER_GAME`**（P2-b：`cap = G0×4` 与 G0 同源，不钳则 est→0 时二者
-    一起爆炸，硬顶永远追不上 G0）。
+    CourseConfig 层已经拦一次，这里再拦是为了纯函数自洽）。**est 不被钳到任何下限**
+    （2026-09-15 回退 P2-b；理由见文件头那段长注释）。
     """
     if est_ticks_per_game <= 0:
         raise ValueError(f"initial_games 需要 est_ticks_per_game ≥ 1，得到 {est_ticks_per_game}")
@@ -112,7 +112,7 @@ def initial_games(target_transitions: int, n_stages: int, est_ticks_per_game: in
         1,
         _ceil_div(
             target_per_stage(target_transitions, n_stages),
-            max(MIN_EST_TICKS_PER_GAME, int(est_ticks_per_game)),
+            int(est_ticks_per_game),
         ),
     )
 
@@ -120,18 +120,18 @@ def initial_games(target_transitions: int, n_stages: int, est_ticks_per_game: in
 def topup_games(remaining_transitions: int, est_ticks_per_game: int) -> int:
     """补波大小 = `ceil(剩余 / est)`；剩余 ≤ 0 → 0（无波可补）。
 
-    与 `initial_games` 同口径：est 钳到 `MIN_EST_TICKS_PER_GAME`（P2-b）。
+    与 `initial_games` 同口径：est **不钳**（见文件头长注释，2026-09-15 回退 P2-b）。
     """
     if est_ticks_per_game <= 0:
         raise ValueError(f"topup_games 需要 est_ticks_per_game ≥ 1，得到 {est_ticks_per_game}")
     remaining = int(remaining_transitions)
     if remaining <= 0:
         return 0
-    return _ceil_div(remaining, max(MIN_EST_TICKS_PER_GAME, int(est_ticks_per_game)))
+    return _ceil_div(remaining, int(est_ticks_per_game))
 
 
 def default_game_cap(initial_g0: int) -> int:
-    """默认单关局数硬顶 = 初波 × `DEFAULT_GAME_CAP_MULT`（≥1；初波已被 est 下限约束）。"""
+    """默认单关局数硬顶 = 初波 × `DEFAULT_GAME_CAP_MULT`（≥1）。"""
     return max(1, int(initial_g0) * DEFAULT_GAME_CAP_MULT)
 
 
