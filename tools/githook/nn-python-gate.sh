@@ -65,7 +65,15 @@
 #   线程打死；所有清理路径一律走该助手。
 set -u
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# Git Bash 的 `pwd` 给 MSYS POSIX 路径（/d/github/battle2/...）——shell 内部一切正常，
+# 但**凡是要塞进 native Windows python.exe 的 argv 的路径都会被 MSYS 路径转换打坏**：
+# 实测 /d/github/battle2/tools/githook/detach-run.py 到 python 手里变成
+#   D:\d\github\battle2\tools\githook\detach-run.py   ← `/` 被当成 MSYS 根，不是 D: 盘根
+# ⇒ `can't open file [Errno 2]` ⇒ 门禁 FAILED 且无法按文件归因 ⇒ pre-commit 保守拦截，
+# 提交被假红卡死（2026-09-16）。受影响的正是 DETACH 与 GATE_TMP（两者都进 python argv），
+# 所以这里直接取 Win32 形式（`pwd -W`）；非 MSYS 环境不支持该选项 → 回退 `pwd`，
+# 与旧版逐字一致。
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && { pwd -W 2>/dev/null || pwd; })
 REPO_ROOT=$(dirname -- "$(dirname -- "$SCRIPT_DIR")")
 NN_ROOT="$REPO_ROOT/nn-training"
 
