@@ -5,6 +5,24 @@
 
 ---
 
+## §49 R9 远端降级：默认 ABORT + 启动界面 opt-in（T7，2026-09-15；DECISIONS §2026-09-15-goalnn-r9-default-abort）
+
+**为什么**：x3-power it1 远端连败触发旧默认 R9 自动降级 → remote 模式 D2 把
+`ppo_backend/model/opt` 置 None（hub 省 torch），降级只改 `args.ppo="local"` 就进
+`_serial_ppo` → `None.load_episodes` ×3，5/5 耗尽。用户拍板：**不**默认静默降级到本机。
+
+**决定**：
+1. `_ensure_local_ppo_stack()`（`rl/loop_core.py`）：懒加载 torch + backend + model + opt；
+   本地启动与降级共用，幂等。降级前必调（`loop_steps._remote_ppo_or_degrade`）。
+2. `--remote-degrade-after` **默认 3 → 0**：连败 3 次写 `gate_verdict: ABORT` 停腿。
+3. 控制台 `TrainLaunchModal`「降级本机」开关（默认关；localStorage + registry
+   `remoteDegrade` 供监督重启复现）→ `--remote-degrade-after 0|3`。
+
+**验证**：`tests/test_remote_degrade.py` 7 用例绿（默认 ABORT / opt-in 建栈）；
+`dashboard/tests/local-worker.test.ts` 12 绿（flag 0/3）；`cd dashboard && bun run typecheck` 绿。
+
+---
+
 ## §48 采集配额量纲 10× 修（T9）：`est_ticks_per_game` → `est_samples_per_game`（2026-09-15；`plan/x3-power-followup.plan.md` §T9）
 
 **为什么**：§46 的判负把「transitions = samples」定为口径令，但实现层分母仍是 ticks ——
@@ -107,7 +125,9 @@ T6（wChip）排序第二（① 也成立，但归属不在先；且须用户明
   shots 14.55→14.07（−3%，无崩塌）、dmg 124.2→124.8（持平）、ticks 995→974 ⇒
   非熔断停腿，是**跑满的干净证伪**（预注册「不升反降即停」按噪声带执行）。
 - 训练（`tmp/x3-power/training_log.jsonl`，30 个 iteration 齐）：**KL it1 0.000581 → it30
-  0.002133**（全程 max **0.00231**@it25，`kl_cap=0.006` **从未咬合**）；rollout wr
+  0.002133**（全程 max **0.00231**@it25；⚠ `kl_cap=0.006` **在本路径不接线**
+  （remote/serial 无人消费，DECISIONS §2026-09-15-goalnn-kl-cap-unwired）——旧文
+  「从未咬合」改读为「该键未生效，谈不上咬合」）；rollout wr
   0.6292–0.7417 无趋势；日常 anchor（只读 `anchor_wr`）it0 0.65 → it30 0.64（128/200）
   横盘，最大 Δ+3.5pp ≈0.75σ；rotor gap 从未触发 ≥5pp×3 轮 ⇒ 无过拟合。
 - 配对硬约束兑现：it0 vs it30 同种子 200 对 b01=4 / b10=6，pd=5.0%，Δ=−1.00pp ⇒ 策略
@@ -1159,7 +1179,9 @@ F4/DECISIONS §339 修复（ENT 改相对崩塌语义 + ent_peak 基线继承，
   （`rl/events.py` 写 `args.lr`）。
 - 影响：it1–35 实际恒定 lr=1.5e-4——warmup 段（≤15，设计 3e-4）只有一半学习率；
   **it36+ 精调段（设计 5e-5）将 3 倍超速**，phase3 又 kl_coef=0 无 KL 惩罚，风险最大。
-  kl_coef/kl_cap 经 `args._kl_coef/_kl_cap` 正常生效（已核 manifest 打包链路）。
+  kl_coef 经 `args._kl_coef` + manifest **生效**；`kl_cap` 仅 stream 路径消费
+  （remote 强制 stream=0 ⇒ **本模式不接线**，打包≠生效；见
+  DECISIONS §2026-09-15-goalnn-kl-cap-unwired）。
 - 按 ~2.2 min/iter，it36 约 1 小时内到达。选项：(a) `_course_iter` 把 `sch['lr']`
   同步折进 `args.lr`（一行改动）+ 重启 resume 续跑，it12 起与课程表对齐，
   it1–11 半速段记为既成事实；(b) 维持恒定 1.5e-4 跑完并改课程注释。属实验语义

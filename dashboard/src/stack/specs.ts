@@ -300,6 +300,12 @@ export interface TrainingLoopSpecOpts {
   venv: { python: string; sitePackages: string }
   /** 门禁触发时的动作：halt = 下发云端停机达令（默认）；notify = 只提示不停机。 */
   gateHaltMode?: GateHaltMode
+  /**
+   * 远端 PPO 连败是否降级到本机进程内 PPO（T7，2026-09-15）。
+   * **默认 false** → `--remote-degrade-after 0`（连败 3 次 ABORT 停腿，不静默切本机）。
+   * true → `--remote-degrade-after 3`（显式 opt-in；降级前 Python 会懒加载本机栈）。
+   */
+  remoteDegrade?: boolean
 }
 
 /**
@@ -364,6 +370,9 @@ export function trainingLoopSpec(cfg: RlConfig, s: TrainingLoopSpecOpts): ProcSp
       ...hubFlags,
       ...(s.smoke ? ['--smoke'] : []),
       ...(s.gateHaltMode ? ['--gate-halt-mode', s.gateHaltMode] : []),
+      // T7：默认不自动降级本机。opt-in 时才给 N>0。
+      '--remote-degrade-after',
+      String(s.remoteDegrade ? 3 : 0),
     ],
     env: {
       PYTHONPATH: `${s.venv.sitePackages}${path.delimiter}${NN_TRAINING}`,

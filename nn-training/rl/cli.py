@@ -471,10 +471,11 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
     ap.add_argument(
         "--remote-degrade-after",
         type=int,
-        default=_d("remote_degrade_after", 3),
-        help="R9（2026-09-10 c6 it50 事故）：远端 PPO 连续失败这么多次后**自动降级本机 "
-        "PPO**（0 = 不降级，改为达 3 次后写 ABORT 停腿）。降级是本轮立即生效的"
-        "“先活着”路径——云端不可达时训练继续跑，而不是整条腿耗在轮询上",
+        default=_d("remote_degrade_after", 0),
+        help="R9（2026-09-15 T7 默认改关）：远端 PPO 连续失败 N 次后降级本机进程内 PPO。"
+        "**默认 0 = 不自动降级**，连败 3 次写 ABORT 停腿（云端不可达应响亮失败，"
+        "不静默切慢速本机）。N>0 为操作员显式 opt-in（控制台启动弹窗开关）；"
+        "降级时会懒加载 torch + model/opt（T7 修复），本轮起本机 PPO",
     )
     ap.add_argument(
         "--gate-remediate-stop-after",

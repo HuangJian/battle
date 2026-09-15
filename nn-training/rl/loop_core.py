@@ -477,6 +477,23 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
             return
 
         import numpy as np
+
+        np.random.seed(args.seed)
+        self._ensure_local_ppo_stack()
+        self._setup_common()
+
+    def _ensure_local_ppo_stack(self) -> None:
+        """构建/恢复本机 PPO 栈（torch + backend + model + opt）。
+
+        本地启动路径与 **R9 降级**共用：remote 模式 D2 为 hub 省 torch 会把
+        `ppo_backend/model/opt` 置 None；一旦 `--remote-degrade-after>0` 触发降级
+        改走 `_serial_ppo` 本机路径，必须先补齐本方法，否则 `None.load_episodes`
+        （x3-power it1 实锤）。已初始化则幂等返回。
+        """
+        if self.ppo_backend is not None and self._model is not None:
+            return
+        args = self.args
+
         import torch
 
         import ppo.engine as ppo_mod
@@ -489,8 +506,6 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         self._ppo_goal = ppo_goal
         self._ppo_intent = ppo_intent
         self._save_weights_json = save_weights_json
-
-        np.random.seed(args.seed)
         self.ppo_backend = get_backend(args.mode)
 
         device = torch.device("cpu")
@@ -547,8 +562,7 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         self._opt = torch.optim.Adam(trainable, lr=args.lr)
         if n_frozen == 0 and freeze_prefixes:
             log(f"[run_rl] WARN freeze prefixes matched nothing: {freeze_prefixes}")
-
-        self._setup_common()
+        log("[run_rl] local PPO stack ready")
 
     def _setup_common(self) -> None:
         """两模式（local/remote）共享的启动尾部：traj 目录 / rotateSeed / run_start 账本 /

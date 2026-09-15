@@ -295,6 +295,15 @@ class TrainingSteps:
     _leg_abort: bool
     #: R9：远端连续失败计数（成功即复位）与"已降级本机"标记。
     _remote_fail: int
+
+    def _ensure_local_ppo_stack(self) -> None:
+        """本机 PPO 栈（torch/backend/model/opt）——TrainingLoop 实现。
+
+        R9 降级前必调（remote D2 启动路径会把栈置 None）。mixin 只声明，
+        真身在 `loop_core.TrainingLoop`。
+        """
+        raise NotImplementedError
+
     _remote_degraded: bool
     _dropped_games: Any
     _load_sec: Any
@@ -649,15 +658,20 @@ class TrainingSteps:
         self._commit_journal().finish("ppo_local", str(it))
 
     def _remote_ppo_or_degrade(self, it: int) -> bool:
-        """R9（plan/feasibility-map.md §12）：远端失败计数与自动降级。
+        """R9（plan/feasibility-map.md §12）：远端失败计数与 **opt-in** 降级。
 
-        c6 it50 事故：单个 job 三次 1800s 超时、进程最终死在 eval 中途——云端在
-        关键路径上却没有任何退路。本方法给三档处置：
-          · 成功 → 计数复位，True（调用方直接 return，语义与旧代码一致）；
-          · 失败且未达阈值 → 原样抛出，交给 loop 的「原地重试同一 iter」（既有语义）；
-          · 失败达阈值 → `--remote-degrade-after N>0`：改 `args.ppo = "local"`、
-            写 `remote_degrade` 事件、本轮起走本机 PPO（训练活着，慢但不死）；
-            `--remote-degrade-after 0`（显式禁降级）：写 ABORT 判决后停腿。
+        2026-09-15 T7：**默认不再自动降级本机**（`remote_degrade_after` 默认 0）。
+        原因：① 远端失败应响亮停腿，不静默切到慢一个量级的本机 PPO；
+        ② 旧默认 3 会撞上 remote 模式 `ppo_backend=None`（x3-power it1 打穿）。
+        控制台启动弹窗提供 opt-in；开启后降级前会 `_ensure_local_ppo_stack()`。
+
+        c6 it50 事故背景：单个 job 三次 1800s 超时、进程最终死在 eval 中途。
+        本方法三档处置：
+          · 成功 → 计数复位，True（调用方直接 return）；
+          · 失败且未达阈值 → 原样抛出（loop 原地重试同一 iter）；
+          · 失败达阈值 → `--remote-degrade-after N>0`：懒加载本机栈 + 改
+            `args.ppo="local"` + `remote_degrade` 事件；
+            **默认 N=0**：连败 3 次写 ABORT 判决后停腿。
 
         返回 True = 远端已出结果（本轮 PPO 结束）；False = 调用方改走本地路径。
         """
@@ -666,7 +680,7 @@ class TrainingSteps:
             self._remote_ppo(it)
         except (RetryableError, ProtocolError, OSError, TimeoutError) as e:
             self._remote_fail += 1
-            limit = int(getattr(args, "remote_degrade_after", 3) or 0)
+            limit = int(getattr(args, "remote_degrade_after", 0) or 0)
             log(
                 f"[run_rl] remote ppo it{it} FAILED ({type(e).__name__}: {str(e)[:200]}) — "
                 f"consecutive={self._remote_fail}"
@@ -687,6 +701,10 @@ class TrainingSteps:
                 raise
             if self._remote_fail < limit:
                 raise  # 未达阈值：按既有语义原地重试（同一 iter，不推进）
+            # T7：降级前必须先建好本机 PPO 栈。remote 启动为 hub 省 torch 把
+            # backend/model/opt 置 None；直接改 args.ppo=local 会让 _serial_ppo
+            # 撞 None.load_episodes（x3-power it1 实锤）。
+            self._ensure_local_ppo_stack()
             args.ppo = "local"
             self._remote_degraded = True
             write_event(

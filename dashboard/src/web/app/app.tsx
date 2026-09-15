@@ -296,14 +296,17 @@ export function App({ initial }: AppProps) {
 
   const handleLaunch = async (
     mode: 'pull' | 'push' | 'local',
-    push?: PushCredentials,
+    push?: Partial<PushCredentials> & { remoteDegrade?: boolean },
   ): Promise<void> => {
     // Push：先关弹窗再 POST（服务端 ping 门；失败走 flash，不启动进程）。
     setTrainOpen(false)
-    const body: Record<string, unknown> = { mode }
+    const body: Record<string, unknown> = {
+      mode,
+      remoteDegrade: push?.remoteDegrade === true,
+    }
     if (mode === 'push' && push) {
-      body.pushEndpoint = push.endpoint
-      body.pushAuthKey = push.authKey
+      body.pushEndpoint = push.endpoint ?? ''
+      body.pushAuthKey = push.authKey ?? ''
     }
     await doAction('preset', body)
   }

@@ -63,6 +63,8 @@ export function restartSpecFor(key: Component, course = ''): ProcSpec | null {
         pushNodeUrl: entry.pushNodeUrl,
         hubUrl,
         venv,
+        // T7：监督重启必须复现启动时的 opt-in（默认关）。
+        remoteDegrade: !!entry.remoteDegrade,
       })
     }
   }

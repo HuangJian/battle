@@ -70,6 +70,8 @@ export interface RegistryEntry {
   jobRoot?: string
   /** trainingLoop 的 push 节点 URL（REMOTE_PUSH_NODE 重启注入）。 */
   pushNodeUrl?: string
+  /** T7：启动时是否 opt-in 远端连败降级本机 PPO（默认 false；监督重启复现）。 */
+  remoteDegrade?: boolean
   /** 启动模式：控制台 trainer 编排（pull/push/local）或 'remote'（冒烟预演）。 */
   mode?: 'pull' | 'push' | 'local' | 'remote'
   /** 非正常退出记录（§380 exit-watchdog 写入；UI/API 展示退出原因）。 */

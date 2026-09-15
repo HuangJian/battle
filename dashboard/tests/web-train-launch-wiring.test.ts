@@ -53,8 +53,11 @@ describe('app.tsx → TrainLaunchModal push 凭据透传', () => {
       join(DASHBOARD_ROOT, 'src', 'web', 'app', 'panels', 'TrainLaunchModal.tsx'),
       'utf8',
     ).replace(/\s+/g, ' ')
-    // 弹窗在 push 模式下必须带第二参数；只带 mode 就是另一端漏传
-    expect(modal).toMatch(/onLaunch\(mode,\s*\{\s*endpoint,\s*authKey\s*\}\)/)
+    // 弹窗在 push 模式下必须带第二参数；只带 mode 就是另一端漏传。
+    // T7 起还带 remoteDegrade（opt-in 降级本机）。
+    expect(modal).toMatch(/onLaunch\(mode,\s*\{\s*endpoint,\s*authKey,\s*remoteDegrade\s*\}\)/)
     expect(modal).toContain('PushCredentials')
+    // 非 push 路径也要透传 remoteDegrade（否则本地/pull 预设丢开关）。
+    expect(modal).toMatch(/onLaunch\(mode,\s*\{\s*remoteDegrade\s*\}\)/)
   })
 })

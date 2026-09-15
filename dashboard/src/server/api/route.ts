@@ -95,6 +95,8 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
           await startPreset(mode as 'pull' | 'push' | 'local', ctx.course, {
             pushEndpoint: bodyStr(body, 'pushEndpoint'),
             pushAuthKey: bodyStr(body, 'pushAuthKey'),
+            // T7：布尔用严格 true（缺省/其它 = 关，不自动降级）。
+            remoteDegrade: body.remoteDegrade === true,
           }),
         )
       }

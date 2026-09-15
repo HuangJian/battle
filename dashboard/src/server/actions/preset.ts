@@ -19,6 +19,8 @@ export interface PresetOpts {
   pushEndpoint?: string
   /** Push：worker_server Bearer token（显式填写时必填；复用/回落时用节点 authKey·rl.remote_token）。 */
   pushAuthKey?: string
+  /** T7：远端连败是否 opt-in 降级本机 PPO（默认 false）。 */
+  remoteDegrade?: boolean
 }
 
 /** 按 trainer 模式顺序拉起组件组合：
@@ -62,7 +64,11 @@ export async function startPreset(
             ? ['selfNode', 'workerServe', 'trainingLoop']
             : ['selfNode', 'trainingLoop']
           : ['hubServer', 'localWorker', 'trainingLoop']
-    const ctx: StartCtx = { course, trainerPpo: mode }
+    const ctx: StartCtx = {
+      course,
+      trainerPpo: mode,
+      remoteDegrade: !!opts.remoteDegrade,
+    }
     const detail: string[] = []
     for (const k of order) {
       const r = await startComponent(k, ctx)

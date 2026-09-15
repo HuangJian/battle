@@ -41,6 +41,8 @@ export interface StartCtx {
   /** 显式 REMOTE_PUSH_NODE（仅冒烟/本机伪 GPU；真实 Push 走 rl-config gpu_push 节点，
    *  不注入 env——env 会强制 remote_token，覆盖用户填写的 authKey）。 */
   pushNodeUrl?: string
+  /** T7：远端连败是否 opt-in 降级本机 PPO（默认 false = ABORT）。 */
+  remoteDegrade?: boolean
 }
 
 /** run_bc 单实例锁持有人（BC 课程；与 runRlLockHolder 同语义，锁名 run_bc）。 */
@@ -259,6 +261,7 @@ export async function startComponent(key: Component, ctx: StartCtx): Promise<Act
           // local 模式：指名本机 hub（worker 是独立进程，训练器只负责发布+等待）
           hubUrl: localHubUrl(cfg, ctx.course, ctx.trainerPpo),
           venv,
+          remoteDegrade: ctx.remoteDegrade,
         })
         const r = launchSpec(spec)
         saveAnyComponent('trainingLoop', ctx.course, {
@@ -268,6 +271,7 @@ export async function startComponent(key: Component, ctx: StartCtx): Promise<Act
           entry: TRAINING_LOOP_ENTRY,
           mode: ctx.trainerPpo,
           pushNodeUrl: ctx.pushNodeUrl ?? cfg.courses?.[ctx.course]?.push_node_url,
+          remoteDegrade: !!ctx.remoteDegrade,
           log: trainLog,
         })
         monitorTouch()

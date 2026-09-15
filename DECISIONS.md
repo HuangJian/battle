@@ -1824,7 +1824,7 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   pooled **Δ=−2.875pp**，McNemar 单侧 p=0.9998（双侧 p=0.0011，净 −3.35σ），pd=5.9%
   ⇒ 判线失败、**判负**。分关/伴随量/事件账全文在 `docs/nn.progress.md` §46。
 - **本条目立的是该腿派生的三条口径/程序（实验记录本身不进本文件）**：
-  1. **判读禁令**：KL it30=0.00213（`kl_cap` 从未咬合）⇒ 结论的**唯一合法写法**是
+  1. **判读禁令**：KL it30=0.00213（`kl_cap` 本路径不接线，见 §2026-09-15-goalnn-kl-cap-unwired）⇒ 结论的**唯一合法写法**是
      「**梯度无方向 / 执行瓶颈**」（指向 metrics v6，分敌种命中列 TS+Python 全链）；
      **禁**写「信用比无效」（须 KL≥0.01 而 Δ≈0 才成立）与「信用比有害」
      （单腿 −2.9pp 可来自起点游走 + 目标关噪声，且四关同降 ≠ 因果）。
@@ -1850,3 +1850,36 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 - **违反后果**：按 ticks 口径规划采集量 ⇒ 下一腿照抄 10× 误差、配额缺口 90%；把判负外推成
   「信用比有害」⇒ 错误回滚奖励语义、丢掉「执行瓶颈」这一真信号；未立案开 wChip ⇒
   N3/R5 被静默架空，日后无从追溯何时因何破了哪条规则。
+
+## §2026-09-15-goalnn-kl-cap-unwired（2026-09-15，x3-step 评审 P0-1：串行/远端路径 kl_cap 不接线）
+
+- **背景**：`ppo_schedule` 的 `kl_cap` 在 per-tick **remote/serial** 执行路径**不接线**——
+  `ppo/engine.py::ppo_update` 无形参；`remote/worker.py` 只读 `kl_coef`；全仓消费者仅
+  `rl/stream.py`（stream 波次闸）与 manifest 打包。x3 线 `stream=0`（remote 强制）⇒
+  字段写了也不生效。`p4-fast.jsonc` 已写对；但 x3-step / x3-power 结算 / `nn.progress.md`
+  §46、§19.1 仍把「kl_cap 从未咬合 / 回落兜底」当成生效护栏叙事。
+- **备选与否决**：A 继续当护栏写 —— 否，机制假、后腿会按「失去护栏」解释第二段；
+  B 引擎接线硬顶 —— 否，属新训练变量/算法变更，须另立项，本条只钉口径；
+  C 只改课程注释 —— 否，跨文件反复误用，须 DECISIONS 禁令。
+- **决定**：**禁**在串行/远端课程、结算、progress 中把 `kl_cap` 写成生效硬顶或「咬合」；
+  本路径生效旋钮只有 `kl_coef`（软惩罚）+ `lr` + F4 `KL_BREAK`。stream 路径才读
+  `args._kl_cap` / `policy.streamKlCap`。x3-power「kl_cap 从未咬合」改读为
+  **「该键本路径未接线，谈不上咬合；KL≈0.002 由 kl_coef+小步长决定」**。
+  判负八字判决（梯度无方向/执行瓶颈）本身不受影响。
+- **违反后果**：后腿把「第二段无 kl_cap」当成第二变量或「失去紧护栏」⇒ 错误解释 KL
+  不升的原因，继续烧 2–4h 腿；或反向去「修」一个根本没接线的键。
+
+## §2026-09-15-goalnn-r9-default-abort（2026-09-15，T7：远端连败默认 ABORT，降级本机 opt-in）
+
+- **背景**：x3-power it1 远端连败触发 R9 自动降级 → `None.load_episodes` ×3（remote
+  模式 D2 把 `ppo_backend` 置 None，降级只改 `args.ppo` 未建栈）。用户拍板：**不**默认
+  静默降级到本机；启动界面提供开关，**默认关**。
+- **备选与否决**：A 只修 None bug 仍默认降级 3 —— 否，远端失败应响亮停腿，静默切慢速
+  本机会把事故吞掉；B 维持旧默认 —— 否，已打穿过一次；C 直接删 R9 —— 否，opt-in
+  仍有价值（长腿/无值守）。
+- **决定**：`--remote-degrade-after` **默认 0**（连败 3 次写 `gate_verdict: ABORT` 停腿）。
+  N>0 为显式 opt-in：控制台启动弹窗「降级本机」（localStorage + registry 复现）→
+  `--remote-degrade-after 3`；降级前必调 `loop_core._ensure_local_ppo_stack()` 懒加载
+  torch/model/opt。
+- **违反后果**：再默认降级 ⇒ 静默切慢速本机 + 无栈时 None crash；不建栈就改 ppo=local
+  ⇒ x3-power it1 事故复现。

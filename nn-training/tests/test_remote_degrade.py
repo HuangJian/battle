@@ -1,12 +1,15 @@
-"""tests/test_remote_degrade.py —— R9 远端失败自动降级（plan/feasibility-map.md §12）。
+"""tests/test_remote_degrade.py —— R9 远端失败降级（plan/feasibility-map.md §12 + T7）。
 
-c6 it50 事故：单个 job 三次 1800s 超时、进程最终死在 eval 中途——云端在关键路径上
-却没有任何退路。本文件锁死三档处置与**退避**行为：
+2026-09-15 T7：**默认不再自动降级**（`remote_degrade_after` 默认 0）。原默认 3 会
+在 remote 模式撞上 `ppo_backend=None`（x3-power it1 `None.load_episodes`）。
+控制台启动弹窗 opt-in 打开后，降级前必须 `_ensure_local_ppo_stack()`。
+
+本文件锁死三档处置与**退避**行为：
 
   * 成功 → 失败计数复位；
   * 连败未达阈值 → 原样抛出（交给 loop 原地重试，既有语义不变）；
-  * 连败达阈值 → `args.ppo` 改 local + `remote_degrade` 事件 + 本轮继续（训练活着）；
-  * `--remote-degrade-after 0`（禁降级）→ 连败 3 次写 `gate_verdict: ABORT` 并停腿；
+  * 连败达阈值（N>0 opt-in）→ 先建本机栈 + `args.ppo` 改 local + `remote_degrade` 事件；
+  * 默认 N=0 → 连败 3 次写 `gate_verdict: ABORT` 并停腿（不切本机）；
   * `wait_job` 轮询：网络错误/5xx 指数退避，404（正常排队）不退避。
 
 免 torch：只构造 stub 承载 `TrainingSteps._remote_ppo_or_degrade`，不碰训练后端。
@@ -29,7 +32,9 @@ class _Stub(TrainingSteps):
     `_remote_ppo`（真远端要 hub/隧道/打包，这里不需要）。"""
 
     def __init__(self, tmp_path: Path, fail_times: int = 0, **args_over: object) -> None:
-        base = {"ppo": "remote", "remote_degrade_after": 3}
+        # 默认 remote_degrade_after=0：与 CLI 新默认一致（不自动降级）。
+        # 测 N>0 路径时由用例显式传入。
+        base = {"ppo": "remote", "remote_degrade_after": 0}
         base.update(args_over)
         self.args = SimpleNamespace(**base)  # type: ignore[arg-type]
         self._jsonl_path = tmp_path / "training_log.jsonl"
@@ -39,6 +44,16 @@ class _Stub(TrainingSteps):
         self._leg_abort = False
         self.remote_calls: list[int] = []
         self.fail_times = fail_times
+        self.ensure_local_calls = 0
+        # 模拟 remote 模式 D2：栈为空（降级前不得直接 load_episodes）。
+        self.ppo_backend = None
+        self._model = None
+
+    def _ensure_local_ppo_stack(self) -> None:
+        """测试替身：只记调用次数（真身在 loop_core，需 torch）。"""
+        self.ensure_local_calls += 1
+        self.ppo_backend = object()  # type: ignore[assignment]
+        self._model = object()
 
     def _remote_ppo(self, it: int) -> None:
         self.remote_calls.append(it)
@@ -64,7 +79,7 @@ def test_success_resets_failure_counter(tmp_path: Path) -> None:
 
 def test_below_threshold_retries_same_iteration(tmp_path: Path) -> None:
     """未达阈值：原样抛出 → loop 的「原地重试同一 iter」语义不变。"""
-    st = _Stub(tmp_path, fail_times=5)
+    st = _Stub(tmp_path, fail_times=5, remote_degrade_after=3)
     with pytest.raises(TimeoutError):
         st._remote_ppo_or_degrade(1)
     with pytest.raises(TimeoutError):
@@ -75,18 +90,36 @@ def test_below_threshold_retries_same_iteration(tmp_path: Path) -> None:
 
 
 def test_degrade_to_local_after_threshold(tmp_path: Path) -> None:
-    """达阈值：args.ppo → local + remote_degrade 事件 + 本轮继续（训练不死）。"""
-    st = _Stub(tmp_path, fail_times=3)
+    """达阈值（opt-in N>0）：先建本机栈 + args.ppo → local + remote_degrade 事件。"""
+    st = _Stub(tmp_path, fail_times=3, remote_degrade_after=3)
     for _ in range(2):
         with pytest.raises(TimeoutError):
             st._remote_ppo_or_degrade(5)
     assert st._remote_ppo_or_degrade(5) is False  # 第 3 次 → 降级
     assert st.args.ppo == "local"
+    # T7：降级前必须懒加载本机 PPO 栈（否则 None.load_episodes）。
+    assert st.ensure_local_calls == 1
+    assert st.ppo_backend is not None
     ev = st.events()
     assert [e["event"] for e in ev] == ["remote_degrade"]
     assert ev[0]["iter"] == 5 and ev[0]["after_failures"] == 3
     # 降级后方法不再调远端（调用方已走本地路径）
     assert len(st.remote_calls) == 3
+
+
+def test_default_is_no_auto_degrade(tmp_path: Path) -> None:
+    """T7：默认 remote_degrade_after=0 → 连败 3 次 ABORT，绝不静默切本机。"""
+    st = _Stub(tmp_path, fail_times=3)  # 使用默认（0）
+    assert st.args.remote_degrade_after == 0
+    for _ in range(2):
+        with pytest.raises(TimeoutError):
+            st._remote_ppo_or_degrade(2)
+    with pytest.raises(TimeoutError):
+        st._remote_ppo_or_degrade(2)
+    assert st.args.ppo == "remote"
+    assert st.ensure_local_calls == 0  # 默认路径永不拉起本机栈
+    assert st._leg_abort is True
+    assert [e["event"] for e in st.events()] == ["gate_verdict"]
 
 
 def test_degrade_disabled_writes_abort(tmp_path: Path) -> None:
@@ -104,6 +137,7 @@ def test_degrade_disabled_writes_abort(tmp_path: Path) -> None:
     assert ev[0]["iter"] == 9
     assert st._leg_abort is True
     assert st.args.ppo == "remote"  # 禁降级时不许偷偷改
+    assert st.ensure_local_calls == 0
 
 
 def test_wait_job_poll_backoff_on_network_errors() -> None:

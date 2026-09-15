@@ -22,13 +22,17 @@ export interface TrainLaunchModalProps {
   modes: ModeView
   onClose: () => void
   onAction: (act: string, body: Record<string, unknown>) => void
-  onLaunch: (mode: 'pull' | 'push' | 'local', push?: PushCredentials) => void
+  onLaunch: (
+    mode: 'pull' | 'push' | 'local',
+    opts?: Partial<PushCredentials> & { remoteDegrade?: boolean },
+  ) => void
   /** 局域网只读视图：行为开关/预演/启动全部禁用（兜底——启动入口可点，弹窗内禁用以防误操作）。 */
   readOnly?: boolean
 }
 
 const TC_PUSH_ENDPOINT = 'tc.pushEndpoint'
 const TC_PUSH_AUTH = 'tc.pushAuthKey'
+const TC_REMOTE_DEGRADE = 'tc.remoteDegrade'
 
 function readLocal(key: string): string {
   try {
@@ -70,6 +74,15 @@ export function TrainLaunchModal({
   const [pushEndpoint, setPushEndpoint] = useState(() => readLocal(TC_PUSH_ENDPOINT))
   const [pushAuthKey, setPushAuthKey] = useState(() => readLocal(TC_PUSH_AUTH))
   const [pushErr, setPushErr] = useState('')
+  // T7：远端连败是否 opt-in 降级本机进程内 PPO。默认关（连败 3 次 ABORT 停腿）。
+  // 历史默认 3 会静默切到慢速本机，且曾撞上 None backend。
+  const [remoteDegrade, setRemoteDegrade] = useState(() => {
+    try {
+      return localStorage.getItem(TC_REMOTE_DEGRADE) === '1'
+    } catch {
+      return false
+    }
+  })
 
   // 行为开关偏好：localStorage 优先 → 服务端 modes 兜底
   const [toggles, setToggles] = useState<{
@@ -136,8 +149,9 @@ export function TrainLaunchModal({
   }
 
   const handleLaunchClick = (): void => {
+    writeLocal(TC_REMOTE_DEGRADE, remoteDegrade ? '1' : '0')
     if (mode !== 'push') {
-      onLaunch(mode)
+      onLaunch(mode, { remoteDegrade })
       return
     }
     const endpoint = pushEndpoint.trim()
@@ -153,7 +167,7 @@ export function TrainLaunchModal({
       writeLocal(TC_PUSH_ENDPOINT, endpoint)
       writeLocal(TC_PUSH_AUTH, authKey)
     }
-    onLaunch(mode, { endpoint, authKey })
+    onLaunch(mode, { endpoint, authKey, remoteDegrade })
   }
 
   if (!open) return null
@@ -254,6 +268,18 @@ export function TrainLaunchModal({
             title="rl.precollect_early"
             disabled={readOnly}
             onChange={(v) => applyToggle('rl.precollect_early', v)}
+          />
+          <Toggle
+            label="降级本机"
+            checked={remoteDegrade}
+            title={
+              '远端 PPO 连败是否降级到本机进程内 PPO（--remote-degrade-after）。\n' +
+              '· 关（默认）：连败 3 次写 ABORT 停腿——不静默切慢速本机。\n' +
+              '· 开：连败 3 次后懒加载本机 torch/model 并继续训练。\n' +
+              '仅启动时生效；监督重启会复现当前开关。'
+            }
+            disabled={readOnly}
+            onChange={setRemoteDegrade}
           />
         </div>
         <div className="tc-line">

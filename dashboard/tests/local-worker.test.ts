@@ -191,6 +191,26 @@ describe('trainer 编排：local = 本机独立 worker（进程内 PPO 已下线
     expect(spec.cmd).not.toContain('--local')
   })
 
+  it('T7：默认 --remote-degrade-after 0；opt-in 时为 3', () => {
+    const cfg = dualCourseCfg()
+    const hub = `http://127.0.0.1:${slotPort(cfg, 'course-a', 'hub')}`
+    const off = trainingLoopSpec(cfg, {
+      course: 'course-a',
+      ppo: 'local',
+      hubUrl: hub,
+      venv: VENV,
+    })
+    expect(flag(off, '--remote-degrade-after')).toBe('0')
+    const on = trainingLoopSpec(cfg, {
+      course: 'course-a',
+      ppo: 'local',
+      hubUrl: hub,
+      venv: VENV,
+      remoteDegrade: true,
+    })
+    expect(flag(on, '--remote-degrade-after')).toBe('3')
+  })
+
   it('BC：local → --remote 同样钉 pull，不再产出 run_bc 的 --local', () => {
     const cfg = dualCourseCfg()
     const hub = `http://127.0.0.1:${slotPort(cfg, 'course-a', 'hub')}`
