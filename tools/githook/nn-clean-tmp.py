@@ -41,15 +41,32 @@ def remove_listed(list_path: Path) -> int:
 
     安全边界（即使清单被污染也删不到 tmp/ 之外）：只接受 **TARGET 正下方一层** 的
     真实目录 —— 父目录必须等于 TARGET（大小写不敏感比较，适配 Windows）。
+
+    删除时间预算（2026-09-15，NN_TMP_CLEAN_S 默认 10）：
+    编码 agent 沙箱（WorkBuddy 等）在**文件系统层**逐文件拦截删除（SHFileOperationW
+    拦截 + 每回合配额计数，`CODEBUDDY_SAFE_DELETE_ENABLED=0` 都挡不住，见 2026-09-14
+    记录）——50 个临时目录的批量 rmtree 实测可把本清理器烧到 100% CPU 数分钟，
+    连带 pytest session 收尾挂起（2026-09-15 实测卡 7 分钟）。预算到期即止损：
+    清理是锦上添花，**完成提交/门禁比删干净重要**；余量由 KEEP_DAYS 兜底或人工
+    `task.py clean` 清。
     """
     if not list_path.is_file():
         return 0
     base = str(TARGET.resolve()).lower()
     removed = skipped = 0
+    # NN_TMP_CLEAN_S<=0 = 不限时**彻底清理**（显式释放阀；沙箱外终端跑即秒清）
+    budget = float(os.environ.get("NN_TMP_CLEAN_S", "10"))
+    t0 = time.monotonic()
     for raw in list_path.read_text(encoding="utf-8").splitlines():
         s = raw.strip()
         if not s:
             continue
+        if budget > 0 and time.monotonic() - t0 > budget:
+            print(
+                f"[nn-clean-tmp] delete budget {budget:g}s hit → stopped after "
+                f"{removed + skipped} dirs; leftover by KEEP_DAYS 兜底"
+            )
+            break
         try:
             rp = Path(s).resolve()
         except OSError:
@@ -59,7 +76,7 @@ def remove_listed(list_path: Path) -> int:
             skipped += 1
             continue
         try:
-            shutil.rmtree(rp)  # -S 下为原版 rmtree（沙箱保护未注入）
+            shutil.rmtree(rp)  # -S 下为原版 rmtree（沙箱保护未注入）——文件系统层拦截仍可能慢
             removed += 1
         except OSError:
             skipped += 1
@@ -88,6 +105,8 @@ def main(argv: list[str] | None = None) -> int:
         return remove_listed(Path(args.paths))
     cutoff = time.time() - KEEP_DAYS * 86400
     removed = kept = 0
+    budget = float(os.environ.get("NN_TMP_CLEAN_S", "10"))  # 与 remove_listed 同的删除时间预算
+    t0 = time.monotonic()
     for child in TARGET.iterdir():
         if not child.is_dir():
             continue
@@ -95,6 +114,12 @@ def main(argv: list[str] | None = None) -> int:
             mtime = child.stat().st_mtime
         except OSError:
             continue
+        if budget > 0 and time.monotonic() - t0 > budget:
+            print(
+                f"[nn-clean-tmp] delete budget {budget:g}s hit → stopped after {removed} "
+                f"expired dir(s); 余量下轮/人工 `task.py clean` 清"
+            )
+            break
         if mtime < cutoff:
             try:
                 shutil.rmtree(child)  # -S 下为原版 rmtree（沙箱保护未注入）

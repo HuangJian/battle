@@ -64,6 +64,43 @@ def run(cmd: list[str], *, check: bool = False, env: dict[str, str] | None = Non
     return result.returncode
 
 
+def run_parallel(cmds: list[list[str]], *, env: dict[str, str] | None = None) -> int:
+    """并行执行多个独立命令，**fail-fast**：任一非零即终止其余在跑者并返回该退出码。
+
+    输出继承父级（实时可见，与 tools/githook/nn-python-gate.sh 的并行语义一致）；
+    仅适合互相独立的步骤（如 check 的 ruff / mypy / pytest）。
+    """
+    jobs: list[tuple[list[str], subprocess.Popen[bytes]]] = []
+    for c in cmds:
+        print(f"[task] (parallel) {' '.join(c)}", flush=True)
+        jobs.append((c, subprocess.Popen(c, env=env)))
+    done = [False] * len(jobs)
+    while not all(done):
+        for i, (_, p) in enumerate(jobs):
+            if done[i]:
+                continue
+            rc = p.poll()
+            if rc is None:
+                continue
+            done[i] = True
+            if rc != 0:
+                # fail fast：杀掉其余仍在跑的任务（连带进程树），不等它们收尾
+                for j, (_, q) in enumerate(jobs):
+                    if not done[j] and q.poll() is None:
+                        _terminate_tree(q)
+                    done[j] = True
+                return rc
+    return 0
+
+
+def _terminate_tree(p: subprocess.Popen[bytes]) -> None:
+    """终止进程；Windows 用 taskkill /T 连子进程树（仅 fail-fast 清理用）。"""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)], capture_output=True)
+    else:
+        p.kill()
+
+
 def target_setup() -> int:
     """One-command bootstrap: 探测 GPU → 选 torch 变体 → uv sync → 装后自检。
 
@@ -75,9 +112,17 @@ def target_setup() -> int:
 
 
 def target_check() -> int:
-    target_lint()
-    target_typecheck()
-    return target_test_fast()
+    # 并行 + fail-fast（2026-09-15）：lint/typecheck/test-fast 三者互相独立，
+    # 任一红立即终止其余（与 nn-python-gate.sh 并行语义同构）；env=clean_env()
+    # 关删除保护沙箱守卫。
+    return run_parallel(
+        [
+            [PYTHON, "-m", "ruff", "check", "."],
+            [PYTHON, "-m", "mypy", ".", "--config-file", str(HERE / "pyproject.toml")],
+            [PYTHON, "-m", "pytest", "tests/", "-n", "4", "-q", "-m", "not heavy", "--timeout=50000"],
+        ],
+        env=clean_env(),
+    )
 
 
 def target_test() -> int:
@@ -120,7 +165,15 @@ def target_clean() -> int:
         if p.exists():
             p.unlink()
             cleaned += 1
-    print(f"[task] clean: removed {cleaned} artifacts. weights/ preserved.")
+    # 彻底清理 tmp/pytest-tmp（2026-09-15）：NN_TMP_CLEAN_S=0 关掉预算止损——
+    # 沙箱删除节流会话里常规清理会欠账，这是无条件释放阀（沙箱外终端跑即秒清）。
+    clean_rc = run(
+        [PYTHON, "-S", str(HERE.parent / "tools" / "githook" / "nn-clean-tmp.py")],
+        env={**clean_env(), "NN_TMP_CLEAN_S": "0", "NN_TMP_KEEP_DAYS": "0"},
+    )
+    if clean_rc:
+        return clean_rc
+    print(f"[task] clean: removed {cleaned} artifacts (+ pytest-tmp 全清). weights/ preserved.")
     return 0
 
 
