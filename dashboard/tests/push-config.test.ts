@@ -1,7 +1,10 @@
 /** push-config.test.ts — Push 执行面解析：URL 归一化 + rl-config 回写（无真实 HTTP）。
  *
- *  2026-09-15 追加：endpoint 留空且 config 无可用 gpu_push → **回落本机 worker_server**
- *  （一键本机 push）。两个节点 kinds 必须共存互不覆盖，回写要保证 python 侧
+ *  **2026-09-15 策略反转（用户指令「就算云机连接不上，也不能直接开本地 worker，横幅报错就好」）**：
+ *  endpoint 留空且 config 无可用 gpu_push 时一律**响亮报错**，**绝不自动回落本机 worker_server**
+ *  —— 旧行为会把「云机连不上」伪装成「训练正常」。本机回落只剩显式 opt-in（`allowLocal:true`），
+ *  且复用扫描默认**排除** `local_push` 节点（残留的 enabled 条目不得被静默复用，那是同一缺陷
+ *  的第二入口）。显式 opt-in 路径下两个节点 kinds 必须共存互不覆盖，回写要保证 python 侧
  *  `_gpu_push_nodes` 按 `courses.<课>.push_node_url` 过滤后**只有**本机 worker_server。
  */
 import { afterAll, describe, expect, it } from 'bun:test'
@@ -178,10 +181,21 @@ describe('本机 worker_server 回落（一键本机 push）', () => {
     )
   })
 
-  it('configurePushEndpoint：无可用 gpu_push → source=local 且写盘可被 python 过滤命中', async () => {
+  it('缺可用 gpu_push → 默认**响亮报错**，绝不自动回落本机（2026-09-15 用户指令）', async () => {
+    await withScratchConfig(baseCfg(), async () => {
+      await expect(configurePushEndpoint('x2-start', '', '')).rejects.toThrow(/Push 执行面不可用/)
+      // 且**不得写盘**：课程 push_node_url 不能被悄悄改指本机（那会把「云机连不上」
+      // 伪装成「训练正常」——本测试就是钉死这条）
+      const onDisk = JSON.parse(readFileSync(process.env.BCITY_RL_CONFIG!, 'utf-8')) as RlConfig
+      expect(onDisk.courses?.['x2-start']?.push_node_url ?? '').toBe('')
+      expect(onDisk.nodes.some((n) => n.local_push)).toBe(false)
+    })
+  })
+
+  it('allowLocal:true（显式 opt-in）→ source=local 且写盘可被 python 过滤命中', async () => {
     const base = baseCfg()
     await withScratchConfig(base, async () => {
-      const t = await configurePushEndpoint('x2-start', '', '')
+      const t = await configurePushEndpoint('x2-start', '', '', { allowLocal: true })
       expect(t.source).toBe('local')
       expect(t.viaLocalWorker).toBe(true)
       // 盘上：local_push 节点 + 课程 push_node_url 指向本机，且两者逐字一致
@@ -199,12 +213,48 @@ describe('本机 worker_server 回落（一键本机 push）', () => {
     })
   })
 
-  it('allowLocal:false（诊断/单测用）→ 缺节点时响亮报错，不静默改执行面', async () => {
+  it('allowLocal:false 与默认等价 → 同样响亮报错（两条都不静默改执行面）', async () => {
     await withScratchConfig(baseCfg(), async () => {
       await expect(
         configurePushEndpoint('x2-start', '', '', { allowLocal: false }),
       ).rejects.toThrow()
     })
+  })
+
+  it('复用扫描默认排除 local_push 节点（残留的 enabled 本机条目不得被静默复用）', async () => {
+    // 起一个真会应答 /ping 的本地服务，冒充"活着的本机 worker_server"——
+    // 只有它能 ping 通，所以"返回 null"只可能来自过滤，而不是 ping 失败。
+    const srv = Bun.serve({ port: 0, fetch: () => new Response('{"ok":true}', { status: 200 }) })
+    try {
+      const url = `http://127.0.0.1:${srv.port}`
+      const cfg: RlConfig = {
+        ...baseCfg(),
+        nodes: [
+          ...baseCfg().nodes,
+          {
+            id: 'local-push',
+            url,
+            authKey: 'tok',
+            concurrency: 1,
+            gpu_push: true,
+            local_push: true,
+            enabled: true,
+          },
+        ],
+      }
+      // 默认：本机节点不参与复用扫描（哪怕它 ping 得通）
+      expect(await findHealthyGpuPushNode(cfg)).toBeNull()
+      // 显式 opt-in：才纳入
+      expect((await findHealthyGpuPushNode(cfg, 5000, { includeLocal: true }))?.id).toBe(
+        'local-push',
+      )
+      // 端到端：endpoint 留空 + 只有本机条目活着 → 仍然响亮报错，不复用本机
+      await withScratchConfig(cfg, async () => {
+        await expect(configurePushEndpoint('x2-start', '', '')).rejects.toThrow(/Push 执行面不可用/)
+      })
+    } finally {
+      srv.stop(true)
+    }
   })
 })
 

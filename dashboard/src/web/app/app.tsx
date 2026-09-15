@@ -723,7 +723,7 @@ export function App({ initial }: AppProps) {
           modes={stateView.modes}
           onClose={() => setTrainOpen(false)}
           onAction={doAction}
-          onLaunch={(m) => void handleLaunch(m)}
+          onLaunch={(m, push) => void handleLaunch(m, push)}
           readOnly={readOnly}
         />
       ) : null}
