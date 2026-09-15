@@ -1876,3 +1876,29 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   ③ 无法就近表达——跨「根 runner 语义 / hook 触发 / CI 范围」三个面，代码注释各说一半。
 - **违反后果**：恢复 basename 窄跑 ⇒ 改配置类文件只跑 1 个测试即绿灯（静默漏测）；放宽 freeze 到
   `tools/**` ⇒ 改探针即可绕签名门禁；dashboard CI 触发清单不跟 import ⇒ 契约破坏重新回到静默落地。
+
+## §2026-09-15-heavy-tests-criterion（2026-09-15，用户提问「根套件实测墙钟 ~6s 下，HEAVY_TESTS 名单还有意义吗」⇒ 判据改为实测 + 名单纠错）
+
+- **背景（全部实测，16 vCPU；非 heavy 全量 179 files = 6.1s）**：`HEAVY_TESTS` 的注释一直写着「keep in sync
+  with measured wall-time (see per-file profiling)」，但**那份 profiling 根本不存在**，于是两个条目都腐烂了：
+  `godai-score-gate` 记 ~19.5s（实测 11.7–13.1s）、`calibration` 记 ~2.5s（实测 **0.66–0.71s**，5/5 稳定——
+  它的 full sweep 早已移交 CLI `tools/eval/calibrate.ts`，测试自己写着「小 stage 子集，完整版走 CLI」）。
+  逐项代价：排除 `godai-score-gate` 使套件 6.1s → 18.6s（**3.0×**）；排除 `calibration` 只值 ≤0.7s（实测落在
+  噪声带内）；次慢的 `nn/intent-rl-rollout`（3.8s/1.7s）剔除也只省 ~0.6s。
+- **判据（改为可复核）**：**只排除「单跑墙钟 ≥ 整份非 heavy 套件」的文件**——它一个就抵得上整份套件。
+  低于这条线时 `--parallel` 会把它填进既有尾巴，剔除收益 ≤ 它自己的运行时间，却白送一个静默盲区
+  （CI **无**根套件 workflow ⇒ 本地 hook 是它唯一的自动化通道）。旧口径「exceeds a few seconds」是错的：
+  「几秒」正是排除不产生收益的区间（`calibration` 0.11×、`intent-rl-rollout` 0.3–0.6× 全落在里面）。
+- **备选与否决**：① 保留 `calibration` 在名单里——否，省不到 0.7s 而丢掉它的本地覆盖；② 把判据写成一个
+  写死的秒数阈值——否，那正是腐烂源（两个数字全被测错）；改为「用 `bun tools/measure-suite.ts` 现测现判」，
+  该工具把「每文件墙钟 + 条目达标判定」变成一条命令（原注释引用的 profiling 从未存在）；③ 维持 §1.4 的
+  ⚠ 软提示——否，它挂在绿行摘要上没人会读，拦不住名单腐烂（先例：`god-ai-gate` 重命名后残留，§234）。
+- **决定**：① 名单只剩 `godai-score-gate`；② 判据与实测数字写进 `tools/test-silent.ts` 的 `HEAVY_TESTS`
+  注释与 `docs/agents.details.md` §5.3；③ 新增 `tools/measure-suite.ts`（只读剖面 + 达标判定）；
+  ④ `tests/test-silent-scope.test.ts` 增硬断言：条目必须命中真实测试文件、名单非空、名字口径与执行器过滤
+  一致且在根套件枚举内（实测：伪造死条目 → 2 fail；复原 → 6 pass）。
+- **三问门（通过）**：① 被否决备选见上；② 未来再犯——「CMA-ES calibration 听着就像重负载」会让下一个 agent
+  把它加回名单，「多排除几秒无所谓」也会持续压低名单的可信度；③ 无法就近表达——判据跨「runner 注释 /
+  测量工具 / 硬断言」三处，且必须推翻 §1.4 记录的软提示口径。
+- **违反后果**：往名单里塞低于地板的文件 ⇒ 名单变装饰、覆盖率静默流失；名字腐烂不管 ⇒ 12s 的 score gate
+  静默塞回每次提交（提交测试步 6s→19s）；恢复「写死秒数」的判据 ⇒ 数字再次腐烂且无人能发现。

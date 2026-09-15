@@ -173,7 +173,7 @@ bun run freeze:l2    # archived-candidate reachability audit over the same corpu
 
 `bun run check` is the definition of "green". Run it before declaring a task done.
 
-- `bun run test` is the token-saving runner: **code changes run the full suite** (it prints only failures, and skips entirely for doc-only / dashboard-only changes); heavy gates (`godai-score-gate`, `calibration`) are excluded from it — run the full suite before landing God-AI changes, and keep `HEAVY_TESTS` in `tools/test-silent.ts` in sync with measured wall-time. Basename-based narrowing was **removed 2026-09-15** (it under-sampled: a `src/config/stages.ts` edit ran 1 of the 50 tests that import it) — do not re-add it (details: `docs/agents.details.md` §5.3, DECISIONS §2026-09-15-gate-trigger-scope).
+- `bun run test` is the token-saving runner: **code changes run the full suite** (it prints only failures, and skips entirely for doc-only / dashboard-only changes); the one heavy gate (`godai-score-gate`, ~12s) is excluded from it — run the full suite before landing God-AI changes. `HEAVY_TESTS` (`tools/test-silent.ts`) excludes a file only when its **standalone wall time ≥ the whole non-heavy suite's** (~6s), i.e. it alone costs as much as the entire suite; re-measure with `bun tools/measure-suite.ts` before editing the list (`calibration` was removed from it 2026-09-15 — measured 0.7s, far below the bar). Basename-based narrowing was **removed 2026-09-15** (it under-sampled: a `src/config/stages.ts` edit ran 1 of the 50 tests that import it) — do not re-add it (details: `docs/agents.details.md` §5.3, DECISIONS §2026-09-15-gate-trigger-scope).
 - `bun test` always takes `--parallel --timeout=50000` — both flags mandatory (details: `docs/agents.details.md` §5.4).
 
 ### Style

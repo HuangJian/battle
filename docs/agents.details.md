@@ -292,13 +292,24 @@ heuristic ran only the tests whose basename matched a changed file, and it **und
 `src/config/combat.ts` 3 of 13. A non-heavy full run costs ~6s (tools-only subset ~5s), so narrowing
 bought ~1s in exchange for a silent blind spot. **Do not re-add it** — make the suite faster instead.
 
-**Heavy gate/integration tests are excluded by default:** the fast runner skips files that run
-hundreds–thousands of full-game simulations (`godai-score-gate` — the worker-pool score gate, and
-`calibration`). Exercise them with `bun run test --heavy` or the full suite. Keep the `HEAVY_TESTS`
-list in `tools/test-silent.ts` in sync with measured wall-time (add any file whose standalone run
-exceeds a few seconds). Because these gates are standalone files, they are only exercised by the full
-suite or `--heavy` — **if a God-AI change is landing,
-run `bun test --parallel --timeout=50000` before committing** to validate the floors.
+**Heavy gate tests are excluded by default:** the fast runner skips `godai-score-gate` — the
+worker-pool score gate (3 difficulties × 35 stages × 10 seeds). Exercise it with `bun run test --heavy`
+or the full suite.
+
+**The criterion is measured, not "slow"** (`bun tools/measure-suite.ts` re-measures it): a file is
+excluded only when its **standalone wall time ≥ the whole non-heavy suite's**, i.e. it alone costs as
+much as the entire suite. Measured 2026-09-15 (16 vCPU; suite floor = 179 files in 6.1s):
+`godai-score-gate` 11.7–13.1s (**2.0×** — excluding it is what keeps the step at 6s instead of 19s);
+`nn/intent-rl-rollout` 3.8s/1.7s and `calibration` 0.66–0.71s are both *below* the bar — `--parallel`
+absorbs them into the existing tail, so excluding them buys ≲1s while giving up the coverage (and CI
+has **no** root-suite workflow, so the local hook is their only automated path). `calibration` was
+removed from the list 2026-09-15 on exactly this measurement (its own comment says the full sweep runs
+via the CLI now); the previous entry claimed ~2.5s and the score gate's ~19.5s — both numbers had
+rotted, which is why the judgement must come from a re-measure, not a hard-coded figure. Because the
+gate is a standalone file, it is only exercised by the full suite or `--heavy` — **if a God-AI change
+is landing, run `bun test --parallel --timeout=50000` before committing** to validate the floors.
+`tests/test-silent-scope.test.ts` hard-fails if a `HEAVY_TESTS` name no longer matches a real test file
+(the in-runner ⚠ hint alone is invisible: it rides on a green summary line).
 
 ### 5.4 `bun test` flags are mandatory
 - **`--parallel`**: bun does not parallelize files by default; per-FILE parallelism across the suite
