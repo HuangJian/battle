@@ -58,6 +58,32 @@ import { RNG } from '../../src/utils/RNG'
 import { writeFileSync, mkdirSync, readFileSync } from 'fs'
 import { scoreRun, V7_SCORE_CONFIG, type DimensionKey } from '../eval/godai-score'
 import type { RunTelemetry, SimOutcome } from './simulation-runner'
+import type { TankKind } from '../../src/types'
+
+// ---- Phase 0 逐敌种画像 census（2026-09-15，plan/x3-power-followup T3）----
+//
+// 只服务于**离线诊断**（分敌种命中/击杀 + killer-kind + 首杀/首命中 + 击杀顺序 +
+// 曝光归一化分母）。刻意只住本文件：`export-rl-rollout.ts` 是训练采集热路径
+// （codeHash 哈希集内、跑百万局），未随动；两文件的既有 telemetry 字段仍保持
+// 逐字段同语义（本 census 是**新增只读观测**，不改变任何已有字段的算法）。
+/** 敌车 kind 的固定顺序 = 三个计数的索引契约（玩家不入列）。 */
+export const ENEMY_KIND_ORDER = ['basic', 'fast', 'power', 'armor'] as const
+
+/** kind → ENEMY_KIND_ORDER 下标；非敌车 kind 返回 -1（零分配热路径）。 */
+function enemyKindIndex(kind: string): number {
+  switch (kind) {
+    case 'basic':
+      return 0
+    case 'fast':
+      return 1
+    case 'power':
+      return 2
+    case 'armor':
+      return 3
+    default:
+      return -1
+  }
+}
 import { buildPack } from './pack-container'
 
 const MAX_TICKS = 36000
@@ -164,6 +190,25 @@ interface Telemetry {
    * 上报取整局 max streak，供 T3 stuckP95）。
    */
   stuckTicks: number
+  /**
+   * Phase 0 逐敌种画像（T3；索引 = ENEMY_KIND_ORDER）：
+   * `hitsByKind` = `enemy_hit` 事件按**目标 kind** 累计；`killsByKind` = `by='player'`
+   * 的 `tank_destroyed` 按受害者 kind 累计；`exposureByKind` = 每 tick「存活且已接战
+   * （`spawnTimer<=0`）」的敌车数积分 —— ④ 的归一化分母（**禁用「在场份额」作分母**，
+   * 那是循环论证）。
+   */
+  hitsByKind: number[]
+  killsByKind: number[]
+  exposureByKind: number[]
+  /** 首次命中敌车的 kind / 首次击杀的受害者 kind（无 = null）。 */
+  firstHitKind: TankKind | null
+  firstKillKind: TankKind | null
+  /** 玩家击杀顺序（受害者 kind 依次入列）。 */
+  killOrder: TankKind[]
+  /** 玩家每次死亡（按时间顺序）的凶手 kind；`byId` 回查失败 = null。 */
+  killerKinds: (TankKind | null)[]
+  /** tank id → kind 回查表（census 每 tick 记，供 `byId` 归因已死/已清理的凶手）。 */
+  kindById: Map<number, TankKind>
 }
 
 function countBaseWall(world: World): number {
@@ -234,6 +279,15 @@ interface EvalResult {
   firstKillTick: number | null
   /** T0.4 新埋点（整局 max streak，见 Telemetry.stuckTicks）。 */
   stuckTicks: number
+  /** Phase 0 逐敌种画像（T3）：分敌种命中/击杀/曝光积分 + 首杀/首命中 + 击杀顺序
+   *  + 玩家凶手 kind 序列。只读观测，不参与打分、不回流 gameplay。 */
+  hitsByKind: number[]
+  killsByKind: number[]
+  exposureByKind: number[]
+  firstHitKind: TankKind | null
+  firstKillKind: TankKind | null
+  killOrder: TankKind[]
+  killerKinds: (TankKind | null)[]
   puSpawnBomb: number
   puSpawnTank: number
   puSpawnFreeze: number
@@ -394,6 +448,14 @@ export function runEvalOne(
     puGotFreeze: 0,
     puGotShield: 0,
     stuckTicks: 0,
+    hitsByKind: [0, 0, 0, 0],
+    killsByKind: [0, 0, 0, 0],
+    exposureByKind: [0, 0, 0, 0],
+    firstHitKind: null,
+    firstKillKind: null,
+    killOrder: [],
+    killerKinds: [],
+    kindById: new Map<number, TankKind>(),
   }
   const seenPuIds = new Set<number>()
   let prevLivePuIds = new Set<number>()
@@ -450,13 +512,42 @@ export function runEvalOne(
     ai.endFrame()
     t++
 
+    // ---- Phase 0 逐敌种 census（T3）----
+    // 位于 consumeEvents **之前**、sim.tick() 之后：`removeDeadEntities` 已在 tick 末
+    // 把本 tick 阵亡的敌车摘掉，所以世界里的敌车都是活的；只跳过出生保护中的
+    // （`spawnTimer>0` = 未接战，与 `World.enemyCount` 同口径）。id→kind 表覆盖
+    // 所有见过的坦克，使 `byId` 能归因到「早已阵亡的凶手」。
+    {
+      const tanks = world.tanks
+      const kindById = tel.kindById
+      const exposure = tel.exposureByKind
+      for (let i = 0; i < tanks.length; i++) {
+        const tk = tanks[i]
+        if (!kindById.has(tk.id)) kindById.set(tk.id, tk.kind)
+        if (tk.spawnTimer > 0) continue
+        const ki = enemyKindIndex(tk.kind)
+        if (ki >= 0) exposure[ki]++
+      }
+    }
+
     // ---- telemetry（语义对齐 simulation-runner / export-rl-rollout）----
     let collectedThisTick = 0
     let hitThisTick = false
     for (const e of world.consumeEvents()) {
       if (e.type === 'tank_destroyed') {
-        if ((e as any).by === 'player' && tel.firstKillTick === undefined) tel.firstKillTick = t - 1
-        if ((e as any).tank?.isPlayer) tel.playerDeaths++
+        if (e.by === 'player' && tel.firstKillTick === undefined) tel.firstKillTick = t - 1
+        if (e.tank.isPlayer) {
+          tel.playerDeaths++
+          // Phase 0（T3①）：谁杀了我 —— 凶手 kind 经 byId 回查（census 表，已死也在）。
+          tel.killerKinds.push(e.byId !== undefined ? (tel.kindById.get(e.byId) ?? null) : null)
+        } else if (e.by === 'player' && e.tank.allegiance === 'enemy') {
+          // Phase 0（T3②③）：先打谁 / 击杀顺序 / 分敌种击杀。
+          const vk = e.tank.kind
+          if (tel.firstKillKind === null) tel.firstKillKind = vk
+          tel.killOrder.push(vk)
+          const ki = enemyKindIndex(vk)
+          if (ki >= 0) tel.killsByKind[ki]++
+        }
       } else if (e.type === 'player_hit') {
         tel.playerHits++
       } else if (e.type === 'player_damage') {
@@ -466,6 +557,11 @@ export function runEvalOne(
       } else if (e.type === 'enemy_hit') {
         tel.enemyHits++
         hitThisTick = true
+        // Phase 0（T3②④）：分敌种命中 + 首命中目标。
+        const hk = e.targetKind
+        if (tel.firstHitKind === null) tel.firstHitKind = hk
+        const ki = enemyKindIndex(hk)
+        if (ki >= 0) tel.hitsByKind[ki]++
       } else if (e.type === 'powerup_collected') {
         collectedThisTick++
         tel.powerUpsCollected++
@@ -665,6 +761,13 @@ export function runEvalOne(
     cellsVisited: tel.cellsVisited.size,
     firstKillTick: tel.firstKillTick ?? null,
     stuckTicks: tel.stuckTicks,
+    hitsByKind: tel.hitsByKind,
+    killsByKind: tel.killsByKind,
+    exposureByKind: tel.exposureByKind,
+    firstHitKind: tel.firstHitKind,
+    firstKillKind: tel.firstKillKind,
+    killOrder: tel.killOrder,
+    killerKinds: tel.killerKinds,
     puSpawnBomb: tel.puSpawnBomb,
     puSpawnTank: tel.puSpawnTank,
     puSpawnFreeze: tel.puSpawnFreeze,

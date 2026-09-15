@@ -5,6 +5,111 @@
 
 ---
 
+## §47 Phase 0 逐敌种画像（T3）：**败局 = 从不碰 power**，判决 T5（2026-09-15；`plan/x3-power-followup.plan.md` §T3）
+
+**为什么**：800 局探针显示败局 = 早死少开火且「摊薄画像」仅占 2%，x2 时代的机制假设在本批不成立；
+容量侧已核足够（67.5K ConvMixer、power 独占 ch9、30 维标量已入模型）。⇒ 先用**零训练成本**的
+逐敌种画像定方向（T5 信用 / T6 生存 / 执行），再决定开哪条腿。
+
+**新增埋点（只读观测，不回流 gameplay）**：`enemy_hit` 加 `targetKind`（唯一 push 点
+`SimulationCombat`，与 `tank_destroyed.byId` 同构先例）；`tools/sim/export-eval-game.ts` 的
+离线 eval telemetry 加 census：`hitsByKind`/`killsByKind`/`exposureByKind`（= 各敌种
+「存活×接战 tick」积分，**④ 的分母**）/`firstHitKind`/`firstKillKind`/`killOrder`/`killerKinds`
+（killer-kind 经 census 的 id→kind 表回查，已死/已清理的凶手也能归因）。采集器
+`export-rl-rollout.ts`（codeHash 热路径）**未动**；报告器 `tools/sim/phase0-fingerprints.ts` 纯离线。
+
+**口径提醒**：census 让 800 局离线探针由 ~92s 变 **118–130s（+28~40%）**，只影响诊断，不进训练。
+
+**四指纹**（池外新段 400200-400399，四关各 200；基线 it333 与终点 it30 各 800 局，**两权重同判**）：
+
+| 指纹 | it333(基线) | it30(终点) |
+|---|---|---|
+| ① killer-kind（谁杀了我，247/240 次死亡） | **power 64.0%**、fast 26.3%、armor 9.7%、basic 0% | **power 65.4%**、fast 23.8%、armor 10.4% |
+| ② 首命中 kind（先打谁） | basic 74.0%、fast 25.9%、**power 0.1%** | basic 73.5%、fast 26.3%、**power 0.3%** |
+| ③ power 在场 600 局 | 没被杀 32.0% / 最后才杀 30.0%（位次 2.39） | 没被杀 30.8% / 最后才杀 30.8%（位次 2.39） |
+| ④ 曝光归一命中/千tick | power **3.62**（basic 9.49）、转化 49.5% | power **3.61**（basic 9.11）、转化 49.2% |
+
+**胜/败条件化（③ 必须条件化，否则被「败局当然没打完」混淆）**：
+
+| 子集 | power 在场局 | 命中过 power | 杀掉 power | power 占首命中 | power 命中/千tick |
+|---|---|---|---|---|---|
+| 胜局 558 | 405 | 396（**97.8%**） | 396 | 1 | 4.25 |
+| 败局 242 | 195 | 21（**10.8%**） | 12 | **0** | **0.80**（basic 9.14） |
+
+⇒ 败局中 NN 平均每局只在 power 身上落 **0.17 发**（它在场 ~213 tick），而败局凶手 **155/195 = 79.5%** 是 power；
+胜局里 power 被打到 97.8% 且转化 50%（四种敌种里最高）⇒ **“打不死 power”不成立**，是“根本不开火”。
+
+**分支判决（预注册 tie-break 原样执行，唯一）**：F1（①处刑 A=0.640）与 F2（②绕开 B=0.999、C=0.620）
+**同时成立**，F3（③打不死 E=0.495 不满足）不成立 ⇒ tie-break 看 ② 首命中分布（power 0.1% < 50%）
+⇒ **归 T5（metrics v6：分敌种命中/击杀列 + 按敌种加权奖励）**；it30 复算同判（A=0.654/B=0.997/C=0.617）。
+T6（wChip）排序第二（① 也成立，但归属不在先；且须用户明示批准 + DECISIONS 破规条款——占位已在
+§2026-09-15-goalnn-x3-power-negative）。⚠ ① 与 ② 是**同一机制的因果两面**（不碰 power → power 活着 →
+它开火杀人）；若按「① 优先」读法则判决为 T6。两条读法的**共同事实**不变：【败局中 NN 几乎从不对 power 开火】。
+
+**验证**：`tests/sim/phase0-census.test.ts`（从零埋点原始事件流独立重算四指纹逐值对账 + determinism 双跑）
+与 `tests/combat-enemy-hit.test.ts`（targetKind 四敌种）共 12 用例绿；产物 `tmp/x3-phase0/*.jsonl` 可复现；
+`bun run check` 绿；`freeze:check` 冻结签名不变（只加只读事件字段，未改行为）。另：同新段上两权重的策略差
+= 69.75% vs 70.625%（Δ=+0.875pp）——与下一节的 −2.875pp 段不同不矛盾，只说明两权重在池外新段上无实质差异。
+
+---
+
+## §46 x3-power 结课：判负（2026-09-15；课程 `nn-training/curricula/x3-power.jsonc`「终点结算」节）
+
+**为什么**：x2 门暴露的结构性差距——含 power 的关恒差 ~15-20pp——被归因于「伤害摊薄零代价」
+（wHit 按次给分 ⇒ 打中两个各一枪与集中打死一个在账上几乎没区别，而 power 必须集火秒掉，
+否则它的快弹先赢）。本腿是现有 metrics 语言下的可表达代理：**杀/中信用比陡峭化**
+（`wKill` 3.0→4.0、`wHit` 0.3→0.15，即 10:1→27:1）。唯一**训练**变量 = reward params
+（formula/scheme/terminal 不动）；唯一例外 = 护栏 `kl_cap` 0.2→0.006（护栏校准，非训练变量）。
+30 轮跑满，正式 800-verdict **判负**。
+
+**判决（同批配对，种子 400000-400199 池外新段，四关各 200；权重
+`nn-training/weights/x3-power/x3-power.it30.20260915-174103.json`）**：
+
+- 终点 **553/800 = 69.125%** vs 暖启基线 it333 **576/800 = 72.00%**，pooled **Δ = −2.875pp**
+  （判线 ≥616/800 且 McNemar 单侧 p<0.05 ⇒ 失败）；b01=12 / b10=35，**pd=5.9%**，
+  单侧 p=**0.9998**（双侧 p=**0.0011**，净 −3.35σ）。
+- 分关（各 200，同种子配对）：abc 73.0%（−2.0pp，2/6）/ abd 75.5%（−2.0pp，4/8）/
+  acd 59.0%（−4.5pp，3/12）/ bcd 69.0%（−3.0pp，3/9）⇒ **四关全降**，无「拆东墙补西墙」。
+- 熔断轴**干净**（verdict 800 口径）：kills 2.411→2.357（−0.05 ≈ −1.3σ，噪声内）、
+  shots 14.55→14.07（−3%，无崩塌）、dmg 124.2→124.8（持平）、ticks 995→974 ⇒
+  非熔断停腿，是**跑满的干净证伪**（预注册「不升反降即停」按噪声带执行）。
+- 训练（`tmp/x3-power/training_log.jsonl`，30 个 iteration 齐）：**KL it1 0.000581 → it30
+  0.002133**（全程 max **0.00231**@it25，`kl_cap=0.006` **从未咬合**）；rollout wr
+  0.6292–0.7417 无趋势；日常 anchor（只读 `anchor_wr`）it0 0.65 → it30 0.64（128/200）
+  横盘，最大 Δ+3.5pp ≈0.75σ；rotor gap 从未触发 ≥5pp×3 轮 ⇒ 无过拟合。
+- 配对硬约束兑现：it0 vs it30 同种子 200 对 b01=4 / b10=6，pd=5.0%，Δ=−1.00pp ⇒ 策略
+  在锚点上几乎没动（仅 10/200 翻转），与「pd<5% ⇒ 看不到 +5pp」的数学硬约束互证。
+
+**八字判决（预注册分支，课程文件 284 行起原样执行）**：**「梯度无方向 / 执行瓶颈」**——
+KL 仍 ~0.002 ⇒ **不得**写成「信用比无效」（后者须 KL≥0.01 而 Δ≈0 才成立），更**不得**外推
+「信用比有害」（单腿 −2.9pp 显著仍可来自起点游走 + acd 噪声）。后继 = **metrics v6**
+（分敌种命中列，TS+Python 全链），**不是**继续调 wKill/wHit 剂量。
+
+**量纲勘误（P0，结课评审复算）**：账本口径的 **`transitions = samples`**（`rl/resume.py`
+自声明「nSamples 之和」），ticks 只是 clocks；本腿实测 **samples/轮均值 23343 ≈ 2.33 万
+transitions/轮**（ticks/轮 231924，samples/ticks = 0.1007 ≈ 1/K）。旧文「23.5 万 transitions/轮」
+实为 **ticks —— 10× 误差**；c4-dodge 的「66 万+」同理（≈6.6 万 transitions）。本腿有效性
+不受影响（固定 60 局/关，单位无关），但**一切「X 万 transitions」规划须按 samples 重算**
+（60 万线 ≈ seed_rotate 1546/关 ≈ 6200 局/轮）。同错蔓延三处
+（`curricula/x3-start.jsonc:66`、`_example-custom-stage.jsonc:77`、`plan/dynamic-rollout-volume.plan.md:26`）
++ `rl/volume_waves.py` 分子 samples 配分母 `est_ticks_per_game` 的 10×（已跑出「兑现 37% 触顶」
+用例）⇒ 立缺陷单（T9）。
+
+**事件账一句话**：wall clock 13:31→17:41 = **4h10m，其中训练仅 1h16m**（it2–it30 ≈2.6min/轮；
+it1 独占 2h54m）。15:00 `wait_result` 超时 1800s → 15:02/15:03 HTTP 530 ×2 → 15:03–15:04
+降级本机 PPO 时 `load_episodes` AttributeError ×3、5/5 耗尽 ⇒ **R9 降级落点被打穿**
+（任何腿远端连败必踩同一坑，立缺陷单：§7 先复现后修，T7）；run_start ×10 / iter_error ×5 /
+轮内 resume ×2 后 KL 与胜率曲线**无断点** ⇒ 判决不受影响。it15 中途 800 探针（预注册）
+**显式注销**（非静默蒸发）。
+
+**未做 / 后继**：metrics v6 立项（被 Phase 0 逐敌种画像门控，T3）；wChip 生存腿为备选
+（须**用户明示批准 + DECISIONS 破 N3/R5 立案**，三者缺一不可，T6）；不加 rollout 量
+（排序：结构先行，加量只做抬升后的收尾平滑器）。evalA it30 三写 `eval_summary` +
+末条 `dropped=400` 脏行（settle 用 `total−settled` 反推）+ reuse 回填行缺 `anchor_wr`/`rotor_wr`
+⇒ 立缺陷单（T8，控制台 `iters.ts` 按 iter 归并会读到）。
+
+---
+
 ## §45 双轨日常评估（Dual-Track Eval Seeds）：P0+P1+P2 单测/本地 e2e
 （2026-09-15；计划 `plan/dual-track-eval-seeds.plan.md`）
 

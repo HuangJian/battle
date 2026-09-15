@@ -92,6 +92,25 @@ describe('enemy_hit 事件', () => {
     expect(tankDestroyedByPlayer).toBe(true)
   })
 
+  // Phase 0 逐敌种画像（plan/x3-power-followup T3）：enemy_hit 必须携带受害车 kind。
+  for (const kind of ['basic', 'fast', 'power', 'armor'] as const) {
+    it(`enemy_hit.targetKind = 受害车 kind（${kind}）`, () => {
+      const { world, sim, fire } = setup()
+      spawnEnemy(world, kind, 999) // 高 HP：命中但非致死
+      world.player!.shieldTimer = 1e9
+      fire()
+      let targetKind: string | null = null
+      for (let t = 0; t < 600; t++) {
+        sim.tick()
+        for (const e of world.consumeEvents()) {
+          if (e.type === 'enemy_hit') targetKind = e.targetKind
+        }
+        if (targetKind !== null) break
+      }
+      expect(targetKind).toBe(kind)
+    })
+  }
+
   it('盾弹开：两者都不推', () => {
     const { world, sim, fire } = setup()
     spawnEnemy(world, 'basic', 1, true) // 有盾

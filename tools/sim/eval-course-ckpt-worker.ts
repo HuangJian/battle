@@ -59,6 +59,15 @@ export interface EvalCourseRow {
   playerShots: number
   powerUpsCollected: number
   score: number
+  /** Phase 0 逐敌种画像（T3）：索引 = ENEMY_KIND_ORDER = [basic, fast, power, armor]。
+   *  `exposureByKind` = 存活×接战 tick 积分（④ 的归一化分母）。 */
+  hitsByKind: number[]
+  killsByKind: number[]
+  exposureByKind: number[]
+  firstHitKind: string | null
+  firstKillKind: string | null
+  killOrder: string[]
+  killerKinds: (string | null)[]
 }
 
 self.onmessage = (ev: MessageEvent<EvalCourseWorkerPayload>): void => {
@@ -106,6 +115,13 @@ self.onmessage = (ev: MessageEvent<EvalCourseWorkerPayload>): void => {
         playerShots: res.playerShots,
         powerUpsCollected: res.powerUpsCollected,
         score: res.score,
+        hitsByKind: res.hitsByKind,
+        killsByKind: res.killsByKind,
+        exposureByKind: res.exposureByKind,
+        firstHitKind: res.firstHitKind,
+        firstKillKind: res.firstKillKind,
+        killOrder: res.killOrder,
+        killerKinds: res.killerKinds,
       })
     }
     ;(self as any).postMessage({ results: rows })

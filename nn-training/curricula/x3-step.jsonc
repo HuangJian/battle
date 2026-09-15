@@ -1,0 +1,149 @@
+// 课程 x3-step —— 步长/缰绳腿（x3-power 的「死段」变活段）：先证「可测性」，不承诺涨点
+// 状态：**2026-09-15 就绪待开训**（§5.6：禁裸 python，一律走启动器；**用户手工开训**，
+//   agent 不得启动实际训练）。开工前只有一件事要人确认：GPU push 节点是否可用
+//   （见文件末「开工前置」）。
+//
+// ── 立项（plan/x3-power-followup.plan.md §T4）───────────────────────────────
+// x3-power 全程紧缰（`kl_coef=0.2` + lr 1.5e-4），30 轮实测 per-iter KL 仅
+// 0.000581→0.002133（max 0.00231@it25，`kl_cap=0.006` 从未咬合）；且第二段日程
+// （`kl_coef=0.03` / lr 5e-5）因 `until_iter=40 > iters=30` **是死段**——整腿等于
+// 从头到尾同一个（最紧的）学习率与 KL 惩罚。在 KL≈0.002 下任何奖励重定价都测不出来
+// （含 wChip）：策略几乎没动（it0 vs it30 同种子 200 对仅 10 局翻转，pd=5.0%；
+// 正式 800 局 pd=5.9% ⇒ 数学上根本看不到 +5pp）。
+// ⇒ **本腿唯一目的 = 恢复可测性**（把 KL 抬到能分辨奖励改动的量级），不是涨点。
+//
+// ── 单变量（与本课唯一改动）────────────────────────────────────────────────
+// `ppo_schedule[0].until_iter` **40 → 20**。其余（环境/奖励/优化器/迭代数/bc/评估/
+// 护栏 kl_cap=0.006/ent_break=0.25）与 x3-power **逐字同构**。
+//   效果（`rl/schedule.py` 段匹配 `(prev_until, until]:`）= it1–20 原第一段
+//   （kl_coef 0.2 / lr 1.5e-4 / kl_cap 0.006），**it21–30 第二段生效**
+//   （kl_coef 0.2→**0.03** 放缰 6.7×、lr 1.5e-4→**5e-5**）。
+// ⚠ 诚实声明（x3-power 同款教训：不得再声称「全部逐字同构」）：第二段**原样继承**
+//   且**不带 `kl_cap`** ⇒ it21–30 的 KL 上限回落到引擎/policy 兜底默认，而不是 0.006。
+//   这是「把第二段改活」本身带来的耦合（不是第二个改动）：被放缰的那一段同时失去了
+//   本腿校准过的紧护栏。读数时按此解释，勿当成异常。
+//
+// ── 预注册判据（执行时不得改口径）──────────────────────────────────────────
+// · **KL 放大 ≥0.005 且 Δ>0** ⇒ 缰绳是病根，后续奖励腿解封（v6 / wChip 依次可跑）；
+// · **KL 放大而 Δ≈0** ⇒ 执行器方向实锤（与 §46「梯度无方向/执行瓶颈」互证）；
+// · **KL 仍 ~0.002** ⇒ 步长无辜，问题在信号（奖励/信用），不是步长。
+// Δ 的唯一读法：终点 vs **冻结基线 it333**（`tmp/x3-power/baseline-it333-seed400000.jsonl`，
+//   **pooled 576/800 = 72.00%**）的**同批配对** 800 局、`--seed0 400000`（四关各 200，
+//   种子 400000-400199）。**必须与基线同段**，不得改用 400200+（换了段 = 换判决条件）。
+//   参考：同段上 x3-power it30 = 553/800（−2.875pp，见 §46）。
+// ⚠ **数学硬约束 Δ ≤ pd**：KL 没放大 ⇒ 策略没动 ⇒ pd 小 ⇒ 观测不到 Δ。此时结论必须写
+//   「步长无辜 / 观测不到」，**不得**写成「奖励改动无效」（x3-power 判负时同款纪律）。
+// KL 是每轮都有的事件字段（`tmp/x3-step/training_log.jsonl` 的 iteration.KL），
+//   本腿**不另设中途 800 局观察点**（判决权只在 it30；x3-power 的中途探针已显式注销，
+//   不再引入同类预注册项）。
+// 熔断：沿用 x3-power 的**噪声带解释**（kills −1~1.3σ + shots 未崩 + zero_kill 不动
+//   ⇒ 不停；预注册的「不升反降即停」是绝对阈值措辞，按噪声带执行）。本次评审意见要求
+//   后腿沿用该解释，**不得回溯**为「停腿条件是软的」。
+//
+// ── 读数纪律（口径 2026-09-15 双轨上线后，改前必读）────────────────────────
+// 日常 eval 每关 50 局会自动触发双轨 ⇒ 实际 400 局/次（锚点 50 + 轮转 50）：
+//   ① 趋势线读 `anchor_wr`（**不要**读 `winRate`——那已是 400 局混轨口径，不可比）；
+//   ② 泛化线读 `rotor_wr`（只看 3 轮滑动均值）；③ 过拟合报警 = 两轨近 3 轮均值差 ≥5pp
+//   且持续 3 轮。日常 400 局**只做趋势**（SE≈2.35pp），正式判决一律走离线 800 局。
+// 行标签口径：in-loop eval 行 iter = 真权重轮；verdict/探针一律用归档权重显式离线重跑。
+//
+// ── 与 x3-power 的关系（不得混淆）──────────────────────────────────────────
+// 本腿**不是** x3-power 的续跑：out/traj/backup 全部新目录（禁续跑——resume 账本按
+// (rotateSeed, it) 复用 shard，继承来的 shard 属于另一条日程的轨迹）。
+// 奖励 params 与 x3-power 相同 ⇒ `corpus_identity_fp` 与 x3-power 相同（语义血缘不变），
+// 但 `course_fp`（文件字节）不同 ⇒ 归属审计可区分两腿。
+//
+// ── 启动（§5.6，用户手工）──────────────────────────────────────────────────
+//   bun dashboard/src/launch/cli.ts --script run_rl.py --course x3-step
+// 或训练控制台 `bun run dashboard` → http://127.0.0.1:8900 选 x3-step 起训。
+//
+// ── 开工前置（2026-09-15 核验）─────────────────────────────────────────────
+// ① bc 权重已核在盘：`nn-training/weights/x3-start/x3-start.it333.20260915-052649.json`
+//    （379114 B）；§379 备份副本另落 `nn-training/weights/in-use/x3-start.it333.json`。
+// ② 关卡 `ladder-c03` 可加载；stage 段 2000=abc / 2001=abd / 2002=acd / 2003=bcd
+//    （与 eval_stages "2000-2003" 一致）。
+// ③ ⚠ GPU push 节点：x3-power 开工时 rl-config 的 `courses.x3-power.push_node_url`
+//    指向 trycloudflare 快隧道（会失效）。本腿**未**在 rl-config `courses` 加条目 ⇒
+//    默认走 hub/pull（控制台 `local` 预设也会把 transport 钉成 pull）。
+//    若要走云端 push：先把 `courses.x3-step.push_node_url` 填成当前活着的节点，
+//    否则会在 wait_result 里空转到超时（x3-power it334 / it1 两次前车）。
+//    采集侧 self+mac 共 16 并发 ≥ workers 8，不受影响。
+//
+// ── 结课后必填（DoD，仿 x3-power 体例：**事件账 / 双池 / 口径声明缺一不可**）──
+// 在下方「终点结算」节补：终点权重文件名 + wver、正式 verdict（800 局 seed400000-400199
+// 同批配对、b01/b10/pd/p 值、分关数字只诊断不进判据）、伴随量（kills/shots/dmg/ticks）、
+// KL 全程曲线（it1/it10/it20/it21/it25/it30 + max 与是否咬合 kl_cap）、anchor/rotor 读数、
+// 熔断轴、事件账（wall clock / run_start / iter_error / resume / 停机时长 / 与「纯训练
+// 时间」的口径差异）、预注册项的**执行或显式注销**、开工阻塞闭合方式、缺陷单。
+{
+  "version": 5,
+  "name": "x3-step",
+  "mode": "per-tick",
+  "level": "ladder-c03",
+
+  // 与 x3-power 同成本：seed_rotate × 关数 = 60 × 4 = 240 局/轮。
+  "seed_rotate": 60,
+  "workers": 8,
+
+  // ── 奖励：与 x3-power **逐字同构**（本腿不动奖励，只动日程）───
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0)",
+    "params": {
+      "wKill": 4.0,
+      "wHit": 0.15,
+      "wWin": 2.0,
+    },
+    "terminal": {
+      "lives_exhausted": -1.0,
+    },
+    "scheme": "toy",
+  },
+
+  // 暖启 = x3-start it333（与 x3-power 同一份冻结 bc；verdict 基线也是它）。
+  "bc": "nn-training/weights/x3-start/x3-start.it333.20260915-052649.json",
+  "kickstart_ref": true,
+  // 必须为 0（config 硬校验；改 1 启动失败）。
+  "warmup_iters": 0,
+
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  // ★ 本腿唯一改动 = 第一段 `until_iter: 40 → 20`（x3-power 该键为 40，在 30 轮腿里是死段）。
+  //   其余键（kl_coef 0.2 / lr 1.5e-4 / kl_cap 0.006；末段 kl_coef 0.03 / lr 5e-5）
+  //   与 x3-power 逐字相同。末段**无** kl_cap ⇒ it21–30 上限回落兜底（见顶部诚实声明）。
+  "ppo_schedule": [
+    { "until_iter": 20, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.006 },
+    { "kl_coef": 0.03, "lr": 0.00005 },
+  ],
+
+  // 短腿 30 轮：跑满即 verdict，不过关账不续。
+  "iters": 30,
+  "max_hours": 12,
+  // 新目录，禁续跑（日程不同 ⇒ 旧 shard 不属于本腿轨迹）。
+  "out": "tmp/x3-step/weights.json",
+  "traj": "tmp/x3-step",
+  "backup_dir": "nn-training/weights/x3-step",
+  "backup_prefix": "x3-step",
+
+  // 护栏：kl_cap 0.006 = x3-power 校准值（x3 同分布前 5 轮实测 KL max 0.001113 × 5），
+  // 沿用不改（改它就变成第二个变量）。ent_break 0.25 在胜率 > max_winrate(0.5) 时
+  // 结构性不触发（设计如此，不是故障）。
+  "ent_break": 0.25,
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5,
+}
+
+// ── 终点结算（待填：跑满/熔断后按顶部「结课后必填」清单补齐）─────────────────
+// 例：终点权重 nn-training/weights/x3-step/x3-step.it30.<ts>.json（wver …）
+//     正式 verdict（800 局 seed400000-400199，配对 vs it333 冻结基线 576/800）：
+//       终点 __/800 = __%  Δ = __pp，b01=__ / b10=__，pd=__%，McNemar 单侧 p=__；
+//     判据：KL 放大 __（it1 __ → it21 __ → it30 __，max __）+ Δ __ ⇒ 分支 = __
+//     （缰绳是病根 / 执行器方向 / 步长无辜）
+//     事件账：wall __ → __，训练 __，run_start ×__、iter_error ×__、resume ×__、
+//     停机 __；预注册中途探针：本腿未设（无注销项）。

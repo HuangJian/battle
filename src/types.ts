@@ -291,7 +291,14 @@ export type GameEvent =
   | { type: 'stage_clear'; stage: number }
   | { type: 'player_hit' }
   | { type: 'player_damage'; damage: number }
-  | { type: 'enemy_hit'; damage: number }
+  | {
+      type: 'enemy_hit'
+      damage: number
+      /** 被命中敌车的 kind（additive **只读观测**字段，2026-09-15 Phase 0 逐敌种画像：
+       *  分敌种命中/击杀 + 首命中目标 + killer-kind 归因）。与 `tank_destroyed.byId`
+       *  同构：只被 tools/sim 取证消费，**永不回流 World gameplay**。 */
+      targetKind: TankKind
+    }
   | { type: 'explosion'; x: number; y: number; kind: 'small' | 'big' }
   | {
       type: 'terrain_destroyed'
