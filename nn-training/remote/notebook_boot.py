@@ -18,6 +18,7 @@ import base64
 import importlib
 import io
 import json
+import os
 import secrets
 import shutil
 import subprocess
@@ -47,14 +48,34 @@ tailscale_boot = _load_tailscale_boot()
 CODE_DIR = "/tmp/worker-code"
 
 
+def _build_opener() -> urllib.request.OpenerDirector:
+    """显式 ProxyHandler —— Colab 的 urllib.request.urlopen() 不读 HTTP_PROXY 环境变量（2026-09-16 实测），
+    curl 读所以诊断显示 200，但 Python 侧 timed out。必须手动建 opener。"""
+    proxies: dict[str, str] = {}
+    for k in ("http_proxy", "HTTP_PROXY"):
+        v = os.environ.get(k)
+        if v:
+            proxies["http"] = v
+            break
+    for k in ("https_proxy", "HTTPS_PROXY"):
+        v = os.environ.get(k)
+        if v:
+            proxies["https"] = v
+            break
+    if proxies:
+        return urllib.request.build_opener(urllib.request.ProxyHandler(proxies))
+    return urllib.request.build_opener()
+
+
 # ── Pull：GET /code → code.zip → 交给 remote.notebook_runtime ──────────────
 def _pull(cfg: dict, log, secret, keepalive_stop, hub: str, hub_tok: str) -> int:
+    opener = _build_opener()
     deadline = time.time() + 3600
     while True:
         try:
             req = urllib.request.Request(
                 hub.rstrip("/") + "/code", headers={"Authorization": "Bearer " + hub_tok})
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with opener.open(req, timeout=120) as resp:
                 raw = resp.read()
             log(f"code.zip 就绪: {len(raw)} bytes")
             break

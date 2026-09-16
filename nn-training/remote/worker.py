@@ -55,6 +55,31 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # ------------------------------------------------------------------ HTTP 客户端
 
+#: 显式 ProxyHandler（Colab userspace 模式下 urlopen() 不读 HTTP_PROXY 环境变量，2026-09-16 实测）
+_opener: urllib.request.OpenerDirector | None = None
+
+
+def _get_opener() -> urllib.request.OpenerDirector:
+    global _opener
+    if _opener is None:
+        proxies: dict[str, str] = {}
+        for k in ("http_proxy", "HTTP_PROXY"):
+            v = os.environ.get(k)
+            if v:
+                proxies["http"] = v
+                break
+        for k in ("https_proxy", "HTTPS_PROXY"):
+            v = os.environ.get(k)
+            if v:
+                proxies["https"] = v
+                break
+        _opener = (
+            urllib.request.build_opener(urllib.request.ProxyHandler(proxies))
+            if proxies
+            else urllib.request.build_opener()
+        )
+    return _opener
+
 
 def _request(
     base_url: str,
@@ -72,7 +97,7 @@ def _request(
         method=method,
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _get_opener().open(req, timeout=timeout) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as e:
         return e.code, e.read()
