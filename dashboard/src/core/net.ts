@@ -1,3 +1,5 @@
+import { networkInterfaces } from 'node:os'
+
 /** net.ts — 健康探测原语（全 Bun 原生 API，无平台分支，沿袭 hub-start §339）。
 
  *  - portListen: 原生 TCP 连接探测（连上即有人在听）。
@@ -162,6 +164,37 @@ export function isLoopbackAddress(ip: string | null | undefined): boolean {
   if (ip === '127.0.0.1' || ip === '::1' || ip === '0:0:0:0:0:0:0:1') return true
   if (ip.startsWith('::ffff:127.')) return true // IPv4-mapped 回环
   return false
+}
+
+/** Tailscale CGNAT 段 100.64.0.0/10（100.64.0.0 – 100.127.255.255）。 */
+function isTailscaleV4(ip: string): boolean {
+  const m = /^100\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip)
+  if (!m) return false
+  const second = Number(m[1])
+  return second >= 64 && second <= 127
+}
+
+/** 本机 tailnet IPv4（Tailscale 网卡地址）；未接入 tailnet / 解析不到 → ''。
+ *
+ *  2026-09-16：pull 模式改用 tailnet 直连——cloudflared 回源会把**所有**云端流量
+ *  归成 127.0.0.1，hub 的 D9 闭锁（5 次鉴权失败封 IP 3600s）一封就把训练主循环
+ *  连坐掉（x3-step 事故：训练循环连续 403 自杀退出、云机空转）。走 tailnet 后
+ *  每台云机是独立 IP，不再互相连坐，也少一跳公网。 */
+export function tailscaleIp(): string {
+  let ifaces: Record<string, unknown[] | undefined> = {}
+  try {
+    ifaces = networkInterfaces() as unknown as Record<string, unknown[] | undefined>
+  } catch {
+    return ''
+  }
+  for (const list of Object.values(ifaces)) {
+    for (const ni of list ?? []) {
+      const e = ni as { family?: string | number; address?: string }
+      if ((e.family === 'IPv4' || e.family === 4) && e.address && isTailscaleV4(e.address))
+        return e.address
+    }
+  }
+  return ''
 }
 
 /** 只读动作门控（局域网只读边界）：写动作（POST）仅限回环来源，其余方法（查看）一律放行。

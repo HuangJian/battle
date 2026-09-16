@@ -3,9 +3,11 @@
  *  2026-09-15：`local` 不再是「进程内本机 PPO」——本机 PPO 拆成独立受管进程
  *  `localWorker`（云端 remote_worker 同一份代码，pull 本课 hub）。因此 local 预设
  *  变成 hubServer → localWorker → trainingLoop(--ppo remote + 本机 hub)。 */
-import { loadConfig, saveConfig, validateCourseArg } from '../../core/config'
+import { loadConfig, saveConfig, validateCourseArg, writeRemoteHubUrl } from '../../core/config'
 import { configurePushEndpoint } from '../../stack/push-config'
 import type { Component } from '../../core/types'
+import { tailscaleIp } from '../../core/net'
+import { slotPort } from '../../core/slots'
 import { rlConfigSmoke } from '../../stack/smoke'
 import { ConsoleState, saveConsoleState } from './console-state'
 import { ActionError, ActionResult, done, guard, release } from './result'
@@ -24,7 +26,8 @@ export interface PresetOpts {
 }
 
 /** 按 trainer 模式顺序拉起组件组合：
- *  pull = selfNode→hubServer→cloudflared→trainer（云机 poll 领取）；
+ *  pull = selfNode→hubServer→trainer（云机 poll 领取；hub 地址写成本机 tailnet IP，
+ *         **不自动拉 cloudflared**——2026-09-16 起，隧道只在你单独点它时才起）；
  *  push = （执行面解析 + 回写 rl-config）→ selfNode→trainer
  *         （云机自起 cloudflared；hub 直推 code.zip/job，**不启本地 hubServer/cloudflared**）；
  *         执行面回落本机时（config 无可用 gpu_push）多一步 `workerServe` —— 本机
@@ -56,9 +59,26 @@ export async function startPreset(
             ? `; 复用 rl-config gpu_push (${t.url}) 已 ping 通；无本地 hub-server/cloudflared`
             : `; push endpoint 已验证并回写 rl-config (${t.url})；无本地 hub-server/cloudflared`
     }
+    // pull **不再自动拉 cloudflared**（2026-09-16）：云机与本机组网后用 tailnet 直连
+    // 本课 hub 即可。理由不是"少一个组件"——隧道回源会把**所有**云端流量归成
+    // 127.0.0.1，hub 的 D9 闭锁（5 次鉴权失败封 IP 3600s）一旦触发，训练主循环会
+    // 被其它云机的失败连坐（x3-step 事故：训练循环连续 403 自杀退出、云机空转一整晚）。
+    // 需要公网隧道时，单独点「cloudflared」组件启动即可（不会自动跑）。
+    let hubNote = ''
+    if (mode === 'pull') {
+      const cfgNow = loadConfig()
+      const ip = tailscaleIp()
+      if (ip) {
+        const hubUrl = `http://${ip}:${slotPort(cfgNow, course, 'hub')}`
+        writeRemoteHubUrl(hubUrl, course)
+        hubNote = `; 云机 pull 地址 = tailnet 直连 ${hubUrl}（未启动 cloudflared）`
+      } else {
+        hubNote = '; 未检测到 Tailscale 网卡 IP——remote_hub_url 未改（云机需自行可达本课 hub）'
+      }
+    }
     const order: Component[] =
       mode === 'pull'
-        ? ['selfNode', 'hubServer', 'cloudflared', 'trainingLoop']
+        ? ['selfNode', 'hubServer', 'trainingLoop']
         : mode === 'push'
           ? viaLocalWorker
             ? ['selfNode', 'workerServe', 'trainingLoop']
@@ -77,7 +97,7 @@ export async function startPreset(
     }
     return done(
       true,
-      `已按 ${mode} 模式启动 ${order.length} 个组件 (course=${course})${pushNote}`,
+      `已按 ${mode} 模式启动 ${order.length} 个组件 (course=${course})${pushNote}${hubNote}`,
       detail,
     )
   } catch (e) {

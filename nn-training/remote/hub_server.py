@@ -348,18 +348,31 @@ class _JobStore:
             return None
 
     # ---- 闭锁（D9） ----
-    def auth_failure(self, ip: str) -> None:
+    def auth_failure(self, ip: str) -> int:
+        """记一次鉴权失败，返回**累计次数**（含本次）；满 5 次封禁 3600s。
+
+        返回值供 handler 打印审计行——2026-09-16 x3-step 事故：401 落在
+        `/ping`・`/jobs/next` 等静默路径上，五次失败把 127.0.0.1 封掉后
+        **hub 日志一行痕迹都没有**，训练循环被 cloudflared 回源 IP 连坐后
+        连续 403 自杀退出，只能靠猜。故次数必须上浮到调用方记录。
+        """
         with self._lock:
             n = self._auth_fail.get(ip, 0) + 1
             self._auth_fail[ip] = n
             if n >= 5:
                 self._auth_blocked_until[ip] = self._now() + 3600
                 self._auth_fail.pop(ip, None)
+            return n
 
     def is_blocked(self, ip: str) -> bool:
         with self._lock:
             until = self._auth_blocked_until.get(ip, 0.0)
             return until > self._now()
+
+    def blocked_remaining(self, ip: str) -> float:
+        """该 ip 剩余封禁秒数（未封禁 = 0）——供审计行提示「还要封多久」。"""
+        with self._lock:
+            return max(0.0, self._auth_blocked_until.get(ip, 0.0) - self._now())
 
 
 # ------------------------------------------------------------------ HTTP
@@ -370,17 +383,22 @@ class HubHandler(BaseHTTPRequestHandler):
 
     store: _JobStore = None  # type: ignore[assignment]  # 由 factory 注入
 
+    #: ip -> 上次打印「封禁拒绝」的墙钟（节流：被封客户端高频轮询时每 ip 每分钟一条）
+    _blocked_logged: dict[str, float] = {}
+
     # ---- 基础 ----
     def log_message(self, fmt: str, *args: object) -> None:  # 只打非常规事件
         # 静默高频只读访问（/ping 健康检查、/jobs/next 拉活、result/payload 轮询含 404）
         # ——这些在多 worker 下每秒可打多行，把 hub-server.out 刷爆。POST result、
         # ERROR、/admin、/code 仍保留。
+        # 例外：**401/403 永不静默**（2026-09-16 x3-step 事故）——鉴权失败与封禁
+        # 恰恰最爱发生在这些高频路径上，静默等于抹掉唯一的破案线索。
         line = fmt % args
         if (
             '"GET /ping ' in line
             or '"GET /jobs/next ' in line
             or ('"GET /jobs/' in line and ('/result ' in line or '/payload ' in line))
-        ):
+        ) and ' 401 ' not in line and ' 403 ' not in line:
             return
         print(
             f"[{time.strftime('%H:%M:%S')}] [hub-server {self.client_address[0]}] {line}",
@@ -390,15 +408,37 @@ class HubHandler(BaseHTTPRequestHandler):
     def _auth_ok(self) -> bool:
         ip = self.client_address[0]
         if self.store.is_blocked(ip):
+            self._log_blocked(ip)
             self._json({"error": "ip blocked"}, 403)
             return False
         auth = self.headers.get(AUTH_HEADER, "")
         token = self.server.token if hasattr(self.server, "token") else ""
         if auth != f"Bearer {token}" or not token:
-            self.store.auth_failure(ip)
+            n = self.store.auth_failure(ip)
+            print(
+                f"[{time.strftime('%H:%M:%S')}] [hub-server {ip}] AUTH FAIL {n}/5 "
+                f"path={self.path.split('?', 1)[0]}"
+                + (" — 已封禁该 IP 3600s" if n >= 5 else ""),
+                flush=True,
+            )
             self._json({"error": "unauthorized"}, 401)
             return False
         return True
+
+    def _log_blocked(self, ip: str) -> None:
+        """封禁命中审计（每 ip 每 60s 一条）：被封客户端往往仍在高频轮询，
+        不节流会把日志刷爆，但完全不打则「谁在被封」永远查不到。"""
+        now = time.time()
+        if now - HubHandler._blocked_logged.get(ip, 0.0) < 60:
+            return
+        HubHandler._blocked_logged[ip] = now
+        print(
+            f"[{time.strftime('%H:%M:%S')}] [hub-server {ip}] BLOCKED — 请求被拒 "
+            f"path={self.path.split('?', 1)[0]} 剩余封禁 "
+            f"{int(self.store.blocked_remaining(ip))}s（5/5 次鉴权失败触发；"
+            f"注意 cloudflared 回源会把隧道流量全归成 127.0.0.1，误伤经隧道的本机组件）",
+            flush=True,
+        )
 
     def _json(self, obj: object, status: int = 200) -> None:
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")

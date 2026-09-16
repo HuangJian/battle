@@ -17,6 +17,9 @@ import { dirname, relative, resolve } from 'node:path'
  */
 const DASH = resolve(import.meta.dir, '..')
 const ROOT = resolve(DASH, '..')
+/** 正斜杠版本（Windows 路径前缀判定的唯一可比形态，见下面扫描循环）。 */
+const nDash = DASH.split('\\').join('/')
+const nRoot = ROOT.split('\\').join('/')
 const WORKFLOW = resolve(ROOT, '.github/workflows/dashboard.yml')
 
 const IMPORT_RE = /from\s+['"]([^'"]+)['"]/g
@@ -51,13 +54,17 @@ function repoDependencies(): string[] {
       const spec = m[1]
       if (!spec.startsWith('.')) continue // 只看相对 import
       const base = resolve(dirname(file), spec)
-      if (base.startsWith(DASH + '/') && !existsSync(`${base}.ts`)) continue // 仍在 dashboard 内
+      // Windows：`resolve` 返回反斜杠路径，拼 `'/'` 的前缀判定恒不成立 ⇒ 依赖集恒空，
+      // 「解析出的仓根依赖非空」永远失败（2026-09-16）。统一成正斜杠再比。
+      const nbase = base.split('\\').join('/')
+      if (nbase.startsWith(`${nDash}/`) && !existsSync(`${base}.ts`)) continue // 仍在 dashboard 内
       const hit = [base, ...EXTS.map((e) => base + e)].find(
         (c) => existsSync(c) && statSync(c).isFile(),
       )
       if (!hit) continue
-      if (hit.startsWith(DASH + '/')) continue // dashboard 内部
-      if (!hit.startsWith(ROOT + '/')) continue // 仓库之外（node_modules 等）
+      const nhit = hit.split('\\').join('/')
+      if (nhit.startsWith(`${nDash}/`)) continue // dashboard 内部
+      if (!nhit.startsWith(`${nRoot}/`)) continue // 仓库之外（node_modules 等）
       deps.add(relative(ROOT, hit).split('\\').join('/'))
     }
   }

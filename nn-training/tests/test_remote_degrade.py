@@ -31,7 +31,13 @@ class _Stub(TrainingSteps):
     """承载被测方法的最小宿主：继承真 mixin 取 `_remote_ppo_or_degrade`，只覆盖
     `_remote_ppo`（真远端要 hub/隧道/打包，这里不需要）。"""
 
-    def __init__(self, tmp_path: Path, fail_times: int = 0, **args_over: object) -> None:
+    def __init__(
+        self,
+        tmp_path: Path,
+        fail_times: int = 0,
+        exc: BaseException | None = None,
+        **args_over: object,
+    ) -> None:
         # 默认 remote_degrade_after=0：与 CLI 新默认一致（不自动降级）。
         # 测 N>0 路径时由用例显式传入。
         base = {"ppo": "remote", "remote_degrade_after": 0}
@@ -44,6 +50,8 @@ class _Stub(TrainingSteps):
         self._leg_abort = False
         self.remote_calls: list[int] = []
         self.fail_times = fail_times
+        #: 抛出的异常（默认 TimeoutError；测 4xx 立即停腿时传 HubClientError）
+        self.exc = exc
         self.ensure_local_calls = 0
         # 模拟 remote 模式 D2：栈为空（降级前不得直接 load_episodes）。
         self.ppo_backend = None
@@ -58,6 +66,8 @@ class _Stub(TrainingSteps):
     def _remote_ppo(self, it: int) -> None:
         self.remote_calls.append(it)
         if len(self.remote_calls) <= self.fail_times:
+            if self.exc is not None:
+                raise self.exc
             raise TimeoutError(f"wait_job 超时（>{1800}s）")
 
     def events(self) -> list[dict]:
@@ -138,6 +148,46 @@ def test_degrade_disabled_writes_abort(tmp_path: Path) -> None:
     assert st._leg_abort is True
     assert st.args.ppo == "remote"  # 禁降级时不许偷偷改
     assert st.ensure_local_calls == 0
+
+
+def test_fatal_remote_http_aborts_on_first_failure(tmp_path: Path) -> None:
+    """401/403/400 = 鉴权/闭锁类失败：**第一次**就写 ABORT 停腿，不走连败计数。
+
+    2026-09-16 x3-step 事故：hub 把回环 IP 封掉后每次 `wait_job` 都是 403，而
+    `HubClientError` 原先不在本方法的捕获白名单里 ⇒ 冒泡到 `loop_core` 的通用兜底，
+    白烧 5×30s 重试（每次还重新 publish 同一 job）后才被杀进程。
+    """
+    from remote.hub_client import HubClientError
+
+    st = _Stub(
+        tmp_path,
+        fail_times=9,
+        exc=HubClientError('wait_job: HTTP 403: {"error": "ip blocked"}'),
+    )
+    with pytest.raises(HubClientError):
+        st._remote_ppo_or_degrade(3)
+    ev = st.events()
+    assert [e["event"] for e in ev] == ["gate_verdict"]
+    assert ev[0]["verdict"] == "ABORT" and ev[0]["iter"] == 3
+    assert "HTTP 403" in ev[0]["reason"]
+    assert st._leg_abort is True
+    assert st.args.ppo == "remote" and st.ensure_local_calls == 0
+    assert len(st.remote_calls) == 1  # 没有重试
+
+
+def test_retryable_http_still_counts_consecutive(tmp_path: Path) -> None:
+    """5xx 属可重试：不写「立即 ABORT」，仍按连败计数（默认 0 → 3 次后停腿）。"""
+    from remote.hub_client import HubClientError
+
+    st = _Stub(tmp_path, fail_times=9, exc=HubClientError("wait_job: HTTP 500: boom"))
+    for _ in range(2):
+        with pytest.raises(HubClientError):
+            st._remote_ppo_or_degrade(4)
+    assert st.events() == []  # 未达 3 次：不写判决
+    with pytest.raises(HubClientError):
+        st._remote_ppo_or_degrade(4)
+    assert st._remote_fail == 3
+    assert st._leg_abort is True
 
 
 def test_wait_job_poll_backoff_on_network_errors() -> None:

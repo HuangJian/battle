@@ -65,6 +65,13 @@
 #   线程打死；所有清理路径一律走该助手。
 set -u
 
+# 中文 Windows 上 subprocess 文本管道默认按 GBK 解码 → e2e / pytest-xdist 捕获测试
+# stdout 时遇 UTF-8 中文字节即 UnicodeDecodeError 崩进程（2026-09-16 实测：
+# e2e/test_worker_queue.py 在 gw1 崩）。PYTHONUTF8=1 让本进程及其子进程（含 xdist
+# worker、ruff/mypy）的文本 I/O 走 UTF-8，根因修复，e2e 不再因编码炸，无需
+# NN_GATE_SKIP_E2E 退避。Linux/macOS 本就是 UTF-8 locale，该变量无副作用。
+export PYTHONUTF8=1
+
 # Git Bash 的 `pwd` 给 MSYS POSIX 路径（/d/github/battle2/...）——shell 内部一切正常，
 # 但**凡是要塞进 native Windows python.exe 的 argv 的路径都会被 MSYS 路径转换打坏**：
 # 实测 /d/github/battle2/tools/githook/detach-run.py 到 python 手里变成

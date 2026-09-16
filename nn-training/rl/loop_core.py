@@ -371,6 +371,11 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                     f"[run_rl] it{it} FAILED ({type(e).__name__}: {e}); "
                     f"consecutive={self._consec_fail}/5 — retry same iteration"
                 )
+                if getattr(self, "_leg_abort", False):
+                    # 已经被判死腿（如远端 401/403 这类重试无意义的失败，ABORT 判决
+                    # 已由 _remote_ppo_or_degrade 落盘）——再按通用兜底重试只是重复
+                    # publish 同一 job、把停腿拖后 5×30s（x3-step 事故）。直接上抛。
+                    raise
                 if self._consec_fail >= 5:
                     raise
                 time.sleep(30)
@@ -431,7 +436,7 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
             parked_min += 1
             # 停车期认领（60s 粒度）：复用 idle 窗逻辑——窗常开（无 rollout 抢占），
             # 有在途单元则只保窗不重复领，无则认领最早 pending 批；dist_cfg 每轮热读
-            #（节点变更下一分钟即生效）。异常自吞（认领失败不影响停车）。
+            # （节点变更下一分钟即生效）。异常自吞（认领失败不影响停车）。
             try:
                 try:
                     dist_cfg = dist_common.load_dist_config()
@@ -771,10 +776,7 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 "落账前每轮重试，结果见后续 [eval] 行"
             )
         except Exception as e:  # 基线派发失败不影响训练
-            log(
-                f"[eval] WARN it0 baseline dispatch failed (non-fatal): "
-                f"{type(e).__name__}: {e}"
-            )
+            log(f"[eval] WARN it0 baseline dispatch failed (non-fatal): {type(e).__name__}: {e}")
 
     def _prepare_iter_dir(self, it: int) -> None:
         """rollout/ppo_backend 断点感知：若该迭代已有 wver 匹配的完整 shard（中途崩过），
@@ -937,9 +939,7 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 "分关配额需要一个明确的关集"
             ) from exc
         if not stages:
-            raise SystemExit(
-                f"[volume] --stages={raw!r} 解析为空集，无法分关配额（请显式传关号）"
-            )
+            raise SystemExit(f"[volume] --stages={raw!r} 解析为空集，无法分关配额（请显式传关号）")
         return stages
 
     def _volume_est_samples(self) -> int:
@@ -1077,9 +1077,7 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         # 已结算的由调度器剔除），再按账本继续后面的波。
         replay = self._volume_journal_replay(it)
         if replay is not None and replay.games:
-            replay_pairs = wave_pairs(
-                self._rotate_seed, it, replay.games, replay.wave_idx
-            )
+            replay_pairs = wave_pairs(self._rotate_seed, it, replay.games, replay.wave_idx)
             log(
                 f"[volume] it{it}: WAL 重放未完成的补波 w{replay.wave_idx} "
                 f"games={replay.games} → {len(replay_pairs)} 局（同种子流，不重抛硬币）"
@@ -1120,8 +1118,7 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 log(
                     f"[volume] it{it}: 补波收官 waves={self._volume_waves} "
                     f"collected={collected_total}/{target} samples "
-                    f"达标关={len(met)}/{len(stages)}"
-                    + (f" 未达标={unmet}" if unmet else "")
+                    f"达标关={len(met)}/{len(stages)}" + (f" 未达标={unmet}" if unmet else "")
                 )
                 break
             pairs = wave_pairs(self._rotate_seed, it, plan.games_by_stage, plan.wave_idx)

@@ -78,13 +78,38 @@ def _request(
         return e.code, e.read()
 
 
-def poll_job(base_url: str, token: str, timeout: float = 30.0) -> dict | None:
+#: "base_url:status" -> 上次告警墙钟（节流：非 200 时每分钟最多一条，别刷屏）
+_POLL_WARN_AT: dict[str, float] = {}
+
+
+def poll_job(
+    base_url: str,
+    token: str,
+    timeout: float = 30.0,
+    log: Any = None,
+) -> dict | None:
     """GET /jobs/next → {job_id, manifest, halt} 或 None（无任务且无停机达令）。
 
     停机达令（§386）随任务同发：有任务 → 原样上浮（含 halt 标志，worker 先试停机、
-    停不掉照常执行任务）；无任务但 halt → {"halt": True}；两者皆无 → None。"""
+    停不掉照常执行任务）；无任务但 halt → {"halt": True}；两者皆无 → None。
+
+    `log` 用于**区分「队列空」与「被 hub 拒绝」**（2026-09-16 x3-step 事故）：
+    此前非 200 一律静默返回 None，worker 被 403 ip blocked 时日志与空队列完全
+    一样（只有 "no job yet"），现场无法判断到底是没活还是被封。现在非 200 会
+    按 (url, status) 节流打印一条。"""
     status, body = _request(base_url, token, "/jobs/next", timeout=timeout)
     if status != 200:
+        if log is not None:
+            now = time.time()
+            key = f"{base_url}:{status}"
+            if now - _POLL_WARN_AT.get(key, 0.0) > 60:
+                _POLL_WARN_AT[key] = now
+                hint = (
+                    "鉴权失败或该 IP 已被 hub 封禁——检查 --token 与 hub 日志 AUTH FAIL/BLOCKED"
+                    if status in (401, 403)
+                    else "hub 异常，请检查 hub 进程与隧道"
+                )
+                log(f"poll {base_url}: HTTP {status} — {hint}（这不是「队列空」）")
         return None
     data = json.loads(body.decode("utf-8"))
     if not isinstance(data, dict):
@@ -1376,7 +1401,7 @@ def worker_loop(
         try:
             _polls_since_log += 1
             _polls_since_accept += 1
-            job = poll_job(base_url, token)
+            job = poll_job(base_url, token, log=log)
         except Exception as e:
             log(f"poll failed: {e} — retry in {poll_sec}s")
             time.sleep(poll_sec)

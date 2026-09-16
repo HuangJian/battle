@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -77,18 +78,12 @@ def _gpu_push_nodes(remote_token: str, course_push_url: str = "") -> list[dict]:
     if env_node:
         out.append({"url": env_node.rstrip("/"), "authKey": remote_token})
     cfg = dist_common.load_dist_config() or {}
-    nodes = [
-        n
-        for n in cfg.get("nodes") or []
-        if n.get("gpu_push") and n.get("enabled", True)
-    ]
+    nodes = [n for n in cfg.get("nodes") or [] if n.get("gpu_push") and n.get("enabled", True)]
     want = (course_push_url or "").rstrip("/")
     if want:
         nodes = [n for n in nodes if str(n.get("url", "")).rstrip("/") == want]
     for n in nodes:
-        out.append(
-            {"url": str(n.get("url", "")).rstrip("/"), "authKey": str(n.get("authKey", ""))}
-        )
+        out.append({"url": str(n.get("url", "")).rstrip("/"), "authKey": str(n.get("authKey", ""))})
     return out
 
 
@@ -257,6 +252,38 @@ def kickstart_coef(args: Any, it: int) -> float:
     return float(update_kwargs(args, it, 1, None)["kl_coef"])
 
 
+#: 远端 HTTP 状态码里**重试不可能自愈**的几类：请求本身有问题 / token 不对 / IP 被闭锁。
+#: 网络抖动、5xx、429 都不在此列（那些该退避重试）。
+FATAL_REMOTE_HTTP = (400, 401, 403)
+
+
+def remote_retryable_exceptions() -> tuple[type[BaseException], ...]:
+    """`_remote_ppo_or_degrade` 认可的远端失败异常集合。
+
+    `remote.hub_client` 只在远端路径延迟导入（见 `_remote_ppo`），异常类型同理延迟取。
+
+    2026-09-16 x3-step 事故：`HubClientError(RuntimeError)` 不在白名单里 ⇒ hub 把回环
+    IP 封掉（403 ip blocked）后，训练主循环连败 5 次被 `loop_core` 的通用兜底直接杀
+    进程，而专为远端失败写的「连败 3 次写 ABORT 停腿」一次都没触发；每次重试还重新
+    publish 同一 job（账本里同 id 留了 5 条 job_pending）。
+    """
+    from remote.hub_client import HubClientError
+
+    return (RetryableError, ProtocolError, OSError, TimeoutError, HubClientError)
+
+
+def fatal_remote_http(e: BaseException) -> int:
+    """从 HubClientError 的消息里抽状态码；命中「重试无意义」的返回该码，否则 0。
+
+    消息形如 `wait_job: HTTP 403: {"error": "ip blocked"}`（hub_client 统一格式）。
+    """
+    m = re.search(r"HTTP\s+(\d{3})", str(e))
+    if not m:
+        return 0
+    code = int(m.group(1))
+    return code if code in FATAL_REMOTE_HTTP else 0
+
+
 class TrainingSteps:
     """单轮结算与梯度步 mixin。"""
 
@@ -396,9 +423,7 @@ class TrainingSteps:
 
         changed = apply_hot_fields(args, new_course)
         if "max_hours" in changed:
-            self._deadline = (
-                time.time() + args.max_hours * 3600 if args.max_hours > 0 else None
-            )
+            self._deadline = time.time() + args.max_hours * 3600 if args.max_hours > 0 else None
         write_event(
             self._jsonl_path,
             {
@@ -678,9 +703,28 @@ class TrainingSteps:
         args = self.args
         try:
             self._remote_ppo(it)
-        except (RetryableError, ProtocolError, OSError, TimeoutError) as e:
+        except remote_retryable_exceptions() as e:
             self._remote_fail += 1
             limit = int(getattr(args, "remote_degrade_after", 0) or 0)
+            # 401/403/400：token 不对、IP 被 hub 闭锁、或请求本身有问题——**重试多少次
+            # 都不会自愈**，继续消耗连败配额只是重复 publish 同一 job 并把停腿拖后
+            # （x3-step 事故：5×30s 空转 + 账本 5 条同 id job_pending，最后照样死）。
+            fatal = fatal_remote_http(e)
+            if fatal:
+                write_gate_verdict(
+                    self._jsonl_path,
+                    it,
+                    "ABORT",
+                    f"远端 PPO 不可重试失败 HTTP {fatal}——检查 --remote-token 与 hub 日志 "
+                    f"AUTH FAIL / BLOCKED 行：{str(e)[:200]}",
+                    decider="loop",
+                )
+                log(
+                    f"[run_rl] GATE ABORT it{it}: 远端 HTTP {fatal}（鉴权/闭锁类，非网络抖动）"
+                    f"——不再重试，立即停腿"
+                )
+                self._leg_abort = True
+                raise
             log(
                 f"[run_rl] remote ppo it{it} FAILED ({type(e).__name__}: {str(e)[:200]}) — "
                 f"consecutive={self._remote_fail}"
@@ -760,9 +804,7 @@ class TrainingSteps:
         # hub_url 可缺省。token 仍要（pull 回落 / env 节点鉴权）；配置节点自带 authKey。
         push_url = _course_push_url(args)
         transport = str(getattr(args, "remote_transport", "auto") or "auto")
-        gpu_nodes = resolve_transport(
-            transport, hub_url, token, _gpu_push_nodes(token, push_url)
-        )
+        gpu_nodes = resolve_transport(transport, hub_url, token, _gpu_push_nodes(token, push_url))
         require_remote_transport(hub_url, token, gpu_nodes)
         log(
             f"[run_rl] remote ppo transport={transport} push_nodes={len(gpu_nodes)} "
@@ -879,7 +921,12 @@ class TrainingSteps:
             self._evalboard_idle(it, getattr(self, "_last_dist_cfg", None))
         # P3-W1b：本课 push_node_url 非空时只取 URL 匹配项（N:1 共享天然成立）；
         # 为空时沿用旧逻辑（全取，默认行为零变化）。gpu_nodes 已在上方解析。
-        if transport == "auto" and push_url and not os.environ.get("REMOTE_PUSH_NODE") and len(gpu_nodes) == 0:
+        if (
+            transport == "auto"
+            and push_url
+            and not os.environ.get("REMOTE_PUSH_NODE")
+            and len(gpu_nodes) == 0
+        ):
             # F-B5：非空但匹配 0 个且无 env 注入 → 响亮失败（WARN + manifest 打标，
             # 不抛异常——抛异常致 loop 无限原地重试 hang；静默回落 pull 仍能正确训练，
             # 危险在误诊不在停机，配错 URL 必须一眼可见）。
