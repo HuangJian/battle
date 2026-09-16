@@ -1,0 +1,98 @@
+// 课程 x3-chip-k0 —— T6 wChip 生存腿（k=0 对照臂：x3-power 精确复刻）
+// 状态：**2026-09-16 已结课**（预注册池 null；复刻使命完成：run 噪声地板实测）。
+//   批准链见 k05 文件头（用户明示批准；DECISIONS 破规条目 3 已激活）。
+//
+// 本臂＝对照：奖励与 x3-power **逐字同构**（wChip 项保留但系数 0.0，三臂仅 params
+// 一值之差，机械可验）。用途：① 校准 run-to-run 方差（同课重跑不同 rollout 键）；
+// ② 若 k05/k10 相对本臂动了而相对冻结基线没动，说明是起点游走不是 chip 效应。
+// 其余（环境/起点/优化器/日程/verdict/熔断/DoD）与 k05 文件头同，执行者读 k05。
+// 启动（用户手工开训；agent 不得启动训练）：
+//   bun dashboard/src/launch/cli.ts --script run_rl.py --course x3-chip-k0 \
+//     --remote-transport pull
+{
+  "version": 5,
+  "name": "x3-chip-k0",
+  "mode": "per-tick",
+  "level": "ladder-c03",
+
+  "seed_rotate": 60,
+  "workers": 8,
+
+  // ── 奖励（x3-power 同构；wChip=0.0 对照）───
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0) - wChip*playerDamageTaken",
+    "params": {
+      "wKill": 4.0,
+      "wHit": 0.15,
+      "wWin": 2.0,
+      "wChip": 0.0,
+    },
+    "terminal": {
+      "lives_exhausted": -1.0,
+    },
+    "scheme": "toy",
+  },
+
+  "bc": "nn-training/weights/x3-start/x3-start.it333.20260915-052649.json",
+  "kickstart_ref": true,
+  "warmup_iters": 0,
+
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    // ※ 死段声明（与 x3-power/k05 同构）：iters=30，第二段 until_iter=40 永不触发。
+    { "until_iter": 40, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.006 },
+    { "kl_coef": 0.03, "lr": 0.00005 },
+  ],
+
+  "iters": 30,
+  "max_hours": 12,
+  "out": "tmp/x3-chip-k0/weights.json",
+  "traj": "tmp/x3-chip-k0",
+  "backup_dir": "nn-training/weights/x3-chip-k0",
+  "backup_prefix": "x3-chip-k0",
+
+  "ent_break": 0.25,
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5,
+}
+
+// ── verdict（与 k05 同规格；基线共用冻结 576/800）──────────────────────────
+//   bun tools/sim/eval-course-ckpt.ts --course nn-training/levels/ladder-c03.jsonc \
+//     --weights <本臂归档> --games 800 --seed0 400000 --workers 8 --out tmp/x3-chip-k0/<tag>.jsonl
+// ── 终点结算（2026-09-16；本臂是钥匙：run 噪声地板实测腿）──────────────────
+// 终点权重：`nn-training/weights/x3-chip-k0/x3-chip-k0.it30.20260916-123923.json`
+//   （wver `4e14f1c3f69aed07`，it1–it30 齐）。单 run_start 零 error，run_complete
+//   正常收官 12:40:08。KL mean 0.001370 / max 0.001916（死水）；kickstart
+//   it1 0.0005→it15 0.0163→it30 0.0259。eval 满血（eval-outdated.plan.md 已执行：
+//   全程仅 1 条 mismatch；it0–it30 summary 齐；锚点 0.650→0.655，横盘）。
+//
+// **预注册池（vs 冻结 BC 基线 576/800）：null**
+//   正式 verdict（`tmp/x3-chip-k0/verdict-it30-seed400000.jsonl`，800 行，108.5s）：
+//   终点 **569/800=71.125%** vs 72.00%，**Δ=−0.875pp**；b01=19/b10=26，pd=5.63%，
+//   McNemar 单侧 p=0.8837 / 双侧 p=0.3713。伴随量：kills −0.7%、eHits −1.1%、
+//   shots −6.2%、dmg **+1.5%（涨了）**、ticks −1.5%——全噪音。锚点 200 对
+//   b01=6/b10=5，pd=5.5%（与 x3-step 逐数相同）。
+//
+// **复刻使命（本臂唯一使命）：run 噪声地板实测**
+//   vs x3-power（同配方/同起点/同超参/同批种子，仅 run 不同）：**569 vs 553，
+//   Δ=+16/800=+2.000pp**；b01=39/b10=23，pd=7.75%，单侧 p=0.0279 / 双侧 p=0.0559
+//   （定义边界， Gate 只认冻结双侧口径）。
+//   ⇒ **同配方两 run 自己就差 2pp 且配对显著**：McNemar 消种子方差，不消 run 方差；
+//   run sd≈2.0/√2≈1.4–1.5pp；单 run 总 SE≈√(1.6²+1.5²)≈2.2pp。
+//   vs k05：+1.0pp（b01=41/b10=33，p=0.21/0.42，null）——+3pp 相对 run 噪声 ~1.5σ，
+//   归档为 run 噪声；H1 降级为不可测（≤run 本底）；倒 U 不需要假设。
+//
+// 指纹（`tmp/x3-chip-k0/fingerprints-report.md`）：power 3.73 vs 3.76、killer 63.8%
+//   vs 64.4%、转化 49.5% vs 49.4%、败局 0.50 vs 0.58——复印机。分支 C=0.597<0.60
+//   →F1 单独（门限硬币六连 3:3，§52 定案必须加固 tie-break）。
+//
+// **判决**：预注册池 null；复刻使命完成——T6 全面判阴（详 §52），本臂是定案钥匙。
+// **不启用 target_transitions**（缺席该键＝默认关，与 x3-power 同款声明）。

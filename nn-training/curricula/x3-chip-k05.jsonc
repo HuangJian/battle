@@ -1,0 +1,158 @@
+// 课程 x3-chip-k05 —— T6 wChip 生存腿（k=0.5 主臂）
+// 状态：**2026-09-16 已结课**（预注册池判阴；单变量池＋3.0pp 待 k0 定案，判待定）。
+//   批准链：用户明示批准；T6 三门已齐（T3 门控过＋批准＋
+//   DECISIONS §2026-09-15-goalnn-x3-power-negative 条目 3 已激活）。
+//
+// 立项（plan/x3-power-followup.plan.md §T6）：死因是挨打（败 dmg≈196 vs 胜≈94）；
+// N3「c01-c03 承伤基数极小不上 wChip」前提被局均 ~97–124 证伪。本腿破 N3/R5，
+// 范围仅早期关（ladder-c03），立案可追溯（见上 DECISIONS 条）。
+// 单变量：相对 x3-power **唯一训练变量** = 奖励加项 `-wChip*playerDamageTaken`
+//   （wChip=k/97，k=0.5 → **0.005**；c4 的 0.03 翻车案在前，零头起步）。
+//   环境/起点/优化器/日程与 x3-power **逐字同构**（kl_cap 0.006 保留但本路径不接线，
+//   见 §2026-09-15-goalnn-kl-cap-unwired；第二段 until_iter=40 在 30 轮腿里仍是死段，
+//   有意保留）。同 bc=x3-start.it333 归档；新 out/traj 目录，禁续跑
+//   （§15.5：reward 语义变更＝新实验）。
+// 判据（主）：dmg/kill 降且 kills/shots 不降（降即停）。
+// 熔断（s-dodge 教训，噪声带执行）：shots 崩（开火被吓没）或 kills 不升反降即停。
+// verdict：800 局 `--seed0 400000` 配对 vs 冻结基线 576/800（同环境/同起点/
+//   同分布同 eval，唯一变量＝奖励；基线复用合法）。日常 eval 只读 anchor_wr；
+//   结算标配 `paired-pd`＋fingerprints（`plan/t5-endpoint.plan.md` 工具链，~5 分钟）。
+// 启动（用户手工开训；agent 不得启动训练）：
+//   bun dashboard/src/launch/cli.ts --script run_rl.py --course x3-chip-k05 \
+//     --remote-transport pull
+//   （781a5fc 后拉模式去 cloudflared 走 tailscale 直连；4xx 立即 ABORT；T7 已修）。
+// DoD：30 轮跑满或熔断停腿＋800-verdict 落账＋课程文件结算节
+//  （事件账/双池/口径声明缺一不可）。
+{
+  "version": 5,
+  "name": "x3-chip-k05",
+  "mode": "per-tick",
+  "level": "ladder-c03",
+
+  "seed_rotate": 60,
+  "workers": 8,
+
+  // ── 奖励（x3-power 同构＋wChip 单变量）───
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0) - wChip*playerDamageTaken",
+    "params": {
+      "wKill": 4.0,
+      "wHit": 0.15,
+      "wWin": 2.0,
+      "wChip": 0.005,
+    },
+    "terminal": {
+      "lives_exhausted": -1.0,
+    },
+    "scheme": "toy",
+  },
+
+  // 暖启：与 x3-power / x3-step 同一起点（正式门一 800 局三点对照见 x3-power 文件）。
+  "bc": "nn-training/weights/x3-start/x3-start.it333.20260915-052649.json",
+  "kickstart_ref": true,
+  // 必须为 0（config 硬校验；改 1 启动失败）。
+  "warmup_iters": 0,
+
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    // ※ 死段声明（与 x3-power 同构，见上）：本腿 iters=30，第二段 until_iter=40
+    // **永不触发** ⇒ 30 轮全程 lr 1.5e-4 + kl_coef 0.2。kl_cap 在本路径不接线。
+    { "until_iter": 40, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.006 },
+    { "kl_coef": 0.03, "lr": 0.00005 },
+  ],
+
+  // 短腿 30 轮：跑满即 verdict，不过关账不续。
+  "iters": 30,
+  "max_hours": 12,
+  "out": "tmp/x3-chip-k05/weights.json",
+  // reward params 进语义身份（与 x3-power/x3-step/另两臂互异），必须新目录，禁止续跑。
+  "traj": "tmp/x3-chip-k05",
+  "backup_dir": "nn-training/weights/x3-chip-k05",
+  "backup_prefix": "x3-chip-k05",
+
+  // ent_break 0.25：胜率 > max_winrate(0.5) 时结构性不触发（设计如此，非故障）。
+  "ent_break": 0.25,
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5,
+}
+
+// ── 开工前置 ─────────────────────────────────────────────────────────────
+// ① bc 权重：`nn-training/weights/x3-start/x3-start.it333.20260915-052649.json`
+//   （＋`nn-training/weights/in-use/x3-start.it333.json` 双份，§379）。
+// ② 关卡 `ladder-c03`（2000=abc / 2001=abd / 2002=acd / 2003=bcd，早期关，破规范围内）。
+// ③ transport：显式 `--remote-transport pull`（781a5fc 后拉模式走 tailscale 直连，
+//    不经过 cloudflared；开工前确认 hub 可达）。
+// ④ T7 已修（默认 ABORT；4xx 立即 ABORT，781a5fc）。
+//
+// ── verdict 执行规格（照 x3-power 同款，种子段冻结）──────────────────────────
+// `--seed0 400000`，800 局 ⇒ 种子 400000-400199，池外（`tools/sim/eval-course-ckpt.ts`
+// stage = g % nStages、seed = seed0 + floor(g / nStages) ⇒ 每关 200 局独立种子）。
+// 基线 it333 同批 400000-400199 已冻结（576/800，`tmp/x3-power/baseline-it333-seed400000.jsonl`），
+// 本腿三臂共用（同环境/同起点/同分布/同 eval，唯一变量＝奖励 doses）。
+// 执行：
+//   bun tools/sim/eval-course-ckpt.ts --course nn-training/levels/ladder-c03.jsonc \
+//     --weights <本臂归档> --games 800 --seed0 400000 --workers 8 --out tmp/x3-chip-k05/<tag>.jsonl
+// 配对：`bun tools/sim/paired-pd.ts --base tmp/x3-power/baseline-it333-seed400000.jsonl
+//   --cand <上> --need-delta 0.05 --need-wins 616`（胜率门仅参考；本腿主判据是 dmg 轴）。
+// 主判据（dmg 轴）：dmg/kill 降且 kills/shots 不降（降即停）；熔断见上。
+//
+// ── 终点结算（2026-09-16，30/30 跑满；双口径并列；详账待 §51）────────────────
+// 终点权重：`nn-training/weights/x3-chip-k05/x3-chip-k05.it30.20260916-103347.json`
+//   （wver `6896d65c1b40c44b`，it1–it30 齐）。训练 09:03:55→10:35:17，run_start×4，
+//   iter_error×0（job_cancelled×3 为重启），run_complete「正常收官」。
+//   KL mean 0.001304 / max 0.002048（紧缰死水，符合设计）；kickstart（离 BC）
+//   it1 0.0005→it15 0.0135→it30 0.0381；rollout wr 0.61–0.75 无趋势；entropy 平稳。
+//
+// **预注册池（vs 冻结 BC 基线 576/800）：判阴，干净零结果**
+//   正式 verdict（`tmp/x3-chip-k05/verdict-it30-seed400000.jsonl`，800 行，140.6s）：
+//   终点 **577/800=72.125%** vs 72.00%，**Δ=+1/800=+0.125pp**；b01=33/b10=32，
+//   pd=8.13%，McNemar 单侧 p=0.5000 / 双侧 p=1.0000（完美对称噪声）。
+//   分关全 ±1pp 内（abc −0.5 / abd +1.0 / acd −0.5 / bcd +0.5pp）。
+//   dmg 轴：dmg 124.24→122.18（−1.66%，≈0.6σ）；kills 2.411→2.409（−0.1% 持平）；
+//   eHits 持平；dmg/kill 51.5→50.7（−1.6%，bootstrap CI 跨 0）；shots 14.55→13.01
+//   （−10.6%，唯一显著 p<0.0001——但 kills/eHits 全平、命中率 45.8%→51.4% 反升，
+//   系"少放空枪"非开火崩；日常 eval 口径 shots 仅 −4.7% 互证）。
+//   ⇒ **主判据（dmg/kill 降）未达标**（二进制结论；不写"字面成立"）；
+//   **熔断不触发**（实质重于字面，噪声带执行先例见 x3-power 结算）。
+//   日常 eval：anchor 0.650→0.675（+2.5pp 噪声内）；锚点 200 对 b01=13/b10=8，
+//   **pd=10.5%**（x3 系第一条过 10% 门的腿——动了，方向待定，见下）。
+//
+// **单变量池（vs x3-power it30 553/800，同批同种子真对照）：＋3.0pp，判待定**
+//   **577 vs 553，Δ=+24/800=+3.000pp**；b01=54/b10=30，pd=10.50%，
+//   McNemar 单侧 p=**0.0058** / 双侧 p=0.0116；**四关同向**
+//   （abc +1.5 / abd +3.0 / acd +4.0 / bcd +3.5pp，目标关涨最多）。
+//   配对合法性：800 行配对键零失配；两批独立复跑的基线 800 行×9 字段逐字段零差异
+//   （dmg 合计同 99392；course_fp 不同仅系课程文件 sha，与环境无关）。
+//   机制：承伤从未下降（BC→power +0.4%，power→k05 −2.1% p=0.23）⇒ **T6 立项叙事
+//   「惩罚挨打→少挨打」未兑现**；唯一稳定改变的是开火频率（kills/eHits 不降反升）；
+//   无 wChip 的 30 轮 PPO 全面退化（kills/hits/ticks/胜率齐降）而 k05 回到 BC 水平 ⇒
+//   候选解释 H1「wChip 系住漂移的 PPO（防退化锚）」vs H0「x3-power 那次是运气差」。
+//   **1 run vs 1 run 分不开两者 ⇒ 定案条件唯一：k0 同批复刻**
+//   （k0≈553 ⇒ H1；k0≈576 ⇒ H0；落中间 ⇒ 看 k10 剂量斜率）。
+//   30 局"退避" subgroup（shots −42%）系按结局选出的样本，只作 k10 watch-item，
+//   不进判决（选样偏差；tripwire 只认全局配对数）。
+//
+// 指纹旁证（`tmp/x3-chip-k05/fingerprints-report.md`，census 配对）：四指纹逐值重合
+//   （killer power 65.0% vs 64.4%、首命中 power 0.0% vs 0.1%、power 3.73 vs 3.76/
+//   千tick、转化 49.3% vs 49.4%、败局 power 命中 0.49 vs 0.58）——开火方向没动，
+//   与胜率结论互锁。本对分支判 F1 单独→T6（C=0.580<0.60），系已知门限硬币
+//   （§50 补记；事实部分两段一致），不改判任何东西。
+//
+// **判决（剂量定案，k0 并入后终判）**：预注册池**判阴**（维持）；单变量池由"待定"
+//   改**归档为 run 噪声**：k0 真复刻落 569/800（Δ−0.875pp，null），k05−k0 仅
+//   +1.0pp（b01=41/b10=33，p=0.21/0.42，null）——+3pp 系 x3-power 低 draw＋
+//   run 噪声（复刻对差 2.0pp，run sd≈1.4–1.5pp；+3pp 相对 run 噪声 ~1.5σ）。
+//   H1（防退化锚）降级为"若有效应≤run本底，不可测"；倒 U 不需要假设。
+//   T6 立项叙事维持"未兑现"。详账 §52。
+//   后继：k10 按 tripwire 跑完（shots 再下台阶且 kills 跟掉即熔断）；
+//   k10 收官→重启 eval 节点→开 k0；三臂剂量表定案后再立 DECISIONS 条目。
+//   k0 按需条件已触发（单变量池待定），不再封存。
+// **不启用 target_transitions**（缺席该键＝默认关，与 x3-power 同款声明）。

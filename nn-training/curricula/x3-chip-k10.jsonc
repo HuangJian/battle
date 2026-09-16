@@ -1,0 +1,115 @@
+// 课程 x3-chip-k10 —— T6 wChip 生存腿（k=1.0 高剂量臂）
+// 状态：**2026-09-16 已结课**（预注册池判负；剂量形状待 k0 定案，不单独结论）。
+//   批准链见 k05 文件头（用户明示批准；DECISIONS 破规条目 3 已激活）。
+//
+// 本臂＝高剂量：相对 x3-power 唯一训练变量＝奖励加项（wChip=k/97，k=1.0 → **0.010**）。
+// 若 k05 不动而本臂动 ⇒ 剂量门槛在 0.005–0.010 之间；若本臂 kills/shots 降 ⇒
+// 按熔断停腿（c4 的 0.03 翻车案在前，本臂已是其 1/3，仍属零头起步）。
+// 其余（环境/起点/优化器/日程/verdict/熔断/DoD）与 k05 文件头同，执行者读 k05。
+// 启动（用户手工开训；agent 不得启动训练）：
+//   bun dashboard/src/launch/cli.ts --script run_rl.py --course x3-chip-k10 \
+//     --remote-transport pull
+{
+  "version": 5,
+  "name": "x3-chip-k10",
+  "mode": "per-tick",
+  "level": "ladder-c03",
+
+  "seed_rotate": 60,
+  "workers": 8,
+
+  // ── 奖励（x3-power 同构＋wChip=0.010）───
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0) - wChip*playerDamageTaken",
+    "params": {
+      "wKill": 4.0,
+      "wHit": 0.15,
+      "wWin": 2.0,
+      "wChip": 0.01,
+    },
+    "terminal": {
+      "lives_exhausted": -1.0,
+    },
+    "scheme": "toy",
+  },
+
+  "bc": "nn-training/weights/x3-start/x3-start.it333.20260915-052649.json",
+  "kickstart_ref": true,
+  "warmup_iters": 0,
+
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    // ※ 死段声明（与 x3-power/k05 同构）：iters=30，第二段 until_iter=40 永不触发。
+    { "until_iter": 40, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.006 },
+    { "kl_coef": 0.03, "lr": 0.00005 },
+  ],
+
+  "iters": 30,
+  "max_hours": 12,
+  "out": "tmp/x3-chip-k10/weights.json",
+  "traj": "tmp/x3-chip-k10",
+  "backup_dir": "nn-training/weights/x3-chip-k10",
+  "backup_prefix": "x3-chip-k10",
+
+  "ent_break": 0.25,
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5,
+}
+
+// ── verdict（与 k05 同规格；基线共用冻结 576/800）──────────────────────────
+//   bun tools/sim/eval-course-ckpt.ts --course nn-training/levels/ladder-c03.jsonc \
+//     --weights <本臂归档> --games 800 --seed0 400000 --workers 8 --out tmp/x3-chip-k10/<tag>.jsonl
+// ── 终点结算（2026-09-16，30/30 跑满；剂量表待 k0 定案）────────────────────
+// 终点权重：`nn-training/weights/x3-chip-k10/x3-chip-k10.it30.20260916-114144.json`
+//   （wver `27ce99bf7097b122`，it1–it30 齐）。训练 10:35:57→11:42:19，run_start×1，
+//   iter_error×0，run_complete「正常收官」。KL mean 0.001271 / max 0.001796
+//   （死水，符合设计）；kickstart（离 BC）it1 0.0005→it15 0.0192→it30 0.0352；
+//   rollout wr 0.64–0.75 无趋势；entropy 平稳，无 KL/ent 熔断。
+//   in-loop eval 缺口：it1–it4 四节点 engine_epoch mismatch 全 skip（发版未 reload，
+//   任务书 `plan/eval-outdated.plan.md`）；it5 起 local 回退续上部分曲线；终点 verdict
+//   不受影响（缺口走声明，不修腿内）。
+//
+// **预注册池（vs 冻结 BC 基线 576/800）：判负**
+//   正式 verdict（`tmp/x3-chip-k10/verdict-it30-seed400000.jsonl`，800 行，124.4s）：
+//   终点 **558/800=69.75%** vs 72.00%，**Δ=−18/800=−2.25pp**；b01=23/b10=41，
+//   pd=8.00%，McNemar 单侧 p=0.9916（反向）/ 双侧 p=0.0336（显著更差，只记判负＋
+//   方向为负，不做因果断言；p 定义以 `paired-pd` 冻结口径为准）。
+//   分关：abc 151/200=75.5%（+0.5pp）/ abd 155/200=77.5%（±0）/
+//   acd 115/200=57.5%（−6.0pp，b01=3/b10=15）/ bcd 137/200=68.5%（−3.5pp，
+//   b01=5/b10=12）⇒ 损失压在 power 关，列为"高剂量有害"嫌疑，不定罪（等 k0 会审；
+//   若 k0 分布均匀噪声，本条按噪声归档）。
+//   主判据：dmg/kill 51.53→**51.51**（±0，死得不能再死）；dmg 124.24→121.66
+//   （−2.08%，≈0.6σ）；kills 2.411→2.362（−2.0%，配对 t=−2.37——但 x3-power 同口径
+//   −3.20（p=0.0014）当年判干净，判例绑定，本腿不停腿）；shots 14.55→14.50
+//   （−0.3%，配对 t=−0.24 彻底 null；k05 的 −10.6% dip 未复制——tripwire 解除）。
+//   ⇒ **主判据未达标**；**熔断不触发**（"降即停"指崩塌量级；日常 kills +2.4% 反向互证）。
+//   日常 eval：anchor 0.650→0.685（+3.5pp 噪声内）。
+//
+// **剂量表（同批配对；k0 未跑，形状待定，不结论）**
+//   k=0（x3-power）553/800=69.125% / k=0.005（k05）577/800=72.125% /
+//   k=0.010（本臂）558/800=69.75% ⇒ 69.1→72.1→69.8 非单调。
+//   非单调只杀死"单调递增 H1"（从未预注册）；倒 U（0.005 见顶、0.010 overlay 伤害）
+//   拟合全部数据。k0 定案条件：k0≈553 ⇒ H1＋倒 U（本臂回落变佐证）；k0≈576 ⇒
+//   全噪音（本臂 −2.25pp 一并按噪声归档）；落中间 ⇒ 弱证据不断言。
+//
+// 指纹旁证（`tmp/x3-chip-k10/fingerprints-report.md`，census 配对）：四指纹逐值重合
+//   （killer power 65.8% vs 64.4%、首命中 power 0.5% vs 0.1%、power 3.67 vs 3.76/
+//   千tick、转化 49.3% vs 49.4%、败局 power 命中 0.54 vs 0.58）。
+//   本对分支判 F1＋F2→T5（C=0.603 过 0.60 门），基线对判 T6（C=0.577）——
+//   同批 0.026 横跨门限，门限硬币第四次确认（§50 补记），不改判任何东西。
+//
+// **判决（剂量定案，k0 并入后终判）**：预注册池**判负**（维持）；剂量形状全噪音：
+//   k0 落 569/800，四点 69.1/72.1/69.8/71.1 极差 3pp，全进 run 本底（sd≈1.5pp）；
+//   "第二半裂"不成立（判例绑定＋shots t=−0.24＋日常反向）；power 关扎堆按噪声归档。
+//   H1/倒 U/全噪音三选一走"全噪音"（k05−k0 +1pp null）。详账 §52。
+//   后继：k0（eval 节点已对齐：k0 全程仅 1 条 mismatch，it0–it25 summary 全在，
+//   已验）收官→四臂会审→§52＋DECISIONS 剂量条目。
+// **不启用 target_transitions**（缺席该键＝默认关，与 x3-power 同款声明）。
