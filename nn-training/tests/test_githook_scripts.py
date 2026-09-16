@@ -16,6 +16,12 @@
    写 `--timeout=50000`——那是从 **bun** 的 `--timeout=50000`（bun 才是毫秒）误搬的，
    等于把上限抬到 13.9 小时并**覆盖掉** pyproject addopts 的 `--timeout=60` ⇒ 所谓
    「>1 分钟即红旗」的护栏名存实亡，hang 又能无限挂。本测试把量级钉死。
+
+4. **「bash 在 PATH 上」≠「bash 起得来」**（2026-09-16 发现）。受限宿主（Windows
+   AppLocker / ASR、沙箱化终端）里 `shutil.which("bash")` 照常返回路径，但任何
+   `subprocess.run(["bash", ...])` 都以 `Bash/CallMsi/E_ACCESSDENIED` 失败 ⇒ 只按
+   which() 决定 skip 会让门禁在任何这类终端里**恒红**，把真回归淹掉。skip 条件改为
+   **真起一次 `bash -c "exit 0"` 探测**。
 """
 
 from __future__ import annotations
@@ -38,7 +44,28 @@ _TIMEOUT_VALUE = re.compile(r"(?:--timeout|NN_PYTEST_TIMEOUT_S[:=])\D*(\d+)")
 #: 合理上界（秒）：本仓最慢单测实测 22s；>10 分钟就不是「护栏」而是摆设。
 _MAX_TIMEOUT_S = 600
 
-no_bash = pytest.mark.skipif(shutil.which("bash") is None, reason="bash 不在 PATH（无法验证 shell 脚本）")
+
+def _bash_usable() -> bool:
+    """bash 在 PATH 上**且真能启动**（见模块 docstring 第 4 条）。
+
+    探测用 `bash -c "exit 0"`：不碰文件系统、不依赖 cwd、毫秒级返回。
+    启动被宿主的执行策略拒绝时抛 `OSError`（E_ACCESSDENIED 等），归为「不可用」。
+    """
+    if shutil.which("bash") is None:
+        return False
+    try:
+        probe = subprocess.run(["bash", "-c", "exit 0"], capture_output=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return probe.returncode == 0
+
+
+#: 模块级求值一次：探测本身要起子进程，不必每条用例重跑。
+_BASH_USABLE = _bash_usable()
+
+no_bash = pytest.mark.skipif(
+    not _BASH_USABLE, reason="bash 不可用/不可启动（宿主拦截或不在 PATH，无法验证 shell 脚本）"
+)
 
 
 @no_bash

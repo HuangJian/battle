@@ -33,7 +33,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 # cell 端 /code 引导（fetch+unpack+sys.path）已完成；本模块只管运行时。
 
@@ -91,20 +91,58 @@ def _tpu_holders() -> list[tuple[int, str, str]]:
     return out
 
 
-def resolve_device(cfg: dict[str, Any], log) -> str:
-    """设备解析：显式指定优先；auto = CUDA（多卡按 use_multi_gpu）→ TPU → CPU。"""
-    log(f"设备探测中（device={cfg['device']}）…")
-    try:
-        import torch
-    except ImportError:
-        log("torch 不可用 → CPU（job 执行会失败——Kaggle/Colab 请选 GPU/TPU 运行时）")
-        return "cpu"
+def _probe_cuda(log) -> dict | None:
+    """子进程探测 torch/CUDA 可见性（kernel 本体永不 import torch）。
 
-    if torch.cuda.is_available():
-        n_gpu = torch.cuda.device_count()
-        log(f"torch {torch.__version__}, CUDA 可见 {n_gpu} 张 GPU")
+    2026-09-16 Kaggle 实证：引导（tailscale 登录）后 **kernel 进程内** `import torch`
+    会无声杀死整会话——`import torch` 前一行的日志还在、无任何 traceback 即断连；
+    而拆到子进程后同环境 import torch 正常（S2/S4/D1-D3 隔离实验全部存活）。探测放
+    子进程后，最坏情况只是探测子进程退一层 → 按无 CUDA 落 TPU/CPU，kernel 照常继续；
+    与「内核绝不 import torch_xla」是同一纪律的延伸。
+
+    返回 {"v": torch 版本, "n": 可见卡数, "names": [卡名...]}；torch 未装 / 子进程
+    崩溃 / 输出不可解析 → None。
+    """
+    import json as _json
+    import subprocess as _sp
+
+    _probe = (
+        "import json, torch\n"
+        "n = torch.cuda.device_count() if torch.cuda.is_available() else 0\n"
+        "print(json.dumps({'v': torch.__version__, 'n': n,"
+        " 'names': [torch.cuda.get_device_name(i) for i in range(n)]}), flush=True)\n"
+    )
+    try:
+        r = _sp.run(
+            [sys.executable, "-u", "-c", _probe], capture_output=True, text=True, timeout=60
+        )
+    except BaseException as e:  # 子进程起不来/超时——探测失败按无 CUDA
+        log(f"torch 探测子进程异常（{type(e).__name__}: {e}）—— 按无 CUDA 处理")
+        return None
+    if r.returncode != 0:
+        log(f"torch 探测子进程退出 rc={r.returncode} —— 按无 CUDA 处理")
+        return None
+    try:
+        return cast(dict[str, Any], _json.loads((r.stdout or "").strip().splitlines()[-1]))
+    except (ValueError, IndexError):
+        log(f"torch 探测子进程输出不可解析：{(r.stdout or '').strip()[:200]!r} —— 按无 CUDA 处理")
+        return None
+
+
+def resolve_device(cfg: dict[str, Any], log) -> str:
+    """设备解析：显式指定优先；auto = CUDA（多卡按 use_multi_gpu）→ TPU → CPU。
+
+    torch 探测走子进程（`_probe_cuda`）；TPU 探测仍用 find_spec + /dev 扫描——
+    两条路 kernel 本体都不 import torch/ torch_xla。
+    """
+    log(f"设备探测中（device={cfg['device']}）…")
+    info = _probe_cuda(log)
+    if info is not None and int(info.get("n") or 0) > 0:
+        n_gpu = int(info["n"])
+        log(f"torch {info.get('v')}, CUDA 可见 {n_gpu} 张 GPU")
+        names = list(info.get("names") or [])
         for i in range(n_gpu):
-            log(f"  [{i}] {torch.cuda.get_device_name(i)}")
+            log(f"  [{i}] {names[i] if i < len(names) else '?'}")
         d = str(cfg["device"])
         if d == "cuda-dp":
             if n_gpu > 1:

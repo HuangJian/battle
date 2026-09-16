@@ -25,10 +25,8 @@ import io
 import os
 import sys
 import threading
-import types
 import urllib.error
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Literal
 
 import pytest
@@ -92,15 +90,10 @@ class _FakeProc:
         self.killed = True
 
 
-def _fake_torch(cuda_available: bool, n_gpu: int = 1, version: str = "2.5.0") -> types.ModuleType:
-    m = types.ModuleType("torch")
-    m.__version__ = version  # type: ignore[attr-defined]
-    m.cuda = SimpleNamespace(  # type: ignore[attr-defined]
-        is_available=lambda: cuda_available,
-        device_count=lambda: n_gpu,
-        get_device_name=lambda i: f"FakeGPU{i}",
-    )
-    return m
+def _fake_probe(n: int, names: list[str] | None = None) -> dict:
+    """resolve_device 消费的 CUDA 探测结果（torch 探测已下沉子进程 _probe_cuda，
+    测试直接注入该接缝，不碰真子进程/真 GPU）。"""
+    return {"v": "2.5.0", "n": n, "names": names or []}
 
 
 def _base_cfg(tmp_path: Path, **over: Any) -> dict[str, Any]:
@@ -136,14 +129,14 @@ def _fake_urlopen_401(req: Any, timeout: float = 0) -> _FakeResp:
 def test_resolve_device_torch_missing_returns_cpu(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setitem(sys.modules, "torch", None)  # import torch → ImportError
+    monkeypatch.setattr(nbr, "_probe_cuda", lambda log: None)  # torch 未装/探测失败
     assert nbr.resolve_device(_base_cfg(tmp_path), lambda m: None) == "cpu"
 
 
 def test_resolve_device_no_cuda_no_tpu_returns_cpu(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setitem(sys.modules, "torch", _fake_torch(cuda_available=False))
+    monkeypatch.setattr(nbr, "_probe_cuda", lambda log: _fake_probe(n=0))
     # torch_xla 未安装（本机即为真——find_spec 不注入）
     assert nbr.resolve_device(_base_cfg(tmp_path), lambda m: None) == "cpu"
 
@@ -151,7 +144,9 @@ def test_resolve_device_no_cuda_no_tpu_returns_cpu(
 def test_resolve_device_cuda_single_and_multi(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setitem(sys.modules, "torch", _fake_torch(True, n_gpu=2))
+    monkeypatch.setattr(
+        nbr, "_probe_cuda", lambda log: _fake_probe(n=2, names=["FakeGPU0", "FakeGPU1"])
+    )
     assert nbr.resolve_device(_base_cfg(tmp_path), lambda m: None) == "cuda"  # 只用第 0 张
     cfg_multi = _base_cfg(tmp_path, use_multi_gpu=True)
     assert nbr.resolve_device(cfg_multi, lambda m: None) == "cuda-dp"  # >1 卡 + 开关
@@ -160,7 +155,9 @@ def test_resolve_device_cuda_single_and_multi(
 def test_resolve_device_cuda_explicit_override_wins(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setitem(sys.modules, "torch", _fake_torch(True, n_gpu=2))
+    monkeypatch.setattr(
+        nbr, "_probe_cuda", lambda log: _fake_probe(n=2, names=["FakeGPU0", "FakeGPU1"])
+    )
     cfg = _base_cfg(tmp_path, device="cuda", use_multi_gpu=True)
     # 显式 "cuda" ≠ "cuda-dp"：显式指定优先，不悄悄包 DP
     assert nbr.resolve_device(cfg, lambda m: None) == "cuda"
@@ -169,7 +166,7 @@ def test_resolve_device_cuda_explicit_override_wins(
 def test_resolve_device_tpu_sets_pjrt_and_reports_holders(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setitem(sys.modules, "torch", _fake_torch(cuda_available=False))
+    monkeypatch.setattr(nbr, "_probe_cuda", lambda log: _fake_probe(n=0))
     monkeypatch.setattr(
         nbr, "_tpu_holders", lambda: [(123, "/dev/vfio/0", "python -m remote.worker")]
     )
@@ -196,7 +193,7 @@ def test_resolve_device_tpu_sets_pjrt_and_reports_holders(
 def test_resolve_device_tpu_present_but_cpu_requested(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setitem(sys.modules, "torch", _fake_torch(cuda_available=False))
+    monkeypatch.setattr(nbr, "_probe_cuda", lambda log: _fake_probe(n=0))
     real_find_spec = importlib.util.find_spec
     monkeypatch.setattr(
         importlib.util,
