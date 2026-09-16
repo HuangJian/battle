@@ -1357,21 +1357,30 @@ def _release_cloud_machine(
 ) -> None:
     """尽力真释放云机（§386，用户确认：worker 退出≠停机省钱）。
 
-    - Colab：`google.colab.runtime.unassign()` 可编程释放实例（真省配额）。
+    worker 是 supervise_worker 拉起的**子进程**，不在 IPython kernel 里——
+    `google.colab.runtime.unassign()` 需要 `get_ipython().kernel`，子进程里是 None。
+    所以写哨兵文件，由 notebook cell 的 keepalive 循环（跑在 kernel 里）检测并执行 unassign。
+
+    - Colab：写 /tmp/battle-halt-request 哨兵 → keepalive 检测 → kernel 里调 unassign()。
     - 其它（Kaggle 等）：无释放 API——诚实提示必须人工在宿主页面断开/关闭会话。
     任何失败都不抛（停机链路绝不能反过来崩 worker）。
     """
+    sentinel = Path("/tmp/battle-halt-request")
     try:
-        # importlib 动态导入：避免静态 mypy import-not-found（google.colab 无 stub）。
+        sentinel.write_text(str(time.time()))
+        log("已写停机哨兵 /tmp/battle-halt-request（notebook keepalive 将检测并释放实例）")
+    except OSError as e:
+        log(f"写停机哨兵失败：{e}——请手工断开宿主会话")
+    # 兼容：如果 worker 恰好跑在 kernel 里（单测 / 非 supervise 场景），直接试一次
+    try:
         runtime_mod: Any = importlib.import_module("google.colab.runtime")
-        log("检测到 Colab 运行时 → 调用 runtime.unassign() 释放实例（真省配额）")
-        try:
+        ipython_mod = importlib.import_module("IPython")
+        if ipython_mod.get_ipython() is not None:
+            log("检测到 Colab kernel 环境 → 直接调用 runtime.unassign()")
             runtime_mod.unassign()
-        except Exception as e:
-            log(f"Colab unassign 失败：{e}——请手工断开宿主会话")
-        return
+            return
     except Exception:
-        log("非 Colab 运行时：无编程释放途径——请在宿主页面手工断开/关闭会话以真省配额")
+        pass
 
 
 def worker_loop(

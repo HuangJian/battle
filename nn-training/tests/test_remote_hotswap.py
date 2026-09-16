@@ -226,7 +226,7 @@ def test_worker_halt_attempts_stop_then_keeps_working(monkeypatch: pytest.Monkey
     assert n == 1
     joined = "\n".join(logs)
     assert "停机达令已送达" in joined
-    assert "手工断开" in joined  # 非 Colab：停机尝试失败只提示、不退出、不假装省了配额
+    assert "哨兵" in joined  # 非 Colab：写哨兵由 kernel 侧 keepalive 处理，不退出
 
 
 def test_worker_halt_attempt_once_then_reset_on_clear(
@@ -283,11 +283,11 @@ def test_worker_halt_branch_still_logs_alive(monkeypatch: pytest.MonkeyPatch) ->
 def test_release_cloud_machine_prompts_manual_outside_colab(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """§386：非 Colab 运行时（CI/Kaggle）→ 提示人工断开，不抛、不假装省了配额。"""
+    """§386：非 Colab 运行时（CI/Kaggle）→ 写哨兵 + 提示人工断开，不抛。"""
     logs: list[str] = []
     W._release_cloud_machine(log=logs.append)
     joined = "\n".join(logs)
-    assert "无编程释放途径" in joined and "手工断开" in joined
+    assert "哨兵" in joined and ("手工断开" in joined or "keepalive" in joined)
 
 
 def test_poll_job_surfaces_halt(monkeypatch: pytest.MonkeyPatch) -> None:
