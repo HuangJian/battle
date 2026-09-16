@@ -42,6 +42,27 @@ def _log_default(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] [battle-rl] {msg}", flush=True)
 
 
+def _hub_open(req: Any, timeout: float = 15) -> Any:
+    """显式 ProxyHandler —— Colab userspace 模式下 urlopen() 不读 HTTP_PROXY（2026-09-16 实测）。
+    无代理时回退 urlopen（测试 mock 路径）。"""
+    import urllib.request
+
+    proxies: dict[str, str] = {}
+    for k in ("http_proxy", "HTTP_PROXY"):
+        v = os.environ.get(k)
+        if v:
+            proxies["http"] = v
+            break
+    for k in ("https_proxy", "HTTPS_PROXY"):
+        v = os.environ.get(k)
+        if v:
+            proxies["https"] = v
+            break
+    if proxies:
+        return urllib.request.build_opener(urllib.request.ProxyHandler(proxies)).open(req, timeout=timeout)
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
 # ════════════════════════ 设备探测：CUDA → TPU → CPU ════════════════════════
 
 
@@ -137,7 +158,7 @@ def run_pull_worker(cfg: dict[str, Any], log) -> int:
     """连接 hub 轮询领 job（PPO 与 BC 同 worker）。返回退出码：
     0 = 干净退出（空闲满/会话到顶）；-2 = 配置致命（不重启）；其它非 0 = 可重启的失败。"""
     from urllib.error import HTTPError
-    from urllib.request import Request, urlopen
+    from urllib.request import Request
 
     hub_url = str(cfg["hub_url"])
     hub_token = str(cfg["hub_token"])
@@ -148,7 +169,7 @@ def run_pull_worker(cfg: dict[str, Any], log) -> int:
     log(f"连接 hub: {hub_url}（/ping 探测…）")
     try:
         req = Request(f"{hub_url.rstrip('/')}/ping", headers={"Authorization": f"Bearer {hub_token}"})
-        with urlopen(req, timeout=15) as resp:
+        with _hub_open(req, timeout=15) as resp:
             resp.read()
         log("hub ping OK")
     except HTTPError as e:
