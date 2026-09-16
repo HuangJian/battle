@@ -1,4 +1,4 @@
-"""remote/notebook_runtime.py — 云端 notebook（battle-rl.ipynb）的运行时逻辑。
+"""remote/notebook_runtime.py — 云端 notebook（battle.cloudflared.ipynb / battle.tailscale.ipynb）的运行时逻辑。
 
 为什么在 code.zip 里（2026-09-13 单 cell 重构）：notebook cell 只留「参数 + 保活 +
 /code 引导」，设备探测 / pull / push / 崩溃退避重启全部住在本模块——随 hub 下发的
