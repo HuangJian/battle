@@ -63,6 +63,18 @@ DEFAULT_RANGES: dict[str, tuple[float, float]] = {
     "puGotFreeze": (0.0, 30.0),
     "puGotShield": (0.0, 30.0),
     "puSpawnStar": (0.0, 30.0),
+    # metrics v6：分敌种击杀/命中（idx31–38；上界同 kills/enemyHits）。
+    # kills 上界 40 = 单关 ENEMIES_PER_STAGE=20 的 2× 余量（ladder-c03 单关 episode）。
+    # caveat：若未来出现「一 episode 连打多关」的课程形态，跨关累计击杀可超 40 触发
+    # 包络警报——届时按真实上界重估本表，而非放宽全局包络判定。
+    "killsBasic": (0.0, 40.0),
+    "killsFast": (0.0, 40.0),
+    "killsPower": (0.0, 40.0),
+    "killsArmor": (0.0, 40.0),
+    "hitsBasic": (0.0, 500.0),
+    "hitsFast": (0.0, 500.0),
+    "hitsPower": (0.0, 500.0),
+    "hitsArmor": (0.0, 500.0),
 }
 
 #: 单加性项在角点上的绝对上界（超过即判为数值爆炸风险）。

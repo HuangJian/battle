@@ -4,6 +4,33 @@
 > New entries are appended at the top (reverse chronological).
 
 ---
+## §53 metrics v6 落地：分敌种命中/击杀列（idx31–38，TS+Python 全链，2026-09-16）
+
+**为什么记这一笔**：T5（分敌杀信用）的工程前提（x3-credit-p6 课程文件头「工程前提」
+节明示）。§52 判 T6 全面阴性后，T5 主路径依赖本条落地；观测/模型/encoder 未动
+（x3-power-followup §52 禁令维持）——本条是**采集通道加宽**，非奖励语义变更。
+
+**落地内容**（plan/t5-metrics-v6.plan.md，全部尾部追加、0–30 列号永久不动）：
+- `METRICS_DIM` 31→39，`METRICS_VERSION` 5→6（TS/Python 双侧同源，manifest 与
+  summary 均改由常量导出，消除硬编码副本）；idx31–34=kills{Basic,Fast,Power,Armor}
+  （只记 `tank_destroyed by=player` 打敌车），idx35–38=hits{同序}（`enemy_hit.targetKind`，
+  含致死命中）；列序 = `ENEMY_KIND_ORDER = [basic, fast, power, armor]`。
+- 验证三层：跨语言 SSOT 断言（两侧列名/idx 互锁）＋新 `tests/sim/metrics-v6-census.test.ts`
+  （独立重实现对账＋守恒 sum(killsByKind)==玩家击杀敌车＋同 seed 双跑确定性）＋
+  golden 复用零填充（v6 尾列对 v7 公式零贡献，不重铸 oracle）。
+- 新课程 `x3-credit-p6` / `x3-credit-p6-r2`（power 杀信用 2× 主臂 ×2 独立 run，
+  §52 新规下限；单变量 vs x3-start；verdict 规格已冻结在课程文件头，
+  **待用户手工开训**）。首次开训触发采样节点 codeHash 重编译，属预期。
+- ★ 残差桶（评审 P0，方案 A）：bomb 清屏（`SimulationPowerUps.ts:391`）不推
+  `tank_destroyed` ⇒ 四桶之和恒 ≤ 标量 `kills` 列（God AI 长局缺 11.6%）。
+  公式末尾带 `wKillBasic*(kills − ΣkillsByKind)`——全 3.0 剂量下与 x3-start
+  标量公式逐字等价（golden 6 局对账 |Δ|=0），单变量纯度保住；已知残留
+  （桶按 basic 计价，bomb 杀 power 无溢价）记在课程文件与结算模板。
+- 教训（本条勘误位）：kills 包络上界 40 是单关 2× 余量——多关合一 episode 的
+  课程形态须重估（caveat 注释已落在 `reward_validation.py` DEFAULT_RANGES）。
+
+---
+
 
 ## §52 T6 剂量定案：全噪音；run 噪声地板≈2pp 实测；T5 开工条件（2026-09-16）
 

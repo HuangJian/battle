@@ -593,6 +593,10 @@ def test_v7_ts_oracle_fidelity() -> None:
     spec = load_course("s4b").reward_spec()
     fn = build_reward_fn(spec)
     m = np.asarray(oracle["metrics"], dtype=np.float64)
+    # oracle 按生成时的 METRICS_DIM 落盘（历史 v5=31）；v6 尾部追加列对 v7 公式零贡献，
+    # 右侧补零即可复用，不重铸 oracle。
+    if m.shape[1] < METRICS_DIM:
+        m = np.pad(m, ((0, 0), (0, METRICS_DIM - m.shape[1])))
     got = fn.phi(m, 1)
     exp = np.asarray(oracle["phi"], dtype=np.float64)
     assert np.max(np.abs(got - exp)) <= 1e-9, (
@@ -714,11 +718,23 @@ def test_item_metrics_layout_locked() -> None:
         "puGotShield",
         "puSpawnStar",
         "clearTick",  # idx30（v5：敌人首次全灭的 tick，哨兵 -1）
+        "killsBasic",  # idx31（v6：分敌种击杀/命中，列序 ENEMY_KIND_ORDER）
+        "killsFast",
+        "killsPower",
+        "killsArmor",
+        "hitsBasic",
+        "hitsFast",
+        "hitsPower",
+        "hitsArmor",  # idx38
     ]
     assert METRIC_INDEX["puGotBomb"] == 25
     assert METRIC_INDEX["puSpawnShield"] == 24
     assert METRIC_INDEX["puSpawnStar"] == 29
     assert METRIC_INDEX["clearTick"] == 30
+    assert METRIC_INDEX["killsBasic"] == 31
+    assert METRIC_INDEX["killsPower"] == 33
+    assert METRIC_INDEX["hitsPower"] == 37
+    assert METRIC_INDEX["hitsArmor"] == 38
 
 
 def test_item_metrics_formula_and_envelope() -> None:
@@ -741,6 +757,130 @@ def test_item_metrics_formula_and_envelope() -> None:
     )
     np.testing.assert_allclose(r[:-1], dense[:-1])
     assert r[-1] == pytest.approx(dense[-1] - 2.0)
+
+
+def test_credit_p6_formula_and_course() -> None:
+    """T5 分敌种杀信用：power 2× 剂量可表达；课程 load_course + validate_reward 全绿。
+
+    机械 diff vs x3-start：非白名单差异仅奖励公式/params + 身份字段（name/out/traj/backup）。
+    """
+    from rl.config import load_course
+    from rl.reward_library import METRICS_VERSION
+    from rl.reward_validation import validate_reward as _vr
+
+    c = load_course("x3-credit-p6")
+    c2 = load_course("x3-credit-p6-r2")
+    base = load_course("x3-start")
+
+    # 奖励单变量
+    assert c.reward.params["wKillPower"] == 6.0
+    assert c.reward.params["wKillBasic"] == 3.0
+    assert c.reward.params["wHit"] == 0.3
+    assert c.reward.params["wWin"] == 2.0
+    assert "killsPower" in c.reward.formula
+    assert "wKill*" not in c.reward.formula  # 标量 wKill 已被向量替代
+    assert c.reward.scheme == "toy"
+    assert c.reward.terminal == base.reward.terminal
+
+    # 环境/优化器与 x3-start 同构（bc 是 x3-start.it333 归档，不是 x3-start 的暖启路径）
+    assert c.level == base.level
+    assert c.mode == base.mode
+    assert c.seed_rotate == base.seed_rotate
+    assert c.workers == base.workers
+    assert "x3-start.it333" in c.bc
+    assert c.lr == base.lr
+    assert c.epochs == base.epochs
+    assert c.mb == base.mb
+    assert c.gamma == base.gamma
+    assert c.lam == base.lam
+    assert c.iters == 30
+    assert c.target_transitions == 0  # 缺席声明＝默认关
+
+    # 两 run 路径互异、奖励同构
+    assert c2.name != c.name
+    assert c2.out != c.out and c2.traj != c.traj
+    assert c2.reward.formula == c.reward.formula
+    assert c2.reward.params == c.reward.params
+
+    rep = _vr(c.reward_spec())
+    assert rep.ok, rep.errors
+    assert rep.warnings == (), rep.warnings
+    assert METRICS_VERSION == 6
+
+    # 公式按列加权：杀 1 basic 再杀 1 power 的两步势差 = +3 / +6（wHit/wWin 本例为 0）
+    spec = RewardSpec(
+        formula="wKillBasic*killsBasic + wKillPower*killsPower",
+        params={"wKillBasic": 3.0, "wKillPower": 6.0},
+    )
+    fn = build_reward_fn(spec)
+    m = np.zeros((3, METRICS_DIM), dtype=np.float64)
+    m[1, METRIC_INDEX["killsBasic"]] = 1.0
+    m[2, METRIC_INDEX["killsBasic"]] = 1.0
+    m[2, METRIC_INDEX["killsPower"]] = 1.0
+    r = fn(m, "timeout", 0.0, 1)
+    np.testing.assert_allclose(r, [3.0, 6.0])
+
+    # ★ 方案 A 核心保证：末尾残差桶让「全 3.0」与 x3-start 的标量公式**逐字等价**。
+    # 背景（评审 P0）：`recordEnemyKill()` 的 4 个调用点里，bomb 清屏
+    # （`src/game/SimulationPowerUps.ts:391`）不推 `tank_destroyed` ⇒ 事件流分列之和
+    # 恒 ≤ 标量 kills 列（实测 God AI 长局缺 11.6%、NN/ladder-c03 缺 ~1.4%）。
+    # 缺残差桶 = 额外删掉炸弹击杀的信用 = 第二个训练变量，单变量纯度被破坏。
+    assert "kills - killsBasic - killsFast - killsPower - killsArmor" in c.reward.formula, (
+        "残差桶不得删除：删了就等于静默丢弃 bomb 清屏击杀的奖励信用（评审 P0）"
+    )
+
+    p6_spec = c.reward_spec()  # 含 startLives 注入；等价态与剂量臂都基于它
+    scalar_fn = build_reward_fn(
+        RewardSpec(
+            formula="wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0)",
+            params={"wKill": 3.0, "wHit": 0.3, "wWin": 2.0},
+        )
+    )
+    whole_fn = build_reward_fn(
+        RewardSpec(
+            formula=p6_spec.formula,
+            params={**p6_spec.params, "wKillPower": 3.0},  # 全 3.0 = x3-start 等价态
+            param_schedule=p6_spec.param_schedule,
+            terminal=p6_spec.terminal,
+            scheme=p6_spec.scheme,
+            reward_scale=p6_spec.reward_scale,
+            allow_extended_funcs=p6_spec.allow_extended_funcs,
+            terminal_spread=p6_spec.terminal_spread,
+        )
+    )
+
+    # (标量 kills 列, 分列 basic/fast/power/armor)
+    cases = [
+        (3.0, (1.0, 1.0, 1.0, 0.0)),  # 常规守恒局
+        (3.0, (1.0, 0.0, 0.0, 0.0)),  # bomb 局：缺 2 个击杀（实测最多的形态）
+        (3.0, (0.0, 1.0, 0.0, 1.0)),  # bomb 局：缺 1 个
+        (3.0, (0.0, 0.0, 3.0, 0.0)),  # 全 power
+        (0.0, (0.0, 0.0, 0.0, 0.0)),  # 零击杀
+        (1.0, (1.0, 1.0, 0.0, 0.0)),  # 分列 > 标量（理论不可达；残差为负应自动扣回）
+    ]
+    rows = np.zeros((len(cases), METRICS_DIM), dtype=np.float64)
+    for i, (kc, (kb, kf, kp, ka)) in enumerate(cases):
+        rows[i, METRIC_INDEX["kills"]] = kc
+        rows[i, METRIC_INDEX["enemyHits"]] = 7.0
+        rows[i, METRIC_INDEX["clearTick"]] = 100.0
+        rows[i, METRIC_INDEX["killsBasic"]] = kb
+        rows[i, METRIC_INDEX["killsFast"]] = kf
+        rows[i, METRIC_INDEX["killsPower"]] = kp
+        rows[i, METRIC_INDEX["killsArmor"]] = ka
+
+    phi_equiv = np.asarray(scalar_fn.phi(rows, 1), dtype=np.float64)
+    phi_whole = np.asarray(whole_fn.phi(rows, 1), dtype=np.float64)
+    np.testing.assert_allclose(
+        phi_whole, phi_equiv, atol=1e-12,
+        err_msg="全 3.0 时必须与 x3-start 标量公式逐字等价（含 bomb 局与分列>标量的兜底）",
+    )
+
+    # 剂量臂：相对等价态的净增量必须精确 = (wKillPower - 3.0) × killsPower
+    dose_fn = build_reward_fn(p6_spec)
+    dosed = np.asarray(dose_fn.phi(rows, 1), dtype=np.float64)
+    prem = c.reward.params["wKillPower"] - 3.0
+    premium = np.asarray([prem * kp for _, (_, _, kp, _) in cases], dtype=np.float64)
+    np.testing.assert_allclose(dosed - phi_equiv, premium, atol=1e-12)
 
 
 def test_all_metrics_have_envelope_range() -> None:
@@ -807,6 +947,7 @@ if __name__ == "__main__":
         test_spread_course_plumbing,
         test_item_metrics_layout_locked,
         test_item_metrics_formula_and_envelope,
+        test_credit_p6_formula_and_course,
         test_all_metrics_have_envelope_range,
         test_envelope_handles_outcome_virtual_terms,
         test_envelope_virtual_term_evaluates_zero_outside_outcome,

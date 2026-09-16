@@ -1,14 +1,14 @@
 """reward_library —— 奖励公式引擎（M1a，plan/rl-training-config.md §4.3）。
 
-奖励的**唯一定义源在 Python**：TS 每决策步只落 30 维指标向量（`metrics.npy`，
-`[N+1,30]` f8），奖励由课程配置里的 `formula` 定义并在此求值。**没有命名
+奖励的**唯一定义源在 Python**：TS 每决策步只落 39 维指标向量（`metrics.npy`，
+`[N+1,39]` f8），奖励由课程配置里的 `formula` 定义并在此求值。**没有命名
 scheme** —— 旧课程（kill/kill2/balanced/dodge-mix）与 v7 都是配置公式，它们是
 公式引擎的验收用例，不是引擎之外的第二机制。
 
 三段式（评审 R2-1）：
     parse   —— `ast.parse` + 白名单递归校验（一次性，配置加载期）
     compile —— 缓存 AST，每 iter 解析一次（含 param_schedule 折算）
-    eval    —— 向量化：对 `[N+1,30]` 指标矩阵一次算完 Φ，禁逐 step Python 循环
+    eval    —— 向量化：对 `[N+1,39]` 指标矩阵一次算完 Φ，禁逐 step Python 循环
 
 Φ → reward 的 wrapper（§4.3.3，golden 锁定的对象）：
 
@@ -43,7 +43,7 @@ import numpy as np
 
 # ---------------------------------------------------------------- 指标向量
 
-#: 30 维指标名（TS 侧 `metrics.npy` 的列序，与 plan §4.1 逐项对齐）。
+#: 39 维指标名（TS 侧 `metrics.npy` 的列序，与 plan §4.1 逐项对齐）。
 #: 变更此元组 = shard 格式变更，必须同步 `METRICS_VERSION` 与 TS 落盘端。
 #:
 # > **idx10 勘误（v8 表 vs 正文）**：plan §4.1 的表只列出 20 个名字（左列 0–9、
@@ -91,13 +91,24 @@ METRICS: tuple[str, ...] = (
     #                    用途：全灭后若场上还有道具会进 BONUS TIME 窗口（≈600 tick）才
     #                    stage_clear；reward 需要「清场 tick」才能只豁免该窗口的 tick 惩罚。
     #                    与 firstKillTick(16) 同构（标量、每行同值、未成立时 -1）。
+    # ---- metrics v6：分敌种击杀/命中（plan/t5-metrics-v6，idx 永久追加在尾部）----
+    # 列序 = ENEMY_KIND_ORDER = [basic, fast, power, armor]（与 TS buildMetricsRow 同序）。
+    # 击杀列只记玩家击杀敌车（tank_destroyed by=player）；命中列含致死命中。
+    "killsBasic",  # 31
+    "killsFast",  # 32
+    "killsPower",  # 33
+    "killsArmor",  # 34
+    "hitsBasic",  # 35
+    "hitsFast",  # 36
+    "hitsPower",  # 37
+    "hitsArmor",  # 38
 )
 
 METRIC_INDEX: dict[str, int] = {name: i for i, name in enumerate(METRICS)}
 METRICS_DIM = len(METRICS)
-#: shard manifest 版本：`[N+1,30]` 布局。任何用 `shape[0]` 推 episode 长度的
+#: shard manifest 版本：`[N+1,39] f8（idx0–38）` 布局。任何用 `shape[0]` 推 episode 长度的
 #: 下游在版本不匹配时必须响亮报错，而非静默错读（评审 LC §1.1）。
-METRICS_VERSION = 5
+METRICS_VERSION = 6
 
 #: 终局 outcome 名（与 TS `manifest.outcome` 同源）；未列出的 terminal 键 = 0。
 OUTCOMES: tuple[str, ...] = ("stage_clear", "lives_exhausted", "timeout", "base_destroyed")
@@ -823,7 +834,7 @@ def assert_no_time_axis_reducers() -> None:
 
 def _self_check() -> None:
     assert_no_time_axis_reducers()
-    assert len(METRICS) == METRICS_DIM == 31, METRICS_DIM  # v5：追加 idx30 clearTick
+    assert len(METRICS) == METRICS_DIM == 39, METRICS_DIM  # v6：追加 idx31–38 分敌种
     assert len(set(METRICS)) == METRICS_DIM
 
 

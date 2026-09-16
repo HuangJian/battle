@@ -106,16 +106,38 @@ const RL_SHARD_FILES = [
   'mask.npy',
 ] as const
 
-// ---- 31 维指标列序（MUST mirror `nn-training/rl/reward_library.py::METRICS`）----
+// ---- 39 维指标列序（MUST mirror `nn-training/rl/reward_library.py::METRICS`）----
 // 改任一侧必须同步另一侧 + manifest metrics_version 不变则任何 shape[0] 下游
 // 会静默错读。idx10=starsCollected 补 plan §4.1 表的空槽（连续编号 0..20）。
 // idx21–28=道具流分类型计数（§9，metric v3：spawn/got × bomb/tank/freeze/shield，
 // 追加在尾部，老列号不动）。idx29=puSpawnStar（v4：star 供给列，拾取列 idx10 已有）。
 // idx30=clearTick（v5：敌人首次全灭的 tick，哨兵 -1 = 本局未清场）。
+// idx31–38=分敌种击杀/命中（metrics v6，plan/t5-metrics-v6：kills/hits ×
+// basic/fast/power/armor，追加在尾部，0–30 列号永久不动）。列序 = ENEMY_KIND_ORDER。
 // **本常量必须与 `buildMetricsRow` 的行宽一致** —— 2026-09-12 的 P0：只改了行、没改
 // 这里，`metrics.set(row, i * METRICS_DIM)` 每局越界抛 RangeError，整条采集腿零产出。
 // 导出仅供测试断言行宽（tests/export-rl-rollout-metrics.test.ts）。
-export const METRICS_DIM = 31
+export const METRICS_DIM = 39
+/** metrics v6：分敌种命中/击杀列（idx31–38）。与 Python METRICS_VERSION 同步。 */
+export const METRICS_VERSION = 6
+/** 分敌种计数的固定顺序（与 export-eval-game.ENEMY_KIND_ORDER 同契约）。 */
+export const ENEMY_KIND_ORDER = ['basic', 'fast', 'power', 'armor'] as const
+
+/** kind → ENEMY_KIND_ORDER 下标；非敌车 kind 返回 -1（零分配热路径，AGENTS §14）。 */
+export function enemyKindIndex(kind: string): number {
+  switch (kind) {
+    case 'basic':
+      return 0
+    case 'fast':
+      return 1
+    case 'power':
+      return 2
+    case 'armor':
+      return 3
+    default:
+      return -1
+  }
+}
 
 // F3：基地失守局终局 score ×= BASE_LOSS_MULT。旧值 0.25 让「投降」太便宜——
 // it1–it68 审计发现 agent 卡在「会动不会守家」局部最优（eval base_destroyed 占
@@ -235,6 +257,10 @@ export interface Telemetry {
   clearTick: number | undefined
   /** 命中敌方累计（enemy_hit 事件数，含致死命中）。 */
   enemyHits: number
+  /** 分敌种玩家击杀（tank_destroyed by=player，kind ∈ ENEMY_KIND_ORDER）。metrics v6。 */
+  killsByKind: [number, number, number, number]
+  /** 分敌种命中（enemy_hit.targetKind）。metrics v6；含致死命中。 */
+  hitsByKind: [number, number, number, number]
   /** 连续「原地 + 未命中」tick 数。 */
   stuckTicks: number
 }
@@ -300,6 +326,14 @@ export function buildMetricsRow(t: number, world: World, tel: Telemetry): number
     tel.puGotShield, // 28 puGotShield
     tel.puSpawnStar, // 29 puSpawnStar
     tel.clearTick === undefined ? -1 : tel.clearTick, // 30 clearTick（v5；-1 = 未清场）
+    tel.killsByKind[0], // 31 killsBasic
+    tel.killsByKind[1], // 32 killsFast
+    tel.killsByKind[2], // 33 killsPower
+    tel.killsByKind[3], // 34 killsArmor
+    tel.hitsByKind[0], // 35 hitsBasic
+    tel.hitsByKind[1], // 36 hitsFast
+    tel.hitsByKind[2], // 37 hitsPower
+    tel.hitsByKind[3], // 38 hitsArmor
   ]
 }
 
@@ -384,7 +418,7 @@ export interface ShardData {
   lpMove: number[]
   lpFire: number[]
   value: number[]
-  /** 每决策步的 30 维指标快照（[N+1][30]：决策行 + 终局行）——reward 的唯一定义源。 */
+  /** 每决策步的 39 维指标快照（[N+1][39]：决策行 + 终局行）——reward 的唯一定义源。 */
   metrics: number[][]
   done: number[]
   mask: number[]
@@ -509,6 +543,8 @@ function runOne(
     firstKillTick: undefined,
     clearTick: undefined,
     enemyHits: 0,
+    killsByKind: [0, 0, 0, 0],
+    hitsByKind: [0, 0, 0, 0],
     stuckTicks: 0,
   }
   const seenPuIds = new Set<number>()
@@ -619,6 +655,18 @@ function runOne(
       if (e.type === 'tank_destroyed') {
         if ((e as any).by === 'player' && tel.firstKillTick === undefined) tel.firstKillTick = t - 1
         if ((e as any).tank?.isPlayer) tel.playerDeaths++
+        else if ((e as any).by === 'player' && (e as any).tank?.allegiance === 'enemy') {
+          // 分敌种击杀（metrics v6）：只记玩家击杀敌车。AOE 走 SimulationPlayer /
+          // SimulationEnemies 两条路径，都推 tank_destroyed 且带 kind。
+          // ⚠ 已知例外（评审 P0，2026-09-16）：bomb 道具「清屏」
+          // （`src/game/SimulationPowerUps.ts:391`）调 `recordEnemyKill`（`world.killCount++`）
+          // 但**不推本事件** ⇒ 这里的四桶之和**恒 ≤** 指标 `kills` 列
+          //（实测 God AI 长局缺 11.6%、NN/ladder-c03 缺 ~1.4%；不守恒局 100% 拾取过 bomb）。
+          // 奖励侧由 `x3-credit-p6` 公式末尾的残差桶按 basic 价补回；**不要**在 metrics
+          // 侧试图"补齐"成相等——那会让口径与 `recordEnemyKill` 的真实计数分叉。
+          const ki = enemyKindIndex((e as any).tank.kind)
+          if (ki >= 0) tel.killsByKind[ki]++
+        }
       } else if (e.type === 'player_hit') {
         tel.playerHits++
       } else if (e.type === 'player_damage') {
@@ -637,6 +685,8 @@ function runOne(
       } else if (e.type === 'enemy_hit') {
         tel.enemyHits++
         hitThisTick = true
+        const ki = enemyKindIndex((e as any).targetKind)
+        if (ki >= 0) tel.hitsByKind[ki]++
       }
     }
     // power-up census（seen-ids + same-tick pickup 对账，镜像 runner）
@@ -945,7 +995,7 @@ function main(argv: string[] = process.argv.slice(2)): void {
         schemaMajor: OBS_SCHEMA_MAJOR,
         collector: 'RL',
         policy: 'nn-student-rl',
-        metrics_version: 5, // [N+1,31] f8 —— v5 追加 idx30 clearTick；shape[0] 下游据此分版本，防静默错读
+        metrics_version: METRICS_VERSION, // [N+1,39] f8（idx0–38）—— v6 追加 idx31–38 分敌种；shape[0] 下游据此分版本
         difficulty,
         stage: si,
         seed,
@@ -1018,7 +1068,7 @@ function main(argv: string[] = process.argv.slice(2)): void {
     dimMeans[k] = +(xs.reduce((a, b) => a + b, 0) / xs.length).toFixed(4)
   const summary = {
     collector: 'RL',
-    metrics_version: 5, // [N+1,31] f8 —— 与 manifest 同版（下游分版本读取）
+    metrics_version: METRICS_VERSION, // [N+1,39] f8（idx0–38）—— 与 manifest 同版（下游分版本读取）
     customStages: stageJson ? '1' : '0', // 自定义关（Python 课程）标记
     difficulty,
     stages,

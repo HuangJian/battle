@@ -46,6 +46,8 @@ function makeTelemetry(over: Partial<Telemetry> = {}): Telemetry {
     firstKillTick: undefined,
     clearTick: undefined,
     enemyHits: 0,
+    killsByKind: [0, 0, 0, 0],
+    hitsByKind: [0, 0, 0, 0],
     stuckTicks: 0,
     ...over,
   }
@@ -65,8 +67,9 @@ describe('export-rl-rollout metrics 行宽', () => {
     const sentinel = buildMetricsRow(7, world, makeTelemetry())
     expect(nz.length).toBe(METRICS_DIM)
     expect(sentinel.length).toBe(METRICS_DIM)
-    expect(nz[METRICS_DIM - 1]).toBe(123)
-    expect(sentinel[METRICS_DIM - 1]).toBe(-1)
+    // clearTick 固定 idx30（v5）；v6 在尾部追加分敌种列，不再假设「最后一列」
+    expect(nz[30]).toBe(123)
+    expect(sentinel[30]).toBe(-1)
   })
 
   it('METRICS_DIM 与 Python METRICS 列数一致（跨语言 SSOT）', () => {
@@ -80,6 +83,19 @@ describe('export-rl-rollout metrics 行宽', () => {
     // 列名唯一且与 TS 侧行宽同长
     expect(new Set(names).size).toBe(names.length)
     expect(names.length).toBe(METRICS_DIM)
-    expect(names[names.length - 1]).toBe('clearTick')
+    expect(names[30]).toBe('clearTick')
+    expect(names[31]).toBe('killsBasic')
+    expect(names[38]).toBe('hitsArmor')
+  })
+
+  it('分敌种击杀/命中写入 idx31–38（metrics v6）', () => {
+    const world = seedWorld(1)
+    const row = buildMetricsRow(
+      0,
+      world,
+      makeTelemetry({ killsByKind: [1, 2, 3, 4], hitsByKind: [5, 6, 7, 8] }),
+    )
+    expect(row.length).toBe(METRICS_DIM)
+    expect(row.slice(31, 39)).toEqual([1, 2, 3, 4, 5, 6, 7, 8])
   })
 })

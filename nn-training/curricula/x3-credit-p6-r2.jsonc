@@ -1,0 +1,66 @@
+// 课程 x3-credit-p6-r2 —— T5 metrics v6 主剂量臂 **第二独立 run**（路径分身）
+// 与 `x3-credit-p6` 奖励/环境/优化器/日程**逐字段相同**；唯一差异 = name/out/traj/
+// backup（§15.5：reward 语义相同也必须独立账本目录，两 run 对账才合法）。
+// 判决与文件头规格见 `x3-credit-p6.jsonc`（勿复制规格，以那份为准）。
+// 启动：
+//   bun dashboard/src/launch/cli.ts --script run_rl.py --course x3-credit-p6-r2 \
+//     --remote-transport pull
+{
+  "version": 5,
+  "name": "x3-credit-p6-r2",
+  "mode": "per-tick",
+  "level": "ladder-c03",
+
+  "seed_rotate": 60,
+  "workers": 8,
+
+  // ※ 公式与 `x3-credit-p6` **逐字相同**（含末尾残差桶——它不是可选项：
+  //   bomb 清屏击杀不进事件流分列，缺了该桶就等于额外删掉炸弹击杀的信用，
+  //   破坏单变量纯度）。完整论证与已知残留见 `x3-credit-p6.jsonc` 同位置注释。
+  "reward": {
+    "formula": "wKillBasic*killsBasic + wKillFast*killsFast + wKillPower*killsPower + wKillArmor*killsArmor + wKillBasic*(kills - killsBasic - killsFast - killsPower - killsArmor) + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0)",
+    "params": {
+      "wKillBasic": 3.0,
+      "wKillFast": 3.0,
+      "wKillPower": 6.0,
+      "wKillArmor": 3.0,
+      "wHit": 0.3,
+      "wWin": 2.0,
+    },
+    "terminal": {
+      "lives_exhausted": -1.0,
+    },
+    "scheme": "toy",
+  },
+
+  "bc": "nn-training/weights/x3-start/x3-start.it333.20260915-052649.json",
+  "kickstart_ref": true,
+  "warmup_iters": 0,
+
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 40, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
+    { "kl_coef": 0.03, "lr": 0.00005 },
+  ],
+
+  "iters": 30,
+  "max_hours": 12,
+  "out": "tmp/x3-credit-p6-r2/weights.json",
+  "traj": "tmp/x3-credit-p6-r2",
+  "backup_dir": "nn-training/weights/x3-credit-p6-r2",
+  "backup_prefix": "x3-credit-p6-r2",
+
+  "ent_break": 0.25,
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5,
+}
+
+// **不启用 target_transitions**（缺席该键＝默认关，与 x3-credit-p6 同款声明）。

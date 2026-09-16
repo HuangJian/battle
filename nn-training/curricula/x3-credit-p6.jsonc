@@ -1,0 +1,167 @@
+// 课程 x3-credit-p6 —— T5 metrics v6：分敌种杀信用腿（power 2× 主臂 run1）
+// 状态：**工程就绪，待用户手工开训**（agent 不得启动训练）。
+//   批准链：plan/t5-metrics-v6.plan.md（任务书）；前置：① 任务书获批；
+//   ② tie-break 加固（§5）已落实到判决表；③ 关键臂复刻预算获批（≥2 run）。
+//
+// 背景（勿重证，直接引用 plan §1 / docs/nn.progress.md §47＋§52）：
+//   败局几乎不对 power 开火（首命中 power 恒 0.0–0.5%、败局 power 命中 ~0.5–0.8/
+//   千tick），而凶手 ~64% 是 power；胜局 power 被打到 ~98%、转化 ~50%。
+//   ⇒ 信用盲区（账本不认"谁"），非执行器无能。观测通道已齐（ch7–ch10），
+//   **禁动观测/模型/encoder**。
+//
+// 单变量（预注册剂量，批了就锁）：分敌种杀信用向量**替代**标量 wKill
+//   `wKill={basic:3.0, fast:3.0, power:6.0, armor:3.0}`；wHit 维持 0.3 标量；
+//   wWin/terminal/scheme 不动。理由：最小可表达改动，正对"首枪/集火 power"失效点；
+//   power 提价 2×，其余不动。
+// 工程前提（本文件能跑的原因）：metrics v6 = rollout 侧分敌种命中/击杀列
+//   （idx31–38，METRICS_DIM 39，METRICS_VERSION 6；TS+Python 全链）。
+//   eval 导出侧 census（export-eval-game）仍是独立重实现参照物。
+//
+// 基准：与 **x3-start 逐字同构**（优化器 lr 1.5e-4 / epochs 4 / mb 512 / gamma 0.998 /
+//   lam 0.95、日程紧缰＋死段声明沿用、ladder-c03、30 轮、seed_rotate 60、workers 8、
+//   同 bc=`x3-start.it333` 归档、kl_cap 0.2）。唯一训练变量＝奖励分敌种向量。
+//
+// 臂设计（新规下限）：主剂量臂 ×**2 独立 run**（本文件 + `x3-credit-p6-r2`，
+//   不同 traj/out/backup；单 run ±2pp 证明不了任何事，run 噪声地板 §52）。
+//   对照＝冻结基线 576/800（同环境/同起点/同分布/同 eval，复用合法）＋两 run 互相对账。
+//
+// ── verdict 规格（冻结，执行时禁改；源 plan/t5-metrics-v6 §3，自 t5-endpoint 继承）──
+// 800 局 `--seed0 400600`（新池外段；400000/400200 已用过），两 run 各一批：
+//   bun tools/sim/eval-course-ckpt.ts --course nn-training/levels/ladder-c03.jsonc \
+//     --weights <归档> --games 800 --seed0 400600 --workers 8 --out tmp/<tag>.jsonl
+// 主端点：power 曝光归一命中/千tick，**Δ≥+0.7（约+20%，~5σ）且配对单侧 p<0.05**
+//   （两 run 都过才算过；只过一个＝复刻失败，不断言）。
+// pd 门：`paired-pd.ts` 锚点 200 对（`--games 200 --seed0 860001` 复刻锚点集，~30 秒）；
+//   ≥10% 为动、<5% 为没动，灰度带不单独判决。
+// 胜率二级：pooled Δ≥+5pp 且 McNemar 单侧 p<0.05 才写"涨点"（`paired-pd --need-delta
+//   0.05 --need-wins 616`）；分关只诊断。
+// 指纹旁证：`phase0-fingerprints.ts` census 配对（killer/首命中/顺序/归一全列）。
+//
+// ── 判决表（冻结；tie-break 加固版，替代 T3 旧 C 门，§52）────────────────────────
+// | 主端点（指纹） | pd | 胜率 | 判决 |
+// | 显著+（≥+0.7/千tick & p<0.05，两 run 一致） | ≥10% | ≥+5pp & p<0.05 | ✅ 信用解封，T5 成功 |
+// | 显著+ | ≥10% | <+5pp | ➡ 执行器天花板：转生存/执行分支 |
+// | 不显著 | ≥10% | — | ➡ 动了但方向不对：调 wKillPower 剂量（加腿） |
+// | 不显著 | <5% | — | ⬅ 没学到：查 KL/优化器 |
+// | 两 run 主端点不一致 | — | — | ⬅ 复刻失败：效应 < run 本底，不断言 |
+// tie-break：直接看 ② 首命中分布（power 占首命中 ≥50%⇒不是绕开；<50%⇒绕开）。
+//   C=(没被杀＋最后才杀)/在场局不再进判决。
+//
+// 熔断（s-dodge / x3-chip 先例，噪声带执行）：shots 崩（开火被吓没）或 kills 不升反降即停。
+//
+// 启动（用户手工开训；agent 禁止）：
+//   bun dashboard/src/launch/cli.ts --script run_rl.py --course x3-credit-p6 \
+//     --remote-transport pull
+//   开工前：hub 可达＋eval 四节点 epoch 对齐（plan/eval-outdated.plan.md 检查单）。
+//   第二 run：`--course x3-credit-p6-r2`（本文件的路径分身，勿共用 traj）。
+//
+// 非目标（plan §6）：加观测通道 / 动模型 / 动 encoder / 调 wHit/wWin/terminal/scheme /
+//   松缰绳 / 用胜率/KL 做主判 / 改 T3 冻结规则。
+//
+// ※ 动态采集：**不启用 target_transitions**（缺席该键＝默认关；加了会引入第二训练变量）。
+{
+  "version": 5,
+  "name": "x3-credit-p6",
+  "mode": "per-tick",
+  "level": "ladder-c03",
+
+  "seed_rotate": 60,
+  "workers": 8,
+
+  // ── 奖励（x3-start 基准 ＋ 分敌种杀信用单变量；metrics v6 依赖）───
+  // kills/hits 分列由 export-rl-rollout metrics v6 落盘（idx31–38）；
+  // 标量 kills/enemyHits 列仍保留（旧课程兼容）。
+  //
+  // ※※ 末尾的残差桶 `wKillBasic*(kills - killsBasic - killsFast - killsPower - killsArmor)`
+  //   **是必须项，不是可选的美化**：
+  //   `recordEnemyKill()`（`src/game/KillPipeline.ts:36`）是 `w.killCount++` 的唯一入口，
+  //   其 4 个调用点中 **`SimulationPowerUps.ts:391`（bomb 道具「清屏」）不推
+  //   `tank_destroyed` 事件** ⇒ 事件流分列之和 **恒 ≤ 标量 kills 列**（实测：God AI
+  //   全关长局缺 11.6% 击杀、NN/ladder-c03 缺 ~1.4%；不守恒局 100% 拾取过 bomb）。
+  //   **少了这一项，本公式就不是「标量 wKill 的分敌种展开」，而是「额外删掉炸弹击杀
+  //   的信用」——那等于引入第二个训练变量，单变量纯度被破坏**（评审 P0）。
+  //   补上后：全 3.0 时与 x3-start 的 `wKill*kills + wHit*enemyHits + wWin*…`
+  //   **逐字等价**（实测 6 个用例含炸弹局，|Δ| = 0；剂量臂净增量精确 = 3.0 × killsPower）。
+  //   附：反例——分列之和 > 标量 kills（理论不可达，引擎也会兜住）：残差为负即自动扣回，
+  //   公式不会因口径漂移而虚增奖励。
+  //
+  // ※ 已知残留（公式层无法消除，结算时必须量化）：残差桶按 **basic 价（3.0）** 计价，
+  //   故 **被 bomb 炸死的 power 敌拿不到 +3 的 power 溢价**（bomb 路径的事件流里没有
+  //   kind 信息）。影响面 = 炸弹局内的 power 击杀 ⇒ 对本腿主端点（power 信用）有轻微
+  //   稀释。结算时以 `kills - (killsBasic+killsFast+killsPower+killsArmor)` 量化缺失量
+  //   并作敏感性分析；彻底消除需给 bomb 分支补 `pushEvent`（改引擎，本腿按方案 A
+  //   处理，不动 `src/game/**`）。
+  "reward": {
+    "formula": "wKillBasic*killsBasic + wKillFast*killsFast + wKillPower*killsPower + wKillArmor*killsArmor + wKillBasic*(kills - killsBasic - killsFast - killsPower - killsArmor) + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0)",
+    "params": {
+      // 预注册剂量（plan §2）：power 2×，其余与 x3-start 的 wKill=3.0 同价。
+      // 注：`wKillBasic` 在本公式里**兼任残差桶（未归因击杀 / bomb 清屏）的单价**，
+      // 故它同时决定「炸弹击杀按什么价入账」——固定 3.0，不随剂量实验变动。
+      "wKillBasic": 3.0,
+      "wKillFast": 3.0,
+      "wKillPower": 6.0,
+      "wKillArmor": 3.0,
+      // 命中稠密信用：与 x3-start 逐字同构，不是本腿变量。
+      "wHit": 0.3,
+      "wWin": 2.0,
+    },
+    "terminal": {
+      "lives_exhausted": -1.0,
+    },
+    "scheme": "toy",
+  },
+
+  // 暖启：x3-start.it333 归档（与 x3-power / x3-chip 同起点）。
+  "bc": "nn-training/weights/x3-start/x3-start.it333.20260915-052649.json",
+  "kickstart_ref": true,
+  // 必须为 0（config 硬校验；改 1 启动失败）。
+  "warmup_iters": 0,
+
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    // ※ 死段声明（与 x3-start 同构）：本腿 iters=30，第二段 until_iter=40
+    // **永不触发** ⇒ 30 轮全程 lr 1.5e-4 + kl_coef 0.2 + kl_cap 0.2。有意保留。
+    { "until_iter": 40, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
+    { "kl_coef": 0.03, "lr": 0.00005 },
+  ],
+
+  // 短腿 30 轮：跑满即 verdict，不过关账不续。
+  "iters": 30,
+  "max_hours": 12,
+  "out": "tmp/x3-credit-p6/weights.json",
+  // reward params 进语义身份（与 x3-start / x3-power / 另一 run 互异），必须新目录。
+  "traj": "tmp/x3-credit-p6",
+  "backup_dir": "nn-training/weights/x3-credit-p6",
+  "backup_prefix": "x3-credit-p6",
+
+  // ent_break 0.25：胜率 > max_winrate(0.5) 时结构性不触发（设计如此，非故障）。
+  "ent_break": 0.25,
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5,
+}
+
+// ── 开工前置 ─────────────────────────────────────────────────────────────
+// ① bc 权重：`nn-training/weights/x3-start/x3-start.it333.20260915-052649.json`
+//   （建议同步 `nn-training/weights/in-use/x3-start.it333.json` 双份，§379）。
+// ② 关卡 `ladder-c03`（2000=abc / 2001=abd / 2002=acd / 2003=bcd）。
+// ③ transport：显式 `--remote-transport pull`；开工前确认 hub 可达、eval 节点对齐。
+// ④ metrics v6 已合入 codeHash 集（export-rl-rollout.ts）——首次开训会触发采样节点
+//    升级重编译，属预期；确认全部节点 codeHash 一致后再看 rollout 产出。
+//
+// ── 结算节（跑完回填；模板见 x3-chip-k05）──────────────────────────────────
+// 终点权重：<it30 归档路径>
+// 正式 verdict（seed0 400600）：本 run ＋ r2 run 各 800 行落账路径
+// 预注册池 / 单变量池 / 指纹报告 / 剂量定案行：待训练
+// ★ 残差桶旁证（方案 A 必备，评审 P0）：报 `Σ(kills − Σ killsByKind)` 缺失量与
+//   不守恒局占比，作为 bomb 清屏击杀的敏感性分析（同分布实测 ~1.4% 击杀 / ~2.5% 局；
+//   不守恒局 100% 拾取过 bomb）。若缺失量异常放大（例如 NN 学会依赖炸弹清屏），
+//   本腿的 power 信用读数须按此打折后再执行 §4 判决表。
+// **不启用 target_transitions**（缺席该键＝默认关，与 x3-power 同款声明）。
