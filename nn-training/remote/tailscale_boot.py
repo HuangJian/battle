@@ -198,7 +198,8 @@ def ensure(cfg: dict, log) -> dict:
     """
     if not shutil.which("tailscale"):
         install(log)
-    mode = "already-running" if state() else start_daemon(log)
+    already = bool(state())
+    mode = "already-running" if already else start_daemon(log)
     if state() != "Running":
         up(log, str(cfg.get("ts_authkey") or "").strip(), bool(cfg.get("ts_ephemeral", True)))
     ip = ""
@@ -210,7 +211,9 @@ def ensure(cfg: dict, log) -> dict:
     if not ip:
         log(_ts("status", timeout=30).stdout[-1500:])
         raise RuntimeError("Tailscale 未能获取 IP")
-    if mode.startswith("userspace"):
+    # already-running 时 mode 不含 "userspace"，靠探测 SOCKS 端口判断
+    is_userspace = mode.startswith("userspace") or (already and _port_listening(PROXY))
+    if is_userspace:
         if cfg.get("proxy_env", True):
             for _k, _v in (
                 ("HTTP_PROXY", f"http://{PROXY}"),
@@ -223,6 +226,18 @@ def ensure(cfg: dict, log) -> dict:
             f"入站到本地端口不通 ⇒ pull 可用、push 不可用")
     log(f"Tailscale IP = {ip} (mode={mode})")
     return {"ip": ip, "mode": mode, "sock": SOCK, "proxy": PROXY}
+
+
+def _port_listening(addr: str) -> bool:
+    """addr 形如 'localhost:1055'——探测 TCP 端口是否在监听。"""
+    import socket
+
+    host, _, port_s = addr.rpartition(":")
+    try:
+        with socket.create_connection((host or "localhost", int(port_s)), timeout=2):
+            return True
+    except OSError:
+        return False
 
 
 # ── 诊断（tailscale.debug.ipynb 用；只读，除确保 daemon 在跑）──────────────
