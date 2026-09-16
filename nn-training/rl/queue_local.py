@@ -257,21 +257,18 @@ def rescan_nodes(
 
 
 def register_inflight(inflight: dict[tuple[int, int], int], task: tuple[int, int]) -> None:
-    """v3.14 主副本派发登记（纯函数，v3.14 单测覆盖）：**所有**主副本派发一律入表。
+    """主副本派发登记（纯函数）：**所有**主副本派发一律入表，即竞速候选。
 
-    v3.7 旧语义只在「出队时 pending ≤ tailFanoutN」登记尾部任务——早派任务对
-    `pick_tail_race` 不可见（it6 实测：a97 重启后积压 3 局，mac/a98 空闲槽因
-    inflight 表空无从竞速，整轮空等 ~2min）。登记即竞速候选；副本上限
-    tailFanoutDup 与 race_tier_ok 派档仍兜底，不会因登记面扩大而放大复制。
-    重试 requeue 不出表、再派发再登记（计数累加），结算/终局失败路径负责扣减。"""
+    早派任务必须可见（it6：a97 积压 3 局、空闲槽无从竞速）。副本数天然上界 =
+    节点数（pick_race_target 同节点排除），无 tailFanoutDup。重试 requeue 不出表、
+    再派发再登记（计数累加），结算/终局失败路径负责扣减。"""
     inflight[task] = inflight.get(task, 0) + 1
 
 
 def pick_tail_race(inflight: dict[tuple[int, int], int], dup: int) -> tuple[int, int] | None:
-    """v3.10 长尾竞速选择（纯函数，v3.10 单测覆盖）：排队队列已空时，空闲执行槽应复制
-    哪个 in-flight 任务竞速——只要副本数 < tailFanoutDup 即选（**不看任务已耗时**，
-    用户裁定"有空槽就派发"）。确定性：字典序最小者优先（避免多 worker 锁竞争抖动）。
-    dup=1 或 inflight 为空 → None（无竞速副本名额）。"""
+    """v3.10 长尾竞速选择（保留给历史单测；生产路径用 pick_race_target）。
+
+    副本数 < dup 时选字典序最小的 in-flight 任务。"""
     cand: tuple[int, int] | None = None
     for t, c in inflight.items():
         if c < dup and (cand is None or t < cand):
@@ -281,26 +278,22 @@ def pick_tail_race(inflight: dict[tuple[int, int], int], dup: int) -> tuple[int,
 
 def pick_race_target(
     inflight: dict[tuple[int, int], int],
-    dup: int,
     nd_id: str,
     inflight_nodes: dict[tuple[int, int], set[str]],
     timeout_blocks: dict[tuple[int, int], set[str]],
 ) -> tuple[int, int] | None:
-    """v3.16 竞速选择 + 节点排除（纯函数，单测覆盖）：在 pick_tail_race 的基础上，
-    排除当前节点已持有或冷却中的任务，避免竞速副本派回同一闪断节点。
+    """in-flight race 选靶（纯函数，单测覆盖）：空闲槽复制哪个已在跑的任务。
 
-    规则：
-    - 副本数 < dup 的任务才可竞速（tail_fanout_dup 防复制爆炸）
-    - nd_id 在 inflight_nodes[task] 中 → 当前节点已有该任务副本，不派回
-    - nd_id 在 timeout_blocks[task] 中 → 当前节点刚超时过该任务，冷却期内不重抢
-    - 返回第一个满足条件的任务（按字典序，与 pick_tail_race 一致）
-    - 无合适候选返回 None"""
-    for t, c in sorted(inflight.items()):
-        if c < dup:
-            current = inflight_nodes.get(t, set())
-            blocked = timeout_blocks.get(t, set())
-            if nd_id not in current and nd_id not in blocked:
-                return t
+    规则（2026-09-16 用户裁定：不判节点快慢、无 dup 上限）：
+    - nd_id 已持有该任务 → 不派回（每节点每任务最多 1 份）
+    - nd_id 在 timeout_blocks[task] → 冷却期内不重抢
+    - 返回字典序最小的可竞速任务；无则 None
+    副本数上界 = 节点数（同节点排除），先返回者结算、败者丢弃。"""
+    for t in sorted(inflight):
+        current = inflight_nodes.get(t, set())
+        blocked = timeout_blocks.get(t, set())
+        if nd_id not in current and nd_id not in blocked:
+            return t
     return None
 
 

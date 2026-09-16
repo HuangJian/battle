@@ -321,14 +321,27 @@ class FakeAgent(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         if u.path == "/v1/ping":
             cache = FakeAgent._ping_cache
-            if "bun" not in cache:
+            got = cache.get("bun")
+            if not got or got == "?":
+                # 不把失败结果永久写进类缓存（xdist 负载下曾缓存 "?"，后续轮次
+                # 节点被 bun mismatch 整台排除，race 用例退化成单节点必红）。
                 bun = shutil.which("bun")
                 if bun is not None:
-                    cache["bun"] = (
-                        run_utf8([bun, "--version"], timeout=10, **_POPEN_NO_WINDOW)
-                        .stdout.strip()
-                        or "?"
-                    )
+                    for _attempt in range(3):
+                        try:
+                            ver = (
+                                run_utf8([bun, "--version"], timeout=30, **_POPEN_NO_WINDOW)
+                                .stdout.strip()
+                                or "?"
+                            )
+                        except Exception:
+                            ver = "?"
+                        if ver != "?":
+                            cache["bun"] = ver
+                            break
+                        time.sleep(0.05)
+                    else:
+                        cache["bun"] = "?"
                 else:
                     # 与 dispatch.bun_version(缺失) 的失败回落同 "?" → mm 门恒匹配
                     cache["bun"] = "?"
@@ -1252,30 +1265,41 @@ def test_pick_tail_race() -> None:
 
 
 def test_pick_race_target_v316() -> None:
-    """v3.16 竞速选靶：排除当前节点+冷却黑名单（纯函数，单测覆盖）。
+    """in-flight race 选靶（2026-09-16：无 dup 上限；同节点排除 + 冷却黑名单）。
 
     规则验证：
     - 不选当前节点已持有
     - 不选冷却黑名单里的节点
-    - 选副本数 < dup，字典序最小
+    - 无副本数上限（多副本仍可被其它节点竞速）
+    - 字典序最小优先
     """
     from rl.queue import pick_race_target
 
     inflight = {(2000, 1): 1, (2000, 2): 1}
     nodes = {(2000, 1): {"a"}, (2000, 2): {"a"}}
     blocked: dict[tuple[int, int], set[str]] = {(2000, 1): {"b"}}
-    cand = pick_race_target(inflight, 2, "b", nodes, blocked)
+    cand = pick_race_target(inflight, "b", nodes, blocked)
     check(cand == (2000, 2), "b was blocked on (2000,1), picks (2000,2)")
 
-    cand = pick_race_target(inflight, 2, "a", nodes, blocked)
-    check(cand is None, "a is already on inflight for (2000,1), so skip")
+    cand = pick_race_target(inflight, "a", nodes, blocked)
+    check(cand is None, "a already holds both tasks — no race back")
 
-    cand = pick_race_target(inflight, 2, "c", nodes, blocked)
-    check(cand == (2000, 1), "c is not blocked/picked, picks lex min")
+    cand = pick_race_target(inflight, "c", nodes, blocked)
+    check(cand == (2000, 1), "c is not blocked, picks lex min")
+
+    # 无 dup：已有 2 份副本仍可被第三节点竞速
+    multi = {(2000, 9): 2}
+    multi_nodes = {(2000, 9): {"a", "b"}}
+    check(
+        pick_race_target(multi, "c", multi_nodes, {}) == (2000, 9),
+        "no dup cap — third node can race a 2-copy task",
+    )
 
     inflight_empty: dict[tuple[int, int], int] = {}
-    cand = pick_race_target(inflight_empty, 2, "a", {}, {})
-    check(cand is None, "empty inflight -> None")
+    check(
+        pick_race_target(inflight_empty, "a", {}, {}) is None,
+        "empty inflight -> None",
+    )
 
 
 def main() -> None:

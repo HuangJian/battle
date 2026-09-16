@@ -36,6 +36,7 @@ from rl.eval_local import (
 )
 from rl.log import log
 from rl.queue import _record_agent_meta, bun_version, mm
+from rl.queue_local import pick_race_target, register_inflight
 
 
 def select_delayed_eval_it(dispatch_it: int, is_eval_round) -> int | None:
@@ -304,6 +305,24 @@ class EvalDispatcher:
             outcomes: dict[str, int] = {}
             node_games: dict[str, int] = {}  # 每节点实际结算的评估局数（summary 用）
             jsonl_lock = threading.Lock()
+            # 2026-09-16：eval 与 rollout 同款 in-flight race——pending 清空后空槽
+            # 复制其它节点在跑的尾局，先返回者记账、败者丢弃（不双计）。
+            inflight: dict[tuple[int, int], int] = {}
+            inflight_nodes: dict[tuple[int, int], set[str]] = {}
+            all_done = threading.Event()
+
+            def _pop_inflight(task: tuple[int, int], nd_id: str) -> None:
+                if task in inflight:
+                    inflight[task] -= 1
+                    if inflight[task] <= 0:
+                        inflight.pop(task, None)
+                        inflight_nodes.pop(task, None)
+                    else:
+                        inflight_nodes.get(task, set()).discard(nd_id)
+
+            def _clear_inflight(task: tuple[int, int]) -> None:
+                inflight.pop(task, None)
+                inflight_nodes.pop(task, None)
 
             def record(manifest: dict, nd_id: str, task: tuple[int, int]) -> None:
                 dims = manifest.get("dims") or {}
@@ -383,27 +402,42 @@ class EvalDispatcher:
                     outcomes[oc] = outcomes.get(oc, 0) + 1
 
             def worker(nd: dict) -> None:
-                while time.time() < deadline:
+                while time.time() < deadline and not all_done.is_set():
                     task = None
+                    fanout_copy = False
                     with lock:
                         if streaks.get(nd["id"], 0) >= fail_streak_max:
                             return
                         if pending:
                             # 尾段预留：gate 未放行且余量 ≤ reserved 时不取（留给本机直跑）；
-                            # 宽限期强制释放防挂死。本地 worker 不受此约束。
-                            if hold_for_local(
+                            # 宽限期强制释放防挂死。hold 中仍可对 in-flight race。
+                            if not hold_for_local(
                                 len(pending),
                                 reserved,
                                 local_gate is not None and local_gate.is_set(),
                                 time.time() >= deadline - EVAL_LOCAL_RELEASE_GRACE,
                             ):
-                                pass
-                            else:
                                 task = pending.popleft()
                                 attempts[task] = attempts.get(task, 0) + 1
                                 attempt = attempts[task]
-                        else:
+                                register_inflight(inflight, task)
+                                inflight_nodes.setdefault(task, set()).add(nd["id"])
+                        elif not inflight:
                             return
+                        if task is None and inflight:
+                            cand = pick_race_target(
+                                inflight, nd["id"], inflight_nodes, {}
+                            )
+                            if cand is not None:
+                                task = cand
+                                inflight[task] += 1
+                                inflight_nodes.setdefault(task, set()).add(nd["id"])
+                                fanout_copy = True
+                                attempt = attempts.get(task, 0) + 1
+                                log(
+                                    f"[eval] tail-race s{task[0]}/seed{task[1]} "
+                                    f"node={nd['id']} — race lane"
+                                )
                     if task is None:
                         all_wait = min(5.0, max(0.1, deadline - time.time()))
                         time.sleep(all_wait)
@@ -437,23 +471,28 @@ class EvalDispatcher:
                         why = dist_common.validate_eval_result(manifest, wver)
                         if why:
                             raise dist_common.DistError(0, why)
-                        record(manifest, nd["id"], task)
                         ok = True
                     except Exception as e:
                         err = str(e)[:200]
                     with lock:
                         if ok:
+                            if task in seen:
+                                _pop_inflight(task, nd["id"])
+                                log(
+                                    f"[eval] dup settle s{task[0]}/seed{task[1]} "
+                                    f"node={nd['id']} — dropped"
+                                )
+                                continue
                             seen.add(task)
+                            _clear_inflight(task)
                             streaks[nd["id"]] = 0
-                            el = manifest.get("elapsedSec")
-                            log(
-                                f"[eval] {len(seen)}/{total} s{task[0]}/seed{task[1]} "
-                                f"node={nd['id']} outcome={manifest.get('outcome')} "
-                                f"ticks={manifest.get('ticks')} "
-                                f"elapsed={str(el) + 's' if el is not None else '-'}"
-                            )
+                            if len(seen) >= total:
+                                all_done.set()
+                        elif fanout_copy:
+                            _pop_inflight(task, nd["id"])
                         else:
                             streaks[nd["id"]] = streaks.get(nd["id"], 0) + 1
+                            _pop_inflight(task, nd["id"])
                             if attempt < EVAL_TASK_ATTEMPTS and task not in seen:
                                 pending.append(task)
                                 log(f"[eval] s{task[0]}/seed{task[1]} failed ({err}) — requeued")
@@ -475,12 +514,21 @@ class EvalDispatcher:
                                     f"[eval] s{task[0]}/seed{task[1]} failed {attempt}x ({err}) "
                                     f"— dropped"
                                 )
+                    if ok:
+                        record(manifest, nd["id"], task)
+                        el = manifest.get("elapsedSec")
+                        log(
+                            f"[eval] {len(seen)}/{total} s{task[0]}/seed{task[1]} "
+                            f"node={nd['id']} outcome={manifest.get('outcome')} "
+                            f"ticks={manifest.get('ticks')} "
+                            f"elapsed={str(el) + 's' if el is not None else '-'}"
+                        )
 
             def local_worker() -> None:
                 """本机直跑 worker：gate 放行前让位训练（每 5s 醒来看一眼 deadline）。"""
-                if snapshot_path is None or not pending:
+                if snapshot_path is None:
                     return
-                while time.time() < deadline:
+                while time.time() < deadline and not all_done.is_set():
                     if local_gate is not None and not local_gate.is_set():
                         remaining = deadline - time.time()
                         if remaining <= 0:
@@ -488,13 +536,31 @@ class EvalDispatcher:
                         if not local_gate.wait(timeout=min(5.0, remaining)):
                             continue
                     task = None
+                    fanout_copy = False
                     with lock:
                         if pending:
                             task = pending.popleft()
                             attempts[task] = attempts.get(task, 0) + 1
                             attempt = attempts[task]
-                        else:
+                            register_inflight(inflight, task)
+                            inflight_nodes.setdefault(task, set()).add("local")
+                        elif not inflight:
                             return
+                        if task is None and inflight:
+                            cand = pick_race_target(inflight, "local", inflight_nodes, {})
+                            if cand is not None:
+                                task = cand
+                                inflight[task] += 1
+                                inflight_nodes.setdefault(task, set()).add("local")
+                                fanout_copy = True
+                                attempt = attempts.get(task, 0) + 1
+                                log(
+                                    f"[eval] tail-race s{task[0]}/seed{task[1]} "
+                                    f"node=local — race lane"
+                                )
+                    if task is None:
+                        time.sleep(min(1.0, max(0.1, deadline - time.time())))
+                        continue
                     ok = False
                     err = ""
                     manifest: dict = {}
@@ -523,24 +589,30 @@ class EvalDispatcher:
                         why = dist_common.validate_eval_result(manifest, wver)
                         if why:
                             raise dist_common.DistError(0, why)
-                        record(manifest, "local", task)
                         ok = True
                     except Exception as e:
                         err = str(e)[:200]
                     with lock:
                         if ok:
+                            if task in seen:
+                                _pop_inflight(task, "local")
+                                log(
+                                    f"[eval] dup settle s{task[0]}/seed{task[1]} "
+                                    f"node=local — dropped"
+                                )
+                                continue
                             seen.add(task)
-                            el = manifest.get("elapsedSec")
-                            log(
-                                f"[eval] {len(seen)}/{total} s{task[0]}/seed{task[1]} "
-                                f"node=local outcome={manifest.get('outcome')} "
-                                f"ticks={manifest.get('ticks')} "
-                                f"elapsed={str(el) + 's' if el is not None else '-'}"
-                            )
+                            _clear_inflight(task)
+                            if len(seen) >= total:
+                                all_done.set()
+                        elif fanout_copy:
+                            _pop_inflight(task, "local")
                         elif attempt < EVAL_TASK_ATTEMPTS and task not in seen:
+                            _pop_inflight(task, "local")
                             pending.append(task)
                             log(f"[eval] s{task[0]}/seed{task[1]} failed ({err}) — requeued")
                         elif task not in seen:
+                            _pop_inflight(task, "local")
                             _record_agent_meta(
                                 meta_path,
                                 {
@@ -557,6 +629,15 @@ class EvalDispatcher:
                             log(
                                 f"[eval] s{task[0]}/seed{task[1]} failed {attempt}x ({err}) — dropped"
                             )
+                    if ok:
+                        record(manifest, "local", task)
+                        el = manifest.get("elapsedSec")
+                        log(
+                            f"[eval] {len(seen)}/{total} s{task[0]}/seed{task[1]} "
+                            f"node=local outcome={manifest.get('outcome')} "
+                            f"ticks={manifest.get('ticks')} "
+                            f"elapsed={str(el) + 's' if el is not None else '-'}"
+                        )
 
             threads = []
             for nd in nodes_ok:

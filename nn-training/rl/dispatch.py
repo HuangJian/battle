@@ -147,7 +147,7 @@ class RolloutDispatcher:
         iter_id = self.iter_id
         on_result = self.on_result
         local_slots_max = self.local_slots_max
-        tail_dispatch = self.tail_dispatch
+        tail_dispatch = self.tail_dispatch  # noqa: F841 — API 兼容保留；2026-09-16 起不再用于 hold
         halt_event = self.halt_event
         on_queue_drained = self.on_queue_drained
         local_suspend = self.local_suspend
@@ -441,106 +441,22 @@ class RolloutDispatcher:
         )
         remote_dead_sec = float(policy.get("remoteDeadSecs", 150))
 
-        # 收尾调度（tail dispatch）：按局均耗时的 EWMA 把节点分为快/慢两档；
-        # 队列剩余量降到"快速集群一波容量"以下时，慢节点停止取任务，
-        # 避免最后几局落在慢节点上拖长整轮（PPO 空等）。速度表用跨轮累积的
-        # dist-agent-meta.jsonl 播种、本轮在线更新；无样本节点按快速处理（乐观）。
-        # 分配依旧依赖实时负载（与既有语义一致），洗牌仍由 runId 种子确定。
-        tail_factor = float(policy.get("tailFastFactor", 1.8))
-        tail_grace = float(policy.get("tailGraceSec", 120.0))
-        # v3.7 尾部 fan-out（用户需求 2026-08-27）：pending 剩 ≤ tail_fanout_n 时，空闲执行槽
-        # 优先复制一个在跑的尾部任务（重复派发），与主副本竞速取先返回——即使有 EWMA 分档，
-        # 末尾任务仍可能落在低速 agent（EWMA 是预期、单局有方差），fan-out 用重复执行兜底。
-        tail_fanout_n = int(policy.get("tailFanoutN", 4))
-        tail_fanout_dup = int(policy.get("tailFanoutDup", 2))
-        # v3.15 分配超时（用户 2026-09-03 指令）：in-flight 任务墙钟超时。
-        # 闪断节点（如 a96）中间上线时抢走尾部任务、实际挂起，导致任务被锁死在
-        # in-flight 长达 15 分钟（taskTimeoutSec=900），全轮空等。taskFetchTimeoutSec
-        # 是更短时间阈值，超时后任务重新进入 pending 队列，由其他健康节点执行。
-        # 默认 30s ≈ 5-10 局正常耗时，闪断节点必超重入。
-        # 冷却黑名单：超时重入后记录节点，冷却期内该节点不能再次抢到同一任务。
+        # 2026-09-16 用户裁定：去掉 EWMA 快慢 hold / tail fan-out / dup 上限。
+        # 分派不判节点快慢；pending 有活谁空谁接；pending 清空后空槽对**其它节点
+        # 正在跑的局**做 in-flight race（同节点不派回；先返回者结算、败者丢弃）。
+        # 副本数天然上界 = 节点数。it24 实锤：hold 使 self/mac 空转 16s 等 a95。
+        # v3.15 分配超时重入（taskFetchTimeoutSec）与冷却黑名单保留。
         task_fetch_timeout = float(policy.get("taskFetchTimeoutSec", 30))
-        # 冷却期 = 4 × taskFetchTimeoutSec，保证节点状态稳定后再参与该任务竞速
         _cooldown_sec = task_fetch_timeout * 4
-        # v3.10 长尾竞速（用户需求 2026-08-31）：v3.7 的 fan-out 只在「pending 还有排队任务」
-        # 时复制。末尾任务一旦被某 worker pop 出队、独占 in-flight（长 RPC 挂起），其他空闲
-        # 执行槽因 src=None 退化为干等 → 整轮被一个慢副本拖住。本机制：排队队列已空时，
-        # **只要空槽**就复制一个 in-flight 任务竞速（每任务副本数上限 = tailFanoutDup，
-        # 不按时间阈值等待——用户裁定"有空槽就派发"）。
-        # v3.14 竞速可见域修正（it6 实测 2026-09-03）：v3.7 登记条件「出队时 pending ≤
-        # tailFanoutN 才入 inflight 表」使早派任务对 pick_tail_race 不可见——a97 重启后
-        # 积压 3 局、空闲快槽因表空无从竞速，整轮空等 ~2min。主副本派发一律登记。
-        # v3.9 动态节点发现（用户需求 2026-08-27）：跑批中途上线的 agent 也能贡献算力。
-        # rescan 线程周期 ping 配置里未在跑的节点，合格即权重下发 + 孵化新 worker 线程
-        # （共享 pending 队列），无需重启整轮。0 = 关闭。
+        # v3.9 动态节点发现：跑批中途上线的 agent 也能贡献算力（0 = 关闭）。
         rescan_sec = float(policy.get("agentRescanSec", 120))
 
-        def _seed_speeds() -> dict[str, float]:
-            hist: dict[str, list[float]] = {}
-            try:
-                if meta_path.exists():
-                    for line in meta_path.read_text(encoding="utf-8").splitlines():
-                        if not line.strip():
-                            continue
-                        try:
-                            r = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        if (
-                            r.get("ok")
-                            and isinstance(r.get("elapsedSec"), (int, float))
-                            and isinstance(r.get("node"), str)
-                        ):
-                            hist.setdefault(r["node"], []).append(float(r["elapsedSec"]))
-            except OSError:
-                pass
-            return {k: sum(v[-20:]) / len(v[-20:]) for k, v in hist.items() if v}
-
-        speed = _seed_speeds() if tail_dispatch else {}
-        if speed:
-            preview = ", ".join(
-                f"{k}={v:.0f}s" for k, v in sorted(speed.items(), key=lambda x: x[1])
-            )
-            log(f"[dist] tail-dispatch speeds (seeded): {preview}")
-        tail_notes: set[str] = set()
-        last_progress = [time.time()]
-        # v3.7 fan-out：任务 -> 当前在跑副本数（>1 = 已被重复派发竞速）。
-        # v3.14：登记面扩大到**所有**主副本派发（原 v3.7 只登记出队时 pending ≤
-        # tailFanoutN 的尾局，早派任务对竞速不可见——it6 实测 a97 积压 3 局拖整轮）。
-        # v3.15：分配超时追踪——inflight_ts 记录每个 in-flight 任务的派发墙钟，
-        # 超时后 re-queue 到 pending 由其他节点执行。
-        # inflight_nodes：任务 → 持有该任务副本的节点集合（防竞速副本派回同节点）。
-        # task_timeout_blocks：任务 → 超时节点集合（冷却期内该节点不能重抢该任务）。
+        # 任务 → 在跑副本数；任务 → 持有副本的节点集合（防竞速派回同节点）；
+        # 任务 → 派发墙钟（超时 requeue）；任务 → 超时冷却节点集合。
         inflight: dict[tuple[int, int], int] = {}
         inflight_ts: dict[tuple[int, int], float] = {}
         inflight_nodes: dict[tuple[int, int], set[str]] = {}
         task_timeout_blocks: dict[tuple[int, int], set[str]] = {}
-
-        def _fast_enough(nid: str, pending_len: int) -> bool:
-            # R6：本机直跑槽位豁免速度持留——它由 local_slots 上限 + local_suspend
-            # 让位语义自治理；再叠加 EWMA 持留会把 local 彻底饿死（实测 local=0）。
-            if nid == "local":
-                return True
-            if not tail_dispatch or not speed or pending_len <= 0:
-                return True
-            my = speed.get(nid)
-            best = min(speed.values())
-            if my is None or my <= best * tail_factor:
-                return True
-            if time.time() - last_progress[0] > tail_grace:
-                key = f"{nid}:grace"
-                if key not in tail_notes:
-                    tail_notes.add(key)
-                    log(f"[dist] tail-grace: no settle for {tail_grace:.0f}s — {nid} re-admitted")
-                return True
-            fast_slots = 0
-            for a in alive:
-                s = speed.get(a["id"])
-                if s is not None and s <= best * tail_factor:
-                    fast_slots += a["c"]
-            if speed.get("local", 1e18) <= best * tail_factor:
-                fast_slots += local_slots
-            return pending_len > fast_slots
 
         def worker(nd: dict | None) -> None:
             suspended = False  # 本迭代持锁前先置初值（nd 非 None 时不赋值，v3.10 else 分支引用）
@@ -625,79 +541,38 @@ class RolloutDispatcher:
                     elif took_local:
                         src = head_tasks or pending or None
                     if src is not None:
-                        probe = len(head_tasks) if src is head_tasks else len(pending)
-                        if _fast_enough(nd_id, probe):
-                            fanout_copy = False
-                            # v3.7 尾部 fan-out：pending 剩 ≤ tail_fanout_n 且存在在跑的尾部任务时，
-                            # 空闲执行槽复制一个在跑任务（重复派发），与主副本竞速取先返回。
-                            # 复制不 pop pending（主副本完成前任务保持"未完成"状态）。
-                            if src is pending and len(pending) <= tail_fanout_n and inflight:
-                                cand = next(
-                                    (t for t, c in inflight.items() if c < tail_fanout_dup), None
-                                )
-                                if cand is not None:
-                                    task = cand
-                                    inflight[task] += 1
-                                    inflight_ts[task] = time.time()
-                                    inflight_nodes.setdefault(task, set()).add(nd_id)
-                                    fanout_copy = True
-                                    attempt = attempts.get(task, 0) + 1
-                            if not fanout_copy:
-                                # v3.16 冷却黑名单旋转：如果 pending 队首任务被当前节点
-                                # 冷却封锁（该任务此前在此节点超时），旋转到队尾继续找。
-                                if src is pending and task_timeout_blocks:
-                                    _rotated = 0
-                                    while pending and _rotated < len(pending):
-                                        _front = pending[0]
-                                        _blk = task_timeout_blocks.get(_front, set())
-                                        if nd_id in _blk:
-                                            pending.rotate(-1)  # 队首→队尾
-                                            _rotated += 1
-                                        else:
-                                            break
-                                task = src.popleft()
-                                attempts[task] = attempts.get(task, 0) + 1
-                                attempt = attempts[task]
-                                # v3.14：主副本派发一律登记（不限 src、不看 pending 余量）——
-                                # 早派到慢节点/滞后节点的任务同样成为竞速候选；
-                                # tailFanoutDup 上限派档防复制放大。
-                                register_inflight(inflight, task)
-                                inflight_ts[task] = time.time()
-                                inflight_nodes.setdefault(task, set()).add(nd_id)
-                            if nd is None:
-                                local_active[0] += 1
-                            if not head_tasks and not pending:
-                                drained = True
-                        elif f"{nd_id}:hold" not in tail_notes:
-                            tail_notes.add(f"{nd_id}:hold")
-                            log(
-                                f"[dist] tail-mode: holding {nd_id} "
-                                f"(ewma={speed.get(nd_id, -1):.0f}s, pending={probe})"
-                            )
-                            task = None
+                        # pending 有活：直接接（不判快慢、无 fan-out）。
+                        # 冷却黑名单旋转：队首被本节点超时冷却则转到队尾。
+                        if src is pending and task_timeout_blocks:
+                            _rotated = 0
+                            while pending and _rotated < len(pending):
+                                _front = pending[0]
+                                _blk = task_timeout_blocks.get(_front, set())
+                                if nd_id in _blk:
+                                    pending.rotate(-1)
+                                    _rotated += 1
+                                else:
+                                    break
+                        task = src.popleft()
+                        attempts[task] = attempts.get(task, 0) + 1
+                        attempt = attempts[task]
+                        register_inflight(inflight, task)
+                        inflight_ts[task] = time.time()
+                        inflight_nodes.setdefault(task, set()).add(nd_id)
+                        if nd is None:
+                            local_active[0] += 1
+                        if not head_tasks and not pending:
+                            drained = True
                     else:
-                        # v3.10 长尾竞速（用户需求 2026-08-31）：排队队列已空，**只要空槽**就
-                        # 复制一个 in-flight 任务竞速（不看任务已耗时；用户裁定"有空槽就派发"）。
-                        # 每任务副本数上限 tailFanoutDup 防无限复制；副本失败静默、成功到 seen
-                        # 则丢弃（v3.7 既有 fan-out 语义）。本机槽被 local_suspend 让位时不竞速
-                        # （让位语义 = 给 PPO 腾核，不抢尾流）。
-                        # v3.16 竞速派档（用户 2026-09-03）：修改 v3.11 的 EWMA top-3 快档——
-                        # 它让健康的空闲快节点饿死，闪断节点偷走尾部任务后锁死它们。
-                        # 新规则：保留 tail_fanout_dup 上限防复制爆炸；删除快慢分档，任意
-                        # 空槽都能抢；PPO 完毕的 local 也参与；永不派回任务当前持有节点；
-                        # 超时冷却黑名单节点也不能抢回同一任务。
-                        # 本机槽参与竞速同样受 local_cap 闸门约束（2026-09-10）：此前这条
-                        # 分支只看「让位 + 有在飞任务」，8 个本机线程在竞速阶段全部放行
-                        # （tail-race 548 次被 local 抢走、self 1 / mac 2），local_slots
-                        # 形同虚设。local_slots=0 ⇒ 本机不参与竞速（只留失联兜底）。
+                        # pending 已空：空槽 in-flight race（2026-09-16）。
+                        # 同节点不派回；无 dup 上限；先返回者结算。
+                        # 本机槽受 local_slots 闸门 + local_suspend 让位约束。
                         _local_lane_ok = nd is not None or (
                             not suspended and local_active[0] < local_cap[0]
                         )
                         if _local_lane_ok and inflight:
-                            # v3.16 使用 pick_race_target 排除当前节点 + 冷却黑名单
                             tail_cand = pick_race_target(
                                 inflight,
-                                tail_fanout_dup,
                                 nd_id,
                                 inflight_nodes,
                                 task_timeout_blocks,
@@ -708,10 +583,6 @@ class RolloutDispatcher:
                                 inflight_ts[task] = time.time()
                                 inflight_nodes.setdefault(task, set()).add(nd_id)
                                 fanout_copy = True
-                                # 闸门配对（2026-09-10）：竞速副本此前不计入 local_active，
-                                # 结算却一律递减 ⇒ 计数被打成负数 ⇒ `local_active < local_cap`
-                                # 恒真、local_slots 闸门永久失效（实测 local_slots=1 跑出 8
-                                # 并发、tail-race 249 次全被 local 抢走）。本机槽照闸门计数。
                                 if nd is None:
                                     local_active[0] += 1
                                 attempt = attempts.get(task, 0) + 1
@@ -866,10 +737,6 @@ class RolloutDispatcher:
                             },
                         )
                         el = summary.get("elapsedSec")
-                        if isinstance(el, (int, float)) and el > 0:
-                            prev = speed.get(nd_id)
-                            speed[nd_id] = 0.3 * float(el) + 0.7 * prev if prev else float(el)
-                        last_progress[0] = time.time()
                         if on_result:
                             try:
                                 on_result(summary)

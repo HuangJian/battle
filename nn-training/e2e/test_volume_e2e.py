@@ -138,6 +138,10 @@ class _VolServer(ThreadingHTTPServer):
         #: `seen` 里登记由线程调度决定，可能双双通过锁外的 validate_result ⇒ 真
         #: double-settle）；>0 = **主副本稳定赢**（副本后到、静默丢弃）。
         self.dup_hang: float = 0.0
+        #: 首次派发即挂起的对（in-flight race 的必要条件：pending 清空后仍有在飞局）。
+        self.slow_once: set[tuple[int, int]] = set()
+        self.slow_sec: float = 0.0
+        self._slow_done: set[tuple[int, int]] = set()
         self.dispatched: list[tuple[int, int]] = []  # 真派发顺序（含重复副本）
         self.fetch_n: dict[tuple[int, int], int] = {}
         self.lock = threading.Lock()
@@ -164,6 +168,36 @@ class _VolServer(ThreadingHTTPServer):
 class _VolAgent(BaseHTTPRequestHandler):
     _cache: dict[str, str] = {}
 
+    @staticmethod
+    def _bun_version() -> str:
+        """取本机 bun 版本；失败不缓存（xdist 高负载下曾把 '?' 永久写进类缓存，
+        后续轮次节点被判 bun mismatch 整台排除，race 用例退化成单节点必红）。"""
+        c = _VolAgent._cache
+        got = c.get("bun")
+        if got and got != "?":
+            return got
+        if not _BUN:
+            return "?"
+        import subprocess
+
+        for _attempt in range(3):
+            try:
+                ver = (
+                    subprocess.run(
+                        [_BUN, "--version"],
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    ).stdout.strip()
+                    or "?"
+                )
+                if ver != "?":
+                    c["bun"] = ver
+                    return ver
+            except Exception:
+                time.sleep(0.05)
+        return "?"
+
     @property
     def _srv(self) -> _VolServer:
         return self.server  # type: ignore[return-value]
@@ -182,26 +216,13 @@ class _VolAgent(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         if u.path == "/v1/ping":
             c = _VolAgent._cache
-            if "bun" not in c:
-                c["bun"] = "?"
-                if _BUN:
-                    import subprocess
-
-                    try:
-                        c["bun"] = (
-                            subprocess.run(
-                                [_BUN, "--version"], capture_output=True, text=True, timeout=10
-                            ).stdout.strip()
-                            or "?"
-                        )
-                    except Exception:
-                        c["bun"] = "?"
+            bun = self._bun_version()
             if "codeHash" not in c:
                 c["codeHash"] = dist_common.compute_code_hash()
             self._json(
                 {
                     "codeHash": c["codeHash"],
-                    "bunVersion": c["bun"],
+                    "bunVersion": bun,
                     "cpus": 4,
                     "evalSupport": True,
                 }
@@ -213,6 +234,13 @@ class _VolAgent(BaseHTTPRequestHandler):
             pair = (stage, seed)
             served = self._srv.games_for(stage)
             copy_idx = self._srv.note(pair)
+            # 首份慢局：制造 in-flight 尾局，pending 清空后空槽 race
+            with self._srv.lock:
+                slow_hit = pair in self._srv.slow_once and pair not in self._srv._slow_done
+                if slow_hit:
+                    self._srv._slow_done.add(pair)
+            if slow_hit and self._srv.slow_sec > 0:
+                time.sleep(self._srv.slow_sec)
             # 竞速时序控制：副本慢一拍（延迟在响应前，输赢才可塑）
             if copy_idx >= 1 and self._srv.dup_hang > 0:
                 time.sleep(self._srv.dup_hang)
@@ -394,6 +422,8 @@ def _env(
     影响），专项竞速用例显式打开。
     """
     monkeypatch.setattr(dist_common, "load_dist_config", lambda: None)
+    # 预热 bun 版本：避免首 ping 在 xdist 负载下拿到 "?" 而整台节点被排除。
+    _VolAgent._bun_version()
     srv = _VolServer(("127.0.0.1", 0), _VolAgent)
     srv.samples = {int(k.split("_")[1]): int(v) for k, v in server_kw.items() if k.startswith("n_")}
     srv.schema = {int(k.split("_")[1]): str(v) for k, v in server_kw.items() if k.startswith("s_")}
@@ -584,32 +614,45 @@ def test_short_stage_does_not_starve_long_stage(
         srv.shutdown()
 
 
-# ────────────── ④ 尾部竞速（tail fan-out）下的配额算术 ──────────────
+# ────────────── ④ in-flight race 下的配额算术 ──────────────
 #
-# 竞速把同一 (stage,seed) 同时派最多 `tailFanoutDup` 份副本，先结算者赢；后到者走
-# `rl/dispatch.py` 两条分支之一，两条都不进账本：
-#   · 锁外 validate 已看到 seen ⇒ 连盘都不写、静默丢弃——最常见的结局；
-#   · 两份结果**都**在对方登记前通过 validate（校验在锁外、写盘在锁内，窗口 = 一次
-#     write_shard）⇒ 双双落到 dup_settle，后到者 rmtree**同一 (stage,seed) 的共享
-#     shard 目录**（同节点竞速时两份副本的 out_dir 逐字相同）⇒ 该局数据被删、白跑。
-# 对配额算术的要求（本节的判据）：
+# 2026-09-16：去掉 EWMA hold / fan-out / dup 上限。pending 有活谁空谁接；pending
+# 清空后空槽复制**其它节点**在跑的尾局，先返回者进账本；败者静默丢弃或 dup_settle
+# 退休共享 shard。对配额算术的要求：
 #   ① **绝不重复计数**：账本局数 ≤ 该关去重派发对数，且 transitions == 局数 × 每局；
 #   ② 白跑的局按掉局处理 ⇒ 补波补回；补不回也必须是**响亮**的（未达标清单），
 #      不许把缺口当「达标」糊过去。
 
 
+def _add_second_node(cfg: dict, srv: _VolServer) -> None:
+    """同 FakeServer、独立 node id——race 排除同节点持有，单节点集群永不竞速。"""
+    cfg["nodes"].append(
+        {
+            "id": "fake2",
+            "url": f"http://127.0.0.1:{srv.server_address[1]}",
+            "authKey": "",
+            "concurrency": 4,
+            "enabled": True,
+        }
+    )
+
+
 def test_racing_duplicates_do_not_distort_the_ledger(
     tmp: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """竞速开启、副本稳定后到（dup_hang>0）⇒ 账本与无竞速时**逐值相同**、不重复计数。"""
+    """in-flight race 触发（slow_once 尾局 + 空槽）⇒ 账本不重复计数。"""
     srv, cfg, _ = _env(tmp, monkeypatch, fanout=True, n_0=14, n_1=14)
+    _add_second_node(cfg, srv)
     try:
         loop = _Loop(tmp, stages="0-1", target=200, est=14)
-        srv.dup_hang = 0.35  # 第 2 份及以后的副本慢一拍 ⇒ 主副本稳定赢
+        # 初波 16 局 / 并发 4：钉一局首派慢 0.4s，其余快局清空 pending 后 race 它。
+        srv.slow_once = {(0, loop._iteration_pairs(1)[0][1])}
+        srv.slow_sec = 0.4
+        srv.dup_hang = 0.05  # race 副本略慢 ⇒ 主副本/先返回者赢
         loop.run_iteration(cfg)
 
         # 竞速真的发生了（否则本用例什么也没验到）
-        assert srv.dup_copies() > 0, "尾部竞速未触发——本用例需要 fan-out 真的复制过"
+        assert srv.dup_copies() > 0, "in-flight race 未触发——需要 slow_once 尾局被空槽复制"
         settled = _settled(loop._traj_dir, Path(loop.args.out))
         unique = {(s, sd) for s, sd in srv.dispatched}
         # 不重复计数：每关落盘局数 == 该关去重派发对局数（副本没被多算一局）
@@ -633,12 +676,15 @@ def test_racing_double_settle_never_inflates_and_quota_stays_sound(
     结局都必须成立**的性质：不重复计数、账本不长于去重派发数、达标或响亮停、WAL 闭环。
     """
     srv, cfg, _ = _env(tmp, monkeypatch, fanout=True, n_0=14, n_1=14)
+    _add_second_node(cfg, srv)
     try:
         loop = _Loop(tmp, stages="0-1", target=200, est=14)
-        srv.dup_hang = 0.0  # 副本不慢 ⇒ 谁先登记由线程调度决定
+        srv.slow_once = {(0, loop._iteration_pairs(1)[0][1])}
+        srv.slow_sec = 0.4
+        srv.dup_hang = 0.0
         loop.run_iteration(cfg)
 
-        assert srv.dup_copies() > 0, "尾部竞速未触发——本用例什么也没验到"
+        assert srv.dup_copies() > 0, "in-flight race 未触发——本用例什么也没验到"
         settled = _settled(loop._traj_dir, Path(loop.args.out))
         unique = set(srv.dispatched)
         for stage in (0, 1):

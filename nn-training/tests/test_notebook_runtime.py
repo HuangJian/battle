@@ -240,10 +240,34 @@ def test_tpu_holders_no_proc_no_crash() -> None:
 # ------------------------------------------------------------------ run_pull_worker
 
 
+def _patch_hub_open(monkeypatch: pytest.MonkeyPatch, status: int) -> None:
+    """直接打 nbr._hub_open。
+
+    本机若有 HTTP(S)_PROXY，生产路径会走 ProxyHandler 而**绕过** urllib.request.urlopen
+    的 monkeypatch（2026-09-16 门禁实测：happy path 被真实网络打成 -2）。单测必须打
+    在 _hub_open 上，不依赖环境变量。非 2xx 与生产一致：抛 HTTPError。
+    """
+
+    def _open(req: Any, timeout: float = 15) -> _FakeResp:
+        if status >= 400:
+            import email.message
+
+            raise urllib.error.HTTPError(
+                getattr(req, "full_url", "http://x"),
+                status,
+                "err",
+                email.message.Message(),
+                None,
+            )
+        return _FakeResp(status)
+
+    monkeypatch.setattr(nbr, "_hub_open", _open)
+
+
 def test_pull_ping_401_returns_minus2_without_restart(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen_401)
+    _patch_hub_open(monkeypatch, 401)
     calls: list[list[str]] = []
 
     def fake_supervise(argv: list[str]) -> int:
@@ -259,7 +283,7 @@ def test_pull_ping_401_returns_minus2_without_restart(
 def test_pull_happy_path_argv_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=0: _FakeResp(200))
+    _patch_hub_open(monkeypatch, 200)
     seen: dict[str, Any] = {}
 
     def fake_supervise(argv: list[str]) -> int:
@@ -282,7 +306,7 @@ def test_pull_happy_path_argv_snapshot(
 def test_pull_keyboard_interrupt_is_clean(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=0: _FakeResp(200))
+    _patch_hub_open(monkeypatch, 200)
 
     def fake_supervise(argv: list[str]) -> int:
         raise KeyboardInterrupt
@@ -292,7 +316,7 @@ def test_pull_keyboard_interrupt_is_clean(
 
 
 def test_pull_rc_passthrough(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=0: _FakeResp(200))
+    _patch_hub_open(monkeypatch, 200)
     monkeypatch.setattr("remote.worker.supervise_worker", lambda argv: 5)
     assert nbr.run_pull_worker(_base_cfg(tmp_path), lambda m: None) == 5
 
@@ -300,7 +324,7 @@ def test_pull_rc_passthrough(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 def test_pull_max_idle_floor_with_long_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=0: _FakeResp(200))
+    _patch_hub_open(monkeypatch, 200)
     seen: dict[str, Any] = {}
     def fake_supervise(argv: list[str]) -> int:
         seen.setdefault("argv", argv)
