@@ -405,6 +405,11 @@ def publish_job(
     # 它的 sha（`plan_sha256`）。传 bytes 而不是 dict：本模块是 `remote/` 层，不 import
     # `rl/`（方向单一）；规范化序列化只有 `rl.plan.dump_plan` 一份，调用方自己 dump。
     plan_bytes: bytes | None = None,
+    # 全离线（2026-09-17）：`register=False` = **只建 job 目录、不记账本也不进待领池**。
+    # 用途：把这一段任务打成可上传云机的任务包（`remote/bundle.py`）——包里的 manifest
+    # 必须由训练侧生成（课程/超参/血缘的解析者），但这条腿不发 job（云机不在网络上），
+    # 记一条 `job_pending` 只会让控制台看到一条永远等不到工人的待领任务。
+    register: bool = True,
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
 ) -> dict:
     """打包 + 发布 job（磁盘 IPC）：job_root/<job_id>/ + jsonl job_pending 事件。
@@ -594,22 +599,24 @@ def publish_job(
     except OSError:
         pass
     # 6) jsonl job_pending（磁盘 IPC；幂等去重——同 job_id 不重复追加）
-    # 悬空 job 清理（§381）：发布前作废更早迭代/旧 runId 遗留的 pending job——
-    # 否则 loop 重启（runId 变 → 同 it 新 jid）后，无 worker 期间滞留的旧 job
-    # 会在 GPU 上线时被全部补做（白烧 GPU + PPO 数 ≠ iteration 数）。
-    _n_cancelled = cancel_stale_jobs(jsonl_path, it, jid)
-    if _n_cancelled:
-        log(f"cancelled {_n_cancelled} stale job(s) with it ≤ {it}（旧 runId 遗留，不再派发）")
-    _append_ledger(
-        jsonl_path,
-        {
-            "event": "job_pending",
-            "job_id": jid,
-            "runId": run_id,
-            "it": it,
-            "ts": time.time(),
-        },
-    )
+    if register:
+        # 悬空 job 清理（§381）：发布前作废更早迭代/旧 runId 遗留的 pending job——
+        # 否则 loop 重启后无 worker 期间滞留的旧 job 会在 GPU 上线时被全部补做。
+        _n_cancelled = cancel_stale_jobs(jsonl_path, it, jid)
+        if _n_cancelled:
+            log(f"cancelled {_n_cancelled} stale job(s) with it ≤ {it}（旧 runId 遗留，不再派发）")
+        _append_ledger(
+            jsonl_path,
+            {
+                "event": "job_pending",
+                "job_id": jid,
+                "runId": run_id,
+                "it": it,
+                "ts": time.time(),
+            },
+        )
+    else:
+        log(f"job {jid} it{it}: 不记账本/不进待领池（打包导出用，`register=False`）")
     log(
         f"published job {jid} it{it}: "
         + (

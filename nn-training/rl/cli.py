@@ -522,6 +522,12 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         "并逐轮落产物（K/D 官方目录，可打包下载）；0 = 关。要求 --ppo remote",
     )
     ap.add_argument(
+        "--export-bundle",
+        default="",
+        help="全离线：把 --run-iters 那一段打成可上传 Kaggle/Colab 的任务包（zip）后退出；"
+        "本轮不训练。云机侧：remote.bundle import 后 remote.run_loop 自主跑完",
+    )
+    ap.add_argument(
         "--run-wait-sec",
         type=float,
         default=_d("run_wait_sec", 0.0),

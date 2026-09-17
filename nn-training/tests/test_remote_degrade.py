@@ -71,6 +71,7 @@ class _Stub(TrainingSteps):
         *,
         plan_bytes: bytes | None = None,
         wait_timeout_sec: float = 0.0,
+        export_path: str | Path | None = None,
     ) -> dict:
         """测试替身：签名必须与真身一致（M3 多 rollout_spec；半离线多 plan_bytes/wait）。"""
         self.remote_calls.append(it)

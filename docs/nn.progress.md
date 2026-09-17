@@ -4,6 +4,69 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §62 全离线任务包落地：hub 导出 → Kaggle/Colab 上传 → 云机自主跑完（2026-09-17）
+
+**为什么记这一笔**：新增一条「任务可以离线搬运」的交付面（协议外的文件格式 + 两处入口 + 一个
+不可信输入的边界）；决策与理由（含四条被否决的备选）见 `DECISIONS.md`
+§2026-09-17-goalnn-offline-task-bundle。
+
+### 与半离线（§61）的关系
+
+```
+半离线（kind="run"）：hub **在线**发一次 job（计划随 payload）→ 云机自主跑完 → 回传尽力而为
+全离线（task bundle）：hub **导出 zip**（计划+课程+权重+动量+代码+TS）→ 人搬上云（dataset/Drive）
+                       → 云机 import 后自主跑完 → 产物落 Kaggle output / Drive
+                       → **若中途能连上 hub**，自动补传（下一笔；本 § 未做）
+```
+
+半离线解决「云机不依赖 hub 也能跑完」，全离线解决「**hub 关机也能开工**」——任务本身不再走网络。
+
+### 形状
+
+```
+hub:  run_rl --ppo remote --run-iters N --export-bundle tmp/task.zip
+        └ 不训练、不等待：拼 plan + 复用发布链造 manifest（register=False：不记账本/不进待领池）
+        └ remote/bundle.export_bundle：task.json 索引（逐件 sha256+字节数）+ README + 六件套
+云机: python -m remote.bundle import task.zip --dest /kaggle/working/battle2-<run>
+        └ 逐件对账（不符即拒收，一局不跑）→ 铺成可直接续跑的产物目录（it-{it}/ 起点 + ts_code/）
+      python -m remote.run_loop --artifacts <dir> --device cuda      # 或 --bundle <zip> 一步到位
+        └ code.zip / ts_code.zip 字节走 run_job 的 preloaded（节点无仓、不联网）
+产物: it-NNN/weights.json + opt.tar + metrics.jsonl + state.json + LATEST.zip/artifacts.zip
+      Kaggle = /kaggle/working（Save Version 即官方打包下载）；Colab = Drive / files.download
+```
+
+轮次对齐（整条最容易错的一处）：loop 的 `it` = 包里要跑的**第一轮** ⇒ `plan.start_it = it-1`、
+`max_iters = n`（不是 n-1——这里没有「job 自己那一轮」要扣，`args.out` 就是包的起点）。
+
+### 两处按教训卡出来的硬门
+
+| 门 | 不卡的后果 |
+|---|---|
+| 导入逐件 sha/字节数对账 + zip-slip 拒绝 + magic 校验 | 一次截断的搬运会变成一堆无法归因的怪结果；恶意/损坏成员可在云机上写任意文件（包是人搬来的，最不可信） |
+| standalone 入口「代码可用」硬门（`code.zip` 或 `code_cache/<sha>/` 命中） | `run_job` 拿空 base_url 去下载代码，报一个跟真因无关的错（重试/联网都治不了）——改前 `test_run_loop` 的两个用例正是这么红的 |
+
+注意这个门**只卡 standalone 入口**，不卡 `_run_iteration`：半离线轮（hub 发的 kind=run）的代码是
+worker 自己那一轮从 hub 下好、已落进内容寻址缓存的——那里没有 `code.zip` 字节也完全正常。
+
+### 验证面（本机可跑的）
+
+`tests/test_bundle.py`(7)：导出→导入的目录形状（起点 checkpoint + opt + TS 树）；改一个字节就
+逐件对账拒收；zip-slip 成员拒收且不落盘；拿错包/坏 zip 在读索引这一步停；导出侧三道自检（计划
+sha 不符 / 缺 code.zip / 缺 ts_code.zip）；**导入后 `run_standalone` 无网无仓跑到 end_it**
+（替身断言 payload 里带了 code.zip 与 ts_code.zip 字节、`base_url/token` 必须为空），再跑一次是
+noop（续跑判定认得出同一段，不从 start_it 重来）。
+
+门禁：nn python gate **1154 passed / exit 0**；根 `bun run check` **1853 pass / 0 fail**。
+
+### 未做（不写成已做）
+
+① **自动补传**（用户同一条需求的后半句「中途能连上 hub 就自动恢复产物在线回传」）——设计已定：
+每轮 best-effort `POST /offline/artifact`（按 `(run_id, it)` 幂等、首写锁定）+ 轮末
+`POST /offline/result`；`GET /health` 轻量探活；连不上静默跳过、下轮再试；产物目录 `delivered.json`
+记已投递项（重启后续投）；hub 侧落 `<job_root>/offline/<run_id>/` 并记 `offline_artifact` /
+`offline_result` 账本事件；token 走 secret 不进包。② 真云端（Kaggle/Colab）端到端一次——本机无
+GPU 节点。③ 控制台入口（导出按钮 / 离线进度显示）。
+
 ## §61 半离线整段落地：kind="run"（一次领走整段，节点自主跑完 + 产物可打包下载）（2026-09-17）
 
 **为什么记这一笔**：新增一种 job 语义（跨层协议 + 新的执行器 + 新的产物面），并抓到两个真缺陷；

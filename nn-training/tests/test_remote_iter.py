@@ -933,6 +933,7 @@ class _IterStub(TrainingSteps):
         *,
         plan_bytes: bytes | None = None,
         wait_timeout_sec: float = 0.0,
+        export_path: str | Path | None = None,
     ) -> dict:
         self.calls += 1
         raise self.exc

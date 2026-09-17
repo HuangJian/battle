@@ -242,6 +242,18 @@ def _run(
     return plan, m, fake, result, tmp_path / "art"
 
 
+def _warm_code_cache(tmp_path: Path) -> Path:
+    """预热内容寻址代码缓存（`code_cache/<manifest.code_sha256>/`）。
+
+    standalone 入口要求「代码可用」——要么产物里有 code.zip（全离线任务包），要么缓存已命中
+    （同一台机器上先跑过一段）。这些用例只关心段/续跑语义，给它暖缓存即可（manifest 的
+    code_sha256 是 `"z"*64`）。
+    """
+    root = tmp_path / "code_cache"
+    (root / ("z" * 64)).mkdir(parents=True, exist_ok=True)
+    return root
+
+
 def _ledger(art: Path) -> list[dict]:
     p = art / ArtifactStore.METRICS_NAME
     return [json.loads(ln) for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
@@ -347,7 +359,13 @@ def test_budget_stops_before_starting_next_iteration(tmp_path: Path) -> None:
     assert result["run_state"] == "budget"
     assert [r["it"] for r in result["iters"]] == [plan["start_it"]]  # 只有本轮（锚点）
     fake2 = _FakeRunJob(tmp_path)
-    res2 = run_standalone(artifacts_dir=art, run_job_fn=fake2, device="cpu", log=_quiet)
+    res2 = run_standalone(
+        artifacts_dir=art,
+        run_job_fn=fake2,
+        device="cpu",
+        code_cache_dir=_warm_code_cache(tmp_path),
+        log=_quiet,
+    )
     assert res2["it_end"] == plan["end_it"]
     assert [c["manifest"]["it"] for c in fake2.calls] == planned_iters(plan)
     assert fake2.calls[0]["init"] == ANCHOR_OUT  # 起点权重 = 本轮输出（不是重跑本轮）
@@ -367,7 +385,13 @@ def test_standalone_resume_continues_without_duplicate_rows(tmp_path: Path) -> N
     plan, _m, _fake, _result, art = _run(tmp_path, max_iters=2)
     before = _ledger(art)
     fake2 = _FakeRunJob(tmp_path)
-    res = run_standalone(artifacts_dir=art, run_job_fn=fake2, device="cpu", log=_quiet)
+    res = run_standalone(
+        artifacts_dir=art,
+        run_job_fn=fake2,
+        device="cpu",
+        code_cache_dir=_warm_code_cache(tmp_path),
+        log=_quiet,
+    )
     assert [c["manifest"]["it"] for c in fake2.calls] == planned_iters(plan)[2:]
     after = _ledger(art)
     assert [r["it"] for r in after] == [plan["start_it"], *planned_iters(plan)]
@@ -427,7 +451,13 @@ def test_iteration_failure_finalizes_artifacts_and_stays_resumable(tmp_path: Pat
     assert (art / ArtifactStore.ALL_ZIP).exists()  # 失败也收尾（否则人拿不到中间产物）
     assert ArtifactStore(art, run_id="run-runloop").weights_path(2).exists()
     good = _FakeRunJob(tmp_path)
-    res = run_standalone(artifacts_dir=art, run_job_fn=good, device="cpu", log=_quiet)
+    res = run_standalone(
+        artifacts_dir=art,
+        run_job_fn=good,
+        device="cpu",
+        code_cache_dir=_warm_code_cache(tmp_path),
+        log=_quiet,
+    )
     assert [c["manifest"]["it"] for c in good.calls] == [3, 4]
     assert res["it_end"] == 4
     assert [r["it"] for r in _ledger(art)] == [1, 2, 3, 4]

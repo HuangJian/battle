@@ -2329,3 +2329,45 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   `remote/hub_client.publish_job`（计划进 payload）、`rl/loop_steps.py`（段长解析 + `_remote_run_segment`
   + `wait_timeout_sec`）、`rl/loop_core.py`（段优先 + 跳过中间轮 eval 派发）、`rl/cli.py`。
   回归：`test_plan.py`(8) + `test_run_loop.py`(11) + `test_run_segment.py`(12)；细节 `docs/nn.progress.md §61`。
+## §2026-09-17-goalnn-offline-task-bundle（2026-09-17，全离线任务包：hub 导出 → Kaggle/Colab 上传 → 云机自主跑完；包是搬文件不是配网络）
+
+- **背景（用户需求，2026-09-17）**：「hub 支持打包导出训练任务（课程、初始权重、代码），以
+  kaggle/colab **官方支持方式**上传云机后，云机全程自主完成训练，并以官方方式提供产物打包下载；
+  若中途能连上 hub，云机自动恢复产物在线回传」。半离线（`kind="run"`）已经解决了「云机不依赖
+  hub 也能跑完 + 产物落盘」，但**任务本身还在网络上**（云机要轮询 hub 领 job）——全离线要的是
+  「hub 关机也能开工」。
+- **备选与否决**：① *让云机 clone 仓库 / pip 装依赖*（否决——官方入口是「数据集 / Drive / 文件
+  上传」，不是「配网络」；rollout 用 TS、训练用 torch，装环境本身是一整天）；② *拆成一堆 curl +
+  环境变量*（否决——把「搬文件」变成「配网络」，正是要消除的东西）；
+  ③ *导出时在 hub 登记 job 并把 token 塞进包*（**部分否决**：包会四处搬运，凭据不进包；导出也
+  不该以 hub 可达为前提）；④ *重建一份 manifest 而不复用训练侧的*（否决——解析者只有训练侧一份）。
+  采用：**单 zip + 两条命令 + 逐件 sha 对账**；token 走 Kaggle secret / `--hub-token-file`。
+- **契约（硬要求）**：① 包内 = 跑完整段所需的一切：`plan.json` / `manifest.json` /
+  `init_weights.json` / `opt.tar`（Adam 动量，缺它续训静默归零）/ **`code.zip`**（同 commit 的
+  python + TS 源码——云机没有仓，`build_pairs` 的重放靠它成立）/ `ts_code.zip`（rollout 运行时）；
+  `task.json` 是索引（逐件 sha256 + 字节数 + run_id + it/end_it + hub_url）。② 导入 = 铺成**可直接
+  续跑的产物目录**（`it-{it}/weights.json` + `opt.tar` + `ts_code/`），随后
+  `python -m remote.run_loop --artifacts <dir>` 即可；`run_loop --bundle <zip>` 一步到位。③ 包是
+  **不可信输入**：越界成员（zip-slip：绝对路径 / `..` / 盘符）、magic 不符、任一件 sha/字节数不符
+  一律**拒收且一局不跑**。④ 导出侧三道自检：计划 sha 与 manifest 不符 / 缺 code.zip / 缺
+  ts_code.zip 都拒导（缺件的包在云上只会以更难懂的方式失败）。⑤ 无 hub 运行**必须有代码快照**：
+  standalone 入口硬门（`code.zip` 或 `code_cache/<sha>/` 命中二者其一），否则拿空 base_url 去下载、
+  报一个跟真因无关的错。⑥ 导出**不记账本、不进待领池**（`publish_job(register=False)`）：这条腿的 job
+  没有人会来领，记一条 `job_pending` 只会让控制台显示一条永远等不到工人的任务。
+- **轮次对齐（最容易错的一处）**：loop 的 `it` = 已完成的下一轮 = 包里要跑的**第一轮**，所以
+  `plan.start_it = it - 1`（区间语义是 `start_it+1 .. end_it`）、`max_iters = n`（**不是 n-1**：
+  这里没有「job 自己那一轮」要扣——那一轮已由 hub 跑完，`args.out` 就是它的产物 = 包的起点）。
+- **违反后果**：把 `code.zip` 换成就地仓库 ⇒ 云机与 hub 的代码版本可以不一致，而 shard 血缘、
+  `wver`、`pairs_fp` 全都建立在「同一 commit」上；不逐件对账 ⇒ 一次截断的搬运变成一堆无法归因的
+  怪结果；standalone 不卡代码快照 ⇒ 空 base_url 下载报错把真因藏起来；导出记账本 ⇒ 控制台出现
+  永远等不到工人的 job（并可能被别的节点领去做错事）。
+- **遗留（未做，不写成已做）**：① **自动补传**（用户同一条需求的后半句）——设计已定：
+  云机每轮 best-effort `POST /offline/artifact`（权重 + 指标，按 `(run_id, it)` 幂等，
+  first-write-locked；含轮末 `POST /offline/result`），`GET /health` 做轻量探活，连不上静默跳过，
+  产物目录里 `delivered.json` 记已投递项；hub 侧落在 `<job_root>/offline/<run_id>/` 并记
+  `offline_artifact`/`offline_result` 账本事件；token 走 secret 不进包；② 真云端（Kaggle/Colab）
+  端到端一次（本机无 GPU 节点）；③ 控制台入口（导出按钮 / 进度显示）。
+- **落地**：`remote/bundle.py`（导出/导入/索引/README/zip-slip 防护）、`remote/run_loop.py`
+  （`--bundle` 导入即跑；代码与 TS 字节走 `preloaded`；standalone 的代码快照硬门）、
+  `remote/hub_client.publish_job(register=False)`、`rl/loop_steps.py`（`--export-bundle` 导出钩子 +
+  `BundleExportedError` 干净退出）、`rl/loop_core.py`、`rl/cli.py`。回归：`tests/test_bundle.py`(7)。

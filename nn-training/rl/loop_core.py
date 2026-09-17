@@ -29,6 +29,7 @@ from rl.events import log_iter_error, write_run_complete, write_run_start
 from rl.log import log
 from rl.loop_guards import TrainingGuards
 from rl.loop_steps import (
+    BundleExportedError,
     SmokeVoidRoundError,
     TrainingSteps,
     _rollout_source,
@@ -311,6 +312,14 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 # hub 期间失联也不影响（产物目录是交付面）。整段优先于逐轮上云。
                 seg = _run_segment_iters(args)
                 seg_ran = False
+                if getattr(args, "export_bundle", ""):
+                    # 全离线导出：本轮**不训练**——把 it..it+n-1 打成可上传云机的任务包后退出。
+                    if seg == 0:
+                        raise SystemExit(
+                            "[run_rl] --export-bundle 需要 --run-iters 说明整段长度"
+                            "（>0 = N 轮；<0 = 到课程末尾）"
+                        )
+                    self._export_offline_bundle(it, pairs, seg)
                 if seg != 0:
                     self._node_rollout = True  # 本机不采样、不预采、不本地 PPO
                     it = self._remote_run_segment(it, pairs, seg)
@@ -386,6 +395,10 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                     )
                 )
                 self._consec_fail = 0
+            except BundleExportedError as e:
+                # 全离线任务包已写出：本轮不训练、不等待，干净退出（不是失败，不计连击）。
+                log(f"[run_rl] 全离线任务包导出完成：{e}——退出（上传云机后由云端自主跑完）")
+                return
             except SmokeVoidRoundError:
                 # 冒烟回显（worker --echo）：已走完全链路但权重是 init 回显——作废。
                 # 不计失败连击、不 sleep；it 原地（异常从 _remote_ppo 抛出时本轮

@@ -38,6 +38,15 @@ if TYPE_CHECKING:
     from rl.commit_journal import CommitJournal
 
 
+class BundleExportedError(Exception):
+    """全离线任务包已写出（`--export-bundle`）：本轮不训练、不等待，干净退出。
+
+    异常而不是返回值：导出路径穿过发布链（`_remote_ppo`）的中间层，那几层的返回值语义
+    是「云回传结果」；用一个专用异常把「停在这里」传回去，比让每层都判断一个 flag 清楚。
+    它与 `SmokeVoidRoundError` 不同：冒烟是「跑完了但作废」，这个是「根本没跑」。
+    """
+
+
 class SmokeVoidRoundError(Exception):
     """冒烟回显结果（result.smoke=true，remote/worker.py --echo）。
 
@@ -1071,6 +1080,7 @@ class TrainingSteps:
         *,
         plan_bytes: bytes | None = None,
         wait_timeout_sec: float = 0.0,
+        export_path: str | Path | None = None,
     ) -> dict:
         """远程 PPO（--ppo remote，D11/D12）：打包 → 发布 job → 轮询等待 → 三重校验落位。
 
@@ -1247,6 +1257,9 @@ class TrainingSteps:
             kind="run" if plan_bytes is not None else ("iter" if rollout_spec else "ppo"),
             rollout_spec=rollout_spec,
             plan_bytes=plan_bytes,
+            # 全离线导出：只建 job 目录（拿它当打包源），不记账本也不进待领池——
+            # 云机不在网络上，记一条 `job_pending` 只会让控制台看到一条永远等不到工人的任务。
+            register=export_path is None,
             ts_code_sha256=(
                 str(getattr(self, "_ts_code_sha256", "") or "") if rollout_spec else ""
             ),
@@ -1255,6 +1268,29 @@ class TrainingSteps:
         )
         jid = manifest["job_id"]
         pack_sec = round(time.time() - t_pack, 3)
+        if export_path is not None:
+            # 全离线：不等待、不发 job——把这一段任务打成能上传 Kaggle/Colab 的任务包。
+            from remote.bundle import export_bundle
+
+            assert plan_bytes is not None  # 调用方保证（kind=run）
+            index = export_bundle(
+                export_path,
+                manifest=manifest,
+                plan_bytes=plan_bytes,
+                init_weights_path=args.out,
+                code_zip_path=self._code_zip_path,
+                job_dir=Path(job_root) / jid,
+                hub_url=hub_url,
+                note=f"run_rl --export-bundle（it{it} 之后整段；course={getattr(args, 'course_name', '') or '-'}）",
+            )
+            log(
+                f"[run_rl] 全离线任务包已导出：{export_path}"
+                f"（{index['run_id']} it{index['it']} → it{index['end_it']}，"
+                f"{sum(int(p['bytes']) for p in index['parts'].values()) / 1e6:.1f} MB）—"
+                "上传 Kaggle/Colab 后：remote.bundle import + remote.run_loop"
+            )
+            self._bundle_index = index
+            raise BundleExportedError(str(export_path))
         # 阻塞等待云 worker 完成（与 _serial_ppo 同构；超时由 hub-server 租约吸收）。
         # 半离线段要等整段（节点跑完 N 轮才回传），所以预算由调用方给（缺省 30min）。
         timeout_sec = float(wait_timeout_sec or 0.0) or 30 * 60.0
@@ -1635,6 +1671,72 @@ class TrainingSteps:
             f"往返 {round(time.time() - t0, 1)}s，state={result.get('run_state')}）"
         )
         return got_end
+
+    def _export_offline_bundle(self, it: int, pairs: list[tuple[int, int]], n: int) -> None:
+        """`--export-bundle`：把 it..it+n-1 打成**可上传云机**的全离线任务包（本轮不训练）。
+
+        用户需求（2026-09-17）：「hub 支持打包导出训练任务（课程、初始权重、代码），以
+        kaggle/colab 官方方式上传云机后，云机全程自主完成训练」。与半离线的差别：包一旦
+        写出，hub 就可以关机——任务信息（课程/超参/血缘/计划/代码）全在包里。
+
+        轮次对齐（整条第 N 个容易错的地方）：本轮的 `it` **就是**包里要跑的第一轮（loop 的
+        `it` = last_completed+1），而包里 `plan.start_it` 必须 = `it - 1`（计划区间是
+        `start_it+1 .. end_it`，起点权重 = `args.out` = W(it-1) 的产物）。所以
+        `max_iters = n`（不是 n-1：这里没有「job 自己那一轮」要扣）。
+
+        没跑过任何一轮（`args.out` 无权重）就拒导——包里没有起点的任务等于没任务。
+        """
+        args = self.args
+        if str(getattr(args, "ppo", "") or "") != "remote":
+            raise SystemExit(
+                "[run_rl] --export-bundle 要求 --ppo remote：包里的 manifest 需要云端 PPO 的"
+                "超参与策略血缘（本机模式没有这些字段，无法拼出可跑的任务）"
+            )
+        iters_total = int(getattr(args, "iters", 0) or 0)
+        if iters_total <= 0:
+            raise SystemExit(
+                "[run_rl] --export-bundle 需要课程声明 iters（包里的计划必须有终点——「跑到哪停」"
+                "是任务定义的一部分，不能靠云机猜）"
+            )
+        if it <= 1 and not dist_common.weights_fingerprint(args.out):
+            raise SystemExit(
+                f"[run_rl] --export-bundle: 没有起点权重（{args.out}）——先跑至少一轮，"
+                "或把已有权重放到 --out 指向的位置"
+            )
+        from rl.iter_job import build_iter_spec
+        from rl.plan import RUN_NODE_LABEL, build_plan, dump_plan, planned_iters
+
+        wver = dist_common.weights_fingerprint(args.out)
+        workers = int(getattr(args, "remote_iter_workers", 0) or 0) or int(
+            getattr(args, "workers", 1) or 1
+        )
+        game_timeout = float(getattr(args, "remote_iter_game_timeout", 0.0) or 0.0)
+        spec = build_iter_spec(
+            args,
+            pairs,
+            wver=wver,
+            workers=workers,
+            game_timeout_sec=game_timeout,
+            hub_bun=str(getattr(self, "bun", "bun") or "bun"),
+            node_label=RUN_NODE_LABEL,
+        )
+        plan = build_plan(
+            args,
+            it=it - 1,
+            iters_total=iters_total,
+            rotate_seed=int(self._rotate_seed),
+            max_iters=0 if n < 0 else n,
+            workers=workers,
+            game_timeout_sec=game_timeout,
+            budget_sec=float(getattr(args, "run_budget_sec", 0.0) or 0.0),
+            log=log,
+        )
+        log(
+            f"[run_rl] 全离线导出：it{it} → it{plan['end_it']}"
+            f"（{len(planned_iters(plan))} 轮）——本轮不训练、不等待"
+        )
+        # export_path 非空 ⇒ `_remote_ppo` 只建 job 目录（打包源）+ 写包 + 抛 BundleExportedError。
+        self._remote_ppo(it, spec, plan_bytes=dump_plan(plan), export_path=str(args.export_bundle))
 
     def _export_weights(self, it: int) -> None:
         """按模式导出权重（goal/intent/per-tick）并归档（只归档不自动清理）。

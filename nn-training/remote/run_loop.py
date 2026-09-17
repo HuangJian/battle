@@ -48,6 +48,7 @@ from remote.artifacts import (
     sha256_bytes,
     sha256_file,
 )
+from remote.bundle import CODE_NAME as BUNDLE_CODE_NAME
 from remote.protocol import (
     PAYLOAD_NAME,
     PLAN_NAME,
@@ -70,6 +71,9 @@ from rl.plan import iter_spec, pairs_for, plan_pairs_fp, planned_iters, validate
 
 #: 产物目录里随段携带的 TS 运行时树（让「只下载产物 zip」的机器也能续跑）。
 TS_TREE_DIR = "ts_code"
+#: 任务包（全离线）里随包携带的两份运行时字节：python 代码快照与 TS 运行时 zip。
+#: 有它们，节点可以**完全不联网**跑完整段（`run_job` 的 preloaded 直接吃这两份字节）。
+TS_CODE_ZIP_NAME = "ts_code.zip"
 #: 单轮的瞬时失败重试上限（自主模式没有 hub 兜底：重试够了就干净停下留产物）。
 ITER_RETRIES = 2
 
@@ -148,6 +152,10 @@ class RunContext:
         torch_threads: int = 0,
         code_cache_dir: Path | None = None,
         ts_code_cache_dir: Path | None = None,
+        # 全离线：随产物/任务包携带的两份字节（`run_job` 的 preloaded）——为空时
+        # `run_job` 会回落去下载（在线链路），或直接报错（纯离线且未带包）。
+        code_zip_bytes: bytes = b"",
+        ts_code_zip_bytes: bytes = b"",
         course: Any = None,
         max_iters: int = 0,
         budget_sec: float = 0.0,
@@ -163,6 +171,8 @@ class RunContext:
         self.torch_threads = int(torch_threads or 0)
         self.code_cache_dir = code_cache_dir
         self.ts_code_cache_dir = ts_code_cache_dir
+        self.code_zip_bytes = code_zip_bytes
+        self.ts_code_zip_bytes = ts_code_zip_bytes
         #: 已加载的 CourseConfig（argv 重定向要按关卡取 stageJson；worker 侧在尾巴处已有）
         self.course = course
         self.max_iters = int(max_iters or 0)
@@ -200,6 +210,8 @@ def open_run_context(
     code_cache_dir: Path | None = None,
     ts_code_cache_dir: Path | None = None,
     ts_tree: Path | None = None,
+    code_zip_bytes: bytes | None = None,
+    ts_code_zip_bytes: bytes | None = None,
     course: Any = None,
     max_iters: int = 0,
     budget_sec: float = 0.0,
@@ -227,6 +239,12 @@ def open_run_context(
         torch_threads=torch_threads,
         code_cache_dir=code_cache_dir,
         ts_code_cache_dir=ts_code_cache_dir,
+        code_zip_bytes=(code_zip_bytes if code_zip_bytes is not None else _read_opt_file(root, BUNDLE_CODE_NAME)),
+        ts_code_zip_bytes=(
+            ts_code_zip_bytes
+            if ts_code_zip_bytes is not None
+            else _read_opt_file(root, TS_CODE_ZIP_NAME)
+        ),
         course=course,
         max_iters=max_iters,
         budget_sec=budget_sec,
@@ -237,6 +255,15 @@ def open_run_context(
     _seed_start_checkpoint(ctx, job_dir=Path(job_dir), start_it=int(plan["start_it"]), last_it=last)
     _carry_ts_tree(ctx, ts_code_cache_dir=ts_code_cache_dir, ts_tree=ts_tree)
     return ctx
+
+
+def _read_opt_file(root: Path, name: str) -> bytes:
+    """产物目录里的可选件字节（缺失 → 空：调用方按在线链路处理或响亮报错）。"""
+    p = root / name
+    try:
+        return p.read_bytes() if p.is_file() else b""
+    except OSError:
+        return b""
 
 
 def load_planned_manifest(path: str | Path) -> tuple[dict, dict]:
@@ -393,6 +420,14 @@ def _run_iteration(ctx: RunContext, it: int, *, prev_it: int) -> dict:
     m["payload_sha256"] = pack_payload([], m, zip_path, extra_files=[payload_init])
     m = normalize_manifest(m)
     run_job = ctx.run_job_fn or _real_run_job
+    # 代码快照与 TS 运行时：**有随包字节就用字节**（全离线：节点无仓、不联网），没有就
+    # 交给 `run_job` 走它本来的路（命中 code_cache / 向 hub 下载——半离线轮就是这条路：
+    # worker 自己那一轮已把 code.zip 落进内容寻址缓存）。两个来源都存在时优先字节。
+    preloaded: dict = {"payload_zip": zip_path.read_bytes()}
+    if ctx.code_zip_bytes:
+        preloaded["code_zip"] = ctx.code_zip_bytes
+    if ctx.ts_code_zip_bytes:
+        preloaded["ts_code_zip"] = ctx.ts_code_zip_bytes
     result = run_job(
         "",
         "",
@@ -400,7 +435,7 @@ def _run_iteration(ctx: RunContext, it: int, *, prev_it: int) -> dict:
         work_dir=ctx.work_dir,
         device=ctx.device,
         torch_threads=ctx.torch_threads,
-        preloaded={"payload_zip": zip_path.read_bytes()},
+        preloaded=preloaded,
         code_cache_dir=ctx.code_cache_dir,
         ts_code_cache_dir=ctx.ts_code_cache_dir,
         log=ctx.log,
@@ -574,10 +609,34 @@ def run_standalone(
             "WARN: 产物目录里没有 TS 运行时树（ts_code/）且未给 --ts-root——"
             "rollout 需要它；请把上一段的 ts_code/ 一起带过来"
         )
+    _require_offline_runtime(ctx, work_dir=wd)
     st = ctx.store.read_state() or {}
     start_from = int(st.get("last_it", plan["start_it"]))
     log(f"续跑起点 it{start_from}（计划 it{plan['start_it']} → it{plan['end_it']}）")
     return _drive(ctx, session=[], start_from=start_from)
+
+
+def _require_offline_runtime(ctx: RunContext, *, work_dir: Path) -> None:
+    """standalone（无 hub）入口的硬门：没有代码快照就**现在**响亮拒收。
+
+    为什么不在 `_run_iteration` 里卡：半离线轮（hub 发的 kind=run）走的是同一条迭代函数，
+    它的代码是 worker 自己那一轮从 hub 下好、已落进内容寻址缓存（`code_cache/<sha>/`）的
+    ——那里没有 `code.zip` 字节也**没问题**。而 standalone 是「无 hub」入口：既没有缓存、
+    又没随包字节时，`run_job` 会拿着空 base_url 去下载，报一个跟真因无关的错（重试/联网
+    都治不了）。所以卡在入口，并把修法写进错误里。
+    """
+    if ctx.code_zip_bytes:
+        return
+    sha = str(ctx.manifest.get("code_sha256", "") or "")
+    root = ctx.code_cache_dir if ctx.code_cache_dir is not None else work_dir / "code_cache"
+    if sha and (Path(root) / sha).is_dir():
+        return  # 缓存已命中（同一台机器上先跑过一段 / 共享缓存）
+    raise ProtocolError(
+        "无 hub 运行需要代码快照，但没有：产物目录里没有 code.zip，也没有 code_cache/"
+        f"{sha[:12] if sha else '<sha>'}…。整段重用同一个 commit 的代码，节点没有仓库可回退。"
+        "修法：用任务包（`python -m remote.bundle import <zip> --dest <目录>`）或把 code.zip"
+        "放进产物目录（`--code-cache-dir` 指向已有缓存也可）"
+    )
 
 
 def _drive(ctx: RunContext, *, session: list[dict], start_from: int) -> dict:
@@ -688,8 +747,17 @@ def _encode_opt(opt_path: Path) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     """`python -m remote.run_loop --artifacts <dir>`：产物目录即任务，续跑到计划末尾。"""
-    ap = argparse.ArgumentParser(description="半离线自主段续跑（产物目录是唯一输入；不需要 hub）")
-    ap.add_argument("--artifacts", required=True, help="产物目录（含 plan.json/state.json）")
+    ap = argparse.ArgumentParser(description="自主段运行（产物目录是唯一输入；不需要 hub）")
+    ap.add_argument(
+        "--bundle",
+        default="",
+        help="全离线任务包 zip（remote/bundle：先铺成产物目录再跑；与 --artifacts 二选一）",
+    )
+    ap.add_argument(
+        "--artifacts",
+        default="",
+        help="产物目录（含 plan.json/state.json；用 --bundle 时可作铺设目标）",
+    )
     ap.add_argument("--work-dir", default="", help="临时工作目录（缺省 <artifacts>/work）")
     ap.add_argument("--ts-root", default="", help="TS 运行时树（缺省 <artifacts>/ts_code）")
     ap.add_argument("--device", default="cuda", help="torch device: cpu / cuda / cuda-dp / tpu")
@@ -702,7 +770,29 @@ def main(argv: list[str] | None = None) -> int:
         help="本次最多跑多少秒（0=不限）——Kaggle 会话到点前干净停机的把手",
     )
     args = ap.parse_args(argv)
+    if not args.artifacts and not args.bundle:
+        print("[run] 需要 --artifacts 或 --bundle 之一", file=sys.stderr, flush=True)
+        return 2
+    if args.bundle:
+        # 全离线入口：包 → 产物目录（逐件对账）→ 就地跑。铺在哪由 `--artifacts` 决定，
+        # 缺省铺在包旁边（人一眼能找到产物）。
+        from remote.bundle import import_bundle, read_bundle_index
 
+        try:
+            idx = read_bundle_index(args.bundle)
+            dest = args.artifacts or str(Path(args.bundle).with_suffix(""))
+            got = import_bundle(args.bundle, dest)
+        except ProtocolError as e:
+            print(f"[run] 任务包导入失败：{e}", file=sys.stderr, flush=True)
+            return 1
+        print(
+            f"[run] 任务包已导入：{got['artifacts_dir']}（{idx['run_id']} it{idx['it']} →"
+            f" it{idx['end_it']}）",
+            flush=True,
+        )
+        args.artifacts = got["artifacts_dir"]
+        if not args.ts_root and got.get("ts_code_tree"):
+            args.ts_root = got["ts_code_tree"]
     root = Path(args.artifacts)
     try:
         plan, manifest = load_planned_manifest(root)
