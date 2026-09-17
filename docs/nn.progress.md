@@ -63,6 +63,55 @@ pass 81.0%→95.0%；通关耗时 928.7→1002.1（**+7.9%，CI 大幅重叠 = �
 | **400800–400999** | **空闲** ⇒ `x3-rebirth` 预注册此段，中途不得改 |
 
 ---
+## §70 「云端同机 rollout + PPO」全链路集成测试：一条真链路，两个面板读法（2026-09-17）
+
+**用户指令**：写一个集成测试，确保「云端同机 rollout + PPO」全流程畅通，本地 dashboard
+能正常读出云端回传的**每 it 权重与指标**；rollout/PPO 用假节点，不跑实际运算。
+
+新增 `nn-training/e2e/test_cloud_iter_e2e.py`（单用例，**~2.0s**，进门禁 e2e 层；见文末"墙钟"）：
+
+```
+训练侧 TrainingLoop._remote_iter(it)     真 build_iter_spec + 真 publish_job（磁盘 IPC）
+  → 真 hub-server（127.0.0.1 临时端口，真租约/真账本；单 worker ⇒ race=false 独占）
+  → 假云机（本测试线程）：真 /jobs/next 领取 → 真下载 payload/code/ts_code（逐 sha 对账）
+      假 rollout（按 argv 逐局写 w{i}/rl_sX_seedY + _rl_report.json，**不 spawn bun**）
+      → 真 verify_shards（实产集 == 声明集）+ 真 combine_reports（聚合口径不假）
+      假 PPO（换一份权重 + opt tar + agg，**不碰 torch**）
+      → 真 validate_result + 真 pack_result_v2（v2 线格式）→ POST result
+  → 训练侧 真 wait_job → 真 verify_and_land（三重校验 + 权重原子落位 + opt 解包）
+  → 真 _export_weights（归档）→ 真 _record_iteration（iteration 账本）
+```
+
+**断言面 = 面板的三个真读者**（python 侧独立重实现其读法，并把口径钉在面板源码的字面量
+上——双端锚，同 `tests/nn/schema-fingerprint.test.ts` 的思路）：
+
+| 面板面 | 源码 | 本测试断言 |
+|---|---|---|
+| 每 it 权重 | `eval-board/ckpts.ts::iterFromCkpt`（`/\.it(\d+)\./`）+ `buildEvalCkptsView` | 归档名解出 iter==7、归档/活动指针字节 == **云端回传**的那份（≠ 本地 init） |
+| 每 it 指标 | `server/iters.ts::readIterMetrics` | iteration 行字段**存在且非空** + 逐值对账（winRate 0.5 / score_mean 0.1 / dim_means.kills 0.5 / rollout_sec=节点自报 / ppo_cloud_sec=云真训练秒 / wire.rollout_src==node；M0 计量：hub 实测 `up_bytes`==节点 payload 字节、`down_bytes`==result 体字节、`wire.worker.payload_bytes` 同值） |
+| job 账本 | `api/ppo-queue.ts::detectPpoQueueStall` | `job_pending` → `job_completed` 有序、`result/result.json` 与 `claimed` 标记齐、无 `fail.json` |
+
+**为什么单独断言「字段存在」**：`readIterMetrics` 用 `Number(r.x ?? 0)`——写入侧漏一个字段
+会被**静默读成 0**（曲线掉零、表格 0% 而不报错）。这是读者**不会**替我们发现的回归，
+只有存在性断言能抓。
+
+**失败卫生**：假云机任何异常都 (a) 记进 `node.errors`（主线程先断言它，根因不被超时掩埋）、
+(b) `POST /jobs/{id}/fail` —— 真链路上这条让训练侧 `wait_job` 立即带原因收兵，测试红了也
+是秒级；训练侧另跑在独立线程 + 45s 限时监督（不会陪 `wait_job` 等满 30min）。
+
+**边界（其余面由既有测试承担）**：push 直推云机 → `e2e/test_push_mode_integration.py`；
+真 bun rollout → `tests/test_remote_iter_real_bun.py`（本机无 bun/权重时 skip）；
+竞速输家叫停仍是后续项（§67）。
+
+**墙钟（首版 6.8s → 现 ~2.0s）**：掐表后最大的那块不是算，是**等**——`wait_job` 的
+`poll_sec` 生产默认 **5s**（为隧道抖动设计的节奏），而假云机在 publish 后几百 ms 就把结果
+POST 上来了 ⇒ 训练侧仍要等满下一个轮询窗。实测分解：**1.0s** 准备/打包/发布（code.zip 238
+文件 + ts_code.zip 340 文件 ~1.4MB + tar.xz payload）+ **5.0s** 轮询窗 + 收尾。
+⇒ 加 `fast_wait_poll` fixture：**只**把 `poll_sec` 调成 0.05（`wait_job` 本体全真跑：404 续等、
+410 带原因收兵、5xx 退避、超时前 `/status` 二次确认）；真 CLI 解析器 import 提到模块级。
+现测 1.99 / 2.00 / 2.08s，占空降到 ~2s（剩下的都是真工作：两包打包 + 真落位）。
+
+**门禁**：nn python gate **1223 passed / 3 skipped**（+1 例）；根 `bun run check` 1851 pass / 0 fail。
 
 ## §67 单课程多卡 → 竞速广播：最新 job 派给每个 worker，先回传者胜（2026-09-17）
 
