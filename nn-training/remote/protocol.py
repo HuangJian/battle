@@ -538,6 +538,49 @@ TS_CODE_NAME = "ts_code.zip"
 FAIL_NAME = "fail.json"
 #: 失败原因回传体上限（人读的诊断字符串，1 个文本块足够；防大体打爆 hub 磁盘）。
 FAIL_BODY_MAX = 64 * 1024
+
+# ---- 产物补传（「中途能连上 hub 就自动回传」；2026-09-17）----
+# 全离线/半离线段把逐轮产物落在**节点本地**（Kaggle working / Colab Drive），产物本身就
+# 是交付面；补传是**第二份拷贝**：节点一旦探到 hub 可达，就 best-effort 把已落盘的轮次
+# 与段末摘要推上去，让控制面不用等人搬 zip。**训练永不因网络停摆**（连不上 = 静默跳过）。
+#: 补传端点（节点 → hub；两条都必须 Bearer 鉴权，与其余端点同一条边界）。
+#: 为什么不做无鉴权的 `/health`：探活要回答的是「**我能不能用**这条链」，不只是「对面
+#: 活着」——只证可达的探针会让「token 配错」在第一次上传 2MB 体之后才暴露，而且多一个
+#: 对公网泄露「hub 在线」的端点。带 token 探 `/ping` 一次同时证两件事。
+OFFLINE_ARTIFACT_PATH = "/offline/artifact"
+OFFLINE_RESULT_PATH = "/offline/result"
+#: 单轮补传体上限（weights ~0.3MB + opt ~1MB，base64 后 ~1.8MB；8MB 已极宽裕）。
+OFFLINE_ARTIFACT_BODY_MAX = 8 * 1024 * 1024
+#: 段末摘要体上限（人读的状态 + 计数，1 个文本块足够）。
+OFFLINE_RESULT_BODY_MAX = 256 * 1024
+#: 产物目录里补传记账文件名（= 已投递项；重启续投靠它，不靠内存）。
+OFFLINE_DELIVERED_NAME = "delivered.json"
+
+_RUN_ID_OK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+#: run_id 长度上限（它同时是 hub 侧目录名，必须短且有界）。
+RUN_ID_MAX = 64
+
+
+def sanitize_run_id(raw: object) -> str:
+    """把远端的 `run_id` 变成**可以安全当目录名**的字符串，否则抛 ProtocolError。
+
+    为什么必须做（这是本端点唯一的路径注入面）：hub 侧要把它拼进
+    `job_root/offline/<run_id>/` —— 一个 `../../` 就能在 hub 上写任意文件（补传体还是
+    远端控制不了的内容）。规则刻意只放行「字母数字开头 + 字母数字/点/下划线/连字符」：
+    真实 run_id 是 `x3-rebirth-a2-<ts>-<rand>` 这种形状，用不着更宽的字符集。
+    另外**显式拒绝 `..`**（`.`/`-` 本身合法，但 `a..b` 这种串在 Windows 上的解析
+    行为不值得赌）与长度上限（目录名要短、要有界）。
+
+    非字符串（None / 数字 / 列表）一律当成非法，**不做 str() 兜底**：这是不可信输入的
+    边界，宽容只会把「上游传错了类型」变成一个看似正常的目录名。
+    """
+    s = raw.strip() if isinstance(raw, str) else ""
+    if not s or len(s) > RUN_ID_MAX or not _RUN_ID_OK.match(s) or ".." in s:
+        raise ProtocolError(
+            f"run_id 非法（只接受 [A-Za-z0-9][A-Za-z0-9._-]* 且 ≤{RUN_ID_MAX} 字符、不含 '..'）: "
+            f"{s[:80]!r}"
+        )
+    return s
 #: kind=iter 的 payload 内要点名的 init 权重文件名（节点跑 rollout 的 --weights）。
 INIT_WEIGHTS_NAME = "init_weights.json"
 # 标注成 Literal：typeshed 的 tarfile.open("w:xz") 重载要求 preset 为 Literal[0..9]，

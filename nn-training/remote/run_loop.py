@@ -22,9 +22,15 @@ hub 监管轮走的是字面同一条代码路径，连校验口径都一致。
 产物（`remote/artifacts.py`）是**唯一**长期记录：hub 在不在都不影响它；`ts_code/` 也随
 产物携带（几 MB），因此「只下载产物 zip」的机器可以独立续跑。
 
-命令行（新会话续跑 / 无 hub 的纯手工递送）：
+**产物补传**（`remote/offline_deliver.py`；可选）：每轮落盘之后顺手问一句 hub 在不在，
+在就把积压的轮次 best-effort 推上去（`delivered.json` 记账，重启后续投）。给 `hub_url`
++ token 即开启；不给、或探不到、或鉴权被拒 ⇒ 零影响（安静跳过，训练照跑）。**补传永
+不阻塞、永不抛**：它只是「产物比别人早一步到达控制面」的旁路，不是训练的一部分。
+
+命令行（新会话续跑 / 无 hub 的纯手工递送 / 中途恢复在线回传）：
 
     python -m remote.run_loop --artifacts <产物目录> [--budget-sec 3600] [--device cuda]
+                                     [--hub-url https://hub.example --hub-token-file ~/tok]
 
 手工递送（完全没有 hub）时，目录里放四样东西即可开跑：`plan.json` + `manifest.json`
 （课程/超参快照）+ `init_weights.json`（起点权重）+ `ts_code/`（TS 运行时树）。
@@ -49,6 +55,7 @@ from remote.artifacts import (
     sha256_file,
 )
 from remote.bundle import CODE_NAME as BUNDLE_CODE_NAME
+from remote.offline_deliver import OfflineDeliverer, make_deliverer
 from remote.protocol import (
     PAYLOAD_NAME,
     PLAN_NAME,
@@ -159,6 +166,9 @@ class RunContext:
         course: Any = None,
         max_iters: int = 0,
         budget_sec: float = 0.0,
+        #: 产物补传（「中途能连上 hub 就自动恢复在线回传」）：None = 这条腿没有补传
+        #: （纯离线且没给 hub 地址，或用户显式关掉）——产物照常落本地。
+        deliverer: OfflineDeliverer | None = None,
         run_job_fn: Callable[..., dict] | None = None,
         log: Callable[[str], None] = _log_default,
     ) -> None:
@@ -177,6 +187,7 @@ class RunContext:
         self.course = course
         self.max_iters = int(max_iters or 0)
         self.budget_sec = float(budget_sec or plan.get("budget_sec", 0.0) or 0.0)
+        self.deliverer = deliverer
         self.run_job_fn = run_job_fn
         self.log = log
         self.t0 = time.time()
@@ -195,6 +206,25 @@ class RunContext:
         if self.budget_sec <= 0:
             return float("inf")
         return self.budget_sec - (time.time() - self.t0)
+
+    # ---- 产物补传（best-effort；两个方法都**永不抛**，失败 = 产物停在本地）----
+
+    def deliver_round(self, it: int) -> None:
+        """一轮落盘后顺手把积压的轮次推给 hub（包含这一轮）。
+
+        点与「落盘」同级是先后的：产物先自洽（`ArtifactStore.checkpoint`），再尽力出网
+        ——反过来的话，一次慢网络就会把「本轮已完整落盘」这个事实推后到网络之后。
+        """
+        if self.deliverer is None:
+            return
+        self.deliverer.sync()
+
+    def deliver_final(self, *, it_end: int, state: str, summary: dict | None = None) -> None:
+        """段末：补完积压 + 推一份摘要（跑到哪 / 什么状态 / 为什么停）。"""
+        if self.deliverer is None:
+            return
+        self.deliverer.sync()
+        self.deliverer.deliver_result(it_end=int(it_end), state=str(state), summary=summary)
 
 
 def open_run_context(
@@ -215,6 +245,11 @@ def open_run_context(
     course: Any = None,
     max_iters: int = 0,
     budget_sec: float = 0.0,
+    # ---- 产物补传（可选；缺任一即关）----
+    hub_url: str = "",
+    hub_token: str = "",
+    deliver: bool = True,
+    deliverer: OfflineDeliverer | None = None,
     run_job_fn: Callable[..., dict] | None = None,
     log: Callable[[str], None] = _log_default,
 ) -> RunContext:
@@ -248,9 +283,30 @@ def open_run_context(
         course=course,
         max_iters=max_iters,
         budget_sec=budget_sec,
+        deliverer=(
+            deliverer
+            if deliverer is not None
+            else (
+                make_deliverer(
+                    hub_url=hub_url,
+                    hub_token=hub_token,
+                    run_id=store.run_id,
+                    artifacts_dir=store.root,
+                    log=log,
+                )
+                if deliver
+                else None
+            )
+        ),
         run_job_fn=run_job_fn,
         log=log,
     )
+    if ctx.deliverer is not None:
+        st = ctx.deliverer.status()
+        log(
+            f"产物补传已启用：{st['hub_url']}（已投递 {st['delivered']} 轮，"
+            f"待投递 {st['pending']} 轮）——连不上就静默跳过，训练不受影响"
+        )
     last = int(state.get("last_it", plan["start_it"]))
     _seed_start_checkpoint(ctx, job_dir=Path(job_dir), start_it=int(plan["start_it"]), last_it=last)
     _carry_ts_tree(ctx, ts_code_cache_dir=ts_code_cache_dir, ts_tree=ts_tree)
@@ -484,6 +540,7 @@ def _checkpoint(ctx: RunContext, it: int, result: dict, *, wall_sec: float, phas
         f"it{it} 落盘：kl={agg.get('kl')} mean_ret={agg.get('mean_ret')} "
         f"winRate={(report or {}).get('winRate')} wall={row['wall_sec']}s → {ctx.store.dir_for(it)}"
     )
+    ctx.deliver_round(it)  # 补传在落盘之后（先自洽，再尽力出网）
     return entry
 
 
@@ -507,6 +564,11 @@ def run_plan_job(
     artifacts_dir: str | Path | None = None,
     max_iters: int = 0,
     budget_sec: float = 0.0,
+    #: 产物补传：本 job 就是从这条连接上领来的，地址与 token 手边就有——半离线段因此
+    #: **默认就开着补传**（hub 中途失联时不至于「跑完一整段、控制面一无所知」）。
+    hub_url: str = "",
+    hub_token: str = "",
+    deliver: bool = True,
     run_job_fn: Callable[..., dict] | None = None,
     log: Callable[[str], None] = _log_default,
 ) -> dict:
@@ -534,6 +596,9 @@ def run_plan_job(
         course=course,
         max_iters=max_iters,
         budget_sec=budget_sec,
+        hub_url=hub_url,
+        hub_token=hub_token,
+        deliver=deliver,
         run_job_fn=run_job_fn,
         log=log,
     )
@@ -569,6 +634,12 @@ def run_standalone(
     torch_threads: int = 0,
     max_iters: int = 0,
     budget_sec: float = 0.0,
+    #: 产物补传（可选）：给了 hub 地址 + token 就会在每轮落盘后尽力推一份上去。
+    #: 全离线腿的常见形态是「一开始连不上（甚至 hub 关机）、后来能连上了」——
+    #: 这里不做任何"记住连不上就别试"的记忆，每轮都探一次（探不到就一跳而过）。
+    hub_url: str = "",
+    hub_token: str = "",
+    deliver: bool = True,
     run_job_fn: Callable[..., dict] | None = None,
     log: Callable[[str], None] = _log_default,
 ) -> dict:
@@ -601,6 +672,9 @@ def run_standalone(
         ts_tree=Path(ts_code_dir) if ts_code_dir is not None else root / TS_TREE_DIR,
         max_iters=max_iters,
         budget_sec=budget_sec,
+        hub_url=hub_url,
+        hub_token=hub_token,
+        deliver=deliver,
         run_job_fn=run_job_fn,
         log=log,
     )
@@ -645,6 +719,8 @@ def _drive(ctx: RunContext, *, session: list[dict], start_from: int) -> dict:
     if not todo:
         ctx.log("计划内的轮次都已在产物里——无事可做")
         ctx.store.finalize(state="complete", summary={"last_it": start_from, "rows": len(ctx.store.rows)})
+        # 无事可做也可能**有东西要补传**：上次会话断网、这次连上了，积压全在这一步补完。
+        ctx.deliver_final(it_end=start_from, state="noop", summary={"rows": len(ctx.store.rows)})
         return _combined(ctx, last_it=start_from, session=session, state="noop")
     ctx.log(f"自主段开始：{len(todo)} 轮待跑（it{todo[0]} → it{todo[-1]}）")
     prev = start_from
@@ -663,13 +739,16 @@ def _drive(ctx: RunContext, *, session: list[dict], start_from: int) -> dict:
             session.append(_checkpoint(ctx, it, result, wall_sec=round(time.time() - t0, 2)))
             prev = it
     except (ProtocolError, RetryableError) as e:
-        ctx.store.finalize(state="failed", summary={"last_it": prev, "error": f"{type(e).__name__}: {e}"})
+        fail_summary = {"last_it": prev, "error": f"{type(e).__name__}: {e}"}
+        ctx.store.finalize(state="failed", summary=fail_summary)
         ctx.log(f"自主段在 it{prev + 1} 处失败（{type(e).__name__}: {e}）——产物已收尾，可续跑")
+        # 段失败也要报：控制面最需要的就是「这条腿停了、停在哪、为什么」——云机那一侧
+        # 的日志人看不到，而失败是**最该被看见**的状态。
+        ctx.deliver_final(it_end=prev, state="failed", summary=fail_summary)
         raise
-    ctx.store.finalize(
-        state="complete" if stopped == "complete" else stopped,
-        summary={"last_it": prev, "rows": len(ctx.store.rows), "session": len(session)},
-    )
+    summary = {"last_it": prev, "rows": len(ctx.store.rows), "session": len(session)}
+    ctx.store.finalize(state="complete" if stopped == "complete" else stopped, summary=summary)
+    ctx.deliver_final(it_end=prev, state=stopped, summary=summary)
     return _combined(ctx, last_it=prev, session=session, state=stopped)
 
 
@@ -745,6 +824,25 @@ def _encode_opt(opt_path: Path) -> str:
 # ------------------------------------------------------------------ CLI（无 hub 续跑）
 
 
+def _resolve_hub_token(inline: str, token_file: str) -> str:
+    """token 解析（flag > 文件 > `$BATTLE_HUB_TOKEN`）。
+
+    为什么支持环境变量：Kaggle/Colab 里凭据的自然容器是 secret / 环境变量（而不是命令行
+    ——命令行会进 notebook 输出与 shell 历史）。**token 不进任务包**（包会四处搬运）。
+    """
+    if inline:
+        return inline.strip()
+    if token_file:
+        try:
+            return Path(token_file).read_text(encoding="utf-8").strip()
+        except OSError as e:
+            print(f"[run] 读 --hub-token-file 失败：{e}", file=sys.stderr, flush=True)
+            return ""
+    import os
+
+    return (os.environ.get("BATTLE_HUB_TOKEN") or "").strip()
+
+
 def main(argv: list[str] | None = None) -> int:
     """`python -m remote.run_loop --artifacts <dir>`：产物目录即任务，续跑到计划末尾。"""
     ap = argparse.ArgumentParser(description="自主段运行（产物目录是唯一输入；不需要 hub）")
@@ -768,6 +866,22 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=0.0,
         help="本次最多跑多少秒（0=不限）——Kaggle 会话到点前干净停机的把手",
+    )
+    ap.add_argument(
+        "--hub-url",
+        default="",
+        help="hub 地址（给了它就开启产物补传；缺省取任务包 task.json 里的 hub_url）",
+    )
+    ap.add_argument("--hub-token", default="", help="hub Bearer token（或 --hub-token-file / $BATTLE_HUB_TOKEN）")
+    ap.add_argument(
+        "--hub-token-file",
+        default="",
+        help="从文件读 token（Kaggle secret / Colab 挂载；避免进 shell 历史）",
+    )
+    ap.add_argument(
+        "--no-deliver",
+        action="store_true",
+        help="显式关掉产物补传（纯离线：不探 hub、不推任何字节）",
     )
     args = ap.parse_args(argv)
     if not args.artifacts and not args.bundle:
@@ -793,7 +907,10 @@ def main(argv: list[str] | None = None) -> int:
         args.artifacts = got["artifacts_dir"]
         if not args.ts_root and got.get("ts_code_tree"):
             args.ts_root = got["ts_code_tree"]
+        if not args.hub_url and got.get("hub_url"):
+            args.hub_url = str(got["hub_url"])  # 包里记着地址（**不记 token**）
     root = Path(args.artifacts)
+    hub_token = _resolve_hub_token(args.hub_token, args.hub_token_file)
     try:
         plan, manifest = load_planned_manifest(root)
         result = run_standalone(
@@ -806,6 +923,9 @@ def main(argv: list[str] | None = None) -> int:
             torch_threads=args.threads,
             max_iters=args.max_iters,
             budget_sec=args.budget_sec,
+            hub_url=args.hub_url,
+            hub_token=hub_token,
+            deliver=not args.no_deliver,
         )
     except (ProtocolError, RetryableError) as e:
         print(f"[run] 失败：{type(e).__name__}: {e}", file=sys.stderr, flush=True)

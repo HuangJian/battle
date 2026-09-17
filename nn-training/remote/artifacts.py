@@ -19,6 +19,8 @@
                                把动量静默归零，见 D5）
     <art>/LATEST.zip       每次 checkpoint 刷新的「最新一轮」小包（人手动下载用）
     <art>/artifacts.zip    收尾/中断时打的全量包（含逐轮 + 账本 + 计划 + README）
+    <art>/delivered.json   产物补传的记账（已投递到 hub 的轮次；`remote/offline_deliver.py`
+                           写——重启后靠它接着补，而不是重传已投递的轮次）
 
 **中断即有效**：每一步先写临时文件再原子改名，且 state.json 永远指向「已完整落盘的
 最后一轮」。会话被 kill 也只丢正在跑的那一轮——新会话用同一个目录再跑一次即可续上。
@@ -101,16 +103,21 @@ def resolve_artifact_dir(
     return Path(work_dir) / "artifacts" / tag
 
 
-def _atomic_write(path: Path, data: bytes) -> None:
-    """tmp + replace：任何时刻读到的都是完整文件（会话被 kill 也不留半截）。"""
+def atomic_write_bytes(path: Path, data: bytes) -> None:
+    """tmp + replace：任何时刻读到的都是完整文件（会话被 kill 也不留半截）。
+
+    公开（同一包内被测代码共用）：补传端写 `delivered.json` 时也必须走这一条——
+    「半截的记账文件」与「半截的产物」一样会把续跑判据带偏（读方拿 OSError/ValueError
+    当「没记过」，于是重复投递，或者更糟：把已投递的当成未投递）。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_bytes(data)
     os.replace(tmp, path)
 
 
-def _write_json(path: Path, obj: Any) -> None:
-    _atomic_write(path, json.dumps(obj, ensure_ascii=False, indent=1).encode("utf-8"))
+def atomic_write_json(path: Path, obj: Any) -> None:
+    atomic_write_bytes(path, json.dumps(obj, ensure_ascii=False, indent=1).encode("utf-8"))
 
 
 # ------------------------------------------------------------------ 产物目录
@@ -177,8 +184,8 @@ class ArtifactStore:
         self.root.mkdir(parents=True, exist_ok=True)
         st = self.read_state()
         declared = plan_sha256 or sha256_bytes(json.dumps(plan, sort_keys=True).encode("utf-8"))
-        _write_json(self.root / self.PLAN_NAME, plan)
-        _write_json(self.root / self.MANIFEST_NAME, manifest)
+        atomic_write_json(self.root / self.PLAN_NAME, plan)
+        atomic_write_json(self.root / self.MANIFEST_NAME, manifest)
         # 续跑判据里的计划身份以**磁盘上这份 plan.json** 为准（**写盘之后**再算）：于是
         # 「谁算」都得到同一个数。曾经用调用方传进来的 sha（= hub payload 里那份的字节
         # 哈希）——它与本目录写盘的格式不同（hub 走 `rl.plan.dump_plan` 的规范形
@@ -199,10 +206,10 @@ class ArtifactStore:
                 f"{self.root}（旧 last_it={st.get('last_it')}）"
             )
         if not resumable:
-            _atomic_write(
+            atomic_write_bytes(
                 self.root / self.README_NAME, self._readme(plan, manifest, plan_sha).encode("utf-8")
             )
-            _write_json(
+            atomic_write_json(
                 self.root / self.STATE_NAME,
                 {
                     "run_id": self.run_id,
@@ -265,9 +272,9 @@ class ArtifactStore:
         """
         d = self.dir_for(it)
         d.mkdir(parents=True, exist_ok=True)
-        _atomic_write(self.weights_path(it), weights_json)
+        atomic_write_bytes(self.weights_path(it), weights_json)
         if opt_tar:
-            _atomic_write(self.opt_path(it), opt_tar)
+            atomic_write_bytes(self.opt_path(it), opt_tar)
         wfp = sha256_file(self.weights_path(it))
         entry = {
             "it": int(it),
@@ -281,7 +288,7 @@ class ArtifactStore:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
             self.rows.append(entry)
         self._refresh_latest(it, entry)
-        _write_json(
+        atomic_write_json(
             self.root / self.STATE_NAME,
             {
                 **(self.read_state() or {}),
@@ -319,7 +326,7 @@ class ArtifactStore:
         Kaggle 的 output 也是整目录提交）。
         """
         st = self.read_state() or {}
-        _write_json(
+        atomic_write_json(
             self.root / self.STATE_NAME,
             {
                 **st,

@@ -2371,3 +2371,40 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   （`--bundle` 导入即跑；代码与 TS 字节走 `preloaded`；standalone 的代码快照硬门）、
   `remote/hub_client.publish_job(register=False)`、`rl/loop_steps.py`（`--export-bundle` 导出钩子 +
   `BundleExportedError` 干净退出）、`rl/loop_core.py`、`rl/cli.py`。回归：`tests/test_bundle.py`(7)。
+
+## §2026-09-17-goalnn-offline-reconnect-delivery（2026-09-17，产物补传：中途能连上 hub 就自动恢复在线回传；不可影响训练是唯一硬约束）
+
+- **背景（用户需求，2026-09-17）**：全离线任务包（上一条）交付了「hub 关机也能开工」，需求的后
+  半句是「如果训练中途发现可以联通 hub，云机也能自动恢复产物在线回传」。补传 = 产物目录之外
+  的**第二份拷贝**（产物本来就已经落在节点本地目录），让控制面不必等人搬 zip。
+- **备选与否决**：① *新增无鉴权 `GET /health` 探活*（否决——探针要回答「我能不能用这条链」，
+  只证可达会让「token 配错」在第一次上传 ~1.9MB 后才暴露，且多一个向公网泄露「hub 在线」的
+  端点）；② *逐轮产物覆盖写*（否决——同一轮权重是不可变快照，覆盖 = 谁先到谁定义历史，而补
+  传天然会重传）；③ *自定义裸二进制容器*（**部分否决**：比复用 `encode_weights_json` /
+  `encode_opt_tar` 省 33% 体量 ≈0.5s/轮，但要多养一种容器格式 + 两端实现；best-effort 旁路不
+  值这个复杂度）；④ *坏 token 每轮重试*（否决——D9 是「同 IP 五次无效鉴权封 3600s」，等于
+  自己把自己封掉，且配置错重试一百次也不会对）；⑤ *把补传做成一种 job*（否决——这条腿没有
+  job 也没有租约，记 `job_pending` 只会让控制台显示一条永远等不到工人的任务，还可能被别的
+  节点领走）；⑥ *把补传做成逐字节续传/断点续传*（否决——整轮 ~1.9MB，代价大于收益）。
+- **契约（硬要求）**：① **训练永不因网络停摆**：`sync()` / `deliver_result()` 永不抛（传输异常
+  收在 `_post` 里，异常冒到外层会跳过 `_save_ledger` ⇒ 已投递的轮次没落盘、下次整批重传）；
+  没有重试预算、没有退避等待、没有阻塞调用。② **重启续投**：`delivered.json`（原子写）是唯一
+  记账，`pending()` = 「磁盘上有权重且不在记账里」——**第一次连上时把之前攒的积压一次补齐**。
+  ③ **幂等 + 首写锁定**：hub 按 `(run_id, it)` 落盘，重复投递回 `duplicate`（200，**不改写**；
+  回 409 会让节点每轮把已投过的再传一遍）。④ **不可信输入边界**：`run_id` 是 hub 侧目录名 ⇒
+  `sanitize_run_id`（只放行 `[A-Za-z0-9][A-Za-z0-9._-]*`、≤64、拒 `..`、非字符串即非法）；权重
+  指纹须与实收字节相符；账本行自称的指纹也须与权重相符（不一致 = 产物目录自相矛盾）；体上限
+  在声明长度上挡（413）。⑤ **401/403/400/413 → 本会话停用**（配置/形状问题，重试无意义）；
+  5xx / 网络异常 → 只记日志（节流），下轮再试。⑥ **逐轮落盘之后才补传**（先自洽，再尽力
+  出网），一次 `sync()` 有上限（`SYNC_CAP=4`），积压留给下轮。
+- **违反后果**：补传一旦能阻塞或以任何方式上抛，就会把「产物落在节点本地即交付完成」这条
+  本已成立的契约毁掉（网络变成训练的必要条件）；不首写锁定 ⇒ 重连/重启/重试会改写历史产物；
+  `run_id` 不净化 ⇒ hub 上任意文件写；坏 token 每轮重试 ⇒ 自己把来源 IP 封一小时。
+- **遗留（未做，不写成已做）**：① 真云端端到端一次（本机没有节点：整条链只在真 HTTP 端点 +
+  替身 `run_job` 上跑过）；② 控制台显示补传进度（账本已有 `offline_artifact` / `offline_result`
+  事件，读方未接）；③ push 模式节点侧没有 hub 地址 ⇒ 该形态默认不开补传（需要显式配 URL）。
+- **落地**：`remote/offline_deliver.py`（新：探活 / 积压扫描 / 逐轮投递 / 段末摘要 / 记账）、
+  `remote/hub_server.py`（`POST /offline/artifact`·`/offline/result` + `store_offline_*` +
+  `offline/<run_id>/` 落位 + 账本审计事件）、`remote/protocol.py`（`sanitize_run_id` + 契约常量）、
+  `remote/run_loop.py`（逐轮/收尾钩子 + `--hub-url`/`--hub-token[-file]`/`BATTLE_HUB_TOKEN`）、
+  `remote/worker.py`（kind=run 默认开启）。回归：`tests/test_offline_deliver.py`(16)。

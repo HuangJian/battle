@@ -22,6 +22,11 @@
                                 `/result` 拿 410 + 原因**立即**停腿，不再等 25min 超时
                                 （2026-09-17）
   GET  /jobs/{id}/result        训练主循环取回已落盘结果做三重校验（已失败 → 410 + 原因）
+  POST /offline/artifact        **产物补传**：节点把全离线/半离线段已落盘的一轮产物
+                                （权重 + opt + 账本行）best-effort 推上来（按 (run_id, it)
+                                幂等、首写锁定）；落在 `<job_root>/offline/<run_id>/`
+                                （2026-09-17）
+  POST /offline/result          同上，段末摘要（跑到哪 / 什么状态）——会覆盖写（最新一份）
 
 鉴权（D9）：`Authorization: Bearer <token>`。**先验 token，封禁只拒无效鉴权尝试**
 （2026-09-17 改序）：同一来源 IP 连续 5 次**无效**鉴权 → 该 IP 的无效尝试 1 小时内
@@ -53,6 +58,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import hashlib
 import ipaddress
 import json
 import os
@@ -75,13 +81,20 @@ from remote.protocol import (
     CLAIM_TTL_SEC,
     FAIL_BODY_MAX,
     FAIL_NAME,
+    OFFLINE_ARTIFACT_BODY_MAX,
+    OFFLINE_ARTIFACT_PATH,
+    OFFLINE_RESULT_BODY_MAX,
+    OFFLINE_RESULT_PATH,
     PAYLOAD_NAME,
     TS_CODE_NAME,
     WIRE_V2_MAGIC,
     ProtocolError,
     blob_path,
+    decode_opt_tar,
+    decode_weights_json,
     find_payload,
     normalize_manifest,
+    sanitize_run_id,
     unpack_result_v2,
 )
 
@@ -416,6 +429,170 @@ class _JobStore:
         except (OSError, ValueError):
             return None
 
+    # ---- 产物补传（offline 腿；2026-09-17）----
+    # 语义：节点自主段的**第二份拷贝**。产物本来就已经落在节点本地目录里（那是它的交付
+    # 面）；这里接收的是「中途发现 hub 可达」时顺手推上来的那一份，让控制面不用等人搬 zip。
+    # 与 job 队列**完全隔离**：不写 job_pending/job_completed（补传没有 job 也没有租约，
+    # 这条腿不存在「谁来领」的问题），只落 `offline/<run_id>/` 与账本 audit 事件。
+    #: 补传落位根目录名（`<job_root>/offline/<run_id>/`）。
+    OFFLINE_DIR = "offline"
+    #: 补传账本文件名（`offline/<run_id>/` 下；与 job 队列的 jsonl **不同文件**——
+    #: 补传不是 job，混进同一本账会让「一行一 job」的读方（控制台/池重建）出现怪行）。
+    OFFLINE_METRICS_NAME = "metrics.jsonl"
+    #: 段末摘要文件名（同一目录；覆盖写）。
+    OFFLINE_RESULT_NAME = "result.json"
+
+    def offline_run_dir(self, run_id: object) -> Path:
+        """补传落位目录。`run_id` 来自远端 ⇒ 必须先过 `sanitize_run_id`（它会是目录名）。"""
+        return self.job_root / self.OFFLINE_DIR / sanitize_run_id(run_id)
+
+    def store_offline_artifact(self, body: dict) -> dict:
+        """落一轮补传产物，返回 {"status": "accepted"|"duplicate", "it": n, "run_id": r}。
+
+        校验（任一不过抛 ProtocolError → 400，且**不落盘任何东西**）：
+          * `run_id` 合法（目录名的唯一防护面）；
+          * `it` 是非负整数；
+          * `weights_json` 能解码出**非空**字节；
+          * **声明指纹与实际字节相符**——传输损坏（截断/串包）必须在入口拦住，否则一条
+            损坏的权重会以「hub 上的产物」身份进入 eval/续跑，而真因在几千行日志之外。
+
+        幂等：`it-NNN/weights.json` 已存在 ⇒ duplicate（**不改写**）。同一轮权重是不可变
+        快照：覆盖它意味着「谁先到」决定了历史，而补传天然会重传（重连、重启续投）。
+        """
+        run_id = sanitize_run_id(body.get("run_id"))
+        it = body.get("it")
+        if not isinstance(it, int) or isinstance(it, bool) or it < 0:
+            raise ProtocolError(f"补传 it 非法（要求非负整数）: {it!r}")
+        wj_raw = body.get("weights_json")
+        if not isinstance(wj_raw, str) or not wj_raw:
+            raise ProtocolError("补传缺 weights_json（权重是这一轮唯一不可再生的东西）")
+        wj = decode_weights_json(wj_raw)
+        if not wj:
+            raise ProtocolError("补传 weights_json 解码后为空")
+        declared = str(body.get("weights_fp", "") or "")
+        got = hashlib.sha256(wj).hexdigest()
+        if declared and declared != got:
+            raise ProtocolError(
+                f"补传 it{it} 的权重指纹不符：声明 {declared[:16]}… 实得 {got[:16]}…"
+                "（传输损坏）——拒收"
+            )
+        row = body.get("row")
+        # 账本行自称的权重指纹必须与实收字节一致：这是**节点自己产的**一致性证据
+        # （`ArtifactStore.checkpoint` 写权重后当场算的 sha）。不符 = 产物目录内部不一致
+        # （人改过 / 半截写入），把这样的权重收成「hub 上的产物」比拒收危险得多。
+        if isinstance(row, dict) and row.get("weights_fp"):
+            row_fp = str(row["weights_fp"])
+            if row_fp != got:
+                raise ProtocolError(
+                    f"补传 it{it} 的账本行与权重不符：行记 {row_fp[:16]}… 实得 {got[:16]}…"
+                    "（产物目录内部不一致）——拒收"
+                )
+        opt = b""
+        opt_raw = body.get("opt_tar_b64")
+        if isinstance(opt_raw, str) and opt_raw:
+            try:
+                opt = decode_opt_tar(opt_raw)
+            except Exception:  # opt 损坏不必拒整轮：代价只是「hub 侧续跑 Adam 归零」
+                opt = b""
+        with self._lock:
+            d = self.offline_run_dir(run_id)
+            it_dir = d / f"it-{int(it):03d}"
+            if (it_dir / "weights.json").exists():
+                return {"status": "duplicate", "run_id": run_id, "it": int(it)}
+            it_dir.mkdir(parents=True, exist_ok=True)
+            _write_bytes(it_dir / "weights.json", wj)
+            if opt:
+                _write_bytes(it_dir / "opt.tar", opt)
+            _write_bytes(
+                it_dir / "row.json",
+                json.dumps(
+                    row if isinstance(row, dict) else {"it": int(it)},
+                    ensure_ascii=False,
+                    indent=1,
+                ).encode("utf-8"),
+            )
+            if not (d / "run.json").exists():
+                _write_bytes(
+                    d / "run.json",
+                    json.dumps(
+                        {
+                            "run_id": run_id,
+                            "plan_sha256": str(body.get("plan_sha256", "") or ""),
+                            "course_fp": str(body.get("course_fp", "") or ""),
+                            "commit": str(body.get("commit", "") or ""),
+                            "source_dir": str(body.get("source_dir", "") or "")[:300],
+                            "first_seen": self._now(),
+                        },
+                        ensure_ascii=False,
+                        indent=1,
+                    ).encode("utf-8"),
+                )
+            # 账本一行 = 一轮（只在**接新**时追加；重复投递不再写——否则同一轮会出现两行，
+            # 而这个文件的读方（人/控制台）按 it 画曲线）。
+            with open(d / self.OFFLINE_METRICS_NAME, "a", encoding="utf-8") as f:
+                f.write(
+                    json.dumps(
+                        {
+                            "event": "offline_artifact",
+                            "run_id": run_id,
+                            "it": int(it),
+                            "weights_fp": got,
+                            "opt_bytes": len(opt),
+                            **(row if isinstance(row, dict) else {}),
+                            "ts": self._now(),
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+            self._append_ledger(
+                {
+                    "event": "offline_artifact",
+                    "run_id": run_id,
+                    "it": int(it),
+                    "weights_fp": got,
+                    "ts": self._now(),
+                }
+            )
+        return {"status": "accepted", "run_id": run_id, "it": int(it)}
+
+    def store_offline_result(self, body: dict) -> dict:
+        """落段末摘要（**覆盖写**：它是「这条腿现在到哪了」的最新答案，不是不可变快照）。"""
+        run_id = sanitize_run_id(body.get("run_id"))
+        it_end = body.get("it_end")
+        if not isinstance(it_end, int) or isinstance(it_end, bool) or it_end < 0:
+            raise ProtocolError(f"补传 it_end 非法（要求非负整数）: {it_end!r}")
+        state = str(body.get("state", "") or "")[:40]
+        rec: dict = {
+            "run_id": run_id,
+            "it_end": int(it_end),
+            "state": state,
+            "delivered": (body.get("delivered") if isinstance(body.get("delivered"), int) else 0),
+            "summary": body.get("summary") if isinstance(body.get("summary"), dict) else {},
+            "plan_sha256": str(body.get("plan_sha256", "") or ""),
+            "course_fp": str(body.get("course_fp", "") or ""),
+            "commit": str(body.get("commit", "") or ""),
+            "source_dir": str(body.get("source_dir", "") or "")[:300],
+            "received_at": self._now(),
+        }
+        with self._lock:
+            d = self.offline_run_dir(run_id)
+            d.mkdir(parents=True, exist_ok=True)
+            _write_bytes(
+                d / self.OFFLINE_RESULT_NAME,
+                json.dumps(rec, ensure_ascii=False, indent=1).encode("utf-8"),
+            )
+            self._append_ledger(
+                {
+                    "event": "offline_result",
+                    "run_id": run_id,
+                    "it_end": int(it_end),
+                    "state": state,
+                    "ts": self._now(),
+                }
+            )
+        return {"status": "accepted", "run_id": run_id, "it_end": int(it_end)}
+
     # ---- BC 每 epoch 回传（2026-09-13，plan/bc-cloud-integration.plan.md）----
     #: 单文件覆盖存最新 resume（磁盘有界：每 job 恒 1 份权重，~0.5MB）；指标追加 jsonl。
     BC_RESUME_NAME = "bc-resume.json"
@@ -543,6 +720,14 @@ class _JobStore:
         """该 ip 剩余封禁秒数（未封禁 = 0）——供审计行提示「还要封多久」。"""
         with self._lock:
             return max(0.0, self._auth_blocked_until.get(ip, 0.0) - self._now())
+
+
+def _write_bytes(path: Path, data: bytes) -> None:
+    """tmp + replace（中断的补传 POST 不留半截文件——半截权重比没有权重更危险）。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
 
 
 # ------------------------------------------------------------------ net-probe（M0）
@@ -730,6 +915,10 @@ class HubHandler(BaseHTTPRequestHandler):
                 self._post_bc_epoch()
             elif path == "/admin/net-probe":
                 self._admin_net_probe_upload()
+            elif path == OFFLINE_ARTIFACT_PATH:
+                self._post_offline_artifact()
+            elif path == OFFLINE_RESULT_PATH:
+                self._post_offline_result()
             else:
                 self._json({"error": "not found"}, 404)
         except (ProtocolError, ValueError) as e:
@@ -1075,6 +1264,86 @@ class HubHandler(BaseHTTPRequestHandler):
     def _clip(v: object, n: int) -> str:
         """截断成有界字符串（失败体来自远端机器，长度不可信）。非字符串 → 空。"""
         return v[:n] if isinstance(v, str) else ""
+
+    # ---- POST /offline/artifact·/offline/result（产物补传；2026-09-17）----
+    def _read_capped_body(self, cap: int) -> bytes | None:
+        """读请求体，超 `cap` → 413 并返回 None（**远端体绝不信 Content-Length 之外的任何
+        暗示**；超限直接拒，不读进内存）。
+
+        与 `/admin/net-probe` 的差别：那里是「读掉就算了」的探针（可以分块丢弃），这里是
+        要解析的 JSON，所以先按声明长度把关再一次性读。
+        """
+        try:
+            n = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._json({"error": "Content-Length 非法"}, 400)
+            return None
+        if n <= 0:
+            self._json({"error": "空请求体"}, 400)
+            return None
+        if n > cap:
+            self._json({"error": f"请求体越界（0..{cap}），收到 {n}"}, 413)
+            return None
+        try:
+            raw = self.rfile.read(n)
+        except Exception as e:
+            self._json({"error": f"read body failed: {e}"}, 400)
+            return None
+        if len(raw) != n:
+            self._json({"error": f"请求体截断（声明 {n}，实收 {len(raw)}）"}, 400)
+            return None
+        return raw
+
+    def _post_offline_artifact(self) -> None:
+        """补传一轮产物：权重 + opt + 账本行 → `<job_root>/offline/<run_id>/it-NNN/`。
+
+        鉴权与其他端点完全一致（Bearer）；**没有租约**——这条腿没有 job（全离线段连 hub
+        都不需要就能跑完）。幂等/首写锁定/指纹校验见 `store_offline_artifact`。
+        """
+        if not self._auth_ok():
+            return
+        raw = self._read_capped_body(OFFLINE_ARTIFACT_BODY_MAX)
+        if raw is None:
+            return
+        try:
+            body = json.loads(raw.decode("utf-8"))
+            if not isinstance(body, dict):
+                raise ProtocolError("补传体必须是 JSON 对象")
+            res = self.store.store_offline_artifact(body)
+        except (ProtocolError, ValueError, UnicodeDecodeError) as e:
+            self._json({"error": f"补传被拒: {e}"}, 400)
+            return
+        if res["status"] == "accepted":
+            print(
+                f"[{time.strftime('%H:%M:%S')}] [hub-server] OFFLINE it{res['it']} "
+                f"run={res['run_id']} <- {len(raw)}B",
+                flush=True,
+            )
+        # duplicate 也回 200：补传是重试友好的（重连/重启续投会重传），409 会让节点把它
+        # 当成「没成功」每轮再传一遍——而首写锁定已经保证了内容不会变。
+        self._json(res)
+
+    def _post_offline_result(self) -> None:
+        """补传段末摘要（覆盖写：它是「这条腿现在到哪了」的最新答案）。"""
+        if not self._auth_ok():
+            return
+        raw = self._read_capped_body(OFFLINE_RESULT_BODY_MAX)
+        if raw is None:
+            return
+        try:
+            body = json.loads(raw.decode("utf-8"))
+            if not isinstance(body, dict):
+                raise ProtocolError("补传体必须是 JSON 对象")
+            res = self.store.store_offline_result(body)
+        except (ProtocolError, ValueError, UnicodeDecodeError) as e:
+            self._json({"error": f"补传被拒: {e}"}, 400)
+            return
+        print(
+            f"[{time.strftime('%H:%M:%S')}] [hub-server] OFFLINE result run={res['run_id']} "
+            f"it{res['it_end']}",
+            flush=True,
+        )
+        self._json(res)
 
     # ---- POST /jobs/{id}/result ----
     def _post_result(self) -> None:

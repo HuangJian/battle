@@ -1679,6 +1679,10 @@ def run_job(
             artifacts_dir=artifacts_dir,
             max_iters=run_max_iters,
             budget_sec=run_budget_sec,
+            # 产物补传：本 job 就是从这条连接上领来的（地址与 token 手边就有）——半离线段
+            # 因此默认开着补传：hub 中途失联也不至于「跑完一整段、控制面一无所知」。
+            hub_url=base_url,
+            hub_token=token,
             log=log,
         )
     validate_result(result, manifest, commit_echo_must_match=False)  # 自查

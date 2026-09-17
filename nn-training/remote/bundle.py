@@ -215,11 +215,16 @@ run_id      : {index['run_id']}    计划区间 : it{index['it']} → it{index['
   Kaggle：目录就在 /kaggle/working 下 → Save Version 即打包下载（官方 output）。
   Colab ：落在 Drive 时直接可见；否则 `from google.colab import files; files.download(...)`。
 
-中途能连上 hub 怎么办
----------------------
-  导入/运行时带 `--hub-url`（包里的 hub_url 会自动带上，token 走环境/参数）：
-  云机每轮**尽力而为**把该轮的权重与指标补传到 hub，连不上就静默跳过、下轮再试——
-  训练从不因为网络停摆，产物也从不因为网络丢失。
+中途能连上 hub 怎么办（产物补传）
+-----------------------------------
+  给个地址 + token 就会自动补传（地址包里的 hub_url 会自动带上；**token 不进包**）：
+      python -m remote.run_loop --artifacts <上面的 --dest>
+          先不用加 --hub-url：包里的 hub_url（{index['hub_url'] or '本包没记'}）会自动带上；
+          没记就显式给 --hub-url <hub 地址>；token 用 --hub-token-file <只有本机能读到的文件>
+      # 或用环境变量：export BATTLE_HUB_TOKEN=<token>（Kaggle secret / Colab 变量）
+  云机每轮**落盘之后**尽力而为把该轮的权重与指标补传到 hub（连不上就静默跳过、下轮再试；
+  第一次连上时会把之前攒的积压一次补齐，已投过的靠目录里的 delivered.json 不再重传）。
+  产物目录里掉了一堆东西？无所谓：补传只是**第二份拷贝**——训练和交付从不等它。
 """
 
 
