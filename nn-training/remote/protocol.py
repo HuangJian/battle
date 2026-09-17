@@ -27,6 +27,8 @@ import gzip
 import hashlib
 import io
 import json
+import os
+import re
 import struct
 import tarfile
 import zipfile
@@ -117,6 +119,23 @@ MANIFEST_OPTIONAL_DEFAULTS: dict[str, object] = {
     "slim": False,
 }
 
+# ------------------------------------------------------------------ M3: kind=iter
+# plan/remote-wire-remediation.plan.md §5.2：新 job kind =「一整轮」——节点自己跑
+# rollout（bun 调 exporter 产 shard）→ 接着跑既有 PPO 链路 → 只回传权重/report。
+# 与 BC 同一条 kind 通道（照 MANIFEST_BC_* 的先例），mode 红线互斥。
+#: kind=iter 追加必填：TS 运行时 zip 的 sha256 + rollout 规格。
+MANIFEST_ITER_EXTRA: tuple[str, ...] = ("ts_code_sha256", "rollout")
+#: TS 源码 zip 里允许出现的 exporter（argv[0] 白名单）。**只**放行 rollout 采集器：
+#: argv 来自 hub（可信方），但白名单让「协议字段被误当命令执行」不可能发生。
+ROLLOUT_SCRIPTS: tuple[str, ...] = ("tools/sim/export-rl-rollout.ts",)
+#: rollout 规格里 argv 内嵌路径的允许前缀（job 目录内的相对路径，防越界）。
+#: 端口无关：worker 一律以 job 目录为 cwd 执行 argv。
+ITER_OUT_REL = "w"
+#: 上云 rollout 写进 shard manifest 的 `node` 标签（hub 侧 argv 里的字面量）。
+#: 与本地 `local` 区分（可溯源），同时是 §5.5① 逐位对拍的基准——验收时本地也用
+#: 同一 argv（同标签）重跑，逐字节比对才成立。
+ITER_NODE_LABEL = "node"
+
 #: M2 blob 载荷名（pull 端点 `GET /jobs/{id}/blob?name=opt|ref`；push body `blobs`）。
 BLOB_OPT = "opt"
 BLOB_REF = "ref"
@@ -165,11 +184,15 @@ def normalize_manifest(m: dict) -> dict:
     if not isinstance(m, dict):
         raise ProtocolError(f"manifest 必须是对象，收到 {type(m).__name__}")
     kind = str(m.get("kind", "ppo") or "ppo")
+    if kind not in ("ppo", "bc", "iter"):
+        raise ProtocolError(f"kind={kind!r} 未知（只认 'ppo'|'bc'|'iter'）——拒收")
     required = [
         k for k in MANIFEST_REQUIRED if not (kind == "bc" and k in MANIFEST_BC_EXEMPT)
     ]
     if kind == "bc":
         required += list(MANIFEST_BC_EXTRA)
+    if kind == "iter":
+        required += list(MANIFEST_ITER_EXTRA)
     missing = [k for k in required if k not in m]
     if missing:
         raise ProtocolError(f"manifest 缺失必填字段: {missing}")
@@ -220,6 +243,15 @@ def normalize_manifest(m: dict) -> dict:
             raise ProtocolError(
                 f"mode={out['mode']!r} != 'per-tick'（v1 红线：仅 per-tick 课程支持远程）"
             )
+    if kind == "iter":
+        # M3 mode 互斥红线：iter 只承载 per-tick rollout（goal/intent 导出器不在
+        # 上云范围内——它们的 rollout 语义未在协议里建模）。ts_code_sha256 必须是
+        # 非空 str（下面的通用非空串循环已覆盖），rollout 规格逐字段校验。
+        if out["mode"] != "per-tick":
+            raise ProtocolError(
+                f"kind=iter 要求 mode='per-tick'，收到 {out['mode']!r}（M3 只上云 per-tick rollout）"
+            )
+        out["rollout"] = validate_rollout_spec(out["rollout"])
     if not isinstance(out.get("normalize_ret", False), bool):
         raise ProtocolError(f"normalize_ret 必须是 bool，收到 {out.get('normalize_ret')!r}")
     if not isinstance(out.get("kickstart_kl", 0.0), (int, float)) or isinstance(
@@ -236,6 +268,28 @@ def normalize_manifest(m: dict) -> dict:
 
 
 # ------------------------------------------------------------------ data_fp
+
+
+#: data_fp 条目 = (shard 目录名, wver, stage, seed)。
+DataFpEntries = Sequence[tuple[str, str, int, int]]
+
+
+def data_fp_entries(entries: DataFpEntries) -> str:
+    """data_fp 的核心：对**声明**的 shard 条目集做 sha256（排序后逐字段拼接）。
+
+    单独抽出来是为了 M3：上云 rollout 的 shard 由节点现产，hub 侧没有目录可读，
+    只能对「声明集」（argv 里逐局的 stage/seed + 约定的 wver）算期望值。节点跑完后
+    对**实产**目录调 `data_fp()`（同一函数、同一拼接顺序）再比对——两侧算法同源，
+    所以「相等」严格等价于「实产集 == 声明集」，任一侧漏局/多局都会露出来。
+    """
+    ents = sorted(entries, key=lambda e: e[0])
+    h = hashlib.sha256()
+    for name, wver, stage, seed in ents:
+        h.update(name.encode("utf-8"))
+        h.update(wver.encode("utf-8"))
+        h.update(str(stage).encode("utf-8"))
+        h.update(str(seed).encode("utf-8"))
+    return h.hexdigest()
 
 
 def data_fp(shard_dirs: Sequence[str | Path]) -> str:
@@ -262,14 +316,160 @@ def data_fp(shard_dirs: Sequence[str | Path]) -> str:
                 int(mm.get("seed", -1)),
             )
         )
-    entries.sort(key=lambda e: e[0])
-    h = hashlib.sha256()
-    for name, wver, stage, seed in entries:
-        h.update(name.encode("utf-8"))
-        h.update(wver.encode("utf-8"))
-        h.update(str(stage).encode("utf-8"))
-        h.update(str(seed).encode("utf-8"))
-    return h.hexdigest()
+    return data_fp_entries(entries)
+
+
+# ------------------------------------------------------------------ M3 rollout 规格
+#
+# 为什么 argv 是规格的 SSOT（而不是 stages/seeds/difficulty 一堆字段）：
+# hub 侧本来就有 `rl/cmd.build_rollout_cmd` 拼装本机 rollout 命令（三导出器 + 课程
+# 覆盖 + D14 血缘，单源）。上云时**用同一个函数**、只把路径换成 job 目录内的相对
+# 路径，再把它交给节点执行 ⇒ 「节点跑的采集」与「本机跑的采集」逐字节同命令，
+# 逐位对拍（计划 §5.5①）是构造性质而不是靠人去对对参数。新增一个字段就等于在
+# 协议里复制一份 cmd.py 的知识，迟早漂。
+
+#: argv 里必须携带的相对路径 flag（job 目录为 cwd）。
+_ITER_PATH_FLAGS: tuple[str, ...] = ("--out", "--weights")
+#: rollout 规格默认值（缺省即旧行为，additive）。
+ROLLOUT_SPEC_DEFAULTS: dict[str, object] = {
+    "wver": "",
+    "workers": 1,
+    "game_timeout_sec": 0.0,  # 0 = 不设单局超时（本机历史行为）
+    "bun": "bun",  # 节点侧 bun 可执行名（PATH 查找）；空 = 用节点默认
+}
+
+
+def shard_name(stage: int, seed: int) -> str:
+    """shard 目录名（与 `export-rl-rollout.ts` 的 `rl_s${si}_seed${seed}` 同源）。"""
+    return f"rl_s{stage}_seed{seed}"
+
+
+def parse_shard_name(name: str) -> tuple[int, int] | None:
+    """`rl_s{stage}_seed{seed}` -> (stage, seed)；不匹配返回 None（不抛）。"""
+    m = re.fullmatch(r"rl_s(\d+)_seed(\d+)", str(name or ""))
+    if m is None:
+        return None
+    return int(m.group(1)), int(m.group(2))
+
+
+def _iter_flag_value(argv: list[str], flag: str) -> int:
+    """取 argv 里 `flag` 的单个整数值；缺失/重复/非整数一律 ProtocolError。
+
+    重复出列（`--stages 0 --stages 1`）也是个坑：导出器只会吃到一个，声明集却可能
+    按另一个算——声明集必须就是**实际会执行**的那一组，所以重复直接拒收。
+    """
+    vals = [argv[i + 1] for i, a in enumerate(argv) if a == flag]
+    if len(vals) != 1:
+        raise ProtocolError(f"rollout.argv 的 {flag} 必须恰好出现 1 次，实得 {len(vals)} 次")
+    try:
+        return int(vals[0])
+    except (TypeError, ValueError):
+        raise ProtocolError(f"rollout.argv 的 {flag} 必须是单个整数，收到 {vals[0]!r}") from None
+
+
+def _iter_rel_path(value: object, flag: str) -> str:
+    """校验 argv 里的路径参数是 job 目录内的相对路径（拒绝对路径 / `..` / 空）。"""
+    s = str(value or "")
+    if not s:
+        raise ProtocolError(f"rollout.argv 的 {flag} 不能为空")
+    if os.path.isabs(s) or Path(s).is_absolute() or s.startswith("~"):
+        raise ProtocolError(
+            f"rollout.argv 的 {flag}={s!r} 必须是相对路径（节点以 job 目录为 cwd）"
+        )
+    parts = Path(s).parts
+    if ".." in parts:
+        raise ProtocolError(f"rollout.argv 的 {flag}={s!r} 不得包含 ..（越界）")
+    return s
+
+
+def validate_rollout_spec(spec: object) -> dict:
+    """校验 + 归一化 manifest 的 `rollout` 子字典（kind=iter）。失败抛 ProtocolError。
+
+    归一化后 shape：
+      {argv: [[str, ...], ...], wver: str, workers: int, game_timeout_sec: float, bun: str}
+    argv 每项 = 一局的完整命令，**不含** bun 路径（worker 用自己的 bun；argv[0] 是
+    exporter 脚本，受 `ROLLOUT_SCRIPTS` 白名单约束）。
+    """
+    if not isinstance(spec, dict):
+        raise ProtocolError(f"manifest.rollout 必须是对象，收到 {type(spec).__name__}")
+    allowed = set(ROLLOUT_SPEC_DEFAULTS) | {"argv"}
+    out = dict(ROLLOUT_SPEC_DEFAULTS)
+    for k, v in spec.items():
+        if k not in allowed:
+            raise ProtocolError(
+                f"manifest.rollout 未知字段 {k!r}（允许：{sorted(allowed)}——拒绝，非忽略）"
+            )
+        out[k] = v
+    raw_argv = spec.get("argv")
+    if not isinstance(raw_argv, list) or not raw_argv:
+        raise ProtocolError("manifest.rollout.argv 必须是非空数组（每局一项）")
+    argv_out: list[list[str]] = []
+    seen: set[tuple[int, int]] = set()
+    for i, item in enumerate(raw_argv):
+        if not isinstance(item, list) or len(item) < 2:
+            raise ProtocolError(f"manifest.rollout.argv[{i}] 必须是长度 >=2 的字符串数组")
+        argv = [str(x) for x in item]
+        if not all(isinstance(x, str) for x in item):
+            raise ProtocolError(f"manifest.rollout.argv[{i}] 含非字符串元素（拒收）")
+        script = argv[0].replace("\\", "/").lstrip("./")
+        if script not in ROLLOUT_SCRIPTS:
+            raise ProtocolError(
+                f"manifest.rollout.argv[{i}][0]={argv[0]!r} 不在白名单 {list(ROLLOUT_SCRIPTS)}（拒收）"
+            )
+        argv[0] = script
+        st = _iter_flag_value(argv, "--stages")
+        sd = _iter_flag_value(argv, "--seeds")
+        for flag in _ITER_PATH_FLAGS:
+            if flag not in argv:
+                raise ProtocolError(f"manifest.rollout.argv[{i}] 缺 {flag}（节点无法定位产物）")
+            j = argv.index(flag)
+            if j + 1 >= len(argv):
+                raise ProtocolError(f"manifest.rollout.argv[{i}] 的 {flag} 没有取值")
+            argv[j + 1] = _iter_rel_path(argv[j + 1], flag)
+        if (st, sd) in seen:
+            raise ProtocolError(f"manifest.rollout.argv 重复声明同一局 (stage={st}, seed={sd})")
+        seen.add((st, sd))
+        argv_out.append(argv)
+    out["argv"] = argv_out
+    out["wver"] = str(out["wver"] or "")
+    # workers：缺席 = 1（默认值）；**显式 0 拒收**（不静默改成 1——那会让「配错了」
+    # 与「没配」长得一样，而并发配错正是那种「跑起来了但完全不是你要的」错误）。
+    _w: object = 1 if out["workers"] is None else out["workers"]
+    if isinstance(_w, bool):
+        raise ProtocolError(f"manifest.rollout.workers 必须是整数，收到 {_w!r}")
+    if isinstance(_w, int):
+        _wn = _w
+    elif isinstance(_w, str) and _w.isdigit():
+        _wn = int(_w)
+    else:
+        raise ProtocolError(f"manifest.rollout.workers 必须是整数，收到 {_w!r}")
+    if _wn < 1:
+        raise ProtocolError("manifest.rollout.workers 必须 >= 1（显式 0 拒收，不静默改成 1）")
+    out["workers"] = _wn
+    _t: object = 0.0 if out["game_timeout_sec"] is None else out["game_timeout_sec"]
+    if isinstance(_t, bool) or not isinstance(_t, (int, float)):
+        raise ProtocolError(f"manifest.rollout.game_timeout_sec 必须是数字，收到 {_t!r}")
+    if float(_t) < 0:
+        raise ProtocolError("manifest.rollout.game_timeout_sec 必须 >= 0（0 = 不限）")
+    out["game_timeout_sec"] = float(_t)
+    out["bun"] = str(out["bun"] or "bun")
+    return out
+
+
+def iter_declared_entries(spec: dict) -> list[tuple[str, str, int, int]]:
+    """rollout 规格 → 声明的 data_fp 条目集（与 argv 一一对应，不可能漂）。"""
+    wver = str(spec.get("wver") or "")
+    ents: list[tuple[str, str, int, int]] = []
+    for argv in spec["argv"]:
+        st = _iter_flag_value(list(argv), "--stages")
+        sd = _iter_flag_value(list(argv), "--seeds")
+        ents.append((shard_name(st, sd), wver, st, sd))
+    return ents
+
+
+def iter_expected_data_fp(spec: dict) -> str:
+    """kind=iter 的 manifest.data_fp = 对**声明集**的 data_fp（hub 算、节点复算比对）。"""
+    return data_fp_entries(iter_declared_entries(spec))
 
 
 # ------------------------------------------------------------------ payload
@@ -283,6 +483,10 @@ def data_fp(shard_dirs: Sequence[str | Path]) -> str:
 # payload.tar.xz 对新旧 worker 都能工作。
 PAYLOAD_NAME = "payload.tar.xz"
 PAYLOAD_LEGACY_NAMES: tuple[str, ...] = ("payload.zip",)
+#: M3：TS 运行时 zip 在 job 目录内的文件名（`GET /jobs/{id}/ts_code` 服务它）。
+TS_CODE_NAME = "ts_code.zip"
+#: kind=iter 的 payload 内要点名的 init 权重文件名（节点跑 rollout 的 --weights）。
+INIT_WEIGHTS_NAME = "init_weights.json"
 # 标注成 Literal：typeshed 的 tarfile.open("w:xz") 重载要求 preset 为 Literal[0..9]，
 # 普通 int 过不了 mypy。**改档位时这里要同步改**（比如变 5 就写 Literal[5]）。
 #
@@ -476,7 +680,57 @@ def validate_result(
         k in agg for k in ("policy", "value", "entropy", "kl", "mean_ret")
     ):
         raise ProtocolError(f"result.agg 缺关键字段: {agg!r}")
+    if str(manifest.get("kind", "ppo") or "ppo") == "iter" and not r.get("smoke"):
+        # M3：节点自己跑的 rollout，其采集口径必须随结果回来（hub 侧没有本地 shard
+        # 可算 winRate/outcomes/samples——不校验就等于信云侧自报，回归时无法归因）。
+        # 冒烟回显（smoke=true）豁免：它刻意不跑 rollout，没有报告可带。
+        r["report"] = validate_iter_report(r.get("report"))
     return r
+
+
+#: kind=iter 结果必须回传的采集报告字段（照 `rl/reports.combine_reports` 的输出名）。
+ITER_REPORT_REQUIRED: tuple[str, ...] = (
+    "games",
+    "winRate",
+    "outcomes",
+    "totalSamples",
+    "totalTicks",
+    "elapsedSec",
+    "shards",
+)
+
+
+def validate_iter_report(rep: object) -> dict:
+    """校验 kind=iter 回传的采集报告（缺字段/类型错 → ProtocolError，fail fast）。"""
+    if not isinstance(rep, dict):
+        raise ProtocolError(f"kind=iter 的 result.report 必须是对象，收到 {type(rep).__name__}")
+    missing = [k for k in ITER_REPORT_REQUIRED if k not in rep]
+    if missing:
+        raise ProtocolError(f"kind=iter 的 result.report 缺字段: {missing}")
+    for k in ("games", "totalSamples", "totalTicks", "shards"):
+        v = rep[k]
+        if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+            raise ProtocolError(f"report.{k} 必须是非负整数，收到 {v!r}")
+    if rep["games"] < 1:
+        raise ProtocolError("report.games 必须 >= 1（0 局 = 本轮没采集，不算完成）")
+    for k in ("winRate", "elapsedSec"):
+        v = rep[k]
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or float(v) < 0:
+            raise ProtocolError(f"report.{k} 必须是非负数字，收到 {v!r}")
+    oc = rep["outcomes"]
+    if not isinstance(oc, dict) or not oc:
+        raise ProtocolError(f"report.outcomes 必须是非空对象，收到 {oc!r}")
+    for k, v in oc.items():
+        if isinstance(v, bool) or not isinstance(v, int):
+            raise ProtocolError(f"report.outcomes[{k!r}] 必须是整数，收到 {v!r}")
+    out = dict(rep)
+    out["winRate"] = float(rep["winRate"])
+    out["elapsedSec"] = float(rep["elapsedSec"])
+    out["outcomes"] = {str(k): int(v) for k, v in oc.items()}
+    if not isinstance(out.get("perGame", []), list):
+        raise ProtocolError("report.perGame 必须是数组（缺省允许）")
+    out.setdefault("perGame", [])
+    return out
 
 
 # ---- result 回传字段的传输编码 ----
@@ -528,23 +782,41 @@ WIRE_JOB_CONTENT_TYPE = "application/x-battle-job-v2"
 
 
 def pack_job_v2(
-    manifest: dict, payload: bytes, code: bytes | None, blobs: dict[str, bytes] | None = None
+    manifest: dict,
+    payload: bytes,
+    code: bytes | None,
+    blobs: dict[str, bytes] | None = None,
+    ts_code: bytes | None = None,
 ) -> bytes:
-    """job 提交体 → v2（payload/code/blob 走裸二进制段）。blobs 按名字典序。"""
+    """job 提交体 → v2（payload/code/ts_code/blob 走裸二进制段）。blobs 按名字典序。
+
+    段序固定：payload, code?, ts_code?, *blobs。ts_code（M3：节点跑 rollout 需要的
+    TS 运行时 zip）**只有 kind=iter 才有**——其余 job 逐字节与以前一致。
+    """
     bl = dict(blobs or {})
     names = sorted(bl)
     lens = [len(payload)]
     if code is not None:
         lens.append(len(code))
+    if ts_code is not None:
+        lens.append(len(ts_code))
     lens.extend(len(bl[n]) for n in names)
-    hdr = json.dumps(
-        {"manifest": manifest, "has_code": code is not None, "blob_names": names, "lens": lens},
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    # `has_ts` **只在该段真的存在时才写**：非 iter 的 job 体因此逐字节与以前一致
+    # （本仓的「旧轮字节不变」纪律；解包侧 get("has_ts", False) 兼容缺席）。
+    head: dict = {
+        "manifest": manifest,
+        "has_code": code is not None,
+        "blob_names": names,
+        "lens": lens,
+    }
+    if ts_code is not None:
+        head["has_ts"] = True
+    hdr = json.dumps(head, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     parts = [WIRE_JOB_MAGIC, struct.pack(">I", len(hdr)), hdr, payload]
     if code is not None:
         parts.append(code)
+    if ts_code is not None:
+        parts.append(ts_code)
     parts.extend(bl[n] for n in names)
     return b"".join(parts)
 
@@ -563,12 +835,14 @@ def unpack_job_v2(body: bytes) -> dict:
         hdr = json.loads(body[off : off + hdr_len].decode("utf-8"))
         manifest: dict = hdr["manifest"]
         has_code: bool = bool(hdr["has_code"])
+        # has_ts 缺失（旧 hub 产的 v2 体）= 无 ts_code 段（旧行为，additive）。
+        has_ts: bool = bool(hdr.get("has_ts", False))
         names: list = hdr["blob_names"]
         lens: list = hdr["lens"]
     except (KeyError, ValueError, UnicodeDecodeError) as e:
         raise ProtocolError(f"v2 job 头解析失败: {e}") from None
     off += hdr_len
-    expected = 1 + (1 if has_code else 0) + len(names)
+    expected = 1 + (1 if has_code else 0) + (1 if has_ts else 0) + len(names)
     if len(lens) != expected:
         raise ProtocolError(f"v2 job lens 长度 {len(lens)} != {expected}")
     out: dict = {"manifest": manifest}
@@ -585,6 +859,9 @@ def unpack_job_v2(body: bytes) -> dict:
     i = 1
     if has_code:
         out["code_b64"] = base64.b64encode(_chunk(int(lens[i]), "code")).decode("ascii")
+        i += 1
+    if has_ts:
+        out["ts_code_b64"] = base64.b64encode(_chunk(int(lens[i]), "ts_code")).decode("ascii")
         i += 1
     if names:
         bm: dict = {}

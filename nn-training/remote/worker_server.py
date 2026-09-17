@@ -83,6 +83,13 @@ class WorkerServerState:
         """
         return bool(sha) and (self.work_dir / "blob_cache" / sha).exists()
 
+    def ts_code_cached(self, ts_sha256: str) -> bool:
+        """M3：TS 运行时 zip 是否已在本地缓存（与 worker.run_job 的 ts_code_cache 同根）。
+
+        命中即免上传——TS 代码在训练中极少变，sha 不变则整段腿只传一次。
+        """
+        return bool(ts_sha256) and (self.work_dir / "ts_code_cache" / ts_sha256).exists()
+
     def set_state(self, jid: str, state: str) -> None:
         with self._lock:
             self.jobs[jid] = {"state": state}
@@ -163,6 +170,7 @@ def _execute_job(
     manifest: dict,
     payload_zip: bytes,
     code_zip: bytes | None,
+    ts_code_zip: bytes | None,
     blobs: dict | None,
     work_dir: Path,
     device: str,
@@ -185,6 +193,8 @@ def _execute_job(
             preloaded={
                 "payload_zip": payload_zip,
                 "code_zip": code_zip,
+                # M3：kind=iter 的 TS 运行时（其余 job 恒 None → 键缺席，run_job 不读）。
+                "ts_code_zip": ts_code_zip,
                 # M2 B3：随 body 上传的内容寻址 blob（仅缓存未命中的那些）。
                 "blobs": blobs or {},
             },
@@ -253,6 +263,11 @@ def make_worker_server(
                     qs = parse_qs(urlparse(self.path).query)
                     sha = (qs.get("sha") or [""])[0]
                     self._json({"sha": sha, "cached": state.code_cached(sha)})
+                elif path == "/ts-code-sha":
+                    # M3：与 /code-sha 同规 —— hub 侧据此判要不要随 body 传 TS 运行时。
+                    qs = parse_qs(urlparse(self.path).query)
+                    sha = (qs.get("sha") or [""])[0]
+                    self._json({"sha": sha, "cached": state.ts_code_cached(sha)})
                 elif path == "/blob-sha":
                     # M2 B3：opt/ref 内容寻址 blob 是否已缓存（HUB 决定是否随 job 上传）。
                     qs = parse_qs(urlparse(self.path).query)
@@ -312,6 +327,13 @@ def make_worker_server(
                         {"error": "code-missing", "code_sha256": manifest["code_sha256"]}, 428
                     )
                     return
+                # M3 kind=iter：TS 运行时 zip 同规（body 未带且缓存未命中 → 428 补传）。
+                ts_b64 = body.get("ts_code_b64")
+                ts_code_zip = base64.b64decode(ts_b64) if ts_b64 else None
+                _ts_sha = str(manifest.get("ts_code_sha256", "") or "")
+                if ts_code_zip is None and _ts_sha and not state.ts_code_cached(_ts_sha):
+                    self._json({"error": "ts-code-missing", "ts_code_sha256": _ts_sha}, 428)
+                    return
                 # M2 B3：opt/ref blob —— body 未带且本地缓存未命中 → 428 要求重发。
                 blobs_raw = body.get("blobs") or {}
                 blobs: dict[str, bytes] = {}
@@ -332,6 +354,7 @@ def make_worker_server(
                     "manifest": manifest,
                     "payload_zip": payload_zip,
                     "code_zip": code_zip,
+                    "ts_code_zip": ts_code_zip,
                     "blobs": blobs,
                     "echo": echo,
                 }
@@ -367,6 +390,7 @@ def make_worker_server(
                 item["manifest"],
                 item["payload_zip"],
                 item["code_zip"],
+                item.get("ts_code_zip"),
                 item.get("blobs"),
                 state.work_dir,
                 device,

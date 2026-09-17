@@ -49,6 +49,19 @@ def blob_cached_on_node(base_url: str, token: str, sha: str, timeout: float = 15
     return False
 
 
+def ts_code_cached_on_node(base_url: str, token: str, sha: str, timeout: float = 15.0) -> bool:
+    """M3：节点 TS 运行时缓存（ts_code_cache）是否已含 sha（未知/失败 → False 保守上传）。"""
+    if not sha:
+        return True
+    try:
+        status, body = _request(base_url, token, f"/ts-code-sha?sha={sha}", timeout=timeout)
+        if status == 200:
+            return bool(json.loads(body.decode("utf-8")).get("cached"))
+    except Exception:
+        pass
+    return False
+
+
 def submit_job(
     base_url: str,
     token: str,
@@ -57,21 +70,30 @@ def submit_job(
     code_zip: bytes | None,
     *,
     blobs: dict | None = None,
+    ts_code_zip: bytes | None = None,
     echo: bool = False,
     timeout: float = 600.0,
     attempts: int = 3,
     log=_default_log,
 ) -> dict:
-    """POST /job 上传 manifest + payload（+ 按需 code）。瞬时失败退避重试；
-    409 busy / 428 code-missing 亦按可重试处理（hub 侧换节点或补传后重试）。
+    """POST /job 上传 manifest + payload（+ 按需 code / TS 运行时）。瞬时失败退避重试；
+    409 busy / 428 code-missing / 428 ts-code-missing 亦按可重试处理（hub 侧换节点或
+    补传后重试）。
 
     M0 统一计量：成功时返回本轮实测传输账（body_bytes / payload_bytes /
-    code_bytes / upload_sec / attempts）——训练主循环把它写进 iteration 事件的
-    `wire` 子字典；旧调用方忽略返回值，行为不变。
+    code_bytes / ts_code_bytes / upload_sec / attempts）——训练主循环把它写进
+    iteration 事件的 `wire` 子字典；旧调用方忽略返回值，行为不变。
+
+    M3：kind=iter 的 TS 运行时同 code.zip 同规按 sha 内容寻址，命中就不传
+    （manifest 无 ts_code_sha256 的 job 恒不涉及）。
     """
     need_code = not code_cached_on_node(base_url, token, manifest["code_sha256"])
     if need_code and code_zip is None:
         raise RetryableError("节点无 code 缓存且本次未携带 code.zip")
+    _ts_sha = str(manifest.get("ts_code_sha256", "") or "")
+    need_ts = bool(_ts_sha) and not ts_code_cached_on_node(base_url, token, _ts_sha)
+    if need_ts and ts_code_zip is None:
+        raise RetryableError("节点无 ts_code 缓存且本次未携带 ts_code.zip（kind=iter 必备）")
     # M2 B3：opt/ref 内容寻址 blob —— 仅当节点缓存未命中时随 body 上传
     # （manifest 带 opt_sha/ref_sha 且调用方提供了 raw 字节）。
     blob_src = blobs or {}
@@ -96,13 +118,21 @@ def submit_job(
         if code_sent:
             assert code_zip is not None  # 收窄：code_sent 已保证非 None
             body_obj["code_b64"] = base64.b64encode(code_zip).decode("ascii")
+        ts_sent = need_ts and ts_code_zip is not None
+        if ts_sent:
+            assert ts_code_zip is not None  # 收窄：ts_sent 已保证非 None
+            body_obj["ts_code_b64"] = base64.b64encode(ts_code_zip).decode("ascii")
         if blob_needs:
             body_obj["blobs"] = {
                 k: base64.b64encode(v).decode("ascii") for k, v in blob_needs.items()
             }
         if use_v2:
             body_bytes = pack_job_v2(
-                manifest, payload_zip, code_zip if code_sent else None, blob_needs
+                manifest,
+                payload_zip,
+                code_zip if code_sent else None,
+                blob_needs,
+                ts_code_zip if ts_sent else None,
             )
             ctype = WIRE_JOB_CONTENT_TYPE
         else:
@@ -131,6 +161,8 @@ def submit_job(
                 "body_bytes": len(body_bytes),
                 "payload_bytes": len(payload_zip),
                 "code_bytes": len(code_zip) if code_sent and code_zip is not None else 0,
+                # M3：TS 运行时实际上传字节（0 = 缓存命中，本轮没走这条线）。
+                "ts_code_bytes": len(ts_code_zip) if ts_sent and ts_code_zip is not None else 0,
                 "blob_bytes": sum(len(v) for v in blob_needs.values()),
                 "blobs_sent": sorted(blob_needs),
                 "upload_sec": round(time.time() - t0, 3),
@@ -144,6 +176,15 @@ def submit_job(
                     if name in ("opt", "ref") and raw:
                         blob_needs[name] = raw
                 last = "428 blob-missing"
+            elif b"ts-code-missing" in resp:
+                # M3：节点没有 TS 运行时缓存 → 下次重试带上（调用方必须提供字节；
+                # 拿不到就在下一轮循环里被 need_ts+None 的守卫响亮拒掉）。
+                # **必须**把 need_ts 置真：走到这里的典型场景是「/ts-code-sha 探到缓存、
+                # 但真正 POST 时缓存已不在」（并发清理/两课共享节点），此时 need_ts 本是
+                # False ⇒ 不置真就会一直重发不带 ts 的体，白烧满重试预算后整轮失败。
+                # 与上面 code-missing 的 `need_code = True` 同规。
+                need_ts = True
+                last = "428 ts-code-missing"
             else:
                 last = "428 code-missing"
         elif status == 409:

@@ -95,6 +95,9 @@ export interface ModeView {
   /** 当前生效的协议瘦身开关（M2，`'on'|'off'`；缺省 on）——可选（additive）：
    *  旧视图/夹具不带此键时 UI 回退缺省。 */
   slim?: string
+  /** 当前生效的 rollout 执行位置（M3，`'local'|'node'|'auto'`；缺省 local）——
+   *  可选（additive）：旧视图/夹具不带此键时 UI 回退缺省。 */
+  rolloutSrc?: string
 }
 
 export interface MetricsView {

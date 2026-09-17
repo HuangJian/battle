@@ -313,6 +313,7 @@ export function App({ initial }: AppProps) {
     if (push?.cfProtocol) body.cfProtocol = push.cfProtocol
     if (push?.cfEdgeIp) body.cfEdgeIp = push.cfEdgeIp
     if (push?.slim) body.slim = push.slim
+    if (push?.rolloutSrc) body.rolloutSrc = push.rolloutSrc
     if (mode === 'push' && push) {
       body.pushEndpoint = push.endpoint ?? ''
       body.pushAuthKey = push.authKey ?? ''

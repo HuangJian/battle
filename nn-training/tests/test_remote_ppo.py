@@ -44,6 +44,7 @@ from remote.protocol import (
     LEASE_SEC,
     MANIFEST_REQUIRED,
     PAYLOAD_NAME,
+    TS_CODE_NAME,
     WIRE_JOB_CONTENT_TYPE,
     WIRE_JOB_MAGIC,
     WIRE_V2_CONTENT_TYPE,
@@ -741,6 +742,50 @@ def _http_raw(base_url: str, token: str, path: str) -> tuple[int, bytes]:
             return resp.status, resp.read()
     except urllib.error.HTTPError as e:
         return e.code, e.read()
+
+
+def test_hub_serves_ts_code_and_blob_endpoints(tmp_path: Path) -> None:
+    """M3/M2：内容寻址的两条 GET 端点（`ts_code.zip` / opt·ref blob）。
+
+    节点侧 `worker.download_ts_code` / `download_blob` 走的就是这两条；kind=iter
+    拿不到 TS 运行时整轮就不可能跑起来，所以「缺失」必须是响亮 404，而不是空体
+    （空体会变成解包 0 字节 → 节点以「TS 代码根不存在」失败，指向错误的方向）。
+    """
+    base, store, srv, th = _boot_server(tmp_path)
+    try:
+        manifest = normalize_manifest(_mini_manifest())
+        jid = manifest["job_id"]
+        store.publish(jid, manifest, b"PK\x03\x04fake")
+        jd = store._job_dir(jid)
+        (jd / TS_CODE_NAME).write_bytes(b"ts-tree-zip")
+        bp = blob_path(jd, BLOB_OPT)
+        bp.parent.mkdir(parents=True, exist_ok=True)
+        bp.write_bytes(b"opt-raw")
+
+        # 未带 token → 401（与其它端点同鉴权边界）
+        assert _http_raw(base, "wrong-token", f"/jobs/{jid}/ts_code")[0] == 401
+
+        st, body = _http_raw(base, "sekret", f"/jobs/{jid}/ts_code")
+        assert st == 200 and body == b"ts-tree-zip"
+        st, body = _http_raw(base, "sekret", f"/jobs/{jid}/blob?name={BLOB_OPT}")
+        assert st == 200 and body == b"opt-raw"
+
+        # 缺失 = 404（确定性的「没有」，不是暂时拿不到）
+        st, _ = _http_raw(base, "sekret", f"/jobs/{jid}/blob?name={BLOB_REF}")
+        assert st == 404
+        # 非法 name → 400：路径穿越/写错名字与「还没上传」必须能区分开
+        st, _ = _http_raw(base, "sekret", f"/jobs/{jid}/blob?name=../../etc/passwd")
+        assert st == 400
+        # 没有 ts_code.zip 的旧 job（普通 ppo）→ 404（不是崩）
+        # 另一个 job id（同 manifest 字段会撞同一个 job_id）
+        m2 = normalize_manifest(_mini_manifest(job_id="k" * 16))
+        store.publish(m2["job_id"], m2, b"PK\x03\x04fake")
+        assert m2["job_id"] != jid
+        st, _ = _http_raw(base, "sekret", f"/jobs/{m2['job_id']}/ts_code")
+        assert st == 404
+    finally:
+        srv.shutdown()
+        th.join()
 
 
 def test_hub_workers_halt_flow(tmp_path: Path) -> None:

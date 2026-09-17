@@ -313,12 +313,14 @@ def test_poll_job_surfaces_halt(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_prune_job_dirs_keeps_recent_and_skips_code_cache(tmp_path: Path) -> None:
-    """保留最近 N 个（含在跑的），code_cache / blob_cache 永不删（M2 加 blob_cache）。"""
+    """保留最近 N 个（含在跑的），三棵内容寻址缓存永不删（M2 加 blob_cache、M3 加 ts_code_cache）。"""
     work = tmp_path / "remote-worker"
     work.mkdir()
     (work / "code_cache").mkdir()
     # M2 B3：blob_cache 也是内容寻址持久层，删了会让下一轮 opt 缓存未命中（白传 1.19MB）。
     (work / "blob_cache").mkdir()
+    # M3：ts_code_cache 同规——删了会让下一轮白传一份 TS 运行时，且日志上完全正常。
+    (work / "ts_code_cache").mkdir()
     for i, name in enumerate(["j1", "j2", "j3", "j4"]):
         d = work / name
         d.mkdir()
@@ -328,7 +330,7 @@ def test_prune_job_dirs_keeps_recent_and_skips_code_cache(tmp_path: Path) -> Non
     logs: list[str] = []
     removed = prune_job_dirs(work, keep=2, log=logs.append)
 
-    expect = ["blob_cache", "code_cache", "j3", "j4"]
+    expect = ["blob_cache", "code_cache", "j3", "j4", "ts_code_cache"]
     if (removed != 2 or sorted(p.name for p in work.iterdir()) != expect) and sandbox_delete_blocked(work):
         # 删除没落地 + 探针确认被拦：沙箱 safe-delete 配额拦截（环境）则 skip，
         # 否则是真回归（探针删得掉），继续走断言红。and 短路保证探针只在已失败
@@ -336,7 +338,7 @@ def test_prune_job_dirs_keeps_recent_and_skips_code_cache(tmp_path: Path) -> Non
         pytest.skip("沙箱 safe-delete 配额耗尽拦截删除（环境，非回归）——换 turn 重跑即绿")
     assert removed == 2
     left = sorted(p.name for p in work.iterdir())
-    assert left == expect  # 最近 2 个 job + 代码缓存 + blob 缓存
+    assert left == expect  # 最近 2 个 job + 代码缓存 + blob 缓存 + TS 运行时缓存
 
 
 def test_prune_job_dirs_tolerates_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

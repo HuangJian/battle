@@ -3,7 +3,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync
 import path from 'path'
 import { loadConfig } from '../../core/config'
 import { NN_TRAINING, REPO_ROOT } from '../../core/paths'
-import type { CfEdgeIp, CfProtocol, Component, SlimMode } from '../../core/types'
+import type { CfEdgeIp, CfProtocol, Component, RolloutSrcMode, SlimMode } from '../../core/types'
 import {
   ActionError,
   type ActionResult,
@@ -105,6 +105,12 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
         if (slim && !['on', 'off'].includes(slim)) {
           return errResp(`未知瘦身开关: ${slim}（只接受 on|off）`, 400)
         }
+        // M3：rollout 执行位置（同白名单写法）——与 python `choices=("auto","local","node")`
+        // 同字面量域，直接落库（**无**域换算，别在这里发明 on/off 那种中间态）。
+        const rolloutSrc = bodyStr(body, 'rolloutSrc')
+        if (rolloutSrc && !['auto', 'local', 'node'].includes(rolloutSrc)) {
+          return errResp(`未知 rollout 位置: ${rolloutSrc}（只接受 auto|local|node）`, 400)
+        }
         return okResp(
           await startPreset(mode as 'pull' | 'push' | 'local', ctx.course, {
             pushEndpoint: bodyStr(body, 'pushEndpoint'),
@@ -114,6 +120,7 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
             cfProtocol: (cfProtocol || undefined) as CfProtocol | undefined,
             cfEdgeIp: (cfEdgeIp || undefined) as CfEdgeIp | undefined,
             slim: (slim || undefined) as SlimMode | undefined,
+            rolloutSrc: (rolloutSrc || undefined) as RolloutSrcMode | undefined,
           }),
         )
       }

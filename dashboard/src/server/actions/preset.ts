@@ -5,7 +5,7 @@
  *  变成 hubServer → localWorker → trainingLoop(--ppo remote + 本机 hub)。 */
 import { loadConfig, saveConfig, validateCourseArg, writeRemoteHubUrl } from '../../core/config'
 import { configurePushEndpoint } from '../../stack/push-config'
-import type { CfEdgeIp, CfProtocol, Component, SlimMode } from '../../core/types'
+import type { CfEdgeIp, CfProtocol, Component, RolloutSrcMode, SlimMode } from '../../core/types'
 import { tailscaleIp } from '../../core/net'
 import { slotPort } from '../../core/slots'
 import { rlConfigSmoke } from '../../stack/smoke'
@@ -32,6 +32,10 @@ export interface PresetOpts {
    *  ⚠ 与 cf_* 不同：**不能**把字符串写进 rl-config（python `--remote-slim` 是
    *  `type=int, choices=(0,1)`），必须过 `slimToCfg()` 换算。 */
   slim?: SlimMode
+  /** M3：rollout 执行位置（随启动回写 rl-config.rl.rollout_src + console-state）。
+   *  ⚠ 与 slim **不同**：python `--rollout-src` 的 choices 就是这三个字符串——
+   *  直接写，**不要**过任何换算函数。 */
+  rolloutSrc?: RolloutSrcMode
 }
 
 /** 按 trainer 模式顺序拉起组件组合：
@@ -56,15 +60,22 @@ export async function startPreset(
     saveConsoleState({ trainerPpo: mode, course })
     // M1：隧道选项随启动回写（rl-config 的 rl.* 键 + console-state 生效值）——
     // 留空 = 不动（沿用 rl-config 现值/缺省 http2/4）。
-    if (opts.cfProtocol || opts.cfEdgeIp || opts.slim) {
+    if (opts.cfProtocol || opts.cfEdgeIp || opts.slim || opts.rolloutSrc) {
       const cfgT = loadConfig()
       cfgT.rl = cfgT.rl || ({} as (typeof cfgT)['rl'])
       if (opts.cfProtocol) cfgT.rl.cf_protocol = opts.cfProtocol
       if (opts.cfEdgeIp) cfgT.rl.cf_edge_ip = opts.cfEdgeIp
       // M2：写数值域（`1|0`）——字符串会让训练侧 `choices=(0,1)` 直接报错退出。
       if (opts.slim) cfgT.rl.slim = slimToCfg(opts.slim)
+      // M3：rollout 位置是字符串域，原样落 rl-config（与 --rollout-src choices 同字面量）。
+      if (opts.rolloutSrc) cfgT.rl.rollout_src = opts.rolloutSrc
       saveConfig(cfgT)
-      saveConsoleState({ cfProtocol: opts.cfProtocol, cfEdgeIp: opts.cfEdgeIp, slim: opts.slim })
+      saveConsoleState({
+        cfProtocol: opts.cfProtocol,
+        cfEdgeIp: opts.cfEdgeIp,
+        slim: opts.slim,
+        rolloutSrc: opts.rolloutSrc,
+      })
     }
     let pushNote = ''
     let viaLocalWorker = false

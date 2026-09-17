@@ -50,6 +50,7 @@ from remote.protocol import (
     AUTH_HEADER,
     CLAIM_TTL_SEC,
     PAYLOAD_NAME,
+    TS_CODE_NAME,
     WIRE_V2_MAGIC,
     ProtocolError,
     blob_path,
@@ -525,6 +526,8 @@ class HubHandler(BaseHTTPRequestHandler):
                 self._admin_net_probe()
             elif path.startswith("/jobs/") and path.endswith("/payload"):
                 self._get_payload()
+            elif path.startswith("/jobs/") and path.endswith("/ts_code"):
+                self._get_ts_code()
             elif path.startswith("/jobs/") and path.endswith("/code"):
                 self._get_code()
             elif path.startswith("/jobs/") and path.endswith("/blob"):
@@ -690,6 +693,20 @@ class HubHandler(BaseHTTPRequestHandler):
         p = self.store._job_dir(jid) / "code.zip"
         if not p.exists():
             self._json({"error": "no code zip"}, 404)
+            return
+        self._bytes(p.read_bytes())
+
+    # ---- GET /jobs/{id}/ts_code（M3：TS 运行时 zip，kind=iter 的节点用）----
+    def _get_ts_code(self) -> None:
+        if not self._auth_ok():
+            return
+        jid = self._job_id()
+        if jid is None:
+            self._json({"error": "not found"}, 404)
+            return
+        p = self.store._job_dir(jid) / TS_CODE_NAME
+        if not p.exists():
+            self._json({"error": "no ts_code zip"}, 404)
             return
         self._bytes(p.read_bytes())
 

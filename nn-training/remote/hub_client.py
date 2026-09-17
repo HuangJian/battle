@@ -32,12 +32,15 @@ from remote.protocol import (
     BLOB_REF,
     PAYLOAD_NAME,
     PAYLOAD_XZ_PRESET,
+    TS_CODE_NAME,
     blob_path,
     data_fp,
     decode_opt_tar,
     decode_weights_json,
+    iter_expected_data_fp,
     job_seed,
     normalize_manifest,
+    validate_rollout_spec,
 )
 from remote.protocol import (
     job_id as make_job_id,
@@ -250,6 +253,88 @@ def pack_code_zip(
     return sha
 
 
+#: M3 TS 运行时打进 zip 的源码根（相对仓根；其余一律不进）。
+#: `tools/` **整棵**（不是只 `tools/sim`）：2026-09-17 实测 `export-rl-rollout.ts`
+#: 的依赖闭包会跨出 tools/sim——它 import `../eval/godai-score`（v7 评分口径）。
+#: 手写「该包哪几个子目录」就是在猜依赖图；靠
+#: `tests/test_remote_iter_real_bun.py` 真跑一遍才是判据（那条测试就是这个事故的哨兵）。
+TS_CODE_DIRS: tuple[str, ...] = ("src", "tools")
+#: 允许进 zip 的后缀（.ts 源码 + .jsonc 数据 + .wasm 权重——`src/nn/conv-wasm.ts`
+#: 经 `import.meta.url` 读 `src/nn/wasm/conv_feats.wasm`，漏了它节点上卷积直接炸）。
+TS_CODE_SUFFIXES: tuple[str, ...] = (".ts", ".jsonc", ".wasm")
+#: 一律不进 zip 的目录名（含 node_modules —— rollout 零第三方运行时依赖，
+#: 只用到 node 内建 `fs`/`path`，所以云机**不必** bun install）。
+TS_CODE_EXCLUDE_DIRS: frozenset[str] = frozenset({
+    "node_modules",
+    "tmp",
+    "__pycache__",
+    ".venv",
+})
+
+
+def pack_ts_code_zip(
+    repo_root: str | Path,
+    zip_path: str | Path,
+    *,
+    log=lambda msg: None,
+) -> str:
+    """M3：把 rollout 用的 **TS 运行时** 打成 ts_code.zip（仅 `src/**` + `tools/sim/**`
+    下的 `.ts/.jsonc/.wasm`），返回字节 sha256。
+
+    与 `pack_code_zip`（Python 侧，另走 zip+extract 到 sys.path）**完全独立**：这条
+    链的消费者是 `bun`（节点上直接 `bun tools/sim/export-rl-rollout.ts`），不需要
+    venv/依赖安装，也不需要进 sys.path。
+
+    ⚠ 零第三方运行时依赖是本方案成立的前提（已核：exporter 链的非相对 import 只有
+    `fs`/`path`，仓根 package.json 无 dependencies）。哪天给 exporter 链引入了真的
+   运行时依赖，这里必须跟着变（否则云机报 module not found 而非静默错）。
+
+    固定时间戳打包：sha 只由内容决定（同内容 → 同 sha → 节点侧 ts_code 缓存可命中）。
+    """
+    import zipfile
+
+    repo_p = Path(repo_root).resolve()
+    zip_path_p = Path(zip_path)
+    zip_path_p.parent.mkdir(parents=True, exist_ok=True)
+    n_files = 0
+    n_bytes = 0
+    with zipfile.ZipFile(zip_path_p, "w", zipfile.ZIP_DEFLATED) as z:
+        for top in TS_CODE_DIRS:
+            base = repo_p / top
+            if not base.is_dir():
+                raise HubClientError(f"pack_ts_code_zip: 源码目录不存在 {base}")
+            for dirpath, dirnames, filenames in os.walk(base):
+                # 点目录一网打尽（.git/.venv/.mypy_cache…）——同 pack_code_zip 的教训
+                dirnames[:] = [
+                    d for d in dirnames if d not in TS_CODE_EXCLUDE_DIRS and not d.startswith(".")
+                ]
+                dir_p = Path(dirpath)
+                for fn in sorted(filenames):
+                    if not fn.endswith(TS_CODE_SUFFIXES) or fn.endswith(".d.ts"):
+                        continue
+                    f = dir_p / fn
+                    try:
+                        if not f.is_file():
+                            continue
+                    except OSError:
+                        continue
+                    arc = str(f.relative_to(repo_p)).replace("\\", "/")
+                    zi = zipfile.ZipInfo(arc, date_time=(1980, 1, 1, 0, 0, 0))
+                    zi.compress_type = zipfile.ZIP_DEFLATED
+                    zi.external_attr = 0o644 << 16
+                    data = f.read_bytes()
+                    z.writestr(zi, data)
+                    n_files += 1
+                    n_bytes += len(data)
+    sha = _sha256_bytes(zip_path_p.read_bytes())
+    if log:
+        log(
+            f"ts_code.zip: {n_files} files, {n_bytes} bytes raw -> "
+            f"{zip_path_p.stat().st_size} bytes, sha256={sha[:12]}…"
+        )
+    return sha
+
+
 # ------------------------------------------------------------------ 发布（磁盘 IPC）
 
 
@@ -313,18 +398,41 @@ def publish_job(
     # 文件，init_weights_fp 恒 "bc"——幂等键分量仍稳定）。
     kind: str = "ppo",
     extra: dict | None = None,
+    # M3（plan/remote-wire-remediation §5.2）：kind="iter" = 一整轮上云。
+    # rollout_spec 已经过 `protocol.validate_rollout_spec`（argv 白名单 + 相对路径 +
+    # 逐局 stage/seed）——本函数不再二次信任，直接进 manifest。
+    # ts_code_zip_path = 节点跑 rollout 用的 TS 运行时 zip（拷进 job 目录供 /ts_code 取）。
+    rollout_spec: dict | None = None,
+    ts_code_sha256: str = "",
+    ts_code_zip_path: str | Path | None = None,
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
 ) -> dict:
     """打包 + 发布 job（磁盘 IPC）：job_root/<job_id>/ + jsonl job_pending 事件。
 
     返回已归一化 manifest（含 job_id / payload_sha256）。幂等：同 job_id
     （幂等键相同）已发布 → 覆盖 payload、不重复追加 pending。
+
+    kind="iter"（M3）：payload 里**没有 shard**（只有 init_weights.json + 可选 blob），
+    shard 由节点自己跑 rollout 现产；data_fp 改对**声明集**（argv 里的逐局 stage/seed
+    + rollout.wver）算——节点跑完后对实产目录复算，两侧同函数，相等 ⇔ 实产集 ==
+    声明集（计划 §5.5①）。
     """
     job_root_p = Path(job_root)
     kind = str(kind or "ppo")
     schedule_raw = schedule_raw if schedule_raw is not None else []
-    # 1) data_fp（D1：排序 shard 路径 + manifest {wver,stage,seed}）
-    fp = data_fp(shard_dirs)
+    if rollout_spec is not None:
+        rollout_spec = validate_rollout_spec(rollout_spec)
+        if kind != "iter":
+            raise HubClientError(f"rollout_spec 只对 kind='iter' 有意义，收到 kind={kind!r}")
+        if not ts_code_sha256:
+            raise HubClientError("kind='iter' 必须带 ts_code_sha256（节点要它定位 TS 运行时）")
+        if shard_dirs:
+            raise HubClientError(
+                f"kind='iter' 不接受本地 shard（实得 {len(shard_dirs)} 个）——"
+                "上云轮由节点现产，混着发会双份采集"
+            )
+    # 1) data_fp（D1：排序 shard 路径 + manifest {wver,stage,seed}；iter = 声明集）
+    fp = iter_expected_data_fp(rollout_spec) if rollout_spec else data_fp(shard_dirs)
     # 2) init_weights_fp（fencing：云回传的 init_weights_fp 必须等于当前 args.out 指纹；
     #    BC 无 warm-start → 恒 "bc" 占位）
     init_weights_fp = _sha256_file(init_weights_path) if init_weights_path else "bc"
@@ -383,6 +491,12 @@ def publish_job(
         "data_fp": fp,
         "payload_sha256": "",
     }
+    if rollout_spec is not None:
+        m["ts_code_sha256"] = str(ts_code_sha256)
+        m["rollout"] = rollout_spec
+        # kind=iter：节点**必须**拿得到 init 权重——它要用这份权重去跑 rollout（不只是
+        # PPO 初始化）。M2 B4「有 opt blob 就不传 init_weights.json」在这里不成立。
+        keep_init_weights = True
     # M2（B4）：有 opt blob 时不传 init_weights.json（worker 从 opt 恢复即完整
     # model+Adam）。echo 冒烟要保持回显能力，keep_init_weights 时照旧带上。
     if init_weights_path and (not use_opt_blob or keep_init_weights):
@@ -438,6 +552,13 @@ def publish_job(
         czp = Path(code_zip_path)
         if czp.exists():
             shutil.copy2(czp, jd / "code.zip")
+    # M3：ts_code.zip 同规（GET /jobs/{id}/ts_code）——内容寻址缓存的前提是节点能拿到
+    # 原始字节并与 manifest.ts_code_sha256 对账。
+    if rollout_spec is not None and ts_code_zip_path:
+        tzp = Path(ts_code_zip_path)
+        if not tzp.exists():
+            raise HubClientError(f"kind='iter' 的 ts_code.zip 不存在: {tzp}")
+        shutil.copy2(tzp, jd / TS_CODE_NAME)
     try:
         rmtree_best_effort(tmp_extra_dir)
     except OSError:
@@ -460,7 +581,14 @@ def publish_job(
         },
     )
     log(
-        f"published job {jid} it{it}: shards={len(shard_dirs)} data_fp={fp[:12]}… payload={sha[:12]}…"
+        f"published job {jid} it{it}: "
+        + (
+            f"kind=iter games={len(rollout_spec['argv'])} "
+            f"ts_code={str(ts_code_sha256)[:12]}… "
+            if rollout_spec
+            else f"shards={len(shard_dirs)} "
+        )
+        + f"data_fp={fp[:12]}… payload={sha[:12]}…"
     )
     return m
 
@@ -773,11 +901,20 @@ def verify_and_land(
       3. commit 一致（result.commit_echo == manifest.commit）。
     任一不等 → 响亮拒绝（抛 HubClientError），不落盘。
     返回落盘 weights 的指纹（供 wver 下游直接使用）。
+
+    kind="iter"（M3）：本轮 shard 由云节点现产，hub 侧**无本地副本可重算**——data_fp
+    改比 manifest 的**声明集**值（hub 发布时算的），而「实产集 == 声明集」由节点侧
+    在产完后用同一函数校验（不通过就在云上响亮失败，job 不会回传成功结果）。
+    所以这里的第 2 项从「本地重算」变成「两边都是声明集」：节点能回传成功结果本身就
+    蕴含了实产集相符（协议层不可绕）；§5.5① 的逐位对拍是离线验收，不是这条链的守卫。
     """
     m = normalize_manifest(manifest)
     if result["init_weights_fp"] != _sha256_file(init_weights_path):
         raise HubClientError("三重校验失败: init_weights_fp 不匹配（云起点 ≠ 当前 args.out）——拒收")
-    local_fp = data_fp(iter_shard_dirs(traj_dir, it, log=log))
+    if str(m.get("kind", "ppo") or "ppo") == "iter":
+        local_fp = str(m["data_fp"])
+    else:
+        local_fp = data_fp(iter_shard_dirs(traj_dir, it, log=log))
     if result["data_fp"] != local_fp:
         raise HubClientError(
             f"三重校验失败: data_fp 不匹配（云={result['data_fp'][:12]}… "

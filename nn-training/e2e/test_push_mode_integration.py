@@ -133,6 +133,119 @@ def test_submit_428_retries_with_code(monkeypatch: pytest.MonkeyPatch) -> None:
     assert bodies[1]["code_b64"] == base64.b64encode(code).decode()
 
 
+# ────────────────────────── M3：TS 运行时（kind=iter 的节点要用 bun 跑 rollout） ──
+
+
+def test_submit_ts_code_cache_hit_skips_ts_upload(monkeypatch: pytest.MonkeyPatch) -> None:
+    """节点已有 ts_code 缓存 → 体里不带 ts_code_b64、计量 ts_code_bytes=0。
+
+    这条线每轮都花字节（TS 运行时与 opt 同量级）：探针失效 = 每轮白传一份 TS 树。
+    """
+    seen: list[dict] = []
+    probed: list[str] = []
+
+    def fake_request(url, token, path, *, data=None, method=None, headers=None, timeout=30.0):
+        probed.append(path)
+        if path.startswith("/code-sha"):
+            return 200, json.dumps({"cached": True}).encode()
+        if path.startswith("/ts-code-sha"):
+            return 200, json.dumps({"cached": True}).encode()
+        seen.append(_decode_job_body(data))
+        return 202, b'{"status":"accepted"}'
+
+    monkeypatch.setattr("remote.push_client._request", fake_request)
+    ts_zip = b"ts-tree-zip"
+    payload, code = b"pay", b"code"
+    man = _mini_manifest("m3-j1", payload, _sha(code))
+    man["ts_code_sha256"] = _sha(ts_zip)
+    out = submit_job(
+        "http://n", "tok", man, payload, code, ts_code_zip=ts_zip, log=lambda m: None
+    )
+    assert len(seen) == 1
+    assert "ts_code_b64" not in seen[0]
+    assert out["ts_code_bytes"] == 0
+    # 探针必须真的问过节点（不问就上传 = 每轮多传一份 TS 树）
+    assert any(p.startswith("/ts-code-sha") for p in probed)
+
+
+def test_submit_ts_code_uploaded_on_cache_miss(monkeypatch: pytest.MonkeyPatch) -> None:
+    """节点无 ts_code 缓存 → 体里带 ts_code_b64，计量出实际上传字节。"""
+    seen: list[dict] = []
+
+    def fake_request(url, token, path, *, data=None, method=None, headers=None, timeout=30.0):
+        if path.startswith("/code-sha"):
+            return 200, json.dumps({"cached": True}).encode()
+        if path.startswith("/ts-code-sha"):
+            return 200, json.dumps({"cached": False}).encode()
+        seen.append(_decode_job_body(data))
+        return 202, b'{"status":"accepted"}'
+
+    monkeypatch.setattr("remote.push_client._request", fake_request)
+    ts_zip = b"ts-tree-zip"
+    payload, code = b"pay", b"code"
+    man = _mini_manifest("m3-j2", payload, _sha(code))
+    man["ts_code_sha256"] = _sha(ts_zip)
+    out = submit_job(
+        "http://n", "tok", man, payload, code, ts_code_zip=ts_zip, log=lambda m: None
+    )
+    assert seen[0]["ts_code_b64"] == base64.b64encode(ts_zip).decode()
+    assert out["ts_code_bytes"] == len(ts_zip)
+
+
+def test_submit_428_ts_code_missing_retries_with_ts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """428 ts-code-missing → 下一轮重试必须带上 ts_code_b64。
+
+    回归点（M3 评审发现）：该分支原先只写 last、**不置 need_ts**。走到这里的典型
+    场景是「探针说缓存命中、真 POST 时缓存已不在」（并发清理/两课共享节点）——此时
+    need_ts 本是 False，不置真就会一直重发不带 ts 的体，白烧满重试预算后整轮失败。
+    与 code-missing 的 `need_code = True` 同规。
+    """
+    bodies: list[dict] = []
+    calls = {"n": 0}
+
+    def fake_request(url, token, path, *, data=None, method=None, headers=None, timeout=30.0):
+        if path.startswith("/code-sha"):
+            return 200, json.dumps({"cached": True}).encode()
+        if path.startswith("/ts-code-sha"):
+            # 探针误报已缓存 → 首次 POST 不带 ts → 节点 428
+            return 200, json.dumps({"cached": True}).encode()
+        bodies.append(_decode_job_body(data))
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return 428, b'{"error":"ts-code-missing"}'
+        return 202, b'{"status":"accepted"}'
+
+    monkeypatch.setattr("remote.push_client._request", fake_request)
+    monkeypatch.setattr("remote.push_client.time.sleep", lambda _s: None)
+    ts_zip = b"ts-tree-zip"
+    payload, code = b"pay", b"code"
+    man = _mini_manifest("m3-j3", payload, _sha(code))
+    man["ts_code_sha256"] = _sha(ts_zip)
+    out = submit_job(
+        "http://n", "tok", man, payload, code, ts_code_zip=ts_zip, attempts=3, log=lambda m: None
+    )
+    assert calls["n"] == 2
+    assert "ts_code_b64" not in bodies[0]  # 首次按探针结果不带
+    assert bodies[1]["ts_code_b64"] == base64.b64encode(ts_zip).decode()
+    assert out["ts_code_bytes"] == len(ts_zip)
+
+
+def test_submit_missing_ts_code_is_loud(monkeypatch: pytest.MonkeyPatch) -> None:
+    """节点无缓存且调用方没带 ts_code.zip → POST 前就 RetryableError（不占队列）。"""
+
+    def fake_request(url, token, path, *, data=None, method=None, headers=None, timeout=30.0):
+        if path.startswith("/code-sha"):
+            return 200, json.dumps({"cached": True}).encode()
+        return 200, json.dumps({"cached": False}).encode()
+
+    monkeypatch.setattr("remote.push_client._request", fake_request)
+    payload, code = b"pay", b"code"
+    man = _mini_manifest("m3-j4", payload, _sha(code))
+    man["ts_code_sha256"] = "t" * 64
+    with pytest.raises(RetryableError, match="ts_code"):
+        submit_job("http://n", "tok", man, payload, code, log=lambda m: None)
+
+
 def test_submit_4xx_is_protocol_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """400 确定性拒绝：不做瞬时重试、最终立刻 ProtocolError。
 
@@ -283,6 +396,8 @@ class _LiveWorker:
         self.url = f"http://127.0.0.1:{self.port}"
         self.token = token
         self.started: list[str] = []
+        #: 每 job 解包后的 item（M3：验 ts_code_zip 真字节到达执行侧）。
+        self.items: dict[str, dict] = {}
         self._thread = threading.Thread(target=self.srv.serve_forever, daemon=True)
         self._thread.start()
         # 覆盖真 starter（会 spawn run_job 线程）——只记 jid 并立刻写结果。
@@ -290,6 +405,7 @@ class _LiveWorker:
 
     def _fake_starter(self, jid: str, item: dict) -> None:
         self.started.append(jid)
+        self.items[jid] = item
         self.state.set_result(
             jid,
             {
@@ -407,6 +523,73 @@ def test_e2e_missing_code_rejected_before_queue(tmp_path: Path) -> None:
         with pytest.raises(RetryableError, match="code"):
             submit_job(w.url, w.token, man, payload, None, attempts=1, log=lambda m: None)
         assert w.started == []
+    finally:
+        w.close()
+
+
+def test_e2e_ts_code_uploaded_and_gated_by_node_cache(tmp_path: Path) -> None:
+    """M3 真 worker_server 闭环：无缓存 → 上传 TS 运行时并受理；有缓存 → 不再上传。
+
+    真 `_LiveWorker` 的 `state.ts_code_cached` 看的是 `work/<ts_code_cache>/<sha>`——
+    测试就位一个同名目录，复现「同会话第二轮」（缓存已在）这一形态。
+    """
+    w = _LiveWorker(tmp_path)
+    try:
+        _wait_ready(w.url, w.token)
+        ts_zip = b"ts-tree-zip-bytes"
+        ts_sha = _sha(ts_zip)
+        payload, code = b"pay", b"code-ts"
+        man = _mini_manifest("e2e-ts1", payload, _sha(code))
+        man["ts_code_sha256"] = ts_sha
+        assert w.state.ts_code_cached(ts_sha) is False
+        out = submit_job(w.url, w.token, man, payload, code, ts_code_zip=ts_zip, log=lambda m: None)
+        assert w.started == ["e2e-ts1"]
+        assert out["ts_code_bytes"] == len(ts_zip)
+        # 真 server 解出的 ts 段字节 == 原字节（不是被静默丢掉的一段）
+        assert w.items["e2e-ts1"].get("ts_code_zip") == ts_zip
+        # 缓存已就位 → 第二轮探针命中，不需要再传
+        (tmp_path / "work" / "ts_code_cache" / ts_sha).mkdir(parents=True, exist_ok=True)
+        payload2 = b"pay2"
+        man2 = _mini_manifest("e2e-ts2", payload2, _sha(code))
+        man2["ts_code_sha256"] = ts_sha
+        out2 = submit_job(w.url, w.token, man2, payload2, code, log=lambda m: None)
+        assert out2["ts_code_bytes"] == 0
+    finally:
+        w.close()
+
+
+def test_e2e_node_reports_ts_code_missing_428(tmp_path: Path) -> None:
+    """节点无 TS 缓存且体里没带 → server 回 428 ts-code-missing（不静默跑空）。
+
+    直接打线协议（不走 push_client 的前置守卫），验的是**服务端**这一侧的门。
+    """
+    from remote.hub_client import _request
+
+    w = _LiveWorker(tmp_path)
+    try:
+        _wait_ready(w.url, w.token)
+        payload, code = b"pay", b"code-ts-428"
+        man = _mini_manifest("e2e-ts428", payload, _sha(code))
+        man["ts_code_sha256"] = "t" * 64
+        body = json.dumps(
+            {
+                "manifest": man,
+                "payload_b64": base64.b64encode(payload).decode(),
+                "code_b64": base64.b64encode(code).decode(),
+            }
+        ).encode()
+        status, resp = _request(
+            w.url,
+            w.token,
+            "/job",
+            timeout=10.0,
+            data=body,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        assert status == 428
+        assert b"ts-code-missing" in resp
+        assert w.started == []  # 未受理（不占队列）
     finally:
         w.close()
 

@@ -2070,6 +2070,43 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   读的正是 args）⇒ §1.4「开关取值必须写进 iteration 事件」过去并未满足。现由 CLI 参数 +
   `_course_cf_tunnel`（CLI > `courses.<stem>.cf_*` > `rl.cf_*` > None）填上。
 - **未做（不写成已做）**：M2 的云机绝对值确认**未跑**；M3（rollout 上云）按 §5.1 门 1 已命中、
-  门 2 待测，且 M2 后上行仅 ~1.2MB ⇒ 留档不做。
+  门 2 待测，且 M2 后上行仅 ~1.2MB ⇒ 当时留档不做（**后经人工指令开工，见下条**）。
+
+## §2026-09-17-goalnn-rollout-on-cloud（2026-09-17，M3 rollout 上云：**人工指令覆盖计划的决策门**，
+安全阀与「不许静默降级」是硬要求）
+
+- **背景与授权**：`plan/remote-wire-remediation.plan.md` §5/§6 的原文是「门 1 命中 ⇒ M3 直接留档不做」，
+  门 1 在 M1 实测中已命中（`http2` 把 2MiB 上行压到 p50 4.8s）。本次开工依据是**用户指令**：目标腿是
+  TPU 实例（v3-8 = 96 vCPU），rollout 上云在那里收益极高。**门的结论没变，是决策权变了** —— 记录本条
+  是为了让后续 agent 不会把「代码里有 M3」误读成「门开了」，也不会拿旧的『留档不做』去回退它。
+- **备选与否决**：① 让节点自己拼 rollout 命令（否决 —— hub 的 `build_rollout_cmd` 是三导出器 + 课程覆盖
+  + D14 血缘的唯一拼装点，节点重算 = 在协议里复制一份它的知识，早晚漂）；改为 hub 发 argv、节点只执行。
+  ② 上云轮降级本机（否决 —— 本地没有 shard 可训，「降级」只能是静默丢掉一整轮）；③ 用 `local_slots=0`
+  + 手工摘节点来关本地采样（否决 —— 靠配置正确；改为 loop_core 在 node 轮**结构上**跳过整个采样相位）。
+- **决定**：① 新 job `kind="iter"`（走 BC 开过的 kind 通道），manifest 追加必填 `ts_code_sha256` + `rollout`；
+  rollout 规格 = 逐局 argv（白名单只放行 `tools/sim/export-rl-rollout.ts`，`--out`/`--weights` 必须 job 内
+  相对路径）。② TS 运行时按内容寻址（`pack_ts_code_zip` 固定时间戳 ⇒ 同内容同 sha ⇒ 节点缓存可命中）；
+  白名单打**整棵 `tools/**` + `src/**`** 而不是手挑子目录（实测依赖闭包会跨出 `tools/sim` 到
+  `../eval/godai-score`；手挑 = 在猜依赖图）。③ 声明集用 `iter_expected_data_fp`，节点侧对实产集
+  用**同一个函数**复算并拒收不符 —— 这不是等价替代，是「上云轮没有本地副本可重算」的唯一替代。
+- **开关与回退**：`--rollout-src auto|local|node`（缺省 auto → local，逐字节旧行为）；值住 rl-config
+  （`rl.rollout_src` / `courses.<课>.rollout_src`，D14 血缘：选项永不进 curricula），并随每轮写入
+  iteration 事件的 `wire.rollout_src`（否则事后无法按「实测在哪跑」分组）。控制台启动弹窗提供选项。
+- **安全阀（配错一律响亮，禁止静默降级）**：node 与 `--target-transitions` 互斥（补波要读本地 shard）；
+  发布时 traj 已有本地 shard ⇒ 拒发（双份采集）；实产 shard 集 ≠ 声明集 ⇒ 拒收；`_ensure_ts_code` 的
+  sha 不符 ⇒ `RetryableError`。上云轮**不经过** `_remote_ppo_or_degrade`，所以 4xx（鉴权/闭锁）
+  立即停腿的判据必须在 `_remote_iter` 里**另补一份**——否则 x3-step 事故的「403 白烧 5×30s 重发同一 job」
+  会重演。
+- **控制面同步（计划 §5.4 「最容易漏一半」）**：本地采样/预采结构上关闭；`rollout_sec` 用节点自报
+  `elapsedSec`（用 t_rollout 会把 PPO + 传输算进采集 = 假指标）；`metrics_stats` 与 `_check_quota_incident`
+  在两轮均**跳过**（上云轮本地零 shard 是预期，不跳就是假精度统计 + 每轮假配额告警）；eval 链零改动。
+- **三问门（通过）**：① 被否决备选见上；② 未来再犯 ——「节点自己重算调度规格」「上云轮降级本机」
+  「内容寻址缓存忘了加进 prune 豁免名单」每条都会再出现（第三条 M2 已经犯过一次）；③ 无法就近表达 ——
+  横跨协议 / 两个执行端 / 控制面读取点 / 回退开关 / 控制台 UI。
+- **配套事实**：逐位对拍已验（`tests/test_remote_iter_real_bun.py`，真 bun + 真权重，同 argv 跑两遍逐文件 diff，
+  含 `_rl_report.json` 除 `elapsedSec` 全字段）；协议/规格/执行器/失败语义/传输端点共 ~70 例。
+  **未做（不写成已做）**：真远程轮次的绝对值（`wire.up_sec`、每轮墙钟）与 TPU 腿上的 target ~10s ——
+  本机无节点可跑；M2 的云机绝对值确认同样仍欠。细节见 `docs/nn.progress.md` §57。
+- **收益前提不变**：≥16 vCPU 的腿才成立（GPU T4×2 = 4 vCPU 直接否，见 `plan/kaggle-rollout-feasibility.md` §3.3）。
 
 

@@ -99,7 +99,9 @@ describe('preset / route / UI 接线（源码断言：跨文件链路 tsc 抓不
     const src = readSrc('src/web/app/panels/TrainLaunchModal.tsx').replace(/\s+/g, ' ')
     expect(src).toContain("const TC_SLIM = 'tc.slim'")
     expect(src).toContain('ariaLabel="协议瘦身"')
-    expect(src).toContain('const tunnel: TunnelLaunchOpts = { cfProtocol, cfEdgeIp, slim }')
+    // 顺序无关（后续 M3 又往同一个选项对象里加了 rolloutSrc——写死整行会让本断言
+    // 在「别人加开关」时变红，而那不是回归）。
+    expect(src).toMatch(/const tunnel: TunnelLaunchOpts = \{[^}]*\bslim\b/)
     // 上次选择要记住（与 cfProtocol 同口径）
     expect(src).toContain('writeLocal(TC_SLIM, slim)')
     // 当前生效值上屏：以为改了其实没改是本仓反复出现的一类坑

@@ -1,0 +1,168 @@
+"""test_remote_iter_real_bun.py — M3 验收：节点侧 rollout 与本机直跑**逐位一致**。
+
+plan/remote-wire-remediation.plan.md §5.5①：「同 (stage, seed)、同权重，节点产出的
+shard 与本地 bun rollout 逐字节一致（data_fp 相等是必要不充分，要直接 diff 文件）」。
+
+本文件的做法比「节点 vs 本机」更严格也更便宜：**同一个 argv**（由
+`rl.iter_job.build_iter_spec` 生成，与上云时发给节点的完全一样）跑两遍——
+  A 直跑（subprocess + cwd=dirA）
+  B 过 `run_iter_rollout`（cwd=job_dir）
+然后逐文件 diff。命令都一样还一致，说明节点路径没有引入任何差异（剩下的只是导出器
+自身的确定性，那由本仓既有的 determinism 纪律守着）。
+
+⚠ 为什么不在 `e2e/` 下：那一层的契约是 **hermetic**（`e2e/conftest.py` 明写「不需要
+bun / 真节点 / weights fixture」）——本文件需要真 bun + 真权重，放进 e2e 会让
+「e2e 是自足层」这个说法失真。故留在 tests/ 层并显式 skip（缺 bun / 缺权重即跳过，
+CI 上不会红）。
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+import sys
+import zipfile
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import remote.iter_rollout as iter_rollout
+from remote.hub_client import pack_ts_code_zip
+from remote.iter_rollout import run_iter_rollout
+from remote.protocol import (
+    TS_CODE_NAME,
+    data_fp,
+    iter_expected_data_fp,
+    validate_rollout_spec,
+)
+from rl.iter_job import build_iter_spec
+
+REPO_ROOT = ROOT.parent
+#: 每局 tick 上限——验收只要「采到 shard 并逐位可比」，不要长局（本文件要秒级跑完）。
+MAX_TICKS = 120
+#: 优先用的权重（形状最新、最可能被 exporter 直接吃下）；找不到就跳过本文件。
+_WEIGHT_CANDIDATES = (
+    "weights/bc-c4-v3/bc-c4-v3.it1.20260914-103830.json",
+    "weights/bc-c4/bc-c4.it1.20260913-161311.json",
+)
+
+
+def _find_weights() -> Path | None:
+    for rel in _WEIGHT_CANDIDATES:
+        p = ROOT / rel
+        if p.exists():
+            return p
+    # 兜底：weights/ 下任意一个 json（版本不明也无妨——两边用的是同一份）
+    for p in sorted((ROOT / "weights").glob("*/*.json")):
+        return p
+    return None
+
+
+BUN = shutil.which("bun")
+WEIGHTS = _find_weights()
+
+pytestmark = pytest.mark.skipif(
+    BUN is None or WEIGHTS is None,
+    reason="需要真 bun 与一份真实权重（本仓 weights/*/；缺失即跳过）",
+)
+
+
+def _rollout_args() -> SimpleNamespace:
+    return SimpleNamespace(
+        goal_rollout=False,
+        intent_rollout=False,
+        max_ticks=MAX_TICKS,
+        difficulty="hard",
+        dodge="",
+        course_obj=None,
+        course_path="",
+        course_frozen_bytes=None,
+    )
+
+
+def _shard_files(d: Path) -> dict[str, bytes]:
+    return {
+        f.name: f.read_bytes()
+        for f in sorted(d.iterdir())
+        if f.is_file()
+    }
+
+
+def test_node_runner_shards_byte_identical_to_direct_run(tmp_path: Path) -> None:
+    assert WEIGHTS is not None
+    spec = validate_rollout_spec(
+        build_iter_spec(_rollout_args(), [(0, 0)], wver="WVER" * 16, workers=1, hub_bun=str(BUN))
+    )
+    argv = spec["argv"][0]
+
+    # 0) TS 运行时 = **真的** 走 pack_ts_code_zip（这一跑顺带验证白名单够用：
+    #    缺一个 .ts/.wasm 都会在这里炸，而不是等上云那一刻）。
+    ts_zip = tmp_path / TS_CODE_NAME
+    pack_ts_code_zip(REPO_ROOT, ts_zip)
+    ts_root = tmp_path / "tsroot"
+    with zipfile.ZipFile(ts_zip) as zf:
+        zf.extractall(ts_root)
+    assert (ts_root / "tools/sim/export-rl-rollout.ts").exists()
+    assert (ts_root / "src/nn/wasm/conv_feats.wasm").exists(), \
+        "wasm 权重没进 ts_code —— 云机上卷积会直接炸"
+
+    # 两个目录各放一份同名权重（argv 里是 `--weights init_weights.json`，job 目录相对）
+    dir_a = tmp_path / "direct"
+    dir_b = tmp_path / "viarunner"
+    for d in (dir_a, dir_b):
+        d.mkdir(parents=True)
+        shutil.copyfile(WEIGHTS, d / "init_weights.json")
+
+    # A：直跑（等价于「本机 rollout」）——cwd = TS 根，job 侧路径绝化（与节点侧同一规则）
+    exec_argv = iter_rollout._exec_argv(argv, dir_a)
+    p = subprocess.run(
+        [str(BUN), *exec_argv],
+        cwd=str(ts_root),
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert p.returncode == 0, f"直跑失败：{p.stdout[-2000:]}\n{p.stderr[-2000:]}"
+
+    # B：过节点侧执行器（真 bun + 真 TS 树 + 真权重）
+    out = run_iter_rollout(dir_b, spec, ts_dir=ts_root, log=lambda _m: None)
+
+    # 两侧同形（`w0/rl_s0_seed0`，与本机 rollout 一致）
+    shard = Path("w0") / "rl_s0_seed0"
+    fa = _shard_files(dir_a / shard)
+    fb = _shard_files(dir_b / shard)
+    assert set(fa) == set(fb), f"文件集不同：{sorted(fa)} vs {sorted(fb)}"
+    assert fa, "shard 目录为空——导出器没写盘？"
+    for name in fa:
+        assert fa[name] == fb[name], f"{name} 逐字节不一致（节点路径引入了差异）"
+
+    # 声明集 = 实产集（同一个 data_fp 函数两侧各算一次）
+    assert data_fp([dir_b / shard]) == iter_expected_data_fp(spec)
+    assert out["report"]["shards"] == 1
+    assert out["report"]["games"] == 1
+
+    # 报告口径与直跑一致（elapsedSec 是唯一允许不同的字段）
+    rep_a = json.loads((dir_a / "w0" / "_rl_report.json").read_text(encoding="utf-8"))
+    rep_b = json.loads((dir_b / "w0" / "_rl_report.json").read_text(encoding="utf-8"))
+    assert rep_a.get("wver") == "WVER" * 16  # argv 里的 wver 真的进了 shard manifest
+    rep_a.pop("elapsedSec", None)
+    rep_b.pop("elapsedSec", None)
+    assert rep_a == rep_b
+    # 节点侧聚合报告（combine_reports 的输出）必须落在单局口径上
+    assert out["report"]["totalTicks"] == rep_b["totalTicks"]
+    assert out["report"]["totalSamples"] == rep_b["totalSamples"]
+    assert out["report"]["outcomes"] == rep_b["outcomes"]
+    assert out["report"]["winRate"] == rep_b["winRate"]
+
+
+def test_bun_version_reported_for_selfcheck(tmp_path: Path) -> None:
+    """§5.3 启动自检：节点必须能报出 bun 版本（对账同 major.minor 的前提）。"""
+    assert BUN is not None
+    # 直接跑被测函数（不依赖 resolve_bun 的环境）——空串也允许（旧 bun），但必须不抛。
+    assert iter_rollout.bun_version(str(BUN)) == "" or iter_rollout.bun_version(str(BUN))[0].isdigit()

@@ -30,6 +30,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from remote.iter_rollout import run_iter_rollout
 from remote.protocol import (
     AUTH_HEADER,
     BLOB_OPT,
@@ -204,6 +205,23 @@ def download_code(
 ) -> bytes:
     return _get_with_retry(
         base_url, token, f"/jobs/{jid}/code", timeout=120.0, attempts=attempts, log=log
+    )
+
+
+def download_ts_code(
+    base_url: str,
+    token: str,
+    jid: str,
+    *,
+    attempts: int = 3,
+    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+) -> bytes:
+    """M3：取 TS 运行时 zip（kind=iter 的节点要用 bun 跑 rollout）。
+
+    代价只付一次：内容寻址缓存（`ts_code_cache/<sha>`）命中后同 sha 永不重下。
+    """
+    return _get_with_retry(
+        base_url, token, f"/jobs/{jid}/ts_code", timeout=300.0, attempts=attempts, log=log
     )
 
 
@@ -411,6 +429,10 @@ def _wire_block(**over: object) -> dict:
         "blob_hits": 0,
         "blob_miss_bytes": 0,
         "result_bytes": 0,
+        # M3 kind=iter（其余 job 恒 0/False = 本轮没走这条线）；rollout_sec / bun_version
+        # 不在这里给默认值——缺席就代表「本轮没有节点侧 rollout」，不能写成 0 冒充。
+        "ts_code_bytes": 0,
+        "ts_code_hit": False,
     }
     w.update({k: v for k, v in over.items() if v is not None})
     return w
@@ -439,14 +461,18 @@ HOT_RELOAD_EXIT = 86
 def prune_job_dirs(work_dir: Path, keep: int = JOB_DIR_KEEP, log=lambda msg: None) -> int:
     """按 mtime 保留最近 `keep` 个 job 目录，其余删除。返回删除个数。
 
-    只动 work_dir 下的 job 目录（按 jid 命名），**跳过 code_cache / blob_cache**
-    （按 sha 内容寻址，命中即省一次下载/上传）。删除失败（占用/沙箱保护）跳过，不抛。
+    只动 work_dir 下的 job 目录（按 jid 命名），**跳过 code_cache / blob_cache /
+    ts_code_cache**（按 sha 内容寻址，命中即省一次下载/上传）。删除失败（占用/沙箱
+    保护）跳过，不抛。
+
+    ⚠ 新增内容寻址缓存目录时必须加进这份豁免名单（2026-09-17 M2 事故：`blob_cache`
+    漏了名单 → 每轮被当旧 job 目录删掉 → 缓存永远未命中，而现象看起来是「协议没生效」）。
     """
     try:
         dirs = [
             d
             for d in work_dir.iterdir()
-            if d.is_dir() and d.name not in ("code_cache", "blob_cache")
+            if d.is_dir() and d.name not in ("code_cache", "blob_cache", "ts_code_cache")
         ]
     except OSError:
         return 0
@@ -932,6 +958,65 @@ def _run_bc_job(
     return result
 
 
+def _ensure_ts_code(
+    base_url: str,
+    token: str,
+    jid: str,
+    manifest: dict,
+    *,
+    ts_root: Path,
+    preloaded: dict | None,
+    log=lambda msg: None,
+) -> tuple[Path, int, bool]:
+    """M3 kind=iter：把 TS 运行时 zip 解包到内容寻址目录，返回 `(目录, 字节数, 缓存命中)`。
+
+    与 code.zip 同口径（按 sha 隔离 + tmp 原子改名），但**另一棵缓存树**：Python 代码走
+    `sys.path`，TS 代码走 bun 的 cwd —— 两者生命周期/内容无关，混在一起只会让删除豁免
+    名单变难维护。sha 不匹配 = 传输损坏（瞬时）⇒ RetryableError，与 payload/code 同规。
+
+    返回的字节数用于 M0 计量（`wire.ts_code_bytes`；缓存命中时为 0 = 本轮没走这条线）。
+    """
+    import zipfile
+
+    sha = str(manifest.get("ts_code_sha256", "") or "")
+    if not sha:
+        raise ProtocolError("kind=iter 的 manifest 缺 ts_code_sha256——无法定位 TS 运行时")
+    cache = ts_root / sha
+    if cache.exists():
+        log(f"job {jid}: ts_code cache 命中（{sha[:12]}…）——跳过下载解压")
+        return cache, 0, True
+    raw = (preloaded or {}).get("ts_code_zip") or download_ts_code(base_url, token, jid, log=log)
+    if hashlib.sha256(raw).hexdigest() != sha:
+        raise RetryableError("ts_code_sha256 不匹配——传输损坏（重下可修复）")
+    tmp = ts_root / (sha + ".tmp")
+    if tmp.exists():
+        from platform_utils import rmtree_best_effort
+
+        rmtree_best_effort(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True, exist_ok=True)
+    zip_path = tmp.parent / (sha + ".zip")
+    zip_path.write_bytes(raw)
+    with zipfile.ZipFile(zip_path) as zf:
+        zf.extractall(tmp)
+    ts_root.mkdir(parents=True, exist_ok=True)
+    if cache.exists():  # 并发窗口：别人已解好 → 用别人的
+        from platform_utils import rmtree_best_effort as _rm
+
+        _rm(tmp, ignore_errors=True)
+        _rm(zip_path, ignore_errors=True)
+        return cache, 0, True
+    tmp.rename(cache)
+    try:
+        zip_path.unlink()
+    except OSError:
+        pass
+    n_ts = len(list(cache.rglob("*.ts")))
+    log(
+        f"job {jid}: ts_code.zip unpacked ({len(raw)} bytes, {n_ts} .ts files) -> {cache.name}"
+    )
+    return cache, len(raw), False
+
+
 def run_job(
     base_url: str,
     token: str,
@@ -943,14 +1028,16 @@ def run_job(
     echo: bool = False,
     preloaded: dict | None = None,
     code_cache_dir: Path | None = None,
+    ts_code_cache_dir: Path | None = None,
     lease_token: str = "",
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
 ) -> dict:
     """执行单个 job：下载 → 校验 → PPO → 产出 weights_json + opt tar → POST。
 
-    preloaded（push 模式，2026-09-05）：{"payload_zip": bytes, "code_zip"?: bytes}——
-    HUB 把 payload/code 随 POST /job 直接上传（worker_server），跳过下载步骤；
-    code 仍走 sha 缓存目录（code_zip 缺省时要求本地缓存已命中或服务器自行处理）。
+    preloaded（push 模式，2026-09-05）：{"payload_zip": bytes, "code_zip"?: bytes,
+    "ts_code_zip"?: bytes}——HUB 把 payload/code 随 POST /job 直接上传（worker_server），
+    跳过下载步骤；code 仍走 sha 缓存目录（code_zip 缺省时要求本地缓存已命中或
+    服务器自行处理）。ts_code_zip 同规（M3 kind=iter 专用，其余 job 恒缺席）。
 
     echo=True（冒烟）：下载/校验全走，但不拉 torch 不跑 PPO——init 权重原样回传
     并带 smoke 标记（消费方作废本轮）；hub-start --smoke-only 的 Kaggle 交互预演。
@@ -1086,6 +1173,31 @@ def run_job(
             lease_token=lease_token,
             log=log,
         )
+
+    # ---- M3 kind 分叉：iter = 一整轮上云（节点自己跑 rollout 产 shard）----
+    #
+    # 位置很关键：必须在 mode 红线 / D14 / echo **之前**——因为本轮真正要校验的 shard
+    # 是刚跑出来的（payload 里没有 shard），D14 必须看到它们；echo 轮则整个跳过 rollout
+    # （回显冒烟不跑任何重计算，只验 payload/code/ts_code 三样传输）。
+    iter_info: dict | None = None
+    ts_code_bytes = 0
+    ts_code_hit = False
+    if str(manifest["kind"]) == "iter":
+        ts_root = (
+            ts_code_cache_dir
+            if ts_code_cache_dir is not None
+            else code_root.parent / "ts_code_cache"
+        )
+        _ts_dir, ts_code_bytes, ts_code_hit = _ensure_ts_code(
+            base_url, token, jid, manifest, ts_root=ts_root, preloaded=preloaded, log=log
+        )
+        if echo:
+            log(f"job {jid}: kind=iter + echo——跳过 rollout（只验传输链）")
+        else:
+            iter_info = run_iter_rollout(
+                job_dir, manifest["rollout"], ts_dir=_ts_dir, log=log
+            )
+            shard_dirs = list(iter_info["shard_dirs"])
 
     # ---- mode 红线（v1：仅 per-tick） ----
     if manifest["mode"] != "per-tick":
@@ -1428,6 +1540,9 @@ def run_job(
         "commit_echo": manifest["commit"],
         "ppo_sec": ppo_sec,
     }
+    if iter_info is not None:
+        # M3：节点自己跑的 rollout 的采集口径（协议层必校——hub 侧无本地 shard 可算）。
+        result["report"] = iter_info["report"]
     result["wire"] = _wire_block(
         payload_bytes=len(raw),
         payload_dl_sec=payload_dl_sec,
@@ -1436,6 +1551,10 @@ def run_job(
         grad_sec=ppo_sec,
         blob_hits=blob_hits,
         blob_miss_bytes=blob_miss_bytes,
+        ts_code_bytes=ts_code_bytes,
+        ts_code_hit=ts_code_hit,
+        rollout_sec=(iter_info or {}).get("rollout_sec"),
+        bun_version=(iter_info or {}).get("bun_version"),
     )
     # 两遍收敛（同 echo 路径）：result_bytes 与自身体长自指，一遍差它的十进制位数。
     result["wire"]["result_bytes"] = len(pack_result_v2(result))

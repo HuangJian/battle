@@ -38,6 +38,17 @@ describe('console/api.routeAction', () => {
     expect(r2.__status).toBe(400)
   })
 
+  it('preset rollout 位置白名单：非法 rolloutSrc → 400（M3；只接受 auto|local|node）', async () => {
+    // 与 python `--rollout-src choices=("auto","local","node")` 同域——
+    // 尤其不许放行 on/off 这类「另一个开关的域」，否则训练侧 choices 直接报错退出。
+    for (const bad of ['on', 'off', 'cloud', '1']) {
+      const r = (await postJson('preset', { mode: 'local', rolloutSrc: bad })) as {
+        __status: number
+      }
+      expect(`${bad}:${r.__status}`).toBe(`${bad}:400`)
+    }
+  })
+
   it('节点并发越界 → 动作失败且不写盘', async () => {
     const before = readFileSync(configPath(), 'utf-8')
     const r = await postJson('setNodeConcurrency', { id: 'self', concurrency: 999 })

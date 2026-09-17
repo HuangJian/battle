@@ -7,7 +7,7 @@
  *  Esc / 遮罩关闭由 App 全局处理。 */
 
 import { useEffect, useRef, useState } from 'preact/hooks'
-import type { SlimMode } from '../../../core/types'
+import type { RolloutSrcMode, SlimMode } from '../../../core/types'
 import type { ModeView } from '../../view'
 import { SegmentedControl } from '../../components/SegmentedControl'
 import { Toggle } from '../../components/Toggle'
@@ -37,12 +37,15 @@ const TC_REMOTE_DEGRADE = 'tc.remoteDegrade'
 const TC_CF_PROTOCOL = 'tc.cfProtocol'
 const TC_CF_EDGE_IP = 'tc.cfEdgeIp'
 const TC_SLIM = 'tc.slim'
+const TC_ROLLOUT_SRC = 'tc.rolloutSrc'
 
 export interface TunnelLaunchOpts {
   cfProtocol: 'http2' | 'quic' | 'auto'
   cfEdgeIp: '4' | '6' | 'auto'
   /** M2 协议瘦身回退开关（`'on'|'off'`）：关掉 = 逐字节回到旧字节行为（A/B 对照组）。 */
   slim: SlimMode
+  /** M3 rollout 执行位置（`'local'|'node'|'auto'`）：node = 本轮整轮上云（A/B 对照）。 */
+  rolloutSrc: RolloutSrcMode
 }
 
 function readLocal(key: string): string {
@@ -104,6 +107,10 @@ export function TrainLaunchModal({
   // M1：隧道协议/边缘 IP。选中值优先 localStorage（上次选择），否则服务端当前生效值。
   const [slim, setSlim] = useState<SlimMode>(() =>
     readTunnelSel(TC_SLIM, modes.slim, ['on', 'off'] as const, 'on'),
+  )
+  // M3：rollout 执行位置。缺省 local（= 历史行为），与服务端解析口径一致。
+  const [rolloutSrc, setRolloutSrc] = useState<RolloutSrcMode>(() =>
+    readTunnelSel(TC_ROLLOUT_SRC, modes.rolloutSrc, ['local', 'node', 'auto'] as const, 'local'),
   )
   const [cfProtocol, setCfProtocol] = useState<'http2' | 'quic' | 'auto'>(() =>
     readTunnelSel(TC_CF_PROTOCOL, modes.cfProtocol, ['http2', 'quic', 'auto'] as const, 'http2'),
@@ -188,7 +195,8 @@ export function TrainLaunchModal({
     writeLocal(TC_CF_PROTOCOL, cfProtocol)
     writeLocal(TC_CF_EDGE_IP, cfEdgeIp)
     writeLocal(TC_SLIM, slim)
-    const tunnel: TunnelLaunchOpts = { cfProtocol, cfEdgeIp, slim }
+    writeLocal(TC_ROLLOUT_SRC, rolloutSrc)
+    const tunnel: TunnelLaunchOpts = { cfProtocol, cfEdgeIp, slim, rolloutSrc }
     if (mode !== 'push') {
       onLaunch(mode, { remoteDegrade, ...tunnel })
       return
@@ -339,6 +347,35 @@ export function TrainLaunchModal({
           逐字节回到旧行为（内联 base64 + payload 内冗余文件），拿来做 A/B 对照。
           当前生效（rl-config）：<b>{modes.slim === 'off' ? '关' : '开'}</b>
           ，取值随每轮写入「传输」页的 瘦身 列（事后可分组统计）。
+        </p>
+        <div className="tc-line">
+          <span className="tc-muted tc-small" style={{ minWidth: 90 }}>
+            rollout
+          </span>
+          <SegmentedControl<RolloutSrcMode>
+            value={rolloutSrc}
+            ariaLabel="rollout 执行位置"
+            options={[
+              { value: 'local', label: '本机' },
+              { value: 'node', label: '上云（节点）' },
+              { value: 'auto', label: 'auto' },
+            ]}
+            onChange={setRolloutSrc}
+          />
+        </div>
+        <p className="tc-muted tc-small" style={{ marginTop: -4 }}>
+          rollout 位置（M3）：本机 = 本机采样 + 只把 PPO 送云（历史行为）； 上云（节点）=
+          本轮**整轮**上云（节点跑 exporter 产 shard 再跑 PPO，撤掉上行 1.2MB payload， 适合 TPU
+          实例）；auto = 不表态，交回课程配置解析。 当前生效（rl-config）：
+          <b>
+            {' '}
+            {modes.rolloutSrc === 'node'
+              ? '上云（节点）'
+              : modes.rolloutSrc === 'auto'
+                ? 'auto'
+                : '本机'}
+          </b>
+          ，取值随每轮写入「传输」页的 rollout 列（事后可分组统计）。
         </p>
         <div className="tc-line tc-toggle-group" ref={togglesRef}>
           <span className="tc-muted tc-small">行为开关</span>

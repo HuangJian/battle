@@ -498,6 +498,33 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         " ~4.43MB → ~1.2MB）；0=逐字节回到旧行为（内联 base64 + payload 内冗余文件）。"
         "回退开关，取值进 iteration 事件的 wire.slim（A/B 归因用）",
     )
+    # M3（2026-09-17，plan/remote-wire-remediation §5.2）：rollout 上云开关。
+    # local = 历史行为（hub 采样本机产 shard，整轮口径逐字节不变）；
+    # node = 本轮由节点自己跑 rollout（kind=iter job），hub 不再本地采样。
+    # 取值优先级：本参数 > rl-config `courses.<stem>.rollout_src` > rl.* > local。
+    ap.add_argument(
+        "--rollout-src",
+        default=_d("rollout_src", "auto"),
+        choices=("auto", "local", "node"),
+        help="M3 rollout 上云：'local'=本机采样（默认行为）；'node'=本轮整轮上云"
+        "（节点 bun 跑 exporter 产 shard + 跑 PPO，kind=iter job）；'auto'=按 rl-config"
+        "（rl.rollout_src / courses.<课>.rollout_src）解析，缺省 local；取值进 iteration"
+        " 事件的 wire.rollout_src（A/B 归因用）",
+    )
+    ap.add_argument(
+        "--remote-iter-game-timeout",
+        type=float,
+        default=_d("remote_iter_game_timeout", 0.0),
+        help="M3 rollout 上云：节点侧单局墙钟上限（秒）。0 = 不限（默认，与本机同口径）；"
+        ">0 时节点杀超时局并按可重试失败处理（防单局挂死拖满整个租约窗口）",
+    )
+    ap.add_argument(
+        "--remote-iter-workers",
+        type=int,
+        default=_d("remote_iter_workers", 0),
+        help="M3 rollout 上云：节点侧 rollout 并发（0 = 用 args.workers，即课程 quotas.workers；"
+        "节点侧另有上限钳制）",
+    )
     ap.add_argument(
         "--remote-degrade-after",
         type=int,

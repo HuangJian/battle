@@ -21,6 +21,7 @@ import type {
   ProcSpec,
   RegistryEntry,
   RlConfig,
+  RolloutSrcMode,
   SlimMode,
 } from '../core/types'
 
@@ -130,6 +131,18 @@ export function resolveSlim(cfg: RlConfig, course = ''): SlimMode {
 /** `SlimMode` → rl-config 能读的数值（**唯一**换算入口；写字符串会让训练启动报错）。 */
 export function slimToCfg(mode: SlimMode): 0 | 1 {
   return mode === 'off' ? 0 : 1
+}
+
+/** rollout 执行位置（M3）解析：per-course > rl.* > 缺省 `'local'`。
+ *
+ *  缺省为什么是 local：python 侧 `--rollout-src` 缺省 `auto`，而 `_rollout_source()`
+ *  在 rl-config 没有该键时一律返回 `local`（历史行为）——这里若缺省成别的值，控制台
+ *  就会在**没改过配置**的课上谎报「本轮上云」。
+ *  与 `resolveCfTunnel`/`resolveSlim` 同形，但**无域换算**：两侧都是同字面量字符串。 */
+export function resolveRolloutSrc(cfg: RlConfig, course = ''): RolloutSrcMode {
+  const cc = course ? cfg.courses?.[course] : undefined
+  const raw = cc?.rollout_src ?? cfg.rl.rollout_src
+  return raw === 'node' || raw === 'auto' ? raw : 'local'
 }
 
 /** cloudflared 隧道旗标（唯一来源）——cloudflaredSpec 与 hub.ts 的 spawn 共用，

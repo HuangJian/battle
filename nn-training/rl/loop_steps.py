@@ -98,6 +98,47 @@ def _course_cf_tunnel(args: Any) -> tuple[str | None, str | None]:
     return proto, edge
 
 
+#: `--rollout-src` 的合法值（auto = 按 rl-config 解析，缺省 local）。
+ROLLOUT_SRCS: tuple[str, ...] = ("auto", "local", "node")
+
+
+def _rollout_source(args: Any) -> str:
+    """本轮 rollout 在哪跑：`local`（历史行为）| `node`（M3 整轮上云）。
+
+    优先级：CLI `--rollout-src`（非 auto）> `courses.<stem>.rollout_src` > `rl.rollout_src`
+    > local。与 `_course_cf_tunnel` / `_course_push_url` 同口径读 rl-config：选项住
+    rl-config，**永不进 curricula**（D14 血缘），读不到一律 local（旧行为，不炸训练）。
+
+    ⚠ 写进 iteration 事件的 wire.rollout_src 用的是本函数的返回值，**不是** args 字面量
+    —— 否则 auto 会记成 "auto"，事后无法按「实测在哪跑」分组。
+    """
+    mode = str(getattr(args, "rollout_src", "") or "auto")
+    if mode and mode != "auto":
+        if mode not in ROLLOUT_SRCS:
+            raise SystemExit(
+                f"[run_rl] 未知 --rollout-src {mode!r}（只接受 {'|'.join(ROLLOUT_SRCS)}）"
+            )
+        return mode
+    try:
+        from train.loop_util import course_key_from_path
+
+        stem = course_key_from_path(str(getattr(args, "course_path", "") or ""))
+    except Exception:
+        stem = ""
+    if not stem:
+        return "local"
+    try:
+        cfg = dist_common.load_dist_config() or {}
+        course = (cfg.get("courses") or {}).get(stem) or {}
+        rl = cfg.get("rl") or {}
+        val = str(course.get("rollout_src") or rl.get("rollout_src") or "") or "local"
+    except Exception:
+        return "local"
+    if val not in ROLLOUT_SRCS or val == "auto":
+        return "local"
+    return val
+
+
 def _gpu_push_nodes(remote_token: str, course_push_url: str = "") -> list[dict]:
     """GPU push 节点清单（HUB 推模式，DECISIONS §340 补充 4）：
     环境变量 REMOTE_PUSH_NODE（hub-start 冒烟注入本机伪节点，优先）→
@@ -198,13 +239,17 @@ def _push_job_round(
     timeout_sec: float,
     log: Any,
     blobs: dict | None = None,
+    ts_code_bytes: bytes | None = None,
 ) -> dict:
     """按序向 push 节点提交 job 并等待结果；单节点失败换下一个，全部失败抛
     RetryableError（loop 原地重试同迭代）。--smoke 经 X-Smoke-Echo 头触发节点侧
     冒烟回显（不跑 PPO，结果带 smoke 标记 → 共享尾部作废本轮）。
 
     blobs（M2 B3）：opt/ref raw 字节（读自 job 目录）——push_client 判节点缓存命中，
-    只传未命中的那些。"""
+    只传未命中的那些。
+
+    ts_code_bytes（M3）：TS 运行时 zip（kind=iter 才非 None）；同样判节点缓存，只在
+    未命中时随 body 上传（sha 不变则整段腿只传一次）。"""
     last: Exception | None = None
     for node in nodes:
         url, key = node["url"], node.get("authKey", "")
@@ -217,6 +262,7 @@ def _push_job_round(
                 payload_bytes,
                 code_bytes,
                 blobs=blobs,
+                ts_code_zip=ts_code_bytes,
                 echo=bool(getattr(args, "smoke", False)),
                 log=log,
             )
@@ -390,6 +436,9 @@ class TrainingSteps:
     _eval_thread: threading.Thread | None
     _eval_gate: threading.Event | None
     _rollout_sec: float
+    #: M3：本轮节点侧采集墙钟；None = 本轮不在节点采集（本地轮）。必须在这里声明类型
+    #: ——只在 _remote_iter 里赋值会被 mypy 推成 float，子类的 `float | None` 就冲突。
+    _node_rollout_sec: float | None
     _ppo_sec: float
     #: 云端 worker **自报**的真训练秒（load+chunk+update，不含上传/排队/下载）。
     #: 与 `_ppo_sec`（往返墙钟）分开记——后者打包传输与排队，用于诊断/配额，
@@ -589,7 +638,19 @@ class TrainingSteps:
             )
 
     def _write_iter_stats(self, it: int) -> None:
-        """M1c：每 iter 落 metrics_stats.jsonl（全维度统计 + 血缘；非致命）。"""
+        """M1c：每 iter 落 metrics_stats.jsonl（全维度统计 + 血缘；非致命）。
+
+        M3：本轮 rollout 在云节点时**跳过**——metrics_stats 读的是本地 traj 目录的
+        shard，上云轮的 shard 在节点上（跑完即毁），硬跑只会写一份 shards=0 的空统计，
+        看起来像「本轮没采样」。逐维度口径改由节点回传的 report（dimMeans/scoreStats）
+        承担（已记入 iteration 事件）。
+        """
+        if getattr(self, "_node_rollout_sec", None) is not None:
+            log(
+                f"[run_rl] metrics_stats it{it}: 本轮 rollout 在云节点（本地无 shard）——"
+                "跳过逐维度统计，改看 iteration 的 report/wire"
+            )
+            return
         course = getattr(self.args, "course_obj", None)
         if course is None:
             return
@@ -634,6 +695,10 @@ class TrainingSteps:
             dropped_games = _sm.get("dropped_games")
             load_sec = _sm.get("load_sec")
             waves_n = _sm.get("waves")
+        elif self._node_rollout_sec is not None:
+            # M3 上云轮：t_rollout 含「等待节点跑完 rollout + PPO」的整段墙钟，拿它当
+            # rollout_sec 会把 PPO/传输全算进采集（假指标）。用节点自报的采集墙钟。
+            self._rollout_sec = float(self._node_rollout_sec)
         else:
             self._rollout_sec = round(time.time() - t_rollout, 1)
         self._kl_cum = kl_cum
@@ -890,8 +955,14 @@ class TrainingSteps:
         self._remote_fail = 0
         return True
 
-    def _remote_ppo(self, it: int) -> None:
+    def _remote_ppo(self, it: int, rollout_spec: dict | None = None) -> dict:
         """远程 PPO（--ppo remote，D11/D12）：打包 → 发布 job → 轮询等待 → 三重校验落位。
+
+        `rollout_spec` 非空 = **M3 整轮上云**（kind=iter）：本轮不发本地 shard（payload
+        只有 init 权重 + 可选 blob），改随 job 发 rollout 规格 + TS 运行时；节点自己跑
+        exporter 产 shard 再跑 PPO，回传里带采集报告。除「发什么/收什么」外，发布/传输/
+        三重校验/落位/埋点全走同一条链（不复制一份会漂的第二实现）。
+        返回 result（调用方 _remote_iter 需要里面的 report）。
 
         - 打包：本轮 traj it{it} 下 wver 匹配的 shard 集 + init 权重 + 上轮 opt tar；
         - 发布：磁盘 IPC（job 目录 + jsonl job_pending 事件）→ 旁路 hub-server；
@@ -934,11 +1005,17 @@ class TrainingSteps:
         job_root = str(getattr(args, "remote_job_root", "") or "") or str(
             Path(args.traj) / "remote-jobs"
         )
-        # 本轮应训 shard 集（与 _serial_ppo load_episodes 装载口径一致）
-        shard_dirs = iter_shard_dirs(args.traj, it, log=log)
-        if not shard_dirs:
+        # 本轮应训 shard 集（与 _serial_ppo load_episodes 装载口径一致）；
+        # M3 上云轮**必须为空**——非空说明本地采样没关干净（双份采集 + data_fp 漂）。
+        shard_dirs = [] if rollout_spec else iter_shard_dirs(args.traj, it, log=log)
+        if not shard_dirs and rollout_spec is None:
             raise SystemExit(
                 f"[run_rl] remote it{it}: 无完整 shard（traj {it_dir} 空）——无法发布 job"
+            )
+        if rollout_spec and iter_shard_dirs(args.traj, it, log=lambda _m: None):
+            raise SystemExit(
+                f"[run_rl] remote it{it}: rollout_src=node 但 traj 目录已有本地 shard "
+                "——本机采样没关（会双份采集），拒绝发布 iter job"
             )
         # 课程快照（D13/D14）：课程文件全文 + course_fp = sha256(文件字节)
         course = getattr(args, "course_obj", None)
@@ -999,6 +1076,9 @@ class TrainingSteps:
         t_pack = time.time()
         # M2：协议瘦身开关（rl.slim / --remote-slim；默认开）。关 → 逐字节旧行为。
         slim = bool(int(getattr(args, "remote_slim", 1) or 0))
+        if rollout_spec:
+            # M3：TS 运行时 zip（一次打包，缓存在 self 上——sha 不变就不重打）。
+            self._ensure_ts_code(job_root, log=log)
         manifest = publish_job(
             job_root=job_root,
             jsonl_path=str(self._jsonl_path),
@@ -1041,6 +1121,14 @@ class TrainingSteps:
             # M2：瘦身开关 + 冒烟轮强制带 init_weights.json（echo 回显要用）。
             slim=slim,
             keep_init_weights=bool(getattr(args, "smoke", False)),
+            # M3：kind=iter 的三件套（rollout 规格 + TS 运行时 sha/文件）；
+            # 非 iter 轮恒为默认（kind="ppo"，manifest 不含这两个键 —— 逐字节不变）。
+            kind="iter" if rollout_spec else "ppo",
+            rollout_spec=rollout_spec,
+            ts_code_sha256=(
+                str(getattr(self, "_ts_code_sha256", "") or "") if rollout_spec else ""
+            ),
+            ts_code_zip_path=getattr(self, "_ts_code_zip_path", None) if rollout_spec else None,
             log=log,
         )
         jid = manifest["job_id"]
@@ -1096,6 +1184,9 @@ class TrainingSteps:
                 timeout_sec,
                 log,
                 blobs=blobs,
+                ts_code_bytes=(
+                    Path(self._ts_code_zip_path).read_bytes() if rollout_spec else None
+                ),
             )
         else:
             result = wait_job(hub_url, token, jid, timeout_sec=timeout_sec, log=log)
@@ -1123,7 +1214,13 @@ class TrainingSteps:
         # H7（review-hy）：--remote-precollect 1 → 在 PPO 等待窗口后 spawn 下一轮首波
         # 预采（θ_N 快照，复用 spawn_collect_next 双缓冲机制）。默认 0（Q10 测后开）
         # 时不可达。stale 分数上限 30% 的筛选（S5/F4）属 §6-D3 后续项，未在此实现。
-        if int(getattr(args, "remote_precollect", 0) or 0) and (args.iters <= 0 or it < args.iters):
+        # M3：上云轮不得预采——节点已经在跑本轮的 rollout，hub 再 spawn 一个本地预采
+        # 就成了双份采集（且下一轮又会被 rollout_src=node 拒绝发布）。
+        if (
+            rollout_spec is None
+            and int(getattr(args, "remote_precollect", 0) or 0)
+            and (args.iters <= 0 or it < args.iters)
+        ):
             from rl.collect_only import spawn_collect_next
 
             # H7（review-hy）：预采子进程句柄必须存入 self._collect_child，
@@ -1156,7 +1253,9 @@ class TrainingSteps:
                 "protocol": _cf_tunnel[0],
                 "edge_ip": _cf_tunnel[1],
                 "slim": bool(int(getattr(args, "remote_slim", 1) or 0)),
-                "rollout_src": str(getattr(args, "rollout_src", "local") or "local"),
+                # M3：记**实测**在哪采集（node = 本轮整轮上云），不是 args 字面量
+                # （auto 会被 _rollout_source 解析成 local/node——原样记 auto 等于没记）。
+                "rollout_src": "node" if rollout_spec else "local",
             },
         )
         # 启动协议补丁（2026-09-08 vk1 事故）：kickstart_ref 已要求时，it1 校准把
@@ -1186,6 +1285,94 @@ class TrainingSteps:
             f"kl={self._agg['kl']:.5f} entropy={self._agg['entropy']:.4f} "
             + (f"kickstart={self._agg['kickstart']:.4f} " if kick_on else "")
             + f"({self._ppo_sec}s round-trip) -> {args.out}"
+        )
+        return result
+
+    def _ensure_ts_code(self, job_root: str, *, log: Any) -> None:
+        """M3：打包 rollout 用的 TS 运行时 zip（一次，缓存在 self 上）。
+
+        为什么在训练侧打而不是节点侧 `bun install`：`tools/sim/export-rl-rollout.ts`
+        的链路**零第三方运行时依赖**（非相对 import 只有 node 内建 `fs`/`path`），所以
+        打包即可，云机不必装依赖（plan §5.3）。内容固定时间戳 + 内容寻址 sha，
+        同源码反复跑只传一次。
+        """
+        if str(getattr(self, "_ts_code_sha256", "") or ""):
+            return
+        from remote.hub_client import pack_ts_code_zip
+
+        repo_root = Path(__file__).resolve().parents[2]  # nn-training/rl/x.py -> 仓根
+        zp = Path(job_root) / "ts_code.zip"
+        self._ts_code_sha256 = pack_ts_code_zip(repo_root, zp, log=log)
+        self._ts_code_zip_path = zp
+
+    def _remote_iter(self, it: int, pairs: list[tuple[int, int]]) -> None:
+        """M3：**整轮上云**（kind=iter）——节点跑 rollout + PPO，hub 只发规格、收结果。
+
+        与 `_remote_ppo` 共享整条发布/传输/三重校验/落位/埋点链（只换「发什么、收什么」）：
+          * 发：rollout 规格（逐局 argv，job 目录内相对路径）+ TS 运行时 + init 权重；
+          * 收：权重/opt/agg（同旧）+ **采集报告**（本机此时无 shard 可算）。
+
+        与动态采集（target_transitions）互斥：那套语义要求训练侧反复读本地 shard 补波，
+        而这里 shard 在节点上（跑完即毁）。配错就响亮失败，不静默降级。
+        """
+        args = self.args
+        if int(getattr(args, "target_transitions", 0) or 0) > 0:
+            raise SystemExit(
+                "[run_rl] rollout_src=node 与 --target-transitions（动态采集）互斥："
+                "补波需要训练侧反复读本地 shard，而上云轮的 shard 在节点上（跑完即毁）。"
+                "要动态采集就保持 rollout_src=local"
+            )
+        from rl.iter_job import build_iter_spec
+
+        wver = dist_common.weights_fingerprint(args.out)
+        workers = int(getattr(args, "remote_iter_workers", 0) or 0) or int(
+            getattr(args, "workers", 1) or 1
+        )
+        spec = build_iter_spec(
+            args,
+            pairs,
+            wver=wver,
+            workers=workers,
+            game_timeout_sec=float(getattr(args, "remote_iter_game_timeout", 0.0) or 0.0),
+            hub_bun=str(getattr(self, "bun", "bun") or "bun"),
+        )
+        log(
+            f"[run_rl] rollout_src=node it{it}: {len(pairs)} 局上云采集"
+            f"（node workers={workers}，wver={wver[:12] if wver else '-'}…）"
+        )
+        t_roll = time.time()
+        try:
+            result = self._remote_ppo(it, rollout_spec=spec)
+        except remote_retryable_exceptions() as e:
+            # 上云轮**不经过** `_remote_ppo_or_degrade`（loop_core 在 _node_rollout 时
+            # 跳过 _serial_ppo），所以那条路的「鉴权/闭锁类失败立即 ABORT」得在这里
+            # 补上：否则 401/403 会走通用兜底 5×30s 重发同一 job 再死（x3-step 事故
+            # 的同一个浪费）。只贴判决，不在这里降级——上云轮没有本地 shard 可训练。
+            fatal = fatal_remote_http(e)
+            if fatal:
+                write_gate_verdict(
+                    self._jsonl_path,
+                    it,
+                    "ABORT",
+                    f"rollout_src=node 不可重试失败 HTTP {fatal}——检查 --remote-token "
+                    f"与节点隧道：{str(e)[:200]}",
+                    decider="loop",
+                )
+                log(
+                    f"[run_rl] GATE ABORT it{it}: 上云 node 轮远端 HTTP {fatal}"
+                    f"（鉴权/闭锁类，非网络抖动）——不再重试，立即停腿"
+                )
+                self._leg_abort = True
+            raise
+        rep = dict(result.get("report") or {})
+        rep.pop("perGameSecs", None)  # 逐局秒数只用于诊断，不进 iteration 账本
+        self._report = rep
+        # 节点侧采集墙钟（本机口径的 self._rollout_sec 在这里无意义——整轮都在云上）。
+        self._node_rollout_sec = float(rep.get("elapsedSec") or 0.0)
+        self._rollout_sec = self._node_rollout_sec
+        log(
+            f"[run_rl] remote iter it{it}: 节点采集 {rep.get('games')} 局 "
+            f"（{self._node_rollout_sec}s），往返 {round(time.time() - t_roll, 1)}s"
         )
 
     def _export_weights(self, it: int) -> None:

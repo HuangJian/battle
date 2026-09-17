@@ -4,6 +4,91 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §57 M3 rollout 上云落地：新 job kind「一整轮」（kind=iter）＋ TS 运行时打包（2026-09-17）
+
+**为什么记这一笔**：这是本仓**训练架构**层面的新增（新的 job kind、新的传输实体、新的执行位置开关），
+按 §5 硬规则入账。方案见 `plan/remote-wire-remediation.plan.md` §5；决策与理由见
+`DECISIONS.md` §2026-09-17-goalnn-rollout-on-cloud。
+
+### 开工依据（先把话说清楚：这是**人拍板**，不是门开了）
+
+计划 §6 的原文是「门 1 命中 ⇒ M3 直接留档不做」，而门 1 在 M1 实测里已经命中（`http2` 把
+2MiB 上行压到 p50 4.8s，见 §56）。本次开工依据是**用户指令**：目标腿是 TPU 实例
+（v3-8 = 96 vCPU），rollout 上云在那里收益极高。即：**门的结论没变，是决策权变了**。
+收益前提也照旧：≥16 vCPU 的腿才成立（GPU T4×2 = 4 vCPU 直接否，见可行性报告 §3.3）。
+
+### 改动清单（file:line → 改后行为）
+
+| 位置 | 改后行为 |
+|---|---|
+| `remote/protocol.py` | 新 `kind="iter"`（走 BC 开过的 kind 通道）：追加必填 `ts_code_sha256` + `rollout`；`mode` 红线互斥照旧；`validate_rollout_spec`（argv 白名单 = 只放行 `tools/sim/export-rl-rollout.ts`；`--out`/`--weights` 必须 job 内相对路径；逐局 stage/seed 不重复）；`iter_declared_entries`/`iter_expected_data_fp`（**声明集**的 data_fp，与实产集同一函数两侧各算一次）；result 增 `report` 必填校验（同 BC 分支先例） |
+| `remote/hub_client.py` | `pack_ts_code_zip`（`src/**`+`tools/**` 的 `.ts/.jsonc/.wasm`，固定时间戳 ⇒ 内容寻址；**整棵 tools/** 不是只 tools/sim——实测依赖闭包跨到 `../eval/godai-score`）；`publish_job(kind="iter", rollout_spec=…)`：payload **不含 shard**、`data_fp` 用声明集、ts_code.zip 拷进 job 目录、有 opt blob 也仍带 `init_weights.json`（节点要用它跑 rollout）；`verify_and_land` 对 iter 轮按声明集校验（hub 侧无本地 shard 可重算） |
+| `remote/iter_rollout.py`（新） | 节点侧执行器：线程池 `bun <argv...>`（cwd = TS 代码根、job 侧路径绝化）→ 逐位校验实产 shard 集 == 声明集 → `combine_reports` 聚合（与本机 rollout 同一个聚合函数）→ 返回 report/shard_dirs/逐局秒数/bun 版本 |
+| `rl/iter_job.py`（新） | hub 侧规格构造：**复用** `rl/cmd.build_rollout_cmd`（三导出器 + 课程覆盖 + D14 血缘的唯一拼装点）只换路径，丢掉 argv[0]（本机 bun 绝对路径在云机上无意义） |
+| `remote/worker.py` / `worker_server.py` / `hub_server.py` / `push_client.py` | TS 运行时四件套：内容寻址缓存 `ts_code_cache/<sha>`（**已加进 `prune_job_dirs` 豁免名单**，M2 的 `blob_cache` 就是漏了这个）、`/ts-code-sha` 探测、`/jobs/{id}/ts_code` 下载、`428 ts-code-missing` 门、wire 记 `ts_code_bytes/hit` |
+| `rl/loop_steps.py` / `loop_core.py` / `cli.py` | `--rollout-src auto|local|node`（缺省 auto→local）；`_remote_iter` = 整轮上云；node 轮本机**完全不采样**（跳过 `_rollout_phase`，也不预采/不补波）；`_rollout_source()` 读 rl-config（CLI > `courses.<课>.rollout_src` > `rl.rollout_src` > local，D14 血缘：选项永不进 curricula） |
+| `dashboard/src/{core,stack,server,web}` | 启动弹窗新增「rollout」选项（本机/上云(节点)/auto）+ 当前生效值；route 白名单（非法 400）；preset 落 `rl.rollout_src`（**字符串域，原样落，不过任何换算**——与 `slim` 的双域相反）；console-state additive |
+
+**回退开关**：`--rollout-src local`（= 缺省；逐字节回到旧行为：本机采样 + 只把 PPO 送云）。
+
+### 安全阀与互斥（配错要响亮，不许静默降级）
+
+1. `rollout_src=node` **与 `--target-transitions` 互斥**（补波要求训练侧反复读本地 shard，而上云轮的
+   shard 在节点上、跑完即毁）⇒ 配错即 `SystemExit`；
+2. 发布 iter job 时 traj 目录**已有本地 shard** ⇒ 拒发（否则 = 双份采集，且下一轮又会被自己拒绝）；
+3. 节点侧实产 shard 集 ≠ 声明集 ⇒ `ProtocolError` 拒收（漏局/多局/`wver` 漂都不会因为重试而变好）；
+4. `opt_sha` 有值而 blob 取不到 ⇒ 响亮失败（M2 既有规矩，上云轮同样适用）。
+
+### 控制面迁移清点（计划 §5.4 说的「最容易漏一半的地方」）
+
+| 读取点 | 上云轮处理 |
+|---|---|
+| 本地采样 / 预采 | loop_core 直接跳过 `_rollout_phase` + `spawn_next_collect`（不是「配成 0」，是**结构上不可能**双采） |
+| `rollout_sec` | 用节点回传 `report.elapsedSec`（t_rollout 含「等节点跑完 rollout + PPO」的整段墙钟，拿它当采集时间 = 假指标） |
+| `metrics_stats` | **跳过**（shard 不在本地，硬跑只会写一份 `shards=0` 的假精度统计），逐维度口径改由 report 的 `dimMeans/scoreStats` 承担 |
+| `_check_quota_incident` | **跳过**（上云轮本地零 shard 是预期，否则每轮喊「检查配额」把真事故淹掉） |
+| eval | 零改动（仍在本地 hub 用 bun 跑，权重照旧下行归档） |
+| 账本/控制台 | `wire.rollout_src` 落每轮取值；「传输」页已有该列（M0 铺的） |
+
+### 实施中踩到 / 修掉的四个坑（都有回归测试）
+
+1. **`_remote_iter` 绕过了 4xx 立即停腿判据**：上云轮不走 `_remote_ppo_or_degrade`（loop_core 跳过
+   `_serial_ppo`），于是 x3-step 事故那种「403 白烧 5×30s 重发同一 job 才死」会重演 ⇒ 在
+   `_remote_iter` 里补上同一分类（`fatal_remote_http` → 写 ABORT 判决 + `_leg_abort`）。
+2. **`push_client` 的 `428 ts-code-missing` 没置 `need_ts`**：典型场景是「探针说缓存命中、真 POST 时
+   缓存已不在」（并发清理 / 两课共享节点），此时 `need_ts` 本是 False ⇒ 一直重发不带 ts 的体、
+   白烧满重试预算后整轮失败。与 `code-missing` 的 `need_code = True` 同规。**先复现再修**（§7.1）。
+3. **`ts_code_cache` 必须进 `prune_job_dirs` 豁免名单**——否则每轮必 miss，而日志上一切正常。
+   这正是 M2 `blob_cache` 的同一个坑，所以顺手把热替换测试的期望集也扩成三棵缓存树。
+4. **`pack_ts_code_zip` 的白名单不能只放 `tools/sim`**：`export-rl-rollout.ts` 的依赖闭包跨到
+   `../eval/godai-score`（v7 评分口径）。手写「该打哪几个子目录」就是在猜依赖图 ⇒ 打整棵
+   `tools/**`，并靠 `test_remote_iter_real_bun.py`（真 bun 真跑）当哨兵。
+
+### 本机验收（能测的都测了）
+
+| 计划 §5.5 条目 | 状态 |
+|---|---|
+| ① 逐位对拍（节点 shard == 本机 rollout，逐字节 diff） | **已验**：`tests/test_remote_iter_real_bun.py`（真 bun + 真权重 + 真 `pack_ts_code_zip` 解包），同 argv 跑两遍逐文件比对，含 `_rl_report.json` 全字段（除 `elapsedSec`） |
+| ② report 等价（winRate/outcomes/ticks 同种子） | **已验**：同上，聚合报告 `totalTicks/totalSamples/outcomes/winRate` 落在单局口径上 |
+| ③ 电量账 `up_bytes ≈ 0` | **部分**：payload 确实只剩 `init_weights.json`（单测断言「不含 shard」），但**真远程轮次的绝对值未测**（本机无节点可跑） |
+| ④ 可回退 `rollout_src=local` | **已验（构造性）**：非 iter 轮 manifest 不含新键、`shard_dirs` 走原路 ⇒ 逐字节旧行为 |
+| ⑤ 协议用例（缺字段拒收 / mode 互斥 / report 校验） | **已验**：`tests/test_remote_iter.py`（51 例）+ `test_remote_ppo.py` 扩 1 例 |
+
+**未做（不写成已做）**：真云机/真远程轮次的绝对值（`wire.up_sec`、每轮墙钟、TPU 腿上的 target ~10s 量级）；
+本机也没有跑过「hub + localWorker + trainer `--rollout-src node`」的整条本机闭环（那需要一次真 PPO 轮）。
+⇒ 下一步的开门条件：拿 TPU 实例跑 ≥2 个独立 run 各 ≥8 轮，比 `rollout_sec`/`ppo_sec`/`wire.up_bytes` 中位。
+
+### 测试与门禁
+
+新增/扩写：`tests/test_remote_iter.py`（协议 + 规格 + 节点执行器 + ts_code 缓存 + 失败语义 + 控制面两处跳过）、
+`tests/test_remote_iter_real_bun.py`（逐位对拍）、`tests/test_remote_ppo.py`（`/ts_code` × `/blob` 两条 GET 端点）、
+`e2e/test_push_mode_integration.py`（+5：ts 缓存命中/未命中/428 补传/缺字节响亮失败/真 worker_server 闭环）、
+`tests/test_remote_hotswap.py`（豁免名单扩到三棵树）、`dashboard/tests/rollout-src-launch-option.test.ts`（+8）。
+门禁：nn pytest+e2e **exit 0**（ruff/mypy 干净）、root `bun run check` **1853 pass / 0 fail**、
+dashboard **427 pass / 0 fail** + 三份 bundle ok。
+
+---
+
 ## §56 远程传输三改 M0–M2 落地：统一计量 + 隧道协议开关 + 协议瘦身（2026-09-17）
 
 **为什么记这一笔**：本笔是**训练架构变更**（云腿线协议 + 校验语义 + 新的运行期开关），按 §5 硬规则入账。

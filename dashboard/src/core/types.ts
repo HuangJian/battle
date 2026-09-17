@@ -31,6 +31,9 @@ export interface CourseConf {
   /** 本课协议瘦身覆盖（M2；缺省 = 用 rl.slim）。数字域：python 侧 `_d("slim",1)`
    *  只认 1/0（`--remote-slim` 是 `type=int, choices=(0,1)`）。 */
   slim?: 0 | 1
+  /** 本课 rollout 执行位置覆盖（M3；缺省 = 用 rl.rollout_src，再缺省 local）。字符串域，
+   *  与 python `--rollout-src` 的 choices 同字面量（`auto` = 按配置解析）。 */
+  rollout_src?: RolloutSrcMode
 }
 
 /** cloudflared 隧道协议（M1，plan/remote-wire-remediation §3）：
@@ -48,6 +51,15 @@ export type CfEdgeIp = '4' | '6' | 'auto'
  *  侧 `--remote-slim` 是 `type=int, choices=(0,1)`，写字符串会让训练启动直接报错。
  *  换算只允许走 `slimToCfg()`（dashboard 侧）一个入口。 */
 export type SlimMode = 'on' | 'off'
+
+/** rollout 执行位置（M3，`plan/remote-wire-remediation.plan.md` §5）。
+ *
+ *  `local` = 本机采样（历史行为，整轮口径逐字节不变）；
+ *  `node` = 本轮**整轮上云**（节点 bun 跑 exporter 产 shard + 跑 PPO，kind=iter job）；
+ *  `auto` = 不表态，交给训练侧按 `courses.<课>.rollout_src` > `rl.rollout_src` 解析
+ *  （缺省仍是 local）。与 python `choices=("auto","local","node")` 同域——
+ *  与 `SlimMode` 不同，这里**不需要**域换算（两侧都是字符串）。 */
+export type RolloutSrcMode = 'local' | 'node' | 'auto'
 
 /** rl-config.json（本工具链只消费 nodes + rl + courses 块，其余键原样保留）。 */
 export interface RlConfig {
@@ -67,6 +79,8 @@ export interface RlConfig {
     cf_edge_ip?: CfEdgeIp
     /** 协议瘦身（M2；缺省 1 = 开）。数字域，见 `SlimMode` 注释。 */
     slim?: 0 | 1
+    /** rollout 执行位置（M3；缺省 = local，即本机采样）。字符串域，见 `RolloutSrcMode`。 */
+    rollout_src?: RolloutSrcMode
     [key: string]: unknown
   }
   /** per-course 槽位/配额（唯一事实来源；console-state 不存这些）。 */

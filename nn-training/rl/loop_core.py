@@ -28,7 +28,7 @@ from rl.course import build_pairs
 from rl.events import log_iter_error, write_run_complete, write_run_start
 from rl.log import log
 from rl.loop_guards import TrainingGuards
-from rl.loop_steps import SmokeVoidRoundError, TrainingSteps, kickstart_coef
+from rl.loop_steps import SmokeVoidRoundError, TrainingSteps, _rollout_source, kickstart_coef
 from rl.modes import get_backend
 from rl.queue import REPO_ROOT, RUN_ID
 from rl.reports import combine_reports
@@ -183,6 +183,9 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         self._volume_est = 0
         self._volume_capped = False
         self._rollout_sec = 0.0
+        # M3（rollout 上云）：本轮节点侧采集墙钟；None = 本轮不在节点采集（本地轮）。
+        # 每轮开头复位——_write_iter_stats / _log_report 靠它区分两种口径。
+        self._node_rollout_sec: float | None = None
         self._ppo_sec = 0.0
         # M0 统一计量（iteration 事件的 wire 子字典）：由 TrainingSteps._remote_ppo 赋值，
         # 本地/旧路径从不赋值——读取一律走 getattr(self, "_wire", None)。
@@ -229,7 +232,13 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         多课程切分下若某课本机槽位被压到 0（或与别课抢核失败），表现为该课 traj
         连续无 shard：训练看似在跑、实则在烧空转墙钟。计数是 per-course 的（每个
         trainer 进程一本课），console 日志页直接可见本行（不建新通道）。
+
+        M3：`rollout_src=node` 轮**本地本来就该零 shard**（采集在节点上，跑完即毁）——
+        不排除就会每轮大喊「检查配额」（假事故），把真事故的告警淹掉。
         """
+        if getattr(self, "_node_rollout", False):
+            self._zero_shard_streak = 0
+            return
         try:
             n = sum(1 for _ in self._traj_dir.rglob("rl_s*_seed*"))
         except OSError:
@@ -287,10 +296,18 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 t_rollout = time.time()
                 # yield：rollout 抢占集群 —— 关 evalboard 窗，在途 B/C 局停派新 seed。
                 self._evalboard_yield()
-                self._rollout_phase(it, pairs, dist_cfg, self._eval_on_round(it))
-                # 动态采集：结算后按已落盘 transitions 逐关补波（v1 串行路径 only）。
-                # 补波属本轮的**采集**阶段，必须坐在 _log_report 之前（本轮报告要含补波）。
-                self._volume_topup(it, dist_cfg)
+                self._node_rollout_sec = None
+                # M3（plan/remote-wire-remediation §5.2）：整轮上云开关。node 时本机
+                # **完全不采样**（也不预采/不补波），改由 _remote_iter 发 kind=iter job，
+                # 节点自己跑 rollout + PPO。eval 不动（仍在本地 hub 跑，§5.4）。
+                self._node_rollout = _rollout_source(args) == "node"
+                if self._node_rollout:
+                    self._remote_iter(it, pairs)
+                else:
+                    self._rollout_phase(it, pairs, dist_cfg, self._eval_on_round(it))
+                    # 动态采集：结算后按已落盘 transitions 逐关补波（v1 串行路径 only）。
+                    # 补波属本轮的**采集**阶段，必须坐在 _log_report 之前（本轮报告要含补波）。
+                    self._volume_topup(it, dist_cfg)
                 # P0 修复：为上一轮已完成权重 W(it-1) 派发干净评估（读归档、标权重轮），
                 # 游戏藏进随后 PPO(it) 空窗。串行路径此前在此处派发读活指针 = W(it-1)
                 # 却标 itN（标签超前一轮）；stream/intent/m1/基线路径维持原语义。
@@ -301,7 +318,8 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 # idle：采集已收官，PPO（本地/远端等待）期间集群空闲 —— 立即领批。
                 # 不能等到 join_eval 之后：remote PPO 可阻塞数十分钟，那时才开窗等于永假。
                 self._evalboard_idle(it, dist_cfg)
-                self._serial_ppo(it)
+                if not self._node_rollout:
+                    self._serial_ppo(it)
                 # R9：远端连败且 --remote-degrade-after=0 → 已写 ABORT 判决，停腿。
                 if self._leg_abort:
                     log(f"[run_rl] leg ABORTED at it{it}（远端不可用且禁用降级）")
@@ -340,9 +358,14 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 if self._budget_hard_cut(it):
                     break
                 self._rotate_cleanup(it)
-                # 吞吐 T4：双缓冲 spawn 下一轮预采（下一轮开头 join）
-                self._collect_child = spawn_next_collect(
-                    args, it, self._stream_meta, self._spawned_early
+                # 吞吐 T4：双缓冲 spawn 下一轮预采（下一轮开头 join）。
+                # M3 上云轮不预采（节点已在跑本轮的整轮；本地预采 = 双份采集）。
+                self._collect_child = (
+                    None
+                    if self._node_rollout
+                    else spawn_next_collect(
+                        args, it, self._stream_meta, self._spawned_early
+                    )
                 )
                 self._consec_fail = 0
             except SmokeVoidRoundError:
