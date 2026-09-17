@@ -26,11 +26,9 @@ import argparse
 import hashlib
 import json
 import os
-import shutil
 import subprocess
 import sys
 import time
-import zipfile
 from pathlib import Path
 
 from platform_utils import rmtree_best_effort
@@ -48,56 +46,37 @@ from remote.hub_client import (
     wait_job,
 )
 from remote.hub_server import _JobStore, make_server
+from remote.protocol import find_payload
 from rl.config import load_course
 from rl.reward_library import METRICS_VERSION
 from schema import BOARD, OBS_CHANNELS, SCALAR_DIM  # v3：合成语料形状随 schema
 
 # ------------------------------------------------------------------ shard 合成
 
-_METRIC_IDX = {
-    "ticks": 0,
-    "kills": 1,
-    "deaths": 2,
-    "playerHits": 3,
-    "playerShots": 4,
-    "enemyHits": 5,
-    "baseAlive": 6,
-    "baseWallTotal": 7,
-    "baseWallIntact": 8,
-    "stuckTicks": 9,
-    "lives": 10,
-    "firstKillTick": 11,
-    "enemyTotal": 12,
-    "timeoutTick": 13,
-    "playerX": 14,
-    "playerY": 15,
-    "playerDir": 16,
-    "playerSpeed": 17,
-    "playerLv": 18,
-    "enemyAlive": 19,
-    "frame": 20,
-}
-
-
 def _synthetic_metrics(n: int, seed: int = 7):
-    """n 决策行 + 1 终局行（21 维），值域贴合 p4-onset 公式的语义（不触发公式守卫）。"""
+    """n 决策行 + 1 终局行（METRICS_DIM 维，当前 v6=39）——列序一律由
+    `reward_library.METRIC_INDEX` 决定（不再硬编码 21 列的旧索引表；metrics 版本
+    追加列时本 harness 自动跟上，不会再次因列数陈旧被 load_shard 拒收）。
+    值域贴合 p4-onset 公式的语义（不触发公式守卫）。"""
     import numpy as np
 
+    from rl.reward_library import METRIC_INDEX, METRICS_DIM
+
     rng = np.random.default_rng(seed)
-    m = np.zeros((n + 1, 21), dtype=np.float64)
-    m[:, _METRIC_IDX["ticks"]] = np.arange(n + 1) * 10.0
-    kills = np.cumsum(rng.integers(0, 2, n + 1)).astype(np.float64)
-    m[:, _METRIC_IDX["kills"]] = kills
-    m[:, _METRIC_IDX["lives"]] = 1.0
-    m[:, _METRIC_IDX["playerShots"]] = rng.integers(0, 4, n + 1)
-    m[:, _METRIC_IDX["enemyHits"]] = rng.integers(0, 2, n + 1)
-    m[:, _METRIC_IDX["playerHits"]] = rng.integers(0, 2, n + 1)
-    m[:, _METRIC_IDX["stuckTicks"]] = 0.0
-    m[:, _METRIC_IDX["enemyTotal"]] = 4.0
-    m[:, _METRIC_IDX["baseAlive"]] = 1.0
-    m[:, _METRIC_IDX["baseWallTotal"]] = 8.0
-    m[:, _METRIC_IDX["baseWallIntact"]] = 8.0
-    m[:, _METRIC_IDX["firstKillTick"]] = -1.0
+    m = np.zeros((n + 1, METRICS_DIM), dtype=np.float64)
+    m[:, METRIC_INDEX["ticks"]] = np.arange(n + 1) * 10.0
+    m[:, METRIC_INDEX["kills"]] = np.cumsum(rng.integers(0, 2, n + 1)).astype(np.float64)
+    m[:, METRIC_INDEX["lives"]] = 1.0
+    m[:, METRIC_INDEX["playerShots"]] = rng.integers(0, 4, n + 1)
+    m[:, METRIC_INDEX["enemyHits"]] = rng.integers(0, 2, n + 1)
+    m[:, METRIC_INDEX["playerHits"]] = rng.integers(0, 2, n + 1)
+    m[:, METRIC_INDEX["stuckTicks"]] = 0.0
+    m[:, METRIC_INDEX["enemyTotal"]] = 4.0
+    m[:, METRIC_INDEX["baseAlive"]] = 1.0
+    m[:, METRIC_INDEX["baseWallTotal"]] = 8.0
+    m[:, METRIC_INDEX["baseWallIntact"]] = 8.0
+    m[:, METRIC_INDEX["firstKillTick"]] = -1.0
+    m[:, METRIC_INDEX["clearTick"]] = -1.0
     return m
 
 
@@ -168,12 +147,15 @@ def main() -> int:
     course = load_course(str(course_path))
     log(f"course p4-onset loaded: reward={course.reward.formula!r}")
 
-    # ---- 1) p1-ep60 权重 → init_weights.json（warm-start，D12） ----
-    zip_path = ROOT / "weights" / "battle-p1bc-ep60.zip"
+    # ---- 1) 自造 init 权重（warm-start，D12）----
+    # 不再依赖 weights/ 里任何归档（plan 明确 harness 自造 init）：最新 schema 下，
+    # 旧归档的 schema_major 会被 worker 的 weights_io 红线响亮拒收；直接在当前
+    # 布局下构建一个随机初始化模型并 save_weights_json（schema_major 自然匹配）。
     init_w = work / "init_weights.json"
-    with zipfile.ZipFile(zip_path) as z:
-        z.extract("battle2-p1bc/run/weights.json", work)
-    shutil.copyfile(work / "battle2-p1bc" / "run" / "weights.json", init_w)
+    import ppo.engine as _ppo_engine
+    from data.weights_io import save_weights_json as _save_wj
+
+    _save_wj(_ppo_engine.build_ppo(None), str(init_w))
     init_weights_fp = hashlib.sha256(init_w.read_bytes()).hexdigest()
     log(
         f"init weights p1-ep60 -> {init_w} ({init_w.stat().st_size} bytes, fp={init_weights_fp[:12]}…)"
@@ -275,6 +257,28 @@ def main() -> int:
         log=log,
     )
     t_total = time.time() - t0
+
+    # ---- 6b) M0 计量对账（本机闭环验收：hub 侧实测 == 发布归档字节 == worker 实测）----
+    payload_path = find_payload(work / "jobs" / jid)
+    published_bytes = payload_path.stat().st_size if payload_path else 0
+    hub_wire = store.wire_stats(jid)
+    _ww = result.get("wire")
+    worker_wire: dict = _ww if isinstance(_ww, dict) else {}
+    log(
+        f"M0 wire: published={published_bytes} "
+        f"hub.sent_bytes={hub_wire.get('sent_bytes')} hub.recv_bytes={hub_wire.get('recv_bytes')} "
+        f"worker.payload_bytes={worker_wire.get('payload_bytes')} "
+        f"worker.result_bytes={worker_wire.get('result_bytes')} "
+        f"worker.grad_sec={worker_wire.get('grad_sec')}"
+    )
+    assert published_bytes > 0, "发布 payload 不在盘上"
+    assert hub_wire.get("sent_bytes") == published_bytes, (
+        f"hub 侧 sent_bytes={hub_wire.get('sent_bytes')} != 发布归档 {published_bytes}（计量不对账）"
+    )
+    assert worker_wire.get("payload_bytes") == published_bytes, (
+        f"worker 侧 payload_bytes={worker_wire.get('payload_bytes')} != 发布归档 {published_bytes}"
+    )
+    assert (hub_wire.get("recv_bytes") or 0) > 0, "hub 未记录 result 收体字节（M0 计量缺失）"
 
     # ---- 7) 断言 ----
     out_bytes = out_weights.read_bytes()

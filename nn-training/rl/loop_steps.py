@@ -171,7 +171,8 @@ def _push_job_round(
     for node in nodes:
         url, key = node["url"], node.get("authKey", "")
         try:
-            _push_submit(
+            # M0：submit_job 返回本轮实测传输账（body/payload/code 字节 + 上传秒）
+            submit_wire = _push_submit(
                 url,
                 key,
                 manifest,
@@ -181,7 +182,12 @@ def _push_job_round(
                 log=log,
             )
             log(f"[run_rl] push: job {jid} 已提交 -> {url}（等待 GPU 完成）")
-            return _push_wait_result(url, key, jid, timeout_sec=timeout_sec, log=log)
+            result = _push_wait_result(url, key, jid, timeout_sec=timeout_sec, log=log)
+            if isinstance(submit_wire, dict) and isinstance(result, dict):
+                # 挂在结果上随返回一路上浮（_wire_from_result 消费）——不改 result 的
+                # 校验字段，纯 additive。
+                result["wire_hub"] = submit_wire
+            return result
         except Exception as e:  # 单节点失败换下一个（含确定性拒绝）
             last = e
             log(f"[run_rl] push: 节点 {url} 失败（{type(e).__name__}: {e}）——尝试下一节点")
@@ -200,6 +206,43 @@ def _kickstart_ref_payload(args: Any) -> tuple[str, str]:
         )
     raw = Path(path).read_bytes()
     return base64.b64encode(raw).decode("ascii"), hashlib.sha256(raw).hexdigest()
+
+
+def _wire_from_result(
+    result: dict,
+    *,
+    is_push: bool,
+    pack_sec: float | None = None,
+    cfg: dict | None = None,
+) -> dict:
+    """M0 统一计量：把传输层实测汇总成 iteration 事件的 `wire` 子字典。
+
+    数据来源（两半各自实测，互不覆盖）：
+      * worker 侧 `result["wire"]`：payload_bytes / 各阶段秒拆分 / result_bytes；
+      * hub 侧 `result["wire_hub"]`：push = submit_job 实测 body_bytes/upload_sec；
+        pull = hub-server 实测 sent_bytes/recv_bytes（随 /jobs/{id}/result 带回）。
+    缺键一律 None（旧 worker / 旧 hub = 旧行无键，不破兼容，additive）。
+    """
+    _w = result.get("wire")
+    w: dict = _w if isinstance(_w, dict) else {}
+    _h = result.get("wire_hub")
+    h: dict = _h if isinstance(_h, dict) else {}
+    c = cfg or {}
+    return {
+        "up_bytes": (h.get("body_bytes") if is_push else h.get("sent_bytes")),
+        "up_sec": (h.get("upload_sec") if is_push else None),
+        "pack_sec": pack_sec,
+        "down_bytes": (None if is_push else h.get("recv_bytes")),
+        "down_sec": None,
+        "blobs_miss": w.get("blob_miss"),
+        "protocol": c.get("protocol"),
+        "edge_ip": c.get("edge_ip"),
+        "slim": c.get("slim"),
+        "rollout_src": c.get("rollout_src"),
+        # worker 侧拆分原样挂上（观测用；plan §2.2 未把它写进 hub 字典，但两半
+        # 互不覆盖，合起来才是完整的“秒/字节到哪去了”的答案）。
+        "worker": (dict(w) if w else None),
+    }
 
 
 def _remote_forward_agg(agg: dict) -> dict:
@@ -913,6 +956,8 @@ class TrainingSteps:
         ref_b64, ref_fp = _kickstart_ref_payload(args) if kick_live else ("", "")
         # I1 取证：publish 前的临终对照点（上传大 payload 前的 RSS/磁盘基线）。
         self._forensics(f"remote_pre_publish it{it}")
+        # M0：打包（tar.xz + 编码）/ 落盘墙钟——iteration 事件的 wire.pack_sec。
+        t_pack = time.time()
         manifest = publish_job(
             job_root=job_root,
             jsonl_path=str(self._jsonl_path),
@@ -955,6 +1000,7 @@ class TrainingSteps:
             log=log,
         )
         jid = manifest["job_id"]
+        pack_sec = round(time.time() - t_pack, 3)
         # 阻塞等待云 worker 完成（与 _serial_ppo 同构；超时由 hub-server 租约吸收）
         timeout_sec = 30 * 60.0
         # remote PPO 等待期集群空闲 —— 立即开 evalboard 窗领批（含等待期间新入队的）。
@@ -1036,6 +1082,19 @@ class TrainingSteps:
         self._ppo_sec = round(time.time() - t_ppo, 1)  # 往返墙钟（含打包/上传/排队/下载）
         # 真训练秒：云端 worker 自报的 load+chunk+update（旧 worker / echo 无此字段 → 回落往返）
         self._ppo_cloud_sec = float(result.get("ppo_sec") or 0.0) or self._ppo_sec
+        # M0 统一计量：传输层实测（字节/秒）汇总进 iteration 事件的 wire 子字典。
+        # protocol/edge_ip/slim 由 M1/M2 的配置面注入（未配 = None，旧行为）。
+        self._wire = _wire_from_result(
+            result,
+            is_push=bool(gpu_nodes),
+            pack_sec=pack_sec,
+            cfg={
+                "protocol": getattr(args, "remote_cf_protocol", None),
+                "edge_ip": str(getattr(args, "remote_cf_edge_ip", "") or "") or None,
+                "slim": getattr(args, "remote_slim", None),
+                "rollout_src": str(getattr(args, "rollout_src", "local") or "local"),
+            },
+        )
         # 启动协议补丁（2026-09-08 vk1 事故）：kickstart_ref 已要求时，it1 校准把
         # 「缰绳真实落地」做进循环——云端 agg 无 kickstart 键或值恒 0 = worker 没跑
         # 缰绳（旧代码/模块钉住），响亮警示而非静默裸奔；正常值应为 0.1~0.6 量级。
@@ -1304,6 +1363,8 @@ class TrainingSteps:
                 "rollout_sec": self._rollout_sec,
                 "ppo_sec": self._ppo_sec,
                 "ppo_cloud_sec": self._ppo_cloud_sec,
+                # M0 统一计量（additive；本地/旧路径无此键 → None）。
+                "wire": getattr(self, "_wire", None),
                 "total_steps": self._total_steps,
                 "chunks_n": self._chunks_n,
                 "agg": self._agg,

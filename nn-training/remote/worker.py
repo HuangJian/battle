@@ -312,6 +312,23 @@ def heartbeat(base_url: str, token: str, jid: str, lease_token: str = "") -> Non
         pass  # 心跳失败不致命：下一次轮询/心跳再续
 
 
+def _wire_block(**over: object) -> dict:
+    """M0 统一计量：worker 侧 `wire` 子字典（全 additive——旧 hub 的 validate_result
+    不校验未知字段，旧读方忽略）。over 里 None 的键保留默认值（不把缺失写成 null）。"""
+    w: dict = {
+        "payload_bytes": 0,
+        "payload_dl_sec": 0.0,
+        "unpack_sec": 0.0,
+        "opt_restore_sec": 0.0,
+        "grad_sec": 0.0,
+        "blob_hits": 0,
+        "blob_miss_bytes": 0,
+        "result_bytes": 0,
+    }
+    w.update({k: v for k, v in over.items() if v is not None})
+    return w
+
+
 def _persist_result(work_dir: Path, jid: str, result: dict) -> None:
     """结果落盘 _result.json：回传失败后重领同 job 时直接复用，不重算 PPO。"""
     rpath = work_dir / jid / "_result.json"
@@ -870,13 +887,17 @@ def run_job(
             pass  # 缓存缺失/跨 manifest/损坏 → 清场走全流程
 
     # ---- payload 来源（D1：sha256 校验防截断/损坏，两条路径同规） ----
+    # M0 统一计量：payload 大小与拿到它的墙钟（push = 随 POST body 抵达，下载耗时归 hub；
+    # pull = 真下载时间）。其余拆分（unpack/opt_restore/grad）各自包在下面。
     t_dl = time.time()
     if preloaded is not None and "payload_zip" in preloaded:
         raw = preloaded["payload_zip"]
         log(f"job {jid}: payload from push ({len(raw)} bytes)")
+        payload_dl_sec = 0.0
     else:
         raw = download_payload(base_url, token, jid)
-        log(f"job {jid}: payload downloaded ({len(raw)} bytes in {time.time() - t_dl:.1f}s)")
+        payload_dl_sec = round(time.time() - t_dl, 3)
+        log(f"job {jid}: payload downloaded ({len(raw)} bytes in {payload_dl_sec:.1f}s)")
     if hashlib.sha256(raw).hexdigest() != manifest["payload_sha256"]:
         # 传输损坏属瞬时故障：重下即可修复（RetryableError → 释放租约立即重领重下）
         raise RetryableError("payload_sha256 不匹配——传输损坏（重下可修复）")
@@ -893,7 +914,9 @@ def run_job(
     zip_path.write_bytes(raw)
     # zip 内 manifest 是占位副本，解包仅取 shard 目录；权威校验全走 job 记录 manifest。
     # init_weights.json / opt_init.tar.b64 与 shard 目录同落 job_dir 根（解包天然如此）。
+    t_unpack = time.time()
     _unused_manifest, shard_dirs = unpack_payload(zip_path, job_dir)
+    unpack_sec = round(time.time() - t_unpack, 3)
 
     # ---- commit 校验：下载 code.zip 解压到 sys.path（替代 git 同步，D6） ----
     # 云端 worker 不再依赖 git checkout，而是使用 hub 启动时打包的代码快照。
@@ -1035,6 +1058,14 @@ def run_job(
             "ppo_sec": 0.0,
             "smoke": True,
         }
+        result["wire"] = _wire_block(
+            payload_bytes=len(raw),
+            payload_dl_sec=payload_dl_sec,
+            unpack_sec=unpack_sec,
+        )
+        # 两遍收敛：result_bytes 自己的十进制位数要算进体长（第一遍以占位 0 计）。
+        result["wire"]["result_bytes"] = len(pack_result_v2(result))
+        result["wire"]["result_bytes"] = len(pack_result_v2(result))
         validate_result(result, manifest, commit_echo_must_match=False)
         _persist_result(work_dir, jid, result)
         log(f"job {jid}: ECHO (smoke) — init 权重原样回传（未跑 PPO）")
@@ -1113,7 +1144,9 @@ def run_job(
         # 于是 auto 照样被喂进 torch.device（日志上「兜底为 cuda」打了、job 仍炸 auto）。
         device_t = torch.device(dev_str)
     opt = None
+    opt_restore_sec = 0.0
     if manifest.get("opt_init"):
+        t_opt = time.time()
         opt_dir = job_dir / "opt_init"
         unpack_opt_tar(decode_opt_tar(str(manifest["opt_init"])), opt_dir)
         # 必须在 model.to(device_t) 之前加载 state_dict，然后统一移到目标设备
@@ -1124,6 +1157,7 @@ def run_job(
         # param 所在设备，所以 XLA/CPU/CUDA 三条路都靠这一句完成搬迁（原先写死
         # device_t 在 XLA 上会走 torch.load 的设备 hook，跨 runtime 不稳）。
         opt.load_state_dict(torch.load(opt_dir / "opt.pt", map_location="cpu"))
+        opt_restore_sec = round(time.time() - t_opt, 3)
         log(f"job {jid}: model/opt 从 opt_init tar 恢复（Adam 动量延续，D5）")
     else:
         # 首轮/无 tar：从 init 权重 warm-start（hub 打包时写入 payload 的 weights_json）
@@ -1258,6 +1292,16 @@ def run_job(
         "commit_echo": manifest["commit"],
         "ppo_sec": ppo_sec,
     }
+    result["wire"] = _wire_block(
+        payload_bytes=len(raw),
+        payload_dl_sec=payload_dl_sec,
+        unpack_sec=unpack_sec,
+        opt_restore_sec=opt_restore_sec,
+        grad_sec=ppo_sec,
+    )
+    # 两遍收敛（同 echo 路径）：result_bytes 与自身体长自指，一遍差它的十进制位数。
+    result["wire"]["result_bytes"] = len(pack_result_v2(result))
+    result["wire"]["result_bytes"] = len(pack_result_v2(result))
     validate_result(result, manifest, commit_echo_must_match=False)  # 自查
     _persist_result(work_dir, jid, result)
     return result

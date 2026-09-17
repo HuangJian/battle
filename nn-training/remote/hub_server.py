@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import sys
 import time
 import urllib.parse
@@ -87,6 +88,10 @@ class _JobStore:
         self._auth_blocked_until: dict[str, float] = {}
         #: 账本增量读缓存（H6）：文件 size -> 已解析事件列表
         self._ledger_cache: tuple[int, list[dict]] = (0, [])
+        #: job_id -> {"sent_bytes", "recv_bytes"}（M0 统一计量：传输层实测字节，
+        #: 供 iteration 事件的 wire 子字典对账 / M1 A-B 归因）。volatile，重启即丢，
+        #: 只做观测，不参与任何调度决策。
+        self._wire: dict[str, dict] = {}
         #: 云端停机标志（§386：停机命令随任务同发；云机先试停机、停不掉照常干活）。
         #: 置位后 /jobs/next 响应带 halt:true；由 console 经 /admin/workers/{halt,resume}
         #: 控制；hub 重启即复位（volatile）。停机**不拦任务分发**。
@@ -157,6 +162,24 @@ class _JobStore:
 
     def _job_dir(self, job_id: str) -> Path:
         return self.job_root / job_id
+
+    # ---- 统一计量（M0）：传输层实测字节 ----
+    def record_payload_sent(self, job_id: str, n: int) -> None:
+        """记一次 /jobs/{id}/payload 服务出去的字节数（累积——重下会累加）。"""
+        with self._lock:
+            w = self._wire.setdefault(job_id, {})
+            w["sent_bytes"] = int(w.get("sent_bytes", 0)) + int(n)
+
+    def record_result_recv(self, job_id: str, n: int) -> None:
+        """记一次 /jobs/{id}/result 收到的请求体字节数（= 云上行 result 体大小）。"""
+        with self._lock:
+            w = self._wire.setdefault(job_id, {})
+            w["recv_bytes"] = int(w.get("recv_bytes", 0)) + int(n)
+
+    def wire_stats(self, job_id: str) -> dict:
+        """该 job 的传输层实测字节（无记录 = {}）。只读快照。"""
+        with self._lock:
+            return dict(self._wire.get(job_id, {}))
 
     # ---- 发布（训练主循环调用：写磁盘 + 账本） ----
     def publish(self, job_id: str, manifest: dict, payload_zip: bytes) -> None:
@@ -375,6 +398,21 @@ class _JobStore:
             return max(0.0, self._auth_blocked_until.get(ip, 0.0) - self._now())
 
 
+# ------------------------------------------------------------------ net-probe（M0）
+
+#: /admin/net-probe 响应体上限（与前端探针脚本约定；2MB 腿只需 2_097_152）。
+NET_PROBE_MAX = 16 * 1024 * 1024
+#: 确定性填充块（固定种子，绝不用随机——同一 bytes=N 每次必须逐字节相同，
+#: 这样隧道 A/B 的差异只可能来自协议，不可能来自载荷）。
+_PROBE_BLOCK = bytes(random.Random(0x5EED).getrandbits(8) for _ in range(65536))
+
+
+def _deterministic_fill(n: int) -> bytes:
+    """生成 n 字节确定性填充（重复 64KiB 固定块，省 CPU）。"""
+    q, rem = divmod(n, len(_PROBE_BLOCK))
+    return _PROBE_BLOCK * q + _PROBE_BLOCK[:rem]
+
+
 # ------------------------------------------------------------------ HTTP
 
 
@@ -482,6 +520,8 @@ class HubHandler(BaseHTTPRequestHandler):
                 self._admin_halt(False)
             elif path == "/admin/workers/status":
                 self._admin_status()
+            elif path == "/admin/net-probe":
+                self._admin_net_probe()
             elif path.startswith("/jobs/") and path.endswith("/payload"):
                 self._get_payload()
             elif path.startswith("/jobs/") and path.endswith("/code"):
@@ -567,6 +607,28 @@ class HubHandler(BaseHTTPRequestHandler):
             return
         self._json({"halt": self.store.halt_workers}, 200)
 
+    # ---- GET /admin/net-probe?bytes=N（M0：隧道吞吐 A/B 探针）----
+    def _admin_net_probe(self) -> None:
+        """回 N 字节确定性填充（固定种子）——同一条隧道双向各传 2MB 量真实吞吐。
+
+        ⚠ 鉴权：必须携正确 Bearer token（同其余端点），**绝不能在循环里重试错误
+        token**（D9：同 IP 连败 5 次封 3600s，而 cloudflared 回源会把隧道流量全归
+        成 127.0.0.1 ⇒ 误伤本机组件）。探针脚本只在自身自检时打一次，见验收 harness。
+        """
+        if not self._auth_ok():
+            return
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        raw = (qs.get("bytes") or ["0"])[0]
+        try:
+            n = int(raw)
+        except ValueError:
+            self._json({"error": f"bytes 必须是整数，收到 {raw!r}"}, 400)
+            return
+        if n < 0 or n > NET_PROBE_MAX:
+            self._json({"error": f"bytes 越界（0..{NET_PROBE_MAX}），收到 {n}"}, 400)
+            return
+        self._bytes(_deterministic_fill(n))
+
     # ---- GET /jobs/{id}/payload ----
     def _get_payload(self) -> None:
         if not self._auth_ok():
@@ -579,7 +641,10 @@ class HubHandler(BaseHTTPRequestHandler):
         if p is None:
             self._json({"error": "no payload"}, 404)
             return
-        self._bytes(p.read_bytes())
+        data = p.read_bytes()
+        # M0 统一计量：传输层实测（服务出去的 payload 字节）——iteration 事件对账用。
+        self.store.record_payload_sent(jid, len(data))
+        self._bytes(data)
 
     # ---- GET /jobs/{id}/code ----
     def _get_code(self) -> None:
@@ -644,6 +709,11 @@ class HubHandler(BaseHTTPRequestHandler):
         if r is None:
             self._json({"error": "not done"}, 404)
             return
+        # M0 统一计量：把 hub 侧传输层实测字节（additive 的 wire_hub 键）随结果
+        # 一并回给训练主循环——旧读方忽略未知键，旧 result.json 不受影响。
+        stats = self.store.wire_stats(jid)
+        if stats:
+            r = {**r, "wire_hub": stats}
         self._json(r)
 
     # ---- POST /jobs/{id}/heartbeat ----
@@ -691,6 +761,9 @@ class HubHandler(BaseHTTPRequestHandler):
         except Exception as e:
             self._json({"error": f"read body failed: {e}"}, 400)
             return
+        # M0 统一计量：收到的 result 请求体字节（云上行实测）——即便后面校验失败
+        # 也已实收，如实记录，供对账。
+        self.store.record_result_recv(jid, len(raw))
         try:
             # 方案B（2026-09-10）：v2 体（gzip 裸二进制段）**按魔数自动识别** —— 不依赖
             # Content-Type，故旧 worker（纯 JSON）与新 worker（v2）都能收。还原出的 dict

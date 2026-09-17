@@ -774,6 +774,112 @@ def test_clear_halt_on_startup(tmp_path: Path) -> None:
         th.join()
 
 
+# ------------------------------------------------------------------ M0 统一计量
+
+
+def _mini_result(manifest: dict, **over) -> dict:
+    r = {
+        "job_id": manifest["job_id"],
+        "data_fp": manifest["data_fp"],
+        "init_weights_fp": manifest["init_weights_fp"],
+        "weights_json": encode_weights_json(b'{"ok":true}'),
+        "opt_tar_b64": "",
+        "agg": {"policy": 0.1, "value": 0.2, "entropy": 0.3, "kl": 0.4, "mean_ret": 0.5},
+        "commit_echo": manifest["commit"],
+    }
+    r.update(over)
+    return r
+
+
+def test_validate_result_accepts_wire_additive() -> None:
+    """M0：wire 子字典是 additive 的——缺失照旧通过（旧行无键），存在也被接受。"""
+    m = normalize_manifest(_mini_manifest())
+    validate_result(_mini_result(m), m, commit_echo_must_match=False)
+    validate_result(
+        _mini_result(m, wire={"payload_bytes": 10}, wire_hub={"sent_bytes": 10}),
+        m,
+        commit_echo_must_match=False,
+    )
+
+
+def test_wire_from_result_maps_both_halves() -> None:
+    """M0：_wire_from_result 把 worker 半与 hub 半汇总成 iteration 事件的 wire 子字典。"""
+    from rl.loop_steps import _wire_from_result
+
+    r = {
+        "wire": {"payload_bytes": 100, "blob_miss": 2},
+        "wire_hub": {"body_bytes": 250, "upload_sec": 1.5},
+    }
+    w = _wire_from_result(r, is_push=True, pack_sec=0.4, cfg={"protocol": "http2"})
+    assert w["up_bytes"] == 250 and w["up_sec"] == 1.5 and w["pack_sec"] == 0.4
+    assert w["blobs_miss"] == 2 and w["protocol"] == "http2"
+    assert w["worker"]["payload_bytes"] == 100
+    # pull：hub-server 实测 sent/recv 分别映射到 up/down
+    w2 = _wire_from_result({"wire_hub": {"sent_bytes": 7, "recv_bytes": 9}}, is_push=False)
+    assert w2["up_bytes"] == 7 and w2["down_bytes"] == 9 and w2["up_sec"] is None
+    # 旧形态（无任何 wire）= 全 None，不炸（additive）
+    w3 = _wire_from_result({}, is_push=False)
+    assert w3["up_bytes"] is None and w3["worker"] is None
+
+
+def test_hub_net_probe_auth_and_deterministic(tmp_path: Path) -> None:
+    """/admin/net-probe（M0）：必须带正确 token；同 bytes 两次逐字节相同；越界/非整数 400。"""
+    base, _store, srv, th = _boot_server(tmp_path)
+    try:
+        # D9：探针端点也走鉴权边界（测试只打一次错 token，绝不进循环）
+        st, _ = _http_raw(base, "wrong-token", "/admin/net-probe?bytes=64")
+        assert st == 401
+        st, body = _http_raw(base, "sekret", "/admin/net-probe?bytes=4096")
+        assert st == 200 and len(body) == 4096
+        st2, body2 = _http_raw(base, "sekret", "/admin/net-probe?bytes=4096")
+        assert st2 == 200 and body2 == body, "确定性填充：同 bytes 两次必须逐字节相同"
+        # 0 字节合法（退化边界）；越界与非整数 → 400
+        st, body0 = _http_raw(base, "sekret", "/admin/net-probe?bytes=0")
+        assert st == 200 and body0 == b""
+        st, _ = _http_raw(base, "sekret", "/admin/net-probe?bytes=999999999")
+        assert st == 400
+        st, _ = _http(base, "sekret", "/admin/net-probe?bytes=abc")
+        assert st == 400
+    finally:
+        srv.shutdown()
+        th.join(timeout=5)
+
+
+def test_hub_wire_stats_recorded(tmp_path: Path) -> None:
+    """M0：hub-server 实测传输字节（sent=payload 服务字节，recv=result 收体字节）。"""
+    base, store, srv, th = _boot_server(tmp_path)
+    try:
+        manifest = normalize_manifest(_mini_manifest())
+        jid = manifest["job_id"]
+        payload = b"PK\x03\x04" + b"x" * 123
+        store.publish(jid, manifest, payload)
+        st, body = _http(base, "sekret", "/jobs/next")
+        assert st == 200 and body["job_id"] == jid
+        lease_token = body["lease_token"]
+        st, got = _http_raw(base, "sekret", f"/jobs/{jid}/payload")
+        assert st == 200 and got == payload
+        assert store.wire_stats(jid)["sent_bytes"] == len(payload)
+        result = _mini_result(manifest)
+        v2 = pack_result_v2(result)
+        st, _ = _http(
+            base,
+            "sekret",
+            f"/jobs/{jid}/result",
+            method="POST",
+            data=v2,
+            extra_headers={"Content-Type": WIRE_V2_CONTENT_TYPE, "X-Lease-Token": lease_token},
+        )
+        assert st in (200, 201)
+        assert store.wire_stats(jid)["recv_bytes"] == len(v2)
+        # ADDITIVE：回读 result 带 wire_hub（旧读方忽略未知键）
+        st, got2 = _http(base, "sekret", f"/jobs/{jid}/result")
+        assert st == 200 and got2["wire_hub"]["recv_bytes"] == len(v2)
+        assert got2["weights_json"] == result["weights_json"]
+    finally:
+        srv.shutdown()
+        th.join(timeout=5)
+
+
 def test_hub_server_auth_and_job_lifecycle(tmp_path: Path) -> None:
     """鉴权（401/闭锁）+ 发布（磁盘 IPC）→ 领取 → payload → 结果 → 状态全链路。"""
     base, store, srv, th = _boot_server(tmp_path)

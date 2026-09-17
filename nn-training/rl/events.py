@@ -104,6 +104,10 @@ def write_iteration(jsonl_path: Path, args, it: int, report: dict, m: dict) -> N
             # 2026-09-11 新增（additive，旧行无此键 → None）：云端/本机 **真训练秒**；
             # ppo_sec 在远端模式是往返墙钟，不可当作训练量。
             "ppo_cloud_sec": m.get("ppo_cloud_sec"),
+            # 2026-09-17 M0（additive，旧行无此键 → None）：统一传输计量子字典——
+            # 把「往返墙钟 − 云端真训练秒」的差额拆成字节与秒（up/down/pack）。
+            # 缺键（本机 PPO / 旧路径）= None，不破兼容；供 A/B 按选项分组统计。
+            "wire": m.get("wire"),
             "steps": m["total_steps"],
             "chunks": m["chunks_n"],
             "policy": agg["policy"] if agg else None,

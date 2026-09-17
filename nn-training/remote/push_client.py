@@ -42,27 +42,36 @@ def submit_job(
     timeout: float = 600.0,
     attempts: int = 3,
     log=_default_log,
-) -> None:
+) -> dict:
     """POST /job 上传 manifest + payload（+ 按需 code）。瞬时失败退避重试；
-    409 busy / 428 code-missing 亦按可重试处理（hub 侧换节点或补传后重试）。"""
+    409 busy / 428 code-missing 亦按可重试处理（hub 侧换节点或补传后重试）。
+
+    M0 统一计量：成功时返回本轮实测传输账（body_bytes / payload_bytes /
+    code_bytes / upload_sec / attempts）——训练主循环把它写进 iteration 事件的
+    `wire` 子字典；旧调用方忽略返回值，行为不变。
+    """
     need_code = not code_cached_on_node(base_url, token, manifest["code_sha256"])
     if need_code and code_zip is None:
         raise RetryableError("节点无 code 缓存且本次未携带 code.zip")
     last: str = ""
+    t0 = time.time()
     for attempt in range(1, attempts + 1):
         body_obj: dict = {
             "manifest": manifest,
             "payload_b64": base64.b64encode(payload_zip).decode("ascii"),
         }
-        if need_code and code_zip is not None:
+        code_sent = need_code and code_zip is not None
+        if code_sent:
+            assert code_zip is not None  # 收窄：code_sent 已保证非 None
             body_obj["code_b64"] = base64.b64encode(code_zip).decode("ascii")
+        body_bytes = json.dumps(body_obj, ensure_ascii=False).encode("utf-8")
         try:
             status, resp = _request(
                 base_url,
                 token,
                 "/job",
                 timeout=timeout,
-                data=json.dumps(body_obj, ensure_ascii=False).encode("utf-8"),
+                data=body_bytes,
                 method="POST",
                 headers={
                     "Content-Type": "application/json",
@@ -75,7 +84,13 @@ def submit_job(
             log(
                 f"job {manifest['job_id']} 已推送到 {base_url}（code 上传={'是' if need_code else '否，缓存命中'}）"
             )
-            return
+            return {
+                "body_bytes": len(body_bytes),
+                "payload_bytes": len(payload_zip),
+                "code_bytes": len(code_zip) if code_sent and code_zip is not None else 0,
+                "upload_sec": round(time.time() - t0, 3),
+                "attempts": attempt,
+            }
         if status == 428:
             need_code = True  # 节点缓存未命中：下次重试带 code
             last = "428 code-missing"

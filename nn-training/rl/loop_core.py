@@ -184,6 +184,8 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         self._volume_capped = False
         self._rollout_sec = 0.0
         self._ppo_sec = 0.0
+        # M0 统一计量（iteration 事件的 wire 子字典）：由 TrainingSteps._remote_ppo 赋值，
+        # 本地/旧路径从不赋值——读取一律走 getattr(self, "_wire", None)。
         self._total_steps = 0
         self._chunks_n = 0
         # 迭代期共享状态（在对应阶段方法内赋值；此处先声明供 mypy/阅读定位）
