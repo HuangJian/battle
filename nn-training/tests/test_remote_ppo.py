@@ -898,6 +898,23 @@ def test_hub_net_probe_auth_and_deterministic(tmp_path: Path) -> None:
         assert st == 400
         st, _ = _http(base, "sekret", "/admin/net-probe?bytes=abc")
         assert st == 400
+        # M1 上行腿：POST 同一端点 —— 读掉体并回 {"bytes": n}；超限 413；错 token 401
+        st, up = _http(
+            base,
+            "sekret",
+            "/admin/net-probe",
+            method="POST",
+            data=b"x" * 4096,
+        )
+        assert st == 200 and up["bytes"] == 4096
+        st2, _ = _http(
+            base,
+            "wrong-token",
+            "/admin/net-probe",
+            method="POST",
+            data=b"z" * 10,
+        )
+        assert st2 == 401
     finally:
         srv.shutdown()
         th.join(timeout=5)

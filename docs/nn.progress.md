@@ -35,11 +35,45 @@
 - push 侧 B5：真 `worker_server` × 真 `push_client` e2e 实测 v2 体比同内容 JSON 体小 **>20%**（断言在 `e2e/test_push_mode_integration.py`）。
 - 门禁：`bun run check` 1853 pass / 0 fail；`bash tools/githook/nn-py-safe.sh -m pytest nn-training/tests nn-training/e2e -q` 310 pass / 0 fail；`bun dashboard/src/server/build.ts` 三份 bundle 通过。
 
+### M1 隧道 A/B 实测（已跑：`remote/tunnel_ab_probe.py`，2026-09-17 本机）
+
+探针自建环境（真 hub-server + `cloudflared tunnel --protocol <p> --edge-ip-version 4` × 每腿一条
+quick tunnel），每腿每方向 2MiB × N 发；`loopback` 腿作基线。**每臂 2 个独立 run**（run1/run2 各 5 发，
+run3 两臂各 8 发）。原始 JSON：`tmp/tunnel-ab-{1,2,3}.json`。
+
+| 腿 | 方向 | run | n | p50 | p90 | max | p50 吞吐 |
+|---|---|---|---:|---:|---:|---:|---:|
+| loopback | up | 1 | 5 | 0.02s | 0.02s | 0.03s | 890 Mbps |
+| loopback | down | 1 | 5 | 0.03s | 0.03s | 0.03s | 576 Mbps |
+| **http2** | **up** | 1 / 2 / 3 | 5/5/8 | **4.84 / 4.66 / 4.85s** | 4.84 / 5.90 / 5.39s | 5.26 / 6.49 / 9.41s | ~3.5 Mbps |
+| http2 | down | 1 / 2 / 3 | 5/5/8 | 4.80 / 5.09 / 5.30s | 5.03 / 6.61 / 9.26s | 8.72 / 8.42 / 9.44s | ~3.3 Mbps |
+| **quic** | **up** | 2 / 3 | 5/8 | **23.42 / 33.04s** | 25.40 / 36.34s | 43.54 / 49.88s | 0.5–0.7 Mbps |
+| quic | down | 2 / 3 | 5/8 | 8.50 / 6.20s | 8.90 / 7.49s | 9.77 / 9.07s | 2.0–2.7 Mbps |
+
+**判定（§3.4 判据）**：`http2` 腿 **p50 明显更快**（上行 4.7–4.9s vs 23–33s，**5–7×**；下行 1.2–1.8×），
+且 **8 连发无退化趋势**（run3 上行 3.3–9.4s 抖动，p50 仍 4.85s）；`quic` 腿**复现退化**且抖动极大
+（p50 23s 而 max 43.5s）—— 与「ISP 对 QUIC(UDP/443) QoS 降质」的病灶签名一致。
+⇒ **决策门 1：命中。** 默认取 `http2`/`edge-ip-version 4` 是对的（即 M1 缺省值）。
+
+⚠ **绝对数不可直接换算每轮耗时**：客户端在本机，请求出一遍家宽、响应回一遍（§2.3 已声明）。
+真轮次的传输量约 1.2MB 上 + 0.86MB 下 ⇒ 按本表 p50 约 6–8s（远低于门 1 的 20s）。
+真实 payload 形状 + 宿主路径下的绝对值仍需云机确认。
+
+### 实施中发现的坑（同批）
+
+- **本机环境代理会杀死隧道探测**：本机设了 `HTTPS_PROXY=http://127.0.0.1:7890`，而 `NO_PROXY` 只含
+  localhost/127.0.0.1/内网网段 ⇒ 打 `https://*.trycloudflare.com` 被丢进本地代理，拿回
+  `SSL: UNEXPECTED_EOF_WHILE_READING`（而 cloudflared 日志里 `Registered tunnel connection` 一切正常，
+  极易误判成「隧道坏了」）。探针客户端已固定 `ProxyHandler({})` 绕过；**云端 worker 没有这种代理**，
+  所以按直连量才是对的。
+- quick tunnel 的 URL 在 edge **注册完成前**就写进日志 ⇒ 必须先用 `/ping` 就绪门等它真开始服务，
+  否则「连接没建好」会被记成「协议慢」，恰好污染本探针唯一要量的东西。
+
 ### 未做（不写成已做）
 
-- **M1 隧道 A/B 探针**（`http2` vs `quic` 各 5×2MB 原地上/下行，p50/p90）**未跑** —— 这是**环境测量**（ISP 对 QUIC 的 QoS），不是代码路径；代码/配置面已交付并有契约与变更检测测试。
 - **M2 云机绝对值确认**（≥8 轮中位 `wire.up_sec`）**未跑**；B6（xz preset 3→6）**未量**，收益 <10% 就不做。
-- **M3（rollout 上云）按 §5.1 门未开**：门 1 需要 M1/M2 的实测（上面两条）先落地。
+- **M3（rollout 上云）按 §5.1 门留档不做**：门 1 已命中（`http2` 把传输打到 ≪20s），门 2 要等云机绝对值，
+  且 M2 之后上行只剩 ~1.2MB —— 按 `plan/kaggle-rollout-feasibility.md` 的算术已经是负交易。
 
 ### 教训
 

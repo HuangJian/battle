@@ -556,6 +556,8 @@ class HubHandler(BaseHTTPRequestHandler):
                 self._post_result()
             elif path.startswith("/jobs/") and path.endswith("/epoch"):
                 self._post_bc_epoch()
+            elif path == "/admin/net-probe":
+                self._admin_net_probe_upload()
             else:
                 self._json({"error": "not found"}, 404)
         except (ProtocolError, ValueError) as e:
@@ -631,6 +633,34 @@ class HubHandler(BaseHTTPRequestHandler):
             self._json({"error": f"bytes 越界（0..{NET_PROBE_MAX}），收到 {n}"}, 400)
             return
         self._bytes(_deterministic_fill(n))
+
+    def _admin_net_probe_upload(self) -> None:
+        """POST /admin/net-probe —— 读掉请求体并回 {"bytes": n}（上行方向的腿）。
+
+        为什么需要：push 模式的真实流量里**上行是大头**（job 体），只量下行会把
+        A/B 的结论押在次要方向上。体上限用同一 NET_PROBE_MAX，超限 413 而不是把
+        N GB 读进内存（探针也会被误用）。
+        """
+        if not self._auth_ok():
+            return
+        try:
+            n = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._json({"error": "Content-Length 非法"}, 400)
+            return
+        if n < 0 or n > NET_PROBE_MAX:
+            self._json({"error": f"请求体越界（0..{NET_PROBE_MAX}），收到 {n}"}, 413)
+            return
+        got = 0
+        while got < n:  # 分块读掉，绝不整体入内存（探针不是文件接收器）
+            chunk = self.rfile.read(min(65536, n - got))
+            if not chunk:
+                break
+            got += len(chunk)
+        if got != n:
+            self._json({"error": f"请求体截断（声明 {n}，实收 {got}）"}, 400)
+            return
+        self._json({"bytes": got})
 
     # ---- GET /jobs/{id}/payload ----
     def _get_payload(self) -> None:

@@ -2053,7 +2053,12 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   「把退路优化掉」每条都会再出现；③ 无法就近表达 —— 横跨传输客户端 / 两个解析端 / 校验语义 / 回退开关。
 - **违反后果**：再出现静默降级 warm-start ⇒ D5 语义被无声改写（本仓最怕那类 bug）；删掉退路重发 ⇒
   新旧混合部署时整轮 job 丢失；开瘦身却不在指标里记开关 ⇒ 无法归因。
-- **未做（不写成已做）**：M1 的隧道 A/B 探针、M2 的云机绝对值确认、M2 §4.2 B6（xz preset 3→6）均**未跑**；
-  M3（rollout 上云）按 §5.1 门未开，留档不做。
+- **配套事实（M1 实测，2026-09-17 本机）**：`http2` 上行 p50 4.7–4.9s / `quic` 23–33s（2MiB，每臂 2 轮
+  独立 run，run3 八连发无退化）⇒ **决策门 1 命中，默认 `http2`/`edge-ip-version 4` 有实测支撑**；
+  数字与探针用法见 `docs/nn.progress.md` §56。同在那一轮量到的一个坑：本机 `HTTPS_PROXY=127.0.0.1:7890`
+  而 `NO_PROXY` 不含 `*.trycloudflare.com` ⇒ **任何打隧道 URL 的本机客户端必须绕过代理**
+  （不绕会拿回 `SSL: UNEXPECTED_EOF_WHILE_READING`，而 cloudflared 日志看起来完全健康）。
+- **未做（不写成已做）**：M2 的云机绝对值确认与 §4.2 B6（xz preset 3→6）**未跑**；M3（rollout 上云）
+  按 §5.1 门 1 已命中、门 2 待测，且 M2 后上行仅 ~1.2MB ⇒ 留档不做。
 
 
