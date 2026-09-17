@@ -52,6 +52,7 @@ from remote.protocol import (
     PAYLOAD_NAME,
     WIRE_V2_MAGIC,
     ProtocolError,
+    blob_path,
     find_payload,
     normalize_manifest,
     unpack_result_v2,
@@ -526,6 +527,8 @@ class HubHandler(BaseHTTPRequestHandler):
                 self._get_payload()
             elif path.startswith("/jobs/") and path.endswith("/code"):
                 self._get_code()
+            elif path.startswith("/jobs/") and path.endswith("/blob"):
+                self._get_blob()
             elif path.startswith("/jobs/") and path.endswith("/status"):
                 self._get_status()
             elif path.startswith("/jobs/") and path.endswith("/result"):
@@ -659,6 +662,26 @@ class HubHandler(BaseHTTPRequestHandler):
             self._json({"error": "no code zip"}, 404)
             return
         self._bytes(p.read_bytes())
+
+    # ---- GET /jobs/{id}/blob?name=opt|ref（M2 B3：内容寻址 opt/ref 载荷）----
+    def _get_blob(self) -> None:
+        if not self._auth_ok():
+            return
+        jid = self._job_id()
+        if jid is None:
+            self._json({"error": "not found"}, 404)
+            return
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        name = (qs.get("name") or [""])[0]
+        try:
+            bp = blob_path(self.store._job_dir(jid), name)
+        except ProtocolError as e:
+            self._json({"error": str(e)}, 400)
+            return
+        if not bp.exists():
+            self._json({"error": "no blob"}, 404)
+            return
+        self._bytes(bp.read_bytes())
 
     # ---- GET /code（共享 code.zip，colab bootstrap 用） ----
     def _get_shared_code(self) -> None:

@@ -28,8 +28,11 @@ from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from platform_utils import rmtree_best_effort
 from remote.protocol import (
     AUTH_HEADER,
+    BLOB_OPT,
+    BLOB_REF,
     PAYLOAD_NAME,
     PAYLOAD_XZ_PRESET,
+    blob_path,
     data_fp,
     decode_opt_tar,
     decode_weights_json,
@@ -151,12 +154,14 @@ def pack_payload_zip(
     zip_path: Path,
     manifest: dict,
 ) -> str:
-    """把 shard 目录 + 额外文件（init_weights.json / opt_init.tar.b64）+ manifest
+    """把 shard 目录 + 额外文件（有 opt blob 时仅 shard；否则含 init_weights.json）
     打成 payload 归档（**tar.xz**，2026-09-10 起；实测体积 −48.7% 而打包耗时持平）。
-    返回归档字节 sha256。布局与 worker 的 unpack_payload 约定一致
-    （shard 目录整体 + manifest.json + init_weights.json + opt_init.tar.b64）。
+    返回归档字节 sha256。
+
+    M2（B1/B2/B4）：不再写根级占位 manifest.json、不再写 opt_init.tar.b64；有 opt
+    blob 时也不写 init_weights.json（opt tar 已含 model+Adam）。布局 = shard 目录整体
+    （+ 可选 init_weights.json）。`manifest` 形参保留只为调用签名兼容。
     """
-    import io
     import tarfile
 
     zip_path.parent.mkdir(parents=True, exist_ok=True)
@@ -168,10 +173,8 @@ def pack_payload_zip(
         for p in extra_files:
             if p.exists():
                 tf.add(p, arcname=p.name)
-        data = json.dumps(manifest, ensure_ascii=False, indent=2).encode()
-        ti = tarfile.TarInfo("manifest.json")
-        ti.size = len(data)
-        tf.addfile(ti, io.BytesIO(data))
+        # M2（B1）：不写根级占位 manifest.json（worker 当日志丢弃；~0.89MB/轮冗余）。
+        # `manifest` 形参保留只为调用方签名兼容。
     return _sha256_bytes(zip_path.read_bytes())
 
 
@@ -296,6 +299,13 @@ def publish_job(
     # 严格样本量配额（target_transitions 路线）：训练侧逐关只收前 ceil(target/关数) 步。
     # 0 = 历史行为（全收）；由 run_rl 的 `_per_stage_quota()` 算好传入。
     per_stage_quota: int = 0,
+    # M2（plan/remote-wire-remediation §4.2）：协议瘦身开关。
+    # True → opt/ref 走内容寻址 sha（不再内联），并去掉 payload 内冗余文件；
+    # False → 逐字节回到旧行为（内联 base64、带 opt_init.tar.b64）。
+    slim: bool = False,
+    # echo 冒烟需要 payload 内的 init_weights.json（无 opt 才需要；冒烟轮可能带 opt
+    # 但仍要回显）——调用方按 args.smoke 传 True 强制带上。
+    keep_init_weights: bool = False,
     # 任务类型（BC 整合，plan/bc-cloud-integration.plan.md §4）：缺省 "ppo" =
     # 原行为逐字节不变；"bc" = 行为克隆 job——manifest 免除 PPO 专有键
     # （protocol.MANIFEST_BC_EXEMPT）并并入 `extra`（arch/val_split/mirror_p/
@@ -318,9 +328,24 @@ def publish_job(
     # 2) init_weights_fp（fencing：云回传的 init_weights_fp 必须等于当前 args.out 指纹；
     #    BC 无 warm-start → 恒 "bc" 占位）
     init_weights_fp = _sha256_file(init_weights_path) if init_weights_path else "bc"
-    # 3) opt_init tar（上轮 ppo_ckpt_remote；空 = 首轮，D5）
-    opt_init = _pack_opt_init(ckpt_remote_dir)
-    # 4) manifest 预建（payload_sha256 占位）→ 打包（zip 内 manifest 为占位副本）
+    # 3) opt/ref 内容寻址（M2 B3）：raw 字节 sha256；未开瘦身则内联 base64（旧口径）
+    opt_raw = _opt_tar_bytes(ckpt_remote_dir)
+    opt_sha = _sha256_bytes(opt_raw) if opt_raw else ""
+    use_opt_blob = bool(slim and opt_sha)
+    ref_raw = b""
+    if slim and ref_weights_b64:
+        try:
+            ref_raw = base64.b64decode(ref_weights_b64.encode("ascii"))
+        except (ValueError, UnicodeEncodeError):
+            ref_raw = b""
+    # ref_sha 口径与 ref_weights_fp 同一（调用方对 raw 权重取 sha）——有字节才寻址。
+    use_ref_blob = bool(slim and ref_weights_fp and ref_raw)
+    opt_init = (
+        ""
+        if use_opt_blob
+        else (base64.b64encode(opt_raw).decode("ascii") if opt_raw else "")
+    )
+    # 4) manifest 预建（payload_sha256 占位）→ 打包（payload 内不再带占位 manifest）
     extra_files: list[Path] = []
     tmp_extra_dir = job_root_p / ".extra_tmp"
     tmp_extra_dir.mkdir(parents=True, exist_ok=True)
@@ -343,24 +368,29 @@ def publish_job(
         "normalize_ret": bool(normalize_ret),
         "kickstart_kl": float(kickstart_kl),
         "ent_coef": ent_coef,
-        "ref_weights_b64": ref_weights_b64,
+        "ref_weights_b64": "" if use_ref_blob else ref_weights_b64,
         "ref_weights_fp": ref_weights_fp,
         "shuffle": shuffle,
         "schedule_raw": schedule_raw,
         "per_stage_quota": int(per_stage_quota),
         "init_weights_fp": init_weights_fp,
         "opt_init": opt_init,
+        "opt_sha": opt_sha if use_opt_blob else "",
+        "ref_sha": str(ref_weights_fp) if use_ref_blob else "",
+        "opt_bytes": len(opt_raw) if use_opt_blob else 0,
+        "ref_bytes": len(ref_raw) if use_ref_blob else 0,
+        "slim": bool(slim),
         "data_fp": fp,
         "payload_sha256": "",
     }
-    if init_weights_path:
+    # M2（B4）：有 opt blob 时不传 init_weights.json（worker 从 opt 恢复即完整
+    # model+Adam）。echo 冒烟要保持回显能力，keep_init_weights 时照旧带上。
+    if init_weights_path and (not use_opt_blob or keep_init_weights):
         init_copy = tmp_extra_dir / "init_weights.json"
         shutil.copyfile(init_weights_path, init_copy)
         extra_files.append(init_copy)
-    if opt_init:
-        opt_copy = tmp_extra_dir / "opt_init.tar.b64"
-        opt_copy.write_text(opt_init, encoding="utf-8")
-        extra_files.append(opt_copy)
+    # M2（B2）：不再打 payload 内 opt_init.tar.b64 —— 全仓无读取方（opt 只从
+    # manifest["opt_init"] / opt_sha blob 取）。
     if kind == "bc":
         # BC manifest：免除 PPO 专有键（与 protocol.MANIFEST_BC_EXEMPT 同表），并入 extra
         for k in ("kl_coef", "kl_cap", "adv_norm", "normalize_ret", "kickstart_kl", "ent_coef"):
@@ -369,6 +399,8 @@ def publish_job(
         m.pop("ref_weights_fp", None)
         m.pop("opt_init", None)
         m.pop("schedule_raw", None)
+        for k in ("opt_sha", "ref_sha", "opt_bytes", "ref_bytes", "slim"):
+            m.pop(k, None)
         for k, v in (extra or {}).items():
             m[k] = v
     else:
@@ -393,6 +425,12 @@ def publish_job(
     zip_path = jd / PAYLOAD_NAME
     sha = pack_payload_zip(shard_dirs, extra_files, zip_path, m)
     m["payload_sha256"] = sha
+    # M2 B3：blob 落盘——pull worker 经 /jobs/{id}/blob 取；push 由 push_client 判缓存
+    # 后按需随 body 发送（读的就是这两个文件）。
+    if use_opt_blob:
+        blob_path(jd, BLOB_OPT).write_bytes(opt_raw)
+    if use_ref_blob:
+        blob_path(jd, BLOB_REF).write_bytes(ref_raw)
     m = normalize_manifest(m)
     (jd / "manifest.json").write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8")
     # 复制 code.zip 到 job 目录（hub-server 的 GET /jobs/{id}/code 从此目录服务）
@@ -427,24 +465,38 @@ def publish_job(
     return m
 
 
-def _pack_opt_init(ckpt_remote_dir: str | Path | None) -> str:
-    """上轮 ppo_ckpt_remote → base64 tar；空 = ""。
+def _opt_tar_bytes(ckpt_remote_dir: str | Path | None) -> bytes:
+    """上轮 ppo_ckpt_remote → raw tar bytes（model.pt + opt.pt，D5）；空 = b""。
 
-    H5（review-hy）：只打 model.pt + opt.pt（Adam 动量，D5）——state.json 的 numpy
-    RNG 状态无人读取（worker 按 per-job 种子重播），不往返死数据。"""
+    H5（review-hy）：不打 state.json（numpy RNG 无人读，worker 按 per-job 种子重播）。
+
+    M2：**优先读 `<ckpt>/../ppo_ckpt_remote.tar`**（verify_and_land 落盘的**原始
+    回传字节**）。只有原样字节的 sha256 才与云 worker 本地 blob_cache 的键一致 ——
+    重打 tar 会因 uid/gid/mtime 规范化差异导致 sha 漂移、每轮都缓存未命中（1.19MB
+    白传回来）。历史 run / 冷启动无该文件 → 从目录重打（可能未命中，走 blob 传一次）。
+    """
     if not ckpt_remote_dir:
-        return ""
+        return b""
     d = Path(ckpt_remote_dir)
+    tar_path = d.parent / (d.name + ".tar")
+    if tar_path.exists():
+        return tar_path.read_bytes()
     names = [n for n in ("model.pt", "opt.pt") if (d / n).exists()]
     if not names:
-        return ""
+        return b""
     import io
 
     buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:") as tf:
+    with tarfile.open(fileobj=buf, mode="w:") as tfb:
         for n in names:
-            tf.add(d / n, arcname=n)
-    return base64.b64encode(buf.getvalue()).decode("ascii")
+            tfb.add(d / n, arcname=n)
+    return buf.getvalue()
+
+
+def _pack_opt_init(ckpt_remote_dir: str | Path | None) -> str:
+    """上轮 ppo_ckpt_remote → **plain base64** tar（旧内联口径，slim=false 逐字节回退）。"""
+    raw = _opt_tar_bytes(ckpt_remote_dir)
+    return base64.b64encode(raw).decode("ascii") if raw else ""
 
 
 def _append_ledger(jsonl_path: str | Path, event: dict) -> None:
@@ -750,6 +802,13 @@ def verify_and_land(
     ckpt_dir = Path(traj_dir) / f"it{it}" / "ppo_ckpt_remote"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     _extract_tar(opt_tar, ckpt_dir)
+    # M2：把**原始回传字节**落盘（sibling `.tar`）——下一轮 publish 的 opt_sha 必须
+    # 由原样字节算出，才能等于云 worker blob_cache 的键（重打 tar 会 sha 漂移 ⇒ 每轮
+    # 未命中 ⇒ 1.19MB 白传回来）。写失败不阻断落位（只是退回重打路径）。
+    try:
+        (ckpt_dir.parent / "ppo_ckpt_remote.tar").write_bytes(opt_tar)
+    except OSError as e:
+        log(f"WARN: 原始 opt tar 落盘失败（{e}）——下一轮 opt_sha 将走重打路径")
     log(f"opt ckpt landed -> {ckpt_dir}")
     return wver
 

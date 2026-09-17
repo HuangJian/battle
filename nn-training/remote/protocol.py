@@ -103,7 +103,24 @@ MANIFEST_OPTIONAL_DEFAULTS: dict[str, object] = {
     # 严格样本量配额（target_transitions 路线）：训练侧逐关只收前 ceil(target/关数) 步。
     # 0 = 历史行为（全收）；缺失（旧 hub 产出的 manifest）= 0 ⇒ wire 兼容。
     "per_stage_quota": 0,
+    # ---- M2（plan/remote-wire-remediation §4.2）内容寻址 blob ----
+    #: raw（编码前）opt tar 的 sha256。有它时 `opt_init` 可为空——节点按 sha 去
+    #: blob_cache 取，未命中才下载。**必须进 OPTIONAL**（wire 兼容红线：缺失必填会
+    #: 把旧 hub/旧 worker 的 job 全部拒收）。
+    "opt_sha": "",
+    #: raw ref 权重的 sha256（= ref_weights_fp；同义别名，便于按名寻址）。
+    "ref_sha": "",
+    #: raw 字节数（预检/日志；0 = 未知）。
+    "opt_bytes": 0,
+    "ref_bytes": 0,
+    #: 本轮是否走瘦身路径（审计/A-B；False = 内联老字段，逐字节回到旧行为）。
+    "slim": False,
 }
+
+#: M2 blob 载荷名（pull 端点 `GET /jobs/{id}/blob?name=opt|ref`；push body `blobs`）。
+BLOB_OPT = "opt"
+BLOB_REF = "ref"
+BLOB_NAMES: tuple[str, ...] = (BLOB_OPT, BLOB_REF)
 
 
 class ProtocolError(ValueError):
@@ -271,6 +288,16 @@ PAYLOAD_LEGACY_NAMES: tuple[str, ...] = ("payload.zip",)
 PAYLOAD_XZ_PRESET: Literal[3] = 3
 
 
+def blob_path(job_dir: str | Path, name: str) -> Path:
+    """内容寻址 blob 在 job 目录内的落盘名（M2；hub 写、pull worker 取）。
+
+    `name` ∈ BLOB_NAMES（opt/ref）。raw 字节原样存（无 base64），sha 即键。
+    """
+    if name not in BLOB_NAMES:
+        raise ProtocolError(f"未知 blob 名 {name!r}（只接受 {BLOB_NAMES}）")
+    return Path(job_dir) / f"blob.{name}"
+
+
 def find_payload(job_dir: str | Path) -> Path | None:
     """定位 job 目录下的 payload（优先新名 tar.xz，回退旧名 zip）——新旧互通。"""
     jd = Path(job_dir)
@@ -324,7 +351,10 @@ def pack_payload(shard_dirs: list[str | Path], manifest: dict, out_path: str | P
             for f in sorted(p.iterdir()):
                 if f.is_file():
                     tf.add(f, arcname=f"{p.name}/{f.name}")
-        _add_bytes(tf, "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2).encode())
+        # M2（B1）：不再写根级占位 manifest.json —— worker.py:896 一直把它当
+        # `_unused_manifest` 丢弃（~0.89MB/轮纯冗余）。权威 manifest 走 job 记录
+        # （/jobs/next 返回），本函数只负责搬运 shard 数据。`manifest` 形参保留
+        # 只为调用方签名兼容（不再进字节）。
     tmp.replace(zpath)
     return hashlib.sha256(zpath.read_bytes()).hexdigest()
 
@@ -340,9 +370,14 @@ def unpack_payload(payload_path: str | Path, dest: str | Path) -> tuple[dict, li
     dest_p = Path(dest)
     dest_p.mkdir(parents=True, exist_ok=True)
     _extract_archive(Path(payload_path), dest_p)
+    # M2（B1）：新 hub 产的 payload 不含根级 manifest.json（占位副本已删）——
+    # 有则读、无则返回 {}（旧 payload 仍兼容；权威校验全走 job 记录 manifest）。
     mp = dest_p / "manifest.json"
-    with open(mp, encoding="utf-8") as f:
-        manifest = json.load(f)
+    if mp.exists():
+        with open(mp, encoding="utf-8") as f:
+            manifest = json.load(f)
+    else:
+        manifest = {}
     shard_dirs: list[str] = []
     for p in sorted(dest_p.iterdir()):
         if p.is_dir() and (p / "manifest.json").exists():
@@ -473,6 +508,85 @@ WIRE_V2_MAGIC = b"BRV2\n"
 WIRE_V2_CONTENT_TYPE = "application/x-battle-result-v2"
 BLOB_FIELDS: tuple[str, ...] = ("weights_json", "opt_tar_b64")
 _HDR_LEN_BYTES = 4
+
+
+# ---- /job 提交体的 v2 线格式（M2 B5：payload/code/blob 去 base64，省 25%）----
+# 布局:  MAGIC(5) | uint32 BE header_len | header_json | payload | [code] | blob0 | ...
+# header = {"manifest": m, "has_code": bool, "blob_names": [...], "lens": [payload, code?, *blobs]}
+# 动机：push body 原为 JSON + `payload_b64`（base64 白占 33%）。拆成裸二进制后
+# 1.6MB → 1.2MB。解析端保留 JSON 退路（旧节点/旧 hub 混跑时降级）。
+WIRE_JOB_MAGIC = b"BRJ2\n"
+WIRE_JOB_CONTENT_TYPE = "application/x-battle-job-v2"
+
+
+def pack_job_v2(
+    manifest: dict, payload: bytes, code: bytes | None, blobs: dict[str, bytes] | None = None
+) -> bytes:
+    """job 提交体 → v2（payload/code/blob 走裸二进制段）。blobs 按名字典序。"""
+    bl = dict(blobs or {})
+    names = sorted(bl)
+    lens = [len(payload)]
+    if code is not None:
+        lens.append(len(code))
+    lens.extend(len(bl[n]) for n in names)
+    hdr = json.dumps(
+        {"manifest": manifest, "has_code": code is not None, "blob_names": names, "lens": lens},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    parts = [WIRE_JOB_MAGIC, struct.pack(">I", len(hdr)), hdr, payload]
+    if code is not None:
+        parts.append(code)
+    parts.extend(bl[n] for n in names)
+    return b"".join(parts)
+
+
+def unpack_job_v2(body: bytes) -> dict:
+    """v2 job 体 → 旧 JSON 形状的 dict（payload_b64/code_b64/blobs）——服务端零下游改动。
+
+    任何长度不符/尾部余料都响亮拒绝，不静默截断（同 unpack_result_v2 规矩）。
+    """
+    if not body.startswith(WIRE_JOB_MAGIC):
+        raise ProtocolError("v2 job 体缺 BRJ2 魔数")
+    off = len(WIRE_JOB_MAGIC)
+    (hdr_len,) = struct.unpack(">I", body[off : off + _HDR_LEN_BYTES])
+    off += _HDR_LEN_BYTES
+    try:
+        hdr = json.loads(body[off : off + hdr_len].decode("utf-8"))
+        manifest: dict = hdr["manifest"]
+        has_code: bool = bool(hdr["has_code"])
+        names: list = hdr["blob_names"]
+        lens: list = hdr["lens"]
+    except (KeyError, ValueError, UnicodeDecodeError) as e:
+        raise ProtocolError(f"v2 job 头解析失败: {e}") from None
+    off += hdr_len
+    expected = 1 + (1 if has_code else 0) + len(names)
+    if len(lens) != expected:
+        raise ProtocolError(f"v2 job lens 长度 {len(lens)} != {expected}")
+    out: dict = {"manifest": manifest}
+
+    def _chunk(n: int, what: str) -> bytes:
+        nonlocal off
+        blob = body[off : off + n]
+        if len(blob) != n:
+            raise ProtocolError(f"v2 job 体截断：{what} 期望 {n} 字节，实得 {len(blob)}")
+        off += n
+        return blob
+
+    out["payload_b64"] = base64.b64encode(_chunk(int(lens[0]), "payload")).decode("ascii")
+    i = 1
+    if has_code:
+        out["code_b64"] = base64.b64encode(_chunk(int(lens[i]), "code")).decode("ascii")
+        i += 1
+    if names:
+        bm: dict = {}
+        for name in names:
+            bm[str(name)] = base64.b64encode(_chunk(int(lens[i]), f"blob {name}")).decode("ascii")
+            i += 1
+        out["blobs"] = bm
+    if off != len(body):
+        raise ProtocolError(f"v2 job 体尾部有 {len(body) - off} 字节多余数据")
+    return out
 
 
 def pack_result_v2(result: dict) -> bytes:

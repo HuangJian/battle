@@ -469,6 +469,15 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         "预采（stale 上限 30%，超量下轮现场重采）",
     )
     ap.add_argument(
+        "--remote-slim",
+        type=int,
+        default=_d("slim", 1),
+        choices=(0, 1),
+        help="远程 PPO 协议瘦身（M2）：1=opt/ref 走内容寻址 blob（**默认**，上行字节"
+        " ~4.43MB → ~1.2MB）；0=逐字节回到旧行为（内联 base64 + payload 内冗余文件）。"
+        "回退开关，取值进 iteration 事件的 wire.slim（A/B 归因用）",
+    )
+    ap.add_argument(
         "--remote-degrade-after",
         type=int,
         default=_d("remote_degrade_after", 0),

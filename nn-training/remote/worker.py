@@ -32,6 +32,8 @@ from typing import Any
 
 from remote.protocol import (
     AUTH_HEADER,
+    BLOB_OPT,
+    BLOB_REF,
     HEARTBEAT_SEC,
     PAYLOAD_NAME,
     WIRE_V2_CONTENT_TYPE,
@@ -205,6 +207,91 @@ def download_code(
     )
 
 
+def download_blob(
+    base_url: str,
+    token: str,
+    jid: str,
+    name: str,
+    *,
+    attempts: int = 3,
+    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+) -> bytes:
+    """M2 B3：取内容寻址 blob（raw opt/ref）。404 = 确定性缺失（响亮失败，非静默降级）。"""
+    return _get_with_retry(
+        base_url,
+        token,
+        f"/jobs/{jid}/blob?name={name}",
+        timeout=300.0,
+        attempts=attempts,
+        log=log,
+    )
+
+
+def _cache_blob(blob_root: Path, sha: str, raw: bytes, log) -> None:
+    """把 raw blob 写入 `blob_cache/<sha>`（原子改名；写失败只记日志）。"""
+    if not sha or not raw:
+        return
+    try:
+        blob_root.mkdir(parents=True, exist_ok=True)
+        p = blob_root / sha
+        if p.exists():
+            return
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_bytes(raw)
+        tmp.replace(p)
+    except OSError as e:
+        log(f"blob cache 写失败（{e}）——下一轮将重传该 blob")
+
+
+def _resolve_blob(
+    *,
+    blob_root: Path,
+    name: str,
+    sha: str,
+    inline_b64: str,
+    jid: str,
+    base_url: str,
+    token: str,
+    preloaded: dict | None,
+    log,
+) -> tuple[bytes, bool, str]:
+    """解析一个 M2 blob → (raw, hit, src)；src ∈ cache|preloaded|download|inline|none。
+
+    安全阀（plan §4.3）：`sha` 非空时**只认内容寻址路径** —— 缓存命中 / preloaded /
+    HTTP 取，任一校验不过就响亮失败（RetryableError/ProtocolError）；**绝不**退回
+    内联或 warm-start（那会静默把 D5 的 Adam 动量丢掉）。`sha` 为空 = 未开瘦身/
+    旧 hub，走内联（内联也空则返回 none，由调用方决定策略）。
+    """
+    import hashlib as _hl
+
+    if sha:
+        cp = blob_root / sha
+        if cp.exists():
+            raw = cp.read_bytes()
+            if _hl.sha256(raw).hexdigest() == sha:
+                return raw, True, "cache"
+            log(f"blob {name}: cache 命中但 sha 不符（损坏）——重新取")
+        pl = (preloaded or {}).get("blobs") or {}
+        if name in pl:
+            raw = pl[name]
+            src = "preloaded"
+        else:
+            raw = download_blob(base_url, token, jid, name, log=log)
+            src = "download"
+        if _hl.sha256(raw).hexdigest() != sha:
+            # 传输损坏 = 瞬时（同 payload_sha256 口径）：重下可修复
+            raise RetryableError(f"blob {name} sha 不匹配——传输损坏（重下可修复）")
+        _cache_blob(blob_root, sha, raw, log)
+        return raw, False, src
+    if name == BLOB_OPT and inline_b64:
+        return decode_opt_tar(inline_b64), True, "inline"
+    if name == BLOB_REF and inline_b64:
+        import base64 as _b64
+
+        return _b64.b64decode(inline_b64.encode("ascii")), True, "inline"
+    return b"", False, "none"
+
+
 def post_result(
     base_url: str,
     token: str,
@@ -352,14 +439,14 @@ HOT_RELOAD_EXIT = 86
 def prune_job_dirs(work_dir: Path, keep: int = JOB_DIR_KEEP, log=lambda msg: None) -> int:
     """按 mtime 保留最近 `keep` 个 job 目录，其余删除。返回删除个数。
 
-    只动 work_dir 下的 job 目录（按 jid 命名），**跳过 code_cache**（按 sha 内容寻址，
-    命中即省一次下载）。删除失败（占用/沙箱保护）跳过，不抛。
+    只动 work_dir 下的 job 目录（按 jid 命名），**跳过 code_cache / blob_cache**
+    （按 sha 内容寻址，命中即省一次下载/上传）。删除失败（占用/沙箱保护）跳过，不抛。
     """
     try:
         dirs = [
             d
             for d in work_dir.iterdir()
-            if d.is_dir() and d.name != "code_cache"
+            if d.is_dir() and d.name not in ("code_cache", "blob_cache")
         ]
     except OSError:
         return 0
@@ -926,6 +1013,8 @@ def run_job(
     # 多课程共享 worker（P3b C3）：code_cache 留共享根（按 sha 内容寻址，跨课复用），
     # 只有 job 目录按源分区——调用方经 code_cache_dir 传入共享根。
     code_root = code_cache_dir if code_cache_dir is not None else work_dir / "code_cache"
+    #: M2 B3 blob 缓存根（跨课共享，同 code_cache 约定；键 = raw sha256）。
+    blob_root = code_root.parent / "blob_cache"
     code_cache_dir = code_root / manifest["code_sha256"]
     if code_cache_dir.exists():
         sys.path.insert(0, str(code_cache_dir))
@@ -1115,11 +1204,11 @@ def run_job(
     # hub 侧免 torch（D2）：模型权重/opt 由 tar 或 weights_json 提供，worker 负责
     # 重建——tar 内 model.pt = 上一轮 PPO 终态（含 Adam 动量，D5）。
     init_w = job_dir / "init_weights.json"
-    if not init_w.exists():
-        raise ProtocolError("payload 缺 init_weights.json——无法构建模型")
     # 标注为 torch.nn.Module（而非推断出的 PPOStudent）：多卡分支要把 model 换成
     # DataParallel，且下游 save_weights_json / load_state_into 收的就是 Module。
-    model: torch.nn.Module = ppo_engine.build_ppo(str(init_w))
+    # M2（B4）：有 opt blob 时 payload 不再带 init_weights.json（model+Adam 都在 opt
+    # tar 里）——build_ppo 只借它读 arch，缺文件走默认（per-tick 固定 64/8/128）。
+    model: torch.nn.Module = ppo_engine.build_ppo(str(init_w) if init_w.exists() else None)
     # 设备解析（2026-09-10 TPU 接力）：--device tpu/xla 走 torch_xla 的 xla_device()，
     # 而不是 torch.device("xla")——后者在部分 torch_xla 版本上拿不到带序号的设备句柄。
     # torch_xla 只在真的选了 TPU 时才 import（未装 torch_xla 的机器行为不变）。
@@ -1143,12 +1232,38 @@ def run_job(
         # 上一版只把分派条件换成 dev_str，这里仍写 `torch.device(device)`，
         # 于是 auto 照样被喂进 torch.device（日志上「兜底为 cuda」打了、job 仍炸 auto）。
         device_t = torch.device(dev_str)
+    # ---- M2 B3：opt 内容寻址解析（cache / preloaded / download / inline）----
+    # 安全阀（plan §4.3）：opt_sha 存在而 blob 不可得 → 响亮失败，绝不静默 warm-start
+    # （那会把 D5 的 Adam 动量悄悄归零，日志上却一切正常）。
+    opt_sha = str(manifest.get("opt_sha", "") or "")
+    blob_hits = 0
+    blob_miss_bytes = 0
+    opt_raw, opt_hit, opt_src = _resolve_blob(
+        blob_root=blob_root,
+        name=BLOB_OPT,
+        sha=opt_sha,
+        inline_b64=str(manifest.get("opt_init", "") or ""),
+        jid=jid,
+        base_url=base_url,
+        token=token,
+        preloaded=preloaded,
+        log=log,
+    )
+    if opt_hit and opt_src == "cache":
+        blob_hits += 1
+    if opt_src == "download":
+        blob_miss_bytes += len(opt_raw)
+    if opt_sha and not opt_raw:
+        raise ProtocolError(
+            f"job {jid}: opt_sha={opt_sha[:12]}… 存在但 blob 不可得——拒收"
+            "（不许静默退回 warm-start，D5）"
+        )
     opt = None
     opt_restore_sec = 0.0
-    if manifest.get("opt_init"):
+    if opt_raw:
         t_opt = time.time()
         opt_dir = job_dir / "opt_init"
-        unpack_opt_tar(decode_opt_tar(str(manifest["opt_init"])), opt_dir)
+        unpack_opt_tar(opt_raw, opt_dir)
         # 必须在 model.to(device_t) 之前加载 state_dict，然后统一移到目标设备
         model.load_state_dict(torch.load(opt_dir / "model.pt", map_location="cpu"))
         model.to(device_t)
@@ -1158,9 +1273,11 @@ def run_job(
         # device_t 在 XLA 上会走 torch.load 的设备 hook，跨 runtime 不稳）。
         opt.load_state_dict(torch.load(opt_dir / "opt.pt", map_location="cpu"))
         opt_restore_sec = round(time.time() - t_opt, 3)
-        log(f"job {jid}: model/opt 从 opt_init tar 恢复（Adam 动量延续，D5）")
+        log(f"job {jid}: model/opt 从 opt_init（{opt_src}）恢复（Adam 动量延续，D5）")
     else:
         # 首轮/无 tar：从 init 权重 warm-start（hub 打包时写入 payload 的 weights_json）
+        if not init_w.exists():
+            raise ProtocolError("payload 缺 init_weights.json 且无 opt_init/blob——无法构建模型")
         load_state_into(model, str(init_w))
         model.to(device_t)
         opt = torch.optim.Adam(model.parameters(), lr=float(manifest["lr"]))
@@ -1199,16 +1316,31 @@ def run_job(
         kick_kl = 0.0
     ref_model: torch.nn.Module | None = None
     if kick_kl > 0:
-        import base64 as _b64
         import hashlib as _hl
 
+        ref_sha = str(manifest.get("ref_sha", "") or "")
         ref_b64 = str(manifest.get("ref_weights_b64", "") or "")
         ref_fp = str(manifest.get("ref_weights_fp", "") or "")
-        if not ref_b64:
+        # M2 B3：ref 也走内容寻址（ref_sha = sha256(raw 权重) = ref_weights_fp）。
+        ref_raw, ref_hit, ref_src = _resolve_blob(
+            blob_root=blob_root,
+            name=BLOB_REF,
+            sha=ref_sha,
+            inline_b64=ref_b64,
+            jid=jid,
+            base_url=base_url,
+            token=token,
+            preloaded=preloaded,
+            log=log,
+        )
+        if not ref_raw:
             raise ProtocolError(f"job {jid}: kickstart_kl={kick_kl} 但无 ref_weights——拒收")
-        ref_raw = _b64.b64decode(ref_b64.encode("ascii"))
-        if _hl.sha256(ref_raw).hexdigest() != ref_fp:
+        if ref_fp and _hl.sha256(ref_raw).hexdigest() != ref_fp:
             raise ProtocolError(f"job {jid}: ref_weights 指纹不符——拒收")
+        if ref_hit and ref_src == "cache":
+            blob_hits += 1
+        if ref_src == "download":
+            blob_miss_bytes += len(ref_raw)
         ref_path = job_dir / "ref_weights.json"
         ref_path.write_bytes(ref_raw)
         ref_model = ppo_engine.build_ppo(str(ref_path))
@@ -1271,7 +1403,11 @@ def run_job(
     save_weights_json(raw_model, str(wj_path))
     ckpt_dir = job_dir / "ppo_final"
     _ppo_save(str(ckpt_dir), raw_model, opt, int(manifest["epochs"]))
-    opt_tar_b64 = encode_opt_tar(pack_opt_tar(ckpt_dir))
+    opt_tar_raw = pack_opt_tar(ckpt_dir)
+    opt_tar_b64 = encode_opt_tar(opt_tar_raw)
+    # M2 B3：把刚产出的 raw opt tar 写进 blob_cache（键 = sha256）——下一轮 hub 的
+    # opt_sha 由 verify_and_land 落盘的同一份原始字节算出，故同会话内 100% 命中。
+    _cache_blob(blob_root, hashlib.sha256(opt_tar_raw).hexdigest(), opt_tar_raw, log)
 
     result = {
         "job_id": jid,
@@ -1298,6 +1434,8 @@ def run_job(
         unpack_sec=unpack_sec,
         opt_restore_sec=opt_restore_sec,
         grad_sec=ppo_sec,
+        blob_hits=blob_hits,
+        blob_miss_bytes=blob_miss_bytes,
     )
     # 两遍收敛（同 echo 路径）：result_bytes 与自身体长自指，一遍差它的十进制位数。
     result["wire"]["result_bytes"] = len(pack_result_v2(result))

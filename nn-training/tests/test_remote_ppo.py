@@ -39,12 +39,17 @@ if str(ROOT) not in sys.path:
 from remote.hub_server import _JobStore, make_server
 from remote.protocol import (
     AUTH_HEADER,
+    BLOB_OPT,
+    BLOB_REF,
     LEASE_SEC,
     MANIFEST_REQUIRED,
     PAYLOAD_NAME,
+    WIRE_JOB_CONTENT_TYPE,
+    WIRE_JOB_MAGIC,
     WIRE_V2_CONTENT_TYPE,
     WIRE_V2_MAGIC,
     ProtocolError,
+    blob_path,
     data_fp,
     decode_opt_tar,
     decode_weights_json,
@@ -54,8 +59,10 @@ from remote.protocol import (
     idempotency_key,
     job_seed,
     normalize_manifest,
+    pack_job_v2,
     pack_payload,
     pack_result_v2,
+    unpack_job_v2,
     unpack_payload,
     unpack_result_v2,
     validate_result,
@@ -222,6 +229,56 @@ def test_result_v2_rejects_truncated_or_padded_body() -> None:
         raise AssertionError("缺魔数未被拒绝")
 
 
+def test_job_v2_wire_roundtrip_and_size() -> None:
+    """M2 B5：/job 体走 v2（payload/code/blob 裸二进制段）—— 逐字段回旧 JSON 形状，
+    省掉 base64 的 33%，且魔数不与旧 JSON 体互认。"""
+    manifest = normalize_manifest(_mini_manifest())
+    payload = b"PK\x03\x04" + bytes(range(256)) * 40
+    code = b"zip-code-bytes" * 20
+    blobs = {"opt": b"\x00\x01" * 5000, "ref": b"ref-weights" * 100}
+    json_body = json.dumps(
+        {
+            "manifest": manifest,
+            "payload_b64": base64.b64encode(payload).decode("ascii"),
+            "code_b64": base64.b64encode(code).decode("ascii"),
+            "blobs": {k: base64.b64encode(v).decode("ascii") for k, v in blobs.items()},
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    v2 = pack_job_v2(manifest, payload, code, blobs)
+    got = unpack_job_v2(v2)
+    assert got["manifest"] == manifest
+    assert base64.b64decode(got["payload_b64"]) == payload
+    assert base64.b64decode(got["code_b64"]) == code
+    assert set(got["blobs"]) == {"opt", "ref"}
+    assert base64.b64decode(got["blobs"]["opt"]) == blobs["opt"]
+    # 真省：base64 膨胀都在 payload/code/blob 上，v2 远小于 JSON 体
+    assert len(v2) < len(json_body) * 0.8, f"v2 {len(v2)} 未显著小于 JSON 体 {len(json_body)}"
+    assert v2.startswith(WIRE_JOB_MAGIC)
+    assert not json_body.startswith(WIRE_JOB_MAGIC)
+    assert WIRE_JOB_CONTENT_TYPE.endswith("job-v2")
+    # 无 code / 无 blob 的退化形态也要能往返（blob 缺省 = 空）
+    bare = unpack_job_v2(pack_job_v2(manifest, payload, None))
+    assert "code_b64" not in bare and "blobs" not in bare
+    assert base64.b64decode(bare["payload_b64"]) == payload
+
+
+def test_job_v2_rejects_truncated_or_padded_body() -> None:
+    """v2 job 体同样**响亮拒绝**截断/尾部余料/缺魔数——绝不让残缺 job 静默通过。"""
+    manifest = normalize_manifest(_mini_manifest())
+    v2 = pack_job_v2(manifest, b"p" * 64, b"c" * 16, {"opt": b"o" * 32})
+    for bad, why in (
+        (v2[:-7], "截断"),
+        (v2 + b"extra-tail", "尾部余料"),
+        (b"NOT_BRJ2" + v2[len(WIRE_JOB_MAGIC) :], "缺魔数"),
+    ):
+        try:
+            unpack_job_v2(bad)
+        except ProtocolError:
+            continue
+        raise AssertionError(f"{why} 未被拒绝")
+
+
 def test_manifest_normalize_required_and_defaults() -> None:
     m = normalize_manifest(_mini_manifest())
     for k in MANIFEST_REQUIRED:
@@ -321,10 +378,11 @@ def test_pack_unpack_payload_roundtrip(tmp_path: Path) -> None:
     zip_path = tmp_path / "payload.zip"
     sha = pack_payload([shard_dir], m, zip_path)
     assert sha == hashlib.sha256(zip_path.read_bytes()).hexdigest()
-    # 解包：shard 目录 + 根 manifest
+    # 解包（M2 B1）：新 payload **不再含**根级占位 manifest.json —— 返回 {}，
+    # 权威校验全走 job 记录；这里断言 shard 目录齐全。
     dest = tmp_path / "out"
     manifest, shard_dirs = unpack_payload(zip_path, dest)
-    assert manifest["job_id"] == m["job_id"]
+    assert manifest == {}, "新 hub 产 payload 不应再带占位 manifest.json（M2 B1）"
     assert [Path(d).name for d in shard_dirs] == ["rl_s1_seed10"]
     assert (dest / "rl_s1_seed10" / "obs.npy").exists()
 
@@ -878,6 +936,213 @@ def test_hub_wire_stats_recorded(tmp_path: Path) -> None:
     finally:
         srv.shutdown()
         th.join(timeout=5)
+
+
+# ------------------------------------------------------------------ M2 协议瘦身
+
+
+def test_manifest_m2_fields_optional() -> None:
+    """M2：opt_sha/ref_sha/slim/opt_bytes 是**可选**字段（旧 hub/旧 worker 的 job
+    不得因缺它们被拒收）——进 MANIFEST_OPTIONAL_DEFAULTS 而非 REQUIRED。"""
+    m = normalize_manifest(_mini_manifest())
+    assert m["opt_sha"] == "" and m["ref_sha"] == "" and m["slim"] is False
+    m2 = normalize_manifest(_mini_manifest(opt_sha="a" * 64, ref_sha="b" * 64, slim=True, opt_bytes=5))
+    assert m2["opt_sha"] == "a" * 64 and m2["slim"] is True and m2["opt_bytes"] == 5
+    for k in ("opt_sha", "ref_sha", "slim", "opt_bytes", "ref_bytes"):
+        assert k not in MANIFEST_REQUIRED
+
+
+def test_publish_job_slim_blob_and_payload_diet(tmp_path: Path) -> None:
+    """M2：slim=True → payload 去冗余文件；opt/ref 只留 sha；blob 落盘（pull 端点源）。"""
+    import tarfile as _tar
+
+    from remote.hub_client import _opt_tar_bytes, publish_job
+
+    shard_dir = tmp_path / "rl_s1_seed10"
+    _write_shard(shard_dir, 1, 10)
+    init_w = tmp_path / "init_weights.json"
+    init_w.write_bytes(b'{"meta": 1}')
+    ckpt = tmp_path / "it1" / "ppo_ckpt_remote"
+    ckpt.mkdir(parents=True)
+    (ckpt / "model.pt").write_bytes(b"model-bytes")
+    (ckpt / "opt.pt").write_bytes(b"opt-bytes")
+    opt_raw = _opt_tar_bytes(ckpt)
+    opt_sha = hashlib.sha256(opt_raw).hexdigest()
+    ref_raw = b"ref-bytes"
+    ref_fp = hashlib.sha256(ref_raw).hexdigest()
+
+    jroot = tmp_path / "jobs"
+    m = publish_job(
+        job_root=jroot,
+        jsonl_path=tmp_path / "log.jsonl",
+        run_id="r",
+        it=2,
+        traj_dir=str(tmp_path / "traj"),
+        shard_dirs=[shard_dir],
+        commit="c" * 40,
+        code_sha256="z" * 64,
+        course="{}",
+        course_fp="f" * 64,
+        reward_formula="score",
+        formula_hash="h" * 40,
+        metrics_version=1,
+        gamma=0.995,
+        lam=0.95,
+        mode="per-tick",
+        epochs=1,
+        mb=8,
+        lr=3e-4,
+        init_weights_path=str(init_w),
+        ckpt_remote_dir=str(ckpt),
+        ref_weights_b64=base64.b64encode(ref_raw).decode("ascii"),
+        ref_weights_fp=ref_fp,
+        slim=True,
+        log=lambda _m: None,
+    )
+    jid = str(m["job_id"])
+    jd = jroot / jid
+    assert m["slim"] is True
+    assert m["opt_sha"] == opt_sha and m["opt_init"] == ""
+    assert m["ref_sha"] == ref_fp and m["ref_weights_b64"] == ""
+    assert m["opt_bytes"] == len(opt_raw)
+    assert blob_path(jd, BLOB_OPT).read_bytes() == opt_raw
+    assert blob_path(jd, BLOB_REF).read_bytes() == ref_raw
+    with _tar.open(jd / PAYLOAD_NAME, "r:*") as tf:
+        names = set(tf.getnames())
+    assert "manifest.json" not in names, "B1：不再打占位 manifest.json"
+    assert "opt_init.tar.b64" not in names, "B2：不再打 opt_init.tar.b64"
+    assert "init_weights.json" not in names, "B4：有 opt blob 时不再带 init_weights"
+    assert "rl_s1_seed10/obs.npy" in names
+
+
+def test_publish_job_slim_off_restores_legacy_inline(tmp_path: Path) -> None:
+    """M2 回退（A/B 对照臂）：slim=False → 内联 base64 + payload 带 init_weights.json，
+    manifest 无 opt_sha/ref_sha（逐字节旧行为）。"""
+    import tarfile as _tar
+
+    from remote.hub_client import _opt_tar_bytes, publish_job
+
+    shard_dir = tmp_path / "rl_s1_seed10"
+    _write_shard(shard_dir, 1, 10)
+    init_w = tmp_path / "init_weights.json"
+    init_w.write_bytes(b'{"meta": 1}')
+    ckpt = tmp_path / "it1" / "ppo_ckpt_remote"
+    ckpt.mkdir(parents=True)
+    (ckpt / "model.pt").write_bytes(b"model-bytes")
+    (ckpt / "opt.pt").write_bytes(b"opt-bytes")
+    opt_raw = _opt_tar_bytes(ckpt)
+    ref_raw = b"ref-bytes"
+
+    jroot = tmp_path / "jobs"
+    m = publish_job(
+        job_root=jroot,
+        jsonl_path=tmp_path / "log.jsonl",
+        run_id="r",
+        it=2,
+        traj_dir=str(tmp_path / "traj"),
+        shard_dirs=[shard_dir],
+        commit="c" * 40,
+        code_sha256="z" * 64,
+        course="{}",
+        course_fp="f" * 64,
+        reward_formula="score",
+        formula_hash="h" * 40,
+        metrics_version=1,
+        gamma=0.995,
+        lam=0.95,
+        mode="per-tick",
+        epochs=1,
+        mb=8,
+        lr=3e-4,
+        init_weights_path=str(init_w),
+        ckpt_remote_dir=str(ckpt),
+        ref_weights_b64=base64.b64encode(ref_raw).decode("ascii"),
+        ref_weights_fp=hashlib.sha256(ref_raw).hexdigest(),
+        slim=False,
+        log=lambda _m: None,
+    )
+    jid = str(m["job_id"])
+    jd = jroot / jid
+    assert m["slim"] is False and m["opt_sha"] == "" and m["ref_sha"] == ""
+    assert m["opt_init"] == base64.b64encode(opt_raw).decode("ascii")
+    assert m["ref_weights_b64"] != ""
+    assert not blob_path(jd, BLOB_OPT).exists()
+    with _tar.open(jd / PAYLOAD_NAME, "r:*") as tf:
+        names = set(tf.getnames())
+    assert "init_weights.json" in names
+    assert "manifest.json" not in names  # B1 独立于 slim（payload 占位manifest一律不打）
+
+
+def test_hub_blob_endpoint(tmp_path: Path) -> None:
+    """M2 B3：GET /jobs/{id}/blob?name=opt|ref —— 命中回 raw，未知名 400，缺失 404。"""
+    base, store, srv, th = _boot_server(tmp_path)
+    try:
+        manifest = normalize_manifest(_mini_manifest())
+        jid = manifest["job_id"]
+        store.publish(jid, manifest, b"PK\x03\x04fake")
+        blob_path(store._job_dir(jid), BLOB_OPT).write_bytes(b"optraw")
+        st, got = _http_raw(base, "sekret", f"/jobs/{jid}/blob?name=opt")
+        assert st == 200 and got == b"optraw"
+        st2, _ = _http_raw(base, "sekret", f"/jobs/{jid}/blob?name=nope")
+        assert st2 == 400
+        st3, _ = _http_raw(base, "sekret", f"/jobs/{jid}/blob?name=ref")
+        assert st3 == 404
+    finally:
+        srv.shutdown()
+        th.join(timeout=5)
+
+
+def test_resolve_blob_safety_valve_and_inline_fallback(tmp_path: Path, monkeypatch) -> None:
+    """M2 §4.3 安全阀：manifest 带 sha + 节点无缓存 + blob 404 ⇒ 响亮失败（ProtocolError），
+    **绝不**静默退回 warm-start（D5）；无 sha（未开瘦身）才走 inline 旧路径。"""
+    root = tmp_path / "blob_cache"
+
+    def _missing(*_a, **_k):
+        raise ProtocolError("blob opt: HTTP 404")
+
+    monkeypatch.setattr(worker_mod, "download_blob", _missing)
+    with pytest.raises(ProtocolError):
+        worker_mod._resolve_blob(
+            blob_root=root,
+            name=BLOB_OPT,
+            sha="a" * 64,
+            inline_b64="",
+            jid="j",
+            base_url="http://hub",
+            token="t",
+            preloaded=None,
+            log=lambda _m: None,
+        )
+    # 无 sha = 未开瘦身 → 内联解析（旧行为不变）
+    raw, hit, src = worker_mod._resolve_blob(
+        blob_root=root,
+        name=BLOB_OPT,
+        sha="",
+        inline_b64=encode_opt_tar(b"raw-payload"),
+        jid="j",
+        base_url="http://hub",
+        token="t",
+        preloaded=None,
+        log=lambda _m: None,
+    )
+    assert src == "inline" and raw == b"raw-payload"
+
+
+def test_resolve_blob_sha_mismatch_is_retryable(tmp_path: Path, monkeypatch) -> None:
+    """M2：blob 取回字节 sha 不符 = 传输损坏 → RetryableError（重下可修复），非静默接受。"""
+    monkeypatch.setattr(worker_mod, "download_blob", lambda *_a, **_k: b"wrong-bytes")
+    with pytest.raises(RetryableError):
+        worker_mod._resolve_blob(
+            blob_root=tmp_path / "blob_cache",
+            name=BLOB_REF,
+            sha="b" * 64,
+            inline_b64="",
+            jid="j",
+            base_url="http://hub",
+            token="t",
+            preloaded=None,
+            log=lambda _m: None,
+        )
 
 
 def test_hub_server_auth_and_job_lifecycle(tmp_path: Path) -> None:

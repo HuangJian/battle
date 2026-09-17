@@ -163,10 +163,14 @@ def _push_job_round(
     args: Any,
     timeout_sec: float,
     log: Any,
+    blobs: dict | None = None,
 ) -> dict:
     """按序向 push 节点提交 job 并等待结果；单节点失败换下一个，全部失败抛
     RetryableError（loop 原地重试同迭代）。--smoke 经 X-Smoke-Echo 头触发节点侧
-    冒烟回显（不跑 PPO，结果带 smoke 标记 → 共享尾部作废本轮）。"""
+    冒烟回显（不跑 PPO，结果带 smoke 标记 → 共享尾部作废本轮）。
+
+    blobs（M2 B3）：opt/ref raw 字节（读自 job 目录）——push_client 判节点缓存命中，
+    只传未命中的那些。"""
     last: Exception | None = None
     for node in nodes:
         url, key = node["url"], node.get("authKey", "")
@@ -178,6 +182,7 @@ def _push_job_round(
                 manifest,
                 payload_bytes,
                 code_bytes,
+                blobs=blobs,
                 echo=bool(getattr(args, "smoke", False)),
                 log=log,
             )
@@ -958,6 +963,8 @@ class TrainingSteps:
         self._forensics(f"remote_pre_publish it{it}")
         # M0：打包（tar.xz + 编码）/ 落盘墙钟——iteration 事件的 wire.pack_sec。
         t_pack = time.time()
+        # M2：协议瘦身开关（rl.slim / --remote-slim；默认开）。关 → 逐字节旧行为。
+        slim = bool(int(getattr(args, "remote_slim", 1) or 0))
         manifest = publish_job(
             job_root=job_root,
             jsonl_path=str(self._jsonl_path),
@@ -997,6 +1004,9 @@ class TrainingSteps:
             # 严格样本量配额（target_transitions 路线）：与 _serial_ppo 同一个来源，
             # 保证 remote 与本机两条 PPO 路径装载口径一致。0 = 全收（历史行为）。
             per_stage_quota=self._per_stage_quota(),
+            # M2：瘦身开关 + 冒烟轮强制带 init_weights.json（echo 回显要用）。
+            slim=slim,
+            keep_init_weights=bool(getattr(args, "smoke", False)),
             log=log,
         )
         jid = manifest["job_id"]
@@ -1034,8 +1044,24 @@ class TrainingSteps:
                 raise ProtocolError(f"job {jid}: payload 不在盘上（push 无法发送）")
             payload_bytes = _pl.read_bytes()
             code_bytes = self._code_zip_path.read_bytes()
+            # M2 B3：读 job 目录内的 opt/ref blob，交给 push_client 按节点缓存按需发送。
+            from remote.protocol import BLOB_NAMES, blob_path
+
+            blobs = {
+                n: _bp.read_bytes()
+                for n in BLOB_NAMES
+                if (_bp := blob_path(Path(job_root) / jid, n)).exists()
+            }
             result = _push_job_round(
-                gpu_nodes, manifest, jid, payload_bytes, code_bytes, args, timeout_sec, log
+                gpu_nodes,
+                manifest,
+                jid,
+                payload_bytes,
+                code_bytes,
+                args,
+                timeout_sec,
+                log,
+                blobs=blobs,
             )
         else:
             result = wait_job(hub_url, token, jid, timeout_sec=timeout_sec, log=log)
@@ -1091,7 +1117,7 @@ class TrainingSteps:
             cfg={
                 "protocol": getattr(args, "remote_cf_protocol", None),
                 "edge_ip": str(getattr(args, "remote_cf_edge_ip", "") or "") or None,
-                "slim": getattr(args, "remote_slim", None),
+                "slim": bool(int(getattr(args, "remote_slim", 1) or 0)),
                 "rollout_src": str(getattr(args, "rollout_src", "local") or "local"),
             },
         )

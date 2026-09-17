@@ -36,7 +36,13 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from remote._port_guard import ensure_port_free
-from remote.protocol import CodeChangedError, ProtocolError, normalize_manifest
+from remote.protocol import (
+    WIRE_JOB_MAGIC,
+    CodeChangedError,
+    ProtocolError,
+    normalize_manifest,
+    unpack_job_v2,
+)
 from remote.worker import run_job
 
 AUTH_HEADER = "Authorization"
@@ -69,6 +75,13 @@ class WorkerServerState:
 
     def code_cached(self, code_sha256: str) -> bool:
         return (self.work_dir / "code_cache" / code_sha256).exists()
+
+    def blob_cached(self, sha: str) -> bool:
+        """M2 B3：内容寻址 blob（opt/ref raw）是否已在本地缓存。
+
+        与 worker.run_job 的 blob_root 同根（code_cache 的兄弟目录）——命中即免上传。
+        """
+        return bool(sha) and (self.work_dir / "blob_cache" / sha).exists()
 
     def set_state(self, jid: str, state: str) -> None:
         with self._lock:
@@ -150,6 +163,7 @@ def _execute_job(
     manifest: dict,
     payload_zip: bytes,
     code_zip: bytes | None,
+    blobs: dict | None,
     work_dir: Path,
     device: str,
     torch_threads: int,
@@ -168,7 +182,12 @@ def _execute_job(
             device=device,
             torch_threads=torch_threads,
             echo=echo,
-            preloaded={"payload_zip": payload_zip, "code_zip": code_zip},
+            preloaded={
+                "payload_zip": payload_zip,
+                "code_zip": code_zip,
+                # M2 B3：随 body 上传的内容寻址 blob（仅缓存未命中的那些）。
+                "blobs": blobs or {},
+            },
             log=log,
         )
         state.set_result(jid, result)
@@ -234,6 +253,11 @@ def make_worker_server(
                     qs = parse_qs(urlparse(self.path).query)
                     sha = (qs.get("sha") or [""])[0]
                     self._json({"sha": sha, "cached": state.code_cached(sha)})
+                elif path == "/blob-sha":
+                    # M2 B3：opt/ref 内容寻址 blob 是否已缓存（HUB 决定是否随 job 上传）。
+                    qs = parse_qs(urlparse(self.path).query)
+                    sha = (qs.get("sha") or [""])[0]
+                    self._json({"sha": sha, "cached": state.blob_cached(sha)})
                 elif path.startswith("/job/") and path.endswith("/status"):
                     jid = path[len("/job/") : -len("/status")]
                     rec = state.get(jid)
@@ -265,7 +289,16 @@ def make_worker_server(
                     self._json({"error": "not found"}, 404)
                     return
                 raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-                body = json.loads(raw.decode("utf-8"))
+                if raw.startswith(WIRE_JOB_MAGIC):
+                    # M2 B5：v2 体（payload/code/blob 为裸二进制段）→ 旧 JSON 形状，
+                    # 下游字段名不变（payload_b64/code_b64/blobs）。非法体响亮 400。
+                    try:
+                        body = unpack_job_v2(raw)
+                    except ProtocolError as e:
+                        self._json({"error": f"job v2 体非法: {e}"}, 400)
+                        return
+                else:
+                    body = json.loads(raw.decode("utf-8"))
                 manifest = normalize_manifest(body["manifest"])
                 jid = manifest["job_id"]
                 payload_zip = base64.b64decode(body["payload_b64"])
@@ -279,11 +312,27 @@ def make_worker_server(
                         {"error": "code-missing", "code_sha256": manifest["code_sha256"]}, 428
                     )
                     return
+                # M2 B3：opt/ref blob —— body 未带且本地缓存未命中 → 428 要求重发。
+                blobs_raw = body.get("blobs") or {}
+                blobs: dict[str, bytes] = {}
+                if isinstance(blobs_raw, dict):
+                    for k, v in blobs_raw.items():
+                        if isinstance(v, str) and v:
+                            blobs[str(k)] = base64.b64decode(v)
+                need_blobs = []
+                for name, sha in (("opt", manifest.get("opt_sha")), ("ref", manifest.get("ref_sha"))):
+                    s = str(sha or "")
+                    if s and name not in blobs and not state.blob_cached(s):
+                        need_blobs.append(name)
+                if need_blobs:
+                    self._json({"error": "blob-missing", "need": need_blobs}, 428)
+                    return
                 echo = self.headers.get("X-Smoke-Echo", "") == "1"
                 item = {
                     "manifest": manifest,
                     "payload_zip": payload_zip,
                     "code_zip": code_zip,
+                    "blobs": blobs,
                     "echo": echo,
                 }
                 verdict = state.submit(jid, item)
@@ -318,6 +367,7 @@ def make_worker_server(
                 item["manifest"],
                 item["payload_zip"],
                 item["code_zip"],
+                item.get("blobs"),
                 state.work_dir,
                 device,
                 torch_threads,
