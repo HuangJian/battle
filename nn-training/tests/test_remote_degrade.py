@@ -24,6 +24,7 @@ from types import SimpleNamespace
 import pytest
 
 from remote.hub_client import wait_job
+from remote.protocol import JobFailedError
 from rl.loop_steps import TrainingSteps
 
 
@@ -236,3 +237,41 @@ def test_wait_job_404_does_not_backoff() -> None:
     finally:
         hc._request, hc.time.sleep = orig_req, orig_sleep  # type: ignore[assignment]
     assert sleeps == [5.0, 5.0]
+
+
+def test_node_failure_in_remote_retryable_set() -> None:
+    """`JobFailedError` 必须在捕获集合里。
+
+    不在集合里就会冒泡到 `loop_core` 的通用兜底（连败即杀进程），专为远端失败写的
+    停腿判决一行不写——x3-step 事故（`HubClientError` 缺席）的同一个坑。
+    """
+    from rl.loop_steps import remote_retryable_exceptions
+
+    assert JobFailedError in remote_retryable_exceptions()
+
+
+def test_node_failure_aborts_on_first_failure_with_reason(tmp_path: Path) -> None:
+    """节点确定性失败（已回报原因）：第一次就带原因 ABORT 停腿，不重试也不降级。
+
+    2026-09-17：`bun` 装不上 / TS 运行时取不到这类失败过去在训练侧只表现为
+    `wait_job` 25 分钟超时（原因留在云机日志里），而每次重试再白烧一个超时窗口。
+    现在原因随 `JobFailedError` 到达 ⇒ 判决里写的是**真原因**，一眼能修。
+    """
+    st = _Stub(
+        tmp_path,
+        fail_times=9,
+        exc=JobFailedError(
+            "job j 失败: bun 未安装（PATH 里没有 bun）[kind=ProtocolError]",
+            kind="ProtocolError",
+        ),
+    )
+    with pytest.raises(JobFailedError):
+        st._remote_ppo_or_degrade(6)
+    ev = st.events()
+    assert [e["event"] for e in ev] == ["gate_verdict"]
+    assert ev[0]["verdict"] == "ABORT" and ev[0]["iter"] == 6
+    assert "bun 未安装" in ev[0]["reason"]
+    assert st._leg_abort is True
+    assert st._remote_fail == 0  # 确定性失败不消耗连败配额
+    assert len(st.remote_calls) == 1  # 不重试（重试只会再撞同一堵墙）
+    assert st.args.ppo == "remote" and st.ensure_local_calls == 0  # 也不静默降级

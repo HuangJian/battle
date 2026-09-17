@@ -403,6 +403,88 @@ def release_job(
         pass  # release 不可达：租约过期兜底（30min），与旧行为一致
 
 
+def worker_tag() -> str:
+    """本 worker 的可读身份（失败回报的 `worker` 字段）。
+
+    多机共用一个 hub 时，「是哪台机器说 bun 缺失」是定位现场的**唯一**线索
+    （全部节点共用同一份 token，日志里分不出来）。
+    """
+    try:
+        import socket
+
+        return f"{socket.gethostname()}:{os.getpid()}"
+    except Exception:  # 主机名不可得（容器/受限沙箱）——pid 也够用
+        return f"pid{os.getpid()}"
+
+
+def _failure_detail(e: BaseException, limit: int = 4000) -> str:
+    """异常现场（traceback 尾段）——回报给人看，不参与任何判定。
+
+    截**尾**段而非头段：栈顶几帧是 transport 样板，真正的原因是最后一帧的
+    `ProtocolError: bun 未安装 …`。
+    """
+    import traceback
+
+    try:
+        return traceback.format_exc()[-limit:]
+    except Exception:  # 极端情况下 format_exc 本身不可用——退回落单行
+        return f"{type(e).__name__}: {e}"[:limit]
+
+
+def report_job_failure(
+    base_url: str,
+    token: str,
+    jid: str,
+    reason: str,
+    *,
+    kind: str = "",
+    detail: str = "",
+    lease_token: str = "",
+    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+) -> bool:
+    """回报**确定性**失败原因（`POST /jobs/{id}/fail`）。
+
+    2026-09-17（plan/remote-wire-remediation §5.3 缺口）：worker_loop 的
+    `except ProtocolError` 此前只写一行云机日志就 skip——**不回传、不还租约**，训练侧
+    只能等 `wait_job` 25 分钟超时，看到的是一行「超时」而不是「bun 装不上」。
+    回报后 hub 把它落成 job 的终局（fail.json），训练侧立即带原因收兵。
+
+    尽力而为：回报不可达时返回 False，由超时兜底（与 release_job 同策略）。
+    """
+    if not base_url or not jid or not reason:
+        return False
+    body = json.dumps(
+        {
+            "reason": str(reason)[:2000],
+            "kind": str(kind)[:200],
+            "detail": str(detail)[:4000],
+            "worker": worker_tag(),
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    try:
+        status, resp = _request(
+            base_url,
+            token,
+            f"/jobs/{jid}/fail",
+            timeout=15.0,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                **({"X-Lease-Token": lease_token} if lease_token else {}),
+            },
+        )
+    except Exception as e:
+        log(f"job {jid} 失败回报未送达（{type(e).__name__}）——训练侧将走超时兜底")
+        return False
+    if status == 200:
+        log(f"job {jid} 失败原因已回报 hub: {str(reason)[:160]}")
+        return True
+    log(f"job {jid} 失败回报被拒：HTTP {status}: {resp[:200].decode('utf-8', 'replace')}")
+    return False
+
+
 def heartbeat(base_url: str, token: str, jid: str, lease_token: str = "") -> None:
     try:
         _request(
@@ -1843,7 +1925,23 @@ def worker_loop(
                 return done
         except ProtocolError as e:
             log(f"job {jid} REJECTED: {e} — skip (not retried)")
-            # 确定性拒绝（commit 不符/模式不符）不重试——轮询下一个
+            # 确定性拒绝（commit 不符/模式不符/节点能力缺失如 bun 装不上）不重试——
+            # 轮询下一个。
+            # 2026-09-17：**必须把原因报给 hub**，否则这条确定性失败在训练侧只表现为
+            # 25 分钟超时（能力缺失被读成网络/排队问题，且每次重试白烧一个超时窗口）。
+            # 只在这一分支报（CodeChangedError 会重启进程靠租约回池、RetryableError
+            # 靠 release 回池，报了就等于把可恢复的 job 钉死）；hub 侧把它落成终局后
+            # 该 job 不再回池，重发同 job（同幂等键）会清标记。
+            report_job_failure(
+                base_url,
+                token,
+                jid,
+                str(e) or type(e).__name__,
+                kind=type(e).__name__,
+                detail=_failure_detail(e),
+                lease_token=lease_token,
+                log=log,
+            )
         except Exception as e:
             log(f"job {jid} FAILED: {type(e).__name__}: {e} — will re-poll (idempotent)")
             # 瞬态失败（网络/远端关闭）：租约未续会自动回池，重拉同 job 幂等

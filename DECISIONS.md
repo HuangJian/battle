@@ -2245,4 +2245,45 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 - **证据与完整表格**：`docs/nn.progress.md §57`。另：门禁不再重复加 `-q`（addopts 已有 ⇒ 原本
   `-qq` 吞掉了「N passed in Xs」，hook 日志里看不到用例数与耗时）。
 
+## §2026-09-17-job-fail-report（2026-09-17，节点**确定性**失败必须带原因回传控制面：`POST /jobs/{id}/fail` + `/result` 410 终局）
+
+- **背景（真缺口，用户 2026-09-17 提问暴露）**：云机确定性失败（bun 装不上 / TS 运行时取不到 /
+  argv 非法）此前只落在**云机日志**里。pull 侧 `worker_loop` 的 `except ProtocolError` 只打一行
+  「REJECTED … skip (not retried)」——**不回传、不还租约**，训练侧只能等 `wait_job` 25 分钟超时，
+  读到的是「超时」而不是「bun 缺失」；push 侧节点 `worker_server` 用 **500** 报 failed，而 500 在
+  `push_client.wait_result` 里被当**瞬时错误**重试到 1800s 预算耗尽。两条路都把「确定性能力缺失」
+  伪装成「网络/排队问题」，且每次重试再白烧一个超时窗口。
+- **备选与否决**：① *只把云机日志写得更清楚*（否决——训练侧读不到，人的第一现场是控制台，不是云机
+  stdout）；② *把确定性失败并进既有连败/降级链*（否决——重试只会撞同一堵墙，且
+  `--remote-degrade-after` 会把上云轮静默切到本机 PPO，而上云轮**没有本地 shard**，降级即打穿）；
+  ③ *启动前 smoke 探 bun 存在性*（否决——只覆盖「装没装」一类，TS 运行时取不到 / argv 非法 /
+  commit 不符同样要回传，且探测本身多一次往返）；④ *调小 `wait_job` 超时预算*（否决——治不了
+  「原因不可见」，还把真慢的云端 PPO 误杀）。采用：**失败即终局 + 原因随行**。
+- **契约（硬要求）**：`POST /jobs/{id}/fail`（bearer 鉴权；活租约须持有人；`reason` 必填非空；
+  体 ≤ 64KB）= 节点判定「这个 job 在这台机器上跑不成」→ 落 `fail.json`（**首写锁定**：已有结果
+  不收失败、首个原因胜出；原子 tmp+replace）→ ① `GET /jobs/{id}/result` → **410 + 原因**
+  （不是 404「还没回来」、不是 5xx「瞬时错误」）；② `/status` → `state="failed"` + 原因；
+  ③ 该 job **不再回池**（`claimable_job_ids` 排除——换节点只会重演同一失败）；④ 账本追加
+  `job_failed`（带 worker 身份：多机共用同一 token，这是定位现场的唯一线索）；⑤ 训练侧
+  `JobFailedError` → **第一次**就写 `gate_verdict: ABORT`（真原因入判决）+ 停腿，不消耗连败
+  配额、不降级。**重发同 job（同幂等键 → 同 job_id，逐轮重试走的正是这条路）由 `publish_job`
+  清掉 `fail.json`**——不清 = 「失败即终局」把重试永久钉死（无人认领 + 立刻 410），这是两条
+  语义共存的**唯一**接口。
+- **名词纪律**：只有**确定性**失败（能力缺失 / 协议级拒收）走这条路；瞬时失败（网络 / 5xx）仍走
+  `release` 回池、**不报** `fail`。搞反的代价单边且严重：瞬时失败报成终局 = 可恢复的 job 被钉死；
+  确定性失败报成瞬时 = 白烧一个超时窗口（本次要治的病）。`CodeChangedError` 刻意不报——它靠
+  重启进程 + 租约回池自愈。
+- **落地**（9 个文件，逐处行为见 `docs/nn.progress.md §60`）：protocol（`FAIL_NAME`/`JobFailedError` 带
+  reason/kind/detail）、hub_server（端点 + 首写锁定 + 池排除 + 410 + `status=failed` + `job_failed` 账本）、
+  hub_client（`report_job_failure` + 立即抛 + `publish_job` 清标记）、worker / worker_server（**500→410**）/ push_client、
+  `rl/loop_steps.py`（首败即 ABORT + `_push_job_round` 不再包成 RetryableError）、dashboard `ppo-queue.ts`
+  （`job_failed`/`fail.json` 不算排队超时；账本读法改 **last-write-wins**——重发同一 job 又该被盯排队，
+  旧口径会把它永久当已关闭）。回归：`test_job_fail_report.py`（9）+ `test_remote_degrade.py`（2）+ dashboard（2）。
+  实测（2026-09-17）：`wait_job` 从「等满 25min」变为**秒级抛错**（整个用例含起服务仅 0.52s）。
+- **违反后果**：删掉 `publish_job` 的清标记 ⇒ 重试被永久钉死（整条腿再也跑不起来）；去掉池排除 ⇒
+  每个节点轮询都重演同一失败；`worker_server` 退回 500 ⇒ 训练侧重新等满 1800s；把确定性失败并回连败链 ⇒
+  上云轮静默降级打穿（无本地 shard 可训）。
+- **遗留（未做，不写成已做）**：真远程轮次的端到端验证（本机无节点可跑）；节点侧 preflight
+  **硬门**（bun 版本对账不匹配直接拒单，计划 §5.3）仍只有记录与日志。
+
 

@@ -105,12 +105,15 @@ class WorkerServerState:
             self.jobs[jid] = {"state": "done", "result": result}
             self.done_total += 1
 
-    def set_error(self, jid: str, error: str) -> None:
+    def set_error(self, jid: str, error: str, kind: str = "") -> None:
+        """标为 failed（终局）。kind = 异常类名，供 `/job/{id}/result` 的 410 体带上
+        （2026-09-17：训练侧据此区分「确定性能力缺失」与「网络/排队」）。"""
         with self._lock:
             prev = self.jobs.get(jid, {})
             self.jobs[jid] = {
                 "state": "failed",
                 "error": error,
+                "kind": kind,
                 **{k: v for k, v in prev.items() if k == "result"},
             }
 
@@ -210,12 +213,12 @@ def _execute_job(
         log(f"job {jid} done — result ready for pickup")
     except CodeChangedError as e:
         # push 模式是长驻服务进程：execv 自重启会打断在跑的 job —— 只能拒收 + 喊人。
-        state.set_error(jid, f"{type(e).__name__}: {e}")
+        state.set_error(jid, f"{type(e).__name__}: {e}", kind=type(e).__name__)
         log(f"job {jid} REJECTED: {e}")
         log("  → 代码已变更：本服务进程无法热替换。请**重启 worker_server 进程**"
             "（notebook 重跑 push 单元格 / 本机重起 workerServe），再重发本 job。")
     except Exception as e:
-        state.set_error(jid, f"{type(e).__name__}: {e}")
+        state.set_error(jid, f"{type(e).__name__}: {e}", kind=type(e).__name__)
         log(f"job {jid} FAILED: {e}")
     finally:
         state.kick()  # 失败不堵队：队首立即顶上（流水线无间隙）
@@ -291,7 +294,17 @@ def make_worker_server(
                     elif rec["state"] == "done":
                         self._json(rec["result"])
                     elif rec["state"] == "failed":
-                        self._json({"error": rec.get("error", "?")}, 500)
+                        # 410（= 不会有结果，原因是终局）而非 500：500 在
+                        # push_client.wait_result 里被当**瞬时错误**重试到预算耗尽，
+                        # 把「bun 装不上」伪装成网络问题（2026-09-17）。
+                        self._json(
+                            {
+                                "failed": True,
+                                "error": rec.get("error", "?"),
+                                "fail_kind": rec.get("kind", ""),
+                            },
+                            410,
+                        )
                     else:
                         self._json({"status": "running"}, 202)
                 else:

@@ -97,6 +97,51 @@ describe('detectPpoQueueStall（PPO 队列 >5min 无 worker 领取 → warning�
     expect(hit!.jobId).not.toBe('job-orphan-cancelled')
   })
 
+  it('账本 job_failed / 盘上 fail.json：节点确定性失败不报排队超时', () => {
+    const now = Date.now()
+    // 节点已回报确定性失败（bun 装不上）：不会再出结果，不该报「无 worker 领取」
+    const failed = mkJob('job-node-failed', { it: 41 })
+    ageDir(failed, 20 * 60_000)
+    writeFileSync(path.join(failed, 'fail.json'), JSON.stringify({ reason: 'bun 未安装' }))
+    const failedLedgerOnly = mkJob('job-node-failed-ledger', { it: 42 })
+    ageDir(failedLedgerOnly, 20 * 60_000)
+    const live = mkJob('job-live-after-fail', { it: 43 })
+    ageDir(live, 6 * 60_000)
+
+    writeLedger([
+      { event: 'job_pending', job_id: 'job-node-failed', it: 41, ts: 1 },
+      { event: 'job_failed', job_id: 'job-node-failed', reason: 'bun 未安装', ts: 2 },
+      { event: 'job_pending', job_id: 'job-node-failed-ledger', it: 42, ts: 3 },
+      { event: 'job_failed', job_id: 'job-node-failed-ledger', reason: 'bun 未安装', ts: 4 },
+      { event: 'job_pending', job_id: 'job-live-after-fail', it: 43, ts: 5 },
+    ])
+
+    const hit = api.detectPpoQueueStall(jobRoot, now)
+    expect(hit).not.toBeNull()
+    expect(hit!.jobId).toBe('job-live-after-fail')
+    expect(hit!.it).toBe(43)
+
+    rmSync(failed, { recursive: true, force: true })
+    rmSync(failedLedgerOnly, { recursive: true, force: true })
+    rmSync(live, { recursive: true, force: true })
+  })
+
+  it('失败后重发同一 job（新 job_pending）→ 又被盯排队（last-write-wins，不被旧终局吞掉）', () => {
+    const now = Date.now()
+    const again = mkJob('job-retry-after-fail', { it: 44 })
+    ageDir(again, 8 * 60_000)
+    writeLedger([
+      { event: 'job_pending', job_id: 'job-retry-after-fail', it: 44, ts: 1 },
+      { event: 'job_failed', job_id: 'job-retry-after-fail', reason: 'bun 未安装', ts: 2 },
+      // 重发 = 同幂等键重发同一 job（publish_job 已清 fail.json）
+      { event: 'job_pending', job_id: 'job-retry-after-fail', it: 44, ts: 3 },
+    ])
+    const hit = api.detectPpoQueueStall(jobRoot, now)
+    expect(hit?.jobId).toBe('job-retry-after-fail')
+    expect(hit!.it).toBe(44)
+    rmSync(again, { recursive: true, force: true })
+  })
+
   it('空目录 / 不存在 → null', () => {
     expect(api.detectPpoQueueStall(path.join(jobRoot, 'nope'))).toBeNull()
   })

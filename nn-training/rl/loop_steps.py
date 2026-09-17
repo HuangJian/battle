@@ -19,7 +19,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import dist_common
-from remote.protocol import ProtocolError, RetryableError, coef_active, find_payload
+from remote.protocol import (
+    JobFailedError,
+    ProtocolError,
+    RetryableError,
+    coef_active,
+    find_payload,
+)
 from remote.push_client import submit_job as _push_submit
 from remote.push_client import wait_result as _push_wait_result
 from rl.archive import backup_weights
@@ -251,6 +257,10 @@ def _push_job_round(
     ts_code_bytes（M3）：TS 运行时 zip（kind=iter 才非 None）；同样判节点缓存，只在
     未命中时随 body 上传（sha 不变则整段腿只传一次）。"""
     last: Exception | None = None
+    # 确定性节点失败（410：节点说这个 job 在这台机器上跑不成）单独记一笔——
+    # 所有节点都倒了时把它**原样抛出**，而不是包成 RetryableError（2026-09-17）。
+    # 否则「bun 装不上」会被上层当瞬时失败重试 3 次（每次重新 push + 等满超时）。
+    node_failed: JobFailedError | None = None
     for node in nodes:
         url, key = node["url"], node.get("authKey", "")
         try:
@@ -273,9 +283,17 @@ def _push_job_round(
                 # 校验字段，纯 additive。
                 result["wire_hub"] = submit_wire
             return result
+        except JobFailedError as e:
+            # 终局：节点已判定跑不成（原因在 e 里）。换下一个节点仍值得一试（另一台
+            # 可能有 bun），但全部节点都倒时得把**原因**带上去（见下方 raise）。
+            last = e
+            node_failed = e
+            log(f"[run_rl] push: 节点 {url} 报确定性失败（{e}）——尝试下一节点")
         except Exception as e:  # 单节点失败换下一个（含确定性拒绝）
             last = e
             log(f"[run_rl] push: 节点 {url} 失败（{type(e).__name__}: {e}）——尝试下一节点")
+    if node_failed is not None:
+        raise node_failed
     raise RetryableError(f"push 全部节点失败: {last}")
 
 
@@ -397,7 +415,18 @@ def remote_retryable_exceptions() -> tuple[type[BaseException], ...]:
     """
     from remote.hub_client import HubClientError
 
-    return (RetryableError, ProtocolError, OSError, TimeoutError, HubClientError)
+    # JobFailedError（2026-09-17）：节点已回报原因的**确定性**失败。必须在集合里——
+    # 否则它会落到 loop_core 的通用兜底（连败即杀进程），专为远端失败写的停腿
+    # 判决一行不写。两处调用方都先做 `isinstance(e, JobFailedError)` 判据：确定性
+    # 失败不消耗连败配额、不重试，直接 ABORT 停腿。
+    return (
+        RetryableError,
+        ProtocolError,
+        OSError,
+        TimeoutError,
+        HubClientError,
+        JobFailedError,
+    )
 
 
 def fatal_remote_http(e: BaseException) -> int:
@@ -868,6 +897,28 @@ class TrainingSteps:
         self._forensics(f"ppo_local_post it{it}")
         self._commit_journal().finish("ppo_local", str(it))
 
+    def _abort_node_failure(self, it: int, e: BaseException, *, where: str) -> None:
+        """节点已回报原因的**确定性**失败 → 写 ABORT 判决 + 停腿标记。
+
+        2026-09-17（plan/remote-wire-remediation §5.3 缺口）：此前这类失败（bun 装不上 /
+        TS 运行时取不到 / argv 非法）在训练侧只表现为 `wait_job` 25 分钟超时——
+        「能力缺失」被写成「网络/排队问题」，而且每次重试再白烧一个超时窗口。现在原因
+        随 `JobFailedError` 直接到达，判决里写的是真原因（人一眼能修）。
+
+        不重试、不降级：节点缺的是运行时能力，换机/换轮都一样；修完节点重跑同课即可
+        （重发同 job 会清失败标记，见 hub_client.publish_job）。
+        """
+        reason = str(e)[:300]
+        write_gate_verdict(
+            self._jsonl_path,
+            it,
+            "ABORT",
+            f"{where} 节点确定性失败（原因已随 /jobs/{{id}}/fail 回传）：{reason}",
+            decider="loop",
+        )
+        log(f"[run_rl] GATE ABORT it{it}: {where} 节点报确定性失败——不重试，立即停腿：{reason}")
+        self._leg_abort = True
+
     def _remote_ppo_or_degrade(self, it: int) -> bool:
         """R9（plan/feasibility-map.md §12）：远端失败计数与 **opt-in** 降级。
 
@@ -890,6 +941,11 @@ class TrainingSteps:
         try:
             self._remote_ppo(it)
         except remote_retryable_exceptions() as e:
+            if isinstance(e, JobFailedError):
+                # 节点已回报原因的**确定性**失败（2026-09-17）：不消耗连败配额、不重试
+                # ——重试只会再派给另一台同样干不了的机器，或等回同一个 410。
+                self._abort_node_failure(it, e, where="远端 PPO")
+                raise
             self._remote_fail += 1
             limit = int(getattr(args, "remote_degrade_after", 0) or 0)
             # 401/403/400：token 不对、IP 被 hub 闭锁、或请求本身有问题——**重试多少次
@@ -1348,6 +1404,11 @@ class TrainingSteps:
             # 跳过 _serial_ppo），所以那条路的「鉴权/闭锁类失败立即 ABORT」得在这里
             # 补上：否则 401/403 会走通用兜底 5×30s 重发同一 job 再死（x3-step 事故
             # 的同一个浪费）。只贴判决，不在这里降级——上云轮没有本地 shard 可训练。
+            if isinstance(e, JobFailedError):
+                # 与上面同规：节点已回报原因（如 bun 装不上 / TS 运行时取不到）——
+                # 这是确定性能力缺失，重试无益，立即带原因停腿。
+                self._abort_node_failure(it, e, where="rollout_src=node 采集+PPO")
+                raise
             fatal = fatal_remote_http(e)
             if fatal:
                 write_gate_verdict(

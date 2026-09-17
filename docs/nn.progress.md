@@ -4,6 +4,74 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §60 节点确定性失败带原因回传控制面：`POST /jobs/{id}/fail` + `/result` 410（2026-09-17）
+
+**为什么记这一笔**：这是**跨层协议**新增（新端点、新终局状态、新的失败分类语义），且改了
+「失败即终局 vs 逐轮重试」两条既有语义的交界，按 §5 硬规则入账。决策与理由（含四条被否决的备选）
+见 `DECISIONS.md` §2026-09-17-job-fail-report。
+
+### 缺口（用户提问暴露，2026-09-17）
+
+云机**确定性**失败（bun 装不上 / TS 运行时取不到 / argv 非法）此前只落在**云机日志**里：
+
+| 链路 | 旧行为 | 训练侧看到 |
+|---|---|---|
+| pull（worker 轮询 hub） | `worker_loop` 的 `except ProtocolError` 只打一行 `REJECTED … skip (not retried)`——不回传、不还租约 | `wait_job` 等满 **25 分钟**超时 ⇒ 一行「超时」（把能力缺失写成了网络/排队问题） |
+| push（hub 推节点） | 节点 `worker_server` 对 failed 返回 **500** | `push_client.wait_result` 把 500 当**瞬时错误**重试到 **1800s** 预算耗尽 |
+
+两条路都白烧一个超时窗口，且重试后通常再撞同一堵墙。
+
+### 改后契约
+
+```
+节点判定「这台机器跑不成」
+   └─ POST /jobs/{id}/fail  {reason(必填), kind, detail, worker}      # bearer + 活租约须持有人
+        └─ fail.json  首写锁定：已有结果不收失败 / 首个原因胜出（原子 tmp+replace）
+             ├─ GET /jobs/{id}/result  → 410 + 原因 + fail_kind + fail_detail
+             ├─ GET /jobs/{id}/status  → state="failed" + 原因
+             ├─ claimable_job_ids()    → 排除（换节点只是重演同一失败）
+             └─ 账本                   → job_failed{job_id, reason, kind, worker}
+训练侧：wait_job/ wait_result  → 立刻抛 JobFailedError(reason, kind, detail)
+        └─ _abort_node_failure    → 第一次就写 gate_verdict: ABORT（真原因入判决）+ 停腿
+逐轮重试：publish_job 重发同 job（同幂等键 → 同 job_id）→ 清掉 fail.json（重发即重试）
+```
+
+用途边界（写进代码与决策）：**只有确定性失败走这条路**——瞬时失败（网络/5xx）仍走 `release`
+回池、不报 `fail`；`CodeChangedError` 刻意不报（它靠重启进程 + 租约回池自愈，报了会把可恢复的
+job 钉死）。
+
+### 改动清单（file → 改后行为）
+
+| 位置 | 改后行为 |
+|---|---|
+| `remote/protocol.py` | `FAIL_NAME="fail.json"` / `FAIL_BODY_MAX=64KB` / `JobFailedError(RuntimeError)`（携 `kind`/`detail`，文档写清与 Retryable/ProtocolError 的分界） |
+| `remote/hub_server.py` | `store_job_failure`（有结果不收 / 首写胜 / 原子写）+ `job_failure` + `POST /jobs/{id}/fail`（`reason` 必填、体有界、租约同 result）+ `_get_result` 410 + `_get_status` failed + `claimable_job_ids` 排除 + 账本 `job_failed` |
+| `remote/hub_client.py` | `report_job_failure`（尽力而为，绝不炸 worker 主循环）；`wait_job` 对 410 与收尾二次确认的 `state=failed` 立即抛；`publish_job` 重发时清 `fail.json` |
+| `remote/worker.py` | `except ProtocolError` 分支补回报（带 `worker_tag()`=`host:pid`，多机共用 token 时定位现场的唯一线索）+ `_failure_detail`（traceback **尾段**：原因是最后一帧） |
+| `remote/worker_server.py` | failed 响应 **500 → 410**（500 在 `wait_result` 里是「瞬时错误」语义）；`set_error` 记 `kind` |
+| `remote/push_client.py` | `wait_result` 见 410 → 立即抛 `JobFailedError` |
+| `rl/loop_steps.py` | `remote_retryable_exceptions()` 收 `JobFailedError`（不进来就会冒泡到 loop_core 通用兜底杀进程）；`_abort_node_failure` 写 ABORT（真原因）+ 停腿，不耗连败配额、不降级；`_push_job_round` 全节点失败时**原样抛**节点失败而非包成 `RetryableError` |
+| `dashboard/src/server/api/ppo-queue.ts` | `job_failed`/`fail.json` 不算「排队超时」；账本读法改 **last-write-wins**（旧口径「出现过终局即关闭」会把重发的同一 job 永久当已关闭，真卡住时不告警） |
+
+### 回归与实测
+
+- `nn-training/tests/test_job_fail_report.py`（**9 例**）：端点/校验/租约/首写/410/status/账本、`wait_job`
+  **秒级**失败（断言 `<10s`，旧路 1500s）、收尾二次确认也认失败、worker 回报到位、push 410、
+  push round 不被包成 RetryableError、**重发清标记**（不清 = 重试永久钉死，故必须钉住）。
+- `nn-training/tests/test_remote_degrade.py`（+2 例）：`JobFailedError` 首败即 ABORT 且 `_remote_fail==0`、
+  不降级、`remote_calls==1`（不重试）；在捕获集合里。
+- `dashboard/tests/server-api-ppo-queue.test.ts`（+2 例）：`job_failed`/`fail.json` 不误报；失败后重发又被盯排队。
+- 实测（2026-09-17 本机）：整个 `wait_job` 快速失败用例含起服务仅 **0.52s**（预算 25min）。
+- 门禁：nn python gate（ruff + mypy + pytest tests/+e2e/）**exit 0**（1112 例）· root `bun run check`
+  **1853 pass / 0 fail** · dashboard typecheck + **457 pass / 0 fail** + 三份 bundle ok。
+
+### 未做（不写成已做）
+
+- 真远程轮次的端到端验证（本机无节点可跑）。
+- 节点侧 preflight **硬门**（计划 §5.3：bun 版本对账不匹配直接拒单）仍只有记录与日志。
+
+---
+
 ## §59 M3 rollout 上云落地：新 job kind「一整轮」（kind=iter）＋ TS 运行时打包（2026-09-17）
 
 > 编号说明：本节原为 §57，与 origin 已推送的「python 全量门禁提速」撞号，合并时改 §59。

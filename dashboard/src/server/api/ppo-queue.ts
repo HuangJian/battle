@@ -16,12 +16,16 @@ export interface PpoQueueStall {
 
 const PAYLOAD_FILES = ['payload.tar.xz', 'payload.zip']
 
-/** 从 training_log.jsonl 读「仍开放」的 job：job_pending 且无 job_completed / job_cancelled。
- *  悬空/已作废 job（§381 cancel_stale、hub 故障遗留）目录仍在盘上，但不应再告警。 */
+/** 从 training_log.jsonl 读「仍开放」的 job。
+ *
+ * 以**每个 job 的最后一条事件**为准（last-write-wins），而不是「出现过终局即关闭」：
+ * 重发同一个 job（同幂等键 → 同 job_id）会再追加一条 job_pending——它又该被盯排队，
+ * 哪怕之前已 failed/cancelled（旧口径会把它永久当已关闭，真卡住时不告警）。
+ * 悬空/已作废 job（§381 cancel_stale、hub 故障遗留、节点确定性失败）目录仍在盘上，
+ * 但最后一条是终局 → 不告警。 */
 function loadOpenPpoJobs(logPath: string): Map<string, number | null> | null {
   if (!existsSync(logPath)) return null
-  const pending = new Map<string, number | null>()
-  const terminal = new Set<string>()
+  const last = new Map<string, { event: string; it: number | null }>()
   try {
     for (const line of readFileSync(logPath, 'utf8').split('\n')) {
       if (!line.trim()) continue
@@ -32,18 +36,17 @@ function loadOpenPpoJobs(logPath: string): Map<string, number | null> | null {
         continue
       }
       const jid = e.job_id
-      if (typeof jid !== 'string') continue
-      if (e.event === 'job_pending') {
-        pending.set(jid, typeof e.it === 'number' ? e.it : null)
-      } else if (e.event === 'job_completed' || e.event === 'job_cancelled') {
-        terminal.add(jid)
-      }
+      if (typeof jid !== 'string' || typeof e.event !== 'string') continue
+      last.set(jid, { event: e.event, it: typeof e.it === 'number' ? e.it : null })
     }
   } catch {
     return null
   }
-  for (const jid of terminal) pending.delete(jid)
-  return pending
+  const open = new Map<string, number | null>()
+  for (const [jid, e] of last) {
+    if (e.event === 'job_pending') open.set(jid, e.it)
+  }
+  return open
 }
 
 /** 扫描 remote-jobs：有 payload、无 result、无 claimed，且目录 mtime 超过阈值。
@@ -74,6 +77,9 @@ export function detectPpoQueueStall(
     const jd = path.join(jobRoot, name)
     try {
       if (existsSync(path.join(jd, 'result'))) continue
+      // 节点确定性失败（`fail.json`，hub_server.store_job_failure）：job 不会再出结果。
+      // 账本可读时上面已按 job_failed 排除；无账本（老 run/账本被清）时靠这一条。
+      if (existsSync(path.join(jd, 'fail.json'))) continue
       if (existsSync(path.join(jd, 'claimed'))) continue
       const hasPayload = PAYLOAD_FILES.some((f) => existsSync(path.join(jd, f)))
       if (!hasPayload) continue

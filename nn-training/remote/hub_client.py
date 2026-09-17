@@ -30,9 +30,12 @@ from remote.protocol import (
     AUTH_HEADER,
     BLOB_OPT,
     BLOB_REF,
+    FAIL_BODY_MAX,
+    FAIL_NAME,
     PAYLOAD_NAME,
     PAYLOAD_XZ_PRESET,
     TS_CODE_NAME,
+    JobFailedError,
     blob_path,
     data_fp,
     decode_opt_tar,
@@ -547,6 +550,16 @@ def publish_job(
         blob_path(jd, BLOB_REF).write_bytes(ref_raw)
     m = normalize_manifest(m)
     (jd / "manifest.json").write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 重发同一个 job（同幂等键 → 同 job_id，逐轮重试走的正是这条路）必须清掉上一次的
+    # 确定性失败标记（2026-09-17）——否则重发出来的 job 在 hub 侧仍算「已失败」：
+    # 可领取池排除它（无人重跑）、wait_job 立刻 410（重试无效）。旧标记只对旧那一次有效。
+    stale_fail = jd / FAIL_NAME
+    if stale_fail.exists():
+        try:
+            stale_fail.unlink()
+            log(f"republished job {jid}: 清掉上一次的失败标记（重发即重试）")
+        except OSError as e:
+            log(f"WARN: 失败标记未清掉（{e}）——重发可能被 hub 当成已失败")
     # 复制 code.zip 到 job 目录（hub-server 的 GET /jobs/{id}/code 从此目录服务）
     if code_zip_path:
         czp = Path(code_zip_path)
@@ -725,6 +738,64 @@ def _request(
         return e.code, e.read()
 
 
+def report_job_failure(
+    base_url: str,
+    token: str,
+    jid: str,
+    reason: str,
+    *,
+    kind: str = "",
+    detail: str = "",
+    worker: str = "",
+    lease_token: str = "",
+    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
+) -> bool:
+    """回报**确定性**失败原因（`POST /jobs/{id}/fail`）——训练侧随即从
+    `wait_job` 拿到 410 + 原因立刻停腿，不再等满超时。
+
+    返回 True = hub 采纳（或已记录过）。尽力而为：回报本身不可达时返回 False，
+    由超时兜底（与 release_job 同策略）——**永不让回报本身炸掉 worker 主循环**。
+
+    只用于「这台机器干不了」的确定性失败（bun 缺失 / TS 运行时取不到 / argv 非法）。
+    瞬时失败（网络/5xx）走 release 回池，**不**报这里——那会把可恢复的 job 钉死。
+    重发同 job（同幂等键 → 同 job_id）时 publish_job 会清除失败标记。
+    """
+    if not base_url or not jid or not reason:
+        return False
+    body = json.dumps(
+        {
+            "reason": str(reason)[:2000],
+            "kind": str(kind)[:200],
+            "detail": str(detail)[:4000],
+            "worker": str(worker)[:200],
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    if len(body) > FAIL_BODY_MAX:  # 已按字段截断，兜底防御（hub 也会 400）
+        return False
+    try:
+        st, resp = _request(
+            base_url,
+            token,
+            f"/jobs/{jid}/fail",
+            timeout=15.0,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                **({"X-Lease-Token": lease_token} if lease_token else {}),
+            },
+        )
+    except Exception as e:
+        log(f"job {jid} 失败回报未送达（{type(e).__name__}）——训练侧将走超时兜底")
+        return False
+    if st == 200:
+        log(f"job {jid} 失败原因已回报（hub 采纳）: {str(reason)[:160]}")
+        return True
+    log(f"job {jid} 失败回报被拒：HTTP {st}: {resp[:200].decode('utf-8', 'replace')}")
+    return False
+
+
 def set_cloud_halt(
     base_url: str,
     token: str,
@@ -807,6 +878,30 @@ def clear_halt_on_startup(
     return False
 
 
+def _job_failed_from_body(jid: str, body: bytes) -> JobFailedError:
+    """410/status=failed 的响应体 → JobFailedError（原因取 error/reason，详情取 fail_detail）。
+
+    消息形如 `job <id> 失败: bun 未安装 … [kind=ProtocolError]`——外部（训练主循环的
+    确定性失败分支）靠 `JobFailedError` 类型收兵，人靠这行字定位现场。损坏体不丢
+    失败事实（退回通用文案）。
+    """
+    reason, kind, detail = "节点报告确定性失败（无原因文本）", "", ""
+    try:
+        loaded = json.loads(body.decode("utf-8"))
+    except (ValueError, AttributeError, UnicodeDecodeError):
+        loaded = None
+    if isinstance(loaded, dict):
+        raw = loaded.get("error") or loaded.get("reason")
+        if isinstance(raw, str) and raw:
+            reason = raw
+        if isinstance(loaded.get("fail_kind"), str):
+            kind = loaded["fail_kind"]
+        if isinstance(loaded.get("fail_detail"), str):
+            detail = loaded["fail_detail"]
+    suffix = f" [kind={kind}]" if kind else ""
+    return JobFailedError(f"job {jid} 失败: {reason}{suffix}", kind=kind, detail=detail)
+
+
 def wait_job(
     base_url: str,
     token: str,
@@ -851,6 +946,11 @@ def wait_job(
             err_streak = 0  # 还没回 = 正常排队，复位退避
             time.sleep(poll_sec)
             continue
+        if status == 410:
+            # 410 = 终局：节点已报**确定性失败**（`POST /jobs/{id}/fail`），原因在体内。
+            # 必须立刻收兵——此前这情况一律落到 25 分钟超时，把「bun 缺失」写成
+            # 「网络/排队问题」，且每次重试都白烧一个超时窗口。
+            raise _job_failed_from_body(jid, body)
         if status >= 500:
             # 隧道/边缘瞬时 5xx（Cloudflare 错误页等）——容忍至 deadline
             err_streak += 1
@@ -872,6 +972,10 @@ def wait_job(
                 loaded = json.loads(body2.decode("utf-8"))
                 if isinstance(loaded, dict):
                     return loaded
+        elif state == "failed":
+            # 终局（2026-09-17）：收尾确认时也要认失败——否则又多等一个超时窗口。
+            st2, body2 = _request(base_url, token, f"/jobs/{jid}/result", timeout=15.0)
+            raise _job_failed_from_body(jid, body2 if st2 == 410 else s_body)
         elif state == "leased":
             log(f"wait_job: job {jid} 仍在 leased（云 PPO 执行中）——再等 {timeout_sec}s")
             return wait_job(

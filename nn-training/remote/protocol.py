@@ -154,6 +154,28 @@ class RetryableError(Exception):
     RetryableError 后主动 release 租约回池，立即可重领（不再干等 30min 过期）。"""
 
 
+class JobFailedError(RuntimeError):
+    """**确定性**节点失败，且失败原因已随 `POST /jobs/{id}/fail` 回传到控制面。
+
+    与 RetryableError/ProtocolError 的分界（2026-09-17，DECISIONS
+    §2026-09-17-job-fail-report）：节点**已经判定这个 job 在这台机器上跑不成**（bun
+    装不上 / TS 运行时取不到 / argv 非法），并把原因报给了 hub/节点服务。
+
+    在此之前这条信息只落在**云机日志**里：pull 侧 worker 走 `except ProtocolError`
+    静默 skip（不回传、不还租约），训练侧只能等 `wait_job` 25 分钟超时（看到的是
+    "超时"，不是"bun 缺失"）；push 侧节点服务用 500 报失败，而 500 在
+    `push_client.wait_result` 里被当**瞬时错误**重试到预算耗尽。两者都把
+    「确定性能力缺失」伪装成了「网络/排队问题」。
+
+    reason/kind/detail 由回报方填写（`kind` = 异常类名，`detail` = 截断后的原文）。
+    """
+
+    def __init__(self, message: str, *, kind: str = "", detail: str = "") -> None:
+        self.kind = kind
+        self.detail = detail
+        super().__init__(message)
+
+
 class CodeChangedError(RuntimeError):
     """本进程已 import 的代码与 job 携带的 code_sha256 不一致（热替换事件）。
 
@@ -485,6 +507,12 @@ PAYLOAD_NAME = "payload.tar.xz"
 PAYLOAD_LEGACY_NAMES: tuple[str, ...] = ("payload.zip",)
 #: M3：TS 运行时 zip 在 job 目录内的文件名（`GET /jobs/{id}/ts_code` 服务它）。
 TS_CODE_NAME = "ts_code.zip"
+#: 节点确定性失败标记在 job 目录内的文件名（`POST /jobs/{id}/fail` 写、`GET
+#: /jobs/{id}/result` 读；存在 = 这个 job 不会有结果，等下去只会等满超时）。
+#: 训练侧**重发同一个 job** 时（同幂等键 → 同 job_id）由 `publish_job` 清除。
+FAIL_NAME = "fail.json"
+#: 失败原因回传体上限（人读的诊断字符串，1 个文本块足够；防大体打爆 hub 磁盘）。
+FAIL_BODY_MAX = 64 * 1024
 #: kind=iter 的 payload 内要点名的 init 权重文件名（节点跑 rollout 的 --weights）。
 INIT_WEIGHTS_NAME = "init_weights.json"
 # 标注成 Literal：typeshed 的 tarfile.open("w:xz") 重载要求 preset 为 Literal[0..9]，

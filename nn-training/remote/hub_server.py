@@ -15,9 +15,13 @@
   GET  /jobs/{id}/payload       下载 payload zip
   POST /jobs/{id}/heartbeat     心跳续租（60s）
   POST /jobs/{id}/result        worker 回传结果（weights_json + opt_tar + agg）
-  GET  /jobs/{id}/status        训练主循环轮询 job 状态（pending/leased/done）
+  GET  /jobs/{id}/status        训练主循环轮询 job 状态（pending/leased/done/failed）
   POST /jobs/{id}/release       worker 瞬时失败主动还租约（job 立即回池，2026-09-05）
-  GET  /jobs/{id}/result        训练主循环取回已落盘结果做三重校验
+  POST /jobs/{id}/fail          节点**确定性**失败回报原因（bun 装不上 / TS 运行时取不到
+                                / argv 非法）——落 `fail.json` 为终局，训练侧从
+                                `/result` 拿 410 + 原因**立即**停腿，不再等 25min 超时
+                                （2026-09-17）
+  GET  /jobs/{id}/result        训练主循环取回已落盘结果做三重校验（已失败 → 410 + 原因）
 
 鉴权（D9）：`Authorization: Bearer <token>`。**先验 token，封禁只拒无效鉴权尝试**
 （2026-09-17 改序）：同一来源 IP 连续 5 次**无效**鉴权 → 该 IP 的无效尝试 1 小时内
@@ -69,6 +73,8 @@ from remote._port_guard import ensure_port_free
 from remote.protocol import (
     AUTH_HEADER,
     CLAIM_TTL_SEC,
+    FAIL_BODY_MAX,
+    FAIL_NAME,
     PAYLOAD_NAME,
     TS_CODE_NAME,
     WIRE_V2_MAGIC,
@@ -240,6 +246,12 @@ class _JobStore:
                 continue  # 目录不存在或 payload 未落盘——不可领取
             if (jd / "result").exists():
                 continue  # 结果已落盘待验收——首写已分胜负，不再领取
+            if (jd / FAIL_NAME).exists():
+                # 节点已报**确定性失败**（POST /jobs/{id}/fail）：再派给别的节点只是把
+                # 同一个失败重演一遍（能力缺失类失败与节点无关地稳定复现），而训练侧
+                # 此刻已经拿着原因停腿了。重发同 job（同幂等键 → 同 job_id）由
+                # publish_job 清标记——重试路径不受影响。
+                continue
             out.append(jid)
         return out
 
@@ -368,6 +380,41 @@ class _JobStore:
             )
             # weights_json / opt_tar 以 base64 存于 result.json（< 数 MB，可接受）
             return True
+
+    def store_job_failure(self, job_id: str, rec: dict) -> bool:
+        """落盘节点确定性失败（`fail.json`）。返回 False = 已有结果 / 已有失败记录。
+
+        两条首写规则，都是为了「训练侧看到的那一条」不被后到的写方改掉：
+          * **有结果就不收失败**——结果已落盘时失败是过时信息（迟到的失败回报不得
+            盖掉成功的产物，与 `store_result` 的首写锁定同向）；
+          * **首个失败原因胜出**——多节点都失败时，第一个报上来的才是训练侧读到的
+            那条，后到的只保留在值里（不再改动）。"""
+        with self._lock:
+            jd = self._job_dir(job_id)
+            if (jd / "result").exists():
+                return False
+            dst = jd / FAIL_NAME
+            if dst.exists():
+                return False
+            jd.mkdir(parents=True, exist_ok=True)
+            # 原子写：tmp + replace（中断的 POST 不留半截失败记录——半截 JSON 会让
+            # _get_result 把它当「没有失败」继续等满超时，正是要治的那个病）。
+            tmp = jd / (FAIL_NAME + ".tmp")
+            tmp.write_text(json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(tmp, dst)
+            return True
+
+    def job_failure(self, job_id: str) -> dict | None:
+        """该 job 的失败记录（无 = None）。损坏/半截文件按「无」处理（不毒死端点）。"""
+        p = self._job_dir(job_id) / FAIL_NAME
+        if not p.exists():
+            return None
+        try:
+            with open(p, encoding="utf-8") as f:
+                loaded = json.load(f)
+                return loaded if isinstance(loaded, dict) else None
+        except (OSError, ValueError):
+            return None
 
     # ---- BC 每 epoch 回传（2026-09-13，plan/bc-cloud-integration.plan.md）----
     #: 单文件覆盖存最新 resume（磁盘有界：每 job 恒 1 份权重，~0.5MB）；指标追加 jsonl。
@@ -675,6 +722,8 @@ class HubHandler(BaseHTTPRequestHandler):
                 self._post_heartbeat()
             elif path.startswith("/jobs/") and path.endswith("/release"):
                 self._post_release()
+            elif path.startswith("/jobs/") and path.endswith("/fail"):
+                self._post_fail()
             elif path.startswith("/jobs/") and path.endswith("/result"):
                 self._post_result()
             elif path.startswith("/jobs/") and path.endswith("/epoch"):
@@ -873,15 +922,25 @@ class HubHandler(BaseHTTPRequestHandler):
             self._json({"error": "unknown job"}, 404)
             return
         now = self.store._now()
+        fail = self.store.job_failure(jid)
         if (jd / "result" / "result.json").exists():
             state = "done"
+        elif fail is not None:
+            # 终局（2026-09-17）：节点已报确定性失败——控制台与 wait_job 的收尾
+            # 二次确认都读这个 state，不必再去 /result 取 410。
+            state = "failed"
         elif self.store._leases.get(jid, 0) > now:
             state = "leased"
         else:
             state = "pending"
+        resp: dict = {"job_id": jid, "state": state}
+        if fail is not None and state == "failed":
+            resp["reason"] = str(fail.get("reason", ""))
+            resp["fail_kind"] = str(fail.get("kind", ""))
+            self._json(resp)
+            return
         # P3b 可观测：租约剩余秒 + 距上次心跳秒（worker 吞错保持现状，文档化——
         # 心跳 5xx 时 worker 侧只记日志不抛，见 worker._hb_loop）。
-        resp: dict = {"job_id": jid, "state": state}
         if state == "leased":
             resp["lease_expires_in"] = round(self.store._leases.get(jid, 0) - now, 1)
             resp["last_heartbeat_ago"] = round(now - self.store._last_heartbeat.get(jid, now), 1)
@@ -897,6 +956,22 @@ class HubHandler(BaseHTTPRequestHandler):
             return
         r = self.store.get_result(jid)
         if r is None:
+            # 410 = 这个 job **不会有结果**（节点已报确定性失败，原因在体内）。
+            # 刻意不用 404（那是「还没回来，继续等」）也不用 5xx（调用方按瞬时错误
+            # 重试）——410 让 wait_job 立刻带着原因收兵，而不是等满 25 分钟。
+            fail = self.store.job_failure(jid)
+            if fail is not None:
+                self._json(
+                    {
+                        "job_id": jid,
+                        "failed": True,
+                        "error": str(fail.get("reason", "job failed")),
+                        "fail_kind": str(fail.get("kind", "")),
+                        "fail_detail": str(fail.get("detail", "")),
+                    },
+                    410,
+                )
+                return
             self._json({"error": "not done"}, 404)
             return
         # M0 统一计量：把 hub 侧传输层实测字节（additive 的 wire_hub 键）随结果
@@ -933,6 +1008,73 @@ class HubHandler(BaseHTTPRequestHandler):
             self._json({"job_id": jid, "status": "released"})
         else:
             self._json({"error": "lease mismatch or absent — 非本 job 租约持有人"}, 403)
+
+    # ---- POST /jobs/{id}/fail（节点确定性失败回报；2026-09-17）----
+    def _post_fail(self) -> None:
+        """节点判定「这个 job 在这台机器上跑不成」时回报原因（bun 缺失 / TS 运行时
+        取不到 / argv 非法）。训练侧随后从 `GET /jobs/{id}/result` 拿到 **410 + 原因**，
+        立刻停腿——不再等 25 分钟超时（超时会把「能力缺失」写成「网络/排队问题」）。
+
+        鉴权同 release/result（H2：活租约须持有人）；首写锁定见 store_job_failure。
+        """
+        if not self._auth_ok():
+            return
+        jid = self._job_id()
+        if jid is None or not (self.store._job_dir(jid) / "manifest.json").exists():
+            self._json({"error": "not found"}, 404)
+            return
+        try:
+            raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        except Exception as e:
+            self._json({"error": f"read body failed: {e}"}, 400)
+            return
+        if len(raw) > FAIL_BODY_MAX:
+            self._json({"error": "fail body too large"}, 400)
+            return
+        try:
+            body = json.loads(raw.decode("utf-8"))
+        except ValueError as e:
+            self._json({"error": f"bad json: {e}"}, 400)
+            return
+        if not isinstance(body, dict) or not isinstance(body.get("reason"), str) or not body["reason"]:
+            self._json({"error": "reason 必填（非空字符串）"}, 400)
+            return
+        lease_token = self.headers.get("X-Lease-Token", "") or self.headers.get(
+            "lease-token", ""
+        )
+        if not self.store.result_token_ok(jid, lease_token):
+            self._json({"error": "lease mismatch — 非本 job 租约持有人"}, 403)
+            return
+        rec = {
+            "reason": self._clip(body["reason"], 2000),
+            "kind": self._clip(body.get("kind", ""), 200),
+            "detail": self._clip(body.get("detail", ""), 4000),
+            "worker": self._clip(body.get("worker", ""), 200),
+            "ts": self.store._now(),
+        }
+        recorded = self.store.store_job_failure(jid, rec)
+        if recorded:
+            # 账本事件（审计 + 控制台训练日志可见）：训练侧与会话结束后的复盘都能
+            # 看到「哪一轮、哪台机器、为什么失败」，而不是一行超时。
+            self.store._append_ledger(
+                {
+                    "event": "job_failed",
+                    "job_id": jid,
+                    "reason": rec["reason"],
+                    "kind": rec["kind"],
+                    "worker": rec["worker"],
+                    "ts": rec["ts"],
+                }
+            )
+            self.log_message("JOB FAILED %s: %s", jid, rec["reason"])
+        self._json(
+            {"job_id": jid, "status": "failed-recorded" if recorded else "already-recorded"}
+        )
+
+    @staticmethod
+    def _clip(v: object, n: int) -> str:
+        """截断成有界字符串（失败体来自远端机器，长度不可信）。非字符串 → 空。"""
+        return v[:n] if isinstance(v, str) else ""
 
     # ---- POST /jobs/{id}/result ----
     def _post_result(self) -> None:

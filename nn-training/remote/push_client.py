@@ -12,7 +12,7 @@ import base64
 import json
 import time
 
-from remote.hub_client import _request
+from remote.hub_client import _job_failed_from_body, _request
 from remote.protocol import (
     WIRE_JOB_CONTENT_TYPE,
     ProtocolError,
@@ -237,6 +237,11 @@ def wait_result(
         if status in (202, 404):
             time.sleep(poll_sec)
             continue
+        if status == 410:
+            # 410 = 节点已判定这个 job 在这台机器上**跑不成**（终局，原因在体内）。
+            # 2026-09-17 前节点用 500 报失败 ⇒ 落进下面的 5xx 分支被当瞬时错误重试到
+            # 预算耗尽（bun 装不上 = 等满 30 分钟）。现在立即带着原因失败。
+            raise _job_failed_from_body(jid, body)
         if status >= 500:
             log(f"wait_result: job {jid} HTTP {status}（瞬时错误）—— 重试")
             time.sleep(poll_sec)
