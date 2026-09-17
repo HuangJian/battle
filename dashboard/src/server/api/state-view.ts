@@ -4,7 +4,7 @@ import path from 'path'
 import { REPO_ROOT } from '../../core/paths'
 import type { ConsoleStateView, MetricsView } from '../../web/view'
 import { loadConsoleState } from '../actions'
-import { resolveCfTunnel } from '../../stack/specs'
+import { resolveCfTunnel, resolveSlim } from '../../stack/specs'
 import { readIterMetrics, readPairedReferee } from '../iters'
 import { loadConfigSafe } from './config'
 import { discoverCourses, effectiveCourse } from './courses'
@@ -68,6 +68,9 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
       // UI 显示它，避免「以为改了其实没改」。
       cfProtocol: resolveCfTunnel(cfg, course).protocol,
       cfEdgeIp: resolveCfTunnel(cfg, course).edgeIp,
+      // M2：协议瘦身开关的当前**生效**值（per-course > rl.* > 缺省 on）——
+      // UI 显示它，避免「以为改了其实没改」。
+      slim: resolveSlim(cfg, course),
     },
     metrics,
     // M1 隧道 A/B：与课程账本无关（探针结果落 tmp/），故不分课程、纯只读。

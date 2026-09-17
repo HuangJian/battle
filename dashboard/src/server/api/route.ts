@@ -3,7 +3,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync
 import path from 'path'
 import { loadConfig } from '../../core/config'
 import { NN_TRAINING, REPO_ROOT } from '../../core/paths'
-import type { CfEdgeIp, CfProtocol, Component } from '../../core/types'
+import type { CfEdgeIp, CfProtocol, Component, SlimMode } from '../../core/types'
 import {
   ActionError,
   type ActionResult,
@@ -100,6 +100,11 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
         if (cfEdgeIp && !['4', '6', 'auto'].includes(cfEdgeIp)) {
           return errResp(`未知边缘 IP 版本: ${cfEdgeIp}（只接受 4|6|auto）`, 400)
         }
+        // M2：协议瘦身回退开关（同白名单写法）——`'on'|'off'` 是 UI 域，落库时换算成 1|0。
+        const slim = bodyStr(body, 'slim')
+        if (slim && !['on', 'off'].includes(slim)) {
+          return errResp(`未知瘦身开关: ${slim}（只接受 on|off）`, 400)
+        }
         return okResp(
           await startPreset(mode as 'pull' | 'push' | 'local', ctx.course, {
             pushEndpoint: bodyStr(body, 'pushEndpoint'),
@@ -108,6 +113,7 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
             remoteDegrade: body.remoteDegrade === true,
             cfProtocol: (cfProtocol || undefined) as CfProtocol | undefined,
             cfEdgeIp: (cfEdgeIp || undefined) as CfEdgeIp | undefined,
+            slim: (slim || undefined) as SlimMode | undefined,
           }),
         )
       }

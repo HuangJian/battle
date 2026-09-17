@@ -64,6 +64,40 @@ def _course_push_url(args: Any) -> str:
         return ""
 
 
+def _course_cf_tunnel(args: Any) -> tuple[str | None, str | None]:
+    """本轮**真正生效**的隧道协议/边缘 IP → 写进 iteration 事件的 wire.protocol/edge_ip。
+
+    为什么训练侧要读它：M1 的开关住在 rl-config（`rl.cf_*` + `courses.<stem>.cf_*` 覆盖），
+    真正拉起 cloudflared 的是控制台——训练进程不读它就只能在指标里记 None，事后无法
+    按选项分组统计（plan §1.4 的硬要求）。
+
+    优先级：CLI 参数 > `courses.<stem>.cf_*` > `rl.cf_*` > None（不记）。
+    与 `_course_push_url` 同口径读 rl-config：选项住 rl-config，**永不进 curricula**
+    （D14 血缘）；读不到一律返回 None（旧行为，不炸训练）。
+    """
+    proto = str(getattr(args, "remote_cf_protocol", "") or "") or None
+    edge = str(getattr(args, "remote_cf_edge_ip", "") or "") or None
+    if proto and edge:
+        return proto, edge  # 两个都由 CLI 给定 → 不必读盘
+    try:
+        from train.loop_util import course_key_from_path
+
+        stem = course_key_from_path(str(getattr(args, "course_path", "") or ""))
+    except Exception:
+        stem = ""
+    if not stem:
+        return proto, edge
+    try:
+        cfg = dist_common.load_dist_config() or {}
+        course = (cfg.get("courses") or {}).get(stem) or {}
+        rl = cfg.get("rl") or {}
+        proto = proto or str(course.get("cf_protocol") or rl.get("cf_protocol") or "") or None
+        edge = edge or str(course.get("cf_edge_ip") or rl.get("cf_edge_ip") or "") or None
+    except Exception:
+        pass
+    return proto, edge
+
+
 def _gpu_push_nodes(remote_token: str, course_push_url: str = "") -> list[dict]:
     """GPU push 节点清单（HUB 推模式，DECISIONS §340 补充 4）：
     环境变量 REMOTE_PUSH_NODE（hub-start 冒烟注入本机伪节点，优先）→
@@ -1110,13 +1144,17 @@ class TrainingSteps:
         self._ppo_cloud_sec = float(result.get("ppo_sec") or 0.0) or self._ppo_sec
         # M0 统一计量：传输层实测（字节/秒）汇总进 iteration 事件的 wire 子字典。
         # protocol/edge_ip/slim 由 M1/M2 的配置面注入（未配 = None，旧行为）。
+        _cf_tunnel = _course_cf_tunnel(args)
         self._wire = _wire_from_result(
             result,
             is_push=bool(gpu_nodes),
             pack_sec=pack_sec,
             cfg={
-                "protocol": getattr(args, "remote_cf_protocol", None),
-                "edge_ip": str(getattr(args, "remote_cf_edge_ip", "") or "") or None,
+                # M1：记**真正生效**的隧道选项（CLI > courses.<stem>.cf_* > rl.cf_* > None）。
+                # 不能用 `getattr(args, "remote_cf_protocol", None)`——控制台写的是 rl-config，
+                # 不在 CLI 参数里时那个读法永远是 None（2026-09-17 查出的真缺口）。
+                "protocol": _cf_tunnel[0],
+                "edge_ip": _cf_tunnel[1],
                 "slim": bool(int(getattr(args, "remote_slim", 1) or 0)),
                 "rollout_src": str(getattr(args, "rollout_src", "local") or "local"),
             },

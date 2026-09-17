@@ -94,6 +94,35 @@ self-node push 训练留下的真 job），解包出真 shard 目录，再调**�
 （含占位 `manifest.json` + `opt_init.tar.b64` + `init_weights.json`）为 2,045,276 / 2,034,536 / 2,074,996 B，
 只打 shard 后为 1,198,096 / 1,187,392 / 1,227,432 B ⇒ **−41.4% / −41.6% / −40.8%**。
 
+### 补记：瘦身开关进启动选项 + 一个真实指标缺口修复（2026-09-17）
+
+**① M2 的 `slim` 现在能在启动训练时选**（计划 §1.4 要求「每个改动都有运行期开关」＋「启动时
+提供选项」）。M1 的隧道选项走齐了一条链（config → console-state → route 白名单 → preset → UI →
+显示当前生效值），而 `slim` 之前只落了 config 键 + 指标 ⇒ 想 A/B 只能手改 `rl-config.json`，
+等于没有「启动时提供选项」这条路。现已补齐同一条链：
+
+| 环节 | 位置 | 行为 |
+|---|---|---|
+| 类型/双域 | `core/types.ts` `SlimMode` + `CourseConf.slim` + `rl.slim` | UI/console-state 用 `'on'\|'off'`；rl-config **必须** `1\|0` |
+| 解析 | `stack/specs.ts` `resolveSlim` / `slimToCfg` | per-course > `rl.*` > 缺省 **on**（与 python `_d("slim",1)` 同口径）；换算只此一个入口 |
+| 生效值 | `api/state-view.ts` `modes.slim` | UI 显示「当前生效」，避免「以为改了其实没改」 |
+| 契约 | `api/route.ts` preset 白名单 `on\|off`（非法 400） | 与 `mode`/`cfProtocol` 同写法 |
+| 落库 | `actions/preset.ts` | `rl.slim = slimToCfg(opts.slim)`（数值域）+ console-state 存 UI 域 |
+| UI | `TrainLaunchModal.tsx` 「瘦身」分段控件 | 开 / 关（A/B 对照）；上次选择进 localStorage；当前生效值上屏 |
+
+**② 修的缺口：`wire.protocol` / `wire.edge_ip` 原本**恒为 null***。`_wire_from_result` 读的是
+`getattr(args, "remote_cf_protocol", None)`，但 CLI **从未声明这两个参数**（`cf_protocol` 在整个
+python 侧只出现在那两行读取处）⇒ M1 §1.4「开关取值必须写进 iteration 事件」实际没被满足：
+控制台能显示「此刻生效值」，却回答不了「改用 http2 之后那几轮 vs 之前那几轮」。修法：
+`rl/cli.py` 加 `--remote-cf-protocol` / `--remote-cf-edge-ip`（缺省取 rl-config，即控制台回写的键），
+`rl/loop_steps.py` 新增 `_course_cf_tunnel(args)`（与 `_course_push_url` 同口径：CLI >
+`courses.<stem>.cf_*` > `rl.cf_*` > None；选项住 rl-config，**永不进 curricula**，D14）。
+测试 `nn-training/tests/test_wire_cf_tunnel.py`（12 例：CLI 声明与缺省、四级优先级、不串课、
+旧 args/坏 config 不炸训练、端到端进 wire）。
+
+> ⚠ 修正一条早前的说法：前文表格里「push 侧 B5」的实测与本次均为本机闭环；
+> `wire.protocol` 现在才会真的非 null —— 在此之前「按协议分组统计」是做不到的。
+
 ### 未做（不写成已做）
 
 - **M2 云机绝对值确认**（≥8 轮中位 `wire.up_sec`）**未跑**。

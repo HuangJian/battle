@@ -309,9 +309,10 @@ export function App({ initial }: AppProps) {
       mode,
       remoteDegrade: push?.remoteDegrade === true,
     }
-    // M1：隧道选项随启动回写 rl-config + console-state（未选 = 不传，沿用现值）。
+    // M1/M2：传输选项随启动回写 rl-config + console-state（未选 = 不传，沿用现值）。
     if (push?.cfProtocol) body.cfProtocol = push.cfProtocol
     if (push?.cfEdgeIp) body.cfEdgeIp = push.cfEdgeIp
+    if (push?.slim) body.slim = push.slim
     if (mode === 'push' && push) {
       body.pushEndpoint = push.endpoint ?? ''
       body.pushAuthKey = push.authKey ?? ''

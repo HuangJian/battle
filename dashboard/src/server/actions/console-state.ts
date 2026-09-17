@@ -2,7 +2,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'fs'
 import path from 'path'
 import { consoleStatePath } from '../../core/paths'
-import type { CfEdgeIp, CfProtocol } from '../../core/types'
+import type { CfEdgeIp, CfProtocol, SlimMode } from '../../core/types'
 
 // ────────────────────────── 控制台状态（trainer 模式 / 当前课程） ──────────────────────────
 
@@ -33,6 +33,9 @@ export interface ConsoleState {
    *  「当前生效值」。旧 console-state.json 无此键 → 读取时由 rl-config 缺省回填。 */
   cfProtocol?: CfProtocol
   cfEdgeIp?: CfEdgeIp
+  /** 协议瘦身（M2，`'on'|'off'`）：preset 时随启动回写；UI 据此显示「当前生效值」。
+   *  旧 console-state.json 无此键 → 读取时由 rl-config 缺省回填（缺省 on）。 */
+  slim?: SlimMode
   /** 当前课程（组件启动的 jobRoot/日志目录来源）。 */
   course: string
   /** 控制台当前课程（P5-W1 additive）——读取优先它，写入与 `course` 同值。

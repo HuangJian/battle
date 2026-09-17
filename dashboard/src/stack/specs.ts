@@ -15,7 +15,14 @@ import { agentSentinels, pySentinels } from '../core/sentinels'
 import { slotPort } from '../core/slots'
 import { resolveVenvPython } from '../core/venv'
 import { COMPONENT_KILL_TREE } from '../core/types'
-import type { CfEdgeIp, CfProtocol, ProcSpec, RegistryEntry, RlConfig } from '../core/types'
+import type {
+  CfEdgeIp,
+  CfProtocol,
+  ProcSpec,
+  RegistryEntry,
+  RlConfig,
+  SlimMode,
+} from '../core/types'
 
 /** 课程日志目录（per-course；无课程走 `nocourse`——与旧单课路径同构）。 */
 export function courseLogDir(course: string): string {
@@ -107,6 +114,22 @@ export function resolveCfTunnel(
   const protocol = (cc?.cf_protocol ?? cfg.rl.cf_protocol ?? 'http2') as CfProtocol
   const edgeIp = (cc?.cf_edge_ip ?? cfg.rl.cf_edge_ip ?? '4') as CfEdgeIp
   return { protocol, edgeIp }
+}
+
+/** 协议瘦身开关（M2）解析：per-course > rl.* > 缺省 `'on'`。
+ *
+ *  缺省为什么是 on：python 侧 `--remote-slim` 默认 `_d("slim", 1)`（开着才是今天的
+ *  线上行为）；这里如果缺省 off，控制台会在**没改过配置**的课上谎报「瘦身关」。
+ *  与 `resolveCfTunnel` 同形：UI 只认 `'on'|'off'`，rl-config 只认 1/0（`slimToCfg`）。 */
+export function resolveSlim(cfg: RlConfig, course = ''): SlimMode {
+  const cc = course ? cfg.courses?.[course] : undefined
+  const raw = cc?.slim ?? cfg.rl.slim
+  return Number(raw ?? 1) === 0 ? 'off' : 'on'
+}
+
+/** `SlimMode` → rl-config 能读的数值（**唯一**换算入口；写字符串会让训练启动报错）。 */
+export function slimToCfg(mode: SlimMode): 0 | 1 {
+  return mode === 'off' ? 0 : 1
 }
 
 /** cloudflared 隧道旗标（唯一来源）——cloudflaredSpec 与 hub.ts 的 spawn 共用，

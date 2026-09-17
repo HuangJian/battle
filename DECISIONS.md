@@ -2061,6 +2061,14 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 - **B6（xz preset 3→6）已量、不采用**（2026-09-17，3 份真 payload）：体积只 −2.6…−3.0%（~34KB），
   打包却 +188…+199%（关键路径 +6.3s/轮），按隧道实测 3.5 Mbps 那 34KB 只值 0.08s ⇒ 净亏。
   结论就写在 `remote/protocol.py` 常量旁（就近表达，防将来重测）。
+- **补记（2026-09-17，同批）**：① M2 的 `slim` 补上「启动时提供选项」整条链（原来只能手改
+  rl-config.json ⇒ A/B 无路）：类型/双域 `SlimMode`、`resolveSlim`/`slimToCfg`、console-state、
+  preset 白名单与落库、启动弹窗控件与当前生效值。**双域是铁的**：UI/console-state/body 用
+  `'on'|'off'`，rl-config 必须 `1|0`（python `--remote-slim` 是 `type=int,choices=(0,1)`，
+  写字符串会让训练启动直接报错），换算只允许走 `slimToCfg()`。② 修掉一个真缺口：
+  `wire.protocol`/`wire.edge_ip` 原**恒为 null**（CLI 从未声明这两个参数，而 `_wire_from_result`
+  读的正是 args）⇒ §1.4「开关取值必须写进 iteration 事件」过去并未满足。现由 CLI 参数 +
+  `_course_cf_tunnel`（CLI > `courses.<stem>.cf_*` > `rl.cf_*` > None）填上。
 - **未做（不写成已做）**：M2 的云机绝对值确认**未跑**；M3（rollout 上云）按 §5.1 门 1 已命中、
   门 2 待测，且 M2 后上行仅 ~1.2MB ⇒ 留档不做。
 

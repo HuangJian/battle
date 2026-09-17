@@ -28,6 +28,9 @@ export interface CourseConf {
   cf_protocol?: CfProtocol
   /** 本课隧道边缘 IP 版本覆盖（M1；缺省 = 用 rl.cf_edge_ip）。 */
   cf_edge_ip?: CfEdgeIp
+  /** 本课协议瘦身覆盖（M2；缺省 = 用 rl.slim）。数字域：python 侧 `_d("slim",1)`
+   *  只认 1/0（`--remote-slim` 是 `type=int, choices=(0,1)`）。 */
+  slim?: 0 | 1
 }
 
 /** cloudflared 隧道协议（M1，plan/remote-wire-remediation §3）：
@@ -38,6 +41,13 @@ export interface CourseConf {
 export type CfProtocol = 'http2' | 'quic' | 'auto'
 /** cloudflared 边缘 IP 版本（M1）：`4`（缺省）/ `6` / `auto`（不传旗标）。 */
 export type CfEdgeIp = '4' | '6' | 'auto'
+/** 协议瘦身开关（M2，`plan/remote-wire-remediation.plan.md` §1.4 的回退开关）。
+ *
+ *  **双域**（有意为之，别"统一"掉）：UI / console-state / HTTP body 用 `'on'|'off'`
+ *  （跟 CfProtocol 一样的字符串域，UI 直接用）；rl-config 里必须落成 `1|0` —— python
+ *  侧 `--remote-slim` 是 `type=int, choices=(0,1)`，写字符串会让训练启动直接报错。
+ *  换算只允许走 `slimToCfg()`（dashboard 侧）一个入口。 */
+export type SlimMode = 'on' | 'off'
 
 /** rl-config.json（本工具链只消费 nodes + rl + courses 块，其余键原样保留）。 */
 export interface RlConfig {
@@ -55,6 +65,8 @@ export interface RlConfig {
     /** 隧道协议（M1；缺省 http2）与边缘 IP 版本（缺省 4）——`auto` = 旧行为。 */
     cf_protocol?: CfProtocol
     cf_edge_ip?: CfEdgeIp
+    /** 协议瘦身（M2；缺省 1 = 开）。数字域，见 `SlimMode` 注释。 */
+    slim?: 0 | 1
     [key: string]: unknown
   }
   /** per-course 槽位/配额（唯一事实来源；console-state 不存这些）。 */

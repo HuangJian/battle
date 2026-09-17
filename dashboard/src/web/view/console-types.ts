@@ -92,6 +92,9 @@ export interface ModeView {
    *  可选（additive）：旧视图/夹具不带此键时 UI 回退缺省。 */
   cfProtocol?: string
   cfEdgeIp?: string
+  /** 当前生效的协议瘦身开关（M2，`'on'|'off'`；缺省 on）——可选（additive）：
+   *  旧视图/夹具不带此键时 UI 回退缺省。 */
+  slim?: string
 }
 
 export interface MetricsView {

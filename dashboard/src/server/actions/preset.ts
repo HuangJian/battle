@@ -5,10 +5,11 @@
  *  变成 hubServer → localWorker → trainingLoop(--ppo remote + 本机 hub)。 */
 import { loadConfig, saveConfig, validateCourseArg, writeRemoteHubUrl } from '../../core/config'
 import { configurePushEndpoint } from '../../stack/push-config'
-import type { CfEdgeIp, CfProtocol, Component } from '../../core/types'
+import type { CfEdgeIp, CfProtocol, Component, SlimMode } from '../../core/types'
 import { tailscaleIp } from '../../core/net'
 import { slotPort } from '../../core/slots'
 import { rlConfigSmoke } from '../../stack/smoke'
+import { slimToCfg } from '../../stack/specs'
 import { ConsoleState, saveConsoleState } from './console-state'
 import { ActionError, ActionResult, done, guard, release } from './result'
 import { startComponent, StartCtx } from './start'
@@ -27,6 +28,10 @@ export interface PresetOpts {
   /** M1：隧道协议/边缘 IP（随启动回写 rl-config.rl.* + console-state 生效值）。 */
   cfProtocol?: CfProtocol
   cfEdgeIp?: CfEdgeIp
+  /** M2：协议瘦身回退开关（随启动回写 rl-config.rl.slim=1|0 + console-state `'on'|'off'`）。
+   *  ⚠ 与 cf_* 不同：**不能**把字符串写进 rl-config（python `--remote-slim` 是
+   *  `type=int, choices=(0,1)`），必须过 `slimToCfg()` 换算。 */
+  slim?: SlimMode
 }
 
 /** 按 trainer 模式顺序拉起组件组合：
@@ -51,13 +56,15 @@ export async function startPreset(
     saveConsoleState({ trainerPpo: mode, course })
     // M1：隧道选项随启动回写（rl-config 的 rl.* 键 + console-state 生效值）——
     // 留空 = 不动（沿用 rl-config 现值/缺省 http2/4）。
-    if (opts.cfProtocol || opts.cfEdgeIp) {
+    if (opts.cfProtocol || opts.cfEdgeIp || opts.slim) {
       const cfgT = loadConfig()
       cfgT.rl = cfgT.rl || ({} as (typeof cfgT)['rl'])
       if (opts.cfProtocol) cfgT.rl.cf_protocol = opts.cfProtocol
       if (opts.cfEdgeIp) cfgT.rl.cf_edge_ip = opts.cfEdgeIp
+      // M2：写数值域（`1|0`）——字符串会让训练侧 `choices=(0,1)` 直接报错退出。
+      if (opts.slim) cfgT.rl.slim = slimToCfg(opts.slim)
       saveConfig(cfgT)
-      saveConsoleState({ cfProtocol: opts.cfProtocol, cfEdgeIp: opts.cfEdgeIp })
+      saveConsoleState({ cfProtocol: opts.cfProtocol, cfEdgeIp: opts.cfEdgeIp, slim: opts.slim })
     }
     let pushNote = ''
     let viaLocalWorker = false

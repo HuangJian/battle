@@ -7,6 +7,7 @@
  *  Esc / 遮罩关闭由 App 全局处理。 */
 
 import { useEffect, useRef, useState } from 'preact/hooks'
+import type { SlimMode } from '../../../core/types'
 import type { ModeView } from '../../view'
 import { SegmentedControl } from '../../components/SegmentedControl'
 import { Toggle } from '../../components/Toggle'
@@ -35,10 +36,13 @@ const TC_PUSH_AUTH = 'tc.pushAuthKey'
 const TC_REMOTE_DEGRADE = 'tc.remoteDegrade'
 const TC_CF_PROTOCOL = 'tc.cfProtocol'
 const TC_CF_EDGE_IP = 'tc.cfEdgeIp'
+const TC_SLIM = 'tc.slim'
 
 export interface TunnelLaunchOpts {
   cfProtocol: 'http2' | 'quic' | 'auto'
   cfEdgeIp: '4' | '6' | 'auto'
+  /** M2 协议瘦身回退开关（`'on'|'off'`）：关掉 = 逐字节回到旧字节行为（A/B 对照组）。 */
+  slim: SlimMode
 }
 
 function readLocal(key: string): string {
@@ -98,6 +102,9 @@ export function TrainLaunchModal({
   const [pushAuthKey, setPushAuthKey] = useState(() => readLocal(TC_PUSH_AUTH))
   const [pushErr, setPushErr] = useState('')
   // M1：隧道协议/边缘 IP。选中值优先 localStorage（上次选择），否则服务端当前生效值。
+  const [slim, setSlim] = useState<SlimMode>(() =>
+    readTunnelSel(TC_SLIM, modes.slim, ['on', 'off'] as const, 'on'),
+  )
   const [cfProtocol, setCfProtocol] = useState<'http2' | 'quic' | 'auto'>(() =>
     readTunnelSel(TC_CF_PROTOCOL, modes.cfProtocol, ['http2', 'quic', 'auto'] as const, 'http2'),
   )
@@ -180,7 +187,8 @@ export function TrainLaunchModal({
     writeLocal(TC_REMOTE_DEGRADE, remoteDegrade ? '1' : '0')
     writeLocal(TC_CF_PROTOCOL, cfProtocol)
     writeLocal(TC_CF_EDGE_IP, cfEdgeIp)
-    const tunnel: TunnelLaunchOpts = { cfProtocol, cfEdgeIp }
+    writeLocal(TC_SLIM, slim)
+    const tunnel: TunnelLaunchOpts = { cfProtocol, cfEdgeIp, slim }
     if (mode !== 'push') {
       onLaunch(mode, { remoteDegrade, ...tunnel })
       return
@@ -311,6 +319,26 @@ export function TrainLaunchModal({
             {modes.cfProtocol ?? 'http2'}/{modes.cfEdgeIp ?? '4'}
           </b>
           。
+        </p>
+        <div className="tc-line">
+          <span className="tc-muted tc-small" style={{ minWidth: 90 }}>
+            瘦身
+          </span>
+          <SegmentedControl<SlimMode>
+            value={slim}
+            ariaLabel="协议瘦身"
+            options={[
+              { value: 'on', label: '开' },
+              { value: 'off', label: '关（A/B 对照）' },
+            ]}
+            onChange={setSlim}
+          />
+        </div>
+        <p className="tc-muted tc-small" style={{ marginTop: -4 }}>
+          协议瘦身（M2）：开 = opt/ref 走内容寻址 blob，上行 ~4.43MB → ~1.2MB； 关 =
+          逐字节回到旧行为（内联 base64 + payload 内冗余文件），拿来做 A/B 对照。
+          当前生效（rl-config）：<b>{modes.slim === 'off' ? '关' : '开'}</b>
+          ，取值随每轮写入「传输」页的 瘦身 列（事后可分组统计）。
         </p>
         <div className="tc-line tc-toggle-group" ref={togglesRef}>
           <span className="tc-muted tc-small">行为开关</span>

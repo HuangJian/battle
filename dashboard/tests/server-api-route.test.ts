@@ -31,6 +31,13 @@ describe('console/api.routeAction', () => {
     expect(b.__status).toBe(400)
   })
 
+  it('preset 瘦身开关白名单：非法 slim → 400（M2；只接受 on|off）', async () => {
+    const r = (await postJson('preset', { mode: 'local', slim: '0' })) as { __status: number }
+    expect(r.__status).toBe(400)
+    const r2 = (await postJson('preset', { mode: 'local', slim: 'true' })) as { __status: number }
+    expect(r2.__status).toBe(400)
+  })
+
   it('节点并发越界 → 动作失败且不写盘', async () => {
     const before = readFileSync(configPath(), 'utf-8')
     const r = await postJson('setNodeConcurrency', { id: 'self', concurrency: 999 })

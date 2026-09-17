@@ -456,6 +456,27 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         default=_d("remote_token", ""),
         help="远程模式：hub-server Bearer token（云 worker 与训练主循环共享）",
     )
+    # M1（2026-09-17）：隧道选项**只是记录口径**——真正拉起 cloudflared 的是控制台。
+    # 但 iteration 事件的 wire.protocol/edge_ip 必须记**当时真正生效**的值
+    # （plan §1.4：开关取值要进指标，否则事后无法按选项分组统计）。
+    # 取值优先级：本参数 > rl-config `courses.<stem>.cf_*` > rl.* > 空（不记）。
+    # 空 = 不记（旧行为）：`--remote-cf-protocol` 是 `type=str` 且有 choices，
+    # 字符串才会被写进账本；用 "" 表示「本次不记」而非 "auto"。
+    ap.add_argument(
+        "--remote-cf-protocol",
+        default=_d("cf_protocol", ""),
+        choices=("", "http2", "quic", "auto"),
+        help="记录口径（M1）：本轮 cloudflared 实际使用的隧道协议，写进 iteration 事件的"
+        " wire.protocol；空串 = 不记（旧行为）。控制台启动时已回写 rl-config，本参数只"
+        "用于手工启动/覆盖",
+    )
+    ap.add_argument(
+        "--remote-cf-edge-ip",
+        default=_d("cf_edge_ip", ""),
+        choices=("", "4", "6", "auto"),
+        help="记录口径（M1）：本轮 cloudflared 实际使用的边缘 IP 版本，写进 wire.edge_ip；"
+        "空串 = 不记",
+    )
     ap.add_argument(
         "--remote-job-root",
         default=_d("remote_job_root", ""),
