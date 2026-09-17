@@ -82,6 +82,38 @@ export function portOwnerPids(port: number): number[] {
   }
 }
 
+/** portOwnedBy 的可注入依赖（测试用；默认走 OS 进程表 + 真实 TCP 探测）。 */
+export interface PortOwnershipIO {
+  ownerPids?: (port: number) => number[]
+  listening?: (port: number) => Promise<boolean>
+}
+
+/** 这个端口是不是**该 pid** 在监听？（= 「刚 spawn 的进程真的拿到了它要独占的端口吗」）
+ *
+ *  **为什么需要它**（2026-09-17 事故家族的第二半）：只问「端口有人答健康检查吗」不够——
+ *  回收失败/晚到位的**旧僵尸**照样能答 200，于是就绪判定把「别人的 200」记到新进程头上：
+ *  控制台报「已就绪」、账本记新 pid，而实际在服务的是旧进程（URL 读自新日志、连接状态
+ *  读自旧端口；监督器同理：把僵尸的 200 当成「重启成功」）。
+ *
+ *  **空清单有两种含义，必须用 TCP 探测区分**（否则会得到一个荒谬的语义）：
+ *    * 根本没人监听 ⇒ 新进程显然没拿到端口 ⇒ **false**（这正是要抓的那类：bind 失败后
+ *      秒退）；
+ *    * 有人在监听但列举不出归属（lsof/netstat 不可用）⇒ 探测不可用 ⇒ **true**（不因此判死，
+ *      否则探测工具缺失会让所有组件启动失败）。
+ *  有清单时只认「包含自己」（fail-closed 落在「确知不是自己」那一侧）。
+ */
+export async function portOwnedBy(
+  pid: number,
+  port: number,
+  io: PortOwnershipIO = {},
+): Promise<boolean> {
+  if (!pid || !port) return false
+  const owners = (io.ownerPids ?? portOwnerPids)(port)
+  if (owners.length > 0) return owners.includes(pid)
+  const listening = await (io.listening ?? portListen)(port)
+  return listening
+}
+
 /** 停止所有登记的受管进程 + 端口兜底清场（用户指令 2026-09-05：不管进程从哪来，
  *  占着端口就杀）。 */
 export async function stopAllManaged(): Promise<void> {

@@ -124,17 +124,39 @@ docstring 到处在讨论这个坑，且 `os.kill(pid, 15)` 是**故意发的信
 一道闸。`stepCloudflared` 在 spawn 前 `reclaimPort(metricsPort)`（与 hub/selfNode 同族），
 堵住 `supersedeSlotTunnels` 看不见的幸存者（孤儿/登记丢失/控制台重启竞态）。metrics 端口既是
 `--metrics` 的 bind 目标、又是 `/ready` 的探测目标，被占着会**同时**造成「新隧道 bind 失败」与
-「就绪读数读自旧僵尸」；后者另加 `tunnelOwnsMetrics(pid, port)`：就绪 = 「本进程持有该端口 ∧
-/ready 200」。探测不可用（清单为空）**返回 true 不判死**——否则 lsof 缺失会让所有隧道启动失败；
-fail-closed 只落在「确知占用者不是自己」那一侧。
+「就绪读数读自旧僵尸」；后者另加**就绪归属**：`core/proc.ts::portOwnedBy(pid, port)`
+（唯一实现，早期叫 `tunnelOwnsMetrics`，因 hub/worker 也要用而改成中性名），就绪 = 「本进程持有
+该端口 ∧ /ready 200」。
+
+### 三补三、就绪归属推广到监督器（2026-09-17 第四批，用户点名「监督器那条路径也要」）
+
+`ProcSpec` 新增可选字段 **`ownsResource?: (pid) => Promise<boolean>`**，三处声明：
+`hubServerSpec`（hub 端口）、`cloudflaredSpec`（metrics 端口）、`workerServeSpec`（push 端口）；
+**监督器**（`server.ts::restart`，变更检测重启）与**启动步骤**的就绪判定都变成
+「`ownsResource`（未声明 = 不阻塞）∧ `healthy()`」，未就绪时日志点出归因。
+
+为什么监督器同样需要：它杀旧 pid 后紧接着拉起同一条 spec，若新进程 bind 失败
+（EADDRINUSE / python 侧双监听守卫拒绝）**早已退出**，而端口上的旧实例照样答 `/ping` / `/ready`
+⇒ 监督器把**僵尸的 200 记成「重启成功」**：账本写新 pid、实际服务的是旧进程 —— 这正是
+hub-server 重启事故的相位（账本 pid ≠ 真在服务的那一个）。
+
+**实现时发现并修掉的语义漏洞**（记一笔，避免以后重蹈）：`portOwnedBy` 最初把「占用者清单为空」
+一律当成「探测不可用 ⇒ 不判死」——但**没人监听**时 lsof/netstat 也返回空，于是「新进程已死」
+会被判成「归属 OK」。现用 TCP 探测二次区分：没人监听 ⇒ **false**（要抓的就是这个）；
+有人在监听但列不出归属 ⇒ **true**（工具缺失不该让所有组件启动失败）。测试里就有一个真监听
+用例把它担住了（hub 端口无人监听 ⇒ `hub.ownsResource!(child.pid) === false`）。
+
+**保留的刻意选择**：监督器重启路径**不接** `reclaimPort`（它杀的是账本里确切 pid、紧接着拉起
+同一 spec，无孤儿窗口；kill 失败时回收也一样杀不掉）——只核归属。
 
 ### 四、验收
 
 - `nn-training/tests/test_hub_auth_d9_order.py`（11 例）、`nn-training/tests/test_instance_lock.py`（9 例，
   含真进程顺序双启被拒 / 同时三启恰好存活一个）、`dashboard/tests/trainer-lock-release.test.ts`（13 例）。
 - A/B 取证：detached worktree 对 HEAD 跑新测试 → 红（`assert 403 == 200`；日志里 127.0.0.1 被 BLOCKED）。
-- 第三批（存活探测/隧道闸）：`test_pid_probe_windows_safe.py` 6 → **8 例**、
-  `dashboard/tests/training-port-reclaim.test.ts` 6 → **12 例**；A/B 红：worktree 对 HEAD 跑新测
+- 第三/四批（存活探测/隧道闸/就绪归属）：`test_pid_probe_windows_safe.py` 6 → **8 例**、
+  `dashboard/tests/training-port-reclaim.test.ts` 6 → **15 例**（含 `ownsResource` 声明门禁、
+  监督器接线门禁、`portOwnedBy` 空清单两义、真监听下 `hub.ownsResource` 判 false）；A/B 红：worktree 对 HEAD 跑新测
   6 红（含行为级 `tmp-clean._pid_alive(0) = True`），cloudflared 侧 HEAD 上既无 `reclaimPort`
   也无 `tunnelOwnsMetrics`、就绪判定是裸 `tunnelEdgeReady`。门禁：nn python gate（205 源文件）✓、
   `cd dashboard && bun run typecheck && bun run test`（406 例）✓、`bun run check`（1849 例）✓。

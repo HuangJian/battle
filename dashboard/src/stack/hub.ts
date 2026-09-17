@@ -24,7 +24,7 @@ import {
   saveComponent,
   clearAnyComponent,
 } from '../core/registry'
-import { launchSpec, portOwnerPids, spawnBg } from '../core/proc'
+import { launchSpec, portOwnedBy, portOwnerPids, spawnBg } from '../core/proc'
 import { writeRemoteHubUrl } from '../core/config'
 import { fail, info, log, ok, warn } from '../core/log'
 import { monitorTouch } from '../core/reload-touch'
@@ -119,33 +119,8 @@ export async function reclaimPort(port: number, io: ReclaimPortIO = {}): Promise
   return struck
 }
 
-/** tunnelOwnsMetrics 的可注入依赖（测试用；默认走 OS 进程表）。 */
-export interface MetricsOwnershipIO {
-  ownerPids?: (port: number) => number[]
-}
-
-/** 该 metrics 端口上的 `/ready` 是不是**本隧道进程**答的？
- *
- *  **为什么光看 /ready 200 不够**（与 reclaimPort 同族的第二半，2026-09-17）：
- *  `reclaimPort` 只能回收**探测得到**的占用者——回收失败（权限不足）或占用者晚到位时，
- *  `--metrics` bind 失败的 cloudflared 会「活着但不持有 metrics 端口」，而 `tunnelEdgeReady`
- *  只要有进程答 `/ready` 200 就返回 true ⇒ **旧僵尸的 200 被当成新隧道的就绪**，控制台报
- *  「隧道已就绪」而实际那条隧道根本不属于刚 spawn 的进程（URL 来自新日志、连接状态却读自旧
- *  metrics）。故就绪判定 = 「自己持有该端口」∧「/ready 200」。
- *
- *  **空清单（lsof/netstat 不可用）= 探测不可用 ⇒ 返回 true**：不因此判死，否则探测工具
- *  缺失会让**所有**隧道启动失败。只有**确知**占用者不是自己时才判 false（fail-closed 只
- *  落在“确知错”的那一侧）。
- */
-export async function tunnelOwnsMetrics(
-  pid: number,
-  metricsPort: number,
-  io: MetricsOwnershipIO = {},
-): Promise<boolean> {
-  if (!pid || !metricsPort) return false
-  const owners = (io.ownerPids ?? portOwnerPids)(metricsPort)
-  return owners.length === 0 || owners.includes(pid)
-}
+// 端口归属判定住 `core/proc.ts::portOwnedBy`（唯一实现，spec 与启动步骤共用）——
+// 本文件不再自带一份，避免又一次「同名两份实现」的漂移。
 
 // ────────────────────────── 组件步骤 ──────────────────────────
 
@@ -354,10 +329,9 @@ export async function stepCloudflared(
 
   // 隧道死活以本地 /ready 为准（不依赖出网）；穿隧道 ping 失败只降级为警告。
   // 归属前置（2026-09-17）：必须确认 metrics 端口是**本进程**持有的，否则旧僵尸答的 200
-  // 会被当成新隧道的就绪（见 tunnelOwnsMetrics）。
+  // 会被当成新隧道的就绪（见 core/proc.ts::portOwnedBy）。
   const edgeReady = await waitUntil(
-    async () =>
-      (await tunnelOwnsMetrics(procPid, metricsPort)) && (await tunnelEdgeReady(metricsPort)),
+    async () => (await portOwnedBy(procPid, metricsPort)) && (await tunnelEdgeReady(metricsPort)),
     20000,
     500,
   )

@@ -16,9 +16,12 @@ import { afterAll, describe, expect, it } from 'bun:test'
 import { readFileSync } from 'fs'
 import path from 'path'
 import { DASHBOARD_ROOT } from '../src/core/paths'
-import { portOwnerPids } from '../src/core/proc'
+import { portOwnedBy, portOwnerPids } from '../src/core/proc'
 import { killPid, pidAlive, portListen, waitUntil } from '../src/core/net'
-import { reclaimPort, tunnelOwnsMetrics } from '../src/stack/hub'
+import { reclaimPort } from '../src/stack/hub'
+import { cloudflaredSpec, hubServerSpec } from '../src/stack/specs'
+import { slotPort } from '../src/core/slots'
+import type { RlConfig } from '../src/core/types'
 
 // ────────────────────────── 单测：可注入依赖（跨平台确定性） ──────────────────────────
 
@@ -172,30 +175,78 @@ describe('接线：启动步骤在 spawn 前回收端口', () => {
   it('stepCloudflared 的就绪判定必须带「端口是我的」', () => {
     // 只认 /ready 200 是不够的：回收失败/晚到位的僵尸也能答 200（那是别人的隧道）。
     const body = bodyOf(src, 'stepCloudflared')
-    expect(body).toContain('tunnelOwnsMetrics')
+    expect(body).toContain('portOwnedBy')
+  })
+
+  it('specs 给独占端口的组件都声明了 ownsResource', () => {
+    const specs = readFileSync(path.join(DASHBOARD_ROOT, 'src', 'stack', 'specs.ts'), 'utf-8')
+    for (const fn of ['hubServerSpec', 'cloudflaredSpec', 'workerServeSpec'] as const) {
+      const start = specs.indexOf(`export function ${fn}`)
+      expect(start).toBeGreaterThan(-1)
+      const rest = specs.indexOf('export function ', start + 1)
+      expect(specs.slice(start, rest === -1 ? undefined : rest)).toContain('ownsResource')
+    }
+  })
+
+  it('监督器重启的就绪复核先问 ownsResource 再问 healthy', () => {
+    // 监督器（server.ts::restart）杀旧 pid 后拉起同一条 spec：若新进程没真的拿到它要
+    // 独占的端口（bind 失败），而**旧僵尸**仍在那端口上答健康检查，监督器会把「僵尸的
+    // 200」记成重启成功——账本记新 pid、实际服务的是旧进程（就是 2026-09-17 事故的相位）。
+    const server = readFileSync(path.join(DASHBOARD_ROOT, 'src', 'server', 'server.ts'), 'utf-8')
+    const start = server.indexOf('const restart = async (')
+    expect(start).toBeGreaterThan(-1)
+    const raw = server.slice(start, server.indexOf('createSupervisor(restart', start))
+    // 去行注释再找：注释里提到 `healthy` 是**解释**（“只问 healthy 会踩…”），不是接线。
+    const body = raw
+      .split('\n')
+      .map((l) => l.replace(/\/\/.*$/, ''))
+      .join('\n')
+    const owns = body.indexOf('ownsResource')
+    const healthy = body.indexOf('healthy')
+    expect(owns).toBeGreaterThan(-1)
+    expect(healthy).toBeGreaterThan(-1)
+    expect(owns).toBeLessThan(healthy) // 先核归属、再问健康
   })
 })
+
+// ────────────────────────── 夹具 ──────────────────────────
+
+/** 最小 RlConfig（只含 spec 构造真正读的字段）；basePort 可注入以对准测试端口。 */
+function cfgFixture(basePort: number): RlConfig {
+  return {
+    version: 1,
+    nodes: [],
+    // hub_port 与下面 cloudflared 用的 metrics 端口必须错开（spec 的端口由槽位推导）
+    rl: { hub_port: basePort + 1000, agent_port: basePort + 2000, remote_token: 'fixture-token' },
+    courses: { 'course-a': { slot: 0 } },
+  } as unknown as RlConfig
+}
 
 // ────────────────────────── 就绪归属：/ready 必须由**本隧道进程**应答 ──────────────────────────
 
-describe('tunnelOwnsMetrics（注入依赖）', () => {
-  it('占用者就是自己 → true；确知是别人 → false', async () => {
-    expect(await tunnelOwnsMetrics(123, 8788, { ownerPids: () => [123] })).toBe(true)
-    expect(await tunnelOwnsMetrics(123, 8788, { ownerPids: () => [123, 9] })).toBe(true)
-    expect(await tunnelOwnsMetrics(123, 8788, { ownerPids: () => [999] })).toBe(false)
+describe('portOwnedBy（注入依赖）', () => {
+  it('占用者含该 pid → true；确知不含 → false', async () => {
+    expect(await portOwnedBy(7, 8877, { ownerPids: () => [7] })).toBe(true)
+    expect(await portOwnedBy(7, 8877, { ownerPids: () => [7, 9] })).toBe(true)
+    expect(await portOwnedBy(7, 8877, { ownerPids: () => [8] })).toBe(false)
   })
 
-  it('探测不可用（空清单）→ 不判死（否则 lsof 缺失会让所有隧道启动失败）', async () => {
-    expect(await tunnelOwnsMetrics(123, 8788, { ownerPids: () => [] })).toBe(true)
+  it('空清单两种含义：没人监听 → false（抓的就是这个）；列举不出归属 → true（不判死）', async () => {
+    expect(await portOwnedBy(7, 8877, { ownerPids: () => [], listening: async () => false })).toBe(
+      false,
+    )
+    expect(await portOwnedBy(7, 8877, { ownerPids: () => [], listening: async () => true })).toBe(
+      true,
+    )
   })
 
-  it('缺 pid / 缺 port → false（没东西可归属）', async () => {
-    expect(await tunnelOwnsMetrics(0, 8788, { ownerPids: () => [0] })).toBe(false)
-    expect(await tunnelOwnsMetrics(123, 0, { ownerPids: () => [123] })).toBe(false)
+  it('缺 pid / 缺 port → false', async () => {
+    expect(await portOwnedBy(0, 8877, { ownerPids: () => [0] })).toBe(false)
+    expect(await portOwnedBy(7, 0, { ownerPids: () => [7] })).toBe(false)
   })
 })
 
-describe('tunnelOwnsMetrics（真实监听进程）', () => {
+describe('portOwnedBy（真实监听进程）', () => {
   const started: number[] = []
   afterAll(async () => {
     for (const pid of started) {
@@ -214,7 +265,29 @@ describe('tunnelOwnsMetrics（真实监听进程）', () => {
     expect(await waitUntil(() => portListen(port), 8000, 100)).toBe(true)
     if (portOwnerPids(port).length === 0) return // 平台探测不可信 → 跳过判定
 
-    expect(await tunnelOwnsMetrics(child.pid, port)).toBe(true)
-    expect(await tunnelOwnsMetrics(process.pid, port)).toBe(false)
+    expect(await portOwnedBy(child.pid, port)).toBe(true)
+    expect(await portOwnedBy(process.pid, port)).toBe(false)
+  })
+
+  integrationIt('spec.ownsResource = 「新进程确实持有它要独占的端口」（真监听）', async () => {
+    // 监督器（变更检测重启）的就绪复核靠它：旧僵尸可能替新进程答健康检查。
+    const port = await freePort()
+    const child = spawnListener(port)
+    started.push(child.pid)
+    expect(await waitUntil(() => portListen(port), 8000, 100)).toBe(true)
+    if (portOwnerPids(port).length === 0) return
+
+    const cfg = cfgFixture(port)
+    const cf = cloudflaredSpec(cfg, { pid: 0, slot: 0, course: 'course-a', metrics: port })
+    expect(typeof cf.ownsResource).toBe('function')
+    expect(await cf.ownsResource!(child.pid)).toBe(true)
+    expect(await cf.ownsResource!(process.pid)).toBe(false)
+
+    // hub-server 同理（它核的是槽位推导出的 hub 端口，本用例里没人监听 ⇒ 应判 false）
+    const hub = hubServerSpec(cfg, 'course-a')
+    expect(typeof hub.ownsResource).toBe('function')
+    expect(slotPort(cfg, 'course-a', 'hub')).not.toBe(port) // 前置：两者不能撞口，否则断言无意义
+    expect(await hub.ownsResource!(child.pid)).toBe(false)
+    expect(await hub.ownsResource!(process.pid)).toBe(false)
   })
 })

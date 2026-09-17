@@ -2085,10 +2085,12 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   互相连坐；停止 trainer 只杀账本 pid = 「停止→启动」死锁回归。
 - **回归测试（第二批）**：`nn-training/tests/test_pid_probe_windows_safe.py`（6 → **8**，覆盖六处入口，
   含 AST 唯一实现门禁与 tmp-clean 副本契约）；`dashboard/tests/training-port-reclaim.test.ts`
-  （6 → **12**：stepCloudflared 接线门禁、tunnelOwnsMetrics 注入/真实监听/未知清单三组）。
+  （6 → **15**：stepCloudflared 接线门禁、`ownsResource` 声明/监督器接线门禁、
+  `portOwnedBy` 注入/真实监听/空清单两义三组）。
   A/B 取证（`tmp/probe-red.log`、`tmp/cf2_probe.py` 输出）：detached worktree 对 HEAD 跑新测试
   6 红（含 `tmp-clean._pid_alive(0) = True`、`_pid_alive(-1) = True` 的行为级红）；cloudflared 侧
-  HEAD 上 `stepCloudflared` 既无 `reclaimPort` 也无 `tunnelOwnsMetrics`、就绪判定是裸 `tunnelEdgeReady`。
+  HEAD 上 `stepCloudflared` 既无 `reclaimPort` 也无端口归属校验、就绪判定是裸 `tunnelEdgeReady`；
+  监督器侧 HEAD 上 `ownsResource` 在 `ProcSpec`/`specs.ts`/`server.ts` 三处**全都为 0 次**。
 - **回归测试（第一批）**：`nn-training/tests/test_hub_auth_d9_order.py`（11 → **19**，2026-09-17 追加 8 例：
   归因矩阵 / 隧道来源 5 次即封且第 6 次 403 / 被封归因 IP 持合法 token 仍放行 / 本机无头组件仍豁免 /
   直连对端自带头不算数 / 伪造头无害 / 访问日志带 `src=`（含直连与无头两负例）/
@@ -2126,15 +2128,24 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   的一道闸。`stepCloudflared` 在 spawn 前 `reclaimPort(metricsPort)`（与 hub/selfNode 同族），
   堵住 `supersedeSlotTunnels` 看不见的那类幸存者（孤儿 / 登记丢失 / 控制台重启竞态）——
   metrics 端口既是 `--metrics` 的 bind 目标、又是 `/ready` 的探测目标，被占着会**同时**造成
-  「新隧道 bind 失败」与「就绪读数读自旧僵尸」。后者另加一道：新增
-  `hub.ts::tunnelOwnsMetrics(pid, port)`，就绪判定改为「**本进程持有该端口** ∧ /ready 200」，
-  避免旧僵尸的 200 被当成新隧道的就绪（URL 来自新日志、连接状态却读自旧 metrics）。
-  探测不可用（lsof/netstat 无输出）时**返回 true 不判死**——否则工具缺失会让所有隧道启动失败；
-  fail-closed 只落在「确知占用者不是自己」那一侧。
-  **故意未改**：监督器（`server.ts::restart`）的重启路径不接回收——它杀的是账本里确切的
-  cloudflared pid、紧接着拉起同一条 spec，没有孤儿窗口（kill 失败时回收也一样杀不掉），
-  而 `killPid → launchSpec` 的释放延迟在 Windows 上随进程退出立即释放监听口。残留（已知）：
-  该路径的就绪复核仍只认 `/ready`，「旧僵尸答 200」的误判面在那里仍存在（需配合端口回收
-  失败才能出现，属低概率残留，未一并修）。
+  「新隧道 bind 失败」与「就绪读数读自旧僵尸」。后者另加一道：**就绪归属**
+  ——`hub.ts` 的就绪判定改为「**本进程持有该端口** ∧ /ready 200」，算法是
+  `core/proc.ts::portOwnedBy(pid, port)`（唯一实现；名字从早期的 `tunnelOwnsMetrics`
+  改成中性名，因为 hub-server / worker_server 也要用它——见下一条）。
+- **就绪归属推广到所有「独占端口的组件」**（同日追加，用户点名「监督器那条路径也要」）：
+  `ProcSpec` 新增可选字段 **`ownsResource?: (pid) => Promise<boolean>`**，声明的三处：
+  `hubServerSpec`（hub 端口）、`cloudflaredSpec`（metrics 端口）、`workerServeSpec`（push 端口）；
+  **监督器**（`server.ts::restart`）与**启动步骤**的就绪判定都变成
+  「`ownsResource`（未声明 = 不阻塞）∧ `healthy()`」。为什么监督器同样需要：它杀旧 pid 后
+  紧接着拉起同一条 spec，若新进程 bind 失败（EADDRINUSE / python 侧双监听守卫拒绝）**早已退出**，
+  而端口上的旧实例照样答 `/ping` / `/ready` ⇒ 监督器会把**僵尸的 200 记成「重启成功」**：
+  账本写新 pid、实际服务的是旧进程——这正是 hub-server 重启事故的相位（账本 pid ≠ 服务者）。
+  未就绪时的日志会点出归因（“新实例未持有该端口”），而不是只报「45s 未就绪」。
+- **`portOwnedBy` 的空清单必须用 TCP 探测二次区分**（同日发现并修，否则语义荒谬）：
+  lsof/netstat 无输出有两种含义——**根本没人监听**（⇒ 新进程显然没拿到端口 ⇒ **false**，
+  这正是要抓的那类）与**列举不出归属**（⇒ 探测不可用 ⇒ **true**，不判死，否则工具缺失会让
+  所有组件启动失败）。有清单时只认「包含自己」。fail-closed 只落在「确知不是自己」那一侧。
+- **监督器重启路径不接 `reclaimPort`**（保留的刻意选择，非残留）：它杀的是账本里确切的
+  pid、紧接着拉起同一条 spec，没有孤儿窗口（kill 失败时回收也一样杀不掉），故不回收、只核归属。
 
 
