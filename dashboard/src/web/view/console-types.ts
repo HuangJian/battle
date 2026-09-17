@@ -165,4 +165,42 @@ export interface ConsoleStateView {
    *  首页只出 BC Epoch 区）；缺省/false = RL 课程（首页只出 RL 区：Hero + EvalBoard 摘要）。
    *  服务端按查看课程 stamp（buildStateView），与 readOnly 同机制——测试直构缺省按 RL。 */
   isBc?: boolean
+  /** M1 隧道 A/B 探针结果（`tmp/tunnel-ab-*.json`，新→旧）。
+   *  缺省（无探针文件/测试直构）= UI 显空态 + 重跑命令提示。 */
+  tunnelAb?: TunnelAbView | null
+}
+
+/** 单腿单方向的 p50/p90/max（探针 `_stats()` 口径）。 */
+export interface TunnelAbStat {
+  n: number
+  p50Sec: number
+  p90Sec: number
+  maxSec: number
+  p50Mbps: number
+}
+
+/** 一行 = (腿, 方向)；方向是**关键列**（push 模式的真实大头是上行）。 */
+export interface TunnelAbRow {
+  leg: string
+  dir: 'up' | 'down'
+  stat: TunnelAbStat
+}
+
+/** 一次探针运行（一个 `tmp/tunnel-ab-*.json`）。 */
+export interface TunnelAbRun {
+  file: string
+  /** 文件 mtime（epoch ms）。 */
+  mtime: number
+  bytes: number
+  rounds: number
+  rows: TunnelAbRow[]
+  /** http2 vs quic 的 p50 倍率（quic ÷ http2；>1 = http2 更快）；缺任一腿 → null。 */
+  speedup: { up: number | null; down: number | null }
+}
+
+export interface TunnelAbView {
+  available: boolean
+  /** 新的在前（看最近几次即可判定「连跑是否退化」）。 */
+  runs: TunnelAbRun[]
+  error?: string
 }

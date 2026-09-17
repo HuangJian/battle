@@ -9,6 +9,7 @@ import { readIterMetrics, readPairedReferee } from '../iters'
 import { loadConfigSafe } from './config'
 import { discoverCourses, effectiveCourse } from './courses'
 import { detectPpoQueueStall } from './ppo-queue'
+import { readTunnelAbRuns } from './tunnel-ab'
 import { getSlowSnapshot } from './snapshot-refresher'
 import { isBcCourse } from '../../stack/courses'
 
@@ -69,6 +70,8 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
       cfEdgeIp: resolveCfTunnel(cfg, course).edgeIp,
     },
     metrics,
+    // M1 隧道 A/B：与课程账本无关（探针结果落 tmp/），故不分课程、纯只读。
+    tunnelAb: readTunnelAbRuns(),
     phase,
     cloudHalts: state.cloudHalts ?? {},
     ppoQueueStall,

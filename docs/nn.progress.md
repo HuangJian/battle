@@ -35,6 +35,11 @@
 - push 侧 B5：真 `worker_server` × 真 `push_client` e2e 实测 v2 体比同内容 JSON 体小 **>20%**（断言在 `e2e/test_push_mode_integration.py`）。
 - 门禁：`bun run check` 1853 pass / 0 fail；`bash tools/githook/nn-py-safe.sh -m pytest nn-training/tests nn-training/e2e -q` 310 pass / 0 fail；`bun dashboard/src/server/build.ts` 三份 bundle 通过。
 
+> 📺 **在哪看**：控制台详情抽屉新增「**传输**」页（`dashboard/src/web/app/panels/WirePanel.tsx`）
+> —— 上半是每轮 `wire` 账（上行/下行/打包/blob 未命中/协议/瘦身 + 最近 12 轮走势表，数据源
+> `metrics.iters[].wire`），下半是 `tmp/tunnel-ab-*.json` 的 A/B 表（p50/p90/max + 倍率徽章，
+> 新→旧）。从此不必翻日志/JSON 才能读到这两组数。
+
 ### M1 隧道 A/B 实测（已跑：`remote/tunnel_ab_probe.py`，2026-09-17 本机）
 
 探针自建环境（真 hub-server + `cloudflared tunnel --protocol <p> --edge-ip-version 4` × 每腿一条

@@ -59,6 +59,37 @@ export interface EvalSummary {
   pairedVsFirst?: PairedCompare | null
 }
 
+/** M0 传输账：iteration 事件的 `wire` 子字典 —— 远端 PPO 每轮**实测**发出的字节与秒数。
+ *
+ *  为什么单独成块：在这一套上线前，「传输慢」只能靠推断（墙钟 − 各阶段秒），A/B 无法归因
+ *  （`plan/remote-wire-remediation.plan.md` §2.1）。旧账本行无此键 ⇒ null，UI 显空态。
+ *  两半各自实测、互不覆盖：hub 侧（up/down + 协议开关取值）+ worker 侧（`worker` 拆分）。
+ *  push 模式下行由 worker 侧 `result_bytes` 提供（hub 侧 down 口径为 pull 专用）。 */
+export interface IterWire {
+  /** 本轮真正发出去的 HTTP body 字节（push = /job 体；pull = hub 服务出的 payload）。 */
+  upBytes: number | null
+  /** 上传墙钟秒（push 实测；pull 无此口径 → null）。 */
+  upSec: number | null
+  /** 打包秒（tar.xz + 编码）——**在关键路径上**：push 在 submit 前、pull 在发布前。 */
+  packSec: number | null
+  /** 下行字节（pull = hub 收 result 体；push 见 `worker.result_bytes`）。 */
+  downBytes: number | null
+  /** 下行墙钟秒（两模式当前都未单独计时 → null；UI 不画空列）。 */
+  downSec: number | null
+  /** 本轮内容寻址 blob（opt/ref）未命中数：>0 = 冷启动全量重传了那一轮。 */
+  blobsMiss: number | null
+  /** 隧道协议（M1）：quic | http2 | auto。 */
+  protocol: string | null
+  /** 边缘 IP 版本（M1）：4 | 6 | auto。 */
+  edgeIp: string | null
+  /** 瘦身开关（M2）当轮取值：false 时同一轮字节应回到 >4MB（回退臂的对照）。 */
+  slim: boolean | null
+  /** rollout 来源（M3）：local | node。 */
+  rolloutSrc: string | null
+  /** worker 侧拆分（payload_bytes / result_bytes / blob_hits / opt_restore_sec …）。 */
+  worker: Record<string, number | null> | null
+}
+
 export interface IterRow {
   iter: number
   time: string
@@ -91,6 +122,9 @@ export interface IterRow {
   kills: number
   actuals: IterActuals | null
   evalData: EvalSummary | null
+  /** M0 传输账；**additive**：旧账本行无 `wire` 键，测试直构的 fixture 通常也不带
+   *  （与控制台视图的 `activeCourse?` / `isBc?` 同口径）→ 消费方一律用 `?? null` 归一。 */
+  wire?: IterWire | null
 }
 
 /** eval 逐局类型（导出 replay 弹窗「类型」列）：win→胜利；outcome=max_ticks→超时；其余→失败。 */

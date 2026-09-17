@@ -27,6 +27,7 @@ import {
   type TunnelLaunchOpts,
 } from './panels/TrainLaunchModal'
 import { BcPanel } from './panels/BcPanel'
+import { WirePanel } from './panels/WirePanel'
 import { EvalSummary } from './panels/EvalSummary'
 import {
   fmtTs,
@@ -48,7 +49,7 @@ export interface AppProps {
   initial: ConsoleStateView
 }
 
-type DrawerTabKey = 'metrics' | 'nodes' | 'log'
+type DrawerTabKey = 'metrics' | 'nodes' | 'log' | 'wire'
 
 function readLocal(key: string): string | null {
   try {
@@ -673,7 +674,8 @@ export function App({ initial }: AppProps) {
         </PanelErrorBoundary>
       ) : null}
       {/* 详情视图直连入口（2026-09-10）：此前「评估」只能先点 Hero/节点 pill 的「更多」
-          进抽屉、再切 tab —— 入口不可见（底部说明也只列了 3 个）。四视图平权直连。 */}
+          进抽屉、再切 tab —— 入口不可见（底部说明也只列了 3 个）。五视图平权直连
+          （2026-09-17 增「传输」：wire 计量 + 隧道 A/B）。 */}
       <nav
         aria-label="详情视图"
         style={{ display: 'flex', gap: 8, flexWrap: 'wrap', margin: '2px 0 10px' }}
@@ -681,6 +683,7 @@ export function App({ initial }: AppProps) {
         {(
           [
             ['metrics', '指标'],
+            ['wire', '传输'],
             ['nodes', '节点统计'],
             ['log', '日志'],
           ] as const
@@ -700,15 +703,16 @@ export function App({ initial }: AppProps) {
         局域网只读：可查看任意课程/日志/节点统计/评估（课程▾仅本浏览器切换）；启停/冒烟/模式/节点编辑
         仅本机 localhost 生效 · /api/state {refreshInterval}s 轮询 · 首页按课程分流（互斥）：RL 课 =
         胜率焦点 + EvalBoard 摘要（行=iter×列=rung×指标），BC 课 = BC Epoch 区 ·
-        组件卡（点击卡在下方展开全宽最近日志）+ 节点 pill 行 + 详情抽屉（指标 | 节点统计 |
-        日志，上方按钮可直连）两课通用 · 评估已独立成页 /eval（RL 课上方「完整评估看板」）· Esc
-        关闭弹窗/抽屉 · r 立即刷新全部。
+        组件卡（点击卡在下方展开全宽最近日志）+ 节点 pill 行 + 详情抽屉（指标 | 传输 | 节点统计 |
+        日志，上方按钮可直连）两课通用 · 传输页 = 每轮实发/实收字节与秒（wire）+ 隧道 A/B 探针结果 ·
+        评估已独立成页 /eval（RL 课上方「完整评估看板」）· Esc 关闭弹窗/抽屉 · r 立即刷新全部。
       </p>
       <Drawer
         open={drawerTab !== null}
         activeTab={drawerTab ?? 'metrics'}
         tabs={[
           { key: 'metrics', label: '指标' },
+          { key: 'wire', label: '传输' },
           { key: 'nodes', label: '节点统计' },
           { key: 'log', label: '日志' },
         ]}
@@ -722,6 +726,7 @@ export function App({ initial }: AppProps) {
             readOnly={readOnly}
           />
         ) : null}
+        {drawerTab === 'wire' ? <WirePanel stateView={stateView} course={viewCourse} /> : null}
         {drawerTab === 'nodes' ? (
           <NodeStats enabled poolFreshNonce={poolFreshNonce} course={viewCourse} />
         ) : null}

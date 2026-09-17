@@ -10,10 +10,56 @@ import type {
   EvalSummary,
   IterActuals,
   IterRow,
+  IterWire,
   PairedCompare,
   PairedReferee,
 } from '../web/view'
 import { mcnemarP, pairedVerdict } from '../../../tools/eval/mcnemar'
+
+// ---------------- M0 传输账（iteration 事件的 `wire` 子字典） ----------------
+
+/** 数值兜底：数字才收，其余（含 JSON null / 字符串）统一 null。
+ *  为什么严格：`wire` 是**对账**口径，把 `"12"` 之类的字符串 "12" 转成 12
+ *  会掩盖上游写端 bug（与 ppo_sec 这类展示字段的 Number() 宽松口径不同）。 */
+function numOrNull(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null
+}
+
+function strOrNull(v: unknown): string | null {
+  return typeof v === 'string' && v ? v : null
+}
+
+/** iteration 行 → 传输账视图；无 `wire` 键（旧账本）= null。
+ *
+ *  worker 子字典只保留数字项：探针/对账要的是「字节到哪去了」，键集不固定
+ *  （M0/M2 先后加过键），故不白名单硬编码 —— 新增键自动可见，UI 逐项列出。 */
+export function parseIterWire(raw: unknown): IterWire | null {
+  // 数组也是 typeof 'object'：`wire: []` 是写端写坏了，不是「空账」——若放行会渲染成
+  // 一整块「—」，看起来像「这轮没量到字节」而不是「这个字段本身坏了」。
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const w = raw as Record<string, unknown>
+  const worker: Record<string, number | null> = {}
+  const ww = w.worker
+  if (ww && typeof ww === 'object') {
+    for (const [k, v] of Object.entries(ww as Record<string, unknown>)) {
+      const n = numOrNull(v)
+      if (n !== null) worker[k] = n
+    }
+  }
+  return {
+    upBytes: numOrNull(w.up_bytes),
+    upSec: numOrNull(w.up_sec),
+    packSec: numOrNull(w.pack_sec),
+    downBytes: numOrNull(w.down_bytes),
+    downSec: numOrNull(w.down_sec),
+    blobsMiss: numOrNull(w.blobs_miss),
+    protocol: strOrNull(w.protocol),
+    edgeIp: strOrNull(w.edge_ip),
+    slim: typeof w.slim === 'boolean' ? w.slim : null,
+    rolloutSrc: strOrNull(w.rollout_src),
+    worker: Object.keys(worker).length > 0 ? worker : null,
+  }
+}
 
 // ---------------- 每轮实际值（it{N}/**/manifest.json 聚合） ----------------
 
@@ -710,6 +756,7 @@ export function readIterMetrics(trajDir: string): { rows: IterRow[] } {
         rows.push({
           iter,
           time: rowTime,
+          wire: parseIterWire(r.wire),
           winRate: Number(r.winRate ?? 0),
           scoreMean: Number(r.score_mean ?? 0),
           scoreStd: Number(r.score_std ?? 0),
