@@ -201,8 +201,17 @@
   //     所以下面取保守值 + 首轮观察规则，而不是一次到位。
   //   · 粗反推：若 KL ∝ 1/kl_coef，达 0.03 需 ≈ **0.013**；但该比例是在 BC 起点测的，
   //     从零起点同值会更大 ⇒ **取 0.05**（松 4 倍，留安全余量）。
-  //   ⚠ `kl_cap` 保持 0.2 —— **它在 remote/serial 路径未接线、恒不生效**
-  //     （只走 stream 模块），别拿它当护栏；真正有效的旋钮只有 `kl_coef`。
+  //   ⚠ `kl_cap` 保持 0.2 —— 它在 **remote/serial 路径未接线**（DECISIONS
+  //     §2026-09-15-goalnn-kl-cap-unwired：`ppo_update` 无形参、`worker.py` 只读 `kl_coef`，
+  //     消费者只有 `rl/stream.py`），**那是对的**；真正有效的旋钮只有 `kl_coef` / `lr` / KL_BREAK。
+  //     【2026-09-17 订正】原文补的那句「**恒**不生效」把话说满了：**stream 路径会读它** ——
+  //     `args._kl_cap = sch.get("kl_cap")` 每轮**整个重赋**（`rl/loop_steps.py:771`）
+  //     ⇒ **段内缺席即 None ⇒ 回落 `policy.streamKlCap`**（`rl/stream.py:163-166`），
+  //     本仓 rl-config 给的是 **0.18**（0.06 只是键缺失时的字面默认）。
+  //     默认为什么碰不到：`rl-config.json` 的 `rl.stream = 0` 压过 `cli.py` 的 argparse 兜底
+  //     （已实测 `args.stream = 0`）⇒ 本路径不生效。
+  //     本腿已跑完 ⇒ **配置不动**（改了会与它的语料/归档脱节），仅订正说法；
+  //     新腿一律**两段显式写值**（见 `x2-rebirth.jsonc`）。
   //   ⚠ `lr` 与 `kl_coef` 同向（都增大位移），故可一起调；但**若结果异常，回退时分开试**
   //     （先只回 kl_coef，再看 lr）才能归因。
   //
