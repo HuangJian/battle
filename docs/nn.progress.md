@@ -4,6 +4,48 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §56 远程传输三改 M0–M2 落地：统一计量 + 隧道协议开关 + 协议瘦身（2026-09-17）
+
+**为什么记这一笔**：本笔是**训练架构变更**（云腿线协议 + 校验语义 + 新的运行期开关），按 §5 硬规则入账。
+方案与十项验收口径见 `plan/remote-wire-remediation.plan.md`；决策见 `DECISIONS.md` §2026-09-17-goalnn-remotewire-m0m2。
+切片提交：**M0 `0bc7a69`**（计量）/ **M1 `fa6a34f`**（隧道协议）/ **M2 `a59b1ef`**（瘦身）。
+
+### 改动清单（file → 改后行为）
+
+| 位置 | 改后行为 |
+|---|---|
+| `rl/loop_steps.py`（`_remote_ppo`/`_push_job_round`）+ `rl/events.py` | iteration 事件增 additive `wire` 子字典（up/down_bytes、up/pack_sec、blobs_miss、protocol、edge_ip、slim、rollout_src）；`_wire_from_result` 把 worker 半与 hub 半合成一份账 |
+| `remote/worker.py` | result 增 `wire`（payload_bytes/dl_sec/unpack/opt_restore/result_bytes/blob_hits/blob_miss_bytes）；`blob_cache/<sha>` 落盘自身产出的 opt；`prune_job_dirs` **豁免** `blob_cache`（否则下一轮必 miss——实施中踩到的真坑） |
+| `remote/hub_server.py` | `/jobs/{id}/blob?name=opt\|ref`、serve payload/收 result 时记 `sent_bytes`/`recv_bytes`、`/admin/net-probe?bytes=N`（鉴权 + 固定种子填充，同 bytes 逐字节相同） |
+| `remote/push_client.py` / `remote/worker_server.py` | `/blob-sha?sha=` 探测；`/job` 体默认 v2（BRJ2）+ 4xx 一次 JSON 退路 |
+| `remote/{protocol,hub_client}.py` | B1 不打占位 `manifest.json`、B2 不打 `opt_init.tar.b64`、B4 有 opt 时不带 `init_weights.json`；B3 `opt_sha`/`ref_sha` 内容寻址（可选键，`slim=false` 逐字节回旧行为） |
+| `dashboard/src/stack/{specs,hub,core/types}.ts` + `server/{actions,api}` + `TrainLaunchModal.tsx` | `cf_protocol`(`http2`|`quic`|`auto`，缺省 http2) / `cf_edge_ip`(4|6|auto) 一路到 cloudflared 命令行；抽出 `cfTunnelArgs` 供两处 spawn 共用；复用旧隧道时**比对登记的协议**，不一致则杀旧起新 |
+
+**回退开关**：`slim`（瘦身，缺省关＝旧字节行为）、`cf_protocol`/`cf_edge_ip`（隧道，缺省 `http2`/`4`）。
+
+### 实测数字（本机闭环，`tmp/m2-smoke.log` / `tmp/m2b-e2e.log`）
+
+| 量 | it1（冷） | it2（同会话） |
+|---|---:|---:|
+| published = hub.sent = worker.payload | 1,683,776 | 1,403,724 |
+| blob_hits / blob_miss_bytes | 0 / 0（首轮无 opt_sha） | **1 / 0** |
+| worker 结果体（v2 vs 同内容 JSON） | 1,039,382 vs 1,385,656 | 1,041,907 vs 1,389,026 |
+
+- it2 日志出现 `model/opt 从 opt_init（cache）恢复（Adam 动量延续，D5）` ⇒ **1.19MB 的 opt 整轮没过线**（B3 的设计意图）。
+- push 侧 B5：真 `worker_server` × 真 `push_client` e2e 实测 v2 体比同内容 JSON 体小 **>20%**（断言在 `e2e/test_push_mode_integration.py`）。
+- 门禁：`bun run check` 1853 pass / 0 fail；`bash tools/githook/nn-py-safe.sh -m pytest nn-training/tests nn-training/e2e -q` 310 pass / 0 fail；`bun dashboard/src/server/build.ts` 三份 bundle 通过。
+
+### 未做（不写成已做）
+
+- **M1 隧道 A/B 探针**（`http2` vs `quic` 各 5×2MB 原地上/下行，p50/p90）**未跑** —— 这是**环境测量**（ISP 对 QUIC 的 QoS），不是代码路径；代码/配置面已交付并有契约与变更检测测试。
+- **M2 云机绝对值确认**（≥8 轮中位 `wire.up_sec`）**未跑**；B6（xz preset 3→6）**未量**，收益 <10% 就不做。
+- **M3（rollout 上云）按 §5.1 门未开**：门 1 需要 M1/M2 的实测（上面两条）先落地。
+
+### 教训
+
+- **验收 harness 是「待修资产」时先修再量**：`smoke_loopback` 盘上没有近期运行痕迹，实际跑起来三处已腐坏（v2 schema 权重文件、21 列 vs 39 列的 METRICS_DIM、`blob_cache` 被 prune）。**它碰的正好是要改的函数** ⇒ 修它本身就是交付物，而不是绕开它。
+- **新缓存目录必须同时改 prune 名单**：`blob_cache` 第一版每轮必 miss，就是因为 `prune_job_dirs` 只豁免 `code_cache`——「缓存命中率」类 bug 会伪装成「协议没生效」。
+
 ## §55 x1-rebirth 开课（纯从零臂）＋ 严格样本量配额机制落地（2026-09-17）
 
 **为什么记这一笔**：本笔含**训练架构变更**（采集配额的执行语义），按 §5 硬规则必须入账；

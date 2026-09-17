@@ -2034,4 +2034,26 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   torch」对照（排除 daemon/平台网络被杀）；E3 `ts_engine=userspace`（排除 kernel 尝试的副作用）；
   E4 对开卡 `sha12` 与 loop 日志核对 code.zip 新鲜度。
 
+## §2026-09-17-goalnn-remotewire-m0m2（2026-09-17，远程 PPO 传输计量 + 协议瘦身落地；退路与安全阀是硬要求）
+
+- **背景**：`plan/remote-wire-remediation.plan.md` M0–M2 实施（分析见 `plan/kaggle-rollout-feasibility.md`：
+  push 上行 4.43MB/轮里 ≥3.2MB 是恒定或可再生的字节）。切片提交：M0 `0bc7a69`、M1 `fa6a34f`、M2 `a59b1ef`。
+- **备选与否决**：① 只在 `_remote_ppo` 里记字节 —— 否（生产路径与验收 harness 会各记一套，数字对不上账）；
+  改记在传输客户端层的返回值，两边共用同一份账。② M2 让节点「自己留着状态、hub 不管」 —— 否（违反 D12：
+  缓存只决定「这坨字节要不要再传」，sha 对账必须仍能在 hub 侧重算）。③ B5 只在旧节点上试一次 JSON —— 否。
+- **决定**：① `wire` 子字典（iteration 事件 + worker result 回传）是**唯一**传输口径，键为 additive，
+  旧行无键 = None，`validate_result` 不校验未知字段；`/admin/net-probe?bytes=N` 走鉴权、确定性填充。
+  ② 瘦身走**运行期开关**（`slim`，缺省关＝逐字节旧行为），开关取值必须进指标，否则事后无法按选项分组。
+  ③ opt/ref 一律对 **raw（编码前）字节**取 sha256 做内容寻址；节点侧重写在 `blob_cache/<sha>` 的那个
+  opt 就是它自己刚产出的那份 ⇒ 同会话命中率 100%。④ **安全阀**：`opt_sha` 存在但 blob 取不到 ⇒
+  响亮失败（`RetryableError`/`ProtocolError`），**绝不**静默退回 `load_state_into` 开新 Adam ——
+  那是把 D5 的动量延续悄悄改成「每轮零动量」，而日志上一切正常。⑤ B5 的 `/job` 体走二进制（BRJ2），
+  但 4xx 时**保留一次 JSON 退路重发**：协议不匹配绝不能让一整轮 job 丢在最后一米（同 result v2 规矩）。
+- **三问门（通过）**：① 被否决备选见上；② 未来再犯 ——「数字分别记两处」「取不到就静默 warm-start」
+  「把退路优化掉」每条都会再出现；③ 无法就近表达 —— 横跨传输客户端 / 两个解析端 / 校验语义 / 回退开关。
+- **违反后果**：再出现静默降级 warm-start ⇒ D5 语义被无声改写（本仓最怕那类 bug）；删掉退路重发 ⇒
+  新旧混合部署时整轮 job 丢失；开瘦身却不在指标里记开关 ⇒ 无法归因。
+- **未做（不写成已做）**：M1 的隧道 A/B 探针、M2 的云机绝对值确认、M2 §4.2 B6（xz preset 3→6）均**未跑**；
+  M3（rollout 上云）按 §5.1 门未开，留档不做。
+
 
