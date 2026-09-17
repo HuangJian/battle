@@ -2,7 +2,12 @@
 
   A. **先验 token**：封禁只拒**无效**鉴权尝试，合法 token 永远放行（改序）；
   B. **回环永不封禁**：`127.0.0.0/8` / `::1` / `::ffff:127.0.0.1` 上的失败**不计数、不封禁**
-     （用户口径：「本地 127.0.0.1 鉴权失败不要锁地址」）。
+     （用户口径：「本地 127.0.0.1 鉴权失败不要锁地址」）；
+  C. **隧道来源还原**（2026-09-17 第三批）：回环对端 + `CF-Connecting-IP`（合法、非回环）
+     ⇒ 归因给该 IP 计数/封禁——把 B 带来的「隧道入口无封禁」代价补回来。
+
+  注意 A/B/C 是一条链：A 让「惩罚无效鉴权」不再连坐合法流量（封禁面从整个来源 IP 缩到
+  「无效尝试」）⇒ B 才敢把回环整段豁免 ⇒ C 才敢把归因从「TCP 对端」换成「真实客户端」。
 
 事故链（现场日志 `tmp/x1-rebirth/hub-server.out`）——A 与 B 都是它的解药：
 
@@ -38,7 +43,12 @@ from test_remote_ppo import (  # type: ignore
     normalize_manifest,
 )
 
-from remote.hub_server import HubHandler, _is_loopback  # isort: skip
+from remote.hub_server import (  # isort: skip
+    CF_SOURCE_HEADER,
+    HubHandler,
+    _is_loopback,
+    attributed_source,
+)
 
 BAD = "wrong-token"
 REMOTE = "203.0.113.7"  # TEST-NET-3：非回环、永不会真的出现
@@ -148,10 +158,12 @@ class _Stub:
     """最小 handler 桩：只提供 `_auth_ok` 真正读的字段（不跑 BaseHTTPRequestHandler.__init__，
     也就不会真的发包）。逻辑零复制——断言的是 `HubHandler._auth_ok` 本体。"""
 
-    def __init__(self, store: Any, token: str, ip: str, auth: str) -> None:
+    def __init__(self, store: Any, token: str, ip: str, auth: str, cf: str | None = None) -> None:
         self.store = store
         self.client_address = (ip, 41234)
         self.headers = {"Authorization": auth}
+        if cf is not None:
+            self.headers[CF_SOURCE_HEADER] = cf
         self.path = "/ping"
         self.server = SimpleNamespace(token=token)
         self.sent: list[tuple[int, object]] = []
@@ -159,12 +171,13 @@ class _Stub:
     def _json(self, obj: object, status: int = 200) -> None:
         self.sent.append((status, obj))
 
-    def _log_blocked(self, _ip: str) -> None:  # 节流审计行：测试里无需打印
+    def _log_blocked(self, _ip: str, peer: str = "", via: str = "peer") -> None:
+        """节流审计行：测试里无需打印（签名需与真实现同形——`_auth_ok` 带 kwargs 调用）。"""
         return None
 
 
-def _stub_handler(store: Any, token: str, ip: str, auth: str) -> _Stub:
-    return _Stub(store, token, ip, auth)
+def _stub_handler(store: Any, token: str, ip: str, auth: str, cf: str | None = None) -> _Stub:
+    return _Stub(store, token, ip, auth, cf)
 
 
 def _auth_ok(stub: _Stub) -> bool:
@@ -214,6 +227,150 @@ def test_loopback_never_reaches_ban_through_handler(tmp_path: Path) -> None:
         assert _auth_ok(h) is False
         assert h.sent == [(401, {"error": "unauthorized"})]
     assert store._auth_blocked_until == {}
+
+
+# ────────────────────────── 归因来源（B：隧道入口来源还原） ──────────────────────────
+#
+# 背景：cloudflared 回源把隧道流量全归成 127.0.0.1，而回环永不封禁 ⇒ 隧道入口此前**无任何
+# 计数/封禁**（改序后的必然代价）。B 方案：**只在「对端是回环」时**采信边缘注入的
+# `CF-Connecting-IP`，把它当作归因来源；直连（tailnet）对端能自己写头，故只认 TCP 对端。
+# 论证与「头可伪造时也不会更差」的代价分析见 `hub_server.attributed_source` 的 docstring。
+
+
+def test_attributed_source_matrix() -> None:
+    """归因规则矩阵（隧道 / 直连 / 伪造 / 垃圾值）。"""
+    # 隧道：回环对端 + 合法公网 IPv4/IPv6 头 → 归因给该 IP
+    assert attributed_source("127.0.0.1", "203.0.113.7") == ("203.0.113.7", "cf")
+    assert attributed_source("::1", "2001:db8::1") == ("2001:db8::1", "cf")
+    assert attributed_source("::ffff:127.0.0.1", " 203.0.113.7 ") == ("203.0.113.7", "cf")
+    # 回环对端但没有头 / 头是垃圾 / 头写的还是回环值 → 回退对端（= 本机组件，仍豁免）
+    assert attributed_source("127.0.0.1", "") == ("127.0.0.1", "peer")
+    assert attributed_source("127.0.0.1", "not-an-ip") == ("127.0.0.1", "peer")
+    assert attributed_source("127.0.0.1", "127.0.0.1") == ("127.0.0.1", "peer")
+    assert attributed_source("127.0.0.1", "203.0.113.7, 10.0.0.1") == ("127.0.0.1", "peer")
+    # 直连（tailnet / 公网）：**一律用 TCP 对端**，对端自称的头不予采信
+    assert attributed_source("100.124.208.62", "203.0.113.7") == ("100.124.208.62", "peer")
+    assert attributed_source("198.51.100.9", "") == ("198.51.100.9", "peer")
+
+
+def test_access_log_carries_attributed_source(capsys: Any, tmp_path: Path) -> None:
+    """访问日志（`log_message`）在隧道流量上必须补出真实来源。
+
+    它才是 x1-rebirth 事故里最大的阻雾：回源流量全写成 `[hub-server 127.0.0.1]`，
+    排障时分不清「本机组件」与「隧道里的陌生人」。"""
+    store = _boot_server(tmp_path)[1]
+    line = '"GET /code HTTP/1.1" 200 -'
+
+    # 隧道：回环对端 + CF 头 → 补 src=/via=cf
+    HubHandler.log_message(  # type: ignore[arg-type]
+        cast(HubHandler, _stub_handler(store, "sekret", "127.0.0.1", "Bearer sekret", cf="203.0.113.7")),
+        line,
+    )
+    out = capsys.readouterr().out
+    assert "127.0.0.1 src=203.0.113.7 via=cf" in out, out
+
+    # 本机组件（回环、无头）→ 不加噪（与旧格式逐字一致）
+    HubHandler.log_message(  # type: ignore[arg-type]
+        cast(HubHandler, _stub_handler(store, "sekret", "127.0.0.1", "Bearer sekret")), line
+    )
+    out = capsys.readouterr().out
+    assert "[hub-server 127.0.0.1]" in out and "via=cf" not in out, out
+
+    # 直连对端自带头 → 不采信（只写对端）
+    HubHandler.log_message(  # type: ignore[arg-type]
+        cast(
+            HubHandler,
+            _stub_handler(store, "sekret", "100.124.208.62", "Bearer sekret", cf="203.0.113.7"),
+        ),
+        line,
+    )
+    out = capsys.readouterr().out
+    assert "[hub-server 100.124.208.62]" in out and "via=cf" not in out, out
+
+
+def test_access_log_survives_missing_headers(capsys: Any, tmp_path: Path) -> None:
+    """早期错误路径（请求行都解析失败）时 `self.headers is None`：日志不得再抛一次异常。"""
+    store = _boot_server(tmp_path)[1]
+    h = _stub_handler(store, "sekret", "127.0.0.1", "Bearer sekret")
+    h.headers = None  # type: ignore[assignment]
+    HubHandler.log_message(cast(HubHandler, h), '"GET /bad HTTP/1.1" 400 -')  # type: ignore[arg-type]
+    assert "[hub-server 127.0.0.1]" in capsys.readouterr().out
+
+
+def test_tunnel_source_gets_counted_and_banned(tmp_path: Path) -> None:
+    """B 的核心：隧道（回环对端 + CF 头）连续 5 次无效 → **按归因 IP 封禁**，第 6 次 403。
+
+    修复前：归因只认对端 ⇒ 回环被豁免 ⇒ 隧道入口永不计数（本用例红）。"""
+    store = _boot_server(tmp_path)[1]
+    for i in range(1, 6):
+        h = _stub_handler(store, "sekret", "127.0.0.1", f"Bearer {BAD}", cf="203.0.113.7")
+        assert _auth_ok(h) is False
+        assert h.sent == [(401, {"error": "unauthorized"})], f"第 {i} 次应 401"
+    assert store.is_blocked("203.0.113.7") is True, "隧道来源应被封（按归因 IP）"
+    assert store.is_blocked("127.0.0.1") is False, "回环本身永不被封"
+
+    h = _stub_handler(store, "sekret", "127.0.0.1", f"Bearer {BAD}", cf="203.0.113.7")
+    _auth_ok(h)
+    assert h.sent == [(403, {"error": "ip blocked"})], "第 6 次应 403"
+
+
+def test_tunnel_valid_token_still_passes_while_attributed_banned(tmp_path: Path) -> None:
+    """封禁只拒无效尝试：同一隧道来源的**合法 token**（Kaggle worker）照常 200。"""
+    store = _boot_server(tmp_path)[1]
+    for _ in range(5):
+        _auth_ok(_stub_handler(store, "sekret", "127.0.0.1", f"Bearer {BAD}", cf="203.0.113.7"))
+    assert store.is_blocked("203.0.113.7") is True
+
+    h = _stub_handler(store, "sekret", "127.0.0.1", "Bearer sekret", cf="203.0.113.7")
+    assert _auth_ok(h) is True
+    assert h.sent == []
+
+
+
+def test_local_component_without_cf_header_still_exempt(tmp_path: Path) -> None:
+    """回归护栏：本机组件（回环、无 CF 头）照旧不计数、不封禁 —— 2026-09-17 用户口径。"""
+    store = _boot_server(tmp_path)[1]
+    for _ in range(12):
+        h = _stub_handler(store, "sekret", "127.0.0.1", f"Bearer {BAD}")
+        assert _auth_ok(h) is False
+        assert h.sent == [(401, {"error": "unauthorized"})]
+    assert store._auth_blocked_until == {}
+
+
+def test_direct_peer_cannot_declare_itself(tmp_path: Path) -> None:
+    """直连对端自带 CF 头不算数：归因=对端自己，5 次即封它自己（不得被头钓走）。"""
+    store = _boot_server(tmp_path)[1]
+    for _ in range(5):
+        _auth_ok(
+            _stub_handler(
+                store, "sekret", "100.124.208.62", f"Bearer {BAD}", cf="203.0.113.7"
+            )
+        )
+    assert store.is_blocked("100.124.208.62") is True
+    assert store.is_blocked("203.0.113.7") is False, "直连声明的头不得把别人封掉"
+
+
+def test_forged_loopback_header_is_harmless(tmp_path: Path) -> None:
+    """伪造头（假设不成立时的最坏情形）**不会更差**：
+
+      * 伪造回环值 ⇒ 归因回退对端（回环）⇒ 免封（= 改假设前的现状）；
+      * 伪造别人的 IP ⇒ 只拒那个 IP 的**无效**尝试，带合法 token 的请求（如 tailnet
+        上的真 worker）照常放行 ⇒ 不构成对合法对端的 DoS。"""
+    store = _boot_server(tmp_path)[1]
+    for _ in range(6):
+        h = _stub_handler(store, "sekret", "127.0.0.1", f"Bearer {BAD}", cf="127.0.0.1")
+        assert _auth_ok(h) is False
+        assert h.sent == [(401, {"error": "unauthorized"})]
+    assert store._auth_blocked_until == {}, "伪造回环值不得产生任何封禁"
+
+    # 受害者 = tailnet 上的真 worker：被人伪造其 IP 打了 5 次无效，仍持合法 token 照常放行
+    victim = "100.124.208.62"
+    for _ in range(5):
+        _auth_ok(_stub_handler(store, "sekret", "127.0.0.1", f"Bearer {BAD}", cf=victim))
+    assert store.is_blocked(victim) is True
+    ok_h = _stub_handler(store, "sekret", victim, "Bearer sekret")
+    assert _auth_ok(ok_h) is True, "被封 IP 的合法 token 必须放行（先验 token 的改序使然）"
+    assert ok_h.sent == []
 
 
 if __name__ == "__main__":

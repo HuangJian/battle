@@ -2053,15 +2053,44 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   （只读 FS）时 fail-open 且响亮告警（守卫是纵深防御的第二道闸）。接线：`hub_server`（8787 类）
   与 `worker_server`（push 端口，经 `remote_worker_serve`）——后者的僵尸更贵（HUB 会把 job POST 进
   无人应答的监听端口，表现为推送静默卡死）；④ **「停止 trainer」即释放**（`launch/cli.ts::releaseTrainerLock(s)` +
-  `server/actions/stop.ts`）——释放本课 run_rl/run_bc 锁，**先核验进程身份**才停存活持有者，身份不符只告警。
+  `server/actions/stop.ts`）——释放本课 run_rl/run_bc 锁，**先核验进程身份**才停存活持有者，身份不符只告警；
+  ⑤ **隧道来源还原（B，同日追加）**——②把回环整段豁免后，隧道入口（cloudflared 回源也归成 127.0.0.1）
+  变成「只 401、不计数、不封禁」，等于对公网暴露面零封禁。新增 `hub_server.attributed_source(peer, cf)`：
+  **只在「TCP 对端是回环」时**采信边缘注入的 `CF-Connecting-IP`（须为合法 IP 字面量且非回环值）
+  ⇒ 按**归因 IP** 计数/封禁；无头 / 头不是合法 IP / 头写的还是回环值 / 对端不是回环 ⇒ 一律归因 TCP 对端。
+  直连（tailnet）对端**只认 TCP 对端 IP**——那台机器能自己写任何头，采信它等于把封禁能力交给攻击者。
+  审计行随之带上 `peer=` / `src=` / `via=cf|peer`（否则事后分不清封的是隧道来源还是直连来源）；
+  **访问日志（`log_message`）同样补 `src=… via=cf`** —— 回源流量原本全写成 `[hub-server 127.0.0.1]`，
+  这正是本次事故排查的最大阻雾（`log_message` 只打非常规事件，不刷屏；`self.headers is None` 的早期
+  错误路径有护栏）。
+  可采信的头**只认 `CF-Connecting-IP`**，不认 `X-Forwarded-For`（后者是可追加的逗号列表，取哪段都是语义游戏）。
 - **被否决备选**：调大阈值/时长（本质是封禁**作用面**，不是次数）；回环也计数（回源流量冒充回环来源，
   惩罚无据）；加解封管理端点（真解药本就无需人工介入）；只靠端口守卫（TOCTOU + Windows 双绑）；
-  按「锁里 PID 活着」直接杀（PID 复用误杀无辜）。
+  按「锁里 PID 活着」直接杀（PID 复用误杀无辜）；**全局无效尝试退避闸（429/延迟，方案 C+D）**——
+  它的全部收益建立在「封禁不可用」之上，而 B 一旦生效就重复了；B 失效时它也只能压速率、不加安全，
+  却要给每条合法路径都加一条延迟分支（合法 token 先过、不受影响，但多一个恒常状态机）。收益重叠、
+  成本不为零 ⇒ 不做。**删掉封禁机制（方案 E）**同理被否：tailnet 直连那一侧的来源标识是可信的，
+  在那里封禁仍然有效，不该为隧道侧的难题陪葬。
+- **头部可伪造时的失效代价（预登记，供事后对照）**：本方案唯一未实测的假设是「Cloudflare 边缘**会覆写**
+  `CF-Connecting-IP`」（仓里无 CF 头读取先例、无 ingress 配置、此沙箱无网络，无法离线验证）。假设不成立时
+  最坏后果**两条都良性**：① 攻击者轮换头值 ⇒ 拿不到封禁，效果退化为「回环豁免」（= 本方案之前的状态，
+  不会更差）；② 伪造某个 tailnet worker 的 IP ⇒ 那个 IP **只**会被拒「无效鉴权尝试」，带正确 token 的
+  请求照常放行（改序使然）⇒ 不构成对合法对端的 DoS。**实测法**（2 分钟，用户可随时做）：向隧道发一次
+  带伪造头的无效鉴权（`curl -H 'Authorization: Bearer wrong' -H 'CF-Connecting-IP: 203.0.113.7'`），
+  看 `hub-server.out` 的 `AUTH FAIL` 行 `src=` 显示伪造值（⇒ 可伪造，本方案降级为 B0）还是真实公网
+  出口 IP（⇒ 假设成立）。若显示伪造值，回退动作 = 把 `attributed_source` 的 `cf` 分支删掉（一行），
+  语义即回到「回环豁免」，不需要改测试以外的任何东西（`test_attributed_source_matrix` 是唯一直接
+  断言该分支的用例）。
 - **违反后果**：把封禁检查挪回 token 校验之前 = 整机自锁；让回环重新计数/封禁 = 隧道流量与本机组件
   互相连坐；停止 trainer 只杀账本 pid = 「停止→启动」死锁回归。
-- **回归测试**：`nn-training/tests/test_hub_auth_d9_order.py`（11）、`nn-training/tests/test_instance_lock.py`
-  （9，含真进程同时三启恰好存活一个）、`dashboard/tests/trainer-lock-release.test.ts`（13）；A/B 取证 =
-  detached worktree 跑新测试对 HEAD 红（`assert 403 == 200`）。
+- **回归测试**：`nn-training/tests/test_hub_auth_d9_order.py`（11 → **19**，2026-09-17 追加 8 例：
+  归因矩阵 / 隧道来源 5 次即封且第 6 次 403 / 被封归因 IP 持合法 token 仍放行 / 本机无头组件仍豁免 /
+  直连对端自带头不算数 / 伪造头无害 / 访问日志带 `src=`（含直连与无头两负例）/
+  `headers is None` 的早期错误路径不抛）、`nn-training/tests/test_instance_lock.py`（9，含真进程同时三启
+  恰好存活一个）、`dashboard/tests/trainer-lock-release.test.ts`（13）；A/B 取证 = detached worktree 跑
+  新测试对 HEAD 红（`assert 403 == 200`；归因来源一节另附行为取证
+  `tmp/cf-red-behavior.log`：修复前 5 次「回环+CF 头」无效鉴权后 `is_blocked(203.0.113.7) = False`、
+  `_auth_fail = {}` ⇒ 隧道入口确实零计数）。
 - **配套（同日同族）**：控制台启动前按端口回收幸存占用者（`stack/hub.ts::reclaimPort`，已接在
   `stepHubServer` / `stepSelfNode`）。**`workerServe` 控制台路径故意不接**：worker_server 可能在跑
   数小时的 PPO job，`/ping` 失败（如 token 临时不匹配）就回收它 = 直接炮掉在途 job；而该路径
