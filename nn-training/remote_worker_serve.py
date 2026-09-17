@@ -24,6 +24,11 @@ def main() -> None:
     )
     ap.add_argument("--device", default="cpu", help="torch device: cpu / cuda / cuda:0")
     ap.add_argument("--threads", type=int, default=0, help="torch intra-op threads (0=default)")
+    ap.add_argument(
+        "--lock-file",
+        default="",
+        help="单实例锁路径（缺省 nn-training/.worker_server.<port>.lock；按端口键控）",
+    )
     args = ap.parse_args()
     token = args.token
     if args.token_file:
@@ -33,7 +38,14 @@ def main() -> None:
     work = Path(args.work)
     if not work.is_absolute():
         work = Path(__file__).resolve().parents[1] / work
-    serve_forever(args.port, token, work, device=args.device, torch_threads=args.threads)
+    serve_forever(
+        args.port,
+        token,
+        work,
+        device=args.device,
+        torch_threads=args.threads,
+        lock_file=args.lock_file,
+    )
 
 
 if __name__ == "__main__":

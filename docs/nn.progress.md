@@ -26,12 +26,18 @@
   （封禁期内的无效尝试 403，且不再计数/不延长）。
 - **回环豁免**（`remote/hub_server.py::_is_loopback`）：`127.0.0.0/8` / `::1` / `::ffff:127.0.0.1`
   上的失败**不计数、不封禁**（`is_blocked` 防御性恒 False）；鉴权边界与 `AUTH FAIL` 审计行不变。
-- **原子实例锁**（新 `remote/_instance_lock.py`，`nn-training/.hub_server.<port>.lock`，按端口键控）：
-  拿锁 → 端口探测 → bind；陈旧锁按「持有者已死 / 命令行不含 `hub_server` 指纹（PID 复用）」接管，
-  身份读不到则 fail-closed 拒启。自带安全存活探测（Windows `GetExitCodeProcess`——**不复用**
-  `train/loop_util._pid_alive`，后者在 Windows 走 `os.kill(pid,0)`＝`TerminateProcess` 会杀持有者）。
-- **控制台侧**：启动前 `reclaimPort` 回收端口幸存者（`stack/hub.ts`）；「停止 trainer」释放本课
-  run_rl/run_bc 锁且**先核验进程身份**再停存活持有者（`launch/cli.ts::releaseTrainerLock`）。
+- **原子实例锁**（新 `remote/_instance_lock.py`，`nn-training/.<kind>.<port>.lock`，按端口键控）：
+  拿锁 → 端口探测 → bind；陈旧锁按「持有者已死 / 命令行缺本服务指纹（PID 复用）」接管（指纹可
+  给多个），身份读不到则 fail-closed 拒启；锁文件**写不下**（只读 FS）则 fail-open + 响亮告警。
+  覆盖 `hub_server` 与 **`worker_server`**（push 端口，经 `remote_worker_serve`，2026-09-17 补）——
+  worker 僵尸更贵：HUB 会把 job POST 进一个没人应答的监听端口，表现为推送静默卡死。
+  自带安全存活探测（Windows `GetExitCodeProcess`——**不复用** `train/loop_util._pid_alive`，后者
+  在 Windows 走 `os.kill(pid,0)`＝`TerminateProcess` 会杀持有者；该隐患已于同日单独修掉）。
+- **控制台侧**：启动前 `reclaimPort` 回收端口幸存者（`stack/hub.ts`，接在 hub/selfNode）；
+  「停止 trainer」释放本课 run_rl/run_bc 锁且**先核验进程身份**再停存活持有者
+  （`launch/cli.ts::releaseTrainerLock`）。**`workerServe` 路径故意不接 reclaimPort**：
+  worker_server 可能在跑数小时的 PPO job，`/ping` 失败就回收它 = 炮掉在途 job；该路径
+  会先复用健康的幸存者，不通时锁会响亮拒启并指向日志（含持有者 PID），交人工处置。
 
 ### 三、教训（可迁移）
 
@@ -42,6 +48,24 @@
   在共享来源 IP（回源/代理/NAT）下必然误伤整机；封禁的作用面必须比鉴权边界**更窄**，不能更宽。
 - **取证纪律**：401/403 永不静默（2026-09-16 已立），且审计行必须写「不计数/不封禁」这类**语义**
   说明——否则下一次排障会把「回环不封禁」误读成「封禁失灵」。
+
+### 三补、存活探测的 Windows 隐患收口（同日补修，用户点名）
+
+- **隐患**：`train/loop_util.py::_pid_alive` 在 Windows 侧一直是裸 `os.kill(pid, 0)` —— Windows 上
+  那不是探测而是 `TerminateProcess(handle, 0)`：`acquire_lock` 判「锁持有者还活着吗」的**只读查询**
+  会直接把持有者杀掉（最坏：打死正在训练的 trainer），而 `except Exception → False` 还会把
+  「我杀了它」记成「它本来就是死的」，双开护栏静默失效。`run_rl._runrl_pid_alive` 早期就因这条
+  隐患不复用它（自己写了安全分支），loop_util 侧因此露了很久。
+- **修**：两处同口径 —— Windows 分支走 `GetExitCodeProcess == STILL_ACTIVE`，并补 `pid <= 0 → 不活`
+  护栏（POSIX 上 `os.kill(0, 0)` / `os.kill(-1, 0)` 命中**进程组**、实测成功，会把残缺锁文件里的
+  0/-1 当成活人持有 ⇒ 同名课永久拒启）。三处同源：`loop_util` / `run_rl` / `remote._instance_lock`。
+- **回归**：`nn-training/tests/test_pid_probe_windows_safe.py`（6 例）——注入假 kernel32 + 监视
+  `os.kill`，断言 Windows 分支**零 os.kill**、退出码语义、句柄不泄漏、POSIX 分支不变、残缺锁可清理，
+  外加一条行程门禁（三处探测必须保留 `os.name == "nt"` 分支）。
+  A/B：修复前红 —— `AssertionError: train.loop_util._pid_alive: Windows 分支不得调用 os.kill，实际: [(pid, 0)]`。
+  ⚠️ 坑：伪装 Windows 时 `os.name="nt"` 必须**只在探针调用期间**生效并先于异常还原，否则
+  `pathlib` 会把路径解析成 `WindowsPath`，pytest 在报错/cache 阶段直接 INTERNALERROR。
+- **同类待收口**：`remote/notebook_runtime.py::_pid_alive`、`tools/tmp-clean.py`（同名写法，未动）。
 
 ### 四、验收
 

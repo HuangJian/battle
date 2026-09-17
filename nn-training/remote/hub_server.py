@@ -55,7 +55,7 @@ from threading import Lock
 
 from remote._instance_lock import (
     acquire_instance_lock,
-    default_hub_lock_path,
+    default_instance_lock_path,
     release_instance_lock,
 )
 from remote._port_guard import ensure_port_free
@@ -890,7 +890,7 @@ def main() -> None:
     # starter 同时探测会双双通过（Windows 的 SO_REUSEADDR 还允许双绑，后启动者静默
     # 变僵尸）。锁用 O_CREAT|O_EXCL 把启动串行化，且能在**持有者身份可核验**的前提下
     # 自动接管陈旧锁（PID 复用 / 崩溃残留），不再出现「锁在、进程没了、永远启不来」。
-    lock_path = args.lock_file or default_hub_lock_path(args.port)
+    lock_path = args.lock_file or default_instance_lock_path("hub_server", args.port)
     if not acquire_instance_lock(lock_path, marker="hub_server", tag="hub-server"):
         sys.exit(1)
     atexit.register(release_instance_lock, lock_path)

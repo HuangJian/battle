@@ -22,6 +22,7 @@ job（manifest + payload.zip + code.zip）POST 到本服务端；本机后台跑
 
 from __future__ import annotations
 
+import atexit
 import base64
 import hashlib
 import json
@@ -35,6 +36,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from remote._instance_lock import (
+    acquire_instance_lock,
+    default_instance_lock_path,
+    release_instance_lock,
+)
 from remote._port_guard import ensure_port_free
 from remote.protocol import CodeChangedError, ProtocolError, normalize_manifest
 from remote.worker import run_job
@@ -333,11 +339,27 @@ def make_worker_server(
 
 
 def serve_forever(
-    port: int, token: str, work_dir: Path, *, device: str = "cpu", torch_threads: int = 0
+    port: int,
+    token: str,
+    work_dir: Path,
+    *,
+    device: str = "cpu",
+    torch_threads: int = 0,
+    lock_file: str = "",
 ) -> None:
     """阻塞运行（调用方负责进程生命周期）；token 缺失响亮报错。"""
     if not token:
         raise SystemExit("[worker-serve] ERROR: 需要 --token（与 HUB 共享密钥）")
+    # §单实例锁（第二道闸，同 hub_server，2026-09-17）：端口守卫是「探测 → bind」的 TOCTOU
+    # （两个 starter 同时探测会双双通过），Windows 的 SO_REUSEADDR 又允许双绑（后启动者静默
+    # 变僵尸）。锁把启动串行化，并能在**核验身份**后接管陈旧锁（PID 复用 / 崩溃残留）。
+    # 指纹给多个：本服务既有 `-m remote_worker_serve` 入口，也可能被以模块名拉起。
+    lock_path = lock_file or default_instance_lock_path("worker_server", port)
+    if not acquire_instance_lock(
+        lock_path, marker=("remote_worker_serve", "worker_server"), tag="worker-serve"
+    ):
+        raise SystemExit(f"[worker-serve] ERROR: 已有实例在运行（锁 {lock_path}）——拒绝启动")
+    atexit.register(release_instance_lock, lock_path)
     # §双监听守卫（同 hub_server）：Windows SO_REUSEADDR 双绑同端口不崩，后启动者
     # 静默变僵尸——bind 前探测 127.0.0.1（worker 绑 0.0.0.0 含回环，任何本地监听都冲突）。
     try:

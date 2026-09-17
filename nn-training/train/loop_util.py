@@ -152,15 +152,40 @@ def heartbeat(stop: threading.Event, interval: int, state: dict, log) -> None:
 
 
 def _pid_alive(pid: int) -> bool:
-    """Cross-platform check: is a process with this PID still running?
+    """Cross-platform liveness probe: is a process with this PID still running?
 
-    Catches ``Exception`` rather than specific types because Windows
-    ``os.kill(pid, 0)`` can raise ``SystemError``, ``OSError``, or other
-    unexpected exceptions depending on the PID / Python build / MSYS
-    translation layer.  Any failure → treat as "not alive" so stale
-    locks are always cleaned up."""
+    **Windows 绝不能用 `os.kill(pid, 0)`**（2026-09-17 修复）：那里它不是「存在性探测」，
+    而是 `TerminateProcess(handle, 0)` —— 会**把锁持有者直接杀掉**。本函数是 `acquire_lock`
+    判定陈旧锁的唯一依据，走那条路等于把「有没有人在跑」这个**只读查询**变成写操作：轻则
+    杀错 PID 复用后的无辜进程，重则打死正在训练的 trainer；更糟的是 `except Exception → False`
+    会把「我杀了它」记成「它本来就是死的」，双开护栏静默失效。故 Windows 分支走
+    `GetExitCodeProcess == STILL_ACTIVE`（与 `run_rl._runrl_pid_alive` /
+    `remote._instance_lock._pid_alive` 同口径；回归见 tests/test_pid_probe_windows_safe.py）。
+
+    POSIX 上 `signal 0` 只是存在性探测，安全。任何异常一律按「不存活」处理——陈旧锁总能被
+    清理（catches ``Exception`` rather than specific types because Windows ``os.kill`` can
+    raise ``SystemError``/``OSError`` etc. depending on PID / Python build / MSYS layer）。
+    """
+    if pid <= 0:
+        return False  # pid 0/负数 = 进程组语义，绝不是「锁持有者」；残缺锁必须可清理
+    if os.name == "nt":
+        import ctypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        handle = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        try:
+            exit_code = ctypes.c_ulong()
+            if not k32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return False
+            return exit_code.value == STILL_ACTIVE
+        finally:
+            k32.CloseHandle(handle)
     try:
-        os.kill(pid, 0)  # signal 0 = no signal sent, just permission check
+        os.kill(pid, 0)  # signal 0 = no signal sent, just existence/permission probe
         return True
     except Exception:
         return False

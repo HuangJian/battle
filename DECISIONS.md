@@ -2047,9 +2047,12 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   **合法 token 永远放行**，封禁只拒无效鉴权尝试（封禁期的无效尝试 403、不计数、不延长）；
   ② **回环永不封禁**（`_is_loopback`）——`127.0.0.0/8` / `::1` / `::ffff:127.0.0.1` 的失败**不计数、
   不封禁**（鉴权边界与 401 审计行不变；用户口径「本地 127.0.0.1 鉴权失败不要锁地址」）；
-  ③ **hub-server 原子实例锁**（新 `remote/_instance_lock.py`，`nn-training/.hub_server.<port>.lock`，
-  按端口键控）——拿锁 → 端口探测 → bind 三道闸，陈旧锁按「持有者已死 / 命令行缺 `hub_server` 指纹」
-  接管，身份读不到即 fail-closed；④ **「停止 trainer」即释放**（`launch/cli.ts::releaseTrainerLock(s)` +
+  ③ **服务侧原子实例锁**（新 `remote/_instance_lock.py`，路径 `nn-training/.<kind>.<port>.lock`，
+  按端口键控）——拿锁 → 端口探测 → bind 三道闸，陈旧锁按「持有者已死 / 命令行缺该服务指纹」
+  接管（指纹可给多个：同一服务常有多个合法入口），身份读不到即 fail-closed，锁文件**写不下**
+  （只读 FS）时 fail-open 且响亮告警（守卫是纵深防御的第二道闸）。接线：`hub_server`（8787 类）
+  与 `worker_server`（push 端口，经 `remote_worker_serve`）——后者的僵尸更贵（HUB 会把 job POST 进
+  无人应答的监听端口，表现为推送静默卡死）；④ **「停止 trainer」即释放**（`launch/cli.ts::releaseTrainerLock(s)` +
   `server/actions/stop.ts`）——释放本课 run_rl/run_bc 锁，**先核验进程身份**才停存活持有者，身份不符只告警。
 - **被否决备选**：调大阈值/时长（本质是封禁**作用面**，不是次数）；回环也计数（回源流量冒充回环来源，
   惩罚无据）；加解封管理端点（真解药本就无需人工介入）；只靠端口守卫（TOCTOU + Windows 双绑）；
@@ -2059,9 +2062,19 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 - **回归测试**：`nn-training/tests/test_hub_auth_d9_order.py`（11）、`nn-training/tests/test_instance_lock.py`
   （9，含真进程同时三启恰好存活一个）、`dashboard/tests/trainer-lock-release.test.ts`（13）；A/B 取证 =
   detached worktree 跑新测试对 HEAD 红（`assert 403 == 200`）。
-- **配套（同日同族）**：控制台启动前按端口回收幸存占用者（`stack/hub.ts::reclaimPort`）。
-- **已知未修（备查，勿顺手改）**：`train/loop_util.py::_pid_alive` 在 Windows 走 `os.kill(pid, 0)`
-  ＝ `TerminateProcess`（可能杀掉锁持有者；`run_rl` 注释早已据此不复用它）——train_loop 陈旧锁判定
-  在 Windows 上有此隐患，本次未动。
+- **配套（同日同族）**：控制台启动前按端口回收幸存占用者（`stack/hub.ts::reclaimPort`，已接在
+  `stepHubServer` / `stepSelfNode`）。**`workerServe` 控制台路径故意不接**：worker_server 可能在跑
+  数小时的 PPO job，`/ping` 失败（如 token 临时不匹配）就回收它 = 直接炮掉在途 job；而该路径
+  现在会先复用 `/ping` 通的幸存者，不通时拿不到锁也会**响亮拒绝并指向日志**（含持有者 PID 与
+  锁路径），足以人工处置 —— 要不要让控制台代劳杀进程，留待用户拍板。
+- **铁律（新增，三处同源）**：**存活探测在 Windows 侧禁止用 `os.kill(pid, 0)`**——它是
+  `TerminateProcess(handle, 0)`，会把被探测的进程**直接杀掉**；且 `except Exception → 不活` 会把
+  「我杀了它」记成「它本来就是死的」，护栏静默失效。一律走 `GetExitCodeProcess == STILL_ACTIVE`；
+  `pid <= 0` 一律判不活（POSIX 上 `os.kill(0/-1, 0)` 命中**进程组**，会把残缺锁当成活人持有 ⇒
+  同名课永久拒启）。覆盖：`train/loop_util.py::_pid_alive`（2026-09-17 修，此前正是裸 `os.kill`）、
+  `run_rl.py::_runrl_pid_alive`（同日补 `pid<=0` 护栏）、`remote/_instance_lock.py::_pid_alive`；
+  回归 + 行程门禁：`nn-training/tests/test_pid_probe_windows_safe.py`（注入假 kernel32，断言
+  Windows 分支**零 os.kill**）。同类待收口（本次未动，勿误以为已安全）：
+  `remote/notebook_runtime.py` 内的 `_pid_alive`、`tools/tmp-clean.py`。
 
 

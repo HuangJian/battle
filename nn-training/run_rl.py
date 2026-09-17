@@ -96,13 +96,20 @@ def _runrl_pid_alive(pid: int) -> bool:
     """跨平台的进程存活探测。
 
     Windows 走 GetExitCodeProcess == STILL_ACTIVE——os.kill(pid, 0) 在 Windows 上
-    是 TerminateProcess(handle, 0)，会把锁持有人直接杀掉（train/loop_util._pid_alive
-    的隐患，不复用）。POSIX 上 signal 0 只是存在性探测，安全。
+    是 TerminateProcess(handle, 0)，会把锁持有人直接杀掉。POSIX 上 signal 0 只是
+    存在性探测，安全。（`train/loop_util._pid_alive` 曾因此不复用本实现，2026-09-17
+    已把那一处也改成同口径的安全探测；三处同源，回归见
+    tests/test_pid_probe_windows_safe.py。）
 
     2026-09-13 修复：原实现把 Windows 分支写成了无条件路径，Linux 一遇**已存在**
     的锁文件就 AttributeError——陈旧锁永不清理、同课双开变成崩溃而非响亮拒启
     （P1 验收遗留的 stale 锁让双课验收当场两连崩）。POSIX 分支与 loop_util._pid_alive
-    同款宽捕获：任何探测失败都按"不存活"处理，stale 锁总能被清理。"""
+    同款宽捕获：任何探测失败都按"不存活"处理，stale 锁总能被清理。
+
+    pid <= 0 一律判「不活」（POSIX 上 os.kill(0, 0) / os.kill(-1, 0) 命中的是**进程组**
+    语义，会把残缺锁文件里的 0/-1 当成「有人持有」⇒ 同名课永久拒启）。"""
+    if pid <= 0:
+        return False
     if os.name == "nt":
         import ctypes
 

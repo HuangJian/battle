@@ -110,12 +110,50 @@ def test_unreadable_cmdline_fails_closed(
     assert "身份未知" in out and "fail-closed" in out
 
 
-def test_default_lock_path_is_port_keyed() -> None:
-    a = il.default_hub_lock_path(8787)
-    b = il.default_hub_lock_path(8877)
+def test_default_lock_path_is_kind_and_port_keyed() -> None:
+    a = il.default_instance_lock_path("hub_server", 8787)
+    b = il.default_instance_lock_path("hub_server", 8877)
+    w = il.default_instance_lock_path("worker_server", 8787)
     assert a.endswith(".hub_server.8787.lock")
+    assert w.endswith(".worker_server.8787.lock")
     assert a != b, "不同端口必须是不同的锁（多课程槽位并行）"
-    assert Path(a).parent == NN_TRAINING
+    assert a != w, "不同服务（同端口）必须是不同的锁"
+    assert Path(a).parent == NN_TRAINING == Path(w).parent
+
+
+def test_multiple_markers_any_hit_refuses(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """多指纹：同一个服务有多个合法入口（`-m remote_worker_serve` / 模块名拉起）时，
+    任一枚命中就算同一程序，仍然拒启（不得因为指纹表没写全而误接管）。"""
+    lock = tmp_path / ".worker_server.8790.lock"
+    holder = _spawn_lock_holder(lock, marker="remote_worker_serve")
+    try:
+        assert _wait_lock_owner(lock, holder.pid)
+        assert (
+            il.acquire_instance_lock(
+                str(lock), marker=("remote_worker_serve", "worker_server"), tag="worker-serve"
+            )
+            is False
+        )
+        assert "已有实例在运行" in capsys.readouterr().out
+    finally:
+        _kill(holder)
+
+
+def test_unwritable_lock_fails_open(
+    tmp_path: Path, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """只读 FS / 权限不足 → **fail-open** 且响亮告警：写不下锁不该变成启动拦路鬼
+    （守卫是第二道闸，第一道端口守卫仍在）。"""
+
+    def _boom(_p: str) -> int:
+        raise OSError(30, "Read-only file system")
+
+    monkeypatch.setattr(il, "_create_exclusive", _boom)
+    assert il.acquire_instance_lock(str(tmp_path / "x.lock"), marker="hub_server", tag="hub") is True
+    out = capsys.readouterr().out
+    assert "WARN" in out and "无法创建" in out
 
 
 # ────────────────────────── 集成：真进程双启 ──────────────────────────
@@ -266,13 +304,13 @@ def _dead_pid() -> int:
     return p.pid
 
 
-def _spawn_lock_holder(lock: Path) -> subprocess.Popen:
-    """起一个真子进程持有锁：命令行含 `hub_server`（同程序指纹），自身驻留直至被杀。"""
+def _spawn_lock_holder(lock: Path, marker: str = "hub_server") -> subprocess.Popen:
+    """起一个真子进程持有锁：其命令行含 `marker`（当作同程序指纹），自身驻留直至被杀。"""
     code = (
         "import sys, time;"
         f"sys.path.insert(0, {str(NN_TRAINING)!r});"
         "from remote._instance_lock import acquire_instance_lock;"
-        f"print('HOLDER', acquire_instance_lock({str(lock)!r}, marker='hub_server'), flush=True);"
+        f"print('HOLDER', acquire_instance_lock({str(lock)!r}, marker={marker!r}), flush=True);"
         "time.sleep(120)"
     )
     return subprocess.Popen(

@@ -14,6 +14,10 @@ socket 同时 bind 同一端口（后绑定者不报错，静默变成「永远�
 锁文件格式 `PID|EXE|START_TS`（与 `run_rl` / `train_loop` 的 PID 单实例锁同形），
 兼容裸 PID 旧文件。
 
+**锁文件写不下时 fail-open**（只读 FS / 权限不足）：守卫是**纵深防御的第二道闸**（第一道是
+端口守卫），写不下锁不该变成启动拦路鬼 —— 响亮告警后本次退化为仅靠端口守卫；反之，「已有
+活实例」的拒启仍是 fail-closed。
+
 **陈旧锁接管规则**（判据只有两条，宁可 fail-closed）：
 
   * 持有者已死 → 陈旧锁，接管（响亮打印）；
@@ -37,7 +41,7 @@ import time
 
 __all__ = [
     "acquire_instance_lock",
-    "default_hub_lock_path",
+    "default_instance_lock_path",
     "proc_cmdline",
     "read_lock",
     "release_instance_lock",
@@ -139,25 +143,44 @@ def read_lock(lock_path: str) -> tuple[int | None, str | None, int | None]:
 
 
 def _create_exclusive(lock_path: str) -> int | None:
-    """`O_CREAT|O_EXCL` 原子创建（原子性正是本锁的全部价值）；已存在 → None。"""
+    """`O_CREAT|O_EXCL` 原子创建（原子性正是本锁的全部价值）；已存在 → None。
+
+    其它 `OSError`（只读 FS / 权限不足）**不在此吞**——由 `acquire_instance_lock` 判定
+    是否 fail-open（与「已存在」是两回事，不能混为一谈）。
+    """
     try:
         return os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
     except FileExistsError:
         return None
 
 
-def acquire_instance_lock(lock_path: str, *, marker: str, tag: str = "instance-lock") -> bool:
+def acquire_instance_lock(
+    lock_path: str, *, marker: str | tuple[str, ...], tag: str = "instance-lock"
+) -> bool:
     """取锁：True = 本进程持有（锁文件已写入）；False = 已有活实例（已响亮打印，调用方应退出）。
 
     *marker* 是持有者身份指纹（如 `"hub_server"`）：只在持有者**活着**时用来区分
     「同一程序的第二个实例」（拒启）与「PID 被系统复用给了别的程序」（接管陈旧锁）。
+    可给多个指纹（元组）——同一个服务常有多个合法入口（如 worker_server 既走
+    `-m remote_worker_serve` 也可能被以模块名拉起），**任一命中即认作同一程序**。
     """
-    fd = _create_exclusive(lock_path)
+    markers = (marker,) if isinstance(marker, str) else tuple(marker)
+    try:
+        fd = _create_exclusive(lock_path)
+    except OSError as e:
+        # 只读 FS / 权限不足：写不下锁 ≠ 有实例在跑。守卫是纵深防御的第二道闸（第一道是
+        # 端口守卫），此处**fail-open**并响亮告警——不能让「写不下锁」变成启动拦路鬼。
+        print(
+            f"[{tag}] WARN: 锁文件 {lock_path} 无法创建（{e}）——本次退化为仅靠端口守卫；"
+            f"请检查目录权限（若两个实例同时启动，此环境双监听窗口未被堵塞）",
+            flush=True,
+        )
+        return True
     if fd is None:  # 已存在锁文件：判定「真双开」还是「陈旧锁/ PID 复用」
         holder, holder_exe, holder_ts = read_lock(lock_path)
         if holder is not None and _pid_alive(holder):
             cmd = proc_cmdline(holder)
-            if cmd is None or marker in cmd:
+            if cmd is None or any(m in cmd for m in markers):
                 why = (
                     "命令行不可读，身份未知（fail-closed）"
                     if cmd is None
@@ -170,8 +193,9 @@ def acquire_instance_lock(lock_path: str, *, marker: str, tag: str = "instance-l
                 )
                 return False
             print(
-                f"[{tag}] 锁持有人 PID {holder} 不是本程序（命令行: {cmd[:_CMD_CLIP]}）"
-                f"——判为 PID 复用，接管陈旧锁 {lock_path}（原 start_ts={holder_ts}）",
+                f"[{tag}] 锁持有人 PID {holder} 不是本程序（命令行: {cmd[:_CMD_CLIP]}；"
+                f"指纹 {list(markers)}）——判为 PID 复用，接管陈旧锁 {lock_path}"
+                f"（原 start_ts={holder_ts}）",
                 flush=True,
             )
         else:
@@ -210,11 +234,14 @@ def release_instance_lock(lock_path: str) -> None:
         pass
 
 
-def default_hub_lock_path(port: int) -> str:
-    """hub-server 默认锁路径：`nn-training/.hub_server.<port>.lock`。
+def default_instance_lock_path(kind: str, port: int) -> str:
+    """服务的默认锁路径：`nn-training/.<kind>.<port>.lock`（如 `.hub_server.8787.lock`、
+    `.worker_server.8790.lock`）。
 
-    按**端口**键控（不是按课程或 job 目录）：不变量是「一个端口只允许一个 hub 实例」，
-    跨课程槽位配错同样必须被挡住。与 trainer 的 `.run_rl.<课程>.lock` 同目录同风格。
+    按**端口**键控（不是按课程或 job 目录）：不变量是「一个端口只允许一个该服务实例」，
+    跨课程槽位配错、不同入口重复拉起同样必须被挡住。与 trainer 的 `.run_rl.<课程>.lock`
+    同目录同风格（同是「启动守卫」）。路径锚在包目录（`remote/` 的上一级 = `nn-training/`），
+    与调用方的 cwd 无关——云端 code.zip 里它就是那份代码副本的目录。
     """
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(root, f".hub_server.{port}.lock")
+    return os.path.join(root, f".{kind}.{port}.lock")
