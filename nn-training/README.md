@@ -278,12 +278,16 @@ git commit --no-verify ...               # 跳过全部门禁
 自定位 nn-training 与 venv，从仓库根或任意目录执行）：
 
 ```sh
-bash tools/githook/nn-python-gate.sh        # 默认 xdist -n 4，NN_GATE_NPROC 可调
+bash tools/githook/nn-python-gate.sh        # 默认 xdist -n min(核数,12) + CPU 内线程 1
 make -C nn-training python-gate             # Makefile 入口（= make check）
 ```
 
-并行架构：ruff + mypy（热缓存 ~4s）+ pytest xdist（`-n 4`，目标 `tests/ e2e/`）
-三路并行；pytest 步的墙钟由最慢的单个用例与 xdist 分发决定（实测本机 16 核 ~27s）。
+并行架构：ruff + mypy（热缓存 ~4s）+ pytest xdist（目标 `tests/ e2e/`）三路并行；
+pytest 步的墙钟由最慢的单个用例与 xdist 分发决定（实测本机 16 核 ~23s）。
+**两个旋钮必须一起调**（2026-09-17 实测）：只加 worker 会更慢、只封线程没收益——
+旧默认 `-n 4` × torch 默认内线程（= 物理核）是 4×16 超订，全量 36.3s；封顶 + 按核数
+发 worker 后 ~23s。完整数据、以及 `NN_GATE_NPROC` / `NN_GATE_THREADS` 两个逃生口
+见 `tools/githook/nn-python-gate.sh` 头注。
 跳过单项：
 
 ```sh

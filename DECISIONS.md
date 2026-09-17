@@ -2148,4 +2148,27 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 - **监督器重启路径不接 `reclaimPort`**（保留的刻意选择，非残留）：它杀的是账本里确切的
   pid、紧接着拉起同一条 spec，没有孤儿窗口（kill 失败时回收也一样杀不掉），故不回收、只核归属。
 
+## §2026-09-17-goalnn-python-gate-parallel-policy（2026-09-17，python 门禁并行策略：worker 数 × CPU 内线程数必须成对调；"-n 4 最优" 作废）
+
+- **背景**：用户「检查 python 全量门禁，提高可维护性，减少耗时」。门禁 39~50s，而 ruff(~1s)/
+  mypy(~4s) 全藏在 pytest 后面 ⇒ 唯一瓶颈是 pytest 步。
+- **根因**：旧默认 `-n 4` × torch 默认内线程（= 物理核）⇒ 4×16 = 64 线程抢 16 核（**超订**）。
+  `docs/goal-nn.progress.md §25`「n=4 最优、auto=16 反更慢」是超订假象的读数（worker 越多越慢
+  本身就是证据），不是「torch import 开销」。16 核实测均值（同机交错 3 次/项）：`-n 4` 默认 36.3s /
+  `-n 12` 默认 44.7s / `-n 4` 线程=1 39.7s / **`-n 12` 线程=1 = 24.7s**（`-n 8/16/auto` 线程=1 同水平）。
+- **备选与否决**：① 只加 worker——否（44.7s，更慢）；② 只封线程——否（39.7s，无收益：小并发盖不住
+  尾部长用例）；③ `-n auto` 且不封顶——否（worker 数 = 逻辑核，无法给内存封顶；本机 auto ≈ n16 同水平
+  但峰值 RSS 随核数线性涨）；④ 把新数字写死（如 `-n 12`）——否（换机器就错），改「核数派生 + 上界」。
+- **决定**：门禁 worker = `min(核数, 12)`（`NN_GATE_NPROC` 覆盖）、CPU 内线程 = 1
+  （`NN_GATE_THREADS` 覆盖，0 = 不设；须在 python 启动前 export OMP/MKL/OPENBLAS）。
+  **同策推广到所有本地入口**（防「门禁快、日常慢」漂移）：`task.py`（线程封顶收在共用的
+  `clean_env()`，四个 target 一律 `-n auto`——**同时回退 2026-09-15 把 `-n auto` 判为
+  「沙箱 ~34% 停滞头号嫌疑」的误判**）、`nn-training/Makefile`（`NPROC ?= auto` / `THREADS ?= 1`）、
+  CI `nn-training.yml`（job 级封顶 + 单测层由串行改 `-n 2`）。**`-n 4` 不再是任何入口的默认值。**
+- **违反后果**：任一入口把封顶 export 删掉、或把 worker 写死回 4，全量立刻退回 ~36s——而**用例仍全绿**，
+  只有人肉计时才看得出来（静默退化）。由 `nn-training/tests/test_githook_scripts.py` 两条静态护栏钉住
+  （已做变异验证：删 export / 退回 `-n 4` / 去上界 3/3 被抓住）。
+- **证据与完整表格**：`docs/nn.progress.md §57`。另：门禁不再重复加 `-q`（addopts 已有 ⇒ 原本
+  `-qq` 吞掉了「N passed in Xs」，hook 日志里看不到用例数与耗时）。
+
 

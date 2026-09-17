@@ -4,6 +4,48 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §57 python 全量门禁提速：worker 数 × CPU 内线程数必须成对调（2026-09-17）
+
+**背景**：用户问「检查 python 全量门禁，提高可维护性，减少耗时」。门禁墙钟实测 39~50s，而
+ruff(~1s) / mypy(~4s) 完全藏在 pytest 后面 ⇒ 只有一个瓶颈：pytest。
+
+**根因（推翻 `docs/goal-nn.progress.md §25` 的旧结论）**：旧默认 `-n 4` + torch 默认内线程
+（= 物理核 16）⇒ 4 worker × 16 线程 = 64 线程抢 16 核，**严重超订**。§25 那条「n=4 最优、
+auto=16 反更慢」正是这个假象的读数（worker 越多越慢本身就是超订证据），不是「torch import 开销」。
+
+**实测**（16 核，`python -m pytest tests/ e2e/` 单独计时，同机交错 3 次/项）：
+
+| 配置 | 均值墙钟 | 备注 |
+|---|---|---|
+| `-n 4` 默认线程 | 36.3s | 旧默认 |
+| `-n 12` 默认线程 | 44.7s | worker 越多越慢（超订证据） |
+| `-n 4` 线程=1 | 39.7s | 只封线程不救小并发 |
+| **`-n 12` 线程=1** | **24.7s** | ← 新默认 |
+| `-n 8` / `-n 16` / `auto` 线程=1 | 25.5 / 23.5 / 24.0s | 8~16 平坦 |
+
+**改动**：① 门禁 export `OMP/MKL/OPENBLAS_NUM_THREADS`（`NN_GATE_THREADS`，默认 1，0 = 不设）
++ worker = `min(核数, 12)`（`NN_GATE_NPROC`；取 12 同时给内存封顶：峰值 pytest 进程树
+RSS ≈ 3.9GB ≈ `-n 4` 的 3 倍）；② 三路工具启动去重成 `run_tool`（原先 LIVE/detach 二选一
+复制了三遍，加一个工具就要再抄一遍，漏掉 detach 分支会让 Windows commit 卡死）；③ 去掉 pytest 的
+重复 `-q`（addopts 已有 `-q` ⇒ 原本是 `-qq`，把结尾的「N passed in Xs」吞了，hook 日志里看不到
+用例数与耗时）——现在日志里是 `1010 passed in 21.2s`；④ `t0` 提到启动工具之前，报告的秒数 = 门禁
+真实墙钟（旧版只算「等最慢那个」）。
+
+**同策推广**（防「门禁快、日常入口慢」的漂移）：`task.py` 四个 target 共用 `clean_env()`，线程封顶
+只改一处即全生效，worker 一律 `-n auto`（**2026-09-15 把 `-n auto` 判为「沙箱 ~34% 停滞」头号嫌疑
+是误判，本次回退**）；`nn-training/Makefile` 加 `NPROC ?= auto` / `THREADS ?= 1` + export；
+CI `nn-training.yml` 加 job 级线程封顶，单测层从**无 `-n`**（job 里最长的 pytest 步）改为 `-n 2`
+（与 e2e 同口径）。
+
+**验证**：门禁连跑两次 20s / 23s rc=0（改前 39 / 50s）；日志含 `1010 passed in 21.2s`；ruff +
+mypy 绿；`test_githook_scripts.py` 新增两条静态护栏（封线程 export + 核数派生 worker 数），并用
+**变异测试证明非空转**（删 export / 退回 `-n 4` / 去掉上界 → 3/3 被抓住）；CI 侧封顶用
+`taskset -c 0,1` 压成本机 2 vCPU 模拟（`-n 2`：默认 57/73s → 封顶 55/53s）。
+
+**教训（通用形态）**：把「并行度不够」当结论之前，先看**每个进程内部**开了多少线程——
+`-n`（进程数）× 库默认线程数（= 核数）是一对乘积，只调一半得到的结论会**反号**（本来该加 worker，
+却得出「workers 越少越好」）。
+
 ## §56 hub-server 重启死锁收口：D9 只当「无效鉴权」的守门人 + 回环永不封禁 + 端口级实例锁（2026-09-17）
 
 **为什么记这一笔**：本笔含**训练基础设施架构变更**（D9 鉴权/闭锁语义、hub 启动串行化），

@@ -3,7 +3,7 @@
 # Usage:
 #   make setup          One-command env bootstrap (GPU detect -> torch variant -> uv sync)
 #   make check          Lint + typecheck + 全量测试（== pre-commit 门禁，同一套）
-#   make test           Full test suite（单测层 + 集成层）
+#   make test           Full test suite（单测层 + 集成层；NPROC/THREADS 可覆盖）
 #   make test-fast      Unit layer only（tests/，无 e2e）
 #   make test-e2e       Integration layer only（e2e/）
 #   make smoke          Torch import check + smoke_test
@@ -60,20 +60,31 @@ setup:
 # check 直接委派给门禁脚本——单一实现，杜绝“日常命令”与“提交门禁”漂移。
 check: python-gate
 
-# 并行门禁（v3.15 2026-09-03）：ruff + mypy + pytest xdist -n 4 同时跑。
-# 与 pre-commit hook 共用同一入口（tools/githook/nn-python-gate.sh）——
-# 目标 = tests/（单测层）+ e2e/（集成层），NN_GATE_NPROC 可调 worker 数。
+# 并行门禁（v3.15 2026-09-03；v3.17 2026-09-17 并行策略重调）：ruff + mypy +
+# pytest xdist 同时跑。与 pre-commit hook 共用同一入口（tools/githook/nn-python-gate.sh），
+# 目标 = tests/（单测层）+ e2e/（集成层）；该脚本自己定 worker 数 = min(核数, 12)、
+# CPU 内线程 = 1（旋钮 NN_GATE_NPROC / NN_GATE_THREADS，实测数据见脚本头注）。
 python-gate:
 	bash ../tools/githook/nn-python-gate.sh
 
+# ---- 分层调试入口的并行旋钮：worker = auto（= 核数），CPU 内线程 = 1 ----
+# 两者**必须一起**（2026-09-17 实测，16 核）：写死 `-n 4` + 默认线程 = 4×16 超订 ⇒
+# 全量 36.3s；只加 worker 更慢（n=12 默认线程 44.7s）；封到 1 线程后 n=12/auto ≈ 23s。
+# 完整数据与推理在门禁脚本头注；覆盖：`make test NPROC=8` / `make test THREADS=0`。
+NPROC   ?= auto
+THREADS ?= 1
+export OMP_NUM_THREADS = $(THREADS)
+export MKL_NUM_THREADS = $(THREADS)
+export OPENBLAS_NUM_THREADS = $(THREADS)
+
 test:
-	$(PREFIX) $(PYTHON) -m pytest tests/ e2e/ -n 4 -q
+	$(PREFIX) $(PYTHON) -m pytest tests/ e2e/ -n $(NPROC) -q
 
 test-fast:
-	$(PREFIX) $(PYTHON) -m pytest tests/ -n 4 -q
+	$(PREFIX) $(PYTHON) -m pytest tests/ -n $(NPROC) -q
 
 test-e2e:
-	$(PREFIX) $(PYTHON) -m pytest e2e/ -n 4 -q
+	$(PREFIX) $(PYTHON) -m pytest e2e/ -n $(NPROC) -q
 
 smoke:
 	$(PREFIX) $(PYTHON) -c "import torch; print('torch', torch.__version__)"

@@ -39,6 +39,11 @@ EXTRA_ARGS: list[str] = []
 # 各自语言里的唯一实现：bash 侧负责 bash/子进程树，这里负责 python 子进程环境）。
 SANDBOX_VAR_RE = re.compile(r"CODEBUDDY|SAFE_|BUDDY|SANDBOX", re.IGNORECASE)
 
+# CPU 内线程封顶（BLAS/OpenMP 池读这些变量；0 = 不设，退回 torch 默认）。
+# 值 = 1 是 16 核实测最优；理由与数据见 tools/githook/nn-python-gate.sh 头注。
+THREADS = "1"
+THREAD_ENV_VARS = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS")
+
 
 def clean_env() -> dict[str, str]:
     """剥离删除保护沙箱的环境副本（2026-09-15，task.py 侧对齐拉闸）。
@@ -48,11 +53,18 @@ def clean_env() -> dict[str, str]:
     无超时）会被打穿——见 .workbuddy/memory/2026-09-15.md「追问 2」。剥离 BASH_ENV
     注入载体 + CODEBUDDY/SAFE_* 变量，并显式关掉 python 侧守卫开关（惰性变量，
     普通机器无害）。
+
+    另：**同时也在这里给 pytest 封 CPU 内线程**（2026-09-17，与门禁同策）——
+    xdist 的每个 worker 默认继承 torch 的内线程数（= 物理核），worker 一多就超订
+    （16 核实测：`-n 12` 用默认线程 44.7s，封到 1 线程 24.7s）。四个 target 共用
+    本工厂函数，所以封顶只需一处。实测与推理见 tools/githook/nn-python-gate.sh 头注。
     """
     env = {k: v for k, v in os.environ.items() if k not in ("BASH_ENV", "ENV") and not SANDBOX_VAR_RE.search(k)}
     env["BASH_ENV"] = "/dev/null"  # 子进程若再拉 bash，无包装函数可注入
     env["CODEBUDDY_SAFE_DELETE_ENABLED"] = "0"
     env["PYTHONNOUSERSITE"] = "1"
+    for _var in THREAD_ENV_VARS:
+        env[_var] = THREADS
     return env
 
 
@@ -123,29 +135,31 @@ def target_check() -> int:
         [
             [PYTHON, "-m", "ruff", "check", "."],
             [PYTHON, "-m", "mypy", ".", "--config-file", str(HERE / "pyproject.toml")],
-            [PYTHON, "-m", "pytest", "tests/", "e2e/", "-n", "4", "-q", "--timeout=60"],
+            [PYTHON, "-m", "pytest", "tests/", "e2e/", "-n", "auto", "-q", "--timeout=60"],
         ],
         env=clean_env(),
     )
 
 
 def target_test() -> int:
-    # 2026-09-15：-n auto（=CPU 核数）作废——16 worker 同时 import torch 是沙箱里
-    # 「~34% 停滞」的头号嫌疑（nn-python-gate.sh 头注释实测：torch import 开销使
-    # 4 worker 才是本机最优点）；对齐 gate 用 -n 4。env=clean_env() 关掉删除沙箱守卫。
+    # worker 数 = `-n auto`（= CPU 核数），**不是写死的 4**（2026-09-17 修正）：
+    # 2026-09-15 曾把 `-n auto` 判为「沙箱 ~34% 停滞」的头号嫌疑并退回 -n 4，那是
+    # 误判——真正的杀手是超订（每个 worker 默认开满物理核线程），已由 clean_env()
+    # 的线程封顶根治；封顶后 16 核实测 auto/n=12 同一水平（~23s）、写死 4 反而最慢
+    # （36s）。数据见 tools/githook/nn-python-gate.sh 头注。
     return run(
-        [PYTHON, "-m", "pytest", "tests/", "e2e/", "-n", "4", "-v", "--timeout=60"],
+        [PYTHON, "-m", "pytest", "tests/", "e2e/", "-n", "auto", "-v", "--timeout=60"],
         env=clean_env(),
     )
 
 
 def target_test_fast() -> int:
-    # -n 4 + --timeout=60（与 target_test / nn-python-gate.sh 对齐，2026-09-15）：
-    # `task.py check` 此前是 -n auto 且无超时——沙箱里 hang 则无限挂；看门禁/日常
-    # 两侧护栏必须一致，只改一处就是破口。层 = 路径：这里是单测层（tests/）。
+    # `-n auto` + `--timeout=60`（与 target_test / nn-python-gate.sh 对齐）：
+    # `task.py check` 此前无超时——沙箱里 hang 则无限挂；看门禁/日常两侧护栏必须
+    # 一致，只改一处就是破口。层 = 路径：这里是单测层（tests/）。
     # 单位是**秒**（pytest-timeout）——原值 50000 是从 bun 的毫秒制误搬的，= 无护栏。
     return run(
-        [PYTHON, "-m", "pytest", "tests/", "-n", "4", "-q", "--timeout=60"],
+        [PYTHON, "-m", "pytest", "tests/", "-n", "auto", "-q", "--timeout=60"],
         env=clean_env(),
     )
 
@@ -153,7 +167,7 @@ def target_test_fast() -> int:
 def target_test_e2e() -> int:
     # 集成层单独入口（e2e/）：调试 / 复核时只跑这一层，不付全量单测的钱。
     return run(
-        [PYTHON, "-m", "pytest", "e2e/", "-n", "4", "-q", "--timeout=60"],
+        [PYTHON, "-m", "pytest", "e2e/", "-n", "auto", "-q", "--timeout=60"],
         env=clean_env(),
     )
 

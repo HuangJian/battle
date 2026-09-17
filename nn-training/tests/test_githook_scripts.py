@@ -1,6 +1,6 @@
 """tools/githook 脚本的可执行性 / 接线护栏。
 
-两个已发生过的坑，各一条断言：
+已发生过的坑，各一条断言（条目 5 由 2026-09-17 门禁提速引入）：
 
 1. **nn-py-safe.sh 在原生 Linux 上跑不了 pytest**（2026-09-15 实测）。它对 `-m pytest`
    分支无条件套 MSYS 盘符改写，`/home/<user>/battle/tools/githook` 被 `s|^/([a-z])|\\1:|`
@@ -22,6 +22,13 @@
    `subprocess.run(["bash", ...])` 都以 `Bash/CallMsi/E_ACCESSDENIED` 失败 ⇒ 只按
    which() 决定 skip 会让门禁在任何这类终端里**恒红**，把真回归淹掉。skip 条件改为
    **真起一次 `bash -c "exit 0"` 探测**。
+
+5. **门禁的并行旋钮必须「worker 数 × CPU 内线程数」一起调**（2026-09-17 实测）。旧默认
+   `-n 4` + torch 默认内线程（= 物理核）⇒ 4 worker × 16 线程抢 16 核，全量 36.3s；
+   只加 worker 更慢（-n 12 默认线程 = 44.7s），封到 1 线程后 -n 12 = 24.7s（与 -n 8/16
+   同水平）⇒ 全量 ~36s → ~23s。**静默退化风险**：谁把 OMP/MKL 的封顶 export 删掉，
+   门禁立刻退回 ~36s，而所有用例仍然全绿——只有人肉计时才发现。故本文件把两个旋钮
+   都钉成静态回归（见 test_gate_caps_intraop_threads / test_gate_worker_count_scales_with_cores）。
 """
 
 from __future__ import annotations
@@ -93,15 +100,22 @@ def test_gate_pytest_targets_cover_both_layers() -> None:
     assert "$PYTEST_TARGETS" in text, "PYTEST_TARGETS 未被真正传给 pytest"
     assert 'NN_GATE_SKIP_E2E' in text, "缺少只退集成层的定向出口（flake 时要用）"
     # 历史坑：`-m "not heavy"` 式的标记分层（tests/ 里 heavy 标记实测 0 个 ⇒ 空转）。
-    # 只看非注释行 —— 在注释里解释这个坑是合法的，不该被判红。
-    code = "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
-    assert "not heavy" not in code, "层应由路径决定，不要回到标记过滤"
+    assert "not heavy" not in strip_comments(text), "层应由路径决定，不要回到标记过滤"
+
+
+def strip_comments(text: str) -> str:
+    """去掉整行注释——在注释里解释历史坑是合法的，不该被判红；只看真正生效的代码。"""
+    return "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
+
+
+def _gate_code() -> str:
+    """门禁脚本里真正生效的行。"""
+    return strip_comments(GATE.read_text(encoding="utf-8"))
 
 
 def _timeout_values(text: str) -> list[int]:
     """非注释行里的 pytest 超时数值（秒）。"""
-    code = "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
-    return [int(m.group(1)) for m in _TIMEOUT_VALUE.finditer(code)]
+    return [int(m.group(1)) for m in _TIMEOUT_VALUE.finditer(strip_comments(text))]
 
 
 @pytest.mark.parametrize("script", [GATE, TASK_PY], ids=["nn-python-gate.sh", "task.py"])
@@ -124,3 +138,36 @@ def test_gate_runs_pytest_for_both_dirs(tmp_path: Path) -> None:
     text = GATE.read_text(encoding="utf-8")
     line = next(ln for ln in text.splitlines() if "$PYTEST_TARGETS" in ln and "-m pytest" in ln)
     assert line.count("$PYTEST_TARGETS") == 1
+
+
+def test_gate_caps_intraop_threads() -> None:
+    """门禁必须把 pytest 的 CPU 内线程数封顶（默认 1）——否则超订，全量 ~36s。
+
+    见模块 docstring 第 5 条：删掉这组 export 会让门禁静默退回 ~36s（测试照旧全绿）。
+    """
+    code = _gate_code()
+    for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+        assert f"{var}=$GATE_THREADS" in code, (
+            f"门禁未把 {var} 封到 GATE_THREADS —— 每个 xdist worker 都会继承 torch 的默认"
+            "内线程数（= 物理核），worker 一多就超订（2026-09-17 实测 36.3s → 24.7s）"
+        )
+    m = re.search(r"\$\{NN_GATE_THREADS:-(\d+)\}", code)
+    assert m, "找不到 NN_GATE_THREADS 的默认值（0 = 退回 torch 默认的逃生口须保留）"
+    assert 1 <= int(m.group(1)) <= 4, (
+        f"NN_GATE_THREADS 默认 {m.group(1)} 不合理：实测 1 最优（0 才是「不设」，别用大数做默认）"
+    )
+
+
+def test_gate_worker_count_scales_with_cores() -> None:
+    """worker 数默认派生自核数（不再写死 4），且必须有上界（内存封顶）。"""
+    code = _gate_code()
+    assert "NN_GATE_NPROC" in code, "缺少 NN_GATE_NPROC 逃生口"
+    assert "os.cpu_count()" in code, (
+        "worker 数应从核数派生——写死 4 在 16 核上白白浪费并行度（2026-09-17 实测 n=4 → n=12 提速 1/3）"
+    )
+    assert re.search(r"NPROC=\$\{NN_GATE_NPROC:-\$CORES\}", code), (
+        "NPROC 默认值应 = min(核数, 上界)，且由 NN_GATE_NPROC 覆盖"
+    )
+    cap = re.search(r'NPROC" -gt (\d+)', code)
+    assert cap, "NPROC 缺上界——worker 无上限会按核数放大内存（-n 12 峰值 RSS 实测 ≈ 3.9GB）"
+    assert int(cap.group(1)) <= 32, f"NPROC 上界 {cap.group(1)} 过大（内存封顶形同虚设）"

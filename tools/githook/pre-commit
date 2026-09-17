@@ -269,7 +269,9 @@ if [ -n "$NN_STAGED" ]; then
     # stdin 丢弃：避免任何子进程继承 git 的 stdio 管道（Windows 上 git 会一直
     # 等 pipe EOF → 门禁全绿后 commit 卡死，2026-09-15）。
     # 不再传位置参数（历史上那个 `4` = 旧 nn-gate-shards.py 的分片数，工具已删）：
-    # xdist worker 数现由 NN_GATE_NPROC 控制（脚本默认 4）。
+    # 并行旋钮由脚本自己定 —— worker 数 = min(核数, 12)（NN_GATE_NPROC 可覆盖）、
+    # CPU 内线程 = 1（NN_GATE_THREADS 可覆盖，0 = 不设）。为什么必须成对、实测数据：
+    # nn-python-gate.sh 头注（2026-09-17 从 ~36s 降到 ~23s）。
     NN_GATE_SKIP="$GATE_SKIP" sh "$TOP/tools/githook/nn-python-gate.sh" \
       > "$GATE_LOG" 2>&1 < /dev/null || GATE_RC=$?
     cat "$GATE_LOG"
