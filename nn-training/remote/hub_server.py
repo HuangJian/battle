@@ -19,8 +19,21 @@
   POST /jobs/{id}/release       worker 瞬时失败主动还租约（job 立即回池，2026-09-05）
   GET  /jobs/{id}/result        训练主循环取回已落盘结果做三重校验
 
-鉴权（D9）：`Authorization: Bearer <token>`；同一来源 IP 5 次 401 → 封 1 小时
-（失败闭锁）。token 永不落日志。
+鉴权（D9）：`Authorization: Bearer <token>`。**先验 token，封禁只拒无效鉴权尝试**
+（2026-09-17 改序）：同一来源 IP 连续 5 次**无效**鉴权 → 该 IP 的无效尝试 1 小时内
+一律 403，但**合法 token 永远放行**（封禁不连坐）。旧序先查封禁 ⇒ 一次误封（本机组件
+用陈旧 token 连打 5 次）会把该来源 IP 的**全部**流量（含 console 健康检查、训练循环、
+worker 拉活）拒之门外一小时，而封禁只住进程内存、只能靠重启清除——重启又正好被
+自己占着的端口挡住（2026-09-17 hub-server 重启死锁事故）。
+另：**回环来源（`127.0.0.0/8` / `::1` / `::ffff:127.0.0.1`）永不计数、永不封禁**
+（用户口径：「本地 127.0.0.1 鉴权失败不要锁地址」）——回环就是本机自己的组件，而
+cloudflared 回源会把隧道流量也全归成 127.0.0.1，对它封禁 = 把本机服务面整体连坐。
+
+**隧道来源还原（B，2026-09-17）**：回环对端 + `CF-Connecting-IP`（合法 IP 字面量、且非回环值）
+⇒ 按**归因 IP** 计数/封禁（`attributed_source`），把「隧道入口无封禁」这个改序代价补回来；
+无头 / 头不合法 ⇒ 仍按回环豁免（本机组件不受影响）。直连（tailnet）对端一律**只认 TCP 对端
+IP**——那台机器能自己写任何头。假设与失效代价（头若可伪造）见 `attributed_source` docstring。
+token 永不落日志。
 
 启动：
   python -m remote.hub_server --port 8787 --token <token> \
@@ -35,6 +48,8 @@
 from __future__ import annotations
 
 import argparse
+import atexit
+import ipaddress
 import json
 import os
 import random
@@ -45,6 +60,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Lock
 
+from remote._instance_lock import (
+    acquire_instance_lock,
+    default_instance_lock_path,
+    release_instance_lock,
+)
 from remote._port_guard import ensure_port_free
 from remote.protocol import (
     AUTH_HEADER,
@@ -58,6 +78,67 @@ from remote.protocol import (
     normalize_manifest,
     unpack_result_v2,
 )
+
+# ------------------------------------------------------------------ 来源判定
+
+#: Cloudflare 边缘注入的「真实客户端 IP」头（客户端自带的值由边缘覆写——本方案的**未实测假设**，
+#: 实测方法：向隧道发带伪造值的无效鉴权，看本文件的 AUTH FAIL 审计行 src= 显示哪个）。
+#: 只认它，不认 `X-Forwarded-For`：后者是**可追加的逗号列表**，取哪一段都是语义游戏。
+CF_SOURCE_HEADER = "CF-Connecting-IP"
+
+
+def _is_ip_literal(s: str) -> bool:
+    """是否是合法的 IP 字面量（`ipaddress` 严格解析；带端口的 `1.2.3.4:56` 不算）。"""
+    try:
+        ipaddress.ip_address(s)
+        return True
+    except ValueError:
+        return False
+
+
+def attributed_source(peer: str, cf_header: str) -> tuple[str, str]:
+    """归因来源 = 「这次鉴权失败算在谁头上」⇒ `(ip, 依据)`，依据 ∈ {`"cf"`, `"peer"`}。
+
+    规则（**只在「对端是回环」时采信边缘头**）：
+      * 回环对端（cloudflared 回源 / 本机组件）+ `CF-Connecting-IP` 是合法 IP 字面量、且不是
+        回环值 ⇒ 归因给该 IP（依据 `"cf"`）；
+      * 其余的（头缺失 / 头不是合法 IP / 头写的还是回环值 / 对端不是回环）⇒ 归因给 TCP 对端
+        （依据 `"peer"`）。
+
+    **为什么只在回环时采信**：tailnet 直连的对端**能自己写任何头**（那台机器就是攻击者时，头就是
+    它自己编的），故直连路径只认 TCP 对端 IP；而回环对端意味着「由本机上的中继（cloudflared）
+    转发进来」，此时头由 Cloudflare 边缘注入。
+
+    ⚠️ **假设与失效代价**（待实测，见 `docs/nn.progress.md` 的归因来源条目）：本规则成立的前提是
+    边缘**会覆写** `CF-Connecting-IP`。即使假设不成立（客户端能自带该头），最坏后果**两条都良性**：
+      ① 轮换头值 ⇒ 攻击者拿不到封禁，效果退化为「回环豁免」（= 本方案之前的状态，不会更差）；
+      ② 伪造别人（如某个 tailnet worker）的 IP ⇒ 那个 IP **只**会被拒「无效鉴权尝试」，带
+         正确 token 的请求照常放行（先验 token 的改序使然）⇒ 不构成对合法对端的 DoS。
+    这正是本方案**不需要**额外加「全局退避闸」的理由（失效时它只会把速率压下去，不增加安全）。
+    """
+    p = (peer or "").strip()
+    if not _is_loopback(p):
+        return p, "peer"
+    cf = (cf_header or "").strip()
+    if cf and _is_ip_literal(cf) and not _is_loopback(cf):
+        return cf, "cf"
+    return p, "peer"
+
+
+def _is_loopback(ip: str) -> bool:
+    """回环来源（`127.0.0.0/8` / `::1` / IPv4-mapped `::ffff:127.0.0.1`）。
+
+    **闭锁永不作用于回环**（2026-09-17 用户口径：「本地 127.0.0.1 鉴权失败不要锁地址」）：
+    回环来源就是本机自己的组件（console 健康检查、训练循环、worker 拉活），而 cloudflared
+    回源还会把**隧道流量一并归成 127.0.0.1** —— 对它封禁等于把整台机器的服务面连坐，且
+    封禁只住进程内存、只能靠重启清除（2026-09-17 hub-server 重启死锁事故的根因）。
+    回环上的**无效**鉴权照常 401（鉴权边界与审计行不变），只是**不计数、不封禁**。
+    """
+    s = (ip or "").strip().lower()
+    if s.startswith("::ffff:"):  # IPv4-mapped IPv6
+        s = s[len("::ffff:") :]
+    return s == "::1" or s == "localhost" or s.startswith("127.")
+
 
 # ------------------------------------------------------------------ state
 
@@ -380,7 +461,11 @@ class _JobStore:
         `/ping`・`/jobs/next` 等静默路径上，五次失败把 127.0.0.1 封掉后
         **hub 日志一行痕迹都没有**，训练循环被 cloudflared 回源 IP 连坐后
         连续 403 自杀退出，只能靠猜。故次数必须上浮到调用方记录。
+
+        **回环来源永不计数、永不封禁**（返回 0）——口径见 `_is_loopback`。
         """
+        if _is_loopback(ip):
+            return 0
         with self._lock:
             n = self._auth_fail.get(ip, 0) + 1
             self._auth_fail[ip] = n
@@ -389,7 +474,20 @@ class _JobStore:
                 self._auth_fail.pop(ip, None)
             return n
 
+    def auth_success(self, ip: str) -> None:
+        """一次合法鉴权：清零该 ip 的失败计数（**不改封禁状态**）。
+
+        2026-09-17 改序配套：封禁只拒无效尝试后，合法流量必须能把计数打回零——否则
+        与合法组件共用同一个来源 IP 的坏客户端（典型：cloudflared 回源把隧道流量与
+        所有本机组件都归成 127.0.0.1）仍会**慢性累积**到 5 次，把整个 IP 拖进封禁。
+        封禁本身不在此解除：它已只影响无效尝试，到点自愈，无需合法流量代劳。
+        """
+        with self._lock:
+            self._auth_fail.pop(ip, None)
+
     def is_blocked(self, ip: str) -> bool:
+        if _is_loopback(ip):  # 回环永不被封（即便旧内存态里混进过记录）
+            return False
         with self._lock:
             until = self._auth_blocked_until.get(ip, 0.0)
             return until > self._now()
@@ -440,32 +538,53 @@ class HubHandler(BaseHTTPRequestHandler):
             or ('"GET /jobs/' in line and ('/result ' in line or '/payload ' in line))
         ) and ' 401 ' not in line and ' 403 ' not in line:
             return
+        # 隧道来源还原（B，2026-09-17）：回源流量在这里本来全写成 127.0.0.1（x1-rebirth 事故
+        # 排查时最大的阻雾），有归因来源就补上——`log_message` 只打非常规事件，不刷屏。
+        peer = self.client_address[0]
+        # `self.headers` 在请求行都解析失败的早期错误路径上可能是 None（BaseHTTPRequestHandler
+        # 先把它置 None 再 parse）——日志绝不能在错误路径上再抛一次异常。
+        hdrs = self.headers
+        src_ip, via = attributed_source(peer, hdrs.get(CF_SOURCE_HEADER, "") if hdrs else "")
+        tag = f"{peer} src={src_ip} via=cf" if via == "cf" else peer
         print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server {self.client_address[0]}] {line}",
+            f"[{time.strftime('%H:%M:%S')}] [hub-server {tag}] {line}",
             flush=True,
         )
 
     def _auth_ok(self) -> bool:
-        ip = self.client_address[0]
-        if self.store.is_blocked(ip):
-            self._log_blocked(ip)
-            self._json({"error": "ip blocked"}, 403)
-            return False
+        peer = self.client_address[0]
+        # 归因来源（B）：隧道（回环对端）按边缘头还原真实来源；直连只认 TCP 对端。
+        ip, via = attributed_source(peer, self.headers.get(CF_SOURCE_HEADER, ""))
         auth = self.headers.get(AUTH_HEADER, "")
         token = self.server.token if hasattr(self.server, "token") else ""
-        if auth != f"Bearer {token}" or not token:
-            n = self.store.auth_failure(ip)
-            print(
-                f"[{time.strftime('%H:%M:%S')}] [hub-server {ip}] AUTH FAIL {n}/5 "
-                f"path={self.path.split('?', 1)[0]}"
-                + (" — 已封禁该 IP 3600s" if n >= 5 else ""),
-                flush=True,
-            )
-            self._json({"error": "unauthorized"}, 401)
+        # ① 先验 token（2026-09-17 改序）：**合法 token 永远放行**，封禁只拒无效鉴权尝试。
+        # 旧序先查 is_blocked ⇒ 一次误封会把该来源 IP 的全部流量（console 健康检查、训练
+        # 循环、worker 拉活）403 一小时，而封禁只住进程内存、只能靠重启清除——重启又被
+        # 端口守卫挡死 = 死锁（2026-09-17 hub-server 重启事故）。
+        if token and auth == f"Bearer {token}":
+            self.store.auth_success(ip)
+            return True
+        # ② 无效鉴权尝试：已封禁 → 只拒（不重复计数，封禁到点自愈）；未封禁 → 计数，满 5 封禁。
+        if self.store.is_blocked(ip):
+            self._log_blocked(ip, peer=peer, via=via)
+            self._json({"error": "ip blocked"}, 403)
             return False
-        return True
+        n = self.store.auth_failure(ip)
+        if _is_loopback(ip):
+            counter, note = "AUTH FAIL", "（回环来源：不计数、不封禁）"
+        else:
+            counter = f"AUTH FAIL {n}/5"
+            note = " — 已封禁该 IP 3600s（仅拒无效鉴权；合法 token 不受影响）" if n >= 5 else ""
+        src = f"peer={peer}" if via == "peer" else f"peer={peer} src={ip} via=cf"
+        print(
+            f"[{time.strftime('%H:%M:%S')}] [hub-server {ip}] {counter} "
+            f"path={self.path.split('?', 1)[0]} {src}{note}",
+            flush=True,
+        )
+        self._json({"error": "unauthorized"}, 401)
+        return False
 
-    def _log_blocked(self, ip: str) -> None:
+    def _log_blocked(self, ip: str, peer: str = "", via: str = "peer") -> None:
         """封禁命中审计（每 ip 每 60s 一条）：被封客户端往往仍在高频轮询，
         不节流会把日志刷爆，但完全不打则「谁在被封」永远查不到。"""
         now = time.time()
@@ -475,8 +594,9 @@ class HubHandler(BaseHTTPRequestHandler):
         print(
             f"[{time.strftime('%H:%M:%S')}] [hub-server {ip}] BLOCKED — 请求被拒 "
             f"path={self.path.split('?', 1)[0]} 剩余封禁 "
-            f"{int(self.store.blocked_remaining(ip))}s（5/5 次鉴权失败触发；"
-            f"注意 cloudflared 回源会把隧道流量全归成 127.0.0.1，误伤经隧道的本机组件）",
+            f"{int(self.store.blocked_remaining(ip))}s（5/5 次**无效**鉴权触发；"
+            f"合法 token 照常放行——本次请求的 token 不匹配；"
+            f"归因: peer={peer} via={via}）",
             flush=True,
         )
 
@@ -954,6 +1074,11 @@ def main() -> None:
     ap.add_argument(
         "--jsonl", required=True, help="training_log.jsonl 路径（job_pending/job_completed 账本）"
     )
+    ap.add_argument(
+        "--lock-file",
+        default="",
+        help="单实例锁路径（缺省 nn-training/.hub_server.<port>.lock；按端口键控）",
+    )
     args = ap.parse_args()
     token = args.token
     if args.token_file:
@@ -965,6 +1090,14 @@ def main() -> None:
     if not token:
         print("[hub-server] ERROR: 需要 --token 或 --token-file", flush=True)
         sys.exit(1)
+    # §单实例锁（2026-09-17，第二道闸）：端口守卫是「探测 → bind」的 TOCTOU —— 两个
+    # starter 同时探测会双双通过（Windows 的 SO_REUSEADDR 还允许双绑，后启动者静默
+    # 变僵尸）。锁用 O_CREAT|O_EXCL 把启动串行化，且能在**持有者身份可核验**的前提下
+    # 自动接管陈旧锁（PID 复用 / 崩溃残留），不再出现「锁在、进程没了、永远启不来」。
+    lock_path = args.lock_file or default_instance_lock_path("hub_server", args.port)
+    if not acquire_instance_lock(lock_path, marker="hub_server", tag="hub-server"):
+        sys.exit(1)
+    atexit.register(release_instance_lock, lock_path)
     # §双监听守卫：Windows SO_REUSEADDR 允许双绑同端口（后启动者静默变僵尸）——
     # bind 前探测，端口已有活监听者即拒绝启动（2026-09-09 8787 双实例事故）。
     # 通配地址（0.0.0.0 / :: / ""）没有可连的语义 ⇒ 统一探回环，避免 0.0.0.0 在

@@ -19,6 +19,7 @@ import threading
 import time
 
 # Windows：spawn 子进程时用 CREATE_NO_WINDOW，避免黑控制台窗口反复弹出抢焦点。
+from pid_probe import pid_alive
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 
 NN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -152,18 +153,19 @@ def heartbeat(stop: threading.Event, interval: int, state: dict, log) -> None:
 
 
 def _pid_alive(pid: int) -> bool:
-    """Cross-platform check: is a process with this PID still running?
+    """Cross-platform liveness probe: is a process with this PID still running?
 
-    Catches ``Exception`` rather than specific types because Windows
-    ``os.kill(pid, 0)`` can raise ``SystemError``, ``OSError``, or other
-    unexpected exceptions depending on the PID / Python build / MSYS
-    translation layer.  Any failure → treat as "not alive" so stale
-    locks are always cleaned up."""
-    try:
-        os.kill(pid, 0)  # signal 0 = no signal sent, just permission check
-        return True
-    except Exception:
-        return False
+    本函数是 `acquire_lock` 判定陈旧锁的**唯一依据**——一个只读查询，因此实现必须是只读的。
+    2026-09-17：本处曾是裸 `os.kill(pid, 0)`，而 Windows 上那不是探测而是
+    `TerminateProcess(handle, 0)`——**查询动作会杀死锁持有者**（最坏：正在训练的 trainer），
+    且 `except Exception → False` 会把「我杀了它」记成「它本来就是死的」，双开护栏静默失效。
+
+    现已**委托唯一实现** `pid_probe.pid_alive`（stdlib-only 顶层模块，与 platform_utils 同层）：
+    该模块集中记录三个坑（Windows TerminateProcess / `pid<=0` 的进程组语义 / 宽捕获），
+    并由 `tests/test_pid_probe_windows_safe.py` 用注入的假 kernel32 直接回归。保留本函数名
+    只为调用点与测试稳定；**新增探测请直接用 `pid_probe.pid_alive`，不要再复制实现**。
+    """
+    return pid_alive(pid)
 
 
 # ────────────────────────── per-course 锁路径（plan multi-course-parallel-training §1.2/§3.1） ──

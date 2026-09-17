@@ -30,6 +30,16 @@ jobs:
     defaults:
       run:
         working-directory: nn-training
+    # CPU 内线程封顶（与本机 python-gate 同一套旋钮、同一个值）：
+    # xdist 每个 worker 默认继承 torch 的内线程数（= 核数），worker 一多就超订。
+    # 本机 16 核实测 `-n 12`：默认线程 44.7s → 封 1 线程 24.7s；
+    # 用 `taskset -c 0,1` 把本机压成 2 vCPU 模拟本 job（`-n 2`）：默认 57/73s → 封顶 55/53s
+    # （收益小但方差明显更小）。0 = 不设（退回 torch 默认）；实测推理见
+    # tools/githook/nn-python-gate.sh 头注。
+    env:
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -64,12 +74,13 @@ jobs:
       # 60e5f69 已被搬到 e2e/，于是这一步自那以后每跑必挂（且无 continue-on-error）。
       # 其覆盖已包含在下面的 e2e 层里（pytest 收集同一批用例）。
       - name: unit layer (tests/)
-        run: uv run pytest tests/ -q --no-header
+        # -n 2：GitHub runner 只有 2-4 vCPU（本机 python-gate 的 min(核数, 12) 是 16 核
+        # 下的最优口径，照抄到 runner 就是超订，故这里**不**用 auto）。2026-09-17 起
+        # 单测层同样并行——此前它是不带 -n 的单进程，是 job 里最长的 pytest 步。
+        run: uv run pytest tests/ -n 2 -q --no-header
 
       - name: e2e layer (e2e/)
-        # -n 2：GitHub runner 只有 2-4 vCPU（本机 python-gate 用 -n 4 是 16 核下的最优点，
-        # 照抄到 runner 就是超订）。备注：仓库记录过的 test_bc_epoch_e2e 负载型 flake
-        # （docs/nn.progress.md §313）已于 2026-09-15 修根因（该测试只等 bc_epoch 就回
-        # result，漏等了随后断言的 bc_eval），所以这里的 -n 2 是**按机器规模**选的，
-        # 不是为了绕 flake。
+        # -n 2 同单测层的理由（按机器规模选，不是为了绕 flake）。备注：仓库记录过的
+        # test_bc_epoch_e2e 负载型 flake（docs/nn.progress.md §313）已于 2026-09-15 修
+        # 根因（该测试只等 bc_epoch 就回 result，漏等了随后断言的 bc_eval）。
         run: uv run pytest e2e/ -n 2 -q

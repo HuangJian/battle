@@ -171,6 +171,13 @@ export interface ProcSpec {
   log: string
   /** 健康检查（就绪判定）；监督循环周期性调用。 */
   healthy: () => Promise<boolean>
+  /** 可选：就绪前先确认**这个新 pid 真的持有它要独占的资源**（目前都是端口）。
+   *
+   *  为什么健康检查不够（2026-09-17 事故）：端口上的**旧僵尸**也能答健康检查——新进程
+   *  bind 失败（EADDRINUSE / python 的双监听守卫）时它早已死，但僵尸的 200 会被记成
+   *  「新进程已就绪」：控制台报成功、账本记新 pid，而实际服务的是旧进程；监督器同理会把
+   *  僵尸的 200 当成「重启成功」。二者都只对「独占端口的组件」有意义，故用可选字段。 */
+  ownsResource?: (pid: number) => Promise<boolean>
   /** 变更检测哨兵文件（mtime 变了 = 该进程运行的代码已更新）。 */
   sentinels: string[]
   /** 归属课程（多课监督以 (key, course) 为单位；空串 = 无课程）。 */

@@ -7,6 +7,7 @@ import { clearAnyComponent } from '../../core/registry'
 import { slotPort } from '../../core/slots'
 import { COMPONENT_KILL_TREE } from '../../core/types'
 import type { Component, RlConfig } from '../../core/types'
+import { releaseTrainerLocks } from '../../launch/cli'
 import { entryOf } from './cloud-halt'
 import { COMPONENT_LABELS } from './labels'
 import { ActionResult, busyKey, done, guard, release } from './result'
@@ -25,6 +26,17 @@ export async function stopComponent(key: Component, course = ''): Promise<Action
   const bk = busyKey('stop', key, course)
   guard(bk)
   try {
+    /** 「停止 trainer」的附加收尾：释放 python 侧单实例锁（run_rl / run_bc）。
+     *
+     *  2026-09-17：账本 pid 与**锁持有者**可以是两个不同进程（崩溃残留 / PID 复用 /
+     *  控制台重启竞态）。旧停止路径只杀账本 pid ⇒ 锁里的存活持有者把「停止 → 启动」
+     *  永久卡死（python 侧只提示「先停止在跑训练（或删除该锁文件）」，控制台无处可删）。
+     *  释放前**核验进程身份**（命令行必须命中本课 run_rl/run_bc），绝不对复用 PID 误杀。 */
+    const releaseLocks = async (crs: string): Promise<string> => {
+      if (key !== 'trainingLoop') return ''
+      const notes = await releaseTrainerLocks(crs)
+      return notes.length > 0 ? `；${notes.join('；')}` : ''
+    }
     const entry = entryOf(key, course)
     if (entry?.pid) {
       if (pidAlive(entry.pid)) {
@@ -36,7 +48,11 @@ export async function stopComponent(key: Component, course = ''): Promise<Action
         if (!dead) return done(false, `${COMPONENT_LABELS[key]} (PID ${entry.pid}) 未能停止`)
       }
       clearAnyComponent(key, course || entry.course || '')
-      return done(true, `${COMPONENT_LABELS[key]} 已停止${course ? ` (course=${course})` : ''}`)
+      const notes = await releaseLocks(course || entry.course || '')
+      return done(
+        true,
+        `${COMPONENT_LABELS[key]} 已停止${course ? ` (course=${course})` : ''}${notes}`,
+      )
     }
     // 无登记：端口兜底（端口一律经槽位算术，不再手写偏移）
     const ports: Record<string, (cfg: RlConfig, course: string) => number> = {
@@ -59,7 +75,8 @@ export async function stopComponent(key: Component, course = ''): Promise<Action
       for (const pid of pids) await killPid(pid)
       return done(true, pids.length > 0 ? `已按端口兜底停止 ${pids.length} 个进程` : '未在运行')
     }
-    return done(true, `${COMPONENT_LABELS[key]} 未在运行`)
+    const notes = await releaseLocks(course || entry?.course || '')
+    return done(true, `${COMPONENT_LABELS[key]} 未在运行${notes}`)
   } catch (e) {
     return done(false, `停止失败: ${e instanceof Error ? e.message : e}`)
   } finally {

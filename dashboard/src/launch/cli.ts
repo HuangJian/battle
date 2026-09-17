@@ -20,10 +20,10 @@
  *  raw python"规则（AGENTS §5.6）的无头执行通道（CI / 脚本 / 一次性脚本）。
  */
 
-import { closeSync, existsSync, openSync, readdirSync, readFileSync } from 'fs'
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, unlinkSync } from 'fs'
 import path from 'path'
 import { LOG_DIR, NN_TRAINING, fmtStamp } from '../core/paths'
-import { pidAlive, portListen, shapeLoopbackNoProxy } from '../core/net'
+import { pidAlive, portListen, shapeLoopbackNoProxy, waitUntil } from '../core/net'
 import { ensureVenv, resolveTorchThreads, resolveVenvPython, torchThreadEnv } from '../core/venv'
 import { loadConfig } from '../core/config'
 import {
@@ -34,6 +34,7 @@ import {
   slotPort,
   validateCourseName,
 } from '../core/slots'
+import type { LockKind } from '../core/slots'
 import { fail, info, initLog, log, ok, warn } from '../core/log'
 import { containerSmoke, summarizeSmoke, weightsSmoke } from '../stack/smoke'
 
@@ -260,6 +261,120 @@ export async function killPreviousTrainers(script: string, course = ''): Promise
     }
   }
   await new Promise((r) => setTimeout(r, 1000))
+}
+
+// ────────────────────────── 停止 trainer：单实例锁释放（2026-09-17） ──────────────────────────
+
+/** 锁 kind → python 训练脚本（身份核验的指纹来源）。 */
+export const TRAINER_SCRIPT: Record<LockKind, string> = {
+  run_rl: 'run_rl.py',
+  run_bc: 'run_bc.py',
+  train_loop: 'train_loop.py',
+}
+
+/** 锁文件 → 持有人（`PID|EXE|TS`，兼容裸 PID）；不可读/残缺 → null。 */
+export function readLockHolder(lockPath: string): { pid: number; exe: string } | null {
+  let raw = ''
+  try {
+    raw = readFileSync(lockPath, 'utf-8').trim()
+  } catch {
+    return null
+  }
+  const parts = raw.split('|')
+  if (!/^\d+$/.test(parts[0] ?? '')) return null
+  return { pid: Number(parts[0]), exe: parts[1] ?? '' }
+}
+
+/** releaseTrainerLock 的可注入依赖（测试用；默认走真实锁文件 / 真实进程表 / 真 kill）。 */
+export interface TrainerLockIO {
+  lockPath?: string
+  exists?: (lockPath: string) => boolean
+  holderOf?: (lockPath: string) => { pid: number; exe: string } | null
+  alive?: (pid: number) => boolean
+  /** 进程表查询：pid → 命令行（读不到 → null）。 */
+  cmdlineOf?: (pid: number) => string | null
+  killTrainer?: (script: string, course: string) => Promise<void>
+  removeLock?: (lockPath: string) => void
+  /** 核验通过后等持有者退出的窗口（ms；真跑 5s，测试注入小值避免空烧）。 */
+  killWaitMs?: number
+}
+
+function removeLockFile(lockPath: string): void {
+  try {
+    unlinkSync(lockPath)
+  } catch {
+    /* already gone */
+  }
+}
+
+/** 「停止 trainer」的锁释放：停掉本课 trainer **并**移除它的单实例锁（run_rl / run_bc）。
+ *
+ *  为什么必须有这一步（2026-09-17 事故清单第 3 条）：账本 pid 与**锁持有者**可以是两个
+ *  不同进程（崩溃残留 / PID 复用 / 控制台重启竞态）。旧 `stop` 只杀账本 pid ⇒ 锁里的
+ *  存活持有者把「停止 → 启动」永久卡死：python 侧只回「先停止在跑训练（或删除该锁
+ *  文件）」，而控制台没有任何入口能删它，唯一出路是人工 rm。
+ *
+ *  **身份核验在前**（`isTrainerFor`：命令行必须命中同一个 `(script, course)`）：
+ *  锁里的 PID 可能早已被系统复用给无辜进程，只看"活着"就杀就是误伤（本仓有 PID 复用
+ *  前科）。身份不符 → 既不杀也不删锁，响亮说明原因，交人工确认（fail-closed）。
+ *
+ *  返回空串 = 无锁可释放（无锁文件）；否则返回一行人手可读的简报（stop 动作回显）。 */
+export async function releaseTrainerLock(
+  kind: LockKind,
+  course = '',
+  io: TrainerLockIO = {},
+): Promise<string> {
+  const script = TRAINER_SCRIPT[kind]
+  if (!script) return ''
+  let safeCourse = ''
+  try {
+    safeCourse = validateCourseName(course)
+  } catch {
+    // 课程名非法 ⇒ 不可能存在对应的锁（python 侧 course_lock_path 同样会响亮拒启）；
+    // 停止动作对课程名不做校验（历史行为），这里必须无害退场而非抛错。
+    return ''
+  }
+  const lockPath = io.lockPath ?? lockPathFor(safeCourse, kind)
+  const name = path.join('nn-training', lockName(safeCourse, kind))
+  if (!(io.exists ?? existsSync)(lockPath)) return '' // 无锁文件 = 无事可做
+  const holder = (io.holderOf ?? readLockHolder)(lockPath)
+  const alive = io.alive ?? pidAlive
+  const removeLock = io.removeLock ?? removeLockFile
+  if (!holder || !alive(holder.pid)) {
+    removeLock(lockPath)
+    return `${name} 陈旧锁已清理（持有者 ${holder ? `PID ${holder.pid}` : '不可解析'} 已不存在）`
+  }
+  const cmdline = (
+    io.cmdlineOf ??
+    ((pid: number) => listPythonProcesses().find((p) => p.pid === pid)?.cmdline ?? null)
+  )(holder.pid)
+  if (!cmdline || !isTrainerFor(cmdline, script, safeCourse)) {
+    warn(
+      `${name} 未释放：持有者 PID ${holder.pid} 存活但**不是本课 ${script}**` +
+        `（${cmdline ? `命令行: ${cmdline.slice(0, 120)}` : '进程表读不到它'}）` +
+        '——按 PID 复用处理，不误杀；确认后可人工删除该锁文件',
+    )
+    return `${name} 未释放（持有者 PID ${holder.pid} 身份未通过核验）`
+  }
+  warn(
+    `停止本课 trainer：${name} 的持有者 PID ${holder.pid} 经身份核验` +
+      `（${script}${safeCourse ? `, ${safeCourse}` : ''}）——停止并释放锁`,
+  )
+  await (io.killTrainer ?? killPreviousTrainers)(script, safeCourse)
+  await waitUntil(async () => !alive(holder.pid), io.killWaitMs ?? 5000, 200)
+  if (alive(holder.pid)) return `${name} 未释放（PID ${holder.pid} 核验通过但未能停止）`
+  removeLock(lockPath)
+  return `${name} 已释放（停掉核验过的持有者 PID ${holder.pid}）`
+}
+
+/** 本课 trainer 的两把锁（run_rl + run_bc）——停 trainer 时一并释放（空串项已滤除）。 */
+export async function releaseTrainerLocks(course = '', io: TrainerLockIO = {}): Promise<string[]> {
+  const out: string[] = []
+  for (const kind of ['run_rl', 'run_bc'] as LockKind[]) {
+    const note = await releaseTrainerLock(kind, course, io)
+    if (note) out.push(note)
+  }
+  return out
 }
 
 /** 冒烟门禁（本地训练）：venv torch import（ensureVenv 已保证）+ BCV2 容器回环 +

@@ -6,8 +6,9 @@
 # pre-commit hook（tools/githook/pre-commit）复用同一入口——提交前与日常跑
 # 的是同一套门禁，不会出现"hook 严、日常松"的漂移。
 #
-# 并行架构（v3.15 2026-09-03；v3.16 2026-09-15 起 pytest 目标含 e2e/）：
-#   ruff(~1s) / mypy(~4s 热缓存) / pytest xdist -n 4 全量 三路并行。
+# 并行架构（v3.15 2026-09-03；v3.16 2026-09-15 起 pytest 目标含 e2e/；
+# v3.17 2026-09-17 起 worker 数 × 线程数按实测重调，见下节）：
+#   ruff(~1s) / mypy(~4s 热缓存) / pytest xdist 全量 三路并行。
 #   全量 = tests/（单测层）+ e2e/（集成层）。**两层同一次 xdist 调用**：实测（16 核）
 #   tests/ 22s → tests/+e2e/ 27s，只 +5s（另外单跑一次要重复付 torch import 与
 #   worker 启动成本）。e2e/ 自 60e5f69 起 hermetic（FakeServer + tmp 落盘，不需要
@@ -15,14 +16,23 @@
 #   层 = **路径**（tests/ = 单测层、e2e/ = 集成层），不再用 `-m "not heavy"`：
 #   tests/ 里 heavy 标记实测 0 个（该过滤早已空转），全仓唯一模块级 heavy 标记在 e2e。
 #   xdist worker 各自 FakeServer 实例隔离，无竞态。
-#   4 worker 为本机最优点（16 核，但 torch import 开销 + 单函数 test_integration
-#   13.9s 不可再分，更多 worker 反而更慢）；NN_GATE_NPROC 可覆盖。
-#   注：e2e 里有竞速 / 真 HTTP / 线程用例，对负载天生比单测敏感。已知的那一条
-#   （docs/nn.progress.md §313：test_bc_epoch_e2e 满编 -n 4 偶发红）已 2026-09-15
-#   修根因：fake_worker 只等 bc_epoch 入账就回 result，漏等了随后要断言的 bc_eval
-#   ⇒ 满负荷时断言 [2,4] 偶发拿到 [2]。修后本机连跑 8/8 绿。
-#   NN_GATE_SKIP_E2E=1 仍保留：只退集成层、单测层照跑，作为将来再遇 flake 的定向
-#   出口（flake 时用它重试，不要长期关）。
+#
+# ---- 并行策略：worker 数 × CPU 内线程数必须一起调（2026-09-17 实测重调）----
+# 旧默认 = `-n 4` + torch 默认内线程（= 物理核数）⇒ 4 worker × 16 线程 = 64 线程抢
+# 16 核，**CPU 时间被线程切换吃掉**（-n 8 时实测 user 440s / wall 37s ≈ 12 核满载空转）。
+# 旧注释把 `-n 4 最优、auto 更慢` 记成了结论，其实是这个超订的假象：核数调大反而更慢。
+# 三项交错 A/B（16 核，每项 3 次；`python -m pytest tests/ e2e/` 单独计时）：
+#     -n 4  线程默认 → 37/34/38s（均值 36.3）    -n 12 线程默认 → 45/42/47s（44.7）
+#     -n 4  线程=1   → 39.7s（封线程不救小并发）  -n 12 线程=1   → 28/25/21s（24.7）
+#     -n 8  线程=1 → 24/27s   -n 16 线程=1 → 25/22s   -n auto 线程=1 → 21/27s
+#   ⇒ 只加 worker 更慢、只封线程无收益，**两者同时**才把门禁从 ~36s 压到 ~23s（-36%）。
+#   默认 worker  = min(核数, 12)（8~16 实测同一水平，取 12 同时给内存封顶：
+#                 -n 12 峰值 pytest 进程树 RSS ≈ 3.9GB，≈ -n 4 的 3 倍）。NN_GATE_NPROC 覆盖。
+#   默认内线程   = 1（OMP/MKL/OPENBLAS，须在 python 启动前 export）。NN_GATE_THREADS 覆盖
+#                 （0 = 不设，退回 torch 自己的默认 = 各 worker 开满物理核）。
+#   注：该 env 随进程树继承到测试 spawn 的子进程（如 train_loop.py 的 os.environ.setdefault）；
+#   训练入口里的 torch.set_num_threads(--threads) 是进程内显式覆盖，不受此影响。
+#
 # 单测墙钟护栏（2026-09-15）：pytest 加 `--timeout=${NN_PYTEST_TIMEOUT_S:-60}`
 #  ——与 task.py check 同款 60s/用例（本仓最慢单测实测 22s，有 ~2.7× 余量）。
 #   背景：编码 agent 沙箱里全量曾「~34% 处 hang」（2026-09-15 Mimo；2026-09-14 无按键
@@ -33,6 +43,8 @@
 #   `50000` 是从 **bun** 的 `--timeout=50000`（那才是毫秒）误搬过来的，等于把上限
 #   抬到 13.9 小时并**覆盖掉** addopts 的 60s ⇒ 护栏名存实亡。改回秒制后才是
 #   「>1 分钟即红旗」的用户口径；禁止再加 ms 量级的值（tests/test_githook_scripts.py 有回归）。
+#   （pytest 自身不再加 `-q`：addopts 已有 `-q`，重复会变成 `-qq` 把结尾的
+#    「N passed in Xs」吞掉——hook 日志里看不到用例数与耗时（2026-09-17 修）。）
 #
 # 跳过单个工具（逗号分隔）：
 #   NN_GATE_SKIP=ruff,mypy bash tools/githook/nn-python-gate.sh
@@ -72,6 +84,15 @@ set -u
 # NN_GATE_SKIP_E2E 退避。Linux/macOS 本就是 UTF-8 locale，该变量无副作用。
 export PYTHONUTF8=1
 
+# ---- 并行旋钮：CPU 内线程封顶（须在 python 启动前 export，见文件头实测那一节）----
+GATE_THREADS=${NN_GATE_THREADS:-1}
+if [ "$GATE_THREADS" != "0" ]; then
+  OMP_NUM_THREADS=$GATE_THREADS
+  MKL_NUM_THREADS=$GATE_THREADS
+  OPENBLAS_NUM_THREADS=$GATE_THREADS
+  export OMP_NUM_THREADS MKL_NUM_THREADS OPENBLAS_NUM_THREADS
+fi
+
 # Git Bash 的 `pwd` 给 MSYS POSIX 路径（/d/github/battle2/...）——shell 内部一切正常，
 # 但**凡是要塞进 native Windows python.exe 的 argv 的路径都会被 MSYS 路径转换打坏**：
 # 实测 /d/github/battle2/tools/githook/detach-run.py 到 python 手里变成
@@ -93,6 +114,17 @@ else
   exit 1
 fi
 
+# ---- worker 数：默认 min(核数, 12)（见文件头实测那一节），NN_GATE_NPROC 覆盖 ----
+# 核数用 venv python 自己问（`-S` 跳过 site：秒级、且唯一跨平台可靠口径）；
+# 结果不是纯数字（python 起不来等）就退回 4（旧默认，安全）。
+CORES=$("$NN_PY" -S -c 'import os; print(os.cpu_count() or 4)' 2>/dev/null || echo "")
+case "$CORES" in
+  '' | *[!0-9]*) CORES=4 ;;
+esac
+NPROC=${NN_GATE_NPROC:-$CORES}
+[ "$NPROC" -gt 12 ] && NPROC=12
+[ "$NPROC" -lt 1 ] && NPROC=1
+
 SKIP_LIST=${NN_GATE_SKIP:-}
 has_skip() {
   case ",$SKIP_LIST," in
@@ -102,7 +134,7 @@ has_skip() {
 }
 
 cd "$NN_ROOT"
-echo "▶ nn-training python gate（ruff + mypy + pytest xdist -n 4, parallel）"
+echo "▶ nn-training python gate（ruff + mypy + pytest xdist -n $NPROC，CPU 内线程 $GATE_THREADS，parallel）"
 # 门禁前清理过期测试临时目录（python -S 绕过沙箱删除保护，仅限 tmp/pytest-tmp
 # 下 KEEP_DAYS 天前的子目录；NN_TMP_KEEP_DAYS 可调，默认 7）。失败静默（清理
 # 是锦上添花，不阻塞门禁）。
@@ -121,7 +153,26 @@ else
   trap 'for __f in "$GATE_TMP"/*.log "$GATE_TMP"/*.err; do [ -e "$__f" ] && : > "$__f"; done' EXIT
 fi
 
-NPROC=${NN_GATE_NPROC:-4}
+# ---- run_tool <name> <cmd...>：三路工具的唯一启动点 ----
+# LIVE（stdout 是 tty）直通终端实时输出；hook/管道模式经 detach-run.py 脱管落日志
+# （理由见文件头「Hook 模式」）。新增工具只需 `run_tool <name> <cmd...>` 一行——
+# 旧版把这段 LIVE/detach 二选一复制了三遍（ruff/mypy/pytest），加一个工具就要
+# 再复制一遍，容易漏掉 detach 分支而让 Windows commit 卡死。
+PIDS=""
+RAN=""
+run_tool() {
+  __name=$1
+  shift
+  if [ "$LIVE" = "1" ]; then
+    "$@" &
+  else
+    "$NN_PY" "$DETACH" --stdout "$GATE_TMP/$__name.log" --stderr "$GATE_TMP/$__name.err" \
+      -- "$@" &
+  fi
+  PIDS="$PIDS $!"
+  RAN="$RAN $__name"
+}
+
 # pytest 目标（层 = 路径；不加引号是有意的：需要词分割成两个参数）。
 PYTEST_TARGETS="tests/"
 if [ "${NN_GATE_SKIP_E2E:-0}" = "1" ]; then
@@ -130,46 +181,28 @@ else
   PYTEST_TARGETS="tests/ e2e/"
 fi
 
-PIDS=""
-RAN=""
+# t0 在**启动任何工具之前**取：报告的数字 = 门禁真实墙钟（旧版在启动后才取，
+# 报的是"等最慢那个"的时间，与用户口径的"门禁耗时"差一个启动窗）。
+t0=$(date +%s)
+
 if has_skip ruff; then
   echo " ▸ ruff skipped（NN_GATE_SKIP=$SKIP_LIST）"
 else
-  if [ "$LIVE" = "1" ]; then
-    "$NN_PY" -m ruff check . & PIDS="$PIDS $!"
-  else
-    "$NN_PY" "$DETACH" --stdout "$GATE_TMP/ruff.log" --stderr "$GATE_TMP/ruff.err" \
-      -- "$NN_PY" -m ruff check . & PIDS="$PIDS $!"
-  fi
-  RAN="$RAN ruff"
+  run_tool ruff "$NN_PY" -m ruff check .
 fi
 if has_skip mypy; then
   echo " ▸ mypy skipped（NN_GATE_SKIP=$SKIP_LIST）"
 else
-  if [ "$LIVE" = "1" ]; then
-    "$NN_PY" -m mypy . --config-file pyproject.toml & PIDS="$PIDS $!"
-  else
-    "$NN_PY" "$DETACH" --stdout "$GATE_TMP/mypy.log" --stderr "$GATE_TMP/mypy.err" \
-      -- "$NN_PY" -m mypy . --config-file pyproject.toml & PIDS="$PIDS $!"
-  fi
-  RAN="$RAN mypy"
+  run_tool mypy "$NN_PY" -m mypy . --config-file pyproject.toml
 fi
 if has_skip pytest; then
   echo " ▸ pytest skipped（NN_GATE_SKIP=$SKIP_LIST）"
 else
   # 全量：xdist -n $NPROC，带单测墙钟护栏（--timeout，见文件头）。
-  if [ "$LIVE" = "1" ]; then
-    # shellcheck disable=SC2086
-    "$NN_PY" -m pytest $PYTEST_TARGETS -n "$NPROC" -q --timeout="${NN_PYTEST_TIMEOUT_S:-60}" & PIDS="$PIDS $!"
-  else
-    # shellcheck disable=SC2086
-    "$NN_PY" "$DETACH" --stdout "$GATE_TMP/pytest.log" --stderr "$GATE_TMP/pytest.err" \
-      -- "$NN_PY" -m pytest $PYTEST_TARGETS -n "$NPROC" -q --timeout="${NN_PYTEST_TIMEOUT_S:-60}" & PIDS="$PIDS $!"
-  fi
-  RAN="$RAN pytest"
+  # shellcheck disable=SC2086
+  run_tool pytest "$NN_PY" -m pytest $PYTEST_TARGETS -n "$NPROC" --timeout="${NN_PYTEST_TIMEOUT_S:-60}"
 fi
 
-t0=$(date +%s)
 RC=0
 for p in $PIDS; do
   wait "$p" || RC=1

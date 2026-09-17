@@ -24,7 +24,7 @@ dev = [
   "ruff>=0.6.0",
   "mypy>=1.11.0",
   "pytest>=8.0.0",
-  "pytest-xdist>=3.6", # Makefile `pytest -n 4` 与 tools/githook/nn-python-gate.sh 依赖
+  "pytest-xdist>=3.6", # 三个入口（门禁 / Makefile / task.py）的 pytest `-n` 并行依赖
   "pytest-timeout>=2.3", # task.py / nn-python-gate.sh 的 `--timeout=60`（**秒**）依赖
 ]
 

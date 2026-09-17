@@ -971,11 +971,16 @@ KEEP_LOG=1 sh tools/githook/run-logged.sh tmp/logs/bench.log -- <cmd>   # 留档
 Minimal inline form when a wrapper is overkill:
 
 ```sh
-python -u -m pytest tests/ -n 4 -q > tmp/logs/pytest.log 2>&1
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+  bash tools/githook/nn-py-safe.sh -m pytest tests/ -n auto -q > tmp/logs/pytest.log 2>&1
 rc=$?
 if [ "$rc" -eq 0 ]; then rm -f tmp/logs/pytest.log; else tail -n 40 tmp/logs/pytest.log; fi
 exit "$rc"
 ```
+
+（`bash tools/githook/nn-py-safe.sh` 而不是裸 `python -m pytest`——AGENTS §0.1-13；
+`-n auto` + 线程封顶 = 实测最优组合，完整数据与「为什么必须成对」在
+`tools/githook/nn-python-gate.sh` 头注。）
 
 Same shape from python, for probes/sims that drive their own subprocesses:
 

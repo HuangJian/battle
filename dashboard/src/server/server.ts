@@ -129,9 +129,26 @@ function startSupervisor(): ReturnType<typeof createSupervisor> {
       log: fresh.log,
     })
     monitorTouch()
-    const ready = await waitUntil(fresh.healthy, 45000, 500)
+    // 就绪 = 「新 pid 真的持有它要独占的端口」∧ 健康检查（2026-09-17 同族修复）。
+    // 只问 healthy 会踩「旧僵尸替新进程答 200」：新进程 bind 失败（EADDRINUSE / python 侧
+    // 双监听守卫）后早已退出，而端口上的旧实例照样答 /ping 或 /ready ⇒ 监督器把**僵尸的
+    // 200** 记成「重启成功」，账本记新 pid、实际服务的是旧进程（就是 hub-server 重启事故
+    // 的相位：账本上的 pid ≠ 真在服务的那一个）。
+    const ownsPort = async (): Promise<boolean> => (await fresh.ownsResource?.(r.pid)) !== false // 未声明 = 无独占资源可核 → 不阻塞
+    const ready = await waitUntil(
+      async () => (await ownsPort()) && (await fresh.healthy()),
+      45000,
+      500,
+    )
+    // 未就绪的原因必须写清楚：到底是「没起起来」还是「新实例没拿到它该独占的端口」。
+    // false 的两种含义（见 core/proc.ts::portOwnedBy）：端口被别人占着（旧僵尸仍在服务？）、
+    // 或端口上根本没人监听（新实例 bind 失败后已退出）。
+    const portNote = (await ownsPort())
+      ? ''
+      : '；新实例未持有该端口（bind 失败，或旧实例仍在服务？）'
     console.log(
-      `[supervisor] ${tag} 已应用最新代码 (PID ${r.pid}${ready ? '' : '，45s 未就绪，继续观察'})`,
+      `[supervisor] ${tag} 已应用最新代码 (PID ${r.pid}` +
+        `${ready ? '' : '，45s 未就绪，继续观察'}${portNote})`,
     )
     return r.pid
   }

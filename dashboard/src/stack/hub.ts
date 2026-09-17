@@ -24,7 +24,7 @@ import {
   saveComponent,
   clearAnyComponent,
 } from '../core/registry'
-import { launchSpec, spawnBg } from '../core/proc'
+import { launchSpec, portOwnedBy, portOwnerPids, spawnBg } from '../core/proc'
 import { writeRemoteHubUrl } from '../core/config'
 import { fail, info, log, ok, warn } from '../core/log'
 import { monitorTouch } from '../core/reload-touch'
@@ -74,6 +74,56 @@ export async function hubServerHealthy(cfg: RlConfig, course = ''): Promise<bool
   return httpOk(`http://127.0.0.1:${port}/ping`, cfg.rl.remote_token)
 }
 
+// ────────────────────────── 端口回收（2026-09-17 事故修复） ──────────────────────────
+
+/** reclaimPort 的可注入依赖（测试用；默认走 OS 进程表 / 真实 kill / 真实探测）。 */
+export interface ReclaimPortIO {
+  ownerPids?: (port: number) => number[]
+  kill?: (pid: number) => Promise<unknown>
+  listening?: (port: number) => Promise<boolean>
+}
+
+/** 杀掉端口上的幸存占用者，等端口真正释放；返回被回收的 PID 清单。
+ *
+ *  **为什么必须有这一层**（2026-09-17 事故：hub-server 重启死锁，用户「手动重启失败」）：
+ *  组件健康检查失败 ⇒ 控制台「启动」spawn 新实例，但**旧实例还活着占着端口**
+ *  （孤儿 / 登记丢失 / 控制台重启竞态留下的僵尸）⇒ python 侧的双监听守卫
+ *  （`remote/_port_guard.ensure_port_free`）拒绝启动 ⇒ 新进程秒退 ⇒ 控制台报
+ *  「启动即退出」。而那个幸存者可能正处于**只有重启才能清除**的状态——hub-server 的
+ *  D9 闭锁（127.0.0.1 连续 5 次鉴权失败封 3600s，封禁只住进程内存）就是典型：
+ *  重启是唯一的解药，而重启恰好被它自己占着的端口挡死 = 死锁，只能手动杀进程。
+ *
+ *  **调用契约：只在健康检查已判定组件不可用时调用**（`stepSelfNode`/`stepHubServer`
+ *  都在这之后）。健康且可用的组件在上层就被短路复用了，端口绝不会被回收。
+ *  与 cloudflared 的 `supersedeSlotTunnels` 同族：同一资源（同槽 = 同端口）只允许
+ *  一个活实例，换代时先清口再起。
+ */
+export async function reclaimPort(port: number, io: ReclaimPortIO = {}): Promise<number[]> {
+  // 永不回收 console 自己（它可能正好是这个端口上的某个客户端）。
+  // 清单 = 「决定回收」的占用者（不因单次 kill 抛错就漏记——已死/权限不足同样要
+  // 计入，且必须等端口真正释放）。
+  const struck = (io.ownerPids ?? portOwnerPids)(port).filter((pid) => pid !== process.pid)
+  for (const pid of struck) {
+    warn(
+      `端口 ${port} 被幸存进程 (PID ${pid}) 占用——先回收再启动` +
+        '（否则新实例会被双监听守卫拒绝，控制台只会看到「启动即退出」）',
+    )
+    try {
+      await (io.kill ?? killPid)(pid)
+    } catch {
+      /* 已死/权限不足：交给下面的释放探测判定 */
+    }
+  }
+  if (struck.length > 0) {
+    // 端口释放以探测为准，不做固定等待。
+    await waitUntil(async () => !(await (io.listening ?? portListen)(port)), 5000, 200)
+  }
+  return struck
+}
+
+// 端口归属判定住 `core/proc.ts::portOwnedBy`（唯一实现，spec 与启动步骤共用）——
+// 本文件不再自带一份，避免又一次「同名两份实现」的漂移。
+
 // ────────────────────────── 组件步骤 ──────────────────────────
 
 /** self-node（sampler-agent）步骤。 */
@@ -84,6 +134,9 @@ export async function stepSelfNode(cfg: RlConfig): Promise<void> {
     return
   }
   log('启动 self-node...')
+  // 端口回收（必须在 spawn 前，契约见 reclaimPort）：健康检查已失败 ⇒ 端口上的
+  // 幸存者不可用，先清口再起，否则新实例撞 EADDRINUSE 秒退。
+  await reclaimPort(cfg.rl.agent_port)
   const spec = selfNodeSpec(cfg)
   const r = launchSpec(spec)
   saveComponent('selfNode', { pid: r.pid, entry: SELF_NODE_ENTRY })
@@ -111,6 +164,11 @@ export async function stepHubServer(cfg: RlConfig, jobRoot: string): Promise<voi
     return
   }
   mkdirSync(jobRoot, { recursive: true })
+  // 端口回收（必须在 spawn 前，2026-09-17 事故）：健康检查已失败 ⇒ 端口上的幸存者
+  // （孤儿 / 登记丢失 / 处于 D9 内存封禁态）不可用，而 python 侧的双监听守卫
+  // （remote/_port_guard.ensure_port_free）会拒绝新实例——不回收就是重启被自己的
+  // 守卫挡死：新进程秒退，控制台报「启动即退出」，只能手动杀进程。
+  await reclaimPort(port)
   log('启动 hub-server...')
   const spec = hubServerSpec(cfg, course)
   const r = launchSpec(spec)
@@ -213,6 +271,13 @@ export async function stepCloudflared(
   // `--metrics` bind 失败即退。监督器只重启被哨兵变化的活进程，杀掉 + 清账后就无复活。
   const superseded = await supersedeSlotTunnels(course, slot)
   if (superseded.length > 0) ok(`已接管 slot ${slot} 的隧道（原属 ${superseded.join('、')}）`)
+  // 端口回收（必须在 spawn 前，2026-09-17 同族修复）：cloudflared 是**第三方二进制**，
+  // 没法在它内部装实例锁（hub/worker 是 python 自己拿 `O_CREAT|O_EXCL`），所以控制台侧的
+  // 回收就是它唯一的一道闸。supersede 只看得见**账本里**的同槽隧道，挡不住孤儿/登记丢失/
+  // 控制台重启竞态留下的幸存者；而 metrics 端口既是 `--metrics` 的 bind 目标、又是后面
+  // `/ready` 的探测目标，被幸存者占着会同时造成「新隧道 bind 失败」与「就绪读到别人的隧道」。
+  const reclaimed = await reclaimPort(metricsPort)
+  if (reclaimed.length > 0) ok(`已回收 metrics 端口 ${metricsPort} 的幸存占用者`)
   let url: string | null = null
   let procPid = 0
   let cfLog = ''
@@ -285,10 +350,17 @@ export async function stepCloudflared(
   })
 
   // 隧道死活以本地 /ready 为准（不依赖出网）；穿隧道 ping 失败只降级为警告。
-  const edgeReady = await waitUntil(() => tunnelEdgeReady(metricsPort), 20000, 500)
+  // 归属前置（2026-09-17）：必须确认 metrics 端口是**本进程**持有的，否则旧僵尸答的 200
+  // 会被当成新隧道的就绪（见 core/proc.ts::portOwnedBy）。
+  const edgeReady = await waitUntil(
+    async () => (await portOwnedBy(procPid, metricsPort)) && (await tunnelEdgeReady(metricsPort)),
+    20000,
+    500,
+  )
   if (!edgeReady) {
     fail(
-      'cloudflared edge 连接未注册（20s）——隧道未建立，判定启动失败；基础设施保留，稍后重跑本脚本即可复用',
+      'cloudflared edge 连接未注册（20s）或 metrics 端口非本隧道持有——隧道未建立，' +
+        '判定启动失败；基础设施保留，稍后重跑本脚本即可复用',
     )
     throw new Error('cloudflared edge 未注册')
   }

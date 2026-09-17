@@ -13,6 +13,7 @@ import { httpOk, pidAlive, portListen } from '../core/net'
 import { entryForCourse, loadRegistry } from '../core/registry'
 import { agentSentinels, pySentinels } from '../core/sentinels'
 import { slotPort } from '../core/slots'
+import { portOwnedBy } from '../core/proc'
 import { resolveVenvPython } from '../core/venv'
 import { COMPONENT_KILL_TREE } from '../core/types'
 import type {
@@ -98,6 +99,9 @@ export function hubServerSpec(cfg: RlConfig, course: string): ProcSpec {
     // 日志 per-course（M6：spec 侧 + api.ts resolver 两半同步）
     log: path.join(courseLogDir(course), 'hub-server.out'),
     healthy: () => httpOk(`http://127.0.0.1:${port}/ping`, cfg.rl.remote_token),
+    // 就绪归属：旧僵尸 hub 可能替新进程答 /ping（新实例被双监听守卫拒绝后秒退），
+    // 那样账本会记新 pid 而实际服务的是旧进程（2026-09-17 事故相位）。
+    ownsResource: (pid) => portOwnedBy(pid, port),
     sentinels: pySentinels(HUB_SERVER_ENTRY),
   }
 }
@@ -180,6 +184,9 @@ export function cloudflaredSpec(cfg: RlConfig, entry?: RegistryEntry): ProcSpec 
     log: cfLog,
     // edge 连接注册以本地 metrics /ready 为准（不依赖出网；hub→CF 劣化不判死）
     healthy: () => httpOk(`http://127.0.0.1:${metricsPort}/ready`, '', 3000),
+    // 就绪归属：metrics 端口既是 bind 目标又是探测目标，被旧僵尸占着时它的 200 会被
+    // 当成新隧道的就绪（URL 读新日志、连接状态读旧 metrics）。
+    ownsResource: (pid) => portOwnedBy(pid, metricsPort),
     sentinels: pySentinels(),
   }
 }
@@ -279,6 +286,10 @@ export function workerServeSpec(
     env: { PYTHONPATH: `${venv.sitePackages}${path.delimiter}${NN_TRAINING}` },
     log: path.join(course ? courseLogDir(course) : LOG_DIR, 'remote-worker-serve.log'),
     healthy: () => httpOk(`${pushUrl}/ping`, cfg.rl.remote_token, 3000),
+    // 就绪归属：push 端口上的旧 worker_server（僵尸）也会答 /ping，而新实例拿不到
+    // 端口实例锁时会**响亮拒启**（这是有意的，不回收在跑 PPO job 的 worker）——
+    // 不核归属就会把「旧实例在服务」记成「重启成功」。
+    ownsResource: (pid) => portOwnedBy(pid, pushPort),
     sentinels: pySentinels(WORKER_SERVE_ENTRY, 'nn-training/remote/worker_server.py'),
   }
 }

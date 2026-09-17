@@ -4,7 +4,9 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
-## §57 M3 rollout 上云落地：新 job kind「一整轮」（kind=iter）＋ TS 运行时打包（2026-09-17）
+## §59 M3 rollout 上云落地：新 job kind「一整轮」（kind=iter）＋ TS 运行时打包（2026-09-17）
+
+> 编号说明：本节原为 §57，与 origin 已推送的「python 全量门禁提速」撞号，合并时改 §59。
 
 **为什么记这一笔**：这是本仓**训练架构**层面的新增（新的 job kind、新的传输实体、新的执行位置开关），
 按 §5 硬规则入账。方案见 `plan/remote-wire-remediation.plan.md` §5；决策与理由见
@@ -89,7 +91,9 @@ dashboard **427 pass / 0 fail** + 三份 bundle ok。
 
 ---
 
-## §56 远程传输三改 M0–M2 落地：统一计量 + 隧道协议开关 + 协议瘦身（2026-09-17）
+## §58 远程传输三改 M0–M2 落地：统一计量 + 隧道协议开关 + 协议瘦身（2026-09-17）
+
+> 编号说明：本节原为 §56，与 origin 已推送的「hub-server 重启死锁收口」撞号，合并时改 §58。
 
 **为什么记这一笔**：本笔是**训练架构变更**（云腿线协议 + 校验语义 + 新的运行期开关），按 §5 硬规则入账。
 方案与十项验收口径见 `plan/remote-wire-remediation.plan.md`；决策见 `DECISIONS.md` §2026-09-17-goalnn-remotewire-m0m2。
@@ -218,6 +222,210 @@ python 侧只出现在那两行读取处）⇒ M1 §1.4「开关取值必须写�
 
 - **验收 harness 是「待修资产」时先修再量**：`smoke_loopback` 盘上没有近期运行痕迹，实际跑起来三处已腐坏（v2 schema 权重文件、21 列 vs 39 列的 METRICS_DIM、`blob_cache` 被 prune）。**它碰的正好是要改的函数** ⇒ 修它本身就是交付物，而不是绕开它。
 - **新缓存目录必须同时改 prune 名单**：`blob_cache` 第一版每轮必 miss，就是因为 `prune_job_dirs` 只豁免 `code_cache`——「缓存命中率」类 bug 会伪装成「协议没生效」。
+## §57 python 全量门禁提速：worker 数 × CPU 内线程数必须成对调（2026-09-17）
+
+**背景**：用户问「检查 python 全量门禁，提高可维护性，减少耗时」。门禁墙钟实测 39~50s，而
+ruff(~1s) / mypy(~4s) 完全藏在 pytest 后面 ⇒ 只有一个瓶颈：pytest。
+
+**根因（推翻 `docs/goal-nn.progress.md §25` 的旧结论）**：旧默认 `-n 4` + torch 默认内线程
+（= 物理核 16）⇒ 4 worker × 16 线程 = 64 线程抢 16 核，**严重超订**。§25 那条「n=4 最优、
+auto=16 反更慢」正是这个假象的读数（worker 越多越慢本身就是超订证据），不是「torch import 开销」。
+
+**实测**（16 核，`python -m pytest tests/ e2e/` 单独计时，同机交错 3 次/项）：
+
+| 配置 | 均值墙钟 | 备注 |
+|---|---|---|
+| `-n 4` 默认线程 | 36.3s | 旧默认 |
+| `-n 12` 默认线程 | 44.7s | worker 越多越慢（超订证据） |
+| `-n 4` 线程=1 | 39.7s | 只封线程不救小并发 |
+| **`-n 12` 线程=1** | **24.7s** | ← 新默认 |
+| `-n 8` / `-n 16` / `auto` 线程=1 | 25.5 / 23.5 / 24.0s | 8~16 平坦 |
+
+**改动**：① 门禁 export `OMP/MKL/OPENBLAS_NUM_THREADS`（`NN_GATE_THREADS`，默认 1，0 = 不设）
++ worker = `min(核数, 12)`（`NN_GATE_NPROC`；取 12 同时给内存封顶：峰值 pytest 进程树
+RSS ≈ 3.9GB ≈ `-n 4` 的 3 倍）；② 三路工具启动去重成 `run_tool`（原先 LIVE/detach 二选一
+复制了三遍，加一个工具就要再抄一遍，漏掉 detach 分支会让 Windows commit 卡死）；③ 去掉 pytest 的
+重复 `-q`（addopts 已有 `-q` ⇒ 原本是 `-qq`，把结尾的「N passed in Xs」吞了，hook 日志里看不到
+用例数与耗时）——现在日志里是 `1010 passed in 21.2s`；④ `t0` 提到启动工具之前，报告的秒数 = 门禁
+真实墙钟（旧版只算「等最慢那个」）。
+
+**同策推广**（防「门禁快、日常入口慢」的漂移）：`task.py` 四个 target 共用 `clean_env()`，线程封顶
+只改一处即全生效，worker 一律 `-n auto`（**2026-09-15 把 `-n auto` 判为「沙箱 ~34% 停滞」头号嫌疑
+是误判，本次回退**）；`nn-training/Makefile` 加 `NPROC ?= auto` / `THREADS ?= 1` + export；
+CI `nn-training.yml` 加 job 级线程封顶，单测层从**无 `-n`**（job 里最长的 pytest 步）改为 `-n 2`
+（与 e2e 同口径）。
+
+**验证**：门禁连跑两次 20s / 23s rc=0（改前 39 / 50s）；日志含 `1010 passed in 21.2s`；ruff +
+mypy 绿；`test_githook_scripts.py` 新增两条静态护栏（封线程 export + 核数派生 worker 数），并用
+**变异测试证明非空转**（删 export / 退回 `-n 4` / 去掉上界 → 3/3 被抓住）；CI 侧封顶用
+`taskset -c 0,1` 压成本机 2 vCPU 模拟（`-n 2`：默认 57/73s → 封顶 55/53s）。
+
+**教训（通用形态）**：把「并行度不够」当结论之前，先看**每个进程内部**开了多少线程——
+`-n`（进程数）× 库默认线程数（= 核数）是一对乘积，只调一半得到的结论会**反号**（本来该加 worker，
+却得出「workers 越少越好」）。
+
+## §56 hub-server 重启死锁收口：D9 只当「无效鉴权」的守门人 + 回环永不封禁 + 端口级实例锁（2026-09-17）
+
+**为什么记这一笔**：本笔含**训练基础设施架构变更**（D9 鉴权/闭锁语义、hub 启动串行化），
+按 §5 硬规则必须入账。事故现场：hub-server「自动崩溃后手动重启失败」，控制台只报「意外退出」。
+
+### 一、事故链（三层同族问题，一次收口）
+
+1. **封禁连坐**：旧 `_auth_ok` **先查 `is_blocked` 再验 token** ⇒ 一次误封（本机组件用陈旧 token
+   连打 5 次 `/ping`）把该来源 IP 的**全部**流量（console 健康检查、训练循环、worker 拉活）403
+   一小时；而封禁只住**进程内存**、只能靠重启清除。
+2. **回环当替罪羊**：cloudflared 回源把**隧道流量也全归成 127.0.0.1** ⇒ 回环上的失败里混着隧道
+   里的陌生来源，对回环封禁 = 整台机器的服务面连坐（用户口径：「本地 127.0.0.1 鉴权失败不要锁地址」）。
+3. **重启被自己的守卫挡死**：端口守卫（`_port_guard.ensure_port_free`）是「探测 → bind」的 TOCTOU，
+   且 Windows `SO_REUSEADDR` 允许双绑（后启动者静默变僵尸）；旧实例活着占着 8787 ⇒ 新实例被拒 ⇒
+   **必须重启才能解封、重启却被自己占的端口挡死**，只能人工杀进程。
+
+### 二、修复（四处）
+
+- **D9 改序**（`remote/hub_server.py`）：先验 token；**合法 token 永远放行**，封禁只拒无效鉴权尝试
+  （封禁期内的无效尝试 403，且不再计数/不延长）。
+- **回环豁免**（`remote/hub_server.py::_is_loopback`）：`127.0.0.0/8` / `::1` / `::ffff:127.0.0.1`
+  上的失败**不计数、不封禁**（`is_blocked` 防御性恒 False）；鉴权边界与 `AUTH FAIL` 审计行不变。
+- **原子实例锁**（新 `remote/_instance_lock.py`，`nn-training/.<kind>.<port>.lock`，按端口键控）：
+  拿锁 → 端口探测 → bind；陈旧锁按「持有者已死 / 命令行缺本服务指纹（PID 复用）」接管（指纹可
+  给多个），身份读不到则 fail-closed 拒启；锁文件**写不下**（只读 FS）则 fail-open + 响亮告警。
+  覆盖 `hub_server` 与 **`worker_server`**（push 端口，经 `remote_worker_serve`，2026-09-17 补）——
+  worker 僵尸更贵：HUB 会把 job POST 进一个没人应答的监听端口，表现为推送静默卡死。
+  自带安全存活探测（Windows `GetExitCodeProcess`——**不复用** `train/loop_util._pid_alive`，后者
+  在 Windows 走 `os.kill(pid,0)`＝`TerminateProcess` 会杀持有者；该隐患已于同日单独修掉）。
+- **控制台侧**：启动前 `reclaimPort` 回收端口幸存者（`stack/hub.ts`，接在 hub/selfNode）；
+  「停止 trainer」释放本课 run_rl/run_bc 锁且**先核验进程身份**再停存活持有者
+  （`launch/cli.ts::releaseTrainerLock`）。**`workerServe` 路径故意不接 reclaimPort**：
+  worker_server 可能在跑数小时的 PPO job，`/ping` 失败就回收它 = 炮掉在途 job；该路径
+  会先复用健康的幸存者，不通时锁会响亮拒启并指向日志（含持有者 PID），交人工处置。
+
+### 二补、隧道来源还原（B，用户点名「确认隧道来源到底该不该计数/封禁」）
+
+**背景**：回环豁免（2 号修复）把隧道入口一并豁免了 —— cloudflared 回源把隧道流量全归成
+`127.0.0.1`，于是隧道侧**只 401、不计数、不封禁**，等于对公网暴露面零封禁（D9 只对 tailnet 直连 IP 有效）。
+
+**决定 = B**（方案对比与 C+D/E 被否的理由见 DECISIONS 同条）：`remote/hub_server.py::attributed_source(peer, cf)`
+—— **只在「TCP 对端是回环」时**采信 `CF-Connecting-IP`（须是合法 IP 字面量且非回环值）⇒ 按**归因 IP**
+计数/封禁；其余（无头 / 头非 IP / 头写回环值 / 对端非回环）⇒ 归因 TCP 对端。直连（tailnet）对端
+**只认对端 IP**：那台机器能自己写任何头。审计行带上 `peer=` / `src=` / `via=cf|peer`。
+
+**为什么不需要再加「全局退避闸」**（C+D，曾被列为首选）：退避的收益完全建立在「封禁不可用」之上，
+B 一生效就重复了；而 B 若失效（头可伪造），最坏后果**两条都良性** —— ① 轮换头值 ⇒ 拿不到封禁，
+退化为回环豁免（不会更差）；② 伪造 tailnet 某 worker 的 IP ⇒ 那只拒它的**无效鉴权尝试**，它带
+正确 token 的请求照常放行（改序使然）⇒ 不是对合法对端的 DoS。零收益增量 + 要给每条合法路径加一条
+延迟分支 ⇒ 不做。
+
+**未实测假设（登记待验）**：CF 边缘**会覆写** `CF-Connecting-IP`。仓里无 CF 头读取先例、quick tunnel
+无 ingress 配置、沙箱无网络 ⇒ 无法离线验证。**实测法（2 分钟）**：向隧道发一次带伪造头的无效鉴权
+（`curl -H 'Authorization: Bearer wrong' -H 'CF-Connecting-IP: 203.0.113.7' https://<隧道>/ping`），看
+`hub-server.out` 的 `AUTH FAIL` 行 `src=` 是伪造值（⇒ 可伪造，回退 = 删 `attributed_source` 的 cf 分支）
+还是真实公网出口 IP（⇒ 假设成立）。**预登记的失效后果**见 DECISIONS 同条，两条都良性。
+
+**访问日志也补上来源**（`log_message`）：回源流量原本全写成 `[hub-server 127.0.0.1]`，正是本次事故
+排查的最大阻雾（分不清「本机组件」与「隧道里的陌生人」）；现在归因到 `via=cf` 时写成
+`[hub-server 127.0.0.1 src=<真实 IP> via=cf]`，本机组件与直连对端逐字保持旧格式（不加噪）。
+`log_message` 只打非常规事件，不刷屏；`self.headers is None` 的早期错误路径有护栏。
+
+**回归**：`nn-training/tests/test_hub_auth_d9_order.py` 11 → **19 例**（归因矩阵 / 隧道源 5 次封禁第 6 次
+403 / 被封归因 IP 持合法 token 仍放行 / 本机无头组件仍豁免 / 直连对端自带头不算数 / 伪造头无害 /
+访问日志带 `src=` 及两个负例 / `headers is None` 不抛）。
+A/B 行为取证（`tmp/cf-red-behavior.log`，detached worktree 跑修复前代码）：
+`PRE-FIX: 5 次回环+CF头 无效鉴权返回码 = [401,401,401,401,401]`、`is_blocked(203.0.113.7) = False`、
+`_auth_fail = {}` ⇒ 隧道入口确实零计数。
+
+### 三、教训（可迁移）
+
+- **「活着但不健康」的进程是重启链路的头号敌人**：所有自我守卫（端口/单实例锁）都必须能区分
+  「真双开」与「上一代残骸」，否则守卫本身变成死锁的一环。判据顺序一律：**存活 → 身份核验 →
+  接管/拒启**，身份读不到就 fail-closed 且**响亮打印**（不静默共存）。
+- **惩罚性状态机只能惩罚「确定恶意」的那一类**：把合法流量与可疑流量放在同一个计数器里，
+  在共享来源 IP（回源/代理/NAT）下必然误伤整机；封禁的作用面必须比鉴权边界**更窄**，不能更宽。
+- **取证纪律**：401/403 永不静默（2026-09-16 已立），且审计行必须写「不计数/不封禁」这类**语义**
+  说明——否则下一次排障会把「回环不封禁」误读成「封禁失灵」；同理，一旦「对端」不再是封禁对象，
+  审计行必须同时打印 `peer=` 与 `src=`——只打一个会让「封的是谁」永远无法事后重建。
+- **一次收紧会开出新的口子，必须回头补上**：改序（A）与回环豁免（B）都是「减误伤」，但 A 把封禁
+  面从「来源 IP」缩到「无效尝试」、B 又豁免了隧道整整一侧 —— 每一步都对，合起来却让公网入口
+  零封禁。这就是 B（2026-09-17 追加）存在的原因：**每次放宽都要重新问一遍「那么谁在守门」**。
+
+### 三补、存活探测的 Windows 隐患收口（同日补修，用户点名）
+
+- **隐患**：`train/loop_util.py::_pid_alive` 在 Windows 侧一直是裸 `os.kill(pid, 0)` —— Windows 上
+  那不是探测而是 `TerminateProcess(handle, 0)`：`acquire_lock` 判「锁持有者还活着吗」的**只读查询**
+  会直接把持有者杀掉（最坏：打死正在训练的 trainer），而 `except Exception → False` 还会把
+  「我杀了它」记成「它本来就是死的」，双开护栏静默失效。`run_rl._runrl_pid_alive` 早期就因这条
+  隐患不复用它（自己写了安全分支），loop_util 侧因此露了很久。
+- **修**：两处同口径 —— Windows 分支走 `GetExitCodeProcess == STILL_ACTIVE`，并补 `pid <= 0 → 不活`
+  护栏（POSIX 上 `os.kill(0, 0)` / `os.kill(-1, 0)` 命中**进程组**、实测成功，会把残缺锁文件里的
+  0/-1 当成活人持有 ⇒ 同名课永久拒启）。三处同源：`loop_util` / `run_rl` / `remote._instance_lock`。
+- **回归**：`nn-training/tests/test_pid_probe_windows_safe.py`（6 例）——注入假 kernel32 + 监视
+  `os.kill`，断言 Windows 分支**零 os.kill**、退出码语义、句柄不泄漏、POSIX 分支不变、残缺锁可清理，
+  外加一条行程门禁（三处探测必须保留 `os.name == "nt"` 分支）。
+  A/B：修复前红 —— `AssertionError: train.loop_util._pid_alive: Windows 分支不得调用 os.kill，实际: [(pid, 0)]`。
+  ⚠️ 坑：伪装 Windows 时 `os.name="nt"` 必须**只在探针调用期间**生效并先于异常还原，否则
+  `pathlib` 会把路径解析成 `WindowsPath`，pytest 在报错/cache 阶段直接 INTERNALERROR。
+- **同类待收口**：`remote/notebook_runtime.py::_pid_alive`、`tools/tmp-clean.py`（同名写法，未动）。
+
+### 三补二、存活探测唯一化 + 隧道 metrics 端口闸（2026-09-17 第三批，用户点名的两个收口）
+
+**存活探测唯一化**（`nn-training/pid_probe.py`，新增）：18 小时内同类隐患在 3 个不同文件各自
+踩过一次——`loop_util` 裸 `os.kill`（会杀锁持有者）、`notebook_runtime` **嵌套闭包**+裸 `os.kill`
+（不可测，且用来判断 bootstrap 已起的 `serve_pid` 是否还活 ⇒ 在 Windows 上会把 worker_server
+直接杀掉）、`tmp-clean` 缺 `pid<=0`（残锁里的 0/-1 命中**进程组**⇒ `training_running()` 恒真 ⇒
+运行目录永远不再收敛，实测 `_pid_alive(0) = True`）。根因面 = 「每加一个调用点就多一份可漂移的
+实现」，故收敛为**唯一实现** `pid_probe.pid_alive`（stdlib-only 顶层模块，与 `platform_utils` 同层，
+`remote/` 与 `train/` 都直接 import 它——两方向都不能反向依赖对方的包）；四份具名薄壳全部委托；
+**唯一保留副本** = 仓根 `tools/tmp-clean.py`（根级开发工具不依赖 nn-training 布局），契约由源码门禁守。
+门禁升级：`test_pid_probe_windows_safe.py` 现在把**六处入口**放进同一组断言，并用 AST 断言
+`nn-training/` 里真调用 `os.kill(pid, 0)` 的文件**只有 `pid_probe.py`**（AST 而非字符串：新写的
+docstring 到处在讨论这个坑，且 `os.kill(pid, 15)` 是**故意发的信号**、不属本不变量）。
+
+**隧道 metrics 端口闸**（`dashboard/src/stack/hub.ts`）：cloudflared 是**第三方二进制**，没法在
+它内部装实例锁（hub/worker 那层是 python 自己拿 `O_CREAT|O_EXCL`）⇒ 控制台侧回收是它**唯一**的
+一道闸。`stepCloudflared` 在 spawn 前 `reclaimPort(metricsPort)`（与 hub/selfNode 同族），
+堵住 `supersedeSlotTunnels` 看不见的幸存者（孤儿/登记丢失/控制台重启竞态）。metrics 端口既是
+`--metrics` 的 bind 目标、又是 `/ready` 的探测目标，被占着会**同时**造成「新隧道 bind 失败」与
+「就绪读数读自旧僵尸」；后者另加**就绪归属**：`core/proc.ts::portOwnedBy(pid, port)`
+（唯一实现，早期叫 `tunnelOwnsMetrics`，因 hub/worker 也要用而改成中性名），就绪 = 「本进程持有
+该端口 ∧ /ready 200」。
+
+### 三补三、就绪归属推广到监督器（2026-09-17 第四批，用户点名「监督器那条路径也要」）
+
+`ProcSpec` 新增可选字段 **`ownsResource?: (pid) => Promise<boolean>`**，三处声明：
+`hubServerSpec`（hub 端口）、`cloudflaredSpec`（metrics 端口）、`workerServeSpec`（push 端口）；
+**监督器**（`server.ts::restart`，变更检测重启）与**启动步骤**的就绪判定都变成
+「`ownsResource`（未声明 = 不阻塞）∧ `healthy()`」，未就绪时日志点出归因。
+
+为什么监督器同样需要：它杀旧 pid 后紧接着拉起同一条 spec，若新进程 bind 失败
+（EADDRINUSE / python 侧双监听守卫拒绝）**早已退出**，而端口上的旧实例照样答 `/ping` / `/ready`
+⇒ 监督器把**僵尸的 200 记成「重启成功」**：账本写新 pid、实际服务的是旧进程 —— 这正是
+hub-server 重启事故的相位（账本 pid ≠ 真在服务的那一个）。
+
+**实现时发现并修掉的语义漏洞**（记一笔，避免以后重蹈）：`portOwnedBy` 最初把「占用者清单为空」
+一律当成「探测不可用 ⇒ 不判死」——但**没人监听**时 lsof/netstat 也返回空，于是「新进程已死」
+会被判成「归属 OK」。现用 TCP 探测二次区分：没人监听 ⇒ **false**（要抓的就是这个）；
+有人在监听但列不出归属 ⇒ **true**（工具缺失不该让所有组件启动失败）。测试里就有一个真监听
+用例把它担住了（hub 端口无人监听 ⇒ `hub.ownsResource!(child.pid) === false`）。
+
+**保留的刻意选择**：监督器重启路径**不接** `reclaimPort`（它杀的是账本里确切 pid、紧接着拉起
+同一 spec，无孤儿窗口；kill 失败时回收也一样杀不掉）——只核归属。
+
+### 四、验收
+
+- `nn-training/tests/test_hub_auth_d9_order.py`（11 例）、`nn-training/tests/test_instance_lock.py`（9 例，
+  含真进程顺序双启被拒 / 同时三启恰好存活一个）、`dashboard/tests/trainer-lock-release.test.ts`（13 例）。
+- A/B 取证：detached worktree 对 HEAD 跑新测试 → 红（`assert 403 == 200`；日志里 127.0.0.1 被 BLOCKED）。
+- 第三/四批（存活探测/隧道闸/就绪归属）：`test_pid_probe_windows_safe.py` 6 → **8 例**、
+  `dashboard/tests/training-port-reclaim.test.ts` 6 → **15 例**（含 `ownsResource` 声明门禁、
+  监督器接线门禁、`portOwnedBy` 空清单两义、真监听下 `hub.ownsResource` 判 false）；A/B 红：worktree 对 HEAD 跑新测
+  6 红（含行为级 `tmp-clean._pid_alive(0) = True`），cloudflared 侧 HEAD 上既无 `reclaimPort`
+  也无 `tunnelOwnsMetrics`、就绪判定是裸 `tunnelEdgeReady`。门禁：nn python gate（205 源文件）✓、
+  `cd dashboard && bun run typecheck && bun run test`（406 例）✓、`bun run check`（1849 例）✓。
+  ⚠️ 本批 gate **首跑红过一次**：`tests/test_remote_ppo.py::test_hub_server_auth_and_job_lifecycle`
+  报 `Con…`（连接错误）——单跑该文件绿、`--maxfail=99` 单跑绿、重跑全量 gate 也绿 ⇒ 满编 `-n 4`
+  下的**负载型 flake**（同 §313 已归档的那一类），与本次改动无关（日志已删，仅存档此判定）。
+- 门禁：`bash tools/githook/nn-python-gate.sh` ✓；`cd dashboard && bun run typecheck && bun run test` ✓；
+  `bun run check` ✓。决策记录：DECISIONS §2026-09-17-hub-restart-deadlock-hardening。
+
 
 ## §55 x1-rebirth 开课（纯从零臂）＋ 严格样本量配额机制落地（2026-09-17）
 

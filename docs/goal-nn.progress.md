@@ -42,6 +42,11 @@ test_integration 与 test_eval_local_gate 并发会踩共享状态。新增 Fake
 **worker 调优**（16 核）：n=4 最优 17.5s（串行 27.2s，-36%）；auto=16 反更慢（torch import
 开销 + 单函数 test_integration 13.9s 不可再分）。
 
+> ⚠ **2026-09-17 更正：那两条「worker 越少越好」的读数作废（含本条的 auto 反更慢）**——
+> 真因是 torch 默认内线程（= 物理核）与 worker 数相乘造成的**超订**，不是 import 开销。
+> 封到 1 线程后 n=12 反比 n=4 快 ~1/3。实测与决定见 `docs/nn.progress.md §57` /
+> `DECISIONS §2026-09-17-goalnn-python-gate-parallel-policy` / 门禁脚本头注。
+
 **落地**：make test → `pytest -n 4 -q`；gate 换 xdist `-n 4` **全量**（含 heavy/integration，
 ~17s；FakeServer 实例隔离保证并发安全；删 SHARDS/分片脚本）。
 用户后续裁定 pre-commit 门改回全量。实测：gate 全量 17.5s rc=0 / 多次稳定。
