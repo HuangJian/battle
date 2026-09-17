@@ -34,6 +34,7 @@ import {
   classifyExit,
   healRecoveredErrors,
   nextExitFailures,
+  pidClaimedElsewhere,
   recentPlannedStop,
   recordExitFailure,
   specPort,
@@ -339,6 +340,34 @@ describe('specPort', () => {
     expect(specPort(mkSpec(['bun', 'a.ts']))).toBeNull()
     expect(specPort(null)).toBeNull()
   })
+
+  it('cloudflared：认 --metrics host:port（2026-09-17 幽灵条目事故）', () => {
+    const cfPort = (m: string[]) =>
+      specPort(
+        mkSpec(['cloudflared', 'tunnel', '--url', 'http://localhost:8787', '--metrics', ...m]),
+      )
+    expect(cfPort(['127.0.0.1:8788'])).toBe(8788)
+    expect(cfPort([':8788'])).toBe(8788)
+    expect(cfPort(['8788'])).toBe(8788)
+    expect(specPort(mkSpec(['cloudflared', 'tunnel', '--metrics=127.0.0.1:9001']))).toBe(9001)
+    // 认不出（值不是端口）时返回 null，而不是瞎猜
+    expect(cfPort(['nonsense'])).toBeNull()
+  })
+})
+
+describe('pidClaimedElsewhere（端口占用者是不是别人）', () => {
+  it('别的条目认领该 pid → 返回其展示名；自己认领 → null', () => {
+    const reg = {
+      cloudflareds: {
+        'x2-acbc': { pid: 13176, course: 'x2-acbc', slot: 0, metrics: 8788, log: '' },
+        'x1-rebirth-a2': { pid: 13576, course: 'x1-rebirth-a2', slot: 0, metrics: 8788, log: '' },
+      },
+    } as unknown as Registry
+    const self = { key: 'cloudflared' as Component, course: 'x2-acbc', entry: { pid: 13176 } }
+    expect(pidClaimedElsewhere(reg, self, 13576)).toContain('x1-rebirth-a2')
+    expect(pidClaimedElsewhere(reg, self, 13176)).toBeNull() // 自己认领的不算"别人"
+    expect(pidClaimedElsewhere(reg, self, 999999)).toBeNull() // 无人认领
+  })
 })
 
 describe('classifyExit', () => {
@@ -389,6 +418,44 @@ describe('classifyExit', () => {
     )
     expect(v).toBe('alive')
     expect(repaired).toBe(0)
+  })
+
+  it('端口被**别的课程**的进程占着 → 清陈旧条目，不改 pid（2026-09-17 幽灵条目）', async () => {
+    const repaired: number[] = []
+    const discarded: string[] = []
+    const warns: string[] = []
+    const v = await classifyExit(
+      { key: 'cloudflared', course: 'x2-acbc', entry: { pid: 13176 } },
+      {
+        healthyOf: async () => true,
+        ownerPidOf: () => 13576, // 端口现在是 x1-rebirth-a2 的隧道
+        claimedBy: () => 'cloudflared[x1-rebirth-a2]',
+        repair: (_it, p) => repaired.push(p),
+        discard: (it) => discarded.push(it.course),
+        warnFn: (t) => warns.push(t),
+      },
+    )
+    expect(v).toBe('alive')
+    expect(repaired).toEqual([]) // **绝不能**把别人的 pid 写成自己的
+    expect(discarded).toEqual(['x2-acbc'])
+    expect(warns.join('\n')).toContain('陈旧条目')
+  })
+
+  it('认不出占用者时：同一 stale pid 只报一次，不每周期刷屏', async () => {
+    const warns: string[] = []
+    const io = {
+      healthyOf: async () => true,
+      ownerPidOf: () => null,
+      repair: () => {},
+      discard: () => {},
+      warnFn: (t: string) => warns.push(t),
+    }
+    const item = { key: 'cloudflared' as Component, course: 'ghost-dedupe', entry: { pid: 999001 } }
+    await classifyExit(item, io)
+    await classifyExit(item, io)
+    await classifyExit(item, io)
+    expect(warns).toHaveLength(1)
+    expect(warns[0]).toContain('只报一次')
   })
 
   it('健康检查抛异常 → exited（探测失败不得漏记真退出）', async () => {

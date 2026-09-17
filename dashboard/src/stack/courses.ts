@@ -7,32 +7,41 @@
  *  这里 import，不断环。`actions.ts` 重导出同名函数，老调用方零改动。
  */
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'fs'
+import { copyFileSync, existsSync, mkdirSync } from 'fs'
 import path from 'path'
+import { readJsoncFile } from '../core/jsonc'
 import { curriculaDir, REPO_ROOT } from '../core/paths'
 
-/** 课程 BC 种子路径（§384）：读课程 jsonc 的 `bc` 字段（相对仓库根解析）；
- *  文件缺失/解析失败/无 bc 键时回退 legacy 硬编码（旧课程兼容）。 */
+/** 课程 BC 种子路径（§384）：读课程 jsonc 的 `bc` 字段（相对仓库根解析）。
+ *
+ *  **三种情形分开处理**（2026-09-17 事故：原来三种一律静默回退 legacy，于是
+ *  「课程文件语法读不了」被报成「初始权重缺失且 BC 产物不存在: tmp/ep60/…」——
+ *  错误信息指向完全无关的文件，真因被藏起来，排查绕远）：
+ *   ① 文件不存在（未知课程）→ legacy 硬编码（老课程兼容，行为不变）；
+ *   ② **文件在、解析失败** → **抛错**并点名文件与原始报错。不许回退：回退要么拿
+ *      错误的种子开腿（§384 原事故），要么报出误导性的下游错误（本次事故）；
+ *   ③ 解析成功但无 `bc` 键 → legacy 硬编码（老课程兼容）。
+ *
+ *  解析器用 `core/jsonc.ts`（与 python `rl/jsonc.py` 同一语义）——**不再手搓
+ *  「只剥整行 `//`」的弱实现**，那正是本次事故根因。 */
 export function resolveCourseBc(course: string): string {
   const legacy = path.join(REPO_ROOT, 'tmp/ep60/battle2-p1bc/run/weights.json')
+  const file = path.join(curriculaDir(), `${course}.jsonc`)
+  let parsed: { bc?: unknown }
   try {
-    const raw = readFileSync(path.join(curriculaDir(), `${course}.jsonc`), 'utf-8')
-    // JSONC 容尾逗号：oxfmt 给 curricula/*.jsonc 加的尾逗号是合法 JSONC、非法 JSON。
-    // 不剥掉 → JSON.parse 抛错 → 静默回退 legacy 种子路径（§384 的事故正是这个
-    // 静默回退：读不到课程 bc 就拿旧权重开腿）。剥完再解析，解析失败仍回退。
-    const stripped = raw
-      .split('\n')
-      .filter((l) => !l.trimStart().startsWith('//'))
-      .join('\n')
-      .replace(/,(\s*[}\]])/g, '$1')
-    const bc: unknown = (JSON.parse(stripped) as { bc?: unknown }).bc
-    // 绝对路径原样返回（跨盘符的 path.relative 会产出绝对路径；Windows 上
-    // path.join(repo, 'C:\\...') 会把盘符拼成非法中间段——§2026-09-13 回归）。
-    if (typeof bc === 'string' && bc.length > 0)
-      return path.isAbsolute(bc) ? bc : path.join(REPO_ROOT, bc)
-  } catch {
-    /* 回退 legacy */
+    parsed = readJsoncFile(file) as { bc?: unknown }
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') return legacy
+    throw new Error(
+      `课程文件解析失败: ${file}——${e instanceof Error ? e.message : String(e)}` +
+        '（修 jsonc 语法；解析失败不回退 legacy 种子，见 dashboard/src/core/jsonc.ts 头注）',
+    )
   }
+  const bc = parsed.bc
+  // 绝对路径原样返回（跨盘符的 path.relative 会产出绝对路径；Windows 上
+  // path.join(repo, 'C:\\...') 会把盘符拼成非法中间段——§2026-09-13 回归）。
+  if (typeof bc === 'string' && bc.length > 0)
+    return path.isAbsolute(bc) ? bc : path.join(REPO_ROOT, bc)
   return legacy
 }
 

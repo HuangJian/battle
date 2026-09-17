@@ -332,7 +332,13 @@ export function bcLoopSpec(cfg: RlConfig, s: BcLoopSpecOpts): ProcSpec {
       '--remote',
       // local preset = 本机独立 worker（pull）：传输钉死 pull，否则 run_bc 的
       // 「push（env/config）> hub」优先级会把 job 推去云机，本机 worker 永远领不到活。
-      ...(s.ppo === 'local' ? ['--remote-transport', 'pull'] : []),
+      // 2026-09-17：**pull preset 同样钉死** —— 它原本不传，于是 run_bc 落回
+      // `--remote-transport auto`（=「config 里本课 gpu_push 节点 > hub」）；
+      // rl-config 里留着一条**过期 quick-tunnel URL** 的 gpu_push 节点时，
+      // 「云机 pull」会静默改走 push → HTTP 530 三连败 → GATE ABORT 停腿，
+      // 而云机 worker 其实正在正常 pull（实测 hub 日志同时有 push 530 与 pull 200）。
+      // 用户选 pull 的语义就是 pull，不该被某条残留节点悄悄改道。
+      ...(s.ppo === 'local' || s.ppo === 'pull' ? ['--remote-transport', 'pull'] : []),
       ...hubFlags,
       ...(s.smoke ? ['--smoke'] : []),
     ],
@@ -438,7 +444,10 @@ export function trainingLoopSpec(cfg: RlConfig, s: TrainingLoopSpecOpts): ProcSp
       // 传输优先级是「config 里本课 gpu_push 节点 > hub」，某课用 push 跑过一次后
       // `courses.<课>.push_node_url` 就留在 rl-config 里——不钉死就会把 job 推给云机，
       // 本机 localWorker 永远空转（且看起来「训练正常」）。
-      ...(s.ppo === 'local' ? ['--remote-transport', 'pull'] : []),
+      // 2026-09-17：**pull preset 同样钉死**（同因，见 BC 分支的详细注释）：
+      // 云机 pull 会话被一条残留/过期的 gpu_push 节点劫走 → push 530 三连败 →
+      // GATE ABORT，而云机 worker 其实正在正常 pull 并已把 result 200 回传。
+      ...(s.ppo === 'local' || s.ppo === 'pull' ? ['--remote-transport', 'pull'] : []),
       ...hubFlags,
       ...(s.smoke ? ['--smoke'] : []),
       ...(s.gateHaltMode ? ['--gate-halt-mode', s.gateHaltMode] : []),

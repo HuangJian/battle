@@ -257,7 +257,7 @@ describe('W6 同槽位 cloudflared 隧道接管', () => {
     return { proc, pid: proc.pid }
   }
 
-  it('接管并杀同槽位残留隧道；异槽位/死 pid 不动；同课自身条目保留', async () => {
+  it('接管并杀同槽位残留隧道；异槽位不动；同课自身死条目保留', async () => {
     // 复现（2026-09-14）：c6-chip 残留隧道长期占住 slot0 metrics 口，bc-c4-v3 隧道
     // bind 失败 12s 退出、控制台「启动失败」。修复 = 启动前接管同槽位其它课程的存活隧道。
     const scratch = mkdtempSync(path.join(os.tmpdir(), 'bcity-p0w6-'))
@@ -309,6 +309,42 @@ describe('W6 同槽位 cloudflared 隧道接管', () => {
       }
       try {
         await killPid(other.pid)
+      } catch {
+        /* already dead */
+      }
+      if (prev === undefined) delete process.env.BCITY_REGISTRY_FILE
+      else process.env.BCITY_REGISTRY_FILE = prev
+      rmSync(scratch, { recursive: true, force: true })
+    }
+  })
+
+  it('同槽位**已死 pid** 的陈旧条目 → 清账（无进程可杀，但账必须清）', async () => {
+    // 2026-09-17 事故：原实现对死 pid 直接 `continue` —— 作者意图是"死进程没什么可杀"，
+    // 但**清账被一起跳过**了 ⇒ 09-14 的 cloudflared[x2-acbc] 条目活到今天，还在账本层
+    // 占住 slot 0；端口被后来的课程接手后，它就成了"PID 已死、服务仍在应答"的幽灵，
+    // 看门狗每 8s 刷屏。修法：死进程不 kill，但条目必须清。
+    const scratch = mkdtempSync(path.join(os.tmpdir(), 'bcity-p0w6b-'))
+    const prev = process.env.BCITY_REGISTRY_FILE
+    process.env.BCITY_REGISTRY_FILE = path.join(scratch, 'registry.json')
+    const ghost = livePid()
+    try {
+      const cfg = cfgFixture()
+      const m0 = slotPort(cfg, 0, 'metrics')
+      await killPid(ghost.pid) // 造一个**确证已死**的 pid（不用硬编码历史值：万一被复用会误杀）
+      expect(pidAlive(ghost.pid)).toBe(false)
+      saveCourseComponent('cloudflared', 'x2-acbc', {
+        pid: ghost.pid,
+        course: 'x2-acbc',
+        slot: 0,
+        metrics: m0,
+        log: '',
+      })
+      const struck = await supersedeSlotTunnels('x1-rebirth-a2', 0)
+      expect(struck).toEqual(['x2-acbc'])
+      expect(loadRegistry().cloudflareds?.['x2-acbc']).toBeUndefined() // 陈旧条目已清
+    } finally {
+      try {
+        await killPid(ghost.pid)
       } catch {
         /* already dead */
       }

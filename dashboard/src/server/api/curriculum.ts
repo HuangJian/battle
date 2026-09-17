@@ -1,6 +1,7 @@
 /** curriculum.ts — 课程梯度账本读取与阶梯视图。 */
 import { readFileSync } from 'fs'
 import path from 'path'
+import { parseJsonc } from '../../core/jsonc'
 import { NN_TRAINING } from '../../core/paths'
 
 export interface CurriculumLadderLevel {
@@ -22,12 +23,10 @@ export function readCurriculumLedger(
 } {
   try {
     const raw = readFileSync(ledgerPath, 'utf8')
-    // LEDGER 由程序生成（纯 JSON）；容错剥掉潜在注释行后解析。
-    const cleaned = raw
-      .split('\n')
-      .filter((l) => !l.trim().startsWith('//'))
-      .join('\n')
-    const data = JSON.parse(cleaned) as {
+    // LEDGER 由程序生成（纯 JSON），但解析走共用 JSONC 解析器（core/jsonc.ts，与
+    // python `rl/jsonc.py` 同语义）——原先手搓的「只剥整行 `//`」遇行内注释即崩，
+    // 与 2026-09-17 课程种子事故同一根因；共用实现接受严格超集，行为只增不减。
+    const data = parseJsonc(raw) as {
       levels?: Record<string, Record<string, unknown>>
       updated_at?: string
     }

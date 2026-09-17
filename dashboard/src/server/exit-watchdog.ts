@@ -20,6 +20,7 @@ import { warn } from '../core/log'
 import { pidAlive } from '../core/net'
 import { portOwnerPids } from '../core/proc'
 import {
+  clearAnyComponent,
   loadRegistry,
   registryTriples,
   saveAnyComponent,
@@ -182,6 +183,13 @@ export function tailNormalCompletion(tail: string[]): string | null {
 }
 
 /** 从 spec.cmd 取监听端口（--port N / --port=N）；无 → null。 */
+/** 从 `host:port` / `:port` / `port` 里取端口号（`--metrics` 的取值形态）。 */
+function listenPortOf(value: string): number | null {
+  const tail = value.includes(':') ? value.slice(value.lastIndexOf(':') + 1) : value
+  const n = Number(tail)
+  return Number.isInteger(n) && n > 0 ? n : null
+}
+
 export function specPort(spec: ProcSpec | null): number | null {
   if (!spec) return null
   for (let i = 0; i < spec.cmd.length; i++) {
@@ -194,6 +202,18 @@ export function specPort(spec: ProcSpec | null): number | null {
       const n = Number(a.slice(7))
       return Number.isInteger(n) && n > 0 ? n : null
     }
+    // cloudflared 没有 `--port`，它自己的监听端口写在 `--metrics 127.0.0.1:<p>`
+    // （specs.ts cloudflaredSpec / hub.ts stepCloudflared）。不认它 ⇒ specPort 恒 null
+    // ⇒ ownerPidOf 恒 null ⇒ classifyExit 永远只能打「跳过意外退出标记」而不修账本
+    // ⇒ 陈旧条目永不收敛（2026-09-17 事故：09-14 的幽灵条目每 8s 刷屏，且真占住 slot 0）。
+    if (a === '--metrics' && i + 1 < spec.cmd.length) {
+      const n = listenPortOf(spec.cmd[i + 1]!)
+      if (n !== null) return n
+    }
+    if (a.startsWith('--metrics=')) {
+      const n = listenPortOf(a.slice('--metrics='.length))
+      if (n !== null) return n
+    }
   }
   return null
 }
@@ -205,6 +225,20 @@ export function ownerPidOf(key: Component, course: string, stalePid: number): nu
   return owners.find((p) => p !== stalePid) ?? owners[0] ?? null
 }
 
+/** 该 pid 是否被账本里**另一个条目**占用。
+ *
+ *  这是「端口被谁答」之外的第二问：同一个端口可能被**别的课程/组件**的进程占着
+ *  （槽位撞车 / 同槽接管后旧条目没清）。此时把占用者的 pid 写进本条 = 跨课错配
+ *  （比不修更糟）。返回占用方的展示名，null = 没人认领（= 大概率是本条自己的下一代）。
+ */
+export function pidClaimedElsewhere(reg: Registry, self: WatchedEntry, pid: number): string | null {
+  for (const item of registryTriples(reg)) {
+    if (item.key === self.key && item.course === self.course) continue
+    if (item.entry.pid === pid) return labelOf(item.key, item.course)
+  }
+  return null
+}
+
 export interface ClassifyIO {
   /** 健康复核（注入用于测试）；默认用 restartSpecFor(key, course).healthy()。 */
   healthyOf?: (item: WatchedEntry) => Promise<boolean | null>
@@ -212,8 +246,18 @@ export interface ClassifyIO {
   repair?: (item: WatchedEntry, newPid: number) => void
   /** 端口占用者（注入用于测试）；默认 specPort + portOwnerPids。 */
   ownerPidOf?: (item: WatchedEntry, stalePid: number) => number | null
+  /** 「该 pid 被别的条目认领了吗」（注入用于测试）；默认 pidClaimedElsewhere。 */
+  claimedBy?: (item: WatchedEntry, pid: number) => string | null
+  /** 陈旧条目清除（注入用于测试）；默认 clearAnyComponent。 */
+  discard?: (item: WatchedEntry) => void
   warnFn?: (text: string) => void
 }
+
+/** 「端口被他人接管、本条已是幽灵」的告警去重集（键 = watchId#stalePid）。
+ *
+ *  没有它的话，认不出占用者的条目会**每个周期重复打同一行**（2026-09-17 实测：每 8s
+ *  一条，把日志刷满）。已报告过的组合只报一次，避免把真信号淹掉。 */
+const warnedGhost = new Set<string>()
 
 /** 判定一条「确证死 pid」是否只是**进程换代**（2026-09-09 selfNode 误报事故）。
  *
@@ -244,19 +288,40 @@ export async function classifyExit(
     entry.pid,
   )
   const say = io.warnFn ?? warn
+  const onceKey = `${watchIdOf(item)}#${entry.pid}`
   if (newPid && newPid !== entry.pid) {
-    ;(io.repair ?? ((it, p) => saveAnyComponent(it.key, it.course, { ...it.entry, pid: p })))(
+    const claimed = (io.claimedBy ?? ((it, p) => pidClaimedElsewhere(loadRegistry(), it, p)))(
       item,
       newPid,
     )
-    say(
-      `[console] ${labelOf(key, course)} 进程换代：账本 PID ${entry.pid} 已消失，服务仍在应答` +
-        ` → 账本 pid 修正为 ${newPid}（不计意外退出）`,
-    )
-  } else {
+    if (claimed) {
+      // 端口被**别人的**进程占着 ⇒ 本条是同槽接管后遗留的陈旧幽灵：清账，**不修 pid**
+      // （修了就是把别人的进程认成自己的 —— 跨课错配，比不修更糟）。
+      // 2026-09-17：09-14 的 cloudflared[x2-acbc] 条目正是靠这条被自动清掉的。
+      ;(io.discard ?? ((it) => clearAnyComponent(it.key, it.course)))(item)
+      if (!warnedGhost.has(onceKey)) {
+        warnedGhost.add(onceKey)
+        say(
+          `[console] ${labelOf(key, course)} 账本 PID ${entry.pid} 已消失，端口现由 ${claimed} 持有` +
+            ' → 判定为陈旧条目并清除（同槽位接管残留；改槽位请走 rl-config courses.<课>.slot）',
+        )
+      }
+    } else {
+      ;(io.repair ?? ((it, p) => saveAnyComponent(it.key, it.course, { ...it.entry, pid: p })))(
+        item,
+        newPid,
+      )
+      say(
+        `[console] ${labelOf(key, course)} 进程换代：账本 PID ${entry.pid} 已消失，服务仍在应答` +
+          ` → 账本 pid 修正为 ${newPid}（不计意外退出）`,
+      )
+    }
+  } else if (!warnedGhost.has(onceKey)) {
+    // 认不出占用者（specPort 也拿不到端口）：只报一次，不每周期刷屏。
+    warnedGhost.add(onceKey)
     say(
       `[console] ${labelOf(key, course)} 账本 PID ${entry.pid} 已消失，但服务仍在应答 → ` +
-        '视为进程换代，跳过意外退出标记',
+        '视为进程换代，跳过意外退出标记（同一 pid 只报一次）',
     )
   }
   return 'alive'

@@ -222,18 +222,25 @@ describe('trainer 编排：local = 本机独立 worker（进程内 PPO 已下线
     const local = bcLoopSpec(cfg, { course: 'course-a', ppo: 'local', hubUrl: hub, venv: VENV })
     expect(flag(local, '--remote-transport')).toBe('pull')
     expect(flag(local, '--remote-hub-url')).toBe(hub)
-    // pull/push preset 保持既有语义（不钉传输，hub 缺省读 rl-config）
+    // 2026-09-17：pull preset 也钉死传输（hub 仍缺省读 rl-config）——不钉会被
+    // rl-config 里残留的 gpu_push 节点劫走（auto = 「本课 gpu_push > hub」），
+    // 实测代价：云机 pull 会话 push 530 三连败 → GATE ABORT 停腿。
     const pull = bcLoopSpec(cfg, { course: 'course-a', ppo: 'pull', venv: VENV })
-    expect(flag(pull, '--remote-transport')).toBeNull()
+    expect(flag(pull, '--remote-transport')).toBe('pull')
     expect(flag(pull, '--remote-hub-url')).toBeNull()
   })
 
-  it('云端 preset 行为不变：pull/push 不注射传输与 hub（缺省读 rl-config）', () => {
+  it('云端 preset：pull 钉死传输；push 仍不注射（保留 auto = 配置节点优先）', () => {
     const cfg = dualCourseCfg()
     const pull = trainingLoopSpec(cfg, { course: 'course-a', ppo: 'pull', venv: VENV })
     expect(flag(pull, '--ppo')).toBe('remote')
-    expect(flag(pull, '--remote-transport')).toBeNull()
+    expect(flag(pull, '--remote-transport')).toBe('pull')
     expect(flag(pull, '--remote-hub-url')).toBeNull()
+    // push preset 保持原状：auto 让「config/env 里的 push 节点」生效（本 preset 的
+    // 前提就是云机在跑 worker_server）。⚠ 残留不对称：push preset 在无节点时会静默
+    // 回落 pull（不响亮报错）——未在本轮改动，留档待议。
+    const push = trainingLoopSpec(cfg, { course: 'course-a', ppo: 'push', venv: VENV })
+    expect(flag(push, '--remote-transport')).toBeNull()
   })
 })
 

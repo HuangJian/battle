@@ -197,14 +197,29 @@ export async function stepHubServer(cfg: RlConfig, jobRoot: string): Promise<voi
  *  of each socket address"）→ 控制台「启动失败」。启动新隧道前，先杀掉并清账同槽位
  *  其它课程的存活隧道，保证「启动即就绪」。
  *
- *  返回被接管课程的清单（日志/测试断言用）；异槽位/死 pid/同课自身条目一律不动。 */
+ *  返回被接管课程的清单（日志/测试断言用）；异槽位 / 同课自身条目不动。
+ *
+ *  ⚠ 2026-09-17 事故修正：原本 `if (!pidAlive(ent.pid)) continue` —— **死 pid 直接跳过**，
+ *  作者意图是"死进程没什么可杀"，但**清账也被一起跳过了** ⇒ 陈旧条目从此永不清除
+ *  （实测：09-14 的 `cloudflared[x2-acbc]` 条目活到今天），并继续在**账本层**占住该槽的
+ *  名义所有权。端口一旦被后来的课程接手，它就变成"PID 已死、服务仍在应答"的**幽灵**：
+ *  看门狗每周期刷屏（8s 一条），且因 specPort 认不出 cloudflared 端口而修不了账。
+ *  ⇒ 死进程不需要 kill，但**账必须清**。 */
 export async function supersedeSlotTunnels(course: string, slot: number): Promise<string[]> {
   const struck: string[] = []
   const reg = loadRegistry()
   for (const [owner, ent] of Object.entries(reg.cloudflareds ?? {})) {
     if (owner === course) continue
     if ((ent.slot ?? 0) !== slot) continue
-    if (!pidAlive(ent.pid)) continue
+    if (!pidAlive(ent.pid)) {
+      warn(
+        `slot ${slot} 的陈旧隧道条目（课程 ${owner}，PID ${ent.pid} 已消失）——清账，` +
+          `为 ${course} 接管（进程早已不在，无需 kill）`,
+      )
+      clearAnyComponent('cloudflared', owner)
+      struck.push(owner)
+      continue
+    }
     warn(
       `slot ${slot} 的隧道由课程 ${owner} 占用（PID ${ent.pid}）——先停止旧隧道，为 ${course} 接管`,
     )
