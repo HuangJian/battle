@@ -115,6 +115,66 @@ export async function fetchEvalReplayJob(course = ''): Promise<EvalReplayJobView
   return (await r.json()) as EvalReplayJobView
 }
 
+// ────────────────────────── 任务包导出 / 产物导入 ──────────────────────────
+
+/** 任务包产出态（`GET /api/taskBundleInfo`）：面板靠它判断「能不能下载」。 */
+export interface TaskBundleInfo {
+  exists: boolean
+  name: string
+  bytes: number
+  mtimeMs: number
+  log: string
+}
+
+export async function fetchTaskBundleInfo(course: string): Promise<TaskBundleInfo> {
+  const r = await fetch(`/api/taskBundleInfo?course=${encodeURIComponent(course)}`)
+  if (!r.ok) throw new Error(`/api/taskBundleInfo HTTP ${r.status}`)
+  const d = (await r.json()) as Record<string, unknown>
+  return {
+    exists: d.exists === true,
+    name: typeof d.name === 'string' ? d.name : '',
+    bytes: typeof d.bytes === 'number' ? d.bytes : 0,
+    mtimeMs: typeof d.mtimeMs === 'number' ? d.mtimeMs : 0,
+    log: typeof d.log === 'string' ? d.log : '',
+  }
+}
+
+/** 任务包下载地址（浏览器直接导航即可，服务端带 `attachment` 文件名）。 */
+export function taskBundleDownloadUrl(course: string): string {
+  return `/api/taskBundle?course=${encodeURIComponent(course)}`
+}
+
+/** 训练产物上传（multipart；文件不走 JSON——几十 MB 的 base64 是纯浪费）。 */
+export async function uploadDeliverZip(
+  course: string,
+  file: File,
+): Promise<ActionResult & { evalStarted?: boolean }> {
+  try {
+    const form = new FormData()
+    form.append('file', file)
+    const r = await fetch(`/api/deliverUpload?course=${encodeURIComponent(course)}`, {
+      method: 'POST',
+      body: form,
+    })
+    let data: Record<string, unknown> = {}
+    try {
+      data = (await r.json()) as Record<string, unknown>
+    } catch {
+      /* non-json */
+    }
+    const message =
+      typeof data.message === 'string' ? data.message : r.ok ? '导入完成' : `HTTP ${r.status}`
+    return {
+      ok: r.ok && data.ok !== false,
+      message,
+      detail: Array.isArray(data.detail) ? (data.detail as string[]) : undefined,
+      evalStarted: data.evalStarted === true,
+    }
+  } catch (e) {
+    return { ok: false, message: `上传失败：${String(e)}` }
+  }
+}
+
 /** 导出 replay：**单局** .replay 拉取（Blob；写入选定目录或触发下载由调用方决定）。 */
 export async function fetchEvalReplayFile(course: string, file: string): Promise<Blob> {
   const params = new URLSearchParams({ file })

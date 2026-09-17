@@ -2408,3 +2408,43 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   `offline/<run_id>/` 落位 + 账本审计事件）、`remote/protocol.py`（`sanitize_run_id` + 契约常量）、
   `remote/run_loop.py`（逐轮/收尾钩子 + `--hub-url`/`--hub-token[-file]`/`BATTLE_HUB_TOKEN`）、
   `remote/worker.py`（kind=run 默认开启）。回归：`tests/test_offline_deliver.py`(16)。
+## §2026-09-17-goalnn-console-task-bundle-exchange（2026-09-17，控制台「导出任务包 / 导入产物即评估」；控制台不重造包格式）
+
+- **背景**：用户 2026-09-17 需求——dashboard 支持导出 `task-<课程>.zip`；支持导入训练产物
+  `deliver-<课程>.zip`，导入完成后**自动按课程配置跑 eval**。底层能力（`remote/bundle.py`
+  导出包、`remote/deliver_zip.py` 导入器）同日先落地，本条目只裁决**控制台这一侧**接法。
+- **备选与否决**：① 控制台自己拼包（否决——`--export-bundle` 已在 trainer 内，
+  重造 = 第二份真相，`bundle.py` 模块注释写明）；② 导入后另写一套评估命令（否决——
+  语料口径/双轨种子/账本格式会与 `evalA` 漂，读数无法与训练期对比）；③ 导出互斥键
+  在 HTTP 请求里 `add`/`delete`（否决——导出跑几分钟，等于没有锁，第二次点会起第二个
+  `run_rl` 抢同一门课的锁）；④ 上传体在控制台解包/校验（否决——zip 是人搬来的、
+  最不可信，三道门（zip-slip / 形状 / 课程对账）留在 python 一侧，控制台只挡文件名课程
+  与体积）。
+- **决定**：
+  1. **智能在 python 一侧，控制台只做三件事**：拼 argv（`--course/--ppo remote/--run-iters -1/
+     --export-bundle <abs>`）、起一次性 detach 进程（日志 `logs/<课>/export-bundle.log`，
+     **不注册组件**——进账本会被监督器当「该重启的组件」）、把产出文件交给浏览器
+     （`GET /api/taskBundle` 流式 `Bun.file` + Content-Disposition）。
+  2. **导入 = 上传（multipart，不走 JSON 动作层）+ `python -m remote.deliver_zip`（同步，
+     调用方需要它的结果）+ 接着起 `evalA`**。评估评**包里末轮**权重、用课程配置语料；
+     评估起不来**不算导入失败**（产物已落地可读，那是这一半的全部价值），响应里明说原因。
+  3. `evalA` 唯一启动点抽到 `eval-a-run.ts`：按钮与「导入后自动评估」共享命令**与互斥键
+     （`eval:A`）**——两处各写一份会出现「按钮说在跑、导入那边不知道」。
+  4. 跨语言常量（`DELIVER_IMPORT_JSON=` / `deliver-`）单列 `bundles/marks.ts`，测试直接读
+     python 源码对账：改一边忘另一边会红（写岔是**静默**的，控制台会把「导入失败」错报）。
+- **落地时抓到的两个缺陷**（均有回归）：① **导出互斥键**：键必须由**子进程退出**释放
+  （轮询 pid），在请求里删 = 没有锁；② **`--export-bundle` 被轮内 shard 门误杀**——导出
+  既不发 job 也不训练，`rollout_spec` 非空 + traj 有历史残留 shard 会命中「M3 上云轮必须
+  空 shard」⇒ 任何跑过一轮的课都导不出包（实测 c6-chip）。判定抽成纯函数
+  `_gate_round_shards`，例外**只**覆盖导出（`tests/test_export_shard_gate.py` 同时钉住
+  「关掉 exporting 两条门照旧生效」，防顺手删门）。
+- **边界（未做）**：① 真云端端到端一次（本机无节点）；② 导入是**同步**阻塞（几 MB 秒级，
+  几十 MB 会让控制台这段时间不响应轮询——可接受，量大再挪后台+状态位）；③ 导出期间刷新
+  页面会丢「生成中」态（只轮询产出文件）。
+- **落地**：`dashboard/src/server/bundles/{export,import,marks}.ts`（新）、
+  `server/run-python.ts`（新：一次性 python 的唯一入口）、`server/eval-a-run.ts`（新）、
+  `server/server.ts`（`POST /api/deliverUpload` + `GET /api/taskBundle[Info]`，全部落在
+  既有回环门控之后）、`web/app/panels/TaskBundlePanel.tsx`（新）+ `api-client.ts`、
+  `api/route.ts`（`exportTaskBundle`，`evalA` 改调共享启动器）；回归：
+  `dashboard/tests/server-api-task-bundle.test.ts`(17) +
+  `nn-training/tests/{test_deliver_zip,test_export_shard_gate}.py`。

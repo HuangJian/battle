@@ -500,6 +500,46 @@ def fatal_remote_http(e: BaseException) -> int:
     return code if code in FATAL_REMOTE_HTTP else 0
 
 
+def _gate_round_shards(
+    *,
+    local_shards: list,
+    rollout_spec: Any,
+    exporting: bool,
+    it: int,
+    it_dir: str,
+) -> list:
+    """走到远程 PPO 发布前时，**本轮该训的 shard 集**该是什么（纯函数；不合规则 raise）。
+
+    三条分支各有各的硬门（每一条都对应一类真事故）：
+
+    * **本机轮**（`rollout_spec` 空、非导出）：必须真有完整 shard，否则发出去的 job 在
+      云上以「payload 缺件」形式失败（错误落在假因上）——挡在发布前。
+    * **M3 上云轮**（`rollout_spec` 非空）：本轮 shard 集**必须为空**——非空说明本地
+      采样没关干净，云与本机会双份采集（data_fp 漂），拒绝发布。
+    * **全离线导出**（`exporting`）：**既不发 job 也不训练**，只是一个打包动作。轮内
+      一致性门在这里不适用：traj 目录里有没有历史残留 shard 与本包无关（那几轮不在
+      计划范围内），空 shard 也不需要拦。
+
+      最后这条是 2026-09-17 实测出来的：拿一个刚跑过一轮的真课（c6-chip）导包，
+      `rollout_spec` 非空 + 残留 shard 命中上一条门 ⇒ `--export-bundle` 直接
+      SystemExit、包产不出来——即「任何跑过一轮的课都导不出包」。
+    """
+    if exporting:
+        return []
+    if rollout_spec:
+        if local_shards:
+            raise SystemExit(
+                f"[run_rl] remote it{it}: rollout_src=node 但 traj 目录已有本地 shard "
+                "——本机采样没关（会双份采集），拒绝发布 iter job"
+            )
+        return []
+    if not local_shards:
+        raise SystemExit(
+            f"[run_rl] remote it{it}: 无完整 shard（traj {it_dir} 空）——无法发布 job"
+        )
+    return local_shards
+
+
 class TrainingSteps:
     """单轮结算与梯度步 mixin。"""
 
@@ -1137,17 +1177,19 @@ class TrainingSteps:
             Path(args.traj) / "remote-jobs"
         )
         # 本轮应训 shard 集（与 _serial_ppo load_episodes 装载口径一致）；
-        # M3 上云轮**必须为空**——非空说明本地采样没关干净（双份采集 + data_fp 漂）。
-        shard_dirs = [] if rollout_spec else iter_shard_dirs(args.traj, it, log=log)
-        if not shard_dirs and rollout_spec is None:
-            raise SystemExit(
-                f"[run_rl] remote it{it}: 无完整 shard（traj {it_dir} 空）——无法发布 job"
-            )
-        if rollout_spec and iter_shard_dirs(args.traj, it, log=lambda _m: None):
-            raise SystemExit(
-                f"[run_rl] remote it{it}: rollout_src=node 但 traj 目录已有本地 shard "
-                "——本机采样没关（会双份采集），拒绝发布 iter job"
-            )
+        # 三条分支的判定抽在 `_gate_round_shards`（纯函数，回归见 test_remote_ppo_gate_fields）。
+        local_shards = iter_shard_dirs(
+            args.traj,
+            it,
+            log=(lambda _m: None) if (rollout_spec or export_path is not None) else log,
+        )
+        shard_dirs = _gate_round_shards(
+            local_shards=local_shards,
+            rollout_spec=rollout_spec,
+            exporting=export_path is not None,
+            it=it,
+            it_dir=str(it_dir),
+        )
         # 课程快照（D13/D14）：课程文件全文 + course_fp = sha256(文件字节)
         course = getattr(args, "course_obj", None)
         if course is None:

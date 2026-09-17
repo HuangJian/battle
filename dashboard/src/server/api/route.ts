@@ -27,6 +27,8 @@ import {
   startLadder,
   stopLadder,
 } from '../eval-board'
+import { launchTaskBundleExport, taskBundleInfo } from '../bundles'
+import { launchEvalA } from '../eval-a-run'
 import { ALL_COMPONENTS } from './component-meta'
 import { loadConfigSafe } from './config'
 import { actionCtx } from './courses'
@@ -254,80 +256,28 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
       case 'evalA': {
         // 课程设计评估（A 层）：用该 iter 权重跑与训练每 eval_every 轮相同的干净评估，
         // 写 tmp/<course>/eval_log.jsonl（与 EvalBoard B 层 evalProbeRun 无关）。
+        // 唯一启动点在 server/eval-a-run.ts——「导入产物后自动评估」走的是同一个函数
+        // （共享互斥键，否则两处会各起一个 evalA 写同一份 eval_log）。
         const ckpt = bodyStr(body, 'ckpt')
         if (!ckpt) return errResp('缺少 ckpt（权重文件路径）', 400)
         const iterRaw = Number(body.iter)
         const iter = Number.isFinite(iterRaw) && iterRaw > 0 ? iterRaw : (iterFromCkpt(ckpt) ?? 0)
-        if (busy.has('eval:A')) return errResp('evalA 已在运行', 409)
-        busy.add('eval:A')
-        const resolved = (await import('../../core/venv')).resolveVenvPython()
-        // 优先 venv 自带入口（.venv\Scripts\python.exe 已含依赖）；uv 跳板解析出的
-        // 基础解释器须靠 PYTHONPATH 挂 site-packages，否则 pydantic 缺失。
-        const venvEntry =
-          process.platform === 'win32'
-            ? path.join(NN_TRAINING, '.venv', 'Scripts', 'python.exe')
-            : path.join(NN_TRAINING, '.venv', 'bin', 'python3')
-        const pyBin = existsSync(venvEntry) ? venvEntry : resolved.python
-        const sitePackages = resolved.sitePackages
-        const script = path.join(NN_TRAINING, 'rl', 'eval_a_once.py')
-        const logFile = path.join(REPO_ROOT, 'tmp', ctx.course, 'evalA.log')
-        try {
-          const { spawn } = await import('child_process')
-          mkdirSync(path.dirname(logFile), { recursive: true })
-          const out = openSync(logFile, 'a')
-          // uv venv 跳板解析出的是基础解释器——必须 PYTHONPATH 挂 site-packages，
-          // 否则 `import pydantic` 直接 ModuleNotFoundError（2026-09-12 实测）。
-          const env = { ...process.env } as Record<string, string>
-          if (sitePackages) {
-            const prev = env.PYTHONPATH || env.PYTHONHOME || ''
-            env.PYTHONPATH = prev ? `${sitePackages}${path.delimiter}${prev}` : sitePackages
-          }
-          const child = spawn(
-            pyBin,
-            [
-              script,
-              '--course',
-              ctx.course,
-              '--ckpt',
-              ckpt,
-              '--iter',
-              String(iter),
-              '--bun',
-              'bun',
-            ],
-            {
-              cwd: path.join(REPO_ROOT, 'nn-training'),
-              detached: true,
-              stdio: ['ignore', out, out],
-              windowsHide: true,
-              env,
-            },
-          )
-          child.on('exit', () => {
-            busy.delete('eval:A')
-            try {
-              closeSync(out)
-            } catch {
-              /* ignore */
-            }
-          })
-          child.on('error', () => {
-            busy.delete('eval:A')
-            try {
-              closeSync(out)
-            } catch {
-              /* ignore */
-            }
-          })
-          child.unref()
-          return okResp({
-            ok: true,
-            message: `evalA 已启动 it${iter}（课程干净评估 → eval_log；日志 tmp/${ctx.course}/evalA.log）`,
-          })
-        } catch (e) {
-          busy.delete('eval:A')
-          return errResp(e instanceof Error ? e.message : String(e), 500)
-        }
+        const r = launchEvalA(ctx.course, ckpt, iter)
+        if (!r.ok) return errResp(r.message, r.message.includes('已在运行') ? 409 : 500)
+        return okResp({ ok: true, message: r.message })
+      }
+      case 'exportTaskBundle': {
+        // 任务包导出（`task-<课程>.zip`）：把整段剩余交给云机。真正的导出在 python 一侧
+        // （run_rl --export-bundle）；这里只起进程 + 把产出文件信息回给面板。
+        if (!ctx.course) return errResp('缺少 course', 400)
+        // 互斥在 launchTaskBundleExport 里，靠**子进程退出**释放（导出是长任务）。
+        const r = launchTaskBundleExport(ctx.course)
+        if (!r.ok) return errResp(r.message, 409)
+        return okResp({
+          ok: true,
+          message: r.message,
+          detail: [`产物将落在 ${taskBundleInfo(ctx.course).path}`],
+        })
       }
       case 'evalReplays': {
         // 导出 replay：确定性重放所选 eval 局 → .replay（rl/eval_replays_once.py；

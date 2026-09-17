@@ -27,6 +27,7 @@ import {
   type TunnelLaunchOpts,
 } from './panels/TrainLaunchModal'
 import { BcPanel } from './panels/BcPanel'
+import { TaskBundlePanel } from './panels/TaskBundlePanel'
 import { WirePanel } from './panels/WirePanel'
 import { EvalSummary } from './panels/EvalSummary'
 import {
@@ -653,6 +654,10 @@ export function App({ initial }: AppProps) {
           onMore={() => setDrawerTab('nodes')}
           readOnly={readOnly}
         />
+      </PanelErrorBoundary>
+      {/* ── 任务包（导出 task-<课程>.zip / 导入 deliver-<课程>.zip 并评估）：两区通用 ── */}
+      <PanelErrorBoundary>
+        <TaskBundlePanel course={viewCourse} enabled={documentVisible} readOnly={readOnly} />
       </PanelErrorBoundary>
       {/* ── EvalBoard 摘要（RL 区）：行 = B 层 iter × 列 = rung×指标；完整看板独立成页 /eval。 ── */}
       {stateView?.isBc ? null : (

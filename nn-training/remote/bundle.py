@@ -231,11 +231,14 @@ run_id      : {index['run_id']}    计划区间 : it{index['it']} → it{index['
 # ------------------------------------------------------------------ 导入（云机侧）
 
 
-def _safe_extract(zf: zipfile.ZipFile, dest: Path) -> list[str]:
+def safe_extract_zip(zf: zipfile.ZipFile, dest: Path) -> list[str]:
     """解压到 `dest`，**拒绝任何越界成员**（zip-slip：绝对路径 / `..` / 盘符）。
 
     这个 zip 的来源是「人从 dataset / Drive / 聊天窗口搬来的文件」，是最典型的不可信输入；
     一个 `../../.ssh/authorized_keys` 成员就能在云机上写任意文件。
+
+    公开（不是 `_safe_extract`）：训练产物 zip（`deliver-*.zip`）的导入走同一道门
+    （`remote/deliver_zip.py`）——两份拷贝只会让其中一份先腐。
     """
     dest = dest.resolve()
     names: list[str] = []
@@ -281,7 +284,7 @@ def import_bundle(zip_path: str | Path, dest: str | Path) -> dict:
     root = Path(dest)
     root.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(zip_path) as zf:
-        names = _safe_extract(zf, root)
+        names = safe_extract_zip(zf, root)
     parts = idx.get("parts") or {}
     for name in (*DATA_PARTS, *OPTIONAL_PARTS):
         want = parts.get(name)
@@ -316,7 +319,7 @@ def import_bundle(zip_path: str | Path, dest: str | Path) -> dict:
         tree.mkdir(parents=True, exist_ok=True)
         try:
             with zipfile.ZipFile(ts_zip) as zf:
-                _safe_extract(zf, tree)
+                safe_extract_zip(zf, tree)
         except zipfile.BadZipFile as e:
             # 没有可用的运行时 = 跑不了一局：宁可现在响亮拒收，别等跑到 rollout 才炸。
             raise ProtocolError(

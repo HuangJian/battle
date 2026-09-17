@@ -4,6 +4,56 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §64 控制台两条腿：导出任务包 / 导入产物即评估（2026-09-17）
+
+**为什么记这一笔**：把 §61–§63 的离线能力**接到人手上**——之前「导出任务包 / 导回产物」
+只有命令行，而这条链的每一步（导出前要不要先停训练、包对不对得上课程、评估跑哪一轮）
+都是**容易做错且错了不报错**的地方。决策与否决见
+`DECISIONS.md §2026-09-17-goalnn-console-task-bundle-exchange`。
+
+```
+导出（课程 + 起点权重 + 代码快照 = 整段剩余）
+  面板「导出任务包」→ POST /api/exportTaskBundle（回环门控之后）
+    ├ 门① 训练在跑？（run_rl 锁的 PID 活着）→ 拒启，说明「包里的起点就是当前进度」
+    ├ 门② 没有 tmp/<课>/weights.json → 拒启（包必须有起点）
+    └ 起 `run_rl.py --course <课> --ppo remote --run-iters -1 --export-bundle <abs>`
+         （detach，日志 logs/<课>/export-bundle.log；**不注册组件**——它是动作不是组件）
+  面板按 2.5s 轮询产出文件 mtime（不猜进程）→ 出现即可「下载」（GET /api/taskBundle 流式）
+
+导入（跑完的产物 + 自动按课程配置评估）
+  面板选文件 → POST /api/deliverUpload（multipart，走 JSON 动作层之外）
+    ├ TS 侧两门：文件名课程须与当前课程一致、≤512MB
+    ├ 落 tmp/<课>/deliver-uploads/<ts>-<name>（留证，不覆盖历史）
+    ├ python -m remote.deliver_zip --zip … --dest tmp/<课>/deliver --course <课>
+    │    （三道门：zip-slip / 形状（拿错包要指明「这是任务包」）/ 课程对账；原子落地）
+    └ 接着起 evalA（共享启动器与互斥键 eval:A）评**末轮**权重 → 读数回填指标表
+```
+
+**怎么用**：面板「任务包（离线交出去 / 收回来）」；导出 → 下载 `task-<课程>.zip` → Kaggle/Colab
+上传跑完 → 把产物 zip 命名 `deliver-<课程>.zip` 选回去 → 自动评估。
+
+**实测（本机可验的部分全跑了）**：
+- 真导出一次（c6-chip，dashboard 的**同一 argv**）：`task-c6-chip.zip` **3.3 MB**，`it16 → it60`
+  45 轮，包内 `code.zip` 237 文件 / `ts_code.zip` 343 文件，逐件 sha 进 `task.json`。
+- 门禁：nn python gate **1187 passed**（新增 5+7）· dashboard typecheck + **485 passed / 0 fail**
+  + 三份 bundle ok · 根 `bun run check` **1853 pass / 0 fail**。
+
+**两个落地时抓到的真缺陷**（都有回归）：
+
+1. **「导出互斥」最初是假的**：键在 HTTP 请求里 `add` 又立刻 `delete`（等于没锁）——第二次
+   点击会起第二个 `run_rl` 去抢同一门课的锁。改成**子进程退出时释放**（轮询 pid；不用
+   `busySince` 那套 5 分钟 TTL——导出合法地会跑过 5 分钟，TTL 会在中途解锁）。
+2. **`--export-bundle` 被轮内 shard 门误杀**（**最贵的一个**）：导出既不发 job 也不训练，
+   但 `_remote_ppo` 里那条「M3 上云轮 shard 集必须为空（否则双份采集）」的门照旧生效——
+   拿任何**跑过一轮**的课导包（traj 下有历史残留 shard）都会 `SystemExit`，包产不出来。
+   即「控制台上这个按钮对真课全程不可用」。修法：判定抽成纯函数 `_gate_round_shards`，
+   `exporting` 时直接返回空集（`register=False` 是同一条思路：导出不参与发布语义），
+   回归 `tests/test_export_shard_gate.py` 同时钉住「关掉 exporting，两条门照旧生效」。
+
+**代理侧踩坑（与功能无关，但会再踩）**：python 一次性进程的 cwd **不是**你 `cd` 的目录
+（trainer 内部会切），**手工验证时必须给绝对路径**；相对路径带 `..` 的写入在沙箱下还可能
+被静默丢掉——第一次导出「日志说 4.1MB、盘上没有」就是我自己传了相对路径。
+
 ## §63 产物补传：中途能连上 hub 就自动恢复在线回传（2026-09-17）
 
 **为什么记这一笔**：这是全离线（§62）需求的后半句，也是**第一条「在线能力可选」的链路**

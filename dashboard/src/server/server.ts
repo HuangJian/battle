@@ -66,6 +66,7 @@ import {
   startSnapshotRefresher,
 } from './api'
 import { restartSpecFor } from './actions'
+import { handleDeliverUpload, taskBundleDownloadResponse, taskBundleInfo } from './bundles'
 import { runExitCheck } from './exit-watchdog'
 import { ensureBundle, type BundleTarget } from './build'
 import { renderConsolePage, renderEvalPage, renderLogPage } from '../web/render'
@@ -347,6 +348,33 @@ async function main(): Promise<void> {
               course: viewCourse || undefined,
             }),
             { headers: { 'Content-Type': 'text/html; charset=utf-8' } },
+          )
+        }
+        // ── 产物导入（multipart 上传 + 自动评估）：体积是 zip，不走 JSON 动作层 ──
+        if (req.method === 'POST' && url.pathname === '/api/deliverUpload') {
+          const resp = await handleDeliverUpload(req, viewCourse || '')
+          invalidateSlowSnapshot()
+          return resp
+        }
+        if (req.method === 'GET' && url.pathname === '/api/taskBundleInfo') {
+          const course = url.searchParams.get('course') || viewCourse || ''
+          if (!course) return json({ ok: false, message: '缺少 course' }, 400)
+          const info = taskBundleInfo(course)
+          return json({
+            ok: true,
+            exists: info.exists,
+            name: info.name,
+            bytes: info.bytes,
+            mtimeMs: info.mtimeMs,
+            log: path.relative(REPO_ROOT, info.log).replace(/\\/g, '/'),
+          })
+        }
+        // 任务包下载（`content-disposition: task-<课程>.zip`）
+        if (req.method === 'GET' && url.pathname === '/api/taskBundle') {
+          const course = url.searchParams.get('course') || viewCourse || ''
+          const resp = course ? taskBundleDownloadResponse(course) : null
+          return (
+            resp ?? json({ ok: false, message: '还没有导出过任务包（先点「导出任务包」）' }, 404)
           )
         }
         if (req.method === 'POST' && url.pathname.startsWith('/api/')) {
