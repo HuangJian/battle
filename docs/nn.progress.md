@@ -4,6 +4,54 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §56 hub-server 重启死锁收口：D9 只当「无效鉴权」的守门人 + 回环永不封禁 + 端口级实例锁（2026-09-17）
+
+**为什么记这一笔**：本笔含**训练基础设施架构变更**（D9 鉴权/闭锁语义、hub 启动串行化），
+按 §5 硬规则必须入账。事故现场：hub-server「自动崩溃后手动重启失败」，控制台只报「意外退出」。
+
+### 一、事故链（三层同族问题，一次收口）
+
+1. **封禁连坐**：旧 `_auth_ok` **先查 `is_blocked` 再验 token** ⇒ 一次误封（本机组件用陈旧 token
+   连打 5 次 `/ping`）把该来源 IP 的**全部**流量（console 健康检查、训练循环、worker 拉活）403
+   一小时；而封禁只住**进程内存**、只能靠重启清除。
+2. **回环当替罪羊**：cloudflared 回源把**隧道流量也全归成 127.0.0.1** ⇒ 回环上的失败里混着隧道
+   里的陌生来源，对回环封禁 = 整台机器的服务面连坐（用户口径：「本地 127.0.0.1 鉴权失败不要锁地址」）。
+3. **重启被自己的守卫挡死**：端口守卫（`_port_guard.ensure_port_free`）是「探测 → bind」的 TOCTOU，
+   且 Windows `SO_REUSEADDR` 允许双绑（后启动者静默变僵尸）；旧实例活着占着 8787 ⇒ 新实例被拒 ⇒
+   **必须重启才能解封、重启却被自己占的端口挡死**，只能人工杀进程。
+
+### 二、修复（四处）
+
+- **D9 改序**（`remote/hub_server.py`）：先验 token；**合法 token 永远放行**，封禁只拒无效鉴权尝试
+  （封禁期内的无效尝试 403，且不再计数/不延长）。
+- **回环豁免**（`remote/hub_server.py::_is_loopback`）：`127.0.0.0/8` / `::1` / `::ffff:127.0.0.1`
+  上的失败**不计数、不封禁**（`is_blocked` 防御性恒 False）；鉴权边界与 `AUTH FAIL` 审计行不变。
+- **原子实例锁**（新 `remote/_instance_lock.py`，`nn-training/.hub_server.<port>.lock`，按端口键控）：
+  拿锁 → 端口探测 → bind；陈旧锁按「持有者已死 / 命令行不含 `hub_server` 指纹（PID 复用）」接管，
+  身份读不到则 fail-closed 拒启。自带安全存活探测（Windows `GetExitCodeProcess`——**不复用**
+  `train/loop_util._pid_alive`，后者在 Windows 走 `os.kill(pid,0)`＝`TerminateProcess` 会杀持有者）。
+- **控制台侧**：启动前 `reclaimPort` 回收端口幸存者（`stack/hub.ts`）；「停止 trainer」释放本课
+  run_rl/run_bc 锁且**先核验进程身份**再停存活持有者（`launch/cli.ts::releaseTrainerLock`）。
+
+### 三、教训（可迁移）
+
+- **「活着但不健康」的进程是重启链路的头号敌人**：所有自我守卫（端口/单实例锁）都必须能区分
+  「真双开」与「上一代残骸」，否则守卫本身变成死锁的一环。判据顺序一律：**存活 → 身份核验 →
+  接管/拒启**，身份读不到就 fail-closed 且**响亮打印**（不静默共存）。
+- **惩罚性状态机只能惩罚「确定恶意」的那一类**：把合法流量与可疑流量放在同一个计数器里，
+  在共享来源 IP（回源/代理/NAT）下必然误伤整机；封禁的作用面必须比鉴权边界**更窄**，不能更宽。
+- **取证纪律**：401/403 永不静默（2026-09-16 已立），且审计行必须写「不计数/不封禁」这类**语义**
+  说明——否则下一次排障会把「回环不封禁」误读成「封禁失灵」。
+
+### 四、验收
+
+- `nn-training/tests/test_hub_auth_d9_order.py`（11 例）、`nn-training/tests/test_instance_lock.py`（9 例，
+  含真进程顺序双启被拒 / 同时三启恰好存活一个）、`dashboard/tests/trainer-lock-release.test.ts`（13 例）。
+- A/B 取证：detached worktree 对 HEAD 跑新测试 → 红（`assert 403 == 200`；日志里 127.0.0.1 被 BLOCKED）。
+- 门禁：`bash tools/githook/nn-python-gate.sh` ✓；`cd dashboard && bun run typecheck && bun run test` ✓；
+  `bun run check` ✓。决策记录：DECISIONS §2026-09-17-hub-restart-deadlock-hardening。
+
+
 ## §55 x1-rebirth 开课（纯从零臂）＋ 严格样本量配额机制落地（2026-09-17）
 
 **为什么记这一笔**：本笔含**训练架构变更**（采集配额的执行语义），按 §5 硬规则必须入账；

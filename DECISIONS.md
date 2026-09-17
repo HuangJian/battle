@@ -2034,4 +2034,34 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   torch」对照（排除 daemon/平台网络被杀）；E3 `ts_engine=userspace`（排除 kernel 尝试的副作用）；
   E4 对开卡 `sha12` 与 loop 日志核对 code.zip 新鲜度。
 
+## §2026-09-17-hub-restart-deadlock-hardening（2026-09-17，hub-server 重启死锁：D9 改序 + 回环永不封禁 + 原子实例锁 + 停止 trainer 即释放锁）
+
+- **背景**：hub-server「崩溃后手动重启失败」，控制台只报「意外退出」，日志为 `端口 127.0.0.1:8787
+  已被占用——拒绝启动（禁止双监听）`。根因链与现场日志、备选否决的完整版见 `docs/nn.progress.md §56`。
+- **根因（三层同族）**：① 旧 `_auth_ok` **先查封禁再验 token** ⇒ 本机组件用陈旧 token 连打 5 次就被
+  封一小时，且**连正确 token 的健康检查/训练循环/worker 拉活一起 403**；② cloudflared 回源把隧道
+  流量也归成 127.0.0.1，回环被封 = 整机服务面连坐；③ 封禁只住**进程内存**、只能重启清除，而旧实例
+  还活着占着端口 ⇒ **重启被自己占的端口挡死** = 只能人工杀进程。另两处同族障碍：双监听守卫的
+  「探测→bind」TOCTOU（Windows 还能双绑成僵尸）、账本 pid ≠ 锁持有者时「停止→启动」被 trainer 锁卡死。
+- **决定（四点）**：① **D9 改序**（`remote/hub_server.py::HubHandler._auth_ok`）——先验 token，
+  **合法 token 永远放行**，封禁只拒无效鉴权尝试（封禁期的无效尝试 403、不计数、不延长）；
+  ② **回环永不封禁**（`_is_loopback`）——`127.0.0.0/8` / `::1` / `::ffff:127.0.0.1` 的失败**不计数、
+  不封禁**（鉴权边界与 401 审计行不变；用户口径「本地 127.0.0.1 鉴权失败不要锁地址」）；
+  ③ **hub-server 原子实例锁**（新 `remote/_instance_lock.py`，`nn-training/.hub_server.<port>.lock`，
+  按端口键控）——拿锁 → 端口探测 → bind 三道闸，陈旧锁按「持有者已死 / 命令行缺 `hub_server` 指纹」
+  接管，身份读不到即 fail-closed；④ **「停止 trainer」即释放**（`launch/cli.ts::releaseTrainerLock(s)` +
+  `server/actions/stop.ts`）——释放本课 run_rl/run_bc 锁，**先核验进程身份**才停存活持有者，身份不符只告警。
+- **被否决备选**：调大阈值/时长（本质是封禁**作用面**，不是次数）；回环也计数（回源流量冒充回环来源，
+  惩罚无据）；加解封管理端点（真解药本就无需人工介入）；只靠端口守卫（TOCTOU + Windows 双绑）；
+  按「锁里 PID 活着」直接杀（PID 复用误杀无辜）。
+- **违反后果**：把封禁检查挪回 token 校验之前 = 整机自锁；让回环重新计数/封禁 = 隧道流量与本机组件
+  互相连坐；停止 trainer 只杀账本 pid = 「停止→启动」死锁回归。
+- **回归测试**：`nn-training/tests/test_hub_auth_d9_order.py`（11）、`nn-training/tests/test_instance_lock.py`
+  （9，含真进程同时三启恰好存活一个）、`dashboard/tests/trainer-lock-release.test.ts`（13）；A/B 取证 =
+  detached worktree 跑新测试对 HEAD 红（`assert 403 == 200`）。
+- **配套（同日同族）**：控制台启动前按端口回收幸存占用者（`stack/hub.ts::reclaimPort`）。
+- **已知未修（备查，勿顺手改）**：`train/loop_util.py::_pid_alive` 在 Windows 走 `os.kill(pid, 0)`
+  ＝ `TerminateProcess`（可能杀掉锁持有者；`run_rl` 注释早已据此不复用它）——train_loop 陈旧锁判定
+  在 Windows 上有此隐患，本次未动。
+
 

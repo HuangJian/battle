@@ -24,7 +24,7 @@ import {
   saveComponent,
   clearAnyComponent,
 } from '../core/registry'
-import { launchSpec, spawnBg } from '../core/proc'
+import { launchSpec, portOwnerPids, spawnBg } from '../core/proc'
 import { writeRemoteHubUrl } from '../core/config'
 import { fail, info, log, ok, warn } from '../core/log'
 import { monitorTouch } from '../core/reload-touch'
@@ -72,6 +72,53 @@ export async function hubServerHealthy(cfg: RlConfig, course = ''): Promise<bool
   return httpOk(`http://127.0.0.1:${port}/ping`, cfg.rl.remote_token)
 }
 
+// ────────────────────────── 端口回收（2026-09-17 事故修复） ──────────────────────────
+
+/** reclaimPort 的可注入依赖（测试用；默认走 OS 进程表 / 真实 kill / 真实探测）。 */
+export interface ReclaimPortIO {
+  ownerPids?: (port: number) => number[]
+  kill?: (pid: number) => Promise<unknown>
+  listening?: (port: number) => Promise<boolean>
+}
+
+/** 杀掉端口上的幸存占用者，等端口真正释放；返回被回收的 PID 清单。
+ *
+ *  **为什么必须有这一层**（2026-09-17 事故：hub-server 重启死锁，用户「手动重启失败」）：
+ *  组件健康检查失败 ⇒ 控制台「启动」spawn 新实例，但**旧实例还活着占着端口**
+ *  （孤儿 / 登记丢失 / 控制台重启竞态留下的僵尸）⇒ python 侧的双监听守卫
+ *  （`remote/_port_guard.ensure_port_free`）拒绝启动 ⇒ 新进程秒退 ⇒ 控制台报
+ *  「启动即退出」。而那个幸存者可能正处于**只有重启才能清除**的状态——hub-server 的
+ *  D9 闭锁（127.0.0.1 连续 5 次鉴权失败封 3600s，封禁只住进程内存）就是典型：
+ *  重启是唯一的解药，而重启恰好被它自己占着的端口挡死 = 死锁，只能手动杀进程。
+ *
+ *  **调用契约：只在健康检查已判定组件不可用时调用**（`stepSelfNode`/`stepHubServer`
+ *  都在这之后）。健康且可用的组件在上层就被短路复用了，端口绝不会被回收。
+ *  与 cloudflared 的 `supersedeSlotTunnels` 同族：同一资源（同槽 = 同端口）只允许
+ *  一个活实例，换代时先清口再起。
+ */
+export async function reclaimPort(port: number, io: ReclaimPortIO = {}): Promise<number[]> {
+  // 永不回收 console 自己（它可能正好是这个端口上的某个客户端）。
+  // 清单 = 「决定回收」的占用者（不因单次 kill 抛错就漏记——已死/权限不足同样要
+  // 计入，且必须等端口真正释放）。
+  const struck = (io.ownerPids ?? portOwnerPids)(port).filter((pid) => pid !== process.pid)
+  for (const pid of struck) {
+    warn(
+      `端口 ${port} 被幸存进程 (PID ${pid}) 占用——先回收再启动` +
+        '（否则新实例会被双监听守卫拒绝，控制台只会看到「启动即退出」）',
+    )
+    try {
+      await (io.kill ?? killPid)(pid)
+    } catch {
+      /* 已死/权限不足：交给下面的释放探测判定 */
+    }
+  }
+  if (struck.length > 0) {
+    // 端口释放以探测为准，不做固定等待。
+    await waitUntil(async () => !(await (io.listening ?? portListen)(port)), 5000, 200)
+  }
+  return struck
+}
+
 // ────────────────────────── 组件步骤 ──────────────────────────
 
 /** self-node（sampler-agent）步骤。 */
@@ -82,6 +129,9 @@ export async function stepSelfNode(cfg: RlConfig): Promise<void> {
     return
   }
   log('启动 self-node...')
+  // 端口回收（必须在 spawn 前，契约见 reclaimPort）：健康检查已失败 ⇒ 端口上的
+  // 幸存者不可用，先清口再起，否则新实例撞 EADDRINUSE 秒退。
+  await reclaimPort(cfg.rl.agent_port)
   const spec = selfNodeSpec(cfg)
   const r = launchSpec(spec)
   saveComponent('selfNode', { pid: r.pid, entry: SELF_NODE_ENTRY })
@@ -109,6 +159,11 @@ export async function stepHubServer(cfg: RlConfig, jobRoot: string): Promise<voi
     return
   }
   mkdirSync(jobRoot, { recursive: true })
+  // 端口回收（必须在 spawn 前，2026-09-17 事故）：健康检查已失败 ⇒ 端口上的幸存者
+  // （孤儿 / 登记丢失 / 处于 D9 内存封禁态）不可用，而 python 侧的双监听守卫
+  // （remote/_port_guard.ensure_port_free）会拒绝新实例——不回收就是重启被自己的
+  // 守卫挡死：新进程秒退，控制台报「启动即退出」，只能手动杀进程。
+  await reclaimPort(port)
   log('启动 hub-server...')
   const spec = hubServerSpec(cfg, course)
   const r = launchSpec(spec)
