@@ -88,6 +88,10 @@ export interface ModeView {
   stream: number
   doubleBuffer: number
   precollectEarly: number
+  /** 当前生效的隧道协议/边缘 IP（M1；缺省 http2/4）——UI 显示「当前生效值」。
+   *  可选（additive）：旧视图/夹具不带此键时 UI 回退缺省。 */
+  cfProtocol?: string
+  cfEdgeIp?: string
 }
 
 export interface MetricsView {

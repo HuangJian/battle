@@ -30,8 +30,10 @@ import path from 'path'
 import { DASHBOARD_ROOT, REPO_ROOT } from '../src/core/paths'
 import {
   HUB_SERVER_ENTRY,
+  cfTunnelArgs,
   cloudflaredSpec,
   hubServerSpec,
+  resolveCfTunnel,
   trainingLoopSpec,
   workerServeSpec,
 } from '../src/stack/specs'
@@ -492,6 +494,52 @@ describe('P3 每课一隧道', () => {
     expect(spec.course).toBe('course-b')
     expect(spec.cmd.join(' ')).toContain(`127.0.0.1:${metrics}`)
     expect(spec.cmd.join(' ')).toContain(`localhost:${hub}`)
+  })
+
+  it('M1 cfTunnelArgs：缺省 http2/4；per-course 覆盖 > rl.*；auto = 不传旗标', () => {
+    const cfg = dualCourseCfg()
+    // 未配 → 缺省 http2 / 4
+    expect(cfTunnelArgs(cfg, 'course-a')).toEqual(['--protocol', 'http2', '--edge-ip-version', '4'])
+    // rl.* 全局生效
+    cfg.rl.cf_protocol = 'quic'
+    cfg.rl.cf_edge_ip = '6'
+    expect(cfTunnelArgs(cfg, 'course-a')).toEqual(['--protocol', 'quic', '--edge-ip-version', '6'])
+    // per-course 覆盖优先于 rl.*
+    cfg.courses!['course-b'] = {
+      ...cfg.courses!['course-b'],
+      cf_protocol: 'http2',
+      cf_edge_ip: '4',
+    }
+    expect(cfTunnelArgs(cfg, 'course-b')).toEqual(['--protocol', 'http2', '--edge-ip-version', '4'])
+    // auto = 逐字节回到旧行为（不传任何旗标）
+    cfg.rl.cf_protocol = 'auto'
+    cfg.rl.cf_edge_ip = 'auto'
+    expect(cfTunnelArgs(cfg, 'course-a')).toEqual([])
+    expect(resolveCfTunnel(cfg, 'course-a')).toEqual({ protocol: 'auto', edgeIp: 'auto' })
+    expect(resolveCfTunnel(cfg, 'course-b')).toEqual({ protocol: 'http2', edgeIp: '4' })
+  })
+
+  it('M1 cloudflaredSpec 带隧道旗标（与 hub.ts 的 spawn 两半同步）', () => {
+    const joined = cloudflaredSpec(dualCourseCfg(), {
+      pid: 1,
+      course: 'course-a',
+      slot: 0,
+    }).cmd.join(' ')
+    expect(joined).toContain('--protocol http2')
+    expect(joined).toContain('--edge-ip-version 4')
+  })
+
+  it('M1 hub.ts：隧道 spawn 用共用 cfTunnelArgs，且复用前做配置变更检测', () => {
+    const src = readFileSync(path.join(DASHBOARD_ROOT, 'src', 'stack', 'hub.ts'), 'utf8').replace(
+      /\s+/g,
+      ' ',
+    )
+    // 两半同步：spawn 必须走共用 helper，不得再自拼 --protocol
+    expect(src).toContain('...cfTunnelArgs(cfg, course)')
+    // 变更检测（防「改了选项不生效」的假成功）：登记值与当前配置不一致即杀旧起新
+    expect(src).toContain('resolveCfTunnel(cfg, course)')
+    expect(src).toContain('prevProtocol !== wantTunnel.protocol')
+    expect(src).toContain('cfProtocol: wantTunnel.protocol')
   })
 
   it('trainingLoopSpec 注入本课 REMOTE_PUSH_NODE（缺省不注，默认行为零变化）', () => {

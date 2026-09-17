@@ -3,7 +3,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync
 import path from 'path'
 import { loadConfig } from '../../core/config'
 import { NN_TRAINING, REPO_ROOT } from '../../core/paths'
-import type { Component } from '../../core/types'
+import type { CfEdgeIp, CfProtocol, Component } from '../../core/types'
 import {
   ActionError,
   type ActionResult,
@@ -91,12 +91,23 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
       case 'preset': {
         const mode = bodyStr(body, 'mode')
         if (!['pull', 'push', 'local'].includes(mode)) return errResp(`未知预设: ${mode}`, 400)
+        // M1：隧道选项白名单（与 mode 同写法）——非法值 400，不静默落库。
+        const cfProtocol = bodyStr(body, 'cfProtocol')
+        const cfEdgeIp = bodyStr(body, 'cfEdgeIp')
+        if (cfProtocol && !['http2', 'quic', 'auto'].includes(cfProtocol)) {
+          return errResp(`未知隧道协议: ${cfProtocol}（只接受 http2|quic|auto）`, 400)
+        }
+        if (cfEdgeIp && !['4', '6', 'auto'].includes(cfEdgeIp)) {
+          return errResp(`未知边缘 IP 版本: ${cfEdgeIp}（只接受 4|6|auto）`, 400)
+        }
         return okResp(
           await startPreset(mode as 'pull' | 'push' | 'local', ctx.course, {
             pushEndpoint: bodyStr(body, 'pushEndpoint'),
             pushAuthKey: bodyStr(body, 'pushAuthKey'),
             // T7：布尔用严格 true（缺省/其它 = 关，不自动降级）。
             remoteDegrade: body.remoteDegrade === true,
+            cfProtocol: (cfProtocol || undefined) as CfProtocol | undefined,
+            cfEdgeIp: (cfEdgeIp || undefined) as CfEdgeIp | undefined,
           }),
         )
       }

@@ -5,7 +5,7 @@
  *  变成 hubServer → localWorker → trainingLoop(--ppo remote + 本机 hub)。 */
 import { loadConfig, saveConfig, validateCourseArg, writeRemoteHubUrl } from '../../core/config'
 import { configurePushEndpoint } from '../../stack/push-config'
-import type { Component } from '../../core/types'
+import type { CfEdgeIp, CfProtocol, Component } from '../../core/types'
 import { tailscaleIp } from '../../core/net'
 import { slotPort } from '../../core/slots'
 import { rlConfigSmoke } from '../../stack/smoke'
@@ -24,6 +24,9 @@ export interface PresetOpts {
   pushAuthKey?: string
   /** T7：远端连败是否 opt-in 降级本机 PPO（默认 false）。 */
   remoteDegrade?: boolean
+  /** M1：隧道协议/边缘 IP（随启动回写 rl-config.rl.* + console-state 生效值）。 */
+  cfProtocol?: CfProtocol
+  cfEdgeIp?: CfEdgeIp
 }
 
 /** 按 trainer 模式顺序拉起组件组合：
@@ -46,6 +49,16 @@ export async function startPreset(
     if (!course) throw new ActionError('需要 course（先在顶部设置课程）')
     validateCourseArg(course)
     saveConsoleState({ trainerPpo: mode, course })
+    // M1：隧道选项随启动回写（rl-config 的 rl.* 键 + console-state 生效值）——
+    // 留空 = 不动（沿用 rl-config 现值/缺省 http2/4）。
+    if (opts.cfProtocol || opts.cfEdgeIp) {
+      const cfgT = loadConfig()
+      cfgT.rl = cfgT.rl || ({} as (typeof cfgT)['rl'])
+      if (opts.cfProtocol) cfgT.rl.cf_protocol = opts.cfProtocol
+      if (opts.cfEdgeIp) cfgT.rl.cf_edge_ip = opts.cfEdgeIp
+      saveConfig(cfgT)
+      saveConsoleState({ cfProtocol: opts.cfProtocol, cfEdgeIp: opts.cfEdgeIp })
+    }
     let pushNote = ''
     let viaLocalWorker = false
     if (mode === 'push') {

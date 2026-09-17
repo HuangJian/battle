@@ -24,7 +24,20 @@ export interface CourseConf {
   local_slots?: number
   /** push 节点（worker_server 隧道）URL；多课同值 = N:1 共享（§3.8）。 */
   push_node_url?: string
+  /** 本课隧道协议覆盖（M1；缺省 = 用 rl.cf_protocol）。 */
+  cf_protocol?: CfProtocol
+  /** 本课隧道边缘 IP 版本覆盖（M1；缺省 = 用 rl.cf_edge_ip）。 */
+  cf_edge_ip?: CfEdgeIp
 }
+
+/** cloudflared 隧道协议（M1，plan/remote-wire-remediation §3）：
+ *  `http2` = TCP/443（**缺省，推荐**）——国内 ISP 对 QUIC(UDP/443) 做 QoS 降质是
+ *  实测病灶（重启复位、数轮内再劣化的状态化限速签名）；
+ *  `quic` = UDP/443（cloudflared 自身缺省）；
+ *  `auto` = 不传 `--protocol`，逐字节回到旧行为（A/B 的对照组）。 */
+export type CfProtocol = 'http2' | 'quic' | 'auto'
+/** cloudflared 边缘 IP 版本（M1）：`4`（缺省）/ `6` / `auto`（不传旗标）。 */
+export type CfEdgeIp = '4' | '6' | 'auto'
 
 /** rl-config.json（本工具链只消费 nodes + rl + courses 块，其余键原样保留）。 */
 export interface RlConfig {
@@ -39,6 +52,9 @@ export interface RlConfig {
     remote_hubs?: Record<string, string>
     torch_threads?: number
     local_slots?: number
+    /** 隧道协议（M1；缺省 http2）与边缘 IP 版本（缺省 4）——`auto` = 旧行为。 */
+    cf_protocol?: CfProtocol
+    cf_edge_ip?: CfEdgeIp
     [key: string]: unknown
   }
   /** per-course 槽位/配额（唯一事实来源；console-state 不存这些）。 */
@@ -74,6 +90,9 @@ export interface RegistryEntry {
   remoteDegrade?: boolean
   /** 启动模式：控制台 trainer 编排（pull/push/local）或 'remote'（冒烟预演）。 */
   mode?: 'pull' | 'push' | 'local' | 'remote'
+  /** 本进程启动时实际生效的隧道选项（M1；复用判定用它检测「改了选项没生效」）。 */
+  cfProtocol?: CfProtocol
+  cfEdgeIp?: CfEdgeIp
   /** 非正常退出记录（§380 exit-watchdog 写入；UI/API 展示退出原因）。 */
   error?: string
   exitAt?: string

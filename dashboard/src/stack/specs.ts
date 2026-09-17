@@ -15,7 +15,7 @@ import { agentSentinels, pySentinels } from '../core/sentinels'
 import { slotPort } from '../core/slots'
 import { resolveVenvPython } from '../core/venv'
 import { COMPONENT_KILL_TREE } from '../core/types'
-import type { ProcSpec, RegistryEntry, RlConfig } from '../core/types'
+import type { CfEdgeIp, CfProtocol, ProcSpec, RegistryEntry, RlConfig } from '../core/types'
 
 /** 课程日志目录（per-course；无课程走 `nocourse`——与旧单课路径同构）。 */
 export function courseLogDir(course: string): string {
@@ -96,6 +96,29 @@ export function hubServerSpec(cfg: RlConfig, course: string): ProcSpec {
 
 // ────────────────────────── cloudflared ──────────────────────────
 
+/** 隧道选项解析（M1，plan/remote-wire-remediation §3.3）：per-course 覆盖 >
+ *  rl.* > 缺省（http2 / 4）。缺省刻意选 http2/4——国内 ISP 对 QUIC(UDP/443) 的
+ *  QoS 降质是实测病灶；`auto` = 不传旗标，逐字节回到旧行为。 */
+export function resolveCfTunnel(
+  cfg: RlConfig,
+  course = '',
+): { protocol: CfProtocol; edgeIp: CfEdgeIp } {
+  const cc = course ? cfg.courses?.[course] : undefined
+  const protocol = (cc?.cf_protocol ?? cfg.rl.cf_protocol ?? 'http2') as CfProtocol
+  const edgeIp = (cc?.cf_edge_ip ?? cfg.rl.cf_edge_ip ?? '4') as CfEdgeIp
+  return { protocol, edgeIp }
+}
+
+/** cloudflared 隧道旗标（唯一来源）——cloudflaredSpec 与 hub.ts 的 spawn 共用，
+ *  杜绝「两处 spawn 漂移」（仓库的「两半同步」约定）。`auto` 不传对应旗标。 */
+export function cfTunnelArgs(cfg: RlConfig, course = ''): string[] {
+  const { protocol, edgeIp } = resolveCfTunnel(cfg, course)
+  return [
+    ...(protocol === 'auto' ? [] : ['--protocol', protocol]),
+    ...(edgeIp === 'auto' ? [] : ['--edge-ip-version', edgeIp]),
+  ]
+}
+
 export function cloudflaredSpec(cfg: RlConfig, entry?: RegistryEntry): ProcSpec {
   const cfBin = resolveCloudflaredBin()
   const slot = entry?.slot ?? 0
@@ -115,6 +138,8 @@ export function cloudflaredSpec(cfg: RlConfig, entry?: RegistryEntry): ProcSpec 
       `127.0.0.1:${metricsPort}`,
       '--logfile',
       cfLog,
+      // M1：隧道协议/边缘 IP（缺省 http2/4；auto = 不传旗标回到旧行为）。
+      ...cfTunnelArgs(cfg, course),
     ],
     log: cfLog,
     // edge 连接注册以本地 metrics /ready 为准（不依赖出网；hub→CF 劣化不判死）

@@ -24,7 +24,7 @@ export interface TrainLaunchModalProps {
   onAction: (act: string, body: Record<string, unknown>) => void
   onLaunch: (
     mode: 'pull' | 'push' | 'local',
-    opts?: Partial<PushCredentials> & { remoteDegrade?: boolean },
+    opts?: Partial<PushCredentials> & TunnelLaunchOpts & { remoteDegrade?: boolean },
   ) => void
   /** 局域网只读视图：行为开关/预演/启动全部禁用（兜底——启动入口可点，弹窗内禁用以防误操作）。 */
   readOnly?: boolean
@@ -33,6 +33,13 @@ export interface TrainLaunchModalProps {
 const TC_PUSH_ENDPOINT = 'tc.pushEndpoint'
 const TC_PUSH_AUTH = 'tc.pushAuthKey'
 const TC_REMOTE_DEGRADE = 'tc.remoteDegrade'
+const TC_CF_PROTOCOL = 'tc.cfProtocol'
+const TC_CF_EDGE_IP = 'tc.cfEdgeIp'
+
+export interface TunnelLaunchOpts {
+  cfProtocol: 'http2' | 'quic' | 'auto'
+  cfEdgeIp: '4' | '6' | 'auto'
+}
 
 function readLocal(key: string): string {
   try {
@@ -48,6 +55,19 @@ function writeLocal(key: string, v: string): void {
   } catch {
     /* ignore */
   }
+}
+
+/** 隧道选项初值：localStorage（上次选择）→ 服务端当前生效值 → 缺省（M1）。 */
+function readTunnelSel<T extends string>(
+  key: string,
+  fromServer: string | undefined,
+  allowed: readonly T[],
+  fallback: T,
+): T {
+  const local = readLocal(key)
+  if ((allowed as readonly string[]).includes(local)) return local as T
+  if (fromServer && (allowed as readonly string[]).includes(fromServer)) return fromServer as T
+  return fallback
 }
 
 /** 上次启动记住的 trainer 模式；无/非法则回落服务端 modes.trainerPpo。 */
@@ -77,6 +97,13 @@ export function TrainLaunchModal({
   const [pushEndpoint, setPushEndpoint] = useState(() => readLocal(TC_PUSH_ENDPOINT))
   const [pushAuthKey, setPushAuthKey] = useState(() => readLocal(TC_PUSH_AUTH))
   const [pushErr, setPushErr] = useState('')
+  // M1：隧道协议/边缘 IP。选中值优先 localStorage（上次选择），否则服务端当前生效值。
+  const [cfProtocol, setCfProtocol] = useState<'http2' | 'quic' | 'auto'>(() =>
+    readTunnelSel(TC_CF_PROTOCOL, modes.cfProtocol, ['http2', 'quic', 'auto'] as const, 'http2'),
+  )
+  const [cfEdgeIp, setCfEdgeIp] = useState<'4' | '6' | 'auto'>(() =>
+    readTunnelSel(TC_CF_EDGE_IP, modes.cfEdgeIp, ['4', '6', 'auto'] as const, '4'),
+  )
   // T7：远端连败是否 opt-in 降级本机进程内 PPO。默认关（连败 3 次 ABORT 停腿）。
   // 历史默认 3 会静默切到慢速本机，且曾撞上 None backend。
   const [remoteDegrade, setRemoteDegrade] = useState(() => {
@@ -151,8 +178,11 @@ export function TrainLaunchModal({
     // 启动即记住本次模式：下次打开弹窗默认继续用它（与服务端 console-state 双保险）。
     writeLocal(TC_TRAIN_MODE, mode)
     writeLocal(TC_REMOTE_DEGRADE, remoteDegrade ? '1' : '0')
+    writeLocal(TC_CF_PROTOCOL, cfProtocol)
+    writeLocal(TC_CF_EDGE_IP, cfEdgeIp)
+    const tunnel: TunnelLaunchOpts = { cfProtocol, cfEdgeIp }
     if (mode !== 'push') {
-      onLaunch(mode, { remoteDegrade })
+      onLaunch(mode, { remoteDegrade, ...tunnel })
       return
     }
     const endpoint = pushEndpoint.trim()
@@ -168,7 +198,7 @@ export function TrainLaunchModal({
       writeLocal(TC_PUSH_ENDPOINT, endpoint)
       writeLocal(TC_PUSH_AUTH, authKey)
     }
-    onLaunch(mode, { endpoint, authKey, remoteDegrade })
+    onLaunch(mode, { endpoint, authKey, remoteDegrade, ...tunnel })
   }
 
   if (!open) return null
@@ -247,6 +277,41 @@ export function TrainLaunchModal({
             )}
           </div>
         ) : null}
+        <div className="tc-line">
+          <span className="tc-muted tc-small" style={{ minWidth: 90 }}>
+            隧道
+          </span>
+          <SegmentedControl<'http2' | 'quic' | 'auto'>
+            value={cfProtocol}
+            ariaLabel="隧道协议"
+            options={[
+              { value: 'http2', label: 'http2' },
+              { value: 'quic', label: 'quic' },
+              { value: 'auto', label: 'auto' },
+            ]}
+            onChange={setCfProtocol}
+          />
+          <span className="tc-muted tc-small">边缘 IP</span>
+          <SegmentedControl<'4' | '6' | 'auto'>
+            value={cfEdgeIp}
+            ariaLabel="边缘 IP 版本"
+            options={[
+              { value: '4', label: '4' },
+              { value: '6', label: '6' },
+              { value: 'auto', label: 'auto' },
+            ]}
+            onChange={setCfEdgeIp}
+          />
+        </div>
+        <p className="tc-muted tc-small" style={{ marginTop: -4 }}>
+          http2 = TCP/443（默认，绕开 ISP 对 QUIC 的 QoS 降质）；auto = 不传旗标（旧行为）。
+          改动即时体现在下一次启动的 cloudflared 命令行。当前生效（rl-config）：
+          <b>
+            {' '}
+            {modes.cfProtocol ?? 'http2'}/{modes.cfEdgeIp ?? '4'}
+          </b>
+          。
+        </p>
         <div className="tc-line tc-toggle-group" ref={togglesRef}>
           <span className="tc-muted tc-small">行为开关</span>
           <Toggle

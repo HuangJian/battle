@@ -46,6 +46,9 @@ describe('app.tsx → TrainLaunchModal push 凭据透传', () => {
     expect(src).toContain("if (mode === 'push' && push)")
     expect(src).toContain('body.pushEndpoint = push.endpoint')
     expect(src).toContain('body.pushAuthKey = push.authKey')
+    // M1：隧道选项也进 body（所有模式；缺省不传 = 沿用现值）。
+    expect(src).toContain('body.cfProtocol = push.cfProtocol')
+    expect(src).toContain('body.cfEdgeIp = push.cfEdgeIp')
   })
 
   it('弹窗侧确实产出凭据对象（接线两端的契约一致）', () => {
@@ -54,10 +57,15 @@ describe('app.tsx → TrainLaunchModal push 凭据透传', () => {
       'utf8',
     ).replace(/\s+/g, ' ')
     // 弹窗在 push 模式下必须带第二参数；只带 mode 就是另一端漏传。
-    // T7 起还带 remoteDegrade（opt-in 降级本机）。
-    expect(modal).toMatch(/onLaunch\(mode,\s*\{\s*endpoint,\s*authKey,\s*remoteDegrade\s*\}\)/)
+    // T7 起还带 remoteDegrade（opt-in 降级本机），M1 起带隧道选项。
+    expect(modal).toMatch(
+      /onLaunch\(mode,\s*\{\s*endpoint,\s*authKey,\s*remoteDegrade,\s*\.\.\.tunnel\s*\}\)/,
+    )
     expect(modal).toContain('PushCredentials')
-    // 非 push 路径也要透传 remoteDegrade（否则本地/pull 预设丢开关）。
-    expect(modal).toMatch(/onLaunch\(mode,\s*\{\s*remoteDegrade\s*\}\)/)
+    // 非 push 路径也要透传 remoteDegrade + tunnel（否则本地/pull 预设丢开关）。
+    expect(modal).toMatch(/onLaunch\(mode,\s*\{\s*remoteDegrade,\s*\.\.\.tunnel\s*\}\)/)
+    // M1：隧道选项确实进 POST body（下游 route.ts/preset.ts 才读得到）。
+    expect(modal).toContain('cfProtocol')
+    expect(modal).toContain('cfEdgeIp')
   })
 })

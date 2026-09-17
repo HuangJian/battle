@@ -4,6 +4,7 @@ import path from 'path'
 import { REPO_ROOT } from '../../core/paths'
 import type { ConsoleStateView, MetricsView } from '../../web/view'
 import { loadConsoleState } from '../actions'
+import { resolveCfTunnel } from '../../stack/specs'
 import { readIterMetrics, readPairedReferee } from '../iters'
 import { loadConfigSafe } from './config'
 import { discoverCourses, effectiveCourse } from './courses'
@@ -62,6 +63,10 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
       stream: Number(cfg.rl.stream ?? 0),
       doubleBuffer: Number(cfg.rl.double_buffer ?? 0),
       precollectEarly: Number(cfg.rl.precollect_early ?? 0),
+      // M1：当前**生效**的隧道选项（per-course 覆盖 > rl.* > 缺省 http2/4）——
+      // UI 显示它，避免「以为改了其实没改」。
+      cfProtocol: resolveCfTunnel(cfg, course).protocol,
+      cfEdgeIp: resolveCfTunnel(cfg, course).edgeIp,
     },
     metrics,
     phase,

@@ -21,7 +21,11 @@ import { NodePills } from './panels/NodePills'
 import { MetricsTable } from './panels/MetricsTable'
 import { NodeStats } from './panels/NodeStats'
 import { LogNavCard } from './panels/LogNavCard'
-import { TrainLaunchModal, type PushCredentials } from './panels/TrainLaunchModal'
+import {
+  TrainLaunchModal,
+  type PushCredentials,
+  type TunnelLaunchOpts,
+} from './panels/TrainLaunchModal'
 import { BcPanel } from './panels/BcPanel'
 import { EvalSummary } from './panels/EvalSummary'
 import {
@@ -296,7 +300,7 @@ export function App({ initial }: AppProps) {
 
   const handleLaunch = async (
     mode: 'pull' | 'push' | 'local',
-    push?: Partial<PushCredentials> & { remoteDegrade?: boolean },
+    push?: Partial<PushCredentials> & TunnelLaunchOpts & { remoteDegrade?: boolean },
   ): Promise<void> => {
     // Push：先关弹窗再 POST（服务端 ping 门；失败走 flash，不启动进程）。
     setTrainOpen(false)
@@ -304,6 +308,9 @@ export function App({ initial }: AppProps) {
       mode,
       remoteDegrade: push?.remoteDegrade === true,
     }
+    // M1：隧道选项随启动回写 rl-config + console-state（未选 = 不传，沿用现值）。
+    if (push?.cfProtocol) body.cfProtocol = push.cfProtocol
+    if (push?.cfEdgeIp) body.cfEdgeIp = push.cfEdgeIp
     if (mode === 'push' && push) {
       body.pushEndpoint = push.endpoint ?? ''
       body.pushAuthKey = push.authKey ?? ''

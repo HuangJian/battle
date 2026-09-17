@@ -2,6 +2,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'fs'
 import path from 'path'
 import { consoleStatePath } from '../../core/paths'
+import type { CfEdgeIp, CfProtocol } from '../../core/types'
 
 // ────────────────────────── 控制台状态（trainer 模式 / 当前课程） ──────────────────────────
 
@@ -28,6 +29,10 @@ export interface ConsoleState {
   /** trainer 基建编排模式：pull=remote+隧道（云机 poll）· push=remote 无本地隧道 ·
    *  local=本机独立 localWorker（pull 本机 hub，与云端 worker 同一份代码）。 */
   trainerPpo: 'pull' | 'push' | 'local'
+  /** 隧道协议/边缘 IP 版本（M1，additive）：preset 时随启动一起回写；UI 据此显示
+   *  「当前生效值」。旧 console-state.json 无此键 → 读取时由 rl-config 缺省回填。 */
+  cfProtocol?: CfProtocol
+  cfEdgeIp?: CfEdgeIp
   /** 当前课程（组件启动的 jobRoot/日志目录来源）。 */
   course: string
   /** 控制台当前课程（P5-W1 additive）——读取优先它，写入与 `course` 同值。

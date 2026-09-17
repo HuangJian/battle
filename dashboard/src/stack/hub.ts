@@ -32,7 +32,9 @@ import {
   HUB_SERVER_ENTRY,
   SELF_NODE_ENTRY,
   TRAINING_LOOP_ENTRY,
+  cfTunnelArgs,
   hubServerSpec,
+  resolveCfTunnel,
   resolveCloudflaredBin as specsResolveCloudflaredBin,
   selfNodeSpec,
   trainingLoopSpec,
@@ -176,16 +178,30 @@ export async function stepCloudflared(
 
   // 已有登记的隧道：edge 就绪（本地 /ready）即复用；穿隧道 ping 失败可能是
   // hub 出网劣化——只有 edge 未注册才重启
+  const wantTunnel = resolveCfTunnel(cfg, course)
   if (prev && pidAlive(prev.pid) && prev.url) {
     const url = prev.url
-    const edgeReady = await tunnelEdgeReady(prev.metrics)
-    if (edgeReady || (await httpOk(`${url}/ping`, cfg.rl.remote_token, 10000))) {
-      if (edgeReady) ok(`cloudflared 已在运行（edge 在线）: ${url}`)
-      else ok(`cloudflared 已在运行: ${url}`)
-      return url
+    // M1 变更检测（plan §3.2）：登记的隧道选项 != 当前配置 → 杀旧起新，否则「改了
+    // 选项其实没生效」的假成功。旧登记无这两字段（= 当时未传旗标）⇒ 按 'auto' 比对，
+    // 缺省 http2/4 会触发一次重启把旧隧道升级到新缺省。
+    const prevProtocol = prev.cfProtocol ?? 'auto'
+    const prevEdgeIp = prev.cfEdgeIp ?? 'auto'
+    if (prevProtocol !== wantTunnel.protocol || prevEdgeIp !== wantTunnel.edgeIp) {
+      warn(
+        `隧道选项变更（${prevProtocol}/${prevEdgeIp} → ${wantTunnel.protocol}/${wantTunnel.edgeIp}）` +
+          '——重启 cloudflared 使新选项生效（下次启动才会走新命令行）',
+      )
+      await killPid(prev.pid)
+    } else {
+      const edgeReady = await tunnelEdgeReady(prev.metrics)
+      if (edgeReady || (await httpOk(`${url}/ping`, cfg.rl.remote_token, 10000))) {
+        if (edgeReady) ok(`cloudflared 已在运行（edge 在线）: ${url}`)
+        else ok(`cloudflared 已在运行: ${url}`)
+        return url
+      }
+      warn('cloudflared 进程存在但 edge 未连接，重启中...')
+      await killPid(prev.pid)
     }
-    warn('cloudflared 进程存在但 edge 未连接，重启中...')
-    await killPid(prev.pid)
   }
 
   // 隧道 per-course（P3）：槽位取自 rl-config courses 块（未配置 → 0 = 旧单课行为）；
@@ -213,6 +229,8 @@ export async function stepCloudflared(
         `127.0.0.1:${metricsPort}`,
         '--logfile',
         cfLog,
+        // M1：隧道协议/边缘 IP（唯一来源 cfTunnelArgs——与 cloudflaredSpec 两半同步）。
+        ...cfTunnelArgs(cfg, course),
       ],
       { log: cfLog },
     )
@@ -223,6 +241,8 @@ export async function stepCloudflared(
       metrics: metricsPort,
       slot,
       course,
+      cfProtocol: wantTunnel.protocol,
+      cfEdgeIp: wantTunnel.edgeIp,
     })
     monitorTouch()
 
@@ -260,6 +280,8 @@ export async function stepCloudflared(
     metrics: metricsPort,
     slot,
     course,
+    cfProtocol: wantTunnel.protocol,
+    cfEdgeIp: wantTunnel.edgeIp,
   })
 
   // 隧道死活以本地 /ready 为准（不依赖出网）；穿隧道 ping 失败只降级为警告。

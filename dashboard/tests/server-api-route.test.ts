@@ -22,6 +22,15 @@ describe('console/api.routeAction', () => {
     expect(r.__status).toBe(400)
   })
 
+  it('preset 隧道选项白名单：非法 cfProtocol/cfEdgeIp → 400（M1）', async () => {
+    const a = (await postJson('preset', { mode: 'pull', cfProtocol: 'bogus' })) as {
+      __status: number
+    }
+    expect(a.__status).toBe(400)
+    const b = (await postJson('preset', { mode: 'push', cfEdgeIp: '5' })) as { __status: number }
+    expect(b.__status).toBe(400)
+  })
+
   it('节点并发越界 → 动作失败且不写盘', async () => {
     const before = readFileSync(configPath(), 'utf-8')
     const r = await postJson('setNodeConcurrency', { id: 'self', concurrency: 999 })
