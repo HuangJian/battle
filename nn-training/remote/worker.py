@@ -1112,6 +1112,13 @@ def run_job(
     code_cache_dir: Path | None = None,
     ts_code_cache_dir: Path | None = None,
     lease_token: str = "",
+    # ---- 半离线（kind=run；2026-09-17）产物目录与本次预算 ----
+    # artifacts_dir：产物根（缺省按 Kaggle /kaggle/working / Colab Drive / 工作目录自动解析）。
+    # run_max_iters / run_budget_sec：本次自主段的额外上限（0 = 只认计划）——后者是
+    # Kaggle 会话到期前「干净停机」的把手。
+    artifacts_dir: str | Path | None = None,
+    run_max_iters: int = 0,
+    run_budget_sec: float = 0.0,
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
 ) -> dict:
     """执行单个 job：下载 → 校验 → PPO → 产出 weights_json + opt tar → POST。
@@ -1264,7 +1271,16 @@ def run_job(
     iter_info: dict | None = None
     ts_code_bytes = 0
     ts_code_hit = False
-    if str(manifest["kind"]) == "iter":
+    # ---- 半离线（kind=run）：先把计划接过来校验（**跑第一局之前**）----
+    # 三道门（sha / 形状 / 全段对集指纹）都在 run_loop.verify_plan_file 里；失败 = 计划
+    # 与 hub 侧不一致，此时不跑任何一局，也不写任何产物。
+    run_plan: dict | None = None
+    run_plan_sha = ""
+    if str(manifest["kind"]) == "run":
+        from remote.run_loop import verify_plan_file
+
+        run_plan, run_plan_sha = verify_plan_file(job_dir, manifest, log=log)
+    if str(manifest["kind"]) in ("iter", "run"):
         ts_root = (
             ts_code_cache_dir
             if ts_code_cache_dir is not None
@@ -1641,6 +1657,30 @@ def run_job(
     # 两遍收敛（同 echo 路径）：result_bytes 与自身体长自指，一遍差它的十进制位数。
     result["wire"]["result_bytes"] = len(pack_result_v2(result))
     result["wire"]["result_bytes"] = len(pack_result_v2(result))
+    # ---- 半离线尾巴（kind=run）：本轮跑完 → 把计划里剩下的轮次自己跑完 ----
+    # 位置在前面的自查**之前**：合并结果是「末轮形状 + iters 明细」，自查要用最终形状。
+    if str(manifest["kind"]) == "run" and not echo:
+        from remote.run_loop import run_plan_job
+
+        assert run_plan is not None  # kind=run 必过 verify_plan_file（上面已抛）
+        result = run_plan_job(
+            job_id=jid,
+            manifest=manifest,
+            job_dir=job_dir,
+            work_dir=work_dir,
+            plan=run_plan,
+            plan_sha256=run_plan_sha,
+            first_result=result,
+            course=course,
+            device=device,
+            torch_threads=torch_threads,
+            code_cache_dir=code_cache_dir,
+            ts_code_cache_dir=ts_code_cache_dir,
+            artifacts_dir=artifacts_dir,
+            max_iters=run_max_iters,
+            budget_sec=run_budget_sec,
+            log=log,
+        )
     validate_result(result, manifest, commit_echo_must_match=False)  # 自查
     _persist_result(work_dir, jid, result)
     return result
@@ -1782,6 +1822,10 @@ def worker_loop(
     max_idle_sec: float = 0.0,
     restart_argv: list[str] | None = None,
     hub_urls: list[str] | None = None,
+    # 半离线（kind=run）：产物根与本次自主段上限（透传给 run_job；缺省 = 自动解析/只认计划）
+    artifacts_dir: str | Path | None = None,
+    run_max_iters: int = 0,
+    run_budget_sec: float = 0.0,
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
 ) -> int:
     """无状态轮询主循环。返回处理的 job 数。
@@ -1899,6 +1943,9 @@ def worker_loop(
                 echo=echo,
                 code_cache_dir=shared_code_cache if multi else None,
                 lease_token=lease_token,
+                artifacts_dir=artifacts_dir,
+                run_max_iters=run_max_iters,
+                run_budget_sec=run_budget_sec,
                 log=log,
             )
             post_result(base_url, token, jid, result, lease_token=lease_token)
@@ -1979,6 +2026,25 @@ def main() -> None:
         help="冒烟：跳过 PPO，回显 init 权重为结果（hub-start 冒烟预演；消费方作废本轮）",
     )
     ap.add_argument("--max-idle-sec", type=float, default=0.0, help="空闲超时退出（0=永不）")
+    # ---- 半离线（kind=run；2026-09-17）----
+    # 产物目录：缺省按 Kaggle /kaggle/working → Colab Drive → <work>/artifacts 自动解析。
+    ap.add_argument(
+        "--artifacts",
+        default="",
+        help="半离线产物目录（kind=run 的交付面；缺省自动：Kaggle /kaggle/working / Colab Drive）",
+    )
+    ap.add_argument(
+        "--run-max-iters",
+        type=int,
+        default=0,
+        help="本次自主段最多再跑几轮（0=只认计划；计划本身也有上限）",
+    )
+    ap.add_argument(
+        "--run-budget-sec",
+        type=float,
+        default=0.0,
+        help="本次自主段最多跑多少秒（0=不限；Kaggle 会话到点前干净停机的把手）",
+    )
     args = ap.parse_args()
     token = args.token
     if args.token_file:
@@ -2021,6 +2087,9 @@ def main() -> None:
             max_idle_sec=args.max_idle_sec,
             restart_argv=sys.argv[1:],
             hub_urls=hub_urls,
+            artifacts_dir=args.artifacts or None,
+            run_max_iters=args.run_max_iters,
+            run_budget_sec=args.run_budget_sec,
         )
         print(f"[{time.strftime('%H:%M:%S')}] [worker] done: {n} job(s) processed", flush=True)
         # H8：--once 失败（返回 -1）→ 非零退出码

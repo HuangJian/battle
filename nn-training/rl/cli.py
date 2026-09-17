@@ -511,6 +511,22 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         "（rl.rollout_src / courses.<课>.rollout_src）解析，缺省 local；取值进 iteration"
         " 事件的 wire.rollout_src（A/B 归因用）",
     )
+    # 半离线（2026-09-17）：一次 `kind=run` job 覆盖 N 轮，节点收到（课程 + 初始权重 +
+    # 代码 + 计划）后自主跑完，hub 失联也不影响（逐轮权重/指标落在节点工作目录，
+    # Kaggle /kaggle/working / Colab Drive）。0 = 关（逐轮上云/本机，历史行为）。
+    ap.add_argument(
+        "--run-iters",
+        type=int,
+        default=_d("run_iters", 0),
+        help="半离线整段：一次领走 N 轮（kind=run job；<0 = 跑到课程末尾）——节点自主跑完"
+        "并逐轮落产物（K/D 官方目录，可打包下载）；0 = 关。要求 --ppo remote",
+    )
+    ap.add_argument(
+        "--run-wait-sec",
+        type=float,
+        default=_d("run_wait_sec", 0.0),
+        help="半离线段的等待上限（秒；整段墙钟量级）。0 = rl.run_wait_sec > 缺省 8h",
+    )
     ap.add_argument(
         "--remote-iter-game-timeout",
         type=float,

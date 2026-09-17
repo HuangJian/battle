@@ -2287,3 +2287,45 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   **硬门**（bun 版本对账不匹配直接拒单，计划 §5.3）仍只有记录与日志。
 
 
+## §2026-09-17-goalnn-halfoffline-run（2026-09-17，半离线整段：云机领一次就自主跑完，产物可打包下载；hub 失联不影响）
+
+- **背景（用户需求，2026-09-17 两次确认）**：现状是 **hub 拥有迭代循环**——每轮 publish 一个 job、
+  节点跑一轮就回等；hub 一断，云机除了等无事可做。用户要的是：云机领到（课程 + 初始权重 + 代码）
+  后**即使本机 hub 一直失联**也能全程自主跑完，并以 Kaggle/Colab 官方方式（工作目录产物 zip）交付
+  **逐轮**权重与指标。用户口径（三问已答）：一次领 = 整段；逐轮权重/指标/可续跑；**不在云上跑评估**。
+- **备选与否决**：① *把 hub 的迭代循环抄一份到云上*（否决——`build_pairs`/`build_rollout_cmd`/课程重建
+  各有**唯一**一份，抄一份就是造第二个真相）；② *等 hub 重连再逐轮问*（否决——正是要治的病）；
+  ③ *产物边跑边 POST 回 hub*（否决——失联时 POST 必失败，产物会跟着丢；产物必须落**本机**，回传尽力而为）；
+  ④ *新写一条「段」执行链*（否决——本轮语义与 kind=iter **逐字段同构**）。采用：**kind="run" = kind="iter"
+  的延长**（同一轮 + 一个计划尾巴）。
+- **契约（硬要求）**：① `plan.json`（`rl/plan.build_plan` + `dump_plan` 规范序列化）随 payload 下发，
+  manifest 记 `plan_sha256`；节点在**跑第一局之前**过三道门——sha256 / 形状（`validate_plan`）/
+  **全段对集指纹**（`plan_pairs_fp` 重放每一轮），任一条不符就一局不跑（跑到半途才发现语料漂了，
+  已经产出一批不可信 shard）。② 计划只带「纯函数入参 + argv 模板」：对集靠 `build_pairs` 重放，逐局
+  argv 只做四个动态 flag 重定向 + 自定义关 `--stage-json`（重定向不认识任何导出器细节）；发布期自检
+  保证「重放 == 真 args」且「重定向对模板恒等」。③ 产物目录是**唯一**长期记录、**中断即有效**：
+  `it-NNN/weights.json` + `opt.tar`（Adam 动量，缺它续训静默归零）+ `metrics.jsonl`（一行一轮）+
+  `state.json` + `LATEST.zip`/`artifacts.zip`；TS 运行时随产物携带 ⇒「只下载产物 zip」的机器也能续跑。
+  ④ 末轮形状 + `iters` 明细回传 ⇒ hub 侧落位链**零新代码**（三个指纹逐字段对的是本 job 自己）。
+  ⑤ 续跑判据 = `run_id` + **磁盘上 plan.json 的 sha** + 该轮权重在盘（自描述，见下）。
+- **两个被测试抓出来的真缺陷（都写进回归）**：① `ArtifactStore.start` 曾用**调用方传入**的计划 sha 做
+  续跑判据，而目录写盘的是另一份格式（hub 走 `dump_plan` 规范形）⇒ 新会话拿着同一目录永远算不出相等
+  的值，每次都被当成**新段**从 `start_it` 重跑——「关掉会话明天接着跑」静默退化成重跑。改为**写盘后
+  再算**。② 起点快照曾往 `metrics.jsonl` 写一行（无 agg/report），使「账本一行 = 一轮、it 唯一」失效，
+  逼下游用「过滤掉没有 report 的行」绕开——用过滤器掩盖一条本不该写的行。改为起点只落 checkpoint **不记账**。
+- **开关与缺省**：`--run-iters N`（>0 一次领 N 轮；<0 到课程末尾）> `courses.<课>.run_iters` >
+  `rl.run_iters` > **0 = 关**（历史行为逐字节不变）；等待上限 `--run-wait-sec` > `rl.run_wait_sec` > 8h
+  （≈Kaggle 单会话上限）。要求 `--ppo remote`。段尾那一轮照常走本机结算（iteration 事件 / eval 派发 /
+  归档），**段中间那些轮不派发本机 eval**——其权重不在本机归档，拿活指针充 W(it-1) 正是 P0 修过的
+  「eval 标签超前一轮」。逐轮明细落成一条 `run_segment` 事件。
+- **违反后果**：让云机自己算下一轮 ⇒ 第二份对集实现；省掉对集指纹门 ⇒ 产出不可信 shard 后才发现；
+  产物只留 hub ⇒ 失联时产物与训练一起丢；`opt.tar` 缺失 ⇒ 续训静默丢 Adam 动量（D5）；用传入 sha 做
+  续跑判据 ⇒ 每次续跑都重跑（本条抓出的缺陷）。
+- **遗留（未做，不写成已做）**：真云端（Kaggle/Colab）端到端跑一次（本机无 GPU 节点）；段内**进度上报
+  到控制台**（长段期间只有等待，逐轮指标要等段尾）；控制台启动弹窗的 `run_iters` 选项（现只有 rl-config /
+  CLI）；push 传输等待预算仍 1800s（半离线的自然形态是 pull）。
+- **落地**：`rl/plan.py`、`remote/artifacts.py`、`remote/run_loop.py`（含无 hub 续跑 CLI
+  `python -m remote.run_loop --artifacts <dir>`）、`remote/protocol.py`、`remote/worker.py`、
+  `remote/hub_client.publish_job`（计划进 payload）、`rl/loop_steps.py`（段长解析 + `_remote_run_segment`
+  + `wait_timeout_sec`）、`rl/loop_core.py`（段优先 + 跳过中间轮 eval 派发）、`rl/cli.py`。
+  回归：`test_plan.py`(8) + `test_run_loop.py`(11) + `test_run_segment.py`(12)；细节 `docs/nn.progress.md §61`。

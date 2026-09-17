@@ -28,6 +28,7 @@ def build_iter_spec(
     workers: int = 0,
     game_timeout_sec: float = 0.0,
     hub_bun: str = "bun",
+    node_label: str = ITER_NODE_LABEL,
 ) -> dict:
     """(stage, seed) 对集 → kind=iter 的 `rollout` 规格（未归一化；发布前会再校验）。
 
@@ -35,6 +36,10 @@ def build_iter_spec(
     塞进规格：规格里的 `bun` 是「节点 PATH 上要找的可执行名」，本机的绝对路径在云机上
     毫无意义（Windows 的 `bun.exe` 更会直接找不到）。节点用自己的 bun，版本对账靠启动
     自检行（worker 日志 + wire.bun_version），不靠这个字段。
+
+    `node_label` 写进每局 shard manifest（`--node-label`）：逐轮上云用 `iter`，半离线整段
+    用 `run`（`rl.plan.RUN_NODE_LABEL`）——事后按 shard 就能分清“这一批局是逐轮上云跑的”
+    还是“云端自主段跑的”。
 
     workers<=0 → 退化为 1（节点侧另有上限钳制）；`wver` 必须是本轮权重的指纹
     （`dist_common.weights_fingerprint(args.out)`）——它同时进 argv（`--wver`，写进每局
@@ -53,7 +58,7 @@ def build_iter_spec(
             stage=int(stage),
             seed=int(seed),
             wver=str(wver or ""),
-            node_label=ITER_NODE_LABEL,
+            node_label=str(node_label or ITER_NODE_LABEL),
         )
         argv.append(list(cmd[1:]))  # 丢掉 bun 路径（节点用自己的）
     return {

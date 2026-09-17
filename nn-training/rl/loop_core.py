@@ -28,7 +28,13 @@ from rl.course import build_pairs
 from rl.events import log_iter_error, write_run_complete, write_run_start
 from rl.log import log
 from rl.loop_guards import TrainingGuards
-from rl.loop_steps import SmokeVoidRoundError, TrainingSteps, _rollout_source, kickstart_coef
+from rl.loop_steps import (
+    SmokeVoidRoundError,
+    TrainingSteps,
+    _rollout_source,
+    _run_segment_iters,
+    kickstart_coef,
+)
 from rl.modes import get_backend
 from rl.queue import REPO_ROOT, RUN_ID
 from rl.reports import combine_reports
@@ -301,7 +307,15 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 # **完全不采样**（也不预采/不补波），改由 _remote_iter 发 kind=iter job，
                 # 节点自己跑 rollout + PPO。eval 不动（仍在本地 hub 跑，§5.4）。
                 self._node_rollout = _rollout_source(args) == "node"
-                if self._node_rollout:
+                # 半离线整段（kind=run；2026-09-17）：一次领走 it..end_it，节点自主跑完，
+                # hub 期间失联也不影响（产物目录是交付面）。整段优先于逐轮上云。
+                seg = _run_segment_iters(args)
+                seg_ran = False
+                if seg != 0:
+                    self._node_rollout = True  # 本机不采样、不预采、不本地 PPO
+                    it = self._remote_run_segment(it, pairs, seg)
+                    seg_ran = True
+                elif self._node_rollout:
                     self._remote_iter(it, pairs)
                 else:
                     self._rollout_phase(it, pairs, dist_cfg, self._eval_on_round(it))
@@ -311,7 +325,11 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 # P0 修复：为上一轮已完成权重 W(it-1) 派发干净评估（读归档、标权重轮），
                 # 游戏藏进随后 PPO(it) 空窗。串行路径此前在此处派发读活指针 = W(it-1)
                 # 却标 itN（标签超前一轮）；stream/intent/m1/基线路径维持原语义。
-                self._dispatch_delayed_eval(it, dist_cfg)
+                # 半离线段例外：段中间那些轮不在本机跑，归档里**没有**它们的权重——拿活
+                # 指针（= 段尾权重）去充 W(it-1) 就是 P0 刚修掉的那个「标签超前一轮」的
+                # eval 污染。段尾权重由下一轮（或收官 drain）正常派发。
+                if not seg_ran:
+                    self._dispatch_delayed_eval(it, dist_cfg)
                 # it0 基线（bc 权重）：rollout 收官后派发，落账前每轮重试（2026-09-12 用户）
                 self._maybe_dispatch_baseline_eval(dist_cfg)
                 self._log_report(it, t_rollout)

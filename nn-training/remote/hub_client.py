@@ -33,7 +33,7 @@ from remote.protocol import (
     FAIL_BODY_MAX,
     FAIL_NAME,
     PAYLOAD_NAME,
-    PAYLOAD_XZ_PRESET,
+    PLAN_NAME,
     TS_CODE_NAME,
     JobFailedError,
     blob_path,
@@ -43,6 +43,7 @@ from remote.protocol import (
     iter_expected_data_fp,
     job_seed,
     normalize_manifest,
+    pack_payload,
     validate_rollout_spec,
 )
 from remote.protocol import (
@@ -167,21 +168,12 @@ def pack_payload_zip(
     M2（B1/B2/B4）：不再写根级占位 manifest.json、不再写 opt_init.tar.b64；有 opt
     blob 时也不写 init_weights.json（opt tar 已含 model+Adam）。布局 = shard 目录整体
     （+ 可选 init_weights.json）。`manifest` 形参保留只为调用签名兼容。
-    """
-    import tarfile
 
-    zip_path.parent.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(zip_path, "w:xz", preset=PAYLOAD_XZ_PRESET) as tf:
-        for d in shard_dirs:
-            for f in sorted(d.iterdir()):
-                if f.is_file():
-                    tf.add(f, arcname=f"{d.name}/{f.name}")
-        for p in extra_files:
-            if p.exists():
-                tf.add(p, arcname=p.name)
-        # M2（B1）：不写根级占位 manifest.json（worker 当日志丢弃；~0.89MB/轮冗余）。
-        # `manifest` 形参保留只为调用方签名兼容。
-    return _sha256_bytes(zip_path.read_bytes())
+    2026-09-17：实现改为**转调** `remote.protocol.pack_payload`（多了一个 `extra_files`
+    形参）——半离线（kind=run）的逐轮 payload 也要带额外文件，第三个 tar.xz 打包副本
+    没有道理，而两份口径本就只差一个 extra 循环。
+    """
+    return pack_payload(shard_dirs, manifest, zip_path, extra_files=list(extra_files))
 
 
 def pack_code_zip(
@@ -408,6 +400,11 @@ def publish_job(
     rollout_spec: dict | None = None,
     ts_code_sha256: str = "",
     ts_code_zip_path: str | Path | None = None,
+    # 半离线（kind="run"，2026-09-17）：`plan.json` 的**字节**（由 `rl.plan.dump_plan`
+    # 规范序列化）。节点靠它自主跑完 it+1..end_it——payload 必须带此文件，manifest 记
+    # 它的 sha（`plan_sha256`）。传 bytes 而不是 dict：本模块是 `remote/` 层，不 import
+    # `rl/`（方向单一）；规范化序列化只有 `rl.plan.dump_plan` 一份，调用方自己 dump。
+    plan_bytes: bytes | None = None,
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
 ) -> dict:
     """打包 + 发布 job（磁盘 IPC）：job_root/<job_id>/ + jsonl job_pending 事件。
@@ -425,15 +422,27 @@ def publish_job(
     schedule_raw = schedule_raw if schedule_raw is not None else []
     if rollout_spec is not None:
         rollout_spec = validate_rollout_spec(rollout_spec)
-        if kind != "iter":
-            raise HubClientError(f"rollout_spec 只对 kind='iter' 有意义，收到 kind={kind!r}")
+        # kind=run 是 kind=iter 的**延长**（同一轮语义 + 计划尾巴）：两者都要
+        # rollout 规格与 TS 运行时，校验口径完全共享。
+        if kind not in ("iter", "run"):
+            raise HubClientError(
+                f"rollout_spec 只对 kind='iter'/'run' 有意义，收到 kind={kind!r}"
+            )
         if not ts_code_sha256:
-            raise HubClientError("kind='iter' 必须带 ts_code_sha256（节点要它定位 TS 运行时）")
+            raise HubClientError(f"kind={kind!r} 必须带 ts_code_sha256（节点要它定位 TS 运行时）")
         if shard_dirs:
             raise HubClientError(
-                f"kind='iter' 不接受本地 shard（实得 {len(shard_dirs)} 个）——"
+                f"kind={kind!r} 不接受本地 shard（实得 {len(shard_dirs)} 个）——"
                 "上云轮由节点现产，混着发会双份采集"
             )
+    if kind == "run":
+        if not plan_bytes:
+            raise HubClientError(
+                "kind='run' 必须带 plan_bytes（半离线段的唯一输入：没有计划，节点跑完本轮"
+                "就不知道下一轮跑哪些局）——拒发"
+            )
+        if rollout_spec is None:
+            raise HubClientError("kind='run' 必须带 rollout_spec（本 job 自己那一轮的采集规格）")
     # 1) data_fp（D1：排序 shard 路径 + manifest {wver,stage,seed}；iter = 声明集）
     fp = iter_expected_data_fp(rollout_spec) if rollout_spec else data_fp(shard_dirs)
     # 2) init_weights_fp（fencing：云回传的 init_weights_fp 必须等于当前 args.out 指纹；
@@ -500,6 +509,14 @@ def publish_job(
         # kind=iter：节点**必须**拿得到 init 权重——它要用这份权重去跑 rollout（不只是
         # PPO 初始化）。M2 B4「有 opt blob 就不传 init_weights.json」在这里不成立。
         keep_init_weights = True
+    if kind == "run":
+        assert plan_bytes is not None  # 上面已拒发（类型收窄给 mypy）
+        # 计划随 payload 走（与 init_weights.json 同层）：节点解包后 `verify_plan_file(job_dir, …)`
+        # 就地拿到它。manifest 只记 sha——全文可达百 KB，不该让 hub 每轮轮询都解析一遍。
+        plan_copy = tmp_extra_dir / PLAN_NAME
+        plan_copy.write_bytes(plan_bytes)
+        extra_files.append(plan_copy)
+        m["plan_sha256"] = _sha256_bytes(plan_bytes)
     # M2（B4）：有 opt blob 时不传 init_weights.json（worker 从 opt 恢复即完整
     # model+Adam）。echo 冒烟要保持回显能力，keep_init_weights 时照旧带上。
     if init_weights_path and (not use_opt_blob or keep_init_weights):

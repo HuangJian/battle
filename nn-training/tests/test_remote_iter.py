@@ -926,7 +926,14 @@ class _IterStub(TrainingSteps):
         self.calls = 0
         self.exc = exc
 
-    def _remote_ppo(self, it: int, rollout_spec: dict | None = None) -> dict:
+    def _remote_ppo(
+        self,
+        it: int,
+        rollout_spec: dict | None = None,
+        *,
+        plan_bytes: bytes | None = None,
+        wait_timeout_sec: float = 0.0,
+    ) -> dict:
         self.calls += 1
         raise self.exc
 

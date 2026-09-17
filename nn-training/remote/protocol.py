@@ -136,6 +136,29 @@ ITER_OUT_REL = "w"
 #: 同一 argv（同标签）重跑，逐字节比对才成立。
 ITER_NODE_LABEL = "node"
 
+# ------------------------------------------------------------------ 半离线: kind="run"
+# 「云端整段自主」job：hub 只在交接时给一次（课程 + 初始权重 + 代码 + **计划**），
+# 节点从此不依赖 hub —— 自己按计划把剩余轮次跑完（rollout + PPO 全在节点），逐轮
+# 把权重/指标写进本地产物目录（Kaggle /kaggle/working、Colab Drive），可打包下载、
+# 可跨会话续跑。
+#
+# 与 kind=iter 的关系（**不是 fork，是延长**）：本 job 自己的那一轮（`it`）与 kind=iter
+# **逐字段同构**（`rollout` + `ts_code_sha256` 必填、data_fp = 该轮声明集），节点走的
+# 也是同一条执行链；区别只在尾巴——跑完本轮到 `plan.json` 继续把后续轮次自己跑完。
+# 于是「离线轮」与「hub 监管轮」的行/产物/校验口径完全一致。
+#: 计划文件名（payload 内，与 init_weights.json 同层；sha 进 manifest 而**不是**全文——
+#: argv 模板 + 逐轮对集可达百 KB 量级，不该让 hub 每轮轮询都解析一遍）。
+PLAN_NAME = "plan.json"
+PLAN_PROTO = 1
+#: kind=run 追加必填：kind=iter 的两项 + 计划的 sha256。
+MANIFEST_RUN_EXTRA: tuple[str, ...] = (*MANIFEST_ITER_EXTRA, "plan_sha256")
+#: 半离线轮写进 shard manifest 的 `node` 标签（与 `node`/`local` 区分：可溯源到
+#: 「这一批局是云端自主段跑的」）。
+RUN_NODE_LABEL = "run"
+#: 计划的**硬上界**（防一份手写/损坏的计划把节点按在机上一整天）。命令行可用
+#: `--run-max-iters` 再降；计划的 end_it 一律按其与 iters_total 的交集钳制。
+RUN_MAX_ITERS_HARD_CAP = 500
+
 #: M2 blob 载荷名（pull 端点 `GET /jobs/{id}/blob?name=opt|ref`；push body `blobs`）。
 BLOB_OPT = "opt"
 BLOB_REF = "ref"
@@ -206,8 +229,8 @@ def normalize_manifest(m: dict) -> dict:
     if not isinstance(m, dict):
         raise ProtocolError(f"manifest 必须是对象，收到 {type(m).__name__}")
     kind = str(m.get("kind", "ppo") or "ppo")
-    if kind not in ("ppo", "bc", "iter"):
-        raise ProtocolError(f"kind={kind!r} 未知（只认 'ppo'|'bc'|'iter'）——拒收")
+    if kind not in ("ppo", "bc", "iter", "run"):
+        raise ProtocolError(f"kind={kind!r} 未知（只认 'ppo'|'bc'|'iter'|'run'）——拒收")
     required = [
         k for k in MANIFEST_REQUIRED if not (kind == "bc" and k in MANIFEST_BC_EXEMPT)
     ]
@@ -215,6 +238,8 @@ def normalize_manifest(m: dict) -> dict:
         required += list(MANIFEST_BC_EXTRA)
     if kind == "iter":
         required += list(MANIFEST_ITER_EXTRA)
+    if kind == "run":
+        required += list(MANIFEST_RUN_EXTRA)
     missing = [k for k in required if k not in m]
     if missing:
         raise ProtocolError(f"manifest 缺失必填字段: {missing}")
@@ -568,7 +593,13 @@ def _extract_archive(src: Path, dest: Path) -> None:
             tf.extractall(dest)
 
 
-def pack_payload(shard_dirs: list[str | Path], manifest: dict, out_path: str | Path) -> str:
+def pack_payload(
+    shard_dirs: Sequence[str | Path],
+    manifest: dict,
+    out_path: str | Path,
+    *,
+    extra_files: Sequence[str | Path] | None = None,
+) -> str:
     """把 shard 目录（npy + manifest.json）打成 **tar.xz**，写 `out_path`。
 
     容器演进（2026-09-10）：原为 zip/deflate —— 实测 tar.xz(preset=3) 体积 −48.7%
@@ -591,6 +622,14 @@ def pack_payload(shard_dirs: list[str | Path], manifest: dict, out_path: str | P
             for f in sorted(p.iterdir()):
                 if f.is_file():
                     tf.add(f, arcname=f"{p.name}/{f.name}")
+        # 额外文件（落归档**根**：init_weights.json / plan.json 等按名取用）。
+        # 2026-09-17：从 hub_client.pack_payload_zip 合并进来——原来两个打包器
+        # （一个带 extra 一个不带）各自维护 tar.xz 口径，半离线段又需要一个带
+        # extra 的，第三个副本毫无道理：统一到这里，hub 侧那个改为转调。
+        for xf in extra_files or ():
+            fx = Path(xf)
+            if fx.is_file():
+                tf.add(fx, arcname=fx.name)
         # M2（B1）：不再写根级占位 manifest.json —— worker.py:896 一直把它当
         # `_unused_manifest` 丢弃（~0.89MB/轮纯冗余）。权威 manifest 走 job 记录
         # （/jobs/next 返回），本函数只负责搬运 shard 数据。`manifest` 形参保留
@@ -708,11 +747,43 @@ def validate_result(
         k in agg for k in ("policy", "value", "entropy", "kl", "mean_ret")
     ):
         raise ProtocolError(f"result.agg 缺关键字段: {agg!r}")
-    if str(manifest.get("kind", "ppo") or "ppo") == "iter" and not r.get("smoke"):
+    kind = str(manifest.get("kind", "ppo") or "ppo")
+    if kind in ("iter", "run") and not r.get("smoke"):
         # M3：节点自己跑的 rollout，其采集口径必须随结果回来（hub 侧没有本地 shard
         # 可算 winRate/outcomes/samples——不校验就等于信云侧自报，回归时无法归因）。
         # 冒烟回显（smoke=true）豁免：它刻意不跑 rollout，没有报告可带。
+        # kind=run（2026-09-17）：hub 侧同样**没有**这些 shard（它们在节点上跑完即
+        # 走），口径同规——「本 job 自己那一轮」的报告。
         r["report"] = validate_iter_report(r.get("report"))
+    if kind == "run":
+        # 半离线段（kind=run）：结果 = **末轮**的形状（weights/opt/agg/report，可直接
+        # 走既有落位链）+ 逐轮明细 `iters` + `it_end`。逐条校验明细：hub 拿不到这些
+        # 轮的 shard，但它们**会**进账本/控制台（人据此判断这条腿学没学会），所以
+        # 形状与单调性必须成立——garbage-in 就会变成一条看起来正常的假学习曲线。
+        rows = r.get("iters")
+        if not isinstance(rows, list) or not rows:
+            raise ProtocolError(f"kind=run 的 result.iters 必须是非空数组，收到 {type(rows).__name__}")
+        prev_it = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ProtocolError(f"result.iters 的元素必须是对象，收到 {type(row).__name__}")
+            it_row = row.get("it")
+            if isinstance(it_row, bool) or not isinstance(it_row, int):
+                raise ProtocolError(f"result.iters[].it 必须是整数，收到 {it_row!r}")
+            if it_row <= prev_it:
+                raise ProtocolError(f"result.iters 的 it 必须严格递增（{prev_it} -> {it_row}）")
+            prev_it = it_row
+            row_agg = row.get("agg")
+            if not isinstance(row_agg, dict) or not all(
+                k in row_agg for k in ("policy", "value", "entropy", "kl", "mean_ret")
+            ):
+                raise ProtocolError(f"result.iters[it={it_row}].agg 缺关键字段: {row_agg!r}")
+            if not r.get("smoke"):
+                row["report"] = validate_iter_report(row.get("report"))
+        if r.get("it_end") != rows[-1]["it"]:
+            raise ProtocolError(
+                f"result.it_end={r.get('it_end')!r} != 末轮 it={rows[-1]['it']!r}——结果自相矛盾"
+            )
     return r
 
 

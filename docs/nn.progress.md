@@ -4,6 +4,69 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §61 半离线整段落地：kind="run"（一次领走整段，节点自主跑完 + 产物可打包下载）（2026-09-17）
+
+**为什么记这一笔**：新增一种 job 语义（跨层协议 + 新的执行器 + 新的产物面），并抓到两个真缺陷；
+决策与理由（含四条被否决的备选）见 `DECISIONS.md` §2026-09-17-goalnn-halfoffline-run。
+
+### 需求与判据（用户 2026-09-17）
+
+> 「云机从 hub 领到训练任务（课程、初始权重、代码）后，即使本机 hub 一直失联，它也能全程自主
+> 完成训练，并以 kaggle/colab 官方支持方式提供产物（每轮权重和指标）打包下载。」
+
+三问已答：**一次领 = 整段**；**逐轮权重 + 指标 + 可续跑**；**不在云上跑评估**（只记训练指标）。
+
+### 形状：kind="run" 是 kind="iter" 的延长，不是 fork
+
+```
+hub（哨兵）                                  云机（自主段执行器）
+  build_plan → plan.json（对集入参 + argv 模板 + end_it）
+  publish_job(kind="run", plan_bytes=…)  ───► payload: init_weights.json + plan.json + ts_code.zip
+                                              ① verify_plan_file（sha / 形状 / 全段对集指纹）→ 一局不跑就拒收
+                                              ② run_job(it)（与 kind=iter **同一**执行链）
+                                              ③ run_plan_job 尾巴：逐轮合成同构 iter job → run_job
+                                                 └ 每轮回传的权重 = 下一轮 payload 的 init_weights.json
+                                                 └ opt 走 blob_cache（Adam 动量不丢）
+                                              ④ 逐轮落产物：it-NNN/{weights.json,opt.tar} + metrics.jsonl
+                                                 + state.json + LATEST.zip；收尾 artifacts.zip
+  wait_job(timeout=8h)  ◄───── 合并结果（末轮形状 + iters 明细 + it_end + artifacts 元信息）
+  verify_and_land（零新代码：三个指纹逐字段对的是本 job 自己）
+  run_segment 事件（逐轮指标进控制台）+ it 跳到段尾，照常走本机结算/归档
+```
+
+轮次语义的一条硬约束：**段中间那些轮不派发本机 eval**——它们的权重不在本机归档里，用活指针充
+`W(it-1)` 就是刚修过的「eval 标签超前一轮」。段尾权重由下一轮（或收官 drain）正常派发。
+
+### 两个被测试抓出来的真缺陷（都已进回归）
+
+| # | 缺陷 | 后果 | 修法 |
+|---|---|---|---|
+| 1 | `ArtifactStore.start` 用**调用方传入**的计划 sha 做续跑判据，而目录写盘的是另一份格式（hub 走 `dump_plan` 的规范形 `sort_keys=True`） | 新会话拿同一目录永远算不出相等值 ⇒ 每次都被当成**新段**从 `start_it` 重跑；「关掉会话明天接着跑」静默退化成重跑，只有对着日志才看得出来 | 判据改为**写盘之后**对磁盘上的 `plan.json` 算 sha（自描述）；传入值另存 `plan_sha256_declared` 供审计 |
+| 2 | 起点快照（`_seed_start_checkpoint`）往 `metrics.jsonl` 写一行（无 agg/report） | 「账本一行 = 一轮、it 唯一」失效，并逼下游用「过滤掉没有 report 的行」绕开——用过滤器掩盖一条本不该写的行 | `checkpoint(..., row=None)` = 只落 checkpoint 不记账；`_combined` 的 report 过滤器随之删掉 |
+
+两个都是**先写测试、后改代码**；`test_standalone_resume_continues_without_duplicate_rows` 就是缺陷 1 的回归。
+
+### 验证面（本机可跑的）
+
+- `tests/test_plan.py`(8)：对集重放逐位一致（rotate / curriculum / seed-rotate 三模式）、
+  argv 模板重定向恒等、`PAIR_ARG_FIELDS` 漏字段在**发布期**就红、`pairs_fp` 顺序敏感。
+- `tests/test_run_loop.py`(11)：**注入 run_job 替身**跑整条链——替身自己开 payload 验
+  `init_weights.json` 的字节（所以「权重逐轮传下去了」不是自报），逐轮 job 与 kind=iter 逐字段同构
+  （逐局 stage/seed、`--wver` = 该轮 init 的 sha），合并结果**过 `validate_result`**；预算/上限/重领/
+  失败四种停机点都能续跑且账本 `it` 唯一。
+- `tests/test_run_segment.py`(12)：段长与等待上限的解析优先级（CLI > courses > rl > 缺省关）、
+  `max_iters=n-1` 的区间语义、`publish_job(kind="run")` 把 `plan.json` 放进 payload 且 manifest 记 sha、
+  缺计划/缺规格/带本地 shard/缺 ts_code sha 一律拒发、同一计划重发同 job_id、发布结果过协议层校验。
+- 门禁：nn python gate（ruff + mypy + pytest tests/ + e2e）**1147 passed / exit 0**；
+  根 `bun run check` **1853 pass / 0 fail**。
+
+### 未做（不写成已做）
+
+① 真云端（Kaggle/Colab）端到端跑一次——本机无 GPU 节点，`run_remote` 这条路没跑过；
+② 段内**进度上报到控制台**（长段期间 hub 只有等待，逐轮指标要等段尾才可见）；
+③ 控制台启动弹窗的 `run_iters` 选项（现只有 rl-config / CLI）；
+④ push 传输的等待预算仍 1800s（半离线的自然形态是 pull：Kaggle worker 在会话内长期驻留）。
+
 ## §60 节点确定性失败带原因回传控制面：`POST /jobs/{id}/fail` + `/result` 410（2026-09-17）
 
 **为什么记这一笔**：这是**跨层协议**新增（新端点、新终局状态、新的失败分类语义），且改了

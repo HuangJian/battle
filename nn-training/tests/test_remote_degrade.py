@@ -64,8 +64,15 @@ class _Stub(TrainingSteps):
         self.ppo_backend = object()  # type: ignore[assignment]
         self._model = object()
 
-    def _remote_ppo(self, it: int, rollout_spec: dict | None = None) -> dict:
-        """测试替身：签名必须与真身一致（真身 M3 后多一个 rollout_spec 形参并返回 result）。"""
+    def _remote_ppo(
+        self,
+        it: int,
+        rollout_spec: dict | None = None,
+        *,
+        plan_bytes: bytes | None = None,
+        wait_timeout_sec: float = 0.0,
+    ) -> dict:
+        """测试替身：签名必须与真身一致（M3 多 rollout_spec；半离线多 plan_bytes/wait）。"""
         self.remote_calls.append(it)
         if len(self.remote_calls) <= self.fail_times:
             if self.exc is not None:
