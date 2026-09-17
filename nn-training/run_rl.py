@@ -9,6 +9,7 @@ import sys
 import time
 from pathlib import Path
 
+from pid_probe import pid_alive as _pid_alive_impl
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from platform_utils import force_utf8_stdio
 from remote.protocol import coef_active
@@ -93,44 +94,15 @@ def _log_rl_args(src: dict, merged: dict) -> None:
 
 
 def _runrl_pid_alive(pid: int) -> bool:
-    """跨平台的进程存活探测。
+    """跨平台的进程存活探测（委托唯一实现 `pid_probe.pid_alive`）。
 
-    Windows 走 GetExitCodeProcess == STILL_ACTIVE——os.kill(pid, 0) 在 Windows 上
-    是 TerminateProcess(handle, 0)，会把锁持有人直接杀掉。POSIX 上 signal 0 只是
-    存在性探测，安全。（`train/loop_util._pid_alive` 曾因此不复用本实现，2026-09-17
-    已把那一处也改成同口径的安全探测；三处同源，回归见
-    tests/test_pid_probe_windows_safe.py。）
-
-    2026-09-13 修复：原实现把 Windows 分支写成了无条件路径，Linux 一遇**已存在**
-    的锁文件就 AttributeError——陈旧锁永不清理、同课双开变成崩溃而非响亮拒启
-    （P1 验收遗留的 stale 锁让双课验收当场两连崩）。POSIX 分支与 loop_util._pid_alive
-    同款宽捕获：任何探测失败都按"不存活"处理，stale 锁总能被清理。
-
-    pid <= 0 一律判「不活」（POSIX 上 os.kill(0, 0) / os.kill(-1, 0) 命中的是**进程组**
-    语义，会把残缺锁文件里的 0/-1 当成「有人持有」⇒ 同名课永久拒启）。"""
-    if pid <= 0:
-        return False
-    if os.name == "nt":
-        import ctypes
-
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        STILL_ACTIVE = 259
-        k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-        handle = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-        if not handle:
-            return False
-        try:
-            exit_code = ctypes.c_ulong()
-            if not k32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
-                return False
-            return exit_code.value == STILL_ACTIVE
-        finally:
-            k32.CloseHandle(handle)
-    try:
-        os.kill(pid, 0)  # signal 0 = 不发信号，仅探测存在性/权限
-        return True
-    except Exception:
-        return False
+    保留本名字只为调用点稳定。历史教训（都写进 `pid_probe` 模块 docstring）：① Windows 侧
+    `os.kill(pid, 0)` 是 `TerminateProcess`，会把锁持有人直接杀掉；② 2026-09-13 曾把 Windows
+    分支写成无条件路径，Linux 上遇到**已存在**的锁文件就 AttributeError——陈旧锁永不清理、
+    同课双开从「响亮拒启」退化成崩溃（P1 验收被 stale 锁连续打崩两门课）；③ `pid <= 0` 命中的
+    是**进程组**，残缺锁里的 0/-1 会被当成「有人持有」⇒ 同名课永久拒启。
+    """
+    return _pid_alive_impl(pid)
 
 
 def _acquire_run_rl_lock(lock_path: str, *, force: bool = False) -> bool:

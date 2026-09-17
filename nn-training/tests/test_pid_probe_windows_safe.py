@@ -7,7 +7,12 @@ trainer），而且 `except Exception → False` 还会把「我把它杀了」�
 于是陈旧锁被「清理」、双开护栏静默失效。同口径的正确写法 = `GetExitCodeProcess ==
 STILL_ACTIVE`（`run_rl._runrl_pid_alive` / `remote._instance_lock._pid_alive` 一直如此）。
 
-本文件把不变量钉在三处同源的探测上（`train.loop_util` / `run_rl` / `remote._instance_lock`）：
+**2026-09-17 收口后**：实现只有一份（`nn-training/pid_probe.py`），四份薄壳全部委托它——
+`train.loop_util` / `run_rl` / `remote._instance_lock` / `remote.notebook_runtime`（后者原是
+函数内的嵌套闭包，不可测，已提到模块层）；`tools/tmp-clean.py` 是唯一有意保留的副本
+（仓根开发工具不能依赖 nn-training 的包布局），由源码门禁守契约。
+
+本文件把不变量钉在**全部六处入口**上：
 
   A. **Windows 分支只读退出码，绝不调用 `os.kill`**（注入假 kernel32 + 监视 `os.kill`）；
   B. 语义：`STILL_ACTIVE(259)` → 活；其他退出码 / 打不开进程 / GetExitCode 失败 → 不活，
@@ -23,6 +28,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Callable, Iterator
@@ -63,16 +69,50 @@ class _FakeK32:
         self.closed.append(handle)
 
 
+def _load_tmp_clean_probe() -> Callable[[int], bool]:
+    """① `tools/tmp-clean.py` 的 `_pid_alive`（仓根脚本，按文件路径加载——不依赖包布局）。
+
+    它是唯一**有意保留的副本**（仓根开发工具不能依赖 nn-training 的布局），一致性由下面的
+    源码门禁守住。`if __name__ == "__main__"` 保护使加载无副作用。
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_tmp_clean_under_test", NN_ROOT.parent / "tools" / "tmp-clean.py"
+    )
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    # 禁止写字节码：否则每次跑测试都会在**仓根** `tools/` 下撒一个 `__pycache__/`
+    # （未被 .gitignore 覆盖 ⇒ 变成脏工作区）。
+    prev = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.dont_write_bytecode = prev
+    return mod._pid_alive  # type: ignore[no-any-return]
+
+
 def _probes() -> list[tuple[str, Callable[[int], bool]]]:
-    """三处同源的存活探测（懒导入：run_rl 会拉起 torch）。"""
+    """全部存活探测入口（懒导入：run_rl 会拉起 torch）。
+
+    四份薄壳（loop_util / run_rl / _instance_lock / notebook_runtime）现在**全部委托**
+    `pid_probe.pid_alive`；额外把「唯一实现」本身与唯一的保留副本（`tools/tmp-clean.py`）
+    一起纳入同一组断言——它们才是真正跑那段逻辑的地方。
+    """
+    from pid_probe import pid_alive as canonical_probe
     from remote._instance_lock import _pid_alive as instance_probe
+    from remote.notebook_runtime import _pid_alive as notebook_probe
     from run_rl import _runrl_pid_alive as runrl_probe
     from train.loop_util import _pid_alive as loop_probe
 
     return [
+        ("pid_probe.pid_alive（唯一实现）", canonical_probe),
         ("train.loop_util._pid_alive", loop_probe),
         ("run_rl._runrl_pid_alive", runrl_probe),
         ("remote._instance_lock._pid_alive", instance_probe),
+        ("remote.notebook_runtime._pid_alive", notebook_probe),
+        ("tools/tmp-clean.py::_pid_alive（保留副本）", _load_tmp_clean_probe()),
     ]
 
 
@@ -81,7 +121,9 @@ def _windows_env(fake: _FakeK32, kills: list[tuple[int, int]]) -> Iterator[None]
     """把当前进程伪装成 Windows（仅在 with 体内生效；退出前必定还原）。"""
     had_windll = hasattr(ctypes, "windll")
     prev_windll = getattr(ctypes, "windll", None)
-    real_name, real_kill = os.name, os.kill
+    # 两种「我在 Windows 上吗」的写法都要翻：pid_probe 系列看 `os.name`，
+    # tools/tmp-clean.py 看 `sys.platform` —— 只翻一个会让另一个副本走 POSIX 分支被漏测。
+    real_name, real_kill, real_platform = os.name, os.kill, sys.platform
 
     def _spy(pid: int, sig: int) -> None:
         kills.append((pid, sig))
@@ -90,12 +132,14 @@ def _windows_env(fake: _FakeK32, kills: list[tuple[int, int]]) -> Iterator[None]
         raise AssertionError(f"Windows 侧禁止用 os.kill 做存活探测：pid={pid} sig={sig}")
 
     os.name = "nt"
+    sys.platform = "win32"
     os.kill = _spy  # type: ignore[assignment]
     ctypes.windll = SimpleNamespace(kernel32=fake)  # type: ignore[attr-defined]
     try:
         yield
     finally:
         os.name = real_name
+        sys.platform = real_platform
         os.kill = real_kill  # type: ignore[assignment]
         if had_windll:
             ctypes.windll = prev_windll  # type: ignore[attr-defined]
@@ -193,11 +237,92 @@ def test_pid_zero_lock_is_not_treated_as_live(tmp_path: Path) -> None:
 # ────────────────────────── 源码门禁：安全分支不得被删回去 ──────────────────────────
 
 
-def test_windows_guard_present_in_all_three_probes() -> None:
-    """行程门禁：这三处探测必须保留 `os.name == "nt"` 分支（防回退成裸 os.kill）。"""
-    for rel in ("train/loop_util.py", "run_rl.py", "remote/_instance_lock.py"):
+def _os_kill_zero_lines(path: Path) -> list[int]:
+    """源码里真调用 `os.kill(<pid>, 0)`（= 存活探测）的行号——用 AST 而非字符串匹配。
+
+    两个理由：① 新写的 docstring 里到处在讨论 `os.kill(pid, 0)` 这个坑，字符串匹配会把
+    注释/文档算成违规；② **只抓信号 0**：`os.kill(pid, 15)`（SIGTERM）是**故意发的信号**
+    （`notebook_runtime` 关闭 push 服务时就是这么干的），那是正常用法，不属本不变量。
+    """
+    import ast
+
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    out: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or len(node.args) < 2:
+            continue
+        fn, sig = node.func, node.args[1]
+        if not (
+            isinstance(fn, ast.Attribute)
+            and fn.attr == "kill"
+            and isinstance(fn.value, ast.Name)
+            and fn.value.id in {"os", "_os", "posix"}
+        ):
+            continue
+        if isinstance(sig, ast.Constant) and sig.value == 0:
+            out.append(node.lineno)
+    return out
+
+
+def _production_py_files() -> list[Path]:
+    """nn-training 的生产 .py（排除点目录/.venv、__pycache__、tests/、e2e/）。"""
+    out: list[Path] = []
+    for path in sorted(NN_ROOT.rglob("*.py")):
+        parts = path.relative_to(NN_ROOT).parts
+        if any(p.startswith(".") for p in parts) or "__pycache__" in parts:
+            continue
+        if parts[0] in {"tests", "e2e"}:
+            continue
+        out.append(path)
+    return out
+
+
+def test_os_kill_probe_exists_in_exactly_one_place() -> None:
+    """行程门禁（唯一实现不变量）：`nn-training/` 里真调用 `os.kill` 的文件**只能有一个**。
+
+    这就是这类隐患反复出现的根因面：从前是「三处同源」——每加一个调用点就多一份可漂移的
+    实现（2026-09-17 一天内就在 `loop_util` / `notebook_runtime` 两处踩到不同的坑）。
+    现在所有入口都委托 `pid_probe.py`，于是「Windows 安全」只需在一个地方成立。
+    """
+    offenders = [
+        p.relative_to(NN_ROOT).as_posix() for p in _production_py_files() if _os_kill_zero_lines(p)
+    ]
+    assert offenders == ["pid_probe.py"], (
+        f"`os.kill(pid, 0)` 存活探测只允许出现在 pid_probe.py（唯一实现），实际: {offenders} —— "
+        "新增调用点请 `from pid_probe import pid_alive`，不要再复制实现"
+    )
+    # 守住“唯一”的另一面：pid_probe 的 POSIX 分支必须真的存在（别为了过门禁把它删了，
+    # 那会让 Linux/本机全部判「不活」）
+    assert any(
+        "os.kill" in line and "pid, 0" in line
+        for line in (NN_ROOT / "pid_probe.py").read_text(encoding="utf-8").splitlines()
+        if not line.strip().startswith("#")
+    ), "pid_probe 的 POSIX 分支不得缺失"
+    # 且它必须靠 `os.name == "nt"` 分流（Windows 侧禁 os.kill）
+    assert 'os.name == "nt"' in (NN_ROOT / "pid_probe.py").read_text(encoding="utf-8")
+
+
+def test_delegation_shells_do_not_reimplement() -> None:
+    """四份薄壳必须**委托**而不是复制：源码里不得再出现 `ctypes.windll`（Windows 分支的标志）。"""
+    for rel in (
+        "train/loop_util.py",
+        "run_rl.py",
+        "remote/_instance_lock.py",
+        "remote/notebook_runtime.py",
+    ):
         src = (NN_ROOT / rel).read_text(encoding="utf-8")
-        assert 'os.name == "nt"' in src, f"{rel}: 缺少 Windows 安全分支（os.kill 会杀进程）"
+        assert "from pid_probe import" in src, f"{rel}: 必须从 pid_probe 导入唯一实现"
+        assert re.search(r"return\s+\w*pid_alive\w*\(\s*pid\s*\)", src), (
+            f"{rel}: 探测函数体必须是 `return ...pid_alive(pid)`（不得再自己写实现）"
+        )
+        assert "import ctypes" not in src, f"{rel}: 不得再自带 Windows 分支（应委托唯一实现）"
+
+
+def test_tmp_clean_copy_keeps_guard_and_windows_branch() -> None:
+    """仓根工具的唯一保留副本：`pid <= 0` 护栏与 Windows 分支都必须**同时**在。"""
+    src = (NN_ROOT.parent / "tools" / "tmp-clean.py").read_text(encoding="utf-8")
+    assert "if pid <= 0:" in src, "缺少 `pid <= 0` 护栏：残锁里的 0/-1 会让运行目录永不收敛"
+    assert 'sys.platform != "win32"' in src, "缺少 Windows 安全分支（os.kill 在 Windows 会杀进程）"
 
 
 if __name__ == "__main__":

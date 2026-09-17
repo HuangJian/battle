@@ -2083,7 +2083,13 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   断言该分支的用例）。
 - **违反后果**：把封禁检查挪回 token 校验之前 = 整机自锁；让回环重新计数/封禁 = 隧道流量与本机组件
   互相连坐；停止 trainer 只杀账本 pid = 「停止→启动」死锁回归。
-- **回归测试**：`nn-training/tests/test_hub_auth_d9_order.py`（11 → **19**，2026-09-17 追加 8 例：
+- **回归测试（第二批）**：`nn-training/tests/test_pid_probe_windows_safe.py`（6 → **8**，覆盖六处入口，
+  含 AST 唯一实现门禁与 tmp-clean 副本契约）；`dashboard/tests/training-port-reclaim.test.ts`
+  （6 → **12**：stepCloudflared 接线门禁、tunnelOwnsMetrics 注入/真实监听/未知清单三组）。
+  A/B 取证（`tmp/probe-red.log`、`tmp/cf2_probe.py` 输出）：detached worktree 对 HEAD 跑新测试
+  6 红（含 `tmp-clean._pid_alive(0) = True`、`_pid_alive(-1) = True` 的行为级红）；cloudflared 侧
+  HEAD 上 `stepCloudflared` 既无 `reclaimPort` 也无 `tunnelOwnsMetrics`、就绪判定是裸 `tunnelEdgeReady`。
+- **回归测试（第一批）**：`nn-training/tests/test_hub_auth_d9_order.py`（11 → **19**，2026-09-17 追加 8 例：
   归因矩阵 / 隧道来源 5 次即封且第 6 次 403 / 被封归因 IP 持合法 token 仍放行 / 本机无头组件仍豁免 /
   直连对端自带头不算数 / 伪造头无害 / 访问日志带 `src=`（含直连与无头两负例）/
   `headers is None` 的早期错误路径不抛）、`nn-training/tests/test_instance_lock.py`（9，含真进程同时三启
@@ -2096,14 +2102,39 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   数小时的 PPO job，`/ping` 失败（如 token 临时不匹配）就回收它 = 直接炮掉在途 job；而该路径
   现在会先复用 `/ping` 通的幸存者，不通时拿不到锁也会**响亮拒绝并指向日志**（含持有者 PID 与
   锁路径），足以人工处置 —— 要不要让控制台代劳杀进程，留待用户拍板。
-- **铁律（新增，三处同源）**：**存活探测在 Windows 侧禁止用 `os.kill(pid, 0)`**——它是
+- **铁律（新增，实现唯一化）**：**存活探测在 Windows 侧禁止用 `os.kill(pid, 0)`**——它是
   `TerminateProcess(handle, 0)`，会把被探测的进程**直接杀掉**；且 `except Exception → 不活` 会把
-  「我杀了它」记成「它本来就是死的」，护栏静默失效。一律走 `GetExitCodeProcess == STILL_ACTIVE`；
-  `pid <= 0` 一律判不活（POSIX 上 `os.kill(0/-1, 0)` 命中**进程组**，会把残缺锁当成活人持有 ⇒
-  同名课永久拒启）。覆盖：`train/loop_util.py::_pid_alive`（2026-09-17 修，此前正是裸 `os.kill`）、
-  `run_rl.py::_runrl_pid_alive`（同日补 `pid<=0` 护栏）、`remote/_instance_lock.py::_pid_alive`；
-  回归 + 行程门禁：`nn-training/tests/test_pid_probe_windows_safe.py`（注入假 kernel32，断言
-  Windows 分支**零 os.kill**）。同类待收口（本次未动，勿误以为已安全）：
-  `remote/notebook_runtime.py` 内的 `_pid_alive`、`tools/tmp-clean.py`。
+  「我杀了它」记成「它本来就是死的」，护栏静默失效；`pid <= 0` 一律判不活（POSIX 上
+  `os.kill(0/-1, 0)` 命中**进程组**，会把残缺锁当成活人持有 ⇒ 同名课永久拒启 / tmp-clean 永不收敛）。
+  **唯一实现 = `nn-training/pid_probe.py::pid_alive`**（stdlib-only 顶层模块，与 `platform_utils`
+  同层；`remote/` 与 `train/` 都直接 import 它而**不经过对方的 `__init__`**——`remote/` 要独立
+  打进 code.zip、`train/loop_util` 刻意保持 torch-free，两个方向都不能反向依赖）。
+  四份具名薄壳全部**委托**它：`train/loop_util._pid_alive`、`run_rl._runrl_pid_alive`、
+  `remote/_instance_lock._pid_alive`、`remote/notebook_runtime._pid_alive`（后者原是**函数内的
+  嵌套闭包**、不可被测试导入，已提到模块层）。**唯一的保留副本** = 仓根 `tools/tmp-clean.py`
+  （根级开发工具不能依赖 nn-training 的包/路径布局），按契约自带 Windows 分支 + `pid<=0`，
+  一致性由源码门禁守住。
+  **为什么必须唯一**（18 小时内同类隐患在 3 个不同文件各自踩了一次：`loop_util` 裸 `os.kill`、
+  `notebook_runtime` 嵌套闭包+裸 `os.kill`、`tmp-clean` 缺 `pid<=0`）：「每加一个调用点就多一份
+  可漂移的实现」就是这类 bug 的根因面；收敛成一份后，“Windows 安全”只需在一个地方成立。
+  回归 + 行程门禁：`nn-training/tests/test_pid_probe_windows_safe.py`（六处入口全纳入同一组断言：
+  注入假 kernel32 断言 Windows 分支**零 os.kill**；AST 门禁断言 `nn-training/` 里真调用
+  `os.kill(pid, 0)` 的文件**只有 `pid_probe.py` 一个**——已排除注释/docstring 与
+  `os.kill(pid, 15)` 这类**故意发的信号**；并断言四份薄壳不得再自带 `import ctypes`）。
+- **隧道 metrics 端口的双绑窗口**（同日追加）：cloudflared 是**第三方二进制**，没法在它内部
+  装实例锁（hub/worker 那层是 python 自己拿 `O_CREAT|O_EXCL`）⇒ 控制台侧回收就是它**唯一**
+  的一道闸。`stepCloudflared` 在 spawn 前 `reclaimPort(metricsPort)`（与 hub/selfNode 同族），
+  堵住 `supersedeSlotTunnels` 看不见的那类幸存者（孤儿 / 登记丢失 / 控制台重启竞态）——
+  metrics 端口既是 `--metrics` 的 bind 目标、又是 `/ready` 的探测目标，被占着会**同时**造成
+  「新隧道 bind 失败」与「就绪读数读自旧僵尸」。后者另加一道：新增
+  `hub.ts::tunnelOwnsMetrics(pid, port)`，就绪判定改为「**本进程持有该端口** ∧ /ready 200」，
+  避免旧僵尸的 200 被当成新隧道的就绪（URL 来自新日志、连接状态却读自旧 metrics）。
+  探测不可用（lsof/netstat 无输出）时**返回 true 不判死**——否则工具缺失会让所有隧道启动失败；
+  fail-closed 只落在「确知占用者不是自己」那一侧。
+  **故意未改**：监督器（`server.ts::restart`）的重启路径不接回收——它杀的是账本里确切的
+  cloudflared pid、紧接着拉起同一条 spec，没有孤儿窗口（kill 失败时回收也一样杀不掉），
+  而 `killPid → launchSpec` 的释放延迟在 Windows 上随进程退出立即释放监听口。残留（已知）：
+  该路径的就绪复核仍只认 `/ready`，「旧僵尸答 200」的误判面在那里仍存在（需配合端口回收
+  失败才能出现，属低概率残留，未一并修）。
 
 

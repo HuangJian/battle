@@ -35,6 +35,8 @@ import time
 from pathlib import Path
 from typing import Any, cast
 
+from pid_probe import pid_alive
+
 # cell 端 /code 引导（fetch+unpack+sys.path）已完成；本模块只管运行时。
 
 
@@ -249,6 +251,17 @@ def run_pull_worker(cfg: dict[str, Any], log) -> int:
 # ════════════════════════ Push 模式 runner ════════════════════════
 
 
+def _pid_alive(pid: int | None) -> bool:
+    """存活探测（委托唯一实现 `pid_probe.pid_alive`）。
+
+    2026-09-17 收口：此处原是**函数内的嵌套闭包**，且直接 `os.kill(int(pid), 0)` —— 两个问题：
+    ① 在 Windows 上 `os.kill(pid, 0)` 是 `TerminateProcess(handle, 0)`，而本函数用来判断
+    bootstrap 已起的 `serve_pid` 还活着吗（只读查询）⇒ 会**把 worker_server 直接杀掉**；
+    ② 嵌套定义使其不可被测试导入，只能靠人读代码发现。现在提到模块层并全程委托唯一实现。
+    """
+    return pid_alive(pid)
+
+
 def run_push_worker(cfg: dict[str, Any], log) -> int:
     """启动 worker_server + cloudflared 隧道，等 hub 推 job。返回码同 pull。
 
@@ -263,15 +276,6 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
     work_dir.mkdir(parents=True, exist_ok=True)
     boot_dir = Path(str(cfg.get("code_dir") or "/tmp/worker-code"))
     serve_log = work_dir / "serve.log"
-
-    def _pid_alive(pid: int | None) -> bool:
-        if not pid:
-            return False
-        try:
-            os.kill(int(pid), 0)
-            return True
-        except OSError:
-            return False
 
     if already:
         serve_pid = int(already.get("serve_pid") or 0)

@@ -48,7 +48,18 @@ RUN_IT_RE = r"it\d+"
 
 
 def _pid_alive(pid: int) -> bool:
-    """跨平台进程存活探测（Windows 用 GetExitCodeProcess，同 run_rl.py 口径）。"""
+    """跨平台进程存活探测（Windows 用 GetExitCodeProcess，与 `nn-training/pid_probe.py` 同口径）。
+
+    **不复用 `nn-training/pid_probe.py`**（2026-09-17 收口时的选择）：本脚本是**仓根**开发工具，
+    不能依赖 nn-training 的包/路径布局（那里是可独立打包发运的训练代码），故按契约重复一份
+    Windows 安全分支；一致性由 `tests/tmp-clean-probe-guard.test.ts` 的源码门禁守住。
+
+    `pid <= 0` 一律判「不活」（POSIX 上 `os.kill(0, 0)` / `os.kill(-1, 0)` 命中的是**进程组**
+    语义、实测成功）：残缺/损坏的 `.run_rl.lock` 里若是 0/-1，会被当成「训练还在跑」⇒
+    `training_running()` 恒真 ⇒ 运行目录**永远不再收敛**。
+    """
+    if pid <= 0:
+        return False
     if sys.platform != "win32":
         try:
             os.kill(pid, 0)

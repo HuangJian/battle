@@ -18,7 +18,7 @@ import path from 'path'
 import { DASHBOARD_ROOT } from '../src/core/paths'
 import { portOwnerPids } from '../src/core/proc'
 import { killPid, pidAlive, portListen, waitUntil } from '../src/core/net'
-import { reclaimPort } from '../src/stack/hub'
+import { reclaimPort, tunnelOwnsMetrics } from '../src/stack/hub'
 
 // ────────────────────────── 单测：可注入依赖（跨平台确定性） ──────────────────────────
 
@@ -156,4 +156,65 @@ describe('接线：启动步骤在 spawn 前回收端口', () => {
       expect(call).toBeLessThan(spawn) // 且必须早于 spawn（先清口再起）
     })
   }
+
+  it('stepCloudflared 在第一次 spawnBg 之前回收 metrics 端口', () => {
+    // cloudflared 是**第三方二进制**：不能在它内部装实例锁（hub/worker 那一层是 python
+    // 自己拿 `O_CREAT|O_EXCL`），所以控制台侧的端口回收就是它唯一的一道闸——漏接就等于
+    // 双绑窗口完全敞开（第二个 `--metrics` bind 失败，隧道静默不属于本进程）。
+    const body = bodyOf(src, 'stepCloudflared')
+    const call = body.indexOf('reclaimPort')
+    const spawn = body.indexOf('spawnBg')
+    expect(call).toBeGreaterThan(-1)
+    expect(spawn).toBeGreaterThan(-1)
+    expect(call).toBeLessThan(spawn)
+  })
+
+  it('stepCloudflared 的就绪判定必须带「端口是我的」', () => {
+    // 只认 /ready 200 是不够的：回收失败/晚到位的僵尸也能答 200（那是别人的隧道）。
+    const body = bodyOf(src, 'stepCloudflared')
+    expect(body).toContain('tunnelOwnsMetrics')
+  })
+})
+
+// ────────────────────────── 就绪归属：/ready 必须由**本隧道进程**应答 ──────────────────────────
+
+describe('tunnelOwnsMetrics（注入依赖）', () => {
+  it('占用者就是自己 → true；确知是别人 → false', async () => {
+    expect(await tunnelOwnsMetrics(123, 8788, { ownerPids: () => [123] })).toBe(true)
+    expect(await tunnelOwnsMetrics(123, 8788, { ownerPids: () => [123, 9] })).toBe(true)
+    expect(await tunnelOwnsMetrics(123, 8788, { ownerPids: () => [999] })).toBe(false)
+  })
+
+  it('探测不可用（空清单）→ 不判死（否则 lsof 缺失会让所有隧道启动失败）', async () => {
+    expect(await tunnelOwnsMetrics(123, 8788, { ownerPids: () => [] })).toBe(true)
+  })
+
+  it('缺 pid / 缺 port → false（没东西可归属）', async () => {
+    expect(await tunnelOwnsMetrics(0, 8788, { ownerPids: () => [0] })).toBe(false)
+    expect(await tunnelOwnsMetrics(123, 0, { ownerPids: () => [123] })).toBe(false)
+  })
+})
+
+describe('tunnelOwnsMetrics（真实监听进程）', () => {
+  const started: number[] = []
+  afterAll(async () => {
+    for (const pid of started) {
+      try {
+        if (pidAlive(pid)) await killPid(pid)
+      } catch {
+        /* already dead */
+      }
+    }
+  })
+
+  integrationIt('真监听者被认成持有者；console 自己不是', async () => {
+    const port = await freePort()
+    const child = spawnListener(port)
+    started.push(child.pid)
+    expect(await waitUntil(() => portListen(port), 8000, 100)).toBe(true)
+    if (portOwnerPids(port).length === 0) return // 平台探测不可信 → 跳过判定
+
+    expect(await tunnelOwnsMetrics(child.pid, port)).toBe(true)
+    expect(await tunnelOwnsMetrics(process.pid, port)).toBe(false)
+  })
 })

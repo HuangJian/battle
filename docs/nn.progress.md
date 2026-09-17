@@ -105,11 +105,42 @@ A/B 行为取证（`tmp/cf-red-behavior.log`，detached worktree 跑修复前代
   `pathlib` 会把路径解析成 `WindowsPath`，pytest 在报错/cache 阶段直接 INTERNALERROR。
 - **同类待收口**：`remote/notebook_runtime.py::_pid_alive`、`tools/tmp-clean.py`（同名写法，未动）。
 
+### 三补二、存活探测唯一化 + 隧道 metrics 端口闸（2026-09-17 第三批，用户点名的两个收口）
+
+**存活探测唯一化**（`nn-training/pid_probe.py`，新增）：18 小时内同类隐患在 3 个不同文件各自
+踩过一次——`loop_util` 裸 `os.kill`（会杀锁持有者）、`notebook_runtime` **嵌套闭包**+裸 `os.kill`
+（不可测，且用来判断 bootstrap 已起的 `serve_pid` 是否还活 ⇒ 在 Windows 上会把 worker_server
+直接杀掉）、`tmp-clean` 缺 `pid<=0`（残锁里的 0/-1 命中**进程组**⇒ `training_running()` 恒真 ⇒
+运行目录永远不再收敛，实测 `_pid_alive(0) = True`）。根因面 = 「每加一个调用点就多一份可漂移的
+实现」，故收敛为**唯一实现** `pid_probe.pid_alive`（stdlib-only 顶层模块，与 `platform_utils` 同层，
+`remote/` 与 `train/` 都直接 import 它——两方向都不能反向依赖对方的包）；四份具名薄壳全部委托；
+**唯一保留副本** = 仓根 `tools/tmp-clean.py`（根级开发工具不依赖 nn-training 布局），契约由源码门禁守。
+门禁升级：`test_pid_probe_windows_safe.py` 现在把**六处入口**放进同一组断言，并用 AST 断言
+`nn-training/` 里真调用 `os.kill(pid, 0)` 的文件**只有 `pid_probe.py`**（AST 而非字符串：新写的
+docstring 到处在讨论这个坑，且 `os.kill(pid, 15)` 是**故意发的信号**、不属本不变量）。
+
+**隧道 metrics 端口闸**（`dashboard/src/stack/hub.ts`）：cloudflared 是**第三方二进制**，没法在
+它内部装实例锁（hub/worker 那层是 python 自己拿 `O_CREAT|O_EXCL`）⇒ 控制台侧回收是它**唯一**的
+一道闸。`stepCloudflared` 在 spawn 前 `reclaimPort(metricsPort)`（与 hub/selfNode 同族），
+堵住 `supersedeSlotTunnels` 看不见的幸存者（孤儿/登记丢失/控制台重启竞态）。metrics 端口既是
+`--metrics` 的 bind 目标、又是 `/ready` 的探测目标，被占着会**同时**造成「新隧道 bind 失败」与
+「就绪读数读自旧僵尸」；后者另加 `tunnelOwnsMetrics(pid, port)`：就绪 = 「本进程持有该端口 ∧
+/ready 200」。探测不可用（清单为空）**返回 true 不判死**——否则 lsof 缺失会让所有隧道启动失败；
+fail-closed 只落在「确知占用者不是自己」那一侧。
+
 ### 四、验收
 
 - `nn-training/tests/test_hub_auth_d9_order.py`（11 例）、`nn-training/tests/test_instance_lock.py`（9 例，
   含真进程顺序双启被拒 / 同时三启恰好存活一个）、`dashboard/tests/trainer-lock-release.test.ts`（13 例）。
 - A/B 取证：detached worktree 对 HEAD 跑新测试 → 红（`assert 403 == 200`；日志里 127.0.0.1 被 BLOCKED）。
+- 第三批（存活探测/隧道闸）：`test_pid_probe_windows_safe.py` 6 → **8 例**、
+  `dashboard/tests/training-port-reclaim.test.ts` 6 → **12 例**；A/B 红：worktree 对 HEAD 跑新测
+  6 红（含行为级 `tmp-clean._pid_alive(0) = True`），cloudflared 侧 HEAD 上既无 `reclaimPort`
+  也无 `tunnelOwnsMetrics`、就绪判定是裸 `tunnelEdgeReady`。门禁：nn python gate（205 源文件）✓、
+  `cd dashboard && bun run typecheck && bun run test`（406 例）✓、`bun run check`（1849 例）✓。
+  ⚠️ 本批 gate **首跑红过一次**：`tests/test_remote_ppo.py::test_hub_server_auth_and_job_lifecycle`
+  报 `Con…`（连接错误）——单跑该文件绿、`--maxfail=99` 单跑绿、重跑全量 gate 也绿 ⇒ 满编 `-n 4`
+  下的**负载型 flake**（同 §313 已归档的那一类），与本次改动无关（日志已删，仅存档此判定）。
 - 门禁：`bash tools/githook/nn-python-gate.sh` ✓；`cd dashboard && bun run typecheck && bun run test` ✓；
   `bun run check` ✓。决策记录：DECISIONS §2026-09-17-hub-restart-deadlock-hardening。
 

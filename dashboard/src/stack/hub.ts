@@ -119,6 +119,34 @@ export async function reclaimPort(port: number, io: ReclaimPortIO = {}): Promise
   return struck
 }
 
+/** tunnelOwnsMetrics 的可注入依赖（测试用；默认走 OS 进程表）。 */
+export interface MetricsOwnershipIO {
+  ownerPids?: (port: number) => number[]
+}
+
+/** 该 metrics 端口上的 `/ready` 是不是**本隧道进程**答的？
+ *
+ *  **为什么光看 /ready 200 不够**（与 reclaimPort 同族的第二半，2026-09-17）：
+ *  `reclaimPort` 只能回收**探测得到**的占用者——回收失败（权限不足）或占用者晚到位时，
+ *  `--metrics` bind 失败的 cloudflared 会「活着但不持有 metrics 端口」，而 `tunnelEdgeReady`
+ *  只要有进程答 `/ready` 200 就返回 true ⇒ **旧僵尸的 200 被当成新隧道的就绪**，控制台报
+ *  「隧道已就绪」而实际那条隧道根本不属于刚 spawn 的进程（URL 来自新日志、连接状态却读自旧
+ *  metrics）。故就绪判定 = 「自己持有该端口」∧「/ready 200」。
+ *
+ *  **空清单（lsof/netstat 不可用）= 探测不可用 ⇒ 返回 true**：不因此判死，否则探测工具
+ *  缺失会让**所有**隧道启动失败。只有**确知**占用者不是自己时才判 false（fail-closed 只
+ *  落在“确知错”的那一侧）。
+ */
+export async function tunnelOwnsMetrics(
+  pid: number,
+  metricsPort: number,
+  io: MetricsOwnershipIO = {},
+): Promise<boolean> {
+  if (!pid || !metricsPort) return false
+  const owners = (io.ownerPids ?? portOwnerPids)(metricsPort)
+  return owners.length === 0 || owners.includes(pid)
+}
+
 // ────────────────────────── 组件步骤 ──────────────────────────
 
 /** self-node（sampler-agent）步骤。 */
@@ -252,6 +280,13 @@ export async function stepCloudflared(
   // `--metrics` bind 失败即退。监督器只重启被哨兵变化的活进程，杀掉 + 清账后就无复活。
   const superseded = await supersedeSlotTunnels(course, slot)
   if (superseded.length > 0) ok(`已接管 slot ${slot} 的隧道（原属 ${superseded.join('、')}）`)
+  // 端口回收（必须在 spawn 前，2026-09-17 同族修复）：cloudflared 是**第三方二进制**，
+  // 没法在它内部装实例锁（hub/worker 是 python 自己拿 `O_CREAT|O_EXCL`），所以控制台侧的
+  // 回收就是它唯一的一道闸。supersede 只看得见**账本里**的同槽隧道，挡不住孤儿/登记丢失/
+  // 控制台重启竞态留下的幸存者；而 metrics 端口既是 `--metrics` 的 bind 目标、又是后面
+  // `/ready` 的探测目标，被幸存者占着会同时造成「新隧道 bind 失败」与「就绪读到别人的隧道」。
+  const reclaimed = await reclaimPort(metricsPort)
+  if (reclaimed.length > 0) ok(`已回收 metrics 端口 ${metricsPort} 的幸存占用者`)
   let url: string | null = null
   let procPid = 0
   let cfLog = ''
@@ -318,10 +353,18 @@ export async function stepCloudflared(
   })
 
   // 隧道死活以本地 /ready 为准（不依赖出网）；穿隧道 ping 失败只降级为警告。
-  const edgeReady = await waitUntil(() => tunnelEdgeReady(metricsPort), 20000, 500)
+  // 归属前置（2026-09-17）：必须确认 metrics 端口是**本进程**持有的，否则旧僵尸答的 200
+  // 会被当成新隧道的就绪（见 tunnelOwnsMetrics）。
+  const edgeReady = await waitUntil(
+    async () =>
+      (await tunnelOwnsMetrics(procPid, metricsPort)) && (await tunnelEdgeReady(metricsPort)),
+    20000,
+    500,
+  )
   if (!edgeReady) {
     fail(
-      'cloudflared edge 连接未注册（20s）——隧道未建立，判定启动失败；基础设施保留，稍后重跑本脚本即可复用',
+      'cloudflared edge 连接未注册（20s）或 metrics 端口非本隧道持有——隧道未建立，' +
+        '判定启动失败；基础设施保留，稍后重跑本脚本即可复用',
     )
     throw new Error('cloudflared edge 未注册')
   }

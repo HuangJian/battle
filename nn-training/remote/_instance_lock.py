@@ -25,12 +25,13 @@ socket 同时 bind 同一端口（后绑定者不报错，静默变成「永远�
   * 持有者活着、命令行读不到（无 `/proc`、`wmic` 不可用）→ **拒启**并打印持有者 pid
     （fail-closed：宁可让操作员确认后删锁，也不静默双监听）。
 
-**为什么不复用 `train/loop_util.py` 的 `acquire_lock`**（曾评估，此处否决）：它的
-`_pid_alive` 在 Windows 上走 `os.kill(pid, 0)` —— 这在 Windows 是
-`TerminateProcess(handle, 0)`，**会把锁持有者直接杀掉**（`run_rl.py::_runrl_pid_alive`
-的注释同样记录了这条不复用理由）。另外 `remote/` 是要打包进 code.zip 的独立包，反向
-依赖 `train/` 会把 hub 的启动链拖进训练侧依赖。故本模块自带安全探测（Windows 走
-`GetExitCodeProcess == STILL_ACTIVE`）。
+**为什么不复用 `train/loop_util.py` 的 `acquire_lock`**（曾评估，此处否决）：它是
+训练侧的流程级锁（面比实例锁大得多），反向依赖 `train/` 会把 hub 的启动链拖进训练侧依赖——
+而 `remote/` 是要独立打进 code.zip 的包。**但存活探测本身现在只有一份**：
+`nn-training/pid_probe.py`（stdlib-only 顶层模块，`remote/` 与 `train/` 都直接 import 它，
+不经过对方的 `__init__`）。历史：此处曾自带一份，理由是当时 `train/loop_util._pid_alive`
+在 Windows 上走 `os.kill(pid, 0)`＝`TerminateProcess`、**会把锁持有者直接杀掉**；2026-09-17
+那份已改为委托同一实现，“三份同源”的漂移面随之归零。
 """
 
 from __future__ import annotations
@@ -38,6 +39,8 @@ from __future__ import annotations
 import os
 import sys
 import time
+
+from pid_probe import pid_alive
 
 __all__ = [
     "acquire_instance_lock",
@@ -52,34 +55,13 @@ _CMD_CLIP = 160
 
 
 def _pid_alive(pid: int) -> bool:
-    """跨平台进程存活探测。
+    """跨平台进程存活探测（委托唯一实现 `pid_probe.pid_alive`）。
 
-    Windows 走 `GetExitCodeProcess == STILL_ACTIVE`；POSIX 用 `signal 0`（只探测存在性）。
-    任何异常一律按「不存活」处理——陈旧锁总能被清理，绝不因为探测本身失败把操作员锁死。
+    本文件早期刻意**不**复用 `train/loop_util._pid_alive`（那一处当时是裸 `os.kill`，在
+    Windows 上会杀死被探测进程）——保留本名字只为调用点稳定；实现与语义现在只有一份，
+    见 `pid_probe` 模块 docstring（Windows `TerminateProcess` / `pid<=0` 进程组 / 宽捕获）。
     """
-    if pid <= 0:
-        return False
-    if os.name == "nt":
-        import ctypes
-
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        STILL_ACTIVE = 259
-        k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-        handle = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-        if not handle:
-            return False
-        try:
-            code = ctypes.c_ulong()
-            if not k32.GetExitCodeProcess(handle, ctypes.byref(code)):
-                return False
-            return code.value == STILL_ACTIVE
-        finally:
-            k32.CloseHandle(handle)
-    try:
-        os.kill(pid, 0)
-        return True
-    except Exception:
-        return False
+    return pid_alive(pid)
 
 
 def proc_cmdline(pid: int) -> str | None:
