@@ -246,6 +246,12 @@ describe('接线门禁', () => {
     expect(branch).toContain("['hubServer', 'localWorker', 'trainingLoop']")
   })
 
+  it('离开 local 的预设会停掉残留 localWorker（否则切 pull/push 后卡片仍亮绿点）', () => {
+    const p = src(path.join('server', 'actions', 'preset.ts'))
+    expect(p).toContain("if (mode !== 'local')")
+    expect(p).toContain("await stopComponent('localWorker', course)")
+  })
+
   it('三条杀进程路径都走整树（stop / 全部停止 / 监督重启），不是裸 killPid', () => {
     for (const rel of [
       path.join('server', 'actions', 'stop.ts'),

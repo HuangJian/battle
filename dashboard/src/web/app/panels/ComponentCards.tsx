@@ -100,9 +100,9 @@ export function ComponentCards({
 
   if (!stateView) return null
   const mains = stateView.components.filter((c) => c.key !== 'workerServe')
-  // 组件卡片固定顺序：hubServer > localWorker > trainingLoop > selfNode > cloudflared
-  // （localWorker 紧跟 hubServer：它消费的就是 hub 的作业队列；两者都可在训练途中独立启停）。
-  const ORDER: string[] = ['hubServer', 'localWorker', 'trainingLoop', 'selfNode', 'cloudflared']
+  // 组件卡片固定顺序：hubServer > trainingLoop > selfNode > localWorker > cloudflared
+  // （localWorker 紧跟 selfNode：本机执行面与采集节点相邻；hub/trainer 居前便于启停）。
+  const ORDER: string[] = ['hubServer', 'trainingLoop', 'selfNode', 'localWorker', 'cloudflared']
   mains.sort((a, b) => ORDER.indexOf(a.key) - ORDER.indexOf(b.key))
   const openCard = mains.find((c) => c.key === open) ?? null
 
@@ -141,17 +141,31 @@ export function ComponentCards({
             >
               <span className={`tc-dot ${dotClass(c)}`} />
               <b>{c.key}</b>
-              {c.mode ? <b className="tc-cc__mode">{c.mode}</b> : null}
-              {c.key === 'trainingLoop' && stateView.pushTarget ? (
+              {(() => {
                 // push 执行面徽章（2026-09-15）：贴在 trainer 卡的模式徽章旁——「job 现在推给谁」
-                // 只有这一个卡上问得出口；active=false 时降调成「配置指向」。
-                <b
-                  className={`tc-cc__push tc-cc__push--${stateView.pushTarget.kind}${stateView.pushTarget.active ? '' : ' tc-cc__push--idle'}`}
-                  title={pushBadgeTitle(stateView.pushTarget)}
-                >
-                  {pushBadgeText(stateView.pushTarget)}
-                </b>
-              ) : null}
+                // 只有这一个卡上问得出口。
+                // 仅当 trainer 正以 push 在跑时展示（c.mode=push 或 active）：config 里的
+                // push_node_url 在切到 pull 后仍会残留，那是「配置指向」不是「正在用」，
+                // 继续上卡会误报「push→云机·不通」（2026-09-16 用户反馈）。
+                // 通信成功（healthy）后「push」与「push→云机」重复——只留后者。
+                const raw = c.key === 'trainingLoop' ? (stateView.pushTarget ?? null) : null
+                const pt = raw && (c.mode === 'push' || raw.active === true) ? raw : null
+                const modeRedundant =
+                  pt !== null && pt.healthy === true && (c.mode === 'push' || pt.active)
+                return (
+                  <>
+                    {c.mode && !modeRedundant ? <b className="tc-cc__mode">{c.mode}</b> : null}
+                    {pt ? (
+                      <b
+                        className={`tc-cc__push tc-cc__push--${pt.kind}${pt.active ? '' : ' tc-cc__push--idle'}`}
+                        title={pushBadgeTitle(pt)}
+                      >
+                        {pushBadgeText(pt)}
+                      </b>
+                    ) : null}
+                  </>
+                )
+              })()}
               {c.key === 'cloudflared' && (c.url || c.secret) ? (
                 // 截断展示 + 全量复制（§361：title 留全量，复制钮拿全量）；复制点击不展开日志详情。
                 <span

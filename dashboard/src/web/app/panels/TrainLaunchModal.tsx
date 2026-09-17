@@ -50,6 +50,17 @@ function writeLocal(key: string, v: string): void {
   }
 }
 
+/** 上次启动记住的 trainer 模式；无/非法则回落服务端 modes.trainerPpo。 */
+function readSavedMode(fallback: 'pull' | 'push' | 'local'): 'pull' | 'push' | 'local' {
+  try {
+    const v = localStorage.getItem(TC_TRAIN_MODE)
+    if (v === 'pull' || v === 'push' || v === 'local') return v
+  } catch {
+    /* ignore */
+  }
+  return fallback
+}
+
 export function TrainLaunchModal({
   open,
   modes,
@@ -60,16 +71,8 @@ export function TrainLaunchModal({
 }: TrainLaunchModalProps) {
   type Mode = 'pull' | 'push' | 'local'
 
-  // trainer 模式偏好：localStorage 优先 → 服务端 modes 兜底
-  const [mode, setMode] = useState<Mode>(() => {
-    try {
-      const v = localStorage.getItem(TC_TRAIN_MODE)
-      if (v === 'pull' || v === 'push' || v === 'local') return v
-    } catch {
-      /* ignore */
-    }
-    return modes.trainerPpo
-  })
+  // trainer 模式偏好：上次启动选择（localStorage）优先 → 服务端 modes 兜底
+  const [mode, setMode] = useState<Mode>(() => readSavedMode(modes.trainerPpo))
 
   const [pushEndpoint, setPushEndpoint] = useState(() => readLocal(TC_PUSH_ENDPOINT))
   const [pushAuthKey, setPushAuthKey] = useState(() => readLocal(TC_PUSH_AUTH))
@@ -130,17 +133,13 @@ export function TrainLaunchModal({
   }, [toggles])
 
   useEffect(() => {
-    if (mode === modes.trainerPpo) return
-    try {
-      localStorage.setItem(TC_TRAIN_MODE, mode)
-    } catch {
-      /* ignore */
+    if (!open) {
+      setPushErr('')
+      return
     }
-  }, [mode])
-
-  useEffect(() => {
-    if (!open) setPushErr('')
-  }, [open])
+    // 每次打开弹窗用「上次启动模式」校准默认选中（组件常驻 mount，useState 只跑一次）。
+    setMode(readSavedMode(modes.trainerPpo))
+  }, [open, modes.trainerPpo])
 
   const applyToggle = (key: string, v: boolean): void => {
     const next = { ...toggles, [key]: v }
@@ -149,6 +148,8 @@ export function TrainLaunchModal({
   }
 
   const handleLaunchClick = (): void => {
+    // 启动即记住本次模式：下次打开弹窗默认继续用它（与服务端 console-state 双保险）。
+    writeLocal(TC_TRAIN_MODE, mode)
     writeLocal(TC_REMOTE_DEGRADE, remoteDegrade ? '1' : '0')
     if (mode !== 'push') {
       onLaunch(mode, { remoteDegrade })

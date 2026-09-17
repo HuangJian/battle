@@ -12,6 +12,7 @@ import { rlConfigSmoke } from '../../stack/smoke'
 import { ConsoleState, saveConsoleState } from './console-state'
 import { ActionError, ActionResult, done, guard, release } from './result'
 import { startComponent, StartCtx } from './start'
+import { stopComponent } from './stop'
 
 // ────────────────────────── 模式预设与开关 ──────────────────────────
 
@@ -84,6 +85,16 @@ export async function startPreset(
             ? ['selfNode', 'workerServe', 'trainingLoop']
             : ['selfNode', 'trainingLoop']
           : ['hubServer', 'localWorker', 'trainingLoop']
+    // 离开 local：清掉上一轮 local 预设留下的 localWorker（进程+登记）。否则切到
+    // pull/push 后卡片仍亮绿点——操作员以为「未启动却在跑」（2026-09-16 用户反馈）。
+    // pull/push 不消费本机独立 worker；停失败不阻断预设（训练主路径更重要）。
+    if (mode !== 'local') {
+      try {
+        await stopComponent('localWorker', course)
+      } catch {
+        /* leftover stop is best-effort */
+      }
+    }
     const ctx: StartCtx = {
       course,
       trainerPpo: mode,
