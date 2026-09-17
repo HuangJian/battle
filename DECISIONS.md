@@ -2058,7 +2058,10 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   数字与探针用法见 `docs/nn.progress.md` §56。同在那一轮量到的一个坑：本机 `HTTPS_PROXY=127.0.0.1:7890`
   而 `NO_PROXY` 不含 `*.trycloudflare.com` ⇒ **任何打隧道 URL 的本机客户端必须绕过代理**
   （不绕会拿回 `SSL: UNEXPECTED_EOF_WHILE_READING`，而 cloudflared 日志看起来完全健康）。
-- **未做（不写成已做）**：M2 的云机绝对值确认与 §4.2 B6（xz preset 3→6）**未跑**；M3（rollout 上云）
-  按 §5.1 门 1 已命中、门 2 待测，且 M2 后上行仅 ~1.2MB ⇒ 留档不做。
+- **B6（xz preset 3→6）已量、不采用**（2026-09-17，3 份真 payload）：体积只 −2.6…−3.0%（~34KB），
+  打包却 +188…+199%（关键路径 +6.3s/轮），按隧道实测 3.5 Mbps 那 34KB 只值 0.08s ⇒ 净亏。
+  结论就写在 `remote/protocol.py` 常量旁（就近表达，防将来重测）。
+- **未做（不写成已做）**：M2 的云机绝对值确认**未跑**；M3（rollout 上云）按 §5.1 门 1 已命中、
+  门 2 待测，且 M2 后上行仅 ~1.2MB ⇒ 留档不做。
 
 
