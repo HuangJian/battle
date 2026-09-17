@@ -15,6 +15,7 @@ import os
 import re
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -563,6 +564,15 @@ class TrainingSteps:
     _stream_meta: dict | None
     _eval_thread: threading.Thread | None
     _eval_gate: threading.Event | None
+    #: 2026-09-17：`_eval_gate` 是否由**我们**提前放行（远端 PPO / 上云轮 / stream
+    #: 轮）。本机 PPO 真接手时用它判断是否需要收回（R6）；无节点时的饥饿放行不算。
+    _eval_gate_early_released: bool
+    #: 本轮收官时仍未结束的 eval 尾巴 `(thread, 派发时刻)`——交给下一轮 rollout 收官
+    #: 这个自然边界收拢（`_sweep_eval_tail`，不站等）。None = 无尾巴。
+    #: 给类级默认值（而不只声明类型）：裸构造的实例（单测脚手架）没有 **init** 赋值。
+    _eval_tail: tuple[Any, float] | None = None
+    #: 本轮 eval 的派发时刻（尾巴的时间基准；None = 本轮未派发评估）。
+    _eval_tail_start: float | None = None
     _rollout_sec: float
     #: M3：本轮节点侧采集墙钟；None = 本轮不在节点采集（本地轮）。必须在这里声明类型
     #: ——只在 _remote_iter 里赋值会被 mypy 推成 float，子类的 `float | None` 就冲突。
@@ -598,7 +608,8 @@ class TrainingSteps:
     _load_sec: Any
     _tail_drain_sec: Any
     _waves_n: Any
-    _eval_join_sec: float
+    #: 本轮主链为 eval 站在外面等的秒数（缺省 0 = 不站等）；类级默认同上。
+    _eval_join_sec: float = 0.0
     #: 动态采集（plan/dynamic-rollout-volume）：None = 本轮课程未开该模式。
     _volume_target: int | None
     _volume_collected: int | None
@@ -933,6 +944,9 @@ class TrainingSteps:
             return
         args = self.args
         traj_dir = self._traj_dir
+        # 本机 PPO 真在跑：若此前按「远端」提前放行了本机份额，现在收回（R6）——
+        # 远端降级的那一轮不得让本机 eval 局与 torch 抢核。
+        self._regate_local_eval()
         # I1 WAL（hy E4/dsf）：提交序列 started/done 台账——重启后 pending() 即
         # 「上一轮提交未完成」的账；本地路径由下方 ppo_ckpt epoch 级断点续跑。
         self._commit_journal().start("ppo_local", str(it))
@@ -977,6 +991,17 @@ class TrainingSteps:
             bc_ref = getattr(self, "_bc_ref", None)
             if bc_ref is not None:
                 kick = kickstart_coef(args, it)
+            # 本机份额提前放行（2026-09-17）：末 `policy.evalLocalEarlyEpochs` 个 epoch
+            # 开始即开闸，让预留尾段与本机 PPO 尾部并行（0 = 不加钩子，R6 原语义）。
+            _gate_hook = self._local_gate_epoch_hook()
+            _upd_kw: dict = {
+                "kl_coef": float(getattr(args, "_kl_coef", 0.0) or 0.0),
+                "ent_coef": getattr(args, "_ent_coef", None),
+                "ref_model": bc_ref,
+                "kickstart_kl": kick,
+            }
+            if _gate_hook is not None:
+                _upd_kw["on_epoch_done"] = _gate_hook
             agg = self._ppo_mod.ppo_update(
                 self._model,
                 self._opt,
@@ -984,10 +1009,7 @@ class TrainingSteps:
                 args.epochs,
                 self._device,
                 ckpt_path=str(traj_dir / "ppo_ckpt"),
-                kl_coef=float(getattr(args, "_kl_coef", 0.0) or 0.0),
-                ent_coef=getattr(args, "_ent_coef", None),
-                ref_model=bc_ref,
-                kickstart_kl=kick,
+                **_upd_kw,
             )
         self._ppo_sec = round(time.time() - t_ppo, 1)  # 本机 PPO：真训练秒 == 往返秒
         self._ppo_cloud_sec = self._ppo_sec
@@ -1823,16 +1845,110 @@ class TrainingSteps:
         if bak:
             log(f"[run_rl] weights archived -> {bak}")
 
+    # ------------------------------------------------- in-loop eval 墙钟（2026-09-17）
+
+    def _eval_policy_cfg(self) -> dict:
+        """rl-config 的 policy 块（每轮热读；见 loop_core 的 `_last_dist_cfg`）。"""
+        return (getattr(self, "_last_dist_cfg", None) or {}).get("policy") or {}
+
+    def _eval_join_soft_sec(self) -> float:
+        """PPO 收官后的软等上限（policy.evalJoinSoftSec；默认 30s，0 = 完全不站等）。
+
+        2026-09-17 用户指令：先前的硬编码 180s 把 eval 尾巴整段暴露在 PPO 之后
+        （本机份额又只在 `_join_eval` 才放行 ⇒ 叠加成 PPO 后的第二次串行等待）。
+        """
+        from rl.eval_local import eval_join_soft_sec
+
+        return eval_join_soft_sec(self._eval_policy_cfg())
+
+    def _regate_local_eval(self) -> None:
+        """本机 PPO 接手本轮 ⇒ 收回「提前放行」，恢复 R6（本机份额让位 PPO）。
+
+        只收回**我们自己**提前放的 gate（`_eval_gate_early_released`）：无节点时
+        `release_local_gate_if_starved` 放行的 gate 不动（否则本机局被卡到收官）。
+        """
+        if not getattr(self, "_eval_gate_early_released", False):
+            return
+        if self._eval_gate is not None and self._eval_gate.is_set():
+            self._eval_gate.clear()
+            log("[eval] 本机 PPO 接手本轮 —— 本机份额重新让位（R6；等到 _join_eval 或末 epoch）")
+        self._eval_gate_early_released = False
+
+    def _local_gate_epoch_hook(self) -> Callable[[int, object], None] | None:
+        """本机 PPO 的提前放行钩子（末 `early` 个 epoch 开始即放行）；None = 不提前放行。
+
+        与吞吐 T4 预采同一判据（ppo_update 的 on_epoch_done 每完成一个 epoch 回调，
+        1 基）；`policy.evalLocalEarlyEpochs=0` → 返回 None，维持 R6 原语义。
+        """
+        from rl.eval_local import early_epoch_reached, eval_local_early_epochs
+
+        gate = self._eval_gate
+        if gate is None or gate.is_set():
+            return None
+        early = eval_local_early_epochs(self._eval_policy_cfg())
+        if early <= 0:
+            return None
+        epochs = int(getattr(self.args, "epochs", 1) or 1)
+
+        def _hook(ep_done: int, _model: object) -> None:
+            if not gate.is_set() and early_epoch_reached(int(ep_done), epochs, early):
+                gate.set()
+                log(
+                    f"[eval] 本机份额提前放行（本机 PPO epoch {ep_done}/{epochs}）"
+                    " —— reserved 尾段与 PPO 尾部并行"
+                )
+
+        return _hook
+
+    def _sweep_eval_tail(self) -> None:
+        """上一轮 eval 尾巴的**自然收拢点**：下一轮 rollout 收官时（2026-09-17 用户指令）。
+
+        为什么不是固定秒数：软等要么白站（尾巴早落地）要么丢（尾巴更晚），两个方向都
+        不对。尾巴在下一轮整段采集期间有几分钟可用——它自己跑完就自己写 summary（
+        wver 键控、续跑幂等），所以到这里通常只剩一次零成本观测/清账。**本函数不 join、
+        不 sleep**：还在跑的（异常：节点慢/挂了）只打 WARN，由它自己的 `eval_window_sec`
+        deadline 结束；`policy.evalJoinSoftSec>0` 时才走旧的「边界处最多补等 N 秒」。
+        """
+        pending = self._eval_tail
+        self._eval_tail = None
+        if pending is None:
+            return
+        thread, t_start = pending
+        elapsed = time.time() - t_start
+        window = float(getattr(self.args, "eval_window_sec", 1500) or 1500)
+        if not thread.is_alive():
+            log(f"[eval] tail settled during rollout (+{elapsed:.0f}s) — 已自落账")
+            return
+        from rl.eval_local import eval_tail_overran
+
+        soft = self._eval_join_soft_sec()
+        if soft > 0.0:
+            # 应急旋钮：只在边界处补等（旧语义）；缺省 0 ⇒ 不进这个分支
+            _t_join = time.time()
+            thread.join(timeout=soft)
+            waited = time.time() - _t_join
+            self._eval_join_sec = round(self._eval_join_sec + waited, 1)
+            if not thread.is_alive():
+                log(f"[eval] tail settled at rollout boundary (+{elapsed:.0f}s, waited {waited:.1f}s)")
+                return
+        level = "WARN " if eval_tail_overran(t_start, window, time.time()) else ""
+        log(
+            f"[eval] {level}tail still running at rollout boundary "
+            f"(alive {elapsed:.0f}s / window {window:.0f}s) — 继续后台消化，不阻塞主链"
+        )
+
     def _join_eval(self, it: int) -> dict | None:
-        """v3.12 eval 延迟化：eval 不阻塞训练主链（后台线程 + 软等待 + wver 键控）。
+        """v3.12 eval 延迟化：eval 不阻塞训练主链（后台线程 + wver 键控）。
 
         门判定读 eval_log 的 eval_summary（iter 字段保留原轮号 + wver），晚入账只
-        让判定窗口顺延，判据不变。溢出预算未收官的在途局由下轮异 sha 清场 + 阈值
-        熔断兜底（与 v3.10 前语义一致）。
+        让判定窗口顺延，判据不变。**per-tick 不站等**（2026-09-17）：未收官的尾巴整根
+        传给 `_sweep_eval_tail`，由下一轮 rollout 收官这个自然边界收拢——不站着等任何
+        固定秒数。intent/goal 仍全预算 join（止损判门要吃同轮 summary）。
         """
         args = self.args
         if self._eval_gate is not None:
             self._eval_gate.set()
+        self._eval_gate_early_released = False
         eval_join_sec = 0.0
         eval_thread = self._eval_thread
         if eval_thread is not None and eval_thread.is_alive():
@@ -1847,14 +1963,24 @@ class TrainingSteps:
                 eval_thread.join(timeout=budget)
                 eval_join_sec = round(time.time() - _t_join, 1)
             else:
-                soft = min(budget, 180.0)  # per-tick 软等待上限：吃尾巴 + 缓存缓冲
-                log(
-                    f"[run_rl] eval deferred: soft-wait {soft:.0f}s for tail "
-                    f"(remaining eval finishes in background, wver-keyed)"
-                )
-                _t_join = time.time()
-                eval_thread.join(timeout=soft)
-                eval_join_sec = round(time.time() - _t_join, 1)
+                # per-tick：不站等（缺省）→ 交棒；policy.evalJoinSoftSec>0 时才补等。
+                soft = min(budget, self._eval_join_soft_sec())
+                if soft > 0.0:
+                    log(
+                        f"[run_rl] eval deferred: soft-wait {soft:.0f}s for tail "
+                        f"(policy.evalJoinSoftSec — 应急旋钮)"
+                    )
+                    _t_join = time.time()
+                    eval_thread.join(timeout=soft)
+                    eval_join_sec = round(time.time() - _t_join, 1)
+                if eval_thread.is_alive():
+                    # 交棒：下一轮 rollout 收官时收拢（_dispatch_delayed_eval 入口）
+                    self._eval_tail = (eval_thread, self._eval_tail_start or time.time())
+                    log(
+                        "[run_rl] eval deferred: tail handed to next rollout boundary "
+                        "（不站等；线程自己按 eval_window_sec 收尾并落账）"
+                    )
+        self._eval_tail_start = None
         self._eval_join_sec = eval_join_sec
         # intent/goal：回读该迭代 eval_summary（评估线程写入；止损判门的数据源）。
         eval_rec = (
@@ -1877,6 +2003,8 @@ class TrainingSteps:
         from rl.queue import RUN_ID
 
         args = self.args
+        # 本轮采集刚落幕（rollout 收官）= 上一轮 eval 尾巴的自然收拢点：先收拢，再派新轮。
+        self._sweep_eval_tail()
         if getattr(args, "mode", "per-tick") != "per-tick":
             # intent/goal m1 与 it0 基线走各自派发流，此处不碰（rollout_phase 已处理）。
             return
@@ -1897,7 +2025,25 @@ class TrainingSteps:
                 f"[eval] it{m}: 归档缺席（backup 失败？）——回落活指针 {src_path} 派发"
                 "（wver 与离线复跑不可比，本轮 eval 仅供参考）"
             )
+        from rl.eval_local import eval_local_early_epochs, local_gate_release_plan
+
         self._eval_gate = threading.Event()
+        self._eval_gate_early_released = False
+        # 尾巴的窗口起点（收拢时判“是否跑过自己的窗口”）；只作时间基准，不参与等待。
+        self._eval_tail_start = time.time()
+        # 本机份额放行档（2026-09-17）：本轮本机不跑 PPO（远端 PPO / 整轮上云 / stream
+        # 已在轮内跑完）⇒ 立刻放行（核心空闲，预留尾段即时开跑）；本机 PPO ⇒ 末 epoch
+        # 放行（early=0 时维持 R6：_join_eval 才放行）。
+        plan = local_gate_release_plan(
+            ppo_remote=str(getattr(args, "ppo", "local")) == "remote",
+            node_rollout=bool(getattr(self, "_node_rollout", False)),
+            stream_round=getattr(self, "_stream_meta", None) is not None,
+            early_epochs=eval_local_early_epochs(self._eval_policy_cfg()),
+        )
+        if plan == "immediate":
+            self._eval_gate.set()
+            self._eval_gate_early_released = True
+            log("[eval] 本机份额提前放行（本轮 PPO 不在本机跑）——reserved 尾段立即开跑")
         self._eval_thread = dispatch_eval_bg(
             self.bun,
             src_path,
@@ -1932,6 +2078,8 @@ class TrainingSteps:
         from rl.queue import RUN_ID
 
         args = self.args
+        # 收官前先把在飞尾巴清账（同理：只观测/清账，不站等）。
+        self._sweep_eval_tail()
         try:
             if getattr(args, "mode", "per-tick") != "per-tick" or getattr(args, "smoke", False):
                 return

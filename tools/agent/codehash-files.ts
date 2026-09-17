@@ -92,63 +92,26 @@ export function computeCodeHash(manifestPath?: string): string {
   return computeCodeHashFromFiles(collectCodeHashEntries(manifestPath))
 }
 
-// ---------------- engine_epoch gameplay 文件集（EvalBench §2.5） ----------------
+// ---------------- engine_epoch（EvalBench §2.5/§6.6；2026-09-17 统一到本清单） ----------------
 /**
- * gameplay 文件集（EvalBench §2.5 唯一源）：src/game/** + src/config/** +
- * src/utils/**（含 RNG）+ src/ai/**（God AI）+ tools/sim/export-eval-game.ts；
- * God 侧借用 freeze golden tools/det-golden.v1.sha256 作行为指纹分量。
- * 目录条目递归（F3 过滤同 codeHash）；单文件条目（'/' 不结尾）直接纳入。
- * 本表与配方都在集内文件 ⇒ 改表/改配方即触发节点升级波（fail-closed 前提）。
+ * engine_epoch = sha256(codeHash)[0:16]（与 dist_common.compute_engine_epoch 同式）。
+ *
+ * 2026-09-17 用户指令：rollout 与 eval 的「节点是否可用」必须同源 = codehash-files.txt。
+ * 旧式 epoch = sha256(git_full_commit + GAMEPLAY_SPECS 指纹)[0:16] 掺了 git commit ⇒
+ * 任何与 rollout/eval 无关的提交（dashboard / nn-training / docs）都把全节点判 stale、
+ * 逼运维重启 sampler-agent。现改为 codeHash 的纯函数：无关提交不动清单内容 ⇒ epoch 不变。
+ * 引擎文件（src/game/** 等）已并入清单，故「改引擎不改 codeHash」的漏网口同时关闭。
+ *
+ * 用途边界（2026-09-17）：本值 = **账本记录值**（EvalGameRow.engine / S10 记录级漂移
+ * 哨兵），**不是节点门判据**——节点门（rollout 与 eval）比的是 codeHash 本身，
+ * /v1/ping 也不再有 engineEpoch 字段。
  */
-export const GAMEPLAY_SPECS: readonly string[] = [
-  'src/game/',
-  'src/config/',
-  'src/utils/',
-  'src/ai/',
-  'tools/sim/export-eval-game.ts',
-  'tools/det-golden.v1.sha256',
-]
-
-/** 按 spec 表展开文件集（root 缺省仓库根；排序确定性；缺失条目跳过）。 */
-export function collectSpecEntries(
-  specs: readonly string[],
-  root: string = REPO_ROOT,
-): { relPath: string; content: Buffer }[] {
-  const out: { relPath: string; content: Buffer }[] = []
-  const walk = (dir: string): void => {
-    if (!fs.existsSync(dir)) return
-    for (const name of [...fs.readdirSync(dir)].sort()) {
-      if (isSkippedCodeHashDir(name)) continue
-      const p = path.join(dir, name)
-      const st = fs.statSync(p)
-      if (st.isDirectory()) walk(p)
-      else if (!isSkippedCodeHashFile(name))
-        out.push({
-          relPath: path.relative(root, p).replace(/\\/g, '/'),
-          content: fs.readFileSync(p),
-        })
-    }
-  }
-  for (const raw of specs) {
-    const s = raw.replace(/\\/g, '/')
-    if (s.endsWith('/')) walk(path.join(root, ...s.slice(0, -1).split('/')))
-    else {
-      const p = path.join(root, ...s.split('/'))
-      if (fs.existsSync(p) && fs.statSync(p).isFile())
-        out.push({
-          relPath: path.relative(root, p).replace(/\\/g, '/'),
-          content: fs.readFileSync(p),
-        })
-    }
-  }
-  return [...new Map(out.map((e) => [e.relPath, e])).values()].sort((a, b) =>
-    a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0,
-  )
+export function engineEpochFromCodeHash(codeHash: string): string {
+  return createHash('sha256').update(codeHash).digest('hex').slice(0, 16)
 }
 
-/** gameplay 文件集指纹（与 dist codeHash 同配方）。 */
-export function gameplayFingerprint(root: string = REPO_ROOT): string {
-  return computeCodeHashFromFiles(collectSpecEntries(GAMEPLAY_SPECS, root))
+export function computeEngineEpoch(manifestPath?: string): string {
+  return engineEpochFromCodeHash(computeCodeHash(manifestPath))
 }
 
 /** 诊断报告（F4，plan/dist-codehash-stale-fix.md）：`sha8\tsize\trelPath` 按 relPath

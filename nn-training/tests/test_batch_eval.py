@@ -79,11 +79,13 @@ def test_hooks_decoupled_from_a_eval() -> None:
     assert "maybe_dispatch_batch" in lc
     assert "window_event=self._eb_window" in lc
     ed = (ROOT / "rl" / "eval_dispatch.py").read_text(encoding="utf-8")
-    assert "check_engine_epoch" in ed
+    # 节点门判定在 eval_dispatch 里（2026-09-17 起 = check_code_hash，与 rollout 同源）
+    assert "check_code_hash" in ed
     import dist_common
 
+    # engine_epoch 仍是账本记录值（EvalGameRow.engine / 心跳），但不再是节点门判据
     assert hasattr(dist_common, "compute_engine_epoch")
-    assert hasattr(dist_common, "check_engine_epoch")
+    assert hasattr(dist_common, "check_code_hash")
 
 
 def test_partial_unit_reopens_batch(tmp_path: Path, monkeypatch) -> None:
@@ -132,7 +134,8 @@ def test_window_close_no_new_games(tmp_path: Path, monkeypatch) -> None:
         "stageJsonSupport": True,
         "bunVersion": "9.9.9",
         "cpus": 1,
-        "engineEpoch": epoch,
+        # 节点门指纹 = codeHash（2026-09-17 起；engine_epoch 不再进 ping）
+        "codeHash": dist_common.compute_code_hash(),
     }
     monkeypatch.setattr(dist_common, "node_ping", lambda *a, **k: dict(ping))
     monkeypatch.setattr(dist_common, "post_weights", lambda *a, **k: "kept")

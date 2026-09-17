@@ -6,7 +6,8 @@ BatchEvalRunner：结构参考 EvalDispatcher，复用 `fetch_task(mode='eval')`
 
 关键契约：
   - 节点门（§6.6）：enabled ∧ ping ∧ evalSupport ∧ stageJsonSupport ∧
-    bunVersion 一致 ∧ engine_epoch 一致——**严格拒派，不静默降级**（P2 DoD）。
+    bunVersion 一致 ∧ **codeHash 一致**（= rollout 门同一判据；2026-09-17 起不再比
+    ping.engineEpoch——见 dist_common.check_code_hash）——**严格拒派，不静默降级**（P2 DoD）。
   - iterId 命名空间 `{runId}.b{batchShort}u{unit}`（runner.ts）：agent taskKey
     无 policy 分量，命名空间隔离是 god/nn 不串键的唯一保证。
   - 窗口（§6.5）：只在窗口开时派新局；在途局自然跑完（taskTimeoutSec 封顶）；
@@ -578,6 +579,8 @@ class BatchEvalRunner:
         local_weights = snapshot_path or ((self.rl_path or "no-weights-god") if god else None)
 
         local_bun = bun_version(self.bun)
+        # 节点门指纹（2026-09-17 统一）：与 rollout 门同源 = SSOT 清单的 codeHash。
+        code_hash_local = dist_common.compute_code_hash()
         alive = []
         for n in self.cfg.get("nodes", []):
             if not n.get("enabled", True):
@@ -595,9 +598,9 @@ class BatchEvalRunner:
             if mm(str(ping.get("bunVersion", "?"))) != mm(local_bun):
                 log(f"[batcheval] node {nid}: bun version mismatch — skipped")
                 continue
-            why = dist_common.check_engine_epoch(ping, self.engine_epoch)
+            why = dist_common.check_code_hash(ping, code_hash_local)
             if why:
-                # B/C 严格：拒派不静默降级（P2 DoD；A 层过渡逻辑在 eval_dispatch）。
+                # B/C 严格：拒派不静默降级（P2 DoD；A 层门在 eval_dispatch，同一判据）。
                 log(f"[batcheval] node {nid}: {why} — refused")
                 continue
             c_n = max(1, int(n.get("concurrency") or ping.get("cpus") or 1))

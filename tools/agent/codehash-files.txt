@@ -20,12 +20,24 @@
 # 实现：dist_common._skip_codehash_dir/_skip_codehash_file ↔
 #   tools/agent/codehash-files.ts isSkippedCodeHashDir/isSkippedCodeHashFile。
 #
-# 纳入原则：影响节点采样/评估语义或 agent 协议行为的代码，必须入集——
+# 纳入原则（2026-09-17 起 = 节点可用性的唯一事实来源）：影响节点采样/评估语义或
+# agent 协议行为的代码，必须入集——rollout 门与 eval 门都只比这一份清单的结果。
 #   src/nn/**                    策略网络（infer / obs-encoder / goal / intent / rl-reward …）
-#   tools/sim/export-*           采样导出器（per-tick / 意图 / 干净评估 schema）
+#   tools/sim/export-*           采样导出器（per-tick / 意图 / 干净评估 schema / BC）
 #   tools/agent/*.ts             agent 本体 + /v1/restart 护栏（重启行为修复须触发升级）
 #   src/types.ts                 事件类型（enemy_hit 等埋点契约）
-#   src/game/SimulationCombat.ts 战斗埋点
+#   src/game/**                  Simulation 引擎（改引擎 ⇒ 采样与 eval 的 gameplay 都变）
+#   src/config/**                关卡/坦克/难度数据行（data-over-code 的行）
+#   src/utils/**                 RNG 等（确定性契约）
+#   src/ai/**                    God AI（eval 基线 / 教师）
+#   tools/det-golden.v1.sha256   God 行为指纹（冻结 golden）
+#
+# 排除原则（同等重要）：与 rollout/eval **无关**的目录严禁入集——
+#   dashboard/** · nn-training/** · docs/** · plan/** · tests/**
+# 它们被改动/提交时不得让节点变 stale（否则每次无关提交都触发重启波，
+# 2026-09-17 用户指令）。eval 侧的 engine_epoch 也由本清单派生
+#（sha256(codeHash)[0:16]），不再掺 git commit——归档的
+# GAMEPLAY_SPECS 双份清单已并入本文件。
 src/nn/
 tools/agent/sampler-agent.ts
 tools/agent/restart-guard.ts
@@ -35,4 +47,8 @@ tools/sim/export-intent-rollout.ts
 tools/sim/export-eval-game.ts
 tools/sim/export-godai-bc.ts
 src/types.ts
-src/game/SimulationCombat.ts
+src/game/
+src/config/
+src/utils/
+src/ai/
+tools/det-golden.v1.sha256

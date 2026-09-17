@@ -4,6 +4,91 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §66 in-loop eval 墙钟：软等可配（180s→30s）+ 本机份额提前放行（2026-09-17）
+
+**为什么记这一笔**：用户检查训练流程后确认「eval 已藏进下一轮 PPO」——`_dispatch_delayed_eval(it)`
+排在 `_serial_ppo(it)` **之前**、读归档 W(it-1)、事后只软等（`select_delayed_eval_it(6)==5`）。
+但仍有**两段墙钟暴露在 PPO 之后**（都在 `rl/loop_steps.py`）：
+
+```
+改前： it6 collect(W5) ─┬─ 派发 eval(W5) ─┬─ PPO(6)  ◄── 节点侧 eval 藏在这里 ✅
+                        │                 └─ _join_eval：软等 ≤180s（硬编码）❌①
+                        └─ 本机份额 gate 只在 _join_eval 置位 ⇒ 本机 eval 局
+                           在 PPO 收尾后才开跑（local_slots ≈ 5% 语料）❌②
+
+改后： ① **不站等固定秒数**：尾巴交下一轮 rollout 收官这个自然边界收拢（_sweep_eval_tail，非阻塞）
+          应急旋钮 policy.evalJoinSoftSec **缺省 0**（>0 = 回到 “PPO 后最多站等 N 秒”）
+       ② 本机份额按「本轮 PPO 是否占本机核心」分档放行（policy.evalLocalEarlyEpochs，默认 1）
+          · 远端 PPO（--ppo remote）/ 整轮上云（rollout=node）/ stream 轮
+              → immediate：本机核心此刻空闲 ⇒ 派发即开闸（节点 hold_for_local 预留同步解除）
+          · 本机 PPO → last_epoch：末 early 个 epoch 完成即开闸（复用 ppo_update 的
+              on_epoch_done 钩子，判据 `ep_done >= epochs - early`，与吞吐 T4 预采同口径）
+          · early=0 → on_join：维持 R6 原语义（纯让位）
+          · 远端降级本机（_serial_ppo 落到本地）⇒ _regate_local_eval 收回我们提前放的 gate
+```
+
+**为什么是“边界收拢”而不是“站等 N 秒”（2026-09-17 同日修正）**：固定秒数两个方向都错——
+尾巴早落地就白站（最常见），尾巴更晚就照样丢。尾巴在**下一轮整段采集**（分钟级）里自己能跑完、
+自己写 summary（wver 键控、续跑幂等），所以到下一个自然同步点（下一轮 rollout 收官，即
+`_dispatch_delayed_eval` 入口；另加收官 `_drain_pending_eval`）只需零成本观测/清账：已收官的
+打一行 `tail settled during rollout`，还在跑的（异常：节点慢/挂）打 WARN 后交后台——时间基准用它
+**自己的** `eval_window_sec`（不引入新魔数），它自己的 deadline 会结束它。intent/goal 模式**不动**：
+止损判门要吃同轮 summary，仍走全预算 join（`window+60`）。
+
+**验证**：`nn-training/tests/test_eval_timing.py` 新增/更新为 16 例（含「缺省零 join」「边界收拢」）——旋钮读数与坏值回落、放行档三分支、
+`early_epoch_reached` 边界（early=0 / early>epochs）、派发即放行 + 降级收回、本机 PPO 未放行 /
+epoch 钩子到点放行 / `evalLocalEarlyEpochs=0` 不加钩子、缺省零 join + 边界收拢（已收官/在跑/应急旋钮>0/无尾巴）、`evalJoinSoftSec` 应急值超预算夹回。
+门禁：`e2e/test_run_rl.py -k "eval_deferred|eval_post_ppo_weights|eval_local_gate|tail_join_grace|early_race"
+5 passed`；nn python 全量 **绿**（唯一未过仍是平台性存量红 `test_spec_argv_weights_must_be_relative`，
+见 §65）；ruff + mypy 干净。
+
+**仍暴露的墙钟（有意保留）**：① 收官 drain（`_drain_pending_eval`，无 PPO 可藏，
+≤min(window+60,600)s）；② intent/goal 全预算 join。per-tick 主链现在**不为 eval 站等一秒**。
+另：stream 路径「标签超前一轮 + 同 iter 双点」的缺陷**未动**（`--ppo remote` 下不可达，本地
+stream 腿才可见），已在上一轮的流检查中记录，待单独处置。
+
+## §65 节点门统一：rollout 与 eval 同用 codehash-files.txt（eval 门改比 codeHash，ping 不再报 engineEpoch）（2026-09-17）
+
+**为什么记这一笔**：eval 节点门比的是 `engine_epoch = sha256(git_full_commit + GAMEPLAY_SPECS
+指纹)[0:16]`——**掺了 git commit**，而 gameplay 集还是 TS（codehash-files.ts）/Python
+（dist_common.py）两侧手工镜像的第二份清单。于是任何与 rollout/eval 无关的提交（dashboard /
+nn-training / docs）都把全节点判 stale，运维只能同步 + 重启 sampler-agent（2026-09-15
+x3-power it30：epoch 全员 mismatch → nodes_ok=[] → 600s 零局；2026-09-03 x3-chip-k10
+it1–it4 四节点同因全 skip）。用户指令：两者统一用 `tools/agent/codehash-files.txt` 作为
+「节点是否可用」的事实来源。
+
+```
+唯一事实来源（改这里 = 同时决定 rollout 门与 eval 门）
+  tools/agent/codehash-files.txt
+    ├ src/nn/**（策略）· tools/sim/export-*（导出器）· tools/agent/*.ts（agent 协议）
+    └ 2026-09-17 并入：src/game/** · src/config/** · src/utils/**（RNG）· src/ai/**（God）
+                        · tools/det-golden.v1.sha256   ← 原 GAMEPLAY_SPECS 双份清单已删
+  排除原则（同处写明）：dashboard/** · nn-training/** · docs/** · plan/** · tests/**
+                        —— 它们的提交不得让任何节点变 stale
+
+  /v1/ping 只报 codeHash = hash(清单展开) —— 唯一的节点门字段
+  rollout 门（dispatch / rescan）与 eval 门（eval_dispatch §6.6 / batch_eval 严格）同用
+    dist_common.check_code_hash(ping, 本机 codeHash)
+  engine_epoch = sha256(codeHash)[0:16]（训练机侧算）= **账本记录值**：进
+    EvalGameRow.engine / 心跳 / S10 哨兵；**不再是门**，故不进 ping（原 check_engine_epoch 删）
+```
+
+**语义变化（有意为之）**：S10「引擎漂移」的范围从 git commit 收窄为清单代码（含 src/nn 策略），
+**比旧式更不容易误报**（以前连 docs 提交都算漂移）；而引擎文件入清单后，「改引擎不改名 codeHash」
+的漏网口同时关闭。节点门也只剩**一个字段（codeHash）与一个判据**：旧 agent「无 engineEpoch →
+过渡期放行」的宽松分支随之取消——codeHash 是 rollout 门一直都在用的字段，比它只严不宽。**代价**：本次自身即清单变更 ⇒ 全节点一次性
+判 stale ⇒ 一轮预期内的升级波（同步代码 + agent 重启后自动纳管）。
+
+**门禁实测（2026-09-17 收尾全绿）**：根 `bun run check` **1851 pass / 0 fail**；dashboard
+typecheck + **485 pass / 0 fail**（顺带修掉进入本次任务时那条**存量红**
+`server-actions-resolve-course-bc`：用例引用的是从未存在过的课程名 `x1-rebirth-a2`，仓内课程是
+`x1-rebirth.jsonc`，已改成真课程名）；nn python：ruff + mypy（225 文件）干净、
+**1183 passed / 3 skipped**。唯一未跑的一条
+`test_remote_iter::test_spec_argv_weights_must_be_relative` 是**平台性存量红**：
+`_iter_rel_path` 只挡 `..` / `~` / POSIX 绝对路径，`C:/weights.json` 在 Linux 上既非
+`os.path.isabs` 也非 `Path.isabs`（Windows 上才拦得住）——与本改动无关，已单独确认。
+决策见 `DECISIONS.md §2026-09-17-goalnn-unified-node-gate`。
+
 ## §64 控制台两条腿：导出任务包 / 导入产物即评估（2026-09-17）
 
 **为什么记这一笔**：把 §61–§63 的离线能力**接到人手上**——之前「导出任务包 / 导回产物」

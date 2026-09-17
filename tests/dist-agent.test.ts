@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   collectCodeHashEntries,
@@ -12,6 +13,9 @@ import {
 import {
   codeHashReport,
   collectCodeHashEntries as collectCodeHashEntriesPure,
+  computeCodeHash,
+  computeEngineEpoch,
+  engineEpochFromCodeHash,
   REPO_ROOT,
 } from '../tools/agent/codehash-files'
 import { buildPack, PACK_MAGIC } from '../tools/sim/pack-container'
@@ -203,6 +207,31 @@ describe('codeHash SSOT manifest (tools/agent/codehash-files.txt)', () => {
     } finally {
       rmSync(base, { recursive: true, force: true })
     }
+  })
+
+  it('SSOT 清单覆盖 eval 引擎面，且不含与 rollout/eval 无关的树（2026-09-17）', () => {
+    const rels = collectCodeHashEntriesPure().map((e) => e.relPath)
+    // 引擎语义（原 GAMEPLAY_SPECS 已并入本清单）：改 src/game 必须改 codeHash，
+    // 否则 eval 节点会带着异构 gameplay 过门。
+    for (const spec of ['src/game/', 'src/config/', 'src/utils/', 'src/ai/']) {
+      expect(rels.some((r) => r.startsWith(spec))).toBe(true)
+    }
+    expect(rels).toContain('tools/det-golden.v1.sha256')
+    expect(rels).toContain('tools/sim/export-eval-game.ts')
+    // 无关树（dashboard / nn-training）入集 = 它们的每次提交都触发节点重启波。
+    expect(rels.some((r) => r.startsWith('dashboard/') || r.startsWith('nn-training/'))).toBe(false)
+  })
+
+  it('engine_epoch = sha256(codeHash)[0:16]（eval 门与 rollout 门同源，不掺 git commit）', () => {
+    const ch = computeCodeHash()
+    const want = createHash('sha256').update(ch).digest('hex').slice(0, 16)
+    expect(engineEpochFromCodeHash(ch)).toBe(want)
+    expect(computeEngineEpoch()).toBe(want)
+    expect(computeEngineEpoch()).toMatch(/^[0-9a-f]{16}$/)
+    // 旧式实现掺 git full commit（sha256(git + gameplay)）——本文件源码不得再出现。
+    const src = readFileSync(new URL('../tools/agent/sampler-agent.ts', import.meta.url), 'utf8')
+    const body = src.slice(src.indexOf('function memoizedEngineEpoch'))
+    expect(body.slice(0, 400)).not.toContain('rev-parse')
   })
 
   it('F4 codeHashReport 输出格式：sha8\\tsize\\trelPath + codeHash=<full> 末行', () => {

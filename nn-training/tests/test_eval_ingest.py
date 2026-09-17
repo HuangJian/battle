@@ -72,18 +72,39 @@ def test_parse_m1_report_per_game_only_from_clean_stdout() -> None:
     assert parse_m1_eval_report(clean)["perGame"] == [{"stage": 0, "seed": 1, "win": True}]
 
 
-def test_engine_epoch_deterministic_and_gate() -> None:
+def test_engine_epoch_derives_from_ssot_codehash() -> None:
+    """2026-09-17 用户指令：eval 节点门与 rollout 门同源 = codehash-files.txt。
+
+    engine_epoch = sha256(codeHash)[:16]，**不再掺 git commit**——任何与 rollout/eval
+    无关的提交（dashboard / nn-training / docs）都不得让节点判 stale。旧式
+    sha256(git_head + GAMEPLAY_SPECS 指纹) 的双份清单已删。
+    """
+    import hashlib
+    import inspect
+
     import dist_common
 
-    assert "src/game/" in dist_common.GAMEPLAY_SPECS
-    assert "tools/sim/export-eval-game.ts" in dist_common.GAMEPLAY_SPECS
-    fp1 = dist_common.gameplay_fingerprint()
-    assert dist_common.gameplay_fingerprint() == fp1
-    ep = dist_common.compute_engine_epoch("abc123")
-    import hashlib
-
-    assert ep == hashlib.sha256(f"abc123\n{fp1}".encode()).hexdigest()[:16]
-    # 节点门：一致通过；缺失/不符拒收（B/C 严格，A 层过渡见 eval_dispatch）
-    assert dist_common.check_engine_epoch({"engineEpoch": ep}, ep) is None
-    assert dist_common.check_engine_epoch({}, ep) is not None
-    assert dist_common.check_engine_epoch({"engineEpoch": "0" * 16}, ep) is not None
+    ch = dist_common.compute_code_hash()
+    ep = dist_common.compute_engine_epoch()
+    assert ep == hashlib.sha256(ch.encode()).hexdigest()[:16]
+    assert len(ep) == 16
+    # 不掺 git：实现里不得出现 git 调用（旧式为 sha256(git_head + gameplay)）
+    assert "git" not in inspect.getsource(dist_common.compute_engine_epoch)
+    # 引擎文件已并入 SSOT 清单（改引擎 ⇒ codeHash 变 ⇒ eval 节点门变红）
+    rels = [rel for rel, _c in dist_common._collect_code_hash_files()]
+    for need in (
+        "src/game/SimulationCombat.ts",
+        "tools/det-golden.v1.sha256",
+        "tools/sim/export-eval-game.ts",
+    ):
+        assert need in rels
+    for spec in ("src/game/", "src/config/", "src/utils/", "src/ai/"):
+        assert any(r.startswith(spec) for r in rels), spec
+    # 无关树不入集（入集 = 每次无关提交都触发节点重启波）
+    assert not any(r.startswith(("dashboard/", "nn-training/")) for r in rels)
+    # 节点门（2026-09-17 统一）：rollout 与 eval 同一判据 = codeHash；
+    # engine_epoch 只是账本记录值，不再进 /v1/ping、也不再是门。
+    assert dist_common.check_code_hash({"codeHash": ch}, ch) is None
+    assert dist_common.check_code_hash({}, ch) is not None
+    assert dist_common.check_code_hash({"codeHash": "0" * 64}, ch) is not None
+    assert not hasattr(dist_common, "check_engine_epoch")

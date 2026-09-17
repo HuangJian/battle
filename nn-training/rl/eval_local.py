@@ -154,6 +154,90 @@ EVAL_TASK_ATTEMPTS = 2  # 单局重试上限；超限放弃并计数（权重切
 EVAL_LOCAL_SLOTS_DEFAULT = 4  # 本地直跑槽位默认值（policy.evalLocalSlots 可覆写；0=禁用）
 EVAL_LOCAL_RELEASE_GRACE = 300  # 距窗口截止剩这些秒时强制释放本地预留（本地失效也不空转到超时）
 
+# ---- eval 尾巴的收拢点与本机份额提前放行（2026-09-17 用户指令）-------------------
+# 背景：in-loop eval 已藏在「下一轮 PPO」里（dispatch 排在 _serial_ppo 之前），但两处
+# 仍把 eval 墙钟暴露在 PPO 之后：
+#   ① `_join_eval` 在 PPO 收官后站着等尾巴（原硬编码 180s）；
+#   ② 本机预留份额（policy.evalLocalSlots）的 gate 只在 `_join_eval` 置位——本机局
+#      在 PPO 结束后才开跑，那段时间等于「PPO 后的第二次串行等待」。
+# 处置：① **不站等任何固定秒数**——尾巴交给「下一轮 rollout 收官」这个自然边界收拢
+#    （`_sweep_eval_tail`，非阻塞）：尾巴在整段采集期间自己跑完就自己落账，到边界只
+#    做一次零成本观测/清账；跑不完的继续在后台（它自己的 `eval_window_sec` deadline
+#    会结束它，且 summary 由该线程自己结算，不靠 join）。
+#    `policy.evalJoinSoftSec` 保留为**应急旋钮**（缺省 0 = 不站等；>0 = 回到旧的
+#    “PPO 后最多站等 N 秒”语义）。
+# ② 本机份额按「本轮 PPO 是否占本机核心」分档放行：远端 PPO / 整轮上云 / stream
+#    （PPO 已在轮内跑完）⇒ **立刻放行**；本机 PPO ⇒ 最后一个 epoch 开始即放行
+#    （policy.evalLocalEarlyEpochs 控制，0 = 维持 R6 原语义：PPO 全收尾才放行）。
+EVAL_JOIN_SOFT_SEC_DEFAULT = 0.0  # policy.evalJoinSoftSec 缺省值（0 = 不站等，尾巴交下一轮边界）
+EVAL_LOCAL_EARLY_EPOCHS_DEFAULT = 1  # policy.evalLocalEarlyEpochs 缺省值（0=严格 R6）
+
+
+def eval_join_soft_sec(policy_cfg: dict | None) -> float:
+    """PPO 收官后站等上限（秒）：应急旋钮 policy.evalJoinSoftSec，**缺省 0 = 不站等**。
+
+    正常路径不靠它：尾巴由下一轮 rollout 边界自然收拢（非阻塞）。非数值/NaN 回落默认、
+    负值夹 0：配置写错不得让主链等一个荒谬的时长或直接崩。
+    """
+    raw = (policy_cfg or {}).get("evalJoinSoftSec", EVAL_JOIN_SOFT_SEC_DEFAULT)
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return EVAL_JOIN_SOFT_SEC_DEFAULT
+    if val != val:  # NaN
+        return EVAL_JOIN_SOFT_SEC_DEFAULT
+    return max(0.0, val)
+
+
+def eval_tail_overran(t_start: float, window_sec: float, now: float) -> bool:
+    """尾巴是否已跑过**它自己的** `eval_window_sec` 窗口（越过 = 异常，日志要打 WARN）。
+
+    边界收拢不站等，但仍需要知道「这个尾巴是不是已经不正常了」：它自带的窗口是唯一的
+    时间基准（不是新魔数），过期后线程会在自己的收尾路径里结算 summary 并退出。
+    """
+    if window_sec <= 0:
+        return False
+    return (float(now) - float(t_start)) > float(window_sec)
+
+
+def eval_local_early_epochs(policy_cfg: dict | None) -> int:
+    """本机 PPO 路径提前放行本机份额的 epoch 数（policy.evalLocalEarlyEpochs；0=不放行）。"""
+    raw = (policy_cfg or {}).get("evalLocalEarlyEpochs", EVAL_LOCAL_EARLY_EPOCHS_DEFAULT)
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return EVAL_LOCAL_EARLY_EPOCHS_DEFAULT
+    return max(0, val)
+
+
+def local_gate_release_plan(
+    *,
+    ppo_remote: bool,
+    node_rollout: bool,
+    stream_round: bool,
+    early_epochs: int,
+) -> str:
+    """本机 eval 份额的放行档（纯函数）：'immediate' | 'last_epoch' | 'on_join'。
+
+    - immediate：本轮本机**不跑 PPO**（远端 PPO / 整轮上云 rollout），或 stream 轮里
+      PPO 已在轮内跑完 ⇒ 本机核心此刻空闲，预留尾段立即开跑（同时把节点从
+      hold_for_local 的预留里放出来）。
+    - last_epoch：本机 PPO ⇒ 最后一个 epoch 开始即放行（early_epochs>0）；
+    - on_join：early_epochs==0 = 维持 R6 原语义（PPO 全部收尾、_join_eval 置位才放行）。
+    """
+    if node_rollout or ppo_remote or stream_round:
+        return "immediate"
+    return "last_epoch" if early_epochs > 0 else "on_join"
+
+
+def early_epoch_reached(ep_done: int, epochs: int, early: int) -> bool:
+    """第 ep_done 个 epoch（1 基，与 ppo_update 的 on_epoch_done 同口径）完成时，
+    是否已到提前放行点。early=1、epochs=4 ⇒ 第 3 个 epoch 完成即放行（最后一个 epoch
+    与本机 eval 份额并行）；与吞吐 T4 预采用的同一判据（`ep_done >= epochs - early`）。"""
+    if early <= 0:
+        return False
+    return int(ep_done) >= max(1, int(epochs) - int(early))
+
 
 def hold_for_local(pending_len: int, reserved: int, gate_set: bool, past_release: bool) -> bool:
     """节点 worker 是否应暂缓取任务、把队列尾段留给本机直跑。

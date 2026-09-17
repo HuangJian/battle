@@ -12,7 +12,7 @@
  *   - 尾逗号（`, }` / `, ]`，仅字符串外）删除——JSONC 惯例兜底。
  *
  *  为什么单独成模块（2026-09-17 事故）：`stack/courses.ts` 与 `server/api/curriculum.ts`
- *  各自手搓过一版「只剥整行 `//`」的弱实现。`curricula/x1-rebirth-a2.jsonc` 里
+ *  各自手搓过一版「只剥整行 `//`」的弱实现。`curricula/x1-rebirth.jsonc` 里
  *  `"lr": 0.0005, // …` 这种**行内**注释让弱实现抛 SyntaxError，`resolveCourseBc`
  *  于是静默回退 legacy 硬编码路径，最终报出「初始权重缺失且 BC 产物不存在:
  *  tmp/ep60/…」——错误信息指向完全无关的文件，真因（课程文件读不了）被藏起来。

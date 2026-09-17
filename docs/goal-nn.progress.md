@@ -3,6 +3,29 @@
 > 按 AGENTS §5.6 / 用户指令建立。新条目置顶（倒序）。架构改动 / 评估结果 / 教训都记这里。
 > 任务卡编号（T0–T12）与规格 § 号均指 `plan/Goal-Space-Policy-Rebuild.md`。
 > NN 训练统一经 `bun tools/training/train.ts`（无头单次）或训练控制台 `bun run train`（组件管理）启动（AGENTS §5.6 硬规则；2026-09-06 起，DECISIONS §349）。
+## §27 in-loop eval 墙钟压缩：软等 180s→`policy.evalJoinSoftSec`(30) + 本机份额提前放行（2026-09-17）
+
+**用户检查结论**：节点侧 eval 局**已**藏在下一轮 PPO 里（`_dispatch_delayed_eval(it)` 排在
+`_serial_ppo(it)` 之前、读归档 W(it-1)）——但 PPO 之后仍有两段墙钟：§17.2 的 180s 硬编码软等，
+以及本机预留份额的 gate 只在 `_join_eval` 置位（本机局在 PPO 收尾后才开跑）。
+
+**改动**：① **不站等固定秒数**（同日修正）：尾巴交给「下一轮 rollout 收官」这个自然边界收拢
+（`_sweep_eval_tail`，非阻塞；下一个数据同步点是下一轮采集落幕）；应急旋钮
+`policy.evalJoinSoftSec` **缺省 0**（>0 = 回到旧“PPO 后最多站等 N 秒”；坏值回落 0）；
+② 本机份额按「本轮本机是否跑 PPO」分档放行（`policy.evalLocalEarlyEpochs`，缺省 1）：
+远端 PPO / 上云轮 / stream 轮 → 派发即开闸；本机 PPO → 末 `early` 个 epoch 开始即开闸
+（`ppo_update` 的 `on_epoch_done` 钩子）；`early=0` → 维持 R6（`_join_eval` 才放）；
+远端降级本机时 `_regate_local_eval` 收回。intent/goal 仍走全预算 join（止损判门依赖同轮 summary）。
+
+**为什么不用固定秒数**：尾巴早落地就白站、更晚就照样丢——两个方向都错。尾巴在下一轮**整段
+采集**（分钟级）里自己能跑完并自落账（wver 键控、幂等），到边界只需零成本观测/清账；还在跑
+（异常）只打 WARN 并交后台，时间基准用它自己的 `eval_window_sec`。
+
+**验证**：`tests/test_eval_timing.py` 16 例（旋钮/坏值、放行档三分支、epoch 边界、派发即放行与降级收回、
+钩子不放/不放行、缺省零 join + 边界收拢、应急旋钮超预算夹回）；e2e `test_run_rl.py -k "eval_deferred|eval_post_ppo_weights|
+eval_local_gate|tail_join_grace|early_race"` 5 passed；nn python 全量绿 + ruff/mypy 干净。
+详见 `docs/nn.progress.md §66`、`DECISIONS.md §2026-09-17-goalnn-eval-wallclock`。
+
 ## §26 test_integration 拆分 9 独立函数 + xdist 并行（DECISIONS §318）
 
 **背景**：§25 后全量 17.5s 瓶颈是单函数 test_integration 13.9s（独占一个 worker，不可分）。
@@ -364,6 +387,8 @@ max-ticks 定 6000（P95=4577, P90×1.2≈4800, 保守取整）。
 **v3.12 改动**（run_rl.py）：
 - 全额等待 → **软等待 ≤180s**（`soft = min(budget, 180.0)`）——只吃已收官尾巴 + 给在途 eval 局
   缓存缓冲（防下轮新权重 POST purge 掐掉），长尾 eval 留到 it+1..N 采集/PPO 空档消化。
+  ⚠️ **硬编码 180s 已被 §27 取代**：改 `policy.evalJoinSoftSec`（缺省 30s，0=不等）；
+  「只吃尾巴 + 缓存缓冲」的理由不变，所以不是一刀切为 0。
 - 账按 **wver 晚入**（`eval_done_keys` 按 wver16 去重，晚到不重跑）；门判定读 eval_log 的
   eval_summary（iter 保留原轮号 + wver），晚入账只顺延判定窗口、判据不变。
 - 溢出预算未收官的在途局：下轮异 sha 清场 + 阈值熔断兜底（与 v3.10 前语义一致）。

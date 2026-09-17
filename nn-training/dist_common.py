@@ -215,97 +215,32 @@ def code_hash_report() -> str:
     return "\n".join(lines)
 
 
-# ---------------- engine_epoch（EvalBench §2.5/§6.6） ----------------
-# gameplay 文件集的表唯一源 = tools/agent/codehash-files.ts GAMEPLAY_SPECS
-# （集内文件，改表即触发升级波）。此处镜像同一张表——改表必须双侧同步
-# （与 codehash-files.txt SSOT 同纪律；偏离会被 epoch 拒派暴露为全员 stale）。
-GAMEPLAY_SPECS: tuple[str, ...] = (
-    "src/game/",
-    "src/config/",
-    "src/utils/",
-    "src/ai/",
-    "tools/sim/export-eval-game.ts",
-    "tools/det-golden.v1.sha256",
-)
+# ---------------- 节点门指纹：唯一事实来源 = SSOT 清单（回 2026-09-17 用户指令） ----------------
+# rollout 门（dispatch / rescan）与 eval 门（eval_dispatch / batch_eval）现在比的是
+# **同一个值 = codeHash**（展开自 tools/agent/codehash-files.txt；引擎 src/game、config、
+# RNG、God AI 已并入该清单）。先例（engine_epoch 掺 git commit）会让任何与 rollout/eval
+# 无关的提交（dashboard / nn-training / docs）把全节点判 stale、逼运维重启 sampler-agent。
+def compute_engine_epoch() -> str:
+    """engine_epoch = sha256(codeHash)[:16]（codeHash 见 SSOT 清单；纯函数）。
 
-
-def _collect_gameplay_files() -> list[tuple[str, bytes]]:
-    """按 GAMEPLAY_SPECS 展开（目录递归受 F3 过滤；与 codehash-files.ts 同规则）。"""
-    out: list[tuple[str, bytes]] = []
-    for spec in GAMEPLAY_SPECS:
-        s = spec.replace("\\", "/")
-        if s.endswith("/"):
-            root = os.path.join(REPO_ROOT, *s.rstrip("/").split("/"))
-            for dirpath, dirnames, files in os.walk(root):
-                dirnames[:] = [d for d in dirnames if not _skip_codehash_dir(d)]
-                for name in files:
-                    if _skip_codehash_file(name):
-                        continue
-                    p = os.path.join(dirpath, name)
-                    rel = os.path.relpath(p, REPO_ROOT).replace("\\", "/")
-                    with open(p, "rb") as f:
-                        out.append((rel, f.read()))
-        else:
-            p = os.path.join(REPO_ROOT, *s.split("/"))
-            if os.path.isfile(p):
-                rel = os.path.relpath(p, REPO_ROOT).replace("\\", "/")
-                with open(p, "rb") as f:
-                    out.append((rel, f.read()))
-    out.sort(key=lambda e: e[0])
-    # 去重（与 TS 侧 Map 去重同语义）
-    seen: dict[str, bytes] = {}
-    for rel, content in out:
-        seen[rel] = content
-    return sorted(seen.items())
-
-
-def gameplay_fingerprint() -> str:
-    """gameplay 文件集指纹（与 dist codeHash 同配方；双侧审计可对）。"""
-    h = hashlib.sha256()
-    for rel, content in _collect_gameplay_files():
-        h.update(rel.encode())
-        h.update(hashlib.sha256(content).digest())
-    return h.hexdigest()
-
-
-def _git_head() -> str:
-    """训练机 git_commit；拿不到返回 'nogit'（跨机比较需配对 git_commit 字段）。"""
-    try:
-        proc = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-            timeout=15,
-            **_POPEN_NO_WINDOW,
-        )
-        if proc.returncode == 0 and proc.stdout.strip():
-            # 显式落 str：stdout 是 Any，warn_return_any 不允许直接返回。
-            head: str = proc.stdout.strip()
-            return head
-    except Exception:
-        pass
-    return "nogit"
-
-
-def compute_engine_epoch(git_commit: str | None = None) -> str:
-    """engine_epoch = sha256(git_commit + '\\n' + gameplay)[0:16]（§2.5）。"""
-    if git_commit is None:
-        git_commit = _git_head()
-    return hashlib.sha256(f"{git_commit}\n{gameplay_fingerprint()}".encode()).hexdigest()[:16]
-
-
-def check_engine_epoch(ping: dict, expected: str) -> str | None:
-    """eval 节点门 engine_epoch 项（§6.6）：None=通过，否则拒收原因。
-
-    旧 agent 无 engineEpoch 字段 → 返回原因（调用方决定：B/C 批严格拒派；
-    A 层过渡期记日志放行，待全员升级后收紧）。
+    **这是账本记录值，不是节点门判据**（节点门比 codeHash，见 check_code_hash）：
+    它进 EvalGameRow.engine / 心跳，供 S10 记录级漂移哨兵与跨轮可比性断言用。
     """
-    got = ping.get("engineEpoch")
+    return hashlib.sha256(compute_code_hash().encode()).hexdigest()[:16]
+
+
+def check_code_hash(ping: dict, expected: str) -> str | None:
+    """节点可用性判据（rollout 与 eval 同一门）：None=通过，否则拒收原因。
+
+    2026-09-17：eval 侧改比 codeHash（原先比 ping.engineEpoch）——该字段已从
+    /v1/ping 移除，engine_epoch 退为账本记录值。唯一事实来源 = SSOT 清单
+    （tools/agent/codehash-files.txt），与 rollout 无关的提交不会让本门变红。
+    """
+    got = ping.get("codeHash")
     if not got:
-        return "missing engineEpoch (old agent — sync code + restart)"
+        return "missing codeHash (old agent — sync code + restart)"
     if got != expected:
-        return f"engine_epoch mismatch: node={got} expected={expected}"
+        return f"codeHash mismatch: node={str(got)[:8]} expected={expected[:8]}"
     return None
 
 

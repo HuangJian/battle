@@ -278,7 +278,8 @@ export class IncomparableError extends Error {}
 
 /**
  * 可比性断言（§3.5）：禁止相减的组合一律抛 `IncomparableError`，不静默。
- * ① 不同 probe_key；② 不同 engine_epoch；③ 不同 seedSpace；
+ * ① 不同 probe_key；② 不同 engine_epoch（= sha256(codehash-files.txt 的 codeHash)[0:16]，
+ * 2026-09-17 起与 rollout 门同源；无关提交不再让其变化）；③ 不同 seedSpace；
  * ④ 配对比较要求同 seed 集；⑤ 同窗内 seed_segment 互不相交。
  */
 export function assertComparable(

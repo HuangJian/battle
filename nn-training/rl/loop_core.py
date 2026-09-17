@@ -205,6 +205,13 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         self._stream_meta: dict | None = None
         self._eval_thread: threading.Thread | None = None
         self._eval_gate: threading.Event | None = None
+        # 2026-09-17：本机 eval 份额是否已被**我们**提前放行（非节点饥饿兜底），
+        # 供 `_regate_local_eval` 在本机 PPO 真接手时收回。
+        self._eval_gate_early_released = False
+        # 2026-09-17：未收官的 eval 尾巴 (thread, 派发时刻)——由下一轮 rollout 收官时
+        # 收拢（_sweep_eval_tail，不站等固定秒数）。
+        self._eval_tail: tuple[threading.Thread, float] | None = None
+        self._eval_tail_start: float | None = None
         # it0 基线评估（bc 权重）：rollout 收官后派发、落账前每轮重试（见
         # _maybe_dispatch_baseline_eval）。线程只作在飞守卫，不参与 join；
         # _baseline_landed_wver = 已落账基线的权重指纹（命中即不再派）。

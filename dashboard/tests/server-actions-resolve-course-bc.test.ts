@@ -6,7 +6,7 @@
  * 自 training-console.test.ts 按 src 分层拆出。
  * 夹具（env 重定向 + 被测模块）见 ./helpers/console-fixture.ts。
  *
- * 2026-09-17 事故回归：`curricula/x1-rebirth-a2.jsonc` 用了**行内**注释
+ * 2026-09-17 事故回归：`curricula/x1-rebirth.jsonc` 用了**行内**注释
  * （`"lr": 0.0005, // …`），而 dashboard 当时手搓的剥离逻辑只认「整行 `//`」⇒
  * JSON.parse 抛 SyntaxError ⇒ 静默回退 legacy ⇒ 报出「初始权重缺失且 BC 产物不存在:
  * tmp/ep60/…」这种指向完全无关文件的错误。三条用例锁住：① 该课程现在能读到真 bc；
@@ -29,9 +29,11 @@ describe('console/actions.resolveCourseBc（§384：种子路径读课程 bc 字
     expect(actions.resolveCourseBc('no-such-course-xyz')).not.toContain('ckpt')
   })
 
-  it('行内 `//` 注释的课程照常读到 bc（2026-09-17 x1-rebirth-a2 事故回归）', () => {
+  it('行内 `//` 注释的课程照常读到 bc（2026-09-17 x1-rebirth 事故回归）', () => {
     // 该文件的 "lr" / "epochs" / "seed_rotate" 等行都带行内注释。
-    expect(actions.resolveCourseBc('x1-rebirth-a2')).toBe(
+    // 课程名 = 课程文件名（`nn-training/curricula/<course>.jsonc`）：事故当时的
+    // 课程就是 x1-rebirth（提交名 x1-rebirth.jsonc，从未有过 -a2 文件）。
+    expect(actions.resolveCourseBc('x1-rebirth')).toBe(
       path.join(NN_TRAINING, 'weights', 'x1-rebirth', 'scratch-init.json'),
     )
   })

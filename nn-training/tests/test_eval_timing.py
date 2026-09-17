@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import sys
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,6 +21,15 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from rl.eval_dispatch import find_archive_weights, select_delayed_eval_it
+from rl.eval_local import (
+    EVAL_JOIN_SOFT_SEC_DEFAULT,
+    EVAL_LOCAL_EARLY_EPOCHS_DEFAULT,
+    early_epoch_reached,
+    eval_join_soft_sec,
+    eval_local_early_epochs,
+    eval_tail_overran,
+    local_gate_release_plan,
+)
 from rl.loop_steps import TrainingSteps
 
 
@@ -130,6 +140,246 @@ def test_dispatch_delayed_eval_skips(tmp_path: Path, monkeypatch: pytest.MonkeyP
     Path(str(ts3.args.out)).write_text("{}", encoding="utf-8")
     ts3._dispatch_delayed_eval(6, {})
     assert len(calls) == 1 and calls[0][1] == str(ts3.args.out) and calls[0][6] == 5
+
+
+# ---- in-loop eval 墙钟（2026-09-17）：软等可配 + 本机份额提前放行 ----------------
+
+
+def test_eval_policy_knobs() -> None:
+    """policy 旋钮读数：缺省/坏值回落安全默认（配置写错不得崩或荒谬时长）。"""
+    assert eval_join_soft_sec(None) == EVAL_JOIN_SOFT_SEC_DEFAULT
+    assert eval_join_soft_sec({}) == EVAL_JOIN_SOFT_SEC_DEFAULT
+    assert eval_join_soft_sec({"evalJoinSoftSec": 0}) == 0.0  # 显式 0 = 不站等
+    assert eval_join_soft_sec({"evalJoinSoftSec": 12.5}) == 12.5
+    assert eval_join_soft_sec({"evalJoinSoftSec": -5}) == 0.0  # 负值夹到 0，不倒扣
+    assert eval_join_soft_sec({"evalJoinSoftSec": "junk"}) == EVAL_JOIN_SOFT_SEC_DEFAULT
+    assert eval_join_soft_sec({"evalJoinSoftSec": float("nan")}) == EVAL_JOIN_SOFT_SEC_DEFAULT
+
+    assert eval_local_early_epochs(None) == EVAL_LOCAL_EARLY_EPOCHS_DEFAULT
+    assert eval_local_early_epochs({"evalLocalEarlyEpochs": 0}) == 0  # 0 = 严格 R6
+    assert eval_local_early_epochs({"evalLocalEarlyEpochs": 3}) == 3
+    assert (
+        eval_local_early_epochs({"evalLocalEarlyEpochs": "junk"}) == EVAL_LOCAL_EARLY_EPOCHS_DEFAULT
+    )
+
+
+def test_local_gate_release_plan() -> None:
+    """放行档：本机不跑 PPO（远端/上云/stream）⇒ 立刻；本机 PPO ⇒ 末 epoch / on_join。"""
+    assert (
+        local_gate_release_plan(
+            ppo_remote=True, node_rollout=False, stream_round=False, early_epochs=1
+        )
+        == "immediate"
+    )
+    assert (
+        local_gate_release_plan(
+            ppo_remote=False, node_rollout=True, stream_round=False, early_epochs=1
+        )
+        == "immediate"
+    )
+    assert (
+        local_gate_release_plan(
+            ppo_remote=False, node_rollout=False, stream_round=True, early_epochs=0
+        )
+        == "immediate"  # stream 轮 PPO 已在轮内跑完，即使 early=0 也立刻放
+    )
+    assert (
+        local_gate_release_plan(
+            ppo_remote=False, node_rollout=False, stream_round=False, early_epochs=1
+        )
+        == "last_epoch"
+    )
+    assert (
+        local_gate_release_plan(
+            ppo_remote=False, node_rollout=False, stream_round=False, early_epochs=0
+        )
+        == "on_join"
+    )
+
+
+def test_early_epoch_reached() -> None:
+    """末 early 个 epoch（1 基）完成即放行；early=0 永不放；epochs<early 夹到下界。"""
+    assert early_epoch_reached(1, 4, 0) is False
+    assert early_epoch_reached(1, 4, 1) is False
+    assert early_epoch_reached(3, 4, 1) is True  # 最后 1 个 epoch 开始
+    assert early_epoch_reached(2, 4, 2) is True
+    assert early_epoch_reached(1, 4, 9) is True  # 提前量 > epochs 也不得为负
+    assert early_epoch_reached(4, 4, 1) is True
+
+
+def test_dispatch_immediate_release_when_ppo_not_local(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """远端 PPO / 上云轮：本机份额立即放行（gate 置位 + 标记，非 R6）。"""
+    import rl.eval_dispatch as ed
+
+    monkeypatch.setattr(ed, "dispatch_eval_bg", lambda *a, **k: threading.Thread())
+    ts = _steps(tmp_path, ppo="remote")
+    _archive(ts, 5, "{}")
+    ts._dispatch_delayed_eval(6, {})
+    assert ts._eval_gate is not None and ts._eval_gate.is_set()
+    assert ts._eval_gate_early_released is True
+    # 本机 PPO 接手（远端降级）⇒ 收回 R6
+    ts._regate_local_eval()
+    assert ts._eval_gate.is_set() is False
+    assert ts._eval_gate_early_released is False
+
+
+def test_dispatch_defers_local_share_on_local_ppo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """本机 PPO：默认不放行（gate 未置位）；early_epochs>0 由 epoch 钩子放行。"""
+    import rl.eval_dispatch as ed
+
+    monkeypatch.setattr(ed, "dispatch_eval_bg", lambda *a, **k: threading.Thread())
+    ts = _steps(tmp_path, epochs=4)
+    _archive(ts, 5, "{}")
+    ts._dispatch_delayed_eval(6, {})
+    assert ts._eval_gate is not None and ts._eval_gate.is_set() is False
+    hook = ts._local_gate_epoch_hook()
+    assert hook is not None
+    hook(2, None)  # 还没到末 1 个 epoch
+    assert ts._eval_gate.is_set() is False
+    hook(3, None)  # 末 epoch 开始（4-1）
+    assert ts._eval_gate.is_set() is True
+    assert ts._local_gate_epoch_hook() is None  # 已开闸 → 不再注入钩子
+
+
+def test_dispatch_no_early_hook_when_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """policy.evalLocalEarlyEpochs=0 ⇒ 不加钩子，维持 R6（_join_eval 才放行）。"""
+    import rl.eval_dispatch as ed
+
+    monkeypatch.setattr(ed, "dispatch_eval_bg", lambda *a, **k: threading.Thread())
+    ts = _steps(tmp_path, epochs=4)
+    ts._last_dist_cfg = {"policy": {"evalLocalEarlyEpochs": 0}}
+    _archive(ts, 5, "{}")
+    ts._dispatch_delayed_eval(6, {})
+    assert ts._local_gate_epoch_hook() is None
+    assert ts._eval_gate is not None and ts._eval_gate.is_set() is False
+
+
+class _AliveThread:
+    """挂着的 eval 线程替身：只记 join 收到的超时。"""
+
+    def __init__(self, rec: list) -> None:
+        self._rec = rec
+
+    def is_alive(self) -> bool:
+        return True
+
+    def join(self, timeout=None) -> None:
+        self._rec.append(timeout)
+
+
+def test_eval_tail_overran() -> None:
+    """尾巴是否跑过自己的窗口（唯一时间基准；window<=0 = 不做这个判定）。"""
+    assert eval_tail_overran(100.0, 1500.0, 200.0) is False
+    assert eval_tail_overran(100.0, 1500.0, 1601.0) is True
+    assert eval_tail_overran(100.0, 0.0, 99999.0) is False
+
+
+def test_join_eval_does_not_wait_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """缺省不站等：`_join_eval` 一次 join 都不发，尾巴整根交棒给下一步。"""
+    joins: list = []
+    ts = _steps(tmp_path)
+    ts._eval_gate = threading.Event()
+    ts._eval_thread = _AliveThread(joins)  # type: ignore[assignment]
+    ts._eval_tail_start = 100.0
+    ts._join_eval(2)
+    assert joins == []  # 零固定秒数
+    assert ts._eval_gate.is_set()  # 收官必放行（本机份额不得被卡死）
+    assert ts._eval_tail is not None  # 交棒
+    assert ts._eval_tail[0] is ts._eval_thread and ts._eval_tail[1] == 100.0
+
+
+def test_join_eval_soft_wait_is_opt_in_escape_hatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """应急旋钮：policy.evalJoinSoftSec>0 才回到旧语义；上限仍受窗口预算夹住。"""
+    joins: list = []
+    ts = _steps(tmp_path, _tag="z")
+    ts._last_dist_cfg = {"policy": {"evalJoinSoftSec": 12.5}}
+    ts._eval_gate = threading.Event()
+    ts._eval_thread = _AliveThread(joins)  # type: ignore[assignment]
+    ts._eval_tail_start = 5.0
+    ts._join_eval(2)
+    assert joins == [12.5]
+    assert ts._eval_tail is not None and ts._eval_tail[1] == 5.0
+
+    # 显式值超过窗口预算 ⇒ 仍以预算为上限（不得等超过 eval_window_sec+60）
+    joins.clear()
+    ts3 = _steps(tmp_path, _tag="y", eval_window_sec=30)
+    ts3._last_dist_cfg = {"policy": {"evalJoinSoftSec": 9999}}
+    ts3._eval_gate = threading.Event()
+    ts3._eval_thread = _AliveThread(joins)  # type: ignore[assignment]
+    ts3._join_eval(2)
+    assert joins == [90.0]
+
+
+def test_sweep_eval_tail_at_rollout_boundary(tmp_path: Path) -> None:
+    """收拢点（下一轮 rollout 收官）：已收官的尾巴只清账；在跑的零等待，只记日志。"""
+    joins: list = []
+    ts = _steps(tmp_path)
+    ts._eval_tail = (_FinishedThread(joins), time.time() - 120.0)  # type: ignore[assignment]
+    ts._eval_join_sec = 0.0
+    ts._sweep_eval_tail()
+    assert joins == [] and ts._eval_tail is None
+
+    # 仍在跑：不 join、不计入 eval_join_sec（缺省 0 ⇒ 不补等）
+    ts2 = _steps(tmp_path, _tag="running")
+    ts2._eval_tail = (_AliveThread(joins), time.time() - 30.0)  # type: ignore[assignment]
+    ts2._sweep_eval_tail()
+    assert joins == [] and ts2._eval_tail is None
+    assert ts2._eval_join_sec == 0.0
+
+    # 应急旋钮 >0：边界处补等，秒数计入 eval_join_sec
+    ts3 = _steps(tmp_path, _tag="soft")
+    ts3._last_dist_cfg = {"policy": {"evalJoinSoftSec": 5}}
+    ts3._eval_tail = (_AliveThread(joins), time.time())  # type: ignore[assignment]
+    ts3._sweep_eval_tail()
+    assert joins == [5]
+
+    # 无尾巴 = 纯空转（非评估轮也会走这里）
+    ts4 = _steps(tmp_path, _tag="none")
+    ts4._sweep_eval_tail()
+    assert ts4._eval_tail is None
+
+
+def test_tail_harvested_when_next_rollout_ends(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """集成：上一轮尾巴在下一轮采集落幕时被收拢（_dispatch_delayed_eval 入口）。"""
+    import rl.eval_dispatch as ed
+
+    monkeypatch.setattr(ed, "dispatch_eval_bg", lambda *a, **k: threading.Thread())
+    ts = _steps(tmp_path)
+    ts._eval_tail = (_FinishedThread([]), time.time() - 300.0)  # type: ignore[assignment]
+    _archive(ts, 5, "{}")
+    ts._dispatch_delayed_eval(6, {})  # 下一轮 rollout 收官
+    assert ts._eval_tail is None  # 已收拢
+
+    # 非评估轮（m=None）也要收拢：不是等评估轮才清账
+    ts2 = _steps(tmp_path, _tag="none")
+    ts2._eval_tail = (_FinishedThread([]), time.time())  # type: ignore[assignment]
+    ts2._dispatch_delayed_eval(7, {})
+    assert ts2._eval_tail is None
+
+
+class _FinishedThread:
+    """已收官的尾巴替身。"""
+
+    def __init__(self, rec: list) -> None:
+        self._rec = rec
+
+    def is_alive(self) -> bool:
+        return False
+
+    def join(self, timeout=None) -> None:
+        self._rec.append(timeout)
 
 
 def _summary(eval_log: Path, it: int, dropped: int) -> None:

@@ -13,10 +13,11 @@ import { evalDataRoot, trackedLadder } from './ladder-data'
 let engineMemo: EvalGameRow['engine'] | null = null
 function engineOfConsole(): EvalGameRow['engine'] {
   if (!engineMemo) {
-    // 惰性一次：tree walk 秒级，memo 后零成本。
+    // 惰性一次：tree walk 秒级，memo 后零成本。engine_epoch = sha256(codeHash)[0:16]，
+    // dist_codehash 与节点门同值（2026-09-17 统一事实来源，诊断一眼可比）。
     try {
-      const { engine_epoch } = computeEngineEpoch(EVAL_REPO_ROOT, gitCommit(EVAL_REPO_ROOT))
-      engineMemo = { git_commit: gitCommit(EVAL_REPO_ROOT), dist_codehash: '', engine_epoch }
+      const { engine_epoch, codeHash } = computeEngineEpoch()
+      engineMemo = { git_commit: gitCommit(EVAL_REPO_ROOT), dist_codehash: codeHash, engine_epoch }
     } catch {
       engineMemo = { git_commit: 'unknown', dist_codehash: '', engine_epoch: 'unknown' }
     }

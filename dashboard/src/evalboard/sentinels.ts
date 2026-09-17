@@ -197,7 +197,11 @@ export function checkS9(entropy: number, entropyPeak: number, kl: number): Senti
   return null
 }
 
-/** S10 引擎漂移（记录级）：同课程记录跨 engine_epoch ⇒ 重跑参照组或标 stale。 */
+/** S10 引擎漂移（记录级）：同课程记录跨 engine_epoch ⇒ 重跑参照组或标 stale。
+ *
+ * 2026-09-17：engine_epoch = sha256(codehash-files.txt 的 codeHash)[0:16]，故“漂移”范围
+ * = SSOT 清单内代码（src/nn 策略 + 引擎/config/RNG/God + agent 工具）；与 rollout/eval
+ * 无关的提交（dashboard / nn-training / docs）不再让同课程记录变不可比。 */
 export function checkS10(epochs: string[]): SentinelHit | null {
   if (new Set(epochs).size > 1) {
     return {

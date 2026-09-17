@@ -515,6 +515,17 @@ def test_codehash_manifest_expansion() -> None:
     ):
         check(need in rels, f"清单含 {need}")
     check(any(r.startswith("src/nn/") for r in rels), "src/nn/ 目录条目递归纳入")
+    # 2026-09-17：引擎/God/评估文件并入本清单（eval 门与 rollout 门同源，
+    # 原 GAMEPLAY_SPECS 双份清单已删）——改引擎必须改 codeHash。
+    for need2 in ("tools/det-golden.v1.sha256", "src/game/SimulationCombat.ts"):
+        check(need2 in rels, f"清单含 {need2}")
+    for spec in ("src/game/", "src/config/", "src/utils/", "src/ai/"):
+        check(any(r.startswith(spec) for r in rels), f"清单递归纳入 {spec}")
+    # 与 rollout/eval 无关的树严禁入集：入集 = 它们的每次提交都触发节点重启波。
+    check(
+        not any(r.startswith(("dashboard/", "nn-training/")) for r in rels),
+        "无关树（dashboard/nn-training）不入集",
+    )
     check(all("\\" not in r for r in rels), "relPath 全 posix 正斜杠")
     check(len(rels) == len(set(rels)), "文件集无重复")
 
