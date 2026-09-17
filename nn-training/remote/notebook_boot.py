@@ -15,6 +15,7 @@ code.zip**）。但 2026-09-16 起 cell 会先从 GitHub raw 拉本文件（和�
 from __future__ import annotations
 
 import base64
+import hashlib
 import importlib
 import io
 import json
@@ -68,7 +69,13 @@ def _build_opener() -> urllib.request.OpenerDirector:
 
 
 # ── Pull：GET /code → code.zip → 交给 remote.notebook_runtime ──────────────
-def _pull(cfg: dict, log, secret, keepalive_stop, hub: str, hub_tok: str) -> int:
+def _pull(cfg: dict, log, keepalive_stop, hub: str, hub_tok: str, push_tok: str) -> int:
+    """取 hub 下发的 code.zip（★ 不再在这里读凭据：此时进程已在 tailnet 代理后面）。
+
+    hub 的 code.zip 是 **TrainingLoop 启动时** 一次性打包的（rl/loop_steps.py
+    pack_code_zip）——改了 remote/ 必须先重启 loop，否则云机拉到的是旧运行时；
+    日志里的 sha12 就是用来跟 loop 侧对账的。
+    """
     opener = _build_opener()
     deadline = time.time() + 3600
     while True:
@@ -77,7 +84,7 @@ def _pull(cfg: dict, log, secret, keepalive_stop, hub: str, hub_tok: str) -> int
                 hub.rstrip("/") + "/code", headers={"Authorization": "Bearer " + hub_tok})
             with opener.open(req, timeout=120) as resp:
                 raw = resp.read()
-            log(f"code.zip 就绪: {len(raw)} bytes")
+            log(f"code.zip 就绪: {len(raw)} bytes sha12={hashlib.sha256(raw).hexdigest()[:12]}")
             break
         except urllib.error.HTTPError as e:
             if e.code in (401, 403):
@@ -97,7 +104,7 @@ def _pull(cfg: dict, log, secret, keepalive_stop, hub: str, hub_tok: str) -> int
     from remote.notebook_runtime import run_notebook
     return run_notebook({
         "mode": cfg["rl_mode"], "hub_url": hub, "hub_token": hub_tok,
-        "push_port": int(cfg["push_port"]), "push_token": secret("PUSH_TOKEN", cfg.get("push_token")),
+        "push_port": int(cfg["push_port"]), "push_token": push_tok,
         "device": cfg["device"], "use_multi_gpu": True,
         "max_session_hours": cfg["max_session_hours"], "poll_interval_sec": 1,
         "idle_floor_sec": 3600, "max_worker_restarts": 5,
@@ -238,26 +245,46 @@ def _bc(cfg: dict, log) -> int:
 
 
 def run(cfg: dict, log, secret, keepalive_stop) -> int:
-    """cell 的唯一入口：起 Tailscale → 按 mode 分支。返回值交给 SystemExit。"""
+    """cell 的唯一入口：起 Tailscale → 按 mode 分支。返回值交给 SystemExit。
+
+    ★ 凭据一律在起 Tailscale **之前**读完（2026-09-17 Kaggle 事故）：userspace 引导
+    会把 HTTP_PROXY/ALL_PROXY 指向只转发 Tailscale IP 的本地代理，之后平台 Secrets
+    （公网 HTTPS）再也读不出来；而读失败被 `secret()` 吞成空串 ⇒ /code 401 ⇒ 会话终结。
+    同一个 cell 的内联回退本来就是这个顺序（先读凭据再 `_inline_ensure`），这里补齐。
+    """
+    creds = {
+        "TS_AUTHKEY": secret("TS_AUTHKEY", cfg.get("ts_authkey")),
+        "HUB_TOKEN": secret("HUB_TOKEN", cfg.get("hub_token")),
+        "PUSH_TOKEN": secret("PUSH_TOKEN", cfg.get("push_token")),
+    }
+    log("凭据就绪（值不落日志）："
+        + (", ".join(k for k, v in creds.items() if v) or "（一个都没读到）"))
     ts_cfg = {
-        "ts_authkey": secret("TS_AUTHKEY", cfg.get("ts_authkey")),
+        "ts_authkey": creds["TS_AUTHKEY"],
         "ts_ephemeral": bool(cfg.get("ts_ephemeral", True)),
         "proxy_env": cfg.get("mode") == "rl",   # bc 要 git clone，别让它走 tailnet 代理
+        "engine": str(cfg.get("ts_engine") or ""),
     }
     if not ts_cfg["ts_authkey"]:
-        log("!! 未拿到 TS_AUTHKEY（环境变量 / Colab Secrets / CFG 三处都没有）")
+        log("!! 未拿到 TS_AUTHKEY（环境变量 / Colab Secrets / Kaggle Secrets / CFG 四处都没有）")
     ts = tailscale_boot.ensure(ts_cfg, log)
     ip = ts["ip"]
 
     if cfg["mode"] == "rl":
         rl_mode = str(cfg.get("rl_mode") or "push").lower()
         hub = str(cfg.get("hub_url") or "").strip()
-        hub_tok = secret("HUB_TOKEN", cfg.get("hub_token"))
+        hub_tok = creds["HUB_TOKEN"]
         if rl_mode == "pull" or (rl_mode == "push" and hub):
             if not hub:
                 raise SystemExit("[FATAL] pull 需要 hub_url")
-            return _pull(cfg, log, secret, keepalive_stop, hub, hub_tok)
-        tok = secret("PUSH_TOKEN", cfg.get("push_token"))
+            if not hub_tok:
+                # 引导后平台 Secrets 读不出来会被吞成空串；别再以「HUB_TOKEN 不一致」
+                # 这种误导性措辞收场（2026-09-17 Kaggle 事故的解码成本就花在这上面）。
+                raise SystemExit(
+                    "[FATAL] HUB_TOKEN 未读到——检查 Kaggle/Colab Secrets 名称与可见性，"
+                    "或改用环境变量/CFG；引导后读凭据必须走在 userspace 代理之前")
+            return _pull(cfg, log, keepalive_stop, hub, hub_tok, creds["PUSH_TOKEN"])
+        tok = creds["PUSH_TOKEN"]
         if tok in ("", "YOUR_TOKEN_HERE"):
             raise SystemExit("[FATAL] push 需要 PUSH_TOKEN")
         return _push(cfg, log, secret, keepalive_stop, ip, tok)

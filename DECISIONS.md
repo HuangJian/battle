@@ -1999,3 +1999,39 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   读成动了”每条腿都会出现；③ 无法就近表达 —— 横跨课程 verdict 口径 / 门禁数学 /
   后继路线，无单一落点。
 - **违反后果**：再开奖励腿 ⇒ 2–4h 换复印零；拿灰度 pd 或单 run 显著断言 ⇒ k05 翻案重演。
+## §2026-09-17-kaggle-cred-before-proxy（2026-09-17，Kaggle 引导期凭据必须在装 tailnet 代理之前读；诊断日志落文件）
+
+- **背景**：`battle.tailscale.ipynb` 在 Kaggle 上「完整引导后」会话无声终结（Colab 一切正常；改了几轮
+  tailscale/daemon/up-flags 都无效）。人工复制出来的日志止于 `Tailscale IP = …(mode=userspace)`。
+- **根因（代码级，2026-09-17 定位）**：`notebook_boot.run()` 把 `HUB_TOKEN`/`PUSH_TOKEN` 的读取放在
+  `tailscale_boot.ensure()` **之后**，而 ensure 会把 `HTTP_PROXY/ALL_PROXY` 指到 userspace tailscaled 的
+  本地代理——**该代理只转发 Tailscale IP**。Kaggle 的凭据链必然落到 `kaggle_secrets`（对
+  `www.kaggle.com` 的 HTTPS 调用），于是引导后读不到 token；`_secret()` 的 `except Exception` 又把它
+  吞成空串 ⇒ `/code` 401 ⇒ `SystemExit` ⇒ 会话终结。Colab 的链在 `google.colab.userdata`（localhost
+  通道，被 NO_PROXY 覆盖）就命中，`_kaggle()` 永不执行 ⇒ **平台差异**。同 cell 的**内联回退**本来就是
+  「先读凭据、再 `_inline_ensure` 注入代理」，顺序是在迁移到远端模块时丢掉的（回归第 5 条）。
+- **备选与否决**：让 tailnet 代理也能走公网——否，tailscaled userspace 出站代理设计上只转发 tailnet；
+  只往 NO_PROXY 塞 `.kaggle.com`——否（清单不可穷举：Secrets/元数据/git/pip，且**顺序错误本身仍在**），
+  但「NO_PROXY 合并平台条目」作为第二道保险保留；给 `_secret` 加重试/回退——否，代理方向本身就是错的。
+- **决定**：① `notebook_boot.run()` 在 `ensure()` **之前**一次性读完三个凭据并下传（`_pull` 不再持有
+  secret 句柄，签名级防回归）；② `tailscale_boot` 新增 `set_proxy_env()` / `platform_net_env()`：
+  NO_PROXY **合并**（不再覆盖平台条目）、记录引导前原值、公网调用前临时还原为平台代理；cell 的
+  `_secret` 用同一套（内联 `_platform_net_env()`）；③ 缺 token 时**响亮点名**，不再落到
+  「`/code` 401 — HUB_TOKEN 不一致」这种误导措辞；④ cell 日志同时落文件
+  （`/kaggle/working/battle-boot.log` → `/content` → `/tmp`），`SystemExit` 收尾/未捕获异常也落文件
+  （此前第一手线索全靠人工复制 `[battle]` 行，**SystemExit 正文恰恰不带该前缀**，最容易被漏掉）；
+  ⑤ `CFG["ts_engine"]` 阀门（引擎顺序实验，默认 `kernel,userspace` 不变；用于验证
+  「kernel 模式那次 TUN/路由尝试动过容器网络」这条待验证假设）。
+- **违反后果**：任何人再把「读平台 Secrets / pip / git」放到引导之后，Kaggle 上都会复现「无声终结」；
+  任何只打 stdout 的引导都会在下一次无声死亡里丢掉全部证据（本轮排障成本的一大半在这里）。
+- **配套事实（同批）**：`code.zip` 是 **TrainingLoop 启动时**的快照（`rl/loop_steps.py::pack_code_zip`，
+  hub `/code` 直接回文件）——改了 `remote/` **必须重启 loop**，否则云机跑的是旧运行时；日志里的
+  `sha12` 就是用来跟 loop 侧对账的（§2026-09-16-kaggle-kernel-no-torch 的子进程探测修复正是靠它才生效）。
+- **回归测试**：`nn-training/tests/test_bootstrap_proxy.py`（7 例：NO_PROXY 合并 / 平台代理还原 /
+  异常路径还原 / 引擎顺序 / ★凭据前置 / `_pull` 签名 / 缺 token 点名）；`tmp/repro-old-order.py`
+  对 HEAD 的**修复前**代码复现了「引导后读 HUB_TOKEN」，断言当场抓住（§7.1）。
+- **未决（下一步验证）**：E1 用落盘日志跑一次 Kaggle 定位真实死点；E2 「boot 完静置 5 分钟不 import
+  torch」对照（排除 daemon/平台网络被杀）；E3 `ts_engine=userspace`（排除 kernel 尝试的副作用）；
+  E4 对开卡 `sha12` 与 loop 日志核对 code.zip 新鲜度。
+
+

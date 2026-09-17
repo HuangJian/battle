@@ -14,15 +14,22 @@ Colab 环境三条硬事实（踩过）：
   1. 没有 systemd（PID 1 不是 init）⇒ apt 装完 tailscaled **不会自启**，必须手工 Popen；
   2. 容器无 CAP_NET_ADMIN / 常无 /dev/net/tun ⇒ kernel 模式 rc=1 秒退，要退 userspace；
   3. 老版本 root 下撞 SO_MARK 权限错误 ⇒ 兜底以非 root 用户（irc/nobody）跑。
+
+第 4 条硬事实（2026-09-17 Kaggle 事故）：**userspace 模式装上的出站代理只转发
+Tailscale IP**（本地 1055 的 HTTP/SOCKS5 代理）。所以引导之后，进程里任何要访问
+**公网**的调用（平台 Secrets、pip、git）都必须走 `platform_net_env()` 临时还原平台
+自己的代理环境；否则请求被塞进 tailnet 代理 → 读不出凭据 → 平台侧报鉴权错。
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
 import subprocess
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 SOCK = "/var/run/tailscale/tailscaled.sock"
@@ -102,23 +109,30 @@ def _alive(p: subprocess.Popen[bytes], log, name: str, secs: int = 20) -> bool:
     return False
 
 
-def start_daemon(log) -> str:
-    """拉起 tailscaled，返回 'kernel' / 'userspace' / 'userspace-unpriv'。"""
+def start_daemon(log, order: str = "") -> str:
+    """拉起 tailscaled，返回 'kernel' / 'userspace' / 'userspace-unpriv'。
+
+    order：逗号分隔的引擎顺序（CFG `ts_engine` / env `TS_ENGINE`），默认
+    `kernel,userspace`。可改成 `userspace`（或 `userspace,kernel`）用于「kernel
+    模式那次 TUN/路由尝试本身就有副作用」的容器——它在失败前可能已经动过 notebook
+    容器的网络命名空间（2026-09-17 Kaggle 待验证假设，E3 实验阀门；默认行为不变）。
+    """
     Path(SOCK).parent.mkdir(parents=True, exist_ok=True)
     Path(STATE_DIR).mkdir(parents=True, exist_ok=True)
     fd = open(DAEMON_LOG, "ab")
-    attempts: list[tuple[str, list[str]]] = [
-        ("kernel", ["tailscaled"]),
-        (
-            "userspace",
-            [
-                "tailscaled",
-                "--tun=userspace-networking",
-                f"--socks5-server={PROXY}",
-                f"--outbound-http-proxy-listen={PROXY}",
-            ],
-        ),
-    ]
+    engines: dict[str, list[str]] = {
+        "kernel": ["tailscaled"],
+        "userspace": [
+            "tailscaled",
+            "--tun=userspace-networking",
+            f"--socks5-server={PROXY}",
+            f"--outbound-http-proxy-listen={PROXY}",
+        ],
+    }
+    names = [n.strip() for n in (order or "kernel,userspace").split(",") if n.strip()]
+    attempts: list[tuple[str, list[str]]] = [(n, engines[n]) for n in names if n in engines]
+    if not attempts:
+        attempts = [("kernel", engines["kernel"]), ("userspace", engines["userspace"])]
     for name, argv in attempts:
         p = _spawn(log, argv, fd)
         if _alive(p, log, name):
@@ -190,16 +204,84 @@ def up(log, authkey: str = "", ephemeral: bool = True) -> None:
         raise RuntimeError("tailscale up 失败（key 用过/过期/一次性？设备数超限？看上一行首句）")
 
 
+# ── 出站代理环境（userspace 模式）与「平台网络」临时还原 ─────────────────────
+#: 本模块会改写的代理环境键（大小写各一份——requests 认大写、部分工具认小写）
+PROXY_ENV_KEYS = (
+    "HTTP_PROXY",
+    "http_proxy",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
+)
+#: 改写前的原值（None = 原本未设）；`platform_net_env()` 靠它还原平台自己的代理
+_ORIG_PROXY_ENV: dict[str, str | None] = {}
+
+
+def set_proxy_env(cfg: dict | None = None) -> None:
+    """把出站代理指向 userspace tailscaled（`PROXY`），并**合并**而非覆盖 NO_PROXY。
+
+    NO_PROXY 必须保留平台原有条目（localhost 通道、平台内网服务），否则引导后平台
+    自己的 API 会被塞进 tailnet 代理——而它只转发 Tailscale IP。同时记下改写前的
+    原值，供 `platform_net_env()` 还原。
+    """
+    cfg = cfg or {}
+    for k in PROXY_ENV_KEYS:
+        _ORIG_PROXY_ENV.setdefault(k, os.environ.get(k))
+    old = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
+    parts = ["localhost", "127.0.0.1", "::1", str(cfg.get("no_proxy_extra") or ""), old]
+    for k, v in (
+        ("HTTP_PROXY", f"http://{PROXY}"),
+        ("ALL_PROXY", f"socks5://{PROXY}"),
+        ("NO_PROXY", ",".join(p for p in parts if p)),
+    ):
+        os.environ[k] = v
+        os.environ[k.lower()] = v
+
+
+@contextlib.contextmanager
+def platform_net_env() -> Iterator[None]:
+    """临时还原「引导前」的代理环境——只给仍要访问**公网**的进程内调用用。
+
+    为什么：userspace 引导后 HTTP_PROXY/ALL_PROXY 指向的本地代理只转发 Tailscale
+    IP，公网 HTTPS（Kaggle/Colab Secrets、pip、git）一律走不通；而 cell 的 `_secret`
+    与 notebook_boot 的凭据读取恰恰是公网调用（2026-09-17 Kaggle 事故：HUB_TOKEN
+    读失败被吞 → /code 401 → 会话终结）。子进程继承的是**当前**环境，所以出这个
+    with 之后 tailnet 代理照旧可用。
+    """
+    saved = {k: os.environ.get(k) for k in PROXY_ENV_KEYS}
+    for k in PROXY_ENV_KEYS:
+        orig = _ORIG_PROXY_ENV.get(k)
+        if orig is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = orig
+    try:
+        yield
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 def ensure(cfg: dict, log) -> dict:
     """装 → 起 daemon → 登录 → 取 IP。返回 {ip, mode, sock, proxy}。
 
-    cfg: {"ts_authkey": str, "ts_ephemeral": bool, "proxy_env": bool}
+    cfg: {"ts_authkey": str, "ts_ephemeral": bool, "proxy_env": bool,
+          "engine": str, "no_proxy_extra": str}
     proxy_env=True 且落到 userspace 时，注入 HTTP_PROXY/ALL_PROXY（否则连 tailnet 都不通）。
+    ★ 调用方必须在**进本函数之前**把凭据全部读完：本函数会改写进程的代理环境，
+      之后平台 Secrets（公网 HTTPS）就走不通了。
     """
     if not shutil.which("tailscale"):
         install(log)
     already = bool(state())
-    mode = "already-running" if already else start_daemon(log)
+    engine = str(cfg.get("engine") or os.environ.get("TS_ENGINE") or "")
+    mode = "already-running" if already else start_daemon(log, engine)
     if state() != "Running":
         up(log, str(cfg.get("ts_authkey") or "").strip(), bool(cfg.get("ts_ephemeral", True)))
     ip = ""
@@ -215,15 +297,11 @@ def ensure(cfg: dict, log) -> dict:
     is_userspace = mode.startswith("userspace") or (already and _port_listening(PROXY))
     if is_userspace:
         if cfg.get("proxy_env", True):
-            for _k, _v in (
-                ("HTTP_PROXY", f"http://{PROXY}"),
-                ("ALL_PROXY", f"socks5://{PROXY}"),
-                ("NO_PROXY", "localhost,127.0.0.1"),
-            ):
-                os.environ[_k] = _v
-                os.environ[_k.lower()] = _v
+            set_proxy_env(cfg)
         log(f"!! {mode} 模式：出站只能走 {PROXY} 代理（已设 HTTP_PROXY/ALL_PROXY）；"
             f"入站到本地端口不通 ⇒ pull 可用、push 不可用")
+        log(f"   NO_PROXY={os.environ.get('NO_PROXY') or '(空)'}"
+            f"（公网调用需 `platform_net_env()` 还原平台代理）")
     log(f"Tailscale IP = {ip} (mode={mode})")
     return {"ip": ip, "mode": mode, "sock": SOCK, "proxy": PROXY}
 
