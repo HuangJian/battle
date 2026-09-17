@@ -39,8 +39,25 @@
 `early_epoch_reached` 边界（early=0 / early>epochs）、派发即放行 + 降级收回、本机 PPO 未放行 /
 epoch 钩子到点放行 / `evalLocalEarlyEpochs=0` 不加钩子、缺省零 join + 边界收拢（已收官/在跑/应急旋钮>0/无尾巴）、`evalJoinSoftSec` 应急值超预算夹回。
 门禁：`e2e/test_run_rl.py -k "eval_deferred|eval_post_ppo_weights|eval_local_gate|tail_join_grace|early_race"
-5 passed`；nn python 全量 **绿**（唯一未过仍是平台性存量红 `test_spec_argv_weights_must_be_relative`，
-见 §65）；ruff + mypy 干净。
+5 passed`；nn python 全量 **绿**（**1200 passed / 3 skipped，第一次无 any deselect/跳过**——
+§65 记的那条平台性存量红已在 §66.1 修掉）；ruff + mypy 干净。
+
+### §66.1 顺带清掉存量红：盘符/UNC 路径在任何平台都被拒（2026-09-17）
+
+**红点**：`test_remote_iter::test_spec_argv_weights_must_be_relative` 在 Linux 上恒失败——
+`_iter_rel_path`（`remote/protocol.py`）只挡 `..` / `~` / POSIX 绝对路径，`os.path.isabs` 与
+`Path.is_absolute` 都只看**当前内核**规则 ⇒ `C:/weights.json` 在 Linux 上静默过门。
+这不只是“测试红”：Windows 盘符路径真能过 hub 的门，到节点上却指向**宿主盘**（或直接跑挂）——
+节点的 cwd 契约不随 hub 内核变。
+
+**修**：`_iter_rel_path` 增两条跨平台判定（只多拒、不放松）：盘符前缀 `^[A-Za-z]:`（绝对值与
+**drive-relative `c:x`** 都算）与 UNC（`\\host\share`）。回归用例扩为参数化 5 例（`C:/`、`C:\`、
+`c:weights.json`、两种 UNC）+ 一条反向断言（`weights.json`、`sub/dir/w.json`、`./w.json`、
+`w-1.2.json`、`a_b/c.json` 照旧放行，防收紧误伤正常相对路径）。修前 4/5 参数化用例红（`//host/…`
+本就命中 `os.path.isabs`），修后全绿。
+
+**门禁**：`nn-python-gate.sh` **1200 passed / 3 skipped，rc=0**（首个无 deselect、无跳过的全绿）；
+ruff + mypy 干净。
 
 **仍暴露的墙钟（有意保留）**：① 收官 drain（`_drain_pending_eval`，无 PPO 可藏，
 ≤min(window+60,600)s）；② intent/goal 全预算 join。per-tick 主链现在**不为 eval 站等一秒**。
@@ -83,10 +100,10 @@ it1–it4 四节点同因全 skip）。用户指令：两者统一用 `tools/age
 typecheck + **485 pass / 0 fail**（顺带修掉进入本次任务时那条**存量红**
 `server-actions-resolve-course-bc`：用例引用的是从未存在过的课程名 `x1-rebirth-a2`，仓内课程是
 `x1-rebirth.jsonc`，已改成真课程名）；nn python：ruff + mypy（225 文件）干净、
-**1183 passed / 3 skipped**。唯一未跑的一条
+**1183 passed / 3 skipped**。当时剩下一条未跑
 `test_remote_iter::test_spec_argv_weights_must_be_relative` 是**平台性存量红**：
 `_iter_rel_path` 只挡 `..` / `~` / POSIX 绝对路径，`C:/weights.json` 在 Linux 上既非
-`os.path.isabs` 也非 `Path.isabs`（Windows 上才拦得住）——与本改动无关，已单独确认。
+`os.path.isabs` 也非 `Path.isabs`（Windows 上才拦得住）——**已于同日修掉，见 §66.1**。
 决策见 `DECISIONS.md §2026-09-17-goalnn-unified-node-gate`。
 
 ## §64 控制台两条腿：导出任务包 / 导入产物即评估（2026-09-17）

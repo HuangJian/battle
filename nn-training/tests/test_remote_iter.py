@@ -200,12 +200,32 @@ def test_spec_argv_paths_must_stay_inside_job_dir(evil: str) -> None:
         validate_rollout_spec(bad)
 
 
-def test_spec_argv_weights_must_be_relative() -> None:
+@pytest.mark.parametrize(
+    "evil",
+    [
+        "C:/weights.json",  # Windows 盘符绝对（POSIX 下 os.path.isabs=None）
+        "C:\\weights.json",  # 反斜杠写法
+        "c:weights.json",  # drive-relative：同样不在 job 目录内
+        "\\\\host\\share\\weights.json",  # UNC 共享
+        "//host/share/weights.json",
+    ],
+)
+def test_spec_argv_weights_must_be_relative(evil: str) -> None:
+    """盘符/UNC 路径必须在**任何平台**都被拒（节点的 cwd 契约不随 hub 内核变）。"""
     bad = _spec([(0, 0)])
     i = bad["argv"][0].index("--weights") + 1
-    bad["argv"][0][i] = "C:/weights.json"
+    bad["argv"][0][i] = evil
     with pytest.raises(ProtocolError):
         validate_rollout_spec(bad)
+
+
+def test_spec_argv_plain_relative_paths_still_pass() -> None:
+    """反向断言：收紧盘符判定不得误伤正常相对路径（含带点的目录名）。"""
+    for ok in ("weights.json", "sub/dir/w.json", "./w.json", "w-1.2.json", "a_b/c.json"):
+        good = _spec([(0, 0)])
+        i = good["argv"][0].index("--weights") + 1
+        good["argv"][0][i] = ok
+        assert validate_rollout_spec(good)["argv"][0][i] == ok
 
 
 def test_spec_rejects_duplicate_game() -> None:

@@ -399,6 +399,10 @@ def parse_shard_name(name: str) -> tuple[int, int] | None:
     return int(m.group(1)), int(m.group(2))
 
 
+#: Windows 盘符前缀（`C:` / `c:`）——绝对值与 drive-relative 都算，跨平台一律拒。
+_WIN_DRIVE_RE = re.compile(r"^[A-Za-z]:")
+
+
 def _iter_flag_value(argv: list[str], flag: str) -> int:
     """取 argv 里 `flag` 的单个整数值；缺失/重复/非整数一律 ProtocolError。
 
@@ -415,11 +419,22 @@ def _iter_flag_value(argv: list[str], flag: str) -> int:
 
 
 def _iter_rel_path(value: object, flag: str) -> str:
-    """校验 argv 里的路径参数是 job 目录内的相对路径（拒绝对路径 / `..` / 空）。"""
+    """校验 argv 里的路径参数是 job 目录内的相对路径（拒绝对路径 / `..` / 空）。
+
+    跨平台（2026-09-17 修）：`os.path.isabs` / `Path.is_absolute` 只看**当前内核**的
+    规则——Linux 上 `C:/weights.json` 两者都判 False，于是 Windows 盘符路径能静默过门，
+    到节点上却变成宿主盘上的文件（或直接跑挂）。节点的 cwd 契约不随着 hub 的内核变，
+    所以盘符（含 drive-relative `c:x`）与 UNC 在任何平台都在这里拒收。
+    """
     s = str(value or "")
     if not s:
         raise ProtocolError(f"rollout.argv 的 {flag} 不能为空")
-    if os.path.isabs(s) or Path(s).is_absolute() or s.startswith("~"):
+    if (
+        os.path.isabs(s)
+        or Path(s).is_absolute()
+        or s.startswith(("~", r"\\"))  # ~ 家目录 / UNC（`\\\\host\\share`）
+        or _WIN_DRIVE_RE.match(s)  # `C:/x` / `C:\\x` / `C:x`（drive-relative）
+    ):
         raise ProtocolError(
             f"rollout.argv 的 {flag}={s!r} 必须是相对路径（节点以 job 目录为 cwd）"
         )
