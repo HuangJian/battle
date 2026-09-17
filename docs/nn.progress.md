@@ -4,6 +4,59 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §67 单课程多卡 → 竞速广播：最新 job 派给每个 worker，先回传者胜（2026-09-17）
+
+**用户指令**：只有一个课程在训练、而同时有多个云机 GPU worker 时进入竞速模式——给每个
+worker 都分派**最新的** it 任务，用先返回的结果，后返回的直接丢弃。
+
+**为什么终于可以这么做**：§343（2026-09-06）的竞速广播就是这套语义，但 §2026-09-12 P3b
+以「多课程并行时同 job 被重复算、慢者 409 白烧」为由 supersede 回独占加超时。用户的
+前提（单一课程 + 多卡）恰好把 P3b 的顾虑消掉——那些卡本来就在同一个 hub 上空转。
+因此本次是**定向重开**：判据不是“现在跑了几门课”这种没人能可靠回答的问题，而是
+**worker 自己报的事实**。
+
+```
+每个 worker 在 GET /jobs/next 上自报两个头：
+  X-Worker-Id: <hostname:pid>   —— 隧道回源把全流量归成 127.0.0.1，源 IP 分不出 worker
+  X-Hub-Scope: <本 worker --poll 的 hub 数>
+
+hub 侧 race_decision(§ remote/protocol.py，纯函数)：
+  off  → 永不广播            on → 永远广播（应急强制）
+  auto → 窗口 180s 内 ≥2 个**不同** worker 且它们全都 scope==1 → 广播
+          · 单 worker 不广播（广播的全部收益就是“最快的卡先跑完”，一个执行者没意义）
+          · 任何 worker 报 scope>1 或缺失（旧 worker / 手写 curl）→ 退回独占（P3b 不变）
+
+竞速轮的具体行为：
+  claimable_job_ids(race=True)  最新 job **忽略租约**（谁都能领）；更老的维持独占
+  claim(jid, race=True)         不下租约、返回空 token，并**清掉先前那份独占租约**
+  worker 拿到空 token ⇒ 不心跳（§343 时代的既有分支），`race:true` 只做日志/观测
+  胜负：store_result 首写锁定（赢家 200/201）；后到者 409 —— worker 侧 **409 本来就按
+        成功处理**（“hub 已有同 job 结果”），不重试、不报失败
+```
+
+**落地时抓到的真缺陷（有回归）**：**先独领、后转竞速**的时序（A 先到，hub 当时只看到它
+一个 ⇒ 独占 + lease_token；B 入场才开竞速）——若只清“不下新租约”，A 的旧租约仍是
+“活租约”，B 的回传会被 `result_token_ok` 按**非持有人 403** 拒收，而 worker 把 4xx 一律
+读成**确定性拒绝**并 `POST /jobs/{id}/fail` 上报 job 失败——**一个赢家把输家炸成事故**。
+修法两道：① `claim(race=True)` 当场清租约；② `_post_result` 在**租约校验之前**先看结果
+是否已落盘，已落盘一律 409（与 token 无关）。回归：`test_race_releases_earlier_exclusive_lease`。
+
+**观测面**：`GET /admin/race`（模式/是否生效/窗口内 worker 数及各 scope）；`POST
+/admin/race?mode=auto|on|off` 热切（volatile，与 halt 同性质；切换后清空历史登记）。
+`/admin/workers/status` 的体形状**不动**（console 的 set_cloud_halt 读它）——竞速不往里叠字段。
+`--race` 启动参数由控制台从 `rl.race_mode` 透传（非法值先归一化为 auto：hub-server 的
+argparse choices 会让未知值**秒退**，写错配置不能让整个 hub 起不来）。
+
+**本轮的已知代价（有意接受）**：输家会一直算到结束才发现输了（N-1 份 GPU 白烧、payload
+也要多传 N-1 份）。叫停输家（赢家落账后通知在跑副本放弃）**本轮不做**，记为后续。
+
+**验证**：`nn-training/tests/test_race_broadcast.py` 22 例（头解析/判定五分支 + 窗口离场 +
+单 worker 不广播 + 身份去重 + 存储层“最新才广播/广播不落租约/清旧租约” + HTTP 全链路
+双卡同 job 首写胜 409 丢弃 + 多 hub 退回独占 + 缺头保守 + on/off 热切 + worker 侧头上报与接线）；
+`dashboard/tests/hub-server-race-arg.test.ts` 4 例。门禁：nn python **1222 passed / 3 skipped**、
+ruff+mypy 干净；dashboard typecheck + **489 pass / 0 fail**。
+决策见 `DECISIONS.md §2026-09-17-goalnn-race-broadcast`。
+
 ## §66 in-loop eval 墙钟：软等可配（180s→30s）+ 本机份额提前放行（2026-09-17）
 
 **为什么记这一笔**：用户检查训练流程后确认「eval 已藏进下一轮 PPO」——`_dispatch_delayed_eval(it)`

@@ -12,6 +12,9 @@
 端点（附录 C）：
   GET  /jobs/next               云 worker 轮询领取（P3b 独占加超时：首个 open job
                                 设租约 + 下发 lease_token；超时前不重发）
+                                —— **竞速广播**（2026-09-17）：当本 hub 的 worker 全部
+                                只服务这一个 hub（单课程多卡）时，最新 job 不下租约、
+                                对所有 worker 可见——先回传者胜，后到者 409 丢弃
   GET  /jobs/{id}/payload       下载 payload zip
   POST /jobs/{id}/heartbeat     心跳续租（60s）
   POST /jobs/{id}/result        worker 回传结果（weights_json + opt_tar + agg）
@@ -22,6 +25,7 @@
                                 `/result` 拿 410 + 原因**立即**停腿，不再等 25min 超时
                                 （2026-09-17）
   GET  /jobs/{id}/result        训练主循环取回已落盘结果做三重校验（已失败 → 410 + 原因）
+  GET  /admin/race?mode=auto|on|off   竞速广播热切（2026-09-17；默认 auto）
   POST /offline/artifact        **产物补传**：节点把全离线/半离线段已落盘的一轮产物
                                 （权重 + opt + 账本行）best-effort 推上来（按 (run_id, it)
                                 幂等、首写锁定）；落在 `<job_root>/offline/<run_id>/`
@@ -81,19 +85,26 @@ from remote.protocol import (
     CLAIM_TTL_SEC,
     FAIL_BODY_MAX,
     FAIL_NAME,
+    HUB_SCOPE_HEADER,
     OFFLINE_ARTIFACT_BODY_MAX,
     OFFLINE_ARTIFACT_PATH,
     OFFLINE_RESULT_BODY_MAX,
     OFFLINE_RESULT_PATH,
     PAYLOAD_NAME,
+    RACE_MODE_AUTO,
+    RACE_MODES,
+    RACE_WORKER_WINDOW_SEC,
     TS_CODE_NAME,
     WIRE_V2_MAGIC,
+    WORKER_ID_HEADER,
     ProtocolError,
     blob_path,
     decode_opt_tar,
     decode_weights_json,
     find_payload,
     normalize_manifest,
+    parse_hub_scope,
+    race_decision,
     sanitize_run_id,
     unpack_result_v2,
 )
@@ -198,6 +209,67 @@ class _JobStore:
         #: 置位后 /jobs/next 响应带 halt:true；由 console 经 /admin/workers/{halt,resume}
         #: 控制；hub 重启即复位（volatile）。停机**不拦任务分发**。
         self.halt_workers = False
+        #: 竞速广播（2026-09-17）：`auto`（按 worker 声明判定）| `on` | `off`。
+        #: 与 halt 同性质：volatile（重启回 auto），由 --race 或 /admin/race 设定。
+        self.race_mode: str = RACE_MODE_AUTO
+        #: worker 登记表（竞速判据的唯一事实源）：worker_id -> (last_seen, hub_scope)。
+        #: 隧道回源把全流量归成 127.0.0.1 ⇒ 源 IP 分不出 worker，必须由 worker 自报身份。
+        self._workers: dict[str, tuple[float, int | None]] = {}
+
+    # ---- 竞速广播判定（auto = 机群只服务本 hub；on/off 为应急强制） ----
+    def note_worker(self, worker_id: str, hub_scope: int | None) -> None:
+        """登记一次 worker 轮询（/jobs/next 入口）。空 id 不记（无身份的轮询无法去重计数）。"""
+        wid = (worker_id or "").strip()
+        if not wid:
+            return
+        with self._lock:
+            self._workers[wid] = (self._now(), hub_scope)
+
+    def race_active(self) -> bool:
+        """当前是否该广播（纯判定在 protocol.race_decision，可单测）。
+
+        auto 的语义：**这个 hub 的 worker 全都只服务这一个 hub**→ 机群只为单一课程干活，
+        广播不会撞别的课程（P3b 顾虑不成立）；多 hub worker 一出现（多课程并行）即
+        自动退回独占，不需要运维改任何配置。
+        """
+        with self._lock:
+            workers = [(wid, seen, scope) for wid, (seen, scope) in self._workers.items()]
+            return race_decision(self.race_mode, workers, self._now(), RACE_WORKER_WINDOW_SEC)
+
+    def set_race_mode(self, mode: str) -> str | None:
+        """设置竞速模式；非法值返回 None（不改）。合法则返回归一化后的模式。"""
+        m = (mode or "").strip().lower()
+        if m not in RACE_MODES:
+            return None
+        with self._lock:
+            self.race_mode = m
+        return m
+
+    def clear_workers(self) -> None:
+        """清空 worker 登记（强制切模式时用：不要让上一模式攒下的证据影响新判定）。"""
+        with self._lock:
+            self._workers.clear()
+
+    def race_state(self) -> dict:
+        """竞速观测面（/admin/status）：模式、是否生效、窗口内 worker 数/范围。"""
+        now = self._now()
+        with self._lock:
+            fresh = [
+                (wid, scope)
+                for wid, (seen, scope) in self._workers.items()
+                if now - seen <= RACE_WORKER_WINDOW_SEC
+            ]
+            return {
+                "race_mode": self.race_mode,
+                "race_active": race_decision(
+                    self.race_mode,
+                    [(w, now, s) for w, s in fresh],
+                    now,
+                    RACE_WORKER_WINDOW_SEC,
+                ),
+                "workers": len(fresh),
+                "worker_scopes": {w: s for w, s in fresh},
+            }
 
     # ---- jsonl 账本（job_pending / job_completed 双态，§3.1/D8） ----
     def _read_ledger(self) -> list[dict]:
@@ -232,13 +304,17 @@ class _JobStore:
             f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
     # ---- 可领取池（jsonl + 结果落盘重算，D8） ----
-    def claimable_job_ids(self) -> list[str]:
+    def claimable_job_ids(self, race: bool = False) -> list[str]:
         """job_pending 且未 job_completed 且 payload 在盘且**结果未落盘**的 job_id，按发布序。
 
         P3b 独占加超时（supersede §343）：持有**未过期租约**的 job 不在池中——
         worker 领到 PPO 任务后超时前不被别 worker 重领。过期租约自动回池
         （死 worker 回收只管这一条，不管调大 TTL——it24 倒车禁令）。
         已有结果未验收的 job 从池中剔除——首写锁定兜底（hub 重启丢租约时用）。
+
+        race=True（竞速广播，2026-09-17 用户指令）：**最新的**那个 job 忽略租约下发给
+        所有 worker（先落账者胜，后到者 409）——不设租约是故意的：租约会把"另一个 worker
+        也来领"这件事本身挡在外面。更老的 job 维持独占（陈旧 job 上堆满 worker 纯浪费）。
         """
         pending: dict[str, dict] = {}
         for e in self._read_ledger():
@@ -250,10 +326,8 @@ class _JobStore:
             elif e["event"] in ("job_completed", "job_cancelled"):
                 pending.pop(jid, None)
         now = self._now()
-        out = []
-        for jid, _e in sorted(pending.items(), key=lambda kv: kv[1].get("ts", 0)):
-            if self._leases.get(jid, 0) > now:
-                continue  # 活租约：已被某 worker 独占，超时前不重发
+        eligible: list[tuple[str, float]] = []
+        for jid, e in pending.items():
             jd = self._job_dir(jid)
             if not jd.exists() or find_payload(jd) is None:
                 continue  # 目录不存在或 payload 未落盘——不可领取
@@ -265,7 +339,15 @@ class _JobStore:
                 # 此刻已经拿着原因停腿了。重发同 job（同幂等键 → 同 job_id）由
                 # publish_job 清标记——重试路径不受影响。
                 continue
-            out.append(jid)
+            eligible.append((jid, float(e.get("ts", 0.0) or 0.0)))
+        eligible.sort(key=lambda kv: kv[1])  # 发布序（同 P3b 的池排序）
+        if not race:
+            return [jid for jid, _ts in eligible if not (self._leases.get(jid, 0) > now)]
+        newest = eligible[-1][0] if eligible else None
+        out = [newest] if newest is not None else []
+        out += [
+            jid for jid, _ts in eligible if jid != newest and not (self._leases.get(jid, 0) > now)
+        ]
         return out
 
     def _job_dir(self, job_id: str) -> Path:
@@ -321,15 +403,30 @@ class _JobStore:
                 )
 
     # ---- 租约（P3b 独占加超时：领取即设租约，心跳续租，过期回池） ----
-    def claim(self, job_id: str, ttl: float = CLAIM_TTL_SEC) -> str | None:
+    def claim(self, job_id: str, ttl: float = CLAIM_TTL_SEC, race: bool = False) -> str | None:
         """领取（设租约 + owner + last_heartbeat 三件套**同时置**）。
 
         B3 必杀细节：只写 `_leases` 不写 `_lease_owners` 会导致 heartbeat 恒 False，
         300s 后长 job 被重广播——故领取必须走本函数，不许手写 `_leases[jid] = ...`。
         活租约在持 → 返回 None（调用方跳过本 jid，不是阻塞等）。
+
+        race=True（竞速副本）：**不设租约**，返回空 token —— 每个 worker 都能拿到同一份
+        job，回传时无人持租约（`result_token_ok` 放行），胜负由 `store_result` 首写锁定决定。
+        空 token 在 worker 侧正是**既有**的「无租约」分支：不心跳、不续租（§343 时代语义），
+        故本模式不需要 worker 协议改动。
         """
         import secrets
 
+        if race:
+            with self._lock:
+                # 广播即**放弃独占**：先前那份独占租约（若有——先到的 worker 独领过，
+                # 之后第二个 worker 入场才转竞速）必须当场失效，否则第二名会被
+                # `result_token_ok` 按「非持有人」403 拒收——而那会被 worker 读成
+                # **确定性拒绝**并上报 job 失败，一个赢家把输家炸成事故。
+                self._leases.pop(job_id, None)
+                self._lease_owners.pop(job_id, None)
+                self._last_heartbeat[job_id] = self._now()  # 仅供观测（谁在跑）
+            return ""
         with self._lock:
             now = self._now()
             lease = self._leases.get(job_id)
@@ -874,6 +971,8 @@ class HubHandler(BaseHTTPRequestHandler):
                 self._admin_halt(False)
             elif path == "/admin/workers/status":
                 self._admin_status()
+            elif path == "/admin/race":
+                self._admin_race(set_mode=False)
             elif path == "/admin/net-probe":
                 self._admin_net_probe()
             elif path.startswith("/jobs/") and path.endswith("/payload"):
@@ -913,6 +1012,8 @@ class HubHandler(BaseHTTPRequestHandler):
                 self._post_result()
             elif path.startswith("/jobs/") and path.endswith("/epoch"):
                 self._post_bc_epoch()
+            elif path == "/admin/race":
+                self._admin_race(set_mode=True)
             elif path == "/admin/net-probe":
                 self._admin_net_probe_upload()
             elif path == OFFLINE_ARTIFACT_PATH:
@@ -935,14 +1036,30 @@ class HubHandler(BaseHTTPRequestHandler):
         # 停不掉（Kaggle 无 API）则照常执行任务。停机**不拦任务分发**（否则云机
         # 闲置空烧反而是最大浪费）。空任务时也带 halt 标志，供空闲 worker 感知。
         halt = self.store.halt_workers
+        # 竞速广播（2026-09-17）：先登记本次轮询的 worker（身份 + 它服务几个 hub）——
+        # 这是 auto 模式的**唯一**输入。缺头（旧 worker / 手写 curl）⇒ 身份或范围未知，
+        # 按保守处理（不计入竞速判定 ⇒ 保持 P3b 独占）。
+        self.store.note_worker(
+            self.headers.get(WORKER_ID_HEADER, ""),
+            parse_hub_scope(self.headers.get(HUB_SCOPE_HEADER, "")),
+        )
+        race = self.store.race_active()
         # P3b 独占加超时（supersede §343）：首个 open job 领取即设租约并下发
         # lease_token；活租约 job 已被 claimable_job_ids 排除。worker 零改动
         # （本就读取 lease_token 并走心跳/回传携带链路）。
-        jids = self.store.claimable_job_ids()
+        # race=True 时最新 job 不下租约、对所有人可见（先落账者胜，后到者 409）。
+        jids = self.store.claimable_job_ids(race=race)
         for jid in jids:
-            lease_token = self.store.claim(jid)
+            lease_token = self.store.claim(jid, race=race)
             if lease_token is None:
                 continue  # 并发领取竞负：本轮跳过（下次轮询回池见）
+            if race:
+                print(
+                    f"[{time.strftime('%H:%M:%S')}] [hub-server] RACE job={jid} "
+                    f"worker={self.headers.get(WORKER_ID_HEADER, '?')} "
+                    f"scope={self.headers.get(HUB_SCOPE_HEADER, '?')}（竞速副本：先回传者胜）",
+                    flush=True,
+                )
             mp = self.store._job_dir(jid) / "manifest.json"
             manifest = json.loads(mp.read_text(encoding="utf-8"))
             # 领取标记：首次向 worker 下发即 touch（console 据此区分「排队等取」与「已在跑」）。
@@ -955,7 +1072,15 @@ class HubHandler(BaseHTTPRequestHandler):
                     claim.write_text(str(self.store._now()), encoding="utf-8")
                 except OSError:
                     pass
-            self._json({"job_id": jid, "manifest": manifest, "halt": halt, "lease_token": lease_token})
+            self._json(
+                {
+                    "job_id": jid,
+                    "manifest": manifest,
+                    "halt": halt,
+                    "lease_token": lease_token,
+                    "race": race,  # 观测（未知字段被旧 worker 忽略）：本份是不是竞速副本
+                }
+            )
             return
         self._json({"job_id": None, "halt": halt})  # 无可领取 job
 
@@ -969,9 +1094,36 @@ class HubHandler(BaseHTTPRequestHandler):
         self._json({"halt": halt}, 200)
 
     def _admin_status(self) -> None:
+        # 体形状不动（console 的 set_cloud_halt / clear_halt_on_startup 读它）：竞速状态
+        # 走自己的 /admin/race（GET = 只看、POST = 热切），不往这里叠字段。
         if not self._auth_ok():
             return
         self._json({"halt": self.store.halt_workers}, 200)
+
+    # ---- 竞速广播开关（2026-09-17）：GET 看状态 / POST ?mode=auto|on|off 热切 ----
+    def _admin_race(self, set_mode: bool = False) -> None:
+        """热切竞速模式（volatile，与 halt 同性质）。非法值 400 且不改。
+
+        GET（set_mode=False）= 只读观测：模式、是否生效、窗口内有几个 worker 及各自范围。
+        POST（set_mode=True）= 设模式 + 清空历史登记（模式与陈旧证据不混用）。
+
+        为什么要热切：auto 的判据是「本 hub 的 worker 全都只服务这一个 hub」，它无法
+        覆盖“我知道现在就是单课程，但 worker 还配了旧 hub”这类现场——运维需要一个
+        说得清的强制闸（on = 现在就广播，off = 立刻退回独占）。
+        """
+        if not self._auth_ok():
+            return
+        if not set_mode:
+            self._json(self.store.race_state(), 200)
+            return
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        mode = (qs.get("mode") or [""])[0]
+        got = self.store.set_race_mode(mode)
+        if got is None:
+            self._json({"error": f"mode 必须是 {list(RACE_MODES)}，收到 {mode!r}"}, 400)
+            return
+        self.store.clear_workers()  # 强制闸后清空历史登记：模式与陈旧证据不混用
+        self._json({"mode": got, **self.store.race_state()}, 200)
 
     # ---- GET /admin/net-probe?bytes=N（M0：隧道吞吐 A/B 探针）----
     def _admin_net_probe(self) -> None:
@@ -1365,6 +1517,12 @@ class HubHandler(BaseHTTPRequestHandler):
         # M0 统一计量：收到的 result 请求体字节（云上行实测）——即便后面校验失败
         # 也已实收，如实记录，供对账。
         self.store.record_result_recv(jid, len(raw))
+        # 竞速广播：**胜负已定就不再往下走**——结果已存在的回传一律 409（与租约无关；
+        # 赢家可能持旧 token、输家根本没 token）。必须在租约校验**之前**：否则输了竞速
+        # 的副本会因「非持有人」拿 403，而 worker 把 4xx 当确定性拒绝 → 报 job 失败。
+        if (jd / "result").exists():
+            self._json({"error": "result already stored (race loser / duplicate)"}, 409)
+            return
         try:
             # 方案B（2026-09-10）：v2 体（gzip 裸二进制段）**按魔数自动识别** —— 不依赖
             # Content-Type，故旧 worker（纯 JSON）与新 worker（v2）都能收。还原出的 dict
@@ -1490,6 +1648,13 @@ def main() -> None:
         default="",
         help="单实例锁路径（缺省 nn-training/.hub_server.<port>.lock；按端口键控）",
     )
+    ap.add_argument(
+        "--race",
+        choices=list(RACE_MODES),
+        default=RACE_MODE_AUTO,
+        help="竞速广播：auto = 本 hub 的 worker 全都只服务这一个 hub 时广播最新 job（默认）；"
+        "on/off = 强制开/关（可热切：POST /admin/race?mode=...）",
+    )
     args = ap.parse_args()
     token = args.token
     if args.token_file:
@@ -1520,10 +1685,12 @@ def main() -> None:
         print(f"[hub-server] ERROR: {e}", flush=True)
         sys.exit(1)
     store = _JobStore(args.job_root, args.jsonl)
+    store.race_mode = args.race
     srv = make_server(store, args.port, token, host=args.host)
     print(
         f"[hub-server] listening on {args.host}:{args.port} "
-        f"job_root={args.job_root} jsonl={args.jsonl} claim_ttl={CLAIM_TTL_SEC}s",
+        f"job_root={args.job_root} jsonl={args.jsonl} claim_ttl={CLAIM_TTL_SEC}s "
+        f"race={args.race}",
         flush=True,
     )
     try:

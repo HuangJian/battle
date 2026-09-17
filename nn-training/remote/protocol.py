@@ -51,6 +51,64 @@ CLAIM_TTL_SEC = 300
 HEARTBEAT_SEC = 60  # （兼容）旧心跳周期；仅旧租约模式 hub 的 worker 心跳线程使用
 AUTH_HEADER = "Authorization"  # Bearer <token>（D9；token 永不落盘/落日志）
 
+# ------------------------------------------------- 竞速广播（单课程多 worker，2026-09-17）
+# 历史：§343（2026-09-06，用户指令）PPO job 改竞速广播——所有轮询 worker 领同一份任务、
+# 先回传者落账、后到者丢弃；§2026-09-12 P3b 以「多课程并行时同 job 被重复算、慢者
+# 409 白烧」为由 supersede 回独占加超时。本段是**定向重开**（2026-09-17 用户指令）：
+# 只有当**这个 hub 的 worker 全都只服务这一个 hub**（= 机群只为单一课程干活）时才广播，
+# 于是多卡在一个课程上会由最快的卡胜出；多课程／多 hub 混合机群自动退回独占，
+# P3b 的语义不被破坏。判据只需要 worker 自己报的两个事实，不需要任何全局课程表。
+#: 竞速模式：auto（按 worker 声明判定）| on（强制）| off（强制关）。
+RACE_MODE_AUTO = "auto"
+RACE_MODE_ON = "on"
+RACE_MODE_OFF = "off"
+RACE_MODES = (RACE_MODE_AUTO, RACE_MODE_ON, RACE_MODE_OFF)
+#: worker → hub：本 worker 轮询的 hub 数（`--poll` 列表长度）。缺失/非法 = 未知
+#: （按多 hub 保守处理——宁可不竞速，也不在多课程机群上重复烧卡）。
+HUB_SCOPE_HEADER = "X-Hub-Scope"
+#: worker → hub：worker 身份（hostname:pid）——hub 靠它数「有几个**不同**的 worker」
+#: （隧道回源把全流量归成 127.0.0.1，源 IP 在此不可用）。
+WORKER_ID_HEADER = "X-Worker-Id"
+#: 「还在轮询」的判定窗口（秒）：超过它没再出现过就当该 worker 已离场，不参与判定。
+RACE_WORKER_WINDOW_SEC = 180.0
+
+
+def parse_hub_scope(raw: object) -> int | None:
+    """解析 `X-Hub-Scope`：≥1 → 该值；缺失/非整数/0 以下 → None（未知）。
+
+    None 与 >1 在 `race_decision` 里同等保守（都不开竞速）：上报一个自己都说不清的
+    数字不能换来「重复烧卡」的许可。
+    """
+    try:
+        n = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return n if n >= 1 else None
+
+
+def race_decision(
+    mode: str,
+    workers: Sequence[tuple[str, float, int | None]],
+    now: float,
+    window: float = RACE_WORKER_WINDOW_SEC,
+) -> bool:
+    """是否进入竞速广播（纯函数，可单测）。
+
+    workers = [(worker_id, last_seen, hub_scope)]，**全部**历史登记（本函数自己按窗口过滤）。
+    - `off` → 恒 False；`on` → 恒 True（应急强制，不看待领池）；
+    - `auto` → 窗口内至少 2 个**不同** worker 在轮询，**且**它们全部声明 hub_scope==1
+      （未知/多 hub 任一出现 → False）。单 worker 不竞速：广播的唯一收益是
+      「最快的卡先跑完」，只有一个执行者时它只是同一份活。
+    """
+    if mode == RACE_MODE_OFF:
+        return False
+    if mode == RACE_MODE_ON:
+        return True
+    fresh = [(wid, scope) for wid, seen, scope in workers if now - seen <= window]
+    if len({wid for wid, _ in fresh}) < 2:
+        return False
+    return all(scope == 1 for _wid, scope in fresh)
+
 #: manifest 必填字段（附录 A；缺失任一 → 校验失败）
 MANIFEST_REQUIRED = (
     "proto",

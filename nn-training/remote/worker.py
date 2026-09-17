@@ -36,8 +36,10 @@ from remote.protocol import (
     BLOB_OPT,
     BLOB_REF,
     HEARTBEAT_SEC,
+    HUB_SCOPE_HEADER,
     PAYLOAD_NAME,
     WIRE_V2_CONTENT_TYPE,
+    WORKER_ID_HEADER,
     CodeChangedError,
     ProtocolError,
     RetryableError,
@@ -115,8 +117,14 @@ def poll_job(
     token: str,
     timeout: float = 30.0,
     log: Any = None,
+    hub_scope: int | None = None,
+    worker_id: str = "",
 ) -> dict | None:
     """GET /jobs/next → {job_id, manifest, halt} 或 None（无任务且无停机达令）。
+
+    `hub_scope` / `worker_id`（2026-09-17 竞速广播）：本 worker 轮询几个 hub、以及自己
+    是谁。hub 靠这两个事实判定“机群是不是只服务单一课程”——**不报就按多 hub 保守**
+    （退回 P3b 独占）。身份必须自报：隧道回源把全流量归成 127.0.0.1，源 IP 分不出 worker。
 
     停机达令（§386）随任务同发：有任务 → 原样上浮（含 halt 标志，worker 先试停机、
     停不掉照常执行任务）；无任务但 halt → {"halt": True}；两者皆无 → None。
@@ -125,7 +133,14 @@ def poll_job(
     此前非 200 一律静默返回 None，worker 被 403 ip blocked 时日志与空队列完全
     一样（只有 "no job yet"），现场无法判断到底是没活还是被封。现在非 200 会
     按 (url, status) 节流打印一条。"""
-    status, body = _request(base_url, token, "/jobs/next", timeout=timeout)
+    _poll_headers: dict[str, str] = {}
+    if worker_id:
+        _poll_headers[WORKER_ID_HEADER] = worker_id
+    if hub_scope is not None:
+        _poll_headers[HUB_SCOPE_HEADER] = str(int(hub_scope))
+    status, body = _request(
+        base_url, token, "/jobs/next", timeout=timeout, headers=_poll_headers or None
+    )
     if status != 200:
         if log is not None:
             now = time.time()
@@ -359,7 +374,9 @@ def post_result(
             )
             return status
         if status == 409:
-            log("result POST 409（hub 已有同 job 结果）——按成功处理")
+            # 竞速广播下这是**输家的正常结局**：同 job 已被别人先回传，本份结果丢弃。
+            # 绝不重试、绝不当失败上报（否则一个赢家会让 N-1 个 worker 白报错）。
+            log("result POST 409（hub 已有同 job 结果：竞速输家/重复回传）——按成功丢弃")
             return 409
         if status is not None and 400 <= status < 500:
             if ctype == WIRE_V2_CONTENT_TYPE and attempt < attempts:
@@ -1869,7 +1886,13 @@ def worker_loop(
         try:
             _polls_since_log += 1
             _polls_since_accept += 1
-            job = poll_job(base_url, token, log=log)
+            job = poll_job(
+                base_url,
+                token,
+                log=log,
+                hub_scope=len(hubs),  # 竞速判定输入：本 worker 服务几个 hub
+                worker_id=worker_tag(),
+            )
         except Exception as e:
             log(f"poll failed: {e} — retry in {poll_sec}s")
             time.sleep(poll_sec)
@@ -1919,8 +1942,11 @@ def worker_loop(
         _polls_since_log = 0  # claim 即上报：alive 行下次只数 claim 之后的轮询，不与本行重复
         jid = job["job_id"]
         lease_token = str(job.get("lease_token", "") or "")
+        raced = bool(job.get("race"))  # 竞速副本（无租约）：先回传者胜，后到者 409 丢弃
         log(
-            f"job {jid} claimed — downloading payload ({_polls_since_accept} polls since last accepted result)"
+            f"job {jid} claimed"
+            + (" [RACE 副本：先回传者胜]" if raced else "")
+            + f" — downloading payload ({_polls_since_accept} polls since last accepted result)"
         )
         # 心跳线程仅在有租约时启动（P3b 独占 hub 下发 lease_token；无租约
         # （旧 hub/§343 时代）则不续租，结果胜负由首写锁定决定）。
@@ -1952,8 +1978,11 @@ def worker_loop(
                 run_budget_sec=run_budget_sec,
                 log=log,
             )
-            post_result(base_url, token, jid, result, lease_token=lease_token)
-            log(f"job {jid} done — result accepted")
+            _post_st = post_result(base_url, token, jid, result, lease_token=lease_token)
+            log(
+                f"job {jid} done — "
+                + ("lost the race (409, 赢家已落账) — 本份丢弃" if _post_st == 409 else "result accepted")
+            )
             done += 1
             _polls_since_accept = 0
             job_ok = True

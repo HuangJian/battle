@@ -15,7 +15,7 @@ import { agentSentinels, pySentinels } from '../core/sentinels'
 import { slotPort } from '../core/slots'
 import { portOwnedBy } from '../core/proc'
 import { resolveVenvPython } from '../core/venv'
-import { COMPONENT_KILL_TREE } from '../core/types'
+import { COMPONENT_KILL_TREE, normalizeRaceMode } from '../core/types'
 import type {
   CfEdgeIp,
   CfProtocol,
@@ -94,6 +94,11 @@ export function hubServerSpec(cfg: RlConfig, course: string): ProcSpec {
       path.join(trajDir, 'remote-jobs'),
       '--jsonl',
       path.join(trajDir, 'training_log.jsonl'),
+      // 竞速广播（2026-09-17）：auto（缺省）= 本 hub 的 worker 全都只服务这一个 hub 时
+      // 广播最新 job；on/off 为运维强制。值先归一化——hub-server 的 argparse choices
+      // 对未知值直接退出，写错配置不能让整个 hub 起不来。
+      '--race',
+      normalizeRaceMode(cfg.rl.race_mode),
     ],
     env: { PYTHONPATH: NN_TRAINING },
     // 日志 per-course（M6：spec 侧 + api.ts resolver 两半同步）

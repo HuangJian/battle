@@ -61,6 +61,19 @@ export type SlimMode = 'on' | 'off'
  *  与 `SlimMode` 不同，这里**不需要**域换算（两侧都是字符串）。 */
 export type RolloutSrcMode = 'local' | 'node' | 'auto'
 
+/** 竞速广播模式（hub-server `--race`，2026-09-17）。
+ *
+ *  `auto` = 本 hub 的 worker 全都只服务这一个 hub（机群只为单一课程干活）时，最新 job
+ *           不下租约广播给所有 worker——先回传者胜；多课程机群自动退回独占（P3b）。
+ *  `on` / `off` = 运维强制开关（也可热切：`POST /admin/race?mode=...`）。
+ */
+export type RaceMode = 'auto' | 'on' | 'off'
+
+/** 归一化 race_mode：认不出的值回落 `auto`（写错配置不得让 hub-server 启动即退）。 */
+export function normalizeRaceMode(raw: unknown): RaceMode {
+  return raw === 'on' || raw === 'off' || raw === 'auto' ? raw : 'auto'
+}
+
 /** rl-config.json（本工具链只消费 nodes + rl + courses 块，其余键原样保留）。 */
 export interface RlConfig {
   version: number
@@ -81,6 +94,8 @@ export interface RlConfig {
     slim?: 0 | 1
     /** rollout 执行位置（M3；缺省 = local，即本机采样）。字符串域，见 `RolloutSrcMode`。 */
     rollout_src?: RolloutSrcMode
+    /** 竞速广播（2026-09-17；缺省 = auto）。字符串域，见 `RaceMode`。 */
+    race_mode?: RaceMode
     [key: string]: unknown
   }
   /** per-course 槽位/配额（唯一事实来源；console-state 不存这些）。 */
