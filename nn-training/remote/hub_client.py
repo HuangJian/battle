@@ -293,6 +293,9 @@ def publish_job(
     ref_weights_fp: str = "",
     shuffle: bool = True,
     schedule_raw: list | None = None,
+    # 严格样本量配额（target_transitions 路线）：训练侧逐关只收前 ceil(target/关数) 步。
+    # 0 = 历史行为（全收）；由 run_rl 的 `_per_stage_quota()` 算好传入。
+    per_stage_quota: int = 0,
     # 任务类型（BC 整合，plan/bc-cloud-integration.plan.md §4）：缺省 "ppo" =
     # 原行为逐字节不变；"bc" = 行为克隆 job——manifest 免除 PPO 专有键
     # （protocol.MANIFEST_BC_EXEMPT）并并入 `extra`（arch/val_split/mirror_p/
@@ -344,6 +347,7 @@ def publish_job(
         "ref_weights_fp": ref_weights_fp,
         "shuffle": shuffle,
         "schedule_raw": schedule_raw,
+        "per_stage_quota": int(per_stage_quota),
         "init_weights_fp": init_weights_fp,
         "opt_init": opt_init,
         "data_fp": fp,

@@ -610,6 +610,37 @@ class TrainingSteps:
         except Exception as e:  # 取证失败不阻断训练（诊断手段不是新故障面）
             log(f"[forensics] {tag} 快照失败（{type(e).__name__}: {e}）")
 
+    def _per_stage_quota(self) -> int:
+        """逐关严格样本量配额 = `ceil(target_transitions / 关数)`；**0 = 全收 = 老行为**。
+
+        与 `_volume_topup` 共用 `target_per_stage`（同一个数，两侧不会漂），
+        也共用 `parse_stages_arg` 解析 `--stages`（见其 docstring：**策略可以不同，
+        判断必须同源**——否则会出现「采集说合法、训练说非法」的裂缝）。
+
+        **本方法自带 mode 门**：`target_transitions` 只对 per-tick 有意义
+        （intent/goal 不支持动态采集）⇒ 非 per-tick 一律返 0。放在这里而不是各调用点，
+        是为了让 serial 与 remote `publish_job` 两条路径**不可能一个 gate 一个不 gate**。
+
+        关集解析**不调 `self._volume_stages()`**：后者定义在 `TrainingLoop` 上，本 mixin
+        （`TrainingSteps`）在类型层看不到它（mypy attr-defined）。`--stages` 缺席/不可解析
+        ⇒ 返 0（静默降级为全收）；**响亮报错留在 `_volume_topup`** —— 采集侧先跑，
+        真配错了在那里就炸，不必在这里重复炸一次。
+        """
+        if str(getattr(self.args, "mode", "")) != "per-tick":
+            return 0
+        target = int(getattr(self.args, "target_transitions", 0) or 0)
+        if target <= 0:
+            return 0
+        from rl.volume_waves import parse_stages_arg, target_per_stage
+
+        try:
+            n_stages = len(parse_stages_arg(getattr(self.args, "stages", "")))
+        except ValueError:
+            return 0
+        if n_stages <= 0:
+            return 0
+        return int(target_per_stage(target, n_stages))
+
     def _serial_ppo(self, it: int) -> None:
         """串行路径（stream_meta 为空）的 PPO 更新：load → chunk → update。
 
@@ -630,12 +661,20 @@ class TrainingSteps:
         self._forensics(f"ppo_local_pre it{it}")
         t_ppo = time.time()
         # P1-7：--adv-norm none 时串行路径跳过 global 归一（对照实验）
+        # 严格样本量配额（target_transitions 路线）：逐关 ceil(target/关数) 步，
+        # 截断在 GAE **之前**（见 ppo/common.trim_shard_arrays）。mode 门在
+        # `_per_stage_quota()` 内部——serial 与 remote `publish_job` 共用同一个门，
+        # 不可能出现「一条 gate、另一条不 gate」。返 0 时**一个参数都不传** ⇒
+        # 老课程 / 非 per-tick 走到这里逐字节不变。
+        _psq = self._per_stage_quota()
+        _quota_kwargs: dict[str, int] = {"per_stage_quota": _psq} if _psq > 0 else {}
         episodes = self.ppo_backend.load_episodes(
             str(traj_dir),
             float(getattr(args, "gamma", 0.995)),
             float(getattr(args, "lam", 0.95)),
             normalize_adv=getattr(args, "adv_norm", "auto") != "none",
             normalize_ret=bool(getattr(args, "normalize_ret", 0)),
+            **_quota_kwargs,
         )
         total_steps = sum(e["obs"].shape[0] for e in episodes)
         chunks = self.ppo_backend.chunk_episodes(episodes, args.mb)
@@ -910,6 +949,9 @@ class TrainingSteps:
             ref_weights_fp=ref_fp,
             shuffle=True,
             schedule_raw=course.ppo_schedule_dicts(),
+            # 严格样本量配额（target_transitions 路线）：与 _serial_ppo 同一个来源，
+            # 保证 remote 与本机两条 PPO 路径装载口径一致。0 = 全收（历史行为）。
+            per_stage_quota=self._per_stage_quota(),
             log=log,
         )
         jid = manifest["job_id"]

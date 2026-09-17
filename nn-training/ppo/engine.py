@@ -154,6 +154,11 @@ def load_shard(dirpath: str) -> dict[str, np.ndarray]:
         with open(mp, encoding="utf-8") as f:
             manifest = json.load(f)
     d["reward"] = _reward_from_metrics(metrics, manifest, dirpath)
+    # stage：供 load_episodes_common 的**逐关**配额（target_transitions 路线）分组。
+    # 它不进 episode 字段集（load_episodes_common 显式排除 "stage"），也不是 GAE 输入；
+    # 0 维数组 ⇒ trim_shard_arrays 不会截它。manifest 缺该键时取 -1（所有 shard 归一组，
+    # 配额退化为全局，加载日志里会显示只有 1 个 stage）。
+    d["stage"] = np.asarray(int(manifest.get("stage", -1)))
     return d
 
 
@@ -220,6 +225,7 @@ def load_episodes(
     lam: float = LAM,
     normalize_adv: bool = True,
     normalize_ret: bool = False,
+    per_stage_quota: int = 0,
 ) -> list[dict]:
     """Discover trajectory shards under `data_root`, compute per-episode GAE,
     and normalize advantages across the whole batch. Shared by this CLI's
@@ -242,6 +248,7 @@ def load_episodes(
         gae_name="GAE",
         normalize_adv=normalize_adv,
         normalize_ret=normalize_ret,
+        per_stage_quota=per_stage_quota,
     )
 
 
@@ -510,6 +517,14 @@ def main():
         "(OMP_NUM_THREADS). 8 = physical cores on the dev box — "
         "avoids HT contention + OMP sync overhead on this small model.",
     )
+    ap.add_argument(
+        "--per-stage-quota",
+        type=int,
+        default=0,
+        help=">0：逐关只收前 N 个 transition（target_transitions 路线的严格样本量配额；"
+        "截断在 GAE 之前，逐关独立）。0 = 历史行为：全收（默认）。"
+        "由 run_rl 按 ceil(target_transitions / 关数) 算好透传。",
+    )
     args = ap.parse_args()
 
     np.random.seed(args.seed)
@@ -545,7 +560,11 @@ def main():
     model.to(device)
 
     episodes = load_episodes(
-        args.data, args.gamma, args.lam, normalize_ret=bool(args.normalize_ret)
+        args.data,
+        args.gamma,
+        args.lam,
+        normalize_ret=bool(args.normalize_ret),
+        per_stage_quota=int(args.per_stage_quota),
     )
     total_steps = sum(e["obs"].shape[0] for e in episodes)
     log(f"[ppo] total transition steps={total_steps}")

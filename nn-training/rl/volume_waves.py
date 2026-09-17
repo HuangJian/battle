@@ -95,6 +95,26 @@ def _ceil_div(a: int, b: int) -> int:
     return -(-a // b)
 
 
+def parse_stages_arg(raw: str) -> list[int]:
+    """`--stages` 字符串 → 关号列表（**共享解析器**）。
+
+    抽出来是为了消除「同一份 `--stages` 被两处各解析一遍」的漂移风险：
+      · `loop_core._volume_stages()`（采集侧）：解析失败**响亮 SystemExit**；
+      · `loop_steps._per_stage_quota()`（训练侧）：解析失败**静默返 0**（= 全收 = 老行为）。
+    两者对同一输入的处理策略不同是**有意的**（采集侧必须响亮，训练侧缺省即老行为），
+    但「什么算可解析」必须是同一个判断——否则会出现「采集说合法、训练说非法」的裂缝。
+
+    ⚠ 空串 / 不可解析 ⇒ `ValueError`（**不返回空列表**）：调用方据此区分
+    「没给」与「给了坏值」，空列表会让 `target_per_stage` 的 n_stages≤0 分支报错在更远处。
+    """
+    from rl.course import parse_range
+
+    text = str(raw or "").strip()
+    if not text:
+        raise ValueError("--stages 为空")
+    return parse_range(text)
+
+
 def target_per_stage(target_transitions: int, n_stages: int) -> int:
     """分关达标线 = ceil(target / n_stages)（n_stages ≤ 0 响亮报错）。
 

@@ -4,6 +4,71 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §55 x1-rebirth 开课（纯从零臂）＋ 严格样本量配额机制落地（2026-09-17）
+
+**为什么记这一笔**：本笔含**训练架构变更**（采集配额的执行语义），按 §5 硬规则必须入账；
+同时记录新腿「从零 ＋ 0 伤」这个**从未试过的新基准**，以及其奖励梯度的实测标定。
+
+### 一、严格样本量配额（`target_transitions` 路线的执行侧，方案 A）
+
+- **动机**：`seed_rotate` 控的是**局数**，而局时长随训练剧烈变化（随机态磨到超时
+  ≈121 samples/局，学会速通后 ≈36 samples/局）⇒ 固定局数会让每轮样本量漂移 3× 以上，
+  学习曲线被采样量本身污染。改为按 **samples** 配额后仍只剩「过冲几个百分点」的抖动
+  （采集按整局补波）。**再往下压到严格相等**的收益是：`n` 恒定 ⇒ `n % mb` 恒定
+  ⇒ **所有 minibatch 的 shape 恒定**（TPU 侧无 host 抖动）。
+- **实现（新增 `per_stage_quota`）**：`ppo/common.trim_shard_arrays()` +
+  `load_episodes_common(per_stage_quota=)`。三条不变量：
+  1. **截断在 GAE 之前** —— GAE 反向递推，先算完再丢尾部会让保留段的 adv/ret 全错；
+  2. **截断处不改 `done`** —— 原为 0 时 `compute_gae` 自然用 value bootstrap
+     （标准 truncated-episode 处理）；改成 1 等于假装局已结束、低估剩余回报；
+  3. **逐关而非全局** —— 全局按序截断会把排在后面的关整关丢掉，破坏
+     「短局关淹不了长局关」的分关独立达标不变量。采集侧补波与训练侧截断共用同一个
+     `volume_waves.target_per_stage`，两侧不会漂。
+- **全链**：`ppo/engine.py`（`load_shard` 带 stage、`--per-stage-quota`、update 模式）→
+  `rl/loop_steps.py`（`_per_stage_quota()`，**自带 mode 门**使 serial 与 remote 不会一个
+  gate 一个不 gate）→ `remote/{protocol,hub_client,worker}.py`（manifest 字段 + 校验，
+  **先挡 bool** 因为 bool 是 int 子类 + worker 接线）。
+- **新增共享解析器** `volume_waves.parse_stages_arg()`：采集侧（`_volume_stages`，失败
+  **响亮 SystemExit**）与训练侧（`_per_stage_quota`，失败**静默返 0 = 全收**）策略仍不同
+  （有意的），但「什么算可解析」从此同源 —— 消除「采集说合法、训练说非法」的裂缝。
+- **单测** `tests/test_ppo_quota.py`（4）：trim 边界（0 维字段不切 / `keep≥N` 零拷贝 /
+  `keep≤0` 空）；逐关精确（**GAE 收到截断后的长度** ⇒ 证明截在 GAE 之前）；
+  配额满丢整 shard 且不跨关借；`quota=0` 全收且 episode 字段集不含 `stage`。
+  ⚠ 测试用**旁路 meta** 记录「episode ↔ stage」而不是 `zip` 位置对齐 —— 丢 shard 时位置会错。
+
+### 二、x1-rebirth：纯从零臂（scratch init，不蒸馏）
+
+- **立项依据**（§47/§52/§54 已记）：教师 God-AI 在 `arena2-acbc` 只有 66.25%；
+  BC 丢失教师「先打 power」（首命中 power 33.3% → 0.5%）；七条腿 KL 全锁 0.0018–0.0027
+  ⇒ **从零是唯一能离开「教师吸引域」的路径**。（另注：goal-nn §5 早就定过同路线，
+  §10 的 S1 过门是唯一先例 —— 但那是 **3 命 1 星**，学到的其实是「莽」，
+  到 x10 冲不上去 ⇒ **不可当可行性证据**。）
+- **初始化**：`scripts/init_scratch_weights.py --seed 7`（trunk×0.1 / 头×0.01 / value×0.1）。
+  朴素 kaiming 会让 logits 随机即 ±2000 ⇒ 熵≈0、首个更新自锁（实测 kl=11930 后恒 0）。
+- **`kickstart_ref=false`**：它是相对 **`bc`** 的 KL 锚，而本腿 `bc` 就是随机策略 ——
+  开着等于把策略钉在噪声上，且恰在 it1–30 探索窗口最猛。
+- **「0 伤」＝任务定义**（用户 2026-09-17 拍板）：奖励加 `-wDmg*playerDamageTaken`
+  （**唯一正确的承伤信号**；历史 `wDmg` 一直挂在死项 `playerHits` 上 ⇒ 从未真正惩罚挨打）
+  与 `-wShot*playerShots`（反「原地狂射」：随机态 20.2 发/局 vs 学会后 5.26 发/局），
+  terminal 梯度 `lives_exhausted=-5.0` / `timeout=-3.0`。
+  **实测梯度**（`build_reward_fn` 真跑）：
+  `0伤通关 +5.35 > 换血通关 +4.22 > 冒险 −2.25 > 苟(超时) −3.0 > 苟(狂射) −3.79 > 死亡 −5.75`。
+  标定过程中的一个纠错：`timeout=-2.0` 时是 `苟(−2.0) > 冒险(−2.25)` ⇒ **保守仍占优**，
+  −3.0 是由该梯度反推（`|timeout| > 2.25`）而非拍脑袋。
+- **位移旋钮**：`lr 1.5e-4 → 3e-4`（goal-nn §7 与 scratch init 配套标定值）＋
+  `kl_coef 0.2 → 0.05`（S1 训练期 KL≈0.03，是本项目 BC 起点 0.002 的 15 倍）。
+  两处都要改（顶层 `lr` 与 `ppo_schedule` 第一段，运行时以 schedule 为准）。
+  ⚠ `kl_cap` 在 remote/serial 路径**未接线**，别拿它当护栏；有效的位移旋钮只有 `kl_coef`。
+- **起跑线实测**（200 局 / seed0 860001 / ladder-c01）：随机 **8/200=4.0%**（dmg 18508）
+  ｜ God AI **190/200=95.0%**（dmg 11088）｜ it333 **200/200=100.0%**（dmg 754）
+  ⇒ x1 对 NN 已被打穿 ⇒ **判据不能只看 wr**（会撞 100% 天花板），要看承伤/速度的连续量。
+  另：ladder-c01 **每关只有 1 个敌人**（c 关纯 power）⇒ **「首命中 power」在 x1 上恒为 power、
+  零判别力**，power 行为验证必须**升档到多敌关**（acbc）才成立。
+- **状态**：工程就绪，**未开训**。另发现 `nn-training/weights/ladder-c01-bc/` **目录不存在**
+  （`ladder-c01.jsonc` 的 bc 缺失 ⇒ 该课程当前开不了跑），待补。
+
+---
+
 ## §54 T5 x3-credit-p6 结课：双 run 一致判负；奖励重定价路线关闭（2026-09-16）
 
 **为什么记这一笔**：T5 主剂量臂（power 杀信用 2×）两 run 跑满＋800-verdict，冻结判决表

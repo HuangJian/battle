@@ -314,6 +314,33 @@ def chunk_episodes(episodes: list[dict], mb: int, shuffle: bool = True) -> list[
 
 
 # ---------------- episode loading skeleton (ppo / ppo_intent 共用) ----------------
+def trim_shard_arrays(d: dict[str, np.ndarray], keep: int) -> dict[str, np.ndarray]:
+    """把 shard 的逐 step 数组截到前 `keep` 步（**在 GAE 之前**调用）。
+
+    为什么必须在 GAE 之前：GAE 是**反向递推**（从局末往回算），保留段的 advantage
+    以被切掉的尾部为递推源头 ⇒ 先算 GAE 再丢弃会让保留段的 adv/ret 全错。
+
+    截断处**不改 `done`**：若截断点的 done 原为 0，`compute_gae` 会自然地用
+    `value` 做 bootstrap（标准 truncated-episode 处理）；把它改成 1 等于假装
+    这局在此结束，会低估剩余回报。
+
+    `keep <= 0` → 空（调用方应自行跳过该 shard）；`keep >= N` → 原样返回（零拷贝）。
+    只截「第 0 维长度 == N」的数组，标量/常量字段原样保留。
+    """
+    n = int(d["obs"].shape[0])
+    if keep >= n:
+        return d
+    if keep <= 0:
+        keep = 0
+    out: dict[str, np.ndarray] = {}
+    for k, v in d.items():
+        if isinstance(v, np.ndarray) and v.ndim >= 1 and v.shape[0] == n:
+            out[k] = v[:keep]
+        else:
+            out[k] = v
+    return out
+
+
 def load_episodes_common(
     data_root: str,
     *,
@@ -326,6 +353,7 @@ def load_episodes_common(
     normalize_ret: bool,
     load_log_every: int = 128,
     normalize_adv: bool = True,
+    per_stage_quota: int = 0,
 ) -> list[dict]:
     """Discover shards → per-shard GAE → global normalize → episode dicts.
 
@@ -341,6 +369,8 @@ def load_episodes_common(
     log(f"[{label}] loaded {len(shards)} {shard_kind} shards from {data_root}")
 
     episodes: list[dict] = []
+    seen_steps: dict[int, int] = {}  # stage → 已收步数（仅 per_stage_quota > 0 时启用）
+    dropped_shards = 0
     t_load = time.time()
     for k, sd in enumerate(shards):
         if k > 0 and k % load_log_every == 0:
@@ -349,8 +379,23 @@ def load_episodes_common(
         N = d["obs"].shape[0]
         if N == 0:
             continue
+        if per_stage_quota > 0:
+            # 逐关严格配额（target_transitions 路线）：每关只收前 per_stage_quota 步。
+            # ① 截断在 GAE **之前**（见 trim_shard_arrays：GAE 反向递推，顺序错了
+            #    保留段的 adv/ret 全错）；② **逐关**而非全局配额，是为保住
+            #    「短局关淹不了长局关」的分关独立达标不变量（全局按序截断会把排在
+            #    后面的关整关丢掉）。配额满后整 shard 丢弃（不切半局进新关）。
+            stage = int(d.get("stage", -1))
+            room = per_stage_quota - seen_steps.get(stage, 0)
+            if room <= 0:
+                dropped_shards += 1
+                continue
+            if room < N:
+                d = trim_shard_arrays(d, room)
+                N = room
+            seen_steps[stage] = seen_steps.get(stage, 0) + N
         adv, ret = gae(d)
-        episode = {k: v for k, v in d.items() if k not in ("reward", "done")}
+        episode = {k: v for k, v in d.items() if k not in ("reward", "done", "stage")}
         episode["adv"] = adv.astype(np.float32)
         episode["ret"] = ret.astype(np.float32)
         episodes.append(episode)
@@ -359,6 +404,18 @@ def load_episodes_common(
         f"[{label}] shard IO + {gae_name} done for {len(episodes)} episodes "
         f"({time.time() - t_load:.0f}s)"
     )
+    if per_stage_quota > 0:
+        total = sum(seen_steps.values())
+        short = {
+            s: per_stage_quota - n
+            for s, n in sorted(seen_steps.items())
+            if n < per_stage_quota
+        }
+        log(
+            f"[{label}] per-stage quota={per_stage_quota}: kept {total} steps / "
+            f"{len(seen_steps)} stages, dropped {dropped_shards} shards"
+            + (f"; SHORT (供给不足) stages={short}" if short else "")
+        )
     # P1-7（2026-09-02）：adv 归一化粒度参数化（normalize_adv=False 供
     # --adv-norm none 对照实验；默认 True 保持全局归一现状）。
     if normalize_adv:

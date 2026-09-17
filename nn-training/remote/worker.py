@@ -1196,6 +1196,9 @@ def run_job(
         float(manifest["lam"]),
         normalize_adv=str(manifest["adv_norm"]) != "none",
         normalize_ret=bool(manifest.get("normalize_ret", False)),
+        # 严格样本量配额（target_transitions 路线）：逐关只收前 N 步，截断在 GAE
+        # 之前。0/缺失（旧 hub 产出的 manifest）= 全收，历史行为逐字节不变。
+        per_stage_quota=int(manifest.get("per_stage_quota", 0) or 0),
     )
     total_steps = sum(e["obs"].shape[0] for e in episodes)
     chunks = ppo_engine.chunk_episodes(

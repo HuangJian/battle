@@ -100,6 +100,9 @@ MANIFEST_OPTIONAL_DEFAULTS: dict[str, object] = {
     "shuffle": True,
     "schedule_raw": [],  # ppo_schedule 解析前原始表（审计）
     "opt_init": "",  # base64 tar（model/opt/numpy RNG）；空 = 无（首轮）
+    # 严格样本量配额（target_transitions 路线）：训练侧逐关只收前 ceil(target/关数) 步。
+    # 0 = 历史行为（全收）；缺失（旧 hub 产出的 manifest）= 0 ⇒ wire 兼容。
+    "per_stage_quota": 0,
 }
 
 
@@ -208,6 +211,10 @@ def normalize_manifest(m: dict) -> dict:
         raise ProtocolError(f"kickstart_kl 必须是 number，收到 {out.get('kickstart_kl')!r}")
     if float(out.get("kickstart_kl", 0.0)) < 0:
         raise ProtocolError("kickstart_kl 必须 >= 0")
+    psq = out.get("per_stage_quota", 0)
+    # bool 是 int 的子类 ⇒ 必须先挡 bool（True/False 混进来会让配额变成 1/0 而不报错）。
+    if isinstance(psq, bool) or not isinstance(psq, int) or psq < 0:
+        raise ProtocolError(f"per_stage_quota 必须是非负整数，收到 {psq!r}")
     return out
 
 

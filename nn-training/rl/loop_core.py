@@ -917,22 +917,23 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 "[volume] target_transitions 与 --curriculum-stages / --rotate-stages 的"
                 "门控窗口 v1 不兼容（配额按课程声明的关集分关）——改用显式 --stages"
             )
-        from rl.course import parse_range
+        from rl.volume_waves import parse_stages_arg
 
         raw = str(getattr(args, "stages", "") or "").strip()
         # P2-c（2026-09-15）：原先是 `parse_range(str(... or "0-3"))` —— 缺 --stages
         # 时静默退成硬编码 4 关。实测本腿 args.stages 恒有值（launch 期从课程
         # stages 派生）所以没踩到，但静默猜关数 = 分关配额分母错、采集量对不上
         # 目标而不报错。改成响亮退出：拿不到显式关集就别开动态采集。
-        # `parse_range` 对空串/不可解析串抛 ValueError（不是返回空集）⇒ 这里先挡
-        # 空串、再兜住 ValueError，两条路都收敛到同一条 SystemExit 文案。
+        # `parse_stages_arg`（`rl.volume_waves` 的共享解析器，训练侧
+        # `_per_stage_quota` 同源）对空串/不可解析串抛 ValueError（不是返回空集）
+        # ⇒ 这里先挡空串、再兜住 ValueError，两条路都收敛到同一条 SystemExit 文案。
         if not raw:
             raise SystemExit(
                 "[volume] --stages 缺席，无法分关配额（动态采集不接受硬编码 fallback "
                 "关集——请显式传 --stages，或关掉 target_transitions）"
             )
         try:
-            stages = parse_range(raw)
+            stages = parse_stages_arg(raw)
         except ValueError as exc:
             raise SystemExit(
                 f"[volume] --stages={raw!r} 无法解析为关号列表（{exc}）——动态采集的"
