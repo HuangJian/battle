@@ -2034,6 +2034,31 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 - **未决（下一步验证）**：E1 用落盘日志跑一次 Kaggle 定位真实死点；E2 「boot 完静置 5 分钟不 import
   torch」对照（排除 daemon/平台网络被杀）；E3 `ts_engine=userspace`（排除 kernel 尝试的副作用）；
   E4 对开卡 `sha12` 与 loop 日志核对 code.zip 新鲜度。
+- **同日扩展（2026-09-17）：本机 hub 地址也走同一批凭据（键名 `HUB_IP`）**。
+  - **背景**：`CFG["hub_url"]` 是「每个会话都要手填、值却长期不变」的值（hub 跑在操作者本机，
+    Tailscale IP 在设备重注册前稳定）——**正是 secret 的用途**；留在 CFG 里等于每开一次
+    Colab/Kaggle 就要人肉改一次，而它的模板值 `http://<本地TS_IP>:8787` 忘了改就会拿一个
+    带尖括号的主机名去连（错在 DNS 层，比当场点名难查得多）。
+  - **决定**：① `HUB_IP` 走与 `TS_AUTHKEY`/`HUB_TOKEN` 同一条取用链（环境变量 → Colab/Kaggle
+    Secrets → CFG 手填），读进 `CFG["hub_ip"]`；有值时**压过** CFG `hub_url`。② 取值两吃：
+    裸 IP/主机名自动配 `CFG["hub_port"]`（缺省 8787），整条 URL（自定义端口/域名/协议）原样用 ——
+    同一个键不必记两套约定。③ CFG 模板值含 `<` 一律视为**未填**（返空串，由调用方响亮失败并
+    点名该填哪个键）。④ 解析逻辑单源住在 `remote/tailscale_boot.py::resolve_hub_url`：两个
+    notebook 都从 GitHub raw 拉这个模块**同一个文件**，而体检那边只拉这一个（消费点
+    `notebook_boot.run()` 与 `diagnose()`）；⑤ `HUB_IP` 与其它凭据同批**在引导之前**读（同上条根因：
+    引导后平台 Secrets 就够不着了）。
+  - **备选与否决**：写进 CFG 让人肉填 —— 否（每会话一次的人肉步骤，且忘改就是带 `<` 的主机名）；
+    只在训练 cell 支持、体检 cell 不改 —— 否（会出现「体检说连不上、真跑却连得上」这种最难信的
+    诊断结论）；新增 `HUB_URL` 键名 —— 否（`HUB_TOKEN`/`HUB_IP` 同族命名更可猜，且 URL 形态仍
+    由 `HUB_IP` 一个键容纳）。
+  - **违反后果**：把 `HUB_IP` 的读取挪到 `ensure()`/`_inline_ensure()` 之后，Kaggle 上会复现
+    「凭据读成空串 → /code 401 → 会话终结」；把内联回退的解析改得与 `resolve_hub_url` 不同源，
+    则两条路会连到不同的 hub（GitHub raw 不可达时才暴露，最难复现的一种）。
+  - **回归测试**：`nn-training/tests/test_notebook_hub_ip.py`（14 例：内联回退的解析与
+    `resolve_hub_url` **逐例对账**（8 例取值 + 2 例未填 → `SystemExit` 且点名两个键）、缺省端口
+    跟随模块常量、两个 cell 的 HUB_IP 读取位置早于代理引导、体检 cell 把 `hub_ip`/`hub_port`
+    喂进 `diagnose`）；notebook 侧接线改动用**先红后绿**验过（把缺省端口字面量改成 9999，
+    对账断言当场红）。
 
 ## §2026-09-17-goalnn-remotewire-m0m2（2026-09-17，远程 PPO 传输计量 + 协议瘦身落地；退路与安全阀是硬要求）
 

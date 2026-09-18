@@ -32,6 +32,44 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 
+#: 本机 hub 的默认端口（与 `hub-server --port` 默认一致）。
+HUB_DEFAULT_PORT = 8787
+
+
+def resolve_hub_url(cfg_hub_url: str = "", hub_ip: str = "", hub_port: int = 0) -> str:
+    """本机 hub 地址：**凭据给的 address 优先**，回落 CFG 手填的 `hub_url`。
+
+    为什么多一个凭据：hub 跑在操作者本机，地址每开一个会话都得填一次，而值又长期不变
+    （Tailscale IP 在设备重注册前是稳定的）——正是 secret 的用途。于是它走与
+    TS_AUTHKEY/HUB_TOKEN 同一条取用链（环境变量 → Colab/Kaggle Secrets → CFG 手填），
+    键名 `HUB_IP`（读进 CFG 的 `hub_ip`）。
+
+    住在本模块而不是 notebook_boot：两个 notebook（训练 cell 与连接体检）都拉本文件，
+    而体检那边只拉这一个——单源一份，两边不会漂。
+
+    取值两吃（同一个键，不必记两套约定）：
+
+      HUB_IP = 100.64.0.5                     → http://100.64.0.5:8787
+      HUB_IP = 100.64.0.5:9999                → http://100.64.0.5:9999
+      HUB_IP = http://hub.tailnet.ts.net:8787 → 原样（换域名/换协议/同机 127.0.0.1 都行）
+
+    CFG 里的模板值（`http://<本地TS_IP>:8787`，含 `<`）一律视为**未填**：否则忘了改就是
+    拿一个带尖括号的主机名去连，报错发生在 DNS 层，比在这里响亮地说一句难查得多。
+
+    两者都没有 → 返空串（由调用方响亮失败并指名该填哪个键）。
+    """
+    ip = str(hub_ip or "").strip()
+    if ip:
+        if "://" in ip:
+            return ip.rstrip("/")  # 整条 URL：原样（含自定义端口/域名）
+        hostport = ip if ":" in ip else f"{ip}:{int(hub_port or 0) or HUB_DEFAULT_PORT}"
+        return f"http://{hostport}"
+    fallback = str(cfg_hub_url or "").strip()
+    if "<" in fallback:  # 模板占位符 = 没填
+        return ""
+    return fallback.rstrip("/")
+
+
 SOCK = "/var/run/tailscale/tailscaled.sock"
 STATE_DIR = "/tmp/tailscale-state"
 DAEMON_LOG = "/tmp/tailscaled.log"
@@ -320,7 +358,13 @@ def _port_listening(addr: str) -> bool:
 
 # ── 诊断（tailscale.debug.ipynb 用；只读，除确保 daemon 在跑）──────────────
 def diagnose(cfg: dict, log) -> None:
-    hub = str(cfg.get("hub_url") or "").strip()
+    # hub 地址与运行时同口径（HUB_IP 凭据优先、CFG 模板值视为未填）——否则会出现
+    # 「体检说连不上、真跑却连得上」（或反过来）这种最难信的一种诊断结论。
+    hub = resolve_hub_url(
+        str(cfg.get("hub_url") or ""),
+        str(cfg.get("hub_ip") or ""),
+        int(cfg.get("hub_port") or 0),
+    )
     token = str(cfg.get("hub_token") or "")
     log("── 1. 二进制 ──")
     ts = shutil.which("tailscale")
@@ -367,7 +411,7 @@ def diagnose(cfg: dict, log) -> None:
             log(f"  {k}={os.environ[k]}")
 
     if not hub:
-        log("── 6. hub ── 未配 hub_url，跳过")
+        log("── 6. hub ── 未配地址（HUB_IP 凭据 / CFG hub_url），跳过")
         return
     log(f"── 6. hub 连通性（{hub}）──")
     targets = [hub.rstrip("/") + "/ping"]

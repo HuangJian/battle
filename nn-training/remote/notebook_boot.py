@@ -251,11 +251,15 @@ def run(cfg: dict, log, secret, keepalive_stop) -> int:
     会把 HTTP_PROXY/ALL_PROXY 指向只转发 Tailscale IP 的本地代理，之后平台 Secrets
     （公网 HTTPS）再也读不出来；而读失败被 `secret()` 吞成空串 ⇒ /code 401 ⇒ 会话终结。
     同一个 cell 的内联回退本来就是这个顺序（先读凭据再 `_inline_ensure`），这里补齐。
+
+    `HUB_IP` 也在这一批里读（本机 hub 地址；见 `tailscale_boot.resolve_hub_url`）——
+    它同样是「每个会话都要填一次」的值，且同样只能公网取（引导后平台 Secrets 就够不着了）。
     """
     creds = {
         "TS_AUTHKEY": secret("TS_AUTHKEY", cfg.get("ts_authkey")),
         "HUB_TOKEN": secret("HUB_TOKEN", cfg.get("hub_token")),
         "PUSH_TOKEN": secret("PUSH_TOKEN", cfg.get("push_token")),
+        "HUB_IP": secret("HUB_IP", cfg.get("hub_ip")),
     }
     log("凭据就绪（值不落日志）："
         + (", ".join(k for k, v in creds.items() if v) or "（一个都没读到）"))
@@ -272,11 +276,18 @@ def run(cfg: dict, log, secret, keepalive_stop) -> int:
 
     if cfg["mode"] == "rl":
         rl_mode = str(cfg.get("rl_mode") or "push").lower()
-        hub = str(cfg.get("hub_url") or "").strip()
+        hub = tailscale_boot.resolve_hub_url(
+            str(cfg.get("hub_url") or ""), creds["HUB_IP"], int(cfg.get("hub_port") or 0)
+        )
+        if hub:
+            log(f"hub = {hub}（来源：{'HUB_IP' if creds['HUB_IP'] else 'CFG hub_url'}）")
         hub_tok = creds["HUB_TOKEN"]
         if rl_mode == "pull" or (rl_mode == "push" and hub):
             if not hub:
-                raise SystemExit("[FATAL] pull 需要 hub_url")
+                raise SystemExit(
+                    "[FATAL] pull 需要本机 hub 地址：把 HUB_IP（本机 Tailscale IP 或整条 "
+                    "URL）写进 Colab/Kaggle Secret，或填 CFG 的 hub_url"
+                )
             if not hub_tok:
                 # 引导后平台 Secrets 读不出来会被吞成空串；别再以「HUB_TOKEN 不一致」
                 # 这种误导性措辞收场（2026-09-17 Kaggle 事故的解码成本就花在这上面）。

@@ -63,6 +63,66 @@ pass 81.0%→95.0%；通关耗时 928.7→1002.1（**+7.9%，CI 大幅重叠 = �
 | **400800–400999** | **空闲** ⇒ `x3-rebirth` 预注册此段，中途不得改 |
 
 ---
+## §69 本机 hub 地址走凭据（`HUB_IP`）：两个 notebook 同键同口径 + 一条对账守卫（2026-09-17）
+
+**用户指令**：`battle.tailscale.ipynb`，把本机 ip 也设置为 secret，避免每次都要手动输入。
+
+**动机**：`CFG["hub_url"]` 是「**每个会话都要手填、值却长期不变**」的值——hub 跑在操作者本机，
+Tailscale IP 在设备重注册前是稳定的。这正是 secret 的用途，而它此前是 CFG 里唯一还需要人肉
+改的条目；模板值 `http://<本地TS_IP>:8787` 忘了改就会拿一个带尖括号的主机名去连
+（错在 DNS 层，比当场点名难查得多）。
+
+**一个键、两种取值**（不必记两套约定）：
+
+```
+HUB_IP = 100.64.0.5                     → http://100.64.0.5:8787（配 CFG hub_port，缺省 8787）
+HUB_IP = 100.64.0.5:9999                → http://100.64.0.5:9999
+HUB_IP = http://hub.tailnet.ts.net:8787 → 原样（换域名/协议/端口都行，同机 127.0.0.1 同）
+CFG hub_url 含 "<" → 视为未填（返空串，由调用方响亮失败并点名该填哪个键）
+```
+
+`HUB_IP` 有值时**压过** CFG `hub_url`；未设时按 CFG 手填——老会话（没建这个 Secret）行为不变。
+
+**单源一份，两个 notebook 共用**：解析逻辑住在 `remote/tailscale_boot.py::resolve_hub_url`，
+消费点是 `notebook_boot.run()`（真跑）与 `diagnose()`（体检）——两个 notebook 都从 GitHub raw
+拉这**同一个文件**（体检那边只拉它一个），所以口径不会两边漂。
+
+**与 §2026-09-17-kaggle-cred-before-proxy 同一条时序约束**：`HUB_IP` 与另三个凭据**同批在
+引导之前**读。它同样只能公网取（平台 Secrets），引导后 userspace 代理只转发 Tailscale IP ⇒
+读出来会是空串；而若它被读成空，症状是「连不上 hub」——与真正的原因（地址没读到）看起来
+完全不像，是最费排障时间的一类假象。
+
+**notebook 侧改动**：
+
+| 位置 | 改动 |
+|---|---|
+| 训练 cell CFG | 新增 `hub_ip` / `hub_port` 两条；`hub_url` 降为「手填兜底」 |
+| 训练 cell 内联回退（远端模块拉不到时唯一的活路） | 复刻同一段解析 + **打日志记来源**（`hub = … （来源：HUB_IP / CFG hub_url）`），失败信息同时点名 `HUB_IP` 与 `hub_url` |
+| 体检 cell | 自己读 `HUB_IP` 并把 `hub_ip`/`hub_port` 喂进 `diagnose()` |
+| 两 cell 的说明（markdown） | 凭据清单补 `HUB_IP`；pull 行不再指向一个要手改的 CFG 值 |
+
+体检 cell 必须同口径，否则会出现「**体检说连不上、真跑却连得上**」这种最难信的一种诊断结论；
+`diagnose` 里那句「未配 hub_url，跳过」也改成「未配地址（HUB_IP 凭据 / CFG hub_url）」——
+体检报告里的跳过一次不该让人再去猜该填哪个键。
+
+**回归守卫**：新增 `nn-training/tests/test_notebook_hub_ip.py`（**14 例**）。notebook 不 import
+仓库代码，所以按 `test_tpu_probe_notebook.py` 的做法把 cell 文本抠出来**独立执行**——
+但不止「有这几行」，而是把内联回退算出的 `_hub` 与 `resolve_hub_url` 的返回值**逐例对账**
+（8 例取值 + 2 例未填→`SystemExit` 且点名两个键 + 缺省端口跟随 `HUB_DEFAULT_PORT`），
+再钉两个 cell 的读取位置早于代理引导、体检 cell 把 `hub_ip`/`hub_port` 喂进 `diagnose`。
+先红后绿验过：把 cell 里的缺省端口字面量 `8787` 改成 `9999`，对账断言当场红。
+
+**存量测试立即咬到新凭据**（这是好信号）：`test_bootstrap_proxy.py` 的「凭据前置」用例
+（假 secret 只认三个旧键）在新凭据加入后立刻 `KeyError: 'HUB_IP'` —— 它断言的正是
+「任何凭据在 tailnet 代理生效后被读即红」，说明这道闸门对**新增凭据**也是自动生效的。
+已扩为四键并顺手加固两处：`calls` 断言四个键的读取顺序；`captured["hub"]` 断言
+HUB_IP（100.64.0.5）**压过** CFG hub_url（故意留成不同的 100.64.0.9，好让「压过」可观测）；
+另加一例「HUB_IP 未设 ⇒ 回落 CFG hub_url」。
+
+**门禁**：nn python gate **1238 passed / 3 skipped**（+15 例；ruff + mypy 干净）；
+根 `bun run check` **1851 pass / 0 fail**。
+
+---
 ## §70 「云端同机 rollout + PPO」全链路集成测试：一条真链路，两个面板读法（2026-09-17）
 
 **用户指令**：写一个集成测试，确保「云端同机 rollout + PPO」全流程畅通，本地 dashboard
