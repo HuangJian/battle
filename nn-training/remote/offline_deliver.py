@@ -41,6 +41,7 @@ import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 
+from remote import net_http
 from remote.artifacts import ArtifactStore, atomic_write_json, sha256_bytes
 from remote.protocol import (
     AUTH_HEADER,
@@ -74,7 +75,8 @@ def _urllib_opener(url: str, data: bytes, headers: dict, timeout: float) -> tupl
     """默认 HTTP（POST；`data=None` 即 GET）。返回 (status, body)；**不抛** HTTPError。"""
     req = urllib.request.Request(url, data=data, headers=headers, method="POST" if data else "GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        # 回环（本机 hub）绕开环境代理；隧道/公网 URL 保持 urllib 默认。
+        with net_http.urlopen(req, timeout=timeout) as resp:
             return int(resp.status), resp.read()
     except urllib.error.HTTPError as e:
         return int(e.code), e.read()

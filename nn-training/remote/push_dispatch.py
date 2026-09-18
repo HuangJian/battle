@@ -39,6 +39,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from remote import net_http
 from remote.protocol import (
     AUTH_HEADER,
     BLOB_NAMES,
@@ -91,7 +92,7 @@ def _http(
         headers={AUTH_HEADER: f"Bearer {key}"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with net_http.urlopen(req, timeout=timeout) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as e:
         try:

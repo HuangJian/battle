@@ -759,6 +759,8 @@ def _request(
     import urllib.error
     import urllib.request
 
+    from remote.net_http import urlopen as _urlopen
+
     req = urllib.request.Request(
         f"{base_url.rstrip('/')}{path}",
         data=data,
@@ -766,7 +768,9 @@ def _request(
         method=method,
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        # 回环（本机 hub）绕开环境代理——`no_proxy` 里的 `127.*` 通配 Python 不认，
+        # 见 remote/net_http.py 模块头。
+        with _urlopen(req, timeout=timeout) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as e:
         return e.code, e.read()

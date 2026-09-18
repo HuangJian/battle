@@ -4,6 +4,74 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §75 多课程单 hub 端到端 + 回环 HTTP 绕开代理（P1 余下 ②）（2026-09-18）
+
+P1 收口：`e2e/test_multi_course_single_hub_e2e.py` 把「一个 hub 进程服务所有并行课程」钉在
+**真跨进程**链路上——真 hub 子进程（`--discover --push`，命令行不点课程名）+ 真
+`worker_server`（starter 换成写结果的假执行器 ⇒ 不跑 rollout/PPO/torch）+ 训练侧真发布
+（`publish_job(dispatch="push")`）与真等待（`wait_job` HTTP 轮询）。
+
+```
+训练侧 publish_job(dispatch="push")  →  <traj>/<课>/remote-jobs/<jid>/
+hub（真进程，发现课程表）            →  push_client.submit_job（code.zip 随体）
+worker_server（真 HTTP 契约）        →  GET /job/<jid>/result
+hub accept_result（对账→租约→首写）  →  本课 result/result.json
+训练侧 wait_job（控制台读同一份账本）
+```
+
+两个用例：① 两门课各发一份 job → 都完成、结果**各回本科目录**、账本不串课、worker
+各收一次、派发器 `pushed=2/requeued=0`；② 离线课（`POST /admin/courses?mode=offline` 真热切）
+不实时派发（job 停在队首、worker 没碰），同 hub 的在线课照常走完，切回在线后**同一份 job**
+（不重发）立刻被推走。
+
+### 实测踩到的四个口径（写进用例注释）
+
+1. **就绪 ≠ 端口能答**：课程表是后台扫描登记的（`DISCOVER_SCAN_MIN_SEC=2s`），端口刚答
+   200 时课程表还是空的——只等端口就会假红（首版就这么红的）；等的是「`/admin/queue`
+   能答 **且**课程表就位」。
+2. **结果落的是 `result/result.json`**（不是 job 根下的 `result.json`），且可领池看的是
+   **盘上有没有结果**，不是租约——成功后租约要到 TTL 才消失，所以断言是「无可领的活 +
+   派发器自己手上没有在飞」，而不是 `inflight == []`。
+3. **`job_completed` 是训练侧写的**（验收落位后 `mark_job_completed`），hub 只写
+   `job_pending` + 落结果；用例显式走一次 `mark_job_completed` 并断言「只进本科账本」。
+4. `--race off`：竞速广播会把同一份活推给两台，本用例要的是 1:1 派发。
+
+### 顺带修掉的门禁真缺陷：**回环 HTTP 被环境代理截走**
+
+`test_offline_deliver.py::test_offline_endpoints_require_auth` 在门禁里红过一次：hub 日志
+明明两次 401，测试侧读到的却是 **502**。根因不在测试——本机用户级环境带
+`HTTP_PROXY`/`HTTPS_PROXY`，而 `no_proxy` 写的是 `127.*` 这种通配，Python 的
+`proxy_bypass()` **不认**（只认 `host == entry` / `*.suffix` / `.suffix`），实测
+`proxy_bypass("127.0.0.1") is False` ⇒ **每一发去 127.0.0.1 的请求都被送到外部代理再转
+回来**（代理抖动/回错误页 = 502），本机训练也凭空多一跳。
+
+修法：新增 `remote/net_http.py`（`is_loopback` / `no_proxy_opener` / `urlopen` 替身），
+把四条本机 HTTP 出口接上——`hub_client._request`（训练侧↔hub）、`push_dispatch._http`
+（hub↔GPU worker）、`worker._request`（worker↔hub，非回环仍用它的显式 ProxyHandler，
+Colab 需求不受影响）、`offline_deliver._urllib_opener`；非回环分支刻意仍调
+`urllib.request.urlopen`（保住测试里那条 monkeypatch 缝）。
+
+复现→修复（§7）：`tests/test_loopback_http_no_proxy.py`（5 例）——把环境代理指到**死端口**
+再打本机真服务，修复前三条出口全部 `ConnectionRefused`（我用临时脚本实测过：raw urllib
+URLError、`net_http.urlopen` 200），修复后全绿；另有一例断言非回环仍走 urllib 默认。
+
+只改生产侧还不够：**测试侧另加一层兜底**——`tests/conftest.py` 把精确回环主名
+（`127.0.0.1` / `localhost` / `::1`）补进 `no_proxy`（`proxy_bypass()` 认精确匹配），8 个仍用
+**裸 `urlopen`** 打本机临时端口的既有用例因此一并脱离代理（实测证据：只改生产侧时
+`test_multi_course_hub.py::test_main_discover_picks_up_course_from_disk` 在满载下仍会
+在 `/jobs/next` 那一步吃到代理的 `Errno 111`，而 hub 自己毫发无损）。生产靠代码、测试靠环境。
+
+### 门禁
+
+| 门 | 结果 |
+|---|---|
+| nn python gate | ✔ **1320 passed / 3 skipped**（+2 e2e +6 回环用例；ruff + mypy 干净）——连跑两次均绿 |
+| 根 `bun run check` | ✔ 19s 绿 |
+| dashboard typecheck / test | ✔ 15s 绿（本轮未动 dashboard） |
+
+**P1 到此收口**；余下的「组件卡片按『单例角色 / 按课程』分组」仍按 §74 的说明推迟（属形状
+整理，不阻塞任何链路）。
+
 ## §74 单 hub + 单隧道（P1 余下 ①）：hub/cloudflared 收敛为单实例 + 课程表从盘上发现（2026-09-18）
 
 用户口径（原话）：`hubserver/trainingloop/selfNode/cloudflared 都只需要开一个进程，就能同时支持所有并行训练课程`。

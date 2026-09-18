@@ -30,6 +30,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from remote import net_http
 from remote.iter_rollout import run_iter_rollout
 from remote.protocol import (
     AUTH_HEADER,
@@ -95,14 +96,17 @@ def _request(
     method: str | None = None,
     headers: dict[str, str] | None = None,
 ) -> tuple[int, bytes]:
+    url = f"{base_url.rstrip('/')}{path}"
     req = urllib.request.Request(
-        f"{base_url.rstrip('/')}{path}",
+        url,
         data=data,
         headers={AUTH_HEADER: f"Bearer {token}", **(headers or {})},
         method=method,
     )
     try:
-        with _get_opener().open(req, timeout=timeout) as resp:
+        # 回环（本机 hub）绕开代理；非回环走进程内的显式 ProxyHandler（Colab 实测需要）。
+        open_fn = net_http.urlopen if net_http.is_loopback(url) else _get_opener().open
+        with open_fn(req, timeout=timeout) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as e:
         return e.code, e.read()
