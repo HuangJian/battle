@@ -4,6 +4,146 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §79 R2c-2：抽出 run_one_round + 任务体↔引擎的桥 + 假件集成测试（2026-09-18）
+
+R2 第三相位的第二半。用户口径（本轮）：**写集成测试验证流程，rollout/ppo/eval 一律用假件**。
+
+### ① `run()` 拆出 `run_one_round(it) -> RoundOutcome`（只搬不改）
+
+原 `run()` 的 190 行轮体搬进 `run_one_round`，控制流逐条保留；差异只在**控制流的出口表达**：
+
+| 原 | 新 |
+|---|---|
+| `break`（停腿/熔断/止损/门/预算） | `return RoundOutcome(ROUND_STOP, it)` |
+| `return`（全离线任务包已导出） | `ROUND_BUNDLE_EXIT` |
+| 冒烟作废：`smoke_void = True; break` | `ROUND_SMOKE_STOP` |
+| `it -= 1`（三种原地重试） | `ROUND_RETRY` |
+| 轮末 `self._consec_fail = 0` | + `ROUND_NEXT` |
+
+`run()` 变成驱动器（预采 join / 预算到点检查 / 按 outcome 施加 / 收官 drain / 停车）；
+**`RoundOutcome.it` 必须带回**：半离线整段 `_remote_run_segment` 一次吃掉 it..end_it，
+丢掉返回值就会重跑已跑完的那一段。
+
+实现方式：一次性拼接脚本（AGENTS §17.1 的纪律）——先在内存里逐 hunk `assert count == N`，
+全过才写盘；写完 `ast.parse` 校验。脚本跑完即删（改动本身在提交里）。
+
+### ② `rl/loop_runner.py`（新）：任务体 ↔ 引擎的**唯一**桥
+
+- `planner`：读该课账本 → `next_it`（账本是 SSOT；队列只是本进程的加速器）；课已收官 ⇒ 空表。
+- `run_round`：`RoundOutcome` → 四态（NEXT→DONE / RETRY→`retry(same_iter)` / STOP·SMOKE·
+  BUNDLE→DONE(final) 并标记收官 / 引擎异常→RETRY）。
+- **`WAIT` 的判据不猜**：只认引擎显式提供的 `remote_job_ready(it)` 钩子。**钩子不存在**
+  （今天的 `TrainingLoop`）⇒ 按「跑完即 DONE」处理 = 行为与改造前逐字节一致；钩子存在
+  （R2c-3 的轮询化实现，或测试里的假件）⇒ 未就绪就 `WAIT` 让位。
+- **粒度诚实记账**：今天一个任务 = **一轮**。轮内 13 步需要的轮内局部量
+  （`pairs`/`dist_cfg`/`t_rollout`/`seg`）还锁在 `run_one_round` 里，提成 `RoundContext`
+  之后即可细化（R2c-3）。粒度只决定**让位点的密度**，不改本模块与调度器的契约。
+
+### ③ 集成测试：重活全假、记账全真
+
+`nn-training/e2e/test_loop_supervisor_integration.py`（4 例）：
+
+```
+真 TrainingLoop（真 args / 真 _setup_common / 真 run_one_round 控制流 / 真 _record_iteration）
+真 Supervisor（轮转 + 资源票 + 四态收敛 + 按课隔离）
+真 LoopRunner
+假：_rollout_phase / _serial_ppo / _join_eval / 预采 / 巡检 / 轮转 / 报告打印 / rl-config 读盘
+```
+
+| 用例 | 钉住的东西 |
+|---|---|
+| 两门课在一个进程里各自跑满 2 轮 | 账本互不串（各自 `[1,2]`）· 前两步来自不同课程（轮转公平，不是「跑完 a 再 b」）· 队列收敛 `done` |
+| a 在 it2 等远端 PPO（`WAIT`） | b 先跑完 it1+it2（**让位的证据**）· 在飞集带 `job-a-2` · 时钟推进 + 置就绪后 a 续跑 |
+| 进程重开 | 指针从账本重建（`next_it=3`）· **不重写任何已有行、不跳轮** |
+| 引擎异常 | 原地重试（RETRY 痕迹）· it 不前跳 · 最终成功落账一次 |
+
+### 门禁
+
+| 门 | 结果 |
+|---|---|
+| nn python gate（ruff + mypy + pytest） | ✔ **1373 passed / 3 skipped**（28s；+4 集成例） |
+| 根 `bun run check` | ✔ 52s 绿 |
+
+### 观察到的一次门禁偶发（非本轮回归）
+
+`e2e/test_multi_course_single_hub_e2e.py::test_single_hub_dispatches_two_courses_to_one_worker`
+在一次全量门禁里红过：hub 子进程报「端口 54749 已被占用——拒绝启动（禁止双监听）」。
+同文件单跑绿、紧接的全量门禁再跑绿 ⇒ **端口抢占竞态**（xdist 12 路并行下「先探空闲端口、
+再启动」之间的窗口被别人抢走），不是改动引入。已记在此处备查；若再现频繁，修法是让
+free-port 助手「绑定即持有」到子进程接手（而不是探完就放）。
+
+### 下一步（R2c-3）
+
+`RoundContext` 提出轮内 13 步（细粒度让位）+ 三处长等待真轮询化
+（`wait_job` / eval 尾巴 / 预采子进程各加 `*_ready(it)` 钩子）+ `Supervisor` 进控制台
+（单例卡片 + 每课队列视图）+ `checkpointCacheMb` 真机 RSS 实测表。
+
+## §78 R2c-1：单进程多课程调度核心 + 只读计划视图（2026-09-18）
+
+R2 第三相位的第一半。设计稿 `plan/r2-loop-task-queue.md` §4/§8 同步（R2c 拆成 R2c-1/R2c-2）。
+
+### 三个新件
+
+| 件 | 职责 |
+|---|---|
+| `nn-training/rl/loop_scheduler.py` | **纯调度**（无 torch/网络/IO）：`PoolSet` 资源票 + `CourseQueue` + `Supervisor`（公平轮转 → 闸门 → 单线程执行 → 四态收敛） |
+| `nn-training/rl/loop_plan.py` | 唯一碰盘的 IO 边缘：账本指针（`LedgerView`）→ `RoundFacts` → `pending_tasks`；shard 结算数；`commit_journal` 在飞集；课程发现 |
+| `nn-training/run_rl_cluster.py` | 入口：**一个进程**读所有并行课程，输出「下一步 / 待办 / 在等谁（含 job_id）/ 被什么挡住 / 关键事实」 |
+
+### 三条不可交易的性质（测试逐条钉住）
+
+1. **同一时刻只跑一个任务**（单线程执行器）——用「执行体重入即计数、峰值必须为 1」证明；
+2. **`WAIT` 不占执行权**——一门课等远程 PPO 时，另一门课跑完自己整轮（时钟注入，测试不真睡）；
+3. **故障域按课**——一门课 `ABORT`（门禁停腿 / 5 连击）只脏它自己的队列，另一门课照常跑完。
+
+外加：轮转公平（`a,b,c,a,b,c` 而不是「跑完 a 再 b」）、`RoundFacts` 算不出时不跳（保守方向）、
+执行体抛异常 = 一次失败（不打崩调度器）、planner 空转 ⇒ 响亮抛错。
+
+### 两处设计上的新东西（原设计稿没写到的）
+
+- **票可跨 `WAIT` 保留**（`waiting(hold=True)` / `TaskResult.hold`）：本机 eval 的局还在后台跑时
+  `eval_join` 先返回 WAIT——**票必须留着**，否则另一门课的本机重资源会插进来把机器压爆。
+  这是我写「池闸门」测试时发现的：若 WAIT 一律还票，容量 1 的池在单线程调度器里**永远不会挡住任何人**
+  （一个任务体跑完就还票），池就失去了意义。真实形态是「后台仍在干活」⇒ 票必须能跨步持有。
+- **「能跑的都被池挡住」= 没事可做**：否则调度器会在两门互相挡住的课之间空转（灌爆 traces、
+  单线程纯烧 CPU）。被挡住的事实留在 `blocked_courses`（读面可见），一旦有票释放就清空重探。
+
+### 与数据的实测（真课程目录，只读）
+
+```
+course                   it state    next task          pending inflight
+s-dodge                   1 ready    prepare_iter            13        0
+tiny-a                    6 ready    prepare_iter            13        0
+    facts: iterations=5 last_verdict=None train_sec=1.2 soft_remediate=0 kl_streak=0 shards(it)=0
+```
+
+`s-dodge` 的 `shards(it)=150` 而 `iterations=0` 恰好演示了「采集完成、账本未结算」这一态——
+计划视图说「rollout 仍要做」（`games_planned` 未知 ⇒ 不跳），而真执行体的 `completed_pairs`
+会把已结算的 150 局剔除，两者不冲突（前者是**保守**，后者是**精确**）。
+
+### 门禁
+
+| 门 | 结果 |
+|---|---|
+| nn python gate（ruff + mypy + pytest） | ✔ **1369 passed / 3 skipped**（24s；+18 新例） |
+| 根 `bun run check` | ✔ 绿 |
+
+### 踩坑
+
+1. **重试计数口径**：`q.attempts.get(tid, task.attempt) + 1` 在**首次**失败时把计数推到 2
+   ⇒ 5 连击提前一轮变 4 连击停腿。正确口径 = 「已记录的失败次数」，从 0 起。
+2. **测试里 planner 必须有限**：`lambda c, it, q: [Task(...)]`（不带 it 门）会每轮供应任务 ⇒
+   调度器永远不 idle，`run_until_idle` 直接撞步数上限。「planner 空转」其实是个**真**故障模式，
+   所以调度器侧也留了响亮抛错（而不是静默死循环）。
+3. mypy：只读模式的 executor 不能返回 `None`（签名要的是 `TaskResult`）——写成「被调用即 raise」，
+   既过类型检查，又把「计划视图退化成真执行」这件事变成响亮错误。
+
+### 下一步（R2c-2）
+
+抽 `run_one_round` + 把任务体接到真 `TrainingLoop`；三处长等待改 `WAIT` 让位（`wait_job` /
+eval 尾巴 / 预采子进程）；`Supervisor` 进控制台（单例卡片 + 每课队列视图）；`checkpointCacheMb`
+真机 RSS 实测。
+
 ## §77 R2b 落地：任务模型 + 在飞集；`loop-state.json` 经落地否决（2026-09-18）
 
 R2 第二相位。设计稿 `plan/r2-loop-task-queue.md` §3/§8/§10 同步更新。

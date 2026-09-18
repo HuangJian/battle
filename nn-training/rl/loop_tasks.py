@@ -37,12 +37,19 @@ ABORT = "abort"
 
 @dataclass(frozen=True)
 class TaskResult:
-    """任务的终态（四态之一）。构造走下面四个工厂，避免各处手拼 status。"""
+    """任务的终态（四态之一）。构造走下面四个工厂，避免各处手拼 status。
+
+    `hold`（R2c）：**WAIT/RETRY 时是否继续持有资源票**。默认 False = 让位即还票，也就是
+    「我这一步在等外部，没占用本机资源」。置 True 的场景是**后台仍在干活**：例如本机
+    eval 的局还在子进程/线程里跑（`eval_join` 先回来等它），此时票必须留着，否则另一门课
+    的本地重资源会插进来把机器压爆。
+    """
 
     status: str
     resume_at: float | None = None
     reason: str = ""
     payload: dict[str, Any] = field(default_factory=dict)
+    hold: bool = False
 
     @property
     def is_terminal(self) -> bool:
@@ -58,13 +65,20 @@ def done(**payload: Any) -> TaskResult:
     return TaskResult(status=DONE, payload=dict(payload))
 
 
-def waiting(resume_at: float | None, reason: str = "", **payload: Any) -> TaskResult:
-    """等外部（远程结果 / eval 尾巴 / 子进程）——`resume_at` = 下次可再问的时刻。"""
-    return TaskResult(status=WAIT, resume_at=resume_at, reason=reason, payload=dict(payload))
+def waiting(
+    resume_at: float | None, reason: str = "", *, hold: bool = False, **payload: Any
+) -> TaskResult:
+    """等外部（远程结果 / eval 尾巴 / 子进程）——`resume_at` = 下次可再问的时刻。
+
+    `hold=True` = 后台工作仍在跑，**不要把资源票还掉**（见 `TaskResult.hold`）。
+    """
+    return TaskResult(
+        status=WAIT, resume_at=resume_at, reason=reason, payload=dict(payload), hold=hold
+    )
 
 
-def retry(reason: str, **payload: Any) -> TaskResult:
-    return TaskResult(status=RETRY, reason=reason, payload=dict(payload))
+def retry(reason: str, *, hold: bool = False, **payload: Any) -> TaskResult:
+    return TaskResult(status=RETRY, reason=reason, payload=dict(payload), hold=hold)
 
 
 def abort(reason: str, **payload: Any) -> TaskResult:

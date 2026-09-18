@@ -2621,5 +2621,50 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 - **落地**：`nn-training/rl/loop_tasks.py`（新）、`rl/commit_journal.py`（attach/inflight）、`rl/loop_steps.py`
   （`_remote_ppo` attach + `_commit_journal` 在飞集日志）；回归 `tests/test_loop_tasks.py`（10 例）、
   `tests/test_commit_journal.py`（+4 例，含硬死注入带 `job_id`）。
-- **仍未做**：R2c（单进程 supervisor + 资源池）· R2d（控制台单例卡片与队列视图）· R2e（e2e）·
-  `checkpointCacheMb` 的 RSS 真机实测。
+**R2c-1 落地（2026-09-18 再续）——单进程调度核心 + 只读计划视图**：
+
+- **`rl/loop_scheduler.py`**（新，纯调度：无 torch/网络/IO）：`PoolSet`（资源票 + 记账，
+  未知池名/超发释放都 `PoolError`）· `CourseQueue` · `Supervisor`（公平轮转 → 闸门 → 单线程
+  执行 → 四态收敛 → 按课隔离故障）。三条不可交易性质：**同一时刻只跑一个任务**、
+  **`WAIT` 不占执行权**、**故障域按课**。
+- **★ 票可跨 `WAIT` 保留**（`TaskResult.hold` / `waiting(hold=True)`）：写池闸门测试时发现的
+  设计缺口——若 `WAIT` 一律还票，单线程调度器里容量 1 的池**永远不会挡住任何人**（任务体
+  跑完即还票），池就失去意义；真实形态是「后台仍在干活」（本机 eval 的局还在子进程里跑）
+  ⇒ 票必须能跨步持有，否则另一门课的本机重资源会插进来把机器压爆。
+- **「能跑的都被池挡住」= 没事可做**（`step()` 返回 None，`blocked_courses` 保留事实）——
+  否则调度器会在两门互相挡住的课之间空转。
+- **`rl/loop_plan.py`**（新，唯一碰盘之处）：账本指针 → `RoundFacts` → `pending_tasks`；
+  shard 结算数；`commit_journal` 在飞集；课程发现（`<traj-root>/*/training_log.jsonl`）。
+  判据永远朝「不跳」保守：算不出的留 `False`/`0`。
+- **`nn-training/run_rl_cluster.py`**（新入口）：**一个进程**读出所有并行课程的「下一步 /
+  待办 / 在等谁（含 job_id）/ 被什么挡住 / 关键事实」。当前只提供只读计划视图（不训练、
+  不发布、不等待）——它零训练行为变化且立刻可用，同时把调度核心放在真数据上跑通。
+- **R2c 拆相**：R2c-1（本段，机制 + 只读面）已完成；**R2c-2** = 抽 `run_one_round` 并把任务体接到
+  真 `TrainingLoop` + 三处长等待改 `WAIT` 让位 + 进控制台 + `checkpointCacheMb` 真机 RSS 实测。
+- **落地**：`nn-training/rl/{loop_scheduler,loop_plan}.py`、`nn-training/run_rl_cluster.py`（均新）；
+  回归 `tests/test_loop_scheduler.py`（18 例）；实测：`run_rl_cluster.py --traj-root tmp` 在真课程
+  目录上读出 5 门课的计划（含「采集完成但账本未结算」那一态）。
+**R2c-2 落地（2026-09-18 三续）——轮体抽出 + 任务体↔引擎的桥 + 假件集成测试**：
+
+- **`TrainingLoop.run_one_round(it) -> RoundOutcome`**：`run()` 的 190 行轮体搬进新方法，`run()` 退为
+  驱动器（预采 join / 预算到点检查 / 按 outcome 施加 / 收官 drain / 停车）。控制流**只搬不改**：
+  `break`→`ROUND_STOP`、包导出 `return`→`ROUND_BUNDLE_EXIT`、冒烟作废→`ROUND_SMOKE_STOP`、
+  三种 `it -= 1`→`ROUND_RETRY`、轮末→`ROUND_NEXT`。**`RoundOutcome.it` 必须带回**：半离线整段
+  `_remote_run_segment` 一次吃掉 it..end_it，丢掉返回值就会重跑已跑完的段。
+- **`rl/loop_runner.py`**（新，任务体↔引擎的**唯一**桥）：`planner` 读账本给指针（SSOT）、
+  `run_round` 把 `RoundOutcome` 映成四态；**`WAIT` 只认引擎显式提供的 `remote_job_ready(it)` 钩子**
+  ——钩子不存在（今天的引擎）⇒ 跑完即 DONE = 行为与改造前逐字节一致；钩子存在（R2c-3 的轮询化，
+  或测试里的假件）⇒ 未就绪就 `WAIT` 让位。**不猜、不睡、不自己轮询**。
+- **粒度诚实记账**：今天一个任务 = **一轮**；轮内 13 步需要的轮内局部量
+  （`pairs`/`dist_cfg`/`t_rollout`/`seg`）还锁在 `run_one_round` 里，提成 `RoundContext` 后即可细化
+  （R2c-3）。粒度只决定让位点密度，不改调度器/桥的契约。
+- **集成测试（用户口径：不跑真 rollout/PPO/eval）**：`nn-training/e2e/test_loop_supervisor_integration.py`
+  （4 例）——真 `TrainingLoop` 控制流 + 真账本写入 + 真 `Supervisor`/`LoopRunner`，只把
+  `_rollout_phase`/`_serial_ppo`/`_join_eval`/预采/巡检/轮转/`rl-config` 读盘换成假件；钉住
+  ①一个进程服务多课互不串账 ②`WAIT` 让位（另一门课先跑完且顺序可断言）③进程重开按账本续跑且
+  不重写行 ④引擎异常 = 原地重试。
+- **落地**：`nn-training/rl/loop_core.py`（抽方法 + 常量/`RoundOutcome`）、`rl/loop_runner.py`（新）、
+  `e2e/test_loop_supervisor_integration.py`（新）；拼接用一次性脚本（逐 hunk `assert` + `ast.parse`，
+  跑完即删）。
+- **仍未做**：R2c-3（轮内细粒度 `RoundContext` + 三处长等待真轮询化 + 控制台视图 + 真机 RSS 表）·
+  R2d · R2e。
