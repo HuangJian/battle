@@ -446,10 +446,12 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
     ap.add_argument(
         "--remote-transport",
         default=_d("remote_transport", "auto"),
-        choices=("auto", "pull", "push"),
-        help="远程 PPO 传输裁决：auto=历史优先级（本课 gpu_push 节点 > hub）；"
+        choices=("auto", "pull", "push", "hubpush"),
+        help="远程 PPO 传输裁决：auto=历史优先级（本课 gpu_push 节点 > hub；"
+        "courses.<课>.hub_push=true 时改走 hub 中介推送）；"
         "pull=强制走 hub（本机独立 localWorker 场景——否则 courses.push_node_url "
-        "一配就把 job 推去云机）；push=强制直推 gpu_push 节点（无节点则响亮失败）",
+        "一配就把 job 推去云机）；push=强制直推 gpu_push 节点（无节点则响亮失败）；"
+        "hubpush=发布到 hub、由 hub 按登记表推给空闲 GPU worker（需 hub-url+token）",
     )
     ap.add_argument(
         "--remote-token",

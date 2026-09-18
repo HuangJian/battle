@@ -96,6 +96,15 @@ export interface RlConfig {
     rollout_src?: RolloutSrcMode
     /** 竞速广播（2026-09-17；缺省 = auto）。字符串域，见 `RaceMode`。 */
     race_mode?: RaceMode
+    /**
+     * hub 中介 push 派发（2026-09-18；缺省 = 关）。
+     *
+     * 打开时 hub-server 多带 `--push --push-config <rl-config>`：它按队列顺序把 job 推给
+     * 登记在册的 `gpu_push` 节点（周期 `/ping` 探活、超时回落队首换 worker）。训练侧仍住在
+     * `rl.hub_push` 的课程级覆盖下（`courses.<课>.hub_push`）——两侧同一个键名是故意的：
+     * 「push 要不要经 hub」是部署事实，不该在面板与训练循环各写一遍。
+     */
+    hub_push?: boolean
     [key: string]: unknown
   }
   /** per-course 槽位/配额（唯一事实来源；console-state 不存这些）。 */

@@ -4,6 +4,59 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §72 hub 中介 push 派发（P1 余下）：队列顺序推空闲 worker + 周期探活 + 超时回落换人（2026-09-18）
+
+用户指令：hub 中介的 push 派发 + worker 登记入口 + 周期 ping 探活，训练侧 push 改走 hub。
+抉择与代价全文见 `DECISIONS.md §2026-09-18-goalnn-hub-push-dispatch`，这里只记落地与实测。
+
+**形状：派发权搬到 hub，训练侧只留一句话。** 训练侧发布时写 `manifest.dispatch="push"`
+（= `--remote-transport hubpush`，或 auto + `courses.<课>.hub_push` / `rl.hub_push`），
+之后回 `wait_job` —— 与 pull 完全同一条收尾链（三重校验 → 落位 → 记账），**不新增第二条
+客户端**。hub 侧新模块 `remote/push_dispatch.py` 认领这份活自己推：
+
+- `PushWorkers`（登记表）：读 rl-config `nodes[]` 里 `gpu_push` 的条目（控制台的 worker
+  登记入口回写它们），**mtime 热重载**（写完配置不必重启 hub）；周期 `GET /ping` 更新
+  在线/忙闲/排队；运行时增删走 `POST /admin/push-workers`（volatile，**且重载后仍保留**）。
+- `PushDispatcher`（派发拍）：跨课程轮转 + **每课程至多一份在途**（课程内轮次有硬序）+
+  只推**队首**且队首必须是 push job（不越过它推后面的）+ 四道闸（在线/不忙/在飞<并发/
+  不在本次避让名单）；上传与等待在**每份 job 一条线程**里做（几十 MB 的 POST 不阻塞拍）。
+- 回落：超时（缺省 45min 兜底）/ 连续探活失败（3 次）/ 拒收（409/428）/ 结果入账被拒
+  ⇒ 放租约 + 避开那台 + 立刻换人重推（job 停在该课队首）。
+- 结果入账与云机 POST **共用** `accept_result`（对账 → 租约 → 首写锁定）；`_post_result`
+  改为调用它 —— 两条腿不可能一条校验一条不校验。
+
+**探活的两条硬判定**（都会在回归里咬）：
+
+1. **从没答过 = 不在线**：宁可这一拍不推，也不往一台可能是死的机器上推几十 MB。
+2. **失败但未达阈值 ⇒ 当局忙**：状态未知必须当忙，否则一次隧道抖动就够调度器认为它空闲
+   并二次推送同一门课（两份 PPO 抢同一轮）。
+
+**缺省关**：`--push` 才启用（不打开连探活线程都不起），既有单课程用例与线上行为逐字节不变；
+控制台经 `rl.hub_push` 透传，`--push-config` 显式指向仓库那份 rl-config（指到 per-course
+目录 = 登记表恒空，是最难查的一种配错）。
+
+**回归**（14 例，全用假 GPU worker server 的三件套 `/ping` `/job` `/job/{id}/result`，
+不跑任何真实运算、不 spawn bun）：
+
+- 纯函数：登记判据与训练侧 `_gpu_push_nodes` 同尺子（`gpu_push` + enabled 缺省 true + url）；
+  四道闸 + 注册序稳定挑选。
+- 登记表：mtime 热重载、非 push 节点不进表、探活写回在线/忙闲/计数、运行时增删。
+- 全链路：happy path（推 → 结果落盘 → **真 hub 端点** `/jobs/{id}/status|result` 读得到 →
+  wire 账 `payload_bytes/body_bytes` 实测）；忙的 worker 被跳过；**离线课一份都不推**；
+  失联 → 回落队首换另一台（并断言跑死它的那台**不得**再拿同一份）；超时兜底；worker 拒收
+  （409）→ 换台；**被篡改的结果**（data_fp 漂）→ 拒收 + 不落盘 + 换台重跑；队首是 pull 活
+  → 一份都不推；没有空闲 worker → job 留队首、无租约残留；**训练侧真发布**
+  （`publish_job(dispatch="push")`）走完同一条链；`/admin/push-workers` 读/增/删 + 未启用 409。
+- 传输裁决（`test_remote_transport.py` +5 例）：`hubpush` 无条件走（缺 hub/token 响亮拒），
+  `push`/`pull` 压过配置，auto 只在 opt-in + hub 齐备时切（旧部署一行不改）。
+
+**门禁**：nn python gate **1301 passed / 3 skipped**（ruff + mypy 干净）、根 `bun run check`
+（1851+ pass）、dashboard typecheck / test（309 例）/ `build:ui` 三份 bundle 全绿。
+
+**本轮未做（P1 余下）**：控制台「worker 登记入口」UI 与面板重组（课程 select 自由可切 /
+在训课程高亮 / 队列与 push 总览）、单隧道（hub/cloudflared 收敛为单例）、多课程单 hub 的
+端到端 e2e（训练侧 hubpush → hub → 真 worker_server + 假 PPO）。
+
 ## §71 多课程单 hub（P1）：一个进程托管 N 份账本 + 跨课程轮转 + 离线课 + 分课程权重桶（2026-09-18）
 
 用户指令：多课程并行训练流程与操作重组（上限先设 5；hubserver/trainingloop/selfNode/

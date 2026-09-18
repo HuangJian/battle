@@ -95,6 +95,8 @@ from remote.protocol import (
     OFFLINE_RESULT_BODY_MAX,
     OFFLINE_RESULT_PATH,
     PAYLOAD_NAME,
+    PUSH_POLL_SEC,
+    PUSH_TIMEOUT_SEC,
     RACE_MODE_AUTO,
     RACE_MODES,
     RACE_WORKER_WINDOW_SEC,
@@ -107,13 +109,18 @@ from remote.protocol import (
     decode_weights_json,
     find_payload,
     may_avoid_stale_holder,
-    normalize_manifest,
     parse_course_arg,
     parse_hub_scope,
     race_decision,
     rotation_order,
     sanitize_run_id,
     unpack_result_v2,
+)
+from remote.push_dispatch import (
+    DEFAULT_PUSH_CONFIG,
+    PushDispatcher,
+    PushWorkers,
+    accept_result,
 )
 
 # ------------------------------------------------------------------ 来源判定
@@ -430,6 +437,20 @@ class _JobStore(_AuthGuard):
         with self._lock:
             w = self._wire.setdefault(job_id, {})
             w["sent_bytes"] = int(w.get("sent_bytes", 0)) + int(n)
+
+    def record_push_wire(self, job_id: str, n: int, payload_bytes: int, upload_sec: float) -> None:
+        """记一次 **hub 中介推送**的传输实测（push 腿的 `wire_hub` 来源）。
+
+        字段名与直推（训练侧 `submit_job` 自己返回的那份）**逐字一致**
+        （body_bytes/payload_bytes/upload_sec），所以训练侧 `_wire_from_result(is_push=True)`
+        读法完全一样——两种 push 的可观测性不该一个有一个无（多课程并行时，哪条腿在吃
+        流量要靠它分组）。重推同一 job 累加 body_bytes（与 payload_sent 同规）。
+        """
+        with self._lock:
+            w = self._wire.setdefault(job_id, {})
+            w["body_bytes"] = int(w.get("body_bytes", 0)) + int(n)
+            w["payload_bytes"] = int(payload_bytes)
+            w["upload_sec"] = round(float(upload_sec), 3)
 
     def record_result_recv(self, job_id: str, n: int) -> None:
         """记一次 /jobs/{id}/result 收到的请求体字节数（= 云上行 result 体大小）。"""
@@ -1315,6 +1336,12 @@ class _HubQueue(_AuthGuard):
         if st:
             st.record_result_recv(job_id, n)
 
+    def record_push_wire(self, job_id: str, n: int, payload_bytes: int, upload_sec: float) -> None:
+        """hub 中介推送的传输实测（按 job 归属委派；未知 job 静默跳过）。"""
+        st = self._store_of(job_id)
+        if st:
+            st.record_push_wire(job_id, n, payload_bytes, upload_sec)
+
     def wire_stats(self, job_id: str) -> dict:
         st = self._store_of(job_id)
         return st.wire_stats(job_id) if st else {}
@@ -1424,6 +1451,8 @@ class HubHandler(BaseHTTPRequestHandler):
     """
 
     hub: _HubQueue = None  # type: ignore[assignment]  # 由 factory 注入
+    #: hub 中介 push 派发器（`--push` 时注入；None = 未启用，端点 409）。
+    push: PushDispatcher | None = None
 
     #: ip -> 上次打印「封禁拒绝」的墙钟（节流：被封客户端高频轮询时每 ip 每分钟一条）
     _blocked_logged: dict[str, float] = {}
@@ -1553,6 +1582,8 @@ class HubHandler(BaseHTTPRequestHandler):
                 self._admin_status()
             elif path == "/admin/queue":
                 self._admin_queue()
+            elif path == "/admin/push-workers":
+                self._admin_push_workers(set_action=False)
             elif path == "/admin/courses":
                 self._admin_courses(set_mode=False)
             elif path == "/admin/race":
@@ -1600,6 +1631,8 @@ class HubHandler(BaseHTTPRequestHandler):
                 self._admin_race(set_mode=True)
             elif path == "/admin/courses":
                 self._admin_courses(set_mode=True)
+            elif path == "/admin/push-workers":
+                self._admin_push_workers(set_action=True)
             elif path == "/admin/net-probe":
                 self._admin_net_probe_upload()
             elif path == OFFLINE_ARTIFACT_PATH:
@@ -1766,6 +1799,65 @@ class HubHandler(BaseHTTPRequestHandler):
             return
         self.hub.clear_workers()  # 强制闸后清空历史登记：模式与陈旧证据不混用
         self._json({"mode": got, **self.hub.race_state()}, 200)
+
+    # ---- push worker 登记表（2026-09-18；控制台 worker 登记入口的服务面）----
+    def _admin_push_workers(self, set_action: bool = False) -> None:
+        """`GET /admin/push-workers` 看登记表 + 派发器状态；`POST` 增/删/热重载。
+
+        控制台登记 worker 的正常路径是**回写 rl-config**（hub 按 mtime 热重载，写完不必
+        重启）；本端点另开两个理由：① 写完配置要 hub **立刻**拾取（不等下一拍）；②
+        冒烟/排障时临时挂一台（volatile，重启即回到配置）。
+
+        body（JSON）：`{"action": "add"|"remove"|"reload", id?, url?, authKey?, concurrency?}`。
+        未启用 push 派发（无 `--push`）时 409 —— 响亮好过默默什么都没发生。
+        """
+        if not self._auth_ok():
+            return
+        disp = self.push
+        if disp is None:
+            self._json({"error": "push 派发未启用（hub-server 需 --push）"}, 409)
+            return
+        if not set_action:
+            self._json({"dispatcher": disp.state(), "registry": disp.workers.state()}, 200)
+            return
+        try:
+            raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            body = json.loads(raw.decode("utf-8")) if raw else {}
+        except (ValueError, OSError) as e:
+            self._json({"error": f"bad json: {e}"}, 400)
+            return
+        if not isinstance(body, dict):
+            self._json({"error": "体必须是对象"}, 400)
+            return
+        action = str(body.get("action") or "reload")
+        if action == "reload":
+            changed = disp.workers.reload(force=True)
+            self._json(
+                {"action": action, "changed": changed, "workers": disp.workers.snapshot()}, 200
+            )
+            return
+        if action == "add":
+            try:
+                w = disp.workers.add(body)
+            except ProtocolError as e:
+                self._json({"error": str(e)}, 400)
+                return
+            print(
+                f"[{time.strftime('%H:%M:%S')}] [hub-server] push worker 登记（运行时）："
+                f"{w['id']} -> {w['url']}",
+                flush=True,
+            )
+            self._json({"action": action, "worker": w}, 200)
+            return
+        if action == "remove":
+            wid = str(body.get("id") or "")
+            if not wid:
+                self._json({"error": "remove 需要 id"}, 400)
+                return
+            hit = disp.workers.remove(wid)
+            self._json({"action": action, "id": wid, "removed": hit}, 200)
+            return
+        self._json({"error": f"未知 action {action!r}（add|remove|reload）"}, 400)
 
     # ---- GET /admin/net-probe?bytes=N（M0：隧道吞吐 A/B 探针）----
     def _admin_net_probe(self) -> None:
@@ -2194,26 +2286,21 @@ class HubHandler(BaseHTTPRequestHandler):
                 result = unpack_result_v2(raw)
             else:
                 result = json.loads(raw.decode("utf-8"))
-            # 与 manifest 对账（job_id/data_fp/init_weights_fp/commit_echo）
-            manifest = json.loads((jd / "manifest.json").read_text(encoding="utf-8"))
-            normalize_manifest(manifest)
-            from remote.protocol import validate_result
-
-            validate_result(result, manifest, commit_echo_must_match=True)
         except (ValueError, ProtocolError) as e:
             self._json({"error": f"result rejected: {e}"}, 400)
             return
-        # P3b 独占加超时：有活租约时验 X-Lease-Token（恢复 H2 检查）——错 token/
-        # 缺 token → 403（非持有人不得写回）；无租约照收（兼容旧 worker/重发）；
-        # 首写锁定保留（hub 重启丢租约 → 首写胜，结果一致）。
+        # 对账（job_id/data_fp/init_weights_fp/commit_echo）+ 租约校验 + 首写锁定：
+        # 走 `push_dispatch.accept_result` —— **与 hub 中介 push 派发器同一个函数**。
+        # 推模式下两条腿并存（云机 POST 上来 / hub 代发后取回），校验绝不能一条有一条无：
+        # 那正是「一份对不上账的结果被静默落盘成一轮看起来正常的训练」的入口。
         lease_token = self.headers.get("X-Lease-Token", "") or self.headers.get(
             "lease-token", ""
         )
-        if not self.hub.result_token_ok(jid, lease_token):
-            self._json({"error": "lease mismatch — 非本 job 租约持有人"}, 403)
-            return
-        if not self.hub.store_result(jid, result):
-            self._json({"error": "result already stored (duplicate write-back)"}, 409)
+        code, why = accept_result(
+            self.hub, jid, result, lease_token, log=lambda m: self.log_message("%s", m)
+        )
+        if code != 200:
+            self._json({"error": why}, code)
             return
         self._json({"job_id": jid, "status": "accepted"})
 
@@ -2295,6 +2382,7 @@ def make_server(
     host: str = "0.0.0.0",
     *,
     hub: _HubQueue | None = None,
+    push: PushDispatcher | None = None,
 ) -> ThreadingHTTPServer:
     """构造 server（handler 注入调度面 + token）。
 
@@ -2311,6 +2399,9 @@ def make_server(
             self.token = token
 
     HubHandler.hub = hub if hub is not None else as_hub(store_or_hub)
+    # push 派发器（可选）：只挂上，**不在此处启动** —— 起线程是启动器的动作，
+    # 免得每个「只想拿个 server 发请求」的测试都被意外拉起一个后台拍。
+    HubHandler.push = push
     return Server()
 
 
@@ -2347,6 +2438,26 @@ def main() -> None:
         "--lock-file",
         default="",
         help="单实例锁路径（缺省 nn-training/.hub_server.<port>.lock；按端口键控）",
+    )
+    ap.add_argument(
+        "--push",
+        action="store_true",
+        help="启用 hub 中介 push 派发：按队列顺序把 job 推给登记在册的空闲 GPU worker"
+        "（缺省关：不启用时连探活线程都不起，行为与改造前逐字节一致）",
+    )
+    ap.add_argument(
+        "--push-config",
+        default="",
+        help=f"push worker 登记来源（rl-config 形状；缺省 {DEFAULT_PUSH_CONFIG}）",
+    )
+    ap.add_argument(
+        "--push-poll-sec", type=float, default=PUSH_POLL_SEC, help="派发/结果轮询节拍（秒）"
+    )
+    ap.add_argument(
+        "--push-timeout-sec",
+        type=float,
+        default=PUSH_TIMEOUT_SEC,
+        help="单份 job 推送后的兜底上限（秒）；超时回落队首换 worker",
     )
     ap.add_argument(
         "--race",
@@ -2434,7 +2545,32 @@ def main() -> None:
         single = _JobStore(args.job_root, args.jsonl)
         single.race_mode = args.race
         hub = as_hub(single)
-    srv = make_server(hub, args.port, token, host=args.host)
+    # push 派发（可选，2026-09-18）：登记表来自 rl-config 的 gpu_push 节点（控制台的
+    # worker 登记入口回写它），派发器每拍探活 + 按队列顺序推给空闲 worker。
+    push_disp: PushDispatcher | None = None
+    if args.push:
+        push_workers = PushWorkers(
+            args.push_config or DEFAULT_PUSH_CONFIG,
+            log=lambda m: print(f"[{time.strftime('%H:%M:%S')}] [hub-server push] {m}", flush=True),
+        )
+        push_workers.reload(force=True)  # 先读一次（缺文件/空表不致命，只是没人可推）
+        push_disp = PushDispatcher(
+            hub,
+            push_workers,
+            token,
+            poll_sec=args.push_poll_sec,
+            timeout_sec=args.push_timeout_sec,
+            log=lambda m: print(f"[{time.strftime('%H:%M:%S')}] [hub-server push] {m}", flush=True),
+        )
+        print(
+            f"[hub-server] push 派发已启用：登记表={push_workers.path} "
+            f"候选 worker={len(push_workers.snapshot())} "
+            f"poll={args.push_poll_sec:g}s timeout={args.push_timeout_sec:g}s",
+            flush=True,
+        )
+    srv = make_server(hub, args.port, token, host=args.host, push=push_disp)
+    if push_disp is not None:
+        push_disp.start()
     print(
         f"[hub-server] listening on {args.host}:{args.port} "
         f"courses={hub.courses()} claim_ttl={CLAIM_TTL_SEC}s race={args.race}",
@@ -2444,6 +2580,9 @@ def main() -> None:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        if push_disp is not None:
+            push_disp.stop()
 
 
 if __name__ == "__main__":

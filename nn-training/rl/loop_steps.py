@@ -229,7 +229,65 @@ def _gpu_push_nodes(remote_token: str, course_push_url: str = "") -> list[dict]:
 
 
 #: `--remote-transport` 的合法值（auto = 历史优先级：本课 gpu_push 节点 > hub）。
-REMOTE_TRANSPORTS: tuple[str, ...] = ("auto", "pull", "push")
+#: `hubpush`（2026-09-18）= 发布到 hub、由 **hub 推给**登记在册的 GPU worker——训练侧不直连
+#: 节点，于是队列/空闲判定/超时回落/多课程公平全住在一处（这就是它相对 `push` 的价值）。
+REMOTE_TRANSPORTS: tuple[str, ...] = ("auto", "pull", "push", "hubpush")
+
+
+def _course_hub_push(args: Any) -> bool:
+    """本课是否要求 **hub 中介推送**（rl-config `courses.<stem>.hub_push` / `rl.hub_push`）。
+
+    auto 下它是唯一切到 `hubpush` 的开关（CLI `--remote-transport hubpush` 则无条件切）：
+    「push 要不要经 hub」是部署事实（云机在 hub 后面跑还是隧道直推），不是每轮要重算的
+    东西，所以它住配置。读法与 `_course_push_url`/`_rollout_source` 同口径——选项住
+    rl-config，**永不进 curricula**（D14 血缘）；读不到一律 False（旧行为，不炸训练）。
+    """
+    try:
+        from train.loop_util import course_key_from_path
+
+        stem = course_key_from_path(str(getattr(args, "course_path", "") or ""))
+    except Exception:
+        return False
+    if not stem:
+        return False
+    try:
+        cfg = dist_common.load_dist_config() or {}
+        course = (cfg.get("courses") or {}).get(stem) or {}
+        rl = cfg.get("rl") or {}
+        return bool(course.get("hub_push") or rl.get("hub_push"))
+    except Exception:
+        return False
+
+
+def resolve_hub_push(
+    mode: str,
+    hub_url: str,
+    token: str,
+    opt_in: bool,
+) -> bool:
+    """传输裁决：本轮是否走 **hub 中介推送**（→ 发布带 `dispatch="push"` + 等 hub 回传）。
+
+    `--remote-transport` 与配置各有分工：
+      · `hubpush` → 无条件走（缺 hub_url/token 响亮 SystemExit，**不静默回落 pull**：
+        配置写错了却“训练看着正常”是这篇仓里最贵的一类错误）；
+      · `push`  → **不走**（“直推”是显式选择：云机没配 hub、或本机伪 GPU 冒烟）；
+      · `pull`  → 不走；
+      · `auto`  → `opt_in` 且 hub_url 与 token 齐备时走，否则保持历史行为（gpu_nodes 直推）。
+    """
+    if mode == "hubpush":
+        if not hub_url or not token:
+            raise SystemExit(
+                "[run_rl] --remote-transport hubpush 需要 --remote-hub-url 与 --remote-token"
+                "（hub 由它推给 GPU worker；直推云机用 --remote-transport push）"
+            )
+        return True
+    if mode in ("push", "pull"):
+        return False
+    if mode != "auto":
+        raise SystemExit(
+            f"[run_rl] 未知 --remote-transport {mode!r}（只接受 {'|'.join(REMOTE_TRANSPORTS)}）"
+        )
+    return bool(opt_in and hub_url and token)
 
 
 def resolve_transport(
@@ -256,6 +314,10 @@ def resolve_transport(
                 "[run_rl] --remote-transport pull 需要 --remote-hub-url 与 --remote-token"
                 "（本地 hub 场景：控制台 local preset 会注入本机 hub）"
             )
+        return []
+    if mode == "hubpush":
+        # hub 中介推送：训练侧**不直连节点**（清单交给 hub 的登记表），校验留给
+        # resolve_hub_push（它才需要 hub_url/token）。
         return []
     if mode == "push":
         if not gpu_nodes:
@@ -1190,10 +1252,14 @@ class TrainingSteps:
         push_url = _course_push_url(args)
         transport = str(getattr(args, "remote_transport", "auto") or "auto")
         gpu_nodes = resolve_transport(transport, hub_url, token, _gpu_push_nodes(token, push_url))
+        # hub 中介推送（2026-09-18）：发布带 manifest.dispatch="push"，由 hub 按登记表
+        # 推给空闲 GPU worker——训练侧不直连节点，于是「队列顺序/空闲判定/超时回落/
+        # 多课程公平」全住在一处。与 gpu_nodes 互斥（resolve_transport hubpush 恒返空）。
+        hub_push = resolve_hub_push(transport, hub_url, token, _course_hub_push(args))
         require_remote_transport(hub_url, token, gpu_nodes)
         log(
             f"[run_rl] remote ppo transport={transport} push_nodes={len(gpu_nodes)} "
-            f"hub={hub_url or '-'}"
+            f"hub_push={hub_push} hub={hub_url or '-'}"
         )
         job_root = str(getattr(args, "remote_job_root", "") or "") or str(
             Path(args.traj) / "remote-jobs"
@@ -1324,6 +1390,8 @@ class TrainingSteps:
             # 全离线导出：只建 job 目录（拿它当打包源），不记账本也不进待领池——
             # 云机不在网络上，记一条 `job_pending` 只会让控制台看到一条永远等不到工人的任务。
             register=export_path is None,
+            # hub 中介推送的意图（hub 读它决定「这份活由我推」；缺席 = pull，字节不变）。
+            dispatch="push" if hub_push else "",
             ts_code_sha256=(
                 str(getattr(self, "_ts_code_sha256", "") or "") if rollout_spec else ""
             ),
@@ -1381,7 +1449,7 @@ class TrainingSteps:
             log(msg)
             manifest["push_filter_warn"] = msg
         if gpu_nodes:
-            # ---- HUB 推分支（DECISIONS §340 补充 4）：payload/code 直接 POST 到
+            # ---- HUB 直推分支（DECISIONS §340 补充 4）：payload/code 直接 POST 到
             # GPU 节点的 worker_server（其 cloudflared 隧道暴露），HUB 只做出站
             # HTTPS——弱链路落在 Kaggle 网络。打包/账本/三重校验/落位与 pull 同构。
             _pl = find_payload(Path(job_root) / jid)
@@ -1467,7 +1535,9 @@ class TrainingSteps:
         _cf_tunnel = _course_cf_tunnel(args)
         self._wire = _wire_from_result(
             result,
-            is_push=bool(gpu_nodes),
+            # hub 中介推送也是「推」：hub 侧记的是 submit 实测（body_bytes/upload_sec），
+            # 与直推同一套读数——两种 push 的可观测性不该一个有一个无。
+            is_push=bool(gpu_nodes) or hub_push,
             pack_sec=pack_sec,
             cfg={
                 # M1：记**真正生效**的隧道选项（CLI > courses.<stem>.cf_* > rl.cf_* > None）。

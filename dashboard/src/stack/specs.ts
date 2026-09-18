@@ -8,7 +8,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import path from 'path'
-import { LOG_DIR, NN_TRAINING, REPO_ROOT } from '../core/paths'
+import { CONFIG_PATH, LOG_DIR, NN_TRAINING, REPO_ROOT } from '../core/paths'
 import { httpOk, pidAlive, portListen } from '../core/net'
 import { entryForCourse, loadRegistry } from '../core/registry'
 import { agentSentinels, pySentinels } from '../core/sentinels'
@@ -99,6 +99,11 @@ export function hubServerSpec(cfg: RlConfig, course: string): ProcSpec {
       // 对未知值直接退出，写错配置不能让整个 hub 起不来。
       '--race',
       normalizeRaceMode(cfg.rl.race_mode),
+      // hub 中介 push 派发（2026-09-18）：`rl.hub_push` 打开时，hub 按队列顺序把 job 推给
+      // **登记在册**的 GPU worker（登记表 = rl-config 的 `gpu_push` 节点，控制台的 worker
+      // 登记入口回写的正是它 ⇒ 必须显式指向仓库那份 rl-config，而不是 per-course 目录）。
+      // 默认关：不打开连探活线程都不起，行为与改造前逐字节一致。
+      ...(cfg.rl.hub_push ? ['--push', '--push-config', CONFIG_PATH] : []),
     ],
     env: { PYTHONPATH: NN_TRAINING },
     // 日志 per-course（M6：spec 侧 + api.ts resolver 两半同步）

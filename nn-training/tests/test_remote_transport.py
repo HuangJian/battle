@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 
 from rl.cli import build_argparser
-from rl.loop_steps import REMOTE_TRANSPORTS, resolve_transport
+from rl.loop_steps import REMOTE_TRANSPORTS, resolve_hub_push, resolve_transport
 
 NODE = {"url": "https://gpu.example", "authKey": "k"}
 
@@ -53,17 +53,51 @@ def test_rl_unknown_mode_is_loud() -> None:
 
 
 def test_rl_argparser_wires_the_single_decision_knob() -> None:
-    """argparse：默认 auto（可被 rl-config `remote_transport` 覆盖）+ 三值封闭。"""
+    """argparse：默认 auto（可被 rl-config `remote_transport` 覆盖）+ 四值封闭。"""
     ap = build_argparser("per-tick", {})
     args = ap.parse_args([])
     assert args.remote_transport == "auto"
     assert ap.parse_args(["--remote-transport", "pull"]).remote_transport == "pull"
-    assert set(REMOTE_TRANSPORTS) == {"auto", "pull", "push"}
+    assert ap.parse_args(["--remote-transport", "hubpush"]).remote_transport == "hubpush"
+    assert set(REMOTE_TRANSPORTS) == {"auto", "pull", "push", "hubpush"}
     with pytest.raises(SystemExit):
         ap.parse_args(["--remote-transport", "nope"])
     # rl-config 提供默认值时以配置为准（历史键风格 _d(name, fallback)）
     ap2 = build_argparser("per-tick", {"remote_transport": "pull"})
     assert ap2.parse_args([]).remote_transport == "pull"
+
+
+# ────────────────────────── hub 中介推送（resolve_hub_push） ──────────────────────────
+
+
+def test_hubpush_transport_forces_it_and_is_loud_without_hub() -> None:
+    """`hubpush` 无条件走 hub；缺 hub_url/token 响亮拒绝（绝不静默回落 pull
+    ——「配置写错了但训练看着正常」是本仓最贵的一类错误）。"""
+    assert resolve_hub_push("hubpush", "https://hub", "tok", opt_in=False) is True
+    for hub_url, token in (("", "tok"), ("https://hub", "")):
+        with pytest.raises(SystemExit, match="hubpush"):
+            resolve_hub_push("hubpush", hub_url, token, opt_in=False)
+
+
+def test_push_and_pull_never_go_through_hub() -> None:
+    """显式 `push`/`pull` 压过配置：直推云机是本机伪 GPU/无 hub 现场的唯一活路。"""
+    assert resolve_hub_push("push", "https://hub", "tok", opt_in=True) is False
+    assert resolve_hub_push("pull", "https://hub", "tok", opt_in=True) is False
+
+
+def test_auto_uses_hub_push_only_when_opted_in_and_hub_ready() -> None:
+    """auto：`courses.<课>.hub_push` / `rl.hub_push` 开 **且** hub_url+token 齐备才切；
+    否则保持历史行为（gpu_push 节点直推）——旧部署一行不改。"""
+    assert resolve_hub_push("auto", "https://hub", "tok", opt_in=True) is True
+    assert resolve_hub_push("auto", "https://hub", "tok", opt_in=False) is False
+    assert resolve_hub_push("auto", "", "tok", opt_in=True) is False
+    assert resolve_hub_push("auto", "https://hub", "", opt_in=True) is False
+
+
+def test_hubpush_has_no_direct_nodes() -> None:
+    """hubpush 下训练侧不直连节点：即使 config 里有本课 gpu_push 也交回空清单
+    （空清单 = 走 `wait_job` 等 hub 回传，不是「推给全部节点」）。"""
+    assert resolve_transport("hubpush", "https://hub", "tok", [NODE]) == []
 
 
 # ────────────────────────── run_bc（run_bc.resolve_transport） ──────────────────────────

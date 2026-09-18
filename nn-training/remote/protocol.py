@@ -32,7 +32,7 @@ import re
 import struct
 import tarfile
 import zipfile
-from collections.abc import Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Literal
 
@@ -150,6 +150,105 @@ def may_avoid_stale_holder(requester: str, active_workers: int) -> bool:
     （2026-09-18 实测：写本函数的第一版就是这个顺序，回归测试当场抓出来）。
     """
     return bool(requester) and int(active_workers) >= 2
+
+
+# ---- hub 中介 push 派发（2026-09-18，P1 余下）----------------------------------
+#: 推给 GPU worker 的 job 体里带它，hub 据此认领「这份活该由 hub 推、不该等 pull」
+#: （旧 hub/旧 worker 忽略未知键 —— 缺席即 pull，行为逐字节不变）。
+DISPATCH_HUB_PUSH = "push"
+
+#: 派发拍的节奏（探活/收割结果/挑活都是这一拍里做完的）。
+PUSH_POLL_SEC = 10.0
+#: 周期探活节奏（GET /ping）——与「离线」判定同源，不必更密（cloudflared 隧道抖动
+#: 一次不该把节点判死）。
+PUSH_PING_SEC = 30.0
+#: 连续 N 次探活失败 ⇒ 该 worker 视为离场（在途 job 立即回落队首换人）。
+PUSH_DEAD_MISSES = 3
+#: 单份 job 推送后的兜底上限（秒）：超过它无论如何回落队首（PPO 一轮 10–30min，
+#: 45min 足以覆盖慢链路 + 排队）。
+PUSH_TIMEOUT_SEC = 45 * 60.0
+#: 跑死过某份 job 的 worker 冷却时长（秒）：冷却期内不再给它派同一份 job
+#: （「改为推送其它 worker」的落地；过期自动解禁，不永久拉黑）。
+PUSH_COOLDOWN_SEC = 600.0
+#: 租约持有人身份前缀：`push:<worker id>`。带前缀是为了让 `/admin/queue` 的
+#: inflight 持有人、避让记录一眼能分清「云机自己报的名字」与「hub 代持的推送」。
+PUSH_WORKER_PREFIX = "push:"
+
+
+def push_worker_id_of(worker_id: str) -> str:
+    """push 派发的租约持有人身份（`push:<id>`；已带前缀则原样返回——幂等）。"""
+    w = str(worker_id or "")
+    return w if w.startswith(PUSH_WORKER_PREFIX) else f"{PUSH_WORKER_PREFIX}{w}"
+
+
+def push_worker_from_node(node: object) -> dict | None:
+    """rl-config `nodes[]` 条目 → push worker；不是 push 节点 → None。
+
+    判据与训练侧 `rl/loop_steps._gpu_push_nodes` **同一把尺子**（`gpu_push` 且
+    `enabled` 缺省视为 true、url 非空）：两边若判据不同，就会出现「训练侧认为该推这台、
+    hub 却认为一台都没有」——症状是 job 永远躺在队首（最难查的一种）。
+
+    返回 `{id, url, key, concurrency}`：`id` 缺省回落到 url（与训练侧日志口径一致），
+    `concurrency` 缺省 1（gpu_push 节点线上就没有这个键——单 GPU 一次一份）。
+    """
+    if not isinstance(node, dict):
+        return None
+    if not node.get("gpu_push") or not node.get("enabled", True):
+        return None
+    url = str(node.get("url") or "").rstrip("/")
+    if not url:
+        return None
+    try:
+        conc = int(node.get("concurrency") or 1)
+    except (TypeError, ValueError):
+        conc = 1
+    return {
+        "id": str(node.get("id") or url),
+        "url": url,
+        "key": str(node.get("authKey") or ""),
+        "concurrency": max(1, conc),
+    }
+
+
+def pick_push_worker(
+    workers: Sequence[dict],
+    inflight: Mapping[str, int],
+    avoid: Iterable[str] = (),
+) -> dict | None:
+    """挑一个**现在就能接活**的 worker；没有空闲者 → None。
+
+    四个条件（全部必要，任缺一个都会把「推送」退化成「往死机器上撞」）：在线（最近一次
+    探活通过且未达离场阈值）、自报不忙（`/ping` 的 busy）、在飞数 < concurrency、不在
+    本次避让名单里（刚跑死这份 job 的那台）。
+
+    顺序 = 注册序（稳定 ⇒ 行为可测）；**不按快慢排序**——「谁空谁接」是既定口径
+    （EWMA 快慢 hold 已被用户裁定删除，见 `rl/dispatch.py` 注释）。
+    """
+    blocked = set(avoid)
+    for w in workers:
+        if not isinstance(w, dict):
+            continue
+        wid = str(w.get("id") or "")
+        if not wid or wid in blocked:
+            continue
+        if not w.get("online"):
+            continue  # 从没答过 / 连续失败达阈值：不往它身上推
+        if w.get("busy"):
+            continue  # 节点自报在跑
+        if int(inflight.get(wid, 0)) >= int(w.get("concurrency") or 1):
+            continue
+        return w
+    return None
+
+
+def push_job_wants_hub_push(manifest: Mapping[str, object]) -> bool:
+    """这份 job 是否要求 **hub 中介推送**（`manifest.dispatch == "push"`）。
+
+    判定住在 manifest 而不是 hub 的课程表：它由训练侧 `--remote-transport hubpush`
+    写定，是「这次发布是谁决定要推」的天然载体（hub 不在场时训练侧照样能直推云机，
+    两条路的差别必须能从一个字段读出来）。
+    """
+    return str(manifest.get("dispatch") or "") == DISPATCH_HUB_PUSH
 
 
 #: 课程模式：`online` = 实时派发 PPO；`offline` = 整段自主（kind=run），不实时派发、

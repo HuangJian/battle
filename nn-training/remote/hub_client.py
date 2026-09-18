@@ -410,6 +410,11 @@ def publish_job(
     # 必须由训练侧生成（课程/超参/血缘的解析者），但这条腿不发 job（云机不在网络上），
     # 记一条 `job_pending` 只会让控制台看到一条永远等不到工人的待领任务。
     register: bool = True,
+    # hub 中介 push 派发（2026-09-18）：非空 = `manifest.dispatch` 告知 hub「这份活由你推给
+    # GPU worker，别等 pull 来领」。由训练侧 `--remote-transport hubpush` 写定。
+    # **在 job_id 算完之后注入**（同 course_name）：切传输方式不改变 job 身份——同一轮的活
+    # 换个传输腿走，幂等键没必要跟着变（变了会让重发变成两个 job，账本上出现两条）。
+    dispatch: str = "",
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
 ) -> dict:
     """打包 + 发布 job（磁盘 IPC）：job_root/<job_id>/ + jsonl job_pending 事件。
@@ -555,6 +560,10 @@ def publish_job(
         # P4-W2 归属（S9）：在 job_id 计算**之后**注入——幂等键不含短名，旧链字节不变；
         # normalize_manifest 允许未知/可选键，wire 兼容（D1：未知字段忽略）。
         m["course_name"] = str(course_name)
+    if dispatch:
+        # 同上：job 身份已定，传输腿的意图是**附加语义**不是身份成分。旧 hub/旧 worker
+        # 忽略未知键 ⇒ 缺席即 pull，行为逐字节不变。
+        m["dispatch"] = str(dispatch)
     # 5) 落盘 job 目录：payload.zip（zip 内 manifest 为占位副本——payload_sha256 尚
     #    未算出）→ 回填真实 sha → 权威 manifest.json（worker 以 job 记录校验，D1）。
     #    normalize_manifest 在回填后调用：payload_sha256 必填非空，占位空串会误拒。
