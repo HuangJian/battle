@@ -52,6 +52,27 @@ export function slotPort(
   return portForSlot(hubBasePort(cfg), slot, PORT_OFFSET[kind])
 }
 
+/** 共享 hub 端口 = `rl.hub_port` 基数**本身**（= 槽位 0 的 hub 端口）。
+ *
+ *  2026-09-18 起 hub/隧道收敛为**单实例**（一个 hub 进程服务所有并行课程、一条隧道
+ *  指向它）：hub 不再按课程占端口，`hub` 这个 kind 只剩这一个地址，任何「按课程推 hub
+ *  端口」都是错的（课程槽位现在只决定 push 端口与旧的 metrics 命）。全部调用者一律走
+ *  本函数 / `sharedHubUrl`，门禁（`single-hub-tunnel.test.ts`）守这一点。 */
+export function sharedHubPort(cfg: RlConfig): number {
+  return hubBasePort(cfg)
+}
+
+/** 共享 hub 的基址（`local`/`pull` 预设、健康探测、冒烟、halt 达令共用一份口径）。 */
+export function sharedHubUrl(cfg: RlConfig, host = '127.0.0.1'): string {
+  return `http://${host}:${sharedHubPort(cfg)}`
+}
+
+/** 共享**单**隧道的 metrics 端口（= 槽位 0 的 metrics 口；cloudflared `--metrics` 与
+ *  `/ready` 探测共用，且旧 per-course 隧道被杀后那个口就空出来了）。 */
+export function sharedTunnelMetricsPort(cfg: RlConfig): number {
+  return portForSlot(hubBasePort(cfg), 0, PORT_OFFSET.metrics)
+}
+
 /** 全部槽位端口（slot0–3 × {hub,metrics,push} + agent）——端口兜底清场的唯一清单。 */
 export function allSlotPorts(cfg: RlConfig): number[] {
   const ports: number[] = []

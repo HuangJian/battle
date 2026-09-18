@@ -17,6 +17,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'fs'
 import os from 'os'
 import path from 'path'
 import { CONFIG_PATH, DASHBOARD_ROOT } from '../src/core/paths'
+import { sharedHubUrl } from '../src/core/slots'
 import {
   LOCAL_WORKER_ENTRY,
   bcLoopSpec,
@@ -107,11 +108,15 @@ describe('localWorker 组件形态', () => {
     for (const key of COMPONENT_KILL_TREE) expect(key).toBe('localWorker')
   })
 
-  it('双课隔离：poll 目标 / work 目录 / 日志互不相同', () => {
+  it('双课隔离：work 目录 / 日志互不相同；**poll 目标相同**（共享 hub）', () => {
     const cfg = dualCourseCfg()
     const a = localWorkerSpec(cfg, VENV, 'course-a')
     const b = localWorkerSpec(cfg, VENV, 'course-b')
-    expect(flag(a, '--poll')).not.toBe(flag(b, '--poll'))
+    // 共享 hub（2026-09-18）：一个作业中枢服务所有课程，两个本机 worker 轮询同一地址
+    // （领到哪门课的 job 就干哪门课的活：job 自带课程快照，结果按 job_id 回家）。
+    expect(flag(a, '--poll')).toBe(sharedHubUrl(cfg))
+    expect(flag(b, '--poll')).toBe(sharedHubUrl(cfg))
+    // 隔离面 = 工作目录（双课同机时 job payload 归档不得互踩）与日志
     expect(flag(a, '--out')).not.toBe(flag(b, '--out'))
     expect(a.log).not.toBe(b.log)
   })

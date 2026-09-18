@@ -1,7 +1,7 @@
 /** component-meta.ts — 受管组件元数据表：日志路径与健康探测 URL（唯一声明处）。 */
 import path from 'path'
 import { LOG_DIR } from '../../core/paths'
-import { slotPort } from '../../core/slots'
+import { sharedHubUrl, slotPort } from '../../core/slots'
 import type { Component, RlConfig } from '../../core/types'
 import { courseLogDir } from '../../stack/specs'
 
@@ -14,7 +14,8 @@ import { courseLogDir } from '../../stack/specs'
 export const COMPONENT_LOGS: Partial<Record<Component, (cfg: RlConfig, course: string) => string>> =
   {
     selfNode: () => path.join(LOG_DIR, 'sampler-agent.log'),
-    hubServer: (_c, course) => path.join(courseLogDir(course), 'hub-server.out'),
+    // 共享 hub/隧道 ⇒ 日志也唯一（不再 per-course；与 specs.ts 的 log: 同源）
+    hubServer: () => path.join(LOG_DIR, 'hub-server.out'),
     cloudflared: (_c) => path.join(LOG_DIR, 'cloudflared.log'),
     localWorker: (_c, course) =>
       path.join(course ? courseLogDir(course) : LOG_DIR, 'local-worker.log'),
@@ -27,7 +28,7 @@ export const COMPONENT_LOGS: Partial<Record<Component, (cfg: RlConfig, course: s
 export const HEALTHY_PORTS: Partial<Record<Component, (cfg: RlConfig, course: string) => string>> =
   {
     selfNode: (c) => `http://127.0.0.1:${c.rl.agent_port}/v1/ping`,
-    hubServer: (c, course) => `http://127.0.0.1:${slotPort(c, course, 'hub')}/ping`,
+    hubServer: (c) => `${sharedHubUrl(c)}/ping`,
     workerServe: (c, course) => `http://127.0.0.1:${slotPort(c, course, 'push')}/ping`,
   }
 

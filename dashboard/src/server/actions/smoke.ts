@@ -3,7 +3,7 @@ import path from 'path'
 import { loadConfig } from '../../core/config'
 import { httpOk, pidAlive } from '../../core/net'
 import { LOG_DIR, REPO_ROOT } from '../../core/paths'
-import { slotPort } from '../../core/slots'
+import { sharedHubPort, slotPort } from '../../core/slots'
 import type { Component } from '../../core/types'
 import { hubServerHealthy } from '../../stack/hub'
 import { rolloutSmoke, selfNodeSmoke, type SmokeItem, summarizeSmoke } from '../../stack/smoke'
@@ -37,8 +37,9 @@ export async function smokeComponent(key: Component, ctx: StartCtx): Promise<Act
         break
       }
       case 'hubServer': {
-        const hubPort = slotPort(cfg, ctx.course, 'hub')
-        const hubOk = await hubServerHealthy(cfg, ctx.course)
+        // 共享 hub：健康判据与课程无关（一个进程服务所有课）；课程表靠盘上发现。
+        const hubPort = sharedHubPort(cfg)
+        const hubOk = await hubServerHealthy(cfg)
         items.push({
           name: 'hub-server /ping',
           passed: hubOk,
@@ -48,8 +49,8 @@ export async function smokeComponent(key: Component, ctx: StartCtx): Promise<Act
         break
       }
       case 'cloudflared': {
-        // 展示路径：per-course 优先，旧单键兜底（R1 读兼容窗口到 P5）。
-        const url = entryOf('cloudflared', ctx.course)?.url ?? ''
+        // 共享单隧道：登记在 `''` 槽。
+        const url = entryOf('cloudflared', '')?.url ?? ''
         if (!url) {
           items.push({ name: 'cloudflared', passed: false, fatal: false, detail: '未建立隧道' })
           break
@@ -78,7 +79,7 @@ export async function smokeComponent(key: Component, ctx: StartCtx): Promise<Act
         // 会自己重连；hub 后起也能自愈）。
         const entry = entryOf('localWorker', ctx.course)
         items.push({ name: 'local-worker 进程存活', passed: pidAlive(entry?.pid), fatal: true })
-        const hubPort = slotPort(cfg, ctx.course, 'hub')
+        const hubPort = sharedHubPort(cfg)
         const hubUp = await httpOk(`http://127.0.0.1:${hubPort}/ping`, cfg.rl.remote_token, 3000)
         items.push({
           name: 'poll 目标 hub-server /ping',

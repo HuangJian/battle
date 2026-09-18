@@ -1,24 +1,29 @@
 /** cloud-halt.ts — 云端停机与恢复（停云端省 GPU 配额，本地进程不动）。 */
 import { httpOk } from '../../core/net'
-import { entryForCourse, loadRegistry } from '../../core/registry'
-import { slotPort } from '../../core/slots'
+import { entryForCourse, loadRegistry, scopeOf } from '../../core/registry'
+import { sharedHubUrl } from '../../core/slots'
 import type { Component, RlConfig } from '../../core/types'
 import { loadConsoleState, saveConsoleState } from './console-state'
 
 // ────────────────────────── 云端停机 / 恢复（§385 复审：停云端省 GPU 配额，本地进程不动） ──────────────────────────
 
 /** hub 管理端点（Bearer 同 worker）。hub 不可达/鉴权失败 → false（不抛）。
- *  course 决定槽位端口（S17 的多课 halt 化在 P5 接上：现在已按槽位取端口，
- *  不再硬编码 slot0）。 */
+ *
+ *  共享 hub（2026-09-18）：地址是**唯一**的（一个进程服务所有并行课程），但 halt/resume
+ *  的**语义**必须按课程——达令以 `?course=` 下发，只停那一门课的云机（进程级一个布尔会
+ *  让 A 课的门禁 ABORT 把 B 课的云机一起停掉）。空课程 = 全课程（旧语义，/admin/status
+ *  这类全局读取也走这条）。 */
 export function hubAdminOk(cfg: RlConfig, pathSuffix: string, course = ''): Promise<boolean> {
-  const port = slotPort(cfg, course, 'hub')
-  if (!port) return Promise.resolve(false)
-  return httpOk(`http://127.0.0.1:${port}${pathSuffix}`, cfg.rl.remote_token, 5000)
+  const qs = course
+    ? `${pathSuffix.includes('?') ? '&' : '?'}course=${encodeURIComponent(course)}`
+    : ''
+  return httpOk(`${sharedHubUrl(cfg)}${pathSuffix}${qs}`, cfg.rl.remote_token, 5000)
 }
 
-/** 取某组件在某课程下的登记条目（严格按课；旧扁平键已移除，R2）。 */
+/** 取某组件在某课程下的登记条目（严格按课；旧扁平键已移除，R2）。
+ *  槽位归一：共享组件（hub/隧道）恒看 `''` 槽，调用方传的课程只当视图语境。 */
 export function entryOf(key: Component, course = ''): ReturnType<typeof entryForCourse> {
-  return entryForCourse(loadRegistry(), key, course)
+  return entryForCourse(loadRegistry(), key, scopeOf(key, course))
 }
 
 /** 云端停机（§386，幂等）：置停机态——hub 置 halt（任务仍正常分发，达令随任务同发）

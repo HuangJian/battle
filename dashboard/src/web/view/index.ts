@@ -16,6 +16,7 @@
  *    log-view       日志页          |  cards  卡片注册表
  *    format / spark / series / phase / rows / interaction  纯函数工具
  *    legacy-keys    浏览器本地键迁移
+ *    course-overview 多课程并行总览 / push worker 登记
  */
 
 // ── 内部模块（唯一对外出口；调用方一律 import 本目录，不直连内部文件）──
@@ -34,3 +35,4 @@ export * from './rows'
 export * from './interaction'
 export * from './legacy-keys'
 export * from './cards'
+export * from './course-overview'

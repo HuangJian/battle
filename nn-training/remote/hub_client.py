@@ -22,6 +22,7 @@ import os
 import shutil
 import tarfile
 import time
+import urllib.parse
 from pathlib import Path
 
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
@@ -835,15 +836,22 @@ def set_cloud_halt(
     halt: bool,
     timeout: float = 15.0,
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
+    course: str = "",
 ) -> bool:
     """§386：向 hub 下发/解除云端停机达令（console 与 TrainingLoop 共用一端点）。
 
     返回 True = hub 已采纳。网络故障/非 200 → False（记录日志，**停机链路永不
     阻断训练**）——local/push 模式无 hub 时会带空 url 进来，直接短路 False。
+
+    `course`（2026-09-18 单 hub 化）：一个 hub 服务所有并行课程，故达令必须**按课程**
+    下发（`?course=`）——否则 A 课的门禁 ABORT 会把 B 课的云机一起停掉。空串 = 全课程
+    （旧语义：单课程 hub / 没有课程上下文的调用方）。
     """
     if not base_url or not token:
         return False
     path = "/admin/workers/halt" if halt else "/admin/workers/resume"
+    if course:
+        path += "?course=" + urllib.parse.quote(course)
     try:
         st, _ = _request(base_url, token, path, timeout=timeout)
     except Exception as e:  # 网络层（tunnel 抖动等）——基础设施不可用，不阻断训练
@@ -856,16 +864,19 @@ def set_cloud_halt(
     return True
 
 
-def hub_halted(base_url: str, token: str, timeout: float = 10.0) -> bool | None:
+def hub_halted(base_url: str, token: str, timeout: float = 10.0, course: str = "") -> bool | None:
     """读 /admin/workers/status → True=停机中 / False=已清除 / None=未知。
 
     未配置 hub（local/push）或不可达/非 200/体裁不对 → None（呼叫方按未知处理，
-    绝不把"问不到"当成"没停机"）。
+    绝不把"问不到"当成"没停机"）。`course` = 只看那一门课（空串 = 全课程都停才 True）。
     """
     if not base_url or not token:
         return None
+    path = "/admin/workers/status"
+    if course:
+        path += "?course=" + urllib.parse.quote(course)
     try:
-        st, body = _request(base_url, token, "/admin/workers/status", timeout=timeout)
+        st, body = _request(base_url, token, path, timeout=timeout)
     except Exception:
         return None
     if st != 200:
@@ -881,6 +892,7 @@ def clear_halt_on_startup(
     base_url: str,
     token: str,
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
+    course: str = "",
 ) -> bool:
     """TrainingLoop 启动即清空 hub 停机态（2026-09-12 it17 事故复盘）。
 
@@ -893,7 +905,7 @@ def clear_halt_on_startup(
     """
     if not base_url or not token:
         return True  # local/push 无 hub——无事可做即成功
-    cur = hub_halted(base_url, token)
+    cur = hub_halted(base_url, token, course=course)
     if cur is False:
         log("[run_rl] hub 停机态：启动时检查，本已清除，无事可做")
         return True
@@ -901,10 +913,10 @@ def clear_halt_on_startup(
         log("[run_rl] hub 停机态：检测到遗留 halt（上轮门判/人工停机残留）——启动即清空")
     else:
         log("[run_rl] hub 停机态未知（不可达？）——仍尝试 resume（幂等），失败不阻断启动")
-    if not set_cloud_halt(base_url, token, False, log=log):
+    if not set_cloud_halt(base_url, token, False, log=log, course=course):
         log("[run_rl] WARN: hub resume 下发失败——首轮 PPO 可能排队超时，盯控制台 PPO 告警")
         return False
-    if hub_halted(base_url, token) is False:
+    if hub_halted(base_url, token, course=course) is False:
         log("[run_rl] hub 停机态：已清除并回读确认")
         return True
     log("[run_rl] WARN: hub resume 已下发但回读仍为 halt——首轮 PPO 可能排队超时")

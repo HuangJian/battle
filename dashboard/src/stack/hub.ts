@@ -39,7 +39,7 @@ import {
   selfNodeSpec,
   trainingLoopSpec,
 } from './specs'
-import { slotOf, slotPort } from '../core/slots'
+import { sharedHubPort, sharedHubUrl, sharedTunnelMetricsPort } from '../core/slots'
 import { seedWeightsFromBc } from './courses'
 import type { RlConfig } from '../core/types'
 
@@ -68,8 +68,8 @@ export async function selfNodeHealthy(cfg: RlConfig): Promise<boolean> {
   return httpOk(`http://127.0.0.1:${cfg.rl.agent_port}/v1/ping`, selfKey)
 }
 
-export async function hubServerHealthy(cfg: RlConfig, course = ''): Promise<boolean> {
-  const port = slotPort(cfg, course, 'hub')
+export async function hubServerHealthy(cfg: RlConfig): Promise<boolean> {
+  const port = sharedHubPort(cfg)
   if (!(await portListen(port))) return false
   return httpOk(`http://127.0.0.1:${port}/ping`, cfg.rl.remote_token)
 }
@@ -149,41 +149,43 @@ export async function stepSelfNode(cfg: RlConfig): Promise<void> {
   }
 }
 
-/** jobRoot（tmp/<course>/remote-jobs）→ 课程名。 */
-function courseOf(jobRoot: string): string {
-  return path.basename(path.dirname(jobRoot))
-}
-
-/** hub-server（python remote.hub_server）步骤。 */
-export async function stepHubServer(cfg: RlConfig, jobRoot: string): Promise<void> {
-  const course = courseOf(jobRoot)
-  const port = slotPort(cfg, course, 'hub')
-  log('检查 hub-server...')
-  if (await hubServerHealthy(cfg, course)) {
+/** 共享 hub-server 步骤（**一个进程服务所有并行课程**，2026-09-18）。
+ *
+ *  课程表不再由控制台给：hub 扫 `tmp/<课>/remote-jobs` 自己发现（`--discover`），所以
+ *  「先起 hub、后开第二门课」零注册、零重启，也不会出现「漏注册 ⇒ 那门课永久饿死而
+ *  表面训练正常」。控制台只负责启停与观察。 */
+export async function stepHubServer(cfg: RlConfig): Promise<void> {
+  const port = sharedHubPort(cfg)
+  log('检查共享 hub-server...')
+  if (await hubServerHealthy(cfg)) {
     ok(`hub-server 已在运行 (port ${port})`)
     return
   }
-  mkdirSync(jobRoot, { recursive: true })
+  // 换代接管（必须在 spawn 前）：旧形状是「每课一个 hub」，而它们与共享实例服务的是
+  // **同一个角色**（同一棵 job 目录树）——两个都在跑就是两个进程读同一份 remote-jobs：
+  // 双派发、双租约、结果回错家。
+  const superseded = await supersedeLegacyInstances('hubServer')
+  if (superseded.length > 0) ok(`已接管旧形状的每课 hub（原属 ${superseded.join('、')}）`)
   // 端口回收（必须在 spawn 前，2026-09-17 事故）：健康检查已失败 ⇒ 端口上的幸存者
   // （孤儿 / 登记丢失 / 处于 D9 内存封禁态）不可用，而 python 侧的双监听守卫
   // （remote/_port_guard.ensure_port_free）会拒绝新实例——不回收就是重启被自己的
   // 守卫挡死：新进程秒退，控制台报「启动即退出」，只能手动杀进程。
   await reclaimPort(port)
-  log('启动 hub-server...')
-  const spec = hubServerSpec(cfg, course)
+  log('启动共享 hub-server...')
+  const spec = hubServerSpec(cfg)
   const r = launchSpec(spec)
-  saveAnyComponent('hubServer', course, {
+  // 登记固定走 `''` 槽（共享实例不属于任何单门课；槽归一化唯一归宿
+  // = core/registry.ts::scopeOf）。
+  saveAnyComponent('hubServer', '', {
     pid: r.pid,
     entry: HUB_SERVER_ENTRY,
-    course,
-    slot: slotOf(cfg, course),
-    jobRoot,
+    course: '',
     log: spec.log,
     url: `http://127.0.0.1:${port}`,
   })
   monitorTouch()
   // Python 冷启动（import 链）可达 10s+，以 /ping 探测为准，上限 45s
-  if (await waitUntil(() => hubServerHealthy(cfg, course), 45000)) {
+  if (await waitUntil(() => hubServerHealthy(cfg), 45000)) {
     ok(`hub-server 启动成功 (port ${port}, PID ${r.pid})`)
   } else {
     fail(`hub-server 启动失败（45s 内未就绪，见 ${spec.log}）`)
@@ -205,44 +207,43 @@ export async function stepHubServer(cfg: RlConfig, jobRoot: string): Promise<voi
  *  名义所有权。端口一旦被后来的课程接手，它就变成"PID 已死、服务仍在应答"的**幽灵**：
  *  看门狗每周期刷屏（8s 一条），且因 specPort 认不出 cloudflared 端口而修不了账。
  *  ⇒ 死进程不需要 kill，但**账必须清**。 */
-export async function supersedeSlotTunnels(course: string, slot: number): Promise<string[]> {
+export async function supersedeLegacyInstances(
+  key: 'hubServer' | 'cloudflared',
+): Promise<string[]> {
   const struck: string[] = []
   const reg = loadRegistry()
-  for (const [owner, ent] of Object.entries(reg.cloudflareds ?? {})) {
-    if (owner === course) continue
-    if ((ent.slot ?? 0) !== slot) continue
+  const map = (key === 'hubServer' ? reg.hubServers : reg.cloudflareds) ?? {}
+  for (const [owner, ent] of Object.entries(map)) {
+    if (!owner) continue // `''` = 共享实例自己（唯一合法的槽）
     if (!pidAlive(ent.pid)) {
       warn(
-        `slot ${slot} 的陈旧隧道条目（课程 ${owner}，PID ${ent.pid} 已消失）——清账，` +
-          `为 ${course} 接管（进程早已不在，无需 kill）`,
+        `旧形状的 ${key}[${owner}] 条目（PID ${ent.pid} 已消失）——清账（共享实例接管；` +
+          '死进程无需 kill，但账必须清，否则它在账本层永久占着同一个角色）',
       )
-      clearAnyComponent('cloudflared', owner)
+      clearAnyComponent(key, owner)
       struck.push(owner)
       continue
     }
-    warn(
-      `slot ${slot} 的隧道由课程 ${owner} 占用（PID ${ent.pid}）——先停止旧隧道，为 ${course} 接管`,
-    )
+    warn(`旧形状的 ${key}[${owner}] 仍在运行（PID ${ent.pid}）——停止它，改由共享实例承担`)
     await killPid(ent.pid)
-    clearAnyComponent('cloudflared', owner)
+    clearAnyComponent(key, owner)
     struck.push(owner)
   }
   return struck
 }
 
-/** cloudflared tunnel 步骤（3 次申请重试；URL 以日志输出为触发）。
- *  course 决定登记归属（P1b 按课程键控）；隧道自身的 per-course 端口/URL 是 P3。 */
-export async function stepCloudflared(
-  cfg: RlConfig,
-  noTunnel = false,
-  course = '',
-): Promise<string> {
-  log('检查 cloudflared tunnel...')
+/** 共享**单**隧道步骤（3 次申请重试；URL 以日志输出为触发）。
+ *
+ *  一条隧道指向共享 hub 端口——它同时服务所有并行课程（hub 按 path 里的 job_id 路由）。
+ *  旧形状「每课一条隧道 + 同槽位接管」随之消失：不同隧道回源同一 hub 只是多几份出网状态，
+ *  还额外招来 2026-09-17 那个事故（隧道回源把云端流量归成 127.0.0.1，D9 闭锁连坐训练主循环）。 */
+export async function stepCloudflared(cfg: RlConfig, noTunnel = false): Promise<string> {
+  log('检查 cloudflared tunnel（共享单隧道）...')
   if (noTunnel) {
     info('已指定 --no-tunnel——跳过隧道（Kaggle 路径本轮不验证）')
     return ''
   }
-  const prev = entryForCourse(loadRegistry(), 'cloudflared', course)
+  const prev = entryForCourse(loadRegistry(), 'cloudflared', '')
   const cfBin = specsResolveCloudflaredBin()
   if (!cfBin) {
     fail('cloudflared 不在 PATH 中——Kaggle 无法接入（安装 cloudflared，或显式 --no-tunnel 跳过）')
@@ -251,7 +252,7 @@ export async function stepCloudflared(
 
   // 已有登记的隧道：edge 就绪（本地 /ready）即复用；穿隧道 ping 失败可能是
   // hub 出网劣化——只有 edge 未注册才重启
-  const wantTunnel = resolveCfTunnel(cfg, course)
+  const wantTunnel = resolveCfTunnel(cfg)
   if (prev && pidAlive(prev.pid) && prev.url) {
     const url = prev.url
     // M1 变更检测（plan §3.2）：登记的隧道选项 != 当前配置 → 杀旧起新，否则「改了
@@ -277,18 +278,16 @@ export async function stepCloudflared(
     }
   }
 
-  // 隧道 per-course（P3）：槽位取自 rl-config courses 块（未配置 → 0 = 旧单课行为）；
-  // 每课独立 cloudflared 进程，各自指向本课 hub 端口。
-  const slot = slotOf(cfg, course)
-  const metricsPort = slotPort(cfg, slot, 'metrics')
-  const hubPort = slotPort(cfg, slot, 'hub')
-  // 同槽位接管（2026-09-14 事故）：先杀其它课程残留占同一槽的存活隧道，避免本课隧道
-  // `--metrics` bind 失败即退。监督器只重启被哨兵变化的活进程，杀掉 + 清账后就无复活。
-  const superseded = await supersedeSlotTunnels(course, slot)
-  if (superseded.length > 0) ok(`已接管 slot ${slot} 的隧道（原属 ${superseded.join('、')}）`)
+  // 共享单隧道：一个 metrics 口（槽位 0 的 metrics）+ 一个 hub 目标端口。
+  const metricsPort = sharedTunnelMetricsPort(cfg)
+  const hubPort = sharedHubPort(cfg)
+  // 换代接管：旧形状「每课一条隧道」全部收掉（服务的是同一件事），否则新隧道 `--metrics`
+  // 会与它们在同一个口上撞车（bind 失败即退），而幸存者的 200 还会被当成新隧道的就绪。
+  const superseded = await supersedeLegacyInstances('cloudflared')
+  if (superseded.length > 0) ok(`已接管旧形状的每课隧道（原属 ${superseded.join('、')}）`)
   // 端口回收（必须在 spawn 前，2026-09-17 同族修复）：cloudflared 是**第三方二进制**，
   // 没法在它内部装实例锁（hub/worker 是 python 自己拿 `O_CREAT|O_EXCL`），所以控制台侧的
-  // 回收就是它唯一的一道闸。supersede 只看得见**账本里**的同槽隧道，挡不住孤儿/登记丢失/
+  // 回收就是它唯一的一道闸。supersede 只看得见**账本里**的旧隧道，挡不住孤儿/登记丢失/
   // 控制台重启竞态留下的幸存者；而 metrics 端口既是 `--metrics` 的 bind 目标、又是后面
   // `/ready` 的探测目标，被幸存者占着会同时造成「新隧道 bind 失败」与「就绪读到别人的隧道」。
   const reclaimed = await reclaimPort(metricsPort)
@@ -310,17 +309,16 @@ export async function stepCloudflared(
         '--logfile',
         cfLog,
         // M1：隧道协议/边缘 IP（唯一来源 cfTunnelArgs——与 cloudflaredSpec 两半同步）。
-        ...cfTunnelArgs(cfg, course),
+        ...cfTunnelArgs(cfg),
       ],
       { log: cfLog },
     )
     procPid = r.pid
-    saveAnyComponent('cloudflared', course, {
+    saveAnyComponent('cloudflared', '', {
       pid: r.pid,
       log: cfLog,
       metrics: metricsPort,
-      slot,
-      course,
+      course: '',
       cfProtocol: wantTunnel.protocol,
       cfEdgeIp: wantTunnel.edgeIp,
     })
@@ -353,13 +351,12 @@ export async function stepCloudflared(
     throw new Error('cloudflared tunnel URL 获取失败')
   }
 
-  saveAnyComponent('cloudflared', course, {
+  saveAnyComponent('cloudflared', '', {
     pid: procPid,
     url,
     log: cfLog,
     metrics: metricsPort,
-    slot,
-    course,
+    course: '',
     cfProtocol: wantTunnel.protocol,
     cfEdgeIp: wantTunnel.edgeIp,
   })
@@ -386,7 +383,8 @@ export async function stepCloudflared(
       '隧道 edge 在线，但 hub 出网探测未通过（hub→CF 劣化）——Kaggle 入站路径不受影响，继续（预演阶段实测连通性）',
     )
 
-  writeRemoteHubUrl(url, course)
+  // URL 是**全局**事实（一条隧道服务所有课程）⇒ 写单键 `rl.remote_hub_url`。
+  writeRemoteHubUrl(url)
   return url
 }
 
@@ -423,18 +421,15 @@ export async function stepNodesCheck(cfg: RlConfig): Promise<void> {
   else warn('部分节点不可用，local 模式兜底')
 }
 
-/** 基础设施冒烟：hub 本地可达 + 隧道可达 + code.zip 可下载（硬门）。 */
+/** 基础设施冒烟：hub 本地可达 + 隧道可达 + code.zip 可下载（硬门）。
+ *  共享 hub/单隧道 ⇒ 与课程无关（旧签名的 course 参数已删：实测无调用者传它）。 */
 export async function stepSmokeTest(
   cfg: RlConfig,
   cfUrl: string | null,
   noTunnel = false,
-  course = '',
 ): Promise<void> {
   log('运行基础设施冒烟测试...')
-  const hubOk = await httpOk(
-    `http://127.0.0.1:${slotPort(cfg, course, 'hub')}/ping`,
-    cfg.rl.remote_token,
-  )
+  const hubOk = await httpOk(`${sharedHubUrl(cfg)}/ping`, cfg.rl.remote_token)
   if (!hubOk) {
     fail('hub-server 不可达')
     throw new Error('hub-server 不可达')
@@ -455,7 +450,7 @@ export async function stepSmokeTest(
   const pingOk = await httpOk(`${cfUrl}/ping`, cfg.rl.remote_token, 10000)
   const edgeReady = pingOk
     ? true
-    : await tunnelEdgeReady(entryForCourse(loadRegistry(), 'cloudflared', course)?.metrics)
+    : await tunnelEdgeReady(entryForCourse(loadRegistry(), 'cloudflared', '')?.metrics)
   if (!pingOk && !edgeReady) {
     fail('cloudflared tunnel 不可达（edge 未建立）——Kaggle 无法连接')
     throw new Error('cloudflared tunnel 不可达')

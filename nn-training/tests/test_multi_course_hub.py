@@ -18,6 +18,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 import threading
 import time
@@ -477,6 +479,71 @@ def test_admin_queue_and_courses_surfaces(tmp_path: Path) -> None:
         th.join(timeout=5)
 
 
+def test_halt_is_per_course(tmp_path: Path) -> None:
+    """停机达令**按课程**（单 hub 化的关键副作用）。
+
+    一个 hub 服务所有并行课程之后，达令若是进程级一个布尔，「A 课门禁 ABORT」会把 B 课的
+    云机一起停掉（worker 下一轮轮询就拿到 halt 并自停）。故：达令跟着**这份活所属的课**走；
+    无课程参数的 halt/resume 保持旧语义（全课程）。
+    """
+    hub = _hub(tmp_path)
+    base, _hub_ref, srv, th = _boot(tmp_path, hub)
+    try:
+        # 全课程（旧语义：不带 course 参数，体形状与既有用例/console 一致）
+        st, r = _http(base, "/admin/workers/halt")
+        assert st == 200 and r == {"halt": True}
+        assert hub.halt_of("a") is True and hub.halt_of("b") is True
+        st, r = _http(base, "/admin/workers/resume")
+        assert st == 200 and r == {"halt": False}
+        assert hub.halt_of("a") is False and hub.halt_of("b") is False
+
+        # 只停 b（共享 hub 上这才是门禁 ABORT 的真实语义）
+        st, r = _http(base, "/admin/workers/halt?course=b")
+        assert st == 200 and r == {"halt": True, "course": "b"}
+        assert hub.halt_of("b") is True and hub.halt_of("a") is False
+
+        # 达令跟**活所属的课**走：a 的 job 不带 halt，b 的带
+        _publish(hub, "a", "a" * 16)
+        _publish(hub, "b", "b" * 16)
+        _st, ra = _http(base, "/jobs/next", headers={WORKER_ID_HEADER: "w1"})
+        assert (ra["course"], ra["halt"]) == ("a", False), ra
+        _st, rb = _http(base, "/jobs/next", headers={WORKER_ID_HEADER: "w2"})
+        assert (rb["course"], rb["halt"]) == ("b", True), rb
+
+        # 空闲轮询没有课程上下文 ⇒ 全部课都停才告诉它停（否则 idle worker 会被凭空停掉）
+        _st, idle = _http(base, "/jobs/next", headers={WORKER_ID_HEADER: "w3"})
+        assert idle["job_id"] is None and idle["halt"] is False
+        _http(base, "/admin/workers/halt?course=a")
+        _st, idle2 = _http(base, "/jobs/next", headers={WORKER_ID_HEADER: "w3"})
+        assert idle2["halt"] is True
+
+        # 单课程读取：`?course=` → 那一门课；体形状恒为 {"halt": ...}（console 读它）
+        _st, sb = _http(base, "/admin/workers/status?course=b")
+        assert sb == {"halt": True}
+        _st, sa = _http(base, "/admin/workers/status?course=a")
+        assert sa == {"halt": True}
+        _http(base, "/admin/workers/resume?course=b")
+        _st, sb2 = _http(base, "/admin/workers/status?course=b")
+        _st, sa2 = _http(base, "/admin/workers/status?course=a")
+        assert sb2 == {"halt": False} and sa2 == {"halt": True}, "解停只动点名的那一课"
+
+        # 未知课程 → 400 且点名（不猜、不静默改写全局）
+        st, bad = _http(base, "/admin/workers/halt?course=zz")
+        assert st == 400 and bad["course"] == "zz"
+        _st, sa3 = _http(base, "/admin/workers/status?course=a")
+        assert sa3 == {"halt": True}, "400 不得顺手改掉现状"
+
+        # 观测面：每课一行带自己的停机态（仪表盘不问就不知道哪门课被停了）
+        st, q = _http(base, "/admin/queue")
+        assert st == 200
+        assert q["courses"]["a"]["halt"] is True and q["courses"]["b"]["halt"] is False
+        assert q["halt"] is False, "顶层 halt = 全课程（不是任一门）"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        th.join(timeout=5)
+
+
 def test_offline_artifact_routes_by_body_course(tmp_path: Path) -> None:
     """补传按体里的 course 归属：同一进程服务多门课也能各落各家。"""
     import base64
@@ -553,3 +620,253 @@ def test_single_course_race_matches_legacy_two_worker_rule(tmp_path: Path) -> No
     hub.note_worker("w2", 1)
     assert hub.race_active() is True
     assert hub.race_state()["workers"] == 2
+
+
+# ------------------------------------------------------------------ 自动发现（--discover）
+#
+# 共享 hub 的课程表来源：训练侧发布 job 写的是**盘**（hub 与 trainer 共享同一份盘），
+# 所以「这门课在跑」本身就写在盘上——不需要第二事实源（HTTP 注册那条旁路会失败、
+# 会乱序、会忘了调，而漏注册的后果是那门课永久饿死且看起来训练正常）。
+
+
+def _discover_hub(tmp_path: Path, clock: _Clock | None = None) -> _HubQueue:
+    """共享 hub 的最简形状：起始**零课程**，课程表只靠盘上发现。"""
+    return _HubQueue({}, now_fn=clock, discover_root=tmp_path)
+
+
+def _mk_course_dir(tmp_path: Path, name: str, *, age: float = 0.0) -> Path:
+    """造一个课程目录（`remote-jobs/` + 本课 jsonl）；`age` 秒把两者 mtime 拨到过去。"""
+    d = tmp_path / name / "remote-jobs"
+    d.mkdir(parents=True, exist_ok=True)
+    log = tmp_path / name / "training_log.jsonl"
+    log.write_text("", encoding="utf-8")
+    if age:
+        past = time.time() - age
+        os.utime(d, (past, past))
+        os.utime(log, (past, past))
+    return d
+
+
+def _publish_standalone(root: Path, course: str, jid: str, *, it: int = 1) -> None:
+    """在**hub 还不知道**这门课时就往盘上发一份 job（真实训练侧的写法）。"""
+    st = _JobStore(root / course / "remote-jobs", root / course / "training_log.jsonl")
+    st.publish(jid, _manifest(jid, it=it), b"PK\x03\x04fake")
+
+
+def test_discover_registers_published_course(tmp_path: Path) -> None:
+    """盘上出现 job ⇒ 课程被发现、可领、可派——零注册调用。"""
+    hub = _discover_hub(tmp_path)
+    assert hub.courses() == []
+    _publish_standalone(tmp_path, "c1", "j" * 16)
+    assert hub.discover() == ["c1"]
+    assert hub.courses() == ["c1"]
+    assert hub.mode_of("c1") == COURSE_MODE_ONLINE
+    course, jid, _tok = _claim(hub, "w1")
+    assert (course, jid) == ("c1", "j" * 16)
+    # 幂等：已登记的课不重复登记（返回空），而模式不被重置
+    hub.set_mode("c1", COURSE_MODE_OFFLINE)
+    assert hub.discover() == []
+    assert hub.mode_of("c1") == COURSE_MODE_OFFLINE
+
+
+def test_discover_skips_stale_and_non_course_dirs(tmp_path: Path) -> None:
+    """陈旧实验目录（同样的磁盘形状、同样残留 pending job）与无关目录都不登记。
+
+    误登记的代价是**真金白银**：已死课程的 pending job 会被继续派给真 GPU worker。
+    """
+    hub = _discover_hub(tmp_path)
+    _mk_course_dir(tmp_path, "dead-old", age=hub.DISCOVER_FRESH_SEC * 3)
+    (tmp_path / "training-start").mkdir()  # 合法名字但没有 remote-jobs/offline
+    (tmp_path / "bad name").mkdir()  # 名字非法（含空白）
+    (tmp_path / "plain.txt").write_text("x", encoding="utf-8")  # 不是目录
+    assert hub.discover() == []
+    assert hub.courses() == []
+
+
+def test_discover_keeps_registered_course_after_it_goes_stale(tmp_path: Path) -> None:
+    """登记后不再撤销：课程暂停/结束（目录变旧）时，在飞 job 的结果回传不能 404。"""
+    hub = _discover_hub(tmp_path)
+    _mk_course_dir(tmp_path, "c1")
+    assert hub.discover() == ["c1"]
+    past = time.time() - hub.DISCOVER_FRESH_SEC * 5
+    os.utime(tmp_path / "c1" / "remote-jobs", (past, past))
+    os.utime(tmp_path / "c1" / "training_log.jsonl", (past, past))
+    assert hub.discover() == []
+    assert hub.courses() == ["c1"], "已登记的课程不因目录变旧被摘掉"
+
+
+def test_discover_scan_is_throttled(tmp_path: Path) -> None:
+    """最小间隔闸：`claim_next` 是派发热路径（worker 每几秒一轮询），不能每次都 readdir。"""
+    clock = _Clock()
+    hub = _discover_hub(tmp_path, clock)
+    _mk_course_dir(tmp_path, "c1")
+    assert hub.discover() == ["c1"]
+    _mk_course_dir(tmp_path, "c2")
+    assert hub.discover() == [], "间隔内不重扫"
+    clock.tick(hub.DISCOVER_SCAN_MIN_SEC + 0.5)
+    assert hub.discover() == ["c2"], "过了间隔就该看到新课程"
+
+
+def test_discover_adopts_process_state_from_solo_store(tmp_path: Path) -> None:
+    """单课程时进程级状态借 store；发现第二门课时必须**搬**过来，不能悄悄清掉。
+
+    不搬就是「新开一门课，把停机达令 / 竞速模式 / 鉴权闭锁一起清了」——三类事故
+    （云端不停机、竞速口径漂、封禁失效）都只在多课程同时跑时才出现。
+    """
+    clock = _Clock()
+    hub = _HubQueue(
+        {
+            "a": _JobStore(
+                tmp_path / "a" / "remote-jobs",
+                tmp_path / "a" / "training_log.jsonl",
+                now_fn=clock,
+            )
+        },
+        order=["a"],
+        now_fn=clock,
+        discover_root=tmp_path,
+    )
+    hub.halt_workers = True
+    hub.race_mode = RACE_MODE_OFF
+    for _ in range(5):
+        hub.auth_failure("203.0.113.9")
+    assert hub.is_blocked("203.0.113.9") is True, "预热：封禁态住在 store 里"
+
+    _mk_course_dir(tmp_path, "b")
+    assert hub.discover() == ["b"]
+    assert hub.halt_workers is True, "多一门课不该清停机达令"
+    assert hub.race_mode == RACE_MODE_OFF
+    assert hub.is_blocked("203.0.113.9") is True, "鉴权闭锁跨课程延续（同进程一份）"
+    # 搬完就不再借 store：此后写的是队列自己的状态
+    hub.halt_workers = False
+    assert hub._stores["a"].halt_workers is True, "store 上那份已成历史（不再生效）"
+
+
+def _free_port() -> int:
+    import socket
+
+    s = socket.socket()
+    try:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+    finally:
+        s.close()
+
+
+def _startup_output(proc: object) -> str:
+    """失败时才读子进程输出：子进程**还活着**时 `stdout.read()` 会一直阻塞到 EOF
+    （会把断言消息的构造变成挂起——2026-09-18 实测吃了一个 60s 超时）。
+
+    只在 `assert` 的失败消息里调用（惰性求值），进程已退出时读到的是全部输出。
+    """
+    out = getattr(proc, "stdout", None)
+    poll = getattr(proc, "poll", None)
+    if out is None or (callable(poll) and poll() is None):
+        return ""
+    try:
+        return (out.read() or "")[:400]
+    except Exception:  # 诊断路径绝不能再抛
+        return ""
+
+
+def test_main_discover_picks_up_course_from_disk(tmp_path: Path) -> None:
+    """**真进程**路径：控制台实际启动的 argv（`--traj-root tmp --discover`）能服务新课程。
+
+    上面那组钉的是 `_HubQueue.discover()` 的判定；这条钉的是 main() 的接线（argparse →
+    ΔHubQueue(discover_root=...) → 后台扫描线程）。接线断了的表现极隐蔽：单测全绿、
+    进程也“在跑”，但新开的课**永远**领不到活（轮转表里没有它）。
+    """
+    port = _free_port()
+    env = {**os.environ, "PYTHONPATH": str(ROOT)}
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-u",
+            "-m",
+            "remote.hub_server",
+            "--port",
+            str(port),
+            "--host",
+            "127.0.0.1",
+            "--token",
+            "sekret",
+            "--traj-root",
+            str(tmp_path),
+            "--discover",
+            "--discover-sec",
+            "0.2",
+            # 锁文件落临时目录：默认住 nn-training/（会向仓库目录撒 `.hub_server.<port>.lock`）
+            "--lock-file",
+            str(tmp_path / "hub.lock"),
+        ],
+        cwd=str(ROOT),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    base = f"http://127.0.0.1:{port}"
+    try:
+        body: dict = {}
+        for _ in range(120):  # 就绪 = /admin/queue 能答（Python 冷启动 import 链 ~1s）
+            if proc.poll() is not None:
+                break
+            try:
+                st, body = _http(base, "/admin/queue")
+                if st == 200:
+                    break
+            except Exception:  # 启动窗口内的连接失败是常态
+                pass
+            time.sleep(0.25)
+        else:
+            raise AssertionError(f"hub-server 未在 30s 内就绪（rc={proc.poll()}）")
+        assert st == 200, f"启动失败：{body}；输出：{_startup_output(proc)}"
+        assert body["courses"] == {}, "还没有课 ⇒ 空课程表（不是错误）"
+
+        # 训练侧发布 job（写盘）= 这门课在跑
+        _publish_standalone(tmp_path, "late", "L" * 16)
+        seen: dict | None = None
+        for _ in range(60):
+            _st, body = _http(base, "/admin/queue")
+            if "late" in body["courses"]:
+                seen = body
+                break
+            time.sleep(0.25)
+        assert seen is not None, f"--discover 没把新课程登记进来：{body}"
+        assert seen["courses"]["late"]["pending_n"] == 1
+
+        # 真 worker 轮询能领到它（端到端：不是只出现在观测面）
+        st, task = _http(base, "/jobs/next", headers={WORKER_ID_HEADER: "w1"})
+        assert st == 200 and task["course"] == "late", task
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+def test_http_worker_picks_up_new_course_without_restart(tmp_path: Path) -> None:
+    """端到端口径：hub 起来之后新开的课，**下一次轮询**就能被领到（不必重启、不必注册）。"""
+    clock = _Clock()
+    hub = _discover_hub(tmp_path, clock)
+    base, _hub_ref, srv, th = _boot(tmp_path, hub)
+    try:
+        st, body = _http(base, "/jobs/next", headers={WORKER_ID_HEADER: "w1"})
+        assert st == 200 and not body["job_id"], "还没有课 ⇒ 空轮询（不是错误）"
+        # 另一门课此刻才开跑（job 落盘）——真实世界里 hub 早就起着了
+        _publish_standalone(tmp_path, "late", "L" * 16)
+        clock.tick(hub.DISCOVER_SCAN_MIN_SEC + 1.0)  # 最小间隔闸：最坏等待就是这个量级
+        st, body = _http(base, "/jobs/next", headers={WORKER_ID_HEADER: "w1"})
+        assert st == 200, body
+        assert (body["course"], body["job_id"]) == ("late", "L" * 16), body
+        st, q = _http(base, "/admin/queue")
+        assert st == 200 and "late" in q["courses"]
+        # payload 也能按 job_id 反查归属（worker 不需要知道课程名）
+        st, raw = _http_raw(base, f"/jobs/{'L' * 16}/payload")
+        assert st == 200 and raw == b"PK\x03\x04fake"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        th.join(timeout=5)

@@ -1,6 +1,6 @@
 /** views.ts — 组件视图与节点视图组装（状态探测 → 视图对象）。 */
 import { httpOk, pidAlive } from '../../core/net'
-import { entryForCourse, loadRegistry } from '../../core/registry'
+import { entryForCourse, isSharedComponent, loadRegistry, scopeOf } from '../../core/registry'
 import type { RlConfig } from '../../core/types'
 import type { ComponentView, NodeView } from '../../web/view'
 import { COMPONENT_LABELS, busy, componentBusy } from '../actions'
@@ -11,8 +11,9 @@ export async function componentViews(cfg: RlConfig, course: string): Promise<Com
   const reg = loadRegistry()
   return Promise.all(
     ALL_COMPONENTS.map(async (key): Promise<ComponentView> => {
-      // 展示路径：严格按课取条目（旧扁平键已在 P5 移除，R2）
-      const e = entryForCourse(reg, key, course)
+      // 展示路径：严格按槽取条目（旧扁平键已在 P5 移除，R2）。共享组件（hub/隧道）
+      // 恒读 `''` 槽——任何课程页看到的都是**同一个**共享实例，并带上 shared 标记。
+      const e = entryForCourse(reg, key, scopeOf(key, course))
       const alive = pidAlive(e?.pid)
       const status: ComponentView['status'] = e ? (alive ? 'running' : 'exited') : 'stopped'
       let healthy: boolean | null = null
@@ -50,7 +51,8 @@ export async function componentViews(cfg: RlConfig, course: string): Promise<Com
         error: e?.error ?? null,
         // 与动作实际加的 busy 键同源（按课键控组件带 course）；否则页面显示「未忙碌」
         // 而服务端 409（2026-09-14 事故：trainingLoop 启动永远返回 409）。
-        busy: componentBusy(key, course),
+        busy: componentBusy(key, scopeOf(key, course)),
+        shared: isSharedComponent(key),
         // cloudflared 卡展示隧道 auth key（复制用）；其余组件无密钥字段
         ...(key === 'cloudflared' ? { secret: cfg.rl.remote_token } : {}),
       }

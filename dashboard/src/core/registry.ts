@@ -69,6 +69,25 @@ export function isCourseComponent(key: Component): key is CourseComponent {
   return (COURSE_COMPONENTS as readonly string[]).includes(key)
 }
 
+/** **单实例（共享）课程组件**（2026-09-18）：`hubServer`/`cloudflared` 不再是「每课一份」
+ *  ——一个 hub 进程服务所有并行课程、一条隧道指向它。
+ *
+ *  它们在账本里仍住 `hubServers`/`cloudflareds` 两张表，只是槽固定 `''`（沿用既有的
+ *  「无课程槽」：语义正好重合，共享实例不属于任何单门课）。**为什么不改成扁平单例键**：
+ *  旧账本里的 per-course hub/隧道条目必须继续可见、可枚举、可停止（静默失监督是事故），
+ *  共用一张表天然做到；而重建/重启路径对非空课程槽 fail-closed（见 `restart.ts`），
+ *  旧实例只能被**显式换代接管**（`stack/hub.ts::supersedeLegacyInstances`）。 */
+export const SHARED_COMPONENTS: readonly CourseComponent[] = ['hubServer', 'cloudflared']
+
+export function isSharedComponent(key: Component): key is CourseComponent {
+  return (SHARED_COMPONENTS as readonly string[]).includes(key)
+}
+
+/** 组件的账本槽：共享组件恒 `''`，其余按课程。**启动/停止/重建/展示一律经此**（唯一归宿）。 */
+export function scopeOf(key: Component, course = ''): string {
+  return isSharedComponent(key) ? '' : course
+}
+
 /** 账本条目 + 归属（`course` 空串 = 旧无课程条目）。 */
 export interface WatchedEntry {
   key: Component

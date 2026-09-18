@@ -1680,6 +1680,19 @@ a.tc-preset {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* 共享实例徽章（hub/隧道：一个进程服务所有并行课程） */
+.tc-cc__shared {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
 /* trainingLoop 运行模式高亮徽章 */
 .tc-cc__mode {
   display: inline-block;
@@ -2151,4 +2164,219 @@ a.tc-preset {
 }
 .tc-npill--ro:hover {
   border-color: var(--border);
+}
+
+/* ────────────── 并行课程总览（2026-09-18 单 hub 多课程） ────────────── */
+.tc-cov {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-3);
+  padding: 6px 12px;
+  margin-bottom: 10px;
+}
+.tc-cov__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  font-size: var(--fs-2);
+}
+.tc-cov__head .lbl {
+  color: var(--muted);
+}
+.tc-cov__head b {
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+}
+.tc-cov__sep {
+  color: var(--muted);
+}
+.tc-cov__hub {
+  color: var(--muted);
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+}
+/* hub 无应答：红字——它意味着队列列整列不可得 */
+.tc-cov__hub--dead {
+  color: var(--red);
+  font-weight: 600;
+}
+.tc-cov__stat {
+  color: var(--muted);
+}
+.tc-cov__race {
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--accent-bg);
+  color: var(--accent);
+  font-weight: 700;
+}
+.tc-cov__halt {
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--red-bg);
+  color: var(--red);
+  font-weight: 700;
+}
+.tc-cov__rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+.tc-cov__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  padding: 2px 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: none;
+  font: inherit;
+  font-size: var(--fs-2);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.tc-cov__row:hover {
+  border-color: var(--accent);
+}
+/* 当前查看课程：与顶部 select 同一目标，视觉上咬合 */
+.tc-cov__row--cur {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+.tc-cov__name {
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-weight: 600;
+  min-width: 12ch;
+}
+.tc-cov__badge {
+  padding: 0 7px;
+  border-radius: 999px;
+  font-weight: 700;
+  font-size: var(--fs-1);
+  background: var(--gray-bg);
+  color: var(--muted);
+}
+.tc-cov__badge--on {
+  background: var(--green-bg);
+  color: var(--green);
+}
+.tc-cov__badge--off {
+  background: var(--gray-bg);
+  color: var(--gray);
+}
+.tc-cov__badge--warn {
+  background: var(--yellow-bg);
+  color: var(--yellow);
+}
+.tc-cov__iter,
+.tc-cov__q {
+  color: var(--muted);
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+}
+
+/* ────────────── push worker 登记（2026-09-18） ────────────── */
+.tc-wreg {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-3);
+  padding: 6px 12px;
+  margin-bottom: 10px;
+}
+.tc-wreg__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  font-size: var(--fs-2);
+}
+.tc-wreg__head .lbl {
+  color: var(--muted);
+}
+.tc-wreg__head b {
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+}
+.tc-wreg__mount {
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--green-bg);
+  color: var(--green);
+  font-weight: 700;
+}
+/* 未挂载：琥珀——登记照落配置，但 hub 不会真派发（训练侧仍 pull） */
+.tc-wreg__mount--off {
+  background: var(--yellow-bg);
+  color: var(--yellow);
+}
+.tc-wreg__rows {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+.tc-wreg__pill {
+  cursor: default;
+}
+.tc-wreg__pill:hover {
+  border-color: var(--border);
+}
+.tc-wreg__local {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--accent-bg);
+  color: var(--accent);
+  font-size: var(--fs-1);
+}
+.tc-wreg__url,
+.tc-wreg__conc,
+.tc-wreg__busy {
+  color: var(--muted);
+  font-size: var(--fs-1);
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+}
+.tc-wreg__busy {
+  color: var(--yellow);
+  font-weight: 700;
+}
+.tc-wreg__empty {
+  margin: 6px 0 2px;
+  color: var(--muted);
+  font-size: var(--fs-2);
+}
+.tc-wreg__form {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.tc-wreg__form label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.tc-wreg__lbl {
+  color: var(--muted);
+  font-size: var(--fs-1);
+}
+.tc-wreg__form input {
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: var(--fs-2);
+  min-width: 18ch;
+  background: var(--card);
+  color: inherit;
+}
+.tc-wreg__form input[type='number'] {
+  min-width: 6ch;
+  width: 6ch;
+}
+.tc-cov__cursor {
+  color: var(--muted);
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
 }

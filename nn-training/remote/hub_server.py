@@ -73,7 +73,7 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread
 
 from remote._instance_lock import (
     acquire_instance_lock,
@@ -934,6 +934,10 @@ class _JobStore(_AuthGuard):
 #: 而 handler 侧的 `(... / "manifest.json").exists()` 仍是 False ⇒ 行为与「没这个 job」同。
 _MISSING_ROOT = Path(tempfile.gettempdir()) / "hub-queue-missing"
 
+#: 自动发现（`--discover`）的扫描节拍（秒）。派发热路径也会顺带扫（有最小间隔闸），
+#: 这里只是「没人轮询时」的兜底：后台线程按这个节拍把新课程登记进来。
+DISCOVER_SCAN_SEC = 5.0
+
 
 class _HubQueue(_AuthGuard):
     """多课程单 hub 的调度面（2026-09-18 用户指令：一个进程服务所有并行课程）。
@@ -963,9 +967,32 @@ class _HubQueue(_AuthGuard):
     #: epoch POST 体上限（与 `_JobStore` 同源，不留第二份魔数）
     BC_EPOCH_BODY_MAX = _JobStore.BC_EPOCH_BODY_MAX
 
-    def __init__(self, stores, order=None, modes=None, now_fn=None) -> None:
+    #: 自动发现时判定「课程目录是不是活的」的新鲜窗口（秒）。
+    #: 一个 PPO 轮次是分钟级（rollout 采集 + 云端结算 10–30min），窗口取 1h：正在跑的课
+    #: 每轮都会在 `remote-jobs/` 里增删条目、往 jsonl 追加行，秒级就落在窗口内；而几天前
+    #: 的陈旧实验目录（同样的磁盘形状，同样残留 pending job）永远不会被误当成「在跑的课」
+    #: ——误登记会把已死课程的 job 继续派给真 GPU worker（白烧租约）。
+    DISCOVER_FRESH_SEC = 3600.0
+
+    #: 两次扫描之间的最小间隔（秒）：`claim_next` 是派发热路径（worker 每几秒一轮询），
+    #: 每次 readdir 都扫一遍没必要，也没意义。
+    DISCOVER_SCAN_MIN_SEC = 2.0
+
+    def __init__(
+        self,
+        stores,
+        order=None,
+        modes=None,
+        now_fn=None,
+        discover_root=None,
+        discover_fresh_sec: float = DISCOVER_FRESH_SEC,
+    ) -> None:
         self._stores: dict[str, _JobStore] = dict(stores)
         self._order: list[str] = [c for c in (order or list(self._stores)) if c in self._stores]
+        #: 自动发现根（`--traj-root`）；None = 关（`--discover` 未给，零开销零行为变化）
+        self._discover_root: Path | None = Path(discover_root) if discover_root else None
+        self._discover_fresh = float(discover_fresh_sec)
+        self._discover_last = 0.0
         md = modes or {}
         self._modes: dict[str, str] = {
             c: str(md.get(c) or COURSE_MODE_ONLINE) for c in self._order
@@ -978,26 +1005,160 @@ class _HubQueue(_AuthGuard):
         self._solo: _JobStore | None = (
             next(iter(self._stores.values())) if len(self._stores) == 1 else None
         )
+        #: 自动发现的扫描闸（`_discover_last` 初值 0 ⇒ 首次调用必扫）
+        if self._discover_root is not None:
+            self._discover_last = float("-inf")
         _AuthGuard.__init__(self, now_fn)
         # 时钟与单课程 store 同源（测试注入的假时钟必须一致，否则 claimed 标记的时间戳
         # 会混入真实墙钟）。
         self._now = self._solo._now if self._solo is not None else (now_fn or time.time)
         #: 多课程时自己的 worker 登记表（worker_id -> (last_seen, hub_scope)）
         self._workers: dict[str, tuple[float, int | None]] = {}
-        self._halt = False
+        # 停机达令**按课程**（2026-09-18 单 hub 化）：一个 hub 服务所有课程之后，若达令还是
+        # 进程级一个布尔，「A 课门禁 ABORT」会连坐 B 课的云机（B 的 worker 下一轮轮询就
+        # 拿到 halt 并自停）。故：无课程参数 = 全课程（旧调用方语义，落 `_halt_default`，
+        # 新发现的课也继承）；`?course=` = 只动那一门课的例外（`_halts`）。
+        self._halt_default = False
+        self._halts: dict[str, bool] = {}
         self._race_mode = RACE_MODE_AUTO
 
+    def halt_of(self, course: str) -> bool:
+        """本课程是否在停机态（单课程借 store 时恒看那一份 store 的旗标）。"""
+        if self._solo is not None:
+            return bool(self._solo.halt_workers)
+        return bool(self._halts.get(course, self._halt_default))
+
+    def all_halted(self) -> bool:
+        """**所有已登记课程**都在停机态。
+
+        空课程表 → False（`--discover` 刚起、还没有课程时“没课可停”，不是停机）——
+        否则空闲 worker 会收到一个凭空的停机达令。
+        """
+        if self._solo is not None:
+            return bool(self._solo.halt_workers)
+        return bool(self._order) and all(self._halts.get(c, self._halt_default) for c in self._order)
+
+    def set_halt(self, halt: bool, course: str = "") -> bool:
+        """置/解停机达令；未知 course → False（不猜、不静默改写全局）。"""
+        if self._solo is not None:
+            self._solo.halt_workers = bool(halt)
+            return True
+        if course:
+            if course not in self._stores:
+                return False
+            self._halts[course] = bool(halt)
+            return True
+        self._halt_default = bool(halt)
+        self._halts.clear()
+        return True
+
+    # ---- 课程表自动发现（`--discover`） ----
+    def add_course(self, name: str, mode: str = COURSE_MODE_ONLINE) -> bool:
+        """登记一门课程（现建 `_JobStore`）；已登记/空名/未开发现 → False（幂等）。
+
+        派生目录与 `--course` 启动参数**逐字节相同**（`<root>/<name>/remote-jobs` +
+        `<root>/<name>/training_log.jsonl`）⇒ 自动发现的课与显式声明的课在观测面、诊断
+        工具、`tmp/<course>` 约定里无法区分，也不该区分。
+        """
+        c = str(name or "")
+        if not c or c in self._stores or self._discover_root is None:
+            return False
+        self._adopt_solo()
+        self._stores[c] = _JobStore(
+            self._discover_root / c / "remote-jobs",
+            self._discover_root / c / "training_log.jsonl",
+            now_fn=self._now,  # 时钟同源：租约时间戳与判定不能一边真墙钟一边假钟
+        )
+        self._order.append(c)
+        m = (mode or "").strip().lower()
+        self._modes[c] = m if m in COURSE_MODES else COURSE_MODE_ONLINE
+        return True
+
+    def _adopt_solo(self) -> None:
+        """从「单课程借 store」切到「多课程自有状态」：把进程级状态搬到自己身上。
+
+        为什么必须搬：单课程时 halt / race / worker 登记 / 鉴权计数都住在那一份 store 里
+        （既有用例直接预热 store 字段），一旦课程数变成 2，这些状态必须继续生效——不搬
+        就是「多发现一门课，把停机达令、竞速模式、鉴权闭锁全悄悄清了」。
+        """
+        st = self._solo
+        if st is None:
+            return
+        self._halt_default = bool(st.halt_workers)
+        self._race_mode = st.race_mode
+        self._workers = dict(st._workers)
+        self._auth_fail = dict(st._auth_fail)
+        self._auth_blocked_until = dict(st._auth_blocked_until)
+        self._solo = None
+
+    def discover(self) -> list[str]:
+        """扫 `<traj_root>/<course>/{remote-jobs,offline}`，把新鲜且未登记的课程登记进来。
+
+        返回本次新增的课程（目录序，稳定）。`--discover` 未开 → 恒空（零开销）。
+
+        为什么以**磁盘**为发现源、而不是让控制台/训练器走一次 HTTP 注册：训练侧把 job
+        发布到 `<traj>/remote-jobs` 是**文件系统事实**（hub 与 trainer 共享同一份盘），
+        所以「有新课程在跑」这件事本身就写在盘上。再加一条注册旁路就是「会失败、会乱序、
+        会忘了调」的第二事实源——而漏注册的后果是那门课**永久饿死**（跨课程轮转表里
+        没有它），且表面上「训练正常」。
+        """
+        root = self._discover_root
+        if root is None:
+            return []
+        now = self._now()
+        if now - self._discover_last < self.DISCOVER_SCAN_MIN_SEC:
+            return []
+        self._discover_last = now
+        try:
+            entries = sorted(root.iterdir(), key=lambda p: p.name)
+        except OSError:
+            return []
+        added: list[str] = []
+        for ent in entries:
+            try:
+                if not ent.is_dir():
+                    continue
+            except OSError:
+                continue
+            if ent.name in self._stores:
+                continue
+            try:
+                parse_course_arg(ent.name)
+            except ProtocolError:
+                continue  # 非课程目录（tmp/training-start 之类）——安静跳过
+            if not self._course_dir_live(ent, now):
+                continue
+            if self.add_course(ent.name):
+                added.append(ent.name)
+        if added:
+            print(f"[hub-server] discovered courses: {', '.join(added)}", flush=True)
+        return added
+
+    def _course_dir_live(self, ent: Path, now: float) -> bool:
+        """课程目录「在跑」判据：`{remote-jobs,offline}` 存在，且自身或本课 jsonl 新鲜。"""
+        for sub in ("remote-jobs", "offline"):
+            d = ent / sub
+            if not d.is_dir():
+                continue
+            newest = 0.0
+            for p in (d, ent / "training_log.jsonl"):
+                try:
+                    newest = max(newest, p.stat().st_mtime)
+                except OSError:
+                    continue
+            if newest > 0 and now - newest <= self._discover_fresh:
+                return True
+        return False
+
     # ---- 进程级状态（单课程借 store，多课程用自己那份） ----
+    #: 进程级读写（`all_halted()` 的旧名）：既有测试/调用方直接读写它。
     @property
     def halt_workers(self) -> bool:
-        return self._solo.halt_workers if self._solo is not None else self._halt
+        return self.all_halted()
 
     @halt_workers.setter
     def halt_workers(self, v: bool) -> None:
-        if self._solo is not None:
-            self._solo.halt_workers = bool(v)
-        else:
-            self._halt = bool(v)
+        self.set_halt(bool(v))
 
     @property
     def race_mode(self) -> str:
@@ -1192,6 +1353,9 @@ class _HubQueue(_AuthGuard):
         但机群只剩一个活跃 worker 时不避让（否则它自己超时过的 job 谁都领不到 = 停摆）。
         离线课程直接跳过（它只收回传，不实时派发）。
         """
+        # 派发前扫一次（有最小间隔闸）：新课程/新 job 目录出现后，**下一次轮询**就能被领到，
+        # 不必等后台节拍——否则新开的课在最坏情况下要等一个扫描周期才有人来领活。
+        self.discover()
         active_workers = self.active_worker_count()
         for course in rotation_order(self._order, self._cursor):
             if self.mode_of(course) == COURSE_MODE_OFFLINE:
@@ -1232,6 +1396,8 @@ class _HubQueue(_AuthGuard):
                 )
             courses[course] = {
                 "mode": self.mode_of(course),
+                # 停机达令是**每课程**的（一门课的门禁 ABORT 只停那门课的云机）
+                "halt": self.halt_of(course),
                 "pending": pending,
                 "pending_n": len(pending),
                 "inflight": inflight,
@@ -1245,7 +1411,7 @@ class _HubQueue(_AuthGuard):
             "active_courses": self.active_courses(),
             "active_workers": self.active_worker_count(),
             "race_active": self.race_active(),
-            "halt": self.halt_workers,
+            "halt": self.all_halted(),
         }
 
     # ---- job 作用域委派（与 `_JobStore` 同名同签名） ----
@@ -1575,9 +1741,9 @@ class HubHandler(BaseHTTPRequestHandler):
             elif path == "/jobs/next":
                 self._get_next()
             elif path == "/admin/workers/halt":
-                self._admin_halt(True)
+                self._admin_halt(True, self._query_course())
             elif path == "/admin/workers/resume":
-                self._admin_halt(False)
+                self._admin_halt(False, self._query_course())
             elif path == "/admin/workers/status":
                 self._admin_status()
             elif path == "/admin/queue":
@@ -1654,7 +1820,10 @@ class HubHandler(BaseHTTPRequestHandler):
         # §386：停机达令随任务同发——云机取任务时同时拿到"停机命令"，先试停机、
         # 停不掉（Kaggle 无 API）则照常执行任务。停机**不拦任务分发**（否则云机
         # 闲置空烧反而是最大浪费）。空任务时也带 halt 标志，供空闲 worker 感知。
-        halt = self.hub.halt_workers
+        #
+        # 多课程（2026-09-18）：达令跟着**这份活所属的课**走（`halt_of(course)`）——
+        # 进程级一个布尔会让 A 课的门禁 ABORT 停掉 B 课的云机。空轮询没有课程上下文
+        # ⇒ 用 `all_halted()`（全部课都停才告诉空闲 worker 停）。
         # 竞速广播（2026-09-17）：先登记本次轮询的 worker（身份 + 它服务几个 hub）——
         # 这是 auto 模式的**唯一**输入。缺头（旧 worker / 手写 curl）⇒ 身份或范围未知，
         # 按保守处理（不计入竞速判定 ⇒ 保持 P3b 独占）。
@@ -1674,9 +1843,10 @@ class HubHandler(BaseHTTPRequestHandler):
         # 「按发布序取第一份可领的」，与改造前逐字节等价。
         picked = self.hub.claim_next(worker_id=worker_id, race=race)
         if picked is None:
-            self._json({"job_id": None, "halt": halt})  # 无可领取 job
+            self._json({"job_id": None, "halt": self.hub.all_halted()})  # 无可领取 job
             return
         course, jid, lease_token = picked
+        halt = self.hub.halt_of(course)
         if race:
             print(
                 f"[{time.strftime('%H:%M:%S')}] [hub-server] RACE job={jid} course={course or '-'} "
@@ -1713,18 +1883,34 @@ class HubHandler(BaseHTTPRequestHandler):
     # ---- 云端停机 / 恢复（§386：停机=发"停机命令"随任务同发；云机先试停机停不掉照常干活） ----
     # 用法：console 在 TrainingLoop 死亡/设计内停车时 GET /admin/workers/halt 置停机态，
     # 停机条件消失（恢复训练）GET /admin/workers/resume。仅 Bearer 鉴权（同 worker），volatile。
-    def _admin_halt(self, halt: bool) -> None:
+    def _admin_halt(self, halt: bool, course: str = "") -> None:
+        """置/解停机达令。`?course=X` = 只动那一门课；无课程 = 全课程（旧语义）。
+
+        返回体：无课程时**恒为 `{"halt": ...}`**（既有用例与 console 读它）；带课程时
+        追加 `course` 字段。未知课程 → 400（不猜、不静默改写全局）。
+        """
         if not self._auth_ok():
             return
-        self.hub.halt_workers = halt
-        self._json({"halt": halt}, 200)
+        if not self.hub.set_halt(halt, course):
+            self._json(
+                {"error": f"未知 course（本 hub 的课程：{self.hub.courses()}）", "course": course},
+                400,
+            )
+            return
+        body: dict = {"halt": self.hub.halt_of(course) if course else self.hub.all_halted()}
+        if course:
+            body["course"] = course
+        self._json(body, 200)
 
     def _admin_status(self) -> None:
         # 体形状不动（console 的 set_cloud_halt / clear_halt_on_startup 读它）：竞速状态
         # 走自己的 /admin/race（GET = 只看、POST = 热切），不往这里叠字段。
+        # `?course=` = 只看那一门课的停机态（多课程下「全局」几乎没有信息量）。
         if not self._auth_ok():
             return
-        self._json({"halt": self.hub.halt_workers}, 200)
+        course = self._query_course()
+        halt = self.hub.halt_of(course) if course else self.hub.all_halted()
+        self._json({"halt": halt}, 200)
 
     # ---- 多课程观测面（2026-09-18）：/admin/queue + /admin/courses ----
     def _admin_queue(self) -> None:
@@ -2432,7 +2618,21 @@ def main() -> None:
     ap.add_argument(
         "--traj-root",
         default="tmp",
-        help="--course 时的每课程目录根（相对 cwd 或绝对路径）；缺省 tmp",
+        help="--course/--discover 时的每课程目录根（相对 cwd 或绝对路径）；缺省 tmp",
+    )
+    # 共享 hub（2026-09-18 用户指令：hubserver 只开一个进程就同时支持所有并行课程）：
+    # 课程表从盘上自动发现——训练侧发布 job 就是"这门课在跑"的事实，不需要第二事实源。
+    ap.add_argument(
+        "--discover",
+        action="store_true",
+        help="课程表从 --traj-root 自动发现（扫 <root>/*/{remote-jobs,offline}，新鲜窗口内"
+        "自动登记）——新增/结束课程无需重启 hub、无需注册",
+    )
+    ap.add_argument(
+        "--discover-sec",
+        type=float,
+        default=DISCOVER_SCAN_SEC,
+        help=f"自动发现的扫描节拍（秒；缺省 {DISCOVER_SCAN_SEC:g}）",
     )
     ap.add_argument(
         "--lock-file",
@@ -2496,15 +2696,16 @@ def main() -> None:
         print(f"[hub-server] ERROR: {e}", flush=True)
         sys.exit(1)
     # ---- 课程表：--course 优先；两者都给 = 响亮拒启（不知道听谁的比听错好）----
-    if args.course and (args.job_root or args.jsonl):
+    if (args.course or args.discover) and (args.job_root or args.jsonl):
         print(
-            "[hub-server] ERROR: --course 与 --job-root/--jsonl 不能同时给（前者=多课程，"
-            "后者=单课程）",
+            "[hub-server] ERROR: --course/--discover 与 --job-root/--jsonl 不能同时给"
+            "（前者=多课程，后者=单课程）",
             flush=True,
         )
         sys.exit(1)
     hub: _HubQueue
-    if args.course:
+    traj_root = Path(args.traj_root).resolve()
+    if args.course or args.discover:
         specs: dict[str, str] = {}
         for raw in args.course:
             try:
@@ -2519,7 +2720,7 @@ def main() -> None:
                 )
                 sys.exit(1)
             specs[name] = mode
-        root = Path(args.traj_root)
+        root = traj_root
         stores = {
             name: _JobStore(
                 root / name / "remote-jobs",
@@ -2527,18 +2728,36 @@ def main() -> None:
             )
             for name in specs
         }
-        hub = _HubQueue(stores, order=list(specs), modes=specs)
+        hub = _HubQueue(
+            stores,
+            order=list(specs),
+            modes=specs,
+            discover_root=root if args.discover else None,
+        )
         hub.race_mode = args.race
         desc = ", ".join(f"{c}:{specs[c]}" for c in specs)
         print(
             f"[hub-server] courses={len(specs)} [{desc}] traj_root={root} "
-            f"offline={hub.offline_courses() or '-'}",
+            f"discover={bool(args.discover)} offline={hub.offline_courses() or '-'}",
             flush=True,
         )
+        if args.discover:
+            # 后台节拍只是「没人轮询（push 模式 / 无 worker）」时的兜底：pull 路径的
+            # `claim_next` 自己会先扫一次（带最小间隔闸），不让新课程等一个节拍。
+            def _scan_loop() -> None:
+                while True:
+                    time.sleep(max(1.0, float(args.discover_sec)))
+                    try:
+                        hub.discover()
+                    except Exception as e:  # 扫描失败不该让调度面死掉
+                        print(f"[hub-server] discover 扫描失败: {e}", flush=True)
+
+            Thread(target=_scan_loop, daemon=True, name="hub-discover").start()
     else:
         if not args.job_root or not args.jsonl:
             print(
-                "[hub-server] ERROR: 需要 --course（多课程）或 --job-root + --jsonl（单课程）",
+                "[hub-server] ERROR: 需要 --course/--discover（多课程）或 "
+                "--job-root + --jsonl（单课程）",
                 flush=True,
             )
             sys.exit(1)

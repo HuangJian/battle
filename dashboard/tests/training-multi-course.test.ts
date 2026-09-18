@@ -45,11 +45,18 @@ import {
   saveCourseComponent,
 } from '../src/core/registry'
 import { loadConfig, saveConfig, writeRemoteHubUrl } from '../src/core/config'
-import { drainStaleJobs, supersedeSlotTunnels } from '../src/stack/hub'
+import { drainStaleJobs, supersedeLegacyInstances } from '../src/stack/hub'
 import { killPid, pidAlive } from '../src/core/net'
 import { seedWeightsFromBc } from '../src/stack/courses'
 import { restartSpecFor } from '../src/server/actions'
-import { capacityError, checkCapacity, lockName, slotOf, slotPort } from '../src/core/slots'
+import {
+  capacityError,
+  checkCapacity,
+  lockName,
+  sharedHubPort,
+  sharedTunnelMetricsPort,
+  slotPort,
+} from '../src/core/slots'
 import type { Registry, RlConfig } from '../src/core/types'
 
 /** 测试用临时目录（账本/控制台状态重定向——绝不写线上 tmp/training-start）。 */
@@ -134,13 +141,26 @@ function cmdPort(spec: { cmd: string[] }): number | null {
 // ────────────────────────── W1：双课程 spec 隔离 ──────────────────────────
 
 describe('W1 双课程 spec 隔离', () => {
-  it('两门课程的 hub-server 端口与日志路径互不相同', () => {
+  it('共享 hub：spec 与课程无关（一个进程服务所有课程，端口/日志只有一份）', () => {
+    // 2026-09-18 用户指令：hubserver 只开一个进程就同时支持所有并行课程。它是**代替**
+    // 「每课一 hub」的（角色相同：同一棵 job 目录树），所以这里断言的不再是「隔离」，
+    // 而是「唯一」+「课程表不靠控制台给」。
     const cfg = dualCourseCfg()
-    const a = hubServerSpec(cfg, 'course-a')
-    const b = hubServerSpec(cfg, 'course-b')
-    expect(cmdPort(a)).not.toBeNull()
-    expect(cmdPort(a)).not.toBe(cmdPort(b))
-    expect(a.log).not.toBe(b.log)
+    const spec = hubServerSpec(cfg)
+    expect(cmdPort(spec)).toBe(sharedHubPort(cfg))
+    expect(spec.course).toBe('')
+    const argv = spec.cmd.map(String)
+    // 课程表来源 = 盘（hub 自己扫）：不给 --course，也不给某一门课的 job-root
+    expect(argv).toContain('--discover')
+    expect(argv[argv.indexOf('--traj-root') + 1]).toBe(path.join(REPO_ROOT, 'tmp'))
+    expect(argv).not.toContain('--job-root')
+    expect(argv).not.toContain('--jsonl')
+    // 同一个 cfg ⇒ 逐字段同一份 spec（没有第二个参数能把它变成「另一门课的 hub」）。
+    // healthy/ownsResource 是闭包，逐可比字段断言（同 W4）。
+    const again = hubServerSpec(cfg)
+    for (const k of ['key', 'name', 'course', 'cmd', 'cwd', 'env', 'log', 'sentinels'] as const) {
+      expect(again[k]).toEqual(spec[k])
+    }
   })
 
   it('两门课程的 worker_server 端口与 work 目录互不相同', () => {
@@ -196,7 +216,7 @@ describe('W3 checkCapacity 加法校验', () => {
 // ────────────────────────── W4：spec 重建快照（§1.4 契约，P1b） ──────────────────────────
 
 describe('W4 spec 重建逐字段一致（旧占位）', () => {
-  it('A 课 hub spec 重建与原 spec 逐字段一致（含 slot/jobRoot/port）', () => {
+  it('共享 hub spec 重建逐字段一致（且**按视图课程**调用也解析到共享槽）', () => {
     // 账本重定向到临时文件（同 exit-watchdog.test.ts），不碰线上账本；
     // 用内联 set/restore（不用模块顶层赋值），与并行跑的其它测试文件互不干扰。
     const scratch = mkdtempSync(path.join(os.tmpdir(), 'bcity-p0w4-'))
@@ -209,26 +229,20 @@ describe('W4 spec 重建逐字段一致（旧占位）', () => {
     try {
       const cfg = cfgFixture()
       writeFileSync(process.env.BCITY_RL_CONFIG, JSON.stringify(cfg, null, 2))
-      const course = 'course-a'
-      const jobRoot = path.join(REPO_ROOT, 'tmp', course, 'remote-jobs')
-      const spec = hubServerSpec(cfg, course)
-      // 登记形状与 hub.ts::stepHubServer 的写入端同构（§1.4 重建完备字段）。
-      saveCourseComponent('hubServer', course, {
+      const course = 'course-a' // = 「操作员正在看哪门课」，不是 hub 的归属
+      const spec = hubServerSpec(cfg)
+      // 登记形状与 hub.ts::stepHubServer 的写入端同构（固定 `''` 槽）。
+      saveCourseComponent('hubServer', '', {
         pid: 424242,
-        course,
-        slot: slotOf(cfg, course),
+        course: '',
         entry: HUB_SERVER_ENTRY,
-        jobRoot,
         log: spec.log,
         url: `http://127.0.0.1:${cmdPort(spec) ?? 0}`,
       })
-      // 登记 round-trip：条目按 (key, course) 原样回来（监督/重启的数据源）。
-      expect(entryForCourse(loadRegistry(), 'hubServer', course)).toMatchObject({
-        course,
-        slot: slotOf(cfg, course),
-        jobRoot,
-      })
-      // 重建 spec 与原 spec 逐字段一致（healthy 是闭包，逐可比字段断言）。
+      // 登记 round-trip：共享槽原样回来（监督/重启的数据源）。
+      expect(entryForCourse(loadRegistry(), 'hubServer', '')).toMatchObject({ course: '' })
+      expect(entryForCourse(loadRegistry(), 'hubServer', course)).toBeUndefined()
+      // 重建 spec **按视图课程**调用也解析到共享槽（scopeOf 归一）且逐字段一致。
       const fresh = restartSpecFor('hubServer', course)
       expect(fresh).not.toBeNull()
       for (const k of ['key', 'name', 'course', 'cmd', 'env', 'log', 'sentinels'] as const) {
@@ -246,7 +260,7 @@ describe('W4 spec 重建逐字段一致（旧占位）', () => {
 
 // ────────────────────────── W6：同槽位 cloudflared 隧道接管（2026-09-14 事故） ──────────────────────────
 
-describe('W6 同槽位 cloudflared 隧道接管', () => {
+describe('W6 旧形状（每课一 hub/隧道）换代接管', () => {
   /** 真实存活子进程（pidAlive 为真），充当「旧隧道进程」。 */
   function livePid(): { proc: Bun.Subprocess; pid: number } {
     const proc = Bun.spawn([process.execPath, '-e', 'setInterval(() => {}, 1000)'], {
@@ -257,9 +271,10 @@ describe('W6 同槽位 cloudflared 隧道接管', () => {
     return { proc, pid: proc.pid }
   }
 
-  it('接管并杀同槽位残留隧道；异槽位不动；同课自身死条目保留', async () => {
-    // 复现（2026-09-14）：c6-chip 残留隧道长期占住 slot0 metrics 口，bc-c4-v3 隧道
-    // bind 失败 12s 退出、控制台「启动失败」。修复 = 启动前接管同槽位其它课程的存活隧道。
+  it('接管并杀所有旧形状隧道条目（活则杀、死则清账）', async () => {
+    // 复现（2026-09-14，每课一隧道时代）：c6-chip 残留隧道长期占住 slot0 metrics 口，
+    // bc-c4-v3 隧道 bind 失败 12s 退出、控制台「启动失败」。共享单隧道后判据变宽：
+    // 服务同一件事的所有旧实例都是冲突方（不再有「异槽位就不动」这回事）。
     const scratch = mkdtempSync(path.join(os.tmpdir(), 'bcity-p0w6-'))
     const prev = process.env.BCITY_REGISTRY_FILE
     process.env.BCITY_REGISTRY_FILE = path.join(scratch, 'registry.json')
@@ -292,15 +307,16 @@ describe('W6 同槽位 cloudflared 隧道接管', () => {
         log: '',
       })
 
-      const killed = await supersedeSlotTunnels('bc-c4-v3', 0)
-      expect(killed.sort()).toEqual(['c6-chip'])
+      // 换代接管：**所有**非共享槽的旧形状条目都是冲突方（共享单隧道服务所有课）
+      const killed = await supersedeLegacyInstances('cloudflared')
+      expect(killed.sort()).toEqual(['bc-c4', 'bc-c4-v3', 'c6-chip']) // 含已死条目（清账也是接管）
 
       const reg = loadRegistry()
       expect(reg.cloudflareds?.['c6-chip']).toBeUndefined() // 已清账
-      expect(reg.cloudflareds?.['bc-c4']).toBeDefined() // 异槽位保留
-      expect(reg.cloudflareds?.['bc-c4-v3']).toBeDefined() // 同课条目不动
-      expect(pidAlive(stale.pid)).toBe(false) // 残留进程已死
-      expect(pidAlive(other.pid)).toBe(true) // 异槽位进程存活
+      expect(reg.cloudflareds?.['bc-c4']).toBeUndefined() // 已清账（不再有「异槽位」概念）
+      expect(reg.cloudflareds?.['bc-c4-v3']).toBeUndefined()
+      expect(pidAlive(stale.pid)).toBe(false) // 旧隧道已死
+      expect(pidAlive(other.pid)).toBe(false) // 旧隧道已死（同一件事只留一个实例）
     } finally {
       try {
         await killPid(stale.pid)
@@ -318,11 +334,11 @@ describe('W6 同槽位 cloudflared 隧道接管', () => {
     }
   })
 
-  it('同槽位**已死 pid** 的陈旧条目 → 清账（无进程可杀，但账必须清）', async () => {
+  it('**已死 pid** 的旧形状条目 → 清账（无进程可杀，但账必须清）', async () => {
     // 2026-09-17 事故：原实现对死 pid 直接 `continue` —— 作者意图是"死进程没什么可杀"，
     // 但**清账被一起跳过**了 ⇒ 09-14 的 cloudflared[x2-acbc] 条目活到今天，还在账本层
-    // 占住 slot 0；端口被后来的课程接手后，它就成了"PID 已死、服务仍在应答"的幽灵，
-    // 看门狗每 8s 刷屏。修法：死进程不 kill，但条目必须清。
+    // 占着角色；共享实例接管后，它就成了"PID 已死、服务仍在应答"的幽灵，看门狗每 8s
+    // 刷屏（restart.ts 已对非空槽 fail-closed，但账仍必须清）。
     const scratch = mkdtempSync(path.join(os.tmpdir(), 'bcity-p0w6b-'))
     const prev = process.env.BCITY_REGISTRY_FILE
     process.env.BCITY_REGISTRY_FILE = path.join(scratch, 'registry.json')
@@ -339,7 +355,7 @@ describe('W6 同槽位 cloudflared 隧道接管', () => {
         metrics: m0,
         log: '',
       })
-      const struck = await supersedeSlotTunnels('x1-rebirth-a2', 0)
+      const struck = await supersedeLegacyInstances('cloudflared')
       expect(struck).toEqual(['x2-acbc'])
       expect(loadRegistry().cloudflareds?.['x2-acbc']).toBeUndefined() // 陈旧条目已清
     } finally {
@@ -354,14 +370,19 @@ describe('W6 同槽位 cloudflared 隧道接管', () => {
     }
   })
 
-  it('接线：stepCloudflared 在 spawn 前调用 supersedeSlotTunnels（防只管 helper 忘接线）', () => {
+  it('接线：hub/隧道启动都在 spawn 前换代接管（防只管 helper 忘接线）', () => {
     // 功能由上面的单测覆盖，但调用点被删会让 helper 形同虚设——grep 门禁守住接线。
     const src = readFileSync(path.join(DASHBOARD_ROOT, 'src', 'stack', 'hub.ts'), 'utf-8')
-    const step = src.slice(src.indexOf('export async function stepCloudflared'))
-    const spawnIdx = step.indexOf('spawnBg')
-    const callIdx = step.indexOf('supersedeSlotTunnels')
-    expect(callIdx).toBeGreaterThan(-1)
-    expect(callIdx).toBeLessThan(spawnIdx) // 必须早于 spawn 循环（先清口再起新隧道）
+    const hubStep = src.slice(src.indexOf('export async function stepHubServer'))
+    const hubSpawn = hubStep.indexOf('launchSpec')
+    const hubCall = hubStep.indexOf("supersedeLegacyInstances('hubServer')")
+    expect(hubCall).toBeGreaterThan(-1)
+    expect(hubCall).toBeLessThan(hubSpawn) // 旧 hub 与共享 hub 服务同一棵树，必须先收
+    const cfStep = src.slice(src.indexOf('export async function stepCloudflared'))
+    const cfSpawn = cfStep.indexOf('spawnBg')
+    const cfCall = cfStep.indexOf("supersedeLegacyInstances('cloudflared')")
+    expect(cfCall).toBeGreaterThan(-1)
+    expect(cfCall).toBeLessThan(cfSpawn) // 必须先清口再起新隧道
   })
 })
 
@@ -430,14 +451,16 @@ describe('W5 grep 门禁', () => {
 
 // ────────────────────────── P2：双 hub 隔离（M3 结构证据 + F-B6 种子） ──────────────────────────
 
-describe('P2 双 hub 隔离', () => {
-  it('两课 hub 的 --job-root 与 --jsonl 互不相同（调用方传对即隔离，M3）', () => {
-    const cfg = dualCourseCfg()
-    const a = hubServerSpec(cfg, 'course-a')
-    const b = hubServerSpec(cfg, 'course-b')
-    const flag = (spec: { cmd: string[] }, name: string) => spec.cmd[spec.cmd.indexOf(name) + 1]
-    expect(flag(a, '--job-root')).not.toBe(flag(b, '--job-root'))
-    expect(flag(a, '--jsonl')).not.toBe(flag(b, '--jsonl'))
+describe('P2 共享 hub 的每课隔离（布局不变，隔离由 hub 自己保证）', () => {
+  it('共享 hub 不被钉死到任何一门课的 job 目录（每课目录由 --traj-root 派生）', () => {
+    // 隔离的新形式：不再是「两个 hub 各自看自己的目录」，而是「**一个** hub 按 course
+    // 路由到 <traj-root>/<课>/...」（磁盘布局与每课一 hub 时代逐字节相同）。
+    // 这行断言守的是旧形状的回归：一旦有人把某一门课的 --job-root/--jsonl 塞回去，
+    // 共享 hub 就只看得见那一门课——其余全部饿死。
+    const argv = hubServerSpec(dualCourseCfg()).cmd.map(String)
+    expect(argv).not.toContain('--job-root')
+    expect(argv).not.toContain('--jsonl')
+    expect(argv).toContain('--discover')
   })
 
   it('M3：drainStaleJobs 只下架本课 jobRoot，B 课 pending 原样保留', () => {
@@ -497,24 +520,23 @@ describe('P2 双 hub 隔离', () => {
 
 // ────────────────────────── P3：每课一隧道（URL 归属 + 槽位 + push 注入） ──────────────────────────
 
-describe('P3 每课一隧道', () => {
-  it('writeRemoteHubUrl 按课写 remote_hubs，单键同步兼容（Q2/D2 每事实一归宿）', () => {
+describe('P3 共享单隧道', () => {
+  it('writeRemoteHubUrl 只写单键 remote_hub_url（URL 是全局事实）', () => {
     const scratch = mkdtempSync(path.join(os.tmpdir(), 'bcity-p3cfg-'))
     SCRATCH_DIRS.push(scratch)
     const prev = process.env.BCITY_RL_CONFIG
     process.env.BCITY_RL_CONFIG = path.join(scratch, 'rl-config.json')
     try {
       writeFileSync(process.env.BCITY_RL_CONFIG, JSON.stringify(cfgFixture()))
-      writeRemoteHubUrl('https://a-tunnel.trycloudflare.com', 'course-a')
-      writeRemoteHubUrl('https://b-tunnel.trycloudflare.com', 'course-b')
+      writeRemoteHubUrl('https://hub.trycloudflare.com')
       const cfg = loadConfig()
-      expect(cfg.rl.remote_hubs?.['course-a']).toBe('https://a-tunnel.trycloudflare.com')
-      expect(cfg.rl.remote_hubs?.['course-b']).toBe('https://b-tunnel.trycloudflare.com')
-      // 单键同步最后一次（兼容读不断）
-      expect(cfg.rl.remote_hub_url).toBe('https://b-tunnel.trycloudflare.com')
+      expect(cfg.rl.remote_hub_url).toBe('https://hub.trycloudflare.com')
+      // 旧形状的 per-course 键不再被写（也不被读：python 侧回填已删）——
+      // 留着它就会变成「指向已不存在的每课隧道」的第二事实源。
+      expect(cfg.rl.remote_hubs ?? {}).toEqual({})
       // 同值重写不落盘（mtime 不变）
       const m1 = statSync(process.env.BCITY_RL_CONFIG).mtimeMs
-      writeRemoteHubUrl('https://a-tunnel.trycloudflare.com', 'course-a')
+      writeRemoteHubUrl('https://hub.trycloudflare.com')
       expect(statSync(process.env.BCITY_RL_CONFIG).mtimeMs).toBe(m1)
     } finally {
       if (prev === undefined) delete process.env.BCITY_RL_CONFIG
@@ -522,45 +544,43 @@ describe('P3 每课一隧道', () => {
     }
   })
 
-  it('cloudflaredSpec 按条目 slot/course 取 metrics 与目标 hub 端口（S13）', () => {
+  it('cloudflaredSpec 指向共享 hub 端口与共享 metrics 口（与课程无关）', () => {
     const cfg = dualCourseCfg()
     const spec = cloudflaredSpec(cfg, { pid: 1, course: 'course-b', slot: 1 })
-    const metrics = slotPort(cfg, 1, 'metrics')
-    const hub = slotPort(cfg, 1, 'hub')
-    expect(spec.course).toBe('course-b')
-    expect(spec.cmd.join(' ')).toContain(`127.0.0.1:${metrics}`)
-    expect(spec.cmd.join(' ')).toContain(`localhost:${hub}`)
+    expect(spec.course).toBe('')
+    expect(spec.cmd.join(' ')).toContain(`127.0.0.1:${sharedTunnelMetricsPort(cfg)}`)
+    expect(spec.cmd.join(' ')).toContain(`localhost:${sharedHubPort(cfg)}`)
+    // 旧形状的 per-course 端口不再出现（槽位 1 的 hub/metrics 口与共享地址不同）
+    expect(spec.cmd.join(' ')).not.toContain(`localhost:${slotPort(cfg, 1, 'hub')}`)
+    expect(spec.cmd.join(' ')).not.toContain(`127.0.0.1:${slotPort(cfg, 1, 'metrics')}`)
   })
 
-  it('M1 cfTunnelArgs：缺省 http2/4；per-course 覆盖 > rl.*；auto = 不传旗标', () => {
+  it('M1 cfTunnelArgs：缺省 http2/4；只有 rl.*（单隧道没有 per-course 覆盖）；auto = 不传旗标', () => {
     const cfg = dualCourseCfg()
     // 未配 → 缺省 http2 / 4
-    expect(cfTunnelArgs(cfg, 'course-a')).toEqual(['--protocol', 'http2', '--edge-ip-version', '4'])
+    expect(cfTunnelArgs(cfg)).toEqual(['--protocol', 'http2', '--edge-ip-version', '4'])
     // rl.* 全局生效
     cfg.rl.cf_protocol = 'quic'
     cfg.rl.cf_edge_ip = '6'
-    expect(cfTunnelArgs(cfg, 'course-a')).toEqual(['--protocol', 'quic', '--edge-ip-version', '6'])
-    // per-course 覆盖优先于 rl.*
+    expect(cfTunnelArgs(cfg)).toEqual(['--protocol', 'quic', '--edge-ip-version', '6'])
+    // per-course 覆盖是「每课一隧道」时代的旋钮：一条隧道没有「谁的配置说了算」的问题，
+    // 故 courses 块里的值**不再被读**（不报错、不生效）。
     cfg.courses!['course-b'] = {
       ...cfg.courses!['course-b'],
       cf_protocol: 'http2',
       cf_edge_ip: '4',
     }
-    expect(cfTunnelArgs(cfg, 'course-b')).toEqual(['--protocol', 'http2', '--edge-ip-version', '4'])
+    expect(cfTunnelArgs(cfg)).toEqual(['--protocol', 'quic', '--edge-ip-version', '6'])
+    expect(resolveCfTunnel(cfg)).toEqual({ protocol: 'quic', edgeIp: '6' })
     // auto = 逐字节回到旧行为（不传任何旗标）
     cfg.rl.cf_protocol = 'auto'
     cfg.rl.cf_edge_ip = 'auto'
-    expect(cfTunnelArgs(cfg, 'course-a')).toEqual([])
-    expect(resolveCfTunnel(cfg, 'course-a')).toEqual({ protocol: 'auto', edgeIp: 'auto' })
-    expect(resolveCfTunnel(cfg, 'course-b')).toEqual({ protocol: 'http2', edgeIp: '4' })
+    expect(cfTunnelArgs(cfg)).toEqual([])
+    expect(resolveCfTunnel(cfg)).toEqual({ protocol: 'auto', edgeIp: 'auto' })
   })
 
   it('M1 cloudflaredSpec 带隧道旗标（与 hub.ts 的 spawn 两半同步）', () => {
-    const joined = cloudflaredSpec(dualCourseCfg(), {
-      pid: 1,
-      course: 'course-a',
-      slot: 0,
-    }).cmd.join(' ')
+    const joined = cloudflaredSpec(dualCourseCfg(), { pid: 1, course: '' }).cmd.join(' ')
     expect(joined).toContain('--protocol http2')
     expect(joined).toContain('--edge-ip-version 4')
   })
@@ -571,9 +591,9 @@ describe('P3 每课一隧道', () => {
       ' ',
     )
     // 两半同步：spawn 必须走共用 helper，不得再自拼 --protocol
-    expect(src).toContain('...cfTunnelArgs(cfg, course)')
+    expect(src).toContain('...cfTunnelArgs(cfg)')
     // 变更检测（防「改了选项不生效」的假成功）：登记值与当前配置不一致即杀旧起新
-    expect(src).toContain('resolveCfTunnel(cfg, course)')
+    expect(src).toContain('resolveCfTunnel(cfg)')
     expect(src).toContain('prevProtocol !== wantTunnel.protocol')
     expect(src).toContain('cfProtocol: wantTunnel.protocol')
   })

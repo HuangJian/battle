@@ -9,6 +9,9 @@ import {
   type ActionResult,
   busy,
   markCloudHaltRecovered,
+  registerPushWorker,
+  reloadPushWorkers,
+  removePushWorker,
   setMode,
   setNodeConcurrency,
   setNodeEnabled,
@@ -186,6 +189,24 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
         if (!Number.isFinite(n)) return errResp(`并发数非法: ${body.concurrency}`, 400)
         return okResp(await setNodeConcurrency(id, Math.round(n)))
       }
+      // ---- GPU push worker 登记（2026-09-18）：回写 rl-config nodes[] + 叫醒 hub ----
+      // （hub 观测面缓存的置空不在本层：动作后统一在 server.ts 与慢快照同时失效）
+      case 'registerPushWorker': {
+        return okResp(
+          await registerPushWorker({
+            id: bodyStr(body, 'id'),
+            url: bodyStr(body, 'url'),
+            authKey: bodyStr(body, 'authKey'),
+            // 并发数缺省由 actions 侧填 1（不在这里编默认值，避免两处口径）。
+            concurrency: body.concurrency === undefined ? undefined : Number(body.concurrency),
+            enabled: body.enabled === undefined ? undefined : body.enabled !== false,
+          }),
+        )
+      }
+      case 'removePushWorker':
+        return okResp(await removePushWorker(bodyStr(body, 'id')))
+      case 'reloadPushWorkers':
+        return okResp(await reloadPushWorkers())
       case 'nodeSmoke': {
         const id = bodyStr(body, 'id')
         if (busy.has(`node:${id}`)) return errResp('该节点冒烟进行中', 409)

@@ -12,7 +12,7 @@ import { CONFIG_PATH, LOG_DIR, NN_TRAINING, REPO_ROOT } from '../core/paths'
 import { httpOk, pidAlive, portListen } from '../core/net'
 import { entryForCourse, loadRegistry } from '../core/registry'
 import { agentSentinels, pySentinels } from '../core/sentinels'
-import { slotPort } from '../core/slots'
+import { sharedHubUrl, sharedHubPort, sharedTunnelMetricsPort, slotPort } from '../core/slots'
 import { portOwnedBy } from '../core/proc'
 import { resolveVenvPython } from '../core/venv'
 import { COMPONENT_KILL_TREE, normalizeRaceMode } from '../core/types'
@@ -74,13 +74,22 @@ export function selfNodeSpec(cfg: RlConfig): ProcSpec {
 
 export const HUB_SERVER_ENTRY = 'nn-training/remote/hub_server.py'
 
-export function hubServerSpec(cfg: RlConfig, course: string): ProcSpec {
-  const trajDir = path.join(REPO_ROOT, 'tmp', course || 'nocourse')
-  const port = slotPort(cfg, course, 'hub')
+/** 共享 hub-server spec：**一个进程服务所有并行课程**（2026-09-18 用户指令）。
+ *
+ *  课程表为什么不在这里给（`--course`）：训练侧把 job 发布到 `<repo>/tmp/<course>/remote-jobs`
+ *  就是「这门课在跑」的**文件系统事实**（hub 与 trainer 共享同一块盘），`--discover` 让 hub
+ *  自己扫出来。于是「控制台先起 hub、后开第二门课」不需要注册、不需要重启，也不会出现
+ *  「漏注册 ⇒ 那门课永久饿死，而表面看起来训练一切正常」。
+ *
+ *  端口 = hub 基数端口本身（`sharedHubPort`）：共享之后 hub 不再按课程占端口。
+ *  `--traj-root` **必须绝对**（hub 的 cwd 是控制台进程的 cwd，相对路径会指到 dashboard/tmp
+ *  去），故用 REPO_ROOT 拼。 */
+export function hubServerSpec(cfg: RlConfig): ProcSpec {
+  const port = sharedHubPort(cfg)
   return {
     key: 'hubServer',
-    name: 'hub-server',
-    course,
+    name: 'hub-server (共享：服务所有课程)',
+    course: '',
     cmd: [
       resolveVenvPython().python,
       '-u',
@@ -90,10 +99,9 @@ export function hubServerSpec(cfg: RlConfig, course: string): ProcSpec {
       String(port),
       '--token',
       cfg.rl.remote_token,
-      '--job-root',
-      path.join(trajDir, 'remote-jobs'),
-      '--jsonl',
-      path.join(trajDir, 'training_log.jsonl'),
+      '--traj-root',
+      path.join(REPO_ROOT, 'tmp'),
+      '--discover',
       // 竞速广播（2026-09-17）：auto（缺省）= 本 hub 的 worker 全都只服务这一个 hub 时
       // 广播最新 job；on/off 为运维强制。值先归一化——hub-server 的 argparse choices
       // 对未知值直接退出，写错配置不能让整个 hub 起不来。
@@ -105,9 +113,12 @@ export function hubServerSpec(cfg: RlConfig, course: string): ProcSpec {
       // 默认关：不打开连探活线程都不起，行为与改造前逐字节一致。
       ...(cfg.rl.hub_push ? ['--push', '--push-config', CONFIG_PATH] : []),
     ],
+    // cwd 钉死 REPO_ROOT：入口是包路径（`-m remote.hub_server`）靠 PYTHONPATH，
+    // 而它内部的默认路径/日志相对 cwd；控制台以 dashboard/ 为 cwd 启动时不能漂。
+    cwd: REPO_ROOT,
     env: { PYTHONPATH: NN_TRAINING },
-    // 日志 per-course（M6：spec 侧 + api.ts resolver 两半同步）
-    log: path.join(courseLogDir(course), 'hub-server.out'),
+    // 共享实例 ⇒ 日志也唯一（不再 per-course；与 api 侧 resolver 两半同步）
+    log: path.join(LOG_DIR, 'hub-server.out'),
     healthy: () => httpOk(`http://127.0.0.1:${port}/ping`, cfg.rl.remote_token),
     // 就绪归属：旧僵尸 hub 可能替新进程答 /ping（新实例被双监听守卫拒绝后秒退），
     // 那样账本会记新 pid 而实际服务的是旧进程（2026-09-17 事故相位）。
@@ -118,16 +129,16 @@ export function hubServerSpec(cfg: RlConfig, course: string): ProcSpec {
 
 // ────────────────────────── cloudflared ──────────────────────────
 
-/** 隧道选项解析（M1，plan/remote-wire-remediation §3.3）：per-course 覆盖 >
- *  rl.* > 缺省（http2 / 4）。缺省刻意选 http2/4——国内 ISP 对 QUIC(UDP/443) 的
- *  QoS 降质是实测病灶；`auto` = 不传旗标，逐字节回到旧行为。 */
-export function resolveCfTunnel(
-  cfg: RlConfig,
-  course = '',
-): { protocol: CfProtocol; edgeIp: CfEdgeIp } {
-  const cc = course ? cfg.courses?.[course] : undefined
-  const protocol = (cc?.cf_protocol ?? cfg.rl.cf_protocol ?? 'http2') as CfProtocol
-  const edgeIp = (cc?.cf_edge_ip ?? cfg.rl.cf_edge_ip ?? '4') as CfEdgeIp
+/** 隧道选项解析（M1，plan/remote-wire-remediation §3.3）：rl.* > 缺省（http2 / 4）。
+ *  缺省刻意选 http2/4——国内 ISP 对 QUIC(UDP/443) 的 QoS 降质是实测病灶；`auto` = 不传旗标，
+ *  逐字节回到旧行为。
+ *
+ *  **2026-09-18 收敛为单隧道后不再有 per-course 覆盖**：`courses.<课>.cf_protocol` 是
+ *  「每课一条隧道」时代的旋钮，一条隧道服务所有课程时它没有意义（哪一门说了算？）——
+ *  按 rl.* 全局配置走，读旧配置不报错（那两项留在 courses 块里，不再被读）。 */
+export function resolveCfTunnel(cfg: RlConfig): { protocol: CfProtocol; edgeIp: CfEdgeIp } {
+  const protocol = (cfg.rl.cf_protocol ?? 'http2') as CfProtocol
+  const edgeIp = (cfg.rl.cf_edge_ip ?? '4') as CfEdgeIp
   return { protocol, edgeIp }
 }
 
@@ -161,35 +172,37 @@ export function resolveRolloutSrc(cfg: RlConfig, course = ''): RolloutSrcMode {
 
 /** cloudflared 隧道旗标（唯一来源）——cloudflaredSpec 与 hub.ts 的 spawn 共用，
  *  杜绝「两处 spawn 漂移」（仓库的「两半同步」约定）。`auto` 不传对应旗标。 */
-export function cfTunnelArgs(cfg: RlConfig, course = ''): string[] {
-  const { protocol, edgeIp } = resolveCfTunnel(cfg, course)
+export function cfTunnelArgs(cfg: RlConfig): string[] {
+  const { protocol, edgeIp } = resolveCfTunnel(cfg)
   return [
     ...(protocol === 'auto' ? [] : ['--protocol', protocol]),
     ...(edgeIp === 'auto' ? [] : ['--edge-ip-version', edgeIp]),
   ]
 }
 
+/** 共享**单**隧道 spec：指向共享 hub 端口，一条隧道服务所有课程。
+ *
+ *  （旧形状是「每课一条隧道 + 每课 metrics 端口 + 同槽位接管」——共享 hub 之后这些全部
+ *  失去意义：隧道里跑的是同一个 hub 的连接，多开一条只是多一份出网状态。） */
 export function cloudflaredSpec(cfg: RlConfig, entry?: RegistryEntry): ProcSpec {
   const cfBin = resolveCloudflaredBin()
-  const slot = entry?.slot ?? 0
-  const course = entry?.course ?? ''
-  const metricsPort = entry?.metrics ?? slotPort(cfg, slot, 'metrics')
+  const metricsPort = entry?.metrics ?? sharedTunnelMetricsPort(cfg)
   const cfLog = entry?.log ?? path.join(LOG_DIR, `cloudflared-${Date.now()}.log`)
   return {
     key: 'cloudflared',
-    name: 'cloudflared',
-    course,
+    name: 'cloudflared (共享：单隧道)',
+    course: '',
     cmd: [
       cfBin ?? 'cloudflared',
       'tunnel',
       '--url',
-      `http://localhost:${slotPort(cfg, slot, 'hub')}`,
+      `http://localhost:${sharedHubPort(cfg)}`,
       '--metrics',
       `127.0.0.1:${metricsPort}`,
       '--logfile',
       cfLog,
       // M1：隧道协议/边缘 IP（缺省 http2/4；auto = 不传旗标回到旧行为）。
-      ...cfTunnelArgs(cfg, course),
+      ...cfTunnelArgs(cfg),
     ],
     log: cfLog,
     // edge 连接注册以本地 metrics /ready 为准（不依赖出网；hub→CF 劣化不判死）
@@ -219,7 +232,9 @@ export function localWorkerSpec(
   venv: { python: string; sitePackages: string },
   course = '',
 ): ProcSpec {
-  const hubUrl = `http://127.0.0.1:${slotPort(cfg, course, 'hub')}`
+  // 共享 hub（2026-09-18）：本机 worker 与本课之外的所有课共用一个作业中枢——
+  // 它领到哪门课的 job 就干哪门课的活（job 自带课程快照，结果按 job_id 回家）。
+  const hubUrl = sharedHubUrl(cfg)
   // torch 线程：0/缺省 = torch 默认（云端 worker 同语义）；配了 rl.torch_threads 就透传——
   // 本机 worker 与 rollout 子进程抢核，这时它是唯一能限核的旋钮。
   const threads = Math.round(Number(cfg.rl?.torch_threads ?? 0) || 0)

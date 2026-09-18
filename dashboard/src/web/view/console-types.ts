@@ -1,4 +1,5 @@
 /** console-types.ts — 控制台整页视图类型（组件 / 节点 / 模式 / 指标 / 整页快照）与展示辅助。 */
+import { ParallelOverviewView, PushWorkerRegistryView } from './course-overview'
 import { IterRow, PairedReferee } from './metric-types'
 import { PhaseInfo } from './phase'
 
@@ -21,6 +22,9 @@ export interface ComponentView {
   log: string | null
   logTail: string[]
   busy: boolean
+  /** **共享实例**（2026-09-18 起 hubServer/cloudflared）：一个进程服务所有并行课程，
+   *  不属于当前查看的课程——卡片要标出来，否则操作员会以为「这门课自己的 hub 停了」。 */
+  shared?: boolean
   /** 需要展示的密钥型字段（仅 cloudflared：rl.remote_token，供用户复制贴给远端）。
    *  局域网只读与回环同权展示——只读是动作边界，不是数据边界（2026-09-09 用户指令）。 */
   secret?: string
@@ -140,6 +144,13 @@ export interface ConsoleStateView {
   /** 控制台当前课程（P5-W1 additive；旧视图无此字段 → 回退 `course`）。 */
   activeCourse?: string
   courses: string[]
+  /** 在训课程（多课程并行）：registry 里 trainingLoop **进程存活**的课程，按名排序。
+   *  课程 select 的多课高亮与总览的「在训」列同源；缺省（旧视图/测试直构）= 无在训课。 */
+  trainingCourses?: string[]
+  /** 多课程并行总览（hub `/admin/queue` + 每课一行）；缺省/null = 无 hub 应答或未计算。 */
+  overview?: ParallelOverviewView | null
+  /** push worker 登记视图（rl-config `nodes[].gpu_push` + 面板直探 + hub 侧探活）。 */
+  workerRegistry?: PushWorkerRegistryView | null
   components: ComponentView[]
   nodes: NodeView[]
   /** 本机直跑节点（§361⑤：pill 行只读展示；无池/无槽位时缺省）。 */

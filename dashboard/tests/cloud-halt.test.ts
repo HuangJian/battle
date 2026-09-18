@@ -32,6 +32,7 @@ afterAll(() => {
 })
 
 import {
+  hubAdminOk,
   loadConsoleState,
   markCloudHaltRecovered,
   saveConsoleState,
@@ -133,6 +134,59 @@ describe('markCloudHaltRecovered（停机条件消失 → recovered，灰横幅�
     const halts = loadConsoleState().cloudHalts
     expect(halts?.a?.status).toBe('recovered')
     expect(halts?.b?.status).toBe('halted') // 未被误恢复
+  })
+})
+
+describe('共享 hub 的停机达令按课程下发（2026-09-18 单隧道）', () => {
+  it('halt/resume 带 ?course=；无课程 = 全局（不带参数）', async () => {
+    // 真起一台假 hub（回 200）——只有真收到请求才能断言线上字节形状。
+    const seen: string[] = []
+    const srv = Bun.serve({
+      port: 0,
+      hostname: '127.0.0.1',
+      fetch(req) {
+        const u = new URL(req.url)
+        seen.push(u.pathname + u.search)
+        return new Response('{"ok":true}', { headers: { 'content-type': 'application/json' } })
+      },
+    })
+    try {
+      const cfg = { rl: { hub_port: Number(srv.port), remote_token: 'x' } } as unknown as RlConfig
+      expect(await hubAdminOk(cfg, '/admin/workers/halt', 'course-b')).toBe(true)
+      expect(await hubAdminOk(cfg, '/admin/workers/resume', 'course-b')).toBe(true)
+      expect(await hubAdminOk(cfg, '/admin/workers/halt')).toBe(true)
+      expect(seen).toEqual([
+        '/admin/workers/halt?course=course-b',
+        '/admin/workers/resume?course=course-b',
+        '/admin/workers/halt',
+      ])
+    } finally {
+      srv.stop(true)
+    }
+  })
+
+  it('端到端：A 课停机只对 A 课下发达令，B 课记录不被触碰', async () => {
+    const seen: string[] = []
+    const srv = Bun.serve({
+      port: 0,
+      hostname: '127.0.0.1',
+      fetch(req) {
+        seen.push(new URL(req.url).search)
+        return new Response('{"ok":true}', { headers: { 'content-type': 'application/json' } })
+      },
+    })
+    try {
+      const cfg = { rl: { hub_port: Number(srv.port), remote_token: 'x' } } as unknown as RlConfig
+      resetState()
+      const a = await triggerCloudHalt(cfg, 'a 事故', 'a')
+      expect(a.ok).toBe(true)
+      expect(seen).toEqual(['?course=a'])
+      const halts = loadConsoleState().cloudHalts
+      expect(halts?.a?.status).toBe('halted')
+      expect(halts?.b).toBeUndefined()
+    } finally {
+      srv.stop(true)
+    }
   })
 })
 

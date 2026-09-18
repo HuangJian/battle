@@ -733,7 +733,7 @@ def resolve_transport(
         return "hub"
     raise SystemExit(
         "[run_bc] 无法确定传输：--local / REMOTE_PUSH_NODE|push_node_url / "
-        "--remote + rl.remote_hubs[course] 三选一（控制台 preset 会注入）"
+        "--remote + rl.remote_hub_url 三选一（控制台 preset 会注入）"
     )
 
 
@@ -834,12 +834,10 @@ def main() -> None:
         or ""
     )
     token = str(args.remote_token or rl_block.get("remote_token") or "")
-    hub_url = str(
-        args.remote_hub_url
-        or (rl_block.get("remote_hubs") or {}).get(course_key)
-        or rl_block.get("remote_hub_url")
-        or ""
-    )
+    # 共享 hub（2026-09-18）：URL 是**全局**事实（一条隧道/一个 hub 服务所有课程）⇒
+    # 只认单键 `rl.remote_hub_url`（python 侧与 run_rl 同口径）。旧 per-course 的
+    # `rl.remote_hubs[<课>]` 不再读：留着它会把 BC 课程指向一个已不存在的每课隧道。
+    hub_url = str(args.remote_hub_url or rl_block.get("remote_hub_url") or "")
     # 传输裁决（2026-09-15）：--remote-transport 是唯一能压过「本课配了 push_node_url
     # 就推云机」的开关——控制台 local preset（本机独立 localWorker）必须钉 pull，否则
     # job 全被推去云机、本机 worker 永远领不到活（且日志看起来「训练正常」）。
@@ -857,7 +855,7 @@ def main() -> None:
         # 启动即清 hub 停机态（2026-09-12 it17 复盘同款；失败不阻断）
         from remote.hub_client import clear_halt_on_startup
 
-        clear_halt_on_startup(hub_url, token, log=log)
+        clear_halt_on_startup(hub_url, token, log=log, course=course_key)
 
     code_bytes: bytes | None = None
     try:

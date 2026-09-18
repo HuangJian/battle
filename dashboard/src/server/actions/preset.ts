@@ -7,7 +7,7 @@ import { loadConfig, saveConfig, validateCourseArg, writeRemoteHubUrl } from '..
 import { configurePushEndpoint } from '../../stack/push-config'
 import type { CfEdgeIp, CfProtocol, Component, RolloutSrcMode, SlimMode } from '../../core/types'
 import { tailscaleIp } from '../../core/net'
-import { slotPort } from '../../core/slots'
+import { sharedHubUrl } from '../../core/slots'
 import { rlConfigSmoke } from '../../stack/smoke'
 import { slimToCfg } from '../../stack/specs'
 import { ConsoleState, saveConsoleState } from './console-state'
@@ -101,11 +101,12 @@ export async function startPreset(
       const cfgNow = loadConfig()
       const ip = tailscaleIp()
       if (ip) {
-        const hubUrl = `http://${ip}:${slotPort(cfgNow, course, 'hub')}`
-        writeRemoteHubUrl(hubUrl, course)
-        hubNote = `; 云机 pull 地址 = tailnet 直连 ${hubUrl}（未启动 cloudflared）`
+        // 共享 hub ⇒ 共享地址（一条隧道/一个端口服务所有课程），URL 写单键。
+        const hubUrl = sharedHubUrl(cfgNow, ip)
+        writeRemoteHubUrl(hubUrl)
+        hubNote = `; 云机 pull 地址 = tailnet 直连 ${hubUrl}（共享 hub：所有课程同一地址，未启动 cloudflared）`
       } else {
-        hubNote = '; 未检测到 Tailscale 网卡 IP——remote_hub_url 未改（云机需自行可达本课 hub）'
+        hubNote = '; 未检测到 Tailscale 网卡 IP——remote_hub_url 未改（云机需自行可达共享 hub）'
       }
     }
     const order: Component[] =

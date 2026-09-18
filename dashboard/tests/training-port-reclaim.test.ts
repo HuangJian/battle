@@ -20,7 +20,7 @@ import { portOwnedBy, portOwnerPids } from '../src/core/proc'
 import { killPid, pidAlive, portListen, waitUntil } from '../src/core/net'
 import { reclaimPort } from '../src/stack/hub'
 import { cloudflaredSpec, hubServerSpec } from '../src/stack/specs'
-import { slotPort } from '../src/core/slots'
+import { sharedHubPort } from '../src/core/slots'
 import type { RlConfig } from '../src/core/types'
 
 // ────────────────────────── 单测：可注入依赖（跨平台确定性） ──────────────────────────
@@ -283,10 +283,10 @@ describe('portOwnedBy（真实监听进程）', () => {
     expect(await cf.ownsResource!(child.pid)).toBe(true)
     expect(await cf.ownsResource!(process.pid)).toBe(false)
 
-    // hub-server 同理（它核的是槽位推导出的 hub 端口，本用例里没人监听 ⇒ 应判 false）
-    const hub = hubServerSpec(cfg, 'course-a')
+    // hub-server 同理（它核的是**共享** hub 端口，本用例里没人监听 ⇒ 应判 false）
+    const hub = hubServerSpec(cfg)
     expect(typeof hub.ownsResource).toBe('function')
-    expect(slotPort(cfg, 'course-a', 'hub')).not.toBe(port) // 前置：两者不能撞口，否则断言无意义
+    expect(sharedHubPort(cfg)).not.toBe(port) // 前置：两者不能撞口，否则断言无意义
     expect(await hub.ownsResource!(child.pid)).toBe(false)
     expect(await hub.ownsResource!(process.pid)).toBe(false)
   })

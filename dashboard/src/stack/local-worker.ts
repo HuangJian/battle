@@ -12,7 +12,7 @@ import { httpOk, pidAlive, sleep } from '../core/net'
 import { launchSpec } from '../core/proc'
 import { saveAnyComponent } from '../core/registry'
 import { monitorTouch } from '../core/reload-touch'
-import { slotOf, slotPort } from '../core/slots'
+import { sharedHubUrl, slotOf } from '../core/slots'
 import type { RlConfig } from '../core/types'
 import { LOCAL_WORKER_ENTRY, localWorkerSpec } from './specs'
 
@@ -52,7 +52,8 @@ function logTail(p: string, n = 6): string[] {
  *  先起 worker 后起 hub 也能自愈。 */
 export async function startLocalWorker(ctx: LocalWorkerCtx): Promise<LocalWorkerResult> {
   const spec = localWorkerSpec(ctx.cfg, ctx.venv, ctx.course)
-  const hubUrl = `http://127.0.0.1:${slotPort(ctx.cfg, ctx.course, 'hub')}`
+  // 共享 hub（2026-09-18）：本机 worker 轮询的是那一个作业中枢，与本课槽位无关。
+  const hubUrl = sharedHubUrl(ctx.cfg)
   if (!(await httpOk(`${hubUrl}/ping`, ctx.cfg.rl.remote_token, 3000))) {
     warn(`本机 hub-server 未就绪（${hubUrl}）——worker 会持续轮询重试；建议先启动 hub-server`)
   }

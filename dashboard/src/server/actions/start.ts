@@ -5,9 +5,17 @@ import { loadConfig, validateCourseArg } from '../../core/config'
 import { httpOk, pidAlive, waitUntil } from '../../core/net'
 import { LOG_DIR, REPO_ROOT } from '../../core/paths'
 import { launchSpec } from '../../core/proc'
-import { clearAnyComponent, saveAnyComponent } from '../../core/registry'
+import { clearAnyComponent, saveAnyComponent, scopeOf } from '../../core/registry'
 import { monitorTouch } from '../../core/reload-touch'
-import { lockName, lockPathFor, slotOf, slotPort, validateCourseName } from '../../core/slots'
+import {
+  lockName,
+  lockPathFor,
+  sharedHubUrl,
+  sharedHubPort,
+  slotOf,
+  slotPort,
+  validateCourseName,
+} from '../../core/slots'
 import type { Component, RlConfig } from '../../core/types'
 import { resolveVenvPython } from '../../core/venv'
 import { isBcCourse, seedWeightsFromBc } from '../../stack/courses'
@@ -145,14 +153,16 @@ function localHubUrl(
   course: string,
   mode: ConsoleState['trainerPpo'],
 ): string | undefined {
-  return mode === 'local' ? `http://127.0.0.1:${slotPort(cfg, course, 'hub')}` : undefined
+  void course // 共享 hub：地址与课程无关
+  return mode === 'local' ? sharedHubUrl(cfg) : undefined
 }
 
 /** 启动单个组件（已在运行 = 幂等成功；依赖缺失 = ActionError/失败结果）。 */
 export async function startComponent(key: Component, ctx: StartCtx): Promise<ActionResult> {
   // 键必须与 finally 释放的键同源（2026-09-14 事故：guard 用按课键、release 用旧无课键
-  // ⇒ 按课键永不释放 ⇒ 该课程组件的启动/停止/冒烟永久 409）。
-  const bk = busyKey('start', key, ctx.course)
+  // ⇒ 按课键永不释放 ⇒ 该课程组件的启动/停止/冒烟永久 409）。槽位归一（共享组件恒 `''`）
+  // 也是同一件事的两半：归一前后两个键会让 guard 与 release 不同源。
+  const bk = busyKey('start', key, scopeOf(key, ctx.course))
   guard(bk)
   try {
     const cfg = loadConfig()
@@ -166,18 +176,16 @@ export async function startComponent(key: Component, ctx: StartCtx): Promise<Act
         return done(true, 'self-node 已启动')
       }
       case 'hubServer': {
-        if (!ctx.course) throw new ActionError('hub-server 需要 course（先在顶部设置课程）')
-        validateCourseArg(ctx.course)
-        const hubPort = slotPort(cfg, ctx.course, 'hub')
-        if (await hubServerHealthy(cfg, ctx.course))
-          return done(true, `hub-server 已在运行 (port ${hubPort})`)
-        const trajDir = path.join(REPO_ROOT, 'tmp', ctx.course)
-        await stepHubServer(cfg, path.join(trajDir, 'remote-jobs'))
-        return done(true, `hub-server 已启动 (port ${hubPort})`)
+        // 共享 hub（2026-09-18）：**不需要 course**——一个进程服务所有并行课程，课程表
+        // 由它自己从盘上发现。以前这里要求课程，是因为 hub 是「每课一份」。
+        const hubPort = sharedHubPort(cfg)
+        if (await hubServerHealthy(cfg)) return done(true, `hub-server 已在运行 (port ${hubPort})`)
+        await stepHubServer(cfg)
+        return done(true, `hub-server 已启动 (port ${hubPort}；服务所有课程)`)
       }
       case 'cloudflared': {
-        // 登记按课程键控（P1b）；隧道本身的 per-course 端口/URL 留 P3。
-        const url = await stepCloudflared(cfg, false, ctx.course)
+        // 共享单隧道（指向共享 hub 端口；一条隧道服务所有课程）。
+        const url = await stepCloudflared(cfg, false)
         return done(true, `隧道已就绪: ${url}`)
       }
       case 'localWorker': {
@@ -190,7 +198,7 @@ export async function startComponent(key: Component, ctx: StartCtx): Promise<Act
         return done(
           r.ready,
           r.ready
-            ? `local-worker 已启动 (PID ${r.pid}, poll 127.0.0.1:${slotPort(cfg, ctx.course, 'hub')})`
+            ? `local-worker 已启动 (PID ${r.pid}, poll ${sharedHubUrl(cfg)})`
             : `local-worker 启动即退出 (PID ${r.pid})`,
           r.tail,
         )
@@ -308,7 +316,13 @@ export async function startComponent(key: Component, ctx: StartCtx): Promise<Act
           return done(false, `TrainingLoop 启动即退出 (PID ${r.pid})`, tailLines(trainLog))
         }
         // §386：TrainingLoop 重启 = 停机条件消失 → 自动恢复停机状态（hub resume + recovered）。
-        const rec = await markCloudHaltRecovered(cfg, 'TrainingLoop 已重启（停机条件消失）')
+        // 只解**本课**的停机态（共享 hub 上达令是按课程下发的：无课程 = 全课程，那会把
+        // 并行训练的其它课程一起解停）
+        const rec = await markCloudHaltRecovered(
+          cfg,
+          'TrainingLoop 已重启（停机条件消失）',
+          ctx.course,
+        )
         return done(
           true,
           rec.ok && rec.message.includes('解除')

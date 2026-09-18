@@ -48,7 +48,9 @@ def _res(verdict: str, reason: str = "test") -> SimpleNamespace:
 def halt_calls(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
     calls: list[bool] = []
 
-    def _fake_set(hub: str, token: str, halt: bool, log=None) -> bool:
+    # `course`（2026-09-18）：共享 hub 上达令必须按课程下发（本课 ABORT 不连坐其它课）——
+    # 课程身份的专测见 `test_halt_carries_process_course_identity`；这里只数 halt 序列。
+    def _fake_set(hub: str, token: str, halt: bool, log=None, course="") -> bool:
         calls.append(halt)
         return True
 
@@ -94,6 +96,28 @@ def test_stop_verdict_does_not_touch_cloud(halt_calls: list[bool], tmp_path: Pat
     fake = _fake(jsonl=tmp_path / "tl.jsonl")
     assert TrainingGuards._apply_verdict(fake, 9, _res("STOP", "max_hours 到顶")) is False
     assert halt_calls == []
+
+
+def test_halt_carries_process_course_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """共享 hub（2026-09-18）：停机达令必须带**本进程的课程身份**。
+
+    不带的后果：A 课门禁 ABORT 把 B 课的云机一起停掉（一个 hub 服务所有并行课程，
+    进程级一个布尔 = 跨课连坐）。课程身份 = `RL_COURSE_NAME`（`apply_course` 挂上），
+    未挂时为空串 = 全课程（旧语义，单课程 hub 照旧）。
+    """
+    seen: list[str] = []
+
+    def _fake_set(hub: str, token: str, halt: bool, log=None, course: str = "") -> bool:
+        seen.append(course)
+        return True
+
+    monkeypatch.setattr("rl.loop_guards.set_cloud_halt", _fake_set, raising=True)
+    monkeypatch.setenv("RL_COURSE_NAME", "  x1-rebirth-a2  ")
+    fake = _fake(jsonl=tmp_path / "tl.jsonl")
+    TrainingGuards._apply_verdict(fake, 3, _res("REMEDIATE"))
+    assert seen == ["x1-rebirth-a2"], "达令必须点名本课（空格也一并归一）"
 
 
 def test_no_hub_short_circuits(tmp_path: Path, halt_calls: list[bool]) -> None:

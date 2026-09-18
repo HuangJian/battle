@@ -267,7 +267,13 @@ def _wait_until(pred, *, timeout: float = 5.0, step: float = 0.02) -> bool:
     return bool(pred())
 
 
-def _pump(disp: PushDispatcher, pred, *, timeout: float = 8.0, step: float = 0.02) -> bool:
+#: 假 worker 的 HTTP 全在本机（正常 <5ms）——超时给足余量是因为门禁拿 xdist -n 12 跑：
+#: 满载时一次本机请求也能 >0.5s，过短的探测超时会把**健康** worker 误判为「没答」，
+#: 派发器随即把它当忙/离场 ⇒ 没有机器能接活 ⇒ 偶发红（2026-09-18 全量门禁实测）。
+_PING_TIMEOUT = 2.0
+
+
+def _pump(disp: PushDispatcher, pred, *, timeout: float = 20.0, step: float = 0.02) -> bool:
     """持续打拍直到 pred 成立——模拟生产里派发循环（`start()` 的那条线程）。
 
     测试用显式 `tick()` 而不是起线程：拍与断言在同一个线程里，失败可复现。
@@ -341,7 +347,7 @@ def test_push_workers_hot_reload_and_probe(tmp_path: Path, worker_factory) -> No
         json.dumps({"nodes": [{"id": "g1", "url": "http://127.0.0.1:1", "gpu_push": True}]}),
         encoding="utf-8",
     )
-    ws = PushWorkers(cfg, log=_quiet, ping_timeout=0.5)
+    ws = PushWorkers(cfg, log=_quiet, ping_timeout=_PING_TIMEOUT)
     assert ws.reload(force=True) is True
     assert [w["id"] for w in ws.snapshot()] == ["g1"]
     # 内容没变 ⇒ 不再重读（mtime 判定）
@@ -395,7 +401,9 @@ def _dispatcher(
 def _workers_with(tmp_path: Path, factory, *specs) -> PushWorkers:
     """登记表用**测试自己的**配置路径：绝不能落回仓库的 rl-config.json
     （那会让用例依赖开发机上的真实节点列表——本机有 gpu_push 节点时行为就变了）。"""
-    ws = PushWorkers(tmp_path / "push-config.json", log=_quiet, ping_sec=0.0, ping_timeout=0.5)
+    ws = PushWorkers(
+        tmp_path / "push-config.json", log=_quiet, ping_sec=0.0, ping_timeout=_PING_TIMEOUT
+    )
     for i, (w, kw) in enumerate(specs):
         ws.add({"id": kw.pop("id", f"g{i}"), "url": w.url, "authKey": "sekret", **kw})
     return ws
@@ -554,7 +562,9 @@ def test_no_idle_worker_leaves_job_at_head(tmp_path: Path, worker_factory) -> No
     """没有空闲 worker ⇒ 什么都不推（等下一拍），job 留在队首、无租约残留。"""
     hub = _hub(tmp_path, ["x2"])
     _publish(hub, "x2", "j" * 16)
-    ws = PushWorkers(tmp_path / "push-config.json", log=_quiet, ping_sec=0.0, ping_timeout=0.5)
+    ws = PushWorkers(
+        tmp_path / "push-config.json", log=_quiet, ping_sec=0.0, ping_timeout=_PING_TIMEOUT
+    )
     disp = _dispatcher(hub, ws)
 
     disp.tick()

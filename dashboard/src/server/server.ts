@@ -59,6 +59,7 @@ import {
   curriculumLadderView,
   discoverCourses,
   evalReplayFileResponse,
+  invalidateHubAdmin,
   invalidateSlowSnapshot,
   ladderTickAll,
   routeAction,
@@ -354,6 +355,7 @@ async function main(): Promise<void> {
         if (req.method === 'POST' && url.pathname === '/api/deliverUpload') {
           const resp = await handleDeliverUpload(req, viewCourse || '')
           invalidateSlowSnapshot()
+          invalidateHubAdmin()
           return resp
         }
         if (req.method === 'GET' && url.pathname === '/api/taskBundleInfo') {
@@ -387,7 +389,12 @@ async function main(): Promise<void> {
           }
           const resp = await routeAction(act, body)
           // 动作改动组件/节点/课程 → 失效慢部件缓存，下次 buildStateView 冷算即时上屏（§366）。
-          if (resp) invalidateSlowSnapshot()
+          // hub 观测面（队列/worker 登记表）同处失效：worker 登记写过 rl-config、启停 hub
+          // 都会改它的内容，下一拍不该再读旧观测（与慢快照同一时机 = 一个失效点）。
+          if (resp) {
+            invalidateSlowSnapshot()
+            invalidateHubAdmin()
+          }
           return resp ?? json({ ok: false, message: `未知动作: ${act}` }, 404)
         }
         return new Response('not found', { status: 404 })

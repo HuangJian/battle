@@ -11,6 +11,7 @@
  *    views               组件与节点视图  |  component-meta  组件元数据表（日志路径/端口）
  *    logs                日志读取与解码  |  ledger / loop-complete  账本尾派生
  *    courses             课程发现与上下文|
+ *    overview            多课程并行总览 + push worker 登记（hub 观测面）
  *    pool / eval-games   端点专属视图    |  ppo-queue / curriculum  专项派生
  *    config              配置读取兜底    |  view-types  视图类型透传
  *
@@ -32,6 +33,7 @@ export * from './snapshot-cache'
 export * from './ledger'
 export * from './loop-complete'
 export * from './snapshot-refresher'
+export * from './overview'
 export * from './ppo-queue'
 export * from './state-view'
 export * from './pool'

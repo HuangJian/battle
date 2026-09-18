@@ -3,8 +3,8 @@ import { loadConfig } from '../../core/config'
 import { warn as logWarn } from '../../core/log'
 import { killPid, killPidTree, pidAlive } from '../../core/net'
 import { portOwnerPids, stopAllManaged } from '../../core/proc'
-import { clearAnyComponent } from '../../core/registry'
-import { slotPort } from '../../core/slots'
+import { clearAnyComponent, isSharedComponent, scopeOf } from '../../core/registry'
+import { sharedHubPort, sharedTunnelMetricsPort, slotPort } from '../../core/slots'
 import { COMPONENT_KILL_TREE } from '../../core/types'
 import type { Component, RlConfig } from '../../core/types'
 import { releaseTrainerLocks } from '../../launch/cli'
@@ -21,7 +21,10 @@ import { ActionResult, busyKey, done, guard, release } from './result'
  *  （localWorker 不监听任何端口，无登记就是「未在运行」——无需兜底。）
  *  指引操作员指定课程或走 stopAll（紧急总闸）。selfNode 是全局单例（agent_port），
  *  不受此限。 */
-export async function stopComponent(key: Component, course = ''): Promise<ActionResult> {
+export async function stopComponent(key: Component, courseArg = ''): Promise<ActionResult> {
+  // 槽位归一（共享组件恒 `''`）：调用方传的课程是**视图语境**（「我在看哪门课」），
+  // 而 hub/隧道是共享的——不归一会拿课程槽去查/键控一个不属于任何课的条目。
+  const course = scopeOf(key, courseArg)
   // 键必须与 finally 释放的键同源（2026-09-14 事故，同 start.ts）。
   const bk = busyKey('stop', key, course)
   guard(bk)
@@ -54,16 +57,19 @@ export async function stopComponent(key: Component, course = ''): Promise<Action
         `${COMPONENT_LABELS[key]} 已停止${course ? ` (course=${course})` : ''}${notes}`,
       )
     }
-    // 无登记：端口兜底（端口一律经槽位算术，不再手写偏移）
+    // 无登记：端口兜底（端口一律经算术函数，不再手写偏移）
+    // hub/metrics 是**共享**端口：不需要也不允许拿课程去推（旧实现按课推 = 推错端口）。
     const ports: Record<string, (cfg: RlConfig, course: string) => number> = {
       selfNode: (c) => c.rl.agent_port,
-      hubServer: (c, crs) => slotPort(c, crs, 'hub'),
+      hubServer: (c) => sharedHubPort(c),
+      cloudflared: (c) => sharedTunnelMetricsPort(c),
       workerServe: (c, crs) => slotPort(c, crs, 'push'),
     }
     const portOf = ports[key]
     if (portOf) {
       const known = course || entry?.course || ''
-      if (!known && key !== 'selfNode') {
+      const shared = isSharedComponent(key)
+      if (!known && key !== 'selfNode' && !shared) {
         const msg =
           `${COMPONENT_LABELS[key]} 无注册且未指定课程——拒绝按端口兜底` +
           '（多课程下按端口盲扫可能停错课）；请在指定课程后重试，或用「全部停止」'
@@ -71,7 +77,8 @@ export async function stopComponent(key: Component, course = ''): Promise<Action
         return done(false, msg)
       }
       const cfg = loadConfig()
-      const pids = portOwnerPids(portOf(cfg, known))
+      // 共享组件的端口兜底是**全仓唯一**的那一个端口，与课程无关（传空串避免误用槽位）。
+      const pids = portOwnerPids(portOf(cfg, shared ? '' : known))
       for (const pid of pids) await killPid(pid)
       return done(true, pids.length > 0 ? `已按端口兜底停止 ${pids.length} 个进程` : '未在运行')
     }

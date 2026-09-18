@@ -141,6 +141,16 @@ export function ComponentCards({
             >
               <span className={`tc-dot ${dotClass(c)}`} />
               <b>{c.key}</b>
+              {c.shared ? (
+                // 共享实例（hub/隧道，2026-09-18）：一个进程服务所有课程，不属于当前查看的课。
+                // 不标出来，操作员会以为「这门课自己的 hub 停了」而去重复启动。
+                <b
+                  className="tc-cc__shared"
+                  title="共享实例：一个进程服务所有并行课程（启动/停止/冒烟的操作对象是同一个）"
+                >
+                  共享
+                </b>
+              ) : null}
               {(() => {
                 // push 执行面徽章（2026-09-15）：贴在 trainer 卡的模式徽章旁——「job 现在推给谁」
                 // 只有这一个卡上问得出口。

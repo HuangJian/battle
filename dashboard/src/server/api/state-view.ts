@@ -8,6 +8,7 @@ import { resolveCfTunnel, resolveRolloutSrc, resolveSlim } from '../../stack/spe
 import { readIterMetrics, readPairedReferee } from '../iters'
 import { loadConfigSafe } from './config'
 import { discoverCourses, effectiveCourse } from './courses'
+import { buildOverview, buildWorkerRegistry, trainingCourses } from './overview'
 import { detectPpoQueueStall } from './ppo-queue'
 import { readTunnelAbRuns } from './tunnel-ab'
 import { getSlowSnapshot } from './snapshot-refresher'
@@ -39,6 +40,12 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
   const ppoQueueStall = course
     ? detectPpoQueueStall(path.join(REPO_ROOT, 'tmp', course, 'remote-jobs'))
     : null
+  // 多课程并行总览 + push worker 登记（2026-09-18）：两个面各有一处 try——观测面
+  // 坏掉（无 hub / 账本不可读）只该让那两块显示空态，不该把整页 /api/state 带崩。
+  const [overview, workerRegistry] = await Promise.all([
+    buildOverview(cfg, courses, course).catch(() => null),
+    buildWorkerRegistry(cfg, course).catch(() => null),
+  ])
   return {
     time: new Date().toISOString(),
     course,
@@ -46,6 +53,10 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     isBc: isBcCourse(course),
     activeCourse: state.activeCourse || state.course || course,
     courses,
+    // 在训课程（registry trainingLoop 存活）：课程 select 的多课高亮与总览的「在训」列同源。
+    trainingCourses: trainingCourses(),
+    overview,
+    workerRegistry,
     components,
     nodes,
     localNode,
@@ -64,10 +75,10 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
       stream: Number(cfg.rl.stream ?? 0),
       doubleBuffer: Number(cfg.rl.double_buffer ?? 0),
       precollectEarly: Number(cfg.rl.precollect_early ?? 0),
-      // M1：当前**生效**的隧道选项（per-course 覆盖 > rl.* > 缺省 http2/4）——
+      // M1：当前**生效**的隧道选项（单隧道 ⇒ 只有 rl.* > 缺省 http2/4）——
       // UI 显示它，避免「以为改了其实没改」。
-      cfProtocol: resolveCfTunnel(cfg, course).protocol,
-      cfEdgeIp: resolveCfTunnel(cfg, course).edgeIp,
+      cfProtocol: resolveCfTunnel(cfg).protocol,
+      cfEdgeIp: resolveCfTunnel(cfg).edgeIp,
       // M2：协议瘦身开关的当前**生效**值（per-course > rl.* > 缺省 on）——
       // UI 显示它，避免「以为改了其实没改」。
       slim: resolveSlim(cfg, course),

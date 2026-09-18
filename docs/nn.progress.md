@@ -4,6 +4,99 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §74 单 hub + 单隧道（P1 余下 ①）：hub/cloudflared 收敛为单实例 + 课程表从盘上发现（2026-09-18）
+
+用户口径（原话）：`hubserver/trainingloop/selfNode/cloudflared 都只需要开一个进程，就能同时支持所有并行训练课程`。
+本轮做 **hub + 隧道**（trainingLoop 是有状态会话，收敛要等 P2 的任务队列改造，见 DECISIONS 条目的「备选与否决」）。
+
+### 形状：一个进程，一份地址，课程表来自磁盘
+
+```
+训练侧（每课一个会话）        共享实例（一个进程）
+tmp/<课A>/remote-jobs  ─┐
+tmp/<课B>/remote-jobs  ─┼─→ hub-server :<rl.hub_port>  --discover --traj-root <repo>/tmp
+tmp/<课C>/remote-jobs  ─┘        ├─ 扫 <traj>/<课>/{remote-jobs,offline}（新鲜 1h 窗口）自动登记
+                                 ├─ 每课一条 FIFO + 跨课程轮转（既有）
+                                 └─ cloudflared（单隧道 → 同一个 hub 端口）
+```
+
+- **课程表不做注册**：训练侧把 job 发布到盘上就是「这门课在跑」的事实。扫描两处触发——`claim_next()` 前置（2s 最小间隔闸 ⇒ 新课程**下一次轮询**就能被领到）+ 后台 5s 节拍（push 模式/无 worker 时兜底）。登记后不撤销（课程暂停时在飞 job 的结果回传不能 404）。
+- **新鲜窗口 1h**：陈旧实验目录的磁盘形状与残留 pending job 完全一样，误登记 = 把死课程的活派给真 GPU worker。
+- **统计面唯一**：`scopeOf(key, course)` 是共享槽（`''`）的唯一归一入口；`sharedHubPort/sharedHubUrl/sharedTunnelMetricsPort` 是唯一地址来源（grep 门禁守 `slotPort(…, 'hub')` 零调用面）。
+- **换代接管**：共享实例启动前把旧形状（per-course）条目活则杀、死则清账；per-course 条目**拒重建**（fail-closed），否则等于凭空再造一个 hub 读同一棵树。
+- **单实例切换要搬状态**：`_adopt_solo()` 把 halt / race / worker 登记 / 鉴权计数从那份 `_JobStore` 搬到队列自己身上。
+- **停机达令按课程下发**（连带必修）：单 hub 之前「一个 hub 一份 halt 布尔」≈ 按课程；单进程后那个布尔升格为**进程级**，A 课门禁 ABORT 会连坐停掉 B 课云机（表现为「云机莫名停机」，属最贵的静默故障）。故 halt/resume/status 一律支持 `?course=`（空 = 全课程），训练侧（门禁 / 启动清停机态）与控制台各自带课名。
+
+### 验收
+
+| 面 | 结果 |
+|---|---|
+| nn python gate | ✔ 26s 绿（ruff / mypy / 全量 pytest **1312 passed / 3 skipped**，含 `test_multi_course_hub.py` 24 例，其中 1 例是**真进程** `--discover` 主流程） |
+| dashboard typecheck / test | ✔ 542 pass / 0 fail（`single-hub-tunnel.test.ts` 新 7 例；`cloud-halt.test.ts` +2 例按课程达令） |
+| dashboard build:ui | ✔ 三份 bundle（app 61.8KB gzip / log / eval） |
+| 根 `bun run check` | ✔ 32s 绿 |
+
+### 踩到的坑（都留了回归）
+
+1. **`tmp/*/remote-jobs` 写进了 TS 块注释** ⇒ `*/` 提前闭合注释，tsc 在下一行开始报 `Module declaration names…` 一类怪错。TS 注释里写通配路径要避开 `*/`。
+2. **`withScratch(async () => …)` 不 await 回调** ⇒ `finally` 在第一个 await 处就恢复环境变量，异步体后半段跑去读**线上** `registry.json`，而那份里正好躺着历史遗留的 `hubServers[''] = {pid: 1}`（exit-watchdog 事故污染）——测试看起来「读到 pid 1」其实是读错文件。修法：测试夹具必须 `await fn(...)`。
+3. **`_pump` 的 8s 上限在满载下会偶发红**：门禁拿 xdist -n 12 跑，假 worker 的 0.5s 探测超时在满载时会把**健康** worker 误判为「没答」⇒ 派发器把它当忙 ⇒ 没有机器能接活（`test_worker_refusing_job_requeues_to_another` 实测红过一次）。修法：假 HTTP 探测超时提到 2s + `_pump` 上限提到 20s（纯测试夹具余量）。
+4. **子进程还活着时读它的 stdout 会阻塞**：`assert st == 200, f"{proc.stdout.read()}"` 一旦被改成**先读后断言**（不在失败分支里惰性求值），就变成等 EOF → 整个用例挂到 60s 超时（mypy 还顺手报 `IO[Any] | None`）。修法：`_startup_output(proc)` 只在失败时调用、且进程未退出时直接返回空串。
+5. **`# noqa: BLE001` 在这个 ruff 配置下是 RUF100（未启用该码）**——写了反而红，异常兜底的注释直接当普通注释写。
+6. **`toEqual` 比 ProcSpec 会因闭包函数不等而假红**（`healthy`/`ownsResource` 每次构造都是新引用）⇒ 逐可比字段断言（沿用 W4 的写法）。
+
+## §73 控制台 worker 登记入口 + 面板重组（P1 余下）：课程 select 解放 / 在训课程全高亮 / 并行总览（2026-09-18）
+
+用户指令：控制台 worker 登记入口 UI + 面板重组。抉择与代价全文见
+`DECISIONS.md §2026-09-18-goalnn-console-worker-register-and-overview`，这里只记落地与实测。
+
+**形状：登记是配置编辑器，总览是 hub 观测面的读方。**
+
+- **worker 登记**（`/v1` 无关，纯 rl-config）：面板只 upsert `nodes[]` 里的 `gpu_push` 条目
+  （hub 按 mtime 热重载），写完 best-effort `POST /admin/push-workers {action:"reload"}`；
+  **ping 不通不拦登记**（云机没开机是常态），返回值如实分流 `ok:true`/`ok:false`。
+  改 url 或删节点时把 `courses.<课>.push_node_url` 一并改写/清除——留着就变成「指向不存在
+  的 URL」⇒ python 匹配 0 个节点后**静默回落 pull**。移除一个 rollout 节点（非 gpu_push）
+  会被 409 拒（不把采集节点改写成 push worker）。
+- **两列探活刻意分开**：面板直探 `{url}/ping`（此刻这台通不通）与 hub 周期探活结论
+  （调度器认不认它在线的唯一判据）各占一列；两列不一致本身就是信号（面板通而 hub 判离线
+  ⇒ hub 还没重载配置）。
+- **课程 select 解锁**：旧锁定（§367，hub 运行中不许切课）的前提已被「单 hub 托管 N 份账本」
+  推翻，多课程并行下它只会把查看/切换锁死。现在恒可切（含历史课程），只改「看哪门课」。
+- **在训课程 = registry 里 `trainingLoop` 存活**（服务端 stamp `trainingCourses`）：课程 select
+  里**每一门**在训课都带 🔥（不是只标第一门），查看的课之外的用「正在训练：…」标签提示。
+- **并行总览**（新面板）：hub 行 = 应答基址 / 在派发课程数 / 活跃 worker 数 / 竞速 / 停机 /
+  最近派发（轮转游标）；每课一行 = 在训 / 离线 / iter / 队列深度 / 在飞，点行即切查看。
+  这一行回答「某门课为什么在饿着」的四种可能（不在 hub 课表 / 被标离线 / 有活但没空闲 worker /
+  队列空），在日志里要靠猜。
+- **每课 iter 只认账本里的 `iteration` 事件**（`training_log.jsonl` 是多写者文件：训练侧写
+  iteration，hub 追加 job_completed/job_failed；把 `job_completed.it` 当轮次会读出还没跑完的那一轮）。
+- **hub 基址不新增配置键**：按 registry 里活着的 hub 条目逐个试 `/admin/queue`，第一个应答者即
+  观测源 ⇒ 单 hub 多课与每课一 hub 两种形状都读得对；都没有 → 「hub 无应答」，不编地址。
+- **容错与预算**：观测面任何失败（无 hub / 401 / 坏 JSON / 账本不可读）→ null/空态，绝不把
+  `/api/state` 带崩；总览与登记表**共用一次** hub 探测（5s TTL + 单飞），冷算里 hub 探测与
+  worker 直探并行开跑（串行会到 3×超时）。
+
+**落地**：`dashboard/src/web/view/course-overview.ts`、`src/stack/hub-admin.ts`、
+`src/server/api/overview.ts`、`src/server/actions/workers.ts`、`src/web/app/panels/{CourseOverview,WorkerRegistry}.tsx`
+（新）；`src/server/api/{route,state-view,index}.ts`、`src/server/actions/index.ts`、
+`src/web/view/{index,console-types}.ts`、`src/web/app/app.tsx`、`src/web/theme.css`（改）。
+
+**门禁**：dashboard typecheck / test **533 pass**（+41 例：overview 12 + 登记动作 16 + 面板 SSR 12
++ 课程 select/在训高亮改写 2 + 原有用例不变）/ lint 0 warning / build:ui 三份 bundle 均过；
+根 `bun run check` 绿。
+
+**两个实测踩点（都留了回归）**：
+1. **`parseHubQueue` 的宽容解析不是装饰**：hub 是独立进程，可能比控制台新/旧一个版本——缺字段
+   退化为 0/空比让整页 500 好得多；用例里专门断言「字段全缺 → 全零/缺省」。
+2. **回环不可达地址会挂满直探超时**：测试里用 `http://127.0.0.1:1` 当「探过、不通」会让每条用例
+   白等 1.5s（本环境对回环拒绝连接是 **DROP** 而非 RST）——改用「401 的假 worker_server」拿到
+   即时确定结论，用例耗时从 9.2s 降到 0.3s。这条写进了测试注释，避免后人再踩。
+
+**P1 余下**：① 单隧道——hub / cloudflared / trainingLoop 收敛为单例（现在仍 per-course 拉起），
+随之把组件卡片拆成「单例角色」与「按课程」两种形状；② 多课程单 hub 的端到端 e2e
+（训练侧 hubpush → hub → 真 worker_server + 假 PPO）。
+
 ## §72 hub 中介 push 派发（P1 余下）：队列顺序推空闲 worker + 周期探活 + 超时回落换人（2026-09-18）
 
 用户指令：hub 中介的 push 派发 + worker 登记入口 + 周期 ping 探活，训练侧 push 改走 hub。

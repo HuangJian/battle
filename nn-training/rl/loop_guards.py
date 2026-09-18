@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import dist_common
 from platform_utils import rmtree_best_effort
 from remote.hub_client import set_cloud_halt
 from rl.breaker import (
@@ -399,6 +400,9 @@ class TrainingGuards:
             token,
             want_halt,
             log=lambda m: log(f"[run_rl] gate it{it}: {m}"),
+            # 共享 hub（2026-09-18）：达令必须按课程下发——本课门禁 ABORT 只停本课云机，
+            # 否则并行训练的其它课程会跟着被停。课程身份就是进程级那个（apply_course 挂上）。
+            course=dist_common.course_name_of(),
         )
         self._cloud_halted = want_halt
 

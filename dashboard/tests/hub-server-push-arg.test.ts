@@ -24,7 +24,8 @@ function cfg(rl: Record<string, unknown> = {}): RlConfig {
 }
 
 function argvOf(c: RlConfig): string[] {
-  return hubServerSpec(c, 'x1-rebirth').cmd.map(String)
+  // 共享 hub（2026-09-18）：spec 不再按课程构造（一个进程服务所有并行课程）。
+  return hubServerSpec(c).cmd.map(String)
 }
 
 describe('hubServerSpec 传 --push', () => {
