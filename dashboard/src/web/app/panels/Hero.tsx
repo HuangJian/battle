@@ -57,6 +57,7 @@ function TrendCell({
   tone,
   range,
   yFloor,
+  yMin,
   title,
 }: {
   series: Series | undefined
@@ -66,6 +67,8 @@ function TrendCell({
   range: TrendRange
   /** y 轴下界上限：击杀/道具 0；胜率 0.3（基底不得高于 30%）。 */
   yFloor?: number
+  /** y 轴强制下界（胜局耗时量级缩放）。 */
+  yMin?: number
   /** 标签悬停提示（口径说明）。 */
   title?: string
 }) {
@@ -98,16 +101,36 @@ function TrendCell({
           tone={tone}
           height={56}
           yFloor={yFloor}
+          yMin={yMin}
         />
       ) : null}
     </div>
   )
 }
 
+/** 胜局耗时 y 轴强制下界（用户 2026-09-18）：
+ *  max(0, 全部 it 最少耗时×0.8, 全部 it 最多耗时×0.5)。
+ *  按序列全量有效点计算（不随「最近 N」档位变）。 */
+function winTicksYMin(...seriesList: Array<{ vals: number[] } | undefined>): number | undefined {
+  const vals: number[] = []
+  for (const s of seriesList) {
+    if (!s) continue
+    for (const v of s.vals) if (Number.isFinite(v)) vals.push(v)
+  }
+  if (vals.length === 0) return undefined
+  const mn = Math.min(...vals)
+  const mx = Math.max(...vals)
+  return Math.max(0, mn * 0.8, mx * 0.5)
+}
+
 /** 击杀/道具 展示辅助：每局平均；击杀 1 位、道具 2 位小数。 */
 function fmtPerGame(total: number, games: number, digits = 1): string {
   if (games <= 0) return String(total)
   return (total / games).toFixed(digits)
+}
+
+function fmtResidual(hp: number | null | undefined): string {
+  return hp == null ? '-' : String(hp)
 }
 
 /** 胜局耗时（ticks）/ 胜局残血 展示：整数（平均值已四舍五入）。 */
@@ -249,8 +272,8 @@ function MainTable({
               {r.actuals?.killRate != null ? (
                 <span title="歼灭率 = Σ击杀 / Σ关卡敌数">{fmtPct(r.actuals.killRate)}</span>
               ) : r.actuals ? (
-                <span className="tc-muted" title="该轮缺关卡敌数，无法换算歼灭率">
-                  -
+                <span className="tc-muted" title="缺关卡敌数，显示每局平均击杀（非百分比）">
+                  {fmtPerGame(r.actuals.totalKills, r.actuals.games)}
                 </span>
               ) : (
                 <span className="tc-muted" title="该轮磁盘数据已清理，估算值">
@@ -261,6 +284,10 @@ function MainTable({
             <td className="tc-num">
               {r.actuals?.dmgPerKillPct != null ? (
                 <span title="每杀承伤 / (命数×满血)">{fmtPct(r.actuals.dmgPerKillPct)}</span>
+              ) : r.actuals?.dmgPerKill != null ? (
+                <span className="tc-muted" title="缺容量分母，显示每杀承伤绝对 HP">
+                  {r.actuals.dmgPerKill.toFixed(1)}
+                </span>
               ) : (
                 <span className="tc-muted">-</span>
               )}
@@ -269,6 +296,10 @@ function MainTable({
               {r.actuals?.avgResidualHpPct != null ? (
                 <span title="胜局残血 / 该局可支配生命容量">
                   {fmtPct(r.actuals.avgResidualHpPct)}
+                </span>
+              ) : r.actuals?.avgResidualHp != null ? (
+                <span className="tc-muted" title="缺容量分母，显示胜局平均残血 HP">
+                  {fmtResidual(r.actuals.avgResidualHp)}
                 </span>
               ) : (
                 <span className="tc-muted">-</span>
@@ -462,6 +493,10 @@ function EvalTable({ rows }: { rows: IterRow[] }) {
                 <td className="tc-num">
                   {e.killRate != null ? (
                     <span title="歼灭率 = Σ击杀 / Σ关卡敌数">{fmtPct(e.killRate)}</span>
+                  ) : e.totalKills != null && e.games > 0 ? (
+                    <span className="tc-muted" title="缺关卡敌数，显示每局平均击杀">
+                      {fmtPerGame(e.totalKills, e.games)}
+                    </span>
                   ) : (
                     <span className="tc-muted">-</span>
                   )}
@@ -469,6 +504,10 @@ function EvalTable({ rows }: { rows: IterRow[] }) {
                 <td className="tc-num">
                   {e.dmgPerKillPct != null ? (
                     <span title="每杀承伤 / (命数×满血)">{fmtPct(e.dmgPerKillPct)}</span>
+                  ) : e.dmgPerKill != null ? (
+                    <span className="tc-muted" title="缺容量分母，显示每杀承伤绝对 HP">
+                      {e.dmgPerKill.toFixed(1)}
+                    </span>
                   ) : (
                     <span className="tc-muted">-</span>
                   )}
@@ -476,6 +515,10 @@ function EvalTable({ rows }: { rows: IterRow[] }) {
                 <td className="tc-num">
                   {e.avgResidualHpPct != null ? (
                     <span title="胜局残血 / 该局可支配生命容量">{fmtPct(e.avgResidualHpPct)}</span>
+                  ) : e.avgResidualHp != null ? (
+                    <span className="tc-muted" title="缺容量分母，显示胜局平均残血 HP">
+                      {fmtResidual(e.avgResidualHp)}
+                    </span>
                   ) : (
                     <span className="tc-muted">-</span>
                   )}
@@ -794,7 +837,7 @@ export function Hero({ stateView, onMore, onRefresh, readOnly = false }: HeroPro
           </div>
         ) : null}
         <div className="tc-trends">
-          {/* 行1：胜率（rollout+eval） / 承伤·杀 / 击杀 */}
+          {/* 行1：胜率 / 承伤·杀 / 胜局耗时（与击杀对调，2026-09-18） */}
           <TrendCell
             series={winSeries}
             seriesEval={evalSeries}
@@ -813,20 +856,21 @@ export function Hero({ stateView, onMore, onRefresh, readOnly = false }: HeroPro
             title="每杀承伤 / (命数×满血)（rollout 实线 · eval 橙点）；越小越会周旋"
           />
           <TrendCell
+            series={winTicksSeries}
+            seriesEval={evalWinTicksSeries}
+            fmt={fmtInt}
+            range={range}
+            yMin={winTicksYMin(winTicksSeries, evalWinTicksSeries)}
+            title="胜局平均耗时（ticks；rollout 实线 · eval 橙点）；y 下界 = max(0, min×0.8, max×0.5)"
+          />
+          {/* 行2：击杀 / 胜局残血 / 道具 */}
+          <TrendCell
             series={killsSeries}
             seriesEval={evalKillsSeries}
             fmt={fmtPct}
             range={range}
             yFloor={0}
             title="歼灭率 = Σ击杀 / Σ关卡敌数（rollout 实线 · eval 橙点）"
-          />
-          {/* 行2：胜局耗时 / 胜局残血 / 道具 */}
-          <TrendCell
-            series={winTicksSeries}
-            seriesEval={evalWinTicksSeries}
-            fmt={fmtInt}
-            range={range}
-            title="胜局平均耗时（ticks；rollout 实线 · eval 橙点）"
           />
           <TrendCell
             series={winHpSeries}

@@ -7,6 +7,18 @@ import { COMPONENT_LABELS, busy, componentBusy } from '../actions'
 import { ALL_COMPONENTS, HEALTHY_PORTS } from './component-meta'
 import { logTail, resolveComponentLog } from './logs'
 
+/** cloudflared 健康判定（2026-09-18）：隧道进程在 ≠ 链路可用。
+ *  hub（origin）不通 → 一律 false（黄点）；hub 通时再看隧道 /ping。
+ *  无隧道 URL 时以 hub 探测为准。 */
+export function cloudflaredHealthy(
+  hubOk: boolean | null,
+  tunnelOk: boolean | null,
+): boolean | null {
+  if (hubOk === false) return false
+  if (tunnelOk !== null) return tunnelOk
+  return hubOk
+}
+
 export async function componentViews(cfg: RlConfig, course: string): Promise<ComponentView[]> {
   const reg = loadRegistry()
   return Promise.all(
@@ -26,7 +38,15 @@ export async function componentViews(cfg: RlConfig, course: string): Promise<Com
           1500,
         )
       } else if (status === 'running' && key === 'cloudflared') {
-        healthy = e?.url ? await httpOk(`${e.url}/ping`, cfg.rl.remote_token, 2500) : null
+        // 隧道在、hub 不通（origin refused）→ 黄点：进程活着但链路不可用。
+        // 先探本课 hub（1500ms），不通直接 false，不再等隧道外网超时。
+        const hubProbe = HEALTHY_PORTS.hubServer?.(cfg, course)
+        const hubOk = hubProbe ? await httpOk(hubProbe, cfg.rl.remote_token, 1500) : null
+        const tunnelOk =
+          hubOk !== false && e?.url
+            ? await httpOk(`${e.url}/ping`, cfg.rl.remote_token, 2500)
+            : null
+        healthy = cloudflaredHealthy(hubOk, tunnelOk)
       } else if (status === 'running' && (key === 'trainingLoop' || key === 'localWorker')) {
         // 存活即健康：trainingLoop 就绪以日志产出为准（iters 指标）；localWorker 是
         // 出站轮询者（没有 HTTP 端点可探），存活即它在轮询。

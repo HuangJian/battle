@@ -275,9 +275,9 @@ describe('console sparkline (ui/view)', () => {
       const html = render.renderConsolePage(mkView(30, true))
       const charts = (html.match(/class="tc-trend__svg"/g) ?? []).length
       expect(charts).toBe(6)
-      // 6 格：胜率 / 承伤·杀 / 击杀 / 胜局耗时 / 胜局残血 / 道具
+      // 6 格：胜率 / 承伤·杀 / 胜局耗时 / 击杀 / 胜局残血 / 道具（2026-09-18 耗时与击杀对调）
       const labels = [...html.matchAll(/tc-tcell__lbl[^>]*>([^<]+)<\/span>/g)].map((m) => m[1])
-      expect(labels).toEqual(['胜率', '承伤/杀', '击杀', '胜局耗时', '胜局残血', '道具'])
+      expect(labels).toEqual(['胜率', '承伤/杀', '胜局耗时', '击杀', '胜局残血', '道具'])
       // 双序列叠加：eval 橙线（#ea580c）在有 eval 数据时出现
       expect(html).toContain('#ea580c')
       // 范围档位渲染且默认最近 30
