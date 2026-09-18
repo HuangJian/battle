@@ -4,7 +4,7 @@
 
 import { useState } from 'preact/hooks'
 import type { JSX } from 'preact'
-import { sliceSeries, type Series, type TrendRange } from '../view'
+import { sliceSeries, trendHoverIndex, type Series, type TrendRange } from '../view'
 
 export interface TrendChartProps {
   /** 主序列（rollout）：全量时序（组件内部按 range 截取）。 */
@@ -132,11 +132,10 @@ export function TrendChart({
   const hy2 = hv2 != null && Number.isFinite(hv2) ? py(hv2) : null
 
   const onMove = (e: JSX.TargetedMouseEvent<SVGRectElement>) => {
+    // 捕获 rect = plot 区（x=PAD_L, width=plotW）：屏幕比例 t∈[0,1] 直接映射下标。
+    // 勿再按全 viewBox 宽换算后减 PAD_L（会在中段把选点推到鼠标左侧）。
     const rect = e.currentTarget.getBoundingClientRect()
-    const relX = ((e.clientX - rect.left) / rect.width) * VB_W - PAD_L
-    let i = Math.round((relX / plotW) * (n - 1))
-    i = Math.max(0, Math.min(n - 1, i))
-    setHover(i)
+    setHover(trendHoverIndex(e.clientX, rect.left, rect.width, n))
   }
 
   const tipParts: string[] = []

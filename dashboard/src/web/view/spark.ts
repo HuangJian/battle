@@ -1,4 +1,4 @@
-/** spark.ts — sparkline 折线点计算与 path 生成。 */
+/** spark.ts — sparkline 折线点计算、path 生成与趋势图 hover 命中。 */
 // ────────────────────────── 纯函数：sparkline ──────────────────────────
 
 export const SPARK_W = 110
@@ -34,6 +34,25 @@ export function sparkPoints(
     lastX: px(pts.length - 1),
     lastY: py(pts[pts.length - 1]!),
   }
+}
+
+/**
+ * 趋势图 hover：捕获层（plot 区）屏幕坐标 → 数据下标。
+ * `rectLeft/rectWidth` 是 **plot 捕获 rect** 的 getBoundingClientRect（已含 PAD_L 偏移、
+ * 宽度 = plot 对应的屏幕宽），因此比例 t∈[0,1] 直接映射 i∈[0,n-1]。
+ * 历史 bug：曾按全 viewBox 宽 VB_W 换算再减 PAD_L，导致中段选点系统性偏左。
+ */
+export function trendHoverIndex(
+  clientX: number,
+  rectLeft: number,
+  rectWidth: number,
+  n: number,
+): number {
+  if (n <= 1) return 0
+  if (!(rectWidth > 0)) return 0
+  const t = (clientX - rectLeft) / rectWidth
+  const i = Math.round(t * (n - 1))
+  return Math.max(0, Math.min(n - 1, i))
 }
 
 /** SSR/首屏用 SVG 字符串（客户端 <Sparkline> 组件与它同源，逐字节一致）。 */

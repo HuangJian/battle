@@ -24,6 +24,8 @@ export interface IterActuals {
   dmgPerKillPct?: number | null
   /** 胜局残血占「该局剩余容量」的平均比例 0–1（capacity=(startLives+tank−deaths)×maxHp）。 */
   avgResidualHpPct?: number | null
+  /** 掉落道具总数（Σspawn）；null/缺 = 数据源无该字段（旧 manifest）。 */
+  totalPUSpawn?: number | null
 }
 
 export interface EvalSummary {
@@ -42,6 +44,8 @@ export interface EvalSummary {
   avgWinTicks: number | null
   totalKills: number | null
   totalPU: number | null
+  /** 掉落道具总数（Σspawn）；null = eval 行无 spawn 字段或无法推导。 */
+  totalPUSpawn?: number | null
   /** 胜局平均残血；null = 评估记录无 residualHp 字段。 */
   avgResidualHp: number | null
   /** 败局平均耗时（ticks，仅败局计入）；null = 无败局或败局缺 ticks。

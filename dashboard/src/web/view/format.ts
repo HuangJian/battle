@@ -42,6 +42,25 @@ export function fmtPct(v: number | null | undefined): string {
   return typeof v === 'number' ? `${(v * 100).toFixed(1)}%` : '—'
 }
 
+/** 每局平均：Σ / games，保留 digits 位小数；null → '-'。 */
+export function fmtPerGameAvg(total: number | null | undefined, games: number, digits = 2): string {
+  if (total == null) return '-'
+  if (games <= 0) return total.toFixed(digits)
+  return (total / games).toFixed(digits)
+}
+
+/** 指标表道具列：每局平均「拾取数/掉落数」。掉落数缺失 → `拾取/-`。 */
+export function fmtLootPickDrop(
+  collected: number | null | undefined,
+  spawned: number | null | undefined,
+  games: number,
+): string {
+  if (collected == null) return '-'
+  const pick = fmtPerGameAvg(collected, games, 2)
+  if (spawned == null) return `${pick}/-`
+  return `${pick}/${fmtPerGameAvg(spawned, games, 2)}`
+}
+
 /** 配对裁判 verdict 文案：灰是正常态（100 对下 99% 时间证据不够），不是故障。 */
 export function pairedVerdictText(v: 'up' | 'down' | 'flat'): string {
   if (v === 'up') return '显著涨'

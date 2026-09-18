@@ -4,6 +4,7 @@
 
 import {
   filterGroups,
+  fmtLootPickDrop,
   fmtPaired,
   fmtPct,
   fmtOverfitGap,
@@ -211,7 +212,7 @@ function MainTable({
           <th className="tc-num" title="胜局残血 / 该局可支配生命容量">
             残血
           </th>
-          <th className="tc-num" title="每局平均道具">
+          <th className="tc-num" title="每局平均拾取数/掉落数">
             道具
           </th>
           <th className="tc-num" title="rollout 纯采集 / ppo 真训练 / net 网络·排队">
@@ -307,7 +308,9 @@ function MainTable({
             </td>
             <td className="tc-num">
               {r.actuals ? (
-                fmtPerGame(r.actuals.totalPU, r.actuals.games, 2)
+                <span title="每局平均拾取数/掉落数">
+                  {fmtLootPickDrop(r.actuals.totalPU, r.actuals.totalPUSpawn, r.actuals.games)}
+                </span>
               ) : (
                 <span className="tc-muted" title="该轮磁盘数据已清理，估算值">
                   {(r.loot * 100).toFixed(0)}%≈
@@ -374,7 +377,7 @@ function EvalTable({ rows }: { rows: IterRow[] }) {
           <th className="tc-num" title="胜局残血 / 该局可支配生命容量">
             残血
           </th>
-          <th className="tc-num" title="每局平均道具">
+          <th className="tc-num" title="每局平均拾取数/掉落数">
             道具
           </th>
           <th className="tc-num">得分</th>
@@ -525,7 +528,9 @@ function EvalTable({ rows }: { rows: IterRow[] }) {
                 </td>
                 <td className="tc-num">
                   {e.totalPU !== null ? (
-                    fmtPerGame(e.totalPU, e.games, 2)
+                    <span title="每局平均拾取数/掉落数">
+                      {fmtLootPickDrop(e.totalPU, e.totalPUSpawn, e.games)}
+                    </span>
                   ) : (
                     <span className="tc-muted">-</span>
                   )}
@@ -886,7 +891,7 @@ export function Hero({ stateView, onMore, onRefresh, readOnly = false }: HeroPro
             fmt={(v) => (v != null ? `${v.toFixed(2)}` : '—')}
             range={range}
             yFloor={0}
-            title="每局平均道具（rollout 实线 · eval 橙点）"
+            title="每局平均拾取/掉落（rollout 实线 · eval 橙点）"
           />
         </div>
         <PairedRefereeLine ref={stateView?.metrics.pairedReferee} />
