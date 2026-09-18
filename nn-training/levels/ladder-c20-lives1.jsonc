@@ -1,8 +1,8 @@
 {
-  "name": "ladder-c07",
+  "name": "ladder-c20-lives1",
   "stages": [
     {
-      "name": "ladder-c07-abcd",
+      "name": "ladder-c20-lives1-abcd",
       "grid": [
         [
           6,
@@ -201,7 +201,7 @@
         ]
       ],
       "forces": "abcdabcdabcdabcdabcd",
-      "count": 7,
+      "count": 20,
       "player_spawn": {
         "col": 12,
         "row": 12
@@ -226,7 +226,7 @@
       ]
     },
     {
-      "name": "ladder-c07-bcda",
+      "name": "ladder-c20-lives1-bcda",
       "grid": [
         [
           6,
@@ -425,7 +425,7 @@
         ]
       ],
       "forces": "bcdabcdabcdabcdabcda",
-      "count": 7,
+      "count": 20,
       "player_spawn": {
         "col": 12,
         "row": 12
@@ -450,7 +450,7 @@
       ]
     },
     {
-      "name": "ladder-c07-cdab",
+      "name": "ladder-c20-lives1-cdab",
       "grid": [
         [
           6,
@@ -649,7 +649,7 @@
         ]
       ],
       "forces": "cdabcdabcdabcdabcdab",
-      "count": 7,
+      "count": 20,
       "player_spawn": {
         "col": 12,
         "row": 12
@@ -674,7 +674,7 @@
       ]
     },
     {
-      "name": "ladder-c07-dabc",
+      "name": "ladder-c20-lives1-dabc",
       "grid": [
         [
           6,
@@ -873,7 +873,7 @@
         ]
       ],
       "forces": "dabcdabcdabcdabcdabc",
-      "count": 7,
+      "count": 20,
       "player_spawn": {
         "col": 12,
         "row": 12
@@ -899,7 +899,7 @@
     }
   ],
   "difficulty": "hard",
-  "max_ticks": 5100,
+  "max_ticks": 12900,
   "player": {
     "lives": 1,
     "level": 0

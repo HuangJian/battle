@@ -923,6 +923,27 @@ export function writeRlShard(dir: string, d: ShardData, manifest: unknown): void
   writeFileSync(`${dir}/manifest.json`, JSON.stringify(manifest, null, 2))
 }
 
+/**
+ * 解析 `--lives-override`（必填，无默认值）。
+ *
+ * 2026-09-19 根因修复：此前缺席时静默回落到难度默认值（全难度 startLives=3），
+ * 而课程/关卡语义（`CourseConfig.player.lives` ← 关卡 `player.lives` 合并）走的
+ * 正是这个 flag —— 裸调 CLI 忘传 = 静默 3 命，烧掉整批 it0 标定语料（x2–x7 全中招，
+ * 训练侧因必经课程合并从未中招）。从此缺席/非法 = 响亮失败，不设默认值。
+ * 训练调用链（`rl/cmd.py` ← `apply_course` ← 关卡合并）恒传此 flag，不受影响。
+ */
+export function resolveLivesFlag(raw: string): number {
+  const v = parseInt(raw, 10)
+  if (!raw || !Number.isInteger(v) || v < 1) {
+    throw new Error(
+      `[export-rl-rollout] missing/invalid --lives-override ${JSON.stringify(raw)} —— ` +
+        '命数无默认值（难度默认 3 命曾静默烧掉标定语料）。显式传 --lives-override N（N≥1），' +
+        '数值取关卡文件 player.lives（训练侧由课程自动合并透传，无需手填）。',
+    )
+  }
+  return v
+}
+
 function parseRange(s: string): number[] {
   const out: number[] = []
   for (const part of s.split(',')) {
@@ -1038,7 +1059,7 @@ function main(argv: string[] = process.argv.slice(2)): void {
         weightsText,
         dodgeMode,
         !!custom,
-        livesOverride ? parseInt(livesOverride, 10) : null,
+        resolveLivesFlag(livesOverride),
         playerLevelOverride ? parseInt(playerLevelOverride, 10) : null,
       )
       outcomes[res.outcome] = (outcomes[res.outcome] ?? 0) + 1

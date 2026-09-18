@@ -5,6 +5,7 @@ import {
   buildMetricsRow,
   METRICS_DIM,
   PICKUP_DIST_SENTINEL,
+  resolveLivesFlag,
   type Telemetry,
 } from '../tools/sim/export-rl-rollout'
 import { seedWorld, positionPlayer, makePowerUp } from './helpers'
@@ -180,5 +181,19 @@ describe('export-rl-rollout metrics 行宽', () => {
     expect(row[26]).toBe(2) // puGotTank
     expect(row[39]).toBe(3) // puGotOther
     expect(row[10]).toBe(4) // starsCollected
+  })
+})
+
+describe('resolveLivesFlag：命数无默认值（2026-09-19 根因修复）', () => {
+  it('显式值直通', () => {
+    expect(resolveLivesFlag('1')).toBe(1)
+    expect(resolveLivesFlag('3')).toBe(3)
+  })
+
+  it('缺席/非法响亮失败（禁静默回落难度默认 3 命）', () => {
+    expect(() => resolveLivesFlag('')).toThrow(/lives-override/)
+    expect(() => resolveLivesFlag('0')).toThrow(/lives-override/)
+    expect(() => resolveLivesFlag('-2')).toThrow(/lives-override/)
+    expect(() => resolveLivesFlag('abc')).toThrow(/lives-override/)
   })
 })
