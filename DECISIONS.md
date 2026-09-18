@@ -2711,6 +2711,70 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   `tests/test_remote_ppo_phases.py`（8）· `e2e/test_loop_supervisor_integration.py`（ppo 让位用例改为
   驱动真三相）· `e2e/test_push_mode_integration.py`（+3：发布相位提交 / 换节点重提交 / 探针目标）。
 - **仍未做**：`Supervisor` 进控制台（单例卡片 + 每课队列视图）· `checkpointCacheMb` 真机 RSS 实测表。
+**R2d 写的一半（2026-09-19 八续）——单进程 supervisor 真的能跑了：进程级/课程级/步骤级三层各做一次**：
+
+用户 2026-09-18 指令（「训练循环任务队列化 —— trainingLoop 由一个进程服务所有并行课程」）的落地前半：
+R2c 造好了调度器与任务体，但**没有驱动者**（至今仍是「一门课一个 `run_rl.py` 进程」）。本轮交付
+`rl/loop_serve.py`（驱动者）、`rl/engine_pool.py`（N 课共享的 torch 栈缓存）、`rl/log.py` 的**行路由**
+（单进程下的课程归属），入口 = `run_rl_cluster.py --serve --courses a,b`。
+
+**分层纪律（每层各做一次；越界做两次会伤到既有护栏）**：
+- **进程级一次**（`prepare_process`）：UTF-8 stdio / faulthandler / `chdir(repo)` / 启动前 `git push`
+  （`.git_push.lock` 串行化）/ 节点升级分支锁到训练机分支 / bun 存在性。每课各做一次 = 每课都推一遍 git。
+- **课程级一次**（`open_course`）：参数解析（与 `run_rl.py --course` **逐字段一致**；对拍见
+  `tests/test_serve_wiring.py::test_course_args_match_run_rl_echo_config`——oracle 是在子进程里跑
+  `run_rl.main()` 自己、把 `echo_config` 换成 dump，本机缺当前 era 权重则**跳过并写清理由**）+ `validate_args`
+  + **按课程的单实例锁**（同课双开响亮拒启；2026-09-06 双 trainer 并写同一 traj 的护栏不删，只是文件名
+  按课程命名）+ 清本课 hub 停机态。
+- **步骤级**（`build_executor`）：`EnginePool.get(课)` → `ensure_ready` → `LoopRunner.executor`，整段包在
+  `prefix_scope(课)` 里。`ensure_ready` 的判据是**对象身份**：引擎对象换了（首用 / 被驱逐后重建）⇒ 走
+  `_setup()`（等同一次进程重启）；对象没换 ⇒ `_ensure_local_ppo_stack()` 幂等补齐。
+
+**四条定案（都写进代码注释 + 用例）**：
+1. **serve 模式不收官停车**：`_park_after_completion` 的死循环语义前提是「这个进程就是这门课」，多课程下会
+   冻住全部 ⇒ 新拆 `TrainingLoop.finish_course(it)`（收敛预采 / 云机 PAUSE / `run_complete` 落账，**三件事
+   与单课程路径共用一份实现**），serve 只调它 + 把该课队列置 `done`；全部收官才退出。
+2. **不换 `sys.stdout`，改行级路由**：单进程里套两个 `Tee` 会把每行复制进两份课日志；课程归属 = 行前缀
+   `[课]` + 镜像写进该课 `out_log`（`rl.log.open_course_sink` / `prefix_scope`）。无前缀时与改造前逐字节相同。
+3. **引擎池的驱逐 = 响亮的一次「重启」**：容量默认 = 并行课程上限 5（§6.1 实测每课 MB 级），字节上限
+   256MB 只是第二道保险；驱逐时**必须**记一行「谁被驱逐 + 权重可从 `args.out` 复原但 Adam 动量重置 + 若
+   常发生请调大上限」，且**绝不驱逐在用引擎**（任务中途抽走栈会撞 `None.load_episodes`）。退出时释放全部
+   栈（只关自己建的池——注入的池归调用方）。
+4. **初次入队的粒度必须匹配执行体**：细粒度给 13 步任务表，轮粒度给**单个** `round` 任务；混了就是把 13 个
+   步骤 kind 塞进只认 `round` 的执行体（响亮 ABORT，不是静默跳步）。初次入队用 `course_facts` +
+   `pending_tasks(round_tasks(...))`（判据原语与只读计划视图同源），**不**调 `plan_course`——那会连 CLI 表格
+   用的展示面字段（累计量/verdict）一起算。
+
+**回归**：`tests/test_engine_pool.py`(9：惰性/命中/LRU/两道上限/不驱逐在用/响亮超预算/释放钩子/快照) ·
+`tests/test_log_router.py`(6：无前缀逐字节不变/作用域还原含异常/镜像到本课/坏 sink 不崩/重复注册换句柄) ·
+`tests/test_serve_wiring.py`(8：轮转交替 a,b,a,b / 13 步全表 / 让位让别的课跑完 / 容量 1 时驱逐重建再 setup /
+账本已结算不建引擎 / 坏课隔离 / 参数对拍)。门禁：nn python gate **1476 passed / 4 skipped**；根 `bun run check` 绿。
+
+**未做（R2d 剩下的操作面）**：控制台的入队/暂停 + 单例 `trainingLoop` 卡片（读面卡 R2c-3 已交付）；**R2e**：
+多课 × 假 worker/假 PPO 的 e2e + 真机双课并行跑通（serve 的真机行为需要人验）。
+
+**R2c-3 收口（2026-09-19 七续）——真机 RSS 实测：checkpoint 缓存上限的真实约束是「数量」不是「字节」**：
+
+- **为什么要实**：单进程 supervisor 要为 N 门课各持一份 torch 栈（model + Adam + 冻结 ref），
+  `checkpointCacheCourses` / `checkpointCacheMb` 的默认值此前**只能拍脑袋**（本机 0 卡、remote 为主）。
+  plan §6 把这张表列为 R2c 上线前置条件。
+- **实测（`nn-training/scripts/measure_checkpoint_rss.py`；本机 CPU-only torch 2.7.1+cpu）**：
+  每课增量 per-tick **≈1.3MB**（70,216 参：model 0.7 + Adam 0.6，无 ref）/ intent **≈1.8MB** /
+  goal **≈1.8MB**（各含一份冻结 ref）；**torch 基线 294.5MB 与课程数无关**；
+  N=5 混合档累计 **294.8 → 301.8MB（仅 +7MB）**。
+- **定案**：**`checkpointCacheMb` 是第二道保险，真实约束是数量** `checkpointCacheCourses`
+  （= 并行课程上限 5）。推荐 `checkpointCacheMb = 256MB`（≈130 课，正常永不触发）；真触发即说明
+  「某课的栈长得离谱」——那时该被看见（响亮拒绝缓存），不得静默驱逐。
+- **口径诚实性（这张表最容易被读错的两处，已写进脚本 docstring 与用例）**：① **先暖一次再测**
+  ——torch 惰性初始化（首次 kernel 选择 / 分配器建池 / Adam 首步）会让**第一份**栈看起来贵两个
+  量级（实测 78MB vs 真值 0.75MB）；② **栈必须活着**——被 gc 回收后第二课的增量会变成 0
+  （分配器复用），累计曲线就是假的。实测工具本身有回归：
+  `nn-training/tests/test_measure_checkpoint_rss.py`（7 例：推荐值取整/余量、候选表恒有默认架构兼底、
+  表格必须自带「测的哪份权重 / 跳过了谁 / 理论 vs 实测」、真造一份栈的量级保护带）。
+- **不测且写明的**：单轮 episodes/chunk 缓冲是**另一处峰值**（由 `mb` 与本轮样本量决定）——
+  它是每轮瞬态、且本机 PPO 池容量 1 ⇒ 同一时刻只有一份；已由 forensics 埋点，不属缓存上限管的常驻量。
+- **仍未做（缓存实现本身）**：随「单进程 supervisor 真上线」的相位落地（R2d/R2e）。今天没有持有者，
+  先写就是无消费者的投机代码；本表 + 上述两个默认值就是它上线时需要的全部输入。
 **R2c-3 余下（2026-09-19 六续）——控制台接线：单例调度器卡片 + 每课队列视图（「在等什么」）**：
 
 - **数据源 = python 只读入口，★ 控制台不得在 TS 重算判据**（防再犯条款）：卡片走

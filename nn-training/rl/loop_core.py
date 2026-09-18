@@ -11,6 +11,7 @@ mixin（rl/loop_guards.py）——mixin 方法以 self.* 共享 TrainingLoop 实
 
 from __future__ import annotations
 
+import gc
 import subprocess
 import sys
 import threading
@@ -357,16 +358,18 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
             # （调度器的退避是 `TaskResult.retry` 的 resume_at，不在任务体里睡 30s）。
             return self.round_failure(e, ctx.it, backoff=True)
 
-    def _park_after_completion(self, it: int) -> None:
-        """正常收官（ALL DONE）→ 停车不断进程（2026-09-12 用户定案）。
+    def finish_course(self, it: int) -> None:
+        """**本课程**收官（一轮跑满）的三件事，不含停车循环（R2d 拆分）。
 
-        三件事：① 本地停止采集（循环已结束，不再开新 it/派新 job）；② 向云机下发
-        停机指示（PAUSE，能自停的释配额；此前预算 STOP 靠进程死亡间接触发云停，
-        现在收官路径统一显式下发）；③ 账本落 run_complete 事件（console「已完成」
-        横幅派生源）。随后停车等待重启（控制台 停止→启动；改大 iters 后重进），
-        期间 EvalBoard B 批照常认领（idle 窗常开、机器本就空闲；直连节点派发，
-        不受 hub 云停机影响）——本地训练采集已停，只服务评估。中断（Ctrl-C/
-        SIGTERM 语义）干净返回。冒烟/--exit-on-done 不进这里。
+        ① 本地停止采集（收敛在飞预采子进程，不留孤儿空烧）；② 向云机下发停机指示
+        （PAUSE，能自停的释配额）；③ 账本落 `run_complete` 事件（console「已完成」横幅
+        派生源）。
+
+        **为什么从 `_park_after_completion` 里拆出来**：停车（死循环等重启）的语义前提是
+        「这个进程就是这门课」。单进程多课程（`rl/loop_serve.py`）下停车会**冻住所有课**，
+        所以那条路径只做本方法、调度器把该课队列置 `done`；单课程前台入口 = 本方法 + 停车
+        （进程即该课）。两条路径因此共用同一份收官副作用（不会一边落 `run_complete`、
+        另一边忘了）。
         """
         args = self.args
         total = args.iters if args.iters > 0 else "∞"
@@ -391,6 +394,16 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
             f"[run_rl] 正常完成（it{it}/{total}）——本地停止采集，进程停车不断开；"
             "EvalBoard B 批照常认领；改大 iters 后经控制台 停止→启动 以继续训练"
         )
+
+    def _park_after_completion(self, it: int) -> None:
+        """正常收官（ALL DONE）→ 停车不断进程（2026-09-12 用户定案）。
+
+        三件事（收敛采集 / 云机 PAUSE / `run_complete` 落账）在 `finish_course` 里；本方法
+        = 它 + **永久停车**：期间 EvalBoard B 批照常认领（idle 窗常开、机器本就空闲；直连节点
+        派发，不受 hub 云停机影响）——本地训练采集已停，只服务评估。中断（Ctrl-C/SIGTERM
+        语义）干净返回。冒烟/--exit-on-done 不进这里。
+        """
+        self.finish_course(it)
         parked_min = 0
         while True:
             try:
@@ -534,6 +547,27 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
             log(f"[run_rl] WARN freeze prefixes matched nothing: {freeze_prefixes}")
         log("[run_rl] local PPO stack ready")
 
+    def release_torch(self) -> None:
+        """释放本机 torch 栈（引擎池驱逐用；`_ensure_local_ppo_stack()` 可原样重建）。
+
+        置 None 的集合与 `_setup()` 的 remote 分支逐字段一致（同一份「栈已卸载」语义）。
+        **代价不对称**（plan/r2-loop-task-queue §6.2）：权重能从 `args.out` 重建，但
+        `torch.optim.Adam` 是新建的 ⇒ **动量丢失**。所以只在**任务之间**调用
+        （任务中途抽走栈会让 `_serial_ppo` 撞 `None.load_episodes`），且调用方必须响亮记录
+        ——`rl/engine_pool.EnginePool.drop` 已内含那行日志。
+        """
+        self._model = None
+        self._opt = None
+        self._ref_model = None
+        self._bc_ref = None
+        self._device = None
+        self.ppo_backend = None
+        self._ppo_mod = None
+        self._ppo_goal = None
+        self._ppo_intent = None
+        self._save_weights_json = None
+        gc.collect()
+
     def _setup_common(self) -> None:
         """两模式（local/remote）共享的启动尾部：traj 目录 / rotateSeed / run_start 账本 /
         日志 / eval 稀疏化 / 断点续跑定位。remote 分支在跳过 torch 构建后也走这里。"""
@@ -616,7 +650,9 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
         # （冷启动首轮）→ breaker 退回绝对电平判定。续跑时从 training_log.jsonl 回读，
         # 否则每次重启 peak 归零，it9 会被当成"首轮"白送一次连击。
         self._ent_peak: float | None = self._ledger.ent_peak
-        self._stop_loss_streak = self._ledger.stop_loss_streak  # P1-9: 止损连击（新 stop_loss 事件）
+        self._stop_loss_streak = (
+            self._ledger.stop_loss_streak
+        )  # P1-9: 止损连击（新 stop_loss 事件）
         # I2（提示类门 REMEDIATE ×N 停腿）：计**整条账本**，不随进程重启洗白
         # （2026-09-18 修）。旧实现在内存里，重启后 4 次确认可以从头再来。
         self._soft_remediate_count = self._ledger.soft_remediate_count(

@@ -1,0 +1,493 @@
+"""loop_serve —— 单进程服务多门课的训练入口（R2d 的「写的一半」，plan/r2-loop-task-queue §8）。
+
+**为什么需要它**：R2c-2/R2c-3 把「一轮」拆成了可让位的细粒度任务、给了调度器（`loop_scheduler`）
+与任务体↔引擎的桥（`loop_runner`），但**没有任何东西真的驱动它**——今天仍是「一门课一个
+`run_rl.py` 进程」。本模块就是那个驱动者：一个进程、一个 supervisor、N 门课，一门课等外部
+（云端 PPO / 预采子进程）时**执行权交给别的课**。
+
+三个层次，**每层各做一次**（越界做两次都会伤到既有护栏，所以按层显式分开）：
+
+| 层 | 频率 | 内容 |
+|---|---|---|
+| 进程级 | 一次 | UTF-8 stdio / `faulthandler` / `chdir(repo)` / 启动前 `git push`（`.git_push.lock` 串行化）/ bun 存在性 → `prepare_process()` |
+| 课程级 | 每课一次 | 解析课程配置（与 `run_rl.py --course` **逐字段一致**）→ `validate_args` → **按课程的单实例锁**（同课双开响亮拒启）→ 日志镜像 → 清本课 hub 停机态 → 引擎对象（`TrainingLoop`，torch 由引擎自己 `_setup()` 在首次执行时才拉起） |
+| 一步级 | 每步 | `Supervisor.step()` → `EnginePool.get(课)` → `LoopRunner.executor(task, queue)` |
+
+**刻意与单课程入口不同的两处**（都在文档里写死，防「统一」时被顺手改回去）：
+
+1. **不收官停车**：`_park_after_completion` 的死循环语义前提是「这个进程就是这门课」——单进程
+   多课程下停车会冻住所有课。所以这里对跑满的课只做 `TrainingLoop.finish_course()`（收敛预采 /
+   云机 PAUSE / `run_complete` 落账，三件事与单课程路径**共用同一份实现**），随后调度器把该课
+   队列置 `done`，进程继续服务别的课；全部课都收官才退出（重启交给控制台/启动器）。
+2. **不换 `sys.stdout`**：单课程入口用 `Tee` 把 stdout 落到 `args.out_log`；一个进程里套两个
+   Tee 会把每行复制进两份课日志。这里改成**行级路由**（`rl.log.open_course_sink` +
+   `prefix_scope`）：每行带 `[课]` 前缀，并镜像到该课自己的 `out_log`。
+
+**可测性**：`serve(..., prepare=False)` + 注入 `pool` / `supervisor` ⇒ 全流程不碰 torch、不碰
+网络、不起进程（见 `tests/test_serve_courses.py` 与 `e2e/test_serve_integration.py`）。
+"""
+
+from __future__ import annotations
+
+import atexit
+import json
+import os
+import shutil
+import subprocess
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+from platform_utils import force_utf8_stdio
+from rl.engine_pool import DEFAULT_CACHE_COURSES, DEFAULT_CACHE_MB, EnginePool
+from rl.log import close_course_sinks, log, open_course_sink, prefix_scope
+from rl.loop_plan import course_facts, course_traj
+from rl.loop_runner import ROUND_KIND, LoopRunner
+from rl.loop_scheduler import ABORTED, PAUSED, QUEUE_DONE, Supervisor
+from rl.loop_tasks import RoundFacts, Task, pending_tasks, round_tasks
+from rl.modes import apply_mode_flags, get_backend, merged_mode_args, resolve_mode
+from rl.queue import REPO_ROOT
+from train.loop_util import acquire_lock, cleanup_lock, course_lock_path
+
+#: nn-training 目录（锁文件/课程文件都相对它——与 `run_rl.py` 的 `Path(__file__).parent` 同一个）。
+NN_DIR = Path(__file__).resolve().parent.parent
+
+#: 本机资源池默认容量（与 `run_rl_cluster.py` 的 CLI 默认值同一套；plan §6.2 定案 PPO/eval=1）。
+DEFAULT_CAPACITIES: dict[str, int] = {"local_ppo": 1, "eval_local": 1, "local_rollout": 4}
+
+#: `Supervisor` 的空转让位粒度（秒）：全部课都在等外部时按这个间隔再问一遍。
+DEFAULT_POLL_SEC = 15.0
+
+
+@dataclass
+class CourseRuntime:
+    """一门课在**本进程**里的运行时（args + 引擎 + 任务体，各自独立、互不共享）。"""
+
+    course: str
+    args: Any
+    lock_path: str = ""
+    engine: Any = None
+    runner: LoopRunner | None = None
+
+
+@dataclass
+class ServeReport:
+    """一次 serve 的可断言结论（测试/控制台都用它，不再从日志里猜）。"""
+
+    courses: dict[str, dict[str, Any]] = field(default_factory=dict)
+    skipped: dict[str, str] = field(default_factory=dict)
+    engines: dict[str, Any] = field(default_factory=dict)
+    steps: int = 0
+    stop_reason: str = ""
+
+
+# ---------------------------------------------------------------- 进程级一次
+
+
+def prepare_process(argv: list[str] | None = None) -> str:
+    """进程级一次性准备，返回 bun 路径（rollout 需要它）。**副作用：启动前 push 当前分支。**
+
+    与 `run_rl.py` 的对应片段同序同义（B7 之后 torch 仍不在启动路径上）：UTF-8 stdio →
+    faulthandler → `chdir(REPO_ROOT)` → 启动前 `git push`（repo 级 O_EXCL 锁串行化——多课并发
+    push 会顶成 non-fast-forward/锁竞争）→ 节点升级分支锁到训练机当前分支 → bun 存在性。
+
+    **只做一次**：每课各做一次就等于每个课程都推一遍 git（这正是单进程入口要省掉的事）。
+    """
+    force_utf8_stdio()
+    import faulthandler
+
+    faulthandler.enable()
+    os.chdir(str(REPO_ROOT))
+
+    from rl.archive import ensure_current_branch_pushed
+
+    push_lock = str(REPO_ROOT / ".git_push.lock")
+    if acquire_lock(push_lock, tag="git push"):
+        try:
+            ensure_current_branch_pushed(REPO_ROOT)  # side-effect: push current branch
+        finally:
+            cleanup_lock(push_lock)
+    else:
+        log(
+            "[serve] WARN: 另一进程正在 git push（.git_push.lock 被占）——跳过本次启动前推送，"
+            "节点沿用远端已有分支；如远端长期无新提交请检查持锁进程"
+        )
+    branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        **_POPEN_NO_WINDOW,
+    ).stdout.strip()
+    if branch and branch != "HEAD":
+        import dist_common as _dc
+
+        _dc.set_upgrade_branch(branch)
+        log(f"[serve] node upgrade branch locked to training-machine branch: {branch}")
+
+    bun = shutil.which("bun")
+    if bun is None:
+        raise SystemExit("[serve] bun not found on PATH — rollout needs it")
+    return bun
+
+
+# ---------------------------------------------------------------- 课程级一次
+
+
+def course_args(course: str, argv: list[str] | None = None) -> Any:
+    """课程 stem → 生效 args（**与 `run_rl.py --course <stem>` 逐字段一致**）。
+
+    解析链一字不差地复刻 `run_rl.py::main` 的启动段（rl-config.json 默认 → argparse →
+    `apply_course` 课程覆盖 → 冲突检测 → 显式 stream 标记 → `validate_args`）。**不作弊**：
+    参数语义没有第二份实现，`tests/test_serve_args.py` 用 `run_rl.py --course X --echo-config`
+    对拍本函数的每一字段（漂移即红）。
+
+    `argv` = serve 级附加参数（如 `--mode goal`）；课程由**课程列表**给出，故这里拒绝
+    `--course`（避免「列表里的课」与「argv 里的课」两个来源）。
+    """
+    extra = list(argv or [])
+    if any(a == "--course" or a.startswith("--course=") for a in extra):
+        raise SystemExit("[serve] 课程由课程列表给出，不要在附加参数里再传 --course/--course-file")
+
+    mode = resolve_mode(extra)
+    try:
+        cfg = json.loads((NN_DIR / "rl-config.json").read_text(encoding="utf-8"))
+    except Exception:
+        cfg = {}
+    rl_args, _src = merged_mode_args(cfg, mode)
+
+    from rl.cli import build_argparser
+
+    ap = build_argparser(mode, rl_args)
+    args = ap.parse_args([*extra, "--course", course])
+    apply_mode_flags(args)
+
+    from rl.config import apply_course, course_cli_conflicts, course_from_args, validate_args
+
+    # 课程配置化（plan/rl-training-config.md §3）：优先级 课程 > rl-config.json > argparse 默认。
+    # `resolve_course` 找不到 `<stem>.jsonc` 时抛 FileNotFoundError（含可用课程列表）——
+    # 由调用方按「故障域 = 单课」处理（响亮跳过这门课，不影响别的课）。
+    co = course_from_args(args)
+    if co is not None:
+        cli_before = {k: v for k, v in vars(args).items()}
+        defaults_ns = ap.parse_args([])
+        apply_course(args, co)
+        conflicts = course_cli_conflicts(cli_before, vars(defaults_ns), co)
+        if conflicts:
+            raise SystemExit(
+                "[serve] 附加参数与课程配置冲突（课程是单一事实来源，无 CLI 逐参覆盖——"
+                "plan §3）：\n  " + "\n  ".join(conflicts)
+            )
+
+    defaults_ns2 = ap.parse_args([])
+    args._explicit_stream = int(getattr(args, "stream", 0) or 0) != int(
+        getattr(defaults_ns2, "stream", 0) or 0
+    )
+    args._explicit_double_buffer = int(getattr(args, "double_buffer", 0) or 0) != int(
+        getattr(defaults_ns2, "double_buffer", 0) or 0
+    )
+    validate_args(args)
+    return args
+
+
+def open_course(
+    course: str, *, argv: list[str] | None = None, traj_root: str = "tmp"
+) -> CourseRuntime:
+    """开课（课程级一次性副作用）。**失败即抛**，由调用方按课隔离。
+
+    ① args（`course_args`）；② 路径一致性核对（发现路径 vs 课程配置的 `traj`，不一致**响亮
+    记录**但不自作主张改一边）；③ **按课程的单实例锁**（同课双开响亮拒启——2026-09-06 双 trainer
+    并行写同一 traj 的护栏，按课程命名后对并行课程不误伤）；④ 每课日志镜像（行路由）；
+    ⑤ 清本课 hub 停机态（残留 halt 会让首轮 PPO job 进无人区）。
+
+    **不在这里** `_setup()`：那会拉起 torch 并写 `run_start`——「扫到但本轮没在训」的课
+    不该付这个代价。首次执行该课的一步时由 `ensure_ready` 做（见 `serve`）。
+    """
+    from run_rl import _acquire_run_rl_lock, _cleanup_run_rl_lock
+
+    args = course_args(course, argv)
+    traj = Path(args.traj)
+    expected = Path(course_traj(traj_root, course))
+    if str(traj) != str(expected):
+        log(
+            f"[serve] WARN 课程 {course} 的 traj = {traj}，与发现路径 {expected} 不一致——"
+            f"按课程配置（{traj}）为准；若这是笔误请改课程 jsonc"
+        )
+
+    lock_path = course_lock_path(str(NN_DIR), course, "run_rl")
+    if not _acquire_run_rl_lock(lock_path, force=bool(getattr(args, "force", False))):
+        raise SystemExit(
+            f"[serve] 课程 {course} 已有 run_rl 在跑（锁 {lock_path}）——拒绝双开；"
+            "先停掉持有者或加 --force 接管"
+        )
+    atexit.register(_cleanup_run_rl_lock, lock_path)
+
+    if getattr(args, "out_log", ""):
+        open_course_sink(course, args.out_log)
+
+    from remote.hub_client import clear_halt_on_startup
+
+    clear_halt_on_startup(
+        str(getattr(args, "remote_hub_url", "") or ""),
+        str(getattr(args, "remote_token", "") or ""),
+        log=log,
+        course=course,
+    )
+    log(f"[serve] 开课 {course}：traj={traj} mode={getattr(args, 'mode', '?')} lock={lock_path}")
+    return CourseRuntime(course=course, args=args, lock_path=lock_path)
+
+
+# ---------------------------------------------------------------- 一步级
+
+
+def ensure_ready(rt: CourseRuntime, engine: Any) -> None:
+    """首次执行前 `_setup()` 一次；同一对象再进（可能刚被池 `release_torch` 过）补齐栈。
+
+    「引擎对象换了」= 新建（首用 / 被池驱逐后重建）⇒ 走 `_setup()`（与一次进程重启同义：
+    `run_start` 续写、账本指针仍是 SSOT）；「对象没换」⇒ `_ensure_local_ppo_stack()` 幂等补齐
+    （未被释放时立即返回，零代价）。
+    """
+    if rt.engine is not engine:
+        engine._setup()
+        rt.engine = engine
+        return
+    engine._ensure_local_ppo_stack()
+
+
+def build_factory(
+    runtimes: dict[str, CourseRuntime],
+    *,
+    bun: str,
+    iters: int = 0,
+    step_mode: bool = True,
+    poll_interval: float = DEFAULT_POLL_SEC,
+    now: Callable[[], float] = time.time,
+) -> Callable[[str], Any]:
+    """课程 → `TrainingLoop` 的构建器（**廉价**：不碰 torch，栈由 `_setup()` 稍后拉起）。
+
+    构建时同时挂好该课的 `LoopRunner`（任务体↔引擎的唯一桥）：它是 `planner`/`executor` 的
+    来源，也是「这一课跑到哪一步」的内存加速器（权威永远是账本）。
+    """
+    from rl.loop_core import TrainingLoop
+
+    def factory(course: str) -> Any:
+        from run_rl import update_kwargs
+
+        rt = runtimes[course]
+        engine = TrainingLoop(rt.args, get_backend(rt.args.mode), bun, update_kwargs)
+        rt.runner = LoopRunner(
+            loop=engine,
+            course=course,
+            iters=int(iters or getattr(rt.args, "iters", 0) or 0),
+            step_mode=step_mode,
+            poll_interval=poll_interval,
+            now=now,
+            facts_fn=facts_fn,
+        )
+        return engine
+
+    def facts_fn(course: str, it: int) -> RoundFacts:
+        """盘上事实（账本 + shard 目录）——与只读计划视图**同一份实现**（`loop_plan`）。"""
+        rt = runtimes.get(course)
+        try:
+            facts, _v = course_facts(Path(rt.args.traj) if rt else Path("."))
+            return facts
+        except Exception as e:  # 读盘失败 ⇒ 判据未知（宁可重做，不可误跳）
+            log(f"[serve] {course} 盘上事实读失败（判据退回未知）：{type(e).__name__}: {e}")
+            return RoundFacts(it=it)
+
+    return factory
+
+
+def build_executor(
+    pool: EnginePool, runtimes: dict[str, CourseRuntime]
+) -> Callable[[Any, Any], Any]:
+    """调度器执行体：取引擎（可能刚重建）→ 补齐栈 → 交给该课的 `LoopRunner.executor`。
+
+    `prefix_scope` 是**行级课程归属**的落点：这一步（及其内部全部日志）带 `[课]` 前缀并镜像
+    到该课日志文件。放在这里而不是引擎里，是因为「谁在执行哪门课」只有调度器知道。
+    """
+
+    def execute(task: Any, queue: Any) -> Any:
+        rt = runtimes[task.course]
+        engine = pool.get(task.course)
+        ensure_ready(rt, engine)
+        with prefix_scope(task.course):
+            assert rt.runner is not None  # factory 保证
+            return rt.runner.executor(task, queue)
+
+    return execute
+
+
+def _all_settled(sup: Supervisor) -> bool:
+    return all(q.state in (QUEUE_DONE, ABORTED, PAUSED) for q in sup.courses.values())
+
+
+# ---------------------------------------------------------------- 主循环
+
+
+def serve(
+    courses: list[str],
+    *,
+    argv: list[str] | None = None,
+    traj_root: str = "tmp",
+    iters: int = 0,
+    poll_sec: float = DEFAULT_POLL_SEC,
+    capacities: dict[str, int] | None = None,
+    cache_courses: int = DEFAULT_CACHE_COURSES,
+    cache_mb: float = DEFAULT_CACHE_MB,
+    step_mode: bool = True,
+    max_seconds: float = 0.0,
+    max_steps: int = 0,
+    prepare: bool = True,
+    bun: str | None = None,
+    pool: EnginePool | None = None,
+    supervisor: Supervisor | None = None,
+    now: Callable[[], float] = time.time,
+    sleep: Callable[[float], None] = time.sleep,
+) -> ServeReport:
+    """单进程服务 N 门课，直到全部收官/停腿/暂停（或撞 `max_*` 上限）。
+
+    退出条件（`ServeReport.stop_reason` 如实记录是哪一条——运维要能一眼分辨「跑完」与「被停」）：
+    `all_settled` / `max_steps` / `max_seconds` / `interrupted`(Ctrl-C) / `no_courses`。
+    课程级失败（课程文件缺失、锁被占）**不**终止进程：该课进 `skipped`，其余课照跑
+    （故障域 = 单课，plan §4.3）。
+    """
+    report = ServeReport()
+    if prepare:
+        bun = prepare_process(argv)
+    bun = bun or "bun"
+    t0 = now()
+
+    runtimes: dict[str, CourseRuntime] = {}
+    for course in courses:
+        try:
+            runtimes[course] = open_course(course, argv=argv, traj_root=traj_root)
+        except BaseException as e:  # 单课故障隔离：不因一门课配错/被占就停掉别的课
+            report.skipped[course] = f"{type(e).__name__}: {e}"
+            log(f"[serve] 跳过课程 {course}：{type(e).__name__}: {e}")
+    if not runtimes:
+        report.stop_reason = "no_courses"
+        log("[serve] 没有可服务的课程——退出")
+        return report
+
+    own_pool = pool is None
+    pool = pool or EnginePool(
+        factory=build_factory(runtimes, bun=bun, iters=iters, step_mode=step_mode, now=now),
+        courses=cache_courses,
+        mb=cache_mb,
+    )
+    sup = supervisor or Supervisor(
+        executor=build_executor(pool, runtimes),
+        planner=_planner(runtimes),
+        capacities=dict(capacities or DEFAULT_CAPACITIES),
+        now=now,
+    )
+
+    # 初始队列内容用**盘上事实**算（不构建引擎：扫到但没在训的课不该拉起 torch）。
+    # 判据原语与只读计划视图同源（`course_facts` + `pending_tasks(round_tasks(...))`）——
+    # 不调 `plan_course` 是因为它连展示面字段（累计量/verdict）一起算，那是给 CLI 表/控制台看的。
+    # 粒度必须匹配：细粒度用 13 步任务表，轮粒度用**单个**轮任务——混了就会把 13 个步骤 kind
+    # 塞进只认 `round` 的执行体（响亮 ABORT，不是静默跳步）。
+    for course, rt in runtimes.items():
+        facts, _view = course_facts(Path(rt.args.traj))
+        it = int(facts.it)
+        tasks = pending_tasks(round_tasks(course, it), facts)
+        if not step_mode and tasks:
+            tasks = [Task(course, it, ROUND_KIND)]
+        q = sup.add_course(course, it, tasks)
+        log(f"[serve] 入队 {course}：it{it} 待办 {len(tasks)} 步（队列状态 {q.state}）")
+
+    log(
+        f"[serve] 单进程 supervisor 启动：{len(runtimes)} 课 / 池容量 "
+        + " ".join(f"{k}={v}" for k, v in (capacities or DEFAULT_CAPACITIES).items())
+        + f" / 粒度={'13 步' if step_mode else '轮'}"
+    )
+
+    done_hooked: set[str] = set()
+    try:
+        while True:
+            trace = sup.step()
+            if trace is not None:
+                report.steps += 1
+                if trace.action in ("aborted", "round_done", "blocked_pool"):
+                    log(f"[serve] {trace.course}: {trace.action} {trace.kind} {trace.detail}")
+                if max_steps and report.steps >= max_steps:
+                    report.stop_reason = "max_steps"
+                    break
+                continue
+            # 一步都没能跑：要么全在等外部，要么全收官/停腿。
+            report.stop_reason = _settle_rounds(sup, runtimes, done_hooked)
+            if report.stop_reason == "all_settled":
+                break
+            if max_seconds and (now() - t0) >= max_seconds:
+                report.stop_reason = "max_seconds"
+                break
+            sleep(poll_sec)
+    except KeyboardInterrupt:
+        report.stop_reason = "interrupted"
+        log("[serve] 收到中断——干净退出（各课账本已落盘，指针续跑可用）")
+
+    report.courses = {
+        course: {
+            "state": q.state,
+            "next_it": q.next_it,
+            "rounds_done": q.rounds_done,
+            "current": q.current.kind if q.current else "",
+            "reason": q.reason,
+            "engine": "loaded" if pool.peek(course) is not None else "cold",
+        }
+        for course, q in sup.courses.items()
+    }
+    if own_pool:
+        pool.close()  # 自己建的池：退出前释放全部 torch 栈（注入的池归调用方管）
+    report.engines = pool.snapshot()  # 快照在 close 之后：`loaded` 为空、计数器保留
+    close_course_sinks()
+    log(
+        f"[serve] 退出（{report.stop_reason}）：步数={report.steps} 课程="
+        + ", ".join(f"{c}:{v['state']}/it{v['next_it']}" for c, v in report.courses.items())
+    )
+    return report
+
+
+def _planner(runtimes: dict[str, CourseRuntime]) -> Callable[[str, int, Any], list[Any]]:
+    """调度器的 planner：委托该课的 `LoopRunner.planner`（步骤表 = 幂等判据的唯一来源）。"""
+
+    def planner(course: str, it: int, queue: Any) -> list[Any]:
+        rt = runtimes[course]
+        if rt.runner is None:  # 引擎还没建（初始入队走 plan_course，不经这里）
+            return []
+        return rt.runner.planner(course, it, queue)
+
+    return planner
+
+
+def _settle_rounds(
+    sup: Supervisor, runtimes: dict[str, CourseRuntime], done_hooked: set[str]
+) -> str:
+    """给**刚**收官的课程做收官副作用（每课一次），返回本轮的整体结论。
+
+    跑满的课：`TrainingLoop.finish_course()`（收敛预采 / 云机 PAUSE / `run_complete` 落账，
+    与单课程入口共用同一份实现）——**只做这三件事，不停车**（停车会冻住其余课，见模块
+    docstring）。停腿（ABORTED）的课不做收官副作用（它不是正常跑满）。
+    """
+    for course, q in sup.courses.items():
+        if q.state != QUEUE_DONE or course in done_hooked:
+            continue
+        done_hooked.add(course)
+        rt = runtimes.get(course)
+        if rt is None or rt.engine is None:
+            continue  # 一步都没跑过：没有预采子进程/云机态可收
+        with prefix_scope(course):
+            rt.engine.finish_course(max(int(q.next_it) - 1, 0))
+        log(
+            f"[serve] 课程 {course} 已收官（{q.rounds_done} 轮，指针 it{q.next_it}）——"
+            "本进程不再为它接新轮（重启由控制台/启动器负责）"
+        )
+    if _all_settled(sup):
+        return "all_settled"
+    return "waiting"  # 还在等外部（远端 PPO / 预采）：让位后稍后再问

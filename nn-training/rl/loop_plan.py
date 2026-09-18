@@ -62,6 +62,35 @@ def inflight_from_journals(traj: Path, it: int | None = None) -> list[dict]:
     return out
 
 
+def course_facts(
+    traj: Path,
+    *,
+    view: LedgerView | None = None,
+    spec: LedgerSpec | None = None,
+    games_planned: int = 0,
+    weights_landed: bool = False,
+) -> tuple[RoundFacts, LedgerView]:
+    """本轮**盘上事实**（`RoundFacts`）+ 账本视图 —— 只读盘、无副作用。
+
+    只读计划视图（`plan_course`）与单进程 supervisor 的 `facts_fn`（步级幂等判据）用
+    **同一份实现**：同一条语义写两遍必然分叉（与「在等什么」同一条规矩）。
+
+    `games_planned`/`weights_landed` 由调用方给（它们来自课程计划与权重账本，本模块不臆测）；
+    缺省即「未知」⇒ 对应任务不会被当成已完成（宁可重做，不可误跳）。
+    """
+    traj = Path(traj)
+    v = view if view is not None else load_ledger(traj / "training_log.jsonl", spec)
+    it = int(v.next_it)
+    facts = RoundFacts(
+        it=it,
+        iteration_recorded=any(r.it == it for r in v.rows),
+        games_settled=settled_shards(traj, it),
+        games_planned=int(games_planned),
+        weights_landed=bool(weights_landed),
+    )
+    return facts, v
+
+
 def plan_course(
     course: str,
     traj: Path,
@@ -78,15 +107,10 @@ def plan_course(
     不臆测）；缺省即「未知」⇒ 对应任务不会被当成已完成。
     """
     traj = Path(traj)
-    v = view if view is not None else load_ledger(traj / "training_log.jsonl", spec)
-    it = int(v.next_it)
-    facts = RoundFacts(
-        it=it,
-        iteration_recorded=any(r.it == it for r in v.rows),
-        games_settled=settled_shards(traj, it),
-        games_planned=int(games_planned),
-        weights_landed=bool(weights_landed),
+    facts, v = course_facts(
+        traj, view=view, spec=spec, games_planned=games_planned, weights_landed=weights_landed
     )
+    it = int(facts.it)
     tasks = pending_tasks(round_tasks(course, it), facts)
     facts_dump = {
         "it": it,

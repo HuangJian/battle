@@ -1,0 +1,357 @@
+"""R2d：单进程多课程 serve 的接线（`rl/loop_serve.py`）——**假引擎 / 假账本**，不碰 torch。
+
+钉的是「驱动者」这一层的性质（plan/r2-loop-task-queue §8）：
+
+1. 一个进程里 N 门课**轮转推进**（不是一门跑完再下一门）⇒ 一门课等外部时别的课照常前进；
+2. 引擎**惰性**构建（没在训的课不付 `_setup()` 代价），且跑满时只做 `finish_course`（不停车）；
+3. 引擎池**越界驱逐 = 等同一次重启**（重建后 `_setup()` 再走一遍，账本指针不受影响）；
+4. 课程级故障（配置缺失/锁被占）隔离：该课进 `skipped`，别的课照跑。
+
+真 rollout/ppo/eval 一律不走（同 `e2e/test_loop_supervisor_integration.py` 的口径）。
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import rl.loop_core as loop_core
+import rl.loop_plan as loop_plan
+import rl.loop_serve as loop_serve
+import rl.train_ledger as train_ledger
+from rl.loop_round import STEP_METHOD
+from rl.loop_serve import CourseRuntime, serve
+from rl.loop_tasks import ROUND_TASKS
+
+# --------------------------------------------------------------- 假件
+
+
+class FakeLedger:
+    """账本视图的最小替身（`next_it` + `rows`）——只给 drive 层用。"""
+
+    def __init__(self, next_it: int = 1, rows: list[Any] | None = None) -> None:
+        self.next_it = next_it
+        self.rows = rows or []
+
+
+class FakeClock:
+    """受控时钟：`sleep` 推进 `now` ⇒ 测试不真睡、也不依赖墙钟顺序。"""
+
+    def __init__(self) -> None:
+        self.t = 0.0
+        self.sleeps = 0
+        self.on_sleep: Any = None
+
+    def now(self) -> float:
+        return self.t
+
+    def sleep(self, sec: float) -> None:
+        self.sleeps += 1
+        self.t += float(sec)
+        if self.on_sleep is not None:
+            self.on_sleep(self.sleeps)
+
+
+class FakeLoop:
+    """引擎替身：只记录调度器真的调了它什么（17 个方法里用到的那些）。"""
+
+    instances: list[FakeLoop] = []
+    #: 全进程的推进顺序 `(课, it)`——轮转公平性的直接证据（跨课）。
+    order: list[tuple[str, int]] = []
+    #: `课 → {it: 远端是否已回传}`（缺省 True；测让位时按 it 关掉几轮）。
+    ready_map: dict[str, dict[int, bool]] = {}
+
+    def __init__(self, args: Any, backend: Any, bun: str, update_kwargs: Any) -> None:
+        self.args = args
+        self.backend = backend
+        self.bun = bun
+        self.setups = 0
+        self.finished: list[int] = []
+        self.released = 0
+        self.executed: list[tuple[int, str]] = []
+        self.steps_done: list[str] = []
+        FakeLoop.instances.append(self)
+
+    @property
+    def course(self) -> str:
+        return Path(self.args.traj).name
+
+    # ---- 生命周期钩子（池 / serve 会调）----
+    def _setup(self) -> None:
+        self.setups += 1
+
+    def _ensure_local_ppo_stack(self) -> None:
+        pass
+
+    def release_torch(self) -> None:
+        self.released += 1
+
+    def finish_course(self, it: int) -> None:
+        self.finished.append(int(it))
+
+    # ---- 执行面 ----
+    def remote_job_ready(self, it: int) -> bool:
+        """远端 PPO 是否已回传（缺省就绪；测试按 (课, it) 关掉几轮）。"""
+        return FakeLoop.ready_map.get(self.course, {}).get(int(it), True)
+
+    def run_one_round(self, it: int) -> Any:
+        self.executed.append((int(it), "round"))
+        FakeLoop.order.append((self.course, int(it)))
+        return loop_core.RoundOutcome(loop_core.ROUND_NEXT, int(it))
+
+
+def _install_step_methods() -> None:
+    """给假引擎补齐 13 步（`STEP_METHOD` 驱动 ⇒ 与真引擎走同一张表，不可能少一步）。"""
+    for kind, method in STEP_METHOD.items():
+
+        def make(k: str, m: str) -> Any:
+            def step(self: FakeLoop, ctx: Any) -> Any:
+                ctx.mark(k)
+                self.steps_done.append(k)
+                FakeLoop.order.append((self.course, int(ctx.it)))
+                return None
+
+            return step
+
+        setattr(FakeLoop, method, make(kind, method))
+
+
+_install_step_methods()
+
+
+@pytest.fixture(autouse=True)
+def _reset() -> Any:
+    FakeLoop.instances.clear()
+    FakeLoop.order.clear()
+    FakeLoop.ready_map.clear()
+    loop_serve.close_course_sinks()
+    yield
+    FakeLoop.instances.clear()
+    FakeLoop.order.clear()
+    FakeLoop.ready_map.clear()
+    loop_serve.close_course_sinks()
+
+
+@pytest.fixture
+def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """假课程 + 假账本 + 假引擎：serve 的真接线、零真运算。"""
+    monkeypatch.setattr(loop_core, "TrainingLoop", FakeLoop)
+    monkeypatch.setattr(loop_serve, "get_backend", lambda mode: f"backend:{mode}")
+    ledger: dict[str, Any] = {"next_it": 1, "rows": []}
+    monkeypatch.setattr(loop_plan, "load_ledger", lambda *a, **k: FakeLedger(**ledger))
+    monkeypatch.setattr(
+        train_ledger, "load_ledger", lambda *a, **k: FakeLedger(next_it=ledger["next_it"])
+    )
+    opened: list[str] = []
+
+    def fake_open_course(course: str, **kw: Any) -> CourseRuntime:
+        opened.append(course)
+        args = SimpleNamespace(
+            mode="per-tick",
+            traj=str(tmp_path / course),
+            iters=2,
+            out_log="",
+            remote_hub_url="",
+            remote_token="",
+            force=False,
+        )
+        return CourseRuntime(course=course, args=args)
+
+    monkeypatch.setattr(loop_serve, "open_course", fake_open_course)
+    Path(tmp_path).mkdir(parents=True, exist_ok=True)
+    return SimpleNamespace(tmp=tmp_path, ledger=ledger, opened=opened)
+
+
+# --------------------------------------------------------------- 接线
+
+
+def test_two_courses_alternate_and_both_finish(env: SimpleNamespace) -> None:
+    rep = serve(["a", "b"], prepare=False, bun="bun", iters=2, step_mode=False)
+
+    assert rep.stop_reason == "all_settled"
+    assert rep.steps == 4  # 每课 2 轮
+    assert env.opened == ["a", "b"]
+    for course in ("a", "b"):
+        assert rep.courses[course]["rounds_done"] == 2
+        assert rep.courses[course]["state"] == "done"
+        assert rep.courses[course]["next_it"] == 3
+    # ★ 轮转推进（一门课不是一口气跑完两轮）：a,b,a,b —— 公平轮转的直接证据
+    assert [(c, it) for c, it in FakeLoop.order] == [("a", 1), ("b", 1), ("a", 2), ("b", 2)]
+    for loop in FakeLoop.instances:
+        assert [it for it, _ in loop.executed] == [1, 2]
+    # 跑满 ⇒ 每课一次 finish_course（**不停车**：进程还要服务别的课）
+    assert all(loop.finished == [2] for loop in FakeLoop.instances)
+    # 自己建的池在退出时释放全部 torch 栈（注入的池不关，归调用方）
+    assert all(loop.released == 1 for loop in FakeLoop.instances)
+    assert rep.engines["loaded"] == []
+
+
+def test_step_mode_runs_the_full_13_step_table(env: SimpleNamespace) -> None:
+    rep = serve(["a"], prepare=False, bun="bun", iters=1, step_mode=True)
+
+    assert rep.stop_reason == "all_settled"
+    assert rep.steps == len(ROUND_TASKS) == 13
+    loop = FakeLoop.instances[0]
+    assert loop.steps_done == list(ROUND_TASKS)  # 顺序即依赖顺序
+    assert loop.executed == []  # 细粒度路径**不**调轮粒度入口
+    assert loop.setups == 1  # 引擎惰性建一次
+    assert rep.courses["a"]["rounds_done"] == 1
+
+
+def test_wait_hands_execution_to_the_other_course(env: SimpleNamespace) -> None:
+    """一门课等远端回传时，另一门课的轮照常推进（单进程多课程的核心收益）。"""
+    clock = FakeClock()
+    FakeLoop.ready_map["a"] = {1: False, 2: False}  # a 的两轮远端结果都还没回
+
+    def flip(_n: int) -> None:
+        # 第 2 次空转后，a 的远端结果到了（模拟云端回传）
+        if _n >= 2:
+            FakeLoop.ready_map["a"] = {1: True, 2: True}
+
+    clock.on_sleep = flip
+    rep = serve(
+        ["a", "b"],
+        prepare=False,
+        bun="bun",
+        iters=2,
+        step_mode=False,
+        now=clock.now,
+        sleep=clock.sleep,
+        max_steps=100,
+    )
+
+    assert rep.stop_reason == "all_settled"
+    loops = {Path(loop.args.traj).name: loop for loop in FakeLoop.instances}
+    # b 全程没被 a 挡住：它的两轮都在 a 让位期间跑完了
+    assert [it for it, _ in loops["b"].executed] == [1, 2]
+    assert [it for it, _ in loops["a"].executed] == [1, 2]
+    assert clock.sleeps >= 2  # 真的发生过「无事可做 → 让位 → 稍后再问」
+    assert rep.courses["a"]["reason"] == ""  # 收官后不再残留「在等什么」
+
+
+def test_pool_eviction_rebuilds_engine_like_a_restart(env: SimpleNamespace) -> None:
+    """容量=1 时两门课互相驱逐：**每次重建都再走一遍 `_setup()`**（等同一次重启）。
+
+    这条是引擎池与 serve 的交界：驱逐后 `pool.get` 会产出**新对象**，`ensure_ready` 必须
+    认出「对象换了 ⇒ 要走 `_setup()`」，而不是误以为「这门课已经 setup 过」。
+    """
+    rep = serve(
+        ["a", "b"],
+        prepare=False,
+        bun="bun",
+        iters=2,
+        step_mode=False,
+        cache_courses=1,
+        cache_mb=10**9,
+    )
+
+    assert rep.stop_reason == "all_settled"
+    assert rep.courses["a"]["rounds_done"] == 2 and rep.courses["b"]["rounds_done"] == 2
+    # a1 → (被 b 挤掉) → b1 → (被 a 挤掉) → a2 → b2：4 次建栈、至少 2 次驱逐
+    assert rep.engines["builds"] == 4
+    assert rep.engines["evictions"] >= 2
+    assert rep.engines["over_budget"] == 0
+    assert len(FakeLoop.instances) == 4
+    assert all(loop.setups == 1 for loop in FakeLoop.instances)  # 每个新对象都 setup 过
+    # 每个对象各跑一轮（轮粒度：一轮 = 一个任务）
+    assert sorted(len(loop.executed) for loop in FakeLoop.instances) == [1, 1, 1, 1]
+
+
+def test_settled_ledger_never_raises_an_engine(env: SimpleNamespace) -> None:
+    """账本说这一轮已结算 ⇒ 队列直接 `done`（不建引擎、不做收官副作用）。"""
+    env.ledger["rows"] = [SimpleNamespace(it=1)]
+
+    rep = serve(["a"], prepare=False, bun="bun", iters=0, step_mode=True)
+
+    assert rep.stop_reason == "all_settled"
+    assert rep.steps == 0
+    assert FakeLoop.instances == []
+    assert rep.courses["a"]["state"] == "done"
+    assert rep.engines["builds"] == 0
+
+
+def test_broken_course_is_isolated(env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """一门课开不起来（配置缺失/锁被占）⇒ 响亮跳过，其余课照跑。"""
+    good = loop_serve.open_course
+
+    def open_course(course: str, **kw: Any) -> CourseRuntime:
+        if course == "bad":
+            raise SystemExit("[serve] 课程 bad 不存在")
+        return good(course, **kw)
+
+    monkeypatch.setattr(loop_serve, "open_course", open_course)
+    rep = serve(["bad", "a"], prepare=False, bun="bun", iters=1, step_mode=False)
+
+    assert list(rep.skipped) == ["bad"] and "不存在" in rep.skipped["bad"]
+    assert rep.courses["a"]["rounds_done"] == 1
+    assert rep.stop_reason == "all_settled"
+
+    rep2 = serve(["bad"], prepare=False, bun="bun", max_steps=5)
+    assert rep2.stop_reason == "no_courses" and rep2.steps == 0
+
+
+# --------------------------------------------------------------- 课程参数
+
+
+def test_course_args_refuses_a_course_flag() -> None:
+    """课程由列表给出：附加参数里再传 `--course` 必须响亮拒启（两个来源 = 必然打架）。"""
+    with pytest.raises(SystemExit, match="课程由课程列表给出"):
+        loop_serve.course_args("c4-dodge", ["--course", "c5-tick"])
+
+
+def test_course_args_unknown_course_is_loud() -> None:
+    with pytest.raises((FileNotFoundError, SystemExit)):
+        loop_serve.course_args("no-such-course-xyz")
+
+
+_ORACLE = """
+import json, sys
+sys.argv = ["run_rl.py", "--course", sys.argv[1]]
+import rl.config as cfg
+def fake_echo(args, course, it=1):
+    print("PARITY:" + json.dumps({k: repr(v) for k, v in vars(args).items()
+                                  if not k.startswith("_")}, ensure_ascii=False))
+cfg.echo_config = fake_echo
+import run_rl
+run_rl.main()
+"""
+
+
+def test_course_args_match_run_rl_echo_config(tmp_path: Path) -> None:
+    """对拍：`course_args(stem)` ≡ `run_rl.py --course <stem>` 的启动段（真机权重在位才跑）。
+
+    oracle = 在**子进程里跑 `run_rl.main()` 自己**、把 `echo_config` 换成 dump（同一调用点、
+    同一份解析链）；本机若缺新 era 权重，`validate_args` 会在这条链上先崩（两侧同样崩），
+    此时**跳过**并在理由里写清——判据不能靠环境侥幸。
+    """
+    stem = "c4-dodge"
+    proc = subprocess.run(
+        [sys.executable, "-c", _ORACLE, stem],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    line = next((ln for ln in proc.stdout.splitlines() if ln.startswith("PARITY:")), "")
+    if not line:
+        tail = proc.stderr.strip()[-300:]
+        # 只在**环境**跑不动时跳过（缺权重/schema 旧）——其余情况是**真回归**，必须红。
+        env_blocked = any(s in tail for s in ("FileNotFoundError", "[weights]", "schema_major"))
+        if not env_blocked:
+            pytest.fail(f"oracle 没吐出 PARITY（对拍链本身出了问题）：{tail}")
+        pytest.skip(f"本机缺当前 era 权重 ⇒ run_rl 启动链两侧同样跑不动：{tail}")
+    theirs = json.loads(line[len("PARITY:") :])
+    mine = {
+        k: repr(v) for k, v in vars(loop_serve.course_args(stem)).items() if not k.startswith("_")
+    }
+    assert mine == theirs
