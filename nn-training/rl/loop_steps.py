@@ -622,6 +622,8 @@ class TrainingSteps:
     _start_it: int
     _traj_dir: Any
     _jsonl_path: Any
+    #: R2a：写入账本后把事件并入 `LedgerView` 的钩子（实现在 TrainingGuards）。
+    _ledger_apply: Any
     _report: dict
     _stream_meta: dict | None
     _eval_thread: threading.Thread | None
@@ -938,12 +940,19 @@ class TrainingSteps:
 
             j = CommitJournal(Path(self._traj_dir) / "commit_journal.jsonl")
             self._commit_journal_obj = j
-            pending = j.pending()
-            if pending:
+            # R2b：报**在飞集**（不只是 phase/round）——「在等哪个 job、推给了谁」
+            # 从「事故考古」变成一条日志（job_id 由 publish 后的 attach 行带上）。
+            inflight = j.inflight()
+            if inflight:
+                detail = ", ".join(
+                    f"{r['phase']}@{r['round']}"
+                    + (f" jid={r['jid']}" if r.get("jid") else "")
+                    + (f" via {r['dispatch']}" if r.get("dispatch") else "")
+                    for r in inflight
+                )
                 log(
-                    f"[run_rl] WAL replay-check: {len(pending)} 个未完成提交轮次 "
-                    f"{[(p['phase'], p['round']) for p in pending]} —— "
-                    "本地轮由 ppo_ckpt 续跑、远端轮重发同 it job（幂等）"
+                    f"[run_rl] WAL replay-check: {len(inflight)} 个未完成提交 "
+                    f"[{detail}] —— 本地轮由 ppo_ckpt 续跑、远端轮重发同 it job（幂等）"
                 )
         return j
 
@@ -1399,6 +1408,16 @@ class TrainingSteps:
             log=log,
         )
         jid = manifest["job_id"]
+        # R2b（plan/r2-loop-task-queue §2.3）：把刚发布的 job 补进 WAL 的**在飞集**——
+        # job_id 是 publish 的返回值（start 时还没有），只能上这条 attach。重启后
+        # `_commit_journal` 就能报出「在等哪个 job、推给了谁」，而不是只报一个 round 号。
+        self._commit_journal().attach(
+            "ppo_remote",
+            str(it),
+            jid=jid,
+            dispatch="push" if hub_push else "pull",
+            ts=time.time(),
+        )
         pack_sec = round(time.time() - t_pack, 3)
         if export_path is not None:
             # 全离线：不等待、不发 job——把这一段任务打成能上传 Kaggle/Colab 的任务包。
@@ -2227,31 +2246,37 @@ class TrainingSteps:
             log(f"[eval] drain: 收尾 eval 失败（{type(e).__name__}: {e}）——不阻断收官")
 
     def _record_iteration(self, it: int) -> None:
-        """iteration 事件落账（字段契约在 rl/events.py::write_iteration）。"""
-        write_iteration(
-            self._jsonl_path,
-            self.args,
-            it,
-            self._report,
-            {
-                "rollout_sec": self._rollout_sec,
-                "ppo_sec": self._ppo_sec,
-                "ppo_cloud_sec": self._ppo_cloud_sec,
-                # M0 统一计量（additive；本地/旧路径无此键 → None）。
-                "wire": getattr(self, "_wire", None),
-                "total_steps": self._total_steps,
-                "chunks_n": self._chunks_n,
-                "agg": self._agg,
-                "kl_cum": self._kl_cum,
-                "halted": self._halted_flag,
-                "dropped_games": self._dropped_games,
-                "waves": self._waves_n,
-                "load_sec": self._load_sec,
-                "tail_drain_sec": self._tail_drain_sec,
-                "eval_join_sec": self._eval_join_sec,
-                # 动态采集（None = 未开该模式；additive 字段，旧行无此键）
-                "transitions_target": self._volume_target,
-                "transitions_collected": self._volume_collected,
-                "transitions_capped": True if self._volume_capped else None,
-            },
+        """iteration 事件落账（字段契约在 rl/events.py::write_iteration）。
+
+        R2a：写入后立刻并入 `LedgerView`（`_ledger_apply`）——视图因此始终 == 盘上
+        账本，且没有第二次全文件扫描（用户 2026-09-18 裁决：每课只读一遍）。
+        """
+        self._ledger_apply(
+            write_iteration(
+                self._jsonl_path,
+                self.args,
+                it,
+                self._report,
+                {
+                    "rollout_sec": self._rollout_sec,
+                    "ppo_sec": self._ppo_sec,
+                    "ppo_cloud_sec": self._ppo_cloud_sec,
+                    # M0 统一计量（additive；本地/旧路径无此键 → None）。
+                    "wire": getattr(self, "_wire", None),
+                    "total_steps": self._total_steps,
+                    "chunks_n": self._chunks_n,
+                    "agg": self._agg,
+                    "kl_cum": self._kl_cum,
+                    "halted": self._halted_flag,
+                    "dropped_games": self._dropped_games,
+                    "waves": self._waves_n,
+                    "load_sec": self._load_sec,
+                    "tail_drain_sec": self._tail_drain_sec,
+                    "eval_join_sec": self._eval_join_sec,
+                    # 动态采集（None = 未开该模式；additive 字段，旧行无此键）
+                    "transitions_target": self._volume_target,
+                    "transitions_collected": self._volume_collected,
+                    "transitions_capped": True if self._volume_capped else None,
+                },
+            )
         )

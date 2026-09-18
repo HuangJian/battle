@@ -4,6 +4,158 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §77 R2b 落地：任务模型 + 在飞集；`loop-state.json` 经落地否决（2026-09-18）
+
+R2 第二相位。设计稿 `plan/r2-loop-task-queue.md` §3/§8/§10 同步更新。
+
+### `rl/loop_tasks.py`（新，纯逻辑：无 torch / 无网络 / 无文件 IO）
+
+| 件 | 内容 |
+|---|---|
+| `Task` | `task_id = course:it:kind`（**幂等键**；重试只动 `attempt`）· `resource` 由 `RESOURCE_OF` 给出 |
+| `TaskResult` | 四态 `DONE` / `WAIT(resume_at)` / `RETRY` / `ABORT` + `is_terminal`（DONE/ABORT 出队）；非法状态当场 `ValueError` |
+| `ROUND_TASKS` | 一轮 **13 步**：`prepare_iter` → `hot_reload` → `course_iter` → `precollect_join` → `rollout` → `volume_topup` → `eval_dispatch` → `ppo` → `export_weights` → `eval_join` → `record_iteration` → `gate` → `cleanup` |
+| `RESOURCE_OF` | 只有 `rollout`/`volume_topup`/`ppo`/`eval_join` 占池；**等待型/记账型不占**——这才是单进程能服务多课程的机制 |
+| `RoundFacts` + `already_done` + `pending_tasks` | 幂等判据只认**盘上事实**；`iteration_recorded` ⇒ 整轮为空（★ 不得重写账本、不得重发 job） |
+| `resolve_failure` | 与现主循环逐条一致：冒烟作废原地重试 / 死腿立刻 ABORT（不再 5×30s 空转）/ `attempt≥5` 才停、it 不前跳 |
+
+### 在飞集：复用既有 WAL，不建第二份登记表
+
+`rl/commit_journal.py`（I1 的 `started/finish` WAL）新增：
+
+```
+attach(phase, round, jid=..., dispatch=..., ts=...)   # 只补事实，**不改状态机**（pending 语义逐字不变）
+inflight()                                            # pending + 它们的 job_id / 派发方式 / 开始时刻
+```
+
+`_remote_ppo` 在 `publish_job` 拿到 `jid` 后立刻 attach（`jid` 是 publish 的返回值，`start` 时还没有 ⇒
+必须另设 op）；`_commit_journal()` 在每 it 首次创建时把在飞集打进日志：
+
+```
+WAL replay-check: 1 个未完成提交 [ppo_remote@37 jid=... via push] —— 本地轮由 ppo_ckpt 续跑、远端轮重发同 it job（幂等）
+```
+
+### ★ 设计变更：`loop-state.json` **不建**
+
+初稿计划每课一份状态文件（指针 + 在飞集 + 预算）。落地时逐条对照，发现盘上**已有三份权威来源**
+覆盖全部四类信息：
+
+| 要落的信息 | 已存在的权威来源 |
+|---|---|
+| 指针（`next_it`/`rotate_seed`/阶梯） | 账本（R2a `LedgerView`，已接） |
+| 预算与门禁计数 | 账本（R2a，已接） |
+| 在飞集（job_id / 等谁回传） | `commit_journal.jsonl`（R2b，已接） |
+| eval 尾巴意图 / 预采子进程 | `eval_log.jsonl` summary + `(stage,seed,wver)` shard 对账 |
+
+再写一份 JSON = **第二份真相**，分叉方向恰是最贵的一种（续跑读错指针）。⇒ 不建；唯一允许留在内存的是
+调度器唤醒条件（`WAIT.resume_at`、资源池票），它可重算。备选否决也记在案：写它当「加速器」（零独立信息并集）、
+把在飞集写进账本（账本是**事件流**，在飞是**状态**，混进去污染所有账本读者）。
+
+### 门禁
+
+| 门 | 结果 |
+|---|---|
+| nn python gate（ruff + mypy + pytest） | ✔ **1351 passed / 3 skipped**（25s；+14 新例） |
+| 根 `bun run check` | ✔ 38s 绿 |
+
+新回归：`tests/test_loop_tasks.py`（10 例：任务表/幂等键/资源池/四态/幂等铁律/失败语义）、
+`tests/test_commit_journal.py`（+4 例：attach 不动状态机、孤立 attach 不造在飞、finish 后不可复活、
+**硬死后带 job_id 的在飞集**）。
+
+### 踩坑
+
+1. **attach 不能进状态机**：`pending()` 是「每个 (phase,round) 的最后一条 op」——若把 attach 当普通记录写，
+   它的 op 会顶掉 `start`，未完成提交立刻变「已完成」。实现上 `_scan()` 明确把 attach 从 last-op 里剔除，
+   只并入 meta（并加了用例钉住）。
+2. **别把在飞集塞进 iteration 事件的 `start`**：`jid` 只能 publish 之后才知道；在 `start` 里塞空值再靠
+   `finish` 补，等于让「未完成的那些」永远看不到 job_id——恰是最需要它的场景。
+
+### 下一步
+
+R2c：单进程 supervisor（每课队列 + 资源池容量 1 + `WAIT` 让位）+ `checkpointCacheMb` 真机实测。
+
+## §76 R2 设计稿 + R2a 落地：门禁与续跑改扫账本（重启不再洗白）（2026-09-18）
+
+用户指令：训练循环任务队列化（「trainingloop 不是请求处理器，是一个有状态的会话」）。本轮交付
+**设计稿 + 第一个相位（R2a）**；四个未决问题已由用户定案。
+
+### 设计稿：`plan/r2-loop-task-queue.md`（327 行）
+
+**「有状态会话」的字面证据**：`TrainingLoop.__init__`（`rl/loop_core.py:151`）约 60 个跨轮字段；
+`run()` 是 190 行顺序脚本 ⇒ 一步阻塞整条腿阻塞 ⇒「多课程 = 多进程」是形状的必然结果，不是选择。
+
+**状态五分类**（R2 的全部工作量）：
+
+| 类 | 内容 | 归宿 |
+|---|---|---|
+| A 指针 | `next_it` / `rotate_seed` / 阶梯（= `it` 的纯函数） | 账本（已有） |
+| B 门禁指标 | `kl_streak` / `ent_streak` / `stop_loss_streak` / `soft_remediate_count` / 累计量 | **改扫账本** |
+| C 在飞集 | `job_id` / 等谁回传 / eval 尾巴 / 预采子进程 | 落**意图**，重启按意图重建（线程句柄不可序列化） |
+| D torch 对象 | `_model` / `_opt` / `_ref_model` | 每课内存缓存最新 checkpoint（权重 + Adam） |
+| E 轮内瞬态 | `_report` / `_agg` / `_volume_*` | **禁持久化**（否则拿旧数字记新轮） |
+
+**任务模型**：一轮 → 13 个细粒度任务，执行器四态 `DONE / WAIT / RETRY / ABORT`；`WAIT`（等远程
+PPO、等 eval 尾巴）**不占执行权**是单进程多课程的关键；每条任务先有**盘上判据**（幂等 guard）——
+这同时就是「重放安全」与「扫账本」的同一件事。
+
+**用户定案（2026-09-18）**：① 直接做到 R2c 单进程；② 细粒度步骤 + `WAIT` 让位；
+③ 本机 `local_ppo`/`eval_local` 跨课排队、池容量 1；④ checkpoint 缓存上限 = 并行课程上限（默认 5）。
+
+### R2a 落地：`nn-training/rl/train_ledger.py`
+
+`LedgerSpec`（阈值，与 `_breaker` 同源）+ `LedgerView`（单遍 `load_ledger` + `apply_event` 增量）
++ `soft_remediate_count(kinds)`。**不新造账本**：`training_log.jsonl` 已含全部事件，且已有五个扫描器
+（`rl/resume.py` × 3、`rl/gate_check.py` × 4）——R2a 只是把它们收敛成一份视图。
+
+接线：
+
+```
+loop_core._setup_common   ← load_ledger 一次
+    next_it / rotate_seed / ent_peak / train_sec_total / train_samples_total
+    kl_streak / ent_streak / stop_loss_streak / soft_remediate_count
+events.write_*             → 返回事件 dict
+loop_guards._ledger_apply  → 写账本处顺手并入视图（观测失败绝不阻断训练）
+events.write_stop_loss     → 止损连击的**状态转移**落账（命中 / 从 >0 回落）
+```
+
+**刻意不继承**：`_consec_fail`（重试连击是单腿内的进程护栏，继承会「重启即秒死」）、
+`_zero_shard_streak`（口径依赖 `_node_rollout`，而 `iteration` 行没有 `rollout_src` ⇒ 会对节点轮报假事故，
+R2b 加字段后再接）。
+
+### 这一相位修掉的真 bug
+
+**I2「提示类门 REMEDIATE ×N 即停腿」原先只在内存计数 ⇒ 重启即洗白。** 边际收益枯竭的 N 次确认
+可以从头再来（`c6-pickup3` 6 次 / `c6-bonus` 10 次 cloud halt 那类事故的判据）。现在读**整条账本**
+（换新 traj = 新纪元，重新计数）；同类问题的 F4 连击与止损连击一并对齐（止损原先在账本里**毫无痕迹**
+——命中只打日志，所以新增 `stop_loss` 事件）。
+
+### 门禁
+
+| 门 | 结果 |
+|---|---|
+| nn python gate（ruff + mypy + pytest） | ✔ **1338 passed / 3 skipped**（26s；+18 新例） |
+| 根 `bun run check` | ✔ 21s 绿 |
+
+新回归：`tests/test_train_ledger.py`（15 例：与五个旧扫描器**奇偶断言**、增量==单遍、
+独立复算连击、坏行/未知事件透明、提示类计数口径）、`tests/test_train_ledger_wiring.py`
+（3 例：`_setup_common` 继承、继承计数当轮停腿、空账本从零起）。
+
+### 踩坑（本轮）
+
+1. **`_ent_peak` 的赋值位置**：原代码在 `if start_it > 1:` 分支里才从账本回读 ⇒ 视图化后必须
+   提到**无条件**赋值，否则「空账本但 view 有值」的组合说不清（本轮统一为「视图即真相」）。
+2. **`NO_CLOUD_HALT_KINDS` 是 `TrainingGuards` 的类属性**（不是模块级名）——从 `rl.loop_guards`
+   直接 import 会 ImportError，用 `TrainingGuards.NO_CLOUD_HALT_KINDS`。
+3. **mypy 需要显式声明 mixin 属性**：`TrainingSteps` 里调 `self._ledger_apply` 必须在类体声明
+   `_ledger_apply: Any`（与既有 `_jsonl_path: Any` 同法），否则 `attr-defined` 报错。
+4. **测试期望值别跟着实现写**：agg 缺失轮（`kl=None`）在 `_breaker` 门控下**既不续也不断**连击
+   ——我第一版测试写成「断」（期望 1），实测 2 才是对的；已把这条语义写进断言注释。
+
+### 下一步
+
+R2b：`rl/loop_tasks.py`（任务 schema + 四态执行器）+ 每课 `loop-state.json`；随后 R2c 单进程
+supervisor（资源池容量 1）+ R2d 控制台单例卡片/队列视图 + R2e e2e。
+
 ## §75 多课程单 hub 端到端 + 回环 HTTP 绕开代理（P1 余下 ②）（2026-09-18）
 
 P1 收口：`e2e/test_multi_course_single_hub_e2e.py` 把「一个 hub 进程服务所有并行课程」钉在

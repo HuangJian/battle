@@ -41,9 +41,6 @@ from rl.queue import REPO_ROOT, RUN_ID
 from rl.reports import combine_reports
 from rl.resume import (
     completed_pairs,
-    last_completed_iter,
-    last_rotate_seed,
-    peak_entropy,
     settled_stage_totals,
     trailing_samples_per_game,
 )
@@ -52,6 +49,7 @@ from rl.rollout_phase import (
     join_precollect_child,
     spawn_next_collect,
 )
+from rl.train_ledger import LedgerSpec, load_ledger
 
 
 def _course_file_fp(args) -> str | None:
@@ -418,7 +416,7 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 it -= 1
             except SystemExit as e:
                 self._consec_fail += 1
-                log_iter_error(self._jsonl_path, it, f"SystemExit: {e}")
+                self._ledger_apply(log_iter_error(self._jsonl_path, it, f"SystemExit: {e}"))
                 log(
                     f"[run_rl] it{it} FAILED (SystemExit: {e}); "
                     f"consecutive={self._consec_fail}/5 — retry same iteration"
@@ -429,7 +427,7 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 it -= 1  # 原地重试同一迭代（resume 保留已完成 shard + ppo_backend ckpt，不重跑已完局）
             except Exception as e:
                 self._consec_fail += 1
-                log_iter_error(self._jsonl_path, it, f"{type(e).__name__}: {e}")
+                self._ledger_apply(log_iter_error(self._jsonl_path, it, f"{type(e).__name__}: {e}"))
                 log(
                     f"[run_rl] it{it} FAILED ({type(e).__name__}: {e}); "
                     f"consecutive={self._consec_fail}/5 — retry same iteration"
@@ -643,10 +641,15 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         # D14 语料血缘：课程文件 sha256（None = 非课程运行，不过滤——旧行为字节不变）
         self._course_fp = _course_file_fp(args)
 
+        # R2a（plan/r2-loop-task-queue §5）：**一次扫描**得到账本视图——续跑指针、累计量、
+        # 熔断连击、提示类判决次数全由它重建（旧实现是 5 个扫描器各读一遍全文件）。
+        # 视图同时是本进程的增量账本：写事件的调用点随后 apply_event ⇒ 永不重扫。
+        # 用户裁决（2026-09-18）：门禁语义 = 扫账本，指标按课缓存、只在开课/续跑读一遍。
+        self._ledger = load_ledger(self._jsonl_path, LedgerSpec.from_args(args))
         # 续跑继承 rotateSeed：已有 run_start 历史 → 沿用其 rotateSeed（课程连续 → it 续跑时
         # 下轮 (stage,seed) 与已落盘局一致 → 断点续跑剔除生效，不重跑已完成局）。
         # 全新开始（无 jsonl 历史，例如用户清空重建）才用当前时刻抖动种子。
-        prev_rs = last_rotate_seed(self._jsonl_path)
+        prev_rs = self._ledger.rotate_seed
         if prev_rs is not None:
             rotate_seed = prev_rs
             log(f"[run_rl] resume: inherited rotateSeed={prev_rs} (course continuity preserved)")
@@ -655,10 +658,8 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         self._rotate_seed = rotate_seed
         # G13 duty 的分子：从账本重算累计有效训练（Σ 真训练秒）。
         # 进程内存累计重启会归零 → 占空比被低估 → 误报"在烧事故"；账本是 SSOT。
-        from rl.gate_check import sum_train_samples, sum_train_sec
-
-        self._train_sec_total = sum_train_sec(self._jsonl_path)
-        self._train_samples_total = sum_train_samples(self._jsonl_path)
+        self._train_sec_total = self._ledger.train_sec_total
+        self._train_samples_total = self._ledger.train_samples_total
         # build_pairs 是 (rotateSeed, it) 的纯函数：不持有任何跨迭代的随机流状态，
         # 同一 it 在任意时刻重启都得到完全相同的一批局（断点续跑剔除的前提）。
         write_run_start(self._jsonl_path, args, rotate_seed)
@@ -700,31 +701,37 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         self._deadline = time.time() + args.max_hours * 3600 if args.max_hours > 0 else None
         self._total = "∞" if args.iters <= 0 else str(args.iters)
         self._prev_entropy = None
+        # consec_fail（重试连击）**不跨重启继承**：它是单腿内的进程级护栏（5 连击即抛），
+        # 继承会让「重启即秒死」（一次失败就撞上历史 5 连击）。只在视图里观测。
         self._consec_fail = 0
-        self._kl_streak = 0  # F4: consecutive iters with kl >= KL_BREAK
-        self._ent_streak = (
-            0  # F4: consecutive iters with entropy <= ent_break and winRate < ent_max_winrate
-        )
+        # F4 连击从账本继承（与 ent_peak §339 同理）：连击是**连续**计数，只有下一轮的
+        # kl/entropy 再越线才继续，故继承既真又无害；不继承则重启即清零。
+        self._kl_streak = self._ledger.kl_streak  # F4: consecutive iters with kl >= KL_BREAK
+        self._ent_streak = self._ledger.ent_streak
         # F4 ENT 相对崩塌基线（2026-09-06）：本轮之前见过的最大熵。None = 无历史
         # （冷启动首轮）→ breaker 退回绝对电平判定。续跑时从 training_log.jsonl 回读，
         # 否则每次重启 peak 归零，it9 会被当成"首轮"白送一次连击。
-        self._ent_peak: float | None = None
-        self._stop_loss_streak = 0  # P1-9: 统计显著止损（Δ≤−2σ）的连续轮数，≥2 才停车
-        self._tripped = None
-        # it 断点续跑：--start-it 显式，否则自动 = 日志最后一个完成迭代 + 1
-        start_it = (
-            args.start_it
-            if args.start_it is not None
-            else (last_completed_iter(self._jsonl_path) + 1)
+        self._ent_peak: float | None = self._ledger.ent_peak
+        self._stop_loss_streak = self._ledger.stop_loss_streak  # P1-9: 止损连击（新 stop_loss 事件）
+        # I2（提示类门 REMEDIATE ×N 停腿）：计**整条账本**，不随进程重启洗白
+        # （2026-09-18 修）。旧实现在内存里，重启后 4 次确认可以从头再来。
+        self._soft_remediate_count = self._ledger.soft_remediate_count(
+            TrainingGuards.NO_CLOUD_HALT_KINDS
         )
+        if self._soft_remediate_count:
+            log(
+                f"[run_rl] resume: inherited soft-REMEDIATE count={self._soft_remediate_count} "
+                "（I2 停腿判据读账本，重启不洗白）"
+            )
+        self._tripped = None
+        # it 断点续跑：--start-it 显式，否则自动 = 账本最后完成迭代 + 1
+        start_it = args.start_it if args.start_it is not None else self._ledger.next_it
         if start_it > 1:
             log(
                 f"[run_rl] resume: continuing from iteration {start_it} "
                 f"(weights resume from {args.out})"
             )
-            # ENT 相对崩塌基线续跑继承（§339）：不继承则重启后首轮 peak=None 被当冷启动，
-            # 直接按绝对电平白记一次连击。
-            self._ent_peak = peak_entropy(self._jsonl_path)
+            # ENT 相对崩塌基线续跑继承（§339）：已在上面从视图赋值，这里只回显。
             if self._ent_peak is not None:
                 log(
                     f"[run_rl] resume: inherited entropy peak={self._ent_peak:.3f} (F4 ENT baseline)"

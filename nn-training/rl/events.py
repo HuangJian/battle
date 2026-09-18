@@ -12,24 +12,55 @@ import time
 from pathlib import Path
 
 
-def write_event(jsonl_path: Path, event: dict) -> None:
+def write_event(jsonl_path: Path, event: dict) -> dict:
     """追加一条事件到 jsonl（不吞异常——与旧内联写入同语义，失败向上传播）。
 
     调用方（loop 的失败重试）负责兜底；观测事件失败不该静默跳过训练主链。
+
+    **返回写入的事件 dict**（R2a，2026-09-18）：调用方把它喂给 `LedgerView.apply_event`
+    做增量维护——视图因此永远与盘上账本一致，且**永不重扫**。旧调用点忽略返回值，
+    行为零变化。
     """
     with open(jsonl_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(event) + "\n")
+    return event
 
 
-def log_iter_error(jsonl_path: Path, it: int, err: str) -> None:
+def write_stop_loss(jsonl_path: Path, it: int, streak: int, delta: float | None = None) -> dict:
+    """stop_loss 事件：止损连击的**状态转移**落账（R2a，2026-09-18）。
+
+    为什么需要这一行：P1-9 的「Δ≤−2σ 连续 2 轮才停车」在内存里只是个计数器，
+    重启即归零 ⇒ 已经确认过一次的止损可能被重启打断，白跑一整轮。账本里原先
+    **没有任何止损痕迹**（命中只打日志，真停车就直接退出了），所以扫账本也无从重建。
+
+    写入时机 = 状态转移（不是每轮）：命中时写 `streak=N`；从 >0 回落到 0 时写
+    `streak=0`。两者合起来让 `streak` 从账本尾行**精确重建**，且日志噪声有界。
+    新事件名对旧读者透明（`LedgerView` 之外没人读它）。
+    """
+    return write_event(
+        jsonl_path,
+        {
+            "event": "stop_loss",
+            "iter": it,
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "streak": streak,
+            "delta": delta,
+        },
+    )
+
+
+def log_iter_error(jsonl_path: Path, it: int, err: str) -> dict | None:
     """迭代失败落 training_log.jsonl（iter_error 事件）。
 
     此前失败详情只进易失 stdout——detach 启动下不可见，it2/it3 连续跳轮时
     无任何可复盘痕迹。观测必须自带牙齿：last_completed_iter 只认 iteration
     事件，iter_error 不影响断点续跑定位。OSError 静默（失败回放路径不该再炸）。
+
+    R2a：成功写入时**返回事件 dict**（调用方喂 `LedgerView.apply_event`）；
+    OSError 静默路径返回 None——调用方的 `_ledger_apply(None)` 是空操作。
     """
     try:
-        write_event(
+        return write_event(
             jsonl_path,
             {
                 "event": "iter_error",
@@ -39,7 +70,7 @@ def log_iter_error(jsonl_path: Path, it: int, err: str) -> None:
             },
         )
     except OSError:
-        pass
+        return None
 
 
 def _json_args(args) -> dict:
@@ -63,9 +94,9 @@ def _json_args(args) -> dict:
     return out
 
 
-def write_run_start(jsonl_path: Path, args, rotate_seed: int) -> None:
+def write_run_start(jsonl_path: Path, args, rotate_seed: int) -> dict:
     """run_start 事件：落盘启动参数与课程 rotateSeed（断点续跑继承来源）。"""
-    write_event(
+    return write_event(
         jsonl_path,
         {
             "event": "run_start",
@@ -76,14 +107,14 @@ def write_run_start(jsonl_path: Path, args, rotate_seed: int) -> None:
     )
 
 
-def write_iteration(jsonl_path: Path, args, it: int, report: dict, m: dict) -> None:
+def write_iteration(jsonl_path: Path, args, it: int, report: dict, m: dict) -> dict:
     """iteration 事件（字段契约与旧 rl/loop.py 内联写入逐字节一致）。
 
     m: {rollout_sec, ppo_sec, total_steps, chunks_n, agg, kl_cum, halted,
         dropped_games, waves, load_sec, tail_drain_sec, eval_join_sec}
     """
     agg = m["agg"]
-    write_event(
+    return write_event(
         jsonl_path,
         {
             "event": "iteration",
@@ -170,7 +201,7 @@ def write_gate_verdict(
     override: dict | None = None,
     seeds: str = "unknown",
     decider: str = "loop",
-) -> None:
+) -> dict:
     """gate_verdict 事件：课程结束门判决落地（plan §4.3）。
 
     两条来源（lattice 的 ABORT 项不能只有人工 override 一条路）：
@@ -178,7 +209,7 @@ def write_gate_verdict(
       2. `_breaker` 熔断——ABORT（ds-P1-1：否则执行面在真正的 ABORT 场景读不到判决）。
     读盘面（notebook/hub 运维）只读末个 gate_verdict，不自己算门。
     """
-    write_event(
+    return write_event(
         jsonl_path,
         {
             "event": "gate_verdict",
