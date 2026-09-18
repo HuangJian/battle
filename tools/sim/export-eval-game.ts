@@ -184,6 +184,10 @@ interface Telemetry {
   puGotTank: number
   puGotFreeze: number
   puGotShield: number
+  /** 残差桶（metrics v7 顺手项，与 export-rl-rollout 同步）：四桶外类型
+   * （fence/boat/repair/emp/decoy/mine/guard/frenzy/sacrifice/rewind）的收集数 ——
+   * 修 x5⑩「puGot* 全零输出 bug」（这些类型此前不进任何 got 桶）。 */
+  puGotOther: number
   /**
    * 整局最大连续「原地 + 未命中」tick 数（EvalBench T0.4 新埋点，检出与
    * export-rl-rollout 同式：中心 cell 不变且本 tick 未命中则 streak++ 否则清零；
@@ -297,6 +301,8 @@ interface EvalResult {
   puGotTank: number
   puGotFreeze: number
   puGotShield: number
+  /** 残差桶（metrics v7 顺手项）：四桶外拾取类型计数（修 x5⑩ 全零输出 bug）。 */
+  puGotOther: number
   /** 终局剩余命数（replay 元数据用；报告口径不变——报告顶层本就无 lives，勿消费）。 */
   finalLives: number
 }
@@ -447,6 +453,7 @@ export function runEvalOne(
     puGotTank: 0,
     puGotFreeze: 0,
     puGotShield: 0,
+    puGotOther: 0,
     stuckTicks: 0,
     hitsByKind: [0, 0, 0, 0],
     killsByKind: [0, 0, 0, 0],
@@ -571,6 +578,7 @@ export function runEvalOne(
         else if (put === 'tank') tel.puGotTank++
         else if (put === 'freeze') tel.puGotFreeze++
         else if (put === 'shield') tel.puGotShield++
+        else tel.puGotOther++
       }
     }
     // power-up census（seen-ids + same-tick pickup 对账，镜像 runner）
@@ -777,6 +785,7 @@ export function runEvalOne(
     puGotTank: tel.puGotTank,
     puGotFreeze: tel.puGotFreeze,
     puGotShield: tel.puGotShield,
+    puGotOther: tel.puGotOther,
     finalLives: world.lives,
   }
 }
@@ -904,6 +913,7 @@ function main(): void {
     puGotTank: res.puGotTank,
     puGotFreeze: res.puGotFreeze,
     puGotShield: res.puGotShield,
+    puGotOther: res.puGotOther,
     ...(wver ? { wver, node: nodeLabel } : {}),
   }
   writeFileSync(`${outDir}/_eval_report.json`, JSON.stringify(report, null, 2))

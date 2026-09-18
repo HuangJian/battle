@@ -106,7 +106,7 @@ const RL_SHARD_FILES = [
   'mask.npy',
 ] as const
 
-// ---- 39 维指标列序（MUST mirror `nn-training/rl/reward_library.py::METRICS`）----
+// ---- 41 维指标列序（MUST mirror `nn-training/rl/reward_library.py::METRICS`）----
 // 改任一侧必须同步另一侧 + manifest metrics_version 不变则任何 shape[0] 下游
 // 会静默错读。idx10=starsCollected 补 plan §4.1 表的空槽（连续编号 0..20）。
 // idx21–28=道具流分类型计数（§9，metric v3：spawn/got × bomb/tank/freeze/shield，
@@ -114,12 +114,27 @@ const RL_SHARD_FILES = [
 // idx30=clearTick（v5：敌人首次全灭的 tick，哨兵 -1 = 本局未清场）。
 // idx31–38=分敌种击杀/命中（metrics v6，plan/t5-metrics-v6：kills/hits ×
 // basic/fast/power/armor，追加在尾部，0–30 列号永久不动）。列序 = ENEMY_KIND_ORDER。
+// idx39=puGotOther（metrics v7，plan/pickup-shaping.plan.md Phase 0 顺手项）：
+//   `puGot*` 四桶只认 bomb/tank/freeze/shield，而 fence/boat/repair/emp/decoy/mine/
+//   guard/frenzy/sacrifice/rewind 等类型拾取后四桶全零（x5⑩「puGot* 全零输出 bug」，
+//   根因 = 未分桶的类型走输入侧却无输出侧桶）；残差桶让
+//   `powerUpsCollected ≡ starsCollected + puGot{4} + puGotOther` 恒成立（可测守恒）。
+//   不进任何公式（"不进训练变量"）。
+// idx40=pickupDist（metrics v7 头牌列，plan/pickup-shaping.plan.md §3）：每决策步玩家
+//   到最近**存活**拾取（powerUp.alive）中心格的曼哈顿距离；无存活拾取或玩家不在场时
+//   填哨兵 `PICKUP_DIST_SENTINEL`（-1，公式侧用 where 归零）。势能法趋近塑形项的量纲。
 // **本常量必须与 `buildMetricsRow` 的行宽一致** —— 2026-09-12 的 P0：只改了行、没改
 // 这里，`metrics.set(row, i * METRICS_DIM)` 每局越界抛 RangeError，整条采集腿零产出。
 // 导出仅供测试断言行宽（tests/export-rl-rollout-metrics.test.ts）。
-export const METRICS_DIM = 39
-/** metrics v6：分敌种命中/击杀列（idx31–38）。与 Python METRICS_VERSION 同步。 */
-export const METRICS_VERSION = 6
+export const METRICS_DIM = 41
+/** metrics v7：puGotOther（idx39）+ pickupDist（idx40）。与 Python METRICS_VERSION 同步。 */
+export const METRICS_VERSION = 7
+/**
+ * pickupDist 哨兵：无存活拾取（或玩家不在场）时填此值 —— 与 firstKillTick/clearTick
+ * 的 -1 哨兵同构。真实曼哈顿距离恒 ≥0（同格 = 0），-1 不可能与真实值混淆。
+ * 势能侧 Φ 不直接消费哨兵：公式统一 `where(pickupDist < 0, 0, pickupDist)` 归零。
+ */
+export const PICKUP_DIST_SENTINEL = -1
 /** 分敌种计数的固定顺序（与 export-eval-game.ENEMY_KIND_ORDER 同契约）。 */
 export const ENEMY_KIND_ORDER = ['basic', 'fast', 'power', 'armor'] as const
 
@@ -241,6 +256,10 @@ export interface Telemetry {
   puGotTank: number
   puGotFreeze: number
   puGotShield: number
+  /** 残差桶（metrics v7）：拾取类型不在 {star,bomb,tank,freeze,shield} 的收集数
+   * （fence/boat/repair/emp/decoy/mine/guard/frenzy/sacrifice/rewind）——
+   * 让 `powerUpsCollected ≡ stars + 四桶 + 本桶` 恒成立（x5⑩ 全零 bug 的补桶）。 */
+  puGotOther: number
   /** star 掉落数（c4 基线发现 star 供给不可测：拾取有列、掉落无列） */
   puSpawnStar: number
   baseWallTotal: number
@@ -283,6 +302,33 @@ function countBaseWall(world: World): number {
 function isSolid(world: World, col: number, row: number): boolean {
   const t = world.tileMap.get(col, row)
   return t === 'brick' || t === 'steel'
+}
+
+/**
+ * 当步玩家到最近**存活**拾取的曼哈顿距离（格）。metrics v7（pickup-shaping §3）：
+ * - 距离口径 = 中心格曼哈顿（`floor((x+w/2)/CELL)`），与 census/telemetry 同构；
+ * - 玩家不在场（`?alive` 为假/无 player）⇒ 哨兵 `PICKUP_DIST_SENTINEL`；
+ * - 场上有存活拾取但玩家活着 ⇒ 真距离（同格 = 0）；
+ * - 无存活拾取（含阵亡玩家）⇒ 哨兵（公式侧 `where` 归零，见课程公式）。
+ * 热路径（AGENTS §14.1）：零分配 —— 只读迭代 `world.powerUps`，无 filter/map/Set。
+ * 防御性 `pu.alive` 检查：dead 拾取可能在 _cleanup 前残留于数组（与 census 同口径）。
+ */
+export function nearestPickupDist(world: World): number {
+  const p = world.player
+  if (!p || !p.alive) return PICKUP_DIST_SENTINEL
+  const pcol = Math.floor((p.x + p.w / 2) / CELL)
+  const prow = Math.floor((p.y + p.h / 2) / CELL)
+  let best = PICKUP_DIST_SENTINEL // -1 兼作「无存活拾取」记号
+  const pus = world.powerUps
+  for (let i = 0; i < pus.length; i++) {
+    const pu = pus[i]
+    if (!pu.alive) continue
+    const col = Math.floor((pu.x + pu.w / 2) / CELL)
+    const row = Math.floor((pu.y + pu.h / 2) / CELL)
+    const d = Math.abs(col - pcol) + Math.abs(row - prow)
+    if (best < 0 || d < best) best = d
+  }
+  return best
 }
 
 /**
@@ -334,6 +380,8 @@ export function buildMetricsRow(t: number, world: World, tel: Telemetry): number
     tel.hitsByKind[1], // 36 hitsFast
     tel.hitsByKind[2], // 37 hitsPower
     tel.hitsByKind[3], // 38 hitsArmor
+    tel.puGotOther, // 39 puGotOther（v7：四桶外拾取残差，x5⑩ 全零 bug 补桶）
+    nearestPickupDist(world), // 40 pickupDist（v7：最近存活拾取中心格曼哈顿距离，哨兵 -1）
   ]
 }
 
@@ -418,7 +466,7 @@ export interface ShardData {
   lpMove: number[]
   lpFire: number[]
   value: number[]
-  /** 每决策步的 39 维指标快照（[N+1][39]：决策行 + 终局行）——reward 的唯一定义源。 */
+  /** 每决策步的 41 维指标快照（[N+1][41]：决策行 + 终局行）——reward 的唯一定义源。 */
   metrics: number[][]
   done: number[]
   mask: number[]
@@ -463,6 +511,7 @@ interface RunResult {
   enemyTotal: number
   startLives: number
   puGotTank: number
+  puGotOther: number
 }
 
 /** dodge 模式解析（卡 A3）：arena → l0；真实关 → off（既有 rollout 逐字节不变）。 */
@@ -537,6 +586,7 @@ function runOne(
     puGotTank: 0,
     puGotFreeze: 0,
     puGotShield: 0,
+    puGotOther: 0,
     puSpawnStar: 0,
     baseWallTotal: countBaseWall(world),
     baseWallIntact: countBaseWall(world),
@@ -681,10 +731,11 @@ function runOne(
         tel.powerUpsCollected++
         const put = (e as any).powerUp
         if (put === 'star') tel.starsCollected++
-        if (put === 'bomb') tel.puGotBomb++
+        else if (put === 'bomb') tel.puGotBomb++
         else if (put === 'tank') tel.puGotTank++
         else if (put === 'freeze') tel.puGotFreeze++
         else if (put === 'shield') tel.puGotShield++
+        else tel.puGotOther++
       } else if (e.type === 'enemy_hit') {
         tel.enemyHits++
         hitThisTick = true
@@ -816,6 +867,7 @@ function runOne(
     enemyTotal: tel.enemyTotal,
     startLives: tel.startLives,
     puGotTank: tel.puGotTank,
+    puGotOther: tel.puGotOther,
   }
 }
 
@@ -1001,7 +1053,7 @@ function main(argv: string[] = process.argv.slice(2)): void {
         schemaMajor: OBS_SCHEMA_MAJOR,
         collector: 'RL',
         policy: 'nn-student-rl',
-        metrics_version: METRICS_VERSION, // [N+1,39] f8（idx0–38）—— v6 追加 idx31–38 分敌种；shape[0] 下游据此分版本
+        metrics_version: METRICS_VERSION, // [N+1,41] f8（idx0–40）—— v7 追加 puGotOther/pickupDist；shape[0] 下游据此分版本
         difficulty,
         stage: si,
         seed,
@@ -1042,6 +1094,7 @@ function main(argv: string[] = process.argv.slice(2)): void {
         startLives: res.startLives,
         playerDeaths: res.playerDeaths,
         puGotTank: res.puGotTank,
+        puGotOther: res.puGotOther,
         ...(wver ? { wver, node: nodeLabel } : {}),
         ...(courseFp ? { course_fp: courseFp } : {}),
         ...(corpusFp ? { corpus_fp: corpusFp } : {}),
@@ -1079,7 +1132,7 @@ function main(argv: string[] = process.argv.slice(2)): void {
     dimMeans[k] = +(xs.reduce((a, b) => a + b, 0) / xs.length).toFixed(4)
   const summary = {
     collector: 'RL',
-    metrics_version: METRICS_VERSION, // [N+1,39] f8（idx0–38）—— 与 manifest 同版（下游分版本读取）
+    metrics_version: METRICS_VERSION, // [N+1,41] f8（idx0–40）—— 与 manifest 同版（下游分版本读取）
     customStages: stageJson ? '1' : '0', // 自定义关（Python 课程）标记
     difficulty,
     stages,

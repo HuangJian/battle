@@ -37,23 +37,32 @@ fi
 # 超时兜不住 C 层原生阻塞（subprocess.wait/文件锁，实测沙箱下 test_rollout_volume 卡住
 # 不触发），进程外 watchdog 连树杀才兜得住（tools/githook/nn-wall.py）。非 pytest 透传。
 if [ "${1:-}" = "-m" ] && [ "${2:-}" = "pytest" ]; then
-  # MSYS 把 /mnt/d、/d 这类 POSIX 路径传给原生 python.exe 时会映射错（实测 → D:\mnt\d\…）
-  # 用纯 sed 转 Windows 盘符路径，不依赖 pwd -W；内层命令经 wall(python) 再 spawn 时
-  # 的 exe 路径也必须 Windows 形态，否则 CreateProcess 找不到文件。
-  # 2026-09-15：**仅在 MSYS/MINGW 下改写**。该 sed 是无条件套用的，于是原生 Linux 的
-  #   /home/<user>/battle/tools/githook 被 `s|^/([a-z])|\1:|` 误伤成 h:ome/hj/…
-  #   ⇒ exit 2「can't open file '…/nn-wall.py'」——钦定的唯一 pytest 入口在 Linux 上
-  #   直接不可用（实测本机）。原生平台下 POSIX 路径本来就是对的（python 也是原生二进制），
-  #   原样透传即可。
-  case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*) _win_paths=1 ;;
-    *) _win_paths=0 ;;
+  # 路径转换的必要条件不是「哪个 uname」而是「python 是不是 Windows 二进制」：
+  # 选中 .venv/Scripts/python.exe（Windows）⇒ argv 里的 POSIX 路径必须转 Win32；选中
+  # .venv/bin/python（原生 Linux）⇒ POSIX 路径本就正确原样透传。
+  # 两种 Windows-bash 情形都要转（2026-09-18 补 WSL）：
+  #   · MSYS/MINGW/CYGWIN —— 既有 sed 逻辑（s|^/mnt/([a-z])|\1:| 等），pwd -W 可用；
+  #   · WSL —— uname 是 Linux、pwd 给 /mnt/d/... 且无 pwd -W，用 wslpath -w 转换；
+  #     此前只认 MINGW*|MSYS*|CYGWIN*，WSL 下走原样透传 ⇒ python 收到 /mnt/d/...
+  #     映射成 D:\mnt\d\... ⇒ nn-wall.py 打不开（实测，与 nn-python-gate 同款事故）。
+  case "$PY_BIN" in
+    *.exe) _win_py=1 ;;
+    *) _win_py=0 ;;
   esac
   _sep='/'
-  if [ "$_win_paths" = "1" ]; then
+  if [ "$_win_py" = "1" ]; then
     _sep='\'
-    _hdir_win=$(printf '%s' "$_hdir" | sed -E 's|^/mnt/([a-z])|\1:|; s|^/([a-z])|\1:|; s|/|\\|g')
-    _py_win=$(printf '%s' "$PY_BIN" | sed -E 's|^/mnt/([a-z])|\1:|; s|^/([a-z])|\1:|; s|/|\\|g')
+    _has_win_pwd=1
+    pwd -W >/dev/null 2>&1 || _has_win_pwd=0
+    if [ "$_has_win_pwd" = "0" ] && command -v wslpath >/dev/null 2>&1; then
+      # WSL：wslpath -w 输出 `D:/github/...`，统一切成反斜杠（与 MSYS 分支同形态）
+      _hdir_win=$(printf '%s' "$_hdir" | xargs wslpath -w 2>/dev/null | tr '/' '\\') || _hdir_win=$_hdir
+      _py_win=$(printf '%s' "$PY_BIN" | xargs wslpath -w 2>/dev/null | tr '/' '\\') || _py_win=$PY_BIN
+    else
+      # MSYS/MINGW/CYGWIN（原有逻辑不动）：/mnt/ 与 /d/ 两种前缀的 sed 归一
+      _hdir_win=$(printf '%s' "$_hdir" | sed -E 's|^/mnt/([a-z])|\1:|; s|^/([a-z])|\1:|; s|/|\\|g')
+      _py_win=$(printf '%s' "$PY_BIN" | sed -E 's|^/mnt/([a-z])|\1:|; s|^/([a-z])|\1:|; s|/|\\|g')
+    fi
   else
     _hdir_win=$_hdir
     _py_win=$PY_BIN
