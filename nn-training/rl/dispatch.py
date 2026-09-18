@@ -320,7 +320,7 @@ class RolloutDispatcher:
             wkind = "rollout"
         for nd in nodes:
             try:
-                mode = dist_common.post_weights(
+                mode = dist_common.post_weights_cached(
                     nd["url"],
                     nd["key"],
                     iter_id,

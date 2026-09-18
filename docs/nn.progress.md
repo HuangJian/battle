@@ -4,6 +4,57 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §71 多课程单 hub（P1）：一个进程托管 N 份账本 + 跨课程轮转 + 离线课 + 分课程权重桶（2026-09-18）
+
+用户指令：多课程并行训练流程与操作重组（上限先设 5；hubserver/trainingloop/selfNode/
+cloudflared 各只需一个进程；hub 设 PPO 任务队列；离线课不实时派发但收回传；rollout 集群
+按课程缓存最近权重；课程数 < worker 数时用单课程竞速；面板重组；e2e）。抉择与代价全文
+见 `DECISIONS.md §2026-09-18-goalnn-multi-course-single-hub`，这里只记落地与实测。
+
+**形状：一个进程托管 N 份 `_JobStore`，磁盘契约逐字节不变。** 多课程不是换一套目录约定，
+而是「同一进程里多挂几份账本」（仍是 `tmp/<course>/remote-jobs` + `training_log.jsonl`）。
+这条取舍换来的是：既有 100 个单课程 hub 用例、`tmp/<course>` 约定、诊断工具全部照旧，
+回滚只需改启动参数。
+
+- `_HubQueue`（调度面）：路由（job_id → 课程，扫 job 目录一次并缓存）+ 每课程 FIFO +
+  **跨课程轮转**（`rotation_order` 从上次派发的下一门开始）+ 离线课不参与 + 观测面。
+- `claim_next(worker_id, race)`：挑活的唯一入口。超时回收时记下「谁跑死的」，在**还有
+  别的活跃 worker** 时避开那位前持有人（用户口径「回落队首并改为推送其它 worker」）；
+  独苗时允许自领（否则那台 worker 永远空转）。
+- 竞速口径：`race_decision(..., active_courses=N)` = 「窗口内不同 worker 数 > 在派发课程数」。
+  **缺省 `active_courses=1` 时与旧口径逐字节等价**（`< 2` ⟺ `<= 1`）⇒ 旧用例一行未改。
+- 鉴权面提取 `_AuthGuard`（进程级一份，不按课程各算 ⇒ 封禁阈值不会变成 5×N）；单课程队列
+  **借**那一份 store 的鉴权/竞速/停机状态。
+- 权重桶按 `(course, kind)`（`tools/agent/weight-buckets.ts`，纯逻辑出列）+ 上传前预检
+  `GET /v1/weights?sha=&kind=&course=`（命中连体都不传）。课程身份走进程级 `RL_COURSE_NAME`
+  （在 `apply_course` 挂——训练进程唯一知道课程名的地方）。
+
+**实测踩到的两个真缺陷（都有回归）**：
+
+1. **「找不到归属」不能写成空串**：单课程队列（与旧单课程 hub）的课程名**就是空串**
+   （`tmp/nocourse` 那套约定）。`course_of` 用空串兼作缺失值 ⇒ 单课程下 `/jobs/next` 刚派
+   出的 job 立刻解析不到归属、handler 打到哨兵路径上 **500**（每一次拉活都失败）；
+   补传路径同款 ⇒ 单课程每一次补传 **400**。两处都改成 `None` 表缺失。
+2. **避让的判定时序**：在队列层「先读 stale 记录再比身份」恒为空——那一刻过期租约还没
+   被回收，stale 记录还没写。修正为「闸在队列层（`may_avoid_stale_holder`：有身份 +
+   还有替班），身份比对在 store 内」（那里才是回收之后的最新状态）。第一版就是这么写的，
+   回归测试当场抓出来。
+
+**另一条实测口径**：避让的闸看的是「窗口内活跃 worker 数」（180s），而租约 TTL 是 300s
+——一个 worker 停 poll 超窗口即判离场。测试里必须按真实节奏刷 `note_worker`（活着的
+worker 每几秒就打一次 `/jobs/next`），否则两台都被当离场 ⇒ 活跃数 0 ⇒ 避让不开（这是
+**对**的行为：连一台活的都没有时，避让只会让这活没人干）。
+
+**门禁**：nn python gate **1270 passed / 3 skipped**（+29 例：`test_multi_course_hub.py` 17 +
+`test_weight_course_buckets.py` 12）；根套件（含 `tests/agent/weight-buckets.test.ts` 13 例）
+全绿；ruff + mypy 干净。
+
+**本轮未做（P1 余下）**：hub 中介的 push 派发（hub 主动推给空闲 worker + worker 登记入口 +
+周期 ping 探活）与训练侧 push 改走 hub；单隧道（随单 hub 自然成立）；dashboard 重组；多课程
+单 hub 的 e2e。**P2（用户已拍板）**：训练循环**迭代任务化**（一轮 = 一个任务、执行器不跨轮
+持状态、状态全在磁盘），验收 = 「断开续跑 == 连续跑，逐字节等价」；允许牺牲 T4 预采、允许
+本机降级改每轮载入、eval 尾巴改盘上轮询。
+
 ## §68 x2-rebirth 结课：承伤 106.4→33.9（−68%），终点取 it15 而非末 it；「有效训练量只有前几轮」（2026-09-18）
 
 **一句话**：a2（1 敌关满分）的权重**热启**到 ladder-c02（2 敌 / 6 关），25 轮后停腿。

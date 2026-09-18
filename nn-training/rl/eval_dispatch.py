@@ -256,7 +256,7 @@ class EvalDispatcher:
             nodes_ok = []
             for nd in alive:
                 try:
-                    dist_common.post_weights(
+                    dist_common.post_weights_cached(
                         nd["url"],
                         nd["key"],
                         iter_id,

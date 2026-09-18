@@ -232,7 +232,7 @@ def rescan_nodes(
                 continue
             c_n = max(1, int(n.get("concurrency") or ping.get("cpus") or 1))
             try:
-                mode = dist_common.post_weights(
+                mode = dist_common.post_weights_cached(
                     n["url"],
                     n.get("authKey", ""),
                     iter_id,

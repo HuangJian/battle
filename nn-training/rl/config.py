@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator, model_validator
 
+import dist_common
 from rl.reward_library import OUTCOMES
 
 #: 课程配置目录（nn-training/curricula/*.jsonc）
@@ -1210,6 +1212,10 @@ def apply_course(args, course: CourseConfig) -> None:
         setattr(args, k, v)
     args.course_obj = course
     args.course_name = course.name
+    # 进程级课程身份导出（v5 多课程，2026-09-18）：出站的权重上报/任务下发都带它，
+    # agent 侧按 (course, kind) 分桶。住在这里是因为这是训练进程**唯一**知道课程名的
+    # 地方（args.course_name 刚被挂上），而出口散在 6 个文件的不同闭包里。
+    os.environ[dist_common.COURSE_ENV] = course.name
     # 命数/星级/冻结/归档随课程走（导出器 CLI 参数）
     if course.player.lives is not None:
         args.lives_override = course.player.lives

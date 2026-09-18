@@ -91,23 +91,92 @@ def race_decision(
     workers: Sequence[tuple[str, float, int | None]],
     now: float,
     window: float = RACE_WORKER_WINDOW_SEC,
+    *,
+    active_courses: int = 1,
 ) -> bool:
     """是否进入竞速广播（纯函数，可单测）。
 
     workers = [(worker_id, last_seen, hub_scope)]，**全部**历史登记（本函数自己按窗口过滤）。
     - `off` → 恒 False；`on` → 恒 True（应急强制，不看待领池）；
-    - `auto` → 窗口内至少 2 个**不同** worker 在轮询，**且**它们全部声明 hub_scope==1
-      （未知/多 hub 任一出现 → False）。单 worker 不竞速：广播的唯一收益是
-      「最快的卡先跑完」，只有一个执行者时它只是同一份活。
+    - `auto` → 窗口内**不同** worker 数 **严格大于**待服务的课程数，**且**它们全部声明
+      hub_scope==1（未知/多 hub 任一出现 → False）。
+
+    active_courses（2026-09-18 多课程单 hub）：当前**有实时派发待办或在飞**的课程数
+    （离线课程不计，见 `_HubQueue.active_courses`）。语义 = 「多出来的那条卡值得去抢一份
+    副本」：
+      · 1 课 1 worker  → 1 > 1 否 → 不竞速（只有一个执行者，广播只是同一份活）
+      · 1 课 ≥2 worker → 2 > 1 是 → 竞速（= 单课程老行为，缺省参数下逐字节等价）
+      · 3 课 3 worker  → 3 > 3 否 → 独占（每门课各拿一条卡，谁也不多）
+      · 2 课 3 worker  → 3 > 2 是 → 竞速（多出来的那条卡去抢最新的活）
+    缺省 active_courses=1 时与旧口径**完全等价**（`< 2` ⟺ `<= 1`），旧调用/旧测试不变。
     """
     if mode == RACE_MODE_OFF:
         return False
     if mode == RACE_MODE_ON:
         return True
     fresh = [(wid, scope) for wid, seen, scope in workers if now - seen <= window]
-    if len({wid for wid, _ in fresh}) < 2:
+    if len({wid for wid, _ in fresh}) <= max(1, int(active_courses)):
         return False
     return all(scope == 1 for _wid, scope in fresh)
+
+
+def rotation_order(order: Sequence[str], start: str | None) -> list[str]:
+    """跨课程轮转顺序：从 `start`（上次派发过的课程）的**下一门**开始绕一圈。
+
+    为什么需要它：每课程一条 FIFO，若每次都从 order[0] 开始扫，第一门课的积压会把
+    其它课程饿死（20 轮 backlog 的课能把 5 课程机群变成单课程机群）。`start` 不在表里
+    （课程被摘除/首次派发）⇒ 原序。纯函数，可单测。
+    """
+    o = [c for c in order]
+    if start is None or start not in o:
+        return o
+    i = (o.index(start) + 1) % len(o)
+    return o[i:] + o[:i]
+
+
+def may_avoid_stale_holder(requester: str, active_workers: int) -> bool:
+    """**是否允许**把「上一份死租约」从它的前持有人手里推开（避让的闸，纯函数）。
+
+    用户口径（2026-09-18）：job 超时回落队首后「改为推送其它 worker」。两个条件：
+
+      · 请求者**有身份**——身份未知（旧 worker / 手写 curl）时无从避让，保守照派；
+      · **还有别的活跃 worker** 可以接手——独苗时恒 False。这条是防停摆的硬条件：
+        机群里只剩一个工人时，它自己超时过的 job 若也避让，就谁都领不到了（那台
+        worker 永远空转，而唯一能干活的就是它）。
+
+    注意分工：**身份是否真是前持有人由 `_JobStore.claim` 判断**（只有它知道租约回收
+    后的 stale 记录），本函数只管「允不允许避让」。这么拆是因为在队列层先读 stale 记录
+    再判身份会踩时序：那一刻过期租约还没被回收，stale 记录还是空的 ⇒ 避让永远不生效
+    （2026-09-18 实测：写本函数的第一版就是这个顺序，回归测试当场抓出来）。
+    """
+    return bool(requester) and int(active_workers) >= 2
+
+
+#: 课程模式：`online` = 实时派发 PPO；`offline` = 整段自主（kind=run），不实时派发、
+#: 只收回传。用户口径（2026-09-18）：离线课程「不实时分派 ppo，但要接收 it 权重/指标
+#: 回传 worker」。
+COURSE_MODE_ONLINE = "online"
+COURSE_MODE_OFFLINE = "offline"
+COURSE_MODES = (COURSE_MODE_ONLINE, COURSE_MODE_OFFLINE)
+
+
+def parse_course_arg(raw: object) -> tuple[str, str]:
+    """解析一个课程规格：`NAME` / `NAME=mode`（mode ∈ {online, offline}）。
+
+    空名/含路径分隔符/含空白 → ProtocolError（**响亮拒启**：课程名进的是磁盘路径，
+    `../x` 之类必须在这里断掉，不能等落盘才发现写到别处去了）。
+    """
+    s = str(raw or "").strip()
+    name, _, mode = s.partition("=")
+    name = name.strip()
+    mode = (mode.strip() or COURSE_MODE_ONLINE).lower()
+    if not name:
+        raise ProtocolError(f"课程名不能为空（收到 {raw!r}）")
+    if any(ch in name for ch in "/\\") or any(ch.isspace() for ch in name) or name in (".", ".."):
+        raise ProtocolError(f"课程名非法（不许路径分隔符/空白）: {name!r}")
+    if mode not in COURSE_MODES:
+        raise ProtocolError(f"课程模式必须是 {list(COURSE_MODES)}，收到 {mode!r}")
+    return name, mode
 
 #: manifest 必填字段（附录 A；缺失任一 → 校验失败）
 MANIFEST_REQUIRED = (
