@@ -27,6 +27,7 @@ from rl.eval_local import (
     EVAL_TASK_ATTEMPTS,
     a_eval_seed_list,
     eval_done_keys,
+    eval_loot_fields,
     hold_for_local,
     release_local_gate_if_starved,
     report_winrate_safe,  # noqa: F401 — re-exported（旧模块成员，兼容外部引用）
@@ -333,6 +334,8 @@ class EvalDispatcher:
                 # 敌人全灭即算歼灭，不受 BONUS TIME 窗口截断影响。门判定全歼必须读它，
                 # 否则 S3/S4a 的 timeout 局被系统性少算（eval_win 偏低 10-15pp）。
                 cleared = 1 if manifest.get("cleared") else 0
+                # x5⑧③：掉落三列（供给/构成可从 eval 直读，不再用 spawn 分项反推）。
+                loot = eval_loot_fields(manifest)
                 row = {
                     "event": "eval",
                     "iter": it,
@@ -352,6 +355,8 @@ class EvalDispatcher:
                     "enemyHits": manifest.get("enemyHits"),
                     "hitRate": manifest.get("hitRate"),
                     "powerUpsCollected": manifest.get("powerUpsCollected"),
+                    "powerUpsSpawned": loot["powerUpsSpawned"],
+                    "starsCollected": loot["starsCollected"],
                     "playerDamageTaken": manifest.get("playerDamageTaken"),
                     # T0.4 贯通（EvalBench §3.3 🟡🟠🔴）：export-eval-game 顶层直转，
                     # 缺键（旧 agent/旧报告）= None，ingest 侧进覆盖率豁免清单。
@@ -373,6 +378,7 @@ class EvalDispatcher:
                     "puGotTank": manifest.get("puGotTank"),
                     "puGotFreeze": manifest.get("puGotFreeze"),
                     "puGotShield": manifest.get("puGotShield"),
+                    "puGotOther": loot["puGotOther"],
                     "elapsedSec": manifest.get("elapsedSec"),
                 }
                 with jsonl_lock:

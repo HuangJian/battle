@@ -125,6 +125,7 @@ def main() -> int:
     from rl.eval_local import (
         a_eval_seed_list,
         eval_done_keys,
+        eval_loot_fields,
         run_local_eval_game,
         settle_eval_summary,
         should_dual_track,
@@ -237,6 +238,8 @@ def main() -> int:
         dim_vals = {k: (v.get("value") if isinstance(v, dict) else v) for k, v in dims.items()}
         win = 1 if man.get("win") else 0
         cleared = 1 if man.get("cleared") else 0
+        # x5⑧③：掉落三列与 dispatch/batch 同源。
+        loot = eval_loot_fields(man)
         row = {
             "event": "eval",
             "iter": args.iter,
@@ -256,6 +259,8 @@ def main() -> int:
             "enemyHits": man.get("enemyHits"),
             "hitRate": man.get("hitRate"),
             "powerUpsCollected": man.get("powerUpsCollected"),
+            "powerUpsSpawned": loot["powerUpsSpawned"],
+            "starsCollected": loot["starsCollected"],
             "playerDamageTaken": man.get("playerDamageTaken"),
             "playerHits": man.get("playerHits"),
             "policy": man.get("policy", "nn"),
@@ -275,6 +280,7 @@ def main() -> int:
             "puGotTank": man.get("puGotTank"),
             "puGotFreeze": man.get("puGotFreeze"),
             "puGotShield": man.get("puGotShield"),
+            "puGotOther": loot["puGotOther"],
             "elapsedSec": man.get("elapsedSec"),
         }
         with lock:

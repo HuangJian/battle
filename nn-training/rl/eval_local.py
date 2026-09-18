@@ -275,6 +275,32 @@ def report_winrate_safe(wr: float | None) -> float | None:
         return None
 
 
+#: eval_log 掉落三列（x5⑧③：eval_dispatch/batch_eval/eval_a_once 此前未接线）。
+#: 取数：manifest 顶层优先 → scorable.telemetry 回落 → None（旧 agent 缺键）。
+#: - puGotOther：export-eval-game 报告顶层已有（metrics v7）。
+#: - powerUpsSpawned / starsCollected：报告顶层未提（改 TS 会动 codehash 哈希集，
+#:   本补齐刻意 Python-only）；已在 scorable.telemetry，新 agent 报告带 scorable。
+EVAL_LOOT_KEYS = ("powerUpsSpawned", "puGotOther", "starsCollected")
+
+
+def eval_loot_fields(manifest: dict | None) -> dict:
+    """从 eval 报告 manifest 抽出三列掉落字段（见 EVAL_LOOT_KEYS 注释）。"""
+    tel: dict = {}
+    if isinstance(manifest, dict):
+        scorable = manifest.get("scorable")
+        if isinstance(scorable, dict):
+            t = scorable.get("telemetry")
+            if isinstance(t, dict):
+                tel = t
+    out: dict = {}
+    for k in EVAL_LOOT_KEYS:
+        v = manifest.get(k) if isinstance(manifest, dict) else None
+        if v is None:
+            v = tel.get(k)
+        out[k] = v
+    return out
+
+
 def run_local_eval_game(
     bun: str,
     weights_snapshot: str,

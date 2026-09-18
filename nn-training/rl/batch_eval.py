@@ -35,6 +35,7 @@ import dist_common
 from rl.eval_local import (
     EVAL_LOCAL_SLOTS_DEFAULT,
     EVAL_TASK_ATTEMPTS,
+    eval_loot_fields,
     run_local_eval_game,
 )
 from rl.log import log
@@ -660,6 +661,8 @@ class BatchEvalRunner:
         def record(manifest: dict, nd_id: str, task: tuple[int, int]) -> None:
             win = 1 if manifest.get("win") else 0
             cleared = 1 if manifest.get("cleared") else 0
+            # x5⑧③：掉落三列与 A-eval record() 同源（eval_loot_fields）。
+            loot = eval_loot_fields(manifest)
             row = {
                 "event": "eval",
                 "iter": self.batch.get("iter", 0),
@@ -677,6 +680,8 @@ class BatchEvalRunner:
                 "enemyHits": manifest.get("enemyHits"),
                 "hitRate": manifest.get("hitRate"),
                 "powerUpsCollected": manifest.get("powerUpsCollected"),
+                "powerUpsSpawned": loot["powerUpsSpawned"],
+                "starsCollected": loot["starsCollected"],
                 "playerDamageTaken": manifest.get("playerDamageTaken"),
                 "playerHits": manifest.get("playerHits"),
                 "policy": manifest.get("policy", self.policy),
@@ -696,6 +701,7 @@ class BatchEvalRunner:
                 "puGotTank": manifest.get("puGotTank"),
                 "puGotFreeze": manifest.get("puGotFreeze"),
                 "puGotShield": manifest.get("puGotShield"),
+                "puGotOther": loot["puGotOther"],
                 "elapsedSec": manifest.get("elapsedSec"),
                 # B 层归属（ingest → EvalStore 直读）
                 "batch_id": self.batch.get("batch_id"),

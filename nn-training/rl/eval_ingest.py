@@ -65,6 +65,9 @@ def m1_game_row(
         "enemyHits": None,
         "hitRate": None,
         "powerUpsCollected": g.get("powerUpsCollected"),
+        # x5⑧③ schema 对齐：m1 perGame 通常无这些键 → None；有则透传。
+        "powerUpsSpawned": g.get("powerUpsSpawned"),
+        "starsCollected": g.get("starsCollected"),
         "playerDamageTaken": None,
         "playerHits": None,
         "policy": policy,
@@ -84,6 +87,7 @@ def m1_game_row(
         "puGotTank": None,
         "puGotFreeze": None,
         "puGotShield": None,
+        "puGotOther": g.get("puGotOther"),
         "elapsedSec": None,
     }
 
