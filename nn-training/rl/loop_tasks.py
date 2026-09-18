@@ -89,11 +89,14 @@ def abort(reason: str, **payload: Any) -> TaskResult:
 
 #: 一轮的标准步骤（顺序即依赖顺序；plan/r2-loop-task-queue §3.1 的 13 项）。
 #: 前 6 项属**采集**，其后是**训练/结算**——R2c 的调度器按资源类给它们分池。
+#: ★ 顺序不是随手排的：`precollect_join` **必须排第一**（R2c-3 对齐真实依赖时纠正——
+#: 它产出的是本轮 `it{it}` 的 shard，而紧接着的 `prepare_iter` 靠 `completed_pairs`
+#: 看盘决定「保留续跑」还是「清场重建」；先清场再落盘就把上一轮的预采整个作废）。
 ROUND_TASKS: tuple[str, ...] = (
+    "precollect_join",  # 收上一轮预采子进程（子进程已消失 ⇒ 无产出，继续）
     "prepare_iter",  # 清场/建目录（幂等：目录已备即跳过）
     "hot_reload",  # 课程热加载（纯函数：文件指纹）
     "course_iter",  # 本轮课程上下文（holder + ppo_schedule）
-    "precollect_join",  # 收上一轮预采子进程（子进程已消失 ⇒ 无产出，继续）
     "rollout",  # 采集（本机槽位 / 云）+ 动态补波
     "volume_topup",  # 配额补波（v1 串行路径）
     "eval_dispatch",  # 为上一轮已完成权重派发干净评估

@@ -257,6 +257,7 @@ class Supervisor:
             if not q.tasks:
                 return self._finish_round(q)
             q.state = RUNNING
+            q.reason = ""  # 已经往下走：上一次的「在等什么」不再是事实
             return StepTrace(
                 course=q.course,
                 action="ran",
@@ -268,7 +269,10 @@ class Supervisor:
 
         if result.status == WAIT:
             # ★ 让位：不占执行权、不占资源票（票已在 finally 归还）；带上在飞事实。
+            # `reason` 落在队列上（读面「在等什么」= 状态 + 原因 + 在飞 job_id，三者一起才
+            # 够定位）；`_finish_round` / 恢复推进时清掉，避免读到一个过期的原因。
             q.state = WAITING
+            q.reason = result.reason
             q.resume_at = result.resume_at
             extra = {k: v for k, v in result.payload.items() if k != "task_id"}
             if extra:
@@ -326,6 +330,7 @@ class Supervisor:
         """本轮任务清空 → 推进指针并按需准备下一轮（队列为空的课进入 `done`）。"""
         q.rounds_done += 1
         q.next_it += 1
+        q.reason = ""
         q.tasks = list(self.planner(q.course, q.next_it, q))
         q.state = QUEUE_DONE if not q.tasks else READY
         return StepTrace(

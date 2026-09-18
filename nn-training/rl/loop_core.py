@@ -15,7 +15,6 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -24,19 +23,25 @@ from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from platform_utils import rmtree_best_effort
 from rl.breaker import CIRCUIT_EXIT_CODE
 from rl.collect_only import precollect_snapshot_wver
-from rl.config import course_key_of, resolve_course_quota
 from rl.course import build_pairs
-from rl.events import log_iter_error, write_run_complete, write_run_start
+from rl.events import write_run_complete, write_run_start
 from rl.log import log
 from rl.loop_guards import TrainingGuards
-from rl.loop_steps import (
-    BundleExportedError,
-    SmokeVoidRoundError,
-    TrainingSteps,
-    _rollout_source,
-    _run_segment_iters,
-    kickstart_coef,
+
+# 一轮的终态与轮内上下文（R2c-3 起由 `rl.loop_round` 定义）——本模块**原样再导出**：
+# `from rl.loop_core import ROUND_NEXT` 这类既有调用点（loop_runner / CLI）不受影响。
+from rl.loop_round import (
+    ROUND_BUNDLE_EXIT,
+    ROUND_NEXT,
+    ROUND_RETRY,
+    ROUND_SMOKE_STOP,
+    ROUND_STOP,
+    RoundContext,
+    RoundOutcome,
+    RoundYieldError,
 )
+from rl.loop_round_steps import RoundSteps
+from rl.loop_steps import TrainingSteps, kickstart_coef
 from rl.modes import get_backend
 from rl.queue import REPO_ROOT, RUN_ID
 from rl.reports import combine_reports
@@ -45,31 +50,11 @@ from rl.resume import (
     settled_stage_totals,
     trailing_samples_per_game,
 )
-from rl.rollout_phase import (
-    dispatch_rollout_phase,
-    join_precollect_child,
-    spawn_next_collect,
-)
+from rl.rollout_phase import dispatch_rollout_phase, join_precollect_child
 from rl.train_ledger import LedgerSpec, load_ledger
 
-#: 一轮的终态（R2c-2，plan/r2-loop-task-queue §3）：由 `run_one_round` 返回、`run()` 施加。
-ROUND_NEXT = "next"  # 本轮正常收官，继续下一轮
-ROUND_STOP = "stop"  # 硬边界停车（门 / 熔断 / 止损 / 预算 / 停腿）
-ROUND_RETRY = "retry"  # 本轮作废，it 原地重试
-ROUND_SMOKE_STOP = "smoke_stop"  # --smoke 冒烟回显作废，干净退出
-ROUND_BUNDLE_EXIT = "bundle_exit"  # 全离线任务包已写出，整条腿结束
-
-
-@dataclass(frozen=True)
-class RoundOutcome:
-    """`run_one_round` 的返回：终态 + 本轮结束时的迭代号。
-
-    `it` 必须带回驱动循环：半离线整段（`_remote_run_segment`）会一次吃掉 it..end_it，
-    丢掉返回值就会重跑已经跑完的那一段（比跳轮更贵）。
-    """
-
-    status: str
-    it: int
+# 一轮的终态（`ROUND_*`）与 `RoundOutcome` 见 `rl/loop_round`（顶部已导入再导出）：
+# 步骤 mixin（`rl/loop_round_steps`）也需要它们，而它被本模块 import——留在本模块会成环。
 
 
 def _course_file_fp(args) -> str | None:
@@ -159,11 +144,11 @@ def should_park_on_done(args, smoke_void: bool) -> bool:
     return not bool(getattr(args, "exit_on_done", False))
 
 
-class TrainingLoop(TrainingSteps, TrainingGuards):
+class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
     """RL 迭代主循环（run_training 的 OO 化；run() 为入口，失败重试内置）。
 
-    MRO：TrainingSteps（结算/PPO/导出/eval join/落账）→ TrainingGuards（熔断/
-    止损/轮转）→ 本类（setup / 迭代编排 / 目录 / 采集派发）。
+    MRO：RoundSteps（轮内 13 步，R2c-3）→ TrainingSteps（结算/PPO/导出/eval join/落账）
+    → TrainingGuards（熔断/止损/轮转）→ 本类（setup / 迭代编排 / 目录 / 采集派发）。
     """
 
     def __init__(self, args, ppo_backend, bun, update_kwargs) -> None:
@@ -322,183 +307,55 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
             return
         self._park_after_completion(it)
 
-    def run_one_round(self, it: int) -> RoundOutcome:
-        """跑一轮（R2c-2：从 run() 逐字节抽出的轮体，语义不变）。
+    def _run_inspect(self, *args: Any, **kwargs: Any) -> None:
+        """自动巡检的**委托点**（步骤 mixin 不能 import 本模块，否则成环）。
 
-        为什么抽出来：单进程多课程调度（plan/r2-loop-task-queue §4）需要「一轮」成为一个
-        可被调度器驱动的单元——否则轮与轮之间只能靠整条 while 循环，跨课程无让位点。
-        本次抽取**只搬不改**：控制流逐条保留（含 5 连击重试、冒烟作废、段跑推进 it），
-        差异仅在于把 `break`/`return`/`it -= 1` 换成返回 `RoundOutcome`，由 `run()` 施加——
-        `tests/test_run_one_round.py` 与 worktree A/B 差分测试钉住这一点。
-
-        返回：`RoundOutcome(status, it)`；`it` 可能大于入参（半离线整段 `_remote_run_segment`
-        会一次推进多轮）——调用方**必须**用返回的 it 继续，否则会重跑已跑过的段。
+        保留 `rl.loop_core.run_inspect` 作为可替换点（`rl.loop.py` 再导出它、测试也替换它）。
         """
-        args = self.args
+        run_inspect(*args, **kwargs)
 
-        self._traj_dir = self._traj_root / f"it{it}"
+    def run_one_round(self, it: int) -> RoundOutcome:
+        """跑一轮（R2c-2 从 `run()` 抽出；R2c-3 起由**步骤表**驱动，仍是同一套控制流）。
+
+        组合路径 = 依次施加 `rl.loop_round.STEP_ORDER` 里的每一步：某一步给出终态
+        （门 / 熔断 / 止损 / 预算 / 停腿 / 冒烟 / 全离线导出）即返回，否则一路到 `cleanup`
+        （它返回 `ROUND_NEXT`）。细粒度路径（`LoopRunner.run_step`）走**同一张表**，只是每步
+        之间可以把执行权交给别的课程——两条驱动因此不可能漂移（加一步必须同时进表）。
+
+        `ctx` = 轮内状态（`pairs` / `dist_cfg` / `t_rollout` / `seg` / `eval_rec`，以及会被
+        半离线整段推进的 `it`）。语义与抽取前逐条一致：5 连击重试、冒烟作废、段跑推进 it、
+        异常分类，全部在 `round_failure` 里**与细粒度执行器共用一份判决**。
+
+        返回：`RoundOutcome(status, ctx.it)`；`it` 可能大于入参（半离线整段一次推进多轮）
+        ——调用方**必须**用返回的 it 继续，否则会重跑已跑过的段。
+        """
+        ctx = RoundContext(it=it)
         try:
-            self._prepare_iter_dir(it)
-            # 课程热加载（§2026-09-13-hot-reload）：rollout 前重读课程文件——
-            # 非语料编辑下一 iter 应用；语料身份编辑拒绝 + 控制台横幅 + 沿用启动配置。
-            self._hot_reload_course(it)
-            # M1c：本轮课程上下文（holder + ppo_schedule）——先于任何 shard 加载
-            self._course_iter(it)
-            log(f"[run_rl] === iteration {it}/{self._total} ===")
-            pairs = self._iteration_pairs(it)
-            # 动态读取节点配置（每轮一次）：有 enabled 节点 → 队列调度模式；
-            # nodes=[] / 文件缺失 → 现有纯本地路径零改动（字节一致回归基线）。
-            dist_cfg = dist_common.load_dist_config()
-            self._last_dist_cfg = dist_cfg
-            # 本机并发配额热读（每轮一次，改 rl-config 下一轮即生效，无需重启）。
-            # 多课程（plan multi-course-parallel-training P4-W1 / §3.4）：
-            # `courses.<课>.{workers,local_slots}` 优先、`rl.*` 回退（纯解析在
-            # rl.config::resolve_course_quota，torch-free 可单测）。原语义保留：
-            # CLI 显式 --local-slots 同样被 rl-config 覆盖（SSOT），0 = 关闭本机直跑
-            # （2026-09-09 语义统一），无 key 不覆盖。workers 被课程配额改写时打响亮
-            # 行——「课程声明 8、实跑 4」的分叉必须有人可见（DoD 断言该行）。
-            args.workers, args.local_slots, _quota_line = resolve_course_quota(
-                dist_cfg, course_key_of(args), args.workers, args.local_slots
-            )
-            if _quota_line:
-                log(_quota_line)
-            t_rollout = time.time()
-            # yield：rollout 抢占集群 —— 关 evalboard 窗，在途 B/C 局停派新 seed。
-            self._evalboard_yield()
-            self._node_rollout_sec = None
-            # M3（plan/remote-wire-remediation §5.2）：整轮上云开关。node 时本机
-            # **完全不采样**（也不预采/不补波），改由 _remote_iter 发 kind=iter job，
-            # 节点自己跑 rollout + PPO。eval 不动（仍在本地 hub 跑，§5.4）。
-            self._node_rollout = _rollout_source(args) == "node"
-            # 半离线整段（kind=run；2026-09-17）：一次领走 it..end_it，节点自主跑完，
-            # hub 期间失联也不影响（产物目录是交付面）。整段优先于逐轮上云。
-            seg = _run_segment_iters(args)
-            seg_ran = False
-            if getattr(args, "export_bundle", ""):
-                # 全离线导出：本轮**不训练**——把 it..it+n-1 打成可上传云机的任务包后退出。
-                if seg == 0:
-                    raise SystemExit(
-                        "[run_rl] --export-bundle 需要 --run-iters 说明整段长度"
-                        "（>0 = N 轮；<0 = 到课程末尾）"
+            for step in self.round_steps():
+                res = step(ctx)
+                if res is None:
+                    continue
+                if res.is_final:
+                    return RoundOutcome(res.outcome or ROUND_NEXT, ctx.it)
+                if res.is_wait:
+                    # 组合路径没有让位点（单课程前台跑，没人接手）。步骤自己要求让位 = 设计
+                    # 走岔了 ⇒ 响亮报错，而不是静默停住或空转。R2c-3 余下部分把 `wait_job` /
+                    # eval 尾巴 / 预采子进程真轮询化时，必须同时给组合路径加 `ROUND_WAIT`。
+                    raise RoundYieldError(
+                        f"步骤在组合路径里要求让位（{res.reason}）——组合路径没有让位点，"
+                        "请走 Supervisor 细粒度驱动"
                     )
-                self._export_offline_bundle(it, pairs, seg)
-            if seg != 0:
-                self._node_rollout = True  # 本机不采样、不预采、不本地 PPO
-                it = self._remote_run_segment(it, pairs, seg)
-                seg_ran = True
-            elif self._node_rollout:
-                self._remote_iter(it, pairs)
-            else:
-                self._rollout_phase(it, pairs, dist_cfg, self._eval_on_round(it))
-                # 动态采集：结算后按已落盘 transitions 逐关补波（v1 串行路径 only）。
-                # 补波属本轮的**采集**阶段，必须坐在 _log_report 之前（本轮报告要含补波）。
-                self._volume_topup(it, dist_cfg)
-            # P0 修复：为上一轮已完成权重 W(it-1) 派发干净评估（读归档、标权重轮），
-            # 游戏藏进随后 PPO(it) 空窗。串行路径此前在此处派发读活指针 = W(it-1)
-            # 却标 itN（标签超前一轮）；stream/intent/m1/基线路径维持原语义。
-            # 半离线段例外：段中间那些轮不在本机跑，归档里**没有**它们的权重——拿活
-            # 指针（= 段尾权重）去充 W(it-1) 就是 P0 刚修掉的那个「标签超前一轮」的
-            # eval 污染。段尾权重由下一轮（或收官 drain）正常派发。
-            if not seg_ran:
-                self._dispatch_delayed_eval(it, dist_cfg)
-            # it0 基线（bc 权重）：rollout 收官后派发，落账前每轮重试（2026-09-12 用户）
-            self._maybe_dispatch_baseline_eval(dist_cfg)
-            self._log_report(it, t_rollout)
-            # idle：采集已收官，PPO（本地/远端等待）期间集群空闲 —— 立即领批。
-            # 不能等到 join_eval 之后：remote PPO 可阻塞数十分钟，那时才开窗等于永假。
-            self._evalboard_idle(it, dist_cfg)
-            if not self._node_rollout:
-                self._serial_ppo(it)
-            # R9：远端连败且 --remote-degrade-after=0 → 已写 ABORT 判决，停腿。
-            if self._leg_abort:
-                log(f"[run_rl] leg ABORTED at it{it}（远端不可用且禁用降级）")
-                return RoundOutcome(ROUND_STOP, it)
-            self._export_weights(it)
-            eval_rec = self._join_eval(it)
-            # A-eval 收官后再试一次（首窗被 yield/部分完成时补领）。
-            self._evalboard_idle(it, dist_cfg)
-            self._record_iteration(it)
-            self._check_quota_incident(it)
-            # G13 duty 分子：本轮有效训练入账（事故轮走 iter_error，不经过这里
-            # → 不计入分子但计入墙钟分母 → 占空比下降，正是想要的语义）。
-            self._train_sec_total += float(self._ppo_cloud_sec or self._ppo_sec or 0.0)
-            # 样本通过量（证据充分性主判据，与硬件/排队无关）
-            self._train_samples_total += float(
-                (self._report or {}).get("totalSamples") or self._total_steps or 0.0
-            ) * float(getattr(args, "epochs", 1) or 1)
-            # M1c：每 iter 指标统计落盘（非致命）
-            self._write_iter_stats(it)
-            # 每轮 ppo_backend 写回后自动生成巡检 HTML（intent/goal 总是生成；
-            # per-tick 仅默认 traj）
-            if self._auto_inspect:
-                run_inspect(self.bun, it, traj_dir=self._traj_root)
-            # F4 circuit breaker（纯逻辑在 rl/breaker.py）。agg 为 None 的轮
-            # （流式 checkpoint-complete，无任何梯度步）不计连击也不告警——
-            # 本来就没有发生新的策略更新。break (not raise)：下方 except 会吞掉重试。
-            if self._agg is not None and self._breaker(it):
-                return RoundOutcome(ROUND_STOP, it)
-            if self._stop_loss(it, eval_rec):
-                return RoundOutcome(ROUND_STOP, it)
-            # M1 第四守卫：课程结束门（无 gates 块的课程恒 False，零行为变化）
-            if self._gate(it):
-                return RoundOutcome(ROUND_STOP, it)
-            # G5 每轮兜底（§385 审计补洞）：max_hours 只在评估轮经门被查，
-            # 非评估轮会过冲——到顶立即停车，别让预算滑过。
-            if self._budget_hard_cut(it):
-                return RoundOutcome(ROUND_STOP, it)
-            self._rotate_cleanup(it)
-            # 吞吐 T4：双缓冲 spawn 下一轮预采（下一轮开头 join）。
-            # M3 上云轮不预采（节点已在跑本轮的整轮；本地预采 = 双份采集）。
-            self._collect_child = (
-                None
-                if self._node_rollout
-                else spawn_next_collect(
-                    args, it, self._stream_meta, self._spawned_early
-                )
-            )
-            self._consec_fail = 0
-            return RoundOutcome(ROUND_NEXT, it)
-        except BundleExportedError as e:
-            # 全离线任务包已写出：本轮不训练、不等待，干净退出（不是失败，不计连击）。
-            log(f"[run_rl] 全离线任务包导出完成：{e}——退出（上传云机后由云端自主跑完）")
-            return RoundOutcome(ROUND_BUNDLE_EXIT, it)
-        except SmokeVoidRoundError:
-            # 冒烟回显（worker --echo）：已走完全链路但权重是 init 回显——作废。
-            # 不计失败连击、不 sleep；it 原地（异常从 _remote_ppo 抛出时本轮
-            # 未写 iteration 事件，重试轮 _prepare_iter_dir 清场重采）。
-            if getattr(args, "smoke", False):
-                log(f"[run_rl] smoke it{it}: 冒烟回显已作废——--smoke 干净退出")
-                return RoundOutcome(ROUND_SMOKE_STOP, it)
-            log(f"[run_rl] it{it} 收到冒烟回显结果——本轮作废，原地重试")
-            return RoundOutcome(ROUND_RETRY, it)
-        except SystemExit as e:
-            self._consec_fail += 1
-            self._ledger_apply(log_iter_error(self._jsonl_path, it, f"SystemExit: {e}"))
-            log(
-                f"[run_rl] it{it} FAILED (SystemExit: {e}); "
-                f"consecutive={self._consec_fail}/5 — retry same iteration"
-            )
-            if self._consec_fail >= 5:
-                raise
-            time.sleep(30)
-            return RoundOutcome(ROUND_RETRY, it)
-        except Exception as e:
-            self._consec_fail += 1
-            self._ledger_apply(log_iter_error(self._jsonl_path, it, f"{type(e).__name__}: {e}"))
-            log(
-                f"[run_rl] it{it} FAILED ({type(e).__name__}: {e}); "
-                f"consecutive={self._consec_fail}/5 — retry same iteration"
-            )
-            if getattr(self, "_leg_abort", False):
-                # 已经被判死腿（如远端 401/403 这类重试无意义的失败，ABORT 判决
-                # 已由 _remote_ppo_or_degrade 落盘）——再按通用兜底重试只是重复
-                # publish 同一 job、把停腿拖后 5×30s（x3-step 事故）。直接上抛。
-                raise
-            if self._consec_fail >= 5:
-                raise
-            time.sleep(30)
-            return RoundOutcome(ROUND_RETRY, it)
-
+            return RoundOutcome(ROUND_NEXT, ctx.it)
+        except RoundYieldError:
+            # 设计走岔 ≠ 一次失败：不落 iter_error、不计连击、不重试（否则它会伪装成
+            # 普通引擎异常被吞进重试阶梯，症状是「每轮都重试同一轮」）。
+            raise
+        except (SystemExit, Exception) as e:
+            # `SystemExit` 不是 `Exception`（基类是 BaseException），故并列捕获——与抽取前的
+            # 四个 except 分支（BundleExportedError / SmokeVoidRoundError / SystemExit /
+            # Exception）覆盖同一集合，分类判决搬进 `round_failure`。退避只在组合路径生效
+            # （调度器的退避是 `TaskResult.retry` 的 resume_at，不在任务体里睡 30s）。
+            return self.round_failure(e, ctx.it, backoff=True)
 
     def _park_after_completion(self, it: int) -> None:
         """正常收官（ALL DONE）→ 停车不断进程（2026-09-12 用户定案）。

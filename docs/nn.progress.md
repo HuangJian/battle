@@ -4,6 +4,206 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §81 R2c-3 余下：远端 PPO 三相拆分（发布 / 等结果 / 落位）（2026-09-18）
+
+上一节把 13 步切出来之后，唯一还堵着调度链的就是 **`ppo` 这一步**：它是「打包 → 发布 → 阻塞轮询 →
+三重校验落位」一个 400 行函数。闸门不能挂在它前面（= 还没发布就被挡住 ⇒ 永远等不到回传），
+所以让位点必须**下沉到这一步内部**。
+
+### ① 三相：同一任务内，不是三个任务
+
+| 相位 | 方法 | 干什么 |
+|---|---|---|
+| ① 发布 | `_remote_ppo_publish` | 打包（payload/code/blob）→ `publish_job` → WAL attach → **直推时提交** → 会话成型 |
+| ② 等结果 | `_remote_ppo_probe`（非阻塞）/ `_remote_ppo_fetch`（阻塞） | 问一句 / 等到 |
+| ③ 落位 | `_remote_ppo_land` | 三重校验 + 落位 + job 记账 + WAL 收口 + 结算字段 + 结绳告警 |
+
+`_remote_ppo` 保留为**组合入口**（三相串联），四个既有调用点（本机轮 / 节点轮 / 半离线整段 /
+全离线导出）行为不变。
+
+**为什么不拆成 `ppo_publish` + `ppo_wait` 两个任务**：三相共享一份会话（jid / 超时预算 / 打包墙钟 /
+运输方式）。拆成两个任务就得把会话序列化到盘上才能跨任务传 —— 那正是 R2b 否决过的「第二份真相」
+（`loop-state.json`）。任务粒度只决定让位点密度，而这一步的让位点已经在步骤内部了。
+
+### ② 会话：纯数据，住轮内上下文
+
+`rl/loop_round.RemotePpoJob`（`RoundContext.remote`）：**不进引擎实例属性**（§2.2；单进程多课程会
+互相覆盖），**不落盘**（第二份真相）。刻意**不持有 payload 字节**（几十 MB）——直推换节点重发时从
+job 目录重读（`find_payload`），于是它会话很小、可打印、读面不触发 IO。
+
+### ③ 探针：状态码分类的唯一实现
+
+`remote/hub_client.probe_job_result`（一次请求）→ 三态：
+
+| 状态 | 含义 | 上层动作 |
+|---|---|---|
+| `ready`（200） | 结果已落 | 取结果 → 落位 |
+| `pending`（202/404） | 还没回（正常排队） | **让位**，下一轮再问 |
+| `transient`（网络错 / 5xx） | 「没答」 | 让位，下一轮再问 |
+| 410 / status=failed | **终局失败** | **抛 `JobFailedError`** ⇒ 立刻停腿 |
+
+「还没好」与「永远好不了」分开，是 x3-step 事故（把「bun 缺失」写成 25 分钟超时）的直接教训。
+hub 与节点两条链路只差端点路径（`/jobs/{jid}/result` vs `/job/{jid}/result`），靠 `path` 注入复用
+同一实现；`wait_job` / `wait_result` 两个阻塞版**改建在探针之上**，各自只保留退避策略
+（hub 指数退避 / 直推固定 poll —— 历史差异，保留）。`poll_job` / `poll_result` 是给调度器用的
+非阻塞出口；超时取 10s（探针误报「还没好」的代价只是再等一轮，永远不会误报成成功）。
+
+### ④ 直推链路：发布即提交
+
+探针要问「那份 job 现在怎么样了」，节点上还没有这份 job 时它只会一直答「还没回」⇒ **提交必须落在
+发布相位**（提交本身是有界上传，不是那 25 分钟的等待）。换节点必须**重新提交**（新节点从没见过这份
+job）。failover 判决抽成 `_push_over_nodes`：组合入口 `_push_job_round`、发布相位的
+`_push_submit_first`、等待相位的 `_push_fetch` 三处共用一份实现（确定性失败 410 的原因在所有节点都
+倒时原样上抛）。
+
+### ⑤ 让位点由「谁在驱动」决定：`ctx.resumable`
+
+细粒度驱动器（`LoopRunner`）造上下文时置 `resumable=True` ⇒ 未就绪就 `wait_for`；组合路径
+（`run_one_round`）保持 False ⇒ 就地阻塞取结果。于是「组合路径没有让位点」从一个运行期异常
+（`RoundYieldError`）变成了一个**事实字段**。
+
+顺带把「在等谁」补进让位结果（`jid`，由 `LoopRunner` 从 `ctx.remote` 取）——状态 + 原因 + 在飞
+`job_id` 三件套齐了才够定位一次卡住。
+
+### ⑥ `WAIT_HOOKS` 里不再有 `ppo`（不得加回去）
+
+表里的闸门跑在**步骤之前**，对 ppo 来说那是「还没发布」。让位已由 `step_ppo` 自己产生——
+`tests/test_loop_runner.py` 把「不在表里」写成了断言（这个坑已经踩过一轮）。
+
+### ⑦ 验收与实测
+
+| 门 | 结果 |
+|---|---|
+| nn python gate（ruff + mypy + pytest xdist -n 12） | ✔ **1432 passed / 3 skipped** |
+| 根 `bun run check` | ✔ 绿 |
+
+新回归：
+
+| 文件 | 例 | 钉住 |
+|---|---|---|
+| `tests/test_remote_probe.py` | 14 | 三态分类 · 410 抛而 202/404 不抛 · **只问一次**（预置第二个响应没被消费）· 探针超时 ≤10s · 两条链路端点各自正确 |
+| `tests/test_remote_ppo_phases.py` | 8 | 未就绪⇒让位且不取结果 · **再入不重发布** · 不可续跑⇒就地阻塞 · 成功复位连败 · 发布/取结果/落位失败**都**进同一份判决 · 真策略接线（连败到阈值即降级） |
+| `e2e/test_loop_supervisor_integration.py` | 改 | ppo 让位用例改为驱动**真三相**（假件只替 `publish`/`probe`/`land`）：a 让位时 b 跑完整轮；`entered` 里 ppo 连着两次（第一次让位、第二次落位）；走完的仍是 13 步各一次 |
+| `e2e/test_push_mode_integration.py` | +3 | 发布相位提交 / 换节点**重提交**（断言 payload 真从盘上重读）· 确定性原因优先上抛 · 探针跟着当前节点 |
+
+### ⑧ 踩坑记录
+
+1. **`ast.parse` 不查 `return` outside function**：脚本化拆相时，错误切片让两行落到了模块级缩进，
+   `ast.parse` 放行、mypy 才报 `"return" outside function`（`PyCF_ONLY_AST` 只跑解析器，符号表阶段
+   的检查在编译成字节码时才发生）。**结论：脚本化搬运之后必须跑 mypy，不能只信 `ast.parse`。**
+2. **函数内 import 清单是「拆相前的残留」**：`_remote_ppo` 顶部那份 7 个名字的 import 现在按相位各留
+   所需（`git_head`/`iter_shard_dirs`/`pack_code_zip`/`publish_job` 在发布，`wait_job` 在等待，
+   `verify_and_land`/`mark_job_completed` 在落位）——否则 ruff F401 立刻红（这正是它的价值）。
+3. **测试补丁打在老 HTTP 出口上**：`wait_result` 改走共用探针后，`monkeypatch.setattr(
+   "remote.push_client._request")` 不再拦截（真探针出网 ⇒ 用例超时）。补丁目标跟着实现搬到
+   `remote.hub_client._request`（**HTTP 出口现在只有一处**）。另外假 `_request` 常把 `timeout`
+   声明成 keyword-only，所以探针内部必须**关键字传参**（位置传参会 TypeError，症状是「一调就炸」
+   而不是「问了没答」）。
+
+## §80 R2c-3：轮内切成 13 步 + 让位闸门（2026-09-18）
+
+R2 第三相位的第三段。用户口径（本轮）：**把轮内切成 13 步细粒度任务（先提 `RoundContext`）**。
+
+### ① `RoundContext`：轮内状态搬家（为什么不放引擎实例上）
+
+原轮体锁着四个轮内局部量（`pairs` / `dist_cfg` / `t_rollout` / `seg`）与一个**会被改写的指针**
+（半离线整段 `_remote_run_segment` 一次吃掉 `it..end_it`）。步骤化之后它们必须跨步可见 ⇒ 提成
+显式对象 `RoundContext`（`rl/loop_round.py`）。
+
+**不放引擎实例属性**的理由是硬的：单进程多课程下，`self._pairs` 会被别的课覆盖（§2.2 无隐藏状态，
+多课程只是把这条老规矩的代价从「难查」变成「串课」）。上下文生命周期 = 一轮，`it` 变了就换新的。
+
+### ② 步骤表是唯一顺序来源
+
+```
+ROUND_TASKS (rl.loop_tasks)  ← 唯一顺序来源
+     ├── STEP_ORDER  = ROUND_TASKS（同序）
+     └── STEP_METHOD : kind → 引擎方法名
+                        └── 组合路径 run_one_round 与细粒度驱动器都从表取步骤
+```
+
+步骤实现住在 `rl/loop_round_steps.py`（`RoundSteps` mixin，MRO 排最前）。切法**不是重新设计控制流**：
+每一行都从轮体搬来，`break`/`return`/`it -= 1` 改由 `StepResult` 表达、驱动器施加。
+
+| 原轮体 | 现在 |
+|---|---|
+| 顺序 190 行脚本 | `step_precollect_join` … `step_cleanup` 共 13 个方法，一步一个 `RoundContext` 入参 |
+| `break` / `it -= 1` | `StepResult.outcome`（`ROUND_*`）由驱动器施加 |
+| 该停就停 | `finish(ROUND_STOP)` / 正常 `None` |
+
+**★ 顺序错纠正（真发现）**：`precollect_join` 必须排**第一**——它产出的是本轮 `it{it}` 的 shard，
+而紧随的 `prepare_iter` 靠 `completed_pairs` 看盘决定「保留续跑」还是「清场重建」；反了就把上一轮
+的预采整个作废（白烧一轮采集）。原轮体里这次 join 坐在 `run()` 循环头，位置一致。
+
+**写测试时挖出的第二个坑**：`run_one_round` 里「让位」必须**先于通用失败分支**捕获。否则步骤
+要求的让位会被 `except Exception` 吞成一次普通失败 ⇒ 落 `iter_error`、计连击、无限重试同一轮
+（症状与「每轮都重试」完全一样）。为此立了专门的 `RoundYieldError`：组合路径没有让位点，遇到就让
+它响亮上抛；细粒度驱动器才支持让位。
+
+### ③ 让位闸门：一张表，且只有两处能装
+
+`rl/loop_runner.WAIT_HOOKS`（kind → 引擎钩子名）。**钩子不存在 ⇒ 不让位**（老引擎行为逐字节不变），
+所以表可以只先装能吃的部分。
+
+| kind | 钩子 | 状态 |
+|---|---|---|
+| `precollect_join` | `TrainingLoop.precollect_ready` | ✅ 本轮装 |
+| `ppo` | `remote_job_ready` | ⛔ **刻意不装**（见下） |
+| `eval_join` | —（`WAIT_HOOKS` 里没有） | ⛔ **刻意不装**（见下） |
+
+**⛔ `ppo` 必须先拆三相**：今天的 `_remote_ppo` 是一个阻塞函数（打包→发布→阻塞轮询→三重校验落位）。
+在它**前面**加闸门 = 还没发布就被挡住 ⇒ 永远等不到回传。要装它得先把「发布 / 等结果 / 落位」拆开，
+否则宁可不装。表里留位 + 理由写在 `loop_runner` 的 docstring 里。
+
+**⛔ `eval_join` 不加让位**：本机 eval 局的墙钟是**故意藏在下一轮 rollout 里**的（`_eval_tail` 交棒、
+`_dispatch_delayed_eval` 入口收拢）。给它让位 = 把那条尾巴重新串回轮边界，正好抵消掉当初压掉的
+软等窗口。`tests/test_loop_runner.py` 把这个「缺席」写成断言，防止后来者顺手补上。
+
+### ④ 已装的那一处：预采（1 小时轮询 → 让位）
+
+`join_precollect_child` 旧形态每 2s 轮询 `completed_pairs`、上限 **1 小时**。单课程前台跑时这只
+是「等一下」；单进程多课程下它就是**一个慢子进程拖垮所有课**的入口。
+
+判据抽成 `rl/rollout_phase.precollect_ready`（**非阻塞**：句柄为空 / 子进程已退出 / 就绪 shard ≥
+半波），**步骤内部循环改成调同一个函数** ⇒「调度器认为可以往下走」与「步骤进去真的不阻塞」不可能
+分叉（两个口径分叉的症状是「调度器说开训、步骤进去还在轮询」，极难排查）。外部语义不变：超时仍
+`terminate` + 回合自己采。`min_wave` 也抽成 `precollect_min_wave()`（两处共用同一个数）。
+
+### ⑤ 读面补全「在等什么」
+
+`WAIT` 时把原因落到队列（`q.reason = result.reason`），推进/收官时清空。理由：状态 + 原因 + 在飞
+`job_id` 三者合起来才够定位一次「卡住」；而过期的原因比没有原因更坏。
+
+### ⑥ 验收与实测
+
+| 门 | 结果 |
+|---|---|
+| nn python gate（ruff + mypy + pytest xdist -n 12） | ✔ **1406 passed / 3 skipped**（含 +28 新例） |
+| 根 `bun run check` | ✔ 90s 绿 |
+
+新回归：
+
+| 文件 | 例数 | 钉住 |
+|---|---|---|
+| `tests/test_loop_round.py` | 13 | 表 == `ROUND_TASKS`、`STEP_METHOD` 与实现一一对应、`precollect_join` 必须最前、组合循环按表施加终止/异常分类 |
+| `tests/test_loop_runner.py` | 5 | `WAIT_HOOKS` 的 kind 都在表里、`eval_join` 刻意缺席、钩子缺失⇒不让位、不就绪⇒`WAIT`+原因+`resume_at` |
+| `tests/test_precollect_ready.py` | 7 | 非阻塞（<0.5s）、半波即就绪、已退出即就绪、与 `join` 同源、超时仍 terminate |
+| `e2e/test_loop_supervisor_integration.py` | +3 | 13 步逐一走完 + **步级轮转**（前两步来自不同课）、ppo 处让位、预采处让位；细粒度与轮粒度**账本形状逐行一致** |
+
+### ⑦ 踩坑记录
+
+1. **mypy 只在 mixin 声明依赖属性时才认 `self.x`**——`RoundSteps` 引用了引擎的 50 个属性/方法，
+   必须像既有 `TrainingSteps`/`TrainingGuards` 那样声明；类型要**照实际赋值写**（`_total` 是展示用
+   字符串 `"0"/"∞"`、`_node_rollout_sec` 是 `float | None`），写窄了立刻红。
+2. **ruff B010 vs mypy method-assign**：测试里替换实例方法时，字面量 `setattr(obj, "name", fn)` 被
+   ruff 拦（B010），直接赋值被 mypy 拦（method-assign）。两处都用 `_stub(obj, name, fn)`（**变量名**
+   传字符串）——这是本仓测试替换方法的标准手法。
+3. **细粒度任务占用资源池 ⇒ 测试必须声明池**：`{local_rollout, local_ppo, eval_local}` 不声明时
+   `PoolSet` 会响亮报「未知资源池」（比静默放行好，但写测试时容易愣一下）。轮粒度任务（`kind=round`）
+   不占池。
+
+下一步：R2c-3 余下 ① `ppo` 三相拆分 ② `Supervisor` 进控制台 ③ `checkpointCacheMb` 真机 RSS 表。
+
 ## §79 R2c-2：抽出 run_one_round + 任务体↔引擎的桥 + 假件集成测试（2026-09-18）
 
 R2 第三相位的第二半。用户口径（本轮）：**写集成测试验证流程，rollout/ppo/eval 一律用假件**。

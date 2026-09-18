@@ -24,6 +24,7 @@ import tarfile
 import time
 import urllib.parse
 from pathlib import Path
+from typing import NamedTuple
 
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from platform_utils import rmtree_best_effort
@@ -951,6 +952,80 @@ def _job_failed_from_body(jid: str, body: bytes) -> JobFailedError:
     return JobFailedError(f"job {jid} 失败: {reason}{suffix}", kind=kind, detail=detail)
 
 
+#: 非阻塞探针的三态（`probe_job_result` 的 `state`）。
+PROBE_READY = "ready"  # 结果已落 hub，可取
+PROBE_PENDING = "pending"  # 还没回（正常排队）——**不等于失败**，过一会儿再问
+PROBE_TRANSIENT = "transient"  # 网络抖动 / 5xx——可重试的「没答」
+
+#: 非阻塞探针的单次请求超时（秒）。**单进程调度器会同步调它**（问一句就走），所以
+#: 必须短：探针只可能给出「就绪 / 还没好 / 瞬时错」，把「瞬时错」误当「还没好」的代价
+#: 只是再等一轮，永远不会误判成成功——所以宁可短，也不让一次网络卡顿堵住整条调度链。
+PROBE_TIMEOUT_SEC = 10.0
+
+
+class ProbeResult(NamedTuple):
+    """一次非阻塞探测的结论。
+
+    `state` ∈ {ready, pending, transient}；`result` 仅在 ready 时非空；`detail` 是
+    transient 的诊断（异常类型或 HTTP 状态），供调用方的日志/退避用。
+    终局失败（410 / status=failed）**不走三态**——它抛 `JobFailedError`，与阻塞等待的
+    收兵口径一致（「还没好」与「永远好不了」必须分开）。
+    """
+
+    state: str
+    result: dict | None = None
+    detail: str = ""
+
+
+def probe_job_result(
+    base_url: str,
+    token: str,
+    jid: str,
+    *,
+    path: str = "/jobs/{jid}/result",
+    timeout: float = PROBE_TIMEOUT_SEC,
+) -> ProbeResult:
+    """**一次**请求探测 job 结果——状态码分类的**唯一**实现（hub / 节点两条链路共用）。
+
+    节点侧（worker_server）的结果端点路径不同（`/job/{jid}/result`），故 `path` 可注入；
+    除路径外两条链路的语义**必须一致**：否则「同一份 job 在 hub 上判 pending、在节点上
+    判 transient」这类分叉会各自演化（历史上 hub 与 push 两段轮询就是这么漂开的）。
+
+    网络异常/5xx = transient；202/404 = pending；410 = 终局失败（抛）；其余 = 协议错误（抛）。
+    """
+    try:
+        # `timeout` 走**关键字**：测试里的假 `_request` 常把它声明成 keyword-only
+        # （位置传参会 TypeError，症状是「探针一调就炸」而不是「问了没答」）。
+        status, body = _request(base_url, token, path.format(jid=jid), timeout=timeout)
+    except Exception as e:  # 瞬时网络错误：与 404 一样是「没答」，不是失败
+        return ProbeResult(PROBE_TRANSIENT, None, f"{type(e).__name__}")
+    if status == 200:
+        loaded = json.loads(body.decode("utf-8"))
+        if isinstance(loaded, dict):
+            return ProbeResult(PROBE_READY, loaded)
+        raise HubClientError(f"probe_job_result: job {jid} 结果非对象: {type(loaded).__name__}")
+    if status in (202, 404):
+        return ProbeResult(PROBE_PENDING)
+    if status == 410:
+        # 终局：节点已报**确定性失败**（`POST /jobs/{id}/fail`），原因在体内。
+        raise _job_failed_from_body(jid, body)
+    if status >= 500:
+        return ProbeResult(PROBE_TRANSIENT, None, f"HTTP {status}")
+    raise HubClientError(
+        f"probe_job_result: HTTP {status}: {body[:200].decode('utf-8', 'replace')}"
+    )
+
+
+def poll_job(
+    base_url: str, token: str, jid: str, *, timeout: float = PROBE_TIMEOUT_SEC
+) -> dict | None:
+    """非阻塞探一次 hub 结果：就绪 → 结果；未就绪 / 瞬时错 → None（终局失败照抛）。
+
+    单进程调度器的让位判据就靠它（R2c-3）：**问一句就走**——不等、不睡、不轮询。
+    """
+    return probe_job_result(base_url, token, jid, timeout=timeout).result
+
+
 def wait_job(
     base_url: str,
     token: str,
@@ -968,49 +1043,32 @@ def wait_job(
     已经不可达的边缘（cloudflared `region1.v2.argotunnel.com i/o timeout` 持续
     6h），既救不回 job 也放大噪声。连续错误按 2 的幂退避（`poll_max_sec` 封顶），
     一次成功即复位。404（job 还没回）是**正常等待**，不走退避。
+
+    单次探测与状态码分类在 `probe_job_result`（与 `poll_job` 同一实现）——本函数只负责
+    「退避策略 + 超时收尾」，这正是它与非阻塞版该有的唯一区别。
     """
     deadline = time.time() + timeout_sec
     err_streak = 0
     while time.time() < deadline:
-        try:
-            status, body = _request(base_url, token, f"/jobs/{jid}/result", timeout=30.0)
-        except Exception as e:
-            # 瞬时网络错误（快速隧道抖动/DNS/连接重置）——与 404 同等处理，续等；
-            # 2026-09-05：此前单次错误直接抛 HubClientError 会废掉整轮迭代
-            # （loop 连击 retry），对 24/7 隧道运营是可靠性缺陷。
-            err_streak += 1
-            backoff = min(poll_sec * (2 ** (err_streak - 1)), poll_max_sec)
-            log(
-                f"wait_job: job {jid} 轮询网络错误 ({type(e).__name__}) "
-                f"— 连续第 {err_streak} 次，{backoff:.0f}s 后退避重试"
-            )
-            time.sleep(backoff)
-            continue
-        if status == 200:
-            loaded = json.loads(body.decode("utf-8"))
-            if isinstance(loaded, dict):
-                return loaded
-            raise HubClientError(f"wait_job: job {jid} 结果非对象: {type(loaded).__name__}")
-        if status == 404:
+        probe = probe_job_result(base_url, token, jid, timeout=30.0)
+        if probe.state == PROBE_READY:
+            assert probe.result is not None  # ready 必带结果（probe_job_result 保证）
+            return probe.result
+        if probe.state == PROBE_PENDING:
             err_streak = 0  # 还没回 = 正常排队，复位退避
             time.sleep(poll_sec)
             continue
-        if status == 410:
-            # 410 = 终局：节点已报**确定性失败**（`POST /jobs/{id}/fail`），原因在体内。
-            # 必须立刻收兵——此前这情况一律落到 25 分钟超时，把「bun 缺失」写成
-            # 「网络/排队问题」，且每次重试都白烧一个超时窗口。
-            raise _job_failed_from_body(jid, body)
-        if status >= 500:
-            # 隧道/边缘瞬时 5xx（Cloudflare 错误页等）——容忍至 deadline
-            err_streak += 1
-            backoff = min(poll_sec * (2 ** (err_streak - 1)), poll_max_sec)
-            log(
-                f"wait_job: job {jid} HTTP {status}（瞬时错误）— 连续第 {err_streak} 次，"
-                f"{backoff:.0f}s 后退避重试"
-            )
-            time.sleep(backoff)
-            continue
-        raise HubClientError(f"wait_job: HTTP {status}: {body[:200].decode('utf-8', 'replace')}")
+        # 瞬时错误（隧道抖动/DNS/5xx）——与 404 同等续等，但按 2 的幂退避；
+        # 2026-09-05：此前单次错误直接抛 HubClientError 会废掉整轮迭代
+        # （loop 连击 retry），对 24/7 隧道运营是可靠性缺陷。
+        err_streak += 1
+        backoff = min(poll_sec * (2 ** (err_streak - 1)), poll_max_sec)
+        log(
+            f"wait_job: job {jid} 轮询瞬时错误 ({probe.detail}) "
+            f"— 连续第 {err_streak} 次，{backoff:.0f}s 后退避重试"
+        )
+        time.sleep(backoff)
+        continue
     # H3：超时前二次确认——leased（云仍在跑）→ 延长等待；done → 直接取结果
     s_status, s_body = _request(base_url, token, f"/jobs/{jid}/status", timeout=15.0)
     if s_status == 200:
