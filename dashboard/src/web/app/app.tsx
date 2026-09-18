@@ -29,6 +29,7 @@ import {
 import { BcPanel } from './panels/BcPanel'
 import { CourseOverview } from './panels/CourseOverview'
 import { WorkerRegistry } from './panels/WorkerRegistry'
+import { LoopQueue } from './panels/LoopQueue'
 import { TaskBundlePanel } from './panels/TaskBundlePanel'
 import { WirePanel } from './panels/WirePanel'
 import { EvalSummary } from './panels/EvalSummary'
@@ -666,6 +667,17 @@ export function App({ initial }: AppProps) {
         <PanelErrorBoundary>
           <CourseOverview
             overview={stateView?.overview ?? null}
+            course={viewCourse}
+            onSelectCourse={selectCourse}
+          />
+        </PanelErrorBoundary>
+      )}
+      {/* ── 训练调度器（单例，RL 区）：每课任务队列 + 「在等什么」——
+           总览卡回答 hub 侧「谁在派活」，本卡回答训练侧「这一轮卡在哪一步」 ── */}
+      {stateView?.isBc ? null : (
+        <PanelErrorBoundary>
+          <LoopQueue
+            loopQueue={stateView?.loopQueue ?? null}
             course={viewCourse}
             onSelectCourse={selectCourse}
           />

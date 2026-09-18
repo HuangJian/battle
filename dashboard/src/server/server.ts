@@ -59,6 +59,7 @@ import {
   curriculumLadderView,
   discoverCourses,
   evalReplayFileResponse,
+  getLoopQueueView,
   invalidateHubAdmin,
   invalidateSlowSnapshot,
   ladderTickAll,
@@ -217,6 +218,11 @@ async function main(): Promise<void> {
   // 慢部件快照后台刷新（§366：节点 ping/组件探测/池历史移出请求路径，页面加载 <1s）。
   // reconcileWatch 已冷算一次暖缓存；此后每 5s 后台重算，请求只读缓存。
   startSnapshotRefresher()
+  // 调度器视图（R2c-3）暖一次缓存：它要起一个只读 python（~sub-second），懒算的话
+  // 首次 /api/state（含 SSR 首屏）要为它等一个子进程。之后由 TTL（10s）驱动重算。
+  void getLoopQueueView().catch(() => {
+    /* 读失败由视图内部转成 error 上屏；这里只需不抛 */
+  })
   // 非正常退出看护（§380）：受管进程自行退出/被杀 → 显式写失败日志 + 记录 error，
   // 不再静默（TrainingLoop 曾因缺 BC 参考 boot 崩溃，只有翻日志才知道原因）。4s 一轮，
   // 两帧确认（内部）避免监督器换 pid 的瞬时误报。

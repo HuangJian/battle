@@ -79,8 +79,27 @@ export function runRunPythonSyncModule(
   args: string[],
   opts: { timeoutMs?: number } = {},
 ): SyncRunResult {
+  return runSync(['-m', module, ...args], opts)
+}
+
+/** 同步跑一个 python **脚本文件**（仓库相对或绝对路径；短任务），捕获输出。
+ *
+ *  与模块变体只差入口形式：只读型脚本（`run_rl_cluster.py --json`）是文件不是包模块，
+ *  而解释器解析 / env / UTF-8 解码这些坑一模一样——故共用同一条实现，不另写一份。
+ */
+export function runRunPythonSyncScript(
+  scriptRel: string,
+  args: string[],
+  opts: { timeoutMs?: number } = {},
+): SyncRunResult {
+  const script = path.isAbsolute(scriptRel) ? scriptRel : path.join(REPO_ROOT, scriptRel)
+  return runSync(['-u', script, ...args], opts)
+}
+
+/** 同步子进程的公共部分：解释器 + env 拼装 + UTF-8 解码 + 超时判定（不抛，进 `timeout`）。 */
+function runSync(tail: string[], opts: { timeoutMs?: number }): SyncRunResult {
   const { python, env } = resolveRunPython()
-  const r = spawnSync(python, ['-m', module, ...args], {
+  const r = spawnSync(python, tail, {
     cwd: NN_TRAINING,
     env: { ...process.env, ...env },
     timeout: opts.timeoutMs ?? 300_000,

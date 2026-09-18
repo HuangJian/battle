@@ -4,6 +4,72 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §82 R2c-3 余下：调度器进控制台（单例卡片 + 每课队列视图 + 在等什么）（2026-09-19）
+
+R2a/R2b/R2c 把单进程调度器造出来了，但**没人看得见它**：`trainingLoop` 收敛为一个进程之后，
+「某门课这一轮为什么还没走完」要翻 N 份日志 + 猜（`run_rl_cluster.py` 原本只给终端看）。
+本节把它接进控制台——只读侧，不动训练行为。
+
+### ① 数据源：走 python 只读入口，**不在 TS 重算判据**
+
+`run_rl_cluster.py --json` 的输出就是控制台卡片的契约面（训练侧只读：不训练、不发布、不等待）。
+判据（指针 → `RoundFacts` → `pending_tasks`）与 CLI 表逐字段同源；若在 TS 里照账本重写一遍，
+就是第二份真相（R2b 否决 `loop-state.json` 的同一条理由）——两边会以不同速度演化。
+
+- `dashboard/src/server/api/loop-queue.ts`：懒算 + **TTL 10s** + 单飞。TTL 比 hub 观测面的 5s 宽，
+  因为事实变化的粒度是「一轮」（分钟级），而一次冷算要起一个 python（解释器冷启 + 扫 N 课账本/
+  journal/shard 目录，亚秒级）。服务器启动时暖一次缓存，避免 SSR 首屏等子进程。
+- `LoopQueueRunner` 是**可注入接缝**（与 `deliver_zip` 导入同惯例）：控制台这一半（argv 形状 /
+  结果翻译 / TTL / 单飞 / 与在训事实合并）在 dashboard 用例里全测到，python 那一半由
+  `nn-training/tests/test_loop_plan_waiting.py` 钉死——两边各测自己那一半，中间不再叠一层端到端。
+- 读失败（解释器缺失 / 超时 / 输出不可解析 / 形状不符）**不抛**：视图带 `error` 上屏，UI 显因 + 空态。
+  观测面坏掉不该把整页 `/api/state` 带崩（与 hub 总览 / 隧道 A/B 同口径）。
+
+### ② 「在等什么」的判据留在 python（`loop_plan.waiting_state`）
+
+控制台那一列不是 TS 从 facts 推的散文，而是 python 单点算出的 `(kind, text)`：
+
+| kind | 何时 | 文案 |
+|---|---|---|
+| `inflight` | 有已发布未回传的 job（`commit_journal.inflight()`） | `等远端回传：ppo@37（jid=… via push）`；多条 → `等 N 个远端任务回传（…）` |
+| `collect` | 本轮已落一部分局、配额未满（或未知） | `等采集落盘（120/150 局）` / `采集中：已落 78 局` |
+| `idle` | 本轮无待办（账本已结算 / 未开训） | `本轮无待办（账本已结算 / 未开训）` |
+| `ready` | 无外部等待 | `无外部等待，下一步 ppo` |
+
+优先级 inflight > collect > idle > ready：**进程外的等待排第一**（结果在别的进程/机器上，
+运维唯一能干预的那一类）。
+
+★ **`games_planned` 的诚实性**：盘上今天**没有**任何地方记「本轮计划多少局」（只有 `rl/plan.py`
+的课程计划知道）⇒ CLI 传 0 = 未知，此时 `collect` 只报已落局数、**不报分数**（绝不出现 `78/0`）。
+真 supervisor 带上课程计划后会走到带分母的文案。这与 `already_done` 同一条规矩：算不出来的事实
+不得当成完成，也不得编出分母。
+
+### ③ 卡片：单例 + 两个事实源逐行合并
+
+`dashboard/src/web/app/panels/LoopQueue.tsx`（RL 区，BC 课不出）——表头「调度器 · **单例** ·
+在训 N/M · N 课等回传 · 排队等资源 X · 池占用」，每课一行：课程 / 在训-未在训 / it / 下一步 /
+待办深度 / **在等什么**（四态各自一个色阶）。点行 = 切到查看该课（与总览卡同一条路径，LAN 只读
+下也可用：只改本浏览器的查看目标）。
+
+- **在训与否来自 registry**（`trainingLoop` 进程存活），不是 python 给的：盘上事实看不出「进程还在
+  不在」。缺了它，一门停了的课会被读成「等外部」——所以未在训的行淡一档 + 悬停说明「这是盘上事实
+  推出的队列状态」。
+- 合并放在视图层（`withTraining` 纯函数）：python 说「卡在哪」，registry 说「有没有人在跑」。
+- 与「并行课程总览」分工：总览回答 hub 侧「谁在派活 / 谁离线」，本卡回答训练侧「这一轮卡在哪一步」。
+
+### 门禁
+
+- nn python gate：**1446 passed / 3 skipped**（ruff + mypy 干净；+14 新例）
+- dashboard：typecheck 绿、**567 passed**（+25：`server-api-loop-queue.test.ts` 13 / `web-app-loopqueue.test.ts` 12）、
+  `bun dashboard/src/server/build.ts` 三份 bundle 通过
+- 根 `bun run check` 绿、`bun run build` 绿
+
+### 记录
+
+`DECISIONS.md`（R2 条目新增「控制台接线」段，含「不得在 TS 重算判据」的防再犯条款）、
+`plan/r2-loop-task-queue.md`（相位表）。**仍未做**：`checkpointCacheMb` 真机 RSS 实测表（R2c 上线
+前置条件）、R2d 操作面（入队 / 暂停 / 单例 trainingLoop 卡片）、R2e e2e。
+
 ## §81 R2c-3 余下：远端 PPO 三相拆分（发布 / 等结果 / 落位）（2026-09-18）
 
 上一节把 13 步切出来之后，唯一还堵着调度链的就是 **`ppo` 这一步**：它是「打包 → 发布 → 阻塞轮询 →

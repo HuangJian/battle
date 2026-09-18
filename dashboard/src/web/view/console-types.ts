@@ -1,5 +1,6 @@
 /** console-types.ts — 控制台整页视图类型（组件 / 节点 / 模式 / 指标 / 整页快照）与展示辅助。 */
 import { ParallelOverviewView, PushWorkerRegistryView } from './course-overview'
+import { LoopQueueView } from './loop-queue'
 import { IterRow, PairedReferee } from './metric-types'
 import { PhaseInfo } from './phase'
 
@@ -149,6 +150,10 @@ export interface ConsoleStateView {
   trainingCourses?: string[]
   /** 多课程并行总览（hub `/admin/queue` + 每课一行）；缺省/null = 无 hub 应答或未计算。 */
   overview?: ParallelOverviewView | null
+  /** 训练调度器（**单例**：一个进程服务所有并行课程）的每课队列视图（R2c-3）。
+   *  数据源 = `run_rl_cluster.py --json`（只读计划视图）+ registry 的在训事实。
+   *  缺省/null = 读失败（`error` 在视图里）或旧视图——UI 显空态，不编数据。 */
+  loopQueue?: LoopQueueView | null
   /** push worker 登记视图（rl-config `nodes[].gpu_push` + 面板直探 + hub 侧探活）。 */
   workerRegistry?: PushWorkerRegistryView | null
   components: ComponentView[]

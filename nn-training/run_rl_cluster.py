@@ -13,6 +13,10 @@
   python run_rl_cluster.py                          # 自动发现 tmp/*/training_log.jsonl
   python run_rl_cluster.py --courses c4-dodge,c5-tick
   python run_rl_cluster.py --traj-root tmp --json    # 机器可读（控制台/CI 用）
+
+**`--json` 是控制台「调度器」卡片的契约面**（dashboard `server/api/loop-queue.ts` 消费，
+TTL 缓存）：改 `--json` 的字段名/语义 = 改控制台，两边必须在同一次改动里对齐（`waiting`
+那一列就是「每课在等什么」，`tests/test_loop_plan_waiting.py` 盯住它的取值域）。
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ from rl.loop_plan import (
     discover_courses,
     inflight_from_journals,
     plan_course,
+    waiting_state,
 )
 from rl.loop_scheduler import CourseQueue, Supervisor
 from rl.loop_tasks import Task, TaskResult
@@ -41,8 +46,46 @@ def _never(task: Task, queue: CourseQueue) -> TaskResult:
     raise AssertionError(f"dry-run 不应执行任务 {task.task_id}")
 
 
+def build_rows(courses: list[str], traj_root: str, sup: Supervisor) -> list[dict]:
+    """每课一行（= `--json` 的主体，也是控制台调度器卡片的唯一数据源）。
+
+    只读盘：账本（指针 + 事实）+ `commit_journal`（在飞集）+ shard 目录（采集进度）。
+    「在等什么」由 `loop_plan.waiting_state` 单点计算——CLI 表与控制台卡片是**同一份**
+    语义的两个渲染面（控制台不得自己从 facts 重算：那是第二份真相）。
+    """
+    rows: list[dict] = []
+    for course in courses:
+        traj = course_traj(traj_root, course)
+        it, tasks, facts = plan_course(course, traj)
+        inflight = inflight_from_journals(traj)
+        current = tasks[0].kind if tasks else ""
+        kind, text = waiting_state(
+            inflight=inflight,
+            games_settled=int(facts["games_settled"]),
+            games_planned=int(facts["games_planned"]),
+            pending=len(tasks),
+            current=current,
+        )
+        # 队列状态取自调度器本身（`add_course` 的 ready/done 判定），不在这里再写一遍
+        # 「有任务 = ready」——两处各写一遍就是第一个分叉点。
+        q = sup.add_course(course, it, tasks)
+        rows.append(
+            {
+                "course": course,
+                "it": it,
+                "state": q.state,
+                "current": current,
+                "pending": [t.kind for t in tasks],
+                "inflight": inflight,
+                "facts": facts,
+                "waiting": {"kind": kind, "text": text},
+            }
+        )
+    return rows
+
+
 def _fmt_table(rows: list[dict]) -> str:
-    """人读表：课程 / 轮次 / 状态 / 当前任务 / 待办 / 在飞（含 job_id）/ 关键事实。"""
+    """人读表：课程 / 轮次 / 状态 / 当前任务 / 待办 / 在飞（含 job_id）/ 在等什么 / 关键事实。"""
     out: list[str] = []
     hdr = f"{'course':<22} {'it':>4} {'state':<8} {'next task':<18} {'pending':>7} {'inflight':>8}"
     out.append(hdr)
@@ -52,6 +95,7 @@ def _fmt_table(rows: list[dict]) -> str:
             f"{r['course']:<22} {r['it']:>4} {r['state']:<8} {r['current'] or '-':<18} "
             f"{len(r['pending']):>7} {len(r['inflight']):>8}"
         )
+        out.append(f"    waiting: {r['waiting']['text']}")
         if r["pending"]:
             out.append(f"    pending: {', '.join(r['pending'])}")
         for rec in r["inflight"]:
@@ -100,22 +144,7 @@ def main(argv: list[str] | None = None) -> int:
             "local_rollout": args.rollout_slots,
         },
     )
-    rows: list[dict] = []
-    for course in courses:
-        traj = course_traj(traj_root, course)
-        it, tasks, facts = plan_course(course, traj)
-        q = sup.add_course(course, it, tasks)
-        rows.append(
-            {
-                "course": course,
-                "it": it,
-                "state": q.state,
-                "current": q.current.kind if q.current else "",
-                "pending": [t.kind for t in q.tasks],
-                "inflight": inflight_from_journals(traj),
-                "facts": facts,
-            }
-        )
+    rows = build_rows(courses, traj_root, sup)
 
     if args.json:
         print(json.dumps({"courses": rows, "pools": sup.snapshot()["pools"]}, ensure_ascii=False))
@@ -127,8 +156,9 @@ def main(argv: list[str] | None = None) -> int:
             + "  ".join(f"{k}={v['capacity']}" for k, v in pools.items())
         )
         print(
-            "[cluster] R2c-1：只读计划视图。写的一半（任务体接线 + 长等待改 WAIT）见 "
-            "plan/r2-loop-task-queue.md §8 的 R2c-2。"
+            "[cluster] 只读计划视图（本入口不训练、不发布、不等待）。单进程 supervisor 的"
+            "执行体已就位（rl/loop_runner.py：任务体↔引擎的唯一桥，回退路径逐字节同旧行为），"
+            "“入队/暂停/单例 trainingLoop 卡片”的操作面见 plan/r2-loop-task-queue.md §8 的 R2d。"
         )
     return 0
 

@@ -8,6 +8,7 @@ import { resolveCfTunnel, resolveRolloutSrc, resolveSlim } from '../../stack/spe
 import { readIterMetrics, readPairedReferee } from '../iters'
 import { loadConfigSafe } from './config'
 import { discoverCourses, effectiveCourse } from './courses'
+import { buildLoopQueueView } from './loop-queue'
 import { buildOverview, buildWorkerRegistry, trainingCourses } from './overview'
 import { detectPpoQueueStall } from './ppo-queue'
 import { readTunnelAbRuns } from './tunnel-ab'
@@ -40,11 +41,14 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
   const ppoQueueStall = course
     ? detectPpoQueueStall(path.join(REPO_ROOT, 'tmp', course, 'remote-jobs'))
     : null
-  // 多课程并行总览 + push worker 登记（2026-09-18）：两个面各有一处 try——观测面
-  // 坏掉（无 hub / 账本不可读）只该让那两块显示空态，不该把整页 /api/state 带崩。
-  const [overview, workerRegistry] = await Promise.all([
+  const training = trainingCourses()
+  // 多课程并行总览 + push worker 登记 + 调度器队列（2026-09-18/R2c-3）：三个面各有一处
+  // catch——观测面坏掉（无 hub / 账本不可读 / 只读 CLI 起不来）只该让那一块显空态
+  // （视图自带 error 交 UI 显因），不该把整页 /api/state 带崩。
+  const [overview, workerRegistry, loopQueue] = await Promise.all([
     buildOverview(cfg, courses, course).catch(() => null),
     buildWorkerRegistry(cfg, course).catch(() => null),
+    buildLoopQueueView(training).catch(() => null),
   ])
   return {
     time: new Date().toISOString(),
@@ -54,9 +58,10 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     activeCourse: state.activeCourse || state.course || course,
     courses,
     // 在训课程（registry trainingLoop 存活）：课程 select 的多课高亮与总览的「在训」列同源。
-    trainingCourses: trainingCourses(),
+    trainingCourses: training,
     overview,
     workerRegistry,
+    loopQueue,
     components,
     nodes,
     localNode,

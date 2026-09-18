@@ -2276,6 +2276,140 @@ a.tc-preset {
   font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
 }
 
+/* ────────── 训练调度器（单例，每课队列 + 在等什么；R2c-3） ────────── */
+.tc-loopq {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-3);
+  padding: 6px 12px;
+  margin-bottom: 10px;
+}
+.tc-loopq__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  font-size: var(--fs-2);
+}
+.tc-loopq__head .lbl {
+  color: var(--muted);
+}
+/* 「单例」徒标：一个进程服务所有课程——不标出来会把这张卡误读成「本课自己的队列」 */
+.tc-loopq__singleton {
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--accent-bg);
+  color: var(--accent);
+  font-weight: 700;
+  font-size: var(--fs-1);
+}
+.tc-loopq__stat,
+.tc-loopq__pools {
+  color: var(--muted);
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+}
+.tc-loopq__waitcount {
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--yellow-bg);
+  color: var(--yellow);
+  font-weight: 700;
+}
+.tc-loopq__blocked {
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--gray-bg);
+  color: var(--gray);
+  font-weight: 700;
+}
+/* 读失败：红字 + 原因在 title；不影响训练，只影响这个观测面 */
+.tc-loopq__err {
+  color: var(--red);
+}
+.tc-loopq__rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+.tc-loopq__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  padding: 2px 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: none;
+  font: inherit;
+  font-size: var(--fs-2);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.tc-loopq__row:hover {
+  border-color: var(--accent);
+}
+.tc-loopq__row--cur {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+/* 未在训：淡一档 —— 队列内容是盘上事实，但不代表有人正在跑 */
+.tc-loopq__row--stopped .tc-loopq__wait,
+.tc-loopq__row--stopped .tc-loopq__step {
+  opacity: 0.6;
+}
+.tc-loopq__name {
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-weight: 600;
+  min-width: 12ch;
+}
+.tc-loopq__badge {
+  padding: 0 7px;
+  border-radius: 999px;
+  font-weight: 700;
+  font-size: var(--fs-1);
+  background: var(--gray-bg);
+  color: var(--muted);
+}
+.tc-loopq__badge--on {
+  background: var(--green-bg);
+  color: var(--green);
+}
+.tc-loopq__badge--idle {
+  background: var(--gray-bg);
+  color: var(--gray);
+}
+.tc-loopq__iter,
+.tc-loopq__step,
+.tc-loopq__pending {
+  color: var(--muted);
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+}
+.tc-loopq__step {
+  min-width: 14ch;
+}
+/* 「在等什么」：整行的产出。四态各自一个色阶，扫一眼就能分出「等外部 / 采集中 / 闲置」 */
+.tc-loopq__wait {
+  flex: 1 1 22ch;
+  min-width: 18ch;
+}
+.tc-loopq__wait--inflight {
+  color: var(--yellow);
+  font-weight: 600;
+}
+.tc-loopq__wait--collect {
+  color: var(--accent);
+}
+.tc-loopq__wait--idle {
+  color: var(--muted);
+}
+.tc-loopq__foot {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: var(--fs-1);
+}
+
 /* ────────────── push worker 登记（2026-09-18） ────────────── */
 .tc-wreg {
   background: var(--card);

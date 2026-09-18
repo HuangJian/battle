@@ -2711,6 +2711,42 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   `tests/test_remote_ppo_phases.py`（8）· `e2e/test_loop_supervisor_integration.py`（ppo 让位用例改为
   驱动真三相）· `e2e/test_push_mode_integration.py`（+3：发布相位提交 / 换节点重提交 / 探针目标）。
 - **仍未做**：`Supervisor` 进控制台（单例卡片 + 每课队列视图）· `checkpointCacheMb` 真机 RSS 实测表。
+**R2c-3 余下（2026-09-19 六续）——控制台接线：单例调度器卡片 + 每课队列视图（「在等什么」）**：
+
+- **数据源 = python 只读入口，★ 控制台不得在 TS 重算判据**（防再犯条款）：卡片走
+  `nn-training/run_rl_cluster.py --json`（训练侧只读：不训练/不发布/不等待），与 CLI 表逐字段同源。
+  指针 → `RoundFacts` → `pending_tasks` / `waiting_state` 这套判据已在 python 侧被用例钉住；
+  在 TS 里照账本重写一遍 = **第二份真相**（同 `loop-state.json` 段），两边会以不同速度演化。
+  谁想「顺手在 TS 里读账本省掉一个子进程」，先重读本段：省下的是亚秒级冷算，换来的是两套语义。
+- **成本与缓存**：`dashboard/src/server/api/loop-queue.ts`——懒算 + **TTL 10s** + 单飞 + 服务启动
+  暖一次（避免 SSR 首屏等子进程）。TTL 比 hub 观测面（5s）宽，因为事实变化的粒度是「一轮」
+  （分钟级）而冷算要起一个 python。读失败（解释器缺失 / 超时 / 输出不可解析 / 形状不符）**不抛**：
+  视图带 `error` 上屏，UI 显因 + 空态——观测面坏掉不该把整页 `/api/state` 带崩（与 hub 总览、
+  隧道 A/B 同口径）。
+- **「在等什么」的判据留在 python**（`rl/loop_plan.py::waiting_state`，CLI 与控制台同一个函数）：
+  `inflight`（已发布未回传，带 phase@round + jid + dispatch）/ `collect` / `idle` / `ready`，
+  优先级 inflight > collect > idle > ready（**进程外的等待排第一**：结果在别的进程/机器上，
+  运维唯一能干预的那一类）。★ **`games_planned` 诚实性**：盘上今天没有任何地方记「本轮计划多少局」
+  ⇒ CLI 传 0 = 未知，`collect` 只报已落局数、**不报分数**（绝不出现 `78/0`）；这与 `already_done`
+  同一条规矩——算不出来的事实不得当成完成，也不得编出分母。
+- **两个事实源逐行合并**（`web/view/loop-queue.ts::withTraining`）：python 说「这一轮卡在哪」，
+  registry（`trainingLoop` 进程存活）说「这门课此刻有没有人在跑」。★ 缺了后者，一门**停了的课**
+  会被读成「等外部」——故未在训的行淡一档 + 悬停说明「下面是盘上事实推出的队列状态」。
+- **与「并行课程总览」的分工**（防重复建设）：总览回答**hub 侧**「谁在派活 / 谁离线」（job 队列），
+  本卡回答**训练侧**「这一轮卡在哪一步」（任务队列）——同一条流水线的两段，不合并。
+- **落地**：`dashboard/src/{server/api/loop-queue.ts, web/view/loop-queue.ts, web/app/panels/LoopQueue.tsx}`
+  （三个新）+ `server/run-python.ts`（新增同步脚本入口 `runRunPythonSyncScript`，与模块入口共用一份
+  实现）+ `api/{state-view,index}.ts` / `web/view/console-types.ts` / `web/app/app.tsx` / `web/theme.css` /
+  `server/server.ts`（启动暖一次）；训练侧 `nn-training/rl/loop_plan.py`（`waiting_state`）+
+  `run_rl_cluster.py`（抽 `build_rows`、JSON 加 `waiting`、表里也打印）。
+- **回归**：`dashboard/tests/server-api-loop-queue.test.ts`（13：解析容错 / 结果翻译四条失败分支 /
+  TTL 复用 / 单飞 / 在训合并 / state 注入）· `dashboard/tests/web-app-loopqueue.test.ts`（12：SSR 每课
+  一行 / 四态着色 / 未在训淡档 + 悬停 / 排队与页脚 / 读失败显因 / 接线断言）·
+  `nn-training/tests/test_loop_plan_waiting.py`（14：优先级 / 未知配额不编分母 / 真读盘组装）。
+  子进程是**可注入接缝**（同 `deliver_zip` 导入惯例）⇒ dashboard 用例不跑 python，python 用例不碰
+  控制台，两边各测自己那一半。
+- **仍未做**：① `checkpointCacheMb` 真机 RSS 实测表（R2c 上线前置条件）；② R2d 操作面（入队 / 暂停 /
+  单例 `trainingLoop` 卡片）；③ R2e e2e（单进程多课 × 假 worker/假 PPO）。
 **R2c-3 落地（2026-09-18 四续）——轮内切成 13 步 + 让位闸门（`WAIT_HOOKS` 表）**：
 
 - **`RoundContext` 与 13 步表**：`rl/loop_round.py`（纯数据 + 表，无 torch/网络/IO）定义

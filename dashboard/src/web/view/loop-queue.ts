@@ -1,0 +1,203 @@
+/** loop-queue.ts — 单进程训练调度器（supervisor）的每课队列视图（R2c-3 控制台接线）。
+ *
+ *  背景（plan/r2-loop-task-queue §7）：多课程并行后 `trainingLoop` 收敛为**一个进程**，
+ *  它内部一台单线程调度器持有**每课一条任务队列**。于是控制台需要回答一个今天只能靠翻
+ *  N 份日志回答的问题：**「这门课在等什么」**。
+ *
+ *  数据源 = 训练侧只读入口 `nn-training/run_rl_cluster.py --json`（同一个 `rl/loop_plan.py`，
+ *  与 CLI 表逐字段同源）。**判据不在本层重算**：`waiting` 的文案由 python 侧
+ *  `loop_plan.waiting_state` 单点给出——TS 里从 facts 再推一遍就是把同一条语义写第二遍，
+ *  两边迟早各说各话（这正是 R2b 否决 `loop-state.json` 的同一条理由）。
+ *
+ *  本模块**只放类型与纯函数**（无 IO、无 node:、无 Bun）——容错解析是最值得单测的部分：
+ *  python 侧可能比控制台新/旧一个版本，缺字段必须退化成空态而不是让整页 /api/state 500
+ *  （与 hub 队列/隧道 A/B 的只读面容错口径一致）。
+ */
+
+/** 「在等什么」的取值域（与 python `loop_plan.WAIT_*` 逐字对应）。 */
+export type LoopWaitKind = 'inflight' | 'collect' | 'idle' | 'ready'
+
+/** 该课队列状态（python `loop_scheduler`：ready / running / waiting / paused / aborted / done）。 */
+export type LoopCourseState = 'ready' | 'running' | 'waiting' | 'paused' | 'aborted' | 'done'
+
+/** 在飞的一条远端提交（`commit_journal.inflight()`：已发布未回传）。 */
+export interface LoopInflightView {
+  /** 提交相位（ppo_remote / …）。 */
+  phase: string
+  /** 轮次（字符串，与 WAL 同行）。 */
+  round: string
+  /** 远端 job 编号（发布后 attach 补上；旧 WAL 可能没有）。 */
+  jid: string | null
+  /** 运输方式（push / pull）。 */
+  dispatch: string | null
+  /** 它所在的 it 目录名（`it37`）。 */
+  dir: string | null
+}
+
+/** 该课的关键事实（账本 + shard 目录派生；`—` 表示未知，不编造）。 */
+export interface LoopCourseFactsView {
+  /** 账本里已结算的轮数。 */
+  iterations: number
+  lastVerdict: string | null
+  trainSecTotal: number
+  softRemediateCount: number
+  klStreak: number
+  /** 当前轮已结算（manifest 落盘）的局数。 */
+  gamesSettled: number
+  /** 计划局数；0 = 未知（盘上今天没记这个数——见 python `waiting_state` 的诚实性说明）。 */
+  gamesPlanned: number
+}
+
+export interface LoopQueueRow {
+  course: string
+  /** 这门课**此刻有存活的 trainingLoop 进程**（registry 为事实源，与控制台总览同口径）。
+   *  它不是 python 给的：盘上事实（账本/inflight）看不出「进程还在不在」。
+   *  为什么必须上卡：没在训的课也会有一套「可推进」的队列（它只是没人跑），
+   *  不区分就会把「停了」读成「等外部」。 */
+  training: boolean
+  /** 下一次要跑的轮次（账本指针）。 */
+  it: number
+  state: LoopCourseState
+  /** 队列里第一个待办步骤（空 = 本轮无待办）。 */
+  current: string
+  /** 待办步骤（顺序即依赖顺序）。 */
+  pending: string[]
+  inflight: LoopInflightView[]
+  facts: LoopCourseFactsView
+  /** **「在等什么」**：python 侧算好的结论 + 取值域（UI 按 kind 上色/排序）。 */
+  waiting: { kind: LoopWaitKind; text: string }
+}
+
+/** 本机重资源池占用（容量为定的票数：本机 PPO / eval 跨课排队 = 1）。 */
+export interface LoopPoolView {
+  held: number
+  capacity: number
+}
+
+export interface LoopQueueView {
+  /** 被资源池挡住（没空闲票）的课程名；单进程调度器此刻在等票。 */
+  blockedCourses: string[]
+  pools: Record<string, LoopPoolView>
+  rows: LoopQueueRow[]
+  /** 行里在训课程数（trainingLoop 进程存活）——卡片表头「在训 N/M」的来源。 */
+  trainingCount: number
+  /** 读取失败原因（python 侧异常 / 解释器缺失 / 输出不可解析）；UI 显空态 + 原因，不静默。 */
+  error?: string
+}
+
+const WAIT_KINDS: LoopWaitKind[] = ['inflight', 'collect', 'idle', 'ready']
+const STATES: LoopCourseState[] = ['ready', 'running', 'waiting', 'paused', 'aborted', 'done']
+
+function str(v: unknown): string {
+  return typeof v === 'string' ? v : ''
+}
+
+function num(v: unknown): number {
+  return typeof v === 'number' && Number.isFinite(v) ? v : 0
+}
+
+function strList(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
+}
+
+/** 解析 `run_rl_cluster.py --json` 的 stdout → 视图。
+ *
+ *  返回 null = **形状不符**（不是「没有课程」）：null 时 UI 显空态，且 `error` 由调用方给。
+ *  逐字段容错是刻意的：python 侧新增字段不该让控制台炸，缺字段退化成 0/空也不该。
+ */
+export function parseLoopQueue(raw: unknown): LoopQueueView | null {
+  if (!raw || typeof raw !== 'object') return null
+  const o = raw as Record<string, unknown>
+  if (!Array.isArray(o.courses)) return null
+  const rows: LoopQueueRow[] = []
+  for (const item of o.courses as unknown[]) {
+    if (!item || typeof item !== 'object') continue
+    const r = item as Record<string, unknown>
+    const course = str(r.course)
+    if (!course) continue
+    const factsRaw = (r.facts ?? {}) as Record<string, unknown>
+    const wRaw = (r.waiting ?? {}) as Record<string, unknown>
+    const kind = str(wRaw.kind) as LoopWaitKind
+    const inflight: LoopInflightView[] = []
+    if (Array.isArray(r.inflight)) {
+      for (const it of r.inflight as unknown[]) {
+        if (!it || typeof it !== 'object') continue
+        const i = it as Record<string, unknown>
+        inflight.push({
+          phase: str(i.phase) || '?',
+          round: str(i.round) || '?',
+          jid: typeof i.jid === 'string' && i.jid ? i.jid : null,
+          dispatch: typeof i.dispatch === 'string' && i.dispatch ? i.dispatch : null,
+          dir: typeof i.dir === 'string' && i.dir ? i.dir : null,
+        })
+      }
+    }
+    const state = str(r.state) as LoopCourseState
+    rows.push({
+      course,
+      // 在训与否由服务端用 registry 事实补（`withTraining`）——解析层不知道进程状态。
+      training: false,
+      it: num(r.it),
+      state: STATES.includes(state) ? state : 'ready',
+      current: str(r.current),
+      pending: strList(r.pending),
+      inflight,
+      facts: {
+        iterations: num(factsRaw.iterations),
+        lastVerdict: typeof factsRaw.last_verdict === 'string' ? factsRaw.last_verdict : null,
+        trainSecTotal: num(factsRaw.train_sec_total),
+        softRemediateCount: num(factsRaw.soft_remediate_count),
+        klStreak: num(factsRaw.kl_streak),
+        gamesSettled: num(factsRaw.games_settled),
+        gamesPlanned: num(factsRaw.games_planned),
+      },
+      // 未知 kind（python 侧新增一类等待）⇒ 退化成 ready 的显示语义，但**保留文案**：
+      // 宁可少一个颜色，不可把「在等什么」整句丢掉（那句话才是卡片的产出）。
+      waiting: {
+        kind: WAIT_KINDS.includes(kind) ? kind : 'ready',
+        text: str(wRaw.text),
+      },
+    })
+  }
+  const pools: Record<string, LoopPoolView> = {}
+  const poolsRaw = (o.pools ?? {}) as Record<string, unknown>
+  for (const [name, v] of Object.entries(poolsRaw)) {
+    if (!v || typeof v !== 'object') continue
+    const p = v as Record<string, unknown>
+    pools[name] = { held: num(p.held), capacity: num(p.capacity) }
+  }
+  const blockedRaw = Array.isArray(o.blocked) ? (o.blocked as unknown[]) : []
+  return {
+    blockedCourses: blockedRaw.filter((x): x is string => typeof x === 'string'),
+    pools,
+    rows,
+    trainingCount: 0,
+  }
+}
+
+/** 把「在训」事实（registry 的 trainingLoop 存活表）并进行，并统计在训数。
+ *
+ *  两个事实源各给一半：python 给「这门课这一轮卡在哪」，registry 给「这门课此刻有没有
+ *  人在跑」。合并放在视图层（纯函数、可单测），服务端只负责把两边凑到一起。
+ */
+export function withTraining(view: LoopQueueView, training: string[]): LoopQueueView {
+  const live = new Set(training)
+  const rows = view.rows.map((r) => ({ ...r, training: live.has(r.course) }))
+  return { ...view, rows, trainingCount: rows.filter((r) => r.training).length }
+}
+
+/** 「在等什么」的排序权重：进程外的等待（在飞）排最前，其余保持课程顺序。
+ *
+ *  排序是**读面**的事（运维先看谁在等外部），不是调度语义——故留在视图层，纯函数可测。
+ */
+export function waitRank(kind: LoopWaitKind): number {
+  return { inflight: 0, collect: 1, idle: 2, ready: 3 }[kind] ?? 3
+}
+
+/** 稳定排序：等外部的课在前，同 kind 保持既有顺序（不改课程表的自然序）。 */
+export function sortByWaiting(rows: LoopQueueRow[]): LoopQueueRow[] {
+  return rows
+    .map((r, i) => ({ r, i }))
+    .sort((a, b) => waitRank(a.r.waiting.kind) - waitRank(b.r.waiting.kind) || a.i - b.i)
+    .map((x) => x.r)
+}
