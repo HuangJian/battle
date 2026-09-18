@@ -99,10 +99,12 @@ describe('deriveMetrics (§5.1)', () => {
 
 describe('R2 二级指标', () => {
   it('meanKills / meanPowerUps / winTickMean / winHpLeftMean（L0 maxHp = 263）', () => {
+    // 2026-09-16：meanKills = 歼灭率 Σkills/ΣenemyTotal；winHpLeftMean = 残血占比 0–1
     const m = deriveMetrics([
       row({
         win: true,
         kills: 4,
+        enemyTotal: 4,
         powerUpsCollected: 2,
         ticks: 1000,
         playerLevel: 0,
@@ -112,16 +114,17 @@ describe('R2 二级指标', () => {
         win: false,
         outcome: 'gameover',
         kills: 2,
+        enemyTotal: 4,
         powerUpsCollected: 0,
         ticks: 800,
         playerLevel: 0,
         playerDamageTaken: 5,
       }),
     ])
-    expect(m.meanKills).toBe(3)
+    expect(m.meanKills).toBeCloseTo(6 / 8, 5)
     expect(m.meanPowerUps).toBe(1)
     expect(m.winTickMean).toBe(1000)
-    expect(m.winHpLeftMean).toBe(263 - 10)
+    expect(m.winHpLeftMean!).toBeCloseTo((263 - 10) / 263, 5)
   })
   it('空集 ⇒ 0/null；无胜局 ⇒ winTickMean/winHpLeftMean 均 null', () => {
     const empty = deriveMetrics([])
@@ -133,10 +136,11 @@ describe('R2 二级指标', () => {
     expect(noWin.winTickMean).toBeNull()
     expect(noWin.winHpLeftMean).toBeNull()
   })
-  it('maxHp 随星位增长（L1 > L0）', () => {
-    const l0 = deriveMetrics([row({ win: true, playerLevel: 0, playerDamageTaken: 0 })])
-    const l1 = deriveMetrics([row({ win: true, playerLevel: 1, playerDamageTaken: 0 })])
+  it('maxHp 随星位增长（L1 > L0）——残血占比口径下更高星位同 dmg 占比略高', () => {
+    const l0 = deriveMetrics([row({ win: true, playerLevel: 0, playerDamageTaken: 10 })])
+    const l1 = deriveMetrics([row({ win: true, playerLevel: 1, playerDamageTaken: 10 })])
     expect(l1.winHpLeftMean!).toBeGreaterThan(l0.winHpLeftMean!)
+    expect(l0.winHpLeftMean!).toBeCloseTo((263 - 10) / 263, 5)
   })
 })
 

@@ -19,14 +19,13 @@ export function fmtMetric(metric: EvalMetricKey, v: number | null): string {
     case 'winRate':
     case 'clearRate':
     case 'killCompletion':
-      return pct(v)
     case 'meanKills':
+    case 'winHpLeftMean':
+      return pct(v)
     case 'meanPowerUps':
       return v.toFixed(2)
     case 'winTickMean':
       return `${Math.round(v)}t`
-    case 'winHpLeftMean':
-      return String(Math.round(v))
   }
 }
 

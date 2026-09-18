@@ -218,20 +218,22 @@ function skillCols(): Col<MetricRow>[] {
       key: 'kills',
       label: '击杀',
       align: 'num',
-      thTitle: '每局平均击杀',
+      thTitle: '歼灭率 = Σ击杀 / Σ关卡敌数',
       cell: (r) =>
         r.kind === 'main' ? (
-          r.main.actuals ? (
-            <span title="每局平均击杀">
-              {fmtPerGame(r.main.actuals.totalKills, r.main.actuals.games)}
+          r.main.actuals?.killRate != null ? (
+            <span title="歼灭率 = Σ击杀 / Σ关卡敌数">{fmtPct(r.main.actuals.killRate)}</span>
+          ) : r.main.actuals ? (
+            <span className="tc-muted" title="该轮缺关卡敌数，无法换算歼灭率">
+              -
             </span>
           ) : (
             <span className="tc-muted" title="该轮磁盘数据已清理，估算值">
               {r.main.kills.toFixed(1)}≈
             </span>
           )
-        ) : r.eval.totalKills !== null ? (
-          <span title="每局平均击杀">{fmtPerGame(r.eval.totalKills, r.eval.games)}</span>
+        ) : r.eval.killRate != null ? (
+          <span title="歼灭率 = Σ击杀 / Σ关卡敌数">{fmtPct(r.eval.killRate)}</span>
         ) : (
           <span className="tc-muted">-</span>
         ),
@@ -240,22 +242,22 @@ function skillCols(): Col<MetricRow>[] {
       key: 'dmgPerKill',
       label: '承伤/杀',
       align: 'num',
-      thTitle: '总承伤 / 总击杀',
+      thTitle: '每杀承伤 / (命数×满血)',
       cell: (r) => {
-        const v = r.kind === 'main' ? r.main.actuals?.dmgPerKill : r.eval.dmgPerKill
+        const v = r.kind === 'main' ? r.main.actuals?.dmgPerKillPct : r.eval.dmgPerKillPct
         if (v == null) return <span className="tc-muted">-</span>
-        return <span title="总承伤 / 总击杀（越小越会周旋）">{v.toFixed(1)}</span>
+        return <span title="每杀承伤 / (命数×满血)；越小越会周旋">{fmtPct(v)}</span>
       },
     },
     {
       key: 'residualHp',
       label: '残血',
       align: 'num',
-      thTitle: '胜局平均剩余 hp（剩余命每命计满额）',
+      thTitle: '胜局残血 / 该局可支配生命容量',
       cell: (r) => {
-        const hp = r.kind === 'main' ? r.main.actuals?.avgResidualHp : r.eval.avgResidualHp
-        if (hp == null) return <span className="tc-muted">-</span>
-        return <span title="胜局平均剩余 hp；剩余多命时每命加满额 hp">{hp}</span>
+        const v = r.kind === 'main' ? r.main.actuals?.avgResidualHpPct : r.eval.avgResidualHpPct
+        if (v == null) return <span className="tc-muted">-</span>
+        return <span title="胜局残血 / 该局可支配生命容量">{fmtPct(v)}</span>
       },
     },
     {
@@ -629,8 +631,8 @@ export function MetricsTable({
       />
       <p className="tc-caption" style={{ border: 'none', padding: '8px 0 0' }}>
         胜局耗时/击杀/承伤·杀/道具 = <b>实际值</b>（it&#123;N&#125;/**/manifest.json 逐局聚合，
-        stage+seed 去重后留底缓存）；击杀/道具为每局平均，承伤·杀 =
-        总承伤/总击杀，残血为胜局平均剩余 hp （剩余多命每命加满额）；带 ≈ 为估算。 eval 行 ={' '}
+        stage+seed 去重后留底缓存）；击杀=歼灭率（Σkills/Σ敌数），承伤·杀 =
+        每杀承伤/(命数×满血)，残血=胜局残血/可支配生命容量（均百分比）；带 ≈ 为估算。 eval 行 ={' '}
         <b>干净评估</b>（greedy 固定语料），iter=N 评估的是第 N 轮 PPO 更新前的权重；缺N =
         窗口内未收官被清场。
       </p>

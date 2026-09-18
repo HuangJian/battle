@@ -139,10 +139,10 @@ export const EVAL_METRIC_LABELS: Record<EvalMetricKey, string> = {
   winRate: '胜率',
   clearRate: '全歼率',
   killCompletion: '完成度',
-  meanKills: '平均击杀',
+  meanKills: '击杀%',
   meanPowerUps: '平均道具',
   winTickMean: '胜局耗时',
-  winHpLeftMean: '胜局残血',
+  winHpLeftMean: '残血%',
 }
 
 /** /eval 独立页（R8）SSR 载荷 + 选项。 */

@@ -49,16 +49,16 @@ export interface TierMetrics {
   /** T3 */ stuckP95: number
   /** T3 */ cellsVisitedMean: number
   // ── R2 二级指标（plan/evalboard-console-ux.md §4-R2）；只新增，不改既有字段语义 ──
-  /** 局均击杀 `Σkills / n`。 */
+  /** 歼灭率 0–1 = Σkills / ΣenemyTotal（2026-09-16：由局均绝对击杀改为百分比）。 */
   meanKills: number
   /** 局均拾取道具 `ΣpowerUpsCollected / n`（schema 已有字段，首次被消费）。 */
   meanPowerUps: number
   /** 胜局平均耗时 ticks（与 winTickMedian 并存，不改后者）。 */
   winTickMean: number | null
   /**
-   * 胜局平均剩余 HP = `mean(maxHp(playerLevel) − playerDamageTaken | win)`。
-   * `playerDamageTaken` 是**非致命扣血累计**（`tools/sim/export-eval-game.ts`），
-   * 跨复活累计 ⇒ 多命局可能为负（信息性读数，UI 标筛查级）。空集 ⇒ null。
+   * 胜局残血占比 0–1 = mean( (maxHp−dmg) / maxHp | win )（用户 2026-09-16：绝对 HP → %）。
+   * `playerDamageTaken` 是**非致命扣血累计**（`tools/sim/export-eval-game.ts`）。
+   * 空集 ⇒ null。
    */
   winHpLeftMean: number | null
 }
@@ -146,13 +146,17 @@ export function deriveMetrics(rows: EvalGameRow[]): TierMetrics {
     ),
     stuckP95: p95(stuck),
     cellsVisitedMean: cells.reduce((s, v) => s + v, 0) / n,
-    meanKills: kills / n,
+    // 歼灭率：与 killCompletion 同口径（Σkills/ΣenemyTotal），meanKills 列改为百分比展示。
+    meanKills: enemyTotal > 0 ? kills / enemyTotal : 0,
     meanPowerUps: rows.reduce((s, r) => s + r.powerUpsCollected, 0) / n,
     winTickMean: winCount > 0 ? wins.reduce((s, r) => s + r.ticks, 0) / winCount : null,
     winHpLeftMean:
       winCount > 0
-        ? wins.reduce((s, r) => s + maxHpOfPlayerLevel(r.playerLevel) - r.playerDamageTaken, 0) /
-          winCount
+        ? wins.reduce((s, r) => {
+            const maxHp = maxHpOfPlayerLevel(r.playerLevel)
+            const left = maxHp - r.playerDamageTaken
+            return s + (maxHp > 0 ? left / maxHp : 0)
+          }, 0) / winCount
         : null,
   }
 }

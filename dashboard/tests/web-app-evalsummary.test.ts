@@ -89,7 +89,7 @@ describe('首页 EvalSummary（阶梯 God vs 学生 B 层）', () => {
         ladder,
         iterRows: [
           mockGod({ 'c4l1.winRate': 0.64 }),
-          mockIter({ iter: 30, cells: { 'c4l1.winRate': 0.5, 'c4l1.meanKills': 3.2 } }),
+          mockIter({ iter: 30, cells: { 'c4l1.winRate': 0.5, 'c4l1.meanKills': 0.8 } }),
         ],
         course: 'c4-margin',
         metricKeys: [...EVAL_METRIC_KEYS],
@@ -99,8 +99,8 @@ describe('首页 EvalSummary（阶梯 God vs 学生 B 层）', () => {
     expect(html).toContain('it30')
     expect(html).toContain('64.0%')
     expect(html).toContain('50.0%')
-    expect(html).toContain('3.20') // meanKills 两位小数
-    expect(html).toContain('c4l1 平均击杀')
+    expect(html).toContain('80.0%') // meanKills 现为歼灭率百分比
+    expect(html).toContain('c4l1 击杀%')
     // hover 标题含关卡画像（rungLabel：1★ / 无基地）
     expect(html).toContain('1★')
     expect(html).toContain('无基地')

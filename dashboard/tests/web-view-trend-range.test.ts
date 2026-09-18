@@ -57,6 +57,9 @@ describe('console sparkline (ui/view)', () => {
             avgWinTicks: 800,
             avgLossTicks: 900,
             dmgPerKill: 3,
+            killRate: 0.5,
+            dmgPerKillPct: 0.05,
+            avgResidualHpPct: 0.57,
           },
           evalData: withEval
             ? {
@@ -77,6 +80,9 @@ describe('console sparkline (ui/view)', () => {
                 avgResidualHp: 150,
                 avgLossTicks: null,
                 dmgPerKill: null,
+                killRate: 0.4,
+                dmgPerKillPct: 0.08,
+                avgResidualHpPct: 0.45,
                 scoreMean: 0,
                 scoreStd: 0,
               }
@@ -207,6 +213,9 @@ describe('console sparkline (ui/view)', () => {
           avgWinTicks: 800,
           avgLossTicks: 900,
           dmgPerKill: 3,
+          killRate: 0.5,
+          dmgPerKillPct: 0.05,
+          avgResidualHpPct: 0.57,
         },
         evalData:
           (i + 1) % 2 === 0
@@ -228,6 +237,9 @@ describe('console sparkline (ui/view)', () => {
                 avgResidualHp: 180,
                 avgLossTicks: null,
                 dmgPerKill: null,
+                killRate: 0.2,
+                dmgPerKillPct: 0.1,
+                avgResidualHpPct: 0.4,
                 scoreMean: 0,
                 scoreStd: 0,
               }
@@ -245,8 +257,13 @@ describe('console sparkline (ui/view)', () => {
       // rollout 口径：取 actuals（800/150/3/900），evalData 同轮给出 1300/180 亦被忽略；
       // 奇数 iter 无 evalData 仍是有效 rollout 点（非 NaN）。
       expect(ticks.vals[0]).toBeCloseTo(800)
-      expect(hp.vals[0]).toBeCloseTo(150)
-      expect(dmg.vals[0]).toBeCloseTo(3)
+      // 2026-09-16：残血趋势 = avgResidualHpPct（0–1），不再读绝对 hp
+      expect(hp.vals[0]).toBeCloseTo(0.57)
+      // 承伤/杀 = dmgPerKillPct（0–1）
+      expect(dmg.vals[0]).toBeCloseTo(0.05)
+      const kills = series.find((s) => s.key === 'kills')!
+      expect(kills.vals[0]).toBeCloseTo(0.5)
+      expect(loss.vals[0]).toBeCloseTo(900)
       expect(loss.vals[0]).toBeCloseTo(900)
       expect(Number.isFinite(ticks.vals[1])).toBe(true)
       // 所有 iter 均为 rollout 有效点（不再随 eval 缺口稀疏）→ 全量 = 50 点，最近 10 = 10 点

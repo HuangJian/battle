@@ -65,9 +65,9 @@ export function metricSeries(rows: IterRow[]): Series[] {
     {
       key: 'kills',
       label: '击杀',
-      // 击杀/道具趋势 = 每局平均（用户指令 2026-09-11：与表列同口径，不展示总和）
+      // 歼灭率 0–1 = Σkills/ΣenemyTotal（用户 2026-09-16：绝对击杀改百分比）；缺敌数 → NaN
       vals: chrono.map((r) =>
-        r.actuals && r.actuals.games > 0 ? r.actuals.totalKills / r.actuals.games : Number.NaN,
+        r.actuals && r.actuals.killRate != null ? r.actuals.killRate : Number.NaN,
       ),
       iters,
     },
@@ -97,18 +97,18 @@ export function metricSeries(rows: IterRow[]): Series[] {
     {
       key: 'winHp',
       label: '胜局残血',
-      // 胜局平均剩余 hp（rollout 胜局口径，所有 iter 采样）；无胜局轮 = NaN 缺口。
+      // 胜局残血占该局可支配容量的比例 0–1（用户 2026-09-16）。
       vals: chrono.map((r) =>
-        r.actuals && r.actuals.avgResidualHp !== null ? r.actuals.avgResidualHp : Number.NaN,
+        r.actuals && r.actuals.avgResidualHpPct != null ? r.actuals.avgResidualHpPct : Number.NaN,
       ),
       iters,
     },
     {
       key: 'dmgPerKill',
       label: '承伤/杀',
-      // 每杀承伤（rollout 全样本口径，所有 iter 采样）；越小越会周旋。防苟活（不打 ⇒ 分母小 ⇒ 值爆炸）。
+      // 每杀承伤 / (命数×满血) 0–1（用户 2026-09-16）；越小越会周旋。
       vals: chrono.map((r) =>
-        r.actuals && r.actuals.dmgPerKill != null ? r.actuals.dmgPerKill : Number.NaN,
+        r.actuals && r.actuals.dmgPerKillPct != null ? r.actuals.dmgPerKillPct : Number.NaN,
       ),
       iters,
     },
@@ -133,9 +133,7 @@ export function metricSeries(rows: IterRow[]): Series[] {
       key: 'evalKills',
       label: 'eval 击杀',
       vals: chrono.map((r) =>
-        r.evalData && r.evalData.games > 0 && r.evalData.totalKills != null
-          ? r.evalData.totalKills / r.evalData.games
-          : Number.NaN,
+        r.evalData && r.evalData.killRate != null ? r.evalData.killRate : Number.NaN,
       ),
       iters,
     },
@@ -161,7 +159,7 @@ export function metricSeries(rows: IterRow[]): Series[] {
       key: 'evalWinHp',
       label: 'eval 胜局残血',
       vals: chrono.map((r) =>
-        r.evalData?.avgResidualHp != null ? r.evalData.avgResidualHp : Number.NaN,
+        r.evalData?.avgResidualHpPct != null ? r.evalData.avgResidualHpPct : Number.NaN,
       ),
       iters,
     },
@@ -169,7 +167,7 @@ export function metricSeries(rows: IterRow[]): Series[] {
       key: 'evalDmgPerKill',
       label: 'eval 承伤/杀',
       vals: chrono.map((r) =>
-        r.evalData?.dmgPerKill != null ? r.evalData.dmgPerKill : Number.NaN,
+        r.evalData?.dmgPerKillPct != null ? r.evalData.dmgPerKillPct : Number.NaN,
       ),
       iters,
     },

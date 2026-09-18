@@ -460,6 +460,9 @@ interface RunResult {
   powerUpsCollected: number
   playerDamageTaken: number
   stuckTicks: number
+  enemyTotal: number
+  startLives: number
+  puGotTank: number
 }
 
 /** dodge 模式解析（卡 A3）：arena → l0；真实关 → off（既有 rollout 逐字节不变）。 */
@@ -810,6 +813,9 @@ function runOne(
     powerUpsCollected: tel.powerUpsCollected,
     playerDamageTaken: tel.playerDamageTaken,
     stuckTicks: tel.stuckTicks,
+    enemyTotal: tel.enemyTotal,
+    startLives: tel.startLives,
+    puGotTank: tel.puGotTank,
   }
 }
 
@@ -1031,6 +1037,11 @@ function main(argv: string[] = process.argv.slice(2)): void {
         playerShots: res.playerShots,
         playerDamageTaken: res.playerDamageTaken,
         stuckTicks: res.stuckTicks,
+        // 百分比指标数据源（控制台 iters 聚合，2026-09-16）：敌数/命数/死亡/加命
+        enemyTotal: res.enemyTotal,
+        startLives: res.startLives,
+        playerDeaths: res.playerDeaths,
+        puGotTank: res.puGotTank,
         ...(wver ? { wver, node: nodeLabel } : {}),
         ...(courseFp ? { course_fp: courseFp } : {}),
         ...(corpusFp ? { corpus_fp: corpusFp } : {}),

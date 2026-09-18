@@ -15,6 +15,8 @@ import type {
   PairedReferee,
 } from '../web/view'
 import { mcnemarP, pairedVerdict } from '../../../tools/eval/mcnemar'
+import { STAGES } from '../../../src/config/stages'
+import { isArenaId, resolveArenaStage } from '../../../src/nn/arena-ladder'
 
 // ---------------- M0 传输账（iteration 事件的 `wire` 子字典） ----------------
 
@@ -75,6 +77,51 @@ const PLAYER_MAX_HP = Math.round(50 * 1.05 * 5) // 263
 /** 训练课程常见 startLives（curricula 普遍 player.lives=1；难度表默认 3 但课程覆盖）。 */
 const ASSUMED_START_LIVES = 1
 
+/** 关卡敌数：manifest `enemyTotal` 优先；否则按 stage id 反查（经典关 / arena）。 */
+function resolveEnemyTotal(stageId: number, fromManifest?: number | null): number | null {
+  if (typeof fromManifest === 'number' && Number.isFinite(fromManifest) && fromManifest > 0) {
+    return fromManifest
+  }
+  try {
+    if (isArenaId(stageId)) {
+      const st = resolveArenaStage(stageId)
+      if (!st) return null
+      return st.enemyCount ?? st.enemies?.length ?? null
+    }
+    const st = STAGES[stageId]
+    if (!st) return null
+    return st.enemyCount ?? st.enemies?.length ?? null
+  } catch {
+    return null
+  }
+}
+
+/** 该局可支配生命容量：(startLives + puGotTank − playerDeaths) × maxHp。 */
+function lifeCapacity(fields: {
+  startLives?: number | null
+  puGotTank?: number | null
+  playerDeaths?: number | null
+}): number {
+  const lives =
+    typeof fields.startLives === 'number' &&
+    Number.isFinite(fields.startLives) &&
+    fields.startLives > 0
+      ? fields.startLives
+      : ASSUMED_START_LIVES
+  const tank = typeof fields.puGotTank === 'number' ? fields.puGotTank : 0
+  const deaths = typeof fields.playerDeaths === 'number' ? fields.playerDeaths : 0
+  return Math.max(1, lives + tank - deaths) * PLAYER_MAX_HP
+}
+
+/** 每杀承伤的分母（用户 2026-09-16：命数 × 满额单命 HP）。 */
+function dmgPerKillCapacity(startLives?: number | null): number {
+  const lives =
+    typeof startLives === 'number' && Number.isFinite(startLives) && startLives > 0
+      ? startLives
+      : ASSUMED_START_LIVES
+  return lives * PLAYER_MAX_HP
+}
+
 /**
  * 胜局残血（hp）：从已有字段推算，不改 export 写端。
  *   (startLives + puGotTank - playerDeaths) × maxHp − playerDamageTaken
@@ -87,16 +134,29 @@ function residualHpFromFields(m: {
   playerDamageTaken?: number
   playerDeaths?: number
   puGotTank?: number
+  startLives?: number
 }): number | null {
   const outcome = String(m.outcome ?? '')
   if (outcome && outcome !== 'stage_clear') return null
   if (typeof m.playerDamageTaken !== 'number' || !Number.isFinite(m.playerDamageTaken)) {
     return null
   }
-  const deaths = typeof m.playerDeaths === 'number' ? m.playerDeaths : 0
-  const tank = typeof m.puGotTank === 'number' ? m.puGotTank : 0
-  const capacity = (ASSUMED_START_LIVES + tank - deaths) * PLAYER_MAX_HP
+  const capacity = lifeCapacity(m)
   return Math.max(0, Math.round(capacity - m.playerDamageTaken))
+}
+
+/** 胜局残血占该局可支配容量的比例 0–1；null = 不可计算。 */
+function residualHpPctFromFields(m: {
+  outcome?: unknown
+  playerDamageTaken?: number
+  playerDeaths?: number
+  puGotTank?: number
+  startLives?: number
+}): number | null {
+  const hp = residualHpFromFields(m)
+  if (hp === null) return null
+  const capacity = lifeCapacity(m)
+  return capacity > 0 ? hp / capacity : null
 }
 
 export function readIterActuals(trajDir: string, iter: number): IterActuals | null {
@@ -111,10 +171,14 @@ export function readIterActuals(trajDir: string, iter: number): IterActuals | nu
         pu: number
         ticks: number
         residualHp: number | null
+        residualPct: number | null
         /** outcome（stage_clear=胜局；null=manifest 未落盘）。 */
         outcome: string | null
         /** playerDamageTaken（全样本承伤，null=字段缺失 → 不计入承伤/杀）。 */
         dmgTaken: number | null
+        /** 关卡敌数（manifest.enemyTotal 或 stage 反查；null=未知）。 */
+        enemyTotal: number | null
+        startLives: number | null
       }
     >()
     const walk = (base: string, rel: string): void => {
@@ -152,6 +216,8 @@ export function readIterActuals(trajDir: string, iter: number): IterActuals | nu
             playerDamageTaken?: number
             playerDeaths?: number
             puGotTank?: number
+            enemyTotal?: number
+            startLives?: number
           }
           const stage = Number(m.stage)
           const seed = Number(m.seed)
@@ -159,16 +225,23 @@ export function readIterActuals(trajDir: string, iter: number): IterActuals | nu
           const nSamples = Number(m.nSamples ?? 0)
           const prev = best.get(`${stage}:${seed}`)
           if (!prev || nSamples > prev.nSamples) {
+            const enemyTotal = resolveEnemyTotal(stage, m.enemyTotal)
             best.set(`${stage}:${seed}`, {
               nSamples,
               kills: Number(m.kills ?? 0) || 0,
               pu: Number(m.powerUpsCollected ?? 0) || 0,
               ticks: Number(m.ticks ?? 0) || 0,
               residualHp: residualHpFromFields(m),
+              residualPct: residualHpPctFromFields(m),
               outcome: typeof m.outcome === 'string' && m.outcome.length > 0 ? m.outcome : null,
               dmgTaken:
                 typeof m.playerDamageTaken === 'number' && Number.isFinite(m.playerDamageTaken)
                   ? m.playerDamageTaken
+                  : null,
+              enemyTotal,
+              startLives:
+                typeof m.startLives === 'number' && Number.isFinite(m.startLives)
+                  ? m.startLives
                   : null,
             })
           }
@@ -184,6 +257,8 @@ export function readIterActuals(trajDir: string, iter: number): IterActuals | nu
     let totalTicks = 0
     let residualSum = 0
     let residualN = 0
+    let residualPctSum = 0
+    let residualPctN = 0
     // 胜局/败局耗时（ticks）与 承伤/杀（全样本，分子分母同口径）
     let winTickSum = 0
     let winN = 0
@@ -192,6 +267,12 @@ export function readIterActuals(trajDir: string, iter: number): IterActuals | nu
     let dmgSum = 0
     let dmgKills = 0
     let dmgN = 0
+    // 歼灭率：仅累计「知道敌数」的局（Σkills / ΣenemyTotal）
+    let killRateKills = 0
+    let killRateEnemies = 0
+    let killRateN = 0
+    let startLivesSum = 0
+    let startLivesN = 0
     for (const v of best.values()) {
       totalKills += v.kills
       totalPU += v.pu
@@ -199,6 +280,10 @@ export function readIterActuals(trajDir: string, iter: number): IterActuals | nu
       if (v.residualHp !== null) {
         residualSum += v.residualHp
         residualN++
+      }
+      if (v.residualPct !== null) {
+        residualPctSum += v.residualPct
+        residualPctN++
       }
       if (v.outcome) {
         if (v.outcome === 'stage_clear' && v.ticks > 0) {
@@ -215,7 +300,18 @@ export function readIterActuals(trajDir: string, iter: number): IterActuals | nu
         dmgKills += v.kills
         dmgN++
       }
+      if (v.enemyTotal != null && v.enemyTotal > 0) {
+        killRateKills += v.kills
+        killRateEnemies += v.enemyTotal
+        killRateN++
+      }
+      if (v.startLives != null && v.startLives > 0) {
+        startLivesSum += v.startLives
+        startLivesN++
+      }
     }
+    const dmgPerKillAbs = dmgN > 0 && dmgKills > 0 ? +(dmgSum / dmgKills).toFixed(1) : null
+    const meanStartLives = startLivesN > 0 ? startLivesSum / startLivesN : ASSUMED_START_LIVES
     return {
       games: best.size,
       totalKills,
@@ -224,7 +320,11 @@ export function readIterActuals(trajDir: string, iter: number): IterActuals | nu
       avgResidualHp: residualN > 0 ? Math.round(residualSum / residualN) : null,
       avgWinTicks: winN > 0 ? Math.round(winTickSum / winN) : null,
       avgLossTicks: lossN > 0 ? Math.round(lossTickSum / lossN) : null,
-      dmgPerKill: dmgN > 0 && dmgKills > 0 ? +(dmgSum / dmgKills).toFixed(1) : null,
+      dmgPerKill: dmgPerKillAbs,
+      killRate: killRateN > 0 && killRateEnemies > 0 ? killRateKills / killRateEnemies : null,
+      dmgPerKillPct:
+        dmgPerKillAbs != null ? dmgPerKillAbs / dmgPerKillCapacity(meanStartLives) : null,
+      avgResidualHpPct: residualPctN > 0 ? residualPctSum / residualPctN : null,
     }
   } catch {
     return null
@@ -262,8 +362,12 @@ function loadActualsCache(trajDir: string): Map<number, CachedActuals> {
         typeof v.totalKills === 'number' &&
         typeof v.totalPU === 'number' &&
         typeof v.avgTicks === 'number' &&
-        // schema 版本门闩：缺 avgWinTicks（旧缓存）→ 作废重建，带出新增 rollout 胜局/败局/承伤字段。
-        'avgWinTicks' in v
+        // schema 版本门闩：缺 avgWinTicks（旧缓存）→ 作废重建；缺 killRate（百分比改造）
+        // 同样作废，强制带出歼灭率/承伤%/残血% 字段。
+        'avgWinTicks' in v &&
+        'killRate' in v &&
+        'dmgPerKillPct' in v &&
+        'avgResidualHpPct' in v
       ) {
         out.set(it, v)
       }
@@ -322,6 +426,15 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
      *  或"分子只覆盖部分局、分母覆盖全部局"造成系统性低估。 */
     dmgKills: number
     dmgN: number
+    /** 歼灭率分子分母（仅累计有 enemyTotal 的局）。 */
+    killRateKills: number
+    killRateEnemies: number
+    killRateN: number
+    /** 胜局残血占比累计（0–1）。 */
+    residualPctSum: number
+    residualPctN: number
+    startLivesSum: number
+    startLivesN: number
   }
   const games = new Map<number, Map<string, GameAgg>>()
   try {
@@ -358,6 +471,13 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
               dmg: 0,
               dmgKills: 0,
               dmgN: 0,
+              killRateKills: 0,
+              killRateEnemies: 0,
+              killRateN: 0,
+              residualPctSum: 0,
+              residualPctN: 0,
+              startLivesSum: 0,
+              startLivesN: 0,
             }
             byWver.set(wver, agg)
           }
@@ -377,6 +497,22 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
             agg.dmgKills += Number(r.kills ?? 0) || 0
             agg.dmgN++
           }
+          // 歼灭率：manifest/eval 行的 enemyTotal，缺则 stage 反查。
+          const stageId = Number(r.stage)
+          const enemyTotal = resolveEnemyTotal(
+            Number.isFinite(stageId) ? stageId : NaN,
+            typeof r.enemyTotal === 'number' ? r.enemyTotal : null,
+          )
+          if (enemyTotal != null && enemyTotal > 0) {
+            agg.killRateKills += Number(r.kills ?? 0) || 0
+            agg.killRateEnemies += enemyTotal
+            agg.killRateN++
+          }
+          const sl = Number(r.startLives)
+          if (Number.isFinite(sl) && sl > 0) {
+            agg.startLivesSum += sl
+            agg.startLivesN++
+          }
           // 残血：仅胜局；(startLives + puGotTank − deaths) × maxHp − playerDamageTaken
           const won = r.win === true || r.win === 1
           if (won) {
@@ -386,16 +522,23 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
               agg.winTicks += wt
               agg.winN++
             }
-            const rh = residualHpFromFields({
+            const fields = {
               outcome: 'stage_clear',
               playerDamageTaken:
                 typeof r.playerDamageTaken === 'number' ? r.playerDamageTaken : undefined,
               playerDeaths: typeof r.playerDeaths === 'number' ? r.playerDeaths : undefined,
               puGotTank: typeof r.puGotTank === 'number' ? r.puGotTank : undefined,
-            })
+              startLives: Number.isFinite(sl) && sl > 0 ? sl : undefined,
+            }
+            const rh = residualHpFromFields(fields)
             if (rh !== null) {
               agg.residualSum += rh
               agg.residualN++
+            }
+            const rp = residualHpPctFromFields(fields)
+            if (rp !== null) {
+              agg.residualPctSum += rp
+              agg.residualPctN++
             }
           } else {
             // 败局耗时：仅败局累计 ticks（败局缺 ticks/0 = 数据缺口，不计入分母）。
@@ -450,6 +593,15 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
       // 承伤/杀：全样本口径（Σdmg / Σ同批 kills），保留 1 位小数（够看趋势）。
       // 无任何带 playerDamageTaken 的局（老课程）→ null（显示 -），不是 0。
       s.dmgPerKill = agg.dmgN > 0 && agg.dmgKills > 0 ? +(agg.dmg / agg.dmgKills).toFixed(1) : null
+      s.killRate =
+        agg.killRateN > 0 && agg.killRateEnemies > 0
+          ? agg.killRateKills / agg.killRateEnemies
+          : null
+      const evalStartLives =
+        agg.startLivesN > 0 ? agg.startLivesSum / agg.startLivesN : ASSUMED_START_LIVES
+      s.dmgPerKillPct =
+        s.dmgPerKill != null ? s.dmgPerKill / dmgPerKillCapacity(evalStartLives) : null
+      s.avgResidualHpPct = agg.residualPctN > 0 ? agg.residualPctSum / agg.residualPctN : null
       s.scoreMean = +mean.toFixed(4)
       s.scoreStd = +Math.sqrt(Math.max(0, agg.scoreSqSum / agg.n - mean * mean)).toFixed(4)
     }

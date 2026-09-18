@@ -110,10 +110,6 @@ function fmtPerGame(total: number, games: number, digits = 1): string {
   return (total / games).toFixed(digits)
 }
 
-function fmtResidual(hp: number | null | undefined): string {
-  return hp == null ? '-' : String(hp)
-}
-
 /** 胜局耗时（ticks）/ 胜局残血 展示：整数（平均值已四舍五入）。 */
 function fmtInt(v: number | null): string {
   return v != null ? String(Math.round(v)) : '—'
@@ -183,13 +179,13 @@ function MainTable({
           <th className="tc-num" title="胜局平均耗时（ticks）">
             胜局耗时
           </th>
-          <th className="tc-num" title="每局平均击杀">
+          <th className="tc-num" title="歼灭率 = Σ击杀 / Σ关卡敌数">
             击杀
           </th>
-          <th className="tc-num" title="总承伤 / 总击杀（越小越会周旋）">
+          <th className="tc-num" title="每杀承伤 / (命数×满血)；越小越会周旋">
             承伤/杀
           </th>
-          <th className="tc-num" title="胜局平均剩余 hp（剩余命每命计满额）">
+          <th className="tc-num" title="胜局残血 / 该局可支配生命容量">
             残血
           </th>
           <th className="tc-num" title="每局平均道具">
@@ -250,8 +246,12 @@ function MainTable({
               <span title="胜局平均耗时（ticks）">{winTicksCell(r)}</span>
             </td>
             <td className="tc-num">
-              {r.actuals ? (
-                fmtPerGame(r.actuals.totalKills, r.actuals.games)
+              {r.actuals?.killRate != null ? (
+                <span title="歼灭率 = Σ击杀 / Σ关卡敌数">{fmtPct(r.actuals.killRate)}</span>
+              ) : r.actuals ? (
+                <span className="tc-muted" title="该轮缺关卡敌数，无法换算歼灭率">
+                  -
+                </span>
               ) : (
                 <span className="tc-muted" title="该轮磁盘数据已清理，估算值">
                   {r.kills.toFixed(1)}≈
@@ -259,16 +259,16 @@ function MainTable({
               )}
             </td>
             <td className="tc-num">
-              {r.actuals?.dmgPerKill != null ? (
-                <span title="总承伤 / 总击杀">{r.actuals.dmgPerKill.toFixed(1)}</span>
+              {r.actuals?.dmgPerKillPct != null ? (
+                <span title="每杀承伤 / (命数×满血)">{fmtPct(r.actuals.dmgPerKillPct)}</span>
               ) : (
                 <span className="tc-muted">-</span>
               )}
             </td>
             <td className="tc-num">
-              {r.actuals ? (
-                <span title="胜局平均剩余 hp；剩余多命时每命加满额 hp">
-                  {fmtResidual(r.actuals.avgResidualHp)}
+              {r.actuals?.avgResidualHpPct != null ? (
+                <span title="胜局残血 / 该局可支配生命容量">
+                  {fmtPct(r.actuals.avgResidualHpPct)}
                 </span>
               ) : (
                 <span className="tc-muted">-</span>
@@ -334,13 +334,13 @@ function EvalTable({ rows }: { rows: IterRow[] }) {
           <th className="tc-num" title="胜局平均耗时（ticks）">
             胜局耗时
           </th>
-          <th className="tc-num" title="每局平均击杀">
+          <th className="tc-num" title="歼灭率 = Σ击杀 / Σ关卡敌数">
             击杀
           </th>
-          <th className="tc-num" title="总承伤 / 总击杀">
+          <th className="tc-num" title="每杀承伤 / (命数×满血)">
             承伤/杀
           </th>
-          <th className="tc-num" title="胜局平均剩余 hp（剩余命每命计满额）">
+          <th className="tc-num" title="胜局残血 / 该局可支配生命容量">
             残血
           </th>
           <th className="tc-num" title="每局平均道具">
@@ -460,22 +460,22 @@ function EvalTable({ rows }: { rows: IterRow[] }) {
                   )}
                 </td>
                 <td className="tc-num">
-                  {e.totalKills !== null ? (
-                    fmtPerGame(e.totalKills, e.games)
+                  {e.killRate != null ? (
+                    <span title="歼灭率 = Σ击杀 / Σ关卡敌数">{fmtPct(e.killRate)}</span>
                   ) : (
                     <span className="tc-muted">-</span>
                   )}
                 </td>
                 <td className="tc-num">
-                  {e.dmgPerKill != null ? (
-                    <span title="总承伤 / 总击杀">{e.dmgPerKill.toFixed(1)}</span>
+                  {e.dmgPerKillPct != null ? (
+                    <span title="每杀承伤 / (命数×满血)">{fmtPct(e.dmgPerKillPct)}</span>
                   ) : (
                     <span className="tc-muted">-</span>
                   )}
                 </td>
                 <td className="tc-num">
-                  {e.avgResidualHp != null ? (
-                    <span title="胜局平均剩余 hp；剩余多命时每命加满额 hp">{e.avgResidualHp}</span>
+                  {e.avgResidualHpPct != null ? (
+                    <span title="胜局残血 / 该局可支配生命容量">{fmtPct(e.avgResidualHpPct)}</span>
                   ) : (
                     <span className="tc-muted">-</span>
                   )}
@@ -807,18 +807,18 @@ export function Hero({ stateView, onMore, onRefresh, readOnly = false }: HeroPro
           <TrendCell
             series={dmgPerKillSeries}
             seriesEval={evalDmgPerKillSeries}
-            fmt={(v) => (v != null ? v.toFixed(1) : '—')}
+            fmt={fmtPct}
             range={range}
             yFloor={0}
-            title="每杀承伤 = 总承伤 / 总击杀（rollout 实线 · eval 橙点）；越小越会周旋"
+            title="每杀承伤 / (命数×满血)（rollout 实线 · eval 橙点）；越小越会周旋"
           />
           <TrendCell
             series={killsSeries}
             seriesEval={evalKillsSeries}
-            fmt={(v) => (v != null ? `${v.toFixed(1)}` : '—')}
+            fmt={fmtPct}
             range={range}
             yFloor={0}
-            title="每局平均击杀（rollout 实线 · eval 橙点）"
+            title="歼灭率 = Σ击杀 / Σ关卡敌数（rollout 实线 · eval 橙点）"
           />
           {/* 行2：胜局耗时 / 胜局残血 / 道具 */}
           <TrendCell
@@ -831,10 +831,10 @@ export function Hero({ stateView, onMore, onRefresh, readOnly = false }: HeroPro
           <TrendCell
             series={winHpSeries}
             seriesEval={evalWinHpSeries}
-            fmt={fmtInt}
+            fmt={fmtPct}
             range={range}
             yFloor={0}
-            title="胜局平均剩余 hp（rollout 实线 · eval 橙点）；剩余命每命计满额"
+            title="胜局残血 / 该局可支配生命容量（rollout 实线 · eval 橙点）"
           />
           <TrendCell
             series={puSeries}

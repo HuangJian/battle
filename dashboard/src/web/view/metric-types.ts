@@ -18,6 +18,12 @@ export interface IterActuals {
   avgLossTicks?: number | null
   /** 每杀承伤（ΣplayerDamageTaken / Σkills，全样本口径）；null = 该轮无击杀。 */
   dmgPerKill?: number | null
+  /** 歼灭率 0–1 = Σkills / ΣenemyTotal（关卡敌数；manifest 缺字段时按 stage 反查）。 */
+  killRate?: number | null
+  /** 每杀承伤占「命数×满血」容量的比例 0–1（用户 2026-09-16：由绝对 HP 改百分比）。 */
+  dmgPerKillPct?: number | null
+  /** 胜局残血占「该局剩余容量」的平均比例 0–1（capacity=(startLives+tank−deaths)×maxHp）。 */
+  avgResidualHpPct?: number | null
 }
 
 export interface EvalSummary {
@@ -47,6 +53,12 @@ export interface EvalSummary {
    *  自动防苟活——不打 ⇒ 分母小 ⇒ 值爆炸；自动防无脑冲——掉血多 ⇒ 值大。
    *  null = 该轮无击杀。 */
   dmgPerKill: number | null
+  /** 歼灭率 0–1 = Σkills / ΣenemyTotal。 */
+  killRate?: number | null
+  /** 每杀承伤 / (startLives×maxHp) 0–1。 */
+  dmgPerKillPct?: number | null
+  /** 胜局残血 / 该局剩余容量 的平均 0–1。 */
+  avgResidualHpPct?: number | null
   scoreMean: number | null
   scoreStd: number | null
   /** 锚点轨胜率（双轨日常评估；非双轨 / 无锚点局 → null）。 */
