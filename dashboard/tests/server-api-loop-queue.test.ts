@@ -203,16 +203,24 @@ describe('getLoopQueueView（懒算 + TTL + 单飞）', () => {
 // ────────────────────────── 组装进 /api/state ──────────────────────────
 
 describe('buildLoopQueueView / buildStateView 注入', () => {
-  it('buildLoopQueueView 把在训事实并进每一行', async () => {
+  it('「在训」= 调度器存活 ∧ 该课未收官（c5-tick 的 state=done ⇒ 不在训）', async () => {
     api.invalidateLoopQueue()
-    const v = await api.buildLoopQueueView(['c4-dodge'], () => ok(JSON.stringify(JSON_OUT)))
+    const v = await api.buildLoopQueueView(true, () => ok(JSON.stringify(JSON_OUT)))
     expect(v.rows.find((r) => r.course === 'c4-dodge')!.training).toBe(true)
+    expect(v.rows.find((r) => r.course === 'c5-tick')!.training).toBe(false)
     expect(v.trainingCount).toBe(1)
+  })
+
+  it('调度器没在跑 ⇒ 一门课都不算在训（盘上的「可推进」只是计划）', async () => {
+    api.invalidateLoopQueue()
+    const v = await api.buildLoopQueueView(false, () => ok(JSON.stringify(JSON_OUT)))
+    expect(v.rows.every((r) => !r.training)).toBe(true)
+    expect(v.trainingCount).toBe(0)
   })
 
   it('buildLoopQueueView 把控制面事实（意图 + 生效回执）并进每一行', async () => {
     api.invalidateLoopQueue()
-    const v = await api.buildLoopQueueView(['c5-tick'], () => ok(JSON.stringify(JSON_OUT)), {
+    const v = await api.buildLoopQueueView(true, () => ok(JSON.stringify(JSON_OUT)), {
       intent: ['c4-dodge', 'c5-tick'],
       applied: ['c4-dodge'],
     })

@@ -247,7 +247,7 @@ export function validateCourseName(course: string): string {
   return c
 }
 
-export type LockKind = 'run_rl' | 'train_loop' | 'run_bc'
+export type LockKind = 'run_rl' | 'train_loop' | 'run_bc' | 'run_cluster'
 
 /** per-course 单实例锁名；无课程沿用旧全局文件名（默认行为零变化，plan §0.5-4）。 */
 export function lockName(course: string, kind: LockKind): string {

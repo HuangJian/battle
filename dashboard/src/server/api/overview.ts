@@ -13,7 +13,7 @@
 import path from 'path'
 import { REPO_ROOT } from '../../core/paths'
 import { pidAlive } from '../../core/net'
-import { loadRegistry } from '../../core/registry'
+import { entryForCourse, loadRegistry, scopeOf } from '../../core/registry'
 import type { RlConfig } from '../../core/types'
 import { hubPushWorkers, liveHub, withWorkerProbes } from '../../stack/hub-admin'
 import {
@@ -27,23 +27,25 @@ import {
 } from '../../web/view'
 import { readLogTail } from './logs'
 
-// ────────────────────────── 在训课程（registry 是按课程键控的唯一事实源） ──────────────────────────
+// ────────────────────────── 共享 trainer 存活（「在训」的进程事实） ──────────────────────────
 
-/** 在训课程：registry 里 **trainingLoop 进程存活**的课程（按课程名稳定排序）。
+/** **共享 trainer 进程存活**：registry 里 `trainingLoop` 的**无课程槽**（`''`）条目。
+ *
+ *  一个进程服务所有课程（2026-09-19 / R3-5）⇒ 账本里只有 `['']` 一个槽，按课查存活
+ *  只会得到「一门课都没在训」这个假事实。故存活是**进程级**一个布尔，而「这一课有没有活」
+ *  来自 python 的队列状态（`loop-queue.trainingFromQueue`）——两半各取自它能回答的那一半。
  *
  *  为什么不问 hub：hub 只知道「谁派过活」，训练循环停在两轮之间时它一无所知。
  *  也不问 console-state：那是「操作员在看哪门课」，与「哪几门课在跑」是两件事
  *  （多课程并行下二者必然不同）。 */
-export function trainingCourses(): string[] {
-  const out: string[] = []
+export function sharedTrainerAlive(): boolean {
   try {
-    for (const [course, ent] of Object.entries(loadRegistry().trainingLoops ?? {})) {
-      if (ent && typeof ent.pid === 'number' && pidAlive(ent.pid)) out.push(course)
-    }
+    const ent = entryForCourse(loadRegistry(), 'trainingLoop', scopeOf('trainingLoop'))
+    return pidAlive(ent?.pid)
   } catch {
-    /* 账本不可读 → 没有在训课程（面板显示空态，不编） */
+    /* 账本不可读 → 视为没在跑（面板显示空态，不编） */
+    return false
   }
-  return out.sort()
 }
 
 // ────────────────────────── hub 观测面（5s 缓存 + 单飞） ──────────────────────────
@@ -132,8 +134,10 @@ export async function buildOverview(
   cfg: RlConfig,
   courses: string[],
   viewing: string,
+  /** 在训课程（由 `loop-queue.trainingFromQueue` 推出：调度器存活 ∧ 该课未收官）。
+   *  调用方传进来而不是在这里重算：那是**第二份真相**，而两份一定会以不同的速度漂开。 */
+  training: string[] = [],
 ): Promise<ParallelOverviewView> {
-  const training = trainingCourses()
   const admin = await getHubAdmin(cfg, viewing)
   const names = overviewCourseNames({
     courses,

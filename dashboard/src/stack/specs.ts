@@ -447,6 +447,59 @@ export function writeGateHaltMode(course: string, mode: GateHaltMode): GateHaltM
   return mode
 }
 
+/** **共享 trainer**（`run_rl_cluster.py --serve`）——2026-09-19 / R3-5：一个进程服务所有课程。
+ *
+ *  为什么不是每课一个 `run_rl.py --course <课>`：用户口径「trainingloop 也只需要开一个进程就能
+ *  支持所有并行课程」，且 R2d 已经造好单进程驱动者（按课锁 / 按课日志镜像 / 引擎池 / 故障隔离 /
+ *  暂停恢复），R3-4 又让同一个进程能带 BC 课——而 BC 与 RL **共用 `trainingLoop` 这一个角色键**。
+ *
+ *  **不给 `--course`（发现模式）**：课程 = 「`<traj-root>/<课>/training_log.jsonl` 存在」这个文件
+ *  系统事实（与 hub 的 `--discover` 同一原则）。控制台先起 trainer、后加课不需要重启，也不会出现
+ *  「漏注册 ⇒ 那门课永久饿死而表面一切正常」。一门课都没有也照常运行（队列空着等）。
+ *
+ *  **不给每課 CLI 旋钮**：单进程没有「这门课的 flag」这一说——它住在机器侧覆盖
+ *  `rl-config → courses.<课>.{remote_transport, remote_hub_url, remote_degrade_after, gate_halt_mode}`
+ *  （serve 的 `apply_course_machine_overrides`）；`ppo=remote` 是**全进程同一个**，故走 argv。
+ *
+ *  日志：stdout 落共享 `trainer-cluster.log`；**每课仍有自己的镜像**（serve 的行路由，
+ *  路径 = 该课 traj 下的 `training-loop.log`）⇒ 组件卡的「日志增长」就绪判定与 `/log/trainingLoop`
+ *  页按课程读，与收敛前同一个文件。
+ */
+export const TRAINER_SERVE_ENTRY = 'nn-training/run_rl_cluster.py'
+
+export function trainerServeSpec(cfg: RlConfig, venv: { python: string }): ProcSpec {
+  void cfg // 机器侧旋钮住 rl-config，由 python 开课时施加（不在命令行上）
+  return {
+    key: 'trainingLoop',
+    name: 'trainer (共享：服务所有课程)',
+    course: '',
+    cmd: [
+      venv.python,
+      '-u',
+      // 绝对路径：cwd 是 REPO_ROOT，但入口写成相对路径会让哨兵/账本匹配不上（与旧 spec 同规）。
+      path.join(REPO_ROOT, TRAINER_SERVE_ENTRY),
+      '--serve',
+      // traj 根必须绝对（hub 同一个坑：相对路径会指到控制台 cwd）
+      '--traj-root',
+      path.join(REPO_ROOT, 'tmp'),
+      // PPO 在云端 GPU（控制台起的训练一律 remote）
+      '--ppo',
+      'remote',
+      // 控制文件（暂停意图）：控制台写、训练侧每拍读——显式给绝对路径，不靠 cwd
+      '--control-file',
+      path.join(REPO_ROOT, 'tmp', 'loop-control.json'),
+      // 进程级单实例锁（一个进程服务所有课程 ⇒ 双开 = 两套调度器抢同一批 traj）
+      '--cluster-lock',
+      path.join(NN_TRAINING, '.run_cluster.lock'),
+    ],
+    cwd: REPO_ROOT,
+    env: { PYTHONPATH: NN_TRAINING },
+    log: path.join(LOG_DIR, 'trainer-cluster.log'),
+    healthy: async () => pidAlive(entryForCourse(loadRegistry(), 'trainingLoop', '')?.pid),
+    sentinels: pySentinels(TRAINER_SERVE_ENTRY),
+  }
+}
+
 export function trainingLoopSpec(cfg: RlConfig, s: TrainingLoopSpecOpts): ProcSpec {
   void cfg
   const trainLog = path.join(LOG_DIR, s.course || 'nocourse', 'training-loop.log')

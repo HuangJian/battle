@@ -3,17 +3,7 @@
  *  specs.ts（DECISIONS §349），本层只做编排（检查→spawn→等就绪）。
  */
 
-import {
-  existsSync,
-  mkdirSync,
-  openSync,
-  closeSync,
-  readSync,
-  readFileSync,
-  readdirSync,
-  statSync,
-  unlinkSync,
-} from 'fs'
+import { openSync, closeSync, readSync, readFileSync, readdirSync, statSync, unlinkSync } from 'fs'
 import path from 'path'
 import { LOG_DIR, fmtStamp } from '../core/paths'
 import { httpOk, killPid, pidAlive, portListen, waitUntil } from '../core/net'
@@ -31,16 +21,13 @@ import { monitorTouch } from '../core/reload-touch'
 import {
   HUB_SERVER_ENTRY,
   SELF_NODE_ENTRY,
-  TRAINING_LOOP_ENTRY,
   cfTunnelArgs,
   hubServerSpec,
   resolveCfTunnel,
   resolveCloudflaredBin as specsResolveCloudflaredBin,
   selfNodeSpec,
-  trainingLoopSpec,
 } from './specs'
 import { sharedHubPort, sharedHubUrl, sharedTunnelMetricsPort } from '../core/slots'
-import { seedWeightsFromBc } from './courses'
 import type { RlConfig } from '../core/types'
 
 // ──────────────────────────────────────────────────── cloudflared 辅助 ──────────────────────────
@@ -208,11 +195,16 @@ export async function stepHubServer(cfg: RlConfig): Promise<void> {
  *  看门狗每周期刷屏（8s 一条），且因 specPort 认不出 cloudflared 端口而修不了账。
  *  ⇒ 死进程不需要 kill，但**账必须清**。 */
 export async function supersedeLegacyInstances(
-  key: 'hubServer' | 'cloudflared',
+  key: 'hubServer' | 'cloudflared' | 'trainingLoop',
 ): Promise<string[]> {
   const struck: string[] = []
   const reg = loadRegistry()
-  const map = (key === 'hubServer' ? reg.hubServers : reg.cloudflareds) ?? {}
+  const maps = {
+    hubServer: reg.hubServers,
+    cloudflared: reg.cloudflareds,
+    trainingLoop: reg.trainingLoops,
+  } as const
+  const map = maps[key] ?? {}
   for (const [owner, ent] of Object.entries(map)) {
     if (!owner) continue // `''` = 共享实例自己（唯一合法的槽）
     if (!pidAlive(ent.pid)) {
@@ -538,103 +530,6 @@ export function drainStaleJobs(jobRoot: string, jsonlPath: string): void {
   }
   if (n > 0) info(`已下架 ${n} 个陈旧 pending job（来自已结束的运行，避免真 worker 空烧租约）`)
   else info('无陈旧 pending job')
-}
-
-export interface TrainingLoopSpec {
-  course: string
-  weightsPath: string
-  jobRoot: string
-  jsonlPath: string
-  smoke: boolean
-  /** PPO 模式：remote=pull/push 远程结算（默认）；local=本机 CPU PPO。 */
-  ppo?: 'local' | 'remote'
-  /** push 模式冒烟：本机伪 GPU 节点（worker_server）URL，注入 REMOTE_PUSH_NODE。 */
-  pushNodeUrl?: string
-  /** 已就绪的 venv 解析结果（复用，避免重复解析）。 */
-  venv: { python: string; sitePackages: string }
-}
-
-/** TrainingLoop 步骤（新启动返回 true；已在运行返回 false）。 */
-export async function stepTrainingLoop(cfg: RlConfig, s: TrainingLoopSpec): Promise<boolean> {
-  log('检查 TrainingLoop...')
-  const prevTl = entryForCourse(loadRegistry(), 'trainingLoop', s.course)
-  if (pidAlive(prevTl?.pid)) {
-    ok(`TrainingLoop 已在运行 (PID ${prevTl!.pid}, course=${s.course})`)
-    return false
-  }
-  drainStaleJobs(s.jobRoot, s.jsonlPath)
-
-  // 确保初始权重存在（课程 BC 种子唯一复制点经 seedWeightsFromBc；缺文件抛错 fail loud）。
-  if (!existsSync(s.weightsPath)) {
-    seedWeightsFromBc(s.course, s.weightsPath)
-    ok(`初始权重已播种到 ${s.weightsPath}`)
-  }
-
-  log(`启动 TrainingLoop (course=${s.course})...`)
-  const trainLog = path.join(LOG_DIR, s.course, 'training-loop.log')
-  mkdirSync(path.dirname(trainLog), { recursive: true })
-
-  // 日志基线 = spawn 前的文件大小：就绪判定与尾部打印只看本次启动的产出。
-  let baseline = 0
-  try {
-    baseline = statSync(trainLog).size
-  } catch {
-    /* first run */
-  }
-
-  const spec = trainingLoopSpec(cfg, {
-    course: s.course,
-    ppo: s.ppo,
-    smoke: s.smoke,
-    pushNodeUrl: s.pushNodeUrl,
-    venv: s.venv,
-  })
-  const r = launchSpec(spec)
-  saveAnyComponent('trainingLoop', s.course, {
-    pid: r.pid,
-    course: s.course,
-    slot: 0,
-    entry: TRAINING_LOOP_ENTRY,
-    mode: s.ppo ?? 'remote',
-    pushNodeUrl: s.pushNodeUrl,
-    log: trainLog,
-  })
-  monitorTouch()
-
-  // 就绪以进程存活 + 本次启动的日志产出为触发（上限 20s），无固定等待。
-  // 另加 fail-fast：进程秒退且日志含 python "can't open file"（路径错/入口错）时
-  // 立即抛错——否则预演/等待逻辑会空烧整个超时窗口等一个永远不来的输出。
-  const hasOutput = await waitUntil(
-    async () => {
-      if (!pidAlive(r.pid)) return true
-      try {
-        return statSync(trainLog).size > baseline
-      } catch {
-        return false
-      }
-    },
-    20000,
-    500,
-  )
-
-  if (!pidAlive(r.pid)) {
-    fail(`TrainingLoop 启动失败（PID ${r.pid} 已退出，见 ${trainLog}）`)
-    printLogTail(trainLog, baseline)
-    const tail = tailText(trainLog, baseline)
-    if (tail.includes("can't open file")) {
-      throw new Error(
-        `TrainingLoop 入口文件打不开（cmd[2]=${spec.cmd[2]}）——检查 specs.ts 路径拼接: ${tail.split('\n').find((l) => l.includes("can't open file")) ?? ''}`,
-      )
-    }
-    throw new Error('TrainingLoop 启动失败')
-  }
-  ok(`TrainingLoop 已启动 (PID ${r.pid})`)
-  if (!hasOutput) {
-    warn('TrainingLoop 进程存活但 20s 内未产生日志输出（继续观察）')
-  } else {
-    printLogTail(trainLog, baseline)
-  }
-  return true
 }
 
 /** baseline 之后的日志文本（字节偏移起读；无文件返回空串）。 */

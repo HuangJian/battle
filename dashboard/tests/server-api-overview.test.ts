@@ -317,26 +317,25 @@ describe('buildWorkerRegistry（rl-config 为条目来源 + hub 侧探活列）'
   })
 })
 
-// ────────────────────────── 在训课程（registry 为唯一事实源） ──────────────────────────
+// ────────────────────────── 共享 trainer 存活（registry 为唯一事实源） ──────────────────────────
 
-describe('trainingCourses / buildStateView 注入', () => {
-  it('只认 trainingLoop 存活的课程（hub 只知派活，console-state 只知在看的课）', () => {
+describe('sharedTrainerAlive / buildStateView 注入', () => {
+  it('只认**共享槽**（空串）里 trainingLoop 的存活——按课查存活是共享 trainer 时代的假事实', () => {
     const scratch = mkdtempSync(path.join(os.tmpdir(), 'bcity-ovw2-'))
     SCRATCH.push(scratch)
     const file = path.join(scratch, 'registry.json')
-    writeFileSync(
-      file,
-      JSON.stringify({
-        trainingLoops: {
-          liveA: { pid: process.pid }, // 本进程 = 必活
-          deadB: { pid: 999999999 }, // 不存在的 pid
-        },
-      }),
-    )
     const prev = process.env.BCITY_REGISTRY_FILE
     process.env.BCITY_REGISTRY_FILE = file
     try {
-      expect(api.trainingCourses()).toEqual(['liveA'])
+      // 共享槽 + 活 pid ⇒ 在跑
+      writeFileSync(file, JSON.stringify({ trainingLoops: { '': { pid: process.pid } } }))
+      expect(api.sharedTrainerAlive()).toBe(true)
+      // 共享槽 + 死 pid ⇒ 不在跑
+      writeFileSync(file, JSON.stringify({ trainingLoops: { '': { pid: 999999999 } } }))
+      expect(api.sharedTrainerAlive()).toBe(false)
+      // 只有旧形状的**每课**槽（且存活）⇒ 仍算不在跑：一个进程服务所有课程，槽恒 `''`
+      writeFileSync(file, JSON.stringify({ trainingLoops: { 'x1-legacy': { pid: process.pid } } }))
+      expect(api.sharedTrainerAlive()).toBe(false)
     } finally {
       if (prev === undefined) delete process.env.BCITY_REGISTRY_FILE
       else process.env.BCITY_REGISTRY_FILE = prev
@@ -344,6 +343,8 @@ describe('trainingCourses / buildStateView 注入', () => {
   })
 
   it('buildStateView 注入 overview / workerRegistry / trainingCourses（观测面坏了不 500）', async () => {
+    // 注：`trainingCourses` 现在由**调度器队列行**推出（调度器存活 ∧ 该课未收官，R3-5）——
+    // 本用例断言的是「注入面在、且读失败时不炸」，故只看形状。
     const prev = process.env.BCITY_REGISTRY_FILE
     process.env.BCITY_REGISTRY_FILE = path.join(os.tmpdir(), 'bcity-ovw2-absent.json')
     try {

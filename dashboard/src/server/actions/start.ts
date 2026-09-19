@@ -1,9 +1,9 @@
 /** start.ts — 组件启动（含 BC 循环启动与 run_bc 锁检查）。 */
-import { appendFileSync, existsSync, readFileSync, statSync } from 'fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'fs'
 import path from 'path'
 import { loadConfig, validateCourseArg } from '../../core/config'
 import { httpOk, pidAlive, waitUntil } from '../../core/net'
-import { LOG_DIR, REPO_ROOT } from '../../core/paths'
+import { tmpLogsDir } from '../../core/paths'
 import { launchSpec } from '../../core/proc'
 import { clearAnyComponent, saveAnyComponent, scopeOf } from '../../core/registry'
 import { monitorTouch } from '../../core/reload-touch'
@@ -18,6 +18,7 @@ import {
 } from '../../core/slots'
 import type { Component, RlConfig } from '../../core/types'
 import { resolveVenvPython } from '../../core/venv'
+import { type CourseMachineKnobs, writeCourseMachineKnobs } from '../../stack/course-knobs'
 import { isBcCourse, seedWeightsFromBc } from '../../stack/courses'
 import {
   hubServerHealthy,
@@ -25,16 +26,11 @@ import {
   stepCloudflared,
   stepHubServer,
   stepSelfNode,
+  supersedeLegacyInstances,
 } from '../../stack/hub'
 import { startLocalWorker } from '../../stack/local-worker'
 import { startLocalWorkerServer } from '../../stack/push'
-import {
-  BC_LOOP_ENTRY,
-  bcLoopSpec,
-  TRAINING_LOOP_ENTRY,
-  trainingLoopSpec,
-  workerServeSpec,
-} from '../../stack/specs'
+import { TRAINER_SERVE_ENTRY, trainerServeSpec, workerServeSpec } from '../../stack/specs'
 import { entryOf, markCloudHaltRecovered } from './cloud-halt'
 import { ConsoleState } from './console-state'
 import { restoreCourseModesNote } from './course-mode'
@@ -45,10 +41,18 @@ import { ActionError, ActionResult, busyKey, done, guard, release } from './resu
 
 export interface StartCtx {
   course: string
-  /** trainer 模式（pull/push → 云端 worker；local → 本机独立 localWorker 的 pull 模式）。 */
+  /** trainer 模式（pull/push → 云端 worker；local → 本机独立 localWorker 的 pull 模式）。
+   *
+   *  ★ 共享 trainer 时代它是**每课**的传输裁决：进程级只有一份命令行，故它落成
+   *  `rl-config → courses.<课>.remote_transport`（+ local 时的本机 hub 地址），由
+   *  `prepareCourseForSharedTrainer` 写、python `apply_course_machine_overrides` 施加。 */
   trainerPpo: ConsoleState['trainerPpo']
-  /** 显式 REMOTE_PUSH_NODE（仅冒烟/本机伪 GPU；真实 Push 走 rl-config gpu_push 节点，
-   *  不注入 env——env 会强制 remote_token，覆盖用户填写的 authKey）。 */
+  /** 显式 REMOTE_PUSH_NODE（仅冒烟/本机伪 GPU 预演；真实 Push 走 rl-config gpu_push 节点，
+   *  不注入 env——env 会强制 remote_token，覆盖用户填写的 authKey）。
+   *
+   *  ★ 共享 trainer 不再消费它（`trainerServeSpec` 不给 `REMOTE_PUSH_NODE`）：push 执行面
+   *  由 `stack/push-config.configurePushEndpoint` 写进 rl-config（节点表 + 本课 push_node_url），
+   *  由训练侧自己解析。保留字段是因为预演（`train-smoke.ts`）仍用它把伪节点注入 env。 */
   pushNodeUrl?: string
   /** T7：远端连败是否 opt-in 降级本机 PPO（默认 false = ABORT）。 */
   remoteDegrade?: boolean
@@ -66,55 +70,189 @@ export function runBcLockHolder(course = ''): number | null {
   }
 }
 
-/** 启动 BC 编排器（run_bc.py）：BC 课程的 trainingLoop 分支——无 BC 种子权重播种
- *  （BC 无 warm-start）、锁名 run_bc、spec = bcLoopSpec（REMOTE_PUSH_NODE 注入
- *  courses.<课>.push_node_url，smoke 由动作层 --smoke 预演覆盖）。 */
-async function startBcLoop(
+/** **共享 trainer 的单实例锁持有人**（`nn-training/.run_cluster.lock`，2026-09-19 / R3-5）。
+ *
+ *  一个进程服务**所有**课程 ⇒ 双开就是两套调度器抢同一批 traj（按课锁拦不住这一类：
+ *  两套调度器可以各跑一半课程，每门课都恰好只有一个跑者）。python 侧 `--serve` 自己也会
+ *  响亮拒启；这里是控制台的**前置**检查——拦在 spawn 之前，报错落在动作返回值里而不是日志里。 */
+export function runClusterLockHolder(): number | null {
+  const lockPath = lockPathFor('', 'run_cluster')
+  if (!existsSync(lockPath)) return null
+  try {
+    const holder = Number.parseInt((readFileSync(lockPath, 'utf-8').split('|')[0] ?? '').trim(), 10)
+    return Number.isInteger(holder) && holder > 0 && pidAlive(holder) ? holder : null
+  } catch {
+    return null
+  }
+}
+
+/** 启动共享 trainer 前的**课程准备**：返回施加了机器侧旋钮的 config + 人读说明。
+ *
+ *  三件事各解决一个具体的坑（每一件都是「不做就会静默地不对」的那类）：
+ *
+ *   ① **权重播种**（RL 才有；BC 无 warm-start）：`tmp/<课>/weights.json` 不在则从 BC 种子复制。
+ *      共享 trainer 不接受每课的权重参数，它按 traj 目录自己找（与 `run_rl.py` 同约定）。
+ *   ② **发现事实**：`tmp/<课>/training_log.jsonl` 必须存在。训练侧的课程表**就是**这个文件
+ *      （`rl/loop_plan.discover_courses` 与控制台 `discoverCourses` 同一判据），而共享 trainer 是
+ *      「先起进程、后加课」的模型 —— 不建它，这门新课永远不会被发现（症状极难查：进程活着、
+ *      队列正常、就是这门课一轮都不跑）。空账本 = 合法状态（第 1 轮从头开始）。
+ *   ③ **机器侧旋钮**：`courses.<课>.{remote_transport,remote_hub_url,remote_degrade_after}`。
+ *      单进程没有「这门课的 flag」这一说（命令行只有一份），故「这门课怎么连云」住 rl-config；
+ *      不写它的后果很具体：`auto` 会按残留的 `push_node_url` 把 job 推给云机，而操作员以为
+ *      自己选的是 pull/local（2026-09-17 事故：云机 pull 会话被过期节点劫走 → 530 三连败 →
+ *      GATE ABORT，而云机 worker 其实正在正常 pull）。
+ *
+ *  local 模式 = 本机独立 worker 的 pull 模式：`remote_transport=pull` + `remote_hub_url=<本机 hub>`
+ *  ——与旧 per-course spec 的 `--remote-transport pull --remote-hub-url <本机 hub>` 逐字段同义。
+ *  **不动 `rl.remote_hub_url`**（刻意）：那个键是「pull preset 的隧道 URL」的家，写本机 hub
+ *  进去会把它悄悄改成打本机 hub；per-course 覆盖正好只作用于这一门课。 */
+export function prepareCourseForSharedTrainer(
+  cfg: RlConfig,
+  course: string,
+  ctx: StartCtx,
+): { cfg: RlConfig; notes: string[] } {
+  const notes: string[] = []
+  const bc = isBcCourse(course)
+  // 课程 traj 根：生产下就是仓根 `tmp/`（与训练侧同布局），单测用 BCITY_TMP_LOGS_DIR 重定向
+  const trajRoot = tmpLogsDir()
+  if (!bc) {
+    const weightsPath = path.join(trajRoot, course, 'weights.json')
+    if (!existsSync(weightsPath)) {
+      seedWeightsFromBc(course, weightsPath) // 缺文件即抛 → 调用方响亮失败（不静默跑新权）
+      notes.push(`已播种初始权重 tmp/${course}/weights.json`)
+    }
+  }
+  const traj = path.join(trajRoot, course)
+  mkdirSync(traj, { recursive: true })
+  const ledger = path.join(traj, 'training_log.jsonl')
+  if (!existsSync(ledger)) {
+    appendFileSync(ledger, '')
+    notes.push('已建课程账本 training_log.jsonl（共享 trainer 的课程发现判据）')
+  }
+  const knobs: CourseMachineKnobs = {}
+  if (ctx.trainerPpo === 'push') knobs.remoteTransport = 'push'
+  else if (ctx.trainerPpo === 'pull') knobs.remoteTransport = 'pull'
+  else {
+    knobs.remoteTransport = 'pull'
+    knobs.remoteHubUrl = sharedHubUrl(cfg)
+  }
+  if (ctx.remoteDegrade !== undefined) knobs.remoteDegradeAfter = ctx.remoteDegrade ? 3 : 0
+  const w = writeCourseMachineKnobs(cfg, course, knobs)
+  // 旋钮说明放**第一条**：它是操作员最需要确认的一件事（「我选的模式真的落盘了吗」），
+  // 也是结果详情/预设详情的首行
+  const knobNote =
+    `本课（${course}）机器侧传输 = ${knobs.remoteTransport}` +
+    `${knobs.remoteHubUrl ? ` @ ${knobs.remoteHubUrl}` : ''}` +
+    (w.changed ? '（已写入 rl-config courses.<课>）' : '（rl-config 已是该值，未重写）') +
+    '；其余并行课程各按自己的配置'
+  return { cfg: w.cfg, notes: [knobNote, ...notes] }
+}
+
+/** **启动共享 trainer**（`run_rl_cluster.py --serve`）——一个进程服务所有课程（R3-5）。
+ *
+ *  为什么不再是「每课一个 `run_rl.py --course`」：用户口径「hubserver/trainingloop/selfNode/
+ *  cloudflared 都只需要开一个进程，就能同时支持所有并行训练课程」。R2d 已造好单进程驱动者
+ *  （按课锁 / 按课日志镜像 / 引擎池 / 故障隔离 / 暂停恢复），R3-4 又让同一个进程能带 BC 课，
+ *  而 BC 与 RL **共用 `trainingLoop` 这一个角色键** —— 两个进程并存是旧形状。
+ *
+ *  **不给 `--courses`（发现模式）**：课程 = 「`tmp/<课>/training_log.jsonl` 存在」这个文件系统
+ *  事实（与 hub `--discover` 同一原则），所以「先起 trainer、后加课」不需要重启进程；
+ *  代价是控制台得替**这门课**把账本文件建出来（见 prepare ②）。
+ *
+ *  ⚠ 行为语义（操作员必须知道）：**停止 trainer = 停掉所有课程的训练**。停单门课用调度器卡片
+ *  的「暂停」（控制文件，只影响调度、队列与账本一个字不动）。
+ *
+ *  BC 课与 RL 课走**同一条路**（R3-4 起 `--serve` 按课程种类选引擎/粒度/指针）：BC 不再有
+ *  单独的 `run_bc.py` 启动分支。 */
+async function startSharedTrainer(
   cfg: RlConfig,
   venv: { python: string; sitePackages: string },
-  course: string,
-  trainerPpo: ConsoleState['trainerPpo'],
+  ctx: StartCtx,
 ): Promise<ActionResult> {
-  const prev = entryOf('trainingLoop', course)
-  if (pidAlive(prev?.pid)) return done(false, `BcLoop 已在运行 (PID ${prev!.pid})——先停止再启动`)
-  const holder = runBcLockHolder(course)
+  const course = ctx.course
+  const bc = isBcCourse(course)
+  // 槽恒 `''`：共享实例不属于任何单门课（`entryOf` 内部走 scopeOf，读面自动同源）
+  const prev = entryOf('trainingLoop')
+  if (pidAlive(prev?.pid)) {
+    // 幂等早退，但**先把本课意图落盘**：单进程的传输裁决住 rl-config（命令行只有一份），
+    // 早退前不写它，操作员的「给这门课换成 push」就成了静默无效的动作。
+    // 同时账本/权重那两件也照样做（新课的账本不建出来，发现扫拍永远看不见它）。
+    //
+    // ★ 准备失败**不改事实**：trainer 在跑、其它并行课程照常。若让它冒泡成
+    // `startComponent` 的通用失败（"TrainingLoop (trainer) 启动失败: …"），操作员会以为
+    // trainer 没起来，于是去停/重启它 —— 而停共享 trainer = 停掉**所有**课程的训练
+    // （本文件顶部那条 ⚠）。故这里自己接住：消息以「已在运行」开头，失败只说本课。
+    const running = `共享 trainer 已在运行 (PID ${prev!.pid})——一个进程服务所有课程（含 ${course}）`
+    const knobHint =
+      '★ 机器侧旋钮在**开课时**施加（python `apply_course_machine_overrides`）：' +
+      '已经开课的课程要等它重开才换传输——暂停该课 → 重启共享 trainer（或等引擎驱逐重开）'
+    let prep: { cfg: RlConfig; notes: string[] } | null = null
+    let prepErr = ''
+    try {
+      prep = prepareCourseForSharedTrainer(cfg, course, ctx)
+    } catch (e) {
+      prepErr = e instanceof Error ? e.message : String(e)
+    }
+    if (prepErr)
+      return done(false, `${running}；但**本课**（${course}）没准备好：${prepErr}`, [
+        '★ trainer 本身没问题，其它课程不受影响——**别停它**（停共享 trainer = 停掉所有并行课程的训练）；' +
+          '停单门课用调度器卡片的「暂停」。',
+        '★ 修好根因后重按「启动」即可补上本课准备（幂等：已在运行不会重复起进程）。',
+        knobHint,
+      ])
+    return done(true, running, [...prep!.notes, knobHint])
+  }
+  const clusterHolder = runClusterLockHolder()
+  if (clusterHolder)
+    return done(
+      false,
+      `共享 trainer 单实例锁被 PID ${clusterHolder} 持有` +
+        `（${path.join('nn-training', lockName('', 'run_cluster'))}）——一个进程服务所有课程，` +
+        '先停掉它（或删除该锁文件）',
+    )
+  // 本课的去重锁：serve 开课时会按课取锁（RL=run_rl / BC=run_bc），别的持有者会让它**响亮拒开
+  // 这门课**。在这里拦下来，操作员就从动作结果里看到原因，不用去日志里找。
+  const kind = bc ? 'run_bc' : 'run_rl'
+  const holder = bc ? runBcLockHolder(course) : runRlLockHolder(course)
   if (holder)
     return done(
       false,
-      `run_bc 锁被 PID ${holder} 持有（${path.join('nn-training', lockName(course, 'run_bc'))}）` +
-        '——先停止在跑训练（或删除该锁文件）',
+      `${kind} 锁被 PID ${holder} 持有（${path.join('nn-training', lockName(course, kind))}）` +
+        '——先停止在跑的那一份训练（或删除该锁文件）',
     )
-  const trainLog = path.join(LOG_DIR, course, 'training-loop.log')
+  const prep = prepareCourseForSharedTrainer(cfg, course, ctx)
+  // 旧形状（每课一个 trainer 进程）**显式换代接管**：存活的会被停掉并清账，死条目的账也清
+  // （与 hub/隧道同规，见 stack/hub.ts::supersedeLegacyInstances）。
+  const superseded = await supersedeLegacyInstances('trainingLoop')
+  const spec = trainerServeSpec(prep.cfg, venv)
   const baseline = (() => {
     try {
-      return statSync(trainLog).size
+      return statSync(spec.log).size
     } catch {
       return 0
     }
   })()
-  const spec = bcLoopSpec(cfg, {
-    course,
-    ppo: trainerPpo,
-    pushNodeUrl: cfg.courses?.[course]?.push_node_url,
-    hubUrl: localHubUrl(cfg, course, trainerPpo),
-    venv,
-  })
   const r = launchSpec(spec)
-  saveAnyComponent('trainingLoop', course, {
+  saveAnyComponent('trainingLoop', '', {
     pid: r.pid,
-    course,
-    slot: slotOf(cfg, course),
-    entry: BC_LOOP_ENTRY,
-    mode: trainerPpo,
-    pushNodeUrl: cfg.courses?.[course]?.push_node_url,
-    log: trainLog,
+    course: '',
+    slot: 0,
+    entry: TRAINER_SERVE_ENTRY,
+    // 「模式」对共享 trainer 是**每课**的（见 prepare ③）：这里记的是最近一次启动所用的模式，
+    // 每课的真实裁决在 `courses.<课>.remote_transport`。
+    mode: ctx.trainerPpo,
+    log: spec.log,
   })
   monitorTouch()
+  const detail = [
+    ...prep.notes,
+    ...(superseded.length > 0 ? [`旧形状 trainer 已换代接管：${superseded.join(', ')}`] : []),
+  ]
   await waitUntil(
     async () => {
       if (!pidAlive(r.pid)) return true
       try {
-        return statSync(trainLog).size > baseline
+        return statSync(spec.log).size > baseline
       } catch {
         return false
       }
@@ -123,12 +261,14 @@ async function startBcLoop(
     500,
   )
   if (!pidAlive(r.pid)) {
+    // 启动即退出不许静默：往共享日志追加失败标记（含尾日志）后再清账，否则只剩本次响应里的
+    // 临时 tail，刷新即丢（2026-09-08 vk1 事故的同一条规矩）。
     try {
       appendFileSync(
-        trainLog,
-        `\n[console] ${new Date().toISOString()} BcLoop 启动即退出 (PID ${r.pid})——` +
+        spec.log,
+        `\n[console] ${new Date().toISOString()} 共享 trainer 启动即退出 (PID ${r.pid})——` +
           `启动失败，原因见上方日志尾段：\n` +
-          tailLines(trainLog)
+          tailLines(spec.log)
             .map((l) => `  | ${l}`)
             .join('\n') +
           '\n',
@@ -137,25 +277,21 @@ async function startBcLoop(
     } catch {
       /* best-effort */
     }
-    clearAnyComponent('trainingLoop', course)
-    return done(false, `BcLoop 启动即退出 (PID ${r.pid})`, tailLines(trainLog))
+    clearAnyComponent('trainingLoop', '')
+    return done(false, `共享 trainer 启动即退出 (PID ${r.pid})`, [
+      ...detail,
+      ...tailLines(spec.log),
+    ])
   }
-  return done(true, `BcLoop 已启动 (PID ${r.pid}, ppo=${trainerPpo})`)
-}
-
-/** local 模式（本机独立 worker）下 trainer 的 pull 目标 = 本机 hub（槽位算术取端口）。
- *
- *  **不改 rl-config 的 remote_hubs**（刻意）：那一个键同时是「pull preset 的隧道 URL」的
- *  家，而 stepCloudflared 复用已有隧道时**不会重写**它——本机 hub 写进去就会把 pull
- *  preset 悄悄改成打本机 hub。显式 --remote-hub-url 压过配置（run_rl 既有语义），
- *  既不动配置也能保证本机 worker 是唯一执行面。 */
-function localHubUrl(
-  cfg: RlConfig,
-  course: string,
-  mode: ConsoleState['trainerPpo'],
-): string | undefined {
-  void course // 共享 hub：地址与课程无关
-  return mode === 'local' ? sharedHubUrl(cfg) : undefined
+  // §386：trainer 重启 = 停机条件消失 → 自动恢复停机状态。只解**本课**（共享 hub 上达令按课程
+  // 下发：无课程 = 全课程，会把并行训练的其它课一起解停）。
+  const rec = await markCloudHaltRecovered(prep.cfg, 'trainer 已重启（停机条件消失）', course)
+  return done(
+    true,
+    `共享 trainer 已启动 (PID ${r.pid})——一个进程服务所有课程` +
+      (rec.ok && rec.message.includes('解除') ? '；本课云端停机状态已自动恢复' : ''),
+    detail,
+  )
 }
 
 /** 启动单个组件（已在运行 = 幂等成功；依赖缺失 = ActionError/失败结果）。 */
@@ -239,107 +375,14 @@ export async function startComponent(key: Component, ctx: StartCtx): Promise<Act
         return done(true, `本机伪 GPU 节点就绪: ${pushUrl}`)
       }
       case 'trainingLoop': {
-        if (!ctx.course) throw new ActionError('trainer 需要 course（先在顶部设置课程）')
-        validateCourseArg(ctx.course)
-        // BC 课程 → run_bc.py 编排器（无 BC 种子播种；run_bc 锁）
-        if (isBcCourse(ctx.course)) return await startBcLoop(cfg, venv, ctx.course, ctx.trainerPpo)
-        const prevTl = entryOf('trainingLoop', ctx.course)
-        if (pidAlive(prevTl?.pid))
-          return done(false, `TrainingLoop 已在运行 (PID ${prevTl!.pid})——先停止再启动`)
-        const holder = runRlLockHolder(ctx.course)
-        if (holder)
-          return done(
-            false,
-            `run_rl 锁被 PID ${holder} 持有（${path.join('nn-training', lockName(ctx.course, 'run_rl'))}）` +
-              '——先停止在跑训练（或删除该锁文件）',
+        // 共享 trainer（R3-5）：**一个进程服务所有课程**，BC 与 RL 走同一条路。
+        // 课程在这里的作用是「开哪门课」（种子权重 / 账本发现 / 机器侧旋钮），不是「起哪个进程」。
+        if (!ctx.course)
+          throw new ActionError(
+            'trainer 需要 course（先在顶部设置课程）——进程是共享的一份，但「开哪门课」由课程决定',
           )
-
-        const trajDir = path.join(REPO_ROOT, 'tmp', ctx.course)
-        const weightsPath = path.join(trajDir, 'weights.json')
-        if (!existsSync(weightsPath)) {
-          try {
-            seedWeightsFromBc(ctx.course, weightsPath)
-          } catch (e) {
-            return done(false, e instanceof Error ? e.message : String(e))
-          }
-        }
-        const trainLog = path.join(LOG_DIR, ctx.course, 'training-loop.log')
-        const baseline = (() => {
-          try {
-            return statSync(trainLog).size
-          } catch {
-            return 0
-          }
-        })()
-        const spec = trainingLoopSpec(cfg, {
-          course: ctx.course,
-          ppo: ctx.trainerPpo,
-          // 真实 Push：不注入 REMOTE_PUSH_NODE（见 StartCtx.pushNodeUrl）。
-          // Python 从 rl-config nodes[].gpu_push 读 URL+authKey（控制台 configurePush 已写回）。
-          pushNodeUrl: ctx.pushNodeUrl,
-          // local 模式：指名本机 hub（worker 是独立进程，训练器只负责发布+等待）
-          hubUrl: localHubUrl(cfg, ctx.course, ctx.trainerPpo),
-          venv,
-          remoteDegrade: ctx.remoteDegrade,
-        })
-        const r = launchSpec(spec)
-        saveAnyComponent('trainingLoop', ctx.course, {
-          pid: r.pid,
-          course: ctx.course,
-          slot: slotOf(cfg, ctx.course),
-          entry: TRAINING_LOOP_ENTRY,
-          mode: ctx.trainerPpo,
-          pushNodeUrl: ctx.pushNodeUrl ?? cfg.courses?.[ctx.course]?.push_node_url,
-          remoteDegrade: !!ctx.remoteDegrade,
-          log: trainLog,
-        })
-        monitorTouch()
-        await waitUntil(
-          async () => {
-            if (!pidAlive(r.pid)) return true
-            try {
-              return statSync(trainLog).size > baseline
-            } catch {
-              return false
-            }
-          },
-          20000,
-          500,
-        )
-        if (!pidAlive(r.pid)) {
-          // §380：启动即退出不许静默——往日志文件追加失败标记（含尾日志）后再清账，
-          // 否则只剩 startComponent 响应里的临时 tail，刷新即丢（2026-09-08 vk1 事故）。
-          try {
-            appendFileSync(
-              trainLog,
-              `\n[console] ${new Date().toISOString()} ${COMPONENT_LABELS[key]} 启动即退出` +
-                ` (PID ${r.pid})——启动失败，原因见上方日志尾段：\n` +
-                tailLines(trainLog)
-                  .map((l) => `  | ${l}`)
-                  .join('\n') +
-                '\n',
-              'utf-8',
-            )
-          } catch {
-            /* best-effort */
-          }
-          clearAnyComponent('trainingLoop', ctx.course)
-          return done(false, `TrainingLoop 启动即退出 (PID ${r.pid})`, tailLines(trainLog))
-        }
-        // §386：TrainingLoop 重启 = 停机条件消失 → 自动恢复停机状态（hub resume + recovered）。
-        // 只解**本课**的停机态（共享 hub 上达令是按课程下发的：无课程 = 全课程，那会把
-        // 并行训练的其它课程一起解停）
-        const rec = await markCloudHaltRecovered(
-          cfg,
-          'TrainingLoop 已重启（停机条件消失）',
-          ctx.course,
-        )
-        return done(
-          true,
-          rec.ok && rec.message.includes('解除')
-            ? `TrainingLoop 已启动 (PID ${r.pid}, ppo=${ctx.trainerPpo})；云端停机状态已自动恢复`
-            : `TrainingLoop 已启动 (PID ${r.pid}, ppo=${ctx.trainerPpo})`,
-        )
+        validateCourseArg(ctx.course)
+        return await startSharedTrainer(cfg, venv, ctx)
       }
     }
   } catch (e) {

@@ -2,10 +2,11 @@
  *
  *  为什么分组，而不是继续排一行：
  *
- *   - 单例角色（selfNode / hub / 隧道）与当前查看的课程**无关**——0 门课也在、100 门课也是一份。
- *     混在按课的行里，操作员会去「给这门课再起一个 hub」（而它是共享的，第二个实例抢同一个
- *     端口），或者把「共享 hub 没起」读成「这门课自己的 hub 没起」；
- *   - 课程面（trainer / 本机 worker）恰好相反：卡片上的对象**就是当前查看的那门课**。
+ *   - 单例角色（selfNode / hub / 隧道 / **trainer**）与当前查看的课程**无关**——0 门课也在、
+ *     100 门课也是一份。混在按课的行里，操作员会去「给这门课再起一个 hub / trainer」
+ *     （而它们是共享的：第二个实例抢同一个端口、或两套调度器抢同一批 traj），
+ *     或者把「共享 hub 没起」读成「这门课自己的 hub 没起」；
+ *   - 课程面（本机 worker / 本机伪节点）恰好相反：卡片上的对象**就是当前查看的那门课**。
  *     换课程 = 换对象，这一点必须在视觉上说出来（否则「启动」按下去，起的可能是另一门课）。
  *
  *  ★ **成员资格只由 `ComponentView.scope` 决定**（服务端按 `core/registry.componentScope` 填）。
@@ -56,10 +57,13 @@ export const FAMILY_META: Record<'service' | 'course', { title: string; hint: st
 
 /** 组内展示顺序（**纯化妆**：未列出的 key 落到组尾，绝不丢弃——成员资格只由 scope 决定）。 */
 const ORDER: Record<'service' | 'course', readonly string[]> = {
-  // 服务面按「谁依赖谁」排：agent（一切动作的落点）→ hub（调度中枢）→ 隧道（入站通道）。
-  service: ['selfNode', 'hubServer', 'cloudflared'],
-  // 课程面：训练器在前（最常按的那一个），本机 worker 在后（它的活由训练器派发）。
-  course: ['trainingLoop', 'localWorker', 'workerServe'],
+  // 服务面按「谁依赖谁」排：agent（一切动作的落点）→ hub（调度中枢）→ 隧道（入站通道）
+  // → trainer（消费 hub 的作业队列、服务所有课程）。
+  service: ['selfNode', 'hubServer', 'cloudflared', 'trainingLoop'],
+  // 课程面：本机 worker 在前（最常按的那一个），本机伪节点在后。
+  // 注：trainer 已于 2026-09-19（R3-5）收敛为共享单例 ⇒ 它属于**服务面**，不在此列
+  // （ORDER 只是化妆顺序：真成员资格由 `scope` 决定，写错这里不会让组件错族）。
+  course: ['localWorker', 'workerServe'],
 }
 
 const FAMILY_OF_SCOPE: Record<ComponentScope, 'service' | 'course'> = {

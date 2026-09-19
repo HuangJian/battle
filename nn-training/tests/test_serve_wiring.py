@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -559,6 +560,39 @@ def test_cli_serve_without_courses_means_discovery(monkeypatch: pytest.MonkeyPat
     run_rl_cluster.main(["--serve", "--control-file", "tmp/ctl.json", "--mode", "goal"])
     assert seen["control_file"] == "tmp/ctl.json"
     assert seen["argv"] == ["--mode", "goal"]  # `--mode` 是课程级参数，只透传它
+
+    # `--ppo` 同规（控制台起的 trainer 一律 remote）：它必须是**显式声明**的 cluster 参数，
+    # 否则 argparse 先以 unrecognized arguments 拒启（`--serve --mode goal` 的老坑）。
+    run_rl_cluster.main(["--serve", "--ppo", "remote", "--mode", "per-tick"])
+    assert seen["argv"] == ["--mode", "per-tick", "--ppo", "remote"]
+
+
+def test_cli_serve_takes_a_process_level_single_instance_lock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """一个进程服务**所有**课程 ⇒ 双开就是两套调度器抢同一批 traj（按课锁拦不住这一类）。
+
+    锁在 `serve()` **之前**把关（真跑起来就晚了），故这里用一个已被自己持有的锁文件表达
+    「另一个服务器正在跑」。`--force` 是显式接管（先确认无人在跑）。
+    """
+    import run_rl_cluster
+
+    lock = tmp_path / ".run_cluster.lock"
+    lock.write_text(f"{os.getpid()}|python|0", encoding="utf-8")
+
+    def fake_serve(courses: Any, **kw: Any) -> Any:
+        return loop_serve.ServeReport(stop_reason="stub")
+
+    monkeypatch.setattr(loop_serve, "serve", fake_serve)
+
+    with pytest.raises(SystemExit, match="已有单进程服务器在跑"):
+        run_rl_cluster.main(["--serve", "--cluster-lock", str(lock)])
+    # 拒启时**不**抢锁改内容（别人的锁原样留着）
+    assert lock.exists() and lock.read_text(encoding="utf-8").startswith(f"{os.getpid()}|")
+
+    assert run_rl_cluster.main(["--serve", "--cluster-lock", str(lock), "--force"]) == 0
+    # 正常收尾后自己释放（`finally`）——不留一个让下次拒启的残锁
+    assert not lock.exists()
 
 
 # --------------------------------------------------------------- 课程参数

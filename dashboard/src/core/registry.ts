@@ -69,15 +69,29 @@ export function isCourseComponent(key: Component): key is CourseComponent {
   return (COURSE_COMPONENTS as readonly string[]).includes(key)
 }
 
-/** **单实例（共享）课程组件**（2026-09-18）：`hubServer`/`cloudflared` 不再是「每课一份」
- *  ——一个 hub 进程服务所有并行课程、一条隧道指向它。
+/** **单实例（共享）课程组件**：`hubServer`/`cloudflared`（2026-09-18）+ `trainingLoop`
+ *  （2026-09-19）不再是「每课一份」——一个 hub 进程服务所有并行课程、一条隧道指向它，
+ *  一个 trainer 进程（`run_rl_cluster.py --serve`）服务所有课程的训练循环。
+ *
+ *  ★ `trainingLoop` 为什么也进来（用户口径：「hubserver/trainingloop/selfNode/cloudflared
+ *  都只需要开一个进程，就能同时支持所有并行训练课程」）：R2d 已经造好了单进程驱动者
+ *  （`rl/loop_serve.py`：按课锁/按课日志镜像/引擎池/故障隔离），且 R3-4 让同一个进程也能
+ *  带 BC 课——而 BC 与 RL **共用 `trainingLoop` 这一个角色键**，按课键控意味着
+ *  「BC 课 A + RL 课 B」只能靠两个进程并存。收敛后一个进程两种课都跑。
+ *
+ *  ⚠ 副作用（必须知道）：**停止 trainer = 停掉所有课程的训练**。想停单门课用调度器的
+ *  「暂停」（控制文件 `tmp/loop-control.json`，只影响调度，队列/账本不动）。
  *
  *  它们在账本里仍住 `hubServers`/`cloudflareds` 两张表，只是槽固定 `''`（沿用既有的
  *  「无课程槽」：语义正好重合，共享实例不属于任何单门课）。**为什么不改成扁平单例键**：
  *  旧账本里的 per-course hub/隧道条目必须继续可见、可枚举、可停止（静默失监督是事故），
  *  共用一张表天然做到；而重建/重启路径对非空课程槽 fail-closed（见 `restart.ts`），
  *  旧实例只能被**显式换代接管**（`stack/hub.ts::supersedeLegacyInstances`）。 */
-export const SHARED_COMPONENTS: readonly CourseComponent[] = ['hubServer', 'cloudflared']
+export const SHARED_COMPONENTS: readonly CourseComponent[] = [
+  'hubServer',
+  'cloudflared',
+  'trainingLoop',
+]
 
 export function isSharedComponent(key: Component): key is CourseComponent {
   return (SHARED_COMPONENTS as readonly string[]).includes(key)

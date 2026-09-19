@@ -103,9 +103,12 @@ describe('localWorker 组件形态', () => {
     // 轮询 hub 抢 job 的孤儿 —— 「随时启停」全靠这一条。
     expect(localWorkerSpec(dualCourseCfg(), VENV, 'c').killTree).toBe(true)
     expect(COMPONENT_KILL_TREE.has('localWorker')).toBe(true)
-    // 集合与 spec 标记不许漂移：集合里的每个组件，其 spec 必须标了 killTree；
-    // 反之 span 里的组件也没理由不带（今天只有 localWorker 一个入列）。
-    for (const key of COMPONENT_KILL_TREE) expect(key).toBe('localWorker')
+    // 共享 trainer（2026-09-19 / R3-5）同样入列：它之下有 rollout / 本机 PPO 子进程，
+    // 只杀父进程会留下**还在写同一批 traj** 的孤儿（比 localWorker 更贵——它们会真跑一轮）。
+    expect(COMPONENT_KILL_TREE.has('trainingLoop')).toBe(true)
+    // 集合与 spec 标记不许漂移：集合里恰好是这两个（多一个少一个都是回归——
+    // 少一个？整树杀退化成裸 kill；多一个？没标 killTree 的 spec 被整树杀）。
+    expect([...COMPONENT_KILL_TREE].sort()).toEqual(['localWorker', 'trainingLoop'])
   })
 
   it('双课隔离：work 目录 / 日志互不相同；**poll 目标相同**（共享 hub）', () => {

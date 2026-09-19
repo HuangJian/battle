@@ -4,6 +4,81 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §89 R3-5：trainer 收敛为「一个进程服务所有课程」（2026-09-19）
+
+**一句话**：`trainingLoop` 从「每课一进程」收敛为**共享槽单进程**（`run_rl_cluster.py --serve`，
+发现模式），于是 hub / 隧道 / selfNode / trainer 四者各只有一个进程就能服务所有并行课程；
+RL 与 BC 课走同一条启动路径。
+
+### 之前错在哪
+
+R3-3 把组件卡分成「服务面 · 单例」与「课程面 · 按课程」，但只交付了**读面**：判据表里
+`SHARED_COMPONENTS = ['hubServer','cloudflared']`，trainer 仍在课程面。这不是显示问题而是形状问题——
+控制台仍按课起 `run_rl.py --course`，于是：
+
+1. 「BC 课 A + RL 课 B」要**两个进程**，而 BC 与 RL 共用 `trainingLoop` 这一个角色键；
+2. 训练侧明明已有单进程驱动者（R2d `rl/loop_serve.py`：按课锁 / 按课日志镜像 / 引擎池 / 故障隔离 /
+   暂停恢复），R3-4 又让同一个进程能带 BC 课——能力在，入口没换；
+3. 用户的验收口径是「hubserver/trainingloop/selfNode/cloudflared 都只需要开一个进程」。
+
+### 现在的形状
+
+```
+服务面 · 单例  [selfNode 单例] [hubServer 共享] [cloudflared 共享] [trainingLoop 共享]
+课程面 · 按课程  [localWorker]
+```
+
+启动一次 = 起一个 `--serve` 进程；之后**加课不需要重启**——课程 = 文件系统事实
+（`<traj-root>/<课>/training_log.jsonl` 存在），控制台负责替新课把这个文件建出来。
+
+### 六条不可交易的细节（每条都是「不做就会静默地不对」）
+
+| 细节 | 不做的后果 |
+|---|---|
+| **不给 `--courses`**（发现模式） | 进程绑死课程表，「先起 trainer、后加课」当场失效 |
+| **每课旋钮住 rl-config** `courses.<课>.remote_transport` 等（`stack/course-knobs.ts` 唯一写面；python 开课时施加） | 单进程没有「这门课的 flag」；`auto` 会按残留 `push_node_url` 把 job 推给云机（2026-09-17 事故的复发路径） |
+| **绝不写进 `curricula/*.jsonc`** | 课程文件字节 = `course_fp` 语料血缘/熔断口径（D14）——加一个传输旋钮会把同一份语料读成新语料 |
+| **幂等早退仍做本课准备，但准备失败只说本课** | 说成「trainer 启动失败」会诱使操作员去停/重启它，而停共享 trainer = 停掉**所有**课程的训练 |
+| **进程级单实例锁**（`.run_cluster.lock`） | 按课锁拦不住「两套调度器各跑一半课程，每门课都恰好只有一个跑者」 |
+| **每课条目拒重建 + 启动时换代接管** | 用共享 spec 重建一个 per-course 条目 = 两套调度器抢同一批 traj |
+
+### 一条被红测试揪出来的真问题（本轮最值得记的一件事）
+
+`tests/training-console-busy.test.ts` 红了：「startComponent 结束后按课键被释放」失败在
+`初始权重缺失且 BC 产物不存在`。查下去是两件事叠在一起：
+
+1. **测试夹具不密闭（测试的错）**：R3-5 让幂等早退分支照样做**本课准备**（播权重 / 建账本 / 写旋钮），
+   而这个 2026-09-14 时代的用例把断言挂在了「本机 `tmp/c5-gae` 恰好有没有权重文件」上——
+   它测的已经不是 busy 键了。修法：夹具重定向 `BCITY_TMP_LOGS_DIR` + `BCITY_RL_CONFIG` 并预置
+   本课权重（对真实 BC 产物零依赖）。
+2. **生产语义确有毛病（代码的错）**：准备阶段抛错会冒泡成 `startComponent` 的通用失败话术
+   「TrainingLoop (trainer) 启动失败: …」——而**进程其实在跑**。操作员照此去停/重启，
+   就会连坐停掉所有并行课程。修法：早退分支自己接住错误，消息仍以「已在运行 / 服务所有课程」开头、
+   失败只归因到本课，并明说「别停它，停单门课用『暂停』」。
+
+新用例钉住第 2 条（造一个**确定性**的准备失败：`BCITY_TMP_LOGS_DIR` 指向一个普通文件 ⇒
+播种/建目录/建账本三路都必抛），与「本机有没有 BC 产物」无关。
+
+### 门禁
+
+| 门 | 结果 |
+|---|---|
+| nn python gate（ruff + mypy + pytest xdist） | ✔ **1567 passed / 4 skipped**（26s） |
+| `cd dashboard && bun run typecheck` / `bun run test` | ✔ 干净 / **648 pass / 0 fail** |
+| 三份 bundle（`bun dashboard/src/server/build.ts`） | ✔ all bundles ok |
+| 根 `bun run check` | ✔ **1868（1864 pass / 4 skip / 0 fail）** |
+
+### 记录
+
+`DECISIONS.md` §2026-09-19-goalnn-shared-trainer-single-process（含四条否决项与三条未做）·
+`plan/multi-course-parallel-training.md §5.2 R3-5`。
+
+### 仍未做
+
+① 真机「一个 serve 进程同时带 RL + BC 并行课」实弹运行（本轮全在夹具/假件下证明逻辑，与 R2e 同口径）；
+② `workerServe` 账本键的轴仍是课程（展示面已按节点例外声明，账本键未动）；
+③ `TrainLaunchModal` 精简（模式仍按课选，落点已改为课程旋钮）。
+
 ## §88 R3-3：组件卡分族（服务面单例角色 vs 课程面按课程）（2026-09-19）
 
 **一句话**：六个受管组件不再排成一行——按**作用域**分成「服务面 · 单例」（selfNode / hub / 隧道，

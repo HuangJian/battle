@@ -1,4 +1,5 @@
 /** smoke.ts — 组件冒烟（启动前门禁，按组件分派）。 */
+import { existsSync } from 'fs'
 import path from 'path'
 import { loadConfig } from '../../core/config'
 import { httpOk, pidAlive } from '../../core/net'
@@ -94,13 +95,18 @@ export async function smokeComponent(key: Component, ctx: StartCtx): Promise<Act
         break
       }
       case 'trainingLoop': {
-        const alive = pidAlive(entryOf('trainingLoop', ctx.course)?.pid)
-        items.push({ name: 'TrainingLoop 进程存活', passed: alive, fatal: false })
-        const logPath = path.join(
+        // 共享 trainer（2026-09-19 / R3-5）：账本槽恒 `''`（entryOf 内部走 scopeOf）——
+        // 存活是**进程级**一件事，冒烟说的也是这件事：它在不在跑。
+        const alive = pidAlive(entryOf('trainingLoop')?.pid)
+        items.push({ name: '共享 trainer 进程存活', passed: alive, fatal: false })
+        // 日志优先取**本课镜像**（serve 的行路由写的，与控制台按课读的其它面同源），
+        // 镜像还没出现时回落到进程自己的 stdout（`trainer-cluster.log`）。
+        const mirror = path.join(
           LOG_DIR,
-          ctx.course || loadConsoleState().course,
+          ctx.course || loadConsoleState().course || 'nocourse',
           'training-loop.log',
         )
+        const logPath = existsSync(mirror) ? mirror : (entryOf('trainingLoop')?.log ?? mirror)
         extraDetail.push(...tailLines(logPath, 6).map((l) => `日志│ ${l}`))
         break
       }

@@ -7,7 +7,8 @@ import { clearAnyComponent, isSharedComponent, scopeOf } from '../../core/regist
 import { sharedHubPort, sharedTunnelMetricsPort, slotPort } from '../../core/slots'
 import { COMPONENT_KILL_TREE } from '../../core/types'
 import type { Component, RlConfig } from '../../core/types'
-import { releaseTrainerLocks } from '../../launch/cli'
+import { releaseClusterLock, releaseTrainerLocks } from '../../launch/cli'
+import { supersedeLegacyInstances } from '../../stack/hub'
 import { entryOf } from './cloud-halt'
 import { COMPONENT_LABELS } from './labels'
 import { ActionResult, busyKey, done, guard, release } from './result'
@@ -37,14 +38,28 @@ export async function stopComponent(key: Component, courseArg = ''): Promise<Act
      *  释放前**核验进程身份**（命令行必须命中本课 run_rl/run_bc），绝不对复用 PID 误杀。 */
     const releaseLocks = async (crs: string): Promise<string> => {
       if (key !== 'trainingLoop') return ''
-      const notes = await releaseTrainerLocks(crs)
-      return notes.length > 0 ? `；${notes.join('；')}` : ''
+      // trainer 的锁有三层：**进程级单实例锁**（共享 trainer 自己，2026-09-19）+ 它开课时为
+      // 每门课取的按课锁（RL=run_rl / BC=run_bc）。三层都要清：账本 pid 与锁持有者可以是两个
+      // 不同进程（崩溃残留 / PID 复用），留着任一把都会把「停止 → 启动」永久卡死。
+      const notes = [...(await releaseTrainerLocks(crs)), await releaseClusterLock()]
+      const kept = notes.filter(Boolean)
+      return kept.length > 0 ? `；${kept.join('；')}` : ''
+    }
+    /** 停止 trainer = 停掉**所有**训练进程：共享实例是唯一形状，但旧形状的每课条目仍可能
+     *  存活（换代之前的残留）——它们是同一个角色，一起收掉才算「停了 trainer」
+     *  （与启动时的换代接管同一把尺子，见 stack/hub.ts::supersedeLegacyInstances）。 */
+    const stopLegacyTrainers = async (): Promise<string> => {
+      if (key !== 'trainingLoop') return ''
+      const taken = await supersedeLegacyInstances('trainingLoop')
+      return taken.length > 0 ? `；同时收掉旧形状的每课 trainer：${taken.join(', ')}` : ''
     }
     const entry = entryOf(key, course)
     if (entry?.pid) {
       if (pidAlive(entry.pid)) {
         // 带子进程监督器的组件（localWorker）必须整树停：只杀父进程会留下继续轮询 hub
         // 抢 job 的孤儿，「随时启停」形同虚设（判定唯一来源 types.COMPONENT_KILL_TREE）。
+        // trainer 同理：共享 trainer 之下有 rollout / 本机 PPO 子进程，只杀父进程就留下
+        // 还在写同一批 traj 的孤儿（比 localWorker 更贵——它们会真跑一轮）。
         const dead = COMPONENT_KILL_TREE.has(key)
           ? await killPidTree(entry.pid)
           : await killPid(entry.pid)
@@ -52,9 +67,13 @@ export async function stopComponent(key: Component, courseArg = ''): Promise<Act
       }
       clearAnyComponent(key, course || entry.course || '')
       const notes = await releaseLocks(course || entry.course || '')
+      const legacy = await stopLegacyTrainers()
+      // 共享 trainer 的行为语义必须在结果里说出来：停它 = 停掉所有课程的训练
+      // （想停单门课走调度器卡片的「暂停」，只影响调度，队列与账本不动）。
+      const scopeNote = key === 'trainingLoop' ? '（共享 trainer：所有课程的训练随之停止）' : ''
       return done(
         true,
-        `${COMPONENT_LABELS[key]} 已停止${course ? ` (course=${course})` : ''}${notes}`,
+        `${COMPONENT_LABELS[key]} 已停止${scopeNote}${course ? ` (course=${course})` : ''}${notes}${legacy}`,
       )
     }
     // 无登记：端口兜底（端口一律经算术函数，不再手写偏移）

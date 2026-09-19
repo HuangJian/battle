@@ -10,17 +10,14 @@ import {
 } from '../../core/registry'
 import type { Component, ProcSpec } from '../../core/types'
 import { resolveVenvPython } from '../../core/venv'
-import { isBcCourse } from '../../stack/courses'
 import {
-  bcLoopSpec,
   cloudflaredSpec,
   hubServerSpec,
   localWorkerSpec,
   selfNodeSpec,
-  trainingLoopSpec,
+  trainerServeSpec,
   workerServeSpec,
 } from '../../stack/specs'
-import { sharedHubUrl } from '../../core/slots'
 
 // ────────────────────────── 变更检测重启（监督器回调） ──────────────────────────
 
@@ -62,29 +59,20 @@ export function restartSpecFor(key: Component, course = ''): ProcSpec | null {
       return workerServeSpec(cfg, venv, c)
     case 'localWorker':
       return localWorkerSpec(cfg, venv, c)
-    case 'trainingLoop': {
-      // local 模式（本机独立 worker）的 pull 目标是本机 hub——与 start.ts 同一条
-      // 推导（rebuild 必须逐字段等于原 spec，否则监督重启会把 hub 打回配置里的隧道）。
-      const hubUrl = entry.mode === 'local' ? sharedHubUrl(cfg) : undefined
-      // BC 课程 → run_bc 编排器 spec（2026-09-13；entry 区分 rl/bc 入口）
-      if (isBcCourse(c)) {
-        return bcLoopSpec(cfg, {
-          course: c,
-          ppo: entry.mode,
-          pushNodeUrl: entry.pushNodeUrl,
-          hubUrl,
-          venv,
-        })
+    // 共享 trainer（2026-09-19 / R3-5）：一个进程服务所有课程，spec 与**课程无关**
+    // （课程由 `--traj-root` 发现，机器侧旋钮住 rl-config）——所以重建就是重建同一份 spec。
+    case 'trainingLoop':
+      if (c) {
+        // 旧形状的每课条目（`trainingLoops[<课>]`）**拒重建**：它与共享实例服务同一件事，
+        // 用共享 spec 把一门课的名字重新拉起一个进程 = 两套调度器抢同一批 traj
+        // （正是单实例锁要防的那件事）。旧实例只能被**显式换代接管**
+        // （hub.ts::supersedeLegacyInstances，在启动共享 trainer 时收掉）。
+        warn(
+          `[console] trainingLoop[${c}] 是旧形状的每课 trainer（共享实例已接管该角色）——` +
+            '不再重建；启动共享 trainer 时会自动停止并清账',
+        )
+        return null
       }
-      return trainingLoopSpec(cfg, {
-        course: c,
-        ppo: entry.mode,
-        pushNodeUrl: entry.pushNodeUrl,
-        hubUrl,
-        venv,
-        // T7：监督重启必须复现启动时的 opt-in（默认关）。
-        remoteDegrade: !!entry.remoteDegrade,
-      })
-    }
+      return trainerServeSpec(cfg, venv)
   }
 }

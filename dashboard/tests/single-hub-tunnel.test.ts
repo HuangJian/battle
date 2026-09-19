@@ -1,8 +1,9 @@
 /** single-hub-tunnel.test.ts — 「hub/隧道只开一个进程，服务所有并行课程」（2026-09-18 用户指令）。
 
  *  形状：`hubserver/trainingloop/selfNode/cloudflared 都只需要开一个进程，就能同时支持所有
- *  并行训练课程`。本文件钉的是 hub 与隧道这两条（trainingLoop 仍是每课一个会话——它是
- *  **有状态会话**，收敛成单进程要等 P2 的任务队列改造）。
+ *  并行训练课程`。本文件钉的是这三条共享角色的**槽位/地址/换代**形状——trainer 已在
+ *  2026-09-19（R3-5）收敛为 `run_rl_cluster.py --serve` 一个进程（它自己的行为面在
+ *  tests/training-shared-trainer.test.ts）。
  *
  *  四条不变量（每一条都能单独出事，且都只在「多课程同时跑」时才显形）：
  *   ① **槽位唯一**：hub/隧道的账本槽恒为 `''`（`scopeOf` 归一）。这是所有读写路径的唯一
@@ -95,15 +96,17 @@ function writeRegistry(reg: string, body: Record<string, unknown>): void {
 // ────────────────────────── ① 槽位唯一 ──────────────────────────
 
 describe('① 槽位唯一：共享组件的账本槽恒为空串', () => {
-  it('scopeOf：hub/隧道归一为 ``,其余组件按课程（含 selfNode 不受影响）', () => {
+  it('scopeOf：hub/隧道/**trainer**归一为 ``,其余组件按课程（含 selfNode 不受影响）', () => {
     expect(isSharedComponent('hubServer')).toBe(true)
     expect(isSharedComponent('cloudflared')).toBe(true)
-    expect(isSharedComponent('trainingLoop')).toBe(false)
+    // trainer 也是共享的（2026-09-19 / R3-5）：一个进程服务所有课程，BC 与 RL 共用这个角色键
+    expect(isSharedComponent('trainingLoop')).toBe(true)
     for (const c of ['course-a', 'course-b', '']) {
       expect(scopeOf('hubServer', c)).toBe('')
       expect(scopeOf('cloudflared', c)).toBe('')
-      expect(scopeOf('trainingLoop', c)).toBe(c)
+      expect(scopeOf('trainingLoop', c)).toBe('')
       expect(scopeOf('localWorker', c)).toBe(c)
+      expect(scopeOf('workerServe', c)).toBe(c)
     }
   })
 
@@ -116,10 +119,10 @@ describe('① 槽位唯一：共享组件的账本槽恒为空串', () => {
         course: '',
         url: 'http://127.0.0.1:1',
       }
-      const tl: RegistryEntry = { pid: 999998, entry: 'training-loop', course: 'course-b' }
+      const tl: RegistryEntry = { pid: 999998, entry: 'training-loop', course: '' }
       writeRegistry(reg, {
         hubServers: { '': hub },
-        trainingLoops: { 'course-b': tl },
+        trainingLoops: { '': tl },
       })
       // 查看 B 课：hub 卡片读的是**共享**条目（不是「B 课自己的 hub 没起」）
       const viewsB = await componentViews(cfg, 'course-b')
@@ -130,10 +133,12 @@ describe('① 槽位唯一：共享组件的账本槽恒为空串', () => {
       // 查看 A 课：同一个共享条目（两课看到的是同一份真相）
       const viewsA = await componentViews(cfg, 'course-a')
       expect(viewsA.find((v) => v.key === 'hubServer')?.pid).toBe(hub.pid)
-      // 非共享组件仍严格按课（A 课没有 trainer ⇒ stopped，不借 B 课的条目）
-      expect(viewsA.find((v) => v.key === 'trainingLoop')?.status).toBe('stopped')
-      expect(viewsB.find((v) => v.key === 'trainingLoop')?.status).toBe('exited')
-      expect(viewsB.find((v) => v.key === 'trainingLoop')?.scope).toBe('course')
+      // trainer 同理（2026-09-19 / R3-5）：两课页看到的是**同一个** trainer 进程，
+      // 不存在「A 课的 trainer 没跑」这种说法——进程级一份
+      expect(viewsA.find((v) => v.key === 'trainingLoop')?.pid).toBe(tl.pid)
+      expect(viewsB.find((v) => v.key === 'trainingLoop')?.scope).toBe('shared')
+      // 非共享组件仍严格按课（A 课没有本机 worker ⇒ stopped，不借 B 课的条目）
+      expect(viewsA.find((v) => v.key === 'localWorker')?.status).toBe('stopped')
     })
   })
 })

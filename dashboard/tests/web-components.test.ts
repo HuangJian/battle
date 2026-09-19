@@ -183,12 +183,13 @@ describe('§361：icon 复制键 / cloudflared endpoint 截断与复制 / local 
   })
 
   it('组件卡分族（R3-3）：服务面（单例角色）在前、课程面在后，族内顺序稳定', () => {
-    // scope 由服务端按账本槽位规则填（这里照抄真值：selfNode 单例 / hub·隧道 共享 / 其余按课程）
+    // scope 由服务端按账本槽位规则填（这里照抄真值：selfNode 单例 / hub·隧道·**trainer** 共享 /
+    // 其余按课程）——trainer 自 2026-09-19（R3-5）起是一个进程服务所有课程。
     const scopes: Record<string, string> = {
       selfNode: 'singleton',
       hubServer: 'shared',
       cloudflared: 'shared',
-      trainingLoop: 'course',
+      trainingLoop: 'shared',
       localWorker: 'course',
       workerServe: 'course',
     }
@@ -231,7 +232,7 @@ describe('§361：icon 复制键 / cloudflared endpoint 截断与复制 / local 
     expect(html).toContain('课程面 · 按课程')
     expect(html).toContain('data-family="service"')
     expect(html).toContain('data-family="course"')
-    // 服务面在前、课程面在后；族内顺序：agent → hub → 隧道 / trainer → 本机 worker
+    // 服务面在前、课程面在后；族内顺序：agent → hub → 隧道 → trainer / 本机 worker
     const order = ['selfNode', 'hubServer', 'cloudflared', 'trainingLoop', 'localWorker']
     let prev = -1
     for (const k of order) {
@@ -239,9 +240,10 @@ describe('§361：icon 复制键 / cloudflared endpoint 截断与复制 / local 
       expect(idx, k).toBeGreaterThan(prev)
       prev = idx
     }
-    // 作用域徽章：共享两个（hub/隧道）+ 单例一个（selfNode）；按课程不挂标签（组标题已说）。
-    // 断言整段 class 属性而不是子串——页面里内联了整份 theme.css，类名本身也会出现。
-    expect(html.match(/class="tc-cc__scope tc-cc__scope--shared"/g)).toHaveLength(2)
+    // 作用域徽章：共享三个（hub/隧道/**trainer**）+ 单例一个（selfNode）；按课程不挂标签
+    // （组标题已说）。断言整段 class 属性而不是子串——页面里内联了整份 theme.css，
+    // 类名本身也会出现。
+    expect(html.match(/class="tc-cc__scope tc-cc__scope--shared"/g)).toHaveLength(3)
     expect(html.match(/class="tc-cc__scope tc-cc__scope--singleton"/g)).toHaveLength(1)
     // 节点面组件（worker_server）不进卡片行：它渲染在节点行，两个入口 = 混淆
     expect(html).not.toContain('>workerServe<')

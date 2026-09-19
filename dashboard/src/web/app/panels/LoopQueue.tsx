@@ -29,7 +29,7 @@ import {
 
 /** 未在训那一行的悬停全文（导出给用例断言，避免文案与断言两处漂移）。 */
 export const STOPPED_TITLE =
-  '没有存活的 trainingLoop 进程——下面是**盘上事实**推出的队列状态（若交给调度器会怎么做）'
+  '没有存活的共享 trainer 进程——下面是**盘上事实**推出的队列状态（若交给调度器会怎么做）'
 
 export interface LoopQueueProps {
   loopQueue: LoopQueueView | null
@@ -101,7 +101,7 @@ export function LoopQueue({ loopQueue, course, onSelectCourse, onAction }: LoopQ
         </span>
         <span
           className="tc-loopq__stat"
-          title="这些课程有存活的 trainingLoop 进程；总数 = 账本可发现的课程数"
+          title="共享 trainer 在跑（调度器活着）且这门课未收官；总数 = 账本/课程目录可发现的课程数"
         >
           在训 {loopQueue.trainingCount}/{rows.length}
         </span>
@@ -160,7 +160,11 @@ export function LoopQueue({ loopQueue, course, onSelectCourse, onAction }: LoopQ
                 ) : null}
                 <span
                   className={`tc-loopq__badge ${r.training ? 'tc-loopq__badge--on' : 'tc-loopq__badge--idle'}`}
-                  title={r.training ? 'trainingLoop 进程存活（registry）' : STOPPED_TITLE}
+                  title={
+                    r.training
+                      ? '共享 trainer 进程存活（registry）且该课未收官（python 队列状态）'
+                      : STOPPED_TITLE
+                  }
                 >
                   {r.training ? '在训' : '未在训'}
                 </span>

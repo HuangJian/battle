@@ -34,6 +34,19 @@ export interface CourseConf {
   /** 本课 rollout 执行位置覆盖（M3；缺省 = 用 rl.rollout_src，再缺省 local）。字符串域，
    *  与 python `--rollout-src` 的 choices 同字面量（`auto` = 按配置解析）。 */
   rollout_src?: RolloutSrcMode
+  // ── 共享 trainer 的**机器侧旋钮**（2026-09-19 / R3-5）──────────────────────────
+  //  一个进程服务所有课程 ⇒ 「这门课怎么连云端」不能是那个进程的命令行参数（只有一份）。
+  //  住这里而**不能**住 `curricula/*.jsonc`：课程文件字节 = course_fp（语料血缘 / 熔断口径
+  //  D14）——往里加一个传输旋钮，熔断会把同一份语料读成新语料。
+  //  读面：python `rl/loop_serve.py::apply_course_machine_overrides`（开课时施加 + 值域校验）。
+  /** 传输裁决（RL：`auto|pull|push|hubpush`；BC 另有 `local` = 本机 train/bc.py）。 */
+  remote_transport?: 'auto' | 'pull' | 'push' | 'hubpush' | 'local'
+  /** 本课 pull/hubpush 打哪个 hub（local 模式 = 本机 hub 地址）。 */
+  remote_hub_url?: string
+  /** T7：远端连败降级本机的阈值（0 = 关）。 */
+  remote_degrade_after?: number
+  /** 门禁失败语义（halt = 打进停机态）。 */
+  gate_halt_mode?: string
 }
 
 /** cloudflared 隧道协议（M1，plan/remote-wire-remediation §3）：
@@ -178,7 +191,7 @@ export type LegacyFlatRegistry = Partial<
  *  `remote.worker` 入口——父 `supervise_worker` + 子 `worker_loop`（子进程 60s 心跳续租、
  *  长期轮询 hub 抢 job）。只杀父进程 = 留一个继续抢 job 的孤儿，「随时启停」形同虚设。
  *  其余组件都是单进程，不进此集合（默认 False 路径行为不变）。 */
-export const COMPONENT_KILL_TREE: ReadonlySet<string> = new Set(['localWorker'])
+export const COMPONENT_KILL_TREE: ReadonlySet<string> = new Set(['localWorker', 'trainingLoop'])
 
 /** 受管进程的描述（spawn + 监督 + 变更检测的统一载体）。 */
 export interface ProcSpec {

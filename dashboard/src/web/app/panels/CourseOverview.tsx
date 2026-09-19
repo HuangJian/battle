@@ -42,8 +42,11 @@ function rowBadge(r: ParallelOverviewView['rows'][number]): {
       title: 'hub 把这门课标为离线：不实时派发 PPO，只接收 it 权重/指标回传',
     }
   }
-  if (r.training) return { text: '在训', cls: 'tc-cov__badge--on', title: 'trainingLoop 进程存活' }
-  return { text: '停', cls: 'tc-cov__badge--idle', title: '没有存活的 trainingLoop 进程' }
+  // 「在训」= 共享 trainer 在跑 ∧ 这门课没被收官（2026-09-19 / R3-5：trainer 是一个进程
+  // 服务所有课程，按课查进程存活是共享 trainer 时代的假事实）。
+  if (r.training)
+    return { text: '在训', cls: 'tc-cov__badge--on', title: '共享 trainer 在跑，且这门课未收官' }
+  return { text: '停', cls: 'tc-cov__badge--idle', title: '调度器没在跑，或这门课已收官' }
 }
 
 export function CourseOverview({

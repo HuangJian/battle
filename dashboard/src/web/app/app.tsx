@@ -354,9 +354,9 @@ export function App({ initial }: AppProps) {
   const phaseInfo: PhaseInfo | null = stateView?.phase ?? null
   const phaseElapsed = phaseInfo && phaseInfo.sinceMs != null ? now - phaseInfo.sinceMs : null
 
-  // 在训课程（**可多门**）：以服务端 stamp 的 `trainingCourses` 为准（registry 里
-  // trainingLoop 进程存活的课程——多课程并行下这是唯一能一次看全的口径）；旧视图
-  // 没有该字段时回退到「当前查看课程的 trainingLoop 是否在跑」（单课程语义不变）。
+  // 在训课程（**可多门**）：以服务端 stamp 的 `trainingCourses` 为准（共享 trainer 在跑
+  // ∧ 该课未收官——多课程并行下这是唯一能一次看全的口径，R3-5）；旧视图没有该字段时
+  // 回退到「trainer 在跑就当作当前查看的这门课在跑」（失败方向是**少报**，不编）。
   const trainingLoop = (stateView?.components ?? []).find((c) => c.key === 'trainingLoop')
   const trainingCourses =
     stateView?.trainingCourses && stateView.trainingCourses.length > 0

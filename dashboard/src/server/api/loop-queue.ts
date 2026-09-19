@@ -16,7 +16,13 @@
 
 import path from 'path'
 import { REPO_ROOT } from '../../core/paths'
-import { type LoopQueueView, parseLoopQueue, withPausedFacts, withTraining } from '../../web/view'
+import {
+  type LoopQueueView,
+  parseLoopQueue,
+  trainingFromQueue,
+  withPausedFacts,
+  withTraining,
+} from '../../web/view'
 import { type SyncRunResult, runRunPythonSyncScript } from '../run-python'
 import { readPauseFacts } from '../actions/loop-control'
 
@@ -112,10 +118,13 @@ export function invalidateLoopQueue(): void {
  *  回执是训练进程自己写的，读盘零代价，也不引入「python 要多报字段」的耦合。
  */
 export async function buildLoopQueueView(
-  training: string[],
+  schedulerAlive: boolean,
   run: LoopQueueRunner = defaultLoopQueueRunner,
   facts: { intent: string[]; applied: string[] } = readPauseFacts(),
 ): Promise<LoopQueueView> {
   const view = await getLoopQueueView(run)
+  // 「在训」由**这一份**视图自己推（`trainingFromQueue`）：调度器存活（registry）∧ 该课未收官
+  // （python 的队列状态）。别再往外要一个 `training: string[]`——那第二份名单会与这里漂开。
+  const training = trainingFromQueue(view, schedulerAlive)
   return withPausedFacts(withTraining(view, training), facts.intent, facts.applied)
 }

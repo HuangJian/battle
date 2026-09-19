@@ -153,13 +153,14 @@ export interface ConsoleStateView {
   /** 控制台当前课程（P5-W1 additive；旧视图无此字段 → 回退 `course`）。 */
   activeCourse?: string
   courses: string[]
-  /** 在训课程（多课程并行）：registry 里 trainingLoop **进程存活**的课程，按名排序。
-   *  课程 select 的多课高亮与总览的「在训」列同源；缺省（旧视图/测试直构）= 无在训课。 */
+  /** 在训课程（多课程并行）：**共享 trainer 在跑**（registry 的空串槽）∧ 该课未收官
+   *  （python 队列状态 `state`，2026-09-19 / R3-5）。课程 select 的多课高亮与总览的
+   *  「在训」列同源；缺省（旧视图/测试直构）= 无在训课。 */
   trainingCourses?: string[]
   /** 多课程并行总览（hub `/admin/queue` + 每课一行）；缺省/null = 无 hub 应答或未计算。 */
   overview?: ParallelOverviewView | null
   /** 训练调度器（**单例**：一个进程服务所有并行课程）的每课队列视图（R2c-3）。
-   *  数据源 = `run_rl_cluster.py --json`（只读计划视图）+ registry 的在训事实。
+   *  数据源 = `run_rl_cluster.py --json`（只读计划视图）+ registry 的调度器存活事实。
    *  缺省/null = 读失败（`error` 在视图里）或旧视图——UI 显空态，不编数据。 */
   loopQueue?: LoopQueueView | null
   /** push worker 登记视图（rl-config `nodes[].gpu_push` + 面板直探 + hub 侧探活）。 */

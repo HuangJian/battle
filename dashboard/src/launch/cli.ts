@@ -279,6 +279,9 @@ export const TRAINER_SCRIPT: Record<LockKind, string> = {
   run_rl: 'run_rl.py',
   run_bc: 'run_bc.py',
   train_loop: 'train_loop.py',
+  // 共享 trainer 的单实例锁（2026-09-19 / R3-5）：一个进程服务**所有**课程。
+  // 它的持有者命令行里没有 `--course`（发现模式），故 isTrainerFor(..., course='') 正好匹配。
+  run_cluster: 'run_rl_cluster.py',
 }
 
 /** 锁文件 → 持有人（`PID|EXE|TS`，兼容裸 PID）；不可读/残缺 → null。 */
@@ -384,6 +387,17 @@ export async function releaseTrainerLocks(course = '', io: TrainerLockIO = {}): 
     if (note) out.push(note)
   }
   return out
+}
+
+/** **共享 trainer 的进程级单实例锁**（`nn-training/.run_cluster.lock`，2026-09-19 / R3-5）。
+ *
+ *  为什么单列一个函数而不是塞进 `releaseTrainerLocks`：那个函数按**课程**横扫两个锁，
+ *  而这一把锁是**进程级**的（`course=''`）。身份核验同规：持有者命令行必须是
+ *  `run_rl_cluster.py` 且**不带 `--course`**（`isTrainerFor` 里查的是「命令行里有没有别的课」），
+ *  绝不按 PID 复用误杀。
+ */
+export async function releaseClusterLock(io: TrainerLockIO = {}): Promise<string> {
+  return releaseTrainerLock('run_cluster', '', io)
 }
 
 /** 冒烟门禁（本地训练）：venv torch import（ensureVenv 已保证）+ BCV2 容器回环 +

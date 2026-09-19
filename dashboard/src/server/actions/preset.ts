@@ -136,11 +136,18 @@ export async function startPreset(
     for (const k of order) {
       const r = await startComponent(k, ctx)
       detail.push(`${k}: ${r.message}${r.detail && !r.ok ? ` — ${r.detail[0] ?? ''}` : ''}`)
+      // trainer 是**共享**进程（R3-5）：它的首条详情是「本课机器侧传输 = …」——操作员选了模式
+      // 之后最需要确认的就是这一条（单进程没有「这门课的 flag」，模式只能落 rl-config）。
+      // 幂等早退（已在运行）时同样有这两行，故不按 ok 分支。
+      if (k === 'trainingLoop' && r.detail?.[0]) detail.push(`  ${r.detail[0]}`)
       if (!r.ok) return done(false, `${mode} 预设启动中断于 ${k}`, detail)
     }
     return done(
       true,
-      `已按 ${mode} 模式启动 ${order.length} 个组件 (course=${course})${pushNote}${hubNote}`,
+      `已按 ${mode} 模式启动 ${order.length} 个组件 (course=${course})${pushNote}${hubNote}` +
+        (order.includes('trainingLoop')
+          ? '；trainer 是共享进程（一个进程服务所有课程，停它 = 停全部）'
+          : ''),
       detail,
     )
   } catch (e) {

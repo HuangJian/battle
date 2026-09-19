@@ -173,6 +173,28 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="--serve：**课程级**附加参数，原样透传给开课（per-tick/intent/goal…）；空 = 吃课程配置",
     )
+    # `--ppo` 同规：控制台起的 trainer 一律 remote（PPO 在云端 GPU）——单进程服务所有课程时
+    # 「怎么连」住 `courses.<课>` 机器侧覆盖，而 `ppo` 是**全进程同一个**（都是 remote），
+    # 所以它是 serve 级参数。不声明它 = argparse 以 unrecognized arguments 拒启（与 --mode 同坑）。
+    ap.add_argument(
+        "--ppo",
+        default="",
+        choices=("", "local", "remote"),
+        help="--serve：PPO 执行位置（控制台起的是 remote）；空 = 吃课程 / rl-config 默认",
+    )
+    ap.add_argument(
+        "--cluster-lock",
+        default="",
+        help=(
+            "--serve：单实例锁文件（缺省 nn-training/.run_cluster.lock）——"
+            "一个进程服务所有课程，双开 = 两套调度器抢同一批 traj，故响亮拒启"
+        ),
+    )
+    ap.add_argument(
+        "--force",
+        action="store_true",
+        help="--serve：接管单实例锁（先确认没有别的 serve 在跑）",
+    )
     ap.add_argument(
         "--iters", type=int, default=0, help="--serve：每课跑满多少轮（0 = 吃课程配置）"
     )
@@ -184,43 +206,64 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.serve:
         # 惰性导入：只读路径（控制台每 10s 跑一次 --json）不得为 torch/网络付导入代价。
-        from rl.loop_serve import serve
-
-        # `--mode` 是**课程级**附加参数（rl-config 默认按模式取）——只有它需要透传给开课。
-        # 它必须是本解析器**显式声明**的参数：之前靠扫 raw argv 取，但 argparse 会先把
-        # `--serve --mode goal` 判成 unrecognized arguments 而拒启（声明了才能真透传）。
-        extra: list[str] = ["--mode", args.mode] if args.mode else []
-        courses = [c.strip() for c in args.courses.split(",") if c.strip()]
-        # 空课程表 = **发现模式**（进程不绑课程：扫 --traj-root 下所有有账本的课，之后每个
-        # 空转拍再扫；一门课都没有也照常运行，队列空着等）。显式课程表则退化为「只看这几门」。
-        rep = serve(
-            courses or None,
-            argv=extra,
-            traj_root=args.traj_root,
-            control_file=args.control_file or None,
-            iters=args.iters,
-            poll_sec=args.poll_sec,
-            capacities={
-                "local_ppo": args.local_ppo_slots,
-                "eval_local": args.local_eval_slots,
-                "local_rollout": args.rollout_slots,
-            },
-            max_seconds=args.max_seconds,
+        from rl.loop_serve import (
+            acquire_cluster_lock,
+            cluster_lock_path,
+            release_cluster_lock,
+            serve,
         )
-        if args.json:
-            print(
-                json.dumps(
-                    {
-                        "stop_reason": rep.stop_reason,
-                        "steps": rep.steps,
-                        "courses": rep.courses,
-                        "skipped": rep.skipped,
-                        "engines": rep.engines,
-                    },
-                    ensure_ascii=False,
-                )
+
+        # **进程级单实例锁**（2026-09-19 / R3-5）：单进程服务**所有**课程 ⇒ 双开就是两套调度器
+        # 抢同一批 traj（按课锁只能拦住「同一门课被两个进程跑」，拦不住「两套调度器各跑一半课程」）。
+        # 控制台启动前也会看它（registry + 锁双保险）；锁文件里的 holder 死了会自动收回。
+        lock_path = args.cluster_lock or cluster_lock_path()
+        if not acquire_cluster_lock(lock_path, force=args.force):
+            raise SystemExit(
+                f"[serve] 已有单进程服务器在跑（锁 {lock_path}）——一个进程服务所有课程，"
+                "双开会两套调度器抢同一批 traj；先停掉它，或确认无人在跑后加 --force 接管"
             )
-        return 0
+        # `--mode`/`--ppo` 是**课程级**附加参数（rl-config 默认按模式取）——只有它们需要透传给
+        # 开课。它们必须是本解析器**显式声明**的参数：不声明则 argparse 先以 unrecognized
+        # arguments 拒启（`--serve --mode goal` 的老坑，`--ppo remote` 同一个坑）。
+        extra: list[str] = []
+        if args.mode:
+            extra += ["--mode", args.mode]
+        if args.ppo:
+            extra += ["--ppo", args.ppo]
+        try:
+            courses = [c.strip() for c in args.courses.split(",") if c.strip()]
+            # 空课程表 = **发现模式**（进程不绑课程：扫 --traj-root 下所有有账本的课，之后每个
+            # 空转拍再扫；一门课都没有也照常运行，队列空着等）。显式课程表则退化为「只看这几门」。
+            rep = serve(
+                courses or None,
+                argv=extra,
+                traj_root=args.traj_root,
+                control_file=args.control_file or None,
+                iters=args.iters,
+                poll_sec=args.poll_sec,
+                capacities={
+                    "local_ppo": args.local_ppo_slots,
+                    "eval_local": args.local_eval_slots,
+                    "local_rollout": args.rollout_slots,
+                },
+                max_seconds=args.max_seconds,
+            )
+            if args.json:
+                print(
+                    json.dumps(
+                        {
+                            "stop_reason": rep.stop_reason,
+                            "steps": rep.steps,
+                            "courses": rep.courses,
+                            "skipped": rep.skipped,
+                            "engines": rep.engines,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            return 0
+        finally:
+            release_cluster_lock(lock_path)
 
     traj_root = args.traj_root
     courses = [c.strip() for c in args.courses.split(",") if c.strip()] or discover_courses(

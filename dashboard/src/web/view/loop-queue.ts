@@ -265,10 +265,24 @@ export function pauseBadge(row: LoopQueueRow): { text: string; cls: string } | n
   }
 }
 
-/** 把「在训」事实（registry 的 trainingLoop 存活表）并进行，并统计在训数。
+/** **「在训」的判据**（共享 trainer 时代）：**调度器进程活着** ∧ 这门课**没被收官**。
  *
- *  两个事实源各给一半：python 给「这门课这一轮卡在哪」，registry 给「这门课此刻有没有
- *  人在跑」。合并放在视图层（纯函数、可单测），服务端只负责把两边凑到一起。
+ *  为什么不再看 registry 的每课条目：`trainingLoop` 已收敛为**一个**进程（2026-09-19 /
+ *  R3-5），账本里只有 `['']` 一个槽 —— 按课查存活只会得到「一门课都没在训」这个假事实。
+ *  现在两半各来自它能回答的那一半：进程存活 = registry（唯一的事实源），「这一课还有没有活」
+ *  = python 给的队列状态（`state` 的 `done`/`aborted` 即收官）。
+ *
+ *  `schedulerAlive = false` ⇒ 全空：没人在跑时，盘上那套「可推进」的队列只是**计划**，
+ *  把它读成「在训」正是这张卡片最想避免的那种误读。 */
+export function trainingFromQueue(view: LoopQueueView, schedulerAlive: boolean): string[] {
+  if (!schedulerAlive) return []
+  return view.rows.filter((r) => r.state !== 'done' && r.state !== 'aborted').map((r) => r.course)
+}
+
+/** 把「在训」事实并进行，并统计在训数。
+ *
+ *  两个事实源各给一半：python 给「这门课这一轮卡在哪」（含它还有没有活），registry 给
+ *  「调度器此刻在不在跑」。合并放在视图层（纯函数、可单测），服务端只负责把两边凑到一起。
  */
 export function withTraining(view: LoopQueueView, training: string[]): LoopQueueView {
   const live = new Set(training)

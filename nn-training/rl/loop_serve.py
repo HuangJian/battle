@@ -144,6 +144,121 @@ def prepare_process(argv: list[str] | None = None) -> str:
     return bun
 
 
+#: 课程**机器侧覆盖**的键白名单（rl-config `courses.<课>.<key>`，2026-09-19 / R3-5）。
+#:
+#: 为什么这些键住 rl-config 而**不能**住 `curricula/<课>.jsonc`：课程文件字节 = `course_fp`
+#: （语料血缘 / 熔断口径，D14）——往课程文件里加一个传输旋钮，熔断会把同一份语料读成新语料。
+#: 与 `push_node_url`、本机并发配额同一条规矩（机器侧旋钮**永不进 curricula**）。
+#:
+#: 为什么现在需要它们：单进程服务器（`--serve`）**无法**用进程级 CLI 表达「这门课怎么连」
+#: ——一个进程服务 N 门课，命令行只有一份。控制台过去往**每门课**的 trainer 命令行里塞
+#: `--remote-transport pull` / `--remote-hub-url` / `--remote-degrade-after` / `--gate-halt-mode`，
+#: 收敛成一个共享 trainer 后那些旋钮搬到这个块（per-course，且随盘持久——比一次性的 flag 耐久）。
+COURSE_MACHINE_OVERRIDE_KEYS: tuple[str, ...] = (
+    "remote_transport",  # auto|pull|push|hubpush（值域与 loop_steps.REMOTE_TRANSPORTS 同源）
+    "remote_hub_url",  # 本课 pull/hubpush 打哪个 hub（共享 hub 时代常同值；本机 local 模式用本机地址）
+    "remote_degrade_after",  # T7 远端连败降级本机的阈值（控制台的 opt-in 开关）
+    "gate_halt_mode",  # 门禁失败语义（halt/skip…）
+)
+
+
+def cluster_lock_path() -> str:
+    """单进程服务器的锁文件：`nn-training/.run_cluster.lock`（`course=''` ⇒ 无课程名后缀）。"""
+    from train.loop_util import course_lock_path
+
+    return course_lock_path(str(NN_DIR), "", "run_cluster")
+
+
+def acquire_cluster_lock(lock_path: str, *, force: bool = False) -> bool:
+    """进程级单实例锁（2026-09-19 / R3-5）：单进程服务**所有**课程 ⇒ 双开 = 两套调度器
+    抢同一批 traj。按课锁拦不住这一类（两套调度器可以各跑一半课程，每门课都只有一个跑者）。
+
+    实现复用 `run_rl._acquire_run_rl_lock`（O_CREAT|O_EXCL；holder 死了自动收回）——
+    锁文件里写 `pid|python|ts`，与其它锁同一种形状（控制台按同一读法看它）。
+    """
+    from run_rl import _acquire_run_rl_lock
+
+    return _acquire_run_rl_lock(str(lock_path), force=force)
+
+
+def release_cluster_lock(lock_path: str) -> None:
+    """释放自己持有的单实例锁（已易主则不删——与 `_cleanup_run_rl_lock` 同契约）。"""
+    from run_rl import _cleanup_run_rl_lock
+
+    _cleanup_run_rl_lock(str(lock_path))
+
+
+#: 课程文件里课程名 → 路径约定下的 stem（读 courses.<课> 块用）。
+
+def _read_rl_config() -> dict:
+    """读 rl-config.json（读不到 / 形状不对 → 空 dict）。**单独一个函数**：这是测试注入点
+    （用例不碰仓根的真 rl-config），也是「读面只读一处」的写法。
+
+    形状校验不是防御性装饰：读者按 `cfg.get("courses")` 取块，而一份顶层是数组/字符串的
+    JSON（手改坏了）会让 `.get` 直接 AttributeError 落在**开课路径**上——一门课开不起来还
+    看不出为什么。空 dict ⇒ 退化成「没配机器侧旋钮」，与文件不存在同一个结果。
+    """
+    try:
+        data: Any = json.loads((NN_DIR / "rl-config.json").read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def apply_course_machine_overrides(
+    args: Any, course: str, cfg: dict | None = None, *, log_fn: Callable[[str], None] | None = None
+) -> list[str]:
+    """把 rl-config `courses.<课>` 里的机器侧旋钮施加到 args；返回**已施加**的键（供测试/日志）。
+
+    契约（三条都与既有写法同源，不发明新语义）：
+      · 只认白名单 `COURSE_MACHINE_OVERRIDE_KEYS`——别的键（`push_node_url` / 配额 / `hub_push`）
+        各自有既有的读取点，本函数一个字都不碰；
+      · `remote_transport` 的值域在**这里**校验（响亮 SystemExit），因为它现在可能来自文件而不是
+        argparse choices —— 静默接受一个拼错的 transport 会让 job 走错执行面而「看起来正常」；
+      · 目标 args 没有这个字段（BC 解析器比 RL 少几个键）⇒ **响亮跳过**并记一行，不 setattr 造字段
+        （造出来的字段没有任何读者，只会让人以为生效了）。
+
+    施加时机 = `course_args`/`_open_bc_course` 的**课程覆盖之后、`validate_args` 之前**。
+    优先顺序（高→低）：本覆盖（rl-config `courses.<课>`，**per-course 最具体**）→ serve 级 argv
+    → 课程文件 → rl-config 默认。「谁赢」本身不是重点，重点是**逐键打印生效值**：静默改写
+    执行面（该走 pull 却走 push）正是「看起来正常」那类事故的温床。
+    """
+    log_fn = log_fn or log
+    if cfg is None:
+        cfg = _read_rl_config()
+    block = ((cfg.get("courses") or {}).get(course) or {}) if isinstance(cfg, dict) else {}
+    if not isinstance(block, dict):
+        return []
+    applied: list[str] = []
+    for key in COURSE_MACHINE_OVERRIDE_KEYS:
+        if key not in block:
+            continue
+        val = block[key]
+        if key == "remote_transport":
+            from rl.loop_steps import REMOTE_TRANSPORTS
+
+            # RL 的合法值域 = loop_steps.REMOTE_TRANSPORTS；BC 多一个 `local`（本机 train/bc.py）
+            # ——按课程种类取并集，不在这里抄第二份枚举。
+            allowed = REMOTE_TRANSPORTS + (("local",) if course_kind(course) == "bc" else ())
+            if str(val) not in allowed:
+                raise SystemExit(
+                    f"[serve] 课程 {course} 的 courses.{course}.remote_transport = {val!r} 非法"
+                    f"（只接受 {'|'.join(allowed)}）——修 rl-config.json；"
+                    "非法值会让 job 走错执行面而「看起来正常」"
+                )
+        if not hasattr(args, key):
+            log_fn(f"[serve] 课程 {course} 的 courses.{course}.{key} 本课程种类没有该参数 ⇒ 跳过")
+            continue
+        setattr(args, key, val)
+        applied.append(key)
+    if applied:
+        log_fn(
+            f"[serve] 课程 {course} 机器侧覆盖（rl-config courses.{course}）: "
+            + ", ".join(f"{k}={getattr(args, k)!r}" for k in applied)
+        )
+    return applied
+
+
 # ---------------------------------------------------------------- 课程级一次
 
 
@@ -191,6 +306,11 @@ def course_args(course: str, argv: list[str] | None = None) -> Any:
                 "[serve] 附加参数与课程配置冲突（课程是单一事实来源，无 CLI 逐参覆盖——"
                 "plan §3）：\n  " + "\n  ".join(conflicts)
             )
+
+    # 课程**机器侧覆盖**（rl-config `courses.<课>`）：优先级「argv > 机器侧覆盖 > 课程文件 >
+    # rl-config 默认」（课程文件不该管机器侧；argv 是当前进程的明确意图）。放在
+    # `validate_args` 之前——覆盖后的值同样要过一次启动期校验（P1-3 的口径）。
+    apply_course_machine_overrides(args, course, cfg)
 
     defaults_ns2 = ap.parse_args([])
     args._explicit_stream = int(getattr(args, "stream", 0) or 0) != int(
@@ -269,6 +389,9 @@ def _open_bc_course(
     from run_rl import _acquire_run_rl_lock, _cleanup_run_rl_lock
 
     args = bc_course_args(course, argv)
+    # 课程机器侧覆盖：与 RL 同源（同一份 rl-config 块、同一个白名单）——BC 解析器缺的键会被
+    # 响亮跳过（不 setattr 造字段）。在 `resolve_bc_runtime` **之前**：它按 args 推传输。
+    apply_course_machine_overrides(args, course)
     # 解析链只此一份（`resolve_bc_runtime` 同时给出 traj/传输/token；它自己读 rl-config）。
     runtime = resolve_bc_runtime(args)
     traj = Path(runtime.traj)
