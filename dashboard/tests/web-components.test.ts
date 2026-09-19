@@ -182,8 +182,25 @@ describe('§361：icon 复制键 / cloudflared endpoint 截断与复制 / local 
     expect(html).toContain('class="tc-cc__mode"')
   })
 
-  it('组件卡片顺序：hubServer → trainingLoop → selfNode → localWorker → cloudflared', () => {
-    const keys = ['cloudflared', 'hubServer', 'localWorker', 'selfNode', 'trainingLoop']
+  it('组件卡分族（R3-3）：服务面（单例角色）在前、课程面在后，族内顺序稳定', () => {
+    // scope 由服务端按账本槽位规则填（这里照抄真值：selfNode 单例 / hub·隧道 共享 / 其余按课程）
+    const scopes: Record<string, string> = {
+      selfNode: 'singleton',
+      hubServer: 'shared',
+      cloudflared: 'shared',
+      trainingLoop: 'course',
+      localWorker: 'course',
+      workerServe: 'course',
+    }
+    // 输入故意乱序：顺序必须是**分组算出来的**，不是渲染顺序碰巧
+    const keys = [
+      'localWorker',
+      'cloudflared',
+      'workerServe',
+      'trainingLoop',
+      'hubServer',
+      'selfNode',
+    ]
     const s = {
       time: 't',
       course: 'c',
@@ -191,6 +208,7 @@ describe('§361：icon 复制键 / cloudflared endpoint 截断与复制 / local 
       components: keys.map((key) => ({
         key,
         label: key,
+        scope: scopes[key],
         status: 'stopped' as const,
         pid: null,
         url: null,
@@ -208,13 +226,25 @@ describe('§361：icon 复制键 / cloudflared endpoint 截断与复制 / local 
       localNode: null,
     } as ConsoleStateView
     const html = renderConsolePage(s)
-    const order = ['hubServer', 'trainingLoop', 'selfNode', 'localWorker', 'cloudflared']
+    // 两组标题都上屏（分组这件事本身要看得见，不能只靠间距）
+    expect(html).toContain('服务面 · 单例')
+    expect(html).toContain('课程面 · 按课程')
+    expect(html).toContain('data-family="service"')
+    expect(html).toContain('data-family="course"')
+    // 服务面在前、课程面在后；族内顺序：agent → hub → 隧道 / trainer → 本机 worker
+    const order = ['selfNode', 'hubServer', 'cloudflared', 'trainingLoop', 'localWorker']
     let prev = -1
     for (const k of order) {
       const idx = html.indexOf(`>${k}<`)
-      expect(idx).toBeGreaterThan(prev)
+      expect(idx, k).toBeGreaterThan(prev)
       prev = idx
     }
+    // 作用域徽章：共享两个（hub/隧道）+ 单例一个（selfNode）；按课程不挂标签（组标题已说）。
+    // 断言整段 class 属性而不是子串——页面里内联了整份 theme.css，类名本身也会出现。
+    expect(html.match(/class="tc-cc__scope tc-cc__scope--shared"/g)).toHaveLength(2)
+    expect(html.match(/class="tc-cc__scope tc-cc__scope--singleton"/g)).toHaveLength(1)
+    // 节点面组件（worker_server）不进卡片行：它渲染在节点行，两个入口 = 混淆
+    expect(html).not.toContain('>workerServe<')
   })
 
   it('未配置 push 目标 → 卡片不出徽章', () => {

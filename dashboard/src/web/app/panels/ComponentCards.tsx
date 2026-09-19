@@ -8,7 +8,7 @@
 
 import { useEffect, useState } from 'preact/hooks'
 import type { ComponentView, ConsoleStateView, PushTargetView } from '../../view'
-import { pendingLockReleases } from '../../view'
+import { cardFamilies, pendingLockReleases, scopeBadge } from '../../view'
 import { CopyButton } from '../../components/CopyButton'
 
 export interface ComponentCardsProps {
@@ -99,162 +99,167 @@ export function ComponentCards({
   }
 
   if (!stateView) return null
-  const mains = stateView.components.filter((c) => c.key !== 'workerServe')
-  // 组件卡片固定顺序：hubServer > trainingLoop > selfNode > localWorker > cloudflared
-  // （localWorker 紧跟 selfNode：本机执行面与采集节点相邻；hub/trainer 居前便于启停）。
-  const ORDER: string[] = ['hubServer', 'trainingLoop', 'selfNode', 'localWorker', 'cloudflared']
-  mains.sort((a, b) => ORDER.indexOf(a.key) - ORDER.indexOf(b.key))
-  const openCard = mains.find((c) => c.key === open) ?? null
+  // 两族（R3-3）：服务面（单例角色，与课程无关）vs 课程面（卡片对象 = 当前查看的那门课）。
+  // 分组与顺序都出自 view 层的 `cardFamilies`（成员资格 = 服务端给的 scope，不在这里按 key 猜）。
+  const families = cardFamilies(stateView.components)
+  const openCard = families.flatMap((f) => f.rows).find((c) => c.key === open) ?? null
 
   return (
     <>
       <div className="tc-comps" aria-label="组件">
-        <span className="lbl">组件</span>
-        {mains.map((c) => {
-          const isOpen = open === c.key
-          const isRunning = c.status === 'running'
-          const locked = c.busy || pending[c.key] !== undefined
-          // 只读视图不禁用按钮（与其它动作键同哲学：可点、服务端 403 + flash 提示）。
-          const roDisabledCls = readOnly ? ' tc-npill--ro' : ''
-          const toggle = (): void => setOpen(isOpen ? null : c.key)
-          const logHref = `/log/${c.key}${course ? `?course=${encodeURIComponent(course)}` : ''}`
-          return (
-            <span
-              key={c.key}
-              className={`tc-npill${roDisabledCls}${isOpen ? ' tc-npill--collapse' : ''}`}
-              role={readOnly ? undefined : 'button'}
-              tabIndex={readOnly ? undefined : 0}
-              aria-label={c.label}
-              aria-expanded={isOpen}
-              title={readOnly ? '（只读）' : `${c.label}·点击展开日志详情`}
-              onClick={readOnly ? undefined : toggle}
-              onKeyDown={
-                readOnly
-                  ? undefined
-                  : (e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault()
-                        toggle()
-                      }
-                    }
-              }
-            >
-              <span className={`tc-dot ${dotClass(c)}`} />
-              <b>{c.key}</b>
-              {c.shared ? (
-                // 共享实例（hub/隧道，2026-09-18）：一个进程服务所有课程，不属于当前查看的课。
-                // 不标出来，操作员会以为「这门课自己的 hub 停了」而去重复启动。
-                <b
-                  className="tc-cc__shared"
-                  title="共享实例：一个进程服务所有并行课程（启动/停止/冒烟的操作对象是同一个）"
-                >
-                  共享
-                </b>
-              ) : null}
-              {(() => {
-                // push 执行面徽章（2026-09-15）：贴在 trainer 卡的模式徽章旁——「job 现在推给谁」
-                // 只有这一个卡上问得出口。
-                // 仅当 trainer 正以 push 在跑时展示（c.mode=push 或 active）：config 里的
-                // push_node_url 在切到 pull 后仍会残留，那是「配置指向」不是「正在用」，
-                // 继续上卡会误报「push→云机·不通」（2026-09-16 用户反馈）。
-                // 通信成功（healthy）后「push」与「push→云机」重复——只留后者。
-                const raw = c.key === 'trainingLoop' ? (stateView.pushTarget ?? null) : null
-                const pt = raw && (c.mode === 'push' || raw.active === true) ? raw : null
-                const modeRedundant =
-                  pt !== null && pt.healthy === true && (c.mode === 'push' || pt.active)
-                return (
-                  <>
-                    {c.mode && !modeRedundant ? <b className="tc-cc__mode">{c.mode}</b> : null}
-                    {pt ? (
-                      <b
-                        className={`tc-cc__push tc-cc__push--${pt.kind}${pt.active ? '' : ' tc-cc__push--idle'}`}
-                        title={pushBadgeTitle(pt)}
-                      >
-                        {pushBadgeText(pt)}
-                      </b>
-                    ) : null}
-                  </>
-                )
-              })()}
-              {c.key === 'cloudflared' && (c.url || c.secret) ? (
-                // 截断展示 + 全量复制（§361：title 留全量，复制钮拿全量）；复制点击不展开日志详情。
+        {families.map((f) => (
+          <div className={`tc-comps__group tc-comps__group--${f.id}`} key={f.id} data-family={f.id}>
+            <span className="tc-comps__glabel" title={f.hint}>
+              {f.title}
+            </span>
+            {f.rows.map((c) => {
+              const isOpen = open === c.key
+              const isRunning = c.status === 'running'
+              const locked = c.busy || pending[c.key] !== undefined
+              // 只读视图不禁用按钮（与其它动作键同哲学：可点、服务端 403 + flash 提示）。
+              const roDisabledCls = readOnly ? ' tc-npill--ro' : ''
+              const toggle = (): void => setOpen(isOpen ? null : c.key)
+              const logHref = `/log/${c.key}${course ? `?course=${encodeURIComponent(course)}` : ''}`
+              const scope = scopeBadge(c)
+              return (
                 <span
-                  role="group"
-                  aria-label={
-                    c.url && c.secret
-                      ? '隧道 + auth key 复制钮'
-                      : c.url
-                        ? '隧道复制钮'
-                        : 'auth key复制钮'
+                  key={c.key}
+                  className={`tc-npill${roDisabledCls}${isOpen ? ' tc-npill--collapse' : ''}`}
+                  role={readOnly ? undefined : 'button'}
+                  tabIndex={readOnly ? undefined : 0}
+                  aria-label={c.label}
+                  aria-expanded={isOpen}
+                  title={readOnly ? '（只读）' : `${c.label}·点击展开日志详情`}
+                  onClick={readOnly ? undefined : toggle}
+                  onKeyDown={
+                    readOnly
+                      ? undefined
+                      : (e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault()
+                            toggle()
+                          }
+                        }
                   }
-                  onClick={(e) => e.stopPropagation()}
                 >
-                  {c.url ? <CopyButton text={c.url} label="url" small /> : null}
-                  {c.secret ? <CopyButton text={c.secret} label="key" small /> : null}
-                </span>
-              ) : null}
-              {c.status === 'exited' && c.error ? (
-                // §380：退出原因放在日志详情里展示全文；chip 内只放 ⚠ 入口。
-                <a
-                  className="tc-cc__err-link"
-                  href={logHref}
-                  title={c.error}
-                  aria-label={`${c.label} 退出原因：${c.error}`}
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  ⚠
-                </a>
-              ) : null}
-              <span className="tc-cc__acts" onClick={(e) => e.stopPropagation()}>
-                {isRunning ? (
-                  <>
-                    <button
-                      type="button"
-                      className="tc-btn tc-btn--sm"
-                      disabled={locked}
-                      aria-label={`停止 ${c.label}`}
-                      title={roDisabledCls ? undefined : '动作进行中…'}
-                      onClick={() => fire(c, 'stop')}
+                  <span className={`tc-dot ${dotClass(c)}`} />
+                  <b>{c.key}</b>
+                  {scope ? (
+                    // 作用域徽章（R3-3）：只说 scope 说不出来的那件事——「共享」= 一个进程服务
+                    // 所有课程（不标就会有人去给这门课再起一个 hub，第二个实例抢同一端口）；
+                    // 「单例」= 全机一份。按课程是默认语义（组标题已说），不给每行挂噪声标签。
+                    <b className={`tc-cc__scope ${scope.cls}`} title={scope.title}>
+                      {scope.text}
+                    </b>
+                  ) : null}
+                  {(() => {
+                    // push 执行面徽章（2026-09-15）：贴在 trainer 卡的模式徽章旁——「job 现在推给谁」
+                    // 只有这一个卡上问得出口。
+                    // 仅当 trainer 正以 push 在跑时展示（c.mode=push 或 active）：config 里的
+                    // push_node_url 在切到 pull 后仍会残留，那是「配置指向」不是「正在用」，
+                    // 继续上卡会误报「push→云机·不通」（2026-09-16 用户反馈）。
+                    // 通信成功（healthy）后「push」与「push→云机」重复——只留后者。
+                    const raw = c.key === 'trainingLoop' ? (stateView.pushTarget ?? null) : null
+                    const pt = raw && (c.mode === 'push' || raw.active === true) ? raw : null
+                    const modeRedundant =
+                      pt !== null && pt.healthy === true && (c.mode === 'push' || pt.active)
+                    return (
+                      <>
+                        {c.mode && !modeRedundant ? <b className="tc-cc__mode">{c.mode}</b> : null}
+                        {pt ? (
+                          <b
+                            className={`tc-cc__push tc-cc__push--${pt.kind}${pt.active ? '' : ' tc-cc__push--idle'}`}
+                            title={pushBadgeTitle(pt)}
+                          >
+                            {pushBadgeText(pt)}
+                          </b>
+                        ) : null}
+                      </>
+                    )
+                  })()}
+                  {c.key === 'cloudflared' && (c.url || c.secret) ? (
+                    // 截断展示 + 全量复制（§361：title 留全量，复制钮拿全量）；复制点击不展开日志详情。
+                    <span
+                      role="group"
+                      aria-label={
+                        c.url && c.secret
+                          ? '隧道 + auth key 复制钮'
+                          : c.url
+                            ? '隧道复制钮'
+                            : 'auth key复制钮'
+                      }
+                      onClick={(e) => e.stopPropagation()}
                     >
-                      停止
-                    </button>
-                    {c.key !== 'trainingLoop' ? (
+                      {c.url ? <CopyButton text={c.url} label="url" small /> : null}
+                      {c.secret ? <CopyButton text={c.secret} label="key" small /> : null}
+                    </span>
+                  ) : null}
+                  {c.status === 'exited' && c.error ? (
+                    // §380：退出原因放在日志详情里展示全文；chip 内只放 ⚠ 入口。
+                    <a
+                      className="tc-cc__err-link"
+                      href={logHref}
+                      title={c.error}
+                      aria-label={`${c.label} 退出原因：${c.error}`}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      ⚠
+                    </a>
+                  ) : null}
+                  <span className="tc-cc__acts" onClick={(e) => e.stopPropagation()}>
+                    {isRunning ? (
+                      <>
+                        <button
+                          type="button"
+                          className="tc-btn tc-btn--sm"
+                          disabled={locked}
+                          aria-label={`停止 ${c.label}`}
+                          title={roDisabledCls ? undefined : '动作进行中…'}
+                          onClick={() => fire(c, 'stop')}
+                        >
+                          停止
+                        </button>
+                        {c.key !== 'trainingLoop' ? (
+                          <button
+                            type="button"
+                            className="tc-iconbtn"
+                            disabled={locked}
+                            aria-label={`冒烟 ${c.label}`}
+                            title={readOnly ? RO_TITLE : '冒烟'}
+                            onClick={() => void onAction('smoke', { component: c.key })}
+                          >
+                            ◎
+                          </button>
+                        ) : null}
+                        <a
+                          className="tc-iconbtn"
+                          aria-label={`日志 ${c.label}`}
+                          title="日志"
+                          href={logHref}
+                        >
+                          ≡
+                        </a>
+                      </>
+                    ) : (
                       <button
                         type="button"
-                        className="tc-iconbtn"
+                        className="tc-btn tc-btn--sm tc-btn--primary"
                         disabled={locked}
-                        aria-label={`冒烟 ${c.label}`}
-                        title={readOnly ? RO_TITLE : '冒烟'}
-                        onClick={() => void onAction('smoke', { component: c.key })}
+                        aria-label={`启动 ${c.label}`}
+                        title={roDisabledCls ? undefined : '动作进行中…'}
+                        onClick={
+                          c.key === 'trainingLoop' ? onLaunchTrainer : () => fire(c, 'start')
+                        }
                       >
-                        ◎
+                        启动
                       </button>
-                    ) : null}
-                    <a
-                      className="tc-iconbtn"
-                      aria-label={`日志 ${c.label}`}
-                      title="日志"
-                      href={logHref}
-                    >
-                      ≡
-                    </a>
-                  </>
-                ) : (
-                  <button
-                    type="button"
-                    className="tc-btn tc-btn--sm tc-btn--primary"
-                    disabled={locked}
-                    aria-label={`启动 ${c.label}`}
-                    title={roDisabledCls ? undefined : '动作进行中…'}
-                    onClick={c.key === 'trainingLoop' ? onLaunchTrainer : () => fire(c, 'start')}
-                  >
-                    启动
-                  </button>
-                )}
-              </span>
-            </span>
-          )
-        })}
+                    )}
+                  </span>
+                </span>
+              )
+            })}
+          </div>
+        ))}
       </div>
       {openCard ? (
         // 点击展开 chip：详情带**整行全宽**贴在 chips 行下方（点击日志区域再次收起）。

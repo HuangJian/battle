@@ -12,6 +12,7 @@
  *
  *  模块地图（按数据来源分组）：
  *    console-types  控制台整页视图  |  metric-types / bc-types  训练指标与 BC 账本行
+ *    component-groups 组件卡分组（服务面单例 vs 课程面按课程）
  *    pool-types     节点池视图      |  eval-types / eval-export  评估板
  *    log-view       日志页          |  cards  卡片注册表
  *    loop-queue     调度器每课队列视图（单例卡片的读面）
@@ -22,6 +23,7 @@
 
 // ── 内部模块（唯一对外出口；调用方一律 import 本目录，不直连内部文件）──
 export * from './console-types'
+export * from './component-groups'
 export * from './bc-types'
 export * from './log-view'
 export * from './metric-types'

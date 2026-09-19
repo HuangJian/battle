@@ -1,6 +1,6 @@
 /** views.ts — 组件视图与节点视图组装（状态探测 → 视图对象）。 */
 import { httpOk, pidAlive } from '../../core/net'
-import { entryForCourse, isSharedComponent, loadRegistry, scopeOf } from '../../core/registry'
+import { componentScope, entryForCourse, loadRegistry, scopeOf } from '../../core/registry'
 import type { RlConfig } from '../../core/types'
 import type { ComponentView, NodeView } from '../../web/view'
 import { COMPONENT_LABELS, busy, componentBusy } from '../actions'
@@ -52,7 +52,9 @@ export async function componentViews(cfg: RlConfig, course: string): Promise<Com
         // 与动作实际加的 busy 键同源（按课键控组件带 course）；否则页面显示「未忙碌」
         // 而服务端 409（2026-09-14 事故：trainingLoop 启动永远返回 409）。
         busy: componentBusy(key, scopeOf(key, course)),
-        shared: isSharedComponent(key),
+        // 作用域（单例/共享/按课程）——卡片分组的唯一判据（R3-3）。服务端算一次，
+        // 客户端不许自己按 key 猜（第二份名单 = 漂开 = 某个组件从 UI 上消失）。
+        scope: componentScope(key),
         // cloudflared 卡展示隧道 auth key（复制用）；其余组件无密钥字段
         ...(key === 'cloudflared' ? { secret: cfg.rl.remote_token } : {}),
       }

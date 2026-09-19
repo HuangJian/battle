@@ -1,6 +1,7 @@
 /** LogNavCard.tsx — 抽屉「日志」tab：常驻组件各自日志页入口（独立页 /log/<key>）。 */
 
 import type { ConsoleStateView } from '../../view'
+import { NODE_FACE_COMPONENTS } from '../../view'
 import { Pill } from '../../components/Pill'
 
 const tone = (status: string): 'g' | 'y' | 'r' | 'gray' =>
@@ -15,7 +16,9 @@ export function LogNavCard({
   course?: string
 }) {
   if (!stateView) return <div className="tc-loading">加载中…</div>
-  const mains = stateView.components.filter((c) => c.key !== 'workerServe')
+  // 节点面组件（worker_server）不在这里列日志入口：它的语义轴是节点 —— 与组件卡行同一份例外声明
+  // （`NODE_FACE_COMPONENTS`），不留第二行 filter（两处名单漂开 = 某个组件某处消失）。
+  const mains = stateView.components.filter((c) => !NODE_FACE_COMPONENTS.includes(c.key))
   return (
     <div>
       <div className="tc-row" style={{ gap: 10 }}>

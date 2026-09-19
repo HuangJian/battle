@@ -9,6 +9,11 @@ import { PhaseInfo } from './phase'
 /** 卡数据源陈旧度（颜色+形状双编码：ok=绿圆 / refresh=黄半圆 / err=红方）。 */
 export type StaleState = 'ok' | 'refresh' | 'err'
 
+/** 组件作用域（服务端按 `core/registry.componentScope` 填）：
+ *  singleton = 全机一份（selfNode）· shared = 一个进程服务所有课程（hub/隧道）· course = 按课程键控。
+ *  卡片按它分组（服务面 vs 课程面，R3-3）——见 `component-groups.ts`。 */
+export type ComponentScope = 'singleton' | 'shared' | 'course'
+
 export interface ComponentView {
   key: string
   label: string
@@ -23,9 +28,12 @@ export interface ComponentView {
   log: string | null
   logTail: string[]
   busy: boolean
-  /** **共享实例**（2026-09-18 起 hubServer/cloudflared）：一个进程服务所有并行课程，
-   *  不属于当前查看的课程——卡片要标出来，否则操作员会以为「这门课自己的 hub 停了」。 */
-  shared?: boolean
+  /** **作用域**（R3-3）：`shared` = 一个进程服务所有并行课程（hub/隧道，2026-09-18 起），
+   *  不属于当前查看的课程——卡片要标出来，否则操作员会以为「这门课自己的 hub 停了」；
+   *  `singleton` = 全机一份（selfNode）；`course` = 按课键控。
+   *  **缺省/未知 ⇒ 按 `course` 渲染**（单侧保守）：少一个徽章只是少信息，凭空空贴「共享」
+   *  会让操作员以为「停它就是停全局」（而它其实只停本课）——假承诺比缺标签贵。 */
+  scope?: ComponentScope
   /** 需要展示的密钥型字段（仅 cloudflared：rl.remote_token，供用户复制贴给远端）。
    *  局域网只读与回环同权展示——只读是动作边界，不是数据边界（2026-09-09 用户指令）。 */
   secret?: string

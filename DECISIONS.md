@@ -2984,3 +2984,19 @@ R2c 造好了调度器与任务体，但**没有驱动者**（至今仍是「一
   - **`kind` 缺省/未知一律按 `rl` 渲染**（保守方向单侧）：python 比控制台旧时（还没这个字段）少一个徽标只是少信息；凭空空贴 BC 标签则会对外宣称「一轮 = 一个任务」（而它有 13 步）——假承诺比缺标签贵。`BC` 这种大小写不符也不认（只认 python 的确切取值）。
   - **卡片解除 `isBc` 门控**：`stateView.isBc` 说的是**当前查看的那门课**，而这张卡是**跨课程**的——用它门控是范畴错误，后果是「选中一门 BC 课 ⇒ 整张卡片消失」，于是 BC 课在调度器视图里根本不存在（而 BC 课正是最需要看「在等哪个 GPU job 回传」的那种）。BC 行只多一个 `BC` 徽标 + 换成「一轮 = 一个任务」的悬停文案（不出现 RL 的门禁/verdict/KL 字眼）。
 - **未做（明确记录，不是漏）**：① 真机「一个 serve 进程带 BC + RL 双课」的实跑（本轮全在假件下证明逻辑，与 R2e 同一口径）；② BC 一轮再下沉成细粒度步骤。
+
+## §2026-09-19-goalnn-console-card-families（2026-09-19，R3-3：组件卡按「单例角色 vs 按课程」分族）
+
+- **背景**：控制台把六个受管组件排成一行 chips，谁跟课程绑定、谁是全机/全局一份，只能靠 `<b>共享</b>` 这一个布尔徽章与操作员的记忆区分。两条具体误读都是这台机器上真会发生的：① hub/隧道已单例（§2026-09-18），但卡片仍按「当前查看的课」渲染，操作员会给这门课**再起一个 hub**（第二个实例抢同一端口）；② trainer 卡片看着像全局对象，但按下去起的是**当前查看的那门课**——换课程 = 换对象这件事在视觉上没有任何提示。
+- **决定**：把「作用域」提升为一等事实，卡片按它分族渲染（`web/view/component-groups.ts`）。
+  - **三态作用域由 `core/registry.ts::componentScope(key)` 单点给出**（`singleton` = selfNode / `shared` = hub·隧道（账本槽恒 `''`）/ `course` = 其余），服务端算一次填进 `ComponentView.scope`；客户端**不许**自己按 key 猜。
+  - **族归属 = scope 的函数**，视图层**不写**「哪些 key 属于哪一族」的名单：族名单一旦与账本槽位规则漂开，症状是某个组件从 UI 上**消失**（而它照样被启动、被监督、被冒烟）。面板只负责画。
+  - **节点面例外声明成数据**（`NODE_FACE_COMPONENTS = ['workerServe']`），不再用面板里的一行 `filter` 静默过滤：`worker_server` 的语义轴是节点/GPU 身份（id/url/concurrency 都是节点的，hub 的 push 派发与竞速也按节点算），卡片行再渲染一份就与节点行出现「同一件事两个入口」。`LogNavCard` 复用同一常量（两处 filter 漂开 = 某个组件某处消失）。
+  - **组内顺序是纯化妆**（`ORDER` 表；未列出的 key 落组尾但**不丢**），**空组不渲染**（没东西可说时不留空壳）。族标题 + 悬停说明上屏（「与课程数量无关」/「卡片上的对象是当前查看的那门课」）。
+  - **`scope` 缺省/未知 ⇒ 按 `course` 渲染**（单侧保守，与 loop-queue 的 `kind` 同一条规矩）：少一个徽章只是少信息；凭空空贴「共享」会让操作员以为「停它就是停全局」（而它其实只停本课）——假承诺比缺标签贵。
+  - 徽章只标 scope 说不出来的那件事：`shared` ⇒ 「共享」、`singleton` ⇒ 「单例」、`course` ⇒ **无徽章**（按课程是默认语义，组标题已说；每行再挂一个只是噪声）。
+- **备选与否决**：① 继续排一行、只加徽章——否（这正是问题本身：单例角色与按课对象混在一个序列里）；② 在面板里写两族 key 名单——否（第二份真相，且新增组件会静默落进没人认识的桶）；③ 保留 `shared` 布尔再另加 `scope`——否（两个字段 = 两个真相，必然漂开）；④ 顺手把 trainer/localWorker 的账本键也收敛成共享槽——**本轮不做**（见下）。
+- **违反后果**：任何客户端按 key 自建族别名，都会在 registry 改规则的那天让某个组件**静默消失**；任何把 `shared` 语义空贴给按课程组件的写法，都会把「只停本课」演成「停全局」。
+- **落地**：`core/registry.ts`（`ComponentScope` + `componentScope`）· `server/api/views.ts`（`ComponentView.scope` 取代 `shared`）· `web/view/component-groups.ts`（新：`cardFamilies` / `scopeBadge` / `NODE_FACE_COMPONENTS` / `FAMILY_META`）· `web/app/panels/ComponentCards.tsx`（分组渲染）· `web/app/panels/LogNavCard.tsx`（复用例外常量）· `web/theme.css`（`.tc-comps__group*` / `.tc-cc__scope--*`）。回归：`tests/web-component-groups.test.ts`(11：分族与族内顺序 / 节点面例外是真组件 / **全组件恰好归属一处** / **与 registry 判据对拍** / `scope` 缺省保守 / 未列出的 key 不丢 / 空组不渲染 / 不改动调用方数组 / 徽章三态) · `tests/web-components.test.ts`（分族 SSR：两组标题与 `data-family`、族内顺序、共享×2+单例×1、节点面组件不在卡行）· `tests/single-hub-tunnel.test.ts`（`.shared` → `.scope`）。进度 `docs/nn.progress.md §88`。
+- **未做（明确记录，不是漏）**：账本键的真正收敛——`trainingLoop`/`localWorker` 仍是 per-course 键（控制台仍按课起 `run_rl.py --course`，尽管训练侧已有 `--serve` 单进程服务所有课程），`workerServe` 仍住 per-course 表（轴却是节点）。那是**启动面/监督面**的改动（含 `TrainLaunchModal` 的精简与旧条目换代接管），与本轮的「把两族读出来、说清楚」是两件事；本轮的分族恰好是它的前置（换成共享槽后，课程面只剩数据、进程面全在服务面）。
+- **一条构建期坑（值得记）**：客户端代码里写**未加引号的 `node:` 对象键**（`{ node: [] }`）会让三份 bundle 全红——`server/build.ts` 的禁词门禁把 `node:` 当「引入了 node 内置模块」。本文件已在 `ComponentFamilyId` 注释里写明。

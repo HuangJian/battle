@@ -83,6 +83,23 @@ export function isSharedComponent(key: Component): key is CourseComponent {
   return (SHARED_COMPONENTS as readonly string[]).includes(key)
 }
 
+/** 组件作用域（三态）—— 卡片分组与作用域徽章的**唯一判据**（R3-3）。
+ *
+ *  singleton = 全机一份（selfNode）；shared = **一个进程服务所有课程**（hub/隧道：账本槽恒 `''`）；
+ *  course = 按课程键控。三态不是新概念，只是把上面两张表（`SINGLETON_COMPONENTS` /
+ *  `SHARED_COMPONENTS`）换个面说一遍。
+ *
+ *  ★ **唯一声明处**：控制台卡片不许自己写「哪些 key 属于哪一族」的名单——名单一旦与槽位规则
+ *  漂开，症状是某个组件从 UI 上**消失**（而它还在被启动、被监督、被冒烟）。故族由 scope 推出，
+ *  面板只负责画。
+ */
+export type ComponentScope = 'singleton' | 'shared' | 'course'
+
+export function componentScope(key: Component): ComponentScope {
+  if ((SINGLETON_COMPONENTS as readonly string[]).includes(key)) return 'singleton'
+  return isSharedComponent(key) ? 'shared' : 'course'
+}
+
 /** 组件的账本槽：共享组件恒 `''`，其余按课程。**启动/停止/重建/展示一律经此**（唯一归宿）。 */
 export function scopeOf(key: Component, course = ''): string {
   return isSharedComponent(key) ? '' : course

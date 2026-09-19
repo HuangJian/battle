@@ -1655,8 +1655,8 @@ a.tc-preset {
   padding: 4px 8px;
 }
 
-/* 组件 4 小卡 */
-/* 组件 chips 行（原 4 小卡 → 一行 chips，复用节点 pill 风格） */
+/* 组件 chips 行（R3-3：两族分组——服务面（单例角色）vs 课程面（按课程），
+   组之间用竖分隔线 + 各自的小标题；族内仍是 pill，点击展开详情）。 */
 .tc-comps {
   display: flex;
   align-items: center;
@@ -1668,10 +1668,26 @@ a.tc-preset {
   padding: 6px 12px;
   margin-bottom: 10px;
 }
-.tc-comps .lbl {
-  font-size: var(--fs-2);
+/* 一组（族）：组标题 + 该族 chips。横排可换行；组与组之间一条淡竖线分隔。 */
+.tc-comps__group {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+.tc-comps__group + .tc-comps__group {
+  margin-left: var(--sp-2);
+  padding-left: var(--sp-3);
+  border-left: 1px solid var(--line);
+}
+/* 组标题：小一号的弱色标签（回答「这一族的键是什么」——课程无关的单例，还是当前查看的那门课）。 */
+.tc-comps__glabel {
+  flex: 0 0 auto;
+  font-size: var(--fs-1);
+  font-weight: 700;
+  letter-spacing: 0.02em;
   color: var(--muted);
-  margin-right: var(--sp-1);
+  cursor: help;
 }
 .tc-cc__name {
   font-size: var(--fs-2);
@@ -1680,8 +1696,9 @@ a.tc-preset {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* 共享实例徽章（hub/隧道：一个进程服务所有并行课程） */
-.tc-cc__shared {
+/* 作用域徽章（R3-3）：共享 = 一个进程服务所有并行课程；单例 = 全机一份。
+   按课程是默认语义（组标题已说），不给每行挂噪声标签。 */
+.tc-cc__scope {
   display: inline-block;
   margin-left: 6px;
   padding: 0 7px;
@@ -1691,6 +1708,11 @@ a.tc-preset {
   font-weight: 600;
   font-size: 10.5px;
   white-space: nowrap;
+}
+.tc-cc__scope--shared {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-bg);
 }
 
 /* trainingLoop 运行模式高亮徽章 */

@@ -107,7 +107,7 @@ describe('① 槽位唯一：共享组件的账本槽恒为空串', () => {
     }
   })
 
-  it('组件视图：任何课程页看到的都是同一个共享实例，并标 shared', async () => {
+  it('组件视图：任何课程页看到的都是同一个共享实例，并标 scope=shared', async () => {
     await withScratch(async ({ reg }) => {
       const cfg = loadConfig()
       const hub: RegistryEntry = {
@@ -124,7 +124,7 @@ describe('① 槽位唯一：共享组件的账本槽恒为空串', () => {
       // 查看 B 课：hub 卡片读的是**共享**条目（不是「B 课自己的 hub 没起」）
       const viewsB = await componentViews(cfg, 'course-b')
       const hubB = viewsB.find((v) => v.key === 'hubServer')
-      expect(hubB?.shared).toBe(true)
+      expect(hubB?.scope).toBe('shared')
       expect(hubB?.pid).toBe(hub.pid)
       expect(hubB?.status).toBe('exited') // pid 999999 存在但已死 = 账在、进程没了
       // 查看 A 课：同一个共享条目（两课看到的是同一份真相）
@@ -133,7 +133,7 @@ describe('① 槽位唯一：共享组件的账本槽恒为空串', () => {
       // 非共享组件仍严格按课（A 课没有 trainer ⇒ stopped，不借 B 课的条目）
       expect(viewsA.find((v) => v.key === 'trainingLoop')?.status).toBe('stopped')
       expect(viewsB.find((v) => v.key === 'trainingLoop')?.status).toBe('exited')
-      expect(viewsB.find((v) => v.key === 'trainingLoop')?.shared).toBe(false)
+      expect(viewsB.find((v) => v.key === 'trainingLoop')?.scope).toBe('course')
     })
   })
 })

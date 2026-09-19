@@ -4,6 +4,65 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §88 R3-3：组件卡分族（服务面单例角色 vs 课程面按课程）（2026-09-19）
+
+**一句话**：六个受管组件不再排成一行——按**作用域**分成「服务面 · 单例」（selfNode / hub / 隧道，
+与课程数量无关）与「课程面 · 按课程」（trainer / 本机 worker，对象 = 当前查看的那门课）。
+
+### 之前错在哪
+
+`<b>共享</b>` 一个布尔徽章 + 操作员记忆，是区分「全机一份 / 一个进程服务所有课程 / 按课键控」
+的全部信息。两条真会发生的误读：① hub/隧道已单例（§2026-09-18），卡片却仍按「当前查看的课」
+渲染 —— 有人会给这门课**再起一个 hub**（第二个实例抢同一端口）；② trainer 卡片看着像全局对象，
+按下去起的却是**当前查看的那门课**（换课程 = 换对象，视觉上零提示）。
+
+### 形状
+
+```
+服务面 · 单例   [selfNode 单例] [hubServer 共享] [cloudflared 共享]  │  课程面 · 按课程  [trainingLoop] [localWorker]
+```
+
+族标题带悬停说明（「与课程数量无关：一个进程服务所有并行课程（0 门课也在，100 门课也只有一份）」/
+「卡片上的对象是当前查看的那门课」）。
+
+### 四个决定
+
+1. **作用域三态单点在 `core/registry.ts::componentScope(key)`**（`singleton` / `shared` / `course`，
+   就是既有两张槽位表的另一个面），服务端算一次填进 `ComponentView.scope`（取代 `shared` 布尔）。
+2. **族归属 = scope 的函数，视图层不写 key 名单**：名单一旦与槽位规则漂开，症状是某个组件从 UI 上
+   **消失**（而它照样被启动、被监督、被冒烟）。族内顺序才是化妆（`ORDER`；未列出的落组尾**不丢**）。
+3. **节点面例外声明成数据**（`NODE_FACE_COMPONENTS = ['workerServe']`）：`worker_server` 的语义轴是
+   节点/GPU 身份（hub 的 push 派发与竞速也按节点算），渲染在节点行；不再用面板里一行 `filter` 静默
+   过滤（读代码的人只看到一行 filter、不知所为何来）。`LogNavCard` 复用同一常量。
+4. **`scope` 缺省/未知 ⇒ 按 `course` 渲染**（单侧保守，与调度器卡片的 `kind` 同一条规矩）：少一个
+   徽章只是少信息；凭空空贴「共享」会让操作员以为「停它就是停全局」（实际只停本课）。
+   徽章只标 scope 说不出来的那件事：共享 / 单例；按课程 **无徽章**（默认语义，每行再挂就是噪声）。
+
+### 回归（两把尺子：全组件恰好归属一处 + 与 registry 对拍）
+
+`tests/web-component-groups.test.ts`(11)：分族与族内顺序（乱序输入）/ 节点面例外是真组件 /
+**每个 `ALL_COMPONENTS` 的 key 要么在卡片行要么在例外名单里**（新增组件忘了归档 ⇒ 红）/
+**族归属只能是 `componentScope` 的函数**（两份判据不许漂）/ `scope` 缺省保守 / 未列出的 key 落组尾不丢 /
+空组不渲染 / 不改动调用方数组（原地 sort 会让上游快照顺序随渲染变化）/ 徽章三态。
+`tests/web-components.test.ts` 的分族 SSR 断言（两组标题 + `data-family` + 族内顺序 + 共享×2/单例×1 +
+节点面组件不在卡行）。
+
+### 踩到的坑（构建期，值得记）
+
+客户端代码里写**未加引号的 `node:` 对象键**（`Record<ComponentFamilyId, …>` 里的那个 `node: []`）
+会让三份 bundle 全红 —— `server/build.ts` 的禁词门禁把 `node:` 当「引入了 node 内置模块」。
+修法：只给**会渲染成组**的两族留元数据（`FAMILY_META: Record<'service' | 'course', …>`），
+`'node'` 只作为词汇存在；`component-groups.ts` 的 `ComponentFamilyId` 注释里写明了这条。
+
+### 未做（明确记录）
+
+账本键的**真正收敛**：`trainingLoop` / `localWorker` 仍是 per-course 键（控制台仍按课起
+`run_rl.py --course`，尽管训练侧已有 `--serve` 单进程服务所有课程），`workerServe` 仍住 per-course 表
+（轴却是节点）。那是启动面/监督面的改动（含 `TrainLaunchModal` 精简与旧条目换代接管）；本轮的分族
+正是它的前置——换成共享槽后，进程面全在服务面、课程面只剩数据。
+
+---
+
 ## §87 R3-4 控制台半：BC 课与 RL 课在同一张调度器卡片里并列（2026-09-19）
 
 **一句话**：`LoopQueue`（训练调度器卡）不再被「当前查看的是不是 BC 课」门控，BC 行与 RL 行
