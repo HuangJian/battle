@@ -2509,3 +2509,21 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   `pure_collect_sec = min(start)→max(end)`（首波分发→全部样本齐，含波间空隙）。无 ts
   时回退 max(per-wave) 并标 `rollout_collect_aggregated=False`。iteration 事件附加
   `rollout_collect_aggregated` / `rollout_collect_waves`。
+
+## §2026-09-19-volume-continuous-quota（2026-09-19，用户指令：退役离散补波 → 配额感知连续派发）
+
+- **背景**：x20 分关样本缺口/wave_cap 复盘 —— 全局 est × 等 G0 盖不住 1 命下变体间
+  产量方差（通关率波动 → 局均 nSamples 波动）。用户裁定：**完全去掉补波机制**，loop
+  实时观测 samples 分布，即将足额不再派、差额大者多派。
+- **规则 VOLUME_RULE_V2**（`rl/volume_quota.py`）：分关配额 `ceil(target/n_stages)`；
+  每批 `allocate_stage_games`：`collected+inflight*est_s ≥ quota` → 软停；差额按
+  `ceil(shortfall/est_s)` 派；`game_cap` 硬顶；`DEFAULT_MAX_BATCHES=12` 安全阀（触顶
+  响亮 WARN，非静默短采）。种子 `(rotate_seed,it,stage)` 独立流第 k 局（无 wave_idx）。
+- **备选与否决**：保留 G0+补波仅改分关 est —— 否，用户要求去掉波次语义；worker 内
+  每局实时选关 —— 改动面过大，v2 用「账本驱动小批」逼近同一语义（批间同步结算）。
+- **§15.5**：相对 wave 规则的语料构造变更 —— 迁课程建议 fresh `--out/--traj`。
+  wave 纯函数（`volume_waves.plan_topup` 等）仍保留供旧单测/e2e；**生产串行路径**
+  已切 `_volume_collect_continuous`（`loop_core`）。`resume.trailing_stage_samples_per_game`
+  提供分关 est_s。
+- **落地**：`rl/volume_quota.py`、`loop_core._volume_collect_continuous`、
+  `tests/test_volume_quota.py`。回归：相关 pytest + parse 绿。

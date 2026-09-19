@@ -47,7 +47,13 @@
    `weights_dist_start_ts`/`collect_end_ts`，`combine_reports` 压成 it 级
    `min(start)→max(end)`（首波分发→全部样本齐）；iteration 事件写
    `rollout_collect_aggregated` / `rollout_collect_waves`。
-6. **GBK 门禁**（§30 同源）：`test_remote_iter_real_bun` / `test_tpu_probe_notebook`
+6. **连续配额采集 VOLUME_RULE_V2**（用户 2026-09-19，DECISIONS
+   §2026-09-19-volume-continuous-quota）：**退役离散补波**——串行 volume 路径改为
+   `loop_core._volume_collect_continuous`：读账本 → 按分关差额+软停
+   （`collected+inflight*est_s≥quota` 不再派）→ 小批派发 → 直到达标/game_cap/
+   batch 安全阀。种子 `(it,stage,k)`；`resume.trailing_stage_samples_per_game`
+   提供 est_s。wave 纯函数保留（旧 e2e）；生产不再走 `_volume_topup`。
+7. **GBK 门禁**（§30 同源）：`test_remote_iter_real_bun` / `test_tpu_probe_notebook`
    改 `tests.subproc_util.run_utf8`；`bun_version` 三处显式 `encoding=utf-8`。
    real_bun 另补 `lives_override=1`（exporter 2026-09-19 起无 flag 即响亮失败）。
 

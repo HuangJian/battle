@@ -189,6 +189,7 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         self._volume_g0 = 0
         self._volume_est = 0
         self._volume_capped = False
+        self._volume_stage_ests: dict[int, int] | None = None
         self._rollout_sec = 0.0
         # M3（rollout 上云）：本轮节点侧采集墙钟；None = 本轮不在节点采集（本地轮）。
         # 每轮开头复位——_write_iter_stats / _log_report 靠它区分两种口径。
@@ -334,10 +335,12 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 elif self._node_rollout:
                     self._remote_iter(it, pairs)
                 else:
-                    self._rollout_phase(it, pairs, dist_cfg, self._eval_on_round(it))
-                    # 动态采集：结算后按已落盘 transitions 逐关补波（v1 串行路径 only）。
-                    # 补波属本轮的**采集**阶段，必须坐在 _log_report 之前（本轮报告要含补波）。
-                    self._volume_topup(it, dist_cfg)
+                    if self._volume_active():
+                        # 连续配额采集（2026-09-19）：替代「初波 + 补波」；实时按
+                        # 分关差额 + 软停派发。必须在 _log_report 之前（报告含全部批）。
+                        self._volume_collect_continuous(it, dist_cfg)
+                    else:
+                        self._rollout_phase(it, pairs, dist_cfg, self._eval_on_round(it))
                 # P0 修复：为上一轮已完成权重 W(it-1) 派发干净评估（读归档、标权重轮），
                 # 游戏藏进随后 PPO(it) 空窗。串行路径此前在此处派发读活指针 = W(it-1)
                 # 却标 itN（标签超前一轮）；stream/intent/m1/基线路径维持原语义。
@@ -1017,14 +1020,16 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         return trailing_samples_per_game(self._jsonl_path, window=5, fallback=declared)
 
     def _iteration_pairs(self, it: int) -> list[tuple[int, int]]:
-        """本轮初波 (stage, seed)：动态采集走 volume，其余逐字节走 build_pairs。
+        """本轮对局表：动态采集串行路径**不预排初波**（连续配额实时派发）；其余 build_pairs。
 
-        老课程（无 target_transitions）= `build_pairs` 原路，逐字节不变（DoD 第一条）。
+        volume 仍返回按全局 est 均分的保守表——仅供 `rollout_src=node` / export_bundle
+        等需要固定 pairs 的路径；串行 ` _volume_collect_continuous` **不用**这张表。
         """
         if not self._volume_active():
             self._volume_target = None
             self._volume_collected = None
             return build_pairs(self.args, it, self._rotate_seed)
+        from rl.volume_quota import target_per_stage
         from rl.volume_waves import initial_games, wave_pairs
 
         args = self.args
@@ -1035,18 +1040,32 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         self._volume_target = target
         self._volume_g0 = g0
         self._volume_est = est
-        self._volume_waves = 1  # 初波已排上（下面的补波从 wave 1 起算）
+        self._volume_waves = 0
         self._volume_capped = False
-        # 初波**不进 WAL**：WAL 记的是「进入提交序列」的相位（plan §2.3.1 要求的是
-        # **补波决策**进账），而初波由 build 期一次性排定；给它开一个 start 而补波
-        # 之外无人 finish，只会让重启后的 pending 常驻一条假未完成。
+        self._volume_stage_ests = None  # 连续采集启动时现算
         pairs = wave_pairs(self._rotate_seed, it, {s: g0 for s in stages}, 0)
         log(
-            f"[volume] it{it}: 初波 G0={g0}/关 × {len(stages)} 关 = {len(pairs)} 局 "
-            f"（target={target} samples est={est} samples/局 "
-            f"分关达标线={-(-target // len(stages))} samples）"
+            f"[volume] it{it}: continuous quota mode target={target} "
+            f"per_stage={target_per_stage(target, len(stages))} est_global={est} "
+            f"（node/export 预排表 {len(pairs)} 局；串行路径按差额实时派发）"
         )
         return pairs
+
+    def _volume_stage_ests_map(self) -> dict[int, int]:
+        """分关 est_s：近轮盘上 shard 局均 nSamples，缺省回退全局 est。"""
+        from rl.resume import trailing_stage_samples_per_game
+        from rl.volume_waves import parse_stages_arg
+
+        stages = self._volume_stages()
+        fallback = int(self._volume_est or self._volume_est_samples() or 1)
+        raw = str(getattr(self.args, "stages", "") or "")
+        try:
+            stages = parse_stages_arg(raw) if raw else stages
+        except ValueError:
+            pass
+        return trailing_stage_samples_per_game(
+            self._traj_root, stages, window_iters=3, fallback=fallback
+        )
 
     def _dispatch_volume_wave(
         self, it: int, pairs: list[tuple[int, int]], dist_cfg: dict | None
@@ -1229,4 +1248,132 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 f"[volume] it{it}: rollout 聚合 waves={self._report.get('rollout_collect_waves', self._volume_waves)} "
                 f"pure_collect_sec={self._report['pure_collect_sec']}"
                 f"（首波分发→样本齐；aggregated={agg_ok}）"
+            )
+
+    def _volume_collect_continuous(self, it: int, dist_cfg: dict | None) -> None:
+        """配额感知连续采集（2026-09-19 用户指令；VOLUME_RULE_V2）。
+
+        **退役离散补波**：loop 读账本 → 按各关 `quota - collected - inflight*est_s`
+        决定下一批局数 → 派发 → 再读账本，直到各关达标 / game_cap / batch 安全阀。
+        即将足额（软停）不再派；差额大的关多派。种子 = `(it, stage, 本轮第k局)`。
+
+        §15.5：相对 wave 规则的新语料语义 —— 课程若从 wave 迁到 continuous，
+        应 fresh `--out/--traj`（用户已知）。
+        """
+        if not self._volume_active():
+            return
+        args = self.args
+        if self._stream_meta is not None:
+            log("[volume] 流式路径不支持连续配额 v2（保持 stream 老语义）")
+            return
+        if int(getattr(args, "collect_only", 0) or 0):
+            return
+        import dist_common
+        from rl.resume import settled_stage_totals
+        from rl.volume_quota import (
+            DEFAULT_MAX_BATCHES,
+            continuous_pairs,
+            default_game_cap,
+            plan_continuous_batch,
+            target_per_stage,
+        )
+
+        stages = self._volume_stages()
+        target = int(args.target_transitions)
+        quota = target_per_stage(target, len(stages))
+        est_global = int(self._volume_est or self._volume_est_samples() or 1)
+        est_s = self._volume_stage_ests_map()
+        self._volume_stage_ests = est_s
+        game_cap = int(getattr(args, "max_games_per_stage", 0) or 0)
+        if game_cap <= 0:
+            game_cap = default_game_cap(quota, est_global)
+        max_batches = int(getattr(args, "volume_max_batches", 0) or DEFAULT_MAX_BATCHES)
+        course_fp = self._course_fp
+        extra_wver = self._extra_wver
+        start_idx = {s: 0 for s in stages}
+        combined: dict | None = None
+        self._volume_capped = False
+        self._volume_waves = 0
+
+        while self._volume_waves < max_batches:
+            wver = dist_common.weights_fingerprint(args.out)
+            totals = settled_stage_totals(
+                self._traj_dir, wver, extra_wver=extra_wver, course_fp=course_fp
+            )
+            collected = {s: int(totals.get(s, (0, 0))[1]) for s in stages}
+            games_done = {s: int(totals.get(s, (0, 0))[0]) for s in stages}
+            # 同步 dispatch：批间无在飞；批内调度器自己竞速。软停用批前账本。
+            inflight = {s: 0 for s in stages}
+            plan = plan_continuous_batch(
+                stages=stages,
+                collected=collected,
+                inflight=inflight,
+                target_transitions=target,
+                ests=est_s,
+                games_done=games_done,
+                game_cap=game_cap,
+                fallback_est=est_global,
+            )
+            if not plan.games_by_stage:
+                break
+            pairs = continuous_pairs(
+                self._rotate_seed, it, plan.games_by_stage, start_idx
+            )
+            for s, n in plan.games_by_stage.items():
+                start_idx[s] = start_idx.get(s, 0) + int(n)
+            self._volume_waves += 1
+            short_note = {s: plan.shortfall.get(s, 0) for s in stages if plan.shortfall.get(s, 0)}
+            log(
+                f"[volume] it{it}: batch{self._volume_waves} "
+                f"games={plan.games_by_stage}（差额 {short_note} "
+                f"est_s={ {s: est_s.get(s) for s in plan.games_by_stage} }）"
+            )
+            wave_report = self._dispatch_volume_wave(it, pairs, dist_cfg)
+            combined = (
+                wave_report if combined is None else combine_reports([combined, wave_report])
+            )
+            if plan.capped:
+                self._volume_capped = True
+
+        wver = dist_common.weights_fingerprint(args.out)
+        totals = settled_stage_totals(
+            self._traj_dir, wver, extra_wver=extra_wver, course_fp=course_fp
+        )
+        collected_total = sum(int(totals.get(s, (0, 0))[1]) for s in stages)
+        unmet = {
+            s: quota - int(totals.get(s, (0, 0))[1])
+            for s in stages
+            if int(totals.get(s, (0, 0))[1]) < quota
+        }
+        if unmet:
+            self._volume_capped = True
+            log(
+                f"[volume] WARN it{it}: 连续配额未满 batches={self._volume_waves}/{max_batches} "
+                f"unmet={unmet} per_stage_quota={quota} game_cap={game_cap}——"
+                f"est 持续低估或触硬顶（非静默；pooled={collected_total}/{target}）"
+            )
+        stage_stats = {
+            s: {
+                "collected": int(totals.get(s, (0, 0))[1]),
+                "games": int(totals.get(s, (0, 0))[0]),
+                "est_s": int(est_s.get(s, est_global)),
+            }
+            for s in stages
+        }
+        log(
+            f"[volume] it{it}: continuous 收官 batches={self._volume_waves} "
+            f"collected={collected_total}/{target} 达标关="
+            f"{len(stages) - len(unmet)}/{len(stages)} stats={stage_stats}"
+        )
+        self._volume_collected = collected_total
+        if combined:
+            if self._report:
+                self._report = combine_reports([self._report, combined])
+            else:
+                self._report = combined
+        if self._volume_waves > 0 and self._report.get("pure_collect_sec") is not None:
+            log(
+                f"[volume] it{it}: rollout 聚合 batches={self._report.get('rollout_collect_waves', self._volume_waves)} "
+                f"pure_collect_sec={self._report['pure_collect_sec']}"
+                f"（首批分发→样本齐；aggregated={self._report.get('rollout_collect_aggregated')}）"
             )

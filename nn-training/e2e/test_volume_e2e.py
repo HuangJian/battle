@@ -283,6 +283,9 @@ class _Loop:
         self.waves.append(list(pairs))  # 真调用边界（供逐波对账）
         return TrainingLoop._dispatch_volume_wave(cast(Any, self), it, pairs, dist_cfg)
 
+    def _volume_collect_continuous(self, it: int, dist_cfg: dict | None) -> None:
+        TrainingLoop._volume_collect_continuous(cast(Any, self), it, dist_cfg)
+
     def _volume_topup(self, it: int, dist_cfg: dict | None) -> None:
         TrainingLoop._volume_topup(cast(Any, self), it, dist_cfg)
 
@@ -380,9 +383,13 @@ class _Loop:
         return TrainingLoop._volume_journal_replay(cast(Any, self), it)
 
     # ---- 一轮 = 初波（真派发）+ 补波循环（真循环）----
+    # 注意：连续配额 v2 生产路径不再用 _volume_topup；本 e2e 仍驱动 wave 版
+    # （volume_waves 纯逻辑保留）。_iteration_pairs 已改为 waves=0，这里手动
+    # 记「初波已跑」以兼容 wave 语义的 topup 断言。
     def run_iteration(self, cfg: dict) -> None:
         pairs = self._iteration_pairs(self.it)
         self.wave0 = list(pairs)
+        self._volume_waves = 1
         self._report = self._dispatch_volume_wave(self.it, pairs, cfg)
         self._volume_topup(self.it, cfg)
 
