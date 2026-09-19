@@ -1,4 +1,6 @@
-"""rl/bc_config.py + run_bc 纯函数 — BC 课程与编排器测试（plan/bc-cloud-integration.plan.md §2/§6）。"""
+"""rl/bc_config.py + rl/bc_loop.py + rl/bc_ledger.py 纯函数 — BC 课程与编排器测试
+（plan/bc-cloud-integration.plan.md §2/§6；R3-4 后编排体归 `rl/bc_loop`）。
+"""
 
 from __future__ import annotations
 
@@ -126,11 +128,11 @@ def test_landed_pairs_reads_manifest(tmp_path: Path) -> None:
     assert landed_pairs(d) == {(2000, 7)}
 
 
-def test_run_bc_completed_rounds_ledger(tmp_path: Path) -> None:
+def test_bc_ledger_completed_rounds(tmp_path: Path) -> None:
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    import run_bc
+    from rl import bc_ledger
 
     j = tmp_path / "training_log.jsonl"
     j.write_text(
@@ -146,18 +148,18 @@ def test_run_bc_completed_rounds_ledger(tmp_path: Path) -> None:
         + "\n",
         encoding="utf-8",
     )
-    assert run_bc.completed_rounds(j) == {1}
-    assert run_bc.completed_rounds(tmp_path / "missing.jsonl") == set()
+    assert bc_ledger.completed_rounds(j) == {1}
+    assert bc_ledger.completed_rounds(tmp_path / "missing.jsonl") == set()
 
 
-def test_run_bc_smoke_overrides() -> None:
+def test_bc_loop_smoke_overrides() -> None:
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    import run_bc
+    from rl import bc_loop
 
     c = load_bc_course("bc-c4")
-    ov = run_bc.smoke_overrides(c)
+    ov = bc_loop.smoke_overrides(c)
     assert ov["games_per_stage"] == 1
     assert ov["max_ticks"] <= 300
     assert ov["epochs"] == 1
@@ -329,7 +331,7 @@ def test_bc_dispatch_busy_backpressure_then_success(tmp_path: Path, monkeypatch)
     assert any("背压" in m for m in msgs)
 
 
-def test_run_bc_finish_all_rounds_writes_run_complete(tmp_path: Path) -> None:
+def test_bc_loop_finish_all_rounds_writes_run_complete(tmp_path: Path) -> None:
     """2026-09-14 回归：BC 全轮完成的收尾必须同时做两件事 ——
 
     ① 打含 `ALL DONE` 的**尾行**：console exit-watchdog 用 `tailNormalCompletion`
@@ -340,11 +342,11 @@ def test_run_bc_finish_all_rounds_writes_run_complete(tmp_path: Path) -> None:
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    import run_bc
+    from rl import bc_loop
 
     j = tmp_path / "training_log.jsonl"
     msgs: list[str] = []
-    run_bc._finish_all_rounds(j, 3, log=msgs.append)
+    bc_loop.finish_all_rounds(j, 3, log=msgs.append)
     assert any("ALL DONE" in m for m in msgs)
     last = [ln for ln in j.read_text(encoding="utf-8").splitlines() if ln.strip()][-1]
     e = json.loads(last)
@@ -367,8 +369,8 @@ def test_wait_bc_round_zero_wait_sec_means_unlimited(tmp_path: Path, monkeypatch
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    import run_bc
     from remote import hub_client
+    from rl import bc_loop
 
     calls = {"n": 0}
 
@@ -381,9 +383,9 @@ def test_wait_bc_round_zero_wait_sec_means_unlimited(tmp_path: Path, monkeypatch
         return 404, b"{}"
 
     monkeypatch.setattr(hub_client, "_request", fake_request)
-    monkeypatch.setattr(run_bc.time, "sleep", lambda _s: None)  # 免真等 poll_sec
+    monkeypatch.setattr(bc_loop.time, "sleep", lambda _s: None)  # 免真等 poll_sec
 
-    out = run_bc.wait_bc_round(
+    out = bc_loop.wait_bc_round(
         hub_url="http://hub",
         token="t",
         jid="j1",
@@ -403,8 +405,8 @@ def test_finish_all_rounds_issues_cloud_halt(tmp_path: Path, monkeypatch) -> Non
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    import run_bc
     from remote import hub_client
+    from rl import bc_loop
 
     seen: dict = {}
 
@@ -414,7 +416,7 @@ def test_finish_all_rounds_issues_cloud_halt(tmp_path: Path, monkeypatch) -> Non
 
     monkeypatch.setattr(hub_client, "set_cloud_halt", fake_halt)
     msgs: list[str] = []
-    run_bc._finish_all_rounds(
+    bc_loop.finish_all_rounds(
         tmp_path / "training_log.jsonl", 1, hub_url="http://hub", token="t", log=msgs.append
     )
     assert seen == {"base": "http://hub", "token": "t", "halt": True}
@@ -423,7 +425,7 @@ def test_finish_all_rounds_issues_cloud_halt(tmp_path: Path, monkeypatch) -> Non
 
     # 非 hub 传输（local/push）不得假装停机
     msgs2: list[str] = []
-    run_bc._finish_all_rounds(tmp_path / "l2.jsonl", 1, log=msgs2.append)
+    bc_loop.finish_all_rounds(tmp_path / "l2.jsonl", 1, log=msgs2.append)
     assert any("停机操作跳过" in m for m in msgs2)
 
 
@@ -437,10 +439,10 @@ def test_bc_run_start_event_is_segmentation_anchor() -> None:
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    import run_bc
+    from rl import bc_loop
 
     c = load_bc_course("bc-c4-v3")
-    e = run_bc.bc_run_start_event(c, "bc-c4-v3", run_id="bc-unit-test")
+    e = bc_loop.bc_run_start_event(c, "bc-c4-v3", run_id="bc-unit-test")
     assert e["event"] == "run_start"
     assert e["runId"] == "bc-unit-test"
     assert e["course"] == "bc-c4-v3"
@@ -459,17 +461,17 @@ def test_bc_job_extra_keeps_auto_fire_pos_weight() -> None:
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    import run_bc
+    from rl import bc_loop
 
     c = load_bc_course("bc-c4-v3")
-    ex = run_bc.bc_job_extra(c, 2)
+    ex = bc_loop.bc_job_extra(c, 2)
     assert ex["fire_pos_weight"] == "auto"  # 原值，不被 float 化
     assert ex["train_seed"] == int(c.train.seed)
     assert ex["arch"] == str(c.train.arch)
     assert ex["notes"].endswith("it=2 smoke=False")
     # 数字型配置同样原样透传
     c2 = c.model_copy(update={"train": c.train.model_copy(update={"fire_pos_weight": 3.5})})
-    assert run_bc.bc_job_extra(c2, 1)["fire_pos_weight"] == 3.5
+    assert bc_loop.bc_job_extra(c2, 1)["fire_pos_weight"] == 3.5
 
 
 def test_resolve_bc_seed_prefers_course_seed() -> None:

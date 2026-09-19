@@ -673,18 +673,22 @@ export function App({ initial }: AppProps) {
           />
         </PanelErrorBoundary>
       )}
-      {/* ── 训练调度器（单例，RL 区）：每课任务队列 + 「在等什么」——
-           总览卡回答 hub 侧「谁在派活」，本卡回答训练侧「这一轮卡在哪一步」 ── */}
-      {stateView?.isBc ? null : (
-        <PanelErrorBoundary>
-          <LoopQueue
-            loopQueue={stateView?.loopQueue ?? null}
-            course={viewCourse}
-            onSelectCourse={selectCourse}
-            onAction={doAction}
-          />
-        </PanelErrorBoundary>
-      )}
+      {/* ── 训练调度器（单例，**两区通用**）：每课任务队列 + 「在等什么」——
+           总览卡回答 hub 侧「谁在派活」，本卡回答训练侧「这一轮卡在哪一步」。
+
+           ★ 本卡**不受 `isBc` 门控**（2026-09-19，R3-4）：它是**跨课程**卡（一次列出所有
+           账本可发现的课，每行自带 kind），而 `isBc` 说的是**当前查看的那门课**——用它门控
+           这张卡是范畴错误，后果是「选中一门 BC 课 ⇒ 整张调度器卡片消失」，于是 BC 课在
+           调度器视图里根本不存在（而 BC 课正是需要看「在等哪个 GPU job 回传」的那类）。
+           BC 行与 RL 行并列：行上有 BC 徽标，粒度/指针/在飞各取自自己的账本。 ── */}
+      <PanelErrorBoundary>
+        <LoopQueue
+          loopQueue={stateView?.loopQueue ?? null}
+          course={viewCourse}
+          onSelectCourse={selectCourse}
+          onAction={doAction}
+        />
+      </PanelErrorBoundary>
       {/* ── push worker 登记（两区通用）：写 rl-config nodes[] + hub 周期探活 ── */}
       <PanelErrorBoundary>
         <WorkerRegistry

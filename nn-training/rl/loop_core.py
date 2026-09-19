@@ -37,6 +37,7 @@ from rl.loop_round import (
     ROUND_RETRY,
     ROUND_SMOKE_STOP,
     ROUND_STOP,
+    ROUND_WAIT,
     RoundContext,
     RoundOutcome,
     RoundYieldError,
@@ -56,6 +57,10 @@ from rl.train_ledger import LedgerSpec, load_ledger
 
 # 一轮的终态（`ROUND_*`）与 `RoundOutcome` 见 `rl/loop_round`（顶部已导入再导出）：
 # 步骤 mixin（`rl/loop_round_steps`）也需要它们，而它被本模块 import——留在本模块会成环。
+
+#: `run()` 撞上 `ROUND_WAIT` 时的再问间隔（秒）。单课程驱动器是阻塞语义（退避后再问同一轮），
+#: 不是让位——真正的让位在 supervisor（`rl/loop_runner` 的 `waiting()`，间隔 `poll_interval`）。
+WAIT_RETRY_SEC = 5.0
 
 
 def _course_file_fp(args) -> str | None:
@@ -296,6 +301,12 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
                 break
             if outcome.status == ROUND_RETRY:
                 it -= 1
+            if outcome.status == ROUND_WAIT:
+                # 单课程驱动器的让位（RL 的 `run_one_round` 今天从不返回它——本分支是**语义
+                # 完整性**：等外部事实时不能把这一轮当成跑完（那会跳轮），也不能原地空转烧 CPU）。
+                # 退避一小段再来问同一轮；这仍是阻塞式单课程语义（真正的让位在 supervisor 那边）。
+                it -= 1
+                time.sleep(WAIT_RETRY_SEC)
 
         # P0 收官 drain（用户指令：最终轮立即 eval）：循环结束（跑满/break/预算）
         # 后，为最新已完成且无完整 summary 的评估轮权重派发并等收官。smoke 轮跳过。

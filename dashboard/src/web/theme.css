@@ -2404,6 +2404,20 @@ a.tc-preset {
   background: var(--gray-bg);
   color: var(--gray);
 }
+/* 课程种类徽标（BC）：只标 BC —— 大多数课是 RL，给 RL 也挂标签就是噪声。
+   颜色用 accent（中性信息色），不与「在训/未在训」的绿/灰争语义。 */
+.tc-loopq__kind {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-weight: 700;
+  font-size: var(--fs-1);
+  letter-spacing: 0.02em;
+}
+.tc-loopq__kind--bc {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
 .tc-loopq__iter,
 .tc-loopq__step,
 .tc-loopq__pending {

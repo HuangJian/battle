@@ -91,6 +91,16 @@ describe('parseLoopQueue（--json 的宽容解析）', () => {
     expect(v.rows[0]!.waiting.text).toBe('新等待：…')
   })
 
+  it('课程种类 kind：缺省/未知一律按 rl 渲染（python 比控制台旧时不得凭空空贴 BC 标签）', () => {
+    // 保守方向是**单侧**的：误判成 RL 只是少一个徽标；误判成 BC 会给一门真 RL 课贴上 BC 标签，
+    // 并对外宣称「一轮 = 一个任务」（而它其实有 13 步）——假承诺比缺标签贵。
+    expect(view.parseLoopQueue(JSON_OUT)!.rows.every((r) => r.kind === 'rl')).toBe(true)
+    const bc = view.parseLoopQueue({ courses: [{ course: 'bc-x', kind: 'bc' }] })!.rows[0]!
+    expect(bc.kind).toBe('bc')
+    const weird = view.parseLoopQueue({ courses: [{ course: 'x', kind: 'BC' }] })!.rows[0]!
+    expect(weird.kind).toBe('rl') // 大小写不符不是「大概也是 BC」（判据只认 python 的确切取值）
+  })
+
   it('形状不符 / 字段缺失 → null 或缺省（python 比控制台新一版不该把整页带崩）', () => {
     expect(view.parseLoopQueue(null)).toBeNull()
     expect(view.parseLoopQueue('nope')).toBeNull()

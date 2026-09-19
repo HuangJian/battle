@@ -37,9 +37,10 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 from rl.loop_plan import (
+    course_kind,
     course_traj,
     discover_courses,
-    inflight_from_journals,
+    inflight_facts,
     plan_course,
     waiting_state,
 )
@@ -58,14 +59,21 @@ def build_rows(courses: list[str], traj_root: str, sup: Supervisor) -> list[dict
     只读盘：账本（指针 + 事实）+ `commit_journal`（在飞集）+ shard 目录（采集进度）。
     「在等什么」由 `loop_plan.waiting_state` 单点计算——CLI 表与控制台卡片是**同一份**
     语义的两个渲染面（控制台不得自己从 facts 重算：那是第二份真相）。
+
+    粒度/指针/在飞源都按**课程种类**选（`course_kind`）：RL（`iteration` + journal + 13 步）
+    与 BC（`bc_round_completed` + 账本 `job_pending` + 单个轮任务）在控制台是**并列的两行**，
+    但各自的事实取自自己的账本而不互相冒充。
     """
     rows: list[dict] = []
     for course in courses:
         traj = course_traj(traj_root, course)
+        kind = course_kind(course)
         it, tasks, facts = plan_course(course, traj)
-        inflight = inflight_from_journals(traj)
+        inflight = inflight_facts(course, traj)
         current = tasks[0].kind if tasks else ""
-        kind, text = waiting_state(
+        # ★ 别把 wait kind 写进 `kind`（课程种类）：两个局部名重叠过一次，症状是控制台把
+        # BC 课标成 “ready”——行里的 `kind` 只许是课程种类。
+        wait_kind, text = waiting_state(
             inflight=inflight,
             games_settled=int(facts["games_settled"]),
             games_planned=int(facts["games_planned"]),
@@ -78,28 +86,34 @@ def build_rows(courses: list[str], traj_root: str, sup: Supervisor) -> list[dict
         rows.append(
             {
                 "course": course,
+                # 课程种类（`rl` / `bc`）：控制台据此上标签并选事实口径（BC 没有门禁/verdict，
+                # 也没有 13 步表——把它当 RL 读会得到一整套「像真的一样」的零）。
+                "kind": kind,
                 "it": it,
                 "state": q.state,
                 "current": current,
                 "pending": [t.kind for t in tasks],
                 "inflight": inflight,
                 "facts": facts,
-                "waiting": {"kind": kind, "text": text},
+                "waiting": {"kind": wait_kind, "text": text},
             }
         )
     return rows
 
 
 def _fmt_table(rows: list[dict]) -> str:
-    """人读表：课程 / 轮次 / 状态 / 当前任务 / 待办 / 在飞（含 job_id）/ 在等什么 / 关键事实。"""
+    """人读表：课程 / 种类 / 轮次 / 状态 / 当前任务 / 待办 / 在飞 / 在等什么 / 关键事实。"""
     out: list[str] = []
-    hdr = f"{'course':<22} {'it':>4} {'state':<8} {'next task':<18} {'pending':>7} {'inflight':>8}"
+    hdr = (
+        f"{'course':<22} {'kind':<4} {'it':>4} {'state':<8} {'next task':<18} "
+        f"{'pending':>7} {'inflight':>8}"
+    )
     out.append(hdr)
     out.append("-" * len(hdr))
     for r in rows:
         out.append(
-            f"{r['course']:<22} {r['it']:>4} {r['state']:<8} {r['current'] or '-':<18} "
-            f"{len(r['pending']):>7} {len(r['inflight']):>8}"
+            f"{r['course']:<22} {r.get('kind', 'rl'):<4} {r['it']:>4} {r['state']:<8} "
+            f"{r['current'] or '-':<18} {len(r['pending']):>7} {len(r['inflight']):>8}"
         )
         out.append(f"    waiting: {r['waiting']['text']}")
         if r["pending"]:
@@ -109,6 +123,13 @@ def _fmt_table(rows: list[dict]) -> str:
                 f"    inflight: {rec.get('phase', '?')}@{rec.get('round', '?')} "
                 f"jid={rec.get('jid', '-')} via {rec.get('dispatch', '-')}（{rec.get('dir', '-')}）"
             )
+        if r.get("kind") == "bc":
+            # BC 的门禁/verdict/kl 全不适用：RL 那套字段在 BC 账本上永远是零（读出来像真的，
+            # 其实是没这一回事）——如实说清比摆一排 0 好。
+            out.append(
+                f"    facts: bc 课程（轮指针 it{r['it']}）；指标看账本 bc_epoch / bc_eval 事件"
+            )
+            continue
         f = r["facts"]
         out.append(
             f"    facts: iterations={f['iterations']} last_verdict={f['last_verdict']} "
@@ -144,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help=(
             "--serve：控制意图文件（默认 tmp/loop-control.json，NN_LOOP_CONTROL 可覆盖）——"
-            "控制台写 `{\"paused\": [\"c5\"]}`，训练侧每拍读一次（暂停只影响调度）"
+            '控制台写 `{"paused": ["c5"]}`，训练侧每拍读一次（暂停只影响调度）'
         ),
     )
     ap.add_argument(

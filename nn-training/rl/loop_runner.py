@@ -52,6 +52,7 @@ from rl.loop_core import (
     ROUND_RETRY,
     ROUND_SMOKE_STOP,
     ROUND_STOP,
+    ROUND_WAIT,
     RoundOutcome,
 )
 from rl.loop_round import STEP_METHOD, RoundContext, StepResult
@@ -148,7 +149,19 @@ class LoopRunner:
         return self.facts_fn(course, it)
 
     def _ledger_next_it(self, fallback: int) -> int:
-        """账本里的下一轮（SSOT）。读不到（首启/IO 故障）⇒ 用队列给的指针。"""
+        """账本里的下一轮（SSOT）。读不到（首启/IO 故障）⇒ 用队列给的指针。
+
+        **指针的语义归引擎**（`ledger_next_it` 钩子）：RL 的指针来自 `iteration` 事件，BC 的
+        来自 `bc_round_completed`（`rl/bc_ledger.py`）——「跑到第几轮」这件事两边不同源，
+        在桥里猜一种就是给另一类课程写错指针（R3-4：BC 课被当成 RL 读 ⇒ 永远停在 it1）。
+        钩子不存在时走历史路径（RL），行为逐字节不变。
+        """
+        hook = getattr(self.loop, "ledger_next_it", None)
+        if callable(hook):
+            try:
+                return max(int(hook(fallback)), int(fallback))
+            except Exception:  # 同上：读盘失败不得卡住调度
+                return int(fallback)
         try:
             from rl.train_ledger import load_ledger
 
@@ -270,6 +283,17 @@ class LoopRunner:
         self.trace.append((out.it, out.status))
         if out.status == ROUND_NEXT:
             return done(it=out.it)
+        if out.status == ROUND_WAIT:
+            # 轮粒度下的「让位」：任务**未完成**（DONE 会让队列推进到下一轮——那会跳过这一轮），
+            # 故与 retry 同样留队，但不计失败连击、退避到下次再问（BC 轮在等 GPU 回传）。
+            jid = getattr(self.loop, "inflight_job_id", lambda _it: None)(out.it)
+            return waiting(
+                self.now() + self.poll_interval,
+                out.detail or f"本轮未完成，等外部事实（it{out.it}）",
+                hold=False,
+                jid=jid,
+                round=str(out.it),
+            )
         if out.status == ROUND_RETRY:
             # 主循环里这是「it 原地重试」：不判 5 连击（那由引擎内部 _consec_fail 负责）
             return retry("本轮作废，it 原地重试", same_iter=True)

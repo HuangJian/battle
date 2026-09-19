@@ -3,7 +3,7 @@
 补 26f9171 评审要求的集成测试：单测（test_bc_epoch_resume.py）只覆盖 _JobStore /
 bc.on_epoch / eval 块解析；本文件把**真 HTTP hub** 拉进环——
 发布 → 领取（租约）→ 每 epoch 回传 → 中断（worker 死亡）→ 重领 → hub resume 接续
-→ 假训练续完 → result 回传 → 零重训终态；以及 run_bc.wait_bc_round 的指标入账 +
+→ 假训练续完 → result 回传 → 零重训终态；以及 bc_loop.wait_bc_round 的指标入账 +
 eval 边界派发（假 eval 节点多图干净评估聚合）。
 
 全程**假文件、零真训练、零真语料生成**：
@@ -32,11 +32,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import dist_common
-import run_bc
 from remote import worker as worker_mod
 from remote.hub_client import AUTH_HEADER
 from remote.hub_server import _JobStore, make_server
 from remote.protocol import decode_weights_json, encode_weights_json
+from rl import bc_loop
 from rl.bc_config import BcEvalBlock, load_bc_course
 
 TOKEN = "test-token"
@@ -408,7 +408,7 @@ def test_e2e_wait_bc_round_ledger_ingest_and_eval(
     }
     try:
         real_sleep = time.sleep
-        monkeypatch.setattr(run_bc.time, "sleep", lambda s: real_sleep(0.01))
+        monkeypatch.setattr(bc_loop.time, "sleep", lambda s: real_sleep(0.01))
 
         def fake_worker() -> None:
             for ep in (1, 2, 3, 4):
@@ -451,7 +451,7 @@ def test_e2e_wait_bc_round_ledger_ingest_and_eval(
 
         thw = threading.Thread(target=fake_worker, daemon=True)
         thw.start()
-        result = run_bc.wait_bc_round(
+        result = bc_loop.wait_bc_round(
             hub_url=base,
             token=TOKEN,
             jid=jid,

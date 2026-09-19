@@ -4,6 +4,120 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §87 R3-4 控制台半：BC 课与 RL 课在同一张调度器卡片里并列（2026-09-19）
+
+**一句话**：`LoopQueue`（训练调度器卡）不再被「当前查看的是不是 BC 课」门控，BC 行与 RL 行
+**并列**展示；行上带课程种类，于是「在等哪个 GPU job 回传」这件事对两类课程都答得出来。
+
+### 之前错在哪（不是「少个功能」）
+
+`app.tsx` 里那张卡是 `stateView?.isBc ? null : (…<LoopQueue/>…)` —— 而 `isBc` 说的是
+**当前查看的那一门课**。用「查看对象的属性」门控「跨课程列表」是范畴错误，后果很具体：
+**选中一门 BC 课 ⇒ 整张调度器卡片从页面上消失**，于是 BC 课在调度器视图里根本不存在。
+而 BC 课恰恰是最需要这张卡的那类（它的全部墙钟都在「等 GPU 回传」，而这句话只有这张卡说）。
+
+### 三个决定
+
+1. **行上带课程种类**（python `build_rows` 的 `kind` ← `loop_plan.course_kind`，判据 =
+   `curricula/<课>.bc.jsonc` 是否存在，与控制台 `isBcCourse` 同源；视图层 `LoopCourseKind`）。
+   不带种类 UI 只能猜，而猜错的方式很坏：把 BC 读成 RL 会得到一整排**看着像真的**零
+   （门禁 verdict / KL / 连击那些字段在 BC 账本上永远不存在）。
+2. **`kind` 缺省/未知一律按 `rl` 渲染**（保守方向是**单侧**的）：python 比控制台旧（还没这个
+   字段）时，少一个徽标只是少信息；反过来凭空空贴 BC 标签，会对外宣称「一轮 = 一个任务」
+   （而它其实有 13 步）——**假承诺比缺标签贵**。`'BC'` 这种大小写不符同样不认。
+3. **文案按种类分叉**（`kindBadge` / `stepTitle` / `pendingTitle` 三个纯函数）：BC 行说
+   「一轮 = 一个任务：采集语料 → 发布 job → 等 GPU 回传 → 落位归档」并点名指标在
+   `bc_epoch`/`bc_eval` 事件里；RL 行保持「待办 N 步（顺序即依赖顺序）」与 13 步原样。
+   BC 行的悬停里**不出现** verdict / KL / 门禁字眼（那些它没有）。
+
+### 顺手改的展示面
+
+`run_rl_cluster.py` 的人读表加了 `kind` 列；BC 行的 facts 行不再摆 `iterations=/last_verdict=`
+那一排 RL 的零，改成「bc 课程（轮指针 itN）；指标看账本 bc_epoch / bc_eval 事件」。
+
+### 回归
+
+`tests/test_loop_plan_bc_rows.py`(9，读面：种类 / 指针跟 `bc_round_completed` / 在飞来自
+`job_pending` / 作废也是终局 / manifest 缺失不丢在飞 / 未知课程默认 `rl` / 两行共存 / 人读表带列)
+· `dashboard/tests/web-app-loopqueue.test.ts`(+3：BC 行与 RL 行并列渲染且只有一行带 BC 徽标 /
+两边悬停各说各的 / 卡片不再被 `isBc` 门控——用正则断言那个包裹形状不再存在)
+· `dashboard/tests/server-api-loop-queue.test.ts`(+1：`kind` 的保守默认)。
+
+### 踩到的坑
+
+`build_rows` 里局部变量 `kind` 一度既是「等待种类」又是「课程种类」，赋值顺序决定了行里
+那个 `kind` 到底是哪一个（症状：控制台把 BC 课标成 `ready`）。改成 `wait_kind` / `kind`
+两个名字，并在视图解析器里同样改名（`parseLoopQueue` 里等待种类叫 `waitKind`）。
+
+### 未做
+
+BC 行的**暂停/恢复**能点（控制文件按课程名，与种类无关），但 BC 的指标面板仍是独立的；
+真机「一个 serve 进程带 BC + RL」的实跑仍待做（与 R2e 同口径）。
+
+---
+
+## §86 R3-4：serve 也能带 BC 课（BC 编排体引擎化，单进程 supervisor 收编 BC）（2026-09-19）
+
+**一句话**：`run_bc.py` 从「一个进程服务一门 BC 课」的脚本变成**入口薄壳**，编排体搬进
+`rl/bc_loop.py::BcLoop` —— 于是 `run_rl_cluster.py --serve` 那一个进程现在能同时带 RL 课与
+BC 课，BC 等云端 GPU 回传时把执行权让给别的课。
+
+### 为什么必须搬（不是「统一风格」）
+
+BC 的 `main()` 是整段 procedural 编排，而 supervisor 要的是**引擎子集**：`_setup()` /
+`run_one_round(it)` / `finish_course(it)` / `release_torch()` / `ledger_next_it()`。
+`BcLoop` 就是那个子集，与 `TrainingLoop` **同名同义**（serve 的执行体不认识课程种类）。
+
+### 搬迁方式：AST 逐字节，不「顺手改善」
+
+14 个函数体（`collect_corpus` / `publish_bc_job` / `train_local_bc` / `wait_bc_round` 的重构件 /
+`finish_all_rounds` / `archive_round` / `resolve_transport` …）用脚本按 `ast` 段落整体搬，
+**只在内部调用名上去下划线**（`_append_ledger` → `append_ledger` 等）；搬完用
+`ast.dump` 对拍（14/14 逐节点相同）才落盘。`run_bc.py` 剩下的只有：utf8/chdir/单实例锁/
+启动前 `git push`/清 hub 停机态 + **阻塞式**驱动（单课程语义：等外部时原地退避重问）。
+
+### 三条新机制
+
+1. **`ROUND_WAIT`（第三种轮终态）**：`retry` = 「我试过、失败了、重做」；`wait` = 「已发布，
+   **正在等外部事实**」——本轮未完。调度器据此把执行权交给别的课（不占资源票、不计失败连击），
+   过一会儿回来问同一轮。`RoundOutcome.detail` 是它的**人读原因**（带 jid），直接上屏到控制台
+   调度器卡片的「在等什么」。
+2. **`ledger_next_it` 钩子**（指针语义归引擎）：BC 读 `bc_round_completed`（`rl/bc_ledger.py`），
+   RL 读 `iteration`。在桥里写死一种 = 给另一类课程读错指针（BC 课会永远停在 it1）。
+3. **`round_tasks_for(course, it)`**：粒度按课程种类选表（BC ⇒ 单个轮任务）。13 步表是 RL 的一轮，
+   硬套会给 BC 发它不认识的待办（执行体响亮 ABORT）。
+
+### 重入不重发布（最贵的一条，四处都钉）
+
+BC 的续训按 `jid` 存（hub `/jobs/{jid}/resume`、worker 本地 `bc-resume/<jid>`）⇒ 重发 = 新 jid =
+**从头训** = 一轮 GPU 时间白烧。所以「让位后再来问」用内存会话、**进程重启/引擎驱逐后**先
+`find_round_job` 认领盘上那份未收口 job（按 manifest mtime 取最新，其余响亮列出但不回收——
+它们可能仍在某台云机上跑）。冒烟轮**不认领**（语料口径被压缩过，复用等于拿冒烟语料冒充真语料）。
+
+### 回归
+
+`tests/test_bc_ledger.py`(9) · `tests/test_bc_loop.py`(16：重入不重发布 / 盘上认领 / 已完成轮跳过 /
+push 每轮一次 / 本机一枪到底 / 冒烟与回显作废 / 指标增量不重复且失败不致命 / 阻塞驱动收官) ·
+`tests/test_serve_bc.py`(5，**serve × BC 集成**：BC 让位时 RL 课照常跑完 / 细粒度下 BC 仍是轮粒度 /
+容量 1 驱逐后认领而**不重发** / 锁 = `.run_bc.<课>.lock` / 坏 BC 课不带倒 RL 课)。
+既有 BC 用例改指向新家（`test_bc_course.py` / `test_remote_transport.py` / `e2e/test_bc_epoch_e2e.py`）。
+
+### 踩到的坑（值得记）
+
+- `from remote.hub_client import _request` 若写在模块顶层，`monkeypatch.setattr(hub_client,
+  "_request", …)` 就**失效**——单测会真去连 hub 并挂满 60s 超时（原 `wait_bc_round` 是函数内导入，
+  搬迁时差点丢掉这个性质）。现在 `poll_once`/`ingest_bc_metrics` 保持**函数内导入**并在 docstring
+  写明原因。
+- 引擎驱逐（容量 1）≠ 只能从盘上重建权重：BC 侧「重建后必须重新认领 job」是**同一条路径的另一半**，
+  且它在真机上是常态（容量 1 + 两门课），不是边角。
+
+### 未做
+
+① 真机「一个 serve 进程带 BC + RL」实跑（全在假件下证明逻辑，与 R2e 同口径）；② BC 一轮再下沉
+成细粒度步骤。（③「控制台把 BC 课与 RL 课并列」已于同日接上，见 §87。）
+
+---
+
 ## §85 R2d 操作面：进程不绑课程 + 暂停/恢复控制通道（含生效回执）（2026-09-19）
 
 用户定案两点（2026-09-18）：① 控制指令走**控制文件**（不在训练进程里再挂 HTTP 服务）；

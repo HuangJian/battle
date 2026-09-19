@@ -45,10 +45,10 @@ from platform_utils import force_utf8_stdio
 from rl.engine_pool import DEFAULT_CACHE_COURSES, DEFAULT_CACHE_MB, EnginePool
 from rl.log import close_course_sinks, log, open_course_sink, prefix_scope
 from rl.loop_control import ControlApplier, read_control
-from rl.loop_plan import course_facts, course_traj, discover_courses
+from rl.loop_plan import course_facts, course_kind, course_traj, discover_courses, round_tasks_for
 from rl.loop_runner import ROUND_KIND, LoopRunner
 from rl.loop_scheduler import ABORTED, QUEUE_DONE, Supervisor
-from rl.loop_tasks import RoundFacts, Task, pending_tasks, round_tasks
+from rl.loop_tasks import RoundFacts, Task, pending_tasks
 from rl.modes import apply_mode_flags, get_backend, merged_mode_args, resolve_mode
 from rl.queue import REPO_ROOT
 from train.loop_util import acquire_lock, cleanup_lock, course_lock_path
@@ -65,13 +65,21 @@ DEFAULT_POLL_SEC = 15.0
 
 @dataclass
 class CourseRuntime:
-    """一门课在**本进程**里的运行时（args + 引擎 + 任务体，各自独立、互不共享）。"""
+    """一门课在**本进程**里的运行时（args + 引擎 + 任务体，各自独立、互不共享）。
+
+    `kind` ∈ {'rl', 'bc'}：决定引擎类型与任务粒度（BC ⇒ `BcLoop` + 单个轮任务）。BC 课时
+    `args` 就是 `BcRuntime`（同样有 `.traj` / `.iters`，故所有「读 `rt.args.traj`」的路径
+    一字不改），完整运行时另存 `bc` 供工厂取。
+    """
 
     course: str
     args: Any
     lock_path: str = ""
     engine: Any = None
     runner: LoopRunner | None = None
+    kind: str = "rl"
+    #: BC 课的解析结果（`rl.bc_loop.BcRuntime`）；RL 课为 None。
+    bc: Any = None
 
 
 @dataclass
@@ -205,9 +213,15 @@ def open_course(
     并行写同一 traj 的护栏，按课程命名后对并行课程不误伤）；④ 每课日志镜像（行路由）；
     ⑤ 清本课 hub 停机态（残留 halt 会让首轮 PPO job 进无人区）。
 
+    BC 课程走 `_open_bc_course`（**同一个函数名/同一份副作用**，只是解析链与锁名不同：
+    `run_bc.py` 用的是 `run_bc` 锁——共用 `run_rl` 锁会让「控制台起 run_bc」与「serve 起同一个
+    BC 课」互相看不见，两边同时开课）。
+
     **不在这里** `_setup()`：那会拉起 torch 并写 `run_start`——「扫到但本轮没在训」的课
     不该付这个代价。首次执行该课的一步时由 `ensure_ready` 做（见 `serve`）。
     """
+    if course_kind(course) == "bc":
+        return _open_bc_course(course, argv=argv, traj_root=traj_root)
     from run_rl import _acquire_run_rl_lock, _cleanup_run_rl_lock
 
     args = course_args(course, argv)
@@ -242,6 +256,45 @@ def open_course(
     return CourseRuntime(course=course, args=args, lock_path=lock_path)
 
 
+def _open_bc_course(
+    course: str, *, argv: list[str] | None = None, traj_root: str = "tmp"
+) -> CourseRuntime:
+    """开一门 BC 课（R3-4）：与 `run_bc.py` 的启动段**同义**，只是不做进程级那几件（utf8 /
+    chdir / 启动前 git push）——那些由 `prepare_process` 在进程级做过一次。
+
+    锁用 `run_bc`（与单课程入口同名同路径）：控制台起的 `run_bc.py --course X` 与 serve 里的
+    同一门 BC 课必须互相看得见（2026-09-06 双 trainer 写同一 traj 的护栏）。
+    """
+    from rl.bc_loop import bc_course_args, resolve_bc_runtime
+    from run_rl import _acquire_run_rl_lock, _cleanup_run_rl_lock
+
+    args = bc_course_args(course, argv)
+    # 解析链只此一份（`resolve_bc_runtime` 同时给出 traj/传输/token；它自己读 rl-config）。
+    runtime = resolve_bc_runtime(args)
+    traj = Path(runtime.traj)
+    expected = Path(course_traj(traj_root, course))
+    if str(traj) != str(expected):
+        log(
+            f"[serve] WARN BC 课程 {course} 的 traj = {traj}，与发现路径 {expected} 不一致——"
+            f"按课程配置（{traj}）为准；若这是笔误请改课程 jsonc"
+        )
+
+    lock_path = course_lock_path(str(NN_DIR), course, "run_bc")
+    if not _acquire_run_rl_lock(lock_path):
+        raise SystemExit(f"[serve] BC 课程 {course} 已有 run_bc 在跑（锁 {lock_path}）——拒绝双开")
+    atexit.register(_cleanup_run_rl_lock, lock_path)
+
+    if runtime.transport == "hub":
+        from remote.hub_client import clear_halt_on_startup
+
+        clear_halt_on_startup(runtime.hub_url, runtime.token, log=log, course=course)
+    log(
+        f"[serve] 开 BC 课 {course}：traj={traj} iters={runtime.iters} "
+        f"transport={runtime.transport} smoke={runtime.smoke} lock={lock_path}"
+    )
+    return CourseRuntime(course=course, args=runtime, lock_path=lock_path, kind="bc", bc=runtime)
+
+
 # ---------------------------------------------------------------- 一步级
 
 
@@ -268,17 +321,35 @@ def build_factory(
     poll_interval: float = DEFAULT_POLL_SEC,
     now: Callable[[], float] = time.time,
 ) -> Callable[[str], Any]:
-    """课程 → `TrainingLoop` 的构建器（**廉价**：不碰 torch，栈由 `_setup()` 稍后拉起）。
+    """课程 → 引擎的构建器（**廉价**：不碰 torch，RL 课的栈由 `_setup()` 稍后拉起）。
 
     构建时同时挂好该课的 `LoopRunner`（任务体↔引擎的唯一桥）：它是 `planner`/`executor` 的
     来源，也是「这一课跑到哪一步」的内存加速器（权威永远是账本）。
+
+    **BC 课（R3-4）**：引擎是 `rl.bc_loop.BcLoop`（同一套 `_setup`/`run_one_round`/
+    `finish_course`/`release_torch` 子集），且**恒为轮粒度**（13 步表是 RL 的一轮，硬套会
+    给 BC 发它不认识的待办）；指针走引擎自己的 `ledger_next_it`（`bc_round_completed`）。
     """
     from rl.loop_core import TrainingLoop
 
     def factory(course: str) -> Any:
+        rt = runtimes[course]
+        if rt.kind == "bc":
+            from rl.bc_loop import BcLoop
+
+            engine: Any = BcLoop(rt.bc)
+            rt.runner = LoopRunner(
+                loop=engine,
+                course=course,
+                iters=int(rt.bc.iters or 0),
+                step_mode=False,
+                poll_interval=poll_interval,
+                now=now,
+                facts_fn=facts_fn,
+            )
+            return engine
         from run_rl import update_kwargs
 
-        rt = runtimes[course]
         engine = TrainingLoop(rt.args, get_backend(rt.args.mode), bun, update_kwargs)
         rt.runner = LoopRunner(
             loop=engine,
@@ -292,10 +363,14 @@ def build_factory(
         return engine
 
     def facts_fn(course: str, it: int) -> RoundFacts:
-        """盘上事实（账本 + shard 目录）——与只读计划视图**同一份实现**（`loop_plan`）。"""
+        """盘上事实（账本 + shard 目录）——与只读计划视图**同一份实现**（`loop_plan`）。
+
+        `course` 必须透传：BC 课的指针与 RL **不同源**（`bc_round_completed` vs `iteration`），
+        少了它一门 BC 课会被按 RL 读账本、指针永远停在 it1。
+        """
         rt = runtimes.get(course)
         try:
-            facts, _v = course_facts(Path(rt.args.traj) if rt else Path("."))
+            facts, _v = course_facts(Path(rt.args.traj) if rt else Path("."), course=course)
             return facts
         except Exception as e:  # 读盘失败 ⇒ 判据未知（宁可重做，不可误跳）
             log(f"[serve] {course} 盘上事实读失败（判据退回未知）：{type(e).__name__}: {e}")
@@ -359,21 +434,25 @@ def _open_courses(
     return opened
 
 
-def _enqueue(sup: Supervisor, runtimes: dict[str, CourseRuntime], course: str, *, step_mode: bool) -> None:
+def _enqueue(
+    sup: Supervisor, runtimes: dict[str, CourseRuntime], course: str, *, step_mode: bool
+) -> None:
     """把一门课挂上调度器（初始队列 = 盘上事实算出的待办表）。
 
-    判据原语与只读计划视图同源（`course_facts` + `pending_tasks(round_tasks(...))`）——
+    判据原语与只读计划视图同源（`course_facts` + `pending_tasks(round_tasks_for(...))`）——
     不调 `plan_course` 是因为它连展示面字段（累计量/verdict）一起算，那是给 CLI 表/控制台看的。
     粒度必须匹配：细粒度用 13 步任务表，轮粒度用**单个**轮任务——混了就会把 13 个步骤 kind
-    塞进只认 `round` 的执行体（响亮 ABORT，不是静默跳步）。
+    塞进只认 `round` 的执行体（响亮 ABORT，不是静默跳步）。BC 课的轮任务由
+    `round_tasks_for` 给出（它按课程种类选表），故这里的折叠分支对它幂等。
     """
-    facts, _view = course_facts(Path(runtimes[course].args.traj))
+    rt = runtimes[course]
+    facts, _view = course_facts(Path(rt.args.traj), course=course)
     it = int(facts.it)
-    tasks = pending_tasks(round_tasks(course, it), facts)
+    tasks = pending_tasks(round_tasks_for(course, it), facts)
     if not step_mode and tasks:
         tasks = [Task(course, it, ROUND_KIND)]
     q = sup.add_course(course, it, tasks)
-    log(f"[serve] 入队 {course}：it{it} 待办 {len(tasks)} 步（队列状态 {q.state}）")
+    log(f"[serve] 入队 {course}（{rt.kind}）：it{it} 待办 {len(tasks)} 步（队列状态 {q.state}）")
 
 
 def _enqueue_opened(

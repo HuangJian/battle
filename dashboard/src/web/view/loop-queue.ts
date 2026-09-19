@@ -20,6 +20,14 @@ export type LoopWaitKind = 'inflight' | 'collect' | 'idle' | 'ready'
 /** 该课队列状态（python `loop_scheduler`：ready / running / waiting / paused / aborted / done）。 */
 export type LoopCourseState = 'ready' | 'running' | 'waiting' | 'paused' | 'aborted' | 'done'
 
+/** 课程种类（python `loop_plan.course_kind`：判据 = `curricula/<课>.bc.jsonc` 是否存在）。
+ *
+ *  BC 与 RL 在**同一张卡片里并列**（用户口径），两者的**指针、粒度、在飞来源都不同**：
+ *  BC 走 `bc_round_completed` + 账本 `job_pending` + 单个轮任务，RL 走 `iteration` +
+ *  commit journal + 13 步表。行上不带这个字段，UI 就只能自己猜（猜错就把 BC 读成 RL，
+ *  显示一排看着像真的、其实不存在的零）。 */
+export type LoopCourseKind = 'rl' | 'bc'
+
 /** 在飞的一条远端提交（`commit_journal.inflight()`：已发布未回传）。 */
 export interface LoopInflightView {
   /** 提交相位（ppo_remote / …）。 */
@@ -50,6 +58,9 @@ export interface LoopCourseFactsView {
 
 export interface LoopQueueRow {
   course: string
+  /** 课程种类（`rl` / `bc`）——默认 `rl`：**python 比控制台旧时（还没这个字段）**，把课当
+   *  RL 渲染是保守方向：误判成 BC 会给一门真 RL 课贴上 BC 标签并说「一轮 = 一个任务」。 */
+  kind: LoopCourseKind
   /** 这门课**此刻有存活的 trainingLoop 进程**（registry 为事实源，与控制台总览同口径）。
    *  它不是 python 给的：盘上事实（账本/inflight）看不出「进程还在不在」。
    *  为什么必须上卡：没在训的课也会有一套「可推进」的队列（它只是没人跑），
@@ -123,7 +134,8 @@ export function parseLoopQueue(raw: unknown): LoopQueueView | null {
     if (!course) continue
     const factsRaw = (r.facts ?? {}) as Record<string, unknown>
     const wRaw = (r.waiting ?? {}) as Record<string, unknown>
-    const kind = str(wRaw.kind) as LoopWaitKind
+    // ★ 别叫 `kind`：行上已有一个课程种类 `kind`（同名过一次，症状是 TS 把等待种类当种类）
+    const waitKind = str(wRaw.kind) as LoopWaitKind
     const inflight: LoopInflightView[] = []
     if (Array.isArray(r.inflight)) {
       for (const it of r.inflight as unknown[]) {
@@ -139,8 +151,11 @@ export function parseLoopQueue(raw: unknown): LoopQueueView | null {
       }
     }
     const state = str(r.state) as LoopCourseState
+    // 未知/缺失 kind ⇒ `rl`（保守方向，见 `LoopCourseKind` 注释）
+    const kind = str(r.kind) === 'bc' ? 'bc' : 'rl'
     rows.push({
       course,
+      kind,
       // 在训与否由服务端用 registry 事实补（`withTraining`）——解析层不知道进程状态。
       training: false,
       it: num(r.it),
@@ -162,7 +177,7 @@ export function parseLoopQueue(raw: unknown): LoopQueueView | null {
       // 未知 kind（python 侧新增一类等待）⇒ 退化成 ready 的显示语义，但**保留文案**：
       // 宁可少一个颜色，不可把「在等什么」整句丢掉（那句话才是卡片的产出）。
       waiting: {
-        kind: WAIT_KINDS.includes(kind) ? kind : 'ready',
+        kind: WAIT_KINDS.includes(waitKind) ? waitKind : 'ready',
         text: str(wRaw.text),
       },
     })
@@ -259,6 +274,41 @@ export function withTraining(view: LoopQueueView, training: string[]): LoopQueue
   const live = new Set(training)
   const rows = view.rows.map((r) => ({ ...r, training: live.has(r.course) }))
   return { ...view, rows, trainingCount: rows.filter((r) => r.training).length }
+}
+
+/** 种类徽标：BC 课才上屏（大多数课是 RL，给 RL 也挂一个标签就是噪声）。
+ *
+ *  它存在的理由很具体：同一张卡片里 BC 行与 RL 行的**形状不同**（BC 只有「一轮 = 一个
+ *  任务」、没有门禁 verdict、指标在 `bc_epoch`/`bc_eval` 事件里）——不标出来，操作员会把
+ *  「待办 1」读成「这门课没活了」。
+ */
+export function kindBadge(row: LoopQueueRow): { text: string; cls: string; title: string } | null {
+  if (row.kind !== 'bc') return null
+  return {
+    text: 'BC',
+    cls: 'tc-loopq__kind--bc',
+    title:
+      'BC（行为克隆）课程：一轮 = 采集语料 → 发布 job → 等 GPU 回传 → 落位归档；' +
+      '没有 RL 的门禁 / verdict / 13 步表，指标看 bc_epoch / bc_eval 账本事件',
+  }
+}
+
+/** 「下一步」列的悬停全文：BC 的「下一步」是一个**整轮**（不是 RL 的某个步骤）。 */
+export function stepTitle(row: LoopQueueRow): string {
+  if (row.kind === 'bc') {
+    return row.current
+      ? `下一步：跑完这一轮 BC（采集语料 → 发布 job → 等 GPU 回传 → 落位归档）· 轮指针 it${row.it}`
+      : `这一轮没有待办（BC 账本已结算 / 未开训）· 轮指针 it${row.it}`
+  }
+  return `下一步：${row.current || '（本轮无待办）'}`
+}
+
+/** 待办计数列的悬停全文（BC 一「轮」就是一个任务，说「步」会让人以为还有别的步骤）。 */
+export function pendingTitle(row: LoopQueueRow): string {
+  if (row.kind === 'bc') {
+    return `BC 课一轮 = 一个任务（${row.pending.length} 个待办）：采集语料 → 发布 job → 等 GPU 回传 → 落位归档；不像 RL 那样拆成 13 步`
+  }
+  return `待办 ${row.pending.length} 步（顺序即依赖顺序）：${row.pending.join(' → ')}`
 }
 
 /** 「在等什么」的排序权重：进程外的等待（在飞）排最前，其余保持课程顺序。

@@ -19,9 +19,12 @@
 import {
   type LoopQueueRow,
   type LoopQueueView,
+  kindBadge,
   pauseBadge,
   pauseLabel,
   pauseTitle,
+  pendingTitle,
+  stepTitle,
 } from '../../view'
 
 /** 未在训那一行的悬停全文（导出给用例断言，避免文案与断言两处漂移）。 */
@@ -133,6 +136,9 @@ export function LoopQueue({ loopQueue, course, onSelectCourse, onAction }: LoopQ
         {rows.map((r) => {
           const viewing = r.course === course
           const badge = pauseBadge(r)
+          // BC 行与 RL 行在同一张卡里并列：种类徽标去掉「这行形状不一样」的歧义
+          // （BC 一轮 = 一个任务、没有门禁 verdict、指标在 bc_epoch/bc_eval 里）。
+          const kind = kindBadge(r)
           return (
             // 暂停/恢复开关是行按钮的**兄弟节点**（行本身是 <button>，嵌套 button 非法）。
             <div className="tc-loopq__rowwrap" key={r.course}>
@@ -147,6 +153,11 @@ export function LoopQueue({ loopQueue, course, onSelectCourse, onAction }: LoopQ
                 onClick={() => onSelectCourse(r.course)}
               >
                 <span className="tc-loopq__name">{r.course}</span>
+                {kind ? (
+                  <span className={`tc-loopq__kind ${kind.cls}`} title={kind.title}>
+                    {kind.text}
+                  </span>
+                ) : null}
                 <span
                   className={`tc-loopq__badge ${r.training ? 'tc-loopq__badge--on' : 'tc-loopq__badge--idle'}`}
                   title={r.training ? 'trainingLoop 进程存活（registry）' : STOPPED_TITLE}
@@ -156,13 +167,10 @@ export function LoopQueue({ loopQueue, course, onSelectCourse, onAction }: LoopQ
                 <span className="tc-loopq__iter" title="账本指针：下一轮要跑的 it">
                   it{r.it}
                 </span>
-                <span className="tc-loopq__step" title={`下一步：${r.current || '（本轮无待办）'}`}>
+                <span className="tc-loopq__step" title={stepTitle(r)}>
                   {r.current || '—'}
                 </span>
-                <span
-                  className="tc-loopq__pending"
-                  title={`待办 ${r.pending.length} 步（顺序即依赖顺序）：${r.pending.join(' → ')}`}
-                >
+                <span className="tc-loopq__pending" title={pendingTitle(r)}>
                   待办 {r.pending.length}
                 </span>
                 <span

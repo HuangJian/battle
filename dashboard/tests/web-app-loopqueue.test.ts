@@ -252,6 +252,50 @@ describe('SSR：暂停按钮与事实徽标', () => {
   })
 })
 
+// ────────────────────────── BC 课与 RL 课并列（R3-4） ──────────────────────────
+
+describe('BC 行与 RL 行并列在同一张卡里', () => {
+  /** BC 课的一行：**单个轮任务** + 账本 `job_pending` 推出的在飞（与 python 同形）。 */
+  const bcRow = (patch: Record<string, unknown> = {}) =>
+    row({
+      course: 'bc-c4-v3',
+      kind: 'bc',
+      it: 2,
+      current: 'round',
+      pending: ['round'],
+      inflight: [{ phase: 'bc', round: '2', jid: 'job-bc-123456789', dispatch: 'hubpush' }],
+      waiting: { kind: 'inflight', text: '等远端回传：bc@2（jid=job-bc-123456789 via hubpush）' },
+      ...patch,
+    })
+
+  it('BC 行上屏「在等哪个 GPU job 回传」，RL 行照旧（并列而不是互相冒充）', async () => {
+    const html = await render(queue([bcRow(), row()], ['bc-c4-v3', 'c4-dodge']))
+    // BC 行：种类徽标 + 在等回传（这是它存在的理由）
+    expect(html).toContain('tc-loopq__kind--bc')
+    expect(html).toContain('等远端回传：bc@2（jid=job-bc-123456789 via hubpush）')
+    expect(html).toContain('tc-loopq__wait--inflight')
+    // RL 行不受影响：没有 BC 徽标（列表里只有一行是 BC）
+    expect(html.match(/tc-loopq__kind--bc/g)).toHaveLength(1)
+    // 页脚点名在等回传的那门课（BC 的 phase 就是 bc）
+    expect(html).toContain('正在等 bc@2')
+  })
+
+  it('BC 行的悬停说清「一轮 = 一个任务」（不说「步」，也不提不存在的 verdict/KL）', async () => {
+    const html = await render(queue([bcRow()], ['bc-c4-v3']))
+    expect(html).toContain('BC 课一轮 = 一个任务')
+    expect(html).toContain('跑完这一轮 BC')
+    expect(html).toContain('bc_epoch')
+    expect(html).not.toContain('13 步表是 RL 的') // 正面口径在 tooltip 里，不是给 RL 用的那句
+  })
+
+  it('RL 行的悬停保持原样（13 步顺序即依赖顺序）', async () => {
+    const html = await render(queue([row()], ['c4-dodge']))
+    expect(html).toContain('待办 2 步（顺序即依赖顺序）：ppo → eval_join')
+    expect(html).toContain('下一步：ppo')
+    expect(html).not.toContain('tc-loopq__kind--bc')
+  })
+})
+
 // ────────────────────────── 接线（SSR 渲染不出点击，用源码断言兜底） ──────────────────────────
 
 describe('接线：卡片挂载与视图字段同源', () => {
@@ -271,10 +315,12 @@ describe('接线：卡片挂载与视图字段同源', () => {
     expect(app).toContain('onSelectCourse={selectCourse}')
   })
 
-  it('卡片是 RL 区专属（BC 课不出：BC 没有 RL 训练循环）', () => {
-    const i = app.indexOf('<LoopQueue')
-    const guard = app.slice(Math.max(0, i - 300), i)
-    expect(guard).toContain('stateView?.isBc ? null :')
+  it('卡片是**跨课程**卡（BC 课也出）：它一次列出所有课，不该被「当前查看的课是 BC」门控', () => {
+    // 这条曾经是**反的**（`isBc ? null` 门控）：后果是选中一门 BC 课 ⇒ 整张卡片消失，
+    // 于是 BC 课在调度器视图里根本不存在——而 BC 课正是最需要看「在等哪个 GPU job 回传」的。
+    // 判据用正则（只看结构，不受注释/缩进漂移影响）：门控包裹 `<LoopQueue>` 的那个形状不该再有。
+    expect(app).not.toMatch(/isBc\s*\?\s*null\s*:\s*\(\s*<PanelErrorBoundary>\s*<LoopQueue/)
+    expect(app).toContain('loopQueue={stateView?.loopQueue ?? null}')
   })
 
   it('视图类型带 loopQueue（服务端填、客户端读，缺失即空态）', () => {

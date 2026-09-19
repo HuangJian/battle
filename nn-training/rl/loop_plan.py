@@ -15,8 +15,10 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+from rl.bc_ledger import inflight_jobs
 from rl.commit_journal import CommitJournal
 from rl.loop_tasks import RoundFacts, Task, pending_tasks, round_tasks
 from rl.train_ledger import LedgerSpec, LedgerView, load_ledger
@@ -62,9 +64,80 @@ def inflight_from_journals(traj: Path, it: int | None = None) -> list[dict]:
     return out
 
 
+def course_kind(course: str) -> str:
+    """课程种类：`'bc'` | `'rl'`（判据 = `curricula/<课>.bc.jsonc` 是否存在）。
+
+    与 `rl/bc_config.is_bc_course` / 控制台 `isBcCourse` 同一份事实（不靠账本事件推断）。
+    延迟导入：RL 课程的读面（只读 CLI / 控制台）不因此多付一次 pydantic 导入。
+    """
+    from rl.bc_config import is_bc_course
+
+    return "bc" if is_bc_course(course) else "rl"
+
+
+def bc_inflight(traj: Path, *, it: int | None = None) -> list[dict]:
+    """BC 课的**在飞集**——与 `inflight_from_journals` **逐字段同形**的记录列表。
+
+    BC 不写 `commit_journal`（那是 RL 远端 PPO / 半离线的 WAL），它的在飞事实在**账本**
+    （`publish_job` 的 `job_pending`，见 `rl/bc_ledger.py::inflight_jobs`），`dispatch` 在 job 目录的
+    manifest 里。归一成同一形状是刻意的：下游 `waiting_state` 只认这一种记录——不然
+    「在等什么」会对 BC 课说谎（它们明明在等 GPU 回传，却因为找不到 journal 而报「没有外部等待」）。
+
+    `job_root` 取默认的 `<traj>/remote-jobs`（`--remote-job-root` 是进程级覆盖，盘上无从得知；
+    真用了它，这一课的在飞就看不见——属于已知限度，比猜一个路径好）。
+    """
+    traj = Path(traj)
+    job_root = traj / "remote-jobs"
+    out: list[dict] = []
+    for rec in inflight_jobs(traj / "training_log.jsonl"):
+        rnd = int(rec.get("it") or 0)
+        if it is not None and rnd != int(it):
+            continue
+        jid = str(rec.get("jid") or "")
+        out.append(
+            {
+                "phase": "bc",
+                "round": str(rnd),
+                "jid": jid,
+                "dispatch": job_dispatch(job_root, jid),
+                "dir": f"remote-jobs/{jid}",
+            }
+        )
+    return out
+
+
+def job_dispatch(job_root: Path, jid: str) -> str | None:
+    """job manifest 里的 `dispatch`（`hubpush` = hub 中介推给 GPU worker；缺省 = pull 领取）。
+
+    读不到/坏文件 ⇒ None（不抛）：这是观测面，不该因一个半写的 manifest 让整页 500。
+    """
+    if not jid:
+        return None
+    try:
+        m = json.loads((Path(job_root) / jid / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    d = m.get("dispatch") if isinstance(m, dict) else None
+    return str(d) if d else None
+
+
+def inflight_facts(course: str, traj: Path, *, it: int | None = None) -> list[dict]:
+    """该课的**在飞集**（判据按课程种类选源）——控制台「在等什么」/CLI 表的共同入口。
+
+    RL = `commit_journal`（`it<N>/commit_journal.jsonl`，半离线/远端 PPO 的 WAL）；
+    BC = 账本 `job_pending`（+ job 目录取 dispatch）。两个源在同一天被归一成同一种记录，
+    下游只认一种形状（「在等什么」一份实现吃两种课程）。
+    """
+    if course and course_kind(course) == "bc":
+        return bc_inflight(traj, it=it)
+    return inflight_from_journals(traj, it)
+
+
 def course_facts(
     traj: Path,
     *,
+    course: str = "",
+    iters: int = 0,
     view: LedgerView | None = None,
     spec: LedgerSpec | None = None,
     games_planned: int = 0,
@@ -77,8 +150,29 @@ def course_facts(
 
     `games_planned`/`weights_landed` 由调用方给（它们来自课程计划与权重账本，本模块不臆测）；
     缺省即「未知」⇒ 对应任务不会被当成已完成（宁可重做，不可误跳）。
+
+    **BC 课程的指针与 RL 不同源**（`course` 给到且是 BC 时走这条路）：BC 的「跑到第几轮」由
+    `bc_round_completed` 决定（`rl/bc_ledger.py`），RL 的由 `iteration` 决定（`LedgerSpec`）。
+    不传 `course` 时行为与改造前**逐字节相同**（RL）。`iters` 只在 BC 分支用于「有空档时取第一个
+    缺轮」；不给（0）则退化为「最大已完成轮 + 1」（不推断是否跑完——算不出的判据不得当完成）。
+
+    ★ BC 分支的 `iteration_recorded` **恒 False**：BC 的「本轮已结算」已由指针本身表达
+    （指针跳过已完成轮），不需要第二个字段重述同一件事（否则两处一旦不一致就是跳轮）。
     """
     traj = Path(traj)
+    if course and course_kind(course) == "bc":
+        from rl.bc_ledger import bc_progress
+
+        prog = bc_progress(traj / "training_log.jsonl", int(iters or 0))
+        facts = RoundFacts(
+            it=int(prog.next_it),
+            games_settled=0,
+            games_planned=0,
+            weights_landed=False,
+        )
+        # 空视图（`path` 指向本课账本）：BC 的展示面字段（iterations/verdict…）由控制台的
+        # BC 面板读自己的事件，不经 RL 的 `LedgerSpec` 解释（它认不出 bc_* 事件）。
+        return facts, LedgerView(path=traj / "training_log.jsonl")
     v = view if view is not None else load_ledger(traj / "training_log.jsonl", spec)
     it = int(v.next_it)
     facts = RoundFacts(
@@ -89,6 +183,20 @@ def course_facts(
         weights_landed=bool(weights_landed),
     )
     return facts, v
+
+
+def round_tasks_for(course: str, it: int, params: dict | None = None) -> list[Task]:
+    """一轮的任务表——**粒度按课程种类选**（`'bc'` ⇒ 单个轮任务）。
+
+    13 步表是 RL 的一轮（rollout/ppo/eval/门禁…）——BC 的一轮是"采语料 → 发布 → 等回传 →
+    落位归档"，把它映射到那张表就是给另一类课程发错的待办（执行体会响亮 ABORT，不是静默跳步）。
+    两种粒度都由 `LoopRunner` 同一份执行体消费（BC 的引擎只实现 `run_one_round`）。
+    """
+    if course_kind(course) == "bc":
+        from rl.loop_runner import ROUND_KIND
+
+        return [Task(course=course, it=int(it), kind=ROUND_KIND, params=dict(params or {}))]
+    return round_tasks(course, it, params)
 
 
 def plan_course(
@@ -105,13 +213,21 @@ def plan_course(
     不传 `view` 时自己扫一遍账本（= 开课/续跑读一次，用户口径）。
     `games_planned`/`weights_landed` 由调用方给（它们来自课程计划与权重账本，本模块
     不臆测）；缺省即「未知」⇒ 对应任务不会被当成已完成。
+
+    粒度与指针都按课程种类走（BC ⇒ 单个轮任务 + `bc_round_completed` 指针），见
+    `round_tasks_for` / `course_facts`。
     """
     traj = Path(traj)
     facts, v = course_facts(
-        traj, view=view, spec=spec, games_planned=games_planned, weights_landed=weights_landed
+        traj,
+        course=course,
+        view=view,
+        spec=spec,
+        games_planned=games_planned,
+        weights_landed=weights_landed,
     )
     it = int(facts.it)
-    tasks = pending_tasks(round_tasks(course, it), facts)
+    tasks = pending_tasks(round_tasks_for(course, it), facts)
     facts_dump = {
         "it": it,
         "iteration_recorded": facts.iteration_recorded,

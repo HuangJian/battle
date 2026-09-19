@@ -6,7 +6,8 @@
 `courses.<课>.push_node_url` 就留在配置里，不钉死则 job 全被推去云机、本机 worker
 永远领不到活，而日志看起来「训练正常」（最贵的那类错误）。
 
-本文件覆盖两侧纯函数（run_rl 的 `resolve_transport` / run_bc 的 `resolve_transport`）
+本文件覆盖两侧纯函数（run_rl 的 `resolve_transport` / BC 的 `resolve_transport`，后者 R3-4 后
+住在 `rl/bc_loop.py`）
 与 argparse 接线（默认值 + choices），不碰 torch。
 """
 
@@ -100,14 +101,14 @@ def test_hubpush_has_no_direct_nodes() -> None:
     assert resolve_transport("hubpush", "https://hub", "tok", [NODE]) == []
 
 
-# ────────────────────────── run_bc（run_bc.resolve_transport） ──────────────────────────
+# ────────────────── BC（rl/bc_loop.resolve_transport；R3-4 引擎化后移出 run_bc） ──────────────────
 
 
 def test_bc_auto_keeps_historical_priority() -> None:
-    import run_bc
+    from rl import bc_loop
 
     assert (
-        run_bc.resolve_transport(
+        bc_loop.resolve_transport(
             local=False,
             mode="auto",
             remote=True,
@@ -118,7 +119,7 @@ def test_bc_auto_keeps_historical_priority() -> None:
         == "push"
     )
     assert (
-        run_bc.resolve_transport(
+        bc_loop.resolve_transport(
             local=False,
             mode="auto",
             remote=True,
@@ -132,45 +133,55 @@ def test_bc_auto_keeps_historical_priority() -> None:
 
 def test_bc_pull_overrides_configured_push_url() -> None:
     """--remote-transport pull 压过 courses.<课>.push_node_url（本地 worker 的唯一活路）。"""
-    import run_bc
+    from rl import bc_loop
 
     assert (
-        run_bc.resolve_transport(
-            local=False, mode="pull", remote=True, push_url="https://gpu", hub_url="https://h", token="t"
+        bc_loop.resolve_transport(
+            local=False,
+            mode="pull",
+            remote=True,
+            push_url="https://gpu",
+            hub_url="https://h",
+            token="t",
         )
         == "hub"
     )
 
 
 def test_bc_pull_needs_full_hub_triple() -> None:
-    import run_bc
+    from rl import bc_loop
 
     with pytest.raises(SystemExit, match="pull"):
-        run_bc.resolve_transport(
+        bc_loop.resolve_transport(
             local=False, mode="pull", remote=False, push_url="https://gpu", hub_url="", token=""
         )
 
 
 def test_bc_push_needs_node_and_local_wins() -> None:
-    import run_bc
+    from rl import bc_loop
 
     with pytest.raises(SystemExit, match="push"):
-        run_bc.resolve_transport(
+        bc_loop.resolve_transport(
             local=False, mode="push", remote=True, push_url="", hub_url="https://h", token="t"
         )
     # --local 是显式意图，优先于任何 --remote-transport
     assert (
-        run_bc.resolve_transport(
-            local=True, mode="pull", remote=True, push_url="https://gpu", hub_url="https://h", token="t"
+        bc_loop.resolve_transport(
+            local=True,
+            mode="pull",
+            remote=True,
+            push_url="https://gpu",
+            hub_url="https://h",
+            token="t",
         )
         == "local"
     )
 
 
 def test_bc_no_transport_is_loud() -> None:
-    import run_bc
+    from rl import bc_loop
 
     with pytest.raises(SystemExit, match="无法确定传输"):
-        run_bc.resolve_transport(
+        bc_loop.resolve_transport(
             local=False, mode="auto", remote=False, push_url="", hub_url="", token=""
         )

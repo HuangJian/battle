@@ -40,6 +40,11 @@ ROUND_NEXT = "next"
 ROUND_STOP = "stop"
 #: 本轮作废，it 原地重试。
 ROUND_RETRY = "retry"
+#: **本轮未完，让位等外部**（R3-4：BC 轮粒度路径）。语义与 `ROUND_RETRY` 的区别很重要：
+#: retry = 「我试过了，失败了，重做」；wait = 「我已经发布/采集完了，**正在等外部事实**
+#: （GPU job 回传 / 语料落盘）」——进程没出错，只是这一步的结果还没到。
+#: 调度器据此把执行权交给别的课程（不占票、不计失败连击），过一会儿再来问同一轮。
+ROUND_WAIT = "wait"
 #: `--smoke` 冒烟回显作废，干净退出。
 ROUND_SMOKE_STOP = "smoke_stop"
 #: 全离线任务包已写出，整条腿结束。
@@ -52,10 +57,15 @@ class RoundOutcome:
 
     `it` 必须带回驱动循环：半离线整段（`_remote_run_segment`）会一次吃掉 it..end_it，
     丢掉返回值就会重跑已经跑完的那一段（比跳轮更贵）。
+
+    `detail`：`ROUND_WAIT` 的**人读原因**（在等什么、等谁）——它会直接上屏到控制台调度器
+    卡片的「在等什么」列，所以必须是事实句（带 jid/轮号），而不是「等待中」。其它终态
+    留空（它们各自有既有的读面字段）。
     """
 
     status: str
     it: int
+    detail: str = ""
 
 
 # ---- 采集模式（轮内 fact：决定 rollout / 补波走哪条支路） -------------------
