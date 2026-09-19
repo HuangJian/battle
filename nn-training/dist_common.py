@@ -23,6 +23,9 @@ dist_common.py — 分布式采样 trainer 侧公共工具（stdlib-only，可�
   探测；命中则不传 body 直接 kept。旧 agent 无此路径 → 404 → 回退完整 POST。
   批量下发用 post_weights_parallel（ThreadPool，与 ping 并行化同款）；pure_collect
   锚点语义不变（仍 = 全部节点权重就绪时刻）。
+  同 it 补波复用（2026-09-19）：进程内 `_WEIGHTS_PUSHED[wver]→node ids`——
+  partition_weights_nodes 拆 reuse/need；成功 POST 自动 note；ping/codeHash/bun
+  exclude 须 forget_weights_node（防脏缓存）。
 
 红线：远端结果必须先过 validate_result() 再落进 traj_dir —— discover_rl_shards()
 对已落盘目录是无条件递归扫描的，落盘之后没有任何兜底。
@@ -574,6 +577,33 @@ def probe_weights_cached(
     return bool(info.get("cached"))
 
 
+# 进程内「已成功下发过该 wver」缓存（volume 同 it 补波复用；跨 it 换 wver 天然失效）。
+# 键 = weights 指纹；值 = 成功 POST 过的 node id。失效：ping/codeHash/bun 门 exclude
+# 时调用 forget_weights_node。局限：同 codeHash 手动重启可能残留脏缓存（同 it 窗口内罕见）。
+_WEIGHTS_PUSHED: dict[str, set[str]] = {}
+
+
+def weights_push_cache_reset() -> None:
+    """测试/运维：清空进程内权重下发缓存。"""
+    _WEIGHTS_PUSHED.clear()
+
+
+def note_weights_pushed(wver: str, node_id: str) -> None:
+    if wver and node_id:
+        _WEIGHTS_PUSHED.setdefault(wver, set()).add(node_id)
+
+
+def forget_weights_node(node_id: str) -> None:
+    if not node_id:
+        return
+    for s in _WEIGHTS_PUSHED.values():
+        s.discard(node_id)
+
+
+def weights_already_pushed(wver: str, node_id: str) -> bool:
+    return bool(node_id) and node_id in _WEIGHTS_PUSHED.get(wver, ())
+
+
 def post_weights(
     url: str,
     auth_key: str,
@@ -625,16 +655,17 @@ def post_weights_parallel(
     timeout: float,
     kind: str = "rollout",
     log=None,
+    on_alive=None,
 ) -> list:
     """并行 POST 权重到全部节点 → alive 节点列表（保持入参顺序）。
 
-    失败节点记日志后排除（与串行版语义一致）。日志在全部完成后按配置顺序回放
-    （与 ping 并行化同款：保序、保线程安全）。pure_collect 锚点由调用方在本函数
-    返回后打点——语义不变（全部节点就绪）。
-
-    nodes 元素需含 id/url；key 取 `key` 或 `authKey`。
+    失败节点记日志后排除（与串行版语义一致）。**边分发边开采**（2026-09-19）：
+    `on_alive(nd)` 在**该节点 POST 成功的瞬间**于 worker 线程回调（须线程安全），
+    调用方可立刻孵化该节点采样线程，无需等其它节点。返回值仍按入参顺序。
+    日志在每节点完成时输出。pure_collect 锚点由调用方定义（用户 2026-09-19：
+    权重开始分发 → 样本齐可交 PPO）。
     """
-    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     if not nodes:
         return []
@@ -659,18 +690,44 @@ def post_weights_parallel(
             return nid, nd, None, e
 
     n = len(nodes)
+    ok_ids: set[str] = set()
     with ThreadPoolExecutor(max_workers=min(8, n)) as ex:
-        results = list(ex.map(_push, nodes))
-    alive: list = []
-    for nid, nd, mode, err in results:
-        if err is not None:
+        futs = [ex.submit(_push, nd) for nd in nodes]
+        for fut in as_completed(futs):
+            nid, nd, mode, err = fut.result()
+            if err is not None:
+                if log is not None:
+                    log(f"[dist] weights POST to {nid} failed ({err}) — excluded")
+                continue
+            note_weights_pushed(wver, nid)
             if log is not None:
-                log(f"[dist] weights POST to {nid} failed ({err}) — excluded")
-            continue
-        if log is not None:
-            log(f"[dist] weights[{kind}] -> {nid} ({mode})")
-        alive.append(nd)
-    return alive
+                log(f"[dist] weights[{kind}] -> {nid} ({mode})")
+            if on_alive is not None:
+                on_alive(nd)
+            ok_ids.add(nid)
+    return [nd for nd in nodes if str(nd.get("id") or nd.get("url") or "?") in ok_ids]
+
+
+def rollout_collect_sec(t_dist_start: float | None, last_settle: float | None) -> float | None:
+    """rollout 采集耗时（用户口径 2026-09-19）。
+
+    起点 = **权重就绪开始分发**；终点 = **所有样本采集完毕可交 PPO**（末局结算）。
+    边分发边开采下该值**包含**与采集重叠的分发墙钟——这正是用户要的端到端口径。
+    """
+    if t_dist_start is None or last_settle is None:
+        return None
+    return round(last_settle - t_dist_start, 1)
+
+
+def partition_weights_nodes(nodes: list, wver: str) -> tuple[list, list]:
+    """按进程内缓存把节点拆成 (reuse, need)：reuse 跳过 POST，need 要下发。
+
+    volume 同 it 补波：权重不变，首波已成功的节点进 reuse。ping/codeHash 门
+    exclude 的节点须先 forget_weights_node，否则可能带着脏缓存进 reuse。
+    """
+    reuse = [nd for nd in nodes if weights_already_pushed(wver, str(nd.get("id") or nd.get("url") or "?"))]
+    need = [nd for nd in nodes if not weights_already_pushed(wver, str(nd.get("id") or nd.get("url") or "?"))]
+    return reuse, need
 
 
 def unpack_container(raw: bytes) -> tuple[dict, dict]:

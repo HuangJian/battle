@@ -36,7 +36,14 @@
    `weightsCachedInBucket`。
 3. **`resolve_tail_join_sec`**（`rl/dispatch.py`）：all_settled/halt 默认 **0**；
    窗口到期未齐默认 5s（`tailGraceJoinSecDeadline`）。policy 可覆写（e2e 用 2s）。
-4. **GBK 门禁**（§30 同源）：`test_remote_iter_real_bun` / `test_tpu_probe_notebook`
+4. **同 it 波次权重复用**（本条追加）：`dist_common` 进程内 `_WEIGHTS_PUSHED[wver]→nodes`。
+   `partition_weights_nodes` 拆 reuse/need；补波只对 need POST。ping/codeHash/bun
+   exclude 时 `forget_weights_node`。`post_weights_parallel` 成功后自动 note。
+5. **边分发边开采 + rollout 口径**（用户 2026-09-19，DECISIONS §2026-09-19-rollout-pipeline-metric）：
+   `pure_collect_sec` = **权重开始分发 → 样本齐可交 PPO**（`last_settle − t_dist_start`，
+   含与采集重叠的分发墙钟）。`post_weights_parallel(..., on_alive=)` 每节点成功即 spawn
+   采样线程；local/reuse 先开采。旧口径「末局 − 全节点 ready」作废。
+6. **GBK 门禁**（§30 同源）：`test_remote_iter_real_bun` / `test_tpu_probe_notebook`
    改 `tests.subproc_util.run_utf8`；`bun_version` 三处显式 `encoding=utf-8`。
    real_bun 另补 `lives_override=1`（exporter 2026-09-19 起无 flag 即响亮失败）。
 

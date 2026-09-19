@@ -230,8 +230,11 @@ class RolloutDispatcher:
         for (nid, ping), n in zip(probe_results, cfg_nodes, strict=False):
             if ping is None:
                 log(f"[dist] node {nid}: ping failed — excluded this round")
+                dist_common.forget_weights_node(nid)
                 continue
             if ping.get("codeHash") != code_hash:
+                # codeHash 不符 ⇒ 节点可能 pull/restart 丢权重——缓存必须失效
+                dist_common.forget_weights_node(nid)
                 # 主动升级（guarded，2026-09-01 重启循环修复②）：分支 = 训练机当前分支
                 # （dist_common.UPGRADE_BRANCH 锁存）。护栏见 dist_common.request_upgrade_
                 # guarded——跨代去重（同节点同 (agent codeHash, 期望 hash) 只杀一次，
@@ -307,6 +310,7 @@ class RolloutDispatcher:
                     f"[dist] node {nid}: bun {remote_full} vs local {local_bun} "
                     f"(major.minor differs) — excluded (red)"
                 )
+                dist_common.forget_weights_node(nid)
                 continue
             if remote_full != local_bun:
                 log(
@@ -327,36 +331,31 @@ class RolloutDispatcher:
             log("[dist] no eligible node — falling back to local-only rollout")
             return run_rollout(bun, rl_path, traj_dir, pairs, args)
 
-        # ② 权重一次下发；异 sha 由 agent 原子清场，同 sha 幂等不动
-        # 并行 POST（2026-09-19：x20-rebirth it19 串行 6 节点 50s——与 ping 同款
-        # ThreadPool）；kept 短路径见 dist_common.post_weights。pure_collect 锚点
-        # 语义不变：仍是「全部节点权重就绪」的时刻（本函数返回后打点）。
-        with open(rl_path, "rb") as f:
-            weights_bytes = f.read()
+        # ② 权重下发准备（边分发边开采，2026-09-19 用户口径）：
+        #    rollout 耗时 = 权重就绪开始分发 → 样本齐可交 PPO。
+        #    同 wver 进程缓存 reuse 跳过 POST；need 节点 POST 成功瞬间孵化采样线程。
+        #    pure_collect_sec = last_settle − t_dist_start（含与采集重叠的分发墙钟）。
         if getattr(args, "goal_rollout", False):
             wkind = "goal"
         elif getattr(args, "intent_rollout", False):
             wkind = "intent"
         else:
             wkind = "rollout"
-        alive = dist_common.post_weights_parallel(
-            nodes,
-            iter_id,
-            wver,
-            weights_bytes,
-            timeout=min(300.0, max(60.0, task_timeout)),
-            kind=wkind,
-            log=log,
-        )
-        if not alive:
-            log("[dist] all weights POST failed — falling back to local-only rollout")
-            return run_rollout(bun, rl_path, traj_dir, pairs, args)
-        # 纯采集起点（用户定义 2026-08-24）：新权重分发完毕的时刻。
-        # 纯采集耗时 = 最后一局结算时刻 − 本时刻；与 PPO 重叠与否无关，就是两个事件锚点。
-        t_dist_done = time.time()
-        # 最后一局成功结算的时刻（worker 内更新）。用单元素 list 做闭包可变捕获；
-        # 显式标注 float|None，否则被推成 list[None]、写入 time.time() 报错。
+        with open(rl_path, "rb") as f:
+            weights_bytes = f.read()
+        reuse, need = dist_common.partition_weights_nodes(nodes, wver)
+        if reuse:
+            log(
+                f"[dist] weights[{wkind}] reuse wver={wver[:12]}… skip POST for "
+                f"{[nd['id'] for nd in reuse]}"
+            )
+        # ping 失败/codeHash/bun 不符已在门内 forget；本列表在 worker 定义后用于
+        # 边分发边开采的即时 spawn。
+        # 最后一局成功结算的时刻（worker 内更新）。
         last_settle_at: list[float | None] = [None]
+        # 权重分发起止（诊断 + pure_collect 新口径）。
+        t_dist_start_box: list[float | None] = [None]
+        t_dist_done_box: list[float | None] = [None]
 
         # ③ 中央队列 + 消费者（远端 C_n 线程 + 本机 workers 线程）
         # 断点续跑：剔除已完整落盘且 wver 匹配的局（本轮重启/重试不重跑已完成任务）。
@@ -423,7 +422,7 @@ class RolloutDispatcher:
         lock = threading.Lock()
         seen: set[tuple[int, int]] = set()
         attempts: dict[tuple[int, int], int] = {}
-        streaks = {nd["id"]: 0 for nd in alive}
+        streaks = {nd["id"]: 0 for nd in nodes}
         results: list[dict] = []
         stats = {"retried": 0}
         # 竞速输家/dup settle 是 fan-out 的正常结局，逐条打会刷爆 training-loop.log
@@ -861,22 +860,74 @@ class RolloutDispatcher:
                     time.sleep(min(5.0, max(0.5, deadline - time.time())))
 
         threads: list[threading.Thread] = []
-        # 本地线程先孵化：任务队列在启动瞬间是满的，谁先起跑谁抢到——agent 线程在
-        # 前的历史顺序曾让课程小轮（12 局）被远端瞬间清空、local 全程零参与。
-        for _ in range(max(local_slots, cap_full)):
-            threads.append(
-                threading.Thread(target=worker, args=(None,), daemon=True, name="rollout-local")
-            )
-        for nd in alive:
+        extra_threads: list[threading.Thread] = []
+        # alive / spawned_ids：权重就绪后才 append（边分发边开采；rescan 共享）。
+        alive: list = []
+        spawned_ids: set[str] = set()
+        alive_lock = threading.Lock()
+
+        def _spawn_node_workers(nd: dict) -> None:
+            """单节点权重就绪后立刻孵化其采样线程（POST 成功回调 / reuse / rescan）。
+
+            **先 start 再入列表**：join 快照可能与 append 竞态，对未 start 的线程
+            join 会 RuntimeError（stream smoke：local 秒结后 push/spawn 尚未启动）。
+            """
+            with alive_lock:
+                if nd["id"] in spawned_ids:
+                    return
+                spawned_ids.add(nd["id"])
+                if nd not in alive:
+                    alive.append(nd)
             for _ in range(nd["c"]):
-                threads.append(threading.Thread(target=worker, args=(nd,), daemon=True))
+                t = threading.Thread(target=worker, args=(nd,), daemon=True)
+                t.start()
+                threads.append(t)
+                extra_threads.append(t)
+
+        # 本地线程先孵化：本地权重已在磁盘（rl_path），不依赖远端 POST。
+        t_dist_start_box[0] = time.time()
+        for _ in range(max(local_slots, cap_full)):
+            t = threading.Thread(
+                target=worker, args=(None,), daemon=True, name="rollout-local"
+            )
+            t.start()
+            threads.append(t)
+        # reuse 节点：同 wver 已下发，立刻开采。
+        for nd in reuse:
+            _spawn_node_workers(nd)
+
+        def _push_need_and_spawn() -> None:
+            """need 节点并行 POST；每个成功节点立刻 spawn（边分发边开采）。"""
+            try:
+                if not need:
+                    return
+                dist_common.post_weights_parallel(
+                    need,
+                    iter_id,
+                    wver,
+                    weights_bytes,
+                    timeout=min(300.0, max(60.0, task_timeout)),
+                    kind=wkind,
+                    log=log,
+                    on_alive=_spawn_node_workers,
+                )
+            except Exception as e:
+                # Fake/真节点在采集结束时被关掉会 URLError；不拖垮 push 线程。
+                log(f"[dist] weights-push aborted ({e}) — 未成功 POST 的节点本轮不采样")
+            finally:
+                t_dist_done_box[0] = time.time()
+
+        if need:
+            push_t = threading.Thread(
+                target=_push_need_and_spawn, daemon=True, name="weights-push"
+            )
+            push_t.start()
+            threads.append(push_t)
+        else:
+            t_dist_done_box[0] = t_dist_start_box[0]
 
         # v3.9 动态节点发现：rescan 线程周期 ping 配置里未上线的节点，合格则
         # 权重下发 + 孵化新 worker 线程（与初始节点同等待遇，共享 pending 队列）。
-        # strategies: 初始 alive 已是共享可变列表（后续 append），spawned_ids 防重复孵化。
-        spawned_ids: set[str] = {nd["id"] for nd in alive}
-        extra_threads: list[threading.Thread] = []
-
         if rescan_sec > 0 and cfg.get("nodes"):
             scan_t = threading.Thread(
                 target=rescan_nodes,
@@ -906,9 +957,8 @@ class RolloutDispatcher:
                 name="rollout-rescan",
             )
             threads.append(scan_t)
+            scan_t.start()
 
-        for t in threads:
-            t.start()
         # v3.17 收尾兜底（2026-09-06，竞速收尾洞②）：旧实现对每个线程
         # join(window + task_timeout) = 2700s —— 只要有一个 worker 卡在**不可中断**
         # 的 HTTP 调用（同步 agent 的 200 分支、提交阶段挂起），整轮就空等到满超时，
@@ -929,8 +979,18 @@ class RolloutDispatcher:
         halted = halt_event is not None and halt_event.is_set()
         tail_join_sec = resolve_tail_join_sec(policy, all_settled.is_set(), halted)
         join_until = time.time() + max(0.0, tail_join_sec)
+        seen_join: set[int] = set()
         for t in list(threads) + list(extra_threads):
-            t.join(timeout=max(0.0, join_until - time.time()))
+            tid = id(t)
+            if tid in seen_join:
+                continue
+            seen_join.add(tid)
+            if t.ident is None and not t.is_alive():
+                continue  # 尚未 start（或已从列表里被复用）——join 会 RuntimeError
+            try:
+                t.join(timeout=max(0.0, join_until - time.time()))
+            except RuntimeError:
+                pass
         stuck = [t.name for t in list(threads) + list(extra_threads) if t.is_alive()]
         if stuck:
             log(
@@ -978,17 +1038,26 @@ class RolloutDispatcher:
             # 跨配置断点轮的目录残留量（不在本轮计划、已忽略）——一次性观测
             "offPlanShards": max(0, len(done_all) - len(done)),
         }
-        combined["dist_phase_sec"] = round(t_dist_done - t_queue_enter, 1)
+        combined["dist_phase_sec"] = round(
+            (t_dist_done_box[0] or time.time()) - t_queue_enter, 1
+        )
         if halt_event is not None and halt_event.is_set():
             combined["halt_aborted"] = True
             log(
                 f"[dist] KL halt active — dispatch stopped early "
                 f"({len(missing)} task(s) left undispatched/unsettled)"
             )
-        # 纯采集（用户定义）：最后一局结算时刻 − 权重分发完毕时刻。与 PPO 重叠无关。
-        if last_settle_at[0] is not None:
-            combined["pure_collect_sec"] = round(last_settle_at[0] - t_dist_done, 1)
-            combined["weights_dist_done_at"] = time.strftime(
-                "%Y-%m-%d %H:%M:%S", time.localtime(t_dist_done)
-            )
+        # rollout 采集耗时（用户口径 2026-09-19）：权重就绪开始分发 → 样本齐可交 PPO。
+        # 边分发边开采下含与采集重叠的分发墙钟（端到端，不是「纯仿真」）。
+        collect_sec = dist_common.rollout_collect_sec(t_dist_start_box[0], last_settle_at[0])
+        if collect_sec is not None:
+            combined["pure_collect_sec"] = collect_sec
+            if t_dist_start_box[0] is not None:
+                combined["weights_dist_start_at"] = time.strftime(
+                    "%Y-%m-%d %H:%M:%S", time.localtime(t_dist_start_box[0])
+                )
+            if t_dist_done_box[0] is not None:
+                combined["weights_dist_done_at"] = time.strftime(
+                    "%Y-%m-%d %H:%M:%S", time.localtime(t_dist_done_box[0])
+                )
         return combined

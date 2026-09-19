@@ -432,8 +432,8 @@ def run_rollout_stream(
     # agg=None 表示本轮没有发生任何梯度步（checkpoint 已在先前进程完整跑完）。
     # 指标不伪造为 0——jsonl 写 null，报告显示 '—'，健康判定自动忽略该轮。
     last = state["last_agg"]
-    # pure_collect_sec 由 run_rollout_queue 实测（末局结算 − 权重分发完毕），
-    # 经 box["report"] 顶层透传——此处不做任何公式派生。
+    # pure_collect_sec 由 run_rollout_queue 实测（用户口径 2026-09-19：
+    # 权重开始分发 → 样本齐可交 PPO），经 box["report"] 顶层透传——此处不派生。
     report["_stream"] = {
         "rollout_sec": rollout_sec,
         "tail_drain_sec": tail_sec,

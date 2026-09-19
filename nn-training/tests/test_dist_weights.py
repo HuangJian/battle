@@ -12,8 +12,18 @@ from __future__ import annotations
 
 import gzip
 import json
+import time
+
+import pytest
 
 import dist_common
+
+
+@pytest.fixture(autouse=True)
+def _reset_weights_push_cache():
+    dist_common.weights_push_cache_reset()
+    yield
+    dist_common.weights_push_cache_reset()
 
 
 class _Call:
@@ -157,12 +167,13 @@ def test_post_weights_parallel_order_and_failures(monkeypatch) -> None:
         kind="rollout",
         log=logs.append,
     )
-    assert [n["id"] for n in alive] == ["self", "a97"]
+    assert [n["id"] for n in alive] == ["self", "a97"]  # 入参顺序
     assert sorted(seen) == ["http://a97", "http://mac", "http://self"]
-    # 日志按配置顺序回放；失败节点点名排除
-    assert logs[0].startswith("[dist] weights[rollout] -> self (kept)")
-    assert "mac" in logs[1] and "excluded" in logs[1]
-    assert logs[2].startswith("[dist] weights[rollout] -> a97 (purged)")
+    # 日志按完成顺序（as_completed）；内容点名成功/失败
+    joined = "\n".join(logs)
+    assert "weights[rollout] -> self (kept)" in joined
+    assert "weights POST to mac failed" in joined and "excluded" in joined
+    assert "weights[rollout] -> a97 (purged)" in joined
 
 
 def test_post_weights_parallel_empty(monkeypatch) -> None:
@@ -171,3 +182,112 @@ def test_post_weights_parallel_empty(monkeypatch) -> None:
 
     monkeypatch.setattr(dist_common, "post_weights", fail)
     assert dist_common.post_weights_parallel([], "r", "s", b"", timeout=1.0) == []
+
+
+def test_weights_push_cache_reuse_partition_and_forget(monkeypatch) -> None:
+    """volume 同 it 补波：首波成功节点进 reuse，不再 POST；forget 后回到 need。"""
+    dist_common.weights_push_cache_reset()
+    calls: list[str] = []
+
+    def fake_post(url, auth_key, iter_id, sha, weights_bytes, timeout=120.0, kind="rollout"):
+        calls.append(url)
+        return "purged"
+
+    monkeypatch.setattr(dist_common, "post_weights", fake_post)
+    nodes = [
+        {"id": "self", "url": "http://self", "key": "k"},
+        {"id": "mac", "url": "http://mac", "key": "k"},
+    ]
+    wver = "a" * 64
+    # 初波：全部 need
+    reuse, need = dist_common.partition_weights_nodes(nodes, wver)
+    assert reuse == [] and need == nodes
+    alive = dist_common.post_weights_parallel(nodes, "r.1", wver, b"{}", timeout=5.0)
+    assert [n["id"] for n in alive] == ["self", "mac"]
+    assert dist_common.weights_already_pushed(wver, "self")
+    assert dist_common.weights_already_pushed(wver, "mac")
+    # 补波：全部 reuse → 调用方跳过 POST
+    reuse, need = dist_common.partition_weights_nodes(nodes, wver)
+    assert [n["id"] for n in reuse] == ["self", "mac"]
+    assert need == []
+    # 新 wver（PPO 更新后）→ 全量重发
+    wver2 = "b" * 64
+    reuse, need = dist_common.partition_weights_nodes(nodes, wver2)
+    assert reuse == [] and need == nodes
+    # ping/codeHash exclude → forget → 该节点回到 need
+    dist_common.forget_weights_node("mac")
+    reuse, need = dist_common.partition_weights_nodes(nodes, wver)
+    assert [n["id"] for n in reuse] == ["self"]
+    assert [n["id"] for n in need] == ["mac"]
+    dist_common.weights_push_cache_reset()
+
+
+def test_post_weights_parallel_notes_cache(monkeypatch) -> None:
+    dist_common.weights_push_cache_reset()
+
+    def fake_post(url, auth_key, iter_id, sha, weights_bytes, timeout=120.0, kind="rollout"):
+        if "bad" in url:
+            raise dist_common.DistError(500, "x")
+        return "kept"
+
+    monkeypatch.setattr(dist_common, "post_weights", fake_post)
+    nodes = [
+        {"id": "ok", "url": "http://ok", "key": "k"},
+        {"id": "bad", "url": "http://bad", "key": "k"},
+    ]
+    wver = "c" * 64
+    alive = dist_common.post_weights_parallel(nodes, "r", wver, b"x", timeout=5.0)
+    assert [n["id"] for n in alive] == ["ok"]
+    assert dist_common.weights_already_pushed(wver, "ok")
+    assert not dist_common.weights_already_pushed(wver, "bad")
+    dist_common.weights_push_cache_reset()
+
+
+def test_post_weights_parallel_on_alive_fires_per_success(monkeypatch) -> None:
+    """边分发边开采：每个成功节点立刻回调，不必等全部 POST 结束。"""
+    dist_common.weights_push_cache_reset()
+    spawned: list[str] = []
+    order: list[str] = []
+
+    def fake_post(url, auth_key, iter_id, sha, weights_bytes, timeout=120.0, kind="rollout"):
+        order.append(f"post:{url.rsplit('/', 1)[-1]}")
+        if "slow" in url:
+            time.sleep(0.15)
+        if "fail" in url:
+            raise dist_common.DistError(500, "x")
+        return "purged"
+
+    monkeypatch.setattr(dist_common, "post_weights", fake_post)
+    nodes = [
+        {"id": "fast", "url": "http://fast", "key": "k", "c": 1},
+        {"id": "slow", "url": "http://slow", "key": "k", "c": 1},
+        {"id": "fail", "url": "http://fail", "key": "k", "c": 1},
+    ]
+    t0 = time.monotonic()
+    alive = dist_common.post_weights_parallel(
+        nodes,
+        "r",
+        "d" * 64,
+        b"x",
+        timeout=5.0,
+        on_alive=lambda nd: spawned.append(nd["id"]),
+    )
+    dt = time.monotonic() - t0
+    assert sorted(spawned) == ["fast", "slow"]
+    assert "fail" not in spawned
+    assert [n["id"] for n in alive] == ["fast", "slow"]
+    # 并行：总墙钟应接近最慢成功节点（0.15s），远小于串行 0.15+ 其它
+    assert dt < 0.4
+    dist_common.weights_push_cache_reset()
+
+
+def test_rollout_collect_sec_user_caliber_2026_09_19() -> None:
+    """用户口径：权重开始分发 → 样本齐可交 PPO。"""
+    assert dist_common.rollout_collect_sec(100.0, 145.0) == 45.0
+    assert dist_common.rollout_collect_sec(None, 10.0) is None
+    assert dist_common.rollout_collect_sec(10.0, None) is None
+    # 含与采集重叠的分发墙钟：起点在分发开始，不是全节点 ready
+    t_start, t_done_all, t_settle = 0.0, 50.0, 80.0
+    assert dist_common.rollout_collect_sec(t_start, t_settle) == 80.0
+    assert dist_common.rollout_collect_sec(t_done_all, t_settle) == 30.0  # 旧口径（作废）
+

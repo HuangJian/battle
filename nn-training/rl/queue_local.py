@@ -188,6 +188,7 @@ def rescan_nodes(
                 # guarded 重启（跨代去重 + 脏树拒发，同 ping 门）；dedup 静默跳过
                 # （rescan 周期 ~15s，重复刷屏无信息量）。F2：日志带两侧 hash——
                 # 与 ping 门同口径，运维一眼看出差异在哪一侧。
+                dist_common.forget_weights_node(nid)
                 local_short = code_hash[:8]
                 remote_short = str(ping.get("codeHash") or "")[:8] or "none"
                 if not upgrade_branch:
@@ -231,18 +232,22 @@ def rescan_nodes(
             if ".".join(remote_full.split(".")[:2]) != ".".join(str(local_bun).split(".")[:2]):
                 continue
             c_n = max(1, int(n.get("concurrency") or ping.get("cpus") or 1))
-            try:
-                mode = dist_common.post_weights(
-                    n["url"],
-                    n.get("authKey", ""),
-                    iter_id,
-                    wver,
-                    weights_bytes,
-                    timeout=min(300.0, max(60.0, task_timeout)),
-                )
-            except dist_common.DistError as e:
-                log(f"[dist] rescan {nid}: weights POST failed ({e}) — skip this round")
-                continue
+            # 中途上线节点：同 wver 进程内已成功下发过则跳过 POST。
+            if dist_common.weights_already_pushed(wver, nid):
+                mode = "kept(cache)"
+            else:
+                try:
+                    mode = dist_common.post_weights(
+                        n["url"],
+                        n.get("authKey", ""),
+                        iter_id,
+                        wver,
+                        weights_bytes,
+                        timeout=min(300.0, max(60.0, task_timeout)),
+                    )
+                except dist_common.DistError as e:
+                    log(f"[dist] rescan {nid}: weights POST failed ({e}) — skip this round")
+                    continue
             nd = {"id": nid, "url": n["url"], "key": n.get("authKey", ""), "c": c_n}
             with lock:
                 spawned_ids.add(nid)

@@ -117,7 +117,7 @@ export interface IterRow {
   rolloutSec: number
   /** 更新墙钟：本机/流式 = 纯训练；远端 = 往返（含打包/上传/排队/下载）。 */
   ppoSec: number
-  /** 纯采集秒（末局结算 − 权重分发完毕）；旧账本无此键 → null（回退 rolloutSec）。 */
+  /** rollout 采集秒：权重开始分发→样本齐可交 PPO（2026-09-19 用户口径，边分发边开采）；旧账本无此键 → null（回退 rolloutSec）。 */
   pureCollectSec: number | null
   /** 云端/本机真训练秒；旧账本无此键 → null（回退 ppoSec）。 */
   ppoCloudSec: number | null
