@@ -4,6 +4,57 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §72 x20-snowball 立项：里程碑 bonus 腿 + god-prefix 实现一半后否决 revert（2026-09-19）
+
+**假说证实**：通关局 1.22 pu/千tick vs 死亡局 0.64、早期死亡 0.20（2 倍差，存活
+归一化后依然）—— 开局拾取缺口是病，中盘到达率是症。新腿 thesis 单变量：
+wMS8/12/16 = 6/9/12（edge-trigger 数值已验）；其余（schedule/batch/gamma/容量/
+开局）全控制。bc = it30，判决段 413000，it40 主检点 kills<7.0 停。CourseConfig
+校验通过，待用户手工开训（agent 不得启动）。
+
+**否决记录**：god-prefix 中盘开局做到 exporter 分支一半时叫停，全 revert
+（git diff 零残留）—— prefix 跳过开局，而缺口在开局，药不对症；fallback 改
+powered-opening（--player-level）/wPickup 剂量。re-warm（peak 在降温后，证伪）
+与加 batch（plateau 在噪声带上清晰可见）同样证据性否决。详见 DECISIONS
+§2026-09-19-x20-snowball。
+
+## §71 x20-rebirth 终点结算：池外 it30 胜出但 c06 回测全超限，无合格终点 + 旧能力丢失（2026-09-19）
+
+**池外段 412000**（800 局配对）：bc 3.3%/3.85杀 ｜ it30 **7.5%/6.10** ｜
+it96 8.0%/5.94。it30 vs it96 互不可区分（Δpass −0.37σ，Δkills 0.15<0.5 量程）
+⇒ 取 kills 高者 **it30 为终点候选**。超时全 0。
+
+**回测 c07**（410000）：it30 39.1% vs bc 30.4%（+3.7σ），dmg −5% ⇒ 通过；
+附带治好 bc 的变体偏科（s2001/s2003 19.5%→36%+/44%）。it96 同样通过。
+**回测 c06**（405000，bc 主场）：it30 pass −11.2pp（−4.6σ）dmg +13.4%
+（CI 不重叠）⇒ 超限不得为终点，顺延 it96；it96 pass −12.6pp（−5.2σ）
+dmg +17.4% ⇒ 同样超限。**全超限 ⇒ 无合格终点，判语"旧能力丢失"**。
+
+教训：c20-1命 dense-only 梯度与 c06 主场解法冲突（主场 −12pp），但与 c07
+兼容（+6~9pp）—— 容量/遗忘权衡，不是学不动。课程结算节已回填，行源
+`tmp/x20-settle/*.jsonl`。
+
+## §70 x20-rebirth 停腿结算：it97 意外退出（非门限触发），plateau 判负（2026-09-19）
+
+**停腿原因**：trainer 进程意外退出（console 注记 PID 21560），卡在 it97
+rollout→PPO publish 之间。it97 rollout 已收齐（132 局 9.85% / score 0.348），
+PPO 未跑；最后归档权重 = it96。gate-halt-mode 全程 notify——**没有任何熔断/
+横盘门限触发停腿**，是事故停，不是规则停。
+
+**终点数**（贪心锚点 860001，400 局）：it95 8.5%/6.61杀 → it90 6.5%/5.58 →
+it85 4.8%/5.58。it85–90 的探底是噪声（it95 已收复），但 it30–95 共 65 轮
+kills 5.6–6.9 原地踏步：8 杀里程碑从未摸到（最好 it30 6.91），pass 门 30%
+最高仅 12.5%（it30）。it40 主检点通过（6.42 > 5.4）是本腿唯一达标的门。
+横盘条款字面未触发（it95 +18.5% 打破计数器），事实 plateau 成立。
+
+**课程三问结算**：① 4v1+续航拼出 20 杀——否（plateau ~7 杀，离 20 差 3 倍）；
+② dense-only 配方——**是**（超时全程 0%，苟均衡不存在，换血 dmg +4~11% 安全，
+PPO 全程健康 KL~0.02 / entropy~0.7）；③ kills 当进展读数——是（单调可读，
+方差行为符合预期）。
+
+**待办**：M2 三选一（kills 最优 it30 / pass 最优 it30 / 末 it96）+ 池外段
+412000（800 局）判决 + c07/c06 回测门，终点才能归档。
+
 ## §69 x20-rebirth it19 rollout 208s 复盘：权重并行下发 + kept 短路径 + tail-join grace 默认 0（2026-09-19）
 
 **一句话**：it19 `rollout_sec=208.4s` 不是仿真慢（真采集 ~26s / 12%），而是 volume 补波
