@@ -277,6 +277,33 @@ def check_code_hash(ping: dict, expected: str) -> str | None:
 # ---------------- HTTP ----------------
 #: 视为瞬断/背压的 HTTP 状态码（不是节点故障）。
 TRANSIENT_HTTP_STATUS: frozenset[int] = frozenset({408, 425, 429, 500, 502, 503, 504})
+#: 无 status 的异常（节点 SDK 直抛）里的 busy 文案判据，与 rl/bc_dispatch.is_busy_hint 同源。
+_BUSY_HINT = "busy"
+
+
+def is_transient_error(e: BaseException) -> bool:
+    """背压/瞬断判定（**单一实现**，A/B/C 三层共用）：True = 限流或网络抖动，
+    调用方**不得**把它计入节点失败 streak。
+
+    优先级：① `DistError.transient`（fetch_task 对 10054/超时/408-429-5xx 的标记）；
+    ② `DistError.status ∈ TRANSIENT_HTTP_STATUS`；③ 文案含 busy。
+    非 DistError 的 OSError/TimeoutError（ConnectionResetError、读超时）一律 transient。
+    409「wver not cached」**不在**此列：它是可刷新条件（见 refresh_weights），
+    既不是背压也不是节点故障。
+
+    历史：本判据原只长在 B 层（rl/batch_eval.py），A 层（rollout）只豁免 503、
+    训练干净评估层完全不豁免 —— 2026-09-19 实测 3 条 HTTP 502（cloudflared 隧道）
+    就把 a97 熔断整轮（training-loop.log 09:48）。
+    """
+    if isinstance(e, DistError):
+        if e.transient:
+            return True
+        if e.status in TRANSIENT_HTTP_STATUS:
+            return True
+        return _BUSY_HINT in str(e.reason)[:64].lower()
+    if isinstance(e, OSError):  # ConnectionResetError / TimeoutError / URLError …
+        return True
+    return _BUSY_HINT in str(e)[:64].lower()
 
 
 # ---------------- 收工即断连（2026-09-19 用户裁定第 4 条） ----------------
@@ -800,6 +827,56 @@ def post_weights(
     except ValueError:
         info = {}
     return str(info.get("cache", "kept"))
+
+
+def refresh_weights(
+    node: dict,
+    *,
+    iter_id: str,
+    wver: str,
+    weights_bytes: bytes,
+    timeout: float = 120.0,
+    kind: str = "rollout",
+    err: str = "",
+    log=None,
+) -> bool:
+    """409「wver not cached here」的自愈路径：清 reuse 缓存 + 就地重发该权重。
+
+    节点侧那份权重会**在客户端不知情的情况下消失**：per-kind 桶只保留 KEEP 份、
+    所有客户端共享同一桶（别的训练作业 / 本机 eval 上传 / agent 重启都能挤掉），
+    而进程内 `_WEIGHTS_PUSHED` 仍以为在（它只在 ping 失败/codeHash 不符时失效）
+    ⇒ 任务持续 409 直到把节点**当故障熔断**（2026-09-19 x20-rebirth 09:48 a97：
+    5 条 409 → circuit-broken，7 槽位整轮闲置，同一 wver 44s 前刚收过）。
+
+    409 是**可刷新条件**而非节点故障：重发一次即可继续用同一节点。
+    返回 True = 重发成功 ⇒ 调用方**不得**记节点失败 streak。
+    """
+    nid = str(node.get("id") or node.get("url") or "?")
+    forget_weights_node(nid)  # 清脏缓存：下一次波次必须重新握手
+    try:
+        mode = post_weights(
+            node["url"],
+            str(node.get("key") if node.get("key") is not None else node.get("authKey", "")),
+            iter_id,
+            wver,
+            weights_bytes,
+            timeout=timeout,
+            kind=kind,
+        )
+    except DistError as e:
+        if log is not None:
+            log(
+                f"[dist] node {nid}: wver not cached（409: {err[:60]}）就地重发失败"
+                f"（{e}）—— 仍未持有权重，本任务回队"
+            )
+        return False
+    note_weights_pushed(wver, nid)
+    if log is not None:
+        log(
+            f"[dist] node {nid}: wver not cached（409）—— 已就地重发权重（{mode}）"
+            f"并清 reuse 缓存（可刷新条件，不记节点故障）"
+        )
+    return True
 
 
 def post_weights_parallel(

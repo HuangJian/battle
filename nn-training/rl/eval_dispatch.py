@@ -297,6 +297,11 @@ class EvalDispatcher:
             seen: set[tuple[int, int]] = set()
             attempts: dict[tuple[int, int], int] = {}
             streaks = {nd["id"]: 0 for nd in nodes_ok}
+            # 瞬时（背压/瞬断）连续计数：与真故障分开（与 A 层 dispatch.py 同款）。
+            # 瞬时错误不计节点失败 streak，但连续软失败有上界——否则隧道/集群
+            # 整体脉搏时会一直空转到窗口到期。任一一局结算即清零。
+            soft_streak_max = int(policy.get("nodeSoftFailStreak", fail_streak_max * 3))
+            soft_streaks: dict[str, int] = {}
             wins = [0]
             cleared_total = [0]
             outcomes: dict[str, int] = {}
@@ -426,7 +431,10 @@ class EvalDispatcher:
                     fanout_copy = False
                     t_task_start: float | None = None
                     with lock:
-                        if streaks.get(nd["id"], 0) >= fail_streak_max:
+                        if (
+                            streaks.get(nd["id"], 0) >= fail_streak_max
+                            or soft_streaks.get(nd["id"], 0) >= soft_streak_max
+                        ):
                             return
                         if pending:
                             # 尾段预留：gate 未放行且余量 ≤ reserved 时不取（留给本机直跑）；
@@ -466,6 +474,7 @@ class EvalDispatcher:
                         continue
                     ok = False
                     err = ""
+                    transient = False  # 背压/瞬断（判据单一实现：dist_common.is_transient_error）
                     manifest: dict = {}
                     try:
                         from rl.config import args_rollout_overrides, stage_json_for_args
@@ -496,6 +505,27 @@ class EvalDispatcher:
                         ok = True
                     except Exception as e:
                         err = str(e)[:200]
+                        # 503 busy / 502 隧道 / 10054 / 超时 = 可恢复，**不计节点故障**
+                        # （判据单一实现：dist_common.is_transient_error；旧实现对 153 次
+                        # 503 也记 streak、3 次即把该节点熔断整轮）。
+                        transient = dist_common.is_transient_error(e)
+                        # 409 wver-not-cached = 可刷新条件：节点侧那份（归档）权重没了，
+                        # 就地重发 + 清 reuse 缓存，同一节点继续用（不是节点故障）。
+                        if (
+                            isinstance(e, dist_common.DistError)
+                            and e.status == 409
+                            and dist_common.refresh_weights(
+                                nd,
+                                iter_id=eval_iter_id,
+                                wver=wver,
+                                weights_bytes=weights_bytes,
+                                timeout=min(300.0, max(60.0, task_timeout)),
+                                kind="rollout",
+                                err=err,
+                                log=log,
+                            )
+                        ):
+                            transient = True
                     with lock:
                         if ok:
                             if task in seen:
@@ -508,16 +538,30 @@ class EvalDispatcher:
                             seen.add(task)
                             _clear_inflight(task)
                             streaks[nd["id"]] = 0
+                            soft_streaks[nd["id"]] = 0
                             if len(seen) >= total:
                                 all_done.set()
                         elif fanout_copy:
                             _pop_inflight(task, nd["id"])
                         else:
-                            streaks[nd["id"]] = streaks.get(nd["id"], 0) + 1
+                            # 瞬时错误不计节点击败（与 A 层 / 一次性评估同判据），但连续
+                            # 软失败仍有上界——否则整体脉停（隧道挂了）时会一直空转到窗口到期。
+                            if transient:
+                                soft_streaks[nd["id"]] = soft_streaks.get(nd["id"], 0) + 1
+                                if soft_streaks[nd["id"]] == soft_streak_max:
+                                    log(
+                                        f"[eval] node {nd['id']}: 连续 {soft_streak_max} 次瞬时失败"
+                                        f"（背压/瞬断，非节点故障）— 本轮停派"
+                                    )
+                            else:
+                                streaks[nd["id"]] = streaks.get(nd["id"], 0) + 1
                             _pop_inflight(task, nd["id"])
-                            if attempt < EVAL_TASK_ATTEMPTS and task not in seen:
+                            if (attempt < EVAL_TASK_ATTEMPTS or transient) and task not in seen:
                                 pending.append(task)
-                                log(f"[eval] s{task[0]}/seed{task[1]} failed ({err}) — requeued")
+                                log(
+                                    f"[eval] s{task[0]}/seed{task[1]} failed ({err}) — requeued"
+                                    + ("（瞬断/背压，不计节点故障）" if transient else "")
+                                )
                             elif task not in seen:
                                 _record_agent_meta(
                                     meta_path,

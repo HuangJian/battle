@@ -68,27 +68,15 @@ SEGMENT_LEN = 100
 
 #: 背压退避封顶（秒）。指数序列 0.25/0.5/1/2/4/8 覆盖 6 次重排。
 BUSY_BACKOFF_CAP_SEC = 8.0
-#: 无 status 的异常（节点 SDK 直抛）里的 busy 文案判据，与 rl/bc_dispatch.is_busy_hint 同源。
-_BUSY_HINT = "busy"
 
 
 def is_transient_error(e: BaseException) -> bool:
-    """背压/瞬断判定：True = 限流或网络抖动，**不得**计入节点失败 streak。
+    """背压/瞬断判定（薄转发；**单一实现** = `dist_common.is_transient_error`）。
 
-    优先级：① `DistError.transient`（dist_common.fetch_task 对 10054/超时/408-429-5xx
-    的标记）；② `DistError.status ∈ TRANSIENT_HTTP_STATUS`；③ 文案含 busy。
-    非 DistError 的 OSError/TimeoutError（连接重置、读超时）一律 transient。
-    判据落在 dist_common（单一实现），本函数只做兜底分类供调度用。
+    A（rollout）/B/C（本层）三层共用同一判据：503 busy、502 隧道、10054 连接重置、
+    超时一律不计节点失败 streak。本名保留以兼容既有引用与单测。
     """
-    if isinstance(e, dist_common.DistError):
-        if e.transient:
-            return True
-        if e.status in dist_common.TRANSIENT_HTTP_STATUS:
-            return True
-        return _BUSY_HINT in str(e.reason)[:64].lower()
-    if isinstance(e, OSError):  # ConnectionResetError / TimeoutError / URLError …
-        return True
-    return _BUSY_HINT in str(e)[:64].lower()
+    return dist_common.is_transient_error(e)
 
 #: 失联/未就绪节点的重探间隔（秒）—— 用户 2026-09-19 第 5 条：「失联的节点，每 20 秒
 #: ping 一次，ping 通了就立即传权重派任务」。旧实现只在**单元开头**探一次：一个单元内

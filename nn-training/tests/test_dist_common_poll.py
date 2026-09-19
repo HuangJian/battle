@@ -110,14 +110,120 @@ def test_fetch_task_marks_5xx_and_429_transient_but_not_4xx(monkeypatch) -> None
         assert ei.value.status == code and ei.value.transient is False, code
 
 
-def test_busy_hint_is_transient_for_eval_dispatcher() -> None:
-    """无 status 的 busy 文案（节点自述限流）同样算瞬断——与 bc_dispatch 判据同源。"""
-    from rl.batch_eval import is_transient_error
+def test_transient_judgement_single_source_delegated() -> None:
+    """背压/瞬断判据：单一实现在 dist_common，B 层薄转发（A/C 层直调同一实现）。"""
+    from rl.batch_eval import is_transient_error as be_is_transient
 
-    assert is_transient_error(dist_common.DistError(0, "busy")) is True
-    assert is_transient_error(ConnectionResetError(10054, "x")) is True
-    assert is_transient_error(dist_common.DistError(409, "wver not cached")) is False
-    assert is_transient_error(dist_common.DistError(0, "validate: wver mismatch")) is False
+    assert be_is_transient(dist_common.DistError(0, "busy")) is True
+    assert be_is_transient(ConnectionResetError(10054, "x")) is True
+    assert be_is_transient(dist_common.DistError(409, "wver not cached")) is False
+    assert be_is_transient(dist_common.DistError(0, "validate: wver mismatch")) is False
+    for probe in (
+        dist_common.DistError(0, "busy"),
+        dist_common.DistError(502, ""),
+        dist_common.DistError(409, "x"),
+        TimeoutError("read timed out"),
+    ):
+        assert be_is_transient(probe) == dist_common.is_transient_error(probe), probe
+
+
+def test_transient_classification_table() -> None:
+    """分类表：隧道/背压/瞬断 = True；409 wver-not-cached 与确定性失败 = False。"""
+    it = dist_common.is_transient_error
+    for code in (408, 425, 429, 500, 502, 503, 504):
+        assert it(dist_common.DistError(code, "")) is True, code
+    for code in (400, 404, 409, 422):
+        assert it(dist_common.DistError(code, "")) is False, code
+    assert it(dist_common.DistError(0, "busy")) is True
+    assert it(dist_common.DistError(0, "node busy: slot saturated")) is True
+    assert it(ConnectionResetError(10054, "forcibly closed")) is True
+    assert it(dist_common.DistError(0, "validate: wver mismatch")) is False
+    assert it(ValueError("corrupt container")) is False
+
+
+def test_refresh_weights_reposts_and_forgets_cache(monkeypatch) -> None:
+    """409 自愈：清 reuse 缓存 → 就地重发 → 重新入账（同一节点继续用）。"""
+    dist_common.weights_push_cache_reset()
+    node = {"id": "a97", "url": "http://node-a97", "key": "k"}
+    seen: list[tuple] = []
+
+    def ok_post(url, auth_key, iter_id, sha, weights_bytes, timeout=120.0, kind="rollout"):
+        seen.append((url, auth_key, iter_id, sha, kind))
+        return "purged"
+
+    monkeypatch.setattr(dist_common, "post_weights", ok_post)
+    dist_common.note_weights_pushed("w1", "a97")  # 脏缓存：客户端以为节点还持有
+    assert dist_common.weights_already_pushed("w1", "a97") is True
+
+    logs: list[str] = []
+    assert (
+        dist_common.refresh_weights(
+            node,
+            iter_id="it1",
+            wver="w1",
+            weights_bytes=b"{}",
+            kind="rollout",
+            log=logs.append,
+        )
+        is True
+    )
+    assert seen == [("http://node-a97", "k", "it1", "w1", "rollout")]
+    assert dist_common.weights_already_pushed("w1", "a97") is True  # 重发成功 ⇒ 重新入账
+    assert logs and "wver not cached" in logs[0]
+
+
+def test_refresh_weights_failure_stays_cold(monkeypatch) -> None:
+    """重发也失败 ⇒ 返回 False（调用方按真失败处理）且缓存必须保持清空。"""
+    dist_common.weights_push_cache_reset()
+    node = {"id": "a97", "url": "http://node-a97", "authKey": "k2"}  # authKey 兼容键
+    seen: list[str] = []
+
+    def boom(url, auth_key, *_a, **_kw):
+        seen.append(auth_key)
+        raise dist_common.DistError(503, "busy")
+
+    monkeypatch.setattr(dist_common, "post_weights", boom)
+    dist_common.note_weights_pushed("w1", "a97")
+    logs: list[str] = []
+    assert (
+        dist_common.refresh_weights(
+            node, iter_id="it1", wver="w1", weights_bytes=b"{}", log=logs.append
+        )
+        is False
+    )
+    assert seen == ["k2"]
+    assert dist_common.weights_already_pushed("w1", "a97") is False  # 下次必须重新握手
+    assert logs and "重发失败" in logs[0]
+
+
+def test_transient_judgement_defined_once_and_wired() -> None:
+    """源码级守卫：判据只有一份实现，A/C 层真的接线（409 自愈也不得各写一套）。"""
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    definers = []
+    for path in [root / "dist_common.py", *sorted((root / "rl").glob("*.py"))]:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "is_transient_error":
+                definers.append(path.name)
+    # 只有 dist_common 是真实实现；batch_eval 允许同名但必须是纯转发。
+    assert set(definers) <= {"dist_common.py", "batch_eval.py"}, definers
+    assert "dist_common.py" in definers and len(definers) == 2, definers
+    b_src = (root / "rl" / "batch_eval.py").read_text(encoding="utf-8")
+    assert "return dist_common.is_transient_error(e)" in b_src
+    assert "TRANSIENT_HTTP_STATUS" not in b_src  # 判据逻辑不得复制回 B 层
+    assert "_BUSY_HINT" not in b_src
+
+    a_layer = (root / "rl" / "dispatch.py").read_text(encoding="utf-8")
+    c_layer = (root / "rl" / "eval_dispatch.py").read_text(encoding="utf-8")
+    for src in (a_layer, c_layer):
+        assert "dist_common.is_transient_error(" in src
+        assert "dist_common.refresh_weights(" in src
+        assert "409" in src  # 409 是可刷新条件，必须显式分支
+    b_layer = (root / "rl" / "batch_eval.py").read_text(encoding="utf-8")
+    assert "return dist_common.is_transient_error(e)" in b_layer
 
 
 def test_trace_enabled_env_contract(monkeypatch) -> None:

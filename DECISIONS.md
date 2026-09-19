@@ -3012,3 +3012,51 @@ stageJson/lives/level/maxTicks/difficulty；B 层 `params_for` 逐字段回落 u
 失联重探后可用 / 快节点不等慢节点 bring-up / settled 满即断连且不算节点故障）+ `test_dist_common_poll.py` +1
 （`abort_active_requests` 不阻塞、置位后新请求按瞬停分类、别的作用域不受影响）+ `test_eval_course_once.py` +1
 （每权重单单元跨关 + 多权重元数据分键）。python 门禁 1324 例全绿。
+## §2026-09-19-node-fault-taxonomy（2026-09-19，A/B/C 三层共用瞬断判据 + 409 wver-not-cached 自愈：把「节点故障」与「可刷新条件/背压」分开）
+
+**触发**：用户 2026-09-19 审计后指名修 A1+A2+A3（训练侧 rollout/eval 与一次性评估同源的三个洞）。
+证据链（`tmp/x20-rebirth/training-loop.log`，08:00–10:36，235 个 rollout 轮 / 20 个 eval 轮）：
+
+- **A1**：09:48:29 `weights[rollout] reuse wver=1a01aa045436… skip POST for ['self','mac','a97','gcs']`
+  → 5 条 `HTTP 409 {"error":"wver not cached here"}` → `node a97: 3 consecutive failures —
+  circuit-broken for this round`；该轮 `byNode={"self":11,"mac":8}`，**a97 的 7 个槽位整轮闲置**。
+  而同一 wver 在 44 秒前（09:47:45）刚在 a97 上 POST 成功（`(purged)`）。
+- **A3**：09:48:13 三条 `HTTP 502:`（cloudflared 隧道，非节点问题）同样记 streak → a97 熔断；
+  实测分布：rollout 617×503（旧实现唯一豁免项）+ 9×502 + 5×409 + 1×10054；eval 层 153×503 +
+  1×502 + 1×10054，**旧实现对这 155 次全部当节点故障**（3 次即熔断该节点整轮）。
+
+**实施**：
+
+1. **判据单源**：`dist_common.is_transient_error(e)`（408/425/429/500/502/503/504、`DistError.transient`、
+   文案含 busy、非 DistError 的 OSError/TimeoutError）成为唯一实现；`rl/batch_eval.is_transient_error`
+   退化为薄转发（保留名以兼容既有引用与单测）。A 层（`rl/dispatch.py`）与 C 层（`rl/eval_dispatch.py`）
+   直调同一实现——旧实现只有 B 层有判据、A 层只豁免 503、C 层什么都不豁免。
+2. **409 = 可刷新条件**（`dist_common.refresh_weights`，A/C 两层共用）：失败时**清进程内 reuse 缓存**
+   （`_WEIGHTS_PUSHED` 原先只在 ping/codeHash 门失效 ⇒ 脏缓存让 409 持续到熔断）+ **就地重发**该 wver；
+   成功则不入 streak、不耗 attempt 配额，同一节点继续用。重发也失败才按真失败记。
+   （节点侧根因是 per-kind 桶只留 KEEP=4 份且**所有客户端共享**——别的训练作业/本机 eval 上传/agent
+   重启都能把文件挤掉，而客户端看不出来；修节点侧要动 `tools/agent/sampler-agent.ts`（codeHash SSOT
+   ⇒ 全集群 stale + 需 push），故本轮只做客户端自保。）
+3. **瞬断不计节点故障，但有上界**：新增 `soft_streaks`（`policy.nodeSoftFailStreak`，缺省 3×`nodeFailStreak`）。
+   单次瞬时错误不熔断；**连续**软失败达到上界则停派该节点并单独措辞记日志（`连续 N 次瞬时失败（背压/瞬断，
+   非节点故障）— 本轮停派`），与真故障的 `circuit-broken` 区分。理由：不给上界的话，隧道/集群整体脉停时
+   会无限重排把整轮拖到窗口超时（旧行为是快速熔断，也有害，但至少不空转）。
+4. **可观测**：背压/瞬断重排日志带上「瞬断/背压（不计节点故障）」；409 自愈单独一条
+   （`wver not cached（409）—— 已就地重发权重（…）并清 reuse 缓存`）。
+
+**被否方案**：① 只在 A 层补 503 之外的豁免（不共用判据）——B/C 层仍在误熔断，且三处判据必然漂移；
+② 把 409 也算 transient 一扔了事——409 是**可修**的（重发即恢复），扔进背压队列会让同一节点持续 409、
+   任务被重排到窗口耗尽，还丢掉「节点侧到底有没有那份权重」这个信号；③ 瞬时错误完全不设上界——
+   整体脉停时整轮空转到 deadline（见 3）；④ 让 rollout 也改用一次性评估的专用 kind 隔离权重——
+   rollout 的权重就是节点采样要用的那份，无法隔离，只能保证丢了能立刻补。
+
+**实测（单测，非仅源码断言）**：A 层新 `tests/test_rollout_dispatch_resilience.py`（7 例）——502×3 后
+4/4 局全结算（`dist.nodes={"a97":4}`、retried=3、无 `circuit-broken`）／真故障连续 3 次即停派（只取活 3 次）／
+409 触发一次就地重发且节点继续跑完整轮／软失败上界停派；C 层新 `tests/test_eval_dispatch_resilience.py`（8 例）
+——502×3 后 4/4 结算、409 自愈、真故障仍熔断；`test_dist_common_poll.py` +4（分类表、刷新语义与缓存清空、
+单源守卫：全仓只有 dist_common 一份实现、B 层必须是纯转发、A/C 层必须接线 409 分支）。
+**两套行为测试都在旧代码上实测变红**（A 层：`missing=[全部 4 局]`；C 层：0/4 结算、`refreshed==[]`），
+不是事后补的绿灯。nn-python-gate 1343 例全绿。
+
+**已知局限**：客户端无法阻止别的客户端（或 agent 重启）挤掉权重，只能事后补；`soft_streak` 上界是启发式
+（3×真故障阈值），不是测量结果；409 重发是整份权重上传（MB 级），高频 409 会吃带宽（实测一次/轮量级，可接受）。

@@ -424,6 +424,12 @@ class RolloutDispatcher:
         seen: set[tuple[int, int]] = set()
         attempts: dict[tuple[int, int], int] = {}
         streaks = {nd["id"]: 0 for nd in nodes}
+        # 瞬时（背压/瞬断）连续计数：与真故障分开。瞬时错误**不计**节点击败
+        # streak（502 隧道/10054/超时/503 busy 都是可恢复的），但连续软失败仍有
+        # 上界——否则「整个集群或隧道挂了」时会无限重排把整轮拖到窗口超时。
+        # 一局成功即清零。`policy.nodeSoftFailStreak` 可覆盖（缺省 3×）。
+        soft_streak_max = int(policy.get("nodeSoftFailStreak", fail_streak_max * 3))
+        soft_streaks: dict[str, int] = {}
         results: list[dict] = []
         stats = {"retried": 0}
         # 竞速输家/dup settle 是 fan-out 的正常结局，逐条打会刷爆 training-loop.log
@@ -489,7 +495,10 @@ class RolloutDispatcher:
                 # 本 worker 本次 attempt 的派发墙钟起点（勿用 inflight_ts[task]——竞速副本会覆盖）。
                 t_task_start: float | None = None
                 with lock:
-                    if nd is not None and streaks.get(nd_id, 0) >= fail_streak_max:
+                    if nd is not None and (
+                        streaks.get(nd_id, 0) >= fail_streak_max
+                        or soft_streaks.get(nd_id, 0) >= soft_streak_max
+                    ):
                         return
                     # v3.15 分配超时重入：扫描 in-flight 找到超时任务，重新进入 pending 队列。
                     # 闪断节点（如 a96）抢走任务后实际挂起，其他节点为空闲但看不到这些任务。
@@ -623,7 +632,8 @@ class RolloutDispatcher:
                     continue
                 summary = None
                 err = ""
-                busy503 = False  # HTTP 503(busy) 瞬时负载标记——重排后背压退避
+                busy503 = False  # HTTP 503(busy) 瞬时负载（重排 + 背压退避）
+                transient_err = False  # 背压/瞬断（单一判据：dist_common.is_transient_error）
                 try:
                     if nd is None:
                         _idx = next_idx[0]
@@ -688,9 +698,31 @@ class RolloutDispatcher:
                         summary = manifest
                 except Exception as e:
                     err = str(e)[:200]
-                    # HTTP 503（busy）是瞬时负载不是节点故障——except 内捕获（Python 3
-                    # 在 except 块后删除 e，必须在块内读出标记）。
+                    # 逐层分类（单一判据，与 B/C 层共用）：
+                    # · 背压/瞬断（503 busy / 502 隧道 / 10054 / 超时）⇒ 不计节点故障；
+                    # · 409 wver-not-cached ⇒ “可刷新”条件：节点侧权重文件没了（桶轮换/
+                    #   agent 重启/别的客户端 churn），进程内 reuse 缓存却仍说在
+                    #   ⇒ 就地重发权重 + 清缓存，同一节点继续用（2026-09-19 实测教训：
+                    #   5 条 409 把 a97 当作故障熔断，7 槽位整轮闲置；同一 wver 44s
+                    #   前刚收过）。两者都**不得**记节点失败 streak。
                     busy503 = isinstance(e, dist_common.DistError) and e.status == 503
+                    transient_err = dist_common.is_transient_error(e)
+                    if (
+                        nd is not None
+                        and isinstance(e, dist_common.DistError)
+                        and e.status == 409
+                        and dist_common.refresh_weights(
+                            nd,
+                            iter_id=iter_id,
+                            wver=wver,
+                            weights_bytes=weights_bytes,
+                            timeout=min(300.0, max(60.0, task_timeout)),
+                            kind=wkind,
+                            err=err,
+                            log=log,
+                        )
+                    ):
+                        transient_err = True  # 已自愈：同样不计故障、不耗 attempt 配额
                 with lock:
                     if nd is None and task is not None:
                         # max(0, …)：任何未配对路径都不许把计数打成负数（负 = 闸门失效）。
@@ -734,6 +766,7 @@ class RolloutDispatcher:
                             inflight_nodes.pop(task, None)
                         last_settle_at[0] = time.time()
                         streaks[nd_id] = 0
+                        soft_streaks[nd_id] = 0
                         if nd is not None:
                             last_remote_ok[0] = time.time()
                         # byNode / dist.nodes 按**配置节点 id**（mac/self/local）记账：
@@ -820,13 +853,27 @@ class RolloutDispatcher:
                                 f"[dist] main s{task[0]}/seed{task[1]} failed ({err}) — settled by fanout copy, dropped"
                             )
                         continue
-                    # 503（busy）不计熔断连击、不计重试上限（小批量突发提交防误熔断）。
-                    if nd is not None and not busy503:
+                    # 瞬时（503 busy / 502 / 10054 / 超时 / 409 已自愈）：不计熔断
+                    # 连击、不计重试上限（小批量突发提交与满负荷集群防误熔断）。
+                    hard_broke = False
+                    if nd is not None and not transient_err:
                         streaks[nd_id] = streaks.get(nd_id, 0) + 1
-                        broke = streaks[nd_id] == fail_streak_max
+                        hard_broke = streaks[nd_id] == fail_streak_max
+                        broke = hard_broke
+                    elif nd is not None:
+                        # 连续软失败上界：单次瞬时错误不是故障，但“一直是瞬时错误”
+                        # 就是集群/隧道真挂了——停派该节点，不把整轮拖到窗口超时
+                        # （与真故障熔断区分：日志与计数都单独记）。
+                        soft_streaks[nd_id] = soft_streaks.get(nd_id, 0) + 1
+                        broke = soft_streaks[nd_id] >= soft_streak_max
+                        if broke:
+                            log(
+                                f"[dist] node {nd_id}: 连续 {soft_streaks[nd_id]} 次瞬时失败"
+                                f"（背压/瞬断，非节点故障）— 本轮停派"
+                            )
                     else:
                         broke = False
-                    if attempt < MAX_TASK_ATTEMPTS or busy503:
+                    if attempt < MAX_TASK_ATTEMPTS or transient_err:
                         # v3.16：失败回队前清理 inflight 登记（避免 stale 条目）
                         if task in inflight:
                             inflight[task] -= 1
@@ -839,7 +886,13 @@ class RolloutDispatcher:
                         log(
                             f"[dist] s{task[0]}/seed{task[1]} failed ({err}) — requeued "
                             f"(attempt {attempt}/{MAX_TASK_ATTEMPTS}"
-                            + (", busy" if busy503 else "")
+                            + (
+                                ", busy"
+                                if busy503
+                                else ", 瞬断/背压（不计节点故障）"
+                                if transient_err
+                                else ""
+                            )
                             + ")"
                         )
                     else:
@@ -861,16 +914,16 @@ class RolloutDispatcher:
                             f"[dist] s{task[0]}/seed{task[1]} failed {attempt}x ({err}) — missing this round "
                             f"[{len(seen) + len(missing_keys)}/{n_total_tasks} settled]"
                         )
-                    if broke:
+                    if hard_broke:
                         log(
                             f"[dist] node {nd_id}: {fail_streak_max} consecutive failures — "
                             f"circuit-broken for this round"
                         )
                     if len(seen) + len(missing_keys) >= n_total_tasks:
                         all_settled.set()
-                # 503(busy) 背压：agent 满负荷 → 本 worker 退避再领下一任务，防提交洪峰
-                # （无限重排会把 attempt 刷到上百、日志洪水——实测 503 洪峰教训）。
-                if busy503:
+                # 背压退避：agent 满负荷 / 隧道抖 / 瞬断 → 本 worker 退避再领下一任务，
+                # 防提交洪峰（无限重排会把 attempt 刷到上百、日志洪水——实测 503 洪峰教训）。
+                if transient_err:
                     time.sleep(min(5.0, max(0.5, deadline - time.time())))
 
         threads: list[threading.Thread] = []
