@@ -287,3 +287,26 @@ def test_abort_active_requests_never_blocks_and_gates_new_requests() -> None:
         dist_common.clear_abort()
         dist_common.set_request_tag("")
         assert dist_common.abort_scope("t-abort") is False  # clear_abort 复位（下一单元可用）
+
+
+def test_ping_nodes_parallel_accepts_key_and_authkey(monkeypatch) -> None:
+    """节点配置两种键名都要认：归一化形态 `key` 与 rl-config 原始 `authKey`。
+
+    旧实现（2026-09-19 B6 现场探针实测）只读 authKey ⇒ 把归一化过的配置喂进来会静默
+    401，整批节点判为「ping 失败」——而 post_weights_parallel 两种都认，两边不一致。
+    """
+    seen: list[tuple[str, str]] = []
+
+    def fake_ping(url: str, auth_key: str, timeout: float = 3.0):
+        seen.append((url, auth_key))
+        return {"evalSupport": True}
+
+    monkeypatch.setattr(dist_common, "node_ping", fake_ping)
+    nodes = [
+        {"id": "a", "url": "http://a", "key": "K1"},
+        {"id": "b", "url": "http://b", "authKey": "K2"},
+        {"id": "c", "url": "http://c", "key": "K3", "authKey": "STALE"},
+    ]
+    out = dist_common.ping_nodes_parallel(nodes, timeout=1.0)
+    assert [x is not None for x in out] == [True, True, True]
+    assert seen == [("http://a", "K1"), ("http://b", "K2"), ("http://c", "K3")]

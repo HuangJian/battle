@@ -3147,3 +3147,117 @@ settled 满（4/4）不等慢节点（慢节点 fetch 睡 3s，整轮实测 <2s�
 （丢弃、不双计）；② 阻塞在 `urlopen`（响应头都未回）的连接不在断连注册表里，只能等其自身超时
 （`all_done` 已置位，结果本就被丢弃）；③ 本机槽位在门失败时立即开闸（`release_local_gate_if_starved`）
 ⇒ 本机局可能与训练主循环的资源窗重叠（与「无可用节点」分支同语义）。
+## §2026-09-19-eval-weights-kind（2026-09-19，训练干净评估的权重 kind 独立成 'eval'——不再与训练 rollout 共用节点权重桶）
+
+**触发**：用户 2026-09-19（「给训练评估独立 kind（我定名 eval），顺带一次现场验证」）。来源是同日审计的
+**B6** 项：`rl/eval_dispatch.py` 的权重下发与局请求都走 `kind="rollout"`，与训练 rollout 的 churn 共用节点
+同一个权重桶。
+
+**根因（节点侧分桶语义，已核实代码）**：节点按 `(kind, sha)` 分桶缓存（`sampler-agent.ts::weightsByKindSha`）：
+内存桶**每 kind 上限 64**（`WEIGHT_BUCKETS_PER_KIND`）、落盘文件**每 kind 保留最新 4 份**
+（`workdir-cleanup.ts::WEIGHT_FILES_KEEP`，在飞桶引用的文件豁免），而 `/v1/task` **只查内存桶**
+（`weightsOf`，不回查磁盘）。⇒ eval 与训练 rollout 同 kind 时，eval 那份与训练每轮的 churn 共用同一组
+计数（64 / 4），任一侧轮换都可能把对方挤掉；被挤掉后节点答 409「wver not cached here」，客户端只能靠
+409 自愈重发兜（A1）。
+
+**决定**：`EVAL_WEIGHTS_KIND = "eval"`（`rl/eval_dispatch.py` 单源常量），**三处同源**——权重 POST 的
+`x-kind`、局请求的 `?kind=`、409 自愈重发的 `kind`。协议侧 kind 是**不透明字符串** ⇒ 旧节点无需任何改动
+（现场实测 5/5 台未升级节点直接接受并正常出局），也不触 codeHash（`nn-training/**` 不在 SSOT 内）。
+
+**配套（同一坑的另一面）**：进程内下发账本 `dist_common._WEIGHTS_PUSHED` 由**键 = wver** 改为
+**键 = (kind, wver)**（`note_weights_pushed` / `weights_already_pushed` / `partition_weights_nodes` /
+`refresh_weights` 同改；缺省 `kind="rollout"` ⇒ 既有调用方行为逐字不变）。理由：同一个权重文件（同一 sha）
+会被两条腿使用（干净评估评的就是刚训练出的那份 θ）——账本不带 kind 时，先跑那条腿的 note 会让另一条腿
+被判成 reuse 而**跳过 POST** ⇒ 该节点对另一条腿整轮 409（脏缓存，与 A1 同类陷阱、方向相反）。
+A 层调用点同步接线：`rl/dispatch.py`（`kind=wkind`）、`rl/queue_local.py`（`kind=wkind`）。
+
+**顺带修（现场探针实测踩到）**：`dist_common.ping_nodes_parallel` 只读 `authKey`，而 `post_weights_parallel`
+两种都认（`key` / `authKey`）⇒ 把归一化配置（`{id,url,key}`，eval_dispatch / batch_eval 用的形态）喂进来会
+静默 401、整批节点判「ping 失败」（探针第一版 6/6 台全灭，第二版才对）。已统一键名兼容。
+
+**现场验证（真实集群 2026-09-19 21:19，`tmp/b6probe/run2.log`）**：x20-rebirth `it96`（sha `232158d9…`）
+× 6 台 enabled 节点 —— ① 并行门 6 台 2.58s（gcs 超时，其余 5 台 evalSupport / stageJsonSupport /
+bun 1.4.2 / codeHash 全过）；② `kind='eval'` 下发 **5/5 台 ok，0.20s**（self `purged`、其余 `kept`）；
+③ 桶隔离实测 `eval=True / rollout=False`（self / mac / a95）——两条腿的桶确实分开；④ 以 `kind='eval'`
+取一局：**HTTP 200，1.2s**，`wver=232158d9…` 对账一致。
+
+**被否方案**：① 继续共用 'rollout'、只靠 409 自愈兜——把可预防的故障做成常态，还掩盖节点侧真实丢失；
+② 用新 **mode** 而非 kind 区分——节点早已按 kind 分桶（v3.7），新增 mode 要动 `sampler-agent.ts`（在
+codeHash SSOT 内 ⇒ 需 push + 集群重启），而 kind 是现成的**零升级**通道；③ 账本保持 wver 单键、只在 eval
+侧「发前 forget 节点」——治不了另半边（rollout 腿复用 eval 的账）；④ 一次性工具链
+（`tools/sim/eval-course-ckpt.ts` / `rl/batch_eval.py`，kind 走 `'rollout'`/`'none'`）**本轮不动**：
+它是独立命名空间（iterId 自带 `evalcourse-`），且迭代节奏与训练循环无关。
+
+**契约（测试钉住，新增 3 例 + 补 1 例断言）**：`tests/test_dist_weights.py::test_push_cache_is_keyed_by_kind`
+（同 sha 的 eval 不得被 rollout 的账判成 reuse；缺省 kind 行为不变；`forget_weights_node` 两条腿一起清）／
+`tests/test_eval_dispatch_resilience.py::test_eval_leg_uses_its_own_weights_kind`（POST 与请求同 kind）＋
+`test_wver_409_reposts_weights_and_keeps_node` 补断言（重发也走 `EVAL_WEIGHTS_KIND`）＋
+`test_eval_dispatch_kind_is_single_sourced`（源码守卫：该文件不得残留 `kind="rollout"` 字面量）／
+`tests/test_dist_common_poll.py::test_ping_nodes_parallel_accepts_key_and_authkey`。
+**其中 3 例在旧实现上实测变红**（`git show HEAD:` 换回旧实现跑同一套：`AttributeError: module
+'rl.eval_dispatch' has no attribute 'EVAL_WEIGHTS_KIND'` ×2 + 键参数 `TypeError` ×1）。
+
+**已知局限（未修，如实记）**：① 本改动只消除「两条腿互相驱逐」；**节点重启清空内存桶**后该 kind 仍会 409
+（`weightsOf` 不回查磁盘）——那是节点侧根因，要动 `sampler-agent.ts`（codeHash SSOT ⇒ 需 push + 集群重启）；
+② 节点上会多出一份 kind 目录（`weights-eval-*`，每 kind 4 份 ≈ 1.5MB/台）——换来两条腿的桶与日志都可分；
+③ `rl/bc_eval.py` 仍是 `kind="rollout"`（BC 每 epoch 评估）——同类站点，但属另一条腿、且改动会连带其
+请求侧，未并入本轮。
+## §2026-09-19-node-weights-disk-fallback（2026-09-19，节点侧权重查找在内存桶未命中时回查磁盘——根治「agent 重启后对盘上已有的权重答 409」）
+
+**触发**：用户 2026-09-19「让节点侧的权重查找在内存桶未命中时回查磁盘，根治重启后的 409」。承接
+`§2026-09-19-eval-weights-kind` 的已知局限 ①（kind 拆桶只消除**两条腿互相驱逐**，重启仍会 409）。
+
+**根因（已核实代码）**：`/v1/task` 只查内存桶（`sampler-agent.ts::weightsOf` → `weightsByKindSha`）。
+agent 一重启，内存桶就空了，而权重文件**仍在 `WORK_DIR`**（boot 收敛只按 kind 删到最新 `KEEP=4` 份）
+⇒ 节点对**盘上就有的**权重答 409「wver not cached here」，客户端只能靠 409 自愈重发兜（每节点每次重启
+白传一份；在 A1 之前还会把该节点**当故障熔断整轮**）。
+
+**决定（`tools/agent/sampler-agent.ts`）**：
+- `weightsOf(kind, wver)`：内存命中 → 原路；未命中 → **磁盘回查** `readWeightsFile`，命中即**回填桶**
+  （后续任务零额外开销）并按 `evictWeightBucket` 做同规驱逐。
+- `readWeightsFile`：文件名只有 **16 hex 前缀**，**不足以判定内容** ⇒ 回查时**按字节重算 sha256 全量
+  比对**，不符即视为未命中（坏/被截断的文件留给 sweep 收拾）。`iterId` 只在 POST 时记账（无消费方），
+  回查来的置空。
+- `weightFileBase(kind, sha)` 提为**单一来源**：POST 落盘、磁盘回查、retention 正则三处必须同名
+  （名字一旦漂移，回查文件会被 boot/切换时的清扫当垃圾删掉）。`weightsKeyOk` 守门（kind 直接进文件名 ⇒
+  防路径穿越；sha 必须全量 64 hex）。
+- `/v1/weights/cached` 探针同样**磁盘感知**（`weightsCachedInBucket(...) || weightsOf(...) !== null`）：
+  否则重启后探针答 false，客户端会重传一份**盘上已有**的权重。
+- `latestWeightsOfKind(kind)`（intent/goal 评估的「最新桶」语义：`policy=intent-exec|goal` 的 409 前置检查 +
+  runGame 的 `--intent-weights/--goal-weights`）：内存桶按插入序取最后一个；**桶空则回查磁盘**取 mtime 最新的
+  一份（逐候选按字节重算 sha256，并要求 sha 前 16 hex 与文件名一致，改名/损坏的跳过；命中即回填桶）。
+  这是另一类重启 409：intent-exec / goal 评估会整轮答「intent weights not cached」。
+
+**代价与影响（必须知道）**：本文件**在 codeHash SSOT 内**（`tools/agent/codehash-files.txt`）⇒
+codeHash `c78d48de…` → **`355f0738…`**，**必须 push + 节点升级/重启才生效**。升级窗口内未升级节点会被
+门排除（可用节点数变少，属预期，不会污染数据）。`freeze:check` 不受影响（不触 God-AI/仿真签名）。
+
+**被否方案**：① 回查只信文件名（16 hex 前缀）——前缀碰撞/坏文件会被放行，故障从「409」变成「局跑错
+权重」，更糟；② boot 时把盘上全部权重文件预载进内存——要逐文件哈希、启动变慢，且把「最新 KEEP 份」
+当权威；懒惰按需回查更小、语义相同；③ 客户端侧继续只靠 409 自愈——把可预防的故障做成常态，重启后每
+节点每轮白传一份；④ 探针直接答 `true` 不校验内容——把「缓存」变成谎言。
+
+**契约（测试钉住，`tests/dist-agent.test.ts` 新增 4 例）**：`readWeightsFile` 内容不符 / 前缀碰撞 /
+缺文件 / 路径穿越与短 sha 一律未命中；`weightsOf` 未命中回查磁盘、命中后**文件消失也仍命中**（证明回填）；
+`weightFileBase` 与 retention 正则 `WEIGHT_RE` 同域（5 个 kind 全覆盖）；`latestWeightsOfKind` 桶空时取盘上
+mtime 最新的一份（不串 kind）、**最新那份是改名坏文件时跳过它取旧的**、回填后文件删掉仍返回。
+旧实现上该文件 **1 fail + 1 error**（`Export named 'readWeightsFile' not found`）；变异体（删掉内容校验那行
+`sha.slice(0, 16) !== c.prefix`）**只让「坏文件跳过」那条断言变红**——证明它守住的正是「文件名 16 hex 后缀
+不可信」这个性质，而不是顺手写绿的。
+
+**现场实测 A/B（`self` 节点，同一权重 `it96` sha `232158d9…`，同一探针 `tmp/restart-probe.py`；
+证据 `tmp/restart-probe/{213330-before,213405-after}.json` + 两份 .log）**：
+- **BEFORE（HEAD 代码，codeHash `c78d48de…`）**：① 重启前取局 seed900 → **200**；② `/v1/restart` accepted
+  → 新进程 uptime=0s；③ **不重传** → 探针 `eval=False`、取局 seed901 → **409 `{"error":"wver not cached
+  here"}`** ← 缺陷在真实节点上复现（而 `weights-eval-232158d94975e6a5.json` 379KB 全程躺在盘上）。
+- **AFTER（本次代码，codeHash `355f0738…`）**：重启（等过 30s grace 窗口后发出，`waited=2.0s`）→ 新进程
+  codeHash=`355f0738…`；**不重传** → 探针 `eval=True`（探针也已磁盘感知）、取局 seed951 → **200**
+  （`outcome=gameover ticks=1483`）；节点日志出现
+  `weights[eval] rehydrated 232158d94975… from disk (in-memory bucket was empty — agent restarted)`。
+- **注意**：本次 A/B 跑在 `self`（本机 agent 直接执行工作区 TS）⇒ 验证的是**代码路径**；远端 5 台仍是
+  `c78d48de…`，需 push + 升级后才具备同样行为（本地工作区 hash 已是 `355f0738…`，未升级节点会被门判 stale）。
+
+**已知局限**：① 盘上只留最近 `KEEP=4` 份/kind（更早的被 sweep 删）⇒ 更早的 sha 仍 409（客户端重传，
+这是正确行为）；② `latestWeightsOfKind`（intent/goal 评估的「最新桶」语义）仍只查内存——同类站点，未并入
+②（**已并入本轮**）`latestWeightsOfKind` 同样磁盘回查，但它的「最新」只能按 **mtime 近似**（POST 命中 kept 不重写文件时 mtime 偏旧；与内存桶插入序语义等价、但有此边界），且「最新」是**跨客户端共享**的语义（别的训练流 POST 的 intent/goal 权重也会成为最新——与改动前一致）；③ 回查是请求路径上的同步 IO（`readFileSync` + sha256）——每个 `(kind, sha)` 每进程只付一次
+（命中即回填），首次命中的那一局多几毫秒；④ 未做重启预载，故「重启后第一局」付出这次哈希。

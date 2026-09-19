@@ -295,7 +295,9 @@ def rescan_nodes(
             # 桶里那份也可能已被别的客户端挤掉；post_weights 自带 cached 探针，命中即
             # 'kept'）。kind 必须与 rollout 腿一致——旧实现漏传，goal/intent 腿会把权重
             # 发进 rollout 桶，任务全 409（与 A1 同一类陷阱）。
-            if why == "new" and dist_common.weights_already_pushed(wver, nid):
+            if why == "new" and dist_common.weights_already_pushed(
+                wver, nid, kind=wkind
+            ):
                 mode = "kept(cache)"
             else:
                 if why == "rearm":

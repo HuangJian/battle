@@ -294,3 +294,30 @@ def test_rollout_collect_sec_user_caliber_2026_09_19() -> None:
     assert dist_common.rollout_collect_sec(t_start, t_settle) == 80.0
     assert dist_common.rollout_collect_sec(t_done_all, t_settle) == 30.0  # 旧口径（作废）
 
+
+def test_push_cache_is_keyed_by_kind() -> None:
+    """B6：同 sha 的不同 kind 各记各的账——A 腿的 note 不得让 B 腿跳过 POST。
+
+    节点按 kind 分桶（sampler-agent weightsByKindSha），而训练 rollout 与其干净评估
+    用**同一个权重文件**（同 sha）。键不含 kind 时：先跑的那条腿 note 完，另一条腿的
+    `partition_weights_nodes` 会把它判成 reuse 而跳过 POST ⇒ 该节点对另一条腿整轮
+    409「wver not cached here」（脏缓存，与 A1 同类陷阱、方向相反）。
+    """
+    dist_common.weights_push_cache_reset()
+    node = {"id": "a97", "url": "http://a97.local"}
+
+    dist_common.note_weights_pushed("w1", "a97", kind="rollout")
+    assert dist_common.weights_already_pushed("w1", "a97", kind="rollout") is True
+    assert dist_common.weights_already_pushed("w1", "a97", kind="eval") is False
+    # 缺省 kind = 'rollout'（既有调用方/旧行为逐字不变）
+    assert dist_common.weights_already_pushed("w1", "a97") is True
+
+    reuse, need = dist_common.partition_weights_nodes([node], "w1", kind="eval")
+    assert (reuse, [nd["id"] for nd in need]) == ([], ["a97"])
+    reuse_r, need_r = dist_common.partition_weights_nodes([node], "w1", kind="rollout")
+    assert ([nd["id"] for nd in reuse_r], need_r) == (["a97"], [])
+
+    # 清节点 = 两条腿的账一起清（否则脏缓存会跨腿复用）
+    dist_common.forget_weights_node("a97")
+    assert dist_common.weights_already_pushed("w1", "a97", kind="rollout") is False
+    assert dist_common.weights_already_pushed("w1", "a97", kind="eval") is False

@@ -150,6 +150,8 @@ def test_wver_409_reposts_weights_and_keeps_node(tmp_path, monkeypatch) -> None:
     assert len(h.refreshed) == 1, "409 必须触发一次就地重发"
     assert h.refreshed[0]["node"] == "a97"
     assert h.refreshed[0]["wver"] == h.wver
+    # 重发必须与下发/请求同 kind——否则权重又进 rollout 桶，等于白修（B6）
+    assert h.refreshed[0]["kind"] == ed.EVAL_WEIGHTS_KIND
     assert "circuit-broken" not in "\n".join(h.logs)
 
 
@@ -447,3 +449,44 @@ def test_window_expiry_still_lands_inflight_games(tmp_path, monkeypatch) -> None
     played = [r for r in rows if r.get("event") == "eval"]
     assert len(played) == 1, f"窗口到点的在飞局必须落账: {rows}"
     assert elapsed < 2.5, f"宽限不该失控（实测 {elapsed:.2f}s）"
+
+
+# ---------------------------------------------------------------------------
+# B6（2026-09-19）：干净评估的权重 kind 独立成 'eval'，不再蹭训练 rollout 桶。
+# 节点按 (kind, wver) 分桶缓存权重；同桶时训练每轮刷 churn 与 eval 那份互相驱逐/清场，
+# eval 局随即 409「wver not cached here」，客户端只能靠 409 自愈重发兜底。
+# ---------------------------------------------------------------------------
+
+
+def test_eval_leg_uses_its_own_weights_kind(tmp_path, monkeypatch) -> None:
+    """三处 kind 必须同源：权重 POST 的 x-kind、局请求的 ?kind=、409 重发的 kind。
+
+    任一漏传都会取错桶（POST 进 eval 桶、请求去 rollout 桶取 ⇒ 整轮 409；反之亦然）。
+    旧实现三处都是 'rollout'（与训练 churn 同桶）。
+    """
+    h = _Harness(tmp_path, monkeypatch, games=1)
+    posted: list[dict] = []
+    seen: list[dict] = []
+
+    def spy_post(nodes, *_a, **kw):
+        posted.append(kw)
+        return [{"id": n["id"], "url": n["url"], "key": "", "c": 1} for n in nodes]
+
+    def fetch(*_a, **kw):
+        seen.append(kw)
+        return h.manifest(kw["stage"], kw["seed"]), {}
+
+    h.mp.setattr(dist_common, "post_weights_parallel", spy_post)
+    rows = h.run(fetch)
+
+    assert ed.EVAL_WEIGHTS_KIND == "eval"  # 节点侧桶名（协议的一部分）
+    assert [r for r in rows if r.get("event") == "eval"], "该轮应有远端结算的局"
+    assert posted and posted[0]["kind"] == ed.EVAL_WEIGHTS_KIND, posted
+    assert seen and seen[0]["kind"] == ed.EVAL_WEIGHTS_KIND, seen
+
+
+def test_eval_dispatch_kind_is_single_sourced() -> None:
+    """源码守卫：C 层不得残留 `kind="rollout"` 字面量（防半途改回 rollout 桶）。"""
+    src = Path(ed.__file__).read_text(encoding="utf-8")
+    assert 'kind="rollout"' not in src
+    assert src.count("EVAL_WEIGHTS_KIND") >= 4  # 定义 1 + 三处使用（POST/请求/重发）

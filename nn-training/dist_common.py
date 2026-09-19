@@ -414,8 +414,13 @@ def ping_nodes_parallel(nodes: list, timeout: float = 3.0) -> list[dict | None]:
     from concurrent.futures import ThreadPoolExecutor
 
     def _one(nd: dict) -> dict | None:
+        # 键名兼容 `key`（归一化配置，eval_dispatch/batch_eval 用的形态）与 `authKey`
+        # （rl-config.json 原始行）——旧实现只认 authKey，把归一化过的配置喂进来会静默
+        # 401 ⇒ 整批节点「ping 失败」（2026-09-19 B6 现场探针实测）。
         return node_ping(
-            str(nd.get("url") or ""), str(nd.get("authKey") or ""), timeout=timeout
+            str(nd.get("url") or ""),
+            str(nd.get("key") if nd.get("key") is not None else nd.get("authKey", "")),
+            timeout=timeout,
         )
 
     with ThreadPoolExecutor(max_workers=min(8, len(nodes))) as ex:
@@ -760,9 +765,13 @@ def probe_weights_cached(
 
 
 # 进程内「已成功下发过该 wver」缓存（volume 同 it 补波复用；跨 it 换 wver 天然失效）。
-# 键 = weights 指纹；值 = 成功 POST 过的 node id。失效：ping/codeHash/bun 门 exclude
+# 值 = 成功 POST 过的 node id（键 = (kind, wver)，见下）。失效：ping/codeHash/bun 门 exclude
 # 时调用 forget_weights_node。局限：同 codeHash 手动重启可能残留脏缓存（同 it 窗口内罕见）。
-_WEIGHTS_PUSHED: dict[str, set[str]] = {}
+# 键 = (kind, wver)。**必须带 kind**：节点侧按 kind 分桶缓存权重，而同一个权重文件
+# （同一 sha）会被多条腿使用——训练 rollout 用 'rollout'，其干净评估用 'eval'
+# （2026-09-19 B6）。不带 kind 时先跑的那条腿的 note 会让另一条腿误判「已下发」
+# 而跳过 POST ⇒ 该节点对另一条腿整轮 409（脏缓存，与 A1 同类陷阱、方向相反）。
+_WEIGHTS_PUSHED: dict[tuple[str, str], set[str]] = {}
 
 
 def weights_push_cache_reset() -> None:
@@ -770,9 +779,9 @@ def weights_push_cache_reset() -> None:
     _WEIGHTS_PUSHED.clear()
 
 
-def note_weights_pushed(wver: str, node_id: str) -> None:
+def note_weights_pushed(wver: str, node_id: str, kind: str = "rollout") -> None:
     if wver and node_id:
-        _WEIGHTS_PUSHED.setdefault(wver, set()).add(node_id)
+        _WEIGHTS_PUSHED.setdefault((kind, wver), set()).add(node_id)
 
 
 def forget_weights_node(node_id: str) -> None:
@@ -782,8 +791,8 @@ def forget_weights_node(node_id: str) -> None:
         s.discard(node_id)
 
 
-def weights_already_pushed(wver: str, node_id: str) -> bool:
-    return bool(node_id) and node_id in _WEIGHTS_PUSHED.get(wver, ())
+def weights_already_pushed(wver: str, node_id: str, kind: str = "rollout") -> bool:
+    return bool(node_id) and node_id in _WEIGHTS_PUSHED.get((kind, wver), ())
 
 
 def post_weights(
@@ -870,7 +879,7 @@ def refresh_weights(
                 f"（{e}）—— 仍未持有权重，本任务回队"
             )
         return False
-    note_weights_pushed(wver, nid)
+    note_weights_pushed(wver, nid, kind=kind)
     if log is not None:
         log(
             f"[dist] node {nid}: wver not cached（409）—— 已就地重发权重（{mode}）"
@@ -936,7 +945,7 @@ def post_weights_parallel(
                 if log is not None:
                     log(f"[dist] weights POST to {nid} failed ({err}, {dt:.2f}s) — excluded")
                 continue
-            note_weights_pushed(wver, nid)
+            note_weights_pushed(wver, nid, kind=kind)
             if log is not None:
                 log(f"[dist] weights[{kind}] -> {nid} ({mode}, {dt:.2f}s)")
             if on_alive is not None:
@@ -962,14 +971,24 @@ def rollout_collect_sec(t_dist_start: float | None, last_settle: float | None) -
     return round(last_settle - t_dist_start, 1)
 
 
-def partition_weights_nodes(nodes: list, wver: str) -> tuple[list, list]:
+def partition_weights_nodes(
+    nodes: list, wver: str, kind: str = "rollout"
+) -> tuple[list, list]:
     """按进程内缓存把节点拆成 (reuse, need)：reuse 跳过 POST，need 要下发。
 
-    volume 同 it 补波：权重不变，首波已成功的节点进 reuse。ping/codeHash 门
+    volume 同 it 补波：权重不变，首波已成功的节点进 reuse。kind 决定取哪条腿的账（缺省 'rollout'）；ping/codeHash 门
     exclude 的节点须先 forget_weights_node，否则可能带着脏缓存进 reuse。
     """
-    reuse = [nd for nd in nodes if weights_already_pushed(wver, str(nd.get("id") or nd.get("url") or "?"))]
-    need = [nd for nd in nodes if not weights_already_pushed(wver, str(nd.get("id") or nd.get("url") or "?"))]
+    reuse = [
+        nd
+        for nd in nodes
+        if weights_already_pushed(wver, str(nd.get("id") or nd.get("url") or "?"), kind=kind)
+    ]
+    need = [
+        nd
+        for nd in nodes
+        if not weights_already_pushed(wver, str(nd.get("id") or nd.get("url") or "?"), kind=kind)
+    ]
     return reuse, need
 
 

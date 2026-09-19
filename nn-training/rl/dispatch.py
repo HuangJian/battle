@@ -344,7 +344,7 @@ class RolloutDispatcher:
             wkind = "rollout"
         with open(rl_path, "rb") as f:
             weights_bytes = f.read()
-        reuse, need = dist_common.partition_weights_nodes(nodes, wver)
+        reuse, need = dist_common.partition_weights_nodes(nodes, wver, kind=wkind)
         if reuse:
             log(
                 f"[dist] weights[{wkind}] reuse wver={wver[:12]}… skip POST for "

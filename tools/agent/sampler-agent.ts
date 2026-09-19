@@ -449,8 +449,82 @@ async function renderPoolPageLocal(): Promise<string> {
 const WEIGHT_BUCKETS_PER_KIND = 64
 const weightsByKindSha: Map<string, Map<string, WeightsState>> = new Map()
 
-function weightsOf(kind: string, wver: string): WeightsState | null {
-  return weightsByKindSha.get(kind)?.get(wver) ?? null
+/** 权重文件基名（**单一来源**：POST 落盘、磁盘回查、retention 清理必须同名）。 */
+export function weightFileBase(kind: string, sha: string): string {
+  return `weights-${kind}-${sha.slice(0, 16)}.json`
+}
+
+/** kind 合法性（kind 直接进文件名 ⇒ 防路径穿越）。 */
+export function kindOk(kind: string): boolean {
+  return /^[a-z][a-z0-9_-]{0,31}$/.test(kind)
+}
+
+/** 键合法性（kind 进文件名 + sha 必须是全量 64 hex）。 */
+export function weightsKeyOk(kind: string, sha: string): boolean {
+  return kindOk(kind) && /^[0-9a-f]{64}$/.test(sha)
+}
+
+/**
+ * 磁盘回查（2026-09-19，用户指令「让节点侧的权重查找在内存桶未命中时回查磁盘」）。
+ *
+ * 为什么必须有：`/v1/task` 只查内存桶（`weightsOf`）。agent 一重启内存桶就空了，而权重
+ * 文件仍在 `WORK_DIR`（boot 收敛只按 kind 留最新 KEEP 份）⇒ 节点对**盘上就有的**权重答
+ * 409「wver not cached here」，客户端只能靠 409 自愈重发兜（每节点每次重启白传一份）。
+ * 文件名里的 sha 前缀只有 16 hex、**不足以判定内容**，故此处按字节重算 sha256 全量比对
+ * ——不符即视为未命中（坏/被截断的文件留给 sweep 收拾）。
+ *
+ * `dir` 仅为单测注入隔离目录；生产调用走缺省 `WORK_DIR`。
+ */
+export function readWeightsFile(
+  kind: string,
+  sha: string,
+  dir: string = WORK_DIR,
+): WeightsState | null {
+  if (!weightsKeyOk(kind, sha)) return null
+  const file = path.join(dir, weightFileBase(kind, sha))
+  try {
+    const bytes = fs.readFileSync(file)
+    if (createHash('sha256').update(bytes).digest('hex') !== sha) return null
+    // iterId 只在 POST 时记账（无消费方）——回查来的权重没有它，置空。
+    return { sha, iterId: '', file }
+  } catch {
+    return null
+  }
+}
+
+/** 桶满驱逐最旧（POST 落盘与磁盘回查共用）。文件尽力删（忙时留给 retention 扫）。 */
+function evictWeightBucket(bucket: Map<string, WeightsState>): void {
+  while (bucket.size > WEIGHT_BUCKETS_PER_KIND) {
+    const oldestSha = bucket.keys().next().value as string
+    const oldest = bucket.get(oldestSha)
+    bucket.delete(oldestSha)
+    if (oldest) {
+      try {
+        fs.rmSync(oldest.file, { force: true })
+      } catch {
+        /* in-flight game holds the handle — best effort */
+      }
+    }
+  }
+}
+
+/** 权重查找（内存桶 → 磁盘回查）；`dir` 仅供单测注入隔离目录。 */
+export function weightsOf(kind: string, wver: string, dir: string = WORK_DIR): WeightsState | null {
+  const bucket = weightsByKindSha.get(kind)
+  const hit = bucket?.get(wver)
+  if (hit) return hit
+  // 未命中 → 回查磁盘（重启后内存桶为空、文件还在）；命中即回填桶，后续任务零额外开销。
+  const fromDisk = readWeightsFile(kind, wver, dir)
+  if (!fromDisk) return null
+  const target = bucket ?? new Map<string, WeightsState>()
+  if (!bucket) weightsByKindSha.set(kind, target)
+  target.set(wver, fromDisk)
+  evictWeightBucket(target)
+  console.log(
+    `[sampler-agent] weights[${kind}] rehydrated ${wver.slice(0, 12)}… from disk` +
+      ' (in-memory bucket was empty — agent restarted)',
+  )
+  return fromDisk
 }
 
 /** 探针纯函数（单测共用）：该 kind 桶是否已持有 sha。 */
@@ -461,12 +535,73 @@ export function weightsCachedInBucket(
   return Boolean(sha) && (bucket?.has(sha) ?? false)
 }
 
-function latestWeightsOfKind(kind: string): WeightsState | null {
+/**
+ * 磁盘上的「最新一份」该 kind 权重（2026-09-19，覆盖 intent/goal 评估的另一类重启 409）。
+ *
+ * 语义对齐内存桶：POST 顺序 = 「最后一个 set 的为最新」；重启后内存桶空了，只能按文件 mtime 取最新
+ *（POST 会写文件 ⇒ 顺序基本一致；命中 kept 不重写时 mtime 可能偏旧，属可接受近似）。文件名只有 16 hex
+ * 前缀 ⇒ 逐候选**按字节重算 sha256**，并要求 sha 前 16 hex 与文件名一致（改名/损坏的文件跳过，留给 sweep）。
+ */
+function latestWeightsOnDisk(kind: string, dir: string): WeightsState | null {
+  if (!kindOk(kind)) return null
+  let names: string[]
+  try {
+    names = fs.readdirSync(dir)
+  } catch {
+    return null
+  }
+  const re = new RegExp(`^weights-${kind}-([0-9a-f]{16})\\.json$`)
+  const cands: { file: string; prefix: string; mtimeMs: number }[] = []
+  for (const n of names) {
+    const m = re.exec(n)
+    if (!m) continue
+    const file = path.join(dir, n)
+    try {
+      cands.push({ file, prefix: m[1], mtimeMs: fs.statSync(file).mtimeMs })
+    } catch {
+      /* 并发删除 — 跳过该候选 */
+    }
+  }
+  if (cands.length > 1) cands.sort((a, b) => b.mtimeMs - a.mtimeMs) // 空/单元素不 sort
+  for (const c of cands) {
+    try {
+      const sha = createHash('sha256').update(fs.readFileSync(c.file)).digest('hex')
+      if (sha.slice(0, 16) !== c.prefix) continue
+      return { sha, iterId: '', file: c.file }
+    } catch {
+      /* 读不到 — 试下一个候选 */
+    }
+  }
+  return null
+}
+
+/**
+ * 「最新桶」语义（intent/goal 评估用）：内存桶按插入序取最后一个；**桶空则回查磁盘**取 mtime 最新的一份。
+ *
+ * 为什么：`/v1/task` 的 `policy=intent-exec|goal` 前置检查与 runGame 的 `--intent-weights/--goal-weights`
+ * 都走这里——agent 一重启内存桶就空，而 intent/goal 权重文件还在盘上 ⇒ intent-exec / goal 评估整轮 409
+ *「intent weights not cached」（与 per-tick 的 wver 409 同类，只是走「最新桶」而非精确 sha）。
+ *
+ * `dir` 仅供单测注入隔离目录。
+ */
+export function latestWeightsOfKind(kind: string, dir: string = WORK_DIR): WeightsState | null {
   const m = weightsByKindSha.get(kind)
-  if (!m || m.size === 0) return null
   let latest: WeightsState | null = null
-  for (const ws of m.values()) latest = ws // Map 保持插入序，最后一个 = 最新
-  return latest
+  if (m) for (const ws of m.values()) latest = ws // Map 保持插入序，最后一个 = 最新
+  if (latest) return latest
+  const fromDisk = latestWeightsOnDisk(kind, dir)
+  if (!fromDisk) return null
+  const target = m ?? new Map<string, WeightsState>()
+  if (!m) weightsByKindSha.set(kind, target)
+  if (!target.has(fromDisk.sha)) {
+    target.set(fromDisk.sha, fromDisk)
+    evictWeightBucket(target)
+  }
+  console.log(
+    `[sampler-agent] weights[${kind}] rehydrated latest ${fromDisk.sha.slice(0, 12)}… from disk` +
+      ' (in-memory bucket was empty — agent restarted)',
+  )
+  return fromDisk
 }
 const AUTH_KEY = loadOrCreateAuthKey()
 fs.mkdirSync(WORK_DIR, { recursive: true })
@@ -1036,7 +1171,11 @@ async function handle(req: Request): Promise<Response> {
     const claimedSha = req.headers.get('x-weights-sha256') ?? ''
     const kind = req.headers.get('x-kind') ?? 'rollout'
     if (!claimedSha) return jsonResponse({ error: 'missing x-weights-sha256' }, 400)
-    const cached = weightsCachedInBucket(weightsByKindSha.get(kind), claimedSha)
+    // 磁盘回查（2026-09-19）：agent 重启后内存桶空、文件仍在盘上——探针若答 false，客户端
+    // 就会重传一份盘上已有的权重。weightsOf 命中即顺便回填桶（后续任务零额外开销）。
+    const cached =
+      weightsCachedInBucket(weightsByKindSha.get(kind), claimedSha) ||
+      weightsOf(kind, claimedSha) !== null
     return jsonResponse({ ok: true, cached, kind }, 200)
   }
 
@@ -1070,22 +1209,11 @@ async function handle(req: Request): Promise<Response> {
     if (bucket.has(actualSha)) return jsonResponse({ ok: true, cache: 'kept' }, 204)
     // 多桶（v4.1）：新 sha 追加进该 kind 的桶组。结果缓存按 iterId 天然分命名空间
     //（不同训练流互不可见），整池清除会把其它训练流在飞结果顶掉——不再全清。
-    const wfile = path.join(WORK_DIR, `weights-${kind}-${actualSha.slice(0, 16)}.json`)
+    const wfile = path.join(WORK_DIR, weightFileBase(kind, actualSha))
     fs.writeFileSync(wfile, weightsBytes)
     bucket.set(actualSha, { sha: actualSha, iterId, file: wfile })
-    // 该 kind 桶数超限 → 驱逐最旧（文件尽力删，忙时留给 retention 扫）
-    while (bucket.size > WEIGHT_BUCKETS_PER_KIND) {
-      const oldestSha = bucket.keys().next().value as string
-      const oldest = bucket.get(oldestSha)
-      bucket.delete(oldestSha)
-      if (oldest) {
-        try {
-          fs.rmSync(oldest.file, { force: true })
-        } catch {
-          /* in-flight game holds the handle — best effort */
-        }
-      }
-    }
+    // 该 kind 桶数超限 → 驱逐最旧（与磁盘回查共用，见 evictWeightBucket）
+    evictWeightBucket(bucket)
     sweepWorkdir()
     console.log(
       `[sampler-agent] weights[${kind}] switched -> ${actualSha.slice(0, 12)}… (result cache purged)`,

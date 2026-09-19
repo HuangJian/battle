@@ -41,6 +41,16 @@ from rl.log import log
 from rl.queue import _record_agent_meta, bun_version, mm
 from rl.queue_local import pick_race_target, register_inflight
 
+#: 干净评估的权重 kind（B6，2026-09-19）：节点按 (kind, wver) 分桶缓存权重
+#: （sampler-agent `weightsByKindSha`）。旧实现与训练 rollout 共用 'rollout' 桶 ⇒ 训练每轮
+#: 刷权重与 eval 那份在同桶内互相驱逐/清场，eval 局随即 409「wver not cached here」
+#: （2026-09-19 审计 A1/B6；客户端只能靠 409 自愈重发兜底）。独立 kind 后两条腿互不驱逐，
+#: 且日志与落盘文件（`weights-eval-<sha16>.json`）一眼可分。
+#:
+#: 协议侧 kind 是不透明字符串（POST x-kind / GET X-Kind / task ?kind= 三处同源）⇒
+#: 旧节点无需任何改动，本改动不触 codeHash（nn-training/** 不在 SSOT 内）。
+EVAL_WEIGHTS_KIND = "eval"
+
 
 def select_delayed_eval_it(dispatch_it: int, is_eval_round) -> int | None:
     """延迟 eval 派发轮选择（P0 修复：in-loop eval 曾恒取 W(N-1) 却标 itN）。
@@ -430,6 +440,7 @@ class EvalDispatcher:
                             difficulty=args.difficulty,
                             timeout=task_timeout,
                             mode="eval",
+                            kind=EVAL_WEIGHTS_KIND,
                             stage_json=stage_json_for_args(args, task[0]) or "",
                             lives_override=int(_ov["lives_override"])
                             if "lives_override" in _ov
@@ -459,7 +470,7 @@ class EvalDispatcher:
                                 wver=wver,
                                 weights_bytes=weights_bytes,
                                 timeout=min(300.0, max(60.0, task_timeout)),
-                                kind="rollout",
+                                kind=EVAL_WEIGHTS_KIND,
                                 err=err,
                                 log=log,
                             )
@@ -756,7 +767,7 @@ class EvalDispatcher:
                     wver,
                     weights_bytes,
                     timeout=min(300.0, max(60.0, task_timeout)),
-                    kind="rollout",
+                    kind=EVAL_WEIGHTS_KIND,
                     log=log,
                 )
                 if alive
