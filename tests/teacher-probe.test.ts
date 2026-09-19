@@ -83,6 +83,10 @@ describe('levelMaxTicks（teacherWR 的 cap 自描述）', () => {
     // DECISIONS §2026-09-13-goalnn-max-ticks-rule：c01=1500 / c07=5100
     expect(levelMaxTicks('ladder-c01')).toBe(1500)
     expect(levelMaxTicks('ladder-c07')).toBe(5100)
+    // 全探针域逐级对账：关卡文件是 JSONC（oxfmt 会重加尾逗号），裸 JSON.parse
+    // 会让每一级都返回 null（2026-09-19 实测）——这里把"7 个文件都读得动"钉住。
+    for (const [i, level] of TEACHER_LEVELS.entries())
+      expect(levelMaxTicks(level)).toBe(600 * (i + 1) + 900)
   })
 
   it('缺关卡文件 → null（探针不因缺一项就崩）', () => {
