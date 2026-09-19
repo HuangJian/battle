@@ -1,7 +1,7 @@
 """rl/reports.py — aggregation invariants."""
 from __future__ import annotations
 
-from rl.reports import aggregate_rollout_collect, combine_reports, win_of
+from rl.reports import adopt_volume_report, aggregate_rollout_collect, combine_reports, win_of
 
 
 def test_win_of() -> None:
@@ -101,3 +101,39 @@ def test_aggregate_rollout_collect_single_wave_passthrough() -> None:
     assert out["pure_collect_sec"] == 15.0
     assert out["rollout_collect_aggregated"] is True
     assert out["rollout_collect_waves"] == 1
+
+
+def test_adopt_volume_report_rejects_prior_iter_merge() -> None:
+    """continuous 收官：只采纳本轮；与上一轮 combine 会把起点钉在历史波（x20 it6=425s）。"""
+    prior = _wave(4, t0=1000.0, t1=1030.0, pure=30.0)  # 上一轮残留 _report
+    it2 = combine_reports([
+        _wave(4, t0=2000.0, t1=2020.0, pure=20.0),
+        _wave(2, t0=2025.0, t1=2040.0, pure=15.0),
+    ])
+    got = adopt_volume_report(it2)
+    assert got is it2
+    assert got["pure_collect_sec"] == 40.0  # 2040-2000，本轮窗口
+    # 反例（历史 bug 路径）：combine([prior, it2]) 会得到 2040-1000=1040
+    wrong = combine_reports([prior, it2])
+    assert wrong["pure_collect_sec"] == 1040.0
+    assert got["pure_collect_sec"] != wrong["pure_collect_sec"]
+
+
+def test_adopt_volume_report_empty_is_valid_shape() -> None:
+    """本轮无采集：返回合法空 shape（games 等键齐全），不得是 {}（KeyError: games 回归）。"""
+    empty = adopt_volume_report(None)
+    assert empty["games"] == 0
+    assert empty["winRate"] == 0.0
+    assert empty["outcomes"] == {}
+    assert empty["totalSamples"] == 0
+    assert empty["totalTicks"] == 0
+    # _log_report / events 直接读这些键——空 dict 会在训练主循环炸掉
+    assert adopt_volume_report({})["games"] == 0
+
+
+def test_combine_reports_skips_empty_dicts() -> None:
+    """轮初 `_report={}` 与真波报告一起 combine 不得 KeyError。"""
+    w0 = _wave(2, t0=0.0, t1=20.0, pure=20.0)
+    combined = combine_reports([{}, w0, {}])
+    assert combined["games"] == 2
+    assert combined["pure_collect_sec"] == 20.0

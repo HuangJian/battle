@@ -2548,6 +2548,41 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   `dashboard/src/server/pool-history.ts`（`pushWindowSample`/`windowMeanSec`/`avgWallSec`）、
   `pool-types.ts`/`api/pool.ts`/`NodeStats.tsx`；回归 `dashboard/tests/server-pool-history.test.ts`。
 
+## §2026-09-19-volume-purecollect-stale-merge（2026-09-19，bugfix：指标表 rollout 时间轮轮累加）
+
+- **背景**：x20-powered/x20-snowball 的 `pure_collect_sec`（指标表 rollout 列）it1≈30s
+  起每轮 +70~100s，it6 达 425s；同轮真采集 `rollout_sec` 始终 ~25–36s。
+- **根因**：`_volume_collect_continuous` 收官时 `combine_reports([self._report, combined])`，
+  而 `self._report` **未在轮初清空**——仍带上一轮 `weights_dist_start_ts`；
+  `aggregate_rollout_collect` 的 min(start) 被钉在 run 起点，pure_collect ≈ 累计墙钟。
+  同路径 `totalSamples` 也被跨轮相加（jsonl `samples` 虚高；`transitions_collected` 正常）。
+- **备选与否决**：在 combine 前手工剥掉 prior 的 ts —— 否，prior 整份都不该进本轮报告
+  （games/score 会双计）；dashboard 改读 `rolloutSec` 回避 —— 否，掩盖错误账本；
+  保留跨轮 combine「凑完整 run 窗口」—— 否，与用户定义的「本轮采集」口径冲突。
+- **决定**：轮初 `self._report = {}`；continuous 收官只采纳本轮
+  `adopt_volume_report(combined)`（无 batch 时返回**合法空 shape** `combine_reports([])`，
+  绝不返回 `{}` —— 否则 `_log_report`/events 读 `games` KeyError，2026-09-19 同日回归已修：
+  combine 跳过空 dict、日志/events 用 `.get`）。历史 jsonl 的
+  pure_collect/samples 累加行**作废对照**，请改看同轮 `rollout_sec`/`transitions_collected`。
+- **违反后果**：任何把上一轮 `_report` 再 combine 进本轮采集的改动，都会让指标表
+  rollout 列再次单调暴涨；任何让 volume 收官后 `_report` 停在 `{}` 的改动都会
+  在 `_log_report` 打 KeyError 打死 trainer。
+- **落地**：`nn-training/rl/reports.py`（`adopt_volume_report`/`empty_collect_report`/combine 跳空）、
+  `loop_core.py`（轮初复位 + continuous 恒 adopt）、`loop_steps.py`/`events.py`（.get）；
+  回归 `tests/test_rl_reports.py::test_adopt_volume_report_*`。
+
+## §2026-09-19-console-wallsec-undefined-guard（2026-09-19，bugfix：节点统计「机侧墙钟」显示 undefineds）
+
+- **背景**：新列渲染 `${r.avgWallSec}s`；服务端进程未重启或旧 API 缺键时
+  `undefined !== null` 为真 → 显示 `undefineds`。
+- **备选与否决**：只提醒用户重启 dashboard —— 否，UI 不应把缺字段画成 undefined；
+  只改服务端 —— 否，客户端仍可能吃到缓存/旧包。
+- **决定**：展示层 `secCell`（仅正有限数 → `Ns`，否则 `-`）；`fetchPool` 将
+  `avgWallSec ?? null` 归一；服务端继续显式写字段。
+- **违反后果**：任何 `x !== null ? x : '-'` 模板在字段缺席时都会画出 `undefined…`。
+- **落地**：`dashboard/src/web/app/panels/NodeStats.tsx`、`api-client.ts`；
+  回归 `dashboard/tests/server-pool-history.test.ts`（secCell 语义）。
+
 ## §2026-09-19-evalcourse-dist-eval（2026-09-19，eval-course-ckpt 开分布式评估：同节点门 + 同规 stageJson）
 
 - **背景**：判决类评估（T5/T6 体量：多权重 × 数百～800 局课程自定义关）在纯本地
@@ -2739,6 +2774,74 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
      重跑结果逐字相同，故不影响读数），只看 provenance 会误读成「远端没拿到活」。
      `m1-eval` 本轮仍只打 provenance（其本地链先入队，分配口径的同样问题未动）。
 
+- **追记四（同日，`eval-course-ckpt` 的 10054 真因：权重桶撞车；含一处我自己引入的回归）**：
+  用户指出「`eval-course-ckpt` 还是有问题」，证据是另一 agent 的课程记录
+  （`nn-training/curricula/x20-powered.jsonc` 第 5 行：「它占着 dist 集群，本腿 it0 探针会被 10054
+  挤死」）。逐层排查（不是猜）得到四个独立缺陷，前两个是真因。
+  1. **本机槽位链被我上一轮的重构悄悄弄回归了**（用户上一轮报障原样复活）：`configLocalSlots()`
+     是上一轮为「`rl.local_slots: 0` 必须真的 0」建的共享纯函数，m1-eval 还在用，但
+     **`eval-course-ckpt` 改成调 Python 后把它丢了** —— 缺省 `localSlots` 不写进 spec ⇒ Python 侧
+     取 `policy.evalLocalSlots` 缺省 **4** ⇒ 整条配置链被跳过（`eval_course_once.py` 的注释甚至
+     声称读了 `rl.local_slots`，而 Python 侧从来没读过）。
+     - **修**：求解器收敛成 `dist-node-gate.pickDistLocal(explicit, cfg, fallback)`（纯函数，
+       **两个工具共用**，m1-eval 的内联三元也换掉）；`eval-course-ckpt` 启动日志打印生效值 + 来源，
+       并**总是**把解析结果写进 spec。实测 `distLocal=0（来源：配置 rl.local_slots）`。
+  2. **10054 的真因 = 一次性评估的权重文件被训练作业扫掉**（不是「节点忙」）：节点侧按 kind 收敛
+     权重文件（`workdir-cleanup.WEIGHT_FILES_KEEP = 4`），而训练作业**每轮**往 `rollout` 桶 POST 新
+     权重 ⇒ 我们那份固定权重（`weights-rollout-d66378e…`）在几秒内被扫掉；但另一支 agent 进程
+     （同机还有 8789 那支，共享 `tmp/dist-agent`）的内存桶仍答 "kept" ⇒ 任务子进程 `ENOENT` 退出 ⇒
+     agent 直接断连 ⇒ client 只见 `WinError 10054`，与「节点满负荷」在传输层**不可区分**。
+     重试耗尽 ⇒ 单元 0/50 settled；`local_slots: 0` 时整批 0 行、exit 1（这正是它「被挤死」的表象）。
+     - **修**：新增 `ONESHOT_EVAL_KIND = "eval"`，两个一次性入口（`eval_course_once` /
+       `eval_m1_once`）把权重 POST 进专用桶（agent 的 `x-kind` 本就能任意分桶），训练作业的
+       `rollout` churn 扫不到它；**按关键字传** —— 位置写错会静默回落 `rollout`（我第一版真踩了：
+       写到 14 号位置 = `init_sha16`，行为与修复前一模一样，靠单测才发现）。
+     - **证据（训练作业**在跑**时实测）**：修复前 —— `weights[rollout] -> self (kept)` 后 8 局全
+       `背压 6/6 耗尽 + 真失败` ⇒ `provenance: none`、0 行、exit 1；修复后 ——
+       `weights[eval] -> … (kept)`、`weights-eval-d66378e3….json` 存活（同时 4 份 rollout 仍被
+       KEEP 轮换）、**16/16 全远端、local 0、exit 0**。
+  3. **10054 不再被当成节点故障**（既有实现缺陷，独立于上条）：`dist_common.fetch_task` 把
+     连接被重置/超时/408·429·5xx 标为 `transient`（`DistError.transient`），`batch_eval` 对它**背压
+     重排 + 指数退避**（上限 8s）而**不计** `nodeFailStreak`，并把「背压次数/真失败次数」与
+     `provenance` 一起入账；单元 0 局且本机槽位 0 时打一行**响亮提示**指向权重文件缺失这一真因。
+     旧行为：一瞬 10 次 10054 把 6 个节点在 1 秒内全部熔断（与 rl/bc_dispatch 的 busy 背压同源问题）。
+  4. **runDir 复用会污染 provenance 判读**：`eval_log.jsonl` 每次运行都重建，而
+     `dist-agent-meta.jsonl` 只追加 ⇒ 200 局的重跑里 meta 积 343 条（含上一轮 114 条远端条目），
+     照它判「是否降级本地」会得出**反的**结论。新增 `_reset_run_ledgers()` 开跑前两个都清。
+     （顺带纠正上一轮的一处判读：那份「200 局全 local」的产物来自**第二次运行**、且它的
+     `spec.json` 写着 `noNodes: true` —— 是调用方显式 `--no-dist`，不是节点被熔断。）
+  - **验证**：真集群 + **训练作业在跑**下三种模式实测（默认 `distLocal=0` 16/16 远端 ·
+    `--dist-local 2` 打印来源且 `[local ×2]` 生效 · `--no-dist` 全本机）；`m1-eval`（god，2 局）
+    `localSlots=0 kind=eval` 全远端。门禁：根 `bun run check` 绿 · `bun run build` 绿 ·
+    `nn-python-gate` 绿（ruff/mypy + 1312 例）。新增测试：TS `pickDistLocal` 4 例 + 槽位链 2 例；
+    Python `_reset_run_ledgers` 1 例 + **专用 kind 契约 1 例（源码级守卫，已实测对「位置传参」变体变红）**。
+
+- **追记五（同日，800 局探针暴露两个真缺陷：起跑 7s 的串行 ping + 慢节点拖尾巴；事件级日志落地）**：
+  用户实测「等了十几秒 CPU 才满」「CPU 满一阵又掉档一阵子（几十秒）」⇒ 要求把**权重传输完毕**与
+  **评测结果返回**打到日志里排查（命令：`x20-rebirth` it96 × `ladder-c20-lives1` × 800 局
+  `--seed0 418000`，非判决段、仅诊断）。
+  - **落地的事件日志**（新增，已真集群验证）：① `dist_common.post_weights_parallel` 逐节点
+    `weights[kind] -> <节点> (<mode>, X.XXs)` + **阶段总计**
+    `weights[kind] ready on N/M nodes in X.XXs (sha …)`（分发起点即此）；② `batch_eval` 逐单元
+    `阶段 gate X.XXs alive=N/M` / `阶段 weights X.XXs ok=N/M`；③ 逐局 `→ <节点> s/seed` 与
+    `← <节点> s/seed X.Xs ticks=… outcome=…`（配对即得**在飞曲线**）；④ 每 2s 在飞采样
+    `⏱ pending=… inflight=… settled=…`；⑤ **被 ping 丢掉的节点不再静默**（原先只是 `continue`，
+    实测 `alive=4/6` 时看不出丢的是谁、为什么）。开关 `EVAL_TRACE_EVENTS`（一次性工具缺省开，
+    训练循环路径缺省关 ⇒ A/B/C 层日志逐字不变）。
+  - **发现①（起跑慢）**：`阶段 gate 6.83s alive=4/6` —— 节点门是**串行** ping，每台预算 3s，
+    两台负载高的节点直接吃掉 ~7s；而门**每单元重跑一次**。修：新增
+    `dist_common.ping_nodes_parallel`（保序、并行）⇒ 阶段墙钟 == 最慢一台，实测 6.83s → **3.01s**；
+    并把「谁掉了、为什么」写进日志（实测 `node a96: ping 失败/超时`）。
+  - **发现②（CPU 掉档的真因：慢节点拖尾巴）**：单元内前 ~30s 快节点（self/mac/gcs 平均 2.9/3.7/3.8s
+    每局）就干完 ~170 局，之后 **pending=0**，只剩配置固定并发（a95/a97/a96 各 7）的慢节点在跑：
+    **a96 平均 124s/局（最大 180s）、a97 42.3s、a95 20.3s**（同一台机器上训练作业抢 CPU）⇒ 每单元尾巴
+    1–3 分钟、本机 8 个槽位与其余节点全部空转（实测 u3：`pending=0 inflight=7` 卡了 ~170s，7 局全在
+    a96）。**这 3 台只贡献 71/800 局（8.9%）却吃掉 63% 的节点秒**。首轮（297s）与次轮（653s）的差距
+    就来自这里，不是网络。**调度策略怎么改尚未定**（见下），本轮只做到「看得见 + 起跑不再白等」。
+  - **实测读数（非判决段，仅吞吐参考）**：800/800 全远端 · **local=0** · 653.2s / 1.2 games/s；
+    来源分布 self=356 · mac=251 · gcs=122 · a96=32 · a95=25 · a97=14；pass 82/800=10.3% ·
+    kills 6.27（与首轮逐值相同：同种子确定性 ✓）。**不要拿它当 it96 capability 读数**（段未预注册）。
+
 ## §2026-09-19-m1-eval-python-dispatch（2026-09-19，m1-eval 分派链回归 Python：TS 只写 spec/读行/打分）
 
 - **决定**：上一轮的「仍留的重复」点名的就是 `m1-eval.ts` 自己的分派链（判门/rescan/尾竞速/权重下发
@@ -2776,6 +2879,30 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 - **门禁**：根 `bun run check` 绿 · `nn-python-gate` 绿（ruff/mypy）。新增 Python 6 例
   （spec→unit 归一/行映射/kind 表与 DISPATCHABLE 对齐）+ TS 7 例（spec 构造/行映射/白名单）。
 
+## §2026-09-19-x20-snowball（2026-09-19，x20 后继腿：中盘激励，里程碑 bonus 单变量 + god-prefix 否决）
+
+- **背景**：x20 结算（池外 it30 7.5%/6.10杀，无合格终点＋旧能力丢失）＋ 用户假说
+  "通关靠捡道具滚雪球"。证实：it30 池外段通关局 1.22 pu/千tick vs 死亡局 0.64、
+  早期死亡局 0.20（存活归一化仍 2 倍）；早期死亡局 0.12 个/局；凶手四类全有 ⇒
+  开局拾取缺口＋全面中盘续航赤字。线性 wKill 在中盘（5–12杀）是回报洼地。
+- **本腿 thesis（单变量）**：`wMS8/12/16 = 6/9/12` edge-trigger bonus（Φ-diff，
+  数值已验：7→8 跨越精确 +6.0 一次）。坐 EV 不动（到 8 杀概率 0）⇒ 走>莽>坐不变。
+- **证据性否决（不做的理由）**：re-warm——peak it30 落在 it25 降温**之后**，冻结说
+  证伪；加 batch——plateau 在噪声带之上清晰可见，batch 非瓶颈；容量——用户指令不动；
+  gamma/lam——value-loss 不可观测（remote 只回 kl/entropy），不盲调。
+- **god-prefix 中盘开局否决（本条核心）**：agent 已实现一半（export-rl-rollout
+  前缀分支＋回退设计）后叫停并全 revert（git diff 确认零残留）。理由：prefix
+  跳过开局，但缺口恰在开局拾取 —— 学生永远学不到"如何到达中盘"，药下错地方；
+  且代价是热路径＋六文件垂直链＋节点升级波。fallback ① 改为 powered-opening
+  （现成 --player-level，零引擎改动）/wPickup 剂量腿；god-prefix 重提需"到达后
+  转化率瓶颈"的新证据。
+- **§15.5 合规**：reward 语义变化 ⇒ 新实验：fresh `tmp/x20-snowball/` ＋ 本条目 ＋
+  判决段 413000（已查 413000–413999 全空）；命数 tier 未变 ⇒ D11 不触发；
+  c06 回测门按用户指令删除（c07 保留）；bc = it30（池外三选一胜者）。
+- **落地**：`nn-training/curricula/x20-snowball.jsonc`（CourseConfig 校验通过；
+  里程碑 8→12→16→20，分母池外 6.10；pass 门 ≥30% 不动；it40 主检点 kills<7.0 停；
+  超时/换血/横盘/M2 全延续）。开训后填 it0 三件套。
+
 ## §2026-09-19-nn-decision-instant（2026-09-19，nn 决策时点归一到语料口径：NNInput 末帧决策 + nn 入列分派白名单）
 
 - **决定**：① `m1-eval` 分派白名单加 `nn`（`--weights-dir` 解析出**最新**权重文件后上传，`kind='rollout'`）
@@ -2811,3 +2938,9 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 - **回归守卫**：`tests/sim/eval-game-parity.test.ts` 新增 nn 分支对账（stage 0 seeds 1/2，maxTicks 3000，
   权重用 `tests/fixtures/student-golden.json` 的 params 落进临时目录的 `weights.json`）——已实测：旧
   `policy-input.ts` 下该用例**红**，修复后绿（≈0.3s）。
+- **追记（2026-09-19 16:40，push 后真多节点复验）**：`908f7cf` 推到 `origin/goal-nn` 后集内脏集合清空
+  （`{"dirty": []}`）⇒ 守卫放行远端升级：mac/a97 `restart-requested`、a95 首轮 `restart-failed` 但随即收敛，
+  self 本就 current ⇒ **4/6 节点同本机 `c78d48de`**（a96 agent 不可达、gcs 拒重启，属用户已裁定的环境事实，不追 6/6）。
+  12 局实跑（stage 0 seeds 1-12，`localSlots=0`）：**12/12 全落远端**（`provenance: node:mac=4, node:self=8`，
+  7.5s），逐局 outcome/ticks/kills 与**本机池完全相等**（4601/3167/6623/2113/2606/5580/3535/3527/7183/2531/5875/2794），
+  聚合也一致（`WIN RATE 33.3%`、`SCORE V7 suite=0.3621`）——跨两台不同机器验证，不再只是同机自证。

@@ -45,6 +45,10 @@ const statusBadge = (s: NodeHistoryRow['status'], okN: number, recentN: number) 
   }
 }
 
+/** 展示秒：仅正有限数渲染 `Ns`；null/undefined/旧 API 缺键 → `-`（防 undefineds）。 */
+const secCell = (v: number | null | undefined): string =>
+  typeof v === 'number' && Number.isFinite(v) ? `${v}s` : '-'
+
 const poolColumns: Col<NodeHistoryRow>[] = [
   {
     key: 'id',
@@ -133,14 +137,14 @@ const poolColumns: Col<NodeHistoryRow>[] = [
     label: '平均耗时',
     align: 'num',
     thTitle: '节点侧服务时长滑动平均（≤50 成功局）：接单→结果就绪，含冷启动，不含网络',
-    cell: (r) => (r.avgElapsedSec !== null ? `${r.avgElapsedSec}s` : '-'),
+    cell: (r) => secCell(r.avgElapsedSec),
   },
   {
     key: 'avgWallSec',
     label: '机侧墙钟',
     align: 'num',
     thTitle: '训练机派发→结算墙钟滑动平均（≤50 成功局）：含网络/异步轮询；与平均耗时并列，不覆盖',
-    cell: (r) => (r.avgWallSec !== null ? `${r.avgWallSec}s` : '-'),
+    cell: (r) => secCell(r.avgWallSec),
   },
   { key: 'lastOkTs', label: '最近成功', cell: (r) => r.lastOkTs || '-' },
   {
@@ -181,8 +185,7 @@ function rowExpand(r: NodeHistoryRow) {
       ) : (
         <div className="tc-muted">
           最近贡献轮 it{r.lastIter}（全局最新 it{r.globalMaxIt}） · 平均耗时{' '}
-          {r.avgElapsedSec !== null ? `${r.avgElapsedSec}s` : '-'} · 机侧墙钟{' '}
-          {r.avgWallSec !== null ? `${r.avgWallSec}s` : '-'}
+          {secCell(r.avgElapsedSec)} · 机侧墙钟 {secCell(r.avgWallSec)}
         </div>
       )}
       {r.lastError ? (

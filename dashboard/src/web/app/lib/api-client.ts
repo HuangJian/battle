@@ -63,7 +63,17 @@ export async function fetchPool(fresh = false, course = ''): Promise<PoolView> {
   const q = params.toString()
   const r = await fetch(`/api/pool${q ? `?${q}` : ''}`)
   if (!r.ok) throw new Error(`/api/pool HTTP ${r.status}`)
-  return (await r.json()) as PoolView
+  const raw = (await r.json()) as PoolView
+  // 旧服务端进程可能尚未带上 avgWallSec——归一成 null，避免 UI 渲染 "undefineds"。
+  const normRow = <T extends { avgWallSec?: number | null }>(row: T): T => ({
+    ...row,
+    avgWallSec: row.avgWallSec ?? null,
+  })
+  return {
+    ...raw,
+    nodes: (raw.nodes ?? []).map(normRow),
+    local: raw.local ? normRow(raw.local) : raw.local,
+  }
 }
 
 export async function fetchLog(

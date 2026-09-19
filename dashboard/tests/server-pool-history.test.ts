@@ -138,4 +138,14 @@ describe('pool-history wallSec 双口径（elapsedSec 节点服务时长 · wall
     expect(h.avgElapsedSec).toBe(2.1)
     expect(h.avgWallSec).toBe(5.4)
   })
+
+  it('展示层：undefined/null 墙钟不得渲染成 undefineds（旧 API 缺键防御）', () => {
+    // 复现 NodeStats.secCell 语义：仅正有限数渲染 Ns
+    const secCell = (v: number | null | undefined): string =>
+      typeof v === 'number' && Number.isFinite(v) ? `${v}s` : '-'
+    expect(secCell(undefined)).toBe('-')
+    expect(secCell(null)).toBe('-')
+    expect(secCell(Number.NaN)).toBe('-')
+    expect(secCell(5.4)).toBe('5.4s')
+  })
 })

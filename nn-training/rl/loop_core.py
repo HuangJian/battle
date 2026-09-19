@@ -312,6 +312,10 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 # yield：rollout 抢占集群 —— 关 evalboard 窗，在途 B/C 局停派新 seed。
                 self._evalboard_yield()
                 self._node_rollout_sec = None
+                # 每轮采集报告重置：volume continuous 若把本轮 combine 进上一轮
+                # _report，pure_collect 起点会被钉在历史波（§adopt_volume_report）。
+                self._report = {}
+                self._stream_meta = None
                 # M3（plan/remote-wire-remediation §5.2）：整轮上云开关。node 时本机
                 # **完全不采样**（也不预采/不补波），改由 _remote_iter 发 kind=iter job，
                 # 节点自己跑 rollout + PPO。eval 不动（仍在本地 hub 跑，§5.4）。
@@ -1265,8 +1269,14 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         args = self.args
         if self._stream_meta is not None:
             log("[volume] 流式路径不支持连续配额 v2（保持 stream 老语义）")
+            from rl.reports import adopt_volume_report
+
+            self._report = adopt_volume_report(None)
             return
         if int(getattr(args, "collect_only", 0) or 0):
+            from rl.reports import adopt_volume_report
+
+            self._report = adopt_volume_report(None)
             return
         import dist_common
         from rl.resume import settled_stage_totals
@@ -1366,11 +1376,12 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
             f"{len(stages) - len(unmet)}/{len(stages)} stats={stage_stats}"
         )
         self._volume_collected = collected_total
-        if combined:
-            if self._report:
-                self._report = combine_reports([self._report, combined])
-            else:
-                self._report = combined
+        # 只采纳本轮 batch 聚合结果；禁止 combine 进上一轮 _report
+        # （否则 pure_collect_sec = now − run_start 轮轮暴涨）。
+        # 本轮无 batch 也必须落到合法空 shape，否则 _log_report 读 games KeyError。
+        from rl.reports import adopt_volume_report
+
+        self._report = adopt_volume_report(combined)
         if self._volume_waves > 0 and self._report.get("pure_collect_sec") is not None:
             log(
                 f"[volume] it{it}: rollout 聚合 batches={self._report.get('rollout_collect_waves', self._volume_waves)} "
