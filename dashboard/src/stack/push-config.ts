@@ -10,8 +10,11 @@
  *  旧实现有第 ③ 条「回落本机 worker_server」：endpoint 留空且 config 无 ping 通节点时，
  *  自动把执行面改指本机 `workerServe` 伪 GPU 节点。实测代价（同日）：用户已填好云 endpoint
  *  （丢参 bug 见 `app.tsx:726`），却看到训练"正常"跑在本机——**故障被伪装成成功**。
- *  现在改为抛错，由控制台横幅呈现；本机回落只剩显式 opt-in（`allowLocal: true`，
- *  服务单测/离线诊断）。
+ *  **2026-09-19 起本机伪节点彻底退出控制台**（用户指令：「它只是用于 trainingloop 冒烟测试」）：
+ *  它不再是受管组件，也不再是可选执行面——「一键本机 push」这条能力连同 `allowLocal`
+ *  opt-in 一并删除（留着就是一条会把训练指向**死端点**的路径）。`local_push` 只剩**遗留标记**
+ *  一个作用：`pushTargetFromConfig` 把历史条目识别成「本机」并在卡片上说出来（看得见的坏
+ *  过静默的）。
  *
  *  之后 startPreset('push') 都不注入 REMOTE_PUSH_NODE（env 会强制 remote_token），由 Python
  *  `_gpu_push_nodes` 从 config 读节点（按 `courses.<课>.push_node_url` 过滤），authKey 以
@@ -20,7 +23,6 @@
 
 import { loadConfig, saveConfig } from '../core/config'
 import { httpOk } from '../core/net'
-import { slotPort } from '../core/slots'
 import type { NodeConf, RlConfig } from '../core/types'
 
 /** 稳定节点 id：同一 URL 复用同一 id（多课 N:1 共享时只改 authKey/enabled）。 */
@@ -65,13 +67,11 @@ export async function pingPushEndpoint(
   }
 }
 
-/** 本机回落节点的稳定 id（同 URL 复用同一条目）。 */
-const LOCAL_PUSH_NODE_ID = 'local-push'
-
 /** upsert **云** gpu_push 节点 + 课程 push_node_url（原 cfg 上改写，返回同一对象）。
  *
- *  `!n.local_push`：本机回落节点（`applyLocalPushNodeConfig` 写的）是独立条目——云 URL
- *  的写入绝不吃掉它，回落的写入也绝不吃掉用户填的云 URL（两种执行面随时互切）。 */
+ *  `!n.local_push`：历史遗留的本机伪节点条目（`local_push`，2026-09-15 那版回落写的；
+ *  写入器已于 2026-09-19 随「伪节点退出控制台」删除）是**独立条目**——云 URL 的写入绝不吃掉
+ *  它（那是别人的数据，删它得由操作员在节点面板里显式做）。 */
 export function applyPushNodeConfig(
   cfg: RlConfig,
   course: string,
@@ -101,66 +101,23 @@ export function applyPushNodeConfig(
   return cfg
 }
 
-/** upsert **本机** worker_server 回落节点 + 课程 push_node_url（2026-09-15）。
- *
- *  写入两条：`nodes[]` 的 local_push 条目（URL = 本机 workerServe，authKey = rl.remote_token
- *  —— 与 worker_server `--token` 同源）+ `courses.<课>.push_node_url`。后者是关键：Python
- *  `_gpu_push_nodes` 按它过滤，保证执行面**只有**本机 worker_server，不会串到云节点
- *  （否则本地一失败就静默烧云机 GPU）。
- *
- *  节点必须真的落 config（不能只注入 env）：`_gpu_push_nodes` 的 gpu_push 分支要求
- *  "push_node_url 能匹配到节点"，否则 job 会回落 pull（hub 不存在）而卡死。 */
-export function applyLocalPushNodeConfig(
-  cfg: RlConfig,
-  course: string,
-  url: string,
-  authKey: string,
-): RlConfig {
-  const nodes: NodeConf[] = Array.isArray(cfg.nodes) ? [...cfg.nodes] : []
-  const key = authKey.trim()
-  const idx = nodes.findIndex((n) => n.local_push)
-  const base: NodeConf = {
-    id: idx >= 0 ? nodes[idx]!.id || LOCAL_PUSH_NODE_ID : LOCAL_PUSH_NODE_ID,
-    url,
-    authKey: key,
-    concurrency: 1,
-    enabled: true,
-    gpu_push: true,
-    local_push: true,
-  }
-  if (idx >= 0) nodes[idx] = { ...nodes[idx], ...base }
-  else nodes.push(base)
-  cfg.nodes = nodes
-  cfg.courses = { ...cfg.courses }
-  cfg.courses[course] = { ...cfg.courses[course], push_node_url: url }
-  return cfg
-}
-
-/** 本机 worker_server 的 push 地址（槽位算术唯一来源；与 workerServeSpec 同端口）。 */
-export function localPushUrl(cfg: RlConfig, course: string): string {
-  return `http://127.0.0.1:${slotPort(cfg, course, 'push')}`
-}
-
 /** enabled 且 gpu_push 的节点（config 扫描；enabled 缺省视为 true）。
- *  **含**本机回落节点：它同样是真执行面（worker_server），复用门/健康探测都要看到它。 */
+ *  **含**遗留的 `local_push` 条目：它仍要在卡片的「执行面」徽章里可见（否则操作员看到的
+ *  是「训练正常」，而实际目标是一条没人服务的本机地址）。 */
 export function enabledGpuPushNodes(cfg: RlConfig): NodeConf[] {
   return (cfg.nodes ?? []).filter((n) => n.gpu_push && n.enabled !== false)
 }
 
 /** 遍历 enabled gpu_push，返回第一个 GET /ping 通的节点；全不通 → null。
  *
- *  `includeLocal` 缺省 **false**：本机回落节点（`local_push`）**不参与复用扫描**。
- *  理由（2026-09-15）：策略是「缺执行面就报错，不自动开本地」。但若 config 里残留一条
- *  上一轮回落写下的 `local_push` 且 `enabled:true`，它会被当普通候选命中 ⇒ 复用分支
- *  又静默把执行面指回本机（同一条缺陷的第二入口）。默认排除，只有显式 opt-in 才纳入。 */
+ *  **一律排除** `local_push` 遗留节点（不再有 opt-in）：策略是「缺执行面就响亮报错」，
+ *  而本机伪节点已经不由控制台提供（2026-09-19）——把它算作候选，就只会在复用时把执行面
+ *  指向一条没人服务的本机地址。 */
 export async function findHealthyGpuPushNode(
   cfg: RlConfig,
   timeoutMs = 5000,
-  opts: { includeLocal?: boolean } = {},
 ): Promise<NodeConf | null> {
-  const cands = enabledGpuPushNodes(cfg).filter(
-    (n) => opts.includeLocal === true || n.local_push !== true,
-  )
+  const cands = enabledGpuPushNodes(cfg).filter((n) => n.local_push !== true)
   for (const n of cands) {
     const url = String(n.url ?? '').trim()
     const key = String(n.authKey ?? '').trim()
@@ -179,7 +136,8 @@ export async function findHealthyGpuPushNode(
  *
  *  `courses.<课>.push_node_url` 是唯一指针（python `_gpu_push_nodes` 也按它过滤），
  *  再回到 `nodes[]` 认领它的那个节点，判定是本机回落节点还是云 GPU：
- *    local      = 指到 `local_push` 节点（本机 worker_server）
+ *    local      = 指到 `local_push` 节点（**历史遗留**的本机伪节点地址：控制台不再提供该执行面，
+ *                 卡片必须说出来，否则操作员看到的是「训练正常」而目标无人服务）
  *    cloud      = 指到普通 gpu_push 节点（云机）
  *    unresolved = 指向了一个 config 里不存在的 URL（python 侧「匹配 0 个」→ 回落 pull，
  *                 必须显式暴露：否则操作员看到的是「训练正常」）
@@ -213,66 +171,52 @@ export function pushTargetFromConfig(cfg: RlConfig, course: string): ConfiguredP
 export interface PushTarget {
   url: string
   /** 来源：manual=用户填的 endpoint（已 ping 通并回写）；config=复用 config 里 ping 通的
-   *  节点；local=**显式 opt-in**（`allowLocal:true`）的本机 worker_server 回落
-   *  （已回写 local_push 节点 + 课程 push_node_url）。生产路径只会有 manual/config——
-   *  缺执行面时抛错，不再自动产生 local。 */
-  source: 'manual' | 'config' | 'local'
-  /** 执行面是否就是**本机** worker_server（local 来源，或复用到的是 local_push 节点）。
-   *  调用方据此把 `workerServe` 排进启动顺序（它是受管组件，得由预设拉起/接管）。 */
-  viaLocalWorker: boolean
+   *  节点。缺执行面时**抛错**——没有第三条路（本机伪节点已退出控制台，2026-09-19）。 */
+  source: 'manual' | 'config'
 }
 
 /** 控制台 Push 启动前置：解析执行面并回写 rl-config。优先级：
  *  ① 用户填的 endpoint（ping 门 + upsert 云节点）；
- *  ② endpoint 留空 → config 里 enabled 且 ping 通的 gpu_push；
- *  ③ 都没有 → **响亮报错**（绝不自动回落本机执行面——那会把「云机连不上」伪装成训练正常）。
- *  `allowLocal: true` 是**显式 opt-in** 的本机回落，只服务单测/离线诊断。
+ *  ② endpoint 留空 → config 里 enabled 且 ping 通的 gpu_push（**不含**遗留 local_push）；
+ *  ③ 都没有 → **响亮报错**（绝不回落本机执行面——那会把「云机连不上」伪装成训练正常；
+ *     且本机伪节点自 2026-09-19 起只服务冒烟预演，不由控制台提供）。
  *  失败抛 Error（不写盘、不启动），由控制台横幅呈现。 */
 export async function configurePushEndpoint(
   course: string,
   endpoint: string,
   authKey: string,
-  opts: { allowLocal?: boolean } = {},
 ): Promise<PushTarget> {
   if (!course) throw new Error('Push 配置需要 course（先在顶部设置课程）')
-  const allowLocal = opts.allowLocal === true
   const cfg = loadConfig()
   const manual = (endpoint ?? '').trim()
   if (!manual) {
-    // 复用扫描**默认排除**本机回落节点（includeLocal 只在显式 opt-in 时开）——
-    // 否则 config 里一条残留的 enabled local_push 会让复用分支静默指回本机。
-    const hit = await findHealthyGpuPushNode(cfg, 5000, { includeLocal: allowLocal })
+    const hit = await findHealthyGpuPushNode(cfg, 5000)
     if (hit) {
       const url = String(hit.url).replace(/\/+$/, '')
       cfg.courses = { ...cfg.courses }
       cfg.courses[course] = { ...cfg.courses[course], push_node_url: url }
       saveConfig(cfg)
-      return { url, source: 'config', viaLocalWorker: hit.local_push === true }
+      return { url, source: 'config' }
     }
-    if (!allowLocal) {
-      // 缺执行面 = 响亮报错（2026-09-15 用户指令「就算云机连接不上，也不能直接开本地
-      // worker，横幅报错就好」）。**绝不静默回落本机**：那会把「云机连不上」伪装成
-      // 「训练正常」，操作员看到的是一切照旧，实际 PPO 跑在本机伪节点上。
-      const cands = enabledGpuPushNodes(cfg)
-        .map((n) => String(n.url ?? '').trim())
-        .filter(Boolean)
-      throw new Error(
-        'Push 执行面不可用：rl-config 里没有 enabled 且 GET /ping 通的 gpu_push 节点' +
-          (cands.length
-            ? `（候选 ${cands.length} 个：${cands.join(' / ')}）`
-            : '（config 里连候选节点都没有）') +
-          '。请确认云机 worker_server 在跑、cloudflared 隧道可达（HTTP 530 = 隧道无客户端）、' +
-          'auth key 与 worker_server --token 一致，或在启动弹窗直接填 endpoint 与 auth key。',
-      )
-    }
-    // 显式 opt-in 的本机回落（allowLocal: true）：执行面 = 本机 workerServe 组件。
-    const url = normalizePushUrl(localPushUrl(cfg, course))
-    saveConfig(applyLocalPushNodeConfig(cfg, course, url, String(cfg.rl?.remote_token ?? '')))
-    return { url, source: 'local', viaLocalWorker: true }
+    // 缺执行面 = 响亮报错（2026-09-15 用户指令「就算云机连接不上，也不能直接开本地
+    // worker，横幅报错就好」）。**绝不静默回落本机**：那会把「云机连不上」伪装成
+    // 「训练正常」，操作员看到的是一切照旧，实际 PPO 跑在本机伪节点上。
+    const cands = enabledGpuPushNodes(cfg)
+      .map((n) => String(n.url ?? '').trim())
+      .filter(Boolean)
+    throw new Error(
+      'Push 执行面不可用：rl-config 里没有 enabled 且 GET /ping 通的 gpu_push 节点' +
+        (cands.length
+          ? `（候选 ${cands.length} 个：${cands.join(' / ')}）`
+          : '（config 里连候选节点都没有）') +
+        '。请确认云机 worker_server 在跑、cloudflared 隧道可达（HTTP 530 = 隧道无客户端）、' +
+        'auth key 与 worker_server --token 一致，或在启动弹窗直接填 endpoint 与 auth key。' +
+        '（本机伪节点只服务冒烟预演，不由控制台提供——2026-09-19）',
+    )
   }
   const url = normalizePushUrl(manual)
   await pingPushEndpoint(url, authKey)
   applyPushNodeConfig(cfg, course, url, authKey)
   saveConfig(cfg)
-  return { url, source: 'manual', viaLocalWorker: false }
+  return { url, source: 'manual' }
 }

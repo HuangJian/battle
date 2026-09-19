@@ -43,9 +43,10 @@ export interface ComponentView {
 
 /** 本课 push 执行面的探测结果（慢快照；纯 config 解析 + 一次 `/ping` 直探）。 */
 export interface PushTargetProbe {
-  /** local = 本机 worker_server（local_push 节点）；cloud = 云 GPU 节点；
-   *  unresolved = 课程 `push_node_url` 指向 config 里不存在的节点（python 侧「匹配 0 个」
-   *  → 静默回落 pull，必须显式暴露）。 */
+  /** local = 历史遗留的**本机** worker_server 地址（`local_push` 节点；控制台自 2026-09-19
+   *  起不再提供这个执行面 —— 徽章必须把它说出来，否则显示的是「配置指向」而实际无人服务）；
+   *  cloud = 云 GPU 节点；unresolved = 课程 `push_node_url` 指向 config 里不存在的节点
+   *  （python 侧「匹配 0 个」→ 静默回落 pull，必须显式暴露）。 */
   kind: 'local' | 'cloud' | 'unresolved'
   url: string
   nodeId: string | null
@@ -53,7 +54,7 @@ export interface PushTargetProbe {
   healthy: boolean | null
 }
 
-/** 本课 push 执行面视图（2026-09-15）：trainer 的 job 现在推给谁——本机 worker_server
+/** 本课 push 执行面视图（2026-09-15）：trainer 的 job 现在推给谁——遗留的本机地址
  *  还是云 GPU。kind 由 config 解析（`push_node_url` → 认领节点），active = 本课 trainer
  *  正以 push 模式在跑（执行面此刻真的生效；false 时徽章是「配置指向」而非「正在用」）。 */
 export interface PushTargetView extends PushTargetProbe {

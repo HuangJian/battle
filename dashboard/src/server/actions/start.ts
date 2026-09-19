@@ -2,7 +2,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'fs'
 import path from 'path'
 import { loadConfig, validateCourseArg } from '../../core/config'
-import { httpOk, pidAlive, waitUntil } from '../../core/net'
+import { pidAlive, waitUntil } from '../../core/net'
 import { tmpLogsDir } from '../../core/paths'
 import { launchSpec } from '../../core/proc'
 import { clearAnyComponent, saveAnyComponent, scopeOf } from '../../core/registry'
@@ -12,8 +12,6 @@ import {
   lockPathFor,
   sharedHubUrl,
   sharedHubPort,
-  slotOf,
-  slotPort,
   validateCourseName,
 } from '../../core/slots'
 import type { Component, RlConfig } from '../../core/types'
@@ -29,8 +27,7 @@ import {
   supersedeLegacyInstances,
 } from '../../stack/hub'
 import { startLocalWorker } from '../../stack/local-worker'
-import { startLocalWorkerServer } from '../../stack/push'
-import { TRAINER_SERVE_ENTRY, trainerServeSpec, workerServeSpec } from '../../stack/specs'
+import { TRAINER_SERVE_ENTRY, trainerServeSpec } from '../../stack/specs'
 import { entryOf, markCloudHaltRecovered } from './cloud-halt'
 import { ConsoleState } from './console-state'
 import { restoreCourseModesNote } from './course-mode'
@@ -354,30 +351,6 @@ export async function startComponent(key: Component, ctx: StartCtx): Promise<Act
             : `local-worker 启动即退出 (PID ${r.pid})`,
           [...r.tail, ...taken],
         )
-      }
-      case 'workerServe': {
-        const course = ctx.course || 'smoke'
-        const prev = entryOf('workerServe', course)
-        // 幂等（与其它组件同规，2026-09-15）：已在运行则不动它。push 预设回落本机时
-        // 也会把 workerServe 排进顺序（复用路径下它本来就活着）——旧实现无条件 kill+重起，
-        // 会把正在跑 PPO job 的 server 当场打死。
-        if (prev?.pid && pidAlive(prev.pid))
-          return done(true, `本机伪 GPU 节点已在运行 (PID ${prev.pid}, ${prev.url ?? ''})`)
-        // 端口级兜底：未登记但在服务的 worker_server 同样不抢端口（不重起、不 bind 失败）。
-        const pushUrl0 = `http://127.0.0.1:${slotPort(cfg, course, 'push')}`
-        if (await httpOk(`${pushUrl0}/ping`, cfg.rl.remote_token, 3000))
-          return done(true, `本机 worker_server 已在服务 (${pushUrl0})`)
-        const { pushUrl, servePid } = await startLocalWorkerServer({ course, cfg, venv })
-        saveAnyComponent('workerServe', course, {
-          pid: servePid,
-          url: pushUrl,
-          entry: 'nn-training/remote_worker_serve.py',
-          course,
-          slot: slotOf(cfg, course),
-          log: workerServeSpec(cfg, venv, course).log,
-        })
-        monitorTouch()
-        return done(true, `本机伪 GPU 节点就绪: ${pushUrl}`)
       }
       case 'trainingLoop': {
         // 共享 trainer（R3-5）：**一个进程服务所有课程**，BC 与 RL 走同一条路。

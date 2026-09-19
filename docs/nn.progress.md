@@ -4,6 +4,82 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §91 本机伪 GPU 节点退出控制台：只剩冒烟预演自起自停（2026-09-19）
+
+**一句话**：`workerServe`（`remote_worker_serve`）不再是被受管组件——没有卡片、没有账本键、
+没有日志页入口、没有端口兜底清场、没有「回落本机」的 push 预设；它此后只是 trainingLoop
+冒烟预演的一次性配角（`stack/push.ts` 起，跑完/失败即杀）。
+
+用户口径：「workerServe 伪节点直接从 dashboard 去掉，**它只是用于 trainingloop 冒烟测试**，
+用户只关心冒烟是否通过，不会手动去开启/停止伪节点。」
+
+### 为什么这不是「换个轴」而是「退出去」
+
+R3-6 曾把它的收敛列为「节点轴」(否决④) 的延后项。但它的语义轴其实是**冒烟预演的临时件**：
+生命周期 20s、一次预演一份、与任何 GPU 身份无关。给它造节点轴账本 = 给一个不该常驻的东西
+一个常驻身份（而它常驻的唯一后果是把「服务面 · 单例」卡行多塞一个用户不想要的开关）。
+
+### 删了什么（受管面，逐处）
+
+| 处 | 内容 |
+|---|---|
+| `core/types.ts` | `Component` 键、`Registry.workerServes`、`LegacyFlatRegistry` 项 |
+| `core/registry.ts` | `COURSE_COMPONENTS`/`PLURAL`/迁移名单里的 `workerServe`（旧 `workerServes` 表已无读者） |
+| `stack/specs.ts` | `WORKER_SERVE_ENTRY` + `workerServeSpec`（ProcSpec 整个删掉） |
+| `server/actions/start.ts` | `case 'workerServe'`（含幂等/端口兜底/登记） |
+| `server/actions/stop.ts` | 端口映射表里的 push 端口项 |
+| `server/actions/smoke.ts` | 冒烟分支 |
+| `server/actions/restart.ts` | `restartSpecFor` 分支 |
+| `server/actions/labels.ts` · `server/api/component-meta.ts`（`ALL_COMPONENTS`/日志/健康端口）· `server/api/logs.ts`（`LOG_NAME_MATCH`） | 展示与解析面 |
+| `web/view/component-groups.ts` | `NODE_FACE_COMPONENTS` 例外名单删除（它存在的唯一理由就是这个键）；`ComponentFamilyId` 回两族 |
+| `web/app/panels/LogNavCard.tsx` | 不再 filter（受管组件全集 = 日志页入口全集） |
+
+### 删了什么（能力面）：「一键本机 push」
+
+`applyLocalPushNodeConfig` / `localPushUrl` / `configurePushEndpoint` 的 `allowLocal` opt-in /
+`findHealthyGpuPushNode` 的 `includeLocal` / `PushTarget.viaLocalWorker` / `preset.ts` 的
+`['selfNode','workerServe','trainingLoop']` 顺序分支。理由：执行面解析在 2026-09-15 就把
+「缺 gpu_push → 自动回落本机」改成了**响亮报错**（回落会把「云机连不上」伪装成「训练正常」），
+剩下的 opt-in 只服务单测；而伪节点不再是受管组件之后，这条路径唯一的效果就是**把课程 push
+目标指向一条没人服务的本机地址**——留着即静默失败通道。`preset.ts` 也从此**到不了** `local`
+来源（类型上只剩 manual/config 两档）。
+
+### 保留了什么（读面识别 + 冒烟）
+
+- `NodeConf.local_push` 标记与 `pushTargetFromConfig` 的 `kind: 'local'`：历史配置里残留的本机
+  条目与指它的 `courses.<课>.push_node_url` 必须**看得见**（看得见的坏过静默的）；复用扫描
+  一律排除它（没有 opt-in 了）。
+- 冒烟预习侧 `stack/push.ts`：直接 `spawnBg`（不再造 ProcSpec），仍按课程取槽位 push 端口与
+  per-course work 目录（**双课同冒**不得互踩），20s 未就绪则**先杀掉自己起的进程**再抛错
+  （旧版对 spawn 后的 `launchSpec` 失败没有兜底，会留一个没人认领的孤儿）。
+- 训练侧只改一句引导日志：`remote/worker_server.py` 的 `CodeChangedError` 指引从「重起
+  workerServe」改成「重跑 `remote_worker_serve`」。
+
+### 回归（三把防回流尺子）
+
+`tests/push-config.test.ts`：原「本机回落」describe 重写为「没有写入口，只有识别面」——
+① **受管组件全集**（`ALL_COMPONENTS`/`COURSE_COMPONENTS`/`registryTriples`）里没有它；
+② **启动面与 spec 面**（start/preset/smoke/specs 源码）里没有它，且 `preset.ts` 的 push 顺序
+只剩 `['selfNode','trainingLoop']`；③ **冒烟侧确实自起自停**（`stack/push.ts` 里有
+`remote_worker_serve` 与 `killPid`）。另：`server-api-logs`（组件日志映射改 5 个）·
+`server-api-state-view`（快照 5 组件）· `single-hub-tunnel`（所有课程组件的槽都归 `''`）·
+`training-multi-course`（伪节点仍按课程隔离端口/work，但不再是 spec）· `web-component-groups`
+（全组件=卡行全集）· `web-components`（SSR 去掉节点面例外）· `training-port-reclaim`（`ownsResource`
+只剩 hub/隧道）同步真值。
+
+### 门禁
+
+| 门 | 结果 |
+|---|---|
+| nn python gate（ruff + mypy + pytest xdist） | ✔ 全绿 |
+| `cd dashboard && bun run typecheck` / `bun run test` | ✔ 干净 / **651 pass / 0 fail** |
+| 三份 bundle（`bun dashboard/src/server/build.ts`） | ✔ all bundles ok |
+| 根 `bun run check` | ✔ **1868（1864 pass / 4 skip / 0 fail）** |
+
+记录：`DECISIONS.md §2026-09-19-goalnn-retire-local-fake-node` · plan §5.2 R3-7 · memory。
+
+---
+
 ## §90 本机 PPO worker 也不绑课程：一个进程领所有课程的活（2026-09-19）
 
 **一句话**：`localWorker` 从「每课一进程」收敛为**共享槽单进程**——它和云端 worker 逐字同语义：

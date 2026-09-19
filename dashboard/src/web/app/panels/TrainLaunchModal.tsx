@@ -258,7 +258,7 @@ export function TrainLaunchModal({
           <div className="tc-push-creds" style={{ display: 'grid', gap: 8, marginTop: 4 }}>
             <label className="tc-line" style={{ display: 'grid', gap: 4 }}>
               <span className="tc-muted tc-small">
-                endpoint（留空 = 复用 config 可用 gpu_push，否则回落本机 worker_server）
+                endpoint（留空 = 复用 config 里 ping 通的 gpu_push）
               </span>
               <input
                 type="url"
@@ -287,8 +287,8 @@ export function TrainLaunchModal({
             ) : (
               <p className="tc-muted tc-small" style={{ margin: 0 }}>
                 云机自起 cloudflared；本机不启 hub-server。留空先检 config 中 enabled gpu_push 的
-                /ping，通了直接启动；都没有则回落本机 worker_server（自动拉起 workerServer
-                组件并把本课 push 目标指到本机，不动你配置里的云节点）。
+                /ping，通了直接启动；都没有则**响亮报错**（不回落本机——本机伪节点只服务冒烟
+                预演，不由控制台拉起）。
               </p>
             )}
           </div>

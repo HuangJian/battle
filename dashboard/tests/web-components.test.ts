@@ -185,7 +185,7 @@ describe('§361：icon 复制键 / cloudflared endpoint 截断与复制 / local 
   it('组件卡分族（R3-3）：服务面（单例角色）在前、课程面在后，族内顺序稳定', () => {
     // scope 由服务端按账本槽位规则填（这里照抄真值：selfNode 单例；hub / 隧道 / **trainer** /
     // **本机 worker** 共享——后两者分别自 2026-09-19 的 R3-5 与共享 worker 收敛起，各一个进程
-    // 服务所有课程；workerServe 按课程但走节点行）。
+    // 服务所有课程；本机伪节点同日退出受管组件）。
     // 另携一个**合成**的课程面键：当前已无按课程的卡片组件，而这一族的渲染路径仍要在 SSR 上
     // 被真实走过（它是 scope 的函数，不是名单）。
     const scopes: Record<string, string> = {
@@ -194,7 +194,6 @@ describe('§361：icon 复制键 / cloudflared endpoint 截断与复制 / local 
       cloudflared: 'shared',
       trainingLoop: 'shared',
       localWorker: 'shared',
-      workerServe: 'course',
       someCourseThing: 'course',
     }
     // 输入故意乱序：顺序必须是**分组算出来的**，不是渲染顺序碰巧
@@ -202,7 +201,6 @@ describe('§361：icon 复制键 / cloudflared endpoint 截断与复制 / local 
       'localWorker',
       'someCourseThing',
       'cloudflared',
-      'workerServe',
       'trainingLoop',
       'hubServer',
       'selfNode',
@@ -252,8 +250,6 @@ describe('§361：icon 复制键 / cloudflared endpoint 截断与复制 / local 
     // theme.css，类名本身也会出现。
     expect(html.match(/class="tc-cc__scope tc-cc__scope--shared"/g)).toHaveLength(4)
     expect(html.match(/class="tc-cc__scope tc-cc__scope--singleton"/g)).toHaveLength(1)
-    // 节点面组件（worker_server）不进卡片行：它渲染在节点行，两个入口 = 混淆
-    expect(html).not.toContain('>workerServe<')
   })
 
   it('未配置 push 目标 → 卡片不出徽章', () => {

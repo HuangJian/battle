@@ -13,36 +13,21 @@
  *  ★ **成员资格只由 `ComponentView.scope` 决定**（服务端按 `core/registry.componentScope` 填）。
  *  这里**不写**「哪些 key 属于哪一族」的名单——名单一旦与账本槽位规则漂开，症状是某个组件从
  *  UI 上**消失**（而它还在被启动、被监督、被冒烟），且读代码的人只看到一行 filter、不知所为何来。
- *  本模块只声明：**族 → 标题/说明**、**族内化妆顺序**、以及 `NODE_FACE_COMPONENTS` 这一个
- *  **显式例外**（渲染在节点行的组件）。
+ *  本模块只声明：**族 → 标题/说明** 与 **族内化妆顺序**。
+ *
+ *  （旧的 `NODE_FACE_COMPONENTS = ['workerServe']` 例外名单已随「本机伪节点退出受管组件」
+ *  在 2026-09-19 删除：`worker_server` 此后只是**节点登记表里的数据**（`nodes[]` 的
+ *  gpu_push / local_push 条目）与节点行，不再是账本里的受管组件 ⇒ 不需要第二份名单。）
  */
 
 import type { ComponentScope, ComponentView } from './console-types'
 
-/** 族标识（`node` 族不渲染在组件卡行，见 `NODE_FACE_COMPONENTS`）。
- *
- *  ★ 本文件在**客户端** bundle 里：别写出未加引号的 `node:` 键（`{ node: … }`）——构建期的
- *  禁词门禁把 `node:` 当「引入了 node 内置模块」（`server/build.ts` 的 FORBIDDEN），bundle 会红。
- *  2026-09-19 实际踩到：`Record<ComponentFamilyId, …>` 里那个 `node: []` 就让三份 bundle 全挂。
- */
-export type ComponentFamilyId = 'service' | 'course' | 'node'
+/** 族标识。★ 本文件在**客户端** bundle 里：别写出未加引号的 `node:` 键（`{ node: … }`）——
+ *  构建期的禁词门禁把 `node:` 当「引入了 node 内置模块」（`server/build.ts` 的 FORBIDDEN）。
+ *  2026-09-19 实际踩到：`Record<ComponentFamilyId, …>` 里那个 `node: []` 就让三份 bundle 全挂。 */
+export type ComponentFamilyId = 'service' | 'course'
 
-/** 渲染在**节点行**（`NodePills` / `WorkerRegistry`）而不是组件卡行的组件。
- *
- *  `worker_server` 的语义轴是**节点/GPU 身份**（它的 id / url / concurrency 都是节点的，
- *  hub 的 push 派发与竞速也按节点算），而账本键今天仍按课程——卡片行再渲染一份，就会与节点行
- *  出现「同一件事两个入口」（而两个入口的启停按钮语义不同：一个起本课伪节点，一个起真 GPU）。
- *
- *  声明成**数据**而不是面板里的一行 `filter`：静默过滤会让「有这个受管组件」这件事从 UI 上
- *  消失。它照样能被预设拉起、能被停、能被冒烟 —— 读面必须至少**显式**说不渲染它、以及为什么。
- */
-export const NODE_FACE_COMPONENTS: readonly string[] = ['workerServe']
-
-/** 族元数据（标题上屏；hint 是组标题的悬停/副标题——它回答「这一族的键是什么」）。
- *
- *  只有**会渲染成组**的两族有元数据：`'node'` 族是词汇（`NODE_FACE_COMPONENTS` 的注脚），
- *  它在节点行渲染、没有组标题。给它编一份用不上的标题，只会让人以为「某处会画这一族」。
- */
+/** 族元数据（标题上屏；hint 是组标题的悬停/副标题——它回答「这一族的键是什么」）。 */
 export const FAMILY_META: Record<'service' | 'course', { title: string; hint: string }> = {
   service: {
     title: '服务面 · 单例',
@@ -63,12 +48,11 @@ const ORDER: Record<'service' | 'course', readonly string[]> = {
   // → trainer（消费 hub 的作业队列、服务所有课程）→ 本机 worker（消费同一份队列里的活）。
   service: ['selfNode', 'hubServer', 'cloudflared', 'trainingLoop', 'localWorker'],
   // 课程面：**当前空**（2026-09-19 收敛完成：selfNode 单例，hub / 隧道 / trainer / 本机 worker
-  // 四条共享，workerServe 走节点行 —— 于是 `cardFamilies` 只渲染服务面一组，这不是坏了）。
+  // 四条共享，本机伪节点退出受管组件 —— 于是 `cardFamilies` 只渲染服务面一组，这不是坏了）。
   // `course` 族本身保留：它是 scope 的函数，日后真出现按课程的卡片会自然落进去，不必改代码。
-  // 这里留着 workerServe 只是化妆顺序上的历史位置——它实际渲染在节点行。
   // 注：trainer（R3-5）与本机 worker（2026-09-19）都已收敛为共享进程 ⇒ 属于**服务面**，
   // 不在此列（ORDER 只是化妆顺序：真成员资格由 `scope` 决定，写错这里不会让组件错族）。
-  course: ['workerServe'],
+  course: [],
 }
 
 const FAMILY_OF_SCOPE: Record<ComponentScope, 'service' | 'course'> = {
@@ -98,10 +82,7 @@ function sortByOrder(rows: ComponentView[], order: readonly string[]): Component
  */
 export function cardFamilies(components: readonly ComponentView[]): ComponentFamilyView[] {
   const buckets: Record<'service' | 'course', ComponentView[]> = { service: [], course: [] }
-  for (const c of components) {
-    if (NODE_FACE_COMPONENTS.includes(c.key)) continue
-    buckets[FAMILY_OF_SCOPE[c.scope ?? 'course']].push(c)
-  }
+  for (const c of components) buckets[FAMILY_OF_SCOPE[c.scope ?? 'course']].push(c)
   const out: ComponentFamilyView[] = []
   for (const id of ['service', 'course'] as const) {
     if (buckets[id].length === 0) continue

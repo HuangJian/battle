@@ -190,7 +190,8 @@ export interface PushWorkerView {
   url: string
   enabled: boolean
   concurrency: number
-  /** 本机回落节点（rl-config `local_push`）：与云节点并存，可单独移除。 */
+  /** 历史遗留的**本机**伪节点条目（rl-config `local_push`；写入器已于 2026-09-19 删除）：
+   *  与云节点并存，可单独移除——遗留它就等于留一条会把执行面指向本机的记录，故显式标记。 */
   local: boolean
   /** 面板直探 `{url}/ping`（worker_server 的 `/ping`）：null = 未探（停用）。 */
   online: boolean | null

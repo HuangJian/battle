@@ -16,7 +16,6 @@ import {
   localWorkerSpec,
   selfNodeSpec,
   trainerServeSpec,
-  workerServeSpec,
 } from '../../stack/specs'
 
 // ────────────────────────── 变更检测重启（监督器回调） ──────────────────────────
@@ -56,8 +55,6 @@ export function restartSpecFor(key: Component, course = ''): ProcSpec | null {
         return null
       }
       return key === 'hubServer' ? hubServerSpec(cfg) : cloudflaredSpec(cfg, entry)
-    case 'workerServe':
-      return workerServeSpec(cfg, venv, c)
     // 共享本机 worker（2026-09-19）：一个进程服务所有课程，spec 与**课程无关**
     // （领到哪门课的 job 就干哪门课的活）——所以重建就是重建同一份 spec。
     case 'localWorker':

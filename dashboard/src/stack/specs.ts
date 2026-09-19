@@ -12,7 +12,7 @@ import { CONFIG_PATH, LOG_DIR, NN_TRAINING, REPO_ROOT } from '../core/paths'
 import { httpOk, pidAlive, portListen } from '../core/net'
 import { entryForCourse, loadRegistry } from '../core/registry'
 import { agentSentinels, pySentinels } from '../core/sentinels'
-import { sharedHubUrl, sharedHubPort, sharedTunnelMetricsPort, slotPort } from '../core/slots'
+import { sharedHubUrl, sharedHubPort, sharedTunnelMetricsPort } from '../core/slots'
 import { portOwnedBy } from '../core/proc'
 import { resolveVenvPython } from '../core/venv'
 import { COMPONENT_KILL_TREE, normalizeRaceMode } from '../core/types'
@@ -231,8 +231,8 @@ export const LOCAL_WORKER_ENTRY = 'nn-training/remote_worker.py'
  *  单一 work 目录与日志）；「这门课的 worker」这个归属只存在于旧账本的每课条目里（启动时
  *  被换代接管收掉）。
  *
- *  语义注意：push（worker_server）不在这里——push 模式的执行面就是既有 `workerServe`
- *  组件（同一台机器两个模式各占半边，不重复实现）。 */
+ *  语义注意：push（worker_server）不在这里——push 模式的执行面是**云机** worker_server
+ *  （经隧道，控制台不拉起本机伪节点；后者只服务冒烟预演，见 `stack/push.ts`）。 */
 export function localWorkerSpec(
   cfg: RlConfig,
   venv: { python: string; sitePackages: string },
@@ -282,47 +282,8 @@ export function localWorkerSpec(
   }
 }
 
-// ────────────────────────── worker_server（本机伪 GPU 节点） ──────────────────────────
-
-export const WORKER_SERVE_ENTRY = 'nn-training/remote_worker_serve.py'
-
-export function workerServeSpec(
-  cfg: RlConfig,
-  venv: { python: string; sitePackages: string },
-  course = '',
-): ProcSpec {
-  const pushPort = slotPort(cfg, course, 'push')
-  const pushUrl = `http://127.0.0.1:${pushPort}`
-  // work 目录 per-course（Q9：硬编码单值在双课冒烟时会让两个伪节点互相踩 payload）；
-  // 无课程沿用旧路径（默认行为零变化）。
-  const workDir = course ? `tmp/remote-worker-serve-${course}` : 'tmp/remote-worker-serve'
-  return {
-    key: 'workerServe',
-    name: 'worker_server (本机伪 GPU 节点)',
-    course,
-    cmd: [
-      venv.python,
-      '-u',
-      '-m',
-      'remote_worker_serve',
-      '--port',
-      String(pushPort),
-      '--token',
-      cfg.rl.remote_token,
-      '--work',
-      workDir,
-    ],
-    cwd: NN_TRAINING,
-    env: { PYTHONPATH: `${venv.sitePackages}${path.delimiter}${NN_TRAINING}` },
-    log: path.join(course ? courseLogDir(course) : LOG_DIR, 'remote-worker-serve.log'),
-    healthy: () => httpOk(`${pushUrl}/ping`, cfg.rl.remote_token, 3000),
-    // 就绪归属：push 端口上的旧 worker_server（僵尸）也会答 /ping，而新实例拿不到
-    // 端口实例锁时会**响亮拒启**（这是有意的，不回收在跑 PPO job 的 worker）——
-    // 不核归属就会把「旧实例在服务」记成「重启成功」。
-    ownsResource: (pid) => portOwnedBy(pid, pushPort),
-    sentinels: pySentinels(WORKER_SERVE_ENTRY, 'nn-training/remote/worker_server.py'),
-  }
-}
+// ★ 本机伪 GPU 节点（`remote_worker_serve`）**没有 ProcSpec**（2026-09-19 用户指令）：
+//   它不是受管组件，只服务 trainingLoop 冒烟预演，由预演自起自停（`stack/push.ts`）。
 
 // ────────────────────────── BcLoop（BC 编排器，2026-09-13） ──────────────────────────
 

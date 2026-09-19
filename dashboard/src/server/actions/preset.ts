@@ -20,9 +20,9 @@ import { stopComponent } from './stop'
 
 export interface PresetOpts {
   /** Push：worker_server / cloudflared endpoint。留空 = 复用 rl-config 中 enabled 且 ping 通的
-   *  gpu_push（含本机回落节点）；都没有 → 回落本机 worker_server（一键本机 push，2026-09-15）。 */
+   *  gpu_push（**排除**历史遗留的本机回落节点）；都没有 → **响亮报错**（不自动回落本机）。 */
   pushEndpoint?: string
-  /** Push：worker_server Bearer token（显式填写时必填；复用/回落时用节点 authKey·rl.remote_token）。 */
+  /** Push：worker_server Bearer token（显式填写时必填；复用时用节点 authKey）。 */
   pushAuthKey?: string
   /** T7：远端连败是否 opt-in 降级本机 PPO（默认 false）。 */
   remoteDegrade?: boolean
@@ -43,9 +43,9 @@ export interface PresetOpts {
  *  pull = selfNode→hubServer→trainer（云机 poll 领取；hub 地址写成本机 tailnet IP，
  *         **不自动拉 cloudflared**——2026-09-16 起，隧道只在你单独点它时才起）；
  *  push = （执行面解析 + 回写 rl-config）→ selfNode→trainer
- *         （云机自起 cloudflared；hub 直推 code.zip/job，**不启本地 hubServer/cloudflared**）；
- *         执行面回落本机时（config 无可用 gpu_push）多一步 `workerServe` —— 本机
- *         worker_server 作为 push 接收端（与 localWorker 共用同一份 worker 代码）。
+ *         （云机自起 cloudflared；hub 直推 code.zip/job，**不启本地 hubServer/cloudflared**）。
+ *         执行面是**云机** worker_server（经隧道）或用户在弹窗填的 endpoint——本机伪 GPU 节点
+ *         **不在受管组件里**（2026-09-19）：它只服务冒烟预演，由预演自起自停。
  *  local = hubServer→localWorker→trainer（本机 worker poll 本机 hub——worker 与
  *          trainer 两个进程，可各自随时启停；语义与云机 pull 完全一致）。
  *  任一步失败即中断（已完成的组件保留，页面可单独停止）。 */
@@ -79,18 +79,16 @@ export async function startPreset(
       })
     }
     let pushNote = ''
-    let viaLocalWorker = false
     if (mode === 'push') {
-      // 执行面解析（ping 门 / 复用 config / 本机回落）+ 必要时回写 rl-config ——
+      // 执行面解析（ping 门 / 复用 config）+ 必要时回写 rl-config ——
       // 失败抛 ActionError，**绝不启动** trainingLoop。
       const t = await configurePushEndpoint(course, opts.pushEndpoint ?? '', opts.pushAuthKey ?? '')
-      viaLocalWorker = t.viaLocalWorker
+      // 只剩两条路（缺执行面在 configurePushEndpoint 里就抛错了）：用户填的 endpoint / 复用
+      // config 里 ping 通的云节点。「回落本机伪节点」已于 2026-09-19 删除（它只服务冒烟预演）。
       pushNote =
-        t.source === 'local'
-          ? `; 无可用 gpu_push → 回落本机 worker_server (${t.url})，已把本课 push 目标指到本机；无本地 hub-server/cloudflared`
-          : t.source === 'config'
-            ? `; 复用 rl-config gpu_push (${t.url}) 已 ping 通；无本地 hub-server/cloudflared`
-            : `; push endpoint 已验证并回写 rl-config (${t.url})；无本地 hub-server/cloudflared`
+        t.source === 'config'
+          ? `; 复用 rl-config gpu_push (${t.url}) 已 ping 通；无本地 hub-server/cloudflared`
+          : `; push endpoint 已验证并回写 rl-config (${t.url})；无本地 hub-server/cloudflared`
     }
     // pull **不再自动拉 cloudflared**（2026-09-16）：云机与本机组网后用 tailnet 直连
     // 本课 hub 即可。理由不是"少一个组件"——隧道回源会把**所有**云端流量归成
@@ -114,9 +112,7 @@ export async function startPreset(
       mode === 'pull'
         ? ['selfNode', 'hubServer', 'trainingLoop']
         : mode === 'push'
-          ? viaLocalWorker
-            ? ['selfNode', 'workerServe', 'trainingLoop']
-            : ['selfNode', 'trainingLoop']
+          ? ['selfNode', 'trainingLoop']
           : ['hubServer', 'localWorker', 'trainingLoop']
     // 离开 local：清掉上一轮 local 预设留下的 localWorker（进程 + 登记）。否则切到 pull/push
     // 后卡片仍亮绿点——操作员以为「未启动却在跑」（2026-09-16 用户反馈）。

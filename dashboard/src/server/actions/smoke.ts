@@ -4,7 +4,7 @@ import path from 'path'
 import { loadConfig } from '../../core/config'
 import { httpOk, pidAlive } from '../../core/net'
 import { LOG_DIR, REPO_ROOT } from '../../core/paths'
-import { sharedHubPort, slotPort } from '../../core/slots'
+import { sharedHubPort } from '../../core/slots'
 import type { Component } from '../../core/types'
 import { hubServerHealthy } from '../../stack/hub'
 import { rolloutSmoke, selfNodeSmoke, type SmokeItem, summarizeSmoke } from '../../stack/smoke'
@@ -63,15 +63,6 @@ export async function smokeComponent(key: Component, ctx: StartCtx): Promise<Act
           fatal: false,
           detail: ping ? undefined : 'edge 在线但出网劣化，或隧道不可达',
         })
-        break
-      }
-      case 'workerServe': {
-        const ping = await httpOk(
-          `http://127.0.0.1:${slotPort(cfg, ctx.course, 'push')}/ping`,
-          cfg.rl.remote_token,
-          3000,
-        )
-        items.push({ name: '本机伪 GPU 节点 /ping', passed: ping, fatal: false })
         break
       }
       case 'localWorker': {

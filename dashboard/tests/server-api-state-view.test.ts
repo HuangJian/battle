@@ -14,11 +14,13 @@ import os from 'os'
 import path from 'path'
 
 describe('console/api.buildStateView', () => {
-  it('快照包含六个组件（含 2026-09-15 独立出来的 localWorker）、节点表与模式区块', async () => {
+  it('快照包含五个受管组件（含 2026-09-15 独立出来的 localWorker）、节点表与模式区块', async () => {
     const s = await api.buildStateView()
     const keys = s.components.map((c) => c.key) as string[]
+    // 本机伪节点（workerServe）2026-09-19 已退出受管组件：它只服务 trainingLoop 冒烟预演，
+    // 由预演自起自停（没有卡片、账本、日志页入口）。
     expect(keys.sort()).toEqual(
-      ['cloudflared', 'hubServer', 'localWorker', 'selfNode', 'trainingLoop', 'workerServe'].sort(),
+      ['cloudflared', 'hubServer', 'localWorker', 'selfNode', 'trainingLoop'].sort(),
     )
     for (const c of s.components) {
       expect(['running', 'stopped', 'exited']).toContain(c.status)

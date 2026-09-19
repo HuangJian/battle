@@ -35,7 +35,6 @@ import {
   hubServerSpec,
   resolveCfTunnel,
   trainingLoopSpec,
-  workerServeSpec,
 } from '../src/stack/specs'
 import {
   entryForCourse,
@@ -168,18 +167,16 @@ describe('W1 双课程 spec 隔离', () => {
     }
   })
 
-  it('两门课程的 worker_server 端口与 work 目录互不相同', () => {
+  it('本机伪节点（冒烟预演专用）仍按课程隔离端口与 work 目录', () => {
+    // 它 2026-09-19 退出了受管组件（没有 ProcSpec/账本键/卡片，只服务 trainingLoop 冒烟
+    // 预演）——但**双课同冒**这条约束还在：两门课的预演同时跑时，伪节点不得互踩端口/payload。
+    const src = readFileSync(path.join(DASHBOARD_ROOT, 'src', 'stack', 'push.ts'), 'utf-8')
+    expect(src).toContain("slotPort(ctx.cfg, ctx.course, 'push')")
+    expect(src).toContain('tmp/remote-worker-serve-${ctx.course}')
+    expect(src).not.toContain('workerServeSpec')
+    // 端口本身也确实按课程分开（槽位算术，唯一来源 core/slots）
     const cfg = dualCourseCfg()
-    const venv = { python: 'python', sitePackages: 'sp' }
-    const a = workerServeSpec(cfg, venv, 'course-a')
-    const b = workerServeSpec(cfg, venv, 'course-b')
-    expect(cmdPort(a)).not.toBe(cmdPort(b))
-    expect(a.log).not.toBe(b.log)
-    const workDir = (spec: { cmd: string[] }) => {
-      const i = spec.cmd.indexOf('--work')
-      return i < 0 ? null : spec.cmd[i + 1]
-    }
-    expect(workDir(a)).not.toBe(workDir(b))
+    expect(slotPort(cfg, 'course-a', 'push')).not.toBe(slotPort(cfg, 'course-b', 'push'))
   })
 
   it('两门课程的锁文件名互不相同（无课程沿用旧文件名，默认行为零变化）', () => {

@@ -9,10 +9,12 @@ export interface NodeConf {
   enabled: boolean
   /** GPU push 节点（DECISIONS §340 补充 4：URL 指向其 worker_server 隧道）。 */
   gpu_push?: boolean
-  /** **本机** worker_server 回落节点（2026-09-15）：endpoint 留空且 config 里没有任何
-   *  ping 通的 gpu_push 时，控制台 push 预设把本课 push 目标改指本机的 `workerServe`
-   *  组件（`http://127.0.0.1:<push 端口>`）。与云节点**并存**：`applyPushNodeConfig` 只
-   *  认非本机节点，回落也绝不覆盖用户填的云 URL（两种节点可随时互相切换）。 */
+  /** **本机** worker_server 回落节点（2026-09-15；2026-09-19 起为 legacy 标记）。
+   *
+   *  控制台**不再**拉起本机伪节点（`workerServe` 已从受管组件里剔除——它只服务训练冒烟
+   *  预演，由预演自起自停），也不再把它当可选执行面（写入器一并删除）。此标记只剩一个作用：
+   *  `pushTargetFromConfig` 把历史遗留的 `local_push` 条目识别成「本机」并在卡片上说出来
+   *  （看得见的坏过静默的）。任何时候都**不会被自动复用**：`findHealthyGpuPushNode` 一律排除。 */
   local_push?: boolean
 }
 
@@ -126,13 +128,7 @@ export interface RlConfig {
 }
 
 /** 受管组件（registry 分文件账本的键）。 */
-export type Component =
-  | 'selfNode'
-  | 'hubServer'
-  | 'cloudflared'
-  | 'localWorker'
-  | 'trainingLoop'
-  | 'workerServe'
+export type Component = 'selfNode' | 'hubServer' | 'cloudflared' | 'localWorker' | 'trainingLoop'
 
 /** 单组件登记条目（PID 账本 + 可选元数据）。 */
 export interface RegistryEntry {
@@ -141,8 +137,9 @@ export interface RegistryEntry {
   entry?: string
   course?: string
   /** 槽位（§1.4 重建契约：重启时必须知道自己占哪槽）。
-   *  **共享组件恒 0/缺省**（hubServer / cloudflared / trainingLoop / localWorker 的实例不属
-   *  任何单门课——判据 `registry.componentScope`）；只有按课程的 workerServe 用它推端口。 */
+   *  **一切受管组件都恒 0/缺省**（hubServer / cloudflared / trainingLoop / localWorker 的实例
+   *  不属任何单门课——判据 `registry.componentScope`）；槽位算术如今只服务**课程配置**
+   *  （`courses.<课>.slot` → push 端口），不再用于受管进程。 */
   slot?: number
   url?: string
   log?: string
@@ -178,7 +175,6 @@ export interface Registry {
   /** per-course 键（P1b 起唯一写入路径）。 */
   hubServers?: Record<string, RegistryEntry>
   cloudflareds?: Record<string, RegistryEntry>
-  workerServes?: Record<string, RegistryEntry>
   localWorkers?: Record<string, RegistryEntry>
   trainingLoops?: Record<string, RegistryEntry>
 }
@@ -186,7 +182,7 @@ export interface Registry {
 /** 旧扁平账本键（P1–P4 的历史形状）——**仅**供 `registry.ts` 的一次性搬迁读取（R2）。
  *  任何其它代码不得读它：编译期把它们挡在 `Registry` 之外，正是为了不留读兼容后门。 */
 export type LegacyFlatRegistry = Partial<
-  Record<'hubServer' | 'cloudflared' | 'trainingLoop' | 'workerServe', RegistryEntry>
+  Record<'hubServer' | 'cloudflared' | 'trainingLoop', RegistryEntry>
 >
 
 /** 需要**整树停止**的组件（stop / 全部停止 / 监督重启三处共用，实现见 net.ts::killPidTree）。

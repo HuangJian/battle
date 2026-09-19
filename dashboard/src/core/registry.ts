@@ -6,8 +6,9 @@
  *  load/clear 时一并消费，保证旧账本里的进程也能被 --kill 收编。
  *
  *  ── 多课程形状（plan multi-course-parallel-training §1.4，P1b） ──
- *  五条组件住 `Record<course, Entry>` 的 per-course 表（`hubServers`/`cloudflareds`/`localWorkers`/
- *  `workerServes`/`trainingLoops`），`selfNode` 保持扁平单例（agent 全局一份）。
+ *  四条组件住 `Record<course, Entry>` 的 per-course 表（`hubServers`/`cloudflareds`/
+ *  `localWorkers`/`trainingLoops`），`selfNode` 保持扁平单例（agent 全局一份）。
+ *  （第五个历史键 `workerServes` 已随「本机伪节点退出受管组件」在 2026-09-19 删除。）
  *
  *  ★ **住在同课表 ≠ 按课程键控**（易混，故写在这里）：hubServer / cloudflared / trainingLoop /
  *  localWorker 四条是**共享**的（一个进程服务所有课程）——它们的槽**恒 `''`**（见
@@ -59,17 +60,15 @@ export const COURSE_COMPONENTS = [
   'hubServer',
   'localWorker',
   'cloudflared',
-  'workerServe',
   'trainingLoop',
 ] as const
 export type CourseComponent = (typeof COURSE_COMPONENTS)[number]
 
-type PluralKey = 'hubServers' | 'localWorkers' | 'cloudflareds' | 'workerServes' | 'trainingLoops'
+type PluralKey = 'hubServers' | 'localWorkers' | 'cloudflareds' | 'trainingLoops'
 const PLURAL: Record<CourseComponent, PluralKey> = {
   hubServer: 'hubServers',
   localWorker: 'localWorkers',
   cloudflared: 'cloudflareds',
-  workerServe: 'workerServes',
   trainingLoop: 'trainingLoops',
 }
 
@@ -176,7 +175,6 @@ function consoleCourse(): string {
 const LEGACY_FLAT_COURSE_COMPONENTS: readonly CourseComponent[] = [
   'hubServer',
   'cloudflared',
-  'workerServe',
   'trainingLoop',
 ]
 
@@ -248,7 +246,7 @@ export function entryForCourse(
 }
 
 /** 有序三元组 `(key, course, entry)`——**枚举账本的唯一路径**（门禁②）。
- *  顺序：selfNode → 每课程内 hubServer/localWorker/cloudflared/workerServe/trainingLoop
+ *  顺序：selfNode → 每课程内 hubServer/localWorker/cloudflared/trainingLoop
  *  （同课 hub 先于 localWorker 先于 trainer，M7；课程名排序保证稳定）。旧扁平键不再枚举（R2 已搬迁）。 */
 export function registryTriples(reg: Registry): WatchedEntry[] {
   const out: WatchedEntry[] = []

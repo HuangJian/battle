@@ -24,7 +24,7 @@ import os from 'os'
 import path from 'path'
 import { DASHBOARD_ROOT } from '../src/core/paths'
 import { loadConfig, writeRemoteHubUrl } from '../src/core/config'
-import { isSharedComponent, scopeOf } from '../src/core/registry'
+import { COURSE_COMPONENTS, isSharedComponent, scopeOf } from '../src/core/registry'
 import { sharedHubPort, sharedHubUrl, sharedTunnelMetricsPort, slotPort } from '../src/core/slots'
 import { componentViews } from '../src/server/api/views'
 import { restartSpecFor } from '../src/server/actions'
@@ -109,8 +109,9 @@ describe('① 槽位唯一：共享组件的账本槽恒为空串', () => {
       expect(scopeOf('cloudflared', c)).toBe('')
       expect(scopeOf('trainingLoop', c)).toBe('')
       expect(scopeOf('localWorker', c)).toBe('')
-      // 仍按课程的：本机伪 GPU 节点（workerServe）与 selfNode（后者是单例，不走 scopeOf）
-      expect(scopeOf('workerServe', c)).toBe(c)
+      // 至此**所有**课程组件都归一为 `''`——「按课程的组件」这一族在账本里已无成员
+      // （selfNode 是单例，不走 scopeOf；本机伪节点 2026-09-19 退出受管组件）。
+      for (const key of COURSE_COMPONENTS) expect(scopeOf(key, c)).toBe('')
     }
   })
 

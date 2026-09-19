@@ -180,7 +180,9 @@ describe('接线：启动步骤在 spawn 前回收端口', () => {
 
   it('specs 给独占端口的组件都声明了 ownsResource', () => {
     const specs = readFileSync(path.join(DASHBOARD_ROOT, 'src', 'stack', 'specs.ts'), 'utf-8')
-    for (const fn of ['hubServerSpec', 'cloudflaredSpec', 'workerServeSpec'] as const) {
+    // 本机伪节点 2026-09-19 已退出受管组件（它只在冒烟预演里存在 20s，不参与端口回收/
+    // 监督重启）——受管面只剩这三个独占端口的组件。
+    for (const fn of ['hubServerSpec', 'cloudflaredSpec'] as const) {
       const start = specs.indexOf(`export function ${fn}`)
       expect(start).toBeGreaterThan(-1)
       const rest = specs.indexOf('export function ', start + 1)

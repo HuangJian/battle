@@ -2,24 +2,25 @@
  *
  *  **2026-09-15 策略反转（用户指令「就算云机连接不上，也不能直接开本地 worker，横幅报错就好」）**：
  *  endpoint 留空且 config 无可用 gpu_push 时一律**响亮报错**，**绝不自动回落本机 worker_server**
- *  —— 旧行为会把「云机连不上」伪装成「训练正常」。本机回落只剩显式 opt-in（`allowLocal:true`），
- *  且复用扫描默认**排除** `local_push` 节点（残留的 enabled 条目不得被静默复用，那是同一缺陷
- *  的第二入口）。显式 opt-in 路径下两个节点 kinds 必须共存互不覆盖，回写要保证 python 侧
- *  `_gpu_push_nodes` 按 `courses.<课>.push_node_url` 过滤后**只有**本机 worker_server。
+ *  —— 旧行为会把「云机连不上」伪装成「训练正常」。
+ *
+ *  **2026-09-19：本机伪节点彻底退出控制台**（用户指令「workerServe 伪节点直接从 dashboard
+ *  去掉，它只是用于 trainingloop 冒烟测试」）：执行面只剩两档（用户填的 endpoint / 复用云
+ *  节点），`allowLocal` opt-in 与写入器（`applyLocalPushNodeConfig` / `localPushUrl`）一并删除；
+ *  留下来的只有 `local_push` **遗留标记**——复用扫描一律排除它，卡片徽章则如实把它说成本机。
  */
 import { afterAll, describe, expect, it } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
 import { DASHBOARD_ROOT } from '../src/core/paths'
-import { slotPort } from '../src/core/slots'
+import { registryTriples, COURSE_COMPONENTS } from '../src/core/registry'
+import { ALL_COMPONENTS } from '../src/server/api/component-meta'
 import {
-  applyLocalPushNodeConfig,
   applyPushNodeConfig,
   configurePushEndpoint,
   enabledGpuPushNodes,
   findHealthyGpuPushNode,
-  localPushUrl,
   normalizePushUrl,
   pushTargetFromConfig,
 } from '../src/stack/push-config'
@@ -138,47 +139,28 @@ describe('enabledGpuPushNodes / findHealthyGpuPushNode', () => {
   })
 })
 
-// ────────────── 2026-09-15：本机 worker_server 作为 push 执行面 ──────────────
+// ────── 2026-09-19：本机伪节点退出控制台，只剩 `local_push` **遗留标记**的读面识别 ──────
 
-describe('本机 worker_server 回落（一键本机 push）', () => {
-  it('applyLocalPushNodeConfig：写 local_push 节点 + 课程 push_node_url，认证键 = rl.remote_token', () => {
-    const cfg = baseCfg()
-    const url = `http://127.0.0.1:${slotPort(cfg, 'x2-start', 'push')}`
-    const out = applyLocalPushNodeConfig(cfg, 'x2-start', url, cfg.rl.remote_token)
-    const node = out.nodes.find((n) => n.local_push)
-    expect(node?.url).toBe(url)
-    expect(node?.gpu_push).toBe(true) // python `_gpu_push_nodes` 只认 gpu_push
-    expect(node?.enabled).toBe(true)
-    expect(node?.authKey).toBe('hub-tok') // 与 worker_server --token 同源
-    expect(out.courses?.['x2-start']?.push_node_url).toBe(url)
-    // 幂等：同一条目更新，不堆节点
-    const again = applyLocalPushNodeConfig(out, 'x2-start', url, cfg.rl.remote_token)
-    expect(again.nodes.filter((n) => n.local_push).length).toBe(1)
-  })
+/** 造一个历史遗留的本机伪节点条目（`local_push`；旧回落在 2026-09-15 写下过它）。 */
+function legacyLocalNode(url: string, token = 'hub-tok') {
+  return {
+    id: 'local-push',
+    url,
+    authKey: token,
+    concurrency: 1,
+    enabled: true,
+    gpu_push: true,
+    local_push: true,
+  }
+}
 
-  it('两种执行面共存互不覆盖：写云节点不吃本机节点，回落不吃云节点', () => {
-    let cfg = applyPushNodeConfig(baseCfg(), 'x2-start', 'https://gpu.example', 'tok-cloud')
-    cfg = applyLocalPushNodeConfig(
-      cfg,
-      'x2-start',
-      localPushUrl(cfg, 'x2-start'),
-      cfg.rl.remote_token,
-    )
-    expect(cfg.nodes.filter((n) => n.gpu_push).length).toBe(2)
-    // 再写云 URL：仍只有那一个云节点（原地更新），本机节点原样
-    const localBefore = cfg.nodes.find((n) => n.local_push)
-    cfg = applyPushNodeConfig(cfg, 'x2-start', 'https://gpu2.example', 'tok-cloud2')
-    const clouds = cfg.nodes.filter((n) => n.gpu_push && !n.local_push)
-    expect(clouds.length).toBe(1)
-    expect(clouds[0]!.url).toBe('https://gpu2.example')
-    expect(cfg.nodes.find((n) => n.local_push)).toEqual(localBefore)
-  })
-
-  it('localPushUrl = 该课槽位的 push 端口（与 workerServeSpec 同源）', () => {
-    const cfg = baseCfg()
-    expect(localPushUrl(cfg, 'x2-start')).toBe(
-      `http://127.0.0.1:${slotPort(cfg, 'x2-start', 'push')}`,
-    )
+describe('本机伪节点退出后：没有写入口，只有识别面', () => {
+  it('push-config 不再导出「把执行面改指本机」的写入口（防回流）', () => {
+    const src = readFileSync(path.join(DASHBOARD_ROOT, 'src', 'stack', 'push-config.ts'), 'utf-8')
+    // 为什么必须没有：伪节点不是受管组件了（没有 spec / 账本键 / 卡片），留着写入口就是一条
+    // 把训练指向**无人服务的本机地址**的路径——而表面看起来「训练正常」。
+    expect(src).not.toMatch(/export function (applyLocalPushNodeConfig|localPushUrl)\b/)
+    expect(src).not.toMatch(/opts:\s*\{\s*allowLocal/)
   })
 
   it('缺可用 gpu_push → 默认**响亮报错**，绝不自动回落本机（2026-09-15 用户指令）', async () => {
@@ -192,36 +174,7 @@ describe('本机 worker_server 回落（一键本机 push）', () => {
     })
   })
 
-  it('allowLocal:true（显式 opt-in）→ source=local 且写盘可被 python 过滤命中', async () => {
-    const base = baseCfg()
-    await withScratchConfig(base, async () => {
-      const t = await configurePushEndpoint('x2-start', '', '', { allowLocal: true })
-      expect(t.source).toBe('local')
-      expect(t.viaLocalWorker).toBe(true)
-      // 盘上：local_push 节点 + 课程 push_node_url 指向本机，且两者逐字一致
-      // （python `_gpu_push_nodes` 按该键过滤 URL，不一致则匹配 0 个 → job 回落 pull 卡死）
-      const onDisk = JSON.parse(readFileSync(process.env.BCITY_RL_CONFIG!, 'utf-8')) as RlConfig
-      const node = onDisk.nodes.find((n) => n.local_push)
-      expect(node?.url).toBe(t.url)
-      expect(onDisk.courses?.['x2-start']?.push_node_url).toBe(t.url)
-      expect(t.url).toBe(localPushUrl(onDisk, 'x2-start'))
-      // 过滤语义：只剩本机一条（不会静默串到云节点）
-      const matched = onDisk.nodes.filter(
-        (n) => n.gpu_push && n.enabled !== false && n.url.replace(/\/+$/, '') === t.url,
-      )
-      expect(matched.length).toBe(1)
-    })
-  })
-
-  it('allowLocal:false 与默认等价 → 同样响亮报错（两条都不静默改执行面）', async () => {
-    await withScratchConfig(baseCfg(), async () => {
-      await expect(
-        configurePushEndpoint('x2-start', '', '', { allowLocal: false }),
-      ).rejects.toThrow()
-    })
-  })
-
-  it('复用扫描默认排除 local_push 节点（残留的 enabled 本机条目不得被静默复用）', async () => {
+  it('复用扫描一律排除 local_push 节点（哪怕它 ping 得通）', async () => {
     // 起一个真会应答 /ping 的本地服务，冒充"活着的本机 worker_server"——
     // 只有它能 ping 通，所以"返回 null"只可能来自过滤，而不是 ping 失败。
     const srv = Bun.serve({ port: 0, fetch: () => new Response('{"ok":true}', { status: 200 }) })
@@ -229,25 +182,10 @@ describe('本机 worker_server 回落（一键本机 push）', () => {
       const url = `http://127.0.0.1:${srv.port}`
       const cfg: RlConfig = {
         ...baseCfg(),
-        nodes: [
-          ...baseCfg().nodes,
-          {
-            id: 'local-push',
-            url,
-            authKey: 'tok',
-            concurrency: 1,
-            gpu_push: true,
-            local_push: true,
-            enabled: true,
-          },
-        ],
+        nodes: [...baseCfg().nodes, legacyLocalNode(url, 'tok')],
       }
-      // 默认：本机节点不参与复用扫描（哪怕它 ping 得通）
+      // 本机节点不参与复用扫描（哪怕它 ping 得通）——没有 opt-in 这回事了。
       expect(await findHealthyGpuPushNode(cfg)).toBeNull()
-      // 显式 opt-in：才纳入
-      expect((await findHealthyGpuPushNode(cfg, 5000, { includeLocal: true }))?.id).toBe(
-        'local-push',
-      )
       // 端到端：endpoint 留空 + 只有本机条目活着 → 仍然响亮报错，不复用本机
       await withScratchConfig(cfg, async () => {
         await expect(configurePushEndpoint('x2-start', '', '')).rejects.toThrow(/Push 执行面不可用/)
@@ -265,13 +203,10 @@ describe('pushTargetFromConfig（卡片徽章的纯数据源）', () => {
     expect(pushTargetFromConfig(baseCfg(), 'x2-start')).toBeNull()
   })
 
-  it('指向 local_push 节点 → kind=local（本机 worker_server）+ 认领节点 id/authKey', () => {
-    const cfg = applyLocalPushNodeConfig(
-      baseCfg(),
-      'x2-start',
-      localPushUrl(baseCfg(), 'x2-start'),
-      'hub-tok',
-    )
+  it('指向遗留 local_push 条目 → kind=local（必须说出来：控制台不再提供该执行面）', () => {
+    const cfg = baseCfg()
+    cfg.nodes = [...cfg.nodes, legacyLocalNode('http://127.0.0.1:8791')]
+    cfg.courses!['x2-start'] = { push_node_url: 'http://127.0.0.1:8791' }
     const t = pushTargetFromConfig(cfg, 'x2-start')
     expect(t?.kind).toBe('local')
     expect(t?.nodeId).toBe('local-push')
@@ -283,13 +218,10 @@ describe('pushTargetFromConfig（卡片徽章的纯数据源）', () => {
     expect(pushTargetFromConfig(cfg, 'x2-start')?.kind).toBe('cloud')
   })
 
-  it('两种执行面共存时按 `push_node_url` 认领：云 URL 写回后不误报本机', () => {
-    let cfg = applyLocalPushNodeConfig(
-      baseCfg(),
-      'x2-start',
-      localPushUrl(baseCfg(), 'x2-start'),
-      'hub-tok',
-    )
+  it('遗留本机条目与云条目并存时按 `push_node_url` 认领：云 URL 写回后不误报本机', () => {
+    let cfg = baseCfg()
+    cfg.nodes = [...cfg.nodes, legacyLocalNode('http://127.0.0.1:8791')]
+    cfg.courses!['x2-start'] = { push_node_url: 'http://127.0.0.1:8791' }
     const local = pushTargetFromConfig(cfg, 'x2-start')
     expect(local?.kind).toBe('local')
     cfg = applyPushNodeConfig(cfg, 'x2-start', 'https://gpu.example', 'tok-cloud')
@@ -311,26 +243,34 @@ describe('pushTargetFromConfig（卡片徽章的纯数据源）', () => {
   })
 })
 
-// ────────────────────────── 预设接线（防「只改 helper 忘接线」） ──────────────────────────
+// ────────────────── 接线回归：受管组件与启动面不得再出现 workerServe ──────────────────
 
-describe('push 预设接线：回落本机时把 workerServe 排进顺序', () => {
-  it('preset.ts 读 viaLocalWorker 并把 workerServe 入 order', () => {
-    const src = readFileSync(
-      path.join(DASHBOARD_ROOT, 'src', 'server', 'actions', 'preset.ts'),
-      'utf-8',
-    )
-    expect(src).toContain('viaLocalWorker')
-    expect(src).toContain("['selfNode', 'workerServe', 'trainingLoop']")
+describe('本机伪节点不在启动面/受管面（防回流）', () => {
+  const read = (rel: string): string =>
+    readFileSync(path.join(DASHBOARD_ROOT, 'src', ...rel.split('/')), 'utf-8')
+
+  it('受管组件全集（卡片/日志页/冒烟/停全部的数据源）里没有 workerServe', () => {
+    expect(ALL_COMPONENTS).not.toContain('workerServe')
+    expect(COURSE_COMPONENTS).not.toContain('workerServe')
+    // 账本枚举路径也管不到它（旧账本里的 workerServes 表已无读者）
+    expect(registryTriples({ workerServes: { x: { pid: 1 } } } as never).length).toBe(0)
   })
 
-  it('workerServe 启动幂等：已在运行/已在服务 → 不 kill 不重起', () => {
-    const src = readFileSync(
-      path.join(DASHBOARD_ROOT, 'src', 'server', 'actions', 'start.ts'),
-      'utf-8',
-    )
-    const block = src.slice(src.indexOf("case 'workerServe'"), src.indexOf("case 'trainingLoop'"))
-    expect(block).toContain('已在运行')
-    expect(block).toContain('/ping')
-    expect(block).not.toContain('killPid')
+  it('启动面：start/preset 里没有它的分派分支与启动顺序', () => {
+    expect(read('server/actions/start.ts')).not.toContain("case 'workerServe'")
+    const preset = read('server/actions/preset.ts')
+    expect(preset).not.toContain('workerServe')
+    expect(preset).toContain("['selfNode', 'trainingLoop']") // push 预设只剩这两个
+    expect(read('server/actions/smoke.ts')).not.toContain('workerServe')
+  })
+
+  it('spec 面：没有它的 ProcSpec（伪节点由冒烟预演自起自停）', () => {
+    const specs = read('stack/specs.ts')
+    expect(specs).not.toContain('workerServeSpec')
+    expect(specs).not.toContain('WORKER_SERVE_ENTRY')
+    // 预演侧确实自起自停（同一份远端入口）
+    const push = read('stack/push.ts')
+    expect(push).toContain("'remote_worker_serve'")
+    expect(push).toContain('killPid')
   })
 })

@@ -10,6 +10,10 @@
  *      ⇒ 第 ③ 条「回落本机 worker_server」（`push-config.ts:240`）⇒ viaLocalWorker=true
  *      ⇒ `preset.ts:56` 启动顺序插入 workerServe ⇒ 控制台打印「启动本机伪 GPU 节点」。
  *
+ * 后续（2026-09-19，用户指令「workerServe 伪节点直接从 dashboard 去掉，它只是用于 trainingloop
+ * 冒烟测试」）：第 ③ 条与 `viaLocalWorker` 一并删除——现在缺执行面就响亮报错，伪节点只剩冒烟
+ * 预演（自起自停）。本文件守的这条接线（凭据不得在路上丢掉）仍然有效且必要。
+ *
  * 为什么 TS/tsc 抓不到：`(m) => void` 对 `(mode, push?) => void` 是**合法**赋值（少形参合法），
  * 所以只能靠源码断言守住这条接线。仓库既有同款手法：`web-ssr-readonly.test.ts` 直接读 app.tsx。
  */

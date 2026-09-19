@@ -4,7 +4,7 @@ import { warn as logWarn } from '../../core/log'
 import { killPid, killPidTree, pidAlive } from '../../core/net'
 import { portOwnerPids, stopAllManaged } from '../../core/proc'
 import { clearAnyComponent, isSharedComponent, scopeOf } from '../../core/registry'
-import { sharedHubPort, sharedTunnelMetricsPort, slotPort } from '../../core/slots'
+import { sharedHubPort, sharedTunnelMetricsPort } from '../../core/slots'
 import { COMPONENT_KILL_TREE } from '../../core/types'
 import type { Component, RlConfig } from '../../core/types'
 import { releaseClusterLock, releaseTrainerLocks } from '../../launch/cli'
@@ -18,7 +18,7 @@ import { ActionResult, busyKey, done, guard, release } from './result'
 /** 停止单个组件（按账本；无登记时按端口兜底清场——与 --kill 同语义）。
  *
  *  fail-closed（plan P1「兜底规则」）：多课时代按端口盲扫 = 杀错课（本仓前科×2），
- *  故 hubServer/workerServe 在**无登记且无课程上下文**时拒绝兜底并响亮告警，
+ *  故按课程键控的组件在**无登记且无课程上下文**时拒绝兜底并响亮告警，
  *  （localWorker 不监听任何端口，无登记就是「未在运行」——无需兜底。）
  *  指引操作员指定课程或走 stopAll（紧急总闸）。selfNode 是全局单例（agent_port），
  *  不受此限。 */
@@ -88,7 +88,6 @@ export async function stopComponent(key: Component, courseArg = ''): Promise<Act
       selfNode: (c) => c.rl.agent_port,
       hubServer: (c) => sharedHubPort(c),
       cloudflared: (c) => sharedTunnelMetricsPort(c),
-      workerServe: (c, crs) => slotPort(c, crs, 'push'),
     }
     const portOf = ports[key]
     if (portOf) {

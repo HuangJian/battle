@@ -4,18 +4,20 @@
  * 分层：src/web/view/component-groups.ts（纯函数）+ 与 `core/registry` / `server/api/component-meta`
  * 的**对拍**（判据只允许有一份）。
  *
- * 这一层要守的不是「渲染得像不像」，而是三条会让组件从 UI 上**消失**的失效模式：
+ * 这一层要守的不是「渲染得像不像」，而是两条会让组件从 UI 上**消失**的失效模式：
  *   ① 族名单与账本槽位规则漂开（hub 变成「按课程」→ 操作员以为要给每门课各起一个 hub）；
- *   ② 新增组件忘了归档（面板照旧渲染，但它落在谁都不认识的桶里）；
- *   ③ 面板自己 filter 掉某个组件（读代码的人只看到一行 filter、不知所为何来）。
- * 三条都在这里用「全组件恰好归属一处」与「与 registry 对拍」两把尺子钉住。
+ *   ② 新增组件忘了归档（面板照旧渲染，但它落在谁都不认识的桶里）。
+ * 两条都在这里用「全组件恰好归属一处」与「与 registry 对拍」两把尺子钉住。
+ *
+ * （旧第三条「面板自己 filter 掉某个组件」随 2026-09-19 的 `NODE_FACE_COMPONENTS` 删除而消失：
+ * 受管组件全集 = 卡行全集，不再有例外名单。）
  */
 
 import { describe, expect, it } from 'bun:test'
 import { componentScope } from '../src/core/registry'
 import type { Component } from '../src/core/types'
 import { ALL_COMPONENTS } from '../src/server/api/component-meta'
-import { NODE_FACE_COMPONENTS, cardFamilies, scopeBadge } from '../src/web/view'
+import { cardFamilies, scopeBadge } from '../src/web/view'
 import type { ComponentScope, ComponentView } from '../src/web/view'
 
 /** 组件视图最小件（只填分族需要的字段）。 */
@@ -46,7 +48,6 @@ describe('cardFamilies：服务面 vs 课程面', () => {
     const groups = cardFamilies([
       cv('localWorker', 'shared'),
       cv('cloudflared', 'shared'),
-      cv('workerServe', 'course'),
       cv('someCourseThing', 'course'),
       cv('trainingLoop', 'shared'),
       cv('hubServer', 'shared'),
@@ -79,26 +80,11 @@ describe('cardFamilies：服务面 vs 课程面', () => {
     ])
   })
 
-  it('节点面组件（worker_server）不进卡片行——但必须**显式声明**，不是面板里的一行 filter', () => {
-    const groups = cardFamilies(KEYS.map((k) => cv(k, componentScope(k))))
-    const keys = groups.flatMap((g) => g.rows.map((r) => r.key))
-    expect(keys).not.toContain('workerServe')
-    expect(NODE_FACE_COMPONENTS).toContain('workerServe')
-    // 例外名单本身也要是真的组件（打错字 = 静默过滤掉一个真组件）
-    for (const k of NODE_FACE_COMPONENTS) expect(KEYS as readonly string[]).toContain(k)
-  })
-
   it('★ 全组件恰好归属一处：新增组件忘了归档会红（否则它会从 UI 上静默消失）', () => {
     const groups = cardFamilies(KEYS.map((k) => cv(k, componentScope(k))))
     const placed: string[] = groups.flatMap((g) => g.rows.map((r) => r.key))
-    for (const k of KEYS) {
-      const where = placed.includes(k)
-        ? '卡片行'
-        : NODE_FACE_COMPONENTS.includes(k)
-          ? '节点行'
-          : '未归属'
-      expect(where, `${k} 既不在卡片行也不在节点行例外名单里`).not.toBe('未归属')
-    }
+    // 受管组件全集 = 卡行全集（自 2026-09-19 起没有例外名单：本机伪节点退出受管组件）
+    for (const k of KEYS) expect(placed, `${k} 没有任何一族收它`).toContain(k)
     // 不重复：同一组件不许出现在两族里（两处都能启停 = 两个真相）
     expect(new Set(placed).size).toBe(placed.length)
   })
@@ -117,9 +103,8 @@ describe('cardFamilies：服务面 vs 课程面', () => {
   it('scope 缺省/未知 ⇒ 课程面（单侧保守：少一个徽章只是少信息，空贴「共享」是假承诺）', () => {
     // 缺省 scope 的 key（旧服务端 / 新增组件还没填）必须落**课程面**：它是保守的那一侧
     // （共享/单例徽章会宣称「停它就是停全局」，而按课程只会少说）
-    const groups = cardFamilies([cv('hubServer'), cv('someNewThing'), cv('workerServe')])
+    const groups = cardFamilies([cv('hubServer'), cv('someNewThing')])
     expect(groups.map((g) => g.id)).toEqual(['course'])
-    // workerServe 不在这份名单里：它在节点行渲染（NODE_FACE_COMPONENTS，另一把尺子在上一组）
     expect(groups[0]!.rows.map((r) => r.key).sort()).toEqual(['hubServer', 'someNewThing'])
     expect(scopeBadge(cv('hubServer'))).toBeNull()
   })
@@ -160,7 +145,7 @@ describe('scopeBadge：只说 scope 说不出来的那件事', () => {
 
   it('course ⇒ 不挂徽章（按课程是默认语义，组标题已说；每行再挂一个只是噪声）', () => {
     expect(scopeBadge(cv('localWorker', 'course'))).toBeNull()
-    expect(scopeBadge(cv('workerServe', 'course'))).toBeNull()
+    expect(scopeBadge(cv('someCourseThing', 'course'))).toBeNull()
   })
 
   it('★ trainer 是 shared（R3-5）：挂在共享徽章上，不是「按课程」', () => {
