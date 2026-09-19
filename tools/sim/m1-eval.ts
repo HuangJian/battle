@@ -50,8 +50,22 @@ import {
   type StageAggregate,
 } from '../eval/godai-score'
 import { writeScorecardHtml, type ScorecardRow, type ScorecardSuite } from './scorecard-html'
+import { resolve } from 'node:path'
 import { TailRaceBatch } from '../lib/hybrid-batch'
 import { flag } from '../lib/cli'
+import { computeCodeHash } from '../agent/codehash-files'
+import {
+  bunMajorMinor,
+  gateWarning,
+  nodeGateReason,
+  provenanceNote,
+  type DistPing,
+  type NodeGateEntry,
+} from '../lib/dist-node-gate'
+import { requestNodeUpgrades, resolveUpgradeBranch, upgradeLogLines } from '../lib/node-upgrade'
+
+/** 仓根（升级子进程 cwd 与 nn-py-safe.sh 的相对路径解析都用它）。 */
+const REPO_ROOT = resolve(import.meta.dir, '..', '..')
 import { BatchLedger, ledgerKey } from '../lib/batch-ledger'
 
 /** The 11 scored dimensions of the God AI score-v7 model (design §3). */
@@ -122,6 +136,11 @@ async function main(): Promise<void> {
   // 死节点只有 ~5s ping 快速失败（并行），活节点即刻接管份额；纯本地用 --no-dist 显式关闭。
   // 布尔存在位用 flag()（位置无关）：本地 arg() 取「下一个 token」，把 --no-dist
   // 写在命令行末尾时取到 undefined → 静默忽略（2026-09-19 实测，m1-eval 同病）。
+  //
+  // 节点门（2026-09-19 补）：此前 tryActivate 只看 HTTP 200，**没有** codeHash/bun/
+  // 能力位门 ⇒ 陈旧节点会被当可用算力（era 混算）。现在与 eval-course-ckpt /
+  // rollout 同源（tools/lib/dist-node-gate.ts）：逐条跳过日志 + 收尾聚合 WARN +
+  // provenance（`node:<id>`/`local` 计数）+ `--upgrade-nodes`（复用训练循环守卫）。
   const noDist = flag('no-dist')
   let distNodesPath = arg('dist-nodes', '')
   if (!distNodesPath && !noDist) {
@@ -678,10 +697,13 @@ async function runHybrid(
   // 共享游标 + 尾部 fan-out 竞速（先结算者胜）+ 幂等结算。
   const batch = new TailRaceBatch(total)
   let done = 0
-  const settle = (i: number, res: import('./sim-worker').SimTaskResult): void => {
+  // 逐局来源计数（`node:<id>` / `local`）：产物必须能回答「这批局谁跑的」。
+  const bySrc: Record<string, number> = {}
+  const settle = (i: number, res: import('./sim-worker').SimTaskResult, src: string): void => {
     if (!batch.settle(i)) return // 幂等：竞速副本后到即弃
     results[i] = res
     done++
+    bySrc[src] = (bySrc[src] ?? 0) + 1
     onProgress(done, total)
     onSettle?.(i, res)
   }
@@ -692,18 +714,37 @@ async function runHybrid(
 
   // v3.9 动态节点激活：ping 通过 → 权重幂等上传 → spawn 并发链。
   // 初始/中途统一走此路径——离线节点不激活、不中断整个跑批，留给 rescan 周期再探。
+  // 节点门（2026-09-19 补：此前 tryActivate 只看 HTTP 200，**没有** codeHash/bun/
+  // 能力位门 ⇒ 陈旧节点会被当可用算力，不同 era 的结果混进同一份读数）。门后
+  // 口径与 rollout/eval 同源（tools/lib/dist-node-gate.ts ↔ dist_common.check_code_hash）。
+  const localBunMM = bunMajorMinor(process.versions.bun ?? Bun.version ?? '?')
+  const localCodeHash = computeCodeHash()
+  const gate: NodeGateEntry[] = []
+  const recordGate = (id: string, why: string | null, pingHash: string): void => {
+    const i = gate.findIndex((g) => g.id === id)
+    const e: NodeGateEntry = { id, ok: !why, reason: why, pingHash }
+    if (i >= 0) gate[i] = e
+    else gate.push(e)
+  }
+
   const tryActivate = async (node: DistNodeCfg): Promise<boolean> => {
-    let ok = false
+    const nid = node.id || node.url
+    let ping: DistPing | null = null
     try {
       const r = await fetch(`${node.url}/v1/ping`, {
         headers: { Authorization: `Bearer ${node.authKey ?? ''}` },
         signal: AbortSignal.timeout(5000),
       })
-      ok = r.status === 200
+      if (r.status === 200) ping = (await r.json()) as DistPing
     } catch {
-      /* offline */
+      ping = null
     }
-    if (!ok) return false
+    const why = nodeGateReason(ping, localBunMM, localCodeHash)
+    recordGate(nid, why, String(ping?.codeHash ?? ''))
+    if (why) {
+      process.stderr.write(`[m1-eval] node ${nid}: ${why} — skipped\n`)
+      return false
+    }
     try {
       // v4.0 修复：kind 随 distKind（原写死 'intent'——goal 分发会 409 wver-not-cached）
       await uploadWeights(node, distKind, bytes, wver, iterId)
@@ -759,25 +800,29 @@ async function runHybrid(
                 const m = manifest as any
                 const sc = m.scorable ?? {}
                 const fs = sc.finalState ?? {}
-                settle(i, {
-                  id: task.id,
-                  ok: true,
-                  outcome: m.outcome ?? 'error',
-                  ticks: typeof m.ticks === 'number' ? m.ticks : 0,
-                  killCount: typeof fs.killCount === 'number' ? fs.killCount : 0,
-                  baseAlive: fs.baseAlive === true,
-                  lives: typeof fs.lives === 'number' ? fs.lives : undefined,
-                  firstKillTick:
-                    typeof sc.firstKillTick === 'number' ? sc.firstKillTick : undefined,
-                  telemetry: sc.telemetry,
-                })
+                settle(
+                  i,
+                  {
+                    id: task.id,
+                    ok: true,
+                    outcome: m.outcome ?? 'error',
+                    ticks: typeof m.ticks === 'number' ? m.ticks : 0,
+                    killCount: typeof fs.killCount === 'number' ? fs.killCount : 0,
+                    baseAlive: fs.baseAlive === true,
+                    lives: typeof fs.lives === 'number' ? fs.lives : undefined,
+                    firstKillTick:
+                      typeof sc.firstKillTick === 'number' ? sc.firstKillTick : undefined,
+                    telemetry: sc.telemetry,
+                  },
+                  `node:${node.id ?? node.url}`,
+                )
                 ok = true
               } catch {
                 // 网络/超时：退避后重试
                 await new Promise((r) => setTimeout(r, RETRY_BACKOFF[attempt] * 1000))
               }
             }
-            if (!ok) settle(i, fail(task.id))
+            if (!ok) settle(i, fail(task.id), `node:${node.id ?? node.url}`)
           }
         } finally {
           batch.finishConsumer()
@@ -806,7 +851,7 @@ async function runHybrid(
               )
               worker.postMessage(task)
             })
-            settle(i, res)
+            settle(i, res, 'local')
           }
         } finally {
           worker.terminate()
@@ -821,9 +866,52 @@ async function runHybrid(
   for (let w = 0; w < localCap; w++) {
     batch.consumer(1)
     void spawnLocal()
-  }
-  for (const node of nodes) {
-    void tryActivate(node) // 初始在线节点尽快激活；离线节点留待 rescan
+  } // 初始在线节点尽快激活；离线节点留待 rescan。收集 promise 供**收尾时**汇总告警
+  // （不在中途等：本地 worker 与已激活节点必须立刻开始消费任务）。
+  const initialActivations = nodes.map((node) => tryActivate(node).catch(() => false))
+
+  /** 收尾时的响亮告警 + 可选升级（复用训练循环守卫）。
+   *  放在 allDone 之后而不是激活当场：ping 与本地游戏是竞速的（1 局的短跑会在 ping
+   *  落定前就结束），提前打印会让告警随机丢失——门结果齐了再汇总才可靠。 */
+  const reportGate = async (): Promise<void> => {
+    await Promise.race([
+      Promise.allSettled(initialActivations).then(() => undefined),
+      new Promise((r) => setTimeout(r, 2000)),
+    ])
+    for (const l of gateWarning('[m1-eval]', gate, localCodeHash, {
+      localCap,
+      upgradeRequested: flag('upgrade-nodes'),
+    })) {
+      process.stderr.write(`${l}\n`)
+    }
+    if (!flag('upgrade-nodes')) return
+    const staleNodes = nodes.filter((n) =>
+      gate.some((g) => g.id === (n.id ?? n.url) && g.reason?.startsWith('codeHash mismatch')),
+    )
+    if (staleNodes.length === 0) {
+      process.stderr.write('[m1-eval] --upgrade-nodes: 无 stale 节点，无需升级\n')
+      return
+    }
+    const branch = resolveUpgradeBranch(REPO_ROOT)
+    process.stderr.write(
+      `[m1-eval] --upgrade-nodes: ${staleNodes.length} 个 stale 节点，分支='${branch || '(空:仅重启/禁 pull)'}'\n`,
+    )
+    const up = requestNodeUpgrades({
+      repoRoot: REPO_ROOT,
+      expectedHash: localCodeHash,
+      branch,
+      // 单节点最多等 8s（同 eval-course-ckpt）：坏路（502/黑洞）不该拖住整批。
+      // 注：个别节点环境上就是不支持远控升级（如隧道后 agent 反向代理返 502、
+      // 或节点根本没起 tunneling）——那是环境事实，不应阻塞其他节点。
+      timeout: 8,
+      nodes: staleNodes.map((n) => ({
+        id: n.id ?? n.url,
+        url: n.url,
+        authKey: n.authKey,
+        pingHash: gate.find((g) => g.id === (n.id ?? n.url))?.pingHash ?? '',
+      })),
+    })
+    for (const l of upgradeLogLines('[m1-eval]', up)) process.stderr.write(`${l}\n`)
   }
 
   // 无消费者守护：--dist-local 0 且初始节点全部离线时（或任务太少被本地瞬取），
@@ -876,6 +964,8 @@ async function runHybrid(
 
   await allDone
   if (rescanTimer) clearInterval(rescanTimer)
+  await reportGate().catch(() => {})
+  for (const l of provenanceNote('[m1-eval]', bySrc)) process.stderr.write(`${l}\n`)
   return results
 }
 

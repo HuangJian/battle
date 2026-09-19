@@ -23,6 +23,13 @@
  * evalSupport ∧ stageJsonSupport ∧ bun major.minor ∧ codeHash (rollout 同源).
  * Force local with `--no-dist`. `--policy nn-goal` stays local-only.
  *
+ * 节点可用性**必须说出来**（2026-09-19）：门被拒的节点逐条打印，门后另有一条
+ * 聚合 WARN（可用数/被拒原因/两侧 codeHash），收尾再打 provenance（`node:<id>` /
+ * `local` 逐来源计数）——判读时一眼看出远端有没有真的参与。`--upgrade-nodes` 时
+ * 对 stale 节点下发 pull+restart，复用训练循环的守卫（`dist_common.
+ * request_upgrade_guarded`，经 nn-py-safe.sh；**不在 TS 里重写护栏**，见
+ * tools/lib/node-upgrade.ts）。
+ *
  * Usage:
  *   bun tools/sim/eval-course-ckpt.ts --course p1-onset \
  *       --weights tmp/p1-bc-smoke/weights.json.ckpt.3 --games 100
@@ -40,15 +47,54 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs'
 import { createHash } from 'node:crypto'
 import { gzipSync } from 'node:zlib'
-import { dirname } from 'path'
+import { dirname, resolve } from 'path'
 import { splitRoundRobin, defaultWorkerCount } from '../lib/worker-pool'
 import { flag } from '../lib/cli'
 import { TailRaceBatch } from '../lib/hybrid-batch'
 import { unpackContainer } from './pack-container'
 import { computeCodeHash } from '../agent/codehash-files'
+import {
+  bunMajorMinor,
+  claimNote,
+  gateWarning,
+  nodeGateReason,
+  provenanceNote,
+  type DistNodeCfg,
+  type DistPing,
+  type NodeGateEntry,
+} from '../lib/dist-node-gate'
+import { requestNodeUpgrades, resolveUpgradeBranch, upgradeLogLines } from '../lib/node-upgrade'
 import type { EvalCourseWorkerPayload, EvalCourseRow } from './eval-course-ckpt-worker'
 
+// 节点门 / bun 版本口径的实现在 tools/lib/dist-node-gate.ts（与 m1-eval 共享）；
+// 这里保留同名导出，既有调用方与单测的导入面不变。
+export { bunMajorMinor, nodeGateReason }
+export type { DistNodeCfg, DistPing }
+
+/**
+ * 消费者起始顺序（纯函数，可单测）：第 r 轮 = 「本机第 r 条链（若有）」+「每个节点第 r 条链（若其容量够）」。
+ *
+ * 为什么需要它：链体在**首次 await 前**就同步 claim 了任务，所以「先 spawn 谁谁多吃」——
+ * 旧代码把配置里第一个节点（常是 self）的并发链全部先起，它们在同步 claim 阶段就把整批任务
+ * 秒光（2026-09-19 实测：5 个节点可用、8 局的批量 100% 落在 node:self，远端一条也没分到）。
+ * 轮转只改启动顺序，共享游标 + 尾部竞速的语义不变（链多任务少时依旧快者多吃）。
+ */
+export function fanOutOrder(
+  localCap: number,
+  nodeCaps: number[],
+): Array<{ local: number } | { node: number }> {
+  const out: Array<{ local: number } | { node: number }> = []
+  const rounds = Math.max(localCap, ...nodeCaps, 0)
+  for (let r = 0; r < rounds; r++) {
+    if (r < localCap) out.push({ local: r })
+    for (let n = 0; n < nodeCaps.length; n++) if (r < (nodeCaps[n] ?? 1)) out.push({ node: n })
+  }
+  return out
+}
+
 const WORKER_URL = new URL('./eval-course-ckpt-worker.ts', import.meta.url).href
+/** 仓根（升级子进程 cwd 与 nn-py-safe.sh 的相对路径解析都用它）。 */
+const REPO_ROOT = resolve(import.meta.dir, '..', '..')
 const CURRICULA_DIR = 'nn-training/curricula'
 const DEFAULT_DIST_CFG = 'nn-training/rl-config.json'
 /** sampler-agent 对 stageJson 的硬上限（query 串 + 校验）。 */
@@ -232,11 +278,6 @@ export function buildCourseJobs(
   return jobs
 }
 
-/** bun 版本 major.minor（节点门，与 Python `mm()` 同式）。 */
-export function bunMajorMinor(v: string): string {
-  return String(v).split('.').slice(0, 2).join('.')
-}
-
 export interface RemoteTaskUrlOpts {
   baseUrl: string
   iterId: string
@@ -317,37 +358,6 @@ export function manifestToCourseRow(
     killOrder: Array.isArray(m.killOrder) ? (m.killOrder as string[]) : [],
     killerKinds,
   }
-}
-
-export interface DistNodeCfg {
-  id: string
-  url: string
-  authKey?: string
-  concurrency?: number
-  enabled?: boolean
-}
-
-export interface DistPing {
-  codeHash?: string
-  bunVersion?: string
-  evalSupport?: boolean
-  stageJsonSupport?: boolean
-  cpus?: number
-}
-
-/** 节点门：enabled 外层已滤；此处判 ping 能力位 + bun + codeHash。返回拒绝原因或 null。 */
-export function nodeGateReason(
-  ping: DistPing | null,
-  localBunMM: string,
-  localCodeHash: string,
-): string | null {
-  if (!ping) return 'ping failed'
-  if (!ping.evalSupport) return 'lacks evalSupport'
-  if (!ping.stageJsonSupport) return 'lacks stageJsonSupport'
-  if (bunMajorMinor(ping.bunVersion ?? '?') !== localBunMM) return 'bun version mismatch'
-  if (localCodeHash && ping.codeHash && ping.codeHash !== localCodeHash)
-    return `codeHash mismatch (node ${String(ping.codeHash).slice(0, 12)}… local ${localCodeHash.slice(0, 12)}…)`
-  return null
 }
 
 interface LabelAgg {
@@ -532,15 +542,32 @@ interface HybridCtx {
   iterId: string
   localWorkers: number
   distCfgPath: string
+  /** `--upgrade-nodes`：对 stale 节点下发 pull+restart（训练循环同规守卫）。 */
+  upgradeNodes: boolean
 }
 
-async function runHybrid(ctx: HybridCtx): Promise<{ rows: EvalCourseRow[]; errors: string[] }> {
+interface HybridResult {
+  rows: EvalCourseRow[]
+  errors: string[]
+  /** 节点门逐节点判定（告警用）。 */
+  gate: NodeGateEntry[]
+  /** 本机 codeHash（告警文案里的 local 侧）。 */
+  localCodeHash: string
+  /** 逐局来源计数：`node:<id>` / `local`（判读口径用）。 */
+  bySrc: Record<string, number>
+  /** 逐消费者**分派**计数（`node:<id>` / `local`）——与 bySrc（结算）配对读。 */
+  byClaim: Record<string, number>
+}
+
+async function runHybrid(ctx: HybridCtx): Promise<HybridResult> {
   const cfgRaw = JSON.parse(readFileSync(ctx.distCfgPath, 'utf8')) as { nodes?: DistNodeCfg[] }
   const nodes = (cfgRaw.nodes ?? []).filter((n) => n.enabled !== false && n.url)
   const localBunMM = bunMajorMinor(process.versions.bun ?? Bun.version ?? '?')
   const localCodeHash = computeCodeHash()
   const rows: EvalCourseRow[] = []
   const errors: string[] = []
+  const bySrc: Record<string, number> = {}
+  const byClaim: Record<string, number> = {}
   const total = ctx.jobs.length
   const batch = new TailRaceBatch(total)
   const results: Array<EvalCourseRow | null> = Array.from({ length: total }, () => null)
@@ -549,11 +576,17 @@ async function runHybrid(ctx: HybridCtx): Promise<{ rows: EvalCourseRow[]; error
   const step = Math.max(1, Math.ceil(total / 20))
   let lastPrint = 0
 
-  const settle = (job: CourseJob, row: EvalCourseRow | null, err?: string): void => {
+  const settle = (
+    job: CourseJob,
+    row: EvalCourseRow | null,
+    err: string | undefined,
+    src: string,
+  ): void => {
     if (!batch.settle(job.id)) return
     if (row) {
       results[job.id] = row
       rows.push(row)
+      bySrc[src] = (bySrc[src] ?? 0) + 1
     } else if (err) {
       errors.push(err)
     }
@@ -568,6 +601,7 @@ async function runHybrid(ctx: HybridCtx): Promise<{ rows: EvalCourseRow[]; error
   }
 
   // ---- 节点门 + 权重下发 ----
+  const gate: NodeGateEntry[] = []
   const alive: DistNodeCfg[] = []
   for (const n of nodes) {
     const nid = n.id || n.url
@@ -582,11 +616,50 @@ async function runHybrid(ctx: HybridCtx): Promise<{ rows: EvalCourseRow[]; error
       ping = null
     }
     const why = nodeGateReason(ping, localBunMM, localCodeHash)
+    gate.push({ id: nid, ok: !why, reason: why, pingHash: String(ping?.codeHash ?? '') })
     if (why) {
       process.stderr.write(`[eval-course-ckpt] node ${nid}: ${why} — skipped\n`)
       continue
     }
     alive.push(n)
+  }
+
+  // ---- 响亮告警（与是否升级无关：判读必须知道远端有没有参与）----
+  for (const l of gateWarning('[eval-course-ckpt]', gate, localCodeHash, {
+    localCap: ctx.localWorkers,
+    upgradeRequested: ctx.upgradeNodes,
+  })) {
+    process.stderr.write(`${l}\n`)
+  }
+
+  // ---- 主动升级（--upgrade-nodes）：复用训练循环守卫（dist_common.request_upgrade_guarded）----
+  if (ctx.upgradeNodes) {
+    const staleNodes = nodes.filter((n) =>
+      gate.some((g) => g.id === (n.id || n.url) && g.reason?.startsWith('codeHash mismatch')),
+    )
+    if (staleNodes.length === 0) {
+      process.stderr.write('[eval-course-ckpt] --upgrade-nodes: 无 stale 节点，无需升级\n')
+    } else {
+      const branch = resolveUpgradeBranch(REPO_ROOT)
+      process.stderr.write(
+        `[eval-course-ckpt] --upgrade-nodes: ${staleNodes.length} 个 stale 节点，分支='${branch || '(空:仅重启/禁 pull)'}'\n`,
+      )
+      const up = requestNodeUpgrades({
+        repoRoot: REPO_ROOT,
+        expectedHash: localCodeHash,
+        branch,
+        // 单节点最多等 8s：agent 正常是秒回（200/202）或明确拒绝（409/5xx）；
+        // 挂了的路（502/黑洞）不该把整批评估卡住（实测 3 个坏节点 × 20s = 启动晚 60s）。
+        timeout: 8,
+        nodes: staleNodes.map((n) => ({
+          id: n.id || n.url,
+          url: n.url,
+          authKey: n.authKey,
+          pingHash: gate.find((g) => g.id === (n.id || n.url))?.pingHash ?? '',
+        })),
+      })
+      for (const l of upgradeLogLines('[eval-course-ckpt]', up)) process.stderr.write(`${l}\n`)
+    }
   }
 
   const nodesOk: DistNodeCfg[] = []
@@ -636,17 +709,18 @@ async function runHybrid(ctx: HybridCtx): Promise<{ rows: EvalCourseRow[]; error
 
   // ---- 远端 fetch-loop ----
   const RETRY_BACKOFF = [3, 5, 8, 12, 18, 26, 38, 60]
-  const spawnNode = (node: DistNodeCfg): void => {
-    const cap = Math.max(1, node.concurrency ?? 4)
+  /** 生成 `chains` 条该节点的 fetch-loop（容量按 chains 份记账）。 */
+  const spawnNode = (node: DistNodeCfg, chains: number): void => {
     const nid = node.id || node.url
-    batch.consumer(cap)
-    for (let s = 0; s < cap; s++) {
+    batch.consumer(chains)
+    for (let s = 0; s < chains; s++) {
       ;(async (): Promise<void> => {
         try {
           for (;;) {
             const i = batch.claim(batch.hasInflight)
             if (i < 0 || i >= total) return
             const job = ctx.jobs[i]
+            byClaim[`node:${nid}`] = (byClaim[`node:${nid}`] ?? 0) + 1
             const slot = ctx.weightsSlots[job.weightIdx]
             const stageJson = ctx.stagePayloads[job.stageLocal]?.json ?? ''
             const url = buildRemoteTaskUrl({
@@ -692,7 +766,7 @@ async function runHybrid(ctx: HybridCtx): Promise<{ rows: EvalCourseRow[]; error
                   job,
                   stageNameOf(job.stageLocal),
                 )
-                settle(job, row)
+                settle(job, row, undefined, `node:${nid}`)
                 ok = true
               } catch (e) {
                 lastErr = `${nid}: ${(e as Error).message}`
@@ -705,6 +779,7 @@ async function runHybrid(ctx: HybridCtx): Promise<{ rows: EvalCourseRow[]; error
                 job,
                 null,
                 `${job.label}#${job.id} s${job.stageId}/seed${job.seed} ${lastErr || 'remote failed'}`,
+                `node:${nid}`,
               )
           }
         } finally {
@@ -724,17 +799,19 @@ async function runHybrid(ctx: HybridCtx): Promise<{ rows: EvalCourseRow[]; error
           const i = batch.claim(batch.hasInflight)
           if (i < 0 || i >= total) return
           const job = ctx.jobs[i]
+          byClaim['local'] = (byClaim['local'] ?? 0) + 1
           try {
             const d = await runWorkerOnce(w, payloadFor(job))
-            if (d.error) settle(job, null, d.error)
+            if (d.error) settle(job, null, d.error, 'local')
             else
               settle(
                 job,
                 d.results[0] ?? null,
                 d.results[0] ? undefined : `empty result #${job.id}`,
+                'local',
               )
           } catch (e) {
-            settle(job, null, `local#${workerId} ${(e as Error).message}`)
+            settle(job, null, `local#${workerId} ${(e as Error).message}`, 'local')
           }
         }
       } finally {
@@ -744,8 +821,13 @@ async function runHybrid(ctx: HybridCtx): Promise<{ rows: EvalCourseRow[]; error
     })()
   }
 
-  for (let li = 0; li < localCap; li++) spawnLocal(li)
-  for (const n of nodesOk) spawnNode(n)
+  // 轮转 spawn（顺序与理由见 fanOutOrder 注释）：每轮先起 1 条本地链，再给每个可用节点
+  // 各起 1 条——不让配置里排第一的节点在同步 claim 阶段把整批任务秒光。
+  const nodeCaps = nodesOk.map((n) => Math.max(1, n.concurrency ?? 4))
+  for (const step of fanOutOrder(localCap, nodeCaps)) {
+    if ('local' in step) spawnLocal(step.local)
+    else spawnNode(nodesOk[step.node]!, 1)
+  }
 
   // 无消费者守护
   setTimeout(() => {
@@ -765,7 +847,7 @@ async function runHybrid(ctx: HybridCtx): Promise<{ rows: EvalCourseRow[]; error
   // 保序输出：按 id 回填（竞速不影响内容）
   const ordered: EvalCourseRow[] = []
   for (const r of results) if (r) ordered.push(r)
-  return { rows: ordered, errors }
+  return { rows: ordered, errors, gate, localCodeHash, bySrc, byClaim }
 }
 
 async function main(): Promise<void> {
@@ -849,6 +931,9 @@ async function main(): Promise<void> {
     distCfgPath = ''
     distPolicy = 'nn-goal'
   }
+  // `--upgrade-nodes`：对 stale 节点下发 pull+restart（训练循环同规守卫，经
+  // nn-py-safe.sh 调 dist_common.request_upgrade_guarded——**不**在 TS 里重写护栏）。
+  const upgradeNodes = flag('upgrade-nodes')
   const distLocalArg = parseInt(arg('dist-local') ?? String(workers), 10)
   const distLocal = Number.isFinite(distLocalArg) && distLocalArg >= 0 ? distLocalArg : workers
   const iterId = arg('iter-id') ?? `evalcourse-${Date.now()}`
@@ -909,12 +994,18 @@ async function main(): Promise<void> {
         iterId,
         localWorkers: distLocal,
         distCfgPath,
+        upgradeNodes,
       })
       rows = r.rows
       hybridErrors = r.errors
+      for (const l of provenanceNote('[eval-course-ckpt]', r.bySrc)) process.stderr.write(`${l}\n`)
+      for (const l of claimNote('[eval-course-ckpt]', r.byClaim)) process.stderr.write(`${l}\n`)
     } catch (e) {
       process.stderr.write(
         `[eval-course-ckpt] hybrid failed (${(e as Error).message}) — falling back to local\n`,
+      )
+      process.stderr.write(
+        '[eval-course-ckpt] WARN provenance: 分布式路径未成立 —— 本次全部局由**本地 worker** 跑（不要当作分布式读数）\n',
       )
       distCfgPath = ''
     }

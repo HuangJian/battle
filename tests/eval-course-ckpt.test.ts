@@ -4,6 +4,7 @@ import {
   buildCourseJobs,
   buildRemoteTaskUrl,
   bunMajorMinor,
+  fanOutOrder,
   manifestToCourseRow,
   nodeGateReason,
   parseCourseJsonc,
@@ -232,5 +233,39 @@ describe('eval-course-ckpt dist 映射', () => {
   it('bunMajorMinor', () => {
     expect(bunMajorMinor('1.2.3')).toBe('1.2')
     expect(bunMajorMinor('1.1.38')).toBe('1.1')
+  })
+})
+
+describe('eval-course-ckpt 消费者轮转顺序', () => {
+  it('第一轮每个节点各拿 1 条链（不被排头的节点秒光）', () => {
+    // 复现 2026-09-19 实测：5 节点（self 排第一、各 8/8/7/7/7 槽）+ local 0、8 局。
+    const order = fanOutOrder(0, [8, 8, 7, 7, 7])
+    expect(order.slice(0, 5)).toEqual([
+      { node: 0 },
+      { node: 1 },
+      { node: 2 },
+      { node: 3 },
+      { node: 4 },
+    ])
+    // 总数 = 各节点容量之和（链数没变，只是启动次序变了）。
+    expect(order.length).toBe(8 + 8 + 7 + 7 + 7)
+    expect(order.filter((s) => 'local' in s)).toEqual([])
+  })
+
+  it('每轮先本地链后节点链，节点容量小的先停', () => {
+    const order = fanOutOrder(2, [2, 1])
+    expect(order).toEqual([{ local: 0 }, { node: 0 }, { node: 1 }, { local: 1 }, { node: 0 }])
+  })
+
+  it('边界：无节点 / 无本地 / 全空', () => {
+    expect(fanOutOrder(3, [])).toEqual([{ local: 0 }, { local: 1 }, { local: 2 }])
+    expect(fanOutOrder(0, [2, 3])).toEqual([
+      { node: 0 },
+      { node: 1 },
+      { node: 0 },
+      { node: 1 },
+      { node: 1 },
+    ])
+    expect(fanOutOrder(0, [])).toEqual([])
   })
 })
