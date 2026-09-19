@@ -8,12 +8,12 @@
     "params": {
       "wKill": 3.0,
       "wHit": 0.3,
-      "wWin": 2.0
+      "wWin": 2.0,
     },
     "terminal": {
-      "lives_exhausted": -1.0
+      "lives_exhausted": -1.0,
     },
-    "scheme": "toy"
+    "scheme": "toy",
   },
   "dodge": "",
   "bc": "nn-training/weights/ladder-c02-bc/bc-latest.json",
@@ -33,12 +33,12 @@
       "until_iter": 40,
       "kl_coef": 0.2,
       "lr": 0.00015,
-      "kl_cap": 0.2
+      "kl_cap": 0.2,
     },
     {
       "kl_coef": 0.03,
-      "lr": 5e-05
-    }
+      "lr": 5e-5,
+    },
   ],
   "out": "tmp/ladder-c02/weights.json",
   "traj": "tmp/ladder-c02",
@@ -48,5 +48,5 @@
   "eval_stages": "2000-2005",
   "eval_games_per_stage": 200,
   "eval_every": 5,
-  "seed_rotate": 600
+  "seed_rotate": 600,
 }

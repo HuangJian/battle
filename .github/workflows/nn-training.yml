@@ -37,9 +37,9 @@ jobs:
     # （收益小但方差明显更小）。0 = 不设（退回 torch 默认）；实测推理见
     # tools/githook/nn-python-gate.sh 头注。
     env:
-      OMP_NUM_THREADS: "1"
-      MKL_NUM_THREADS: "1"
-      OPENBLAS_NUM_THREADS: "1"
+      OMP_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
     steps:
       - uses: actions/checkout@v4
 

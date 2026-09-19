@@ -215,13 +215,13 @@
       "wExplore": 0.2,
       // 最终剂量（§前置②b 的门 fired 后按门调整：2.5 → 3.0；wStar 项删除）。
       // 拾取项均值 +3.1/局 vs kill+win 17.0（§2 新语料）。
-      "wPickup": 3.0
+      "wPickup": 3.0,
     },
     "terminal": {
       "lives_exhausted": -5.0,
-      "timeout": -2.0
+      "timeout": -2.0,
     },
-    "scheme": "toy"
+    "scheme": "toy",
   },
   "dodge": "",
 
@@ -248,7 +248,7 @@
     // kl_cap 两段显式（x2 教训）。
     { "until_iter": 25, "kl_coef": 0.02, "lr": 0.0005, "kl_cap": 0.2 },
     // 尾段 it26+：kl 放松 + lr 砍半。
-    { "kl_coef": 0.01, "lr": 0.00025, "kl_cap": 0.2 }
+    { "kl_coef": 0.01, "lr": 0.00025, "kl_cap": 0.2 },
   ],
 
   // ── 采集：总量 24000/轮；单关 per-stage = 24000 ───────────────────────────

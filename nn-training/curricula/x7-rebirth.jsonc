@@ -218,13 +218,13 @@
       "wExplore": 0.2,
       "wPickup": 3.0,
       // 上限 0.0154（Σwhere0 747.2），冻结 0.008（余 48%）；改剂量 = 新腿。
-      "wApproach": 0.008
+      "wApproach": 0.008,
     },
     "terminal": {
       "lives_exhausted": -5.0,
-      "timeout": -2.0
+      "timeout": -2.0,
     },
-    "scheme": "toy"
+    "scheme": "toy",
   },
   "dodge": "",
 
@@ -250,7 +250,7 @@
     // 早段 it1–25（iters=0 时；有限轮 N 则 until 取 min(25, 40%×N)。kl_cap 两段显式。
     { "until_iter": 25, "kl_coef": 0.02, "lr": 0.0005, "kl_cap": 0.2 },
     // 尾段 it26+：kl 放松 + lr 砍半。
-    { "kl_coef": 0.01, "lr": 0.00025, "kl_cap": 0.2 }
+    { "kl_coef": 0.01, "lr": 0.00025, "kl_cap": 0.2 },
   ],
 
   // ── 采集：总量 24000/轮；4 关均分 = 6000 samples/关 ───────────────────────
@@ -272,7 +272,7 @@
   // 判决走池外固定段（§4：410000，4 关各 200）。
   "eval_stages": "2000-2003",
   "eval_games_per_stage": 50,
-  "eval_every": 5
+  "eval_every": 5,
 }
 
 // ── 开工前置 ─────────────────────────────────────────────────────────────

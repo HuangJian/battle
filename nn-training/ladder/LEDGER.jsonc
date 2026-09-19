@@ -12,7 +12,7 @@
         "source": "god-ai eval-course-ckpt",
         "outcomes": {
           "stage_clear": 198,
-          "gameover": 2
+          "gameover": 2,
         },
         "score": {
           "mean": 0.968,
@@ -21,9 +21,9 @@
           "std": 0.089,
           "var": 0.008,
           "min": 0.086,
-          "max": 0.98
-        }
-      }
+          "max": 0.98,
+        },
+      },
     },
     "ladder-c02": {
       "teacherWR": 0.845,
@@ -37,7 +37,7 @@
         "source": "god-ai eval-course-ckpt",
         "outcomes": {
           "gameover": 32,
-          "stage_clear": 168
+          "stage_clear": 168,
         },
         "score": {
           "mean": 0.843,
@@ -46,9 +46,9 @@
           "std": 0.316,
           "var": 0.1,
           "min": 0.086,
-          "max": 0.988
-        }
-      }
+          "max": 0.988,
+        },
+      },
     },
     "ladder-c03": {
       "teacherWR": 0.79,
@@ -62,7 +62,7 @@
         "source": "god-ai eval-course-ckpt",
         "outcomes": {
           "stage_clear": 157,
-          "gameover": 43
+          "gameover": 43,
         },
         "score": {
           "mean": 0.801,
@@ -71,9 +71,9 @@
           "std": 0.346,
           "var": 0.12,
           "min": 0.086,
-          "max": 0.988
-        }
-      }
+          "max": 0.988,
+        },
+      },
     },
     "ladder-c04": {
       "teacherWR": 0.64,
@@ -87,7 +87,7 @@
         "source": "god-ai eval-course-ckpt",
         "outcomes": {
           "gameover": 72,
-          "stage_clear": 128
+          "stage_clear": 128,
         },
         "score": {
           "mean": 0.682,
@@ -96,9 +96,9 @@
           "std": 0.398,
           "var": 0.159,
           "min": 0.086,
-          "max": 0.993
-        }
-      }
+          "max": 0.993,
+        },
+      },
     },
     "ladder-c05": {
       "teacherWR": 0.485,
@@ -112,7 +112,7 @@
         "source": "god-ai eval-course-ckpt",
         "outcomes": {
           "gameover": 103,
-          "stage_clear": 97
+          "stage_clear": 97,
         },
         "score": {
           "mean": 0.556,
@@ -121,9 +121,9 @@
           "std": 0.414,
           "var": 0.171,
           "min": 0.086,
-          "max": 0.992
-        }
-      }
+          "max": 0.992,
+        },
+      },
     },
     "ladder-c06": {
       "teacherWR": 0.44,
@@ -137,7 +137,7 @@
         "source": "god-ai eval-course-ckpt",
         "outcomes": {
           "gameover": 112,
-          "stage_clear": 88
+          "stage_clear": 88,
         },
         "score": {
           "mean": 0.518,
@@ -146,9 +146,9 @@
           "std": 0.413,
           "var": 0.171,
           "min": 0.086,
-          "max": 0.993
-        }
-      }
+          "max": 0.993,
+        },
+      },
     },
     "ladder-c07": {
       "teacherWR": 0.435,
@@ -162,7 +162,7 @@
         "source": "god-ai eval-course-ckpt",
         "outcomes": {
           "stage_clear": 87,
-          "gameover": 113
+          "gameover": 113,
         },
         "score": {
           "mean": 0.509,
@@ -171,9 +171,9 @@
           "std": 0.416,
           "var": 0.173,
           "min": 0.086,
-          "max": 0.994
-        }
-      }
+          "max": 0.994,
+        },
+      },
     },
     "x2": {
       "hypothesis": "kill/hit 稠密信号 + wWin 清场尖峰驱动，it40 前 pooled 爬升；60 轮无爬升证伪",
@@ -182,23 +182,23 @@
       "gates": "正式门 80.6/79.2/79.7（it50/60/75 归档，种子 0/1000/2000，1200局/轮）——仅第一轮过 80%，未毕业",
       "verdict": "not-graduated",
       "updated_at": "2026-09-15 05:34:23",
-      "disk_bytes": 914753327
+      "disk_bytes": 914753327,
     },
     "x2-acbc": {
       "hypothesis": "双关密度x3 + kill/hit 信号，it20 前 ac/bc pooled +5pp；30 轮无爬升证伪",
       "status": "closed-falsified",
       "verdict": "配对（种子4000+）ac 131->134、bc 122->116、pooled 253->250（-3/400），判负关账不续",
       "updated_at": "2026-09-15 05:34:24",
-      "disk_bytes": 556491835
+      "disk_bytes": 556491835,
     },
     "x3": {
       "hypothesis": "kill/hit + wWin 驱动，it40 前 pooled 爬升；60 轮无爬升证伪",
       "status": "running",
       "gates": "正式门一 it333 800局 69.5%（abc73.5/abd76.0/acd60.0/bcd68.5）；日常67轮横盘0.65-0.72",
       "updated_at": "2026-09-15 05:34:26",
-      "disk_bytes": 2359046877
-    }
+      "disk_bytes": 2359046877,
+    },
   },
   "version": 1,
-  "updated_at": "2026-09-13T14:49:22.973Z"
+  "updated_at": "2026-09-13T14:49:22.973Z",
 }

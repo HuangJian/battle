@@ -77,234 +77,52 @@
     {
       "name": "p4-onset-mixed",
       "grid": [
-        [
-          6,
-          6,
-          6,
-          6,
-          6,
-          6,
-          6,
-          6,
-          6,
-          6,
-          6,
-          6,
-          6
-        ],
-        [
-          6,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          6
-        ],
-        [
-          6,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          6
-        ],
-        [
-          6,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          6
-        ],
-        [
-          6,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          6
-        ],
-        [
-          6,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          6
-        ],
-        [
-          6,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          6
-        ],
-        [
-          6,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          6
-        ],
-        [
-          6,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          6
-        ],
-        [
-          6,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          6
-        ],
-        [
-          6,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          6
-        ],
-        [
-          6,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          6
-        ],
-        [
-          6,
-          6,
-          6,
-          6,
-          6,
-          6,
-          6,
-          6,
-          6,
-          6,
-          6,
-          6,
-          6
-        ]
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
       ],
       "forces": "abcdabcdabcdabcdabcd",
       "count": 6,
       "player_spawn": {
         "col": 12,
-        "row": 12
+        "row": 12,
       },
       "enemy_spawns": [
         {
           "col": 2,
-          "row": 2
+          "row": 2,
         },
         {
           "col": 22,
-          "row": 2
+          "row": 2,
         },
         {
           "col": 22,
-          "row": 22
+          "row": 22,
         },
         {
           "col": 2,
-          "row": 22
-        }
-      ]
-    }
+          "row": 22,
+        },
+      ],
+    },
   ],
   "difficulty": "hard",
   "max_ticks": 2400,
   "seed_rotate": 150,
   "player": {
     "lives": 1,
-    "level": 0
+    "level": 0,
   },
   "reward": {
     "formula": "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots - wTick*(min(ticks, clearTick + wBonusTicks) if clearTick >= 0 else ticks) - wChip*playerDamageTaken + wClear*(1.0 if (is_timeout and clearTick >= 0) else 0.0)",
@@ -319,14 +137,14 @@
       "wTick": 0.01,
       "wChip": 0.005,
       "wClear": 4.0,
-      "wBonusTicks": 600.0
+      "wBonusTicks": 600.0,
     },
     "terminal": {
       "stage_clear": 2.0,
       "lives_exhausted": -1.0,
-      "timeout": -2.0
+      "timeout": -2.0,
     },
-    "scheme": "toy"
+    "scheme": "toy",
   },
   "dodge": "",
   "bc": "nn-training/weights/c6-pickup/c6-pickup.it35.20260912-165846.json",
@@ -346,12 +164,12 @@
       "until_iter": 40,
       "kl_coef": 0.2,
       "lr": 0.00015,
-      "kl_cap": 0.2
+      "kl_cap": 0.2,
     },
     {
       "kl_coef": 0.03,
-      "lr": 5e-05
-    }
+      "lr": 5e-5,
+    },
   ],
   "out": "tmp/c6-bonus/weights.json",
   "traj": "tmp/c6-bonus",
@@ -371,12 +189,9 @@
       "kills": 3.54,
       "phits": 0.57,
       "zero_kill_frac": 0.14,
-      "timeout_frac": 0.02
+      "timeout_frac": 0.02,
     },
-    "advance_requires": [
-      "G1",
-      "G2"
-    ],
+    "advance_requires": ["G1", "G2"],
     "min_train_samples": 4000000,
     "est_iter_min": 3,
     "rules": [
@@ -388,13 +203,13 @@
         "min_gain_pp": 5.0,
         "require_rising": true,
         "pool_window": 4,
-        "conf_z": 1.645
+        "conf_z": 1.645,
       },
       {
         "id": "G2",
         "kind": "skill_floor",
         "verdict": "ADVANCE",
-        "max_zero_kill_frac": 0.3
+        "max_zero_kill_frac": 0.3,
       },
       {
         "id": "G4",
@@ -403,30 +218,23 @@
         "window_rounds": 6,
         "tol_pp": 5.0,
         "tol_kills": 0.5,
-        "metrics": [
-          "win_rate",
-          "kills_mean",
-          "pickup_mean"
-        ],
-        "advance_if": [
-          "G1",
-          "G2"
-        ],
-        "advance_frac": 0.7
+        "metrics": ["win_rate", "kills_mean", "pickup_mean"],
+        "advance_if": ["G1", "G2"],
+        "advance_frac": 0.7,
       },
       {
         "id": "G7",
         "kind": "course_valid",
         "verdict": "REMEDIATE",
         "max_timeout_frac": 0.15,
-        "rising_rounds": 3
+        "rising_rounds": 3,
       },
       {
         "id": "G13",
         "kind": "duty",
         "verdict": "REMEDIATE",
-        "min_train_frac": 0.1
-      }
-    ]
-  }
+        "min_train_frac": 0.1,
+      },
+    ],
+  },
 }

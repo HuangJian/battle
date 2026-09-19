@@ -217,11 +217,10 @@
       "wShot": 0.05,
       "wExplore": 0.2,
       "wPickup": 3.0,
-      "wApproach": 0.008
+      "wApproach": 0.008,
     },
-    "terminal": {
-    },
-    "scheme": "toy"
+    "terminal": {},
+    "scheme": "toy",
   },
   "dodge": "",
 
@@ -245,7 +244,7 @@
 
   "ppo_schedule": [
     { "until_iter": 25, "kl_coef": 0.02, "lr": 0.0005, "kl_cap": 0.2 },
-    { "kl_coef": 0.01, "lr": 0.00025, "kl_cap": 0.2 }
+    { "kl_coef": 0.01, "lr": 0.00025, "kl_cap": 0.2 },
   ],
 
   // ── 采集：总量 24000/轮；4 关均分 = 6000 samples/关 ───────────────────────
@@ -267,7 +266,7 @@
   // 判决走池外段（§4：412000，4 关各 200，seeds 412000-412199）。
   "eval_stages": "2000-2003",
   "eval_games_per_stage": 50,
-  "eval_every": 5
+  "eval_every": 5,
 }
 
 // ── 开工前置 ─────────────────────────────────────────────────────────────
