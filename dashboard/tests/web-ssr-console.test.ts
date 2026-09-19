@@ -46,7 +46,8 @@ describe('控制台 SSR（render.tsx renderConsolePage）', () => {
     expect(html).toContain('tc-hero')
     expect(html).toContain('tc-comps')
     expect(html).toContain('tc-npill')
-    // worker_server（冒烟瞬态）不进渲染体
+    // 本机伪节点（worker_server）**不在受管组件里**（2026-09-19 退出）：冒烟预演自起自停，
+    // 永远不该出现在渲染体里（它没有卡片/账本/日志页入口）。
     expect(html).not.toContain('<span class="tc-cc__name">workerServe')
     // 详情抽屉 / 弹窗 SSR 首帧不渲染（tc-drawer 类名在 CSS，用渲染体判定）
     expect(html).not.toContain('<aside class="tc-drawer"')

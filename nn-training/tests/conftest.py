@@ -15,6 +15,21 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# ---- 回环流量不许走环境代理（2026-09-18 门禁实测：同一类用例红了两次）----
+# 本机用户级环境带 HTTP_PROXY/HTTPS_PROXY，而 no_proxy 里写的是 `127.*` 这种**通配** ——
+# Python 的 urllib.request.proxy_bypass() 只认 host == entry / *.suffix / .suffix，
+# 于是每一次打到测试临时端口（127.0.0.1）的请求都被送进外部代理：多一跳，代理抖动时回 502
+# 或直接连接被拒（test_offline_deliver 读到 502、test_multi_course_hub 读到 Errno 111 ——
+# 两次被测服务自己的日志都好好的）。生产侧靠 `remote/net_http.py` 兑（不依赖环境变量），
+# 测试侧就没地补**精确主名**进 no_proxy：一行兜住所有裸 `urlopen` 的用例（8 个文件在用）。
+_LOOPBACK_NO_PROXY = ("127.0.0.1", "localhost", "::1")
+for _key in ("no_proxy", "NO_PROXY"):
+    _have = [x.strip() for x in os.environ.get(_key, "").split(",") if x.strip()]
+    for _host in _LOOPBACK_NO_PROXY:
+        if _host not in _have:
+            _have.append(_host)
+    os.environ[_key] = ",".join(_have)
+
 # ---- 幽灵 KeyboardInterrupt 免疫（2026-09-15）----
 # 本机（zh-CN Windows）pytest 树会间歇收到**无人按键**的 CTRL_C_EVENT 控制台组广播：
 # threading 等待处 KeyboardInterrupt、python 门禁 ~7s 即败且卡在 ~33-36% 段（2026-09-14

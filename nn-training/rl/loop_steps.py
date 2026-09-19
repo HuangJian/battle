@@ -33,6 +33,7 @@ from rl.archive import backup_weights
 from rl.eval_m1 import read_eval_summary
 from rl.events import write_event, write_gate_verdict, write_iteration
 from rl.log import log
+from rl.loop_round import RemotePpoJob, RoundContext, StepResult, wait_for
 from rl.modes import _MODE_BACKUP_PREFIX
 
 if TYPE_CHECKING:
@@ -58,28 +59,6 @@ class SmokeVoidRoundError(Exception):
     """
 
 
-def _course_push_url(args: Any) -> str:
-    """本课 push 节点 URL（rl-config `courses.<stem>.push_node_url`；多课同值 = N:1 共享）。
-
-    缺省空 = 沿用旧逻辑（全取 gpu_push 节点）。C1：URL 住 rl-config，永不进
-    curricula（否则 course_fp 血缘漂移，D14 熔断误判）。
-    """
-    try:
-        from train.loop_util import course_key_from_path
-
-        stem = course_key_from_path(str(getattr(args, "course_path", "") or ""))
-    except Exception:
-        return ""
-    if not stem:
-        return ""
-    try:
-        cfg = dist_common.load_dist_config() or {}
-        url = ((cfg.get("courses") or {}).get(stem) or {}).get("push_node_url") or ""
-        return str(url).rstrip("/")
-    except Exception:
-        return ""
-
-
 def _course_cf_tunnel(args: Any) -> tuple[str | None, str | None]:
     """本轮**真正生效**的隧道协议/边缘 IP → 写进 iteration 事件的 wire.protocol/edge_ip。
 
@@ -88,7 +67,7 @@ def _course_cf_tunnel(args: Any) -> tuple[str | None, str | None]:
     按选项分组统计（plan §1.4 的硬要求）。
 
     优先级：CLI 参数 > `courses.<stem>.cf_*` > `rl.cf_*` > None（不记）。
-    与 `_course_push_url` 同口径读 rl-config：选项住 rl-config，**永不进 curricula**
+    与 `_rollout_source` 同口径读 rl-config：选项住 rl-config，**永不进 curricula**
     （D14 血缘）；读不到一律返回 None（旧行为，不炸训练）。
     """
     proto = str(getattr(args, "remote_cf_protocol", "") or "") or None
@@ -115,15 +94,19 @@ def _course_cf_tunnel(args: Any) -> tuple[str | None, str | None]:
 
 
 #: `--rollout-src` 的合法值（auto = 按 rl-config 解析，缺省 local）。
-ROLLOUT_SRCS: tuple[str, ...] = ("auto", "local", "node")
+ROLLOUT_SRCS: tuple[str, ...] = ("auto", "local", "node", "run")
 
 
 def _rollout_source(args: Any) -> str:
-    """本轮 rollout 在哪跑：`local`（历史行为）| `node`（M3 整轮上云）。
+    """本轮 rollout 在哪跑：`local`（历史行为）| `node`（M3 整轮上云）| `run`（整段上云）。
 
     优先级：CLI `--rollout-src`（非 auto）> `courses.<stem>.rollout_src` > `rl.rollout_src`
-    > local。与 `_course_cf_tunnel` / `_course_push_url` 同口径读 rl-config：选项住
+    > local。与 `_course_cf_tunnel` 同口径读 rl-config：选项住
     rl-config，**永不进 curricula**（D14 血缘），读不到一律 local（旧行为，不炸训练）。
+
+    ★ `run`（2026-09-19 离线训练模式）是**声明**：真正的段长在 `_run_segment_iters`
+    （`run_iters`），两者都进了 `ROLLOUT_SRCS` —— 只声明 `run` 而不给段长是配置错误，
+    在 `step_course_iter` 里响亮拒跑（静默退化成「本地采样」正是最难查的那类）。
 
     ⚠ 写进 iteration 事件的 wire.rollout_src 用的是本函数的返回值，**不是** args 字面量
     —— 否则 auto 会记成 "auto"，事后无法按「实测在哪跑」分组。
@@ -205,31 +188,86 @@ def _run_wait_sec(args: Any) -> float:
     return v if v > 0 else RUN_WAIT_DEFAULT_SEC
 
 
-def _gpu_push_nodes(remote_token: str, course_push_url: str = "") -> list[dict]:
+def _gpu_push_nodes(remote_token: str) -> list[dict]:
     """GPU push 节点清单（HUB 推模式，DECISIONS §340 补充 4）：
-    环境变量 REMOTE_PUSH_NODE（hub-start 冒烟注入本机伪节点，优先）→
-    rl-config nodes[].gpu_push=true（真 GPU 机器，URL 指向其 worker_server 隧道）。
+    环境变量 REMOTE_PUSH_NODE（冒烟预演注入本机伪节点，优先）→
+    rl-config `nodes[].gpu_push=true`（真 GPU 机器，URL 指向其 worker_server 隧道）。
 
-    多课程（plan multi-course-parallel-training P3-W1b）：`course_push_url` 非空时
-    只取 URL 与之匹配的节点（N:1 共享天然成立——同 URL 多课同取）；为空时沿用旧逻辑
-    （全取）。env 注入永远保留（显式冒烟覆盖，不受课程过滤影响）。
-    非空但匹配 0 个的响亮失败在调用方（WARN + manifest 打标，不抛异常）。"""
+    ★ **课程与 worker 节点正交**（2026-09-19 用户口径：「课程任务与 worker 节点互相正交！
+    所有 worker 都可能接到在训的课程任务，不管它是哪个课程的」）：这里**不再**按课程的
+    `push_node_url` 过滤——登记在册的节点就是全部候选（hub 中介派发按队列顺序挑空闲的那个，
+    直推按序 failover）。「把某门课钉到某台机器」不存在：课程定义任务，节点提供算力。
+    env 注入是**独占**的显式覆盖（冒烟预演）：设了它就只有它，登记节点一律不参与——
+    否则伪节点一失败，failover 会把预演的 job 送去真 GPU 上跑（「冒烟不该碰真训练」）。"""
     out: list[dict] = []
     env_node = os.environ.get("REMOTE_PUSH_NODE")
     if env_node:
-        out.append({"url": env_node.rstrip("/"), "authKey": remote_token})
+        return [{"url": env_node.rstrip("/"), "authKey": remote_token}]
     cfg = dist_common.load_dist_config() or {}
     nodes = [n for n in cfg.get("nodes") or [] if n.get("gpu_push") and n.get("enabled", True)]
-    want = (course_push_url or "").rstrip("/")
-    if want:
-        nodes = [n for n in nodes if str(n.get("url", "")).rstrip("/") == want]
     for n in nodes:
         out.append({"url": str(n.get("url", "")).rstrip("/"), "authKey": str(n.get("authKey", ""))})
     return out
 
 
-#: `--remote-transport` 的合法值（auto = 历史优先级：本课 gpu_push 节点 > hub）。
-REMOTE_TRANSPORTS: tuple[str, ...] = ("auto", "pull", "push")
+#: `--remote-transport` 的合法值（auto = 登记在册的 gpu_push 节点 > hub pull）。
+#: 2026-09-19 起**课程与节点正交**：不再有「本课 push_node_url」这层按课程过滤。
+#: `hubpush`（2026-09-18）= 发布到 hub、由 **hub 推给**登记在册的 GPU worker——训练侧不直连
+#: 节点，于是队列/空闲判定/超时回落/多课程公平全住在一处（这就是它相对 `push` 的价值）。
+REMOTE_TRANSPORTS: tuple[str, ...] = ("auto", "pull", "push", "hubpush")
+
+
+def _hub_push_opt_in() -> bool:
+    """是否**允许** hub 中介推送（rl-config `rl.hub_push`；**缺省 = 允许**）。
+
+    auto 下它是唯一切到 `hubpush` 的开关（CLI `--remote-transport hubpush` 则无条件切）：
+    「push 经不经 hub」是**部署事实**（机群在 hub 后面跑还是隧道直推），不是每轮要重算的
+    东西 ⇒ 住 `rl.hub_push`（全局一个，2026-09-19 起**不再**按课程读 `courses.<课>.hub_push`：
+    那是「把某门课钉到某条派发路」的耦合，用户口径是课程与节点正交）。
+
+    缺省为什么是 **True**（用户 2026-09-19：「配了节点就默认走 hub 中介派发」）：hub 在
+    新模型下**始终在线**（pull 本来就要求它在），而 hub 派发把队列顺序 / 空闲判定 / 超时
+    回落 / 多课程公平全集中在一处。显式 `"hub_push": false` 回到直推节点。
+    需要 `hub_url` + token 齐备才真生效（`resolve_hub_push`）；缺则维持直推，不炸训练。
+    """
+    try:
+        cfg = dist_common.load_dist_config() or {}
+        rl = cfg.get("rl") or {}
+        v = rl.get("hub_push")
+        return True if v is None else bool(v)
+    except Exception:
+        return True
+
+
+def resolve_hub_push(
+    mode: str,
+    hub_url: str,
+    token: str,
+    opt_in: bool,
+) -> bool:
+    """传输裁决：本轮是否走 **hub 中介推送**（→ 发布带 `dispatch="push"` + 等 hub 回传）。
+
+    `--remote-transport` 与配置各有分工：
+      · `hubpush` → 无条件走（缺 hub_url/token 响亮 SystemExit，**不静默回落 pull**：
+        配置写错了却“训练看着正常”是这篇仓里最贵的一类错误）；
+      · `push`  → **不走**（“直推”是显式选择：云机没配 hub、或本机伪 GPU 冒烟）；
+      · `pull`  → 不走；
+      · `auto`  → `opt_in` 且 hub_url 与 token 齐备时走，否则保持历史行为（gpu_nodes 直推）。
+    """
+    if mode == "hubpush":
+        if not hub_url or not token:
+            raise SystemExit(
+                "[run_rl] --remote-transport hubpush 需要 --remote-hub-url 与 --remote-token"
+                "（hub 由它推给 GPU worker；直推云机用 --remote-transport push）"
+            )
+        return True
+    if mode in ("push", "pull"):
+        return False
+    if mode != "auto":
+        raise SystemExit(
+            f"[run_rl] 未知 --remote-transport {mode!r}（只接受 {'|'.join(REMOTE_TRANSPORTS)}）"
+        )
+    return bool(opt_in and hub_url and token)
 
 
 def resolve_transport(
@@ -240,11 +278,9 @@ def resolve_transport(
 ) -> list[dict]:
     """传输裁决（2026-09-15）→ **生效的 gpu_push 节点清单**（空 = 走 hub pull）。
 
-    `--remote-transport` 是**唯一**能压过「config 里有本课 gpu_push 节点就静默推云机」
-    的开关。控制台 local preset（本机独立 localWorker）必须钉 pull：某课用 push 跑过
-    一次后 `courses.<课>.push_node_url` 就留在 rl-config 里，不钉死则 job 全被推去云机，
-    本机 worker 永远领不到活——而且日志看起来「训练正常」（最贵的那种错误）。
-    auto 保持历史行为零变化（云机 pull/push preset 均不受影响）。
+    auto（默认）= 登记在册的 gpu_push 节点就是全部候选（课程与节点正交，2026-09-19）；
+    想钉死一条路就用 `--remote-transport pull|push|hubpush` 显式压过——控制台已不再
+    代写任何按课程的传输旋钮（课程定义任务，节点提供算力，二者不互相绑定）。
 
     非法组合响亮 SystemExit（与 require_remote_transport 同风格：绝不静默回落）。
     """
@@ -257,11 +293,15 @@ def resolve_transport(
                 "（本地 hub 场景：控制台 local preset 会注入本机 hub）"
             )
         return []
+    if mode == "hubpush":
+        # hub 中介推送：训练侧**不直连节点**（清单交给 hub 的登记表），校验留给
+        # resolve_hub_push（它才需要 hub_url/token）。
+        return []
     if mode == "push":
         if not gpu_nodes:
             raise SystemExit(
                 "[run_rl] --remote-transport push 但没有可用的 gpu_push 节点——"
-                "检查 rl-config nodes[].gpu_push / courses.<课>.push_node_url / REMOTE_PUSH_NODE"
+                "检查 rl-config nodes[].gpu_push（enabled）与 REMOTE_PUSH_NODE"
             )
         return gpu_nodes
     raise SystemExit(
@@ -295,54 +335,29 @@ def require_remote_transport(
         )
 
 
-def _push_job_round(
+def _push_over_nodes(
     nodes: list[dict],
-    manifest: dict,
-    jid: str,
-    payload_bytes: bytes,
-    code_bytes: bytes,
-    args: Any,
-    timeout_sec: float,
+    start_i: int,
+    step: Callable[[int, dict], Any],
     log: Any,
-    blobs: dict | None = None,
-    ts_code_bytes: bytes | None = None,
-) -> dict:
-    """按序向 push 节点提交 job 并等待结果；单节点失败换下一个，全部失败抛
-    RetryableError（loop 原地重试同迭代）。--smoke 经 X-Smoke-Echo 头触发节点侧
-    冒烟回显（不跑 PPO，结果带 smoke 标记 → 共享尾部作废本轮）。
+) -> Any:
+    """逐节点执行 `step(i, node)`；单节点失败换下一个；全失败时**抛出**（确定性原因优先）。
 
-    blobs（M2 B3）：opt/ref raw 字节（读自 job 目录）——push_client 判节点缓存命中，
-    只传未命中的那些。
+    为什么做成模块级共用：节点 failover 的**判决**只该有一份。它现在有三个调用方——
+    组合入口 `_push_job_round`（节点轮/整段）与拆相后的 `_push_submit_first`（发布）/
+    `_push_fetch`（等待）——三份各自演化过的 failover 语义是没法再对齐的（这个仓库已经
+    因为「同一件事两条实现」付过几次学费）。
 
-    ts_code_bytes（M3）：TS 运行时 zip（kind=iter 才非 None）；同样判节点缓存，只在
-    未命中时随 body 上传（sha 不变则整段腿只传一次）。"""
+    确定性节点失败（410：节点说这个 job 在这台机器上跑不成）单独记一笔：所有节点都倒了
+    时把它**原样抛出**，而不是包成 RetryableError（2026-09-17）。否则「bun 装不上」会被
+    上层当瞬时失败重试 3 次（每次重新 push + 等满超时）。
+    """
     last: Exception | None = None
-    # 确定性节点失败（410：节点说这个 job 在这台机器上跑不成）单独记一笔——
-    # 所有节点都倒了时把它**原样抛出**，而不是包成 RetryableError（2026-09-17）。
-    # 否则「bun 装不上」会被上层当瞬时失败重试 3 次（每次重新 push + 等满超时）。
     node_failed: JobFailedError | None = None
-    for node in nodes:
-        url, key = node["url"], node.get("authKey", "")
+    for i in range(start_i, len(nodes)):
+        url = nodes[i]["url"]
         try:
-            # M0：submit_job 返回本轮实测传输账（body/payload/code 字节 + 上传秒）
-            submit_wire = _push_submit(
-                url,
-                key,
-                manifest,
-                payload_bytes,
-                code_bytes,
-                blobs=blobs,
-                ts_code_zip=ts_code_bytes,
-                echo=bool(getattr(args, "smoke", False)),
-                log=log,
-            )
-            log(f"[run_rl] push: job {jid} 已提交 -> {url}（等待 GPU 完成）")
-            result = _push_wait_result(url, key, jid, timeout_sec=timeout_sec, log=log)
-            if isinstance(submit_wire, dict) and isinstance(result, dict):
-                # 挂在结果上随返回一路上浮（_wire_from_result 消费）——不改 result 的
-                # 校验字段，纯 additive。
-                result["wire_hub"] = submit_wire
-            return result
+            return step(i, nodes[i])
         except JobFailedError as e:
             # 终局：节点已判定跑不成（原因在 e 里）。换下一个节点仍值得一试（另一台
             # 可能有 bun），但全部节点都倒时得把**原因**带上去（见下方 raise）。
@@ -355,6 +370,59 @@ def _push_job_round(
     if node_failed is not None:
         raise node_failed
     raise RetryableError(f"push 全部节点失败: {last}")
+
+
+def _push_job_round(
+    nodes: list[dict],
+    manifest: dict,
+    jid: str,
+    payload_bytes: bytes,
+    code_bytes: bytes,
+    args: Any,
+    timeout_sec: float,
+    log: Any,
+    blobs: dict | None = None,
+    ts_code_bytes: bytes | None = None,
+) -> dict:
+    """（组合入口）按序向 push 节点提交 job 并等待结果；单节点失败换下一个，全部失败抛
+    RetryableError（loop 原地重试同迭代）。--smoke 经 X-Smoke-Echo 头触发节点侧
+    冒烟回显（不跑 PPO，结果带 smoke 标记 → 共享尾部作废本轮）。
+
+    blobs（M2 B3）：opt/ref raw 字节（读自 job 目录）——push_client 判节点缓存命中，
+    只传未命中的那些。
+
+    ts_code_bytes（M3）：TS 运行时 zip（kind=iter 才非 None）；同样判节点缓存，只在
+    未命中时随 body 上传（sha 不变则整段腿只传一次）。
+
+    R2c-3 之后它退为**薄组合**：failover 循环在 `_push_over_nodes`，提交/等待两个原语分别
+    是 `_push_submit` / `_push_wait_result`——与三相路径（`_push_submit_node` + `_push_fetch`）
+    同源，于是「换节点」的行为只有一处定义。本函数的入参是**内存里的字节**（调用方已经
+    读好），三相路径则是从 job 目录重读——这是两者唯一的区别。
+    """
+
+    def step(_i: int, node: dict) -> dict:
+        url, key = node["url"], node.get("authKey", "")
+        # M0：submit_job 返回本轮实测传输账（body/payload/code 字节 + 上传秒）
+        submit_wire = _push_submit(
+            url,
+            key,
+            manifest,
+            payload_bytes,
+            code_bytes,
+            blobs=blobs,
+            ts_code_zip=ts_code_bytes,
+            echo=bool(getattr(args, "smoke", False)),
+            log=log,
+        )
+        log(f"[run_rl] push: job {jid} 已提交 -> {url}（等待 GPU 完成）")
+        result = _push_wait_result(url, key, jid, timeout_sec=timeout_sec, log=log)
+        if isinstance(submit_wire, dict) and isinstance(result, dict):
+            # 挂在结果上随返回一路上浮（_wire_from_result 消费）——不改 result 的
+            # 校验字段，纯 additive。
+            result["wire_hub"] = submit_wire
+        return result
+
+    return cast(dict, _push_over_nodes(list(nodes), 0, step, log))
 
 
 def _kickstart_ref_payload(args: Any) -> tuple[str, str]:
@@ -560,6 +628,8 @@ class TrainingSteps:
     _start_it: int
     _traj_dir: Any
     _jsonl_path: Any
+    #: R2a：写入账本后把事件并入 `LedgerView` 的钩子（实现在 TrainingGuards）。
+    _ledger_apply: Any
     _report: dict
     _stream_meta: dict | None
     _eval_thread: threading.Thread | None
@@ -877,12 +947,19 @@ class TrainingSteps:
 
             j = CommitJournal(Path(self._traj_dir) / "commit_journal.jsonl")
             self._commit_journal_obj = j
-            pending = j.pending()
-            if pending:
+            # R2b：报**在飞集**（不只是 phase/round）——「在等哪个 job、推给了谁」
+            # 从「事故考古」变成一条日志（job_id 由 publish 后的 attach 行带上）。
+            inflight = j.inflight()
+            if inflight:
+                detail = ", ".join(
+                    f"{r['phase']}@{r['round']}"
+                    + (f" jid={r['jid']}" if r.get("jid") else "")
+                    + (f" via {r['dispatch']}" if r.get("dispatch") else "")
+                    for r in inflight
+                )
                 log(
-                    f"[run_rl] WAL replay-check: {len(pending)} 个未完成提交轮次 "
-                    f"{[(p['phase'], p['round']) for p in pending]} —— "
-                    "本地轮由 ppo_ckpt 续跑、远端轮重发同 it job（幂等）"
+                    f"[run_rl] WAL replay-check: {len(inflight)} 个未完成提交 "
+                    f"[{detail}] —— 本地轮由 ppo_ckpt 续跑、远端轮重发同 it job（幂等）"
                 )
         return j
 
@@ -1062,79 +1139,92 @@ class TrainingSteps:
 
         返回 True = 远端已出结果（本轮 PPO 结束）；False = 调用方改走本地路径。
         """
-        args = self.args
         try:
             self._remote_ppo(it)
         except remote_retryable_exceptions() as e:
-            if isinstance(e, JobFailedError):
-                # 节点已回报原因的**确定性**失败（2026-09-17）：不消耗连败配额、不重试
-                # ——重试只会再派给另一台同样干不了的机器，或等回同一个 410。
-                self._abort_node_failure(it, e, where="远端 PPO")
+            if self._handle_remote_failure(it, e):
                 raise
-            self._remote_fail += 1
-            limit = int(getattr(args, "remote_degrade_after", 0) or 0)
-            # 401/403/400：token 不对、IP 被 hub 闭锁、或请求本身有问题——**重试多少次
-            # 都不会自愈**，继续消耗连败配额只是重复 publish 同一 job 并把停腿拖后
-            # （x3-step 事故：5×30s 空转 + 账本 5 条同 id job_pending，最后照样死）。
-            fatal = fatal_remote_http(e)
-            if fatal:
+            return False
+        self._remote_fail = 0
+        return True
+
+    def _handle_remote_failure(self, it: int, e: BaseException) -> bool:
+        """远端失败的**唯一**处置策略（R9 三档）：`True` = 调用方原样上抛（本轮失败），
+        `False` = 已降级到本机（`args.ppo` 已置 local，调用方改走本地路径）。
+
+        为什么要抽出来：三相拆分之后，「发布失败」「取结果失败」「落位失败」是**同一类**
+        失败，必须过同一份判决——三段各自演化出不同的连败计数/停腿口径，正是本仓最贵的
+        一类分叉（x3-step 事故就是「专为远端失败写的停腿判决一行没写」）。三档语义与每条
+        处置细则逐字见 `_remote_ppo_or_degrade` 的 docstring。
+        """
+        args = self.args
+        if isinstance(e, JobFailedError):
+            # 节点已回报原因的**确定性**失败（2026-09-17）：不消耗连败配额、不重试
+            # ——重试只会再派给另一台同样干不了的机器，或等回同一个 410。
+            self._abort_node_failure(it, e, where="远端 PPO")
+            return True
+        self._remote_fail += 1
+        limit = int(getattr(args, "remote_degrade_after", 0) or 0)
+        # 401/403/400：token 不对、IP 被 hub 闭锁、或请求本身有问题——**重试多少次
+        # 都不会自愈**，继续消耗连败配额只是重复 publish 同一 job 并把停腿拖后
+        # （x3-step 事故：5×30s 空转 + 账本 5 条同 id job_pending，最后照样死）。
+        fatal = fatal_remote_http(e)
+        if fatal:
+            write_gate_verdict(
+                self._jsonl_path,
+                it,
+                "ABORT",
+                f"远端 PPO 不可重试失败 HTTP {fatal}——检查 --remote-token 与 hub 日志 "
+                f"AUTH FAIL / BLOCKED 行：{str(e)[:200]}",
+                decider="loop",
+            )
+            log(
+                f"[run_rl] GATE ABORT it{it}: 远端 HTTP {fatal}（鉴权/闭锁类，非网络抖动）"
+                f"——不再重试，立即停腿"
+            )
+            self._leg_abort = True
+            return True
+        log(
+            f"[run_rl] remote ppo it{it} FAILED ({type(e).__name__}: {str(e)[:200]}) — "
+            f"consecutive={self._remote_fail}"
+            + (f"/{limit}" if limit > 0 else "（降级已禁用）")
+        )
+        if limit <= 0:
+            # 显式关闭降级：连败 3 次即停腿（§12-R9 末句：仍失败写 ABORT 行）
+            if self._remote_fail >= 3:
                 write_gate_verdict(
                     self._jsonl_path,
                     it,
                     "ABORT",
-                    f"远端 PPO 不可重试失败 HTTP {fatal}——检查 --remote-token 与 hub 日志 "
-                    f"AUTH FAIL / BLOCKED 行：{str(e)[:200]}",
+                    f"远端 PPO 连续失败 {self._remote_fail} 次且 --remote-degrade-after=0",
                     decider="loop",
                 )
-                log(
-                    f"[run_rl] GATE ABORT it{it}: 远端 HTTP {fatal}（鉴权/闭锁类，非网络抖动）"
-                    f"——不再重试，立即停腿"
-                )
+                log(f"[run_rl] GATE ABORT it{it}: 远端不可用且禁用降级——停腿")
                 self._leg_abort = True
-                raise
-            log(
-                f"[run_rl] remote ppo it{it} FAILED ({type(e).__name__}: {str(e)[:200]}) — "
-                f"consecutive={self._remote_fail}"
-                + (f"/{limit}" if limit > 0 else "（降级已禁用）")
-            )
-            if limit <= 0:
-                # 显式关闭降级：连败 3 次即停腿（§12-R9 末句：仍失败写 ABORT 行）
-                if self._remote_fail >= 3:
-                    write_gate_verdict(
-                        self._jsonl_path,
-                        it,
-                        "ABORT",
-                        f"远端 PPO 连续失败 {self._remote_fail} 次且 --remote-degrade-after=0",
-                        decider="loop",
-                    )
-                    log(f"[run_rl] GATE ABORT it{it}: 远端不可用且禁用降级——停腿")
-                    self._leg_abort = True
-                raise
-            if self._remote_fail < limit:
-                raise  # 未达阈值：按既有语义原地重试（同一 iter，不推进）
-            # T7：降级前必须先建好本机 PPO 栈。remote 启动为 hub 省 torch 把
-            # backend/model/opt 置 None；直接改 args.ppo=local 会让 _serial_ppo
-            # 撞 None.load_episodes（x3-power it1 实锤）。
-            self._ensure_local_ppo_stack()
-            args.ppo = "local"
-            self._remote_degraded = True
-            write_event(
-                self._jsonl_path,
-                {
-                    "event": "remote_degrade",
-                    "iter": it,
-                    "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "after_failures": self._remote_fail,
-                    "reason": f"{type(e).__name__}: {str(e)[:300]}",
-                },
-            )
-            log(
-                f"[run_rl] R9 DEGRADE it{it}: 远端连续失败 {self._remote_fail} 次 —— "
-                f"本腿改走本机 PPO（args.ppo=local）。恢复远端需重启训练并修好链路。"
-            )
-            return False
-        self._remote_fail = 0
-        return True
+            return True
+        if self._remote_fail < limit:
+            return True  # 未达阈值：按既有语义原地重试（同一 iter，不推进）
+        # T7：降级前必须先建好本机 PPO 栈。remote 启动为 hub 省 torch 把
+        # backend/model/opt 置 None；直接改 args.ppo=local 会让 _serial_ppo
+        # 撞 None.load_episodes（x3-power it1 实锤）。
+        self._ensure_local_ppo_stack()
+        args.ppo = "local"
+        self._remote_degraded = True
+        write_event(
+            self._jsonl_path,
+            {
+                "event": "remote_degrade",
+                "iter": it,
+                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "after_failures": self._remote_fail,
+                "reason": f"{type(e).__name__}: {str(e)[:300]}",
+            },
+        )
+        log(
+            f"[run_rl] R9 DEGRADE it{it}: 远端连续失败 {self._remote_fail} 次 —— "
+            f"本腿改走本机 PPO（args.ppo=local）。恢复远端需重启训练并修好链路。"
+        )
+        return False
 
     def _remote_ppo(
         self,
@@ -1145,6 +1235,34 @@ class TrainingSteps:
         wait_timeout_sec: float = 0.0,
         export_path: str | Path | None = None,
     ) -> dict:
+        """远端 PPO（--ppo remote，D11/D12）——**组合入口**：发布 → 等结果 → 落位。
+
+        R2c-3（2026-09-18）把原来那 400 行顺序函数拆成三相（`_remote_ppo_publish` /
+        `_remote_ppo_probe` / `_remote_ppo_fetch` / `_remote_ppo_land`），本函数保持拆分前
+        的**组合语义**（打包 → 发布 → 阻塞等待 → 三重校验落位），四个既有调用点（本机轮 /
+        节点轮 / 半离线整段 / 全离线导出）行为不变。
+
+        差别只在**谁驱动**：细粒度路径（`step_ppo` + `Supervisor`）不调本函数，而是自己串
+        三相——中间那次「问一句」允许让位，于是「等云机回传」不再是阻塞点（`_remote_ppo_step`）。
+        """
+        sess = self._remote_ppo_publish(
+            it,
+            rollout_spec,
+            plan_bytes=plan_bytes,
+            wait_timeout_sec=wait_timeout_sec,
+            export_path=export_path,
+        )
+        return self._remote_ppo_land(sess, self._remote_ppo_fetch(sess))
+
+    def _remote_ppo_publish(
+        self,
+        it: int,
+        rollout_spec: dict | None = None,
+        *,
+        plan_bytes: bytes | None = None,
+        wait_timeout_sec: float = 0.0,
+        export_path: str | Path | None = None,
+    ) -> RemotePpoJob:
         """远程 PPO（--ppo remote，D11/D12）：打包 → 发布 job → 轮询等待 → 三重校验落位。
 
         `rollout_spec` 非空 = **M3 整轮上云**（kind=iter）：本轮不发本地 shard（payload
@@ -1173,14 +1291,13 @@ class TrainingSteps:
         # verify_and_land 三重校验防错位落盘）。
         self._commit_journal().start("ppo_remote", str(it))
         self._forensics(f"remote_pre it{it}")
+        # 本相位只做「打包 + 发布」：等结果与校验落位各在自己的相位里（三相拆分后
+        # 三处的导入也各自独立——一份 import 清单服务三段，是拆相前那种形状的残留）。
         from remote.hub_client import (
             git_head,
             iter_shard_dirs,
-            mark_job_completed,
             pack_code_zip,
             publish_job,
-            verify_and_land,
-            wait_job,
         )
 
         hub_url = str(getattr(args, "remote_hub_url", "") or "")
@@ -1188,13 +1305,16 @@ class TrainingSteps:
         # Push 优先解析（纯 push 不再依赖本地 hub-server / cloudflared）：
         # 有 gpu_push 节点或 REMOTE_PUSH_NODE 时，payload/code 直推云机隧道，
         # hub_url 可缺省。token 仍要（pull 回落 / env 节点鉴权）；配置节点自带 authKey。
-        push_url = _course_push_url(args)
         transport = str(getattr(args, "remote_transport", "auto") or "auto")
-        gpu_nodes = resolve_transport(transport, hub_url, token, _gpu_push_nodes(token, push_url))
+        gpu_nodes = resolve_transport(transport, hub_url, token, _gpu_push_nodes(token))
+        # hub 中介推送（2026-09-18）：发布带 manifest.dispatch="push"，由 hub 按登记表
+        # 推给空闲 GPU worker——训练侧不直连节点，于是「队列顺序/空闲判定/超时回落/
+        # 多课程公平」全住在一处。与 gpu_nodes 互斥（resolve_transport hubpush 恒返空）。
+        hub_push = resolve_hub_push(transport, hub_url, token, _hub_push_opt_in())
         require_remote_transport(hub_url, token, gpu_nodes)
         log(
             f"[run_rl] remote ppo transport={transport} push_nodes={len(gpu_nodes)} "
-            f"hub={hub_url or '-'}"
+            f"hub_push={hub_push} hub={hub_url or '-'}"
         )
         job_root = str(getattr(args, "remote_job_root", "") or "") or str(
             Path(args.traj) / "remote-jobs"
@@ -1325,6 +1445,8 @@ class TrainingSteps:
             # 全离线导出：只建 job 目录（拿它当打包源），不记账本也不进待领池——
             # 云机不在网络上，记一条 `job_pending` 只会让控制台看到一条永远等不到工人的任务。
             register=export_path is None,
+            # hub 中介推送的意图（hub 读它决定「这份活由我推」；缺席 = pull，字节不变）。
+            dispatch="push" if hub_push else "",
             ts_code_sha256=(
                 str(getattr(self, "_ts_code_sha256", "") or "") if rollout_spec else ""
             ),
@@ -1332,6 +1454,16 @@ class TrainingSteps:
             log=log,
         )
         jid = manifest["job_id"]
+        # R2b（plan/r2-loop-task-queue §2.3）：把刚发布的 job 补进 WAL 的**在飞集**——
+        # job_id 是 publish 的返回值（start 时还没有），只能上这条 attach。重启后
+        # `_commit_journal` 就能报出「在等哪个 job、推给了谁」，而不是只报一个 round 号。
+        self._commit_journal().attach(
+            "ppo_remote",
+            str(it),
+            jid=jid,
+            dispatch="push" if hub_push else "pull",
+            ts=time.time(),
+        )
         pack_sec = round(time.time() - t_pack, 3)
         if export_path is not None:
             # 全离线：不等待、不发 job——把这一段任务打成能上传 Kaggle/Colab 的任务包。
@@ -1356,101 +1488,115 @@ class TrainingSteps:
             )
             self._bundle_index = index
             raise BundleExportedError(str(export_path))
-        # 阻塞等待云 worker 完成（与 _serial_ppo 同构；超时由 hub-server 租约吸收）。
-        # 半离线段要等整段（节点跑完 N 轮才回传），所以预算由调用方给（缺省 30min）。
+        # ---- 会话成型：三相之间**唯一**的载体（发布 → 等结果 → 落位） ----
+        # 超时预算在这里算定：同一份 job 的等待预算不该因为「谁先问了一句」而变
+        # （细粒度路径会让位后再回来，那时 `wait_timeout_sec` 已经不在作用域里了）。
         timeout_sec = float(wait_timeout_sec or 0.0) or 30 * 60.0
+        sess = RemotePpoJob(
+            it=it,
+            jid=jid,
+            manifest=manifest,
+            transport="push" if gpu_nodes else "hub",
+            nodes=list(gpu_nodes),
+            job_root=job_root,
+            hub_url=hub_url,
+            hub_token=token,
+            timeout_sec=timeout_sec,
+            t_ppo=t_ppo,
+            pack_sec=pack_sec,
+            kick_on=kick_on,
+            kick_kl=kick_kl,
+            rollout_spec=rollout_spec,
+            segment=plan_bytes is not None,
+            hub_push=hub_push,
+        )
         # remote PPO 等待期集群空闲 —— 立即开 evalboard 窗领批（含等待期间新入队的）。
         # 否则「rollout 后才 enqueue」的批要等 PPO 收官后的第二次 idle，卡数十分钟。
+        # **必须落在发布相位**：窗口要在「开始等」那一刻就开——细粒度路径会先让位，
+        # 等到结果再开窗就永远错过那段空闲（那正是它要服务的窗口）。
         if hasattr(self, "_evalboard_idle"):
             self._evalboard_idle(it, getattr(self, "_last_dist_cfg", None))
-        # P3-W1b：本课 push_node_url 非空时只取 URL 匹配项（N:1 共享天然成立）；
-        # 为空时沿用旧逻辑（全取，默认行为零变化）。gpu_nodes 已在上方解析。
-        if (
-            transport == "auto"
-            and push_url
-            and not os.environ.get("REMOTE_PUSH_NODE")
-            and len(gpu_nodes) == 0
-        ):
-            # F-B5：非空但匹配 0 个且无 env 注入 → 响亮失败（WARN + manifest 打标，
-            # 不抛异常——抛异常致 loop 无限原地重试 hang；静默回落 pull 仍能正确训练，
-            # 危险在误诊不在停机，配错 URL 必须一眼可见）。
-            msg = (
-                f"[run_rl] WARN: courses push_node_url={push_url} 匹配到 0 个 "
-                "gpu_push 节点——本轮回落 pull（remote_hub_url），请检查 rl-config "
-                "courses 块或节点 gpu_push 标记"
-            )
-            log(msg)
-            manifest["push_filter_warn"] = msg
+        # 直推节点链路：**发布即提交**（三相拆分的关键约定）。探针要问「那份 job 现在怎么
+        # 样了」，而节点上还没有这份 job 时它只会一直答「还没回」⇒ 提交必须落在发布相位，
+        # 等待相位才可能真让位。提交本身是**有界**的上传（几十 MB），不是那 25 分钟的等待。
         if gpu_nodes:
-            # ---- HUB 推分支（DECISIONS §340 补充 4）：payload/code 直接 POST 到
-            # GPU 节点的 worker_server（其 cloudflared 隧道暴露），HUB 只做出站
-            # HTTPS——弱链路落在 Kaggle 网络。打包/账本/三重校验/落位与 pull 同构。
-            _pl = find_payload(Path(job_root) / jid)
-            if _pl is None:
-                raise ProtocolError(f"job {jid}: payload 不在盘上（push 无法发送）")
-            payload_bytes = _pl.read_bytes()
-            code_bytes = self._code_zip_path.read_bytes()
-            # M2 B3：读 job 目录内的 opt/ref blob，交给 push_client 按节点缓存按需发送。
-            from remote.protocol import BLOB_NAMES, blob_path
+            self._push_submit_first(sess)
+        return sess
 
-            blobs = {
-                n: _bp.read_bytes()
-                for n in BLOB_NAMES
-                if (_bp := blob_path(Path(job_root) / jid, n)).exists()
-            }
-            result = _push_job_round(
-                gpu_nodes,
-                manifest,
-                jid,
-                payload_bytes,
-                code_bytes,
-                args,
-                timeout_sec,
-                log,
-                blobs=blobs,
-                ts_code_bytes=(
-                    Path(self._ts_code_zip_path).read_bytes() if rollout_spec else None
-                ),
-            )
-        else:
-            result = wait_job(hub_url, token, jid, timeout_sec=timeout_sec, log=log)
+    def _remote_ppo_probe(self, sess: RemotePpoJob) -> dict | None:
+        """相位②的**非阻塞**版：问一句就走（就绪 → 结果；未就绪 / 瞬时错 → None）。
+
+        终局失败（410）照抛：「还没好」与「永远好不了」必须分开——后者要立刻停腿，而把它
+        当成「还没好」正是 x3-step 事故把「bun 缺失」写成 25 分钟超时的原因。
+        """
+        from remote.hub_client import poll_job
+        from remote.push_client import poll_result
+
+        if sess.transport == "push":
+            return poll_result(sess.probe_base_url, sess.probe_token, sess.jid)
+        return poll_job(sess.probe_base_url, sess.probe_token, sess.jid)
+
+    def _remote_ppo_fetch(self, sess: RemotePpoJob) -> dict:
+        """相位②：**阻塞**等到结果（组合路径 / 节点轮 / 半离线整段用它）。
+
+        细粒度驱动器不走这里：它先 `_remote_ppo_probe` 问一句，未就绪就 `WAIT` 让位
+        ——让位点因此落在「已经发布、只是还没回」这个**真状态**上（`_remote_ppo_step`）。
+        """
+        from remote.hub_client import wait_job
+
+        if sess.transport == "push":
+            return self._push_fetch(sess)
+        return wait_job(
+            sess.hub_url, sess.hub_token, sess.jid, timeout_sec=sess.timeout_sec, log=log
+        )
+
+    def _remote_ppo_land(self, sess: RemotePpoJob, result: dict) -> dict:
+        """相位③：三重校验 + 落位 + 记账 + 结算字段（`_remote_ppo` 的返回就是它）。
+
+        `result` 由相位②给（阻塞或非阻塞取到的是同一件东西），本相位因此对驱动方式
+        完全无感——这也是把「校验落位」单独切出来的理由：它既不该被等法影响，也不该
+        自己再去碰网络。
+        """
+        args = self.args
+        from remote.hub_client import mark_job_completed, verify_and_land
+
         # 三重校验 + 落位（D12）：任一不等响亮拒绝，不落盘
         verify_and_land(
             result,
-            manifest,
+            sess.manifest,
             init_weights_path=args.out,
             traj_dir=args.traj,
-            it=it,
+            it=sess.it,
             out_weights=args.out,
             log=log,
         )
-        mark_job_completed(self._jsonl_path, jid)
+        mark_job_completed(self._jsonl_path, sess.jid)
         # I1：远端提交序列完成（校验落位 + job 记账）——WAL 收口。冒烟作废轮也算
         # 完成（commit 本身成功了；作废轮由 _prepare_iter_dir 清场后重试新轮）。
-        self._commit_journal().finish("ppo_remote", str(it), jid=jid)
-        self._forensics(f"remote_post it{it}")
+        self._commit_journal().finish("ppo_remote", str(sess.it), jid=sess.jid)
+        self._forensics(f"remote_post it{sess.it}")
         if result.get("smoke"):
             # 冒烟回显（worker --echo）：全链路已验证，但权重 = init 回显非真 PPO——
             # 作废本轮。job_completed 已记账（审计链完整）；落位的 out 权重与
             # 发布时逐字节相同（init 回显），无需回滚；重试轮 _prepare_iter_dir 清场。
-            log(f"[run_rl] remote ppo it{it}: job {jid} 是冒烟回显（result.smoke）——本轮作废")
-            raise SmokeVoidRoundError(jid)
+            log(f"[run_rl] remote ppo it{sess.it}: job {sess.jid} 是冒烟回显（result.smoke）——本轮作废")
+            raise SmokeVoidRoundError(sess.jid)
         # H7（review-hy）：--remote-precollect 1 → 在 PPO 等待窗口后 spawn 下一轮首波
         # 预采（θ_N 快照，复用 spawn_collect_next 双缓冲机制）。默认 0（Q10 测后开）
         # 时不可达。stale 分数上限 30% 的筛选（S5/F4）属 §6-D3 后续项，未在此实现。
         # M3：上云轮不得预采——节点已经在跑本轮的 rollout，hub 再 spawn 一个本地预采
         # 就成了双份采集（且下一轮又会被 rollout_src=node 拒绝发布）。
         if (
-            rollout_spec is None
+            sess.rollout_spec is None
             and int(getattr(args, "remote_precollect", 0) or 0)
-            and (args.iters <= 0 or it < args.iters)
+            and (args.iters <= 0 or sess.it < args.iters)
         ):
             from rl.collect_only import spawn_collect_next
 
             # H7（review-hy）：预采子进程句柄必须存入 self._collect_child，
             # 否则主循环的 join_precollect_child（下一轮开头）接收 None 跳过
             # 等待，预采首波可能尚未落盘即被 _prepare_iter_dir 清场。
-            self._collect_child = spawn_collect_next(args, it)
+            self._collect_child = spawn_collect_next(args, sess.it)
             if self._collect_child is not None:
                 log(
                     f"[run_rl] remote precollect: next-round first-wave spawned (pid={self._collect_child.pid})"
@@ -1460,7 +1606,8 @@ class TrainingSteps:
         self._chunks_n = int(result.get("agg", {}).get("chunks", 0))
         self._total_steps = int(result.get("agg", {}).get("steps", 0))
         self._kl_cum = self._agg["kl"]
-        self._ppo_sec = round(time.time() - t_ppo, 1)  # 往返墙钟（含打包/上传/排队/下载）
+        # 往返墙钟（含打包/上传/排队/下载）：分母是**发布时刻**，跨步也认同一份
+        self._ppo_sec = round(time.time() - sess.t_ppo, 1)
         # 真训练秒：云端 worker 自报的 load+chunk+update（旧 worker / echo 无此字段 → 回落往返）
         self._ppo_cloud_sec = float(result.get("ppo_sec") or 0.0) or self._ppo_sec
         # M0 统一计量：传输层实测（字节/秒）汇总进 iteration 事件的 wire 子字典。
@@ -1468,8 +1615,10 @@ class TrainingSteps:
         _cf_tunnel = _course_cf_tunnel(args)
         self._wire = _wire_from_result(
             result,
-            is_push=bool(gpu_nodes),
-            pack_sec=pack_sec,
+            # hub 中介推送也是「推」：hub 侧记的是 submit 实测（body_bytes/upload_sec），
+            # 与直推同一套读数——两种 push 的可观测性不该一个有一个无。
+            is_push=bool(sess.nodes) or sess.hub_push,
+            pack_sec=sess.pack_sec,
             cfg={
                 # M1：记**真正生效**的隧道选项（CLI > courses.<stem>.cf_* > rl.cf_* > None）。
                 # 不能用 `getattr(args, "remote_cf_protocol", None)`——控制台写的是 rl-config，
@@ -1481,7 +1630,9 @@ class TrainingSteps:
                 # args 字面量（auto 会被 _rollout_source 解析成 local/node——原样记
                 # auto 等于没记）。
                 "rollout_src": (
-                    "run" if plan_bytes is not None else ("node" if rollout_spec else "local")
+                    "run"
+                    if sess.segment
+                    else ("node" if sess.rollout_spec else "local")
                 ),
             },
         )
@@ -1491,29 +1642,150 @@ class TrainingSteps:
         # 2026-09-14 x2-start it31 豁免：系数按几何衰减到期归零后（kick_kl 不活跃、
         # 训练侧不再附 ref），worker 回 0 是预期行为，不得误报（kickstart_warn_kind）。
         _kick_kind = kickstart_warn_kind(
-            kick_on=kick_on,
+            kick_on=sess.kick_on,
             smoke=bool(result.get("smoke")),
             agg_kickstart=float(self._agg.get("kickstart", 0.0)),
-            kick_coef=kick_kl,
+            kick_coef=sess.kick_kl,
         )
         if _kick_kind == "warn":
             log(
-                f"[run_rl] WARN remote it{it}: kickstart_ref 已要求（kk 衰减调度激活）"
+                f"[run_rl] WARN remote it{sess.it}: kickstart_ref 已要求（kk 衰减调度激活）"
                 "但云端结果 kickstart=0——worker 未执行缰绳？查 worker 代码/会话新鲜度"
             )
         elif _kick_kind == "expired":
             log(
-                f"[run_rl] remote it{it}: kickstart 系数已衰减到期（kk={kick_kl:g}）——"
+                f"[run_rl] remote it{sess.it}: kickstart 系数已衰减到期（kk={sess.kick_kl:g}）——"
                 "worker 未上报距离属预期，不告警"
             )
         log(
-            f"[run_rl] remote ppo it{it}: job {jid} accepted — "
+            f"[run_rl] remote ppo it{sess.it}: job {sess.jid} accepted — "
             f"steps={self._total_steps} chunks={self._chunks_n} "
             f"kl={self._agg['kl']:.5f} entropy={self._agg['entropy']:.4f} "
-            + (f"kickstart={self._agg['kickstart']:.4f} " if kick_on else "")
+            + (f"kickstart={self._agg['kickstart']:.4f} " if sess.kick_on else "")
             + f"({self._ppo_sec}s round-trip) -> {args.out}"
         )
         return result
+
+    # ---- 直推节点链路（提交 = 发布相位，等待 = 等待相位） ------------------------
+
+    def _push_submit_node(self, sess: RemotePpoJob, i: int) -> None:
+        """向第 i 个直推节点提交 job（**发布**动作），并把传输读数记进会话。
+
+        payload / code / blob 一律**从 job 目录重读盘**：会话刻意不持有几十 MB 的字节
+        （见 `RemotePpoJob` 的文档），换节点重发时正好也重读一次。
+        """
+        node = sess.nodes[i]
+        job_dir = Path(sess.job_root) / sess.jid
+        _pl = find_payload(job_dir)
+        if _pl is None:
+            raise ProtocolError(f"job {sess.jid}: payload 不在盘上（push 无法发送）")
+        from remote.protocol import BLOB_NAMES, blob_path
+
+        blobs = {
+            n: bp.read_bytes()
+            for n in BLOB_NAMES
+            if (bp := blob_path(job_dir, n)).exists()
+        }
+        # M0：submit_job 返回本轮实测传输账（body/payload/code 字节 + 上传秒）
+        sess.submit_wire = _push_submit(
+            str(node["url"]),
+            str(node.get("authKey", "")),
+            sess.manifest,
+            _pl.read_bytes(),
+            self._code_zip_path.read_bytes(),
+            blobs=blobs,
+            ts_code_zip=(
+                Path(self._ts_code_zip_path).read_bytes() if sess.rollout_spec else None
+            ),
+            echo=bool(getattr(self.args, "smoke", False)),
+            log=log,
+        )
+        sess.node_i = i
+        log(f"[run_rl] push: job {sess.jid} 已提交 -> {node['url']}（等待 GPU 完成）")
+
+    def _push_submit_first(self, sess: RemotePpoJob) -> None:
+        """按序找第一个收下这份 job 的节点；全失败时把**确定性原因**原样上抛。
+
+        failover 判决在 `_push_over_nodes`（与 `_push_job_round` / `_push_fetch` 同一份）。
+        """
+
+        def step(i: int, _node: dict) -> None:
+            self._push_submit_node(sess, i)
+
+        _push_over_nodes(sess.nodes, 0, step, log)
+
+    def _push_fetch(self, sess: RemotePpoJob) -> dict:
+        """等已提交的节点回结果；该节点失败就换下一个（**重提交**），全失败照旧上抛。
+
+        与组合入口 `_push_job_round` 同序（逐节点「提交 → 等」，任一环节失败即换人），
+        差别只在「第一个节点的提交已经发生在发布相位」⇒ 本函数从 `sess.node_i` 起走，
+        且换到新节点时要先补提交（新节点从没见过这份 job）。
+        """
+
+        def step(i: int, node: dict) -> dict:
+            if sess.node_i != i:
+                self._push_submit_node(sess, i)
+            result = _push_wait_result(
+                str(node["url"]),
+                str(node.get("authKey", "")),
+                sess.jid,
+                timeout_sec=sess.timeout_sec,
+                log=log,
+            )
+            if isinstance(sess.submit_wire, dict) and isinstance(result, dict):
+                # 挂在结果上随返回一路上浮（_wire_from_result 消费）——不改 result 的
+                # 校验字段，纯 additive。
+                result["wire_hub"] = sess.submit_wire
+            return result
+
+        return cast(dict, _push_over_nodes(sess.nodes, sess.node_i, step, log))
+
+    def _remote_ppo_step(self, ctx: RoundContext) -> StepResult | None:
+        """远端 PPO 的**三相驱动**（细粒度路径；R2c-3）。
+
+        返回 `None` = 本轮远端 PPO 已收口（成功，或已降级给本机）；返回 `StepResult`
+        = 本轮结束（让位 / 停车）。
+
+        与组合路径（`_remote_ppo`）共用同一批相位方法与同一份失败判决
+        （`_handle_remote_failure`），唯一差别在这里**允许让位**：`ctx.resumable` 为真时
+        未就绪就 `wait_for`，执行权交给别的课程；为假则退化成阻塞取结果（组合语义）。
+        """
+        it = ctx.it
+        sess = ctx.remote
+        if sess is None:
+            try:
+                sess = self._remote_ppo_publish(it)
+            except remote_retryable_exceptions() as e:
+                if self._handle_remote_failure(it, e):
+                    raise
+                return None  # 已降级：调用方改走本机
+            ctx.remote = sess
+        try:
+            result = self._remote_ppo_probe(sess)
+        except remote_retryable_exceptions() as e:
+            if self._handle_remote_failure(it, e):
+                raise
+            return None
+        if result is None:
+            if ctx.resumable:
+                # ★ 让位点：job 已经发布，只是还没回。本机没在替它干活（云机在跑）
+                # ⇒ 票还掉，机器让给别的课（`hold=False` 见 `LoopRunner`）。
+                return wait_for(f"等远端 PPO 回传（job {sess.jid}）")
+            try:
+                result = self._remote_ppo_fetch(sess)
+            except remote_retryable_exceptions() as e:
+                if self._handle_remote_failure(it, e):
+                    raise
+                return None
+        try:
+            self._remote_ppo_land(sess, result)
+        except remote_retryable_exceptions() as e:
+            if self._handle_remote_failure(it, e):
+                raise
+            return None
+        ctx.remote = None
+        self._remote_fail = 0
+        return None
 
     def _ensure_ts_code(self, job_root: str, *, log: Any) -> None:
         """M3：打包 rollout 用的 TS 运行时 zip（一次，缓存在 self 上）。
@@ -2158,31 +2430,37 @@ class TrainingSteps:
             log(f"[eval] drain: 收尾 eval 失败（{type(e).__name__}: {e}）——不阻断收官")
 
     def _record_iteration(self, it: int) -> None:
-        """iteration 事件落账（字段契约在 rl/events.py::write_iteration）。"""
-        write_iteration(
-            self._jsonl_path,
-            self.args,
-            it,
-            self._report,
-            {
-                "rollout_sec": self._rollout_sec,
-                "ppo_sec": self._ppo_sec,
-                "ppo_cloud_sec": self._ppo_cloud_sec,
-                # M0 统一计量（additive；本地/旧路径无此键 → None）。
-                "wire": getattr(self, "_wire", None),
-                "total_steps": self._total_steps,
-                "chunks_n": self._chunks_n,
-                "agg": self._agg,
-                "kl_cum": self._kl_cum,
-                "halted": self._halted_flag,
-                "dropped_games": self._dropped_games,
-                "waves": self._waves_n,
-                "load_sec": self._load_sec,
-                "tail_drain_sec": self._tail_drain_sec,
-                "eval_join_sec": self._eval_join_sec,
-                # 动态采集（None = 未开该模式；additive 字段，旧行无此键）
-                "transitions_target": self._volume_target,
-                "transitions_collected": self._volume_collected,
-                "transitions_capped": True if self._volume_capped else None,
-            },
+        """iteration 事件落账（字段契约在 rl/events.py::write_iteration）。
+
+        R2a：写入后立刻并入 `LedgerView`（`_ledger_apply`）——视图因此始终 == 盘上
+        账本，且没有第二次全文件扫描（用户 2026-09-18 裁决：每课只读一遍）。
+        """
+        self._ledger_apply(
+            write_iteration(
+                self._jsonl_path,
+                self.args,
+                it,
+                self._report,
+                {
+                    "rollout_sec": self._rollout_sec,
+                    "ppo_sec": self._ppo_sec,
+                    "ppo_cloud_sec": self._ppo_cloud_sec,
+                    # M0 统一计量（additive；本地/旧路径无此键 → None）。
+                    "wire": getattr(self, "_wire", None),
+                    "total_steps": self._total_steps,
+                    "chunks_n": self._chunks_n,
+                    "agg": self._agg,
+                    "kl_cum": self._kl_cum,
+                    "halted": self._halted_flag,
+                    "dropped_games": self._dropped_games,
+                    "waves": self._waves_n,
+                    "load_sec": self._load_sec,
+                    "tail_drain_sec": self._tail_drain_sec,
+                    "eval_join_sec": self._eval_join_sec,
+                    # 动态采集（None = 未开该模式；additive 字段，旧行无此键）
+                    "transitions_target": self._volume_target,
+                    "transitions_collected": self._volume_collected,
+                    "transitions_capped": True if self._volume_capped else None,
+                },
+            )
         )

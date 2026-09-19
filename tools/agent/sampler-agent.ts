@@ -40,6 +40,8 @@ import {
 } from '../sim/pack-container'
 // rollout 子进程运行时选择（node/V8 推理更快；§353）
 import { createRolloutRunner, type LaunchPlan, type RolloutRunner } from './rollout-runner'
+// 权重桶纯逻辑（多课程：(course, kind) 键 / 按 sha 精确查找；单测共享，见 weight-buckets.ts）
+import { bucketKey, findSha, latestOfKind } from './weight-buckets'
 // 工作目录磁盘收敛纯函数（boot 孤儿清理 + 权重文件保留；修正则 2026-09-08，§374）
 import { staleOrphanPlan, sweepWeightFilePlan } from './workdir-cleanup'
 // codeHash 文件集展开（F3/F4 抽出，plan/dist-codehash-stale-fix.md）：纯实现 + 诊断
@@ -472,7 +474,13 @@ async function renderPoolPageLocal(): Promise<string> {
 // 64：三训练流并发时每轮各产生 1 个新 sha（8 → 慢节点滞后 2–3 轮就被挤掉 ⇒
 // 永远 409，2026-08-30 实测）。单桶 ~0.5MB，64 桶 ≈ 32MB 内存/磁盘，可忽略。
 const WEIGHT_BUCKETS_PER_KIND = 64
-const weightsByKindSha: Map<string, Map<string, WeightsState>> = new Map()
+// v5（2026-09-18 多课程）：键从 `kind` 改为 **(course, kind)**（见 weight-buckets.ts）。
+// 为什么要改：5 门课每轮各出一个新 sha，全挤进同一个 `rollout` 桶 ⇒ 64 桶被 5 门课
+// 分着用，历史深度从 64 掉到 ~13 轮；再叠加「慢节点落后几轮才回来取」，撞上驱逐就是
+// `409 wver not cached here`（那一局作废）。分桶后每门课各自拥有完整历史。
+// 另一条要求（用户 2026-09-18：「避免同一份权重多次传递」）：新增 `GET /v1/weights`
+// 预检——调用方先问「你有这个 sha 吗」，命中就不再上传体（~0.5MB/轮/节点）。
+const weightsByBucket: Map<string, Map<string, WeightsState>> = new Map()
 
 /** 权重文件基名（**单一来源**：POST 落盘、磁盘回查、retention 清理必须同名）。 */
 export function weightFileBase(kind: string, sha: string): string {
@@ -533,21 +541,36 @@ function evictWeightBucket(bucket: Map<string, WeightsState>): void {
   }
 }
 
-/** 权重查找（内存桶 → 磁盘回查）；`dir` 仅供单测注入隔离目录。 */
-export function weightsOf(kind: string, wver: string, dir: string = WORK_DIR): WeightsState | null {
-  const bucket = weightsByKindSha.get(kind)
-  const hit = bucket?.get(wver)
+/**
+ * 权重查找（内存桶 → 磁盘回查）；`course` = 本局属于哪门课（空串 = 旧单课程桶）。
+ *
+ * 内存三跳（本课桶 → 旧单课程桶 → 任意同 kind 桶）见 `weight-buckets.findSha`——sha 内容
+ * 寻址，命中哪个桶都是同一份字节。未命中再回查磁盘（2026-09-19：agent 一重启内存桶就空，
+ * 而文件仍在 WORK_DIR ⇒ 旧实现会把**盘上就有的**权重答 409，客户端白传一份）。
+ * `dir` 仅供单测注入隔离目录（生产走缺省 WORK_DIR）。
+ */
+export function weightsOf(
+  kind: string,
+  wver: string,
+  course = '',
+  dir: string = WORK_DIR,
+): WeightsState | null {
+  const hit = findSha(weightsByBucket, course, kind, wver)
   if (hit) return hit
   // 未命中 → 回查磁盘（重启后内存桶为空、文件还在）；命中即回填桶，后续任务零额外开销。
   const fromDisk = readWeightsFile(kind, wver, dir)
   if (!fromDisk) return null
-  const target = bucket ?? new Map<string, WeightsState>()
-  if (!bucket) weightsByKindSha.set(kind, target)
+  const bkey = bucketKey(course, kind)
+  let target = weightsByBucket.get(bkey)
+  if (!target) {
+    target = new Map()
+    weightsByBucket.set(bkey, target)
+  }
   target.set(wver, fromDisk)
   evictWeightBucket(target)
   console.log(
-    `[sampler-agent] weights[${kind}] rehydrated ${wver.slice(0, 12)}… from disk` +
-      ' (in-memory bucket was empty — agent restarted)',
+    `[sampler-agent] weights[course=${course || '-'} kind=${kind}] rehydrated ` +
+      `${wver.slice(0, 12)}… from disk (in-memory bucket was empty — agent restarted)`,
   )
   return fromDisk
 }
@@ -610,14 +633,17 @@ function latestWeightsOnDisk(kind: string, dir: string): WeightsState | null {
  * `dir` 仅供单测注入隔离目录。
  */
 export function latestWeightsOfKind(kind: string, dir: string = WORK_DIR): WeightsState | null {
-  const m = weightsByKindSha.get(kind)
-  let latest: WeightsState | null = null
-  if (m) for (const ws of m.values()) latest = ws // Map 保持插入序，最后一个 = 最新
+  const latest = latestOfKind(weightsByBucket, kind)
   if (latest) return latest
   const fromDisk = latestWeightsOnDisk(kind, dir)
   if (!fromDisk) return null
-  const target = m ?? new Map<string, WeightsState>()
-  if (!m) weightsByKindSha.set(kind, target)
+  // 盘上文件名不含课程 ⇒ 回填「旧单课程桶」（findSha 的第三跳按 kind 扫全部桶，仍能命中）
+  const bkey = bucketKey('', kind)
+  let target = weightsByBucket.get(bkey)
+  if (!target) {
+    target = new Map()
+    weightsByBucket.set(bkey, target)
+  }
   if (!target.has(fromDisk.sha)) {
     target.set(fromDisk.sha, fromDisk)
     evictWeightBucket(target)
@@ -682,7 +708,7 @@ function diskFreeMB(): number | null {
 function sweepWorkdir(nowMs = Date.now()): void {
   try {
     const live = new Set<string>()
-    for (const bucket of weightsByKindSha.values())
+    for (const bucket of weightsByBucket.values())
       for (const ws of bucket.values()) live.add(path.basename(ws.file))
     const names = fs
       .readdirSync(WORK_DIR)
@@ -882,12 +908,14 @@ async function runGame(
   courseFp = '',
   wins = '1',
   nearMiss = '3',
+  // v5 多课程：本局权重该从哪门课的桶里取（空串 = 旧单课程桶）。
+  course = '',
 ): Promise<Buffer> {
-  // 多桶：按 (kind, wver) 精确取——同节点可同时服务多个不同权重的训练流。
+  // 多桶：按 (course, kind, wver) 精确取——同节点可同时服务多个课程/权重的训练流。
   // mode=bc（BC 语料任务，2026-09-13）：God-AI 教师自对弈，无策略权重语义——
   // 跳过权重桶查找（调用方 /v1/task 已保证只有 bcSupport 节点会收到该模式）。
   const isBc = mode === 'bc'
-  const ws = isBc ? null : weightsOf(kind, wver)
+  const ws = isBc ? null : weightsOf(kind, wver, course)
   if (!ws && !isBc) throw new Error(`no weights cached for kind=${kind} wver=${wver.slice(0, 12)}…`)
   const wfile = ws?.file ?? ''
   // 干净评估走独立贪心 runner（不在 codeHash 集内，见 export-eval-game.ts 头注释）；
@@ -1129,6 +1157,8 @@ function beginTask(
   courseFp = '',
   wins = '1',
   nearMiss = '3',
+  // v5 多课程：本局权重该从哪门课的桶里取（空串 = 旧单课程桶）。
+  course = '',
 ): void {
   activeWorkers++
   inflight.set(key, { stage, seed, startedAt: Date.now() })
@@ -1153,6 +1183,7 @@ function beginTask(
     courseFp,
     wins,
     nearMiss,
+    course,
   )
     .then((buf) => {
       lruPut(key, stampServiceSec(key, buf))
@@ -1199,7 +1230,8 @@ async function handle(req: Request): Promise<Response> {
     // 磁盘回查（2026-09-19）：agent 重启后内存桶空、文件仍在盘上——探针若答 false，客户端
     // 就会重传一份盘上已有的权重。weightsOf 命中即顺便回填桶（后续任务零额外开销）。
     const cached =
-      weightsCachedInBucket(weightsByKindSha.get(kind), claimedSha) ||
+      // 探针头不带 course（旧 trainer 也不带）⇒ weightsOf 的第三跳「任意同 kind 桶」兜底：
+      // sha 内容寻址，命中哪门课的桶都是同一份字节。weightsOf 命中即顺便回填桶。
       weightsOf(kind, claimedSha) !== null
     return jsonResponse({ ok: true, cached, kind }, 200)
   }
@@ -1224,14 +1256,17 @@ async function handle(req: Request): Promise<Response> {
       rejectedCount++
       return jsonResponse({ error: `sha mismatch: header=${claimedSha} actual=${actualSha}` }, 400)
     }
-    // v3.7 kind 分桶：x-kind 头（缺省 'rollout'）决定存哪个权重桶（'intent' 供 intent-exec 评估）。
+    // v3.7 kind 分桶（'intent' 供 intent-exec 评估）；v5（2026-09-18）**再按课程分桶**：
+    // 缺 X-Course 的旧训练侧照旧落「空课程桶」（升级期两向兼容，见 weight-buckets.ts）。
     const kind = req.headers.get('x-kind') ?? 'rollout'
-    let bucket = weightsByKindSha.get(kind)
+    const course = req.headers.get('x-course') ?? ''
+    const bkey = bucketKey(course, kind)
+    let bucket = weightsByBucket.get(bkey)
     if (!bucket) {
       bucket = new Map()
-      weightsByKindSha.set(kind, bucket)
+      weightsByBucket.set(bkey, bucket)
     }
-    if (bucket.has(actualSha)) return jsonResponse({ ok: true, cache: 'kept' }, 204)
+    if (bucket.has(actualSha)) return jsonResponse({ ok: true, cache: 'kept', course }, 204)
     // 多桶（v4.1）：新 sha 追加进该 kind 的桶组。结果缓存按 iterId 天然分命名空间
     //（不同训练流互不可见），整池清除会把其它训练流在飞结果顶掉——不再全清。
     const wfile = path.join(WORK_DIR, weightFileBase(kind, actualSha))
@@ -1241,10 +1276,28 @@ async function handle(req: Request): Promise<Response> {
     evictWeightBucket(bucket)
     sweepWorkdir()
     console.log(
-      `[sampler-agent] weights[${kind}] switched -> ${actualSha.slice(0, 12)}… (result cache purged)`,
+      `[sampler-agent] weights[course=${course || '-'} kind=${kind}] ` +
+        `switched -> ${actualSha.slice(0, 12)}… (buckets=${bucket.size})`,
     )
     // 状态变更触发（清场）：带 JSON body，返回 200（204 不应带 body，HTTP 语义）
-    return jsonResponse({ ok: true, cache: 'purged' }, 200)
+    return jsonResponse({ ok: true, cache: 'purged', course, bucket: bucket.size }, 200)
+  }
+
+  // ---- 权重预检（2026-09-18 多课程）：“你有这个 sha 吗” ----
+  // 为什么要它：POST 是「先收完整个体才知道已缓存」（返回 kept 时那 ~0.5MB 已经传完了）。
+  // 多课程并行时每个评估轮的每节点都重传同一份权重，白传量按「课程数 × 节点数」放大。
+  // 命中就根本不上传。语义与 `worker_server` 的 `/code-sha`、`/blob-sha` 同族。
+  // 查询失败/未知一律 `cached:false`（保守上传）——少传一次是省流量，错判不传是 409 停活。
+  if (req.method === 'GET' && url.pathname === '/v1/weights') {
+    const sha = url.searchParams.get('sha') ?? ''
+    const kind = url.searchParams.get('kind') ?? 'rollout'
+    const course = url.searchParams.get('course') ?? ''
+    return jsonResponse({
+      sha,
+      kind,
+      course,
+      cached: Boolean(sha) && weightsOf(kind, sha, course) !== null,
+    })
   }
 
   // ---- 运维控制（v3.7）：拉取指定 branch 最新代码 ----
@@ -1402,7 +1455,10 @@ async function handle(req: Request): Promise<Response> {
     const isBc = mode === 'bc'
     const wins = url.searchParams.get('wins') ?? '1'
     const nearMissTimes = url.searchParams.get('nearMissTimes') ?? '3'
-    const ws = isBc ? null : weightsOf(kind, wver)
+    // v5 多课程：课程名从任务 URL 来（训练侧按课程下发），权重按 (course, kind) 取桶。
+    // 缺省空串 = 旧单课程桶（旧训练侧不传 → 行为与改造前一致）。
+    const course = url.searchParams.get('course') ?? ''
+    const ws = isBc ? null : weightsOf(kind, wver, course)
     if (!ws && !isBc) return jsonResponse({ error: 'wver not cached here' }, 409)
     // M1d：课程自定义关参数（仅 per-tick rollout 消费；eval/其它 kind 忽略）。
     const stageJson = url.searchParams.get('stageJson') ?? ''
@@ -1469,6 +1525,7 @@ async function handle(req: Request): Promise<Response> {
         courseFp,
         wins,
         nearMissTimes,
+        course, // v5 多课程：异步路径同规（取 (course,kind) 桶）
       )
       return jsonResponse({ status: 'accepted', token: key }, 202)
     }
@@ -1509,6 +1566,7 @@ async function handle(req: Request): Promise<Response> {
           courseFp,
           wins,
           nearMissTimes,
+          course, // v5 多课程：同步流式路径同规（取 (course,kind) 桶）
         )
           .then((buf) => {
             if (hb) clearInterval(hb)

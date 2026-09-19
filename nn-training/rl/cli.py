@@ -446,10 +446,11 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
     ap.add_argument(
         "--remote-transport",
         default=_d("remote_transport", "auto"),
-        choices=("auto", "pull", "push"),
-        help="远程 PPO 传输裁决：auto=历史优先级（本课 gpu_push 节点 > hub）；"
-        "pull=强制走 hub（本机独立 localWorker 场景——否则 courses.push_node_url "
-        "一配就把 job 推去云机）；push=强制直推 gpu_push 节点（无节点则响亮失败）",
+        choices=("auto", "pull", "push", "hubpush"),
+        help="远程 PPO 传输裁决：auto=登记在册的 gpu_push 节点 > hub，"
+        "rl.hub_push（缺省开）且 hub 可达时改走 hub 中介推送；"
+        "pull=强制走 hub（等 worker 自己来领）；push=强制直推 gpu_push 节点（无节点则响亮失败）；"
+        "hubpush=发布到 hub、由 hub 按登记表推给空闲 GPU worker（需 hub-url+token）",
     )
     ap.add_argument(
         "--remote-token",
@@ -501,14 +502,17 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
     # M3（2026-09-17，plan/remote-wire-remediation §5.2）：rollout 上云开关。
     # local = 历史行为（hub 采样本机产 shard，整轮口径逐字节不变）；
     # node = 本轮由节点自己跑 rollout（kind=iter job），hub 不再本地采样。
+    # run  = 整段（kind=run job）：节点领走 it..end_it 自己跑完（离线训练模式）。
     # 取值优先级：本参数 > rl-config `courses.<stem>.rollout_src` > rl.* > local。
     ap.add_argument(
         "--rollout-src",
         default=_d("rollout_src", "auto"),
-        choices=("auto", "local", "node"),
+        choices=("auto", "local", "node", "run"),
         help="M3 rollout 上云：'local'=本机采样（默认行为）；'node'=本轮整轮上云"
-        "（节点 bun 跑 exporter 产 shard + 跑 PPO，kind=iter job）；'auto'=按 rl-config"
-        "（rl.rollout_src / courses.<课>.rollout_src）解析，缺省 local；取值进 iteration"
+        "（节点 bun 跑 exporter 产 shard + 跑 PPO，kind=iter job）；'run'=**整段**上云"
+        "（一次 kind=run job 领走 it..end_it，节点自主跑完；需要 --run-iters 说明段长，"
+        "离线训练模式的机器侧写法）；'auto'=按 rl-config（rl.rollout_src /"
+        " courses.<课>.rollout_src）解析，缺省 local；取值进 iteration"
         " 事件的 wire.rollout_src（A/B 归因用）",
     )
     # 半离线（2026-09-17）：一次 `kind=run` job 覆盖 N 轮，节点收到（课程 + 初始权重 +

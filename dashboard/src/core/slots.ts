@@ -8,7 +8,8 @@
  *  `rl.hub_port` 或手写偏移**（`tests/training-multi-course.test.ts` 的门禁①守这条）。
  *
  *  槽位定义（§3.2）：`hub_port(slot) = base + slot*10`；+1 = cloudflared metrics；
- *  +2 = 本机伪 push（worker_server）。槽位 0–3（常态 2 课，4 槽留余量）。
+ *  +2 = 本机伪 push（worker_server）。槽位 = **可并行课程数**（"slot 只是 push 口的历史
+ *  命名空间"——hub/隧道自 2026-09-18 起是单实例，不再按课程占口）。
  *  缺省 = slot 0 = 旧单课端口，故**未配置 `courses` 时不改变任何现有行为**。
  */
 
@@ -17,8 +18,12 @@ import { NN_TRAINING } from './paths'
 import { portListen } from './net'
 import type { RlConfig } from './types'
 
-/** 槽位数（§0.4 已定案：常态 2 课、上限 4）。 */
-export const SLOT_COUNT = 4
+/** 槽位数 = 可并行课程数上限（用户 2026-09-18 口径：**先设为 5**）。
+ *
+ *  R3-1（2026-09-19）：此前是 4 —— 而用户口径是 5 ⇒ 第 5 门课必然越界；叠加 `slotOf`
+ *  的静默回落 0，第 5 门课会**静默**用第 1 门课的 push 端口（两门课的推送互相顶掉，
+ *  只有日志里的端口冲突能看出来）。现在两头都堵：上限 5 + 越界响亮拒启（见 `slotOf`）。 */
+export const SLOT_COUNT = 5
 /** 槽位端口步长（一个槽位吃掉 base 起 10 个端口：hub/+1/+2，余量留人工进程）。 */
 export const SLOT_STRIDE = 10
 
@@ -36,10 +41,65 @@ export function portForSlot(base: number, slot: number, offset = 0): number {
   return base + slot * SLOT_STRIDE + offset
 }
 
-/** 课程 → 槽位（未配置/越界 → 0 = 旧单课行为，绝不静默顶替到别的槽位）。 */
+/** 单个槽位值的合法性（`undefined`/`null` = 未配置 ⇒ 合法；返回 null）。
+ *
+ *  未配置与非法是**两件事**：未配置 = 旧单课语义（回落 0，默认行为零变化）；非法 =
+ *  用户写了越界/非整数的值 —— 那时回落 0 就是「静默顶到别的课头上」，必须拒。 */
+function slotIssue(course: string, s: unknown): string | null {
+  if (s === undefined || s === null) return null
+  if (Number.isInteger(s) && (s as number) >= 0 && (s as number) < SLOT_COUNT) return null
+  return (
+    `courses.${course}.slot = ${JSON.stringify(s)} 非法（合法槽位 0..${SLOT_COUNT - 1}，` +
+    `共 ${SLOT_COUNT} 个；只有未配置才回落 0）`
+  )
+}
+
+/** 课程 → 槽位。未配置/`null` ⇒ 0（旧单课行为）；**配置了非法值 ⇒ 响亮抛错**。
+ *
+ *  R3-1（2026-09-19）：旧实现对越界值也静默回落 0 ⇒ 第 5 门课（`slot: 4`，上限当时 4）
+ *  与第 1 门课撞同一个 push 端口，而且是**静默**的。现在这一类不存在：要么合法，要么
+ *  当场报错点名课程 + 越界值 + 合法范围（plan §5 R3-1②）。 */
 export function slotOf(cfg: RlConfig, course: string): number {
   const s = cfg.courses?.[course]?.slot
-  return Number.isInteger(s) && (s as number) >= 0 && (s as number) < SLOT_COUNT ? (s as number) : 0
+  const issue = slotIssue(course, s)
+  if (issue) {
+    throw new Error(
+      `课程槽位非法: ${issue}——请改成一个空闲槽位（或提升 SLOT_COUNT）；` +
+        '越界静默回落会与别的课程撞 push 端口（plan R3-1）',
+    )
+  }
+  return s === undefined || s === null ? 0 : (s as number)
+}
+
+/** 配置级槽位守卫（`saveConfig` 的第二个守卫，R3-1）：非法槽位 + **显式重复槽位**。
+ *
+ *  重复 = 两门课配到同一个槽位 ⇒ 撞 push 端口（真正的病根，比单课越界更早发生）。
+ *  只管**显式配置**的槽位：未配置 = 旧单课语义，不因「多门课都没配槽位」拒存（legacy
+ *  单课配置根本没有 `courses` 块）。null = 通过（与 `capacityError` 同一契约）。 */
+export function slotError(cfg: RlConfig): string | null {
+  const courses = cfg.courses ?? {}
+  const bad: string[] = []
+  const bySlot = new Map<number, string[]>()
+  for (const name of Object.keys(courses).sort()) {
+    const s = courses[name]?.slot
+    const issue = slotIssue(name, s)
+    if (issue) {
+      bad.push(issue)
+      continue
+    }
+    if (s === undefined || s === null) continue
+    const group = bySlot.get(s as number) ?? []
+    group.push(name)
+    bySlot.set(s as number, group)
+  }
+  const dupes = [...bySlot.entries()].filter(([, names]) => names.length > 1)
+  if (!bad.length && !dupes.length) return null
+  const parts: string[] = []
+  if (bad.length) parts.push(`非法槽位: ${bad.join('；')}`)
+  for (const [s, names] of dupes) {
+    parts.push(`槽位 ${s} 被多门课占用: ${names.join(', ')}（会撞同一个 push 端口）`)
+  }
+  return `课程槽位配置有问题——${parts.join('；')}（plan R3-1）`
 }
 
 /** 槽位端口：按课程（或显式槽位）+ 用途取端口。唯一的调用面。 */
@@ -52,7 +112,30 @@ export function slotPort(
   return portForSlot(hubBasePort(cfg), slot, PORT_OFFSET[kind])
 }
 
-/** 全部槽位端口（slot0–3 × {hub,metrics,push} + agent）——端口兜底清场的唯一清单。 */
+/** 共享 hub 端口 = `rl.hub_port` 基数**本身**（= 槽位 0 的 hub 端口）。
+ *
+ *  2026-09-18 起 hub/隧道收敛为**单实例**（一个 hub 进程服务所有并行课程、一条隧道
+ *  指向它）：hub 不再按课程占端口，`hub` 这个 kind 只剩这一个地址，任何「按课程推 hub
+ *  端口」都是错的（课程槽位现在只决定 push 端口与旧的 metrics 命）。全部调用者一律走
+ *  本函数 / `sharedHubUrl`，门禁（`single-hub-tunnel.test.ts`）守这一点。 */
+export function sharedHubPort(cfg: RlConfig): number {
+  return hubBasePort(cfg)
+}
+
+/** 共享 hub 的基址（`local`/`pull` 预设、健康探测、冒烟、halt 达令共用一份口径）。 */
+export function sharedHubUrl(cfg: RlConfig, host = '127.0.0.1'): string {
+  return `http://${host}:${sharedHubPort(cfg)}`
+}
+
+/** 共享**单**隧道的 metrics 端口（= 槽位 0 的 metrics 口；cloudflared `--metrics` 与
+ *  `/ready` 探测共用，且旧 per-course 隧道被杀后那个口就空出来了）。 */
+export function sharedTunnelMetricsPort(cfg: RlConfig): number {
+  return portForSlot(hubBasePort(cfg), 0, PORT_OFFSET.metrics)
+}
+
+/** 全部槽位端口（`0..SLOT_COUNT-1` × {hub,metrics,push} + agent）——端口兜底清场的唯一清单。
+ *
+ *  随 `SLOT_COUNT` 自动扩容（不写死上限）：上限提高后旧槽位的口仍被清场覆盖。 */
 export function allSlotPorts(cfg: RlConfig): number[] {
   const ports: number[] = []
   for (let s = 0; s < SLOT_COUNT; s++) {
@@ -164,7 +247,7 @@ export function validateCourseName(course: string): string {
   return c
 }
 
-export type LockKind = 'run_rl' | 'train_loop' | 'run_bc'
+export type LockKind = 'run_rl' | 'train_loop' | 'run_bc' | 'run_cluster'
 
 /** per-course 单实例锁名；无课程沿用旧全局文件名（默认行为零变化，plan §0.5-4）。 */
 export function lockName(course: string, kind: LockKind): string {

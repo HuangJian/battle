@@ -30,6 +30,8 @@ import {
   allSlotPorts,
   lockName,
   lockPathFor,
+  sharedHubPort,
+  sharedTunnelMetricsPort,
   slotOf,
   slotPort,
   validateCourseName,
@@ -138,8 +140,11 @@ export function preflightCourseLocks(force: boolean, script: string, course = ''
   }
 }
 
-/** 端口预检（槽位化）：本课槽位的 hub/metrics/push 有占用时响亮提示。
- *  不阻停（trainer 不绑这些端口；hub 由控制台起）——静默才是最危险的形态。 */
+/** 端口预检：本课 push 端口 + **共享** hub/隧道端口有占用时响亮提示。
+ *  不阻停（trainer 不绑这些端口；hub 由控制台起）——静默才是最危险的形态。
+ *
+ *  共享化后 hub/metrics 不再是「本课槽位的」，而是全仓唯一的两个地址：占用告警的意义
+ *  反而更大了（占着它的不是本课的东西，是别的进程在抱共享资源）。 */
 export async function preflightSlotPorts(course: string): Promise<void> {
   if (!course) return
   let cfg
@@ -150,17 +155,21 @@ export async function preflightSlotPorts(course: string): Promise<void> {
   }
   const slot = slotOf(cfg, course)
   const occupied: string[] = []
-  for (const kind of ['hub', 'metrics', 'push'] as const) {
-    const port = slotPort(cfg, course, kind)
+  const ports: Array<[string, number]> = [
+    ['hub(shared)', sharedHubPort(cfg)],
+    ['metrics(shared)', sharedTunnelMetricsPort(cfg)],
+    ['push', slotPort(cfg, course, 'push')],
+  ]
+  for (const [kind, port] of ports) {
     if (await portListen(port)) occupied.push(`${kind}=${port}`)
   }
   if (occupied.length > 0) {
     warn(
       `[preflight] 课程 ${course}（槽位 ${slot}）端口已占用: ${occupied.join(' ')}` +
-        '——本课 hub 若未启动，可能是人工进程或槽位配错（config 的 courses 块）',
+        '——hub/metrics 是**共享**端口（一个进程服务所有课），占用者可能是上一层世代或人工进程',
     )
   }
-  // allSlotPorts 是唯一的槽位端口清单（这里只用来提示总范围，便于人工排查）
+  // allSlotPorts 是唯一的端口清单（这里只用来提示总范围，便于人工排查）
   void allSlotPorts(cfg)
 }
 
@@ -270,6 +279,9 @@ export const TRAINER_SCRIPT: Record<LockKind, string> = {
   run_rl: 'run_rl.py',
   run_bc: 'run_bc.py',
   train_loop: 'train_loop.py',
+  // 共享 trainer 的单实例锁（2026-09-19 / R3-5）：一个进程服务**所有**课程。
+  // 它的持有者命令行里没有 `--course`（发现模式），故 isTrainerFor(..., course='') 正好匹配。
+  run_cluster: 'run_rl_cluster.py',
 }
 
 /** 锁文件 → 持有人（`PID|EXE|TS`，兼容裸 PID）；不可读/残缺 → null。 */
@@ -375,6 +387,17 @@ export async function releaseTrainerLocks(course = '', io: TrainerLockIO = {}): 
     if (note) out.push(note)
   }
   return out
+}
+
+/** **共享 trainer 的进程级单实例锁**（`nn-training/.run_cluster.lock`，2026-09-19 / R3-5）。
+ *
+ *  为什么单列一个函数而不是塞进 `releaseTrainerLocks`：那个函数按**课程**横扫两个锁，
+ *  而这一把锁是**进程级**的（`course=''`）。身份核验同规：持有者命令行必须是
+ *  `run_rl_cluster.py` 且**不带 `--course`**（`isTrainerFor` 里查的是「命令行里有没有别的课」），
+ *  绝不按 PID 复用误杀。
+ */
+export async function releaseClusterLock(io: TrainerLockIO = {}): Promise<string> {
+  return releaseTrainerLock('run_cluster', '', io)
 }
 
 /** 冒烟门禁（本地训练）：venv torch import（ensureVenv 已保证）+ BCV2 容器回环 +

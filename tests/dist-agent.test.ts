@@ -312,12 +312,12 @@ describe('权重磁盘回查（agent 重启后不再对盘上已有的权重答 
     const { sha, body } = fresh('rehydrate')
     const file = join(dir, weightFileBase('eval', sha))
     try {
-      expect(weightsOf('eval', sha, dir)).toBeNull() // 盘上还没有 ⇒ 仍应 409
+      expect(weightsOf('eval', sha, '', dir)).toBeNull() // 盘上还没有 ⇒ 仍应 409
       writeFileSync(file, body)
-      expect(weightsOf('eval', sha, dir)?.sha).toBe(sha) // 回查磁盘命中
+      expect(weightsOf('eval', sha, '', dir)?.sha).toBe(sha) // 回查磁盘命中
       rmSync(file, { force: true })
       // 已回填内存桶：文件没了（被 sweep 清 / 另一进程删）也照样命中
-      expect(weightsOf('eval', sha, dir)?.sha).toBe(sha)
+      expect(weightsOf('eval', sha, '', dir)?.sha).toBe(sha)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

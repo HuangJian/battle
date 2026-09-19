@@ -41,6 +41,7 @@ import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 
+from remote import net_http
 from remote.artifacts import ArtifactStore, atomic_write_json, sha256_bytes
 from remote.protocol import (
     AUTH_HEADER,
@@ -74,7 +75,8 @@ def _urllib_opener(url: str, data: bytes, headers: dict, timeout: float) -> tupl
     """默认 HTTP（POST；`data=None` 即 GET）。返回 (status, body)；**不抛** HTTPError。"""
     req = urllib.request.Request(url, data=data, headers=headers, method="POST" if data else "GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        # 回环（本机 hub）绕开环境代理；隧道/公网 URL 保持 urllib 默认。
+        with net_http.urlopen(req, timeout=timeout) as resp:
             return int(resp.status), resp.read()
     except urllib.error.HTTPError as e:
         return int(e.code), e.read()
@@ -94,6 +96,7 @@ class OfflineDeliverer:
         token: str,
         run_id: str,
         artifacts_dir: str | Path,
+        course: str = "",
         timeout: float = HTTP_TIMEOUT_SEC,
         probe_ttl: float = PROBE_TTL_SEC,
         sync_cap: int = SYNC_CAP,
@@ -110,6 +113,16 @@ class OfflineDeliverer:
         except Exception:
             self.run_id = ""
         self.root = Path(artifacts_dir)
+        #: 本份产物属于 hub 的**哪门课**（多课程 hub 的归位键）。
+        #:
+        #: 为什么必须带上：hub 的 `/offline/artifact` 要在多门课里定位这条腿（
+        #: `locate_offline_course`），而补传体里**没有**可用的课程身份——`course_name`
+        #: 是课程文件的 `name` 字段（`bc-c4-v3` 的 name 是 `bc-c4-v3-distill`），与 hub 侧
+        #: 的课程键（`<traj>/<课>/` 目录名）不是一回事。值来源两处：领来的 job（hub 在
+        #: `/jobs/next` 里下发）或 `--hub-course`（全离线包那条腿，由 notebook 的 CFG 给）。
+        #: 空 = 单课程 hub（那门课的键就是空串）：此时**不带这个键**（带空串与不带等价，
+        #: 但不带更贴近旧字节行为）。
+        self.course = str(course or "").strip()
         self.timeout = float(timeout)
         self.probe_ttl = float(probe_ttl)
         self.sync_cap = int(sync_cap)
@@ -340,6 +353,8 @@ class OfflineDeliverer:
             "source_dir": str(self.root)[-300:],
             "ts": self._now(),
         }
+        if self.course:
+            body["course"] = self.course
         raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         if len(raw) > OFFLINE_ARTIFACT_BODY_MAX:
             self._disable(f"it{it} 补传体 {len(raw)}B 超上限——本会话停用补传")
@@ -391,6 +406,8 @@ class OfflineDeliverer:
                 "source_dir": str(self.root)[-300:],
                 "ts": self._now(),
             }
+            if self.course:
+                body["course"] = self.course
             raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             if len(raw) > OFFLINE_RESULT_BODY_MAX:
                 raw = json.dumps(
@@ -439,6 +456,7 @@ class OfflineDeliverer:
             "enabled": self.enabled,
             "hub_url": self.base_url,
             "run_id": self.run_id,
+            "course": self.course,
             "delivered": len(self._delivered),
             "pending": len(self.pending()),
             "result_done": self._result_done,
@@ -467,16 +485,23 @@ def make_deliverer(
     hub_token: str,
     run_id: str,
     artifacts_dir: str | Path,
+    course: str = "",
     log: Callable[[str], None] = _log_default,
 ) -> OfflineDeliverer | None:
     """构造补传器：**缺 hub_url 或 token 就返回 None**（= 这条腿没有补传，不是错误）。
 
     调用方（`run_loop`）因此只需 `if d is not None`，不必自己判断「参数齐不齐」。
+    `course` = 本份产物在 hub 里的归位键（多课程 hub 必需；见 `OfflineDeliverer.__init__`）。
     """
     if not str(hub_url or "").strip() or not str(hub_token or "").strip():
         return None
     return OfflineDeliverer(
-        base_url=hub_url, token=hub_token, run_id=run_id, artifacts_dir=artifacts_dir, log=log
+        base_url=hub_url,
+        token=hub_token,
+        run_id=run_id,
+        artifacts_dir=artifacts_dir,
+        course=course,
+        log=log,
     )
 
 

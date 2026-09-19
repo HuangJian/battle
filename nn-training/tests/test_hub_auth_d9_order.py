@@ -47,6 +47,7 @@ from remote.hub_server import (  # isort: skip
     CF_SOURCE_HEADER,
     HubHandler,
     _is_loopback,
+    as_hub,
     attributed_source,
 )
 
@@ -159,7 +160,11 @@ class _Stub:
     也就不会真的发包）。逻辑零复制——断言的是 `HubHandler._auth_ok` 本体。"""
 
     def __init__(self, store: Any, token: str, ip: str, auth: str, cf: str | None = None) -> None:
-        self.store = store
+        # handler 读的字段 2026-09-18 从 `store` 改名为 `hub`（多课程调度面）。
+        # 这里包成**单课程队列**（`as_hub`）而不是直接塞 store：本文件要靠「在 store 上
+        # 预热失败计数/封禁态，再让真 `_auth_ok` 读到同一份状态」来断言——单课程队列
+        # 的鉴权面正是借那一份 store 的，所以语义与改造前完全一致。
+        self.hub = as_hub(store)
         self.client_address = (ip, 41234)
         self.headers = {"Authorization": auth}
         if cf is not None:

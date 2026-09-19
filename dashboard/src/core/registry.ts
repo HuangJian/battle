@@ -6,8 +6,15 @@
  *  load/clear 时一并消费，保证旧账本里的进程也能被 --kill 收编。
  *
  *  ── 多课程形状（plan multi-course-parallel-training §1.4，P1b） ──
- *  课程 = 并行单元，故 hubServer/cloudflared/localWorker/trainingLoop/workerServe 五条按课程键控：
- *    `hubServers: Record<course, Entry>` 等；`selfNode` 保持单例（agent 全局一份）。
+ *  四条组件住 `Record<course, Entry>` 的 per-course 表（`hubServers`/`cloudflareds`/
+ *  `localWorkers`/`trainingLoops`），`selfNode` 保持扁平单例（agent 全局一份）。
+ *  （第五个历史键 `workerServes` 已随「本机伪节点退出受管组件」在 2026-09-19 删除。）
+ *
+ *  ★ **住在同课表 ≠ 按课程键控**（易混，故写在这里）：hubServer / cloudflared / trainingLoop /
+ *  localWorker 四条是**共享**的（一个进程服务所有课程）——它们的槽**恒 `''`**（见
+ *  `SHARED_COMPONENTS`）。表只是一个容器：把共享实例放进 per-course 表是刻意的（旧账本里的
+ *  每课条目必须继续可见、可枚举、可停止，静默失监督是事故）。谁按课程、谁共享，**唯一判据**
+ *  是 `componentScope`，不是表名。
  *  旧扁平单键（`hubServer`/…）**已在 P5 移除读写**（R1 读兼容 + R2 删键）：
  *  `loadRegistry()` 每次加载都会把扁平键**一次性搬迁**进 per-course 表再删键
  *  （`migrateFlatCourseEntries`）——不搬就删 = 线上旧进程永久失监督，静默失监督是事故。
@@ -44,29 +51,95 @@ const LEGACY_COMPS: readonly (keyof LegacyFlatRegistry | 'selfNode')[] = [
 /** 单例组件（agent 全局一份，不按课程键控）。 */
 export const SINGLETON_COMPONENTS = ['selfNode'] as const
 export type SingletonComponent = (typeof SINGLETON_COMPONENTS)[number]
-/** 按课程键控的组件（顺序即遍历顺序：hub 先于 localWorker 先于 trainer——M7）。
- *  localWorker = 本机独立 PPO worker（云端 remote_worker 同款，poll 本课 hub）；
- *  它排在 cloudflared 前：同课内「作业中枢 → 作业执行者 → 入站隧道 → 训练器」。 */
+/** 组件键全集（顺序即遍历顺序：hub 先于 localWorker 先于 trainer——M7）。
+ *  localWorker = 本机独立 PPO worker（云端 remote_worker 同款）；
+ *  它排在 cloudflared 前：同课内「作业中枢 → 作业执行者 → 入站隧道 → 训练器」。
+ *  ⚠ 本表**不等于**「按课程键控」——共享四条（hub/隧道/trainer/本机 worker）也在里面，
+ *  只是槽恒 `''`；判据看 `componentScope`。 */
 export const COURSE_COMPONENTS = [
   'hubServer',
   'localWorker',
   'cloudflared',
-  'workerServe',
   'trainingLoop',
 ] as const
 export type CourseComponent = (typeof COURSE_COMPONENTS)[number]
 
-type PluralKey = 'hubServers' | 'localWorkers' | 'cloudflareds' | 'workerServes' | 'trainingLoops'
+type PluralKey = 'hubServers' | 'localWorkers' | 'cloudflareds' | 'trainingLoops'
 const PLURAL: Record<CourseComponent, PluralKey> = {
   hubServer: 'hubServers',
   localWorker: 'localWorkers',
   cloudflared: 'cloudflareds',
-  workerServe: 'workerServes',
   trainingLoop: 'trainingLoops',
 }
 
 export function isCourseComponent(key: Component): key is CourseComponent {
   return (COURSE_COMPONENTS as readonly string[]).includes(key)
+}
+
+/** **单实例（共享）组件**：`hubServer`/`cloudflared`（2026-09-18）+ `trainingLoop`（2026-09-19）
+ *  + `localWorker`（2026-09-19）不再是「每课一份」——一个 hub 进程服务所有并行课程、一条隧道
+ *  指向它，一个 trainer 进程（`run_rl_cluster.py --serve`）服务所有课程的训练循环，
+ *  一个本机 PPO worker 领任何课程的 job。
+ *
+ *  ★ `localWorker` 为什么也进来（用户口径：「localWorker 也不应绑定课程，它和云端 worker 一样，
+ *  只与 hub 通信（pull/push），领到任务后直接执行，完成后回传结果」）：它跑的就是云端那一条
+ *  链路（`python -m remote_worker --poll <hub>`），而 `/jobs/next` **从来不看课程**——job 由
+ *  hub 按队列分发、manifest 自带课程快照、结果按 job_id 回家（hub 侧 `course` 只是随包
+ *  告知的观测字段）。按课程键控因而只产生了三样副作用：一个进程只能服务一门课、同机多份
+ *  进程抢同一批 job、以及「这门课的 worker」这个不存在的归属感。
+ *
+ *  ⚠ 副作用（必须知道）：**一个本机 worker 同一时刻只干一份活**（云端 worker 同语义——想要
+ *  本机并发就多起几个云端 worker）；「停止」= 本机不再执行**任何**课程的 PPO job。
+ *
+ *  ★ `trainingLoop` 为什么也进来（用户口径：「hubserver/trainingloop/selfNode/cloudflared
+ *  都只需要开一个进程，就能同时支持所有并行训练课程」）：R2d 已经造好了单进程驱动者
+ *  （`rl/loop_serve.py`：按课锁/按课日志镜像/引擎池/故障隔离），且 R3-4 让同一个进程也能
+ *  带 BC 课——而 BC 与 RL **共用 `trainingLoop` 这一个角色键**，按课键控意味着
+ *  「BC 课 A + RL 课 B」只能靠两个进程并存。收敛后一个进程两种课都跑。
+ *
+ *  ⚠ 副作用（必须知道）：**停止 trainer = 停掉所有课程的训练**。想停单门课用调度器的
+ *  「暂停」（控制文件 `tmp/loop-control.json`，只影响调度，队列/账本不动）。
+ *
+ *  它们在账本里仍住 `hubServers`/`cloudflareds` 两张表，只是槽固定 `''`（沿用既有的
+ *  「无课程槽」：语义正好重合，共享实例不属于任何单门课）。**为什么不改成扁平单例键**：
+ *  旧账本里的 per-course hub/隧道条目必须继续可见、可枚举、可停止（静默失监督是事故），
+ *  共用一张表天然做到；而重建/重启路径对非空课程槽 fail-closed（见 `restart.ts`），
+ *  旧实例只能被**显式换代接管**（`stack/hub.ts::supersedeLegacyInstances`）。 */
+export const SHARED_COMPONENTS = [
+  'hubServer',
+  'cloudflared',
+  'trainingLoop',
+  'localWorker',
+] as const satisfies readonly CourseComponent[]
+/** 共享组件的键（= `SHARED_COMPONENTS` 的元素）——换代接管、停止语义等按它做窄化，
+ *  而不是各自再写一份名单（第二份名单 = 漂开 = 某个组件失去换代接管）。 */
+export type SharedComponent = (typeof SHARED_COMPONENTS)[number]
+
+export function isSharedComponent(key: Component): key is SharedComponent {
+  return (SHARED_COMPONENTS as readonly string[]).includes(key)
+}
+
+/** 组件作用域（三态）—— 卡片分组与作用域徽章的**唯一判据**（R3-3）。
+ *
+ *  singleton = 全机一份（selfNode）；shared = **一个进程服务所有课程**（hub / 隧道 / trainer /
+ *  本机 worker：账本槽恒 `''`）；
+ *  course = 按课程键控。三态不是新概念，只是把上面两张表（`SINGLETON_COMPONENTS` /
+ *  `SHARED_COMPONENTS`）换个面说一遍。
+ *
+ *  ★ **唯一声明处**：控制台卡片不许自己写「哪些 key 属于哪一族」的名单——名单一旦与槽位规则
+ *  漂开，症状是某个组件从 UI 上**消失**（而它还在被启动、被监督、被冒烟）。故族由 scope 推出，
+ *  面板只负责画。
+ */
+export type ComponentScope = 'singleton' | 'shared' | 'course'
+
+export function componentScope(key: Component): ComponentScope {
+  if ((SINGLETON_COMPONENTS as readonly string[]).includes(key)) return 'singleton'
+  return isSharedComponent(key) ? 'shared' : 'course'
+}
+
+/** 组件的账本槽：共享组件恒 `''`，其余按课程。**启动/停止/重建/展示一律经此**（唯一归宿）。 */
+export function scopeOf(key: Component, course = ''): string {
+  return isSharedComponent(key) ? '' : course
 }
 
 /** 账本条目 + 归属（`course` 空串 = 旧无课程条目）。 */
@@ -102,7 +175,6 @@ function consoleCourse(): string {
 const LEGACY_FLAT_COURSE_COMPONENTS: readonly CourseComponent[] = [
   'hubServer',
   'cloudflared',
-  'workerServe',
   'trainingLoop',
 ]
 
@@ -174,7 +246,7 @@ export function entryForCourse(
 }
 
 /** 有序三元组 `(key, course, entry)`——**枚举账本的唯一路径**（门禁②）。
- *  顺序：selfNode → 每课程内 hubServer/localWorker/cloudflared/workerServe/trainingLoop
+ *  顺序：selfNode → 每课程内 hubServer/localWorker/cloudflared/trainingLoop
  *  （同课 hub 先于 localWorker 先于 trainer，M7；课程名排序保证稳定）。旧扁平键不再枚举（R2 已搬迁）。 */
 export function registryTriples(reg: Registry): WatchedEntry[] {
   const out: WatchedEntry[] = []

@@ -19,7 +19,7 @@ import time
 from typing import Any
 
 import dist_common
-from dist_common import fetch_task, node_ping, post_weights, validate_eval_result
+from dist_common import fetch_task, node_ping, post_weights_cached, validate_eval_result
 
 #: 与 rl/config.GATE_PLATEAU_METRICS 同词表（RL eval 展示口径）
 EVAL_METRIC_KEYS = ("win_rate", "kills_mean", "phits_mean", "pickup_mean", "timeout_frac")
@@ -128,7 +128,7 @@ def dispatch_bc_eval(
     pushed = 0
     for n in nodes:
         try:
-            post_weights(
+            post_weights_cached(
                 n["url"], n.get("authKey", ""), iter_id, wver, weights_bytes, kind="rollout"
             )
             pushed += 1

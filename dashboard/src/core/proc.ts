@@ -148,7 +148,7 @@ export async function stopAllManaged(): Promise<void> {
     /* no config — skip port sweep */
   }
   if (config) {
-    // 全部槽位端口（slot0–3 × hub/metrics/push）+ agent：多课时代按单槽扫会漏掉别课。
+    // 全部槽位端口（0..SLOT_COUNT-1 × hub/metrics/push）+ agent：多课时代按单槽扫会漏掉别课。
     const ports = allSlotPorts(config)
     for (const port of ports) {
       for (const pid of portOwnerPids(port)) {

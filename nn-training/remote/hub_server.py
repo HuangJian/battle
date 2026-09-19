@@ -68,11 +68,12 @@ import json
 import os
 import random
 import sys
+import tempfile
 import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread
 
 from remote._instance_lock import (
     acquire_instance_lock,
@@ -83,14 +84,21 @@ from remote._port_guard import ensure_port_free
 from remote.protocol import (
     AUTH_HEADER,
     CLAIM_TTL_SEC,
+    COURSE_MODE_OFFLINE,
+    COURSE_MODE_ONLINE,
+    COURSE_MODES,
     FAIL_BODY_MAX,
     FAIL_NAME,
     HUB_SCOPE_HEADER,
     OFFLINE_ARTIFACT_BODY_MAX,
     OFFLINE_ARTIFACT_PATH,
+    OFFLINE_CAP_HEADER,
     OFFLINE_RESULT_BODY_MAX,
     OFFLINE_RESULT_PATH,
+    OFFLINE_TASK_PACK_PATH,
     PAYLOAD_NAME,
+    PUSH_POLL_SEC,
+    PUSH_TIMEOUT_SEC,
     RACE_MODE_AUTO,
     RACE_MODES,
     RACE_WORKER_WINDOW_SEC,
@@ -102,11 +110,20 @@ from remote.protocol import (
     decode_opt_tar,
     decode_weights_json,
     find_payload,
-    normalize_manifest,
+    has_offline_capability,
+    may_avoid_stale_holder,
+    parse_course_arg,
     parse_hub_scope,
     race_decision,
+    rotation_order,
     sanitize_run_id,
     unpack_result_v2,
+)
+from remote.push_dispatch import (
+    DEFAULT_PUSH_CONFIG,
+    PushDispatcher,
+    PushWorkers,
+    accept_result,
 )
 
 # ------------------------------------------------------------------ 来源判定
@@ -173,7 +190,66 @@ def _is_loopback(ip: str) -> bool:
 # ------------------------------------------------------------------ state
 
 
-class _JobStore:
+class _AuthGuard:
+    """D9 鉴权闭锁（提取自 `_JobStore`，2026-09-18）。
+
+    为什么要独立成类：多课程单 hub 之后**鉴权面是进程级的一份**（一个 IP 的失败计数
+    不该按课程各算一套，否则“同一来源 5 次无效鉴权”会把封禁阈值变成 5×N）。`_JobStore`
+    仍继承它（旧调用/旧测试的 `store.is_blocked(...)` 逐字不变）。"""
+
+    def __init__(self, now_fn=None) -> None:
+        self._lock = Lock()
+        self._now = now_fn or time.time
+        #: 来源 IP -> 无效鉴权计数（满 5 封禁，D9）
+        self._auth_fail: dict[str, int] = {}
+        self._auth_blocked_until: dict[str, float] = {}
+
+    # ---- 闭锁（D9） ----
+    def auth_failure(self, ip: str) -> int:
+        """记一次鉴权失败，返回**累计次数**（含本次）；满 5 次封禁 3600s。
+
+        返回值供 handler 打印审计行——2026-09-16 x3-step 事故：401 落在
+        `/ping`・`/jobs/next` 等静默路径上，五次失败把 127.0.0.1 封掉后
+        **hub 日志一行痕迹都没有**，训练循环被 cloudflared 回源 IP 连坐后
+        连续 403 自杀退出，只能靠猜。故次数必须上浮到调用方记录。
+
+        **回环来源永不计数、永不封禁**（返回 0）——口径见 `_is_loopback`。
+        """
+        if _is_loopback(ip):
+            return 0
+        with self._lock:
+            n = self._auth_fail.get(ip, 0) + 1
+            self._auth_fail[ip] = n
+            if n >= 5:
+                self._auth_blocked_until[ip] = self._now() + 3600
+                self._auth_fail.pop(ip, None)
+            return n
+
+    def auth_success(self, ip: str) -> None:
+        """一次合法鉴权：清零该 ip 的失败计数（**不改封禁状态**）。
+
+        2026-09-17 改序配套：封禁只拒无效尝试后，合法流量必须能把计数打回零——否则
+        与合法组件共用同一个来源 IP 的坏客户端（典型：cloudflared 回源把隧道流量与
+        所有本机组件都归成 127.0.0.1）仍会**慢性累积**到 5 次，把整个 IP 拖进封禁。
+        封禁本身不在此解除：它已只影响无效尝试，到点自愈，无需合法流量代劳。
+        """
+        with self._lock:
+            self._auth_fail.pop(ip, None)
+
+    def is_blocked(self, ip: str) -> bool:
+        if _is_loopback(ip):  # 回环永不被封（即便旧内存态里混进过记录）
+            return False
+        with self._lock:
+            until = self._auth_blocked_until.get(ip, 0.0)
+            return until > self._now()
+
+    def blocked_remaining(self, ip: str) -> float:
+        """该 ip 剩余封禁秒数（未封禁 = 0）——供审计行提示「还要封多久」。"""
+        with self._lock:
+            return max(0.0, self._auth_blocked_until.get(ip, 0.0) - self._now())
+
+
+class _JobStore(_AuthGuard):
     """磁盘 job 存储 + 内存租约状态。
 
     事实来源 = 磁盘（jsonl 账本 + job 目录）；内存只存租约（重启即丢，符合
@@ -195,10 +271,15 @@ class _JobStore:
         self._lease_owners: dict[str, str] = {}
         #: job_id -> 最近一次心跳（领取算一次）墙钟（P3b 可观测；/jobs/status 暴露）
         self._last_heartbeat: dict[str, float] = {}
-        self._now = now_fn or time.time
-        #: job_id -> 401 失败计数（闭锁用，D9）
-        self._auth_fail: dict[str, int] = {}
-        self._auth_blocked_until: dict[str, float] = {}
+        #: job_id -> 租约持有人的 worker 身份（v5 多课程单 hub，2026-09-18）。
+        #: 与 `_lease_owners`（token，鉴权用）**分工不同**：这个只用来回答「上一份租约是
+        #: 谁跑死的」，从而在超时回收时把那台 worker 排除在本次重派之外（用户口径：
+        #: 超时回落队首后「改为推送其它 worker」）。无身份（旧 worker / 手写 curl）不记。
+        self._lease_workers: dict[str, str] = {}
+        #: job_id -> 上一次租约**过期**时死掉的持有人（不避让自己时不清，避免误让）
+        self._stale_holders: dict[str, str] = {}
+        # 鉴权面（`_AuthGuard`）：进程级一份——多课程单 hub 下不按课程各算一套计数
+        _AuthGuard.__init__(self, now_fn)
         #: 账本增量读缓存（H6）：文件 size -> 已解析事件列表
         self._ledger_cache: tuple[int, list[dict]] = (0, [])
         #: job_id -> {"sent_bytes", "recv_bytes"}（M0 统一计量：传输层实测字节，
@@ -360,6 +441,20 @@ class _JobStore:
             w = self._wire.setdefault(job_id, {})
             w["sent_bytes"] = int(w.get("sent_bytes", 0)) + int(n)
 
+    def record_push_wire(self, job_id: str, n: int, payload_bytes: int, upload_sec: float) -> None:
+        """记一次 **hub 中介推送**的传输实测（push 腿的 `wire_hub` 来源）。
+
+        字段名与直推（训练侧 `submit_job` 自己返回的那份）**逐字一致**
+        （body_bytes/payload_bytes/upload_sec），所以训练侧 `_wire_from_result(is_push=True)`
+        读法完全一样——两种 push 的可观测性不该一个有一个无（多课程并行时，哪条腿在吃
+        流量要靠它分组）。重推同一 job 累加 body_bytes（与 payload_sent 同规）。
+        """
+        with self._lock:
+            w = self._wire.setdefault(job_id, {})
+            w["body_bytes"] = int(w.get("body_bytes", 0)) + int(n)
+            w["payload_bytes"] = int(payload_bytes)
+            w["upload_sec"] = round(float(upload_sec), 3)
+
     def record_result_recv(self, job_id: str, n: int) -> None:
         """记一次 /jobs/{id}/result 收到的请求体字节数（= 云上行 result 体大小）。"""
         with self._lock:
@@ -403,7 +498,14 @@ class _JobStore:
                 )
 
     # ---- 租约（P3b 独占加超时：领取即设租约，心跳续租，过期回池） ----
-    def claim(self, job_id: str, ttl: float = CLAIM_TTL_SEC, race: bool = False) -> str | None:
+    def claim(
+        self,
+        job_id: str,
+        ttl: float = CLAIM_TTL_SEC,
+        race: bool = False,
+        worker_id: str = "",
+        avoid_stale_holder: bool = False,
+    ) -> str | None:
         """领取（设租约 + owner + last_heartbeat 三件套**同时置**）。
 
         B3 必杀细节：只写 `_leases` 不写 `_lease_owners` 会导致 heartbeat 恒 False，
@@ -414,6 +516,12 @@ class _JobStore:
         job，回传时无人持租约（`result_token_ok` 放行），胜负由 `store_result` 首写锁定决定。
         空 token 在 worker 侧正是**既有**的「无租约」分支：不心跳、不续租（§343 时代语义），
         故本模式不需要 worker 协议改动。
+
+        worker_id / avoid_stale_holder（2026-09-18 多课程单 hub）：领取时记下**是谁**在跑，
+        并在租约过期的那一刻把它转成 `_stale_holders`。`avoid_stale_holder=True` 时，若
+        请求者正是上一份死租约的持有人，**本次不给他**（返回 None）——按用户口径
+        「超时回落队首并改为推送其它 worker」。是否允许避让由调用方算（只剩一个活跃
+        worker 时必须允许自领，否则集群停摆，见 `protocol.avoid_expired_holder`）。
         """
         import secrets
 
@@ -425,6 +533,7 @@ class _JobStore:
                 # **确定性拒绝**并上报 job 失败，一个赢家把输家炸成事故。
                 self._leases.pop(job_id, None)
                 self._lease_owners.pop(job_id, None)
+                self._lease_workers.pop(job_id, None)
                 self._last_heartbeat[job_id] = self._now()  # 仅供观测（谁在跑）
             return ""
         with self._lock:
@@ -432,11 +541,55 @@ class _JobStore:
             lease = self._leases.get(job_id)
             if lease is not None and lease > now:
                 return None
+            if lease is not None:
+                # 过期租约：回收并记下「谁跑死的」——下一个 worker 该顶上（而不是让它
+                # 自领自己跑死的活，那只是把同一个故障重演一遍）。
+                dead = self._lease_workers.get(job_id, "")
+                self._leases.pop(job_id, None)
+                self._lease_owners.pop(job_id, None)
+                self._lease_workers.pop(job_id, None)
+                if dead:
+                    self._stale_holders[job_id] = dead
+            # 避让：上一份**过期死掉**的租约若就是这个请求者跑的，本次不给他（让别的
+            # worker 顶上）。身份比对只能在这里做——上面刚完成租约回收，stale 记录此刻
+            # 才是最新的；在队列层先判会恒为空（2026-09-18 实测）。
+            if avoid_stale_holder and worker_id and self._stale_holders.get(job_id, "") == worker_id:
+                return None
             token = secrets.token_hex(16)
             self._leases[job_id] = now + ttl
             self._lease_owners[job_id] = token
+            if worker_id:
+                self._lease_workers[job_id] = worker_id
+                self._stale_holders.pop(job_id, None)  # 有人接手了 ⇒ 避让记录使命结束
             self._last_heartbeat[job_id] = now
             return token
+
+    def stale_holder(self, job_id: str) -> str:
+        """上一份**过期**租约的持有人（无 → 空串）。给 `/admin/queue` 观测用。"""
+        with self._lock:
+            return self._stale_holders.get(job_id, "")
+
+    def lease_worker(self, job_id: str) -> str:
+        """当前租约持有人身份（无 → 空串）；同时在租约已过期时把它转成 stale 记录。"""
+        with self._lock:
+            lease = self._leases.get(job_id)
+            if lease is None:
+                return ""
+            if lease <= self._now():
+                dead = self._lease_workers.get(job_id, "")
+                self._leases.pop(job_id, None)
+                self._lease_owners.pop(job_id, None)
+                self._lease_workers.pop(job_id, None)
+                if dead:
+                    self._stale_holders[job_id] = dead
+                return ""
+            return self._lease_workers.get(job_id, "")
+
+    def inflight(self) -> list[str]:
+        """持有**未过期**租约的 job_id（在飞）。观测面与「在派发课程数」共用一份口径。"""
+        now = self._now()
+        with self._lock:
+            return [jid for jid, exp in self._leases.items() if exp > now]
 
     def heartbeat(self, job_id: str, lease_token: str) -> bool:
         """心跳续租（60s 节奏；H2：非原租者拒续）。
@@ -465,6 +618,8 @@ class _JobStore:
                 return False
             self._leases.pop(job_id, None)
             self._lease_owners.pop(job_id, None)
+            self._lease_workers.pop(job_id, None)
+            self._stale_holders.pop(job_id, None)  # 主动还租约 = 不是「跑死了」，不该避让
             self._last_heartbeat.pop(job_id, None)
             return True
 
@@ -774,49 +929,739 @@ class _JobStore:
         except (OSError, ValueError):
             return None
 
-    # ---- 闭锁（D9） ----
-    def auth_failure(self, ip: str) -> int:
-        """记一次鉴权失败，返回**累计次数**（含本次）；满 5 次封禁 3600s。
 
-        返回值供 handler 打印审计行——2026-09-16 x3-step 事故：401 落在
-        `/ping`・`/jobs/next` 等静默路径上，五次失败把 127.0.0.1 封掉后
-        **hub 日志一行痕迹都没有**，训练循环被 cloudflared 回源 IP 连坐后
-        连续 403 自杀退出，只能靠猜。故次数必须上浮到调用方记录。
+# ------------------------------------------------------------------ 多课程调度面
 
-        **回环来源永不计数、永不封禁**（返回 0）——口径见 `_is_loopback`。
+#: 未知 job_id 的哨兵根：归属解析不到时 `_job_dir` 返回它下面的路径。
+#: 选 tempdir 而不是仓库内目录：任何漏网的 mkdir 都落在系统临时目录（不污染真 store），
+#: 而 handler 侧的 `(... / "manifest.json").exists()` 仍是 False ⇒ 行为与「没这个 job」同。
+_MISSING_ROOT = Path(tempfile.gettempdir()) / "hub-queue-missing"
+
+#: 自动发现（`--discover`）的扫描节拍（秒）。派发热路径也会顺带扫（有最小间隔闸），
+#: 这里只是「没人轮询时」的兜底：后台线程按这个节拍把新课程登记进来。
+DISCOVER_SCAN_SEC = 5.0
+
+
+class _HubQueue(_AuthGuard):
+    """多课程单 hub 的调度面（2026-09-18 用户指令：一个进程服务所有并行课程）。
+
+    形状：**一个进程托管 N 份 `_JobStore`**，而磁盘布局逐字节不变（每课程仍是
+    `tmp/<course>/remote-jobs` + `tmp/<course>/training_log.jsonl`）。这是本设计的
+    核心取舍：多课程只是「同一个进程里多挂几份账本」，不是换一套磁盘契约 —— 于是
+    既有工具、既有 66 个单课程用例、`tmp/<course>` 约定全部照旧。
+
+    本类负责三件跨课程的事：
+
+      ① **路由**：任意 `/jobs/{id}/...` 先按 job_id 找归属课程。job_id 的幂等键含
+         `runId`，而 runId 是每进程随机的 8 字节 hex（`rl/queue.py::RUN_ID`）⇒ 跨课程
+         天然不撞；判据 = 「哪个课程的 job 目录里真有它」，命中即入缓存（一次 fs 探测）。
+      ② **队形**：每课程一条 FIFO（`claimable_job_ids` 本来就是发布序）；派发时
+         **跨课程轮转**（`protocol.rotation_order`）—— 否则一门积压 20 轮的课会把
+         其它课程饿死（5 课程机群退化成单课程机群）。
+      ③ **进程级状态**（竞速模式 / 停机达令 / 鉴权闭锁）：单课程时**借**那一份
+         `_JobStore` 的，多课程时用自己的。这不是洁癖 —— 既有用例会在 store 上预热
+         `_auth_blocked_until` / `race_mode` / 摆 `_workers` 再发 HTTP 请求，若本类另有
+         副本，那些预热就不生效了。
+
+    对外的 job 作用域方法**与 `_JobStore` 同名同签名**（内部先解析归属），所以 handler
+    侧只需把 `self.hub.` 换成 `self.hub.`，单课程行为逐字节等价。
+    """
+
+    #: epoch POST 体上限（与 `_JobStore` 同源，不留第二份魔数）
+    BC_EPOCH_BODY_MAX = _JobStore.BC_EPOCH_BODY_MAX
+
+    #: 自动发现时判定「课程目录是不是活的」的新鲜窗口（秒）。
+    #: 一个 PPO 轮次是分钟级（rollout 采集 + 云端结算 10–30min），窗口取 1h：正在跑的课
+    #: 每轮都会在 `remote-jobs/` 里增删条目、往 jsonl 追加行，秒级就落在窗口内；而几天前
+    #: 的陈旧实验目录（同样的磁盘形状，同样残留 pending job）永远不会被误当成「在跑的课」
+    #: ——误登记会把已死课程的 job 继续派给真 GPU worker（白烧租约）。
+    DISCOVER_FRESH_SEC = 3600.0
+
+    #: 两次扫描之间的最小间隔（秒）：`claim_next` 是派发热路径（worker 每几秒一轮询），
+    #: 每次 readdir 都扫一遍没必要，也没意义。
+    DISCOVER_SCAN_MIN_SEC = 2.0
+
+    def __init__(
+        self,
+        stores,
+        order=None,
+        modes=None,
+        now_fn=None,
+        discover_root=None,
+        discover_fresh_sec: float = DISCOVER_FRESH_SEC,
+    ) -> None:
+        self._stores: dict[str, _JobStore] = dict(stores)
+        self._order: list[str] = [c for c in (order or list(self._stores)) if c in self._stores]
+        #: 自动发现根（`--traj-root`）；None = 关（`--discover` 未给，零开销零行为变化）
+        self._discover_root: Path | None = Path(discover_root) if discover_root else None
+        self._discover_fresh = float(discover_fresh_sec)
+        self._discover_last = 0.0
+        md = modes or {}
+        self._modes: dict[str, str] = {
+            c: str(md.get(c) or COURSE_MODE_ONLINE) for c in self._order
+        }
+        #: 上次派发过的课程（轮转起点）；None = 从序首开始
+        self._cursor: str | None = None
+        #: job_id -> course（归属解析缓存；job_id 不可复用，故不会失效）
+        self._locate_cache: dict[str, str] = {}
+        #: 单课程 = 旧形状：进程级状态一律借那一份 store（见类 docstring ③）
+        self._solo: _JobStore | None = (
+            next(iter(self._stores.values())) if len(self._stores) == 1 else None
+        )
+        #: 自动发现的扫描闸（`_discover_last` 初值 0 ⇒ 首次调用必扫）
+        if self._discover_root is not None:
+            self._discover_last = float("-inf")
+        _AuthGuard.__init__(self, now_fn)
+        # 时钟与单课程 store 同源（测试注入的假时钟必须一致，否则 claimed 标记的时间戳
+        # 会混入真实墙钟）。
+        self._now = self._solo._now if self._solo is not None else (now_fn or time.time)
+        #: 多课程时自己的 worker 登记表（worker_id -> (last_seen, hub_scope)）
+        self._workers: dict[str, tuple[float, int | None]] = {}
+        # 停机达令**按课程**（2026-09-18 单 hub 化）：一个 hub 服务所有课程之后，若达令还是
+        # 进程级一个布尔，「A 课门禁 ABORT」会连坐 B 课的云机（B 的 worker 下一轮轮询就
+        # 拿到 halt 并自停）。故：无课程参数 = 全课程（旧调用方语义，落 `_halt_default`，
+        # 新发现的课也继承）；`?course=` = 只动那一门课的例外（`_halts`）。
+        self._halt_default = False
+        self._halts: dict[str, bool] = {}
+        self._race_mode = RACE_MODE_AUTO
+
+    def halt_of(self, course: str) -> bool:
+        """本课程是否在停机态（单课程借 store 时恒看那一份 store 的旗标）。"""
+        if self._solo is not None:
+            return bool(self._solo.halt_workers)
+        return bool(self._halts.get(course, self._halt_default))
+
+    def all_halted(self) -> bool:
+        """**所有已登记课程**都在停机态。
+
+        空课程表 → False（`--discover` 刚起、还没有课程时“没课可停”，不是停机）——
+        否则空闲 worker 会收到一个凭空的停机达令。
         """
-        if _is_loopback(ip):
-            return 0
-        with self._lock:
-            n = self._auth_fail.get(ip, 0) + 1
-            self._auth_fail[ip] = n
-            if n >= 5:
-                self._auth_blocked_until[ip] = self._now() + 3600
-                self._auth_fail.pop(ip, None)
-            return n
+        if self._solo is not None:
+            return bool(self._solo.halt_workers)
+        return bool(self._order) and all(self._halts.get(c, self._halt_default) for c in self._order)
+
+    def set_halt(self, halt: bool, course: str = "") -> bool:
+        """置/解停机达令；未知 course → False（不猜、不静默改写全局）。"""
+        if self._solo is not None:
+            self._solo.halt_workers = bool(halt)
+            return True
+        if course:
+            if course not in self._stores:
+                return False
+            self._halts[course] = bool(halt)
+            return True
+        self._halt_default = bool(halt)
+        self._halts.clear()
+        return True
+
+    # ---- 课程表自动发现（`--discover`） ----
+    def add_course(self, name: str, mode: str = COURSE_MODE_ONLINE) -> bool:
+        """登记一门课程（现建 `_JobStore`）；已登记/空名/未开发现 → False（幂等）。
+
+        派生目录与 `--course` 启动参数**逐字节相同**（`<root>/<name>/remote-jobs` +
+        `<root>/<name>/training_log.jsonl`）⇒ 自动发现的课与显式声明的课在观测面、诊断
+        工具、`tmp/<course>` 约定里无法区分，也不该区分。
+        """
+        c = str(name or "")
+        if not c or c in self._stores or self._discover_root is None:
+            return False
+        self._adopt_solo()
+        self._stores[c] = _JobStore(
+            self._discover_root / c / "remote-jobs",
+            self._discover_root / c / "training_log.jsonl",
+            now_fn=self._now,  # 时钟同源：租约时间戳与判定不能一边真墙钟一边假钟
+        )
+        self._order.append(c)
+        m = (mode or "").strip().lower()
+        self._modes[c] = m if m in COURSE_MODES else COURSE_MODE_ONLINE
+        return True
+
+    def _adopt_solo(self) -> None:
+        """从「单课程借 store」切到「多课程自有状态」：把进程级状态搬到自己身上。
+
+        为什么必须搬：单课程时 halt / race / worker 登记 / 鉴权计数都住在那一份 store 里
+        （既有用例直接预热 store 字段），一旦课程数变成 2，这些状态必须继续生效——不搬
+        就是「多发现一门课，把停机达令、竞速模式、鉴权闭锁全悄悄清了」。
+        """
+        st = self._solo
+        if st is None:
+            return
+        self._halt_default = bool(st.halt_workers)
+        self._race_mode = st.race_mode
+        self._workers = dict(st._workers)
+        self._auth_fail = dict(st._auth_fail)
+        self._auth_blocked_until = dict(st._auth_blocked_until)
+        self._solo = None
+
+    def discover(self) -> list[str]:
+        """扫 `<traj_root>/<course>/{remote-jobs,offline}`，把新鲜且未登记的课程登记进来。
+
+        返回本次新增的课程（目录序，稳定）。`--discover` 未开 → 恒空（零开销）。
+
+        为什么以**磁盘**为发现源、而不是让控制台/训练器走一次 HTTP 注册：训练侧把 job
+        发布到 `<traj>/remote-jobs` 是**文件系统事实**（hub 与 trainer 共享同一份盘），
+        所以「有新课程在跑」这件事本身就写在盘上。再加一条注册旁路就是「会失败、会乱序、
+        会忘了调」的第二事实源——而漏注册的后果是那门课**永久饿死**（跨课程轮转表里
+        没有它），且表面上「训练正常」。
+        """
+        root = self._discover_root
+        if root is None:
+            return []
+        now = self._now()
+        if now - self._discover_last < self.DISCOVER_SCAN_MIN_SEC:
+            return []
+        self._discover_last = now
+        try:
+            entries = sorted(root.iterdir(), key=lambda p: p.name)
+        except OSError:
+            return []
+        added: list[str] = []
+        for ent in entries:
+            try:
+                if not ent.is_dir():
+                    continue
+            except OSError:
+                continue
+            if ent.name in self._stores:
+                continue
+            try:
+                parse_course_arg(ent.name)
+            except ProtocolError:
+                continue  # 非课程目录（tmp/training-start 之类）——安静跳过
+            if not self._course_dir_live(ent, now):
+                continue
+            if self.add_course(ent.name):
+                added.append(ent.name)
+        if added:
+            print(f"[hub-server] discovered courses: {', '.join(added)}", flush=True)
+        return added
+
+    def _course_dir_live(self, ent: Path, now: float) -> bool:
+        """课程目录「在跑」判据：`{remote-jobs,offline}` 存在，且自身或本课 jsonl 新鲜。"""
+        for sub in ("remote-jobs", "offline"):
+            d = ent / sub
+            if not d.is_dir():
+                continue
+            newest = 0.0
+            for p in (d, ent / "training_log.jsonl"):
+                try:
+                    newest = max(newest, p.stat().st_mtime)
+                except OSError:
+                    continue
+            if newest > 0 and now - newest <= self._discover_fresh:
+                return True
+        return False
+
+    # ---- 进程级状态（单课程借 store，多课程用自己那份） ----
+    #: 进程级读写（`all_halted()` 的旧名）：既有测试/调用方直接读写它。
+    @property
+    def halt_workers(self) -> bool:
+        return self.all_halted()
+
+    @halt_workers.setter
+    def halt_workers(self, v: bool) -> None:
+        self.set_halt(bool(v))
+
+    @property
+    def race_mode(self) -> str:
+        return self._solo.race_mode if self._solo is not None else self._race_mode
+
+    @race_mode.setter
+    def race_mode(self, v: str) -> None:
+        if self._solo is not None:
+            self._solo.race_mode = v
+        else:
+            self._race_mode = v
+
+    # ---- 鉴权面：同样「单课程借 store」。
+    # 为什么这四个必须委派而不能用自己那份：鉴权面是**进程级一份**，而单课程 hub 的
+    # 计数/封禁历史就住在那一份 `_JobStore` 里——既有用例会在 store 上预热 5 次失败
+    # 再断言下一个请求拿到 403，也会在 HTTP 请求后断言 `store._auth_fail` 被更新。
+    # 各存一份副本会让这两类断言全部反，且是对生产行为的真实偏离（两个计数器）。
+    def auth_failure(self, ip: str) -> int:
+        if self._solo is not None:
+            return self._solo.auth_failure(ip)
+        return _AuthGuard.auth_failure(self, ip)
 
     def auth_success(self, ip: str) -> None:
-        """一次合法鉴权：清零该 ip 的失败计数（**不改封禁状态**）。
-
-        2026-09-17 改序配套：封禁只拒无效尝试后，合法流量必须能把计数打回零——否则
-        与合法组件共用同一个来源 IP 的坏客户端（典型：cloudflared 回源把隧道流量与
-        所有本机组件都归成 127.0.0.1）仍会**慢性累积**到 5 次，把整个 IP 拖进封禁。
-        封禁本身不在此解除：它已只影响无效尝试，到点自愈，无需合法流量代劳。
-        """
-        with self._lock:
-            self._auth_fail.pop(ip, None)
+        if self._solo is not None:
+            self._solo.auth_success(ip)
+            return
+        _AuthGuard.auth_success(self, ip)
 
     def is_blocked(self, ip: str) -> bool:
-        if _is_loopback(ip):  # 回环永不被封（即便旧内存态里混进过记录）
-            return False
-        with self._lock:
-            until = self._auth_blocked_until.get(ip, 0.0)
-            return until > self._now()
+        if self._solo is not None:
+            return self._solo.is_blocked(ip)
+        return _AuthGuard.is_blocked(self, ip)
 
     def blocked_remaining(self, ip: str) -> float:
-        """该 ip 剩余封禁秒数（未封禁 = 0）——供审计行提示「还要封多久」。"""
+        if self._solo is not None:
+            return self._solo.blocked_remaining(ip)
+        return _AuthGuard.blocked_remaining(self, ip)
+
+    def _registry(self) -> dict[str, tuple[float, int | None]]:
+        """生效的 worker 登记表（单课程 = store 的，多课程 = 自己的）。"""
+        return self._solo._workers if self._solo is not None else self._workers
+
+    def note_worker(self, worker_id: str, hub_scope: int | None) -> None:
+        """登记一次 worker 轮询（/jobs/next 入口）。空 id 不记（无身份无法去重计数）。"""
+        wid = (worker_id or "").strip()
+        if not wid:
+            return
+        reg = self._registry()
         with self._lock:
-            return max(0.0, self._auth_blocked_until.get(ip, 0.0) - self._now())
+            reg[wid] = (self._now(), hub_scope)
+
+    def active_worker_count(self) -> int:
+        """窗口内**不同** worker 数（「多出来的卡」判据与避让判据共用一份口径）。"""
+        now = self._now()
+        with self._lock:
+            return len(
+                {wid for wid, (seen, _s) in self._registry().items() if now - seen <= RACE_WORKER_WINDOW_SEC}
+            )
+
+    def race_active(self) -> bool:
+        """当前是否该广播（判定纯函数在 `protocol.race_decision`，可单测）。
+
+        多课程口径（2026-09-18 用户指令）：**在实时派发的课程数 < 窗口内活跃 worker
+        数** 才广播。单课程时退化成旧口径（≥2 个 worker），逐字节等价。
+        """
+        if self._solo is not None:
+            return self._solo.race_active()
+        with self._lock:
+            workers = [(wid, seen, scope) for wid, (seen, scope) in self._workers.items()]
+        return race_decision(
+            self.race_mode,
+            workers,
+            self._now(),
+            RACE_WORKER_WINDOW_SEC,
+            active_courses=max(1, self.active_courses()),
+        )
+
+    def set_race_mode(self, mode: str) -> str | None:
+        """设置竞速模式；非法值返回 None（不改）。合法则返回归一化后的模式。"""
+        if self._solo is not None:
+            return self._solo.set_race_mode(mode)
+        m = (mode or "").strip().lower()
+        if m not in RACE_MODES:
+            return None
+        with self._lock:
+            self._race_mode = m
+        return m
+
+    def clear_workers(self) -> None:
+        """清空 worker 登记（强制切模式时用：不让上一模式的证据影响新判定）。"""
+        with self._lock:
+            self._registry().clear()
+
+    def race_state(self) -> dict:
+        """竞速观测面（/admin/race）：模式、是否生效、窗口内 worker 数/范围。"""
+        if self._solo is not None:
+            return self._solo.race_state()
+        now = self._now()
+        with self._lock:
+            fresh = {
+                wid: scope
+                for wid, (seen, scope) in self._workers.items()
+                if now - seen <= RACE_WORKER_WINDOW_SEC
+            }
+        return {
+            "race_mode": self._race_mode,
+            "race_active": self.race_active(),
+            "workers": len(fresh),
+            "worker_scopes": fresh,
+            # 多课程新增：判据的两个数摆出来（否则「为什么没竞速」只能靠猜）
+            "active_courses": self.active_courses(),
+            "courses": self._order,
+        }
+
+    # ---- 课程表与归属 ----
+    def courses(self) -> list[str]:
+        return list(self._order)
+
+    def course_of(self, job_id: str) -> str | None:
+        """job_id → 归属课程；**找不到返回 None**（不是空串！）。
+
+        为什么必须用 None 区分：单课程队列（以及旧单课程 hub）的课程名**就是空串**
+        （`tmp/nocourse` 那套约定）。用空串兼作「找不到」会把它当成找不到 —— 直接后果
+        是 `/jobs/next` 刚派出的 job 立刻解析不到归属，handler 打到哨兵路径上 500
+        （2026-09-18 白测一次的真故障）。
+
+        为什么搜目录而不是搜账本：账本行里没有课程字段（磁盘契约不变），而
+        `<job_root>/<job_id>/` 的存在本身就是归属证据，且是一次 fs 调用 —— 比读账本便宜。
+        """
+        jid = str(job_id or "")
+        if not jid:
+            return None
+        hit = self._locate_cache.get(jid)
+        if hit is not None:
+            return hit
+        for course in self._order:
+            try:
+                if (self._stores[course].job_root / jid).exists():
+                    self._locate_cache[jid] = course
+                    return course
+            except OSError:
+                continue
+        return None
+
+    def _store_of(self, job_id: str) -> _JobStore | None:
+        course = self.course_of(job_id)
+        return None if course is None else self._stores.get(course)
+
+    def mode_of(self, course: str) -> str:
+        return self._modes.get(course, COURSE_MODE_ONLINE)
+
+    def offline_courses(self) -> list[str]:
+        return [c for c in self._order if self.mode_of(c) == COURSE_MODE_OFFLINE]
+
+    def set_mode(self, course: str, mode: str) -> bool:
+        """热切一门课的模式（在线/离线）。非法课程/模式 → False。
+
+        volatile（与 halt/race 同性质）：重启回启动参数给定的模式。
+        """
+        if course not in self._stores:
+            return False
+        m = (mode or "").strip().lower()
+        if m not in COURSE_MODES:
+            return False
+        self._modes[course] = m
+        return True
+
+    def active_courses(self) -> int:
+        """**在实时派发**的课程数（竞速判据的分母）：非离线，且有待领或未过期在飞 job。
+
+        离线课程不算（用户口径：它不实时派发 PPO）；已跑完无待办的课程不算（没活可抢，
+        把它算进去只会白降压竞速阈值）。
+        """
+        n = 0
+        for course in self._order:
+            if self.mode_of(course) == COURSE_MODE_OFFLINE:
+                continue
+            st = self._stores[course]
+            if st.claimable_job_ids() or st.inflight():
+                n += 1
+        return n
+
+    # ---- 派发（跨课程轮转 + 超时换 worker） ----
+    def claim_next(
+        self, worker_id: str = "", race: bool = False, offline_ok: bool = False
+    ) -> tuple[str, str, str] | None:
+        """取下一份该派发的 job → (course, job_id, lease_token)；无 → None。
+
+        轮转从**上次派发的下一门**开始（`rotation_order`）：每课程一条 FIFO，若每次都
+        从序首扫，一门课的积压会把其它课程饿死。
+
+        避让（用户口径「超时回落队首并改为推送其它 worker」）：候选 job 的上一份租约是
+        **过期死掉的**且持有人就是本次请求者时，本次跳过它（`avoid_expired_holder`）——
+        但机群只剩一个活跃 worker 时不避让（否则它自己超时过的 job 谁都领不到 = 停摆）。
+
+        离线课（2026-09-19 用户口径「也支持带特别标识的云端 worker 在线领取」）：
+        只有 `offline_ok=True`（worker 自报能跑完整段）的请求才能领——它不实时派发，
+        但也**不是**谁都领不到的坟墓。带标 worker 仍可领在线课（课程与 worker 正交）。
+        """
+        # 派发前扫一次（有最小间隔闸）：新课程/新 job 目录出现后，**下一次轮询**就能被领到，
+        # 不必等后台节拍——否则新开的课在最坏情况下要等一个扫描周期才有人来领活。
+        self.discover()
+        active_workers = self.active_worker_count()
+        for course in rotation_order(self._order, self._cursor):
+            offline = self.mode_of(course) == COURSE_MODE_OFFLINE
+            if offline and not offline_ok:
+                continue
+            st = self._stores[course]
+            # 离线课**永不竞速**：竞速广播是把同一份 job 交给多个 worker 抢答（先落账者胜），
+            # 而离线课的 job 是**整段**——广播等于让每台带标 worker 各跑一遍完整课程。
+            # 而且离线课不算进竞速判据的分母，只剩离线课时 `race_active()` 反而为真。
+            use_race = race and not offline
+            for jid in st.claimable_job_ids(race=use_race):
+                # 只给「允不允许避让」的闸；身份比对在 store 里（它才知道租约回收后的
+                # stale 记录，在这里判会踩时序——见 `may_avoid_stale_holder` docstring）。
+                avoid = may_avoid_stale_holder(worker_id, active_workers)
+                tok = st.claim(
+                    jid, race=use_race, worker_id=worker_id, avoid_stale_holder=avoid
+                )
+                if tok is None:
+                    continue  # 活租约在持 / 本次该避让 / 并发领取竞负
+                with self._lock:
+                    self._cursor = course
+                return course, jid, tok
+        return None
+
+    def traj_root(self) -> Path | None:
+        """课程根目录（`<traj>/<课>/{remote-jobs,training_log.jsonl}` 的 `<traj>`）。
+
+        发现模式 = `--traj-root`；单课程模式由 `--job-root`（= `<traj>/<课>/remote-jobs`）
+        回推两级。推不出来（测试里的裸 job_root）⇒ None，调用方据此拒服务而不是猜路径。
+        """
+        if self._discover_root is not None:
+            return self._discover_root
+        if self._solo is not None:
+            return self._solo.job_root.parent.parent
+        return None
+
+    def task_pack_path(self, course: str) -> Path:
+        """整段任务包落点：`<traj>/<课>/task-<课>.zip`（控制台导出的就是它）。
+
+        课程名进的是磁盘路径 ⇒ 在这里断掉分隔符/`..`（与 `parse_course_arg` 同一条边界）。
+        hub 不知道 traj 根 ⇒ ProtocolError（响亮，不猜）。
+        """
+        root = self.traj_root()
+        if root is None:
+            raise ProtocolError("hub 不知道课程根目录（--traj-root / --discover 未给）")
+        name = (course or "").strip()
+        if not name or name in (".", "..") or any(ch in name for ch in ("/", "\\", "\x00")):
+            raise ProtocolError(f"课程名非法: {course!r}（不得含路径分隔符/空名）")
+        if ".." in name:
+            raise ProtocolError(f"课程名非法: {course!r}（不得含 ..）")
+        return root / name / f"task-{name}.zip"
+
+    def offline_progress(self) -> dict[str, dict]:
+        """每课程已收到的离线进度（补传产物）：`{课: {run_id: {its: [...], count, last_mtime}}}`。
+
+        为什么单开一个读面：段内进度**只能**从产物目录看出来（hub 不跑那几轮，账本里没有
+        它们的行），而控制台要在长段期间看到进度曲线——「它在跑」与「它挂了」的唯一区别
+        就是最近一轮的时间戳。只读列目录，不解析产物（解析权重不在观测面做）。
+        """
+        out: dict[str, dict] = {}
+        for course in self._order:
+            runs: dict[str, dict] = {}
+            base = self._stores[course].job_root / _JobStore.OFFLINE_DIR
+            try:
+                run_dirs = sorted(p for p in base.iterdir() if p.is_dir())
+            except OSError:
+                run_dirs = []
+            for run_dir in run_dirs:
+                its: list[int] = []
+                last = 0.0
+                try:
+                    for it_dir in run_dir.iterdir():
+                        if not it_dir.is_dir() or not it_dir.name.startswith("it-"):
+                            continue
+                        try:
+                            its.append(int(it_dir.name[3:]))
+                            last = max(last, it_dir.stat().st_mtime)
+                        except (ValueError, OSError):
+                            continue
+                except OSError:
+                    continue
+                runs[run_dir.name] = {
+                    "its": sorted(its),
+                    "count": len(its),
+                    "last_mtime": last,
+                }
+            if runs:
+                out[course] = runs
+        return out
+
+    # ---- 观测面 ----
+    def queue_state(self) -> dict:
+        """`/admin/queue`：每课程的深度/在飞/最近心跳/退避记录 + 竞速的两个判据数。
+
+        只读观测——不参与任何调度决策，但它是「为什么某门课在饿着」的唯一答案面。
+        """
+        now = self._now()
+        courses: dict[str, dict] = {}
+        for course in self._order:
+            st = self._stores[course]
+            pending = st.claimable_job_ids()
+            inflight: list[dict] = []
+            for jid in st.inflight():
+                holder = st.lease_worker(jid) or "?"
+                inflight.append(
+                    {
+                        "job_id": jid,
+                        "worker": holder,
+                        "heartbeat_ago": round(now - st._last_heartbeat.get(jid, now), 1),
+                    }
+                )
+            courses[course] = {
+                "mode": self.mode_of(course),
+                # 停机达令是**每课程**的（一门课的门禁 ABORT 只停那门课的云机）
+                "halt": self.halt_of(course),
+                "pending": pending,
+                "pending_n": len(pending),
+                "inflight": inflight,
+                "next_job": pending[0] if pending else None,
+            }
+        return {
+            "courses": courses,
+            "order": self._order,
+            "cursor": self._cursor,
+            "offline": self.offline_courses(),
+            "active_courses": self.active_courses(),
+            "active_workers": self.active_worker_count(),
+            "race_active": self.race_active(),
+            "halt": self.all_halted(),
+        }
+
+    # ---- job 作用域委派（与 `_JobStore` 同名同签名） ----
+    def _job_dir(self, job_id: str) -> Path:
+        """归属课程 job 目录；找不到 → 哨兵路径（`manifest.json` 必不存在 ⇒ 调用方 404）。"""
+        st = self._store_of(job_id)
+        if st is None:
+            return _MISSING_ROOT / str(job_id)
+        return st._job_dir(job_id)
+
+    def job_root_of(self, course: str) -> Path | None:
+        st = self._stores.get(course)
+        return st.job_root if st else None
+
+    def shared_code_zip(self, course: str = "") -> Path | None:
+        """共享 code.zip 路径：给课程就用它，否则用第一份**真存在**的（bootstrap 用）。"""
+        order = [course] if course in self._stores else self._order
+        for c in order:
+            p = self._stores[c].job_root / "code.zip"
+            if p.exists():
+                return p
+        return None
+
+    def claimable_job_ids(self, course: str, race: bool = False) -> list[str]:
+        st = self._stores.get(course)
+        return st.claimable_job_ids(race=race) if st else []
+
+    def claim(
+        self,
+        job_id: str,
+        ttl: float = CLAIM_TTL_SEC,
+        race: bool = False,
+        worker_id: str = "",
+        avoid_stale_holder: bool = False,
+    ) -> str | None:
+        """（单份领取；多课程的挑选入口是 `claim_next`——离线课的能力闸在那边。）"""
+        st = self._store_of(job_id)
+        if st is None:
+            return None
+        return st.claim(
+            job_id,
+            ttl=ttl,
+            race=race,
+            worker_id=worker_id,
+            avoid_stale_holder=avoid_stale_holder,
+        )
+
+    def heartbeat(self, job_id: str, lease_token: str) -> bool:
+        st = self._store_of(job_id)
+        return st.heartbeat(job_id, lease_token) if st else False
+
+    def release(self, job_id: str, lease_token: str) -> bool:
+        st = self._store_of(job_id)
+        return st.release(job_id, lease_token) if st else False
+
+    def result_token_ok(self, job_id: str, lease_token: str) -> bool:
+        st = self._store_of(job_id)
+        # 找不到归属 = 这个 job 不归本 hub 管 ⇒ **拒收**（放行会写出一个无归属的 result）
+        return st.result_token_ok(job_id, lease_token) if st else False
+
+    def store_result(self, job_id: str, result: dict) -> bool:
+        st = self._store_of(job_id)
+        return st.store_result(job_id, result) if st else False
+
+    def store_job_failure(self, job_id: str, rec: dict) -> bool:
+        st = self._store_of(job_id)
+        return st.store_job_failure(job_id, rec) if st else False
+
+    def job_failure(self, job_id: str) -> dict | None:
+        st = self._store_of(job_id)
+        return st.job_failure(job_id) if st else None
+
+    def get_result(self, job_id: str) -> dict | None:
+        st = self._store_of(job_id)
+        return st.get_result(job_id) if st else None
+
+    def mark_completed(self, job_id: str) -> None:
+        st = self._store_of(job_id)
+        if st:
+            st.mark_completed(job_id)
+
+    def record_payload_sent(self, job_id: str, n: int) -> None:
+        st = self._store_of(job_id)
+        if st:
+            st.record_payload_sent(job_id, n)
+
+    def record_result_recv(self, job_id: str, n: int) -> None:
+        st = self._store_of(job_id)
+        if st:
+            st.record_result_recv(job_id, n)
+
+    def record_push_wire(self, job_id: str, n: int, payload_bytes: int, upload_sec: float) -> None:
+        """hub 中介推送的传输实测（按 job 归属委派；未知 job 静默跳过）。"""
+        st = self._store_of(job_id)
+        if st:
+            st.record_push_wire(job_id, n, payload_bytes, upload_sec)
+
+    def wire_stats(self, job_id: str) -> dict:
+        st = self._store_of(job_id)
+        return st.wire_stats(job_id) if st else {}
+
+    def store_bc_epoch(self, job_id: str, body: dict) -> bool:
+        st = self._store_of(job_id)
+        return st.store_bc_epoch(job_id, body) if st else False
+
+    def get_bc_resume(self, job_id: str) -> dict | None:
+        st = self._store_of(job_id)
+        return st.get_bc_resume(job_id) if st else None
+
+    def get_bc_metrics(self, job_id: str) -> list[dict]:
+        st = self._store_of(job_id)
+        return st.get_bc_metrics(job_id) if st else []
+
+    def lease_expires_in(self, job_id: str) -> float | None:
+        """距租约到期秒数；无租约/无归属 → None（`/jobs/{id}/status` 观测用）。"""
+        st = self._store_of(job_id)
+        if st is None:
+            return None
+        exp = st._leases.get(job_id)
+        return None if exp is None else round(exp - st._now(), 1)
+
+    def last_heartbeat_ago(self, job_id: str) -> float | None:
+        """距上次心跳秒数；从未心跳/无归属 → None。"""
+        st = self._store_of(job_id)
+        if st is None:
+            return None
+        hb = st._last_heartbeat.get(job_id)
+        return None if hb is None else round(st._now() - hb, 1)
+
+    def append_ledger(self, job_id: str, event: dict) -> None:
+        """往**归属课程**的账本追加一行（`/jobs/{id}/fail` 的 job_cancelled 用）。"""
+        st = self._store_of(job_id)
+        if st is not None:
+            st._append_ledger(event)
+
+    # ---- 离线产物补传（路由：显式 course > 已有 offline 目录 > 400） ----
+    def locate_offline_course(self, body: dict, query_course: str = "") -> str | None:
+        """定一段补传产物归哪门课程；**归不到返回 None**（不是空串）。
+
+        ① 体里的 `course`/`course_name`（节点从 job manifest 抄来，最可靠）；
+        ② `?course=` 查询参数（运维手工补传）；
+        ③ 已有 `offline/<run_id>/` 目录的课程 —— 补传天然会重传续投，第一条推送
+           建目录、后续自动归位（幂等）。
+
+        为什么返回 None 而不用空串表「归不到」：单课程队列（与旧单课程 hub）的课程名
+        **就是空串**，空串兼作缺失值会让单课程下的每一次补传都 400（2026-09-18 实测）。
+        """
+        named = str(body.get("course") or body.get("course_name") or query_course or "").strip()
+        if named in self._stores:
+            return named
+        run_id = str(body.get("run_id") or "")
+        if run_id:
+            try:
+                safe = sanitize_run_id(run_id)
+            except ProtocolError:
+                return None
+            for course in self._order:
+                try:
+                    if (self._stores[course].job_root / _JobStore.OFFLINE_DIR / safe).exists():
+                        return course
+                except OSError:
+                    continue
+        return None
+
+    def store_offline_artifact(self, course: str, body: dict) -> dict:
+        return self._stores[course].store_offline_artifact(body)
+
+    def store_offline_result(self, course: str, body: dict) -> dict:
+        return self._stores[course].store_offline_result(body)
 
 
 def _write_bytes(path: Path, data: bytes) -> None:
@@ -846,9 +1691,16 @@ def _deterministic_fill(n: int) -> bytes:
 
 
 class HubHandler(BaseHTTPRequestHandler):
-    """单例 handler：类属性持共享 store（ThreadingHTTPServer 每请求新建实例）。"""
+    """单例 handler：类属性持共享调度面（ThreadingHTTPServer 每请求新建实例）。
 
-    store: _JobStore = None  # type: ignore[assignment]  # 由 factory 注入
+    注：类属性名从 `store` 改为 `hub`（2026-09-18 多课程）——它现在是**多课程调度面**
+    `_HubQueue` 而不再是单一 job store；单课程时它是包着一份 `_JobStore` 的队列，行为
+    与改造前逐字节等价（见 `make_server`）。
+    """
+
+    hub: _HubQueue = None  # type: ignore[assignment]  # 由 factory 注入
+    #: hub 中介 push 派发器（`--push` 时注入；None = 未启用，端点 409）。
+    push: PushDispatcher | None = None
 
     #: ip -> 上次打印「封禁拒绝」的墙钟（节流：被封客户端高频轮询时每 ip 每分钟一条）
     _blocked_logged: dict[str, float] = {}
@@ -891,14 +1743,14 @@ class HubHandler(BaseHTTPRequestHandler):
         # 循环、worker 拉活）403 一小时，而封禁只住进程内存、只能靠重启清除——重启又被
         # 端口守卫挡死 = 死锁（2026-09-17 hub-server 重启事故）。
         if token and auth == f"Bearer {token}":
-            self.store.auth_success(ip)
+            self.hub.auth_success(ip)
             return True
         # ② 无效鉴权尝试：已封禁 → 只拒（不重复计数，封禁到点自愈）；未封禁 → 计数，满 5 封禁。
-        if self.store.is_blocked(ip):
+        if self.hub.is_blocked(ip):
             self._log_blocked(ip, peer=peer, via=via)
             self._json({"error": "ip blocked"}, 403)
             return False
-        n = self.store.auth_failure(ip)
+        n = self.hub.auth_failure(ip)
         if _is_loopback(ip):
             counter, note = "AUTH FAIL", "（回环来源：不计数、不封禁）"
         else:
@@ -923,7 +1775,7 @@ class HubHandler(BaseHTTPRequestHandler):
         print(
             f"[{time.strftime('%H:%M:%S')}] [hub-server {ip}] BLOCKED — 请求被拒 "
             f"path={self.path.split('?', 1)[0]} 剩余封禁 "
-            f"{int(self.store.blocked_remaining(ip))}s（5/5 次**无效**鉴权触发；"
+            f"{int(self.hub.blocked_remaining(ip))}s（5/5 次**无效**鉴权触发；"
             f"合法 token 照常放行——本次请求的 token 不匹配；"
             f"归因: peer={peer} via={via}）",
             flush=True,
@@ -938,11 +1790,18 @@ class HubHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _bytes(
-        self, data: bytes, status: int = 200, ctype: str = "application/octet-stream"
+        self,
+        data: bytes,
+        status: int = 200,
+        ctype: str = "application/octet-stream",
+        filename: str = "",
     ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
+        if filename:
+            # 习惯文件名（下载时手一按就是这个名字，不必再改名）
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         self.end_headers()
         self.wfile.write(data)
 
@@ -952,6 +1811,11 @@ class HubHandler(BaseHTTPRequestHandler):
         if len(parts) >= 2 and parts[0] == "jobs" and len(parts[1]) > 0:
             return urllib.parse.unquote(parts[1])
         return None
+
+    def _query_course(self) -> str:
+        """`?course=` 查询参数（空 = 未给定）。与路径解析同源（urllib.parse）。"""
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        return (qs.get("course") or [""])[0].strip()
 
     # ---- 路由 ----
     def do_GET(self) -> None:
@@ -966,15 +1830,25 @@ class HubHandler(BaseHTTPRequestHandler):
             elif path == "/jobs/next":
                 self._get_next()
             elif path == "/admin/workers/halt":
-                self._admin_halt(True)
+                self._admin_halt(True, self._query_course())
             elif path == "/admin/workers/resume":
-                self._admin_halt(False)
+                self._admin_halt(False, self._query_course())
             elif path == "/admin/workers/status":
                 self._admin_status()
+            elif path == "/admin/queue":
+                self._admin_queue()
+            elif path == "/admin/push-workers":
+                self._admin_push_workers(set_action=False)
+            elif path == "/admin/courses":
+                self._admin_courses(set_mode=False)
             elif path == "/admin/race":
                 self._admin_race(set_mode=False)
             elif path == "/admin/net-probe":
                 self._admin_net_probe()
+            elif path == "/admin/offline":
+                self._admin_offline()
+            elif path == OFFLINE_TASK_PACK_PATH:
+                self._get_task_pack()
             elif path.startswith("/jobs/") and path.endswith("/payload"):
                 self._get_payload()
             elif path.startswith("/jobs/") and path.endswith("/ts_code"):
@@ -1014,6 +1888,10 @@ class HubHandler(BaseHTTPRequestHandler):
                 self._post_bc_epoch()
             elif path == "/admin/race":
                 self._admin_race(set_mode=True)
+            elif path == "/admin/courses":
+                self._admin_courses(set_mode=True)
+            elif path == "/admin/push-workers":
+                self._admin_push_workers(set_action=True)
             elif path == "/admin/net-probe":
                 self._admin_net_probe_upload()
             elif path == OFFLINE_ARTIFACT_PATH:
@@ -1035,70 +1913,213 @@ class HubHandler(BaseHTTPRequestHandler):
         # §386：停机达令随任务同发——云机取任务时同时拿到"停机命令"，先试停机、
         # 停不掉（Kaggle 无 API）则照常执行任务。停机**不拦任务分发**（否则云机
         # 闲置空烧反而是最大浪费）。空任务时也带 halt 标志，供空闲 worker 感知。
-        halt = self.store.halt_workers
+        #
+        # 多课程（2026-09-18）：达令跟着**这份活所属的课**走（`halt_of(course)`）——
+        # 进程级一个布尔会让 A 课的门禁 ABORT 停掉 B 课的云机。空轮询没有课程上下文
+        # ⇒ 用 `all_halted()`（全部课都停才告诉空闲 worker 停）。
         # 竞速广播（2026-09-17）：先登记本次轮询的 worker（身份 + 它服务几个 hub）——
         # 这是 auto 模式的**唯一**输入。缺头（旧 worker / 手写 curl）⇒ 身份或范围未知，
         # 按保守处理（不计入竞速判定 ⇒ 保持 P3b 独占）。
-        self.store.note_worker(
+        self.hub.note_worker(
             self.headers.get(WORKER_ID_HEADER, ""),
             parse_hub_scope(self.headers.get(HUB_SCOPE_HEADER, "")),
         )
-        race = self.store.race_active()
+        race = self.hub.race_active()
+        worker_id = self.headers.get(WORKER_ID_HEADER, "")
         # P3b 独占加超时（supersede §343）：首个 open job 领取即设租约并下发
         # lease_token；活租约 job 已被 claimable_job_ids 排除。worker 零改动
         # （本就读取 lease_token 并走心跳/回传携带链路）。
         # race=True 时最新 job 不下租约、对所有人可见（先落账者胜，后到者 409）。
-        jids = self.store.claimable_job_ids(race=race)
-        for jid in jids:
-            lease_token = self.store.claim(jid, race=race)
-            if lease_token is None:
-                continue  # 并发领取竞负：本轮跳过（下次轮询回池见）
-            if race:
-                print(
-                    f"[{time.strftime('%H:%M:%S')}] [hub-server] RACE job={jid} "
-                    f"worker={self.headers.get(WORKER_ID_HEADER, '?')} "
-                    f"scope={self.headers.get(HUB_SCOPE_HEADER, '?')}（竞速副本：先回传者胜）",
-                    flush=True,
-                )
-            mp = self.store._job_dir(jid) / "manifest.json"
-            manifest = json.loads(mp.read_text(encoding="utf-8"))
-            # 领取标记：首次向 worker 下发即 touch（console 据此区分「排队等取」与「已在跑」）。
-            # 无 worker 轮询 /jobs/next 时不会出现 claimed → 排队超时可告警。
-            claim = self.store._job_dir(jid) / "claimed"
-            if not claim.exists():
-                try:
-                    # `_now` 属 _JobStore（handler 无此属性）——漏写 store. 会让
-                    # 每个 /jobs/next 在「有可领任务」路径抛 500，云 worker 全取不到 job
-                    claim.write_text(str(self.store._now()), encoding="utf-8")
-                except OSError:
-                    pass
-            self._json(
-                {
-                    "job_id": jid,
-                    "manifest": manifest,
-                    "halt": halt,
-                    "lease_token": lease_token,
-                    "race": race,  # 观测（未知字段被旧 worker 忽略）：本份是不是竞速副本
-                }
-            )
+        #
+        # 多课程（2026-09-18）：挑活的是**队列**（`claim_next`）——每课程一条 FIFO、
+        # 跨课程轮转、离线课跳过、超时过的课避开原持有人。单课程时退化成
+        # 「按发布序取第一份可领的」，与改造前逐字节等价。
+        # 离线课的能力闸（2026-09-19）：标识 = worker 自报「我能自己跑完整段」。
+        # 缺头 = 无能力 ⇒ 离线课一律不给（不实时派发不是“谁都领得到”）。
+        offline_ok = has_offline_capability(self.headers.get(OFFLINE_CAP_HEADER, ""))
+        picked = self.hub.claim_next(worker_id=worker_id, race=race, offline_ok=offline_ok)
+        if picked is None:
+            self._json({"job_id": None, "halt": self.hub.all_halted()})  # 无可领取 job
             return
-        self._json({"job_id": None, "halt": halt})  # 无可领取 job
+        course, jid, lease_token = picked
+        if self.hub.mode_of(course) == COURSE_MODE_OFFLINE:
+            # 发光的一行：离线课（整段）落到带标 worker 手上——这是「离线课真的在跑」
+            # 在 hub 侧的唯一痕迹（它不进竞速判据，也不会被推送）。
+            print(
+                f"[{time.strftime('%H:%M:%S')}] [hub-server] 离线课整段交领：course={course or '-'} "
+                f"job={jid} worker={worker_id or '?'}（带 `{OFFLINE_CAP_HEADER}` 能力头）",
+                flush=True,
+            )
+        halt = self.hub.halt_of(course)
+        if race:
+            print(
+                f"[{time.strftime('%H:%M:%S')}] [hub-server] RACE job={jid} course={course or '-'} "
+                f"worker={worker_id or '?'} "
+                f"scope={self.headers.get(HUB_SCOPE_HEADER, '?')}（竞速副本：先回传者胜）",
+                flush=True,
+            )
+        mp = self.hub._job_dir(jid) / "manifest.json"
+        manifest = json.loads(mp.read_text(encoding="utf-8"))
+        # 领取标记：首次向 worker 下发即 touch（console 据此区分「排队等取」与「已在跑」）。
+        # 无 worker 轮询 /jobs/next 时不会出现 claimed → 排队超时可告警。
+        claim = self.hub._job_dir(jid) / "claimed"
+        if not claim.exists():
+            try:
+                # `_now` 属调度面（handler 无此属性）——漏写会让
+                # 每个 /jobs/next 在「有可领任务」路径抛 500，云 worker 全取不到 job
+                claim.write_text(str(self.hub._now()), encoding="utf-8")
+            except OSError:
+                    pass
+        self._json(
+            {
+                "job_id": jid,
+                "manifest": manifest,
+                "halt": halt,
+                "lease_token": lease_token,
+                "race": race,  # 观测（未知字段被旧 worker 忽略）：本份是不是竞速副本
+                # 多课程（2026-09-18）：本份活属于哪门课。worker 不需要它就能干活
+                #（后续 `/jobs/{id}/...` 请求由 hub 按 job_id 反查归属），但回传日志/
+                # 权重上报（`X-Course`）拿它才对得上账。旧 worker 忽略未知字段。
+                "course": course,
+            }
+        )
 
     # ---- 云端停机 / 恢复（§386：停机=发"停机命令"随任务同发；云机先试停机停不掉照常干活） ----
     # 用法：console 在 TrainingLoop 死亡/设计内停车时 GET /admin/workers/halt 置停机态，
     # 停机条件消失（恢复训练）GET /admin/workers/resume。仅 Bearer 鉴权（同 worker），volatile。
-    def _admin_halt(self, halt: bool) -> None:
+    def _admin_halt(self, halt: bool, course: str = "") -> None:
+        """置/解停机达令。`?course=X` = 只动那一门课；无课程 = 全课程（旧语义）。
+
+        返回体：无课程时**恒为 `{"halt": ...}`**（既有用例与 console 读它）；带课程时
+        追加 `course` 字段。未知课程 → 400（不猜、不静默改写全局）。
+        """
         if not self._auth_ok():
             return
-        self.store.halt_workers = halt
-        self._json({"halt": halt}, 200)
+        if not self.hub.set_halt(halt, course):
+            self._json(
+                {"error": f"未知 course（本 hub 的课程：{self.hub.courses()}）", "course": course},
+                400,
+            )
+            return
+        body: dict = {"halt": self.hub.halt_of(course) if course else self.hub.all_halted()}
+        if course:
+            body["course"] = course
+        self._json(body, 200)
 
     def _admin_status(self) -> None:
         # 体形状不动（console 的 set_cloud_halt / clear_halt_on_startup 读它）：竞速状态
         # 走自己的 /admin/race（GET = 只看、POST = 热切），不往这里叠字段。
+        # `?course=` = 只看那一门课的停机态（多课程下「全局」几乎没有信息量）。
         if not self._auth_ok():
             return
-        self._json({"halt": self.store.halt_workers}, 200)
+        course = self._query_course()
+        halt = self.hub.halt_of(course) if course else self.hub.all_halted()
+        self._json({"halt": halt}, 200)
+
+    # ---- 多课程观测面（2026-09-18）：/admin/queue + /admin/courses ----
+    def _admin_queue(self) -> None:
+        """`GET /admin/queue`：每课程队列深度/在飞/心跳 + 竞速两个判据数（只读）。
+
+        为什么单开一个面：多课程下「为什么某门课在饿着」只能靠它回答（轮转游标、
+        避让记录、离线标记都在里面），而 `/admin/status` 的体形状被 console 读着，
+        不能往里叠字段。
+        """
+        if not self._auth_ok():
+            return
+        self._json(self.hub.queue_state(), 200)
+
+    def _admin_offline(self) -> None:
+        """`GET /admin/offline`：已收到的离线段进度（只读，逐课程 × 逐 run）。
+
+        段内进度**只能**从补传产物看出来（hub 不跑那几轮，课程账本里没有它们的行），
+        而控制台要在长段期间回答「它在跑还是挂了」——唯一能回答的就是最近一轮的时间戳。
+        """
+        if not self._auth_ok():
+            return
+        self._json({"progress": self.hub.offline_progress()}, 200)
+
+    def _get_task_pack(self) -> None:
+        """`GET /offline/task-pack?course=<课>`：把整段任务包（`task-<课>.zip`）递给云机。
+
+        为什么由 hub 发：云机 notebook 的第一条路径就是「先连 hub，能通就从 hub 取包」
+        （用户口径 2026-09-19）；包本来就是本机产物（`tmp/<课>/task-<课>.zip`，控制台
+        导出写的就是它），hub 的 `<traj-root>` 正是 `tmp` ⇒ 本端点只是把**同一个文件**
+        按 HTTP 递出去，不造第二份真相。
+
+        三种拒因各说各话（非法课程名 400 / 没这个包 404 / 未鉴权 401）：人在云机上排障时，
+        「去控制台点导出」与「课程名写错了」是两条完全不同的下一步。
+        """
+        if not self._auth_ok():
+            return
+        course = self._query_course()
+        try:
+            p = self.hub.task_pack_path(course)
+        except ProtocolError as e:
+            self._json({"error": str(e), "course": course}, 400)
+            return
+        if not p.exists():
+            known = self.hub.courses()
+            self._json(
+                {
+                    "error": (
+                        f"没有任务包 {p.name}——先在控制台导出（导出要求训练已停），"
+                        "或检查课程名"
+                    ),
+                    "course": course,
+                    "path": str(p),
+                    "known_courses": known,
+                },
+                404,
+            )
+            return
+        try:
+            data = p.read_bytes()
+        except OSError as e:
+            self._json({"error": f"读任务包失败: {e}", "course": course}, 500)
+            return
+        print(
+            f"[{time.strftime('%H:%M:%S')}] [hub-server] task-pack -> {p.name} "
+            f"({len(data)} bytes)",
+            flush=True,
+        )
+        self._bytes(data, 200, "application/zip", filename=p.name)
+
+    def _admin_courses(self, set_mode: bool = False) -> None:
+        """`GET /admin/courses` 看课程表；`POST ?course=X&mode=online|offline` 热切。
+
+        volatile（与 halt/race 同性质，重启回启动参数）——运维需要一个能当场把一门课
+        改派为离线的闸（例如某课的云机报销了，先不派活只收回传）。
+        """
+        if not self._auth_ok():
+            return
+        if not set_mode:
+            self._json(
+                {
+                    "courses": [
+                        {"course": c, "mode": self.hub.mode_of(c)} for c in self.hub.courses()
+                    ]
+                },
+                200,
+            )
+            return
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        course = (qs.get("course") or [""])[0]
+        mode = (qs.get("mode") or [""])[0]
+        if not self.hub.set_mode(course, mode):
+            self._json(
+                {
+                    "error": f"需要合法 course（{self.hub.courses()}）与 mode（{list(COURSE_MODES)}）",
+                    "course": course,
+                    "mode": mode,
+                },
+                400,
+            )
+            return
+        print(
+            f"[{time.strftime('%H:%M:%S')}] [hub-server] course={course or '-'} mode -> {mode}",
+            flush=True,
+        )
+        self._json({"course": course, "mode": self.hub.mode_of(course)}, 200)
 
     # ---- 竞速广播开关（2026-09-17）：GET 看状态 / POST ?mode=auto|on|off 热切 ----
     def _admin_race(self, set_mode: bool = False) -> None:
@@ -1114,16 +2135,75 @@ class HubHandler(BaseHTTPRequestHandler):
         if not self._auth_ok():
             return
         if not set_mode:
-            self._json(self.store.race_state(), 200)
+            self._json(self.hub.race_state(), 200)
             return
         qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         mode = (qs.get("mode") or [""])[0]
-        got = self.store.set_race_mode(mode)
+        got = self.hub.set_race_mode(mode)
         if got is None:
             self._json({"error": f"mode 必须是 {list(RACE_MODES)}，收到 {mode!r}"}, 400)
             return
-        self.store.clear_workers()  # 强制闸后清空历史登记：模式与陈旧证据不混用
-        self._json({"mode": got, **self.store.race_state()}, 200)
+        self.hub.clear_workers()  # 强制闸后清空历史登记：模式与陈旧证据不混用
+        self._json({"mode": got, **self.hub.race_state()}, 200)
+
+    # ---- push worker 登记表（2026-09-18；控制台 worker 登记入口的服务面）----
+    def _admin_push_workers(self, set_action: bool = False) -> None:
+        """`GET /admin/push-workers` 看登记表 + 派发器状态；`POST` 增/删/热重载。
+
+        控制台登记 worker 的正常路径是**回写 rl-config**（hub 按 mtime 热重载，写完不必
+        重启）；本端点另开两个理由：① 写完配置要 hub **立刻**拾取（不等下一拍）；②
+        冒烟/排障时临时挂一台（volatile，重启即回到配置）。
+
+        body（JSON）：`{"action": "add"|"remove"|"reload", id?, url?, authKey?, concurrency?}`。
+        未启用 push 派发（无 `--push`）时 409 —— 响亮好过默默什么都没发生。
+        """
+        if not self._auth_ok():
+            return
+        disp = self.push
+        if disp is None:
+            self._json({"error": "push 派发未启用（hub-server 需 --push）"}, 409)
+            return
+        if not set_action:
+            self._json({"dispatcher": disp.state(), "registry": disp.workers.state()}, 200)
+            return
+        try:
+            raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            body = json.loads(raw.decode("utf-8")) if raw else {}
+        except (ValueError, OSError) as e:
+            self._json({"error": f"bad json: {e}"}, 400)
+            return
+        if not isinstance(body, dict):
+            self._json({"error": "体必须是对象"}, 400)
+            return
+        action = str(body.get("action") or "reload")
+        if action == "reload":
+            changed = disp.workers.reload(force=True)
+            self._json(
+                {"action": action, "changed": changed, "workers": disp.workers.snapshot()}, 200
+            )
+            return
+        if action == "add":
+            try:
+                w = disp.workers.add(body)
+            except ProtocolError as e:
+                self._json({"error": str(e)}, 400)
+                return
+            print(
+                f"[{time.strftime('%H:%M:%S')}] [hub-server] push worker 登记（运行时）："
+                f"{w['id']} -> {w['url']}",
+                flush=True,
+            )
+            self._json({"action": action, "worker": w}, 200)
+            return
+        if action == "remove":
+            wid = str(body.get("id") or "")
+            if not wid:
+                self._json({"error": "remove 需要 id"}, 400)
+                return
+            hit = disp.workers.remove(wid)
+            self._json({"action": action, "id": wid, "removed": hit}, 200)
+            return
+        self._json({"error": f"未知 action {action!r}（add|remove|reload）"}, 400)
 
     # ---- GET /admin/net-probe?bytes=N（M0：隧道吞吐 A/B 探针）----
     def _admin_net_probe(self) -> None:
@@ -1183,13 +2263,13 @@ class HubHandler(BaseHTTPRequestHandler):
         if jid is None:
             self._json({"error": "not found"}, 404)
             return
-        p = find_payload(self.store._job_dir(jid))
+        p = find_payload(self.hub._job_dir(jid))
         if p is None:
             self._json({"error": "no payload"}, 404)
             return
         data = p.read_bytes()
         # M0 统一计量：传输层实测（服务出去的 payload 字节）——iteration 事件对账用。
-        self.store.record_payload_sent(jid, len(data))
+        self.hub.record_payload_sent(jid, len(data))
         self._bytes(data)
 
     # ---- GET /jobs/{id}/code ----
@@ -1200,7 +2280,7 @@ class HubHandler(BaseHTTPRequestHandler):
         if jid is None:
             self._json({"error": "not found"}, 404)
             return
-        p = self.store._job_dir(jid) / "code.zip"
+        p = self.hub._job_dir(jid) / "code.zip"
         if not p.exists():
             self._json({"error": "no code zip"}, 404)
             return
@@ -1214,7 +2294,7 @@ class HubHandler(BaseHTTPRequestHandler):
         if jid is None:
             self._json({"error": "not found"}, 404)
             return
-        p = self.store._job_dir(jid) / TS_CODE_NAME
+        p = self.hub._job_dir(jid) / TS_CODE_NAME
         if not p.exists():
             self._json({"error": "no ts_code zip"}, 404)
             return
@@ -1231,7 +2311,7 @@ class HubHandler(BaseHTTPRequestHandler):
         qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         name = (qs.get("name") or [""])[0]
         try:
-            bp = blob_path(self.store._job_dir(jid), name)
+            bp = blob_path(self.hub._job_dir(jid), name)
         except ProtocolError as e:
             self._json({"error": str(e)}, 400)
             return
@@ -1244,8 +2324,12 @@ class HubHandler(BaseHTTPRequestHandler):
     def _get_shared_code(self) -> None:
         if not self._auth_ok():
             return
-        p = self.store.job_root / "code.zip"
-        if not p.exists():
+        # 多课程：code.zip 是**每课程一份**（各课的训练循环往自己的 job_root 写）。
+        # `?course=` 指定就取那门课的；不指定（旧 colab bootstrap）取第一份真存在的
+        # ——代码区份份同源（同一个仓、同一支），取哪门课的都一样。
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        p = self.hub.shared_code_zip((qs.get("course") or [""])[0])
+        if p is None:
             self._json({"error": "no shared code zip — training loop 尚未启动"}, 404)
             return
         self._bytes(p.read_bytes())
@@ -1258,19 +2342,18 @@ class HubHandler(BaseHTTPRequestHandler):
         if jid is None:
             self._json({"error": "not found"}, 404)
             return
-        jd = self.store._job_dir(jid)
+        jd = self.hub._job_dir(jid)
         if not (jd / "manifest.json").exists():
             self._json({"error": "unknown job"}, 404)
             return
-        now = self.store._now()
-        fail = self.store.job_failure(jid)
+        fail = self.hub.job_failure(jid)
         if (jd / "result" / "result.json").exists():
             state = "done"
         elif fail is not None:
             # 终局（2026-09-17）：节点已报确定性失败——控制台与 wait_job 的收尾
             # 二次确认都读这个 state，不必再去 /result 取 410。
             state = "failed"
-        elif self.store._leases.get(jid, 0) > now:
+        elif (self.hub.lease_expires_in(jid) or 0.0) > 0:
             state = "leased"
         else:
             state = "pending"
@@ -1283,8 +2366,8 @@ class HubHandler(BaseHTTPRequestHandler):
         # P3b 可观测：租约剩余秒 + 距上次心跳秒（worker 吞错保持现状，文档化——
         # 心跳 5xx 时 worker 侧只记日志不抛，见 worker._hb_loop）。
         if state == "leased":
-            resp["lease_expires_in"] = round(self.store._leases.get(jid, 0) - now, 1)
-            resp["last_heartbeat_ago"] = round(now - self.store._last_heartbeat.get(jid, now), 1)
+            resp["lease_expires_in"] = self.hub.lease_expires_in(jid)
+            resp["last_heartbeat_ago"] = self.hub.last_heartbeat_ago(jid)
         self._json(resp)
 
     # ---- GET /jobs/{id}/result ----
@@ -1295,12 +2378,12 @@ class HubHandler(BaseHTTPRequestHandler):
         if jid is None:
             self._json({"error": "not found"}, 404)
             return
-        r = self.store.get_result(jid)
+        r = self.hub.get_result(jid)
         if r is None:
             # 410 = 这个 job **不会有结果**（节点已报确定性失败，原因在体内）。
             # 刻意不用 404（那是「还没回来，继续等」）也不用 5xx（调用方按瞬时错误
             # 重试）——410 让 wait_job 立刻带着原因收兵，而不是等满 25 分钟。
-            fail = self.store.job_failure(jid)
+            fail = self.hub.job_failure(jid)
             if fail is not None:
                 self._json(
                     {
@@ -1317,7 +2400,7 @@ class HubHandler(BaseHTTPRequestHandler):
             return
         # M0 统一计量：把 hub 侧传输层实测字节（additive 的 wire_hub 键）随结果
         # 一并回给训练主循环——旧读方忽略未知键，旧 result.json 不受影响。
-        stats = self.store.wire_stats(jid)
+        stats = self.hub.wire_stats(jid)
         if stats:
             r = {**r, "wire_hub": stats}
         self._json(r)
@@ -1332,7 +2415,7 @@ class HubHandler(BaseHTTPRequestHandler):
             return
         # H2：lease_token 必填且须与原租者一致（否则拒续）
         lease_token = self.headers.get("X-Lease-Token", "") or self.headers.get("lease-token", "")
-        ok = self.store.heartbeat(jid, lease_token)
+        ok = self.hub.heartbeat(jid, lease_token)
         self._json({"job_id": jid, "ok": ok}, 200 if ok else 404)
 
     # ---- POST /jobs/{id}/release ----
@@ -1341,11 +2424,11 @@ class HubHandler(BaseHTTPRequestHandler):
         if not self._auth_ok():
             return
         jid = self._job_id()
-        if jid is None or not (self.store._job_dir(jid) / "manifest.json").exists():
+        if jid is None or not (self.hub._job_dir(jid) / "manifest.json").exists():
             self._json({"error": "not found"}, 404)
             return
         lease_token = self.headers.get("X-Lease-Token", "") or self.headers.get("lease-token", "")
-        if self.store.release(jid, lease_token):
+        if self.hub.release(jid, lease_token):
             self._json({"job_id": jid, "status": "released"})
         else:
             self._json({"error": "lease mismatch or absent — 非本 job 租约持有人"}, 403)
@@ -1361,7 +2444,7 @@ class HubHandler(BaseHTTPRequestHandler):
         if not self._auth_ok():
             return
         jid = self._job_id()
-        if jid is None or not (self.store._job_dir(jid) / "manifest.json").exists():
+        if jid is None or not (self.hub._job_dir(jid) / "manifest.json").exists():
             self._json({"error": "not found"}, 404)
             return
         try:
@@ -1383,7 +2466,7 @@ class HubHandler(BaseHTTPRequestHandler):
         lease_token = self.headers.get("X-Lease-Token", "") or self.headers.get(
             "lease-token", ""
         )
-        if not self.store.result_token_ok(jid, lease_token):
+        if not self.hub.result_token_ok(jid, lease_token):
             self._json({"error": "lease mismatch — 非本 job 租约持有人"}, 403)
             return
         rec = {
@@ -1391,13 +2474,16 @@ class HubHandler(BaseHTTPRequestHandler):
             "kind": self._clip(body.get("kind", ""), 200),
             "detail": self._clip(body.get("detail", ""), 4000),
             "worker": self._clip(body.get("worker", ""), 200),
-            "ts": self.store._now(),
+            "ts": self.hub._now(),
         }
-        recorded = self.store.store_job_failure(jid, rec)
+        recorded = self.hub.store_job_failure(jid, rec)
         if recorded:
             # 账本事件（审计 + 控制台训练日志可见）：训练侧与会话结束后的复盘都能
             # 看到「哪一轮、哪台机器、为什么失败」，而不是一行超时。
-            self.store._append_ledger(
+            # 多课程：账本是**每课程一份**，所以追加必须带 job_id 让调度面先解归属
+            #（旧单课程 hub 只有一份账本，不需要这个参数）。
+            self.hub.append_ledger(
+                jid,
                 {
                     "event": "job_failed",
                     "job_id": jid,
@@ -1405,7 +2491,7 @@ class HubHandler(BaseHTTPRequestHandler):
                     "kind": rec["kind"],
                     "worker": rec["worker"],
                     "ts": rec["ts"],
-                }
+                },
             )
             self.log_message("JOB FAILED %s: %s", jid, rec["reason"])
         self._json(
@@ -1461,14 +2547,23 @@ class HubHandler(BaseHTTPRequestHandler):
             body = json.loads(raw.decode("utf-8"))
             if not isinstance(body, dict):
                 raise ProtocolError("补传体必须是 JSON 对象")
-            res = self.store.store_offline_artifact(body)
+            # 多课程（2026-09-18）：一个 hub 服务多门课时，补传必须自报归哪门课
+            #（① 体里的 course/course_name，节点从 job manifest 拄来；② ?course=；
+            # ③ 已有 offline/<run_id>/ 的课——补传天然会重传续投，后续自动归位）。
+            course = self.hub.locate_offline_course(body, self._query_course())
+            if course is None:
+                raise ProtocolError(
+                    "补传无法归属课程：体里带 course（或 course_name），或加 ?course=；"
+                    f"本 hub 的课程：{self.hub.courses()}"
+                )
+            res = self.hub.store_offline_artifact(course, body)
         except (ProtocolError, ValueError, UnicodeDecodeError) as e:
             self._json({"error": f"补传被拒: {e}"}, 400)
             return
         if res["status"] == "accepted":
             print(
-                f"[{time.strftime('%H:%M:%S')}] [hub-server] OFFLINE it{res['it']} "
-                f"run={res['run_id']} <- {len(raw)}B",
+                f"[{time.strftime('%H:%M:%S')}] [hub-server] OFFLINE course={course or '-'} "
+                f"it{res['it']} run={res['run_id']} <- {len(raw)}B",
                 flush=True,
             )
         # duplicate 也回 200：补传是重试友好的（重连/重启续投会重传），409 会让节点把它
@@ -1486,13 +2581,19 @@ class HubHandler(BaseHTTPRequestHandler):
             body = json.loads(raw.decode("utf-8"))
             if not isinstance(body, dict):
                 raise ProtocolError("补传体必须是 JSON 对象")
-            res = self.store.store_offline_result(body)
+            course = self.hub.locate_offline_course(body, self._query_course())
+            if course is None:
+                raise ProtocolError(
+                    "段末摘要无法归属课程：体里带 course（或 course_name），或加 ?course=；"
+                    f"本 hub 的课程：{self.hub.courses()}"
+                )
+            res = self.hub.store_offline_result(course, body)
         except (ProtocolError, ValueError, UnicodeDecodeError) as e:
             self._json({"error": f"补传被拒: {e}"}, 400)
             return
         print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server] OFFLINE result run={res['run_id']} "
-            f"it{res['it_end']}",
+            f"[{time.strftime('%H:%M:%S')}] [hub-server] OFFLINE course={course or '-'} "
+            f"result run={res['run_id']} it{res['it_end']}",
             flush=True,
         )
         self._json(res)
@@ -1505,7 +2606,7 @@ class HubHandler(BaseHTTPRequestHandler):
         if jid is None:
             self._json({"error": "not found"}, 404)
             return
-        jd = self.store._job_dir(jid)
+        jd = self.hub._job_dir(jid)
         if not (jd / "manifest.json").exists():
             self._json({"error": "unknown job"}, 404)
             return
@@ -1516,7 +2617,7 @@ class HubHandler(BaseHTTPRequestHandler):
             return
         # M0 统一计量：收到的 result 请求体字节（云上行实测）——即便后面校验失败
         # 也已实收，如实记录，供对账。
-        self.store.record_result_recv(jid, len(raw))
+        self.hub.record_result_recv(jid, len(raw))
         # 竞速广播：**胜负已定就不再往下走**——结果已存在的回传一律 409（与租约无关；
         # 赢家可能持旧 token、输家根本没 token）。必须在租约校验**之前**：否则输了竞速
         # 的副本会因「非持有人」拿 403，而 worker 把 4xx 当确定性拒绝 → 报 job 失败。
@@ -1531,26 +2632,21 @@ class HubHandler(BaseHTTPRequestHandler):
                 result = unpack_result_v2(raw)
             else:
                 result = json.loads(raw.decode("utf-8"))
-            # 与 manifest 对账（job_id/data_fp/init_weights_fp/commit_echo）
-            manifest = json.loads((jd / "manifest.json").read_text(encoding="utf-8"))
-            normalize_manifest(manifest)
-            from remote.protocol import validate_result
-
-            validate_result(result, manifest, commit_echo_must_match=True)
         except (ValueError, ProtocolError) as e:
             self._json({"error": f"result rejected: {e}"}, 400)
             return
-        # P3b 独占加超时：有活租约时验 X-Lease-Token（恢复 H2 检查）——错 token/
-        # 缺 token → 403（非持有人不得写回）；无租约照收（兼容旧 worker/重发）；
-        # 首写锁定保留（hub 重启丢租约 → 首写胜，结果一致）。
+        # 对账（job_id/data_fp/init_weights_fp/commit_echo）+ 租约校验 + 首写锁定：
+        # 走 `push_dispatch.accept_result` —— **与 hub 中介 push 派发器同一个函数**。
+        # 推模式下两条腿并存（云机 POST 上来 / hub 代发后取回），校验绝不能一条有一条无：
+        # 那正是「一份对不上账的结果被静默落盘成一轮看起来正常的训练」的入口。
         lease_token = self.headers.get("X-Lease-Token", "") or self.headers.get(
             "lease-token", ""
         )
-        if not self.store.result_token_ok(jid, lease_token):
-            self._json({"error": "lease mismatch — 非本 job 租约持有人"}, 403)
-            return
-        if not self.store.store_result(jid, result):
-            self._json({"error": "result already stored (duplicate write-back)"}, 409)
+        code, why = accept_result(
+            self.hub, jid, result, lease_token, log=lambda m: self.log_message("%s", m)
+        )
+        if code != 200:
+            self._json({"error": why}, code)
             return
         self._json({"job_id": jid, "status": "accepted"})
 
@@ -1559,7 +2655,7 @@ class HubHandler(BaseHTTPRequestHandler):
         if not self._auth_ok():
             return
         jid = self._job_id()
-        if jid is None or not (self.store._job_dir(jid) / "manifest.json").exists():
+        if jid is None or not (self.hub._job_dir(jid) / "manifest.json").exists():
             self._json({"error": "not found"}, 404)
             return
         try:
@@ -1567,7 +2663,7 @@ class HubHandler(BaseHTTPRequestHandler):
         except Exception as e:
             self._json({"error": f"read body failed: {e}"}, 400)
             return
-        if len(raw) > self.store.BC_EPOCH_BODY_MAX:
+        if len(raw) > self.hub.BC_EPOCH_BODY_MAX:
             self._json({"error": "epoch body too large"}, 400)
             return
         try:
@@ -1580,10 +2676,10 @@ class HubHandler(BaseHTTPRequestHandler):
         lease_token = self.headers.get("X-Lease-Token", "") or self.headers.get(
             "lease-token", ""
         )
-        if not self.store.result_token_ok(jid, lease_token):
+        if not self.hub.result_token_ok(jid, lease_token):
             self._json({"error": "lease mismatch — 非本 job 租约持有人"}, 403)
             return
-        if not self.store.store_bc_epoch(jid, body):
+        if not self.hub.store_bc_epoch(jid, body):
             self._json({"error": "invalid epoch body"}, 400)
             return
         self._json({"job_id": jid, "status": "accepted"})
@@ -1596,7 +2692,7 @@ class HubHandler(BaseHTTPRequestHandler):
         if jid is None:
             self._json({"error": "not found"}, 404)
             return
-        r = self.store.get_bc_resume(jid)
+        r = self.hub.get_bc_resume(jid)
         if r is None:
             self._json({"error": "no resume checkpoint"}, 404)
             return
@@ -1610,13 +2706,34 @@ class HubHandler(BaseHTTPRequestHandler):
         if jid is None:
             self._json({"error": "not found"}, 404)
             return
-        self._json({"job_id": jid, "rows": self.store.get_bc_metrics(jid)})
+        self._json({"job_id": jid, "rows": self.hub.get_bc_metrics(jid)})
+
+
+def as_hub(store_or_hub: _JobStore | _HubQueue) -> _HubQueue:
+    """把单个 `_JobStore` 包成单课程队列（幂等）。
+
+    为什么保留这层：`make_server(store, ...)` 是既有测试与 e2e 夹具的**唯一**入口
+    （十多个文件直接构造 `_JobStore` 再起 server）。不包装就要改十几个测试，而「多课程」
+    本身不需要他们改一行 —— 单课程队列就是 `_HubQueue` 的退化情形，行为逐字节等价。
+    """
+    if isinstance(store_or_hub, _HubQueue):
+        return store_or_hub
+    return _HubQueue({"": store_or_hub}, order=[""])
 
 
 def make_server(
-    store: _JobStore, port: int, token: str, host: str = "0.0.0.0"
+    store_or_hub: _JobStore | _HubQueue,
+    port: int,
+    token: str,
+    host: str = "0.0.0.0",
+    *,
+    hub: _HubQueue | None = None,
+    push: PushDispatcher | None = None,
 ) -> ThreadingHTTPServer:
-    """构造 server（handler 注入 store + token）。
+    """构造 server（handler 注入调度面 + token）。
+
+    `store_or_hub` 兼容两种：单一 `_JobStore`（自动包成单课程队列，旧调用零改动）或
+    已装配好的 `_HubQueue`（多课程；也可用 `hub=` 显式传）。
 
     host 默认 0.0.0.0（2026-09-16）：Tailscale 直连时云 worker 从 tailnet 入站访问，
     绑 127.0.0.1 会导致对端超时。单测/冒烟需回环时显式传 host="127.0.0.1"。
@@ -1627,7 +2744,10 @@ def make_server(
             super().__init__((host, port), HubHandler)
             self.token = token
 
-    HubHandler.store = store
+    HubHandler.hub = hub if hub is not None else as_hub(store_or_hub)
+    # push 派发器（可选）：只挂上，**不在此处启动** —— 起线程是启动器的动作，
+    # 免得每个「只想拿个 server 发请求」的测试都被意外拉起一个后台拍。
+    HubHandler.push = push
     return Server()
 
 
@@ -1637,16 +2757,67 @@ def main() -> None:
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--token", default="", help="Bearer token（云 worker 与训练主循环共享）")
     ap.add_argument("--token-file", default="", help="从文件读取 token（避免进程列表泄露，H10）")
+    # 单课程（旧形状）：job-root/jsonl 直接给。既有测试、既有 dashboard 调用零改动。
     ap.add_argument(
-        "--job-root", required=True, help="job 目录根（payload zip / 结果 / ppo_ckpt_remote）"
+        "--job-root", default="", help="job 目录根（单课程；多课程用 --course + --traj-root）"
     )
     ap.add_argument(
-        "--jsonl", required=True, help="training_log.jsonl 路径（job_pending/job_completed 账本）"
+        "--jsonl", default="", help="training_log.jsonl 路径（单课程；多课程自动派生）"
+    )
+    # 多课程（2026-09-18 用户指令：一个 hub 进程服务所有并行课程）：
+    #   --course tiny-a --course x1-rebirth-a2=offline ...
+    #   派生 job-root=<traj-root>/<course>/remote-jobs、jsonl=<traj-root>/<course>/training_log.jsonl
+    #   —— **磁盘布局与每课程一个 hub 时逐字节相同**，所以控制台/诊断工具/tmp/<course> 约定全照旧。
+    ap.add_argument(
+        "--course",
+        action="append",
+        default=[],
+        metavar="NAME[=online|offline]",
+        help="课程（可重复）。offline = 不实时派发 PPO、只收回传（整段自主的 kind=run 课）",
+    )
+    ap.add_argument(
+        "--traj-root",
+        default="tmp",
+        help="--course/--discover 时的每课程目录根（相对 cwd 或绝对路径）；缺省 tmp",
+    )
+    # 共享 hub（2026-09-18 用户指令：hubserver 只开一个进程就同时支持所有并行课程）：
+    # 课程表从盘上自动发现——训练侧发布 job 就是"这门课在跑"的事实，不需要第二事实源。
+    ap.add_argument(
+        "--discover",
+        action="store_true",
+        help="课程表从 --traj-root 自动发现（扫 <root>/*/{remote-jobs,offline}，新鲜窗口内"
+        "自动登记）——新增/结束课程无需重启 hub、无需注册",
+    )
+    ap.add_argument(
+        "--discover-sec",
+        type=float,
+        default=DISCOVER_SCAN_SEC,
+        help=f"自动发现的扫描节拍（秒；缺省 {DISCOVER_SCAN_SEC:g}）",
     )
     ap.add_argument(
         "--lock-file",
         default="",
         help="单实例锁路径（缺省 nn-training/.hub_server.<port>.lock；按端口键控）",
+    )
+    ap.add_argument(
+        "--push",
+        action="store_true",
+        help="启用 hub 中介 push 派发：按队列顺序把 job 推给登记在册的空闲 GPU worker"
+        "（缺省关：不启用时连探活线程都不起，行为与改造前逐字节一致）",
+    )
+    ap.add_argument(
+        "--push-config",
+        default="",
+        help=f"push worker 登记来源（rl-config 形状；缺省 {DEFAULT_PUSH_CONFIG}）",
+    )
+    ap.add_argument(
+        "--push-poll-sec", type=float, default=PUSH_POLL_SEC, help="派发/结果轮询节拍（秒）"
+    )
+    ap.add_argument(
+        "--push-timeout-sec",
+        type=float,
+        default=PUSH_TIMEOUT_SEC,
+        help="单份 job 推送后的兜底上限（秒）；超时回落队首换 worker",
     )
     ap.add_argument(
         "--race",
@@ -1684,19 +2855,113 @@ def main() -> None:
     except RuntimeError as e:
         print(f"[hub-server] ERROR: {e}", flush=True)
         sys.exit(1)
-    store = _JobStore(args.job_root, args.jsonl)
-    store.race_mode = args.race
-    srv = make_server(store, args.port, token, host=args.host)
+    # ---- 课程表：--course 优先；两者都给 = 响亮拒启（不知道听谁的比听错好）----
+    if (args.course or args.discover) and (args.job_root or args.jsonl):
+        print(
+            "[hub-server] ERROR: --course/--discover 与 --job-root/--jsonl 不能同时给"
+            "（前者=多课程，后者=单课程）",
+            flush=True,
+        )
+        sys.exit(1)
+    hub: _HubQueue
+    traj_root = Path(args.traj_root).resolve()
+    if args.course or args.discover:
+        specs: dict[str, str] = {}
+        for raw in args.course:
+            try:
+                name, mode = parse_course_arg(raw)
+            except ProtocolError as e:
+                print(f"[hub-server] ERROR: --course {raw!r}: {e}", flush=True)
+                sys.exit(1)
+            if name in specs and specs[name] != mode:
+                print(
+                    f"[hub-server] ERROR: 课程 {name!r} 被重复声明且模式不同（{specs[name]} vs {mode}）",
+                    flush=True,
+                )
+                sys.exit(1)
+            specs[name] = mode
+        root = traj_root
+        stores = {
+            name: _JobStore(
+                root / name / "remote-jobs",
+                root / name / "training_log.jsonl",
+            )
+            for name in specs
+        }
+        hub = _HubQueue(
+            stores,
+            order=list(specs),
+            modes=specs,
+            discover_root=root if args.discover else None,
+        )
+        hub.race_mode = args.race
+        desc = ", ".join(f"{c}:{specs[c]}" for c in specs)
+        print(
+            f"[hub-server] courses={len(specs)} [{desc}] traj_root={root} "
+            f"discover={bool(args.discover)} offline={hub.offline_courses() or '-'}",
+            flush=True,
+        )
+        if args.discover:
+            # 后台节拍只是「没人轮询（push 模式 / 无 worker）」时的兜底：pull 路径的
+            # `claim_next` 自己会先扫一次（带最小间隔闸），不让新课程等一个节拍。
+            def _scan_loop() -> None:
+                while True:
+                    time.sleep(max(1.0, float(args.discover_sec)))
+                    try:
+                        hub.discover()
+                    except Exception as e:  # 扫描失败不该让调度面死掉
+                        print(f"[hub-server] discover 扫描失败: {e}", flush=True)
+
+            Thread(target=_scan_loop, daemon=True, name="hub-discover").start()
+    else:
+        if not args.job_root or not args.jsonl:
+            print(
+                "[hub-server] ERROR: 需要 --course/--discover（多课程）或 "
+                "--job-root + --jsonl（单课程）",
+                flush=True,
+            )
+            sys.exit(1)
+        single = _JobStore(args.job_root, args.jsonl)
+        single.race_mode = args.race
+        hub = as_hub(single)
+    # push 派发（可选，2026-09-18）：登记表来自 rl-config 的 gpu_push 节点（控制台的
+    # worker 登记入口回写它），派发器每拍探活 + 按队列顺序推给空闲 worker。
+    push_disp: PushDispatcher | None = None
+    if args.push:
+        push_workers = PushWorkers(
+            args.push_config or DEFAULT_PUSH_CONFIG,
+            log=lambda m: print(f"[{time.strftime('%H:%M:%S')}] [hub-server push] {m}", flush=True),
+        )
+        push_workers.reload(force=True)  # 先读一次（缺文件/空表不致命，只是没人可推）
+        push_disp = PushDispatcher(
+            hub,
+            push_workers,
+            token,
+            poll_sec=args.push_poll_sec,
+            timeout_sec=args.push_timeout_sec,
+            log=lambda m: print(f"[{time.strftime('%H:%M:%S')}] [hub-server push] {m}", flush=True),
+        )
+        print(
+            f"[hub-server] push 派发已启用：登记表={push_workers.path} "
+            f"候选 worker={len(push_workers.snapshot())} "
+            f"poll={args.push_poll_sec:g}s timeout={args.push_timeout_sec:g}s",
+            flush=True,
+        )
+    srv = make_server(hub, args.port, token, host=args.host, push=push_disp)
+    if push_disp is not None:
+        push_disp.start()
     print(
         f"[hub-server] listening on {args.host}:{args.port} "
-        f"job_root={args.job_root} jsonl={args.jsonl} claim_ttl={CLAIM_TTL_SEC}s "
-        f"race={args.race}",
+        f"courses={hub.courses()} claim_ttl={CLAIM_TTL_SEC}s race={args.race}",
         flush=True,
     )
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        if push_disp is not None:
+            push_disp.stop()
 
 
 if __name__ == "__main__":

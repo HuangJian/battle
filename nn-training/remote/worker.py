@@ -30,6 +30,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from remote import net_http
 from remote.iter_rollout import run_iter_rollout
 from remote.protocol import (
     AUTH_HEADER,
@@ -37,6 +38,8 @@ from remote.protocol import (
     BLOB_REF,
     HEARTBEAT_SEC,
     HUB_SCOPE_HEADER,
+    OFFLINE_CAP_HEADER,
+    OFFLINE_CAP_VALUE,
     PAYLOAD_NAME,
     WIRE_V2_CONTENT_TYPE,
     WORKER_ID_HEADER,
@@ -95,14 +98,17 @@ def _request(
     method: str | None = None,
     headers: dict[str, str] | None = None,
 ) -> tuple[int, bytes]:
+    url = f"{base_url.rstrip('/')}{path}"
     req = urllib.request.Request(
-        f"{base_url.rstrip('/')}{path}",
+        url,
         data=data,
         headers={AUTH_HEADER: f"Bearer {token}", **(headers or {})},
         method=method,
     )
     try:
-        with _get_opener().open(req, timeout=timeout) as resp:
+        # 回环（本机 hub）绕开代理；非回环走进程内的显式 ProxyHandler（Colab 实测需要）。
+        open_fn = net_http.urlopen if net_http.is_loopback(url) else _get_opener().open
+        with open_fn(req, timeout=timeout) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as e:
         return e.code, e.read()
@@ -119,8 +125,13 @@ def poll_job(
     log: Any = None,
     hub_scope: int | None = None,
     worker_id: str = "",
+    offline_ok: bool = False,
 ) -> dict | None:
     """GET /jobs/next → {job_id, manifest, halt} 或 None（无任务且无停机达令）。
+
+    `offline_ok`（2026-09-19 离线训练模式）：本会话**能自己跑完整段**（`kind="run"`）时
+    带上能力头 —— hub 只把离线课的 job 放给带标的 worker（普通逐轮 worker 领不到）。
+    这是能力声明，不是课程绑定：带标 worker 照样领在线课。
 
     `hub_scope` / `worker_id`（2026-09-17 竞速广播）：本 worker 轮询几个 hub、以及自己
     是谁。hub 靠这两个事实判定“机群是不是只服务单一课程”——**不报就按多 hub 保守**
@@ -138,6 +149,8 @@ def poll_job(
         _poll_headers[WORKER_ID_HEADER] = worker_id
     if hub_scope is not None:
         _poll_headers[HUB_SCOPE_HEADER] = str(int(hub_scope))
+    if offline_ok:
+        _poll_headers[OFFLINE_CAP_HEADER] = OFFLINE_CAP_VALUE
     status, body = _request(
         base_url, token, "/jobs/next", timeout=timeout, headers=_poll_headers or None
     )
@@ -1700,6 +1713,10 @@ def run_job(
             # 因此默认开着补传：hub 中途失联也不至于「跑完一整段、控制面一无所知」。
             hub_url=base_url,
             hub_token=token,
+            # 补传的**归位键**：hub 在 `/jobs/next` 里告诉我们这份活属于哪门课（多课程
+            # hub 里没有它，每条补传都会被 400 「无法归属课程」拒掉——而 manifest 里的
+            # `course_name` 是课程文件的 name 字段，与 hub 的课程键不是一回事）。
+            hub_course=str(job.get("course") or ""),
             log=log,
         )
     validate_result(result, manifest, commit_echo_must_match=False)  # 自查
@@ -1847,6 +1864,8 @@ def worker_loop(
     artifacts_dir: str | Path | None = None,
     run_max_iters: int = 0,
     run_budget_sec: float = 0.0,
+    # 离线训练模式（2026-09-19）：本会话能自己跑完整段 ⇒ 带能力头领离线课
+    offline_ok: bool = False,
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
 ) -> int:
     """无状态轮询主循环。返回处理的 job 数。
@@ -1892,6 +1911,7 @@ def worker_loop(
                 log=log,
                 hub_scope=len(hubs),  # 竞速判定输入：本 worker 服务几个 hub
                 worker_id=worker_tag(),
+                offline_ok=offline_ok,  # 能力自报：能自己跑完整段
             )
         except Exception as e:
             log(f"poll failed: {e} — retry in {poll_sec}s")
@@ -2078,6 +2098,15 @@ def main() -> None:
         default=0.0,
         help="本次自主段最多跑多少秒（0=不限；Kaggle 会话到点前干净停机的把手）",
     )
+    # ---- 离线训练模式（2026-09-19）----
+    # 能力自报：本会话能自己跑完整段（kind=run）。hub 只把**离线课**的 job 放给带标的
+    # worker；不带标就领不到（离线课不实时派发，但不是谁都领得到的公共池）。
+    # 这是能力声明，不是课程绑定：带标 worker 照样领在线课（课程与 worker 正交）。
+    ap.add_argument(
+        "--offline",
+        action="store_true",
+        help="自报「能自主跑完整段」：领离线课的整段 job（kind=run）；带标仍可领在线课",
+    )
     args = ap.parse_args()
     token = args.token
     if args.token_file:
@@ -2123,6 +2152,7 @@ def main() -> None:
             artifacts_dir=args.artifacts or None,
             run_max_iters=args.run_max_iters,
             run_budget_sec=args.run_budget_sec,
+            offline_ok=args.offline,
         )
         print(f"[{time.strftime('%H:%M:%S')}] [worker] done: {n} job(s) processed", flush=True)
         # H8：--once 失败（返回 -1）→ 非零退出码

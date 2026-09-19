@@ -465,6 +465,59 @@ def test_run_plan_job_delivers_each_round_while_the_segment_runs(tmp_path: Path)
         th.join(timeout=5)
 
 
+# ─────────────────── 归位键（多课程 hub：补传必须落进本课） ───────────────────
+
+
+def test_deliverer_omits_course_key_when_unset(tmp_path: Path) -> None:
+    """没给课程 ⇒ 体里**不带** course 键（单课程 hub 的键就是空串，逐字回到旧形状）。
+
+    与「带一个空串」的差别是实打实的：hub 的 `locate_offline_course` 把「体里带没带」
+    当作第一个判据，多一个空字符串键就等于要在那里多一层归一化。"""
+    seen: list[dict] = []
+
+    def opener(url: str, data: bytes, headers: dict, timeout: float) -> tuple[int, bytes]:
+        if url.endswith("/offline/artifact"):
+            seen.append(json.loads(data.decode("utf-8")))
+        return 200, b"{}"
+
+    root = _make_artifacts(tmp_path / "art")
+    d = _deliverer("http://hub", root, opener=opener)
+    assert d.sync() == 3
+    assert all("course" not in b for b in seen) and len(seen) == 3
+    assert d.status()["course"] == ""
+
+
+def test_deliverer_carries_course_so_a_multi_course_hub_can_route(tmp_path: Path) -> None:
+    """给了课程 ⇒ 逐轮体与段末摘要**都**带 `course`。
+
+    真 hub 下的后果（test_multi_course_hub 有端到端）：不带它就 400「无法归属课程」
+    ⇒ 补传整个停掉（体是自己造的，重试不会变对）⇒ 控制台上只剩「跑完自己下载导入」。
+    所以这个键是**多课程 hub 下补传能不能用**的关键，不是可选装饰。"""
+    seen: list[dict] = []
+
+    def opener(url: str, data: bytes, headers: dict, timeout: float) -> tuple[int, bytes]:
+        if data:  # `/ping` 的体是空的（非 JSON）——只收有体的那几个端点
+            seen.append(json.loads(data.decode("utf-8")))
+        return 200, b"{}"
+
+    root = _make_artifacts(tmp_path / "art")
+    d = _deliverer("http://hub", root, course="c5-gae", opener=opener)
+    assert d.sync() == 3
+    assert d.deliver_result(it_end=3, state="complete")
+    assert seen and all(b.get("course") == "c5-gae" for b in seen)
+    assert d.status()["course"] == "c5-gae"
+
+
+def test_make_deliverer_passes_the_course_through() -> None:
+    """工厂也接这个参数（错过它 = 参数在构造链上静默丢掉，与「没实现」同效）。"""
+    from remote.offline_deliver import make_deliverer
+
+    d = make_deliverer(
+        hub_url="http://hub", hub_token="t", run_id=RUN, artifacts_dir="x", course="c4"
+    )
+    assert d is not None and d.course == "c4"
+
+
 def test_run_plan_job_ignores_delivery_failures(tmp_path: Path) -> None:
     """补传坏掉（hub 没人听）时整段照常跑完 —— 这是本功能唯一不可让步的性质。"""
     plan, m, job_dir, first = _prepare(tmp_path, iters=3, start_it=1)

@@ -142,7 +142,10 @@ def _rl_cfg() -> dict:
     return {
         "mode": "rl",
         "rl_mode": "pull",
+        # 故意与 HUB_IP 凭据指向不同的机器：这样「凭据压过 CFG」是可观测的
         "hub_url": "http://100.64.0.9:8787",
+        "hub_ip": "",
+        "hub_port": 8787,
         "ts_authkey": "",
         "ts_ephemeral": True,
         "push_port": 8790,
@@ -156,6 +159,7 @@ def test_run_reads_credentials_before_installing_tailnet_proxy(
 
     旧实现里 HUB_TOKEN 在 `ensure()` 之后才读 ⇒ Kaggle 上读失败被吞成空串 ⇒ /code 401。
     这里用假 secret + 假 ensure 复刻当时的时序：任何凭据在 tailnet 代理生效后被读，断言即红。
+    本机 hub 地址（`HUB_IP`）与它同批：同样是「只能公网取、引导后就够不着」的值。
     """
     calls: list[str] = []
 
@@ -165,7 +169,12 @@ def test_run_reads_credentials_before_installing_tailnet_proxy(
             "Kaggle 上公网 HTTPS（平台 Secrets）此时已走不通（2026-09-17 事故）"
         )
         calls.append(key)
-        return {"TS_AUTHKEY": "ak", "HUB_TOKEN": "ht", "PUSH_TOKEN": "pt"}[key]
+        return {
+            "TS_AUTHKEY": "ak",
+            "HUB_TOKEN": "ht",
+            "PUSH_TOKEN": "pt",
+            "HUB_IP": "100.64.0.5",
+        }[key]
 
     def _fake_ensure(cfg: dict, log) -> dict:
         assert cfg["ts_authkey"] == "ak", "TS_AUTHKEY 必须在引导前就绪"
@@ -183,8 +192,39 @@ def test_run_reads_credentials_before_installing_tailnet_proxy(
     monkeypatch.setattr(nb, "_pull", _fake_pull)
 
     assert nb.run(_rl_cfg(), lambda _m: None, _fake_secret, None) == 0
-    assert calls == ["TS_AUTHKEY", "HUB_TOKEN", "PUSH_TOKEN"]
-    assert captured == {"hub": "http://100.64.0.9:8787", "hub_tok": "ht", "push_tok": "pt"}
+    assert calls == ["TS_AUTHKEY", "HUB_TOKEN", "PUSH_TOKEN", "HUB_IP"]
+    assert captured == {
+        # HUB_IP 凭据（100.64.0.5）压过 CFG 的 hub_url（100.64.0.9）
+        "hub": "http://100.64.0.5:8787",
+        "hub_tok": "ht",
+        "push_tok": "pt",
+    }
+
+
+def test_run_falls_back_to_cfg_hub_url_when_hub_ip_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`HUB_IP` 未设（老会话没建这个 Secret）时仍按 CFG 手填的 `hub_url` 连——不破旧用法。"""
+    captured: dict = {}
+
+    monkeypatch.setattr(
+        nb.tailscale_boot,
+        "ensure",
+        lambda cfg, log: {
+            "ip": "100.64.0.5",
+            "mode": "userspace",
+            "sock": ts.SOCK,
+            "proxy": ts.PROXY,
+        },
+    )
+    monkeypatch.setattr(nb, "_pull", lambda cfg, log, k, hub, tok, ptok: captured.update(hub=hub) or 0)
+
+    def _cfg_only_secret(key: str, cfg_val: str = "") -> str:
+        # 老会话：只有 TS_AUTHKEY / HUB_TOKEN，没建 HUB_IP
+        return {"TS_AUTHKEY": "ak", "HUB_TOKEN": "ht"}.get(key, "")
+
+    assert nb.run(_rl_cfg(), lambda _m: None, _cfg_only_secret, None) == 0
+    assert captured == {"hub": "http://100.64.0.9:8787"}
 
 
 def test_pull_takes_no_secret_reader() -> None:

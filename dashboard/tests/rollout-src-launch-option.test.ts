@@ -7,9 +7,10 @@
  * rl-config.json。本文件锁补上的那半条链路。
  *
  * 与 `slim`（`slim-launch-option.test.ts`）最关键的两点不同：
- *  1. **域无换算**：python `--rollout-src` 的 choices 就是 `'auto'|'local'|'node'`
- *     字符串，rl-config 里原样落。若有人在这里发明 `on/off` 之类的中间域，训练侧
- *     choices 会直接报错退出——所以有专项断言「preset 不得过换算函数」。
+ *  1. **域无换算**：python `--rollout-src` 的 choices 就是
+ *     `'auto'|'local'|'node'|'run'` 字符串，rl-config 里原样落。若有人在这里发明
+ *     `on/off` 之类的中间域，训练侧 choices 会直接报错退出——所以有专项断言
+ *     「preset 不得过换算函数」。（`run` = 离线训练模式的整段上云，2026-09-19 加。）
  *  2. **缺省不是 auto**：python 缺省 `auto`，但 `_rollout_source()` 在 rl-config
  *     没有该键时一律返回 `local`（历史行为）。控制台若缺省成 `node`，就会在没改过
  *     配置的课上谎报「本轮上云」。
@@ -44,9 +45,12 @@ describe('resolveRolloutSrc：生效值解析', () => {
     expect(resolveRolloutSrc(cfg({ rollout_src: 'auto' }), '')).toBe('auto')
   })
 
-  it('rl.rollout_src 三值透传', () => {
+  it('rl.rollout_src 各值透传（含离线模式的 run）', () => {
     expect(resolveRolloutSrc(cfg({ rollout_src: 'node' }), '')).toBe('node')
     expect(resolveRolloutSrc(cfg({ rollout_src: 'local' }), '')).toBe('local')
+    // run = 离线训练模式（整段 job 交给云机）：漏掉它，离线课会在 UI 上显示成 local，
+    // 而那正是「云机在跑 / 本机在跑看起来一样」的静默分叉。
+    expect(resolveRolloutSrc(cfg({ rollout_src: 'run' }), '')).toBe('run')
   })
 
   it('per-course 覆盖 > rl.*（两个方向都要生效）', () => {
@@ -68,18 +72,22 @@ describe('preset / route / UI 接线（源码断言：跨文件链路 tsc 抓不
   it('route：rolloutSrc 走白名单，非法值 400（与 mode / cfProtocol 同写法）', () => {
     const src = readSrc('src/server/api/route.ts').replace(/\s+/g, ' ')
     expect(src).toContain("const rolloutSrc = bodyStr(body, 'rolloutSrc')")
-    expect(src).toContain("if (rolloutSrc && !['auto', 'local', 'node'].includes(rolloutSrc))")
+    expect(src).toContain(
+      "if (rolloutSrc && !['auto', 'local', 'node', 'run'].includes(rolloutSrc))",
+    )
     expect(src).toContain('rolloutSrc: (rolloutSrc || undefined) as RolloutSrcMode | undefined')
   })
 
   it('preset：字符串域**原样**落 rl-config（过换算函数 = 训练启动直接报错退出）', () => {
     const src = readSrc('src/server/actions/preset.ts').replace(/\s+/g, ' ')
-    expect(src).toContain('cfgT.rl.rollout_src = opts.rolloutSrc')
-    expect(src).toMatch(/saveConsoleState\(\{ [^}]*rolloutSrc: opts\.rolloutSrc/)
+    // 全局键写的是 `globalRolloutSrc`（= 离线模式下被置空的那个）；写成 opts.rolloutSrc
+    // 就等于把离线档的 `run` 落进**所有课共用**的 rl.rollout_src。
+    expect(src).toContain('cfgT.rl.rollout_src = globalRolloutSrc')
+    expect(src).toMatch(/saveConsoleState\(\{ [^}]*rolloutSrc: globalRolloutSrc/)
     // 反向：不得像 slim 那样过任何 *ToCfg 换算
     expect(src).not.toMatch(/rollout_src = \w*[Tt]oCfg\(/)
     // 回写门必须带上它，否则「选了但没写盘」= 假成功
-    expect(src).toContain('opts.cfProtocol || opts.cfEdgeIp || opts.slim || opts.rolloutSrc')
+    expect(src).toContain('opts.cfProtocol || opts.cfEdgeIp || opts.slim || globalRolloutSrc')
   })
 
   it('state-view：modes 带当前生效值（UI 才能显示「改动有没有生效」）', () => {
@@ -89,16 +97,17 @@ describe('preset / route / UI 接线（源码断言：跨文件链路 tsc 抓不
 
   it('app.tsx：rolloutSrc 进 preset body（漏了 = 选项点了不生效的假成功）', () => {
     const src = readSrc('src/web/app/app.tsx').replace(/\s+/g, ' ')
-    expect(src).toContain('if (push?.rolloutSrc) body.rolloutSrc = push.rolloutSrc')
+    expect(src).toContain('if (opts?.rolloutSrc) body.rolloutSrc = opts.rolloutSrc')
   })
 
   it('TrainLaunchModal：控件 + 随启动选项带上 rolloutSrc + 显示当前生效值', () => {
     const src = readSrc('src/web/app/panels/TrainLaunchModal.tsx').replace(/\s+/g, ' ')
     expect(src).toContain("const TC_ROLLOUT_SRC = 'tc.rolloutSrc'")
     expect(src).toContain('ariaLabel="rollout 执行位置"')
-    expect(src).toMatch(/const tunnel: TunnelLaunchOpts = \{[^}]*\brolloutSrc\b/)
-    // 选项对象类型里有它（漏了 = UI 选了但没随 onLaunch 传出去）
-    expect(src).toContain('rolloutSrc: RolloutSrcMode }')
+    // 上抛的选项对象里有它（漏了 = UI 选了但没随 onLaunch 传出去；启动不再带 mode）
+    expect(src).toMatch(/onLaunch\(\{[^}]*\brolloutSrc\b/)
+    // 选项对象类型里有它（`trainMode` 紧随其后，故不能再锚 `}`）
+    expect(src).toContain('rolloutSrc: RolloutSrcMode')
     // 上次选择要记住（与 cfProtocol / slim 同口径）
     expect(src).toContain('writeLocal(TC_ROLLOUT_SRC, rolloutSrc)')
     // 当前生效值上屏：以为改了其实没改是本仓反复出现的一类坑
@@ -109,7 +118,8 @@ describe('preset / route / UI 接线（源码断言：跨文件链路 tsc 抓不
     const src = readSrc('src/server/actions/console-state.ts').replace(/\s+/g, ' ')
     expect(src).toContain('rolloutSrc?: RolloutSrcMode')
     // 缺省状态必须**不带**此键——带了就把「没配过」写死成了某个值
-    expect(src).toContain("const DEFAULT_STATE: ConsoleState = { trainerPpo: 'pull'")
+    // （trainerPpo 已随「启动不选模式」退役，DEFAULT_STATE 只剩两个课程字段）
+    expect(src).toContain("const DEFAULT_STATE: ConsoleState = { course: '', activeCourse: '' }")
     expect(src).not.toMatch(/const DEFAULT_STATE[^\n]*rolloutSrc/)
   })
 })

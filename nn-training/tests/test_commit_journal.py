@@ -110,6 +110,89 @@ def test_journal_lines_are_jsonl_audit_trail(tmp_path: Path) -> None:
     assert lines[1]["jid"] == "job-1"
 
 
+# ---- R2b：attach / inflight（在飞集：job_id + 等谁回传）----
+
+
+def test_attach_does_not_change_pending_state(tmp_path: Path) -> None:
+    """attach 只补事实，**不改状态机**：start→attach→attach 仍算「未完成」。"""
+    j = CommitJournal(tmp_path / "j.jsonl")
+    j.start("ppo_remote", "37")
+    j.attach("ppo_remote", "37", jid="job-a", dispatch="push")
+    j.attach("ppo_remote", "37", jid="job-a", dispatch="push", attempt=2)
+    assert j.pending() == [{"phase": "ppo_remote", "round": "37"}]
+    got = j.inflight()
+    assert len(got) == 1
+    # 附带字段（ts/pid）是刻意保留的：说清楚「何时、由哪个 pid 发布」
+    assert {k: got[0][k] for k in ("phase", "round", "jid", "dispatch", "attempt")} == {
+        "phase": "ppo_remote",
+        "round": "37",
+        "jid": "job-a",
+        "dispatch": "push",
+        "attempt": 2,
+    }
+    assert "ts" in got[0] and "pid" in got[0]
+
+
+def test_attach_before_start_is_not_inflight(tmp_path: Path) -> None:
+    """只有**已开始**的提交才算在飞：孤立 attach 不凭空造出一个在飞任务。"""
+    j = CommitJournal(tmp_path / "j.jsonl")
+    j.attach("ppo_remote", "37", jid="job-a")
+    assert j.pending() == [] and j.inflight() == []
+
+
+def test_finish_clears_inflight_and_late_attach_cannot_resurrect_it(tmp_path: Path) -> None:
+    """完成即在飞集里消失；完成后再来的 attach 不得把它拉回来（最后一条 start/finish wins）。"""
+    j = CommitJournal(tmp_path / "j.jsonl")
+    j.start("ppo_remote", "37", jid="job-a")
+    j.finish("ppo_remote", "37", jid="job-a")
+    j.attach("ppo_remote", "37", late=True)
+    assert j.inflight() == []
+
+
+def test_inflight_survives_hard_exit_with_job_id(tmp_path: Path) -> None:
+    """★ R2b 的核心价值：硬死后能看到「在等哪个 job、推给了谁」。"""
+    jpath = tmp_path / "j.jsonl"
+    child = (
+        "import os, sys\n"
+        f"sys.path.insert(0, r'{ROOT}')\n"
+        "from rl.commit_journal import CommitJournal\n"
+        f"j = CommitJournal(r'{jpath}')\n"
+        "j.start('ppo_remote', '41')\n"
+        "j.attach('ppo_remote', '41', jid='job-zzz', dispatch='push')\n"
+        "os._exit(1)\n"
+    )
+    r = subprocess.run(
+        [sys.executable, "-c", child],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=dict(os.environ),
+        cwd=str(ROOT),
+    )
+    assert r.returncode != 0
+    parent = CommitJournal(jpath)
+    got = parent.inflight()
+    assert len(got) == 1
+    assert {k: got[0][k] for k in ("phase", "round", "jid", "dispatch")} == {
+        "phase": "ppo_remote",
+        "round": "41",
+        "jid": "job-zzz",
+        "dispatch": "push",
+    }
+    # 重放收口后，在飞集清空
+    parent.finish("ppo_remote", "41", jid="job-zzz")
+    assert parent.inflight() == []
+
+
+def test_inflight_skips_corrupt_lines(tmp_path: Path) -> None:
+    p = tmp_path / "j.jsonl"
+    j = CommitJournal(p)
+    j.start("ppo_remote", "41")
+    with open(p, "a", encoding="utf-8") as f:
+        f.write('{"event": "commit_journal", "op": "att')  # 半行截断
+    assert j.inflight() == [{"phase": "ppo_remote", "round": "41"}]
+
+
 # ---- forensics：取证快照 ----
 
 

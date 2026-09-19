@@ -12,7 +12,13 @@ import base64
 import json
 import time
 
-from remote.hub_client import _job_failed_from_body, _request
+#: 节点侧结果端点（hub 侧是 `/jobs/{jid}/result`，只差一个 s）——探针靠注入它复用同一份
+#: 状态码分类实现（见 `hub_client.probe_job_result`）。
+NODE_RESULT_PATH = "/job/{jid}/result"
+
+# `_request` / `_job_failed_from_body` 仍是本模块其它函数（缓存查询、submit）的实现细节；
+# 结果探测自身走 `probe_job_result`（状态码分类的唯一实现，见 hub_client）。
+from remote.hub_client import PROBE_READY, PROBE_TRANSIENT, _request, probe_job_result
 from remote.protocol import (
     WIRE_JOB_CONTENT_TYPE,
     ProtocolError,
@@ -211,6 +217,23 @@ def submit_job(
     raise RetryableError(f"job POST 重试 {attempts} 次仍失败: {last}")
 
 
+def poll_result(
+    base_url: str,
+    token: str,
+    jid: str,
+    *,
+    timeout: float = 30.0,
+) -> dict | None:
+    """非阻塞探一次节点结果：就绪 → 结果；未就绪 / 瞬时错 → None（终局失败照抛）。
+
+    单进程调度器的让位判据（R2c-3）：**问一句就走**。与 hub 侧的 `poll_job` 共用状态码
+    分类实现（`path` 注入节点侧端点），两条链路不可能各判一套。
+    """
+    return probe_job_result(
+        base_url, token, jid, path=NODE_RESULT_PATH, timeout=timeout
+    ).result
+
+
 def wait_result(
     base_url: str,
     token: str,
@@ -220,31 +243,19 @@ def wait_result(
     poll_sec: float = 5.0,
     log=_default_log,
 ) -> dict:
-    """轮询 /job/{id}/result 直到 200（幂等读）——瞬时网络/5xx 容忍至预算。"""
+    """轮询 /job/{id}/result 直到 200（幂等读）——瞬时网络/5xx 容忍至预算。
+
+    单次探测与状态码分类在 `hub_client.probe_job_result`（`path` 注入节点侧端点）；
+    本函数只负责「**固定** poll_sec 重试 + 超时收尾」——与 hub 侧的差别仅在退避策略
+    （直推节点是弱链路热点，历史选择不放大频率），而这个差别不该再复制一份分类逻辑。
+    """
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
-        try:
-            status, body = _request(base_url, token, f"/job/{jid}/result", timeout=30.0)
-        except Exception as e:
-            log(f"wait_result: job {jid} 轮询网络错误 ({type(e).__name__}) —— 重试")
-            time.sleep(poll_sec)
-            continue
-        if status == 200:
-            loaded = json.loads(body.decode("utf-8"))
-            if isinstance(loaded, dict):
-                return loaded
-            raise ProtocolError(f"wait_result: job {jid} 结果非对象")
-        if status in (202, 404):
-            time.sleep(poll_sec)
-            continue
-        if status == 410:
-            # 410 = 节点已判定这个 job 在这台机器上**跑不成**（终局，原因在体内）。
-            # 2026-09-17 前节点用 500 报失败 ⇒ 落进下面的 5xx 分支被当瞬时错误重试到
-            # 预算耗尽（bun 装不上 = 等满 30 分钟）。现在立即带着原因失败。
-            raise _job_failed_from_body(jid, body)
-        if status >= 500:
-            log(f"wait_result: job {jid} HTTP {status}（瞬时错误）—— 重试")
-            time.sleep(poll_sec)
-            continue
-        raise ProtocolError(f"wait_result: HTTP {status}: {body[:200].decode('utf-8', 'replace')}")
+        probe = probe_job_result(base_url, token, jid, path=NODE_RESULT_PATH, timeout=30.0)
+        if probe.state == PROBE_READY:
+            assert probe.result is not None  # ready 必带结果
+            return probe.result
+        if probe.state == PROBE_TRANSIENT:
+            log(f"wait_result: job {jid} 轮询瞬时错误 ({probe.detail}) —— 重试")
+        time.sleep(poll_sec)
     raise RetryableError(f"wait_result: job {jid} 超时（>{timeout_sec}s）未完成")

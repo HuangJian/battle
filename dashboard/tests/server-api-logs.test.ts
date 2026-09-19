@@ -77,16 +77,18 @@ describe('console/log viewer (§348 补 2)', () => {
     }
   })
 
-  it('resolveComponentLog：五个组件均有日志映射；未知组件 null', () => {
+  it('resolveComponentLog：受管组件均有日志映射；未知组件 null', () => {
     const cfg = JSON.parse(readFileSync(configPath(), 'utf-8')) as Parameters<
       typeof api.resolveComponentLog
     >[1]
+    // 受管组件全集（ALL_COMPONENTS）：本机伪节点 2026-09-19 已退出（它只服务冒烟预演，
+    // 没有卡片/日志页入口）。
     for (const key of [
       'selfNode',
       'hubServer',
       'cloudflared',
+      'localWorker',
       'trainingLoop',
-      'workerServe',
     ] as const) {
       expect(api.resolveComponentLog(key, cfg, 'p4-horizon')).toBeTruthy()
     }
@@ -106,7 +108,7 @@ describe('console/log viewer (§348 补 2)', () => {
       utimesSync(fresh, new Date('2026-09-08T06:00:00Z'), new Date('2026-09-08T06:00:00Z'))
       expect(api.scanLatestLog(dir, 'cloudflared', 'x')).toBe(fresh)
       // 无匹配文件 → null；目录不存在 → null（不抛）
-      expect(api.scanLatestLog(dir, 'workerServe', 'x')).toBeNull()
+      expect(api.scanLatestLog(dir, 'localWorker', 'x')).toBeNull()
       const missing = path.join(os.tmpdir(), 'bcity-logscan-no-such-dir-xyz')
       expect(api.scanLatestLog(missing, 'selfNode', 'x')).toBeNull()
     } finally {

@@ -19,7 +19,7 @@ describe('console sparkline (ui/view)', () => {
       courses: [],
       components: [],
       nodes: [],
-      modes: { trainerPpo: 'pull' as const, stream: 0, doubleBuffer: 0, precollectEarly: 0 },
+      modes: { stream: 0, doubleBuffer: 0, precollectEarly: 0 },
       phase: { phase: 'idle' as const, sinceMs: null, iter: null },
       metrics: {
         available: true,

@@ -1655,8 +1655,8 @@ a.tc-preset {
   padding: 4px 8px;
 }
 
-/* 组件 4 小卡 */
-/* 组件 chips 行（原 4 小卡 → 一行 chips，复用节点 pill 风格） */
+/* 组件 chips 行（R3-3：两族分组——服务面（单例角色）vs 课程面（按课程），
+   组之间用竖分隔线 + 各自的小标题；族内仍是 pill，点击展开详情）。 */
 .tc-comps {
   display: flex;
   align-items: center;
@@ -1668,10 +1668,26 @@ a.tc-preset {
   padding: 6px 12px;
   margin-bottom: 10px;
 }
-.tc-comps .lbl {
-  font-size: var(--fs-2);
+/* 一组（族）：组标题 + 该族 chips。横排可换行；组与组之间一条淡竖线分隔。 */
+.tc-comps__group {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+.tc-comps__group + .tc-comps__group {
+  margin-left: var(--sp-2);
+  padding-left: var(--sp-3);
+  border-left: 1px solid var(--line);
+}
+/* 组标题：小一号的弱色标签（回答「这一族的键是什么」——课程无关的单例，还是当前查看的那门课）。 */
+.tc-comps__glabel {
+  flex: 0 0 auto;
+  font-size: var(--fs-1);
+  font-weight: 700;
+  letter-spacing: 0.02em;
   color: var(--muted);
-  margin-right: var(--sp-1);
+  cursor: help;
 }
 .tc-cc__name {
   font-size: var(--fs-2);
@@ -1680,6 +1696,25 @@ a.tc-preset {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* 作用域徽章（R3-3）：共享 = 一个进程服务所有并行课程；单例 = 全机一份。
+   按课程是默认语义（组标题已说），不给每行挂噪声标签。 */
+.tc-cc__scope {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+.tc-cc__scope--shared {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-bg);
+}
+
 /* trainingLoop 运行模式高亮徽章 */
 .tc-cc__mode {
   display: inline-block;
@@ -2151,4 +2186,454 @@ a.tc-preset {
 }
 .tc-npill--ro:hover {
   border-color: var(--border);
+}
+
+/* ────────────── 并行课程总览（2026-09-18 单 hub 多课程） ────────────── */
+.tc-cov {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-3);
+  padding: 6px 12px;
+  margin-bottom: 10px;
+}
+.tc-cov__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  font-size: var(--fs-2);
+}
+.tc-cov__head .lbl {
+  color: var(--muted);
+}
+.tc-cov__head b {
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+}
+.tc-cov__sep {
+  color: var(--muted);
+}
+.tc-cov__hub {
+  color: var(--muted);
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+}
+/* hub 无应答：红字——它意味着队列列整列不可得 */
+.tc-cov__hub--dead {
+  color: var(--red);
+  font-weight: 600;
+}
+.tc-cov__stat {
+  color: var(--muted);
+}
+.tc-cov__race {
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--accent-bg);
+  color: var(--accent);
+  font-weight: 700;
+}
+.tc-cov__halt {
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--red-bg);
+  color: var(--red);
+  font-weight: 700;
+}
+.tc-cov__rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+/* 行外壳：行（按钮，占满）+ 模式开关（R3-2）——开关不能嵌在行按钮里（嵌套按钮非法）。 */
+.tc-cov__rowwrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tc-cov__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  flex: 1;
+  text-align: left;
+  padding: 2px 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: none;
+  font: inherit;
+  font-size: var(--fs-2);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.tc-cov__row:hover {
+  border-color: var(--accent);
+}
+/* 当前查看课程：与顶部 select 同一目标，视觉上咬合 */
+.tc-cov__row--cur {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+/* 模式开关（R3-2）：小、次要，但永远可点（只在 hub 认识这门课时出现） */
+.tc-cov__mode {
+  flex: 0 0 auto;
+  padding: 1px 8px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--fg-dim);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.tc-cov__mode:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+.tc-cov__name {
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-weight: 600;
+  min-width: 12ch;
+}
+.tc-cov__badge {
+  padding: 0 7px;
+  border-radius: 999px;
+  font-weight: 700;
+  font-size: var(--fs-1);
+  background: var(--gray-bg);
+  color: var(--muted);
+}
+.tc-cov__badge--on {
+  background: var(--green-bg);
+  color: var(--green);
+}
+.tc-cov__badge--off {
+  background: var(--gray-bg);
+  color: var(--gray);
+}
+.tc-cov__badge--warn {
+  background: var(--yellow-bg);
+  color: var(--yellow);
+}
+.tc-cov__iter,
+.tc-cov__q {
+  color: var(--muted);
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+}
+/* 离线段内进度：账本里**没有**这些轮（云机自己跑的），故与 iter 列视觉上分开 */
+.tc-cov__seg {
+  padding: 0 7px;
+  border-radius: 999px;
+  font-weight: 700;
+  font-size: var(--fs-1);
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+/* 超过 1h 没新产物 ⇒ 云机可能挂了（离线课唯一的「死」信号） */
+.tc-cov__seg--stale {
+  background: var(--yellow-bg);
+  color: var(--yellow);
+}
+
+/* ────────── 训练调度器（单例，每课队列 + 在等什么；R2c-3） ────────── */
+.tc-loopq {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-3);
+  padding: 6px 12px;
+  margin-bottom: 10px;
+}
+.tc-loopq__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  font-size: var(--fs-2);
+}
+.tc-loopq__head .lbl {
+  color: var(--muted);
+}
+/* 「单例」徒标：一个进程服务所有课程——不标出来会把这张卡误读成「本课自己的队列」 */
+.tc-loopq__singleton {
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--accent-bg);
+  color: var(--accent);
+  font-weight: 700;
+  font-size: var(--fs-1);
+}
+.tc-loopq__stat,
+.tc-loopq__pools {
+  color: var(--muted);
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+}
+.tc-loopq__waitcount {
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--yellow-bg);
+  color: var(--yellow);
+  font-weight: 700;
+}
+.tc-loopq__blocked {
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--gray-bg);
+  color: var(--gray);
+  font-weight: 700;
+}
+/* 读失败：红字 + 原因在 title；不影响训练，只影响这个观测面 */
+.tc-loopq__err {
+  color: var(--red);
+}
+.tc-loopq__rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+.tc-loopq__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  padding: 2px 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: none;
+  font: inherit;
+  font-size: var(--fs-2);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.tc-loopq__row:hover {
+  border-color: var(--accent);
+}
+.tc-loopq__row--cur {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+/* 未在训：淡一档 —— 队列内容是盘上事实，但不代表有人正在跑 */
+.tc-loopq__row--stopped .tc-loopq__wait,
+.tc-loopq__row--stopped .tc-loopq__step {
+  opacity: 0.6;
+}
+.tc-loopq__name {
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-weight: 600;
+  min-width: 12ch;
+}
+.tc-loopq__badge {
+  padding: 0 7px;
+  border-radius: 999px;
+  font-weight: 700;
+  font-size: var(--fs-1);
+  background: var(--gray-bg);
+  color: var(--muted);
+}
+.tc-loopq__badge--on {
+  background: var(--green-bg);
+  color: var(--green);
+}
+.tc-loopq__badge--idle {
+  background: var(--gray-bg);
+  color: var(--gray);
+}
+/* 课程种类徽标（BC）：只标 BC —— 大多数课是 RL，给 RL 也挂标签就是噪声。
+   颜色用 accent（中性信息色），不与「在训/未在训」的绿/灰争语义。 */
+.tc-loopq__kind {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-weight: 700;
+  font-size: var(--fs-1);
+  letter-spacing: 0.02em;
+}
+.tc-loopq__kind--bc {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+.tc-loopq__iter,
+.tc-loopq__step,
+.tc-loopq__pending {
+  color: var(--muted);
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+}
+.tc-loopq__step {
+  min-width: 14ch;
+}
+/* 「在等什么」：整行的产出。四态各自一个色阶，扫一眼就能分出「等外部 / 采集中 / 闲置」 */
+.tc-loopq__wait {
+  flex: 1 1 22ch;
+  min-width: 18ch;
+}
+.tc-loopq__wait--inflight {
+  color: var(--yellow);
+  font-weight: 600;
+}
+.tc-loopq__wait--collect {
+  color: var(--accent);
+}
+.tc-loopq__wait--idle {
+  color: var(--muted);
+}
+/* 行 + 暂停开关（开关是行按钮的兄弟节点：行本身是 <button>，嵌 button 非法） */
+.tc-loopq__rowwrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tc-loopq__rowwrap .tc-loopq__row {
+  flex: 1;
+  min-width: 0;
+}
+.tc-loopq__pausebtn {
+  flex: 0 0 auto;
+  padding: 1px 8px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--fg-dim);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.tc-loopq__pausebtn:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+/* 事实徽标：已暂停（实）/ 待生效 · 恢复中（虚）——意图未生效时不得与已生效同色 */
+.tc-loopq__pause {
+  flex: 0 0 auto;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: var(--fs-1);
+  font-weight: 700;
+}
+.tc-loopq__pause--on {
+  color: var(--yellow);
+  border: 1px solid var(--yellow);
+}
+.tc-loopq__pause--pending {
+  color: var(--muted);
+  border: 1px dashed var(--line);
+}
+.tc-loopq__foot {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: var(--fs-1);
+}
+
+/* ────────────── push worker 登记（2026-09-18） ────────────── */
+.tc-wreg {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-3);
+  padding: 6px 12px;
+  margin-bottom: 10px;
+}
+.tc-wreg__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  font-size: var(--fs-2);
+}
+.tc-wreg__head .lbl {
+  color: var(--muted);
+}
+.tc-wreg__head b {
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+}
+.tc-wreg__mount {
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--green-bg);
+  color: var(--green);
+  font-weight: 700;
+}
+/* 未挂载：琥珀——登记照落配置，但 hub 不会真派发（训练侧仍 pull） */
+.tc-wreg__mount--off {
+  background: var(--yellow-bg);
+  color: var(--yellow);
+}
+/* 派发开关（rl.hub_push）：与「已挂载」徽章同理——它是 push 那条路的模式开关，
+   配了节点就走哪条路由它定，故与登记表同屏（一眼可见、可改）。 */
+.tc-wreg__hubpush {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+.tc-wreg__rows {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+.tc-wreg__pill {
+  cursor: default;
+}
+.tc-wreg__pill:hover {
+  border-color: var(--border);
+}
+.tc-wreg__local {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--accent-bg);
+  color: var(--accent);
+  font-size: var(--fs-1);
+}
+.tc-wreg__url,
+.tc-wreg__conc,
+.tc-wreg__busy {
+  color: var(--muted);
+  font-size: var(--fs-1);
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+}
+.tc-wreg__busy {
+  color: var(--yellow);
+  font-weight: 700;
+}
+.tc-wreg__empty {
+  margin: 6px 0 2px;
+  color: var(--muted);
+  font-size: var(--fs-2);
+}
+.tc-wreg__form {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.tc-wreg__form label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.tc-wreg__lbl {
+  color: var(--muted);
+  font-size: var(--fs-1);
+}
+.tc-wreg__form input {
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: var(--fs-2);
+  min-width: 18ch;
+  background: var(--card);
+  color: inherit;
+}
+.tc-wreg__form input[type='number'] {
+  min-width: 6ch;
+  width: 6ch;
+}
+.tc-cov__cursor {
+  color: var(--muted);
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
 }

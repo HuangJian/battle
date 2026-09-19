@@ -16,17 +16,12 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import pytest
 
 from remote._port_guard import ensure_port_free
-
-
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
+from tests.subproc_util import free_port
 
 
 def test_free_port_passes() -> None:
     """无人监听 → 守卫放行（正常启动不被误伤）。"""
-    ensure_port_free("127.0.0.1", _free_port())
+    ensure_port_free("127.0.0.1", free_port())
 
 
 def test_occupied_port_refuses() -> None:

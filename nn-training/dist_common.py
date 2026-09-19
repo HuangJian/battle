@@ -797,6 +797,62 @@ def upgrade_stale_nodes(
     return out
 
 
+#: 进程级课程身份（环境变量名）。训练进程 = 一门课，`apply_course` 挂上后所有
+#: 出站权重/任务都带它——agent 侧据此按 (course, kind) 分桶（多课程互不驱逐）。
+#: 为什么走环境变量而不是逐调用点加参数：这 9 个出站点散在 6 个文件的不同闭包里，
+#: 逐点穿参要改十几个签名且每加一个调用点就要记得再穿一次；而「这个进程是哪门课」
+#: 是**进程级身份**，不是逐请求的参数（与 PYTHONPATH/PYTHONHASHSEED 同类）。
+COURSE_ENV = "RL_COURSE_NAME"
+
+
+def course_name_of() -> str:
+    """本进程的课程短名（未设/空 → 空串 = 旧单课程桶，agent 侧两向兼容）。"""
+    return os.environ.get(COURSE_ENV, "").strip()
+
+
+def weights_cached_on_node(
+    url: str, auth_key: str, sha: str, kind: str = "rollout", timeout: float = 15.0
+) -> bool:
+    """`GET /v1/weights?sha=` → 节点是否已缓存该 sha（未知/失败/空 sha → False 保守上传）。
+
+    语义与 `push_client.code_cached_on_node` / `/blob-sha` 同族：**少传一次是省流量，
+    错判不传是 409 停活**，所以任何不确定都往「传」那边掉。旧 agent 没有这个端点
+    ⇒ 非 200 ⇒ False ⇒ 退化成改造前行为（多传一次，不影响正确性）。
+    """
+    if not sha:
+        return False
+    qs = urllib.parse.urlencode({"sha": sha, "kind": kind, "course": course_name_of()})
+    try:
+        status, body = _request(
+            url.rstrip("/") + f"/v1/weights?{qs}", auth_key, timeout, method="GET"
+        )
+        if status == 200:
+            return bool(json.loads(body.decode("utf-8")).get("cached"))
+    except Exception:
+        pass
+    return False
+
+
+def post_weights_cached(
+    url: str,
+    auth_key: str,
+    iter_id: str,
+    sha: str,
+    weights_bytes: bytes,
+    timeout: float = 120.0,
+    kind: str = "rollout",
+) -> str:
+    """带预检的 `post_weights`：节点已持有同一 sha → 只查不发，返回 `'cached'`。
+
+    为什么值得：POST 是「先收完整个体才知道已缓存」（返回 kept 时 ~0.5MB 已经传完）。
+    多课程并行时每个评估轮×每个节点都在重传同一份权重，白传量按「课程数 × 节点数」
+    放大，而权重按 sha 内容寻址、天然幂等——先问一句就能把这份白传全免掉。
+    """
+    if weights_cached_on_node(url, auth_key, sha, kind=kind):
+        return "cached"
+    return post_weights(url, auth_key, iter_id, sha, weights_bytes, timeout=timeout, kind=kind)
+
+
 def probe_weights_cached(
     url: str,
     auth_key: str,
@@ -881,11 +937,17 @@ def post_weights(
     weights_bytes: bytes,
     timeout: float = 120.0,
     kind: str = "rollout",
+    course: str | None = None,
 ) -> str:
     """POST /v1/weights → 'kept' | 'purged'；失败抛 DistError。
 
     kind（v3.7/M8）：'rollout'（per-tick RL 采样）/ 'intent'（意图权重桶——
     intent-exec 评估 + 意图 RL rollout 共用）。agent 按 x-kind 分桶缓存。
+
+    course（v5 2026-09-18 多课程）：None = 用进程级身份（`COURSE_ENV`），空串 = 显式
+    落「旧单课程桶」。agent 侧按 **(course, kind)** 分桶——课程之间不再互相驱逐
+    （5 门课共用一个 `rollout` 桶时，64 桶被分摊，历史深度掉到 ~13 轮，慢节点回来
+    取旧权重就是 409）。
 
     kept 短路径（2026-09-19，x20-rebirth it19 rollout 208s 复盘）：先探针
     GET /v1/weights/cached；sha 已在桶内 → 不传 body 直接 'kept'（补波/同 it
@@ -894,17 +956,21 @@ def post_weights(
     cached = probe_weights_cached(url, auth_key, sha, kind=kind, timeout=min(5.0, timeout))
     if cached is True:
         return "kept"
+    course_name = course_name_of() if course is None else course
+    headers = {
+        "Content-Encoding": "gzip",
+        "X-Iter-Id": iter_id,
+        "X-Weights-Sha256": sha,
+        "X-Kind": kind,
+    }
+    if course_name:
+        headers["X-Course"] = course_name
     status, body = _request(
         url.rstrip("/") + "/v1/weights",
         auth_key,
         timeout,
         data=gzip.compress(weights_bytes),
-        headers={
-            "Content-Encoding": "gzip",
-            "X-Iter-Id": iter_id,
-            "X-Weights-Sha256": sha,
-            "X-Kind": kind,
-        },
+        headers=headers,
         method="POST",
     )
     if status not in (200, 204):
@@ -1128,6 +1194,7 @@ def fetch_task(
     kind: str = "rollout",
     replan: int = 0,
     reward: str = "",
+    course: str | None = None,
     dodge: str = "",
     stage_json: str = "",
     lives_override: int | None = None,
@@ -1197,6 +1264,12 @@ def fetch_task(
         params["playerLevel"] = player_level
     if course_fp:
         params["courseFp"] = course_fp
+    # v5 多课程：任务自报课程——agent 按 (course, kind) 取权重桶。缺省走进程级身份
+    #（旧训练侧不传 → 空串桶，行为与改造前一致）。
+    if course is None:
+        course = course_name_of()
+    if course:
+        params["course"] = course
     if wins is not None:
         params["wins"] = wins
     if near_miss_times is not None:

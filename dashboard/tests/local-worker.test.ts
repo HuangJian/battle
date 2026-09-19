@@ -1,22 +1,31 @@
 /**
- * local-worker.test.ts — 本机 PPO 拆成独立 worker（2026-09-15）的形态与接线门禁。
+ * local-worker.test.ts — 本机 PPO worker 的形态与接线门禁。
  *
- * 交付物三件事，本文件逐条守：
- *  ① 组件 `localWorker` = **云端 worker 同一个入口**（`python -m remote_worker --poll 本课
- *     hub`），per-course、受管（账本 + 监督 + 整树停止）；
- *  ② 控制台 `local` 预设 = hubServer → localWorker → trainer(--ppo remote + 本机 hub)，
- *     进程内 PPO（`--ppo local` / run_bc `--local`）不再是控制台的编排选项；
- *  ③ 传输必须**钉死 pull**：某课用过 push 后 `courses.<课>.push_node_url` 会留在
- *     rl-config 里，不钉死则训练器把 job 推去云机，本机 worker 永远空转。
+ * 2026-09-19 起它是**共享进程**（用户口径：「localWorker 也不应绑定课程，它和云端 worker 一样，
+ * 只与 hub 通信（pull/push），领到任务后直接执行，完成后回传结果」）。理由不是需求而是事实：
+ * `GET /jobs/next` **从来不看课程** —— job 由 hub 按队列分发、manifest 自带课程快照、结果按
+ * job_id 回家（hub 侧 `course` 只是随包告知的观测字段）。按课程键控因而只产生三样副作用：
+ * 一个进程只能服务一门课、同机多份进程抢同一批 job、以及「这门课的 worker」这个不存在的归属感。
  *
- * 纪律（同 training-multi-course.test.ts）：端口/容量一律从真实 rl-config 推导，不写死数字。
+ * 本文件守四件事：
+ *  ① **形态**：与云端 worker 同一个入口/同一套协议，且 spec **与课程无关**（单 work 目录、
+ *     单日志、槽恒 `''`）；
+ *  ② **共享语义**：`componentScope` 判据、槽归一、旧形状（每课一条）换代接管与拒重建；
+ *  ③ **不连坐**：离开 local 模式时只在「本课是最后一门 local 课」才停那份唯一进程；
+ *  ④ **接线门禁**：启动/停止/重建/冒烟/日志/标签五处都在（缺一处 = UI 无声失败）。
+ *
+ * 行为层（一个进程领多门课的活）由 python 侧假 hub 用例逐条演示：
+ * `nn-training/tests/test_local_worker_multi_course.py`。
+ *
+ * 纪律：端口/容量一律从真实 rl-config 推导（不写死数字）；本文件不 spawn 任何进程。
  */
 
-import { afterAll, describe, expect, it } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync } from 'fs'
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
 import { CONFIG_PATH, DASHBOARD_ROOT } from '../src/core/paths'
+import { sharedHubUrl } from '../src/core/slots'
 import {
   LOCAL_WORKER_ENTRY,
   bcLoopSpec,
@@ -26,25 +35,33 @@ import {
 import { COMPONENT_KILL_TREE } from '../src/core/types'
 import {
   COURSE_COMPONENTS,
+  SHARED_COMPONENTS,
+  componentScope,
   entryForCourse,
   loadRegistry,
   registryTriples,
-  saveCourseComponent,
+  saveAnyComponent,
+  scopeOf,
 } from '../src/core/registry'
 import { restartSpecFor } from '../src/server/actions'
-import { slotPort } from '../src/core/slots'
+import { supersedeLegacyInstances } from '../src/stack/hub'
 import { resolveVenvPython } from '../src/core/venv'
 import type { RlConfig } from '../src/core/types'
 
-const SCRATCH: string[] = []
+let scratch = ''
+let tmpRegistry = ''
+const prevRegistry = process.env.BCITY_REGISTRY_FILE
+
+beforeAll(() => {
+  scratch = mkdtempSync(path.join(os.tmpdir(), 'bcity-lw-'))
+  tmpRegistry = path.join(scratch, 'registry.json')
+  process.env.BCITY_REGISTRY_FILE = tmpRegistry
+})
+
 afterAll(() => {
-  for (const d of SCRATCH) {
-    try {
-      rmSync(d, { recursive: true, force: true })
-    } catch {
-      /* noop */
-    }
-  }
+  if (prevRegistry === undefined) delete process.env.BCITY_REGISTRY_FILE
+  else process.env.BCITY_REGISTRY_FILE = prevRegistry
+  rmSync(scratch, { recursive: true, force: true })
 })
 
 function loadRealConfig(): RlConfig {
@@ -76,18 +93,29 @@ function src(rel: string): string {
   return readFileSync(path.join(DASHBOARD_ROOT, 'src', rel), 'utf-8')
 }
 
-// ────────────────────────── ① 组件形态 ──────────────────────────
+/** 清空账本（用例互不依赖：账本是全局状态，一条测试的遗留就是下一条的噪音）。 */
+function resetRegistry(): void {
+  writeFileSync(tmpRegistry, '{}')
+}
 
-describe('localWorker 组件形态', () => {
-  it('spec = 云端同一入口：python -m remote_worker --poll 本课 hub --device cpu', () => {
+/** 登记一条共享（`''` 槽）实例条目。 */
+function saveShared(pid = 424242): void {
+  saveAnyComponent('localWorker', '', { pid, course: '', entry: LOCAL_WORKER_ENTRY })
+}
+
+// ────────────────────────── ① 形态：与课程无关 ──────────────────────────
+
+describe('localWorker 形态（共享进程）', () => {
+  it('spec = 云端同一入口：python -m remote_worker --poll 共享 hub --device cpu', () => {
     const cfg = dualCourseCfg()
-    const spec = localWorkerSpec(cfg, VENV, 'course-a')
+    const spec = localWorkerSpec(cfg, VENV)
     expect(spec.key).toBe('localWorker')
-    expect(spec.course).toBe('course-a')
+    // 共享实例不属于任何单门课：course 为空串 = 槽 `''`
+    expect(spec.course).toBe('')
     // 入口命令与云端 notebook 那条完全同源（不是另写一份本机 PPO 实现）
     expect(spec.cmd.slice(0, 4)).toEqual(['python', '-u', '-m', 'remote_worker'])
-    expect(flag(spec, '--poll')).toBe(`http://127.0.0.1:${slotPort(cfg, 'course-a', 'hub')}`)
-    expect(flag(spec, '--out')).toBe('tmp/local-worker-course-a')
+    expect(flag(spec, '--poll')).toBe(sharedHubUrl(cfg))
+    expect(flag(spec, '--out')).toBe('tmp/local-worker')
     expect(flag(spec, '--device')).toBe('cpu')
     expect(flag(spec, '--token')).toBe(cfg.rl.remote_token)
     expect(LOCAL_WORKER_ENTRY).toBe('nn-training/remote_worker.py')
@@ -97,168 +125,208 @@ describe('localWorker 组件形态', () => {
     expect(spec.sentinels.some((s) => s.endsWith('remote/protocol.py'))).toBe(true)
   })
 
+  it('spec 与课程数量无关：多课程配置下逐字段相同（没有课程参数可传）', () => {
+    const cfg = dualCourseCfg()
+    const a = localWorkerSpec(cfg, VENV)
+    const b = localWorkerSpec(cfg, VENV)
+    // 逐字段比对（`healthy` 是函数，连引用一起比会假红——比的是「同一份 spec」的可序列化面）
+    for (const k of [
+      'key',
+      'name',
+      'course',
+      'cmd',
+      'env',
+      'log',
+      'sentinels',
+      'killTree',
+    ] as const) {
+      expect(a[k]).toEqual(b[k])
+    }
+    expect(a.cmd).not.toContain('--course')
+    // 日志唯一（不再 per-course 分目录）——与 component-meta.ts 的读面同源
+    expect(a.log.endsWith('local-worker.log')).toBe(true)
+    expect(path.dirname(a.log)).not.toContain('course')
+  })
+
   it('整树停止：killTree 标记 + COMPONENT_KILL_TREE 登记（父+子进程监督器）', () => {
     // 云端 remote_worker = 父 supervise_worker + 子 worker_loop；只杀父进程会留下继续
     // 轮询 hub 抢 job 的孤儿 —— 「随时启停」全靠这一条。
-    expect(localWorkerSpec(dualCourseCfg(), VENV, 'c').killTree).toBe(true)
+    expect(localWorkerSpec(dualCourseCfg(), VENV).killTree).toBe(true)
     expect(COMPONENT_KILL_TREE.has('localWorker')).toBe(true)
-    // 集合与 spec 标记不许漂移：集合里的每个组件，其 spec 必须标了 killTree；
-    // 反之 span 里的组件也没理由不带（今天只有 localWorker 一个入列）。
-    for (const key of COMPONENT_KILL_TREE) expect(key).toBe('localWorker')
-  })
-
-  it('双课隔离：poll 目标 / work 目录 / 日志互不相同', () => {
-    const cfg = dualCourseCfg()
-    const a = localWorkerSpec(cfg, VENV, 'course-a')
-    const b = localWorkerSpec(cfg, VENV, 'course-b')
-    expect(flag(a, '--poll')).not.toBe(flag(b, '--poll'))
-    expect(flag(a, '--out')).not.toBe(flag(b, '--out'))
-    expect(a.log).not.toBe(b.log)
+    // 共享 trainer（2026-09-19 / R3-5）同样入列：它之下有 rollout / 本机 PPO 子进程，
+    // 只杀父进程会留下**还在写同一批 traj** 的孤儿（比 localWorker 更贵——它们会真跑一轮）。
+    expect(COMPONENT_KILL_TREE.has('trainingLoop')).toBe(true)
+    // 集合与 spec 标记不许漂移：集合里恰好是这两个（多一个少一个都是回归——
+    // 少一个？整树杀退化成裸 kill；多一个？没标 killTree 的 spec 被整树杀）。
+    expect([...COMPONENT_KILL_TREE].sort()).toEqual(['localWorker', 'trainingLoop'])
   })
 
   it('torch 线程：配了 rl.torch_threads 才透传（0/缺省 = torch 默认，云端同语义）', () => {
     const base = dualCourseCfg()
     // 真实配置读值推导（不写死）：配了正数就透传，0/缺省不带旗标
     const configured = Number((base.rl as Record<string, unknown>).torch_threads ?? 0)
-    expect(flag(localWorkerSpec(base, VENV, 'c'), '--threads')).toBe(
+    expect(flag(localWorkerSpec(base, VENV), '--threads')).toBe(
       configured > 0 ? String(configured) : null,
     )
     const zeroed = { ...base, rl: { ...base.rl, torch_threads: 0 } } as RlConfig
-    expect(flag(localWorkerSpec(zeroed, VENV, 'c'), '--threads')).toBeNull()
-  })
-
-  it('注册为按课程键控组件（监督/停止/日志三链共用 CourseComponent 约定）', () => {
-    expect((COURSE_COMPONENTS as readonly string[]).includes('localWorker')).toBe(true)
-    const scratch = mkdtempSync(path.join(os.tmpdir(), 'bcity-lw-'))
-    SCRATCH.push(scratch)
-    const prev = process.env.BCITY_REGISTRY_FILE
-    process.env.BCITY_REGISTRY_FILE = path.join(scratch, 'registry.json')
-    try {
-      const cfg = dualCourseCfg()
-      // 重建走真实 venv 解析（restartSpecFor 内部用 resolveVenvPython）——用同一份
-      // 解析结果构造对照 spec，比对才比的是「重建是否复现原 spec」而非两条 venv 路径。
-      const spec = localWorkerSpec(cfg, resolveVenvPython(), 'course-a')
-      saveCourseComponent('localWorker', 'course-a', {
-        pid: 424242,
-        course: 'course-a',
-        entry: LOCAL_WORKER_ENTRY,
-        log: spec.log,
-      })
-      expect(entryForCourse(loadRegistry(), 'localWorker', 'course-a')?.pid).toBe(424242)
-      // 枚举顺序：同课内 hubServer 先于 localWorker（作业中枢 → 执行者）
-      const triples = registryTriples(loadRegistry()).filter((t) => t.course === 'course-a')
-      expect(triples.map((t) => t.key).indexOf('hubServer')).toBeLessThan(
-        triples.map((t) => t.key).indexOf('localWorker'),
-      )
-      // 重建逐字段一致（监督器重启的数据源——不等于原 spec 就会把 poll 目标换掉）
-      const fresh = restartSpecFor('localWorker', 'course-a')
-      expect(fresh).not.toBeNull()
-      for (const k of [
-        'key',
-        'name',
-        'course',
-        'cmd',
-        'env',
-        'log',
-        'sentinels',
-        'killTree',
-      ] as const) {
-        expect(fresh![k]).toEqual(spec[k])
-      }
-    } finally {
-      if (prev === undefined) delete process.env.BCITY_REGISTRY_FILE
-      else process.env.BCITY_REGISTRY_FILE = prev
-    }
+    expect(flag(localWorkerSpec(zeroed, VENV), '--threads')).toBeNull()
   })
 })
 
-// ────────────────────────── ② trainer 编排：local = 本机 worker ──────────────────────────
+// ────────────────────────── ② 共享语义：槽归一 / 换代 / 拒重建 ──────────────────────────
 
-describe('trainer 编排：local = 本机独立 worker（进程内 PPO 已下线）', () => {
-  it('RL：local → --ppo remote + 传输钉死 pull + 指名本机 hub', () => {
-    const cfg = dualCourseCfg()
-    const hub = `http://127.0.0.1:${slotPort(cfg, 'course-a', 'hub')}`
-    const spec = trainingLoopSpec(cfg, {
+describe('localWorker 共享语义', () => {
+  it('判据：componentScope = shared；槽归一恒为空串（两课同一份）', () => {
+    expect(SHARED_COMPONENTS).toContain('localWorker')
+    expect(componentScope('localWorker')).toBe('shared')
+    expect(scopeOf('localWorker', 'course-a')).toBe('')
+    expect(scopeOf('localWorker', 'course-b')).toBe('')
+    // 仍在组件键全集里（顺序 = 枚举顺序：hub 先于 localWorker 先于 trainer）
+    expect((COURSE_COMPONENTS as readonly string[]).includes('localWorker')).toBe(true)
+  })
+
+  it('账本：共享条目住 `localWorkers[""]`，按课槽查不到（读面不会拿到别课的进程）', () => {
+    resetRegistry()
+    saveShared()
+    const reg = loadRegistry()
+    expect(entryForCourse(reg, 'localWorker', '')?.pid).toBe(424242)
+    expect(entryForCourse(reg, 'localWorker', 'course-a')).toBeUndefined()
+    // 枚举**看得见**它（course = ''）——监督器/看门狗靠三元组遍历，看不见 = 静默失监督。
+    // 注意：它与旧账本里的每课条目（course = 课名）是两条不同的记录，枚举时不会混同。
+    expect(registryTriples(reg).some((t) => t.key === 'localWorker' && t.course === '')).toBe(true)
+  })
+
+  it('重建：共享 spec 逐字段复现；只有旧形状条目时**什么都不重建**（返回 null）', async () => {
+    // 旧形状先单独验：`localWorkers['course-a']` 是换代前的残留。共享槽为空 ⇒ 两个调用
+    // 都必须返回 null —— 绝不允许凭一条每课残留就把共享 worker 「重建」出来（那等于
+    // 操作员从未同意过的第二个进程）。
+    resetRegistry()
+    saveAnyComponent('localWorker', 'course-a', {
+      pid: 999999999,
       course: 'course-a',
-      ppo: 'local',
-      hubUrl: hub,
-      venv: VENV,
+      entry: LOCAL_WORKER_ENTRY,
     })
+    expect(restartSpecFor('localWorker')).toBeNull()
+    expect(restartSpecFor('localWorker', 'course-a')).toBeNull()
+
+    resetRegistry()
+    saveShared()
+    // 重建走真实 venv 解析（restartSpecFor 内部用它）——两边同一份解析结果，比的是
+    // 「重建是否复现原 spec」而不是两条 venv 路径。
+    const want = localWorkerSpec(loadRealConfig(), resolveVenvPython())
+    const fresh = restartSpecFor('localWorker')
+    expect(fresh).not.toBeNull()
+    for (const k of [
+      'key',
+      'name',
+      'course',
+      'cmd',
+      'env',
+      'log',
+      'sentinels',
+      'killTree',
+    ] as const) {
+      expect(fresh![k]).toEqual(want[k])
+    }
+  })
+
+  it('换代接管：收掉旧形状的每课 worker，**不碰**共享实例（死条目清账、活实例停掉）', async () => {
+    resetRegistry()
+    saveShared(777)
+    for (const c of ['course-a', 'course-b']) {
+      saveAnyComponent('localWorker', c, {
+        pid: 999999999, // 死 pid：只验清账，不 kill 任何真进程
+        course: c,
+        entry: LOCAL_WORKER_ENTRY,
+      })
+    }
+    const taken = await supersedeLegacyInstances('localWorker')
+    expect(taken.sort()).toEqual(['course-a', 'course-b'])
+    // 账已清（否则旧条目在账本层永久占着同一个角色：每课一条 + 共享一条）
+    expect(entryForCourse(loadRegistry(), 'localWorker', 'course-a')).toBeUndefined()
+    expect(entryForCourse(loadRegistry(), 'localWorker', 'course-b')).toBeUndefined()
+    // ⚠ 共享实例（`''` 槽）必须原封不动 —— 换代接管是「收旧的」，不是「连新的一起收」
+    // （错杀它 = 启动共享 worker 时把自己刚起的进程一起杀掉）
+    expect(entryForCourse(loadRegistry(), 'localWorker', '')?.pid).toBe(777)
+    // 幂等：再跑一次没有可接管的
+    expect(await supersedeLegacyInstances('localWorker')).toEqual([])
+  })
+
+  // ★ 2026-09-19：`coursesInLocalMode`（判据 = 本课的 `remote_transport` + `remote_hub_url`）
+  //   已随「课程与 worker 节点正交」删除：本机 worker 与云机 worker 逐字同权，不再有
+  //   「哪门课跑在本机」这个概念。停它 = 本机不再执行**任何**课程的 PPO job（与停云机同语义），
+  //   而它是终端操作员显式点的那一个按钮——不再需要从配置反推「还有谁在 local」。
+})
+
+// ────────────────────────── ③ 预设与启动/停止接线 ──────────────────────────
+
+describe('local 预设与启动接线（共享形状）', () => {
+  it('启动分支不按课：entryOf 无课程参数、startLocalWorker 只吃 cfg+venv', () => {
+    const s = src(path.join('server', 'actions', 'start.ts'))
+    expect(s).toContain("case 'localWorker'")
+    expect(s).toContain("entryOf('localWorker')")
+    expect(s).toContain('await startLocalWorker({ cfg, venv })')
+    // 不再有「按课查/按课建」的痕迹
+    expect(s).not.toContain("entryOf('localWorker', ctx.course)")
+    expect(s).not.toContain('startLocalWorker({ course:')
+  })
+
+  it('启动步骤内部先换代接管再 spawn，并登记到共享槽', () => {
+    const s = src(path.join('stack', 'local-worker.ts'))
+    expect(s).toContain("supersedeLegacyInstances('localWorker')")
+    expect(s).toContain("saveAnyComponent('localWorker', ''")
+    // 换代必须在 spawn 之前（先杀旧的再起新的，否则两份进程同时抢活）
+    expect(s.indexOf('supersedeLegacyInstances')).toBeLessThan(s.indexOf('launchSpec(spec)'))
+    expect(s).not.toContain('courseLogDir')
+  })
+
+  it('停止：停共享实例同时收旧形状每课实例，并把「本机不再执行任何课程的 job」说出来', () => {
+    const s = src(path.join('server', 'actions', 'stop.ts'))
+    expect(s).toContain('isSharedComponent(key)')
+    expect(s).toContain('supersedeLegacyInstances(key)')
+    expect(s).toContain('本机不再执行任何课程的 PPO job')
+  })
+
+  it('启动编排不再有 local 分支（launch 不选模式，本机 worker 是自己的一张卡片）', () => {
+    const p = src(path.join('server', 'actions', 'preset.ts'))
+    expect(p).not.toContain("mode === 'push'")
+    expect(p).not.toContain("mode === 'local'")
+    expect(p).not.toContain("mode !== 'local'")
+    // 编排恒一条：本机 agent → 共享 hub → 共享 trainer
+    expect(p).toContain("'selfNode',")
+    expect(p).toContain("'hubServer',")
+    expect(p).toContain("'trainingLoop',")
+  })
+
+  // ── trainer 侧（本地 PPO = 本机 worker 领活）──
+  it('RL：恒 --ppo remote，且不注入 --remote-transport（交回训练侧 auto 裁决）', () => {
+    const cfg = dualCourseCfg()
+    const hub = sharedHubUrl(cfg)
+    const spec = trainingLoopSpec(cfg, { course: 'course-a', hubUrl: hub, venv: VENV })
     expect(flag(spec, '--ppo')).toBe('remote')
-    expect(flag(spec, '--remote-transport')).toBe('pull')
+    expect(flag(spec, '--remote-transport')).toBeNull()
     expect(flag(spec, '--remote-hub-url')).toBe(hub)
     // 绝不出现进程内 PPO 旗标
     expect(spec.cmd).not.toContain('--local')
   })
 
-  it('T7：默认 --remote-degrade-after 0；opt-in 时为 3', () => {
+  it('BC：恒 --remote，同样不注入 --remote-transport', () => {
     const cfg = dualCourseCfg()
-    const hub = `http://127.0.0.1:${slotPort(cfg, 'course-a', 'hub')}`
-    const off = trainingLoopSpec(cfg, {
-      course: 'course-a',
-      ppo: 'local',
-      hubUrl: hub,
-      venv: VENV,
-    })
-    expect(flag(off, '--remote-degrade-after')).toBe('0')
-    const on = trainingLoopSpec(cfg, {
-      course: 'course-a',
-      ppo: 'local',
-      hubUrl: hub,
-      venv: VENV,
-      remoteDegrade: true,
-    })
-    expect(flag(on, '--remote-degrade-after')).toBe('3')
-  })
-
-  it('BC：local → --remote 同样钉 pull，不再产出 run_bc 的 --local', () => {
-    const cfg = dualCourseCfg()
-    const hub = `http://127.0.0.1:${slotPort(cfg, 'course-a', 'hub')}`
-    for (const ppo of ['local', 'pull', 'push'] as const) {
-      const spec = bcLoopSpec(cfg, { course: 'course-a', ppo, hubUrl: hub, venv: VENV })
-      expect(spec.cmd).toContain('--remote')
-      expect(spec.cmd).not.toContain('--local')
-    }
-    const local = bcLoopSpec(cfg, { course: 'course-a', ppo: 'local', hubUrl: hub, venv: VENV })
-    expect(flag(local, '--remote-transport')).toBe('pull')
-    expect(flag(local, '--remote-hub-url')).toBe(hub)
-    // 2026-09-17：pull preset 也钉死传输（hub 仍缺省读 rl-config）——不钉会被
-    // rl-config 里残留的 gpu_push 节点劫走（auto = 「本课 gpu_push > hub」），
-    // 实测代价：云机 pull 会话 push 530 三连败 → GATE ABORT 停腿。
-    const pull = bcLoopSpec(cfg, { course: 'course-a', ppo: 'pull', venv: VENV })
-    expect(flag(pull, '--remote-transport')).toBe('pull')
-    expect(flag(pull, '--remote-hub-url')).toBeNull()
-  })
-
-  it('云端 preset：pull 钉死传输；push 仍不注射（保留 auto = 配置节点优先）', () => {
-    const cfg = dualCourseCfg()
-    const pull = trainingLoopSpec(cfg, { course: 'course-a', ppo: 'pull', venv: VENV })
-    expect(flag(pull, '--ppo')).toBe('remote')
-    expect(flag(pull, '--remote-transport')).toBe('pull')
-    expect(flag(pull, '--remote-hub-url')).toBeNull()
-    // push preset 保持原状：auto 让「config/env 里的 push 节点」生效（本 preset 的
-    // 前提就是云机在跑 worker_server）。⚠ 残留不对称：push preset 在无节点时会静默
-    // 回落 pull（不响亮报错）——未在本轮改动，留档待议。
-    const push = trainingLoopSpec(cfg, { course: 'course-a', ppo: 'push', venv: VENV })
-    expect(flag(push, '--remote-transport')).toBeNull()
+    const hub = sharedHubUrl(cfg)
+    const spec = bcLoopSpec(cfg, { course: 'course-a', hubUrl: hub, venv: VENV })
+    expect(spec.cmd).toContain('--remote')
+    expect(spec.cmd).not.toContain('--local')
+    expect(flag(spec, '--remote-transport')).toBeNull()
+    expect(flag(spec, '--remote-hub-url')).toBe(hub)
+    // hub 仍缺省读 rl-config（不传 hubUrl 时不带旗标）
+    const noHub = bcLoopSpec(cfg, { course: 'course-a', venv: VENV })
+    expect(flag(noHub, '--remote-hub-url')).toBeNull()
   })
 })
 
-// ────────────────────────── ③ 接线 grep 门禁（防「只改 helper 忘接线」） ──────────────────────────
+// ────────────────────────── ④ 接线门禁（防「只改 helper 忘接线」） ──────────────────────────
 
 describe('接线门禁', () => {
-  it('local 预设顺序含 hubServer → localWorker → trainingLoop', () => {
-    const p = src(path.join('server', 'actions', 'preset.ts'))
-    const branch = p.slice(p.indexOf("mode === 'push'"), p.indexOf('const ctx: StartCtx'))
-    expect(branch).toContain("['hubServer', 'localWorker', 'trainingLoop']")
-  })
-
-  it('离开 local 的预设会停掉残留 localWorker（否则切 pull/push 后卡片仍亮绿点）', () => {
-    const p = src(path.join('server', 'actions', 'preset.ts'))
-    expect(p).toContain("if (mode !== 'local')")
-    expect(p).toContain("await stopComponent('localWorker', course)")
-  })
-
   it('三条杀进程路径都走整树（stop / 全部停止 / 监督重启），不是裸 killPid', () => {
     for (const rel of [
       path.join('server', 'actions', 'stop.ts'),
@@ -271,12 +339,22 @@ describe('接线门禁', () => {
     }
   })
 
-  it('localWorker 有启动分支 + 日志/标签/组件表三项登记（缺一项则 UI 无声失败）', () => {
+  it('localWorker 有启动/重建/冒烟/日志/标签五项登记（缺一项则 UI 无声失败）', () => {
     expect(src(path.join('server', 'actions', 'start.ts'))).toContain("case 'localWorker'")
     expect(src(path.join('server', 'actions', 'restart.ts'))).toContain('localWorkerSpec')
     expect(src(path.join('server', 'actions', 'smoke.ts'))).toContain("case 'localWorker'")
     expect(src(path.join('server', 'api', 'component-meta.ts'))).toContain("'localWorker'")
     expect(src(path.join('server', 'api', 'logs.ts'))).toContain('local-worker')
     expect(src(path.join('server', 'actions', 'labels.ts'))).toContain('localWorker')
+  })
+
+  it('读面日志与写面同源：唯一一份 local-worker.log（不再按课程分目录）', () => {
+    const meta = src(path.join('server', 'api', 'component-meta.ts'))
+    expect(meta).toContain("localWorker: () => path.join(LOG_DIR, 'local-worker.log')")
+    // 冒烟的日志兜底也必须是那一条路径
+    const smoke = src(path.join('server', 'actions', 'smoke.ts'))
+    expect(smoke).toContain("path.join(LOG_DIR, 'local-worker.log')")
+    // 且不得再出现按课程拼日志的旧写法（课程目录已不属于共享实例）
+    expect(smoke).not.toContain("ctx.course || loadConsoleState().course, 'local-worker.log'")
   })
 })

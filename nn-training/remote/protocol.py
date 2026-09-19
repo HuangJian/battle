@@ -32,7 +32,7 @@ import re
 import struct
 import tarfile
 import zipfile
-from collections.abc import Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Literal
 
@@ -91,23 +91,191 @@ def race_decision(
     workers: Sequence[tuple[str, float, int | None]],
     now: float,
     window: float = RACE_WORKER_WINDOW_SEC,
+    *,
+    active_courses: int = 1,
 ) -> bool:
     """是否进入竞速广播（纯函数，可单测）。
 
     workers = [(worker_id, last_seen, hub_scope)]，**全部**历史登记（本函数自己按窗口过滤）。
     - `off` → 恒 False；`on` → 恒 True（应急强制，不看待领池）；
-    - `auto` → 窗口内至少 2 个**不同** worker 在轮询，**且**它们全部声明 hub_scope==1
-      （未知/多 hub 任一出现 → False）。单 worker 不竞速：广播的唯一收益是
-      「最快的卡先跑完」，只有一个执行者时它只是同一份活。
+    - `auto` → 窗口内**不同** worker 数 **严格大于**待服务的课程数，**且**它们全部声明
+      hub_scope==1（未知/多 hub 任一出现 → False）。
+
+    active_courses（2026-09-18 多课程单 hub）：当前**有实时派发待办或在飞**的课程数
+    （离线课程不计，见 `_HubQueue.active_courses`）。语义 = 「多出来的那条卡值得去抢一份
+    副本」：
+      · 1 课 1 worker  → 1 > 1 否 → 不竞速（只有一个执行者，广播只是同一份活）
+      · 1 课 ≥2 worker → 2 > 1 是 → 竞速（= 单课程老行为，缺省参数下逐字节等价）
+      · 3 课 3 worker  → 3 > 3 否 → 独占（每门课各拿一条卡，谁也不多）
+      · 2 课 3 worker  → 3 > 2 是 → 竞速（多出来的那条卡去抢最新的活）
+    缺省 active_courses=1 时与旧口径**完全等价**（`< 2` ⟺ `<= 1`），旧调用/旧测试不变。
     """
     if mode == RACE_MODE_OFF:
         return False
     if mode == RACE_MODE_ON:
         return True
     fresh = [(wid, scope) for wid, seen, scope in workers if now - seen <= window]
-    if len({wid for wid, _ in fresh}) < 2:
+    if len({wid for wid, _ in fresh}) <= max(1, int(active_courses)):
         return False
     return all(scope == 1 for _wid, scope in fresh)
+
+
+def rotation_order(order: Sequence[str], start: str | None) -> list[str]:
+    """跨课程轮转顺序：从 `start`（上次派发过的课程）的**下一门**开始绕一圈。
+
+    为什么需要它：每课程一条 FIFO，若每次都从 order[0] 开始扫，第一门课的积压会把
+    其它课程饿死（20 轮 backlog 的课能把 5 课程机群变成单课程机群）。`start` 不在表里
+    （课程被摘除/首次派发）⇒ 原序。纯函数，可单测。
+    """
+    o = [c for c in order]
+    if start is None or start not in o:
+        return o
+    i = (o.index(start) + 1) % len(o)
+    return o[i:] + o[:i]
+
+
+def may_avoid_stale_holder(requester: str, active_workers: int) -> bool:
+    """**是否允许**把「上一份死租约」从它的前持有人手里推开（避让的闸，纯函数）。
+
+    用户口径（2026-09-18）：job 超时回落队首后「改为推送其它 worker」。两个条件：
+
+      · 请求者**有身份**——身份未知（旧 worker / 手写 curl）时无从避让，保守照派；
+      · **还有别的活跃 worker** 可以接手——独苗时恒 False。这条是防停摆的硬条件：
+        机群里只剩一个工人时，它自己超时过的 job 若也避让，就谁都领不到了（那台
+        worker 永远空转，而唯一能干活的就是它）。
+
+    注意分工：**身份是否真是前持有人由 `_JobStore.claim` 判断**（只有它知道租约回收
+    后的 stale 记录），本函数只管「允不允许避让」。这么拆是因为在队列层先读 stale 记录
+    再判身份会踩时序：那一刻过期租约还没被回收，stale 记录还是空的 ⇒ 避让永远不生效
+    （2026-09-18 实测：写本函数的第一版就是这个顺序，回归测试当场抓出来）。
+    """
+    return bool(requester) and int(active_workers) >= 2
+
+
+# ---- hub 中介 push 派发（2026-09-18，P1 余下）----------------------------------
+#: 推给 GPU worker 的 job 体里带它，hub 据此认领「这份活该由 hub 推、不该等 pull」
+#: （旧 hub/旧 worker 忽略未知键 —— 缺席即 pull，行为逐字节不变）。
+DISPATCH_HUB_PUSH = "push"
+
+#: 派发拍的节奏（探活/收割结果/挑活都是这一拍里做完的）。
+PUSH_POLL_SEC = 10.0
+#: 周期探活节奏（GET /ping）——与「离线」判定同源，不必更密（cloudflared 隧道抖动
+#: 一次不该把节点判死）。
+PUSH_PING_SEC = 30.0
+#: 连续 N 次探活失败 ⇒ 该 worker 视为离场（在途 job 立即回落队首换人）。
+PUSH_DEAD_MISSES = 3
+#: 单份 job 推送后的兜底上限（秒）：超过它无论如何回落队首（PPO 一轮 10–30min，
+#: 45min 足以覆盖慢链路 + 排队）。
+PUSH_TIMEOUT_SEC = 45 * 60.0
+#: 跑死过某份 job 的 worker 冷却时长（秒）：冷却期内不再给它派同一份 job
+#: （「改为推送其它 worker」的落地；过期自动解禁，不永久拉黑）。
+PUSH_COOLDOWN_SEC = 600.0
+#: 租约持有人身份前缀：`push:<worker id>`。带前缀是为了让 `/admin/queue` 的
+#: inflight 持有人、避让记录一眼能分清「云机自己报的名字」与「hub 代持的推送」。
+PUSH_WORKER_PREFIX = "push:"
+
+
+def push_worker_id_of(worker_id: str) -> str:
+    """push 派发的租约持有人身份（`push:<id>`；已带前缀则原样返回——幂等）。"""
+    w = str(worker_id or "")
+    return w if w.startswith(PUSH_WORKER_PREFIX) else f"{PUSH_WORKER_PREFIX}{w}"
+
+
+def push_worker_from_node(node: object) -> dict | None:
+    """rl-config `nodes[]` 条目 → push worker；不是 push 节点 → None。
+
+    判据与训练侧 `rl/loop_steps._gpu_push_nodes` **同一把尺子**（`gpu_push` 且
+    `enabled` 缺省视为 true、url 非空）：两边若判据不同，就会出现「训练侧认为该推这台、
+    hub 却认为一台都没有」——症状是 job 永远躺在队首（最难查的一种）。
+
+    返回 `{id, url, key, concurrency}`：`id` 缺省回落到 url（与训练侧日志口径一致），
+    `concurrency` 缺省 1（gpu_push 节点线上就没有这个键——单 GPU 一次一份）。
+    """
+    if not isinstance(node, dict):
+        return None
+    if not node.get("gpu_push") or not node.get("enabled", True):
+        return None
+    url = str(node.get("url") or "").rstrip("/")
+    if not url:
+        return None
+    try:
+        conc = int(node.get("concurrency") or 1)
+    except (TypeError, ValueError):
+        conc = 1
+    return {
+        "id": str(node.get("id") or url),
+        "url": url,
+        "key": str(node.get("authKey") or ""),
+        "concurrency": max(1, conc),
+    }
+
+
+def pick_push_worker(
+    workers: Sequence[dict],
+    inflight: Mapping[str, int],
+    avoid: Iterable[str] = (),
+) -> dict | None:
+    """挑一个**现在就能接活**的 worker；没有空闲者 → None。
+
+    四个条件（全部必要，任缺一个都会把「推送」退化成「往死机器上撞」）：在线（最近一次
+    探活通过且未达离场阈值）、自报不忙（`/ping` 的 busy）、在飞数 < concurrency、不在
+    本次避让名单里（刚跑死这份 job 的那台）。
+
+    顺序 = 注册序（稳定 ⇒ 行为可测）；**不按快慢排序**——「谁空谁接」是既定口径
+    （EWMA 快慢 hold 已被用户裁定删除，见 `rl/dispatch.py` 注释）。
+    """
+    blocked = set(avoid)
+    for w in workers:
+        if not isinstance(w, dict):
+            continue
+        wid = str(w.get("id") or "")
+        if not wid or wid in blocked:
+            continue
+        if not w.get("online"):
+            continue  # 从没答过 / 连续失败达阈值：不往它身上推
+        if w.get("busy"):
+            continue  # 节点自报在跑
+        if int(inflight.get(wid, 0)) >= int(w.get("concurrency") or 1):
+            continue
+        return w
+    return None
+
+
+def push_job_wants_hub_push(manifest: Mapping[str, object]) -> bool:
+    """这份 job 是否要求 **hub 中介推送**（`manifest.dispatch == "push"`）。
+
+    判定住在 manifest 而不是 hub 的课程表：它由训练侧 `--remote-transport hubpush`
+    写定，是「这次发布是谁决定要推」的天然载体（hub 不在场时训练侧照样能直推云机，
+    两条路的差别必须能从一个字段读出来）。
+    """
+    return str(manifest.get("dispatch") or "") == DISPATCH_HUB_PUSH
+
+
+#: 课程模式：`online` = 实时派发 PPO；`offline` = 整段自主（kind=run），不实时派发、
+#: 只收回传。用户口径（2026-09-18）：离线课程「不实时分派 ppo，但要接收 it 权重/指标
+#: 回传 worker」。
+COURSE_MODE_ONLINE = "online"
+COURSE_MODE_OFFLINE = "offline"
+COURSE_MODES = (COURSE_MODE_ONLINE, COURSE_MODE_OFFLINE)
+
+
+def parse_course_arg(raw: object) -> tuple[str, str]:
+    """解析一个课程规格：`NAME` / `NAME=mode`（mode ∈ {online, offline}）。
+
+    空名/含路径分隔符/含空白 → ProtocolError（**响亮拒启**：课程名进的是磁盘路径，
+    `../x` 之类必须在这里断掉，不能等落盘才发现写到别处去了）。
+    """
+    s = str(raw or "").strip()
+    name, _, mode = s.partition("=")
+    name = name.strip()
+    mode = (mode.strip() or COURSE_MODE_ONLINE).lower()
+    if not name:
+        raise ProtocolError(f"课程名不能为空（收到 {raw!r}）")
+    if any(ch in name for ch in "/\\") or any(ch.isspace() for ch in name) or name in (".", ".."):
+        raise ProtocolError(f"课程名非法（不许路径分隔符/空白）: {name!r}")
+    if mode not in COURSE_MODES:
+        raise ProtocolError(f"课程模式必须是 {list(COURSE_MODES)}，收到 {mode!r}")
+    return name, mode
 
 #: manifest 必填字段（附录 A；缺失任一 → 校验失败）
 MANIFEST_REQUIRED = (
@@ -628,6 +796,29 @@ OFFLINE_ARTIFACT_BODY_MAX = 8 * 1024 * 1024
 OFFLINE_RESULT_BODY_MAX = 256 * 1024
 #: 产物目录里补传记账文件名（= 已投递项；重启续投靠它，不靠内存）。
 OFFLINE_DELIVERED_NAME = "delivered.json"
+#: 任务包端点（hub → 云机）：把本机的整段任务包 `task-<课>.zip` 递出去。
+#: 云机 notebook 的第一条路径就是「先连 hub，能通就从 hub 取包」（用户口径 2026-09-19）。
+OFFLINE_TASK_PACK_PATH = "/offline/task-pack"
+
+# ---- worker 能力自报（离线训练模式，2026-09-19）----
+# 离线课（`kind="run"` 整段）与在线课（逐轮）对 worker 的要求不同：前者要求节点
+# **自己跑完整段**（rollout + PPO 全在节点、计划随 job 走）。所以「谁能领离线课」不能靠
+# 猜，要由 worker 自己声明能力。用户口径：离线模式「也支持带特别标识的云端 worker 在线
+# 领取」——标识语义 = 能力，不是课程绑定（课程与 worker 正交：带标 worker 仍可领在线课）。
+#: 能力头（`/jobs/next`）：`X-Battle-Offline: 1` = 本会话能自主跑完整段。
+OFFLINE_CAP_HEADER = "X-Battle-Offline"
+#: 头的规范值（写 1；解析放宽到常见真值）。
+OFFLINE_CAP_VALUE = "1"
+
+
+def has_offline_capability(raw: object) -> bool:
+    """能力头 → 布尔。缺头 / 空 / `0` / `false` 一律 = **无能力**。
+
+    只认白名单真值（不做「非空即有」这类宽松推断）：能力判错的方向是明确的——
+    低估只是少一个 worker 领离线课（看得见：队列不降），高估会让一个只会逐轮的
+    worker 领走整段 job 并卡在那里（看不见）。
+    """
+    return str(raw or "").strip().lower() in ("1", "true", "yes", "on")
 
 _RUN_ID_OK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 #: run_id 长度上限（它同时是 hub 侧目录名，必须短且有界）。

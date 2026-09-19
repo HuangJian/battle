@@ -7,23 +7,26 @@ export interface NodeConf {
   authKey: string
   concurrency: number
   enabled: boolean
-  /** GPU push 节点（DECISIONS §340 补充 4：URL 指向其 worker_server 隧道）。 */
+  /** GPU push 节点（DECISIONS §340 补充 4：URL 指向其 worker_server 隧道）。
+   *
+   *  ★ **课程任务与 worker 节点正交**（2026-09-19 用户口径：「所有 worker 都可能接到在训的
+   *  课程任务，不管它是哪个课程的」）：节点只登记一次，谁接到活由部署（`rl.hub_push` + hub
+   *  队列）决定。`local_push` 标记已删除——本机伪节点与那套「一键本机 push」在 R3-7 全部退场
+   *  （启动时由 `pruneLegacyCourseKnobs` 连同按课程的指针一并清理）。 */
   gpu_push?: boolean
-  /** **本机** worker_server 回落节点（2026-09-15）：endpoint 留空且 config 里没有任何
-   *  ping 通的 gpu_push 时，控制台 push 预设把本课 push 目标改指本机的 `workerServe`
-   *  组件（`http://127.0.0.1:<push 端口>`）。与云节点**并存**：`applyPushNodeConfig` 只
-   *  认非本机节点，回落也绝不覆盖用户填的云 URL（两种节点可随时互相切换）。 */
-  local_push?: boolean
 }
 
 /** 课程配置块（plan multi-course-parallel-training §1.3）。
- *  slot 0–3 = 槽位（hub_port = base + slot*10）；workers/local_slots = 本机并发配额。 */
+ *  slot = 槽位（只决定本机 push 端口）；workers/local_slots = 本机并发配额。
+ *
+ *  ★ **课程不携带任何传输/节点指针**（2026-09-19）：删掉了 `push_node_url`、
+ *  `remote_transport`、`remote_hub_url`、`hub_push`。它们是「把**这门课**钉到某条路 /
+ *  某台机器」的耦合——课程定义任务，worker 节点提供算力，二者正交。旧值由
+ *  `stack/course-knobs.ts::pruneLegacyCourseKnobs` 在启动训练时清理。 */
 export interface CourseConf {
   slot?: number
   workers?: number
   local_slots?: number
-  /** push 节点（worker_server 隧道）URL；多课同值 = N:1 共享（§3.8）。 */
-  push_node_url?: string
   /** 本课隧道协议覆盖（M1；缺省 = 用 rl.cf_protocol）。 */
   cf_protocol?: CfProtocol
   /** 本课隧道边缘 IP 版本覆盖（M1；缺省 = 用 rl.cf_edge_ip）。 */
@@ -34,6 +37,20 @@ export interface CourseConf {
   /** 本课 rollout 执行位置覆盖（M3；缺省 = 用 rl.rollout_src，再缺省 local）。字符串域，
    *  与 python `--rollout-src` 的 choices 同字面量（`auto` = 按配置解析）。 */
   rollout_src?: RolloutSrcMode
+  /** 半离线段长覆盖（本课跑几轮一次上交；`-1` = 直到课程末尾，`0` = 关）。
+   *  与 `rollout_src:'run'` 是**一对**：离线训练模式（2026-09-19）同时写这两个键，
+   *  只给 `run` 不给段长在训练侧是配置错误（`_run_segment_iters` 回 0 ⇒ 响亮拒跑）。 */
+  run_iters?: number
+  // ── 共享 trainer 的**机器侧旋钮**（2026-09-19 / R3-5）──────────────────────────
+  //  一个进程服务所有课程 ⇒ 「这门课怎么跑」不能是那个进程的命令行参数（只有一份）。
+  //  住这里而**不能**住 `curricula/*.jsonc`：课程文件字节 = course_fp（语料血缘 / 熔断口径
+  //  D14）——往里加一个旋钮，熔断会把同一份语料读成新语料。
+  //  读面：python `rl/loop_serve.py::apply_course_machine_overrides`（开课时施加）。
+  //  传输/节点指针**不在**这里（课程与 worker 节点正交）。
+  /** T7：远端连败降级本机的阈值（0 = 关）。 */
+  remote_degrade_after?: number
+  /** 门禁失败语义（halt = 打进停机态）。 */
+  gate_halt_mode?: string
 }
 
 /** cloudflared 隧道协议（M1，plan/remote-wire-remediation §3）：
@@ -59,7 +76,17 @@ export type SlimMode = 'on' | 'off'
  *  `auto` = 不表态，交给训练侧按 `courses.<课>.rollout_src` > `rl.rollout_src` 解析
  *  （缺省仍是 local）。与 python `choices=("auto","local","node")` 同域——
  *  与 `SlimMode` 不同，这里**不需要**域换算（两侧都是字符串）。 */
-export type RolloutSrcMode = 'local' | 'node' | 'auto'
+export type RolloutSrcMode = 'local' | 'node' | 'run' | 'auto'
+
+/** 启动训练时的**训练模式**（2026-09-19 用户口径：启动时需指定，缺省在线）。
+ *
+ *  · `online`  = 现状：本机跑 rollout，每个 it 向云端 worker 传语料；hub 实时派发。
+ *  · `offline` = 本机不跑训练：整段上云（`courses.<课>.{rollout_src:'run', run_iters:-1}`）
+ *    + hub 该课置 offline（只有带标 worker 能领），或在控制台导出任务包人工搬上云。
+ *
+ *  它不是「一个旋钮的显示名」：域换算（模式 → 课程级键）住在 `stack/specs.ts::trainModeKnobs`，
+ *  是**唯一**推导点（在线要显式清掉 run 的两把键，否则切回在线仍是整段上云）。 */
+export type TrainMode = 'online' | 'offline'
 
 /** 竞速广播模式（hub-server `--race`，2026-09-17）。
  *
@@ -96,6 +123,15 @@ export interface RlConfig {
     rollout_src?: RolloutSrcMode
     /** 竞速广播（2026-09-17；缺省 = auto）。字符串域，见 `RaceMode`。 */
     race_mode?: RaceMode
+    /**
+     * hub 中介 push 派发（2026-09-18；缺省 = 关）。
+     *
+     * 打开时 hub-server 多带 `--push --push-config <rl-config>`：它按队列顺序把 job 推给
+     * 登记在册的 `gpu_push` 节点（周期 `/ping` 探活、超时回落队首换 worker）。训练侧仍住在
+     * `rl.hub_push` 的课程级覆盖下（`courses.<课>.hub_push`）——两侧同一个键名是故意的：
+     * 「push 要不要经 hub」是部署事实，不该在面板与训练循环各写一遍。
+     */
+    hub_push?: boolean
     [key: string]: unknown
   }
   /** per-course 槽位/配额（唯一事实来源；console-state 不存这些）。 */
@@ -104,13 +140,7 @@ export interface RlConfig {
 }
 
 /** 受管组件（registry 分文件账本的键）。 */
-export type Component =
-  | 'selfNode'
-  | 'hubServer'
-  | 'cloudflared'
-  | 'localWorker'
-  | 'trainingLoop'
-  | 'workerServe'
+export type Component = 'selfNode' | 'hubServer' | 'cloudflared' | 'localWorker' | 'trainingLoop'
 
 /** 单组件登记条目（PID 账本 + 可选元数据）。 */
 export interface RegistryEntry {
@@ -118,7 +148,10 @@ export interface RegistryEntry {
   /** 进程入口（监督重启/变更检测用）。 */
   entry?: string
   course?: string
-  /** 槽位（§1.4 重建契约：hubServer/cloudflared/localWorker/workerServe 重启时必须知道自己占哪槽）。 */
+  /** 槽位（§1.4 重建契约：重启时必须知道自己占哪槽）。
+   *  **一切受管组件都恒 0/缺省**（hubServer / cloudflared / trainingLoop / localWorker 的实例
+   *  不属任何单门课——判据 `registry.componentScope`）；槽位算术如今只服务**课程配置**
+   *  （`courses.<课>.slot` → push 端口），不再用于受管进程。 */
   slot?: number
   url?: string
   log?: string
@@ -141,7 +174,9 @@ export interface RegistryEntry {
 
 /** registry.json：全部组件条目（缺省组件 = 未启动）。
  *
- *  多课程形状（plan §1.4，P1b）：按课程键控的五个组件各有一份 `Record<course, Entry>`。
+ *  多课程形状（plan §1.4，P1b）：五个组件键各有一份 `Record<course, Entry>`（**表**按课程，
+ *  但 hubServer / cloudflared / trainingLoop / localWorker 四条是**共享**实例，槽恒 `''`；
+ *  谁按课程看 `registry.componentScope`，不要看表名）。
  *  旧扁平单键（`hubServer`/…）**已在 P5 移除**（R2）：类型里不再声明，唯一读点是
  *  `registry.ts::migrateFlatCourseEntries` 的一次性搬迁（把旧条目搬进 per-course 表再删键），
  *  写入路径不再产生扁平键（`saveComponent` 只服务 selfNode）。
@@ -152,7 +187,6 @@ export interface Registry {
   /** per-course 键（P1b 起唯一写入路径）。 */
   hubServers?: Record<string, RegistryEntry>
   cloudflareds?: Record<string, RegistryEntry>
-  workerServes?: Record<string, RegistryEntry>
   localWorkers?: Record<string, RegistryEntry>
   trainingLoops?: Record<string, RegistryEntry>
 }
@@ -160,7 +194,7 @@ export interface Registry {
 /** 旧扁平账本键（P1–P4 的历史形状）——**仅**供 `registry.ts` 的一次性搬迁读取（R2）。
  *  任何其它代码不得读它：编译期把它们挡在 `Registry` 之外，正是为了不留读兼容后门。 */
 export type LegacyFlatRegistry = Partial<
-  Record<'hubServer' | 'cloudflared' | 'trainingLoop' | 'workerServe', RegistryEntry>
+  Record<'hubServer' | 'cloudflared' | 'trainingLoop', RegistryEntry>
 >
 
 /** 需要**整树停止**的组件（stop / 全部停止 / 监督重启三处共用，实现见 net.ts::killPidTree）。
@@ -169,7 +203,7 @@ export type LegacyFlatRegistry = Partial<
  *  `remote.worker` 入口——父 `supervise_worker` + 子 `worker_loop`（子进程 60s 心跳续租、
  *  长期轮询 hub 抢 job）。只杀父进程 = 留一个继续抢 job 的孤儿，「随时启停」形同虚设。
  *  其余组件都是单进程，不进此集合（默认 False 路径行为不变）。 */
-export const COMPONENT_KILL_TREE: ReadonlySet<string> = new Set(['localWorker'])
+export const COMPONENT_KILL_TREE: ReadonlySet<string> = new Set(['localWorker', 'trainingLoop'])
 
 /** 受管进程的描述（spawn + 监督 + 变更检测的统一载体）。 */
 export interface ProcSpec {

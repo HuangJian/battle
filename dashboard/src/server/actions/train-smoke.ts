@@ -5,7 +5,7 @@ import { loadConfig, validateCourseArg } from '../../core/config'
 import { killPid, pidAlive } from '../../core/net'
 import { LOG_DIR, REPO_ROOT } from '../../core/paths'
 import { launchSpec } from '../../core/proc'
-import { clearAnyComponent, saveAnyComponent } from '../../core/registry'
+import { clearAnyComponent, saveAnyComponent, scopeOf } from '../../core/registry'
 import { monitorTouch } from '../../core/reload-touch'
 import { slotOf } from '../../core/slots'
 import { resolveVenvPython } from '../../core/venv'
@@ -31,8 +31,13 @@ async function smokeTrainBc(course: string): Promise<ActionResult> {
   let servePid = 0
   try {
     const cfg = loadConfig()
-    if (pidAlive(entryOf('trainingLoop', course)?.pid))
-      return done(false, 'BcLoop 已在运行（可能是真训练）——预演会干扰在途 job，先停止')
+    // 共享 trainer（2026-09-19 / R3-5）：预演要**独占** PPO 发布链路（真课程 + 伪节点 + --smoke），
+    // 而共享 trainer 同时也服务其它课程 —— 两者并存会在同一批 traj 上抢 job。响亮拒绝并说原因。
+    if (pidAlive(entryOf('trainingLoop')?.pid))
+      return done(
+        false,
+        '共享 trainer 在跑（一个进程服务所有课程）——预演要独占训练栈，先停止它再冒烟',
+      )
     const venv = resolveVenvPython()
 
     // 1) 本机伪 GPU 节点
@@ -43,13 +48,15 @@ async function smokeTrainBc(course: string): Promise<ActionResult> {
     const trainLog = path.join(LOG_DIR, course, 'training-loop.log')
     const spec = bcLoopSpec(cfg, {
       course,
-      ppo: 'remote',
       smoke: true,
       pushNodeUrl: pushUrl,
       venv,
     })
     const r = launchSpec(spec)
-    saveAnyComponent('trainingLoop', course, {
+    // 账本槽 = `scopeOf`（共享角色恒 `''`）：预演进程占的就是那**一个** trainer 角色
+    // （它在共享 slot 上，所以上面那条「共享 trainer 在跑就拒绝」同时挡住了重复预演）。
+    // payload 里保留 course：这条记录要能回答「这次预演跑的是哪门课」。
+    saveAnyComponent('trainingLoop', scopeOf('trainingLoop', course), {
       pid: r.pid,
       course,
       slot: slotOf(cfg, course),
@@ -65,7 +72,7 @@ async function smokeTrainBc(course: string): Promise<ActionResult> {
     } catch (e) {
       if (pidAlive(r.pid)) {
         await killPid(r.pid)
-        clearAnyComponent('trainingLoop', course)
+        clearAnyComponent('trainingLoop', scopeOf('trainingLoop', course))
       }
       return done(
         false,
@@ -104,8 +111,12 @@ export async function smokeTrain(course: string): Promise<ActionResult> {
     if (!course) throw new ActionError('需要 course（先在顶部设置课程）')
     validateCourseArg(course)
     const cfg = loadConfig()
-    if (pidAlive(entryOf('trainingLoop', course)?.pid))
-      return done(false, 'TrainingLoop 已在运行（可能是真训练）——预演会干扰在途 job，先停止')
+    // 共享 trainer（2026-09-19 / R3-5）：预演要独占 PPO 发布链路，见 BC 分支同一条注释。
+    if (pidAlive(entryOf('trainingLoop')?.pid))
+      return done(
+        false,
+        '共享 trainer 在跑（一个进程服务所有课程）——预演要独占训练栈，先停止它再冒烟',
+      )
     const venv = resolveVenvPython()
     const trajDir = path.join(REPO_ROOT, 'tmp', course)
     const weightsPath = path.join(trajDir, 'weights.json')
@@ -125,13 +136,13 @@ export async function smokeTrain(course: string): Promise<ActionResult> {
     const trainLog = path.join(LOG_DIR, course, 'training-loop.log')
     const spec = trainingLoopSpec(cfg, {
       course,
-      ppo: 'remote',
       smoke: true,
       pushNodeUrl: pushUrl,
       venv,
     })
     const r = launchSpec(spec)
-    saveAnyComponent('trainingLoop', course, {
+    // 账本槽 = `scopeOf`（共享角色恒 `''`）：预演占的就是那**一个** trainer 角色。
+    saveAnyComponent('trainingLoop', scopeOf('trainingLoop', course), {
       pid: r.pid,
       course,
       slot: slotOf(cfg, course),
@@ -147,7 +158,7 @@ export async function smokeTrain(course: string): Promise<ActionResult> {
     } catch (e) {
       if (pidAlive(r.pid)) {
         await killPid(r.pid)
-        clearAnyComponent('trainingLoop', course)
+        clearAnyComponent('trainingLoop', scopeOf('trainingLoop', course))
       }
       return done(
         false,

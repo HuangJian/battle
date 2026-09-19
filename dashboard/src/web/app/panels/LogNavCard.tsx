@@ -15,7 +15,9 @@ export function LogNavCard({
   course?: string
 }) {
   if (!stateView) return <div className="tc-loading">加载中…</div>
-  const mains = stateView.components.filter((c) => c.key !== 'workerServe')
+  // 受管组件即日志入口全集（不再有「某组件不在这列」的例外：本机伪节点已退出受管组件，
+  // 2026-09-19 —— 它的日志页入口也随之消失，它只服务冒烟预演）。
+  const mains = stateView.components
   return (
     <div>
       <div className="tc-row" style={{ gap: 10 }}>

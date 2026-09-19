@@ -55,7 +55,7 @@ describe('Hero 训练状态区（§367：最新 6 轮完整指标）', () => {
       courses: [],
       components: [],
       nodes: [],
-      modes: { trainerPpo: 'pull', stream: 0, doubleBuffer: 0, precollectEarly: 0 },
+      modes: { stream: 0, doubleBuffer: 0, precollectEarly: 0 },
       metrics: { available: true, iters },
       phase: { phase: 'idle', sinceMs: null, iter: null },
     })

@@ -21,12 +21,11 @@ import { NodePills } from './panels/NodePills'
 import { MetricsTable } from './panels/MetricsTable'
 import { NodeStats } from './panels/NodeStats'
 import { LogNavCard } from './panels/LogNavCard'
-import {
-  TrainLaunchModal,
-  type PushCredentials,
-  type TunnelLaunchOpts,
-} from './panels/TrainLaunchModal'
+import { TrainLaunchModal, type TunnelLaunchOpts } from './panels/TrainLaunchModal'
 import { BcPanel } from './panels/BcPanel'
+import { CourseOverview } from './panels/CourseOverview'
+import { WorkerRegistry } from './panels/WorkerRegistry'
+import { LoopQueue } from './panels/LoopQueue'
 import { TaskBundlePanel } from './panels/TaskBundlePanel'
 import { WirePanel } from './panels/WirePanel'
 import { EvalSummary } from './panels/EvalSummary'
@@ -301,33 +300,29 @@ export function App({ initial }: AppProps) {
   )
 
   const handleLaunch = async (
-    mode: 'pull' | 'push' | 'local',
-    push?: Partial<PushCredentials> & TunnelLaunchOpts & { remoteDegrade?: boolean },
+    opts?: TunnelLaunchOpts & { remoteDegrade?: boolean },
   ): Promise<void> => {
-    // Push：先关弹窗再 POST（服务端 ping 门；失败走 flash，不启动进程）。
     setTrainOpen(false)
+    // 启动**不传模式**（2026-09-19）：执行面由 rl.hub_push + 登记节点推出来，
+    // 服务端 preset 也不再有 mode/endpoint/authKey 这几个 body 字段。
     const body: Record<string, unknown> = {
-      mode,
-      remoteDegrade: push?.remoteDegrade === true,
+      remoteDegrade: opts?.remoteDegrade === true,
     }
-    // M1/M2：传输选项随启动回写 rl-config + console-state（未选 = 不传，沿用现值）。
-    if (push?.cfProtocol) body.cfProtocol = push.cfProtocol
-    if (push?.cfEdgeIp) body.cfEdgeIp = push.cfEdgeIp
-    if (push?.slim) body.slim = push.slim
-    if (push?.rolloutSrc) body.rolloutSrc = push.rolloutSrc
-    if (mode === 'push' && push) {
-      body.pushEndpoint = push.endpoint ?? ''
-      body.pushAuthKey = push.authKey ?? ''
-    }
+    // M1/M2/M3：传输选项随启动回写 rl-config + console-state（未选 = 不传，沿用现值）。
+    if (opts?.cfProtocol) body.cfProtocol = opts.cfProtocol
+    if (opts?.cfEdgeIp) body.cfEdgeIp = opts.cfEdgeIp
+    if (opts?.slim) body.slim = opts.slim
+    if (opts?.rolloutSrc) body.rolloutSrc = opts.rolloutSrc
+    // 训练模式（2026-09-19）：在线/离线。离线时服务端会忽略上面的 rolloutSrc
+    // （`run` 绝不进全局 rl.rollout_src），只写该课的课程级键。
+    if (opts?.trainMode) body.trainMode = opts.trainMode
     await doAction('preset', body)
   }
 
-  // hub-server 运行中锁定课程（仅本机）：hub 按课程建 jobRoot/日志目录，切操作员课程会打乱
-  // 在途训练状态——先停止 hub-server 再切换（§367 UI 交互）。局域网查看不受此限：只读切换
-  // 课程不影响任何训练状态。
-  const hubRunning = (stateView?.components ?? []).some(
-    (c) => c.key === 'hubServer' && c.status === 'running',
-  )
+  // 课程锁已随「单 hub 多课程」解除（2026-09-18）：hub 现在一个进程托管 N 份账本
+  // （`--course <课>` 可重复），进程级状态不再与「操作员在看哪门课」绑定——原来的
+  // 「hub 运行中锁定课程」保护（§367，当时 hub 按课程建 jobRoot/日志目录）已无对象，
+  // 而多课程并行下它反倒会把查看/切换彻底锁死。切课程现在只改「看哪门课」。
 
   // 课程下拉 onChange：本机 = 查看 + POST setCourse 同步操作员课程；局域网 = 仅查看 + 写 URL。
   // 注意：ref 须在此同步更新（setState 后下一渲染才赋值）——随后的 refreshState/doAction
@@ -353,12 +348,19 @@ export function App({ initial }: AppProps) {
   const phaseInfo: PhaseInfo | null = stateView?.phase ?? null
   const phaseElapsed = phaseInfo && phaseInfo.sinceMs != null ? now - phaseInfo.sinceMs : null
 
-  // 正在训练的课程：trainingLoop 运行时的注册课程（启动即记账）；监督重启丢 course 时
-  // 回退服务端生效课程（console-state，正常流程与训练课程一致）。查看课程 ≠ 训练课程时，
-  // 在课程 select 后高亮提示——局域网切去查看其它课程也能一眼看到训练在哪个课程上。
+  // 在训课程（**可多门**）：以服务端 stamp 的 `trainingCourses` 为准（共享 trainer 在跑
+  // ∧ 该课未收官——多课程并行下这是唯一能一次看全的口径，R3-5）；旧视图没有该字段时
+  // 回退到「trainer 在跑就当作当前查看的这门课在跑」（失败方向是**少报**，不编）。
   const trainingLoop = (stateView?.components ?? []).find((c) => c.key === 'trainingLoop')
-  const trainingCourse =
-    trainingLoop?.status === 'running' ? trainingLoop.course || stateView?.course || '' : ''
+  const trainingCourses =
+    stateView?.trainingCourses && stateView.trainingCourses.length > 0
+      ? stateView.trainingCourses
+      : trainingLoop?.status === 'running'
+        ? [trainingLoop.course || stateView?.course || ''].filter(Boolean)
+        : []
+  const trainingSet = new Set(trainingCourses)
+  // 除当前查看之外的在训课程（见下方标签处的注释）。
+  const otherTraining = trainingCourses.filter((c) => c !== viewCourse)
 
   return (
     <div className="tc-wrap">
@@ -385,40 +387,39 @@ export function App({ initial }: AppProps) {
               id="courseSel"
               className="tc-sel"
               value={viewCourse}
-              // 课程锁只对本机生效：用服务端 stamp 的 readOnly（SSR 首帧即正确）而非客户端 isLocal——
-              // 后者 SSR 期恒 true，会渲染出局域网首帧 disabled 的 select（靠 hydration 纠正不可靠）。
-              // 局域网只读切换课程不影响训练，任何训练状态下都可切。
-              disabled={hubRunning && !readOnly}
+              // 恒可切（含历史课程）：切课程只改「本浏览器看哪门课」+ 本机的操作员课程，
+              // 不碰任何在训进程——多课程并行时它还必须可切（否则看不到其它在训课程）。
               title={
-                hubRunning && !readOnly
-                  ? 'hub-server 运行中——切课程会打乱在途训练状态，先停止 hub-server 再切换'
-                  : readOnly
-                    ? '局域网只读：切换仅影响当前浏览器的查看课程，不影响训练'
-                    : undefined
+                readOnly
+                  ? '局域网只读：切换仅影响当前浏览器的查看课程，不影响训练'
+                  : '切换查看课程（含历史课程）。不影响任何在训课程'
               }
               onChange={onCourseChange}
             >
               <option value="">自动（最近活跃课程）</option>
               {(stateView?.courses ?? []).map((c) => (
                 <option key={c} value={c}>
-                  {c === trainingCourse ? '🔥 ' : ''}
+                  {trainingSet.has(c) ? '🔥 ' : ''}
                   {c}
-                  {c === trainingCourse ? '（正在训练）' : ''}
+                  {trainingSet.has(c) ? '（正在训练）' : ''}
                 </option>
               ))}
             </select>
-            {trainingCourse && trainingCourse !== viewCourse ? (
+            {/* 在训课程里**除当前查看之外**的那些：正在看的那门由 select 里的 🔥 标记
+                （全体在训课程的 🔥 标记在选项里，一份不落），这里只提醒「别处还在跑」——
+                多课程并行时它是「有哪些课上在同时跑」的唯一可见面。 */}
+            {otherTraining.length > 0 ? (
               <span
                 className="tc-training-tag"
-                title={`正在训练 ${trainingCourse}；当前查看 ${viewCourse || '(自动)'}——切换查看不影响训练`}
+                title={
+                  `在训课程共 ${trainingCourses.length} 门：${trainingCourses.join('、')}` +
+                  (viewCourse && trainingSet.has(viewCourse)
+                    ? '（含当前查看的这门）'
+                    : '——切换查看不影响训练')
+                }
               >
                 <span className="tc-dot tc-dot--on" />
-                正在训练：{trainingCourse}
-              </span>
-            ) : null}
-            {hubRunning && !readOnly ? (
-              <span className="tc-muted tc-small" title="先停止 hub-server 再切换课程">
-                hub 运行中，课程已锁定
+                正在训练：{otherTraining.join('、')}
               </span>
             ) : null}
           </label>
@@ -426,7 +427,7 @@ export function App({ initial }: AppProps) {
               提示 = 只横幅告警，绝不杀云端 PPO worker。
               背景：G4(plateau) 的 REMEDIATE 每 5 轮必复现，c6-pickup3 / c6-bonus
               被它反复停机 6 次 / 10 次，后半程训练全在中断态下进行。切换**即时生效**。 */}
-          {trainingCourse ? (
+          {trainingCourses.length > 0 ? (
             <label
               className="tc-topbar__course"
               title={
@@ -655,6 +656,41 @@ export function App({ initial }: AppProps) {
           readOnly={readOnly}
         />
       </PanelErrorBoundary>
+      {/* ── 多课程并行总览（RL 区）：每课一行（在训/离线/iter/队列/在飞）+ hub 调度行 ── */}
+      {stateView?.isBc ? null : (
+        <PanelErrorBoundary>
+          <CourseOverview
+            overview={stateView?.overview ?? null}
+            course={viewCourse}
+            onSelectCourse={selectCourse}
+            onAction={doAction}
+          />
+        </PanelErrorBoundary>
+      )}
+      {/* ── 训练调度器（单例，**两区通用**）：每课任务队列 + 「在等什么」——
+           总览卡回答 hub 侧「谁在派活」，本卡回答训练侧「这一轮卡在哪一步」。
+
+           ★ 本卡**不受 `isBc` 门控**（2026-09-19，R3-4）：它是**跨课程**卡（一次列出所有
+           账本可发现的课，每行自带 kind），而 `isBc` 说的是**当前查看的那门课**——用它门控
+           这张卡是范畴错误，后果是「选中一门 BC 课 ⇒ 整张调度器卡片消失」，于是 BC 课在
+           调度器视图里根本不存在（而 BC 课正是需要看「在等哪个 GPU job 回传」的那类）。
+           BC 行与 RL 行并列：行上有 BC 徽标，粒度/指针/在飞各取自自己的账本。 ── */}
+      <PanelErrorBoundary>
+        <LoopQueue
+          loopQueue={stateView?.loopQueue ?? null}
+          course={viewCourse}
+          onSelectCourse={selectCourse}
+          onAction={doAction}
+        />
+      </PanelErrorBoundary>
+      {/* ── push worker 登记（两区通用）：写 rl-config nodes[] + hub 周期探活 ── */}
+      <PanelErrorBoundary>
+        <WorkerRegistry
+          registry={stateView?.workerRegistry ?? null}
+          onAction={doAction}
+          readOnly={readOnly}
+        />
+      </PanelErrorBoundary>
       {/* ── 任务包（导出 task-<课程>.zip / 导入 deliver-<课程>.zip 并评估）：两区通用 ── */}
       <PanelErrorBoundary>
         <TaskBundlePanel course={viewCourse} enabled={documentVisible} readOnly={readOnly} />
@@ -745,7 +781,7 @@ export function App({ initial }: AppProps) {
           modes={stateView.modes}
           onClose={() => setTrainOpen(false)}
           onAction={doAction}
-          onLaunch={(m, push) => void handleLaunch(m, push)}
+          onLaunch={(opts) => void handleLaunch(opts)}
           readOnly={readOnly}
         />
       ) : null}

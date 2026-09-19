@@ -226,7 +226,6 @@ describe('ProcSpec path semantics (dashboard/src/specs.ts, DECISIONS §349 regre
     }
     const spec = trainingLoopSpec(cfg, {
       course: 'spec-path-test',
-      ppo: 'remote',
       venv: { python: 'python', sitePackages: '' },
     })
     expect(spec.cmd[2]).toBe(join(REPO_ROOT, 'nn-training', 'run_rl.py'))

@@ -213,31 +213,16 @@ def main() -> None:
         echo_config(args, course)
         log("[run_rl] --echo-config done — exit")
         return
-    # 多课程 P3-W2：--ppo remote 的 hub URL 按课程回填——`rl.remote_hubs[<stem>]` 优先，
-    # 单键 `rl.remote_hub_url` 回退（Q2；手工 notebook 路径照旧读单键）。course 在 parse
-    # 后才确定，argparse default 填不了，故在这里回填（apply_course 后、validate_args 前）。
-    # 显式 --remote-hub-url 优先（operator 意图压过配置）。
-    # 注：变量名 _hub_course_key（与锁段共用一次推导）；非法 stem 在此即响亮拒启。
+    # 课程名（与锁段共用一次推导；非法 stem 在此即响亮拒启）。
+    #
+    # ❌ 2026-09-18 删掉了“按课程回填 remote_hubs[<stem>]”那段：hub/隧道已收敛为**单**
+    # 实例（一个进程服务所有并行课程、一条隧道指向它），URL 是全局事实 ⇒ 只认单键
+    # `rl.remote_hub_url`（首参数 `--remote-hub-url` 仍可显式压过）。旧的 per-course 键如果
+    # 还被读，就会把训练指向一个**已经不存在的每课隧道**（控制台写的是单键，两边不一致）。
     try:
         _hub_course_key = course_key_from_path(str(getattr(args, "course_path", "") or ""))
     except ValueError as e:
         raise SystemExit(f"[run_rl] {e}") from e
-    if _hub_course_key:
-        import dist_common as _dc_hub
-
-        _hubs = (((_dc_hub.load_dist_config() or {}).get("rl") or {}).get("remote_hubs") or {})
-        _per_course_hub = str(_hubs.get(_hub_course_key) or "")
-        if _per_course_hub:
-            _cli_dft = ap.parse_args([])
-            if str(getattr(args, "remote_hub_url", "") or "") == str(
-                getattr(_cli_dft, "remote_hub_url", "") or ""
-            ):
-                args.remote_hub_url = _per_course_hub
-                log(f"[run_rl] remote_hub_url <= remote_hubs[{_hub_course_key}]（课程隧道）")
-            else:
-                log(
-                    f"[run_rl] 显式 --remote-hub-url 压过 remote_hubs[{_hub_course_key}]（operator 意图优先）"
-                )
     # P1-3（2026-09-02）：启动期配置校验（互斥/范围 fail fast——此前这些错误
     # 要等训练中途才暴露）。课程覆盖后校验（课程值是单一事实来源）。
     # 远程模式（--ppo remote）的 stream/double-buffer 显式互斥判定需要区分
@@ -345,6 +330,8 @@ def main() -> None:
         str(getattr(args, "remote_hub_url", "") or ""),
         str(getattr(args, "remote_token", "") or ""),
         log=log,
+        # 共享 hub（2026-09-18）：只清**本课**的停机态（清全课程会把并行的其它课一起解停）
+        course=_hub_course_key,
     )
 
     # ===== 主循环（rl/loop.py::run_training）=====

@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import dist_common
 from platform_utils import rmtree_best_effort
 from remote.hub_client import set_cloud_halt
 from rl.breaker import (
@@ -31,7 +32,7 @@ from rl.breaker import (
     KL_WARN,
     breaker_update,
 )
-from rl.events import write_circuit_break, write_gate_verdict
+from rl.events import write_circuit_break, write_gate_verdict, write_stop_loss
 from rl.gate_check import (
     BudgetInfo,
     count_iteration_events,
@@ -44,6 +45,13 @@ from rl.gate_check import (
 from rl.log import log
 from rl.stop_loss import eval_sigma, stop_loss_hit
 from rl.workdir_sweep import sweep_failed_wave_dirs
+
+
+def _num_or_none(v: Any) -> float | None:
+    """数值化（bool / 非数值 → None）——**只用于观测字段落账**，绝不参与判定。"""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return float(v)
 
 
 def _is_nonfinite(v: Any) -> bool:
@@ -91,6 +99,23 @@ class TrainingGuards:
     _eval_on_round: Any
     #: 云端停机达令当前置位态（门判决 → set_cloud_halt 联动；重启即复位）。
     _cloud_halted: bool
+    #: R2a 账本视图（`loop_core._setup_common` 建立；缺失时各使用点退化，不阻断训练）。
+    _ledger: Any
+
+    def _ledger_apply(self, event: dict | None) -> None:
+        """把刚写入账本的事件并入本进程的 `LedgerView`（R2a，2026-09-18）。
+
+        视图只在开课/续跑时扫一遍盘（用户 2026-09-18 裁决），之后靠这条增量路径
+        保持同步——于是任何时刻「视图 == 盘上账本」，且没有第二次全文件扫描。
+        视图缺失（老测试直接构造 mixin、未走 `_setup`）时静默跳过：观测永不阻断训练。
+        """
+        view = getattr(self, "_ledger", None)
+        if view is None or not event:
+            return
+        try:
+            view.apply_event(event)
+        except Exception as e:  # 观测量失败不得影响训练主链（同 _gate 的兜底风格）
+            log(f"[run_rl] ledger view advance skipped（{type(e).__name__}: {e}）")
 
     def _breaker(self, it: int) -> bool:
         """F4 熔断 + KL/熵漂移告警（纯逻辑在 rl/breaker.py）。返回 True = 熔断停车。"""
@@ -135,12 +160,14 @@ class TrainingGuards:
             )
             # ds-P1-1：熔断同写 ABORT 判决——lattice 的 ABORT 项不能只有人工
             # override 一条路，否则 notebook/执行面在真正的崩塌场景读不到判决。
-            write_gate_verdict(
-                self._jsonl_path,
-                it,
-                "ABORT",
-                f"circuit-break: {self._tripped}",
-                decider="loop",
+            self._ledger_apply(
+                write_gate_verdict(
+                    self._jsonl_path,
+                    it,
+                    "ABORT",
+                    f"circuit-break: {self._tripped}",
+                    decider="loop",
+                )
             )
             log(f"[run_rl] CRITICAL CIRCUIT-BREAK it{it}: {self._tripped}")
             log(
@@ -168,11 +195,20 @@ class TrainingGuards:
     def _stop_loss(self, it: int, eval_rec) -> bool:
         """止损判定（D4 泛化，仅 intent/goal 生效）：eval_summary 的 Δ（相对 baseline）
         在 stop-loss-at 迭代 ≤ stop-loss-delta → 停车。P1-9：Δ 须统计显著（≤ −2σ）
-        且**连续 2 轮**才停车。返回 True = 停车。"""
+        且**连续 2 轮**才停车。返回 True = 停车。
+
+        R2a：连击的每次**状态转移**落 `stop_loss` 事件（命中 / 从 >0 回落），
+        使「已确认一次」在重启后仍成立——否则重启即归零，白跑一整轮。
+        """
         args = self.args
         if stop_loss_hit(args.mode, args.stop_loss_at, args.stop_loss_delta, it, eval_rec):
             assert eval_rec is not None  # stop_loss_hit 已保证非 None（delta 可读）
             self._stop_loss_streak += 1
+            self._ledger_apply(
+                write_stop_loss(
+                    self._jsonl_path, it, self._stop_loss_streak, _num_or_none(eval_rec.get("delta"))
+                )
+            )
             sigma = eval_sigma(eval_rec)
             log(
                 f"STOP-LOSS: iter{it} clean-eval Δ={eval_rec['delta']:+.4f} "
@@ -180,8 +216,10 @@ class TrainingGuards:
                 f"z·σ={'--' if sigma is None else f'{2.0 * sigma:.4f}'}) "
                 f"streak={self._stop_loss_streak}/2 — waiting for confirmation"
             )
-        else:
+        elif self._stop_loss_streak:
+            # 只在**从 >0 回落**时落账（每轮都写会把账本淹掉；0 → 0 无需记录）。
             self._stop_loss_streak = 0
+            self._ledger_apply(write_stop_loss(self._jsonl_path, it, 0))
         if self._stop_loss_streak >= 2:
             assert eval_rec is not None
             stop_reason = (
@@ -399,6 +437,9 @@ class TrainingGuards:
             token,
             want_halt,
             log=lambda m: log(f"[run_rl] gate it{it}: {m}"),
+            # 共享 hub（2026-09-18）：达令必须按课程下发——本课门禁 ABORT 只停本课云机，
+            # 否则并行训练的其它课程会跟着被停。课程身份就是进程级那个（apply_course 挂上）。
+            course=dist_common.course_name_of(),
         )
         self._cloud_halted = want_halt
 
@@ -436,16 +477,18 @@ class TrainingGuards:
         （记录日志，绝不带病停车）。
         """
         try:
-            write_gate_verdict(
-                self._jsonl_path,
-                it,
-                res.verdict,
-                res.reason,
-                route=res.route,
-                readings=[r.to_dict() for r in res.readings],
-                override=dict(res.override) if res.override else None,
-                seeds=res.seeds,
-                decider="loop",
+            self._ledger_apply(
+                write_gate_verdict(
+                    self._jsonl_path,
+                    it,
+                    res.verdict,
+                    res.reason,
+                    route=res.route,
+                    readings=[r.to_dict() for r in res.readings],
+                    override=dict(res.override) if res.override else None,
+                    seeds=res.seeds,
+                    decider="loop",
+                )
             )
         except OSError as e:
             log(f"[run_rl] gate it{it}: gate_verdict 落盘失败（{e}）— 记录缺失，继续训练")
@@ -462,13 +505,15 @@ class TrainingGuards:
             limit = int(getattr(self.args, "gate_remediate_stop_after", 4) or 0)
             if 0 < limit <= self._soft_remediate_count:
                 try:
-                    write_gate_verdict(
-                        self._jsonl_path,
-                        it,
-                        "ABORT",
-                        f"提示类门 REMEDIATE 已 {self._soft_remediate_count} 次（≥{limit}）"
-                        "——边际收益枯竭确认，停腿（I2）",
-                        decider="loop",
+                    self._ledger_apply(
+                        write_gate_verdict(
+                            self._jsonl_path,
+                            it,
+                            "ABORT",
+                            f"提示类门 REMEDIATE 已 {self._soft_remediate_count} 次（≥{limit}）"
+                            "——边际收益枯竭确认，停腿（I2）",
+                            decider="loop",
+                        )
                     )
                 except OSError as e:
                     log(f"[run_rl] gate it{it}: ABORT 落盘失败（{e}）")

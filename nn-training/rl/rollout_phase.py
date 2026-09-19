@@ -27,6 +27,57 @@ from rl.resume import completed_pairs
 from rl.stream import run_rollout_stream
 
 
+def precollect_min_wave() -> int:
+    """预采「半波即可开训」的 shard 数（`policy.streamWaveGames` 的一半，下限 4）。
+
+    抽成函数是为了让**步骤内部循环**与**调度器让位判据**（`precollect_ready`）用同一个数：
+    两个口径分叉的症状是「调度器说可以开训、步骤进去却还在轮询」（或反之），极难排查。
+    """
+    import dist_common
+
+    cfg = dist_common.load_dist_config() or {}
+    wave = max(4, int((cfg.get("policy") or {}).get("streamWaveGames", 12)))
+    return max(4, wave // 2)
+
+
+def precollect_progress(
+    traj_root: Path, it: int, args, course_fp: str | None = None
+) -> int:
+    """本轮预采已完整落盘的 shard 数（**只读盘，不 join 子进程，不睡**）。
+
+    `wver` / `extra_wver` 口径与 `join_precollect_child` 完全一致（双白名单）：
+    当前活指针 θ_N + 预采快照 θ_{N,e3}，否则首波会被当成「未完成」重新派发。
+    """
+    import dist_common
+
+    wver = dist_common.weights_fingerprint(args.out)
+    extra_wver = precollect_snapshot_wver(args.out, it)
+    done = completed_pairs(
+        traj_root / f"it{it}", wver, extra_wver=extra_wver, course_fp=course_fp
+    )
+    return len(done)
+
+
+def precollect_ready(
+    child: subprocess.Popen | None,
+    traj_root: Path,
+    it: int,
+    args,
+    course_fp: str | None = None,
+) -> bool:
+    """预采是否**已经可以开训**（非阻塞判据；R2c-3 的让位入口）。
+
+    三种情况都算「不必再等」：句柄为空（本轮没有预采这件事）/ 子进程已退出 /
+    就绪 shard 已达半波。**与 `join_precollect_child` 的循环条件同源**（后者改成调它），
+    所以「调度器认为可以往下走」与「步骤进去真的不阻塞」不可能分叉。
+    """
+    if child is None:
+        return True
+    if child.poll() is not None:
+        return True
+    return precollect_progress(traj_root, it, args, course_fp=course_fp) >= precollect_min_wave()
+
+
 def join_precollect_child(
     child: subprocess.Popen | None,
     traj_root: Path,
@@ -40,34 +91,25 @@ def join_precollect_child(
     拖慢、主进程空等。子进程在后台继续产出剩余 shard，run_rollout_queue 的
     completed_pairs 会跳过已落盘局。返回始终为 None——句柄本轮已消费
     （超时 terminate / 正常退出），下一轮的新句柄由 spawn_next_collect 建立。
+
+    就绪判据在 `precollect_ready`（单进程调度器问的是同一个函数 ⇒ 它不会让位到一半
+    又被本循环卡住）。
     """
     if child is None:
         return None
-    import dist_common
-
-    _pre_traj_dir = traj_root / f"it{it}"
-    # wver/extra_wver 需在子进程退出前算出才能匹配预采 shard
-    _pre_wver = dist_common.weights_fingerprint(args.out)
-    _pre_extra_wver = precollect_snapshot_wver(args.out, it)
-    _pre_cfg = dist_common.load_dist_config() or {}
-    _pre_policy = _pre_cfg.get("policy", {})
-    _pre_wave = max(4, int(_pre_policy.get("streamWaveGames", 12)))
-    _pre_min_wave = max(4, _pre_wave // 2)  # 半波即可开训
+    _pre_min_wave = precollect_min_wave()
     _pre_deadline = time.time() + 3600
     _pre_ready = False
     while time.time() < _pre_deadline:
-        _pre_done = completed_pairs(
-            _pre_traj_dir, _pre_wver, extra_wver=_pre_extra_wver, course_fp=course_fp
-        )
-        if len(_pre_done) >= _pre_min_wave:
-            log(
-                f"[double-buffer] precollect it{it}: {len(_pre_done)} shards ready "
-                f"(≥{_pre_min_wave}), proceeding before subprocess exit"
-            )
-            _pre_ready = True
-            break
-        if child.poll() is not None:
-            log(f"[double-buffer] precollect it{it} done rc={child.returncode}")
+        if precollect_ready(child, traj_root, it, args, course_fp=course_fp):
+            if child.poll() is None:
+                _pre_done = precollect_progress(traj_root, it, args, course_fp=course_fp)
+                log(
+                    f"[double-buffer] precollect it{it}: {_pre_done} shards ready "
+                    f"(≥{_pre_min_wave}), proceeding before subprocess exit"
+                )
+            else:
+                log(f"[double-buffer] precollect it{it} done rc={child.returncode}")
             _pre_ready = True
             break
         time.sleep(2)

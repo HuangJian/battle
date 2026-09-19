@@ -20,6 +20,7 @@
  *    console-state   控制台状态读写            |  nodes  节点配置回写
  *    cloud-halt      云端停机与恢复            |  labels  标签与锁查询
  *    train-smoke     推送链路预演              |  restart  变更检测重启
+ *    workers         GPU push worker 登记（回写 rl-config）
  */
 
 // ── facade 再导出（原 actions.ts 第 22 行的转发；调用方零改动）──
@@ -29,11 +30,14 @@ export { resolveCourseBc } from '../../stack/courses'
 export * from './result'
 export * from './console-state'
 export * from './cloud-halt'
+export * from './course-mode'
+export * from './loop-control'
 export * from './labels'
 export * from './start'
 export * from './stop'
 export * from './smoke'
 export * from './preset'
 export * from './nodes'
+export * from './workers'
 export * from './train-smoke'
 export * from './restart'

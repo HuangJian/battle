@@ -7,7 +7,9 @@
 # 的是同一套门禁，不会出现"hook 严、日常松"的漂移。
 #
 # 并行架构（v3.15 2026-09-03；v3.16 2026-09-15 起 pytest 目标含 e2e/；
-# v3.17 2026-09-17 起 worker 数 × 线程数按实测重调，见下节）：
+# v3.17 2026-09-17 起 worker 数 × 线程数按实测重调，见下节；
+# v3.18 2026-09-20 起双向路径改按「python 是不是 Windows 二进制」判定，
+# 不再只看 wslpath 存不存在，见下方「双向路径」一节）：
 #   ruff(~1s) / mypy(~4s 热缓存) / pytest xdist 全量 三路并行。
 #   全量 = tests/（单测层）+ e2e/（集成层）。**两层同一次 xdist 调用**：实测（16 核）
 #   tests/ 22s → tests/+e2e/ 27s，只 +5s（另外单跑一次要重复付 torch import 与
@@ -97,32 +99,51 @@ fi
 # —— bash 不认 `D:/...` 盘符路径，`[ -x ]`/exec 一律失败；**塞进 python argv 的用 Win32
 # 正斜杠形式**（`D:/...`）——Windows python 的 open/subprocess.CreateProcess 不认
 # /mnt/d/...（MSYS 分支两者通用：MSYS 层自动双向映射 /d/ 路径）。
+#
+# ⚠ **要不要 Win32 形态，唯一判据是「选中的 python 是不是 Windows 二进制」**，
+# 与 uname / wslpath 存不存在无关（2026-09-20 事故：容器是 WSL2 内核 + 原生 Linux venv，
+# 而 /usr/bin/wslpath 把仓库路径映射成 `//wsl.localhost/opencode/…` —— 一个**只有
+# Windows 侧**能读的 UNC 命名空间；原生 python 拿到它当场
+# `can't open file '//wsl.localhost/.../detach-run.py'`，门禁 0s 假红）。旧版只问
+# 「wslpath 可用吗」，就把用不到、也不需要 Win32 形态的原生 python 喂了 UNC 路径。
+# 同款判据在 nn-py-safe.sh 里早已写明（`case "$PY_BIN" in *.exe)`）。
 # 取基准目录：
 #   · PWD：POSIX（pwd），shell 侧一律用它；
-#   · PWD_WIN：pwd -W 可用（MSYS/MINGW/CYGWIN）→ 同 PWD（MSYS 层映射）；
+#   · PWD_WIN：**仅当 NN_PY 是 `.exe`（Windows 二进制）才求**：
+#     pwd -W 可用（MSYS/MINGW/CYGWIN）→ **显式 `pwd -W` 求 Win32 正斜杠形态（D:/...）**；
+#       ⚠ 2026-09-20 修正：旧版这里是「同 PWD（MSYS 层映射）」——即继续用 POSIX 的
+#       `/d/...`。实测那条捷径不成立：Windows python 拿到 `/d/...` 会当**相对路径**，
+#       拼上 cwd 变成 `D:\d\github\...`，detach 启动秒退、门禁 0s 假红。MSYS 的双向映射
+#       只在它自己 exec 的路径上生效，**塞进 detach argv 的串不保证被转换** ⇒ 显式求
+#       Win32 形态最稳（且与下面 wslpath -m 分支同形态：正斜杠）。
 #     wslpath 可用（WSL，uname=Linux + /mnt 挂载）→ wslpath -m（**正斜杠**混合路径，
 #     与 MSYS pwd -W 同形态；不能用 -w 反斜杠输出，下游 dirname 只认 /）；
-#     都不可用（原生 Linux，python 也是原生二进制）→ 同 PWD。
+#     都不可用 → 同 PWD（无 Windows python 的环境不该走到这里，保守取 POSIX）；
+#     原生 Linux/macOS python（.venv/bin/python）→ **一律不转换**，POSIX 本就是它认的形态。
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-SCRIPT_DIR_WIN=$SCRIPT_DIR
-if pwd -W >/dev/null 2>&1; then
-  :
-elif command -v wslpath >/dev/null 2>&1; then
-  SCRIPT_DIR_WIN=$(wslpath -m "$SCRIPT_DIR")
-fi
 REPO_ROOT=$(dirname -- "$(dirname -- "$SCRIPT_DIR")")
-REPO_ROOT_WIN=$(dirname -- "$(dirname -- "$SCRIPT_DIR_WIN")")
 NN_ROOT="$REPO_ROOT/nn-training"
-NN_ROOT_WIN="$REPO_ROOT_WIN/nn-training"
 
 if [ -x "$NN_ROOT/.venv/Scripts/python.exe" ]; then
   NN_PY="$NN_ROOT/.venv/Scripts/python.exe"
   # bash 直连执行用 POSIX（NN_PY）；塞进 detach/shell 子进程 argv 的用 Win32（NN_PY_WIN）。
-  # WSL 下二者不同（/mnt/d/... vs D:/...）；MSYS/原生 Linux 下相同。
+  # WSL 下二者不同（/mnt/d/... vs D:/...）；MSYS 下相同。
+  SCRIPT_DIR_WIN=$SCRIPT_DIR
+  if pwd -W >/dev/null 2>&1; then
+    # ⚠ 不能沿用 POSIX 的 SCRIPT_DIR（理由见上方「双向路径」注释）：显式求 Win32 形态。
+    SCRIPT_DIR_WIN=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -W)
+  elif command -v wslpath >/dev/null 2>&1; then
+    SCRIPT_DIR_WIN=$(wslpath -m "$SCRIPT_DIR")
+  fi
+  REPO_ROOT_WIN=$(dirname -- "$(dirname -- "$SCRIPT_DIR_WIN")")
+  NN_ROOT_WIN="$REPO_ROOT_WIN/nn-training"
   NN_PY_WIN="$NN_ROOT_WIN/.venv/Scripts/python.exe"
 elif [ -x "$NN_ROOT/.venv/bin/python" ]; then
+  # 原生（Linux/macOS）python：argv 里的 POSIX 路径正确原样透传（理由见上）。
   NN_PY="$NN_ROOT/.venv/bin/python"
-  NN_PY_WIN="$NN_ROOT_WIN/.venv/bin/python"
+  REPO_ROOT_WIN=$REPO_ROOT
+  NN_ROOT_WIN="$REPO_ROOT_WIN/nn-training"
+  NN_PY_WIN=$NN_PY
 else
   echo "✗ nn-training/.venv 不存在（$NN_ROOT/.venv）——请先 python -m venv .venv && pip install -r requirements.txt" >&2
   exit 1

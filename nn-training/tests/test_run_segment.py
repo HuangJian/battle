@@ -29,8 +29,15 @@ if str(ROOT) not in sys.path:
 
 from remote.hub_client import HubClientError, publish_job
 from remote.protocol import PLAN_NAME, TS_CODE_NAME, unpack_payload
+from rl.cli import build_argparser
 from rl.iter_job import build_iter_spec
-from rl.loop_steps import RUN_WAIT_DEFAULT_SEC, _run_segment_iters, _run_wait_sec
+from rl.loop_steps import (
+    ROLLOUT_SRCS,
+    RUN_WAIT_DEFAULT_SEC,
+    _rollout_source,
+    _run_segment_iters,
+    _run_wait_sec,
+)
 from rl.plan import build_plan, dump_plan, planned_iters
 
 
@@ -89,6 +96,32 @@ def test_segment_iters_reads_course_then_rl() -> None:
         assert _run_segment_iters(_args(course_path="curricula/x1.jsonc")) == 3
         dc.load_dist_config.side_effect = OSError("no cfg")
         assert _run_segment_iters(_args(course_path="curricula/x1.jsonc")) == 0
+
+
+def test_rollout_src_run_is_a_declared_source() -> None:
+    """`run`（离线模式的机器侧写法）必须在来源枚举里——否则配置被静默读成 `local`。
+
+    这正是「云机在跑」与「本机在跑」看起来一样的那类静默分叉：`_rollout_source` 对**未知**
+    值一律回落 local（历史容忍），所以枚举少一个值 = 配置项静默失效。
+    """
+    assert "run" in ROLLOUT_SRCS
+    assert _rollout_source(_args(rollout_src="run")) == "run"
+    assert _rollout_source(_args(rollout_src="node")) == "node"
+    # 显式 CLI 给了垃圾值 ⇒ 响亮拒跑（不许静默退化）
+    with pytest.raises(SystemExit, match="未知 --rollout-src"):
+        _rollout_source(_args(rollout_src="cloud"))
+    # 配置里给了垃圾值 ⇒ 容忍成 local（旧行为逐字节不变：配置写错不该炸训练）
+    with patch("rl.loop_steps.dist_common") as dc:
+        dc.load_dist_config.return_value = {"courses": {"x1": {"rollout_src": "cloud"}}}
+        assert _rollout_source(_args(rollout_src="auto", course_path="curricula/x1.jsonc")) == "local"
+
+
+def test_cli_accepts_rollout_src_run() -> None:
+    """命令行也必须收 `run`（argparse choices 与 ROLLOUT_SRCS 同源；否则控制台写了就拒启）。"""
+    ns = build_argparser("rl", {}).parse_args(["--rollout-src", "run"])
+    assert ns.rollout_src == "run"
+    with pytest.raises(SystemExit):
+        build_argparser("rl", {}).parse_args(["--rollout-src", "cloud"])
 
 
 def test_segment_wait_sec_default_and_override() -> None:

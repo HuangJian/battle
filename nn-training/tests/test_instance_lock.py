@@ -26,6 +26,12 @@ NN_TRAINING = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(NN_TRAINING))
 
 from remote import _instance_lock as il
+from tests.subproc_util import (
+    PORT_TAKEN_MARKER,
+    PortStolenError,
+    retry_on_port_stolen,
+    spawn_bound_port,
+)
 
 # ────────────────────────── 单元：取锁 / 释放 ──────────────────────────
 
@@ -178,14 +184,16 @@ def test_unwritable_lock_fails_open(
 
 
 def test_real_second_instance_refused_by_lock(tmp_path: Path) -> None:
-    port = _free_port()
     lock = tmp_path / ".hub_server.lock"
+    # 端口竞态由 helper 消化：它只在**这个子进程**自报 listening 后才交出端口，
+    # 否则换端口重试（裸「探端口 → 起子进程」在 xdist 并行下会撞「禁止双监听」→ 假红）
+    first = spawn_bound_port(
+        lambda port: _hub_argv(port, lock, tmp_path), cwd=str(NN_TRAINING)
+    )
+    port, p1 = first.port, first.proc
     argv = _hub_argv(port, lock, tmp_path)
-    log1 = tmp_path / "first.log"
-    with open(log1, "w", encoding="utf-8") as f:
-        p1 = subprocess.Popen(argv, cwd=str(NN_TRAINING), stdout=f, stderr=subprocess.STDOUT)
     try:
-        assert _wait_ready(port, lock, p1, log1), f"第一实例未就绪：{_tail(log1)}"
+        assert _wait_ready(port, lock, p1, None), f"第一实例未就绪：{first.tail()}"
 
         # 定位明确用 bytes + 显式 utf-8 解码（AGENTS §17.6）：本机用户级
         # `PYTHONIOENCODING=UTF-8` 让子进程写 UTF-8，而 `text=True` 会按控制台代码页
@@ -205,28 +213,38 @@ def test_simultaneous_starts_leave_exactly_one_instance(tmp_path: Path) -> None:
 
     这正是端口守卫**单独**挡不住的窗口（探测都能过、Windows 还能双绑成僵尸）；
     锁把它关掉：任一道闸拦下都是响亮拒启，不会有静默共存者。
+
+    三个进程必须抢**同一个**端口，所以用不了 `spawn_bound_port`（它只起一个）；端口若在
+    探测后被外人抢走，三个都会死在端口守卫上（输出带 `PORT_TAKEN_MARKER`）——那不是被测
+    行为不对，而是场景作废 ⇒ 抛 `PortStolenError` 让 `retry_on_port_stolen` 换端口重跑。
     """
-    port = _free_port()
     lock = tmp_path / ".hub_server.lock"
-    argv = _hub_argv(port, lock, tmp_path)
-    procs: list[tuple[subprocess.Popen, Path]] = []
-    for i in range(3):
-        log = tmp_path / f"boot{i}.log"
-        with open(log, "w", encoding="utf-8") as f:
-            procs.append((subprocess.Popen(argv, cwd=str(NN_TRAINING), stdout=f, stderr=subprocess.STDOUT), log))
-    try:
+
+    def scenario(port: int) -> tuple[int, int, list[tuple[subprocess.Popen, Path]]]:
+        argv = _hub_argv(port, lock, tmp_path)
+        procs: list[tuple[subprocess.Popen, Path]] = []
+        for i in range(3):
+            log = tmp_path / f"boot{i}.log"
+            with open(log, "w", encoding="utf-8") as f:
+                procs.append(
+                    (subprocess.Popen(argv, cwd=str(NN_TRAINING), stdout=f, stderr=subprocess.STDOUT), log)
+                )
         deadline = time.time() + 30
-        alive = 3
+        alive = len(procs)
         while time.time() < deadline:
             alive = sum(1 for p, _ in procs if p.poll() is None)
-            if alive == 1:
+            if alive <= 1:
                 break
-            if alive == 0:
-                raise AssertionError(
-                    "三启全灭——锁/端口守卫把唯一实例也拒了: "
-                    + "; ".join(_tail(lg) for _, lg in procs)
-                )
             time.sleep(0.3)
+        if alive == 0:
+            outs = "; ".join(_tail(lg) for _, lg in procs)
+            if PORT_TAKEN_MARKER in outs:  # 端口被外人抢走 ⇒ 场景作废，换个端口重跑
+                raise PortStolenError(outs)
+            raise AssertionError(f"三启全灭——锁/端口守卫把唯一实例也拒了: {outs}")
+        return port, alive, procs
+
+    port, alive, procs = retry_on_port_stolen(scenario)
+    try:
         assert alive == 1, f"必须恰好一个实例存活，实际 {alive}（静默双监听机会）"
         assert _wait_ready(port, lock, None, None), "存活的那个必须真的在服务"
         # 落败者非零退出（响亮失败，绝不静默变僵尸）
@@ -263,12 +281,6 @@ def _hub_argv(port: int, lock: Path, tmp_path: Path) -> list[str]:
         "--lock-file",
         str(lock),
     ]
-
-
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
 
 
 def _ping_ok(port: int, token: str = "t0k", timeout: float = 2.0) -> bool:

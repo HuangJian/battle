@@ -12,7 +12,6 @@ export const COMPONENT_LABELS: Record<Component, string> = {
   cloudflared: 'cloudflared (入站隧道)',
   localWorker: 'local-worker (本机 PPO worker)',
   trainingLoop: 'TrainingLoop (trainer)',
-  workerServe: 'worker_server (本机伪 GPU 节点)',
 }
 
 export function tailLines(p: string, n = 8): string[] {

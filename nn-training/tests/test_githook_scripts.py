@@ -23,6 +23,15 @@
    which() 决定 skip 会让门禁在任何这类终端里**恒红**，把真回归淹掉。skip 条件改为
    **真起一次 `bash -c "exit 0"` 探测**。
 
+6. **双向路径的转换判据是「python 是不是 Windows 二进制」，不是「wslpath 存不存在」**
+   （2026-09-20 事故）。写好 WSL 支持的那次只问了「`command -v wslpath` 通不通」，
+   而容器里恰好是 **WSL2 内核 + 原生 Linux venv + 一个把仓库路径映射到
+   `//wsl.localhost/<distro>/…` 的 wslpath** —— 那是个**只有 Windows 侧**能读的 UNC
+   命名空间；原生 python 拿到它当场 `can't open file '//wsl.localhost/.../detach-run.py'`，
+   门禁 **0s 假红**（`✗ nn-python-gate 失败且无法按文件归因`）。判据同 `nn-py-safe.sh`
+   的 `case "$PY_BIN" in *.exe)`；本文件静态钉住转换的所在分支，并用
+   `test_gate_keeps_native_paths_when_wslpath_maps_elsewhere` 真起一次假仓库骨架复现事故。
+
 5. **门禁的并行旋钮必须「worker 数 × CPU 内线程数」一起调**（2026-09-17 实测）。旧默认
    `-n 4` + torch 默认内线程（= 物理核）⇒ 4 worker × 16 线程抢 16 核，全量 36.3s；
    只加 worker 更慢（-n 12 默认线程 = 44.7s），封到 1 线程后 -n 12 = 24.7s（与 -n 8/16
@@ -33,6 +42,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -50,6 +60,18 @@ TASK_PY = NN_ROOT / "task.py"
 _TIMEOUT_VALUE = re.compile(r"(?:--timeout|NN_PYTEST_TIMEOUT_S[:=])\D*(\d+)")
 #: 合理上界（秒）：本仓最慢单测实测 22s；>10 分钟就不是「护栏」而是摆设。
 _MAX_TIMEOUT_S = 600
+
+
+def _msys(p: Path) -> str:
+    """MSYS bash 里的路径形态：`D:/github/battle2` → `/d/github/battle2`。
+
+    门禁/包装器都跑在 MSYS bash 下，脚本里 `pwd`/`dirname` 给出的就是这种形式；而
+    `str(Path(...))` 在 Windows 上是反斜杠 + 盘符（`D:\\github\\...`）⇒ 直接拿它去
+    bash 的输出里比对**永远找不到**（2026-09-20）。原生 Linux 上没有盘符，原样返回。
+    """
+    s = p.as_posix()
+    m = re.match(r"^([A-Za-z]):/(.*)$", s)
+    return f"/{m.group(1).lower()}/{m.group(2)}" if m else s
 
 
 def _bash_usable() -> bool:
@@ -191,6 +213,108 @@ def test_gate_caps_intraop_threads() -> None:
     assert 1 <= int(m.group(1)) <= 4, (
         f"NN_GATE_THREADS 默认 {m.group(1)} 不合理：实测 1 最优（0 才是「不设」，别用大数做默认）"
     )
+
+
+def test_gate_only_converts_paths_for_windows_python() -> None:
+    """路径转换必须**限定在「选中 Windows python」的分支内**（模块 docstring 第 6 条）。
+
+    转换本身要留着（Windows python 在 WSL 下确实需要 `D:/...`），但它不能出现在分支外
+    ——分支外无条件转换 = 给原生 python 喂 UNC/盘符形态，直接开不了文件（2026-09-20 事故）。
+    """
+    code = _gate_code()
+    idx = code.find("wslpath -m")
+    assert idx != -1, "Windows python 在 WSL 下的 wslpath 转换被删了？"
+    assert "Scripts/python.exe" in code[:idx], (
+        "wslpath 转换必须在「选中 .venv/Scripts/python.exe」的分支内——放在分支外无条件转换，"
+        "原生 Linux venv 的 argv 也会被换成 Win32/UNC 形态（2026-09-20 门禁 0s 假红）"
+    )
+    assert re.search(r"NN_PY_WIN=\$NN_PY\b", code), (
+        "原生 python 分支必须直通（NN_PY_WIN=$NN_PY）——POSIX 路径本就是它认的形态"
+    )
+
+
+@no_bash
+def test_gate_keeps_native_paths_when_wslpath_maps_elsewhere(tmp_path: Path) -> None:
+    """回归：wslpath 映射到「Linux 侧读不到」的命名空间时，原生 python 必须拿到 POSIX 路径。
+
+    复现 2026-09-20 事故的**最小骨架**：假仓库（只有 `nn-training/.venv/bin/python`，
+    没有 `Scripts/python.exe`）+ PATH 前置一个模拟本容器行为的假 wslpath（输出
+    `//wsl.localhost/<distro>/…`）。旧版门禁把 detach-run.py 的路径换成该 UNC 路径，
+    原生 python 开不了 ⇒ 假 `python` 记下的 argv 里就能看到证据；修正后应全程 POSIX。
+    """
+    skel = tmp_path / "skel"
+    hook_dir = skel / "tools" / "githook"
+    hook_dir.mkdir(parents=True)
+    shutil.copy(GATE, hook_dir / GATE.name)
+
+    # 假 python：把每次调用的 argv 记下来再 exit 0（门禁的三路工具、核数探测、detach 全走它）。
+    # newline="\n" 必须写死：Windows 上 write_text 默认把 \n 译成 \r\n，shebang 变成
+    # `#!/bin/sh\r` ⇒ WSL/bash 报「cannot execute: required file not found」（2026-09-20）。
+    argv_log = tmp_path / "argv.log"
+    argv_log_posix = _bash_path(argv_log)
+    fake_py = skel / "nn-training" / ".venv" / "bin" / "python"
+    fake_py.parent.mkdir(parents=True)
+    fake_py.write_text(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$ARGV_LOG\"\nexit 0\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    fake_py.chmod(0o755)
+
+    # 假 wslpath：模仿本容器 /usr/bin/wslpath 的映射（只有 Windows 侧能读的 UNC）。
+    stub_bin = tmp_path / "stub-bin"
+    stub_bin.mkdir()
+    stub_wslpath = stub_bin / "wslpath"
+    stub_wslpath.write_text(
+        "#!/bin/sh\nlast=\nfor a in \"$@\"; do last=$a; done\n"
+        "printf '//wsl.localhost/opencode%s\\n' \"$last\"\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    stub_wslpath.chmod(0o755)
+
+    # Windows Python → WSL bash 的 subprocess env **不可靠**（实测自定义变量一律空，
+    # 2026-09-20）：PATH/ARGV_LOG 必须在 bash 进程内 export，否则假 python 的
+    # `>> "$ARGV_LOG"` 变成 `>> ""`（Directory nonexistent）且 stub wslpath 不在 PATH。
+    wrapper = tmp_path / "run-gate.sh"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        f"export PATH='{_bash_path(stub_bin)}':\"$PATH\"\n"
+        f"export ARGV_LOG='{argv_log_posix}'\n"
+        "export NN_GATE_SKIP=ruff,mypy\n"
+        "export PYTHONUTF8=1\n"
+        f"cd '{_bash_path(skel)}'\n"
+        f"exec bash '{_bash_path(hook_dir / GATE.name)}'\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    wrapper.chmod(0o755)
+
+    proc = subprocess.run(
+        ["bash", _bash_path(wrapper)],
+        cwd=skel,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
+    assert proc.returncode == 0, (
+        f"门禁骨架应跑通（rc=0）\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    calls = argv_log.read_text(encoding="utf-8").splitlines()
+    detach = next((ln for ln in calls if "detach-run.py" in ln), None)
+    assert detach is not None, f"没看到 detach 启动（python argv 记录：{calls}）"
+    assert "wsl.localhost" not in detach, (
+        "原生 python 的 argv 里出现了只读得到 Windows 侧的 UNC 路径——路径转换没有按"
+        f"「python 是不是 Windows 二进制」判定（2026-09-20 事故回归）\n{detach}"
+    )
+    # WSL 下 `pwd` 是 /mnt/d/...；MSYS 下是 /d/...。`/d/...` 是 `/mnt/d/...` 的子串，
+    # 故 _msys() 形态在两种 bash 下都能命中（见 _msys docstring）。
+    assert _msys(hook_dir / "detach-run.py") in detach, (
+        f"detach 脚本路径应是骨架内的 POSIX 绝对路径\n{_msys(hook_dir / 'detach-run.py')}\n{detach}"
+    )
+    assert _msys(fake_py) in detach, f"detach 内层 argv[0] 应是原生 python 的 POSIX 路径\n{detach}"
 
 
 def test_gate_worker_count_scales_with_cores() -> None:

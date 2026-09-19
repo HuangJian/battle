@@ -33,15 +33,7 @@ from remote.push_bootstrap import (
     start_bootstrap_server,
     tail_text_lines,
 )
-
-
-def _free_port() -> int:
-    s = socket.socket()
-    try:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-    finally:
-        s.close()
+from tests.subproc_util import free_port
 
 
 def _running_bootstrap(port: int, tmp_path: Path):
@@ -58,7 +50,7 @@ def test_teardown_closes_listening_socket(tmp_path: Path) -> None:
     变 -1）。所以判「已关闭」要看 `fileno()`。只调 `shutdown()` 时套接字仍开着
     （`fileno() >= 0`）⇒ 端口没释放 ⇒ 本断言红。
     """
-    srv = _running_bootstrap(_free_port(), tmp_path)
+    srv = _running_bootstrap(free_port(), tmp_path)
 
     close_bootstrap_server(srv)
 
@@ -72,7 +64,7 @@ def test_port_free_for_next_bind_after_teardown(tmp_path: Path) -> None:
     新 socket 刻意**不设** SO_REUSEADDR：Windows 上「双 SO_REUSEADDR」才允许抢占，
     不设即能在两个平台上都正确判出「端口还被占着」。
     """
-    port = _free_port()
+    port = free_port()
     srv = _running_bootstrap(port, tmp_path)
 
     close_bootstrap_server(srv)

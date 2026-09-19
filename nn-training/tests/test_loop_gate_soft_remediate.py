@@ -64,7 +64,9 @@ def _res(verdict: str, readings: tuple) -> SimpleNamespace:
 def halt_calls(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
     calls: list[bool] = []
 
-    def _fake_set(hub: str, token: str, halt: bool, log=None) -> bool:
+    # `course`（2026-09-18）：共享 hub 上达令按课程下发——本文件只数 halt 序列，
+    # 课程身份的专测住 tests/test_loop_gate_nopark.py。
+    def _fake_set(hub: str, token: str, halt: bool, log=None, course="") -> bool:
         calls.append(halt)
         return True
 

@@ -78,7 +78,11 @@ describe('console 局域网只读边界（§…：LAN 查看 / localhost 控制�
     expect(app).toContain('storedInterval()')
   })
 
-  it('课程 select：局域网只读下 hub 运行也不禁用（可切查看课程）；本机 hub 运行才锁定', async () => {
+  it('课程 select：hub 运行中恒不禁用（单 hub 多课程——切课程只改查看目标）', async () => {
+    // 2026-09-18 语义变更（原用例断言「本机 hub 运行中锁定」）：hub 已是一个进程托管 N 份
+    // 账本的多课程调度器，进程级状态不再与「操作员在看哪门课」绑定——旧锁定保护（§367，
+    // 当时 hub 按课程建 jobRoot/日志目录）已无对象；多课程并行下它反倒会把查看/切换锁死
+    // （看不到其它在训课程）。故断言改为「任何来源、任何 hub 状态下都可用」。
     const base = await api.buildStateView()
     // hubServer 强制 running（hub 运行 = 在途训练状态）
     const mk = (readOnly: boolean): ConsoleStateView => ({
@@ -90,14 +94,33 @@ describe('console 局域网只读边界（§…：LAN 查看 / localhost 控制�
     })
     const selTag = (html: string): string =>
       html.match(/<select[^>]*id="courseSel"[^>]*>/)?.[0] ?? ''
-    // 局域网只读：hub 运行中 select 仍可用（切换仅影响查看），无锁定提示
-    const roSel = selTag(render.renderConsolePage(mk(true)))
-    expect(roSel).not.toContain('disabled')
-    expect(render.renderConsolePage(mk(true))).not.toContain('hub 运行中，课程已锁定')
-    // 本机：hub 运行中 select 锁定（原语义保留）
-    const rwSel = selTag(render.renderConsolePage(mk(false)))
-    expect(rwSel).toContain('disabled')
-    expect(render.renderConsolePage(mk(false))).toContain('hub 运行中，课程已锁定')
+    for (const readOnly of [true, false]) {
+      const sel = selTag(render.renderConsolePage(mk(readOnly)))
+      expect(sel).toContain('id="courseSel"') // 守卫：正则真匹配到 select（防空跑）
+      expect(sel).not.toContain('disabled')
+      expect(render.renderConsolePage(mk(readOnly))).not.toContain('hub 运行中，课程已锁定')
+    }
+  })
+
+  it('课程 select：所有在训课程在选项里高亮（🔥 + （正在训练）），不止第一门', async () => {
+    const base = await api.buildStateView()
+    const view2: ConsoleStateView = {
+      ...base,
+      course: 'viewB',
+      courses: ['a', 'viewB', 'b'],
+      trainingCourses: ['b', 'a'], // 服务端 stamp：在训多门（按名排序）
+    }
+    const html = render.renderConsolePage(view2)
+    for (const c of ['a', 'b']) {
+      expect(html).toContain(`🔥 ${c}（正在训练）`)
+    }
+    expect(html).not.toContain('🔥 viewB')
+    // 查看课程不是任一门在训 → 标签列出全部在训课程
+    expect(html).toContain('正在训练：b、a')
+    // 查看课程恰是其中一门 → 标签只提醒「别处还在跑」（正在看的那门由 🔥 标记）
+    const same = render.renderConsolePage({ ...view2, course: 'a' })
+    expect(same).toContain('正在训练：b')
+    expect(same).not.toContain('正在训练：b、a')
   })
 
   it('训练中课程标签：trainingLoop 运行且课程 ≠ 查看课程时，select 后高亮「正在训练：<课程>」', async () => {

@@ -2,13 +2,25 @@
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'fs'
 import path from 'path'
 import { loadConfig } from '../../core/config'
-import { NN_TRAINING, REPO_ROOT } from '../../core/paths'
-import type { CfEdgeIp, CfProtocol, Component, RolloutSrcMode, SlimMode } from '../../core/types'
+import { NN_TRAINING, REPO_ROOT, loopControlPath } from '../../core/paths'
+import type {
+  CfEdgeIp,
+  CfProtocol,
+  Component,
+  RolloutSrcMode,
+  SlimMode,
+  TrainMode,
+} from '../../core/types'
 import {
   ActionError,
   type ActionResult,
   busy,
   markCloudHaltRecovered,
+  registerPushWorker,
+  reloadPushWorkers,
+  removePushWorker,
+  setCourseMode,
+  setCoursePaused,
   setMode,
   setNodeConcurrency,
   setNodeEnabled,
@@ -91,9 +103,9 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
       case 'smokeTrain':
         return okResp(await smokeTrain(ctx.course))
       case 'preset': {
-        const mode = bodyStr(body, 'mode')
-        if (!['pull', 'push', 'local'].includes(mode)) return errResp(`未知预设: ${mode}`, 400)
-        // M1：隧道选项白名单（与 mode 同写法）——非法值 400，不静默落库。
+        // 启动训练（2026-09-19 起只有一条编排：selfNode → hubServer → trainer）。
+        // 执行面不再是「模式」：由 rl.hub_push + 登记节点推出来（`remoteExecutionFace`）。
+        // M1：隧道选项白名单——非法值 400，不静默落库。
         const cfProtocol = bodyStr(body, 'cfProtocol')
         const cfEdgeIp = bodyStr(body, 'cfEdgeIp')
         if (cfProtocol && !['http2', 'quic', 'auto'].includes(cfProtocol)) {
@@ -110,19 +122,26 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
         // M3：rollout 执行位置（同白名单写法）——与 python `choices=("auto","local","node")`
         // 同字面量域，直接落库（**无**域换算，别在这里发明 on/off 那种中间态）。
         const rolloutSrc = bodyStr(body, 'rolloutSrc')
-        if (rolloutSrc && !['auto', 'local', 'node'].includes(rolloutSrc)) {
-          return errResp(`未知 rollout 位置: ${rolloutSrc}（只接受 auto|local|node）`, 400)
+        // 域与 python `rl/loop_steps.py::ROLLOUT_SRCS` 同源（含离线模式的 `run`）。
+        if (rolloutSrc && !['auto', 'local', 'node', 'run'].includes(rolloutSrc)) {
+          return errResp(`未知 rollout 位置: ${rolloutSrc}（只接受 auto|local|node|run）`, 400)
+        }
+        // 训练模式（2026-09-19）：`在线|离线`。**不能**归到 rolloutSrc 里：离线要同时写
+        // 两个课程级键（run + run_iters=-1）并把该课 hub 置 offline，换算在
+        // `stack/specs.ts::trainModeKnobs`。
+        const trainMode = bodyStr(body, 'trainMode')
+        if (trainMode && !['online', 'offline'].includes(trainMode)) {
+          return errResp(`未知训练模式: ${trainMode}（只接受 online|offline）`, 400)
         }
         return okResp(
-          await startPreset(mode as 'pull' | 'push' | 'local', ctx.course, {
-            pushEndpoint: bodyStr(body, 'pushEndpoint'),
-            pushAuthKey: bodyStr(body, 'pushAuthKey'),
+          await startPreset(ctx.course, {
             // T7：布尔用严格 true（缺省/其它 = 关，不自动降级）。
             remoteDegrade: body.remoteDegrade === true,
             cfProtocol: (cfProtocol || undefined) as CfProtocol | undefined,
             cfEdgeIp: (cfEdgeIp || undefined) as CfEdgeIp | undefined,
             slim: (slim || undefined) as SlimMode | undefined,
             rolloutSrc: (rolloutSrc || undefined) as RolloutSrcMode | undefined,
+            trainMode: (trainMode || undefined) as TrainMode | undefined,
           }),
         )
       }
@@ -186,6 +205,33 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
         if (!Number.isFinite(n)) return errResp(`并发数非法: ${body.concurrency}`, 400)
         return okResp(await setNodeConcurrency(id, Math.round(n)))
       }
+      // ---- GPU push worker 登记（2026-09-18）：回写 rl-config nodes[] + 叫醒 hub ----
+      // （hub 观测面缓存的置空不在本层：动作后统一在 server.ts 与慢快照同时失效）
+      case 'registerPushWorker': {
+        return okResp(
+          await registerPushWorker({
+            id: bodyStr(body, 'id'),
+            url: bodyStr(body, 'url'),
+            authKey: bodyStr(body, 'authKey'),
+            // 并发数缺省由 actions 侧填 1（不在这里编默认值，避免两处口径）。
+            concurrency: body.concurrency === undefined ? undefined : Number(body.concurrency),
+            enabled: body.enabled === undefined ? undefined : body.enabled !== false,
+          }),
+        )
+      }
+      // ---- 每课 hub 派发模式（R3-2）：热切 + 落意图（起 hub 时回灌）----
+      case 'setCourseMode':
+        return okResp(await setCourseMode(bodyStr(body, 'course'), bodyStr(body, 'mode')))
+      // ---- 每课「暂停/恢复」意图（R2d 操作面）：写 tmp/loop-control.json，训练进程每拍读 ----
+      // 缺 `paused` 字段 = 暂停（前端只传方向时不必再编一个布尔约定）。
+      case 'setCoursePaused':
+        return okResp(
+          setCoursePaused(bodyStr(body, 'course'), body.paused !== false, loopControlPath()),
+        )
+      case 'removePushWorker':
+        return okResp(await removePushWorker(bodyStr(body, 'id')))
+      case 'reloadPushWorkers':
+        return okResp(await reloadPushWorkers())
       case 'nodeSmoke': {
         const id = bodyStr(body, 'id')
         if (busy.has(`node:${id}`)) return errResp('该节点冒烟进行中', 409)

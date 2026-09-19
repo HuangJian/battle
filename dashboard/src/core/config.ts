@@ -3,7 +3,7 @@
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'fs'
 import path from 'path'
 import { configPath, curriculaDir } from './paths'
-import { capacityError } from './slots'
+import { capacityError, slotError } from './slots'
 import type { RlConfig } from './types'
 
 export function loadConfig(cfgPath = configPath()): RlConfig {
@@ -14,29 +14,31 @@ export function loadConfig(cfgPath = configPath()): RlConfig {
  *
  *  多课程（plan P4-W1）：落盘前过 `capacityError` 加法校验——`Σ eff(course) ≤ 裸机
  *  容量`，超量 fail-fast 并点名超量课程（绝不把超量配额写到磁盘再靠运行时补救）。
- *  无 `courses` 块时为空操作（默认行为零变化，§0.5-4）。 */
+ *  R3-1（2026-09-19）：再过 `slotError` 槽位守卫——越界或**两门课配同一槽位**都拒绝落盘
+ *  （否则就是撞 push 端口，而运行时才发现只会变成两门课互相顶掉）。
+ *  无 `courses` 块时两个守卫都是空操作（默认行为零变化，§0.5-4）。 */
 export function saveConfig(cfg: RlConfig, cfgPath = configPath()): void {
   const cap = capacityError(cfg)
   if (cap) throw new Error(cap)
+  const slot = slotError(cfg)
+  if (slot) throw new Error(slot)
   writeFileSync(cfgPath, JSON.stringify(cfg, null, 2), 'utf-8')
 }
 
-/** 写回隧道 URL（隧道重建时）。
+/** 写回 hub URL（隧道重建时）。
  *
- *  多课程（plan §3.3，P3）：URL 住 `rl.remote_hubs[course]`（每课一隧道）；
- *  单课键 `rl.remote_hub_url` 同步写一份作兼容读（notebook 手工路径/Q2 回退读它）。
- *  无课程时只写单键（默认行为零变化）。 */
-export function writeRemoteHubUrl(url: string, course = ''): void {
+ *  **2026-09-18 收敛为单隧道/共享 hub 后只有一个地址**：hub 与隧道都不再按课程分开，
+ *  URL 是**全局事实** ⇒ 只写单键 `rl.remote_hub_url`。旧形状的 per-course 键
+ *  `rl.remote_hubs[<课>]` 不再写（也不被读：python 侧的回填已删）——留着它会变成
+ *  「指向已不存在的每课隧道」的第二事实源。 */
+export function writeRemoteHubUrl(url: string): void {
   const cfg = loadConfig()
-  const old = course ? cfg.rl?.remote_hubs?.[course] : cfg.rl?.remote_hub_url
+  const old = cfg.rl?.remote_hub_url
   if (url && url !== old) {
     cfg.rl = cfg.rl || ({} as RlConfig['rl'])
     cfg.rl.remote_hub_url = url
-    if (course) {
-      cfg.rl.remote_hubs = { ...cfg.rl.remote_hubs, [course]: url }
-    }
     writeFileSync(configPath(), JSON.stringify(cfg, null, 2), 'utf-8')
-    console.log(`  remote_hub_url updated: ${old} -> ${url}${course ? ` (course=${course})` : ''}`)
+    console.log(`  remote_hub_url updated: ${old} -> ${url}`)
   }
 }
 

@@ -210,7 +210,9 @@ class BcCourseConfig(BaseModel):
             "name": spec.get("name", ""),
             "grid": spec.get("grid"),
             "forces": spec.get("forces", ""),
-            "count": spec.get("count") if spec.get("count") is not None else len(spec.get("forces", "")),
+            "count": spec.get("count")
+            if spec.get("count") is not None
+            else len(spec.get("forces", "")),
         }
         if spec.get("player_spawn") is not None:
             payload["player_spawn"] = spec["player_spawn"]
@@ -248,6 +250,21 @@ def resolve_bc_course(name_or_path: str) -> Path:
             f"BC 课程 '{name_or_path}' 不存在（查找 {cand}）；可用：{available}"
         )
     return cand
+
+
+def is_bc_course(name_or_path: str) -> bool:
+    """课程键是否为 BC 课程（排查用的一行判据，**唯一一份**）。
+
+    与 `resolve_bc_course` 同一份事实：`curricula/<课>.bc.jsonc` 存在；控制台是同一口径
+    （`dashboard/src/stack/courses.ts::isBcCourse`）。**不靠账本推断**——刚建的 BC 课程账本
+    是空的，靠事件猜会把首轮判成 RL（症状：指针永远停在 it1）。
+    """
+    if not name_or_path:
+        return False
+    p = Path(name_or_path)
+    if str(p).endswith(BC_SUFFIX):
+        return p.exists()
+    return (CURRICULA_DIR / f"{name_or_path}{BC_SUFFIX}").exists()
 
 
 def load_bc_course(path_or_name: str | Path) -> BcCourseConfig:
@@ -292,9 +309,8 @@ def bc_corpus_identity_fp(course: BcCourseConfig) -> str:
     （dispatch.py:34）而不受影响，BC 侧没有这层保护，只能靠身份指纹本身含 schema。
     """
     from schema import OBS_SCHEMA_MAJOR, SCHEMA_FINGERPRINT
-    stages = (
-        list(course.stages) if isinstance(course.stages, list) else course.stages
-    )
+
+    stages = list(course.stages) if isinstance(course.stages, list) else course.stages
     payload = {
         "kind": "bc",
         # 编码布局：schema bump / 指纹变化 ⇒ 「一个样本是什么」已变，身份必须跟着变

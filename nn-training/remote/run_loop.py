@@ -248,6 +248,8 @@ def open_run_context(
     # ---- 产物补传（可选；缺任一即关）----
     hub_url: str = "",
     hub_token: str = "",
+    #: hub 侧的课程键（多课程 hub 的补传归位键；空 = 单课程 hub）。见 `OfflineDeliverer.course`。
+    hub_course: str = "",
     deliver: bool = True,
     deliverer: OfflineDeliverer | None = None,
     run_job_fn: Callable[..., dict] | None = None,
@@ -292,6 +294,7 @@ def open_run_context(
                     hub_token=hub_token,
                     run_id=store.run_id,
                     artifacts_dir=store.root,
+                    course=hub_course,
                     log=log,
                 )
                 if deliver
@@ -568,6 +571,10 @@ def run_plan_job(
     #: **默认就开着补传**（hub 中途失联时不至于「跑完一整段、控制面一无所知」）。
     hub_url: str = "",
     hub_token: str = "",
+    #: 本份产物在 hub 里的**归位键**（多课程 hub 的课程键；见 `OfflineDeliverer.course`）。
+    #: 领活路径由 hub 在 `/jobs/next` 下发（`remote/worker.py` 传进来），全离线包那条腿
+    #: 由 `--hub-course` 给。空 = 单课程 hub。
+    hub_course: str = "",
     deliver: bool = True,
     run_job_fn: Callable[..., dict] | None = None,
     log: Callable[[str], None] = _log_default,
@@ -598,6 +605,7 @@ def run_plan_job(
         budget_sec=budget_sec,
         hub_url=hub_url,
         hub_token=hub_token,
+        hub_course=hub_course,
         deliver=deliver,
         run_job_fn=run_job_fn,
         log=log,
@@ -639,6 +647,8 @@ def run_standalone(
     #: 这里不做任何"记住连不上就别试"的记忆，每轮都探一次（探不到就一跳而过）。
     hub_url: str = "",
     hub_token: str = "",
+    #: 本份产物在 hub 里的归位键（见 `OfflineDeliverer.course`；空 = 单课程 hub）。
+    hub_course: str = "",
     deliver: bool = True,
     run_job_fn: Callable[..., dict] | None = None,
     log: Callable[[str], None] = _log_default,
@@ -674,6 +684,7 @@ def run_standalone(
         budget_sec=budget_sec,
         hub_url=hub_url,
         hub_token=hub_token,
+        hub_course=hub_course,
         deliver=deliver,
         run_job_fn=run_job_fn,
         log=log,
@@ -874,6 +885,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--hub-token", default="", help="hub Bearer token（或 --hub-token-file / $BATTLE_HUB_TOKEN）")
     ap.add_argument(
+        "--hub-course",
+        default="",
+        help=(
+            "本份产物在 hub 里归哪门课（多课程 hub 的补传归位键 = 控制台里那门课的名字）；"
+            "空 = 单课程 hub。缺了它，多课程 hub 的补传会以「无法归属课程」被拒"
+        ),
+    )
+    ap.add_argument(
         "--hub-token-file",
         default="",
         help="从文件读 token（Kaggle secret / Colab 挂载；避免进 shell 历史）",
@@ -925,6 +944,7 @@ def main(argv: list[str] | None = None) -> int:
             budget_sec=args.budget_sec,
             hub_url=args.hub_url,
             hub_token=hub_token,
+            hub_course=args.hub_course,
             deliver=not args.no_deliver,
         )
     except (ProtocolError, RetryableError) as e:

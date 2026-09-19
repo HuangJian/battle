@@ -382,16 +382,25 @@ export async function runExitCheck(): Promise<number> {
     for (const hit of hits) {
       const { key, entry } = hit
       if ((await classifyExit(hit)) === 'alive') continue // 仅换代，非退出
-      // 日志按**条目自身的课程**取（operator 课程 ≠ 该条目课程时不能串）
-      const logRel = resolveComponentLog(key, cfg, hit.course || course) ?? entry.log ?? null
+      // 日志按**条目自身的课程**取（operator 课程 ≠ 该条目课程时不能串）。
+      // 共享 trainer（2026-09-19 / R3-5）**没有课程**：它的日志是进程 stdout
+      // （`trainer-cluster.log`，进程级一份），按课推路径会指向 `nocourse/`——那里没东西。
+      const logRel =
+        key === 'trainingLoop' && !hit.course
+          ? (entry.log ?? null)
+          : (resolveComponentLog(key, cfg, hit.course || course) ?? entry.log ?? null)
       const tail = logRel ? readLogTail(logRel, 12).lines : []
       // §385：trainingLoop 账本有最近 gate_verdict/circuit_break → 设计内停车，
       // 标「已停车(原因)」而非「意外退出」；其余组件/无事件走原意外路径。
       // 2026-09-12：账本无判决但日志尾行 ALL DONE（iters 跑满正常完成）→ 同样
       // 是设计内停车（账本原因优先，tail 兜底）。
+      //
+      // 共享 trainer 的账本判据**不适用**：它的一个进程跑 N 门课，任一门课的
+      // gate_verdict 都不是「这个进程该退」的理由（它的停车是**按课**的，进程照跑）。
+      // 故只看 tail（日志尾），旧形状的每课条目才查账本。
       const planned =
         key === 'trainingLoop' && logRel
-          ? (recentPlannedStop(join(dirname(logRel), 'training_log.jsonl')) ??
+          ? ((hit.course ? recentPlannedStop(join(dirname(logRel), 'training_log.jsonl')) : null) ??
             tailNormalCompletion(tail))
           : null
       recordExitFailure(key, hit.course, entry, logRel, tail, {}, undefined, planned)

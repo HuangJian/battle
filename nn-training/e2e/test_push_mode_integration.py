@@ -313,7 +313,9 @@ def test_wait_result_polls_until_200(monkeypatch: pytest.MonkeyPatch) -> None:
         i["k"] += 1
         return r
 
-    monkeypatch.setattr("remote.push_client._request", fake_request)
+    # ★ 补丁打在**共用的** HTTP 出口上（R2c-3 起 `wait_result` 的单次探测走
+    # `hub_client.probe_job_result`——两条链路共用一份状态码分类，所以 HTTP 出口也只有一处）。
+    monkeypatch.setattr("remote.hub_client._request", fake_request)
     monkeypatch.setattr("remote.push_client.time.sleep", lambda _s: None)
     out = wait_result("http://n", "tok", "j1", timeout_sec=30, poll_sec=0.01, log=lambda m: None)
     assert out["job_id"] == "j1" and out["agg"]["kl"] == 0.1
@@ -324,7 +326,7 @@ def test_wait_result_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_request(url, token, path, *, timeout=30.0, **kw):
         return 202, b'{"status":"running"}'
 
-    monkeypatch.setattr("remote.push_client._request", fake_request)
+    monkeypatch.setattr("remote.hub_client._request", fake_request)
     # 让 deadline 立刻过期：time.time 先返回 t0 再返回 t0+10
     ticks = iter([1000.0, 1000.0, 1010.0, 1010.0, 1010.0])
 
@@ -381,6 +383,101 @@ def test_push_job_round_all_nodes_fail(monkeypatch: pytest.MonkeyPatch) -> None:
             5.0,
             lambda m: None,
         )
+
+
+def test_push_over_nodes_prefers_the_deterministic_cause() -> None:
+    """所有节点都倒时把**确定性原因**原样抛出（410 的原因不能被包成 RetryableError）。
+
+    2026-09-17：不这样就会让「bun 装不上」被上层当瞬时失败重试 3 次（每次重新 push +
+    等满超时）。这条是组合路径与拆相路径**共用**的那份 failover 判决。
+    """
+    from remote.protocol import JobFailedError
+    from rl.loop_steps import _push_over_nodes
+
+    def step(i: int, _node: dict):
+        if i == 0:
+            raise JobFailedError("job j: bun 未安装", kind="ProtocolError")
+        raise RetryableError("node down")
+
+    with pytest.raises(JobFailedError, match="bun 未安装"):
+        _push_over_nodes([{"url": "http://a"}, {"url": "http://b"}], 0, step, lambda m: None)
+
+
+# ──────────────── 三相拆分后的 push 相位（发布即提交 / 换节点重提交） ────────────────
+
+
+def _push_session(tmp_path: Path, *, bad_first: bool = True):
+    """造一份直推会话 + 真 job 目录（换节点时要重读盘上 payload）。"""
+    from remote.protocol import PAYLOAD_NAME
+    from rl.loop_round import RemotePpoJob
+    from rl.loop_steps import TrainingSteps
+
+    job_root = tmp_path / "remote-jobs"
+    (job_root / "j7").mkdir(parents=True)
+    (job_root / "j7" / PAYLOAD_NAME).write_bytes(b"payload-bytes")
+    st = TrainingSteps()
+    st.args = SimpleNamespace(smoke=False)
+    st._code_zip_path = tmp_path / "code.zip"
+    st._code_zip_path.write_bytes(b"code-bytes")
+    first = "http://bad.example" if bad_first else "http://good.example"
+    other = "http://good.example" if bad_first else "http://second.example"
+    sess = RemotePpoJob(
+        it=1,
+        jid="j7",
+        manifest={"job_id": "j7"},
+        transport="push",
+        nodes=[{"url": first, "authKey": "k"}, {"url": other, "authKey": "k"}],
+        job_root=str(job_root),
+        timeout_sec=5.0,
+    )
+    return st, sess
+
+
+def test_push_publish_phase_submits_and_wait_phase_switches_node(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """发布相位**只提交**；等待相位等；当前节点等待中失败 ⇒ 换下一个并**重新提交**。
+
+    这条钉的是拆相新增的那条路：提交必须落在发布相位（否则探针问「那份 job 怎么样了」
+    时节点上根本没有它），而换节点时新节点从没见过这份 job ⇒ 必须从盘上重读 payload 重发。
+    """
+    submitted: list[str] = []
+    waited: list[str] = []
+
+    def fake_submit(url, key, manifest, payload, code, *, echo=False, log=None, **kw):
+        submitted.append(url)
+        assert payload == b"payload-bytes"  # 真从 job 目录重读的（不是内存缓存）
+        return {"body_bytes": 1}
+
+    def fake_wait(url, key, jid, *, timeout_sec=30.0, log=None, **kw):
+        waited.append(url)
+        if "bad" in url:
+            raise RetryableError("node down mid-wait")
+        return {"job_id": jid, "from": url}
+
+    monkeypatch.setattr("rl.loop_steps._push_submit", fake_submit)
+    monkeypatch.setattr("rl.loop_steps._push_wait_result", fake_wait)
+    st, sess = _push_session(tmp_path)
+
+    st._push_submit_first(sess)
+    assert submitted == ["http://bad.example"] and sess.node_i == 0
+    out = st._push_fetch(sess)
+    assert submitted == ["http://bad.example", "http://good.example"]
+    assert waited == ["http://bad.example", "http://good.example"]
+    assert out["from"] == "http://good.example"
+    assert sess.node_i == 1  # 探针之后要问这个节点
+    assert sess.submit_wire == {"body_bytes": 1}  # 随结果上浮的传输读数仍挂着
+    assert out["wire_hub"] == {"body_bytes": 1}
+
+
+def test_push_probe_targets_the_node_holding_the_job(tmp_path: Path) -> None:
+    """探针打的是**当前持有 job 的那个节点**（换节点后自动跟着换）。"""
+    st, sess = _push_session(tmp_path, bad_first=False)
+    assert sess.transport == "push"
+    assert sess.probe_base_url == "http://good.example"
+    sess.node_i = 1
+    assert sess.probe_base_url == "http://second.example"
+    assert sess.node is not None and sess.node["url"] == "http://second.example"
 
 
 # ────────────────────────── 真 worker_server × 真 push_client ──────────────────────────

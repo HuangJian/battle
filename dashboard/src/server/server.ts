@@ -59,6 +59,9 @@ import {
   curriculumLadderView,
   discoverCourses,
   evalReplayFileResponse,
+  getLoopQueueView,
+  invalidateHubAdmin,
+  invalidateLoopQueue,
   invalidateSlowSnapshot,
   ladderTickAll,
   routeAction,
@@ -216,6 +219,11 @@ async function main(): Promise<void> {
   // 慢部件快照后台刷新（§366：节点 ping/组件探测/池历史移出请求路径，页面加载 <1s）。
   // reconcileWatch 已冷算一次暖缓存；此后每 5s 后台重算，请求只读缓存。
   startSnapshotRefresher()
+  // 调度器视图（R2c-3）暖一次缓存：它要起一个只读 python（~sub-second），懒算的话
+  // 首次 /api/state（含 SSR 首屏）要为它等一个子进程。之后由 TTL（10s）驱动重算。
+  void getLoopQueueView().catch(() => {
+    /* 读失败由视图内部转成 error 上屏；这里只需不抛 */
+  })
   // 非正常退出看护（§380）：受管进程自行退出/被杀 → 显式写失败日志 + 记录 error，
   // 不再静默（TrainingLoop 曾因缺 BC 参考 boot 崩溃，只有翻日志才知道原因）。4s 一轮，
   // 两帧确认（内部）避免监督器换 pid 的瞬时误报。
@@ -354,6 +362,7 @@ async function main(): Promise<void> {
         if (req.method === 'POST' && url.pathname === '/api/deliverUpload') {
           const resp = await handleDeliverUpload(req, viewCourse || '')
           invalidateSlowSnapshot()
+          invalidateHubAdmin()
           return resp
         }
         if (req.method === 'GET' && url.pathname === '/api/taskBundleInfo') {
@@ -387,7 +396,15 @@ async function main(): Promise<void> {
           }
           const resp = await routeAction(act, body)
           // 动作改动组件/节点/课程 → 失效慢部件缓存，下次 buildStateView 冷算即时上屏（§366）。
-          if (resp) invalidateSlowSnapshot()
+          // hub 观测面（队列/worker 登记表）同处失效：worker 登记写过 rl-config、启停 hub
+          // 都会改它的内容，下一拍不该再读旧观测（与慢快照同一时机 = 一个失效点）。
+          if (resp) {
+            invalidateSlowSnapshot()
+            invalidateHubAdmin()
+            // 调度器视图的 TTL 比 hub 观测面长（10s）：暂停/恢复动作后必须显式作废，
+            // 否则按钮点下去要到下一个 TTL 才看到意图上屏（回执面同理）。
+            invalidateLoopQueue()
+          }
           return resp ?? json({ ok: false, message: `未知动作: ${act}` }, 404)
         }
         return new Response('not found', { status: 404 })

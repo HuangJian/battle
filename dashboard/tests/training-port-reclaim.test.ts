@@ -20,7 +20,7 @@ import { portOwnedBy, portOwnerPids } from '../src/core/proc'
 import { killPid, pidAlive, portListen, waitUntil } from '../src/core/net'
 import { reclaimPort } from '../src/stack/hub'
 import { cloudflaredSpec, hubServerSpec } from '../src/stack/specs'
-import { slotPort } from '../src/core/slots'
+import { sharedHubPort } from '../src/core/slots'
 import type { RlConfig } from '../src/core/types'
 
 // ────────────────────────── 单测：可注入依赖（跨平台确定性） ──────────────────────────
@@ -180,7 +180,9 @@ describe('接线：启动步骤在 spawn 前回收端口', () => {
 
   it('specs 给独占端口的组件都声明了 ownsResource', () => {
     const specs = readFileSync(path.join(DASHBOARD_ROOT, 'src', 'stack', 'specs.ts'), 'utf-8')
-    for (const fn of ['hubServerSpec', 'cloudflaredSpec', 'workerServeSpec'] as const) {
+    // 本机伪节点 2026-09-19 已退出受管组件（它只在冒烟预演里存在 20s，不参与端口回收/
+    // 监督重启）——受管面只剩这三个独占端口的组件。
+    for (const fn of ['hubServerSpec', 'cloudflaredSpec'] as const) {
       const start = specs.indexOf(`export function ${fn}`)
       expect(start).toBeGreaterThan(-1)
       const rest = specs.indexOf('export function ', start + 1)
@@ -283,10 +285,10 @@ describe('portOwnedBy（真实监听进程）', () => {
     expect(await cf.ownsResource!(child.pid)).toBe(true)
     expect(await cf.ownsResource!(process.pid)).toBe(false)
 
-    // hub-server 同理（它核的是槽位推导出的 hub 端口，本用例里没人监听 ⇒ 应判 false）
-    const hub = hubServerSpec(cfg, 'course-a')
+    // hub-server 同理（它核的是**共享** hub 端口，本用例里没人监听 ⇒ 应判 false）
+    const hub = hubServerSpec(cfg)
     expect(typeof hub.ownsResource).toBe('function')
-    expect(slotPort(cfg, 'course-a', 'hub')).not.toBe(port) // 前置：两者不能撞口，否则断言无意义
+    expect(sharedHubPort(cfg)).not.toBe(port) // 前置：两者不能撞口，否则断言无意义
     expect(await hub.ownsResource!(child.pid)).toBe(false)
     expect(await hub.ownsResource!(process.pid)).toBe(false)
   })
