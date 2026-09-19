@@ -39,12 +39,15 @@ function cv(key: string, scope?: ComponentScope): ComponentView {
 const KEYS: readonly Component[] = ALL_COMPONENTS
 
 describe('cardFamilies：服务面 vs 课程面', () => {
-  it('分族与族内顺序：服务面（agent → hub → 隧道 → trainer）在前，课程面（本机 worker）在后', () => {
-    // 输入乱序（真快照的顺序不保证）：顺序必须由分组算出来，不是渲染顺序碰巧
+  it('分族与族内顺序：服务面（agent → hub → 隧道 → trainer → 本机 worker）在前，课程面在后', () => {
+    // 输入乱序（真快照的顺序不保证）：顺序必须由分组算出来，不是渲染顺序碰巧。
+    // 课程面用一个**合成键**（当前没有按课程的卡片组件了，但机制必须仍然能用——
+    // 它是 scope 的函数，日后真出现按课程的卡片会自然落进去）。
     const groups = cardFamilies([
-      cv('localWorker', 'course'),
+      cv('localWorker', 'shared'),
       cv('cloudflared', 'shared'),
       cv('workerServe', 'course'),
+      cv('someCourseThing', 'course'),
       cv('trainingLoop', 'shared'),
       cv('hubServer', 'shared'),
       cv('selfNode', 'singleton'),
@@ -55,12 +58,25 @@ describe('cardFamilies：服务面 vs 课程面', () => {
       'hubServer',
       'cloudflared',
       'trainingLoop',
+      'localWorker',
     ])
-    expect(groups[1]!.rows.map((r) => r.key)).toEqual(['localWorker'])
+    expect(groups[1]!.rows.map((r) => r.key)).toEqual(['someCourseThing'])
     // 组标题/说明上屏（分组这件事本身要看得见，不能只靠间距）
     expect(groups[0]!.title).toContain('服务面')
     expect(groups[0]!.hint).toContain('与课程数量无关')
     expect(groups[1]!.title).toContain('课程面')
+  })
+
+  it('当前真实 scope 下只有服务面一族（账本键收敛的终点，不是坏了）', () => {
+    const groups = cardFamilies(KEYS.map((k) => cv(k, componentScope(k))))
+    expect(groups.map((g) => g.id)).toEqual(['service'])
+    expect(groups[0]!.rows.map((r) => r.key)).toEqual([
+      'selfNode',
+      'hubServer',
+      'cloudflared',
+      'trainingLoop',
+      'localWorker',
+    ])
   })
 
   it('节点面组件（worker_server）不进卡片行——但必须**显式声明**，不是面板里的一行 filter', () => {
@@ -99,16 +115,20 @@ describe('cardFamilies：服务面 vs 课程面', () => {
   })
 
   it('scope 缺省/未知 ⇒ 课程面（单侧保守：少一个徽章只是少信息，空贴「共享」是假承诺）', () => {
-    const groups = cardFamilies([cv('hubServer'), cv('localWorker'), cv('workerServe')])
+    // 缺省 scope 的 key（旧服务端 / 新增组件还没填）必须落**课程面**：它是保守的那一侧
+    // （共享/单例徽章会宣称「停它就是停全局」，而按课程只会少说）
+    const groups = cardFamilies([cv('hubServer'), cv('someNewThing'), cv('workerServe')])
     expect(groups.map((g) => g.id)).toEqual(['course'])
     // workerServe 不在这份名单里：它在节点行渲染（NODE_FACE_COMPONENTS，另一把尺子在上一组）
-    expect(groups[0]!.rows.map((r) => r.key)).toEqual(['localWorker', 'hubServer'])
+    expect(groups[0]!.rows.map((r) => r.key).sort()).toEqual(['hubServer', 'someNewThing'])
     expect(scopeBadge(cv('hubServer'))).toBeNull()
   })
 
   it('未列进化妆顺序的 key 落组尾但**不丢**（成员资格只由 scope 决定）', () => {
-    const groups = cardFamilies([cv('someNewThing', 'course'), cv('localWorker', 'course')])
-    expect(groups[0]!.rows.map((r) => r.key)).toEqual(['localWorker', 'someNewThing'])
+    const groups = cardFamilies([cv('someNewThing', 'course'), cv('someCourseThing', 'course')])
+    expect(groups[0]!.rows.map((r) => r.key).sort()).toEqual(['someCourseThing', 'someNewThing'])
+    // 顺序是化妆（ORDER 里没有它们 ⇒ 同为组尾，稳定排序保持输入序）
+    expect(groups[0]!.rows.map((r) => r.key)).toEqual(['someNewThing', 'someCourseThing'])
   })
 
   it('空组不渲染（没东西可说时不留空壳）；只有服务面组件时只有一族', () => {
@@ -118,7 +138,7 @@ describe('cardFamilies：服务面 vs 课程面', () => {
   })
 
   it('不改动调用方数组（排序是拷贝——原地 sort 会让上游的快照顺序随渲染变化）', () => {
-    const input = [cv('localWorker', 'course'), cv('selfNode', 'singleton')]
+    const input = [cv('localWorker', 'shared'), cv('selfNode', 'singleton')]
     cardFamilies(input)
     expect(input.map((c) => c.key)).toEqual(['localWorker', 'selfNode'])
   })

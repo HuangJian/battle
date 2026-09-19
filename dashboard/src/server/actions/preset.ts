@@ -8,6 +8,7 @@ import { configurePushEndpoint } from '../../stack/push-config'
 import type { CfEdgeIp, CfProtocol, Component, RolloutSrcMode, SlimMode } from '../../core/types'
 import { tailscaleIp } from '../../core/net'
 import { sharedHubUrl } from '../../core/slots'
+import { coursesInLocalMode } from '../../stack/local-worker'
 import { rlConfigSmoke } from '../../stack/smoke'
 import { slimToCfg } from '../../stack/specs'
 import { ConsoleState, saveConsoleState } from './console-state'
@@ -117,14 +118,23 @@ export async function startPreset(
             ? ['selfNode', 'workerServe', 'trainingLoop']
             : ['selfNode', 'trainingLoop']
           : ['hubServer', 'localWorker', 'trainingLoop']
-    // 离开 local：清掉上一轮 local 预设留下的 localWorker（进程+登记）。否则切到
-    // pull/push 后卡片仍亮绿点——操作员以为「未启动却在跑」（2026-09-16 用户反馈）。
-    // pull/push 不消费本机独立 worker；停失败不阻断预设（训练主路径更重要）。
+    // 离开 local：清掉上一轮 local 预设留下的 localWorker（进程 + 登记）。否则切到 pull/push
+    // 后卡片仍亮绿点——操作员以为「未启动却在跑」（2026-09-16 用户反馈）。
+    // ⚠ 但它是**共享**进程了（2026-09-19）：停它 = 本机不再执行**任何**课程的 PPO job，
+    // 故只在「本课是最后一门 local 课」时才停；还有别的课在 local ⇒ 保留并说明。
+    // 判据从配置算（`courses.<课>.{remote_transport,remote_hub_url}` = local 预设写下的值），
+    // 见 stack/local-worker.ts::coursesInLocalMode；停失败不阻断预设（训练主路径更重要）。
+    let localWorkerNote = ''
     if (mode !== 'local') {
-      try {
-        await stopComponent('localWorker', course)
-      } catch {
-        /* leftover stop is best-effort */
+      const stillLocal = coursesInLocalMode(loadConfig(), course)
+      if (stillLocal.length > 0) {
+        localWorkerNote = `；本机 worker 保留（${stillLocal.join('、')} 仍在 local）`
+      } else {
+        try {
+          await stopComponent('localWorker', course)
+        } catch {
+          /* leftover stop is best-effort */
+        }
       }
     }
     const ctx: StartCtx = {
@@ -147,7 +157,8 @@ export async function startPreset(
       `已按 ${mode} 模式启动 ${order.length} 个组件 (course=${course})${pushNote}${hubNote}` +
         (order.includes('trainingLoop')
           ? '；trainer 是共享进程（一个进程服务所有课程，停它 = 停全部）'
-          : ''),
+          : '') +
+        localWorkerNote,
       detail,
     )
   } catch (e) {

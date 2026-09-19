@@ -2,12 +2,13 @@
  *
  *  为什么分组，而不是继续排一行：
  *
- *   - 单例角色（selfNode / hub / 隧道 / **trainer**）与当前查看的课程**无关**——0 门课也在、
- *     100 门课也是一份。混在按课的行里，操作员会去「给这门课再起一个 hub / trainer」
- *     （而它们是共享的：第二个实例抢同一个端口、或两套调度器抢同一批 traj），
- *     或者把「共享 hub 没起」读成「这门课自己的 hub 没起」；
- *   - 课程面（本机 worker / 本机伪节点）恰好相反：卡片上的对象**就是当前查看的那门课**。
- *     换课程 = 换对象，这一点必须在视觉上说出来（否则「启动」按下去，起的可能是另一门课）。
+ *   - 单例角色（selfNode / hub / 隧道 / **trainer** / **本机 worker**）与当前查看的课程**无关**
+ *     ——0 门课也在、100 门课也是一份。混在按课的行里，操作员会去「给这门课再起一个 hub /
+ *     trainer / worker」（而它们是共享的：第二个实例抢同一个端口、两套调度器抢同一批 traj、
+ *     多份 worker 抢同一份 hub 队列），或者把「共享 hub 没起」读成「这门课自己的 hub 没起」；
+ *   - 课程面恰好相反：卡片上的对象**就是当前查看的那门课**。换课程 = 换对象，这一点必须在视觉上
+ *     说出来（否则「启动」按下去，起的可能是另一门课）。**2026-09-19 起这一族没有成员**
+ *     （账本键收敛的终点：进程面全在服务面），但机制保留——它是 `scope` 的函数，不是名单。
  *
  *  ★ **成员资格只由 `ComponentView.scope` 决定**（服务端按 `core/registry.componentScope` 填）。
  *  这里**不写**「哪些 key 属于哪一族」的名单——名单一旦与账本槽位规则漂开，症状是某个组件从
@@ -47,7 +48,8 @@ export const FAMILY_META: Record<'service' | 'course', { title: string; hint: st
     title: '服务面 · 单例',
     hint:
       '与课程数量无关：一个进程服务所有并行课程（0 门课也在，100 门课也只有一份）。' +
-      '「共享」= hub / 隧道（一个进程服务所有课程）；「单例」= 本机 agent（全机一份）。',
+      '「共享」= hub / 隧道 / trainer / 本机 worker（各一个进程服务所有课程）；' +
+      '「单例」= 本机 agent（全机一份）。',
   },
   course: {
     title: '课程面 · 按课程',
@@ -58,12 +60,15 @@ export const FAMILY_META: Record<'service' | 'course', { title: string; hint: st
 /** 组内展示顺序（**纯化妆**：未列出的 key 落到组尾，绝不丢弃——成员资格只由 scope 决定）。 */
 const ORDER: Record<'service' | 'course', readonly string[]> = {
   // 服务面按「谁依赖谁」排：agent（一切动作的落点）→ hub（调度中枢）→ 隧道（入站通道）
-  // → trainer（消费 hub 的作业队列、服务所有课程）。
-  service: ['selfNode', 'hubServer', 'cloudflared', 'trainingLoop'],
-  // 课程面：本机 worker 在前（最常按的那一个），本机伪节点在后。
-  // 注：trainer 已于 2026-09-19（R3-5）收敛为共享单例 ⇒ 它属于**服务面**，不在此列
-  // （ORDER 只是化妆顺序：真成员资格由 `scope` 决定，写错这里不会让组件错族）。
-  course: ['localWorker', 'workerServe'],
+  // → trainer（消费 hub 的作业队列、服务所有课程）→ 本机 worker（消费同一份队列里的活）。
+  service: ['selfNode', 'hubServer', 'cloudflared', 'trainingLoop', 'localWorker'],
+  // 课程面：**当前空**（2026-09-19 收敛完成：selfNode 单例，hub / 隧道 / trainer / 本机 worker
+  // 四条共享，workerServe 走节点行 —— 于是 `cardFamilies` 只渲染服务面一组，这不是坏了）。
+  // `course` 族本身保留：它是 scope 的函数，日后真出现按课程的卡片会自然落进去，不必改代码。
+  // 这里留着 workerServe 只是化妆顺序上的历史位置——它实际渲染在节点行。
+  // 注：trainer（R3-5）与本机 worker（2026-09-19）都已收敛为共享进程 ⇒ 属于**服务面**，
+  // 不在此列（ORDER 只是化妆顺序：真成员资格由 `scope` 决定，写错这里不会让组件错族）。
+  course: ['workerServe'],
 }
 
 const FAMILY_OF_SCOPE: Record<ComponentScope, 'service' | 'course'> = {

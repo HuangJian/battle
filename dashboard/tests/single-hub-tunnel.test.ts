@@ -96,16 +96,20 @@ function writeRegistry(reg: string, body: Record<string, unknown>): void {
 // ────────────────────────── ① 槽位唯一 ──────────────────────────
 
 describe('① 槽位唯一：共享组件的账本槽恒为空串', () => {
-  it('scopeOf：hub/隧道/**trainer**归一为 ``,其余组件按课程（含 selfNode 不受影响）', () => {
+  it('scopeOf：hub/隧道/**trainer**/**本机 worker**归一为 ``,其余组件按课程（含 selfNode 不受影响）', () => {
     expect(isSharedComponent('hubServer')).toBe(true)
     expect(isSharedComponent('cloudflared')).toBe(true)
     // trainer 也是共享的（2026-09-19 / R3-5）：一个进程服务所有课程，BC 与 RL 共用这个角色键
     expect(isSharedComponent('trainingLoop')).toBe(true)
+    // 本机 worker 同理（2026-09-19）：「它和云端 worker 一样，只与 hub 通信，领到任务后直接
+    // 执行」——`/jobs/next` 不看课程，故「这门课的 worker」从来不是个概念
+    expect(isSharedComponent('localWorker')).toBe(true)
     for (const c of ['course-a', 'course-b', '']) {
       expect(scopeOf('hubServer', c)).toBe('')
       expect(scopeOf('cloudflared', c)).toBe('')
       expect(scopeOf('trainingLoop', c)).toBe('')
-      expect(scopeOf('localWorker', c)).toBe(c)
+      expect(scopeOf('localWorker', c)).toBe('')
+      // 仍按课程的：本机伪 GPU 节点（workerServe）与 selfNode（后者是单例，不走 scopeOf）
       expect(scopeOf('workerServe', c)).toBe(c)
     }
   })

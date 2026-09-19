@@ -41,9 +41,10 @@ export function restartSpecFor(key: Component, course = ''): ProcSpec | null {
   switch (key) {
     case 'selfNode':
       return selfNodeSpec(cfg)
-    // 共享组件（hub/隧道）的旧形状条目（`hubServers[<课>]`）**拒重建**：它们与共享实例
-    // 服务同一件事，用共享 spec 把一门课的名字重新拉起一个进程 = 两个 hub 读同一棵 job 目录
-    // （双派发 / 双租约 / 结果回错家），正是本仓最怕的串味。旧实例只能被显式换代接管
+    // 共享组件（hub / 隧道 / 本机 worker）的旧形状条目（`hubServers[<课>]` / `localWorkers[<课>]`）
+    // **拒重建**：它们与共享实例服务同一件事，用共享 spec 把一门课的名字重新拉起一个进程 =
+    // 两个 hub 读同一棵 job 目录（双派发 / 双租约 / 结果回错家）或多份 worker 抢同一份 hub
+    // 队列里的活，正是本仓最怕的串味。旧实例只能被显式换代接管
     // （hub.ts::supersedeLegacyInstances，在启动共享实例时收掉）。
     case 'hubServer':
     case 'cloudflared':
@@ -57,8 +58,17 @@ export function restartSpecFor(key: Component, course = ''): ProcSpec | null {
       return key === 'hubServer' ? hubServerSpec(cfg) : cloudflaredSpec(cfg, entry)
     case 'workerServe':
       return workerServeSpec(cfg, venv, c)
+    // 共享本机 worker（2026-09-19）：一个进程服务所有课程，spec 与**课程无关**
+    // （领到哪门课的 job 就干哪门课的活）——所以重建就是重建同一份 spec。
     case 'localWorker':
-      return localWorkerSpec(cfg, venv, c)
+      if (c) {
+        warn(
+          `[console] localWorker[${c}] 是旧形状的每课 worker（共享实例已接管该角色）——` +
+            '不再重建；启动共享实例时会自动停止并清账',
+        )
+        return null
+      }
+      return localWorkerSpec(cfg, venv)
     // 共享 trainer（2026-09-19 / R3-5）：一个进程服务所有课程，spec 与**课程无关**
     // （课程由 `--traj-root` 发现，机器侧旋钮住 rl-config）——所以重建就是重建同一份 spec。
     case 'trainingLoop':

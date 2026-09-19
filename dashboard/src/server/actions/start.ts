@@ -336,18 +336,23 @@ export async function startComponent(key: Component, ctx: StartCtx): Promise<Act
         return done(true, `隧道已就绪: ${url}`)
       }
       case 'localWorker': {
-        if (!ctx.course) throw new ActionError('local-worker 需要 course（先在顶部设置课程）')
-        validateCourseArg(ctx.course)
-        const prev = entryOf('localWorker', ctx.course)
-        if (prev?.pid && pidAlive(prev.pid))
-          return done(true, `local-worker 已在运行 (PID ${prev.pid})`)
-        const r = await startLocalWorker({ course: ctx.course, cfg, venv })
+        // 共享本机 worker（2026-09-19）：**一个进程服务所有课程**——它领到哪门课的 job 就干哪门
+        // 课的活（job 自带课程快照，结果按 job_id 回家）。故这里**不要求 course**：
+        // 「开哪门课」对本组件不是一个概念（旧形状的每课实例由 startLocalWorker 换代接管收掉）。
+        const prev = entryOf('localWorker')
+        if (pidAlive(prev?.pid))
+          return done(true, `local-worker 已在运行 (PID ${prev!.pid})——一个进程服务所有课程`)
+        const r = await startLocalWorker({ cfg, venv })
+        const taken =
+          r.superseded.length > 0
+            ? [`旧形状的每课 worker 已换代接管：${r.superseded.join(', ')}`]
+            : []
         return done(
           r.ready,
           r.ready
-            ? `local-worker 已启动 (PID ${r.pid}, poll ${sharedHubUrl(cfg)})`
+            ? `local-worker 已启动 (PID ${r.pid}, poll ${sharedHubUrl(cfg)}；服务所有课程)`
             : `local-worker 启动即退出 (PID ${r.pid})`,
-          r.tail,
+          [...r.tail, ...taken],
         )
       }
       case 'workerServe': {

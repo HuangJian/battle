@@ -13,6 +13,7 @@ import {
   saveAnyComponent,
   saveComponent,
   clearAnyComponent,
+  type SharedComponent,
 } from '../core/registry'
 import { launchSpec, portOwnedBy, portOwnerPids, spawnBg } from '../core/proc'
 import { writeRemoteHubUrl } from '../core/config'
@@ -194,15 +195,14 @@ export async function stepHubServer(cfg: RlConfig): Promise<void> {
  *  名义所有权。端口一旦被后来的课程接手，它就变成"PID 已死、服务仍在应答"的**幽灵**：
  *  看门狗每周期刷屏（8s 一条），且因 specPort 认不出 cloudflared 端口而修不了账。
  *  ⇒ 死进程不需要 kill，但**账必须清**。 */
-export async function supersedeLegacyInstances(
-  key: 'hubServer' | 'cloudflared' | 'trainingLoop',
-): Promise<string[]> {
+export async function supersedeLegacyInstances(key: SharedComponent): Promise<string[]> {
   const struck: string[] = []
   const reg = loadRegistry()
   const maps = {
     hubServer: reg.hubServers,
     cloudflared: reg.cloudflareds,
     trainingLoop: reg.trainingLoops,
+    localWorker: reg.localWorkers,
   } as const
   const map = maps[key] ?? {}
   for (const [owner, ent] of Object.entries(map)) {

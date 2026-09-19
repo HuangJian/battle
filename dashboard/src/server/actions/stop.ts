@@ -45,13 +45,13 @@ export async function stopComponent(key: Component, courseArg = ''): Promise<Act
       const kept = notes.filter(Boolean)
       return kept.length > 0 ? `；${kept.join('；')}` : ''
     }
-    /** 停止 trainer = 停掉**所有**训练进程：共享实例是唯一形状，但旧形状的每课条目仍可能
-     *  存活（换代之前的残留）——它们是同一个角色，一起收掉才算「停了 trainer」
+    /** 停**共享组件** = 停掉那一个进程：共享实例是唯一形状，但旧形状的每课条目仍可能
+     *  存活（换代之前的残留）——它们是同一个角色，一起收掉才算「停了它」
      *  （与启动时的换代接管同一把尺子，见 stack/hub.ts::supersedeLegacyInstances）。 */
-    const stopLegacyTrainers = async (): Promise<string> => {
-      if (key !== 'trainingLoop') return ''
-      const taken = await supersedeLegacyInstances('trainingLoop')
-      return taken.length > 0 ? `；同时收掉旧形状的每课 trainer：${taken.join(', ')}` : ''
+    const stopLegacy = async (): Promise<string> => {
+      if (!isSharedComponent(key)) return ''
+      const taken = await supersedeLegacyInstances(key)
+      return taken.length > 0 ? `；同时收掉旧形状的每课实例（原属 ${taken.join(', ')}）` : ''
     }
     const entry = entryOf(key, course)
     if (entry?.pid) {
@@ -67,10 +67,16 @@ export async function stopComponent(key: Component, courseArg = ''): Promise<Act
       }
       clearAnyComponent(key, course || entry.course || '')
       const notes = await releaseLocks(course || entry.course || '')
-      const legacy = await stopLegacyTrainers()
-      // 共享 trainer 的行为语义必须在结果里说出来：停它 = 停掉所有课程的训练
-      // （想停单门课走调度器卡片的「暂停」，只影响调度，队列与账本不动）。
-      const scopeNote = key === 'trainingLoop' ? '（共享 trainer：所有课程的训练随之停止）' : ''
+      const legacy = await stopLegacy()
+      // 共享组件的行为语义必须在结果里说出来——不然操作员以为只停了「当前这门课」：
+      // trainer ⇒ 所有课程的训练随之停止（想停单门课走调度器卡片的「暂停」，只影响调度，
+      // 队列与账本不动）；本机 worker ⇒ 本机不再执行任何课程的 PPO job（云端 worker 照常）。
+      const scopeNote =
+        key === 'trainingLoop'
+          ? '（共享 trainer：所有课程的训练随之停止）'
+          : key === 'localWorker'
+            ? '（共享本机 worker：本机不再执行任何课程的 PPO job，云端 worker 不受影响）'
+            : ''
       return done(
         true,
         `${COMPONENT_LABELS[key]} 已停止${scopeNote}${course ? ` (course=${course})` : ''}${notes}${legacy}`,

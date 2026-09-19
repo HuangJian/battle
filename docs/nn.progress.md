@@ -4,6 +4,76 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §90 本机 PPO worker 也不绑课程：一个进程领所有课程的活（2026-09-19）
+
+**一句话**：`localWorker` 从「每课一进程」收敛为**共享槽单进程**——它和云端 worker 逐字同语义：
+只与 hub 通信（轮询领活）、领到什么课的 job 就干哪门课的活、结果按 job_id 回家。
+
+### 为什么这是**事实**而不是需求
+
+`GET /jobs/next` **从来不看课程**：挑活的是 hub 的队列（每课程一条 FIFO + **跨课程轮转**），
+响应里的 `course` 只是随包告知的观测字段；job 的 manifest 又自带整份课程快照（`course` 字段
+是课程文件正文，worker 照它重建 reward 函数）。于是「按课程键控」只产生三样副作用：
+
+1. 一份进程只能服务一门课；
+2. 同机多份进程抢同一份队列里的活；
+3. 「这门课的 worker」这个不存在的归属感（它甚至没拦住跨课领活——旧形状下 A 课的 worker
+   本来就可能领走 B 课的 job，因为轮询的就是同一个 hub）。
+
+### 六处落地（控制台）
+
+| 处 | 内容 |
+|---|---|
+| `core/registry.ts` | `localWorker` 进 `SHARED_COMPONENTS`（槽恒 `''`）；新增 `SharedComponent` 类型，换代/停止按它窄化（不再各自写名单） |
+| `stack/specs.ts` | `localWorkerSpec(cfg, venv)`——**去掉课程参数**：单一 `tmp/local-worker` work 目录、单一 `tmp/local-worker.log` |
+| `stack/local-worker.ts` | 启动先 `supersedeLegacyInstances('localWorker')`（必须在 spawn **之前**），再登记共享槽；新增纯函数 `coursesInLocalMode(cfg, exclude)` |
+| `actions/{start,stop,restart,smoke}.ts` | 幂等早退（「一个进程服务所有课程」）；停它 = 本机不再执行**任何**课程的 PPO job（且把这句话说出来）；每课条目**拒重建**；冒烟/日志走共享槽 |
+| `actions/preset.ts` | 离开 local 时只在「本课是最后一门 local 课」才停（否则保留并说明）——停共享 worker 会连坐其它 local 课 |
+| `web/view/component-groups.ts` | 本机 worker 进服务面顺序；至此**课程面无成员**（workerServe 走节点行）——写明「只渲染一组不是坏了」 |
+
+### 操作员必须知道的三件事
+
+- **停它 = 本机不再执行任何课程的 PPO job**（云端 worker 不受影响）；
+- **一份进程同一时刻只干一份活**（与云端 worker 同语义：想要本机并发就多起云端 worker）；
+- 离开 local 时若还有别的课在 local，**worker 会保留**（否则那门课的 job 从此无人领取，
+  而表面「训练正常」）。
+
+### 判据为什么要从配置算
+
+`coursesInLocalMode` = 「`courses.<课>.remote_transport === 'pull'` ∧ `remote_hub_url ===
+sharedHubUrl(cfg)`」——正是 local 预设写下的那两个键。**刻意不按「同端口就算本机 hub」放宽**：
+云机 pull 课程写的是 tailnet 地址但**同一个 hub 端口**，放宽会让「把唯一的课从 local 切到 pull」
+永远停不掉 worker（正是 2026-09-16 用户反馈要修的那个「以为未启动却在跑」）。
+
+### 训练侧一行未改（这才是重点）
+
+`remote.worker` 本来就与课程无关（`poll_job(base_url, token, …)` 没有课程参数）。新增集成用例
+`tests/test_local_worker_multi_course.py`(3) 用**进程内真 hub（HTTP）+ 真 worker 领活函数**钉住：
+① 同一 worker 身份依次领到两门课的 job（跨课程轮转 + 响应自报 `course`）；②「先起 worker、
+后加课」时同一进程立刻能领新课的活；③ 形参围栏——领活链路里不得出现「课程」（哪天有人给
+worker 加 `--course`，这条会红；否则它不会崩，只会表现为「另一门课的 job 永远没人领」）。
+
+### 门禁
+
+| 门 | 结果 |
+|---|---|
+| nn python gate（ruff + mypy + pytest xdist） | ✔ **1570 passed / 4 skipped** |
+| `cd dashboard && bun run typecheck` / `bun run test` | ✔ 干净 / **655 pass / 0 fail** |
+| 三份 bundle | ✔ all bundles ok |
+| 根 `bun run check` | ✔ **1868（1864 pass / 4 skip / 0 fail）** |
+
+### 记录
+
+`DECISIONS.md` §2026-09-19-goalnn-shared-local-worker（含四条否决项与三条未做）·
+`plan/multi-course-parallel-training.md §5.2 R3-6`。
+
+### 仍未做
+
+① `workerServe`（本机伪 GPU 节点）的**节点轴**收敛——它的端口按课程派生（R3-1 刚把每课 push
+端口摊开防撞），与 push 目标解析耦合，值得单独一轮；② 本机多 worker 实例（worker 身份轴）——
+当前并发模型是「一份本机 worker + 云端多 worker」；③ 真机实弹：本机 worker 领两门并行课的真实
+PPO job（本轮为夹具级 + 进程内真 hub 的证据）。
+
 ## §89 R3-5：trainer 收敛为「一个进程服务所有课程」（2026-09-19）
 
 **一句话**：`trainingLoop` 从「每课一进程」收敛为**共享槽单进程**（`run_rl_cluster.py --serve`，

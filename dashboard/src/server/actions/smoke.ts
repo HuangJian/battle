@@ -75,10 +75,12 @@ export async function smokeComponent(key: Component, ctx: StartCtx): Promise<Act
         break
       }
       case 'localWorker': {
-        // 本机 PPO worker（独立进程，pull 本课 hub）：存活 + 轮询目标可达 + 日志尾。
+        // 本机 PPO worker（独立进程，poll 共享 hub）：存活 + 轮询目标可达 + 日志尾。
         // 「hub 通不通」是它能不能领到活的唯一外部依赖，故按 fatal:false 提示（worker
         // 会自己重连；hub 后起也能自愈）。
-        const entry = entryOf('localWorker', ctx.course)
+        // 共享实例（2026-09-19）：`entryOf` 内部走 scopeOf 归一为 `''` 槽——冒烟问的是
+        // 「那份唯一的进程在不在跑」，与当前查看的课程无关。
+        const entry = entryOf('localWorker')
         items.push({ name: 'local-worker 进程存活', passed: pidAlive(entry?.pid), fatal: true })
         const hubPort = sharedHubPort(cfg)
         const hubUp = await httpOk(`http://127.0.0.1:${hubPort}/ping`, cfg.rl.remote_token, 3000)
@@ -88,9 +90,8 @@ export async function smokeComponent(key: Component, ctx: StartCtx): Promise<Act
           fatal: false,
           detail: hubUp ? `port ${hubPort}` : 'hub 未就绪（worker 会持续重试轮询）',
         })
-        const logPath =
-          entry?.log ??
-          path.join(LOG_DIR, ctx.course || loadConsoleState().course, 'local-worker.log')
+        // 日志也是**唯一**一份（共享实例不再按课程分目录）。
+        const logPath = entry?.log ?? path.join(LOG_DIR, 'local-worker.log')
         extraDetail.push(...tailLines(logPath, 6).map((l) => `日志│ ${l}`))
         break
       }

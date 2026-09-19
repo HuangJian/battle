@@ -183,19 +183,24 @@ describe('§361：icon 复制键 / cloudflared endpoint 截断与复制 / local 
   })
 
   it('组件卡分族（R3-3）：服务面（单例角色）在前、课程面在后，族内顺序稳定', () => {
-    // scope 由服务端按账本槽位规则填（这里照抄真值：selfNode 单例 / hub·隧道·**trainer** 共享 /
-    // 其余按课程）——trainer 自 2026-09-19（R3-5）起是一个进程服务所有课程。
+    // scope 由服务端按账本槽位规则填（这里照抄真值：selfNode 单例；hub / 隧道 / **trainer** /
+    // **本机 worker** 共享——后两者分别自 2026-09-19 的 R3-5 与共享 worker 收敛起，各一个进程
+    // 服务所有课程；workerServe 按课程但走节点行）。
+    // 另携一个**合成**的课程面键：当前已无按课程的卡片组件，而这一族的渲染路径仍要在 SSR 上
+    // 被真实走过（它是 scope 的函数，不是名单）。
     const scopes: Record<string, string> = {
       selfNode: 'singleton',
       hubServer: 'shared',
       cloudflared: 'shared',
       trainingLoop: 'shared',
-      localWorker: 'course',
+      localWorker: 'shared',
       workerServe: 'course',
+      someCourseThing: 'course',
     }
     // 输入故意乱序：顺序必须是**分组算出来的**，不是渲染顺序碰巧
     const keys = [
       'localWorker',
+      'someCourseThing',
       'cloudflared',
       'workerServe',
       'trainingLoop',
@@ -232,7 +237,7 @@ describe('§361：icon 复制键 / cloudflared endpoint 截断与复制 / local 
     expect(html).toContain('课程面 · 按课程')
     expect(html).toContain('data-family="service"')
     expect(html).toContain('data-family="course"')
-    // 服务面在前、课程面在后；族内顺序：agent → hub → 隧道 → trainer / 本机 worker
+    // 服务面在前、课程面在后；族内顺序：agent → hub → 隧道 → trainer → 本机 worker
     const order = ['selfNode', 'hubServer', 'cloudflared', 'trainingLoop', 'localWorker']
     let prev = -1
     for (const k of order) {
@@ -240,10 +245,12 @@ describe('§361：icon 复制键 / cloudflared endpoint 截断与复制 / local 
       expect(idx, k).toBeGreaterThan(prev)
       prev = idx
     }
-    // 作用域徽章：共享三个（hub/隧道/**trainer**）+ 单例一个（selfNode）；按课程不挂标签
-    // （组标题已说）。断言整段 class 属性而不是子串——页面里内联了整份 theme.css，
-    // 类名本身也会出现。
-    expect(html.match(/class="tc-cc__scope tc-cc__scope--shared"/g)).toHaveLength(3)
+    // 课程面族在服务面之后（合成键所在那族；它本身也必须在卡行里出现过）
+    expect(html.indexOf('>someCourseThing<')).toBeGreaterThan(html.indexOf('>localWorker<'))
+    // 作用域徽章：共享四个（hub / 隧道 / trainer / 本机 worker）+ 单例一个（selfNode）；
+    // 按课程不挂标签（组标题已说）。断言整段 class 属性而不是子串——页面里内联了整份
+    // theme.css，类名本身也会出现。
+    expect(html.match(/class="tc-cc__scope tc-cc__scope--shared"/g)).toHaveLength(4)
     expect(html.match(/class="tc-cc__scope tc-cc__scope--singleton"/g)).toHaveLength(1)
     // 节点面组件（worker_server）不进卡片行：它渲染在节点行，两个入口 = 混淆
     expect(html).not.toContain('>workerServe<')

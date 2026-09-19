@@ -17,8 +17,8 @@ export const COMPONENT_LOGS: Partial<Record<Component, (cfg: RlConfig, course: s
     // 共享 hub/隧道 ⇒ 日志也唯一（不再 per-course；与 specs.ts 的 log: 同源）
     hubServer: () => path.join(LOG_DIR, 'hub-server.out'),
     cloudflared: (_c) => path.join(LOG_DIR, 'cloudflared.log'),
-    localWorker: (_c, course) =>
-      path.join(course ? courseLogDir(course) : LOG_DIR, 'local-worker.log'),
+    // 共享本机 worker（2026-09-19）：日志也唯一（不再按课程分目录；与 specs.ts 的 log: 同源）
+    localWorker: () => path.join(LOG_DIR, 'local-worker.log'),
     trainingLoop: (_cfg, course) => path.join(courseLogDir(course), 'training-loop.log'),
     workerServe: (_c, course) =>
       path.join(course ? courseLogDir(course) : LOG_DIR, 'remote-worker-serve.log'),

@@ -219,31 +219,35 @@ export function cloudflaredSpec(cfg: RlConfig, entry?: RegistryEntry): ProcSpec 
 /** localWorker 的入口 = 云端 worker 的同一个入口（`python -m remote_worker` 薄包装）。 */
 export const LOCAL_WORKER_ENTRY = 'nn-training/remote_worker.py'
 
-/** 本机 PPO worker（pull 模式）：`remote_worker --poll 本课 hub`。
+/** 本机 PPO worker（pull 模式）：`remote_worker --poll <共享 hub>`。
  *
  *  与云端 worker **同一份代码/同一套协议**（租约/心跳/幂等重拉/热替换退出码 86 +
  *  内部监督器重拉），差别只有 `--poll` 指向本机 hub、`--device cpu`。控制台只负责
  *  启停（与其它受管组件同规：账本 + 变更检测重启 + 整树停止）。
+ *
+ *  ★ **一个进程服务所有课程**（2026-09-19，用户口径：「它和云端 worker 一样，只与 hub 通信，
+ *  领到任务后直接执行，完成后回传结果」）：`/jobs/next` 从来不看课程——job 由 hub 按队列
+ *  分发、manifest 自带课程快照、结果按 job_id 回家。故 spec 与**课程无关**（`course: ''`、
+ *  单一 work 目录与日志）；「这门课的 worker」这个归属只存在于旧账本的每课条目里（启动时
+ *  被换代接管收掉）。
  *
  *  语义注意：push（worker_server）不在这里——push 模式的执行面就是既有 `workerServe`
  *  组件（同一台机器两个模式各占半边，不重复实现）。 */
 export function localWorkerSpec(
   cfg: RlConfig,
   venv: { python: string; sitePackages: string },
-  course = '',
 ): ProcSpec {
-  // 共享 hub（2026-09-18）：本机 worker 与本课之外的所有课共用一个作业中枢——
-  // 它领到哪门课的 job 就干哪门课的活（job 自带课程快照，结果按 job_id 回家）。
+  // 共享 hub（2026-09-18）：一个作业中枢服务所有课程。
   const hubUrl = sharedHubUrl(cfg)
   // torch 线程：0/缺省 = torch 默认（云端 worker 同语义）；配了 rl.torch_threads 就透传——
   // 本机 worker 与 rollout 子进程抢核，这时它是唯一能限核的旋钮。
   const threads = Math.round(Number(cfg.rl?.torch_threads ?? 0) || 0)
-  // work 目录 per-course（与 workerServe 同规：双课同机时两个 worker 的 job 目录/payload
-  // 归档不得互相踩）；无课程沿用旧路径。--out 由 python 侧按仓库根解析（worker main）。
+  // work 目录唯一（不再 per-course）：一个进程串行干所有课的活，job 目录/payload 按 job_id
+  // 归档，故不存在互踩。--out 由 python 侧按仓库根解析（worker main）。
   return {
     key: 'localWorker',
     name: 'local-worker (本机 PPO worker)',
-    course,
+    course: '',
     cmd: [
       venv.python,
       '-u',
@@ -254,16 +258,17 @@ export function localWorkerSpec(
       '--token',
       cfg.rl.remote_token,
       '--out',
-      course ? `tmp/local-worker-${course}` : 'tmp/local-worker',
+      'tmp/local-worker',
       '--device',
       'cpu',
       ...(threads > 0 ? ['--threads', String(threads)] : []),
     ],
     cwd: NN_TRAINING,
     env: { PYTHONPATH: `${venv.sitePackages}${path.delimiter}${NN_TRAINING}` },
-    log: path.join(course ? courseLogDir(course) : LOG_DIR, 'local-worker.log'),
+    log: path.join(LOG_DIR, 'local-worker.log'),
     // 无 HTTP 端点可探（它是出站轮询者）——存活即健康，与 trainingLoop 同口径。
-    healthy: async () => pidAlive(entryForCourse(loadRegistry(), 'localWorker', course)?.pid),
+    // 槽恒 `''`（共享实例不属于任何单门课；归一唯一归宿 = registry.scopeOf）。
+    healthy: async () => pidAlive(entryForCourse(loadRegistry(), 'localWorker', '')?.pid),
     // 入口 + 实际执行链（remote/worker.py 是全部逻辑、protocol.py 是线路格式）：
     // 手工哨兵补足 codehash-files.txt 之外的依赖面（漏报 = worker 用旧协议跑新 job）。
     sentinels: pySentinels(

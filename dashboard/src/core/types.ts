@@ -140,7 +140,9 @@ export interface RegistryEntry {
   /** 进程入口（监督重启/变更检测用）。 */
   entry?: string
   course?: string
-  /** 槽位（§1.4 重建契约：hubServer/cloudflared/localWorker/workerServe 重启时必须知道自己占哪槽）。 */
+  /** 槽位（§1.4 重建契约：重启时必须知道自己占哪槽）。
+   *  **共享组件恒 0/缺省**（hubServer / cloudflared / trainingLoop / localWorker 的实例不属
+   *  任何单门课——判据 `registry.componentScope`）；只有按课程的 workerServe 用它推端口。 */
   slot?: number
   url?: string
   log?: string
@@ -163,7 +165,9 @@ export interface RegistryEntry {
 
 /** registry.json：全部组件条目（缺省组件 = 未启动）。
  *
- *  多课程形状（plan §1.4，P1b）：按课程键控的五个组件各有一份 `Record<course, Entry>`。
+ *  多课程形状（plan §1.4，P1b）：五个组件键各有一份 `Record<course, Entry>`（**表**按课程，
+ *  但 hubServer / cloudflared / trainingLoop / localWorker 四条是**共享**实例，槽恒 `''`；
+ *  谁按课程看 `registry.componentScope`，不要看表名）。
  *  旧扁平单键（`hubServer`/…）**已在 P5 移除**（R2）：类型里不再声明，唯一读点是
  *  `registry.ts::migrateFlatCourseEntries` 的一次性搬迁（把旧条目搬进 per-course 表再删键），
  *  写入路径不再产生扁平键（`saveComponent` 只服务 selfNode）。
