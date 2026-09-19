@@ -1,13 +1,19 @@
+/**
+ * eval-course-ckpt.test.ts ↔ tools/sim/eval-course-ckpt.ts + tools/lib/hybrid-batch.ts
+ *
+ * 2026-09-19 重构后：节点通信/重试/探测全部搬去 Python（`nn-training/eval_course_once.py`
+ * → `rl.batch_eval.BatchEvalRunner`），本文件只覆盖 TS 侧仍然拥有的东西：
+ *   * 课程 JSONC 解析（与 Python `rl/jsonc.py` 同口径，两端都读同一批关卡文件）
+ *   * `--weights label=path` 解析、spec 构造（本机份额/noNodes/dist 配置如何透传）
+ *   * `TailRaceBatch` 的纯逻辑（Python 队列的 TS 镜像）
+ */
 import { describe, expect, it } from 'bun:test'
 import { existsSync, readFileSync } from 'fs'
+import { TailRaceBatch } from '../tools/lib/hybrid-batch'
 import {
-  buildCourseJobs,
-  buildRemoteTaskUrl,
-  bunMajorMinor,
-  fanOutOrder,
-  manifestToCourseRow,
-  nodeGateReason,
+  buildSpec,
   parseCourseJsonc,
+  parseWeightSpec,
   stripTrailingCommas,
 } from '../tools/sim/eval-course-ckpt'
 
@@ -66,206 +72,50 @@ describe('eval-course-ckpt JSONC 管线', () => {
   )
 })
 
-describe('eval-course-ckpt dist 映射', () => {
-  const weights = [
-    { path: 'tmp/a.json', label: 'bc' },
-    { path: 'tmp/b.json', label: 'it30' },
-  ]
+describe('spec 构造（透传给 Python 引擎的参数）', () => {
+  it('--weights 解析：label=path 与裸路径', () => {
+    expect(parseWeightSpec('it30=tmp/w.json')).toEqual({ path: 'tmp/w.json', label: 'it30' })
+    expect(parseWeightSpec('tmp/w.json')).toEqual({ path: 'tmp/w.json', label: 'w.json' })
+  })
 
-  it('buildCourseJobs：stageLocal/seed/stageId 与本地口径一致', () => {
-    // 3 关 × games=7 seed0=100：g=0..6 → stage 0,1,2,0,1,2,0；seed = 100 + floor(g/3)
-    const jobs = buildCourseJobs(weights, 7, 100, 3)
-    expect(jobs.length).toBe(14)
-    expect(jobs[0]).toMatchObject({
-      id: 0,
-      weightIdx: 0,
-      label: 'bc',
-      stageLocal: 0,
-      seed: 100,
-      stageId: 2000,
+  it('本机份额 / 无节点 / dist 配置都进 spec；未指定则**不写**该键（让 Python 读配置）', () => {
+    const base = {
+      course: 'nn-training/levels/ladder-c06.jsonc',
+      weights: [{ label: 'it30', path: 'tmp/w.json' }],
+      games: 8,
+      seed0: 405000,
+      policy: 'nn' as const,
+      iterId: 't1',
+      runDir: 'tmp/x.run',
+      out: 'tmp/x.jsonl',
+      noNodes: false,
+    }
+    const bare = buildSpec(base)
+    expect('localSlots' in bare).toBe(false) // 缺省 = 配置（policy.evalLocalSlots → rl.local_slots）
+    expect('distCfgPath' in bare).toBe(false)
+
+    const explicit = buildSpec({
+      ...base,
+      localSlots: 0,
+      distCfgPath: 'nn-training/rl-config.json',
+      noNodes: true,
     })
-    expect(jobs[2]).toMatchObject({ stageLocal: 2, seed: 100, stageId: 2002 })
-    expect(jobs[3]).toMatchObject({ stageLocal: 0, seed: 101, stageId: 2000 })
-    expect(jobs[6]).toMatchObject({ stageLocal: 0, seed: 102, stageId: 2000 })
-    // 第二份权重 id 连续
-    expect(jobs[7]).toMatchObject({ id: 7, weightIdx: 1, label: 'it30', stageLocal: 0, seed: 100 })
-  })
-
-  it('buildRemoteTaskUrl：mode=eval + stageJson + lives/level', () => {
-    const url = buildRemoteTaskUrl({
-      baseUrl: 'http://127.0.0.1:8443/',
-      iterId: 'evalcourse-1',
-      wver: 'abc',
-      kind: 'rollout',
-      stageId: 2001,
-      seed: 42,
-      maxTicks: 12000,
-      difficulty: 'hard',
-      policy: 'nn',
-      stageJson: '{"name":"s1","tiles26":[]}',
-      livesOverride: 1,
-      playerLevel: 0,
-    })
-    expect(url.startsWith('http://127.0.0.1:8443/v1/task?')).toBe(true)
-    const q = new URL(url).searchParams
-    expect(q.get('mode')).toBe('eval')
-    expect(q.get('kind')).toBe('rollout')
-    expect(q.get('stage')).toBe('2001')
-    expect(q.get('seed')).toBe('42')
-    expect(q.get('stageJson')).toBe('{"name":"s1","tiles26":[]}')
-    expect(q.get('livesOverride')).toBe('1')
-    expect(q.get('playerLevel')).toBe('0')
-    expect(q.get('policy')).toBeNull() // nn 不下发 policy
-  })
-
-  it('buildRemoteTaskUrl：god 策略带 policy + kind=none', () => {
-    const url = buildRemoteTaskUrl({
-      baseUrl: 'http://n',
-      iterId: 'x',
-      wver: 'deadbeef',
-      kind: 'none',
-      stageId: 2000,
-      seed: 0,
-      maxTicks: 36000,
-      difficulty: 'hard',
-      policy: 'god',
-      stageJson: '{}',
-      livesOverride: 3,
-      playerLevel: 0,
-    })
-    const q = new URL(url).searchParams
-    expect(q.get('kind')).toBe('none')
-    expect(q.get('policy')).toBe('god')
-  })
-
-  it('manifestToCourseRow：Phase0 与击杀字段透传', () => {
-    const task = buildCourseJobs([{ path: '', label: 'god' }], 1, 0, 1)[0]!
-    const row = manifestToCourseRow(
-      {
-        outcome: 'stage_clear',
-        win: true,
-        cleared: true,
-        ticks: 800,
-        kills: 20,
-        enemyHits: 30,
-        playerHits: 2,
-        playerDamageTaken: 4,
-        playerShots: 40,
-        powerUpsCollected: 1,
-        score: 12.5,
-        hitsByKind: [1, 2, 3, 4],
-        killsByKind: [10, 5, 3, 2],
-        exposureByKind: [100, 50, 20, 10],
-        firstHitKind: 'basic',
-        firstKillKind: 'fast',
-        killOrder: ['basic', 'fast'],
-        killerKinds: ['armor', null],
-      },
-      task,
-      'arena-a',
-    )
-    expect(row).toMatchObject({
-      label: 'god',
-      stageId: 2000,
-      stageName: 'arena-a',
-      outcome: 'stage_clear',
-      win: true,
-      cleared: true,
-      kills: 20,
-      hitsByKind: [1, 2, 3, 4],
-      killsByKind: [10, 5, 3, 2],
-      firstHitKind: 'basic',
-      firstKillKind: 'fast',
-      killOrder: ['basic', 'fast'],
-      killerKinds: ['armor', null],
-    })
-  })
-
-  it('manifestToCourseRow：缺 Phase0 键时填零，不抛错', () => {
-    const task = buildCourseJobs([{ path: '', label: 'nn' }], 1, 5, 2)[0]!
-    const row = manifestToCourseRow({ outcome: 'gameover', win: false }, task, 's0')
-    expect(row.seed).toBe(5)
-    expect(row.stageId).toBe(2000)
-    expect(row.hitsByKind).toEqual([0, 0, 0, 0])
-    expect(row.killOrder).toEqual([])
-    expect(row.killerKinds).toEqual([])
-  })
-
-  it('nodeGateReason：能力位 / bun / codeHash', () => {
-    expect(nodeGateReason(null, '1.2', 'aa')).toBe('ping failed')
-    expect(
-      nodeGateReason(
-        { evalSupport: false, stageJsonSupport: true, bunVersion: '1.2' },
-        '1.2',
-        'aa',
-      ),
-    ).toBe('lacks evalSupport')
-    expect(
-      nodeGateReason(
-        { evalSupport: true, stageJsonSupport: false, bunVersion: '1.2' },
-        '1.2',
-        'aa',
-      ),
-    ).toBe('lacks stageJsonSupport')
-    expect(
-      nodeGateReason(
-        { evalSupport: true, stageJsonSupport: true, bunVersion: '1.3.9' },
-        '1.2',
-        'aa',
-      ),
-    ).toBe('bun version mismatch')
-    expect(
-      nodeGateReason(
-        { evalSupport: true, stageJsonSupport: true, bunVersion: '1.2.1', codeHash: 'bb' },
-        '1.2',
-        'aa',
-      ),
-    ).toMatch(/codeHash mismatch/)
-    expect(
-      nodeGateReason(
-        { evalSupport: true, stageJsonSupport: true, bunVersion: '1.2.1', codeHash: 'aa' },
-        '1.2',
-        'aa',
-      ),
-    ).toBeNull()
-  })
-
-  it('bunMajorMinor', () => {
-    expect(bunMajorMinor('1.2.3')).toBe('1.2')
-    expect(bunMajorMinor('1.1.38')).toBe('1.1')
+    expect(explicit.localSlots).toBe(0)
+    expect(explicit.distCfgPath).toBe('nn-training/rl-config.json')
+    expect(explicit.noNodes).toBe(true)
+    expect(explicit.policy).toBe('nn')
   })
 })
 
-describe('eval-course-ckpt 消费者轮转顺序', () => {
-  it('第一轮每个节点各拿 1 条链（不被排头的节点秒光）', () => {
-    // 复现 2026-09-19 实测：5 节点（self 排第一、各 8/8/7/7/7 槽）+ local 0、8 局。
-    const order = fanOutOrder(0, [8, 8, 7, 7, 7])
-    expect(order.slice(0, 5)).toEqual([
-      { node: 0 },
-      { node: 1 },
-      { node: 2 },
-      { node: 3 },
-      { node: 4 },
-    ])
-    // 总数 = 各节点容量之和（链数没变，只是启动次序变了）。
-    expect(order.length).toBe(8 + 8 + 7 + 7 + 7)
-    expect(order.filter((s) => 'local' in s)).toEqual([])
-  })
-
-  it('每轮先本地链后节点链，节点容量小的先停', () => {
-    const order = fanOutOrder(2, [2, 1])
-    expect(order).toEqual([{ local: 0 }, { node: 0 }, { node: 1 }, { local: 1 }, { node: 0 }])
-  })
-
-  it('边界：无节点 / 无本地 / 全空', () => {
-    expect(fanOutOrder(3, [])).toEqual([{ local: 0 }, { local: 1 }, { local: 2 }])
-    expect(fanOutOrder(0, [2, 3])).toEqual([
-      { node: 0 },
-      { node: 1 },
-      { node: 0 },
-      { node: 1 },
-      { node: 1 },
-    ])
-    expect(fanOutOrder(0, [])).toEqual([])
+describe('TailRaceBatch.cursorDone（Python 侧 rescan 停止条件的 TS 镜像）', () => {
+  it('游标发完前 false，发完后 true（含尾竞速阶段）', () => {
+    const b = new TailRaceBatch(3)
+    expect(b.cursorDone).toBe(false)
+    b.consumer(1)
+    expect(b.claim(false)).toBe(0)
+    expect(b.cursorDone).toBe(false)
+    expect(b.claim(false)).toBe(1)
+    expect(b.claim(false)).toBe(2)
+    expect(b.cursorDone).toBe(true)
   })
 })

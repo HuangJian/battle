@@ -361,6 +361,28 @@ def reset_restart_state() -> None:
     _RESTART_SEEN.clear()
 
 
+def seed_restart_state(entries: list) -> int:
+    """把调用方持久化的跨代去重 memo 灌回 `_RESTART_SEEN`。返回灌入条数。
+
+    一次性进程（CLI）专用：本模块的去重状态只活在进程内，调用方（TS 工具）把上次
+    成功下发的 (nid, agent codeHash, 期望 hash) 存盘，下次调用前预置回来 ⇒ 守卫
+    的 `dedup` 分支语义与常驻训练循环**逐字一致**，不必在调用方重写判据。
+    每项须含 id / pingHash / expectedHash（全量 hex，不接受截断值）。
+    """
+    n = 0
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        nid = str(e.get("id") or "").strip()
+        ping_hash = str(e.get("pingHash") or "").strip()
+        exp_hash = str(e.get("expectedHash") or "").strip()
+        if not nid or not ping_hash or not exp_hash:
+            continue
+        _RESTART_SEEN[nid] = (ping_hash, exp_hash)
+        n += 1
+    return n
+
+
 def _parse_porcelain(text: str) -> list[str]:
     """git status --porcelain v1 输出 → 路径列表（含改名目标、去引号）。"""
     out: list[str] = []
@@ -537,8 +559,16 @@ def upgrade_stale_nodes(
             dirty=dirty,
             expected_hash=expected_hash,
         )
+        # pingHash 回传给调用方：一次性 CLI 要靠它把本次下发写进跨调用 memo
+        #（键 = (nid, agent ping hash, 期望 hash)，与 _RESTART_SEEN 同构）。
         out.append(
-            {"id": nid, "upgraded": ok, "reason": reason, "agentVersion": ping.get("agentVersion")}
+            {
+                "id": nid,
+                "upgraded": ok,
+                "reason": reason,
+                "pingHash": ping_hash,
+                "agentVersion": ping.get("agentVersion"),
+            }
         )
     return out
 

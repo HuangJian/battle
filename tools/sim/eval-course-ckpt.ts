@@ -1,104 +1,51 @@
 #!/usr/bin/env bun
 /**
  * eval-course-ckpt.ts — greedy evaluation of NN-policy checkpoint(s) on a
- * curriculum course's custom stages (2000+), headless & parallel.
+ * curriculum course's custom stages (2000+), headless.
  *
- * Unlike m1-eval.ts (built-in STAGES only), this evaluates the checkpoint on
- * `--course <name|path>.jsonc` custom stages — e.g. the p1-onset stages —
- * through the same masked-argmax deployment evaluator as the RL eval loop
- * (export-eval-game.runEvalOne, pure v7 scoring). Rows carry the full hit
- * accounting (kills / enemyHits 击中 / playerHits+playerDamageTaken 被击中),
- * the fields the RL metrics (reward_library METRICS 30-dim) track.
- *
- * Determinism & parallelism: each game is a pure function of (weights bytes,
- * stageLocal, seed) — fresh World, own seeded RNG, decodeStageGrid spawn
- * variant picked by seed hash. Jobs are split round-robin across
- * `runChunkedWorkers` (physical-core cap, defaultWorkerCount) so parallel ==
- * serial; JSONL rows are emitted in submission order (stable aggregation).
- *
- * Distributed (2026-09-19, same hybrid path as m1-eval auto-dist): when
- * `nn-training/rl-config.json` has enabled nodes (or `--dist-nodes <path>`),
- * games fan out to sampler-agent `mode=eval` + custom `stageJson` (stage id
- * 2000+stageLocal), while local workers keep a share. Node gate =
- * evalSupport ∧ stageJsonSupport ∧ bun major.minor ∧ codeHash (rollout 同源).
- * Force local with `--no-dist`. `--policy nn-goal` stays local-only.
- *
- * 节点可用性**必须说出来**（2026-09-19）：门被拒的节点逐条打印，门后另有一条
- * 聚合 WARN（可用数/被拒原因/两侧 codeHash），收尾再打 provenance（`node:<id>` /
- * `local` 逐来源计数）——判读时一眼看出远端有没有真的参与。`--upgrade-nodes` 时
- * 对 stale 节点下发 pull+restart，复用训练循环的守卫（`dist_common.
- * request_upgrade_guarded`，经 nn-py-safe.sh；**不在 TS 里重写护栏**，见
- * tools/lib/node-upgrade.ts）。
+ * 架构（2026-09-19 重构；用户裁定「不要在 TS 里重新实现一套节点通信和重试」）：
+ *   * **本地与分布式都由 Python 引擎跑**：`nn-training/eval_course_once.py` →
+ *     `rl.batch_eval.BatchEvalRunner`。节点门 / ping / 退避重试 / 失败连击停用 /
+ *     权重下发 / wver(409) / 本机份额 / 队列尾竞速，全部是训练栈里长期实战的
+ *     那一份（`dist_common.fetch_task`、`post_weights_parallel`、`rl/queue.py`）。
+ *     TS 侧**不再**复制任何节点通信逻辑（旧实现探测/重试/rescan/停用/本机槽位
+ *     各写一份，既漂移又漏护栏，已删除）。
+ *   * 本文件只做四件事：解析参数 → 写 spec → 经 `nn-py-safe.sh` 调 Python →
+ *     读回 JSONL 打汇总。逐局行由 Python 写（含 Phase-0 七列 + `node` 来源列）。
+ *   * 本机份额：`--dist-local N` 透传为 `policy.evalLocalSlots` 的**内存**覆盖；
+ *     缺省由配置决定（`policy.evalLocalSlots` → `rl.local_slots`）。
+ *   * `--policy nn-goal` 是 TS 独有的目标层实验路径（GOAL_SOURCE/GOAL_BIAS 未进
+ *     agent 协议），仍走本机 worker 分片，不做分布式。
  *
  * Usage:
- *   bun tools/sim/eval-course-ckpt.ts --course p1-onset \
- *       --weights tmp/p1-bc-smoke/weights.json.ckpt.3 --games 100
- *   bun tools/sim/eval-course-ckpt.ts --course nn-training/curricula/p1-onset.jsonc \
- *       --weights a.json --weights b.json --games 50 --workers 8 \
- *       --out tmp/p1-eval-rows.jsonl
- *   bun tools/sim/eval-course-ckpt.ts --course p1-onset --policy god --games 100 \
- *       # true God-AI (DEFAULT_GOD_AI_PARAMS, RNG 同 simulation-runner，无需 --weights)
- *   bun tools/sim/eval-course-ckpt.ts --course p1-onset --weights w.json \
- *       --dist-nodes nn-training/rl-config.json --out tmp/x.jsonl
+ *   bun tools/sim/eval-course-ckpt.ts --course nn-training/levels/ladder-c06.jsonc \
+ *       --weights it30=tmp/weights/it30.json --games 800 --seed0 405000 \
+ *       --out tmp/x20-settle/backtest-c06.jsonl
+ *   bun tools/sim/eval-course-ckpt.ts --course p1-onset --policy god --games 100
+ *   bun tools/sim/eval-course-ckpt.ts --course p1-onset --weights a.json --dist-local 0
+ *   bun tools/sim/eval-course-ckpt.ts --course p1-onset --no-dist --weights a.json  # 纯本机（Python 本机槽）
+ *   bun tools/sim/eval-course-ckpt.ts --course nn-training/levels/ladder-c06.jsonc \
+ *       --weights a.json --policy nn-goal --goal-source god   # 本机 worker（无分布式）
  *
- * Output: one JSON row per game (JSONL) to --out or stdout; human summary per
- * checkpoint to stderr.
+ * Output: one JSON row per game (JSONL) to --out; human summary to stderr.
+ * 运行目录（spec / Python 账本 eval_log.jsonl / 本机局 workdir）= `<out>.run/`。
  */
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs'
-import { createHash } from 'node:crypto'
-import { gzipSync } from 'node:zlib'
 import { dirname, resolve } from 'path'
+import { spawnSync } from 'node:child_process'
 import { splitRoundRobin, defaultWorkerCount } from '../lib/worker-pool'
 import { flag } from '../lib/cli'
-import { TailRaceBatch } from '../lib/hybrid-batch'
-import { unpackContainer } from './pack-container'
 import { computeCodeHash } from '../agent/codehash-files'
-import {
-  bunMajorMinor,
-  claimNote,
-  gateWarning,
-  nodeGateReason,
-  provenanceNote,
-  type DistNodeCfg,
-  type DistPing,
-  type NodeGateEntry,
-} from '../lib/dist-node-gate'
 import { requestNodeUpgrades, resolveUpgradeBranch, upgradeLogLines } from '../lib/node-upgrade'
-import type { EvalCourseWorkerPayload, EvalCourseRow } from './eval-course-ckpt-worker'
+import type { EvalCourseRow, EvalCourseWorkerPayload } from './eval-course-ckpt-worker'
 
-// 节点门 / bun 版本口径的实现在 tools/lib/dist-node-gate.ts（与 m1-eval 共享）；
-// 这里保留同名导出，既有调用方与单测的导入面不变。
-export { bunMajorMinor, nodeGateReason }
-export type { DistNodeCfg, DistPing }
-
-/**
- * 消费者起始顺序（纯函数，可单测）：第 r 轮 = 「本机第 r 条链（若有）」+「每个节点第 r 条链（若其容量够）」。
- *
- * 为什么需要它：链体在**首次 await 前**就同步 claim 了任务，所以「先 spawn 谁谁多吃」——
- * 旧代码把配置里第一个节点（常是 self）的并发链全部先起，它们在同步 claim 阶段就把整批任务
- * 秒光（2026-09-19 实测：5 个节点可用、8 局的批量 100% 落在 node:self，远端一条也没分到）。
- * 轮转只改启动顺序，共享游标 + 尾部竞速的语义不变（链多任务少时依旧快者多吃）。
- */
-export function fanOutOrder(
-  localCap: number,
-  nodeCaps: number[],
-): Array<{ local: number } | { node: number }> {
-  const out: Array<{ local: number } | { node: number }> = []
-  const rounds = Math.max(localCap, ...nodeCaps, 0)
-  for (let r = 0; r < rounds; r++) {
-    if (r < localCap) out.push({ local: r })
-    for (let n = 0; n < nodeCaps.length; n++) if (r < (nodeCaps[n] ?? 1)) out.push({ node: n })
-  }
-  return out
-}
-
-const WORKER_URL = new URL('./eval-course-ckpt-worker.ts', import.meta.url).href
-/** 仓根（升级子进程 cwd 与 nn-py-safe.sh 的相对路径解析都用它）。 */
+const REPO_ROOT_WORKER = new URL('./eval-course-ckpt-worker.ts', import.meta.url).href
 const REPO_ROOT = resolve(import.meta.dir, '..', '..')
 const CURRICULA_DIR = 'nn-training/curricula'
 const DEFAULT_DIST_CFG = 'nn-training/rl-config.json'
-/** sampler-agent 对 stageJson 的硬上限（query 串 + 校验）。 */
-const STAGE_JSON_MAX = 16384
+/** 仓根（升级子进程 cwd 与 nn-py-safe.sh 的相对路径解析都用它）。 */
+const PY_ENTRY = 'nn-training/eval_course_once.py'
+const PY_SAFE = 'tools/githook/nn-py-safe.sh'
 
 interface CourseJson {
   stages: Array<Record<string, unknown> & { name?: string }>
@@ -238,126 +185,51 @@ function parseRangeInt(spec: string | undefined, fallback: number): number {
   return Number.isInteger(n) && n > 0 ? n : fallback
 }
 
-// ---------------- dist 纯函数（可单测；不碰网络） ----------------
-
-export interface CourseJob {
-  id: number
-  weightIdx: number
-  label: string
-  stageLocal: number
-  seed: number
-  /** 自定义关 stage id：与 worker / batch_eval 同命名空间（2000+）。 */
-  stageId: number
-}
-
-/**
- * 课程局任务展开：stageLocal = g % nStages；seed = seed0 + floor(g / nStages)。
- * 与本地 worker 路径同一映射（docs 中已固定的探针口径）。
- */
-export function buildCourseJobs(
-  weights: Array<{ path: string; label: string }>,
-  games: number,
-  seed0: number,
-  nStages: number,
-): CourseJob[] {
-  const jobs: CourseJob[] = []
-  if (nStages <= 0 || games <= 0) return jobs
-  for (let wi = 0; wi < weights.length; wi++) {
-    for (let g = 0; g < games; g++) {
-      const stageLocal = g % nStages
-      jobs.push({
-        id: wi * games + g,
-        weightIdx: wi,
-        label: weights[wi].label,
-        stageLocal,
-        seed: seed0 + Math.floor(g / nStages),
-        stageId: 2000 + stageLocal,
-      })
-    }
-  }
-  return jobs
-}
-
-export interface RemoteTaskUrlOpts {
-  baseUrl: string
+/** Python 入口的 spec（写盘交给 `eval_course_once.py --spec`，避免 argv 引号地狱）。 */
+export interface CourseOnceSpec {
+  course: string
+  weights: Array<{ label: string; path: string }>
+  games: number
+  seed0: number
+  policy: 'nn' | 'god'
   iterId: string
-  wver: string
-  kind: string
-  stageId: number
-  seed: number
-  maxTicks: number
-  difficulty: string
-  policy: string
-  stageJson: string
-  livesOverride: number
-  playerLevel: number
+  runDir: string
+  out: string
+  noNodes: boolean
+  localSlots?: number
+  distCfgPath?: string
+  windowSec?: number
 }
 
-/** 构造 sampler-agent `/v1/task` 查询串（mode=eval + 课程自定义关 stageJson）。 */
-export function buildRemoteTaskUrl(o: RemoteTaskUrlOpts): string {
-  const p = new URLSearchParams()
-  p.set('iterId', o.iterId)
-  p.set('wver', o.wver)
-  p.set('stage', String(o.stageId))
-  p.set('seed', String(o.seed))
-  p.set('maxTicks', String(o.maxTicks))
-  p.set('difficulty', o.difficulty)
-  p.set('mode', 'eval')
-  p.set('kind', o.kind)
-  if (o.policy && o.policy !== 'nn') p.set('policy', o.policy)
-  if (o.stageJson) p.set('stageJson', o.stageJson)
-  p.set('livesOverride', String(o.livesOverride))
-  p.set('playerLevel', String(o.playerLevel))
-  return `${o.baseUrl.replace(/\/$/, '')}/v1/task?${p.toString()}`
-}
-
-/** 节点 pack manifest → eval-course-ckpt JSONL 行（Phase0 字段由 export-eval-game 顶层携带）。 */
-export function manifestToCourseRow(
-  m: Record<string, unknown>,
-  task: CourseJob,
-  stageName: string,
-): EvalCourseRow {
-  const num = (k: string): number => (typeof m[k] === 'number' ? (m[k] as number) : 0)
-  const bool = (k: string): boolean => m[k] === true
-  const numArr = (k: string, len: number): number[] => {
-    const v = m[k]
-    if (Array.isArray(v) && v.every((x) => typeof x === 'number')) return v as number[]
-    return Array.from({ length: len }, () => 0)
+export function buildSpec(o: {
+  course: string
+  weights: Array<{ label: string; path: string }>
+  games: number
+  seed0: number
+  policy: 'nn' | 'god'
+  iterId: string
+  runDir: string
+  out: string
+  noNodes: boolean
+  localSlots?: number
+  distCfgPath?: string
+  windowSec?: number
+}): CourseOnceSpec {
+  const spec: CourseOnceSpec = {
+    course: o.course,
+    weights: o.weights,
+    games: o.games,
+    seed0: o.seed0,
+    policy: o.policy,
+    iterId: o.iterId,
+    runDir: o.runDir,
+    out: o.out,
+    noNodes: o.noNodes,
   }
-  const strOrNull = (k: string): string | null => {
-    const v = m[k]
-    return typeof v === 'string' ? v : null
-  }
-  const killerKinds = ((): (string | null)[] => {
-    const v = m.killerKinds
-    if (!Array.isArray(v)) return []
-    return v.map((x) => (typeof x === 'string' ? x : null))
-  })()
-  return {
-    label: task.label,
-    id: task.id,
-    stageId: task.stageId,
-    stageName,
-    seed: task.seed,
-    outcome: String(m.outcome ?? 'error'),
-    win: bool('win'),
-    cleared: bool('cleared'),
-    ticks: num('ticks'),
-    kills: num('kills'),
-    enemyHits: num('enemyHits'),
-    playerHits: num('playerHits'),
-    playerDamageTaken: num('playerDamageTaken'),
-    playerShots: num('playerShots'),
-    powerUpsCollected: num('powerUpsCollected'),
-    score: num('score'),
-    hitsByKind: numArr('hitsByKind', 4),
-    killsByKind: numArr('killsByKind', 4),
-    exposureByKind: numArr('exposureByKind', 4),
-    firstHitKind: strOrNull('firstHitKind'),
-    firstKillKind: strOrNull('firstKillKind'),
-    killOrder: Array.isArray(m.killOrder) ? (m.killOrder as string[]) : [],
-    killerKinds,
-  }
+  if (o.localSlots !== undefined) spec.localSlots = o.localSlots
+  if (o.distCfgPath) spec.distCfgPath = o.distCfgPath
+  if (o.windowSec !== undefined) spec.windowSec = o.windowSec
+  return spec
 }
 
 interface LabelAgg {
@@ -438,47 +310,31 @@ function summarize(rows: EvalCourseRow[], outPath: string | undefined, t0: numbe
   )
 }
 
-function emitRows(rows: EvalCourseRow[], outPath: string | undefined): void {
-  const lines = rows.map((r) => JSON.stringify(r))
-  if (outPath) {
-    mkdirSync(dirname(outPath), { recursive: true })
-    writeFileSync(outPath, lines.join('\n') + '\n')
-  } else {
-    for (const l of lines) console.log(l)
-  }
+/** 逐局行读回（Python 已按 id 排序写好；此处只解析 + 打汇总）。 */
+function readRows(outPath: string): EvalCourseRow[] {
+  const text = readFileSync(outPath, 'utf8').trim()
+  if (!text) return []
+  return text.split('\n').map((l) => JSON.parse(l) as EvalCourseRow)
 }
 
 /**
- * Chunk-per-worker runner (mirrors tools/lib/worker-pool runChunkedWorkers but
- * surfaces per-chunk errors instead of resolving empty). Each chunk payload is
- * posted to its own short-lived worker; the worker answers once with
- * { results, error? }.
+ * `--upgrade-nodes`：扫描 stale 节点并下发 pull+restart。**探测与判 stale 都不在 TS 里**
+ * ——`nn-training/dist_upgrade_cli.py` 直接调训练循环的
+ * `dist_common.upgrade_stale_nodes`（ping → codeHash ≠ expected → request_upgrade_guarded），
+ * TS 只拼 spec、读结果、打日志（升级要 pull+重启，本步会阻塞至多 ~3s/节点，属显式开关）。
  */
-async function runChunks(
-  chunks: EvalCourseWorkerPayload[],
-): Promise<Array<{ results: EvalCourseRow[]; error?: string }>> {
-  const settled = await Promise.all(
-    chunks.map(
-      (payload) =>
-        new Promise<{ results: EvalCourseRow[]; error?: string }>((resolve, reject) => {
-          const w = new Worker(WORKER_URL)
-          w.addEventListener('message', (ev: MessageEvent) => {
-            const d = ev.data as { results: EvalCourseRow[]; error?: string }
-            resolve({ results: d.results ?? [], error: d.error })
-            w.terminate()
-          })
-          w.addEventListener('error', (err: unknown) => {
-            w.terminate()
-            reject(new Error((err as ErrorEvent)?.message ?? String(err)))
-          })
-          w.postMessage(payload)
-        }),
-    ),
-  )
-  return settled
+function maybeUpgradeNodes(cfgPath: string): void {
+  const up = requestNodeUpgrades({
+    repoRoot: REPO_ROOT,
+    cfgPath,
+    branch: resolveUpgradeBranch(REPO_ROOT),
+    expectedHash: computeCodeHash(),
+  })
+  for (const l of upgradeLogLines('[eval-course-ckpt]', up)) process.stderr.write(`${l}\n`)
 }
 
-/** 持久 worker 串行跑一个 payload（hybrid 本地槽）。 */
+// ---------------- nn-goal：TS 独有的本机 worker 路径（无分布式） ----------------
+
 function runWorkerOnce(
   w: Worker,
   payload: EvalCourseWorkerPayload,
@@ -501,353 +357,59 @@ function runWorkerOnce(
   })
 }
 
-interface WeightSlot {
-  path: string
-  label: string
-  bytes: Buffer
-  sha: string
-  kind: 'rollout' | 'none'
-}
-
-async function uploadWeightsToNode(
-  node: DistNodeCfg,
-  slot: WeightSlot,
-  iterId: string,
-): Promise<void> {
-  const resp = await fetch(`${node.url.replace(/\/$/, '')}/v1/weights`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${node.authKey ?? ''}`,
-      'Content-Type': 'application/octet-stream',
-      'x-weights-sha256': slot.sha,
-      'x-iter-id': iterId,
-      'x-kind': slot.kind,
-    },
-    body: gzipSync(slot.bytes),
-    signal: AbortSignal.timeout(120_000),
-  })
-  if (resp.status !== 200 && resp.status !== 204)
-    throw new Error(`${node.id} weights upload HTTP ${resp.status}`)
-}
-
-interface HybridCtx {
-  jobs: CourseJob[]
-  stagePayloads: Array<{ name: string; json: string }>
-  weightsSlots: WeightSlot[]
-  difficulty: string
-  maxTicks: number
-  lives: number
-  level: number
-  policy: string
-  iterId: string
-  localWorkers: number
-  distCfgPath: string
-  /** `--upgrade-nodes`：对 stale 节点下发 pull+restart（训练循环同规守卫）。 */
-  upgradeNodes: boolean
-}
-
-interface HybridResult {
-  rows: EvalCourseRow[]
-  errors: string[]
-  /** 节点门逐节点判定（告警用）。 */
-  gate: NodeGateEntry[]
-  /** 本机 codeHash（告警文案里的 local 侧）。 */
-  localCodeHash: string
-  /** 逐局来源计数：`node:<id>` / `local`（判读口径用）。 */
-  bySrc: Record<string, number>
-  /** 逐消费者**分派**计数（`node:<id>` / `local`）——与 bySrc（结算）配对读。 */
-  byClaim: Record<string, number>
-}
-
-async function runHybrid(ctx: HybridCtx): Promise<HybridResult> {
-  const cfgRaw = JSON.parse(readFileSync(ctx.distCfgPath, 'utf8')) as { nodes?: DistNodeCfg[] }
-  const nodes = (cfgRaw.nodes ?? []).filter((n) => n.enabled !== false && n.url)
-  const localBunMM = bunMajorMinor(process.versions.bun ?? Bun.version ?? '?')
-  const localCodeHash = computeCodeHash()
-  const rows: EvalCourseRow[] = []
-  const errors: string[] = []
-  const bySrc: Record<string, number> = {}
-  const byClaim: Record<string, number> = {}
-  const total = ctx.jobs.length
-  const batch = new TailRaceBatch(total)
-  const results: Array<EvalCourseRow | null> = Array.from({ length: total }, () => null)
-  let done = 0
-  const t0 = Date.now()
-  const step = Math.max(1, Math.ceil(total / 20))
-  let lastPrint = 0
-
-  const settle = (
-    job: CourseJob,
-    row: EvalCourseRow | null,
-    err: string | undefined,
-    src: string,
-  ): void => {
-    if (!batch.settle(job.id)) return
-    if (row) {
-      results[job.id] = row
-      rows.push(row)
-      bySrc[src] = (bySrc[src] ?? 0) + 1
-    } else if (err) {
-      errors.push(err)
-    }
-    done++
-    if (done - lastPrint >= step || done === total) {
-      lastPrint = done
-      const el = (Date.now() - t0) / 1000
-      process.stderr.write(
-        `[eval-course-ckpt] hybrid progress ${done}/${total} (${((done / total) * 100).toFixed(0)}%) elapsed ${el.toFixed(0)}s\n`,
-      )
-    }
-  }
-
-  // ---- 节点门 + 权重下发 ----
-  const gate: NodeGateEntry[] = []
-  const alive: DistNodeCfg[] = []
-  for (const n of nodes) {
-    const nid = n.id || n.url
-    let ping: DistPing | null = null
-    try {
-      const r = await fetch(`${n.url.replace(/\/$/, '')}/v1/ping`, {
-        headers: { Authorization: `Bearer ${n.authKey ?? ''}` },
-        signal: AbortSignal.timeout(5000),
+/** nn-goal 本机分片：每个 (weight, 轮转片) 一个短命 worker，结果一次性回包。 */
+async function runLocalWorkerChunks(
+  weights: Array<{ path: string; label: string }>,
+  games: number,
+  seed0: number,
+  stages: Array<{ name: string; json: string }>,
+  env: { difficulty: string; maxTicks: number; lives: number; level: number },
+  policy: string,
+  workers: number,
+): Promise<EvalCourseRow[]> {
+  const chunks: EvalCourseWorkerPayload[] = []
+  for (let wi = 0; wi < weights.length; wi++) {
+    const jobs: Array<{ id: number; stageLocal: number; seed: number }> = []
+    for (let g = 0; g < games; g++) {
+      jobs.push({
+        id: wi * games + g,
+        stageLocal: g % stages.length,
+        seed: seed0 + Math.floor(g / stages.length),
       })
-      if (r.status === 200) ping = (await r.json()) as DistPing
-    } catch {
-      ping = null
     }
-    const why = nodeGateReason(ping, localBunMM, localCodeHash)
-    gate.push({ id: nid, ok: !why, reason: why, pingHash: String(ping?.codeHash ?? '') })
-    if (why) {
-      process.stderr.write(`[eval-course-ckpt] node ${nid}: ${why} — skipped\n`)
-      continue
-    }
-    alive.push(n)
-  }
-
-  // ---- 响亮告警（与是否升级无关：判读必须知道远端有没有参与）----
-  for (const l of gateWarning('[eval-course-ckpt]', gate, localCodeHash, {
-    localCap: ctx.localWorkers,
-    upgradeRequested: ctx.upgradeNodes,
-  })) {
-    process.stderr.write(`${l}\n`)
-  }
-
-  // ---- 主动升级（--upgrade-nodes）：复用训练循环守卫（dist_common.request_upgrade_guarded）----
-  if (ctx.upgradeNodes) {
-    const staleNodes = nodes.filter((n) =>
-      gate.some((g) => g.id === (n.id || n.url) && g.reason?.startsWith('codeHash mismatch')),
-    )
-    if (staleNodes.length === 0) {
-      process.stderr.write('[eval-course-ckpt] --upgrade-nodes: 无 stale 节点，无需升级\n')
-    } else {
-      const branch = resolveUpgradeBranch(REPO_ROOT)
-      process.stderr.write(
-        `[eval-course-ckpt] --upgrade-nodes: ${staleNodes.length} 个 stale 节点，分支='${branch || '(空:仅重启/禁 pull)'}'\n`,
-      )
-      const up = requestNodeUpgrades({
-        repoRoot: REPO_ROOT,
-        expectedHash: localCodeHash,
-        branch,
-        // 单节点最多等 8s：agent 正常是秒回（200/202）或明确拒绝（409/5xx）；
-        // 挂了的路（502/黑洞）不该把整批评估卡住（实测 3 个坏节点 × 20s = 启动晚 60s）。
-        timeout: 8,
-        nodes: staleNodes.map((n) => ({
-          id: n.id || n.url,
-          url: n.url,
-          authKey: n.authKey,
-          pingHash: gate.find((g) => g.id === (n.id || n.url))?.pingHash ?? '',
-        })),
+    for (const slice of splitRoundRobin(jobs, workers)) {
+      if (slice.length === 0) continue
+      chunks.push({
+        weightsPath: weights[wi].path,
+        label: weights[wi].label,
+        policy,
+        goalSource: policy === 'nn-goal' ? (process.env.GOAL_SOURCE ?? 'god') : undefined,
+        goalBias: policy === 'nn-goal' ? (process.env.GOAL_BIAS ?? undefined) : undefined,
+        difficulty: env.difficulty,
+        maxTicks: env.maxTicks,
+        lives: env.lives,
+        level: env.level,
+        stages,
+        jobs: slice,
       })
-      for (const l of upgradeLogLines('[eval-course-ckpt]', up)) process.stderr.write(`${l}\n`)
     }
   }
-
-  const nodesOk: DistNodeCfg[] = []
-  if (alive.length > 0) {
-    for (const n of alive) {
-      let ok = true
-      for (const slot of ctx.weightsSlots) {
-        try {
-          await uploadWeightsToNode(n, slot, ctx.iterId)
-        } catch (e) {
-          process.stderr.write(
-            `[eval-course-ckpt] ${n.id || n.url}: weights upload failed (${(e as Error).message})\n`,
-          )
-          ok = false
-          break
-        }
-      }
-      if (ok) nodesOk.push(n)
-    }
-  }
-
-  const remoteCap = nodesOk.reduce((s, n) => s + Math.max(1, n.concurrency ?? 4), 0)
-  const localCap = Math.max(0, ctx.localWorkers)
-  process.stderr.write(
-    `[eval-course-ckpt] hybrid dispatch: ${nodesOk.length} nodes (${remoteCap} slots) + local ${localCap}, ${total} games, codeHash=${localCodeHash.slice(0, 12)}…\n`,
-  )
-  if (nodesOk.length === 0 && localCap <= 0)
-    throw new Error('no eval-capable node and no local worker')
-
-  const stageNameOf = (stageLocal: number): string =>
-    ctx.stagePayloads[stageLocal]?.name ?? 'custom'
-
-  const payloadFor = (job: CourseJob): EvalCourseWorkerPayload => {
-    const slot = ctx.weightsSlots[job.weightIdx]
-    return {
-      weightsPath: slot.path,
-      label: slot.label,
-      policy: ctx.policy,
-      difficulty: ctx.difficulty,
-      maxTicks: ctx.maxTicks,
-      lives: ctx.lives,
-      level: ctx.level,
-      stages: ctx.stagePayloads,
-      jobs: [{ id: job.id, stageLocal: job.stageLocal, seed: job.seed }],
-    }
-  }
-
-  // ---- 远端 fetch-loop ----
-  const RETRY_BACKOFF = [3, 5, 8, 12, 18, 26, 38, 60]
-  /** 生成 `chains` 条该节点的 fetch-loop（容量按 chains 份记账）。 */
-  const spawnNode = (node: DistNodeCfg, chains: number): void => {
-    const nid = node.id || node.url
-    batch.consumer(chains)
-    for (let s = 0; s < chains; s++) {
-      ;(async (): Promise<void> => {
-        try {
-          for (;;) {
-            const i = batch.claim(batch.hasInflight)
-            if (i < 0 || i >= total) return
-            const job = ctx.jobs[i]
-            byClaim[`node:${nid}`] = (byClaim[`node:${nid}`] ?? 0) + 1
-            const slot = ctx.weightsSlots[job.weightIdx]
-            const stageJson = ctx.stagePayloads[job.stageLocal]?.json ?? ''
-            const url = buildRemoteTaskUrl({
-              baseUrl: node.url,
-              iterId: ctx.iterId,
-              wver: slot.sha,
-              kind: slot.kind,
-              stageId: job.stageId,
-              seed: job.seed,
-              maxTicks: ctx.maxTicks,
-              difficulty: ctx.difficulty,
-              policy: ctx.policy,
-              stageJson,
-              livesOverride: ctx.lives,
-              playerLevel: ctx.level,
-            })
-            let ok = false
-            let lastErr = ''
-            for (let attempt = 0; attempt < RETRY_BACKOFF.length && !ok; attempt++) {
-              try {
-                const resp = await fetch(url, {
-                  headers: { Authorization: `Bearer ${node.authKey ?? ''}` },
-                  signal: AbortSignal.timeout((ctx.maxTicks / 20 + 120) * 1000),
-                })
-                if (resp.status === 409) {
-                  lastErr = `${nid}: wver not cached (409)`
-                  break
-                }
-                if (resp.status !== 200) {
-                  lastErr = `${nid}: HTTP ${resp.status}`
-                  const retryAfter = Number(resp.headers.get('retry-after') ?? '')
-                  await new Promise((r) =>
-                    setTimeout(
-                      r,
-                      ((retryAfter > 0 ? retryAfter : RETRY_BACKOFF[attempt]) || 5) * 1000,
-                    ),
-                  )
-                  continue
-                }
-                const { manifest } = unpackContainer(Buffer.from(await resp.arrayBuffer()))
-                const row = manifestToCourseRow(
-                  manifest as Record<string, unknown>,
-                  job,
-                  stageNameOf(job.stageLocal),
-                )
-                settle(job, row, undefined, `node:${nid}`)
-                ok = true
-              } catch (e) {
-                lastErr = `${nid}: ${(e as Error).message}`
-                if (attempt + 1 < RETRY_BACKOFF.length)
-                  await new Promise((r) => setTimeout(r, RETRY_BACKOFF[attempt] * 1000))
-              }
-            }
-            if (!ok)
-              settle(
-                job,
-                null,
-                `${job.label}#${job.id} s${job.stageId}/seed${job.seed} ${lastErr || 'remote failed'}`,
-                `node:${nid}`,
-              )
-          }
-        } finally {
-          batch.finishConsumer()
-        }
-      })()
-    }
-  }
-
-  // ---- 本地 worker-loop ----
-  const spawnLocal = (workerId: number): void => {
-    batch.consumer(1)
-    void (async (): Promise<void> => {
-      const w = new Worker(WORKER_URL)
+  const settled = await Promise.all(
+    chunks.map(async (payload) => {
+      const w = new Worker(REPO_ROOT_WORKER)
       try {
-        for (;;) {
-          const i = batch.claim(batch.hasInflight)
-          if (i < 0 || i >= total) return
-          const job = ctx.jobs[i]
-          byClaim['local'] = (byClaim['local'] ?? 0) + 1
-          try {
-            const d = await runWorkerOnce(w, payloadFor(job))
-            if (d.error) settle(job, null, d.error, 'local')
-            else
-              settle(
-                job,
-                d.results[0] ?? null,
-                d.results[0] ? undefined : `empty result #${job.id}`,
-                'local',
-              )
-          } catch (e) {
-            settle(job, null, `local#${workerId} ${(e as Error).message}`, 'local')
-          }
-        }
+        return await runWorkerOnce(w, payload)
       } finally {
         w.terminate()
-        batch.finishConsumer()
       }
-    })()
+    }),
+  )
+  const errs = settled.filter((r) => r.error)
+  if (errs.length > 0) {
+    for (const e of errs) process.stderr.write(`[eval-course-ckpt] ${e.error}\n`)
+    process.exit(1)
   }
-
-  // 轮转 spawn（顺序与理由见 fanOutOrder 注释）：每轮先起 1 条本地链，再给每个可用节点
-  // 各起 1 条——不让配置里排第一的节点在同步 claim 阶段把整批任务秒光。
-  const nodeCaps = nodesOk.map((n) => Math.max(1, n.concurrency ?? 4))
-  for (const step of fanOutOrder(localCap, nodeCaps)) {
-    if ('local' in step) spawnLocal(step.local)
-    else spawnNode(nodesOk[step.node]!, 1)
-  }
-
-  // 无消费者守护
-  setTimeout(() => {
-    if (batch.pendingConsumers <= 0 && done < total) {
-      const failed = batch.failUnsettled()
-      process.stderr.write(
-        `[eval-course-ckpt] no consumer available — failing ${failed.length} remaining tasks\n`,
-      )
-      for (const id of failed) {
-        const job = ctx.jobs[id]
-        if (job && !results[id]) errors.push(`${job.label}#${job.id} unsettled (no consumer)`)
-      }
-    }
-  }, 2500)
-
-  await batch.whenAll()
-  // 保序输出：按 id 回填（竞速不影响内容）
-  const ordered: EvalCourseRow[] = []
-  for (const r of results) if (r) ordered.push(r)
-  return { rows: ordered, errors, gate, localCodeHash, bySrc, byClaim }
+  return settled.flatMap((r) => r.results).sort((a, b) => a.id - b.id)
 }
 
 async function main(): Promise<void> {
@@ -876,7 +438,7 @@ async function main(): Promise<void> {
         console.error(`[eval-course-ckpt] --goal-bias must be a positive number`)
         process.exit(2)
       }
-      process.env.GOAL_BIAS = String(b)
+      process.env.GOAL_BIAS = String(bias)
     }
   }
   const weightPaths = argAll('weights')
@@ -889,25 +451,16 @@ async function main(): Promise<void> {
   const weights = policy === 'god' ? [{ path: '', label: 'god' }] : weightPaths.map(parseWeightSpec)
   const games = parseRangeInt(arg('games'), 100)
   const seed0 = parseRangeInt(arg('seed0'), 0)
-  const workersArg = parseInt(arg('workers') ?? '0', 10)
-  const workers = workersArg > 0 ? workersArg : defaultWorkerCount()
   const outPath = arg('out')
-
-  const course = parseCourseJsonc(readFileSync(resolveCourse(courseArg), 'utf8')) as CourseJson
+  const coursePath = resolveCourse(courseArg)
+  const course = parseCourseJsonc(readFileSync(coursePath, 'utf8')) as CourseJson
   const stages = course.stages
   if (!Array.isArray(stages) || stages.length === 0) {
     console.error(`[eval-course-ckpt] course has no custom stages: ${courseArg}`)
     process.exit(2)
   }
-  const difficulty = course.difficulty ?? 'hard'
-  const maxTicks = course.max_ticks ?? 36000
-  const lives = course.player?.lives ?? 3
-  const level = course.player?.level ?? 0
-  const stagePayloads = stages.map((s) => ({ name: s.name ?? 'custom', json: JSON.stringify(s) }))
 
-  // ---- dist 开关（与 m1-eval auto-dist 同规）----
-  // 布尔存在位用 flag()（位置无关）：arg() 取「下一个 token」，把 --no-dist 写在
-  // 命令行末尾时取到 undefined → 静默忽略（2026-09-19 实测，与 m1-eval 同规加固）。
+  // dist 开关：默认「有 nodes 的 rl-config.json 即分布式」（与训练栈同源）；--no-dist 关。
   const noDist = flag('no-dist')
   let distCfgPath = arg('dist-nodes') ?? ''
   if (!distCfgPath && !noDist) {
@@ -918,167 +471,102 @@ async function main(): Promise<void> {
       )
         distCfgPath = DEFAULT_DIST_CFG
     } catch {
-      /* 纯本地 */
+      /* 纯本机 */
     }
   }
-  // nn-goal：GOAL_* 未进 agent 协议，强制本地。
-  let distPolicy = policy
-  if (policy === 'nn-goal') {
-    if (distCfgPath)
-      process.stderr.write(
-        `[eval-course-ckpt] policy nn-goal is not dispatchable — running local only\n`,
-      )
-    distCfgPath = ''
-    distPolicy = 'nn-goal'
+  const distLocalRaw = arg('dist-local')
+  const distLocal = distLocalRaw === undefined ? undefined : parseInt(distLocalRaw, 10)
+  if (distLocal !== undefined && (!Number.isFinite(distLocal) || distLocal < 0)) {
+    console.error('[eval-course-ckpt] --dist-local must be a non-negative integer')
+    process.exit(2)
   }
-  // `--upgrade-nodes`：对 stale 节点下发 pull+restart（训练循环同规守卫，经
-  // nn-py-safe.sh 调 dist_common.request_upgrade_guarded——**不**在 TS 里重写护栏）。
-  const upgradeNodes = flag('upgrade-nodes')
-  const distLocalArg = parseInt(arg('dist-local') ?? String(workers), 10)
-  const distLocal = Number.isFinite(distLocalArg) && distLocalArg >= 0 ? distLocalArg : workers
   const iterId = arg('iter-id') ?? `evalcourse-${Date.now()}`
-
-  const oversized = stagePayloads.filter((s) => s.json.length > STAGE_JSON_MAX)
-  if (distCfgPath && oversized.length > 0) {
-    process.stderr.write(
-      `[eval-course-ckpt] ${oversized.length} stageJson > ${STAGE_JSON_MAX}B — dist disabled (local only)\n`,
-    )
-    distCfgPath = ''
-  }
-
-  process.stderr.write(
-    `[eval-course-ckpt] course=${courseArg} stages=${stages.length} games/weights=${games} ` +
-      `policy=${policy} weights=${weights.length} workers=${workers} difficulty=${difficulty} ` +
-      `max_ticks=${maxTicks} lives=${lives} level=${level}` +
-      (distCfgPath ? ` dist=${distCfgPath} distLocal=${distLocal}` : ' dist=local') +
-      `\n`,
-  )
-
+  const windowSec = parseRangeInt(arg('window-sec'), 86400)
   const t0 = Date.now()
 
-  // ---- 混合分派路径 ----
-  if (distCfgPath) {
-    const weightsSlots: WeightSlot[] = weights.map((w) => {
-      if (policy === 'god' || !w.path) {
-        const bytes = Buffer.from('{}')
-        return {
-          path: w.path,
-          label: w.label,
-          bytes,
-          sha: createHash('sha256').update(bytes).digest('hex'),
-          kind: 'none' as const,
-        }
-      }
-      const bytes = readFileSync(w.path)
-      return {
-        path: w.path,
-        label: w.label,
-        bytes,
-        sha: createHash('sha256').update(bytes).digest('hex'),
-        kind: 'rollout' as const,
-      }
-    })
-    const jobs = buildCourseJobs(weights, games, seed0, stages.length)
-    let hybridErrors: string[] = []
-    let rows: EvalCourseRow[] = []
-    try {
-      const r = await runHybrid({
-        jobs,
-        stagePayloads,
-        weightsSlots,
-        difficulty,
-        maxTicks,
-        lives,
-        level,
-        policy: distPolicy === 'nn-goal' ? 'nn' : distPolicy,
-        iterId,
-        localWorkers: distLocal,
-        distCfgPath,
-        upgradeNodes,
-      })
-      rows = r.rows
-      hybridErrors = r.errors
-      for (const l of provenanceNote('[eval-course-ckpt]', r.bySrc)) process.stderr.write(`${l}\n`)
-      for (const l of claimNote('[eval-course-ckpt]', r.byClaim)) process.stderr.write(`${l}\n`)
-    } catch (e) {
-      process.stderr.write(
-        `[eval-course-ckpt] hybrid failed (${(e as Error).message}) — falling back to local\n`,
-      )
-      process.stderr.write(
-        '[eval-course-ckpt] WARN provenance: 分布式路径未成立 —— 本次全部局由**本地 worker** 跑（不要当作分布式读数）\n',
-      )
-      distCfgPath = ''
+  // ---- nn-goal：本机 worker 路径（GOAL_* 未进 agent 协议，无法经 Python 引擎分发）----
+  if (policy === 'nn-goal') {
+    const stagePayloads = stages.map((s) => ({ name: s.name ?? 'custom', json: JSON.stringify(s) }))
+    process.stderr.write(
+      `[eval-course-ckpt] course=${coursePath} stages=${stages.length} games/weights=${games} ` +
+        `policy=nn-goal weights=${weights.length} local-only iterId=${iterId}\n`,
+    )
+    const rows = await runLocalWorkerChunks(
+      weights,
+      games,
+      seed0,
+      stagePayloads,
+      {
+        difficulty: course.difficulty ?? 'hard',
+        maxTicks: course.max_ticks ?? 36000,
+        lives: course.player?.lives ?? 3,
+        level: course.player?.level ?? 0,
+      },
+      policy,
+      defaultWorkerCount(),
+    )
+    if (outPath) {
+      mkdirSync(dirname(outPath), { recursive: true })
+      writeFileSync(outPath, rows.map((r) => JSON.stringify(r)).join('\n') + '\n')
+    } else {
+      for (const r of rows) console.log(JSON.stringify(r))
     }
-    if (distCfgPath) {
-      if (hybridErrors.length > 0) {
-        for (const e of hybridErrors) process.stderr.write(`[eval-course-ckpt] ${e}\n`)
-      }
-      if (rows.length !== jobs.length) {
-        process.stderr.write(
-          `[eval-course-ckpt] incomplete hybrid results ${rows.length}/${jobs.length} — exit 1\n`,
-        )
-        // 仍写出已得行，便于断点/诊断
-        emitRows(
-          rows.sort((a, b) => a.id - b.id),
-          outPath,
-        )
-        summarize(rows, outPath, t0)
-        process.exit(1)
-      }
-      rows.sort((a, b) => a.id - b.id)
-      emitRows(rows, outPath)
-      summarize(rows, outPath, t0)
-      return
-    }
+    summarize(rows, outPath, t0)
+    return
   }
 
-  // ---- 纯本地 chunked 路径（旧行为）----
-  const jobsPerWeight: Array<Array<{ id: number; stageLocal: number; seed: number }>> = weights.map(
-    (_, wi) => {
-      const jobs: Array<{ id: number; stageLocal: number; seed: number }> = []
-      for (let g = 0; g < games; g++) {
-        jobs.push({
-          id: wi * games + g,
-          stageLocal: g % stages.length,
-          seed: seed0 + Math.floor(g / stages.length),
-        })
-      }
-      return jobs
-    },
+  // ---- nn / god：Python 引擎（BatchEvalRunner：节点门/重试/停用/权重/本机份额一套）----
+  if (flag('upgrade-nodes') && distCfgPath) maybeUpgradeNodes(distCfgPath)
+  const runDir = `${outPath ?? `tmp/eval-course-${iterId}`}.run`
+  const spec = buildSpec({
+    course: coursePath,
+    weights,
+    games,
+    seed0,
+    policy: policy as 'nn' | 'god',
+    iterId,
+    runDir,
+    out: outPath ?? `${runDir}/rows.jsonl`,
+    noNodes: !distCfgPath,
+    localSlots: distLocal,
+    distCfgPath: distCfgPath || undefined,
+    windowSec,
+  })
+  mkdirSync(runDir, { recursive: true })
+  const specPath = `${runDir}/spec.json`
+  writeFileSync(specPath, JSON.stringify(spec, null, 1))
+  process.stderr.write(
+    `[eval-course-ckpt] course=${coursePath} stages=${stages.length} games/weights=${games} ` +
+      `policy=${policy} weights=${weights.length} difficulty=${course.difficulty ?? 'hard'} ` +
+      `max_ticks=${course.max_ticks ?? 36000} lives=${course.player?.lives ?? 3} ` +
+      `level=${course.player?.level ?? 0} ` +
+      (distCfgPath ? `dist=${distCfgPath}` : 'dist=local') +
+      (distLocal !== undefined ? ` distLocal=${distLocal}` : ' distLocal=配置') +
+      ` iterId=${iterId} runDir=${runDir}\n`,
   )
 
-  // One chunk per (weight, round-robin job slice) — one fresh worker per chunk,
-  // each returns { results } once. Rows are ordered by id after concat.
-  const chunks: EvalCourseWorkerPayload[] = []
-  for (let wi = 0; wi < weights.length; wi++) {
-    const slices = splitRoundRobin(jobsPerWeight[wi], workers)
-    for (const slice of slices) {
-      if (slice.length === 0) continue
-      chunks.push({
-        weightsPath: weights[wi].path,
-        label: weights[wi].label,
-        policy,
-        goalSource: policy === 'nn-goal' ? (process.env.GOAL_SOURCE ?? 'god') : undefined,
-        goalBias: policy === 'nn-goal' ? (process.env.GOAL_BIAS ?? undefined) : undefined,
-        difficulty,
-        maxTicks,
-        lives,
-        level,
-        stages: stagePayloads,
-        jobs: slice,
-      })
-    }
-  }
-
-  const chunkResults = await runChunks(chunks)
-  const errors = chunkResults.filter((r) => r.error)
-  if (errors.length > 0) {
-    for (const e of errors) process.stderr.write(`[eval-course-ckpt] ${e.error}\n`)
+  // 走官方解释器包装（AGENTS §0.1 规则 13：nn python 一律经 nn-py-safe.sh）
+  const proc = spawnSync('bash', [PY_SAFE, PY_ENTRY, '--spec', specPath], {
+    cwd: REPO_ROOT,
+    stdio: ['ignore', 'inherit', 'inherit'],
+  })
+  if (proc.error) {
+    console.error(`[eval-course-ckpt] python 调用失败: ${proc.error.message}`)
     process.exit(1)
   }
-  const rows = chunkResults.flatMap((r) => r.results).sort((a, b) => a.id - b.id)
-  emitRows(rows, outPath)
-  summarize(rows, outPath, t0)
+  if (!existsSync(spec.out)) {
+    console.error(`[eval-course-ckpt] 未产出逐局行（${spec.out}）— python exit ${proc.status}`)
+    process.exit(1)
+  }
+  const rows = readRows(spec.out)
+  summarize(rows, outPath ?? spec.out, t0)
+  const expected = games * (policy === 'god' ? 1 : weights.length)
+  if (rows.length !== expected) {
+    console.error(
+      `[eval-course-ckpt] incomplete rows ${rows.length}/${expected}（节点忙/不可达时属预期）— exit 1`,
+    )
+    process.exit(1)
+  }
 }
 
 if (import.meta.main) await main()

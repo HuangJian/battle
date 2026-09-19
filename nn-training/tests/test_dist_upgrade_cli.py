@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -142,3 +143,144 @@ def test_cli_bad_spec_exit_2() -> None:
     )
     assert proc.returncode == 2
     assert json.loads(proc.stdout.decode("utf-8"))["error"]
+
+
+# ---------------- 扫描模式（cfg_path）：判 stale 这一步必须复用 dist_common ----------------
+
+CFG = {
+    "nodes": [
+        {"id": "stale", "url": "http://10.0.0.1:8443", "authKey": "k", "enabled": True},
+        {"id": "current", "url": "http://10.0.0.2:8443", "enabled": True},
+        {"id": "off", "url": "http://10.0.0.3:8443", "enabled": False},
+    ]
+}
+
+
+def _write_cfg(tmp_path: Path, cfg: dict) -> str:
+    p = tmp_path / "rl-config.json"
+    p.write_text(json.dumps(cfg), encoding="utf-8")
+    return str(p)
+
+
+def _ping_a(url: str, auth: str = "", timeout: float = 3.0) -> dict:
+    """所有节点都报同一个 hash（当前/陈旧取决于 expected）。"""
+    return {"codeHash": "a" * 64}
+
+
+def _recorder(posts: list[str]) -> Callable[..., bool]:
+    """替换 request_upgrade 的 POST 记登器（返回 True = agent 已接受）。"""
+
+    def _fake(url: str, auth: str, branch: str, timeout: float = 20.0) -> bool:
+        posts.append(url)
+        return True
+
+    return _fake
+
+
+def test_scan_pings_itself_and_only_stale_is_upgraded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """扫描模式自己 ping（调用方不再 ping）——判据是 dist_common 那一层。"""
+    cfg_path = _write_cfg(tmp_path, CFG)
+    dist_common.reset_restart_state()
+    pinged: list[str] = []
+
+    def fake_ping(url: str, auth: str = "", timeout: float = 3.0) -> dict | None:
+        pinged.append(url)
+        if "10.0.0.1:" in url:
+            return {"codeHash": "a" * 64, "agentVersion": "abc"}
+        return {"codeHash": "b" * 64, "agentVersion": "def"}
+
+    monkeypatch.setattr(dist_common, "node_ping", fake_ping)
+    monkeypatch.setattr(dist_common, "dirty_hash_files", lambda: [])
+    posted: list[str] = []
+    monkeypatch.setattr(dist_common, "request_upgrade", _recorder(posted))
+    out = dist_upgrade_cli.run_scan(
+        {"cfg_path": cfg_path, "branch": "goal-nn", "dirty": [], "expected_hash": "b" * 64}
+    )
+    by_id = {r["id"]: r for r in out["results"]}
+    # enabled 节点全被 ping（current 也要 ping——那一步正是在判 stale）；disabled 不碰。
+    assert sorted(pinged) == ["http://10.0.0.1:8443", "http://10.0.0.2:8443"]
+    assert by_id["stale"]["ok"] is True and by_id["stale"]["reason"] == "restart-requested"
+    assert by_id["stale"]["pingHash"] == "a" * 64  # 调用方要靠它写 memo
+    assert by_id["current"]["reason"] == "current"
+    assert posted == ["http://10.0.0.1:8443"]  # 只对 stale 发 POST
+
+
+def test_scan_expected_hash_defaults_to_local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg_path = _write_cfg(tmp_path, {"nodes": [CFG["nodes"][0]]})
+    dist_common.reset_restart_state()
+    monkeypatch.setattr(dist_common, "compute_code_hash", lambda: "a" * 64)
+    monkeypatch.setattr(dist_common, "node_ping", _ping_a)
+    posted: list[str] = []
+    monkeypatch.setattr(dist_common, "request_upgrade", _recorder(posted))
+    out = dist_upgrade_cli.run_scan({"cfg_path": cfg_path, "branch": "goal-nn"})
+    assert out["results"][0]["reason"] == "current" and posted == []
+
+
+def test_scan_seen_memo_suppresses_restart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """跨调用 memo（seen）预置回 _RESTART_SEEN ⇒ dedup 分支与常驻循环逐字一致。"""
+    cfg_path = _write_cfg(tmp_path, {"nodes": [CFG["nodes"][0]]})
+    dist_common.reset_restart_state()
+    monkeypatch.setattr(dist_common, "node_ping", _ping_a)
+    posted: list[str] = []
+    monkeypatch.setattr(dist_common, "request_upgrade", _recorder(posted))
+    # 第一次：真发（并返回 pingHash 供调用方持久化）。
+    first = dist_upgrade_cli.run_scan(
+        {"cfg_path": cfg_path, "branch": "goal-nn", "dirty": [], "expected_hash": "b" * 64}
+    )
+    assert first["results"][0]["reason"] == "restart-requested"
+    # 第二次（新进程语义）：调用方把上次下发写进 memo 并预置回来 ⇒ 不再打扰节点。
+    dist_common.reset_restart_state()
+    seen = [
+        {"id": "stale", "pingHash": first["results"][0]["pingHash"], "expectedHash": "b" * 64}
+    ]
+    second = dist_upgrade_cli.run_scan(
+        {"cfg_path": cfg_path, "branch": "goal-nn", "dirty": [], "seen": seen, "expected_hash": "b" * 64}
+    )
+    assert second["results"][0]["reason"] == "dedup"
+    assert posted == ["http://10.0.0.1:8443"]  # 只发过一次
+
+
+def test_scan_dry_run_sends_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg_path = _write_cfg(tmp_path, CFG)
+    dist_common.reset_restart_state()
+    monkeypatch.setattr(dist_common, "node_ping", _ping_a)
+    called: list[str] = []
+
+    def _fake_scan(cfg: dict, *a: object, **k: object) -> list:
+        called.append("x")
+        return []
+
+    monkeypatch.setattr(dist_common, "upgrade_stale_nodes", _fake_scan)
+    out = dist_upgrade_cli.run_scan({"cfg_path": cfg_path, "dry_run": True, "expected_hash": "b" * 64})
+    assert called == []  # dry 连扫描升级路径都不进
+    assert {r["id"]: r["reason"] for r in out["results"]} == {"stale": "stale", "current": "stale"}
+
+
+def test_scan_structural_errors(tmp_path: Path) -> None:
+    with pytest.raises(ValueError):
+        dist_upgrade_cli.run_scan({"diff": 1})  # cfg_path 缺
+    with pytest.raises(ValueError):
+        dist_upgrade_cli.run_scan({"cfg_path": str(tmp_path / "nope.json")})
+    with pytest.raises(ValueError):
+        dist_upgrade_cli.run_scan({"cfg_path": _write_cfg(tmp_path, CFG), "seen": "nope"})
+
+
+def test_scan_empty_nodes_is_noop(tmp_path: Path) -> None:
+    out = dist_upgrade_cli.run_scan({"cfg_path": _write_cfg(tmp_path, {"nodes": []})})
+    assert out["results"] == []
+
+
+def test_seed_restart_state_contract() -> None:
+    dist_common.reset_restart_state()
+    n = dist_common.seed_restart_state(
+        [
+            {"id": "mac", "pingHash": "a" * 64, "expectedHash": "b" * 64},
+            {"id": "bad"},  # 缺 hash → 忽略
+            "not-a-dict",  # 类型不对 → 忽略
+        ]
+    )
+    assert n == 1
+    assert dist_common._RESTART_SEEN["mac"] == ("a" * 64, "b" * 64)
+    dist_common.reset_restart_state()

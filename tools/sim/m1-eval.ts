@@ -56,9 +56,12 @@ import { flag } from '../lib/cli'
 import { computeCodeHash } from '../agent/codehash-files'
 import {
   bunMajorMinor,
+  configLocalSlots,
   gateWarning,
   nodeGateReason,
+  pingNode,
   provenanceNote,
+  reprobeDue,
   type DistPing,
   type NodeGateEntry,
 } from '../lib/dist-node-gate'
@@ -360,7 +363,25 @@ async function main(): Promise<void> {
       process.exit(2)
     }
   }
-  const distLocal = parseInt(arg('dist-local', String(workers))!, 10) // 本机并发，缺省 = --workers 全核
+  // 本机并发：显式 `--dist-local` > 配置 `policy.evalLocalSlots` > `rl.local_slots` > --workers 全核。
+  // 旧实现只认 --workers（= 物理核数）⇒ 配置里的「本机不参与」被静默覆盖（2026-09-19 实测）。
+  const distLocalRaw = arg('dist-local')
+  const distLocalParsed = distLocalRaw === undefined ? NaN : parseInt(distLocalRaw, 10)
+  const distLocalCfg = distNodesPath ? configLocalSlots(distNodesPath) : { slots: null, source: '' }
+  const distLocal =
+    Number.isFinite(distLocalParsed) && distLocalParsed >= 0
+      ? distLocalParsed
+      : (distLocalCfg.slots ?? workers)
+  if (distNodesPath)
+    process.stderr.write(
+      `[m1-eval] 本机槽位 distLocal=${distLocal}（来源：${
+        Number.isFinite(distLocalParsed)
+          ? '--dist-local'
+          : distLocalCfg.slots !== null
+            ? `配置 ${distLocalCfg.source}`
+            : '物理核数（配置未约定）'
+      }）\n`,
+    )
   const weightsArg =
     distKind === 'goal'
       ? (goalWeights as string)
@@ -709,8 +730,12 @@ async function runHybrid(
   }
   const allDone = batch.whenAll()
 
-  // 已激活节点（按 url 去重）：初始节点 + rescan 中途加入的节点。
+  // 已激活节点（按 url 去重）：初始节点 + rescan 中途加入的节点；
+  // stoppedNodes = 任务连失且重探未过门（链自行退出，留给 rescan 复活）。
   const activeNodes = new Set<string>()
+  const stoppedNodes = new Set<string>()
+  const lastProbeAt = new Map<string, number>()
+  const pingTimeoutMs = parseInt(arg('ping-timeout', '10')!, 10) * 1000
 
   // v3.9 动态节点激活：ping 通过 → 权重幂等上传 → spawn 并发链。
   // 初始/中途统一走此路径——离线节点不激活、不中断整个跑批，留给 rescan 周期再探。
@@ -727,18 +752,34 @@ async function runHybrid(
     else gate.push(e)
   }
 
+  // 任务连失后的**立即重探**（冷却去重）：还过门就继续用（忙≠死），
+  // 不过门就停用这台（它的链自行退出，尾部交给健康消费者）；rescan 会再给机会。
+  const reprobeAfterFailure = async (node: DistNodeCfg): Promise<void> => {
+    const nid = node.id || node.url
+    if (stoppedNodes.has(node.url)) return
+    if (!reprobeDue(lastProbeAt.get(node.url), Date.now(), 15_000)) return
+    lastProbeAt.set(node.url, Date.now())
+    const ping = await pingNode(node.url, node.authKey ?? '', { timeoutMs: pingTimeoutMs })
+    const why = nodeGateReason(ping, localBunMM, localCodeHash)
+    recordGate(nid, why, String(ping?.codeHash ?? ''))
+    if (!why) return
+    stoppedNodes.add(node.url)
+    activeNodes.delete(node.url)
+    process.stderr.write(
+      `[m1-eval] node ${nid}: 任务连失且重探未过门（${why}）— 本轮停用（rescan 会再试）\n`,
+    )
+  }
+
   const tryActivate = async (node: DistNodeCfg): Promise<boolean> => {
     const nid = node.id || node.url
-    let ping: DistPing | null = null
-    try {
-      const r = await fetch(`${node.url}/v1/ping`, {
-        headers: { Authorization: `Bearer ${node.authKey ?? ''}` },
-        signal: AbortSignal.timeout(5000),
-      })
-      if (r.status === 200) ping = (await r.json()) as DistPing
-    } catch {
-      ping = null
-    }
+    if (activeNodes.has(node.url)) return false
+    stoppedNodes.delete(node.url)
+    lastProbeAt.set(node.url, Date.now())
+    // ping 带重试 + 可调超时（用户 2026-09-19：节点都在线，只是可能 ping 得慢；
+    // 一次 5s 超时就把健康节点判死，会让整批白丢这台算力）。
+    const ping: DistPing | null = await pingNode(node.url, node.authKey ?? '', {
+      timeoutMs: pingTimeoutMs,
+    })
     const why = nodeGateReason(ping, localBunMM, localCodeHash)
     recordGate(nid, why, String(ping?.codeHash ?? ''))
     if (why) {
@@ -765,6 +806,8 @@ async function runHybrid(
       ;(async (): Promise<void> => {
         try {
           for (;;) {
+            // 已停用（连失 + 重探未过门）⇒ 退出，把尾部留给健康消费者
+            if (stoppedNodes.has(node.url)) return
             const i = batch.claim(batch.hasInflight)
             if (i < 0) return
             if (i >= total) return
@@ -822,7 +865,10 @@ async function runHybrid(
                 await new Promise((r) => setTimeout(r, RETRY_BACKOFF[attempt] * 1000))
               }
             }
-            if (!ok) settle(i, fail(task.id), `node:${node.id ?? node.url}`)
+            if (!ok) {
+              settle(i, fail(task.id), `node:${node.id ?? node.url}`)
+              void reprobeAfterFailure(node)
+            }
           }
         } finally {
           batch.finishConsumer()
@@ -885,31 +931,15 @@ async function runHybrid(
       process.stderr.write(`${l}\n`)
     }
     if (!flag('upgrade-nodes')) return
-    const staleNodes = nodes.filter((n) =>
-      gate.some((g) => g.id === (n.id ?? n.url) && g.reason?.startsWith('codeHash mismatch')),
-    )
-    if (staleNodes.length === 0) {
-      process.stderr.write('[m1-eval] --upgrade-nodes: 无 stale 节点，无需升级\n')
-      return
-    }
-    const branch = resolveUpgradeBranch(REPO_ROOT)
-    process.stderr.write(
-      `[m1-eval] --upgrade-nodes: ${staleNodes.length} 个 stale 节点，分支='${branch || '(空:仅重启/禁 pull)'}'\n`,
-    )
+    // 扫描 + 判 stale + 护栏全在 Python 侧（dist_common.upgrade_stale_nodes）；
+    // 本文件不 ping、不自己挑 stale（此前那套是训练循环的重复实现）。
+    // 注：个别节点环境上就是不支持远控升级（如隧道后 agent 返 502、节点没起
+    // tunneling）——那是环境事实，python 逐个 reason 报告，不阻塞其他节点。
     const up = requestNodeUpgrades({
       repoRoot: REPO_ROOT,
+      cfgPath: nodesPath,
       expectedHash: localCodeHash,
-      branch,
-      // 单节点最多等 8s（同 eval-course-ckpt）：坏路（502/黑洞）不该拖住整批。
-      // 注：个别节点环境上就是不支持远控升级（如隧道后 agent 反向代理返 502、
-      // 或节点根本没起 tunneling）——那是环境事实，不应阻塞其他节点。
-      timeout: 8,
-      nodes: staleNodes.map((n) => ({
-        id: n.id ?? n.url,
-        url: n.url,
-        authKey: n.authKey,
-        pingHash: gate.find((g) => g.id === (n.id ?? n.url))?.pingHash ?? '',
-      })),
+      branch: resolveUpgradeBranch(REPO_ROOT),
     })
     for (const l of upgradeLogLines('[m1-eval]', up)) process.stderr.write(`${l}\n`)
   }
@@ -936,7 +966,9 @@ async function runHybrid(
     const cli = parseInt(arg('dist-rescan', '0')!, 10)
     if (cli > 0) return cli
     const pol = rescanCfg?.agentRescanSec
-    return typeof pol === 'number' && pol > 0 ? pol : 120
+    // 缺省 30s（旧值 120s）：节点慢/被别的作业占满时，重探是回收算力的唯一渠道；
+    // 探一次的成本 = 一次带重试的 ping，比白白空跑几分钟便宜。
+    return typeof pol === 'number' && pol > 0 ? pol : 30
   })()
   let rescanTimer: ReturnType<typeof setInterval> | undefined
   if (rescanSec > 0) {
@@ -965,7 +997,11 @@ async function runHybrid(
   await allDone
   if (rescanTimer) clearInterval(rescanTimer)
   await reportGate().catch(() => {})
-  for (const l of provenanceNote('[m1-eval]', bySrc)) process.stderr.write(`${l}\n`)
+  for (const l of provenanceNote('[m1-eval]', bySrc, {
+    localCap,
+    usableNodes: gate.filter((g) => g.ok).length,
+  }))
+    process.stderr.write(`${l}\n`)
   return results
 }
 

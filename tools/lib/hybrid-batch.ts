@@ -99,6 +99,11 @@ export class TailRaceBatch {
     return this.pending
   }
 
+  /** 游标已发完（此后 claim 只做尾部竞速）。周期性 rescan 用它决定「不必再探新节点」。 */
+  get cursorDone(): boolean {
+    return this.next >= this.total
+  }
+
   /** 无消费者守护：把全部未结算任务标败收尾，返回标记的任务号（已结算的不动）。 */
   failUnsettled(): number[] {
     const out: number[] = []

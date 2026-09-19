@@ -7,28 +7,40 @@
 不升级也不汇总告警，等于把「远端不可用」静默降级成本地跑。
 
 本文件让 TS 侧**调用**这份守卫而不是移植它：守卫与 dirty 判据只有一处实现
-（`dist_common`），TS 侧只做「拼 spec → spawn → 读 JSON → 打日志」。
+（`dist_common`），TS 侧只做「拼 spec → spawn → 读 JSON → 打日志」。输入（stdin，UTF-8 JSON）——两种模式：
 
-输入（stdin，UTF-8 JSON；key 与 `--dry-run` 同义位）：
+  A) 扫描模式（**推荐**，调用方不 ping）：
     {
-      "expected_hash": "<64hex 训练机 codeHash>",
-      "branch": "goal-nn",              # 远端 pull 分支；self/回环节点恒为空（禁 pull）
-      "nodes": [ {"id":"mac","url":"http://…","authKey":"…","pingHash":"<64hex>"} ],
-      "dirty": null,                    # null/缺省 = 本进程用 dirty_hash_files() 探测（字节级）
-      "dry_run": false,                 # true = 只算 dirty + 计划，不发任何 POST
-      "timeout": 20.0
+        "cfg_path": "nn-training/rl-config.json",   # 本 CLI 自己 ping 每个 enabled 节点
+        "expected_hash": "<64hex>",       # 可省 = dist_common.compute_code_hash()
+        "branch": "goal-nn",              # 远端 pull 分支；self/回环节点恒为空（禁 pull）
+        "seen": [ {"id":"mac","pingHash":"<64hex>","expectedHash":"<64hex>"} ],
+                                            # 可选：跨调用去重 memo 预置（见下）
+        "dirty": null, "dry_run": false, "timeout": 20.0
+    }
+    判 stale 的那一步直接走训练循环自己的 `dist_common.upgrade_stale_nodes(...)`
+    （ping → codeHash ≠ expected → request_upgrade_guarded），调用方**不重复实现探测**。
+
+  B) 显式节点模式（调用方已 ping 过，把 hash 传来）：
+    {
+        "expected_hash": "<64hex>", "branch": "goal-nn",
+        "nodes": [ {"id":"mac","url":"http://…","authKey":"…","pingHash":"<64hex>"} ],
+        "dirty": null, "dry_run": false, "timeout": 20.0
     }
 
 输出（stdout，单行 JSON）：
-    {"dirty": ["src/…"], "results": [{"id":"mac","ok":true,"reason":"restart-requested"}]}
+    {"dirty": ["src/…"],
+     "results": [{"id":"mac","ok":true,"reason":"restart-requested","pingHash":"<64hex>"}]}
 
 reason 取值同 `request_upgrade_guarded`：`restart-requested` / `dedup` /
-`dirty-tree:<n>` / `restart-failed`；本文件另加 `current`（pingHash == expected，未发）。
+`dirty-tree:<n>` / `restart-failed`；本文件另加 `current`（pingHash == expected，未发）
+与 `unreachable`（扫描模式 ping 不通）。
 
 退出码：0 = 已处理（即使全部失败，逐条 reason 说明）；2 = spec 非法（结构性错误）。
 
 注意：本进程是一次性的 ⇒ `dist_common._RESTART_SEEN` 的跨代去重只在**本次调用内**
-有效；跨调用去重由调用方负责（TS 侧落一份 (nid, agentHash, expectedHash) memo）。
+有效；跨调用去重由调用方持久化 memo，并经 spec 的 `seen` 预置回来（`seed_restart_state`），
+判据本身仍只有 dist_common 一处实现。`pingHash` 就是给调用方写 memo 用的。
 本文件不做任何删除/清理动作（沙箱安全），但仍按仓库纪律经
 `bash tools/githook/nn-py-safe.sh` 启动。
 """
@@ -49,10 +61,89 @@ def _fail(msg: str) -> int:
     return 2
 
 
-def run_spec(spec: dict) -> dict:
-    """纯逻辑：spec → {dirty, results}。可单测（monkeypatch dist_common 的守卫即可）。
+def run_scan(spec: dict) -> dict:
+    """扫描模式：本 CLI 自己 ping 每个 enabled 节点，判 stale 后下发升级。
 
-    不 ping（调用方已 ping 过并把 hash 传来）：避免同一回合对同一节点打两次网络。
+    判据那一层**直接调用** `dist_common.upgrade_stale_nodes`——调用方（TS 工具）不再
+    自己 ping、不再自己比 codeHash（此前那套是训练循环的重复实现，2026-09-19 用户
+    指出）。`seen` 预置跨调用 memo，使 `dedup` 分支与常驻训练循环逐字一致。
+    """
+    cfg_path = str(spec.get("cfg_path") or "").strip()
+    if not cfg_path:
+        raise ValueError("cfg_path 缺失")
+    expected = str(spec.get("expected_hash") or "").strip() or dist_common.compute_code_hash()
+    branch = str(spec.get("branch") or "").strip()
+    try:
+        timeout = float(spec.get("timeout") or 20.0)
+    except (TypeError, ValueError):
+        raise ValueError("timeout 必须是数字") from None
+    try:
+        status_timeout = float(spec.get("status_timeout") or 3.0)
+    except (TypeError, ValueError):
+        raise ValueError("status_timeout 必须是数字") from None
+    seen = spec.get("seen")
+    if seen is not None and not isinstance(seen, list):
+        raise ValueError("seen 必须是数组")
+    dist_common.seed_restart_state(seen or [])
+    cfg = dist_common.load_dist_config(cfg_path)
+    if not isinstance(cfg, dict):
+        raise ValueError(f"读不到节点配置（{cfg_path}）：文件缺失/损坏，或 nodes 不是数组")
+    if not cfg.get("nodes"):
+        # 配置里没有 enabled 节点：无可升级对象（不是结构性错误）。
+        return {"dirty": _report_dirty(), "results": []}
+    if bool(spec.get("dry_run")):
+        # dry：只报告谁 stale、谁 current，不发任何 POST。
+        results = []
+        for n in cfg.get("nodes", []):
+            if not n.get("enabled", True):
+                continue
+            nid = str(n.get("id") or n.get("url") or "?")
+            ping = dist_common.node_ping(n["url"], n.get("authKey", ""), timeout=status_timeout)
+            if ping is None:
+                results.append({"id": nid, "ok": False, "reason": "unreachable", "pingHash": ""})
+                continue
+            ping_hash = str(ping.get("codeHash") or "")
+            results.append(
+                {
+                    "id": nid,
+                    "ok": False,
+                    "reason": "current" if ping_hash == expected else "stale",
+                    "pingHash": ping_hash,
+                }
+            )
+        return {"dirty": _report_dirty(), "results": results}
+    raw = dist_common.upgrade_stale_nodes(
+        cfg,
+        expected_hash=expected,
+        branch=branch,
+        status_timeout=status_timeout,
+        restart_timeout=timeout,
+    )
+    results = [
+        {
+            "id": str(r.get("id")),
+            "ok": bool(r.get("upgraded")),
+            "reason": str(r.get("reason")),
+            "pingHash": str(r.get("pingHash") or ""),
+        }
+        for r in raw
+    ]
+    return {"dirty": _report_dirty(), "results": results}
+
+
+def _report_dirty() -> list[str]:
+    """调用方要在日志里说明「为什么远端被拒」——取不到就不报（守卫侧仍会自行判定）。"""
+    try:
+        return list(dist_common.dirty_hash_files())
+    except Exception:
+        return []
+
+
+def run_spec(spec: dict) -> dict:
+    """显式节点模式：spec → {dirty, results}。可单测（monkeypatch 守卫即可）。
+
+    调用方已 ping 过并把 hash 传来 ⇒ 不再 ping（避免同回合对同一节点打两次网络）。
+    能自动 ping 的场景请用 run_scan（`cfg_path`），不要在这一侧重建探测。
     """
     if not isinstance(spec, dict):
         raise ValueError("spec 必须是 JSON 对象")
@@ -113,13 +204,7 @@ def run_spec(spec: dict) -> dict:
 
     # dirty 报告：self-only 的调用方不探测远端 dirty（与守卫同口径），但调用方要能
     # 在日志里说明「为什么远端被拒」——dry 分支已算过，这里再取一次对非 dry 也一致。
-    reported_dirty = dirty
-    if reported_dirty is None:
-        try:
-            reported_dirty = dist_common.dirty_hash_files()
-        except Exception:
-            # 诊断信息，取不到就不报（守卫侧仍会自行判定）。
-            reported_dirty = []
+    reported_dirty = dirty if dirty is not None else _report_dirty()
     return {"dirty": list(reported_dirty or []), "results": results}
 
 
@@ -134,8 +219,10 @@ def main() -> int:
         spec = json.loads(raw)
     except json.JSONDecodeError as e:
         return _fail(f"spec 不是合法 JSON: {e}")
+    if not isinstance(spec, dict):
+        return _fail("spec 必须是 JSON 对象")
     try:
-        out = run_spec(spec)
+        out = run_scan(spec) if str(spec.get("cfg_path") or "").strip() else run_spec(spec)
     except ValueError as e:
         return _fail(str(e))
     print(json.dumps(out, ensure_ascii=False))

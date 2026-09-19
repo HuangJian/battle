@@ -1,6 +1,7 @@
 /** dist-node-gate.test.ts ↔ tools/lib/dist-node-gate.ts（节点门 + 响亮告警的共享实现）。 */
 import { describe, expect, it } from 'bun:test'
-import { claimNote } from '../tools/lib/dist-node-gate'
+import { rmSync, writeFileSync } from 'node:fs'
+import { claimNote, configLocalSlots, pingNode, reprobeDue } from '../tools/lib/dist-node-gate'
 import {
   bunMajorMinor,
   classifyGate,
@@ -124,21 +125,126 @@ describe('gateWarning（响亮告警）', () => {
 })
 
 describe('provenanceNote（谁跑的必须说出来）', () => {
-  it('纯节点 ⇒ 无 WARN；混跑/全本地 ⇒ WARN 且按来源拆开', () => {
-    expect(provenanceNote('[t]', { 'node:self': 8 })).toEqual([
-      '[t] provenance: node:self=8（共 8 局）',
-    ])
-    const mixed = provenanceNote('[t]', { 'node:self': 6, local: 2 })
-    expect(mixed[0]).toContain('node:self=6')
-    expect(mixed[0]).toContain('local=2')
-    expect(mixed[1]).toContain('2/8 局由本地 worker 跑')
-    const allLocal = provenanceNote('[t]', { local: 5 })
-    expect(allLocal[1]).toContain('5/5 局由**本地 worker** 跑')
-    expect(allLocal[1]).toContain('不要当作分布式读数')
+  it('纯节点 ⇒ 说明远端全包，且无 WARN', () => {
+    const lines = provenanceNote('[t]', { 'node:self': 8 })
+    expect(lines[0]).toContain('node:self=8')
+    expect(lines[0]).toContain('远端 8 / 本地 0')
+    expect(lines[1]).toContain('全部 8 局由远端节点完成')
+    expect(lines.join('\n')).not.toContain('WARN')
+  })
+
+  it('混跑 ⇒ 只报份额 + 点明 --dist-local，绝不写成「节点失败/兜底」', () => {
+    // 2026-09-19 实测误读源头：1600 局里 728 本地是 --dist-local 15 的**份额**，
+    // 旧文案却写成「节点部分失败或本地兜底」，被读成「没分派到集群」。
+    const lines = provenanceNote(
+      '[t]',
+      { 'node:mac': 358, local: 730 },
+      {
+        localCap: 15,
+        usableNodes: 6,
+      },
+    )
+    expect(lines[0]).toContain('共 1088 局：远端 358 / 本地 730')
+    expect(lines[1]).toContain('--dist-local 15 的份额')
+    expect(lines[1]).toContain('不是失败兜底')
+    const all = lines.join('\n')
+    expect(all).not.toContain('WARN')
+    expect(all).not.toContain('部分失败')
+  })
+
+  it('全本地 ⇒ WARN；过门节点数 >0 时给出「分到但没干完」的排查口径', () => {
+    const noNodes = provenanceNote('[t]', { local: 5 }, { localCap: 5 })
+    expect(noNodes[1]).toContain('5/5 局全部由**本地 worker** 跑')
+    expect(noNodes[1]).toContain('无可用节点')
+    expect(noNodes[1]).toContain('不要当作分布式读数')
+    const withNodes = provenanceNote('[t]', { local: 5 }, { localCap: 5, usableNodes: 6 })
+    expect(withNodes[1]).toContain('6 个节点过门')
+    expect(withNodes[1]).toContain('claims')
   })
 
   it('空 ⇒ 空', () => {
     expect(provenanceNote('[t]', {})).toEqual([])
+  })
+})
+
+describe('pingNode（探测不能是「一次定生死」）', () => {
+  const serve = (
+    handler: (req: Request, state: { hits: number }) => Response | Promise<Response>,
+  ): { server: ReturnType<typeof Bun.serve>; state: { hits: number }; url: string } => {
+    const state = { hits: 0 }
+    const server = Bun.serve({ port: 0, fetch: (req) => handler(req, state) })
+    return { server, state, url: `http://127.0.0.1:${server.port}` }
+  }
+
+  it('单次慢响应不判死：第一次超时、第二次成功 ⇒ 仍拿到 ping', async () => {
+    const { server, state, url } = serve(async (_req, st) => {
+      st.hits++
+      if (st.hits === 1) await new Promise((r) => setTimeout(r, 300))
+      return Response.json({ ok: true, evalSupport: true, stageJsonSupport: true, codeHash: 'x' })
+    })
+    const ping = await pingNode(url, '', { timeoutMs: 100, attempts: 2, gapMs: 10 })
+    expect(ping?.codeHash).toBe('x')
+    expect(state.hits).toBe(2)
+    server.stop(true)
+  })
+
+  it('每次都慢/非 200 ⇒ null（重试用尽才算不可达）', async () => {
+    const slow = serve(async (_req, st) => {
+      st.hits++
+      await new Promise((r) => setTimeout(r, 300))
+      return Response.json({ ok: true })
+    })
+    expect(await pingNode(slow.url, '', { timeoutMs: 50, attempts: 2, gapMs: 10 })).toBeNull()
+    expect(slow.state.hits).toBe(2)
+    slow.server.stop(true)
+    const busy = serve((_req, st) => {
+      st.hits++
+      return new Response('busy', { status: 503 })
+    })
+    expect(await pingNode(busy.url, '', { timeoutMs: 200, attempts: 2, gapMs: 10 })).toBeNull()
+    expect(busy.state.hits).toBe(2)
+    busy.server.stop(true)
+  })
+
+  it('连不上的主机 ⇒ null（不死循环）', async () => {
+    expect(await pingNode('http://127.0.0.1:1', '', { timeoutMs: 200, attempts: 2 })).toBeNull()
+  })
+
+  it('reprobeDue：冷却窗口内不重复探，窗口外可探；首次可探', () => {
+    expect(reprobeDue(undefined, 1_000, 15_000)).toBe(true)
+    expect(reprobeDue(1_000, 5_000, 15_000)).toBe(false)
+    expect(reprobeDue(1_000, 16_000, 15_000)).toBe(true)
+  })
+})
+
+describe('configLocalSlots（本机槽位必读配置）', () => {
+  const writeCfg = (obj: unknown): string => {
+    const p = `tmp/dist-node-gate-cfg-${Math.random().toString(36).slice(2)}.json`
+    writeFileSync(p, JSON.stringify(obj))
+    return p
+  }
+
+  it('rl.local_slots=0（本机不参与）⇒ 取 0，不被「物理核数」覆盖', () => {
+    // 2026-09-19 实测：这份配置下 1600 局的批本地跑了 730 局。
+    const p = writeCfg({ nodes: [], rl: { local_slots: 0, workers: 8 } })
+    expect(configLocalSlots(p)).toEqual({ slots: 0, source: 'rl.local_slots' })
+    rmSync(p, { force: true })
+  })
+
+  it('policy.evalLocalSlots 优先于 rl.local_slots（与 Python 评测栈同序）', () => {
+    const p = writeCfg({ policy: { evalLocalSlots: 4 }, rl: { local_slots: 8 } })
+    expect(configLocalSlots(p)).toEqual({ slots: 4, source: 'policy.evalLocalSlots' })
+    rmSync(p, { force: true })
+  })
+
+  it('两键都没有 / 非数值 / 文件不可读 ⇒ null（调用方用兜底）', () => {
+    const none = writeCfg({ nodes: [], rl: { workers: 8 } })
+    expect(configLocalSlots(none)).toEqual({ slots: null, source: '' })
+    const bad = writeCfg({ policy: { evalLocalSlots: '0' }, rl: { local_slots: -1 } })
+    expect(configLocalSlots(bad)).toEqual({ slots: null, source: '' })
+    expect(configLocalSlots('tmp/definitely-not-here-42.json')).toEqual({ slots: null, source: '' })
+    rmSync(none, { force: true })
+    rmSync(bad, { force: true })
   })
 })
 

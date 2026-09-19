@@ -12,6 +12,8 @@
  * 必须在这批产物里说明白。
  */
 
+import { readFileSync } from 'node:fs'
+
 export interface DistNodeCfg {
   id: string
   url: string
@@ -44,6 +46,51 @@ export interface NodeGateEntry {
   reason: string | null
   /** ping 报的 codeHash（不可达为空串）——升级指令与告警都要用。 */
   pingHash: string
+}
+
+export interface PingOpts {
+  /** 单次 ping 超时（默认 10s）。节点被别的作业占满时 /v1/ping 会很慢（用户 2026-09-19：
+   *  「所有 enabled 节点都在线，只是可能 ping 得慢」）——超时太短会把健康节点判成不可达。 */
+  timeoutMs?: number
+  /** 尝试次数（默认 2）：一次慢响应 ≠ 节点不在。 */
+  attempts?: number
+  /** 重试间隔（默认 500ms）。 */
+  gapMs?: number
+}
+
+/**
+ * ping 一个节点（带重试）。返回 null = **多次**尝试后仍拿不到 200。
+ *
+ * 为什么要重试 + 可调超时：单次探测的结论会被用来决定「本轮是否用这台算力」，
+ * 而慢响应（占满、隧道抖动）与真的下线在单次超时上不可区分；判错一次就白白
+ * 浪费整轮批的节点容量（配合 local_slots=0 时更是直接决定成败）。
+ */
+export async function pingNode(
+  url: string,
+  authKey = '',
+  opts: PingOpts = {},
+): Promise<DistPing | null> {
+  const timeoutMs = opts.timeoutMs ?? 10_000
+  const attempts = Math.max(1, opts.attempts ?? 2)
+  const gapMs = opts.gapMs ?? 500
+  for (let a = 0; a < attempts; a++) {
+    try {
+      const r = await fetch(`${url.replace(/\/$/, '')}/v1/ping`, {
+        headers: { Authorization: `Bearer ${authKey}` },
+        signal: AbortSignal.timeout(timeoutMs),
+      })
+      if (r.status === 200) return (await r.json()) as DistPing
+    } catch {
+      /* 超时/网络：退避后重试 */
+    }
+    if (a + 1 < attempts) await new Promise((r) => setTimeout(r, gapMs))
+  }
+  return null
+}
+
+/** 失败触发的再探测闸门（纯函数）：冷却窗口内不重复探（一批任务成批失败时只探一次）。 */
+export function reprobeDue(lastMs: number | undefined, nowMs: number, cooldownMs: number): boolean {
+  return lastMs === undefined || nowMs - lastMs >= cooldownMs
 }
 
 /** bun 版本 major.minor（节点门，与 Python `mm()` 同式）。 */
@@ -91,6 +138,40 @@ export function classifyGate(entries: NodeGateEntry[]): GateSummary {
     else out.other.push([e.id, String(e.reason)])
   }
   return out
+}
+
+/**
+ * dist 配置里的「本机槽位」约定。`slots=null` = 配置未约定（调用方用自己的兜底）。
+ *
+ * 为什么必须读它：`rl.local_slots: 0` / `policy.evalLocalSlots: 0` 是**机器口径**
+ * （本机不参与，全交集群）。一次性评估工具此前缺省 `--dist-local` = 物理核数，
+ * 把「本机不参与」静默变成「本机跑近一半」（2026-09-19 实测：配置 local_slots=0，
+ * 1600 局的批本地跑了 730 局，5 台节点只分到 870）。取值优先级与 Python 评测栈
+ * 同序：`policy.evalLocalSlots`（评测专用旋钮，`rl/eval_local.py`）→ `rl.local_slots`
+ * （机器级，`dashboard/src/core/slots.ts` 同源）。
+ */
+export interface LocalSlotsFromConfig {
+  slots: number | null
+  /** 生效键名（日志用）：`policy.evalLocalSlots` / `rl.local_slots` / 空。 */
+  source: string
+}
+
+export function configLocalSlots(cfgPath: string): LocalSlotsFromConfig {
+  const pick = (v: unknown): number | null =>
+    typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.floor(v) : null
+  try {
+    const raw = JSON.parse(readFileSync(cfgPath, 'utf8')) as {
+      policy?: { evalLocalSlots?: unknown }
+      rl?: { local_slots?: unknown }
+    }
+    const evalSlots = pick(raw.policy?.evalLocalSlots)
+    if (evalSlots !== null) return { slots: evalSlots, source: 'policy.evalLocalSlots' }
+    const rlSlots = pick(raw.rl?.local_slots)
+    if (rlSlots !== null) return { slots: rlSlots, source: 'rl.local_slots' }
+    return { slots: null, source: '' }
+  } catch {
+    return { slots: null, source: '' }
+  }
 }
 
 export interface GateWarnOpts {
@@ -163,22 +244,50 @@ export function claimNote(prefix: string, byClaim: Record<string, number>): stri
   ]
 }
 
+export interface ProvenanceOpts {
+  /** 本机 worker 槽数（`--dist-local`）——用于区分「本地份额」与「失败兜底」。 */
+  localCap?: number
+  /** 过门的节点数（>0 说明远端本来可用 ⇒ 「全本地」才是异常）。 */
+  usableNodes?: number
+}
+
 /**
- * 「这批局是谁跑的」注脚（本地回落必须显式说出来）。
- * bySrc 形如 `{ 'node:self': 12, local: 4 }`。
+ * 「这批局是谁跑的」注脚。bySrc 形如 `{ 'node:self': 12, local: 4 }`。
+ *
+ * 口径（2026-09-19 修正）：本地 >0 **不等于**出事——`--dist-local N` 本就是显式的本地份额
+ * （缺省 = 物理核数），15 个快本地槽与 41 个高延迟远端槽同台竞速时本地本来就会多吃；
+ * 上一版把所有 local>0 都写成「节点部分失败或本地兜底」，把健康跑批误报成故障
+ * （实测：1600 局的批 728 本地 / 872 远端，被读成「没分派到集群」）。
+ * 现在只对**远端零参与**喊 WARN，混跑只报份额，并点明它由 `--dist-local` 决定。
  */
-export function provenanceNote(prefix: string, bySrc: Record<string, number>): string[] {
+export function provenanceNote(
+  prefix: string,
+  bySrc: Record<string, number>,
+  opts: ProvenanceOpts = {},
+): string[] {
   const keys = Object.keys(bySrc).sort()
   if (keys.length === 0) return []
   const local = keys.filter((k) => k === 'local').reduce((n, k) => n + bySrc[k], 0)
   const total = keys.reduce((n, k) => n + bySrc[k], 0)
+  const remote = total - local
   const detail = keys.map((k) => `${k}=${bySrc[k]}`).join(', ')
-  const lines = [`${prefix} provenance: ${detail}（共 ${total} 局）`]
-  if (local > 0)
+  const lines = [
+    `${prefix} provenance: ${detail}（共 ${total} 局：远端 ${remote} / 本地 ${local}）`,
+  ]
+  if (remote === 0) {
+    const why =
+      (opts.usableNodes ?? 0) > 0
+        ? `，但本轮有 ${opts.usableNodes} 个节点过门——节点可能被别的任务占满 / 请求全超时，看 claims 区分「没分到活」与「分到但没干完」`
+        : '（无可用节点）'
     lines.push(
-      local === total
-        ? `${prefix} WARN provenance: ${local}/${total} 局由**本地 worker** 跑（远端未参与）——不要当作分布式读数`
-        : `${prefix} WARN provenance: ${local}/${total} 局由本地 worker 跑（节点部分失败或本地兜底）——混跑读数须按来源拆开看`,
+      `${prefix} WARN provenance: ${local}/${total} 局全部由**本地 worker** 跑（远端零参与${why}）——不要当作分布式读数`,
     )
+  } else if (local > 0) {
+    lines.push(
+      `${prefix} provenance: 本地 ${local}/${total} 局是 **--dist-local ${opts.localCap ?? '?'} 的份额**（不是失败兜底；想全走远端用 --dist-local 0），远端 ${remote}/${total} 局`,
+    )
+  } else {
+    lines.push(`${prefix} provenance: 全部 ${total} 局由远端节点完成（本地 0）`)
+  }
   return lines
 }
