@@ -48,7 +48,6 @@ async function smokeTrainBc(course: string): Promise<ActionResult> {
     const trainLog = path.join(LOG_DIR, course, 'training-loop.log')
     const spec = bcLoopSpec(cfg, {
       course,
-      ppo: 'remote',
       smoke: true,
       pushNodeUrl: pushUrl,
       venv,
@@ -137,7 +136,6 @@ export async function smokeTrain(course: string): Promise<ActionResult> {
     const trainLog = path.join(LOG_DIR, course, 'training-loop.log')
     const spec = trainingLoopSpec(cfg, {
       course,
-      ppo: 'remote',
       smoke: true,
       pushNodeUrl: pushUrl,
       venv,

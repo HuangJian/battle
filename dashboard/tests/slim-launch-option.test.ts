@@ -92,16 +92,15 @@ describe('preset / route / UI 接线（源码断言：跨文件链路 tsc 抓不
 
   it('app.tsx：slim 进 preset body（漏了 = 选项点了不生效的假成功）', () => {
     const src = readSrc('src/web/app/app.tsx').replace(/\s+/g, ' ')
-    expect(src).toContain('if (push?.slim) body.slim = push.slim')
+    expect(src).toContain('if (opts?.slim) body.slim = opts.slim')
   })
 
   it('TrainLaunchModal：控件 + 随启动选项带上 slim + 显示当前生效值', () => {
     const src = readSrc('src/web/app/panels/TrainLaunchModal.tsx').replace(/\s+/g, ' ')
     expect(src).toContain("const TC_SLIM = 'tc.slim'")
     expect(src).toContain('ariaLabel="协议瘦身"')
-    // 顺序无关（后续 M3 又往同一个选项对象里加了 rolloutSrc——写死整行会让本断言
-    // 在「别人加开关」时变红，而那不是回归）。
-    expect(src).toMatch(/const tunnel: TunnelLaunchOpts = \{[^}]*\bslim\b/)
+    // 上抛的选项对象里必须有 slim（启动不再带 mode，故这里是单参数调用）
+    expect(src).toMatch(/onLaunch\(\{[^}]*\bslim[,}]/)
     // 上次选择要记住（与 cfProtocol 同口径）
     expect(src).toContain('writeLocal(TC_SLIM, slim)')
     // 当前生效值上屏：以为改了其实没改是本仓反复出现的一类坑

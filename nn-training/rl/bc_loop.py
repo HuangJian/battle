@@ -793,10 +793,9 @@ def resolve_transport(
 ) -> str:
     """BC 传输裁决（纯函数，2026-09-15 对齐 run_rl）→ 'local' | 'push' | 'hub'。
 
-    历史优先级是「push（env/config）> hub」：本课用 push 跑过一次后
-    `courses.<课>.push_node_url` 就留在 rl-config 里，之后任何 --remote 都会被静默推去
-    云机。`--remote-transport pull` 是唯一能压过它的开关——控制台 local preset 用的正是
-    它（本机独立 localWorker 必须领到 job）。auto = 历史行为零变化。
+    优先级「push（env `REMOTE_PUSH_NODE`，冒烟预演）> hub」；2026-09-19 起**不再**读课程
+    `push_node_url`（课程与节点正交），所以非冒烟场景下 auto 恒落 `hub`（发布到 hub、等
+    worker 领取）。显式 `--remote-transport push|pull` 仍可钉死（headless 用）。
 
     非法组合响亮 SystemExit（不静默回落）。
     """
@@ -812,8 +811,7 @@ def resolve_transport(
     if mode == "push":
         if not push_url:
             raise SystemExit(
-                "[run_bc] --remote-transport push 但没有 push 节点"
-                "（courses.<课>.push_node_url / REMOTE_PUSH_NODE 均空）"
+                "[run_bc] --remote-transport push 但没有 push 节点（REMOTE_PUSH_NODE 为空）"
             )
         return "push"
     if mode != "auto":
@@ -823,8 +821,8 @@ def resolve_transport(
     if remote and hub_url and token:
         return "hub"
     raise SystemExit(
-        "[run_bc] 无法确定传输：--local / REMOTE_PUSH_NODE|push_node_url / "
-        "--remote + rl.remote_hub_url 三选一（控制台 preset 会注入）"
+        "[run_bc] 无法确定传输：--local / REMOTE_PUSH_NODE / "
+        "--remote + rl.remote_hub_url 三选一（控制台共享 trainer 走 --remote + hub）"
     )
 
 
@@ -877,7 +875,8 @@ def resolve_bc_runtime(
     """BC CLI 参数 → `BcRuntime`（解析链**只此一份**；与改造前 `main()` 的启动段逐条同义）。
 
     `cfg` 注入是为了让 supervisor 复用同一份 dist 配置（缺省自己读 rl-config.json）；
-    `push_url` 的优先级保持历史行为：**env `REMOTE_PUSH_NODE` > 课程 `push_node_url`**。
+    `push_url` 只认 **env `REMOTE_PUSH_NODE`**（2026-09-19 起不再读课程 `push_node_url`：
+    课程与 worker 节点正交，见 `loop_steps._gpu_push_nodes` 同一条口径）。
     """
     course_path = resolve_bc_course(args.course)
     course_key = course_path.name[: -len(BC_SUFFIX)]
@@ -895,11 +894,10 @@ def resolve_bc_runtime(
 
         cfg = dc.load_dist_config()
     rl_block = (cfg or {}).get("rl") or {}
-    push_url = str(
-        os.environ.get("REMOTE_PUSH_NODE")
-        or (((cfg or {}).get("courses", {}) or {}).get(course_key, {}) or {}).get("push_node_url")
-        or ""
-    )
+    # 直推目标只从 env 来（冒烟预演注入本机的伪节点）。真实的 push 执行面走 hub 中介派发：
+    # BC 课在共享 trainer 里没有 env，resolve_transport(auto) 因而落在 `hub`（发布到 hub、
+    # 等 worker 领取）——与「所有 worker 都可能接到任何课程的活」同一个模型。
+    push_url = str(os.environ.get("REMOTE_PUSH_NODE") or "")
     token = str(args.remote_token or rl_block.get("remote_token") or "")
     # 共享 hub（2026-09-18）：URL 是**全局**事实（一条隧道/一个 hub 服务所有课程）⇒
     # 只认单键 `rl.remote_hub_url`（python 侧与 run_rl 同口径）。旧 per-course 的
@@ -963,9 +961,8 @@ def bc_argparser(
         "--remote-transport",
         default="auto",
         choices=("auto", "pull", "push", "local"),
-        help="传输裁决（对齐 run_rl，2026-09-15）：auto=历史优先级（push > hub）；"
-        "pull=强制走 hub（本机独立 localWorker 场景——否则 courses.push_node_url "
-        "一配就把 job 推去云机）；push=强制直推 push 节点（无节点则响亮失败）；"
+        help="传输裁决（对齐 run_rl，2026-09-15）：auto=env REMOTE_PUSH_NODE 直推否则 hub；"
+        "pull=强制走 hub（等 worker 自己来领）；push=强制直推 push 节点（无节点则响亮失败）；"
         "local=本机 train/bc.py（同 --local）",
     )
     return ap

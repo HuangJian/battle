@@ -83,7 +83,7 @@ describe('busy 键同源：guard 与 release 必须同键', () => {
       entry: 'run_rl_cluster.py',
       course: '',
     })
-    const r = await actions.startComponent('trainingLoop', { course: COURSE, trainerPpo: 'local' })
+    const r = await actions.startComponent('trainingLoop', { course: COURSE })
     expect(r.message).toContain('已在运行')
     // 幂等分支也要能回答「它服务谁」——一个进程服务所有课程
     expect(r.message).toContain('服务所有课程')
@@ -106,10 +106,7 @@ describe('busy 键同源：guard 与 release 必须同键', () => {
         entry: 'run_rl_cluster.py',
         course: '',
       })
-      const r = await actions.startComponent('trainingLoop', {
-        course: COURSE,
-        trainerPpo: 'local',
-      })
+      const r = await actions.startComponent('trainingLoop', { course: COURSE })
       expect(r.ok).toBe(false)
       // ① 事实留住：进程在跑、服务所有课程。少了这句，操作员会去停/重启 trainer ——
       //    而停共享 trainer = 停掉**所有**课程的训练。
@@ -135,7 +132,7 @@ describe('busy 键同源：guard 与 release 必须同键', () => {
 
   it('smokeComponent 结束后按课键被释放', async () => {
     // trainingLoop 冒烟的「进程存活」非致命 ⇒ ok 可能为 true；这里只关心 busy 是否释放
-    await actions.smokeComponent('trainingLoop', { course: GHOST_COURSE, trainerPpo: 'local' })
+    await actions.smokeComponent('trainingLoop', { course: GHOST_COURSE })
     expect([...actions.busy]).toEqual([])
   })
 
@@ -184,10 +181,7 @@ describe('busy 自愈：漏 release 的键超过 TTL 自动解锁', () => {
       entry: 'run_rl_cluster.py',
       course: '',
     })
-    const again = await actions.startComponent('trainingLoop', {
-      course: COURSE,
-      trainerPpo: 'local',
-    })
+    const again = await actions.startComponent('trainingLoop', { course: COURSE })
     expect(again.message).not.toContain('动作进行中')
   })
 

@@ -7,25 +7,26 @@ export interface NodeConf {
   authKey: string
   concurrency: number
   enabled: boolean
-  /** GPU push 节点（DECISIONS §340 补充 4：URL 指向其 worker_server 隧道）。 */
-  gpu_push?: boolean
-  /** **本机** worker_server 回落节点（2026-09-15；2026-09-19 起为 legacy 标记）。
+  /** GPU push 节点（DECISIONS §340 补充 4：URL 指向其 worker_server 隧道）。
    *
-   *  控制台**不再**拉起本机伪节点（`workerServe` 已从受管组件里剔除——它只服务训练冒烟
-   *  预演，由预演自起自停），也不再把它当可选执行面（写入器一并删除）。此标记只剩一个作用：
-   *  `pushTargetFromConfig` 把历史遗留的 `local_push` 条目识别成「本机」并在卡片上说出来
-   *  （看得见的坏过静默的）。任何时候都**不会被自动复用**：`findHealthyGpuPushNode` 一律排除。 */
-  local_push?: boolean
+   *  ★ **课程任务与 worker 节点正交**（2026-09-19 用户口径：「所有 worker 都可能接到在训的
+   *  课程任务，不管它是哪个课程的」）：节点只登记一次，谁接到活由部署（`rl.hub_push` + hub
+   *  队列）决定。`local_push` 标记已删除——本机伪节点与那套「一键本机 push」在 R3-7 全部退场
+   *  （启动时由 `pruneLegacyCourseKnobs` 连同按课程的指针一并清理）。 */
+  gpu_push?: boolean
 }
 
 /** 课程配置块（plan multi-course-parallel-training §1.3）。
- *  slot 0–3 = 槽位（hub_port = base + slot*10）；workers/local_slots = 本机并发配额。 */
+ *  slot = 槽位（只决定本机 push 端口）；workers/local_slots = 本机并发配额。
+ *
+ *  ★ **课程不携带任何传输/节点指针**（2026-09-19）：删掉了 `push_node_url`、
+ *  `remote_transport`、`remote_hub_url`、`hub_push`。它们是「把**这门课**钉到某条路 /
+ *  某台机器」的耦合——课程定义任务，worker 节点提供算力，二者正交。旧值由
+ *  `stack/course-knobs.ts::pruneLegacyCourseKnobs` 在启动训练时清理。 */
 export interface CourseConf {
   slot?: number
   workers?: number
   local_slots?: number
-  /** push 节点（worker_server 隧道）URL；多课同值 = N:1 共享（§3.8）。 */
-  push_node_url?: string
   /** 本课隧道协议覆盖（M1；缺省 = 用 rl.cf_protocol）。 */
   cf_protocol?: CfProtocol
   /** 本课隧道边缘 IP 版本覆盖（M1；缺省 = 用 rl.cf_edge_ip）。 */
@@ -37,14 +38,11 @@ export interface CourseConf {
    *  与 python `--rollout-src` 的 choices 同字面量（`auto` = 按配置解析）。 */
   rollout_src?: RolloutSrcMode
   // ── 共享 trainer 的**机器侧旋钮**（2026-09-19 / R3-5）──────────────────────────
-  //  一个进程服务所有课程 ⇒ 「这门课怎么连云端」不能是那个进程的命令行参数（只有一份）。
+  //  一个进程服务所有课程 ⇒ 「这门课怎么跑」不能是那个进程的命令行参数（只有一份）。
   //  住这里而**不能**住 `curricula/*.jsonc`：课程文件字节 = course_fp（语料血缘 / 熔断口径
-  //  D14）——往里加一个传输旋钮，熔断会把同一份语料读成新语料。
-  //  读面：python `rl/loop_serve.py::apply_course_machine_overrides`（开课时施加 + 值域校验）。
-  /** 传输裁决（RL：`auto|pull|push|hubpush`；BC 另有 `local` = 本机 train/bc.py）。 */
-  remote_transport?: 'auto' | 'pull' | 'push' | 'hubpush' | 'local'
-  /** 本课 pull/hubpush 打哪个 hub（local 模式 = 本机 hub 地址）。 */
-  remote_hub_url?: string
+  //  D14）——往里加一个旋钮，熔断会把同一份语料读成新语料。
+  //  读面：python `rl/loop_serve.py::apply_course_machine_overrides`（开课时施加）。
+  //  传输/节点指针**不在**这里（课程与 worker 节点正交）。
   /** T7：远端连败降级本机的阈值（0 = 关）。 */
   remote_degrade_after?: number
   /** 门禁失败语义（halt = 打进停机态）。 */

@@ -27,7 +27,9 @@ describe('console/api.buildStateView', () => {
       expect(c.label.length).toBeGreaterThan(0)
     }
     expect(s.nodes.length).toBeGreaterThan(0)
-    expect(['pull', 'push', 'local']).toContain(s.modes.trainerPpo)
+    // 启动训练不选模式（2026-09-19）：modes 里不再有 trainerPpo；执行面看 `pushFleet`
+    expect(s.modes).not.toHaveProperty('trainerPpo')
+    expect(['hub-dispatch', 'direct-push', 'pull']).toContain(s.pushFleet?.mode ?? 'pull')
     expect([0, 1]).toContain(s.modes.stream)
     expect([0, 1]).toContain(s.modes.doubleBuffer)
     expect(s.courses).toBeInstanceOf(Array)
@@ -85,19 +87,15 @@ describe('console/api.buildStateView', () => {
     }
   })
 
-  it('push 执行面（2026-09-15）：快照给出「job 推给本机还是云机」的数据源', async () => {
-    // 在 scratch 配置上临时种一个云 push 节点 + 两个课程键（course 名唯一，不与他人争缓存）。
+  it('push 执行面（2026-09-19）：快照按**机群级**事实推执行面，不再按课程认领节点', async () => {
+    // 在 scratch 配置上临时种一个云 push 节点（课程侧一个字不配）+ 两个课程名。
     const prev = readConfigText()
     const cloud = 'push-probe-cloud'
     const none = 'push-probe-none'
     try {
       const cfg = JSON.parse(prev) as Record<string, unknown>
       const courses = (cfg.courses as Record<string, unknown>) ?? {}
-      cfg.courses = {
-        ...courses,
-        [cloud]: { push_node_url: 'https://127.0.0.1:1' },
-        [none]: { slot: 1 },
-      }
+      cfg.courses = { ...courses, [cloud]: { slot: 1 }, [none]: { slot: 1 } }
       cfg.nodes = [
         ...((cfg.nodes as unknown[]) ?? []),
         {
@@ -110,16 +108,16 @@ describe('console/api.buildStateView', () => {
         },
       ]
       writeFileSync(scratchConfig, JSON.stringify(cfg, null, 2))
+      // 课程侧**一个字都没配**（两个课程块只有 slot）——执行面仍然被登记节点抬起来，
+      // 这正是「课程 ↔ worker 节点正交」：同一个机群服务所有课程，不按课认领。
+      expect(JSON.stringify(cfg.courses)).not.toContain('push_node_url')
       const s = await api.buildStateView(cloud)
-      // kind 由 config 认领（`push_node_url` → gpu_push 节点）；healthy 是 /ping 直探
-      // （127.0.0.1:1 无人监听 → false）；active=false（trainer 未以 push 模式在跑）。
-      expect(s.pushTarget?.kind).toBe('cloud')
-      expect(s.pushTarget?.nodeId).toBe('probe-cloud')
-      expect(s.pushTarget?.healthy).toBe(false)
-      expect(s.pushTarget?.active).toBe(false)
-      // 未配置 push 目标 → null（非 push 场景卡片不出徽章）
-      const s2 = await api.buildStateView(none)
-      expect(s2.pushTarget ?? null).toBeNull()
+      // 执行面 = 登记事实：有 gpu_push 节点 ⇒ hub 派发/直推（不再有「这门课指向谁」）。
+      expect(['hub-dispatch', 'direct-push']).toContain(s.pushFleet?.mode ?? '')
+      expect(s.pushFleet?.nodes).toBeGreaterThan(0)
+      // 逐节点探活结果在队列里（127.0.0.1:1 无人监听 → false）
+      const probe = s.pushFleet?.probes.find((p) => p.id === 'probe-cloud')
+      expect(probe?.healthy).toBe(false)
     } finally {
       writeFileSync(scratchConfig, prev)
     }

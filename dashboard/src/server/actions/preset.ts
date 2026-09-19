@@ -1,29 +1,42 @@
-/** preset.ts — 模式预设与开关（stream / double_buffer / trainer pull|push|local）。
+/** preset.ts — **启动训练**（一套编排，不再是 pull/push/local 三选一）。
  *
- *  2026-09-15：`local` 不再是「进程内本机 PPO」——本机 PPO 拆成独立受管进程
- *  `localWorker`（云端 remote_worker 同一份代码，pull 本课 hub）。因此 local 预设
- *  变成 hubServer → localWorker → trainingLoop(--ppo remote + 本机 hub)。 */
+ *  ★ 2026-09-19 用户口径：「启动课程训练时，trainloop 不需要指定 pull/push 模式。pull 模式是由
+ *  远端 worker 自己请求，本机只需要保证 hub 在线，配以 tailscale/cloudflared tunnel。push 模式
+ *  只看系统是否已经配置了 push worker 节点，界面留配置入口，节点数据存 rl-config.json」。
+ *
+ *  ⇒ 编排恒为 **selfNode → hubServer → trainer**：
+ *   · hub 在线 + （可选）隧道 = 让**任何** worker（云机 / 本机）都能来领活；
+ *   · 这轮 PPO 到底推给谁由**部署事实**决定（`rl.hub_push` 缺省开 + 登记在册的 `nodes[].gpu_push`
+ *     + hub 队列），见 `stack/push-config.ts::remoteExecutionFace` —— 课程侧一个字都不配；
+ *   · 本机 worker 不再是「local 模式」的一部分：它是一张独立的共享卡片，起它就参与领活
+ *     （与云机逐字同权，「所有 worker 都可能接到在训的课程任务，不管它是哪个课程的」）。
+ *
+ *  **不再自动拉 cloudflared**（2026-09-16）：云机与本机组网后用 tailnet 直连 hub 即可；隧道
+ *  回源会把所有云端流量归成 127.0.0.1，hub 的 D9 闭锁一旦触发会让训练主循环被别的云机连坐。
+ *  需要公网隧道时单独点「cloudflared」组件（不会自动跑）。
+ *
+ *  任一步失败即中断（已完成的组件保留，页面可单独停止）。 */
 import { loadConfig, saveConfig, validateCourseArg, writeRemoteHubUrl } from '../../core/config'
-import { configurePushEndpoint } from '../../stack/push-config'
 import type { CfEdgeIp, CfProtocol, Component, RolloutSrcMode, SlimMode } from '../../core/types'
 import { tailscaleIp } from '../../core/net'
 import { sharedHubUrl } from '../../core/slots'
-import { coursesInLocalMode } from '../../stack/local-worker'
+import { remoteExecutionFace } from '../../stack/push-config'
 import { rlConfigSmoke } from '../../stack/smoke'
 import { slimToCfg } from '../../stack/specs'
-import { ConsoleState, saveConsoleState } from './console-state'
+import { saveConsoleState } from './console-state'
 import { ActionError, ActionResult, done, guard, release } from './result'
 import { startComponent, StartCtx } from './start'
-import { stopComponent } from './stop'
 
-// ────────────────────────── 模式预设与开关 ──────────────────────────
+// ────────────────────────── 启动训练 ──────────────────────────
+
+/** 启动顺序（恒一条路）：本机 agent → 共享 hub → 共享 trainer。 */
+export const TRAIN_START_ORDER: readonly Component[] = [
+  'selfNode',
+  'hubServer',
+  'trainingLoop',
+] as const
 
 export interface PresetOpts {
-  /** Push：worker_server / cloudflared endpoint。留空 = 复用 rl-config 中 enabled 且 ping 通的
-   *  gpu_push（**排除**历史遗留的本机回落节点）；都没有 → **响亮报错**（不自动回落本机）。 */
-  pushEndpoint?: string
-  /** Push：worker_server Bearer token（显式填写时必填；复用时用节点 authKey）。 */
-  pushAuthKey?: string
   /** T7：远端连败是否 opt-in 降级本机 PPO（默认 false）。 */
   remoteDegrade?: boolean
   /** M1：隧道协议/边缘 IP（随启动回写 rl-config.rl.* + console-state 生效值）。 */
@@ -39,26 +52,12 @@ export interface PresetOpts {
   rolloutSrc?: RolloutSrcMode
 }
 
-/** 按 trainer 模式顺序拉起组件组合：
- *  pull = selfNode→hubServer→trainer（云机 poll 领取；hub 地址写成本机 tailnet IP，
- *         **不自动拉 cloudflared**——2026-09-16 起，隧道只在你单独点它时才起）；
- *  push = （执行面解析 + 回写 rl-config）→ selfNode→trainer
- *         （云机自起 cloudflared；hub 直推 code.zip/job，**不启本地 hubServer/cloudflared**）。
- *         执行面是**云机** worker_server（经隧道）或用户在弹窗填的 endpoint——本机伪 GPU 节点
- *         **不在受管组件里**（2026-09-19）：它只服务冒烟预演，由预演自起自停。
- *  local = hubServer→localWorker→trainer（本机 worker poll 本机 hub——worker 与
- *          trainer 两个进程，可各自随时启停；语义与云机 pull 完全一致）。
- *  任一步失败即中断（已完成的组件保留，页面可单独停止）。 */
-export async function startPreset(
-  mode: ConsoleState['trainerPpo'],
-  course: string,
-  opts: PresetOpts = {},
-): Promise<ActionResult> {
-  guard(`preset:${mode}`)
+export async function startPreset(course: string, opts: PresetOpts = {}): Promise<ActionResult> {
+  guard('preset:train')
   try {
     if (!course) throw new ActionError('需要 course（先在顶部设置课程）')
     validateCourseArg(course)
-    saveConsoleState({ trainerPpo: mode, course })
+    saveConsoleState({ course })
     // M1：隧道选项随启动回写（rl-config 的 rl.* 键 + console-state 生效值）——
     // 留空 = 不动（沿用 rl-config 现值/缺省 http2/4）。
     if (opts.cfProtocol || opts.cfEdgeIp || opts.slim || opts.rolloutSrc) {
@@ -78,105 +77,51 @@ export async function startPreset(
         rolloutSrc: opts.rolloutSrc,
       })
     }
-    let pushNote = ''
-    if (mode === 'push') {
-      // 执行面解析（ping 门 / 复用 config）+ 必要时回写 rl-config ——
-      // 失败抛 ActionError，**绝不启动** trainingLoop。
-      const t = await configurePushEndpoint(course, opts.pushEndpoint ?? '', opts.pushAuthKey ?? '')
-      // 只剩两条路（缺执行面在 configurePushEndpoint 里就抛错了）：用户填的 endpoint / 复用
-      // config 里 ping 通的云节点。「回落本机伪节点」已于 2026-09-19 删除（它只服务冒烟预演）。
-      pushNote =
-        t.source === 'config'
-          ? `; 复用 rl-config gpu_push (${t.url}) 已 ping 通；无本地 hub-server/cloudflared`
-          : `; push endpoint 已验证并回写 rl-config (${t.url})；无本地 hub-server/cloudflared`
-    }
-    // pull **不再自动拉 cloudflared**（2026-09-16）：云机与本机组网后用 tailnet 直连
-    // 本课 hub 即可。理由不是"少一个组件"——隧道回源会把**所有**云端流量归成
-    // 127.0.0.1，hub 的 D9 闭锁（5 次鉴权失败封 IP 3600s）一旦触发，训练主循环会
-    // 被其它云机的失败连坐（x3-step 事故：训练循环连续 403 自杀退出、云机空转一整晚）。
-    // 需要公网隧道时，单独点「cloudflared」组件启动即可（不会自动跑）。
+    // hub 地址：把本机 tailnet IP 写进单键 `rl.remote_hub_url`（**pull 与 hub 派发都要它**）。
+    // 没有它就只能直推节点——而「worker 自己来领」是默认路径，所以这一步不能省。
     let hubNote = ''
-    if (mode === 'pull') {
-      const cfgNow = loadConfig()
-      const ip = tailscaleIp()
-      if (ip) {
-        // 共享 hub ⇒ 共享地址（一条隧道/一个端口服务所有课程），URL 写单键。
-        const hubUrl = sharedHubUrl(cfgNow, ip)
-        writeRemoteHubUrl(hubUrl)
-        hubNote = `; 云机 pull 地址 = tailnet 直连 ${hubUrl}（共享 hub：所有课程同一地址，未启动 cloudflared）`
-      } else {
-        hubNote = '; 未检测到 Tailscale 网卡 IP——remote_hub_url 未改（云机需自行可达共享 hub）'
-      }
+    const cfgNow = loadConfig()
+    const ip = tailscaleIp()
+    if (ip) {
+      const hubUrl = sharedHubUrl(cfgNow, ip)
+      writeRemoteHubUrl(hubUrl)
+      hubNote = `；hub 地址 = tailnet 直连 ${hubUrl}（一个 hub 服务所有课程，未启动 cloudflared）`
+    } else {
+      hubNote = '；未检测到 Tailscale 网卡 IP——remote_hub_url 未改（worker 需自行可达共享 hub）'
     }
-    const order: Component[] =
-      mode === 'pull'
-        ? ['selfNode', 'hubServer', 'trainingLoop']
-        : mode === 'push'
-          ? ['selfNode', 'trainingLoop']
-          : ['hubServer', 'localWorker', 'trainingLoop']
-    // 离开 local：清掉上一轮 local 预设留下的 localWorker（进程 + 登记）。否则切到 pull/push
-    // 后卡片仍亮绿点——操作员以为「未启动却在跑」（2026-09-16 用户反馈）。
-    // ⚠ 但它是**共享**进程了（2026-09-19）：停它 = 本机不再执行**任何**课程的 PPO job，
-    // 故只在「本课是最后一门 local 课」时才停；还有别的课在 local ⇒ 保留并说明。
-    // 判据从配置算（`courses.<课>.{remote_transport,remote_hub_url}` = local 预设写下的值），
-    // 见 stack/local-worker.ts::coursesInLocalMode；停失败不阻断预设（训练主路径更重要）。
-    let localWorkerNote = ''
-    if (mode !== 'local') {
-      const stillLocal = coursesInLocalMode(loadConfig(), course)
-      if (stillLocal.length > 0) {
-        localWorkerNote = `；本机 worker 保留（${stillLocal.join('、')} 仍在 local）`
-      } else {
-        try {
-          await stopComponent('localWorker', course)
-        } catch {
-          /* leftover stop is best-effort */
-        }
-      }
-    }
-    const ctx: StartCtx = {
-      course,
-      trainerPpo: mode,
-      remoteDegrade: !!opts.remoteDegrade,
-    }
+    const ctx: StartCtx = { course, remoteDegrade: !!opts.remoteDegrade }
     const detail: string[] = []
-    for (const k of order) {
+    for (const k of TRAIN_START_ORDER) {
       const r = await startComponent(k, ctx)
       detail.push(`${k}: ${r.message}${r.detail && !r.ok ? ` — ${r.detail[0] ?? ''}` : ''}`)
-      // trainer 是**共享**进程（R3-5）：它的首条详情是「本课机器侧传输 = …」——操作员选了模式
-      // 之后最需要确认的就是这一条（单进程没有「这门课的 flag」，模式只能落 rl-config）。
-      // 幂等早退（已在运行）时同样有这两行，故不按 ok 分支。
+      // trainer 是**共享**进程：它的首条详情是「本课执行面 = …」——启动之后最需要确认的就是这条
+      // （本轮 PPO 会去哪、缺什么会退到下一条路）。幂等早退（已在运行）时同样有这两行，故不按 ok 分支。
       if (k === 'trainingLoop' && r.detail?.[0]) detail.push(`  ${r.detail[0]}`)
-      if (!r.ok) return done(false, `${mode} 预设启动中断于 ${k}`, detail)
+      if (!r.ok) return done(false, `启动训练中断于 ${k}`, detail)
     }
+    const face = remoteExecutionFace(loadConfig())
     return done(
       true,
-      `已按 ${mode} 模式启动 ${order.length} 个组件 (course=${course})${pushNote}${hubNote}` +
-        (order.includes('trainingLoop')
-          ? '；trainer 是共享进程（一个进程服务所有课程，停它 = 停全部）'
-          : '') +
-        localWorkerNote,
+      `已启动训练栈 (course=${course})${hubNote}` +
+        `；本轮执行面：${face.text}` +
+        '（trainer 是共享进程：一个进程服务所有课程，停它 = 停全部）',
       detail,
     )
   } catch (e) {
     if (e instanceof ActionError) throw e
-    // configurePushEndpoint 的 ping/校验失败 → ActionError（响亮，不启动）
     throw new ActionError(e instanceof Error ? e.message : String(e))
   } finally {
-    release(`preset:${mode}`)
+    release('preset:train')
   }
 }
 
-/** 模式开关：rl.* 键回写 rl-config.json（run_rl 真实键，下次 trainer 启动生效）；
- *  trainer.ppo 持久化到 console-state.json（pull/push/local 基建编排选择）。 */
+/** 模式开关：rl.* 键回写 rl-config.json（训练侧真实键，下次 trainer 启动生效）。
+ *
+ *  2026-09-19 删掉了 `trainer.ppo`（pull/push/local）：执行面不再是一个「模式」，而是由
+ *  `rl.hub_push` + 登记节点推出来的事实——它的配置入口在 worker 登记面板。 */
 export async function setMode(key: string, value: string): Promise<ActionResult> {
   guard(`mode:${key}`)
   try {
-    if (key === 'trainer.ppo') {
-      if (!['pull', 'push', 'local'].includes(value))
-        throw new ActionError(`未知 trainer 模式: ${value}`)
-      saveConsoleState({ trainerPpo: value as ConsoleState['trainerPpo'] })
-      return done(true, `trainer 模式 = ${value}（下次启动 trainer 生效）`)
-    }
     const cfg = loadConfig()
     cfg.rl = cfg.rl || {}
     const num = Number(value)
@@ -191,6 +136,10 @@ export async function setMode(key: string, value: string): Promise<ActionResult>
       case 'rl.precollect_early':
         cfg.rl.precollect_early = num
         break
+      case 'rl.hub_push':
+        // hub 中介派发开关（缺省开）：配了节点就走 hub 派发，关掉则训练侧直推节点。
+        cfg.rl.hub_push = num === 1
+        break
       default:
         throw new ActionError(`未知模式开关: ${key}`)
     }
@@ -198,7 +147,7 @@ export async function setMode(key: string, value: string): Promise<ActionResult>
     const smoke = rlConfigSmoke(cfg)
     return done(
       smoke.passed,
-      `${key} = ${value}（已回写 rl-config.json，下次 trainer 启动生效）`,
+      `${key} = ${value}（已回写 rl-config.json；训练栈重启后生效）`,
       smoke.passed ? undefined : [smoke.detail ?? ''],
     )
   } finally {

@@ -21,11 +21,7 @@ import { NodePills } from './panels/NodePills'
 import { MetricsTable } from './panels/MetricsTable'
 import { NodeStats } from './panels/NodeStats'
 import { LogNavCard } from './panels/LogNavCard'
-import {
-  TrainLaunchModal,
-  type PushCredentials,
-  type TunnelLaunchOpts,
-} from './panels/TrainLaunchModal'
+import { TrainLaunchModal, type TunnelLaunchOpts } from './panels/TrainLaunchModal'
 import { BcPanel } from './panels/BcPanel'
 import { CourseOverview } from './panels/CourseOverview'
 import { WorkerRegistry } from './panels/WorkerRegistry'
@@ -304,24 +300,19 @@ export function App({ initial }: AppProps) {
   )
 
   const handleLaunch = async (
-    mode: 'pull' | 'push' | 'local',
-    push?: Partial<PushCredentials> & TunnelLaunchOpts & { remoteDegrade?: boolean },
+    opts?: TunnelLaunchOpts & { remoteDegrade?: boolean },
   ): Promise<void> => {
-    // Push：先关弹窗再 POST（服务端 ping 门；失败走 flash，不启动进程）。
     setTrainOpen(false)
+    // 启动**不传模式**（2026-09-19）：执行面由 rl.hub_push + 登记节点推出来，
+    // 服务端 preset 也不再有 mode/endpoint/authKey 这几个 body 字段。
     const body: Record<string, unknown> = {
-      mode,
-      remoteDegrade: push?.remoteDegrade === true,
+      remoteDegrade: opts?.remoteDegrade === true,
     }
-    // M1/M2：传输选项随启动回写 rl-config + console-state（未选 = 不传，沿用现值）。
-    if (push?.cfProtocol) body.cfProtocol = push.cfProtocol
-    if (push?.cfEdgeIp) body.cfEdgeIp = push.cfEdgeIp
-    if (push?.slim) body.slim = push.slim
-    if (push?.rolloutSrc) body.rolloutSrc = push.rolloutSrc
-    if (mode === 'push' && push) {
-      body.pushEndpoint = push.endpoint ?? ''
-      body.pushAuthKey = push.authKey ?? ''
-    }
+    // M1/M2/M3：传输选项随启动回写 rl-config + console-state（未选 = 不传，沿用现值）。
+    if (opts?.cfProtocol) body.cfProtocol = opts.cfProtocol
+    if (opts?.cfEdgeIp) body.cfEdgeIp = opts.cfEdgeIp
+    if (opts?.slim) body.slim = opts.slim
+    if (opts?.rolloutSrc) body.rolloutSrc = opts.rolloutSrc
     await doAction('preset', body)
   }
 
@@ -787,7 +778,7 @@ export function App({ initial }: AppProps) {
           modes={stateView.modes}
           onClose={() => setTrainOpen(false)}
           onAction={doAction}
-          onLaunch={(m, push) => void handleLaunch(m, push)}
+          onLaunch={(opts) => void handleLaunch(opts)}
           readOnly={readOnly}
         />
       ) : null}

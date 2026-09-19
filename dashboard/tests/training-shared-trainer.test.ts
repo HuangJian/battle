@@ -24,7 +24,6 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import os from 'os'
 import path from 'path'
 import { saveAnyComponent } from '../src/core/registry'
-import { sharedHubUrl } from '../src/core/slots'
 import { DASHBOARD_ROOT, REPO_ROOT } from '../src/core/paths'
 import type { RlConfig } from '../src/core/types'
 import * as actions from '../src/server/actions'
@@ -160,48 +159,48 @@ describe('② 课程准备：账本（发现判据）与机器侧旋钮', () => 
     }
   }
 
-  it('mode → 传输裁决：local = pull + **本机 hub**；push/pull 各自定死（不让残留节点改道）', () => {
+  it('课程准备**不写任何传输裁决**（启动不选模式）：只落降级旋钮 + 把执行面说出来', () => {
     withTmpLogs(() => {
       const cfg = fixture()
-      const hub = sharedHubUrl(cfg)
-      // local：本机独立 worker 的 pull 模式（与旧 per-course spec 逐字段同义）
-      const a = actions.prepareCourseForSharedTrainer(cfg, COURSE, {
+      const r = actions.prepareCourseForSharedTrainer(cfg, COURSE, {
         course: COURSE,
-        trainerPpo: 'local',
         remoteDegrade: true,
       })
-      expect(knobsOnDisk(COURSE)).toMatchObject({
-        remote_transport: 'pull',
-        remote_hub_url: hub,
-        remote_degrade_after: 3,
-      })
-      expect(a.notes.join('\n')).toContain('本课（c5-gae）机器侧传输 = pull')
-      // pull：定死 pull，但**不**写本机 hub（hub 地址来自 rl.remote_hub_url）
+      // 写面只剩机器侧旋钮：课程不带「走哪条路 / 打哪个 hub / 钉哪台机器」
+      expect(knobsOnDisk(COURSE)).toMatchObject({ remote_degrade_after: 3 })
+      for (const key of ['remote_transport', 'remote_hub_url', 'push_node_url', 'hub_push']) {
+        expect(knobsOnDisk(COURSE)[key]).toBeUndefined()
+      }
+      // 执行面改成**说给操作员听**（不再是一个写进配置的模式）
+      expect(r.notes.join('\n')).toContain('本课（c5-gae）执行面：')
       writeFileSync(tmpConfig, JSON.stringify(fixture(), null, 2))
-      actions.prepareCourseForSharedTrainer(cfg, COURSE, { course: COURSE, trainerPpo: 'pull' })
-      expect(knobsOnDisk(COURSE).remote_transport).toBe('pull')
-      expect(knobsOnDisk(COURSE).remote_hub_url).toBeUndefined()
-      // push：定死 push（auto 会按残留 push_node_url 推给别的节点，而那正是事故源）
-      writeFileSync(tmpConfig, JSON.stringify(fixture(), null, 2))
-      actions.prepareCourseForSharedTrainer(cfg, COURSE, { course: COURSE, trainerPpo: 'push' })
-      expect(knobsOnDisk(COURSE).remote_transport).toBe('push')
+    })
+  })
+
+  it('启动时只**清**旧的传输耦合键（prune），绝不重新写回去', () => {
+    withTmpLogs(() => {
+      const cfg = fixture()
+      // 类型表里这两个键已删 ⇒ 用旧形状（Record）造历史配置，模拟线上 rl-config.json 的残留值。
+      cfg.courses = {
+        [COURSE]: { remote_transport: 'pull', remote_hub_url: 'https://old.example' },
+      } as unknown as RlConfig['courses']
+      writeFileSync(tmpConfig, JSON.stringify(cfg, null, 2))
+      const r = actions.prepareCourseForSharedTrainer(cfg, COURSE, { course: COURSE })
+      const onDisk = knobsOnDisk(COURSE)
+      expect(onDisk.remote_transport).toBeUndefined()
+      expect(onDisk.remote_hub_url).toBeUndefined()
+      expect(r.notes.join('\n')).toContain('已清理 legacy 传输配置')
       writeFileSync(tmpConfig, JSON.stringify(fixture(), null, 2))
     })
   })
 
   it('为本课建账本（发现判据）——不建它，这门新课永远不会被共享 trainer 看见', () => {
     withTmpLogs((dir) => {
-      const r = actions.prepareCourseForSharedTrainer(fixture(), COURSE, {
-        course: COURSE,
-        trainerPpo: 'pull',
-      })
+      const r = actions.prepareCourseForSharedTrainer(fixture(), COURSE, { course: COURSE })
       expect(existsSync(path.join(dir, COURSE, 'training_log.jsonl'))).toBe(true)
       expect(r.notes.join('\n')).toContain('已建课程账本')
       // 账本已存在时不重复建（幂等）：再跑一次不出那条说明
-      const again = actions.prepareCourseForSharedTrainer(fixture(), COURSE, {
-        course: COURSE,
-        trainerPpo: 'pull',
-      })
+      const again = actions.prepareCourseForSharedTrainer(fixture(), COURSE, { course: COURSE })
       expect(again.notes.join('\n')).not.toContain('已建课程账本')
       writeFileSync(tmpConfig, JSON.stringify(fixture(), null, 2))
     })

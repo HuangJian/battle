@@ -20,7 +20,7 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
   const state = loadConsoleState()
   const courses = discoverCourses()
   const course = courseOverride || effectiveCourse(state, courses)
-  const { components, nodes, localNode, phase, loopComplete, pushTarget } = await getSlowSnapshot(
+  const { components, nodes, localNode, phase, loopComplete, pushFleet } = await getSlowSnapshot(
     cfg,
     course,
   )
@@ -71,18 +71,10 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     components,
     nodes,
     localNode,
-    // push 执行面「此刻真的在生效」= 本课 trainer 以 push 模式在跑（模式来自控制台状态，
-    // 存活来自组件探测）——徽章据此从「配置指向」切换为「正在用」。
-    pushTarget: pushTarget
-      ? {
-          ...pushTarget,
-          active:
-            state.trainerPpo === 'push' &&
-            components.some((c) => c.key === 'trainingLoop' && c.status === 'running'),
-        }
-      : null,
+    // push 执行面（机群级）：登记节点 + hub_push（缺省开）+ 逐节点探活——不再按课程键控，
+    // 也不再需要「trainer 是否以 push 在跑」这层判断：登记即候选，唯一一条派发路（2026-09-19）。
+    pushFleet,
     modes: {
-      trainerPpo: state.trainerPpo,
       stream: Number(cfg.rl.stream ?? 0),
       doubleBuffer: Number(cfg.rl.double_buffer ?? 0),
       precollectEarly: Number(cfg.rl.precollect_early ?? 0),

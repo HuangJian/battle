@@ -49,29 +49,10 @@ function logTail(p: string, n = 6): string[] {
   }
 }
 
-/** 处于 **local 模式**的课程名（`exclude` 除外）——判据 = local 预设写下的那两个键。
- *
- *  为什么需要它：本机 worker 收敛为共享进程后，「离开 local 就停掉残留 worker」这条 2026-09-16
- *  的修法不能再按课执行——停的是**唯一**那份进程，会把其它仍在 local 的课一起停掉（它们的 PPO
- *  job 从此无人领取，而表面「训练正常」，是最坏的一类静默失败）。故离开 local 时先问这句：
- *  本课是最后一门 local 课才停。
- *
- *  判据取 `courses.<课>.{remote_transport,remote_hub_url}` **恰等于** local 预设写下的值
- *  （见 `actions/start.ts::prepareCourseForSharedTrainer` 的 local 分支：`pull` + 本机 hub URL）。
- *  刻意不做「同端口就算本机 hub」这类放宽：pull（云机）课程写的是 tailnet 地址但**同一个 hub
- *  端口**，放宽会让「把唯一的课从 local 切到 pull」永远停不掉 worker——正是 2026-09-16 用户
- *  反馈要修的那个「卡片仍亮绿点，操作员以为未启动却在跑」。手工改过配置的边角情形由组件卡的
- *  显式「停止」兜底（共享实例的停止语义在卡片上有说明）。 */
-export function coursesInLocalMode(cfg: RlConfig, exclude = ''): string[] {
-  const localHub = sharedHubUrl(cfg)
-  return Object.entries(cfg.courses ?? {})
-    .filter(
-      ([course, c]) =>
-        course !== exclude && c?.remote_transport === 'pull' && c?.remote_hub_url === localHub,
-    )
-    .map(([course]) => course)
-    .sort()
-}
+// ★ 2026-09-19 删掉了 `coursesInLocalMode`：它是「local 模式」的配套判据（离开 local 时只在
+//   最后一门 local 课才停共享 worker）。local 模式本身已随「课程与 worker 节点正交」退场 ——
+//   本机 worker 就是一张独立的共享卡片，起它就参与领活，没有任何课程声明「我在本机跑」。
+//   停它 = 本机不再执行**任何**课程的 PPO job（卡片上的停止语义有说明）。
 
 /** 启动本机 PPO worker：换代接管旧形状实例 + spawn + 登记账本 + 就绪窗口判活。
  *

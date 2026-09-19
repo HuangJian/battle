@@ -59,28 +59,6 @@ class SmokeVoidRoundError(Exception):
     """
 
 
-def _course_push_url(args: Any) -> str:
-    """本课 push 节点 URL（rl-config `courses.<stem>.push_node_url`；多课同值 = N:1 共享）。
-
-    缺省空 = 沿用旧逻辑（全取 gpu_push 节点）。C1：URL 住 rl-config，永不进
-    curricula（否则 course_fp 血缘漂移，D14 熔断误判）。
-    """
-    try:
-        from train.loop_util import course_key_from_path
-
-        stem = course_key_from_path(str(getattr(args, "course_path", "") or ""))
-    except Exception:
-        return ""
-    if not stem:
-        return ""
-    try:
-        cfg = dist_common.load_dist_config() or {}
-        url = ((cfg.get("courses") or {}).get(stem) or {}).get("push_node_url") or ""
-        return str(url).rstrip("/")
-    except Exception:
-        return ""
-
-
 def _course_cf_tunnel(args: Any) -> tuple[str | None, str | None]:
     """本轮**真正生效**的隧道协议/边缘 IP → 写进 iteration 事件的 wire.protocol/edge_ip。
 
@@ -89,7 +67,7 @@ def _course_cf_tunnel(args: Any) -> tuple[str | None, str | None]:
     按选项分组统计（plan §1.4 的硬要求）。
 
     优先级：CLI 参数 > `courses.<stem>.cf_*` > `rl.cf_*` > None（不记）。
-    与 `_course_push_url` 同口径读 rl-config：选项住 rl-config，**永不进 curricula**
+    与 `_rollout_source` 同口径读 rl-config：选项住 rl-config，**永不进 curricula**
     （D14 血缘）；读不到一律返回 None（旧行为，不炸训练）。
     """
     proto = str(getattr(args, "remote_cf_protocol", "") or "") or None
@@ -123,7 +101,7 @@ def _rollout_source(args: Any) -> str:
     """本轮 rollout 在哪跑：`local`（历史行为）| `node`（M3 整轮上云）。
 
     优先级：CLI `--rollout-src`（非 auto）> `courses.<stem>.rollout_src` > `rl.rollout_src`
-    > local。与 `_course_cf_tunnel` / `_course_push_url` 同口径读 rl-config：选项住
+    > local。与 `_course_cf_tunnel` 同口径读 rl-config：选项住
     rl-config，**永不进 curricula**（D14 血缘），读不到一律 local（旧行为，不炸训练）。
 
     ⚠ 写进 iteration 事件的 wire.rollout_src 用的是本函数的返回值，**不是** args 字面量
@@ -206,58 +184,55 @@ def _run_wait_sec(args: Any) -> float:
     return v if v > 0 else RUN_WAIT_DEFAULT_SEC
 
 
-def _gpu_push_nodes(remote_token: str, course_push_url: str = "") -> list[dict]:
+def _gpu_push_nodes(remote_token: str) -> list[dict]:
     """GPU push 节点清单（HUB 推模式，DECISIONS §340 补充 4）：
-    环境变量 REMOTE_PUSH_NODE（hub-start 冒烟注入本机伪节点，优先）→
-    rl-config nodes[].gpu_push=true（真 GPU 机器，URL 指向其 worker_server 隧道）。
+    环境变量 REMOTE_PUSH_NODE（冒烟预演注入本机伪节点，优先）→
+    rl-config `nodes[].gpu_push=true`（真 GPU 机器，URL 指向其 worker_server 隧道）。
 
-    多课程（plan multi-course-parallel-training P3-W1b）：`course_push_url` 非空时
-    只取 URL 与之匹配的节点（N:1 共享天然成立——同 URL 多课同取）；为空时沿用旧逻辑
-    （全取）。env 注入永远保留（显式冒烟覆盖，不受课程过滤影响）。
-    非空但匹配 0 个的响亮失败在调用方（WARN + manifest 打标，不抛异常）。"""
+    ★ **课程与 worker 节点正交**（2026-09-19 用户口径：「课程任务与 worker 节点互相正交！
+    所有 worker 都可能接到在训的课程任务，不管它是哪个课程的」）：这里**不再**按课程的
+    `push_node_url` 过滤——登记在册的节点就是全部候选（hub 中介派发按队列顺序挑空闲的那个，
+    直推按序 failover）。「把某门课钉到某台机器」不存在：课程定义任务，节点提供算力。
+    env 注入是**独占**的显式覆盖（冒烟预演）：设了它就只有它，登记节点一律不参与——
+    否则伪节点一失败，failover 会把预演的 job 送去真 GPU 上跑（「冒烟不该碰真训练」）。"""
     out: list[dict] = []
     env_node = os.environ.get("REMOTE_PUSH_NODE")
     if env_node:
-        out.append({"url": env_node.rstrip("/"), "authKey": remote_token})
+        return [{"url": env_node.rstrip("/"), "authKey": remote_token}]
     cfg = dist_common.load_dist_config() or {}
     nodes = [n for n in cfg.get("nodes") or [] if n.get("gpu_push") and n.get("enabled", True)]
-    want = (course_push_url or "").rstrip("/")
-    if want:
-        nodes = [n for n in nodes if str(n.get("url", "")).rstrip("/") == want]
     for n in nodes:
         out.append({"url": str(n.get("url", "")).rstrip("/"), "authKey": str(n.get("authKey", ""))})
     return out
 
 
-#: `--remote-transport` 的合法值（auto = 历史优先级：本课 gpu_push 节点 > hub）。
+#: `--remote-transport` 的合法值（auto = 登记在册的 gpu_push 节点 > hub pull）。
+#: 2026-09-19 起**课程与节点正交**：不再有「本课 push_node_url」这层按课程过滤。
 #: `hubpush`（2026-09-18）= 发布到 hub、由 **hub 推给**登记在册的 GPU worker——训练侧不直连
 #: 节点，于是队列/空闲判定/超时回落/多课程公平全住在一处（这就是它相对 `push` 的价值）。
 REMOTE_TRANSPORTS: tuple[str, ...] = ("auto", "pull", "push", "hubpush")
 
 
-def _course_hub_push(args: Any) -> bool:
-    """本课是否要求 **hub 中介推送**（rl-config `courses.<stem>.hub_push` / `rl.hub_push`）。
+def _hub_push_opt_in() -> bool:
+    """是否**允许** hub 中介推送（rl-config `rl.hub_push`；**缺省 = 允许**）。
 
     auto 下它是唯一切到 `hubpush` 的开关（CLI `--remote-transport hubpush` 则无条件切）：
-    「push 要不要经 hub」是部署事实（云机在 hub 后面跑还是隧道直推），不是每轮要重算的
-    东西，所以它住配置。读法与 `_course_push_url`/`_rollout_source` 同口径——选项住
-    rl-config，**永不进 curricula**（D14 血缘）；读不到一律 False（旧行为，不炸训练）。
+    「push 经不经 hub」是**部署事实**（机群在 hub 后面跑还是隧道直推），不是每轮要重算的
+    东西 ⇒ 住 `rl.hub_push`（全局一个，2026-09-19 起**不再**按课程读 `courses.<课>.hub_push`：
+    那是「把某门课钉到某条派发路」的耦合，用户口径是课程与节点正交）。
+
+    缺省为什么是 **True**（用户 2026-09-19：「配了节点就默认走 hub 中介派发」）：hub 在
+    新模型下**始终在线**（pull 本来就要求它在），而 hub 派发把队列顺序 / 空闲判定 / 超时
+    回落 / 多课程公平全集中在一处。显式 `"hub_push": false` 回到直推节点。
+    需要 `hub_url` + token 齐备才真生效（`resolve_hub_push`）；缺则维持直推，不炸训练。
     """
     try:
-        from train.loop_util import course_key_from_path
-
-        stem = course_key_from_path(str(getattr(args, "course_path", "") or ""))
-    except Exception:
-        return False
-    if not stem:
-        return False
-    try:
         cfg = dist_common.load_dist_config() or {}
-        course = (cfg.get("courses") or {}).get(stem) or {}
         rl = cfg.get("rl") or {}
-        return bool(course.get("hub_push") or rl.get("hub_push"))
+        v = rl.get("hub_push")
+        return True if v is None else bool(v)
     except Exception:
-        return False
+        return True
 
 
 def resolve_hub_push(
@@ -299,11 +274,9 @@ def resolve_transport(
 ) -> list[dict]:
     """传输裁决（2026-09-15）→ **生效的 gpu_push 节点清单**（空 = 走 hub pull）。
 
-    `--remote-transport` 是**唯一**能压过「config 里有本课 gpu_push 节点就静默推云机」
-    的开关。控制台 local preset（本机独立 localWorker）必须钉 pull：某课用 push 跑过
-    一次后 `courses.<课>.push_node_url` 就留在 rl-config 里，不钉死则 job 全被推去云机，
-    本机 worker 永远领不到活——而且日志看起来「训练正常」（最贵的那种错误）。
-    auto 保持历史行为零变化（云机 pull/push preset 均不受影响）。
+    auto（默认）= 登记在册的 gpu_push 节点就是全部候选（课程与节点正交，2026-09-19）；
+    想钉死一条路就用 `--remote-transport pull|push|hubpush` 显式压过——控制台已不再
+    代写任何按课程的传输旋钮（课程定义任务，节点提供算力，二者不互相绑定）。
 
     非法组合响亮 SystemExit（与 require_remote_transport 同风格：绝不静默回落）。
     """
@@ -324,7 +297,7 @@ def resolve_transport(
         if not gpu_nodes:
             raise SystemExit(
                 "[run_rl] --remote-transport push 但没有可用的 gpu_push 节点——"
-                "检查 rl-config nodes[].gpu_push / courses.<课>.push_node_url / REMOTE_PUSH_NODE"
+                "检查 rl-config nodes[].gpu_push（enabled）与 REMOTE_PUSH_NODE"
             )
         return gpu_nodes
     raise SystemExit(
@@ -1327,13 +1300,12 @@ class TrainingSteps:
         # Push 优先解析（纯 push 不再依赖本地 hub-server / cloudflared）：
         # 有 gpu_push 节点或 REMOTE_PUSH_NODE 时，payload/code 直推云机隧道，
         # hub_url 可缺省。token 仍要（pull 回落 / env 节点鉴权）；配置节点自带 authKey。
-        push_url = _course_push_url(args)
         transport = str(getattr(args, "remote_transport", "auto") or "auto")
-        gpu_nodes = resolve_transport(transport, hub_url, token, _gpu_push_nodes(token, push_url))
+        gpu_nodes = resolve_transport(transport, hub_url, token, _gpu_push_nodes(token))
         # hub 中介推送（2026-09-18）：发布带 manifest.dispatch="push"，由 hub 按登记表
         # 推给空闲 GPU worker——训练侧不直连节点，于是「队列顺序/空闲判定/超时回落/
         # 多课程公平」全住在一处。与 gpu_nodes 互斥（resolve_transport hubpush 恒返空）。
-        hub_push = resolve_hub_push(transport, hub_url, token, _course_hub_push(args))
+        hub_push = resolve_hub_push(transport, hub_url, token, _hub_push_opt_in())
         require_remote_transport(hub_url, token, gpu_nodes)
         log(
             f"[run_rl] remote ppo transport={transport} push_nodes={len(gpu_nodes)} "
@@ -1539,22 +1511,6 @@ class TrainingSteps:
         # 等到结果再开窗就永远错过那段空闲（那正是它要服务的窗口）。
         if hasattr(self, "_evalboard_idle"):
             self._evalboard_idle(it, getattr(self, "_last_dist_cfg", None))
-        # F-B5：push_node_url 非空但匹配 0 个节点 → 响亮 WARN + manifest 打标（不抛异常：
-        # 抛了 loop 会无限原地重试 hang；静默回落 pull 仍能正确训练，危险在误诊不在停机）。
-        # 原在等待相位，语义不变，只是提前到「解析完就能定」的位置。
-        if (
-            transport == "auto"
-            and push_url
-            and not os.environ.get("REMOTE_PUSH_NODE")
-            and not gpu_nodes
-        ):
-            msg = (
-                f"[run_rl] WARN: courses push_node_url={push_url} 匹配到 0 个 "
-                "gpu_push 节点——本轮回落 pull（remote_hub_url），请检查 rl-config "
-                "courses 块或节点 gpu_push 标记"
-            )
-            log(msg)
-            manifest["push_filter_warn"] = msg
         # 直推节点链路：**发布即提交**（三相拆分的关键约定）。探针要问「那份 job 现在怎么
         # 样了」，而节点上还没有这份 job 时它只会一直答「还没回」⇒ 提交必须落在发布相位，
         # 等待相位才可能真让位。提交本身是**有界**的上传（几十 MB），不是那 25 分钟的等待。

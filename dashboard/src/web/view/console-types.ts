@@ -41,24 +41,20 @@ export interface ComponentView {
   error?: string | null
 }
 
-/** 本课 push 执行面的探测结果（慢快照；纯 config 解析 + 一次 `/ping` 直探）。 */
-export interface PushTargetProbe {
-  /** local = 历史遗留的**本机** worker_server 地址（`local_push` 节点；控制台自 2026-09-19
-   *  起不再提供这个执行面 —— 徽章必须把它说出来，否则显示的是「配置指向」而实际无人服务）；
-   *  cloud = 云 GPU 节点；unresolved = 课程 `push_node_url` 指向 config 里不存在的节点
-   *  （python 侧「匹配 0 个」→ 静默回落 pull，必须显式暴露）。 */
-  kind: 'local' | 'cloud' | 'unresolved'
-  url: string
-  nodeId: string | null
-  /** `/ping` 直探结果；null = 未探（无鉴权键）。 */
-  healthy: boolean | null
-}
-
-/** 本课 push 执行面视图（2026-09-15）：trainer 的 job 现在推给谁——遗留的本机地址
- *  还是云 GPU。kind 由 config 解析（`push_node_url` → 认领节点），active = 本课 trainer
- *  正以 push 模式在跑（执行面此刻真的生效；false 时徽章是「配置指向」而非「正在用」）。 */
-export interface PushTargetView extends PushTargetProbe {
-  active: boolean
+/** push 执行面（**机群级**事实，2026-09-19：课程与 worker 节点正交 ⇒ 不再按课程键控）。
+ *
+ *  `mode` 由部署事实推出（`stack/push-config.ts::remoteExecutionFace`，与 python
+ *  `resolve_transport`/`resolve_hub_push` 同序）：有登记节点 + `rl.hub_push` + hub 地址
+ *  ⇒ hub 中介派发；有节点但缺 hub（或显式关掉）⇒ 直推；没节点 ⇒ pull（worker 来领）。
+ *  `probes` 是逐节点 `/ping` 的后台探活（慢快照）。 */
+export interface PushFleetProbe {
+  mode: 'hub-dispatch' | 'direct-push' | 'pull'
+  text: string
+  detail: string
+  nodes: number
+  hubPush: boolean
+  hubUrl: string
+  probes: Array<{ id: string; url: string; healthy: boolean | null }>
 }
 
 export interface NodeView {
@@ -97,8 +93,13 @@ export function shortUrl(url: string): string {
   return url.length <= host.length + 4 ? url : `${host}…${url.slice(-4)}`
 }
 
+/** 行为/传输开关的当前生效值。
+ *
+ *  ★ 2026-09-19：删掉了 `trainerPpo`（pull/push/local）。启动训练不再选模式——
+ *  pull 是「远端 worker 自己来领」（本机只保证 hub 在线 + 可选隧道），push 是
+ *  「系统里登记了 push worker 节点」（入口在 worker 登记面板，数据住 rl-config.json）。
+ *  两者都由**部署事实**决定，课程侧一个字都不配。 */
 export interface ModeView {
-  trainerPpo: 'pull' | 'push' | 'local'
   stream: number
   doubleBuffer: number
   precollectEarly: number
@@ -170,8 +171,8 @@ export interface ConsoleStateView {
   nodes: NodeView[]
   /** 本机直跑节点（§361⑤：pill 行只读展示；无池/无槽位时缺省）。 */
   localNode?: NodeLocalView | null
-  /** 本课 push 执行面（2026-09-15）：未配置 push 目标时为 null/缺省。 */
-  pushTarget?: PushTargetView | null
+  /** push 执行面（机群级；2026-09-19 起不再按课程）：登记节点 + hub_push + 逐节点探活。 */
+  pushFleet?: PushFleetProbe | null
   modes: ModeView
   metrics: MetricsView
   /** 当前训练阶段（顶栏图标用）。 */

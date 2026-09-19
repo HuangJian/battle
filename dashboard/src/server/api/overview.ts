@@ -16,6 +16,7 @@ import { pidAlive } from '../../core/net'
 import { entryForCourse, loadRegistry, scopeOf } from '../../core/registry'
 import type { RlConfig } from '../../core/types'
 import { hubPushWorkers, liveHub, withWorkerProbes } from '../../stack/hub-admin'
+import { hubPushEnabled } from '../../stack/push-config'
 import {
   type HubQueueView,
   type ParallelOverviewView,
@@ -70,7 +71,6 @@ function workerRows(cfg: RlConfig): Array<Omit<PushWorkerView, 'online' | 'busy'
       url: String(n.url ?? ''),
       enabled: n.enabled !== false,
       concurrency: Number(n.concurrency ?? 1) || 1,
-      local: n.local_push === true,
       hubOnline: null,
     }))
 }
@@ -168,6 +168,8 @@ export async function buildWorkerRegistry(
   return {
     hubUrl: admin.url,
     mounted: admin.pushMap !== null,
+    // 派发开关（机群级，与课程无关）：缺省 true = 配了节点就走 hub 中介派发。
+    hubPush: hubPushEnabled(cfg),
     workers: admin.workers.map((w) => ({
       ...w,
       hubOnline: admin.pushMap ? (admin.pushMap.get(w.id) ?? null) : null,

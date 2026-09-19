@@ -89,15 +89,16 @@ describe('preset / route / UI 接线（源码断言：跨文件链路 tsc 抓不
 
   it('app.tsx：rolloutSrc 进 preset body（漏了 = 选项点了不生效的假成功）', () => {
     const src = readSrc('src/web/app/app.tsx').replace(/\s+/g, ' ')
-    expect(src).toContain('if (push?.rolloutSrc) body.rolloutSrc = push.rolloutSrc')
+    expect(src).toContain('if (opts?.rolloutSrc) body.rolloutSrc = opts.rolloutSrc')
   })
 
   it('TrainLaunchModal：控件 + 随启动选项带上 rolloutSrc + 显示当前生效值', () => {
     const src = readSrc('src/web/app/panels/TrainLaunchModal.tsx').replace(/\s+/g, ' ')
     expect(src).toContain("const TC_ROLLOUT_SRC = 'tc.rolloutSrc'")
     expect(src).toContain('ariaLabel="rollout 执行位置"')
-    expect(src).toMatch(/const tunnel: TunnelLaunchOpts = \{[^}]*\brolloutSrc\b/)
-    // 选项对象类型里有它（漏了 = UI 选了但没随 onLaunch 传出去）
+    // 上抛的选项对象里有它（漏了 = UI 选了但没随 onLaunch 传出去；启动不再带 mode）
+    expect(src).toMatch(/onLaunch\(\{[^}]*\brolloutSrc\b/)
+    // 选项对象类型里有它
     expect(src).toContain('rolloutSrc: RolloutSrcMode }')
     // 上次选择要记住（与 cfProtocol / slim 同口径）
     expect(src).toContain('writeLocal(TC_ROLLOUT_SRC, rolloutSrc)')
@@ -109,7 +110,8 @@ describe('preset / route / UI 接线（源码断言：跨文件链路 tsc 抓不
     const src = readSrc('src/server/actions/console-state.ts').replace(/\s+/g, ' ')
     expect(src).toContain('rolloutSrc?: RolloutSrcMode')
     // 缺省状态必须**不带**此键——带了就把「没配过」写死成了某个值
-    expect(src).toContain("const DEFAULT_STATE: ConsoleState = { trainerPpo: 'pull'")
+    // （trainerPpo 已随「启动不选模式」退役，DEFAULT_STATE 只剩两个课程字段）
+    expect(src).toContain("const DEFAULT_STATE: ConsoleState = { course: '', activeCourse: '' }")
     expect(src).not.toMatch(/const DEFAULT_STATE[^\n]*rolloutSrc/)
   })
 })

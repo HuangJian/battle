@@ -291,10 +291,6 @@ export const BC_LOOP_ENTRY = 'nn-training/run_bc.py'
 
 export interface BcLoopSpecOpts {
   course: string
-  /** 远程：发布到 per-course hub（pull preset）/ 直推 push 节点（push preset，
-   *  run_bc 读 REMOTE_PUSH_NODE/push_node_url）。local preset（2026-09-15 起）
-   *  = 本机独立 localWorker pull 模式：仍走 hub，但传输钉死 pull 并指名本机 hub。 */
-  ppo?: 'pull' | 'push' | 'local' | 'remote'
   /** 冒烟：尺寸压缩真一轮，落位即作废（不覆盖 out、不归档、账本零污染）。 */
   smoke?: boolean
   /** 冒烟/push 注入：REMOTE_PUSH_NODE（本机伪 GPU 节点 URL）。 */
@@ -321,15 +317,10 @@ export function bcLoopSpec(cfg: RlConfig, s: BcLoopSpecOpts): ProcSpec {
       '--course',
       s.course,
       '--remote',
-      // local preset = 本机独立 worker（pull）：传输钉死 pull，否则 run_bc 的
-      // 「push（env/config）> hub」优先级会把 job 推去云机，本机 worker 永远领不到活。
-      // 2026-09-17：**pull preset 同样钉死** —— 它原本不传，于是 run_bc 落回
-      // `--remote-transport auto`（=「config 里本课 gpu_push 节点 > hub」）；
-      // rl-config 里留着一条**过期 quick-tunnel URL** 的 gpu_push 节点时，
-      // 「云机 pull」会静默改走 push → HTTP 530 三连败 → GATE ABORT 停腿，
-      // 而云机 worker 其实正在正常 pull（实测 hub 日志同时有 push 530 与 pull 200）。
-      // 用户选 pull 的语义就是 pull，不该被某条残留节点悄悄改道。
-      ...(s.ppo === 'local' || s.ppo === 'pull' ? ['--remote-transport', 'pull'] : []),
+      // ★ 2026-09-19：**不再钉死传输**（`--remote-transport` 由训练侧 auto 裁决）。旧的
+      // 「local/pull 一律钉 pull」是为了防残留 gpu_push 节点把活劫去云机；现在课程与
+      // worker 节点正交、控制台也不再写 per-course 传输键，残留的那种条目已在启动时由
+      // `pruneLegacyCourseKnobs` 清掉。冒烟预演则靠 env `REMOTE_PUSH_NODE` 定方向。
       ...hubFlags,
       ...(s.smoke ? ['--smoke'] : []),
     ],
@@ -356,10 +347,6 @@ export const TRAINING_LOOP_ENTRY = 'nn-training/run_rl.py'
 
 export interface TrainingLoopSpecOpts {
   course: string
-  /** PPO 执行面：pull/push → --ppo remote（云端 worker）；local（2026-09-15 起）
-   *  = 本机独立 localWorker 的 pull 模式（--ppo remote --remote-transport pull
-   *  --remote-hub-url 本机 hub）——进程内 PPO 不再是控制台可选项。 */
-  ppo?: 'pull' | 'push' | 'local' | 'remote'
   /** 冒烟预演：--smoke（作废本轮、账本零污染）。 */
   smoke?: boolean
   /** 冒烟注入：REMOTE_PUSH_NODE（本机伪 GPU 节点 URL）。 */
@@ -484,14 +471,9 @@ export function trainingLoopSpec(cfg: RlConfig, s: TrainingLoopSpecOpts): ProcSp
       s.course,
       '--ppo',
       'remote',
-      // local preset = 本机独立 worker pull 模式。**必须钉死 pull**：_remote_ppo 的
-      // 传输优先级是「config 里本课 gpu_push 节点 > hub」，某课用 push 跑过一次后
-      // `courses.<课>.push_node_url` 就留在 rl-config 里——不钉死就会把 job 推给云机，
-      // 本机 localWorker 永远空转（且看起来「训练正常」）。
-      // 2026-09-17：**pull preset 同样钉死**（同因，见 BC 分支的详细注释）：
-      // 云机 pull 会话被一条残留/过期的 gpu_push 节点劫走 → push 530 三连败 →
-      // GATE ABORT，而云机 worker 其实正在正常 pull 并已把 result 200 回传。
-      ...(s.ppo === 'local' || s.ppo === 'pull' ? ['--remote-transport', 'pull'] : []),
+      // ★ 2026-09-19：**不再钉死传输**（同 BC 分支）：执行面由 `rl.hub_push` + 登记节点 +
+      // hub 队列裁决；`--remote-transport` 一律交回训练侧 auto。冒烟预演靠 env
+      // `REMOTE_PUSH_NODE` 定方向。
       ...hubFlags,
       ...(s.smoke ? ['--smoke'] : []),
       ...(s.gateHaltMode ? ['--gate-halt-mode', s.gateHaltMode] : []),

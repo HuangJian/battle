@@ -147,16 +147,21 @@ def prepare_process(argv: list[str] | None = None) -> str:
 #: 课程**机器侧覆盖**的键白名单（rl-config `courses.<课>.<key>`，2026-09-19 / R3-5）。
 #:
 #: 为什么这些键住 rl-config 而**不能**住 `curricula/<课>.jsonc`：课程文件字节 = `course_fp`
-#: （语料血缘 / 熔断口径，D14）——往课程文件里加一个传输旋钮，熔断会把同一份语料读成新语料。
-#: 与 `push_node_url`、本机并发配额同一条规矩（机器侧旋钮**永不进 curricula**）。
+#: （语料血缘 / 熔断口径，D14）——往课程文件里加一个旋钮，熔断会把同一份语料读成新语料。
+#: 机器侧旋钮**永不进 curricula**。
 #:
-#: 为什么现在需要它们：单进程服务器（`--serve`）**无法**用进程级 CLI 表达「这门课怎么连」
+#: 为什么现在需要它们：单进程服务器（`--serve`）**无法**用进程级 CLI 表达「这门课怎么跑」
 #: ——一个进程服务 N 门课，命令行只有一份。控制台过去往**每门课**的 trainer 命令行里塞
-#: `--remote-transport pull` / `--remote-hub-url` / `--remote-degrade-after` / `--gate-halt-mode`，
-#: 收敛成一个共享 trainer 后那些旋钮搬到这个块（per-course，且随盘持久——比一次性的 flag 耐久）。
+#: `--remote-degrade-after` / `--gate-halt-mode`，收敛成一个共享 trainer 后那些旋钮搬到这个块
+#: （per-course，且随盘持久——比一次性的 flag 耐久）。
+#:
+#: ★ **2026-09-19 删掉了两个键**（用户口径「课程任务与 worker 节点互相正交」）：
+#: `remote_transport` 与 `remote_hub_url`。它们是「把**这门课**钉到某条传输路 / 某个 hub」的
+#: 耦合旋钮：课程定义任务，worker 节点提供算力，谁接到活由**部署**（`rl.hub_push` + 登记节点）
+#: 与 hub 的队列决定，不该由科目名决定。旧配置里若还留着这两个键，**不再被读**（不报错，
+#: 静默失效）；控制台启动时会把它们连同 `push_node_url` / `hub_push` 一并清理（见
+#: `dashboard/src/stack/course-knobs.ts::pruneLegacyCourseKnobs`）。
 COURSE_MACHINE_OVERRIDE_KEYS: tuple[str, ...] = (
-    "remote_transport",  # auto|pull|push|hubpush（值域与 loop_steps.REMOTE_TRANSPORTS 同源）
-    "remote_hub_url",  # 本课 pull/hubpush 打哪个 hub（共享 hub 时代常同值；本机 local 模式用本机地址）
     "remote_degrade_after",  # T7 远端连败降级本机的阈值（控制台的 opt-in 开关）
     "gate_halt_mode",  # 门禁失败语义（halt/skip…）
 )
@@ -210,11 +215,9 @@ def apply_course_machine_overrides(
 ) -> list[str]:
     """把 rl-config `courses.<课>` 里的机器侧旋钮施加到 args；返回**已施加**的键（供测试/日志）。
 
-    契约（三条都与既有写法同源，不发明新语义）：
-      · 只认白名单 `COURSE_MACHINE_OVERRIDE_KEYS`——别的键（`push_node_url` / 配额 / `hub_push`）
-        各自有既有的读取点，本函数一个字都不碰；
-      · `remote_transport` 的值域在**这里**校验（响亮 SystemExit），因为它现在可能来自文件而不是
-        argparse choices —— 静默接受一个拼错的 transport 会让 job 走错执行面而「看起来正常」；
+    契约（两条都与既有写法同源，不发明新语义）：
+      · 只认白名单 `COURSE_MACHINE_OVERRIDE_KEYS`——别的键（配额 / 隧道选项）各自有既有的
+        读取点，本函数一个字都不碰；
       · 目标 args 没有这个字段（BC 解析器比 RL 少几个键）⇒ **响亮跳过**并记一行，不 setattr 造字段
         （造出来的字段没有任何读者，只会让人以为生效了）。
 
@@ -234,18 +237,6 @@ def apply_course_machine_overrides(
         if key not in block:
             continue
         val = block[key]
-        if key == "remote_transport":
-            from rl.loop_steps import REMOTE_TRANSPORTS
-
-            # RL 的合法值域 = loop_steps.REMOTE_TRANSPORTS；BC 多一个 `local`（本机 train/bc.py）
-            # ——按课程种类取并集，不在这里抄第二份枚举。
-            allowed = REMOTE_TRANSPORTS + (("local",) if course_kind(course) == "bc" else ())
-            if str(val) not in allowed:
-                raise SystemExit(
-                    f"[serve] 课程 {course} 的 courses.{course}.remote_transport = {val!r} 非法"
-                    f"（只接受 {'|'.join(allowed)}）——修 rl-config.json；"
-                    "非法值会让 job 走错执行面而「看起来正常」"
-                )
         if not hasattr(args, key):
             log_fn(f"[serve] 课程 {course} 的 courses.{course}.{key} 本课程种类没有该参数 ⇒ 跳过")
             continue

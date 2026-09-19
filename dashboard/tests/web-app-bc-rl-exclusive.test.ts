@@ -20,7 +20,7 @@ function mkView(isBc: boolean): ConsoleStateView {
     isBc,
     components: [],
     nodes: [],
-    modes: { trainerPpo: 'pull', stream: 0, doubleBuffer: 0, precollectEarly: 0 },
+    modes: { stream: 0, doubleBuffer: 0, precollectEarly: 0 },
     metrics: { available: false, iters: [] },
     phase: { phase: 'idle', sinceMs: null, iter: null },
   }

@@ -190,9 +190,6 @@ export interface PushWorkerView {
   url: string
   enabled: boolean
   concurrency: number
-  /** 历史遗留的**本机**伪节点条目（rl-config `local_push`；写入器已于 2026-09-19 删除）：
-   *  与云节点并存，可单独移除——遗留它就等于留一条会把执行面指向本机的记录，故显式标记。 */
-  local: boolean
   /** 面板直探 `{url}/ping`（worker_server 的 `/ping`）：null = 未探（停用）。 */
   online: boolean | null
   /** 该 worker 当前是否在跑活（`/ping` 的 `busy`）；null = 未探。 */
@@ -206,6 +203,10 @@ export interface PushWorkerRegistryView {
   hubUrl: string | null
   /** hub-server 是否带 `--push`（false = 只落了配置，hub 不会真派发）。 */
   mounted: boolean
+  /** `rl.hub_push` 的**生效值**（缺省 true = 配了节点就走 hub 派发）。
+   *  关掉则训练侧直推登记节点（`stack/push-config.ts::hubPushEnabled` 同口径）——它是
+   *  「push 派发走不走中介」的唯一开关，故与登记表同屏放。 */
+  hubPush: boolean
   workers: PushWorkerView[]
 }
 

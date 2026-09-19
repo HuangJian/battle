@@ -15,7 +15,8 @@ export const TC_HERO_ITER_VIEW = `${TC_KEY_PREFIX}hero.iters`
 /** hero 最新 6 轮区块折叠态（'1' = 折叠只留标题行）。 */
 export const TC_HERO_ITERS_COLLAPSED = `${TC_KEY_PREFIX}hero.iters.collapsed`
 export const TC_TREND_RANGE = `${TC_KEY_PREFIX}trend.range`
-export const TC_TRAIN_MODE = `${TC_KEY_PREFIX}train.mode`
+// ★ `tc.train.mode`（last-used pull/push/local）已随「启动训练不选模式」于 2026-09-19 退役；
+//   旧值留在 localStorage 里无害（tc.* 前缀不会被 cleanupNonTcKeys 误删），不再有任何读者。
 export const TC_TRAIN_TOGGLES = `${TC_KEY_PREFIX}train.toggles`
 export const TC_NODE_VIEW = (view: 'ctl' | 'pool', key: string): string =>
   `${TC_KEY_PREFIX}node.${view}.${key}`

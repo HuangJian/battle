@@ -2544,6 +2544,14 @@ a.tc-preset {
   background: var(--yellow-bg);
   color: var(--yellow);
 }
+/* 派发开关（rl.hub_push）：与「已挂载」徽章同理——它是 push 那条路的模式开关，
+   配了节点就走哪条路由它定，故与登记表同屏（一眼可见、可改）。 */
+.tc-wreg__hubpush {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
 .tc-wreg__rows {
   display: flex;
   align-items: center;

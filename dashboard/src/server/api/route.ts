@@ -96,9 +96,9 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
       case 'smokeTrain':
         return okResp(await smokeTrain(ctx.course))
       case 'preset': {
-        const mode = bodyStr(body, 'mode')
-        if (!['pull', 'push', 'local'].includes(mode)) return errResp(`未知预设: ${mode}`, 400)
-        // M1：隧道选项白名单（与 mode 同写法）——非法值 400，不静默落库。
+        // 启动训练（2026-09-19 起只有一条编排：selfNode → hubServer → trainer）。
+        // 执行面不再是「模式」：由 rl.hub_push + 登记节点推出来（`remoteExecutionFace`）。
+        // M1：隧道选项白名单——非法值 400，不静默落库。
         const cfProtocol = bodyStr(body, 'cfProtocol')
         const cfEdgeIp = bodyStr(body, 'cfEdgeIp')
         if (cfProtocol && !['http2', 'quic', 'auto'].includes(cfProtocol)) {
@@ -119,9 +119,7 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
           return errResp(`未知 rollout 位置: ${rolloutSrc}（只接受 auto|local|node）`, 400)
         }
         return okResp(
-          await startPreset(mode as 'pull' | 'push' | 'local', ctx.course, {
-            pushEndpoint: bodyStr(body, 'pushEndpoint'),
-            pushAuthKey: bodyStr(body, 'pushAuthKey'),
+          await startPreset(ctx.course, {
             // T7：布尔用严格 true（缺省/其它 = 关，不自动降级）。
             remoteDegrade: body.remoteDegrade === true,
             cfProtocol: (cfProtocol || undefined) as CfProtocol | undefined,

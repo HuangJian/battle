@@ -1,4 +1,8 @@
-/** console-state.ts — 控制台状态读写（trainer 模式 / 当前课程 / 停机记录）。 */
+/** console-state.ts — 控制台状态读写（当前课程 / 停机记录 / 隧道选项）。
+ *
+ *  ★ 2026-09-19 删掉了 `trainerPpo`（pull/push/local）：启动训练不再选模式，执行面由
+ *  `rl.hub_push` + 登记节点推出来（课程与 worker 节点正交）。旧文件里那个键留着无害——
+ *  `loadConsoleState` 只合并已声明的字段，多余键不进内存态。 */
 import { mkdirSync, readFileSync, writeFileSync } from 'fs'
 import path from 'path'
 import { consoleStatePath } from '../../core/paths'
@@ -26,9 +30,6 @@ export interface CloudHaltInfo {
 }
 
 export interface ConsoleState {
-  /** trainer 基建编排模式：pull=remote+隧道（云机 poll）· push=remote 无本地隧道 ·
-   *  local=本机独立 localWorker（pull 本机 hub，与云端 worker 同一份代码）。 */
-  trainerPpo: 'pull' | 'push' | 'local'
   /** 隧道协议/边缘 IP 版本（M1，additive）：preset 时随启动一起回写；UI 据此显示
    *  「当前生效值」。旧 console-state.json 无此键 → 读取时由 rl-config 缺省回填。 */
   cfProtocol?: CfProtocol
@@ -57,7 +58,7 @@ export interface ConsoleState {
   courseModes?: Record<string, 'online' | 'offline'>
 }
 
-const DEFAULT_STATE: ConsoleState = { trainerPpo: 'pull', course: '', activeCourse: '' }
+const DEFAULT_STATE: ConsoleState = { course: '', activeCourse: '' }
 
 export function loadConsoleState(): ConsoleState {
   try {

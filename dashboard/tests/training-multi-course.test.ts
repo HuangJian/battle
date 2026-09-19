@@ -605,13 +605,12 @@ describe('P3 共享单隧道', () => {
     const venv = { python: 'python', sitePackages: 'sp' }
     const withPush = trainingLoopSpec(cfg, {
       course: 'course-a',
-      ppo: 'remote',
       pushNodeUrl: 'https://w.example',
       venv,
     })
     expect(withPush.env?.REMOTE_PUSH_NODE).toBe('https://w.example')
-    const legacy = trainingLoopSpec(cfg, { course: 'course-a', ppo: 'local', venv })
-    expect(legacy.env?.REMOTE_PUSH_NODE).toBeUndefined()
+    const plain = trainingLoopSpec(cfg, { course: 'course-a', venv })
+    expect(plain.env?.REMOTE_PUSH_NODE).toBeUndefined()
   })
 })
 

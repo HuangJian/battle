@@ -1,9 +1,8 @@
 /** snapshot-cache.ts — 慢部件快照：类型定义与冷算实现（节点 ping / 组件探测 / 池历史）。 */
 import path from 'path'
-import { httpOk } from '../../core/net'
 import { REPO_ROOT } from '../../core/paths'
 import type { RlConfig } from '../../core/types'
-import { pushTargetFromConfig } from '../../stack/push-config'
+import { probePushFleet } from '../../stack/push-config'
 import {
   type ComponentView,
   type CourseEdit,
@@ -11,7 +10,7 @@ import {
   type NodeLocalView,
   type NodeView,
   type PhaseInfo,
-  type PushTargetProbe,
+  type PushFleetProbe,
   parsePhaseFromLog,
 } from '../../web/view'
 import { type NodeHistory, aggregateNodeHistory, isSlowNode } from '../pool-history'
@@ -39,8 +38,8 @@ export interface SlowSnapshot {
   /** 课程热加载最新判决（§2026-09-13-hot-reload；账本最近一条 course_edit 事件。
    *  rejected = 语料身份编辑被拒 → 错误横幅；restored/applied 不上横幅）。 */
   courseEdit: CourseEdit | null
-  /** 本课 push 执行面（2026-09-15）：未配置 push 目标 → null。 */
-  pushTarget: PushTargetProbe | null
+  /** push 执行面（2026-09-19 起是**机群级**事实，不再按课程）：登记节点 + hub_push + 逐节点探活。 */
+  pushFleet: PushFleetProbe
 }
 
 export const SNAPSHOT_REFRESH_MS = 5000
@@ -69,10 +68,10 @@ export async function computeSlowSnapshot(cfg: RlConfig, course: string): Promis
   }
   const slowById = new Map<string, boolean>()
   for (const [id, h] of histById) slowById.set(id, isSlowNode(h))
-  const [components, nodes, pushTarget] = await Promise.all([
+  const [components, nodes, pushFleet] = await Promise.all([
     componentViews(cfg, course),
     nodeViews(cfg, slowById),
-    probePushTarget(cfg, course),
+    probePushFleet(cfg),
   ])
   // 节点上一轮贡献数（池历史聚合；无数据 = -1）。
   const contribById = new Map<string, number>()
@@ -112,20 +111,7 @@ export async function computeSlowSnapshot(cfg: RlConfig, course: string): Promis
       courseEdit = null
     }
   }
-  return { components, nodes, localNode, phase, loopComplete, courseEdit, pushTarget }
-}
-
-/** 本课 push 执行面探测：config 解析（`push_node_url` → 认领节点）+ 一次 `{url}/ping` 直探。
- *
- *  直探（而非复用节点 pill 的 `/v1/ping`）是因为「job 真被推到哪」的判据就是 push 侧那条
- *  `/ping`（python 侧 `_gpu_push_nodes` 也以该 URL 为准）——一次探测换唯一真相。本机目标
- *  的 refused 立即返回；云端不可达最多等 1.5s，且在后台快照里（不在请求路径，§366）。
- *  无鉴权键 → healthy = null（探了也必然 401，不如显示「未探」）。 */
-async function probePushTarget(cfg: RlConfig, course: string): Promise<PushTargetProbe | null> {
-  const t = pushTargetFromConfig(cfg, course)
-  if (!t) return null
-  const healthy = t.authKey ? await httpOk(`${t.url}/ping`, t.authKey, 1500) : null
-  return { kind: t.kind, url: t.url, nodeId: t.nodeId, healthy }
+  return { components, nodes, localNode, phase, loopComplete, courseEdit, pushFleet }
 }
 
 /** 账本中最近一条 course_edit 事件 → 热加载判决；无则 null（纯函数，可单测）。

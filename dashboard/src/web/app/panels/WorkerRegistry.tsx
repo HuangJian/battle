@@ -68,6 +68,24 @@ export function WorkerRegistry({ registry, onAction, readOnly }: WorkerRegistryP
             hub 未挂载派发
           </span>
         )}
+        {/* 派发开关（rl.hub_push，缺省开）：push 的**唯一**模式开关。关掉 = 训练侧
+            直推登记节点（不经 hub 队列），所以它与登记表同屏——「配了节点走哪条路」
+            在这里一眼可见、可改，不必手改 rl-config.json。 */}
+        <label
+          className="tc-wreg__hubpush"
+          title={
+            (readOnly ? `${RO_TITLE}；` : '') +
+            'rl.hub_push：开（缺省）= hub 按队列顺序推给空闲 worker（超时回落队首换人）；' +
+            '关 = 训练侧按登记顺序直连节点。改动写 rl-config，训练栈重启后生效。'
+          }
+        >
+          <Switch
+            label="hub 中介派发"
+            checked={registry?.hubPush !== false}
+            onChange={(v) => void onAction('setMode', { key: 'rl.hub_push', value: v ? '1' : '0' })}
+          />
+          <span className="tc-muted tc-small">hub 派发</span>
+        </label>
         <button
           type="button"
           className="tc-btn tc-btn--sm"
@@ -92,8 +110,8 @@ export function WorkerRegistry({ registry, onAction, readOnly }: WorkerRegistryP
       </div>
       {workers.length === 0 ? (
         <p className="tc-wreg__empty">
-          还没有登记 push worker。push 模式下 hub 只往登记在册的节点推 job——没有登记时 训练侧按 pull
-          走（云机自领）。
+          还没有登记 push worker。hub 只往登记在册的节点推 job——没有登记时训练侧按 pull 走
+          （云机/本机 worker 自己来领，本机只需 hub 在线）。
         </p>
       ) : (
         <div className="tc-wreg__rows">
@@ -103,11 +121,6 @@ export function WorkerRegistry({ registry, onAction, readOnly }: WorkerRegistryP
               <span key={w.id} className="tc-npill tc-wreg__pill">
                 <span className={`tc-dot ${d.cls}`} title={d.title} />
                 <b>{w.id}</b>
-                {w.local ? (
-                  <b className="tc-wreg__local" title="本机回落节点（rl-config local_push）">
-                    本机
-                  </b>
-                ) : null}
                 <span className="tc-wreg__url" title={w.url}>
                   {shortUrl(w.url)}
                 </span>

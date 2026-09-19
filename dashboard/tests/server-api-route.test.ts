@@ -106,14 +106,13 @@ describe('console/api.routeAction', () => {
     expect(r.ok).toBe(false)
   })
 
-  it('trainer 模式切换持久化到 console-state（前后还原）', async () => {
-    const before = actions.loadConsoleState().trainerPpo
-    const next = before === 'pull' ? 'local' : 'pull'
-    const r = await postJson('setMode', { key: 'trainer.ppo', value: next })
-    expect(r.ok).toBe(true)
-    expect(actions.loadConsoleState().trainerPpo).toBe(next)
-    await postJson('setMode', { key: 'trainer.ppo', value: before })
-    expect(actions.loadConsoleState().trainerPpo).toBe(before)
+  it('trainer 模式开关已退役：setMode(trainer.ppo) 响亮拒绝（防回流）', async () => {
+    // 启动训练不选模式（2026-09-19）：执行面由 rl.hub_push + 登记节点推出来。
+    // 留着这个键会让人以为「可以在这里选 pull/push」——必须响亮报错，不能静默忽略。
+    const r = (await postJson('setMode', { key: 'trainer.ppo', value: 'push' })) as {
+      ok: boolean
+    }
+    expect(r.ok).toBe(false)
   })
 
   it('busy 互斥：同 key 第二次调用 409', async () => {

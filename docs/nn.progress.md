@@ -4,6 +4,46 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §92 启动训练不选 pull/push 模式：传输成为部署事实，课程与 worker 节点正交（2026-09-19）
+
+**一句话**：控制台启动一门课不再问 pull/push/local——**pull 零配置**（hub 在线 + 可选隧道，
+谁在轮询谁领活），**push 只看 `nodes[].gpu_push` 是否登记**（配了就默认走 hub 中介派发）：
+`courses.<课>.{remote_transport,push_node_url,remote_hub_url,hub_push}` 四个键从类型表、
+python 读面与写面上全部删除，残留值由 `pruneLegacyCourseKnobs` 在启动时清掉。
+
+用户口径：「启动课程训练时，trainloop 不需要指定 pull/push 模式。pull 模式是由远端 worker
+自己请求，本机只需要保证 hub 在线，配以 tailscale/cloudflared tunnel。push 模式只看系统是否
+已经配置了 push worker 节点，界面留配置入口，节点数据存 rl-config.json」；并再次强调
+「课程任务与 worker 节点互相正交！所有 worker 都可能接到在训的课程任务！本地 worker 与
+云端 worker 完全一致」。
+
+**传达推（`stack/push-config.ts::remoteExecutionFace`，纯函数）**：登记节点数 = 0 ⇒ `pull`；
+有节点 + `rl.hub_push`（**缺省 true**）+ hub 地址/token ⇒ `hub-dispatch`；否则 `direct-push`
+（detail 里说清缺哪一项）。卡面徽章、启动详情、总览三处**共用这一份**，不再有「本课指向谁」
+的按课认领。
+
+**为什么必须删键而不能只改默认值**：课程定义**任务**，worker 节点提供**算力**。按课程的
+`push_node_url` 意味着「同一门课换个机器跑就得改课程配置」，而 `local_push` 那种残留条目
+**仍有读者**（python 的 auto 全取登记节点）⇒ 会把训练指向一条没人服务的本机地址，表面
+「训练正常」。两个方向都是静默失败，故从写面上彻底移除、从读面上清掉。
+
+**python 侧**：`_course_push_url` / `_course_hub_push` 删除；`_gpu_push_nodes(token)` 不再
+按课过滤（登记即全部候选）；`_hub_push_opt_in()` 只读全局 `rl.hub_push` 且缺省 True；
+`--remote-transport` 保留为「运维钉死一条路」的最后手段，但控制台不再代写。**冒烟预演的
+`REMOTE_PUSH_NODE` 改为独占**——设了它就只它一个，否则伪节点失败时 failover 会把预演的 job
+送上真 GPU（「冒烟不该碰真训练」）。
+
+**控制台侧**：启动弹窗删掉模式开关与 push 凭据输入（只剩隧道/瘦身/rollout + 降级 + 预演）；
+`console-state.trainerPpo` 与 localStorage `tc.train.mode` 退役，`setMode('trainer.ppo')` 响亮
+拒绝；唯一配置入口 = 「push worker 登记」面板（`nodes[]` 增删改 + `rl.hub_push` 开关 + hub/面板
+两列探活）；移除 worker 时不再改写「指向它的课程指针」（那个键不存在了）。
+
+**门禁**：nn python gate 绿（ruff + mypy + pytest xdist，含重写的 `test_course_push.py`）·
+dashboard `typecheck`/`test` **658 pass**/`lint` 0 · 三份 bundle 绿 · 根 `bun run check` 绿。
+决策记录：`DECISIONS.md §2026-09-19-goalnn-course-worker-orthogonal`。
+
+---
+
 ## §91 本机伪 GPU 节点退出控制台：只剩冒烟预演自起自停（2026-09-19）
 
 **一句话**：`workerServe`（`remote_worker_serve`）不再是被受管组件——没有卡片、没有账本键、

@@ -7,7 +7,7 @@
  *    或动作失败后再 enable——防双连击把组件状态打乱。 */
 
 import { useEffect, useState } from 'preact/hooks'
-import type { ComponentView, ConsoleStateView, PushTargetView } from '../../view'
+import type { ComponentView, ConsoleStateView, PushFleetProbe } from '../../view'
 import { cardFamilies, pendingLockReleases, scopeBadge } from '../../view'
 import { CopyButton } from '../../components/CopyButton'
 
@@ -27,24 +27,30 @@ export interface ComponentCardsProps {
 /** 只读视图的动作按钮悬停提示（局域网用户误点前的说明）。 */
 const RO_TITLE = '只读模式：操作仅限本机 localhost'
 
-/** push 执行面徽章文案：本机/云机/未匹配（+ 探测不通后缀）。 */
-function pushBadgeText(t: PushTargetView): string {
-  const what = t.kind === 'local' ? '本机' : t.kind === 'cloud' ? '云机' : '未匹配'
-  return `push→${what}${t.healthy === false ? '·不通' : ''}`
+/** push 执行面徽章文案（机群级）：hub 派发 N 台 / 直推 N 台 / 等待拉取（+ 探活汇总）。
+ *
+ *  2026-09-19 起执行面不再按课程配（课程与 worker 节点正交）：它就是「这轮 PPO 会去哪」
+ *  的一句话，数据源 = `stateView.pushFleet`（部署事实推出来，见 `stack/push-config.ts`）。 */
+function pushBadgeText(f: PushFleetProbe): string {
+  const up = f.probes.filter((p) => p.healthy === true).length
+  const down = f.probes.filter((p) => p.healthy === false).length
+  const n = f.nodes
+  if (f.mode === 'pull') return 'dispatch→拉取'
+  const head = f.mode === 'hub-dispatch' ? `hub→${n} 台` : `直推→${n} 台`
+  return down > 0 ? `${head}·${down} 台不通` : up > 0 ? head : `${head}·未探`
 }
 
-/** 徽章悬停详情：URL / 认领节点 / 探测结果 / 此刻是否真的生效。 */
-function pushBadgeTitle(t: PushTargetView): string {
-  const probe = t.healthy === true ? '通' : t.healthy === false ? '不通' : '未探（无鉴权键）'
-  const node = t.nodeId ?? '未认领到节点（python 会回落 pull，不会推到该 URL）'
-  return [
-    `push 执行面：${t.url}`,
-    `节点：${node}`,
-    `探测：${probe}`,
-    t.active
-      ? '本课 trainer 正以 push 模式在跑——job 就推到这里'
-      : '当前未以 push 模式在跑（这是配置指向；push 预设会推到这里）',
-  ].join('\n')
+/** 徽章悬停详情：模式理由 / hub / 逐节点探活。 */
+function pushBadgeTitle(f: PushFleetProbe): string {
+  const lines = [`执行面：${f.text}`, f.detail]
+  for (const p of f.probes) {
+    const probe = p.healthy === true ? '通' : p.healthy === false ? '不通' : '未探（无鉴权键）'
+    lines.push(`· ${p.id || '(未命名)'} ${p.url} — ${probe}`)
+  }
+  if (f.mode === 'pull') {
+    lines.push('没有登记节点时的必然结果：谁来领谁就跑（本机 worker 与云机同权）')
+  }
+  return lines.join('\n')
 }
 
 function dotClass(c: ComponentView): string {
@@ -153,25 +159,19 @@ export function ComponentCards({
                     </b>
                   ) : null}
                   {(() => {
-                    // push 执行面徽章（2026-09-15）：贴在 trainer 卡的模式徽章旁——「job 现在推给谁」
-                    // 只有这一个卡上问得出口。
-                    // 仅当 trainer 正以 push 在跑时展示（c.mode=push 或 active）：config 里的
-                    // push_node_url 在切到 pull 后仍会残留，那是「配置指向」不是「正在用」，
-                    // 继续上卡会误报「push→云机·不通」（2026-09-16 用户反馈）。
-                    // 通信成功（healthy）后「push」与「push→云机」重复——只留后者。
-                    const raw = c.key === 'trainingLoop' ? (stateView.pushTarget ?? null) : null
-                    const pt = raw && (c.mode === 'push' || raw.active === true) ? raw : null
-                    const modeRedundant =
-                      pt !== null && pt.healthy === true && (c.mode === 'push' || pt.active)
+                    // 执行面徽章：贴在 trainer 卡上（「这轮 PPO 会去哪」只有这一个卡问得出口）。
+                    // 数据源是**机群级**事实（登记节点 + rl.hub_push + 探活），与当前查看的课程
+                    // 无关——课程与 worker 节点正交（2026-09-19）。
+                    const f = c.key === 'trainingLoop' ? (stateView.pushFleet ?? null) : null
                     return (
                       <>
-                        {c.mode && !modeRedundant ? <b className="tc-cc__mode">{c.mode}</b> : null}
-                        {pt ? (
+                        {c.mode ? <b className="tc-cc__mode">{c.mode}</b> : null}
+                        {f ? (
                           <b
-                            className={`tc-cc__push tc-cc__push--${pt.kind}${pt.active ? '' : ' tc-cc__push--idle'}`}
-                            title={pushBadgeTitle(pt)}
+                            className={`tc-cc__push tc-cc__push--${f.mode}`}
+                            title={pushBadgeTitle(f)}
                           >
-                            {pushBadgeText(pt)}
+                            {pushBadgeText(f)}
                           </b>
                         ) : null}
                       </>

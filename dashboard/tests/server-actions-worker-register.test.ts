@@ -7,8 +7,9 @@
  *   · 登记 = upsert `nodes[]` 的 `gpu_push` 条目；**ping 不通不拦登记**（云机没开机是常态），
  *     但返回值如实报 `ok:false` + 怎么查；
  *   · 探活失败的写法与被测代码同源（fail-loud，绝不静默）；
- *   · 改 url / 删节点时把 `courses.<课>.push_node_url` 一并收口——留着就变成「指向不存在的
- *     URL」⇒ python 匹配 0 个节点后**静默回落 pull**（2026-09-15 同类事故的入口）。
+ *   · 节点的增删改**只动 `nodes[]` 一处**（2026-09-19 用户口径「课程任务与 worker 节点互相正交」）：
+ *     旧形状还要顺带改写 `courses.<课>.push_node_url`——那个键把「哪门课钉到哪台机器」变成课程
+ *     属性，已从类型表与 python 读面一并拿掉（残留值由启动时的 prune 清）。
  *
  * 夹具（env 重定向 + 被测模块）见 ./helpers/console-fixture.ts。
  */
@@ -40,12 +41,12 @@ function worker(id: string): Record<string, unknown> | null {
   return (n as unknown as Record<string, unknown>) ?? null
 }
 
-/** 课程块的 push_node_url（找不到 → null）。 */
-function coursePushUrl(course: string): string | null {
+/** 课程块（原文读，用于断言「节点增删改不碰课程块」）。 */
+function courseBlock(course: string): Record<string, unknown> {
   const cfg = JSON.parse(readFileSync(scratchConfig, 'utf-8')) as {
-    courses?: Record<string, { push_node_url?: string }>
+    courses?: Record<string, Record<string, unknown>>
   }
-  return cfg.courses?.[course]?.push_node_url ?? null
+  return cfg.courses?.[course] ?? {}
 }
 
 /** 假 worker_server（`/ping` 回 200 + busy）——只为 ping 门给一个确定的「通」。 */
@@ -218,33 +219,30 @@ describe('registerPushWorker：非法入参响亮拒（磁盘保持原样）', (
   })
 })
 
-describe('registerPushWorker：课程指针收口（改 url 不悬空）', () => {
-  it('同 id 改 url：nodes[] 更新 + courses.*.push_node_url 一并改写', async () => {
+describe('registerPushWorker：只动 nodes[]，不碰课程块（正交性）', () => {
+  it('同 id 改 url：nodes[] 原地更新；课程块**一个字不动**（旧形状的 push_node_url 已无读者）', async () => {
     const a = fakeWorkerReject()
     const b = fakeWorkerReject()
-    const other = fakeWorkerReject()
     try {
       seed({
         courses: {
-          c4: { slot: 0, push_node_url: a.url },
-          c5: { slot: 1, push_node_url: other.url },
+          c4: { slot: 0, remote_degrade_after: 3 },
+          c5: { slot: 1 },
         },
       })
-      // 先按旧 URL 登记（造出「指针指向它」的局面）
+      const beforeC4 = courseBlock('c4')
       const first = await postJson('registerPushWorker', { id: 'gpu1', url: a.url, authKey: 'k' })
       expect(first.ok).toBe(false) // 探不通，但配置已落
-      expect(coursePushUrl('c4')).toBe(a.url)
-      // 再改地址：指向旧地址的课必须跟着走
+      expect(worker('gpu1')!.url).toBe(a.url)
+      // 改地址：只换 nodes[] 里那一行
       const second = await postJson('registerPushWorker', { id: 'gpu1', url: b.url, authKey: 'k' })
       expect(worker('gpu1')!.url).toBe(b.url)
-      expect(coursePushUrl('c4')).toBe(b.url)
-      // 指向别处的课原样不动
-      expect(coursePushUrl('c5')).toBe(other.url)
-      expect((second.detail as string[]).join(' ')).toContain('课程指针已改写: c4')
+      expect(courseBlock('c4')).toEqual(beforeC4)
+      expect(courseBlock('c5')).toEqual({ slot: 1 })
+      expect((second.detail as string[]).join(' ')).not.toContain('课程指针')
     } finally {
       a.stop()
       b.stop()
-      other.stop()
     }
   })
 })
@@ -252,13 +250,13 @@ describe('registerPushWorker：课程指针收口（改 url 不悬空）', () =>
 // ────────────────────────── 移除 ──────────────────────────
 
 describe('removePushWorker', () => {
-  it('移除节点 + 清掉指向它的课程 push_node_url（留着会静默回落 pull）', async () => {
-    seed({ courses: { c4: { push_node_url: 'https://push.fixture.invalid' }, c5: {} } })
+  it('移除节点后它不再是候选；课程块不动（没有「指向它」这回事了）', async () => {
+    seed({ courses: { c4: { slot: 0 }, c5: {} } })
     const r = await postJson('removePushWorker', { id: 'gpu1' })
     expect(r.ok).toBe(true)
     expect(worker('gpu1')).toBeNull()
-    expect(coursePushUrl('c4')).toBeNull()
-    expect((r.detail as string[]).join(' ')).toContain('已清掉指向它的课程 push_node_url: c4')
+    expect(courseBlock('c4')).toEqual({ slot: 0 })
+    expect((r.detail as string[]).join(' ')).toContain('未登记即不再是候选')
   })
 
   it('不存在 → 409；非 push worker（采集节点）→ 409 且不动它', async () => {

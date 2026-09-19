@@ -187,23 +187,22 @@ describe('CourseOverview（并行课程总览）', () => {
 const registry = (patch: Partial<PushWorkerRegistryView> = {}): PushWorkerRegistryView => ({
   hubUrl: 'http://127.0.0.1:18787',
   mounted: true,
+  hubPush: true,
   workers: [
     {
       id: 'gpu1',
       url: 'https://a.trycloudflare.com/very/long/path',
       enabled: true,
       concurrency: 2,
-      local: false,
       online: true,
       busy: false,
       hubOnline: true,
     },
     {
-      id: 'local-push',
+      id: 'gpu2',
       url: 'http://127.0.0.1:18797',
       enabled: true,
       concurrency: 1,
-      local: true,
       online: false,
       busy: null,
       hubOnline: false,
@@ -213,7 +212,6 @@ const registry = (patch: Partial<PushWorkerRegistryView> = {}): PushWorkerRegist
       url: 'http://127.0.0.1:1',
       enabled: false,
       concurrency: 1,
-      local: false,
       online: null,
       busy: null,
       hubOnline: null,
@@ -223,19 +221,48 @@ const registry = (patch: Partial<PushWorkerRegistryView> = {}): PushWorkerRegist
 })
 
 describe('WorkerRegistry（push worker 登记入口）', () => {
-  it('每行两个探活列各自有记号：hub 在线绿 / hub 离线红 / 停用灰 + 本机标记', async () => {
+  it('每行两个探活列各自有记号：hub 在线绿 / hub 离线红 / 停用灰', async () => {
     const { WorkerRegistry } = await import('../src/web/app/panels/WorkerRegistry')
     const html = renderToString(
       h(WorkerRegistry, { registry: registry(), onAction: async () => ({ ok: true }) }),
     )
     expect(html).toContain('tc-dot--on') // gpu1：hub 认为在线
-    expect(html).toContain('tc-dot--dead') // local-push：hub 认为离线
+    expect(html).toContain('tc-dot--dead') // gpu2：hub 认为离线
     expect(html).toContain('tc-dot--empty') // off：停用
-    expect(html).toContain('tc-wreg__local') // 本机回落节点标记
+    // 不再有「本机回落节点」标记：本机 worker 与云机 worker 同权（课程与节点正交）
+    expect(html).not.toContain('tc-wreg__local')
     expect(html).toContain('×2')
     // URL 截断展示（完整 URL 在 title 里）
     expect(html).toContain('title="https://a.trycloudflare.com/very/long/path"')
     expect(html).toContain('aria-label="移除 worker gpu1"')
+  })
+
+  it('派发开关（rl.hub_push，缺省开）与登记表同屏：配了节点走哪条路一眼可见', async () => {
+    const { WorkerRegistry } = await import('../src/web/app/panels/WorkerRegistry')
+    const on = renderToString(
+      h(WorkerRegistry, { registry: registry(), onAction: async () => ({ ok: true }) }),
+    )
+    expect(on).toContain('aria-checked="true"')
+    expect(on).toContain('aria-label="hub 中介派发"')
+    const off = renderToString(
+      h(WorkerRegistry, {
+        registry: registry({ hubPush: false }),
+        onAction: async () => ({ ok: true }),
+      }),
+    )
+    expect(off).toContain('aria-checked="false"')
+    // 只读视图：开关**照常可点**（与面板其余按钮同哲学——只读是动作边界，不是把区域
+    // 画成灰的），悬停提示 + 服务端 403 兜底。
+    const ro = renderToString(
+      h(WorkerRegistry, {
+        registry: registry(),
+        onAction: async () => ({ ok: true }),
+        readOnly: true,
+      }),
+    )
+    expect(ro).toContain('aria-label="hub 中介派发"')
+    expect(ro).toContain('只读模式')
+    expect(ro).not.toMatch(/<button[^>]*aria-label="hub 中介派发"[^>]*disabled/)
   })
 
   it('hub 未挂载派发 → 醒目提示（登记会落配置但 hub 不会真推）', async () => {

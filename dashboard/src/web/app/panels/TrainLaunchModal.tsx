@@ -1,9 +1,11 @@
 /** TrainLaunchModal.tsx — 启动 TrainingLoop 的弹窗（工具行并入此处，用户指令）：
- *  选择 trainer 模式（Pull/Push/Local）+ rl-config 行为开关（即时写）+ 推送链路预演入口。
- *  Push 模式：endpoint + auth key 可选（填了才 ping 门 + 回写 rl-config）；留空依次尝试
- *  复用 config 的 gpu_push、回落本机 worker_server（2026-09-15 一键本机 push）。
- *  Local 模式（2026-09-15 起）：本机 PPO 独立成进程——预设会先起 hub-server 与
- *  local-worker，trainer 走 --ppo remote + 本机 hub（进程内 PPO 已不是控制台选项）。
+ *  rl-config 行为开关（即时写）+ 隧道/瘦身/rollout 选项 + 推送链路预演入口。
+ *
+ *  ★ 2026-09-19 用户口径：**启动训练不选 pull/push 模式**。
+ *   · pull = 远端 worker 自己来领 —— 本机只需保证 hub 在线（配以 tailscale/cloudflared 隧道）；
+ *   · push = 系统里**已经登记了** push worker 节点 —— 配置入口是 worker 登记面板，
+ *     节点数据住 rl-config.json（`rl.hub_push` + `nodes[].gpu_push`）。
+ *  两者都是**部署事实**，不是启动参数；弹窗里因此不再有模式开关与 push 凭据输入。
  *  Esc / 遮罩关闭由 App 全局处理。 */
 
 import { useEffect, useRef, useState } from 'preact/hooks'
@@ -11,28 +13,18 @@ import type { RolloutSrcMode, SlimMode } from '../../../core/types'
 import type { ModeView } from '../../view'
 import { SegmentedControl } from '../../components/SegmentedControl'
 import { Toggle } from '../../components/Toggle'
-import { TC_TRAIN_MODE, TC_TRAIN_TOGGLES } from '../../view'
-
-export interface PushCredentials {
-  endpoint: string
-  authKey: string
-}
+import { TC_TRAIN_TOGGLES } from '../../view'
 
 export interface TrainLaunchModalProps {
   open: boolean
   modes: ModeView
   onClose: () => void
   onAction: (act: string, body: Record<string, unknown>) => void
-  onLaunch: (
-    mode: 'pull' | 'push' | 'local',
-    opts?: Partial<PushCredentials> & TunnelLaunchOpts & { remoteDegrade?: boolean },
-  ) => void
+  onLaunch: (opts?: TunnelLaunchOpts & { remoteDegrade?: boolean }) => void
   /** 局域网只读视图：行为开关/预演/启动全部禁用（兜底——启动入口可点，弹窗内禁用以防误操作）。 */
   readOnly?: boolean
 }
 
-const TC_PUSH_ENDPOINT = 'tc.pushEndpoint'
-const TC_PUSH_AUTH = 'tc.pushAuthKey'
 const TC_REMOTE_DEGRADE = 'tc.remoteDegrade'
 const TC_CF_PROTOCOL = 'tc.cfProtocol'
 const TC_CF_EDGE_IP = 'tc.cfEdgeIp'
@@ -77,17 +69,6 @@ function readTunnelSel<T extends string>(
   return fallback
 }
 
-/** 上次启动记住的 trainer 模式；无/非法则回落服务端 modes.trainerPpo。 */
-function readSavedMode(fallback: 'pull' | 'push' | 'local'): 'pull' | 'push' | 'local' {
-  try {
-    const v = localStorage.getItem(TC_TRAIN_MODE)
-    if (v === 'pull' || v === 'push' || v === 'local') return v
-  } catch {
-    /* ignore */
-  }
-  return fallback
-}
-
 export function TrainLaunchModal({
   open,
   modes,
@@ -96,14 +77,6 @@ export function TrainLaunchModal({
   onLaunch,
   readOnly,
 }: TrainLaunchModalProps) {
-  type Mode = 'pull' | 'push' | 'local'
-
-  // trainer 模式偏好：上次启动选择（localStorage）优先 → 服务端 modes 兜底
-  const [mode, setMode] = useState<Mode>(() => readSavedMode(modes.trainerPpo))
-
-  const [pushEndpoint, setPushEndpoint] = useState(() => readLocal(TC_PUSH_ENDPOINT))
-  const [pushAuthKey, setPushAuthKey] = useState(() => readLocal(TC_PUSH_AUTH))
-  const [pushErr, setPushErr] = useState('')
   // M1：隧道协议/边缘 IP。选中值优先 localStorage（上次选择），否则服务端当前生效值。
   const [slim, setSlim] = useState<SlimMode>(() =>
     readTunnelSel(TC_SLIM, modes.slim, ['on', 'off'] as const, 'on'),
@@ -173,15 +146,6 @@ export function TrainLaunchModal({
     }
   }, [toggles])
 
-  useEffect(() => {
-    if (!open) {
-      setPushErr('')
-      return
-    }
-    // 每次打开弹窗用「上次启动模式」校准默认选中（组件常驻 mount，useState 只跑一次）。
-    setMode(readSavedMode(modes.trainerPpo))
-  }, [open, modes.trainerPpo])
-
   const applyToggle = (key: string, v: boolean): void => {
     const next = { ...toggles, [key]: v }
     setToggles(next)
@@ -189,32 +153,13 @@ export function TrainLaunchModal({
   }
 
   const handleLaunchClick = (): void => {
-    // 启动即记住本次模式：下次打开弹窗默认继续用它（与服务端 console-state 双保险）。
-    writeLocal(TC_TRAIN_MODE, mode)
+    // 启动即记住本次选项：下次打开弹窗默认继续用它（与服务端 rl-config 双保险）。
     writeLocal(TC_REMOTE_DEGRADE, remoteDegrade ? '1' : '0')
     writeLocal(TC_CF_PROTOCOL, cfProtocol)
     writeLocal(TC_CF_EDGE_IP, cfEdgeIp)
     writeLocal(TC_SLIM, slim)
     writeLocal(TC_ROLLOUT_SRC, rolloutSrc)
-    const tunnel: TunnelLaunchOpts = { cfProtocol, cfEdgeIp, slim, rolloutSrc }
-    if (mode !== 'push') {
-      onLaunch(mode, { remoteDegrade, ...tunnel })
-      return
-    }
-    const endpoint = pushEndpoint.trim()
-    const authKey = pushAuthKey.trim()
-    // 留空合法：服务端复用 rl-config 中 enabled 且 ping 通的 gpu_push。
-    // 填了 endpoint 则必须同时给 auth key。
-    if (endpoint && !authKey) {
-      setPushErr('填写 endpoint 时必须同时填写 auth key')
-      return
-    }
-    setPushErr('')
-    if (endpoint) {
-      writeLocal(TC_PUSH_ENDPOINT, endpoint)
-      writeLocal(TC_PUSH_AUTH, authKey)
-    }
-    onLaunch(mode, { endpoint, authKey, remoteDegrade, ...tunnel })
+    onLaunch({ remoteDegrade, cfProtocol, cfEdgeIp, slim, rolloutSrc })
   }
 
   if (!open) return null
@@ -232,67 +177,12 @@ export function TrainLaunchModal({
             🔒 只读模式：启动训练仅限本机 localhost 打开控制台操作。
           </p>
         ) : null}
-        <div className="tc-line">
-          <span className="tc-muted tc-small" style={{ minWidth: 90 }}>
-            trainer 编排
-          </span>
-          <SegmentedControl<'pull' | 'push' | 'local'>
-            value={mode}
-            ariaLabel="trainer 模式"
-            options={[
-              { value: 'pull', label: 'Pull' },
-              { value: 'push', label: 'Push' },
-              { value: 'local', label: 'Local' },
-            ]}
-            onChange={setMode}
-          />
-        </div>
-        {mode === 'local' ? (
-          <p className="tc-muted tc-small" style={{ marginTop: 4 }}>
-            Local = 本机独立 PPO worker（与云端 worker 同一份代码）：预设依次拉起 hub-server →
-            local-worker → trainer（--ppo remote，pull 本机 hub）。worker
-            是独立进程，训练途中可单独启停/换代码重启。
-          </p>
-        ) : null}
-        {mode === 'push' ? (
-          <div className="tc-push-creds" style={{ display: 'grid', gap: 8, marginTop: 4 }}>
-            <label className="tc-line" style={{ display: 'grid', gap: 4 }}>
-              <span className="tc-muted tc-small">
-                endpoint（留空 = 复用 config 里 ping 通的 gpu_push）
-              </span>
-              <input
-                type="url"
-                className="tc-input"
-                placeholder="https://xxxx.trycloudflare.com"
-                value={pushEndpoint}
-                disabled={readOnly}
-                onChange={(e) => setPushEndpoint((e.target as HTMLInputElement).value)}
-              />
-            </label>
-            <label className="tc-line" style={{ display: 'grid', gap: 4 }}>
-              <span className="tc-muted tc-small">auth key（worker_server --token，必填）</span>
-              <input
-                type="password"
-                className="tc-input"
-                placeholder="Bearer token"
-                value={pushAuthKey}
-                disabled={readOnly}
-                onChange={(e) => setPushAuthKey((e.target as HTMLInputElement).value)}
-              />
-            </label>
-            {pushErr ? (
-              <p className="tc-banner tc-banner--err" style={{ margin: 0 }} role="alert">
-                {pushErr}
-              </p>
-            ) : (
-              <p className="tc-muted tc-small" style={{ margin: 0 }}>
-                云机自起 cloudflared；本机不启 hub-server。留空先检 config 中 enabled gpu_push 的
-                /ping，通了直接启动；都没有则**响亮报错**（不回落本机——本机伪节点只服务冒烟
-                预演，不由控制台拉起）。
-              </p>
-            )}
-          </div>
-        ) : null}
+        <p className="tc-muted tc-small" style={{ marginTop: 0 }}>
+          启动**不选模式**：编队恒为 本机 agent → 共享 hub → 共享 trainer。本轮的 PPO
+          去哪，由**部署事实**决定—— 登记了 push worker 节点就走 hub 派发（配置入口在「push worker
+          登记」面板，数据住 rl-config.json）；没登记则等 worker（云机 / 本机）自己来领，本机只需
+          hub 在线（配以 tailscale 直连或 cloudflared 隧道）。
+        </p>
         <div className="tc-line">
           <span className="tc-muted tc-small" style={{ minWidth: 90 }}>
             隧道
@@ -436,11 +326,11 @@ export function TrainLaunchModal({
           <button
             type="button"
             className="tc-btn tc-btn--primary"
-            aria-label={`按 ${mode} 模式启动 TrainingLoop`}
-            disabled={readOnly || (mode === 'push' && !!pushEndpoint.trim() && !pushAuthKey.trim())}
+            aria-label="启动 TrainingLoop"
+            disabled={readOnly}
             onClick={handleLaunchClick}
           >
-            启动（{mode}）
+            启动训练栈
           </button>
         </div>
       </div>

@@ -27,7 +27,7 @@ from rl import loop_serve
 
 
 def _args(**kw: Any) -> Namespace:
-    """最小 args（含覆盖白名单里的字段 + 一个不该被碰的字段）。"""
+    """最小 args（含覆盖白名单里的字段 + 几个不该被碰的字段）。"""
     base: dict[str, Any] = {
         "remote_transport": "auto",
         "remote_hub_url": "",
@@ -40,42 +40,43 @@ def _args(**kw: Any) -> Namespace:
     return Namespace(**base)
 
 
+#: 课程块里**不许**再被读的传输耦合键（2026-09-19：课程任务与 worker 节点正交）。
+COUPLING_KEYS = ("remote_transport", "remote_hub_url", "push_node_url", "hub_push")
+
+
 # ---------------------------------------------------------------- 机器侧覆盖
 
 
 def test_overlay_applies_only_the_whitelisted_keys() -> None:
-    """白名单键生效；`courses.<课>` 里的**其它**键（push_node_url / 配额 / hub_push）一个字不碰。"""
+    """白名单键（只有两个训练策略旋钮）生效；其余键（含传输耦合）一个字不碰。"""
     lines: list[str] = []
     args = _args()
     cfg = {
         "courses": {
             "c5-tick": {
-                "remote_transport": "pull",
-                "remote_hub_url": "http://127.0.0.1:8789",
                 "remote_degrade_after": 3,
                 "gate_halt_mode": "skip",
-                # ↓ 各有既有的读取点，本函数不许代劳
+                # ↓ 2026-09-19 起**已不是**被读的键（课程与节点正交）；留着不报错也不生效
+                "remote_transport": "pull",
+                "remote_hub_url": "http://127.0.0.1:8789",
                 "push_node_url": "https://gpu.example",
+                "hub_push": True,
                 "workers": 4,
             }
         }
     }
     applied = loop_serve.apply_course_machine_overrides(args, "c5-tick", cfg, log_fn=lines.append)
-    assert applied == [
-        "remote_transport",
-        "remote_hub_url",
-        "remote_degrade_after",
-        "gate_halt_mode",
-    ]
-    assert args.remote_transport == "pull"
-    assert args.remote_hub_url == "http://127.0.0.1:8789"
+    assert applied == ["remote_degrade_after", "gate_halt_mode"]
     assert args.remote_degrade_after == 3
     assert args.gate_halt_mode == "skip"
-    # 非白名单键：**没有**被 setattr（它属于别的读者）
+    # 非白名单键：**没有**被 setattr（它们属于别的读者，或者已无读者）
+    assert args.remote_transport == "auto"
+    assert args.remote_hub_url == ""
     assert args.push_node_url == ""
     assert args.workers == 8
+    assert not hasattr(args, "hub_push")
     # 生效值必须上屏（静默改写执行面 = 「看起来正常」那类事故）
-    assert any("c5-tick" in ln and "remote_transport='pull'" in ln for ln in lines)
+    assert any("c5-tick" in ln and "gate_halt_mode='skip'" in ln for ln in lines)
 
 
 def test_overlay_is_inert_without_the_course_block() -> None:
@@ -87,34 +88,37 @@ def test_overlay_is_inert_without_the_course_block() -> None:
     assert lines == []
 
 
-def test_overlay_rejects_an_illegal_transport_loudly() -> None:
-    """`remote_transport` 的值域在这里校验：它现在可能来自**文件**，绕过 argparse 的 choices。"""
-    cfg = {"courses": {"c5-tick": {"remote_transport": "pull-typo"}}}
-    with pytest.raises(SystemExit, match="remote_transport = 'pull-typo' 非法"):
-        loop_serve.apply_course_machine_overrides(_args(), "c5-tick", cfg, log_fn=lambda _l: None)
-    # 合法值域与 loop_steps 的单一来源同源（不在这里抄一份枚举）
-    from rl.loop_steps import REMOTE_TRANSPORTS
+def test_transport_coupling_keys_are_not_read_anymore() -> None:
+    """★ 正交性尺子：课程块里那四个传输耦合键**不在**白名单里，且不再有任何值域校验。
 
-    for v in REMOTE_TRANSPORTS:
+    旧行为：非法 `remote_transport` 会在这里响亮 SystemExit（因为它来自文件、绕过 argparse
+    choices）。现在它压根不该被读——读它就是把「哪门课走哪条传输路」重新变成课程的属性。
+    """
+    assert not (set(COUPLING_KEYS) & set(loop_serve.COURSE_MACHINE_OVERRIDE_KEYS))
+    args = _args()
+    assert (
         loop_serve.apply_course_machine_overrides(
-            _args(),
+            args,
             "c5-tick",
-            {"courses": {"c5-tick": {"remote_transport": v}}},
+            {"courses": {"c5-tick": {k: "pull-typo" for k in COUPLING_KEYS}}},
             log_fn=lambda _l: None,
         )
+        == []
+    )
+    assert args.remote_transport == "auto"
 
 
 def test_overlay_skips_keys_the_args_namespace_does_not_have() -> None:
     """BC 解析器比 RL 少几个键 ⇒ **响亮跳过**，不 setattr 造字段（造出来的字段没有读者）。"""
     lines: list[str] = []
-    args = Namespace(remote_transport="auto")  # 只有这一个字段
+    args = Namespace(remote_degrade_after=0)  # 只有这一个字段
     applied = loop_serve.apply_course_machine_overrides(
         args,
         "c5-tick",
-        {"courses": {"c5-tick": {"remote_transport": "hubpush", "gate_halt_mode": "halt"}}},
+        {"courses": {"c5-tick": {"remote_degrade_after": 3, "gate_halt_mode": "halt"}}},
         log_fn=lines.append,
     )
-    assert applied == ["remote_transport"]
+    assert applied == ["remote_degrade_after"]
     assert not hasattr(args, "gate_halt_mode")
     assert any("gate_halt_mode" in ln and "跳过" in ln for ln in lines)
 
@@ -122,13 +126,15 @@ def test_overlay_skips_keys_the_args_namespace_does_not_have() -> None:
 def test_overlay_reads_rl_config_through_one_seam(monkeypatch: pytest.MonkeyPatch) -> None:
     """不传 cfg 时走 `_read_rl_config`（**唯一**读取点，也是用例的注入点）。"""
     monkeypatch.setattr(
-        loop_serve, "_read_rl_config", lambda: {"courses": {"c5-tick": {"remote_transport": "pull"}}}
+        loop_serve,
+        "_read_rl_config",
+        lambda: {"courses": {"c5-tick": {"gate_halt_mode": "notify"}}},
     )
     args = _args()
     assert loop_serve.apply_course_machine_overrides(args, "c5-tick", None, log_fn=lambda _l: None) == [
-        "remote_transport"
+        "gate_halt_mode"
     ]
-    assert args.remote_transport == "pull"
+    assert args.gate_halt_mode == "notify"
 
 
 def test_real_rl_config_keeps_course_args_unchanged() -> None:

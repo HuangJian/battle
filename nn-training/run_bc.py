@@ -9,8 +9,8 @@
     5. 归档 backup_weights → `nn-training/weights/<prefix>/…it<N>.<ts>.json` + WEIGHTS.md 行。
 
 三种传输（--course 之外按环境自动选）：
-  push   ：env REMOTE_PUSH_NODE（控制台冒烟/伪 GPU 节点）或 courses.<课>.push_node_url
-           → push_client 直推 GPU 节点 worker_server；
+  push   ：env REMOTE_PUSH_NODE（冒烟预演的本机伪 GPU 节点）→ push_client 直推
+           worker_server（真实的 push 执行面走 hub 中介派发：课程与节点正交）；
   hub    ：--remote → 发布到共享 hub（云机 `remote_worker --poll` 领取）；
   local  ：--local → 语料就绪后本机子进程 train/bc.py（训练机 venv torch）。
 

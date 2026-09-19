@@ -43,7 +43,6 @@ import {
   saveAnyComponent,
   scopeOf,
 } from '../src/core/registry'
-import { coursesInLocalMode } from '../src/stack/local-worker'
 import { restartSpecFor } from '../src/server/actions'
 import { supersedeLegacyInstances } from '../src/stack/hub'
 import { resolveVenvPython } from '../src/core/venv'
@@ -253,34 +252,10 @@ describe('localWorker 共享语义', () => {
     expect(await supersedeLegacyInstances('localWorker')).toEqual([])
   })
 
-  it('「离开 local 不连坐」：判据 = local 预设写下的那两个键（pull + 本机 hub）', () => {
-    const cfg = dualCourseCfg()
-    const localHub = sharedHubUrl(cfg)
-    const withMode = (courses: RlConfig['courses']): RlConfig => ({ ...cfg, courses })
-    // 只有 course-a 是 local
-    const one = withMode({
-      'course-a': { remote_transport: 'pull', remote_hub_url: localHub },
-      'course-b': { remote_transport: 'pull', remote_hub_url: 'https://tunnel.example' },
-    })
-    expect(coursesInLocalMode(one)).toEqual(['course-a'])
-    // 排除本课 ⇒ 「还有谁在 local」（空 = 本课是最后一门）
-    expect(coursesInLocalMode(one, 'course-a')).toEqual([])
-    // 两课都 local ⇒ 离开其中一门时必须保留共享 worker（停它 = 把另一门也停了）
-    const both = withMode({
-      'course-a': { remote_transport: 'pull', remote_hub_url: localHub },
-      'course-b': { remote_transport: 'pull', remote_hub_url: localHub },
-    })
-    expect(coursesInLocalMode(both, 'course-a')).toEqual(['course-b'])
-    // 云机 pull（tailnet 地址、同一个 hub 端口）**不算** local：否则「把唯一的课从 local 切到
-    // pull」永远停不掉 worker —— 正是 2026-09-16 用户反馈要修的那个「卡片仍亮绿点」
-    const cloud = withMode({
-      'course-a': { remote_transport: 'pull', remote_hub_url: 'http://100.64.0.9:9' },
-    })
-    expect(coursesInLocalMode(cloud)).toEqual([])
-    // push / 未配 / 无课程表：都不是 local
-    expect(coursesInLocalMode(withMode({}))).toEqual([])
-    expect(coursesInLocalMode(withMode({ 'course-a': { remote_transport: 'push' } }))).toEqual([])
-  })
+  // ★ 2026-09-19：`coursesInLocalMode`（判据 = 本课的 `remote_transport` + `remote_hub_url`）
+  //   已随「课程与 worker 节点正交」删除：本机 worker 与云机 worker 逐字同权，不再有
+  //   「哪门课跑在本机」这个概念。停它 = 本机不再执行**任何**课程的 PPO job（与停云机同语义），
+  //   而它是终端操作员显式点的那一个按钮——不再需要从配置反推「还有谁在 local」。
 })
 
 // ────────────────────────── ③ 预设与启动/停止接线 ──────────────────────────
@@ -312,55 +287,40 @@ describe('local 预设与启动接线（共享形状）', () => {
     expect(s).toContain('本机不再执行任何课程的 PPO job')
   })
 
-  it('local 预设顺序含 hubServer → localWorker → trainingLoop', () => {
+  it('启动编排不再有 local 分支（launch 不选模式，本机 worker 是自己的一张卡片）', () => {
     const p = src(path.join('server', 'actions', 'preset.ts'))
-    const branch = p.slice(p.indexOf("mode === 'push'"), p.indexOf('const ctx: StartCtx'))
-    expect(branch).toContain("['hubServer', 'localWorker', 'trainingLoop']")
-  })
-
-  it('离开 local：只在「最后一门 local 课」时才停（否则连坐其它课）', () => {
-    const p = src(path.join('server', 'actions', 'preset.ts'))
-    expect(p).toContain("if (mode !== 'local')")
-    expect(p).toContain('coursesInLocalMode(loadConfig(), course)')
-    expect(p).toContain('本机 worker 保留')
-    // 停的仍是那份唯一进程（课程只作视图语境，槽由 scopeOf 归一）
-    expect(p).toContain("await stopComponent('localWorker', course)")
+    expect(p).not.toContain("mode === 'push'")
+    expect(p).not.toContain("mode === 'local'")
+    expect(p).not.toContain("mode !== 'local'")
+    // 编排恒一条：本机 agent → 共享 hub → 共享 trainer
+    expect(p).toContain("'selfNode',")
+    expect(p).toContain("'hubServer',")
+    expect(p).toContain("'trainingLoop',")
   })
 
   // ── trainer 侧（本地 PPO = 本机 worker 领活）──
-  it('RL：local → --ppo remote + 传输钉死 pull + 指名本机 hub', () => {
+  it('RL：恒 --ppo remote，且不注入 --remote-transport（交回训练侧 auto 裁决）', () => {
     const cfg = dualCourseCfg()
     const hub = sharedHubUrl(cfg)
-    const spec = trainingLoopSpec(cfg, {
-      course: 'course-a',
-      ppo: 'local',
-      hubUrl: hub,
-      venv: VENV,
-    })
+    const spec = trainingLoopSpec(cfg, { course: 'course-a', hubUrl: hub, venv: VENV })
     expect(flag(spec, '--ppo')).toBe('remote')
-    expect(flag(spec, '--remote-transport')).toBe('pull')
+    expect(flag(spec, '--remote-transport')).toBeNull()
     expect(flag(spec, '--remote-hub-url')).toBe(hub)
     // 绝不出现进程内 PPO 旗标
     expect(spec.cmd).not.toContain('--local')
   })
 
-  it('BC：local → --remote 同样钉 pull，不再产出 run_bc 的 --local', () => {
+  it('BC：恒 --remote，同样不注入 --remote-transport', () => {
     const cfg = dualCourseCfg()
     const hub = sharedHubUrl(cfg)
-    for (const ppo of ['local', 'pull', 'push'] as const) {
-      const spec = bcLoopSpec(cfg, { course: 'course-a', ppo, hubUrl: hub, venv: VENV })
-      expect(spec.cmd).toContain('--remote')
-      expect(spec.cmd).not.toContain('--local')
-    }
-    const local = bcLoopSpec(cfg, { course: 'course-a', ppo: 'local', hubUrl: hub, venv: VENV })
-    expect(flag(local, '--remote-transport')).toBe('pull')
-    expect(flag(local, '--remote-hub-url')).toBe(hub)
-    // 2026-09-17：pull preset 也钉死传输（hub 仍缺省读 rl-config）——不钉会被
-    // rl-config 里残留的 gpu_push 节点劫走（auto = 「本课 gpu_push > hub」），
-    // 实测代价：云机 pull 会话 push 530 三连败 → GATE ABORT 停腿。
-    const pull = bcLoopSpec(cfg, { course: 'course-a', ppo: 'pull', venv: VENV })
-    expect(flag(pull, '--remote-transport')).toBe('pull')
-    expect(flag(pull, '--remote-hub-url')).toBeNull()
+    const spec = bcLoopSpec(cfg, { course: 'course-a', hubUrl: hub, venv: VENV })
+    expect(spec.cmd).toContain('--remote')
+    expect(spec.cmd).not.toContain('--local')
+    expect(flag(spec, '--remote-transport')).toBeNull()
+    expect(flag(spec, '--remote-hub-url')).toBe(hub)
+    // hub 仍缺省读 rl-config（不传 hubUrl 时不带旗标）
+    const noHub = bcLoopSpec(cfg, { course: 'course-a', venv: VENV })
+    expect(flag(noHub, '--remote-hub-url')).toBeNull()
   })
 })
 

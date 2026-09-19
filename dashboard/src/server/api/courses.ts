@@ -85,11 +85,13 @@ export function effectiveCourse(state: ConsoleCourseState, discovered: string[])
 }
 
 /** 动作上下文（routeAction 专用）：显式 body.course > effectiveCourse。
- *  保证「页面显示的课程 = 动作实际使用的课程」不变量。 */
+ *  保证「页面显示的课程 = 动作实际使用的课程」不变量。
+ *
+ *  ★ 2026-09-19：不再带 `trainerPpo`——启动训练不选模式（pull 由远端 worker 自己来领，
+ *  push 由 rl-config 里登记的 push worker 节点决定）。 */
 export function actionCtx(body: PostBody): StartCtx {
   const state = loadConsoleState()
   return {
     course: bodyStr(body, 'course') || effectiveCourse(state, discoverCourses()),
-    trainerPpo: state.trainerPpo,
   }
 }

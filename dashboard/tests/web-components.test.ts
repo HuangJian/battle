@@ -14,14 +14,24 @@ import { h } from 'preact'
 import { renderToString } from 'preact-render-to-string'
 import { CopyButton } from '../src/web/components/CopyButton'
 import { PanelErrorBoundary } from '../src/web/components/PanelErrorBoundary'
-import { shortUrl, type ConsoleStateView, type PushTargetView } from '../src/web/view'
+import { shortUrl, type ConsoleStateView, type PushFleetProbe } from '../src/web/view'
 
-/** 构造一个带 trainingLoop 卡（+可选 push 执行面）的整页状态，SSR 渲染成 HTML。 */
-function pageWithPushTarget(
-  pushTarget: PushTargetView | null,
-  opts: { mode?: 'pull' | 'push' | 'local' } = {},
-): string {
-  const mode = opts.mode ?? 'push'
+/** 造一个机群级执行面探针（`stateView.pushFleet` 的形状）。 */
+function fleet(patch: Partial<PushFleetProbe> = {}): PushFleetProbe {
+  return {
+    mode: 'hub-dispatch',
+    text: 'hub 中介派发',
+    detail: '',
+    nodes: 1,
+    hubPush: true,
+    hubUrl: 'http://127.0.0.1:8787',
+    probes: [{ id: 'gpu1', url: 'https://gpu.example', healthy: true }],
+    ...patch,
+  }
+}
+
+/** 构造一个带 trainingLoop 卡（+可选执行面徽章）的整页状态，SSR 渲染成 HTML。 */
+function pageWithPushTarget(pushFleet: PushFleetProbe | null): string {
   return renderConsolePage({
     time: 't',
     course: 'c',
@@ -34,7 +44,7 @@ function pageWithPushTarget(
         pid: 1,
         url: null,
         course: 'c',
-        mode,
+        mode: 'remote',
         healthy: true,
         log: null,
         logTail: [],
@@ -42,16 +52,11 @@ function pageWithPushTarget(
       },
     ],
     nodes: [],
-    modes: {
-      trainerPpo: mode as 'pull' | 'push' | 'local',
-      stream: 0,
-      doubleBuffer: 0,
-      precollectEarly: 0,
-    },
+    modes: { stream: 0, doubleBuffer: 0, precollectEarly: 0 },
     metrics: { available: false, iters: [] },
     phase: { phase: 'idle' as const, sinceMs: null, iter: null },
     localNode: null,
-    pushTarget,
+    pushFleet,
   } as ConsoleStateView)
 }
 
@@ -112,7 +117,7 @@ describe('§361：icon 复制键 / cloudflared endpoint 截断与复制 / local 
         },
       ],
       nodes: [],
-      modes: { trainerPpo: 'pull' as const, stream: 0, doubleBuffer: 0, precollectEarly: 0 },
+      modes: { stream: 0, doubleBuffer: 0, precollectEarly: 0 },
       metrics: { available: false, iters: [] },
       phase: { phase: 'idle' as const, sinceMs: null, iter: null },
       localNode: null,
@@ -126,60 +131,28 @@ describe('§361：icon 复制键 / cloudflared endpoint 截断与复制 / local 
     expect(body).not.toContain('trycloudflare.com')
   })
 
-  it('push 执行面徽章：贴在 trainingLoop 卡上，区分本机 / 云机 / 未匹配', () => {
-    // 绿色 = 本机 worker_server（active=正在用的执行面）
-    const local = pageWithPushTarget({
-      kind: 'local',
-      url: 'http://127.0.0.1:8790',
-      nodeId: 'local-push',
-      healthy: true,
-      active: true,
-    })
-    expect(local).toContain('class="tc-cc__push tc-cc__push--local"')
-    expect(local).toContain('push→本机')
-    expect(local).not.toContain('tc-cc__push--idle"') // active → 不降调
-    expect(local).toContain('http://127.0.0.1:8790') // 悬停详情留全量 URL
-    // 通信成功后「push」与「push→本机」重复——只留后者
-    expect(local).not.toContain('class="tc-cc__mode"')
+  it('执行面徽章（机群级）：hub 派发 / 直推 / 等待拉取三态 + 探活汇总', () => {
+    // hub 派发：hub 按队列推给登记节点
+    const hub = pageWithPushTarget(fleet())
+    expect(hub).toContain('class="tc-cc__push tc-cc__push--hub-dispatch"')
+    expect(hub).toContain('hub→1 台')
+    expect(hub).toContain('https://gpu.example') // 悬停详情留全量 URL
 
-    // 蓝色 = 云 GPU 节点
-    const cloud = pageWithPushTarget({
-      kind: 'cloud',
-      url: 'https://gpu.example',
-      nodeId: 'gpu-push',
-      healthy: true,
-      active: true,
-    })
-    expect(cloud).toContain('class="tc-cc__push tc-cc__push--cloud"')
-    expect(cloud).toContain('push→云机')
-    // 通信成功后「push」与「push→云机」重复——只留后者（用户指令 2026-09-16）
-    expect(cloud).not.toContain('class="tc-cc__mode"')
-    expect(cloud).not.toContain('>push</b>')
+    // 直推：训练侧按登记顺序直连节点（hub_push 关 / hub 不可用）
+    const direct = pageWithPushTarget(
+      fleet({
+        mode: 'direct-push',
+        nodes: 2,
+        probes: [{ id: 'g1', url: 'https://a', healthy: false }],
+      }),
+    )
+    expect(direct).toContain('class="tc-cc__push tc-cc__push--direct-push"')
+    expect(direct).toContain('直推→2 台·1 台不通')
 
-    // 红色 = 指向 config 里不存在的节点（python 会回落 pull）――必须醒目；探测不通也上后缀
-    const unresolved = pageWithPushTarget({
-      kind: 'unresolved',
-      url: 'https://ghost.example',
-      nodeId: null,
-      healthy: false,
-      active: false,
-    })
-    expect(unresolved).toContain('class="tc-cc__push tc-cc__push--unresolved tc-cc__push--idle"')
-    expect(unresolved).toContain('push→未匹配·不通')
-    // 通信失败 → 仍保留「push」模式徽章（双徽章并存，便于看清当前模式）
-    expect(unresolved).toContain('class="tc-cc__mode"')
-  })
-
-  it('push 目标未探通（healthy=null）→ 仍显示 push 模式徽章', () => {
-    const html = pageWithPushTarget({
-      kind: 'cloud',
-      url: 'https://gpu.example',
-      nodeId: 'gpu-push',
-      healthy: null,
-      active: false,
-    })
-    expect(html).toContain('push→云机')
-    expect(html).toContain('class="tc-cc__mode"')
+    // 等待拉取：没有登记节点（谁在轮询 hub 谁就能领到活）
+    const pull = pageWithPushTarget(fleet({ mode: 'pull', nodes: 0, probes: [] }))
+    expect(pull).toContain('class="tc-cc__push tc-cc__push--pull"')
+    expect(pull).toContain('dispatch→拉取')
   })
 
   it('组件卡分族（R3-3）：服务面（单例角色）在前、课程面在后，族内顺序稳定', () => {
@@ -224,7 +197,7 @@ describe('§361：icon 复制键 / cloudflared endpoint 截断与复制 / local 
         busy: false,
       })),
       nodes: [],
-      modes: { trainerPpo: 'pull' as const, stream: 0, doubleBuffer: 0, precollectEarly: 0 },
+      modes: { stream: 0, doubleBuffer: 0, precollectEarly: 0 },
       metrics: { available: false, iters: [] },
       phase: { phase: 'idle' as const, sinceMs: null, iter: null },
       localNode: null,
@@ -252,25 +225,8 @@ describe('§361：icon 复制键 / cloudflared endpoint 截断与复制 / local 
     expect(html.match(/class="tc-cc__scope tc-cc__scope--singleton"/g)).toHaveLength(1)
   })
 
-  it('未配置 push 目标 → 卡片不出徽章', () => {
+  it('未探测到执行面（pushFleet 缺省）→ 卡片不出执行面徽章', () => {
     expect(pageWithPushTarget(null)).not.toContain('class="tc-cc__push')
-  })
-
-  it('trainer 已切到 pull：config 残留的 push 目标不得再上卡（2026-09-16）', () => {
-    const html = pageWithPushTarget(
-      {
-        kind: 'cloud',
-        url: 'https://gpu.example',
-        nodeId: 'gpu-push',
-        healthy: false,
-        active: false,
-      },
-      { mode: 'pull' },
-    )
-    expect(html).not.toContain('class="tc-cc__push')
-    expect(html).not.toContain('push→云机')
-    expect(html).toContain('class="tc-cc__mode"')
-    expect(html).toContain('>pull</b>')
   })
 
   it('local pill：只读展示（槽位 + 上轮贡献）', () => {
@@ -280,7 +236,7 @@ describe('§361：icon 复制键 / cloudflared endpoint 截断与复制 / local 
       courses: [],
       components: [],
       nodes: [],
-      modes: { trainerPpo: 'pull' as const, stream: 0, doubleBuffer: 0, precollectEarly: 0 },
+      modes: { stream: 0, doubleBuffer: 0, precollectEarly: 0 },
       metrics: { available: false, iters: [] },
       phase: { phase: 'idle' as const, sinceMs: null, iter: null },
       localNode: { id: 'local', slots: 3, lastContrib: 2 },

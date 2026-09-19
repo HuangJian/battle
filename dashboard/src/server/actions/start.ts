@@ -16,7 +16,11 @@ import {
 } from '../../core/slots'
 import type { Component, RlConfig } from '../../core/types'
 import { resolveVenvPython } from '../../core/venv'
-import { type CourseMachineKnobs, writeCourseMachineKnobs } from '../../stack/course-knobs'
+import {
+  type CourseMachineKnobs,
+  pruneLegacyCourseKnobs,
+  writeCourseMachineKnobs,
+} from '../../stack/course-knobs'
 import { isBcCourse, seedWeightsFromBc } from '../../stack/courses'
 import {
   hubServerHealthy,
@@ -28,8 +32,8 @@ import {
 } from '../../stack/hub'
 import { startLocalWorker } from '../../stack/local-worker'
 import { TRAINER_SERVE_ENTRY, trainerServeSpec } from '../../stack/specs'
+import { remoteExecutionFace } from '../../stack/push-config'
 import { entryOf, markCloudHaltRecovered } from './cloud-halt'
-import { ConsoleState } from './console-state'
 import { restoreCourseModesNote } from './course-mode'
 import { COMPONENT_LABELS, runRlLockHolder, tailLines } from './labels'
 import { ActionError, ActionResult, busyKey, done, guard, release } from './result'
@@ -38,18 +42,11 @@ import { ActionError, ActionResult, busyKey, done, guard, release } from './resu
 
 export interface StartCtx {
   course: string
-  /** trainer 模式（pull/push → 云端 worker；local → 本机独立 localWorker 的 pull 模式）。
+  /** 显式 REMOTE_PUSH_NODE（仅冒烟预演：把本机伪节点注入 env；真实执行面走
+   *  `rl.hub_push` + 登记节点，由训练侧自己解析）。
    *
-   *  ★ 共享 trainer 时代它是**每课**的传输裁决：进程级只有一份命令行，故它落成
-   *  `rl-config → courses.<课>.remote_transport`（+ local 时的本机 hub 地址），由
-   *  `prepareCourseForSharedTrainer` 写、python `apply_course_machine_overrides` 施加。 */
-  trainerPpo: ConsoleState['trainerPpo']
-  /** 显式 REMOTE_PUSH_NODE（仅冒烟/本机伪 GPU 预演；真实 Push 走 rl-config gpu_push 节点，
-   *  不注入 env——env 会强制 remote_token，覆盖用户填写的 authKey）。
-   *
-   *  ★ 共享 trainer 不再消费它（`trainerServeSpec` 不给 `REMOTE_PUSH_NODE`）：push 执行面
-   *  由 `stack/push-config.configurePushEndpoint` 写进 rl-config（节点表 + 本课 push_node_url），
-   *  由训练侧自己解析。保留字段是因为预演（`train-smoke.ts`）仍用它把伪节点注入 env。 */
+   *  ★ 共享 trainer 不消费它（`trainerServeSpec` 不给 `REMOTE_PUSH_NODE`）；保留字段是因为
+   *  预演（`train-smoke.ts`）仍用它把伪节点注入 env。 */
   pushNodeUrl?: string
   /** T7：远端连败是否 opt-in 降级本机 PPO（默认 false = ABORT）。 */
   remoteDegrade?: boolean
@@ -93,16 +90,15 @@ export function runClusterLockHolder(): number | null {
  *      （`rl/loop_plan.discover_courses` 与控制台 `discoverCourses` 同一判据），而共享 trainer 是
  *      「先起进程、后加课」的模型 —— 不建它，这门新课永远不会被发现（症状极难查：进程活着、
  *      队列正常、就是这门课一轮都不跑）。空账本 = 合法状态（第 1 轮从头开始）。
- *   ③ **机器侧旋钮**：`courses.<课>.{remote_transport,remote_hub_url,remote_degrade_after}`。
- *      单进程没有「这门课的 flag」这一说（命令行只有一份），故「这门课怎么连云」住 rl-config；
- *      不写它的后果很具体：`auto` 会按残留的 `push_node_url` 把 job 推给云机，而操作员以为
- *      自己选的是 pull/local（2026-09-17 事故：云机 pull 会话被过期节点劫走 → 530 三连败 →
- *      GATE ABORT，而云机 worker 其实正在正常 pull）。
+ *   ③ **机器侧旋钮 + legacy 清理**：`courses.<课>.{remote_degrade_after,gate_halt_mode}`（单进程
+ *      没有「这门课的 flag」这一说，命令行只有一份），外加把旧的**传输耦合键**
+ *      （`push_node_url`/`remote_transport`/`remote_hub_url`/`hub_push`）与伪节点条目清掉。
+ *      后者不是洁癖：残留的传输键会让操作员以为「这门课还是我当年配的那条路」，而残留的
+ *      `local_push` 节点**仍有读者**（python `_gpu_push_nodes` 全取登记节点）⇒ 会把训练指向
+ *      一条没人服务的本机地址而「看起来正常」。
  *
- *  local 模式 = 本机独立 worker 的 pull 模式：`remote_transport=pull` + `remote_hub_url=<本机 hub>`
- *  ——与旧 per-course spec 的 `--remote-transport pull --remote-hub-url <本机 hub>` 逐字段同义。
- *  **不动 `rl.remote_hub_url`**（刻意）：那个键是「pull preset 的隧道 URL」的家，写本机 hub
- *  进去会把它悄悄改成打本机 hub；per-course 覆盖正好只作用于这一门课。 */
+ *  ★ **课程与 worker 节点正交**（2026-09-19 用户口径）：这里**不再**写任何按课程的传输裁决。
+ *  哪条路生效是**部署事实**（`rl.hub_push` 缺省开 + 登记在册的 gpu_push 节点 + hub 队列）。 */
 export function prepareCourseForSharedTrainer(
   cfg: RlConfig,
   course: string,
@@ -126,22 +122,16 @@ export function prepareCourseForSharedTrainer(
     appendFileSync(ledger, '')
     notes.push('已建课程账本 training_log.jsonl（共享 trainer 的课程发现判据）')
   }
+  // legacy 清理（幂等）：全课范围一次做完——旧键 / 伪节点条目不该只对「这次启动的课」生效。
+  const pruned = pruneLegacyCourseKnobs(cfg)
+  if (pruned.removed.length > 0)
+    notes.push(`已清理 legacy 传输配置 ${pruned.removed.length} 项（课程与 worker 节点正交）`)
   const knobs: CourseMachineKnobs = {}
-  if (ctx.trainerPpo === 'push') knobs.remoteTransport = 'push'
-  else if (ctx.trainerPpo === 'pull') knobs.remoteTransport = 'pull'
-  else {
-    knobs.remoteTransport = 'pull'
-    knobs.remoteHubUrl = sharedHubUrl(cfg)
-  }
   if (ctx.remoteDegrade !== undefined) knobs.remoteDegradeAfter = ctx.remoteDegrade ? 3 : 0
-  const w = writeCourseMachineKnobs(cfg, course, knobs)
-  // 旋钮说明放**第一条**：它是操作员最需要确认的一件事（「我选的模式真的落盘了吗」），
-  // 也是结果详情/预设详情的首行
-  const knobNote =
-    `本课（${course}）机器侧传输 = ${knobs.remoteTransport}` +
-    `${knobs.remoteHubUrl ? ` @ ${knobs.remoteHubUrl}` : ''}` +
-    (w.changed ? '（已写入 rl-config courses.<课>）' : '（rl-config 已是该值，未重写）') +
-    '；其余并行课程各按自己的配置'
+  const w = writeCourseMachineKnobs(pruned.cfg, course, knobs)
+  // 执行面说明放**第一条**：它是操作员最需要确认的一件事（「这轮 PPO 会去谁那儿」）
+  const face = remoteExecutionFace(pruned.cfg)
+  const knobNote = `本课（${course}）执行面：${face.text}${face.detail ? `（${face.detail}）` : ''}`
   return { cfg: w.cfg, notes: [knobNote, ...notes] }
 }
 
@@ -235,9 +225,6 @@ async function startSharedTrainer(
     course: '',
     slot: 0,
     entry: TRAINER_SERVE_ENTRY,
-    // 「模式」对共享 trainer 是**每课**的（见 prepare ③）：这里记的是最近一次启动所用的模式，
-    // 每课的真实裁决在 `courses.<课>.remote_transport`。
-    mode: ctx.trainerPpo,
     log: spec.log,
   })
   monitorTouch()
