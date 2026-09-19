@@ -19,6 +19,10 @@ dist_common.py — 分布式采样 trainer 侧公共工具（stdlib-only，可�
   （2026-09-06 竞速收尾洞修复）。DIST_TASK_ASYNC=1 可全局强制旧异步路径。
 - 权重下发：POST body = gzip(weights.json 字节)，头部 X-Iter-Id / X-Weights-Sha256；
   agent 校验 sha 一致后，同 sha 幂等不动、异 sha 原子切换并清空结果缓存。
+  kept 短路径（2026-09-19）：先 GET /v1/weights/cached（头 X-Weights-Sha256 / X-Kind）
+  探测；命中则不传 body 直接 kept。旧 agent 无此路径 → 404 → 回退完整 POST。
+  批量下发用 post_weights_parallel（ThreadPool，与 ping 并行化同款）；pure_collect
+  锚点语义不变（仍 = 全部节点权重就绪时刻）。
 
 红线：远端结果必须先过 validate_result() 再落进 traj_dir —— discover_rl_shards()
 对已落盘目录是无条件递归扫描的，落盘之后没有任何兜底。
@@ -536,6 +540,40 @@ def upgrade_stale_nodes(
     return out
 
 
+def probe_weights_cached(
+    url: str,
+    auth_key: str,
+    sha: str,
+    kind: str = "rollout",
+    timeout: float = 3.0,
+) -> bool | None:
+    """GET /v1/weights/cached → True/False；探针不可用（旧 agent / 网络失败）→ None。
+
+    语义：节点该 kind 桶内是否已持有此 sha。None 时调用方必须走完整 POST。
+    """
+    if not sha:
+        return None
+    try:
+        status, body = _request(
+            url.rstrip("/") + "/v1/weights/cached",
+            auth_key,
+            timeout,
+            headers={"X-Weights-Sha256": sha, "X-Kind": kind},
+            method="GET",
+        )
+    except Exception:
+        return None
+    if status != 200:
+        return None
+    try:
+        info = json.loads(body.decode("utf-8")) if body else {}
+    except ValueError:
+        return None
+    if not isinstance(info, dict) or "cached" not in info:
+        return None
+    return bool(info.get("cached"))
+
+
 def post_weights(
     url: str,
     auth_key: str,
@@ -549,7 +587,14 @@ def post_weights(
 
     kind（v3.7/M8）：'rollout'（per-tick RL 采样）/ 'intent'（意图权重桶——
     intent-exec 评估 + 意图 RL rollout 共用）。agent 按 x-kind 分桶缓存。
+
+    kept 短路径（2026-09-19，x20-rebirth it19 rollout 208s 复盘）：先探针
+    GET /v1/weights/cached；sha 已在桶内 → 不传 body 直接 'kept'（补波/同 it
+    多波的权重握手主成本）。探针 404/失败（旧 agent）→ 完整 POST，语义不变。
     """
+    cached = probe_weights_cached(url, auth_key, sha, kind=kind, timeout=min(5.0, timeout))
+    if cached is True:
+        return "kept"
     status, body = _request(
         url.rstrip("/") + "/v1/weights",
         auth_key,
@@ -570,6 +615,62 @@ def post_weights(
     except ValueError:
         info = {}
     return str(info.get("cache", "kept"))
+
+
+def post_weights_parallel(
+    nodes: list,
+    iter_id: str,
+    wver: str,
+    weights_bytes: bytes,
+    timeout: float,
+    kind: str = "rollout",
+    log=None,
+) -> list:
+    """并行 POST 权重到全部节点 → alive 节点列表（保持入参顺序）。
+
+    失败节点记日志后排除（与串行版语义一致）。日志在全部完成后按配置顺序回放
+    （与 ping 并行化同款：保序、保线程安全）。pure_collect 锚点由调用方在本函数
+    返回后打点——语义不变（全部节点就绪）。
+
+    nodes 元素需含 id/url；key 取 `key` 或 `authKey`。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    if not nodes:
+        return []
+
+    def _key_of(nd) -> str:
+        return str(nd.get("key") if nd.get("key") is not None else nd.get("authKey", ""))
+
+    def _push(nd):
+        nid = str(nd.get("id") or nd.get("url") or "?")
+        try:
+            mode = post_weights(
+                nd["url"],
+                _key_of(nd),
+                iter_id,
+                wver,
+                weights_bytes,
+                timeout=timeout,
+                kind=kind,
+            )
+            return nid, nd, mode, None
+        except DistError as e:
+            return nid, nd, None, e
+
+    n = len(nodes)
+    with ThreadPoolExecutor(max_workers=min(8, n)) as ex:
+        results = list(ex.map(_push, nodes))
+    alive: list = []
+    for nid, nd, mode, err in results:
+        if err is not None:
+            if log is not None:
+                log(f"[dist] weights POST to {nid} failed ({err}) — excluded")
+            continue
+        if log is not None:
+            log(f"[dist] weights[{kind}] -> {nid} ({mode})")
+        alive.append(nd)
+    return alive
 
 
 def unpack_container(raw: bytes) -> tuple[dict, dict]:

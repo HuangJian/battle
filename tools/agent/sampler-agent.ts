@@ -4,6 +4,9 @@
  * 协议（plan/distributed-rollout.md v3.6）：
  *   POST /v1/weights  每轮一次；x-weights-sha256 与缓存不同 → 原子切换并清空结果缓存，
  *                     相同 → 幂等不动（relaunch 续跑不误清本批数据）。
+ *   GET  /v1/weights/cached  探针（2026-09-19）：头 X-Weights-Sha256 + X-Kind →
+ *                     {cached:bool}。trainer 命中则跳过 POST body（kept 短路径）。
+ *                     旧 trainer 不调此路径；旧 agent 无此路径时 trainer 回退完整 POST。
  *   GET  /v1/task     ?iterId&wver&stage&seed&maxTicks&difficulty
  *                     — 同步模式（缺省，v3.5- 兼容）：跑完一局流式回包（20s 心跳防空闲回收）；
  *                     — 异步模式（x-async:1，v3.6）：202+token 立即返回、后台执行，
@@ -448,6 +451,14 @@ const weightsByKindSha: Map<string, Map<string, WeightsState>> = new Map()
 
 function weightsOf(kind: string, wver: string): WeightsState | null {
   return weightsByKindSha.get(kind)?.get(wver) ?? null
+}
+
+/** 探针纯函数（单测共用）：该 kind 桶是否已持有 sha。 */
+export function weightsCachedInBucket(
+  bucket: Map<string, unknown> | undefined,
+  sha: string,
+): boolean {
+  return Boolean(sha) && (bucket?.has(sha) ?? false)
 }
 
 function latestWeightsOfKind(kind: string): WeightsState | null {
@@ -1019,6 +1030,15 @@ async function handle(req: Request): Promise<Response> {
   const auth = req.headers.get('authorization') ?? ''
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
   if (!token || !safeEqual(token, AUTH_KEY)) return jsonResponse({ error: 'unauthorized' }, 401)
+
+  // kept 短路径探针（2026-09-19）：只查内存桶，不读 body。trainer 命中后跳过 POST。
+  if (req.method === 'GET' && url.pathname === '/v1/weights/cached') {
+    const claimedSha = req.headers.get('x-weights-sha256') ?? ''
+    const kind = req.headers.get('x-kind') ?? 'rollout'
+    if (!claimedSha) return jsonResponse({ error: 'missing x-weights-sha256' }, 400)
+    const cached = weightsCachedInBucket(weightsByKindSha.get(kind), claimedSha)
+    return jsonResponse({ ok: true, cached, kind }, 200)
+  }
 
   if (req.method === 'POST' && url.pathname === '/v1/weights') {
     const declared = req.headers.get('content-length') ?? '0'

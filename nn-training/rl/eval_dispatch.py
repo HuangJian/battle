@@ -254,20 +254,16 @@ class EvalDispatcher:
             # 幂等下发（节点通常已持有 → kept；agent 重启过则补发）
             with open(rl_path, "rb") as f:
                 weights_bytes = f.read()
-            nodes_ok = []
-            for nd in alive:
-                try:
-                    dist_common.post_weights(
-                        nd["url"],
-                        nd["key"],
-                        iter_id,
-                        wver,
-                        weights_bytes,
-                        timeout=min(300.0, max(60.0, task_timeout)),
-                    )
-                    nodes_ok.append(nd)
-                except dist_common.DistError as e:
-                    log(f"[eval] weights POST to {nd['id']} failed ({e}) — excluded")
+            # 幂等下发（节点通常已持有 → kept 短路径；agent 重启过则补发）——并行
+            nodes_ok = dist_common.post_weights_parallel(
+                alive,
+                iter_id,
+                wver,
+                weights_bytes,
+                timeout=min(300.0, max(60.0, task_timeout)),
+                kind="rollout",
+                log=log,
+            )
             if not nodes_ok:
                 if not alive and local_gate is not None and snapshot_path:
                     log("[eval] all weight POSTs failed — local-only eval this round")

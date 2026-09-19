@@ -8,6 +8,7 @@ import {
   packContainer,
   unpackContainer,
   SHARD_FILES,
+  weightsCachedInBucket,
 } from '../tools/agent/sampler-agent'
 // F3/F4 纯实现（与 sampler-agent 同源，诊断工具/单测共用）
 import {
@@ -245,5 +246,14 @@ describe('codeHash SSOT manifest (tools/agent/codehash-files.txt)', () => {
       expect(first[0]).toMatch(/^[0-9a-f]{8}$/)
       expect(Number.isInteger(Number(first[1]))).toBe(true)
     }
+  })
+
+  it('weightsCachedInBucket：sha 命中 / 空 sha / 无桶（kept 短路径探针，2026-09-19）', () => {
+    const sha = 'a'.repeat(64)
+    const bucket = new Map<string, unknown>([[sha, { sha }]])
+    expect(weightsCachedInBucket(bucket, sha)).toBe(true)
+    expect(weightsCachedInBucket(bucket, 'b'.repeat(64))).toBe(false)
+    expect(weightsCachedInBucket(undefined, sha)).toBe(false)
+    expect(weightsCachedInBucket(bucket, '')).toBe(false)
   })
 })

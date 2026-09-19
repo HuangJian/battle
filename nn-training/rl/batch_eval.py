@@ -613,19 +613,15 @@ class BatchEvalRunner:
         nodes_ok = []
         if not god:
             assert weights_bytes is not None
-            for nd in alive:
-                try:
-                    dist_common.post_weights(
-                        nd["url"],
-                        nd["key"],
-                        iter_id,
-                        wver,
-                        weights_bytes,
-                        timeout=min(300.0, max(60.0, task_timeout)),
-                    )
-                    nodes_ok.append(nd)
-                except dist_common.DistError as e:
-                    log(f"[batcheval] weights POST to {nd['id']} failed ({e}) — excluded")
+            nodes_ok = dist_common.post_weights_parallel(
+                alive,
+                iter_id,
+                wver,
+                weights_bytes,
+                timeout=min(300.0, max(60.0, task_timeout)),
+                kind="rollout",
+                log=log,
+            )
             if not nodes_ok and local_weights is None:
                 log("[batcheval] all weight POSTs failed — unit deferred")
                 return {"settled": 0, "total": total, "dropped": total}

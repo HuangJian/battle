@@ -46,6 +46,20 @@ ROLLOUT_LOG_EVERY = 10  # 本地 rollout 每 N 局结算打一条进度行
 RACE_LOG_SAMPLE = 2  # 竞速输家/dup settle 每类最多打前 N 条，其余进 round-done 汇总
 
 
+def resolve_tail_join_sec(policy: dict, all_settled: bool, halted: bool) -> float:
+    """收尾 join 的 grace 秒数（纯函数；2026-09-19 收紧）。
+
+    all_settled / halt 后默认 **0**：计划对局已齐（或已熔断），在飞副本只剩竞速
+    输家——结果注定被 dedup 丢弃，等待无数据价值（x20-rebirth it19：30s×3 波纯开销）。
+    policy.tailGraceJoinSec 可覆写（e2e 用 2s 验有界）。
+    窗口到期未齐 → tailGraceJoinSecDeadline（默认 5s）给在飞 worker 极短补结算窗；
+    缺口由 volume 补波 / resume 兜底。绝不再用 queueWindow+taskTimeout（旧 2700s 洞）。
+    """
+    if all_settled or halted:
+        return float(policy.get("tailGraceJoinSec", 0))
+    return float(policy.get("tailGraceJoinSecDeadline", 5))
+
+
 def _ensure_games(m: dict) -> dict:
     """将单局 agent manifest（无 games 键）转换为 combine_reports 可消费的格式。
 
@@ -70,7 +84,12 @@ def bun_version(bun: str) -> str:
     try:
         return (
             subprocess.run(
-                [bun, "--version"], capture_output=True, text=True, timeout=10, **_POPEN_NO_WINDOW
+                [bun, "--version"],
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
+                **_POPEN_NO_WINDOW,
             ).stdout.strip()
             or "?"
         )
@@ -309,30 +328,26 @@ class RolloutDispatcher:
             return run_rollout(bun, rl_path, traj_dir, pairs, args)
 
         # ② 权重一次下发；异 sha 由 agent 原子清场，同 sha 幂等不动
+        # 并行 POST（2026-09-19：x20-rebirth it19 串行 6 节点 50s——与 ping 同款
+        # ThreadPool）；kept 短路径见 dist_common.post_weights。pure_collect 锚点
+        # 语义不变：仍是「全部节点权重就绪」的时刻（本函数返回后打点）。
         with open(rl_path, "rb") as f:
             weights_bytes = f.read()
-        alive = []
         if getattr(args, "goal_rollout", False):
             wkind = "goal"
         elif getattr(args, "intent_rollout", False):
             wkind = "intent"
         else:
             wkind = "rollout"
-        for nd in nodes:
-            try:
-                mode = dist_common.post_weights(
-                    nd["url"],
-                    nd["key"],
-                    iter_id,
-                    wver,
-                    weights_bytes,
-                    timeout=min(300.0, max(60.0, task_timeout)),
-                    kind=wkind,
-                )
-                log(f"[dist] weights[{wkind}] -> {nd['id']} ({mode})")
-                alive.append(nd)
-            except dist_common.DistError as e:
-                log(f"[dist] weights POST to {nd['id']} failed ({e}) — excluded")
+        alive = dist_common.post_weights_parallel(
+            nodes,
+            iter_id,
+            wver,
+            weights_bytes,
+            timeout=min(300.0, max(60.0, task_timeout)),
+            kind=wkind,
+            log=log,
+        )
         if not alive:
             log("[dist] all weights POST failed — falling back to local-only rollout")
             return run_rollout(bun, rl_path, traj_dir, pairs, args)
@@ -899,21 +914,20 @@ class RolloutDispatcher:
         # 的 HTTP 调用（同步 agent 的 200 分支、提交阶段挂起），整轮就空等到满超时，
         # 哪怕 150 局早已结算完毕（p4-horizon it2 273s / it3 258s，洞内日志静默）。
         # v3.16 的 abandon_event 只覆盖 x-async 轮询阶段，盖不住这条路径，故在此兜底。
-        # 新语义：
+        # 语义（2026-09-19 收紧，x20-rebirth it19 复盘）：
         #   ① 先等「本轮结算完成 / halt / 窗口到期」——正常收官时立即通过；
-        #   ② 再给在飞副本 tailGraceJoinSec（默认 30s，**全局共享**不是每线程各 30s）
-        #      自然收工：结果已齐，输家副本的返回值注定被 dedup 丢弃；
-        #   ③ 仍存活的线程一律放弃等待（daemon 线程随进程退出，不影响报告/落盘）。
-        # 未正常收官（deadline/halt 中止）时不走 grace：给足单任务窗口，保持旧语义。
+        #   ② **all_settled / halt 后默认 0s 不再等**：计划对局已齐（或已熔断），
+        #      在飞副本只剩竞速输家——返回值注定被 dedup 丢弃，等待无数据价值；
+        #      30s×volume 多波是纯墙钟开销（it19 实测 3×30s）。policy 可覆写。
+        #   ③ 窗口到期未齐：给在飞 worker 极短 grace（默认 5s）尝试补结算；
+        #      缺口由 volume 补波 / 下轮 resume 兜底，不再用 window+taskTimeout。
+        #   ④ 仍存活的线程一律放弃等待（daemon 线程随进程退出，不影响报告/落盘）。
         while not all_settled.is_set() and time.time() < deadline:
             if halt_event is not None and halt_event.is_set():
                 break
             all_settled.wait(0.5)
-        tail_join_sec = (
-            float(policy.get("tailGraceJoinSec", 30))
-            if all_settled.is_set()
-            else max(30.0, min(window, task_timeout))
-        )
+        halted = halt_event is not None and halt_event.is_set()
+        tail_join_sec = resolve_tail_join_sec(policy, all_settled.is_set(), halted)
         join_until = time.time() + max(0.0, tail_join_sec)
         for t in list(threads) + list(extra_threads):
             t.join(timeout=max(0.0, join_until - time.time()))

@@ -9,11 +9,15 @@
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
 from pathlib import Path
 
 NN = Path(__file__).resolve().parent.parent
+if str(NN) not in sys.path:
+    sys.path.insert(0, str(NN))
+
+from tests.subproc_util import run_utf8
+
 SCRIPT = NN / "tools" / "tpu-probe.py"
 NB = NN / "ipynb" / "tpu-probe.ipynb"
 SYNC_TOOL = NN / "tools" / "sync_tpu_probe_nb.py"
@@ -45,11 +49,13 @@ def test_embedded_probe_script_matches_repo_copy() -> None:
 
 
 def test_sync_tool_check_mode_agrees() -> None:
-    """sync 工具自身的 --check 也要通过（防工具 rot）。"""
-    r = subprocess.run(
+    """sync 工具自身的 --check 也要通过（防工具 rot）。
+
+    run_utf8：裸 text=True 在 zh-CN Windows 按 cp936 解码子进程 UTF-8 输出
+    （PYTHONIOENCODING=utf-8），读线程 UnicodeDecodeError → stdout=None。
+    """
+    r = run_utf8(
         [sys.executable, str(SYNC_TOOL), "--check"],
-        capture_output=True,
-        text=True,
         timeout=60,
     )
-    assert r.returncode == 0, f"sync --check 报漂移:\n{r.stdout}\n{r.stderr}"
+    assert r.returncode == 0, f"sync --check 报漂移:\n{(r.stdout or '')}\n{(r.stderr or '')}"

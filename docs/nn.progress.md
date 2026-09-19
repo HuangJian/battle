@@ -4,6 +4,67 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §69 x20-rebirth it19 rollout 208s 复盘：权重并行下发 + kept 短路径 + tail-join grace 默认 0（2026-09-19）
+
+**一句话**：it19 `rollout_sec=208.4s` 不是仿真慢（真采集 ~26s / 12%），而是 volume 补波
+每波重跑「串行权重 POST + tail-join grace 30s」叠出来的墙钟。三处收紧 + GBK 门禁修复。
+
+### 根因（training-loop.log it19 时间线）
+
+| 阶段 | 耗时 | 说明 |
+|------|------|------|
+| 权重 POST w0 | 50s | 串行 6 节点，单节点 7–12s（purged 整包上传） |
+| 真仿真 w0 | 21s | 124/124 局 |
+| tail-join grace | 30s | 结果已齐仍等僵尸 worker |
+| 补波 w1/w2 同构 | ×2 | kept 仍整包 POST + 又各 30s grace |
+| **合计** | **~209s** | **仿真仅 ~26s** |
+
+- 权重 POST 原为裸 `for nd in nodes` 串行；ping 早已 ThreadPool 并行（v4.0）。
+- 补波时 agent 返回 `kept`（同 sha 幂等），但 HTTP body 仍整包上传。
+- `tailGraceJoinSec` 默认 30s：all_settled 后在飞副本只剩竞速输家，结果注定被 dedup
+  丢弃——等待无数据价值；旧实现的问题是「无上界」（join window+taskTimeout≈2700s），
+  不是「必须等 30s」。
+
+### 改动
+
+1. **`dist_common.post_weights_parallel`** + dispatch/eval_dispatch/batch_eval 接线：
+   ThreadPool 并行 POST，日志按配置顺序回放。`pure_collect_sec` 锚点**不变**
+   （仍 = 全部节点权重就绪时刻）。
+2. **kept 短路径**：`GET /v1/weights/cached`（头 X-Weights-Sha256 / X-Kind）→
+   命中则不传 body 直接 kept。旧 agent 404 → 回退完整 POST。trainer
+   `post_weights` 内先探针；agent `sampler-agent.ts` 新增该 GET + 纯函数
+   `weightsCachedInBucket`。
+3. **`resolve_tail_join_sec`**（`rl/dispatch.py`）：all_settled/halt 默认 **0**；
+   窗口到期未齐默认 5s（`tailGraceJoinSecDeadline`）。policy 可覆写（e2e 用 2s）。
+4. **GBK 门禁**（§30 同源）：`test_remote_iter_real_bun` / `test_tpu_probe_notebook`
+   改 `tests.subproc_util.run_utf8`；`bun_version` 三处显式 `encoding=utf-8`。
+   real_bun 另补 `lives_override=1`（exporter 2026-09-19 起无 flag 即响亮失败）。
+
+### 未做（有意）
+
+- **边分发边开采**：会改 `pure_collect_sec` 用户口径（起点 ≠ 全部权重就绪）——属决策项，
+  不在本次执行范围。
+- volume 多波跨波聚合 `pure_collect_sec`：dashboard 在无 dist 字段时仍回退
+  `rollout_sec`（整段墙钟）；观测口径问题，非调度路径。
+
+### 回归
+
+- `nn-training/tests/test_dist_weights.py`（探针命中/404 回退/并行顺序）
+- `nn-training/tests/test_tail_grace.py`（grace 默认 0 / deadline 5s）
+- `e2e/test_run_rl.py::test_it_tail_join_grace_v317`（policy 覆写仍有界）
+- `tests/dist-agent.test.ts` weightsCachedInBucket
+- `bash tools/githook/nn-python-gate.sh` 绿（1243+ 用例）
+- 根 `bun run test` 绿
+
+### 预期效果（量级，非承诺）
+
+- w0 权重：串行 ~50s → 最慢节点 ~10s（并行）+ 探针。
+- 补波 kept：~16–20s/波 → ~2s/波（只探针）。
+- tail grace：30s×3 波 → 0s（all_settled）。
+- it19 同类轮次 rollout 墙钟有望从 ~200s 压到 ~40–60s（仿真 + 少量调度）。
+
+---
+
 ## §68 x2-rebirth 结课：承伤 106.4→33.9（−68%），终点取 it15 而非末 it；「有效训练量只有前几轮」（2026-09-18）
 
 **一句话**：a2（1 敌关满分）的权重**热启**到 ladder-c02（2 敌 / 6 关），25 轮后停腿。

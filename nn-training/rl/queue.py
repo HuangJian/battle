@@ -42,7 +42,12 @@ def bun_version(bun: str) -> str:
     try:
         return (
             subprocess.run(
-                [bun, "--version"], capture_output=True, text=True, timeout=10, **_POPEN_NO_WINDOW
+                [bun, "--version"],
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
+                **_POPEN_NO_WINDOW,
             ).stdout.strip()
             or "?"
         )
