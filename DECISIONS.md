@@ -2579,3 +2579,74 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   killOrder/killerKinds；集内文件 ⇒ 需节点 resync）、回归 `tests/eval-course-ckpt.test.ts`
   （纯函数对拍）+ 实测：对 `self` 节点 2 局 god 全链（ping→权重下发→stageJson 派发→回包
   →JSONL 行，Phase 0 列齐全）通过。
+
+## §2026-09-19-evalboard-phase0-census（2026-09-19，Phase 0 逐敌种画像进 EvalStore schema（中方案 P1））
+
+- **背景**：T5 主端点 = power 曝光归一命中/千 tick（七列：hitsByKind/killsByKind/
+  exposureByKind/firstHitKind/firstKillKind/killOrder/killerKinds）。报告层已有这七列
+  （`export-eval-game.ts` 顶层，同日早些时候落地），但 A/B/C/m1 四条逐局行构造点都没搬
+  ⇒ EvalStore（唯一账本，§3.1）查不到分敌种读数。用户拍板「中方案」：列进 schema +
+  判决批走 B 层（P2/P3 见 `docs/evalboard-phase0-census.md`）。
+- **备选与否决**：① 维持现状（判决只读临时自造 JSONL）——否，账本永不沉淀分敌种读数、
+  控制台无法看；② 只给 A 层行加列 —— 否，B/C 批（判决批的宿主）同样要读；③ 把七列塞
+  `scorable.telemetry` 靠 `eval_loot_fields` 回退 —— 否，形态不同（telemetry 是标量，
+  这七列是 4 元数组 + 序列表），且无端改 codehash 集内文件的报告形态；④ 直接进
+  `REQUIRED_FIELDS` 不设豁免 —— 否，本批次之前的资产行会全量报缺（P0 覆盖率要求
+  100% **或明示豁免**）。
+- **决定**：`rl/eval_local.py::eval_census_fields` 单源（**只认顶层**，缺键 = None
+  不伪造），A/B/C/m1 四个写点接线；`ingest.ts` 映射（畸形计数列/非字符串归零或空）；
+  `store.ts` 七列进 `EvalGameRow` + `GAMEPLAY_FIELDS` + `REQUIRED_FIELDS`，并新增
+  `PHASE0_FIELDS` 作为**旧资产行的明示豁免清单**（豁免由调用方传，不写死在
+  `coverageReport` 里）。
+- **违反后果**：七列改走 telemetry 回退 ⇒ 同一字段两种形态、旧值真假难辨；缺键填零
+  却不进豁免清单 ⇒ 覆盖率报表冤报旧行、真缺失被噪声淹没；把七列排除在
+  `GAMEPLAY_FIELDS` 外 ⇒ 双跑不一致无人发现（§3.4 确定性契约失效）。
+- **落地**：`nn-training/rl/eval_local.py`（`EVAL_CENSUS_KEYS` / `eval_census_fields`）、
+  `rl/{eval_dispatch,batch_eval,eval_a_once,eval_ingest}.py`；`dashboard/src/evalboard/
+  {ingest,store}.ts`；回归 `nn-training/tests/test_eval_census_fields.py`（5 例）+  
+  `dashboard/tests/evalboard-{ingest,store}.test.ts`（映射/豁免）。验证：真实
+  `_eval_report.json` 七列齐全可抽；nn-python-gate 1263 绿 · dashboard 513 绿 +
+  typecheck · 根 `bun run check` 1875 绿。
+
+## §2026-09-19-evalboard-verdict-batch（2026-09-19，判决批走 B 层：语料注册表 + 多 ckpt 批类型（中方案 P2））
+
+- **背景**：T5 判决语料 = 课程关卡文件 stages[] × **池外** seed 段（400600+，与训练池
+  860001-860200 及已用池外段 400000/400200 不相交，§15.1 轮转纪律）× ≥2 个 ckpt
+  **同种子逐局配对**（§3.5④ 不许事后求交集）。执行层（`mode=eval` + stageJson +
+  lives/level 覆盖 + `export-eval-game.ts`）本来就在复用，缺的是**驱动器**：A 层
+  （`EvalDispatcher`）语料写死在课程配置、单权重、无外部语料入口；B 层批键 =
+  `(course, rung_from, ckpt)` ⇒ 一批一个 ckpt，且 ladder rung 承载「arena 阶梯几何 +
+  段推进」语义。用户 2026-09-19 拍板「中方案」并选定两个分叉：**新建语料注册表** +
+  **新增判决批类型**（见 `docs/evalboard-phase0-census.md` §3/§6）。
+- **备选与否决**：① 给 A 层加 `--seed0/--games/多 --weights` —— 否，判决语料混装进
+  训练课程配置会破坏「轮转键控」纪律（判决与日常读数本就该吃不同语料）；② 把语料塞进
+  `ladder.json` 的 rungs —— 否，污染阶梯几何/段推进/去重键/ladder_pos 四处；③ 改造现有
+  批键支持多权重 —— 否，动到 A/B/C 全链去重语义与历史行；④ 判决继续各造临时 JSONL ——
+  否（这就是要修的现状：读数永不沉淀、控制台看不到趋势）。
+- **决定**：① 语料身份独立成注册表 `dashboard/src/evalboard/corpora.json`
+  （`{id, level, seed0, games_per_stage, policy?}`，读/校验/身份派生在 `corpora.ts`，
+  坏行**响亮失败**）；② 新批类型 `kind='verdict'`（`trigger='verdict'`、`corpus`、
+  `ckpts[]`），**`course/rung_from/ckpt` 置空串**——键空间分离靠 `kind` 判别，不用假 course
+  去骗旧读方的键；③ 台账**单写者**不变：`verdict-cli.ts` 只往 `requests.jsonl` 追加
+  `kind='verdict'` 请求，物化由 runner/`kick-once` 完成；④ unit = 一个 (ckpt × 关卡)，
+  **权重在 unit 上**（批次级无权重 ⇒ 多 ckpt 批成立），每 ckpt 每关跑同一 seed 段；
+  ⑤ 展开只有一处（`plan_verdict_units` / `units_for_batch`），训练内派发与一次性 kick
+  共用。
+- **违反后果**：语料登记进 rungs ⇒ 阶梯推进/去重/ladder_pos 全按假 rung 走；判决批填假
+  `course` ⇒ 旧读方按 ladder 键匹配，判决行被并进课程读数；unit 不带权重而回落批次级
+  `rl_path` ⇒ 多 ckpt 批实际全跑同一个权重（配对数看着齐、其实是同一策略）；两侧各写一份
+  unit 展开 ⇒ 训练内能用而一次性 kick 跑不了（或将来的漂移）。
+- **落地**：`dashboard/src/evalboard/{corpora.json,corpora.ts,verdict-cli.ts}`、
+  `{batches,requests}.ts`（`kind/corpus/ckpts` + `verdictQueued/verdictCovered`，键 = 语料 id +
+  ckpt **标签序**，顺序敏感）、`kick-once.py`（先 `consume_requests` 再 claim，`units_for_batch`
+  统一展开；同批修其 `ROOT` 少算两层的既有 bug）；`nn-training/rl/batch_eval.py`
+  （`load_corpora/corpus_doc/plan_verdict_units/units_for_batch` + `consume_requests` 判决分支
+  + 单元权重透传）。**同批修两处硬伤**：god 局不 POST 权重且 wver 传 12 位 `key16` ⇒ agent
+  `/v1/task` 按全量 sha 查桶必然 409（现 god 也 POST 占位 `{}` 并把其 sha 当 wver；`key16`
+  仍是行身份/续跑键）；`kick-once.py` 的 `ROOT` 路径算错（2026-09-15 目录迁移遗留）⇒ 脚本
+  一直 import 不到 nn-training。回归：`nn-training/tests/test_verdict_corpus.py`（10 例）+
+  `dashboard/tests/evalboard-corpora.test.ts`（17 例）+ `test_batch_eval_wver.py` +
+  `test_kick_once_paths.py`。验证：一次真判决批 kick（本机 self）行带齐 Phase-0 七列 +
+  真 batch_id；nn-python-gate 1277 绿 · dashboard typecheck + 530 绿 · 根 `bun run check`
+  1875 绿。**未做**：判决读数自动入 store（需显式 `ingest-cli.ts` 一步，属 P3）、控制台发起
+  按钮。

@@ -54,6 +54,14 @@ export interface RawEvalRow {
   firstKillTick?: number | null
   stuckTicks?: number
   elapsedSec?: number
+  /** Phase 0 逐敌种画像七列（报告顶层；旧行/未同步节点缺键）。 */
+  hitsByKind?: number[]
+  killsByKind?: number[]
+  exposureByKind?: number[]
+  firstHitKind?: string | null
+  firstKillKind?: string | null
+  killOrder?: string[]
+  killerKinds?: (string | null)[]
   policy?: string
   /** B/C 批直写字段（batch_eval.record）：优先于 ctx。 */
   source?: string
@@ -65,6 +73,20 @@ export interface RawEvalRow {
 const toNum = (v: unknown, dft = 0): number =>
   typeof v === 'number' && Number.isFinite(v) ? v : dft
 const toBool = (v: unknown): boolean => v === true || v === 1
+
+/** Phase-0 计数列（长度 4，basic/fast/power/armor；非数组/旧行 → 全 0）。 */
+const toKindCounts = (v: unknown): number[] =>
+  Array.isArray(v) && v.length === 4 && v.every((x) => typeof x === 'number')
+    ? (v as number[])
+    : [0, 0, 0, 0]
+/** 单值敌种标签；非字符串（含旧行缺键）→ null。 */
+const toKindOrNull = (v: unknown): string | null => (typeof v === 'string' ? v : null)
+/** 字符串列（击杀顺序）；旧行缺键 → 空数组。 */
+const toStrList = (v: unknown): string[] =>
+  Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
+/** `(string|null)` 列（凶手敌种）；旧行缺键 → 空数组。 */
+const toKindList = (v: unknown): (string | null)[] =>
+  Array.isArray(v) ? v.map((x) => (typeof x === 'string' ? x : null)) : []
 
 /**
  * 单行映射（纯函数，可单测）：raw + ctx → schema v1 行。
@@ -131,6 +153,14 @@ export function ingestEvalRow(raw: RawEvalRow, ctx: IngestCtx, ts?: string): Eva
     puGotFreeze: 0,
     puGotShield: 0,
     score: toNum(raw.score, 0),
+    // Phase 0 逐敌种画像：确定性 gameplay 遥测，旧行缺键填零/空（不伪造，见 store.PHASE0_FIELDS）
+    hitsByKind: toKindCounts(raw.hitsByKind),
+    killsByKind: toKindCounts(raw.killsByKind),
+    exposureByKind: toKindCounts(raw.exposureByKind),
+    firstHitKind: toKindOrNull(raw.firstHitKind),
+    firstKillKind: toKindOrNull(raw.firstKillKind),
+    killOrder: toStrList(raw.killOrder),
+    killerKinds: toKindList(raw.killerKinds),
     metrics_version: 1,
     greedy: true,
     node_id: typeof raw.node === 'string' ? raw.node : 'unknown',

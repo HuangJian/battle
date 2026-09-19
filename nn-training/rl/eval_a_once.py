@@ -124,6 +124,7 @@ def main() -> int:
     from rl.config import apply_course, load_course, stage_json_for_args
     from rl.eval_local import (
         a_eval_seed_list,
+        eval_census_fields,
         eval_done_keys,
         eval_loot_fields,
         run_local_eval_game,
@@ -240,6 +241,8 @@ def main() -> int:
         cleared = 1 if man.get("cleared") else 0
         # x5⑧③：掉落三列与 dispatch/batch 同源。
         loot = eval_loot_fields(man)
+        # Phase 0 逐敌种画像七列与 dispatch/batch 同源（eval_census_fields）。
+        census = eval_census_fields(man)
         row = {
             "event": "eval",
             "iter": args.iter,
@@ -282,6 +285,13 @@ def main() -> int:
             "puGotShield": man.get("puGotShield"),
             "puGotOther": loot["puGotOther"],
             "elapsedSec": man.get("elapsedSec"),
+            "hitsByKind": census["hitsByKind"],
+            "killsByKind": census["killsByKind"],
+            "exposureByKind": census["exposureByKind"],
+            "firstHitKind": census["firstHitKind"],
+            "firstKillKind": census["firstKillKind"],
+            "killOrder": census["killOrder"],
+            "killerKinds": census["killerKinds"],
         }
         with lock:
             with open(eval_jsonl, "a", encoding="utf-8") as jf:

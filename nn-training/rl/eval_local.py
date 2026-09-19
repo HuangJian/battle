@@ -301,6 +301,33 @@ def eval_loot_fields(manifest: dict | None) -> dict:
     return out
 
 
+#: Phase 0 逐敌种画像七列（T5 分敌种信用；报告**顶层**，见 docs/evalboard-phase0-census.md）。
+#: `export-eval-game.ts` 顶层直出（2026-09-19）；旧报告/未同步节点缺键 = None。
+EVAL_CENSUS_KEYS = (
+    "hitsByKind",
+    "killsByKind",
+    "exposureByKind",
+    "firstHitKind",
+    "firstKillKind",
+    "killOrder",
+    "killerKinds",
+)
+
+
+def eval_census_fields(manifest: dict | None) -> dict:
+    """从 eval 报告 manifest 抽出 Phase 0 七列（缺键 = None，不伪造）。
+
+    只认**顶层**：这七列与本模块 `eval_loot_fields` 的三列形态不同——它们不在
+    `scorable.telemetry` 里（那是 basePressure/powerUps 一类标量），所以没有
+    telemetry 回退可走；节点未同步/旧报告就是没有，交付给 ingest 计入覆盖率
+    豁免清单（`PHASE0_FIELDS`）。
+    """
+    out: dict = {}
+    for k in EVAL_CENSUS_KEYS:
+        out[k] = manifest.get(k) if isinstance(manifest, dict) else None
+    return out
+
+
 def run_local_eval_game(
     bun: str,
     weights_snapshot: str,

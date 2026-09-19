@@ -35,9 +35,11 @@ import dist_common
 from rl.eval_local import (
     EVAL_LOCAL_SLOTS_DEFAULT,
     EVAL_TASK_ATTEMPTS,
+    eval_census_fields,
     eval_loot_fields,
     run_local_eval_game,
 )
+from rl.jsonc import load as jsonc_load
 from rl.log import log
 from rl.queue import _record_agent_meta, bun_version, mm
 from train.loop_util import acquire_lock, cleanup_lock
@@ -45,6 +47,11 @@ from train.loop_util import acquire_lock, cleanup_lock
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATA_ROOT = REPO_ROOT / "dashboard" / "data" / "evalboard"
 LADDER_JSON = REPO_ROOT / "dashboard" / "src" / "evalboard" / "ladder.json"
+#: 判决语料注册表（P2，2026-09-19「中方案」）：课程关卡文件 + 池外 seed 段 + 多 ckpt。
+#: 与 ladder.json 分家：rung 的语义是「arena 阶梯几何 + seg=k%16 推进」，判决语料塞进
+#: rungs 会污染阶梯推进/去重键（详见该文件 _comment）；本文件只声明语料身份。
+CORPORA_JSON = REPO_ROOT / "dashboard" / "src" / "evalboard" / "corpora.json"
+LEVELS_DIR = REPO_ROOT / "nn-training" / "levels"
 
 REGRESSION_EVERY = 3  # 与 runner.ts 同值（双侧镜像，改一侧必须同步另一侧）
 BATCH_STAGE_BASE = 2000
@@ -140,6 +147,101 @@ def plan_units(ladder: dict, ladder_pos: int, k: int) -> list[dict]:
     if k % REGRESSION_EVERY == REGRESSION_EVERY - 1:
         units.append(_unit(rungs[ladder_pos], 0))
     return units
+
+
+def corpora_path() -> Path:
+    """语料注册表路径（`EVALBOARD_CORPORA` 覆盖——与 `EVALBOARD_DATA` 同惯例，冒烟/单测用）。"""
+    return Path(os.environ.get("EVALBOARD_CORPORA", str(CORPORA_JSON)))
+
+
+def load_corpora() -> dict:
+    """读判决语料注册表（dashboard/src/evalboard/corpora.json）。"""
+    path = corpora_path()
+    with open(path, encoding="utf-8") as f:
+        doc = json.load(f)
+    if not isinstance(doc, dict) or not isinstance(doc.get("corpora"), list):
+        raise ValueError(f"corpora.json 形态非法: {path}")
+    return doc
+
+
+def corpus_doc(corpus_id: str) -> dict:
+    """按 id 取语料声明；未知 id → ValueError（响亮失败，不默默跑空语料）。"""
+    for c in load_corpora()["corpora"]:
+        if isinstance(c, dict) and str(c.get("id")) == corpus_id:
+            return c
+    raise ValueError(f"未知判决语料 id: {corpus_id!r}（见 {corpora_path()}）")
+
+
+def plan_verdict_units(corpus: dict, ckpts: list[dict]) -> list[dict]:
+    """判决批语料规划（纯函数，可单测）：一个 unit = 一个 (ckpt × 关卡)。
+
+    - 语料 = 课程关卡文件的 `stages[]` **原样**进 stageJson（与
+      `eval-course-ckpt.ts` 同形：`JSON.stringify(stage)` ⇒ 这里用紧凑 separators
+      对齐字节，否则同关会在 agent 侧变成两个不同缓存键）。
+    - stage id = `BATCH_STAGE_BASE + 关内下标`（2000+i，与课程自定义关同基址）。
+    - seed 段 = `seed0 + 0..games_per_stage-1`；**每个 ckpt 每个关跑同一批种子**
+      ⇒ 跨 ckpt 天然逐局配对（§3.5④ 要求同 seed 集，不许事后求交集）。
+    - unit 自带 `ckpt`/`ckpt_label`：多 ckpt 同批的关键（runner 按 unit 的权重发车，
+      而不是批次级的单一 `rl_path`）。
+    """
+    level = str(corpus.get("level") or "")
+    if not level:
+        raise ValueError("corpus.level 缺失")
+    lv = jsonc_load(str(LEVELS_DIR / f"{level}.jsonc"))
+    stages = lv.get("stages")
+    if not isinstance(stages, list) or not stages:
+        raise ValueError(f"关卡文件无 stages: {level}")
+    seed0 = int(corpus.get("seed0") or 0)
+    gps = int(corpus.get("games_per_stage") or 0)
+    if seed0 <= 0 or gps <= 0:
+        raise ValueError(f"corpus seed0/games_per_stage 非法: {seed0}/{gps}")
+    player = lv.get("player") or {}
+    lives = int(player.get("lives") or 3)
+    plevel = int(player.get("level") or 0)
+    difficulty = str(lv.get("difficulty") or "hard")
+    max_ticks = int(lv.get("max_ticks") or 36000)
+    seeds = [seed0 + i for i in range(gps)]
+    units: list[dict] = []
+    for ci, ck in enumerate(ckpts):
+        path = str((ck or {}).get("path") or "")
+        if not path:
+            raise ValueError("ckpts[].path 缺失")
+        label = str((ck or {}).get("label") or path or f"ckpt{ci}")
+        for si, st in enumerate(stages):
+            sj = json.dumps(st, separators=(",", ":"), ensure_ascii=False)
+            units.append(
+                {
+                    "unit_idx": len(units),
+                    "rung": f"{corpus.get('id')}#{(st or {}).get('name') or si}",
+                    "lives": lives,
+                    "level": plevel,
+                    "difficulty": difficulty,
+                    "maxTicks": max_ticks,
+                    # 与 runner.ts stageJsonHash 同式（agent resultCache 键分量）。
+                    "mapHash": hashlib.sha256(sj.encode()).hexdigest()[:16],
+                    "stageJson": sj,
+                    "stageJsonHash": hashlib.sha256(sj.encode()).hexdigest()[:16],
+                    "stageId": BATCH_STAGE_BASE + si,
+                    "seed0": seed0,
+                    "seeds": seeds,
+                    "ckpt": path,
+                    "ckpt_label": label,
+                }
+            )
+    return units
+
+
+def units_for_batch(batch: dict) -> list[dict]:
+    """批 → 展开的 unit 列表（ladder 批走 ladder.json；verdict 批走语料注册表）。
+
+    `maybe_dispatch_batch` / `kick-once.py` 共用同一份展开，避免判决批只在训练
+    主循环里能用、一次性 kick 却跑不了（两处各写一份必然漂移）。
+    """
+    if str(batch.get("kind") or "ladder") == "verdict":
+        return plan_verdict_units(
+            corpus_doc(str(batch.get("corpus") or "")), list(batch.get("ckpts") or [])
+        )
+    return plan_units(load_ladder(), int(batch.get("ladder_pos", 0) or 0), int(batch.get("k_seq", 0) or 0))
 
 
 _KIND_CHAR = {"basic": "a", "fast": "b", "power": "c", "armor": "d", "player": "a"}
@@ -294,6 +396,16 @@ def mark_requests_done(root: Path, ids: set[str] | list[str]) -> None:
             f.write(json.dumps({"req_id": i, "consumed_ts": ts}) + "\n")
 
 
+def _verdict_key_of(corpus: str, ckpts: list) -> str:
+    """判决批去重键：语料 id + ckpt 标签序列（顺序敏感——同批多 ckpt 的配对语义）。"""
+    labels = [str((c or {}).get("label") or (c or {}).get("path") or "") for c in ckpts]
+    return f"verdict|{corpus}|{','.join(labels)}"
+
+
+def _verdict_key(b: dict) -> str:
+    return _verdict_key_of(str(b.get("corpus") or ""), list(b.get("ckpts") or []))
+
+
 def _same_enq_key(b: dict, course: str, rung_from: str, ckpt: str) -> bool:
     return (
         b.get("course") == course
@@ -392,6 +504,70 @@ def consume_requests(root: Path) -> dict:
                     if r.get(opt) is not None:
                         batch[opt] = r[opt]
                 batches.append(batch)
+                dirty = True
+                consumed.append(key)
+                counts["enqueued"] += 1
+            elif kind == "verdict":
+                # 判决批（P2）：语料 id + ckpts[]（多权重同批同种子配对）。
+                corpus = str(r.get("corpus", ""))
+                raw_ckpts = r.get("ckpts") or []
+                ckpts = [
+                    c
+                    for c in raw_ckpts
+                    if isinstance(c, dict) and str(c.get("path") or "")
+                ]
+                if not corpus or not ckpts:
+                    consumed.append(key)
+                    counts["skipped"] += 1
+                    continue
+                vkey = _verdict_key_of(corpus, ckpts)
+                if any(
+                    b.get("status") == "pending" and _verdict_key(b) == vkey
+                    for b in batches
+                ):
+                    consumed.append(key)
+                    counts["skipped"] += 1
+                    continue
+                req_ts = str(r.get("ts", ""))
+                if req_ts and any(
+                    _verdict_key(b) == vkey and str(b.get("created_ts", "")) >= req_ts
+                    for b in batches
+                ):
+                    consumed.append(key)
+                    counts["skipped"] += 1
+                    continue
+                now = utc_now_iso()
+                stamp = now.replace("-", "").replace(":", "").replace("T", "")
+                stamp = stamp.replace(".", "").replace("Z", "")
+                try:
+                    it = int(r.get("iter", 0))
+                except (TypeError, ValueError):
+                    it = 0
+                pol = str(r.get("policy", "nn"))
+                if pol not in ("nn", "god"):
+                    pol = "nn"
+                vbatch: dict = {
+                    "batch_id": f"b-{stamp}-{random.randrange(0x10000):04x}",
+                    "kind": "verdict",
+                    "corpus": corpus,
+                    "ckpts": ckpts,
+                    "requester": str(r.get("requester", "web")),
+                    "created_ts": now,
+                    "status": "pending",
+                    # units.of 由 plan_verdict_units 展平后回写（= ckpts × 关卡数）。
+                    "units": {"of": 0, "done": []},
+                    "k_seq": 0,
+                    "window_seq": 0,
+                    "trigger": "verdict",
+                    "iter": it,
+                    "node_dist": {},
+                    "elapsed_sec": None,
+                    "policy": pol,
+                }
+                for opt in ("init_sha16", "only_rungs"):
+                    if r.get(opt) is not None:
+                        vbatch[opt] = r[opt]
+                batches.append(vbatch)
                 dirty = True
                 consumed.append(key)
                 counts["enqueued"] += 1
@@ -532,8 +708,12 @@ class BatchEvalRunner:
         deadline = time.time() + window
         god = self.policy == "god"
         if god:
+            # god 局无权语义，但 agent 的 /v1/task **一律**按 (kind, wver) 查缓存桶
+            #（无 god 豁免；weightsOf 是全量 sha 精确查表，2026-09-19 核实）⇒
+            # 必须 POST 占位 `{}` 并把它的 sha 当 wver 传。key16 仍是行身份（显示/去重）。
+            weights_bytes = b"{}"
+            wver = hashlib.sha256(weights_bytes).hexdigest()
             key16 = f"god-{self.engine_epoch[:12]}"
-            weights_bytes = None
         else:
             if not self.rl_path:
                 log("[batcheval] nn unit without weights — skipped")
@@ -611,22 +791,21 @@ class BatchEvalRunner:
             return {"settled": 0, "total": total, "dropped": total}
 
         nodes_ok = []
-        if not god:
-            assert weights_bytes is not None
-            nodes_ok = dist_common.post_weights_parallel(
-                alive,
-                iter_id,
-                wver,
-                weights_bytes,
-                timeout=min(300.0, max(60.0, task_timeout)),
-                kind="rollout",
-                log=log,
-            )
-            if not nodes_ok and local_weights is None:
-                log("[batcheval] all weight POSTs failed — unit deferred")
-                return {"settled": 0, "total": total, "dropped": total}
-        else:
-            nodes_ok = alive
+        # god 也 POST：占位 `{}` 的 sha 就是它的 wver（见上）——不 POST 则 /v1/task
+        # 必然 409（此为 C 层 god 批此前「无节点可用」表象的真因）。
+        assert weights_bytes is not None
+        nodes_ok = dist_common.post_weights_parallel(
+            alive,
+            iter_id,
+            wver,
+            weights_bytes,
+            timeout=min(300.0, max(60.0, task_timeout)),
+            kind="rollout",
+            log=log,
+        )
+        if not nodes_ok and local_weights is None:
+            log("[batcheval] all weight POSTs failed — unit deferred")
+            return {"settled": 0, "total": total, "dropped": total}
         if not nodes_ok and (local_weights is None or local_slots <= 0):
             log("[batcheval] god unit: no node and no local slot — deferred")
             return {"settled": 0, "total": total, "dropped": total}
@@ -659,6 +838,8 @@ class BatchEvalRunner:
             cleared = 1 if manifest.get("cleared") else 0
             # x5⑧③：掉落三列与 A-eval record() 同源（eval_loot_fields）。
             loot = eval_loot_fields(manifest)
+            # Phase 0 逐敌种画像七列与 A-eval 同源（eval_census_fields）。
+            census = eval_census_fields(manifest)
             row = {
                 "event": "eval",
                 "iter": self.batch.get("iter", 0),
@@ -699,6 +880,13 @@ class BatchEvalRunner:
                 "puGotShield": manifest.get("puGotShield"),
                 "puGotOther": loot["puGotOther"],
                 "elapsedSec": manifest.get("elapsedSec"),
+                "hitsByKind": census["hitsByKind"],
+                "killsByKind": census["killsByKind"],
+                "exposureByKind": census["exposureByKind"],
+                "firstHitKind": census["firstHitKind"],
+                "firstKillKind": census["firstKillKind"],
+                "killOrder": census["killOrder"],
+                "killerKinds": census["killerKinds"],
                 # B 层归属（ingest → EvalStore 直读）
                 "batch_id": self.batch.get("batch_id"),
                 "batch_unit": {"idx": self.unit_idx, "of": self.unit_of},
@@ -742,7 +930,9 @@ class BatchEvalRunner:
                     max_ticks=int(unit["maxTicks"]),
                     difficulty=str(unit["difficulty"]),
                     timeout_sec=task_timeout,
-                    wver=key16,
+                    # 全量 wver：agent 按完整 sha 存桶；且本局 manifest.wver 就是它
+                    #（validate 用同一个值对账）。key16 只作行字段。
+                    wver=wver,
                     stage_json=str(unit["stageJson"]),
                     lives_override=int(unit["lives"]),
                     player_level=int(unit["level"]),
@@ -753,7 +943,8 @@ class BatchEvalRunner:
                     nd["url"],
                     nd["key"],
                     iter_id=iter_id,
-                    wver=key16,
+                    # 全量 wver（agent 桶按完整 sha 存；key16 会 409 —— 2026-09-19 实测）。
+                    wver=wver,
                     stage=task[0],
                     seed=task[1],
                     max_ticks=int(unit["maxTicks"]),
@@ -765,7 +956,7 @@ class BatchEvalRunner:
                     player_level=int(unit["level"]),
                     policy=self.policy,
                 )
-            why = dist_common.validate_eval_result(m, key16)
+            why = dist_common.validate_eval_result(m, wver)
             if why:
                 raise dist_common.DistError(0, why)
             return m
@@ -927,21 +1118,18 @@ def maybe_dispatch_batch(
     batch = claim_pending(root)
     if batch is None:
         return None
+    # 判决批（P2）：语料来自注册表，unit 自带 ckpt ⇒ 不需要 rl_path，也不吃 mode
+    # 分歧（显式判决与训练模式无关：这一局的权重就是 unit 的 ckpt）。
+    verdict = str(batch.get("kind") or "ladder") == "verdict"
     policy = str(batch.get("policy", "nn"))
-    if policy == "nn" and getattr(args, "mode", "per-tick") != "per-tick":
+    if not verdict and policy == "nn" and getattr(args, "mode", "per-tick") != "per-tick":
         log(
             f"[batcheval] batch {batch.get('batch_id')}: nn unit 不适用于 mode={args.mode} — 退回队列"
         )
         _requeue(root, batch)
         return None
     try:
-        ladder = load_ladder()
-    except Exception as e:
-        log(f"[batcheval] ladder.json 不可用 ({e}) — 退回队列")
-        _requeue(root, batch)
-        return None
-    try:
-        units = plan_units(ladder, int(batch.get("ladder_pos", 0)), int(batch.get("k_seq", 0)))
+        units = units_for_batch(batch)
     except Exception as e:
         log(f"[batcheval] plan 失败 ({e}) — 退回队列")
         _requeue(root, batch)
@@ -951,7 +1139,9 @@ def maybe_dispatch_batch(
     )
     if nxt is None or unit is None:
         return None
-    if policy == "nn" and not rl_path:
+    # 判决批的权重在 unit 上（多 ckpt 同批）；ladder 批回落批次级 rl_path。
+    unit_weights = str(unit.get("ckpt") or "") or rl_path
+    if policy == "nn" and not unit_weights:
         log("[batcheval] nn unit without weights — 退回队列")
         _requeue(root, batch)
         return None
@@ -961,7 +1151,7 @@ def maybe_dispatch_batch(
     _persist_of(root, str(batch.get("batch_id")), len(units))
     return dispatch_batch_bg(
         bun,
-        rl_path,
+        unit_weights,
         eval_log,
         args,
         cfg,

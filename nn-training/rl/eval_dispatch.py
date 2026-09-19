@@ -26,6 +26,7 @@ from rl.eval_local import (
     EVAL_LOCAL_SLOTS_DEFAULT,
     EVAL_TASK_ATTEMPTS,
     a_eval_seed_list,
+    eval_census_fields,
     eval_done_keys,
     eval_loot_fields,
     hold_for_local,
@@ -338,6 +339,8 @@ class EvalDispatcher:
                 cleared = 1 if manifest.get("cleared") else 0
                 # x5⑧③：掉落三列（供给/构成可从 eval 直读，不再用 spawn 分项反推）。
                 loot = eval_loot_fields(manifest)
+                # Phase 0 逐敌种画像七列（T5 分敌种信用；旧报告缺键 = None）。
+                census = eval_census_fields(manifest)
                 row = {
                     "event": "eval",
                     "iter": it,
@@ -383,6 +386,13 @@ class EvalDispatcher:
                     "puGotOther": loot["puGotOther"],
                     "elapsedSec": manifest.get("elapsedSec"),
                     "wallSec": wall_sec,
+                    "hitsByKind": census["hitsByKind"],
+                    "killsByKind": census["killsByKind"],
+                    "exposureByKind": census["exposureByKind"],
+                    "firstHitKind": census["firstHitKind"],
+                    "firstKillKind": census["firstKillKind"],
+                    "killOrder": census["killOrder"],
+                    "killerKinds": census["killerKinds"],
                 }
                 with jsonl_lock:
                     with open(eval_jsonl, "a", encoding="utf-8") as jf:
