@@ -43,6 +43,7 @@ from rl.loop_round import (
     RoundOutcome,
     StepResult,
     finish,
+    resolve_collect_mode,
 )
 from rl.loop_steps import (
     BundleExportedError,
@@ -220,18 +221,30 @@ class RoundSteps:
         # yield：rollout 抢占集群 —— 关 evalboard 窗，在途 B/C 局停派新 seed。
         self._evalboard_yield()
         self._node_rollout_sec = None
-        # M3（plan/remote-wire-remediation §5.2）：整轮上云开关。node 时本机
-        # **完全不采样**（也不预采/不补波），改由 _remote_iter 发 kind=iter job，
-        # 节点自己跑 rollout + PPO。eval 不动（仍在本地 hub 跑，§5.4）。
-        self._node_rollout = _rollout_source(args) == "node"
-        ctx.node_rollout = self._node_rollout
-        ctx.collect_mode = COLLECT_NODE if self._node_rollout else COLLECT_LOCAL
         # 本轮是否派发干净评估：**求值一次**并共享（原轮体在 rollout 调用点内联求值，
         # 同一 it 上是纯函数，故拆出来不改变行为）。
         ctx.eval_on_round = self._eval_on_round(it)
         # 半离线整段（kind=run；2026-09-17）：一次领走 it..end_it，节点自主跑完，
-        # hub 期间失联也不影响（产物目录是交付面）。整段优先于逐轮上云。
+        # hub 期间失联也不影响（产物目录是交付面）。
+        #
+        # ★ 采集模式由 `resolve_collect_mode` **一处**裁决（段长 > 整轮上云 > 本机采样，
+        #   2026-09-19 离线训练模式）：R2c-3 拆 13 步时这里只算了 `ctx.seg` 而没翻
+        #   `collect_mode`，于是 kind=run 分支不可达（表面正常：本机照常采样、账本照常
+        #   记账，只是云机永远领不到整段）。段长与来源的先后也必须在同一处对齐。
+        src = _rollout_source(args)
         ctx.seg = _run_segment_iters(args)
+        if src == "run" and not ctx.seg:
+            raise SystemExit(
+                "[run_rl] --rollout-src run（整段上云）需要说明段长：--run-iters >0（N 轮）"
+                "或 <0（到课程末尾）——也可以写进 rl-config：courses.<课>.run_iters。"
+                "缺段长时**不**替你退回本机采样（那会让「云机在跑」与「本机在跑」看起来一样）"
+            )
+        # M3/离线：node 或整段时本机**完全不采样**（也不预采/不补波），分别由
+        # _remote_iter（kind=iter）与 _remote_run_segment（kind=run）派发。
+        # eval 不动（仍在本地 hub 跑，§5.4）。
+        ctx.collect_mode = resolve_collect_mode(src, ctx.seg)
+        self._node_rollout = ctx.collect_mode != COLLECT_LOCAL
+        ctx.node_rollout = self._node_rollout
         if getattr(args, "export_bundle", ""):
             # 全离线导出：本轮**不训练**——把 it..it+n-1 打成可上传云机的任务包后退出。
             if ctx.seg == 0:

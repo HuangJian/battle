@@ -313,6 +313,9 @@ export function App({ initial }: AppProps) {
     if (opts?.cfEdgeIp) body.cfEdgeIp = opts.cfEdgeIp
     if (opts?.slim) body.slim = opts.slim
     if (opts?.rolloutSrc) body.rolloutSrc = opts.rolloutSrc
+    // 训练模式（2026-09-19）：在线/离线。离线时服务端会忽略上面的 rolloutSrc
+    // （`run` 绝不进全局 rl.rollout_src），只写该课的课程级键。
+    if (opts?.trainMode) body.trainMode = opts.trainMode
     await doAction('preset', body)
   }
 

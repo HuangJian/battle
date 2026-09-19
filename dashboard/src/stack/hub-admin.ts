@@ -18,7 +18,13 @@ import { pidAlive } from '../core/net'
 import { loadRegistry } from '../core/registry'
 import { sharedHubUrl } from '../core/slots'
 import type { RlConfig } from '../core/types'
-import { type HubQueueView, type PushWorkerView, parseHubQueue } from '../web/view'
+import {
+  type HubQueueView,
+  type PushWorkerView,
+  type OfflineRunView,
+  parseHubQueue,
+  parseOfflineProgress,
+} from '../web/view'
 
 /** GET 一个 hub 管理端点 → 解析后的 JSON；网络失败/非 2xx/坏 JSON → null。 */
 async function hubGet(url: string, token: string, timeoutMs: number): Promise<unknown | null> {
@@ -75,6 +81,14 @@ export async function liveHub(
     if (queue) return { url: base, queue }
   }
   return null
+}
+
+/** `/admin/offline` 的逐课程离线段进度；hub 不可达 / 该端点不存在（旧版本）→ null。 */
+export async function hubOfflineProgress(
+  url: string,
+  token: string,
+): Promise<Record<string, Record<string, OfflineRunView>> | null> {
+  return parseOfflineProgress(await hubGet(`${url}/admin/offline`, token, HUB_PROBE_TIMEOUT_MS))
 }
 
 /** `/admin/push-workers` 的登记表归一化：id → hub 侧探活结论。

@@ -92,8 +92,10 @@ from remote.protocol import (
     HUB_SCOPE_HEADER,
     OFFLINE_ARTIFACT_BODY_MAX,
     OFFLINE_ARTIFACT_PATH,
+    OFFLINE_CAP_HEADER,
     OFFLINE_RESULT_BODY_MAX,
     OFFLINE_RESULT_PATH,
+    OFFLINE_TASK_PACK_PATH,
     PAYLOAD_NAME,
     PUSH_POLL_SEC,
     PUSH_TIMEOUT_SEC,
@@ -108,6 +110,7 @@ from remote.protocol import (
     decode_opt_tar,
     decode_weights_json,
     find_payload,
+    has_offline_capability,
     may_avoid_stale_holder,
     parse_course_arg,
     parse_hub_scope,
@@ -1342,7 +1345,9 @@ class _HubQueue(_AuthGuard):
         return n
 
     # ---- 派发（跨课程轮转 + 超时换 worker） ----
-    def claim_next(self, worker_id: str = "", race: bool = False) -> tuple[str, str, str] | None:
+    def claim_next(
+        self, worker_id: str = "", race: bool = False, offline_ok: bool = False
+    ) -> tuple[str, str, str] | None:
         """取下一份该派发的 job → (course, job_id, lease_token)；无 → None。
 
         轮转从**上次派发的下一门**开始（`rotation_order`）：每课程一条 FIFO，若每次都
@@ -1351,27 +1356,103 @@ class _HubQueue(_AuthGuard):
         避让（用户口径「超时回落队首并改为推送其它 worker」）：候选 job 的上一份租约是
         **过期死掉的**且持有人就是本次请求者时，本次跳过它（`avoid_expired_holder`）——
         但机群只剩一个活跃 worker 时不避让（否则它自己超时过的 job 谁都领不到 = 停摆）。
-        离线课程直接跳过（它只收回传，不实时派发）。
+
+        离线课（2026-09-19 用户口径「也支持带特别标识的云端 worker 在线领取」）：
+        只有 `offline_ok=True`（worker 自报能跑完整段）的请求才能领——它不实时派发，
+        但也**不是**谁都领不到的坟墓。带标 worker 仍可领在线课（课程与 worker 正交）。
         """
         # 派发前扫一次（有最小间隔闸）：新课程/新 job 目录出现后，**下一次轮询**就能被领到，
         # 不必等后台节拍——否则新开的课在最坏情况下要等一个扫描周期才有人来领活。
         self.discover()
         active_workers = self.active_worker_count()
         for course in rotation_order(self._order, self._cursor):
-            if self.mode_of(course) == COURSE_MODE_OFFLINE:
+            offline = self.mode_of(course) == COURSE_MODE_OFFLINE
+            if offline and not offline_ok:
                 continue
             st = self._stores[course]
-            for jid in st.claimable_job_ids(race=race):
+            # 离线课**永不竞速**：竞速广播是把同一份 job 交给多个 worker 抢答（先落账者胜），
+            # 而离线课的 job 是**整段**——广播等于让每台带标 worker 各跑一遍完整课程。
+            # 而且离线课不算进竞速判据的分母，只剩离线课时 `race_active()` 反而为真。
+            use_race = race and not offline
+            for jid in st.claimable_job_ids(race=use_race):
                 # 只给「允不允许避让」的闸；身份比对在 store 里（它才知道租约回收后的
                 # stale 记录，在这里判会踩时序——见 `may_avoid_stale_holder` docstring）。
                 avoid = may_avoid_stale_holder(worker_id, active_workers)
-                tok = st.claim(jid, race=race, worker_id=worker_id, avoid_stale_holder=avoid)
+                tok = st.claim(
+                    jid, race=use_race, worker_id=worker_id, avoid_stale_holder=avoid
+                )
                 if tok is None:
                     continue  # 活租约在持 / 本次该避让 / 并发领取竞负
                 with self._lock:
                     self._cursor = course
                 return course, jid, tok
         return None
+
+    def traj_root(self) -> Path | None:
+        """课程根目录（`<traj>/<课>/{remote-jobs,training_log.jsonl}` 的 `<traj>`）。
+
+        发现模式 = `--traj-root`；单课程模式由 `--job-root`（= `<traj>/<课>/remote-jobs`）
+        回推两级。推不出来（测试里的裸 job_root）⇒ None，调用方据此拒服务而不是猜路径。
+        """
+        if self._discover_root is not None:
+            return self._discover_root
+        if self._solo is not None:
+            return self._solo.job_root.parent.parent
+        return None
+
+    def task_pack_path(self, course: str) -> Path:
+        """整段任务包落点：`<traj>/<课>/task-<课>.zip`（控制台导出的就是它）。
+
+        课程名进的是磁盘路径 ⇒ 在这里断掉分隔符/`..`（与 `parse_course_arg` 同一条边界）。
+        hub 不知道 traj 根 ⇒ ProtocolError（响亮，不猜）。
+        """
+        root = self.traj_root()
+        if root is None:
+            raise ProtocolError("hub 不知道课程根目录（--traj-root / --discover 未给）")
+        name = (course or "").strip()
+        if not name or name in (".", "..") or any(ch in name for ch in ("/", "\\", "\x00")):
+            raise ProtocolError(f"课程名非法: {course!r}（不得含路径分隔符/空名）")
+        if ".." in name:
+            raise ProtocolError(f"课程名非法: {course!r}（不得含 ..）")
+        return root / name / f"task-{name}.zip"
+
+    def offline_progress(self) -> dict[str, dict]:
+        """每课程已收到的离线进度（补传产物）：`{课: {run_id: {its: [...], count, last_mtime}}}`。
+
+        为什么单开一个读面：段内进度**只能**从产物目录看出来（hub 不跑那几轮，账本里没有
+        它们的行），而控制台要在长段期间看到进度曲线——「它在跑」与「它挂了」的唯一区别
+        就是最近一轮的时间戳。只读列目录，不解析产物（解析权重不在观测面做）。
+        """
+        out: dict[str, dict] = {}
+        for course in self._order:
+            runs: dict[str, dict] = {}
+            base = self._stores[course].job_root / _JobStore.OFFLINE_DIR
+            try:
+                run_dirs = sorted(p for p in base.iterdir() if p.is_dir())
+            except OSError:
+                run_dirs = []
+            for run_dir in run_dirs:
+                its: list[int] = []
+                last = 0.0
+                try:
+                    for it_dir in run_dir.iterdir():
+                        if not it_dir.is_dir() or not it_dir.name.startswith("it-"):
+                            continue
+                        try:
+                            its.append(int(it_dir.name[3:]))
+                            last = max(last, it_dir.stat().st_mtime)
+                        except (ValueError, OSError):
+                            continue
+                except OSError:
+                    continue
+                runs[run_dir.name] = {
+                    "its": sorted(its),
+                    "count": len(its),
+                    "last_mtime": last,
+                }
+            if runs:
+                out[course] = runs
+        return out
 
     # ---- 观测面 ----
     def queue_state(self) -> dict:
@@ -1447,6 +1528,7 @@ class _HubQueue(_AuthGuard):
         worker_id: str = "",
         avoid_stale_holder: bool = False,
     ) -> str | None:
+        """（单份领取；多课程的挑选入口是 `claim_next`——离线课的能力闸在那边。）"""
         st = self._store_of(job_id)
         if st is None:
             return None
@@ -1708,11 +1790,18 @@ class HubHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _bytes(
-        self, data: bytes, status: int = 200, ctype: str = "application/octet-stream"
+        self,
+        data: bytes,
+        status: int = 200,
+        ctype: str = "application/octet-stream",
+        filename: str = "",
     ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
+        if filename:
+            # 习惯文件名（下载时手一按就是这个名字，不必再改名）
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         self.end_headers()
         self.wfile.write(data)
 
@@ -1756,6 +1845,10 @@ class HubHandler(BaseHTTPRequestHandler):
                 self._admin_race(set_mode=False)
             elif path == "/admin/net-probe":
                 self._admin_net_probe()
+            elif path == "/admin/offline":
+                self._admin_offline()
+            elif path == OFFLINE_TASK_PACK_PATH:
+                self._get_task_pack()
             elif path.startswith("/jobs/") and path.endswith("/payload"):
                 self._get_payload()
             elif path.startswith("/jobs/") and path.endswith("/ts_code"):
@@ -1841,11 +1934,22 @@ class HubHandler(BaseHTTPRequestHandler):
         # 多课程（2026-09-18）：挑活的是**队列**（`claim_next`）——每课程一条 FIFO、
         # 跨课程轮转、离线课跳过、超时过的课避开原持有人。单课程时退化成
         # 「按发布序取第一份可领的」，与改造前逐字节等价。
-        picked = self.hub.claim_next(worker_id=worker_id, race=race)
+        # 离线课的能力闸（2026-09-19）：标识 = worker 自报「我能自己跑完整段」。
+        # 缺头 = 无能力 ⇒ 离线课一律不给（不实时派发不是“谁都领得到”）。
+        offline_ok = has_offline_capability(self.headers.get(OFFLINE_CAP_HEADER, ""))
+        picked = self.hub.claim_next(worker_id=worker_id, race=race, offline_ok=offline_ok)
         if picked is None:
             self._json({"job_id": None, "halt": self.hub.all_halted()})  # 无可领取 job
             return
         course, jid, lease_token = picked
+        if self.hub.mode_of(course) == COURSE_MODE_OFFLINE:
+            # 发光的一行：离线课（整段）落到带标 worker 手上——这是「离线课真的在跑」
+            # 在 hub 侧的唯一痕迹（它不进竞速判据，也不会被推送）。
+            print(
+                f"[{time.strftime('%H:%M:%S')}] [hub-server] 离线课整段交领：course={course or '-'} "
+                f"job={jid} worker={worker_id or '?'}（带 `{OFFLINE_CAP_HEADER}` 能力头）",
+                flush=True,
+            )
         halt = self.hub.halt_of(course)
         if race:
             print(
@@ -1923,6 +2027,62 @@ class HubHandler(BaseHTTPRequestHandler):
         if not self._auth_ok():
             return
         self._json(self.hub.queue_state(), 200)
+
+    def _admin_offline(self) -> None:
+        """`GET /admin/offline`：已收到的离线段进度（只读，逐课程 × 逐 run）。
+
+        段内进度**只能**从补传产物看出来（hub 不跑那几轮，课程账本里没有它们的行），
+        而控制台要在长段期间回答「它在跑还是挂了」——唯一能回答的就是最近一轮的时间戳。
+        """
+        if not self._auth_ok():
+            return
+        self._json({"progress": self.hub.offline_progress()}, 200)
+
+    def _get_task_pack(self) -> None:
+        """`GET /offline/task-pack?course=<课>`：把整段任务包（`task-<课>.zip`）递给云机。
+
+        为什么由 hub 发：云机 notebook 的第一条路径就是「先连 hub，能通就从 hub 取包」
+        （用户口径 2026-09-19）；包本来就是本机产物（`tmp/<课>/task-<课>.zip`，控制台
+        导出写的就是它），hub 的 `<traj-root>` 正是 `tmp` ⇒ 本端点只是把**同一个文件**
+        按 HTTP 递出去，不造第二份真相。
+
+        三种拒因各说各话（非法课程名 400 / 没这个包 404 / 未鉴权 401）：人在云机上排障时，
+        「去控制台点导出」与「课程名写错了」是两条完全不同的下一步。
+        """
+        if not self._auth_ok():
+            return
+        course = self._query_course()
+        try:
+            p = self.hub.task_pack_path(course)
+        except ProtocolError as e:
+            self._json({"error": str(e), "course": course}, 400)
+            return
+        if not p.exists():
+            known = self.hub.courses()
+            self._json(
+                {
+                    "error": (
+                        f"没有任务包 {p.name}——先在控制台导出（导出要求训练已停），"
+                        "或检查课程名"
+                    ),
+                    "course": course,
+                    "path": str(p),
+                    "known_courses": known,
+                },
+                404,
+            )
+            return
+        try:
+            data = p.read_bytes()
+        except OSError as e:
+            self._json({"error": f"读任务包失败: {e}", "course": course}, 500)
+            return
+        print(
+            f"[{time.strftime('%H:%M:%S')}] [hub-server] task-pack -> {p.name} "
+            f"({len(data)} bytes)",
+            flush=True,
+        )
+        self._bytes(data, 200, "application/zip", filename=p.name)
 
     def _admin_courses(self, set_mode: bool = False) -> None:
         """`GET /admin/courses` 看课程表；`POST ?course=X&mode=online|offline` 热切。

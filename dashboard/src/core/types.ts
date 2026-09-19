@@ -37,6 +37,10 @@ export interface CourseConf {
   /** 本课 rollout 执行位置覆盖（M3；缺省 = 用 rl.rollout_src，再缺省 local）。字符串域，
    *  与 python `--rollout-src` 的 choices 同字面量（`auto` = 按配置解析）。 */
   rollout_src?: RolloutSrcMode
+  /** 半离线段长覆盖（本课跑几轮一次上交；`-1` = 直到课程末尾，`0` = 关）。
+   *  与 `rollout_src:'run'` 是**一对**：离线训练模式（2026-09-19）同时写这两个键，
+   *  只给 `run` 不给段长在训练侧是配置错误（`_run_segment_iters` 回 0 ⇒ 响亮拒跑）。 */
+  run_iters?: number
   // ── 共享 trainer 的**机器侧旋钮**（2026-09-19 / R3-5）──────────────────────────
   //  一个进程服务所有课程 ⇒ 「这门课怎么跑」不能是那个进程的命令行参数（只有一份）。
   //  住这里而**不能**住 `curricula/*.jsonc`：课程文件字节 = course_fp（语料血缘 / 熔断口径
@@ -72,7 +76,17 @@ export type SlimMode = 'on' | 'off'
  *  `auto` = 不表态，交给训练侧按 `courses.<课>.rollout_src` > `rl.rollout_src` 解析
  *  （缺省仍是 local）。与 python `choices=("auto","local","node")` 同域——
  *  与 `SlimMode` 不同，这里**不需要**域换算（两侧都是字符串）。 */
-export type RolloutSrcMode = 'local' | 'node' | 'auto'
+export type RolloutSrcMode = 'local' | 'node' | 'run' | 'auto'
+
+/** 启动训练时的**训练模式**（2026-09-19 用户口径：启动时需指定，缺省在线）。
+ *
+ *  · `online`  = 现状：本机跑 rollout，每个 it 向云端 worker 传语料；hub 实时派发。
+ *  · `offline` = 本机不跑训练：整段上云（`courses.<课>.{rollout_src:'run', run_iters:-1}`）
+ *    + hub 该课置 offline（只有带标 worker 能领），或在控制台导出任务包人工搬上云。
+ *
+ *  它不是「一个旋钮的显示名」：域换算（模式 → 课程级键）住在 `stack/specs.ts::trainModeKnobs`，
+ *  是**唯一**推导点（在线要显式清掉 run 的两把键，否则切回在线仍是整段上云）。 */
+export type TrainMode = 'online' | 'offline'
 
 /** 竞速广播模式（hub-server `--race`，2026-09-17）。
  *

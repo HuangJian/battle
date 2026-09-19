@@ -10,7 +10,9 @@
  * 现行口径（2026-09-19 用户指令「启动课程训练时，trainloop 不需要指定 pull/push 模式」）：
  *   pull 由远端 worker 自己来领（本机只需 hub 在线 + 可选隧道），push 只看系统里**是否登记了**
  *   push worker 节点（配置入口 = worker 登记面板，数据住 rl-config.json）。⇒ 启动链路里
- *   **不再有 mode / endpoint / authKey**，只剩隧道/瘦身/rollout 三个随启动回写的 rl-config 选项。
+ *   **不再有 mode / endpoint / authKey**，只剩隧道/瘦身/rollout 三个随启动回写的 rl-config 选项
+ *   + **训练模式**（在线/离线，2026-09-19；那是另一个域——`trainMode` 决定本机跑不跑，
+ *   与已退役的 pull/push「传输模式」无关）。
  *
  * 本文件守两条：**选项不得在路上丢掉**（③ 那类假成功）与 **模式不得复活**。
  * 为什么 TS/tsc 抓不到丢参：`(opts) => void` 对 `(opts?) => void` 合法，少形参也合法，
@@ -40,7 +42,7 @@ describe('app.tsx → TrainLaunchModal 启动选项透传', () => {
   it('handleLaunch 把隧道/瘦身/rollout 选项写进 POST body（漏了 = 点了不生效的假成功）', () => {
     const src = squash(APP)
     expect(src).toMatch(/handleLaunch\s*=\s*async\s*\(\s*opts\?/)
-    for (const key of ['cfProtocol', 'cfEdgeIp', 'slim', 'rolloutSrc']) {
+    for (const key of ['cfProtocol', 'cfEdgeIp', 'slim', 'rolloutSrc', 'trainMode']) {
       expect(src).toContain(`body.${key} = opts.${key}`)
     }
     // T7：降级开关是严格布尔（缺省 false），不走「未选 = 不传」那条路
@@ -55,16 +57,18 @@ describe('app.tsx → TrainLaunchModal 启动选项透传', () => {
     expect(src).not.toContain('body.mode')
   })
 
-  it('弹窗侧：产出单参数 opts（隧道 + 降级），不再有模式与凭据', () => {
+  it('弹窗侧：产出单参数 opts（隧道 + 降级 + 训练模式），不再有 pull/push 凭据', () => {
     const modal = squash(MODAL)
-    // 唯一的上抛形态：opts 里带 remoteDegrade + 隧道选项
+    // 唯一的上抛形态：opts 里带 remoteDegrade + 隧道选项 + 训练模式
     expect(modal).toMatch(
-      /onLaunch\(\{\s*remoteDegrade,\s*cfProtocol,\s*cfEdgeIp,\s*slim,\s*rolloutSrc\s*\}\)/,
+      /onLaunch\(\{\s*remoteDegrade,\s*cfProtocol,\s*cfEdgeIp,\s*slim,\s*rolloutSrc,\s*trainMode\s*\}\)/,
     )
     expect(modal).not.toContain('PushCredentials')
     expect(modal).not.toContain('pushEndpoint')
     expect(modal).not.toContain('pushAuthKey')
-    expect(modal).not.toContain('TC_TRAIN_MODE')
+    // 已退役的 pull/push 模式键（`tc.train.mode`）不得复活；`TC_TRAIN_MODE` 是
+    // 在线/离线那个**新**域，不是同一回事。
+    expect(modal).not.toContain('tc.train.mode')
     // M1/M2/M3：三个选项控件确实在弹窗上，且各自显示「当前生效值」
     expect(modal).toContain('cfProtocol')
     expect(modal).toContain('cfEdgeIp')
@@ -87,6 +91,6 @@ describe('route.ts preset 分支：只认隧道/瘦身/rollout 三个可选键',
     expect(presetCase).not.toContain('pushAuthKey')
     // 白名单校验仍在（非法值 400，不静默落库）
     expect(presetCase).toContain("['http2', 'quic', 'auto']")
-    expect(presetCase).toContain("['auto', 'local', 'node']")
+    expect(presetCase).toContain("['auto', 'local', 'node', 'run']")
   })
 })

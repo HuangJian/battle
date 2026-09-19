@@ -15,10 +15,16 @@ import { REPO_ROOT } from '../../core/paths'
 import { pidAlive } from '../../core/net'
 import { entryForCourse, loadRegistry, scopeOf } from '../../core/registry'
 import type { RlConfig } from '../../core/types'
-import { hubPushWorkers, liveHub, withWorkerProbes } from '../../stack/hub-admin'
+import {
+  hubOfflineProgress,
+  hubPushWorkers,
+  liveHub,
+  withWorkerProbes,
+} from '../../stack/hub-admin'
 import { hubPushEnabled } from '../../stack/push-config'
 import {
   type HubQueueView,
+  type OfflineRunView,
   type ParallelOverviewView,
   type PushWorkerView,
   type PushWorkerRegistryView,
@@ -58,6 +64,8 @@ interface HubAdmin {
   queue: HubQueueView | null
   /** hub 派发器登记表：worker id → 探活结论；null = hub 未启用 push 派发 / 不可达。 */
   pushMap: Map<string, boolean> | null
+  /** 逐课程离线段进度（`/admin/offline`）；null = hub 不可达 / 端点不存在（旧版 hub）。 */
+  offline: Record<string, Record<string, OfflineRunView>> | null
   /** 已直探过的 push worker 行（**探活也在本缓存里**，不在请求路径上）。 */
   workers: PushWorkerView[]
 }
@@ -93,8 +101,18 @@ export async function getHubAdmin(cfg: RlConfig, course: string): Promise<HubAdm
       withWorkerProbes(workerRows(cfg), cfg),
       liveHub(cfg, course),
     ])
-    const pushMap = live ? await hubPushWorkers(live.url, token) : null
-    return { url: live?.url ?? null, queue: live?.queue ?? null, pushMap, workers: probed }
+    // 两个 hub 端点**并行**探（登记表 + 离线进度）：串行会把冷算再拉一个超时窗口，
+    // 而它们互不依赖（同一个 hub 基址，各自独立问答）。
+    const [pushMap, offline] = live
+      ? await Promise.all([hubPushWorkers(live.url, token), hubOfflineProgress(live.url, token)])
+      : [null, null]
+    return {
+      url: live?.url ?? null,
+      queue: live?.queue ?? null,
+      pushMap,
+      offline,
+      workers: probed,
+    }
   })().then(
     (val) => {
       hubCache.set(course, { at: Date.now(), val })
@@ -155,7 +173,14 @@ export async function buildOverview(
     activeWorkers: admin.queue?.activeWorkers ?? 0,
     halt: admin.queue?.halt ?? false,
     recentDispatch: admin.queue?.cursor ?? null,
-    rows: buildCourseRows({ courses: names, training, queue: admin.queue, iters }),
+    offlineProgress: admin.offline,
+    rows: buildCourseRows({
+      courses: names,
+      training,
+      queue: admin.queue,
+      iters,
+      offline: admin.offline,
+    }),
   }
 }
 

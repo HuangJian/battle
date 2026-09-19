@@ -78,6 +78,25 @@ COLLECT_NODE = "node"
 COLLECT_SEGMENT = "segment"
 
 
+def resolve_collect_mode(source: str, seg: int) -> str:
+    """采集模式的**唯一**裁决点：段长 > 整轮上云 > 本机采样。
+
+    为什么单拎出来：这三条支路决定「本机到底采不采样」，而派发点（`step_rollout`）与
+    裁决点（`step_course_iter`）在两个文件里。2026-09-17 的半离线整段写着 `ctx.seg` 却
+    没人翻 `collect_mode`，于是 kind=run 分支**永远不可达**（且表面看一切正常：本机照常
+    采样、账本照常记账，只是云机永远领不到整段）。把裁决收在一个纯函数里，它就能被单测
+    钉住，而不是靠人把两处对齐。
+
+    `source` 取 `rl/loop_steps.py::_rollout_source` 的返回值（auto 已解析过）；`seg` 取
+    `_run_segment_iters`（`>0` = N 轮，`<0` = 到课程末尾）。
+    """
+    if seg:
+        return COLLECT_SEGMENT
+    if source == "node":
+        return COLLECT_NODE
+    return COLLECT_LOCAL
+
+
 @dataclass
 class RemotePpoJob:
     """一次远端 PPO 提交的全部上下文——「发布 / 等结果 / 落位」三相之间**唯一**的载体。

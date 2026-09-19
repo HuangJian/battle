@@ -24,6 +24,7 @@ const overview = (patch: Partial<ParallelOverviewView> = {}): ParallelOverviewVi
   activeWorkers: 3,
   halt: false,
   recentDispatch: 'c4',
+  offlineProgress: null,
   rows: [
     {
       course: 'c4',
@@ -33,6 +34,9 @@ const overview = (patch: Partial<ParallelOverviewView> = {}): ParallelOverviewVi
       hubSeen: true,
       queuePending: 2,
       inflight: 1,
+      offlineRounds: 0,
+      offlineLastIter: null,
+      offlineLastMtime: 0,
     },
     {
       course: 'c5',
@@ -42,6 +46,10 @@ const overview = (patch: Partial<ParallelOverviewView> = {}): ParallelOverviewVi
       hubSeen: true,
       queuePending: 0,
       inflight: 0,
+      // 离线段已在云机上跑了几轮（账本里没有这些行——只看得到这里）
+      offlineRounds: 3,
+      offlineLastIter: 9,
+      offlineLastMtime: Math.floor(Date.now() / 1000) - 60,
     },
     {
       course: 'ghost',
@@ -51,6 +59,9 @@ const overview = (patch: Partial<ParallelOverviewView> = {}): ParallelOverviewVi
       hubSeen: false,
       queuePending: 0,
       inflight: 0,
+      offlineRounds: 0,
+      offlineLastIter: null,
+      offlineLastMtime: 0,
     },
     {
       course: 'old',
@@ -60,6 +71,9 @@ const overview = (patch: Partial<ParallelOverviewView> = {}): ParallelOverviewVi
       hubSeen: true,
       queuePending: 0,
       inflight: 0,
+      offlineRounds: 0,
+      offlineLastIter: null,
+      offlineLastMtime: 0,
     },
   ],
   ...patch,
@@ -170,6 +184,33 @@ describe('CourseOverview（并行课程总览）', () => {
     )
     expect(on).toContain('tc-cov__race')
     expect(on).toContain('tc-cov__halt')
+  })
+
+  it('离线段内进度：只给离线且已有产物的课，超时变醒目（云机挂了 vs 在跑）', async () => {
+    const { CourseOverview } = await import('../src/web/app/panels/CourseOverview')
+    const html = renderToString(
+      h(CourseOverview, { overview: overview(), course: 'c4', onSelectCourse: () => {} }),
+    )
+    expect(html).toContain('tc-cov__seg') // c5：段内 3 轮
+    expect(html).toContain('段内 3 轮')
+    expect((html.match(/tc-cov__seg\b/g) ?? []).length).toBe(1) // 只有 c5 有
+    expect(html).not.toContain('tc-cov__seg--stale') // 1 分钟前 = 在跑
+    // 2 小时没新产物 ⇒ 醒目（离线课唯一的「死」信号）
+    const stale = renderToString(
+      h(CourseOverview, {
+        overview: overview({
+          rows: overview().rows.map((r) =>
+            r.course === 'c5'
+              ? { ...r, offlineLastMtime: Math.floor(Date.now() / 1000) - 7200 }
+              : r,
+          ),
+        }),
+        course: 'c4',
+        onSelectCourse: () => {},
+      }),
+    )
+    expect(stale).toContain('tc-cov__seg--stale')
+    expect(stale).toContain('可能挂了')
   })
 
   it('无总览 / 无行 → 不渲染（没东西可说时不留空壳）', async () => {

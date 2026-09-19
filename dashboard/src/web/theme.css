@@ -2321,6 +2321,20 @@ a.tc-preset {
   color: var(--muted);
   font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
 }
+/* 离线段内进度：账本里**没有**这些轮（云机自己跑的），故与 iter 列视觉上分开 */
+.tc-cov__seg {
+  padding: 0 7px;
+  border-radius: 999px;
+  font-weight: 700;
+  font-size: var(--fs-1);
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+/* 超过 1h 没新产物 ⇒ 云机可能挂了（离线课唯一的「死」信号） */
+.tc-cov__seg--stale {
+  background: var(--yellow-bg);
+  color: var(--yellow);
+}
 
 /* ────────── 训练调度器（单例，每课队列 + 在等什么；R2c-3） ────────── */
 .tc-loopq {

@@ -796,6 +796,29 @@ OFFLINE_ARTIFACT_BODY_MAX = 8 * 1024 * 1024
 OFFLINE_RESULT_BODY_MAX = 256 * 1024
 #: 产物目录里补传记账文件名（= 已投递项；重启续投靠它，不靠内存）。
 OFFLINE_DELIVERED_NAME = "delivered.json"
+#: 任务包端点（hub → 云机）：把本机的整段任务包 `task-<课>.zip` 递出去。
+#: 云机 notebook 的第一条路径就是「先连 hub，能通就从 hub 取包」（用户口径 2026-09-19）。
+OFFLINE_TASK_PACK_PATH = "/offline/task-pack"
+
+# ---- worker 能力自报（离线训练模式，2026-09-19）----
+# 离线课（`kind="run"` 整段）与在线课（逐轮）对 worker 的要求不同：前者要求节点
+# **自己跑完整段**（rollout + PPO 全在节点、计划随 job 走）。所以「谁能领离线课」不能靠
+# 猜，要由 worker 自己声明能力。用户口径：离线模式「也支持带特别标识的云端 worker 在线
+# 领取」——标识语义 = 能力，不是课程绑定（课程与 worker 正交：带标 worker 仍可领在线课）。
+#: 能力头（`/jobs/next`）：`X-Battle-Offline: 1` = 本会话能自主跑完整段。
+OFFLINE_CAP_HEADER = "X-Battle-Offline"
+#: 头的规范值（写 1；解析放宽到常见真值）。
+OFFLINE_CAP_VALUE = "1"
+
+
+def has_offline_capability(raw: object) -> bool:
+    """能力头 → 布尔。缺头 / 空 / `0` / `false` 一律 = **无能力**。
+
+    只认白名单真值（不做「非空即有」这类宽松推断）：能力判错的方向是明确的——
+    低估只是少一个 worker 领离线课（看得见：队列不降），高估会让一个只会逐轮的
+    worker 领走整段 job 并卡在那里（看不见）。
+    """
+    return str(raw or "").strip().lower() in ("1", "true", "yes", "on")
 
 _RUN_ID_OK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 #: run_id 长度上限（它同时是 hub 侧目录名，必须短且有界）。

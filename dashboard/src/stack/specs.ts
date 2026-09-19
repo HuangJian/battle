@@ -24,6 +24,7 @@ import type {
   RlConfig,
   RolloutSrcMode,
   SlimMode,
+  TrainMode,
 } from '../core/types'
 
 /** 课程日志目录（per-course；无课程走 `nocourse`——与旧单课路径同构）。 */
@@ -164,10 +165,35 @@ export function slimToCfg(mode: SlimMode): 0 | 1 {
  *  在 rl-config 没有该键时一律返回 `local`（历史行为）——这里若缺省成别的值，控制台
  *  就会在**没改过配置**的课上谎报「本轮上云」。
  *  与 `resolveCfTunnel`/`resolveSlim` 同形，但**无域换算**：两侧都是同字面量字符串。 */
+/** 训练模式 → 课程级 rl-config 键（**唯一推导点**；2026-09-19 离线训练模式）。
+ *
+ *  `offline` ⇒ `{rollout_src:'run', run_iters:-1}`：两个键缺一不可——
+ *    · `run` 是**声明**（本机不跑 rollout，整段交给云机）；
+ *    · `run_iters:-1` 是**段长**（-1 = 直到课程末尾，与 `--export-bundle` 同口径）。
+ *    只写 `run` 而不给段长在训练侧是配置错误（`_run_segment_iters` 返回 0 = 关，
+ *    于是本轮静默退化成在**本机**采样 —— 那正是最难查的那类分叉）。
+ *  `online` ⇒ `{rolloutSrc: 选中的源, runIters: null}`，其中 `null` = **要求删除**该课
+ *    的 `run_iters`/`rollout_src` 覆盖（不删就会「切回在线了但还在整段上云」）。
+ *
+ *  为什么放这里：模式与 rollout 源是**两个域**（一个用户口径、一个 python 字面量），
+ *  换算只此一处，弹窗/preset/测试共用。
+ */
+export function trainModeKnobs(
+  mode: TrainMode,
+  rolloutSrc: RolloutSrcMode,
+): { rolloutSrc: RolloutSrcMode; runIters: number | null } {
+  if (mode === 'offline') return { rolloutSrc: 'run', runIters: -1 }
+  // 在线不接受 `run`：`run` 是离线模式的产物，留在在线档位里就是自相矛盾的状态。
+  return { rolloutSrc: rolloutSrc === 'run' ? 'local' : rolloutSrc, runIters: null }
+}
+
 export function resolveRolloutSrc(cfg: RlConfig, course = ''): RolloutSrcMode {
   const cc = course ? cfg.courses?.[course] : undefined
   const raw = cc?.rollout_src ?? cfg.rl.rollout_src
-  return raw === 'node' || raw === 'auto' ? raw : 'local'
+  // `run`（离线训练模式；2026-09-19）也是合法值——漏掉它 = 离线课在 UI 上显示成 `local`，
+  // 而那正是「云机在跑」与「本机在跑」看起来一样的那类静默分叉。域与 python
+  // `rl/loop_steps.py::ROLLOUT_SRCS` 同源（有测试对账）。
+  return raw === 'node' || raw === 'run' || raw === 'auto' ? raw : 'local'
 }
 
 /** cloudflared 隧道旗标（唯一来源）——cloudflaredSpec 与 hub.ts 的 spawn 共用，

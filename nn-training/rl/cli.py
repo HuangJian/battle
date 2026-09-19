@@ -502,14 +502,17 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
     # M3（2026-09-17，plan/remote-wire-remediation §5.2）：rollout 上云开关。
     # local = 历史行为（hub 采样本机产 shard，整轮口径逐字节不变）；
     # node = 本轮由节点自己跑 rollout（kind=iter job），hub 不再本地采样。
+    # run  = 整段（kind=run job）：节点领走 it..end_it 自己跑完（离线训练模式）。
     # 取值优先级：本参数 > rl-config `courses.<stem>.rollout_src` > rl.* > local。
     ap.add_argument(
         "--rollout-src",
         default=_d("rollout_src", "auto"),
-        choices=("auto", "local", "node"),
+        choices=("auto", "local", "node", "run"),
         help="M3 rollout 上云：'local'=本机采样（默认行为）；'node'=本轮整轮上云"
-        "（节点 bun 跑 exporter 产 shard + 跑 PPO，kind=iter job）；'auto'=按 rl-config"
-        "（rl.rollout_src / courses.<课>.rollout_src）解析，缺省 local；取值进 iteration"
+        "（节点 bun 跑 exporter 产 shard + 跑 PPO，kind=iter job）；'run'=**整段**上云"
+        "（一次 kind=run job 领走 it..end_it，节点自主跑完；需要 --run-iters 说明段长，"
+        "离线训练模式的机器侧写法）；'auto'=按 rl-config（rl.rollout_src /"
+        " courses.<课>.rollout_src）解析，缺省 local；取值进 iteration"
         " 事件的 wire.rollout_src（A/B 归因用）",
     )
     # 半离线（2026-09-17）：一次 `kind=run` job 覆盖 N 轮，节点收到（课程 + 初始权重 +

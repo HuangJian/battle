@@ -9,7 +9,7 @@
  *  Esc / 遮罩关闭由 App 全局处理。 */
 
 import { useEffect, useRef, useState } from 'preact/hooks'
-import type { RolloutSrcMode, SlimMode } from '../../../core/types'
+import type { RolloutSrcMode, SlimMode, TrainMode } from '../../../core/types'
 import type { ModeView } from '../../view'
 import { SegmentedControl } from '../../components/SegmentedControl'
 import { Toggle } from '../../components/Toggle'
@@ -30,14 +30,18 @@ const TC_CF_PROTOCOL = 'tc.cfProtocol'
 const TC_CF_EDGE_IP = 'tc.cfEdgeIp'
 const TC_SLIM = 'tc.slim'
 const TC_ROLLOUT_SRC = 'tc.rolloutSrc'
+const TC_TRAIN_MODE = 'tc.trainMode'
 
 export interface TunnelLaunchOpts {
   cfProtocol: 'http2' | 'quic' | 'auto'
   cfEdgeIp: '4' | '6' | 'auto'
   /** M2 协议瘦身回退开关（`'on'|'off'`）：关掉 = 逐字节回到旧字节行为（A/B 对照组）。 */
   slim: SlimMode
-  /** M3 rollout 执行位置（`'local'|'node'|'auto'`）：node = 本轮整轮上云（A/B 对照）。 */
+  /** M3 rollout 执行位置（`'local'|'node'|'auto'`）：node = 本轮整轮上云（A/B 对照）。
+   *  离线模式下不参与（服务端会忽略它——见 `trainMode`）。 */
   rolloutSrc: RolloutSrcMode
+  /** 训练模式（2026-09-19）：在线/离线，缺省在线。 */
+  trainMode: TrainMode
 }
 
 function readLocal(key: string): string {
@@ -82,8 +86,27 @@ export function TrainLaunchModal({
     readTunnelSel(TC_SLIM, modes.slim, ['on', 'off'] as const, 'on'),
   )
   // M3：rollout 执行位置。缺省 local（= 历史行为），与服务端解析口径一致。
+  // `run` 是离线模式的产物：不作为选项，但要把「这门课已经是离线」显示在训练模式上
+  // （否则重新打开弹窗再点启动 = 静默把它拉回在线）。
   const [rolloutSrc, setRolloutSrc] = useState<RolloutSrcMode>(() =>
-    readTunnelSel(TC_ROLLOUT_SRC, modes.rolloutSrc, ['local', 'node', 'auto'] as const, 'local'),
+    readTunnelSel(
+      TC_ROLLOUT_SRC,
+      modes.rolloutSrc === 'run' ? 'local' : modes.rolloutSrc,
+      ['local', 'node', 'auto'] as const,
+      'local',
+    ),
+  )
+  // 训练模式：服务端生效值 `run` ⇒ 这门课正处离线档（**以 rl-config 为准**，
+  // localStorage 只记上次点选，不是事实源）。
+  const [trainMode, setTrainMode] = useState<TrainMode>(() =>
+    modes.rolloutSrc === 'run'
+      ? 'offline'
+      : (readTunnelSel(
+          TC_TRAIN_MODE,
+          undefined,
+          ['online', 'offline'] as const,
+          'online',
+        ) as TrainMode),
   )
   const [cfProtocol, setCfProtocol] = useState<'http2' | 'quic' | 'auto'>(() =>
     readTunnelSel(TC_CF_PROTOCOL, modes.cfProtocol, ['http2', 'quic', 'auto'] as const, 'http2'),
@@ -159,7 +182,8 @@ export function TrainLaunchModal({
     writeLocal(TC_CF_EDGE_IP, cfEdgeIp)
     writeLocal(TC_SLIM, slim)
     writeLocal(TC_ROLLOUT_SRC, rolloutSrc)
-    onLaunch({ remoteDegrade, cfProtocol, cfEdgeIp, slim, rolloutSrc })
+    writeLocal(TC_TRAIN_MODE, trainMode)
+    onLaunch({ remoteDegrade, cfProtocol, cfEdgeIp, slim, rolloutSrc, trainMode })
   }
 
   if (!open) return null
@@ -240,33 +264,61 @@ export function TrainLaunchModal({
         </p>
         <div className="tc-line">
           <span className="tc-muted tc-small" style={{ minWidth: 90 }}>
-            rollout
+            训练模式
           </span>
-          <SegmentedControl<RolloutSrcMode>
-            value={rolloutSrc}
-            ariaLabel="rollout 执行位置"
+          <SegmentedControl<TrainMode>
+            value={trainMode}
+            ariaLabel="训练模式"
             options={[
-              { value: 'local', label: '本机' },
-              { value: 'node', label: '上云（节点）' },
-              { value: 'auto', label: 'auto' },
+              { value: 'online', label: '在线' },
+              { value: 'offline', label: '离线' },
             ]}
-            onChange={setRolloutSrc}
+            onChange={setTrainMode}
           />
         </div>
-        <p className="tc-muted tc-small" style={{ marginTop: -4 }}>
-          rollout 位置（M3）：本机 = 本机采样 + 只把 PPO 送云（历史行为）； 上云（节点）=
-          本轮**整轮**上云（节点跑 exporter 产 shard 再跑 PPO，撤掉上行 1.2MB payload， 适合 TPU
-          实例）；auto = 不表态，交回课程配置解析。 当前生效（rl-config）：
-          <b>
-            {' '}
-            {modes.rolloutSrc === 'node'
-              ? '上云（节点）'
-              : modes.rolloutSrc === 'auto'
-                ? 'auto'
-                : '本机'}
-          </b>
-          ，取值随每轮写入「传输」页的 rollout 列（事后可分组统计）。
-        </p>
+        {trainMode === 'offline' ? (
+          <p className="tc-muted tc-small" style={{ marginTop: -4 }}>
+            训练模式 <b>离线</b>（缺省在线）：本机**不跑** rollout/PPO。启动后本课
+            <code> rollout_src=run</code> + <code>run_iters=-1</code>（整段），并把 hub 这课置
+            offline——整段 job 只交给**带标** worker（云机跑 <code>battle.offline.ipynb</code>）；
+            也可停下训练后在「导出」里拿 <code>task-&lt;课&gt;.zip</code> 人工搬上云。
+            云机逐轮回传的段内进度会出现在上面的「并行课程」面板。
+          </p>
+        ) : (
+          <>
+            <div className="tc-line">
+              <span className="tc-muted tc-small" style={{ minWidth: 90 }}>
+                rollout
+              </span>
+              <SegmentedControl<RolloutSrcMode>
+                value={rolloutSrc === 'run' ? 'local' : rolloutSrc}
+                ariaLabel="rollout 执行位置"
+                options={[
+                  { value: 'local', label: '本机' },
+                  { value: 'node', label: '上云（节点）' },
+                  { value: 'auto', label: 'auto' },
+                ]}
+                onChange={setRolloutSrc}
+              />
+            </div>
+            <p className="tc-muted tc-small" style={{ marginTop: -4 }}>
+              rollout 位置（M3）：本机 = 本机采样 + 只把 PPO 送云（历史行为）； 上云（节点）=
+              本轮**整轮**上云（节点跑 exporter 产 shard 再跑 PPO，撤掉上行 1.2MB payload， 适合 TPU
+              实例）；auto = 不表态，交回课程配置解析。 当前生效（rl-config）：
+              <b>
+                {' '}
+                {modes.rolloutSrc === 'node'
+                  ? '上云（节点）'
+                  : modes.rolloutSrc === 'auto'
+                    ? 'auto'
+                    : modes.rolloutSrc === 'run'
+                      ? 'run（离线档）'
+                      : '本机'}
+              </b>
+              ，取值随每轮写入「传输」页的 rollout 列（事后可分组统计）。
+            </p>
+          </>
+        )}
         <div className="tc-line tc-toggle-group" ref={togglesRef}>
           <span className="tc-muted tc-small">行为开关</span>
           <Toggle

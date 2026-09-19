@@ -10,7 +10,11 @@
  *  交互：点任意行 = 切到查看该课程（与顶部课程 select 同一条路径 `onSelectCourse`，
  *  故 LAN 只读视图下同样可用——它只改本浏览器的查看目标，不碰任何训练状态）。 */
 
-import { shortUrl, type ParallelOverviewView } from '../../view'
+import { fmtRel, shortUrl, type ParallelOverviewView } from '../../view'
+
+/** 段内产物「多久没动了」的红线：超过它就当可疑（离线课挂掉与还在跑的唯一区分）。
+ *  离线段是整段上云（一轮可能十几分钟），30 分钟仍属正常长轮，故定 1h。 */
+export const OFFLINE_STALE_SEC = 3600
 
 export interface CourseOverviewProps {
   overview: ParallelOverviewView | null
@@ -20,6 +24,25 @@ export interface CourseOverviewProps {
   /** 动作通道（R3-2：切离线/在线）。可缺省——只读视图/单测直接渲染时不接动作。
    *  返回类型放 `unknown`：app 的 `doAction` 回 `{ok}`，无关的回传值不该逼调用方套壳。 */
   onAction?: (act: string, body: Record<string, unknown>) => unknown
+}
+
+/** 离线段内进度的显示（无产物 → null：那一行的徽标已经说了「离线」）。 */
+function segBadge(r: ParallelOverviewView['rows'][number]): {
+  text: string
+  cls: string
+  title: string
+} | null {
+  if (!r.offline || r.offlineRounds === 0) return null
+  const stale = r.offlineLastMtime > 0 && Date.now() / 1000 - r.offlineLastMtime > OFFLINE_STALE_SEC
+  const ago = r.offlineLastMtime > 0 ? fmtRel(r.offlineLastMtime * 1000) : '—'
+  return {
+    text: `段内 ${r.offlineRounds} 轮 · 最近 ${ago}`,
+    cls: `tc-cov__seg${stale ? ' tc-cov__seg--stale' : ''}`,
+    title:
+      `云机已回传的段内轮次：${r.offlineRounds} 轮，最新 it${r.offlineLastIter ?? '—'}，` +
+      `最近一件产物 ${ago}。这些轮**不在课程账本里**（hub 不跑它们），只有这里看得到。` +
+      (stale ? `⚠ 已超过 ${OFFLINE_STALE_SEC / 60} 分钟没新产物——云机可能挂了。` : ''),
+  }
 }
 
 /** 单行状态徽标的（文案 + 修饰类）。 */
@@ -107,6 +130,7 @@ export function CourseOverview({
       <div className="tc-cov__rows">
         {overview.rows.map((r) => {
           const b = rowBadge(r)
+          const seg = segBadge(r)
           const viewing = r.course === course
           // 模式开关只在 hub 认识这门课时给（hub 不认识的课程 → 400，按钮就是假承诺）。
           const canToggle = overview.hubOnline && r.hubSeen && Boolean(onAction)
@@ -126,6 +150,11 @@ export function CourseOverview({
                 <span className="tc-cov__iter" title="该课账本尾行的 iteration">
                   {r.iter === null ? '—' : `it${r.iter}`}
                 </span>
+                {seg ? (
+                  <span className={seg.cls} title={seg.title}>
+                    {seg.text}
+                  </span>
+                ) : null}
                 <span
                   className="tc-cov__q"
                   title={

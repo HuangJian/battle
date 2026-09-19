@@ -92,6 +92,74 @@ export function parseHubQueue(body: unknown): HubQueueView | null {
   }
 }
 
+// ────────────────────────── 离线段进度（GET /admin/offline） ──────────────────────────
+
+/** 一次离线段（一个 run_id 手）已回传到 hub 的逐轮产物统计。
+ *
+ *  为什么需要它：离线课的段内几轮**不在课程账本里**（hub 不跑那些轮，训练侧也没参与），
+ *  唯一能回答「它在跑还是挂了」的事实就是产物目录里最近一轮的时间戳。 */
+export interface OfflineRunView {
+  /** 已收到的轮次（升序）。 */
+  its: number[]
+  /** 已收到的轮数（= `its.length`；hub 也单独给，两者对不上时以 `its` 为准）。 */
+  count: number
+  /** 最近一件产物的 mtime（epoch 秒）；0 = 没读到。 */
+  lastMtime: number
+}
+
+/** 解析 hub `/admin/offline` 的响应体 → `{课: {runId: 段内进度}}`；形状不符 → null。
+ *
+ *  宽容解析（与 `parseHubQueue` 同规）：hub 可能比控制台新/旧一个版本，缺字段退化成
+ *  空表比让整页 /api/state 500 好。 */
+export function parseOfflineProgress(
+  body: unknown,
+): Record<string, Record<string, OfflineRunView>> | null {
+  if (!body || typeof body !== 'object') return null
+  const raw = (body as Record<string, unknown>).progress
+  if (!raw || typeof raw !== 'object') return null
+  const out: Record<string, Record<string, OfflineRunView>> = {}
+  for (const [course, runsRaw] of Object.entries(raw as Record<string, unknown>)) {
+    if (!course || !runsRaw || typeof runsRaw !== 'object') continue
+    const runs: Record<string, OfflineRunView> = {}
+    for (const [runId, v] of Object.entries(runsRaw as Record<string, unknown>)) {
+      if (!runId || !v || typeof v !== 'object') continue
+      const r = v as Record<string, unknown>
+      const its = Array.isArray(r.its)
+        ? (r.its as unknown[]).filter(
+            (x): x is number => typeof x === 'number' && Number.isFinite(x),
+          )
+        : []
+      its.sort((a, b) => a - b)
+      runs[runId] = {
+        its,
+        // count 缺/不实（与 its 长度不符）时以 its 为准：轮次数是能数出来的事实。
+        count: typeof r.count === 'number' && Number.isFinite(r.count) ? r.count : its.length,
+        lastMtime: num(r.last_mtime),
+      }
+    }
+    if (Object.keys(runs).length) out[course] = runs
+  }
+  return out
+}
+
+/** 一门课的全部离线段：已收到的总轮数 + 最后一轮号 + 最近时间戳（跨 run 取最大）。 */
+export function offlineSummary(runs: Record<string, OfflineRunView> | undefined): {
+  rounds: number
+  lastIter: number | null
+  lastMtime: number
+} {
+  if (!runs) return { rounds: 0, lastIter: null, lastMtime: 0 }
+  let rounds = 0
+  let lastIter: number | null = null
+  let lastMtime = 0
+  for (const r of Object.values(runs)) {
+    rounds += r.count
+    for (const it of r.its) lastIter = lastIter === null ? it : Math.max(lastIter, it)
+    lastMtime = Math.max(lastMtime, r.lastMtime)
+  }
+  return { rounds, lastIter, lastMtime }
+}
+
 // ────────────────────────── 并行总览行 ──────────────────────────
 
 export interface CourseOverviewRow {
@@ -106,6 +174,12 @@ export interface CourseOverviewRow {
   hubSeen: boolean
   queuePending: number
   inflight: number
+  /** 离线段内已回传的轮数（**不在课程账本里**：那些轮由云机自己跑）。 */
+  offlineRounds: number
+  /** 段内已收到的最新轮号（null = 没收到任何一轮）。 */
+  offlineLastIter: number | null
+  /** 段内最近一件产物的 mtime（epoch 秒）；0 = 无。 */
+  offlineLastMtime: number
 }
 
 /** 恒等在训课程 ∩ hub 课程表 ∩ 查看课程的课程清单（保持入参顺序 = 服务端的新→旧）。 */
@@ -131,10 +205,13 @@ export function buildCourseRows(input: {
   training: string[]
   queue: HubQueueView | null
   iters: Record<string, number | null>
+  /** 逐课程的离线段进度（`parseOfflineProgress` 的产物；缺 = 没读到）。 */
+  offline?: Record<string, Record<string, OfflineRunView>> | null
 }): CourseOverviewRow[] {
   const training = new Set(input.training)
   return input.courses.map((course) => {
     const q = input.queue?.courses[course]
+    const seg = offlineSummary(input.offline?.[course])
     return {
       course,
       training: training.has(course),
@@ -143,6 +220,9 @@ export function buildCourseRows(input: {
       hubSeen: q !== undefined,
       queuePending: q?.pending ?? 0,
       inflight: q?.inflight ?? 0,
+      offlineRounds: seg.rounds,
+      offlineLastIter: seg.lastIter,
+      offlineLastMtime: seg.lastMtime,
     }
   })
 }
@@ -159,6 +239,8 @@ export interface ParallelOverviewView {
   /** 最近派发到的课程（hub 轮转游标）；null = 还没派过或 hub 不可达。 */
   recentDispatch: string | null
   rows: CourseOverviewRow[]
+  /** 逐课程的离线段进度（原始形状，UI 需要按 run 展开时用；缺 = 没读到）。 */
+  offlineProgress: Record<string, Record<string, OfflineRunView>> | null
 }
 
 /** 账本尾行里最后一个 `iteration` 事件的轮次（纯函数，可单测）。

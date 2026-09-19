@@ -17,13 +17,21 @@
  *
  *  任一步失败即中断（已完成的组件保留，页面可单独停止）。 */
 import { loadConfig, saveConfig, validateCourseArg, writeRemoteHubUrl } from '../../core/config'
-import type { CfEdgeIp, CfProtocol, Component, RolloutSrcMode, SlimMode } from '../../core/types'
+import type {
+  CfEdgeIp,
+  CfProtocol,
+  Component,
+  RolloutSrcMode,
+  SlimMode,
+  TrainMode,
+} from '../../core/types'
 import { tailscaleIp } from '../../core/net'
 import { sharedHubUrl } from '../../core/slots'
 import { remoteExecutionFace } from '../../stack/push-config'
 import { rlConfigSmoke } from '../../stack/smoke'
-import { slimToCfg } from '../../stack/specs'
+import { slimToCfg, trainModeKnobs } from '../../stack/specs'
 import { saveConsoleState } from './console-state'
+import { setCourseMode } from './course-mode'
 import { ActionError, ActionResult, done, guard, release } from './result'
 import { startComponent, StartCtx } from './start'
 
@@ -47,9 +55,13 @@ export interface PresetOpts {
    *  `type=int, choices=(0,1)`），必须过 `slimToCfg()` 换算。 */
   slim?: SlimMode
   /** M3：rollout 执行位置（随启动回写 rl-config.rl.rollout_src + console-state）。
-   *  ⚠ 与 slim **不同**：python `--rollout-src` 的 choices 就是这三个字符串——
+   *  ⚠ 与 slim **不同**：python `--rollout-src` 的 choices 就是这几个字符串——
    *  直接写，**不要**过任何换算函数。 */
   rolloutSrc?: RolloutSrcMode
+  /** 训练模式（2026-09-19）：`offline` ⇒ 写该课的 `{rollout_src:'run', run_iters:-1}`
+   *  并把该课 hub 模式置 offline（只有带标 worker 能领整段）；`online` ⇒ **删掉**该课的
+   *  这两个覆盖键（不删就「切回在线了但还在整段上云」）。域换算见 `trainModeKnobs`。 */
+  trainMode?: TrainMode
 }
 
 export async function startPreset(course: string, opts: PresetOpts = {}): Promise<ActionResult> {
@@ -60,7 +72,13 @@ export async function startPreset(course: string, opts: PresetOpts = {}): Promis
     saveConsoleState({ course })
     // M1：隧道选项随启动回写（rl-config 的 rl.* 键 + console-state 生效值）——
     // 留空 = 不动（沿用 rl-config 现值/缺省 http2/4）。
-    if (opts.cfProtocol || opts.cfEdgeIp || opts.slim || opts.rolloutSrc) {
+    // 模式 → 课程级键的换算只走 `trainModeKnobs` 一处；全局面取它的 rolloutSrc，
+    // 而离线档算出来的就是 `run`——`run` **绝不写进全局 rl.rollout_src**（那个键是所有课
+    // 共用的默认面，落进去 = 把全部课程一起拖进离线，而用户在弹窗里只选了这一门课）。
+    const knobs = opts.trainMode ? trainModeKnobs(opts.trainMode, opts.rolloutSrc ?? 'local') : null
+    const globalRolloutSrc: RolloutSrcMode | undefined =
+      knobs === null ? opts.rolloutSrc : knobs.rolloutSrc === 'run' ? undefined : knobs.rolloutSrc
+    if (opts.cfProtocol || opts.cfEdgeIp || opts.slim || globalRolloutSrc || opts.trainMode) {
       const cfgT = loadConfig()
       cfgT.rl = cfgT.rl || ({} as (typeof cfgT)['rl'])
       if (opts.cfProtocol) cfgT.rl.cf_protocol = opts.cfProtocol
@@ -68,13 +86,30 @@ export async function startPreset(course: string, opts: PresetOpts = {}): Promis
       // M2：写数值域（`1|0`）——字符串会让训练侧 `choices=(0,1)` 直接报错退出。
       if (opts.slim) cfgT.rl.slim = slimToCfg(opts.slim)
       // M3：rollout 位置是字符串域，原样落 rl-config（与 --rollout-src choices 同字面量）。
-      if (opts.rolloutSrc) cfgT.rl.rollout_src = opts.rolloutSrc
+      if (globalRolloutSrc) cfgT.rl.rollout_src = globalRolloutSrc
+      // 训练模式（2026-09-19）：离线是**课程级**决定（`courses.<课>.{rollout_src,run_iters}`），
+      // 不落 rl.*（那是所有课共用的默认面）。
+      if (knobs && opts.trainMode) {
+        cfgT.courses = cfgT.courses ?? {}
+        const row = (cfgT.courses[course] = cfgT.courses[course] ?? {})
+        if (opts.trainMode === 'offline') {
+          // 两个键缺一不可：`run` 是声明，`run_iters` 是段长（`-1` = 到课程末）。
+          row.rollout_src = knobs.rolloutSrc
+          row.run_iters = knobs.runIters ?? -1
+        } else {
+          // 切回在线 = **撤掉离线标记**：段长必删（留着它 = 下一轮又被当成段长 + 本机
+          // 采样 = 半状态），课程级的 `run` 也删。但**不能**顺手删掉别的课程级覆盖
+          // （有人显式写过 `rollout_src:'node'`，那是本课在线的另一个理由，不归这里管）。
+          delete row.run_iters
+          if (row.rollout_src === 'run') delete row.rollout_src
+        }
+      }
       saveConfig(cfgT)
       saveConsoleState({
         cfProtocol: opts.cfProtocol,
         cfEdgeIp: opts.cfEdgeIp,
         slim: opts.slim,
-        rolloutSrc: opts.rolloutSrc,
+        rolloutSrc: globalRolloutSrc,
       })
     }
     // hub 地址：把本机 tailnet IP 写进单键 `rl.remote_hub_url`（**pull 与 hub 派发都要它**）。
@@ -89,6 +124,15 @@ export async function startPreset(course: string, opts: PresetOpts = {}): Promis
     } else {
       hubNote = '；未检测到 Tailscale 网卡 IP——remote_hub_url 未改（worker 需自行可达共享 hub）'
     }
+    // 训练模式 = 离线时把该课的 hub 派发闸也切到 offline：整段 job 只能被**带标** worker
+    // 领走（hub 对离线课一律不放行普通 worker）。不切的话，整段 job 会被任意一台普通
+    // worker 领走并对着一份「跑不完的任务」开工。在线启动同样下发 online：训练模式字的
+    // 就是「本机跑 + 实时派发」，留着旧的 offline 会让在线启动静默停摆。
+    let modeNote = ''
+    if (opts.trainMode) {
+      const r = await setCourseMode(course, opts.trainMode === 'offline' ? 'offline' : 'online')
+      modeNote = `；训练模式 ${opts.trainMode === 'offline' ? '离线（整段上云）' : '在线'}：${r.message}`
+    }
     const ctx: StartCtx = { course, remoteDegrade: !!opts.remoteDegrade }
     const detail: string[] = []
     for (const k of TRAIN_START_ORDER) {
@@ -102,7 +146,7 @@ export async function startPreset(course: string, opts: PresetOpts = {}): Promis
     const face = remoteExecutionFace(loadConfig())
     return done(
       true,
-      `已启动训练栈 (course=${course})${hubNote}` +
+      `已启动训练栈 (course=${course})${hubNote}${modeNote}` +
         `；本轮执行面：${face.text}` +
         '（trainer 是共享进程：一个进程服务所有课程，停它 = 停全部）',
       detail,

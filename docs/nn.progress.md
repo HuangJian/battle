@@ -4,6 +4,45 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §94 离线训练模式：启动选在线/离线 + 云端整段执行 + 补传归位（2026-09-19）
+
+**用户口径**：启动课程训练时指定在线/离线（缺省在线）；离线 = 下载任务包上云自跑，或由
+带特别标识的云端 worker 在线领取；`battle.offline.ipynb` 带「是否实时回传 hub」开关（不实时
+回传则跑完统一打包手动导入）；notebook 先试连 hub 取包，不通则等人手动上传。
+
+**四个已拍板**（讨论后）：① 离线启动后本机**发一个整段 job + 保留导包按钮**；② 「特别标识」=
+worker **自报能力**（`X-Battle-Offline: 1` / `--offline`），不是课程绑定；③ notebook 实时回传**默认开**；
+④ 段内逐轮进度**要**回传控制台。
+
+**模式 → 键的唯一换算**（`stack/specs.ts::trainModeKnobs`）：离线 ⇒ `courses.<课>.{rollout_src:'run',
+run_iters:-1}`（声明 + 段长，缺一不可）；在线 ⇒ **撤标记**（删段长；课程级 `run` 也删；别的覆盖
+不动）。离线档的 `run` **绝不**写全局 `rl.rollout_src`（那会把所有课一起拖进离线）。
+
+**本轮的另一个收获 —— 一条存量真 bug**（e2e 把它逼了出来）：补传体里原来没有**可用的课程身份**
+（`manifest.course_name` 是课程文件的 `name` 字段，与 hub 的课程键 `<traj>/<课>/` 不是一回事）
+⇒ **多课程 hub 下每条 `/offline/artifact` 都被 400「无法归属课程」拒掉**，节点侧补传**整体停用**
+（体是自己造的，重试不会变对）。训练照常，唯一症状是控制台上段内进度永远空着。
+
+**修法**：归位键由**生产者**带（不是 hub 猜）：领活路径 = hub 在 `/jobs/next` 里下发的 `course`
+（本来就发了，只是没人往下透传）→ `run_plan_job(hub_course=)` → `make_deliverer(course=)` → 逐轮体
+与段末摘要都带；全离线包路径 = `--hub-course <CFG.course>`（offline_boot 写进 argv）。空 = 单课程
+hub（键就是空串）⇒ **不带**这个键，逐字回到旧形状。
+
+**e2e**（`e2e/test_offline_training_e2e.py`，真 hub 进程 / 不跑真 rollout·PPO·eval）三条：
+① 离线整段 job —— 普通 poller 先领到**在线课**那份、再轮仍是 None，带标 poller 领到 `kind="run"`
+（并自报 `plan_sha256`）；hub 日志有「离线课整段交领」；② 真 `OfflineDeliverer` 逐轮补传 → 落
+`<traj>/<课>/remote-jobs/offline/<run>/it-NNN/` → `GET /admin/offline` 报出 `{its,count,last_mtime}`
+（控制台 `parseOfflineProgress` 吃的就是这个形状）+ 重传幂等 + 不串到另一门课；③ `GET /offline/task-pack`
+200（字节相等）/ 404（人读下一步）/ 401 / 400（路径越界）。
+
+**控制台**：启动弹窗新增「训练模式 在线/离线」（缺省在线；服务端生效值 `run` ⇒ 打开就已选中离线，
+否则重新开弹窗再点启动 = 静默拉回在线）；离线启动同时把该课 hub 模式置 offline（整段只给带标 worker）。
+总览行新增离线段内进度（`段内 N 轮 · 最近 …`，超 1h 无新产物变醒目 —— 离线课唯一的「死」信号）。
+
+**门禁**：nn python gate ✔ 31s · dashboard typecheck/test（675 pass）/lint ✔ · 三份 bundle ✔ · 根 `bun run check` ✔ 33s。
+
+---
+
 ## §93 测试侧端口竞态：`spawn_bound_port()` 把「探端口 → 子进程 bind」收成一个出口（2026-09-19）
 
 **现象**：R4 提交被 pre-commit 的 nn python gate 拦下，红的是一条与本轮改动**无关**的 e2e ——

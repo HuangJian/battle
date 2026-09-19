@@ -44,6 +44,7 @@ from remote.protocol import (
     RACE_MODE_OFF,
     WORKER_ID_HEADER,
     ProtocolError,
+    has_offline_capability,
     may_avoid_stale_holder,
     normalize_manifest,
     parse_course_arg,
@@ -189,11 +190,93 @@ def _publish(hub: _HubQueue, course: str, jid: str, *, run: str = "run", it: int
     st.publish(jid, _manifest(jid, run=run, it=it), b"PK\x03\x04fake")
 
 
-def _claim(hub: _HubQueue, worker: str, *, race: bool = False) -> tuple[str, str, str]:
+def _claim(
+    hub: _HubQueue, worker: str, *, race: bool = False, offline_ok: bool = False
+) -> tuple[str, str, str]:
     """取下一份该派的 job；**没有必须是失败**（否则断言会变成静默跳过）。"""
-    picked = hub.claim_next(worker_id=worker, race=race)
+    picked = hub.claim_next(worker_id=worker, race=race, offline_ok=offline_ok)
     assert picked is not None, f"应当有可派给 {worker} 的 job"
     return picked
+
+
+# ------------------------------------------------------------------ 离线课的能力闸（2026-09-19）
+#
+# 离线课（`kind=run` 整段）不实时派发，但**不是**谁都领不到的坟墓：用户口径「也支持带
+# 特别标识的云端 worker 在线领取」——标识语义 = 能力（「我能自己跑完整段」），不是课程绑定。
+# 判错的方向是刻意选的：低估只是少一个 worker 领离线课（队列可见地不降），高估会让只会
+# 逐轮的 worker 搬走整段 job 并在那儿卡到租约超时（不可见）。
+
+
+@pytest.mark.parametrize(
+    ("raw", "want"),
+    [
+        ("1", True),
+        ("true", True),
+        ("YES", True),
+        ("on", True),
+        (" 1 ", True),
+        ("", False),
+        (None, False),
+        ("0", False),
+        ("false", False),
+        ("2", False),
+        ("offline", False),  # 只认白名单真值：能力名写进来不算声明
+    ],
+)
+def test_offline_capability_header_truth_table(raw: object, want: bool) -> None:
+    assert has_offline_capability(raw) is want
+
+
+def test_offline_course_needs_capability(tmp_path: Path) -> None:
+    """普通 worker 领不到离线课；带标（自报能跑整段）的领得到。"""
+    hub = _discover_hub(tmp_path)
+    _publish_standalone(tmp_path, "c1", "j" * 16)
+    hub.discover()
+    assert hub.set_mode("c1", COURSE_MODE_OFFLINE) is True
+
+    assert hub.claim_next(worker_id="w1") is None, "空头 = 无能力 ⇒ 不得领离线课"
+    assert hub.claim_next(worker_id="w1", offline_ok=False) is None
+    course, jid, _tok = _claim(hub, "w1", offline_ok=True)
+    assert (course, jid) == ("c1", "j" * 16)
+    # 租约在持：同一份不会被第二个带标 worker 再领一次（那是同一段跑两遍）
+    assert hub.claim_next(worker_id="w2", offline_ok=True) is None
+
+
+def test_marked_worker_still_claims_online_courses(tmp_path: Path) -> None:
+    """课程与 worker **正交**（用户 2026-09-19 再强调）：带标 worker 照样领在线课。
+
+    标识是「我能跑完整段」的能力声明，不是「我只服务离线课」的归属——把它做成归属，就会
+    重新制造「某门课钉到某台机器」的耦合（R4 刚拆掉的那种）。
+    """
+    hub = _discover_hub(tmp_path)
+    _publish_standalone(tmp_path, "c-online", "a" * 16)
+    _publish_standalone(tmp_path, "c-offline", "b" * 16)
+    hub.discover()
+    assert hub.set_mode("c-offline", COURSE_MODE_OFFLINE) is True
+
+    seen = set()
+    for _ in range(2):
+        course, _jid, _tok = _claim(hub, "w1", offline_ok=True)
+        seen.add(course)
+    assert seen == {"c-online", "c-offline"}, f"带标 worker 应两门课都能领，实得 {seen}"
+
+
+def test_offline_job_is_never_race_broadcast(tmp_path: Path) -> None:
+    """离线课的整段 job **绝不**竞速广播（广播 = 每台带标 worker 各跑一遍完整课程）。
+
+    race 的判据是「在实时派发的课程数 < 窗口内活跃 worker 数」——只剩离线课时该判据反而
+    为真（离线课不算进分母），所以这里不能靠 race_active 自己收口，必须由 claim 路径显式屏蔽。
+    """
+    hub = _discover_hub(tmp_path)
+    _publish_standalone(tmp_path, "c1", "j" * 16)
+    hub.discover()
+    assert hub.set_mode("c1", COURSE_MODE_OFFLINE) is True
+
+    first = hub.claim_next(worker_id="w1", race=True, offline_ok=True)
+    assert first is not None
+    # race=True 下在线课会「不下租约、对所有人可见」（先落账者胜）；离线整段绝不能这样。
+    second = hub.claim_next(worker_id="w2", race=True, offline_ok=True)
+    assert second is None, "离线整段被广播给了第二台 worker（同一段会跑两遍）"
 
 
 def _boot(tmp_path: Path, hub: _HubQueue) -> tuple:
@@ -741,6 +824,116 @@ def test_discover_adopts_process_state_from_solo_store(tmp_path: Path) -> None:
     # 搬完就不再借 store：此后写的是队列自己的状态
     hub.halt_workers = False
     assert hub._stores["a"].halt_workers is True, "store 上那份已成历史（不再生效）"
+
+
+# ------------------------------------------------------------------ 补传归位（离线训练模式）
+#
+# 离线段（kind=run）在云机上自己跑完，逐轮把产物**补传**回 hub（`/offline/artifact`）。
+# 补传体里没有 job、也没有租约 ⇒ hub 只能靠体里自报的课程把每一轮落进正确的课程目录。
+# 缺这个键时的后果（2026-09-19 发现）：多课程 hub 下每一条补传都被 400「无法归属课程」
+# 拒掉，节点侧补传**整体停用**（体是自己造的，重试不会变对）——训练照常，但控制台上
+# 段内进度永远是空的，只剩「跑完自己下载导入」。
+
+
+def _artifact_body(run_id: str, it: int, *, course: str = "") -> bytes:
+    """一份最小合法补传体（权重自动算指纹；course 可选）。"""
+    import hashlib
+
+    from remote.protocol import encode_weights_json
+
+    wj = json.dumps({"it": it, "w": it * 1.5}).encode("utf-8")
+    body: dict = {
+        "run_id": run_id,
+        "it": it,
+        "weights_fp": hashlib.sha256(wj).hexdigest(),
+        "weights_json": encode_weights_json(wj),
+        "row": {"it": it},
+    }
+    if course:
+        body["course"] = course
+    return json.dumps(body).encode("utf-8")
+
+
+def test_offline_backfeed_routes_by_the_declared_course(tmp_path: Path) -> None:
+    """体里带 `course` ⇒ 落进**那门课**的 `offline/<run>/it-NNN/`，另一门课一个字都不写。"""
+    hub = _discover_hub(tmp_path)
+    for c in ("c4", "c5"):
+        _mk_course_dir(tmp_path, c)
+    assert hub.discover() == ["c4", "c5"], hub.courses()
+    base, _ref, srv, th = _boot(tmp_path, hub)
+    try:
+        st, body = _http(
+            base,
+            "/offline/artifact",
+            method="POST",
+            data=_artifact_body("seg-1", 7, course="c5"),
+        )
+        assert st == 200 and body["status"] == "accepted", body
+        assert (tmp_path / "c5" / "remote-jobs" / "offline" / "seg-1" / "it-007").is_dir()
+        assert not (tmp_path / "c4" / "remote-jobs" / "offline").exists(), "串课 = 曲线画错课程"
+        # 段末摘要同规（同一门课）
+        st, body = _http(
+            base,
+            "/offline/result",
+            method="POST",
+            data=json.dumps(
+                {"run_id": "seg-1", "it_end": 7, "state": "complete", "course": "c5"}
+            ).encode("utf-8"),
+        )
+        assert st == 200, body
+        assert (tmp_path / "c5" / "remote-jobs" / "offline" / "seg-1" / "result.json").exists()
+        # 读面（控制台读的就是它）：只报 c5 这一门
+        st, body = _http(base, "/admin/offline")
+        assert st == 200 and list(body["progress"]) == ["c5"], body
+        assert body["progress"]["c5"]["seg-1"]["its"] == [7]
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        th.join(timeout=5)
+
+
+def test_offline_backfeed_without_a_course_is_refused_loudly_on_a_multi_course_hub(
+    tmp_path: Path,
+) -> None:
+    """多课程 hub 上不带课程 ⇒ **响亮 400**（带课程清单），不猜、不错落另一门课。
+
+    为什么不允许猜：补传落到错课程上，那条曲线看起来完全正常（数值合理、时间戳合理），
+    只有事后对账才能发现——比拒收危险得多。
+    """
+    hub = _discover_hub(tmp_path)
+    for c in ("c4", "c5"):
+        _mk_course_dir(tmp_path, c)
+    assert hub.discover() == ["c4", "c5"], hub.courses()
+    base, _ref, srv, th = _boot(tmp_path, hub)
+    try:
+        st, body = _http(
+            base, "/offline/artifact", method="POST", data=_artifact_body("seg-2", 1)
+        )
+        assert st == 400 and "无法归属课程" in body["error"], body
+        assert "c4" in body["error"] and "c5" in body["error"], "拒因要带上课程清单"
+        assert not (tmp_path / "c4" / "remote-jobs" / "offline").exists()
+        assert not (tmp_path / "c5" / "remote-jobs" / "offline").exists()
+        # `?course=` 是运维手工补传那条路（体里没有课程时用它）
+        st, body = _http(
+            base,
+            "/offline/artifact?course=c4",
+            method="POST",
+            data=_artifact_body("seg-2", 1),
+        )
+        assert st == 200 and body["status"] == "accepted", body
+        assert (tmp_path / "c4" / "remote-jobs" / "offline" / "seg-2" / "it-001").is_dir()
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        th.join(timeout=5)
+
+
+def test_spawn_hub_argv_is_the_console_shape(tmp_path: Path) -> None:
+    """控制台实际启动的 argv 形状（`--traj-root <traj> --discover`）——防漂移锚点。"""
+    argv = _spawn_hub(1234, tmp_path)
+    assert "remote.hub_server" in argv
+    assert argv[argv.index("--traj-root") + 1] == str(tmp_path)
+    assert "--discover" in argv
 
 
 def _spawn_hub(port: int, tmp_path: Path) -> list[str]:

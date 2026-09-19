@@ -37,6 +37,7 @@ from rl.loop_round import (
     RoundYieldError,
     advance,
     finish,
+    resolve_collect_mode,
     wait_for,
 )
 from rl.loop_round_steps import RoundSteps
@@ -96,6 +97,22 @@ def test_round_context_seg_ran_is_derived_from_collect_mode() -> None:
     assert not ctx.seg_ran
     ctx.collect_mode = COLLECT_SEGMENT
     assert ctx.seg_ran  # 派生属性：不可能与 collect_mode 分叉
+
+
+def test_resolve_collect_mode_precedence() -> None:
+    """采集模式裁决点：**段长 > 整轮上云 > 本机采样**。
+
+    这不是纯风格：2026-09-17 的半离线整段只算了 `ctx.seg` 而没人翻 `collect_mode`，
+    kind=run 分支因此**永远不可达**（表面一切正常：本机照常采样、账本照常记账）。
+    把优先序扭在一个纯函数上，就不必靠「两个文件里的两行看起来还一致」。
+    """
+    assert resolve_collect_mode("local", 0) == COLLECT_LOCAL
+    assert resolve_collect_mode("node", 0) == COLLECT_NODE
+    assert resolve_collect_mode("run", 3) == COLLECT_SEGMENT
+    assert resolve_collect_mode("run", -1) == COLLECT_SEGMENT  # <0 = 到课程末尾，也是整段
+    # 段长优先：声明 node 但又给了段长 ⇒ 走整段（否则云机永远领不到 kind=run job）
+    assert resolve_collect_mode("node", 2) == COLLECT_SEGMENT
+    assert resolve_collect_mode("local", 1) == COLLECT_SEGMENT
 
 
 def test_round_context_marks_are_ordered_and_unique() -> None:

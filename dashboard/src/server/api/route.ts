@@ -3,7 +3,14 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync
 import path from 'path'
 import { loadConfig } from '../../core/config'
 import { NN_TRAINING, REPO_ROOT, loopControlPath } from '../../core/paths'
-import type { CfEdgeIp, CfProtocol, Component, RolloutSrcMode, SlimMode } from '../../core/types'
+import type {
+  CfEdgeIp,
+  CfProtocol,
+  Component,
+  RolloutSrcMode,
+  SlimMode,
+  TrainMode,
+} from '../../core/types'
 import {
   ActionError,
   type ActionResult,
@@ -115,8 +122,16 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
         // M3：rollout 执行位置（同白名单写法）——与 python `choices=("auto","local","node")`
         // 同字面量域，直接落库（**无**域换算，别在这里发明 on/off 那种中间态）。
         const rolloutSrc = bodyStr(body, 'rolloutSrc')
-        if (rolloutSrc && !['auto', 'local', 'node'].includes(rolloutSrc)) {
-          return errResp(`未知 rollout 位置: ${rolloutSrc}（只接受 auto|local|node）`, 400)
+        // 域与 python `rl/loop_steps.py::ROLLOUT_SRCS` 同源（含离线模式的 `run`）。
+        if (rolloutSrc && !['auto', 'local', 'node', 'run'].includes(rolloutSrc)) {
+          return errResp(`未知 rollout 位置: ${rolloutSrc}（只接受 auto|local|node|run）`, 400)
+        }
+        // 训练模式（2026-09-19）：`在线|离线`。**不能**归到 rolloutSrc 里：离线要同时写
+        // 两个课程级键（run + run_iters=-1）并把该课 hub 置 offline，换算在
+        // `stack/specs.ts::trainModeKnobs`。
+        const trainMode = bodyStr(body, 'trainMode')
+        if (trainMode && !['online', 'offline'].includes(trainMode)) {
+          return errResp(`未知训练模式: ${trainMode}（只接受 online|offline）`, 400)
         }
         return okResp(
           await startPreset(ctx.course, {
@@ -126,6 +141,7 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
             cfEdgeIp: (cfEdgeIp || undefined) as CfEdgeIp | undefined,
             slim: (slim || undefined) as SlimMode | undefined,
             rolloutSrc: (rolloutSrc || undefined) as RolloutSrcMode | undefined,
+            trainMode: (trainMode || undefined) as TrainMode | undefined,
           }),
         )
       }

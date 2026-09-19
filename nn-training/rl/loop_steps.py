@@ -94,15 +94,19 @@ def _course_cf_tunnel(args: Any) -> tuple[str | None, str | None]:
 
 
 #: `--rollout-src` 的合法值（auto = 按 rl-config 解析，缺省 local）。
-ROLLOUT_SRCS: tuple[str, ...] = ("auto", "local", "node")
+ROLLOUT_SRCS: tuple[str, ...] = ("auto", "local", "node", "run")
 
 
 def _rollout_source(args: Any) -> str:
-    """本轮 rollout 在哪跑：`local`（历史行为）| `node`（M3 整轮上云）。
+    """本轮 rollout 在哪跑：`local`（历史行为）| `node`（M3 整轮上云）| `run`（整段上云）。
 
     优先级：CLI `--rollout-src`（非 auto）> `courses.<stem>.rollout_src` > `rl.rollout_src`
     > local。与 `_course_cf_tunnel` 同口径读 rl-config：选项住
     rl-config，**永不进 curricula**（D14 血缘），读不到一律 local（旧行为，不炸训练）。
+
+    ★ `run`（2026-09-19 离线训练模式）是**声明**：真正的段长在 `_run_segment_iters`
+    （`run_iters`），两者都进了 `ROLLOUT_SRCS` —— 只声明 `run` 而不给段长是配置错误，
+    在 `step_course_iter` 里响亮拒跑（静默退化成「本地采样」正是最难查的那类）。
 
     ⚠ 写进 iteration 事件的 wire.rollout_src 用的是本函数的返回值，**不是** args 字面量
     —— 否则 auto 会记成 "auto"，事后无法按「实测在哪跑」分组。

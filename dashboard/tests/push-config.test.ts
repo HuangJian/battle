@@ -232,7 +232,10 @@ describe('启动训练不选模式（防回流）', () => {
     expect(modal).not.toContain('readSavedMode')
     expect(modal).not.toContain('pushEndpoint')
     expect(modal).not.toContain('pushAuthKey')
-    expect(modal).not.toContain('TC_TRAIN_MODE')
+    // 已退役的 pull/push 模式 localStorage 键（`tc.train.mode`）不得回流。
+    // 注意：`TC_TRAIN_MODE` 是**另一个域**（在线/离线，2026-09-19），别把两者混为一谈。
+    expect(modal).not.toContain('tc.train.mode')
+    expect(modal).toContain("const TC_TRAIN_MODE = 'tc.trainMode'")
   })
 
   it('launch 动作面不再传 mode / endpoint / authKey', () => {
