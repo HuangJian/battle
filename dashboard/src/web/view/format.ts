@@ -153,6 +153,7 @@ export interface PhaseSecs {
  * 从 IterRow 拆出准确阶段耗时。
  * - rollout：优先 pureCollectSec。口径（2026-09-19 用户定义，边分发边开采）：
  *   权重就绪**开始分发** → 样本采集完毕可交 PPO（含与采集重叠的分发墙钟）。
+ *   volume 多波：loop 层 combine_reports 聚合 min(分发起点)→max(样本齐)。
  *   旧账本 pure_collect = 末局结算−权重下发完毕；无此键时回退 rolloutSec。
  * - ppo：优先 ppoCloudSec（云端自报真训练秒）；旧账本/本机回退 ppoSec。
  * - net：权重下发（distPhaseSec）+ 远端往返超出真训练的部分（ppoSec−ppoCloudSec）。

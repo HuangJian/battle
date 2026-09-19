@@ -2504,3 +2504,8 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 - **落地**：`dist_common.rollout_collect_sec` / `partition_weights_nodes` / `_WEIGHTS_PUSHED`
   同 it 补波复用；dashboard `phaseSecs` 注释同步。DECISIONS 本条 = 口径变更备案（防再
   「优化」回旧锚点）。
+- **多波聚合（同日补充）**：`rl/reports.aggregate_rollout_collect`——volume 各波报告带
+  `weights_dist_start_ts` / `collect_end_ts`，`combine_reports` 压成 it 级
+  `pure_collect_sec = min(start)→max(end)`（首波分发→全部样本齐，含波间空隙）。无 ts
+  时回退 max(per-wave) 并标 `rollout_collect_aggregated=False`。iteration 事件附加
+  `rollout_collect_aggregated` / `rollout_collect_waves`。

@@ -140,9 +140,12 @@ def write_iteration(jsonl_path: Path, args, it: int, report: dict, m: dict) -> N
                 if "missing" in report
                 else {}
             ),
-            # 纯采集（用户定义）：末局结算 − 权重分发完毕；队列模式实测透传，
-            # 纯本地路径回退为 rollout 全长（无重叠即等价纯采集）。
+            # rollout 采集（用户口径 2026-09-19）：权重开始分发 → 样本齐可交 PPO。
+            # volume 多波：combine_reports 已聚合 min(dist_start)→max(collect_end)。
+            # 纯本地路径回退 rollout 全长。旧账本无 ts 键时仍读 report.pure_collect_sec。
             "pure_collect_sec": report.get("pure_collect_sec", round(m["rollout_sec"], 1)),
+            "rollout_collect_aggregated": report.get("rollout_collect_aggregated"),
+            "rollout_collect_waves": report.get("rollout_collect_waves"),
             # R5 遥测补牙（2026-08-25）：流式的 kl 只是末 wave 单值，对轮内
             # 累积漂移全盲——补 kl_cum/halted/dropped 与各阶段耗时拆分。
             # F4 熔断仍读 kl（每梯度步均值，跨模式可比）；轮内漂移由

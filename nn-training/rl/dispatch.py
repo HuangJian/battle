@@ -1052,12 +1052,18 @@ class RolloutDispatcher:
         collect_sec = dist_common.rollout_collect_sec(t_dist_start_box[0], last_settle_at[0])
         if collect_sec is not None:
             combined["pure_collect_sec"] = collect_sec
-            if t_dist_start_box[0] is not None:
-                combined["weights_dist_start_at"] = time.strftime(
-                    "%Y-%m-%d %H:%M:%S", time.localtime(t_dist_start_box[0])
-                )
-            if t_dist_done_box[0] is not None:
-                combined["weights_dist_done_at"] = time.strftime(
-                    "%Y-%m-%d %H:%M:%S", time.localtime(t_dist_done_box[0])
-                )
+        # 数值锚点：多波 volume 由 combine_reports 做 it 级 min→max 聚合。
+        if t_dist_start_box[0] is not None:
+            combined["weights_dist_start_ts"] = float(t_dist_start_box[0])
+            combined["weights_dist_start_at"] = time.strftime(
+                "%Y-%m-%d %H:%M:%S", time.localtime(t_dist_start_box[0])
+            )
+        end_ts = last_settle_at[0]
+        if end_ts is None:
+            end_ts = t_dist_done_box[0] or time.time()
+        combined["collect_end_ts"] = float(end_ts)
+        if t_dist_done_box[0] is not None:
+            combined["weights_dist_done_at"] = time.strftime(
+                "%Y-%m-%d %H:%M:%S", time.localtime(t_dist_done_box[0])
+            )
         return combined

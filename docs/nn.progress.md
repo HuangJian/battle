@@ -43,6 +43,10 @@
    `pure_collect_sec` = **权重开始分发 → 样本齐可交 PPO**（`last_settle − t_dist_start`，
    含与采集重叠的分发墙钟）。`post_weights_parallel(..., on_alive=)` 每节点成功即 spawn
    采样线程；local/reuse 先开采。旧口径「末局 − 全节点 ready」作废。
+   **多波聚合**：`rl/reports.aggregate_rollout_collect`——volume 各波带
+   `weights_dist_start_ts`/`collect_end_ts`，`combine_reports` 压成 it 级
+   `min(start)→max(end)`（首波分发→全部样本齐）；iteration 事件写
+   `rollout_collect_aggregated` / `rollout_collect_waves`。
 6. **GBK 门禁**（§30 同源）：`test_remote_iter_real_bun` / `test_tpu_probe_notebook`
    改 `tests.subproc_util.run_utf8`；`bun_version` 三处显式 `encoding=utf-8`。
    real_bun 另补 `lives_override=1`（exporter 2026-09-19 起无 flag 即响亮失败）。

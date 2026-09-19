@@ -1220,3 +1220,13 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                     "iteration 事件打 transitions_capped"
                 )
         self._volume_collected = collected_total
+        # it 级 rollout 聚合（2026-09-19）：combine_reports 已把各波
+        # weights_dist_start_ts / collect_end_ts 压成 pure_collect_sec
+        # （首波分发 → 全部样本齐）。多波时打一条便于对照 dashboard。
+        if self._volume_waves > 1 and self._report.get("pure_collect_sec") is not None:
+            agg_ok = self._report.get("rollout_collect_aggregated")
+            log(
+                f"[volume] it{it}: rollout 聚合 waves={self._report.get('rollout_collect_waves', self._volume_waves)} "
+                f"pure_collect_sec={self._report['pure_collect_sec']}"
+                f"（首波分发→样本齐；aggregated={agg_ok}）"
+            )
