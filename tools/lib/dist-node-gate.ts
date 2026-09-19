@@ -156,6 +156,25 @@ export interface LocalSlotsFromConfig {
   source: string
 }
 
+/**
+ * 本机槽位链的**唯一**求解（纯函数；两个分派工具共用，不许各自再写一遍）。
+ *
+ * 序：显式 `--dist-local` > 配置链 > 调用方兜底（物理核数）。返回值带 `source` 供启动
+ * 日志打印——「本机 N 局」是配置意图还是意外、从哪一级来的，必须一眼可读。
+ * 反例（本函数存在的理由）：`eval-course-ckpt` 曾把缺省值留给 Python 侧
+ * `policy.evalLocalSlots`（缺省 4），整条配置链被静默跳过 ⇒ `rl.local_slots: 0`
+ * （本机不参与）的机器口径被违反，评测仍跑本机 4 槽（2026-09-19 用户报障 + 复现）。
+ */
+export function pickDistLocal(
+  explicit: number,
+  cfg: LocalSlotsFromConfig,
+  fallback: number,
+): { slots: number; source: string } {
+  if (Number.isFinite(explicit) && explicit >= 0) return { slots: explicit, source: '--dist-local' }
+  if (cfg.slots !== null) return { slots: cfg.slots, source: `配置 ${cfg.source}` }
+  return { slots: fallback, source: '物理核数（配置未约定）' }
+}
+
 export function configLocalSlots(cfgPath: string): LocalSlotsFromConfig {
   const pick = (v: unknown): number | null =>
     typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.floor(v) : null

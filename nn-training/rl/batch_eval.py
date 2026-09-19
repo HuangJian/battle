@@ -42,6 +42,14 @@ from rl.eval_local import (
 from rl.jsonc import load as jsonc_load
 from rl.log import log
 from rl.queue import _record_agent_meta, bun_version, mm
+
+# 尾竞速：与 A 层（rl/eval_dispatch）**同一机制**（纯函数在 rl/queue_local 单源）。
+from rl.queue_local import (
+    clear_inflight,
+    pick_race_target,
+    pop_inflight,
+    register_inflight,
+)
 from train.loop_util import acquire_lock, cleanup_lock
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -57,6 +65,59 @@ REGRESSION_EVERY = 3  # 与 runner.ts 同值（双侧镜像，改一侧必须同
 BATCH_STAGE_BASE = 2000
 EVAL_SEED0 = 860001
 SEGMENT_LEN = 100
+
+#: 背压退避封顶（秒）。指数序列 0.25/0.5/1/2/4/8 覆盖 6 次重排。
+BUSY_BACKOFF_CAP_SEC = 8.0
+#: 无 status 的异常（节点 SDK 直抛）里的 busy 文案判据，与 rl/bc_dispatch.is_busy_hint 同源。
+_BUSY_HINT = "busy"
+
+
+def is_transient_error(e: BaseException) -> bool:
+    """背压/瞬断判定：True = 限流或网络抖动，**不得**计入节点失败 streak。
+
+    优先级：① `DistError.transient`（dist_common.fetch_task 对 10054/超时/408-429-5xx
+    的标记）；② `DistError.status ∈ TRANSIENT_HTTP_STATUS`；③ 文案含 busy。
+    非 DistError 的 OSError/TimeoutError（连接重置、读超时）一律 transient。
+    判据落在 dist_common（单一实现），本函数只做兜底分类供调度用。
+    """
+    if isinstance(e, dist_common.DistError):
+        if e.transient:
+            return True
+        if e.status in dist_common.TRANSIENT_HTTP_STATUS:
+            return True
+        return _BUSY_HINT in str(e.reason)[:64].lower()
+    if isinstance(e, OSError):  # ConnectionResetError / TimeoutError / URLError …
+        return True
+    return _BUSY_HINT in str(e)[:64].lower()
+
+#: 失联/未就绪节点的重探间隔（秒）—— 用户 2026-09-19 第 5 条：「失联的节点，每 20 秒
+#: ping 一次，ping 通了就立即传权重派任务」。旧实现只在**单元开头**探一次：一个单元内
+#: 节点恢复也永远等不到活（一次性评估 = 一个单元 ⇒ 整批都等不到）。
+#: `policy.recoverPingSec` 可覆盖（单测用极小值）。
+RECOVER_PING_SEC = 20.0
+#: 「零消费者」宽限（秒）：没有任何节点就绪、本机槽位也 0 时，等多久才判定整批无人可跑
+#: （响亮收摊，不无限等）。有本机槽位时不适用——本地永远是消费者 ⇒ 节点可无限重探。
+NO_CONSUMER_GRACE_SEC = 180.0
+#: 单节点「恢复后仍 0 局成功」的最大轮次（`policy.nodeRecoveryTries` 可覆盖）——
+#: 有进展即清零，见 BatchEvalRunner.mark_tripped。
+NODE_RECOVERY_TRIES = 3
+
+
+def node_gate_reason(ping: dict, local_bun: str, code_hash_local: str) -> str | None:
+    """节点门判据（纯函数，单测覆盖）：None = 可用，否则拒派原因。
+
+    门 = evalSupport ∧ stageJsonSupport ∧ bun major.minor 一致 ∧ codeHash 一致
+    （codeHash 与 rollout 门同源，实现在 `dist_common.check_code_hash`）。
+    """
+    if not ping.get("evalSupport"):
+        return "lacks evalSupport"
+    if not ping.get("stageJsonSupport"):
+        return "lacks stageJsonSupport"
+    node_ver = str(ping.get("bunVersion", "?"))
+    if mm(node_ver) != mm(local_bun):
+        return f"bun version mismatch (node {node_ver} vs local {local_bun})"
+    return dist_common.check_code_hash(ping, code_hash_local)
+
 
 #: policy → agent 权重桶 `kind`。agent 的 `/v1/task` 按 **(kind, wver)** 精确查缓存桶
 #: （无 policy 豁免，2026-09-19 核实）⇒ 上传权重与查询任务的 kind **必须同值**，
@@ -74,6 +135,16 @@ KIND_FOR_POLICY: dict[str, str] = {
 def kind_for_policy(policy: str) -> str:
     """policy → 权重桶 kind（未知 policy 回落 'rollout'，与旧调用方逐字一致）。"""
     return KIND_FOR_POLICY.get(str(policy), "rollout")
+
+
+#: 一次性评估入口专用桶。**为什么不蹭 'rollout'**（2026-09-19 实测事故）：节点侧
+#: 同 kind 权重文件按保留份数收敛（`workdir-cleanup.WEIGHT_FILES_KEEP = 4`），而训练
+#: 作业每轮向 'rollout' 桶 POST 一份新权重 ⇒ 一次性评估那份固定权重在几秒内就被扫掉；
+#: 但另一支 agent 进程（共享同一 `tmp/dist-agent`）的内存桶仍说它 cached ⇒ client 收到
+#: "kept" 后所有任务在子进程里 ENOENT 退出（agent 直接断连 = client 见 WinError 10054），
+#: 重试耗尽 ⇒ 单元 0/50 settled（`local_slots: 0` 时整批 0 行、exit 1）。
+#: 独立 kind 让评估权重自成一桶（该 kind 下只有它一份）⇒ 训练作业的 churn 扫不到它。
+ONESHOT_EVAL_KIND = "eval"
 
 
 def utc_now_iso() -> str:
@@ -730,6 +801,13 @@ class BatchEvalRunner:
         status_timeout = float(policy_cfg.get("statusTimeoutSec", 3))
         task_timeout = float(policy_cfg.get("taskTimeoutSec", 900))
         fail_streak_max = int(policy_cfg.get("nodeFailStreak", 3))
+        # 背压参数（与 rl/bc_dispatch 的 busy 重排同源，默认值取同一量级）：
+        # 节点满负荷时回 503 busy / 连接被重置（10054）——是**限流信号不是故障**。
+        # 原实现把它计入 nodeFailStreak：一套被训练作业占满的集群会在 1 秒内把
+        # 6 个节点全部熔断（2026-09-19 实测 x20-powered it0 探针 200 局 **全部**
+        # 落本地，单元墙钟 172–191s，日志里只有十几行 “requeued”）。
+        busy_retry_limit = int(policy_cfg.get("busyRetryLimit", 6))
+        busy_backoff_sec = float(policy_cfg.get("busyBackoffSec", 0.25))
         window = float(getattr(args, "eval_window_sec", 1500) or 1500)
         deadline = time.time() + window
         god = self.policy == "god"
@@ -756,8 +834,30 @@ class BatchEvalRunner:
         # 没有课程覆盖语义，传 3 之类会把「难度默认」硬编码成常数（改难度即错）。
         unit_lives = None if unit.get("lives") is None else int(unit["lives"])
         unit_level = None if unit.get("level") is None else int(unit["level"])
-        seeds = [int(s) for s in unit["seeds"]]
-        pairs = [(int(unit["stageId"]), s) for s in seeds]
+        #: 多关单单元（一次性评估）的逐关参数表；缺省空 ⇒ 全部回落 unit 级字段。
+        stage_params: dict = unit.get("stageParams") or {}
+        #: 失联重探间隔（用户第 5 条：每 20s ping 一次，通了就立即传权重派单）。
+        recover_ping_sec = float(policy_cfg.get("recoverPingSec", RECOVER_PING_SEC))
+        #: 「零消费者」宽限（秒）——**只在整批从未有过任何消费者时生效**：没有任何节点
+        #: 就绪过 + 本机槽位 0 ⇒ 等到这个上限就响亮 deferred（不无限等）。曾就绪过的节点
+        #: 掉线后仍按 recover_ping_sec 一直重探到窗口截止（用户第 5 条）。
+        no_consumer_grace = float(policy_cfg.get("noConsumerGraceSec", NO_CONSUMER_GRACE_SEC))
+        #: 单节点「恢复后仍 0 局成功」的最大轮次：连续这么多次就认定它是**坏的**而不是
+        #: 一时失联，本单元不再等它（其余节点/本机槽位继续）。有进展（结算过任意一局）
+        #: 就把轮次清零 —— 用户第 5 条的「失联重探」是给抖动/重启用的，不是给死节点。
+        max_recovery_tries = int(policy_cfg.get("nodeRecoveryTries", NODE_RECOVERY_TRIES))
+        #: 收工断连的作用域键（只关本单元自己的在飞请求——rollout 同进程并发，不能误伤）。
+        req_scope = f"batcheval:{iter_id}"
+        # 新单元开跑：解除上一单元可能的收工态（否则本单元请求落地就被拒）。
+        dist_common.clear_abort()
+        # 单 unit 跨多关（一次性评估：用户 2026-09-19 第 2 条「不要 u0/u1/u2 阶段」）：
+        # unit["pairs"] = [[stageId, seed], …] 时以它为准；缺省仍由 seeds × stageId 展开
+        #（ladder/corpora 的单元逐字不变）。逐关参数走 unit["stageParams"]，见 params_for。
+        if unit.get("pairs"):
+            pairs = [(int(p[0]), int(p[1])) for p in unit["pairs"]]
+        else:
+            seeds = [int(s) for s in unit["seeds"]]
+            pairs = [(int(unit["stageId"]), s) for s in seeds]
         total = len(pairs)
         done_before = self._done_keys(key16)
         todo = [p for p in pairs if p not in done_before]
@@ -765,6 +865,7 @@ class BatchEvalRunner:
             log(f"[batcheval] {unit['rung']} u{self.unit_idx}: already settled — skip")
             return {"settled": total, "total": total, "dropped": 0}
         t_start = time.time()
+        trace = dist_common.trace_enabled()
         # R4-G1 心跳：单元开始（console 只读，显示当前批/单元/rung）。
         _heartbeat(
             window_open=(
@@ -794,69 +895,221 @@ class BatchEvalRunner:
         local_bun = bun_version(self.bun)
         # 节点门指纹（2026-09-17 统一）：与 rollout 门同源 = SSOT 清单的 codeHash。
         code_hash_local = dist_common.compute_code_hash()
-        alive = []
-        for n in self.cfg.get("nodes", []):
-            if not n.get("enabled", True):
-                continue
-            nid = str(n.get("id") or n.get("url") or "?")
-            ping = dist_common.node_ping(n["url"], n.get("authKey", ""), timeout=status_timeout)
-            if ping is None:
-                continue
-            if not ping.get("evalSupport"):
-                log(f"[batcheval] node {nid}: lacks evalSupport — skipped")
-                continue
-            if not ping.get("stageJsonSupport"):
-                log(f"[batcheval] node {nid}: lacks stageJsonSupport — skipped")
-                continue
-            if mm(str(ping.get("bunVersion", "?"))) != mm(local_bun):
-                log(f"[batcheval] node {nid}: bun version mismatch — skipped")
-                continue
-            why = dist_common.check_code_hash(ping, code_hash_local)
-            if why:
-                # B/C 严格：拒派不静默降级（P2 DoD；A 层门在 eval_dispatch，同一判据）。
-                log(f"[batcheval] node {nid}: {why} — refused")
-                continue
-            c_n = max(1, int(n.get("concurrency") or ping.get("cpus") or 1))
-            alive.append({"id": nid, "url": n["url"], "key": n.get("authKey", ""), "c": c_n})
-        if not alive and local_weights is None:
-            log("[batcheval] no eval-capable node and no local — unit deferred")
-            return {"settled": 0, "total": total, "dropped": total}
-
-        nodes_ok = []
-        # god 也 POST：占位 `{}` 的 sha 就是它的 wver（见上）——不 POST 则 /v1/task
-        # 必然 409（此为 C 层 god 批此前「无节点可用」表象的真因）。
-        assert weights_bytes is not None
-        nodes_ok = dist_common.post_weights_parallel(
-            alive,
-            iter_id,
-            wver,
-            weights_bytes,
-            timeout=min(300.0, max(60.0, task_timeout)),
-            kind=kind,
-            log=log,
-        )
-        if not nodes_ok and local_weights is None:
-            log("[batcheval] all weight POSTs failed — unit deferred")
-            return {"settled": 0, "total": total, "dropped": total}
-        if not nodes_ok and (local_weights is None or local_slots <= 0):
-            log("[batcheval] god unit: no node and no local slot — deferred")
-            return {"settled": 0, "total": total, "dropped": total}
-
+        # ---- 派发通道：**每节点各自就绪、各自派单**（用户 2026-09-19 五条裁定）----
+        # 旧实现是三个**串行阶段**：ping 全部节点 → 全部节点收权重 → 才开派。慢节点把整批
+        # 拖住（实测 gate 6.83s + weights 0.79s，**且每个单元重跑一遍**），而**已经就绪的
+        # 节点在这段时间里空转**（用户：「一个节点权重分发成功后立即派发任务」）。现在每个
+        # 节点一条通道：ping 通 → 传权重 → **立刻**派活，不等任何别的节点；就绪的节点不再
+        # 被 ping、不再重传同一份权重；失联节点每 recover_ping_sec 重探，通了立即派单。
+        enabled_nodes = [n for n in self.cfg.get("nodes", []) if n.get("enabled", True)]
+        # 本机槽位不需要任何门/权重 ⇒ 与节点通道并行、**立刻**开工。
+        local_on = local_weights is not None and local_slots > 0
         log(
             f"[batcheval] {unit['rung']} u{self.unit_idx}/{self.unit_of} "
-            f"policy={self.policy}: dispatch {len(todo)} games "
-            f"->{[(n['id'], n['c']) for n in nodes_ok]}"
-            + (f" [local ×{local_slots}]" if local_weights else "")
+            f"policy={self.policy}: dispatch {len(todo)} games -> "
+            f"{len(enabled_nodes)} 节点通道（各自 ping+权重就绪即派单，不等慢节点）"
+            + (f" + local ×{local_slots}" if local_on else "")
         )
+
+        # god 的占位 `{}` 权重也在各自通道内 POST（不 POST 则 /v1/task 必然 409 ——
+        # 这正是 C 层 god 批此前「无节点可用」表象的真因）。
+        assert weights_bytes is not None
 
         pending: deque[tuple[int, int]] = deque(todo)
         lock = threading.Lock()
         seen: set[tuple[int, int]] = set()
         attempts: dict[tuple[int, int], int] = {}
-        streaks = {nd["id"]: 0 for nd in nodes_ok}
+        streaks: dict[str, int] = {}
+        #: 逐节点通道账（诊断 + 单测断言）：ping 次数 / 就绪时刻 / 本单元曾就绪过的节点。
+        node_pings: dict[str, int] = {}
+        node_ready_at: dict[str, float] = {}
+        nodes_ready_ever: set[str] = set()
+        #: 通道表 + 当前就绪通道数（>0 = 有节点在干活）。
+        lanes: dict[str, dict] = {}
+        ready_lanes = [0]
         settled = [0]
+        #: 事件追踪（用户 2026-09-19：「CPU 满一阵又掉档几十秒」——需要看**在飞数**
+        #: 随时间的变化，才能分清「排队空了（尾巴）」与「派发被阻塞（阶段）」）。
+        in_flight = [0]
+        #: 正在落盘逐局行的赢家数。收工**只等它归零**（微秒级）：settled 一满时可能还有
+        #: 一个赢家在写自己那行（它在置位 all_done 之前已进 record），不等就会丢行。
+        #: 而慢节点/竞速副本的回包**一律不用等**——那些行永不需要（结果本就无用）。
+        writers = [0]
+        #: 竞速败者/收尾副本的丢弃计数（收尾汇总一行，替代赛后逐条刷屏）。
+        dup_settles = [0]
+        stop_watch = threading.Event()
+        #: 全部任务已结算 → worker 立即收工（尾段竞速副本不再空等）。
+        all_done = threading.Event()
+        #: in-flight 副本账（与 A 层同机制）：task → 副本数 / 持有该任务的节点集。
+        #: 队列空了但账非空 = 只剩尾巴 ⇒ 空闲槽按 pick_race_target 复制一份抢单。
+        inflight: dict[tuple[int, int], int] = {}
+        inflight_nodes: dict[tuple[int, int], set[str]] = {}
         node_games: dict[str, int] = {}
+        #: 每任务的背压重排次数（跨 worker 共享，否则任务在节点间来回被推会无限重排）。
+        busy_tries: dict[tuple[int, int], int] = {}
+        #: 逐节点瞬断/硬失败计数：单元结束时入账，避免「熔断静默降本地」。
+        node_soft_fails: dict[str, int] = {}
+        node_hard_fails: dict[str, int] = {}
         jsonl_lock = threading.Lock()
+
+        # ---- 通道机器（req 1/3/5）：就绪即派单；就绪不再 ping/传权重；失联重探 ----
+        def lane_state(nd: dict) -> dict:
+            """规范化节点描述 + 通道状态。
+
+            worker / fetch_task 要的是 `{"id", "url", "key"}` 形态（旧实现由 alive 列表
+            构造）；配置里的节点是 `{"id","url","authKey","concurrency"}` ⇒ 这里做一次
+            归一，避免两套形状在各处硬取键（2026-09-19 实测：直接传配置 dict 会让
+            fetch_task 取 `nd["key"]` 抛 KeyError，整批 0 局）。
+            """
+            nid = str(nd.get("id") or nd.get("url") or "?")
+            lane = lanes.get(nid)
+            if lane is None:
+                lane = {
+                    "id": nid,
+                    "raw": nd,
+                    "nd": {
+                        "id": nid,
+                        "url": str(nd.get("url") or ""),
+                        "key": str(nd.get("authKey") or ""),
+                    },
+                    "ready": False,
+                    "tripped": False,
+                    "next_try": 0.0,
+                    "tries": 0,
+                    "strikes": 0,
+                    "given_up": False,
+                    "c": max(1, int(nd.get("concurrency") or 1)),
+                }
+                lanes[nid] = lane
+            return lane
+
+        def bringup(lane: dict) -> bool:
+            """未就绪节点的两步：ping → POST 权重；任一步失败 ⇒ recover_ping_sec 后重探。
+
+            **就绪节点永不进来**（调用方只在 `not ready` 时调）——用户第 3 条：已经在正常
+            工作的节点不要 ping、不要重传同一份权重，一直派活就好。
+            """
+            nd = lane["nd"]
+            nid = str(lane["id"])
+            lane["tries"] += 1
+            with lock:
+                node_pings[nid] = node_pings.get(nid, 0) + 1
+            t0 = time.monotonic()
+            try:
+                ping = dist_common.node_ping(
+                    str(nd.get("url") or ""),
+                    str(nd.get("key") or ""),
+                    timeout=status_timeout,
+                )
+                ping_err = ""
+            except Exception as e:  # node_ping 自吞异常；这里兜底防御
+                ping = None
+                ping_err = f": {str(e)[:80]}"
+            dt = time.monotonic() - t0
+            if ping is None:
+                log(
+                    f"[batcheval] node {nid}: ping 失败/超时（{dt:.2f}s{ping_err}）"
+                    f" — {recover_ping_sec:.0f}s 后重探（就绪节点不会被重探）"
+                )
+                lane["next_try"] = time.time() + recover_ping_sec
+                return False
+            why = node_gate_reason(ping, local_bun, code_hash_local)
+            if why:
+                # B/C 严格：拒派不静默降级（P2 DoD；A 层门在 eval_dispatch，同一判据）。
+                # 首次 + 之后每 3 次喊一次（20s 一次的重探不刷屏；节点升级后自动加入）。
+                if lane["tries"] == 1 or lane["tries"] % 3 == 0:
+                    log(
+                        f"[batcheval] node {nid}: {why} — 拒派（{recover_ping_sec:.0f}s 后重探；"
+                        f"节点升级/修复后自动加入）"
+                    )
+                lane["next_try"] = time.time() + recover_ping_sec
+                return False
+            t_w = time.monotonic()
+            try:
+                mode = dist_common.post_weights(
+                    str(nd.get("url") or ""),
+                    str(nd.get("key") or ""),
+                    iter_id,
+                    wver,
+                    weights_bytes,
+                    timeout=min(300.0, max(60.0, task_timeout)),
+                    kind=kind,
+                )
+            except Exception as e:
+                log(
+                    f"[batcheval] node {nid}: weights POST 失败（{str(e)[:120]}）"
+                    f" — {recover_ping_sec:.0f}s 后重探"
+                )
+                lane["next_try"] = time.time() + recover_ping_sec
+                return False
+            dist_common.note_weights_pushed(wver, nid)
+            lane["c"] = max(
+                1, int(lane["raw"].get("concurrency") or ping.get("cpus") or 1)
+            )
+            lane["ready"] = True
+            with lock:
+                ready_lanes[0] += 1
+                node_ready_at[nid] = time.time()
+                nodes_ready_ever.add(nid)
+            log(
+                f"[batcheval] node {nid} 就绪（ping {dt:.2f}s + "
+                f"weights {time.monotonic() - t_w:.2f}s, {mode}, {lane['c']} 槽）— 立即派单"
+            )
+            return True
+
+        def mark_tripped(lane: dict) -> None:
+            """节点掉线（连续真失败）：交出槽位并安排重探（用户第 5 条）。
+
+            「重探」有界：连续 `max_recovery_tries` 轮**恢复后仍 0 局成功** ⇒ 认定节点是
+            坏的（不是一时失联），本单元不再等它（否则一个必坏节点会拖满整窗）。
+            """
+            lane["ready"] = False
+            lane["tripped"] = True
+            lane["strikes"] = int(lane.get("strikes", 0)) + 1
+            lane["next_try"] = time.time() + recover_ping_sec
+            with lock:
+                ready_lanes[0] = max(0, ready_lanes[0] - 1)
+            if lane["strikes"] >= max_recovery_tries:
+                lane["given_up"] = True
+                log(
+                    f"[batcheval] node {lane['id']}: 连续 {lane['strikes']} 轮恢复后仍 0 局成功"
+                    f" — 本单元不再等它（其余节点/本机槽位继续；查节点日志与 /v1/ping）"
+                )
+
+        def spawn_workers(nd: dict, lane: dict, count: int) -> list[threading.Thread]:
+            ws: list[threading.Thread] = []
+            for i in range(count):
+                t = threading.Thread(target=worker, args=(nd, lane, i), daemon=True)
+                t.start()
+                ws.append(t)
+            return ws
+
+        def supervise(nd: dict) -> None:
+            """一个节点的通道：未就绪 → 重探；就绪 → 起槽位线程；掉线 → 交回重探。"""
+            dist_common.set_request_tag(req_scope)
+            lane = lane_state(nd)
+            nid = str(lane["id"])
+            while not all_done.is_set() and time.time() < deadline:
+                if lane["given_up"]:
+                    return
+                if not lane["ready"]:
+                    wait = lane["next_try"] - time.time()
+                    if wait > 0:
+                        all_done.wait(min(1.0, wait))
+                        continue
+                    if not bringup(lane):
+                        continue
+                lane["tripped"] = False
+                ws = spawn_workers(lane["nd"], lane, lane["c"])
+                for w in ws:
+                    w.join()
+                if not lane["tripped"] or all_done.is_set():
+                    return
+                mark_tripped(lane)
+                log(
+                    f"[batcheval] node {nid} 掉线（连续真失败）— {recover_ping_sec:.0f}s 后重探，"
+                    f"ping 通即重新派单"
+                )
 
         def window_open() -> bool:
             # 关窗即停派新局（§6.5 / 用户 2026-09-11：rollout 抢占让出集群）。
@@ -950,9 +1203,29 @@ class BatchEvalRunner:
                 )
             with lock:
                 settled[0] += 1
+                writers[0] = max(0, writers[0] - 1)
                 node_games[nd_id] = node_games.get(nd_id, 0) + 1
+                # 有进展 ⇒ 该节点可信，清零「恢复轮次」（坏节点 vs 一时失联的判据）。
+                if nd_id in lanes:
+                    lanes[nd_id]["strikes"] = 0
+
+        def params_for(stage_id: int) -> dict:
+            """逐局参数（单 unit 跨多关）：`stageParams[str(stageId)]` 优先，缺省回落 unit 级值。
+
+            旧行为（ladder/corpora 的单元）unit 级只有一个 stage ⇒ `stageParams` 缺省时
+            逐字段回落，行为逐字不变。
+            """
+            p = stage_params.get(str(stage_id)) or stage_params.get(stage_id) or {}
+            return {
+                "maxTicks": int(p.get("maxTicks", unit["maxTicks"])),
+                "difficulty": str(p.get("difficulty", unit.get("difficulty"))),
+                "stageJson": str(p.get("stageJson", unit.get("stageJson"))),
+                "lives": unit_lives if p.get("lives") is None else int(p["lives"]),
+                "level": unit_level if p.get("level") is None else int(p["level"]),
+            }
 
         def fetch_manifest(nd: dict, task: tuple[int, int]) -> dict:
+            up = params_for(task[0])
             if nd["id"] == "local":
                 assert local_weights is not None
                 m = run_local_eval_game(
@@ -963,15 +1236,15 @@ class BatchEvalRunner:
                     self.eval_log.parent
                     / "local-batcheval"
                     / f"u{self.unit_idx}_s{task[0]}_seed{task[1]}",
-                    max_ticks=int(unit["maxTicks"]),
-                    difficulty=str(unit["difficulty"]),
+                    max_ticks=up["maxTicks"],
+                    difficulty=up["difficulty"],
                     timeout_sec=task_timeout,
                     # 全量 wver：agent 按完整 sha 存桶；且本局 manifest.wver 就是它
                     #（validate 用同一个值对账）。key16 只作行字段。
                     wver=wver,
-                    stage_json=str(unit["stageJson"]),
-                    lives_override=unit_lives,
-                    player_level=unit_level,
+                    stage_json=up["stageJson"],
+                    lives_override=up["lives"],
+                    player_level=up["level"],
                     policy=self.policy,
                 )
             else:
@@ -983,14 +1256,14 @@ class BatchEvalRunner:
                     wver=wver,
                     stage=task[0],
                     seed=task[1],
-                    max_ticks=int(unit["maxTicks"]),
-                    difficulty=str(unit["difficulty"]),
+                    max_ticks=up["maxTicks"],
+                    difficulty=up["difficulty"],
                     timeout=task_timeout,
                     mode="eval",
                     kind=kind,
-                    stage_json=str(unit["stageJson"]),
-                    lives_override=unit_lives,
-                    player_level=unit_level,
+                    stage_json=up["stageJson"],
+                    lives_override=up["lives"],
+                    player_level=up["level"],
                     policy=self.policy,
                 )
             why = dist_common.validate_eval_result(m, wver)
@@ -998,62 +1271,287 @@ class BatchEvalRunner:
                 raise dist_common.DistError(0, why)
             return m
 
-        def worker(nd: dict) -> None:
-            while time.time() < deadline:
+        def worker(nd: dict, lane: dict, slot: int) -> None:
+            dist_common.set_request_tag(req_scope)
+            nid = str(nd["id"])
+            while time.time() < deadline and not all_done.is_set():
                 task = None
+                race_copy = False
                 with lock:
-                    if streaks.get(nd["id"], 0) >= fail_streak_max:
+                    if streaks.get(nid, 0) >= fail_streak_max:
+                        # 熔断 → 交回通道：supervise 会每 recover_ping_sec 重探（req 5）。
+                        if nid != "local":
+                            lane["tripped"] = True
                         return
                     # 关窗（rollout 抢占）本地与远端一并停派；在途局自然收完。
                     if pending and window_open():
                         task = pending.popleft()
                         attempts[task] = attempts.get(task, 0) + 1
+                        register_inflight(inflight, task)
+                        inflight_nodes.setdefault(task, set()).add(nid)
+                    elif inflight:
+                        # ---- 尾段竞速（与 A 层同机制）----
+                        # 队列已空但还有在飞局 ⇒ 空闲槽复制一份到本节点，**先返回者结算**、
+                        # 败者按 dup 丢弃。专项修的就是「快节点干完、只剩慢节点拖尾巴」：
+                        # 实测 3 台慢节点（a96 平均 124s/局）只出 8.9% 的局却吃掉 63% 节点秒，
+                        # 每单元尾巴空转 1–3 分钟（2026-09-19）。
+                        cand = pick_race_target(inflight, nid, inflight_nodes, {})
+                        if cand is not None:
+                            task = cand
+                            inflight[task] += 1
+                            inflight_nodes.setdefault(task, set()).add(nid)
+                            # **不**递增 attempts：副本是投机重跑，若算进去，一局被 6 台
+                            # 各抢一次后**一次真失败**就会直接耗满配额（局面被丢弃）。
+                            # 该局必然已从 pending 领过一次 ⇒ 键已在（setdefault 兜底）。
+                            attempts.setdefault(task, 1)
+                            race_copy = True
                 if task is None:
-                    if not pending:
+                    if not pending and not inflight:
                         return
                     if not window_open():
                         # yield：退出 worker，剩余 seed 留给下一次 idle 窗口续跑。
                         return
-                    time.sleep(min(5.0, max(0.1, deadline - time.time())))
+                    all_done.wait(min(5.0, max(0.1, deadline - time.time())))
                     continue
                 attempt = attempts[task]
+                if race_copy:
+                    log(
+                        f"[batcheval] tail-race s{task[0]}/seed{task[1]} "
+                        f"node={nid} — race lane"
+                    )
+                sleep_for = 0.0
+                manifest: dict | None = None
+                t_task = time.monotonic()
+                with lock:
+                    in_flight[0] += 1
+                if trace:
+                    log(f"[batcheval] → {nid} s{task[0]}/seed{task[1]}")
                 try:
                     manifest = fetch_manifest(nd, task)
-                    record(manifest, nd["id"], task)
                     ok = True
                     err = ""
+                    transient = False
                 except Exception as e:
                     ok = False
                     err = str(e)[:200]
+                    transient = is_transient_error(e)
+                finally:
+                    with lock:
+                        in_flight[0] -= 1
+                # 竞速败者：结果与胜者逐字相同（同一 (stage,seed,wver) 纯函数），丢弃不落盘。
+                dup_settle = False
+                last_settled = False
+                if ok:
+                    with lock:
+                        if task in seen:
+                            pop_inflight(inflight, inflight_nodes, task, nid)
+                            dup_settle = True
+                        else:
+                            seen.add(task)
+                            writers[0] += 1  # 收工前必须等它落盘（见 writers 注释）
+                            clear_inflight(inflight, inflight_nodes, task)
+                            streaks[nid] = 0
+                            busy_tries.pop(task, None)
+                            if len(seen) >= total:
+                                all_done.set()
+                                last_settled = True
+                if dup_settle:
+                    dup_settles[0] += 1
+                    # 收工后的副本回包是**噪**（收尾汇总里给计数）；在飞期间的逐条留作
+                    # 竞速证据（且只在开了事件追踪时打，训练循环的日志逐字不变）。
+                    if trace and not all_done.is_set():
+                        log(
+                            f"[batcheval] dup settle s{task[0]}/seed{task[1]} node={nid} — dropped"
+                        )
+                    continue
+                if ok and manifest is not None:
+                    record(manifest, nd["id"], task)  # 只有胜者落盘（settled/node_games 同源）
+                    if trace:
+                        # 事件：**单局结果返回**（含节点与耗时：与「→」配对可算在飞曲线）。
+                        log(
+                            f"[batcheval] ← {nid} s{task[0]}/seed{task[1]} "
+                            f"{time.monotonic() - t_task:.1f}s ticks={manifest.get('ticks')} "
+                            f"{manifest.get('outcome')}"
+                        )
+                    if last_settled:
+                        # 用户第 4 条：竞速后 settled 一满，**直接关闭所有节点的连接**——
+                        # 立即！马上！right now！不等慢节点把尾巴算完（那些结果本就无用）。
+                        closing = dist_common.abort_active_requests(req_scope)
+                        log(
+                            f"[batcheval] settled 满（{len(seen)}/{total}）— 断连 {closing} 条"
+                            f"在飞连接 + 拒发新请求，立即收工（慢节点/竞速副本不再等）"
+                        )
+                    continue
                 with lock:
-                    if ok:
-                        seen.add(task)
-                        streaks[nd["id"]] = 0
+                    pop_inflight(inflight, inflight_nodes, task, nid)
+                    # 竞速副本/收工断连的回包：本任务已被胜者结算（或本单元已收工）⇒ 结果
+                    # 无关，**丢弃且不计任何账**（既不是背压，也不是节点故障）。不加这一支，
+                    # 主动断连会被当成硬失败去熔断节点（2026-09-19）。
+                    if task in seen or all_done.is_set():
+                        pass
+                    elif transient and busy_tries.get(task, 0) < busy_retry_limit:
+                        # 背压：节点满负荷/连接被重置 —— 不是节点故障。不计 streak，
+                        # 退避后重排（指数、封顶），不消耗 attempt 配额。
+                        n = busy_tries.get(task, 0) + 1
+                        busy_tries[task] = n
+                        pending.append(task)
+                        node_soft_fails[nid] = node_soft_fails.get(nid, 0) + 1
+                        sleep_for = min(BUSY_BACKOFF_CAP_SEC, busy_backoff_sec * (2 ** (n - 1)))
+                        log(
+                            f"[batcheval] {nid} s{task[0]}/seed{task[1]} 背压（{err[:90]}）"
+                            f"→ 退避 {sleep_for:.2f}s 重排（第 {n}/{busy_retry_limit} 次；不计节点失败）"
+                        )
                     else:
-                        streaks[nd["id"]] = streaks.get(nd["id"], 0) + 1
+                        streaks[nid] = streaks.get(nid, 0) + 1
+                        node_hard_fails[nid] = node_hard_fails.get(nid, 0) + 1
                         if attempt < EVAL_TASK_ATTEMPTS and task not in seen:
                             pending.append(task)
-                            log(f"[batcheval] s{task[0]}/seed{task[1]} failed ({err}) — requeued")
+                            log(
+                                f"[batcheval] {nid} s{task[0]}/seed{task[1]} failed ({err}) — "
+                                f"requeued（第 {attempt}/{EVAL_TASK_ATTEMPTS} 次）"
+                            )
+                        else:
+                            # 试满配额（或已结算）⇒ 不再重排，但**失败本身必须留痕**：
+                            # 2026-09-19 实测「真失败计数 gcs=1」却在日志里查不到任何原因
+                            #（原实现只有「会重排」那条才打日志）——静默计数正是排查黑洞。
+                            log(
+                                f"[batcheval] {nid} s{task[0]}/seed{task[1]} failed ({err}) — "
+                                f"试满 {attempt}/{EVAL_TASK_ATTEMPTS} 次，本单元不再重排"
+                            )
+                        if streaks[nid] == fail_streak_max:
+                            if nid != "local":
+                                lane["tripped"] = True  # supervise 收工后会重探（req 5）
+                            log(
+                                f"[batcheval] ⚠ 节点 {nid} 连续 {fail_streak_max} 次真失败"
+                                f" → 停派该节点，{recover_ping_sec:.0f}s 后重探"
+                                f"（其余节点继续；/v1/ping 看 codeHash 与节点日志）"
+                            )
+                if sleep_for > 0:
+                    # 锁外退避（持锁睡会卡住全部 worker）。
+                    time.sleep(sleep_for)
 
-        threads = []
-        for nd in nodes_ok:
-            for _ in range(nd["c"]):
-                threads.append(threading.Thread(target=worker, args=(nd,), daemon=True))
-        if local_weights is not None and local_slots > 0:
-            for _ in range(local_slots):
-                threads.append(
-                    threading.Thread(target=worker, args=({"id": "local"},), daemon=True)
+        threads: list[threading.Thread] = []
+        # 本机槽位：无门无权重 ⇒ **立刻**开工，不等任何节点（req 1 的精神）。
+        if local_on:
+            local_lane = {
+                "id": "local",
+                "nd": {"id": "local"},
+                "ready": True,
+                "tripped": False,
+                "next_try": 0.0,
+                "tries": 0,
+                "c": local_slots,
+            }
+            threads += spawn_workers({"id": "local"}, local_lane, local_slots)
+        # 每节点一条通道：各自就绪即派单；失联每 recover_ping_sec 重探（req 1/3/5）。
+        for nd in enabled_nodes:
+            t = threading.Thread(target=supervise, args=(nd,), daemon=True)
+            t.start()
+            threads.append(t)
+        if trace:
+            # 每 2s 一行在飞采样：掉档时一眼看出是「队列空了」还是「派发停了」。
+            def _watch() -> None:
+                while not stop_watch.wait(2.0):
+                    with lock:
+                        p, inf, st = len(pending), in_flight[0], settled[0]
+                    log(
+                        f"[batcheval] ⏱ u{self.unit_idx} pending={p} inflight={inf} "
+                        f"settled={st}/{total}"
+                    )
+
+            threading.Thread(target=_watch, daemon=True).start()
+        # 收尾等待：settled 一满（all_done 由最后结算的 worker 置位）或墙钟到点即收工。
+        # 「零消费者」只在**整批从未有过任何消费者**时生效（无节点就绪过 + 本机槽位 0）
+        # ⇒ 有界响亮收摊，而不是默认 86400s 窗口里干等。
+        while not all_done.is_set() and time.time() < deadline:
+            if (
+                not local_on
+                and enabled_nodes
+                and ready_lanes[0] <= 0
+                and all(lz["given_up"] for k, lz in lanes.items() if k != "local")
+            ):
+                log(
+                    f"[batcheval] {unit['rung']} u{self.unit_idx}: 全部节点通道已放弃"
+                    f"（连续 {max_recovery_tries} 轮恢复后仍无进展）且本机槽位 0 — 收摊"
                 )
+                break
+            if (
+                not local_on
+                and not nodes_ready_ever
+                and time.time() - t_start > no_consumer_grace
+            ):
+                log(
+                    f"[batcheval] {unit['rung']} u{self.unit_idx}: {no_consumer_grace:.0f}s 内"
+                    f" 无任何节点就绪且本机槽位 0 — 本批无人可跑（deferred；查 /v1/ping、"
+                    f"codeHash 与 rl-config 的节点/本机槽位）"
+                )
+                break
+            all_done.wait(0.2)
+        stop_watch.set()
+        # req 4：收工即断连（settled 满或墙钟到点都一样——在途局结果无用，不许再拖着等）。
+        closing = dist_common.abort_active_requests(req_scope)
+        if all_done.is_set():
+            log(
+                f"[batcheval] u{self.unit_idx} settled 满 → 断连 {closing} 条在飞连接 + 拒发新请求，"
+                f"立即收工"
+            )
+        else:
+            log(
+                f"[batcheval] u{self.unit_idx} 收工（未全结算）→ 断连 {closing} 条在飞连接"
+                f"（在途局丢弃，下次 idle 窗续跑）"
+            )
+        all_done.set()  # 单元收尾（在途竞速副本/慢节点连接已断，结果本就无用）
+        # 收工只等一件事：**正在写行的赢家**落盘（<=1s 兜底，实际微秒级）。慢节点/竞速
+        # 副本的回包永不需要（结果无用，行也不会写），等它们纯属浪费——实测那 5s 全是
+        # 「等 dup settle 回包」，占 800 局墙钟的 3%（2026-09-19 用户追问）。
+        quiet_deadline = time.monotonic() + 1.0
+        while time.monotonic() < quiet_deadline:
+            with lock:
+                if writers[0] <= 0:
+                    break
+            time.sleep(0.002)
+        # 线程只做 best-effort 收拢（0.25s 总预算）：daemon 线程本就随进程退出，
+        # 训练循环里它们也会在下一次 fetch 返回时自行退出（all_done 已在循环顶判）。
+        join_deadline = time.monotonic() + 0.25
         for t_ in threads:
-            t_.start()
-        for t_ in threads:
-            t_.join(timeout=max(30.0, window + task_timeout))
+            t_.join(timeout=max(0.01, join_deadline - time.monotonic()))
         # dropped = todo 中未结算（断点续跑由 units.done + eval_done_keys 双保险）
         dropped = len(todo) - len(seen)
         log(
             f"[batcheval] {unit['rung']} u{self.unit_idx} DONE settled={len(seen)}/{len(todo)} "
-            f"dropped={dropped} sec={round(time.time() - t_start, 1)}"
+            f"dropped={dropped} dup={dup_settles[0]} sec={round(time.time() - t_start, 1)}"
         )
+        # 参与度账（provenance）：谁跑的必须自证。逐局行带的 node 列是同一份账的
+        # 落盘形态；这里在日志里再算一遍，让“熔断静默降本地”不再可能被误读为分布式。
+        tally = ", ".join(f"{k}={v}" for k, v in sorted(node_games.items())) or "none"
+        remote = sum(v for k, v in node_games.items() if k != "local")
+        local = node_games.get("local", 0)
+        if node_soft_fails or node_hard_fails:
+            soft = ", ".join(
+                f"{k}={v}" for k, v in sorted(node_soft_fails.items())
+            ) or "—"
+            hard = ", ".join(
+                f"{k}={v}" for k, v in sorted(node_hard_fails.items())
+            ) or "—"
+            log(f"[batcheval] {unit['rung']} u{self.unit_idx} 背压计数 {soft}｜真失败计数 {hard}")
+        log(f"[batcheval] {unit['rung']} u{self.unit_idx} provenance: {tally}")
+        if remote == 0 and len(nodes_ready_ever) > 0:
+            if local > 0:
+                log(
+                    f"[batcheval] ⚠ u{self.unit_idx} 远端 0 参与（{len(nodes_ready_ever)} 个就绪节点全部失败/"
+                    f"停派）——本单元实际 **全本地** 跑：逐局口径不变（本地与节点引擎已对账），"
+                    f"但墙钟慢约 10x；确认集群是否被训练作业占满（/v1/ping + 节点 inflight）"
+                )
+            else:
+                # 2026-09-19 实测：训练作业每轮重写 'rollout' 桶 ⇒ 评估权重被节点侧
+                # 同 kind 保留份数收敛扫掉，但内存桶仍说 cached ⇒ 任务子进程 ENOENT，
+                # client 只见 10054，重试耗尽 ⇒ 单元 0 局。本机槽位 0 时整批无行退出。
+                log(
+                    f"[batcheval] ⚠ u{self.unit_idx} 本单元 **0 局跑成**（{len(nodes_ready_ever)} 个就绪节点"
+                    f"全部失败，本机槽位 0）——若集群上有训练作业在跑：节点侧那份权重文件可能被"
+                    f"同 kind 保留份数收敛扫掉（workdir-cleanup.WEIGHT_FILES_KEEP）；查节点日志的"
+                    f"ENOENT 与 tmp/dist-agent/weights-*.json，一次性评估用专用 kind 规避"
+                )
         try:
             if dropped == 0:
                 mark_unit_done(

@@ -137,7 +137,7 @@ def main() -> int:
     os.environ.setdefault("EVALBOARD_DATA", str(run_dir / "evalboard"))
 
     import dist_common
-    from rl.batch_eval import BatchEvalRunner, kind_for_policy
+    from rl.batch_eval import ONESHOT_EVAL_KIND, BatchEvalRunner
     from rl.queue import RUN_ID
 
     units = plan_units(spec)
@@ -167,7 +167,7 @@ def main() -> int:
         f"[m1-once] policy={policy} stages={len(units)} games={games} "
         f"difficulty={spec.get('difficulty')} max_ticks={spec.get('maxTicks')} "
         f"nodes={len(nodes)} localSlots={policy_cfg.get('evalLocalSlots')} "
-        f"kind={kind_for_policy(policy)} runDir={run_dir}"
+        f"kind={ONESHOT_EVAL_KIND} runDir={run_dir}"
     )
 
     batch = {
@@ -188,7 +188,8 @@ def main() -> int:
 
     for i, unit in enumerate(units):
         # policy nn 走学生权重；intent-exec/goal 走各自权重文件（同 rl_path 语义：
-        # agent 按 (kind, wver) 查桶，kind 由 policy 推）；god 无权重语义（占位）。
+        # agent 按 (kind, wver) 查桶）；god 无权重语义（占位）。kind 一律用一次性
+        # 专用桶 ONESHOT_EVAL_KIND（不蹭训练作业每轮重写的 'rollout'，见其注释）。
         rl_path = None if policy == "god" else weights_path
         # init_sha16 用单位置零外的权重指纹（agent 元数据列，缺因置空串即可）
         runner = BatchEvalRunner(
@@ -205,7 +206,11 @@ def main() -> int:
             epoch,
             policy,
             None,
-            "",
+            "",  # init_sha16（按位置，缺省空串）
+            # 专用权重桶（见 ONESHOT_EVAL_KIND）：训练作业每轮重写 'rollout' 桶，
+            # 一次性评估那份固定权重会被节点侧的保留份数收敛扫掉（→ ENOENT/10054）。
+            # **按关键字**：它前面还有 init_sha16，位置写错会静默回落 'rollout'。
+            kind=ONESHOT_EVAL_KIND,
             include_scorable=True,
         )
         t0 = time.time()

@@ -281,6 +281,35 @@ def pick_tail_race(inflight: dict[tuple[int, int], int], dup: int) -> tuple[int,
     return cand
 
 
+def pop_inflight(
+    inflight: dict[tuple[int, int], int],
+    inflight_nodes: dict[tuple[int, int], set[str]],
+    task: tuple[int, int],
+    nd_id: str,
+) -> None:
+    """一个副本出表（结算/失败/丢弃）。计数归零时连同节点集一起清。
+
+    A/B/C 三层共用一处（原先只是 `eval_dispatch` 里的局部闭包，现提到本模块）。
+    """
+    if task in inflight:
+        inflight[task] -= 1
+        if inflight[task] <= 0:
+            inflight.pop(task, None)
+            inflight_nodes.pop(task, None)
+        else:
+            inflight_nodes.get(task, set()).discard(nd_id)
+
+
+def clear_inflight(
+    inflight: dict[tuple[int, int], int],
+    inflight_nodes: dict[tuple[int, int], set[str]],
+    task: tuple[int, int],
+) -> None:
+    """任务已结算（胜者拿到）⇒ 整个出表；在飞的竞速副本回来时按 dup 丢弃。"""
+    inflight.pop(task, None)
+    inflight_nodes.pop(task, None)
+
+
 def pick_race_target(
     inflight: dict[tuple[int, int], int],
     nd_id: str,

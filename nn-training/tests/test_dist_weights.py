@@ -169,11 +169,14 @@ def test_post_weights_parallel_order_and_failures(monkeypatch) -> None:
     )
     assert [n["id"] for n in alive] == ["self", "a97"]  # 入参顺序
     assert sorted(seen) == ["http://a97", "http://mac", "http://self"]
-    # 日志按完成顺序（as_completed）；内容点名成功/失败
+    # 日志按完成顺序（as_completed）；内容点名成功/失败 + **逐节点耗时**（用户 2026-09-19：
+    # 「权重传输完毕」与「结果返回」都要可判读，否则看不清阶段墙钟）。
     joined = "\n".join(logs)
-    assert "weights[rollout] -> self (kept)" in joined
+    assert "weights[rollout] -> self (kept," in joined
     assert "weights POST to mac failed" in joined and "excluded" in joined
-    assert "weights[rollout] -> a97 (purged)" in joined
+    assert "weights[rollout] -> a97 (purged," in joined
+    # 阶段总计（分发起点）：ready on N/M + 总墙钟 + sha 前 12 位
+    assert "ready on 2/3 nodes" in joined and "sha wwwwwwwwwwww" in joined
 
 
 def test_post_weights_parallel_empty(monkeypatch) -> None:

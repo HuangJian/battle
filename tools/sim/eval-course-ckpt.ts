@@ -37,6 +37,7 @@ import { splitRoundRobin, defaultWorkerCount } from '../lib/worker-pool'
 import { flag } from '../lib/cli'
 import { computeCodeHash } from '../agent/codehash-files'
 import { requestNodeUpgrades, resolveUpgradeBranch, upgradeLogLines } from '../lib/node-upgrade'
+import { configLocalSlots, pickDistLocal, type LocalSlotsFromConfig } from '../lib/dist-node-gate'
 import type { EvalCourseRow, EvalCourseWorkerPayload } from './eval-course-ckpt-worker'
 
 const REPO_ROOT_WORKER = new URL('./eval-course-ckpt-worker.ts', import.meta.url).href
@@ -251,7 +252,14 @@ interface LabelAgg {
   ticks: number
 }
 
-function summarize(rows: EvalCourseRow[], outPath: string | undefined, t0: number): void {
+function summarize(
+  rows: EvalCourseRow[],
+  outPath: string | undefined,
+  t0: number,
+  /** 本批是否开了分布式（`--no-dist`/无配置 = false）。仅当开了却 0 远端参与才告警——
+   *  显式本机跑不是降级，不该发 WARN。 */
+  distEnabled = false,
+): void {
   const agg = new Map<string, LabelAgg>()
   for (const r of rows) {
     let a = agg.get(r.label)
@@ -302,6 +310,30 @@ function summarize(rows: EvalCourseRow[], outPath: string | undefined, t0: numbe
         `${String(a.outcomes['max_ticks'] ?? 0).padEnd(9)} ${a.outcomes['gameover'] ?? 0}\n`,
     )
   }
+  // 参与度账（provenance）：**谁跑的必须自证**。只打汇总表会让“熔断/满负荷静默降本地”
+  // 看起来像分布式跑（2026-09-19 实测：x20-powered it0 探针 200 局全落本地，日志只有
+  // 十几行 requeued）。行里的 `node` 列是同一份账的落盘形态，此处按工具口径再算一遍。
+  const bySource: Record<string, number> = {}
+  for (const r of rows) {
+    const k = r.node ?? 'unknown'
+    bySource[k] = (bySource[k] ?? 0) + 1
+  }
+  const remote = Object.entries(bySource)
+    .filter(([k]) => k !== 'local')
+    .reduce((s, [, v]) => s + v, 0)
+  const localCount = bySource['local'] ?? 0
+  const srcText =
+    Object.entries(bySource)
+      .map(([k, v]) => `${k}=${v}`)
+      .join(', ') || 'none'
+  process.stderr.write(
+    `[eval-course-ckpt] provenance: ${srcText}（共 ${rows.length} 局：远端 ${remote} / 本地 ${localCount}）\n`,
+  )
+  if (distEnabled && remote === 0 && rows.length > 0 && localCount > 0)
+    process.stderr.write(
+      `[eval-course-ckpt] ⚠ WARN 远端 0 参与 —— 本批全由本机跑（逐局口径不变，但墙钟慢约 10x）：` +
+        `先 ping 各节点 / 确认集群未被训练作业占满\n`,
+    )
   process.stderr.write(
     // `pass` = win ∪ cleared（单关场景二者等价，见 LabelAgg.passed 注释）；
     // win/cleared 的原始计数仍逐局落在 JSONL 里，需要细分时可离线重算。
@@ -475,11 +507,24 @@ async function main(): Promise<void> {
     }
   }
   const distLocalRaw = arg('dist-local')
-  const distLocal = distLocalRaw === undefined ? undefined : parseInt(distLocalRaw, 10)
-  if (distLocal !== undefined && (!Number.isFinite(distLocal) || distLocal < 0)) {
+  const distLocalParsed = distLocalRaw === undefined ? NaN : parseInt(distLocalRaw, 10)
+  if (distLocalRaw !== undefined && (!Number.isFinite(distLocalParsed) || distLocalParsed < 0)) {
     console.error('[eval-course-ckpt] --dist-local must be a non-negative integer')
     process.exit(2)
   }
+  // 本机份额由共享纯函数解析（**不许自己另立一套**）：
+  //   `--dist-local` > `policy.evalLocalSlots` > `rl.local_slots` > 物理核数，
+  // 与 `m1-eval` 同源、与 DECISIONS §2026-09-19 追记二同序。旧实现让 Python 侧
+  // 缺省 `evalLocalSlots`（=4），**整条配置链被静默跳过** ⇒ `rl.local_slots: 0`
+  // （本机不参与）的机器口径被违反（用户 2026-09-19 实测报障，2026-09-19 复现）。
+  const distLocalCfg: LocalSlotsFromConfig = distCfgPath
+    ? configLocalSlots(distCfgPath)
+    : { slots: null, source: '' }
+  const { slots: distLocal, source: distLocalSource } = pickDistLocal(
+    distLocalParsed,
+    distLocalCfg,
+    defaultWorkerCount(),
+  )
   const iterId = arg('iter-id') ?? `evalcourse-${Date.now()}`
   const windowSec = parseRangeInt(arg('window-sec'), 86400)
   const t0 = Date.now()
@@ -511,7 +556,8 @@ async function main(): Promise<void> {
     } else {
       for (const r of rows) console.log(JSON.stringify(r))
     }
-    summarize(rows, outPath, t0)
+    // nn-goal 强制本机（GOAL_* 未进 agent 协议）⇒ 不涉分派，provenance 不告警
+    summarize(rows, outPath, t0, false)
     return
   }
 
@@ -532,6 +578,9 @@ async function main(): Promise<void> {
     distCfgPath: distCfgPath || undefined,
     windowSec,
   })
+  process.stderr.write(
+    `[eval-course-ckpt] 本机槽位 distLocal=${distLocal}（来源：${distLocalSource}）\n`,
+  )
   mkdirSync(runDir, { recursive: true })
   const specPath = `${runDir}/spec.json`
   writeFileSync(specPath, JSON.stringify(spec, null, 1))
@@ -541,7 +590,7 @@ async function main(): Promise<void> {
       `max_ticks=${course.max_ticks ?? 36000} lives=${course.player?.lives ?? 3} ` +
       `level=${course.player?.level ?? 0} ` +
       (distCfgPath ? `dist=${distCfgPath}` : 'dist=local') +
-      (distLocal !== undefined ? ` distLocal=${distLocal}` : ' distLocal=配置') +
+      ` distLocal=${distLocal}` +
       ` iterId=${iterId} runDir=${runDir}\n`,
   )
 
@@ -559,7 +608,7 @@ async function main(): Promise<void> {
     process.exit(1)
   }
   const rows = readRows(spec.out)
-  summarize(rows, outPath ?? spec.out, t0)
+  summarize(rows, outPath ?? spec.out, t0, Boolean(spec.distCfgPath))
   const expected = games * (policy === 'god' ? 1 : weights.length)
   if (rows.length !== expected) {
     console.error(

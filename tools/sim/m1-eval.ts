@@ -61,7 +61,7 @@ import { resolveLatestWeights } from '../../src/nn/weights'
 import { join, resolve } from 'node:path'
 import { flag } from '../lib/cli'
 import { computeCodeHash } from '../agent/codehash-files'
-import { configLocalSlots, provenanceNote } from '../lib/dist-node-gate'
+import { configLocalSlots, pickDistLocal, provenanceNote } from '../lib/dist-node-gate'
 import { requestNodeUpgrades, resolveUpgradeBranch, upgradeLogLines } from '../lib/node-upgrade'
 
 /** 仓根（升级子进程 cwd 与 nn-py-safe.sh 的相对路径解析都用它）。 */
@@ -420,23 +420,17 @@ async function main(): Promise<void> {
   }
   // 本机并发：显式 `--dist-local` > 配置 `policy.evalLocalSlots` > `rl.local_slots` > --workers 全核。
   // 旧实现只认 --workers（= 物理核数）⇒ 配置里的「本机不参与」被静默覆盖（2026-09-19 实测）。
+  // 求解器是共享纯函数 `pickDistLocal`（`eval-course-ckpt` 同一处，别再各写一套）。
   const distLocalRaw = arg('dist-local')
   const distLocalParsed = distLocalRaw === undefined ? NaN : parseInt(distLocalRaw, 10)
   const distLocalCfg = distNodesPath ? configLocalSlots(distNodesPath) : { slots: null, source: '' }
-  const distLocal =
-    Number.isFinite(distLocalParsed) && distLocalParsed >= 0
-      ? distLocalParsed
-      : (distLocalCfg.slots ?? workers)
+  const { slots: distLocal, source: distLocalSrc } = pickDistLocal(
+    distLocalParsed,
+    distLocalCfg,
+    workers,
+  )
   if (distNodesPath)
-    process.stderr.write(
-      `[m1-eval] 本机槽位 distLocal=${distLocal}（来源：${
-        Number.isFinite(distLocalParsed)
-          ? '--dist-local'
-          : distLocalCfg.slots !== null
-            ? `配置 ${distLocalCfg.source}`
-            : '物理核数（配置未约定）'
-      }）\n`,
-    ) // 分派权重文件（nn 用解析出的最新文件；god 无权重语义）
+    process.stderr.write(`[m1-eval] 本机槽位 distLocal=${distLocal}（来源：${distLocalSrc}）\n`) // 分派权重文件（nn 用解析出的最新文件；god 无权重语义）
   const weightsArg =
     policy === 'goal'
       ? (goalWeights ?? '')

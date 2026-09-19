@@ -1,7 +1,13 @@
 /** dist-node-gate.test.ts ↔ tools/lib/dist-node-gate.ts（节点门 + 响亮告警的共享实现）。 */
 import { describe, expect, it } from 'bun:test'
 import { rmSync, writeFileSync } from 'node:fs'
-import { claimNote, configLocalSlots, pingNode, reprobeDue } from '../tools/lib/dist-node-gate'
+import {
+  claimNote,
+  configLocalSlots,
+  pickDistLocal,
+  pingNode,
+  reprobeDue,
+} from '../tools/lib/dist-node-gate'
 import {
   bunMajorMinor,
   classifyGate,
@@ -245,6 +251,44 @@ describe('configLocalSlots（本机槽位必读配置）', () => {
     expect(configLocalSlots('tmp/definitely-not-here-42.json')).toEqual({ slots: null, source: '' })
     rmSync(none, { force: true })
     rmSync(bad, { force: true })
+  })
+})
+
+/**
+ * 回归守卫（用户 2026-09-19 报障：`rl.local_slots: 0` 被忽略，评测仍跑本机 4 槽）。
+ * 当时两个工具各写一遍求解，`eval-course-ckpt` 还把缺省值留给 Python 侧
+ * `policy.evalLocalSlots`（缺省 4）⇒ 整条配置链被静默跳过。现在链只有这一处。
+ */
+describe('pickDistLocal（本机槽位链：显式 > 配置 > 物理核数）', () => {
+  const cfg = (slots: number | null, source: string) => ({ slots, source })
+
+  it('显式 --dist-local 最高优先（含 0 = 本机不参与）', () => {
+    expect(pickDistLocal(0, cfg(3, 'policy.evalLocalSlots'), 15)).toEqual({
+      slots: 0,
+      source: '--dist-local',
+    })
+    expect(pickDistLocal(7, cfg(0, 'rl.local_slots'), 15)).toEqual({
+      slots: 7,
+      source: '--dist-local',
+    })
+  })
+
+  it('未显式给定时取配置值（含 0），并写明来源键', () => {
+    expect(pickDistLocal(NaN, cfg(0, 'rl.local_slots'), 15)).toEqual({
+      slots: 0,
+      source: '配置 rl.local_slots',
+    })
+    expect(pickDistLocal(NaN, cfg(4, 'policy.evalLocalSlots'), 15)).toEqual({
+      slots: 4,
+      source: '配置 policy.evalLocalSlots',
+    })
+  })
+
+  it('配置未约定 ⇒ 物理核数兜底（来源可读）', () => {
+    expect(pickDistLocal(NaN, cfg(null, ''), 15)).toEqual({
+      slots: 15,
+      source: '物理核数（配置未约定）',
+    })
   })
 })
 

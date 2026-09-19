@@ -78,7 +78,7 @@ describe('spec 构造（透传给 Python 引擎的参数）', () => {
     expect(parseWeightSpec('tmp/w.json')).toEqual({ path: 'tmp/w.json', label: 'w.json' })
   })
 
-  it('本机份额 / 无节点 / dist 配置都进 spec；未指定则**不写**该键（让 Python 读配置）', () => {
+  it('--dist-local / dist 配置 / noNodes 都进 spec', () => {
     const base = {
       course: 'nn-training/levels/ladder-c06.jsonc',
       weights: [{ label: 'it30', path: 'tmp/w.json' }],
@@ -90,10 +90,6 @@ describe('spec 构造（透传给 Python 引擎的参数）', () => {
       out: 'tmp/x.jsonl',
       noNodes: false,
     }
-    const bare = buildSpec(base)
-    expect('localSlots' in bare).toBe(false) // 缺省 = 配置（policy.evalLocalSlots → rl.local_slots）
-    expect('distCfgPath' in bare).toBe(false)
-
     const explicit = buildSpec({
       ...base,
       localSlots: 0,

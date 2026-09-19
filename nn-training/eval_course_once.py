@@ -6,7 +6,9 @@
   * 节点门 / codeHash 判据：`dist_common.check_code_hash`（SSOT = codehash-files.txt）
   * ping + 任务下发 + 退避重试 + 权重下发 + wver/409：`dist_common.fetch_task` / `post_weights_parallel`
   * 失败连击停用（nodeFailStreak）、EVAL_TASK_ATTEMPTS 重排队：`BatchEvalRunner`
-  * 本机份额：`policy.evalLocalSlots` / `rl.local_slots`（`eval_local.EVAL_LOCAL_SLOTS_DEFAULT`）
+  * 本机份额：`policy.evalLocalSlots`（缺省 `eval_local.EVAL_LOCAL_SLOTS_DEFAULT`）；
+    机器级配置链（`rl.local_slots`）由调用方 TS 侧 `dist-node-gate.configLocalSlots`
+    解析后以 `spec.localSlots` 显式传入 —— 本文件**不重读** rl-config 的槽位语义
   * 队列与尾竞速：`rl/queue.py`
 
 TS 侧曾把这些又实现了一遍（探测/重试/rescan/停用/本机槽位），既漂移又漏护栏。
@@ -66,11 +68,122 @@ def _row_id(seed0: int, n_stages: int, games: int, weight_idx: int, stage_local:
     return weight_idx * games + g
 
 
+def weight_key16(w: dict) -> str:
+    """单元/行的权重身份键 —— 与 B 层行 `ckpt_sha16` **同式**：
+
+    * nn：权重文件 sha256 前 16 hex（B 层 `wver[:16]`）；
+    * god（path 为空）：`god-<engineEpoch 前 12>`（B 层 god 分支逐字同式）。
+
+    为什么元数据必须按它分键（2026-09-19）：`meta[(stage, seed)]` 是**关卡内**身份，
+    同一次调用跑两个权重时两张表键完全相同 ⇒ 后一个权重把前者的 label/weightIdx 全盖掉，
+    于是逐行 label 全错、`_row_id` 的 `wi * games` 也全错（多权重产物实际不可用）。
+    """
+    import dist_common
+
+    path = str(w.get("path") or "")
+    if not path:
+        return f"god-{dist_common.compute_engine_epoch()[:12]}"
+    return dist_common.weights_fingerprint(path)[:16]
+
+
+def build_course_units(
+    weights: list[dict],
+    stages: list[dict],
+    plan: list[list[int]],
+    *,
+    max_ticks: int,
+    difficulty: str,
+    lives: int,
+    level: int,
+    base_stage_id: int = 2000,
+) -> tuple[list[dict], dict[tuple[str, int, int], dict]]:
+    """(units, meta)：**每个权重一个单元**、跨该权重的全部关卡（纯函数，单测覆盖）。
+
+    meta 键 = `(weight_key16, stageId, seed)`（多权重调用下逐权重分表，见 weight_key16）。
+
+    为什么不再按关卡拆单元（用户 2026-09-19 第 2 条：「不要分什么 u0/u1/u2 阶段，一直持续
+    不停派发，直到所有 eval 任务完成」）：单元边界在 B 层是**串行屏障**——权重下发 → 派发 →
+    等全部结算，才开下一个单元，且每个单元开头都会重新 ping + 传一次权重。4 关 = 4 段串行，
+    中间必然出现「CPU 满一阵、掉一阵」的锯齿。
+
+    现在一个权重一条**连续**派发流（`unit["pairs"]` 取代 stageId × seeds 展开，
+    `unit["stageParams"]` 带逐关参数），直到它的全部 (关, 种子) 结算完。
+    unit 级字段仍保留（= 第一关），供只认旧字段的消费方读。
+    """
+    units: list[dict] = []
+    meta: dict[tuple[str, int, int], dict] = {}
+    for wi, w in enumerate(weights):
+        key16 = weight_key16(w)
+        pairs: list[list[int]] = []
+        stage_params: dict[str, dict] = {}
+        for si, seeds in enumerate(plan):
+            if not seeds:
+                continue
+            stage_id = base_stage_id + si
+            stage = stages[si] if isinstance(stages[si], dict) else {}
+            stage_params[str(stage_id)] = {
+                "stageJson": json.dumps(stages[si], ensure_ascii=False),
+                "maxTicks": max_ticks,
+                "difficulty": difficulty,
+                "lives": lives,
+                "level": level,
+            }
+            for seed in seeds:
+                pairs.append([stage_id, int(seed)])
+                meta[(key16, stage_id, int(seed))] = {
+                    "label": str(w["label"]),
+                    "weightIdx": wi,
+                    "stageName": str(stage.get("name") or "custom"),
+                }
+        if not pairs:
+            continue
+        first_id = int(pairs[0][0])
+        units.append(
+            {
+                "rung": f"{w['label']}·all{len(stage_params)}",
+                "stageId": first_id,
+                "seeds": [p[1] for p in pairs if p[0] == first_id],
+                "pairs": pairs,
+                "stageParams": stage_params,
+                "maxTicks": max_ticks,
+                "difficulty": difficulty,
+                "stageJson": stage_params[str(first_id)]["stageJson"],
+                "lives": lives,
+                "level": level,
+                "ckpt": w["path"],
+            }
+        )
+    return units, meta
+
+
+def _reset_run_ledgers(run_dir: Path) -> list[str]:
+    """清掉本次 runDir 里的旧账本（eval_log + dist-agent-meta），返回被删文件名。
+
+    为什么必须两个都清：`eval_log.jsonl` 每次运行都会 unlink 重建，而
+    `dist-agent-meta.jsonl` 只是**追加** ⇒ 同一个 `--out` 重跑（runDir 复用）时，
+    meta 里混着上一轮的记录：上一轮跑的局会以第二副面孔出现。2026-09-19 实测
+    `tmp/x20-powered-zeroshot.jsonl.run/dist-agent-meta.jsonl` 在 200 局的重跑里
+    积了 343 条（114 条是**上一轮**的远端局，标着远端 + 本地各一条）——按它判读
+    “这批局谁跑的/是否降级本地”会得出反的结论（本文件的 provenance 汇总因此一度被误读）。
+    """
+    removed: list[str] = []
+    for name in ("eval_log.jsonl", "dist-agent-meta.jsonl"):
+        p = run_dir / name
+        if p.exists():
+            p.unlink()
+            removed.append(name)
+    return removed
+
+
 def _to_tool_row(row: dict, meta: dict, n_stages: int, seed0: int, games: int) -> dict:
-    """B 层逐局行 → eval-course-ckpt 的 JSONL 契约（字段名保持既有产物不变）。"""
+    """B 层逐局行 → eval-course-ckpt 的 JSONL 契约（字段名保持既有产物不变）。
+
+    元数据按 `(ckpt_sha16, stage, seed)` 取：B 层行自带 `ckpt_sha16`（= 权重身份），
+    多权重调用据此各归各的 label/weightIdx（见 weight_key16）。
+    """
     stage_local = int(row["stage"]) - 2000
     seed = int(row["seed"])
-    m = meta[(int(row["stage"]), seed)]
+    m = meta[(str(row.get("ckpt_sha16") or ""), int(row["stage"]), seed)]
 
     def bool_of(key: str) -> bool:
         return row.get(key) == 1 or row.get(key) is True
@@ -116,11 +229,14 @@ def main() -> int:
 
     run_dir = Path(spec["runDir"]).resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
+    # 诊断工具：缺省打**事件级**日志（逐局派发/返回 + 在飞采样 + 阶段墙钟），
+    # 供排查「CPU 满一阵又掉档」。`EVAL_TRACE_EVENTS=0` 可关（批量跑不想刷日志时）。
+    os.environ.setdefault("EVAL_TRACE_EVENTS", "1")
     # 临时批次：EvalBoard 数据根指向本次 runDir（心跳/台账都不进控制台既有数据）
     os.environ.setdefault("EVALBOARD_DATA", str(run_dir / "evalboard"))
 
     import dist_common
-    from rl.batch_eval import BatchEvalRunner, data_root
+    from rl.batch_eval import ONESHOT_EVAL_KIND, BatchEvalRunner, data_root
     from rl.jsonc import load as jsonc_load
     from rl.queue import RUN_ID
 
@@ -162,8 +278,8 @@ def main() -> int:
     )
 
     eval_log = run_dir / "eval_log.jsonl"
-    if eval_log.exists():
-        eval_log.unlink()  # 临时批次：每次运行都是干净的账（续跑靠显式 --resume，暂不提供）
+    # 临时批次：每次运行都是干净的账（续跑靠显式 --resume，暂不提供）。
+    _reset_run_ledgers(run_dir)
     batch = {
         "batch_id": f"adhoc-{spec.get('iterId') or int(time.time() * 1000)}",
         "iter": 0,
@@ -171,35 +287,28 @@ def main() -> int:
         "policy": policy,
         "units": {},
     }
-    # args.local_slots 不用：本机份额由 policy.evalLocalSlots / rl.local_slots 决定（配置唯一来源）
+    # args.local_slots 不用：本机份额已在上面解析进 cfg["policy"]["evalLocalSlots"]
+    #（显式 spec.localSlots = TS 侧 configLocalSlots 的解析结果，含 rl.local_slots）
     args = SimpleNamespace(mode="per-tick", out="", eval_window_sec=float(spec.get("windowSec") or 86400))
     bun = shutil.which("bun") or "bun"
     epoch = dist_common.compute_engine_epoch()
 
-    units: list[dict] = []
-    meta: dict[tuple[int, int], dict] = {}
-    for wi, w in enumerate(weights if policy != "god" else [{"label": "god", "path": ""}]):
-        for si in range(n_stages):
-            if not plan[si]:
-                continue
-            unit = {
-                "rung": f"{w['label']}·s{si}",
-                "stageId": 2000 + si,
-                "seeds": plan[si],
-                "maxTicks": max_ticks,
-                "difficulty": difficulty,
-                "stageJson": json.dumps(stages[si], ensure_ascii=False),
-                "lives": lives,
-                "level": level,
-                "ckpt": w["path"],
-            }
-            units.append(unit)
-            for seed in plan[si]:
-                meta[(2000 + si, seed)] = {
-                    "label": w["label"],
-                    "weightIdx": wi,
-                    "stageName": stages[si].get("name") or "custom",
-                }
+    units, meta = build_course_units(
+        weights if policy != "god" else [{"label": "god", "path": ""}],
+        stages,
+        plan,
+        max_ticks=max_ticks,
+        difficulty=difficulty,
+        lives=lives,
+        level=level,
+    )
+    if not units:
+        _log("[course-once] no pairs to evaluate (empty seed plan?)")
+        return 2
+    _log(
+        f"[course-once] units={len(units)}（每权重一个连续单元，跨 {n_stages} 关）"
+        f" games/weight={games}"
+    )
 
     for i, unit in enumerate(units):
         rl_path: str | None = None if policy == "god" else str(unit["ckpt"])
@@ -217,7 +326,11 @@ def main() -> int:
             epoch,
             policy,
             None,
-            "",
+            "",  # init_sha16（按位置，缺省空串）
+            # 专用权重桶（见 ONESHOT_EVAL_KIND）：训练作业每轮重写 'rollout' 桶，
+            # 一次性评估那份固定权重会被节点侧的保留份数收敛扫掉（→ ENOENT/10054）。
+            # **按关键字**：它前面还有 init_sha16，位置写错会静默回落 'rollout'。
+            kind=ONESHOT_EVAL_KIND,
         )
         t0 = time.time()
         res = runner.run()

@@ -48,6 +48,9 @@ export interface EvalCourseRow {
   stageId: number
   stageName: string
   seed: number
+  /** 本局执行者（`node:<id>` / `local`）——参与度账的唯一依据（Python 侧逐单元也打）。
+   *  本地 worker 路径不填（该路径没有节点语义）；分布式路径的行必有值。 */
+  node?: string | null
   outcome: string
   win: boolean
   cleared: boolean
@@ -103,6 +106,8 @@ self.onmessage = (ev: MessageEvent<EvalCourseWorkerPayload>): void => {
         id: job.id,
         stageId,
         stageName: s.name,
+        // 本路径就是本机 in-process 执行（nn-goal，无分布式）：来源自证。
+        node: 'local',
         seed: job.seed,
         outcome: res.outcome,
         win: res.win,

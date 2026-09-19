@@ -101,13 +101,36 @@ BC_COLLECTOR = "BC-GOD"
 BC_WVER = "bc"
 
 
-class DistError(RuntimeError):
-    """节点交互失败：status=HTTP 状态码（0=本地校验拒绝），reason=可读原因。"""
+#: `EVAL_TRACE_EVENTS` 的真值词（事件级追踪开关）。
+_TRACE_TRUE = frozenset({"1", "true", "yes", "on"})
 
-    def __init__(self, status: int, reason: str) -> None:
+
+def trace_enabled(default: bool = False) -> bool:
+    """事件级追踪开关（逐局派发/返回 + 在飞采样），供「CPU 满一阵又掉档」类排查。
+
+    默认由调用方给（训练循环的 A/B/C 层保持安静；一次性评估入口缺省开）。
+    `EVAL_TRACE_EVENTS=0` 强制关、=1 强制开——判据只此一处，调用方不各自解析字符串。
+    """
+    raw = os.environ.get("EVAL_TRACE_EVENTS")
+    if raw is None:
+        return default
+    return raw.strip().lower() in _TRACE_TRUE
+
+
+class DistError(RuntimeError):
+    """节点交互失败：status=HTTP 状态码（0=本地校验拒绝），reason=可读原因。
+
+    transient=True 表示**限流/抖动信号**（并发槽满 503 busy、连接被重置 10054、
+    408/429/5xx）而非节点故障：调用方应背压重排 + 退避，**不计**节点失败 streak。
+    判据在这里落地而不是调用方各自做字符串匹配 —— 与 rl/bc_dispatch 的 busy
+    背压同源（那边 2026-09-14 事故：busy 被当故障熔断，整轮训练被打死）。
+    """
+
+    def __init__(self, status: int, reason: str, transient: bool = False) -> None:
         super().__init__(f"HTTP {status}: {reason}" if status else reason)
         self.status = status
         self.reason = reason
+        self.transient = bool(transient)
 
 
 def load_dist_config(path: str = CONFIG_PATH) -> dict | None:
@@ -252,6 +275,76 @@ def check_code_hash(ping: dict, expected: str) -> str | None:
 
 
 # ---------------- HTTP ----------------
+#: 视为瞬断/背压的 HTTP 状态码（不是节点故障）。
+TRANSIENT_HTTP_STATUS: frozenset[int] = frozenset({408, 425, 429, 500, 502, 503, 504})
+
+
+# ---------------- 收工即断连（2026-09-19 用户裁定第 4 条） ----------------
+# 「竞速后 settled 一满，直接关闭所有节点的连接！！！立即！马上！right now！」
+# urllib 无连接池可关，但每个在飞请求的 HTTPResponse 都能 close()：关掉它会让阻塞中的
+# read 立刻抛（连接重置），而不是等慢节点把那一局算完（最长 taskTimeoutSec=900s）。
+# **作用域 = 线程 tag**：训练主循环里 rollout 与本层同进程并发，全局关连接会把别人的在飞
+# 请求一起打死（rollout 任务被当瞬断重排 = 白烧节点）⇒ 只关自己 tag 的请求。
+_ACTIVE_LOCK = threading.Lock()
+_ACTIVE: set[tuple[str, object]] = set()
+_ABORTED_TAGS: set[str] = set()
+_TAG = threading.local()
+
+
+def set_request_tag(tag: str) -> None:
+    """给**当前线程**的 HTTP 请求打标（`abort_active_requests` 的作用域键）。
+
+    线程本地，不继承：调用方须在每个自建线程（worker/supervisor）开头显式设置。
+    空 tag = 不参与收工断连（rollout/A/C 层的既有行为逐字不变）。
+    """
+    _TAG.value = tag
+
+
+def request_tag() -> str:
+    return str(getattr(_TAG, "value", "") or "")
+
+
+def abort_active_requests(tag: str = "") -> int:
+    """停发同作用域的新请求 + **交 daemon 线程**关闭其全部在飞连接（返回待关条数）。
+
+    **为什么关连接必须异步**（2026-09-19 实测）：`HTTPResponse.close()` 可能阻塞——
+    若响应体正被读线程消费，close 要等它让出内部锁；800 局探针实测主线程在
+    `abort_active_requests` 里卡了 **81 秒**（该批 181s 就跑完 800 局，收工却占掉 32%
+    墙钟）。收工路径「立即！马上！」是硬要求 ⇒ 置位 + 尽力关，绝不等。
+
+    已知局限（如实记录）：阻塞在 `urlopen`（响应头都还没回来的慢节点）的连接不在
+    注册表里 ⇒ 关不到它们。那部分只能等它们自己超时；`all_done` 已置位 + 新请求拒发，
+    调用方不再依赖它们的结果。
+    """
+    scope = tag or request_tag()
+    with _ACTIVE_LOCK:
+        _ABORTED_TAGS.add(scope)
+        targets = [r for t, r in _ACTIVE if t == scope]
+    if targets:
+
+        def _closer() -> None:
+            for r in targets:
+                try:
+                    r.close()  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+
+        threading.Thread(target=_closer, daemon=True, name="abort-close").start()
+    return len(targets)
+
+
+def clear_abort() -> None:
+    """解除全部收工态（**每个单元开头必须调**；否则上一单元收工后请求立刻被拒）。"""
+    with _ACTIVE_LOCK:
+        _ABORTED_TAGS.clear()
+
+
+def abort_scope(tag: str = "") -> bool:
+    """该作用域是否处于收工态（回包无用 ⇒ 调用方丢弃而不是重排）。"""
+    with _ACTIVE_LOCK:
+        return (tag or request_tag()) in _ABORTED_TAGS
+
+
 def _request(
     url: str,
     auth_key: str,
@@ -260,6 +353,10 @@ def _request(
     headers: dict[str, str] | None = None,
     method: str | None = None,
 ):
+    scope = request_tag()
+    if scope and abort_scope(scope):
+        # 收工后不再发新请求（settled 已满 = 本单元不需要任何新结果）。
+        raise DistError(0, "aborted: settled complete", transient=True)
     req = urllib.request.Request(
         url,
         data=data,
@@ -267,7 +364,35 @@ def _request(
         method=method,
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.status, resp.read()
+        key = (scope, resp)
+        with _ACTIVE_LOCK:
+            _ACTIVE.add(key)
+        try:
+            return resp.status, resp.read()
+        finally:
+            with _ACTIVE_LOCK:
+                _ACTIVE.discard(key)
+
+
+def ping_nodes_parallel(nodes: list, timeout: float = 3.0) -> list[dict | None]:
+    """**并行** ping 一批节点（保序返回，失败 = None）。
+
+    为什么必须并行：串行 ping 的墙钟 = Σ 每台延迟，而超时预算是**按节点**的
+    （`statusTimeoutSec` 默认 3s）⇒ 两台负载高的节点就让整个阶段花 ~7s（2026-09-19
+    实测：`u0 阶段 gate 6.83s alive=4/6`，其中两台正是超时被丢）。节点门在每单元
+    重跑一次，这笔开销按单元累加。并行后 == 最慢一台。
+    """
+    if not nodes:
+        return []
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _one(nd: dict) -> dict | None:
+        return node_ping(
+            str(nd.get("url") or ""), str(nd.get("authKey") or ""), timeout=timeout
+        )
+
+    with ThreadPoolExecutor(max_workers=min(8, len(nodes))) as ex:
+        return list(ex.map(_one, nodes))
 
 
 def node_ping(url: str, auth_key: str, timeout: float = 3.0) -> dict | None:
@@ -721,20 +846,31 @@ def post_weights_parallel(
 
     n = len(nodes)
     ok_ids: set[str] = set()
+    t0 = time.monotonic()
     with ThreadPoolExecutor(max_workers=min(8, n)) as ex:
-        futs = [ex.submit(_push, nd) for nd in nodes]
+        futs = {ex.submit(_push, nd): nd for nd in nodes}
+        t_sub: dict[int, float] = {id(f): time.monotonic() for f in futs}
         for fut in as_completed(futs):
             nid, nd, mode, err = fut.result()
+            # 事件：**该节点权重就绪时刻**（用户 2026-09-19：排查「等十几秒 CPU 才满」
+            # 与评测中途的掉档——没有这条就看不出权重阶段占了多久）。
+            dt = time.monotonic() - t_sub[id(fut)]
             if err is not None:
                 if log is not None:
-                    log(f"[dist] weights POST to {nid} failed ({err}) — excluded")
+                    log(f"[dist] weights POST to {nid} failed ({err}, {dt:.2f}s) — excluded")
                 continue
             note_weights_pushed(wver, nid)
             if log is not None:
-                log(f"[dist] weights[{kind}] -> {nid} ({mode})")
+                log(f"[dist] weights[{kind}] -> {nid} ({mode}, {dt:.2f}s)")
             if on_alive is not None:
                 on_alive(nd)
             ok_ids.add(nid)
+    if log is not None:
+        # 事件：**权重传输完毕**（阶段墙钟）——分发起点就是它。
+        log(
+            f"[dist] weights[{kind}] ready on {len(ok_ids)}/{n} nodes "
+            f"in {time.monotonic() - t0:.2f}s (sha {wver[:12]}…)"
+        )
     return [nd for nd in nodes if str(nd.get("id") or nd.get("url") or "?") in ok_ids]
 
 
@@ -910,12 +1046,21 @@ def fetch_task(
             return unpack_container(body)
         raise DistError(status, body[:300].decode("utf-8", "replace"))
     except urllib.error.HTTPError as e:
-        raise DistError(e.code, e.read()[:300].decode("utf-8", "replace")) from e
+        raise DistError(
+            e.code,
+            e.read()[:300].decode("utf-8", "replace"),
+            transient=e.code in TRANSIENT_HTTP_STATUS,
+        ) from e
     except DistError:
         raise
+    except OSError as e:
+        # 传输层瞬断：连接被重置（WinError 10054）/超时/对端关闭 —— 节点可能只是满负荷。
+        # 标记 transient 由调用方背压重排，不当节点故障（2026-09-19：满负荷集群下
+        # 一瞬 10 次 10054 曾把 6 个节点全部熔断，评估份额静默全落本地）。
+        raise DistError(0, f"task fetch failed: {e}", transient=True) from e
     except Exception as e:
-        # 提交期网络错误 + 轮询期逃逸的非 DistError（deadline 时的 socket 超时、
-        # 损坏容器解包错）统一包装；真实原因保留在 message 里。
+        # 其余非 DistError（损坏容器解包错等确定性错误）不标 transient：重试没有意义，
+        # 真实原因保留在 message 里。
         raise DistError(0, f"task fetch failed: {e}") from e
 
 
