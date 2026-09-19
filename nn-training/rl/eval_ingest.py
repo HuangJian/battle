@@ -65,6 +65,9 @@ def m1_game_row(
         "enemyHits": None,
         "hitRate": None,
         "powerUpsCollected": g.get("powerUpsCollected"),
+        # x5⑧③ schema 对齐：m1 perGame 通常无这些键 → None；有则透传。
+        "powerUpsSpawned": g.get("powerUpsSpawned"),
+        "starsCollected": g.get("starsCollected"),
         "playerDamageTaken": None,
         "playerHits": None,
         "policy": policy,
@@ -84,7 +87,17 @@ def m1_game_row(
         "puGotTank": None,
         "puGotFreeze": None,
         "puGotShield": None,
+        "puGotOther": g.get("puGotOther"),
         "elapsedSec": None,
+        # Phase 0 逐敌种画像七列：m1 scorecard perGame 通常无这些键 → None；
+        # 有则透传（列名与 A/B 层逐局行一致，ingest.ts 同一映射）。
+        "hitsByKind": g.get("hitsByKind"),
+        "killsByKind": g.get("killsByKind"),
+        "exposureByKind": g.get("exposureByKind"),
+        "firstHitKind": g.get("firstHitKind"),
+        "firstKillKind": g.get("firstKillKind"),
+        "killOrder": g.get("killOrder"),
+        "killerKinds": g.get("killerKinds"),
     }
 
 

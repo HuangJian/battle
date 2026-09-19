@@ -42,6 +42,25 @@ export function fmtPct(v: number | null | undefined): string {
   return typeof v === 'number' ? `${(v * 100).toFixed(1)}%` : '—'
 }
 
+/** 每局平均：Σ / games，保留 digits 位小数；null → '-'。 */
+export function fmtPerGameAvg(total: number | null | undefined, games: number, digits = 2): string {
+  if (total == null) return '-'
+  if (games <= 0) return total.toFixed(digits)
+  return (total / games).toFixed(digits)
+}
+
+/** 指标表道具列：每局平均「拾取数/掉落数」。掉落数缺失 → `拾取/-`。 */
+export function fmtLootPickDrop(
+  collected: number | null | undefined,
+  spawned: number | null | undefined,
+  games: number,
+): string {
+  if (collected == null) return '-'
+  const pick = fmtPerGameAvg(collected, games, 2)
+  if (spawned == null) return `${pick}/-`
+  return `${pick}/${fmtPerGameAvg(spawned, games, 2)}`
+}
+
 /** 配对裁判 verdict 文案：灰是正常态（100 对下 99% 时间证据不够），不是故障。 */
 export function pairedVerdictText(v: 'up' | 'down' | 'flat'): string {
   if (v === 'up') return '显著涨'
@@ -132,7 +151,10 @@ export interface PhaseSecs {
 
 /**
  * 从 IterRow 拆出准确阶段耗时。
- * - rollout：优先 pureCollectSec（末局结算−权重下发完毕）；旧账本回退 rolloutSec。
+ * - rollout：优先 pureCollectSec。口径（2026-09-19 用户定义，边分发边开采）：
+ *   权重就绪**开始分发** → 样本采集完毕可交 PPO（含与采集重叠的分发墙钟）。
+ *   volume 多波：loop 层 combine_reports 聚合 min(分发起点)→max(样本齐)。
+ *   旧账本 pure_collect = 末局结算−权重下发完毕；无此键时回退 rolloutSec。
  * - ppo：优先 ppoCloudSec（云端自报真训练秒）；旧账本/本机回退 ppoSec。
  * - net：权重下发（distPhaseSec）+ 远端往返超出真训练的部分（ppoSec−ppoCloudSec）。
  *   本机/流式（ppoCloudSec 缺失或 == ppoSec）时 ppo 侧净开销为 0。
@@ -151,7 +173,10 @@ export function phaseSecs(r: {
   return { rollout, ppo, net: dist + ppoNet }
 }
 
-/** 阶段耗时展示：`120/80/15s`（rollout/ppo/net，整秒）。 */
+/**
+ * 阶段耗时展示：`120/80/15s`（rollout/ppo/net，整秒）。
+ * rollout = 权重开始分发→样本齐（2026-09-19 用户口径，边分发边开采）。
+ */
 export function fmtPhaseSecs(p: PhaseSecs): string {
   return `${p.rollout.toFixed(0)}/${p.ppo.toFixed(0)}/${p.net.toFixed(0)}s`
 }
@@ -159,7 +184,7 @@ export function fmtPhaseSecs(p: PhaseSecs): string {
 /** 阶段耗时 hover：把三段拆开写清楚，避免再把网络算进训练。 */
 export function phaseSecsTitle(p: PhaseSecs): string {
   return (
-    `rollout 纯采集 ${p.rollout.toFixed(0)}s · ` +
+    `rollout 权重分发→样本齐 ${p.rollout.toFixed(0)}s · ` +
     `ppo 真训练 ${p.ppo.toFixed(0)}s · ` +
     `net 网络/排队 ${p.net.toFixed(0)}s`
   )

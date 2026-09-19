@@ -10,8 +10,9 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'fs'
 import path from 'path'
 import type { EvalBatch } from './batches'
+import { verdictKeyOf } from './corpora'
 
-export type RequestKind = 'enqueue' | 'abort' | 'ladder_start' | 'ladder_stop'
+export type RequestKind = 'enqueue' | 'abort' | 'ladder_start' | 'ladder_stop' | 'verdict'
 
 export interface EvalRequest {
   req_id: string
@@ -28,6 +29,10 @@ export interface EvalRequest {
   threshold?: number
   start_rung?: string
   reason?: string
+  /** 判决请求（kind='verdict'，P2）：语料 id + N 个 ckpt。
+   *  顺序即配对语义（同语料同 ckpt 序 = 同一判决）。 */
+  corpus?: string
+  ckpts?: Array<{ label?: string; path: string }>
   /** 透传给 runner 建批的可选字段（与 batches.ts EvalBatch 对齐）。 */
   ladder_pos?: number
   k_seq?: number
@@ -123,11 +128,50 @@ function reqEnqKey(r: EvalRequest): EnqKey | null {
   return { course: r.course, rung_from: r.rung_from, ckpt: r.ckpt }
 }
 
+/** 判决请求身份（与 Python `_verdict_key_of` 同式；缺字段 → null = 不是判决请求）。 */
+function reqVerdictKey(r: EvalRequest): string | null {
+  if (r.kind !== 'verdict' || !r.corpus || !Array.isArray(r.ckpts) || r.ckpts.length === 0)
+    return null
+  return verdictKeyOf(r.corpus, r.ckpts)
+}
+
+/** 台账批的判决身份（非判决批 → null）。 */
+function batchVerdictKey(b: EvalBatch): string | null {
+  if (b.kind !== 'verdict' || !b.corpus || !(b.ckpts ?? []).length) return null
+  return verdictKeyOf(b.corpus, b.ckpts ?? [])
+}
+
+/**
+ * 判决请求是否已被“覆盖”（同键批已物化）——`enqueueCovered` 的判决分支。
+ */
+export function verdictCovered(batches: EvalBatch[], req: EvalRequest): boolean {
+  const vk = reqVerdictKey(req)
+  if (!vk) return false
+  const reqTs = req.ts ?? ''
+  return batches.some((b) => batchVerdictKey(b) === vk && b.created_ts >= reqTs)
+}
+
+/**
+ * 判决请求是否“仍在排队”（同键 pending 批 或 未物化的同键请求）。
+ * 与 `enqueueQueued` 平行：判决键不带 course/rung，复用不了前者。
+ */
+export function verdictQueued(
+  batches: EvalBatch[],
+  reqs: EvalRequest[],
+  corpus: string,
+  ckpts: Array<{ label?: string; path: string }>,
+): boolean {
+  const vk = verdictKeyOf(corpus, ckpts)
+  if (batches.some((b) => b.status === 'pending' && batchVerdictKey(b) === vk)) return true
+  return reqs.some((r) => reqVerdictKey(r) === vk && !verdictCovered(batches, r))
+}
+
 /**
  * enqueue 是否已被"覆盖"（ticker/去重用，无状态推导）：
  * 同 key 已有批且 created_ts >= req.ts（已物化）即覆盖。
  */
 export function enqueueCovered(batches: EvalBatch[], req: EvalRequest): boolean {
+  if (req.kind === 'verdict') return verdictCovered(batches, req)
   if (req.kind !== 'enqueue') return false
   const key = reqEnqKey(req)
   if (!key) return false

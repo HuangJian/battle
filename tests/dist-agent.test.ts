@@ -1,14 +1,23 @@
 import { describe, expect, it } from 'bun:test'
 import { createHash } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
+  applyPullResult,
   collectCodeHashEntries,
   computeCodeHashFromFiles,
+  memoizedCodeHash,
   packContainer,
   unpackContainer,
   SHARD_FILES,
+  latestWeightsOfKind,
+  readWeightsFile,
+  weightFileBase,
+  weightsCachedInBucket,
+  weightsKeyOk,
+  weightsOf,
 } from '../tools/agent/sampler-agent'
+import { WEIGHT_RE } from '../tools/agent/workdir-cleanup'
 // F3/F4 纯实现（与 sampler-agent 同源，诊断工具/单测共用）
 import {
   codeHashReport,
@@ -245,5 +254,174 @@ describe('codeHash SSOT manifest (tools/agent/codehash-files.txt)', () => {
       expect(first[0]).toMatch(/^[0-9a-f]{8}$/)
       expect(Number.isInteger(Number(first[1]))).toBe(true)
     }
+  })
+
+  it('weightsCachedInBucket：sha 命中 / 空 sha / 无桶（kept 短路径探针，2026-09-19）', () => {
+    const sha = 'a'.repeat(64)
+    const bucket = new Map<string, unknown>([[sha, { sha }]])
+    expect(weightsCachedInBucket(bucket, sha)).toBe(true)
+    expect(weightsCachedInBucket(bucket, 'b'.repeat(64))).toBe(false)
+    expect(weightsCachedInBucket(undefined, sha)).toBe(false)
+    expect(weightsCachedInBucket(bucket, '')).toBe(false)
+  })
+})
+
+describe('权重磁盘回查（agent 重启后不再对盘上已有的权重答 409，2026-09-19）', () => {
+  const mkDir = (): string => mkdtempSync(join(REPO_ROOT, 'tmp', 'pytest-tmp', 'wdisk-'))
+  /** 每次唯一内容 ⇒ 每次唯一 sha（避免同进程内复用桶缓存，测试相互独立）。 */
+  const fresh = (tag: string): { sha: string; body: Buffer } => {
+    const body = Buffer.from(`${tag}-${Date.now()}-${Math.random()}`)
+    return { sha: createHash('sha256').update(body).digest('hex'), body }
+  }
+
+  it('readWeightsFile：命中要求**内容** sha 全量一致；不符/缺文件/非法键一律未命中', () => {
+    const dir = mkDir()
+    try {
+      const { sha, body } = fresh('hit')
+      writeFileSync(join(dir, weightFileBase('eval', sha)), body)
+      expect(readWeightsFile('eval', sha, dir)).toEqual({
+        sha,
+        iterId: '',
+        file: join(dir, `weights-eval-${sha.slice(0, 16)}.json`),
+      })
+
+      // 文件名只有 16 hex 前缀 —— **不足以判定内容**：同名不同内容必须拒绝
+      writeFileSync(join(dir, weightFileBase('eval', sha)), Buffer.from('not the same bytes'))
+      expect(readWeightsFile('eval', sha, dir)).toBeNull()
+
+      // 前缀碰撞（前 16 hex 相同、后面不同）：只按文件名查会误命中，按内容查必须拒绝
+      const collide = sha.slice(0, 16) + 'f'.repeat(48)
+      expect(collide).not.toBe(sha)
+      writeFileSync(join(dir, weightFileBase('eval', sha)), body)
+      expect(readWeightsFile('eval', collide, dir)).toBeNull()
+
+      // 缺文件 / 非法键（路径穿越、短 sha、大写 hex）
+      expect(readWeightsFile('eval', 'a'.repeat(64), dir)).toBeNull()
+      expect(readWeightsFile('../etc', sha, dir)).toBeNull()
+      expect(weightsKeyOk('../etc', sha)).toBe(false)
+      expect(weightsKeyOk('eval', sha.slice(0, 32))).toBe(false)
+      expect(weightsKeyOk('eval', sha.toUpperCase())).toBe(false)
+      expect(weightsKeyOk('eval', sha)).toBe(true)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('weightsOf：内存桶未命中 → 回查磁盘；命中即回填（此后文件消失也不影响出局）', () => {
+    const dir = mkDir()
+    const { sha, body } = fresh('rehydrate')
+    const file = join(dir, weightFileBase('eval', sha))
+    try {
+      expect(weightsOf('eval', sha, '', dir)).toBeNull() // 盘上还没有 ⇒ 仍应 409
+      writeFileSync(file, body)
+      expect(weightsOf('eval', sha, '', dir)?.sha).toBe(sha) // 回查磁盘命中
+      rmSync(file, { force: true })
+      // 已回填内存桶：文件没了（被 sweep 清 / 另一进程删）也照样命中
+      expect(weightsOf('eval', sha, '', dir)?.sha).toBe(sha)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('weightFileBase：POST 落盘与磁盘回查同名，且落在 retention 正则的命名域内', () => {
+    const sha = 'ab'.repeat(32)
+    expect(weightFileBase('rollout', sha)).toBe(`weights-rollout-${sha.slice(0, 16)}.json`)
+    expect(weightFileBase('eval', sha)).toBe(`weights-eval-${sha.slice(0, 16)}.json`)
+    // 一次性工具链的 god 占位权重走 kind='none'
+    expect(weightFileBase('none', sha)).toBe(`weights-none-${sha.slice(0, 16)}.json`)
+    // boot/切换时的清扫只认这个正则：名字不匹配 ⇒ 回查文件会被当垃圾删掉
+    for (const kind of ['rollout', 'eval', 'intent', 'goal', 'none']) {
+      const name = weightFileBase(kind, sha)
+      expect(WEIGHT_RE.test(name)).toBe(true)
+      expect(weightsKeyOk(kind, sha)).toBe(true)
+    }
+  })
+
+  it('latestWeightsOfKind：桶空（重启后）→ 取盘上 mtime 最新的一份；坏/改名的跳过；不串 kind', () => {
+    const dir = mkDir()
+    const older = fresh('intent-old')
+    const newer = fresh('intent-new')
+    const goalOld = fresh('goal-old')
+    const goalBad = fresh('goal-bad')
+    const fOld = join(dir, weightFileBase('intent', older.sha))
+    const fNew = join(dir, weightFileBase('intent', newer.sha))
+    const gOld = join(dir, weightFileBase('goal', goalOld.sha))
+    const gBad = join(dir, weightFileBase('goal', goalBad.sha))
+    const at = (secAgo: number): Date => new Date(Date.now() - secAgo * 1000)
+    try {
+      // kind='intent'：旧 + 新两份有效权重，外加一个别的 kind 的干扰文件
+      writeFileSync(fOld, older.body)
+      writeFileSync(fNew, newer.body)
+      const distractor = fresh('rollout-distractor')
+      writeFileSync(join(dir, weightFileBase('rollout', distractor.sha)), distractor.body)
+      utimesSync(fOld, at(120), at(120))
+      utimesSync(fNew, at(60), at(60))
+      expect(latestWeightsOfKind('intent', dir)?.sha).toBe(newer.sha)
+
+      // 已回填内存桶 ⇒ 文件删掉也照样返回（不再读盘）
+      rmSync(fNew, { force: true })
+      expect(latestWeightsOfKind('intent', dir)?.sha).toBe(newer.sha)
+
+      // kind='goal'：**最新那份是被改名的坏文件**（内容 sha ≠ 文件名前缀）⇒ 跳过它取旧的
+      writeFileSync(gOld, goalOld.body)
+      writeFileSync(gBad, Buffer.from('renamed/corrupted bytes'))
+      utimesSync(gOld, at(120), at(120))
+      utimesSync(gBad, at(10), at(10))
+      expect(latestWeightsOfKind('goal', dir)?.sha).toBe(goalOld.sha)
+
+      // 该 kind 盘上什么都没有 ⇒ null（不串到别的 kind）
+      expect(latestWeightsOfKind('zzprobe', dir)).toBeNull()
+      // 非法 kind（路径穿越）⇒ null
+      expect(latestWeightsOfKind('../etc', dir)).toBeNull()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+// F2（2026-09-19 审计）：`/v1/update` 只 pull 不重启 ⇒ 它**不得**使 codeHash memo 失效，
+// 否则节点会「报新 hash、跑旧代码」，codeHash 门（dist_common.check_code_hash）反向放行。
+describe('F2 codeHash 归属：报的是**运行中代码**，不是盘上代码', () => {
+  const SRC = readFileSync(
+    join(import.meta.dir, '..', 'tools', 'agent', 'sampler-agent.ts'),
+    'utf8',
+  )
+
+  it('applyPullResult：pull 成功（changed）也不得改变已算出的 codeHash', () => {
+    const before = memoizedCodeHash()
+    expect(before).toMatch(/^[0-9a-f]{64}$/)
+    expect(
+      applyPullResult({
+        changed: true,
+        branch: 'goal-nn',
+        oldSha: 'a'.repeat(40),
+        newSha: 'b'.repeat(40),
+      }),
+    ).toBe(true)
+    expect(memoizedCodeHash()).toBe(before) // 本进程仍跑启动时那份代码 ⇒ hash 不变
+    // 无变更时甚至连日志都不发（幂等）；拉过与否都不影响 hash
+    expect(
+      applyPullResult({
+        changed: false,
+        branch: '',
+        oldSha: 'a'.repeat(40),
+        newSha: 'a'.repeat(40),
+      }),
+    ).toBe(false)
+    expect(memoizedCodeHash()).toBe(before)
+  })
+
+  it('源码守卫：/v1/update 不得置空 codeHash/gitShort memo（防「pull 后重算」回归）', () => {
+    expect(SRC).not.toContain('codeHashMemo.value = null')
+    expect(SRC).not.toContain('gitShortMemo.value = null')
+    // 唯一允许 hash 变化的途径 = 重启（进程换代码）
+    expect(SRC).toContain('memoizedCodeHash()')
+  })
+
+  it('源码守卫：/v1/restart 分支在退出前显式收长驻 worker 池（旧代码带着旧代码继续算）', () => {
+    const start = SRC.indexOf("url.pathname === '/v1/restart'")
+    expect(start).toBeGreaterThan(0)
+    const branch = SRC.slice(start, SRC.indexOf('process.exit(0)', start))
+    expect(branch).toContain('killPersistPool()')
   })
 })

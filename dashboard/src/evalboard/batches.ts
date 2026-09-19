@@ -8,10 +8,24 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import path from 'path'
 
 export type BatchStatus = 'pending' | 'running' | 'done' | 'aborted'
-export type BatchTrigger = 'main' | 'standalone' | 'auto-ladder'
+export type BatchTrigger = 'main' | 'standalone' | 'auto-ladder' | 'verdict'
+/** 批次类型：`ladder`（默认，阶梯语料由 ladder.json 驱动）/ `verdict`（判决语料，P2）。 */
+export type BatchKind = 'ladder' | 'verdict'
+
+/** 判决批的权重项（多 ckpt 同批同种子配对）。 */
+export interface BatchCkpt {
+  label?: string
+  path: string
+}
 
 export interface EvalBatch {
   batch_id: string
+  /** 缺省 = 'ladder'（旧台账行无此键 ⇒ 不得把它当必填）。 */
+  kind?: BatchKind
+  /** 判决批：语料 id（corpora.json）。 */
+  corpus?: string
+  /** 判决批：N 个权重（顺序即配对语义）。 */
+  ckpts?: BatchCkpt[]
   course: string
   rung_from: string
   ckpt: string
@@ -98,6 +112,64 @@ export function enqueueBatch(
     elapsed_sec: null,
     ...(spec.policy ? { policy: spec.policy } : {}),
     ...(spec.ladder_pos !== undefined ? { ladder_pos: spec.ladder_pos } : {}),
+    ...(spec.init_sha16 ? { init_sha16: spec.init_sha16 } : {}),
+    ...(spec.only_rungs ? { only_rungs: spec.only_rungs } : {}),
+  }
+  appendFileSync(batchesPath(dataRoot), `${JSON.stringify(batch)}\n`, 'utf-8')
+  return batch
+}
+
+/**
+ * 判决批入队（P2）：语料 id + N 个 ckpt。与 `enqueueBatch` 同台账、同去重纪律
+ * （同语料同 ckpt 序列的 pending 批已存在则返回它，不重复建批）。
+ * 台账行的 `course`/`rung_from`/`ckpt` 置空串：判决批的身份是 `corpus`+`ckpts`，
+ * 不要用假 course 去骗旧读方的键（键空间分离靠 `kind` 判别）。
+ */
+export function enqueueVerdictBatch(
+  dataRoot: string,
+  spec: {
+    corpus: string
+    ckpts: BatchCkpt[]
+    requester: string
+    iter: number
+    policy?: 'nn' | 'god'
+    init_sha16?: string
+    only_rungs?: string[]
+  },
+): EvalBatch {
+  mkdirSync(dataRoot, { recursive: true })
+  const labels = spec.ckpts.map((c) => c.label || c.path).join(',')
+  const existing = loadBatches(dataRoot).find(
+    (b) =>
+      b.status === 'pending' &&
+      b.kind === 'verdict' &&
+      b.corpus === spec.corpus &&
+      (b.ckpts ?? []).map((c) => c.label || c.path).join(',') === labels,
+  )
+  if (existing) return existing
+  const now = new Date().toISOString()
+  const batch: EvalBatch = {
+    batch_id: `b-${now.replace(/[-:.]/g, '').slice(0, 15)}-${Math.floor(Math.random() * 0xffff)
+      .toString(16)
+      .padStart(4, '0')}`,
+    kind: 'verdict',
+    corpus: spec.corpus,
+    ckpts: spec.ckpts,
+    course: '',
+    rung_from: '',
+    ckpt: '',
+    requester: spec.requester,
+    created_ts: now,
+    status: 'pending',
+    // of 由 Python 侧展开后回写（= ckpts × 关卡数）。
+    units: { of: 0, done: [] },
+    k_seq: 0,
+    window_seq: 0,
+    trigger: 'verdict',
+    iter: spec.iter,
+    node_dist: {},
+    elapsed_sec: null,
+    ...(spec.policy ? { policy: spec.policy } : {}),
     ...(spec.init_sha16 ? { init_sha16: spec.init_sha16 } : {}),
     ...(spec.only_rungs ? { only_rungs: spec.only_rungs } : {}),
   }

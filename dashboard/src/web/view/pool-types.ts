@@ -31,6 +31,8 @@ export interface NodeHistoryRow {
   lastIter: number
   globalMaxIt: number
   avgElapsedSec: number | null
+  /** 训练机派发→结算墙钟滑动均值（含网络/轮询）；null = meta 尚无 wallSec。 */
+  avgWallSec: number | null
   lastOkTs: string
   lastFailTs: string
   /** 已剥离 agent ISO 前缀（GLM-U3）。 */

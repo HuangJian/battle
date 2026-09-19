@@ -225,7 +225,40 @@ describe('§361：icon 复制键 / cloudflared endpoint 截断与复制 / local 
     expect(html.match(/class="tc-cc__scope tc-cc__scope--singleton"/g)).toHaveLength(1)
   })
 
-  it('未探测到执行面（pushFleet 缺省）→ 卡片不出执行面徽章', () => {
+  it('cloudflared 进程在但 hub 不通 → 黄点（healthy=false）', () => {
+    const s = {
+      time: 't',
+      course: 'c',
+      courses: [],
+      components: [
+        {
+          key: 'cloudflared',
+          label: 'cloudflared (入站隧道)',
+          status: 'running' as const,
+          pid: 9,
+          url: 'https://x.trycloudflare.com',
+          course: 'c',
+          mode: null,
+          healthy: false,
+          log: null,
+          logTail: [],
+          busy: false,
+          secret: 'tok',
+        },
+      ],
+      nodes: [],
+      modes: { trainerPpo: 'pull' as const, stream: 0, doubleBuffer: 0, precollectEarly: 0 },
+      metrics: { available: false, iters: [] },
+      phase: { phase: 'idle' as const, sinceMs: null, iter: null },
+      localNode: null,
+    } as ConsoleStateView
+    const html = renderConsolePage(s)
+    // 组件 pill 上的状态点必须是黄（CSS 里仍有 .tc-dot--on 规则，不能整页 not.toContain）
+    expect(html).toMatch(/cloudflared[\s\S]{0,200}tc-dot--warn/)
+    expect(html).not.toMatch(/cloudflared[\s\S]{0,200}tc-dot--on/)
+  })
+
+  it('未配置 push 目标 → 卡片不出徽章', () => {
     expect(pageWithPushTarget(null)).not.toContain('class="tc-cc__push')
   })
 

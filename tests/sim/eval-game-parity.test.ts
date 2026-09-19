@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'bun:test'
+import { readFileSync, writeFileSync, mkdtempSync, mkdirSync } from 'node:fs'
+import { join } from 'node:path'
 import { runSimulation } from '../../tools/sim/simulation-runner'
 import { runEvalOne } from '../../tools/sim/export-eval-game'
 import { STAGES } from '../../src/config/stages'
@@ -39,6 +41,61 @@ describe('export-eval-game god 分支与 runSimulation 等价（远程/本地对
 
   it('stage 5 seed 1 同局（不同地形族）', () => {
     parity(5, 1)
+  })
+})
+
+/**
+ * nn 分支的远程/本地对账（2026-09-19 补）。
+ *
+ * 此前只有 god 分支被钉住，nn 的两套实现（远程 export-eval-game 的内联循环 vs 本地
+ * runSimulation → NNInput）**从不互相对账**——于是两者的决策时点/相位各走各的：
+ * local 在 tick 中途（Simulation 已递减计时器/跑过 updateSpawning 之后）观察并决策，
+ * 而远程（以及语料生成器 export-rl-rollout / export-nn-replays）在 `sim.tick()` 之前
+ * 用 `t % K === 0` 观察决策 ⇒ 同一 (权重, 关卡, 种子) 6/6 局不同（首个动作分歧在
+ * stage 0 seed 1 的 tick 290）。本测试钉住两者逐局同结果。
+ *
+ * 权重用 tests/fixtures/student-golden.json 的 params（h=16/d=2 瘦身规格，forward 便宜）；
+ * NNInput 走目录解析 ⇒ 落一份 `weights.json` 到临时目录（resolveLatestWeights 的兜底名）。
+ */
+function nnParity(
+  stageIdx: number,
+  seed: number,
+  weightsText: string,
+  dir: string,
+  maxTicks: number,
+): void {
+  const local = runSimulation({
+    seed,
+    stage: STAGES[stageIdx] as never,
+    stageIndex: stageIdx,
+    difficulty: 'hard',
+    policy: 'nn',
+    nnWeightsDir: dir,
+    maxTicks,
+    collectMetrics: false,
+  })
+  const remote = runEvalOne(stageIdx, STAGES[stageIdx], seed, 'hard', maxTicks, weightsText, 'nn')
+  expect(remote.outcome).toBe(local.outcome)
+  expect(remote.ticks).toBe(local.ticks)
+}
+
+describe('export-eval-game nn 分支与 runSimulation 等价（决策时点/相位同源）', () => {
+  it('stage 0 seed 1/2 同局（观察时点 + K 相位一致）', () => {
+    const g = JSON.parse(
+      readFileSync(join(import.meta.dir, '..', 'fixtures', 'student-golden.json'), 'utf8'),
+    ) as { h: number; d: number; params: Record<string, unknown> }
+    const weightsText = JSON.stringify({
+      arch: { kind: 'student', h: g.h, d: g.d },
+      params: g.params,
+    })
+    // NNInput 走目录解析（resolveLatestWeights）：落一份 `weights.json` 到临时目录。
+    // 先建 tmp/ —— 它在 .gitignore 里，干净检出可能不存在。
+    const base = join(process.cwd(), 'tmp')
+    mkdirSync(base, { recursive: true })
+    const dir = mkdtempSync(join(base, 'nn-parity-'))
+    writeFileSync(join(dir, 'weights.json'), weightsText)
+    nnParity(0, 1, weightsText, dir, 3000)
+    nnParity(0, 2, weightsText, dir, 3000)
   })
 })
 

@@ -141,6 +141,15 @@ def rescan_nodes(
     worker,
     extra_threads,
     halt_event=None,
+    *,
+    first_probe_sec: float = 5.0,
+    wkind: str = "rollout",
+    streaks=None,
+    soft_streaks=None,
+    fail_streak_max: int = 3,
+    soft_streak_max: int = 9,
+    rearm_cap: int = 3,
+    rearm_warned=None,
 ) -> None:
     """v3.9 动态节点发现线程主体（dispatch.run() spawn，19 参逐位对应）。
 
@@ -155,39 +164,90 @@ def rescan_nodes(
     修复前 dispatch 的 18 个实参会整体错位 → 线程启动即抛
     `missing 6 required positional arguments`（rollout-rescan 线程报废，
     运行中上线的节点永远不被发现）。
+
+    A4（2026-09-19 审计实测）：旧实现 `all_settled.wait(rescan_sec)` 之后紧跟
+    「已结算即 return」——而 volume 短波形态下 **234 轮全部 <120s**（p50 7s，max 115s），
+    于是本线程每轮都在首个 sleep 里被结算事件唤醒并退出：2.5h 里 **0 次扫描 pass**、
+    130+ 次节点排除无一次回场。现在：
+      · 首个 pass 提前到 `first_probe_sec`（缺省 5s），之后每 `rescan_sec`；
+      · 候选 = 尚未孵化 ∪ **已停派**（真故障熔断 / 连续瞬断软停）的节点 —— 后者原先
+        因 `spawned_ids` 命中被永久跳过，熔断即整轮出局；
+      · 回场强制重握手（清缓存 + 重发权重，post_weights 自带 cached 探针）并**重置
+        失败计数**、补孵 c_n 个采样线程；每节点有 `rearm_cap` 上界（缺省 3），
+        用尽后不再补孵并告警一次；
+      · ping 并行（与 B/C 层同款）；补 `kind=wkind` —— 旧实现漏传 kind，goal/intent
+        腿的中途上线节点会把权重发进 rollout 桶，任务全 409；
+      · `nd` 带 `ping`（旧实现漏带 ⇒ stageJson 任务在回场节点上被能力握手拒掉）。
     """
     configured = [n for n in cfg.get("nodes", []) if n.get("enabled", True)]
+    streaks = {} if streaks is None else streaks
+    soft_streaks = {} if soft_streaks is None else soft_streaks
+    rearm_warned = set() if rearm_warned is None else rearm_warned
+    rearm_counts: dict[str, int] = {}
+    # 首个 pass 不等满 rescan_sec（短波形态下那样等于永不扫描，见 docstring）。
+    next_probe_at = time.time() + max(0.0, first_probe_sec)
     while (
         not all_settled.is_set()
         and not (halt_event is not None and halt_event.is_set())
         and time.time() < deadline
     ):
-        sleep_sec = min(rescan_sec, max(1.0, deadline - time.time()))
-        if sleep_sec <= 0:
-            return
-        # 用 all_settled.wait(sleep_sec) 替代 time.sleep(sleep_sec)：
-        # 所有游戏已结算完毕（all_settled.set()）时立即唤醒，不等满 rescan_sec 超时。
-        # 此前 `t.join(timeout=window+taskTimeout)` 被 rescan 线程的固定 120s sleep
-        # 阻塞，导致 round done 滞后 2 分钟（实测 2026-09-05）。
-        all_settled.wait(sleep_sec)
+        # 用 all_settled.wait 替代 time.sleep：所有游戏已结算时立即唤醒（不再等满
+        # rescan_sec，round done 不滞后——实测 2026-09-05）。
+        # 防忙等的地板：50ms（不写死 0.5s——那会让 `recoverPingSec` 这类旋钮在
+        # 小值时不生效，配置与实际行为说谎；生产缺省 5s/20s，地板不参与）。
+        wait_sec = min(
+            max(0.05, next_probe_at - time.time()),
+            max(0.05, deadline - time.time()),
+        )
+        all_settled.wait(wait_sec)
         if (
             all_settled.is_set()
             or (halt_event is not None and halt_event.is_set())
             or time.time() >= deadline
         ):
             return
-        for n in configured:
-            nid = str(n.get("id") or n.get("url") or "?")
-            with lock:
-                if nid in spawned_ids:
-                    continue
-            ping = dist_common.node_ping(n["url"], n.get("authKey", ""), timeout=status_timeout)
+        next_probe_at = time.time() + max(1.0, rescan_sec)
+
+        # 候选 = 尚未孵化 ∪ 已停派（真故障熔断 / 连续瞬断软停）。
+        with lock:
+            cands: list[tuple[dict, str, str]] = []
+            for n in configured:
+                nid = str(n.get("id") or n.get("url") or "?")
+                if nid not in spawned_ids:
+                    cands.append((n, nid, "new"))
+                elif (
+                    streaks.get(nid, 0) >= fail_streak_max
+                    or soft_streaks.get(nid, 0) >= soft_streak_max
+                ):
+                    cands.append((n, nid, "rearm"))
+        if not cands:
+            continue
+        # 并行 ping（串行 3s/台 会让一个 pass 卡十几秒，与 B/C 层同款修法）。
+        pings = dist_common.ping_nodes_parallel(
+            [n for n, _nid, _why in cands], timeout=status_timeout
+        )
+        for (n, nid, why), ping in zip(cands, pings, strict=True):
             if ping is None:
-                continue  # 仍未上线，下轮再试
+                continue  # 仍未上线，下个 pass 再试
+            # 回场上界：每节点每轮最多补孵 rearm_cap 次（防「永远失败的节点」无限起线程）。
+            if why == "rearm":
+                with lock:
+                    capped = rearm_counts.get(nid, 0) >= rearm_cap
+                    first_warn = capped and nid not in rearm_warned
+                    if first_warn:
+                        rearm_warned.add(nid)
+                if capped:
+                    if first_warn:
+                        log(
+                            f"[dist] rescan {nid}: 本轮回场上界 {rearm_cap} 次已用尽 — "
+                            f"不再补孵（节点持续失败，见日志根因）"
+                        )
+                    continue
             if ping.get("codeHash") != code_hash:
                 # guarded 重启（跨代去重 + 脏树拒发，同 ping 门）；dedup 静默跳过
                 # （rescan 周期 ~15s，重复刷屏无信息量）。F2：日志带两侧 hash——
                 # 与 ping 门同口径，运维一眼看出差异在哪一侧。
+                dist_common.forget_weights_node(nid)
                 local_short = code_hash[:8]
                 remote_short = str(ping.get("codeHash") or "")[:8] or "none"
                 if not upgrade_branch:
@@ -231,25 +291,59 @@ def rescan_nodes(
             if ".".join(remote_full.split(".")[:2]) != ".".join(str(local_bun).split(".")[:2]):
                 continue
             c_n = max(1, int(n.get("concurrency") or ping.get("cpus") or 1))
-            try:
-                mode = dist_common.post_weights_cached(
-                    n["url"],
-                    n.get("authKey", ""),
-                    iter_id,
-                    wver,
-                    weights_bytes,
-                    timeout=min(300.0, max(60.0, task_timeout)),
-                )
-            except dist_common.DistError as e:
-                log(f"[dist] rescan {nid}: weights POST failed ({e}) — skip this round")
-                continue
-            nd = {"id": nid, "url": n["url"], "key": n.get("authKey", ""), "c": c_n}
+            # 权重：新上线节点走进程内复用缓存；**回场节点强制重握手**（它可能刚重启，
+            # 桶里那份也可能已被别的客户端挤掉；post_weights 自带 cached 探针，命中即
+            # 'kept'）。kind 必须与 rollout 腿一致——旧实现漏传，goal/intent 腿会把权重
+            # 发进 rollout 桶，任务全 409（与 A1 同一类陷阱）。
+            if why == "new" and dist_common.weights_already_pushed(
+                wver, nid, kind=wkind
+            ):
+                mode = "kept(cache)"
+            else:
+                if why == "rearm":
+                    dist_common.forget_weights_node(nid)
+                try:
+                    mode = dist_common.post_weights(
+                        n["url"],
+                        n.get("authKey", ""),
+                        iter_id,
+                        wver,
+                        weights_bytes,
+                        timeout=min(300.0, max(60.0, task_timeout)),
+                        kind=wkind,
+                    )
+                except dist_common.DistError as e:
+                    log(f"[dist] rescan {nid}: weights POST failed ({e}) — skip this round")
+                    continue
+            # nd 带 ping：漏带会让 stageJson 任务在回场/中途上线节点上被能力握手拒掉
+            # （旧实现 bug，自定义关课程下等于把这些节点白孵）。
+            nd = {
+                "id": nid,
+                "url": n["url"],
+                "key": n.get("authKey", ""),
+                "c": c_n,
+                "ping": ping,
+            }
             with lock:
                 spawned_ids.add(nid)
-                alive.append(nd)
-            log(
-                f"[dist] rescan: node {nid} online mid-run — weights {mode}, spawning {c_n} workers"
-            )
+                if why == "new":
+                    alive.append(nd)
+                # 回场：重置失败计数（否则 worker 在循环顶部立刻又 return）。
+                streaks[nid] = 0
+                soft_streaks[nid] = 0
+                if why == "rearm":
+                    rearm_counts[nid] = rearm_counts.get(nid, 0) + 1
+            if why == "new":
+                log(
+                    f"[dist] rescan: node {nid} online mid-run — weights {mode}, "
+                    f"spawning {c_n} workers"
+                )
+            else:
+                log(
+                    f"[dist] rescan: node {nid} 回场（此前停派）— weights {mode}，"
+                    f"重置失败计数并补孵 {c_n} 个采样线程"
+                    f"（第 {rearm_counts[nid]}/{rearm_cap} 次）"
+                )
             for _ in range(c_n):
                 t = threading.Thread(target=worker, args=(nd,), daemon=True)
                 t.start()
@@ -274,6 +368,35 @@ def pick_tail_race(inflight: dict[tuple[int, int], int], dup: int) -> tuple[int,
         if c < dup and (cand is None or t < cand):
             cand = t
     return cand
+
+
+def pop_inflight(
+    inflight: dict[tuple[int, int], int],
+    inflight_nodes: dict[tuple[int, int], set[str]],
+    task: tuple[int, int],
+    nd_id: str,
+) -> None:
+    """一个副本出表（结算/失败/丢弃）。计数归零时连同节点集一起清。
+
+    A/B/C 三层共用一处（原先只是 `eval_dispatch` 里的局部闭包，现提到本模块）。
+    """
+    if task in inflight:
+        inflight[task] -= 1
+        if inflight[task] <= 0:
+            inflight.pop(task, None)
+            inflight_nodes.pop(task, None)
+        else:
+            inflight_nodes.get(task, set()).discard(nd_id)
+
+
+def clear_inflight(
+    inflight: dict[tuple[int, int], int],
+    inflight_nodes: dict[tuple[int, int], set[str]],
+    task: tuple[int, int],
+) -> None:
+    """任务已结算（胜者拿到）⇒ 整个出表；在飞的竞速副本回来时按 dup 丢弃。"""
+    inflight.pop(task, None)
+    inflight_nodes.pop(task, None)
 
 
 def pick_race_target(

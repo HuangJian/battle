@@ -4,6 +4,9 @@ import { GAME_VERSION } from '../src/snapshot/config'
 import { FRAME_SCHEMA_VERSION, FRAME_SCHEMA_V1 } from '../src/replay/config'
 import { packFrames } from '../src/replay/pack'
 import type { InputFrame } from '../src/replay/types'
+import { killScore, levelFactor } from '../src/config/score'
+import { RULES } from '../src/config/rules'
+import { SCORE_DROP_INTERVAL } from '../src/config/score-constants'
 
 // ============================================================
 // Helpers
@@ -192,6 +195,60 @@ describe('Replay file format round-trip', () => {
     // The snapshot's stale stageIndex must be corrected to match metadata.
     expect(replay.initialSnapshot.stageIndex).toBe(32)
     expect(replay.metadata.stage).toBe(32)
+  })
+
+  it('does not write arena/curriculum stage ids into snapshot.stageIndex (replay OOM)', () => {
+    // Regression: ladder/arena replays record metadata.stage = 2000+ while
+    // loadStageData(..., 0) correctly keeps snapshot.stageIndex = 0 (see
+    // tools/sim/export-rl-rollout.ts). reconcileSnapshotStage used to
+    // overwrite stageIndex with 2000 → killScore ~ 1.05^2001 →
+    // dropOnScoreMilestone pushes ~1e40 drops → tab OOM on first kill.
+    const snapshot = makeMinimalSnapshot() // stageIndex: 0
+    const frames = packFrames(SAMPLE_FRAMES)
+    const text = serializeReplayFile({
+      source: 'sim',
+      seed: 860106,
+      sim: {
+        seed: 860106,
+        difficulty: 'hard',
+        stageIndex: 2000,
+        stageName: 'ladder-c05',
+        outcome: 'died',
+        status: 'died',
+        maxTicks: 36000,
+      },
+      initialSnapshot: snapshot,
+      frames,
+      totalTicks: 3,
+      metadata: {
+        stage: 2000,
+        stageName: 'ladder-c05',
+        difficulty: 'hard',
+        lives: 0,
+        playerLevel: 0,
+        score: 0,
+        killCount: 3,
+        enemiesTotal: 5,
+        playTimeMs: 12500,
+      },
+    })
+
+    const result = parseReplayFile(text)
+    if ('error' in result) throw new Error(`Parse failed: ${result.error}`)
+    const { replay } = result as { replay: any }
+
+    // metadata still carries the curriculum id for browsing/filters…
+    expect(replay.metadata.stage).toBe(2000)
+    // …but the playable snapshot must keep scoring index 0.
+    expect(replay.initialSnapshot.stageIndex).toBe(0)
+
+    // If 2000 ever leaked into stageIndex again, one kill's milestone loop
+    // would push ~floor(killScore/5000) drops (≈1e40) and OOM the tab.
+    const stageIndex = replay.initialSnapshot.stageIndex as number
+    const oneKill = killScore('hard', undefined, stageIndex, RULES['hard'])
+    const milestones = Math.floor(oneKill / SCORE_DROP_INTERVAL)
+    expect(levelFactor(stageIndex)).toBeLessThan(100)
+    expect(milestones).toBeLessThan(100)
   })
 })
 

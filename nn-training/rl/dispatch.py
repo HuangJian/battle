@@ -46,6 +46,20 @@ ROLLOUT_LOG_EVERY = 10  # 本地 rollout 每 N 局结算打一条进度行
 RACE_LOG_SAMPLE = 2  # 竞速输家/dup settle 每类最多打前 N 条，其余进 round-done 汇总
 
 
+def resolve_tail_join_sec(policy: dict, all_settled: bool, halted: bool) -> float:
+    """收尾 join 的 grace 秒数（纯函数；2026-09-19 收紧）。
+
+    all_settled / halt 后默认 **0**：计划对局已齐（或已熔断），在飞副本只剩竞速
+    输家——结果注定被 dedup 丢弃，等待无数据价值（x20-rebirth it19：30s×3 波纯开销）。
+    policy.tailGraceJoinSec 可覆写（e2e 用 2s 验有界）。
+    窗口到期未齐 → tailGraceJoinSecDeadline（默认 5s）给在飞 worker 极短补结算窗；
+    缺口由 volume 补波 / resume 兜底。绝不再用 queueWindow+taskTimeout（旧 2700s 洞）。
+    """
+    if all_settled or halted:
+        return float(policy.get("tailGraceJoinSec", 0))
+    return float(policy.get("tailGraceJoinSecDeadline", 5))
+
+
 def _ensure_games(m: dict) -> dict:
     """将单局 agent manifest（无 games 键）转换为 combine_reports 可消费的格式。
 
@@ -70,7 +84,12 @@ def bun_version(bun: str) -> str:
     try:
         return (
             subprocess.run(
-                [bun, "--version"], capture_output=True, text=True, timeout=10, **_POPEN_NO_WINDOW
+                [bun, "--version"],
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
+                **_POPEN_NO_WINDOW,
             ).stdout.strip()
             or "?"
         )
@@ -85,7 +104,8 @@ def mm(version: str) -> str:
 def _record_agent_meta(meta_path: Path, rec: dict) -> None:
     """追加一条节点采样元数据到 dist-agent-meta.jsonl（巡检读它聚合进 HTML）。
 
-    rec: {node, it, stage, seed, ok, [win, elapsedSec | reason], ts}。
+    rec: {node, it, stage, seed, ok, [win, elapsedSec, wallSec | reason], ts}。
+    elapsedSec = 节点侧服务时长；wallSec = 训练机派发→结算墙钟（含网络）。
     放锁内调用保证顺序；单局一次 IO，成本可忽略。
     """
     try:
@@ -211,8 +231,11 @@ class RolloutDispatcher:
         for (nid, ping), n in zip(probe_results, cfg_nodes, strict=False):
             if ping is None:
                 log(f"[dist] node {nid}: ping failed — excluded this round")
+                dist_common.forget_weights_node(nid)
                 continue
             if ping.get("codeHash") != code_hash:
+                # codeHash 不符 ⇒ 节点可能 pull/restart 丢权重——缓存必须失效
+                dist_common.forget_weights_node(nid)
                 # 主动升级（guarded，2026-09-01 重启循环修复②）：分支 = 训练机当前分支
                 # （dist_common.UPGRADE_BRANCH 锁存）。护栏见 dist_common.request_upgrade_
                 # guarded——跨代去重（同节点同 (agent codeHash, 期望 hash) 只杀一次，
@@ -261,7 +284,9 @@ class RolloutDispatcher:
                     if not dist_common.is_self_node(n["url"], nid) and dedup_streak[nid] >= 3:
                         log(
                             f"[dist] WARN node {nid}: stale for {dedup_streak[nid]} "
-                            f"rounds, upgrade suppressed by dedup — 在节点执行 "
+                            f"rounds, upgrade suppressed by dedup （去重有"
+                            f"{int(dist_common.restart_dedup_cooldown_sec())}s 冷却窗，"
+                            f"窗过后会自动重发一次）— 在节点执行 "
                             f"'bun tools/agent/codehash-report.ts' 与本机 diff"
                             f"（见 plan/dist-codehash-stale-fix.md §4）"
                         )
@@ -288,6 +313,7 @@ class RolloutDispatcher:
                     f"[dist] node {nid}: bun {remote_full} vs local {local_bun} "
                     f"(major.minor differs) — excluded (red)"
                 )
+                dist_common.forget_weights_node(nid)
                 continue
             if remote_full != local_bun:
                 log(
@@ -308,40 +334,31 @@ class RolloutDispatcher:
             log("[dist] no eligible node — falling back to local-only rollout")
             return run_rollout(bun, rl_path, traj_dir, pairs, args)
 
-        # ② 权重一次下发；异 sha 由 agent 原子清场，同 sha 幂等不动
-        with open(rl_path, "rb") as f:
-            weights_bytes = f.read()
-        alive = []
+        # ② 权重下发准备（边分发边开采，2026-09-19 用户口径）：
+        #    rollout 耗时 = 权重就绪开始分发 → 样本齐可交 PPO。
+        #    同 wver 进程缓存 reuse 跳过 POST；need 节点 POST 成功瞬间孵化采样线程。
+        #    pure_collect_sec = last_settle − t_dist_start（含与采集重叠的分发墙钟）。
         if getattr(args, "goal_rollout", False):
             wkind = "goal"
         elif getattr(args, "intent_rollout", False):
             wkind = "intent"
         else:
             wkind = "rollout"
-        for nd in nodes:
-            try:
-                mode = dist_common.post_weights_cached(
-                    nd["url"],
-                    nd["key"],
-                    iter_id,
-                    wver,
-                    weights_bytes,
-                    timeout=min(300.0, max(60.0, task_timeout)),
-                    kind=wkind,
-                )
-                log(f"[dist] weights[{wkind}] -> {nd['id']} ({mode})")
-                alive.append(nd)
-            except dist_common.DistError as e:
-                log(f"[dist] weights POST to {nd['id']} failed ({e}) — excluded")
-        if not alive:
-            log("[dist] all weights POST failed — falling back to local-only rollout")
-            return run_rollout(bun, rl_path, traj_dir, pairs, args)
-        # 纯采集起点（用户定义 2026-08-24）：新权重分发完毕的时刻。
-        # 纯采集耗时 = 最后一局结算时刻 − 本时刻；与 PPO 重叠与否无关，就是两个事件锚点。
-        t_dist_done = time.time()
-        # 最后一局成功结算的时刻（worker 内更新）。用单元素 list 做闭包可变捕获；
-        # 显式标注 float|None，否则被推成 list[None]、写入 time.time() 报错。
+        with open(rl_path, "rb") as f:
+            weights_bytes = f.read()
+        reuse, need = dist_common.partition_weights_nodes(nodes, wver, kind=wkind)
+        if reuse:
+            log(
+                f"[dist] weights[{wkind}] reuse wver={wver[:12]}… skip POST for "
+                f"{[nd['id'] for nd in reuse]}"
+            )
+        # ping 失败/codeHash/bun 不符已在门内 forget；本列表在 worker 定义后用于
+        # 边分发边开采的即时 spawn。
+        # 最后一局成功结算的时刻（worker 内更新）。
         last_settle_at: list[float | None] = [None]
+        # 权重分发起止（诊断 + pure_collect 新口径）。
+        t_dist_start_box: list[float | None] = [None]
+        t_dist_done_box: list[float | None] = [None]
 
         # ③ 中央队列 + 消费者（远端 C_n 线程 + 本机 workers 线程）
         # 断点续跑：剔除已完整落盘且 wver 匹配的局（本轮重启/重试不重跑已完成任务）。
@@ -408,7 +425,13 @@ class RolloutDispatcher:
         lock = threading.Lock()
         seen: set[tuple[int, int]] = set()
         attempts: dict[tuple[int, int], int] = {}
-        streaks = {nd["id"]: 0 for nd in alive}
+        streaks = {nd["id"]: 0 for nd in nodes}
+        # 瞬时（背压/瞬断）连续计数：与真故障分开。瞬时错误**不计**节点击败
+        # streak（502 隧道/10054/超时/503 busy 都是可恢复的），但连续软失败仍有
+        # 上界——否则「整个集群或隧道挂了」时会无限重排把整轮拖到窗口超时。
+        # 一局成功即清零。`policy.nodeSoftFailStreak` 可覆盖（缺省 3×）。
+        soft_streak_max = int(policy.get("nodeSoftFailStreak", fail_streak_max * 3))
+        soft_streaks: dict[str, int] = {}
         results: list[dict] = []
         stats = {"retried": 0}
         # 竞速输家/dup settle 是 fan-out 的正常结局，逐条打会刷爆 training-loop.log
@@ -448,8 +471,14 @@ class RolloutDispatcher:
         # v3.15 分配超时重入（taskFetchTimeoutSec）与冷却黑名单保留。
         task_fetch_timeout = float(policy.get("taskFetchTimeoutSec", 30))
         _cooldown_sec = task_fetch_timeout * 4
-        # v3.9 动态节点发现：跑批中途上线的 agent 也能贡献算力（0 = 关闭）。
-        rescan_sec = float(policy.get("agentRescanSec", 120))
+        # v3.9 动态节点发现 + A4 轮内回场（2026-09-19 审计）：跑批中途上线的 agent、
+        # 以及**被熔断/软停后恢复的节点**都能回场（0 = 关闭）。
+        #  cadence：`recoverPingSec`（缺省 20s，与 B/C 层同口径）> `agentRescanSec`（旧名，
+        #  显式设 0 即关闭）> 20s。首个 pass 由 `nodeRecoverFirstSec`（缺省 5s）决定——
+        #  旧实现首个 pass 要等满 120s，而 volume 短波 234 轮全部 <120s ⇒ 一次都没跑过。
+        rescan_sec = float(policy.get("recoverPingSec", policy.get("agentRescanSec", 20)))
+        recover_first_sec = float(policy.get("nodeRecoverFirstSec", 5.0))
+        rearm_cap = int(policy.get("nodeRearmLimit", 3))
 
         # 任务 → 在跑副本数；任务 → 持有副本的节点集合（防竞速派回同节点）；
         # 任务 → 派发墙钟（超时 requeue）；任务 → 超时冷却节点集合。
@@ -471,8 +500,13 @@ class RolloutDispatcher:
                 took_local = False
                 fanout_copy = False
                 drained = False  # 本次取任务后派发队列是否清空（回调在锁外做，避免持锁派 eval）
+                # 本 worker 本次 attempt 的派发墙钟起点（勿用 inflight_ts[task]——竞速副本会覆盖）。
+                t_task_start: float | None = None
                 with lock:
-                    if nd is not None and streaks.get(nd_id, 0) >= fail_streak_max:
+                    if nd is not None and (
+                        streaks.get(nd_id, 0) >= fail_streak_max
+                        or soft_streaks.get(nd_id, 0) >= soft_streak_max
+                    ):
                         return
                     # v3.15 分配超时重入：扫描 in-flight 找到超时任务，重新进入 pending 队列。
                     # 闪断节点（如 a96）抢走任务后实际挂起，其他节点为空闲但看不到这些任务。
@@ -558,6 +592,7 @@ class RolloutDispatcher:
                         attempt = attempts[task]
                         register_inflight(inflight, task)
                         inflight_ts[task] = time.time()
+                        t_task_start = inflight_ts[task]
                         inflight_nodes.setdefault(task, set()).add(nd_id)
                         if nd is None:
                             local_active[0] += 1
@@ -581,6 +616,7 @@ class RolloutDispatcher:
                                 task = tail_cand
                                 inflight[task] += 1
                                 inflight_ts[task] = time.time()
+                                t_task_start = inflight_ts[task]
                                 inflight_nodes.setdefault(task, set()).add(nd_id)
                                 fanout_copy = True
                                 if nd is None:
@@ -604,7 +640,9 @@ class RolloutDispatcher:
                     continue
                 summary = None
                 err = ""
-                busy503 = False  # HTTP 503(busy) 瞬时负载标记——重排后背压退避
+                busy503 = False  # HTTP 503(busy) 瞬时负载（重排 + 背压退避）
+                transient_err = False  # 背压/瞬断（单一判据：dist_common.is_transient_error）
+                task_lost = False  # 取包丢失（节点重启/清场；判据：dist_common.is_task_lost_error）
                 try:
                     if nd is None:
                         _idx = next_idx[0]
@@ -669,9 +707,42 @@ class RolloutDispatcher:
                         summary = manifest
                 except Exception as e:
                     err = str(e)[:200]
-                    # HTTP 503（busy）是瞬时负载不是节点故障——except 内捕获（Python 3
-                    # 在 except 块后删除 e，必须在块内读出标记）。
+                    # 逐层分类（单一判据，与 B/C 层共用）：
+                    # · 背压/瞬断（503 busy / 502 隧道 / 10054 / 超时）⇒ 不计节点故障；
+                    # · 409 wver-not-cached ⇒ “可刷新”条件：节点侧权重文件没了（桶轮换/
+                    #   agent 重启/别的客户端 churn），进程内 reuse 缓存却仍说在
+                    #   ⇒ 就地重发权重 + 清缓存，同一节点继续用（2026-09-19 实测教训：
+                    #   5 条 409 把 a97 当作故障熔断，7 槽位整轮闲置；同一 wver 44s
+                    #   前刚收过）。两者都**不得**记节点失败 streak。
                     busy503 = isinstance(e, dist_common.DistError) and e.status == 503
+                    transient_err = dist_common.is_transient_error(e)
+                    if (
+                        nd is not None
+                        and isinstance(e, dist_common.DistError)
+                        and e.status == 409
+                        and dist_common.refresh_weights(
+                            nd,
+                            iter_id=iter_id,
+                            wver=wver,
+                            weights_bytes=weights_bytes,
+                            timeout=min(300.0, max(60.0, task_timeout)),
+                            kind=wkind,
+                            err=err,
+                            log=log,
+                        )
+                    ):
+                        transient_err = True  # 已自愈：同样不计故障、不耗 attempt 配额
+                    # 404「task lost on node」= 节点重启/清场把它**内存里**的结果/在飞任务
+                    # 清掉了（resultCache/failedTasks/inflight 都是节点进程内状态）：既非
+                    # 背压也非节点故障 ⇒ 清该节点这条腿的 reuse 账本（重启后桶也可能空了，
+                    # 下次取活会重新握手）+ 立即回队、不耗 attempt 配额。
+                    # 2026-09-19 审计 F1：旧实现把它当确定性失败记 streak ⇒ 与 409 同族，
+                    # 3 条就把刚重启的节点熔断整轮。
+                    task_lost = dist_common.is_task_lost_error(e)
+                    if task_lost:
+                        if nd is not None:
+                            dist_common.forget_weights_node(nd_id, kind=wkind)
+                        transient_err = True
                 with lock:
                     if nd is None and task is not None:
                         # max(0, …)：任何未配对路径都不许把计数打成负数（负 = 闸门失效）。
@@ -715,12 +786,21 @@ class RolloutDispatcher:
                             inflight_nodes.pop(task, None)
                         last_settle_at[0] = time.time()
                         streaks[nd_id] = 0
+                        soft_streaks[nd_id] = 0
                         if nd is not None:
                             last_remote_ok[0] = time.time()
                         # byNode / dist.nodes 按**配置节点 id**（mac/self/local）记账：
                         # summary["node"] 是 agent 自报的 worker 名（bun-71535 /
                         # node-30332 之类），直接用它汇总会看不到真实节点（2026-09-09）。
                         summary["nodeId"] = nd_id
+                        # 训练机侧墙钟：本 attempt 派发→结算（含网络/轮询/本地 Popen）。
+                        # 不覆盖 elapsedSec（节点服务时长仍用于算力横向比）。
+                        wall_sec = (
+                            round(time.time() - t_task_start, 3)
+                            if t_task_start is not None
+                            else None
+                        )
+                        summary["wallSec"] = wall_sec
                         results.append(summary)
                         _record_agent_meta(
                             meta_path,
@@ -733,6 +813,7 @@ class RolloutDispatcher:
                                 "ok": True,
                                 "win": win_of(summary),
                                 "elapsedSec": summary.get("elapsedSec"),
+                                "wallSec": wall_sec,
                                 "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
                             },
                         )
@@ -792,13 +873,27 @@ class RolloutDispatcher:
                                 f"[dist] main s{task[0]}/seed{task[1]} failed ({err}) — settled by fanout copy, dropped"
                             )
                         continue
-                    # 503（busy）不计熔断连击、不计重试上限（小批量突发提交防误熔断）。
-                    if nd is not None and not busy503:
+                    # 瞬时（503 busy / 502 / 10054 / 超时 / 409 已自愈）：不计熔断
+                    # 连击、不计重试上限（小批量突发提交与满负荷集群防误熔断）。
+                    hard_broke = False
+                    if nd is not None and not transient_err:
                         streaks[nd_id] = streaks.get(nd_id, 0) + 1
-                        broke = streaks[nd_id] == fail_streak_max
+                        hard_broke = streaks[nd_id] == fail_streak_max
+                        broke = hard_broke
+                    elif nd is not None:
+                        # 连续软失败上界：单次瞬时错误不是故障，但“一直是瞬时错误”
+                        # 就是集群/隧道真挂了——停派该节点，不把整轮拖到窗口超时
+                        # （与真故障熔断区分：日志与计数都单独记）。
+                        soft_streaks[nd_id] = soft_streaks.get(nd_id, 0) + 1
+                        broke = soft_streaks[nd_id] >= soft_streak_max
+                        if broke:
+                            log(
+                                f"[dist] node {nd_id}: 连续 {soft_streaks[nd_id]} 次瞬时失败"
+                                f"（背压/瞬断，非节点故障）— 本轮停派"
+                            )
                     else:
                         broke = False
-                    if attempt < MAX_TASK_ATTEMPTS or busy503:
+                    if attempt < MAX_TASK_ATTEMPTS or transient_err:
                         # v3.16：失败回队前清理 inflight 登记（避免 stale 条目）
                         if task in inflight:
                             inflight[task] -= 1
@@ -811,7 +906,15 @@ class RolloutDispatcher:
                         log(
                             f"[dist] s{task[0]}/seed{task[1]} failed ({err}) — requeued "
                             f"(attempt {attempt}/{MAX_TASK_ATTEMPTS}"
-                            + (", busy" if busy503 else "")
+                            + (
+                                ", busy"
+                                if busy503
+                                else ", 任务丢失（节点重启/清场，已回队、不计故障）"
+                                if task_lost
+                                else ", 瞬断/背压（不计节点故障）"
+                                if transient_err
+                                else ""
+                            )
                             + ")"
                         )
                     else:
@@ -833,90 +936,160 @@ class RolloutDispatcher:
                             f"[dist] s{task[0]}/seed{task[1]} failed {attempt}x ({err}) — missing this round "
                             f"[{len(seen) + len(missing_keys)}/{n_total_tasks} settled]"
                         )
-                    if broke:
+                    if hard_broke:
                         log(
                             f"[dist] node {nd_id}: {fail_streak_max} consecutive failures — "
                             f"circuit-broken for this round"
                         )
                     if len(seen) + len(missing_keys) >= n_total_tasks:
                         all_settled.set()
-                # 503(busy) 背压：agent 满负荷 → 本 worker 退避再领下一任务，防提交洪峰
-                # （无限重排会把 attempt 刷到上百、日志洪水——实测 503 洪峰教训）。
-                if busy503:
+                # 背压退避：agent 满负荷 / 隧道抖 / 瞬断 → 本 worker 退避再领下一任务，
+                # 防提交洪峰（无限重排会把 attempt 刷到上百、日志洪水——实测 503 洪峰教训）。
+                if transient_err:
                     time.sleep(min(5.0, max(0.5, deadline - time.time())))
 
         threads: list[threading.Thread] = []
-        # 本地线程先孵化：任务队列在启动瞬间是满的，谁先起跑谁抢到——agent 线程在
-        # 前的历史顺序曾让课程小轮（12 局）被远端瞬间清空、local 全程零参与。
-        for _ in range(max(local_slots, cap_full)):
-            threads.append(
-                threading.Thread(target=worker, args=(None,), daemon=True, name="rollout-local")
-            )
-        for nd in alive:
+        extra_threads: list[threading.Thread] = []
+        # alive / spawned_ids：权重就绪后才 append（边分发边开采；rescan 共享）。
+        alive: list = []
+        spawned_ids: set[str] = set()
+        alive_lock = threading.Lock()
+
+        def _spawn_node_workers(nd: dict) -> None:
+            """单节点权重就绪后立刻孵化其采样线程（POST 成功回调 / reuse / rescan）。
+
+            **先 start 再入列表**：join 快照可能与 append 竞态，对未 start 的线程
+            join 会 RuntimeError（stream smoke：local 秒结后 push/spawn 尚未启动）。
+            """
+            with alive_lock:
+                if nd["id"] in spawned_ids:
+                    return
+                spawned_ids.add(nd["id"])
+                if nd not in alive:
+                    alive.append(nd)
             for _ in range(nd["c"]):
-                threads.append(threading.Thread(target=worker, args=(nd,), daemon=True))
+                t = threading.Thread(target=worker, args=(nd,), daemon=True)
+                t.start()
+                threads.append(t)
+                extra_threads.append(t)
+
+        # 本地线程先孵化：本地权重已在磁盘（rl_path），不依赖远端 POST。
+        t_dist_start_box[0] = time.time()
+        for _ in range(max(local_slots, cap_full)):
+            t = threading.Thread(
+                target=worker, args=(None,), daemon=True, name="rollout-local"
+            )
+            t.start()
+            threads.append(t)
+        # reuse 节点：同 wver 已下发，立刻开采。
+        for nd in reuse:
+            _spawn_node_workers(nd)
+
+        def _push_need_and_spawn() -> None:
+            """need 节点并行 POST；每个成功节点立刻 spawn（边分发边开采）。"""
+            try:
+                if not need:
+                    return
+                dist_common.post_weights_parallel(
+                    need,
+                    iter_id,
+                    wver,
+                    weights_bytes,
+                    timeout=min(300.0, max(60.0, task_timeout)),
+                    kind=wkind,
+                    log=log,
+                    on_alive=_spawn_node_workers,
+                )
+            except Exception as e:
+                # Fake/真节点在采集结束时被关掉会 URLError；不拖垮 push 线程。
+                log(f"[dist] weights-push aborted ({e}) — 未成功 POST 的节点本轮不采样")
+            finally:
+                t_dist_done_box[0] = time.time()
+
+        if need:
+            push_t = threading.Thread(
+                target=_push_need_and_spawn, daemon=True, name="weights-push"
+            )
+            push_t.start()
+            threads.append(push_t)
+        else:
+            t_dist_done_box[0] = t_dist_start_box[0]
 
         # v3.9 动态节点发现：rescan 线程周期 ping 配置里未上线的节点，合格则
         # 权重下发 + 孵化新 worker 线程（与初始节点同等待遇，共享 pending 队列）。
-        # strategies: 初始 alive 已是共享可变列表（后续 append），spawned_ids 防重复孵化。
-        spawned_ids: set[str] = {nd["id"] for nd in alive}
-        extra_threads: list[threading.Thread] = []
-
         if rescan_sec > 0 and cfg.get("nodes"):
             scan_t = threading.Thread(
                 target=rescan_nodes,
-                args=(
-                    cfg,
-                    code_hash,
-                    upgrade_branch,
-                    dirty_files,
-                    local_bun,
-                    spawned_ids,
-                    alive,
-                    lock,
-                    weights_bytes,
-                    iter_id,
-                    wver,
-                    task_timeout,
-                    status_timeout,
-                    all_settled,
-                    deadline,
-                    rescan_sec,
-                    worker,
-                    extra_threads,
+                # **全部关键字传参**：本调用有 20+ 实参，历史上第 19 个位置参数错位
+                # 过（线程启动即抛，运行中上线的节点永远不被发现——见函数 docstring）。
+                kwargs=dict(
+                    cfg=cfg,
+                    code_hash=code_hash,
+                    upgrade_branch=upgrade_branch,
+                    dirty_files=dirty_files,
+                    local_bun=local_bun,
+                    spawned_ids=spawned_ids,
+                    alive=alive,
+                    lock=lock,
+                    weights_bytes=weights_bytes,
+                    iter_id=iter_id,
+                    wver=wver,
+                    task_timeout=task_timeout,
+                    status_timeout=status_timeout,
+                    all_settled=all_settled,
+                    deadline=deadline,
+                    rescan_sec=rescan_sec,
+                    worker=worker,
+                    extra_threads=extra_threads,
                     # v3.14b：halt 感知——熔断后 rescan 立即退出，主 join 不再白等超时
-                    halt_event,
+                    halt_event=halt_event,
+                    # A4：首个 pass 提前 / 权重 kind / 回场重置失败计数所需的状态。
+                    first_probe_sec=recover_first_sec,
+                    wkind=wkind,
+                    streaks=streaks,
+                    soft_streaks=soft_streaks,
+                    fail_streak_max=fail_streak_max,
+                    soft_streak_max=soft_streak_max,
+                    rearm_cap=rearm_cap,
                 ),
                 daemon=True,
                 name="rollout-rescan",
             )
             threads.append(scan_t)
+            scan_t.start()
 
-        for t in threads:
-            t.start()
         # v3.17 收尾兜底（2026-09-06，竞速收尾洞②）：旧实现对每个线程
         # join(window + task_timeout) = 2700s —— 只要有一个 worker 卡在**不可中断**
         # 的 HTTP 调用（同步 agent 的 200 分支、提交阶段挂起），整轮就空等到满超时，
         # 哪怕 150 局早已结算完毕（p4-horizon it2 273s / it3 258s，洞内日志静默）。
         # v3.16 的 abandon_event 只覆盖 x-async 轮询阶段，盖不住这条路径，故在此兜底。
-        # 新语义：
+        # 语义（2026-09-19 收紧，x20-rebirth it19 复盘）：
         #   ① 先等「本轮结算完成 / halt / 窗口到期」——正常收官时立即通过；
-        #   ② 再给在飞副本 tailGraceJoinSec（默认 30s，**全局共享**不是每线程各 30s）
-        #      自然收工：结果已齐，输家副本的返回值注定被 dedup 丢弃；
-        #   ③ 仍存活的线程一律放弃等待（daemon 线程随进程退出，不影响报告/落盘）。
-        # 未正常收官（deadline/halt 中止）时不走 grace：给足单任务窗口，保持旧语义。
+        #   ② **all_settled / halt 后默认 0s 不再等**：计划对局已齐（或已熔断），
+        #      在飞副本只剩竞速输家——返回值注定被 dedup 丢弃，等待无数据价值；
+        #      30s×volume 多波是纯墙钟开销（it19 实测 3×30s）。policy 可覆写。
+        #   ③ 窗口到期未齐：给在飞 worker 极短 grace（默认 5s）尝试补结算；
+        #      缺口由 volume 补波 / 下轮 resume 兜底，不再用 window+taskTimeout。
+        #   ④ 仍存活的线程一律放弃等待（daemon 线程随进程退出，不影响报告/落盘）。
         while not all_settled.is_set() and time.time() < deadline:
             if halt_event is not None and halt_event.is_set():
                 break
             all_settled.wait(0.5)
-        tail_join_sec = (
-            float(policy.get("tailGraceJoinSec", 30))
-            if all_settled.is_set()
-            else max(30.0, min(window, task_timeout))
-        )
+        halted = halt_event is not None and halt_event.is_set()
+        tail_join_sec = resolve_tail_join_sec(policy, all_settled.is_set(), halted)
         join_until = time.time() + max(0.0, tail_join_sec)
+        seen_join: set[int] = set()
         for t in list(threads) + list(extra_threads):
-            t.join(timeout=max(0.0, join_until - time.time()))
+            tid = id(t)
+            if tid in seen_join:
+                continue
+            seen_join.add(tid)
+            if t.ident is None and not t.is_alive():
+                continue  # 尚未 start（或已从列表里被复用）——join 会 RuntimeError
+            try:
+                t.join(timeout=max(0.0, join_until - time.time()))
+            except RuntimeError:
+                pass
         stuck = [t.name for t in list(threads) + list(extra_threads) if t.is_alive()]
         if stuck:
             log(
@@ -964,17 +1137,32 @@ class RolloutDispatcher:
             # 跨配置断点轮的目录残留量（不在本轮计划、已忽略）——一次性观测
             "offPlanShards": max(0, len(done_all) - len(done)),
         }
-        combined["dist_phase_sec"] = round(t_dist_done - t_queue_enter, 1)
+        combined["dist_phase_sec"] = round(
+            (t_dist_done_box[0] or time.time()) - t_queue_enter, 1
+        )
         if halt_event is not None and halt_event.is_set():
             combined["halt_aborted"] = True
             log(
                 f"[dist] KL halt active — dispatch stopped early "
                 f"({len(missing)} task(s) left undispatched/unsettled)"
             )
-        # 纯采集（用户定义）：最后一局结算时刻 − 权重分发完毕时刻。与 PPO 重叠无关。
-        if last_settle_at[0] is not None:
-            combined["pure_collect_sec"] = round(last_settle_at[0] - t_dist_done, 1)
+        # rollout 采集耗时（用户口径 2026-09-19）：权重就绪开始分发 → 样本齐可交 PPO。
+        # 边分发边开采下含与采集重叠的分发墙钟（端到端，不是「纯仿真」）。
+        collect_sec = dist_common.rollout_collect_sec(t_dist_start_box[0], last_settle_at[0])
+        if collect_sec is not None:
+            combined["pure_collect_sec"] = collect_sec
+        # 数值锚点：多波 volume 由 combine_reports 做 it 级 min→max 聚合。
+        if t_dist_start_box[0] is not None:
+            combined["weights_dist_start_ts"] = float(t_dist_start_box[0])
+            combined["weights_dist_start_at"] = time.strftime(
+                "%Y-%m-%d %H:%M:%S", time.localtime(t_dist_start_box[0])
+            )
+        end_ts = last_settle_at[0]
+        if end_ts is None:
+            end_ts = t_dist_done_box[0] or time.time()
+        combined["collect_end_ts"] = float(end_ts)
+        if t_dist_done_box[0] is not None:
             combined["weights_dist_done_at"] = time.strftime(
-                "%Y-%m-%d %H:%M:%S", time.localtime(t_dist_done)
+                "%Y-%m-%d %H:%M:%S", time.localtime(t_dist_done_box[0])
             )
         return combined

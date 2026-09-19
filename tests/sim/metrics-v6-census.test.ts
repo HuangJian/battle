@@ -99,6 +99,7 @@ function makeTel(over: Partial<Telemetry> = {}): Telemetry {
     puGotTank: 0,
     puGotFreeze: 0,
     puGotShield: 0,
+    puGotOther: 0,
     puSpawnStar: 0,
     baseWallTotal: 8,
     baseWallIntact: 8,

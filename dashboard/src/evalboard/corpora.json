@@ -1,0 +1,14 @@
+{
+  "version": "v1",
+  "_comment": "判决语料注册表（plan/rl-eval-system.md B 层扩展，用户 2026-09-19「中方案」P2）。与 ladder.json 分家：ladder rung 的语义是「arena 阶梯几何 + seg=k%16 推进」，判决语料是「课程关卡文件 stages × 池外 seed 段 × 多 ckpt」——混进 rungs 会污染阶梯语义（去重键/推进/ladder_pos 全部按 rung 走）。本文件只声明语料身份；批次与逐局行仍落 batches.jsonl / games/。",
+  "corpora": [
+    {
+      "id": "v-ladder-c03-p400600",
+      "level": "ladder-c03",
+      "seed0": 400600,
+      "games_per_stage": 200,
+      "policy": "nn",
+      "note": "T5 判决池外段（plan/t5-metrics-v6.plan.md §3）：4 关 × 200 局 = 800 局；与训练池 860001-860200（含双轨锚点/轮转段）及已用池外段 400000/400200 均不相交（§15.1 语料轮转）。"
+    }
+  ]
+}

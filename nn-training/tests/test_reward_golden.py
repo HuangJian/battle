@@ -726,6 +726,8 @@ def test_item_metrics_layout_locked() -> None:
         "hitsFast",
         "hitsPower",
         "hitsArmor",  # idx38
+        "puGotOther",  # idx39（v7：四桶外拾取残差，x5⑩ 全零 bug 补桶；不进公式）
+        "pickupDist",  # idx40（v7：最近存活拾取中心格曼哈顿距离，哨兵 -1）
     ]
     assert METRIC_INDEX["puGotBomb"] == 25
     assert METRIC_INDEX["puSpawnShield"] == 24
@@ -735,6 +737,8 @@ def test_item_metrics_layout_locked() -> None:
     assert METRIC_INDEX["killsPower"] == 33
     assert METRIC_INDEX["hitsPower"] == 37
     assert METRIC_INDEX["hitsArmor"] == 38
+    assert METRIC_INDEX["puGotOther"] == 39
+    assert METRIC_INDEX["pickupDist"] == 40
 
 
 def test_item_metrics_formula_and_envelope() -> None:
@@ -757,6 +761,48 @@ def test_item_metrics_formula_and_envelope() -> None:
     )
     np.testing.assert_allclose(r[:-1], dense[:-1])
     assert r[-1] == pytest.approx(dense[-1] - 2.0)
+
+
+def test_pickup_shaping_metrics_v7_formula() -> None:
+    """pickup-shaping（plan/pickup-shaping.plan.md §3/Phase 0）：v7 两列可用性回归。
+
+    ① 公式解析/包络全绿：`−wApproach*where(pickupDist<0,0,pickupDist)` 是趋近项的
+      标准写法（哨兵 -1 归零；str 'pickupDist' 已登记 DEFAULT_RANGES ⇒ 角点可求值）；
+    ② 势能语义：朝道具走一步（dist 9→8,8→7）即时到账 +wApproach —— 不依赖稀疏
+      拾取事件；绕回去（dist 7→8）净还回去（来回刷分净零 = 势能差的性质）；
+    ③ 走到 0 格（踩格拾取）后拾取消失（哨兵 -1，where 归零）不产生额外信用 ——
+      全程 +0.5×9 = 4.5 恰好是「从 9 格走到拾取」的完整趋近回报；
+    ④ `puGotOther` 可引用（残差桶「不进训练变量」，但列必须可用）。
+    """
+    spec = RewardSpec(
+        formula=(
+            "- wApproach * where(pickupDist < 0, 0, pickupDist)"
+            "+ wGotOther * puGotOther"
+        ),
+        params={"wApproach": 0.5, "wGotOther": 0.0},
+        terminal={"timeout": -2.0},
+    )
+    rep = validate_reward(spec)
+    assert rep.ok, rep.errors
+    assert rep.warnings == (), rep.warnings
+    fn = build_reward_fn(spec)
+    m = _metrics(6)
+    # 决策步 0..5 的 pickupDist：9,8,7,7,0,(-1 拾取已收集消失)；第 3 步不动（绕路）
+    m[:, METRIC_INDEX["pickupDist"]] = [9, 8, 7, 7, 0, -1]
+    m[:, METRIC_INDEX["puGotOther"]] = [0, 0, 0, 0, 1, 1]
+    r = fn(m, "timeout", 0.0, 1)
+    # Φ = -0.5*where(d<0,0,d)：[-4.5,-4,-3.5,-3.5,0,0]；diff = [0.5,0.5,0,3.5,0]
+    expected = np.array([0.5, 0.5, 0.0, 3.5, 0.0])
+    np.testing.assert_allclose(r[:-1], expected[:-1], atol=1e-12)
+    assert r[-1] == pytest.approx(expected[-1] - 2.0)
+    # 来回刷分净零：toward 9→8→7 (+1.0)，back 7→8→9 (−1.0)，净 0
+    fn2 = build_reward_fn(
+        RewardSpec(formula="- wApproach * where(pickupDist < 0, 0, pickupDist)",
+                   params={"wApproach": 0.5})
+    )
+    m2 = _metrics(5)
+    m2[:, METRIC_INDEX["pickupDist"]] = [9, 8, 7, 8, 9]
+    np.testing.assert_allclose(np.sum(fn2(m2, "timeout", 0.0, 1)), 0.0, atol=1e-12)
 
 
 def test_credit_p6_formula_and_course() -> None:
@@ -805,7 +851,7 @@ def test_credit_p6_formula_and_course() -> None:
     rep = _vr(c.reward_spec())
     assert rep.ok, rep.errors
     assert rep.warnings == (), rep.warnings
-    assert METRICS_VERSION == 6
+    assert METRICS_VERSION == 7
 
     # 公式按列加权：杀 1 basic 再杀 1 power 的两步势差 = +3 / +6（wHit/wWin 本例为 0）
     spec = RewardSpec(

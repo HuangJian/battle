@@ -10,12 +10,73 @@ def win_of(summary: dict[str, Any]) -> int:
     return 1 if summary.get("outcomes", {}).get("stage_clear", 0) > 0 else 0
 
 
+def aggregate_rollout_collect(reports: list[dict[str, Any]]) -> dict[str, Any]:
+    """多波 volume 的 it 级 rollout 聚合（用户口径 2026-09-19）。
+
+    起点 = 各波 `weights_dist_start_ts` 的 **min**（首波开始分发）；
+    终点 = 各波 `collect_end_ts` 的 **max**（最后一波样本齐可交 PPO）。
+    产出：`pure_collect_sec` + 数值锚点 + `rollout_collect_aggregated`。
+    无 ts 锚点时回退各波 `pure_collect_sec` 的 max（**下界**，多波端到端只会更长）
+    并标 `rollout_collect_aggregated=False`。
+    """
+    starts = [
+        float(r["weights_dist_start_ts"])
+        for r in reports
+        if r.get("weights_dist_start_ts") is not None
+    ]
+    ends = [
+        float(r["collect_end_ts"]) for r in reports if r.get("collect_end_ts") is not None
+    ]
+    per_wave = [
+        float(r["pure_collect_sec"])
+        for r in reports
+        if r.get("pure_collect_sec") is not None
+    ]
+    out: dict[str, Any] = {}
+    if starts and ends:
+        t0, t1 = min(starts), max(ends)
+        out["weights_dist_start_ts"] = t0
+        out["collect_end_ts"] = t1
+        out["pure_collect_sec"] = round(t1 - t0, 1)
+        out["rollout_collect_aggregated"] = True
+        out["rollout_collect_waves"] = len(starts)
+        return out
+    if per_wave:
+        out["pure_collect_sec"] = max(per_wave)
+        out["rollout_collect_aggregated"] = False
+        out["rollout_collect_waves"] = len(per_wave)
+    return out
+
+
+def empty_collect_report() -> dict[str, Any]:
+    """空采集报告（合法 shape）：games/winRate/outcomes/samples/ticks 齐全，供日志/事件读。"""
+    return combine_reports([])
+
+
+def adopt_volume_report(wave_combined: dict[str, Any] | None) -> dict[str, Any]:
+    """连续配额收官采纳本轮采集报告（2026-09-19 bugfix）。
+
+    `wave_combined` 是本轮全部 batch 的 combine 结果，内含本轮
+    weights_dist_start_ts / collect_end_ts。**不得**再与上一轮 `_report`
+    做 combine_reports：min(start) 会钉在历史波，pure_collect_sec 轮轮累加
+    （x20-powered it6 实测 425s，真采集 rollout_sec 仅 ~30s）。
+
+    本轮无采集（空 batch / 提前返回）时返回**空但合法** shape，绝不返回 `{}`——
+    否则 `_log_report` / events 读 `report['games']` 会 KeyError（2026-09-19 回归）。
+    """
+    if wave_combined:
+        return wave_combined
+    return empty_collect_report()
+
+
 def combine_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
     """跨 worker 精确重聚合（scoreList/dimLists 原始值列表）。
 
     本地 rollout 与远端单局摘要同构（远端 manifest 即单局 _rl_report.json 内容，
     另带 wver/node/elapsedSec 溯源字段，不影响聚合），两条采样路径共用本函数。
     M8 意图 RL：额外聚合 intentCounts（意图动作分布）与 totalKills（存在时）。
+    rollout 耗时（2026-09-19）：多波时 min(weights_dist_start_ts)→max(collect_end_ts)。
+    空 dict / 缺键报告跳过（轮初 `_report={}` 不得炸 combine）。
     """
     combined: dict[str, Any] = {
         "games": 0,
@@ -30,16 +91,18 @@ def combine_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
     intentCounts: list[int] | None = None
     totalKills = 0
     for r in reports:
-        combined["games"] += r["games"]
-        combined["totalSamples"] += r["totalSamples"]
-        combined["totalTicks"] += r["totalTicks"]
-        totalKills += r.get("totalKills", 0)
+        if not r:
+            continue
+        combined["games"] += int(r.get("games") or 0)
+        combined["totalSamples"] += int(r.get("totalSamples") or 0)
+        combined["totalTicks"] += int(r.get("totalTicks") or 0)
+        totalKills += r.get("totalKills") or 0
         for o, c in r.get("outcomes", {}).items():
             combined["outcomes"][o] = combined["outcomes"].get(o, 0) + c
             if o == "stage_clear":
                 wins += c
-        combined["scoreList"].extend(r.get("scoreList", []))
-        for k, vs in r.get("dimLists", {}).items():
+        combined["scoreList"].extend(r.get("scoreList") or [])
+        for k, vs in (r.get("dimLists") or {}).items():
             combined["dimLists"].setdefault(k, []).extend(vs)
         ic = r.get("intentCounts")
         if ic:
@@ -67,4 +130,5 @@ def combine_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
     combined["dimMeans"] = {
         k: round(sum(v) / len(v), 4) for k, v in combined["dimLists"].items() if v
     }
+    combined.update(aggregate_rollout_collect([r for r in reports if r]))
     return combined

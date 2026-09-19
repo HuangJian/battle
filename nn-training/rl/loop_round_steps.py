@@ -84,6 +84,9 @@ class RoundSteps:
     _remote_iter: Any
     _rollout_phase: Any
     _volume_topup: Any
+    #: 配额课程判据 + 连续配额采集（VOLUME_RULE_V2，2026-09-19）。
+    _volume_active: Any
+    _volume_collect_continuous: Any
     _dispatch_delayed_eval: Any
     _maybe_dispatch_baseline_eval: Any
     _log_report: Any
@@ -221,6 +224,10 @@ class RoundSteps:
         # yield：rollout 抢占集群 —— 关 evalboard 窗，在途 B/C 局停派新 seed。
         self._evalboard_yield()
         self._node_rollout_sec = None
+        # 每轮采集报告重置：volume continuous 若把本轮 combine 进上一轮
+        # _report，pure_collect 起点会被钉在历史波（§adopt_volume_report）。
+        self._report = {}
+        self._stream_meta = None
         # 本轮是否派发干净评估：**求值一次**并共享（原轮体在 rollout 调用点内联求值，
         # 同一 it 上是纯函数，故拆出来不改变行为）。
         ctx.eval_on_round = self._eval_on_round(it)
@@ -262,7 +269,8 @@ class RoundSteps:
 
         · `segment`（半离线整段）：一次领走 it..end_it，**推进指针**（`ctx.it` 变成本段末尾）；
         · `node`（整轮上云）：发 kind=iter job，本机不采样；
-        · `local`（默认）：本机 `_rollout_phase`（补波是**下一步**，因为它独占同一资源池）。
+        · `local`（默认）：配额课程走**连续配额采集**（2026-09-19 VOLUME_RULE_V2，它自己
+          实时读账本派批 + 软停 + 采纳报告，离散补波因此退役）；否则本机 `_rollout_phase`。
         """
         it = ctx.it
         if ctx.collect_mode == COLLECT_SEGMENT:
@@ -271,20 +279,25 @@ class RoundSteps:
             ctx.it = self._remote_run_segment(it, ctx.pairs, ctx.seg)
         elif ctx.collect_mode == COLLECT_NODE:
             self._remote_iter(it, ctx.pairs)
+        elif self._volume_active():
+            # 连续配额采集（2026-09-19）：替代「初波 + 补波」；实时按分关差额 + 软停
+            # 派发。必须在 `_log_report` 之前（本轮报告要含全部批）。
+            self._volume_collect_continuous(it, ctx.dist_cfg)
         else:
             self._rollout_phase(it, ctx.pairs, ctx.dist_cfg, ctx.eval_on_round)
         return None
 
     def step_volume_topup(self, ctx: RoundContext) -> StepResult | None:
-        """动态采集补波（配额未满 ⇒ 按已落盘 transitions 逐关补波）。
+        """离散补波——**已退役**（2026-09-19 VOLUME_RULE_V2）。
 
-        补波属本轮的**采集**阶段，必须坐在 `_log_report` 之前（本轮报告要含补波），
-        且只有本机采样路径有它——节点/整段轮采在云端，本机补波 = 双份采集（原轮体的
-        分支条件即此）。
+        配额课程的采集在上一步（`step_rollout`）由 `_volume_collect_continuous`
+        **一站式**收官：它自己按账本实时派批、软停、并采纳报告 ⇒ 补波无事可做；
+        非配额课程下 `_volume_topup` 本来就立即返回。
+
+        步骤本体保留：`STEP_ORDER` / `STEP_METHOD` 要求每个 kind 有实现（加一步必须
+        同时加实现，见 `tests/test_loop_round.py`），且细粒度驱动器要能在这两个 kind
+        之间把执行权交给别的课程。
         """
-        if ctx.collect_mode != COLLECT_LOCAL:
-            return None
-        self._volume_topup(ctx.it, ctx.dist_cfg)
         return None
 
     # ------------------------------------------- ⑥ 派发评估 + 本轮报告 + 开窗

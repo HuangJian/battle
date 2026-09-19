@@ -1,6 +1,7 @@
 import { TICK_MS } from '../constants'
 import type { WorldSnapshot } from '../snapshot/types'
 import { GAME_VERSION } from '../snapshot/config'
+import { STAGES } from '../config/stages'
 import { FRAME_SCHEMA_VERSION, REPLAY_HASH_INTERVAL, isSupportedFrameSchema } from './config'
 import { frameSchemaVersionOf, packFrames, unpackFrames } from './pack'
 import type { Replay, ReplayMetadata, ReplayType } from './types'
@@ -354,10 +355,19 @@ function buildReplay(
  * loadStageData(stage, 0), leaving initialSnapshot.stageIndex === 0 even
  * though metadata.stage is correct. Without this, playback restores
  * stageIndex 0 and the HUD shows "STAGE 01" for a later stage (bug: import
- * 的 S32 replay 播放时显示 STAGE 01). metadata.stage is the source of truth. */
+ * 的 S32 replay 播放时显示 STAGE 01). metadata.stage is the source of truth.
+ *
+ * Only classic `STAGES` indices may enter the snapshot. Arena/curriculum ids
+ * (1000+/2000+, e.g. ladder-c05 = 2000) are recorded with
+ * loadStageData(..., 0) on purpose — writing them into stageIndex makes
+ * killScore scale as 1.05^2000 and `dropOnScoreMilestone` push ~1e40
+ * power-up drops on the first kill (tab OOM). Same class of bug as
+ * tools/sim/export-rl-rollout.ts. */
 function reconcileSnapshotStage(built: Replay): void {
-  if (built.initialSnapshot && built.initialSnapshot.stageIndex !== built.metadata.stage) {
-    built.initialSnapshot.stageIndex = built.metadata.stage
+  const stage = built.metadata.stage
+  if (!STAGES[stage]) return
+  if (built.initialSnapshot && built.initialSnapshot.stageIndex !== stage) {
+    built.initialSnapshot.stageIndex = stage
   }
 }
 

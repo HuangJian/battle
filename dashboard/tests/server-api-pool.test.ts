@@ -24,6 +24,8 @@ describe('/api/pool（buildPoolView）', () => {
       expect(typeof r.ok).toBe('number')
       expect(typeof r.fail).toBe('number')
       expect(typeof r.contrib).toBe('number')
+      expect(r.avgElapsedSec === null || typeof r.avgElapsedSec === 'number').toBe(true)
+      expect(r.avgWallSec === null || typeof r.avgWallSec === 'number').toBe(true)
       expect(Array.isArray(r.recent)).toBe(true)
       expect(typeof r.lastError).toBe('string')
     }

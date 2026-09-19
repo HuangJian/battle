@@ -685,9 +685,10 @@ def test_iteration_pairs_identity_without_volume(tmp_path: Path, _patch_wver: No
 
 
 def test_iteration_pairs_volume_initial_wave(tmp_path: Path, _patch_wver: None) -> None:
+    """volume 课程仍产出 node/export 预排表；串行连续采集不预置 waves=1。"""
     stub = _StubLoop(tmp_path, target=600000, est=967)
     pairs = stub._iteration_pairs(3)
-    assert stub._volume_waves == 1
+    assert stub._volume_waves == 0
     assert stub._volume_g0 == 156
     assert stub._volume_target == 600000
     assert pairs == wave_pairs(stub._rotate_seed, 3, {s: 156 for s in range(4)}, 0)
@@ -727,6 +728,7 @@ def test_volume_topup_quota_met_in_first_wave(tmp_path: Path, _patch_wver: None)
     """初波就达标：不补波，只记账（est 估准的正常情形）。"""
     stub = _StubLoop(tmp_path, target=600000, est=967, samples=967)
     stub._iteration_pairs(1)
+    stub._volume_waves = 1  # wave 测试：初波已跑（生产连续配额不再预置）
     _settle_first_wave(stub)
     stub._volume_topup(1, None)
     assert stub.dispatched == []  # 无需补波
@@ -738,6 +740,7 @@ def test_volume_topup_iterates_until_wave_cap(tmp_path: Path, _patch_wver: None)
     """每局 samples 偏少（est 声明值偏大）⇒ 逐关补波，至多 3 波后停（不无限补）。"""
     stub = _StubLoop(tmp_path, target=600000, est=967, samples=500)
     stub._iteration_pairs(1)
+    stub._volume_waves = 1
     _settle_first_wave(stub)
     stub._volume_topup(1, None)
     sizes = [len(w) for w in stub.dispatched]
@@ -755,6 +758,7 @@ def test_volume_topup_hard_cap_marks_capped(tmp_path: Path, _patch_wver: None) -
     """局数硬顶：本波截断到剩余额度，触顶后停采并打标（配额未满但停）。"""
     stub = _StubLoop(tmp_path, target=600000, est=967, samples=500, max_games_per_stage=200)
     stub._iteration_pairs(1)
+    stub._volume_waves = 1
     _settle_first_wave(stub)
     stub._volume_topup(1, None)
     assert [len(w) for w in stub.dispatched] == [4 * 44]  # 200-156 剩余额度
@@ -772,6 +776,7 @@ def test_volume_topup_partial_ledger_replays_same_continuation(
     """
     full = _StubLoop(tmp_path / "full", target=600000, est=967, samples=500)
     full._iteration_pairs(1)
+    full._volume_waves = 1
     _settle_first_wave(full)
     full._volume_topup(1, None)
     assert len(full.dispatched) == 2
@@ -824,6 +829,7 @@ def test_volume_topup_replays_unfinished_wave(tmp_path: Path, _patch_wver: None)
 
     stub = _StubLoop(tmp_path, target=600000, est=967, samples=500)
     stub._iteration_pairs(1)
+    stub._volume_waves = 1
     _settle_first_wave(stub)
     # 造「崩在 w2 中间」的 WAL：w2 有 start、无 finish（对局表 = 每关 36 局）
     games = {0: 36, 1: 36, 2: 36, 3: 36}
@@ -844,6 +850,7 @@ def test_volume_topup_does_not_replay_finished_wave(tmp_path: Path, _patch_wver:
 
     stub = _StubLoop(tmp_path, target=600000, est=967, samples=500)
     stub._iteration_pairs(1)
+    stub._volume_waves = 1
     _settle_first_wave(stub)
     stub._journal.start(WAVE_PHASE, wave_round_key(1, 2), games={"0": 36})
     stub._journal.finish(WAVE_PHASE, wave_round_key(1, 2))
@@ -856,6 +863,7 @@ def test_volume_topup_skips_stream_path(tmp_path: Path, _patch_wver: None) -> No
     """v1 边界：stream 路径保持老语义（只记日志，不补波）。"""
     stub = _StubLoop(tmp_path, target=600000, est=967, samples=500)
     stub._iteration_pairs(1)
+    stub._volume_waves = 1
     _settle_first_wave(stub)
     stub._stream_meta = {"rollout_sec": 1.0}
     stub._volume_topup(1, None)
@@ -873,6 +881,7 @@ def _topup_from_ledger(tmp: Path, half: list[tuple[int, int]]) -> _StubLoop:
     """造一个「初波已结算 + 第二波只落了一半」的循环桩，然后跑补波（崩后续跑）。"""
     stub = _StubLoop(tmp, target=600000, est=967, samples=500)
     stub._iteration_pairs(1)
+    stub._volume_waves = 1
     _settle_first_wave(stub)
     for stage, seed in half:
         _manifest(stub._traj_dir, stage, seed, _WVER, stub.samples)

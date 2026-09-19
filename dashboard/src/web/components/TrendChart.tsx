@@ -4,7 +4,7 @@
 
 import { useState } from 'preact/hooks'
 import type { JSX } from 'preact'
-import { sliceSeries, type Series, type TrendRange } from '../view'
+import { sliceSeries, trendHoverIndex, type Series, type TrendRange } from '../view'
 
 export interface TrendChartProps {
   /** 主序列（rollout）：全量时序（组件内部按 range 截取）。 */
@@ -18,6 +18,9 @@ export interface TrendChartProps {
   /** y 轴下界上限：实际下界 = min(dataMin, yFloor)。缺省贴 dataMin。
    *  击杀/道具传 0（基底锁 0）；胜率传 0.3（基底不得高于 30%）。 */
   yFloor?: number
+  /** y 轴**强制**下界（胜局耗时等需要按数据量级缩放时用）：轴下界 = yMin，
+   *  可高于 dataMin（裁掉下方空白/低点）。与 yFloor 同传时 yMin 优先。 */
+  yMin?: number
   /** 主序列图例色（默认 accent）；叠加序列固定琥珀。 */
   color2?: string
 }
@@ -60,6 +63,7 @@ export function TrendChart({
   tone,
   height = 56,
   yFloor,
+  yMin,
   color2 = COLOR2_DEFAULT,
 }: TrendChartProps) {
   const [hover, setHover] = useState<number | null>(null)
@@ -91,8 +95,9 @@ export function TrendChart({
   const plotH = height - PAD_T - PAD_B
   const all = [...valid, ...valid2]
   const dataMin = all.length ? Math.min(...all) : 0
-  const max = all.length ? Math.max(...all) : 1
-  const min = yFloor !== undefined ? Math.min(dataMin, yFloor) : dataMin
+  const dataMax = all.length ? Math.max(...all) : 1
+  const min = yMin !== undefined ? yMin : yFloor !== undefined ? Math.min(dataMin, yFloor) : dataMin
+  const max = dataMax > min ? dataMax : min + Math.max(1, Math.abs(min) * 0.05)
   const span = max - min
 
   const px = (i: number): number => PAD_L + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW)
@@ -127,11 +132,10 @@ export function TrendChart({
   const hy2 = hv2 != null && Number.isFinite(hv2) ? py(hv2) : null
 
   const onMove = (e: JSX.TargetedMouseEvent<SVGRectElement>) => {
+    // 捕获 rect = plot 区（x=PAD_L, width=plotW）：屏幕比例 t∈[0,1] 直接映射下标。
+    // 勿再按全 viewBox 宽换算后减 PAD_L（会在中段把选点推到鼠标左侧）。
     const rect = e.currentTarget.getBoundingClientRect()
-    const relX = ((e.clientX - rect.left) / rect.width) * VB_W - PAD_L
-    let i = Math.round((relX / plotW) * (n - 1))
-    i = Math.max(0, Math.min(n - 1, i))
-    setHover(i)
+    setHover(trendHoverIndex(e.clientX, rect.left, rect.width, n))
   }
 
   const tipParts: string[] = []

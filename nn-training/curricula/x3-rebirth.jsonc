@@ -240,13 +240,13 @@
       "wWin": 2.0,
       "wDmg": 0.03,
       "wShot": 0.05,
-      "wExplore": 0.2
+      "wExplore": 0.2,
     },
     "terminal": {
       "lives_exhausted": -5.0,
-      "timeout": -2.0
+      "timeout": -2.0,
     },
-    "scheme": "toy"
+    "scheme": "toy",
   },
   "dodge": "",
 
@@ -281,7 +281,7 @@
     // （DECISIONS §2026-09-15-goalnn-kl-cap-unwired，`ppo_update` 无形参），
     // 但 stream 路径会读；段内缺席即 None ⇒ 回落 `policy.streamKlCap`（本仓 0.18）
     // ⇒ 会与 kl_coef 的放松方向打架。**别把它当护栏，也别留缺席。**
-    { "kl_coef": 0.01, "lr": 0.00025, "kl_cap": 0.2 }
+    { "kl_coef": 0.01, "lr": 0.00025, "kl_cap": 0.2 },
   ],
 
   // ── 采集：严格样本量配额（与 a2 / x2-rebirth 同每轮样本量）────────────────

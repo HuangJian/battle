@@ -123,6 +123,14 @@ def run_clean_eval(bun: str, rl_path: str, args, _runner=None) -> dict:
                 cwd=str(REPO_ROOT),
                 capture_output=True,
                 text=True,
+                # 父进程不传 encoding 时按 locale 解码（zh-CN Windows = cp936），而 m1-eval
+                # 的 stderr 带中文（WIN RATE 横幅旁的「全灭率」等）⇒ UnicodeDecodeError 被
+                # `dispatch_eval_bg_m1` 的 except 吞成「clean eval failed (ignored)」，干净评估
+                # **静默消失**（2026-09-19 实测：本地/分布式两种 m1-eval 调用都复现）。与
+                # gate_check §30 是同一类坑（那边靠 ensure_ascii 免疫）。机器通道是 stdout 的
+                # JSON（纯 ASCII），中文只在人类可读行 ⇒ errors=replace 不损伤解析。
+                encoding="utf-8",
+                errors="replace",
                 timeout=3600,
                 **_POPEN_NO_WINDOW,
             )

@@ -3093,3 +3093,865 @@ R2c 造好了调度器与任务体，但**没有驱动者**（至今仍是「一
 - **违反后果**：新写的测试再自己 `bind(0) → close → 交给子进程`，xdist 下会重现那条无头假红；把「端口有人答就算成功」引入成功判据，会让用例对着**别人的** hub/worker 跑完并且通过。
 - **落地**：`tests/subproc_util.py`（新增 `PortStolenError` / `retry_on_port_stolen`；子进程 stdout 改**显式 `encoding="utf-8", errors="replace"`** —— `text=True` 按控制台代码页解码，zh-CN Windows 撞 gbk 会让读线程静默死掉，正是 2026-09-17 在本仓吃过的那个坑）· 四处调用点收敛（`test_instance_lock` / `test_worker_server_lock` 起真进程的两条各改 `spawn_bound_port`（顺序双启）与 `retry_on_port_stolen`（三启抢端口）；`test_port_guard` / `test_push_bootstrap_teardown` 只换共享 `free_port()`）· 守卫重写为扫全部 `tests/**` + `e2e/**`（**剥注释后**扫，R4 那条教训）：① 不许再有私有 `_free_port`；② 凡 argv 里出现 `"-m", "remote.hub_server" | "remote_worker_serve" | "remote.worker_server"` 的文件必须借端口。回归 `tests/test_subproc_util.py` 共 9 例（新增编码守卫 + 中文 marker 端到端）。
 - **仍未做**：平台侧正解仍是「`--port 0` ⇒ 自选端口并回报」（见 §2026-09-19-goalnn-test-port-contention 的「仍未做」①）。
+## §2026-09-18-pickup-shaping-metrics-v7（2026-09-18，课程 x5-approach 立项：plan/pickup-shaping.plan.md Phase 0/1 落地）
+
+- **背景**：x5（wPickup 3.0）结课判部分达成 —— pu 0.71→0.69 纹丝不动而 dmg 同种子 −39% ⇒ 拾取特异性不动；意愿半径 cliff（0–4 格拾取率 74%，5 格+ ≈5%）证明「朝道具走」行为维度不存在。本腿 = 唯一训练变量 `−wApproach×pickupDist`（势能法，不改最优策略），让该维度被塑形出来。
+- **metrics v7（shard 格式变更 ⇒ golden 重生成，语义变更声明）**：`METRICS_DIM` 39→41、`METRICS_VERSION` 6→7。新列：**idx40 `pickupDist`**（每决策步玩家到最近存活拾取中心格曼哈顿距离；无存活拾取/玩家阵亡 = 哨兵 −1，公式侧 `where(pickupDist<0,0,pickupDist)` 归零 —— 哨兵与 firstKillTick/clearTick 同构）+ **idx39 `puGotOther`**（顺手修 x5⑩「puGot* 全零输出 bug」）。
+- **puGotOther 与 x5⑭ 的关系（否决陷阱澄清）**：x5⑭ 把「分列 collected-by-kind」整个判成独立工程不开（doctrine：fence 除外无法低成本实现，接受残差）；本列是**更小**的修法 —— 只补一个**残差桶**（四桶外类型全进它），不做按类型定价（这些列不进任何公式，「不进训练变量」），只恢复输出侧守恒（`powerUpsCollected ≡ stars + 四桶 + puGotOther`，可测）。未否定 ⑭ —— 全分列仍不开。
+- **wApproach 剂量冻结 = 0.008（Phase 1，方法按 plan §3 预注册）**：it0 语料（it35-best/40 局/v7）Σwhere0(pickupDist) 均值 753.8、kill+win 均值 12.68 ⇒ 门②上限 0.0084 ⇒ 冻 0.008（留 ~5%）。边际算术 −1.57 dmg/格（趋近 dmg 成本非正 ⇒ 定价不被承伤约束）。telescoped 读数：d0 恒 0 ⇒ 趋近项每局净 ≤0（势能法原理，不改最优策略；来回刷分净零同源）。§5 趋近 hack 熔断（cellsVisited 暴涨而 kills 不升 / zero-kill-frac 翻倍）作护栏。
+- **作废声明**：v6 及更早 shard（traj/）**不可续跑**（列序已变，下游按 version 判别会响亮报错）；旧 `-best` 权重当 bc 可用；v6/v7 的 metric 数值**禁直接比较**（终点三选项限于 v7 内）。
+- **落地**：`tools/sim/export-rl-rollout.ts`（`nearestPickupDist`/`PICKUP_DIST_SENTINEL`/两新列/`puGotOther` 残差桶，idx40 热路径零分配）、`tools/sim/export-eval-game.ts`（puGotOther 同桶）、`nn-training/rl/reward_library.py`（METRICS 缀尾 + v7）、`reward_validation.py`（范围：puGotOther 0–30、pickupDist −1–50）、golden 重生成（64 cases）、`tests/pickup-dist-metric.test.ts`（codec 独立重实现 + 炸弹局/多拾取局/BONUS 窗口局等价用例 + determinism）、`nn-training/curricula/x5-approach.jsonc`（判据原文搬家，plan 文件退役归档）。回归：`bun run check` 绿 + nn pytest 396 用例绿。
+
+## §2026-09-19-x20-dense-only（2026-09-19，20 敌 1 命总攻腿 x20-rebirth 立项：dense-only 第一例 + lives1 晋升 + 4 出场变体）
+
+- **背景**：c20-3命 83% vs c20-1命 9.9% 撞出 §0.2（1 命任务定义）vs D1/D2（阶梯命数）矛盾，用户裁定执行 A 面（1 命）。1 命下机会成本（没收后面全部未杀，c20 高达 +60）淹没终局常数（wWin +2 / death −5）⇒ 去 wWin、去双 terminal 只留持续项；围歼下苟均衡不存在（待验证，不断言 —— 超时熔断 >5% 即加回重开是预注册反悔键）。
+- **备选与否决**：保留双 terminal（称"自杀威慑/苟定价"）—— 否，离线 EV 三档重算去留排序不变（走>莽>坐；1 命真值语料 n=40），威慑主由机会成本承担；缩短 max_ticks 防苟 —— 否，cap 2500 会把 30% 真通关（含教师 13%）变超时（D7 立案的截断正是要删的东西），且当前策略 24 枪/局无苟病；wWin 单留 —— 否，杀光=通关机械恒等，+2 只是 top-up，删了 EV 不变。
+- **D11 合规**：命数 tier 变化触发立案（roadmap:37），四项逐项打勾 —— ① 本条目；② fresh `tmp/x20-rebirth/`；③ reward 重验算（§2 剂量复核 + EV 三档）；④ bc 零样本重测（x6best c20-1命对决胜 + it0 三件套）。`ladder-c20` 原 3 命毕业账不混入。
+- **作废声明**：3 命探针数全作废（est 478→147、边际 −2.71→+0.90、鸿沟 45pp→0.5pp；根因 `export-rl-rollout` 漏传 lives 静默 3 命，已修 fail-fast + 回归测试）；4 变体 it0（pooled 2.0%/3.63杀）替代单变体旧数（11.5%/7.49杀）。
+- **落地**：`nn-training/levels/ladder-c20-lives1.jsonc`（4 轮转变体，成分恒 5/5/5/5；`ladder-c20` 整名 D11 账不动）、`nn-training/curricula/x20-rebirth.jsonc`（kills 里程碑 8/12/16/20 + pass 门 30% + 超时熔断 + 回测门 c07/c06；it40 主检点 kills +50%；it20 只记录不判决）、`tools/sim/export-rl-rollout.ts`（`resolveLivesFlag` 无 flag 即抛错 + 回归测试）。回归：课程 `CourseConfig` 校验通过（terminal 空表合法）。
+
+## §2026-09-19-rollout-pipeline-metric（2026-09-19，边分发边开采 + rollout 耗时口径，用户定义）
+
+- **口径（用户拍板）**：rollout 耗时 = **权重就绪开始分发 → 所有样本采集完毕可交 PPO**。
+  `pure_collect_sec` = `last_settle − t_dist_start`（**含**与采集重叠的分发墙钟，端到端）。
+  旧口径（2026-08-24：末局结算 − **全部**权重分发完毕）作废——在「先等全节点再开采」下
+  把分发墙钟藏进 net/dist_phase，volume 多波时 dashboard 显示的 rollout 与真实采集周期脱节。
+- **实现**：`dist_common.post_weights_parallel(..., on_alive=)` 每节点 POST 成功即回调；
+  `rl/dispatch.py` 先起 local/reuse 采样线程，need 节点后台 POST 成功立刻 spawn（边分发边开采）。
+  `weights_dist_start_at` / `weights_dist_done_at` 作诊断锚点；`dist_phase_sec` 仍为
+  ping→权重分发完成（与采集重叠部分不再从 rollout 里抠掉）。
+- **备选与否决**：保持「等全节点 ready 再开采 + pure_collect=末局−全 ready」——否，与用户
+  端到端口径冲突，且 it19 实测串行分发 50s×多波白白空转；rollout 只记纯仿真（末局−各节点
+  自 ready）——否，用户明确要「开始分发→样本齐」一体读数。
+- **落地**：`dist_common.rollout_collect_sec` / `partition_weights_nodes` / `_WEIGHTS_PUSHED`
+  同 it 补波复用；dashboard `phaseSecs` 注释同步。DECISIONS 本条 = 口径变更备案（防再
+  「优化」回旧锚点）。
+- **多波聚合（同日补充）**：`rl/reports.aggregate_rollout_collect`——volume 各波报告带
+  `weights_dist_start_ts` / `collect_end_ts`，`combine_reports` 压成 it 级
+  `pure_collect_sec = min(start)→max(end)`（首波分发→全部样本齐，含波间空隙）。无 ts
+  时回退 max(per-wave) 并标 `rollout_collect_aggregated=False`。iteration 事件附加
+  `rollout_collect_aggregated` / `rollout_collect_waves`。
+
+## §2026-09-19-volume-continuous-quota（2026-09-19，用户指令：退役离散补波 → 配额感知连续派发）
+
+- **背景**：x20 分关样本缺口/wave_cap 复盘 —— 全局 est × 等 G0 盖不住 1 命下变体间
+  产量方差（通关率波动 → 局均 nSamples 波动）。用户裁定：**完全去掉补波机制**，loop
+  实时观测 samples 分布，即将足额不再派、差额大者多派。
+- **规则 VOLUME_RULE_V2**（`rl/volume_quota.py`）：分关配额 `ceil(target/n_stages)`；
+  每批 `allocate_stage_games`：`collected+inflight*est_s ≥ quota` → 软停；差额按
+  `ceil(shortfall/est_s)` 派；`game_cap` 硬顶；`DEFAULT_MAX_BATCHES=12` 安全阀（触顶
+  响亮 WARN，非静默短采）。种子 `(rotate_seed,it,stage)` 独立流第 k 局（无 wave_idx）。
+- **备选与否决**：保留 G0+补波仅改分关 est —— 否，用户要求去掉波次语义；worker 内
+  每局实时选关 —— 改动面过大，v2 用「账本驱动小批」逼近同一语义（批间同步结算）。
+- **§15.5**：相对 wave 规则的语料构造变更 —— 迁课程建议 fresh `--out/--traj`。
+  wave 纯函数（`volume_waves.plan_topup` 等）仍保留供旧单测/e2e；**生产串行路径**
+  已切 `_volume_collect_continuous`（`loop_core`）。`resume.trailing_stage_samples_per_game`
+  提供分关 est_s。
+- **落地**：`rl/volume_quota.py`、`loop_core._volume_collect_continuous`、
+  `tests/test_volume_quota.py`。回归：相关 pytest + parse 绿。
+
+## §2026-09-19-console-node-wallsec（2026-09-19，用户指令：节点统计新增训练机侧平均墙钟）
+
+- **背景**：节点统计「平均耗时」= meta `elapsedSec` 滑动均值；该字段是**节点侧**接单→
+  结果就绪（sampler-agent `stampServiceSec`，含冷启动，**不含**训练机↔节点网络）。用户
+  要求另加一列训练机侧墙钟，观测派发→结算的真实回传成本。
+- **备选与否决**：把 trainer 墙钟**覆盖**进 `elapsedSec` —— 否，摧毁节点算力横向比
+  （2026-09-06 口径升级正是为对齐 local/remote 服务时长）；只改 dashboard 从现有
+  字段反推网络 —— 否，meta 无派发时刻，推不出来；在 agent 侧再起一个计时器写第二
+  字段 —— 否，网络段只在 trainer 视角完整，节点侧测不到提交/回传。
+- **决定**：双字段并列，互不覆盖。`wallSec` = **本 worker 本 attempt** 派发→结算墙钟
+  （`t_task_start` 本地量，**勿读** `inflight_ts[task]`——竞速副本会覆盖）；成功结算时
+  写入 `dist-agent-meta.jsonl` + summary。dashboard 聚合 `avgWallSec`（≤50 滑动，与
+  `avgElapsedSec` 同窗），NodeStats 新列「机侧墙钟」。历史 meta 无 `wallSec` → 显示 `-`。
+  含网络/异步轮询/排队，**不是**纯 RTT；慢节点判定仍用服务时长，不改 `isSlowNode`。
+- **违反后果**：覆盖 `elapsedSec` ⇒ 节点算力对比被网络污染；用 `inflight_ts` 算墙钟
+  ⇒ 竞速赢家的墙钟被输家起点抬高/压低；把墙钟当 ping 用 ⇒ 轮询间隔被误读成故障。
+- **落地**：`nn-training/rl/{dispatch,queue,eval_dispatch}.py`（meta `wallSec`）；
+  `dashboard/src/server/pool-history.ts`（`pushWindowSample`/`windowMeanSec`/`avgWallSec`）、
+  `pool-types.ts`/`api/pool.ts`/`NodeStats.tsx`；回归 `dashboard/tests/server-pool-history.test.ts`。
+
+## §2026-09-19-volume-purecollect-stale-merge（2026-09-19，bugfix：指标表 rollout 时间轮轮累加）
+
+- **背景**：x20-powered/x20-snowball 的 `pure_collect_sec`（指标表 rollout 列）it1≈30s
+  起每轮 +70~100s，it6 达 425s；同轮真采集 `rollout_sec` 始终 ~25–36s。
+- **根因**：`_volume_collect_continuous` 收官时 `combine_reports([self._report, combined])`，
+  而 `self._report` **未在轮初清空**——仍带上一轮 `weights_dist_start_ts`；
+  `aggregate_rollout_collect` 的 min(start) 被钉在 run 起点，pure_collect ≈ 累计墙钟。
+  同路径 `totalSamples` 也被跨轮相加（jsonl `samples` 虚高；`transitions_collected` 正常）。
+- **备选与否决**：在 combine 前手工剥掉 prior 的 ts —— 否，prior 整份都不该进本轮报告
+  （games/score 会双计）；dashboard 改读 `rolloutSec` 回避 —— 否，掩盖错误账本；
+  保留跨轮 combine「凑完整 run 窗口」—— 否，与用户定义的「本轮采集」口径冲突。
+- **决定**：轮初 `self._report = {}`；continuous 收官只采纳本轮
+  `adopt_volume_report(combined)`（无 batch 时返回**合法空 shape** `combine_reports([])`，
+  绝不返回 `{}` —— 否则 `_log_report`/events 读 `games` KeyError，2026-09-19 同日回归已修：
+  combine 跳过空 dict、日志/events 用 `.get`）。历史 jsonl 的
+  pure_collect/samples 累加行**作废对照**，请改看同轮 `rollout_sec`/`transitions_collected`。
+- **违反后果**：任何把上一轮 `_report` 再 combine 进本轮采集的改动，都会让指标表
+  rollout 列再次单调暴涨；任何让 volume 收官后 `_report` 停在 `{}` 的改动都会
+  在 `_log_report` 打 KeyError 打死 trainer。
+- **落地**：`nn-training/rl/reports.py`（`adopt_volume_report`/`empty_collect_report`/combine 跳空）、
+  `loop_core.py`（轮初复位 + continuous 恒 adopt）、`loop_steps.py`/`events.py`（.get）；
+  回归 `tests/test_rl_reports.py::test_adopt_volume_report_*`。
+
+## §2026-09-19-console-wallsec-undefined-guard（2026-09-19，bugfix：节点统计「机侧墙钟」显示 undefineds）
+
+- **背景**：新列渲染 `${r.avgWallSec}s`；服务端进程未重启或旧 API 缺键时
+  `undefined !== null` 为真 → 显示 `undefineds`。
+- **备选与否决**：只提醒用户重启 dashboard —— 否，UI 不应把缺字段画成 undefined；
+  只改服务端 —— 否，客户端仍可能吃到缓存/旧包。
+- **决定**：展示层 `secCell`（仅正有限数 → `Ns`，否则 `-`）；`fetchPool` 将
+  `avgWallSec ?? null` 归一；服务端继续显式写字段。
+- **违反后果**：任何 `x !== null ? x : '-'` 模板在字段缺席时都会画出 `undefined…`。
+- **落地**：`dashboard/src/web/app/panels/NodeStats.tsx`、`api-client.ts`；
+  回归 `dashboard/tests/server-pool-history.test.ts`（secCell 语义）。
+
+## §2026-09-19-evalcourse-dist-eval（2026-09-19，eval-course-ckpt 开分布式评估：同节点门 + 同规 stageJson）
+
+- **背景**：判决类评估（T5/T6 体量：多权重 × 数百～800 局课程自定义关）在纯本地
+  chunked 路径（一 chunk 一 fresh worker，物理核封顶）上耗时以小时计，而节点在跑
+  rollout 的间隙具备 eval 能力（`evalSupport` + `stageJsonSupport`），且 m1-eval 早已
+  用同一 HTTP 协议派发 eval 局。缺的是**把 eval-course-ckpt 的逐局行**（JSONL，
+  `phase0-fingerprints`/`paired-pd` 消费）也搬到节点上。
+- **备选与否决**：① 另起一个 dist 专用工具 —— 否，映射/汇总两套实现必然漂移；
+  ② 把课程评估塞进 m1-eval —— 否，m1-eval 的行语义是 godai scorecard（stageIndex/dims），
+  不带课程自定义关与逐局 Phase 0 列；③ 只靠本地并发不开 dist —— 否，节点算力闲置；
+  ④ 强制显式 `--dist-nodes`（不 auto）—— 否，与 m1-eval auto-dist 同规（用户 2026-08-29
+  指令：节点随时上线、每批都要吃满；`--no-dist` 显式关）。
+- **决定**：eval-course-ckpt 增混合分派路径，**缺省仍是原本地 chunked 路径（行为逐字不变）**。
+  节点门与 rollout/m1-eval 同源：`evalSupport ∧ stageJsonSupport ∧ bun major.minor ∧ codeHash`，
+  不匹配只 skip（打印原因）不中断；局经 `mode=eval` + `kind=<rollout|none>` + `stageJson`
+  （课程自定义关原文）+ `livesOverride`/`playerLevel` 派发，stageJson > 16KB 自动退回纯本地；
+  回包 BCV2 manifest 顶层 → `manifestToCourseRow`（缺 Phase 0 键填零，旧节点不崩）。
+  `--dist-local`（缺省 = `--workers`）保留本地份额；`--policy nn-goal` 强制本地（GOAL_* 未
+  进 agent 协议）。**真相锚**：同 (stage, seed, 权重) 的 dist 行与本地行**逐字节相同**
+  （2026-09-19 实测 `diff` 空；§16.6 并行==串行验收）。
+- **违反后果**：节点门放宽成「能 ping 就派」⇒ 新旧代码混跑，Phase 0 列静默缺失/口径不同，
+  判决用错读数；改 `export-eval-game.ts` 顶层 schema（**在 codehash-files.txt 集内**）而不
+  等节点同步 ⇒ 门把全节点判 stale、dist 静默退化成本地（本条的已知代价，不是故障）；
+  直接拿 dist 行的 wallSec/网络时段做节点算力对比 ⇒ 网络污染（见
+  §2026-09-19-console-node-wallsec）。
+- **落地**：`tools/sim/eval-course-ckpt.ts`（`buildCourseJobs`/`buildRemoteTaskUrl`/
+  `manifestToCourseRow`/`nodeGateReason` + `runHybrid`）、`tools/sim/export-eval-game.ts`
+  （报告顶层补 Phase 0 逐敌种列 hitsByKind/killsByKind/exposureByKind/firstHit/firstKill/
+  killOrder/killerKinds；集内文件 ⇒ 需节点 resync）、回归 `tests/eval-course-ckpt.test.ts`
+  （纯函数对拍）+ 实测：对 `self` 节点 2 局 god 全链（ping→权重下发→stageJson 派发→回包
+  →JSONL 行，Phase 0 列齐全）通过。
+
+## §2026-09-19-evalboard-phase0-census（2026-09-19，Phase 0 逐敌种画像进 EvalStore schema（中方案 P1））
+
+- **背景**：T5 主端点 = power 曝光归一命中/千 tick（七列：hitsByKind/killsByKind/
+  exposureByKind/firstHitKind/firstKillKind/killOrder/killerKinds）。报告层已有这七列
+  （`export-eval-game.ts` 顶层，同日早些时候落地），但 A/B/C/m1 四条逐局行构造点都没搬
+  ⇒ EvalStore（唯一账本，§3.1）查不到分敌种读数。用户拍板「中方案」：列进 schema +
+  判决批走 B 层（P2/P3 见 `docs/evalboard-phase0-census.md`）。
+- **备选与否决**：① 维持现状（判决只读临时自造 JSONL）——否，账本永不沉淀分敌种读数、
+  控制台无法看；② 只给 A 层行加列 —— 否，B/C 批（判决批的宿主）同样要读；③ 把七列塞
+  `scorable.telemetry` 靠 `eval_loot_fields` 回退 —— 否，形态不同（telemetry 是标量，
+  这七列是 4 元数组 + 序列表），且无端改 codehash 集内文件的报告形态；④ 直接进
+  `REQUIRED_FIELDS` 不设豁免 —— 否，本批次之前的资产行会全量报缺（P0 覆盖率要求
+  100% **或明示豁免**）。
+- **决定**：`rl/eval_local.py::eval_census_fields` 单源（**只认顶层**，缺键 = None
+  不伪造），A/B/C/m1 四个写点接线；`ingest.ts` 映射（畸形计数列/非字符串归零或空）；
+  `store.ts` 七列进 `EvalGameRow` + `GAMEPLAY_FIELDS` + `REQUIRED_FIELDS`，并新增
+  `PHASE0_FIELDS` 作为**旧资产行的明示豁免清单**（豁免由调用方传，不写死在
+  `coverageReport` 里）。
+- **违反后果**：七列改走 telemetry 回退 ⇒ 同一字段两种形态、旧值真假难辨；缺键填零
+  却不进豁免清单 ⇒ 覆盖率报表冤报旧行、真缺失被噪声淹没；把七列排除在
+  `GAMEPLAY_FIELDS` 外 ⇒ 双跑不一致无人发现（§3.4 确定性契约失效）。
+- **落地**：`nn-training/rl/eval_local.py`（`EVAL_CENSUS_KEYS` / `eval_census_fields`）、
+  `rl/{eval_dispatch,batch_eval,eval_a_once,eval_ingest}.py`；`dashboard/src/evalboard/
+  {ingest,store}.ts`；回归 `nn-training/tests/test_eval_census_fields.py`（5 例）+  
+  `dashboard/tests/evalboard-{ingest,store}.test.ts`（映射/豁免）。验证：真实
+  `_eval_report.json` 七列齐全可抽；nn-python-gate 1263 绿 · dashboard 513 绿 +
+  typecheck · 根 `bun run check` 1875 绿。
+
+## §2026-09-19-evalboard-verdict-batch（2026-09-19，判决批走 B 层：语料注册表 + 多 ckpt 批类型（中方案 P2））
+
+- **背景**：T5 判决语料 = 课程关卡文件 stages[] × **池外** seed 段（400600+，与训练池
+  860001-860200 及已用池外段 400000/400200 不相交，§15.1 轮转纪律）× ≥2 个 ckpt
+  **同种子逐局配对**（§3.5④ 不许事后求交集）。执行层（`mode=eval` + stageJson +
+  lives/level 覆盖 + `export-eval-game.ts`）本来就在复用，缺的是**驱动器**：A 层
+  （`EvalDispatcher`）语料写死在课程配置、单权重、无外部语料入口；B 层批键 =
+  `(course, rung_from, ckpt)` ⇒ 一批一个 ckpt，且 ladder rung 承载「arena 阶梯几何 +
+  段推进」语义。用户 2026-09-19 拍板「中方案」并选定两个分叉：**新建语料注册表** +
+  **新增判决批类型**（见 `docs/evalboard-phase0-census.md` §3/§6）。
+- **备选与否决**：① 给 A 层加 `--seed0/--games/多 --weights` —— 否，判决语料混装进
+  训练课程配置会破坏「轮转键控」纪律（判决与日常读数本就该吃不同语料）；② 把语料塞进
+  `ladder.json` 的 rungs —— 否，污染阶梯几何/段推进/去重键/ladder_pos 四处；③ 改造现有
+  批键支持多权重 —— 否，动到 A/B/C 全链去重语义与历史行；④ 判决继续各造临时 JSONL ——
+  否（这就是要修的现状：读数永不沉淀、控制台看不到趋势）。
+- **决定**：① 语料身份独立成注册表 `dashboard/src/evalboard/corpora.json`
+  （`{id, level, seed0, games_per_stage, policy?}`，读/校验/身份派生在 `corpora.ts`，
+  坏行**响亮失败**）；② 新批类型 `kind='verdict'`（`trigger='verdict'`、`corpus`、
+  `ckpts[]`），**`course/rung_from/ckpt` 置空串**——键空间分离靠 `kind` 判别，不用假 course
+  去骗旧读方的键；③ 台账**单写者**不变：`verdict-cli.ts` 只往 `requests.jsonl` 追加
+  `kind='verdict'` 请求，物化由 runner/`kick-once` 完成；④ unit = 一个 (ckpt × 关卡)，
+  **权重在 unit 上**（批次级无权重 ⇒ 多 ckpt 批成立），每 ckpt 每关跑同一 seed 段；
+  ⑤ 展开只有一处（`plan_verdict_units` / `units_for_batch`），训练内派发与一次性 kick
+  共用。
+- **违反后果**：语料登记进 rungs ⇒ 阶梯推进/去重/ladder_pos 全按假 rung 走；判决批填假
+  `course` ⇒ 旧读方按 ladder 键匹配，判决行被并进课程读数；unit 不带权重而回落批次级
+  `rl_path` ⇒ 多 ckpt 批实际全跑同一个权重（配对数看着齐、其实是同一策略）；两侧各写一份
+  unit 展开 ⇒ 训练内能用而一次性 kick 跑不了（或将来的漂移）。
+- **落地**：`dashboard/src/evalboard/{corpora.json,corpora.ts,verdict-cli.ts}`、
+  `{batches,requests}.ts`（`kind/corpus/ckpts` + `verdictQueued/verdictCovered`，键 = 语料 id +
+  ckpt **标签序**，顺序敏感）、`kick-once.py`（先 `consume_requests` 再 claim，`units_for_batch`
+  统一展开；同批修其 `ROOT` 少算两层的既有 bug）；`nn-training/rl/batch_eval.py`
+  （`load_corpora/corpus_doc/plan_verdict_units/units_for_batch` + `consume_requests` 判决分支
+  + 单元权重透传）。**同批修两处硬伤**：god 局不 POST 权重且 wver 传 12 位 `key16` ⇒ agent
+  `/v1/task` 按全量 sha 查桶必然 409（现 god 也 POST 占位 `{}` 并把其 sha 当 wver；`key16`
+  仍是行身份/续跑键）；`kick-once.py` 的 `ROOT` 路径算错（2026-09-15 目录迁移遗留）⇒ 脚本
+  一直 import 不到 nn-training。回归：`nn-training/tests/test_verdict_corpus.py`（10 例）+
+  `dashboard/tests/evalboard-corpora.test.ts`（17 例）+ `test_batch_eval_wver.py` +
+  `test_kick_once_paths.py`。验证：一次真判决批 kick（本机 self）行带齐 Phase-0 七列 +
+  真 batch_id；nn-python-gate 1277 绿 · dashboard typecheck + 530 绿 · 根 `bun run check`
+  1875 绿。**未做**：判决读数自动入 store（需显式 `ingest-cli.ts` 一步，属 P3）、控制台发起
+  按钮。
+
+## §2026-09-19-eval-tools-node-upgrade（2026-09-19，一次性评估工具复用训练循环的节点升级守卫 + m1-eval 补节点门）
+
+- **背景**：`eval-course-ckpt.ts` 遇到 stale 节点只打一行 `codeHash mismatch … — skipped`，
+  既不升级也不汇总告警；全灭时 `hybrid failed — falling back to local` 后**照跑本地**，
+  汇总行不区分节点/本地（2026-09-19 实测：x20 it96 跑 ladder-c20-lives1，5 台远端全 stale，
+  唯一的局其实是 self 节点跑的）。`m1-eval.ts` 更旧：`tryActivate` 只看 HTTP 200，
+  **根本没有 codeHash/bun/能力位门** ⇒ 陈旧节点会被当可用算力，不同 era 的结果混进同一份读数。
+- **备选与否决**：① TS 重写护栏/dirty 判据 —— 否，dirty 是字节级判据（`git ls-files -s` +
+  `git cat-file --batch`，不能用 `git status`：autocrlf 会把 CRLF 污染藏起来，2026-09-09 mac
+  事故），重写就是双语漂移 + 重演事故；② 只告警不升级 —— 否，用户要「能推升级」；③ 在 TS 里
+  内联 `python -c` 拼脚本 —— 否（argv 引号/路径脆弱，且仓库规定 nn python 须经
+  `tools/githook/nn-py-safe.sh`）；④ 升级默认开 —— 否，一次性判读工具不该默默重启别人的机器。
+- **决定**：① 新增 `nn-training/dist_upgrade_cli.py`（stdin JSON spec → 逐节点调
+  `dist_common.request_upgrade_guarded`，**单源**：护栏与 dirty 判据仍只在 Python 一处）；
+  ② 新增 `tools/lib/node-upgrade.ts`（经 `nn-py-safe.sh` 拉起该 CLI；memo 文件
+  `tmp/node-upgrade-memo.json` 跨调用去重，语义同 `_RESTART_SEEN`；**永不抛**——失败以
+  `{ok:false,error}` 返回供调用方响亮告警）；③ 新增 `tools/lib/dist-node-gate.ts`（门 +
+  聚合 WARN + provenance，两个工具共享；`eval-course-ckpt` 保留同名再导出，既有测试
+  导入面不变）；④ 两工具接上：门逐条日志 + 收尾聚合 WARN（可用数/原因/两侧 codeHash）+
+  provenance（`node:<id>`/`local` 逐局计数）+ **`--upgrade-nodes` 显式开关**才下发 pull+restart；
+  ⑤ m1-eval 补上原本缺失的 codeHash/bun/能力位门（与 rollout/eval 同源）。
+- **违反后果**：TS 重写 dirty 判据 ⇒ 重演 autocrlf 掩盖 CRLF（mac 卡 40 分钟）；升级默认开 ⇒
+  判读脚本随处重启节点；不回填 memo ⇒ 每次跑 CLI 都再捶一遍同一 stale 节点；m1-eval 无门 ⇒
+  陈旧节点的局混进 gate/scoreV7 读数且**看不出来**（本条的起点）。
+- **落地**：`nn-training/dist_upgrade_cli.py` + `tests/test_dist_upgrade_cli.py`（8 例：spec 校验 /
+  current 短路 / 映射到共享守卫 / dirty=null 真探测 / self 不探 dirty / dry-run 零 POST / 端到端）；
+  `tools/lib/{dist-node-gate,node-upgrade}.ts` + `tests/{dist-node-gate,node-upgrade}.test.ts`
+  （+21 例，含真子进程 dry-run）；`tools/sim/{eval-course-ckpt,m1-eval}.ts` 接线。
+- **证据**：mock 节点全链实测——TS → `nn-py-safe.sh` → CLI → 守卫 → `POST /v1/restart` → 202，
+  mock 端看到 body `{"pullBranch":""}`（self/回环语义强制禁 pull，护栏③ 生效）→ 回传
+  `restart-requested` 并落 memo；真节点告警实测：`WARN dist nodes: 1/6 usable (self) ·
+  5 stale (mac,a95,a97,a96,gcs)` + `provenance: node:self=1（共 1 局）`；m1-eval 同样输出 6/6 门
+  结果。门禁：根 `bun run check` 1896 绿 · nn-python-gate 1285 绿。
+- **未做**：控制台里的节点升级按钮（仍只有 CLI/训练循环）；`--require-nodes` 这类「无可用节点即
+  非零退出」的判定开关（本轮只做到「响亮说出来」）。
+- **追记二（同日，本机槽位必读 rl-config——用户 2026-09-19 实测报障）**：一次 1600 局的
+  `eval-course-ckpt`（`--dist-local` 未给）跑出 `local=730 / 远端 870`，而 `nn-training/rl-config.json`
+  写的是 `rl.local_slots: 0`（= 本机不参与、全交集群）。根因：两个工具的 `--dist-local` 缺省写死
+  `workers`（物理核数 15），**从不看配置** ⇒ 机器口径被静默覆盖。
+  - **决定**：本机槽位取值序 = 显式 `--dist-local` > `policy.evalLocalSlots`（评测专用旋钮，
+    与 `rl/eval_local.py` 的 `EVAL_LOCAL_SLOTS_DEFAULT` 同序）> `rl.local_slots`（机器级，
+    `dashboard/src/core/slots.ts` 同源）> 物理核数（配置未约定时的兜底）。实现为共享纯函数
+    `configLocalSlots()`，两工具共用；启动日志固定打印生效值与**来源**（`--dist-local` /
+    `配置 rl.local_slots` / `物理核数`）——缺省值从哪来决定了「本地 N 局」是配置意图还是意外。
+  - **行为变化（重要）**：本机 **0 槽位现在真的意味着 0**。节点忙/不可达（503、ping 超时）时
+    不再静默用本机补上，而是响亮失败（`incomplete hybrid results N/M — exit 1`）；想留本机兜底
+    就显式 `--dist-local N`。节点被别的作业占满时这是预期行为，不是回归。
+  - **同时修掉我上一版告警文案的误报**：`local>0` 曾被一律写成「节点部分失败或本地兜底」，
+    把健康混跑报成故障；现只对**远端零参与**喊 WARN，混跑只报份额并点明由 `--dist-local` 决定。
+  - **验证**：真配置下 16 局——`distLocal=0（来源：配置 rl.local_slots）` → `远端 8 / 本地 0`；
+    m1-eval 同配置（单节点假配置）4 局全走节点；新增 `configLocalSlots` 3 例 + provenance 重写用例。
+- **追记（同日，真节点收敛 + 两个判读修正）**：
+  1. **升级真的收敛了**：`--upgrade-nodes` 后轮询 `rl-config.json` 全部 6 节点，`codeHash` 均为
+     `ba6f7b4eda13…`（= 本机）、`agent=52cf887`（= HEAD）。**但收敛有尾巴**：mac/a95/a97 秒级收敛，
+     a96 与 gcs 在 push 后的下一分钟里才翻过来（a96 曾返 502、gcs 曾保持 stale）——所以「push 成功」
+     与「节点已可用于本批」不是同一时刻，判读时以**再 ping 一次**为准，不要拿 push 当次结果下结论。
+     节点环境不支持远控升级属正常（本机隧道/反代差异），不必追求 6/6，一两台成功即达到目的。
+  2. **修：小批量下排头的节点会秒光整批**（`fanOutOrder`）。链体在首次 await 前**同步** claim，旧代码
+     按配置顺序把每个节点的并发链一次性起完 ⇒ 第一个节点（常是 self）把整批任务吃掉：实测 5 节点可用、
+     8 局的批量里 `provenance: node:self=8`（远端一条没分到）。现改为轮转 spawn（每轮 1 条本地链 +
+     每节点各 1 条），只改启动顺序，共享游标 + 尾部竞速语义不变；纯函数 + 单测 `fanOutOrder`。
+- **追记三（同日，节点探测/判 stale 也回归 Python 单源——用户裁定）**：用户指出「Python 侧早就有这套
+  节点通信与重试且经长期实战检验，别再在 TS 里重建」。复核属实：上一条的 `--upgrade-nodes` 虽然把
+  **护栏**（dirty 判据/去重/self 禁 pull）交给了 `dist_upgrade_cli.py`，但**「谁是 stale」这一步仍在 TS 里
+  自己 ping + 比 codeHash**——而 `dist_common.upgrade_stale_nodes(cfg, expected, branch, ...)` 早就是
+  训练循环里那个「ping 每个 enabled 节点 → hash ≠ expected → request_upgrade_guarded」的完整实现。
+  - **决定**：探测与判门也**只能有一处实现**。`dist_upgrade_cli.py` 增扫描模式（spec 给 `cfg_path`，
+    由它自己 ping）；新增 `dist_common.seed_restart_state(entries)` 让一次性进程把调用方持久化的
+    跨调用 memo 预置回 `_RESTART_SEEN`（判据仍是同一函数，调用方只存状态不写规则）；
+    `upgrade_stale_nodes` 的结果补 `pingHash`（调用方写 memo 用的键）。`tools/lib/node-upgrade.ts`
+    随之改为**扫描客户端**：spec = `{cfg_path, expected_hash, branch, seen, dry_run}`，TS **不再 ping、
+    不再比 hash**；memo 键改为全量 hex（`nid|pingHash|expectedHash`，旧截断键自然失效、无害）。
+    `eval-course-ckpt.ts` 因此不再 import `pingNode`/`nodeGateReason`；`m1-eval.ts` 的 `--upgrade-nodes`
+    同样只传 cfg 路径。
+  - **证据**：真集群 `--upgrade-nodes` 实跑（2 局 × x20 it96 × ladder-c20-lives1）——
+    `node self/mac/a95/a97/gcs: 已是期望 codeHash` · `node a96: ping 不通`，随后 dispatch 照常
+    `5 nodes → settled=1/1`（探测由 Python 做，TS 侧零 ping）。门禁：根 `bun run check` 绿 ·
+    `nn-python-gate` 绿（ruff/mypy + 1296 例）。新增 Python 测试 6 例（扫描/stale·current 分流/dry-run
+    零 POST/seen→dedup 真闸门/结构错误），重写 `tests/node-upgrade.test.ts` 为 spec 契约 + memo 往返。
+  - **仍留的重复（明确不做假动作）**：`m1-eval.ts` 自己的**分派链**（判门/rescan/尾竞速/权重下发）
+    还是 TS 实现——它的产物（`[m1-eval] WIN RATE` + 顶层 JSON report）被 `rl/eval_m1.py` 解析，
+    整段改走 Python 得新写一个跑**内置关**的入口并接回训练循环契约，不是本轮的范围；本轮只把
+    「升级探测」这一个已确认的重建点收敛掉。
+  3. **加：`claims` 注脚（分派口径）与 `provenance`（结算口径）配对读**——实测一批 8 局出现 11 次分派：
+     a95/a96/a97 各领到 1 局但结果被尾部竞速的重复副本抢走（`fanoutDup=2` 的设计使然，同一 (stage,seed)
+     重跑结果逐字相同，故不影响读数），只看 provenance 会误读成「远端没拿到活」。
+     `m1-eval` 本轮仍只打 provenance（其本地链先入队，分配口径的同样问题未动）。
+
+- **追记四（同日，`eval-course-ckpt` 的 10054 真因：权重桶撞车；含一处我自己引入的回归）**：
+  用户指出「`eval-course-ckpt` 还是有问题」，证据是另一 agent 的课程记录
+  （`nn-training/curricula/x20-powered.jsonc` 第 5 行：「它占着 dist 集群，本腿 it0 探针会被 10054
+  挤死」）。逐层排查（不是猜）得到四个独立缺陷，前两个是真因。
+  1. **本机槽位链被我上一轮的重构悄悄弄回归了**（用户上一轮报障原样复活）：`configLocalSlots()`
+     是上一轮为「`rl.local_slots: 0` 必须真的 0」建的共享纯函数，m1-eval 还在用，但
+     **`eval-course-ckpt` 改成调 Python 后把它丢了** —— 缺省 `localSlots` 不写进 spec ⇒ Python 侧
+     取 `policy.evalLocalSlots` 缺省 **4** ⇒ 整条配置链被跳过（`eval_course_once.py` 的注释甚至
+     声称读了 `rl.local_slots`，而 Python 侧从来没读过）。
+     - **修**：求解器收敛成 `dist-node-gate.pickDistLocal(explicit, cfg, fallback)`（纯函数，
+       **两个工具共用**，m1-eval 的内联三元也换掉）；`eval-course-ckpt` 启动日志打印生效值 + 来源，
+       并**总是**把解析结果写进 spec。实测 `distLocal=0（来源：配置 rl.local_slots）`。
+  2. **10054 的真因 = 一次性评估的权重文件被训练作业扫掉**（不是「节点忙」）：节点侧按 kind 收敛
+     权重文件（`workdir-cleanup.WEIGHT_FILES_KEEP = 4`），而训练作业**每轮**往 `rollout` 桶 POST 新
+     权重 ⇒ 我们那份固定权重（`weights-rollout-d66378e…`）在几秒内被扫掉；但另一支 agent 进程
+     （同机还有 8789 那支，共享 `tmp/dist-agent`）的内存桶仍答 "kept" ⇒ 任务子进程 `ENOENT` 退出 ⇒
+     agent 直接断连 ⇒ client 只见 `WinError 10054`，与「节点满负荷」在传输层**不可区分**。
+     重试耗尽 ⇒ 单元 0/50 settled；`local_slots: 0` 时整批 0 行、exit 1（这正是它「被挤死」的表象）。
+     - **修**：新增 `ONESHOT_EVAL_KIND = "eval"`，两个一次性入口（`eval_course_once` /
+       `eval_m1_once`）把权重 POST 进专用桶（agent 的 `x-kind` 本就能任意分桶），训练作业的
+       `rollout` churn 扫不到它；**按关键字传** —— 位置写错会静默回落 `rollout`（我第一版真踩了：
+       写到 14 号位置 = `init_sha16`，行为与修复前一模一样，靠单测才发现）。
+     - **证据（训练作业**在跑**时实测）**：修复前 —— `weights[rollout] -> self (kept)` 后 8 局全
+       `背压 6/6 耗尽 + 真失败` ⇒ `provenance: none`、0 行、exit 1；修复后 ——
+       `weights[eval] -> … (kept)`、`weights-eval-d66378e3….json` 存活（同时 4 份 rollout 仍被
+       KEEP 轮换）、**16/16 全远端、local 0、exit 0**。
+  3. **10054 不再被当成节点故障**（既有实现缺陷，独立于上条）：`dist_common.fetch_task` 把
+     连接被重置/超时/408·429·5xx 标为 `transient`（`DistError.transient`），`batch_eval` 对它**背压
+     重排 + 指数退避**（上限 8s）而**不计** `nodeFailStreak`，并把「背压次数/真失败次数」与
+     `provenance` 一起入账；单元 0 局且本机槽位 0 时打一行**响亮提示**指向权重文件缺失这一真因。
+     旧行为：一瞬 10 次 10054 把 6 个节点在 1 秒内全部熔断（与 rl/bc_dispatch 的 busy 背压同源问题）。
+  4. **runDir 复用会污染 provenance 判读**：`eval_log.jsonl` 每次运行都重建，而
+     `dist-agent-meta.jsonl` 只追加 ⇒ 200 局的重跑里 meta 积 343 条（含上一轮 114 条远端条目），
+     照它判「是否降级本地」会得出**反的**结论。新增 `_reset_run_ledgers()` 开跑前两个都清。
+     （顺带纠正上一轮的一处判读：那份「200 局全 local」的产物来自**第二次运行**、且它的
+     `spec.json` 写着 `noNodes: true` —— 是调用方显式 `--no-dist`，不是节点被熔断。）
+  - **验证**：真集群 + **训练作业在跑**下三种模式实测（默认 `distLocal=0` 16/16 远端 ·
+    `--dist-local 2` 打印来源且 `[local ×2]` 生效 · `--no-dist` 全本机）；`m1-eval`（god，2 局）
+    `localSlots=0 kind=eval` 全远端。门禁：根 `bun run check` 绿 · `bun run build` 绿 ·
+    `nn-python-gate` 绿（ruff/mypy + 1312 例）。新增测试：TS `pickDistLocal` 4 例 + 槽位链 2 例；
+    Python `_reset_run_ledgers` 1 例 + **专用 kind 契约 1 例（源码级守卫，已实测对「位置传参」变体变红）**。
+
+- **追记五（同日，800 局探针暴露两个真缺陷：起跑 7s 的串行 ping + 慢节点拖尾巴；事件级日志落地）**：
+  用户实测「等了十几秒 CPU 才满」「CPU 满一阵又掉档一阵子（几十秒）」⇒ 要求把**权重传输完毕**与
+  **评测结果返回**打到日志里排查（命令：`x20-rebirth` it96 × `ladder-c20-lives1` × 800 局
+  `--seed0 418000`，非判决段、仅诊断）。
+  - **落地的事件日志**（新增，已真集群验证）：① `dist_common.post_weights_parallel` 逐节点
+    `weights[kind] -> <节点> (<mode>, X.XXs)` + **阶段总计**
+    `weights[kind] ready on N/M nodes in X.XXs (sha …)`（分发起点即此）；② `batch_eval` 逐单元
+    `阶段 gate X.XXs alive=N/M` / `阶段 weights X.XXs ok=N/M`；③ 逐局 `→ <节点> s/seed` 与
+    `← <节点> s/seed X.Xs ticks=… outcome=…`（配对即得**在飞曲线**）；④ 每 2s 在飞采样
+    `⏱ pending=… inflight=… settled=…`；⑤ **被 ping 丢掉的节点不再静默**（原先只是 `continue`，
+    实测 `alive=4/6` 时看不出丢的是谁、为什么）。开关 `EVAL_TRACE_EVENTS`（一次性工具缺省开，
+    训练循环路径缺省关 ⇒ A/B/C 层日志逐字不变）。
+  - **发现①（起跑慢）**：`阶段 gate 6.83s alive=4/6` —— 节点门是**串行** ping，每台预算 3s，
+    两台负载高的节点直接吃掉 ~7s；而门**每单元重跑一次**。修：新增
+    `dist_common.ping_nodes_parallel`（保序、并行）⇒ 阶段墙钟 == 最慢一台，实测 6.83s → **3.01s**；
+    并把「谁掉了、为什么」写进日志（实测 `node a96: ping 失败/超时`）。
+  - **发现②（CPU 掉档的真因：慢节点拖尾巴）**：单元内前 ~30s 快节点（self/mac/gcs 平均 2.9/3.7/3.8s
+    每局）就干完 ~170 局，之后 **pending=0**，只剩配置固定并发（a95/a97/a96 各 7）的慢节点在跑：
+    **a96 平均 124s/局（最大 180s）、a97 42.3s、a95 20.3s**（同一台机器上训练作业抢 CPU）⇒ 每单元尾巴
+    1–3 分钟、本机 8 个槽位与其余节点全部空转（实测 u3：`pending=0 inflight=7` 卡了 ~170s，7 局全在
+    a96）。**这 3 台只贡献 71/800 局（8.9%）却吃掉 63% 的节点秒**。首轮（297s）与次轮（653s）的差距
+    就来自这里，不是网络。**调度策略怎么改尚未定**（见下），本轮只做到「看得见 + 起跑不再白等」。
+  - **实测读数（非判决段，仅吞吐参考）**：800/800 全远端 · **local=0** · 653.2s / 1.2 games/s；
+    来源分布 self=356 · mac=251 · gcs=122 · a96=32 · a95=25 · a97=14；pass 82/800=10.3% ·
+    kills 6.27（与首轮逐值相同：同种子确定性 ✓）。**不要拿它当 it96 capability 读数**（段未预注册）。
+
+## §2026-09-19-m1-eval-python-dispatch（2026-09-19，m1-eval 分派链回归 Python：TS 只写 spec/读行/打分）
+
+- **决定**：上一轮的「仍留的重复」点名的就是 `m1-eval.ts` 自己的分派链（判门/rescan/尾竞速/权重下发
+  ≈300 行）。用户裁定同一口径——**Python 侧已有实战版，别再在 TS 重建**。新增
+  `nn-training/eval_m1_once.py`（spec → `rl/batch_eval.BatchEvalRunner` → 逐局行），TS 只做
+  「写 spec → 经 nn-py-safe.sh 调 Python → 读回逐局行 → scoreV7/报告/HTML/banner」。
+- **边界（明确划出，不是半途而废）**：只有**分派**回归 Python。`--no-dist` 仍走本机 in-process
+  worker 池——那是游戏引擎本身、不涉节点通信，且 `tools/perf/scan-intent-concurrency.ts` 正是量它的
+  并发度；非分派 policy（`nn` 走 `--weights-dir` 自动发现、无文件可上传，`intent`/`intent-oracle`
+  与 cadence 探针）也留在本机池。`goal-god` **不再分派**：远端 goal 执行器需要 goal 权重桶，
+  而它按 kind='none' 分派时远端必然缺权重（旧实现看似分派、实则不可用）⇒ 要跑用 `--no-dist`。
+- **Python 侧三处扩展（都是加法；既有调用方行为逐字节不变）**：
+  1. `rl/batch_eval.py`：`kind` 由 policy 推（`KIND_FOR_POLICY`：intent-exec→'intent'、goal→'goal'、
+     nn/god→'rollout'），**上传与查询同 kind**（此前写死 'rollout' ⇒ intent/goal 一律 409）；
+     `include_scorable`（默认关；True 时逐局行多带 agent 报告的原始 `scorable` = scoreV7 的完整输入，
+     原样回传、不做字段级搬运 ⇒ 不可能两端漂移）；unit 的 `lives`/`level` 缺省 = **不覆盖**
+     （difficulty/关卡默认说了算；写死 3 会把「难度默认」硬编码成常数，改难度即错）。
+  2. `rl/eval_m1.py`：`subprocess.run(text=True)` 补 `encoding="utf-8", errors="replace"`——父进程不传
+     encoding 时按 locale 解码（zh-CN Windows = cp936），而 m1-eval 的 stderr 带中文 ⇒
+     UnicodeDecodeError 被 `dispatch_eval_bg_m1` 的 except 吞成「clean eval failed (ignored)」，
+     **干净评估静默消失**（2026-09-19 实测：本地/分布式两种调用都复现；与 gate_check §30 同类坑，
+     那边靠 ensure_ascii 免疫）。
+  3. 两个一次性入口（m1 / course）把 `sys.stdout` 改道 stderr：训练栈 `rl.log.log()` 按设计写 stdout，
+     而这两个入口的 stdout 是调用方的**产物通道**（m1 的 JSON 报告 / 课程行）——实测 `[dist] weights[…]`
+     行混进 stdout 后 `json.loads(stdout)` 取 perGame 会**静默失败**（D5(a) 入账缺口）。
+- **验证（真集群 + 真消费方）**：
+  - 三种分派 policy 实跑（`god` / `intent-exec` 用 `tools/gen-intent-weights.ts` 生成的全尺寸权重 /
+    `goal` 用形状合法的合成权重）：6 节点在线、配置 `rl.local_slots: 0` ⇒ 逐局 `node:…` 全远端、本地 0；
+  - **跨 runner 对拍**（同 stage/seed/权重，dist=export-eval-game vs 本机池=sim-worker）：逐字段一致，
+    唯一差异是 `firstKillTick` ±1 tick 的采样口径（scoreV7 suite 完全相同）；
+  - **训练循环真入口** `rl/eval_m1.py::run_clean_eval` 实跑 35 关 × 1 seed →
+    `winRate=0.714 total=35 cleared=25 error=0 retries=0 perGame=35`；
+  - 断点：dist 走 Python run dir 台账（二次运行 `already settled — skip`，0.0s；`--fresh` 才清），
+    本机池仍走 TS ledger（`ledger resume: N/M already settled`）——两套各自完整，不叠加。
+- **门禁**：根 `bun run check` 绿 · `nn-python-gate` 绿（ruff/mypy）。新增 Python 6 例
+  （spec→unit 归一/行映射/kind 表与 DISPATCHABLE 对齐）+ TS 7 例（spec 构造/行映射/白名单）。
+
+## §2026-09-19-x20-snowball（2026-09-19，x20 后继腿：中盘激励，里程碑 bonus 单变量 + god-prefix 否决）
+
+- **背景**：x20 结算（池外 it30 7.5%/6.10杀，无合格终点＋旧能力丢失）＋ 用户假说
+  "通关靠捡道具滚雪球"。证实：it30 池外段通关局 1.22 pu/千tick vs 死亡局 0.64、
+  早期死亡局 0.20（存活归一化仍 2 倍）；早期死亡局 0.12 个/局；凶手四类全有 ⇒
+  开局拾取缺口＋全面中盘续航赤字。线性 wKill 在中盘（5–12杀）是回报洼地。
+- **本腿 thesis（单变量）**：`wMS8/12/16 = 6/9/12` edge-trigger bonus（Φ-diff，
+  数值已验：7→8 跨越精确 +6.0 一次）。坐 EV 不动（到 8 杀概率 0）⇒ 走>莽>坐不变。
+- **证据性否决（不做的理由）**：re-warm——peak it30 落在 it25 降温**之后**，冻结说
+  证伪；加 batch——plateau 在噪声带之上清晰可见，batch 非瓶颈；容量——用户指令不动；
+  gamma/lam——value-loss 不可观测（remote 只回 kl/entropy），不盲调。
+- **god-prefix 中盘开局否决（本条核心）**：agent 已实现一半（export-rl-rollout
+  前缀分支＋回退设计）后叫停并全 revert（git diff 确认零残留）。理由：prefix
+  跳过开局，但缺口恰在开局拾取 —— 学生永远学不到"如何到达中盘"，药下错地方；
+  且代价是热路径＋六文件垂直链＋节点升级波。fallback ① 改为 powered-opening
+  （现成 --player-level，零引擎改动）/wPickup 剂量腿；god-prefix 重提需"到达后
+  转化率瓶颈"的新证据。
+- **§15.5 合规**：reward 语义变化 ⇒ 新实验：fresh `tmp/x20-snowball/` ＋ 本条目 ＋
+  判决段 413000（已查 413000–413999 全空）；命数 tier 未变 ⇒ D11 不触发；
+  c06 回测门按用户指令删除（c07 保留）；bc = it30（池外三选一胜者）。
+- **落地**：`nn-training/curricula/x20-snowball.jsonc`（CourseConfig 校验通过；
+  里程碑 8→12→16→20，分母池外 6.10；pass 门 ≥30% 不动；it40 主检点 kills<7.0 停；
+  超时/换血/横盘/M2 全延续）。开训后填 it0 三件套。
+
+## §2026-09-19-nn-decision-instant（2026-09-19，nn 决策时点归一到语料口径：NNInput 末帧决策 + nn 入列分派白名单）
+
+- **决定**：① `m1-eval` 分派白名单加 `nn`（`--weights-dir` 解析出**最新**权重文件后上传，`kind='rollout'`）
+  ——上一轮条目「nn 走 --weights-dir 自动发现、无文件可上传 ⇒ 留本机池」的**理由已被自身证伪**（解析出的
+  文件就是可上传的权重）。② `src/nn/policy-input.ts`（NNInput）的**决策时点**改为「tick 末决策、下一 tick 生效」。
+- **背景（2026-09-19 用户要求「nn 分派后与本地一致」时实测挖出）**：nn 有**两套实现且从不互相对账**
+  （god 有 `tests/sim/eval-game-parity.test.ts` 钉远程/本地同局，nn 侧无对应用例）。
+  同一 (权重=ep96, stage 0, seed 1..6)、同 maxTicks/difficulty：
+  节点引擎 `export-eval-game` 得 4601/3167/6623/2113/2606/5580；本机池（`runSimulation`→NNInput）
+  **6/6 全不同**（首个动作分歧在 seed 1 的 tick 290）。
+- **根因两层，都在 NNInput**：
+  1. **观察时点**：`Simulation.tick()` 先 `frame++`、递减 freeze/emp/spawn/pickup 计时器、跑
+     `updateSpawning()`，**之后**才读玩家输入（Simulation.ts:205-245）；而三个构建器都在自己
+     `sim.tick()` **之前**观察（`export-rl-rollout.ts:642`、`export-nn-replays.ts:116`、
+     `export-eval-game.ts:482`）⇒ mid-tick 决策看到的是策略训练时从未见过的状态。
+  2. **相位**：NNInput 用 `frame % K === 0`，构建器用 `t % K === 0`（`world.frame` = 已完成 tick 数
+     = 构建器的 `t`；末帧 `frame` 即在读输入时是 `t+1`）⇒ 决策 tick 整体错一格。
+- **修法**：决策只在 `reset()`（tick 0，调用方都在 `loadStageData` 之后 reset）与 `endFrame()`
+  （`world.frame % K === 0`、且状态仍为 `playing`）发生；`getMoveDirection()`/`isFiring()` 只读已提交动作，
+  不再 mid-tick 前向。推理次数仍是 1/K；`thinkNow()` 保留「当前状态强制一次前向」的诊断语义
+  （divergence-probe 用）。
+- **影响面（必须知道）**：历史所有**本机** nn 评估读数（m1-eval 本机池、eval-course-ckpt 本机 worker、
+  `export-dagger-labels`、`nn-trace`）都是在该错时点上评的 ⇒ 这些数字会变；**远端节点侧不变**
+  （export-eval-game 本来就是对的），故此前「本机池 vs 分派批」的混跑读数本就不可配对。
+- **验证（四腿一致，stage 0 seeds 1-3 = 4601/3167/6623 gameover/gameover/stage_clear）**：
+  真集群分派（weights 上传 → `mode=eval` kind=rollout → self 节点，`provenance: node:self=3 远端 3 / 本地 0`）、
+  本机池、Python 分派路径（localSlots=3 实跑）、节点引擎 CLI 直跑——四者逐局 ticks/kills/outcome 全等；
+  in-process 对拍 5 局（stage 0 seeds 1-3、stage 5 seeds 1/7）逐 tick 动作序列零分歧。
+- **守卫（本案的副作用）**：`src/nn/policy-input.ts` 在 codeHash 集内 ⇒ 改它会让全集群 stale（节点 hash
+  memo 到 `/v1/update` 真 pull 才失效）。self/回环节点**纯重启**（共享工作区、禁 pull、不受脏工作区护栏
+  限制）即收敛到本机 live hash（实测 `c78d48de`）；其余节点须 **commit + push → `--upgrade-nodes`**
+  （`dist_common.request_upgrade_guarded` 对脏工作区拒发，日志点名未提交的集内文件）。
+- **回归守卫**：`tests/sim/eval-game-parity.test.ts` 新增 nn 分支对账（stage 0 seeds 1/2，maxTicks 3000，
+  权重用 `tests/fixtures/student-golden.json` 的 params 落进临时目录的 `weights.json`）——已实测：旧
+  `policy-input.ts` 下该用例**红**，修复后绿（≈0.3s）。
+- **追记（2026-09-19 16:40，push 后真多节点复验）**：`908f7cf` 推到 `origin/goal-nn` 后集内脏集合清空
+  （`{"dirty": []}`）⇒ 守卫放行远端升级：mac/a97 `restart-requested`、a95 首轮 `restart-failed` 但随即收敛，
+  self 本就 current ⇒ **4/6 节点同本机 `c78d48de`**（a96 agent 不可达、gcs 拒重启，属用户已裁定的环境事实，不追 6/6）。
+  12 局实跑（stage 0 seeds 1-12，`localSlots=0`）：**12/12 全落远端**（`provenance: node:mac=4, node:self=8`，
+  7.5s），逐局 outcome/ticks/kills 与**本机池完全相等**（4601/3167/6623/2113/2606/5580/3535/3527/7183/2531/5875/2794），
+  聚合也一致（`WIN RATE 33.3%`、`SCORE V7 suite=0.3621`）——跨两台不同机器验证，不再只是同机自证。
+## §2026-09-19-eval-tier-channels（2026-09-19，B/C 层派发改为「每节点独立通道」：无阶段屏障、就绪即派单、失联重探、settled 满即断连）
+
+**触发**：用户 2026-09-19 五条裁定（原话）：①「不要把分发权重和派发 eval 任务划分为串行的不同阶段！！！
+一个节点权重分发成功后，立即！马上！right now！给它派发任务！！！不要等慢节点！」②「不要分什么 u0/u1/u2
+阶段！！！一直持续不停派发，直到所有 eval 任务完成！」③「已经在正常工作的节点！！！就不要再 ping 它！
+不要再给它分发同样的权重，一直派活就好了！」④「竞速后 settled 一满，直接关闭所有节点的连接！！！立即！
+马上！right now！」⑤「失联的节点，每 20 秒 ping 一次，ping 通了就立即传权重派任务！」。两次追问收紧了细节：
+「从 settled 满到 DONE 为什么还花 5 秒？能省掉吗？」（→ 收工只等写行的赢家）与「你这任务都没分出去呀」阶段
+日志停在 13:17 的反面取证。
+
+**实施（B/C 层 `rl/batch_eval.BatchEvalRunner`）**：派发由「ping 全部节点 → 全部节点收权重 → 才开派」
+三段串行 + 每单元重跑，改为**每节点一条通道**（`_run` 内 lane 状态机）：
+
+- **lane**：`{ready, tripped, next_try, tries, strikes, given_up, c(槽位)}` + 归一化节点描述
+  `{"id","url","key"}`（旧实现直接拿配置 dict 取 `nd["key"]` 会 KeyError —— 本轮实测踩过：整批 0 局）。
+  `supervise(nd)` 线程：未就绪 → `bringup`（ping → `post_weights`）；`ready=True` 才算消费者；就绪后**只在**
+  该节点槽位线程里领活（永不重复 ping/传权重 = 裁定③）。
+- **无阶段屏障**（裁定①）：每个节点的通道各自就绪、各自开派；`local` 槽位不需要门/权重 ⇒ 与节点通道并行、
+  立刻开工。慢节点再也拖不住整批。
+- **失联重探**（裁定⑤）：`recoverPingSec`（缺省 20s）重探一次，ping 通 → 立即传权重 → 立即派单；日志逐次
+  响亮（`node <id>: ping 失败/超时（3.20s）— 20s 后重探`）。**有界**：连续 `nodeRecoveryTries`（缺省 3）轮
+  「恢复后仍 0 局成功」⇒ 判定节点是坏的（不是一时失联）而非无限等；任意一局结算即清零轮次（有进展即信任）。
+- **settled 满即断连**（裁定④）：最后结算的 worker 置位 `all_done` 后立即 `dist_common.abort_active_requests(scope)`
+  —— 停发新请求 + **异步**（daemon 线程）关闭在飞连接。**作用域 = 线程 tag**（`batcheval:<iterId>`）：训练主循环
+  里 rollout 与本层同进程并发，全局关连接会误伤别人的在飞请求。新单元开头 `clear_abort()`。
+- **收工只等「写行的赢家」**（用户追问）：`writers` 计数（赢家在锁内自增、`record()` 落盘后自减），收工等它归零
+  （≤1s 兜底，实测同秒）；线程 join 只给 0.25s 总预算（daemon 线程本就随进程退出）。慢节点/竞速副本的回包
+  **一律不等**（那些行永不需要）——旧实现 join(5s×线程) 实测占 800 局墙钟 3%，更早还有 `close()` 阻塞主线程
+  **81 秒**（占该批 32%）。
+- **失败分类补洞**：主动断连/已结算任务的回包按「无关」丢弃（既非背压也非节点故障，否则会误熔断慢节点）；
+  硬失败**每条都留痕**（原先只有「还会重排」的那条打日志 ⇒ 实测「真失败计数 gcs=1」却零原因可查）；竞速副本
+  **不再消耗** `attempts` 配额（一局被 6 台各抢一次后一次真失败就会耗满配额而丢局）。
+
+**单单元跨关（一次性评估，裁定②）**：`eval_course_once.build_course_units` 改为**每权重一个单元**、跨该权重的
+全部关卡（`unit["pairs"]` = `[[stageId, seed], …]`，`unit["stageParams"][str(stageId)]` 带逐关
+stageJson/lives/level/maxTicks/difficulty；B 层 `params_for` 逐字段回落 unit 级值）。ladder/corpora 的既有单元
+（`stageId` × `seeds`）逐字不变。副作用修复：行元数据改按 **`(ckpt_sha16, stage, seed)`** 分键——原先
+`meta[(stage, seed)]` 在多权重调用下被后一个权重覆盖，逐行 label 全错、`_row_id` 的 `wi * games` 也全错（多权重
+产物实际不可用）。
+
+**被否方案**：① 保留阶段结构只做并行（`ping_nodes_parallel`/`post_weights_parallel` 已有）——阶段**屏障**本身
+才是病根，快节点仍要等慢节点；② 在 TS 侧实现同样的通道（`tools/sim/eval-course-ckpt.ts` 自带一套重试/探测）
+——用户已裁定「Python 端有长期实战检验的机制，不要在 TS 重写一套」，本轮继续单一实现（TS 只写 spec/读行/打分）；
+③ 无界重探失联节点——一个必坏节点会拖满整窗（一次性评估窗口缺省 86400s）；④ 收工 `join` 全部线程——实测 5s+，
+且对结果毫无贡献。
+
+**实测（800 局 × ladder-c20-lives1 × x20-rebirth it96 × seed0 418000，全远端 / 本地 0）**：
+| 形态 | 墙钟 | 说明 |
+|---|---|---|
+| 旧（4 单元 × 3 阶段，17:34） | 297.0s | 全远端 |
+| 旧（带事件追踪，17:42） | 653.2s | 慢节点兜底尾巴空转 170s |
+| 新（首轮验证，18:41） | **268.3s** | 181s 跑完 800 局 + **86s 收工阻塞（已修）** |
+| 新（断连非阻塞，18:48） | **166.8s** | 4.8 局/s；开跑时 3/6 节点失联，a95/a97 于 18:48:55 重探成功后立即投入 |
+| 新（收工只等写行，18:58） | **174.0s** | `settled 满` → `DONE` **同秒**；`dup=20` |
+| 新（与门禁并发，19:00） | **202.8s** | 本机槽位争用下的保守值 |
+逐局对拍（对旧形态产物，三次）**0 差异**（800/800 行、passed 154/800、kills 7144）——本改动是纯调度，不改语义。
+
+**配置旋钮（`policy` 段，均有缺省）**：`recoverPingSec`（20）· `nodeRecoveryTries`（3）· `noConsumerGraceSec`（180，
+**只在整批从未有过任何消费者**时生效：无节点就绪过 + 本机槽位 0 ⇒ 有界响亮收摊而非等满窗）。
+
+**已知局限（如实记录）**：阻塞在 `urlopen`（响应头都还没回来）的慢节点连接不在注册表里 ⇒ 关不到；那部分只能等
+其自身超时（`taskTimeoutSec`）。`all_done` 已置位 + 新请求拒发 ⇒ 调用方不再依赖它们的结果。日志里的
+「断连 0 条在飞连接」正是这个含义（此刻没有处于读体阶段的响应），不是没做事。
+
+**守卫（`nn-training/tests/`）**：`test_batch_eval.py` +5（门判据纯函数 / 就绪节点只 ping 1 次 + 传权重 1 次 /
+失联重探后可用 / 快节点不等慢节点 bring-up / settled 满即断连且不算节点故障）+ `test_dist_common_poll.py` +1
+（`abort_active_requests` 不阻塞、置位后新请求按瞬停分类、别的作用域不受影响）+ `test_eval_course_once.py` +1
+（每权重单单元跨关 + 多权重元数据分键）。python 门禁 1324 例全绿。
+## §2026-09-19-node-fault-taxonomy（2026-09-19，A/B/C 三层共用瞬断判据 + 409 wver-not-cached 自愈：把「节点故障」与「可刷新条件/背压」分开）
+
+**触发**：用户 2026-09-19 审计后指名修 A1+A2+A3（训练侧 rollout/eval 与一次性评估同源的三个洞）。
+证据链（`tmp/x20-rebirth/training-loop.log`，08:00–10:36，235 个 rollout 轮 / 20 个 eval 轮）：
+
+- **A1**：09:48:29 `weights[rollout] reuse wver=1a01aa045436… skip POST for ['self','mac','a97','gcs']`
+  → 5 条 `HTTP 409 {"error":"wver not cached here"}` → `node a97: 3 consecutive failures —
+  circuit-broken for this round`；该轮 `byNode={"self":11,"mac":8}`，**a97 的 7 个槽位整轮闲置**。
+  而同一 wver 在 44 秒前（09:47:45）刚在 a97 上 POST 成功（`(purged)`）。
+- **A3**：09:48:13 三条 `HTTP 502:`（cloudflared 隧道，非节点问题）同样记 streak → a97 熔断；
+  实测分布：rollout 617×503（旧实现唯一豁免项）+ 9×502 + 5×409 + 1×10054；eval 层 153×503 +
+  1×502 + 1×10054，**旧实现对这 155 次全部当节点故障**（3 次即熔断该节点整轮）。
+
+**实施**：
+
+1. **判据单源**：`dist_common.is_transient_error(e)`（408/425/429/500/502/503/504、`DistError.transient`、
+   文案含 busy、非 DistError 的 OSError/TimeoutError）成为唯一实现；`rl/batch_eval.is_transient_error`
+   退化为薄转发（保留名以兼容既有引用与单测）。A 层（`rl/dispatch.py`）与 C 层（`rl/eval_dispatch.py`）
+   直调同一实现——旧实现只有 B 层有判据、A 层只豁免 503、C 层什么都不豁免。
+2. **409 = 可刷新条件**（`dist_common.refresh_weights`，A/C 两层共用）：失败时**清进程内 reuse 缓存**
+   （`_WEIGHTS_PUSHED` 原先只在 ping/codeHash 门失效 ⇒ 脏缓存让 409 持续到熔断）+ **就地重发**该 wver；
+   成功则不入 streak、不耗 attempt 配额，同一节点继续用。重发也失败才按真失败记。
+   （节点侧根因是 per-kind 桶只留 KEEP=4 份且**所有客户端共享**——别的训练作业/本机 eval 上传/agent
+   重启都能把文件挤掉，而客户端看不出来；修节点侧要动 `tools/agent/sampler-agent.ts`（codeHash SSOT
+   ⇒ 全集群 stale + 需 push），故本轮只做客户端自保。）
+3. **瞬断不计节点故障，但有上界**：新增 `soft_streaks`（`policy.nodeSoftFailStreak`，缺省 3×`nodeFailStreak`）。
+   单次瞬时错误不熔断；**连续**软失败达到上界则停派该节点并单独措辞记日志（`连续 N 次瞬时失败（背压/瞬断，
+   非节点故障）— 本轮停派`），与真故障的 `circuit-broken` 区分。理由：不给上界的话，隧道/集群整体脉停时
+   会无限重排把整轮拖到窗口超时（旧行为是快速熔断，也有害，但至少不空转）。
+4. **可观测**：背压/瞬断重排日志带上「瞬断/背压（不计节点故障）」；409 自愈单独一条
+   （`wver not cached（409）—— 已就地重发权重（…）并清 reuse 缓存`）。
+
+**被否方案**：① 只在 A 层补 503 之外的豁免（不共用判据）——B/C 层仍在误熔断，且三处判据必然漂移；
+② 把 409 也算 transient 一扔了事——409 是**可修**的（重发即恢复），扔进背压队列会让同一节点持续 409、
+   任务被重排到窗口耗尽，还丢掉「节点侧到底有没有那份权重」这个信号；③ 瞬时错误完全不设上界——
+   整体脉停时整轮空转到 deadline（见 3）；④ 让 rollout 也改用一次性评估的专用 kind 隔离权重——
+   rollout 的权重就是节点采样要用的那份，无法隔离，只能保证丢了能立刻补。
+
+**实测（单测，非仅源码断言）**：A 层新 `tests/test_rollout_dispatch_resilience.py`（7 例）——502×3 后
+4/4 局全结算（`dist.nodes={"a97":4}`、retried=3、无 `circuit-broken`）／真故障连续 3 次即停派（只取活 3 次）／
+409 触发一次就地重发且节点继续跑完整轮／软失败上界停派；C 层新 `tests/test_eval_dispatch_resilience.py`（8 例）
+——502×3 后 4/4 结算、409 自愈、真故障仍熔断；`test_dist_common_poll.py` +4（分类表、刷新语义与缓存清空、
+单源守卫：全仓只有 dist_common 一份实现、B 层必须是纯转发、A/C 层必须接线 409 分支）。
+**两套行为测试都在旧代码上实测变红**（A 层：`missing=[全部 4 局]`；C 层：0/4 结算、`refreshed==[]`），
+不是事后补的绿灯。nn-python-gate 1343 例全绿。
+
+**已知局限**：客户端无法阻止别的客户端（或 agent 重启）挤掉权重，只能事后补；`soft_streak` 上界是启发式
+（3×真故障阈值），不是测量结果；409 重发是整份权重上传（MB 级），高频 409 会吃带宽（实测一次/轮量级，可接受）。
+## §2026-09-19-rollout-midround-recover（2026-09-19，A 层 rollout 中途重探真正跑起来 + 轮内回场：`rescan_nodes` 从「每轮 0 次 pass」到 5s 首探/20s 周期 + 已停派节点回场）
+
+**触发**：用户 2026-09-19 指名修 A4（审计发现）。**证据（两条独立线索都指向 0 次执行）**：
+① `tmp/x20-rebirth/training-loop.log` 2.5h / **235 个 rollout 轮**里 `rescan` 日志 **0 行**，而同期
+节点排除 130+ 次（`ping failed`：a96 61 / a97 43 / a95 26）；② 机制上必然如此——旧实现
+`sleep_sec = min(rescan_sec=120, …)` → `all_settled.wait(sleep_sec)` → 紧接
+`if all_settled.is_set(): return`，而该 run **234 轮全部 <120s**（p50 7s，max 115s）⇒ 线程每轮都在
+首个 sleep 里被结算事件唤醒并退出；且候选集用 `if nid in spawned_ids: continue` 过滤，**已熔断的
+节点永远不是候选**（熔断即整轮出局，窗口 1800s）。
+
+**实施（`rl/queue_local.rescan_nodes` + `rl/dispatch` 调用点）**：
+
+- **首个 pass 提前**：`nodeRecoverFirstSec`（缺省 5s）后首探，之后每 `recoverPingSec`（缺省 20s，
+  与 B/C 层同口径；旧的 `agentRescanSec` 仍可覆盖、显式 0 = 关闭）。防忙等地板从 0.5s 降到 0.05s
+  ——0.5s 地板会让小值旋钮（测试/调频）名不副实。
+- **候选 = 尚未孵化 ∪ 已停派**（`streaks ≥ nodeFailStreak` 或 `soft_streaks ≥ nodeSoftFailStreak`）；
+  后者是新增的「回场」路径：清 reuse 缓存 → 强制重握手（`post_weights` 自带 cached 探针）→
+  **重置失败计数** → 补孵 c_n 个采样线程。每节点每轮 `nodeRearmLimit`（缺省 3）次上界，
+  用尽后告警一次并停手（防「永远失败的节点」无限起线程）。
+- **ping 并行**（`dist_common.ping_nodes_parallel`，与 B/C 层同款）：串行 3s/台会让一个 pass 卡十几秒。
+- **两个旧 bug 顺带修**：① 漏传 `kind=wkind` ⇒ goal/intent 腿的中途上线节点把权重发进 rollout 桶，
+  任务全 409（与 §2026-09-19-node-fault-taxonomy 的 A1 同一类陷阱）；② `nd` 漏带 `ping`
+  ⇒ stageJson 任务在回场/中途上线节点上被能力握手拒掉（自定义关课程下等于白孵这些节点）。
+- **调用点全关键字传参**：该调用有 20+ 实参，历史上第 19 个位置参数错位过一次（线程启动即抛、
+  运行中上线的节点永不被发现）——位置传参是这类 bug 的温床。
+
+**被否方案**：① 只把 `rescan_sec` 缺省从 120 改小——线程仍会在结算瞬间退出，「短波轮里永不扫描」
+不变；② 用 `time.sleep` 代替 `all_settled.wait`（保证 pass 跑到）——会让 round done 滞后一个
+cadence（2026-09-05 修过的老毛病复活）；③ 回场不做上界——节点持续失败时会无限补孵线程；
+④ 回场沿用进程内权重缓存（跳过 POST）——节点刚重启/桶被挤时缓存是脏的，正是 A1/A2 的教训。
+
+**契约（测试钉住，11 例）**：`tests/test_rollout_dispatch_resilience.py`
+中途上线节点在轮内供样（旧实现 `{'self': 6}`，新实现 a97 拿到 ≥2 局）／熔断后轮内回场把剩余任务跑完
+（旧实现 6 局全 missing，新实现 6/6）／真失败「熔断 + 有界回场」= 3×(`nodeFailStreak`)×(1+`nodeRearmLimit`)
+= 12 次取活、回场日志恰好 3 条／`nodeRearmLimit=1` 时上界告警且共 6 次取活／halt 置位后 3s 内收工
+（不等满 30s 窗口）。**A4 三条行为测试在旧代码上实测变红**。nn-python-gate ✓（1347 例）。
+
+**已知局限**：回场会暂时叠加线程（旧线程可能还在收尾一局，新线程又孵），故为「有界多孵」而非
+精确替换——自愈性影响可忽略（同一节点、多余槽位在下一轮自然收敛）；节点侧根因（per-kind 桶
+KEEP=4 且全客户端共享）仍未修，回场只是客户端侧的自保（见 §2026-09-19-node-fault-taxonomy）。
+## §2026-09-19-eval-gate-lanes（2026-09-19，C 层（训练干净评估）的门与收工形态：并行 ping + 逐条留痕 + POST 全败走本地 + 本机槽位先开工 + settled 满即断连）
+
+**触发**：用户 2026-09-19 连续两条指令（「把 C 层收工空等 4–76s/轮榨掉：all_done 即断连 + 只等写行的赢家」、
+「把 eval 层的病态分支与串行门一起修」），底稿是同日的 C 层审计（`tmp/x20-rebirth/training-loop.log`，
+08:00–10:36 共 20 个 eval 轮）。
+
+**证据（五个缺陷，均为一手日志）**：① **B1 收工空等**：末局结算 → `DONE` 的墙钟 = it10 42s / it15 47s /
+it40 32s / it80 76s，而这些行在 `all_done` 置位前就已全部落盘——旧收工是
+`t_.join(timeout=max(30, window + task_timeout))`，卡在 HTTP 里的线程要等请求自己结束；② **B2 门串行**：
+逐节点 `node_ping(timeout=3s)`，墙钟 = Σ 每台延迟（两台超时即 ~7s），而门每轮重跑一次；③ **B4 静默丢节点**：
+`if ping is None: continue` 零日志——节点被丢时既看不出是谁、也看不出为什么（`ping failed` 计数只能靠
+别的账本反推）；④ **B5 病态分支**：`if not nodes_ok` 时无条件 `return`，本机槽位明明可用却整轮 0 局
+（且旧写法的 `if not alive and …` 条件自相矛盾）；⑤ **B3 门即屏障**：权重 POST 全部返回后才孵化线程，
+本机槽位干等（本地权重就是本机冻结快照，根本没有下发开销）。
+
+**实施（`rl/eval_dispatch.py`；常量 `EVAL_INFLIGHT_GRACE_SEC` 落 `rl/eval_local.py`）**：
+
+- **B1**：收口**显式**成三段——① 等 `all_done`（或墙钟 `deadline`，或消费线程全退）；② 未满时给在飞局一个
+  **有界**落账窗（`min(task_timeout, EVAL_INFLIGHT_GRACE_SEC=120)`，在飞清空即走）；③ 之后
+  `abort_active_requests(req_scope)` 断连 + 拒发新请求，只等**正在写行的赢家**（`writers` 计数，1s 兜底）
+  并把线程 join 预算压到 0.25s。`writers` 在 `seen.add` 时 +1、`record()` 落盘后 -1。
+- **B2**：门改用 `dist_common.ping_nodes_parallel`（保序，== 最慢一台）。
+- **B4**：`ping is None` 逐条 `[eval] node <id>: ping 失败/超时（并行探测，预算 Ns） — 本轮不参与`。
+- **B5**：`alive` 非空但 POST 全败 ⇒ 本机可用则 **local-only**（响亮记一行），不可用才跳过；
+  `alive` 为空时不再重复打「POST 失败」误导行。门/权重段整体移到闭包之后（B3 的前提）。
+- **B3**：本机槽位在**门之前**孵化并启动（`_spawn_tracked`），门/权重只影响节点侧。
+- **顺带（收工的护栏）**：`live_workers` 计数（孵化即 +1、线程退出 -1）——「任务全被 drop 且无在飞」时
+  旧形态只能空等整个窗口（60/1500s）；现在全退即收工，并在日志里注明「消费线程已全退」。
+
+**被否方案**：① 只加一个 `all_done.wait(…)` 超时——收工只是变慢而非**立即**，且窗口到期时仍会把在飞的
+有效局一起砍掉；② 用 `join(timeout=2s)` 代替断连——线程仍卡在 socket 读上（进程内连接数按节点并发累积）；
+③ 门/权重段整体前移到快照之前——`nodes_ok` 必须先于 `streaks`/日志，前移等于把闭包拆散；改为「本机先开工 +
+门后移」；④ 本机槽位在门失败时也照旧 `return`（旧行为）——用户点名要「POST 全败走本地」。
+
+**契约（测试钉住，新增 7 例）**：`tests/test_eval_dispatch_resilience.py`
+并行门（3 台 × 0.3s 实测 <0.7s；串行基线实测 0.906s）／ping 失败逐条留痕（含节点 id）／
+POST 全败 + 本机可用 ⇒ 2/2 局全由 `local` 结算且日志为 `— local-only eval this round`／
+本机也不可用时仍响亮跳过／本机首局早于权重门完成（`post_delay=1.0s`）／
+settled 满（4/4）不等慢节点（慢节点 fetch 睡 3s，整轮实测 <2s）／窗口到期不砍在飞局（有界宽限）。
+**其中 5 例（B1/B2/B3/B4/B5）在旧代码上实测变红**（`git show HEAD:…` 换回旧实现跑同一套测试：5 failed /
+10 passed；旧实现必须在 `--maxfail=99` 下一次拿全，因为 pyproject 的 addopts 带 `-x`）。
+
+**已知局限**：① `clear_abort()` 是**全局**清账（同进程并发的另一轮 eval/baseline 的收工态会被清）——
+与 B 层 `batch_eval` 同款语义，重叠窗口只在 baseline 与 A-eval 同迭代并发时出现，后果是少量 dup 回包
+（丢弃、不双计）；② 阻塞在 `urlopen`（响应头都未回）的连接不在断连注册表里，只能等其自身超时
+（`all_done` 已置位，结果本就被丢弃）；③ 本机槽位在门失败时立即开闸（`release_local_gate_if_starved`）
+⇒ 本机局可能与训练主循环的资源窗重叠（与「无可用节点」分支同语义）。
+## §2026-09-19-eval-weights-kind（2026-09-19，训练干净评估的权重 kind 独立成 'eval'——不再与训练 rollout 共用节点权重桶）
+
+**触发**：用户 2026-09-19（「给训练评估独立 kind（我定名 eval），顺带一次现场验证」）。来源是同日审计的
+**B6** 项：`rl/eval_dispatch.py` 的权重下发与局请求都走 `kind="rollout"`，与训练 rollout 的 churn 共用节点
+同一个权重桶。
+
+**根因（节点侧分桶语义，已核实代码）**：节点按 `(kind, sha)` 分桶缓存（`sampler-agent.ts::weightsByKindSha`）：
+内存桶**每 kind 上限 64**（`WEIGHT_BUCKETS_PER_KIND`）、落盘文件**每 kind 保留最新 4 份**
+（`workdir-cleanup.ts::WEIGHT_FILES_KEEP`，在飞桶引用的文件豁免），而 `/v1/task` **只查内存桶**
+（`weightsOf`，不回查磁盘）。⇒ eval 与训练 rollout 同 kind 时，eval 那份与训练每轮的 churn 共用同一组
+计数（64 / 4），任一侧轮换都可能把对方挤掉；被挤掉后节点答 409「wver not cached here」，客户端只能靠
+409 自愈重发兜（A1）。
+
+**决定**：`EVAL_WEIGHTS_KIND = "eval"`（`rl/eval_dispatch.py` 单源常量），**三处同源**——权重 POST 的
+`x-kind`、局请求的 `?kind=`、409 自愈重发的 `kind`。协议侧 kind 是**不透明字符串** ⇒ 旧节点无需任何改动
+（现场实测 5/5 台未升级节点直接接受并正常出局），也不触 codeHash（`nn-training/**` 不在 SSOT 内）。
+
+**配套（同一坑的另一面）**：进程内下发账本 `dist_common._WEIGHTS_PUSHED` 由**键 = wver** 改为
+**键 = (kind, wver)**（`note_weights_pushed` / `weights_already_pushed` / `partition_weights_nodes` /
+`refresh_weights` 同改；缺省 `kind="rollout"` ⇒ 既有调用方行为逐字不变）。理由：同一个权重文件（同一 sha）
+会被两条腿使用（干净评估评的就是刚训练出的那份 θ）——账本不带 kind 时，先跑那条腿的 note 会让另一条腿
+被判成 reuse 而**跳过 POST** ⇒ 该节点对另一条腿整轮 409（脏缓存，与 A1 同类陷阱、方向相反）。
+A 层调用点同步接线：`rl/dispatch.py`（`kind=wkind`）、`rl/queue_local.py`（`kind=wkind`）。
+
+**顺带修（现场探针实测踩到）**：`dist_common.ping_nodes_parallel` 只读 `authKey`，而 `post_weights_parallel`
+两种都认（`key` / `authKey`）⇒ 把归一化配置（`{id,url,key}`，eval_dispatch / batch_eval 用的形态）喂进来会
+静默 401、整批节点判「ping 失败」（探针第一版 6/6 台全灭，第二版才对）。已统一键名兼容。
+
+**现场验证（真实集群 2026-09-19 21:19，`tmp/b6probe/run2.log`）**：x20-rebirth `it96`（sha `232158d9…`）
+× 6 台 enabled 节点 —— ① 并行门 6 台 2.58s（gcs 超时，其余 5 台 evalSupport / stageJsonSupport /
+bun 1.4.2 / codeHash 全过）；② `kind='eval'` 下发 **5/5 台 ok，0.20s**（self `purged`、其余 `kept`）；
+③ 桶隔离实测 `eval=True / rollout=False`（self / mac / a95）——两条腿的桶确实分开；④ 以 `kind='eval'`
+取一局：**HTTP 200，1.2s**，`wver=232158d9…` 对账一致。
+
+**被否方案**：① 继续共用 'rollout'、只靠 409 自愈兜——把可预防的故障做成常态，还掩盖节点侧真实丢失；
+② 用新 **mode** 而非 kind 区分——节点早已按 kind 分桶（v3.7），新增 mode 要动 `sampler-agent.ts`（在
+codeHash SSOT 内 ⇒ 需 push + 集群重启），而 kind 是现成的**零升级**通道；③ 账本保持 wver 单键、只在 eval
+侧「发前 forget 节点」——治不了另半边（rollout 腿复用 eval 的账）；④ 一次性工具链
+（`tools/sim/eval-course-ckpt.ts` / `rl/batch_eval.py`，kind 走 `'rollout'`/`'none'`）**本轮不动**：
+它是独立命名空间（iterId 自带 `evalcourse-`），且迭代节奏与训练循环无关。
+
+**契约（测试钉住，新增 3 例 + 补 1 例断言）**：`tests/test_dist_weights.py::test_push_cache_is_keyed_by_kind`
+（同 sha 的 eval 不得被 rollout 的账判成 reuse；缺省 kind 行为不变；`forget_weights_node` 两条腿一起清）／
+`tests/test_eval_dispatch_resilience.py::test_eval_leg_uses_its_own_weights_kind`（POST 与请求同 kind）＋
+`test_wver_409_reposts_weights_and_keeps_node` 补断言（重发也走 `EVAL_WEIGHTS_KIND`）＋
+`test_eval_dispatch_kind_is_single_sourced`（源码守卫：该文件不得残留 `kind="rollout"` 字面量）／
+`tests/test_dist_common_poll.py::test_ping_nodes_parallel_accepts_key_and_authkey`。
+**其中 3 例在旧实现上实测变红**（`git show HEAD:` 换回旧实现跑同一套：`AttributeError: module
+'rl.eval_dispatch' has no attribute 'EVAL_WEIGHTS_KIND'` ×2 + 键参数 `TypeError` ×1）。
+
+**已知局限（未修，如实记）**：① 本改动只消除「两条腿互相驱逐」；**节点重启清空内存桶**后该 kind 仍会 409
+（`weightsOf` 不回查磁盘）——那是节点侧根因，要动 `sampler-agent.ts`（codeHash SSOT ⇒ 需 push + 集群重启）；
+② 节点上会多出一份 kind 目录（`weights-eval-*`，每 kind 4 份 ≈ 1.5MB/台）——换来两条腿的桶与日志都可分；
+③ `rl/bc_eval.py` 仍是 `kind="rollout"`（BC 每 epoch 评估）——同类站点，但属另一条腿、且改动会连带其
+请求侧，未并入本轮。
+## §2026-09-19-node-weights-disk-fallback（2026-09-19，节点侧权重查找在内存桶未命中时回查磁盘——根治「agent 重启后对盘上已有的权重答 409」）
+
+**触发**：用户 2026-09-19「让节点侧的权重查找在内存桶未命中时回查磁盘，根治重启后的 409」。承接
+`§2026-09-19-eval-weights-kind` 的已知局限 ①（kind 拆桶只消除**两条腿互相驱逐**，重启仍会 409）。
+
+**根因（已核实代码）**：`/v1/task` 只查内存桶（`sampler-agent.ts::weightsOf` → `weightsByKindSha`）。
+agent 一重启，内存桶就空了，而权重文件**仍在 `WORK_DIR`**（boot 收敛只按 kind 删到最新 `KEEP=4` 份）
+⇒ 节点对**盘上就有的**权重答 409「wver not cached here」，客户端只能靠 409 自愈重发兜（每节点每次重启
+白传一份；在 A1 之前还会把该节点**当故障熔断整轮**）。
+
+**决定（`tools/agent/sampler-agent.ts`）**：
+- `weightsOf(kind, wver)`：内存命中 → 原路；未命中 → **磁盘回查** `readWeightsFile`，命中即**回填桶**
+  （后续任务零额外开销）并按 `evictWeightBucket` 做同规驱逐。
+- `readWeightsFile`：文件名只有 **16 hex 前缀**，**不足以判定内容** ⇒ 回查时**按字节重算 sha256 全量
+  比对**，不符即视为未命中（坏/被截断的文件留给 sweep 收拾）。`iterId` 只在 POST 时记账（无消费方），
+  回查来的置空。
+- `weightFileBase(kind, sha)` 提为**单一来源**：POST 落盘、磁盘回查、retention 正则三处必须同名
+  （名字一旦漂移，回查文件会被 boot/切换时的清扫当垃圾删掉）。`weightsKeyOk` 守门（kind 直接进文件名 ⇒
+  防路径穿越；sha 必须全量 64 hex）。
+- `/v1/weights/cached` 探针同样**磁盘感知**（`weightsCachedInBucket(...) || weightsOf(...) !== null`）：
+  否则重启后探针答 false，客户端会重传一份**盘上已有**的权重。
+- `latestWeightsOfKind(kind)`（intent/goal 评估的「最新桶」语义：`policy=intent-exec|goal` 的 409 前置检查 +
+  runGame 的 `--intent-weights/--goal-weights`）：内存桶按插入序取最后一个；**桶空则回查磁盘**取 mtime 最新的
+  一份（逐候选按字节重算 sha256，并要求 sha 前 16 hex 与文件名一致，改名/损坏的跳过；命中即回填桶）。
+  这是另一类重启 409：intent-exec / goal 评估会整轮答「intent weights not cached」。
+
+**代价与影响（必须知道）**：本文件**在 codeHash SSOT 内**（`tools/agent/codehash-files.txt`）⇒
+codeHash `c78d48de…` → **`355f0738…`**，**必须 push + 节点升级/重启才生效**。升级窗口内未升级节点会被
+门排除（可用节点数变少，属预期，不会污染数据）。`freeze:check` 不受影响（不触 God-AI/仿真签名）。
+
+**被否方案**：① 回查只信文件名（16 hex 前缀）——前缀碰撞/坏文件会被放行，故障从「409」变成「局跑错
+权重」，更糟；② boot 时把盘上全部权重文件预载进内存——要逐文件哈希、启动变慢，且把「最新 KEEP 份」
+当权威；懒惰按需回查更小、语义相同；③ 客户端侧继续只靠 409 自愈——把可预防的故障做成常态，重启后每
+节点每轮白传一份；④ 探针直接答 `true` 不校验内容——把「缓存」变成谎言。
+
+**契约（测试钉住，`tests/dist-agent.test.ts` 新增 4 例）**：`readWeightsFile` 内容不符 / 前缀碰撞 /
+缺文件 / 路径穿越与短 sha 一律未命中；`weightsOf` 未命中回查磁盘、命中后**文件消失也仍命中**（证明回填）；
+`weightFileBase` 与 retention 正则 `WEIGHT_RE` 同域（5 个 kind 全覆盖）；`latestWeightsOfKind` 桶空时取盘上
+mtime 最新的一份（不串 kind）、**最新那份是改名坏文件时跳过它取旧的**、回填后文件删掉仍返回。
+旧实现上该文件 **1 fail + 1 error**（`Export named 'readWeightsFile' not found`）；变异体（删掉内容校验那行
+`sha.slice(0, 16) !== c.prefix`）**只让「坏文件跳过」那条断言变红**——证明它守住的正是「文件名 16 hex 后缀
+不可信」这个性质，而不是顺手写绿的。
+
+**现场实测 A/B（`self` 节点，同一权重 `it96` sha `232158d9…`，同一探针 `tmp/restart-probe.py`；
+证据 `tmp/restart-probe/{213330-before,213405-after}.json` + 两份 .log）**：
+- **BEFORE（HEAD 代码，codeHash `c78d48de…`）**：① 重启前取局 seed900 → **200**；② `/v1/restart` accepted
+  → 新进程 uptime=0s；③ **不重传** → 探针 `eval=False`、取局 seed901 → **409 `{"error":"wver not cached
+  here"}`** ← 缺陷在真实节点上复现（而 `weights-eval-232158d94975e6a5.json` 379KB 全程躺在盘上）。
+- **AFTER（本次代码，codeHash `355f0738…`）**：重启（等过 30s grace 窗口后发出，`waited=2.0s`）→ 新进程
+  codeHash=`355f0738…`；**不重传** → 探针 `eval=True`（探针也已磁盘感知）、取局 seed951 → **200**
+  （`outcome=gameover ticks=1483`）；节点日志出现
+  `weights[eval] rehydrated 232158d94975… from disk (in-memory bucket was empty — agent restarted)`。
+- **注意**：本次 A/B 跑在 `self`（本机 agent 直接执行工作区 TS）⇒ 验证的是**代码路径**；远端 5 台仍是
+  `c78d48de…`，需 push + 升级后才具备同样行为（本地工作区 hash 已是 `355f0738…`，未升级节点会被门判 stale）。
+
+**已知局限**：① 盘上只留最近 `KEEP=4` 份/kind（更早的被 sweep 删）⇒ 更早的 sha 仍 409（客户端重传，
+这是正确行为）；② `latestWeightsOfKind`（intent/goal 评估的「最新桶」语义）仍只查内存——同类站点，未并入
+②（**已并入本轮**）`latestWeightsOfKind` 同样磁盘回查，但它的「最新」只能按 **mtime 近似**（POST 命中 kept 不重写文件时 mtime 偏旧；与内存桶插入序语义等价、但有此边界），且「最新」是**跨客户端共享**的语义（别的训练流 POST 的 intent/goal 权重也会成为最新——与改动前一致）；③ 回查是请求路径上的同步 IO（`readFileSync` + sha256）——每个 `(kind, sha)` 每进程只付一次
+（命中即回填），首次命中的那一局多几毫秒；④ 未做重启预载，故「重启后第一局」付出这次哈希。
+## §2026-09-19-node-memory-restart-blindspots（2026-09-19，依赖节点内存态的三处重启盲区：取包丢失 404 判据 / `/v1/update` 假收敛 / 升级去重冷却窗）
+
+**触发**：用户 2026-09-19「系统排查其它依赖节点内存态的地方（结果缓存、inflight 表）是否也有重启后行为
+盲区」，随后裁定按 F1 → F3 → F2 修。
+
+**审计（只读，判据 = 进程内可变状态重启后消失，而**是否有人据此做过判断**）**：
+节点侧逐个过：`weightsByKindSha`（已覆盖，见 §node-weights-disk-fallback）/ `resultCache` / `inflight` /
+`failedTasks`（**F1**）/ 计数器（`gamesDoneTotal/ByIter`、`cacheHits/Evicted`、`rejectedCount`、`activeWorkers`、
+`lastError`）→ 只喂 `/v1/status`，面板的贡献度算的是**客户端写的** `dist-agent-meta.jsonl`，live 计数只显示、
+无跨轮 delta 运算 ⇒ **无盲区**；`persistPool` 子进程 → 父进程退出即关掉它们的 stdin 管道 ⇒
+`export-rl-rollout.ts` 的 `stdin.on('end') → process.exit(0)` 自灭，boot 的 `sweepWorkdir()` 另清孤儿
+`game-*`/陈旧 pid；`gameSeq` → 目录名带 pid，重启不碰撞；`codeHashMemo/gitShortMemo` → **F2**；
+`persistFailStreak`/`updating`/`restartPending` → 更宽松的闩，无消费方。
+客户端跨轮、按节点为键的内存态：`_WEIGHTS_PUSHED`（已由 409 自愈 + 节点磁盘回查覆盖）/
+`_RESTART_SEEN` + TS 落盘 memo（**F3**）/ `_ACTIVE`·`_ABORTED_TAGS`（进程内、按轮）/ `DEDUP_STREAK`（日志告警
+计数）。`/v1/ping` **没有**权重字段 ⇒ 客户端从不信节点内存来判权重。
+
+**F1（客户端，`dist_common` + A/C 层）——取包丢失 404 不许当节点故障**：
+`resultCache/failedTasks/inflight` 都是节点进程内状态，agent 一重启即空；轮询 `/v1/result` 得到 404
+（文案明写 `expired/purged/restart`）。旧实现在 A 层按确定性失败记 streak（3 条即 `circuit-broken for this
+round`）并在 C 层按 attempt 打光即 `dropped`（**丢局**）——与 §node-fault-taxonomy 里 409 的错误同族、方向相反。
+- 新增 `dist_common.TASK_LOST_MARKER` + `is_task_lost_error(e)`：判据 = **状态 404 ∧ 文案带标记**（裸 404 =
+  路径写错等客户端 bug，必须继续响亮失败，绝不静默成无限回队）。与 `is_transient_error` **刻意分开**
+  （处置不同：一个回队重跑、一个背压退避），但两层都按「不计节点故障、不耗 attempt 配额」处理。
+- `forget_weights_node(nid, kind=None) -> int`：摘某节点账本（缺省全 kind；给 kind 只摘那条腿）。404 ⇒ 立刻
+  摘该节点这条腿的 reuse 账本——重启同时也意味着它的权重桶可能空了（升级后的节点会靠磁盘回查零重传）。
+- 可达性（精确）：async 只在 `abandon_event`（仅 fanout 竞速副本；副本失败有独立分支静默丢弃）或
+  `DIST_TASK_ASYNC=1` 运维模式；面板 `smoke.ts` 把 404 当「继续轮询」⇒ 重启节点表现为 30s 朦胧超时（诊断噪声）。
+
+**F2（节点侧，`tools/agent/sampler-agent.ts`）——`/v1/update` 不得让节点「报新代码、跑旧代码」**：
+旧实现在 pull 成功后 `codeHashMemo.value = null` / `gitShortMemo.value = null`，而 `/v1/ping` 报的正是
+`memoizedCodeHash()` ⇒ pull 过但**没重启**的节点会以**新 hash** 通过 codeHash 门
+（`dist_common.check_code_hash`）、静默跑启动时那份代码——正是该门要拦的东西的反向漏网。
+- 决定：memo 的**生命周期 = 本进程**，永不因 pull 失效；pull 只留一行响亮日志（新代码重启后生效）。抽
+  `applyPullResult(r)`（导出，供单测钉住不变量），HTTP 分支只调它。要换 hash 只有 `/v1/restart`（可带 pullBranch）。
+- 顺带：`/v1/restart` 分支在 `process.exit(0)` 前显式 `killPersistPool()`——池靠 stdin EOF 自灭，但**忙** worker
+  要跑完当前那局才回到事件循环 ⇒ 旧代码会顶着旧代码继续算一段、把没人消费的 `game-*` 留在盘上。
+
+**F3（`dist_common` + CLI/TS memo）——升级去重从「永久」改成「冷却窗」**：
+旧 `_RESTART_SEEN` 命中即永久 dedup；pull 失败 / 环境不支持远端升级的节点带着**同一个** codeHash 回来 ⇒
+该节点再也收不到升级指令（训练循环里直到训练机有新提交；TS 工具那条腿还把 memo 落盘
+`tmp/node-upgrade-memo.json`，跨调用继续压制）。
+- `RESTART_DEDUP_COOLDOWN_SEC = 600`（env `NN_RESTART_DEDUP_COOLDOWN_S` 可覆盖，0 = 关闭去重）；
+  `_RESTART_SEEN[nid] = (pingHash, expectedHash, at)`；窗内 dedup、**窗过期 ⇒ 允许再发一次并重置时钟**
+  （防连环杀 §2026-09-01 不破）。
+- memo 的时刻要**进判据**：`seed_restart_state` 接受可选 `atSec`（缺省 = 现在 ⇒ 旧调用方语义逐字不变）；
+  CLI spec 新增可选 `cooldown_sec` / `seen[].atSec`；TS 侧 `latestSeenEntries` 把 memo 值（ISO 时刻）换算成
+  `atSec` 一并送过去（**判据仍只在 dist_common**，TS 只送时刻）。`memoAtSec` 先判纯数字再试 ISO——实测
+  `Date.parse('1758300000')` 会给一个毫不相干的日期（2001-05-01），静默把新鲜 memo 变成「一小时前」。
+- A 层 dedup 的 WARN 文案补上冷却窗秒数（运维知道它会自愈，不必手删 memo）。
+
+**证据**：
+- F1 两例行为测试在旧层上实测变红：A 层 `circuit-broken for this round`；C 层 `dropped=2 / games=0`；新实现
+  A 层 `byNode={"a97":2}`、C 层 2/2 结算，且 `forget_weights_node` 被调用、`refreshed == []`（404 不走 409 路径）。
+- F3 行为 A/B（`seed` 一条 1 小时前的 memo）：旧 `(False, 'dedup')` → 新 `(True, 'restart-requested')`。
+- F2 守卫 A/B（HEAD vs 工作区）：`无 memo 置空 false→true`、`restart 前收池 false→true`、`导出 applyPullResult false→true`。
+- 门禁：`nn-python-gate` ✓（ruff/mypy + pytest）· 根 `bun run check` ✓ · `bun run build` ✓ · `freeze:check` ✓。
+
+**代价与影响**：`tools/agent/sampler-agent.ts` **在 codeHash SSOT 内** ⇒ F2 需 **push + 节点升级/重启**才生效；
+F1/F3 是 `nn-training/**`（不在 SSOT）⇒ 无需 push。另：F2 改动期间工作区对 SSOT 变脏 ⇒ 从本仓跑工具会把远端
+判 stale/拒发升级（既有护栏语义），提交后消失；两个 scan 用例顺手钉死「与工作区脏不脏无关」
+（`dirty_hash_files → []`），否则改 `tools/agent/**` 就会把它们弄红（实测）。
+
+**被否方案**：① F1 把 404 并入 `is_transient_error`——措辞与处置都不同，且会让「裸 404 客户端 bug」也变
+静默回队；② F1 只豁免 streak 但照旧耗 attempt——C 层 attempt 打光即 `dropped`，等于照旧丢局；③ F2 让
+`/v1/update` 顺带自重启——把「拉代码」这个可逆操作变成不可逆的杀进程，且 `test-dist-ops --pull` 的语义会变；
+④ F3 把去重彻底删掉——2026-09-01 重启循环事故会回来；⑤ F3 只在 TS 侧按 memo 时间过滤——判据会一分为二。
+
+**已知局限**：① F3 冷却窗是**时间**判据，窗内仍不重发（连续 3 轮 dedup 的 WARN 已在 A 层，TS 工具那条腿只有
+日志行 + 面板 `versionOk=false`）；② F1 只覆盖 async 取包路径（同步路径没有 `/v1/result`，重启表现为连接被
+重置 = 瞬断，已豁免）；③ F2 不做运行中进程的自我重启（要重启请 `/v1/restart`，这条刻意保留人工/协调器触发）。
+

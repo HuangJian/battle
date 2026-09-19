@@ -120,16 +120,16 @@ def write_iteration(jsonl_path: Path, args, it: int, report: dict, m: dict) -> d
             "event": "iteration",
             "iter": it,
             "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "winRate": report["winRate"],
-            "outcomes": report["outcomes"],
+            "winRate": report.get("winRate", 0.0),
+            "outcomes": report.get("outcomes") or {},
             "score_mean": report.get("scoreStats", {}).get("mean"),
             "score_std": report.get("scoreStats", {}).get("std"),
             "dim_means": report.get("dimMeans", {}),
             # 意图 RL 字段（per-tick 报告无此行 → None，不破兼容）。
             "intentCounts": report.get("intentCounts" if args.mode != "goal" else "actionCounts"),
             "baseIntegrity": report.get("dimMeans", {}).get("baseIntegrity"),
-            "samples": report["totalSamples"],
-            "ticks": report["totalTicks"],
+            "samples": report.get("totalSamples", 0),
+            "ticks": report.get("totalTicks", 0),
             "rollout_sec": m["rollout_sec"],
             "ppo_sec": m["ppo_sec"],
             # 2026-09-11 新增（additive，旧行无此键 → None）：云端/本机 **真训练秒**；
@@ -171,9 +171,12 @@ def write_iteration(jsonl_path: Path, args, it: int, report: dict, m: dict) -> d
                 if "missing" in report
                 else {}
             ),
-            # 纯采集（用户定义）：末局结算 − 权重分发完毕；队列模式实测透传，
-            # 纯本地路径回退为 rollout 全长（无重叠即等价纯采集）。
+            # rollout 采集（用户口径 2026-09-19）：权重开始分发 → 样本齐可交 PPO。
+            # volume 多波：combine_reports 已聚合 min(dist_start)→max(collect_end)。
+            # 纯本地路径回退 rollout 全长。旧账本无 ts 键时仍读 report.pure_collect_sec。
             "pure_collect_sec": report.get("pure_collect_sec", round(m["rollout_sec"], 1)),
+            "rollout_collect_aggregated": report.get("rollout_collect_aggregated"),
+            "rollout_collect_waves": report.get("rollout_collect_waves"),
             # R5 遥测补牙（2026-08-25）：流式的 kl 只是末 wave 单值，对轮内
             # 累积漂移全盲——补 kl_cum/halted/dropped 与各阶段耗时拆分。
             # F4 熔断仍读 kl（每梯度步均值，跨模式可比）；轮内漂移由
@@ -248,7 +251,7 @@ def write_circuit_break(
             "kl_streak": kl_streak,
             "entropy": agg["entropy"],
             "ent_streak": ent_streak,
-            "winRate": report["winRate"],
+            "winRate": report.get("winRate", 0.0),
             "weights": args.out,
         },
     )

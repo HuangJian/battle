@@ -42,7 +42,12 @@ def bun_version(bun: str) -> str:
     try:
         return (
             subprocess.run(
-                [bun, "--version"], capture_output=True, text=True, timeout=10, **_POPEN_NO_WINDOW
+                [bun, "--version"],
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
+                **_POPEN_NO_WINDOW,
             ).stdout.strip()
             or "?"
         )
@@ -57,7 +62,8 @@ def mm(version: str) -> str:
 def _record_agent_meta(meta_path: Path, rec: dict) -> None:
     """追加一条节点采样元数据到 dist-agent-meta.jsonl（巡检读它聚合进 HTML）。
 
-    rec: {node, it, stage, seed, ok, [win, elapsedSec | reason], ts}。
+    rec: {node, it, stage, seed, ok, [win, elapsedSec, wallSec | reason], ts}。
+    elapsedSec = 节点侧服务时长；wallSec = 训练机派发→结算墙钟（含网络）。
     放锁内调用保证顺序；单局一次 IO，成本可忽略。
     """
     try:

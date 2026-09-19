@@ -77,7 +77,7 @@ describe('phaseSecs：rollout/ppo/net 准确拆分', () => {
     })
     expect(p).toEqual({ rollout: 350, ppo: 80, net: 60 }) // 20 dist + 40 (120-80)
     expect(fmtPhaseSecs(p)).toBe('350/80/60s')
-    expect(phaseSecsTitle(p)).toContain('纯采集')
+    expect(phaseSecsTitle(p)).toContain('权重分发')
   })
 
   it('本机/流式：无 cloud 拆分 → net 仅 dist；ppo 回退 ppoSec', () => {

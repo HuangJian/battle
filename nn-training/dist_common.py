@@ -19,6 +19,13 @@ dist_common.py — 分布式采样 trainer 侧公共工具（stdlib-only，可�
   （2026-09-06 竞速收尾洞修复）。DIST_TASK_ASYNC=1 可全局强制旧异步路径。
 - 权重下发：POST body = gzip(weights.json 字节)，头部 X-Iter-Id / X-Weights-Sha256；
   agent 校验 sha 一致后，同 sha 幂等不动、异 sha 原子切换并清空结果缓存。
+  kept 短路径（2026-09-19）：先 GET /v1/weights/cached（头 X-Weights-Sha256 / X-Kind）
+  探测；命中则不传 body 直接 kept。旧 agent 无此路径 → 404 → 回退完整 POST。
+  批量下发用 post_weights_parallel（ThreadPool，与 ping 并行化同款）；pure_collect
+  锚点语义不变（仍 = 全部节点权重就绪时刻）。
+  同 it 补波复用（2026-09-19）：进程内 `_WEIGHTS_PUSHED[wver]→node ids`——
+  partition_weights_nodes 拆 reuse/need；成功 POST 自动 note；ping/codeHash/bun
+  exclude 须 forget_weights_node（防脏缓存）。
 
 红线：远端结果必须先过 validate_result() 再落进 traj_dir —— discover_rl_shards()
 对已落盘目录是无条件递归扫描的，落盘之后没有任何兜底。
@@ -94,13 +101,36 @@ BC_COLLECTOR = "BC-GOD"
 BC_WVER = "bc"
 
 
-class DistError(RuntimeError):
-    """节点交互失败：status=HTTP 状态码（0=本地校验拒绝），reason=可读原因。"""
+#: `EVAL_TRACE_EVENTS` 的真值词（事件级追踪开关）。
+_TRACE_TRUE = frozenset({"1", "true", "yes", "on"})
 
-    def __init__(self, status: int, reason: str) -> None:
+
+def trace_enabled(default: bool = False) -> bool:
+    """事件级追踪开关（逐局派发/返回 + 在飞采样），供「CPU 满一阵又掉档」类排查。
+
+    默认由调用方给（训练循环的 A/B/C 层保持安静；一次性评估入口缺省开）。
+    `EVAL_TRACE_EVENTS=0` 强制关、=1 强制开——判据只此一处，调用方不各自解析字符串。
+    """
+    raw = os.environ.get("EVAL_TRACE_EVENTS")
+    if raw is None:
+        return default
+    return raw.strip().lower() in _TRACE_TRUE
+
+
+class DistError(RuntimeError):
+    """节点交互失败：status=HTTP 状态码（0=本地校验拒绝），reason=可读原因。
+
+    transient=True 表示**限流/抖动信号**（并发槽满 503 busy、连接被重置 10054、
+    408/429/5xx）而非节点故障：调用方应背压重排 + 退避，**不计**节点失败 streak。
+    判据在这里落地而不是调用方各自做字符串匹配 —— 与 rl/bc_dispatch 的 busy
+    背压同源（那边 2026-09-14 事故：busy 被当故障熔断，整轮训练被打死）。
+    """
+
+    def __init__(self, status: int, reason: str, transient: bool = False) -> None:
         super().__init__(f"HTTP {status}: {reason}" if status else reason)
         self.status = status
         self.reason = reason
+        self.transient = bool(transient)
 
 
 def load_dist_config(path: str = CONFIG_PATH) -> dict | None:
@@ -245,6 +275,130 @@ def check_code_hash(ping: dict, expected: str) -> str | None:
 
 
 # ---------------- HTTP ----------------
+#: 视为瞬断/背压的 HTTP 状态码（不是节点故障）。
+TRANSIENT_HTTP_STATUS: frozenset[int] = frozenset({408, 425, 429, 500, 502, 503, 504})
+#: 无 status 的异常（节点 SDK 直抛）里的 busy 文案判据，与 rl/bc_dispatch.is_busy_hint 同源。
+_BUSY_HINT = "busy"
+
+
+def is_transient_error(e: BaseException) -> bool:
+    """背压/瞬断判定（**单一实现**，A/B/C 三层共用）：True = 限流或网络抖动，
+    调用方**不得**把它计入节点失败 streak。
+
+    优先级：① `DistError.transient`（fetch_task 对 10054/超时/408-429-5xx 的标记）；
+    ② `DistError.status ∈ TRANSIENT_HTTP_STATUS`；③ 文案含 busy。
+    非 DistError 的 OSError/TimeoutError（ConnectionResetError、读超时）一律 transient。
+    409「wver not cached」**不在**此列：它是可刷新条件（见 refresh_weights），
+    既不是背压也不是节点故障。
+
+    历史：本判据原只长在 B 层（rl/batch_eval.py），A 层（rollout）只豁免 503、
+    训练干净评估层完全不豁免 —— 2026-09-19 实测 3 条 HTTP 502（cloudflared 隧道）
+    就把 a97 熔断整轮（training-loop.log 09:48）。
+    """
+    if isinstance(e, DistError):
+        if e.transient:
+            return True
+        if e.status in TRANSIENT_HTTP_STATUS:
+            return True
+        return _BUSY_HINT in str(e.reason)[:64].lower()
+    if isinstance(e, OSError):  # ConnectionResetError / TimeoutError / URLError …
+        return True
+    return _BUSY_HINT in str(e)[:64].lower()
+
+
+#: 「取包丢失」标记：节点重启 / 权重切换清场后结果缓存为空，轮询 /v1/result 答 404。
+#: **单一来源**——本常量在此定义，_poll_result 用它拼消息、is_task_lost_error 用它判据，
+#: A/C 层不得各写一份字面量。
+TASK_LOST_MARKER = "task lost on node"
+
+
+def is_task_lost_error(e: BaseException) -> bool:
+    """取包丢失（节点重启 / 清场后节点侧结果缓存为空）——**既非背压、也非节点故障**。
+
+    节点没坏，只是它**进程内**那份结果没了（`resultCache` / `failedTasks` / `inflight`
+    都是节点内存态，agent 一重启即空）⇒ 正确处置 = 立刻回队重跑（局是 (权重,关卡,种子)
+    的纯函数 ⇒ 字节一致）+ 清该节点 reuse 账本（重启同时也意味着它的权重桶可能空了）。
+
+    为什么不并入 is_transient_error：处置与措辞都不同（瞬断=背压退避重排；任务丢失=重新
+    提交），且**裸 404**（路径写错之类客户端 bug）必须继续响亮失败 ⇒ 判据要求
+    「状态 404 **∧** 文案带 TASK_LOST_MARKER」。
+
+    背景（2026-09-19 审计 F1）：旧实现把这条 404 当确定性失败记节点 streak ⇒ 与 409 同族，
+    3 条就把**刚重启**的节点熔断整轮，还白耗 attempt 配额。
+    """
+    return (
+        isinstance(e, DistError)
+        and e.status == 404
+        and str(e.reason).startswith(TASK_LOST_MARKER)
+    )
+
+
+# ---------------- 收工即断连（2026-09-19 用户裁定第 4 条） ----------------
+# 「竞速后 settled 一满，直接关闭所有节点的连接！！！立即！马上！right now！」
+# urllib 无连接池可关，但每个在飞请求的 HTTPResponse 都能 close()：关掉它会让阻塞中的
+# read 立刻抛（连接重置），而不是等慢节点把那一局算完（最长 taskTimeoutSec=900s）。
+# **作用域 = 线程 tag**：训练主循环里 rollout 与本层同进程并发，全局关连接会把别人的在飞
+# 请求一起打死（rollout 任务被当瞬断重排 = 白烧节点）⇒ 只关自己 tag 的请求。
+_ACTIVE_LOCK = threading.Lock()
+_ACTIVE: set[tuple[str, object]] = set()
+_ABORTED_TAGS: set[str] = set()
+_TAG = threading.local()
+
+
+def set_request_tag(tag: str) -> None:
+    """给**当前线程**的 HTTP 请求打标（`abort_active_requests` 的作用域键）。
+
+    线程本地，不继承：调用方须在每个自建线程（worker/supervisor）开头显式设置。
+    空 tag = 不参与收工断连（rollout/A/C 层的既有行为逐字不变）。
+    """
+    _TAG.value = tag
+
+
+def request_tag() -> str:
+    return str(getattr(_TAG, "value", "") or "")
+
+
+def abort_active_requests(tag: str = "") -> int:
+    """停发同作用域的新请求 + **交 daemon 线程**关闭其全部在飞连接（返回待关条数）。
+
+    **为什么关连接必须异步**（2026-09-19 实测）：`HTTPResponse.close()` 可能阻塞——
+    若响应体正被读线程消费，close 要等它让出内部锁；800 局探针实测主线程在
+    `abort_active_requests` 里卡了 **81 秒**（该批 181s 就跑完 800 局，收工却占掉 32%
+    墙钟）。收工路径「立即！马上！」是硬要求 ⇒ 置位 + 尽力关，绝不等。
+
+    已知局限（如实记录）：阻塞在 `urlopen`（响应头都还没回来的慢节点）的连接不在
+    注册表里 ⇒ 关不到它们。那部分只能等它们自己超时；`all_done` 已置位 + 新请求拒发，
+    调用方不再依赖它们的结果。
+    """
+    scope = tag or request_tag()
+    with _ACTIVE_LOCK:
+        _ABORTED_TAGS.add(scope)
+        targets = [r for t, r in _ACTIVE if t == scope]
+    if targets:
+
+        def _closer() -> None:
+            for r in targets:
+                try:
+                    r.close()  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+
+        threading.Thread(target=_closer, daemon=True, name="abort-close").start()
+    return len(targets)
+
+
+def clear_abort() -> None:
+    """解除全部收工态（**每个单元开头必须调**；否则上一单元收工后请求立刻被拒）。"""
+    with _ACTIVE_LOCK:
+        _ABORTED_TAGS.clear()
+
+
+def abort_scope(tag: str = "") -> bool:
+    """该作用域是否处于收工态（回包无用 ⇒ 调用方丢弃而不是重排）。"""
+    with _ACTIVE_LOCK:
+        return (tag or request_tag()) in _ABORTED_TAGS
+
+
 def _request(
     url: str,
     auth_key: str,
@@ -253,6 +407,10 @@ def _request(
     headers: dict[str, str] | None = None,
     method: str | None = None,
 ):
+    scope = request_tag()
+    if scope and abort_scope(scope):
+        # 收工后不再发新请求（settled 已满 = 本单元不需要任何新结果）。
+        raise DistError(0, "aborted: settled complete", transient=True)
     req = urllib.request.Request(
         url,
         data=data,
@@ -260,7 +418,40 @@ def _request(
         method=method,
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.status, resp.read()
+        key = (scope, resp)
+        with _ACTIVE_LOCK:
+            _ACTIVE.add(key)
+        try:
+            return resp.status, resp.read()
+        finally:
+            with _ACTIVE_LOCK:
+                _ACTIVE.discard(key)
+
+
+def ping_nodes_parallel(nodes: list, timeout: float = 3.0) -> list[dict | None]:
+    """**并行** ping 一批节点（保序返回，失败 = None）。
+
+    为什么必须并行：串行 ping 的墙钟 = Σ 每台延迟，而超时预算是**按节点**的
+    （`statusTimeoutSec` 默认 3s）⇒ 两台负载高的节点就让整个阶段花 ~7s（2026-09-19
+    实测：`u0 阶段 gate 6.83s alive=4/6`，其中两台正是超时被丢）。节点门在每单元
+    重跑一次，这笔开销按单元累加。并行后 == 最慢一台。
+    """
+    if not nodes:
+        return []
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _one(nd: dict) -> dict | None:
+        # 键名兼容 `key`（归一化配置，eval_dispatch/batch_eval 用的形态）与 `authKey`
+        # （rl-config.json 原始行）——旧实现只认 authKey，把归一化过的配置喂进来会静默
+        # 401 ⇒ 整批节点「ping 失败」（2026-09-19 B6 现场探针实测）。
+        return node_ping(
+            str(nd.get("url") or ""),
+            str(nd.get("key") if nd.get("key") is not None else nd.get("authKey", "")),
+            timeout=timeout,
+        )
+
+    with ThreadPoolExecutor(max_workers=min(8, len(nodes))) as ex:
+        return list(ex.map(_one, nodes))
 
 
 def node_ping(url: str, auth_key: str, timeout: float = 3.0) -> dict | None:
@@ -346,12 +537,61 @@ def request_upgrade(url: str, auth_key: str, branch: str, timeout: float = 20.0)
 #     改集内文件）后自动恢复资格（F1，plan/dist-codehash-stale-fix.md：dedup 键纳入
 #     期望 hash——否则 mac 类字节差异稳定后训练机永远不再下发升级，运维 pull+重启
 #     因 hash 不变反而永远无法重新纳管）。
-_RESTART_SEEN: dict[str, tuple[str, str]] = {}  # nid -> (agent_ping_hash, expected_hash)
+#: 升级去重**冷却窗**（秒，2026-09-19 审计 F3）。同节点、同 (agent codeHash, 期望 hash)
+#: 在窗内只下发一次 restart；**超窗后允许再发一次**（不收敛的节点由此自愈）。
+#: 为什么需要（旧行为 = 永久 dedup）：节点 pull 失败 / 环境不支持远端升级时，它会带着
+#: **同一个** codeHash 回来 ⇒ dedup 键永久命中 ⇒ 该节点再也收不到升级指令（训练循环里
+#: 直到训练机有新提交；TS 工具那条腿还把这个 memo 落盘到 tmp/node-upgrade-memo.json，
+#: 跨调用继续压制）。冷却窗既保住「防连环杀」（2026-09-01 重启循环事故），又给不收敛节点
+#: 一条自愈路径。`NN_RESTART_DEDUP_COOLDOWN_S` 可覆盖（0 = 关闭去重，每轮都发）。
+RESTART_DEDUP_COOLDOWN_SEC = 600.0
+#: nid -> (agent_ping_hash, expected_hash, 该次下发时刻)。第三项只为冷却窗存在。
+_RESTART_SEEN: dict[str, tuple[str, str, float]] = {}
+
+
+def restart_dedup_cooldown_sec(cooldown_sec: float | None = None) -> float:
+    """去重冷却窗秒数：显式传参 > env `NN_RESTART_DEDUP_COOLDOWN_S` > 缺省常量。"""
+    if cooldown_sec is not None:
+        return max(0.0, float(cooldown_sec))
+    raw = os.environ.get("NN_RESTART_DEDUP_COOLDOWN_S", "")
+    if raw.strip():
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            return RESTART_DEDUP_COOLDOWN_SEC
+    return RESTART_DEDUP_COOLDOWN_SEC
 
 
 def reset_restart_state() -> None:
     """测试专用：清空跨代去重状态（模块级状态，测试间必须隔离）。"""
     _RESTART_SEEN.clear()
+
+
+def seed_restart_state(entries: list) -> int:
+    """把调用方持久化的跨代去重 memo 灌回 `_RESTART_SEEN`。返回灌入条数。
+
+    一次性进程（CLI）专用：本模块的去重状态只活在进程内，调用方（TS 工具）把上次
+    成功下发的 (nid, agent codeHash, 期望 hash) 存盘，下次调用前预置回来 ⇒ 守卫
+    的 `dedup` 分支语义与常驻训练循环**逐字一致**，不必在调用方重写判据。
+    每项须含 id / pingHash / expectedHash（全量 hex，不接受截断值）；可选 `atSec`
+    （= 该次下发的 epoch 秒，调用方 memo 里就有这个时间）——冷却窗靠它判定「是否已过期」，
+    **缺省 = 现在**（保持旧调用方的永久 dedup 语义不变，F3 向后兼容）。
+    """
+    n = 0
+    now = time.time()
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        nid = str(e.get("id") or "").strip()
+        ping_hash = str(e.get("pingHash") or "").strip()
+        exp_hash = str(e.get("expectedHash") or "").strip()
+        if not nid or not ping_hash or not exp_hash:
+            continue
+        at = e.get("atSec")
+        ts = float(at) if isinstance(at, (int, float)) and not isinstance(at, bool) else now
+        _RESTART_SEEN[nid] = (ping_hash, exp_hash, ts)
+        n += 1
+    return n
 
 
 def _parse_porcelain(text: str) -> list[str]:
@@ -462,13 +702,16 @@ def request_upgrade_guarded(
     timeout: float = 20.0,
     dirty: list[str] | None = None,
     expected_hash: str = "",
+    cooldown_sec: float | None = None,
 ) -> tuple[bool, str]:
     """带护栏的重启请求（ping 门 / rescan / upgrade_stale_nodes 共用入口）。
 
     返回 (ok, reason)：
-      restart-requested  — 已下发，节点将 pull + 重启（本轮生效）
-      dedup              — 同节点同 (agent codeHash, 期望 hash) 已重启过，跳过
-                           （防连环杀；期望 hash 变化 ⇒ 允许再发一次，F1）
+      restart-requested  — 已下发，节点将 pull + 重启（本轮生效；含**冷却窗过期后的重发**）
+      dedup              — 同节点同 (agent codeHash, 期望 hash) 且**仍在冷却窗内**，跳过
+                           （防连环杀；期望 hash 变化 ⇒ 立即允许再发一次，F1；
+                            冷却窗过期 ⇒ 也允许再发一次，F3——否则 pull 失败/不支持远端
+                            升级的节点会被永久压制，见 RESTART_DEDUP_COOLDOWN_SEC）
       dirty-tree:<n>     — 期望 hash 含 n 个未提交文件，远端 pull 永不收敛，拒发
       restart-failed     — agent 拒绝（409 grace / 5xx）或不可达；不写去重状态
                            （协调器下轮 rescan 自动重试）
@@ -483,12 +726,20 @@ def request_upgrade_guarded(
     if not is_self_node(url, nid) and dirty:
         return False, f"dirty-tree:{len(dirty)}"
     key = (ping_hash, expected_hash)
-    if _RESTART_SEEN.get(nid) == key:
+    prev = _RESTART_SEEN.get(nid)
+    # 冷却窗内 ⇒ dedup（防连环杀）；窗**已过**而节点仍 stale（pull 失败 / 环境不支持远端
+    # 升级）⇒ 允许再发一次，并把时钟重置（下一窗内继续 dedup）。F3：旧行为是永久 dedup，
+    # 这类节点会静默卡死到训练机出新提交为止（TS 工具的落盘 memo 还会跨调用压制）。
+    if (
+        prev is not None
+        and prev[:2] == key
+        and time.time() - prev[2] < restart_dedup_cooldown_sec(cooldown_sec)
+    ):
         return False, "dedup"
     actual_branch = "" if is_self_node(url, nid) else branch
     ok = request_upgrade(url, auth_key, actual_branch, timeout=timeout)
     if ok:
-        _RESTART_SEEN[nid] = key
+        _RESTART_SEEN[nid] = (ping_hash, expected_hash, time.time())
     return ok, ("restart-requested" if ok else "restart-failed")
 
 
@@ -500,6 +751,7 @@ def upgrade_stale_nodes(
     restart_timeout: float = 20.0,
     max_nodes: int = 16,
     dirty: list[str] | None = None,
+    cooldown_sec: float | None = None,
 ) -> list[dict]:
     """主动升级扫描：ping 每个 enabled 节点，codeHash ≠ expected（stale）→
     request_upgrade_guarded（跨代去重 + 脏工作区拒发，2026-09-01 重启循环修复）。
@@ -529,9 +781,18 @@ def upgrade_stale_nodes(
             timeout=restart_timeout,
             dirty=dirty,
             expected_hash=expected_hash,
+            cooldown_sec=cooldown_sec,
         )
+        # pingHash 回传给调用方：一次性 CLI 要靠它把本次下发写进跨调用 memo
+        #（键 = (nid, agent ping hash, 期望 hash)，与 _RESTART_SEEN 同构）。
         out.append(
-            {"id": nid, "upgraded": ok, "reason": reason, "agentVersion": ping.get("agentVersion")}
+            {
+                "id": nid,
+                "upgraded": ok,
+                "reason": reason,
+                "pingHash": ping_hash,
+                "agentVersion": ping.get("agentVersion"),
+            }
         )
     return out
 
@@ -592,6 +853,82 @@ def post_weights_cached(
     return post_weights(url, auth_key, iter_id, sha, weights_bytes, timeout=timeout, kind=kind)
 
 
+def probe_weights_cached(
+    url: str,
+    auth_key: str,
+    sha: str,
+    kind: str = "rollout",
+    timeout: float = 3.0,
+) -> bool | None:
+    """GET /v1/weights/cached → True/False；探针不可用（旧 agent / 网络失败）→ None。
+
+    语义：节点该 kind 桶内是否已持有此 sha。None 时调用方必须走完整 POST。
+    """
+    if not sha:
+        return None
+    try:
+        status, body = _request(
+            url.rstrip("/") + "/v1/weights/cached",
+            auth_key,
+            timeout,
+            headers={"X-Weights-Sha256": sha, "X-Kind": kind},
+            method="GET",
+        )
+    except Exception:
+        return None
+    if status != 200:
+        return None
+    try:
+        info = json.loads(body.decode("utf-8")) if body else {}
+    except ValueError:
+        return None
+    if not isinstance(info, dict) or "cached" not in info:
+        return None
+    return bool(info.get("cached"))
+
+
+# 进程内「已成功下发过该 wver」缓存（volume 同 it 补波复用；跨 it 换 wver 天然失效）。
+# 值 = 成功 POST 过的 node id（键 = (kind, wver)，见下）。失效：ping/codeHash/bun 门 exclude
+# 时调用 forget_weights_node。局限：同 codeHash 手动重启可能残留脏缓存（同 it 窗口内罕见）。
+# 键 = (kind, wver)。**必须带 kind**：节点侧按 kind 分桶缓存权重，而同一个权重文件
+# （同一 sha）会被多条腿使用——训练 rollout 用 'rollout'，其干净评估用 'eval'
+# （2026-09-19 B6）。不带 kind 时先跑的那条腿的 note 会让另一条腿误判「已下发」
+# 而跳过 POST ⇒ 该节点对另一条腿整轮 409（脏缓存，与 A1 同类陷阱、方向相反）。
+_WEIGHTS_PUSHED: dict[tuple[str, str], set[str]] = {}
+
+
+def weights_push_cache_reset() -> None:
+    """测试/运维：清空进程内权重下发缓存。"""
+    _WEIGHTS_PUSHED.clear()
+
+
+def note_weights_pushed(wver: str, node_id: str, kind: str = "rollout") -> None:
+    if wver and node_id:
+        _WEIGHTS_PUSHED.setdefault((kind, wver), set()).add(node_id)
+
+
+def forget_weights_node(node_id: str, kind: str | None = None) -> int:
+    """把某节点从「已下发」账本摘掉 → 返回摘掉的条数（0 = 本来就没有）。
+
+    kind=None（缺省）= 该节点**所有** kind 都摘（节点重启 ⇒ 它的桶全空了）；
+    给 kind 时只摘那一条腿（避免同进程其它腿被无谓重握手；它们各自有 409 自愈兜底）。
+    """
+    if not node_id:
+        return 0
+    n = 0
+    for key, s in _WEIGHTS_PUSHED.items():
+        if kind is not None and key[0] != kind:
+            continue
+        if node_id in s:
+            s.discard(node_id)
+            n += 1
+    return n
+
+
+def weights_already_pushed(wver: str, node_id: str, kind: str = "rollout") -> bool:
+    return bool(node_id) and node_id in _WEIGHTS_PUSHED.get((kind, wver), ())
+
+
 def post_weights(
     url: str,
     auth_key: str,
@@ -611,7 +948,14 @@ def post_weights(
     落「旧单课程桶」。agent 侧按 **(course, kind)** 分桶——课程之间不再互相驱逐
     （5 门课共用一个 `rollout` 桶时，64 桶被分摊，历史深度掉到 ~13 轮，慢节点回来
     取旧权重就是 409）。
+
+    kept 短路径（2026-09-19，x20-rebirth it19 rollout 208s 复盘）：先探针
+    GET /v1/weights/cached；sha 已在桶内 → 不传 body 直接 'kept'（补波/同 it
+    多波的权重握手主成本）。探针 404/失败（旧 agent）→ 完整 POST，语义不变。
     """
+    cached = probe_weights_cached(url, auth_key, sha, kind=kind, timeout=min(5.0, timeout))
+    if cached is True:
+        return "kept"
     course_name = course_name_of() if course is None else course
     headers = {
         "Content-Encoding": "gzip",
@@ -636,6 +980,160 @@ def post_weights(
     except ValueError:
         info = {}
     return str(info.get("cache", "kept"))
+
+
+def refresh_weights(
+    node: dict,
+    *,
+    iter_id: str,
+    wver: str,
+    weights_bytes: bytes,
+    timeout: float = 120.0,
+    kind: str = "rollout",
+    err: str = "",
+    log=None,
+) -> bool:
+    """409「wver not cached here」的自愈路径：清 reuse 缓存 + 就地重发该权重。
+
+    节点侧那份权重会**在客户端不知情的情况下消失**：per-kind 桶只保留 KEEP 份、
+    所有客户端共享同一桶（别的训练作业 / 本机 eval 上传 / agent 重启都能挤掉），
+    而进程内 `_WEIGHTS_PUSHED` 仍以为在（它只在 ping 失败/codeHash 不符时失效）
+    ⇒ 任务持续 409 直到把节点**当故障熔断**（2026-09-19 x20-rebirth 09:48 a97：
+    5 条 409 → circuit-broken，7 槽位整轮闲置，同一 wver 44s 前刚收过）。
+
+    409 是**可刷新条件**而非节点故障：重发一次即可继续用同一节点。
+    返回 True = 重发成功 ⇒ 调用方**不得**记节点失败 streak。
+    """
+    nid = str(node.get("id") or node.get("url") or "?")
+    forget_weights_node(nid)  # 清脏缓存：下一次波次必须重新握手
+    try:
+        mode = post_weights(
+            node["url"],
+            str(node.get("key") if node.get("key") is not None else node.get("authKey", "")),
+            iter_id,
+            wver,
+            weights_bytes,
+            timeout=timeout,
+            kind=kind,
+        )
+    except DistError as e:
+        if log is not None:
+            log(
+                f"[dist] node {nid}: wver not cached（409: {err[:60]}）就地重发失败"
+                f"（{e}）—— 仍未持有权重，本任务回队"
+            )
+        return False
+    note_weights_pushed(wver, nid, kind=kind)
+    if log is not None:
+        log(
+            f"[dist] node {nid}: wver not cached（409）—— 已就地重发权重（{mode}）"
+            f"并清 reuse 缓存（可刷新条件，不记节点故障）"
+        )
+    return True
+
+
+def post_weights_parallel(
+    nodes: list,
+    iter_id: str,
+    wver: str,
+    weights_bytes: bytes,
+    timeout: float,
+    kind: str = "rollout",
+    log=None,
+    on_alive=None,
+) -> list:
+    """并行 POST 权重到全部节点 → alive 节点列表（保持入参顺序）。
+
+    失败节点记日志后排除（与串行版语义一致）。**边分发边开采**（2026-09-19）：
+    `on_alive(nd)` 在**该节点 POST 成功的瞬间**于 worker 线程回调（须线程安全），
+    调用方可立刻孵化该节点采样线程，无需等其它节点。返回值仍按入参顺序。
+    日志在每节点完成时输出。pure_collect 锚点由调用方定义（用户 2026-09-19：
+    权重开始分发 → 样本齐可交 PPO）。
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    if not nodes:
+        return []
+
+    def _key_of(nd) -> str:
+        return str(nd.get("key") if nd.get("key") is not None else nd.get("authKey", ""))
+
+    def _push(nd):
+        nid = str(nd.get("id") or nd.get("url") or "?")
+        try:
+            mode = post_weights(
+                nd["url"],
+                _key_of(nd),
+                iter_id,
+                wver,
+                weights_bytes,
+                timeout=timeout,
+                kind=kind,
+            )
+            return nid, nd, mode, None
+        except DistError as e:
+            return nid, nd, None, e
+
+    n = len(nodes)
+    ok_ids: set[str] = set()
+    t0 = time.monotonic()
+    with ThreadPoolExecutor(max_workers=min(8, n)) as ex:
+        futs = {ex.submit(_push, nd): nd for nd in nodes}
+        t_sub: dict[int, float] = {id(f): time.monotonic() for f in futs}
+        for fut in as_completed(futs):
+            nid, nd, mode, err = fut.result()
+            # 事件：**该节点权重就绪时刻**（用户 2026-09-19：排查「等十几秒 CPU 才满」
+            # 与评测中途的掉档——没有这条就看不出权重阶段占了多久）。
+            dt = time.monotonic() - t_sub[id(fut)]
+            if err is not None:
+                if log is not None:
+                    log(f"[dist] weights POST to {nid} failed ({err}, {dt:.2f}s) — excluded")
+                continue
+            note_weights_pushed(wver, nid, kind=kind)
+            if log is not None:
+                log(f"[dist] weights[{kind}] -> {nid} ({mode}, {dt:.2f}s)")
+            if on_alive is not None:
+                on_alive(nd)
+            ok_ids.add(nid)
+    if log is not None:
+        # 事件：**权重传输完毕**（阶段墙钟）——分发起点就是它。
+        log(
+            f"[dist] weights[{kind}] ready on {len(ok_ids)}/{n} nodes "
+            f"in {time.monotonic() - t0:.2f}s (sha {wver[:12]}…)"
+        )
+    return [nd for nd in nodes if str(nd.get("id") or nd.get("url") or "?") in ok_ids]
+
+
+def rollout_collect_sec(t_dist_start: float | None, last_settle: float | None) -> float | None:
+    """rollout 采集耗时（用户口径 2026-09-19）。
+
+    起点 = **权重就绪开始分发**；终点 = **所有样本采集完毕可交 PPO**（末局结算）。
+    边分发边开采下该值**包含**与采集重叠的分发墙钟——这正是用户要的端到端口径。
+    """
+    if t_dist_start is None or last_settle is None:
+        return None
+    return round(last_settle - t_dist_start, 1)
+
+
+def partition_weights_nodes(
+    nodes: list, wver: str, kind: str = "rollout"
+) -> tuple[list, list]:
+    """按进程内缓存把节点拆成 (reuse, need)：reuse 跳过 POST，need 要下发。
+
+    volume 同 it 补波：权重不变，首波已成功的节点进 reuse。kind 决定取哪条腿的账（缺省 'rollout'）；ping/codeHash 门
+    exclude 的节点须先 forget_weights_node，否则可能带着脏缓存进 reuse。
+    """
+    reuse = [
+        nd
+        for nd in nodes
+        if weights_already_pushed(wver, str(nd.get("id") or nd.get("url") or "?"), kind=kind)
+    ]
+    need = [
+        nd
+        for nd in nodes
+        if not weights_already_pushed(wver, str(nd.get("id") or nd.get("url") or "?"), kind=kind)
+    ]
+    return reuse, need
 
 
 def unpack_container(raw: bytes) -> tuple[dict, dict]:
@@ -795,12 +1293,21 @@ def fetch_task(
             return unpack_container(body)
         raise DistError(status, body[:300].decode("utf-8", "replace"))
     except urllib.error.HTTPError as e:
-        raise DistError(e.code, e.read()[:300].decode("utf-8", "replace")) from e
+        raise DistError(
+            e.code,
+            e.read()[:300].decode("utf-8", "replace"),
+            transient=e.code in TRANSIENT_HTTP_STATUS,
+        ) from e
     except DistError:
         raise
+    except OSError as e:
+        # 传输层瞬断：连接被重置（WinError 10054）/超时/对端关闭 —— 节点可能只是满负荷。
+        # 标记 transient 由调用方背压重排，不当节点故障（2026-09-19：满负荷集群下
+        # 一瞬 10 次 10054 曾把 6 个节点全部熔断，评估份额静默全落本地）。
+        raise DistError(0, f"task fetch failed: {e}", transient=True) from e
     except Exception as e:
-        # 提交期网络错误 + 轮询期逃逸的非 DistError（deadline 时的 socket 超时、
-        # 损坏容器解包错）统一包装；真实原因保留在 message 里。
+        # 其余非 DistError（损坏容器解包错等确定性错误）不标 transient：重试没有意义，
+        # 真实原因保留在 message 里。
         raise DistError(0, f"task fetch failed: {e}") from e
 
 
@@ -859,7 +1366,9 @@ def _poll_result(
                     msg = detail
                 raise DistError(500, str(msg)) from e
             if e.code == 404:
-                raise DistError(404, f"task lost on node (restart/purge): {detail}") from e
+                # 文案前缀 = TASK_LOST_MARKER（单一来源）：客户端据此判定「重启/清场丢包」，
+                # 与「裸 404 = 路径写错」区分开。
+                raise DistError(404, f"{TASK_LOST_MARKER} (restart/purge): {detail}") from e
             raise DistError(e.code, detail) from e
         except Exception:
             # 瞬断（休眠/SSH 重连/隧道抖动）：结果仍在节点缓存里，睡一下继续拉。

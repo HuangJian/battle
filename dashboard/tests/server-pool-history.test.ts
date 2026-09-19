@@ -9,7 +9,14 @@
  */
 
 import { describe, expect, it } from 'bun:test'
-import { emptyHistory, isSlowNode, isSlowNodeRows, parseTsMs } from '../src/server/pool-history'
+import {
+  emptyHistory,
+  isSlowNode,
+  isSlowNodeRows,
+  parseTsMs,
+  pushWindowSample,
+  windowMeanSec,
+} from '../src/server/pool-history'
 
 // ────────────────────────── 节点 pill 行（慢节点/停用/启停 toggle，2026-09-11 用户指令） ──────────────────────────
 describe('pool-history.isSlowNode（慢节点判定：1.5s ping 误报「离线」的根治）', () => {
@@ -79,5 +86,66 @@ describe('pool-history.isSlowNode（慢节点判定：1.5s ping 误报「离线�
     expect(parseTsMs('2026-09-11 11:52:21')).toBe(Date.parse('2026-09-11T11:52:21'))
     expect(parseTsMs(undefined)).toBeNull()
     expect(parseTsMs('garbage')).toBeNull()
+  })
+})
+
+// ────────────────────────── 机侧墙钟 / 滑动窗口（wallSec 双口径） ──────────────────────────
+describe('pool-history wallSec 双口径（elapsedSec 节点服务时长 · wallSec 训练机墙钟）', () => {
+  it('emptyHistory 默认带 wallRecent / avgWallSec，且与 elapsed 互相独立', () => {
+    const h = emptyHistory()
+    expect(h.elapsedRecent).toEqual([])
+    expect(h.avgElapsedSec).toBeNull()
+    expect(h.wallRecent).toEqual([])
+    expect(h.avgWallSec).toBeNull()
+  })
+
+  it('pushWindowSample：只收正有限数值；窗口满挤掉最旧；拒绝 0/负/NaN/非 number', () => {
+    const arr: number[] = []
+    pushWindowSample(arr, 2.0)
+    pushWindowSample(arr, 0)
+    pushWindowSample(arr, -1)
+    pushWindowSample(arr, Number.NaN)
+    pushWindowSample(arr, '3')
+    pushWindowSample(arr, null)
+    pushWindowSample(arr, 4.5)
+    expect(arr).toEqual([2.0, 4.5])
+    const win: number[] = []
+    for (let i = 1; i <= 52; i++) pushWindowSample(win, i, 50)
+    expect(win.length).toBe(50)
+    expect(win[0]).toBe(3) // 1、2 被挤掉
+    expect(win[49]).toBe(52)
+  })
+
+  it('windowMeanSec：空=null；有样本保留 1 位小数（独立重实现对拍）', () => {
+    expect(windowMeanSec([])).toBeNull()
+    const samples = [1.25, 2.0, 4.75]
+    const expectMean = +(samples.reduce((a, b) => a + b, 0) / samples.length).toFixed(1)
+    expect(windowMeanSec(samples)).toBe(expectMean)
+    expect(windowMeanSec(samples)).toBe(2.7) // (1.25+2+4.75)/3 = 2.666… → 2.7
+  })
+
+  it('双口径互不覆盖：同一 NodeHistory 可同时持有服务时长与墙钟样本', () => {
+    const h = emptyHistory()
+    for (const [svc, wall] of [
+      [2.0, 5.0],
+      [2.2, 5.8],
+    ] as const) {
+      pushWindowSample(h.elapsedRecent, svc)
+      pushWindowSample(h.wallRecent, wall)
+    }
+    h.avgElapsedSec = windowMeanSec(h.elapsedRecent)
+    h.avgWallSec = windowMeanSec(h.wallRecent)
+    expect(h.avgElapsedSec).toBe(2.1)
+    expect(h.avgWallSec).toBe(5.4)
+  })
+
+  it('展示层：undefined/null 墙钟不得渲染成 undefineds（旧 API 缺键防御）', () => {
+    // 复现 NodeStats.secCell 语义：仅正有限数渲染 Ns
+    const secCell = (v: number | null | undefined): string =>
+      typeof v === 'number' && Number.isFinite(v) ? `${v}s` : '-'
+    expect(secCell(undefined)).toBe('-')
+    expect(secCell(null)).toBe('-')
+    expect(secCell(Number.NaN)).toBe('-')
+    expect(secCell(5.4)).toBe('5.4s')
   })
 })

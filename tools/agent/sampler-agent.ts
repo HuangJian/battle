@@ -4,6 +4,9 @@
  * 协议（plan/distributed-rollout.md v3.6）：
  *   POST /v1/weights  每轮一次；x-weights-sha256 与缓存不同 → 原子切换并清空结果缓存，
  *                     相同 → 幂等不动（relaunch 续跑不误清本批数据）。
+ *   GET  /v1/weights/cached  探针（2026-09-19）：头 X-Weights-Sha256 + X-Kind →
+ *                     {cached:bool}。trainer 命中则跳过 POST body（kept 短路径）。
+ *                     旧 trainer 不调此路径；旧 agent 无此路径时 trainer 回退完整 POST。
  *   GET  /v1/task     ?iterId&wver&stage&seed&maxTicks&difficulty
  *                     — 同步模式（缺省，v3.5- 兼容）：跑完一局流式回包（20s 心跳防空闲回收）；
  *                     — 异步模式（x-async:1，v3.6）：202+token 立即返回、后台执行，
@@ -37,8 +40,9 @@ import {
 } from '../sim/pack-container'
 // rollout 子进程运行时选择（node/V8 推理更快；§353）
 import { createRolloutRunner, type LaunchPlan, type RolloutRunner } from './rollout-runner'
-// 工作目录磁盘收敛纯函数（boot 孤儿清理 + 权重文件保留；修正则 2026-09-08，§374）
+// 权重桶纯逻辑（多课程：(course, kind) 键 / 按 sha 精确查找；单测共享，见 weight-buckets.ts）
 import { bucketKey, findSha, latestOfKind } from './weight-buckets'
+// 工作目录磁盘收敛纯函数（boot 孤儿清理 + 权重文件保留；修正则 2026-09-08，§374）
 import { staleOrphanPlan, sweepWeightFilePlan } from './workdir-cleanup'
 // codeHash 文件集展开（F3/F4 抽出，plan/dist-codehash-stale-fix.md）：纯实现 + 诊断
 // 工具与单测共用；本文件重新导出以保持对外 API 稳定（console api.ts / dist-agent.test.ts）。
@@ -244,17 +248,42 @@ function serveWithRetry(
 // 实现已迁至 ./codehash-files（纯模块，无本文件模块加载副作用）；此处仅 re-export。
 
 /**
- * memo 化 codeHash：启动/首次调用算一次缓存，仅在 /v1/update 的 git pull 真正切换
- * 代码后置空重算（见 update 分支）。否则每次 /v1/ping /v1/status 都会对 src/nn/**
- * 全量 statSync + readFileSync + sha256——在 proot/eMMC 弱机上把响应拖到秒级。
+ * memo 化 codeHash：启动/首次调用算一次缓存，**生命周期 = 本进程**（永不因 git pull 失效）。
+ * 否则每次 /v1/ping /v1/status 都会对 src/nn/** 全量 statSync + readFileSync + sha256——
+ * 在 proot/eMMC 弱机上把响应拖到秒级。
+ *
+ * F2（2026-09-19 审计）：POST /v1/update 只 pull、**不重启**，进程里跑的仍是启动时那份
+ * 代码 ⇒ 这个 memo 必须继续报「运行中代码」的 hash。旧实现在 pull 成功后把它置空重算 ⇒ 节点会
+ * 「报新代码、跑旧代码」，codeHash 门（dist_common.check_code_hash）随即放行它——正是该门
+ * 要拦的东西的反向漏网。要换 hash，只有重启（/v1/restart，可带 pullBranch）。
  */
-function memoizedCodeHash(): string {
+export function memoizedCodeHash(): string {
   const memo: { value: string | null } = codeHashMemo
   if (memo.value === null) memo.value = computeCodeHash()
   return memo.value
 }
 
-/** 模块级 memo 单元（惰性）：null=未算/已失效，非 null=缓存值，仅在 git pull 切换后置空。 */
+/**
+ * F2：一次 git pull 的结果落到进程状态 —— **只记日志，绝不动 codeHash/gitShort memo**。
+ *
+ * 抽成导出函数的唯一目的：让单测能钉住「/v1/update 不得使已算出的 codeHash 失效」这条
+ * 不变量（HTTP 分支只调它，不再自己改 memo）。返回是否发生了代码变更（日志用）。
+ */
+export function applyPullResult(r: {
+  changed: boolean
+  branch: string
+  oldSha: string
+  newSha: string
+}): boolean {
+  if (!r.changed) return false
+  console.log(
+    `[sampler-agent] pulled ${r.branch} ${r.oldSha.slice(0, 8)} -> ${r.newSha.slice(0, 8)}` +
+      ` — 仍在跑启动时那份代码（codeHash 不变）；重启后生效`,
+  )
+  return true
+}
+
+/** 模块级 memo 单元（惰性）：null=未算，非 null=缓存值；进程内一经算出就不再失效（F2）。 */
 const codeHashMemo: { value: string | null } = { value: null }
 
 function gitShortHash(): string {
@@ -271,8 +300,8 @@ function gitShortHash(): string {
 }
 
 /**
- * memo 化 gitShortHash：进程启动/首次调用算一次缓存，仅在 /v1/update 的 git pull 切换
- * 代码后置空重算（与 codeHash 同策略）。否则每次 /v1/ping /v1/status 都 spawn 一次
+ * memo 化 gitShortHash：进程启动/首次调用算一次缓存，**与 codeHash 同生命周期**（F2：
+ * pull 不改变本进程在跑的代码，故不失效）。否则每次 /v1/ping /v1/status 都 spawn 一次
  * git 子进程——在 proot/ptrace 环境每次 fork+exec+读 .git 被拖到几十秒，是弱机上的
  * 隐藏瓶颈。
  */
@@ -281,7 +310,7 @@ function cachedGitShortHash(): string {
   return gitShortMemo.value
 }
 
-/** 模块级 memo 单元：null=未算/已失效，非 null=缓存值，仅在 git pull 切换后置空。 */
+/** 模块级 memo 单元：null=未算，非 null=缓存值；进程内一经算出就不再失效（F2）。 */
 const gitShortMemo: { value: string | null } = { value: null }
 
 // ---------------- engine_epoch 已**不再**是节点门字段（2026-09-17） ----------------
@@ -453,13 +482,177 @@ const WEIGHT_BUCKETS_PER_KIND = 64
 // 预检——调用方先问「你有这个 sha 吗」，命中就不再上传体（~0.5MB/轮/节点）。
 const weightsByBucket: Map<string, Map<string, WeightsState>> = new Map()
 
-/** 按 sha 取权重（本课桶 → 旧单课程桶 → 任意同 kind 桶；sha 内容寻址，见 weight-buckets）。 */
-function weightsOf(kind: string, wver: string, course = ''): WeightsState | null {
-  return findSha(weightsByBucket, course, kind, wver)
+/** 权重文件基名（**单一来源**：POST 落盘、磁盘回查、retention 清理必须同名）。 */
+export function weightFileBase(kind: string, sha: string): string {
+  return `weights-${kind}-${sha.slice(0, 16)}.json`
 }
 
-function latestWeightsOfKind(kind: string): WeightsState | null {
-  return latestOfKind(weightsByBucket, kind)
+/** kind 合法性（kind 直接进文件名 ⇒ 防路径穿越）。 */
+export function kindOk(kind: string): boolean {
+  return /^[a-z][a-z0-9_-]{0,31}$/.test(kind)
+}
+
+/** 键合法性（kind 进文件名 + sha 必须是全量 64 hex）。 */
+export function weightsKeyOk(kind: string, sha: string): boolean {
+  return kindOk(kind) && /^[0-9a-f]{64}$/.test(sha)
+}
+
+/**
+ * 磁盘回查（2026-09-19，用户指令「让节点侧的权重查找在内存桶未命中时回查磁盘」）。
+ *
+ * 为什么必须有：`/v1/task` 只查内存桶（`weightsOf`）。agent 一重启内存桶就空了，而权重
+ * 文件仍在 `WORK_DIR`（boot 收敛只按 kind 留最新 KEEP 份）⇒ 节点对**盘上就有的**权重答
+ * 409「wver not cached here」，客户端只能靠 409 自愈重发兜（每节点每次重启白传一份）。
+ * 文件名里的 sha 前缀只有 16 hex、**不足以判定内容**，故此处按字节重算 sha256 全量比对
+ * ——不符即视为未命中（坏/被截断的文件留给 sweep 收拾）。
+ *
+ * `dir` 仅为单测注入隔离目录；生产调用走缺省 `WORK_DIR`。
+ */
+export function readWeightsFile(
+  kind: string,
+  sha: string,
+  dir: string = WORK_DIR,
+): WeightsState | null {
+  if (!weightsKeyOk(kind, sha)) return null
+  const file = path.join(dir, weightFileBase(kind, sha))
+  try {
+    const bytes = fs.readFileSync(file)
+    if (createHash('sha256').update(bytes).digest('hex') !== sha) return null
+    // iterId 只在 POST 时记账（无消费方）——回查来的权重没有它，置空。
+    return { sha, iterId: '', file }
+  } catch {
+    return null
+  }
+}
+
+/** 桶满驱逐最旧（POST 落盘与磁盘回查共用）。文件尽力删（忙时留给 retention 扫）。 */
+function evictWeightBucket(bucket: Map<string, WeightsState>): void {
+  while (bucket.size > WEIGHT_BUCKETS_PER_KIND) {
+    const oldestSha = bucket.keys().next().value as string
+    const oldest = bucket.get(oldestSha)
+    bucket.delete(oldestSha)
+    if (oldest) {
+      try {
+        fs.rmSync(oldest.file, { force: true })
+      } catch {
+        /* in-flight game holds the handle — best effort */
+      }
+    }
+  }
+}
+
+/**
+ * 权重查找（内存桶 → 磁盘回查）；`course` = 本局属于哪门课（空串 = 旧单课程桶）。
+ *
+ * 内存三跳（本课桶 → 旧单课程桶 → 任意同 kind 桶）见 `weight-buckets.findSha`——sha 内容
+ * 寻址，命中哪个桶都是同一份字节。未命中再回查磁盘（2026-09-19：agent 一重启内存桶就空，
+ * 而文件仍在 WORK_DIR ⇒ 旧实现会把**盘上就有的**权重答 409，客户端白传一份）。
+ * `dir` 仅供单测注入隔离目录（生产走缺省 WORK_DIR）。
+ */
+export function weightsOf(
+  kind: string,
+  wver: string,
+  course = '',
+  dir: string = WORK_DIR,
+): WeightsState | null {
+  const hit = findSha(weightsByBucket, course, kind, wver)
+  if (hit) return hit
+  // 未命中 → 回查磁盘（重启后内存桶为空、文件还在）；命中即回填桶，后续任务零额外开销。
+  const fromDisk = readWeightsFile(kind, wver, dir)
+  if (!fromDisk) return null
+  const bkey = bucketKey(course, kind)
+  let target = weightsByBucket.get(bkey)
+  if (!target) {
+    target = new Map()
+    weightsByBucket.set(bkey, target)
+  }
+  target.set(wver, fromDisk)
+  evictWeightBucket(target)
+  console.log(
+    `[sampler-agent] weights[course=${course || '-'} kind=${kind}] rehydrated ` +
+      `${wver.slice(0, 12)}… from disk (in-memory bucket was empty — agent restarted)`,
+  )
+  return fromDisk
+}
+
+/** 探针纯函数（单测共用）：该 kind 桶是否已持有 sha。 */
+export function weightsCachedInBucket(
+  bucket: Map<string, unknown> | undefined,
+  sha: string,
+): boolean {
+  return Boolean(sha) && (bucket?.has(sha) ?? false)
+}
+
+/**
+ * 磁盘上的「最新一份」该 kind 权重（2026-09-19，覆盖 intent/goal 评估的另一类重启 409）。
+ *
+ * 语义对齐内存桶：POST 顺序 = 「最后一个 set 的为最新」；重启后内存桶空了，只能按文件 mtime 取最新
+ *（POST 会写文件 ⇒ 顺序基本一致；命中 kept 不重写时 mtime 可能偏旧，属可接受近似）。文件名只有 16 hex
+ * 前缀 ⇒ 逐候选**按字节重算 sha256**，并要求 sha 前 16 hex 与文件名一致（改名/损坏的文件跳过，留给 sweep）。
+ */
+function latestWeightsOnDisk(kind: string, dir: string): WeightsState | null {
+  if (!kindOk(kind)) return null
+  let names: string[]
+  try {
+    names = fs.readdirSync(dir)
+  } catch {
+    return null
+  }
+  const re = new RegExp(`^weights-${kind}-([0-9a-f]{16})\\.json$`)
+  const cands: { file: string; prefix: string; mtimeMs: number }[] = []
+  for (const n of names) {
+    const m = re.exec(n)
+    if (!m) continue
+    const file = path.join(dir, n)
+    try {
+      cands.push({ file, prefix: m[1], mtimeMs: fs.statSync(file).mtimeMs })
+    } catch {
+      /* 并发删除 — 跳过该候选 */
+    }
+  }
+  if (cands.length > 1) cands.sort((a, b) => b.mtimeMs - a.mtimeMs) // 空/单元素不 sort
+  for (const c of cands) {
+    try {
+      const sha = createHash('sha256').update(fs.readFileSync(c.file)).digest('hex')
+      if (sha.slice(0, 16) !== c.prefix) continue
+      return { sha, iterId: '', file: c.file }
+    } catch {
+      /* 读不到 — 试下一个候选 */
+    }
+  }
+  return null
+}
+
+/**
+ * 「最新桶」语义（intent/goal 评估用）：内存桶按插入序取最后一个；**桶空则回查磁盘**取 mtime 最新的一份。
+ *
+ * 为什么：`/v1/task` 的 `policy=intent-exec|goal` 前置检查与 runGame 的 `--intent-weights/--goal-weights`
+ * 都走这里——agent 一重启内存桶就空，而 intent/goal 权重文件还在盘上 ⇒ intent-exec / goal 评估整轮 409
+ *「intent weights not cached」（与 per-tick 的 wver 409 同类，只是走「最新桶」而非精确 sha）。
+ *
+ * `dir` 仅供单测注入隔离目录。
+ */
+export function latestWeightsOfKind(kind: string, dir: string = WORK_DIR): WeightsState | null {
+  const latest = latestOfKind(weightsByBucket, kind)
+  if (latest) return latest
+  const fromDisk = latestWeightsOnDisk(kind, dir)
+  if (!fromDisk) return null
+  // 盘上文件名不含课程 ⇒ 回填「旧单课程桶」（findSha 的第三跳按 kind 扫全部桶，仍能命中）
+  const bkey = bucketKey('', kind)
+  let target = weightsByBucket.get(bkey)
+  if (!target) {
+    target = new Map()
+    weightsByBucket.set(bkey, target)
+  }
+  if (!target.has(fromDisk.sha)) {
+    target.set(fromDisk.sha, fromDisk)
+    evictWeightBucket(target)
+  }
+  console.log(
+    `[sampler-agent] weights[${kind}] rehydrated latest ${fromDisk.sha.slice(0, 12)}… from disk` +
+      ' (in-memory bucket was empty — agent restarted)',
+  )
+  return fromDisk
 }
 const AUTH_KEY = loadOrCreateAuthKey()
 fs.mkdirSync(WORK_DIR, { recursive: true })
@@ -715,9 +908,10 @@ async function runGame(
   courseFp = '',
   wins = '1',
   nearMiss = '3',
+  // v5 多课程：本局权重该从哪门课的桶里取（空串 = 旧单课程桶）。
   course = '',
 ): Promise<Buffer> {
-  // 多桶：按 (kind, wver) 精确取——同节点可同时服务多个不同权重的训练流。
+  // 多桶：按 (course, kind, wver) 精确取——同节点可同时服务多个课程/权重的训练流。
   // mode=bc（BC 语料任务，2026-09-13）：God-AI 教师自对弈，无策略权重语义——
   // 跳过权重桶查找（调用方 /v1/task 已保证只有 bcSupport 节点会收到该模式）。
   const isBc = mode === 'bc'
@@ -1028,6 +1222,20 @@ async function handle(req: Request): Promise<Response> {
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
   if (!token || !safeEqual(token, AUTH_KEY)) return jsonResponse({ error: 'unauthorized' }, 401)
 
+  // kept 短路径探针（2026-09-19）：只查内存桶，不读 body。trainer 命中后跳过 POST。
+  if (req.method === 'GET' && url.pathname === '/v1/weights/cached') {
+    const claimedSha = req.headers.get('x-weights-sha256') ?? ''
+    const kind = req.headers.get('x-kind') ?? 'rollout'
+    if (!claimedSha) return jsonResponse({ error: 'missing x-weights-sha256' }, 400)
+    // 磁盘回查（2026-09-19）：agent 重启后内存桶空、文件仍在盘上——探针若答 false，客户端
+    // 就会重传一份盘上已有的权重。weightsOf 命中即顺便回填桶（后续任务零额外开销）。
+    const cached =
+      // 探针头不带 course（旧 trainer 也不带）⇒ weightsOf 的第三跳「任意同 kind 桶」兜底：
+      // sha 内容寻址，命中哪门课的桶都是同一份字节。weightsOf 命中即顺便回填桶。
+      weightsOf(kind, claimedSha) !== null
+    return jsonResponse({ ok: true, cached, kind }, 200)
+  }
+
   if (req.method === 'POST' && url.pathname === '/v1/weights') {
     const declared = req.headers.get('content-length') ?? '0'
     if (parseInt(declared, 10) > 64 * 1024 * 1024)
@@ -1061,22 +1269,11 @@ async function handle(req: Request): Promise<Response> {
     if (bucket.has(actualSha)) return jsonResponse({ ok: true, cache: 'kept', course }, 204)
     // 多桶（v4.1）：新 sha 追加进该 kind 的桶组。结果缓存按 iterId 天然分命名空间
     //（不同训练流互不可见），整池清除会把其它训练流在飞结果顶掉——不再全清。
-    const wfile = path.join(WORK_DIR, `weights-${kind}-${actualSha.slice(0, 16)}.json`)
+    const wfile = path.join(WORK_DIR, weightFileBase(kind, actualSha))
     fs.writeFileSync(wfile, weightsBytes)
     bucket.set(actualSha, { sha: actualSha, iterId, file: wfile })
-    // 该 kind 桶数超限 → 驱逐最旧（文件尽力删，忙时留给 retention 扫）
-    while (bucket.size > WEIGHT_BUCKETS_PER_KIND) {
-      const oldestSha = bucket.keys().next().value as string
-      const oldest = bucket.get(oldestSha)
-      bucket.delete(oldestSha)
-      if (oldest) {
-        try {
-          fs.rmSync(oldest.file, { force: true })
-        } catch {
-          /* in-flight game holds the handle — best effort */
-        }
-      }
-    }
+    // 该 kind 桶数超限 → 驱逐最旧（与磁盘回查共用，见 evictWeightBucket）
+    evictWeightBucket(bucket)
     sweepWorkdir()
     console.log(
       `[sampler-agent] weights[course=${course || '-'} kind=${kind}] ` +
@@ -1116,14 +1313,11 @@ async function handle(req: Request): Promise<Response> {
     updating = true
     try {
       const r = runGitPull(branch)
-      // 代码已变 → codeHash / gitVersion 缓存作废（下轮 /v1/status /v1/ping 重新计算）。
-      if (r.changed) {
-        codeHashMemo.value = null
-        gitShortMemo.value = null
-        console.log(
-          `[sampler-agent] pulled ${r.branch} ${r.oldSha.slice(0, 8)} -> ${r.newSha.slice(0, 8)}`,
-        )
-      }
+      // F2（2026-09-19 审计）：pull **不作废** codeHash/gitShort memo。本进程执行的代码没有
+      // 变，/v1/ping 必须继续报那份代码的 hash——否则刚 pull 的节点会以「新 hash」通过
+      // codeHash 门、静默跑旧代码（旧实现正是如此：门被反向绕过）。盘上新代码只在**重启**
+      // 后生效（POST /v1/restart，可带 pullBranch），故这里只响亮提示。
+      applyPullResult(r)
       return jsonResponse({ ok: true, ...r }, 200)
     } catch (e) {
       return jsonResponse(
@@ -1211,6 +1405,10 @@ async function handle(req: Request): Promise<Response> {
           restartPending = false // 不退出，保持旧实例存活
           return
         }
+        // 长驻 worker 池是靠 stdin EOF 自灭的（export-rl-rollout.ts: stdin `end` → exit），
+        // 但**忙** worker 要跑完当前那局才回到事件循环 ⇒ 重启后它会顶着旧代码继续算一段、
+        // 并把没人消费的 game-* 目录留在盘上。这里显式收池：重启语义 = 旧代码立即退场。
+        killPersistPool()
         setTimeout(() => {
           console.log(`[sampler-agent] restarting (exit)`)
           process.exit(0)
@@ -1329,7 +1527,6 @@ async function handle(req: Request): Promise<Response> {
         nearMissTimes,
         course, // v5 多课程：异步路径同规（取 (course,kind) 桶）
       )
-
       return jsonResponse({ status: 'accepted', token: key }, 202)
     }
 
@@ -1369,6 +1566,7 @@ async function handle(req: Request): Promise<Response> {
           courseFp,
           wins,
           nearMissTimes,
+          course, // v5 多课程：同步流式路径同规（取 (course,kind) 桶）
         )
           .then((buf) => {
             if (hb) clearInterval(hb)

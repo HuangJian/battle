@@ -89,6 +89,14 @@ export interface EvalGameRow {
   puGotFreeze: number
   puGotShield: number
   score: number
+  // Phase 0 逐敌种画像（T5 分敌种信用；索引 = [basic, fast, power, armor]）
+  hitsByKind: number[]
+  killsByKind: number[]
+  exposureByKind: number[]
+  firstHitKind: string | null
+  firstKillKind: string | null
+  killOrder: string[]
+  killerKinds: (string | null)[]
   metrics_version: number
   greedy: true
   // 派发侧元数据（不进一致性断言，§3.4）
@@ -126,7 +134,31 @@ export const GAMEPLAY_FIELDS = [
   'puGotFreeze',
   'puGotShield',
   'score',
+  // Phase 0（2026-09-19 追加）：确定性 gameplay 遥测——同 ckpt+seed+stage 双跑
+  // 必须逐字节一致（§3.4）。旧资产行无这些键，调用方用 PHASE0_FIELDS 明示豁免。
+  'hitsByKind',
+  'killsByKind',
+  'exposureByKind',
+  'firstHitKind',
+  'firstKillKind',
+  'killOrder',
+  'killerKinds',
 ] as const
+
+/**
+ * Phase-0 列集（= GAMEPLAY_FIELDS 尾部七列）：P0 覆盖率硬指标要求 100% 或**明示**
+ * 豁免——本批次之前落盘的 `games/*.jsonl` 行没有这七列，调用方用
+ * `coverageReport(rows, PHASE0_FIELDS)` 表达“旧资产豁免”，别把豁免写死在函数里。
+ */
+export const PHASE0_FIELDS: readonly string[] = [
+  'hitsByKind',
+  'killsByKind',
+  'exposureByKind',
+  'firstHitKind',
+  'firstKillKind',
+  'killOrder',
+  'killerKinds',
+]
 
 // ────────────────────────── §2.2 种子/段 ──────────────────────────
 

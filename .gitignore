@@ -47,6 +47,11 @@ dashboard/data/evalboard/*
 *.log
 *.zip
 
+# Python 字节码缓存（nn-training/.gitignore 有自己的副本；dashboard/ 下也有 .py
+# （kick-once.py 等），其测试 import 它们会生成 __pycache__）
+__pycache__/
+*.pyc
+
 # uv.lock 是 universal 锁文件，必须入库（2026-09-04 决策：uv + uv.lock 真锁）
 !nn-training/uv.lock
 

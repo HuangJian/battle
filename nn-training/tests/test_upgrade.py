@@ -17,6 +17,7 @@ import os
 import shutil
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -278,6 +279,65 @@ def test_request_upgrade_guarded_dedup() -> None:
         check(ok6 and r6 == "restart-requested", f"另一节点首杀不受影响, got {r6}")
         check(len(mock.restart_calls) == 4, "n2 的首杀发出")
     finally:
+        mock.close()
+
+
+def test_request_upgrade_guarded_cooldown() -> None:
+    """F3：去重是**冷却窗**而非永久压制。
+
+    旧行为：同 (agent codeHash, 期望 hash) 一旦下发过就永远 dedup ⇒ pull 失败或不支持
+    远端升级的节点（带着同一个 codeHash 回来）再也收不到升级指令，且 TS 工具的落盘 memo
+    会跨调用继续压制。现在：窗内 dedup（防连环杀），窗过后允许再发一次并重置时钟。
+    """
+    dist_common.reset_restart_state()
+    mock = MockAgent(code_hash="stale-hash-abc")
+    args = ("n1", mock.url(), "K", "goal-nn", "stale-hash-abc")
+    try:
+        ok1, r1 = dist_common.request_upgrade_guarded(
+            *args, dirty=[], expected_hash="E", cooldown_sec=60
+        )
+        check(ok1 and r1 == "restart-requested", f"首次 → restart-requested, got {r1}")
+        ok2, r2 = dist_common.request_upgrade_guarded(
+            *args, dirty=[], expected_hash="E", cooldown_sec=60
+        )
+        check(ok2 is False and r2 == "dedup", f"窗内 → dedup, got {r2}")
+        check(len(mock.restart_calls) == 1, "窗内不再发 POST")
+        # 窗过期（用 cooldown=0 等价于「已过 10 分钟」）⇒ 允许再发一次（自愈路径）。
+        ok3, r3 = dist_common.request_upgrade_guarded(
+            *args, dirty=[], expected_hash="E", cooldown_sec=0
+        )
+        check(ok3 and r3 == "restart-requested", f"窗过期 → 可再发, got {r3}")
+        check(len(mock.restart_calls) == 2, "重发恰好一次")
+        # 重发后时钟重置：窗内再问又回到 dedup（防连环杀没被废掉）。
+        ok4, r4 = dist_common.request_upgrade_guarded(
+            *args, dirty=[], expected_hash="E", cooldown_sec=60
+        )
+        check(ok4 is False and r4 == "dedup", f"重发后窗内 → dedup, got {r4}")
+        check(len(mock.restart_calls) == 2, "重发后时钟重置，窗内不发 POST")
+        # 调用方持久化 memo（TS 落盘那条腿）预置 atSec：一小时前的下发 ⇒ 已过期 ⇒ 可重发。
+        dist_common.reset_restart_state()
+        dist_common.seed_restart_state(
+            [
+                {
+                    "id": "n1",
+                    "pingHash": "stale-hash-abc",
+                    "expectedHash": "E",
+                    "atSec": time.time() - 3600,
+                }
+            ]
+        )
+        ok5, r5 = dist_common.request_upgrade_guarded(*args, dirty=[], expected_hash="E")
+        check(ok5 and r5 == "restart-requested", f"memo 里 1h 前的下发应已过期, got {r5}")
+        check(len(mock.restart_calls) == 3, "过期 memo 后的重发发出")
+        # 旧 memo（无 atSec）视作「刚刚下发」⇒ 保持旧的永久去重语义（向后兼容）。
+        dist_common.reset_restart_state()
+        dist_common.seed_restart_state(
+            [{"id": "n1", "pingHash": "stale-hash-abc", "expectedHash": "E"}]
+        )
+        ok6, r6 = dist_common.request_upgrade_guarded(*args, dirty=[], expected_hash="E")
+        check(ok6 is False and r6 == "dedup", f"旧 memo（无 atSec）→ dedup, got {r6}")
+    finally:
+        dist_common.reset_restart_state()
         mock.close()
 
 
@@ -578,6 +638,7 @@ def main() -> None:
     test_request_upgrade()
     test_upgrade_stale_nodes()
     test_request_upgrade_guarded_dedup()
+    test_request_upgrade_guarded_cooldown()
     test_request_upgrade_guarded_dirty_tree()
     test_upgrade_stale_nodes_dirty_tree()
     test_parse_porcelain()

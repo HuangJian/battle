@@ -153,6 +153,10 @@ BASELINE_EVAL_ITER = 0
 EVAL_TASK_ATTEMPTS = 2  # 单局重试上限；超限放弃并计数（权重切换后未完成局自然作废）
 EVAL_LOCAL_SLOTS_DEFAULT = 4  # 本地直跑槽位默认值（policy.evalLocalSlots 可覆写；0=禁用）
 EVAL_LOCAL_RELEASE_GRACE = 300  # 距窗口截止剩这些秒时强制释放本地预留（本地失效也不空转到超时）
+# 窗口到期仍在飞的局：给它们的落账宽限上界（收工不是立刻砍在飞——那些局有价值，
+# 但旧实现在此 join(window + taskTimeoutSec) 会空等 4–76s/轮，故改为「在飞清空即走 +
+# 本上界兜底」，2026-09-19 审计 B1）。
+EVAL_INFLIGHT_GRACE_SEC = 120
 
 # ---- eval 尾巴的收拢点与本机份额提前放行（2026-09-17 用户指令）-------------------
 # 背景：in-loop eval 已藏在「下一轮 PPO」里（dispatch 排在 _serial_ppo 之前），但两处
@@ -273,6 +277,59 @@ def report_winrate_safe(wr: float | None) -> float | None:
         return round(float(wr), 4)
     except (TypeError, ValueError):
         return None
+
+
+#: eval_log 掉落三列（x5⑧③：eval_dispatch/batch_eval/eval_a_once 此前未接线）。
+#: 取数：manifest 顶层优先 → scorable.telemetry 回落 → None（旧 agent 缺键）。
+#: - puGotOther：export-eval-game 报告顶层已有（metrics v7）。
+#: - powerUpsSpawned / starsCollected：报告顶层未提（改 TS 会动 codehash 哈希集，
+#:   本补齐刻意 Python-only）；已在 scorable.telemetry，新 agent 报告带 scorable。
+EVAL_LOOT_KEYS = ("powerUpsSpawned", "puGotOther", "starsCollected")
+
+
+def eval_loot_fields(manifest: dict | None) -> dict:
+    """从 eval 报告 manifest 抽出三列掉落字段（见 EVAL_LOOT_KEYS 注释）。"""
+    tel: dict = {}
+    if isinstance(manifest, dict):
+        scorable = manifest.get("scorable")
+        if isinstance(scorable, dict):
+            t = scorable.get("telemetry")
+            if isinstance(t, dict):
+                tel = t
+    out: dict = {}
+    for k in EVAL_LOOT_KEYS:
+        v = manifest.get(k) if isinstance(manifest, dict) else None
+        if v is None:
+            v = tel.get(k)
+        out[k] = v
+    return out
+
+
+#: Phase 0 逐敌种画像七列（T5 分敌种信用；报告**顶层**，见 docs/evalboard-phase0-census.md）。
+#: `export-eval-game.ts` 顶层直出（2026-09-19）；旧报告/未同步节点缺键 = None。
+EVAL_CENSUS_KEYS = (
+    "hitsByKind",
+    "killsByKind",
+    "exposureByKind",
+    "firstHitKind",
+    "firstKillKind",
+    "killOrder",
+    "killerKinds",
+)
+
+
+def eval_census_fields(manifest: dict | None) -> dict:
+    """从 eval 报告 manifest 抽出 Phase 0 七列（缺键 = None，不伪造）。
+
+    只认**顶层**：这七列与本模块 `eval_loot_fields` 的三列形态不同——它们不在
+    `scorable.telemetry` 里（那是 basePressure/powerUps 一类标量），所以没有
+    telemetry 回退可走；节点未同步/旧报告就是没有，交付给 ingest 计入覆盖率
+    豁免清单（`PHASE0_FIELDS`）。
+    """
+    out: dict = {}
+    for k in EVAL_CENSUS_KEYS:
+        out[k] = manifest.get(k) if isinstance(manifest, dict) else None
+    return out
 
 
 def run_local_eval_game(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 
 # P2-2（2026-09-02）：_scan_shards 目录签名缓存。run_rl 的轮询热路径每 2 秒调一次
@@ -169,6 +170,54 @@ def trailing_samples_per_game(jsonl_path: Path, window: int = 5, fallback: int =
         "trailing_samples_per_game: 无 iteration 历史且未给 est_samples_per_game 兜底——"
         "动态采集无法反解局数（检查课程 target_transitions/est_samples_per_game 配对）"
     )
+
+
+def trailing_stage_samples_per_game(
+    traj_root: Path,
+    stages: Sequence[int],
+    *,
+    window_iters: int = 3,
+    fallback: int = 1,
+) -> dict[int, int]:
+    """近几轮盘上 shard 的 **分关** 局均 nSamples（连续配额 est_s）。
+
+    扫 `traj_root/it*` 下最近 `window_iters` 个仍有 manifest 的轮目录，
+    对每个 stage 聚合 `ΣnSamples/Σgames`；无数据的关回退 `fallback`（通常=全局 est）。
+    量纲与 `settled_stage_totals` 同：只认 nSamples/totalSamples，不读 ticks。
+    """
+    from collections import defaultdict
+
+    stage_set = {int(s) for s in stages}
+    it_dirs = sorted(
+        (p for p in Path(traj_root).glob("it*") if p.is_dir()),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )[: max(1, int(window_iters))]
+    games: dict[int, int] = defaultdict(int)
+    samples: dict[int, int] = defaultdict(int)
+    for it_dir in it_dirs:
+        for mp in it_dir.glob("**/rl_s*_seed*/manifest.json"):
+            try:
+                mm = json.loads(mp.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            st = mm.get("stage")
+            if st not in stage_set:
+                continue
+            n = mm.get("nSamples")
+            if not isinstance(n, int):
+                n = mm.get("totalSamples")
+            if not isinstance(n, int) or n <= 0:
+                continue
+            games[int(st)] += 1
+            samples[int(st)] += int(n)
+    out: dict[int, int] = {}
+    fb = max(1, int(fallback))
+    for st in stage_set:
+        g = games.get(st, 0)
+        s = samples.get(st, 0)
+        out[st] = max(1, round(s / g)) if g > 0 and s > 0 else fb
+    return out
 
 
 def resumed_manifests(

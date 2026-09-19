@@ -93,22 +93,36 @@ if [ "$GATE_THREADS" != "0" ]; then
   export OMP_NUM_THREADS MKL_NUM_THREADS OPENBLAS_NUM_THREADS
 fi
 
-# Git Bash 的 `pwd` 给 MSYS POSIX 路径（/d/github/battle2/...）——shell 内部一切正常，
-# 但**凡是要塞进 native Windows python.exe 的 argv 的路径都会被 MSYS 路径转换打坏**：
-# 实测 /d/github/battle2/tools/githook/detach-run.py 到 python 手里变成
-#   D:\d\github\battle2\tools\githook\detach-run.py   ← `/` 被当成 MSYS 根，不是 D: 盘根
-# ⇒ `can't open file [Errno 2]` ⇒ 门禁 FAILED 且无法按文件归因 ⇒ pre-commit 保守拦截，
-# 提交被假红卡死（2026-09-16）。受影响的正是 DETACH 与 GATE_TMP（两者都进 python argv），
-# 所以这里直接取 Win32 形式（`pwd -W`）；非 MSYS 环境不支持该选项 → 回退 `pwd`，
-# 与旧版逐字一致。
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && { pwd -W 2>/dev/null || pwd; })
+# 双向路径（2026-09-18 补 WSL 支持）：**shell 侧（bash/dash 的 cd/stat/exec）用 POSIX**
+# —— bash 不认 `D:/...` 盘符路径，`[ -x ]`/exec 一律失败；**塞进 python argv 的用 Win32
+# 正斜杠形式**（`D:/...`）——Windows python 的 open/subprocess.CreateProcess 不认
+# /mnt/d/...（MSYS 分支两者通用：MSYS 层自动双向映射 /d/ 路径）。
+# 取基准目录：
+#   · PWD：POSIX（pwd），shell 侧一律用它；
+#   · PWD_WIN：pwd -W 可用（MSYS/MINGW/CYGWIN）→ 同 PWD（MSYS 层映射）；
+#     wslpath 可用（WSL，uname=Linux + /mnt 挂载）→ wslpath -m（**正斜杠**混合路径，
+#     与 MSYS pwd -W 同形态；不能用 -w 反斜杠输出，下游 dirname 只认 /）；
+#     都不可用（原生 Linux，python 也是原生二进制）→ 同 PWD。
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SCRIPT_DIR_WIN=$SCRIPT_DIR
+if pwd -W >/dev/null 2>&1; then
+  :
+elif command -v wslpath >/dev/null 2>&1; then
+  SCRIPT_DIR_WIN=$(wslpath -m "$SCRIPT_DIR")
+fi
 REPO_ROOT=$(dirname -- "$(dirname -- "$SCRIPT_DIR")")
+REPO_ROOT_WIN=$(dirname -- "$(dirname -- "$SCRIPT_DIR_WIN")")
 NN_ROOT="$REPO_ROOT/nn-training"
+NN_ROOT_WIN="$REPO_ROOT_WIN/nn-training"
 
 if [ -x "$NN_ROOT/.venv/Scripts/python.exe" ]; then
   NN_PY="$NN_ROOT/.venv/Scripts/python.exe"
+  # bash 直连执行用 POSIX（NN_PY）；塞进 detach/shell 子进程 argv 的用 Win32（NN_PY_WIN）。
+  # WSL 下二者不同（/mnt/d/... vs D:/...）；MSYS/原生 Linux 下相同。
+  NN_PY_WIN="$NN_ROOT_WIN/.venv/Scripts/python.exe"
 elif [ -x "$NN_ROOT/.venv/bin/python" ]; then
   NN_PY="$NN_ROOT/.venv/bin/python"
+  NN_PY_WIN="$NN_ROOT_WIN/.venv/bin/python"
 else
   echo "✗ nn-training/.venv 不存在（$NN_ROOT/.venv）——请先 python -m venv .venv && pip install -r requirements.txt" >&2
   exit 1
@@ -140,34 +154,41 @@ echo "▶ nn-training python gate（ruff + mypy + pytest xdist -n $NPROC，CPU �
 # 是锦上添花，不阻塞门禁）。
 "$NN_PY" -S ../tools/githook/nn-clean-tmp.py >/dev/null 2>&1 || true
 
-DETACH="$REPO_ROOT/tools/githook/detach-run.py"
+# DETACH / GATE_TMP 都会进 python argv（detach-run.py 的 open/subprocess）⇒ 必须 Win32 正斜杠。
+DETACH="$REPO_ROOT_WIN/tools/githook/detach-run.py"
 if [ -t 1 ]; then
   LIVE=1
   GATE_TMP=""
+  GATE_TMP_WIN=""
 else
   LIVE=0
   # 放在 pytest-tmp 下：既有 nn-clean-tmp KEEP_DAYS 清扫会带走空目录
-  GATE_TMP="$REPO_ROOT/tmp/pytest-tmp/nn-gate-$$"
+  GATE_TMP="$REPO_ROOT/tmp/pytest-tmp/nn-gate-$$"       # bash 侧（mkdir/trap）
+  GATE_TMP_WIN="$REPO_ROOT_WIN/tmp/pytest-tmp/nn-gate-$$" # python 侧（detach argv）
   mkdir -p "$GATE_TMP"
   # 截断不删除（沙箱删除配额铁律，同 pre-commit EXIT trap）
   trap 'for __f in "$GATE_TMP"/*.log "$GATE_TMP"/*.err; do [ -e "$__f" ] && : > "$__f"; done' EXIT
 fi
 
-# ---- run_tool <name> <cmd...>：三路工具的唯一启动点 ----
+# ---- run_tool <name> <exe> <args...>：三路工具的唯一启动点 ----
 # LIVE（stdout 是 tty）直通终端实时输出；hook/管道模式经 detach-run.py 脱管落日志
 # （理由见文件头「Hook 模式」）。新增工具只需 `run_tool <name> <cmd...>` 一行——
 # 旧版把这段 LIVE/detach 二选一复制了三遍（ruff/mypy/pytest），加一个工具就要
 # 再复制一遍，容易漏掉 detach 分支而让 Windows commit 卡死。
+# exe 参数语义（2026-09-18 WSL 双向路径）：bash 直连执行用 POSIX（`"$NN_PY"`），
+# detach 内层 CreateProcess 的 argv[0] 用 Win32（`"$NN_PY_WIN"`）——WSL 下二者必须分开。
 PIDS=""
 RAN=""
 run_tool() {
   __name=$1
   shift
+  __exe_sh=$1
+  shift
   if [ "$LIVE" = "1" ]; then
-    "$@" &
+    "$__exe_sh" "$@" &
   else
-    "$NN_PY" "$DETACH" --stdout "$GATE_TMP/$__name.log" --stderr "$GATE_TMP/$__name.err" \
-      -- "$@" &
+    "$NN_PY" "$DETACH" --stdout "$GATE_TMP_WIN/$__name.log" --stderr "$GATE_TMP_WIN/$__name.err" \
+      -- "$NN_PY_WIN" "$@" &
   fi
   PIDS="$PIDS $!"
   RAN="$RAN $__name"

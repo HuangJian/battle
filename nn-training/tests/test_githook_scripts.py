@@ -67,8 +67,43 @@ def _bash_usable() -> bool:
     return probe.returncode == 0
 
 
+def _bash_is_wsl() -> bool:
+    """当前 bash 是不是 WSL（`uname -s` = Linux 且能调 wslpath）。
+
+    WSL bash 与 MSYS git-bash 不同：不认 `D:\\...` 盘符路径（反斜杠被吞，子进程
+    直接 ENOENT），也吃不下 `/d/...`；只认 `/mnt/d/...`。Windows 原生 python 的
+    `Path(...)` 给的是 `D:\\...`，喂给 WSL bash 前必须经 wslpath -u 转 POSIX。
+    """
+    try:
+        probe = subprocess.run(
+            ["bash", "-c", "test -x /usr/bin/wslpath && uname -s"], capture_output=True, timeout=15
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return probe.returncode == 0 and b"Linux" in probe.stdout
+
+
+def _bash_path(p: Path) -> str:
+    """把（可能 Windows 盘符形式的）路径转成当前 bash 可读形态。
+
+    非 WSL（MSYS/native Linux）原样返回 —— MSYS 层自动映射 /d/ 风格路径，native
+    Linux 本就是 POSIX。WSL 下经 wslpath -u 转 /mnt/<drive>/...；转换失败回退原样。
+    """
+    if not _BASH_IS_WSL:
+        return str(p)
+    try:
+        r = subprocess.run(
+            ["bash", "-lc", f"wslpath -u '{p}'"], capture_output=True, text=True, timeout=10
+        )
+    except (OSError, subprocess.SubprocessError):
+        return str(p)
+    out = r.stdout.strip()
+    return out if r.returncode == 0 and out else str(p)
+
+
 #: 模块级求值一次：探测本身要起子进程，不必每条用例重跑。
 _BASH_USABLE = _bash_usable()
+_BASH_IS_WSL = _BASH_USABLE and _bash_is_wsl()
 
 no_bash = pytest.mark.skipif(
     not _BASH_USABLE, reason="bash 不可用/不可启动（宿主拦截或不在 PATH，无法验证 shell 脚本）"
@@ -77,9 +112,9 @@ no_bash = pytest.mark.skipif(
 
 @no_bash
 def test_py_safe_wrapper_launches_pytest() -> None:
-    """`nn-py-safe.sh -m pytest` 必须真能把 pytest 起起来（Linux/MSYS 都要成立）。"""
+    """`nn-py-safe.sh -m pytest` 必须真能把 pytest 起起来（Linux/MSYS/WSL 都要成立）。"""
     proc = subprocess.run(
-        ["bash", str(WRAPPER), "-m", "pytest", "--version"],
+        ["bash", _bash_path(WRAPPER), "-m", "pytest", "--version"],
         capture_output=True,
         text=True,
         encoding="utf-8",

@@ -8,9 +8,11 @@ import {
   assertComparable,
   coverageReport,
   dedupKeyOf,
+  GAMEPLAY_FIELDS,
   IncomparableError,
   loadDedupKeys,
   monthFile,
+  PHASE0_FIELDS,
   REQUIRED_FIELDS,
   segmentOf,
   segmentOfSeed,
@@ -67,6 +69,13 @@ function row(over: Partial<EvalGameRow> = {}): EvalGameRow {
     puGotFreeze: 0,
     puGotShield: 0,
     score: 1.5,
+    hitsByKind: [0, 0, 0, 0],
+    killsByKind: [0, 0, 0, 0],
+    exposureByKind: [0, 0, 0, 0],
+    firstHitKind: null,
+    firstKillKind: null,
+    killOrder: [],
+    killerKinds: [],
     metrics_version: 1,
     greedy: true,
     node_id: 'self',
@@ -150,5 +159,22 @@ describe('coverageReport (§3.3)', () => {
     const r = row() as unknown as Record<string, unknown>
     delete r.stuckTicks
     expect(coverageReport([r], ['stuckTicks'])).toEqual([])
+  })
+
+  it('Phase 0 七列：属 GAMEPLAY_FIELDS/REQUIRED_FIELDS，旧资产行可用 PHASE0_FIELDS 豁免', () => {
+    // 七列是确定性 gameplay 遥测（§3.4 双跑必须一致）⇒ 必须在 GAMEPLAY_FIELDS 里。
+    const gameplay: readonly string[] = GAMEPLAY_FIELDS
+    const required: readonly string[] = REQUIRED_FIELDS
+    for (const f of PHASE0_FIELDS) {
+      expect(gameplay).toContain(f)
+      expect(required).toContain(f)
+    }
+    expect(PHASE0_FIELDS.length).toBe(7)
+    // 旧资产行（本批次之前落盘）没这七列 ⇒ 只有显式豁免才不报缺。
+    const old = row() as unknown as Record<string, unknown>
+    for (const f of PHASE0_FIELDS) delete old[f]
+    expect(coverageReport([old]).length).toBe(1)
+    expect(coverageReport([old])[0].missing.sort()).toEqual([...PHASE0_FIELDS].sort())
+    expect(coverageReport([old], PHASE0_FIELDS)).toEqual([])
   })
 })

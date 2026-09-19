@@ -1,7 +1,7 @@
 """reward_library —— 奖励公式引擎（M1a，plan/rl-training-config.md §4.3）。
 
-奖励的**唯一定义源在 Python**：TS 每决策步只落 39 维指标向量（`metrics.npy`，
-`[N+1,39]` f8），奖励由课程配置里的 `formula` 定义并在此求值。**没有命名
+奖励的**唯一定义源在 Python**：TS 每决策步只落 41 维指标向量（`metrics.npy`，
+`[N+1,41]` f8），奖励由课程配置里的 `formula` 定义并在此求值。**没有命名
 scheme** —— 旧课程（kill/kill2/balanced/dodge-mix）与 v7 都是配置公式，它们是
 公式引擎的验收用例，不是引擎之外的第二机制。
 
@@ -102,13 +102,22 @@ METRICS: tuple[str, ...] = (
     "hitsFast",  # 36
     "hitsPower",  # 37
     "hitsArmor",  # 38
+    # ---- metrics v7（plan/pickup-shaping.plan.md Phase 0；idx 永久追加在尾部）----
+    "puGotOther",  # 39  ← v7 顺手项：residual 桶。`puGot*` 四桶不认 fence/boat/repair/
+    #                     emp/decoy/mine/guard/frenzy/sacrifice/rewind，这些类型拾取后
+    #                     四桶全零（x5⑩「puGot* 全零输出 bug」）；本桶让
+    #                     powerUpsCollected ≡ stars + 四桶 + 本桶 恒成立（可测守恒）。
+    #                     不进任何公式（"不进训练变量"）。
+    "pickupDist",  # 40  ← v7 头牌列：每决策步玩家到最近**存活**拾取中心格的曼哈顿
+    #              距离（powerUp.alive；玩家不在场或无存活拾取 = 哨兵 -1）。势能法
+    #              趋近塑形项（-wApproach*pickupDist）的量纲，公式侧 where 归零。
 )
 
 METRIC_INDEX: dict[str, int] = {name: i for i, name in enumerate(METRICS)}
 METRICS_DIM = len(METRICS)
-#: shard manifest 版本：`[N+1,39] f8（idx0–38）` 布局。任何用 `shape[0]` 推 episode 长度的
+#: shard manifest 版本：`[N+1,41] f8（idx0–40）` 布局。任何用 `shape[0]` 推 episode 长度的
 #: 下游在版本不匹配时必须响亮报错，而非静默错读（评审 LC §1.1）。
-METRICS_VERSION = 6
+METRICS_VERSION = 7
 
 #: 终局 outcome 名（与 TS `manifest.outcome` 同源）；未列出的 terminal 键 = 0。
 OUTCOMES: tuple[str, ...] = ("stage_clear", "lives_exhausted", "timeout", "base_destroyed")
@@ -834,7 +843,7 @@ def assert_no_time_axis_reducers() -> None:
 
 def _self_check() -> None:
     assert_no_time_axis_reducers()
-    assert len(METRICS) == METRICS_DIM == 39, METRICS_DIM  # v6：追加 idx31–38 分敌种
+    assert len(METRICS) == METRICS_DIM == 41, METRICS_DIM  # v7：追加 idx39–40 puGotOther/pickupDist
     assert len(set(METRICS)) == METRICS_DIM
 
 

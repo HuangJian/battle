@@ -920,9 +920,10 @@ class TrainingSteps:
         self._tail_drain_sec = tail_drain_sec
         self._waves_n = waves_n
         log(
-            f"[run_rl] rollout it{it}: games={report['games']} winRate={report['winRate']} "
-            f"outcomes={json.dumps(report['outcomes'])} "
-            f"samples={report['totalSamples']} ticks={report['totalTicks']}"
+            f"[run_rl] rollout it{it}: games={report.get('games', 0)} "
+            f"winRate={report.get('winRate', 0.0)} "
+            f"outcomes={json.dumps(report.get('outcomes') or {})} "
+            f"samples={report.get('totalSamples', 0)} ticks={report.get('totalTicks', 0)}"
         )
         if "scoreStats" in report:
             ss = report["scoreStats"]
@@ -2259,7 +2260,7 @@ class TrainingSteps:
             read_eval_summary(self._jsonl_path, it) if args.mode in ("intent", "goal") else None
         )
         # pace checkpoint（intent/goal 护栏）：iter5 首现通关。
-        if args.mode in ("intent", "goal") and it == 5 and self._report["winRate"] <= 0:
+        if args.mode in ("intent", "goal") and it == 5 and self._report.get("winRate", 0) <= 0:
             log("WARN pace: no clear by iter5 (rollout winRate=0) — investigate")
         return eval_rec
 

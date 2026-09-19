@@ -75,6 +75,10 @@ DEFAULT_RANGES: dict[str, tuple[float, float]] = {
     "hitsFast": (0.0, 500.0),
     "hitsPower": (0.0, 500.0),
     "hitsArmor": (0.0, 500.0),
+    # metrics v7：puGotOther（残差桶，上界同其他拾取桶）+ pickupDist（哨兵 -1；
+    # 真值 = 26×26 场上中心格曼哈顿最大 25+25=50）。
+    "puGotOther": (0.0, 30.0),
+    "pickupDist": (-1.0, 50.0),
 }
 
 #: 单加性项在角点上的绝对上界（超过即判为数值爆炸风险）。

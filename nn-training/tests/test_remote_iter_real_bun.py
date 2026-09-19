@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -42,6 +41,7 @@ from remote.protocol import (
     validate_rollout_spec,
 )
 from rl.iter_job import build_iter_spec
+from tests.subproc_util import run_utf8
 
 REPO_ROOT = ROOT.parent
 #: 每局 tick 上限——验收只要「采到 shard 并逐位可比」，不要长局（本文件要秒级跑完）。
@@ -83,6 +83,10 @@ def _rollout_args() -> SimpleNamespace:
         course_obj=None,
         course_path="",
         course_frozen_bytes=None,
+        # 2026-09-19：export-rl-rollout 无 --lives-override 即响亮失败（x20 命数事故
+        # 根因修复）。训练侧由课程合并恒传；本测试无课程，须显式给出。
+        lives_override=1,
+        player_level=0,
     )
 
 
@@ -120,15 +124,17 @@ def test_node_runner_shards_byte_identical_to_direct_run(tmp_path: Path) -> None
         shutil.copyfile(WEIGHTS, d / "init_weights.json")
 
     # A：直跑（等价于「本机 rollout」）——cwd = TS 根，job 侧路径绝化（与节点侧同一规则）
+    # run_utf8：裸 text=True 在 zh-CN Windows 按 cp936 解码 bun 的 UTF-8 stdout，
+    # 读线程 UnicodeDecodeError → stdout=None → assert 消息再 TypeError（§30）。
     exec_argv = iter_rollout._exec_argv(argv, dir_a)
-    p = subprocess.run(
+    p = run_utf8(
         [str(BUN), *exec_argv],
         cwd=str(ts_root),
-        capture_output=True,
-        text=True,
         timeout=180,
     )
-    assert p.returncode == 0, f"直跑失败：{p.stdout[-2000:]}\n{p.stderr[-2000:]}"
+    assert p.returncode == 0, (
+        f"直跑失败：{(p.stdout or '')[-2000:]}\n{(p.stderr or '')[-2000:]}"
+    )
 
     # B：过节点侧执行器（真 bun + 真 TS 树 + 真权重）
     out = run_iter_rollout(dir_b, spec, ts_dir=ts_root, log=lambda _m: None)

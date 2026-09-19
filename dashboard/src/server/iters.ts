@@ -2,7 +2,7 @@
  *  类型移居 ui/view.ts 单一源，本层只留实现）。api.ts 与 pool 共用。 */
 
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'fs'
-import { join } from 'path'
+import { basename, join } from 'path'
 import type {
   EvalGameClass,
   EvalGameRow,
@@ -17,6 +17,8 @@ import type {
 import { mcnemarP, pairedVerdict } from '../../../tools/eval/mcnemar'
 import { STAGES } from '../../../src/config/stages'
 import { isArenaId, resolveArenaStage } from '../../../src/nn/arena-ladder'
+import { parseJsonc } from '../core/jsonc'
+import { curriculaDir, NN_TRAINING } from '../core/paths'
 
 // ---------------- M0 传输账（iteration 事件的 `wire` 子字典） ----------------
 
@@ -77,13 +79,55 @@ const PLAYER_MAX_HP = Math.round(50 * 1.05 * 5) // 263
 /** 训练课程常见 startLives（curricula 普遍 player.lives=1；难度表默认 3 但课程覆盖）。 */
 const ASSUMED_START_LIVES = 1
 
-/** 关卡敌数：manifest `enemyTotal` 优先；否则按 stage id 反查（经典关 / arena）。 */
-function resolveEnemyTotal(stageId: number, fromManifest?: number | null): number | null {
+/** 自定义关 2000+i 的敌数：curricula/<course>.jsonc → level → levels/<level>.jsonc stages[i].count。
+ *  按课缓存；失败返回 null（不拖垮聚合）。 */
+const courseEnemyByStage = new Map<string, Map<number, number>>()
+
+function loadCourseCustomEnemies(course: string): Map<number, number> {
+  const hit = courseEnemyByStage.get(course)
+  if (hit) return hit
+  const out = new Map<number, number>()
+  courseEnemyByStage.set(course, out)
+  try {
+    const curPath = join(curriculaDir(), `${course}.jsonc`)
+    if (!existsSync(curPath)) return out
+    const cur = parseJsonc(readFileSync(curPath, 'utf8')) as { level?: string }
+    const level = String(cur.level ?? '')
+    if (!level) return out
+    const lvPath = join(NN_TRAINING, 'levels', `${level}.jsonc`)
+    if (!existsSync(lvPath)) return out
+    const lv = parseJsonc(readFileSync(lvPath, 'utf8')) as {
+      stages?: Array<{ count?: number; forces?: string }>
+    }
+    const stages = Array.isArray(lv.stages) ? lv.stages : []
+    stages.forEach((st, i) => {
+      const c = Number(st.count)
+      const enemy =
+        Number.isFinite(c) && c > 0 ? c : typeof st.forces === 'string' ? st.forces.length : null
+      if (enemy != null && enemy > 0) out.set(2000 + i, enemy)
+    })
+  } catch {
+    /* unreadable curriculum → empty map */
+  }
+  return out
+}
+
+/** 关卡敌数：manifest `enemyTotal` 优先；否则 stage id 反查（经典关 / arena / 自定义关）。 */
+function resolveEnemyTotal(
+  stageId: number,
+  fromManifest?: number | null,
+  course?: string,
+): number | null {
   if (typeof fromManifest === 'number' && Number.isFinite(fromManifest) && fromManifest > 0) {
     return fromManifest
   }
   try {
     if (isArenaId(stageId)) {
+      // 自定义关 2000+ 先走课程 level；arena-ladder 的 1000+n 再走 ARENA_LADDER。
+      if (stageId >= 2000 && course) {
+        const custom = loadCourseCustomEnemies(course).get(stageId)
+        if (custom != null) return custom
+      }
       const st = resolveArenaStage(stageId)
       if (!st) return null
       return st.enemyCount ?? st.enemies?.length ?? null
@@ -93,6 +137,15 @@ function resolveEnemyTotal(stageId: number, fromManifest?: number | null): numbe
     return st.enemyCount ?? st.enemies?.length ?? null
   } catch {
     return null
+  }
+}
+
+/** traj 目录名 = 课程名（tmp/<course>）。 */
+function courseFromTrajDir(trajDir: string): string {
+  try {
+    return basename(trajDir)
+  } catch {
+    return ''
   }
 }
 
@@ -159,7 +212,46 @@ function residualHpPctFromFields(m: {
   return capacity > 0 ? hp / capacity : null
 }
 
+/**
+ * 从 eval 行 / rollout manifest 推导「掉落数」（power-ups spawned）。
+ * 优先级：显式 `powerUpsSpawned` → `puSpawn*` 分项之和（可能漏同 tick 拾取）→
+ * `dims.loot` 比值反推（collected/value）→ 不可推导返回 null。
+ */
+function puSpawnFromRow(r: Record<string, unknown>): number | null {
+  const explicit = Number(r.powerUpsSpawned)
+  if (Number.isFinite(explicit)) return explicit
+  const sum =
+    (Number(r.puSpawnBomb ?? 0) || 0) +
+    (Number(r.puSpawnTank ?? 0) || 0) +
+    (Number(r.puSpawnFreeze ?? 0) || 0) +
+    (Number(r.puSpawnShield ?? 0) || 0) +
+    (Number(r.puSpawnStar ?? 0) || 0)
+  const collected = Number(r.powerUpsCollected ?? 0) || 0
+  // 分项能解释拾取（或本局无拾取）时信任分项；collected>0 且分项=0 说明遥测不全，走比值。
+  if (sum > 0 || collected === 0) return sum
+  return spawnFromLootRatio(r, collected)
+}
+
+/** 从 dims.loot（eval_log 为标量；manifest 为 `{value,raw}`）反推 spawn；不可推 → null。 */
+function spawnFromLootRatio(r: Record<string, unknown>, collected: number): number | null {
+  const dims = r.dims
+  let lootVal: number | null = null
+  if (dims != null && typeof dims === 'object') {
+    const loot = (dims as Record<string, unknown>).loot
+    if (typeof loot === 'number') lootVal = loot
+    else if (loot != null && typeof loot === 'object' && 'value' in loot) {
+      const v = (loot as { value: unknown }).value
+      lootVal = typeof v === 'number' ? v : null
+    }
+  }
+  if (lootVal == null || !Number.isFinite(lootVal)) return collected > 0 ? null : 0
+  if (lootVal > 0 && collected > 0) return Math.round(collected / lootVal)
+  // loot=0：有掉落但未拾取——精确 spawn 数未知
+  return null
+}
+
 export function readIterActuals(trajDir: string, iter: number): IterActuals | null {
+  const course = courseFromTrajDir(trajDir)
   const itDir = join(trajDir, `it${iter}`)
   try {
     if (!existsSync(itDir)) return null
@@ -169,6 +261,8 @@ export function readIterActuals(trajDir: string, iter: number): IterActuals | nu
         nSamples: number
         kills: number
         pu: number
+        /** 单局掉落数；null = 无法推导。 */
+        puSpawn: number | null
         ticks: number
         residualHp: number | null
         residualPct: number | null
@@ -225,11 +319,12 @@ export function readIterActuals(trajDir: string, iter: number): IterActuals | nu
           const nSamples = Number(m.nSamples ?? 0)
           const prev = best.get(`${stage}:${seed}`)
           if (!prev || nSamples > prev.nSamples) {
-            const enemyTotal = resolveEnemyTotal(stage, m.enemyTotal)
+            const enemyTotal = resolveEnemyTotal(stage, m.enemyTotal, course)
             best.set(`${stage}:${seed}`, {
               nSamples,
               kills: Number(m.kills ?? 0) || 0,
               pu: Number(m.powerUpsCollected ?? 0) || 0,
+              puSpawn: puSpawnFromRow(m as Record<string, unknown>),
               ticks: Number(m.ticks ?? 0) || 0,
               residualHp: residualHpFromFields(m),
               residualPct: residualHpPctFromFields(m),
@@ -254,6 +349,8 @@ export function readIterActuals(trajDir: string, iter: number): IterActuals | nu
     if (best.size === 0) return null
     let totalKills = 0
     let totalPU = 0
+    let totalPUSpawn = 0
+    let totalPUSpawnN = 0
     let totalTicks = 0
     let residualSum = 0
     let residualN = 0
@@ -276,6 +373,10 @@ export function readIterActuals(trajDir: string, iter: number): IterActuals | nu
     for (const v of best.values()) {
       totalKills += v.kills
       totalPU += v.pu
+      if (v.puSpawn != null) {
+        totalPUSpawn += v.puSpawn
+        totalPUSpawnN++
+      }
       totalTicks += v.ticks
       if (v.residualHp !== null) {
         residualSum += v.residualHp
@@ -316,6 +417,7 @@ export function readIterActuals(trajDir: string, iter: number): IterActuals | nu
       games: best.size,
       totalKills,
       totalPU,
+      totalPUSpawn: totalPUSpawnN > 0 ? totalPUSpawn : null,
       avgTicks: Math.round(totalTicks / best.size),
       avgResidualHp: residualN > 0 ? Math.round(residualSum / residualN) : null,
       avgWinTicks: winN > 0 ? Math.round(winTickSum / winN) : null,
@@ -338,7 +440,13 @@ export function readIterActuals(trajDir: string, iter: number): IterActuals | nu
 export interface CachedActuals extends IterActuals {
   /** 该轮 iteration 事件的 time（防串门闩：同 iter 号不同轮 → 不采用缓存）。 */
   time: string
+  /** 缓存 schema 版本：v2 = 自定义关敌数反查（2000+）已接入，killRate 可非 null。 */
+  schemaV: number
 }
+
+/** 当前 actuals 缓存 schema 版本（门闩：旧缓存一律作废重建）。
+ *  v3 = totalPUSpawn（道具掉落数）入聚合。 */
+const ACTUALS_SCHEMA_V = 3
 
 function actualsCachePath(trajDir: string): string {
   return join(trajDir, '.pool-actuals-cache.json')
@@ -362,12 +470,14 @@ function loadActualsCache(trajDir: string): Map<number, CachedActuals> {
         typeof v.totalKills === 'number' &&
         typeof v.totalPU === 'number' &&
         typeof v.avgTicks === 'number' &&
-        // schema 版本门闩：缺 avgWinTicks（旧缓存）→ 作废重建；缺 killRate（百分比改造）
-        // 同样作废，强制带出歼灭率/承伤%/残血% 字段。
-        'avgWinTicks' in v &&
+        // schema 版本门闩：缺 schemaV 或版本过旧 → 作废重建。
+        // v2 = 自定义关敌数反查 + 百分比字段；v3 = totalPUSpawn 掉落数。
+        'schemaV' in v &&
+        Number((v as CachedActuals).schemaV) >= ACTUALS_SCHEMA_V &&
         'killRate' in v &&
         'dmgPerKillPct' in v &&
-        'avgResidualHpPct' in v
+        'avgResidualHpPct' in v &&
+        'totalPUSpawn' in v
       ) {
         out.set(it, v)
       }
@@ -401,6 +511,7 @@ function saveActualsCache(trajDir: string, cache: Map<number, CachedActuals>): v
  *  it 序数语义：eval_summary.iter = N 评估的是第 N 轮 PPO 更新前的权重——即第 N 轮
  *  rollout 采样所用的同一权重。summary 可能晚到——按 iter 字段匹配，绝不按时间邻近。 */
 export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
+  const course = courseFromTrajDir(trajDir)
   const out = new Map<number, EvalSummary>()
   const logPath = join(trajDir, 'eval_log.jsonl')
   interface GameAgg {
@@ -408,6 +519,9 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
     ticks: number
     kills: number
     pu: number
+    /** 掉落累计（可推导的局）与局数：`totalPUSpawn = ΣpuSpawn / puSpawnN>0`。 */
+    puSpawn: number
+    puSpawnN: number
     scoreSum: number
     scoreSqSum: number
     residualSum: number
@@ -460,6 +574,8 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
               ticks: 0,
               kills: 0,
               pu: 0,
+              puSpawn: 0,
+              puSpawnN: 0,
               scoreSum: 0,
               scoreSqSum: 0,
               residualSum: 0,
@@ -486,6 +602,11 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
           agg.ticks += Number(r.ticks ?? 0) || 0
           agg.kills += Number(r.kills ?? 0) || 0
           agg.pu += Number(r.powerUpsCollected ?? 0) || 0
+          const rowSpawn = puSpawnFromRow(r)
+          if (rowSpawn != null) {
+            agg.puSpawn += rowSpawn
+            agg.puSpawnN++
+          }
           agg.scoreSum += score
           agg.scoreSqSum += score * score
           // 承伤（dmgPerKill 分子）：全样本累计，不区分胜负；**分子分母同口径**——
@@ -502,6 +623,7 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
           const enemyTotal = resolveEnemyTotal(
             Number.isFinite(stageId) ? stageId : NaN,
             typeof r.enemyTotal === 'number' ? r.enemyTotal : null,
+            course,
           )
           if (enemyTotal != null && enemyTotal > 0) {
             agg.killRateKills += Number(r.kills ?? 0) || 0
@@ -566,6 +688,7 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
           avgWinTicks: null,
           totalKills: null,
           totalPU: null,
+          totalPUSpawn: null,
           avgResidualHp: null,
           avgLossTicks: null,
           dmgPerKill: null,
@@ -588,6 +711,7 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
       s.avgWinTicks = agg.winN > 0 ? Math.round(agg.winTicks / agg.winN) : null
       s.totalKills = agg.kills
       s.totalPU = agg.pu
+      s.totalPUSpawn = agg.puSpawnN > 0 ? agg.puSpawn : null
       s.avgResidualHp = agg.residualN > 0 ? Math.round(agg.residualSum / agg.residualN) : null
       s.avgLossTicks = agg.lossN > 0 ? Math.round(agg.lossTicks / agg.lossN) : null
       // 承伤/杀：全样本口径（Σdmg / Σ同批 kills），保留 1 位小数（够看趋势）。
@@ -884,24 +1008,26 @@ export function readIterMetrics(trajDir: string): { rows: IterRow[] } {
         let actuals: IterActuals | null = null
         const cached = actualsCache.get(iter)
         if (cached && cached.time === rowTime) {
+          // 缓存命中必须**整对象透传**：百分比字段（killRate/dmgPerKillPct/avgResidualHpPct）
+          // 漏拷会让表列恒空（schema 门闩已在 loadActualsCache 挡掉旧缓存）。
           actuals = {
             games: cached.games,
             totalKills: cached.totalKills,
             totalPU: cached.totalPU,
+            totalPUSpawn: cached.totalPUSpawn ?? null,
             avgTicks: cached.avgTicks,
-            avgResidualHp:
-              (cached as CachedActuals & { avgResidualHp?: number | null }).avgResidualHp ?? null,
-            avgWinTicks:
-              (cached as CachedActuals & { avgWinTicks?: number | null }).avgWinTicks ?? null,
-            avgLossTicks:
-              (cached as CachedActuals & { avgLossTicks?: number | null }).avgLossTicks ?? null,
-            dmgPerKill:
-              (cached as CachedActuals & { dmgPerKill?: number | null }).dmgPerKill ?? null,
+            avgResidualHp: cached.avgResidualHp ?? null,
+            avgWinTicks: cached.avgWinTicks ?? null,
+            avgLossTicks: cached.avgLossTicks ?? null,
+            dmgPerKill: cached.dmgPerKill ?? null,
+            killRate: cached.killRate ?? null,
+            dmgPerKillPct: cached.dmgPerKillPct ?? null,
+            avgResidualHpPct: cached.avgResidualHpPct ?? null,
           }
         } else {
           actuals = readIterActuals(trajDir, iter)
           if (actuals) {
-            actualsCache.set(iter, { ...actuals, time: rowTime })
+            actualsCache.set(iter, { ...actuals, time: rowTime, schemaV: ACTUALS_SCHEMA_V })
             cacheDirty = true
           }
         }

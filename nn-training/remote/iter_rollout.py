@@ -58,12 +58,17 @@ def resolve_bun(name: str = "") -> str:
 
 
 def bun_version(bun: str) -> str:
-    """`bun --version`（启动自检行用；失败返回空串，不致命）。"""
+    """`bun --version`（启动自检行用；失败返回空串，不致命）。
+
+    encoding=utf-8：裸 text=True 在 zh-CN Windows 按 cp936 解码，读线程死亡时
+    stdout=None（§30 / test_remote_iter_real_bun GBK 事故同源）。
+    """
     try:
         p = subprocess.run(
             [bun, "--version"],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
             **_POPEN_NO_WINDOW,
         )

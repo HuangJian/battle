@@ -70,7 +70,8 @@ class RoundOutcome:
 
 # ---- 采集模式（轮内 fact：决定 rollout / 补波走哪条支路） -------------------
 
-#: 本机采样（默认）：`_rollout_phase` + `_volume_topup`。
+#: 本机采样（默认）：配额课程走 `_volume_collect_continuous`（VOLUME_RULE_V2，采完即含补波），
+#: 其余走 `_rollout_phase`。
 COLLECT_LOCAL = "local"
 #: 整轮上云（kind=iter）：节点自己跑 rollout + PPO，本机**完全不采样、不补波**。
 COLLECT_NODE = "node"

@@ -55,6 +55,9 @@ function pushBadgeTitle(f: PushFleetProbe): string {
 
 function dotClass(c: ComponentView): string {
   if (c.busy) return 'tc-dot--warn'
+  // running 且明确不健康 → 黄；healthy=null（未探）不冒充绿——只对「无探测语义」的
+  // 组件（trainingLoop/localWorker 服务端恒 true）出绿。cloudflared hub 不通时服务端
+  // 会写 healthy=false → 黄点（2026-09-18）。
   if (c.status === 'running') return c.healthy === false ? 'tc-dot--warn' : 'tc-dot--on'
   if (c.status === 'exited') return 'tc-dot--dead'
   return 'tc-dot--empty'

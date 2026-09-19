@@ -60,9 +60,26 @@ function loadModel(opts: NNInputOptions): ModelLike {
 
 /**
  * NN-driven player input. Constructed with the live `world` reference (same
- * lifetime contract as GodAIInput). `getMoveDirection()` / `isFiring()` /
- * `wasItemPressed()` lazily run inference on the first call of each tick and
- * hold the result until `endFrame()` clears the per-tick flag.
+ * lifetime contract as GodAIInput).
+ *
+ * Decision instant (2026-09-19): a decision is taken on the state at the **end of
+ * a tick** — i.e. inside `endFrame()`, plus once at `reset()` for tick 0 — and it
+ * drives the following tick(s) until the next due decision. That state is exactly
+ * the state every corpus/eval builder observes at its own loop iteration `t`, right
+ * before its `sim.tick()` (export-rl-rollout.ts:642, export-nn-replays.ts:116,
+ * export-eval-game.ts:482), so the policy sees the same state distribution at
+ * training time, at eval time and on remote nodes.
+ *
+ * Why not decide mid-tick: `Simulation.tick()` decrements timers, arms mines and
+ * runs `updateSpawning()` *before* reading player input (Simulation.ts:205-245), so
+ * a decision taken there sees a state the policy was never trained on — measured
+ * 2026-09-19: identical (weights, stage, seed) diverged from the node-side
+ * export-eval-game in 6/6 games (first action flip at tick 290 of stage 0 seed 1).
+ *
+ * Inferences are gated by the K-subsample like the builders do: cadence is checked
+ * on `world.frame` (= completed ticks = the builders' `t`), so due ticks are
+ * t = 0, K, 2K, … for all implementations. `getMoveDirection()` / `isFiring()` only
+ * read the committed action; they never run the forward mid-tick.
  */
 export class NNInput implements InputLike {
   private world: World
@@ -81,9 +98,9 @@ export class NNInput implements InputLike {
   private lastDir: Direction = 'up'
   private firing = false
 
-  // per-tick evaluation guard
-  private thought = false
-  private forceThink = true // think at least once after reset()
+  // A decision is committed (and holds until the next due tick). Only the lazy
+  // fallback for callers that never reset()/endFrame() decides on read.
+  private committed = false
 
   constructor(world: World, opts: NNInputOptions = {}) {
     this.world = world
@@ -92,12 +109,12 @@ export class NNInput implements InputLike {
   }
 
   getMoveDirection(): Direction | null {
-    if (!this.thought) this.think()
+    if (!this.committed) this.decide()
     return this.moveDir
   }
 
   isFiring(): boolean {
-    if (!this.thought) this.think()
+    if (!this.committed) this.decide()
     return this.firing
   }
 
@@ -107,26 +124,33 @@ export class NNInput implements InputLike {
     return false
   }
 
+  /**
+   * Called by the caller after each completed `sim.tick()`. The world here is at
+   * the decision state the corpus/eval builders observe (`world.frame` = their
+   * `t`), so a due tick takes its decision now and holds it into the next tick.
+   * Terminal states take no decision — the builders stop at the same point.
+   */
   endFrame(): void {
-    // Allow a fresh decision next tick (edge pulses only — no items in v2).
-    this.thought = false
+    const w = this.world
+    if (w.state === 'playing' && w.frame % this.K === 0) this.decide()
   }
 
   reset(): void {
-    this.thought = false
-    this.forceThink = true
     this.moveDir = null
     this.lastDir = 'up'
     this.firing = false
+    // Tick 0's decision, on the freshly loaded stage (callers reset() after
+    // `world.loadStageData(...)` — the builders' `t = 0` observation).
+    this.decide()
   }
 
   /**
    * M1 divergence-probe support (tools/diag/divergence-probe.ts): force a
-   * decision NOW (idempotent within the tick) and read the greedy argmax.
-   * Read-only relative to the World; never mutates gameplay state.
+   * decision on the CURRENT state (bypassing the endFrame cadence) and read the
+   * greedy argmax. Read-only relative to the World; never mutates gameplay state.
    */
   thinkNow(): void {
-    if (!this.thought) this.think()
+    this.decide()
   }
 
   /** Greedy move-argmax (0-4) from the latest forward pass. */
@@ -143,21 +167,14 @@ export class NNInput implements InputLike {
     return fr[1] > fr[0] ? 1 : 0
   }
 
-  /** Run the NN forward at most once per tick, gated by the decision cadence. */
-  private think(): void {
-    if (this.thought) return
+  /**
+   * Encode the current world state, run one forward pass and commit the greedy
+   * action (masked argmax, held-action semantics). Called only at decision
+   * instants: `reset()`, a due `endFrame()`, `thinkNow()`, or the lazy fallback
+   * for callers that never drive the tick loop.
+   */
+  private decide(): void {
     const w = this.world
-
-    // Decide whether a new decision is due this tick.
-    // v2: no item events — decision cadence is forceThink + K-subsample.
-    const frame = w.frame
-    const due = this.forceThink || frame % this.K === 0
-
-    if (!due) {
-      // Hold the previously committed action; do NOT run the conv forward.
-      this.thought = true
-      return
-    }
 
     // Encode current world state and run the forward pass.
     this.encoder.encode(w)
@@ -193,7 +210,6 @@ export class NNInput implements InputLike {
 
     // v2: item head removed — AI never activates guard/frenzy/rewind.
 
-    this.forceThink = false
-    this.thought = true
+    this.committed = true
   }
 }

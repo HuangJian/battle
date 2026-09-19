@@ -36,6 +36,58 @@ describe('ingestEvalRow', () => {
   })
 })
 
+/**
+ * Phase 0 逐敌种画像（T5 分敌种信用）：七列从 eval 报告顶层 → eval_log → schema v1。
+ * 旧行/未同步节点的报告没有这些键 —— 必须填零/空而**不伪造**（覆盖率里另行豁免，
+ * 见 store.PHASE0_FIELDS），且不得把畸形值（长度≠4 / 混类型）当有效数据收下。
+ */
+describe('Phase 0 census 七列映射', () => {
+  const base = { iter: 1, wver: 'w1', stage: 0, seed: 860001, win: 1, outcome: 'stage_clear' }
+
+  it('报告有值 → 逐列透传（含 null 凶手与顺序）', () => {
+    const r = ingestEvalRow(
+      {
+        ...base,
+        hitsByKind: [1, 2, 3, 4],
+        killsByKind: [10, 5, 3, 2],
+        exposureByKind: [100, 50, 20, 10],
+        firstHitKind: 'power',
+        firstKillKind: 'fast',
+        killOrder: ['basic', 'fast'],
+        killerKinds: ['armor', null],
+      },
+      ctx,
+    )
+    expect(r.hitsByKind).toEqual([1, 2, 3, 4])
+    expect(r.killsByKind).toEqual([10, 5, 3, 2])
+    expect(r.exposureByKind).toEqual([100, 50, 20, 10])
+    expect(r.firstHitKind).toBe('power')
+    expect(r.firstKillKind).toBe('fast')
+    expect(r.killOrder).toEqual(['basic', 'fast'])
+    expect(r.killerKinds).toEqual(['armor', null])
+  })
+
+  it('旧报告缺键 → 零/空（不伪造），且不进覆盖率豁免清单以外的字段', () => {
+    const r = ingestEvalRow({ ...base }, ctx)
+    expect(r.hitsByKind).toEqual([0, 0, 0, 0])
+    expect(r.killsByKind).toEqual([0, 0, 0, 0])
+    expect(r.exposureByKind).toEqual([0, 0, 0, 0])
+    expect(r.firstHitKind).toBeNull()
+    expect(r.firstKillKind).toBeNull()
+    expect(r.killOrder).toEqual([])
+    expect(r.killerKinds).toEqual([])
+  })
+
+  it('畸形计数列（长度≠4 / 含非数值）→ 归零，不落半真数据', () => {
+    const r = ingestEvalRow(
+      { ...base, hitsByKind: [1, 2] as number[], killsByKind: [1, 'x'] as unknown as number[] },
+      ctx,
+    )
+    expect(r.hitsByKind).toEqual([0, 0, 0, 0])
+    expect(r.killsByKind).toEqual([0, 0, 0, 0])
+  })
+})
+
 describe('ingestRows 幂等', () => {
   it('同键重入不重复', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'evalingest-'))

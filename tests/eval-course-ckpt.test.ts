@@ -1,6 +1,21 @@
+/**
+ * eval-course-ckpt.test.ts ↔ tools/sim/eval-course-ckpt.ts + tools/lib/hybrid-batch.ts
+ *
+ * 2026-09-19 重构后：节点通信/重试/探测全部搬去 Python（`nn-training/eval_course_once.py`
+ * → `rl.batch_eval.BatchEvalRunner`），本文件只覆盖 TS 侧仍然拥有的东西：
+ *   * 课程 JSONC 解析（与 Python `rl/jsonc.py` 同口径，两端都读同一批关卡文件）
+ *   * `--weights label=path` 解析、spec 构造（本机份额/noNodes/dist 配置如何透传）
+ *   * `TailRaceBatch` 的纯逻辑（Python 队列的 TS 镜像）
+ */
 import { describe, expect, it } from 'bun:test'
 import { existsSync, readFileSync } from 'fs'
-import { parseCourseJsonc, stripTrailingCommas } from '../tools/sim/eval-course-ckpt'
+import { TailRaceBatch } from '../tools/lib/hybrid-batch'
+import {
+  buildSpec,
+  parseCourseJsonc,
+  parseWeightSpec,
+  stripTrailingCommas,
+} from '../tools/sim/eval-course-ckpt'
 
 describe('eval-course-ckpt JSONC 管线', () => {
   it('干净 JSON 原样通过', () => {
@@ -55,4 +70,48 @@ describe('eval-course-ckpt JSONC 管线', () => {
       expect(v.reward.params.wPickup).toBe(3.0)
     },
   )
+})
+
+describe('spec 构造（透传给 Python 引擎的参数）', () => {
+  it('--weights 解析：label=path 与裸路径', () => {
+    expect(parseWeightSpec('it30=tmp/w.json')).toEqual({ path: 'tmp/w.json', label: 'it30' })
+    expect(parseWeightSpec('tmp/w.json')).toEqual({ path: 'tmp/w.json', label: 'w.json' })
+  })
+
+  it('--dist-local / dist 配置 / noNodes 都进 spec', () => {
+    const base = {
+      course: 'nn-training/levels/ladder-c06.jsonc',
+      weights: [{ label: 'it30', path: 'tmp/w.json' }],
+      games: 8,
+      seed0: 405000,
+      policy: 'nn' as const,
+      iterId: 't1',
+      runDir: 'tmp/x.run',
+      out: 'tmp/x.jsonl',
+      noNodes: false,
+    }
+    const explicit = buildSpec({
+      ...base,
+      localSlots: 0,
+      distCfgPath: 'nn-training/rl-config.json',
+      noNodes: true,
+    })
+    expect(explicit.localSlots).toBe(0)
+    expect(explicit.distCfgPath).toBe('nn-training/rl-config.json')
+    expect(explicit.noNodes).toBe(true)
+    expect(explicit.policy).toBe('nn')
+  })
+})
+
+describe('TailRaceBatch.cursorDone（Python 侧 rescan 停止条件的 TS 镜像）', () => {
+  it('游标发完前 false，发完后 true（含尾竞速阶段）', () => {
+    const b = new TailRaceBatch(3)
+    expect(b.cursorDone).toBe(false)
+    b.consumer(1)
+    expect(b.claim(false)).toBe(0)
+    expect(b.cursorDone).toBe(false)
+    expect(b.claim(false)).toBe(1)
+    expect(b.claim(false)).toBe(2)
+    expect(b.cursorDone).toBe(true)
+  })
 })
