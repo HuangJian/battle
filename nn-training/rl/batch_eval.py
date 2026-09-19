@@ -58,6 +58,23 @@ BATCH_STAGE_BASE = 2000
 EVAL_SEED0 = 860001
 SEGMENT_LEN = 100
 
+#: policy → agent 权重桶 `kind`。agent 的 `/v1/task` 按 **(kind, wver)** 精确查缓存桶
+#: （无 policy 豁免，2026-09-19 核实）⇒ 上传权重与查询任务的 kind **必须同值**，
+#: 否则一律 409 wver-not-cached。B 层（policy nn）与 C 层（policy god）用 'rollout'；
+#: intent/goal 是各自独立的权重桶（agent 侧 `latestWeightsOfKind('intent'|'goal')`）。
+KIND_FOR_POLICY: dict[str, str] = {
+    "nn": "rollout",
+    "god": "rollout",
+    "intent-exec": "intent",
+    "goal": "goal",
+    "goal-god": "rollout",
+}
+
+
+def kind_for_policy(policy: str) -> str:
+    """policy → 权重桶 kind（未知 policy 回落 'rollout'，与旧调用方逐字一致）。"""
+    return KIND_FOR_POLICY.get(str(policy), "rollout")
+
 
 def utc_now_iso() -> str:
     """UTC ISO-8601 带毫秒 + Z —— 与 console 侧 `new Date().toISOString()` 同格式。
@@ -674,6 +691,8 @@ class BatchEvalRunner:
         policy: str = "nn",
         window_event: threading.Event | None = None,
         init_sha16: str = "",
+        kind: str | None = None,
+        include_scorable: bool = False,
     ) -> None:
         self.bun = bun
         self.rl_path = rl_path
@@ -689,6 +708,13 @@ class BatchEvalRunner:
         self.policy = policy
         self.window_event = window_event
         self.init_sha16 = init_sha16
+        # kind：None = 由 policy 推（见 KIND_FOR_POLICY）；显式给值只为一处例外——
+        # 一次性评估入口要复用既有 agent 桶命名时。
+        self.kind = kind or kind_for_policy(policy)
+        # include_scorable：把 agent 报告的原始 `scorable`（scoreV7 的完整输入：
+        # finalState + telemetry）原样落到逐局行。默认关 ⇒ A/B/C 层的行**逐字节不变**；
+        # eval_m1_once 打开它，把 TS 侧的打分输入原样带回（不做字段级搬运 = 不会漂移）。
+        self.include_scorable = include_scorable
 
     def run(self) -> dict:
         try:
@@ -724,6 +750,12 @@ class BatchEvalRunner:
                 weights_bytes = f.read()
         iter_base = batch_iter_id(self.run_id, str(self.batch.get("batch_id")))
         iter_id = f"{iter_base}u{self.unit_idx}"
+        kind = self.kind
+        # unit 可**缺** lives/level：缺 = 不做覆盖（difficulty / 关卡默认说了算）。
+        # ladder/corpora 的 unit 恒带值（旧行为逐字不变）；一次性评估工具跑内置关时
+        # 没有课程覆盖语义，传 3 之类会把「难度默认」硬编码成常数（改难度即错）。
+        unit_lives = None if unit.get("lives") is None else int(unit["lives"])
+        unit_level = None if unit.get("level") is None else int(unit["level"])
         seeds = [int(s) for s in unit["seeds"]]
         pairs = [(int(unit["stageId"]), s) for s in seeds]
         total = len(pairs)
@@ -800,7 +832,7 @@ class BatchEvalRunner:
             wver,
             weights_bytes,
             timeout=min(300.0, max(60.0, task_timeout)),
-            kind="rollout",
+            kind=kind,
             log=log,
         )
         if not nodes_ok and local_weights is None:
@@ -895,6 +927,10 @@ class BatchEvalRunner:
                 "init_sha16": self.init_sha16,
                 "source": "B" if self.policy == "nn" else "C",
             }
+            # scoreV7 的原始输入（finalState + telemetry）原样带上——只有显式打开的
+            # 调用方（eval_m1_once）会看到这一列；A/B/C 层的行不留任何新键。
+            if self.include_scorable:
+                row["scorable"] = manifest.get("scorable")
             with jsonl_lock:
                 with open(self.eval_log, "a", encoding="utf-8") as jf:
                     jf.write(json.dumps(row) + "\n")
@@ -934,8 +970,8 @@ class BatchEvalRunner:
                     #（validate 用同一个值对账）。key16 只作行字段。
                     wver=wver,
                     stage_json=str(unit["stageJson"]),
-                    lives_override=int(unit["lives"]),
-                    player_level=int(unit["level"]),
+                    lives_override=unit_lives,
+                    player_level=unit_level,
                     policy=self.policy,
                 )
             else:
@@ -951,9 +987,10 @@ class BatchEvalRunner:
                     difficulty=str(unit["difficulty"]),
                     timeout=task_timeout,
                     mode="eval",
+                    kind=kind,
                     stage_json=str(unit["stageJson"]),
-                    lives_override=int(unit["lives"]),
-                    player_level=int(unit["level"]),
+                    lives_override=unit_lives,
+                    player_level=unit_level,
                     policy=self.policy,
                 )
             why = dist_common.validate_eval_result(m, wver)

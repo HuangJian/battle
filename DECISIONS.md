@@ -2738,3 +2738,76 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
      a95/a96/a97 各领到 1 局但结果被尾部竞速的重复副本抢走（`fanoutDup=2` 的设计使然，同一 (stage,seed)
      重跑结果逐字相同，故不影响读数），只看 provenance 会误读成「远端没拿到活」。
      `m1-eval` 本轮仍只打 provenance（其本地链先入队，分配口径的同样问题未动）。
+
+## §2026-09-19-m1-eval-python-dispatch（2026-09-19，m1-eval 分派链回归 Python：TS 只写 spec/读行/打分）
+
+- **决定**：上一轮的「仍留的重复」点名的就是 `m1-eval.ts` 自己的分派链（判门/rescan/尾竞速/权重下发
+  ≈300 行）。用户裁定同一口径——**Python 侧已有实战版，别再在 TS 重建**。新增
+  `nn-training/eval_m1_once.py`（spec → `rl/batch_eval.BatchEvalRunner` → 逐局行），TS 只做
+  「写 spec → 经 nn-py-safe.sh 调 Python → 读回逐局行 → scoreV7/报告/HTML/banner」。
+- **边界（明确划出，不是半途而废）**：只有**分派**回归 Python。`--no-dist` 仍走本机 in-process
+  worker 池——那是游戏引擎本身、不涉节点通信，且 `tools/perf/scan-intent-concurrency.ts` 正是量它的
+  并发度；非分派 policy（`nn` 走 `--weights-dir` 自动发现、无文件可上传，`intent`/`intent-oracle`
+  与 cadence 探针）也留在本机池。`goal-god` **不再分派**：远端 goal 执行器需要 goal 权重桶，
+  而它按 kind='none' 分派时远端必然缺权重（旧实现看似分派、实则不可用）⇒ 要跑用 `--no-dist`。
+- **Python 侧三处扩展（都是加法；既有调用方行为逐字节不变）**：
+  1. `rl/batch_eval.py`：`kind` 由 policy 推（`KIND_FOR_POLICY`：intent-exec→'intent'、goal→'goal'、
+     nn/god→'rollout'），**上传与查询同 kind**（此前写死 'rollout' ⇒ intent/goal 一律 409）；
+     `include_scorable`（默认关；True 时逐局行多带 agent 报告的原始 `scorable` = scoreV7 的完整输入，
+     原样回传、不做字段级搬运 ⇒ 不可能两端漂移）；unit 的 `lives`/`level` 缺省 = **不覆盖**
+     （difficulty/关卡默认说了算；写死 3 会把「难度默认」硬编码成常数，改难度即错）。
+  2. `rl/eval_m1.py`：`subprocess.run(text=True)` 补 `encoding="utf-8", errors="replace"`——父进程不传
+     encoding 时按 locale 解码（zh-CN Windows = cp936），而 m1-eval 的 stderr 带中文 ⇒
+     UnicodeDecodeError 被 `dispatch_eval_bg_m1` 的 except 吞成「clean eval failed (ignored)」，
+     **干净评估静默消失**（2026-09-19 实测：本地/分布式两种调用都复现；与 gate_check §30 同类坑，
+     那边靠 ensure_ascii 免疫）。
+  3. 两个一次性入口（m1 / course）把 `sys.stdout` 改道 stderr：训练栈 `rl.log.log()` 按设计写 stdout，
+     而这两个入口的 stdout 是调用方的**产物通道**（m1 的 JSON 报告 / 课程行）——实测 `[dist] weights[…]`
+     行混进 stdout 后 `json.loads(stdout)` 取 perGame 会**静默失败**（D5(a) 入账缺口）。
+- **验证（真集群 + 真消费方）**：
+  - 三种分派 policy 实跑（`god` / `intent-exec` 用 `tools/gen-intent-weights.ts` 生成的全尺寸权重 /
+    `goal` 用形状合法的合成权重）：6 节点在线、配置 `rl.local_slots: 0` ⇒ 逐局 `node:…` 全远端、本地 0；
+  - **跨 runner 对拍**（同 stage/seed/权重，dist=export-eval-game vs 本机池=sim-worker）：逐字段一致，
+    唯一差异是 `firstKillTick` ±1 tick 的采样口径（scoreV7 suite 完全相同）；
+  - **训练循环真入口** `rl/eval_m1.py::run_clean_eval` 实跑 35 关 × 1 seed →
+    `winRate=0.714 total=35 cleared=25 error=0 retries=0 perGame=35`；
+  - 断点：dist 走 Python run dir 台账（二次运行 `already settled — skip`，0.0s；`--fresh` 才清），
+    本机池仍走 TS ledger（`ledger resume: N/M already settled`）——两套各自完整，不叠加。
+- **门禁**：根 `bun run check` 绿 · `nn-python-gate` 绿（ruff/mypy）。新增 Python 6 例
+  （spec→unit 归一/行映射/kind 表与 DISPATCHABLE 对齐）+ TS 7 例（spec 构造/行映射/白名单）。
+
+## §2026-09-19-nn-decision-instant（2026-09-19，nn 决策时点归一到语料口径：NNInput 末帧决策 + nn 入列分派白名单）
+
+- **决定**：① `m1-eval` 分派白名单加 `nn`（`--weights-dir` 解析出**最新**权重文件后上传，`kind='rollout'`）
+  ——上一轮条目「nn 走 --weights-dir 自动发现、无文件可上传 ⇒ 留本机池」的**理由已被自身证伪**（解析出的
+  文件就是可上传的权重）。② `src/nn/policy-input.ts`（NNInput）的**决策时点**改为「tick 末决策、下一 tick 生效」。
+- **背景（2026-09-19 用户要求「nn 分派后与本地一致」时实测挖出）**：nn 有**两套实现且从不互相对账**
+  （god 有 `tests/sim/eval-game-parity.test.ts` 钉远程/本地同局，nn 侧无对应用例）。
+  同一 (权重=ep96, stage 0, seed 1..6)、同 maxTicks/difficulty：
+  节点引擎 `export-eval-game` 得 4601/3167/6623/2113/2606/5580；本机池（`runSimulation`→NNInput）
+  **6/6 全不同**（首个动作分歧在 seed 1 的 tick 290）。
+- **根因两层，都在 NNInput**：
+  1. **观察时点**：`Simulation.tick()` 先 `frame++`、递减 freeze/emp/spawn/pickup 计时器、跑
+     `updateSpawning()`，**之后**才读玩家输入（Simulation.ts:205-245）；而三个构建器都在自己
+     `sim.tick()` **之前**观察（`export-rl-rollout.ts:642`、`export-nn-replays.ts:116`、
+     `export-eval-game.ts:482`）⇒ mid-tick 决策看到的是策略训练时从未见过的状态。
+  2. **相位**：NNInput 用 `frame % K === 0`，构建器用 `t % K === 0`（`world.frame` = 已完成 tick 数
+     = 构建器的 `t`；末帧 `frame` 即在读输入时是 `t+1`）⇒ 决策 tick 整体错一格。
+- **修法**：决策只在 `reset()`（tick 0，调用方都在 `loadStageData` 之后 reset）与 `endFrame()`
+  （`world.frame % K === 0`、且状态仍为 `playing`）发生；`getMoveDirection()`/`isFiring()` 只读已提交动作，
+  不再 mid-tick 前向。推理次数仍是 1/K；`thinkNow()` 保留「当前状态强制一次前向」的诊断语义
+  （divergence-probe 用）。
+- **影响面（必须知道）**：历史所有**本机** nn 评估读数（m1-eval 本机池、eval-course-ckpt 本机 worker、
+  `export-dagger-labels`、`nn-trace`）都是在该错时点上评的 ⇒ 这些数字会变；**远端节点侧不变**
+  （export-eval-game 本来就是对的），故此前「本机池 vs 分派批」的混跑读数本就不可配对。
+- **验证（四腿一致，stage 0 seeds 1-3 = 4601/3167/6623 gameover/gameover/stage_clear）**：
+  真集群分派（weights 上传 → `mode=eval` kind=rollout → self 节点，`provenance: node:self=3 远端 3 / 本地 0`）、
+  本机池、Python 分派路径（localSlots=3 实跑）、节点引擎 CLI 直跑——四者逐局 ticks/kills/outcome 全等；
+  in-process 对拍 5 局（stage 0 seeds 1-3、stage 5 seeds 1/7）逐 tick 动作序列零分歧。
+- **守卫（本案的副作用）**：`src/nn/policy-input.ts` 在 codeHash 集内 ⇒ 改它会让全集群 stale（节点 hash
+  memo 到 `/v1/update` 真 pull 才失效）。self/回环节点**纯重启**（共享工作区、禁 pull、不受脏工作区护栏
+  限制）即收敛到本机 live hash（实测 `c78d48de`）；其余节点须 **commit + push → `--upgrade-nodes`**
+  （`dist_common.request_upgrade_guarded` 对脏工作区拒发，日志点名未提交的集内文件）。
+- **回归守卫**：`tests/sim/eval-game-parity.test.ts` 新增 nn 分支对账（stage 0 seeds 1/2，maxTicks 3000，
+  权重用 `tests/fixtures/student-golden.json` 的 params 落进临时目录的 `weights.json`）——已实测：旧
+  `policy-input.ts` 下该用例**红**，修复后绿（≈0.3s）。

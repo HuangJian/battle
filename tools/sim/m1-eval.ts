@@ -28,16 +28,23 @@
  *   bun tools/sim/m1-eval.ts --stages 1-5 --seeds 1-3 --policy nn
  *   bun tools/sim/m1-eval.ts --stages 1 --seeds 1 --policy nn   # 1-game sanity
  *   bun tools/sim/m1-eval.ts --stages all --seeds 1-12 --out tmp/m1_eval_scorecard.html
+ *
+ * 分派（dist）：节点通信 / 重试 / 权重下发 / rescan **只有 Python 一份实现**
+ * （`nn-training/eval_m1_once.py` → `rl/batch_eval.BatchEvalRunner` + `dist_common`，
+ * 即训练循环长期在用的那套）。本文件在 dist 路径上只做三件事：写 spec → 读回逐局行
+ * → 打分/报告。`--policy intent-exec|goal|god` 可经 agent 分派；其余策略与 `--no-dist`
+ * 走本机 worker 池（那是游戏引擎本身，不涉节点通信）。本机份额由配置决定
+ * （`policy.evalLocalSlots` → `rl.local_slots`，`--dist-local` 可显式覆盖）。
  */
 
 import { STAGES } from '../../src/config/stages'
 import { DEFAULT_GOD_AI_PARAMS, type GodAIParams } from '../../src/ai/GodAIInput'
 import { AdaptiveSimWorkerPool, physicalCores } from './sim-pool'
-import type { SimTask } from './sim-worker'
-import { gzipSync } from 'node:zlib'
+import type { RunTelemetry } from './simulation-runner'
+import type { SimTask, SimTaskResult } from './sim-worker'
+import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { readFileSync, writeFileSync } from 'node:fs'
-import { unpackContainer } from './pack-container'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import {
   scoreRun,
   aggregateStage,
@@ -50,26 +57,32 @@ import {
   type StageAggregate,
 } from '../eval/godai-score'
 import { writeScorecardHtml, type ScorecardRow, type ScorecardSuite } from './scorecard-html'
-import { resolve } from 'node:path'
-import { TailRaceBatch } from '../lib/hybrid-batch'
+import { resolveLatestWeights } from '../../src/nn/weights'
+import { join, resolve } from 'node:path'
 import { flag } from '../lib/cli'
 import { computeCodeHash } from '../agent/codehash-files'
-import {
-  bunMajorMinor,
-  configLocalSlots,
-  gateWarning,
-  nodeGateReason,
-  pingNode,
-  provenanceNote,
-  reprobeDue,
-  type DistPing,
-  type NodeGateEntry,
-} from '../lib/dist-node-gate'
+import { configLocalSlots, provenanceNote } from '../lib/dist-node-gate'
 import { requestNodeUpgrades, resolveUpgradeBranch, upgradeLogLines } from '../lib/node-upgrade'
 
 /** 仓根（升级子进程 cwd 与 nn-py-safe.sh 的相对路径解析都用它）。 */
 const REPO_ROOT = resolve(import.meta.dir, '..', '..')
 import { BatchLedger, ledgerKey } from '../lib/batch-ledger'
+
+/**
+ * 分派链的 Python 入口（节点通信/重试/权重下发/rescan 的唯一实现，见文件头）。
+ * 经 `nn-py-safe.sh`（AGENTS §0.1 规则 13：nn python 一律走官方解释器包装）。
+ */
+const PY_ENTRY = 'nn-training/eval_m1_once.py'
+const PY_SAFE = 'tools/githook/nn-py-safe.sh'
+
+/**
+ * 可经 agent 分派的 policy（与 Python 侧 `eval_m1_once.DISPATCHABLE` 同集合）：
+ * `nn` 需要先把 `--weights-dir` 解析成一个权重**文件**（见 `resolveNnWeights`），
+ * intent-exec / goal 各自带权重文件，god 无权重语义。
+ * 注：`goal-god` 自 2026-09-19 起不再分派（远端 goal 执行器需要 goal 权重桶，而它
+ * 按 kind='none' 分派时远端必然缺权重——旧实现看似分派、实则不可用）。
+ */
+export const DIST_POLICIES = ['nn', 'intent-exec', 'goal', 'god'] as const
 
 /** The 11 scored dimensions of the God AI score-v7 model (design §3). */
 const DIM_KEYS: DimensionKey[] = [
@@ -89,6 +102,19 @@ const DIM_KEYS: DimensionKey[] = [
 function arg(name: string, fallback?: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`)
   return i >= 0 ? process.argv[i + 1] : fallback
+}
+
+/**
+ * `--policy nn` 的权重**文件**解析：与 NNInput 的自动发现同一函数、同一默认目录
+ * （`src/nn/weights.resolveLatestWeights`：先取最新的 `weights.<stamp>_ep*_val*.json`，
+ * 无则回落 `weights.json`）。
+ *
+ * 为什么必须解析成文件：分派时节点上的 `export-eval-game` 要一个**文件路径**
+ * （`--weights`），不能再靠「目录里自己找」。本机池仍按目录自动发现——同一解析函数
+ * 保证两侧拿到的是同一个文件（否则分派/本地会因为「最新」的判定不同而跑不同权重）。
+ */
+export function resolveNnWeights(weightsDir: string | undefined, cwd: string): string | null {
+  return resolveLatestWeights(weightsDir ?? join(cwd, 'nn-training', 'weights'))
 }
 
 function parseRange(spec: string): number[] {
@@ -125,6 +151,8 @@ async function main(): Promise<void> {
   // machine). `--workers` may LOWER the cap for a conservative run but can never
   // exceed it. Live concurrency then tracks system CPU load via AdaptiveSimWorkerPool:
   //   load > 90% → −1 worker ; load < 85% → +1 worker ; floor = 1.
+  // nn 策略的权重文件（分派要文件路径；本机池按目录自动发现——同一解析函数）
+  const nnWeightsPath = policy === 'nn' ? resolveNnWeights(weightsDir, process.cwd()) : null
   const physical = physicalCores()
   const fixedWorkers = parseInt(arg('fixed-workers', '0')!, 10) // 0 = 自适应并发（默认）
   const workers =
@@ -207,21 +235,37 @@ async function main(): Promise<void> {
   // ---- v4.1 逐局账本：断点续跑 + 错误局重跑（rollout resume 机制的 TS 提取）----
   // wver 覆盖"影响结果的全部输入"（权重字节 / 无权重策略的占位）；权重变更或
   // 代码变更（--fresh）都会使旧账本条目不计入 done。
+  // 账本只在**本机 worker 池**路径生效：dist 路径的断点台账是 Python run dir 里的
+  // eval_log（同 wver 的 (stage,seed) 由 BatchEvalRunner 的 `_done_keys` 跳过），
+  // 两套各自完整，不叠加（叠加只会让「谁在续跑」说不清）。
   const noFresh = arg('fresh') === undefined
   let wverBytes: Buffer | null = null
   if (policy === 'goal' && goalWeights) wverBytes = readFileSync(goalWeights)
   else if (policy === 'intent-exec' && intentWeights) wverBytes = readFileSync(intentWeights)
   else if (policy === 'god' || policy === 'goal-god') wverBytes = Buffer.from('{}')
   const wver = wverBytes ? createHash('sha256').update(wverBytes).digest('hex') : `local-${policy}`
-  const ledger = noFresh ? new BatchLedger(`${outPath}.ledger.jsonl`, wver) : null
+  const ledger = noFresh && !distNodesPath ? new BatchLedger(`${outPath}.ledger.jsonl`, wver) : null
+  if (distNodesPath)
+    process.stderr.write(
+      `[m1-eval] ledger: dist 路径由 Python run dir 断点（${outPath}.m1run；--fresh 清空）\n`,
+    )
   const ledgerDone = ledger ? ledger.loadDone() : new Map()
   const milestone: Record<string, boolean> = {}
 
   // 按 id 归位的占位数组：未结算/账本跳过的任务必须是**空洞**（不是 undefined）——
   // 下面的 `results.map` 靠空洞跳过产生 JSON null 行；填成 undefined 会改成「默认值行」，
   // 静默改变 perGame/eval_log 的逐局口径。故用 `length` 预置而不能用 Array.from。
-  const results: import('./sim-worker').SimTaskResult[] = []
+  const results: DistResult[] = []
   results.length = tasks.length
+  /** error 局占位（dist 路径一轮跑完**不留空洞**——未结算即 error，交重跑循环/报告记账）。 */
+  const failResult = (id: number): DistResult => ({
+    id,
+    ok: false,
+    outcome: 'error',
+    ticks: 0,
+    killCount: 0,
+    baseAlive: false,
+  })
   const tasksTodo: SimTask[] = []
   for (const t of tasks) {
     const key = ledgerKey(t.stageIndex ?? 0, t.seed)
@@ -246,7 +290,7 @@ async function main(): Promise<void> {
   }
 
   /** 单局结算（含账本追加；results 按任务 id 归位）。 */
-  const onSettleOne = (t: SimTask, res: import('./sim-worker').SimTaskResult): void => {
+  const onSettleOne = (t: SimTask, res: DistResult): void => {
     results[t.id] = res
     ledger?.append({
       wver,
@@ -260,8 +304,11 @@ async function main(): Promise<void> {
     })
   }
 
-  /** 一轮分派（断点续跑子集/重跑子集都走同一入口）。 */
-  const runOnce = async (batchTasks: SimTask[]): Promise<void> => {
+  /** 一轮分派（断点续跑子集/重跑子集都走同一入口；fresh 只在首轮为真）。 */
+  const runOnce = async (
+    batchTasks: SimTask[],
+    fresh: boolean,
+  ): Promise<Record<string, number>> => {
     const base = results.filter(Boolean).length
     const progress = (d: number, tot: number): void => {
       reportProgress(base + d, tasks.length)
@@ -290,27 +337,28 @@ async function main(): Promise<void> {
       void tot
     }
     if (distNodesPath) {
-      await runHybrid(
+      // 分派链 = Python（写 spec → BatchEvalRunner → 逐局行归位）；本机份额也在那边按配置决定。
+      const src = await runPythonDist(
+        distCtx,
         batchTasks,
-        distNodesPath,
-        distLocal,
-        iterId,
-        weightsArg,
-        distKind,
         progress,
         (i, res) => onSettleOne(batchTasks[i], res),
+        fresh,
       )
-    } else {
-      const pool = new AdaptiveSimWorkerPool(workers, 1)
-      pool.setAdjustHook((desired, load) => {
-        process.stderr.write(`[m1-eval] concurrency ${desired} (cpu ${load}%)\n`)
-      })
-      const sub = await pool.runAdaptive(batchTasks, progress, { fixed: fixedWorkers > 0 })
-      for (const r of sub) {
-        const t = batchTasks.find((x) => x.id === r.id)
-        if (t) onSettleOne(t, r)
-      }
+      // 不变量：一轮跑完不留空洞（未结算 = error 局，重跑循环只挑 ok===false 的）
+      for (const t of batchTasks) if (results[t.id] === undefined) onSettleOne(t, failResult(t.id))
+      return src
     }
+    const pool = new AdaptiveSimWorkerPool(workers, 1)
+    pool.setAdjustHook((desired, load) => {
+      process.stderr.write(`[m1-eval] concurrency ${desired} (cpu ${load}%)\n`)
+    })
+    const sub = await pool.runAdaptive(batchTasks, progress, { fixed: fixedWorkers > 0 })
+    for (const r of sub) {
+      const t = batchTasks.find((x) => x.id === r.id)
+      if (t) onSettleOne(t, r)
+    }
+    return {}
   }
 
   // Staged progress reporter (to stderr, so stdout stays clean JSON).
@@ -336,31 +384,38 @@ async function main(): Promise<void> {
     )
   }
 
-  // v4.0 auto-dist：策略可分发（在白名单内）且配置存在 ⇒ 混合分派；否则纯本地回落。
-  // kind='none'：无权重策略（god/goal-god），上传占位桶满足 agent 的 wver 协议。
-  const DIST_POLICIES: Record<string, 'intent' | 'goal' | 'none'> = {
-    'intent-exec': 'intent',
-    goal: 'goal',
-    god: 'none',
-    'goal-god': 'none',
-  }
-  const distKind = DIST_POLICIES[policy]
-  if (distNodesPath && !distKind) {
+  // v4.0 auto-dist：策略可分发且配置存在 ⇒ 经 **Python** 分派（BatchEvalRunner）；
+  // 否则纯本地（分派集合见文件头的 DIST_POLICIES）。
+  if (distNodesPath && !(DIST_POLICIES as readonly string[]).includes(policy)) {
     process.stderr.write(
-      `[m1-eval] policy ${policy} is not dispatchable (${Object.keys(DIST_POLICIES).join('|')}) — running local only\n`,
+      `[m1-eval] policy ${policy} is not dispatchable (${DIST_POLICIES.join('|')}) — running local only\n`,
     )
     distNodesPath = ''
   }
   if (distNodesPath) {
-    if (distKind === 'intent' && !intentWeights) {
+    if (policy === 'intent-exec' && !intentWeights) {
       process.stderr.write(
         '[m1-eval] --dist-nodes --policy intent-exec requires --intent-weights\n',
       )
       process.exit(2)
     }
-    if (distKind === 'goal' && !goalWeights) {
+    if (policy === 'goal' && !goalWeights) {
       process.stderr.write('[m1-eval] --dist-nodes --policy goal requires --goal-weights\n')
       process.exit(2)
+    }
+    if (policy === 'nn') {
+      // 解析不到就不派（本机池也会因同一原因失败，早报比半跑好）：目录里既没有
+      // `weights.<stamp>_ep*_val*.json` 也没有 `weights.json`。
+      const dirShown = weightsDir ?? join(process.cwd(), 'nn-training', 'weights')
+      if (!nnWeightsPath) {
+        process.stderr.write(
+          `[m1-eval] --dist-nodes --policy nn: no weights in ${dirShown}` +
+            ` (expect weights.<YYYYMMDD-HHMMSS>_ep*_val*.json or weights.json)\n`,
+        )
+        process.exit(2)
+      }
+      // 读数可追溯：这批跑的是哪个文件（目录里可能同时躺着几十份）
+      process.stderr.write(`[m1-eval] nn weights: ${nnWeightsPath}\n`)
     }
   }
   // 本机并发：显式 `--dist-local` > 配置 `policy.evalLocalSlots` > `rl.local_slots` > --workers 全核。
@@ -381,15 +436,33 @@ async function main(): Promise<void> {
             ? `配置 ${distLocalCfg.source}`
             : '物理核数（配置未约定）'
       }）\n`,
-    )
+    ) // 分派权重文件（nn 用解析出的最新文件；god 无权重语义）
   const weightsArg =
-    distKind === 'goal'
-      ? (goalWeights as string)
-      : distKind === 'intent'
-        ? (intentWeights as string)
-        : '' // 'none'：runHybrid 内部用占位字节
+    policy === 'goal'
+      ? (goalWeights ?? '')
+      : policy === 'intent-exec'
+        ? (intentWeights ?? '')
+        : policy === 'nn'
+          ? (nnWeightsPath ?? '')
+          : ''
+  // ---- 分派上下文：spec 由 buildDistSpec（纯函数）从任务子集构造 ----
+  // 路径一律绝对化：Python 子进程的 cwd 是仓根（REPO_ROOT），用户从别的目录敲命令时
+  // 相对路径会在两侧指向不同文件（权重读不到 / 行写错地方）。
+  const distCtx: DistCtx = {
+    cfgPath: distNodesPath ?? '',
+    policy,
+    weights: weightsArg ? resolve(weightsArg) : '',
+    difficulty,
+    maxTicks,
+    localSlots: distLocal,
+    iterId,
+    runDir: resolve(`${outPath}.m1run`),
+    out: resolve(`${outPath}.m1run/rows.jsonl`),
+  }
   // 错误局重跑（rollout clean-eval 的 CLEAN_EVAL_MAX_RETRY 语义）：错误局最多再跑 2 次。
   let todo = tasksTodo
+  /** 逐局来源（`node:<id>` / `local`）——产物必须能回答「这批局谁跑的」。 */
+  const bySrc: Record<string, number> = {}
   for (let attempt = 0; attempt <= 2 && todo.length > 0; attempt++) {
     if (attempt > 0) {
       process.stderr.write(
@@ -397,8 +470,36 @@ async function main(): Promise<void> {
 `,
       )
     }
-    await runOnce(todo)
+    // fresh：只在首轮且用户给了 `--fresh` 时清 Python 台账（重跑子集绝不能清——
+    // 清了就把首轮已结算的行一起丢掉，重跑会连成功局一起重跑）。
+    const passSrc = await runOnce(todo, attempt === 0 && !noFresh)
+    for (const [k, v] of Object.entries(passSrc)) bySrc[k] = (bySrc[k] ?? 0) + v
     todo = tasks.filter((t) => results[t.id] && results[t.id]!.ok === false)
+  }
+
+  // 收尾：来源注脚 + 可选节点升级（扫描/判 stale 全在 Python：dist_common.upgrade_stale_nodes）。
+  // 注：个别节点环境上就是不支持远控升级（隧道后 agent 返 502 等）——那是环境事实，
+  // Python 逐节点报告，不阻塞其他节点。
+  if (distNodesPath) {
+    const nodeIds = new Set(
+      Object.keys(bySrc)
+        .filter((k) => k.startsWith('node:'))
+        .map((k) => k.slice(5)),
+    )
+    for (const l of provenanceNote('[m1-eval]', bySrc, {
+      localCap: distLocal,
+      usableNodes: nodeIds.size,
+    }))
+      process.stderr.write(`${l}\n`)
+    if (flag('upgrade-nodes')) {
+      const up = requestNodeUpgrades({
+        repoRoot: REPO_ROOT,
+        cfgPath: distNodesPath,
+        expectedHash: computeCodeHash(),
+        branch: resolveUpgradeBranch(REPO_ROOT),
+      })
+      for (const l of upgradeLogLines('[m1-eval]', up)) process.stderr.write(`${l}\n`)
+    }
   }
   const simSeconds = (Date.now() - t0) / 1000
   process.stderr.write(
@@ -465,8 +566,10 @@ async function main(): Promise<void> {
       acc.clearedAll = (acc.clearedAll ?? 0) + 1
     acc.kills += r.killCount
 
-    // Score this run with the God AI score-v7 model.
-    const scorable: ScorableRun = {
+    // Score this run with the God AI score-v7 model. dist 路径带 agent 报告的原始
+    // `scorable`（打分的完整输入；逐字段搬运会漂移）；本机 worker 池路径按
+    // SimTaskResult 合成同一形状。
+    const scorable: ScorableRun = r.scorable ?? {
       outcome: r.outcome,
       ticks: r.ticks,
       finalState: { killCount: r.killCount, lives: r.lives ?? 0, baseAlive: r.baseAlive },
@@ -633,376 +736,202 @@ async function main(): Promise<void> {
   }
 }
 
-// ---------------- v3.7 分布式分派：评估任务经 HTTP 派发到 rollout agent ----------------
+// ---------------- 分派（dist）：spec → Python（BatchEvalRunner）→ 逐局行 ----------------
+//
+// 这里**只**做三件事：把任务子集翻成 spec、调 Python、把逐局行归位。节点 ping/门/
+// 退避重试/rescan/失败停用/权重下发/wver 409/本机份额全在 `nn-training/eval_m1_once.py`
+// → `rl/batch_eval.BatchEvalRunner` + `dist_common`（训练循环长期实战的那套）——本文件
+// 不再有第二份实现（2026-09-19 用户裁定：Python 端已有这些机制，别再在 TS 里重建）。
 
-interface DistNodeCfg {
-  id: string
-  url: string
-  authKey?: string
-  concurrency?: number
-  enabled?: boolean
+/** 分派上下文（main 构造；runPythonDist 只读；测试直接构造）。 */
+export interface DistCtx {
+  cfgPath: string
+  policy: string
+  weights: string
+  difficulty: string
+  maxTicks: number
+  localSlots: number
+  iterId: string
+  runDir: string
+  out: string
 }
 
-async function uploadWeights(
-  node: DistNodeCfg,
-  kind: string,
-  bytes: Buffer,
-  sha: string,
-  iterId: string,
-): Promise<void> {
-  const resp = await fetch(`${node.url}/v1/weights`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${node.authKey ?? ''}`,
-      'Content-Type': 'application/octet-stream',
-      'x-weights-sha256': sha,
-      'x-iter-id': iterId,
-      'x-kind': kind,
-    },
-    body: gzipSync(bytes),
-  })
-  if (resp.status !== 200 && resp.status !== 204)
-    throw new Error(`${node.id} weights upload HTTP ${resp.status}`)
+/** Python 侧 spec 契约（`nn-training/eval_m1_once.py --spec`）。 */
+export interface M1DistSpec {
+  runDir: string
+  out: string
+  policy: string
+  weights: string
+  difficulty: string
+  maxTicks: number
+  distCfgPath: string
+  localSlots: number
+  iterId: string
+  fresh: boolean
+  windowSec: number
+  taskTimeoutSec: number
+  units: Array<{ stageId: number; seeds: number[] }>
 }
 
 /**
- * 混合分派（v3.8）：本机 worker + 远端节点共用同一任务游标并行消费。
+ * 任务子集 → spec（纯函数，可单测）。
  *
- * 为什么不是 v3.7 的 runDist：
- *  - v3.7 用 `i % nodes.length` 轮转指派，节点 concurrency 只影响总线程数，
- *    不控制每个节点实际在飞请求数——慢节点与快节点同额分单，并发没打满。
- *  - v3.7 本机只当协调者，16 个本地核闲置。
- *
- * 本实现：每个节点按自己的 concurrency 生成独立 fetch-loop（在飞请求数 =
- * concurrency，精确利用节点容量），本地生成 localWorkers 个 worker-loop，
- * 全部从一个共享游标取任务——快节点/本地自动多吃，尾部不再被慢节点拖住。
+ * unit = 一个内置关（`stageId` = 关卡索引）+ 它的种子段；stage 升序保证行序稳定
+ * （错误局重跑只换 tasks 子集，语料口径仍只有这一处）。
  */
-async function runHybrid(
-  tasks: SimTask[],
-  nodesPath: string,
-  localWorkers: number,
-  iterId: string,
-  weightsPath: string,
-  distKind: 'intent' | 'goal' | 'none' = 'intent',
-  onProgress: (done: number, total: number) => void,
-  onSettle?: (i: number, res: import('./sim-worker').SimTaskResult) => void,
-): Promise<import('./sim-worker').SimTaskResult[]> {
-  const cfg = JSON.parse(readFileSync(nodesPath, 'utf8')) as { nodes?: DistNodeCfg[] }
-  const nodes = (cfg.nodes ?? []).filter((n) => n.enabled !== false && n.url)
-  if (nodes.length === 0 && localWorkers <= 0)
-    throw new Error('no enabled nodes and no local workers')
-
-  const localCap = Math.max(0, localWorkers)
-  const remoteCap = nodes.reduce((s, n) => s + Math.max(1, n.concurrency ?? 4), 0)
-  process.stderr.write(
-    `[m1-eval] hybrid dispatch: ${nodes.length} nodes (${remoteCap} slots) + local ${localCap}, ${tasks.length} games\n`,
-  )
-
-  // kind='none'（god/goal-god 无权重策略）：占位字节满足 wver 协议，内容恒定。
-  const bytes = distKind === 'none' ? Buffer.from('{}') : readFileSync(weightsPath)
-  const wver = createHash('sha256').update(bytes).digest('hex')
-
-  // 按 id 归位的占位数组（未结算槽位保持空洞，与主循环同约定；返回值交调用方消费）。
-  const results: import('./sim-worker').SimTaskResult[] = []
-  results.length = tasks.length
-  const total = tasks.length
-  const fail = (id: number): import('./sim-worker').SimTaskResult => ({
-    id,
-    ok: false,
-    outcome: 'error',
-    ticks: 0,
-    killCount: 0,
-    baseAlive: false,
-  })
-  // v4.1 调度状态机（rollout queue v3.7 机制的 TS 提取，tools/lib/hybrid-batch.ts）：
-  // 共享游标 + 尾部 fan-out 竞速（先结算者胜）+ 幂等结算。
-  const batch = new TailRaceBatch(total)
-  let done = 0
-  // 逐局来源计数（`node:<id>` / `local`）：产物必须能回答「这批局谁跑的」。
-  const bySrc: Record<string, number> = {}
-  const settle = (i: number, res: import('./sim-worker').SimTaskResult, src: string): void => {
-    if (!batch.settle(i)) return // 幂等：竞速副本后到即弃
-    results[i] = res
-    done++
-    bySrc[src] = (bySrc[src] ?? 0) + 1
-    onProgress(done, total)
-    onSettle?.(i, res)
+export function buildDistSpec(ctx: DistCtx, tasks: SimTask[], fresh: boolean): M1DistSpec {
+  const byStage = new Map<number, number[]>()
+  for (const t of tasks) {
+    const si = t.stageIndex ?? 0
+    const arr = byStage.get(si)
+    if (arr) arr.push(t.seed)
+    else byStage.set(si, [t.seed])
   }
-  const allDone = batch.whenAll()
-
-  // 已激活节点（按 url 去重）：初始节点 + rescan 中途加入的节点；
-  // stoppedNodes = 任务连失且重探未过门（链自行退出，留给 rescan 复活）。
-  const activeNodes = new Set<string>()
-  const stoppedNodes = new Set<string>()
-  const lastProbeAt = new Map<string, number>()
-  const pingTimeoutMs = parseInt(arg('ping-timeout', '10')!, 10) * 1000
-
-  // v3.9 动态节点激活：ping 通过 → 权重幂等上传 → spawn 并发链。
-  // 初始/中途统一走此路径——离线节点不激活、不中断整个跑批，留给 rescan 周期再探。
-  // 节点门（2026-09-19 补：此前 tryActivate 只看 HTTP 200，**没有** codeHash/bun/
-  // 能力位门 ⇒ 陈旧节点会被当可用算力，不同 era 的结果混进同一份读数）。门后
-  // 口径与 rollout/eval 同源（tools/lib/dist-node-gate.ts ↔ dist_common.check_code_hash）。
-  const localBunMM = bunMajorMinor(process.versions.bun ?? Bun.version ?? '?')
-  const localCodeHash = computeCodeHash()
-  const gate: NodeGateEntry[] = []
-  const recordGate = (id: string, why: string | null, pingHash: string): void => {
-    const i = gate.findIndex((g) => g.id === id)
-    const e: NodeGateEntry = { id, ok: !why, reason: why, pingHash }
-    if (i >= 0) gate[i] = e
-    else gate.push(e)
+  return {
+    runDir: ctx.runDir,
+    out: ctx.out,
+    policy: ctx.policy,
+    weights: ctx.weights,
+    difficulty: ctx.difficulty,
+    maxTicks: ctx.maxTicks,
+    distCfgPath: ctx.cfgPath,
+    localSlots: ctx.localSlots,
+    iterId: ctx.iterId,
+    fresh,
+    // 一次性 CLI：窗口不截断（Python 侧默认 86400s）；单局超时沿用本工具旧公式
+    //（maxTicks/20 + 120：36000 tick 的硬关 ≈ 1920s，别拿 900s 默认值砍掉慢节点上的长局）。
+    windowSec: 86400,
+    taskTimeoutSec: Math.round(ctx.maxTicks / 20 + 120),
+    units: [...byStage.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([stageId, seeds]) => ({ stageId, seeds })),
   }
-
-  // 任务连失后的**立即重探**（冷却去重）：还过门就继续用（忙≠死），
-  // 不过门就停用这台（它的链自行退出，尾部交给健康消费者）；rescan 会再给机会。
-  const reprobeAfterFailure = async (node: DistNodeCfg): Promise<void> => {
-    const nid = node.id || node.url
-    if (stoppedNodes.has(node.url)) return
-    if (!reprobeDue(lastProbeAt.get(node.url), Date.now(), 15_000)) return
-    lastProbeAt.set(node.url, Date.now())
-    const ping = await pingNode(node.url, node.authKey ?? '', { timeoutMs: pingTimeoutMs })
-    const why = nodeGateReason(ping, localBunMM, localCodeHash)
-    recordGate(nid, why, String(ping?.codeHash ?? ''))
-    if (!why) return
-    stoppedNodes.add(node.url)
-    activeNodes.delete(node.url)
-    process.stderr.write(
-      `[m1-eval] node ${nid}: 任务连失且重探未过门（${why}）— 本轮停用（rescan 会再试）\n`,
-    )
-  }
-
-  const tryActivate = async (node: DistNodeCfg): Promise<boolean> => {
-    const nid = node.id || node.url
-    if (activeNodes.has(node.url)) return false
-    stoppedNodes.delete(node.url)
-    lastProbeAt.set(node.url, Date.now())
-    // ping 带重试 + 可调超时（用户 2026-09-19：节点都在线，只是可能 ping 得慢；
-    // 一次 5s 超时就把健康节点判死，会让整批白丢这台算力）。
-    const ping: DistPing | null = await pingNode(node.url, node.authKey ?? '', {
-      timeoutMs: pingTimeoutMs,
-    })
-    const why = nodeGateReason(ping, localBunMM, localCodeHash)
-    recordGate(nid, why, String(ping?.codeHash ?? ''))
-    if (why) {
-      process.stderr.write(`[m1-eval] node ${nid}: ${why} — skipped\n`)
-      return false
-    }
-    try {
-      // v4.0 修复：kind 随 distKind（原写死 'intent'——goal 分发会 409 wver-not-cached）
-      await uploadWeights(node, distKind, bytes, wver, iterId)
-    } catch {
-      process.stderr.write(`[m1-eval] ${node.id ?? node.url}: weights upload failed — skipped\n`)
-      return false
-    }
-    activeNodes.add(node.url)
-    spawnNode(node)
-    return true
-  }
-
-  // 远端 fetch-loop：单条并发链，精确占用节点容量。返回后 pending--。
-  const spawnNode = (node: DistNodeCfg): void => {
-    const cap = Math.max(1, node.concurrency ?? 4)
-    batch.consumer(cap)
-    for (let s = 0; s < cap; s++) {
-      ;(async (): Promise<void> => {
-        try {
-          for (;;) {
-            // 已停用（连失 + 重探未过门）⇒ 退出，把尾部留给健康消费者
-            if (stoppedNodes.has(node.url)) return
-            const i = batch.claim(batch.hasInflight)
-            if (i < 0) return
-            if (i >= total) return
-            const task = tasks[i]
-            const url =
-              `${node.url}/v1/task?iterId=${encodeURIComponent(iterId)}&wver=${wver}` +
-              `&stage=${task.stageIndex}&seed=${task.seed}&maxTicks=${task.maxTicks}` +
-              `&difficulty=${task.difficulty}&mode=eval&kind=${distKind}&policy=${task.policy ?? 'nn'}`
-            let ok = false
-            // 退避重试（§30 启发）：agent 忙（503 busy / HTTP 错误）时尊重 Retry-After
-            // 或阶梯退避，熬过 rollout 尾巴与 eval 并发的忙窗——纯 2 连击失败会把
-            // 350 局大半打成 error → winRate 假阳性暴跌 → 误触发止损。409（wver 不
-            // 匹配）是确定性错误，不重试浪费时间。
-            const RETRY_BACKOFF = [3, 5, 8, 12, 18, 26, 38, 60] // 秒
-            for (let attempt = 0; attempt < RETRY_BACKOFF.length && !ok; attempt++) {
-              try {
-                const resp = await fetch(url, {
-                  headers: { Authorization: `Bearer ${node.authKey ?? ''}` },
-                  signal: AbortSignal.timeout((task.maxTicks / 20 + 120) * 1000),
-                })
-                if (resp.status !== 200) {
-                  if (resp.status === 409) break // 确定性错误（wver 未缓存）
-                  const retryAfter = Number(resp.headers.get('retry-after') ?? '')
-                  await new Promise((r) =>
-                    setTimeout(
-                      r,
-                      ((retryAfter > 0 ? retryAfter : RETRY_BACKOFF[attempt]) || 5) * 1000,
-                    ),
-                  )
-                  continue
-                }
-                const { manifest } = unpackContainer(Buffer.from(await resp.arrayBuffer()))
-                const m = manifest as any
-                const sc = m.scorable ?? {}
-                const fs = sc.finalState ?? {}
-                settle(
-                  i,
-                  {
-                    id: task.id,
-                    ok: true,
-                    outcome: m.outcome ?? 'error',
-                    ticks: typeof m.ticks === 'number' ? m.ticks : 0,
-                    killCount: typeof fs.killCount === 'number' ? fs.killCount : 0,
-                    baseAlive: fs.baseAlive === true,
-                    lives: typeof fs.lives === 'number' ? fs.lives : undefined,
-                    firstKillTick:
-                      typeof sc.firstKillTick === 'number' ? sc.firstKillTick : undefined,
-                    telemetry: sc.telemetry,
-                  },
-                  `node:${node.id ?? node.url}`,
-                )
-                ok = true
-              } catch {
-                // 网络/超时：退避后重试
-                await new Promise((r) => setTimeout(r, RETRY_BACKOFF[attempt] * 1000))
-              }
-            }
-            if (!ok) {
-              settle(i, fail(task.id), `node:${node.id ?? node.url}`)
-              void reprobeAfterFailure(node)
-            }
-          }
-        } finally {
-          batch.finishConsumer()
-        }
-      })()
-    }
-  }
-
-  const spawnLocal = (): Promise<void> =>
-    new Promise<void>((resolve) => {
-      const worker = new Worker(WORKER_URL)
-      const run = async (): Promise<void> => {
-        try {
-          for (;;) {
-            const i = batch.claim(batch.hasInflight)
-            if (i < 0) return
-            if (i >= total) return
-            const task = tasks[i]
-            const res = await new Promise<import('./sim-worker').SimTaskResult>((r) => {
-              worker.addEventListener(
-                'message',
-                (ev: MessageEvent<import('./sim-worker').SimTaskResult>) => r(ev.data),
-                {
-                  once: true,
-                },
-              )
-              worker.postMessage(task)
-            })
-            settle(i, res, 'local')
-          }
-        } finally {
-          worker.terminate()
-          batch.finishConsumer()
-        }
-      }
-      void run().then(resolve)
-    })
-
-  // 本地 worker-loop：每个 worker 串行消费，独占一条并发链。
-  const WORKER_URL = new URL('./sim-worker.ts', import.meta.url).href
-  for (let w = 0; w < localCap; w++) {
-    batch.consumer(1)
-    void spawnLocal()
-  } // 初始在线节点尽快激活；离线节点留待 rescan。收集 promise 供**收尾时**汇总告警
-  // （不在中途等：本地 worker 与已激活节点必须立刻开始消费任务）。
-  const initialActivations = nodes.map((node) => tryActivate(node).catch(() => false))
-
-  /** 收尾时的响亮告警 + 可选升级（复用训练循环守卫）。
-   *  放在 allDone 之后而不是激活当场：ping 与本地游戏是竞速的（1 局的短跑会在 ping
-   *  落定前就结束），提前打印会让告警随机丢失——门结果齐了再汇总才可靠。 */
-  const reportGate = async (): Promise<void> => {
-    await Promise.race([
-      Promise.allSettled(initialActivations).then(() => undefined),
-      new Promise((r) => setTimeout(r, 2000)),
-    ])
-    for (const l of gateWarning('[m1-eval]', gate, localCodeHash, {
-      localCap,
-      upgradeRequested: flag('upgrade-nodes'),
-    })) {
-      process.stderr.write(`${l}\n`)
-    }
-    if (!flag('upgrade-nodes')) return
-    // 扫描 + 判 stale + 护栏全在 Python 侧（dist_common.upgrade_stale_nodes）；
-    // 本文件不 ping、不自己挑 stale（此前那套是训练循环的重复实现）。
-    // 注：个别节点环境上就是不支持远控升级（如隧道后 agent 返 502、节点没起
-    // tunneling）——那是环境事实，python 逐个 reason 报告，不阻塞其他节点。
-    const up = requestNodeUpgrades({
-      repoRoot: REPO_ROOT,
-      cfgPath: nodesPath,
-      expectedHash: localCodeHash,
-      branch: resolveUpgradeBranch(REPO_ROOT),
-    })
-    for (const l of upgradeLogLines('[m1-eval]', up)) process.stderr.write(`${l}\n`)
-  }
-
-  // 无消费者守护：--dist-local 0 且初始节点全部离线时（或任务太少被本地瞬取），
-  // 若干 loop 都没被 spawn、pending=0 → allDone 永不 resolve → 永久挂起。
-  // 首轮激活尝试后仍未 spawn 任何 loop，则剩余任务标记失败收尾。
-  ;(async (): Promise<void> => {
-    await Promise.resolve()
-    setTimeout(() => {
-      if (batch.pendingConsumers <= 0 && batch.done < total) {
-        const failed = batch.failUnsettled()
-        process.stderr.write(
-          `[m1-eval] no consumer available (local ${localCap}, ${activeNodes.size}/${nodes.length} nodes) — failing ${failed.length} remaining tasks\n`,
-        )
-      }
-    }, 2500)
-  })().catch(() => {})
-
-  // v3.9 动态节点发现：周期（默认 120s）重读 rl-config.json，把中途上线的
-  // 新节点（或运行中被加入配置的节点）也纳入分派——权重幂等上传 + spawn 其并发链。
-  const rescanCfg = (cfg as { policy?: { agentRescanSec?: number } }).policy
-  const rescanSec = ((): number => {
-    const cli = parseInt(arg('dist-rescan', '0')!, 10)
-    if (cli > 0) return cli
-    const pol = rescanCfg?.agentRescanSec
-    // 缺省 30s（旧值 120s）：节点慢/被别的作业占满时，重探是回收算力的唯一渠道；
-    // 探一次的成本 = 一次带重试的 ping，比白白空跑几分钟便宜。
-    return typeof pol === 'number' && pol > 0 ? pol : 30
-  })()
-  let rescanTimer: ReturnType<typeof setInterval> | undefined
-  if (rescanSec > 0) {
-    const scan = async (): Promise<void> => {
-      if (batch.done >= total) return // 已派完，无需再发现
-      let fresh: { nodes?: DistNodeCfg[] } | null = null
-      try {
-        fresh = JSON.parse(readFileSync(nodesPath, 'utf8'))
-      } catch {
-        return
-      }
-      if (!fresh) return
-      for (const cand of fresh.nodes ?? []) {
-        if (cand.enabled === false || !cand.url || activeNodes.has(cand.url)) continue
-        const act = await tryActivate(cand)
-        if (act) {
-          process.stderr.write(
-            `[m1-eval] rescan: node ${cand.id ?? cand.url} online mid-run (+${Math.max(1, cand.concurrency ?? 4)} slots)\n`,
-          )
-        }
-      }
-    }
-    rescanTimer = setInterval(() => void scan(), rescanSec * 1000)
-  }
-
-  await allDone
-  if (rescanTimer) clearInterval(rescanTimer)
-  await reportGate().catch(() => {})
-  for (const l of provenanceNote('[m1-eval]', bySrc, {
-    localCap,
-    usableNodes: gate.filter((g) => g.ok).length,
-  }))
-    process.stderr.write(`${l}\n`)
-  return results
 }
 
-await main()
+/** Python 侧逐局行（`eval_m1_once.to_m1_row` 的输出契约）。 */
+export interface M1DistRow {
+  stage: number
+  seed: number
+  node?: string | null
+  ok?: boolean
+  outcome?: string | null
+  win?: boolean
+  cleared?: boolean
+  ticks?: number
+  kills?: number
+  lives?: number | null
+  baseAlive?: boolean | null
+  firstKillTick?: number | null
+  enemyTotal?: number | null
+  playerDeaths?: number | null
+  playerShots?: number | null
+  powerUpsCollected?: number | null
+  playerLevel?: number | null
+  cellsVisited?: number | null
+  /** agent 报告的原始 scorable（scoreV7 的完整输入；旧节点缺这一列）。 */
+  scorable?: unknown
+}
+
+/** 逐局结果 + agent 原始 scorable（本机 worker 池路径没有这一项）。 */
+export interface DistResult extends SimTaskResult {
+  scorable?: ScorableRun
+}
+
+/**
+ * 逐局行 → SimTaskResult（纯函数，可单测）。
+ *
+ * `scorable` 原样带上（打分输入不做字段级搬运 = 不会两端漂移）；旧节点/缺列时按标量列
+ * 合成一份 telemetry，让 scoreV7 仍能算（缺的维度按 null 跳过，不是伪造成 0）。
+ */
+export function rowToSimResult(row: M1DistRow, id: number): DistResult {
+  const sc = (row.scorable ?? null) as ScorableRun | null
+  const telemetry: RunTelemetry | undefined =
+    (sc?.telemetry as RunTelemetry | undefined) ??
+    ({
+      enemyTotal: row.enemyTotal ?? 0,
+      startLives: 0,
+      playerDeaths: row.playerDeaths ?? 0,
+      playerShots: row.playerShots ?? 0,
+      powerUpsSpawned: 0,
+      powerUpsCollected: row.powerUpsCollected ?? 0,
+      starsCollected: 0,
+      finalPlayerLevel: row.playerLevel ?? 0,
+      baseWallIntact: 0,
+      baseWallTotal: 0,
+      basePressureMean: 0,
+      basePressureSamples: 0,
+      cellsVisited: row.cellsVisited ?? 0,
+      deaths: [],
+    } as RunTelemetry)
+  const outcome = String(row.outcome ?? 'error')
+  return {
+    id,
+    ok: row.ok !== false && outcome !== 'error',
+    outcome,
+    ticks: row.ticks ?? 0,
+    killCount: row.kills ?? 0,
+    baseAlive: row.baseAlive ?? sc?.finalState?.baseAlive ?? true,
+    cleared: row.cleared === true,
+    lives: row.lives ?? sc?.finalState?.lives ?? undefined,
+    firstKillTick: row.firstKillTick ?? undefined,
+    telemetry,
+    scorable: sc ?? undefined,
+  }
+}
+
+/**
+ * 跑一轮分派：写 spec → 经 `nn-py-safe.sh` 调 Python → 逐局行归位。
+ * 返回本轮的**来源计数**（`local` / `node:<id>`），供 provenance 注脚。
+ */
+async function runPythonDist(
+  ctx: DistCtx,
+  batchTasks: SimTask[],
+  progress: (done: number, total: number) => void,
+  onSettle: (i: number, res: DistResult) => void,
+  fresh: boolean,
+): Promise<Record<string, number>> {
+  const spec = buildDistSpec(ctx, batchTasks, fresh)
+  mkdirSync(ctx.runDir, { recursive: true })
+  const specPath = `${ctx.runDir}/spec.json`
+  writeFileSync(specPath, JSON.stringify(spec, null, 2))
+  process.stderr.write(
+    `[m1-eval] dist via python: policy=${ctx.policy} ${batchTasks.length} games, ` +
+      `nodes=${ctx.cfgPath}, localSlots=${ctx.localSlots}${fresh ? ' (--fresh)' : ' (续跑)'}\n`,
+  )
+  // 同步等待（spawnSync）：Python 的日志直接进 stderr，stdout 留给本工具的 JSON 报告。
+  const proc = spawnSync('bash', [PY_SAFE, PY_ENTRY, '--spec', specPath], {
+    cwd: REPO_ROOT,
+    stdio: ['ignore', 'inherit', 'inherit'],
+  })
+  if (proc.error) process.stderr.write(`[m1-eval] python 调用失败: ${proc.error.message}\n`)
+  const bySrc: Record<string, number> = {}
+  if (!existsSync(spec.out)) {
+    process.stderr.write(
+      `[m1-eval] python 未产出逐局行（${spec.out}）— exit ${proc.status}；本批按 error 记账\n`,
+    )
+    return bySrc
+  }
+  const index = new Map<string, number>()
+  for (let i = 0; i < batchTasks.length; i++)
+    index.set(`${batchTasks[i].stageIndex ?? 0}:${batchTasks[i].seed}`, i)
+  let done = 0
+  for (const line of readFileSync(spec.out, 'utf8').split('\n')) {
+    if (!line.trim()) continue
+    let row: M1DistRow
+    try {
+      row = JSON.parse(line) as M1DistRow
+    } catch {
+      continue // 半行/损坏行：跳过（Python 侧写文件是原子的，这里只是防御）
+    }
+    const i = index.get(`${row.stage}:${row.seed}`)
+    if (i === undefined) continue // 续跑台账里的旧行（不属于本轮子集）
+    onSettle(i, rowToSimResult(row, batchTasks[i].id))
+    done++
+    progress(done, batchTasks.length)
+    const key = row.node === 'local' ? 'local' : `node:${row.node ?? '?'}`
+    bySrc[key] = (bySrc[key] ?? 0) + 1
+  }
+  return bySrc
+}
+
+if (import.meta.main) await main()

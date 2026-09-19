@@ -38,6 +38,11 @@ from types import SimpleNamespace
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "nn-training"))
 
+# 本入口的 stdout 是**调用方的产物通道**（`--out` 缺省时 eval-course-ckpt 的行就走
+# stdout），而训练栈的 `rl.log.log()` 按设计写 stdout（run_rl 的日志流）。整体改道
+# stderr——否则调用方的 stdout 会被日志行污染（2026-09-19 实测于 m1 链路）。
+sys.stdout = sys.stderr
+
 
 def _log(msg: str) -> None:
     sys.stderr.write(msg + "\n")
