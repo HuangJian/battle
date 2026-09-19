@@ -230,7 +230,8 @@ def test_window_close_no_new_games(tmp_path: Path, monkeypatch) -> None:
 
 
 def _run_unit(
-    tmp_path: Path, monkeypatch, *, cfg_policy: dict, fake_fetch, units_pick=None, nodes=None
+    tmp_path: Path, monkeypatch, *, cfg_policy: dict, fake_fetch, units_pick=None, nodes=None,
+    window: float = 60.0,
 ):
     import types
 
@@ -252,7 +253,7 @@ def _run_unit(
     monkeypatch.setattr(dist_common, "post_weights", lambda *a, **k: "kept")
     monkeypatch.setattr("rl.batch_eval.bun_version", lambda *a, **k: "9.9.9")
     monkeypatch.setattr(dist_common, "fetch_task", fake_fetch)
-    args = types.SimpleNamespace(eval_window_sec=60)
+    args = types.SimpleNamespace(eval_window_sec=window)
     cfg = {
         "policy": cfg_policy,
         "nodes": nodes
@@ -446,6 +447,98 @@ def test_tail_race_steals_slow_node_tail(tmp_path: Path, monkeypatch) -> None:
     assert len({(r["stage"], r["seed"]) for r in rows}) == out["total"]
     # 墙钟不得被慢节点拖满：慢副本各 1.5s，竞速后应明显更短（宽松上界，防抖动）。
     assert dt < out["total"] * 1.4, f"尾段未被竞速抢走：{dt:.2f}s for {out['total']} games"
+
+
+def test_backpressure_requeue_does_not_drain_attempts(tmp_path: Path, monkeypatch) -> None:
+    """背压重排**不得**消耗 attempt 配额（2026-09-19 修复）。
+
+    事故：`pending.popleft()` 无条件给 `attempts[task]` +1，而背压分支（503 busy /
+    连接重置）走的是同一条重排路径 ⇒ 持续背压会把 attempts 顶过 `EVAL_TASK_ATTEMPTS`，
+    使一局「根本没跑成」被误判成「试满丢弃」（实测 attempt=7 > 2）⇒ `len(seen) >= total`
+    永不成立 ⇒ settled 799/800 干等到 deadline（用户手动停）。
+
+    本用例：一局连吃 8 次 503（> busyRetryLimit=6）之后才成功 —— 修复前该局会被丢弃。
+    """
+    import dist_common
+
+    calls: dict[tuple[int, int], int] = {}
+    victim: list[tuple[int, int]] = []
+
+    def fake_fetch(url, key, **kw):
+        task = (int(kw["stage"]), int(kw["seed"]))
+        if not victim:
+            victim.append(task)
+        n = calls.get(task, 0) + 1
+        calls[task] = n
+        if task == victim[0] and n <= 8:
+            raise dist_common.DistError(503, 'HTTP 503: {"error":"busy"}', transient=True)
+        return _ok_manifest(task[0], task[1], kw["wver"]), {}
+
+    out, logs, _ = _run_unit(
+        tmp_path,
+        monkeypatch,
+        cfg_policy={
+            "statusTimeoutSec": 1,
+            "taskTimeoutSec": 30,
+            "nodeFailStreak": 3,
+            "evalLocalSlots": 0,
+            "busyRetryLimit": 6,
+            "busyBackoffSec": 0.001,
+        },
+        fake_fetch=fake_fetch,
+        units_pick=lambda us: us[0],
+        window=15.0,
+    )
+    assert out["settled"] == out["total"], f"背压重排不得丢局：{out}"
+    assert not any("试满" in m for m in logs), "背压重排不得消耗 attempt 配额"
+
+
+def test_settle_stall_exits_loudly_not_at_deadline(tmp_path: Path, monkeypatch) -> None:
+    """有局被丢弃后，收尾必须**响亮收工**，而不是干等到 deadline（2026-09-19 修复）。
+
+    事故：`len(seen) >= total` 是唯一完成条件；某局真失败耗尽配额被丢弃后该条件永不成立，
+    其余 break 分支也不命中 ⇒ 主线程在 `pending=0 inflight=0 settled=799/800` 上空转
+    （实测两分钟，用户手动停）。
+
+    本用例：一局始终硬失败（HTTP 400，非瞬断）直到被丢弃，其余 99 局正常完成 ⇒
+    收尾必须在 STUCK_GRACE_SEC 内以「收尾僵死」收工。
+    """
+    import dist_common
+    import rl.batch_eval as be
+
+    monkeypatch.setattr(be, "STUCK_GRACE_SEC", 0.5)
+
+    victim: list[tuple[int, int]] = []
+
+    def fake_fetch(url, key, **kw):
+        task = (int(kw["stage"]), int(kw["seed"]))
+        if not victim:
+            victim.append(task)
+        if task == victim[0]:
+            raise dist_common.DistError(400, "HTTP 400 bad request (not transient)")
+        return _ok_manifest(task[0], task[1], kw["wver"]), {}
+
+    nodes = [
+        {"id": "n1", "url": "http://n1", "authKey": "", "enabled": True, "concurrency": 2},
+        {"id": "n2", "url": "http://n2", "authKey": "", "enabled": True, "concurrency": 2},
+    ]
+    out, logs, _ = _run_unit(
+        tmp_path,
+        monkeypatch,
+        cfg_policy={
+            "statusTimeoutSec": 1,
+            "taskTimeoutSec": 30,
+            "nodeFailStreak": 3,
+            "evalLocalSlots": 0,
+            "busyBackoffSec": 0.001,
+        },
+        fake_fetch=fake_fetch,
+        units_pick=lambda us: us[0],
+        nodes=nodes,
+        window=30.0,
+    )
+    assert out["settled"] == out["total"] - 1, f"应恰好丢一局：{out}"
+    assert any("收尾僵死" in m for m in logs), f"缺局必须响亮收工：{logs[-6:]}"
 
 # ---- 每节点独立通道（2026-09-19 用户五条裁定）----
 #

@@ -21,6 +21,7 @@ import dist_common
 # 同 queue.py：Windows 下隐藏本地评估子进程的控制台窗口（避免反复弹黑窗抢焦点）。
 from rl.eval_local import (
     BASELINE_EVAL_ITER,
+    EVAL_INFLIGHT_GRACE_SEC,
     EVAL_ITER_SUFFIX,
     EVAL_LOCAL_RELEASE_GRACE,
     EVAL_LOCAL_SLOTS_DEFAULT,
@@ -205,73 +206,6 @@ class EvalDispatcher:
                 except OSError as e:
                     log(f"[eval] WARN weights snapshot failed — local participation off: {e}")
 
-            local_bun = bun_version(bun)
-            # 2026-09-03 修正（mac 实测 stage.tiles null）：eval_stages 含自定义关
-            # （>=2000）时，节点必须有能力位 stageJsonSupport——旧 agent（无该位）
-            # 收到 stage=2000 会走 arena/真实关解析 → stage null → 崩溃。无能力节点
-            # 一律跳过，任务自然落回本机 local（已支持 stage-json 透传）。
-            need_sj = bool(todo) and any(t[0] >= 2000 for t in todo)
-            # 节点门（2026-09-17 统一）：与 rollout 同一判据 = codeHash——唯一事实来源
-            # tools/agent/codehash-files.txt（引擎 src/game、config、RNG、God AI 已并入
-            # 该清单）。不再比 ping.engineEpoch：该字段已从 /v1/ping 移除（engine_epoch
-            # 退为账本记录值），也不再需要「旧 agent 无字段→过渡期放行」的分支——
-            # codeHash 是 rollout 门一直都在用的字段。
-            code_hash_local = dist_common.compute_code_hash()
-            alive = []
-            for n in cfg.get("nodes", []):
-                if not n.get("enabled", True):
-                    continue
-                nid = str(n.get("id") or n.get("url") or "?")
-                ping = dist_common.node_ping(n["url"], n.get("authKey", ""), timeout=status_timeout)
-                if ping is None:
-                    continue
-                if not ping.get("evalSupport"):
-                    log(
-                        f"[eval] node {nid}: agent lacks evalSupport — skipped "
-                        f"(sync code + restart agent to enable)"
-                    )
-                    continue
-                if need_sj and not ping.get("stageJsonSupport"):
-                    log(
-                        f"[eval] node {nid}: 自定义关 eval 需 stageJsonSupport 能力位"
-                        f"（旧 agent）—— skipped，任务落本机 local"
-                    )
-                    continue
-                if mm(str(ping.get("bunVersion", "?"))) != mm(local_bun):
-                    log(f"[eval] node {nid}: bun version mismatch — skipped")
-                    continue
-                ch_why = dist_common.check_code_hash(ping, code_hash_local)
-                if ch_why:
-                    log(f"[eval] node {nid}: {ch_why} — skipped")
-                    continue
-                c_n = max(1, int(n.get("concurrency") or ping.get("cpus") or 1))
-                alive.append({"id": nid, "url": n["url"], "key": n.get("authKey", ""), "c": c_n})
-            if not alive and (local_gate is None or not snapshot_path):
-                log("[eval] no eval-capable node — skipped this round")
-                return
-            if not alive:
-                log("[eval] no eval-capable node — local-only eval this round")
-
-            # 幂等下发（节点通常已持有 → kept；agent 重启过则补发）
-            with open(rl_path, "rb") as f:
-                weights_bytes = f.read()
-            # 幂等下发（节点通常已持有 → kept 短路径；agent 重启过则补发）——并行
-            nodes_ok = dist_common.post_weights_parallel(
-                alive,
-                iter_id,
-                wver,
-                weights_bytes,
-                timeout=min(300.0, max(60.0, task_timeout)),
-                kind="rollout",
-                log=log,
-            )
-            if not nodes_ok:
-                if not alive and local_gate is not None and snapshot_path:
-                    log("[eval] all weight POSTs failed — local-only eval this round")
-                else:
-                    log("[eval] all weight POSTs failed — skipped this round")
-                    return
-
             total = len(todo)
             # 尾段预留量：gate 接线且本地可用时，节点不取最后 reserved 局（留给本机直跑）
             reserved = (
@@ -279,24 +213,13 @@ class EvalDispatcher:
                 if (snapshot_path is not None and local_gate is not None and local_slots > 0)
                 else 0
             )
-            log(
-                f"[eval] it{it}: dispatch {total} greedy games "
-                f"(corpus={len(pairs)}, done={len(pairs) - total})"
-                + (" [it0 基线 · bc 权重]" if baseline else "")
-                + (
-                    " [dual-track anchor+rotor]"
-                    if should_dual_track(n_seeds, baseline)
-                    else ""
-                )
-                + f" -> {[(n['id'], n['c']) for n in nodes_ok]}"
-                + (f" [local tail-reserved ×{reserved}]" if reserved else "")
-            )
-
             pending: deque[tuple[int, int]] = deque(todo)
             lock = threading.Lock()
             seen: set[tuple[int, int]] = set()
             attempts: dict[tuple[int, int], int] = {}
-            streaks = {nd["id"]: 0 for nd in nodes_ok}
+            # 按需建键（节点集在本块之后才定向——并行 ping 的门在闭包之后，见下）；
+            # 读取一律 .get(nid, 0)，写入才建键。
+            streaks: dict[str, int] = {}
             # 瞬时（背压/瞬断）连续计数：与真故障分开（与 A 层 dispatch.py 同款）。
             # 瞬时错误不计节点失败 streak，但连续软失败有上界——否则隧道/集群
             # 整体脉搏时会一直空转到窗口到期。任一一局结算即清零。
@@ -312,6 +235,20 @@ class EvalDispatcher:
             inflight: dict[tuple[int, int], int] = {}
             inflight_nodes: dict[tuple[int, int], set[str]] = {}
             all_done = threading.Event()
+            # 收工即断连的作用域（线程 tag）：settled 满即置位 + 关在飞连接——尾部
+            # 竞速副本/慢节点不再等（同 A/B 层）。同进程 rollout 的标签不同，不误伤。
+            req_scope = f"evalscope:{eval_iter_id}"
+            dist_common.clear_abort()
+            #: 正在写行的赢家数（record 期间 +1）：收工只等它们落盘。
+            writers = [0]
+            #: 消费线程数（孵化即 +1，线程退出 -1）。全退 = 再等也不会结算 ⇒ 收工
+            #: （否则「任务全被 drop + 无在飞」时只能空等整个窗口，2026-09-19）。
+            live_workers = [0]
+
+            def _settle_complete() -> None:
+                """settled 满：置收工位 + 断连（调用方持 lock；实现非阻塞）。"""
+                all_done.set()
+                dist_common.abort_active_requests(req_scope)
 
             def _pop_inflight(task: tuple[int, int], nd_id: str) -> None:
                 if task in inflight:
@@ -426,6 +363,8 @@ class EvalDispatcher:
                     outcomes[oc] = outcomes.get(oc, 0) + 1
 
             def worker(nd: dict) -> None:
+                # 线程本地标签（不继承主线程）：收工断连的作用域键。
+                dist_common.set_request_tag(req_scope)
                 while time.time() < deadline and not all_done.is_set():
                     task = None
                     fanout_copy = False
@@ -536,11 +475,12 @@ class EvalDispatcher:
                                 )
                                 continue
                             seen.add(task)
+                            writers[0] += 1  # 收工前必须等它落盘
                             _clear_inflight(task)
                             streaks[nd["id"]] = 0
                             soft_streaks[nd["id"]] = 0
                             if len(seen) >= total:
-                                all_done.set()
+                                _settle_complete()
                         elif fanout_copy:
                             _pop_inflight(task, nd["id"])
                         else:
@@ -586,7 +526,11 @@ class EvalDispatcher:
                             if t_task_start is not None
                             else None
                         )
-                        record(manifest, nd["id"], task, wall_sec)
+                        try:
+                            record(manifest, nd["id"], task, wall_sec)
+                        finally:
+                            with lock:
+                                writers[0] = max(0, writers[0] - 1)
                         el = manifest.get("elapsedSec")
                         log(
                             f"[eval] {len(seen)}/{total} s{task[0]}/seed{task[1]} "
@@ -676,9 +620,10 @@ class EvalDispatcher:
                                 )
                                 continue
                             seen.add(task)
+                            writers[0] += 1  # 收工前必须等它落盘
                             _clear_inflight(task)
                             if len(seen) >= total:
-                                all_done.set()
+                                _settle_complete()
                         elif fanout_copy:
                             _pop_inflight(task, "local")
                         elif attempt < EVAL_TASK_ATTEMPTS and task not in seen:
@@ -709,7 +654,11 @@ class EvalDispatcher:
                             if t_task_start is not None
                             else None
                         )
-                        record(manifest, "local", task, wall_sec)
+                        try:
+                            record(manifest, "local", task, wall_sec)
+                        finally:
+                            with lock:
+                                writers[0] = max(0, writers[0] - 1)
                         el = manifest.get("elapsedSec")
                         log(
                             f"[eval] {len(seen)}/{total} s{task[0]}/seed{task[1]} "
@@ -718,19 +667,121 @@ class EvalDispatcher:
                             f"elapsed={str(el) + 's' if el is not None else '-'}"
                         )
 
-            threads = []
-            for nd in nodes_ok:
-                for _ in range(nd["c"]):
-                    threads.append(
-                        threading.Thread(
-                            target=worker, args=(nd,), daemon=True, name=f"eval-{nd['id']}"
-                        )
-                    )
+            # —— 本机槽位先开工（不等节点门/权重门，审计 B3）——
+            # 本地权重就是本机冻结快照，无需下发；节点门（并行 ping）与权重 POST 都是
+            # 秒级开销，让本机槽位干等纯属白丢吞吐。
+            def _spawn_tracked(fn, *a: Any, name: str = "") -> threading.Thread:
+                """孵化消费线程并计入 live_workers（线程必须先计数再启动：主线程在
+                spawn 完才看计数，晚计数会让收工判断误以为「消费线程全退」）。"""
+                live_workers[0] += 1
+
+                def _body() -> None:
+                    try:
+                        fn(*a)
+                    finally:
+                        with lock:
+                            live_workers[0] -= 1
+
+                t = threading.Thread(target=_body, daemon=True, name=name)
+                t.start()
+                return t
+
+            threads: list[threading.Thread] = []
             if snapshot_path is not None and local_slots > 0:
                 for _ in range(local_slots):
-                    threads.append(
-                        threading.Thread(target=local_worker, daemon=True, name="eval-local")
+                    threads.append(_spawn_tracked(local_worker, name="eval-local"))
+
+            local_bun = bun_version(bun)
+            # 2026-09-03 修正（mac 实测 stage.tiles null）：eval_stages 含自定义关
+            # （>=2000）时，节点必须有能力位 stageJsonSupport——旧 agent（无该位）
+            # 收到 stage=2000 会走 arena/真实关解析 → stage null → 崩溃。无能力节点
+            # 一律跳过，任务自然落回本机 local（已支持 stage-json 透传）。
+            need_sj = bool(todo) and any(t[0] >= 2000 for t in todo)
+            # 节点门（2026-09-17 统一）：与 rollout 同一判据 = codeHash——唯一事实来源
+            # tools/agent/codehash-files.txt（引擎 src/game、config、RNG、God AI 已并入
+            # 该清单）。不再比 ping.engineEpoch：该字段已从 /v1/ping 移除（engine_epoch
+            # 退为账本记录值），也不再需要「旧 agent 无字段→过渡期放行」的分支——
+            # codeHash 是 rollout 门一直都在用的字段。
+            code_hash_local = dist_common.compute_code_hash()
+            alive = []
+            # 并行 ping（保序）：串行墙钟 = Σ 每台延迟（两台超时即 ~7s），而节点门每轮
+            # 重跑一次；并行 == 最慢一台（同 batch_eval，2026-09-19 审计 B2）。
+            enabled_nodes = [n for n in cfg.get("nodes", []) if n.get("enabled", True)]
+            pings = dist_common.ping_nodes_parallel(enabled_nodes, timeout=status_timeout)
+            for n, ping in zip(enabled_nodes, pings, strict=True):
+                nid = str(n.get("id") or n.get("url") or "?")
+                if ping is None:
+                    # 留痕：旧实现静默 continue——节点被丢时日志里既看不出是谁、也看不出
+                    # 为什么（2026-09-19 审计 B4）。
+                    log(
+                        f"[eval] node {nid}: ping 失败/超时（并行探测，预算 {status_timeout}s）"
+                        f" — 本轮不参与"
                     )
+                    continue
+                if not ping.get("evalSupport"):
+                    log(
+                        f"[eval] node {nid}: agent lacks evalSupport — skipped "
+                        f"(sync code + restart agent to enable)"
+                    )
+                    continue
+                if need_sj and not ping.get("stageJsonSupport"):
+                    log(
+                        f"[eval] node {nid}: 自定义关 eval 需 stageJsonSupport 能力位"
+                        f"（旧 agent）—— skipped，任务落本机 local"
+                    )
+                    continue
+                if mm(str(ping.get("bunVersion", "?"))) != mm(local_bun):
+                    log(f"[eval] node {nid}: bun version mismatch — skipped")
+                    continue
+                ch_why = dist_common.check_code_hash(ping, code_hash_local)
+                if ch_why:
+                    log(f"[eval] node {nid}: {ch_why} — skipped")
+                    continue
+                c_n = max(1, int(n.get("concurrency") or ping.get("cpus") or 1))
+                alive.append({"id": nid, "url": n["url"], "key": n.get("authKey", ""), "c": c_n})
+            # 本机槽位可用 ⇔ snapshot_path 已建（见上方快照段）⇒ 门失败不再整轮空转。
+            if not alive:
+                if snapshot_path is None:
+                    log("[eval] no eval-capable node — skipped this round")
+                    return
+                log("[eval] no eval-capable node — local-only eval this round")
+
+            # 幂等下发（节点通常已持有 → kept 短路径；agent 重启过则补发）——并行
+            with open(rl_path, "rb") as f:
+                weights_bytes = f.read()
+            nodes_ok = (
+                dist_common.post_weights_parallel(
+                    alive,
+                    iter_id,
+                    wver,
+                    weights_bytes,
+                    timeout=min(300.0, max(60.0, task_timeout)),
+                    kind="rollout",
+                    log=log,
+                )
+                if alive
+                else []
+            )
+            if alive and not nodes_ok:
+                # 旧实现此处无条件 return：本机槽位明明可用却整轮 0 局（审计 B5）。
+                if snapshot_path is None:
+                    log("[eval] all weight POSTs failed — skipped this round")
+                    return
+                log("[eval] all weight POSTs failed — local-only eval this round")
+
+            log(
+                f"[eval] it{it}: dispatch {total} greedy games "
+                f"(corpus={len(pairs)}, done={len(pairs) - total})"
+                + (" [it0 基线 · bc 权重]" if baseline else "")
+                + (
+                    " [dual-track anchor+rotor]"
+                    if should_dual_track(n_seeds, baseline)
+                    else ""
+                )
+                + f" -> {[(n['id'], n['c']) for n in nodes_ok]}"
+                + (f" [local tail-reserved ×{reserved}]" if reserved else "")
+            )
+
             # 收官 drain / 远端全员 mismatch 时：gate 若仍关着，local_worker 会空等到
             # deadline 才放行——终轮 eval 等 600s 却 0 局。没有节点可派时立刻开闸。
             if release_local_gate_if_starved(local_gate, nodes_ok):
@@ -738,10 +789,57 @@ class EvalDispatcher:
                     f"[eval] it{it}: no remote nodes — local_gate released immediately"
                     f"（local_slots={local_slots} snapshot={'yes' if snapshot_path else 'no'}）"
                 )
+            for nd in nodes_ok:
+                for _ in range(nd["c"]):
+                    threads.append(_spawn_tracked(worker, nd, name=f"eval-{nd['id']}"))
+            # —— 等收口（**显式**：旧实现靠 join(window + task_timeout) 顺带完成）——
+            # ① settled 满 → 立即收工（req 4：断连 + 拒发新请求，慢节点/竞速副本不再等）；
+            # ② 墙钟到期 → **有界**等窗口内的在飞局落账（在飞清空即走，兜底
+            #    EVAL_INFLIGHT_GRACE_SEC），那些局有价值，但不再像旧实现那样空等 4–76s。
+            while not all_done.is_set() and time.time() < deadline:
+                all_done.wait(0.2)
+                with lock:
+                    if live_workers[0] <= 0:
+                        break
+            grace_end = time.time() + float(min(task_timeout, EVAL_INFLIGHT_GRACE_SEC))
+            while not all_done.is_set() and time.time() < grace_end:
+                with lock:
+                    if not inflight or live_workers[0] <= 0:
+                        break
+                all_done.wait(0.2)
+            with lock:
+                no_consumers = live_workers[0] <= 0
+            # settled 满 = 断连（收工只等「正在写行」的赢家落盘）。
+            closing = dist_common.abort_active_requests(req_scope)
+            if all_done.is_set():
+                log(
+                    f"[eval] it{it}: settled 满（{len(seen)}/{total}）— 断连 {closing} 条"
+                    f"在飞连接 + 拒发新请求，立即收工（慢节点/竞速副本不再等）"
+                )
+            else:
+                log(
+                    f"[eval] it{it}: 收工（未全结算 {len(seen)}/{total}）— 断连 {closing} 条"
+                    f"在飞连接（在途局丢弃，下次续跑）"
+                    + ("【消费线程已全退】" if no_consumers else "")
+                )
+            all_done.set()
+            quiet_deadline = time.monotonic() + 1.0
+            while time.monotonic() < quiet_deadline:
+                with lock:
+                    if writers[0] <= 0:
+                        break
+                time.sleep(0.002)
+            with lock:
+                pending_writers = writers[0]
+            if pending_writers > 0:
+                log(
+                    f"[eval] it{it}: 收工仍有 {pending_writers} 个写行者未落盘"
+                    f"（1s 预算用尽，行可能晚于本行 summary 落账）"
+                )
+            # 线程只做 best-effort 收拢（0.25s 总预算）：daemon 线程本就随进程退出。
+            join_deadline = time.monotonic() + 0.25
             for t_ in threads:
-                t_.start()
-            for t_ in threads:
-                t_.join(timeout=max(30.0, window + task_timeout))
+                t_.join(timeout=max(0.01, join_deadline - time.monotonic()))
 
             # 课程血缘进 summary 行（门控趋势过滤；延迟导入避免 rl.cmd ↔ 本模块环）。
             from rl.cmd import course_fp_for_args

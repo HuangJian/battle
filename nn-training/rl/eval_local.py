@@ -153,6 +153,10 @@ BASELINE_EVAL_ITER = 0
 EVAL_TASK_ATTEMPTS = 2  # 单局重试上限；超限放弃并计数（权重切换后未完成局自然作废）
 EVAL_LOCAL_SLOTS_DEFAULT = 4  # 本地直跑槽位默认值（policy.evalLocalSlots 可覆写；0=禁用）
 EVAL_LOCAL_RELEASE_GRACE = 300  # 距窗口截止剩这些秒时强制释放本地预留（本地失效也不空转到超时）
+# 窗口到期仍在飞的局：给它们的落账宽限上界（收工不是立刻砍在飞——那些局有价值，
+# 但旧实现在此 join(window + taskTimeoutSec) 会空等 4–76s/轮，故改为「在飞清空即走 +
+# 本上界兜底」，2026-09-19 审计 B1）。
+EVAL_INFLIGHT_GRACE_SEC = 120
 
 # ---- eval 尾巴的收拢点与本机份额提前放行（2026-09-17 用户指令）-------------------
 # 背景：in-loop eval 已藏在「下一轮 PPO」里（dispatch 排在 _serial_ppo 之前），但两处

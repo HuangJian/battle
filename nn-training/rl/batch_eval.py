@@ -68,6 +68,10 @@ SEGMENT_LEN = 100
 
 #: 背压退避封顶（秒）。指数序列 0.25/0.5/1/2/4/8 覆盖 6 次重排。
 BUSY_BACKOFF_CAP_SEC = 8.0
+#: 收尾僵死兜底（2026-09-19）：队列空 + 无在飞 + settled 不再变化持续这么久 ⇒ 认定有局在
+#: 重试配额耗尽后被丢弃（收尾条件 `len(seen) >= total` 永不成立），立即响亮收工，
+#: 而不是干等到 deadline。取 10s：足够容纳回包 / 背压重排 / 节点重探的间隙。
+STUCK_GRACE_SEC = 10.0
 
 
 def is_transient_error(e: BaseException) -> bool:
@@ -1284,6 +1288,15 @@ class BatchEvalRunner:
                         # 实测 3 台慢节点（a96 平均 124s/局）只出 8.9% 的局却吃掉 63% 节点秒，
                         # 每单元尾巴空转 1–3 分钟（2026-09-19）。
                         cand = pick_race_target(inflight, nid, inflight_nodes, {})
+                        if cand is not None and cand in seen:
+                            # 不变式：inflight 里的任务必然 ∉ seen（赢家一律走 clear_inflight）。
+                            # 残留 ⇒ 对它竞速只会「回包即 dup」，而 pop_inflight 在计数 > 0 时
+                            # 会把本节点移出 inflight_nodes ⇒ 下一轮又能抢同一个 ⇒ 竞速风车
+                            # （2026-09-19 实测：同一节点对同一已结算任务 5s 内重抢 48 次，
+                            #  单批 411 条 tail-race + 111 条 dup settle，纯烧算力）。
+                            # 摘除残留并放弃本次竞速（每轮至多清一个，有界）。
+                            clear_inflight(inflight, inflight_nodes, cand)
+                            cand = None
                         if cand is not None:
                             task = cand
                             inflight[task] += 1
@@ -1377,17 +1390,30 @@ class BatchEvalRunner:
                     # 主动断连会被当成硬失败去熔断节点（2026-09-19）。
                     if task in seen or all_done.is_set():
                         pass
-                    elif transient and busy_tries.get(task, 0) < busy_retry_limit:
-                        # 背压：节点满负荷/连接被重置 —— 不是节点故障。不计 streak，
-                        # 退避后重排（指数、封顶），不消耗 attempt 配额。
+                    elif transient:
+                        # 背压/瞬断（503 busy、10054 连接重置、超时）：**节点容量或网络**问题，
+                        # 既不是任务问题、也不是节点故障 ⇒ 任务只重排、**永不丢弃**，
+                        # 且不消耗 attempt 配额（退避指数封顶 BUSY_BACKOFF_CAP_SEC ⇒ 不烧 CPU；
+                        # 真正的放弃由 deadline / all_done 兜底）。
+                        # ⚠ 2026-09-19 修复：原条件是 `... and busy_tries < busy_retry_limit`，
+                        # 上限用尽后掉进下面的「硬失败」分支 ⇒ attempts 被抬到 7（> 2）
+                        # ⇒ 一局被误判「试满丢弃」⇒ settled 799/800 干等到 deadline。
                         n = busy_tries.get(task, 0) + 1
                         busy_tries[task] = n
                         pending.append(task)
+                        # 回退 `pending.popleft()` 时累加的那一次（背压不是一次真尝试）。
+                        attempts[task] = max(1, attempts.get(task, 1) - 1)
                         node_soft_fails[nid] = node_soft_fails.get(nid, 0) + 1
                         sleep_for = min(BUSY_BACKOFF_CAP_SEC, busy_backoff_sec * (2 ** (n - 1)))
+                        if n == busy_retry_limit:
+                            log(
+                                f"[batcheval] ⚠ {nid} 对 s{task[0]}/seed{task[1]} 已连续 {n} 次背压"
+                                f"（上限 {busy_retry_limit}）—— 任务继续排队，但该节点疑似持续"
+                                f"满负荷（退避封顶 {BUSY_BACKOFF_CAP_SEC:.0f}s，不再计入失败）"
+                            )
                         log(
                             f"[batcheval] {nid} s{task[0]}/seed{task[1]} 背压（{err[:90]}）"
-                            f"→ 退避 {sleep_for:.2f}s 重排（第 {n}/{busy_retry_limit} 次；不计节点失败）"
+                            f"→ 退避 {sleep_for:.2f}s 重排（第 {n} 次；不计节点失败）"
                         )
                     else:
                         streaks[nid] = streaks.get(nid, 0) + 1
@@ -1451,7 +1477,28 @@ class BatchEvalRunner:
         # 收尾等待：settled 一满（all_done 由最后结算的 worker 置位）或墙钟到点即收工。
         # 「零消费者」只在**整批从未有过任何消费者**时生效（无节点就绪过 + 本机槽位 0）
         # ⇒ 有界响亮收摊，而不是默认 86400s 窗口里干等。
+        stuck_since: float | None = None
         while not all_done.is_set() and time.time() < deadline:
+            # 僵死兜底（2026-09-19）：某局在重试配额耗尽后被丢弃（见上文 failed 行）时
+            # `len(seen) >= total` 永不成立，上面两个 break 条件也不会命中 ⇒ 原先只能干等到
+            # deadline（实测 settled=799/800、pending=0、inflight=0 空转两分钟，用户手动停）。
+            # 队列空 + 无在飞 + 计数不再变化持续 STUCK_GRACE_SEC ⇒ 判定缺局，响亮收工。
+            with lock:
+                _idle = (not pending) and in_flight[0] == 0 and len(seen) < total
+                _settled_n = len(seen)
+            if _idle:
+                if stuck_since is None:
+                    stuck_since = time.time()
+                elif time.time() - stuck_since > STUCK_GRACE_SEC:
+                    log(
+                        f"[batcheval] ⚠ {unit['rung']} u{self.unit_idx}: 收尾僵死 — "
+                        f"settled={_settled_n}/{total}，队列空且无在飞；"
+                        f"{total - _settled_n} 局在重试配额耗尽后被丢弃（见上文 failed 行）"
+                        f"⇒ 立即收工，不再空等"
+                    )
+                    break
+            else:
+                stuck_since = None
             if (
                 not local_on
                 and enabled_nodes

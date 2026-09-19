@@ -175,3 +175,275 @@ def test_hard_failure_still_trips_node(tmp_path, monkeypatch) -> None:
 def test_shared_classifier_covers_tunnel_and_backpressure(status: int) -> None:
     """三层共用判据：隧道/背压状态码一律 transient（不得计节点故障）。"""
     assert dist_common.is_transient_error(dist_common.DistError(status, "")) is True
+
+# ---------------------------------------------------------------------------
+# 2026-09-19 审计 B1–B5（门/收工形态）行为钉：
+#   B2 门串行 ping（Σ 每台延迟，两台超时即 ~7s）→ 改并行；
+#   B4 ping 失败静默丢弃（日志里看不出是谁/为什么）→ 逐条留痕；
+#   B5 权重 POST 全败时无条件 return（本机槽位可用却整轮 0 局）→ 走 local-only；
+#   B3 门/权重是屏障：本机槽位干等（本地权重本就在盘上）→ 本机先开工；
+#   B1 收工 join(window + taskTimeoutSec)：卡在 HTTP 的线程要等请求自己结束
+#      （实测 4–76s/轮，行早已落盘）→ settled 满即断连 + 只等写行的赢家。
+# ---------------------------------------------------------------------------
+
+
+class _LaneHarness:
+    """多节点 + 本机槽位脚手架（门/下发/本机直跑均可编排，时间线可断言）。"""
+
+    def __init__(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+        *,
+        games: int,
+        nodes: list[dict],
+        local_slots: int = 0,
+        ping_delay: float = 0.0,
+        ping_fail: tuple[str, ...] = (),
+        post_ok: bool = True,
+        post_delay: float = 0.0,
+        gate_open: bool = True,
+        window_sec: float = 60.0,
+    ) -> None:
+        import threading
+        import time
+
+        self.mp = monkeypatch
+        self.time = time
+        self.work = tmp_path / "lanes"
+        self.work.mkdir()
+        self.weights = self.work / "w.json"
+        self.weights.write_text('{"arch":{}}', encoding="utf-8")
+        self.traj = self.work / "it1"
+        self.traj.mkdir()
+        self.wver = dist_common.weights_fingerprint(str(self.weights))
+        self.logs: list[str] = []
+        self.pinged: list[str] = []
+        self.local_games: list[int] = []
+        self.local_seen_at: list[float] = []
+        self.gate_done_at: float | None = None
+        self.args = types.SimpleNamespace(
+            eval_games_per_stage=games,
+            total_stages=1,
+            eval_window_sec=window_sec,
+            eval_stages="2000-2000",
+            max_ticks=10,
+            difficulty="hard",
+        )
+        self.cfg = {
+            "nodes": nodes,
+            "policy": {"evalLocalSlots": local_slots, "nodeFailStreak": 3},
+        }
+        self.gate = threading.Event()
+        if gate_open:
+            self.gate.set()
+        id_of = {str(n["url"]): str(n["id"]) for n in nodes}
+
+        def ping(url: str, _key: str, timeout: float = 3.0) -> dict | None:
+            time.sleep(ping_delay)
+            self.pinged.append(id_of.get(url, url))
+            if id_of.get(url, url) in ping_fail:
+                return None
+            return {
+                "evalSupport": True,
+                "stageJsonSupport": True,
+                "bunVersion": "1.1.0",
+                "codeHash": "deadbeef",
+                "cpus": 1,
+            }
+
+        def post(nodes_: list, *a: Any, **k: Any) -> list:
+            time.sleep(post_delay)
+            self.gate_done_at = time.monotonic()
+            if not post_ok:
+                return []
+            return [
+                {"id": n["id"], "url": n["url"], "key": "", "c": n.get("concurrency", 1)}
+                for n in nodes_
+            ]
+
+        monkeypatch.setattr(dist_common, "compute_code_hash", lambda: "deadbeef")
+        monkeypatch.setattr(dist_common, "node_ping", ping)
+        monkeypatch.setattr(dist_common, "post_weights_parallel", post)
+        monkeypatch.setattr(dist_common, "refresh_weights", lambda *a, **k: True)
+        monkeypatch.setattr(ed, "bun_version", lambda _bun: "1.1.0")
+        monkeypatch.setattr(ed, "log", self.logs.append)
+
+        def runner(
+            _bun, _snap, stage, seed, _out, max_ticks, difficulty, timeout_sec, wver, **kw
+        ) -> dict:
+            # 本机直跑签名与生产一致（位置 5 + 关键字）：名字必须对齐，否则只会
+            # 静默变成「本机局全失败」，门/收工的断言就测不到真东西。
+            del max_ticks, difficulty, timeout_sec
+            self.local_games.append(seed)
+            self.local_seen_at.append(time.monotonic())
+            return self.manifest(stage, seed)
+
+        monkeypatch.setattr(ed, "run_local_eval_game", runner)
+
+    def manifest(self, stage: int, seed: int) -> dict:
+        return {
+            "stage": stage,
+            "seed": seed,
+            "wver": self.wver,
+            "mode": "eval",
+            "outcome": "timeout",
+            "ticks": 10,
+            "win": 0,
+            "score": 0.1,
+            "quality": 0.2,
+            "dims": {},
+            "elapsedSec": 0.001,
+        }
+
+    def play(self, fetch) -> tuple[list[dict], float]:
+        """跑一轮（假节点，不碰网络），返回 (全部日志行, 墙钟秒)。"""
+        dist_common.weights_push_cache_reset()
+        self.mp.setattr(dist_common, "fetch_task", fetch)
+        t0 = self.time.monotonic()
+        ed.dispatch_eval_round(
+            "bun", str(self.weights), self.traj, self.args, self.cfg, "rid.lane", 7,
+            local_gate=self.gate,
+        )
+        elapsed = self.time.monotonic() - t0
+        ledger = self.work / "eval_log.jsonl"
+        # 整轮跳过（无节点也无本机）时不建账本文件——退回空行集。
+        rows = (
+            [
+                json.loads(line)
+                for line in ledger.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            if ledger.exists()
+            else []
+        )
+        return rows, elapsed
+
+
+def _fast_fetch(h):
+    def fetch(*_a, **kw):
+        return h.manifest(kw["stage"], kw["seed"]), {}
+
+    return fetch
+
+
+def test_gate_pings_nodes_in_parallel(tmp_path, monkeypatch) -> None:
+    """B2：门必须并行探测——3 台各 0.3s，串行 = 0.9s（实测两台超时即 ~7s）。"""
+    nodes = [
+        {"id": f"n{i}", "url": f"http://n{i}.local", "concurrency": 1} for i in range(3)
+    ]
+    h = _LaneHarness(
+        tmp_path, monkeypatch, games=1, nodes=nodes, ping_delay=0.3, local_slots=0
+    )
+    rows, elapsed = h.play(_fast_fetch(h))
+    assert sorted(h.pinged) == ["n0", "n1", "n2"], "每台都要探到"
+    assert elapsed < 0.7, f"门应并行（串行 ≥0.9s，实测 {elapsed:.2f}s）"
+    assert any(r.get("event") == "eval" for r in rows)
+
+
+def test_ping_failure_is_logged_with_node_id(tmp_path, monkeypatch) -> None:
+    """B4：ping 失败的节点必须逐条留痕（旧实现静默 continue，排查黑洞）。"""
+    nodes = [
+        {"id": "a95", "url": "http://a95.local", "concurrency": 1},
+        {"id": "a96", "url": "http://a96.local", "concurrency": 1},
+    ]
+    h = _LaneHarness(
+        tmp_path,
+        monkeypatch,
+        games=1,
+        nodes=nodes,
+        ping_fail=("a96",),
+        local_slots=1,
+    )
+    h.play(_fast_fetch(h))
+    joined = "\n".join(h.logs)
+    assert "node a96" in joined and "ping 失败/超时" in joined, joined
+    assert "node a95" not in joined
+
+
+def test_all_weight_posts_failed_falls_back_to_local(tmp_path, monkeypatch) -> None:
+    """B5：POST 全败但本机槽位可用 ⇒ 走 local-only（旧实现整轮 0 局 + return）。"""
+    nodes = [{"id": "a97", "url": "http://a97.local", "concurrency": 1}]
+    h = _LaneHarness(
+        tmp_path, monkeypatch, games=2, nodes=nodes, local_slots=2, post_ok=False
+    )
+    rows, _ = h.play(_fast_fetch(h))
+    played = [r for r in rows if r.get("event") == "eval"]
+    assert len(played) == 2 and {r["node"] for r in played} == {"local"}, played
+    joined = "\n".join(h.logs)
+    assert "all weight POSTs failed — local-only eval this round" in joined
+    assert "— skipped this round" not in joined
+
+
+def test_weight_post_failure_without_local_still_skips(tmp_path, monkeypatch) -> None:
+    """B5 的反面：本机也不可用时仍须响亮跳过（护栏不许被顺带拆掉）。"""
+    nodes = [{"id": "a97", "url": "http://a97.local", "concurrency": 1}]
+    h = _LaneHarness(
+        tmp_path,
+        monkeypatch,
+        games=2,
+        nodes=nodes,
+        local_slots=0,
+        post_ok=False,
+        gate_open=False,
+    )
+    rows, _ = h.play(_fast_fetch(h))
+    assert [r for r in rows if r.get("event") == "eval"] == []
+    assert "all weight POSTs failed — skipped this round" in "\n".join(h.logs)
+
+
+def test_local_slots_start_before_weight_gate(tmp_path, monkeypatch) -> None:
+    """B3：本机槽位不等权重门（本地权重本就在盘上；旧形态里本地首个结果晚于门）。"""
+    nodes = [{"id": "a97", "url": "http://a97.local", "concurrency": 1}]
+    h = _LaneHarness(
+        tmp_path,
+        monkeypatch,
+        games=2,
+        nodes=nodes,
+        local_slots=2,
+        post_delay=1.0,
+    )
+    rows, _ = h.play(_fast_fetch(h))
+    assert len([r for r in rows if r.get("event") == "eval"]) == 2
+    assert h.gate_done_at is not None, "权重门必须跑过"
+    assert h.local_seen_at, "本机槽位必须真跑了局"
+    assert min(h.local_seen_at) < h.gate_done_at, (
+        "本机首局应早于权重门完成（旧形态：门后才孵化本机线程）"
+    )
+
+
+def test_settled_full_teardown_does_not_wait_for_slow_node(tmp_path, monkeypatch) -> None:
+    """B1：settled 满 → 立即收工（旧实现 join(window + taskTimeoutSec) 会等慢节点）。"""
+    nodes = [
+        {"id": "fast", "url": "http://fast.local", "concurrency": 1},
+        {"id": "slow", "url": "http://slow.local", "concurrency": 1},
+    ]
+    h = _LaneHarness(tmp_path, monkeypatch, games=4, nodes=nodes, local_slots=0)
+
+    def fetch(_url, _key, **kw):
+        if _url == "http://slow.local":
+            h.time.sleep(3.0)  # 慢节点：回包对结果无用（tail-race 已由快节点结算）
+        return h.manifest(kw["stage"], kw["seed"]), {}
+
+    rows, elapsed = h.play(fetch)
+    summ = [r for r in rows if r.get("event") == "eval_summary"]
+    assert summ and summ[-1]["games"] == 4, summ
+    assert elapsed < 2.0, f"settled 满后不该等慢节点（实测 {elapsed:.2f}s）"
+    assert "settled 满（4/4）" in "\n".join(h.logs)
+
+
+def test_window_expiry_still_lands_inflight_games(tmp_path, monkeypatch) -> None:
+    """B1 的反面：墙钟到点**不砍在飞**——窗口内起跑的局照样落账（有界宽限）。"""
+    nodes = [{"id": "a97", "url": "http://a97.local", "concurrency": 1}]
+    h = _LaneHarness(
+        tmp_path, monkeypatch, games=1, nodes=nodes, local_slots=0, window_sec=1.0
+    )
+
+    def fetch(*_a, **kw):
+        h.time.sleep(0.6)  # 跨过窗口（1.0s）仍在飞
+        return h.manifest(kw["stage"], kw["seed"]), {}
+
+    rows, elapsed = h.play(fetch)
+    played = [r for r in rows if r.get("event") == "eval"]
+    assert len(played) == 1, f"窗口到点的在飞局必须落账: {rows}"
+    assert elapsed < 2.5, f"宽限不该失控（实测 {elapsed:.2f}s）"

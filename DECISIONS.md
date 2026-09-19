@@ -3100,3 +3100,50 @@ cadence（2026-09-05 修过的老毛病复活）；③ 回场不做上界——�
 **已知局限**：回场会暂时叠加线程（旧线程可能还在收尾一局，新线程又孵），故为「有界多孵」而非
 精确替换——自愈性影响可忽略（同一节点、多余槽位在下一轮自然收敛）；节点侧根因（per-kind 桶
 KEEP=4 且全客户端共享）仍未修，回场只是客户端侧的自保（见 §2026-09-19-node-fault-taxonomy）。
+## §2026-09-19-eval-gate-lanes（2026-09-19，C 层（训练干净评估）的门与收工形态：并行 ping + 逐条留痕 + POST 全败走本地 + 本机槽位先开工 + settled 满即断连）
+
+**触发**：用户 2026-09-19 连续两条指令（「把 C 层收工空等 4–76s/轮榨掉：all_done 即断连 + 只等写行的赢家」、
+「把 eval 层的病态分支与串行门一起修」），底稿是同日的 C 层审计（`tmp/x20-rebirth/training-loop.log`，
+08:00–10:36 共 20 个 eval 轮）。
+
+**证据（五个缺陷，均为一手日志）**：① **B1 收工空等**：末局结算 → `DONE` 的墙钟 = it10 42s / it15 47s /
+it40 32s / it80 76s，而这些行在 `all_done` 置位前就已全部落盘——旧收工是
+`t_.join(timeout=max(30, window + task_timeout))`，卡在 HTTP 里的线程要等请求自己结束；② **B2 门串行**：
+逐节点 `node_ping(timeout=3s)`，墙钟 = Σ 每台延迟（两台超时即 ~7s），而门每轮重跑一次；③ **B4 静默丢节点**：
+`if ping is None: continue` 零日志——节点被丢时既看不出是谁、也看不出为什么（`ping failed` 计数只能靠
+别的账本反推）；④ **B5 病态分支**：`if not nodes_ok` 时无条件 `return`，本机槽位明明可用却整轮 0 局
+（且旧写法的 `if not alive and …` 条件自相矛盾）；⑤ **B3 门即屏障**：权重 POST 全部返回后才孵化线程，
+本机槽位干等（本地权重就是本机冻结快照，根本没有下发开销）。
+
+**实施（`rl/eval_dispatch.py`；常量 `EVAL_INFLIGHT_GRACE_SEC` 落 `rl/eval_local.py`）**：
+
+- **B1**：收口**显式**成三段——① 等 `all_done`（或墙钟 `deadline`，或消费线程全退）；② 未满时给在飞局一个
+  **有界**落账窗（`min(task_timeout, EVAL_INFLIGHT_GRACE_SEC=120)`，在飞清空即走）；③ 之后
+  `abort_active_requests(req_scope)` 断连 + 拒发新请求，只等**正在写行的赢家**（`writers` 计数，1s 兜底）
+  并把线程 join 预算压到 0.25s。`writers` 在 `seen.add` 时 +1、`record()` 落盘后 -1。
+- **B2**：门改用 `dist_common.ping_nodes_parallel`（保序，== 最慢一台）。
+- **B4**：`ping is None` 逐条 `[eval] node <id>: ping 失败/超时（并行探测，预算 Ns） — 本轮不参与`。
+- **B5**：`alive` 非空但 POST 全败 ⇒ 本机可用则 **local-only**（响亮记一行），不可用才跳过；
+  `alive` 为空时不再重复打「POST 失败」误导行。门/权重段整体移到闭包之后（B3 的前提）。
+- **B3**：本机槽位在**门之前**孵化并启动（`_spawn_tracked`），门/权重只影响节点侧。
+- **顺带（收工的护栏）**：`live_workers` 计数（孵化即 +1、线程退出 -1）——「任务全被 drop 且无在飞」时
+  旧形态只能空等整个窗口（60/1500s）；现在全退即收工，并在日志里注明「消费线程已全退」。
+
+**被否方案**：① 只加一个 `all_done.wait(…)` 超时——收工只是变慢而非**立即**，且窗口到期时仍会把在飞的
+有效局一起砍掉；② 用 `join(timeout=2s)` 代替断连——线程仍卡在 socket 读上（进程内连接数按节点并发累积）；
+③ 门/权重段整体前移到快照之前——`nodes_ok` 必须先于 `streaks`/日志，前移等于把闭包拆散；改为「本机先开工 +
+门后移」；④ 本机槽位在门失败时也照旧 `return`（旧行为）——用户点名要「POST 全败走本地」。
+
+**契约（测试钉住，新增 7 例）**：`tests/test_eval_dispatch_resilience.py`
+并行门（3 台 × 0.3s 实测 <0.7s；串行基线实测 0.906s）／ping 失败逐条留痕（含节点 id）／
+POST 全败 + 本机可用 ⇒ 2/2 局全由 `local` 结算且日志为 `— local-only eval this round`／
+本机也不可用时仍响亮跳过／本机首局早于权重门完成（`post_delay=1.0s`）／
+settled 满（4/4）不等慢节点（慢节点 fetch 睡 3s，整轮实测 <2s）／窗口到期不砍在飞局（有界宽限）。
+**其中 5 例（B1/B2/B3/B4/B5）在旧代码上实测变红**（`git show HEAD:…` 换回旧实现跑同一套测试：5 failed /
+10 passed；旧实现必须在 `--maxfail=99` 下一次拿全，因为 pyproject 的 addopts 带 `-x`）。
+
+**已知局限**：① `clear_abort()` 是**全局**清账（同进程并发的另一轮 eval/baseline 的收工态会被清）——
+与 B 层 `batch_eval` 同款语义，重叠窗口只在 baseline 与 A-eval 同迭代并发时出现，后果是少量 dup 回包
+（丢弃、不双计）；② 阻塞在 `urlopen`（响应头都未回）的连接不在断连注册表里，只能等其自身超时
+（`all_done` 已置位，结果本就被丢弃）；③ 本机槽位在门失败时立即开闸（`release_local_gate_if_starved`）
+⇒ 本机局可能与训练主循环的资源窗重叠（与「无可用节点」分支同语义）。
