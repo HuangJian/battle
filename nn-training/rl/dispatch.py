@@ -104,7 +104,8 @@ def mm(version: str) -> str:
 def _record_agent_meta(meta_path: Path, rec: dict) -> None:
     """追加一条节点采样元数据到 dist-agent-meta.jsonl（巡检读它聚合进 HTML）。
 
-    rec: {node, it, stage, seed, ok, [win, elapsedSec | reason], ts}。
+    rec: {node, it, stage, seed, ok, [win, elapsedSec, wallSec | reason], ts}。
+    elapsedSec = 节点侧服务时长；wallSec = 训练机派发→结算墙钟（含网络）。
     放锁内调用保证顺序；单局一次 IO，成本可忽略。
     """
     try:
@@ -485,6 +486,8 @@ class RolloutDispatcher:
                 took_local = False
                 fanout_copy = False
                 drained = False  # 本次取任务后派发队列是否清空（回调在锁外做，避免持锁派 eval）
+                # 本 worker 本次 attempt 的派发墙钟起点（勿用 inflight_ts[task]——竞速副本会覆盖）。
+                t_task_start: float | None = None
                 with lock:
                     if nd is not None and streaks.get(nd_id, 0) >= fail_streak_max:
                         return
@@ -572,6 +575,7 @@ class RolloutDispatcher:
                         attempt = attempts[task]
                         register_inflight(inflight, task)
                         inflight_ts[task] = time.time()
+                        t_task_start = inflight_ts[task]
                         inflight_nodes.setdefault(task, set()).add(nd_id)
                         if nd is None:
                             local_active[0] += 1
@@ -595,6 +599,7 @@ class RolloutDispatcher:
                                 task = tail_cand
                                 inflight[task] += 1
                                 inflight_ts[task] = time.time()
+                                t_task_start = inflight_ts[task]
                                 inflight_nodes.setdefault(task, set()).add(nd_id)
                                 fanout_copy = True
                                 if nd is None:
@@ -735,6 +740,14 @@ class RolloutDispatcher:
                         # summary["node"] 是 agent 自报的 worker 名（bun-71535 /
                         # node-30332 之类），直接用它汇总会看不到真实节点（2026-09-09）。
                         summary["nodeId"] = nd_id
+                        # 训练机侧墙钟：本 attempt 派发→结算（含网络/轮询/本地 Popen）。
+                        # 不覆盖 elapsedSec（节点服务时长仍用于算力横向比）。
+                        wall_sec = (
+                            round(time.time() - t_task_start, 3)
+                            if t_task_start is not None
+                            else None
+                        )
+                        summary["wallSec"] = wall_sec
                         results.append(summary)
                         _record_agent_meta(
                             meta_path,
@@ -747,6 +760,7 @@ class RolloutDispatcher:
                                 "ok": True,
                                 "win": win_of(summary),
                                 "elapsedSec": summary.get("elapsedSec"),
+                                "wallSec": wall_sec,
                                 "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
                             },
                         )

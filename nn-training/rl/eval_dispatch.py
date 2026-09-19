@@ -320,7 +320,13 @@ class EvalDispatcher:
                 inflight.pop(task, None)
                 inflight_nodes.pop(task, None)
 
-            def record(manifest: dict, nd_id: str, task: tuple[int, int]) -> None:
+            def record(
+                manifest: dict,
+                nd_id: str,
+                task: tuple[int, int],
+                wall_sec: float | None = None,
+            ) -> None:
+                # wall_sec = 训练机派发→结算墙钟；不覆盖 manifest.elapsedSec（节点服务时长）。
                 dims = manifest.get("dims") or {}
                 dim_vals = {
                     k: (v.get("value") if isinstance(v, dict) else v) for k, v in dims.items()
@@ -376,6 +382,7 @@ class EvalDispatcher:
                     "puGotShield": manifest.get("puGotShield"),
                     "puGotOther": loot["puGotOther"],
                     "elapsedSec": manifest.get("elapsedSec"),
+                    "wallSec": wall_sec,
                 }
                 with jsonl_lock:
                     with open(eval_jsonl, "a", encoding="utf-8") as jf:
@@ -392,6 +399,7 @@ class EvalDispatcher:
                             "ok": True,
                             "win": win,
                             "elapsedSec": manifest.get("elapsedSec"),
+                            "wallSec": wall_sec,
                             "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
                         },
                     )
@@ -406,6 +414,7 @@ class EvalDispatcher:
                 while time.time() < deadline and not all_done.is_set():
                     task = None
                     fanout_copy = False
+                    t_task_start: float | None = None
                     with lock:
                         if streaks.get(nd["id"], 0) >= fail_streak_max:
                             return
@@ -422,6 +431,7 @@ class EvalDispatcher:
                                 attempts[task] = attempts.get(task, 0) + 1
                                 attempt = attempts[task]
                                 register_inflight(inflight, task)
+                                t_task_start = time.time()
                                 inflight_nodes.setdefault(task, set()).add(nd["id"])
                         elif not inflight:
                             return
@@ -432,6 +442,7 @@ class EvalDispatcher:
                             if cand is not None:
                                 task = cand
                                 inflight[task] += 1
+                                t_task_start = time.time()
                                 inflight_nodes.setdefault(task, set()).add(nd["id"])
                                 fanout_copy = True
                                 attempt = attempts.get(task, 0) + 1
@@ -516,7 +527,12 @@ class EvalDispatcher:
                                     f"— dropped"
                                 )
                     if ok:
-                        record(manifest, nd["id"], task)
+                        wall_sec = (
+                            round(time.time() - t_task_start, 3)
+                            if t_task_start is not None
+                            else None
+                        )
+                        record(manifest, nd["id"], task, wall_sec)
                         el = manifest.get("elapsedSec")
                         log(
                             f"[eval] {len(seen)}/{total} s{task[0]}/seed{task[1]} "
@@ -530,6 +546,7 @@ class EvalDispatcher:
                 if snapshot_path is None:
                     return
                 while time.time() < deadline and not all_done.is_set():
+                    t_task_start = None
                     if local_gate is not None and not local_gate.is_set():
                         remaining = deadline - time.time()
                         if remaining <= 0:
@@ -544,6 +561,7 @@ class EvalDispatcher:
                             attempts[task] = attempts.get(task, 0) + 1
                             attempt = attempts[task]
                             register_inflight(inflight, task)
+                            t_task_start = time.time()
                             inflight_nodes.setdefault(task, set()).add("local")
                         elif not inflight:
                             return
@@ -552,6 +570,7 @@ class EvalDispatcher:
                             if cand is not None:
                                 task = cand
                                 inflight[task] += 1
+                                t_task_start = time.time()
                                 inflight_nodes.setdefault(task, set()).add("local")
                                 fanout_copy = True
                                 attempt = attempts.get(task, 0) + 1
@@ -631,7 +650,12 @@ class EvalDispatcher:
                                 f"[eval] s{task[0]}/seed{task[1]} failed {attempt}x ({err}) — dropped"
                             )
                     if ok:
-                        record(manifest, "local", task)
+                        wall_sec = (
+                            round(time.time() - t_task_start, 3)
+                            if t_task_start is not None
+                            else None
+                        )
+                        record(manifest, "local", task, wall_sec)
                         el = manifest.get("elapsedSec")
                         log(
                             f"[eval] {len(seen)}/{total} s{task[0]}/seed{task[1]} "

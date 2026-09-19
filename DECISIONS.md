@@ -2527,3 +2527,55 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   提供分关 est_s。
 - **落地**：`rl/volume_quota.py`、`loop_core._volume_collect_continuous`、
   `tests/test_volume_quota.py`。回归：相关 pytest + parse 绿。
+
+## §2026-09-19-console-node-wallsec（2026-09-19，用户指令：节点统计新增训练机侧平均墙钟）
+
+- **背景**：节点统计「平均耗时」= meta `elapsedSec` 滑动均值；该字段是**节点侧**接单→
+  结果就绪（sampler-agent `stampServiceSec`，含冷启动，**不含**训练机↔节点网络）。用户
+  要求另加一列训练机侧墙钟，观测派发→结算的真实回传成本。
+- **备选与否决**：把 trainer 墙钟**覆盖**进 `elapsedSec` —— 否，摧毁节点算力横向比
+  （2026-09-06 口径升级正是为对齐 local/remote 服务时长）；只改 dashboard 从现有
+  字段反推网络 —— 否，meta 无派发时刻，推不出来；在 agent 侧再起一个计时器写第二
+  字段 —— 否，网络段只在 trainer 视角完整，节点侧测不到提交/回传。
+- **决定**：双字段并列，互不覆盖。`wallSec` = **本 worker 本 attempt** 派发→结算墙钟
+  （`t_task_start` 本地量，**勿读** `inflight_ts[task]`——竞速副本会覆盖）；成功结算时
+  写入 `dist-agent-meta.jsonl` + summary。dashboard 聚合 `avgWallSec`（≤50 滑动，与
+  `avgElapsedSec` 同窗），NodeStats 新列「机侧墙钟」。历史 meta 无 `wallSec` → 显示 `-`。
+  含网络/异步轮询/排队，**不是**纯 RTT；慢节点判定仍用服务时长，不改 `isSlowNode`。
+- **违反后果**：覆盖 `elapsedSec` ⇒ 节点算力对比被网络污染；用 `inflight_ts` 算墙钟
+  ⇒ 竞速赢家的墙钟被输家起点抬高/压低；把墙钟当 ping 用 ⇒ 轮询间隔被误读成故障。
+- **落地**：`nn-training/rl/{dispatch,queue,eval_dispatch}.py`（meta `wallSec`）；
+  `dashboard/src/server/pool-history.ts`（`pushWindowSample`/`windowMeanSec`/`avgWallSec`）、
+  `pool-types.ts`/`api/pool.ts`/`NodeStats.tsx`；回归 `dashboard/tests/server-pool-history.test.ts`。
+
+## §2026-09-19-evalcourse-dist-eval（2026-09-19，eval-course-ckpt 开分布式评估：同节点门 + 同规 stageJson）
+
+- **背景**：判决类评估（T5/T6 体量：多权重 × 数百～800 局课程自定义关）在纯本地
+  chunked 路径（一 chunk 一 fresh worker，物理核封顶）上耗时以小时计，而节点在跑
+  rollout 的间隙具备 eval 能力（`evalSupport` + `stageJsonSupport`），且 m1-eval 早已
+  用同一 HTTP 协议派发 eval 局。缺的是**把 eval-course-ckpt 的逐局行**（JSONL，
+  `phase0-fingerprints`/`paired-pd` 消费）也搬到节点上。
+- **备选与否决**：① 另起一个 dist 专用工具 —— 否，映射/汇总两套实现必然漂移；
+  ② 把课程评估塞进 m1-eval —— 否，m1-eval 的行语义是 godai scorecard（stageIndex/dims），
+  不带课程自定义关与逐局 Phase 0 列；③ 只靠本地并发不开 dist —— 否，节点算力闲置；
+  ④ 强制显式 `--dist-nodes`（不 auto）—— 否，与 m1-eval auto-dist 同规（用户 2026-08-29
+  指令：节点随时上线、每批都要吃满；`--no-dist` 显式关）。
+- **决定**：eval-course-ckpt 增混合分派路径，**缺省仍是原本地 chunked 路径（行为逐字不变）**。
+  节点门与 rollout/m1-eval 同源：`evalSupport ∧ stageJsonSupport ∧ bun major.minor ∧ codeHash`，
+  不匹配只 skip（打印原因）不中断；局经 `mode=eval` + `kind=<rollout|none>` + `stageJson`
+  （课程自定义关原文）+ `livesOverride`/`playerLevel` 派发，stageJson > 16KB 自动退回纯本地；
+  回包 BCV2 manifest 顶层 → `manifestToCourseRow`（缺 Phase 0 键填零，旧节点不崩）。
+  `--dist-local`（缺省 = `--workers`）保留本地份额；`--policy nn-goal` 强制本地（GOAL_* 未
+  进 agent 协议）。**真相锚**：同 (stage, seed, 权重) 的 dist 行与本地行**逐字节相同**
+  （2026-09-19 实测 `diff` 空；§16.6 并行==串行验收）。
+- **违反后果**：节点门放宽成「能 ping 就派」⇒ 新旧代码混跑，Phase 0 列静默缺失/口径不同，
+  判决用错读数；改 `export-eval-game.ts` 顶层 schema（**在 codehash-files.txt 集内**）而不
+  等节点同步 ⇒ 门把全节点判 stale、dist 静默退化成本地（本条的已知代价，不是故障）；
+  直接拿 dist 行的 wallSec/网络时段做节点算力对比 ⇒ 网络污染（见
+  §2026-09-19-console-node-wallsec）。
+- **落地**：`tools/sim/eval-course-ckpt.ts`（`buildCourseJobs`/`buildRemoteTaskUrl`/
+  `manifestToCourseRow`/`nodeGateReason` + `runHybrid`）、`tools/sim/export-eval-game.ts`
+  （报告顶层补 Phase 0 逐敌种列 hitsByKind/killsByKind/exposureByKind/firstHit/firstKill/
+  killOrder/killerKinds；集内文件 ⇒ 需节点 resync）、回归 `tests/eval-course-ckpt.test.ts`
+  （纯函数对拍）+ 实测：对 `self` 节点 2 局 god 全链（ping→权重下发→stageJson 派发→回包
+  →JSONL 行，Phase 0 列齐全）通过。

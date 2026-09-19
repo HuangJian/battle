@@ -914,6 +914,14 @@ function main(): void {
     puGotFreeze: res.puGotFreeze,
     puGotShield: res.puGotShield,
     puGotOther: res.puGotOther,
+    // Phase 0 逐敌种画像：eval-course-ckpt 分布式路径消费（节点 pack manifest 顶层）。
+    hitsByKind: res.hitsByKind,
+    killsByKind: res.killsByKind,
+    exposureByKind: res.exposureByKind,
+    firstHitKind: res.firstHitKind,
+    firstKillKind: res.firstKillKind,
+    killOrder: res.killOrder,
+    killerKinds: res.killerKinds,
     ...(wver ? { wver, node: nodeLabel } : {}),
   }
   writeFileSync(`${outDir}/_eval_report.json`, JSON.stringify(report, null, 2))

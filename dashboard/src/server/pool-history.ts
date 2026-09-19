@@ -39,6 +39,21 @@ function normTs(s: string | undefined): string {
   return (s ?? '').replace('T', ' ')
 }
 
+/** 滑动窗口上限（服务时长 / 训练机墙钟共用）。 */
+export const ELAPSED_WINDOW = 50
+
+/** 只收正有限样本；窗口满则挤掉最旧。 */
+export function pushWindowSample(arr: number[], v: unknown, max = ELAPSED_WINDOW): void {
+  if (typeof v !== 'number' || !(v > 0) || !Number.isFinite(v)) return
+  arr.push(v)
+  if (arr.length > max) arr.shift()
+}
+
+/** 滑动均值，保留 1 位小数；空样本 = null。 */
+export function windowMeanSec(arr: readonly number[]): number | null {
+  return arr.length ? +(arr.reduce((a, b) => a + b, 0) / arr.length).toFixed(1) : null
+}
+
 export interface NodeHistory {
   ok: number
   fail: number
@@ -47,10 +62,14 @@ export interface NodeHistory {
   lastFailTs: string
   /** 已剥离 agent ISO 前缀（GLM-U3）。 */
   lastError: string
-  /** 最近至多 50 局的端到端服务时长样本（滑动窗口）。 */
+  /** 最近至多 50 局的节点侧服务时长样本（滑动窗口）。 */
   elapsedRecent: number[]
   /** elapsedRecent 的均值；null = 无样本。 */
   avgElapsedSec: number | null
+  /** 最近至多 50 局的训练机侧墙钟样本（派发→结算，含网络/轮询）。 */
+  wallRecent: number[]
+  /** wallRecent 的均值；null = 无样本（历史 meta 无 wallSec 时）。 */
+  avgWallSec: number | null
   /** 最近至多 10 条结算结果（ok=true），完成率 = 在线状态的判定依据。 */
   recent: boolean[]
   /** 该节点自己最近一次成功结算的轮次（-1 = 无成功记录）。 */
@@ -78,6 +97,8 @@ export function emptyHistory(): NodeHistory {
     lastError: '',
     elapsedRecent: [],
     avgElapsedSec: null,
+    wallRecent: [],
+    avgWallSec: null,
     recent: [],
     lastIter: -1,
     lastIterOk: 0,
@@ -189,6 +210,8 @@ export function aggregateNodeHistory(): HistoryAggregate {
             node?: string
             ok?: boolean
             elapsedSec?: number
+            /** 训练机派发→结算墙钟（新 meta 行；旧行无此键）。 */
+            wallSec?: number
             ts?: string
             reason?: string
             it?: number
@@ -228,10 +251,8 @@ export function aggregateNodeHistory(): HistoryAggregate {
               }
               mm.set(it, (mm.get(it) ?? 0) + 1)
             }
-            if (typeof r.elapsedSec === 'number' && r.elapsedSec > 0) {
-              h.elapsedRecent.push(r.elapsedSec)
-              if (h.elapsedRecent.length > 50) h.elapsedRecent.shift()
-            }
+            pushWindowSample(h.elapsedRecent, r.elapsedSec)
+            pushWindowSample(h.wallRecent, r.wallSec)
           } else {
             h.fail++
             // 最新错误只近一小时（用户指令）：窗口外错误不进 lastError；
@@ -267,9 +288,9 @@ export function aggregateNodeHistory(): HistoryAggregate {
     h.contribRollout = (globalMaxIt >= 0 && mr?.get(globalMaxIt)) || 0
     h.contribEval = (globalMaxIt >= 0 && me?.get(globalMaxIt)) || 0
     // 滑动窗口均值（最近 ≤50 局）：口径升级/负载变化后即时不被终身历史拖累。
-    h.avgElapsedSec = h.elapsedRecent.length
-      ? +(h.elapsedRecent.reduce((a, b) => a + b, 0) / h.elapsedRecent.length).toFixed(1)
-      : null
+    // avgWallSec 与 avgElapsedSec 并列：前者含网络/轮询，后者是节点侧服务时长。
+    h.avgElapsedSec = windowMeanSec(h.elapsedRecent)
+    h.avgWallSec = windowMeanSec(h.wallRecent)
   }
   return { hist, activeFlow, globalMaxIt, epochMs: POOL_EPOCH_MS }
 }

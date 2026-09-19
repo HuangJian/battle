@@ -21,7 +21,22 @@ function replayFiles(dir: string): string[] {
 
 /** god 策略（免权重文件）跑一小段：120 ticks 内无终局 → timeout 收场。 */
 function runGod(replayDir = '', seed = 860001, maxTicks = 120) {
-  return runEvalOne(0, STAGES[0], seed, 'hard', maxTicks, '', 'god', '', '', 0, 0, null, null, replayDir)
+  return runEvalOne(
+    0,
+    STAGES[0],
+    seed,
+    'hard',
+    maxTicks,
+    '',
+    'god',
+    '',
+    '',
+    0,
+    0,
+    null,
+    null,
+    replayDir,
+  )
 }
 
 describe('export-eval-game --replay', () => {

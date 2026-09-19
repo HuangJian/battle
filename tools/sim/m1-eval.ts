@@ -51,6 +51,7 @@ import {
 } from '../eval/godai-score'
 import { writeScorecardHtml, type ScorecardRow, type ScorecardSuite } from './scorecard-html'
 import { TailRaceBatch } from '../lib/hybrid-batch'
+import { flag } from '../lib/cli'
 import { BatchLedger, ledgerKey } from '../lib/batch-ledger'
 
 /** The 11 scored dimensions of the God AI score-v7 model (design §3). */
@@ -119,7 +120,9 @@ async function main(): Promise<void> {
   // v4.0 auto-dist（用户指令 2026-08-29：远程节点随时可能上线，每批都要充分利用）：
   // 不传 --dist-nodes 时，若默认 rl-config.json 存在且未给 --no-dist，也走混合分派——
   // 死节点只有 ~5s ping 快速失败（并行），活节点即刻接管份额；纯本地用 --no-dist 显式关闭。
-  const noDist = arg('no-dist') !== undefined
+  // 布尔存在位用 flag()（位置无关）：本地 arg() 取「下一个 token」，把 --no-dist
+  // 写在命令行末尾时取到 undefined → 静默忽略（2026-09-19 实测，m1-eval 同病）。
+  const noDist = flag('no-dist')
   let distNodesPath = arg('dist-nodes', '')
   if (!distNodesPath && !noDist) {
     const defaultCfg = 'nn-training/rl-config.json'

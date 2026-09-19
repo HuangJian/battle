@@ -132,7 +132,15 @@ const poolColumns: Col<NodeHistoryRow>[] = [
     key: 'avgElapsedSec',
     label: '平均耗时',
     align: 'num',
+    thTitle: '节点侧服务时长滑动平均（≤50 成功局）：接单→结果就绪，含冷启动，不含网络',
     cell: (r) => (r.avgElapsedSec !== null ? `${r.avgElapsedSec}s` : '-'),
+  },
+  {
+    key: 'avgWallSec',
+    label: '机侧墙钟',
+    align: 'num',
+    thTitle: '训练机派发→结算墙钟滑动平均（≤50 成功局）：含网络/异步轮询；与平均耗时并列，不覆盖',
+    cell: (r) => (r.avgWallSec !== null ? `${r.avgWallSec}s` : '-'),
   },
   { key: 'lastOkTs', label: '最近成功', cell: (r) => r.lastOkTs || '-' },
   {
@@ -173,7 +181,8 @@ function rowExpand(r: NodeHistoryRow) {
       ) : (
         <div className="tc-muted">
           最近贡献轮 it{r.lastIter}（全局最新 it{r.globalMaxIt}） · 平均耗时{' '}
-          {r.avgElapsedSec !== null ? `${r.avgElapsedSec}s` : '-'}
+          {r.avgElapsedSec !== null ? `${r.avgElapsedSec}s` : '-'} · 机侧墙钟{' '}
+          {r.avgWallSec !== null ? `${r.avgWallSec}s` : '-'}
         </div>
       )}
       {r.lastError ? (
@@ -280,8 +289,9 @@ export function NodeStats({ enabled, poolFreshNonce, course }: NodeStatsProps) {
       />
       <p className="tc-caption" style={{ border: 'none', padding: '8px 0 0' }}>
         状态 = 最近 10 次结算完成率（≥90% 健康 / ≥70% 波动 / &lt;70% 异常）；ping
-        仅实时参考。平均耗时 = 最近 50 局端到端服务时长滑动平均。 最近错误半小时窗口。服务端缓存{' '}
-        {Math.round((Date.now() - pool.cachedAt) / 1000)}s 前构建。
+        仅实时参考。平均耗时 = 最近 50 局节点侧服务时长滑动平均（接单→结果就绪，不含网络）。
+        机侧墙钟 = 训练机派发→结算（含网络/轮询）；历史 meta 无 wallSec 时显示 -。
+        最近错误半小时窗口。服务端缓存 {Math.round((Date.now() - pool.cachedAt) / 1000)}s 前构建。
       </p>
     </div>
   )
