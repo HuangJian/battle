@@ -2496,6 +2496,74 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 - **违反后果**：把判据改成配置/人工声明 ⇒ 多课程并行时忘关 ⇒ 同 job 在多卡重复算（P3b 回归）；少了“广播时清旧租约 + 只认首写”两道 ⇒ 输家拿 403 被读成确定性失败，job 被钉成 fail.json 终局；广播所有在池 job ⇒ 陈旧 job 上堆卡空烧。
 - **落地**：`nn-training/remote/protocol.py`（`RACE_MODE_*` / `HUB_SCOPE_HEADER` / `WORKER_ID_HEADER` / `RACE_WORKER_WINDOW_SEC` / `parse_hub_scope` / `race_decision`）、`nn-training/remote/hub_server.py`（worker 登记表 + `race_active`/`race_state`/`set_race_mode`/`clear_workers`，`claimable_job_ids(race)`/`claim(race)`，`/jobs/next` 接线 + RACE 日志行，`_post_result` 前置 409，`GET|POST /admin/race`，`--race`）、`nn-training/remote/worker.py`（上报身份/范围 + 竞速副本日志 + 409 措辞）、`dashboard/src/core/types.ts`（`RaceMode`/`normalizeRaceMode`）、`dashboard/src/stack/specs.ts`（`--race` 透传）；回归：`nn-training/tests/test_race_broadcast.py`（22 例）、`dashboard/tests/hub-server-race-arg.test.ts`（4 例）。后续（本轮明确不做）：赢家落账后叫停还在算的副本（省 N-1 份 GPU）。
 
+## §2026-09-19-goalnn-console-course-mode-toggle（2026-09-19，plan R3-2：控制台每课离线/在线开关 + 意图回灌）
+
+**背景**：hub 的「离线课」语义**早就实现且被 e2e 钉住**（`POST /admin/courses?mode=offline`：
+不实时派发、只收 it 权重/指标回传），但**全仓没有任何控制台代码调它**——面板上只有一个只读
+徽标，想真用这个闸只能手敲 curl；而且 hub 的 `mode` 是 **volatile**（重启回启动参数）⇒
+hub 一重启就**静默**恢复派发。这是「功能存在但不可达 + 重启即失忆」的两层缺口。
+
+**定案（`actions/course-mode.ts` + 总览卡开关）**：
+
+1. **热切 + 意图落盘**（`setCourseMode`）：调 hub `/admin/courses` 后把意图写进
+   `console-state.courseModes[课]`（additive 键，旧 state 文件读作空表）。
+2. **起 hub 时回灌**（`restoreCourseModes`，接在 `startComponent('hubServer')` 的两个分支上）：
+   ① **两种模式都发**（不是只补 offline）——hub 可能被以别的启动参数拉起来（例如
+   `--offline c5`），只补 offline 会让「我明明点过在线」惄惄失效；② 「已运行」那条早退路径
+   也回灌（hub 可能是手敲命令/别的终端拉起来的）。
+3. **hub 拒绝/不可达 → 意图照样落盘**并如实报告「已记录，但 hub 未接受：<原因>（起 hub 时
+   会按意图回灌）」：运维的决定不因为 hub 没起来而蒸发；但**也不谎报切换成功**。
+4. **开关只在 hub 认识这门课时出现**（`hubOnline && hubSeen`）：hub 不认识就 400，
+   给按钮等于给一个假承诺；开关是行按钮的**兄弟节点**（行本身是 `<button>`，嵌套 button 非法），
+   hub 无应答时整个开关都不渲染。
+5. 新增 `hubSetCourseMode`（`stack/hub-admin.ts`）：与 halt/resume 同性质的 `/admin/*` 客户端，
+   返回人读错误而非抛（观测/运维面不得把页面带崩）。
+
+**回归**：`dashboard/tests/course-mode.test.ts`（11 例：请求形状与 Bearer / 意图落盘 / 幂等重发文案 /
+400 与连接被拒都**保留意图**且不抛 / 非法模式与空课程**一次都不打 hub** / 回灌两种模式都发 /
+全失败逐课点名 / 无意图 → 空摘要 / 旧文件与脏键归一化）+ 总览面板 3 例（开关只在 hubSeen 时出现 /
+文案按模式反转且行按钮仍 4 个 / 无 onAction 或 hub 无应答都不渲染 + `setCourseMode` 在面板与路由
+**两侧**存在的接线断言）。gate：dashboard **588 pass / 0 fail**（574 → 588）+ `tsc --noEmit` 干净。
+
+**仍未做**：操作面（单例 `trainingLoop` 卡片 + 「入队/暂停该课」）——暂停需要一个**跨进程控制通道**
+（控制台不能直接调 python supervisor），需先定形态再动训练侧调度环。
+
+---
+
+## §2026-09-19-goalnn-slot-cap-5-and-loud-rejection（2026-09-19，plan R3-1：课程上限 5 + 越界槽位响亮拒启）
+
+**背景**：用户口径「允许同时训练多个课程，上限先设为 5」（2026-09-18），而实现是
+`dashboard/src/core/slots.ts::SLOT_COUNT = 4`，且 `slotOf` 对**越界值也静默回落 0**。
+两者叠加 = **第 5 门课必然越界，然后静默用第 1 门课的 push 端口**：两门课的本机 push
+互相顶掉，而且没有任何一行日志说这件事（只有端口占用冲突能间接看出）。这是真 bug，
+不是「缺功能」。
+
+**定案（三件事，都在 `slots.ts` 一个聚合点内）**：
+
+1. **`SLOT_COUNT` 4 → 5**（= 用户口径的并行课程上限）。hub/隧道自 2026-09-18 起是单实例，
+   槽位不再决定 hub 端口——它只剩「本机 push（worker_server）端口」与历史 metrics 命名，
+   所以「槽位数 = 可并行课程数」是准确的语义，不存在第二个上限要同步。
+2. **越界/非法槽位响亮拒启**（`slotOf` 抛错，点名课程 + 越界值 + 合法范围 + 总数）：
+   未配置（`undefined`/`null`）⇒ 仍旧回落 0（legacy 单课行为零变化，§0.5-4）；
+   **配置了非法值** ⇒ 报错。"只有未配置才回落"是本次要钉死的边界（旧注释与实现不符
+   已在 `slotIssue` 的 docstring 里写明）。
+3. **`slotError(cfg)` 配置级守卫 + 接进 `saveConfig`**：除非法槽位外，还拒绝
+   **两门课显式配到同一槽位**（那才是撞端口的病根，比单课越界更早发生）并点名双方；
+   未配置槽位的多课配置不拒（升级路上常态）。与 `capacityError` 同契约（null = 通过）。
+   `allSlotPorts`（端口兜底清场清单）随 `SLOT_COUNT` 自动扩容，无需另改。
+
+**取舍**：没有做「让课程数与槽位解耦」（plan R3-1 的备选）——hub/隧道已单例后槽位本就
+只剩 push 端口，加一层抽象只会多一个概念；上限 5 与用户口径一致，越界现在响亮，成本为零。
+
+**回归（先红后绿，§7）**：`dashboard/tests/training-multi-course.test.ts` 新增 W7 共 7 例
+（上限 ≥5 / 5 门课 push 口互异且第 5 门不再回落 0 / 越界与非法值（5、-1、1.5、"2"）点名拒启
+且 `slotPort` 同样响亮 / 未配置仍回落 0 且共享 hub 地址不受影响 / `allSlotPorts` 满 5 槽无重复 /
+两课同槽位点名双方 / `saveConfig` 拒落盘且磁盘保持原样）。复现证据：修前该块 **4 红**
+（`SLOT_COUNT` 实测 4、5 门课只算出 4 个端口、`slot: 4` 不抛而返回 0、`slotError` 不存在），
+修后该文件 **35 pass / 0 fail**（W7 全绿）；dashboard 全量 **574 pass / 0 fail** + `tsc --noEmit` 干净。
+
+---
+
 ## §2026-09-18-goalnn-multi-course-single-hub（2026-09-18，用户指令：多课程并行训练流程与操作重组；单进程服务所有课程 + hub 队列 + 分课程权重缓存）
 
 - **背景**：多课程并行（`docs/multi-course-audit.md` / plan multi-course-parallel-training）当时定的形状是**课程 = 并行单元**：每门课各一套 hub-server / cloudflared / trainingLoop / localWorker / workerServe 进程，端口按槽位 `base + slot*10`，账本按课程键控。它解决了「第二课覆盖第一课登记」那类串账，但代价是进程数按课程线性增长（5 课 = 25 个进程），且 **hub 完全不知道「课程」这回事**（`--job-root`/`--jsonl` 都是每课程路径），所以没有跨课程的调度面：一门课积压 20 轮就独占自己的 hub，别的课的 worker 空转。
@@ -2752,6 +2820,59 @@ R2c 造好了调度器与任务体，但**没有驱动者**（至今仍是「一
 
 **未做（R2d 剩下的操作面）**：控制台的入队/暂停 + 单例 `trainingLoop` 卡片（读面卡 R2c-3 已交付）；**R2e**：
 多课 × 假 worker/假 PPO 的 e2e + 真机双课并行跑通（serve 的真机行为需要人验）。
+
+**R2d 操作面（2026-09-19 九续）——进程不绑课程 + 暂停/恢复的控制文件通道（含生效回执）**：
+
+用户定案两点：① 控制指令走**控制文件**（不在训练进程里再挂 HTTP 服务）；② **trainingLoop 进程
+独立于课程**——没有课在训也能起，队列空着等。本轮把这两条落地，并把「离线开关」（R3-2）之外的
+另一半操作面补齐。
+
+**① 发现模式：进程不绑课程（`serve(courses=None)`）**
+- `--serve` 不给 `--courses` ⇒ 启动扫 `--traj-root/*/training_log.jsonl`，之后**每个空转拍再扫一次**
+  （新课程账本出现即自动开课入队）；**一门课都没有也照常运行**，`stop_reason` 不再有 `no_courses`
+  这一条（空队列是合法稳态，不是结束条件）。显式课程表则退化为「只看这几门」，全收官即退（e2e/单课调试）。
+- **被跳过过的课不再重试**（课程配置缺失 = 这一轮修不好；否则空转拍每秒刷日志）。
+- `--mode` 必须**显式声明**在 cluster 解析器上：此前靠扫 raw argv 取，但 argparse 会先把
+  `--serve --mode goal` 判成 unrecognized arguments 而拒启（声明了才能真透传）。
+
+**② 控制通道 = 一份意图文件（`tmp/loop-control.json`）**
+- 控制台写 `{"version":1,"paused":["c5"]}`（`dashboard/src/server/actions/loop-control.ts`，**原子写**
+  tmp+rename：训练侧每拍都在读，读到半个 JSON = 读到坏文件 = 静默失效），训练侧每拍读一次并施加到
+  调度器（`rl/loop_control.py`）。hub 挂了也能用，**文件本身就是状态**（对比 hub 的 course-mode 是
+  volatile，那边要靠回灌）。
+- **保守方向是刻意的**：读不到 / 解析失败 / 形状不对 ⇒ 当作「没有任何暂停意图」（继续训练）。控制面
+  坏掉不该停掉整条腿——这与 `already_done` 的「算不出的判据不得当成完成」同一条纪律。两侧各自单测。
+- **暂停只影响调度**（用户口径「暂停 = 保留队列，恢复后接着跑」）：队列与账本一个字不动。
+
+**③ 回执面（意图 ≠ 事实）——为什么必须有第三个文件**
+只有意图文件时，控制台点完暂停只能盲猜生效没生效（进程可能没在跑，也可能还没轮到读文件）。所以训练
+进程把**自己实际施加了什么**写回 `tmp/loop-control.applied.json`（`at` + `pid` + `paused`，仅在
+施加结果**变化时**写，不心跳），控制台用 `pid` 存活核对分辨「已暂停 / 待生效 / 恢复中 / 运行中」四态。
+**进程已死 ⇒ 残留文件不作数**（否则界面永远显示「已暂停」）——这是回执能被当事实的唯一前提。
+
+**④ UI：按钮改意图、徽标报事实（`LoopQueue` 卡片每行）**
+- 按钮方向由**意图**定（未生效时说「取消暂停」、已生效说「恢复」）；徽标只在「意图 ≠ 事实」时出现，
+  且**待生效用虚线、已暂停用实线**（同色即等于骗人）。「待生效」的悬停分两种解释：进程没跑 vs 还没
+  轮到读——不能一句「处理中」糊过去。
+- 开关是行按钮的**兄弟节点**（行本身是 `<button>`，嵌套 button 非法）；`onAction` 缺省 = 一个开关都不
+  渲染（LAN 只读下不假装能控，同总览卡的离线开关）。
+- 动作后**显式作废调度器视图缓存**（TTL 10s 比 hub 观测面的 5s 宽）——否则点下去要等一个 TTL 才上屏。
+
+**⑤ 暂停不算收官（教训）**：`_all_settled` 原先把 PAUSED 当收官 ⇒ 「暂停一门课」会顺手把整个进程退掉，
+恢复意图永远没人执行。现改为只认 `done`/`aborted`（暂停的课会让显式课程模式的进程一直等，用
+`--max-seconds` 兜底；发现模式本来就不退）。
+
+**回归**：`tests/test_serve_wiring.py`(+8：零课程照跑 / 中途出现的课自动入队 / 开不起来的课只试一次 /
+暂停只停被点名的课 / 恢复从原处接着跑 / 坏控制文件保守继续 / CLI 发现模式与 `--control-file`/`--mode` 转发) ·
+`tests/test_loop_control.py`(22：解析边界 / 非法名不废整份意图 / 保守方向 / 幂等 / 坏文件不被覆盖 /
+回执形状与原子性 / **未变化不写盘** / pid 存活语义) ·
+`dashboard/tests/loop-control.test.ts`(22) · `dashboard/tests/web-app-loopqueue.test.ts`(+9：四态 / 文案 /
+徽标 / 只读不渲染开关 / route+cache 接线) · `dashboard/tests/server-api-loop-queue.test.ts`(+1)。
+门禁：nn python gate **1511 passed / 4 skipped**；dashboard **621 passed**；三份 bundle + 根 `bun run check` +
+`bun run build` 绿。
+
+**仍未做**：单例 `trainingLoop` 卡片的分组（R3-3）· **R2e**（多课 × 假 worker/假 PPO 的 e2e + 真机双课
+并行跑通——serve 的真机行为需要人验，本轮改动同样只在假件下验证过）。
 
 **R2c-3 收口（2026-09-19 七续）——真机 RSS 实测：checkpoint 缓存上限的真实约束是「数量」不是「字节」**：
 

@@ -669,6 +669,7 @@ export function App({ initial }: AppProps) {
             overview={stateView?.overview ?? null}
             course={viewCourse}
             onSelectCourse={selectCourse}
+            onAction={doAction}
           />
         </PanelErrorBoundary>
       )}
@@ -680,6 +681,7 @@ export function App({ initial }: AppProps) {
             loopQueue={stateView?.loopQueue ?? null}
             course={viewCourse}
             onSelectCourse={selectCourse}
+            onAction={doAction}
           />
         </PanelErrorBoundary>
       )}

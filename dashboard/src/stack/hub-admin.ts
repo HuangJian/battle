@@ -122,6 +122,33 @@ export async function hubReloadPushWorkers(url: string, token: string): Promise<
   }
 }
 
+/** 热切某课的 hub 派发模式（R3-2）：`POST /admin/courses?course=X&mode=online|offline`。
+ *
+ *  语义（hub 侧注释同口径）：volatile 内存态 —— 重启回启动参数，所以调用方（控制台）
+ *  必须把**意图**单独落盘并在起 hub 时回灌。返回 null = 接受；否则返回人读错误（不抛）。
+ *  为什么放在本模块：它是 `/admin/*` 客户端的一部分（与 halt/resume 同性质），
+ *  动作层只负责「落意图 + 回灌 + 组话术」。 */
+export async function hubSetCourseMode(
+  url: string,
+  token: string,
+  course: string,
+  mode: 'online' | 'offline',
+): Promise<string | null> {
+  const qs = `course=${encodeURIComponent(course)}&mode=${encodeURIComponent(mode)}`
+  try {
+    const resp = await fetch(`${url.replace(/\/+$/, '')}/admin/courses?${qs}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(3000),
+    })
+    if (resp.status === 200) return null
+    const body = (await resp.json().catch(() => null)) as { error?: unknown } | null
+    return typeof body?.error === 'string' ? body.error : `HTTP ${resp.status}`
+  } catch (e) {
+    return String(e)
+  }
+}
+
 /** 直探一台 worker_server 的 `/ping`（登记/列表用）：`{online, busy}`。
  *  `online=false` 与「未探」是**两种**状态：前者是探过不通（隧道没起来/机器没开），
  *  后者是根本没法探（无鉴权键 / 已停用）——面板要给不同的提示。 */

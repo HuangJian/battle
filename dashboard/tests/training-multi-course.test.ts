@@ -50,11 +50,14 @@ import { killPid, pidAlive } from '../src/core/net'
 import { seedWeightsFromBc } from '../src/stack/courses'
 import { restartSpecFor } from '../src/server/actions'
 import {
+  allSlotPorts,
   capacityError,
   checkCapacity,
   lockName,
   sharedHubPort,
   sharedTunnelMetricsPort,
+  slotError,
+  slotOf,
   slotPort,
 } from '../src/core/slots'
 import type { Registry, RlConfig } from '../src/core/types'
@@ -112,6 +115,8 @@ const FIXTURE_CFG = {
 function cfgFixture(): RlConfig {
   return JSON.parse(JSON.stringify(FIXTURE_CFG)) as RlConfig
 }
+
+import { SLOT_COUNT } from '../src/core/slots'
 
 /** 裸机容量 = max(rl.workers, rl.local_slots)（plan §1.1「裸机容量」）。 */
 function bareCapacity(cfg: RlConfig): number {
@@ -748,5 +753,111 @@ describe('P5-R2 旧扁平账本键搬迁（migration）+ 读兼容移除', () =>
     const good: Registry = { hubServers: { '': { pid: 1 }, a: { pid: 2 } } }
     expect(entryForCourse(good, 'hubServer', '')?.pid).toBe(1)
     expect(entryForCourse(good, 'hubServer', 'a')?.pid).toBe(2)
+  })
+})
+
+// ──────────────────── W7：课程上限与越界槽位（R3-1 修端口撞车） ────────────────────
+
+/** 用户口径（2026-09-18）：**并行课程上限先设为 5**。
+ *
+ *  这是**需求**、不是实现常量：故意写成字面量（不引用 `SLOT_COUNT`），否则实现把上限
+ *  改回 4 时「5 门课」的用例会自己缩成 4 门、永远绿（判据跟着实现跑 = 假绿）。 */
+const REQUIRED_COURSES = 5
+
+/** N 门课各占一个槽位（slot 0..N-1）——与用户会在 rl-config 里写的形状一致。 */
+function nCourseCfg(n: number): RlConfig {
+  const courses: Record<string, { slot: number }> = {}
+  for (let s = 0; s < n; s++) courses[`course-${s}`] = { slot: s }
+  return { ...cfgFixture(), courses }
+}
+
+describe('W7 课程上限：第 5 门课不许撞第 1 门课的端口（R3-1）', () => {
+  it('实现至少容得下 5 门课（用户口径）', () => {
+    expect(SLOT_COUNT).toBeGreaterThanOrEqual(REQUIRED_COURSES)
+  })
+
+  it('5 门课各自的 push 端口互异（越界槽位不再静默回落 0）', () => {
+    const cfg = nCourseCfg(REQUIRED_COURSES)
+    const ports = Array.from({ length: REQUIRED_COURSES }, (_, s) =>
+      slotPort(cfg, `course-${s}`, 'push'),
+    )
+    // 旧实现（SLOT_COUNT=4 + 越界回落 0）：第 5 门课拿到 slot 0 的口 ⇒ 与 course-0 相撞
+    expect(new Set(ports).size).toBe(REQUIRED_COURSES)
+    expect(slotOf(cfg, `course-${REQUIRED_COURSES - 1}`)).toBe(REQUIRED_COURSES - 1)
+  })
+
+  it('越界/非法槽位响亮拒启（点名课程 + 上限），不再静默顶到槽位 0', () => {
+    const bad: unknown[] = [REQUIRED_COURSES, -1, 1.5, '2']
+    for (const v of bad) {
+      const cfg = { ...cfgFixture(), courses: { a: { slot: v } } } as unknown as RlConfig
+      expect(() => slotOf(cfg, 'a')).toThrow(/槽位/)
+      // 诊断必须能直接定位：课程名 + 越界值 + 上限
+      let msg = ''
+      try {
+        slotOf(cfg, 'a')
+      } catch (e) {
+        msg = (e as Error).message
+      }
+      expect(msg).toContain('a')
+      expect(msg).toContain(JSON.stringify(v))
+      expect(msg).toContain(String(SLOT_COUNT))
+      // 端口算术同样响亮（调用方不必各自记得先校验）
+      expect(() => slotPort(cfg, 'a', 'push')).toThrow(/槽位/)
+    }
+  })
+
+  it('未配置 = 仍回落槽位 0（旧单课行为零变化）', () => {
+    const cfg = cfgFixture()
+    expect(slotOf(cfg, 'any-course')).toBe(0) // courses 块整个缺失
+    expect(slotOf({ ...cfg, courses: { z: {} } } as RlConfig, 'z')).toBe(0) // 只配了配额
+    expect(slotOf({ ...cfg, courses: { z: { slot: null } } } as unknown as RlConfig, 'z')).toBe(0)
+    // 旧单课口径：共享 hub 与槽位无关（配错 slot 不许把 hub 地址一起带偏）
+    expect(sharedHubPort(cfg)).toBe(slotPort(cfg, 0, 'hub'))
+  })
+
+  it('端口兜底清单随上限扩容（每个槽位 3 口 + agent，无重复）', () => {
+    const cfg = nCourseCfg(REQUIRED_COURSES)
+    const ports = allSlotPorts(cfg)
+    expect(ports.length).toBe(SLOT_COUNT * 3 + 1)
+    expect(new Set(ports).size).toBe(ports.length) // 撞口是不会被容忍的
+    for (let s = 0; s < SLOT_COUNT; s++) {
+      for (const kind of ['hub', 'metrics', 'push'] as const) {
+        expect(ports).toContain(slotPort(cfg, s, kind))
+      }
+    }
+  })
+
+  it('两门课配到同一个槽位 = 撞 push 端口 ⇒ 守卫点名两门课', () => {
+    const dup = { ...cfgFixture(), courses: { a: { slot: 1 }, b: { slot: 1 } } } as RlConfig
+    const msg = slotError(dup)
+    expect(msg).not.toBeNull()
+    expect(msg).toContain('a')
+    expect(msg).toContain('b')
+    expect(msg).toContain('撞同一个 push 端口')
+    // 两门课的真实端口确实是同一个（这才是病根）
+    expect(slotPort(dup, 'a', 'push')).toBe(slotPort(dup, 'b', 'push'))
+    // legacy：全都没配槽位 = 旧单课语义，不当错误（升级路上常态）
+    expect(slotError({ ...cfgFixture(), courses: { a: {}, b: {} } } as RlConfig)).toBeNull()
+  })
+
+  it('saveConfig 把越界槽位挡在落盘之前（点名课程，磁盘保持原样）', () => {
+    const cfg = { ...cfgFixture(), courses: { a: { slot: REQUIRED_COURSES } } } as RlConfig
+    const msg = slotError(cfg)
+    expect(msg).not.toBeNull()
+    expect(msg).toContain('a')
+    expect(msg).toContain(String(REQUIRED_COURSES))
+
+    const scratch = mkdtempSync(path.join(os.tmpdir(), 'bcity-w7cfg-'))
+    SCRATCH_DIRS.push(scratch)
+    const p = path.join(scratch, 'rl-config.json')
+    const base = JSON.stringify(cfgFixture(), null, 2)
+    writeFileSync(p, base)
+    expect(() => saveConfig(cfg, p)).toThrow()
+    expect(readFileSync(p, 'utf-8')).toBe(base)
+    // 合法配置（5 门课各占一槽）照常落盘
+    saveConfig(nCourseCfg(REQUIRED_COURSES), p)
+    const saved = JSON.parse(readFileSync(p, 'utf-8')) as RlConfig
+    expect(Object.keys(saved.courses ?? {})).toHaveLength(REQUIRED_COURSES)
+    expect(slotError(nCourseCfg(REQUIRED_COURSES))).toBeNull()
   })
 })

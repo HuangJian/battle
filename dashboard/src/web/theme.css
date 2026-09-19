@@ -2222,11 +2222,19 @@ a.tc-preset {
   gap: 4px;
   margin-top: 6px;
 }
+/* 行外壳：行（按钮，占满）+ 模式开关（R3-2）——开关不能嵌在行按钮里（嵌套按钮非法）。 */
+.tc-cov__rowwrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
 .tc-cov__row {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
   flex-wrap: wrap;
+  flex: 1;
+  text-align: left;
   padding: 2px 8px;
   border: 1px solid transparent;
   border-radius: 8px;
@@ -2244,6 +2252,22 @@ a.tc-preset {
 .tc-cov__row--cur {
   border-color: var(--accent);
   background: var(--accent-bg);
+}
+/* 模式开关（R3-2）：小、次要，但永远可点（只在 hub 认识这门课时出现） */
+.tc-cov__mode {
+  flex: 0 0 auto;
+  padding: 1px 8px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--fg-dim);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.tc-cov__mode:hover {
+  color: var(--fg);
+  border-color: var(--accent);
 }
 .tc-cov__name {
   font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
@@ -2403,6 +2427,47 @@ a.tc-preset {
 }
 .tc-loopq__wait--idle {
   color: var(--muted);
+}
+/* 行 + 暂停开关（开关是行按钮的兄弟节点：行本身是 <button>，嵌 button 非法） */
+.tc-loopq__rowwrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tc-loopq__rowwrap .tc-loopq__row {
+  flex: 1;
+  min-width: 0;
+}
+.tc-loopq__pausebtn {
+  flex: 0 0 auto;
+  padding: 1px 8px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--fg-dim);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.tc-loopq__pausebtn:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+/* 事实徽标：已暂停（实）/ 待生效 · 恢复中（虚）——意图未生效时不得与已生效同色 */
+.tc-loopq__pause {
+  flex: 0 0 auto;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: var(--fs-1);
+  font-weight: 700;
+}
+.tc-loopq__pause--on {
+  color: var(--yellow);
+  border: 1px solid var(--yellow);
+}
+.tc-loopq__pause--pending {
+  color: var(--muted);
+  border: 1px dashed var(--line);
 }
 .tc-loopq__foot {
   margin-top: 4px;

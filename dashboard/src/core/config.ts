@@ -3,7 +3,7 @@
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'fs'
 import path from 'path'
 import { configPath, curriculaDir } from './paths'
-import { capacityError } from './slots'
+import { capacityError, slotError } from './slots'
 import type { RlConfig } from './types'
 
 export function loadConfig(cfgPath = configPath()): RlConfig {
@@ -14,10 +14,14 @@ export function loadConfig(cfgPath = configPath()): RlConfig {
  *
  *  多课程（plan P4-W1）：落盘前过 `capacityError` 加法校验——`Σ eff(course) ≤ 裸机
  *  容量`，超量 fail-fast 并点名超量课程（绝不把超量配额写到磁盘再靠运行时补救）。
- *  无 `courses` 块时为空操作（默认行为零变化，§0.5-4）。 */
+ *  R3-1（2026-09-19）：再过 `slotError` 槽位守卫——越界或**两门课配同一槽位**都拒绝落盘
+ *  （否则就是撞 push 端口，而运行时才发现只会变成两门课互相顶掉）。
+ *  无 `courses` 块时两个守卫都是空操作（默认行为零变化，§0.5-4）。 */
 export function saveConfig(cfg: RlConfig, cfgPath = configPath()): void {
   const cap = capacityError(cfg)
   if (cap) throw new Error(cap)
+  const slot = slotError(cfg)
+  if (slot) throw new Error(slot)
   writeFileSync(cfgPath, JSON.stringify(cfg, null, 2), 'utf-8')
 }
 

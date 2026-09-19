@@ -16,7 +16,13 @@
  *  它只改本浏览器的查看目标，不碰训练状态）。
  */
 
-import { type LoopQueueRow, type LoopQueueView } from '../../view'
+import {
+  type LoopQueueRow,
+  type LoopQueueView,
+  pauseBadge,
+  pauseLabel,
+  pauseTitle,
+} from '../../view'
 
 /** 未在训那一行的悬停全文（导出给用例断言，避免文案与断言两处漂移）。 */
 export const STOPPED_TITLE =
@@ -27,6 +33,8 @@ export interface LoopQueueProps {
   /** 当前查看课程（高亮）。 */
   course: string
   onSelectCourse: (course: string) => void
+  /** 动作派发（写暂停意图）。缺省 = 不渲染暂停按钮（LAN 只读 / 无动作能力时**不假装能控**）。 */
+  onAction?: (act: string, body: Record<string, unknown>) => unknown
 }
 
 /** 「在等什么」的（修饰类 + 悬停解释）。kind 的语义在 python `waiting_state` 里定死。 */
@@ -58,7 +66,7 @@ function poolText(pools: LoopQueueView['pools']): string {
   return names.map((n) => `${n} ${pools[n]!.held}/${pools[n]!.capacity}`).join(' · ')
 }
 
-export function LoopQueue({ loopQueue, course, onSelectCourse }: LoopQueueProps) {
+export function LoopQueue({ loopQueue, course, onSelectCourse, onAction }: LoopQueueProps) {
   if (!loopQueue) return null
   const { rows, error } = loopQueue
   if (error && rows.length === 0) {
@@ -124,43 +132,69 @@ export function LoopQueue({ loopQueue, course, onSelectCourse }: LoopQueueProps)
       <div className="tc-loopq__rows">
         {rows.map((r) => {
           const viewing = r.course === course
+          const badge = pauseBadge(r)
           return (
-            <button
-              key={r.course}
-              type="button"
-              className={`tc-loopq__row${viewing ? ' tc-loopq__row--cur' : ''}${
-                r.training ? '' : ' tc-loopq__row--stopped'
-              }`}
-              aria-current={viewing ? 'true' : undefined}
-              title={viewing ? `${r.course}（当前查看）` : `切到查看 ${r.course}`}
-              onClick={() => onSelectCourse(r.course)}
-            >
-              <span className="tc-loopq__name">{r.course}</span>
-              <span
-                className={`tc-loopq__badge ${r.training ? 'tc-loopq__badge--on' : 'tc-loopq__badge--idle'}`}
-                title={r.training ? 'trainingLoop 进程存活（registry）' : STOPPED_TITLE}
+            // 暂停/恢复开关是行按钮的**兄弟节点**（行本身是 <button>，嵌套 button 非法）。
+            <div className="tc-loopq__rowwrap" key={r.course}>
+              <button
+                key={r.course}
+                type="button"
+                className={`tc-loopq__row${viewing ? ' tc-loopq__row--cur' : ''}${
+                  r.training ? '' : ' tc-loopq__row--stopped'
+                }`}
+                aria-current={viewing ? 'true' : undefined}
+                title={viewing ? `${r.course}（当前查看）` : `切到查看 ${r.course}`}
+                onClick={() => onSelectCourse(r.course)}
               >
-                {r.training ? '在训' : '未在训'}
-              </span>
-              <span className="tc-loopq__iter" title="账本指针：下一轮要跑的 it">
-                it{r.it}
-              </span>
-              <span className="tc-loopq__step" title={`下一步：${r.current || '（本轮无待办）'}`}>
-                {r.current || '—'}
-              </span>
-              <span
-                className="tc-loopq__pending"
-                title={`待办 ${r.pending.length} 步（顺序即依赖顺序）：${r.pending.join(' → ')}`}
-              >
-                待办 {r.pending.length}
-              </span>
-              <span
-                className={`tc-loopq__wait ${waitCls(r.waiting.kind)}`}
-                title={WAIT_TITLES[r.waiting.kind]}
-              >
-                {r.waiting.text || '—'}
-              </span>
-            </button>
+                <span className="tc-loopq__name">{r.course}</span>
+                <span
+                  className={`tc-loopq__badge ${r.training ? 'tc-loopq__badge--on' : 'tc-loopq__badge--idle'}`}
+                  title={r.training ? 'trainingLoop 进程存活（registry）' : STOPPED_TITLE}
+                >
+                  {r.training ? '在训' : '未在训'}
+                </span>
+                <span className="tc-loopq__iter" title="账本指针：下一轮要跑的 it">
+                  it{r.it}
+                </span>
+                <span className="tc-loopq__step" title={`下一步：${r.current || '（本轮无待办）'}`}>
+                  {r.current || '—'}
+                </span>
+                <span
+                  className="tc-loopq__pending"
+                  title={`待办 ${r.pending.length} 步（顺序即依赖顺序）：${r.pending.join(' → ')}`}
+                >
+                  待办 {r.pending.length}
+                </span>
+                <span
+                  className={`tc-loopq__wait ${waitCls(r.waiting.kind)}`}
+                  title={WAIT_TITLES[r.waiting.kind]}
+                >
+                  {r.waiting.text || '—'}
+                </span>
+              </button>
+              {/* 开关改的是**意图文件**，能不能生效由训练进程决定 ⇒ 旁边再挂一个事实徽标，
+                  诚实区分「已暂停」与「待生效」（只显示意图会骗人，只显示事实会点完没反馈）。 */}
+              {onAction ? (
+                <button
+                  type="button"
+                  className="tc-loopq__pausebtn"
+                  title={pauseTitle(r)}
+                  onClick={() =>
+                    void onAction('setCoursePaused', {
+                      course: r.course,
+                      paused: !r.pausedIntent,
+                    })
+                  }
+                >
+                  {pauseLabel(r)}
+                </button>
+              ) : null}
+              {badge ? (
+                <span className={`tc-loopq__pause ${badge.cls}`} title={pauseTitle(r)}>
+                  {badge.text}
+                </span>
+              ) : null}
+            </div>
           )
         })}
       </div>

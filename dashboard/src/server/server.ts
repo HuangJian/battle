@@ -61,6 +61,7 @@ import {
   evalReplayFileResponse,
   getLoopQueueView,
   invalidateHubAdmin,
+  invalidateLoopQueue,
   invalidateSlowSnapshot,
   ladderTickAll,
   routeAction,
@@ -400,6 +401,9 @@ async function main(): Promise<void> {
           if (resp) {
             invalidateSlowSnapshot()
             invalidateHubAdmin()
+            // 调度器视图的 TTL 比 hub 观测面长（10s）：暂停/恢复动作后必须显式作废，
+            // 否则按钮点下去要到下一个 TTL 才看到意图上屏（回执面同理）。
+            invalidateLoopQueue()
           }
           return resp ?? json({ ok: false, message: `未知动作: ${act}` }, 404)
         }

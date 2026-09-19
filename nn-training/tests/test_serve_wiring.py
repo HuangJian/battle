@@ -300,6 +300,267 @@ def test_broken_course_is_isolated(env: SimpleNamespace, monkeypatch: pytest.Mon
     assert rep2.stop_reason == "no_courses" and rep2.steps == 0
 
 
+# --------------------------------------------------------------- 发现模式（进程不绑课程）
+
+
+def test_discover_mode_runs_with_zero_courses(env: SimpleNamespace) -> None:
+    """**一门课都没有也照常跑**（队列空着等）——空队列不是结束条件（用户 2026-09-18 口径）。"""
+    clock = FakeClock()
+    rep = serve(
+        None,
+        prepare=False,
+        bun="bun",
+        iters=1,
+        step_mode=False,
+        traj_root=str(env.tmp),
+        now=clock.now,
+        sleep=clock.sleep,
+        max_seconds=60.0,
+    )
+
+    assert rep.stop_reason == "max_seconds"  # 不是 all_settled：发现模式没有「全收官」这个终点
+    assert rep.courses == {} and env.opened == []
+    assert clock.sleeps >= 1  # 真的空转了（等新课程）
+
+
+def test_discover_mode_picks_up_a_course_that_appears_mid_run(env: SimpleNamespace) -> None:
+    """扫到新课程账本 ⇒ 自动开课入队（无需重启进程）。"""
+    clock = FakeClock()
+
+    def spawn(_n: int) -> None:
+        if _n == 2:  # 第 2 次空转时，盘上出现一门新课
+            d = env.tmp / "a"
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "training_log.jsonl").write_text("", encoding="utf-8")
+
+    clock.on_sleep = spawn
+    rep = serve(
+        None,
+        prepare=False,
+        bun="bun",
+        iters=1,
+        step_mode=False,
+        traj_root=str(env.tmp),
+        now=clock.now,
+        sleep=clock.sleep,
+        poll_sec=1.0,
+        max_seconds=10.0,
+    )
+
+    assert env.opened == ["a"]
+    assert rep.courses["a"]["state"] == "done"
+    assert rep.courses["a"]["rounds_done"] == 1
+    assert rep.stop_reason == "max_seconds"
+
+
+def test_discover_mode_opens_what_is_already_on_disk(env: SimpleNamespace) -> None:
+    """启动时盘上已有两门课 ⇒ 一次全开、不重复开（`_open_courses` 幂等）。"""
+    for name in ("a", "b"):
+        d = env.tmp / name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "training_log.jsonl").write_text("", encoding="utf-8")
+    clock = FakeClock()
+
+    rep = serve(
+        None,
+        prepare=False,
+        bun="bun",
+        iters=1,
+        step_mode=False,
+        traj_root=str(env.tmp),
+        now=clock.now,
+        sleep=clock.sleep,
+        poll_sec=1.0,
+        max_seconds=5.0,
+    )
+
+    assert env.opened == ["a", "b"]  # 各开一次（后续空转不再重复开）
+    assert sorted(rep.courses) == ["a", "b"]
+    assert all(v["rounds_done"] == 1 for v in rep.courses.values())
+
+
+def test_a_course_whose_ledger_blows_up_does_not_take_down_the_process(
+    env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """入队阶段读盘失败（账本半写/权限）⇒ 只跳过那门课（故障域 = 单课）。
+
+    没有队列的课会被调度器忽略；若不摘掉它，它会变成一个「看着开着、实际没人跑」的幽灵。
+    """
+    real_facts = loop_plan.course_facts
+
+    def course_facts(traj: Any, *a: Any, **kw: Any) -> Any:
+        if Path(str(traj)).name == "bad":
+            raise OSError("账本读不了")
+        return real_facts(traj, *a, **kw)
+
+    monkeypatch.setattr(loop_serve, "course_facts", course_facts)
+    rep = serve(["bad", "a"], prepare=False, bun="bun", iters=1, step_mode=False)
+
+    assert rep.stop_reason == "all_settled"
+    assert "bad" in rep.skipped and "账本读不了" in rep.skipped["bad"]
+    assert "bad" not in rep.courses  # 幽灵不留在调度器里
+    assert rep.courses["a"]["rounds_done"] == 1
+
+
+def test_discover_mode_does_not_retry_a_broken_course(
+    env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """开不起来的课（配置缺失/锁被占）只试一次——否则空转拍会每秒重试、把日志刷爆。"""
+    d = env.tmp / "bad"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "training_log.jsonl").write_text("", encoding="utf-8")
+    attempts: list[str] = []
+
+    def open_course(course: str, **kw: Any) -> CourseRuntime:
+        attempts.append(course)
+        raise SystemExit(f"[serve] 课程 {course} 开不起来")
+
+    monkeypatch.setattr(loop_serve, "open_course", open_course)
+    clock = FakeClock()
+    rep = serve(
+        None,
+        prepare=False,
+        bun="bun",
+        step_mode=False,
+        traj_root=str(env.tmp),
+        now=clock.now,
+        sleep=clock.sleep,
+        poll_sec=1.0,
+        max_seconds=5.0,
+    )
+
+    assert attempts == ["bad"]  # 一次，不是每次空转一次
+    assert list(rep.skipped) == ["bad"]
+    assert clock.sleeps >= 2  # 确实空转了好几拍
+
+
+# --------------------------------------------------------------- 控制面（暂停/恢复）
+
+
+def test_control_file_pauses_only_the_named_course(
+    env: SimpleNamespace, tmp_path: Path
+) -> None:
+    """控制台写暂停意图 ⇒ 被暂停的课**一步都不推**，别的课照常跑完。"""
+    control = tmp_path / "loop-control.json"
+    control.write_text(json.dumps({"paused": ["b"]}), encoding="utf-8")
+    clock = FakeClock()
+
+    # 显式课程模式 + 全程暂停 b：b 不推进，a 跑完后进程停在「等恢复」（max_seconds 兜底退出）
+    rep = serve(
+        ["a", "b"],
+        prepare=False,
+        bun="bun",
+        iters=2,
+        step_mode=False,
+        control_file=str(control),
+        now=clock.now,
+        sleep=clock.sleep,
+        poll_sec=1.0,
+        max_seconds=30.0,
+    )
+
+    assert rep.stop_reason == "max_seconds"  # 暂停不算收官 ⇒ 不退
+    assert rep.courses["a"]["rounds_done"] == 2 and rep.courses["a"]["state"] == "done"
+    assert rep.courses["b"]["state"] == "paused"
+    assert rep.courses["b"]["rounds_done"] == 0
+    assert [c for c, _ in FakeLoop.order] == ["a", "a"]  # b 一步都没跑
+
+
+def test_control_file_resume_lets_the_course_continue(
+    env: SimpleNamespace, tmp_path: Path
+) -> None:
+    """暂停 → 恢复：队列与账本一个字没动，从原处接着跑（**不重做已完成轮**）。"""
+    control = tmp_path / "loop-control.json"
+    control.write_text(json.dumps({"paused": ["a"]}), encoding="utf-8")
+    clock = FakeClock()
+
+    def unpause(_n: int) -> None:
+        if _n >= 2:  # 两拍之后控制台恢复
+            control.write_text(json.dumps({"paused": []}), encoding="utf-8")
+
+    clock.on_sleep = unpause
+    rep = serve(
+        ["a"],
+        prepare=False,
+        bun="bun",
+        iters=2,
+        step_mode=False,
+        control_file=str(control),
+        now=clock.now,
+        sleep=clock.sleep,
+        poll_sec=1.0,
+        max_seconds=60.0,
+    )
+
+    assert rep.stop_reason == "all_settled"
+    loop = FakeLoop.instances[0]
+    assert [it for it, _ in loop.executed] == [1, 2]  # 恢复后接着跑，不是从头
+    assert rep.courses["a"]["rounds_done"] == 2
+
+
+def test_missing_or_broken_control_file_keeps_training(
+    env: SimpleNamespace, tmp_path: Path
+) -> None:
+    """控制面坏掉 ⇒ **保守方向 = 继续训练**（绝不因为读不到意图而误停整条腿）。"""
+    control = tmp_path / "loop-control.json"
+    control.write_text("{ 这不是 JSON", encoding="utf-8")
+
+    rep = serve(
+        ["a"],
+        prepare=False,
+        bun="bun",
+        iters=1,
+        step_mode=False,
+        control_file=str(control),
+    )
+
+    assert rep.stop_reason == "all_settled" and rep.courses["a"]["rounds_done"] == 1
+
+    # 文件根本不存在同理（空意图）
+    rep2 = serve(
+        ["a"],
+        prepare=False,
+        bun="bun",
+        iters=1,
+        step_mode=False,
+        control_file=str(tmp_path / "nope.json"),
+    )
+    assert rep2.stop_reason == "all_settled"
+
+
+# --------------------------------------------------------------- CLI 接线
+
+
+def test_cli_serve_without_courses_means_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--serve` 不给 `--courses` = 发现模式（**不再拒启**）——进程独立于课程。
+
+    这里只钉转发形状（不真跑 supervisor：`serve` 被换成收参数的假件，因为它一旦真跑会
+    先做启动前 `git push`）。
+    """
+    import run_rl_cluster
+
+    seen: dict[str, Any] = {}
+
+    def fake_serve(courses: Any, **kw: Any) -> Any:
+        seen["courses"] = courses
+        seen.update(kw)
+        return loop_serve.ServeReport(stop_reason="stub")
+
+    monkeypatch.setattr(loop_serve, "serve", fake_serve)
+
+    assert run_rl_cluster.main(["--serve"]) == 0
+    assert seen["courses"] is None  # 空表 ⇒ None（发现模式），不是空列表
+    assert seen["control_file"] is None  # 未显式给 ⇒ 走 loop_control 的默认路径
+    assert seen["traj_root"] == "tmp"
+
+    assert run_rl_cluster.main(["--serve", "--courses", "c4-dodge,c5-tick"]) == 0
+    assert seen["courses"] == ["c4-dodge", "c5-tick"]
+
+    run_rl_cluster.main(["--serve", "--control-file", "tmp/ctl.json", "--mode", "goal"])
+    assert seen["control_file"] == "tmp/ctl.json"
+    assert seen["argv"] == ["--mode", "goal"]  # `--mode` 是课程级参数，只透传它
+
+
 # --------------------------------------------------------------- 课程参数
 
 

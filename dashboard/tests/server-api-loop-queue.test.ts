@@ -200,6 +200,18 @@ describe('buildLoopQueueView / buildStateView 注入', () => {
     expect(v.trainingCount).toBe(1)
   })
 
+  it('buildLoopQueueView 把控制面事实（意图 + 生效回执）并进每一行', async () => {
+    api.invalidateLoopQueue()
+    const v = await api.buildLoopQueueView(['c5-tick'], () => ok(JSON.stringify(JSON_OUT)), {
+      intent: ['c4-dodge', 'c5-tick'],
+      applied: ['c4-dodge'],
+    })
+    expect(v.rows.map((r) => [r.course, r.pausedIntent, r.pauseApplied])).toEqual([
+      ['c4-dodge', true, true], // 意图 + 已生效
+      ['c5-tick', true, false], // 意图写了但训练进程还没施加
+    ])
+  })
+
   it('buildStateView 带上 loopQueue（且不因读失败 500）', async () => {
     // 先用自己的假执行体暖缓存：`buildStateView` 走缺省执行体，TTL 内读的是这份缓存
     // ——于是本用例既不真起 python，又能断言「服务端确实把它挂上去了」。

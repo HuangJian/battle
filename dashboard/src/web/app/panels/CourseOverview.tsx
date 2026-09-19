@@ -17,6 +17,9 @@ export interface CourseOverviewProps {
   /** 当前查看课程（高亮）。 */
   course: string
   onSelectCourse: (course: string) => void
+  /** 动作通道（R3-2：切离线/在线）。可缺省——只读视图/单测直接渲染时不接动作。
+   *  返回类型放 `unknown`：app 的 `doAction` 回 `{ok}`，无关的回传值不该逼调用方套壳。 */
+  onAction?: (act: string, body: Record<string, unknown>) => unknown
 }
 
 /** 单行状态徽标的（文案 + 修饰类）。 */
@@ -43,7 +46,12 @@ function rowBadge(r: ParallelOverviewView['rows'][number]): {
   return { text: '停', cls: 'tc-cov__badge--idle', title: '没有存活的 trainingLoop 进程' }
 }
 
-export function CourseOverview({ overview, course, onSelectCourse }: CourseOverviewProps) {
+export function CourseOverview({
+  overview,
+  course,
+  onSelectCourse,
+  onAction,
+}: CourseOverviewProps) {
   if (!overview || overview.rows.length === 0) return null
   const trainingCount = overview.rows.filter((r) => r.training).length
   const recentDispatch = overview.recentDispatch
@@ -97,33 +105,55 @@ export function CourseOverview({ overview, course, onSelectCourse }: CourseOverv
         {overview.rows.map((r) => {
           const b = rowBadge(r)
           const viewing = r.course === course
+          // 模式开关只在 hub 认识这门课时给（hub 不认识的课程 → 400，按钮就是假承诺）。
+          const canToggle = overview.hubOnline && r.hubSeen && Boolean(onAction)
           return (
-            <button
-              key={r.course}
-              type="button"
-              className={`tc-cov__row${viewing ? ' tc-cov__row--cur' : ''}`}
-              aria-current={viewing ? 'true' : undefined}
-              title={viewing ? `${r.course}（当前查看）` : `切到查看 ${r.course}`}
-              onClick={() => onSelectCourse(r.course)}
-            >
-              <span className="tc-cov__name">{r.course}</span>
-              <span className={`tc-cov__badge ${b.cls}`} title={b.title}>
-                {b.text}
-              </span>
-              <span className="tc-cov__iter" title="该课账本尾行的 iteration">
-                {r.iter === null ? '—' : `it${r.iter}`}
-              </span>
-              <span
-                className="tc-cov__q"
-                title={
-                  overview.hubOnline
-                    ? `队列深度 ${r.queuePending}（可领取 job 数）· 在飞 ${r.inflight}`
-                    : 'hub 无应答——队列数据不可得'
-                }
+            <div className="tc-cov__rowwrap" key={r.course}>
+              <button
+                type="button"
+                className={`tc-cov__row${viewing ? ' tc-cov__row--cur' : ''}`}
+                aria-current={viewing ? 'true' : undefined}
+                title={viewing ? `${r.course}（当前查看）` : `切到查看 ${r.course}`}
+                onClick={() => onSelectCourse(r.course)}
               >
-                {overview.hubOnline ? `队列 ${r.queuePending} · 在飞 ${r.inflight}` : '队列 —'}
-              </span>
-            </button>
+                <span className="tc-cov__name">{r.course}</span>
+                <span className={`tc-cov__badge ${b.cls}`} title={b.title}>
+                  {b.text}
+                </span>
+                <span className="tc-cov__iter" title="该课账本尾行的 iteration">
+                  {r.iter === null ? '—' : `it${r.iter}`}
+                </span>
+                <span
+                  className="tc-cov__q"
+                  title={
+                    overview.hubOnline
+                      ? `队列深度 ${r.queuePending}（可领取 job 数）· 在飞 ${r.inflight}`
+                      : 'hub 无应答——队列数据不可得'
+                  }
+                >
+                  {overview.hubOnline ? `队列 ${r.queuePending} · 在飞 ${r.inflight}` : '队列 —'}
+                </span>
+              </button>
+              {canToggle ? (
+                <button
+                  type="button"
+                  className="tc-cov__mode"
+                  title={
+                    r.offline
+                      ? '切回在线：hub 恢复为这门课实时派发 PPO'
+                      : '切离线：hub 不再实时派发这门课的 PPO，只接收 it 权重/指标回传（本机训练与账本不动）'
+                  }
+                  onClick={() =>
+                    void onAction?.('setCourseMode', {
+                      course: r.course,
+                      mode: r.offline ? 'online' : 'offline',
+                    })
+                  }
+                >
+                  {r.offline ? '恢复在线' : '切离线'}
+                </button>
+              ) : null}
+            </div>
           )
         })}
       </div>

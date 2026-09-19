@@ -44,9 +44,10 @@ from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from platform_utils import force_utf8_stdio
 from rl.engine_pool import DEFAULT_CACHE_COURSES, DEFAULT_CACHE_MB, EnginePool
 from rl.log import close_course_sinks, log, open_course_sink, prefix_scope
-from rl.loop_plan import course_facts, course_traj
+from rl.loop_control import ControlApplier, read_control
+from rl.loop_plan import course_facts, course_traj, discover_courses
 from rl.loop_runner import ROUND_KIND, LoopRunner
-from rl.loop_scheduler import ABORTED, PAUSED, QUEUE_DONE, Supervisor
+from rl.loop_scheduler import ABORTED, QUEUE_DONE, Supervisor
 from rl.loop_tasks import RoundFacts, Task, pending_tasks, round_tasks
 from rl.modes import apply_mode_flags, get_backend, merged_mode_args, resolve_mode
 from rl.queue import REPO_ROOT
@@ -324,17 +325,85 @@ def build_executor(
 
 
 def _all_settled(sup: Supervisor) -> bool:
-    return all(q.state in (QUEUE_DONE, ABORTED, PAUSED) for q in sup.courses.values())
+    """全部课程**已收官 / 停腿**。
+
+    **暂停不算收官**（用户口径「暂停 = 保留队列，恢复后接着跑」）：把 PAUSED 当收官会让
+    「暂停一门课」顺手把整个进程退掉，于是恢复意图永远没人执行。暂停的课会让显式课程模式
+    的进程一直等（用 `--max-seconds` 兜底）；发现模式本来就不退。
+    """
+    return all(q.state in (QUEUE_DONE, ABORTED) for q in sup.courses.values())
 
 
 # ---------------------------------------------------------------- 主循环
 
 
+def _open_courses(
+    names: list[str],
+    runtimes: dict[str, CourseRuntime],
+    report: ServeReport,
+    *,
+    argv: list[str] | None,
+    traj_root: str,
+) -> list[str]:
+    """开课并登记到 `runtimes`（单课失败隔离；返回本次**新开**的课程名）。"""
+    opened: list[str] = []
+    for course in names:
+        if course in runtimes:
+            continue
+        try:
+            runtimes[course] = open_course(course, argv=argv, traj_root=traj_root)
+            opened.append(course)
+        except BaseException as e:  # 单课故障隔离：不因一门课配错/被占就停掉别的课
+            report.skipped[course] = f"{type(e).__name__}: {e}"
+            log(f"[serve] 跳过课程 {course}：{type(e).__name__}: {e}")
+    return opened
+
+
+def _enqueue(sup: Supervisor, runtimes: dict[str, CourseRuntime], course: str, *, step_mode: bool) -> None:
+    """把一门课挂上调度器（初始队列 = 盘上事实算出的待办表）。
+
+    判据原语与只读计划视图同源（`course_facts` + `pending_tasks(round_tasks(...))`）——
+    不调 `plan_course` 是因为它连展示面字段（累计量/verdict）一起算，那是给 CLI 表/控制台看的。
+    粒度必须匹配：细粒度用 13 步任务表，轮粒度用**单个**轮任务——混了就会把 13 个步骤 kind
+    塞进只认 `round` 的执行体（响亮 ABORT，不是静默跳步）。
+    """
+    facts, _view = course_facts(Path(runtimes[course].args.traj))
+    it = int(facts.it)
+    tasks = pending_tasks(round_tasks(course, it), facts)
+    if not step_mode and tasks:
+        tasks = [Task(course, it, ROUND_KIND)]
+    q = sup.add_course(course, it, tasks)
+    log(f"[serve] 入队 {course}：it{it} 待办 {len(tasks)} 步（队列状态 {q.state}）")
+
+
+def _enqueue_opened(
+    sup: Supervisor,
+    runtimes: dict[str, CourseRuntime],
+    report: ServeReport,
+    names: list[str],
+    *,
+    step_mode: bool,
+) -> None:
+    """给**刚开的**课挂队列——单课失败隔离（一门课读盘/算判据失败不该带走整个进程）。
+
+    失败时把该课从 `runtimes` 里摘掉并记进 `skipped`：没有队列的课不会被调度器选中，留在
+    `runtimes` 里只会变成一个「看着开着、实际没人跑」的幽灵（且下次扫到它也不会重试）。
+    """
+    for course in names:
+        try:
+            _enqueue(sup, runtimes, course, step_mode=step_mode)
+        except BaseException as e:
+            report.skipped[course] = f"入队失败 {type(e).__name__}: {e}"
+            runtimes.pop(course, None)
+            log(f"[serve] 课程 {course} 入队失败，本次不服务：{type(e).__name__}: {e}")
+
+
 def serve(
-    courses: list[str],
+    courses: list[str] | None = None,
     *,
     argv: list[str] | None = None,
     traj_root: str = "tmp",
+    control_file: str | None = None,
     iters: int = 0,
     poll_sec: float = DEFAULT_POLL_SEC,
     capacities: dict[str, int] | None = None,
@@ -350,10 +419,19 @@ def serve(
     now: Callable[[], float] = time.time,
     sleep: Callable[[float], None] = time.sleep,
 ) -> ServeReport:
-    """单进程服务 N 门课，直到全部收官/停腿/暂停（或撞 `max_*` 上限）。
+    """单进程服务 N 门课。
+
+    **进程不绑课程**（用户 2026-09-18 口径）：`courses=None`/空 ⇒ 发现模式——启动时扫
+    `--traj-root` 下所有有账本的课程，之后每个空转拍再扫一次（新课程自动入队）；一门课都
+    没有也能起，队列就空着等（**不退出**：空队列是合法稳态，不是结束条件）。显式给
+    `courses` 时退化为「只看这几门」，全收官即退出（e2e/单课调试用）。
+
+    每拍的**控制面**（`rl/loop_control.py`）：读 `tmp/loop-control.json` 的暂停意图 →
+    `Supervisor.pause/resume`。暂停只影响调度，队列/账本不动（用户口径「保留队列，不删」）。
 
     退出条件（`ServeReport.stop_reason` 如实记录是哪一条——运维要能一眼分辨「跑完」与「被停」）：
-    `all_settled` / `max_steps` / `max_seconds` / `interrupted`(Ctrl-C) / `no_courses`。
+    `all_settled`（仅显式课程模式；**暂停不算收官**——进程等着恢复）/ `max_steps` /
+    `max_seconds` / `interrupted`(Ctrl-C)。
     课程级失败（课程文件缺失、锁被占）**不**终止进程：该课进 `skipped`，其余课照跑
     （故障域 = 单课，plan §4.3）。
     """
@@ -362,17 +440,23 @@ def serve(
         bun = prepare_process(argv)
     bun = bun or "bun"
     t0 = now()
+    discover = not courses  # 发现模式：进程独立于课程（没课在训也照常起）
 
     runtimes: dict[str, CourseRuntime] = {}
-    for course in courses:
-        try:
-            runtimes[course] = open_course(course, argv=argv, traj_root=traj_root)
-        except BaseException as e:  # 单课故障隔离：不因一门课配错/被占就停掉别的课
-            report.skipped[course] = f"{type(e).__name__}: {e}"
-            log(f"[serve] 跳过课程 {course}：{type(e).__name__}: {e}")
-    if not runtimes:
+    explicit = list(courses or [])
+    if discover:
+        explicit = discover_courses(traj_root)
+        if explicit:
+            log(f"[serve] 发现 {len(explicit)} 门课程：{', '.join(explicit)}")
+        else:
+            log(
+                f"[serve] {traj_root} 下暂无课程账本——进程照常运行，队列空着等"
+                "（有新课程账本出现即自动入队）"
+            )
+    _open_courses(explicit, runtimes, report, argv=argv, traj_root=traj_root)
+    if not runtimes and not discover:
         report.stop_reason = "no_courses"
-        log("[serve] 没有可服务的课程——退出")
+        log("[serve] 显式课程表里没有能开的课——退出")
         return report
 
     own_pool = pool is None
@@ -389,28 +473,20 @@ def serve(
     )
 
     # 初始队列内容用**盘上事实**算（不构建引擎：扫到但没在训的课不该拉起 torch）。
-    # 判据原语与只读计划视图同源（`course_facts` + `pending_tasks(round_tasks(...))`）——
-    # 不调 `plan_course` 是因为它连展示面字段（累计量/verdict）一起算，那是给 CLI 表/控制台看的。
-    # 粒度必须匹配：细粒度用 13 步任务表，轮粒度用**单个**轮任务——混了就会把 13 个步骤 kind
-    # 塞进只认 `round` 的执行体（响亮 ABORT，不是静默跳步）。
-    for course, rt in runtimes.items():
-        facts, _view = course_facts(Path(rt.args.traj))
-        it = int(facts.it)
-        tasks = pending_tasks(round_tasks(course, it), facts)
-        if not step_mode and tasks:
-            tasks = [Task(course, it, ROUND_KIND)]
-        q = sup.add_course(course, it, tasks)
-        log(f"[serve] 入队 {course}：it{it} 待办 {len(tasks)} 步（队列状态 {q.state}）")
+    _enqueue_opened(sup, runtimes, report, list(runtimes), step_mode=step_mode)
 
     log(
-        f"[serve] 单进程 supervisor 启动：{len(runtimes)} 课 / 池容量 "
+        f"[serve] 单进程 supervisor 启动：{len(runtimes)} 课（{'发现模式：不绑课程' if discover else '显式课程表'}）/ 池容量 "
         + " ".join(f"{k}={v}" for k, v in (capacities or DEFAULT_CAPACITIES).items())
         + f" / 粒度={'13 步' if step_mode else '轮'}"
     )
 
     done_hooked: set[str] = set()
+    control = ControlApplier()
     try:
         while True:
+            # 控制面先于推进：暂停的那门课本拍就不会被选到（意图 → 调度，无中间态）。
+            control.apply(sup, read_control(control_file), path=control_file)
             trace = sup.step()
             if trace is not None:
                 report.steps += 1
@@ -422,8 +498,22 @@ def serve(
                 continue
             # 一步都没能跑：要么全在等外部，要么全收官/停腿。
             report.stop_reason = _settle_rounds(sup, runtimes, done_hooked)
-            if report.stop_reason == "all_settled":
+            # 发现模式：**空队列不是结束**（进程独立于课程，队列空着等新课程）。
+            if report.stop_reason == "all_settled" and not discover:
                 break
+            if discover:
+                fresh = [c for c in discover_courses(traj_root) if c not in runtimes]
+                # 被跳过过的课不再重试（课程文件缺失 = 这一轮修不好；避免每秒刷日志）
+                fresh = [c for c in fresh if c not in report.skipped]
+                if fresh:
+                    log(f"[serve] 发现新课程：{', '.join(fresh)}")
+                    _enqueue_opened(
+                        sup,
+                        runtimes,
+                        report,
+                        _open_courses(fresh, runtimes, report, argv=argv, traj_root=traj_root),
+                        step_mode=step_mode,
+                    )
             if max_seconds and (now() - t0) >= max_seconds:
                 report.stop_reason = "max_seconds"
                 break

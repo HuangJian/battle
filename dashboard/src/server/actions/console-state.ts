@@ -49,6 +49,12 @@ export interface ConsoleState {
    *  recovered=灰横幅历史，不复位删除，确保"曾停机"可见。旧单键 `cloudHalt`
    *  在加载时一次性折叠进本表（键取当时的 `course`）。 */
   cloudHalts?: Record<string, CloudHaltInfo>
+  /** 每课 hub 派发模式**意图**（R3-2，additive）：`offline` = 只收回传、不实时派发。
+   *
+   *  为什么要在控制台落一份：hub 的 `mode` 是 **volatile**（重启回启动参数给的模式）
+   *  ——「这门课先别派活」是运维的决定，不该随 hub 的重启蒸发。所以控制台记住意图，
+   *  并在每次起 hub 时回灌（见 `actions/course-mode.ts::restoreCourseModes`）。 */
+  courseModes?: Record<string, 'online' | 'offline'>
 }
 
 const DEFAULT_STATE: ConsoleState = { trainerPpo: 'pull', course: '', activeCourse: '' }
@@ -65,6 +71,7 @@ export function loadConsoleState(): ConsoleState {
       merged.cloudHalts = raw.cloudHalt ? { [merged.course || '']: raw.cloudHalt } : {}
     }
     merged.cloudHalts = merged.cloudHalts ?? {}
+    merged.courseModes = merged.courseModes ?? {}
     delete (merged as unknown as Record<string, unknown>).cloudHalt
     return merged
   } catch {

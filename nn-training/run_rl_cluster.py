@@ -5,14 +5,20 @@
 **只读一半**，也是运维视图（今天要开 N 个终端看 N 份日志才知道这些）。
 
 **`--serve` = 写的一半**（R2d）：真跑一个 supervisor（`rl/loop_serve.py`），N 门课共用一份
-资源池与一份 torch 引擎池（`rl/engine_pool.py`）。课程必须显式列出（`--courses`）——
-「该训哪几门课」是运维决定，不猜。
+资源池与一份 torch 引擎池（`rl/engine_pool.py`）。**进程不绑课程**（用户 2026-09-18 口径）：
+不给 `--courses` 就是**发现模式**——扫 `--traj-root` 下所有有账本的课、之后每个空转拍再扫，
+一门课都没有也照常运行（队列空着等，不退出）；显式给 `--courses` 则退化为「只看这几门」，
+全收官即退出（e2e / 单课调试用）。
+
+**控制面**（`--control-file`，默认 `tmp/loop-control.json`）：控制台写暂停意图，训练侧每拍读
+一次并施加到调度器（`rl/loop_control.py`）。暂停**只影响调度**——队列与账本一个字不动。
 
 用法：
   python run_rl_cluster.py                          # 自动发现 tmp/*/training_log.jsonl
   python run_rl_cluster.py --courses c4-dodge,c5-tick
   python run_rl_cluster.py --traj-root tmp --json    # 机器可读（控制台/CI 用）
   python run_rl_cluster.py --serve --courses c4-dodge,c5-tick   # 真跑多课（R2d）
+  python run_rl_cluster.py --serve                   # 发现模式：进程独立于课程（推荐）
 
 **`--json` 是控制台「调度器」卡片的契约面**（dashboard `server/api/loop-queue.ts` 消费，
 TTL 缓存）：改 `--json` 的字段名/语义 = 改控制台，两边必须在同一次改动里对齐（`waiting`
@@ -134,6 +140,19 @@ def main(argv: list[str] | None = None) -> int:
         help="单进程**真跑** N 门课（R2d 写的一半：默认只读计划视图，--serve 才驱动 supervisor）",
     )
     ap.add_argument(
+        "--control-file",
+        default="",
+        help=(
+            "--serve：控制意图文件（默认 tmp/loop-control.json，NN_LOOP_CONTROL 可覆盖）——"
+            "控制台写 `{\"paused\": [\"c5\"]}`，训练侧每拍读一次（暂停只影响调度）"
+        ),
+    )
+    ap.add_argument(
+        "--mode",
+        default="",
+        help="--serve：**课程级**附加参数，原样透传给开课（per-tick/intent/goal…）；空 = 吃课程配置",
+    )
+    ap.add_argument(
         "--iters", type=int, default=0, help="--serve：每课跑满多少轮（0 = 吃课程配置）"
     )
     ap.add_argument("--poll-sec", type=float, default=15.0, help="--serve：全员等外部时的再问间隔")
@@ -147,19 +166,17 @@ def main(argv: list[str] | None = None) -> int:
         from rl.loop_serve import serve
 
         # `--mode` 是**课程级**附加参数（rl-config 默认按模式取）——只有它需要透传给开课。
-        raw = list(argv) if argv is not None else sys.argv[1:]
-        extra: list[str] = []
-        if "--mode" in raw:
-            i = raw.index("--mode")
-            extra = ["--mode", raw[i + 1] if i + 1 < len(raw) else ""]
+        # 它必须是本解析器**显式声明**的参数：之前靠扫 raw argv 取，但 argparse 会先把
+        # `--serve --mode goal` 判成 unrecognized arguments 而拒启（声明了才能真透传）。
+        extra: list[str] = ["--mode", args.mode] if args.mode else []
         courses = [c.strip() for c in args.courses.split(",") if c.strip()]
-        if not courses:
-            print("[serve] 必须显式给 --courses（单进程 supervisor 不猜「该训哪几门课」）")
-            return 2
+        # 空课程表 = **发现模式**（进程不绑课程：扫 --traj-root 下所有有账本的课，之后每个
+        # 空转拍再扫；一门课都没有也照常运行，队列空着等）。显式课程表则退化为「只看这几门」。
         rep = serve(
-            courses,
+            courses or None,
             argv=extra,
             traj_root=args.traj_root,
+            control_file=args.control_file or None,
             iters=args.iters,
             poll_sec=args.poll_sec,
             capacities={

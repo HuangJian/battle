@@ -48,6 +48,26 @@ export function consoleStatePath(): string {
   return process.env.BCITY_CONSOLE_STATE ?? path.join(START_LOG_DIR, 'console-state.json')
 }
 
+/** 训练侧控制意图文件（`tmp/loop-control.json`）—— 控制台**写**、单进程 supervisor **读**。
+ *
+ *  它是「暂停/恢复某课」的唯一通道（用户 2026-09-18 定案：不为此在训练进程里再挂一个
+ *  HTTP 服务）。两侧共享同一个工作区 ⇒ 一份意图文件最省，且 hub 挂了也能用。
+ *  **python 侧默认路径必须与这里一致**：`nn-training/rl/loop_control.py::control_path()`
+ *  （那边 `NN_LOOP_CONTROL` 可覆盖，本侧用 `BCITY_LOOP_CONTROL`；单测各自重定向）。
+ *  故这里**惰性**取值。 */
+export function loopControlPath(): string {
+  return process.env.BCITY_LOOP_CONTROL ?? path.join(LOG_DIR, 'loop-control.json')
+}
+
+/** 训练进程的控制**回执**（`tmp/loop-control.applied.json`）—— 训练侧写、控制台读。
+ *
+ *  内容 = 「我（pid）此刻实际把哪几门课暂停着」。它存在的唯一理由：意图文件回答不了
+ *  「生效了没」——进程可能没在跑，也可能还没轮到读文件。
+ *  对应 `nn-training/rl/loop_control.py::applied_path()`（`NN_LOOP_CONTROL_APPLIED`）。 */
+export function loopAppliedPath(): string {
+  return process.env.BCITY_LOOP_APPLIED ?? path.join(LOG_DIR, 'loop-control.applied.json')
+}
+
 /** 控制台客户端 bundle 产物目录（server/build.ts 构建，.gitignore 排除）。 */
 export const BUNDLE_DIR = path.join(DASHBOARD_ROOT, '.build')
 /** EvalBoard 账本数据根（EVALBOARD_DATA 环境变量可覆盖；见 store.ts）。 */

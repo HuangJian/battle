@@ -2,7 +2,7 @@
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'fs'
 import path from 'path'
 import { loadConfig } from '../../core/config'
-import { NN_TRAINING, REPO_ROOT } from '../../core/paths'
+import { NN_TRAINING, REPO_ROOT, loopControlPath } from '../../core/paths'
 import type { CfEdgeIp, CfProtocol, Component, RolloutSrcMode, SlimMode } from '../../core/types'
 import {
   ActionError,
@@ -12,6 +12,8 @@ import {
   registerPushWorker,
   reloadPushWorkers,
   removePushWorker,
+  setCourseMode,
+  setCoursePaused,
   setMode,
   setNodeConcurrency,
   setNodeEnabled,
@@ -203,6 +205,15 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
           }),
         )
       }
+      // ---- 每课 hub 派发模式（R3-2）：热切 + 落意图（起 hub 时回灌）----
+      case 'setCourseMode':
+        return okResp(await setCourseMode(bodyStr(body, 'course'), bodyStr(body, 'mode')))
+      // ---- 每课「暂停/恢复」意图（R2d 操作面）：写 tmp/loop-control.json，训练进程每拍读 ----
+      // 缺 `paused` 字段 = 暂停（前端只传方向时不必再编一个布尔约定）。
+      case 'setCoursePaused':
+        return okResp(
+          setCoursePaused(bodyStr(body, 'course'), body.paused !== false, loopControlPath()),
+        )
       case 'removePushWorker':
         return okResp(await removePushWorker(bodyStr(body, 'id')))
       case 'reloadPushWorkers':

@@ -15,7 +15,16 @@ import { renderToString } from 'preact-render-to-string'
 import path from 'path'
 import { DASHBOARD_ROOT } from '../src/core/paths'
 import { STOPPED_TITLE } from '../src/web/app/panels/LoopQueue'
-import { type LoopQueueView, parseLoopQueue, withTraining } from '../src/web/view'
+import {
+  type LoopQueueView,
+  parseLoopQueue,
+  pauseBadge,
+  pauseLabel,
+  pauseState,
+  pauseTitle,
+  withPausedFacts,
+  withTraining,
+} from '../src/web/view'
 
 /** 一课的原始行（形状与 run_rl_cluster.build_rows 一致，便于按需改）。 */
 function row(patch: Record<string, unknown> = {}): Record<string, unknown> {
@@ -33,17 +42,25 @@ function row(patch: Record<string, unknown> = {}): Record<string, unknown> {
 }
 
 /** 组装一份视图（走真实解析 + 合并路径，不手拼 LoopQueueView）。 */
-function queue(raw: Record<string, unknown>[] = [row()], training: string[] = []): LoopQueueView {
+function queue(
+  raw: Record<string, unknown>[] = [row()],
+  training: string[] = [],
+  pause: { intent?: string[]; applied?: string[] } = {},
+): LoopQueueView {
   const v = parseLoopQueue({
     courses: raw,
     pools: { local_ppo: { held: 1, capacity: 1 }, eval_local: { held: 0, capacity: 1 } },
   })!
-  return withTraining(v, training)
+  return withPausedFacts(withTraining(v, training), pause.intent ?? [], pause.applied ?? [])
 }
 
-async function render(q: LoopQueueView | null, course = 'c4-dodge'): Promise<string> {
+async function render(
+  q: LoopQueueView | null,
+  course = 'c4-dodge',
+  onAction?: (act: string, body: Record<string, unknown>) => void,
+): Promise<string> {
   const { LoopQueue } = await import('../src/web/app/panels/LoopQueue')
-  return renderToString(h(LoopQueue, { loopQueue: q, course, onSelectCourse: () => {} }))
+  return renderToString(h(LoopQueue, { loopQueue: q, course, onSelectCourse: () => {}, onAction }))
 }
 
 describe('LoopQueue（训练调度器·单例）', () => {
@@ -153,6 +170,88 @@ describe('LoopQueue（训练调度器·单例）', () => {
   })
 })
 
+// ────────────────────────── 暂停/恢复（意图 × 事实） ──────────────────────────
+
+describe('暂停态：意图与事实分开（四态）', () => {
+  const one = (intent: boolean, applied: boolean) => {
+    const r = queue([row()], ['c4-dodge'], {
+      intent: intent ? ['c4-dodge'] : [],
+      applied: applied ? ['c4-dodge'] : [],
+    }).rows[0]!
+    return r
+  }
+
+  it('四种组合各是一个真实局面（running / pending / paused / resuming）', () => {
+    expect(pauseState(one(false, false))).toBe('running')
+    expect(pauseState(one(true, false))).toBe('pending')
+    expect(pauseState(one(true, true))).toBe('paused')
+    expect(pauseState(one(false, true))).toBe('resuming')
+  })
+
+  it('按钮方向由**意图**定：点了暂停未生效时说「取消暂停」，已生效说「恢复」', () => {
+    expect(pauseLabel(one(false, false))).toBe('暂停')
+    expect(pauseLabel(one(true, false))).toBe('取消暂停')
+    expect(pauseLabel(one(true, true))).toBe('恢复')
+  })
+
+  it('待生效的悬停解释分两种：进程没跑 vs 还没轮到读（不能一句「处理中」糊过去）', () => {
+    const live = queue([row()], ['c4-dodge'], { intent: ['c4-dodge'] }).rows[0]!
+    expect(pauseTitle(live)).toContain('每拍读一次')
+    const dead = queue([row()], [], { intent: ['c4-dodge'] }).rows[0]!
+    expect(pauseTitle(dead)).toContain('没有存活的 trainingLoop 进程')
+  })
+
+  it('徽标只在「意图 ≠ 事实」或「已暂停」时出现（没事可说的行不挂徽标）', () => {
+    expect(pauseBadge(one(false, false))).toBeNull()
+    expect(pauseBadge(one(true, true))!.text).toBe('已暂停')
+    expect(pauseBadge(one(true, false))!.text).toBe('待生效')
+    expect(pauseBadge(one(false, true))!.text).toBe('恢复中')
+  })
+
+  it('意图只作用于被点名的课（别的行不受污染）', () => {
+    const v = queue([row(), row({ course: 'c5-tick' })], ['c4-dodge', 'c5-tick'], {
+      intent: ['c4-dodge'],
+      applied: ['c4-dodge'],
+    })
+    expect(v.rows.map((r) => [r.course, r.pausedIntent, r.pauseApplied])).toEqual([
+      ['c4-dodge', true, true],
+      ['c5-tick', false, false],
+    ])
+  })
+})
+
+describe('SSR：暂停按钮与事实徽标', () => {
+  it('有动作能力才渲染按钮；关掉时一个都不多渲染（LAN 只读不假装能控）', async () => {
+    const withAct = await render(queue(), 'c4-dodge', () => {})
+    expect(withAct).toContain('tc-loopq__pausebtn')
+    expect(withAct).toContain('暂停')
+    expect(await render(queue())).not.toContain('tc-loopq__pausebtn')
+  })
+
+  it('已暂停的行：按钮「恢复」+ 徽标「已暂停」（事实由训练进程回执给）', async () => {
+    const html = await render(
+      queue([row()], ['c4-dodge'], { intent: ['c4-dodge'], applied: ['c4-dodge'] }),
+      'c4-dodge',
+      () => {},
+    )
+    expect(html).toContain('恢复')
+    expect(html).toContain('tc-loopq__pause--on')
+    expect(html).toContain('已暂停')
+  })
+
+  it('只写了意图、尚未生效：按钮「取消暂停」+ 徽标「待生效」（虚线，不得与已暂停同色）', async () => {
+    const html = await render(
+      queue([row()], ['c4-dodge'], { intent: ['c4-dodge'] }),
+      'c4-dodge',
+      () => {},
+    )
+    expect(html).toContain('取消暂停')
+    expect(html).toContain('tc-loopq__pause--pending')
+    expect(html).toContain('待生效')
+    expect(html).not.toContain('tc-loopq__pause--on')
+  })
+})
+
 // ────────────────────────── 接线（SSR 渲染不出点击，用源码断言兜底） ──────────────────────────
 
 describe('接线：卡片挂载与视图字段同源', () => {
@@ -184,5 +283,19 @@ describe('接线：卡片挂载与视图字段同源', () => {
 
   it('面板不直连服务端（分层铁律由 architecture-layering 用例兜底，这里挡住「顺手 import」）', () => {
     expect(panel).not.toContain('server/')
+  })
+
+  it('app.tsx 把动作派发交给卡片（不传则只有只读徽标——操作面在 LAN 只读下自动消失）', () => {
+    expect(app).toContain('onAction={doAction}')
+  })
+
+  it('动作走 route 表的 setCoursePaused，且动作后作废调度器缓存（否则要等 TTL 才上屏）', () => {
+    const route = readFileSync(
+      path.join(DASHBOARD_ROOT, 'src', 'server', 'api', 'route.ts'),
+      'utf-8',
+    )
+    const server = readFileSync(path.join(DASHBOARD_ROOT, 'src', 'server', 'server.ts'), 'utf-8')
+    expect(route).toContain("case 'setCoursePaused'")
+    expect(server).toContain('invalidateLoopQueue()')
   })
 })

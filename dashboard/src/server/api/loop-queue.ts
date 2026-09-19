@@ -16,8 +16,9 @@
 
 import path from 'path'
 import { REPO_ROOT } from '../../core/paths'
-import { type LoopQueueView, parseLoopQueue, withTraining } from '../../web/view'
+import { type LoopQueueView, parseLoopQueue, withPausedFacts, withTraining } from '../../web/view'
 import { type SyncRunResult, runRunPythonSyncScript } from '../run-python'
+import { readPauseFacts } from '../actions/loop-control'
 
 /** 调度器视图的 TTL（10s：事实变化的粒度是「一轮」，冷算要起一个 python）。 */
 export const LOOP_QUEUE_TTL_MS = 10_000
@@ -100,14 +101,21 @@ export function invalidateLoopQueue(): void {
   cached = null
 }
 
-/** 组装：调度器视图 + **在训事实**（registry 的 trainingLoop 存活表，与控制台总览同源）。
+/** 组装：调度器视图 + **在训事实**（registry）+ **暂停意图/生效回执**（控制文件），逐行合并。
  *
- *  两个事实源各给一半事实、逐行合并：python 说「这一轮卡在哪」，registry 说「这门课此刻
- *  有没有人在跑」——缺了后者，「停了的课」会被读成「等外部」。
+ *  四个事实源各给一半：python 说「这一轮卡在哪」，registry 说「这门课此刻有没有人在跑」，
+ *  控制文件说「操作员想让它跑吗」，回执文件说「训练进程实际把它停着没」——缺了最后两个，
+ *  暂停按钮点下去毫无反馈（要等下一拍 python 读到才显示），也看不出「点了但进程没跑」
+ *  这种**待生效**状态。
+ *
+ *  两个控制面事实都从**文件**读（不是从 python 的输出）：意图就是控制台自己写的那份，
+ *  回执是训练进程自己写的，读盘零代价，也不引入「python 要多报字段」的耦合。
  */
 export async function buildLoopQueueView(
   training: string[],
   run: LoopQueueRunner = defaultLoopQueueRunner,
+  facts: { intent: string[]; applied: string[] } = readPauseFacts(),
 ): Promise<LoopQueueView> {
-  return withTraining(await getLoopQueueView(run), training)
+  const view = await getLoopQueueView(run)
+  return withPausedFacts(withTraining(view, training), facts.intent, facts.applied)
 }

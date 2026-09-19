@@ -92,6 +92,48 @@ describe('CourseOverview（并行课程总览）', () => {
     expect(html).toContain('title="切到查看 c4"')
   })
 
+  it('模式开关（R3-2）：hub 认识的课才有开关，文案按当前模式反转', async () => {
+    const { CourseOverview } = await import('../src/web/app/panels/CourseOverview')
+    const acts: Array<[string, Record<string, unknown>]> = []
+    const html = renderToString(
+      h(CourseOverview, {
+        overview: overview(),
+        course: 'c4',
+        onSelectCourse: () => {},
+        onAction: (act: string, body: Record<string, unknown>) => {
+          acts.push([act, body])
+        },
+      }),
+    )
+    // 行按钮仍是 4 个（开关是**兄弟**节点——嵌在行按钮里是嵌套 button，非法）
+    expect((html.match(/<button type="button" class="tc-cov__row/g) ?? []).length).toBe(4)
+    // hub 认识的课：在训的 c4 给「切离线」，已离线的 c5 给「恢复在线」
+    expect(html).toContain('>切离线</button>')
+    expect(html).toContain('>恢复在线</button>')
+    // 开关数 = hub 认识的课数（其它课不给：hub 会 400，按钮就是假承诺）
+    expect((html.match(/tc-cov__mode/g) ?? []).length).toBe(
+      overview().rows.filter((r) => r.hubSeen).length,
+    )
+    expect(acts).toEqual([]) // SSR 不模拟点击：动作由 onClick 接线（下面源码断言守）
+  })
+
+  it('模式开关：无 onAction 或 hub 无应答 → 一个都不渲染', async () => {
+    const { CourseOverview } = await import('../src/web/app/panels/CourseOverview')
+    const noAction = renderToString(
+      h(CourseOverview, { overview: overview(), course: 'c4', onSelectCourse: () => {} }),
+    )
+    expect(noAction).not.toContain('tc-cov__mode')
+    const offlineHub = renderToString(
+      h(CourseOverview, {
+        overview: overview({ hubUrl: null, hubOnline: false }),
+        course: 'c4',
+        onSelectCourse: () => {},
+        onAction: () => {},
+      }),
+    )
+    expect(offlineHub).not.toContain('tc-cov__mode')
+  })
+
   it('hub 行：无应答 → 明确说「hub 无应答」且队列列退化为 —（不编数字）', async () => {
     const { CourseOverview } = await import('../src/web/app/panels/CourseOverview')
     const html = renderToString(
@@ -273,6 +315,17 @@ describe('接线：面板动作字符串与路由注册同源', () => {
     }
     // 启停复用既有节点动作（不发明第二个入口）
     expect(panel).toContain("'setNodeEnabled'")
+  })
+
+  it('R3-2 模式开关：面板与路由两侧都有 setCourseMode，且 app 接了动作通道', () => {
+    const cov = readFileSync(
+      path.join(DASHBOARD_ROOT, 'src', 'web', 'app', 'panels', 'CourseOverview.tsx'),
+      'utf-8',
+    )
+    expect(cov).toContain("'setCourseMode'")
+    expect(route).toContain("'setCourseMode'")
+    // 面板拿到 onAction（否则开关渲染不出来，静默失效）
+    expect(app).toContain('onAction={doAction}')
   })
 
   it('app.tsx 挂载了两个新面板，且课程 select 不再被 hub 状态禁用', () => {

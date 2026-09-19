@@ -66,6 +66,12 @@ export interface LoopQueueRow {
   facts: LoopCourseFactsView
   /** **「在等什么」**：python 侧算好的结论 + 取值域（UI 按 kind 上色/排序）。 */
   waiting: { kind: LoopWaitKind; text: string }
+  /** **控制台写下的暂停意图**（`tmp/loop-control.json`，按钮动作就改它）。 */
+  pausedIntent: boolean
+  /** **训练进程回执：它实际把这门课停着**（`loop-control.applied.json`，已按进程存活过滤）。
+   *  意图与事实必须分开上屏：只看意图会把「进程没跑/还没读到」演成已停，只看事实则点了
+   *  暂停毫无反馈。 */
+  pauseApplied: boolean
 }
 
 /** 本机重资源池占用（容量为定的票数：本机 PPO / eval 跨课排队 = 1）。 */
@@ -139,6 +145,8 @@ export function parseLoopQueue(raw: unknown): LoopQueueView | null {
       training: false,
       it: num(r.it),
       state: STATES.includes(state) ? state : 'ready',
+      pausedIntent: false, // 由 `withPausedFacts` 补（解析层不知道控制文件）
+      pauseApplied: false,
       current: str(r.current),
       pending: strList(r.pending),
       inflight,
@@ -172,6 +180,73 @@ export function parseLoopQueue(raw: unknown): LoopQueueView | null {
     pools,
     rows,
     trainingCount: 0,
+  }
+}
+
+/** 把**控制面事实**（意图 + 实际生效）并进行。
+ *
+ *  意图与事实分开存：训练进程每拍才读一次控制文件，且它可能根本没在跑（那时意图就是
+ *  「等进程起来才生效」）。分开之后 UI 才能如实说「待生效」而不是骗人地说「已暂停」。
+ */
+export function withPausedFacts(
+  view: LoopQueueView,
+  intent: string[],
+  applied: string[],
+): LoopQueueView {
+  const want = new Set(intent)
+  const did = new Set(applied)
+  return {
+    ...view,
+    rows: view.rows.map((r) => ({
+      ...r,
+      pausedIntent: want.has(r.course),
+      pauseApplied: did.has(r.course),
+    })),
+  }
+}
+
+/** 暂停态四值：意图与事实的四种组合各是一个真实且不同的局面。 */
+export type LoopPauseState = 'paused' | 'pending' | 'resuming' | 'running'
+
+export function pauseState(row: LoopQueueRow): LoopPauseState {
+  if (row.pauseApplied) return row.pausedIntent ? 'paused' : 'resuming'
+  return row.pausedIntent ? 'pending' : 'running'
+}
+
+/** 按钮文案：**按意图定方向**（按钮只改意图文件）。已生效时说「恢复」，未生效时说「取消暂停」
+ *  ——两者都是「去掉意图」，但前者的真实语义是恢复训练。 */
+export function pauseLabel(row: LoopQueueRow): string {
+  if (!row.pausedIntent) return '暂停'
+  return row.pauseApplied ? '恢复' : '取消暂停'
+}
+
+/** 按钮悬停解释。`pending` 要把「为什么还没生效」说清楚（进程没跑 / 还没轮到读）。 */
+export function pauseTitle(row: LoopQueueRow): string {
+  switch (pauseState(row)) {
+    case 'paused':
+      return '已生效：调度器不再推进这门课（队列与账本保留），点一下恢复'
+    case 'resuming':
+      return '恢复已请求，训练进程下一拍接着跑（回执还是上一拍的）'
+    case 'pending':
+      return row.training
+        ? '暂停意图已写入控制文件：训练进程每拍读一次，下一拍生效'
+        : '暂停意图已写入控制文件，但当前没有存活的 trainingLoop 进程——起进程时才会生效'
+    default:
+      return '暂停这门课：训练进程不再推进它（rollout / 本机 PPO / 预采全停），队列与账本保留，随时可恢复'
+  }
+}
+
+/** 事实徽标（意图未生效/正在生效时才上屏；没有可说的就返回 null）。 */
+export function pauseBadge(row: LoopQueueRow): { text: string; cls: string } | null {
+  switch (pauseState(row)) {
+    case 'paused':
+      return { text: '已暂停', cls: 'tc-loopq__pause--on' }
+    case 'pending':
+      return { text: '待生效', cls: 'tc-loopq__pause--pending' }
+    case 'resuming':
+      return { text: '恢复中', cls: 'tc-loopq__pause--pending' }
+    default:
+      return null
   }
 }
 
