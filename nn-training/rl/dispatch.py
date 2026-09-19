@@ -469,8 +469,14 @@ class RolloutDispatcher:
         # v3.15 分配超时重入（taskFetchTimeoutSec）与冷却黑名单保留。
         task_fetch_timeout = float(policy.get("taskFetchTimeoutSec", 30))
         _cooldown_sec = task_fetch_timeout * 4
-        # v3.9 动态节点发现：跑批中途上线的 agent 也能贡献算力（0 = 关闭）。
-        rescan_sec = float(policy.get("agentRescanSec", 120))
+        # v3.9 动态节点发现 + A4 轮内回场（2026-09-19 审计）：跑批中途上线的 agent、
+        # 以及**被熔断/软停后恢复的节点**都能回场（0 = 关闭）。
+        #  cadence：`recoverPingSec`（缺省 20s，与 B/C 层同口径）> `agentRescanSec`（旧名，
+        #  显式设 0 即关闭）> 20s。首个 pass 由 `nodeRecoverFirstSec`（缺省 5s）决定——
+        #  旧实现首个 pass 要等满 120s，而 volume 短波 234 轮全部 <120s ⇒ 一次都没跑过。
+        rescan_sec = float(policy.get("recoverPingSec", policy.get("agentRescanSec", 20)))
+        recover_first_sec = float(policy.get("nodeRecoverFirstSec", 5.0))
+        rearm_cap = int(policy.get("nodeRearmLimit", 3))
 
         # 任务 → 在跑副本数；任务 → 持有副本的节点集合（防竞速派回同节点）；
         # 任务 → 派发墙钟（超时 requeue）；任务 → 超时冷却节点集合。
@@ -998,27 +1004,37 @@ class RolloutDispatcher:
         if rescan_sec > 0 and cfg.get("nodes"):
             scan_t = threading.Thread(
                 target=rescan_nodes,
-                args=(
-                    cfg,
-                    code_hash,
-                    upgrade_branch,
-                    dirty_files,
-                    local_bun,
-                    spawned_ids,
-                    alive,
-                    lock,
-                    weights_bytes,
-                    iter_id,
-                    wver,
-                    task_timeout,
-                    status_timeout,
-                    all_settled,
-                    deadline,
-                    rescan_sec,
-                    worker,
-                    extra_threads,
+                # **全部关键字传参**：本调用有 20+ 实参，历史上第 19 个位置参数错位
+                # 过（线程启动即抛，运行中上线的节点永远不被发现——见函数 docstring）。
+                kwargs=dict(
+                    cfg=cfg,
+                    code_hash=code_hash,
+                    upgrade_branch=upgrade_branch,
+                    dirty_files=dirty_files,
+                    local_bun=local_bun,
+                    spawned_ids=spawned_ids,
+                    alive=alive,
+                    lock=lock,
+                    weights_bytes=weights_bytes,
+                    iter_id=iter_id,
+                    wver=wver,
+                    task_timeout=task_timeout,
+                    status_timeout=status_timeout,
+                    all_settled=all_settled,
+                    deadline=deadline,
+                    rescan_sec=rescan_sec,
+                    worker=worker,
+                    extra_threads=extra_threads,
                     # v3.14b：halt 感知——熔断后 rescan 立即退出，主 join 不再白等超时
-                    halt_event,
+                    halt_event=halt_event,
+                    # A4：首个 pass 提前 / 权重 kind / 回场重置失败计数所需的状态。
+                    first_probe_sec=recover_first_sec,
+                    wkind=wkind,
+                    streaks=streaks,
+                    soft_streaks=soft_streaks,
+                    fail_streak_max=fail_streak_max,
+                    soft_streak_max=soft_streak_max,
+                    rearm_cap=rearm_cap,
                 ),
                 daemon=True,
                 name="rollout-rescan",

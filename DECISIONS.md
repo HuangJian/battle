@@ -3060,3 +3060,43 @@ stageJson/lives/level/maxTicks/difficulty；B 层 `params_for` 逐字段回落 u
 
 **已知局限**：客户端无法阻止别的客户端（或 agent 重启）挤掉权重，只能事后补；`soft_streak` 上界是启发式
 （3×真故障阈值），不是测量结果；409 重发是整份权重上传（MB 级），高频 409 会吃带宽（实测一次/轮量级，可接受）。
+## §2026-09-19-rollout-midround-recover（2026-09-19，A 层 rollout 中途重探真正跑起来 + 轮内回场：`rescan_nodes` 从「每轮 0 次 pass」到 5s 首探/20s 周期 + 已停派节点回场）
+
+**触发**：用户 2026-09-19 指名修 A4（审计发现）。**证据（两条独立线索都指向 0 次执行）**：
+① `tmp/x20-rebirth/training-loop.log` 2.5h / **235 个 rollout 轮**里 `rescan` 日志 **0 行**，而同期
+节点排除 130+ 次（`ping failed`：a96 61 / a97 43 / a95 26）；② 机制上必然如此——旧实现
+`sleep_sec = min(rescan_sec=120, …)` → `all_settled.wait(sleep_sec)` → 紧接
+`if all_settled.is_set(): return`，而该 run **234 轮全部 <120s**（p50 7s，max 115s）⇒ 线程每轮都在
+首个 sleep 里被结算事件唤醒并退出；且候选集用 `if nid in spawned_ids: continue` 过滤，**已熔断的
+节点永远不是候选**（熔断即整轮出局，窗口 1800s）。
+
+**实施（`rl/queue_local.rescan_nodes` + `rl/dispatch` 调用点）**：
+
+- **首个 pass 提前**：`nodeRecoverFirstSec`（缺省 5s）后首探，之后每 `recoverPingSec`（缺省 20s，
+  与 B/C 层同口径；旧的 `agentRescanSec` 仍可覆盖、显式 0 = 关闭）。防忙等地板从 0.5s 降到 0.05s
+  ——0.5s 地板会让小值旋钮（测试/调频）名不副实。
+- **候选 = 尚未孵化 ∪ 已停派**（`streaks ≥ nodeFailStreak` 或 `soft_streaks ≥ nodeSoftFailStreak`）；
+  后者是新增的「回场」路径：清 reuse 缓存 → 强制重握手（`post_weights` 自带 cached 探针）→
+  **重置失败计数** → 补孵 c_n 个采样线程。每节点每轮 `nodeRearmLimit`（缺省 3）次上界，
+  用尽后告警一次并停手（防「永远失败的节点」无限起线程）。
+- **ping 并行**（`dist_common.ping_nodes_parallel`，与 B/C 层同款）：串行 3s/台会让一个 pass 卡十几秒。
+- **两个旧 bug 顺带修**：① 漏传 `kind=wkind` ⇒ goal/intent 腿的中途上线节点把权重发进 rollout 桶，
+  任务全 409（与 §2026-09-19-node-fault-taxonomy 的 A1 同一类陷阱）；② `nd` 漏带 `ping`
+  ⇒ stageJson 任务在回场/中途上线节点上被能力握手拒掉（自定义关课程下等于白孵这些节点）。
+- **调用点全关键字传参**：该调用有 20+ 实参，历史上第 19 个位置参数错位过一次（线程启动即抛、
+  运行中上线的节点永不被发现）——位置传参是这类 bug 的温床。
+
+**被否方案**：① 只把 `rescan_sec` 缺省从 120 改小——线程仍会在结算瞬间退出，「短波轮里永不扫描」
+不变；② 用 `time.sleep` 代替 `all_settled.wait`（保证 pass 跑到）——会让 round done 滞后一个
+cadence（2026-09-05 修过的老毛病复活）；③ 回场不做上界——节点持续失败时会无限补孵线程；
+④ 回场沿用进程内权重缓存（跳过 POST）——节点刚重启/桶被挤时缓存是脏的，正是 A1/A2 的教训。
+
+**契约（测试钉住，11 例）**：`tests/test_rollout_dispatch_resilience.py`
+中途上线节点在轮内供样（旧实现 `{'self': 6}`，新实现 a97 拿到 ≥2 局）／熔断后轮内回场把剩余任务跑完
+（旧实现 6 局全 missing，新实现 6/6）／真失败「熔断 + 有界回场」= 3×(`nodeFailStreak`)×(1+`nodeRearmLimit`)
+= 12 次取活、回场日志恰好 3 条／`nodeRearmLimit=1` 时上界告警且共 6 次取活／halt 置位后 3s 内收工
+（不等满 30s 窗口）。**A4 三条行为测试在旧代码上实测变红**。nn-python-gate ✓（1347 例）。
+
+**已知局限**：回场会暂时叠加线程（旧线程可能还在收尾一局，新线程又孵），故为「有界多孵」而非
+精确替换——自愈性影响可忽略（同一节点、多余槽位在下一轮自然收敛）；节点侧根因（per-kind 桶
+KEEP=4 且全客户端共享）仍未修，回场只是客户端侧的自保（见 §2026-09-19-node-fault-taxonomy）。
