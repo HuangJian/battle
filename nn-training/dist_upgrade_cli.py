@@ -14,9 +14,11 @@
         "cfg_path": "nn-training/rl-config.json",   # 本 CLI 自己 ping 每个 enabled 节点
         "expected_hash": "<64hex>",       # 可省 = dist_common.compute_code_hash()
         "branch": "goal-nn",              # 远端 pull 分支；self/回环节点恒为空（禁 pull）
-        "seen": [ {"id":"mac","pingHash":"<64hex>","expectedHash":"<64hex>"} ],
-                                            # 可选：跨调用去重 memo 预置（见下）
-        "dirty": null, "dry_run": false, "timeout": 20.0
+        "seen": [ {"id":"mac","pingHash":"<64hex>","expectedHash":"<64hex>",
+                   "atSec": 1758300000} ],  # 可选：跨调用去重 memo 预置（见下）；
+                                            # atSec = 该次下发时刻（epoch 秒），冷却窗靠它判定过期
+        "dirty": null, "dry_run": false, "timeout": 20.0,
+        "cooldown_sec": 600.0               # 可选：去重冷却窗（缺省 dist_common 常量/env）
     }
     判 stale 的那一步直接走训练循环自己的 `dist_common.upgrade_stale_nodes(...)`
     （ping → codeHash ≠ expected → request_upgrade_guarded），调用方**不重复实现探测**。
@@ -61,6 +63,21 @@ def _fail(msg: str) -> int:
     return 2
 
 
+def _cooldown_of(spec: dict) -> float | None:
+    """spec.cooldown_sec（可选）→ 去重冷却窗秒数；缺省 None = dist_common 自己定
+    （env `NN_RESTART_DEDUP_COOLDOWN_S` > 常量）。非数字/负数视为非法输入。"""
+    raw = spec.get("cooldown_sec")
+    if raw is None:
+        return None
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError("cooldown_sec 必须是数字") from None
+    if v < 0:
+        raise ValueError("cooldown_sec 不能为负")
+    return v
+
+
 def run_scan(spec: dict) -> dict:
     """扫描模式：本 CLI 自己 ping 每个 enabled 节点，判 stale 后下发升级。
 
@@ -85,6 +102,7 @@ def run_scan(spec: dict) -> dict:
     if seen is not None and not isinstance(seen, list):
         raise ValueError("seen 必须是数组")
     dist_common.seed_restart_state(seen or [])
+    cooldown = _cooldown_of(spec)
     cfg = dist_common.load_dist_config(cfg_path)
     if not isinstance(cfg, dict):
         raise ValueError(f"读不到节点配置（{cfg_path}）：文件缺失/损坏，或 nodes 不是数组")
@@ -118,6 +136,7 @@ def run_scan(spec: dict) -> dict:
         branch=branch,
         status_timeout=status_timeout,
         restart_timeout=timeout,
+        cooldown_sec=cooldown,
     )
     results = [
         {
@@ -156,6 +175,7 @@ def run_spec(spec: dict) -> dict:
         timeout = float(spec.get("timeout") or 20.0)
     except (TypeError, ValueError):
         raise ValueError("timeout 必须是数字") from None
+    cooldown = _cooldown_of(spec)
     raw_nodes = spec.get("nodes")
     if not isinstance(raw_nodes, list) or not raw_nodes:
         raise ValueError("nodes 必须是非空数组")
@@ -199,6 +219,7 @@ def run_spec(spec: dict) -> dict:
             timeout=timeout,
             dirty=eff_dirty,
             expected_hash=expected,
+            cooldown_sec=cooldown,
         )
         results.append({"id": nid, "ok": bool(ok), "reason": str(reason)})
 

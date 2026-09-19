@@ -424,6 +424,7 @@ class EvalDispatcher:
                     ok = False
                     err = ""
                     transient = False  # 背压/瞬断（判据单一实现：dist_common.is_transient_error）
+                    task_lost = False  # 取包丢失（节点重启/清场；dist_common.is_task_lost_error）
                     manifest: dict = {}
                     try:
                         from rl.config import args_rollout_overrides, stage_json_for_args
@@ -476,6 +477,13 @@ class EvalDispatcher:
                             )
                         ):
                             transient = True
+                        # 404「task lost on node」= 节点重启/清场把它进程内的结果/在飞任务清掉了
+                        # （2026-09-19 审计 F1，与 A 层同判据）：不计故障、不耗 attempt 配额，
+                        # 并清该节点这条腿的 reuse 账本（重启后桶也可能空了）。
+                        task_lost = dist_common.is_task_lost_error(e)
+                        if task_lost:
+                            dist_common.forget_weights_node(nd["id"], kind=EVAL_WEIGHTS_KIND)
+                            transient = True
                     with lock:
                         if ok:
                             if task in seen:
@@ -511,7 +519,13 @@ class EvalDispatcher:
                                 pending.append(task)
                                 log(
                                     f"[eval] s{task[0]}/seed{task[1]} failed ({err}) — requeued"
-                                    + ("（瞬断/背压，不计节点故障）" if transient else "")
+                                    + (
+                                        "（任务丢失·节点重启，已回队、不计故障）"
+                                        if task_lost
+                                        else "（瞬断/背压，不计节点故障）"
+                                        if transient
+                                        else ""
+                                    )
                                 )
                             elif task not in seen:
                                 _record_agent_meta(

@@ -3,8 +3,10 @@ import { createHash } from 'node:crypto'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
+  applyPullResult,
   collectCodeHashEntries,
   computeCodeHashFromFiles,
+  memoizedCodeHash,
   packContainer,
   unpackContainer,
   SHARD_FILES,
@@ -374,5 +376,52 @@ describe('权重磁盘回查（agent 重启后不再对盘上已有的权重答 
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+// F2（2026-09-19 审计）：`/v1/update` 只 pull 不重启 ⇒ 它**不得**使 codeHash memo 失效，
+// 否则节点会「报新 hash、跑旧代码」，codeHash 门（dist_common.check_code_hash）反向放行。
+describe('F2 codeHash 归属：报的是**运行中代码**，不是盘上代码', () => {
+  const SRC = readFileSync(
+    join(import.meta.dir, '..', 'tools', 'agent', 'sampler-agent.ts'),
+    'utf8',
+  )
+
+  it('applyPullResult：pull 成功（changed）也不得改变已算出的 codeHash', () => {
+    const before = memoizedCodeHash()
+    expect(before).toMatch(/^[0-9a-f]{64}$/)
+    expect(
+      applyPullResult({
+        changed: true,
+        branch: 'goal-nn',
+        oldSha: 'a'.repeat(40),
+        newSha: 'b'.repeat(40),
+      }),
+    ).toBe(true)
+    expect(memoizedCodeHash()).toBe(before) // 本进程仍跑启动时那份代码 ⇒ hash 不变
+    // 无变更时甚至连日志都不发（幂等）；拉过与否都不影响 hash
+    expect(
+      applyPullResult({
+        changed: false,
+        branch: '',
+        oldSha: 'a'.repeat(40),
+        newSha: 'a'.repeat(40),
+      }),
+    ).toBe(false)
+    expect(memoizedCodeHash()).toBe(before)
+  })
+
+  it('源码守卫：/v1/update 不得置空 codeHash/gitShort memo（防「pull 后重算」回归）', () => {
+    expect(SRC).not.toContain('codeHashMemo.value = null')
+    expect(SRC).not.toContain('gitShortMemo.value = null')
+    // 唯一允许 hash 变化的途径 = 重启（进程换代码）
+    expect(SRC).toContain('memoizedCodeHash()')
+  })
+
+  it('源码守卫：/v1/restart 分支在退出前显式收长驻 worker 池（旧代码带着旧代码继续算）', () => {
+    const start = SRC.indexOf("url.pathname === '/v1/restart'")
+    expect(start).toBeGreaterThan(0)
+    const branch = SRC.slice(start, SRC.indexOf('process.exit(0)', start))
+    expect(branch).toContain('killPersistPool()')
   })
 })

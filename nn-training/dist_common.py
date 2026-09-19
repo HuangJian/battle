@@ -306,6 +306,33 @@ def is_transient_error(e: BaseException) -> bool:
     return _BUSY_HINT in str(e)[:64].lower()
 
 
+#: 「取包丢失」标记：节点重启 / 权重切换清场后结果缓存为空，轮询 /v1/result 答 404。
+#: **单一来源**——本常量在此定义，_poll_result 用它拼消息、is_task_lost_error 用它判据，
+#: A/C 层不得各写一份字面量。
+TASK_LOST_MARKER = "task lost on node"
+
+
+def is_task_lost_error(e: BaseException) -> bool:
+    """取包丢失（节点重启 / 清场后节点侧结果缓存为空）——**既非背压、也非节点故障**。
+
+    节点没坏，只是它**进程内**那份结果没了（`resultCache` / `failedTasks` / `inflight`
+    都是节点内存态，agent 一重启即空）⇒ 正确处置 = 立刻回队重跑（局是 (权重,关卡,种子)
+    的纯函数 ⇒ 字节一致）+ 清该节点 reuse 账本（重启同时也意味着它的权重桶可能空了）。
+
+    为什么不并入 is_transient_error：处置与措辞都不同（瞬断=背压退避重排；任务丢失=重新
+    提交），且**裸 404**（路径写错之类客户端 bug）必须继续响亮失败 ⇒ 判据要求
+    「状态 404 **∧** 文案带 TASK_LOST_MARKER」。
+
+    背景（2026-09-19 审计 F1）：旧实现把这条 404 当确定性失败记节点 streak ⇒ 与 409 同族，
+    3 条就把**刚重启**的节点熔断整轮，还白耗 attempt 配额。
+    """
+    return (
+        isinstance(e, DistError)
+        and e.status == 404
+        and str(e.reason).startswith(TASK_LOST_MARKER)
+    )
+
+
 # ---------------- 收工即断连（2026-09-19 用户裁定第 4 条） ----------------
 # 「竞速后 settled 一满，直接关闭所有节点的连接！！！立即！马上！right now！」
 # urllib 无连接池可关，但每个在飞请求的 HTTPResponse 都能 close()：关掉它会让阻塞中的
@@ -510,7 +537,29 @@ def request_upgrade(url: str, auth_key: str, branch: str, timeout: float = 20.0)
 #     改集内文件）后自动恢复资格（F1，plan/dist-codehash-stale-fix.md：dedup 键纳入
 #     期望 hash——否则 mac 类字节差异稳定后训练机永远不再下发升级，运维 pull+重启
 #     因 hash 不变反而永远无法重新纳管）。
-_RESTART_SEEN: dict[str, tuple[str, str]] = {}  # nid -> (agent_ping_hash, expected_hash)
+#: 升级去重**冷却窗**（秒，2026-09-19 审计 F3）。同节点、同 (agent codeHash, 期望 hash)
+#: 在窗内只下发一次 restart；**超窗后允许再发一次**（不收敛的节点由此自愈）。
+#: 为什么需要（旧行为 = 永久 dedup）：节点 pull 失败 / 环境不支持远端升级时，它会带着
+#: **同一个** codeHash 回来 ⇒ dedup 键永久命中 ⇒ 该节点再也收不到升级指令（训练循环里
+#: 直到训练机有新提交；TS 工具那条腿还把这个 memo 落盘到 tmp/node-upgrade-memo.json，
+#: 跨调用继续压制）。冷却窗既保住「防连环杀」（2026-09-01 重启循环事故），又给不收敛节点
+#: 一条自愈路径。`NN_RESTART_DEDUP_COOLDOWN_S` 可覆盖（0 = 关闭去重，每轮都发）。
+RESTART_DEDUP_COOLDOWN_SEC = 600.0
+#: nid -> (agent_ping_hash, expected_hash, 该次下发时刻)。第三项只为冷却窗存在。
+_RESTART_SEEN: dict[str, tuple[str, str, float]] = {}
+
+
+def restart_dedup_cooldown_sec(cooldown_sec: float | None = None) -> float:
+    """去重冷却窗秒数：显式传参 > env `NN_RESTART_DEDUP_COOLDOWN_S` > 缺省常量。"""
+    if cooldown_sec is not None:
+        return max(0.0, float(cooldown_sec))
+    raw = os.environ.get("NN_RESTART_DEDUP_COOLDOWN_S", "")
+    if raw.strip():
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            return RESTART_DEDUP_COOLDOWN_SEC
+    return RESTART_DEDUP_COOLDOWN_SEC
 
 
 def reset_restart_state() -> None:
@@ -524,9 +573,12 @@ def seed_restart_state(entries: list) -> int:
     一次性进程（CLI）专用：本模块的去重状态只活在进程内，调用方（TS 工具）把上次
     成功下发的 (nid, agent codeHash, 期望 hash) 存盘，下次调用前预置回来 ⇒ 守卫
     的 `dedup` 分支语义与常驻训练循环**逐字一致**，不必在调用方重写判据。
-    每项须含 id / pingHash / expectedHash（全量 hex，不接受截断值）。
+    每项须含 id / pingHash / expectedHash（全量 hex，不接受截断值）；可选 `atSec`
+    （= 该次下发的 epoch 秒，调用方 memo 里就有这个时间）——冷却窗靠它判定「是否已过期」，
+    **缺省 = 现在**（保持旧调用方的永久 dedup 语义不变，F3 向后兼容）。
     """
     n = 0
+    now = time.time()
     for e in entries:
         if not isinstance(e, dict):
             continue
@@ -535,7 +587,9 @@ def seed_restart_state(entries: list) -> int:
         exp_hash = str(e.get("expectedHash") or "").strip()
         if not nid or not ping_hash or not exp_hash:
             continue
-        _RESTART_SEEN[nid] = (ping_hash, exp_hash)
+        at = e.get("atSec")
+        ts = float(at) if isinstance(at, (int, float)) and not isinstance(at, bool) else now
+        _RESTART_SEEN[nid] = (ping_hash, exp_hash, ts)
         n += 1
     return n
 
@@ -648,13 +702,16 @@ def request_upgrade_guarded(
     timeout: float = 20.0,
     dirty: list[str] | None = None,
     expected_hash: str = "",
+    cooldown_sec: float | None = None,
 ) -> tuple[bool, str]:
     """带护栏的重启请求（ping 门 / rescan / upgrade_stale_nodes 共用入口）。
 
     返回 (ok, reason)：
-      restart-requested  — 已下发，节点将 pull + 重启（本轮生效）
-      dedup              — 同节点同 (agent codeHash, 期望 hash) 已重启过，跳过
-                           （防连环杀；期望 hash 变化 ⇒ 允许再发一次，F1）
+      restart-requested  — 已下发，节点将 pull + 重启（本轮生效；含**冷却窗过期后的重发**）
+      dedup              — 同节点同 (agent codeHash, 期望 hash) 且**仍在冷却窗内**，跳过
+                           （防连环杀；期望 hash 变化 ⇒ 立即允许再发一次，F1；
+                            冷却窗过期 ⇒ 也允许再发一次，F3——否则 pull 失败/不支持远端
+                            升级的节点会被永久压制，见 RESTART_DEDUP_COOLDOWN_SEC）
       dirty-tree:<n>     — 期望 hash 含 n 个未提交文件，远端 pull 永不收敛，拒发
       restart-failed     — agent 拒绝（409 grace / 5xx）或不可达；不写去重状态
                            （协调器下轮 rescan 自动重试）
@@ -669,12 +726,20 @@ def request_upgrade_guarded(
     if not is_self_node(url, nid) and dirty:
         return False, f"dirty-tree:{len(dirty)}"
     key = (ping_hash, expected_hash)
-    if _RESTART_SEEN.get(nid) == key:
+    prev = _RESTART_SEEN.get(nid)
+    # 冷却窗内 ⇒ dedup（防连环杀）；窗**已过**而节点仍 stale（pull 失败 / 环境不支持远端
+    # 升级）⇒ 允许再发一次，并把时钟重置（下一窗内继续 dedup）。F3：旧行为是永久 dedup，
+    # 这类节点会静默卡死到训练机出新提交为止（TS 工具的落盘 memo 还会跨调用压制）。
+    if (
+        prev is not None
+        and prev[:2] == key
+        and time.time() - prev[2] < restart_dedup_cooldown_sec(cooldown_sec)
+    ):
         return False, "dedup"
     actual_branch = "" if is_self_node(url, nid) else branch
     ok = request_upgrade(url, auth_key, actual_branch, timeout=timeout)
     if ok:
-        _RESTART_SEEN[nid] = key
+        _RESTART_SEEN[nid] = (ping_hash, expected_hash, time.time())
     return ok, ("restart-requested" if ok else "restart-failed")
 
 
@@ -686,6 +751,7 @@ def upgrade_stale_nodes(
     restart_timeout: float = 20.0,
     max_nodes: int = 16,
     dirty: list[str] | None = None,
+    cooldown_sec: float | None = None,
 ) -> list[dict]:
     """主动升级扫描：ping 每个 enabled 节点，codeHash ≠ expected（stale）→
     request_upgrade_guarded（跨代去重 + 脏工作区拒发，2026-09-01 重启循环修复）。
@@ -715,6 +781,7 @@ def upgrade_stale_nodes(
             timeout=restart_timeout,
             dirty=dirty,
             expected_hash=expected_hash,
+            cooldown_sec=cooldown_sec,
         )
         # pingHash 回传给调用方：一次性 CLI 要靠它把本次下发写进跨调用 memo
         #（键 = (nid, agent ping hash, 期望 hash)，与 _RESTART_SEEN 同构）。
@@ -784,11 +851,22 @@ def note_weights_pushed(wver: str, node_id: str, kind: str = "rollout") -> None:
         _WEIGHTS_PUSHED.setdefault((kind, wver), set()).add(node_id)
 
 
-def forget_weights_node(node_id: str) -> None:
+def forget_weights_node(node_id: str, kind: str | None = None) -> int:
+    """把某节点从「已下发」账本摘掉 → 返回摘掉的条数（0 = 本来就没有）。
+
+    kind=None（缺省）= 该节点**所有** kind 都摘（节点重启 ⇒ 它的桶全空了）；
+    给 kind 时只摘那一条腿（避免同进程其它腿被无谓重握手；它们各自有 409 自愈兜底）。
+    """
     if not node_id:
-        return
-    for s in _WEIGHTS_PUSHED.values():
-        s.discard(node_id)
+        return 0
+    n = 0
+    for key, s in _WEIGHTS_PUSHED.items():
+        if kind is not None and key[0] != kind:
+            continue
+        if node_id in s:
+            s.discard(node_id)
+            n += 1
+    return n
 
 
 def weights_already_pushed(wver: str, node_id: str, kind: str = "rollout") -> bool:
@@ -1215,7 +1293,9 @@ def _poll_result(
                     msg = detail
                 raise DistError(500, str(msg)) from e
             if e.code == 404:
-                raise DistError(404, f"task lost on node (restart/purge): {detail}") from e
+                # 文案前缀 = TASK_LOST_MARKER（单一来源）：客户端据此判定「重启/清场丢包」，
+                # 与「裸 404 = 路径写错」区分开。
+                raise DistError(404, f"{TASK_LOST_MARKER} (restart/purge): {detail}") from e
             raise DistError(e.code, detail) from e
         except Exception:
             # 瞬断（休眠/SSH 重连/隧道抖动）：结果仍在节点缓存里，睡一下继续拉。

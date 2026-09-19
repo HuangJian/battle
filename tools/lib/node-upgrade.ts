@@ -15,7 +15,13 @@
  * 已知边界：子进程是一次性的 ⇒ 守卫内部的跨代去重只在单次调用内生效；跨调用由本模块的
  * memo 文件兜底（key = nid + agent ping hash + 期望 hash，**语义与 dist_common._RESTART_SEEN
  * 一致**，落 `tmp/node-upgrade-memo.json`，可用 NN_UPGRADE_MEMO 覆盖）：调用前按节点取
- * memo 里最新的一条经 spec.`seen` 预置回子进程，判据仍只有一处实现。
+ * memo 里最新的一条经 spec.`seen` 预置回子进程，判据（含**去重冷却窗**）仍只有一处实现。
+ *
+ * F3（2026-09-19）：去重不是永久的——memo 值就是该次下发的 ISO 时刻，本模块把它换算成
+ * `atSec`（epoch 秒）随 `seen` 传给 Python，由 `dist_common.request_upgrade_guarded` 按
+ * `RESTART_DEDUP_COOLDOWN_SEC`（缺省 600s）判定「还在窗内 ⇒ dedup」/「窗已过 ⇒ 再发一次」。
+ * 旧行为下，pull 失败（或节点环境不支持远端升级）的节点会带着同一个 codeHash 回来、
+ * memo 键永久命中 ⇒ 该节点再也收不到升级指令且跨调用持续被压制。
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
@@ -27,8 +33,8 @@ export interface UpgradeSpecInput {
   branch: string
   /** 节点配置（`rl-config.json` 或 `--dist-nodes` 指定的文件）。 */
   cfgPath: string
-  /** 跨调用去重 memo（预置回 `dist_common._RESTART_SEEN`）。 */
-  seen?: Array<{ id: string; pingHash: string; expectedHash: string }>
+  /** 跨调用去重 memo（预置回 `dist_common._RESTART_SEEN`；`atSec` = 该次下发时刻）。 */
+  seen?: Array<{ id: string; pingHash: string; expectedHash: string; atSec?: number }>
   /** null/缺省 ⇒ 子进程用 `dist_common.dirty_hash_files()` 字节级探测。 */
   dirty?: string[] | null
   dryRun?: boolean
@@ -155,18 +161,41 @@ export function saveMemo(memoPath: string, memo: UpgradeMemo): void {
  */
 export function latestSeenEntries(
   memo: UpgradeMemo,
-): Array<{ id: string; pingHash: string; expectedHash: string }> {
+): Array<{ id: string; pingHash: string; expectedHash: string; atSec: number }> {
   const latest = new Map<
     string,
-    { at: string; entry: { id: string; pingHash: string; expectedHash: string } }
+    {
+      at: string
+      entry: { id: string; pingHash: string; expectedHash: string; atSec: number }
+    }
   >()
   for (const [key, at] of Object.entries(memo)) {
     const e = parseMemoKey(key)
     if (!e.id || !e.pingHash || !e.expectedHash) continue
     const prev = latest.get(e.id)
-    if (!prev || String(at) > prev.at) latest.set(e.id, { at: String(at), entry: e })
+    if (!prev || String(at) > prev.at)
+      latest.set(e.id, { at: String(at), entry: { ...e, atSec: memoAtSec(at) } })
   }
   return [...latest.values()].map((v) => v.entry)
+}
+
+/**
+ * memo 值（该次下发的时刻）→ epoch 秒。认 ISO 8601（本模块写入的形态）与纯数字两种；
+ * 解不出来时回 **0**（= 最旧）——由 Python 侧的冷却窗判它「已过期 ⇒ 允许再发一次」。
+ * 这里**不做去重判断**（判据只在 dist_common，单一实现），只负责把时刻送达。
+ */
+export function memoAtSec(at: unknown): number {
+  const s = String(at ?? '').trim()
+  if (!s) return 0
+  // 纯数字（可带符号）= epoch 秒。必须**先**判数字：`Date.parse('1758300000')` 在
+  // 宽松解析下会给出一个与输入毫无关系的日期（实测 2001-05-01），静默把新鲜 memo
+  // 变成「一小时前」。
+  if (/^[+-]?\d+$/.test(s)) {
+    const n = Number(s)
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0
+  }
+  const iso = Date.parse(s)
+  return Number.isFinite(iso) && iso > 0 ? Math.floor(iso / 1000) : 0
 }
 
 /** 期望分支：`UPGRADE_BRANCH` 优先（与训练循环锁存语义一致），否则 git 当前分支。 */
@@ -290,7 +319,7 @@ export function upgradeLogLines(prefix: string, out: UpgradeOutcome, dirty?: str
         : r.reason === 'current'
           ? '已是期望 codeHash'
           : r.reason === 'dedup'
-            ? '同一 (agent hash, 期望 hash) 已发过，跳过（防连环重启）'
+            ? '同一 (agent hash, 期望 hash) 且仍在去重冷却窗内，跳过（防连环重启；窗过后自动重发一次）'
             : r.reason.startsWith('dirty-tree')
               ? `拒发（${r.reason}）`
               : r.reason === 'restart-failed'

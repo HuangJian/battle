@@ -12,6 +12,7 @@ import path from 'path'
 import {
   buildUpgradeSpec,
   latestSeenEntries,
+  memoAtSec,
   memoKey,
   parseMemoKey,
   parseUpgradeOutput,
@@ -127,8 +128,12 @@ describe('requestNodeUpgrades（经 nn-py-safe.sh 调 python 扫描）', () => {
         { repoRoot: REPO, expectedHash: EXP, branch: 'goal-nn', cfgPath: CFG },
         { spawn: fakeSpawn(out, 0, seen2), memoPath, env: {} },
       )
-      const sent2 = JSON.parse(seen2[0]!.spec) as { seen?: Array<Record<string, string>> }
-      expect(sent2.seen).toEqual([{ id: 'a95', pingHash: STALE, expectedHash: EXP }])
+      const sent2 = JSON.parse(seen2[0]!.spec) as { seen?: Array<Record<string, unknown>> }
+      // F3：`atSec` = memo 里那次下发的时刻（冷却窗靠它判定是否已过期）——判据仍在 Python。
+      expect(sent2.seen).toEqual([
+        { id: 'a95', pingHash: STALE, expectedHash: EXP, atSec: expect.any(Number) },
+      ])
+      expect(sent2.seen?.[0]?.atSec as number).toBeGreaterThan(1_600_000_000)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
@@ -218,6 +223,29 @@ describe('memo（跨调用去重状态；判据在 dist_common，这里只管持
     expect(byId['a95']?.pingHash).toBe(STALE)
     expect(entries.length).toBe(2)
   })
+
+  it('F3：条目带上 `atSec`（下发时刻的 epoch 秒）——冷却窗判据所需的唯一新信息', () => {
+    const entries = latestSeenEntries({ [`mac|${STALE}|${EXP}`]: '2026-09-19T02:00:00Z' })
+    expect(entries).toEqual([
+      {
+        id: 'mac',
+        pingHash: STALE,
+        expectedHash: EXP,
+        atSec: Math.floor(Date.parse('2026-09-19T02:00:00Z') / 1000),
+      },
+    ])
+  })
+
+  it('memoAtSec：认 ISO 与纯数字；解不出来 ⇒ 0（= 最旧 ⇒ Python 视作已过期可重发）', () => {
+    expect(memoAtSec('2026-09-19T02:00:00Z')).toBe(
+      Math.floor(Date.parse('2026-09-19T02:00:00Z') / 1000),
+    )
+    expect(memoAtSec('1758300000')).toBe(1758300000)
+    expect(memoAtSec('')).toBe(0)
+    expect(memoAtSec(undefined)).toBe(0)
+    expect(memoAtSec('not a time')).toBe(0)
+    expect(memoAtSec('-5')).toBe(0)
+  })
 })
 
 describe('resolveUpgradeBranch / pythonCandidates', () => {
@@ -285,7 +313,8 @@ describe('upgradeLogLines 逐 reason 文案', () => {
   })
   it('current / dedup / dirty-tree / restart-failed / unreachable 都有可读文案', () => {
     expect(upgradeLogLines('[t]', out('current')).join('\n')).toContain('已是期望 codeHash')
-    expect(upgradeLogLines('[t]', out('dedup')).join('\n')).toContain('已发过')
+    // F3：dedup 文案要讲清「不是永久」——窗过后会自动重发一次
+    expect(upgradeLogLines('[t]', out('dedup')).join('\n')).toContain('去重冷却窗内')
     expect(upgradeLogLines('[t]', out('dirty-tree:3')).join('\n')).toContain('拒发（dirty-tree:3）')
     expect(upgradeLogLines('[t]', out('restart-failed')).join('\n')).toContain('agent 拒绝/不可达')
     expect(upgradeLogLines('[t]', out('unreachable')).join('\n')).toContain('ping 不通')

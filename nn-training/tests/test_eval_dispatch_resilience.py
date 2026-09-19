@@ -155,6 +155,44 @@ def test_wver_409_reposts_weights_and_keeps_node(tmp_path, monkeypatch) -> None:
     assert "circuit-broken" not in "\n".join(h.logs)
 
 
+def test_task_lost_404_requeues_without_tripping_node(tmp_path, monkeypatch) -> None:
+    """F1：节点重启导致取包丢失（/v1/result 404）⇒ 不丢局、不熔断、清 reuse 账本。
+
+    旧实现：404 不计瞬断 ⇒ attempt 打光即 `dropped`（丢局）+ 3 次熔断整轮。
+    """
+    h = _Harness(tmp_path, monkeypatch, games=2)
+    forgotten: list[str] = []
+    real_forget = dist_common.forget_weights_node
+
+    def spy_forget(nid: str, kind: str | None = None) -> int:
+        forgotten.append(nid)
+        return real_forget(nid, kind)
+
+    monkeypatch.setattr(dist_common, "forget_weights_node", spy_forget)
+    calls = {"n": 0}
+
+    def fetch(*_a, **kw):
+        calls["n"] += 1
+        h.tasks.append((kw["stage"], kw["seed"]))
+        if calls["n"] <= 4:
+            raise dist_common.DistError(
+                404,
+                f"{dist_common.TASK_LOST_MARKER} (restart/purge): "
+                '{"error":"unknown task (expired/purged/restart)"}',
+            )
+        return h.manifest(kw["stage"], kw["seed"]), {}
+
+    rows = h.run(fetch)
+    played = [r for r in rows if r.get("event") == "eval"]
+    assert len(played) == 2, f"404 不得丢局（旧实现 attempt 打光即 dropped）: {rows}"
+    assert {r["node"] for r in played} == {"a97"}
+    joined = "\n".join(h.logs)
+    assert "circuit-broken" not in joined
+    assert "任务丢失·节点重启，已回队、不计故障" in joined
+    assert forgotten.count("a97") >= 1, "404 必须清该节点这条腿的 reuse 账本"
+    assert h.refreshed == [], "404 不是 409：不得走权重重发路径"
+
+
 def test_hard_failure_still_trips_node(tmp_path, monkeypatch) -> None:
     """真故障（确定性校验失败）仍要停派——瞬断豁免不得顺手废掉护栏。
 

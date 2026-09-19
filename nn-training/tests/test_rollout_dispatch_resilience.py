@@ -218,6 +218,42 @@ def test_wver_409_reposts_and_keeps_node(tmp_path, monkeypatch) -> None:
     assert "circuit-broken" not in joined
 
 
+def test_task_lost_404_requeues_without_tripping_node(tmp_path, monkeypatch) -> None:
+    """F1：节点重启导致取包丢失（/v1/result 404）⇒ 不计故障、不耗 attempt、清 reuse 账本。
+
+    旧实现把它当确定性失败记 streak ⇒ 3 条就把**刚重启**的节点熔断整轮（`circuit-broken`），
+    第 4 次起连取活都不给 ⇒ 整轮 0 局、missing 全满。
+    """
+    h = _Harness(tmp_path, monkeypatch, games=2)
+    forgotten: list[str] = []
+    real_forget = dist_common.forget_weights_node
+
+    def spy_forget(nid: str, kind: str | None = None) -> int:
+        forgotten.append(nid)
+        return real_forget(nid, kind)
+
+    monkeypatch.setattr(dist_common, "forget_weights_node", spy_forget)
+    calls = {"n": 0}
+
+    def fetch(*_a, **_kw):
+        calls["n"] += 1
+        if calls["n"] <= 4:
+            raise dist_common.DistError(
+                404,
+                f"{dist_common.TASK_LOST_MARKER} (restart/purge): "
+                '{"error":"unknown task (expired/purged/restart)"}',
+            )
+        return h.manifest(), {}
+
+    report = h.run(fetch)
+    assert report["missing"] == [], report.get("missing")
+    assert report["dist"]["nodes"] == {"a97": 2}, report["dist"]
+    joined = "\n".join(h.logs)
+    assert "circuit-broken" not in joined
+    assert "任务丢失（节点重启/清场，已回队、不计故障）" in joined
+    assert forgotten.count("a97") >= 1, "404 必须清该节点这条腿的 reuse 账本"
+
+
 @pytest.mark.parametrize("status", [500, 502, 503, 504])
 def test_soft_streak_still_bounded_when_cluster_is_down(tmp_path, monkeypatch, status) -> None:
     """整体脉停（一直是瞬时错误）仍有上界：停派该节点，不把整轮拖到窗口超时。

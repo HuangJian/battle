@@ -246,17 +246,42 @@ function serveWithRetry(
 // 实现已迁至 ./codehash-files（纯模块，无本文件模块加载副作用）；此处仅 re-export。
 
 /**
- * memo 化 codeHash：启动/首次调用算一次缓存，仅在 /v1/update 的 git pull 真正切换
- * 代码后置空重算（见 update 分支）。否则每次 /v1/ping /v1/status 都会对 src/nn/**
- * 全量 statSync + readFileSync + sha256——在 proot/eMMC 弱机上把响应拖到秒级。
+ * memo 化 codeHash：启动/首次调用算一次缓存，**生命周期 = 本进程**（永不因 git pull 失效）。
+ * 否则每次 /v1/ping /v1/status 都会对 src/nn/** 全量 statSync + readFileSync + sha256——
+ * 在 proot/eMMC 弱机上把响应拖到秒级。
+ *
+ * F2（2026-09-19 审计）：POST /v1/update 只 pull、**不重启**，进程里跑的仍是启动时那份
+ * 代码 ⇒ 这个 memo 必须继续报「运行中代码」的 hash。旧实现在 pull 成功后把它置空重算 ⇒ 节点会
+ * 「报新代码、跑旧代码」，codeHash 门（dist_common.check_code_hash）随即放行它——正是该门
+ * 要拦的东西的反向漏网。要换 hash，只有重启（/v1/restart，可带 pullBranch）。
  */
-function memoizedCodeHash(): string {
+export function memoizedCodeHash(): string {
   const memo: { value: string | null } = codeHashMemo
   if (memo.value === null) memo.value = computeCodeHash()
   return memo.value
 }
 
-/** 模块级 memo 单元（惰性）：null=未算/已失效，非 null=缓存值，仅在 git pull 切换后置空。 */
+/**
+ * F2：一次 git pull 的结果落到进程状态 —— **只记日志，绝不动 codeHash/gitShort memo**。
+ *
+ * 抽成导出函数的唯一目的：让单测能钉住「/v1/update 不得使已算出的 codeHash 失效」这条
+ * 不变量（HTTP 分支只调它，不再自己改 memo）。返回是否发生了代码变更（日志用）。
+ */
+export function applyPullResult(r: {
+  changed: boolean
+  branch: string
+  oldSha: string
+  newSha: string
+}): boolean {
+  if (!r.changed) return false
+  console.log(
+    `[sampler-agent] pulled ${r.branch} ${r.oldSha.slice(0, 8)} -> ${r.newSha.slice(0, 8)}` +
+      ` — 仍在跑启动时那份代码（codeHash 不变）；重启后生效`,
+  )
+  return true
+}
+
+/** 模块级 memo 单元（惰性）：null=未算，非 null=缓存值；进程内一经算出就不再失效（F2）。 */
 const codeHashMemo: { value: string | null } = { value: null }
 
 function gitShortHash(): string {
@@ -273,8 +298,8 @@ function gitShortHash(): string {
 }
 
 /**
- * memo 化 gitShortHash：进程启动/首次调用算一次缓存，仅在 /v1/update 的 git pull 切换
- * 代码后置空重算（与 codeHash 同策略）。否则每次 /v1/ping /v1/status 都 spawn 一次
+ * memo 化 gitShortHash：进程启动/首次调用算一次缓存，**与 codeHash 同生命周期**（F2：
+ * pull 不改变本进程在跑的代码，故不失效）。否则每次 /v1/ping /v1/status 都 spawn 一次
  * git 子进程——在 proot/ptrace 环境每次 fork+exec+读 .git 被拖到几十秒，是弱机上的
  * 隐藏瓶颈。
  */
@@ -283,7 +308,7 @@ function cachedGitShortHash(): string {
   return gitShortMemo.value
 }
 
-/** 模块级 memo 单元：null=未算/已失效，非 null=缓存值，仅在 git pull 切换后置空。 */
+/** 模块级 memo 单元：null=未算，非 null=缓存值；进程内一经算出就不再失效（F2）。 */
 const gitShortMemo: { value: string | null } = { value: null }
 
 // ---------------- engine_epoch 已**不再**是节点门字段（2026-09-17） ----------------
@@ -1235,14 +1260,11 @@ async function handle(req: Request): Promise<Response> {
     updating = true
     try {
       const r = runGitPull(branch)
-      // 代码已变 → codeHash / gitVersion 缓存作废（下轮 /v1/status /v1/ping 重新计算）。
-      if (r.changed) {
-        codeHashMemo.value = null
-        gitShortMemo.value = null
-        console.log(
-          `[sampler-agent] pulled ${r.branch} ${r.oldSha.slice(0, 8)} -> ${r.newSha.slice(0, 8)}`,
-        )
-      }
+      // F2（2026-09-19 审计）：pull **不作废** codeHash/gitShort memo。本进程执行的代码没有
+      // 变，/v1/ping 必须继续报那份代码的 hash——否则刚 pull 的节点会以「新 hash」通过
+      // codeHash 门、静默跑旧代码（旧实现正是如此：门被反向绕过）。盘上新代码只在**重启**
+      // 后生效（POST /v1/restart，可带 pullBranch），故这里只响亮提示。
+      applyPullResult(r)
       return jsonResponse({ ok: true, ...r }, 200)
     } catch (e) {
       return jsonResponse(
@@ -1330,6 +1352,10 @@ async function handle(req: Request): Promise<Response> {
           restartPending = false // 不退出，保持旧实例存活
           return
         }
+        // 长驻 worker 池是靠 stdin EOF 自灭的（export-rl-rollout.ts: stdin `end` → exit），
+        // 但**忙** worker 要跑完当前那局才回到事件循环 ⇒ 重启后它会顶着旧代码继续算一段、
+        // 并把没人消费的 game-* 目录留在盘上。这里显式收池：重启语义 = 旧代码立即退场。
+        killPersistPool()
         setTimeout(() => {
           console.log(`[sampler-agent] restarting (exit)`)
           process.exit(0)

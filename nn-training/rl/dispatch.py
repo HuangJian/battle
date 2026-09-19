@@ -284,7 +284,9 @@ class RolloutDispatcher:
                     if not dist_common.is_self_node(n["url"], nid) and dedup_streak[nid] >= 3:
                         log(
                             f"[dist] WARN node {nid}: stale for {dedup_streak[nid]} "
-                            f"rounds, upgrade suppressed by dedup — 在节点执行 "
+                            f"rounds, upgrade suppressed by dedup （去重有"
+                            f"{int(dist_common.restart_dedup_cooldown_sec())}s 冷却窗，"
+                            f"窗过后会自动重发一次）— 在节点执行 "
                             f"'bun tools/agent/codehash-report.ts' 与本机 diff"
                             f"（见 plan/dist-codehash-stale-fix.md §4）"
                         )
@@ -640,6 +642,7 @@ class RolloutDispatcher:
                 err = ""
                 busy503 = False  # HTTP 503(busy) 瞬时负载（重排 + 背压退避）
                 transient_err = False  # 背压/瞬断（单一判据：dist_common.is_transient_error）
+                task_lost = False  # 取包丢失（节点重启/清场；判据：dist_common.is_task_lost_error）
                 try:
                     if nd is None:
                         _idx = next_idx[0]
@@ -729,6 +732,17 @@ class RolloutDispatcher:
                         )
                     ):
                         transient_err = True  # 已自愈：同样不计故障、不耗 attempt 配额
+                    # 404「task lost on node」= 节点重启/清场把它**内存里**的结果/在飞任务
+                    # 清掉了（resultCache/failedTasks/inflight 都是节点进程内状态）：既非
+                    # 背压也非节点故障 ⇒ 清该节点这条腿的 reuse 账本（重启后桶也可能空了，
+                    # 下次取活会重新握手）+ 立即回队、不耗 attempt 配额。
+                    # 2026-09-19 审计 F1：旧实现把它当确定性失败记 streak ⇒ 与 409 同族，
+                    # 3 条就把刚重启的节点熔断整轮。
+                    task_lost = dist_common.is_task_lost_error(e)
+                    if task_lost:
+                        if nd is not None:
+                            dist_common.forget_weights_node(nd_id, kind=wkind)
+                        transient_err = True
                 with lock:
                     if nd is None and task is not None:
                         # max(0, …)：任何未配对路径都不许把计数打成负数（负 = 闸门失效）。
@@ -895,6 +909,8 @@ class RolloutDispatcher:
                             + (
                                 ", busy"
                                 if busy503
+                                else ", 任务丢失（节点重启/清场，已回队、不计故障）"
+                                if task_lost
                                 else ", 瞬断/背压（不计节点故障）"
                                 if transient_err
                                 else ""

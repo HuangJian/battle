@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -33,6 +34,8 @@ def test_spec_validation_errors() -> None:
         {"expected_hash": "x", "nodes": [{"id": "mac"}]},  # url 缺
         {"expected_hash": "x", "nodes": [NODE], "dirty": "not-a-list"},
         {"expected_hash": "x", "nodes": [NODE], "timeout": "soon"},
+        {"expected_hash": "x", "nodes": [NODE], "cooldown_sec": "soon"},  # F3
+        {"expected_hash": "x", "nodes": [NODE], "cooldown_sec": -1},
     ):
         with pytest.raises(ValueError):
             dist_upgrade_cli.run_spec(bad)
@@ -54,18 +57,24 @@ def test_current_node_short_circuits(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_stale_node_maps_to_shared_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict = {}
 
-    def fake(nid, url, auth, branch, ping_hash, timeout=20.0, dirty=None, expected_hash=""):
+    def fake(
+        nid, url, auth, branch, ping_hash, timeout=20.0, dirty=None, expected_hash="",
+        cooldown_sec=None,
+    ):
         seen.update(
-            nid=nid, url=url, auth=auth, branch=branch, ping=ping_hash, dirty=dirty, exp=expected_hash
+            nid=nid, url=url, auth=auth, branch=branch, ping=ping_hash, dirty=dirty,
+            exp=expected_hash, cooldown=cooldown_sec,
         )
         return True, "restart-requested"
 
     monkeypatch.setattr(dist_common, "request_upgrade_guarded", fake)
-    out = dist_upgrade_cli.run_spec({**SPEC, "dirty": ["src/x.ts"]})
+    out = dist_upgrade_cli.run_spec({**SPEC, "dirty": ["src/x.ts"], "cooldown_sec": 30})
     assert out["results"] == [{"id": "mac", "ok": True, "reason": "restart-requested"}]
     assert out["dirty"] == ["src/x.ts"]
     # 显式 dirty 透传（调用方每轮已检测则复用，不重复探测）；期望 hash 必须显式传（F1）。
     assert seen["dirty"] == ["src/x.ts"] and seen["exp"] == "b" * 64 and seen["branch"] == "goal-nn"
+    # F3：spec.cooldown_sec 透传到守卫（缺省 None ⇒ 由 dist_common 决定 env/常量）。
+    assert seen["cooldown"] == 30.0
 
 
 def test_dirty_none_probes_really(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -223,6 +232,10 @@ def test_scan_seen_memo_suppresses_restart(tmp_path: Path, monkeypatch: pytest.M
     cfg_path = _write_cfg(tmp_path, {"nodes": [CFG["nodes"][0]]})
     dist_common.reset_restart_state()
     monkeypatch.setattr(dist_common, "node_ping", _ping_a)
+    # 工作区脏不脏与用例语义无关（scan 不传 dirty ⇒ 守卫会字节级探测）——如果断言真的
+    # 依赖「本仓此刻恰好没有未提交的 SSOT 文件」，那改 tools/agent/** 就会把这个用例弄红
+    # （实测 2026-09-19 F2）。固定为「干净」。
+    monkeypatch.setattr(dist_common, "dirty_hash_files", lambda: [])
     posted: list[str] = []
     monkeypatch.setattr(dist_common, "request_upgrade", _recorder(posted))
     # 第一次：真发（并返回 pingHash 供调用方持久化）。
@@ -282,5 +295,65 @@ def test_seed_restart_state_contract() -> None:
         ]
     )
     assert n == 1
-    assert dist_common._RESTART_SEEN["mac"] == ("a" * 64, "b" * 64)
+    # 第三项是「该次下发时刻」（F3 冷却窗靠它）：缺 atSec ⇒ 记作现在（旧语义 = 立即 dedup）
+    got = dist_common._RESTART_SEEN["mac"]
+    assert got[:2] == ("a" * 64, "b" * 64)
+    assert isinstance(got[2], float) and abs(got[2] - time.time()) < 5
+
+
+def test_scan_seen_atsec_expires_dedup_cooldown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F3：memo 里的 `atSec` 早于冷却窗 ⇒ 允许再发一次；新 memo（无 atSec）⇒ 仍 dedup。
+
+    旧行为：pull 失败/不支持远端升级的节点带着同一个 codeHash 回来 ⇒ memo 键永久命中，
+    该节点再也收不到升级指令（跨调用持续压制）。
+    """
+    cfg_path = _write_cfg(tmp_path, {"nodes": [CFG["nodes"][0]]})
+    monkeypatch.setattr(dist_common, "node_ping", _ping_a)
+    monkeypatch.setattr(dist_common, "dirty_hash_files", lambda: [])  # 同上一用例：与工作区无关
+    posted: list[str] = []
+    monkeypatch.setattr(dist_common, "request_upgrade", _recorder(posted))
+
+    # 一小时前下发过（memo 里带着当时的时刻）⇒ 冷却窗（缺省 600s）已过 ⇒ 再发一次
+    dist_common.reset_restart_state()
+    old = dist_upgrade_cli.run_scan(
+        {
+            "cfg_path": cfg_path,
+            "branch": "goal-nn",
+            "dirty": [],
+            "expected_hash": "b" * 64,
+            "seen": [
+                {
+                    "id": "stale",
+                    "pingHash": "a" * 64,
+                    "expectedHash": "b" * 64,
+                    "atSec": time.time() - 3600,
+                }
+            ],
+        }
+    )
+    assert old["results"][0]["reason"] == "restart-requested", old["results"]
+    assert posted == ["http://10.0.0.1:8443"]
+
+    # 刚刚下发过（同一 memo 键、时刻为现在）⇒ 窗内 dedup，不打扰节点
+    dist_common.reset_restart_state()
+    fresh = dist_upgrade_cli.run_scan(
+        {
+            "cfg_path": cfg_path,
+            "branch": "goal-nn",
+            "dirty": [],
+            "expected_hash": "b" * 64,
+            "seen": [
+                {
+                    "id": "stale",
+                    "pingHash": "a" * 64,
+                    "expectedHash": "b" * 64,
+                    "atSec": time.time(),
+                }
+            ],
+        }
+    )
+    assert fresh["results"][0]["reason"] == "dedup", fresh["results"]
+    assert posted == ["http://10.0.0.1:8443"], "窗内不得再发 POST"
     dist_common.reset_restart_state()

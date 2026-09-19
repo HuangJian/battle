@@ -141,6 +141,44 @@ def test_transient_classification_table() -> None:
     assert it(ValueError("corrupt container")) is False
 
 
+def test_task_lost_classification_table() -> None:
+    """F1 判据表：只有「404 ∧ 文案带 TASK_LOST_MARKER」才算取包丢失。
+
+    裸 404（路径写错之类客户端 bug）必须继续响亮失败——把它当成「节点重启」会把真实
+    客户端 bug 静默成无限回队。
+    """
+    tl = dist_common.is_task_lost_error
+    marker = dist_common.TASK_LOST_MARKER
+    assert marker == "task lost on node"  # 与 _poll_result 的文案同源
+    assert tl(dist_common.DistError(404, f"{marker} (restart/purge): {{}}")) is True
+    assert tl(dist_common.DistError(404, "not found")) is False
+    assert tl(dist_common.DistError(404, "")) is False
+    assert tl(dist_common.DistError(503, marker)) is False  # 状态不对
+    assert tl(dist_common.DistError(409, "wver not cached here")) is False
+    assert tl(ConnectionResetError(10054, "x")) is False
+    assert tl(ValueError("corrupt container")) is False
+    # 与瞬断**分开**：处置不同（回队重跑 vs 背压退避），404 不属背压分类
+    assert dist_common.is_transient_error(dist_common.DistError(404, marker)) is False
+
+
+def test_forget_weights_node_scope() -> None:
+    """账本摘除范围：给 kind 时只摘那条腿，缺省摘该节点全部 kind，不误伤别的节点。"""
+    dist_common.weights_push_cache_reset()
+    dist_common.note_weights_pushed("w1", "a97", kind="rollout")
+    dist_common.note_weights_pushed("w1", "a97", kind="eval")
+    dist_common.note_weights_pushed("w1", "mac", kind="rollout")
+    dist_common.note_weights_pushed("w1", "a97", kind="rollout")  # 幂等
+
+    assert dist_common.forget_weights_node("a97", kind="rollout") == 1
+    assert dist_common.weights_already_pushed("w1", "a97", kind="rollout") is False
+    assert dist_common.weights_already_pushed("w1", "a97", kind="eval") is True
+    assert dist_common.weights_already_pushed("w1", "mac", kind="rollout") is True
+    assert dist_common.forget_weights_node("a97") == 1  # 缺省 = 全 kind
+    assert dist_common.weights_already_pushed("w1", "a97", kind="eval") is False
+    assert dist_common.forget_weights_node("a97") == 0  # 再摘一次 = 0 条
+    assert dist_common.forget_weights_node("") == 0  # 空 id 不炸
+
+
 def test_refresh_weights_reposts_and_forgets_cache(monkeypatch) -> None:
     """409 自愈：清 reuse 缓存 → 就地重发 → 重新入账（同一节点继续用）。"""
     dist_common.weights_push_cache_reset()
@@ -222,6 +260,19 @@ def test_transient_judgement_defined_once_and_wired() -> None:
         assert "dist_common.is_transient_error(" in src
         assert "dist_common.refresh_weights(" in src
         assert "409" in src  # 409 是可刷新条件，必须显式分支
+        # F1：取包丢失（404 重启）也必须接线；判据与标记只在 dist_common（单源）
+        assert "dist_common.is_task_lost_error(" in src
+        assert "dist_common.forget_weights_node(" in src
+        # 带引号的标记字面量只许待在 dist_common（注释里提到它无所谓）
+        assert '"task lost on node"' not in src
+    # is_task_lost_error 只许有一份实现（不得复制回 A/B/C 层）
+    tl_definers = []
+    for path in [root / "dist_common.py", *sorted((root / "rl").glob("*.py"))]:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "is_task_lost_error":
+                tl_definers.append(path.name)
+    assert tl_definers == ["dist_common.py"], tl_definers
     b_layer = (root / "rl" / "batch_eval.py").read_text(encoding="utf-8")
     assert "return dist_common.is_transient_error(e)" in b_layer
 

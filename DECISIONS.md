@@ -3261,3 +3261,75 @@ mtime 最新的一份（不串 kind）、**最新那份是改名坏文件时跳�
 这是正确行为）；② `latestWeightsOfKind`（intent/goal 评估的「最新桶」语义）仍只查内存——同类站点，未并入
 ②（**已并入本轮**）`latestWeightsOfKind` 同样磁盘回查，但它的「最新」只能按 **mtime 近似**（POST 命中 kept 不重写文件时 mtime 偏旧；与内存桶插入序语义等价、但有此边界），且「最新」是**跨客户端共享**的语义（别的训练流 POST 的 intent/goal 权重也会成为最新——与改动前一致）；③ 回查是请求路径上的同步 IO（`readFileSync` + sha256）——每个 `(kind, sha)` 每进程只付一次
 （命中即回填），首次命中的那一局多几毫秒；④ 未做重启预载，故「重启后第一局」付出这次哈希。
+## §2026-09-19-node-memory-restart-blindspots（2026-09-19，依赖节点内存态的三处重启盲区：取包丢失 404 判据 / `/v1/update` 假收敛 / 升级去重冷却窗）
+
+**触发**：用户 2026-09-19「系统排查其它依赖节点内存态的地方（结果缓存、inflight 表）是否也有重启后行为
+盲区」，随后裁定按 F1 → F3 → F2 修。
+
+**审计（只读，判据 = 进程内可变状态重启后消失，而**是否有人据此做过判断**）**：
+节点侧逐个过：`weightsByKindSha`（已覆盖，见 §node-weights-disk-fallback）/ `resultCache` / `inflight` /
+`failedTasks`（**F1**）/ 计数器（`gamesDoneTotal/ByIter`、`cacheHits/Evicted`、`rejectedCount`、`activeWorkers`、
+`lastError`）→ 只喂 `/v1/status`，面板的贡献度算的是**客户端写的** `dist-agent-meta.jsonl`，live 计数只显示、
+无跨轮 delta 运算 ⇒ **无盲区**；`persistPool` 子进程 → 父进程退出即关掉它们的 stdin 管道 ⇒
+`export-rl-rollout.ts` 的 `stdin.on('end') → process.exit(0)` 自灭，boot 的 `sweepWorkdir()` 另清孤儿
+`game-*`/陈旧 pid；`gameSeq` → 目录名带 pid，重启不碰撞；`codeHashMemo/gitShortMemo` → **F2**；
+`persistFailStreak`/`updating`/`restartPending` → 更宽松的闩，无消费方。
+客户端跨轮、按节点为键的内存态：`_WEIGHTS_PUSHED`（已由 409 自愈 + 节点磁盘回查覆盖）/
+`_RESTART_SEEN` + TS 落盘 memo（**F3**）/ `_ACTIVE`·`_ABORTED_TAGS`（进程内、按轮）/ `DEDUP_STREAK`（日志告警
+计数）。`/v1/ping` **没有**权重字段 ⇒ 客户端从不信节点内存来判权重。
+
+**F1（客户端，`dist_common` + A/C 层）——取包丢失 404 不许当节点故障**：
+`resultCache/failedTasks/inflight` 都是节点进程内状态，agent 一重启即空；轮询 `/v1/result` 得到 404
+（文案明写 `expired/purged/restart`）。旧实现在 A 层按确定性失败记 streak（3 条即 `circuit-broken for this
+round`）并在 C 层按 attempt 打光即 `dropped`（**丢局**）——与 §node-fault-taxonomy 里 409 的错误同族、方向相反。
+- 新增 `dist_common.TASK_LOST_MARKER` + `is_task_lost_error(e)`：判据 = **状态 404 ∧ 文案带标记**（裸 404 =
+  路径写错等客户端 bug，必须继续响亮失败，绝不静默成无限回队）。与 `is_transient_error` **刻意分开**
+  （处置不同：一个回队重跑、一个背压退避），但两层都按「不计节点故障、不耗 attempt 配额」处理。
+- `forget_weights_node(nid, kind=None) -> int`：摘某节点账本（缺省全 kind；给 kind 只摘那条腿）。404 ⇒ 立刻
+  摘该节点这条腿的 reuse 账本——重启同时也意味着它的权重桶可能空了（升级后的节点会靠磁盘回查零重传）。
+- 可达性（精确）：async 只在 `abandon_event`（仅 fanout 竞速副本；副本失败有独立分支静默丢弃）或
+  `DIST_TASK_ASYNC=1` 运维模式；面板 `smoke.ts` 把 404 当「继续轮询」⇒ 重启节点表现为 30s 朦胧超时（诊断噪声）。
+
+**F2（节点侧，`tools/agent/sampler-agent.ts`）——`/v1/update` 不得让节点「报新代码、跑旧代码」**：
+旧实现在 pull 成功后 `codeHashMemo.value = null` / `gitShortMemo.value = null`，而 `/v1/ping` 报的正是
+`memoizedCodeHash()` ⇒ pull 过但**没重启**的节点会以**新 hash** 通过 codeHash 门
+（`dist_common.check_code_hash`）、静默跑启动时那份代码——正是该门要拦的东西的反向漏网。
+- 决定：memo 的**生命周期 = 本进程**，永不因 pull 失效；pull 只留一行响亮日志（新代码重启后生效）。抽
+  `applyPullResult(r)`（导出，供单测钉住不变量），HTTP 分支只调它。要换 hash 只有 `/v1/restart`（可带 pullBranch）。
+- 顺带：`/v1/restart` 分支在 `process.exit(0)` 前显式 `killPersistPool()`——池靠 stdin EOF 自灭，但**忙** worker
+  要跑完当前那局才回到事件循环 ⇒ 旧代码会顶着旧代码继续算一段、把没人消费的 `game-*` 留在盘上。
+
+**F3（`dist_common` + CLI/TS memo）——升级去重从「永久」改成「冷却窗」**：
+旧 `_RESTART_SEEN` 命中即永久 dedup；pull 失败 / 环境不支持远端升级的节点带着**同一个** codeHash 回来 ⇒
+该节点再也收不到升级指令（训练循环里直到训练机有新提交；TS 工具那条腿还把 memo 落盘
+`tmp/node-upgrade-memo.json`，跨调用继续压制）。
+- `RESTART_DEDUP_COOLDOWN_SEC = 600`（env `NN_RESTART_DEDUP_COOLDOWN_S` 可覆盖，0 = 关闭去重）；
+  `_RESTART_SEEN[nid] = (pingHash, expectedHash, at)`；窗内 dedup、**窗过期 ⇒ 允许再发一次并重置时钟**
+  （防连环杀 §2026-09-01 不破）。
+- memo 的时刻要**进判据**：`seed_restart_state` 接受可选 `atSec`（缺省 = 现在 ⇒ 旧调用方语义逐字不变）；
+  CLI spec 新增可选 `cooldown_sec` / `seen[].atSec`；TS 侧 `latestSeenEntries` 把 memo 值（ISO 时刻）换算成
+  `atSec` 一并送过去（**判据仍只在 dist_common**，TS 只送时刻）。`memoAtSec` 先判纯数字再试 ISO——实测
+  `Date.parse('1758300000')` 会给一个毫不相干的日期（2001-05-01），静默把新鲜 memo 变成「一小时前」。
+- A 层 dedup 的 WARN 文案补上冷却窗秒数（运维知道它会自愈，不必手删 memo）。
+
+**证据**：
+- F1 两例行为测试在旧层上实测变红：A 层 `circuit-broken for this round`；C 层 `dropped=2 / games=0`；新实现
+  A 层 `byNode={"a97":2}`、C 层 2/2 结算，且 `forget_weights_node` 被调用、`refreshed == []`（404 不走 409 路径）。
+- F3 行为 A/B（`seed` 一条 1 小时前的 memo）：旧 `(False, 'dedup')` → 新 `(True, 'restart-requested')`。
+- F2 守卫 A/B（HEAD vs 工作区）：`无 memo 置空 false→true`、`restart 前收池 false→true`、`导出 applyPullResult false→true`。
+- 门禁：`nn-python-gate` ✓（ruff/mypy + pytest）· 根 `bun run check` ✓ · `bun run build` ✓ · `freeze:check` ✓。
+
+**代价与影响**：`tools/agent/sampler-agent.ts` **在 codeHash SSOT 内** ⇒ F2 需 **push + 节点升级/重启**才生效；
+F1/F3 是 `nn-training/**`（不在 SSOT）⇒ 无需 push。另：F2 改动期间工作区对 SSOT 变脏 ⇒ 从本仓跑工具会把远端
+判 stale/拒发升级（既有护栏语义），提交后消失；两个 scan 用例顺手钉死「与工作区脏不脏无关」
+（`dirty_hash_files → []`），否则改 `tools/agent/**` 就会把它们弄红（实测）。
+
+**被否方案**：① F1 把 404 并入 `is_transient_error`——措辞与处置都不同，且会让「裸 404 客户端 bug」也变
+静默回队；② F1 只豁免 streak 但照旧耗 attempt——C 层 attempt 打光即 `dropped`，等于照旧丢局；③ F2 让
+`/v1/update` 顺带自重启——把「拉代码」这个可逆操作变成不可逆的杀进程，且 `test-dist-ops --pull` 的语义会变；
+④ F3 把去重彻底删掉——2026-09-01 重启循环事故会回来；⑤ F3 只在 TS 侧按 memo 时间过滤——判据会一分为二。
+
+**已知局限**：① F3 冷却窗是**时间**判据，窗内仍不重发（连续 3 轮 dedup 的 WARN 已在 A 层，TS 工具那条腿只有
+日志行 + 面板 `versionOk=false`）；② F1 只覆盖 async 取包路径（同步路径没有 `/v1/result`，重启表现为连接被
+重置 = 瞬断，已豁免）；③ F2 不做运行中进程的自我重启（要重启请 `/v1/restart`，这条刻意保留人工/协调器触发）。
+
