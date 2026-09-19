@@ -28,7 +28,6 @@ import base64
 import hashlib
 import json
 import os
-import socket
 import subprocess
 import sys
 import threading
@@ -45,6 +44,7 @@ if str(ROOT) not in sys.path:
 from remote import net_http
 from remote.hub_client import mark_job_completed, publish_job, wait_job
 from remote.worker_server import WorkerServerState, make_worker_server
+from tests.subproc_util import spawn_bound_port
 
 #: hub 与 worker 共用的 Bearer（推模式下 worker 的 authKey 就是它）。
 TOKEN = "e2e-sekret"
@@ -57,15 +57,6 @@ _WEIGHTS_JSON = base64.b64encode(
 
 def _quiet(_msg: str) -> None:
     return None
-
-
-def _free_port() -> int:
-    s = socket.socket()
-    try:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-    finally:
-        s.close()
 
 
 def _sha(data: bytes) -> str:
@@ -109,16 +100,6 @@ def _wait_until(pred, *, timeout: float = 30.0, step: float = 0.1) -> bool:
             return True
         time.sleep(step)
     return bool(pred())
-
-
-def _startup_output(proc: subprocess.Popen[str]) -> str:
-    """失败时才读子进程输出（进程还活着时 read() 会阻塞到 EOF）。"""
-    if proc.poll() is None or proc.stdout is None:
-        return ""
-    try:
-        return (proc.stdout.read() or "")[:800]
-    except Exception:  # 诊断路径绝不能再抛
-        return ""
 
 
 # ────────────────────────── 假 GPU worker（真 worker_server 契约） ──────────────────────────
@@ -168,45 +149,49 @@ class _Hub:
     """真 `remote.hub_server` 子进程（控制台实际启动的那条 argv）。"""
 
     def __init__(self, traj_root: Path, push_config: Path, *, extra: list[str] | None = None) -> None:
-        self.port = _free_port()
-        self.base = f"http://127.0.0.1:{self.port}"
-        env = {**os.environ, "PYTHONPATH": str(ROOT)}
-        argv = [
-            sys.executable,
-            "-u",
-            "-m",
-            "remote.hub_server",
-            "--port",
-            str(self.port),
-            "--host",
-            "127.0.0.1",
-            "--token",
-            TOKEN,
-            "--traj-root",
-            str(traj_root),
-            "--discover",
-            "--discover-sec",
-            "0.2",
-            # 锁文件落临时目录：缺省住 nn-training/（会向仓库目录撒 .hub_server.<port>.lock）
-            "--lock-file",
-            str(traj_root / "hub.lock"),
-            "--push",
-            "--push-config",
-            str(push_config),
-            "--push-poll-sec",
-            "0.05",
-            "--race",
-            "off",  # 竞速广播会把同一份活推给两台——本用例要的是 1:1 派发
-            *(extra or []),
-        ]
-        self.proc = subprocess.Popen(
-            argv,
-            cwd=str(ROOT),
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
+        def _argv(port: int) -> list[str]:
+            return [
+                sys.executable,
+                "-u",
+                "-m",
+                "remote.hub_server",
+                "--port",
+                str(port),
+                "--host",
+                "127.0.0.1",
+                "--token",
+                TOKEN,
+                "--traj-root",
+                str(traj_root),
+                "--discover",
+                "--discover-sec",
+                "0.2",
+                # 锁文件落临时目录：缺省住 nn-training/（会向仓库目录撒 .hub_server.<port>.lock）
+                "--lock-file",
+                str(traj_root / "hub.lock"),
+                "--push",
+                "--push-config",
+                str(push_config),
+                "--push-poll-sec",
+                "0.05",
+                "--race",
+                "off",  # 竞速广播会把同一份活推给两台——本用例要的是 1:1 派发
+                *(extra or []),
+            ]
+
+        # 端口竞态由 helper 消化（裸的「探一个端口 → 交给子进程 bind」在 xdist 并行下
+        # 会撞「禁止双监听」当场退出 ⇒ 假红；见 tests/subproc_util.py::spawn_bound_port）
+        srv = spawn_bound_port(
+            _argv, cwd=str(ROOT), env={**os.environ, "PYTHONPATH": str(ROOT)}
         )
+        self.port = srv.port
+        self.proc = srv.proc
+        self.lines = srv.lines
+        self.base = f"http://127.0.0.1:{self.port}"
+
+    def output(self) -> str:
+        """已捕获的子进程输出尾部（诊断用；进程活着也能安全取）。"""
+        return "\n".join(self.lines)[-800:]
 
     def ready(self, *, expect: list[str], timeout: float = 40.0) -> None:
         """/admin/queue 能答 **且**课程表已就位。
@@ -223,7 +208,7 @@ class _Hub:
                 return
             time.sleep(0.1)
         raise AssertionError(
-            f"hub-server 未就绪或课程表不对（rc={self.proc.poll()}）；输出：{_startup_output(self.proc)}"
+            f"hub-server 未就绪或课程表不对（rc={self.proc.poll()}）；输出：{self.output()}"
         )
 
     def queue(self) -> dict:

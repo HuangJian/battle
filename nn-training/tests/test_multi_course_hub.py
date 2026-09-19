@@ -50,6 +50,7 @@ from remote.protocol import (
     race_decision,
     rotation_order,
 )
+from tests.subproc_util import spawn_bound_port
 
 # ------------------------------------------------------------------ 纯函数
 
@@ -742,31 +743,28 @@ def test_discover_adopts_process_state_from_solo_store(tmp_path: Path) -> None:
     assert hub._stores["a"].halt_workers is True, "store 上那份已成历史（不再生效）"
 
 
-def _free_port() -> int:
-    import socket
-
-    s = socket.socket()
-    try:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-    finally:
-        s.close()
-
-
-def _startup_output(proc: object) -> str:
-    """失败时才读子进程输出：子进程**还活着**时 `stdout.read()` 会一直阻塞到 EOF
-    （会把断言消息的构造变成挂起——2026-09-18 实测吃了一个 60s 超时）。
-
-    只在 `assert` 的失败消息里调用（惰性求值），进程已退出时读到的是全部输出。
-    """
-    out = getattr(proc, "stdout", None)
-    poll = getattr(proc, "poll", None)
-    if out is None or (callable(poll) and poll() is None):
-        return ""
-    try:
-        return (out.read() or "")[:400]
-    except Exception:  # 诊断路径绝不能再抛
-        return ""
+def _spawn_hub(port: int, tmp_path: Path) -> list[str]:
+    """控制台实际启动的那条 argv（`--traj-root tmp --discover`）。"""
+    return [
+        sys.executable,
+        "-u",
+        "-m",
+        "remote.hub_server",
+        "--port",
+        str(port),
+        "--host",
+        "127.0.0.1",
+        "--token",
+        "sekret",
+        "--traj-root",
+        str(tmp_path),
+        "--discover",
+        "--discover-sec",
+        "0.2",
+        # 锁文件落临时目录：默认住 nn-training/（会向仓库目录撒 `.hub_server.<port>.lock`）
+        "--lock-file",
+        str(tmp_path / "hub.lock"),
+    ]
 
 
 def test_main_discover_picks_up_course_from_disk(tmp_path: Path) -> None:
@@ -776,37 +774,17 @@ def test_main_discover_picks_up_course_from_disk(tmp_path: Path) -> None:
     ΔHubQueue(discover_root=...) → 后台扫描线程）。接线断了的表现极隐蔽：单测全绿、
     进程也“在跑”，但新开的课**永远**领不到活（轮转表里没有它）。
     """
-    port = _free_port()
-    env = {**os.environ, "PYTHONPATH": str(ROOT)}
-    proc = subprocess.Popen(
-        [
-            sys.executable,
-            "-u",
-            "-m",
-            "remote.hub_server",
-            "--port",
-            str(port),
-            "--host",
-            "127.0.0.1",
-            "--token",
-            "sekret",
-            "--traj-root",
-            str(tmp_path),
-            "--discover",
-            "--discover-sec",
-            "0.2",
-            # 锁文件落临时目录：默认住 nn-training/（会向仓库目录撒 `.hub_server.<port>.lock`）
-            "--lock-file",
-            str(tmp_path / "hub.lock"),
-        ],
+    # 端口竞态由 helper 消化：裸的「探一个端口 → 交给子进程 bind」在 xdist 并行下会撞
+    # 「禁止双监听」当场退出（2026-09-19 pre-commit 实测）⇒ 看着像本用例的假红
+    srv = spawn_bound_port(
+        lambda port: _spawn_hub(port, tmp_path),
         cwd=str(ROOT),
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
+        env={**os.environ, "PYTHONPATH": str(ROOT)},
     )
+    port, proc = srv.port, srv.proc
     base = f"http://127.0.0.1:{port}"
     try:
+        st = 0
         body: dict = {}
         for _ in range(120):  # 就绪 = /admin/queue 能答（Python 冷启动 import 链 ~1s）
             if proc.poll() is not None:
@@ -820,7 +798,7 @@ def test_main_discover_picks_up_course_from_disk(tmp_path: Path) -> None:
             time.sleep(0.25)
         else:
             raise AssertionError(f"hub-server 未在 30s 内就绪（rc={proc.poll()}）")
-        assert st == 200, f"启动失败：{body}；输出：{_startup_output(proc)}"
+        assert st == 200, f"启动失败：{body}；输出：{srv.tail()}"
         assert body["courses"] == {}, "还没有课 ⇒ 空课程表（不是错误）"
 
         # 训练侧发布 job（写盘）= 这门课在跑

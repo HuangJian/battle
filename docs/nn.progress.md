@@ -4,6 +4,33 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §93 测试侧端口竞态：`spawn_bound_port()` 把「探端口 → 子进程 bind」收成一个出口（2026-09-19）
+
+**现象**：R4 提交被 pre-commit 的 nn python gate 拦下，红的是一条与本轮改动**无关**的 e2e ——
+`hub-server 未就绪或课程表不对（rc=1）`；真因（`端口 127.0.0.1:53637 已被占用——拒绝启动`）
+只埋在子进程输出里（gate 的报错摘要里看得见，本地单跑该文件却 2 passed）。
+
+**根因**：`_free_port()` 是「`bind(0)` → `close()` → **交给子进程** bind」的 TOCTOU。串行跑窗口只
+微秒级，但 gate 用 pytest **xdist**：另一个 worker 的探测会拿到刚被释放的同一端口并先绑上
+（窗口 = 另一端 Python 冷启动 ~1s）⇒ 先绑者赢、后绑者被 `remote/_port_guard.py` 拒启。
+
+**修法**（`tests/subproc_util.py::spawn_bound_port()`）：
+
+- 成功判据 = **这个子进程自报** `listening on <host>:<port>`（不是「端口上有人监听」——那可能是
+  别人的服务，最坏会让用例对着陌生 hub 跑完并且通过）；
+- 撞端口的子进程带 `PORT_TAKEN_MARKER` 退出 ⇒ **换端口重试**（默认 5 次）＋ print 一行（重试要可见）；
+- 非端口原因的死法**立刻**抛（重试只该救端口，不该把真 bug 藏成「偶尔红一次」）；
+- 超时既没自报也没退出 ⇒ 当成功（日志文案变了不该变硬失败），就绪判定交回调用方。
+
+**证据**：`tests/test_subproc_util.py` 6 例——真 `remote._port_guard` 子进程驱动「撞端口 → 重试」、
+非端口死法不重试、上限到顶、超时兜底 + `tail()` 可读、守卫文案对齐、**源码守卫**（两个调用点
+不得再出现裸取端口）。全量 gate `1579 passed / 4 skipped`（+6）；`-n 6` 并发复跑相关 5 文件 83 passed × 3
+（**未见重试**——竞态本身稀有，所以靠确定性用例而不是压力测试来证明）。
+
+**顺带**：两个调用点各自那份 `_startup_output()`（「进程活着时 read() 会阻塞到 EOF」的绕行）删除，
+改由 helper 的 reader 线程实时收行 + `BoundServer.tail()` 取尾部——诊断面从「只能在进程死后读」
+变成「随时能读」。
+
 ## §92 启动训练不选 pull/push 模式：传输成为部署事实，课程与 worker 节点正交（2026-09-19）
 
 **一句话**：控制台启动一门课不再问 pull/push/local——**pull 零配置**（hub 在线 + 可选隧道，
