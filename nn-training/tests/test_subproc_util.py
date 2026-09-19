@@ -168,14 +168,94 @@ def test_silent_child_is_accepted_after_timeout_and_tail_reads_output() -> None:
         _reap(srv.proc)
 
 
-def test_call_sites_go_through_the_helper() -> None:
-    """源码守卫：起真服务进程的地方不许再用裸 `_free_port()`（TOCTOU 假红会回来）。"""
-    for rel in (
-        "e2e/test_multi_course_single_hub_e2e.py",
-        "tests/test_multi_course_hub.py",
-    ):
-        src = (ROOT / rel).read_text(encoding="utf-8")
-        assert "spawn_bound_port(" in src, f"{rel} 应走 spawn_bound_port()"
-        assert "_free_port()" not in src, (
-            f"{rel} 里的裸 _free_port() 会重现「探测→子进程 bind」的 TOCTOU 假红"
+def test_child_output_is_decoded_as_utf8_not_console_codepage() -> None:
+    """子进程 stdout 必须显式 utf-8 解码（AGENTS §17.6）——`text=True` 按**控制台代码页**
+    （zh-CN Windows = gbk）解 UTF-8 输出，读线程撞 UnicodeDecodeError 后静默死掉：`lines` 永远
+    为空 ⇒ 自报监听看不见、端口竞争也识别不出（同一根因 2026-09-17 在本仓真实吃过一次）。
+    """
+    code = _code_of("tests/subproc_util.py")
+    body = code[code.index("def spawn_bound_port(") : code.index("def _await_listening(")]
+    assert 'encoding="utf-8"' in body
+    assert 'errors="replace"' in body, "读线程不得因编码而死（乱码也要能认出关键行）"
+    assert "text=True" not in body, "text=True 就是回到控制台代码页解码"
+
+
+def test_child_output_survives_non_ascii_marker() -> None:
+    """端到端：子进程输出中文时 `lines` 拿到的是**原文**（被编码吞掉的话竞争识别会失效）。"""
+    child = (
+        "import sys, time\n"
+        "print('端口 127.0.0.1:1 已被占用——拒绝启动（禁止双监听）', flush=True)\n"
+        "print('listening on 127.0.0.1:99999', flush=True)\n"
+        "while True:\n"
+        "    time.sleep(0.2)\n"
+    )
+    srv = _spawn(lambda port: [sys.executable, "-u", "-c", child], listen_timeout=0.4)
+    try:
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and len(srv.lines) < 2:
+            time.sleep(0.02)
+        assert any(PORT_TAKEN_MARKER in ln for ln in srv.lines), (
+            f"中文输出必须原样收下（编码错误会让它变乱码/空）: {srv.lines}"
         )
+    finally:
+        _reap(srv.proc)
+
+
+#: 凡起真服务进程的测试文件，必须从本模块借端口 —— 自己探端口就会把 TOCTOU 带回来。
+#: 判据用**带引号的 argv 元素**（`"-m", "remote.hub_server"`）：`from remote.worker_server import`
+#: 是进程内用法（bind 紧跟探测、窗口微秒级），不该被这条守卫扫进来。
+_SERVICE_SPAWN_MARKERS = ('"remote.hub_server"', '"remote_worker_serve"', '"remote.worker_server"')
+
+#: 本模块自身与本文（讲原理要引用那个名字）不参与守卫。
+_GUARD_EXEMPT = {"tests/subproc_util.py", "tests/test_subproc_util.py"}
+
+
+def _code_of(rel: str) -> str:
+    """源码**剥掉注释**后的正文。
+
+    防回流尺子必须这样做（R4 已栽过一次）：这些「已退役」的记录恰恰写在注释里，直接扫原文
+    会把「写明它退役了」判成「它还在」（同 `dashboard/tests/push-config.test.ts::code()`）。
+    """
+    src = (ROOT / rel).read_text(encoding="utf-8")
+    return "\n".join(line.split("#", 1)[0] for line in src.splitlines())
+
+
+def _test_files() -> list[str]:
+    """全部测试文件（相对 nn-training/），排除豁免名单。"""
+    out: list[str] = []
+    for layer in ("tests", "e2e"):
+        for p in sorted((ROOT / layer).glob("*.py")):
+            rel = f"{layer}/{p.name}"
+            if rel not in _GUARD_EXEMPT:
+                out.append(rel)
+    assert len(out) > 50, f"测试文件扫得太少（{len(out)}）——路径写错了？"
+    return out
+
+
+def test_no_private_free_port_helper_anywhere() -> None:
+    """源码守卫：测试里不许再出现私有的 `_free_port`（探测 → close 的 TOCTOU 假红会回来）。
+
+    2026-09-19 之前每个文件各写一份，五份副本各自把「探一个端口」交给子进程 bind。
+    端口来源现在只有 `subproc_util.free_port()`；子进程场景必须走 `spawn_bound_port()`
+    （单进程）或 `retry_on_port_stolen()`（多进程抢一个端口）。
+    """
+    for rel in _test_files():
+        code = _code_of(rel)
+        assert "def _free_port" not in code, f"{rel} 又写了一份私有探端口助手——用 subproc_util"
+        assert "_free_port()" not in code, f"{rel} 仍在调用私有 _free_port()"
+
+
+def test_service_spawning_tests_borrow_ports_from_subproc_util() -> None:
+    """源码守卫：起 hub/worker 真进程的测试必须借端口（否则 TOCTOU 假红回来）。"""
+    checked = 0
+    for rel in _test_files():
+        code = _code_of(rel)
+        if not any(m in code for m in _SERVICE_SPAWN_MARKERS):
+            continue
+        checked += 1
+        assert "from tests.subproc_util import" in code, f"{rel} 应借 subproc_util 的端口"
+        assert "spawn_bound_port(" in code or "retry_on_port_stolen(" in code, (
+            f"{rel} 起真服务进程却没用 spawn_bound_port()/retry_on_port_stolen()——"
+            "「探一个端口 → 交给子进程 bind」的竞态会把假红带回来"
+        )
+    assert checked >= 4, f"只扫到 {checked} 个起真进程的文件——标记清单落后于实际？"

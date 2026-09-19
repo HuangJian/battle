@@ -31,6 +31,35 @@
 改由 helper 的 reader 线程实时收行 + `BoundServer.tail()` 取尾部——诊断面从「只能在进程死后读」
 变成「随时能读」。
 
+### 续（同日）：全部取端口点收编——四份私有 `_free_port` 清零，守卫改扫全测试面
+
+仓库里还剩四份私有副本，语义分两档，故出口也定成三个（全在 `tests/subproc_util.py`）：
+
+| 出口 | 适用 | 机制 |
+|---|---|---|
+| `free_port()` | **进程内**探端口（`test_port_guard` / `test_push_bootstrap_teardown`） | bind 紧随探测，窗口微秒级 |
+| `spawn_bound_port()` | **单个**服务子进程（`test_multi_course_hub` / `test_instance_lock` 的顺序双启 / `test_worker_server_lock` / e2e 的 `_Hub`） | 等**这个子进程**自报 listening；撞端口换端口重试 |
+| `retry_on_port_stolen(scenario)` | **多个**进程抢同一端口（两处「三启 ⇒ 恰好一个」） | `scenario(port)` 抛 `PortStolenError` ⇒ 换端口重跑；其余异常原样上抛 |
+
+第三个出口的理由：「三启同时启动」必须让 N 个进程抢**同一个**端口，单进程版用不了；端口若被外人
+抢走则 N 个全灭且输出带占用文案——那是**场景作废**（换端口重跑），不是被测行为不对，既不该报红
+也不该把断言放宽。
+
+**另一个真坑（这次顺手拆掉）**：helper 的子进程 stdout 一开始写 `text=True`——那按**控制台代码页**
+解码（zh-CN Windows = gbk），而服务侧按 `force_utf8_stdio()` 写 UTF-8 ⇒ 读线程撞 UnicodeDecodeError
+静默死掉，`lines` 永远为空 ⇒ 自报监听看不见、端口竞争也识别不出。改成显式
+`encoding="utf-8", errors="replace"`，并加一条源码守卫钉住（`test_child_output_is_decoded_as_utf8_not_console_codepage`）。
+同一个根因 2026-09-17 在本仓吃过一次（`test_instance_lock` / `test_worker_server_lock` 当时被迫用
+`capture_output=True` + bytes + 手动 utf-8 解码）。
+
+**守卫扩面 + 剥注释**：从「2 个文件的点名清单」改成扫全部 `tests/**` + `e2e/**`（剥掉注释后扫，R4 那条
+教训——「已退役」的记录恰恰写在注释里）：① 不许再有私有 `_free_port`；② 凡 argv 里出现
+`"-m"` + `remote.hub_server|remote_worker_serve|remote.worker_server` 的文件必须借端口（用**带引号的
+argv 元素**判定，避免把 `from remote.worker_server import` 这种进程内用法误扫进来）。
+
+**证据**：`tests/test_subproc_util.py` **9 例**；全量 gate `1582 passed / 4 skipped`（+3）；根 `bun run check`
+1868 绿。记录：`DECISIONS.md` §2026-09-19-goalnn-test-port-convergence。
+
 ## §92 启动训练不选 pull/push 模式：传输成为部署事实，课程与 worker 节点正交（2026-09-19）
 
 **一句话**：控制台启动一门课不再问 pull/push/local——**pull 零配置**（hub 在线 + 可选隧道，

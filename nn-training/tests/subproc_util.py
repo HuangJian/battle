@@ -24,7 +24,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeVar
 
 #: 服务进程「端口已被占用」的拒绝文案（`remote/_port_guard.py::ensure_port_free`）。
 #: 不硬编码在调用点：`tests/test_subproc_util.py` 拿真守卫把它钉死。
@@ -35,6 +35,8 @@ SPAWN_PORT_ATTEMPTS = 5
 
 #: 服务自报监听的文案（hub-server / worker-serve 都印这句）。
 _LISTENING_RE = re.compile(r"listening on .*?:(\d+)")
+
+T = TypeVar("T")
 
 
 def run_utf8(cmd: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
@@ -80,6 +82,36 @@ class BoundServer:
     def tail(self, limit: int = 800) -> str:
         """已捕获输出的尾部——诊断消息专用（永不阻塞，进程活着也能调）。"""
         return "\n".join(self.lines)[-limit:]
+
+
+class PortStolenError(Exception):
+    """整个场景作废：端口在探测后被别的进程抢走 —— 换一个端口重跑即可（非被测行为）。"""
+
+
+def retry_on_port_stolen(
+    scenario: Callable[[int], T], *, attempts: int = SPAWN_PORT_ATTEMPTS
+) -> T:
+    """跑 `scenario(port)`；它抛 `PortStolenError` 就换端口重跑（其余异常原样上抛）。
+
+    给「**多个**进程抢同一个端口」这类无法用 `spawn_bound_port()` 表达的场景（典型：三启
+    同时启动、期望恰好一个成为实例）：这类用例必须自己选端口并交给 N 个子进程，选端口的
+    TOCTOU 窗口照样存在。判据由场景自己给：全灭**且**输出里出现 `PORT_TAKEN_MARKER`
+    ⇒ 抛 `PortStolenError`（端口被外人抢走，不是被测行为不对）；其它失败照旧红。
+
+    调用方仍需自己收尸：`scenario` 里已死的进程重跑时会再被 `_kill` 一次（无害）。
+    """
+    for attempt in range(1, attempts + 1):
+        port = free_port()
+        try:
+            return scenario(port)
+        except PortStolenError as e:
+            print(
+                f"[subproc_util] 场景因端口 {port} 被抢而作废（第 {attempt}/{attempts} 次）——{e}",
+                flush=True,
+            )
+    raise AssertionError(
+        f"连续 {attempts} 次都撞上端口竞争（xdist 并行）；若本机有残留 hub/worker 进程请先清理"
+    )
 
 
 class _Drain(threading.Thread):
@@ -132,7 +164,13 @@ def spawn_bound_port(
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
+            # 显式 utf-8 + replace（与 run_utf8 同一条理由，AGENTS §17.6）：服务子进程按
+            # platform_utils.force_utf8_stdio() / PYTHONIOENCODING=UTF-8 写 UTF-8，而
+            # `text=True` 按**控制台代码页**解码（zh-CN Windows = gbk）——中文输出会让读线程
+            # 抛 UnicodeDecodeError 静默死掉（`stdout` 变 None / 此处 `lines` 永远空 ⇒ 自报
+            # 监听看不见、端口竞争也识别不出）。`errors="replace"` 保证读线程绝不因编码而死。
+            encoding="utf-8",
+            errors="replace",
         )
         lines: list[str] = []
         drain = _Drain(proc, lines)
