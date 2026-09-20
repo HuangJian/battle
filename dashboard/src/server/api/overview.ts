@@ -32,7 +32,7 @@ import {
   latestIterFromLedgerTail,
   overviewCourseNames,
 } from '../../web/view'
-import { readLogTail } from './logs'
+import { readLedgerTail } from './logs'
 
 // ────────────────────────── 共享 trainer 存活（「在训」的进程事实） ──────────────────────────
 
@@ -136,11 +136,14 @@ export function invalidateHubAdmin(): void {
 // ────────────────────────── 组装 ──────────────────────────
 
 /** 该课账本尾行的最新轮次（**只认 iteration 事件**；多写者账本见 `latestIterFromLedgerTail`）。
- *  读取量 = 尾部 600 行（约 120 轮），在 5s 快照节奏下可忽略。 */
+ *  读取量 = 尾部 600 行（约 120 轮），在 5s 快照节奏下可忽略。
+ *  必须用 `readLedgerTail`（不截断长行）：`iteration` 事件单行 >500 字符，经
+ *  `readLogTail` 的展示截断后 JSON 不可解析 ⇒ 总览「轮次」列对每门课都恒显 `—`
+ *  （2026-09-20 实测 x20-steady / c6-chip 均为 null）。 */
 export function courseIter(course: string): number | null {
   if (!course) return null
   try {
-    const lines = readLogTail(path.join(REPO_ROOT, 'tmp', course, 'training_log.jsonl'), 600).lines
+    const lines = readLedgerTail(path.join(REPO_ROOT, 'tmp', course, 'training_log.jsonl'), 600)
     return latestIterFromLedgerTail(lines)
   } catch {
     return null

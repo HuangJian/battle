@@ -4446,3 +4446,66 @@ rollout 位置覆盖：courses.x20-steady.rollout_src=local
 `test_it_stream_smoke` 的 I3 断言假红（xdist 下随机）。修法：哑权重内容带**每用例唯一**标记
 （`{"stub": true, "case": <tmp 名>}`）——只有**键不同**才与线程时序无关；reset 保留作双保险。**gate**：nn python 全量 **1859 passed**（ruff + mypy 绿；新增 `tests/test_wire_reroll.py` 17 例：判据/相对阈值/上限/末次不重抽/浪费有界/账行形状/产物不重抽）。
 签入前与 §108（continuous 报告真源）合并复跑：**1863 passed in 34.65s**（ruff/mypy 绿）。
+## §2026-09-20-node-health-by-completed-round-contrib（2026-09-20，用户指令：节点 pill 的贡献数取上一轮**完成**值，健康度按「贡献 vs 并发」重定义）
+
+**背景**：节点 pill 行有两处口径都不对：
+
+1. **贡献数取的是进行中那一轮**——对齐基准 `globalMaxIt` = meta 里所有节点成功结算的**最大 it**。
+   轮次是**逐局结算**的，进行中那一轮的行一直在变多：先交活的节点数字漂亮、还没轮到的显示 0
+   （看着像掉线，而机器完全健康）。
+2. **健康度取的是 ping**——1.5s `/v1/ping` 超时 ⇒ 标「慢 / 离线」。ping 只是**可达性**；
+   「上一轮到底交没交活」才是节点可用性的直接事实。
+
+**决定**：
+
+* **对齐基准轮 = 最近已完成轮**：完成水位 = 同一训练流目录 `training_log.jsonl` 里最后一个
+  `iteration` 事件（训练循环在轮末写，正好是「这一轮账已结清」的判据）。只认 `iteration`——
+  hub 追加的 `job_completed` 也带 `it`，照它取会读出「还没跑完的那一轮」
+  （`latestIterFromLedgerTail` 的既有口径）。
+  安全阀：水位缺失 / 为负 / **在 meta 里没有任何行**（账本与 meta 不同步）⇒ 退化为 meta 最大 it
+  （旧口径）；硬用水位会把**全员**算成 0 贡献，那比退化口径糟得多。
+* **健康度 = 纯函数 `nodeHealth(贡献, 并发)`**：贡献 0（或无池数据 `-1`）⇒ 离线；`≥ 并发` ⇒ 健康；
+  其间 ⇒ 缓慢。pill 行据此三桶（健康 / 缓慢 / 离线，缓慢与离线仍不折叠），**ping 出局**
+  （`NodeView.slow` 保留给 API / 节点统计表，pill 不再消费）。
+* **local（本机直跑）同口径**——它也是一个 rollout 执行面；`rl.local_slots = 0`（直跑未启用）时
+  并入「停用」折叠桶（不再占行内位置）。槽位数仍恒出（§361⑤ 的展示契约不回退）。
+* **并发数前的 `✓` 去掉**（它把「并发数」误读成「在线数」）：并发数恒出，状态词另起一格
+  （`a95 2 缓慢 | 1`）——判据的两个数当场可核对；「停用」仍顶替数字列。
+
+**备选与否决**：
+
+* **用「meta 最大 it − 1」当完成轮**——否：轮次不一定连续（换流 / 重跑 / BC 与 RL 交错），
+  减一可能落在没有行的轮 ⇒ 全员 0 贡献。
+* **时间静默判完成**（最近 N 秒无新行 ⇒ 该轮算完成）——否：阈值是猜的，且慢节点会把
+  「还在跑」读成「已完成」。
+* **按 mode 各取完成水位**（rollout / eval 分开）——否：eval 没有自己的完成事件（它与 PPO 重叠，
+  行会在 `iteration` 之后继续落），分开只会做出一个「更精确但同样在漂」的水位；同基准轮下
+  eval 的尾行会在下一次刷新自然补全。
+* **ping 参与判定**（如「贡献 0 但 ping 通 ⇒ 慢」）——否：那正是本次要消除的混淆
+  （ping 通而零贡献的节点是真没在产出）。
+* **健康节点写字「健康」**——否：绿点 + 并发数已经表达；字只留给异常态（缓慢 / 离线）。
+* **停用节点也显示贡献数**——否：它没在跑，数字只会误导。
+
+**违反后果**：回到「按最大 it 取对齐基准」⇒ 每轮开头那几十秒健康节点集体显示 0，
+操作员去查一台没问题的机器；用 ping 判健康 ⇒ 算力受限 / 网络抖动的节点被反复标红、
+而真正零贡献的节点因 ping 通而看起来正常（本次的起因）；用 `readLogTail`（**展示**口径，
+500 字符截断）读账本 ⇒ `iteration` 单行 >1.2KB，JSON 不可解析 ⇒ 完成水位与总览「轮次」列恒为空。
+
+**顺带修掉的（同一根因）**：`readLogTail` 的 500 字符截断被误用在机器解析上 ⇒ `courseIter`
+对**每一门课**都返回 null（总览「轮次」列恒显 `—`；x20-steady / c6-chip 实测）。新增
+`readLedgerTail`（不截断）并把 `courseIter` 切过去；`readLogTail` 加 `maxLineLen` 参数
+（默认 500 保持展示行为不变）。
+
+**落地**：`core/paths.ts`（`tmpPoolDir()` + `BCITY_POOL_DIR`——完成水位要用**真目录树 + 真账本**
+才能验，夹具写进仓根 tmp/ 会被真实训练流淹没、也会反向污染别的用例的活跃流判定）·
+`server/pool-history.ts`（`lastCompletedIter` / `pickBaseIter` + 对齐基准换水位）·
+`server/api/logs.ts`（`readLogTail(maxLineLen)` + `readLedgerTail`）· `server/api/overview.ts`
+（`courseIter` 走 `readLedgerTail`）· `server/api/snapshot-cache.ts`（池历史**聚合一次**——
+此前同一份数 MB meta 冷算两遍：慢节点判定一遍、贡献数一遍）· `web/view/console-types.ts`
+（`nodeHealth` 纯函数，客户端安全）· `web/app/panels/NodePills.tsx`（三桶 + 去 ✓ + local 折叠 +
+贡献数上非健康 pill）· `web/app/panels/NodeStats.tsx`（陈旧节点 tooltip 与新基准对齐）·
+`web/theme.css`（`.tc-npill__state`）。回归：`tests/web-app-nodepills.test.ts`（14 例，改写为
+贡献口径 + 三态 + local 折叠 + 无 ✓）· `tests/server-pool-history.test.ts`（+5 例：完成水位 e2e、
+无账本退化、安全阀、只认 iteration、`pickBaseIter`）· `tests/server-api-logs.test.ts`
+（+1 例：长行不截断）。**gate**：dashboard **808 pass / 0 fail** · `tsc --noEmit` ·
+oxlint 0 warning · 三份 bundle 构建通过 · 根 `bun run check` 绿。

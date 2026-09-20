@@ -54,6 +54,17 @@ export function logTail(nnRel: string, n = 5): string[] {
 
 // ────────────────────────── 日志查看（§348 补 2） ──────────────────────────
 
+/** 账本（`training_log.jsonl`）尾部**原样**读取：机器解析专用（`latestIterFromLedgerTail`
+ *  等），不做展示用的行长截断。
+ *
+ *  2026-09-20 实测（x20-steady 真实账本）：`iteration` 事件带 wire / model 遥测，单行
+ *  >1.2KB ⇒ `readLogTail` 的 500 字符截断把 JSON 截成 `…`，`JSON.parse` 必失败 ⇒
+ *  `courseIter` 对**每一门课**都返回 null（总览「轮次」列恒显 `—`），完成水位也读不到。
+ *  展示面（日志页）仍走 `readLogTail` 的截断（那正是它的目的，别把长行塞进 DOM）。 */
+export function readLedgerTail(absPath: string, maxLines = 600): string[] {
+  return readLogTail(absPath, maxLines, 512 * 1024, 'all').lines
+}
+
 /** 组件日志解析：静态映射存在 → 用之；否则账本 entry.log → 否则运行时动态查找（§374）：
  *  cloudflared 每次 spawn 生成 cloudflared-<ts>.log（动态文件名），trainingLoop 日志在
  *  tmp/<course>/ 下，清理 tmp 或换课程后静态路径会失效——按组件语义扫 tmp 找最近活跃文件。
@@ -127,6 +138,10 @@ export function readLogTail(
   nnRel: string,
   maxLines: number | 'all' = 200,
   maxBytes = 512 * 1024,
+  /** 行长上限（**展示**用截断，默认 500，带省略号）；`'all'` = 不截断（机器解析用，
+   *  见 `readLedgerTail`）。截断会破坏 JSON —— 账本的 `iteration` 事件带 wire/model
+   *  遥测，单行常超 500 字符。 */
+  maxLineLen: number | 'all' = 500,
 ): {
   lines: string[]
   exists: boolean
@@ -164,7 +179,7 @@ export function readLogTail(
   const out = lines
     .filter((l) => l.length > 0)
     .slice(all ? undefined : -maxLines)
-    .map((l) => (l.length > 500 ? `${l.slice(0, 500)}…` : l))
+    .map((l) => (maxLineLen === 'all' || l.length <= maxLineLen ? l : `${l.slice(0, maxLineLen)}…`))
   // 顶部「共 N 行」要总行数：≤8MB 精确统计（字节计数换行 + 末尾残行），更大返回 null。
   let totalLines: number | null = null
   if (fileSize <= 8 * 1024 * 1024) {

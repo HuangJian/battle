@@ -124,7 +124,7 @@ const poolColumns: Col<NodeHistoryRow>[] = [
       ) : r.lastIter >= 0 && r.globalMaxIt >= 0 ? (
         <span
           className="tc-muted"
-          title={`该节点最近一次成功结算在 it${r.lastIter}，已落后当前 it${r.globalMaxIt}`}
+          title={`该节点在最近完成轮 it${r.globalMaxIt} 无贡献（它最近一次成功结算在 it${r.lastIter}）`}
         >
           0/0
         </span>
@@ -184,7 +184,7 @@ function rowExpand(r: NodeHistoryRow) {
         <div className="tc-muted">本机直跑槽位（rl-config rl.local_slots）</div>
       ) : (
         <div className="tc-muted">
-          最近贡献轮 it{r.lastIter}（全局最新 it{r.globalMaxIt}） · 平均耗时{' '}
+          最近贡献轮 it{r.lastIter}（最近完成轮 it{r.globalMaxIt}） · 平均耗时{' '}
           {secCell(r.avgElapsedSec)} · 机侧墙钟 {secCell(r.avgWallSec)}
         </div>
       )}

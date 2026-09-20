@@ -1927,6 +1927,21 @@ a.tc-preset {
   padding-left: var(--sp-2);
   margin-left: 2px;
 }
+/* 非健康 pill（缓慢/离线/停用）的贡献数不抢眼：状态由 `__state` 词表达，数字只是判据存证
+ * （2026-09-20：健康度改由贡献数判定，缓慢/离线 pill 也要把那个数露出来）。 */
+.tc-npill--off .tc-npill__contrib {
+  color: var(--muted);
+}
+/* 状态词（缓慢/离线）：与并发数并排（判据的两个数都在场，词只做结论）
+ * 2026-09-20 用户指令——健康度 = 最近完成轮贡献 vs 并发数。 */
+.tc-npill__state {
+  font-weight: 600;
+  font-size: var(--fs-2);
+  color: var(--muted);
+}
+.tc-npill--slow .tc-npill__state {
+  color: var(--yellow);
+}
 .tc-npill__edit {
   display: flex;
   gap: 6px;

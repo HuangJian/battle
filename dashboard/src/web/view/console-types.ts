@@ -65,14 +65,33 @@ export interface NodeView {
   concurrency: number
   /** /v1/ping 实时探测；null = 未探测（disabled 时跳过）。 */
   online: boolean | null
-  /** 慢节点（ping 失败但近期仍在成功结算，算力受限）：展示「慢」而非「离线」。
-   *  仅当 online === false 时有意义（在线节点无慢语义）。 */
+  /** 慢节点（ping 失败但近期仍在成功结算，算力受限）：口径 = 「ping 超时 ≠ 掉线」。
+   *  仅当 online === false 时有意义（在线节点无慢语义）。
+   *  **2026-09-20 起 pill 行不再消费它**——健康度改由 `nodeHealth(最近完成轮贡献, 并发数)`
+   *  判定（贡献数是「这台机器上一轮到底交没交活」的直接事实，ping 只是可达性）；
+   *  本字段保留给 API / 节点统计表（`isSlowNode` 仍是服务端口径，见 pool-history）。 */
   slow: boolean
   codeHash: string | null
   cpus: number | null
   busy: boolean
-  /** 上一轮贡献数（全局最新轮下该节点成功局数；-1 = 无池数据）。 */
+  /** 最近**完成**轮贡献数（该轮内该节点成功局数，rollout + eval；-1 = 无池数据）。
+   *  「完成」= 训练账本已写该轮 `iteration` 事件——进行中那一轮的半截计数不算数
+   *  （否则先交活的节点看着健康、还没轮到的看着掉线）。 */
   lastContrib: number
+}
+
+/** 节点健康度（2026-09-20 用户指令：**只由最近完成轮的贡献数**判定，与 ping 探测无关）。
+ *
+ *  · `offline` — 贡献 0（无池数据 -1 同判）⇒ 这一轮它没产出，标红的「离线」
+ *  · `healthy` — 贡献 ≥ 节点并发数 ⇒ 满负荷产出
+ *  · `slow`    — 0 < 贡献 < 并发数 ⇒ 在产出但没吃满并发，标琥珀的「缓慢」
+ *
+ *  纯函数、无 IO：`server/pool-history` 与浏览器 pill 行共用（客户端安全，见 view/index.ts）。 */
+export type NodeHealth = 'healthy' | 'slow' | 'offline'
+
+export function nodeHealth(contrib: number, concurrency: number): NodeHealth {
+  if (!(contrib > 0)) return 'offline'
+  return contrib >= (concurrency >= 1 ? concurrency : 1) ? 'healthy' : 'slow'
 }
 
 export interface NodeLocalView {
@@ -80,7 +99,7 @@ export interface NodeLocalView {
   /** 本机直跑槽数（rl.local_slots）；显式 0 = 直跑未启用（仍出芯片，slots=0）；
    *  配置缺失/非法（NaN）时整个 localNode 缺省不出。 */
   slots: number
-  /** 上一轮贡献数（与节点同口径：全局最新轮下 local 成功局数；-1 = 无池数据）。 */
+  /** 最近**完成**轮贡献数（与节点同口径：该轮内 local 成功局数；-1 = 无池数据）。 */
   lastContrib: number
 }
 

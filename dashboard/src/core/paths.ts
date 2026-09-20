@@ -37,6 +37,15 @@ export const LOG_DIR = path.join(REPO_ROOT, 'tmp')
 export function tmpLogsDir(): string {
   return process.env.BCITY_TMP_LOGS_DIR || LOG_DIR
 }
+/** 池历史（各训练流的 `dist-agent-meta.jsonl`）扫描根。
+ *
+ *  单测以 `BCITY_POOL_DIR` 重定向到临时目录——聚合要用**真目录树 + 真账本**才能验
+ *  「贡献数取最近完成轮」（夹具写进仓根 tmp/ 会被真实训练流淹没，也会反过来污染
+ *  别的用例对活跃流的判定）；默认行为零变化，故**惰性**取值。 */
+export function tmpPoolDir(): string {
+  return process.env.BCITY_POOL_DIR || LOG_DIR
+}
+
 /** 本模块的运行日志目录（tmp/training-start）。 */
 export const START_LOG_DIR = path.join(LOG_DIR, 'training-start')
 /** 监控页热加载元数据文件（变更检测哨兵，实义为最后实际变更时间戳）。 */

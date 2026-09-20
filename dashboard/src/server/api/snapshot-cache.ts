@@ -13,7 +13,7 @@ import {
   type PushFleetProbe,
   parsePhaseFromLog,
 } from '../../web/view'
-import { type NodeHistory, aggregateNodeHistory, isSlowNode } from '../pool-history'
+import { type HistoryAggregate, aggregateNodeHistory, isSlowNode } from '../pool-history'
 import { courseEditFromLedgerTail } from './ledger'
 import { readLogTail } from './logs'
 import { loopCompleteFromLedgerTail } from './loop-complete'
@@ -58,35 +58,32 @@ export const snapshotInFlight = new Map<string, Promise<SlowSnapshot>>()
 
 /** 重算指定课程的慢部件快照（不落缓存；落缓存由 getSlowSnapshot 负责）。 */
 export async function computeSlowSnapshot(cfg: RlConfig, course: string): Promise<SlowSnapshot> {
-  // 先聚合池历史（慢节点判定输入），再并行探测组件/节点——isSlowNode 依据「近期仍在
-  // 成功结算且单局耗时高」把 ping 超时的慢节点与真离线区分开。
-  let histById = new Map<string, NodeHistory>()
+  // 先聚合池历史（慢节点判定 + 上一轮贡献数**同源**），再并行探测组件/节点。
+  // 聚合只做一次：它要全读一份实打实的 meta 账本（实测数 MB），此前这里调了两遍。
+  let agg: HistoryAggregate | null = null
   try {
-    histById = aggregateNodeHistory().hist
+    agg = aggregateNodeHistory()
   } catch {
-    /* 池历史不可用 → 慢节点判定退化为全 false（节点一律按 ping 口径展示） */
+    /* 池历史不可用 → 慢节点判定退化为全 false、贡献数保持 -1 */
   }
   const slowById = new Map<string, boolean>()
-  for (const [id, h] of histById) slowById.set(id, isSlowNode(h))
+  if (agg) for (const [id, h] of agg.hist) slowById.set(id, isSlowNode(h))
   const [components, nodes, pushFleet] = await Promise.all([
     componentViews(cfg, course),
     nodeViews(cfg, slowById),
     probePushFleet(cfg),
   ])
-  // 节点上一轮贡献数（池历史聚合；无数据 = -1）。
+  // 节点最近完成轮贡献数（池历史聚合；无数据 = -1）。
   const contribById = new Map<string, number>()
   // local 节点：只由配置决定（配置缺失/非法才缺省）。池历史不可用只是贡献数拿不到（-1），
   // 不能因此把 local 节点整块吞掉——此前它在 try 里，aggregateNodeHistory() 一抛就丢了。
   const slots = Number(cfg.rl.local_slots)
-  let localNode: NodeLocalView | null =
+  const localNode: NodeLocalView | null =
     Number.isInteger(slots) && slots >= 0 ? { id: 'local', slots, lastContrib: -1 } : null
-  try {
-    const { hist, globalMaxIt } = aggregateNodeHistory()
-    for (const [id, h] of hist) contribById.set(id, globalMaxIt >= 0 ? h.lastIterOk : -1)
-    const localH = hist.get('local')
-    if (localNode) localNode.lastContrib = globalMaxIt >= 0 ? (localH?.lastIterOk ?? 0) : -1
-  } catch {
-    /* 池历史不可用 → 贡献数保持 -1（local 节点仍按配置显示） */
+  if (agg) {
+    for (const [id, h] of agg.hist) contribById.set(id, agg.globalMaxIt >= 0 ? h.lastIterOk : -1)
+    const localH = agg.hist.get('local')
+    if (localNode) localNode.lastContrib = agg.globalMaxIt >= 0 ? (localH?.lastIterOk ?? 0) : -1
   }
   for (const n of nodes) n.lastContrib = contribById.has(n.id) ? contribById.get(n.id)! : -1
   // 当前训练阶段（训练循环日志尾解析）。

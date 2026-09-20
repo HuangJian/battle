@@ -9,14 +9,21 @@
  */
 
 import { describe, expect, it } from 'bun:test'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import {
+  aggregateNodeHistory,
   emptyHistory,
   isSlowNode,
   isSlowNodeRows,
+  lastCompletedIter,
   parseTsMs,
+  pickBaseIter,
   pushWindowSample,
   windowMeanSec,
 } from '../src/server/pool-history'
+import { fmtFullTs } from '../src/web/view'
 
 // ────────────────────────── 节点 pill 行（慢节点/停用/启停 toggle，2026-09-11 用户指令） ──────────────────────────
 describe('pool-history.isSlowNode（慢节点判定：1.5s ping 误报「离线」的根治）', () => {
@@ -86,6 +93,121 @@ describe('pool-history.isSlowNode（慢节点判定：1.5s ping 误报「离线�
     expect(parseTsMs('2026-09-11 11:52:21')).toBe(Date.parse('2026-09-11T11:52:21'))
     expect(parseTsMs(undefined)).toBeNull()
     expect(parseTsMs('garbage')).toBeNull()
+  })
+})
+
+// ────────────────────────── 贡献数取「最近完成轮」（2026-09-20 用户指令） ──────────────────────────
+// 进行中那一轮的半截计数不算数：否则先交活的节点看着健康、还没轮到的看着掉线。
+// 完成水位 = 训练账本的 `iteration` 事件（轮末 rollout + PPO 之后写）。
+
+describe('pool-history · 贡献数取最近完成轮（进行中那一轮不计）', () => {
+  const ts = fmtFullTs(Date.now())
+  const metaRow = (node: string, it: number, mode: 'rollout' | 'eval' = 'rollout') =>
+    JSON.stringify({ node, mode, it, stage: 0, seed: 1, ok: true, elapsedSec: 1, ts })
+  const iterEvent = (it: number) => JSON.stringify({ event: 'iteration', iter: it, time: 'x' })
+
+  /** 一个临时池根 + 一条训练流（meta 与账本不同目录时用 `ledgerDir` 单独指）。 */
+  const withPoolRoot = (
+    flow: { meta: string[]; ledger?: string[] | null; ledgerDir?: string },
+    fn: (root: string) => void,
+  ): void => {
+    const root = mkdtempSync(join(tmpdir(), 'bcity-pool-'))
+    const prev = process.env.BCITY_POOL_DIR
+    process.env.BCITY_POOL_DIR = root
+    try {
+      const dir = join(root, 'flow')
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(join(dir, 'dist-agent-meta.jsonl'), `${flow.meta.join('\n')}\n`, 'utf8')
+      if (flow.ledger) {
+        const ld = flow.ledgerDir ? join(root, flow.ledgerDir) : dir
+        mkdirSync(ld, { recursive: true })
+        writeFileSync(join(ld, 'training_log.jsonl'), `${flow.ledger.join('\n')}\n`, 'utf8')
+      }
+      fn(root)
+    } finally {
+      if (prev === undefined) delete process.env.BCITY_POOL_DIR
+      else process.env.BCITY_POOL_DIR = prev
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+
+  const FLOW = {
+    // it7 是最近完成轮：a1 交 3 局（rollout 2 + eval 1）、a2 交 1 局。
+    // it8 还在跑：a2 已交 5 局、a1 才 1 局——照「最大 it」算就会把 a1 当成快掉线。
+    meta: [
+      metaRow('a1', 7),
+      metaRow('a1', 7),
+      metaRow('a1', 7, 'eval'),
+      metaRow('a2', 7),
+      metaRow('a1', 8),
+      metaRow('a2', 8),
+      metaRow('a2', 8),
+      metaRow('a2', 8),
+      metaRow('a2', 8),
+      metaRow('a2', 8),
+    ],
+    ledger: [iterEvent(5), iterEvent(6), iterEvent(7)],
+  }
+
+  it('对齐基准 = 账本最后一个 iteration（不是 meta 最大 it）；贡献按该轮计', () => {
+    withPoolRoot(FLOW, () => {
+      const agg = aggregateNodeHistory()
+      expect(agg.globalMaxIt).toBe(7)
+      expect(agg.hist.get('a1')!.lastIterOk).toBe(3)
+      expect(agg.hist.get('a2')!.lastIterOk).toBe(1)
+      // 分桶口径同一基准轮：a1 = rollout 2 / eval 1
+      expect(agg.hist.get('a1')!.contribRollout).toBe(2)
+      expect(agg.hist.get('a1')!.contribEval).toBe(1)
+      // 节点自己的「最近一次结算轮」语义不变（它交到哪一轮就是哪一轮）
+      expect(agg.hist.get('a1')!.lastIter).toBe(8)
+    })
+  })
+
+  it('无训练账本（一次性 run 目录）→ 退化为 meta 最大 it（旧口径，行为不变）', () => {
+    withPoolRoot({ ...FLOW, ledger: null }, () => {
+      const agg = aggregateNodeHistory()
+      expect(agg.globalMaxIt).toBe(8)
+      expect(agg.hist.get('a1')!.lastIterOk).toBe(1)
+      expect(agg.hist.get('a2')!.lastIterOk).toBe(5)
+    })
+  })
+
+  it('完成水位在 meta 里没有任何行（账本与 meta 不同步）→ 退回 meta 最大 it，不把全员算成 0', () => {
+    withPoolRoot({ ...FLOW, ledger: [iterEvent(7), iterEvent(9)] }, () => {
+      const agg = aggregateNodeHistory()
+      expect(agg.globalMaxIt).toBe(8)
+      expect(agg.hist.get('a2')!.lastIterOk).toBe(5)
+    })
+  })
+
+  it('lastCompletedIter：只认 iteration 事件（job_completed 带 it 会读出没跑完的那一轮）；缺失 → null', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bcity-pool-'))
+    try {
+      const meta = join(dir, 'dist-agent-meta.jsonl')
+      writeFileSync(meta, `${metaRow('a1', 1)}\n`, 'utf8')
+      expect(lastCompletedIter(meta)).toBeNull() // 有 meta 无账本
+      writeFileSync(
+        join(dir, 'training_log.jsonl'),
+        `${iterEvent(3)}\n${JSON.stringify({ event: 'job_completed', job_id: 'j', it: 4 })}\n`,
+        'utf8',
+      )
+      expect(lastCompletedIter(meta)).toBe(3)
+      // 兼容 meta 落在 <traj root>/traj/ 的布局：账本在父母录
+      const nested = join(dir, 'traj')
+      mkdirSync(nested, { recursive: true })
+      expect(lastCompletedIter(join(nested, 'dist-agent-meta.jsonl'))).toBe(3)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('pickBaseIter：水位缺失/为负/在 meta 里无行 → 退化；否则用水位', () => {
+    const has = (it: number) => it === 7
+    expect(pickBaseIter(7, 8, has)).toBe(7)
+    expect(pickBaseIter(null, 8, has)).toBe(8)
+    expect(pickBaseIter(-1, 8, has)).toBe(8)
+    expect(pickBaseIter(9, 8, () => false)).toBe(8)
+    expect(pickBaseIter(7, -1, has)).toBe(-1) // 空池：无贡献可算（-1 = 无池数据）
   })
 })
 

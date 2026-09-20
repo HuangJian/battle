@@ -12,6 +12,7 @@ import path from 'path'
 import { LOG_DIR, NN_TRAINING } from '../src/core/paths'
 import { api } from './helpers/console-fixture'
 import { configPath } from '../src/core/paths'
+import { latestIterFromLedgerTail } from '../src/web/view'
 import { describe, expect, it } from 'bun:test'
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'fs'
 
@@ -47,6 +48,35 @@ describe('console/log viewer (§348 补 2)', () => {
       expect(api.readLogTail('tmp/no-such-log-xyz.log', 50).totalLines).toBeNull()
     } finally {
       rmSync(p, { force: true })
+    }
+  })
+
+  it('readLedgerTail：长行不截断——iteration 事件带遥测（>500 字符）也能解析出轮次', () => {
+    // 2026-09-20 实测（x20-steady/c6-chip 真实账本）：`iteration` 事件单行 >1.2KB，
+    // 经 readLogTail 的展示截断（`${slice(0,500)}…`）后 JSON 不可解析 ⇒ 总览「轮次」列
+    // 对每门课恒显 `—`、贡献基准轮读不到。账本读法必须原样返回。
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'bcity-ledger-'))
+    const p = path.join(dir, 'training_log.jsonl')
+    const long = JSON.stringify({
+      event: 'iteration',
+      iter: 42,
+      time: '2026-09-20 20:00:57',
+      wire: { protocol: 'http2', edge_ip: '4', pad: 'x'.repeat(900) },
+    })
+    writeFileSync(p, `${long}\n`, 'utf-8')
+    try {
+      expect(long.length).toBeGreaterThan(500)
+      const shown = api.readLogTail(p, 600).lines
+      expect(shown[0]!.endsWith('…')).toBe(true)
+      expect(latestIterFromLedgerTail(shown)).toBeNull() // 展示口径：截断即不可解析（旧 bug 现场）
+      expect(latestIterFromLedgerTail(api.readLedgerTail(p, 600))).toBe(42)
+      // 短行不受影响（两种读法一致）
+      const short = JSON.stringify({ event: 'iteration', iter: 7 })
+      writeFileSync(p, `${short}\n`, 'utf-8')
+      expect(api.readLedgerTail(p, 600)).toEqual([short])
+      expect(api.readLedgerTail(path.join(dir, 'no-such-ledger.jsonl'), 600)).toEqual([])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 

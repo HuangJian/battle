@@ -11,9 +11,11 @@
  */
 
 import { existsSync, readFileSync, readdirSync, statSync } from 'fs'
-import { join } from 'path'
-import { REPO_ROOT } from '../core/paths'
-import { fmtFullTs, stripIsoPrefix } from '../web/view'
+import { dirname, join } from 'path'
+import { REPO_ROOT, tmpPoolDir } from '../core/paths'
+import { fmtFullTs, latestIterFromLedgerTail, stripIsoPrefix } from '../web/view'
+// 直连 api/logs 的文件而非 `../api` 桶：桶经 snapshot-cache 反向 import 本模块（成环）。
+import { readLedgerTail } from './api/logs'
 
 /** 锚点文件：tmp/dist-agent/pool-epoch.txt（毫秒时间戳）。语义（用户 2026-08-31）：
  *  · 部署写入一次 → 历史自此刻起重新累计；
@@ -74,16 +76,16 @@ export interface NodeHistory {
   recent: boolean[]
   /** 该节点自己最近一次成功结算的轮次（-1 = 无成功记录）。 */
   lastIter: number
-  /** 全局最新轮（globalMaxIt）该节点的成功结算局数（rollout + eval 合计）。 */
+  /** 对齐基准轮（globalMaxIt，= 最近**完成**轮）该节点的成功结算局数（rollout + eval 合计）。 */
   lastIterOk: number
   /** 最近一次成功结算的毫秒时刻（null = 从未结算）；isSlowNode 判定用。 */
   lastOkTsMs: number | null
   /** 最近一次成功结算的单局耗时（秒，null = 无样本）；isSlowNode 判定用。 */
   lastOkElapsedSec: number | null
-  /** 全局最新轮 rollout 成功局数（F5，plan/dist-codehash-stale-fix.md：贡献列按
+  /** 对齐基准轮（最近完成轮）rollout 成功局数（F5，plan/dist-codehash-stale-fix.md：贡献列按
    *  mode 分桶——"只跑 eval 的节点"不再看起来在贡献 rollout）。 */
   contribRollout: number
-  /** 全局最新轮 eval 成功局数。 */
+  /** 对齐基准轮（最近完成轮）eval 成功局数。 */
   contribEval: number
 }
 
@@ -119,10 +121,57 @@ export interface ActiveFlow {
 export interface HistoryAggregate {
   hist: Map<string, NodeHistory>
   activeFlow: ActiveFlow | null
-  /** 全局最新轮 = 所有节点成功结算的最大 it（上轮贡献度的对齐基准）。 */
+  /** 上轮贡献度的对齐基准轮 = **最近已完成轮**（训练账本 `iteration` 事件的最后一个，
+   *  见 `lastCompletedIter`）；无完成信号（一次性 run 目录）或该轮在 meta 里没有任何行时
+   *  退化为「meta 里所有节点成功结算的最大 it」（旧口径）。
+   *  名字保留 `globalMaxIt`（调用面用它与节点自己的 `lastIter` 比时效），语义以上行为准。 */
   globalMaxIt: number
   /** 历史锚点毫秒（渲染层展示用）。 */
   epochMs: number
+}
+
+/**
+ * 最近**已完成**轮的水位：同一训练流目录里 `training_log.jsonl` 的最后一个 `iteration`
+ * 事件（只认 iteration —— hub 追加的 `job_completed` 带 it，照它取会读出「还没跑完的那一轮」，
+ * 见 `web/view/course-overview.latestIterFromLedgerTail`）。
+ *
+ * 为什么需要水位：meta 账本是**逐局**追加的，进行中那一轮的行会一直变多——按「最大 it」取
+ * 对齐基准，先交活的节点贡献显示得高、还没跑到的显示 0（看着像掉线），而这台机器其实健康。
+ * 完成水位由训练循环写在轮末（rollout + PPO 之后），正好是「这一轮的账已经结清」的判据。
+ *
+ * 目录取 meta 所在目录（rollout/eval 的 meta 路径 = `<traj root>/dist-agent-meta.jsonl`，
+ * 账本同在 traj root）；再退一层父母录，兼容 meta 落在 `<traj root>/traj/` 的布局。
+ * 读不出（无账本 / 一次性 run 目录 / 坏文件）→ null，调用方按旧口径退化。
+ */
+export function lastCompletedIter(metaAbsPath: string): number | null {
+  const dir = dirname(metaAbsPath)
+  for (const p of [join(dir, 'training_log.jsonl'), join(dirname(dir), 'training_log.jsonl')]) {
+    try {
+      if (!existsSync(p)) continue
+      const it = latestIterFromLedgerTail(readLedgerTail(p, 600))
+      if (it !== null) return it
+    } catch {
+      /* 账本不可读 → 试下一个候选 */
+    }
+  }
+  return null
+}
+
+/**
+ * 对齐基准轮的选取（纯函数，可单测）：
+ *  · 有完成水位、且该轮在 meta 里**确实有行** → 用水位（进行中那一轮不进贡献统计）；
+ *  · 水位缺失/在 meta 里无行/水位为负 → 退化为 meta 最大 it（一次性 run 目录、空池）。
+ *
+ * 「水位在 meta 里无行」这一条是安全阀：账本与 meta 不同步（换了训练流、账本被清）时，
+ * 硬用水位会把**所有**节点算成 0 贡献（全员离线）——那比退化口径糟糕得多。
+ */
+export function pickBaseIter(
+  completedIt: number | null,
+  maxIt: number,
+  hasRowsAt: (it: number) => boolean,
+): number {
+  if (maxIt < 0 || completedIt === null || completedIt < 0) return maxIt
+  return hasRowsAt(completedIt) ? completedIt : maxIt
 }
 
 export function aggregateNodeHistory(): HistoryAggregate {
@@ -156,7 +205,7 @@ export function aggregateNodeHistory(): HistoryAggregate {
     mtimeMs: number
   }
   const candidates: MetaCandidate[] = []
-  const tmpDir = join(REPO_ROOT, 'tmp')
+  const tmpDir = tmpPoolDir()
   const walk = (base: string, rel: string): void => {
     try {
       for (const d of readdirSync(join(base, rel), { withFileTypes: true })) {
@@ -270,12 +319,19 @@ export function aggregateNodeHistory(): HistoryAggregate {
       /* unreadable */
     }
   }
-  // 上轮贡献度修正（2026-09-06，a98 案例）：口径 = globalMaxIt 下各节点成功局数，
+  // 上轮贡献度修正（2026-09-06，a98 案例）：口径 = 对齐基准轮下各节点成功局数，
   // 落后节点计 0（渲染层灰显 + tooltip 给出其最近贡献轮次）。
-  let globalMaxIt = -1
+  let metaMaxIt = -1
   for (const m of okByNodeIt.values()) {
-    for (const it of m.keys()) if (it > globalMaxIt) globalMaxIt = it
+    for (const it of m.keys()) if (it > metaMaxIt) metaMaxIt = it
   }
+  // 对齐基准轮 = 最近**完成**轮（2026-09-20 用户指令：进行中那一轮的半截计数不算数——
+  // 否则先交活的节点看着健康、还没轮到的看着掉线）。无完成信号时退化，见 pickBaseIter。
+  const completedIt = sources.length > 0 ? lastCompletedIter(sources[0]!.path) : null
+  const globalMaxIt = pickBaseIter(completedIt, metaMaxIt, (it) => {
+    for (const m of okByNodeIt.values()) if (m.has(it)) return true
+    return false
+  })
   for (const [node, h] of hist) {
     const m = okByNodeIt.get(node)
     let maxIt = -1
