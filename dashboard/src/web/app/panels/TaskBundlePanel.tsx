@@ -123,10 +123,9 @@ export function TaskBundlePanel({
         </span>
       </header>
 
-      <div
-        className="tc-row"
-        style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}
-      >
+      {/* 行布局用 .tc-line（2026-09-20：此前写 `tc-row` + 内联 flex 补丁 —— `.tc-row` 当时已被
+          StatusRow 的芯片定义静默覆盖，行根本不成行，于是有人用内联 style 就地打了补丁）。 */}
+      <div className="tc-line">
         <button
           type="button"
           className="tc-btn tc-btn--sm"
@@ -155,10 +154,7 @@ export function TaskBundlePanel({
         {info?.log ? <span className="tc-caption">日志 {info.log}</span> : null}
       </div>
 
-      <div
-        className="tc-row"
-        style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}
-      >
+      <div className="tc-line">
         <input
           ref={fileRef}
           type="file"

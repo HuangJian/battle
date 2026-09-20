@@ -1,5 +1,9 @@
-/** MetricsTable.tsx — 抽屉「指标」tab：完整表格 + eval 子行 + 行过滤。
- *  iter 列：无 eval 的主行可点 evalA（课程设计评估 → eval_log，与 Hero 最新 6 轮同路径）。 */
+/** MetricsTable.tsx — 「指标」页：完整表格 + eval 子行 + 行过滤。
+ *  iter 列：无 eval 的主行可点 evalA（课程设计评估 → eval_log，与 Hero 最新 6 轮同路径）。
+ *
+ *  列模型（表头文字 / hover 口径 / 数字对齐）来自 `view/metric-columns.ts` 的**唯一一份**——
+ *  本文件只提供每列的**格子渲染 + 排序键**（`cell`/`sortValue`），不再自己写 label/align/thTitle。
+ *  背景与验收：`DECISIONS.md §2026-09-20-metric-table-single-home`。 */
 
 import { useEffect, useRef, useState } from 'preact/hooks'
 import type { ComponentChildren } from 'preact'
@@ -11,7 +15,7 @@ import {
   fmtPhaseSecs,
   iterGroups,
   klTone,
-  OVERFIT_COL_TITLE,
+  METRIC_COLS,
   overfitCellTitle,
   overfitTone,
   PAIRED_COL_TITLES,
@@ -27,6 +31,7 @@ import {
   type EvalSummary,
   type IterFilter,
   type IterRow,
+  type MetricColKey,
   type PairedCompare,
 } from '../../view'
 import type { ConsoleStateView } from '../../view'
@@ -35,6 +40,15 @@ import { DataTable, type Col } from '../../components/DataTable'
 import { InlineNotice } from '../../components/InlineNotice'
 import { SegmentedControl } from '../../components/SegmentedControl'
 import { ckptForIter, loadCourseCkpts, startEvalA } from '../lib/eval-a'
+
+/** 列模型 → `DataTable` 的列壳（键/表头/对齐/hover 口径）。
+ *
+ *  为什么用展开而不是逐个赋值：`Col` 的这四个字段本来就该由模型独占，展开能保证「模型加一个字段、
+ *  这里自动跟上」，不必两处同步；`key` 也从模型取，顺手保证列 id 与模型键一致。 */
+function colDef(key: MetricColKey): Pick<Col<MetricRow>, 'key' | 'label' | 'align' | 'thTitle'> {
+  const m = METRIC_COLS[key]
+  return { key: m.key, label: m.label, align: m.num ? 'num' : undefined, thTitle: m.title }
+}
 
 /** 显示行 = 主行 | eval 子行 的联合（eval only 时只保留子行，与旧 /pool 语义一致）。 */
 type MetricRow =
@@ -94,28 +108,19 @@ function pairedCols(baselineIter: number | null): Col<MetricRow>[] {
     r.kind === 'eval' ? r.eval.pairedVsFirst : undefined
   return [
     {
-      key: 'b01',
-      label: 'b01',
-      align: 'num',
-      thTitle: PAIRED_COL_TITLES.b01,
+      ...colDef('b01'),
       sortValue: (r) => get(r)?.b01 ?? null,
       cell: (r) =>
         pairedCell(get(r), isBase(r), (c) => <span title={PAIRED_COL_TITLES.b01}>{c.b01}</span>),
     },
     {
-      key: 'b10',
-      label: 'b10',
-      align: 'num',
-      thTitle: PAIRED_COL_TITLES.b10,
+      ...colDef('b10'),
       sortValue: (r) => get(r)?.b10 ?? null,
       cell: (r) =>
         pairedCell(get(r), isBase(r), (c) => <span title={PAIRED_COL_TITLES.b10}>{c.b10}</span>),
     },
     {
-      key: 'pairedP',
-      label: 'p',
-      align: 'num',
-      thTitle: PAIRED_COL_TITLES.p,
+      ...colDef('pairedP'),
       sortValue: (r) => get(r)?.p ?? null,
       cell: (r) =>
         pairedCell(get(r), isBase(r), (c) => (
@@ -128,10 +133,7 @@ function pairedCols(baselineIter: number | null): Col<MetricRow>[] {
         )),
     },
     {
-      key: 'delta',
-      label: 'delta',
-      align: 'num',
-      thTitle: PAIRED_COL_TITLES.delta,
+      ...colDef('delta'),
       sortValue: (r) => get(r)?.deltaPp ?? null,
       cell: (r) =>
         pairedCell(get(r), isBase(r), (c) => (
@@ -146,9 +148,7 @@ function pairedCols(baselineIter: number | null): Col<MetricRow>[] {
 /** 共享列：iter（eval 行旁无 evalA——eval-only 只有 eval 子行）。 */
 function iterCol(ea: EvalACols): Col<MetricRow> {
   return {
-    key: 'iter',
-    label: 'iter',
-    align: 'num',
+    ...colDef('iter'),
     cell: (r) =>
       r.kind === 'main' ? (
         <span style={{ whiteSpace: 'nowrap' }}>
@@ -193,10 +193,7 @@ function iterCol(ea: EvalACols): Col<MetricRow> {
 function skillCols(): Col<MetricRow>[] {
   return [
     {
-      key: 'avgWinTicks',
-      label: '胜局耗时',
-      align: 'num',
-      thTitle: '胜局平均耗时（ticks）',
+      ...colDef('avgWinTicks'),
       cell: (r) =>
         r.kind === 'main' ? (
           r.main.actuals?.avgWinTicks != null ? (
@@ -217,10 +214,7 @@ function skillCols(): Col<MetricRow>[] {
         ),
     },
     {
-      key: 'kills',
-      label: '击杀',
-      align: 'num',
-      thTitle: '歼灭率 = Σ击杀 / Σ关卡敌数',
+      ...colDef('kills'),
       cell: (r) =>
         r.kind === 'main' ? (
           r.main.actuals?.killRate != null ? (
@@ -245,10 +239,7 @@ function skillCols(): Col<MetricRow>[] {
         ),
     },
     {
-      key: 'dmgPerKill',
-      label: '承伤/杀',
-      align: 'num',
-      thTitle: '每杀承伤 / (命数×满血)',
+      ...colDef('dmgPerKill'),
       cell: (r) => {
         const pct = r.kind === 'main' ? r.main.actuals?.dmgPerKillPct : r.eval.dmgPerKillPct
         const abs = r.kind === 'main' ? r.main.actuals?.dmgPerKill : r.eval.dmgPerKill
@@ -264,10 +255,7 @@ function skillCols(): Col<MetricRow>[] {
       },
     },
     {
-      key: 'residualHp',
-      label: '残血',
-      align: 'num',
-      thTitle: '胜局残血 / 该局可支配生命容量',
+      ...colDef('residualHp'),
       cell: (r) => {
         const pct = r.kind === 'main' ? r.main.actuals?.avgResidualHpPct : r.eval.avgResidualHpPct
         const abs = r.kind === 'main' ? r.main.actuals?.avgResidualHp : r.eval.avgResidualHp
@@ -282,10 +270,7 @@ function skillCols(): Col<MetricRow>[] {
       },
     },
     {
-      key: 'loot',
-      label: '道具',
-      align: 'num',
-      thTitle: '每局平均拾取数/掉落数',
+      ...colDef('loot'),
       cell: (r) =>
         r.kind === 'main' ? (
           r.main.actuals ? (
@@ -314,10 +299,7 @@ function skillCols(): Col<MetricRow>[] {
 
 function overfitCol(): Col<MetricRow> {
   return {
-    key: 'overfit',
-    label: '过拟合',
-    align: 'num',
-    thTitle: OVERFIT_COL_TITLE,
+    ...colDef('overfit'),
     sortValue: (r) => (r.kind === 'eval' ? (r.eval.overfitGapPp ?? null) : null),
     cell: (r) => {
       if (r.kind !== 'eval') return <span className="tc-muted">-</span>
@@ -350,13 +332,12 @@ function buildMetricCols(
   baselineIter: number | null,
 ): Col<MetricRow>[] {
   const timeCol: Col<MetricRow> = {
-    key: 'time',
-    label: '时间',
+    ...colDef('time'),
     cell: (r) => <span className="tc-muted">{r.kind === 'main' ? r.main.time : r.eval.time}</span>,
   }
-  const winRateCol = (label: string): Col<MetricRow> => ({
-    key: 'winRate',
-    label,
+  /** 胜率列：两处调用分别是主行「胜率」与 eval 视图「eval 胜率」——两个列键共用一份格子渲染。 */
+  const winRateCol = (key: 'winRate' | 'evalRate'): Col<MetricRow> => ({
+    ...colDef(key),
     cell: (r) =>
       r.kind === 'main' ? (
         <Badge tone={winTone(r.main.winRate)}>{fmtPct(r.main.winRate)}</Badge>
@@ -381,9 +362,7 @@ function buildMetricCols(
       ),
   })
   const scoreCol: Col<MetricRow> = {
-    key: 'scoreMean',
-    label: '得分',
-    align: 'num',
+    ...colDef('scoreMean'),
     cell: (r) =>
       r.kind === 'main' ? (
         r.main.scoreMean.toFixed(4)
@@ -398,21 +377,18 @@ function buildMetricCols(
     return [
       iterCol(ea),
       timeCol,
-      winRateCol('eval 胜率'),
+      winRateCol('evalRate'),
       ...pairedCols(baselineIter),
       overfitCol(),
       ...skillCols(),
       scoreCol,
       {
-        key: 'evalSec',
-        label: '用时',
-        align: 'num',
+        ...colDef('evalSec'),
         cell: (r) =>
           r.kind === 'eval' ? `${r.eval.sec.toFixed(0)}s` : <span className="tc-muted">-</span>,
       },
       {
-        key: 'wver',
-        label: 'wver',
+        ...colDef('wver'),
         cell: (r) =>
           r.kind === 'eval' ? (
             <span className="tc-mono tc-muted tc-small" title={r.eval.wver}>
@@ -428,13 +404,11 @@ function buildMetricCols(
   return [
     iterCol(ea),
     timeCol,
-    winRateCol('胜率'),
+    winRateCol('winRate'),
     overfitCol(),
     ...skillCols(),
     {
-      key: 'phaseSecs',
-      label: 'rollout/ppo/net',
-      align: 'num',
+      ...colDef('phaseSecs'),
       cell: (r) =>
         r.kind === 'main' ? (
           <span title={phaseSecsTitle(phaseSecs(r.main))}>{fmtPhaseSecs(phaseSecs(r.main))}</span>
@@ -453,8 +427,7 @@ function buildMetricCols(
 function klEntropyCols(): Col<MetricRow>[] {
   return [
     {
-      key: 'kl',
-      label: 'KL',
+      ...colDef('kl'),
       cell: (r) =>
         r.kind === 'main' ? (
           <Badge tone={klTone(r.main.kl)}>{r.main.kl.toFixed(4)}</Badge>
@@ -463,15 +436,12 @@ function klEntropyCols(): Col<MetricRow>[] {
         ),
     },
     {
-      key: 'entropy',
-      label: 'entropy',
-      align: 'num',
+      ...colDef('entropy'),
       cell: (r) =>
         r.kind === 'main' ? r.main.entropy.toFixed(3) : <span className="tc-muted">-</span>,
     },
     {
-      key: 'meanRet',
-      label: 'mean_ret',
+      ...colDef('meanRet'),
       cell: (r) =>
         r.kind === 'main' ? (
           <Badge tone={retTone(r.main.meanRet)}>{r.main.meanRet.toFixed(3)}</Badge>
@@ -480,9 +450,7 @@ function klEntropyCols(): Col<MetricRow>[] {
         ),
     },
     {
-      key: 'lr',
-      label: 'lr',
-      align: 'num',
+      ...colDef('lr'),
       cell: (r) => (r.kind === 'main' ? r.main.lr.toFixed(6) : <span className="tc-muted">-</span>),
     },
   ]
@@ -624,7 +592,7 @@ export function MetricsTable({
     }
   }
   return (
-    <div className="tc-drawer__panel">
+    <div className="tc-panelbody">
       {flash ? <InlineNotice>{flash}</InlineNotice> : null}
       <DataTable<MetricRow>
         rows={display}

@@ -316,7 +316,7 @@ export function EvalSummary({
             · 行 = B 层 iter · 列 = rung×指标（{course || '当前课程'}）
           </span>
         </h2>
-        <div className="tc-row tc-small">
+        <div className="tc-line tc-small">
           <label>
             iter{' '}
             <select

@@ -21,11 +21,22 @@ import type { ConsoleStateView } from './console-types'
 /** 本 bundle 内的页面键（/eval 与 /log 是独立页，不在此列）。 */
 export type PageKey = 'overview' | 'metrics' | 'nodes' | 'wire'
 
+/** **全部成页**的页面键 = 控制台四页 + 两个独立页（/eval · /log，各自 bundle）。
+ *
+ *  为什么与 PageKey 分开：独立页不参与本 bundle 的客户端路由（`pageForPath` 对它们返回
+ *  null，点击不拦截、走真链接），但它们**同样需要一份页面元信息**——外壳（`Topbar`）
+ *  的「本页 + 这一页回答什么问题」是全部页面共用的契约，否则独立页只能把标题写成散落
+ *  在组件里的字符串字面量，两处描述同一页迟早不一致。
+ *
+ *  用途分工：路由判定只用 `PageKey`（窄的，保证 `bootstrapPage` 不可能返回独立页）；
+ *  元信息查询与外壳渲染用 `AnyPageKey`（宽的）。 */
+export type AnyPageKey = PageKey | 'eval' | 'log'
+
 /** 侧栏分组 id（渲染顺序 = 数组顺序）。 */
 export type NavGroupId = 'monitor' | 'infra'
 
 export interface PageMeta {
-  key: PageKey
+  key: AnyPageKey
   /** 页面标题（Topbar 主标题 + 侧栏标签的完整形态）。 */
   title: string
   /** 这一页回答的问题（Topbar 副标题；"一页一个问题"的可视化契约）。 */
@@ -52,8 +63,10 @@ export interface NavItem {
 
 // ────────────────────────── 页面表 ──────────────────────────
 
-/** 页面元信息（顺序 = Topbar 无关；渲染顺序由 NAV_GROUPS/NAV_ITEMS 决定）。 */
-export const PAGES: Readonly<Record<PageKey, PageMeta>> = {
+/** 页面元信息（顺序 = Topbar 无关；渲染顺序由 NAV_GROUPS/NAV_ITEMS 决定）。
+ *
+ *  含两个独立页（eval / log）：它们的 Topbar 与侧栏条目必须和四页读同一份元信息。 */
+export const PAGES: Readonly<Record<AnyPageKey, PageMeta>> = {
   overview: {
     key: 'overview',
     title: '总览',
@@ -77,6 +90,19 @@ export const PAGES: Readonly<Record<PageKey, PageMeta>> = {
     title: '传输',
     desc: '每轮实发/实收多少？隧道哪条快？',
     path: '/wire',
+  },
+  // ── 独立页（各自 bundle，由服务端整页服务；只取元信息，不参与本 bundle 路由） ──
+  eval: {
+    key: 'eval',
+    title: '评估',
+    desc: '阶梯练到哪一级了？这次评估能不能信？',
+    path: '/eval',
+  },
+  log: {
+    key: 'log',
+    title: '日志',
+    desc: '这个组件刚才到底报了什么？',
+    path: '/log',
   },
 }
 
@@ -199,8 +225,8 @@ export function pageForPath(pathname: string): PageKey | null {
   return null
 }
 
-/** 页面键 → 规范路径。 */
-export function canonicalPath(page: PageKey): string {
+/** 页面键 → 规范路径（独立页同样可查：`canonicalPath('eval') === '/eval'`）。 */
+export function canonicalPath(page: AnyPageKey): string {
   return PAGES[page].path
 }
 

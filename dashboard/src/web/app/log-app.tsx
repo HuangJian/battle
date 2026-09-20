@@ -23,6 +23,9 @@ import {
   type TrainingLogEvent,
 } from '../view'
 import { usePolling } from './lib/usePolling'
+import { Shell } from './shell/Shell'
+import { NavSidebar } from './shell/NavSidebar'
+import { Topbar } from './shell/Topbar'
 import { fetchLog } from './lib/api-client'
 import { SegmentedControl } from '../components/SegmentedControl'
 
@@ -223,226 +226,237 @@ export function LogApp({ initial, options }: LogAppProps) {
   const label = payload.label
 
   return (
-    <div className="tc-wrap tc-logwrap">
-      {/* ── 顶卡：标题 + 文件元信息 + 返回 ── */}
-      <header className="tc-loghead">
-        <span
-          className={`tc-loghead__dot${exists ? ' tc-loghead__dot--live' : ''}`}
-          aria-hidden="true"
+    <Shell
+      sidebar={<NavSidebar activePath="/log" course={course} />}
+      topbar={
+        <Topbar
+          page="log"
+          stateView={null}
+          phaseElapsedMs={null}
+          trainingCount={0}
+          courseCount={0}
+          nodeSummary={null}
+          onRefreshNow={() => void refetch()}
         />
-        <h1>
-          组件日志 <span className="tc-loghead__sep">/</span>
-          <span className="tc-loghead__comp">{label}</span>
-        </h1>
-        <div className="tc-loghead__meta">
-          {meta ? (
-            <code className="tc-logpath" title={meta}>
-              {meta}
-            </code>
-          ) : null}
-          {exists ? (
-            <span
-              className="tc-chip"
-              title={payload.totalLines == null ? '文件过大，行数按已读窗口展示' : '文件总行数'}
-            >
-              共{' '}
-              <b>
-                {payload.totalLines != null
-                  ? payload.totalLines
-                  : payload.truncated
-                    ? `>${counts.total}`
-                    : counts.total}
-              </b>{' '}
-              行{payload.totalLines == null && payload.truncated ? '（窗口内）' : ''}
-            </span>
-          ) : null}
-          {exists ? (
-            <span className="tc-chip tc-chip--muted">{formatBytes(payload.fileSize)}</span>
-          ) : null}
-          {payload.truncated ? (
-            <span
-              className="tc-chip tc-chip--amber"
-              title={
-                lines === 'all' ? '文件过大，仅显示尾部 4MB 字节窗口' : `仅显示尾部 ${lines} 行`
-              }
-            >
-              {lines === 'all' ? '已截断·尾部窗口' : `已截断·尾部 ${lines} 行`}
-            </span>
-          ) : null}
-          {exists && payload.updatedAt ? (
-            <span className="tc-chip tc-chip--time" title="服务端取数时刻">
-              更新于 <b>{fmtTs(payload.updatedAt, payload.updatedAt)}</b>
-            </span>
-          ) : null}
-        </div>
-        <a
-          className="tc-btn tc-btn--sm tc-loghead__back"
-          href={`/${course ? `?course=${encodeURIComponent(course)}` : ''}`}
-        >
-          ← 返回控制台
-        </a>
-      </header>
-
-      {/* ── 吸顶工具栏：导航 + follow + 尾行数 + 搜索 + 级别 ── */}
-      <div className="tc-logtool">
-        <nav className="tc-logtool__nav" aria-label="组件">
-          {options.components.map((c) => (
-            <a
-              key={c.key}
-              className={`tc-lognav${c.key === payload.component ? ' tc-lognav--on' : ''}`}
-              href={`/log/${c.key}${course ? `?course=${encodeURIComponent(course)}` : ''}`}
-            >
-              <span className={statusDot(c.status)} />
-              {c.label}
-            </a>
-          ))}
-        </nav>
-        <div className="tc-logtool__right">
-          {/* 暂停提示与「过滤日志」同排（§373 修订：勿放 nav 前，会把组件 chips 挤到提示后） */}
-          {!pinned && follow ? (
-            <span
-              className="tc-logpause"
-              role="status"
-              title="上滚读历史时自动暂停跟随；滚回底部或点直达底部恢复"
-            >
-              已暂停跟随 · 正在读历史
-            </span>
-          ) : null}
-          <span className="tc-logtool__search">
-            <span className="tc-logtool__search-icon" aria-hidden="true">
-              ⌕
-            </span>
-            <input
-              ref={searchRef}
-              id="tclog-search"
-              type="text"
-              placeholder="过滤日志…"
-              aria-label="过滤日志（/ 聚焦，Esc 清空）"
-              value={query}
-              onInput={(e) => setQuery((e.target as HTMLInputElement).value)}
-            />
-            {query ? (
-              <button
-                type="button"
-                className="tc-logtool__clear"
-                aria-label="清空搜索"
-                onClick={() => setQuery('')}
-              >
-                ✕
-              </button>
-            ) : null}
-          </span>
-          <SegmentedControl<LevelFilter>
-            value={level}
-            ariaLabel="级别过滤"
-            options={[
-              { value: 'all', label: `全部 ${counts.total}` },
-              { value: 'error', label: `错误 ${counts.error}` },
-              { value: 'warn', label: `警告 ${counts.warn}` },
-            ]}
-            onChange={setLevel}
+      }
+    >
+      <div className="tc-logwrap">
+        {/* ── 顶卡：文件元信息（页名与导航已由外壳承担，2026-09-20） ── */}
+        <header className="tc-loghead">
+          <span
+            className={`tc-loghead__dot${exists ? ' tc-loghead__dot--live' : ''}`}
+            aria-hidden="true"
           />
-          <label className="tc-toggle tc-toggle--sm">
-            <input
-              type="checkbox"
-              id="follow"
-              checked={follow}
-              onChange={(e) => setFollow((e.target as HTMLInputElement).checked)}
-            />
-            <span>{follow ? '跟随中 2s' : '自动刷新 4s'}</span>
-          </label>
-          <label className="tc-logtool__lines">
-            尾行
-            <select
-              id="lines"
-              className="tc-sel"
-              value={String(lines)}
-              onChange={(e) => {
-                const v = (e.target as HTMLSelectElement).value
-                setLines(v === 'all' ? 'all' : Number(v) || 200)
-              }}
-            >
-              {LINES_OPTIONS.map((n) => (
-                <option key={n} value={n}>
-                  {n}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button
-            type="button"
-            className={`tc-logbtn${pinned ? ' tc-logbtn--bottom' : ''}`}
-            aria-label={pinned ? '已到底部' : '直达底部'}
-            disabled={pinned}
-            onClick={scrollToBottom}
-          >
-            <span className="tc-logbtn__icon">↓</span>
-            {pinned ? '已到底部' : '直达底部'}
-            {!pinned && arrivals > 0 ? <span className="tc-logbtn__badge">+{arrivals}</span> : null}
-          </button>
-          {!exists ? <span className="tc-chip tc-chip--red">文件不存在</span> : null}
-        </div>
-      </div>
+          <div className="tc-loghead__title">
+            组件日志 <span className="tc-loghead__sep">/</span>
+            <span className="tc-loghead__comp">{label}</span>
+          </div>
+          <div className="tc-loghead__meta">
+            {meta ? (
+              <code className="tc-logpath" title={meta}>
+                {meta}
+              </code>
+            ) : null}
+            {exists ? (
+              <span
+                className="tc-chip"
+                title={payload.totalLines == null ? '文件过大，行数按已读窗口展示' : '文件总行数'}
+              >
+                共{' '}
+                <b>
+                  {payload.totalLines != null
+                    ? payload.totalLines
+                    : payload.truncated
+                      ? `>${counts.total}`
+                      : counts.total}
+                </b>{' '}
+                行{payload.totalLines == null && payload.truncated ? '（窗口内）' : ''}
+              </span>
+            ) : null}
+            {exists ? (
+              <span className="tc-chip tc-chip--muted">{formatBytes(payload.fileSize)}</span>
+            ) : null}
+            {payload.truncated ? (
+              <span
+                className="tc-chip tc-chip--amber"
+                title={
+                  lines === 'all' ? '文件过大，仅显示尾部 4MB 字节窗口' : `仅显示尾部 ${lines} 行`
+                }
+              >
+                {lines === 'all' ? '已截断·尾部窗口' : `已截断·尾部 ${lines} 行`}
+              </span>
+            ) : null}
+            {exists && payload.updatedAt ? (
+              <span className="tc-chip tc-chip--time" title="服务端取数时刻">
+                更新于 <b>{fmtTs(payload.updatedAt, payload.updatedAt)}</b>
+              </span>
+            ) : null}
+          </div>
+        </header>
 
-      {/* ── 日志体 ── */}
-      <div className="tc-logpanel">
-        <div className="tc-logpanel__hd">
-          <span className="tc-logpanel__dots" aria-hidden="true">
-            <i />
-            <i />
-            <i />
-          </span>
-          <span className="tc-logpanel__file">{meta || '（无日志文件）'}</span>
-          {exists ? (
-            <span className="tc-logpanel__live" aria-hidden="true">
-              <i />
-              {follow ? 'LIVE' : 'refresh 4s'}
+        {/* ── 吸顶工具栏：导航 + follow + 尾行数 + 搜索 + 级别 ── */}
+        <div className="tc-logtool">
+          <nav className="tc-logtool__nav" aria-label="组件">
+            {options.components.map((c) => (
+              <a
+                key={c.key}
+                className={`tc-lognav${c.key === payload.component ? ' tc-lognav--on' : ''}`}
+                href={`/log/${c.key}${course ? `?course=${encodeURIComponent(course)}` : ''}`}
+              >
+                <span className={statusDot(c.status)} />
+                {c.label}
+              </a>
+            ))}
+          </nav>
+          <div className="tc-logtool__right">
+            {/* 暂停提示与「过滤日志」同排（§373 修订：勿放 nav 前，会把组件 chips 挤到提示后） */}
+            {!pinned && follow ? (
+              <span
+                className="tc-logpause"
+                role="status"
+                title="上滚读历史时自动暂停跟随；滚回底部或点直达底部恢复"
+              >
+                已暂停跟随 · 正在读历史
+              </span>
+            ) : null}
+            <span className="tc-logtool__search">
+              <span className="tc-logtool__search-icon" aria-hidden="true">
+                ⌕
+              </span>
+              <input
+                ref={searchRef}
+                id="tclog-search"
+                type="text"
+                placeholder="过滤日志…"
+                aria-label="过滤日志（/ 聚焦，Esc 清空）"
+                value={query}
+                onInput={(e) => setQuery((e.target as HTMLInputElement).value)}
+              />
+              {query ? (
+                <button
+                  type="button"
+                  className="tc-logtool__clear"
+                  aria-label="清空搜索"
+                  onClick={() => setQuery('')}
+                >
+                  ✕
+                </button>
+              ) : null}
             </span>
-          ) : null}
-          <span className="tc-logpanel__count">
-            {query || level !== 'all'
-              ? `${shown.length} / ${counts.total} 行`
-              : `${counts.total} 行`}
-          </span>
+            <SegmentedControl<LevelFilter>
+              value={level}
+              ariaLabel="级别过滤"
+              options={[
+                { value: 'all', label: `全部 ${counts.total}` },
+                { value: 'error', label: `错误 ${counts.error}` },
+                { value: 'warn', label: `警告 ${counts.warn}` },
+              ]}
+              onChange={setLevel}
+            />
+            <label className="tc-toggle tc-toggle--sm">
+              <input
+                type="checkbox"
+                id="follow"
+                checked={follow}
+                onChange={(e) => setFollow((e.target as HTMLInputElement).checked)}
+              />
+              <span>{follow ? '跟随中 2s' : '自动刷新 4s'}</span>
+            </label>
+            <label className="tc-logtool__lines">
+              尾行
+              <select
+                id="lines"
+                className="tc-sel"
+                value={String(lines)}
+                onChange={(e) => {
+                  const v = (e.target as HTMLSelectElement).value
+                  setLines(v === 'all' ? 'all' : Number(v) || 200)
+                }}
+              >
+                {LINES_OPTIONS.map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              className={`tc-logbtn${pinned ? ' tc-logbtn--bottom' : ''}`}
+              aria-label={pinned ? '已到底部' : '直达底部'}
+              disabled={pinned}
+              onClick={scrollToBottom}
+            >
+              <span className="tc-logbtn__icon">↓</span>
+              {pinned ? '已到底部' : '直达底部'}
+              {!pinned && arrivals > 0 ? (
+                <span className="tc-logbtn__badge">+{arrivals}</span>
+              ) : null}
+            </button>
+            {!exists ? <span className="tc-chip tc-chip--red">文件不存在</span> : null}
+          </div>
         </div>
-        <div
-          id="logbox"
-          ref={boxRef}
-          className="tc-logbox"
-          onScroll={onScroll}
-          aria-label={`${label} 日志内容`}
-          tabIndex={0}
-        >
-          {!exists ? (
-            <div className="tc-logempty">
-              <span className="tc-logempty__icon">🗂</span>
-              <p>
-                日志文件不存在——组件可能从未启动。
-                <br />
-                <span className="tc-muted">启动对应组件后日志会自动出现。</span>
-              </p>
-            </div>
-          ) : shown.length === 0 ? (
-            <div className="tc-logempty">
-              <span className="tc-logempty__icon">🔍</span>
-              <p>
-                无匹配行
-                <br />
-                <span className="tc-muted">换个关键词或放宽级别过滤。</span>
-              </p>
-            </div>
-          ) : (
-            shown.map((r) =>
-              r.ev ? (
-                <TrainingRow key={r.i} idx={r.i + 1} ev={r.ev} hasError={r.ev.hasError} />
-              ) : (
-                <LogRow key={r.i} idx={r.i + 1} pl={r.pl} text={r.line} query={query} />
-              ),
-            )
-          )}
+
+        {/* ── 日志体 ── */}
+        <div className="tc-logpanel">
+          <div className="tc-logpanel__hd">
+            <span className="tc-logpanel__dots" aria-hidden="true">
+              <i />
+              <i />
+              <i />
+            </span>
+            <span className="tc-logpanel__file">{meta || '（无日志文件）'}</span>
+            {exists ? (
+              <span className="tc-logpanel__live" aria-hidden="true">
+                <i />
+                {follow ? 'LIVE' : 'refresh 4s'}
+              </span>
+            ) : null}
+            <span className="tc-logpanel__count">
+              {query || level !== 'all'
+                ? `${shown.length} / ${counts.total} 行`
+                : `${counts.total} 行`}
+            </span>
+          </div>
+          <div
+            id="logbox"
+            ref={boxRef}
+            className="tc-logbox"
+            onScroll={onScroll}
+            aria-label={`${label} 日志内容`}
+            tabIndex={0}
+          >
+            {!exists ? (
+              <div className="tc-logempty">
+                <span className="tc-logempty__icon">🗂</span>
+                <p>
+                  日志文件不存在——组件可能从未启动。
+                  <br />
+                  <span className="tc-muted">启动对应组件后日志会自动出现。</span>
+                </p>
+              </div>
+            ) : shown.length === 0 ? (
+              <div className="tc-logempty">
+                <span className="tc-logempty__icon">🔍</span>
+                <p>
+                  无匹配行
+                  <br />
+                  <span className="tc-muted">换个关键词或放宽级别过滤。</span>
+                </p>
+              </div>
+            ) : (
+              shown.map((r) =>
+                r.ev ? (
+                  <TrainingRow key={r.i} idx={r.i + 1} ev={r.ev} hasError={r.ev.hasError} />
+                ) : (
+                  <LogRow key={r.i} idx={r.i + 1} pl={r.pl} text={r.line} query={query} />
+                ),
+              )
+            )}
+          </div>
         </div>
       </div>
-    </div>
+    </Shell>
   )
 }
 

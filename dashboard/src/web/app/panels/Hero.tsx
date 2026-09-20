@@ -3,6 +3,8 @@
  *  数据口径 = /api/state.metrics；「完整指标表 ›」进抽屉。 */
 
 import {
+  colsOf,
+  EVAL_ROW_KEYS,
   filterGroups,
   fmtLootPickDrop,
   fmtPaired,
@@ -13,8 +15,8 @@ import {
   iterGroups,
   klTone,
   latestRow,
+  MAIN_ROW_KEYS,
   metricSeries,
-  OVERFIT_COL_TITLE,
   overfitCellTitle,
   overfitTone,
   PAIRED_COL_TITLES,
@@ -31,6 +33,7 @@ import {
   type ConsoleStateView,
   type EvalCkptFile,
   type IterRow,
+  type MetricCol,
   type PairedReferee,
   type Series,
   type TrendRange,
@@ -42,6 +45,7 @@ import { InlineNotice } from '../../components/InlineNotice'
 import { ckptForIter, loadCourseCkpts, startEvalA } from '../lib/eval-a'
 import { ReplayExportModal } from './ReplayExportModal'
 import { useEffect, useRef, useState } from 'preact/hooks'
+import type { JSX } from 'preact'
 
 export interface HeroProps {
   stateView: ConsoleStateView | null
@@ -177,6 +181,18 @@ function PairedRefereeLine({ ref }: { ref: PairedReferee | null | undefined }) {
 
 /** 按 iter 解析权重路径 → 见 lib/eval-a.ts */
 
+/** 表头单元格：列模型 → `<th>`。`num` 一个字段同时管右对齐与 tabular-nums（两位一体）。
+ *
+ *  两张表共用它，表头文字/口径文案/列数全部来自 `view/metric-columns.ts`——本文件不再出现
+ *  任何表头字面量（此前 15 个 `<th>` 是手写的，与 `/metrics` 那套各写一遍）。 */
+function colHead(c: MetricCol): JSX.Element {
+  return (
+    <th key={c.key} className={c.num ? 'tc-num' : undefined} title={c.title}>
+      {c.label}
+    </th>
+  )
+}
+
 /** 主行视图：最新 6 轮完整指标。非 eval 轮可手动启动 evalA（课程 A 层，完成后回填）。 */
 function MainTable({
   rows,
@@ -195,36 +211,9 @@ function MainTable({
 }) {
   return (
     <table className="tc-table tc-table--dense">
+      {/* 表头从列模型取（view/metric-columns.ts）——两处表格不许再各写一份表头字面量。 */}
       <thead>
-        <tr>
-          <th>iter</th>
-          <th>时间</th>
-          <th>胜率</th>
-          <th>eval</th>
-          <th className="tc-num" title="胜局平均耗时（ticks）">
-            胜局耗时
-          </th>
-          <th className="tc-num" title="歼灭率 = Σ击杀 / Σ关卡敌数">
-            击杀
-          </th>
-          <th className="tc-num" title="每杀承伤 / (命数×满血)；越小越会周旋">
-            承伤/杀
-          </th>
-          <th className="tc-num" title="胜局残血 / 该局可支配生命容量">
-            残血
-          </th>
-          <th className="tc-num" title="每局平均拾取数/掉落数">
-            道具
-          </th>
-          <th className="tc-num" title="rollout 纯采集 / ppo 真训练 / net 网络·排队">
-            rollout/ppo/net
-          </th>
-          <th className="tc-num">得分</th>
-          <th>KL</th>
-          <th className="tc-num">熵</th>
-          <th>mean_ret</th>
-          <th className="tc-num">lr</th>
-        </tr>
+        <tr>{colsOf(MAIN_ROW_KEYS).map(colHead)}</tr>
       </thead>
       <tbody>
         {rows.map((r) => (
@@ -346,50 +335,16 @@ function EvalTable({ rows }: { rows: IterRow[] }) {
   const baseIter = pairedBaselineOf(rows.map((r) => r.evalData?.pairedVsFirst))
   return (
     <table className="tc-table tc-table--dense">
+      {/* 表头从列模型取（与 /metrics 的 eval 模式同一份顺序与口径）。 */}
       <thead>
-        <tr>
-          <th>iter</th>
-          <th>时间</th>
-          <th>eval 胜率</th>
-          <th className="tc-num" title={PAIRED_COL_TITLES.b01}>
-            b01
-          </th>
-          <th className="tc-num" title={PAIRED_COL_TITLES.b10}>
-            b10
-          </th>
-          <th className="tc-num" title={PAIRED_COL_TITLES.p}>
-            p
-          </th>
-          <th className="tc-num" title={PAIRED_COL_TITLES.delta}>
-            delta
-          </th>
-          <th className="tc-num" title={OVERFIT_COL_TITLE}>
-            过拟合
-          </th>
-          <th className="tc-num" title="胜局平均耗时（ticks）">
-            胜局耗时
-          </th>
-          <th className="tc-num" title="歼灭率 = Σ击杀 / Σ关卡敌数">
-            击杀
-          </th>
-          <th className="tc-num" title="每杀承伤 / (命数×满血)">
-            承伤/杀
-          </th>
-          <th className="tc-num" title="胜局残血 / 该局可支配生命容量">
-            残血
-          </th>
-          <th className="tc-num" title="每局平均拾取数/掉落数">
-            道具
-          </th>
-          <th className="tc-num">得分</th>
-          <th className="tc-num">用时</th>
-          <th>wver</th>
-        </tr>
+        <tr>{colsOf(EVAL_ROW_KEYS).map(colHead)}</tr>
       </thead>
       <tbody>
         {groups.length === 0 ? (
           <tr>
-            <td colSpan={15} className="tc-muted" style={{ textAlign: 'center' }}>
+            {/* colSpan 由列模型算（此前手写 15，而 eval 表实为 16 列——空态那一行少跨一格，
+                没人会发现）。 */}
+            <td colSpan={EVAL_ROW_KEYS.length} className="tc-muted" style={{ textAlign: 'center' }}>
               该课程暂无 eval 评估记录
             </td>
           </tr>

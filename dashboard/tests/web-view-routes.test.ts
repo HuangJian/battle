@@ -88,6 +88,21 @@ describe('canonicalPath — 页面键 → 规范路径（往返一致）', () =>
       expect(PAGES[k].key).toBe(k)
     }
   })
+
+  it('两个独立页（eval / log）也在 PAGES 里：外壳顶栏三页读同一份元信息', () => {
+    // 为什么单独锁：/eval 与 /log 是各自 bundle，但它们的外壳顶栏（Topbar）要拿到与本包
+    // 一致的「页名 + 这一页回答什么问题」。没有这条，两个独立页只能把标题写成散落的字面量。
+    expect(canonicalPath('eval')).toBe('/eval')
+    expect(canonicalPath('log')).toBe('/log')
+    for (const k of ['eval', 'log'] as const) {
+      expect(PAGES[k].key).toBe(k)
+      expect(PAGES[k].title.length).toBeGreaterThan(0)
+      expect(PAGES[k].desc.length).toBeGreaterThan(0)
+    }
+    // 但它们**不是**本 bundle 内的路由：pageForPath 对它们返回 null（点击不拦截、走真链接）。
+    expect(pageForPath('/eval')).toBe(null)
+    expect(pageForPath('/log/trainingLoop')).toBe(null)
+  })
 })
 
 describe('withCourse — 内部链接保留查看课程', () => {
@@ -194,6 +209,9 @@ describe('NAV_ITEMS / NAV_GROUPS 结构约束（防路由表漂移）', () => {
       expect(n.page).toBeUndefined()
       // /eval 与 /log/<key> 都必须真的在服务端有路由（server.ts）。
       expect(n.href.startsWith('/eval') || n.href.startsWith('/log/')).toBe(true)
+      // 两个独立页的 href 必须与 PAGES 里的规范路径同源（导航项 ↔ 页面元信息不许各写一份）。
+      const key = n.id === 'eval' ? 'eval' : 'log'
+      expect(n.href.startsWith(PAGES[key].path)).toBe(true)
     }
   })
 

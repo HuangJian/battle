@@ -27,6 +27,8 @@ import { PanelErrorBoundary } from '../components/PanelErrorBoundary'
 import { usePolling } from './lib/usePolling'
 import { fetchState, postAction } from './lib/api-client'
 import { Shell } from './shell/Shell'
+import { Sidebar } from './shell/Sidebar'
+import { Topbar } from './shell/Topbar'
 import { Hero } from './panels/Hero'
 import { ComponentCards } from './panels/ComponentCards'
 import { NodePills } from './panels/NodePills'
@@ -388,37 +390,41 @@ export function App({ initial }: AppProps) {
     <div>
       <Flash flash={flash} onHide={() => setFlash(null)} />
       <Shell
-        sidebar={{
-          // 激活态按**页面键**推（不是 location）：SSR 无 location，首帧读它会 hydrate 错配。
-          activePath: canonicalPath(page),
-          course: viewCourse,
-          courses,
-          trainingCourses,
-          onCourseChange: selectCourse,
-          onNavigate: navigate,
-          readOnly,
-          gate: {
-            visible: trainingCourses.length > 0,
-            mode: gateHaltMode,
-            disabled: !isLocal || readOnly,
-            onChange: onGateHaltModeChange,
-          },
-          refresh: { value: refreshInterval, onChange: onRefreshIntervalChange },
-        }}
-        topbar={{
-          page,
-          stateView,
-          phaseElapsedMs: phaseElapsed,
-          trainingCount: trainingCourses.length,
-          courseCount: courses.length,
-          nodeSummary,
-          connError,
-          onRetry: () => void refreshState(),
-          onRefreshNow: () => {
-            void refreshState()
-            setPoolFreshNonce((n) => n + 1)
-          },
-        }}
+        sidebar={
+          <Sidebar
+            // 激活态按**页面键**推（不是 location）：SSR 无 location，首帧读它会 hydrate 错配。
+            activePath={canonicalPath(page)}
+            course={viewCourse}
+            courses={courses}
+            trainingCourses={trainingCourses}
+            onCourseChange={selectCourse}
+            onNavigate={navigate}
+            readOnly={readOnly}
+            gate={{
+              visible: trainingCourses.length > 0,
+              mode: gateHaltMode,
+              disabled: !isLocal || readOnly,
+              onChange: onGateHaltModeChange,
+            }}
+            refresh={{ value: refreshInterval, onChange: onRefreshIntervalChange }}
+          />
+        }
+        topbar={
+          <Topbar
+            page={page}
+            stateView={stateView}
+            phaseElapsedMs={phaseElapsed}
+            trainingCount={trainingCourses.length}
+            courseCount={courses.length}
+            nodeSummary={nodeSummary}
+            connError={connError}
+            onRetry={() => void refreshState()}
+            onRefreshNow={() => {
+              void refreshState()
+              setPoolFreshNonce((n) => n + 1)
+            }}
+          />
+        }
       >
         {/* ── 告警坞（P2b：原先 6 条同权重横幅收敛成一个容器，见 view/alerts.ts） ──
             条目、排序、折叠判据全在纯函数层；这里只把动作绑到通道上。 */}

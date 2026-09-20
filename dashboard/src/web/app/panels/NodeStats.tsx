@@ -245,7 +245,7 @@ export function NodeStats({ enabled, poolFreshNonce, course }: NodeStatsProps) {
     : all
   const st = pool.selfStatus
   return (
-    <div className="tc-drawer__panel">
+    <div className="tc-panelbody">
       <div className="tc-toolbar" style={{ padding: '0 0 8px' }}>
         {st ? (
           <span className="tc-badge tc-badge--a">

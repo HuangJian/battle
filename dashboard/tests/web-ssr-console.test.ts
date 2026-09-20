@@ -15,6 +15,8 @@
 
 import { api, render } from './helpers/console-fixture'
 import { describe, expect, it } from 'bun:test'
+import { readFileSync, readdirSync } from 'node:fs'
+import { join } from 'node:path'
 
 /**
  * 只取 `#root` 内的 SSG 渲染体。
@@ -28,6 +30,16 @@ function body(html: string): string {
   if (i < 0) return html
   const j = html.indexOf('<script>', i)
   return j > i ? html.slice(i, j) : html.slice(i)
+}
+
+/** 递归收集 `src/web` 下的所有 `.tsx`（用于「类名不得复活」的全量扫描）。 */
+function webComponents(dir = 'src/web', out: string[] = []): string[] {
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, e.name)
+    if (e.isDirectory()) webComponents(p, out)
+    else if (e.name.endsWith('.tsx')) out.push(p)
+  }
+  return out
 }
 
 describe('console SSR renderConsolePage', () => {
@@ -52,7 +64,6 @@ describe('console SSR renderConsolePage', () => {
       expect(dom).toContain(`>${label}</span>`)
     }
     // 详情已路由化：首帧不渲染模态抽屉 / 弹窗（这是回归闸——抽屉已退役，别让它回来）
-    expect(html).not.toContain('<aside class="tc-drawer"')
     expect(html).not.toContain('class="tc-modal-mask"')
     // 无原始 <script> 注入风险：SSR 输出经 preact 转义
     expect(html).not.toContain('<script>alert')
@@ -106,5 +117,23 @@ describe('console SSR renderConsolePage', () => {
     expect(html).toContain('"page":"nodes"')
     // 缺省 = 总览（测试与旧调用方直接渲染时不必知道路由）
     expect(render.renderConsolePage(s)).toContain('"page":"overview"')
+  })
+
+  it('已退役的抽屉类名不得复活（markup / 样式表规则 / 组件三通道）', async () => {
+    const s = await api.buildStateView()
+    const html = render.renderConsolePage(s)
+    const dom = body(html)
+    // ① markup：`dom` 是 `#root` 切片，**不含** head 里的内联 <style>，所以这一条只查 DOM。
+    expect(dom).not.toContain('tc-drawer')
+    // ② 样式表：不得再有 `.tc-drawer*` **规则**。只锚行首选择器——注释里保留旧名（说明改名史）
+    //    是故意的，而 theme.css 是**整体内联**进 SSR 的（见本文件头注），连注释都会随页面发出：
+    //    所以「字符串为 0」这条断言会把自己的历史注也判红，必须分通道、按语义查。
+    expect(readFileSync('src/web/theme.css', 'utf8')).not.toMatch(/^\.tc-drawer/m)
+    // ③ 组件：任何 .tsx 都不得再引用它（P3 的唯一复用者是两个面板，已改名 tc-panelbody）。
+    //    比原先只查 `<aside class="tc-drawer"` 强：换个标签、写进 className 字符串拼接都会漏。
+    const hits = webComponents().filter((f) => readFileSync(f, 'utf8').includes('tc-drawer'))
+    expect(hits).toEqual([])
+    // 前提闸：内联样式表确实在 html 里（否则 ② 之外的类名断言会退化成永真 —— 见 #root 切片注）
+    expect(html).toContain('.tc-panelbody')
   })
 })

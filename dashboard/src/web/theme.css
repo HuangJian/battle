@@ -102,11 +102,8 @@ body {
   font-size: var(--fs-3);
   line-height: 1.5;
 }
-.tc-wrap {
-  max-width: 1180px;
-  margin: 0 auto;
-  padding: var(--sp-3) var(--sp-4) var(--sp-4);
-} /* 纵向密度：上 12 / 左右 16 / 下 16 */
+/* ✖ `.tc-wrap`（页级容器：max-width 1180 + 居中 + 内边距）已删：唯一消费者是日志页根节点，
+   2026-09-20 P3 它已改由 `.tc-shell`/`.tc-main__body` 提供容器（否则与外壳双层留白）。 */
 
 /* ── 顶栏（吸顶 + 永远可见，DS-U8）+ 训练状态条 ─────────── */
 .tc-topbar {
@@ -1000,15 +997,10 @@ a.tc-preset {
 .tc-small {
   font-size: var(--fs-2);
 }
-.tc-row {
-  display: flex;
-  gap: var(--sp-6);
-  flex-wrap: wrap;
-}
-.tc-col {
-  flex: 1;
-  min-width: 320px;
-}
+/* ✖ 这里曾有一个「flex 行」版的 `.tc-row`（gap: sp-6）与它的搭档 `.tc-col`——2026-09-20 删除：
+   ① 名为 `.tc-row` 的类在下方还有一份定义（StatusRow 的芯片行，P1），同为单类选择器、后者胜，
+   于是这一份**一直被静默覆盖**（“写了但从来没生效”）；② `.tc-col` 全仓零消费者（精确类名查过）。
+   行布局一律用 `.tc-line`（下同：flex + align-items:center + gap sp-3 + wrap）。 */
 .tc-logtail {
   max-height: 150px;
   overflow: auto;
@@ -1040,7 +1032,9 @@ a.tc-preset {
 
 /* ── 日志页（§367 重设计：终端美学 + 结构化日志 + 搜索/过滤交互） ───────────────────────────── */
 .tc-logwrap {
-  padding: var(--sp-4) 0 var(--sp-6);
+  /* 2026-09-20（P3）：日志页已进外壳，内边距与栅格由 `.tc-main__body` 给（曾是页面自带
+     `padding: sp-4 0 sp-6`，套壳后会变成双层留白）。这里只保留纵向堆叠语义。 */
+  padding: 0;
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
@@ -1078,7 +1072,8 @@ a.tc-preset {
     opacity: 0.45;
   }
 }
-.tc-loghead h1 {
+/* 不是 h1：页名由外壳 Topbar 承担（一面一 h1）——这里标识的是**哪个组件的**日志文件。 */
+.tc-loghead__title {
   font-size: var(--fs-4);
   margin: 0;
   display: flex;
@@ -1108,9 +1103,8 @@ a.tc-preset {
   text-overflow: ellipsis;
   max-width: min(46vw, 420px);
 }
-.tc-loghead__back {
-  margin-left: auto;
-}
+/* ✖ `.tc-loghead__back`（「← 返回控制台」按钮的 margin-left:auto）已删：日志页进外壳后导航由
+   侧栏承担（2026-09-20 P3），该按钮与它的样式一并下线。 */
 .tc-chip {
   display: inline-flex;
   align-items: center;
@@ -1138,14 +1132,15 @@ a.tc-preset {
   color: var(--muted);
 }
 
-/* 吸顶工具栏 */
+/* 吸顶工具栏（页内第二层吸顶）：`top` 必须让开外壳顶栏 —— 两者都 sticky 在 top:0 时，
+   本栏（z-index 20 < 顶栏 60）会滑到顶栏底下被遮住。2026-09-20：日志页套壳后才有这个冲突。 */
 .tc-logtool {
   display: flex;
   align-items: center;
   gap: var(--sp-3);
   flex-wrap: wrap;
   position: sticky;
-  top: 0;
+  top: var(--topbar-h);
   z-index: 20;
   background: var(--bg);
   padding: 8px 2px;
@@ -1497,9 +1492,6 @@ a.tc-preset {
 
 /* ── 响应式 ──────────────────────────────────────────────── */
 @media (max-width: 900px) {
-  .tc-wrap {
-    padding: var(--sp-4);
-  }
   .tc-table thead th,
   .tc-table tbody td {
     padding: 8px 10px;
@@ -1933,77 +1925,20 @@ a.tc-preset {
   font-size: var(--fs-2);
 }
 
-/* 详情层（全屏 modal，用户 2026-09-07：抽屉太挤改全屏） */
-.tc-drawer-mask {
-  position: fixed;
-  inset: 0;
-  background: rgba(16, 24, 40, 0.35);
-  z-index: 70;
-}
-.tc-drawer {
-  position: fixed;
-  top: 4vh;
-  left: 4vw;
-  right: 4vw;
-  bottom: 4vh;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--r-3);
-  z-index: 71;
-  display: flex;
-  flex-direction: column;
-  box-shadow: 0 8px 32px rgba(16, 24, 40, 0.3);
-}
-.tc-drawer__hd {
-  padding: var(--sp-3) var(--sp-4);
-  border-bottom: 1px solid var(--border);
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  background: var(--card);
-}
-.tc-drawer__tabs {
-  display: flex;
-  gap: var(--sp-1);
-  padding: var(--sp-2) var(--sp-4);
-  border-bottom: 1px solid var(--border);
-  background: var(--card);
-}
-.tc-drawer__tab {
-  padding: 3px 14px;
-  border-radius: 999px;
-  font-size: var(--fs-2);
-  color: var(--muted);
-  cursor: pointer;
-  border: none;
-  background: none;
-  font-weight: 600;
-}
-.tc-drawer__tab--on {
-  background: var(--accent);
-  color: #fff;
-}
-.tc-drawer__body {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  overflow: hidden;
-  padding: var(--sp-3) var(--sp-4);
-} /* 页面不滚动——表格内部滚动 */
-/* 抽屉面板：竖直弹性链 面板→表根→tablewrap，表格整高铺满 modal 中间区域 */
-.tc-drawer__panel {
+/* 面板主体容器：竖直弹性链 面板→表根→tablewrap，表格整高铺满所在区块。
+   原名 tc-drawer__panel —— 抽屉 P0 已退役，类名不再自解释（docs/dashboard-redesign.md §6 P3）。 */
+.tc-panelbody {
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
   flex: 1;
   min-height: 0;
 }
-.tc-drawer__panel .tc-dtable {
+.tc-panelbody .tc-dtable {
   flex: 1;
   min-height: 0;
 }
-.tc-drawer__panel .tc-tablewrap {
+.tc-panelbody .tc-tablewrap {
   flex: 1 1 auto;
   min-height: 0;
   max-height: none;

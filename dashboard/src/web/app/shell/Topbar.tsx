@@ -6,13 +6,19 @@
  *  课程选择器、触发门禁、刷新间隔**不在这里**（见 Sidebar.tsx 的文件头）。
  *
  *  阶段耗时由 App 的 10s ticker 驱动（轮询间隙不冻结），本组件只负责展示。
+ *
+ *  **独立页复用（/eval · /log）**：标题/描述取自同一份 `PAGES`（`page` 取 `AnyPageKey`），
+ *  而全局状态读数属于「此刻训练集群在干吗」——那是控制台**持有并轮询**的数据。独立页没有
+ *  这份数据，所以 `stateView=null` 时顶栏自动退成「本页标题 + 刷新」，不伪造读数
+ *  （这是 `stateView` 从一开始就可空的原因）。
  */
 
-import { fmtElapsed, fmtTs, PAGES, type ConsoleStateView, type PageKey } from '../../view'
+import { fmtElapsed, fmtTs, PAGES, type AnyPageKey, type ConsoleStateView } from '../../view'
 import { Badge } from '../../components/Pill'
 
 export interface TopbarProps {
-  page: PageKey
+  /** 控制台四页或独立页（eval / log）——只用于查 `PAGES` 元信息。 */
+  page: AnyPageKey
   stateView: ConsoleStateView | null
   /** 本阶段已耗时（ms）；null = 无阶段（idle）。 */
   phaseElapsedMs: number | null
@@ -23,10 +29,11 @@ export interface TopbarProps {
   /** 算力摘要（本机槽位计入在线）；null = 无节点可报。 */
   nodeSummary: { online: number; total: number } | null
   /** 连接状态：off = 正常；retry = 单次失败重试中；down = 连续 3 次失败。 */
-  connError: 'off' | 'retry' | 'down'
-  onRetry: () => void
-  /** 立即刷新全部（等同于快捷键 r）。 */
-  onRefreshNow: () => void
+  connError?: 'off' | 'retry' | 'down'
+  /** 断线重试（仅控制台有轮询连接概念）。 */
+  onRetry?: () => void
+  /** 立即刷新全部（等同于快捷键 r）。独立页传自己的 refresh 函数。 */
+  onRefreshNow?: () => void
 }
 
 export function Topbar({
@@ -36,7 +43,7 @@ export function Topbar({
   trainingCount,
   courseCount,
   nodeSummary,
-  connError,
+  connError = 'off',
   onRetry,
   onRefreshNow,
 }: TopbarProps) {
@@ -97,23 +104,27 @@ export function Topbar({
             {connError === 'down' ? '控制台无响应' : '刷新失败，重试中'}
           </Badge>
         ) : null}
-        {connError === 'down' ? (
+        {connError === 'down' && onRetry ? (
           <button type="button" className="tc-btn tc-btn--sm" onClick={onRetry}>
             重试
           </button>
         ) : null}
-        <button
-          type="button"
-          className="tc-btn tc-btn--sm"
-          aria-label="立即刷新全部 (r)"
-          title="立即刷新全部 (r)"
-          onClick={onRefreshNow}
-        >
-          ⟳
-        </button>
-        <span className="tc-top__ts">
-          {stateView ? `更新于 ${fmtTs(new Date(stateView.time).getTime(), Date.now())}` : ''}
-        </span>
+        {onRefreshNow ? (
+          <button
+            type="button"
+            className="tc-btn tc-btn--sm"
+            aria-label="立即刷新全部 (r)"
+            title="立即刷新全部 (r)"
+            onClick={onRefreshNow}
+          >
+            ⟳
+          </button>
+        ) : null}
+        {stateView ? (
+          <span className="tc-top__ts">
+            更新于 {fmtTs(new Date(stateView.time).getTime(), Date.now())}
+          </span>
+        ) : null}
       </div>
     </header>
   )

@@ -11,6 +11,21 @@
 import { api, render } from './helpers/console-fixture'
 import { describe, expect, it } from 'bun:test'
 
+/**
+ * 只取 `#root` 内的渲染体（同 web-ssr-console.test.ts / web-ssr-eval-page.test.ts）。
+ *
+ * ⚠ 2026-09-20（P3）就是在这个文件上被咬的：`expect(html).toContain('返回控制台')` 在删掉
+ * 页头那个按钮**之后仍然通过**——因为整个 `theme.css` 被内联进 `<style>`，而新写的一条 CSS
+ * 注释里恰好写着「← 返回控制台」。**断言被样式表文本满足 = 根本没在断言页面**。
+ * 现在本文件一律先切出 `#root`。
+ */
+function body(html: string): string {
+  const i = html.indexOf('<div id="root">')
+  if (i < 0) return html
+  const j = html.indexOf('<script>', i)
+  return j > i ? html.slice(i, j) : html.slice(i)
+}
+
 describe('console/log viewer (§348 补 2)', () => {
   it('renderLogPage：日志内容转义 + 组件导航 + follow 开关', async () => {
     const p = (await api.componentLogPayload('selfNode', 40))!
@@ -20,13 +35,37 @@ describe('console/log viewer (§348 补 2)', () => {
       follow: true,
       lines: 40,
     })
-    expect(html).toContain('组件日志')
-    expect(html).toContain('id="logbox"')
-    expect(html).toContain('id="follow" checked')
-    expect(html).toContain('/log/trainingLoop')
-    expect(html).toContain('返回控制台')
+    const dom = body(html)
+    expect(dom).toContain('组件日志')
+    expect(dom).toContain('id="logbox"')
+    expect(dom).toContain('id="follow" checked')
+    expect(dom).toContain('/log/trainingLoop')
     // 日志文本必须经转义（原始 <script> 不得出现在 logbox 内容里）
     expect(html).not.toContain('<script>alert')
+  })
+
+  it('套上侧栏外壳（2026-09-20 P3）：日志页也能直接去其它页，日志项高亮', async () => {
+    const p = (await api.componentLogPayload('selfNode', 40))!
+    const state = await api.buildStateView()
+    const html = render.renderLogPage(p, {
+      components: state.components.map((c) => ({ key: c.key, label: c.label, status: c.status })),
+      follow: true,
+      lines: 40,
+      course: 'x20-rebirth',
+    })
+    const dom = body(html)
+    expect(dom).toContain('aria-label="控制台导航"')
+    for (const label of ['总览', '指标', '评估', '节点', '传输', '日志']) {
+      expect(dom).toContain(`tc-nav__label">${label}</span>`)
+    }
+    // `?course=` 透传：从日志页点回控制台不丢「我在看哪门课」。
+    expect(dom).toContain('href="/?course=x20-rebirth"')
+    expect(dom).toContain('aria-current="page"')
+    // 页头那个「← 返回控制台」按钮已删（导航由侧栏承担）——这一条正是上面那个
+    // 「被 CSS 注释满足」的假断言换过来的。
+    expect(dom).not.toContain('返回控制台')
+    // 页名由外壳顶栏给（PAGES.log），页内头部只说「哪个组件的」日志。
+    expect(dom).toContain('>日志</h1>')
   })
 
   it('renderLogPage：暂停态（follow=false）刷新间隔 4s；缺文件显示占位', async () => {
@@ -49,11 +88,11 @@ describe('日志页 SSR（render.tsx renderLogPage，§348 补 2 语义保留）
       follow: true,
       lines: 40,
     })
-    expect(html).toContain('组件日志')
-    expect(html).toContain('id="logbox"')
-    expect(html).toContain('id="follow" checked')
-    expect(html).toContain('/log/trainingLoop')
-    expect(html).toContain('返回控制台')
+    const dom = body(html)
+    expect(dom).toContain('组件日志')
+    expect(dom).toContain('id="logbox"')
+    expect(dom).toContain('id="follow" checked')
+    expect(dom).toContain('/log/trainingLoop')
     expect(html).toContain('/log.js') // 服务端可服务的 bundle 路径（§371：旧 /app-log.js 404）
     expect(html).not.toContain('<script>alert')
   })

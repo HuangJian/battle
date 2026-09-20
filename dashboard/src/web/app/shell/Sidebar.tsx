@@ -1,4 +1,4 @@
-/** Sidebar.tsx — 侧栏：品牌 + 分组导航 + 当前课程卡 + 全局设置。
+/** Sidebar.tsx — 控制台侧栏 = 共用导航（NavSidebar）+ 控制台专有的全局设置。
  *
  *  为什么课程选择器必须在这里（docs/dashboard-redesign.md §3.1 / 问题 C3）：课程是整页的
  *  **主语**，此前被 `flex: 1` 挤在顶栏正中间与状态 chip 抢权重。移到侧栏底部后：
@@ -7,26 +7,17 @@
  *
  *  只读可见性（§5.4）：LAN 只读常驻显示锁徽标（不可关闭），取代此前可关闭横幅的常驻职责；
  *  动作按钮**保持可点**（§7 O1 已决：物理禁用会让组件区看起来灰败破碎），误点由服务端 403 兜底。
+ *
+ *  导航本体在 `NavSidebar.tsx`（/eval 与 /log 两个独立 bundle 复用同一组件，见该文件头注）；
+ *  本文件只负责「控制台这一页多出来的东西」——课程、门禁、刷新间隔。
  */
 
 import type { JSX } from 'preact'
-import {
-  DEFAULT_LOG_COMPONENT,
-  isNavActive,
-  NAV_GROUPS,
-  NAV_ITEMS,
-  refreshLabel,
-  REFRESH_INTERVALS,
-  withCourse,
-  type PageKey,
-  type RefreshSec,
-} from '../../view'
+import { refreshLabel, REFRESH_INTERVALS, type PageKey, type RefreshSec } from '../../view'
+import { NavSidebar } from './NavSidebar'
 
 export interface SidebarProps {
-  /** 导航激活判定的路径 = 当前页面的**规范路径**（`canonicalPath(page)`）。
-   *
-   *  为什么不是 `location.pathname`：SSR 期不存在 `location`，而首帧读它会与客户端不一致
-   *  → hydrate 错配（§5.1 纪律）。由页面键推出规范路径后，两侧首帧同为 `/` → `/metrics`。 */
+  /** 导航激活判定的路径 = 当前页面的**规范路径**（`canonicalPath(page)`）。 */
   activePath: string
   /** 当前查看课程（空串 = 自动/最近活跃）。 */
   course: string
@@ -74,131 +65,97 @@ export function Sidebar({
   const otherTraining = trainingCourses.filter((c) => c !== course)
 
   return (
-    <aside className="tc-side" aria-label="控制台导航">
-      <div className="tc-side__brand">
-        <span className="tc-side__logo" aria-hidden="true" />
-        <span className="tc-side__name">炼丹炉</span>
-        {readOnly ? (
-          <span
-            className="tc-lock"
-            title="局域网只读：可查看任意课程/日志/节点统计；启停、冒烟、模式开关与节点编辑仅在本机 localhost 打开控制台时可用"
-          >
-            🔒 只读
-          </span>
-        ) : null}
-      </div>
+    <NavSidebar
+      activePath={activePath}
+      course={course}
+      readOnly={readOnly}
+      onNavigate={onNavigate}
+      footer={
+        <>
+          {/* ── 当前课程（主控对象，全页唯一一处） ── */}
+          <div className="tc-side__sec">
+            <span className="tc-side__slabel">当前课程</span>
+            <select
+              id="courseSel"
+              className="tc-sel"
+              value={course}
+              aria-label="选择查看课程"
+              title={readOnly ? COURSE_TITLE_RO : COURSE_TITLE_LOCAL}
+              onChange={(e) => onCourseChange((e.currentTarget as HTMLSelectElement).value)}
+            >
+              <option value="">自动（最近活跃课程）</option>
+              {courses.map((c) => (
+                <option key={c} value={c}>
+                  {trainingSet.has(c) ? '🔥 ' : ''}
+                  {c}
+                  {trainingSet.has(c) ? '（正在训练）' : ''}
+                </option>
+              ))}
+            </select>
+            {otherTraining.length > 0 ? (
+              <span
+                className="tc-training-tag"
+                title={
+                  `在训课程共 ${trainingCourses.length} 门：${trainingCourses.join('、')}` +
+                  (course && trainingSet.has(course)
+                    ? '（含当前查看的这门）'
+                    : '——切换查看不影响训练')
+                }
+              >
+                <span className="tc-dot tc-dot--on" />
+                还有在训：{otherTraining.join('、')}
+              </span>
+            ) : null}
+          </div>
 
-      <nav className="tc-side__nav" aria-label="主导航">
-        {NAV_GROUPS.map((g) => (
-          <div className="tc-side__group" key={g.id}>
-            <span className="tc-side__glabel">{g.title}</span>
-            {NAV_ITEMS.filter((n) => n.group === g.id).map((n) => {
-              const active = isNavActive(n, activePath)
-              const href = withCourse(n.href, course)
-              return (
-                <a
-                  key={n.id}
-                  className="tc-nav"
-                  href={href}
-                  title={n.title}
-                  aria-current={active ? 'page' : undefined}
-                  onClick={
-                    n.kind === 'route' && n.page
-                      ? (e) => onNavigate(n.page as PageKey, e)
-                      : undefined
+          {/* ── 全局设置（原来散在顶栏右侧） ── */}
+          <div className="tc-side__sec">
+            {gate.visible ? (
+              <label className="tc-side__row" title={GATE_TITLE}>
+                <span className="tc-side__slabel">触发门禁</span>
+                <select
+                  id="gateHaltSel"
+                  className="tc-sel"
+                  value={gate.mode}
+                  disabled={gate.disabled}
+                  aria-label="门禁触发时对云端 PPO worker 的动作"
+                  onChange={(e) =>
+                    gate.onChange(
+                      (e.currentTarget as HTMLSelectElement).value === 'notify' ? 'notify' : 'halt',
+                    )
                   }
                 >
-                  <span className="tc-nav__icon" aria-hidden="true">
-                    {n.icon}
-                  </span>
-                  <span className="tc-nav__label">{n.label}</span>
-                </a>
-              )
-            })}
-          </div>
-        ))}
-      </nav>
-
-      <div className="tc-side__spacer" />
-
-      {/* ── 当前课程（主控对象，全页唯一一处） ── */}
-      <div className="tc-side__sec">
-        <span className="tc-side__slabel">当前课程</span>
-        <select
-          id="courseSel"
-          className="tc-sel"
-          value={course}
-          aria-label="选择查看课程"
-          title={readOnly ? COURSE_TITLE_RO : COURSE_TITLE_LOCAL}
-          onChange={(e) => onCourseChange((e.currentTarget as HTMLSelectElement).value)}
-        >
-          <option value="">自动（最近活跃课程）</option>
-          {courses.map((c) => (
-            <option key={c} value={c}>
-              {trainingSet.has(c) ? '🔥 ' : ''}
-              {c}
-              {trainingSet.has(c) ? '（正在训练）' : ''}
-            </option>
-          ))}
-        </select>
-        {otherTraining.length > 0 ? (
-          <span
-            className="tc-training-tag"
-            title={
-              `在训课程共 ${trainingCourses.length} 门：${trainingCourses.join('、')}` +
-              (course && trainingSet.has(course) ? '（含当前查看的这门）' : '——切换查看不影响训练')
-            }
-          >
-            <span className="tc-dot tc-dot--on" />
-            还有在训：{otherTraining.join('、')}
-          </span>
-        ) : null}
-      </div>
-
-      {/* ── 全局设置（原来散在顶栏右侧） ── */}
-      <div className="tc-side__sec">
-        {gate.visible ? (
-          <label className="tc-side__row" title={GATE_TITLE}>
-            <span className="tc-side__slabel">触发门禁</span>
-            <select
-              id="gateHaltSel"
-              className="tc-sel"
-              value={gate.mode}
-              disabled={gate.disabled}
-              aria-label="门禁触发时对云端 PPO worker 的动作"
-              onChange={(e) =>
-                gate.onChange(
-                  (e.currentTarget as HTMLSelectElement).value === 'notify' ? 'notify' : 'halt',
-                )
-              }
+                  <option value="halt">停机</option>
+                  <option value="notify">提示</option>
+                </select>
+              </label>
+            ) : null}
+            <label
+              className="tc-side__row"
+              title="页面数据轮询间隔（后台标签页自动暂停，切回即补拉）"
             >
-              <option value="halt">停机</option>
-              <option value="notify">提示</option>
-            </select>
-          </label>
-        ) : null}
-        <label className="tc-side__row" title="页面数据轮询间隔（后台标签页自动暂停，切回即补拉）">
-          <span className="tc-side__slabel">刷新</span>
-          <select
-            id="refreshSel"
-            className="tc-sel"
-            aria-label="刷新间隔"
-            value={refresh.value}
-            onChange={(e) =>
-              refresh.onChange(Number((e.currentTarget as HTMLSelectElement).value) as RefreshSec)
-            }
-          >
-            {REFRESH_INTERVALS.map((s) => (
-              <option key={s} value={s}>
-                {refreshLabel(s)}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
-    </aside>
+              <span className="tc-side__slabel">刷新</span>
+              <select
+                id="refreshSel"
+                className="tc-sel"
+                aria-label="刷新间隔"
+                value={refresh.value}
+                onChange={(e) =>
+                  refresh.onChange(
+                    Number((e.currentTarget as HTMLSelectElement).value) as RefreshSec,
+                  )
+                }
+              >
+                {REFRESH_INTERVALS.map((s) => (
+                  <option key={s} value={s}>
+                    {refreshLabel(s)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        </>
+      }
+    />
   )
 }
-
-/** 日志入口的默认路径（供测试与 App 复用，避免两处各写一份）。 */
-export const DEFAULT_LOG_HREF = `/log/${DEFAULT_LOG_COMPONENT}`

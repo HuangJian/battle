@@ -20,7 +20,9 @@ export function LogNavCard({
   const mains = stateView.components
   return (
     <div>
-      <div className="tc-row" style={{ gap: 10 }}>
+      {/* 2026-09-20：原为 `tc-row` + 内联 `gap:10` —— `.tc-row` 被 StatusRow 的芯片定义覆盖后
+          这行成了带边框的胶囊，行布局请用 `.tc-line`。 */}
+      <div className="tc-line">
         {mains.map((c) => (
           <span
             key={c.key}
