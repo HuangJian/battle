@@ -21,6 +21,7 @@ import {
   uploadDeliverZip,
   type TaskBundleInfo,
 } from '../lib/api-client'
+import { InlineNotice } from '../../components/InlineNotice'
 
 export interface TaskBundlePanelProps {
   course: string
@@ -181,11 +182,7 @@ export function TaskBundlePanel({
         </button>
       </div>
 
-      {flash ? (
-        <p className="tc-caption" style={{ whiteSpace: 'pre-wrap' }} role="status">
-          {flash}
-        </p>
-      ) : null}
+      {flash ? <InlineNotice wrap>{flash}</InlineNotice> : null}
     </section>
   )
 }

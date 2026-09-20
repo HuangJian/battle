@@ -38,6 +38,7 @@ import {
 import { Badge } from '../../components/Pill'
 import { SegmentedControl } from '../../components/SegmentedControl'
 import { TrendChart } from '../../components/TrendChart'
+import { InlineNotice } from '../../components/InlineNotice'
 import { ckptForIter, loadCourseCkpts, startEvalA } from '../lib/eval-a'
 import { ReplayExportModal } from './ReplayExportModal'
 import { useEffect, useRef, useState } from 'preact/hooks'
@@ -836,11 +837,7 @@ export function Hero({ stateView, onMore, onRefresh, readOnly = false }: HeroPro
             </button>
           ))}
         </div>
-        {evalFlash ? (
-          <div className="tc-muted tc-small" style={{ marginBottom: 4 }} role="status">
-            {evalFlash}
-          </div>
-        ) : null}
+        {evalFlash ? <InlineNotice>{evalFlash}</InlineNotice> : null}
         <div className="tc-trends">
           {/* 行1：胜率 / 承伤·杀 / 胜局耗时（与击杀对调，2026-09-18） */}
           <TrendCell

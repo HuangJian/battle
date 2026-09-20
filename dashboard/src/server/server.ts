@@ -2,6 +2,9 @@
  *
  *  职责：
  *    - GET  /            → SSR 首屏（render.tsx renderConsolePage，renderToString + hydrate）
+ *    - GET  /metrics     → 指标页（同一 App + page=metrics；单 bundle，服务端路由 SSR，
+ *    - GET  /nodes         docs/dashboard-redesign.md §3.2 选型）
+ *    - GET  /wire
  *    - GET  /app.js      → 客户端 bundle（build.ts ensureBundle：mtime 失效自动重建；禁词/体积断言）
  *    - GET  /log/<key>   → 日志页 SSR（renderLogPage）+ /app-log.js
  *    - GET  /api/state   → 状态快照（api.buildStateView：组件/节点/模式/指标，3s 全局节奏）
@@ -73,6 +76,7 @@ import { handleDeliverUpload, taskBundleDownloadResponse, taskBundleInfo } from 
 import { runExitCheck } from './exit-watchdog'
 import { ensureBundle, type BundleTarget } from './build'
 import { renderConsolePage, renderEvalPage, renderLogPage } from '../web/render'
+import { pageForPath } from '../web/view'
 import type { Component } from '../core/types'
 
 interface ServeOpts {
@@ -264,9 +268,13 @@ async function main(): Promise<void> {
           s.readOnly = !loopback
           return s
         }
-        if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/console')) {
+        // 控制台页面族（`/` · `/console` 别名 · `/metrics` · `/nodes` · `/wire`）：
+        // 同一 App + 服务端路由 SSR。路由真相只有一份（web/view/routes.ts）——server 不再
+        // 自己写一张 pathname 表，否则「新增页只加了客户端、忘了服务端」会 404。
+        const consolePage = req.method === 'GET' ? pageForPath(url.pathname) : null
+        if (consolePage) {
           const state = stampState(await buildStateView(viewCourse || undefined))
-          return new Response(renderConsolePage(state), {
+          return new Response(renderConsolePage(state, { page: consolePage }), {
             headers: { 'Content-Type': 'text/html; charset=utf-8' },
           })
         }

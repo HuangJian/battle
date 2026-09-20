@@ -66,11 +66,16 @@ src/
     eval-board/     评估板端点（视图合成 / 入账 / 探针 / 自动爬梯）
     iters.ts pool-history.ts exit-watchdog.ts build.ts
   web/         SSR + 浏览器 UI（禁 IO / 禁 node: / 禁 Bun 全局，有构建期禁词门禁）
-    view/           共享视图类型与纯函数（客户端安全，唯一事实源）
-    components/     通用 UI 原子（DataTable / TrendChart / Pill …）
+    view/           共享视图类型与纯函数（客户端安全，唯一事实源；`routes.ts` = 路由真相）
+    components/     通用 UI 原子（DataTable / TrendChart / Pill …）；**P1 起的行/反馈原语**：
+                    StatusRow（行：状态点·名称·值·徽章·元信息·动作，含显式折叠头）/
+                    StatusDot / SectionHeader / Empty（四态）/ InlineNotice（面板内动作结果一行）
+                    —— 「同一语义只有一个原语」，不要在面板里自绘（docs/dashboard-redesign.md §4.2）
     app/            SSR 首屏 + hydrate 的浏览器应用（app / log / eval 三入口 + panels）
+      shell/        应用外壳（Shell / Sidebar / Topbar；三档响应式，见 docs/dashboard-redesign.md §3.1）
+      app.tsx       外壳 + 路由页面分派（/ · /metrics · /nodes · /wire，服务端 stamp `page`）
     render.tsx theme.ts
-tests/        52 个本子系统的测试（原根 tests/ 的同名文件迁入 + 两巨型文件按分层拆开）
+tests/        88 个本子系统的测试（原根 tests/ 的同名文件迁入 + 两巨型文件按分层拆开）
 data/evalboard/  EvalBoard 账本数据根（默认值；EVALBOARD_DATA 可覆盖）
 ```
 
@@ -78,8 +83,14 @@ data/evalboard/  EvalBoard 账本数据根（默认值；EVALBOARD_DATA 可覆�
 
 测试**镜像 `src/` 的模块**（AGENTS §8）：一个测试文件对应它覆盖的那个模块，
 文件名形如 `web-view-rows` ↔ `src/web/view/rows.ts`、`server-api-pool` ↔
-`src/server/api`。dashboard 侧的 306 个用例在 52 个文件里，拆分产出的文件最大 264 行
-（单节走势图；其余均 <170 行）。
+`src/server/api`。dashboard 侧当前 **776 个用例 / 88 个文件**（2026-09-20；P1 行原语前为 746 / 87，
+重设计前基线 717 / 86），拆分产出的文件最大 264 行（单节走势图；其余均 <170 行）。
+
+> ⚠ **web 用例只能断言结构，挡不住交互缺陷**：本仓 web 测试全部是 SSR（无 `happy-dom`/`jsdom`），
+> 而 `preact-render-to-string` **丢弃全部事件处理器**（实测 `h('pre', {onClick}, 'x')` → `<pre>x</pre>`）
+> —— 一个挂了隐藏点击区的元素和没挂的，渲染出的 HTML 一模一样。所以「点这里会误触收起」
+> 这类缺陷靠读代码评审，别以为写了断言就守住了（实例与结论：`DECISIONS.md
+> §2026-09-20-dashboard-shell-routing` 的「P1 续」第 2 条）。
 
 按关注点聚合的两个巨型测试文件已按上表分层拆完：`training-console-preact.test.ts`
 （1234 行 / 19 个 describe）与 `training-console.test.ts`（1354 行 / 17 个 describe，

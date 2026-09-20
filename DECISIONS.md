@@ -3955,3 +3955,76 @@ F1/F3 是 `nn-training/**`（不在 SSOT）⇒ 无需 push。另：F2 改动期�
 日志行 + 面板 `versionOk=false`）；② F1 只覆盖 async 取包路径（同步路径没有 `/v1/result`，重启表现为连接被
 重置 = 瞬断，已豁免）；③ F2 不做运行中进程的自我重启（要重启请 `/v1/restart`，这条刻意保留人工/协调器触发）。
 
+---
+
+## §2026-09-20-dashboard-shell-routing（2026-09-20，训练控制台信息架构重设计 P0：应用外壳 + 路由化详情页；**路由实现 = 单 bundle + 服务端路由 SSR + pushState**）
+
+**背景**：控制台是单列纵向堆叠的 12 个平权面板（无分区/无导航），四类详情（指标/传输/节点统计/日志）
+住在全屏模态抽屉里（**没有 URL**：看不到也分享不了「我在看这个视图」），课程选择器（整页主语）被
+`flex: 1` 挤在顶栏正中间与状态 chip 抢权重，底部还有一段 299 字的说明文字占了主版面最长的文本块。
+全部问题按编号列在 `docs/dashboard-redesign.md` §1.2（C1–C13），目标形态在 §3。
+
+**决定（P0 已落地）**：
+1. **外壳**：`Sidebar(216px) + Topbar(56px) + 主内容`（`web/app/shell/{Shell,Sidebar,Topbar}.tsx`）。
+   课程选择器 + 触发门禁 + 刷新间隔一并移入**侧栏底部**——课程是整页主语，位置固定且全页唯一；
+   顶栏只剩「本页（标题 + 这一页回答什么）」与「全局状态（阶段/在训/节点/连接 + ⟳ + 更新时间）」。
+2. **详情路由化**：`/metrics` · `/nodes` · `/wire` 三个新路由接管原抽屉三个 tab；**`Drawer.tsx` 删除**
+   （无引用、无测试）。`/eval` 与 `/log/<key>` 维持独立页与独立 bundle，不并入控制台路由表。
+3. **路由真相只有一份**：`web/view/routes.ts`（`PageKey` / `PAGES` / `NAV_ITEMS` / `pageForPath` /
+   `bootstrapPage`，纯函数）。服务端 `server.ts` 通过 `pageForPath(url.pathname)` 判定页面并
+   `renderConsolePage(state, { page })` 注入 `window.__INITIAL__.page`，客户端据此渲染首帧。
+4. **首帧不读 `location`**：`page` 由服务端 stamp 决定（客户端用 `canonicalPath(page)` 推导航激活态），
+   挂载后的 effect 才按 URL 校准 + 监听 `popstate`。理由同既有 hydrate 纪律（SSR 无 `location`，
+   首帧读浏览器状态 = 水合错配）。
+
+**被否方案**：① **每页一个独立 bundle**（`/metrics.js` `/nodes.js` `/wire.js`）——三页共用同一份
+`/api/state` 快照，页面差异只是「渲染哪部分」；独立 bundle 换来 3 次额外构建、3 份 SSR 入口、3 套
+hydrate 路径，而收益只有体积（当前 app 包 68.7KB / 预算 150KB，远未吃满）。② **保留模态抽屉只重做视觉**
+——C2 的核心损失是「没有 URL + 打断监控上下文」，换皮不解决。③ **只读时物理禁用动作按钮**
+（原设计倾向）——owner 拍板维持既有哲学（物理禁用会让组件区灰败破碎），只读可见性改由
+侧栏常驻 `tc-lock` 锁徽标 + 首屏一次性横幅承担（`docs/dashboard-redesign.md` §7 O1–O4）。
+
+**落地范围**：`web/view/{routes.ts,format.ts(fmtElapsed)}` · `web/app/shell/{Shell,Sidebar,Topbar}.tsx` ·
+`web/app/app.tsx`（外壳 + 四页分派）· `web/render.tsx`（`ConsolePageOpts.page`）· `web/app/index.tsx`
+（`ConsoleBootstrap`）· `server/server.ts`（页面族路由）· `theme.css`（外壳 token + 12 栏栅格 + 三档响应式）。
+**删除**：`web/components/Drawer.tsx`。**尚未做（P1–P4）**：统一行原语 `StatusRow`（现 4 套行式实现）·
+`CourseMatrix` 合并「并行课程总览 + 训练调度器」· `AlertDock` 合并 7 类横幅 · `KpiStrip` ·
+空态四态 · 底部大段说明拆进各页口径折叠块 · 字号阶梯全量替换（现正文仍 11.5–12.5px）。
+
+**配套回归**（新增/改写）：`tests/web-view-routes.test.ts`（新，22 例：路径归一化/往返一致/URL 带课程/
+导航激活/路由表结构约束/引导载荷三层回退）· `web-ssr-console.test.ts`（改用 `#root` 切片断言 DOM——
+整个 `theme.css` 被内联进 `<style>`，类名断言此前靠样式表文本**假通过**；顺带揪出 `tc-cc__name` 只存在于
+CSS 里的空断言）· `web-wire-panel-wiring.test.ts`（抽屉接线 → 路由表/服务端/分派三处接线）·
+`web-ssr-readonly.test.ts`（角标 `tc-badge--ro` → 侧栏 `tc-lock`；标签文案「正在训练：」→「还有在训：」
+——后者会被读成「当前查看的这门在训」，而标签列的恰恰是别的课）。
+
+**证据**：`cd dashboard` — `bun run typecheck` ✓ · `oxlint` 0 警告 0 错误 · `bun run test` **746 pass / 0 fail**
+（P0 前基线 717 pass / 86 文件）· `bun src/server/build.ts` 三份 bundle 全绿（app 68.7KB gzip）。
+
+**已知局限**：① P0 只做外壳与路由，页面内仍是单列堆叠（栅格与面板归组是 P1/P2）；② 概览页三个面板
+（`MetricsTable`/`NodeStats`）仍带 `tc-drawer__panel` 类——抽屉没了但类名沿用，重命名随 P3 的 CSS 清理；
+③ `LogNavCard` 暂留在总览底部（与组件卡的「≡ 日志」入口职责有重叠，是否下线待 P3 定）。
+
+**P1 续（同一轮工作：行原语）**：四套「一行实体 + 状态 + 指标 + 动作」实现（`tc-comps` chip /
+`tc-npill` / `tc-wreg__pill` / `tc-cov__row`·`tc-loopq__row`）收敛为 `StatusRow` 单一原语
+（配 `StatusDot` / `SectionHeader` / `Empty`）；组件卡、节点行、worker 登记行已迁移，
+课程矩阵两行随 P2 合并时迁移。同类问题的第二个实例一并收敛（`docs/dashboard-redesign.md` §1.2
+新增 **C14**）：**动作结果反馈 6 处手写、5 种样式**（其中一处漏了 `tc-muted` 因而不灰，一处误用
+卡片页脚样式 `tc-caption` 而多画一条上边框）→ `InlineNotice`。
+
+**决定**：
+1. **动作反馈分两层，原计划的 `Toast` 作废**：`components/Flash.tsx` **本就是**右上角浮层
+   （`position: fixed` + 8s 自动隐藏），不存在「顶部 `Flash` 行」可替代——按原计划再新增 `Toast`
+   只会造出**第七处**同类实现。定为：跨面板的全局动作 → `Flash` 浮层；面板局部动作 →
+   `InlineNotice` **就地**（「在哪个按钮旁边」正是它的信息价值，搬到屏幕角落是净损失）。
+2. **不给 dashboard web 测试加 DOM 夹具**：实测 `preact-render-to-string` **丢弃全部事件处理器**
+   （`h('pre', {onClick}, 'x')` → `<pre>x</pre>`），而本仓 web 测试全是 SSR、无 `happy-dom`/`jsdom`。
+   于是**交互行为类缺陷在 HTML 上不可观测**，断言拦不住——实例：旧 `tc-cc__detail` 是
+   `<pre onClick={close}>`，在日志尾部拖选文字一按鼠标就误收起，而任何 SSR 断言都看不见它。
+   选择**不加依赖**（MANIFEST §14 零新依赖 + dashboard 自包含纪律），改用「结构断言钉形状 +
+   交互缺陷靠读代码评审」，并把这条局限写在用例头注里。**写新 web 用例时不要以为 SSR 断言
+   守住了点击行为。**
+
+**P1 证据**：`cd dashboard` — `bun run typecheck` ✓ · `bun run test` **776 pass / 0 fail**
+（P1 前 746）· `bun src/server/build.ts` 三份 bundle 绿（app **69,987 B gzip** / 预算 150 KB）。
+

@@ -262,7 +262,7 @@ describe('§361：icon 复制键 / cloudflared endpoint 截断与复制 / local 
     expect(pageWithPushTarget(null)).not.toContain('class="tc-cc__push')
   })
 
-  it('local pill：只读展示（槽位 + 上轮贡献）', () => {
+  it('local 行：只读展示（槽位 + 上轮贡献）', () => {
     const s = {
       time: 't',
       course: 'c',
@@ -275,7 +275,7 @@ describe('§361：icon 复制键 / cloudflared endpoint 截断与复制 / local 
       localNode: { id: 'local', slots: 3, lastContrib: 2 },
     } as ConsoleStateView
     const html = renderConsolePage(s)
-    expect(html).toContain('tc-npill--local')
+    expect(html).toContain('tc-row--local') // 统一行原语的「本机直跑」modifier
     expect(html).toContain('>local<')
     expect(html).toContain('3槽')
     expect(html).toContain('本机直跑')

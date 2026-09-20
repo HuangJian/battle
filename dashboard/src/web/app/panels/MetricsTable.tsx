@@ -32,6 +32,7 @@ import {
 import type { ConsoleStateView } from '../../view'
 import { Badge } from '../../components/Pill'
 import { DataTable, type Col } from '../../components/DataTable'
+import { InlineNotice } from '../../components/InlineNotice'
 import { SegmentedControl } from '../../components/SegmentedControl'
 import { ckptForIter, loadCourseCkpts, startEvalA } from '../lib/eval-a'
 
@@ -624,11 +625,7 @@ export function MetricsTable({
   }
   return (
     <div className="tc-drawer__panel">
-      {flash ? (
-        <div className="tc-muted tc-small" style={{ marginBottom: 6 }} role="status">
-          {flash}
-        </div>
-      ) : null}
+      {flash ? <InlineNotice>{flash}</InlineNotice> : null}
       <DataTable<MetricRow>
         rows={display}
         rowKey={(r) => (r.kind === 'main' ? `m${r.iter}` : `e${r.iter}`)}

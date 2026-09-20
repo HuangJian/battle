@@ -1,10 +1,12 @@
 /**
- * web-wire-panel-wiring.test.ts — 「传输」视图接线（app.tsx ↔ WirePanel）
+ * web-wire-panel-wiring.test.ts — 「传输」页接线（路由表 ↔ server.ts ↔ app.tsx ↔ WirePanel）
  *
  * 为什么用源码断言（仓库既有同款：web-train-launch-wiring / web-ssr-readonly）：
- *  抽屉 tab 是 `DrawerTabKey` 联合 + 两处字面量数组（tabs 声明、nav 入口）+ 一处
- *  内容分派。少改任何一处都不会报错，只会让面板**存在但永远打不开**（或 tab
- *  打开是空白）——tsc 抓不到，单测渲染也抓不到（抽屉默认关闭）。
+ *  路由化（docs/dashboard-redesign.md §3.2）后，「面板存在但看不到」有三种失效模式，
+ *  三种都不会让 tsc 或渲染单测报错：
+ *    ① 路由表里缺 /wire（侧栏点不到）；
+ *    ② 服务端不再用共享路由表（直接输 URL / 刷新 404）；
+ *    ③ app.tsx 缺 `page === 'wire'` 分派（页面存在但是空白）。
  *
  * 同批守一条口径：下行字节对 push 模式必须走 worker 侧 `result_bytes`
  * （`wire.downBytes` 为 null 是 pull 专用口径）——写错就会全屏「—」。
@@ -16,29 +18,39 @@ import { join } from 'node:path'
 import { h } from 'preact'
 import { renderToString } from 'preact-render-to-string'
 import { WirePanel } from '../src/web/app/panels/WirePanel'
+import { canonicalPath, NAV_ITEMS, PAGES } from '../src/web/view'
 import type { ConsoleStateView, IterRow } from '../src/web/view'
 
 const DASHBOARD_ROOT = join(import.meta.dir, '..')
 const APP = join(DASHBOARD_ROOT, 'src', 'web', 'app', 'app.tsx')
 const PANEL = join(DASHBOARD_ROOT, 'src', 'web', 'app', 'panels', 'WirePanel.tsx')
+const SERVER = join(DASHBOARD_ROOT, 'src', 'server', 'server.ts')
 
-describe('app.tsx 「传输」tab 接线', () => {
+describe('「传输」页接线（/wire）', () => {
   const src = readFileSync(APP, 'utf8').replace(/\s+/g, ' ')
 
-  it('DrawerTabKey 含 wire，且 tabs 与 nav 两处都注册了入口', () => {
-    expect(src).toContain("type DrawerTabKey = 'metrics' | 'nodes' | 'log' | 'wire'")
-    // tabs 声明（Drawer 属性）：只要求存在该条目，不绑定它在数组里的位置
-    expect(src).toContain("{ key: 'wire', label: '传输' }")
-    // nav 直连入口（否则只能靠抽屉里切，入口不可见 = 等于没有）
-    expect(src).toContain("['wire', '传输']")
-  })
-
-  it('wire tab 的内容分派到 WirePanel（漏了就是空白页）', () => {
+  it('page === wire 分派到 WirePanel（漏了就是空白页）', () => {
     // ⚠ 不要写死括号/换行：pre-commit 的 oxfmt 会重排 JSX，把 `? ( <X/> )` 收成
     // `? <X/>`——写死形状的断言会在别人提交时才第一次变红（本测试首版就踩了这个）。
-    expect(src).toContain("drawerTab === 'wire' ?")
+    expect(src).toContain("page === 'wire' ?")
     expect(src).toContain('<WirePanel stateView={stateView} course={viewCourse} />')
     expect(src).toContain("import { WirePanel } from './panels/WirePanel'")
+  })
+
+  it('路由在共享路由表里，且侧栏有入口（不是只能手输 URL 的页）', () => {
+    expect(canonicalPath('wire')).toBe('/wire')
+    expect(PAGES.wire.title.length).toBeGreaterThan(0)
+    const navHit = NAV_ITEMS.filter((n) => n.kind === 'route' && n.page === 'wire')
+    expect(navHit.length).toBe(1)
+    expect(navHit[0]!.href).toBe('/wire')
+  })
+
+  it('服务端按共享路由表服务该路径（SSR 首帧与客户端路由同源）', () => {
+    const server = readFileSync(SERVER, 'utf8')
+    // 服务端必须通过 pageForPath 判定页面——自己再写一张 pathname 表就会漂移，
+    // 症状是「新增页只加了客户端」→ 直接输 URL / 刷新 404。
+    expect(server).toContain('pageForPath(url.pathname)')
+    expect(server).toContain('renderConsolePage(state, { page: consolePage })')
   })
 })
 

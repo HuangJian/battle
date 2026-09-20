@@ -36,9 +36,11 @@ describe('console 局域网只读边界（§…：LAN 查看 / localhost 控制�
       components: base.components.map((c) => ({ ...c, busy: false })),
     }
     const html = render.renderConsolePage({ ...clean, readOnly: true })
-    // 角标与横幅（类名断言避开 CSS 内联定义里的同名串）
-    expect(html).toContain('class="tc-badge tc-badge--ro"')
-    expect(html).toContain('class="tc-banner tc-banner--ro"')
+    // 只读可见面（docs/dashboard-redesign.md §5.4）：
+    //   ① 侧栏常驻锁徽标 `tc-lock`（不可关闭，取代此前可关闭横幅的常驻职责）
+    //   ② 首屏只读横幅 `tc-banner--ro`（可关闭，仅提示一次）
+    expect(html).toContain('class="tc-lock"')
+    expect(html).toContain('tc-banner tc-banner--ro')
     expect(html).toContain('🔒 只读模式')
     // 只读视图不禁用动作按钮（物理禁用会让组件区灰败破碎——只读是动作边界，不是按钮状态）：
     // 悬停提示 + 真点击由服务端 403 + flash 兜底，按钮保持正常外观可点击。
@@ -47,7 +49,7 @@ describe('console 局域网只读边界（§…：LAN 查看 / localhost 控制�
     // 动作按钮带只读悬停提示（说明动作仅限本机）
     expect(html).toContain('title="只读模式：操作仅限本机 localhost"')
     const html2 = render.renderConsolePage({ ...clean, readOnly: false })
-    expect(html2).not.toContain('class="tc-badge tc-badge--ro"')
+    expect(html2).not.toContain('class="tc-lock"')
     expect(html2).not.toContain('class="tc-banner tc-banner--ro"')
     expect(html2).not.toContain('🔒 只读模式')
     expect(html2).not.toContain('title="只读模式：操作仅限本机 localhost"')
@@ -102,7 +104,7 @@ describe('console 局域网只读边界（§…：LAN 查看 / localhost 控制�
     }
   })
 
-  it('课程 select：所有在训课程在选项里高亮（🔥 + （正在训练）），不止第一门', async () => {
+  it('课程 select：所有在训课程在选项里高亮（🔥 + （正在训练）），不止第一门；标签列出“还有在训”的课', async () => {
     const base = await api.buildStateView()
     const view2: ConsoleStateView = {
       ...base,
@@ -115,15 +117,16 @@ describe('console 局域网只读边界（§…：LAN 查看 / localhost 控制�
       expect(html).toContain(`🔥 ${c}（正在训练）`)
     }
     expect(html).not.toContain('🔥 viewB')
-    // 查看课程不是任一门在训 → 标签列出全部在训课程
-    expect(html).toContain('正在训练：b、a')
+    // 查看课程不是任一门在训 → 标签列出全部在训课程（文案为「还有在训：」——
+    // 「正在训练：」会被读成「当前查看的这门在训」，而标签列的恰恰是**别的课**）
+    expect(html).toContain('还有在训：b、a')
     // 查看课程恰是其中一门 → 标签只提醒「别处还在跑」（正在看的那门由 🔥 标记）
     const same = render.renderConsolePage({ ...view2, course: 'a' })
-    expect(same).toContain('正在训练：b')
-    expect(same).not.toContain('正在训练：b、a')
+    expect(same).toContain('还有在训：b')
+    expect(same).not.toContain('还有在训：b、a')
   })
 
-  it('训练中课程标签：trainingLoop 运行且课程 ≠ 查看课程时，select 后高亮「正在训练：<课程>」', async () => {
+  it('训练中课程标签：trainingLoop 运行且课程 ≠ 查看课程时，select 后高亮「还有在训：<课程>」', async () => {
     const base = await api.buildStateView()
     const mk = (course: string, tlCourse: string | null, running: boolean): ConsoleStateView => ({
       ...base,
@@ -140,13 +143,13 @@ describe('console 局域网只读边界（§…：LAN 查看 / localhost 控制�
     })
     // 查看 viewB、训练 trainA → select 后高亮训练课程
     const html = render.renderConsolePage(mk('viewB', 'trainA', true))
-    expect(html).toContain('正在训练：trainA')
+    expect(html).toContain('还有在训：trainA')
     // 查看课程 = 训练课程 → 无标签（正在看的就是训练的）
     const same = render.renderConsolePage(mk('trainA', 'trainA', true))
-    expect(same).not.toContain('正在训练：')
+    expect(same).not.toContain('还有在训：')
     // trainingLoop 未运行 → 无标签
     const idle = render.renderConsolePage(mk('viewB', 'trainA', false))
-    expect(idle).not.toContain('正在训练：')
+    expect(idle).not.toContain('还有在训：')
   })
 
   it('只读横幅关闭键带 tc. 前缀：cleanupNonTcKeys 白名单清理不误删', () => {

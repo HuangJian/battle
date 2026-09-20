@@ -35,6 +35,44 @@
   --fs-3: 13px;
   --fs-4: 15px;
   --fs-5: 20px;
+
+  /* ── 外壳与栅格（docs/dashboard-redesign.md §4.1/§4.3） ────────────────────
+     旧 --fs-1..--fs-5 保留为别名（渐进替换，P4 收尾统一）：新代码一律用 --fs-* 阶梯。 */
+  --sidebar-w: 216px;
+  --sidebar-w-rail: 56px;
+  --topbar-h: 56px;
+  --content-max: 1440px;
+
+  /* 面（surface）层：页面底 / 卡片 / 卡内嵌面板 */
+  --surface-0: #f4f6f9;
+  --surface-1: #ffffff;
+  --surface-2: #f8fafc;
+
+  /* 字号阶梯：正文基线提到 13.5px（旧 11.5–12.5px 低于可读基线） */
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-base: 13.5px;
+  --fs-md: 15px;
+  --fs-lg: 18px;
+  --fs-xl: 24px;
+  --fs-2xl: 30px;
+
+  /* 语义状态色（三档：前景 / 背景 / 描边）——同一状态在全站同色同形 */
+  --ok-fg: #16a34a;
+  --ok-bg: #e9f9ef;
+  --ok-bd: #b7e6c8;
+  --warn-fg: #b45309;
+  --warn-bg: #fdf3e7;
+  --warn-bd: #f3d9b5;
+  --err-fg: #dc2626;
+  --err-bg: #fdecec;
+  --err-bd: #f5c2c2;
+  --info-fg: #2f5fe0;
+  --info-bg: #eef2fe;
+  --info-bd: #c3d0f8;
+  --neutral-fg: #7a8395;
+  --neutral-bg: #f1f3f7;
+  --neutral-bd: #dfe3ea;
 }
 * {
   box-sizing: border-box;
@@ -1680,22 +1718,8 @@ a.tc-preset {
   padding-left: var(--sp-3);
   border-left: 1px solid var(--line);
 }
-/* 组标题：小一号的弱色标签（回答「这一族的键是什么」——课程无关的单例，还是当前查看的那门课）。 */
-.tc-comps__glabel {
-  flex: 0 0 auto;
-  font-size: var(--fs-1);
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  color: var(--muted);
-  cursor: help;
-}
-.tc-cc__name {
-  font-size: var(--fs-2);
-  font-weight: 700;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+/* 组标题与组件名的旧类（`__glabel` / `tc-cc__name`）已随 P1 迁到
+   `SectionHeader`（`.tc-sh__label`）与 `StatusRow`（`.tc-row__name`）。 */
 /* 作用域徽章（R3-3）：共享 = 一个进程服务所有并行课程；单例 = 全机一份。
    按课程是默认语义（组标题已说），不给每行挂噪声标签。 */
 .tc-cc__scope {
@@ -1778,8 +1802,9 @@ a.tc-preset {
   word-break: break-all;
   max-height: 200px;
   overflow-y: auto;
-  margin-bottom: var(--sp-4);
 }
+/* 展开详情（`pre`）不再自带下外边距：与下一行的间距由 `.tc-row__detail` 一处给（折叠头已经
+   把详情与行分开，`pre` 再叠一层就双层留白）。 */
 .tc-cc__err-link {
   color: var(--red);
   font-weight: 700;
@@ -1809,18 +1834,25 @@ a.tc-preset {
   white-space: nowrap;
 } /* code 铺满剩余宽、复制键贴右缘 */
 
-/* 状态点 */
+/* 状态点：**色 + 形双编码**（色盲可辨；与 `.tc-stale` 同款约定，见 components/StatusDot.tsx）
+     ok ● 实心圆 · warn ◆ 菱形 · err ■ 方 · off ○ 空心圆
+   形编码让「同色不同义」与「不同色同义」在只看形状时也能区分。 */
 .tc-dot--warn {
   background: var(--yellow);
+  border-radius: 0;
+  transform: rotate(45deg);
 }
 .tc-dot--on {
   background: var(--green);
 }
 .tc-dot--dead {
   background: var(--red);
+  border-radius: 1px;
 }
 .tc-dot--empty {
-  background: var(--border);
+  background: transparent;
+  border: 1.5px solid var(--border);
+  box-sizing: border-box;
 }
 
 /* Switch（节点启停 toggle，role=switch；内嵌轨道 28×16） */
@@ -1881,90 +1913,9 @@ a.tc-preset {
   padding: 6px 12px;
   margin-bottom: 10px;
 }
-.tc-nodes .lbl {
-  font-size: var(--fs-2);
-  color: var(--muted);
-  margin-right: var(--sp-1);
-}
-.tc-npill {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-2);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 3px 12px;
-  font-size: var(--fs-2);
-  background: var(--card);
-  cursor: pointer;
-  flex-shrink: 0;
-  user-select: none;
-}
-.tc-npill:hover {
-  border-color: var(--accent);
-}
-.tc-npill b {
-  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
-  font-weight: 600;
-  font-size: var(--fs-2);
-}
-.tc-npill .v {
-  color: var(--green);
-  font-weight: 600;
-  font-size: var(--fs-2);
-}
-.tc-npill--off .v {
-  color: var(--muted);
-}
-/* 停用节点 pill：灰点（tc-dot--empty）+ 灰字，与离线红点区分（2026-09-11 用户指令） */
-.tc-npill--off.tc-npill--disabled .v {
-  color: var(--gray);
-}
-/* 慢节点 pill：琥珀字（与 tc-dot--warn 同色系）——仍在贡献，非掉线 */
-.tc-npill--off.tc-npill--slow .v {
-  color: var(--yellow);
-}
-.tc-npill--dead {
-  opacity: 0.72;
-}
-.tc-npill--collapse {
-  color: var(--accent);
-  border-color: var(--accent);
-  background: var(--accent-bg);
-  font-weight: 600;
-}
-.tc-npill__contrib {
-  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
-  font-weight: 700;
-  font-size: var(--fs-2);
-  color: var(--green);
-  border-left: 1px solid var(--border);
-  padding-left: var(--sp-2);
-  margin-left: 2px;
-}
-.tc-npill__edit {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
-.tc-npill__edit input[type='number'] {
-  width: 56px;
-  padding: 2px 6px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  font-size: var(--fs-2);
-}
-.tc-nodes .more {
-  margin-left: auto;
-  font-size: var(--fs-2);
-  color: var(--accent);
-  font-weight: 600;
-  border: none;
-  background: none;
-  cursor: pointer;
-}
-.tc-nodes .more:hover {
-  text-decoration: underline;
-}
+/* 节点行的旧 chip 词汇（`.tc-npill*` / `.tc-nodes .lbl` / `.tc-nodes .more`）已随 P1
+   迁移到行原语 `.tc-row*` + 区块头 `.tc-sechd*` 而删除（docs/dashboard-redesign.md §4.2）。
+   不要把它们加回来——第四套行样式就是这么长出来的。 */
 
 /* 工具行（TrainingLoop 启动弹窗内） */
 .tc-line {
@@ -2167,26 +2118,7 @@ a.tc-preset {
   justify-content: center;
   font-size: 12px;
 }
-/* §361⑤：local 本机直跑 pill（只读，不悬停高亮，无点击语义）。 */
-.tc-npill--local {
-  cursor: default;
-  border-color: var(--accent);
-  background: var(--accent-bg);
-}
-.tc-npill--local:hover {
-  border-color: var(--accent);
-}
-.tc-npill--local .v {
-  color: var(--muted);
-}
-/* 局域网只读节点 pill：无点击语义、无 hover 高亮（编辑/冒烟仅本机） */
-.tc-npill--ro {
-  cursor: default;
-  opacity: 0.92;
-}
-.tc-npill--ro:hover {
-  border-color: var(--border);
-}
+/* §361⑤：local 本机直跑行 = `.tc-row--local`（虚线描边，无点击语义）。 */
 
 /* ────────────── 并行课程总览（2026-09-18 单 hub 多课程） ────────────── */
 .tc-cov {
@@ -2573,35 +2505,8 @@ a.tc-preset {
   flex-wrap: wrap;
   margin-top: 6px;
 }
-.tc-wreg__pill {
-  cursor: default;
-}
-.tc-wreg__pill:hover {
-  border-color: var(--border);
-}
-.tc-wreg__local {
-  padding: 0 6px;
-  border-radius: 999px;
-  background: var(--accent-bg);
-  color: var(--accent);
-  font-size: var(--fs-1);
-}
-.tc-wreg__url,
-.tc-wreg__conc,
-.tc-wreg__busy {
-  color: var(--muted);
-  font-size: var(--fs-1);
-  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
-}
-.tc-wreg__busy {
-  color: var(--yellow);
-  font-weight: 700;
-}
-.tc-wreg__empty {
-  margin: 6px 0 2px;
-  color: var(--muted);
-  font-size: var(--fs-2);
-}
+/* worker 行的旧 per-field 类（__pill / __local / __url / __conc / __busy）已随 P1 迁到
+   `.tc-row*`（url/并发走 `RowMeta`，忙走徽章，空态走 `Empty`）。 */
 .tc-wreg__form {
   display: flex;
   align-items: flex-end;
@@ -2636,4 +2541,585 @@ a.tc-preset {
 .tc-cov__cursor {
   color: var(--muted);
   font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   应用外壳：侧栏 + 顶栏 + 主内容（docs/dashboard-redesign.md §3.1 / §4.3）
+   ─────────────────────────────────────────────────────────────────────────
+   三档响应式（§7 O3）：
+     ≥1280px        侧栏常驻 216px + 12 栏栅格（8/4 分栏）
+     1024–1279px    侧栏收为 56px 图标条；hover/聚焦时浮层展开（**不推出内容**，
+                    故用 position: fixed 而非改宽度——栅格列宽恒为 56px，零重排）
+     <1024px        侧栏变顶部横向条；主内容单列
+   ══════════════════════════════════════════════════════════════════════════ */
+
+.tc-shell {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  min-height: 100vh;
+  background: var(--surface-0);
+}
+
+/* ── 侧栏 ─────────────────────────────────────────────── */
+.tc-side {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-2);
+  background: var(--surface-1);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.tc-side__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-2) var(--sp-2);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--sp-1);
+}
+.tc-side__logo {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--ok-fg);
+  flex: 0 0 auto;
+}
+.tc-side__logo--down {
+  background: var(--err-fg);
+}
+.tc-side__name {
+  font-size: var(--fs-md);
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+}
+/* 只读锁（常驻、不可关闭）：局域网只读的**可见面**放在这里而不是横幅 */
+.tc-lock {
+  margin-left: auto;
+  font-size: var(--fs-sm);
+  color: var(--warn-fg);
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-bd);
+  border-radius: 999px;
+  padding: 1px 7px;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.tc-side__nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.tc-side__group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.tc-side__glabel {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+  padding: 0 var(--sp-2) 2px;
+  text-transform: uppercase;
+}
+.tc-nav {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 6px var(--sp-2);
+  border-radius: var(--r-1);
+  color: var(--text);
+  text-decoration: none;
+  font-size: var(--fs-base);
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tc-nav:hover {
+  background: var(--surface-2);
+  color: var(--info-fg);
+}
+.tc-nav[aria-current='page'] {
+  background: var(--info-bg);
+  color: var(--info-fg);
+  font-weight: 600;
+  box-shadow: inset 3px 0 0 0 var(--info-fg);
+}
+.tc-nav__icon {
+  width: 18px;
+  text-align: center;
+  flex: 0 0 auto;
+  opacity: 0.85;
+}
+.tc-nav__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tc-side__spacer {
+  flex: 1 1 auto;
+  min-height: var(--sp-2);
+}
+.tc-side__sec {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-2);
+  background: var(--surface-2);
+}
+.tc-side__slabel {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+}
+.tc-side__sec .tc-sel {
+  width: 100%;
+  max-width: 100%;
+}
+.tc-side__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+/* ── 顶栏 ─────────────────────────────────────────────── */
+.tc-top {
+  position: sticky;
+  top: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  min-height: var(--topbar-h);
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--surface-0);
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.tc-top__head {
+  min-width: 0;
+}
+.tc-top__title {
+  margin: 0;
+  font-size: var(--fs-lg);
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.tc-top__desc {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tc-top__right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  font-size: var(--fs-sm);
+}
+.tc-top__ts {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* ── 主内容 ───────────────────────────────────────────── */
+.tc-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.tc-main__body {
+  width: 100%;
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: var(--sp-3) var(--sp-4) var(--sp-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+/* ── 12 栏栅格（面板用 span 声明宽度；不许写内联 style） ── */
+.tc-grid {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: var(--sp-3);
+  align-items: start;
+}
+.tc-col-12 {
+  grid-column: span 12;
+}
+.tc-col-8 {
+  grid-column: span 8;
+}
+.tc-col-6 {
+  grid-column: span 6;
+}
+.tc-col-4 {
+  grid-column: span 4;
+}
+
+/* 数字列：等宽数字（对齐才能扫读） */
+.tc-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 1279px) {
+  /* 图标条：栅格列宽恒为 56px（零重排），展开靠 fixed 浮层 */
+  .tc-shell {
+    grid-template-columns: var(--sidebar-w-rail) minmax(0, 1fr);
+  }
+  .tc-side {
+    width: var(--sidebar-w-rail);
+    padding: var(--sp-3) 6px;
+  }
+  .tc-side:hover,
+  .tc-side:focus-within {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: var(--sidebar-w);
+    height: 100vh;
+    padding: var(--sp-3) var(--sp-2);
+    z-index: 80;
+    box-shadow: var(--sh-2);
+    overflow-y: auto;
+  }
+  .tc-side__name,
+  .tc-nav__label,
+  .tc-side__glabel,
+  .tc-side__sec {
+    display: none;
+  }
+  .tc-side:hover .tc-side__name,
+  .tc-side:hover .tc-nav__label,
+  .tc-side:hover .tc-side__glabel,
+  .tc-side:hover .tc-side__sec,
+  .tc-side:focus-within .tc-side__name,
+  .tc-side:focus-within .tc-nav__label,
+  .tc-side:focus-within .tc-side__glabel,
+  .tc-side:focus-within .tc-side__sec {
+    display: flex;
+  }
+  .tc-side:hover .tc-side__glabel,
+  .tc-side:focus-within .tc-side__glabel {
+    display: block;
+  }
+  .tc-nav {
+    justify-content: center;
+  }
+  .tc-side:hover .tc-nav,
+  .tc-side:focus-within .tc-nav {
+    justify-content: flex-start;
+  }
+  /* 中档：8/4 分栏退为堆叠 */
+  .tc-col-8,
+  .tc-col-6,
+  .tc-col-4 {
+    grid-column: span 12;
+  }
+}
+
+@media (max-width: 1023px) {
+  /* 顶部横向条：侧栏内容横排（品牌 + 导航 + 课程/设置），主内容单列 */
+  .tc-shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .tc-side {
+    position: static;
+    height: auto;
+    width: auto;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--sp-2);
+    padding: var(--sp-2) var(--sp-3);
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    overflow: visible;
+  }
+  .tc-side__brand {
+    border-bottom: none;
+    padding: 0;
+    margin: 0;
+  }
+  .tc-side__nav {
+    flex-direction: row;
+    gap: var(--sp-2);
+    flex-wrap: wrap;
+  }
+  .tc-side__group {
+    flex-direction: row;
+    align-items: center;
+    gap: 2px;
+  }
+  .tc-side__glabel {
+    display: none;
+  }
+  .tc-side__spacer {
+    display: none;
+  }
+  .tc-side__sec {
+    flex-direction: row;
+    align-items: center;
+    gap: var(--sp-2);
+    padding: var(--sp-1) var(--sp-2);
+    margin-left: auto;
+  }
+  .tc-side__slabel {
+    display: none;
+  }
+  .tc-side__sec .tc-sel {
+    width: auto;
+  }
+  .tc-side:hover,
+  .tc-side:focus-within {
+    position: static;
+    width: auto;
+    height: auto;
+    padding: var(--sp-2) var(--sp-3);
+    box-shadow: none;
+  }
+  .tc-top {
+    padding: var(--sp-2) var(--sp-3);
+  }
+  .tc-main__body {
+    padding: var(--sp-3) var(--sp-3) var(--sp-6);
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   行原语 / 区块头 / 空态（docs/dashboard-redesign.md §4.2，问题 C6 / C9）
+   ─────────────────────────────────────────────────────────────────────────
+   `.tc-row` 是「一行实体 + 状态 + 指标 + 动作」的**唯一实现**，取代此前的 4 套手写行
+   （组件 chip · 节点 pill · worker 登记 pill · 课程/调度器行）。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* 行包装：`display:contents` 让行与详情都成为外层 flex 容器的直接子项
+   （行照旧与外层其它行一起换行；详情靠 flex-basis:100% 独占一整行）。 */
+.tc-row-wrap {
+  display: contents;
+}
+
+.tc-row {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 12px;
+  min-height: 24px;
+  background: var(--surface-1);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  max-width: 100%;
+}
+.tc-row > b {
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 可点击行（展开/收起）：保持与只读行相同的外观，只补交互反馈 */
+.tc-row--act {
+  cursor: pointer;
+}
+.tc-row--act:hover {
+  border-color: var(--info-fg);
+}
+.tc-row--act:focus-visible {
+  outline: 2px solid var(--info-fg);
+  outline-offset: 1px;
+}
+.tc-row--open {
+  border-color: var(--info-fg);
+  background: var(--info-bg);
+}
+/* 语义 modifier（由调用方的领域判定给出，原语不猜） */
+.tc-row--off {
+  color: var(--muted);
+  background: var(--surface-2);
+}
+.tc-row--slow {
+  color: var(--yellow);
+}
+.tc-row--local {
+  border-style: dashed;
+}
+.tc-row__val {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.tc-row__meta {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.tc-row__acts {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+/* 展开详情：独占一整行（外层容器都是 flex-wrap，故 flex-basis 生效） */
+.tc-row__detail {
+  flex-basis: 100%;
+  width: 100%;
+  margin: 0 0 var(--sp-3);
+}
+/* 折叠头：详情内**唯一**的收起入口（详情本体不再挂点击区，见 StatusRow 头注）。 */
+.tc-row__detailhd {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 18px;
+}
+.tc-row__detailttl {
+  font-size: var(--fs-1);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+}
+.tc-row__collapse {
+  margin-left: auto;
+  padding: 0 4px;
+  border: 0;
+  border-radius: var(--r-1);
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--fs-1);
+  cursor: pointer;
+}
+.tc-row__collapse:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.tc-row__collapse:focus-visible {
+  outline: 2px solid var(--info-fg);
+  outline-offset: 1px;
+}
+/* 面板内的动作结果一行（`InlineNotice`，role="status"）：五处手写实现（tc-small /
+   tc-muted tc-small / tc-caption / tc-eval-summary__note）收敛于此。下边距走 CSS，
+   不再由调用方写内联 `marginBottom: 4|6`。 */
+.tc-notice {
+  margin: 0 0 var(--sp-1);
+  color: var(--muted);
+  font-size: var(--fs-2);
+  line-height: 1.6;
+}
+.tc-notice--wrap {
+  white-space: pre-wrap;
+}
+/* 行内联编辑（节点并发）：详情里的紧凑控件排 */
+.tc-nodeedit {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  padding: 6px var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-2);
+  background: var(--surface-2);
+  font-size: var(--fs-sm);
+}
+.tc-nodeedit label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.tc-nodeedit input[type='number'] {
+  width: 64px;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: var(--fs-sm);
+  background: var(--surface-1);
+  color: inherit;
+}
+
+/* ── 区块头 ── */
+.tc-sechd {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+.tc-sechd__title {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  cursor: help;
+}
+.tc-sechd__count {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+}
+.tc-sechd__acts {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.tc-sechd--sub {
+  font-size: var(--fs-xs);
+}
+
+/* ── 空态三态（无数据 / 加载中 / 错误） ── */
+.tc-emptybox {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px dashed var(--border);
+  border-radius: var(--r-2);
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  flex-wrap: wrap;
+}
+.tc-emptybox__icon {
+  font-size: var(--fs-md);
+  line-height: 1;
+}
+.tc-emptybox__reason {
+  color: var(--text);
+}
+.tc-emptybox__extra {
+  white-space: pre-wrap;
+}
+.tc-emptybox--error {
+  border-color: var(--err-bd);
+  background: var(--err-bg);
+  color: var(--err-fg);
+}
+.tc-emptybox--error .tc-emptybox__reason {
+  color: var(--err-fg);
+}
+.tc-emptybox--error button {
+  margin-left: auto;
+}
+.tc-emptybox--loading {
+  border-style: solid;
 }

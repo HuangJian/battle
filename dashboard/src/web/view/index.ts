@@ -19,6 +19,7 @@
  *    format / spark / series / phase / rows / interaction  纯函数工具
  *    legacy-keys    浏览器本地键迁移
  *    course-overview 多课程并行总览 / push worker 登记
+ *    routes         控制台路由（路径 ↔ 页面键、导航项、激活判定）
  */
 
 // ── 内部模块（唯一对外出口；调用方一律 import 本目录，不直连内部文件）──
@@ -40,3 +41,4 @@ export * from './legacy-keys'
 export * from './cards'
 export * from './course-overview'
 export * from './loop-queue'
+export * from './routes'

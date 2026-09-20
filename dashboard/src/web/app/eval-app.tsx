@@ -21,6 +21,7 @@ import type {
 import { EVAL_METRIC_KEYS, EVAL_METRIC_LABELS, buildEvalCsv, rungLabel } from '../view'
 import { Badge, Pill } from '../components/Pill'
 import { DataTable, type Col } from '../components/DataTable'
+import { InlineNotice } from '../components/InlineNotice'
 import { EvalMatrix } from './panels/eval-matrix'
 import { fetchEvalBoard, postAction } from './lib/api-client'
 import { usePolling } from './lib/usePolling'
@@ -394,11 +395,7 @@ export function EvalApp({
         </div>
       ) : null}
 
-      {flash ? (
-        <p className="tc-small" role="status">
-          {flash}
-        </p>
-      ) : null}
+      {flash ? <InlineNotice>{flash}</InlineNotice> : null}
       {error ? (
         <div className="tc-banner tc-banner--err" role="alert">
           {error}
