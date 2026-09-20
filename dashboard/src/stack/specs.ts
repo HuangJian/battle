@@ -446,7 +446,10 @@ export function writeGateHaltMode(course: string, mode: GateHaltMode): GateHaltM
  */
 export const TRAINER_SERVE_ENTRY = 'nn-training/run_rl_cluster.py'
 
-export function trainerServeSpec(cfg: RlConfig, venv: { python: string }): ProcSpec {
+export function trainerServeSpec(
+  cfg: RlConfig,
+  venv: { python: string; sitePackages: string },
+): ProcSpec {
   void cfg // 机器侧旋钮住 rl-config，由 python 开课时施加（不在命令行上）
   return {
     key: 'trainingLoop',
@@ -472,7 +475,13 @@ export function trainerServeSpec(cfg: RlConfig, venv: { python: string }): ProcS
       path.join(NN_TRAINING, '.run_cluster.lock'),
     ],
     cwd: REPO_ROOT,
-    env: { PYTHONPATH: NN_TRAINING },
+    // ★ venv 的 **site-packages** 必须挂在 PYTHONPATH 上：`venv.python` 是 uv 跳板的真身
+    //  （基础解释器），它自己不认 venv 的包（`pyvenv.cfg` 无 executable 时
+    //  `resolveVenvPython` 只能从 `home` 取基础解释器；`include-system-site-packages=false`）
+    //  ⇒ 漏了这一项就是 `ModuleNotFoundError: No module named 'pydantic'`（2026-09-20 线上实测：
+    //  trainer 连续两次「启动即退出」，而 hub/其余组件无恙——它们要么只用 stdlib，要么本就带了
+    //  这一项）。与 localWorker / trainingLoop / BC spec 同规。
+    env: { PYTHONPATH: `${venv.sitePackages}${path.delimiter}${NN_TRAINING}` },
     log: path.join(LOG_DIR, 'trainer-cluster.log'),
     healthy: async () => pidAlive(entryForCourse(loadRegistry(), 'trainingLoop', '')?.pid),
     sentinels: pySentinels(TRAINER_SERVE_ENTRY),

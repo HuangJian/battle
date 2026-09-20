@@ -99,8 +99,8 @@ describe('preset / route / UI 接线（源码断言：跨文件链路 tsc 抓不
     const src = readSrc('src/web/app/panels/TrainLaunchModal.tsx').replace(/\s+/g, ' ')
     expect(src).toContain("const TC_SLIM = 'tc.slim'")
     expect(src).toContain('ariaLabel="协议瘦身"')
-    // 上抛的选项对象里必须有 slim（启动不再带 mode，故这里是单参数调用）
-    expect(src).toMatch(/onLaunch\(\{[^}]*\bslim[,}]/)
+    // 上抛的选项对象里必须有 slim（启动只带进程级选项：隧道 + 瘦身）
+    expect(src).toMatch(/onLaunch\(\{[^}]*\bslim\s*[,}]/)
     // 上次选择要记住（与 cfProtocol 同口径）
     expect(src).toContain('writeLocal(TC_SLIM, slim)')
     // 当前生效值上屏：以为改了其实没改是本仓反复出现的一类坑

@@ -10,8 +10,10 @@
  *      argv 就等于给进程绑死了课程表，「先起 trainer、后加课」当场失效；
  *   ② **旧形状换代**：每课条目（`trainingLoops[<课>]`）**拒重建**（用共享 spec 重建一个每课
  *      条目 = 两套调度器抢同一批 traj），只能被启动时的显式换代接管收掉；
- *   ③ **课程准备**：机器侧旋钮（`courses.<课>.remote_transport`）与「账本文件 = 课程发现判据」
- *      这两件事发生在启动路径里，且 mode → transport 的映射逐条钉住；
+ *   ③ **课程准备已迁出启动路径**（2026-09-20 用户口径：「服务进程启动不应与课程绑定。
+ *      进程启动时不要自动开启课程训练」）：机器侧旋钮与「账本文件 = 课程发现判据」现在住在
+ *      `actions/course-lifecycle.ts`（开课），启动路径**一个字都不写课程**
+ *      （否则「起个进程」又要先选一门课，还会撞上「hub 还不认识这门课」）；
  *   ④ **停止语义**：停 trainer = 停**所有**课程的训练（消息里必须说出来，不然操作员会以为
  *      只是停了当前查看的那门课），并清共享槽。
  *
@@ -24,6 +26,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import os from 'os'
 import path from 'path'
 import { saveAnyComponent } from '../src/core/registry'
+import { pruneLegacyCourseKnobs } from '../src/stack/course-knobs'
 import { DASHBOARD_ROOT, REPO_ROOT } from '../src/core/paths'
 import type { RlConfig } from '../src/core/types'
 import * as actions from '../src/server/actions'
@@ -78,6 +81,15 @@ function src(rel: string): string {
   return readFileSync(path.join(DASHBOARD_ROOT, rel), 'utf-8')
 }
 
+/** 剥掉注释后的源码：防回流断言查**代码**。
+ *  「已迁走的东西」在注释里被反复点名（那正是它们迁移的记录），扫原文会把
+ *  「写明它已搬去 course-lifecycle」当成「它还在 start.ts」。 */
+function codeOnly(rel: string): string {
+  return src(rel)
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '')
+}
+
 describe('① 形状：共享 trainer = 一个进程 + 发现模式', () => {
   it('restartSpecFor(trainingLoop, 共享槽) 重建出的 argv 不绑课程表', () => {
     saveAnyComponent('trainingLoop', '', {
@@ -126,7 +138,7 @@ describe('① 形状：共享 trainer = 一个进程 + 发现模式', () => {
   })
 })
 
-describe('② 课程准备：账本（发现判据）与机器侧旋钮', () => {
+describe('② 开课（course-lifecycle）：账本（发现判据）与机器侧旋钮', () => {
   /** 夹具配置（每例自造，因为准备过程会回写 rl-config）。 */
   function fixture(): RlConfig {
     return {
@@ -159,25 +171,20 @@ describe('② 课程准备：账本（发现判据）与机器侧旋钮', () => 
     }
   }
 
-  it('课程准备**不写任何传输裁决**（启动不选模式）：只落降级旋钮 + 把执行面说出来', () => {
+  it('开课**不写任何传输裁决**：只落降级旋钮（课程与 worker 节点正交）', () => {
     withTmpLogs(() => {
-      const cfg = fixture()
-      const r = actions.prepareCourseForSharedTrainer(cfg, COURSE, {
-        course: COURSE,
-        remoteDegrade: true,
-      })
+      writeFileSync(tmpConfig, JSON.stringify(fixture(), null, 2))
+      actions.writeCourseConfigForOpen(COURSE, { remoteDegrade: true })
       // 写面只剩机器侧旋钮：课程不带「走哪条路 / 打哪个 hub / 钉哪台机器」
       expect(knobsOnDisk(COURSE)).toMatchObject({ remote_degrade_after: 3 })
       for (const key of ['remote_transport', 'remote_hub_url', 'push_node_url', 'hub_push']) {
         expect(knobsOnDisk(COURSE)[key]).toBeUndefined()
       }
-      // 执行面改成**说给操作员听**（不再是一个写进配置的模式）
-      expect(r.notes.join('\n')).toContain('本课（c5-gae）执行面：')
       writeFileSync(tmpConfig, JSON.stringify(fixture(), null, 2))
     })
   })
 
-  it('启动时只**清**旧的传输耦合键（prune），绝不重新写回去', () => {
+  it('开课时只**清**旧的传输耦合键（prune），绝不重新写回去', () => {
     withTmpLogs(() => {
       const cfg = fixture()
       // 类型表里这两个键已删 ⇒ 用旧形状（Record）造历史配置，模拟线上 rl-config.json 的残留值。
@@ -185,33 +192,42 @@ describe('② 课程准备：账本（发现判据）与机器侧旋钮', () => 
         [COURSE]: { remote_transport: 'pull', remote_hub_url: 'https://old.example' },
       } as unknown as RlConfig['courses']
       writeFileSync(tmpConfig, JSON.stringify(cfg, null, 2))
-      const r = actions.prepareCourseForSharedTrainer(cfg, COURSE, { course: COURSE })
+      const r = pruneLegacyCourseKnobs(cfg)
       const onDisk = knobsOnDisk(COURSE)
       expect(onDisk.remote_transport).toBeUndefined()
       expect(onDisk.remote_hub_url).toBeUndefined()
-      expect(r.notes.join('\n')).toContain('已清理 legacy 传输配置')
+      expect(r.removed.length).toBeGreaterThan(0)
       writeFileSync(tmpConfig, JSON.stringify(fixture(), null, 2))
     })
   })
 
-  it('为本课建账本（发现判据）——不建它，这门新课永远不会被共享 trainer 看见', () => {
+  it('开课为本课建账本 **与 `remote-jobs/`**（两个发现判据：trainer 认账本，hub 认目录）', () => {
     withTmpLogs((dir) => {
-      const r = actions.prepareCourseForSharedTrainer(fixture(), COURSE, { course: COURSE })
+      const r = actions.prepareCourseForOpen(COURSE)
       expect(existsSync(path.join(dir, COURSE, 'training_log.jsonl'))).toBe(true)
+      // hub 的 `_course_dir_live` 只认 `{remote-jobs,offline}` 目录 + 新鲜 mtime：
+      // 不先建它，开课时置 hub 模式必然拿到「需要合法 course（[]）」（2026-09-20 实测）
+      expect(existsSync(path.join(dir, COURSE, 'remote-jobs'))).toBe(true)
       expect(r.notes.join('\n')).toContain('已建课程账本')
       // 账本已存在时不重复建（幂等）：再跑一次不出那条说明
-      const again = actions.prepareCourseForSharedTrainer(fixture(), COURSE, { course: COURSE })
+      const again = actions.prepareCourseForOpen(COURSE)
       expect(again.notes.join('\n')).not.toContain('已建课程账本')
       writeFileSync(tmpConfig, JSON.stringify(fixture(), null, 2))
     })
   })
 
-  it('启动时为本课建账本：没有 `training_log.jsonl` 的课永远不会被发现', () => {
-    const start = src(path.join('src', 'server', 'actions', 'start.ts'))
-    expect(start).toContain('training_log.jsonl')
-    expect(start).toContain('prepareCourseForSharedTrainer')
-    // 课程发现判据必须与训练侧同一处措辞（greppable 的交叉引用）
-    expect(start).toContain('discover_courses')
+  it('★ 启动进程不再为任何课程建账本（源码级围栏：准备只住 course-lifecycle）', () => {
+    const start = codeOnly(path.join('src', 'server', 'actions', 'start.ts'))
+    // 启动路径不得再碰课程事实/旋钮（回流 = 「起进程先选一门课」当场复活）
+    expect(start).not.toContain('training_log.jsonl')
+    expect(start).not.toContain('prepareCourseForSharedTrainer')
+    expect(start).not.toContain('seedWeightsFromBc')
+    expect(start).not.toContain('writeCourseMachineKnobs')
+    // 课程发现判据必须与训练侧同一处措辞（greppable 的交叉引用）——住在开课模块里
+    const life = src(path.join('src', 'server', 'actions', 'course-lifecycle.ts'))
+    expect(life).toContain('training_log.jsonl')
+    expect(life).toContain('remote-jobs')
+    expect(life).toContain('discover_courses')
   })
 
   it('stop 路径扫旧形状的每课 trainer + 清进程级锁（「停 trainer」= 停所有训练）', () => {

@@ -3955,3 +3955,182 @@ F1/F3 是 `nn-training/**`（不在 SSOT）⇒ 无需 push。另：F2 改动期�
 日志行 + 面板 `versionOk=false`）；② F1 只覆盖 async 取包路径（同步路径没有 `/v1/result`，重启表现为连接被
 重置 = 瞬断，已豁免）；③ F2 不做运行中进程的自我重启（要重启请 `/v1/restart`，这条刻意保留人工/协调器触发）。
 
+---
+
+## §2026-09-20-console-process-course-decoupled（2026-09-20，用户指令：服务进程启动与课程解耦 + 开课/停课独立入口）
+
+**背景（一次实测故障里其实躺着两件事）**：用户点「启动训练」（课程 `x20-steady`）失败，控制台输出：
+
+```
+❌ 启动训练中断于 trainingLoop
+selfNode: self-node 已在运行 (port 8443)
+hubServer: hub-server 已在运行 (port 8787)；已回灌 0 门课的离线/在线意图
+失败 x20-steady: 需要合法 course（[]）与 mode（['online', 'offline']）
+trainingLoop: 共享 trainer 启动即退出 (PID 2496)
+```
+
+- **① trainer 死因 = spec 漏挂 venv site-packages**（与课程耦合无关）：`venv.python` 是 uv 跳板的**真身**
+  （基础解释器——这台机器 `pyvenv.cfg` 无 `executable`，`resolveVenvPython` 只能从 `home` 取），第三方包
+  只能靠 `PYTHONPATH` 挂 venv site-packages。R3-5 新增的 `trainerServeSpec` 只挂了 `NN_TRAINING`
+  ⇒ `ModuleNotFoundError: No module named 'pydantic'` ⇒ 「启动即退出」（`tmp/trainer-cluster.log` 实锤）。
+  hub/其余组件无恙：它们要么只用 stdlib，要么本就带这一项（`localWorker` / `trainingLoop` / BC spec 都是
+  `${sitePackages};${NN_TRAINING}`）。**定案**：`trainerServeSpec` 与它们同规；实测 `run_rl_cluster.py --help`
+  在该 PYTHONPATH 下 import 链全通。
+- **② 「需要合法 course（[]）」= 时序错位**：hub 的课程表是**扫盘发现**
+  （`<traj-root>/<课>/{remote-jobs,offline}` 存在且新鲜，`_course_dir_live`），而旧形状把「置 hub 模式」挂在
+  **启动 trainer 的第三步**上——那一刻课程目录还没建出来（`remote-jobs/` 要等训练侧第一次发布 job）
+  ⇒ hub 诚实地回 400。
+
+**用户指令（原文）**：「服务进程启动不应与课程绑定。进程启动时不要自动开启课程训练，需要增加独立的入口
+开启/停止课程训练！」
+
+**定案**：
+
+1. **启动 = 只起进程**：`startPreset(opts)` 不再要课程；`startSharedTrainer` 不再有任何按课程的副作用（旧的
+   「播权重 / 建账本 / 写课程旋钮 / 置 hub 模式」四件全迁走）——「起个进程」不必先选一门课，② 的时序
+   也从结构上消失。停止语义随之更干净：重启共享 trainer 的自动解停改成**全课程**（无课程 = 全课程）——
+   被停掉的正是整个调度器，只解「当前查看的那门」会让其它课替它背锅。
+2. **开课 / 停课 = 独立入口**（`actions/course-lifecycle.ts`；路由 `openCourse` / `stopCourse`）：
+   - **开课** = 课程级旋钮（`courses.<课>.{rollout_src,run_iters,remote_degrade_after}`）+ 发现事实
+     （账本 + **`remote-jobs/`** + RL 权重播种）+ 解暂停 + 置 hub 模式（**有界重试** 3×2s：hub 扫到这门课
+     要一两拍）+ 报执行面。**进程没跑也能开**（trainer 是发现式的，下一拍就入队）。
+   - **停课** = **非破坏**：暂停意图（`tmp/loop-control.json`，与调度器卡片的「暂停」同一份契约）
+     + 该课 hub 置 offline。队列/账本/课程表一个字不动，恢复走开课。
+3. **课程级选项整体迁到「开课」**：训练模式（在线/离线）· rollout 位置 · 降级本机——它们落
+   `courses.<课>.*`，而进程是共享的一台。启动弹窗只剩进程级（隧道/瘦身/行为开关/预演）；`preset` 路由对
+   `trainMode`/`rolloutSrc`/`remoteDegrade` **响亮 400**（静默丢掉 = 一条假承诺）。
+4. **入口位置（用户选）**：顶部课程选择旁的按钮（已停课显示「开课」，否则「停课」）。判据由 `/api/state`
+   的 `courseLifecycle` stamp：`open` = 账本存在（与训练侧 `discover_courses` / hub `--discover` 同一判据）、
+   `stopped` = 暂停意图。只读视图**不物理禁用**按钮（只读是动作边界，不是按钮状态——
+   `web-ssr-readonly.test.ts` 钉着这条）。
+
+   ★ **本点当天即被取代**（同日晚些的报障）：判据「账本存在」= 历史课全在训（进程一起来把 tmp/ 下
+   21 门历史课一起拉去跑），按钮形状也被用户在后面的指令里改成「课程 select + 「训练」按键 +
+   每门课一个 pill（含停课）」——见 §2026-09-20-course-enable-marker-and-training-pills，
+   那里有完整的判据、形状与否决理由。
+
+**备选与否决**：
+
+- 停课 = **下架账本**（删/改名 `training_log.jsonl`，让调度器与 hub 都看不见它）——否：真从训练里消失，
+  但 iter/队列/账本等阅读面**同时**消失，且重开 = 重建账本（历史归零）。
+- 停课 = **只停本机**（只写暂停意图、不动 hub 派发）——否：云机仍会领走队列里已入队的整段 job 跑完，
+  而操作员以为停了。
+- 保留「启动时顺带开课」并加一个「启动后立即开课」勾选框——否：默认路径仍把两件事绑在一起，② 照旧存在。
+- 用 `core/config.ts::validateCourseArg` 做开课的课程校验——否：它最后一手是 `process.exit(1)`，对长驻的
+  控制台进程就是自杀（一次误点 = 整个控制台消失）；改成可捕获的 `ActionError`，判据保持一致。
+- 为让 hub 立刻认课而在 hub 侧加显式注册 API——否：hub 与 trainer 共享同一份盘，「课程在这跑」本来就写在
+  盘上（R3-5 的发现模式原则）；多一条注册旁路 = 会失败、会乱序、会忘了调的第二个事实源。开课改为先建
+  `remote-jobs/`（训练侧第一次发布时本就会建的那个目录），空目录 = hub 认课的锚点。
+
+**违反后果**：把课程准备重新挂回启动路径 ⇒ 「起进程先选一门课」与 ② 的 400 一起复活；停课改成下架账本 ⇒
+操作员看不到自己刚停的那门课的任何状态（阅读面连带消失）。
+
+**落地**：`dashboard/src/stack/specs.ts`（`trainerServeSpec` PYTHONPATH 修复）·
+`server/actions/{start,preset,course-lifecycle,index}.ts` · `server/api/{route,state-view}.ts` ·
+`web/view/console-types.ts` · `web/app/{app.tsx,panels/{TrainLaunchModal,OpenCourseModal}.tsx}`。
+
+**回归**：`dashboard/tests/course-lifecycle.test.ts`（新，19 例：开课把发现事实写全（含 `remote-jobs/`）·
+课程级旋钮两向（在线撤离线标记 / 离线成对落键）· 置 hub 模式的「hub 还不认识这门课」回归与有界重试 ·
+停课非破坏与可逆 · hub 不可达时意图照样落盘）· `training-shared-trainer.test.ts`（② 段改钉「准备只住
+course-lifecycle + 启动路径零课程写盘」）· `training-console-busy.test.ts`（幂等早退不碰课程：traj 根
+坏掉也必须成功）· `web-train-launch-wiring` / `train-mode-offline` / `rollout-src-launch-option` /
+`slim-launch-option` / `push-config`（课程级选项不得回流启动链路）。
+
+**gate**：dashboard **737 pass / 0 fail**（717 → 737）+ `tsc --noEmit` 干净 + 三份 bundle 构建通过
+（app 292245B / gzip 68110B）；根 `bun run check` **1938 pass / 0 fail**。
+
+**未做（明确记录，不是漏）**：① 实弹验证「停课后云机也不再领活」需要真节点（本轮全在假 fetch 下证明逻辑）；
+② 课程生命周期只在顶部按钮一处可见——`CourseOverview` 行内那格仍是「切离线」，两者语义不同
+（离线 ≠ 停课：离线课照旧在本机跑/整段上云）。（② 已被次日口径部分解决：在训课程现在顶部有
+pill 行，见下一条。）
+
+
+## §2026-09-20-course-enable-marker-and-training-pills（2026-09-20，用户报障 + 用户指令：课程开训必须手动开；在训课程显示为 pill）
+
+**背景（上一条落盘当天就撞上的两个洞）**：
+
+```
+启动trainingloop 成功后，界面显示一堆课程正在训练！！！ 课程开训需要用户手动开启！！！
+正在训练：c6-chip、remote-smoke、x1-rebirth、…（21 门）
+```
+
+- **① 课程表判据错了**：共享 trainer 是**发现式**的（扫 `<traj-root>/*/training_log.jsonl`），tmp/ 下堆着
+  几十门历史课的账本 ⇒ 进程一起就把它们**全部**拉进训练；hub 同理（`_course_dir_live` 只看
+  `remote-jobs/` 存在且新鲜）⇒ 残留的 pending job 还会被继续派给真 GPU worker（白烧租约）。
+- **② 顶部没有「哪几门在训」的样子**：旧形状把其余在训课程堆成一串文字（`正在训练：a、b、c`）
+  ——读不出各自进度，也没有停课入口（停课挂在「当前查看的那门课」的按钮上）。
+
+**用户指令（原文）**：「课程开训需要用户手动开启」·「顶部课程 select 选择某课程，点击「训练」按键；
+正在训练的所有课程，都在顶部显示为一个 pill，概览显示 it 数和状态（参考节点 pill），有停止按键，
+点击 pill 后切换显示其趋势图和指标表，并高亮 pill；点击停止按键后，停止课程，从顶部区域移除」。
+
+**定案**：
+
+1. **开课 = 一个显式标记文件**：`<traj-root>/<课>/training-enabled.txt`（`remote/protocol.py::COURSE_ENABLE_MARKER`，
+   控制台「开课」写 /「停课」删）。训练侧（`rl/loop_plan.enabled_courses` → `loop_serve` 发现模式、
+   `run_rl_cluster.py --json` 只读课程表）与 hub（`_course_dir_live`）的判据统一改成
+   **账本 ∧ 开课标记**；`discover_courses`（盘上跑过哪些课）**保持不变** —— 课程下拉仍要能选历史课。
+   照落点选目录内的独立文件（而不是共享 JSON）：一个判据、一处位置，开/停各是一次文件操作
+   （无读-改-写竞态），控制台重启不丢「哪几门开着」，且它同时是**证据**（写入了开课时刻）。
+2. **控制台的服务端事实同源**：`/api/state` 的 `trainingCourses` 改成**已开课课程**（标记扫描），
+   与 `courseLifecycle.enabled` 同一表达式——它同时供课程 select 的 🔥 标记、在训 pill 行、
+   `CourseOverview` 的「在训」列与「触发门禁」开关的可见性（一处算，四处用）。旧口径
+   （「共享 trainer 在跑 ∧ 队列未收官」）回答的是另一个问题：进程没跑时已开课的课会从顶部消失。
+3. **顶部形状**：课程 select + **「训练」按键**（弹 `OpenCourseModal` 收课程级选项：训练模式 /
+   rollout 位置 / 降级本机；已在课程表时再点 = 按当前选项重写旋钮并重置 hub 模式）+ **在训 pill 行**
+   （顶栏正下方，与节点 pill 同一套视觉语言）：每门课一个 pill = 状态点 + 课名 + `it<N>`（账本指针，
+   不是已结算轮数）+ 一句状态（采集中 / 等回传 / 推进中 / 空闲 / 待进程 / 已暂停 / 已收官 / 已中止 /
+   视图不可用）+ ■ 停课。**点 pill 切查看目标**（Hero 趋势 + 抽屉指标表随查看课程走）并高亮；
+   ■ 停课走 `stopCourse` 且**显式带课程名**（不走「当前查看课程」兜底——点 A 课的 ■ 必须停 A），
+   服务端下一拍 stamp 里不再有它 ⇒ pill 自行消失（**不做本地乐观删除**：队列/账本一个字没动这件事
+   只能由服务端事实说话）。没有在训课程时整行不渲染（空行会被读成「有东西没加载出来」）。
+4. **停课 = 删除开课标记** + 暂停意图 + 该课 hub 置 offline（仍是**非破坏**：队列/账本/课程表不动，
+   恢复走开课）。这是上一条停课语义的**必需补充**：只写暂停意图而不删标记，发现式的训练进程
+   下一拍又会把这门课拉起来。
+
+**备选与否决**：
+
+- **判据用「控制台自己记一份在训名单」**（`console-state.json` 里加 `enabledCourses`）——否：训练侧与 hub
+  必须知道同一件事，而它们读不到控制台的状态文件 ⇒ 只能各记一份（正是「一启动 21 门课」的成因）；
+  盘上的标记是三方（trainer / hub / 控制台）都能读到的那一份。
+- **判据用「有没有账本 mtime 新鲜」**——否：历史课目录随时因为动过账本而变新鲜，正是最贵的那类误派
+  （真 GPU worker 白烧租约）；且 freshness 是滑动的，操作员意图（开/停）会被时间悄悄改写。
+- **停课 = 删账本 / 改课程文件**——否（同上一条：阅读面连带消失、历史归零）。
+- **在训 pill 行的数据源用 python 的 `run_rl_cluster.py --json` 一门定生死**——否：它要起子进程（10s TTL），
+  读失败时 pill 会整行消失——**停课入口不能因观测面坏了就消失**。故 pill 的全集来自服务端 stamp 的
+  标记扫描（纯 fs），it/状态来自队列行（读面不可用时它才降级为「视图不可用」，pill 仍在、仍可停）。
+- **pill 上只给状态点不给 it 数**——否：多课程并行时操作员第一眼要看的就是「各自跑到第几轮」
+  （用户原话「概览显示 it 数和状态（参考节点 pill）」）。
+- **点 pill 时也把 localStorage/服务端操作员课程一并改掉**——否：那会把「看哪门课」变成持久副作用
+  （切一下看一眼就把动作目标换掉了）；`selectCourse` 本来就是「本浏览器查看 + 本机同步操作员课程」
+  的既有语义，pill 复用它。
+
+**违反后果**：把开课标记退回「有账本」⇒ 一次「启动服务进程」就把 tmp/ 下全部历史课拉起来跑（并让 hub
+继续派残留 job）；停课不删标记 ⇒ 点到「停课」后课程自己又回来（比没有停课更坏：操作员会以为停不掉）；
+在训名单在 TS 里按进程存活重算 ⇒ 进程一停已开课的课程全从顶部消失（开课与进程是两件事）。
+
+5. **「空课程表」必须回契约形状**：默认表 = 已开课的课，而开课是显式动作 ⇒「一门课都没开」是启动后的
+   **第一种状态**。只读入口 `run_rl_cluster.py --json` 的空表分支原本回一行人话，而控制台是直接
+   `JSON.parse` 这段 stdout（`server/api/loop-queue.ts`）⇒ 在默认状态下常年报「输出不可解析」的红错。
+   定案：空表也回 `{"courses": [], "pools": {...}}`（形状在所有分支一致；池容量是进程事实，与有没有课无关）。
+
+**落地**：`nn-training/remote/protocol.py`（`COURSE_ENABLE_MARKER`）· `nn-training/rl/loop_plan.py`
+（`course_enabled` / `enabled_courses`）· `nn-training/rl/loop_serve.py`（发现模式两处扫描）·
+`nn-training/run_rl_cluster.py`（只读课程表）· `nn-training/remote/hub_server.py`（`_course_dir_live`）·
+`dashboard/src/server/actions/course-lifecycle.ts`（标记写/删）· `dashboard/src/server/api/state-view.ts`
+（`trainingCourses` = 已开课）· `dashboard/src/web/view/loop-queue.ts`（`coursePills` 纯函数）·
+`dashboard/src/web/app/panels/TrainingPills.tsx`（新）· `dashboard/src/web/app/app.tsx`（顶部形状）·
+`dashboard/src/web/theme.css`（`.tc-tpills` / `.tc-tpill`）。
+
+**回归**：`nn-training/tests/test_loop_plan_waiting.py`（+2 例：空课程表的 `--json` 形状 · 默认课程表 = 已开课）·
+`dashboard/tests/training-pills.test.ts`（新，14 例：pill 推导四态 + 确定性事实优先 +
+「待进程」/「视图不可用」不编造 · `trainingCourses` = 标记而非账本 · SSR 上屏/高亮/BC 徽标/停课键/
+空行不渲染/顶栏只有「训练」）· `course-lifecycle.test.ts`（+2 例：开课写标记、停课删标记、可逆）·
+`web-ssr-readonly.test.ts`（旧 `tc-training-tag` 用例改写为「select 标记 + pill 行」）·
+nn python：`test_multi_course_hub.py`（`_enable` 助手 + 新回归「没开过课的目录不进课程表」）·
+`test_serve_wiring.py` / `test_offline_task_pack.py` / `test_worker_offline_cap.py`（造课目录的助手补写标记
+——它们钉的是各自那件事，不是「没标记也能被发现」）。
+
+**gate**：dashboard **752 pass / 0 fail** + `tsc --noEmit` + oxlint 0 warning + 三份 bundle 构建通过
+（app 296114B / gzip 69219B）；根 `bun run check` 绿；nn python 全量 **0 failed**（`bash tools/githook/nn-py-safe.sh`）。
+

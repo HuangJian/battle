@@ -18,10 +18,12 @@ import { fetchState, postAction } from './lib/api-client'
 import { Hero } from './panels/Hero'
 import { ComponentCards } from './panels/ComponentCards'
 import { NodePills } from './panels/NodePills'
+import { TrainingPills } from './panels/TrainingPills'
 import { MetricsTable } from './panels/MetricsTable'
 import { NodeStats } from './panels/NodeStats'
 import { LogNavCard } from './panels/LogNavCard'
 import { TrainLaunchModal, type TunnelLaunchOpts } from './panels/TrainLaunchModal'
+import { OpenCourseModal } from './panels/OpenCourseModal'
 import { BcPanel } from './panels/BcPanel'
 import { CourseOverview } from './panels/CourseOverview'
 import { WorkerRegistry } from './panels/WorkerRegistry'
@@ -29,6 +31,7 @@ import { LoopQueue } from './panels/LoopQueue'
 import { TaskBundlePanel } from './panels/TaskBundlePanel'
 import { WirePanel } from './panels/WirePanel'
 import { EvalSummary } from './panels/EvalSummary'
+import type { RolloutSrcMode, TrainMode } from '../../core/types'
 import {
   fmtTs,
   latestRow,
@@ -129,6 +132,8 @@ export function App({ initial }: AppProps) {
   )
   const [drawerTab, setDrawerTab] = useState<DrawerTabKey | null>(null)
   const [trainOpen, setTrainOpen] = useState(false)
+  // 开课弹窗（2026-09-20：课程级选项随它走，不再搭「启动服务进程」的车）。
+  const [openCourseModal, setOpenCourseModal] = useState(false)
   const [poolFreshNonce, setPoolFreshNonce] = useState(0)
   // 只读横幅可关闭：localStorage 记住「不再显示」（仅局域网只读视图相关；tc. 前缀防误删）。
   // 首帧恒 false（与 SSR 一致），localStorage 偏好 hydrate 后恢复——见下方 effect。
@@ -299,24 +304,40 @@ export function App({ initial }: AppProps) {
     [doAction],
   )
 
-  const handleLaunch = async (
-    opts?: TunnelLaunchOpts & { remoteDegrade?: boolean },
-  ): Promise<void> => {
+  const handleLaunch = async (opts?: TunnelLaunchOpts): Promise<void> => {
     setTrainOpen(false)
-    // 启动**不传模式**（2026-09-19）：执行面由 rl.hub_push + 登记节点推出来，
-    // 服务端 preset 也不再有 mode/endpoint/authKey 这几个 body 字段。
-    const body: Record<string, unknown> = {
-      remoteDegrade: opts?.remoteDegrade === true,
-    }
-    // M1/M2/M3：传输选项随启动回写 rl-config + console-state（未选 = 不传，沿用现值）。
+    // 启动**只带进程级选项**（2026-09-20）：本机 agent → 共享 hub → 共享 trainer。
+    // 课程级选项（训练模式 / rollout 位置 / 降级本机）随「开课」走（`openCourse`），
+    // 服务端也把往 preset 里的这些字段当错误拒掉（响亮，而不是静默丢掉）。
+    const body: Record<string, unknown> = {}
+    // M1/M2：传输选项随启动回写 rl-config + console-state（未选 = 不传，沿用现值）。
     if (opts?.cfProtocol) body.cfProtocol = opts.cfProtocol
     if (opts?.cfEdgeIp) body.cfEdgeIp = opts.cfEdgeIp
     if (opts?.slim) body.slim = opts.slim
-    if (opts?.rolloutSrc) body.rolloutSrc = opts.rolloutSrc
-    // 训练模式（2026-09-19）：在线/离线。离线时服务端会忽略上面的 rolloutSrc
-    // （`run` 绝不进全局 rl.rollout_src），只写该课的课程级键。
-    if (opts?.trainMode) body.trainMode = opts.trainMode
     await doAction('preset', body)
+  }
+
+  /** 开课：课程级选项随它一起下发（服务端写 `courses.<课>.*` + 建发现事实 + 解暂停 + 置 hub 模式）。 */
+  const handleOpenCourse = async (opts: {
+    trainMode: TrainMode
+    rolloutSrc?: RolloutSrcMode
+    remoteDegrade: boolean
+  }): Promise<void> => {
+    setOpenCourseModal(false)
+    await doAction('openCourse', {
+      trainMode: opts.trainMode,
+      remoteDegrade: opts.remoteDegrade,
+      ...(opts.rolloutSrc ? { rolloutSrc: opts.rolloutSrc } : {}),
+    })
+  }
+
+  /** 停课：非破坏（删开课标记 + 写暂停意图 + 该课 hub 置离线；队列与账本一个字不动）。
+   *
+   *  ★ 课程显式带上（不依赖 doAction 的「当前查看课程」兜底）：停课的入口在**每门课的 pill**
+   *  上（2026-09-20 用户口径），点 A 课的 ■ 必须停 A——若走兜底，一旦查看目标与 pill 不同步
+   *  （或用户在两次渲染之间切了课）就会停错一门，那是这里最贵的一类错误。 */
+  const handleStopCourse = async (course: string): Promise<void> => {
+    await doAction('stopCourse', { course })
   }
 
   // 课程锁已随「单 hub 多课程」解除（2026-09-18）：hub 现在一个进程托管 N 份账本
@@ -348,19 +369,19 @@ export function App({ initial }: AppProps) {
   const phaseInfo: PhaseInfo | null = stateView?.phase ?? null
   const phaseElapsed = phaseInfo && phaseInfo.sinceMs != null ? now - phaseInfo.sinceMs : null
 
-  // 在训课程（**可多门**）：以服务端 stamp 的 `trainingCourses` 为准（共享 trainer 在跑
-  // ∧ 该课未收官——多课程并行下这是唯一能一次看全的口径，R3-5）；旧视图没有该字段时
-  // 回退到「trainer 在跑就当作当前查看的这门课在跑」（失败方向是**少报**，不编）。
+  // 在训课程（**可多门**）：以服务端 stamp 的 `trainingCourses` 为准——2026-09-20 起它是
+  // **已开课**的课程（事实源 = 开课标记，与训练侧 `enabled_courses` / hub `_course_dir_live`
+  // 同一个闸），不是「共享 trainer 在跑」（那是进程事实，两者正交：开了课但进程没跑是合法
+  // 稳态）。旧服务端没有该字段 ⇒ 空表（**不**回退到「trainer 在跑就当作这门课在训」：那个
+  // 回退会在旧版上给一门从未开课的课挂上在训 pill，而 pill 上的停课键会真去停一门没开的课）。
   const trainingLoop = (stateView?.components ?? []).find((c) => c.key === 'trainingLoop')
-  const trainingCourses =
-    stateView?.trainingCourses && stateView.trainingCourses.length > 0
-      ? stateView.trainingCourses
-      : trainingLoop?.status === 'running'
-        ? [trainingLoop.course || stateView?.course || ''].filter(Boolean)
-        : []
+  const trainingCourses = stateView?.trainingCourses ?? []
   const trainingSet = new Set(trainingCourses)
-  // 除当前查看之外的在训课程（见下方标签处的注释）。
-  const otherTraining = trainingCourses.filter((c) => c !== viewCourse)
+  // 共享 trainer 是否在跑（「已开课」与「进程在跑」是两件事，pill 状态与按钮提示都要说清）。
+  const trainerRunning = trainingLoop?.status === 'running'
+  // 课程生命周期（2026-09-20）：开课/停课入口的判据由服务端 stamp（账本存在 + 暂停意图）。
+  // 旧视图无此字段 ⇒ 不渲染按钮（不编状态；宁可少一个按钮，不可给一个假承诺）。
+  const lifecycle = stateView?.courseLifecycle ?? null
 
   return (
     <div className="tc-wrap">
@@ -401,28 +422,36 @@ export function App({ initial }: AppProps) {
                 <option key={c} value={c}>
                   {trainingSet.has(c) ? '🔥 ' : ''}
                   {c}
-                  {trainingSet.has(c) ? '（正在训练）' : ''}
+                  {trainingSet.has(c) ? '（已开课）' : ''}
                 </option>
               ))}
             </select>
-            {/* 在训课程里**除当前查看之外**的那些：正在看的那门由 select 里的 🔥 标记
-                （全体在训课程的 🔥 标记在选项里，一份不落），这里只提醒「别处还在跑」——
-                多课程并行时它是「有哪些课上在同时跑」的唯一可见面。 */}
-            {otherTraining.length > 0 ? (
-              <span
-                className="tc-training-tag"
-                title={
-                  `在训课程共 ${trainingCourses.length} 门：${trainingCourses.join('、')}` +
-                  (viewCourse && trainingSet.has(viewCourse)
-                    ? '（含当前查看的这门）'
-                    : '——切换查看不影响训练')
-                }
-              >
-                <span className="tc-dot tc-dot--on" />
-                正在训练：{otherTraining.join('、')}
-              </span>
-            ) : null}
           </label>
+          {/* 开课入口（2026-09-20 用户口径：**进程启动与课程解耦** + **课程开训必须手动开**）。
+              先在上面的课程 select 选课，再点这里：弹窗收课程级选项（训练模式 / rollout
+              位置 / 降级本机），确认即开课——写开课标记（训练侧/hub 的「在训」判据）+ 课程级
+              旋钮 + 发现事实（账本/权重/`remote-jobs`）+ 解暂停 + 置 hub 模式（进程没跑也能开）。
+
+              **停课不在这里**：它在每门课的 pill 上（见下方 TrainingPills），按课停、按课消失
+              ——一个按钮同时做「开这门」与「停这门」在两门课并存时语义不明。 */}
+          {viewCourse ? (
+            <button
+              type="button"
+              className={`tc-btn tc-btn--sm${lifecycle?.enabled ? '' : ' tc-btn--primary'}`}
+              // 只读视图**不物理禁用**（只读是动作边界，不是按钮状态：禁用会让整条工具栏
+              // 看起来灰败破碎，真点击由服务端 403 + flash 兜底）。
+              title={
+                readOnly
+                  ? '只读模式：开课仅限本机 localhost'
+                  : lifecycle?.enabled
+                    ? `${viewCourse} 已在课程表（在训）。再点「训练」= 按当前选项重写课程级旋钮 + 重新置 hub 模式（机器侧旋钮要重开课才生效）`
+                    : `${viewCourse} 未开课。点「训练」= 开课：写开课标记 + 建账本/权重/remote-jobs + 按所选训练模式置 hub 派发闸（进程没跑也能开）`
+              }
+              onClick={() => setOpenCourseModal(true)}
+            >
+              训练
+            </button>
+          ) : null}
           {/* 门禁动作（**仅在有训练时显示**）：停机 = 触发门禁即下发 cloud halt；
               提示 = 只横幅告警，绝不杀云端 PPO worker。
               背景：G4(plateau) 的 REMEDIATE 每 5 轮必复现，c6-pickup3 / c6-bonus
@@ -508,6 +537,21 @@ export function App({ initial }: AppProps) {
           </div>
         </div>
       </header>
+      {/* ── 在训课程 pill 行（用户 2026-09-20 口径）：一门课一个 pill（it 数 + 状态），
+           点 pill 切查看目标（Hero 趋势 + 指标表跟着走）并高亮，pill 上的 ■ 停课（非破坏）
+           ——停课后服务端 stamp 里不再有它，pill 自行从顶部消失（不做本地乐观删除：队列与
+           账本一宇未动这件事只能由服务端事实说话）── */}
+      <PanelErrorBoundary>
+        <TrainingPills
+          courses={trainingCourses}
+          rows={stateView?.loopQueue?.rows ?? []}
+          trainerRunning={trainerRunning}
+          viewCourse={viewCourse}
+          onSelect={selectCourse}
+          onStop={(c) => void handleStopCourse(c)}
+          readOnly={readOnly}
+        />
+      </PanelErrorBoundary>
       {connError !== 'off' ? (
         <div className="tc-banner tc-banner--err" role="alert">
           <span>
@@ -782,6 +826,16 @@ export function App({ initial }: AppProps) {
           onClose={() => setTrainOpen(false)}
           onAction={doAction}
           onLaunch={(opts) => void handleLaunch(opts)}
+          readOnly={readOnly}
+        />
+      ) : null}
+      {stateView ? (
+        <OpenCourseModal
+          open={openCourseModal}
+          course={viewCourse}
+          modes={stateView.modes}
+          onClose={() => setOpenCourseModal(false)}
+          onConfirm={(opts) => void handleOpenCourse(opts)}
           readOnly={readOnly}
         />
       ) : null}

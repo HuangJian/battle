@@ -84,6 +84,7 @@ from remote._port_guard import ensure_port_free
 from remote.protocol import (
     AUTH_HEADER,
     CLAIM_TTL_SEC,
+    COURSE_ENABLE_MARKER,
     COURSE_MODE_OFFLINE,
     COURSE_MODE_ONLINE,
     COURSE_MODES,
@@ -1138,7 +1139,15 @@ class _HubQueue(_AuthGuard):
         return added
 
     def _course_dir_live(self, ent: Path, now: float) -> bool:
-        """课程目录「在跑」判据：`{remote-jobs,offline}` 存在，且自身或本课 jsonl 新鲜。"""
+        """课程目录「在训」判据：**已开课标记**存在，且 `{remote-jobs,offline}` 之一存在且新鲜。
+
+        ★ 开课标记（`training-enabled.txt`）是 2026-09-20 加的**显式闸**：没有它，hub 会把
+        tmp/ 下每一门历史课（都有 remote-jobs/ 残影）都当成「在跑的课」登记进课程表，并继续
+        把残留的 pending job 派给真 GPU worker（白烧租约）。用户口径：「课程开训需要用户手动
+        开启」；标记由控制台开课写、停课删（`remote.protocol.COURSE_ENABLE_MARKER`）。
+        """
+        if not (ent / COURSE_ENABLE_MARKER).exists():
+            return False
         for sub in ("remote-jobs", "offline"):
             d = ent / sub
             if not d.is_dir():

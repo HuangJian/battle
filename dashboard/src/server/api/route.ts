@@ -16,6 +16,7 @@ import {
   type ActionResult,
   busy,
   markCloudHaltRecovered,
+  openCourse,
   registerPushWorker,
   reloadPushWorkers,
   removePushWorker,
@@ -30,6 +31,7 @@ import {
   startPreset,
   stopAll,
   stopComponent,
+  stopCourse,
   triggerCloudHalt,
 } from '../actions'
 import {
@@ -119,32 +121,47 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
         if (slim && !['on', 'off'].includes(slim)) {
           return errResp(`未知瘦身开关: ${slim}（只接受 on|off）`, 400)
         }
-        // M3：rollout 执行位置（同白名单写法）——与 python `choices=("auto","local","node")`
-        // 同字面量域，直接落库（**无**域换算，别在这里发明 on/off 那种中间态）。
-        const rolloutSrc = bodyStr(body, 'rolloutSrc')
-        // 域与 python `rl/loop_steps.py::ROLLOUT_SRCS` 同源（含离线模式的 `run`）。
-        if (rolloutSrc && !['auto', 'local', 'node', 'run'].includes(rolloutSrc)) {
-          return errResp(`未知 rollout 位置: ${rolloutSrc}（只接受 auto|local|node|run）`, 400)
+        // ★ 课程级选项（trainMode / rolloutSrc / remoteDegrade）**已迁到「开课」**
+        // （2026-09-20：进程启动不再为某门课写配置）——还往这里发就是一条静默无效的承诺，
+        // 所以响亮拒绝并指路，而不是默默丢掉。
+        for (const k of ['trainMode', 'rolloutSrc', 'remoteDegrade'] as const) {
+          if (body[k] !== undefined) {
+            return errResp(`${k} 是课程级选项，已迁到「开课」（openCourse）`, 400)
+          }
         }
-        // 训练模式（2026-09-19）：`在线|离线`。**不能**归到 rolloutSrc 里：离线要同时写
-        // 两个课程级键（run + run_iters=-1）并把该课 hub 置 offline，换算在
-        // `stack/specs.ts::trainModeKnobs`。
+        return okResp(
+          await startPreset({
+            cfProtocol: (cfProtocol || undefined) as CfProtocol | undefined,
+            cfEdgeIp: (cfEdgeIp || undefined) as CfEdgeIp | undefined,
+            slim: (slim || undefined) as SlimMode | undefined,
+          }),
+        )
+      }
+      // ---- 开课 / 停课（2026-09-20 用户指令：进程启动与课程解耦，课程生命周期独立入口）----
+      case 'openCourse': {
+        // 训练模式（`在线|离线`）：离线要同时写两个课程级键（run + run_iters=-1）并把该课
+        // hub 置 offline，换算在 `stack/specs.ts::trainModeKnobs`（这里只做白名单）。
         const trainMode = bodyStr(body, 'trainMode')
         if (trainMode && !['online', 'offline'].includes(trainMode)) {
           return errResp(`未知训练模式: ${trainMode}（只接受 online|offline）`, 400)
         }
+        // rollout 位置：与 python `rl/loop_steps.py::ROLLOUT_SRCS` 同字面量域。
+        const rolloutSrc = bodyStr(body, 'rolloutSrc')
+        if (rolloutSrc && !['auto', 'local', 'node', 'run'].includes(rolloutSrc)) {
+          return errResp(`未知 rollout 位置: ${rolloutSrc}（只接受 auto|local|node|run）`, 400)
+        }
         return okResp(
-          await startPreset(ctx.course, {
-            // T7：布尔用严格 true（缺省/其它 = 关，不自动降级）。
-            remoteDegrade: body.remoteDegrade === true,
-            cfProtocol: (cfProtocol || undefined) as CfProtocol | undefined,
-            cfEdgeIp: (cfEdgeIp || undefined) as CfEdgeIp | undefined,
-            slim: (slim || undefined) as SlimMode | undefined,
-            rolloutSrc: (rolloutSrc || undefined) as RolloutSrcMode | undefined,
+          await openCourse(ctx.course, {
             trainMode: (trainMode || undefined) as TrainMode | undefined,
+            rolloutSrc: (rolloutSrc || undefined) as RolloutSrcMode | undefined,
+            // T7：显式给了才写（缺省 = 不动该课的降级旋钮）。
+            remoteDegrade:
+              body.remoteDegrade === undefined ? undefined : body.remoteDegrade === true,
           }),
         )
       }
+      case 'stopCourse':
+        return okResp(await stopCourse(ctx.course))
       case 'setMode': {
         const key = bodyStr(body, 'key')
         const value = bodyStr(body, 'value')

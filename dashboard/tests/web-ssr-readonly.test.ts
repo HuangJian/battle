@@ -102,7 +102,10 @@ describe('console 局域网只读边界（§…：LAN 查看 / localhost 控制�
     }
   })
 
-  it('课程 select：所有在训课程在选项里高亮（🔥 + （正在训练）），不止第一门', async () => {
+  it('课程 select：所有在训课程在选项里高亮（🔥 + （已开课）），不止第一门', async () => {
+    // 2026-09-20 语义变更：名单来自服务端 stamp 的 `trainingCourses` = **已开课**（开课标记）
+    // ——「正在训练」那串标签已被在训 pill 行取代（每门课一个 pill，见 training-pills.test.ts），
+    // 这里只钉 select 里的多课标记不再漏课（旧的「只标第一门」回归）。
     const base = await api.buildStateView()
     const view2: ConsoleStateView = {
       ...base,
@@ -112,41 +115,35 @@ describe('console 局域网只读边界（§…：LAN 查看 / localhost 控制�
     }
     const html = render.renderConsolePage(view2)
     for (const c of ['a', 'b']) {
-      expect(html).toContain(`🔥 ${c}（正在训练）`)
+      expect(html).toContain(`🔥 ${c}（已开课）`)
     }
     expect(html).not.toContain('🔥 viewB')
-    // 查看课程不是任一门在训 → 标签列出全部在训课程
-    expect(html).toContain('正在训练：b、a')
-    // 查看课程恰是其中一门 → 标签只提醒「别处还在跑」（正在看的那门由 🔥 标记）
-    const same = render.renderConsolePage({ ...view2, course: 'a' })
-    expect(same).toContain('正在训练：b')
-    expect(same).not.toContain('正在训练：b、a')
+    // 旧的串行标签（`tc-training-tag`）不再上屏——它换成了在训 pill 行
+    // （阅其内容看 training-pills.test.ts；这里只钉旧元素不再存在）。
+    expect(html).not.toContain('tc-training-tag')
   })
 
-  it('训练中课程标签：trainingLoop 运行且课程 ≠ 查看课程时，select 后高亮「正在训练：<课程>」', async () => {
+  it('在训 pill 行的状态由**进程事实**决定：trainer 停住时标「待进程」而不是假装在推进', async () => {
+    // “已开课”与“进程在跑”是两件事（进程与课程解耦后），pill 必须把两半都说清：
+    // 开课了但 trainer 没起 ⇒ 灰点「待进程」（启动服务进程后自动入队），不是故障。
     const base = await api.buildStateView()
-    const mk = (course: string, tlCourse: string | null, running: boolean): ConsoleStateView => ({
+    const mk = (running: boolean): ConsoleStateView => ({
       ...base,
-      course,
+      course: 'trainA',
+      trainingCourses: ['trainA'],
+      loopQueue: null,
       components: base.components.map((c) =>
         c.key === 'trainingLoop'
-          ? {
-              ...c,
-              status: running ? ('running' as const) : ('stopped' as const),
-              course: tlCourse,
-            }
+          ? { ...c, status: running ? ('running' as const) : ('stopped' as const), course: null }
           : c,
       ),
     })
-    // 查看 viewB、训练 trainA → select 后高亮训练课程
-    const html = render.renderConsolePage(mk('viewB', 'trainA', true))
-    expect(html).toContain('正在训练：trainA')
-    // 查看课程 = 训练课程 → 无标签（正在看的就是训练的）
-    const same = render.renderConsolePage(mk('trainA', 'trainA', true))
-    expect(same).not.toContain('正在训练：')
-    // trainingLoop 未运行 → 无标签
-    const idle = render.renderConsolePage(mk('viewB', 'trainA', false))
-    expect(idle).not.toContain('正在训练：')
+    // loopQueue 为 null ⇒ 读面不可用：pill 仍在（停课入口不能因读面坏了就消失），状态如实说
+    const idle = render.renderConsolePage(mk(false))
+    expect(idle).toContain('class="tc-tpills"')
+    expect(idle).toContain('视图不可用')
+    const running = render.renderConsolePage(mk(true))
+    expect(running).toContain('视图不可用')
   })
 
   it('只读横幅关闭键带 tc. 前缀：cleanupNonTcKeys 白名单清理不误删', () => {

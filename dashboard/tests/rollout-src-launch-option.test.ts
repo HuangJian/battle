@@ -78,16 +78,15 @@ describe('preset / route / UI 接线（源码断言：跨文件链路 tsc 抓不
     expect(src).toContain('rolloutSrc: (rolloutSrc || undefined) as RolloutSrcMode | undefined')
   })
 
-  it('preset：字符串域**原样**落 rl-config（过换算函数 = 训练启动直接报错退出）', () => {
-    const src = readSrc('src/server/actions/preset.ts').replace(/\s+/g, ' ')
-    // 全局键写的是 `globalRolloutSrc`（= 离线模式下被置空的那个）；写成 opts.rolloutSrc
-    // 就等于把离线档的 `run` 落进**所有课共用**的 rl.rollout_src。
-    expect(src).toContain('cfgT.rl.rollout_src = globalRolloutSrc')
-    expect(src).toMatch(/saveConsoleState\(\{ [^}]*rolloutSrc: globalRolloutSrc/)
-    // 反向：不得像 slim 那样过任何 *ToCfg 换算
-    expect(src).not.toMatch(/rollout_src = \w*[Tt]oCfg\(/)
-    // 回写门必须带上它，否则「选了但没写盘」= 假成功
-    expect(src).toContain('opts.cfProtocol || opts.cfEdgeIp || opts.slim || globalRolloutSrc')
+  it('★ 全局 rl.rollout_src 不再被控制台写（课程级选项只落 courses.<课>）', () => {
+    // 2026-09-20：rollout 位置随「开课」走，而它在 rl-config 里的落点是**课程级覆盖**。
+    // 曾经的写法（全局面 opt-in）把一门课的选择变成了所有课共用的默认面。
+    const preset = readSrc('src/server/actions/preset.ts').replace(/\s+/g, ' ')
+    expect(preset).not.toMatch(/rl\.rollout_src\s*=/)
+    // 字符串域**原样**落（过换算函数 = 训练启动直接报错退出）
+    const life = readSrc('src/server/actions/course-lifecycle.ts').replace(/\s+/g, ' ')
+    expect(life).toContain('row.rollout_src = opts.rolloutSrc')
+    expect(life).not.toMatch(/rollout_src = \w*[Tt]oCfg\(/)
   })
 
   it('state-view：modes 带当前生效值（UI 才能显示「改动有没有生效」）', () => {
@@ -95,23 +94,23 @@ describe('preset / route / UI 接线（源码断言：跨文件链路 tsc 抓不
     expect(src).toContain('rolloutSrc: resolveRolloutSrc(cfg, course)')
   })
 
-  it('app.tsx：rolloutSrc 进 preset body（漏了 = 选项点了不生效的假成功）', () => {
+  it('app.tsx：rolloutSrc 进 **openCourse** body（漏了 = 选项点了不生效的假成功）', () => {
     const src = readSrc('src/web/app/app.tsx').replace(/\s+/g, ' ')
-    expect(src).toContain('if (opts?.rolloutSrc) body.rolloutSrc = opts.rolloutSrc')
+    expect(src).toContain('...(opts.rolloutSrc ? { rolloutSrc: opts.rolloutSrc } : {})')
+    // 启动 body 不带它（课程级选项不得回流）
+    expect(src).not.toContain('body.rolloutSrc')
   })
 
-  it('TrainLaunchModal：控件 + 随启动选项带上 rolloutSrc + 显示当前生效值', () => {
-    const src = readSrc('src/web/app/panels/TrainLaunchModal.tsx').replace(/\s+/g, ' ')
-    expect(src).toContain("const TC_ROLLOUT_SRC = 'tc.rolloutSrc'")
+  it('开课弹窗：控件 + 随开课选项带上 rolloutSrc + 显示当前生效值', () => {
+    const src = readSrc('src/web/app/panels/OpenCourseModal.tsx').replace(/\s+/g, ' ')
+    expect(src).toContain("const TC_OPEN_ROLLOUT = 'tc.openCourse.rolloutSrc'")
     expect(src).toContain('ariaLabel="rollout 执行位置"')
-    // 上抛的选项对象里有它（漏了 = UI 选了但没随 onLaunch 传出去；启动不再带 mode）
-    expect(src).toMatch(/onLaunch\(\{[^}]*\brolloutSrc\b/)
-    // 选项对象类型里有它（`trainMode` 紧随其后，故不能再锚 `}`）
-    expect(src).toContain('rolloutSrc: RolloutSrcMode')
+    // 上抛的选项对象里有它（漏了 = UI 选了但没随 onConfirm 传出去）
+    expect(src).toMatch(/onConfirm\(\{[^}]*\brolloutSrc\b/)
     // 上次选择要记住（与 cfProtocol / slim 同口径）
-    expect(src).toContain('writeLocal(TC_ROLLOUT_SRC, rolloutSrc)')
+    expect(src).toContain('writeLocal(TC_OPEN_ROLLOUT, rolloutSrc)')
     // 当前生效值上屏：以为改了其实没改是本仓反复出现的一类坑
-    expect(src).toContain("modes.rolloutSrc === 'node'")
+    expect(src).toContain('modes.rolloutSrc')
   })
 
   it('console-state：字段 additive（旧文件无此键不阻塞读取，由 rl-config 回填）', () => {

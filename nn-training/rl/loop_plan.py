@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from remote.protocol import COURSE_ENABLE_MARKER
 from rl.bc_ledger import inflight_jobs
 from rl.commit_journal import CommitJournal
 from rl.loop_tasks import RoundFacts, Task, pending_tasks, round_tasks
@@ -294,10 +295,30 @@ def waiting_state(
     return WAIT_READY, f"无外部等待，下一步 {current or '?'}"
 
 
+def course_enabled(traj: str | Path) -> bool:
+    """这门课是否被**显式开课**（`<traj>/training-enabled.txt` 存在）。
+
+    标记由控制台「开课」写、「停课」删（`actions/course-lifecycle.ts`）；训练侧的发现表
+    必须过这一道闸——否则 tmp/ 下的历史课会被一起拉起来跑（见 `COURSE_ENABLE_MARKER`）。
+    """
+    return (Path(traj) / COURSE_ENABLE_MARKER).exists()
+
+
+def enabled_courses(traj_root: str | Path) -> list[str]:
+    """**发现模式下的课程表**：有账本 ∧ 被显式开课（用户口径 2026-09-20）。
+
+    与 `discover_courses` 的关系：前者是「盘上有哪些**跑过**的课」（控制台的课程下拉用它，
+    历史课必须仍可选/可看），后者是「这门课**现在在训**」——只有开过课的才算。
+    """
+    return [c for c in discover_courses(traj_root) if course_enabled(course_traj(traj_root, c))]
+
+
 def discover_courses(traj_root: str | Path) -> list[str]:
-    """扫 `<traj-root>/*/training_log.jsonl` 得到课程表（与 hub `--discover` 同判据）。
+    """扫 `<traj-root>/*/training_log.jsonl` 得到**盘上已有的**课程表。
 
     「有账本 = 这门课在这里跑过」是文件系统事实，不需要注册表（R1 的同一原则）。
+    ⚠ 它**不是**「哪几门课在训」：「在训」的判据是 `enabled_courses`（开课标记）——
+    把这两件事混为一谈的后果是进程一起来就把历史课全拉去训练（2026-09-20 实测）。
     """
     root = Path(traj_root)
     if not root.exists():

@@ -225,17 +225,19 @@ describe('启动训练不选模式（防回流）', () => {
     expect(code('web/view/console-types.ts')).not.toContain('trainerPpo')
   })
 
-  it('启动弹窗没有模式开关与 push 凭据输入（配置入口在 worker 登记面板）', () => {
+  it('启动弹窗只留进程级选项（课程级选项与 push 凭据都不在）', () => {
     const modal = code('web/app/panels/TrainLaunchModal.tsx')
-    // 保留的 SegmentedControl 只服务隧道/瘦身/rollout——不得再出现 pull/push/local 三选一
+    // 保留的 SegmentedControl 只服务隧道/瘦身——不得再出现 pull/push/local 三选一
     expect(modal).not.toContain("label: 'Push'")
     expect(modal).not.toContain('readSavedMode')
     expect(modal).not.toContain('pushEndpoint')
     expect(modal).not.toContain('pushAuthKey')
-    // 已退役的 pull/push 模式 localStorage 键（`tc.train.mode`）不得回流。
-    // 注意：`TC_TRAIN_MODE` 是**另一个域**（在线/离线，2026-09-19），别把两者混为一谈。
+    // 已退役的 pull/push 模式 localStorage 键（`tc.train.mode`）不得回流
     expect(modal).not.toContain('tc.train.mode')
-    expect(modal).toContain("const TC_TRAIN_MODE = 'tc.trainMode'")
+    // ★ 课程级选项（在线/离线训练模式）**不在启动弹窗里**（2026-09-20 用户口径：
+    // 服务进程启动与课程解耦）——它们在开课弹窗。
+    expect(modal).not.toContain('训练模式')
+    expect(code('web/app/panels/OpenCourseModal.tsx')).toContain('训练模式')
   })
 
   it('launch 动作面不再传 mode / endpoint / authKey', () => {

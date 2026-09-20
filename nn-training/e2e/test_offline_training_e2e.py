@@ -49,7 +49,7 @@ from remote import net_http
 from remote.artifacts import ArtifactStore
 from remote.hub_client import publish_job
 from remote.offline_deliver import OfflineDeliverer
-from remote.protocol import TS_CODE_NAME, encode_weights_json
+from remote.protocol import COURSE_ENABLE_MARKER, TS_CODE_NAME, encode_weights_json
 from remote.worker import poll_job
 from rl.iter_job import build_iter_spec
 from rl.plan import build_plan, dump_plan
@@ -109,12 +109,19 @@ def _http_bytes(base: str, path: str, *, token: str = TOKEN) -> tuple[int, bytes
 
 
 def _course_dirs(traj_root: Path, course: str) -> tuple[Path, Path]:
-    """课程的盘上形状（与生产逐字节同构）：`<traj>/<课>/{remote-jobs,training_log.jsonl}`。"""
+    """课程的盘上形状（与生产逐字节同构）：
+    `<traj>/<课>/{remote-jobs,training_log.jsonl,training-enabled.txt}`。
+
+    ★ 开课标记（`training-enabled.txt`）是 hub 认课的那道显式闸（2026-09-20）：课程表 =
+    账本 ∧ 标记——否则 tmp/ 下的历史课（同样有 `remote-jobs/` 残影）会把残留 job 继续派给
+    真 GPU worker。生产里由控制台「开课」写；这里由一个已开课的课程目录代人按下那一下。
+    """
     d = traj_root / course
     job_root = d / "remote-jobs"
     job_root.mkdir(parents=True, exist_ok=True)
     jsonl = d / "training_log.jsonl"
     jsonl.touch()
+    (d / COURSE_ENABLE_MARKER).touch()
     return job_root, jsonl
 
 

@@ -3,7 +3,7 @@ import { existsSync } from 'fs'
 import path from 'path'
 import { REPO_ROOT } from '../../core/paths'
 import type { ConsoleStateView, MetricsView } from '../../web/view'
-import { loadConsoleState } from '../actions'
+import { courseEnableMarkerPath, loadConsoleState } from '../actions'
 import { resolveCfTunnel, resolveRolloutSrc, resolveSlim } from '../../stack/specs'
 import { readIterMetrics, readPairedReferee } from '../iters'
 import { loadConfigSafe } from './config'
@@ -51,7 +51,29 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
   // 总览/worker 登记有 5s TTL，稳态下两者都在缓存里）。
   const trainerAlive = sharedTrainerAlive()
   const loopQueue = await buildLoopQueueView(trainerAlive).catch(() => null)
-  const training = (loopQueue?.rows ?? []).filter((r) => r.training).map((r) => r.course)
+  // 「在训课程」= **已开课**的课程（`tmp/<课>/training-enabled.txt`）。
+  //
+  // ★ 判据换过两次，两次都是事故驱动的（2026-09-20）：
+  //   ① 旧口径「共享 trainer 在跑 ∧ 队列未收官」——它回答的是「进程在不在推进」，
+  //      而不是「哪几门课被放进了课程表」；进程没跑时已开课的课会从顶上消失（而它明明
+  //      在课程表里，一起进程就该跑）；
+  //   ② 更早的「有账本 = 在训」——tmp/ 下每门历史课都有账本，**一启动共享 trainer 就
+  //      把 21 门历史课一起拉起来跑**（用户报障原话：「界面显示一堆课程正在训练」）。
+  // 开课标记是训练侧（`loop_plan.enabled_courses`）与 hub（`_course_dir_live`）用的**同一个**
+  // 闸：控制台只是把同一份事实读出来上屏（不再自己推算一份，两份必然漂开）。
+  const training = courses.filter((c) => existsSync(courseEnableMarkerPath(c)))
+  // 课程生命周期事实（2026-09-20：进程与课程解耦后，顶部「训练」入口与在训 pill 行的判据）。
+  // 两个判据各自只有**一个**事实源，不在这里发明第三份：
+  //  · enabled = **开课标记**（`training-enabled.txt`）——训练侧 `enabled_courses` 与 hub
+  //    `_course_dir_live` 的同一个闸。「有账本」**不是**在训判据（每门历史课都有账本：
+  //    拿它当判据的后果就是一启动共享 trainer 就把 21 门历史课拉起来跑）；
+  //  · paused = 暂停意图（与调度器卡片的「暂停」共用同一份契约）。
+  const courseLifecycle = course
+    ? {
+        enabled: training.includes(course),
+        paused: (loopQueue?.rows ?? []).some((r) => r.course === course && r.pausedIntent),
+      }
+    : null
   const [overview, workerRegistry] = await Promise.all([
     buildOverview(cfg, courses, course, training).catch(() => null),
     buildWorkerRegistry(cfg, course).catch(() => null),
@@ -63,11 +85,13 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     isBc: isBcCourse(course),
     activeCourse: state.activeCourse || state.course || course,
     courses,
-    // 在训课程（registry trainingLoop 存活）：课程 select 的多课高亮与总览的「在训」列同源。
+    // 在训（= **已开课**）课程：课程 select 的多课高亮、顶部 pill 行、总览的「在训」列
+    // 与门禁动作开关**同源**——一处判据修三次才会三处各说各话，故只在这里算一次。
     trainingCourses: training,
     overview,
     workerRegistry,
     loopQueue,
+    courseLifecycle,
     components,
     nodes,
     localNode,

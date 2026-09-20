@@ -27,6 +27,7 @@ import pytest
 from remote.hub_server import _HubQueue, _JobStore, as_hub, make_server
 from remote.protocol import (
     AUTH_HEADER,
+    COURSE_ENABLE_MARKER,
     OFFLINE_CAP_VALUE,
     OFFLINE_TASK_PACK_PATH,
     ProtocolError,
@@ -97,6 +98,9 @@ def test_task_pack_missing_is_actionable_404(tmp_path: Path) -> None:
     # 有这门课（`remote-jobs/` + jsonl = 被发现的判据），但还没导出过包
     (tmp_path / "c5-gae" / "remote-jobs").mkdir(parents=True)
     (tmp_path / "c5-gae" / "training_log.jsonl").touch()
+    # 开课标记：课程表 = 账本 ∧ `training-enabled.txt`（控制台「开课」写、停课删）——
+    # 只造账本的目录在 2026-09-20 之后不算在训（不写它，`hub.discover()` 什么也扫不到）。
+    (tmp_path / "c5-gae" / COURSE_ENABLE_MARKER).write_text("", encoding="utf-8")
     hub.discover()
     assert hub.courses() == ["c5-gae"]
 
@@ -130,6 +134,9 @@ def test_task_pack_path_derives_from_single_course_job_root(tmp_path: Path) -> N
     """单课程模式（`--job-root <traj>/<课>/remote-jobs`）下同一个算式仍成立。"""
     (tmp_path / "c5-gae" / "remote-jobs").mkdir(parents=True)
     (tmp_path / "c5-gae" / "training_log.jsonl").touch()
+    # 开课标记：课程表 = 账本 ∧ `training-enabled.txt`（控制台「开课」写、停课删）——
+    # 只造账本的目录在 2026-09-20 之后不算在训（不写它，`hub.discover()` 什么也扫不到）。
+    (tmp_path / "c5-gae" / COURSE_ENABLE_MARKER).write_text("", encoding="utf-8")
     hub = as_hub(
         _JobStore(tmp_path / "c5-gae" / "remote-jobs", tmp_path / "c5-gae" / "training_log.jsonl")
     )
@@ -146,6 +153,9 @@ def test_admin_offline_lists_rounds_landed_by_backfeed(tmp_path: Path) -> None:
     base, hub, _srv = _boot(tmp_path)
     (tmp_path / "c5-gae" / "remote-jobs").mkdir(parents=True)
     (tmp_path / "c5-gae" / "training_log.jsonl").touch()
+    # 开课标记：课程表 = 账本 ∧ `training-enabled.txt`（控制台「开课」写、停课删）——
+    # 只造账本的目录在 2026-09-20 之后不算在训（不写它，`hub.discover()` 什么也扫不到）。
+    (tmp_path / "c5-gae" / COURSE_ENABLE_MARKER).write_text("", encoding="utf-8")
     _write_pack(tmp_path, "c5-gae")
     assert hub.discover() == ["c5-gae"]
 
@@ -171,6 +181,9 @@ def test_admin_offline_is_empty_when_nothing_landed(tmp_path: Path) -> None:
     base, hub, _srv = _boot(tmp_path)
     (tmp_path / "c5-gae" / "remote-jobs").mkdir(parents=True)
     (tmp_path / "c5-gae" / "training_log.jsonl").touch()
+    # 开课标记：课程表 = 账本 ∧ `training-enabled.txt`（控制台「开课」写、停课删）——
+    # 只造账本的目录在 2026-09-20 之后不算在训（不写它，`hub.discover()` 什么也扫不到）。
+    (tmp_path / "c5-gae" / COURSE_ENABLE_MARKER).write_text("", encoding="utf-8")
     hub.discover()
 
     st, raw, _h = _get(base, "/admin/offline")

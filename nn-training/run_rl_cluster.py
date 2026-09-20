@@ -39,7 +39,7 @@ if HERE not in sys.path:
 from rl.loop_plan import (
     course_kind,
     course_traj,
-    discover_courses,
+    enabled_courses,
     inflight_facts,
     plan_course,
     waiting_state,
@@ -232,8 +232,9 @@ def main(argv: list[str] | None = None) -> int:
             extra += ["--ppo", args.ppo]
         try:
             courses = [c.strip() for c in args.courses.split(",") if c.strip()]
-            # 空课程表 = **发现模式**（进程不绑课程：扫 --traj-root 下所有有账本的课，之后每个
-            # 空转拍再扫；一门课都没有也照常运行，队列空着等）。显式课程表则退化为「只看这几门」。
+            # 空课程表 = **发现模式**（进程不绑课程：扫 --traj-root 下所有**已开课**的课
+            # ——账本 ∧ `training-enabled.txt`，见 `loop_plan.enabled_courses`——之后每个空转拍
+            # 再扫；一门课都没开也照常运行，队列空着等）。显式课程表则退化为「只看这几门」。
             rep = serve(
                 courses or None,
                 argv=extra,
@@ -266,12 +267,9 @@ def main(argv: list[str] | None = None) -> int:
             release_cluster_lock(lock_path)
 
     traj_root = args.traj_root
-    courses = [c.strip() for c in args.courses.split(",") if c.strip()] or discover_courses(
-        traj_root
-    )
-    if not courses:
-        print(f"[cluster] {traj_root} 下没有任何课程账本（--courses 或先跑一门课）")
-        return 0
+    # 默认课程表 = **已开课**的课（账本 ∧ training-enabled.txt）：与 `--serve` 同一判据（
+    # 2026-09-20 用户口径「课程开训需要用户手动开启」），否则只读计划视图会把历史课也列成在训。
+    courses = [c.strip() for c in args.courses.split(",") if c.strip()] or enabled_courses(traj_root)
 
     # 调度器只用来算「每课下一步是谁」+ 展示资源池读面；本轮不执行任何任务体。
     sup = Supervisor(
@@ -283,6 +281,19 @@ def main(argv: list[str] | None = None) -> int:
             "local_rollout": args.rollout_slots,
         },
     )
+
+    # 空课程表是**合法稳态**（一门课都还没开：2026-09-20 起开课是显式动作）。
+    #
+    # ★ `--json` 是控制台的**契约面**（`dashboard/server/api/loop-queue.ts` 直接 JSON.parse
+    # 这段 stdout）：空表回一行人话 = 控制台把它读成「输出不可解析」而在默认状态下常年报红
+    # （还没开课是启动后的第一种状态）。形状在所有分支里保持一致。
+    if not courses:
+        if args.json:
+            print(json.dumps({"courses": [], "pools": sup.snapshot()["pools"]}, ensure_ascii=False))
+        else:
+            print(f"[cluster] {traj_root} 下没有已开课的课程（先用 --courses，或在控制台点「开课」）")
+        return 0
+
     rows = build_rows(courses, traj_root, sup)
 
     if args.json:

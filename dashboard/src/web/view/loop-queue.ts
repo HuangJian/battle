@@ -85,6 +85,130 @@ export interface LoopQueueRow {
   pauseApplied: boolean
 }
 
+// ────────────────────────── 在训课程 pill（顶部行） ──────────────────────────
+
+/** pill 圆点的色调（g=在跑 / y=有外部等待或暂停 / r=中止 / gray=没在推进）。 */
+export type CoursePillTone = 'g' | 'y' | 'r' | 'gray'
+
+/** 顶部「在训课程」pill 的一门课（用户 2026-09-20 口径：课程开训必须手动开）。
+ *
+ *  它是「顶部一次看全在训哪几门、各自到哪一轮」的最小事实：**课程名 + it 指针 + 一句状态**。
+ *  与 LoopQueue 卡的差別是职责：那张卡回答「这一轮卡在哪一步」（逐课任务表），pill 只要求
+ *  「一眼扫完 N 门课」——所以它一屏一行、可点选（切查看目标）、可停（非破坏停课）。
+ *
+ *  ★ `it` 用账本指针（下一轮）而不是「已结算轮数」：调度器 `loop_plan.plan_course` 的指针
+ *  与它同源（轮号不重复计数，否则 pill 与卡片会差 1）。 */
+export interface CoursePillView {
+  course: string
+  /** 课程种类（BC 课挂徽标：它不是 RL 的 13 步表）——缺省 `rl`（python 比控制台旧时）。 */
+  kind: LoopCourseKind
+  /** 账本指针（下一轮）；null = 队列视图里没这门课（读面不可用，不是「第 0 轮」）。 */
+  it: number | null
+  /** 短状态（2-4 字；悬停有整句）——顶部一行里放不下整句，但也不能只给个圆点。 */
+  status: string
+  tone: CoursePillTone
+  /** 悬停整句：调度器「在等什么」的原文 + 进程/意图事实（诊断入口，不重写语义）。 */
+  title: string
+}
+
+/** 从「已开课课程表 + 队列行 + 进程存活」推出 pill 行（纯函数，可单测）。
+ *
+ *  **入参就是 pill 的全集**：`courses` 是服务端 stamp 的已开课课程（开课标记为事实源），
+ *  逐课去 `rows` 里找它的队列行——找不到时**不编一个假状态**（读面不可用是事实，
+ *  显示「视图不可用」而不是「空闲」：后者会让操作员去查一个不存在的卡顿）。
+ *
+ *  状态优先级：暂停意图 > 收官 > 中止 > 进程未运行 > 「在等什么」。前四者都是**确定性事实**，
+ *  只有最后一条来自 python 的 waiting 判据——一件事只有一个主人（不在 TS 里重算）。
+ */
+export function coursePills(input: {
+  courses: string[]
+  rows: LoopQueueRow[]
+  /** 共享 trainer 是否在跑（进程事实，与「已开课」正交：开了课但进程没跑是合法稳态）。 */
+  trainerRunning: boolean
+}): CoursePillView[] {
+  const byCourse = new Map(input.rows.map((r) => [r.course, r]))
+  return input.courses.map((course) => {
+    const r = byCourse.get(course)
+    if (!r) {
+      return {
+        course,
+        kind: 'rl' as LoopCourseKind,
+        it: null,
+        status: '视图不可用',
+        tone: 'gray' as CoursePillTone,
+        title:
+          '调度器读面不可用（run_rl_cluster.py --json 读失败 / 超时）：这门课的进度未知。' +
+          '停课不受它影响（停课只写暂停意图 + 删开课标记）。',
+      }
+    }
+    const it = r.it
+    const wait = r.waiting.text
+    const kind = r.kind
+    if (r.pausedIntent) {
+      return {
+        course,
+        kind,
+        it,
+        status: '已暂停',
+        tone: 'y' as CoursePillTone,
+        title:
+          `暂停意图已写（${r.pauseApplied ? '训练进程已停住这门课' : '训练进程还没读到它'}）。` +
+          `恢复走「开课」· ${wait}`,
+      }
+    }
+    if (r.state === 'done') {
+      return {
+        course,
+        kind,
+        it,
+        status: '已收官',
+        tone: 'gray' as CoursePillTone,
+        title: `本轮课程已收官（${wait}）——要接着跑就改大 iters 后重新开课。`,
+      }
+    }
+    if (r.state === 'aborted') {
+      return {
+        course,
+        kind,
+        it,
+        status: '已中止',
+        tone: 'r' as CoursePillTone,
+        title: `训练进程已把该课标为「已中止」：${wait}`,
+      }
+    }
+    if (!input.trainerRunning) {
+      return {
+        course,
+        kind,
+        it,
+        status: '待进程',
+        tone: 'gray' as CoursePillTone,
+        title:
+          '已开课（在调度课程表里），但共享 trainer 没在跑——启动「服务进程」后下一拍就会入队。' +
+          `· ${wait}`,
+      }
+    }
+    switch (r.waiting.kind) {
+      case 'inflight':
+        return {
+          course,
+          kind,
+          it,
+          status: '等回传',
+          tone: 'y' as CoursePillTone,
+          title: wait,
+        }
+      case 'collect':
+        return { course, kind, it, status: '采集中', tone: 'g' as CoursePillTone, title: wait }
+      case 'ready':
+        return { course, kind, it, status: '推进中', tone: 'g' as CoursePillTone, title: wait }
+      default:
+        // `idle`：本轮无待办（账本已结算 / 刚开课还没起第一轮）——不是故障，也不活跃。
+        return { course, kind, it, status: '空闲', tone: 'gray' as CoursePillTone, title: wait }
+    }
+  })
+}
+
 /** 本机重资源池占用（容量为定的票数：本机 PPO / eval 跨课排队 = 1）。 */
 export interface LoopPoolView {
   held: number

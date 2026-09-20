@@ -21,6 +21,7 @@
  *    cloud-halt      云端停机与恢复            |  labels  标签与锁查询
  *    train-smoke     推送链路预演              |  restart  变更检测重启
  *    workers         GPU push worker 登记（回写 rl-config）
+ *    course-lifecycle 开课/停课（**独立于进程启停**：进程启动不再顺带开课）
  */
 
 // ── facade 再导出（原 actions.ts 第 22 行的转发；调用方零改动）──
@@ -31,6 +32,7 @@ export * from './result'
 export * from './console-state'
 export * from './cloud-halt'
 export * from './course-mode'
+export * from './course-lifecycle'
 export * from './loop-control'
 export * from './labels'
 export * from './start'

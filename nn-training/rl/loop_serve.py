@@ -45,7 +45,13 @@ from platform_utils import force_utf8_stdio
 from rl.engine_pool import DEFAULT_CACHE_COURSES, DEFAULT_CACHE_MB, EnginePool
 from rl.log import close_course_sinks, log, open_course_sink, prefix_scope
 from rl.loop_control import ControlApplier, read_control
-from rl.loop_plan import course_facts, course_kind, course_traj, discover_courses, round_tasks_for
+from rl.loop_plan import (
+    course_facts,
+    course_kind,
+    course_traj,
+    enabled_courses,
+    round_tasks_for,
+)
 from rl.loop_runner import ROUND_KIND, LoopRunner
 from rl.loop_scheduler import ABORTED, QUEUE_DONE, Supervisor
 from rl.loop_tasks import RoundFacts, Task, pending_tasks
@@ -615,9 +621,13 @@ def serve(
     """单进程服务 N 门课。
 
     **进程不绑课程**（用户 2026-09-18 口径）：`courses=None`/空 ⇒ 发现模式——启动时扫
-    `--traj-root` 下所有有账本的课程，之后每个空转拍再扫一次（新课程自动入队）；一门课都
-    没有也能起，队列就空着等（**不退出**：空队列是合法稳态，不是结束条件）。显式给
-    `courses` 时退化为「只看这几门」，全收官即退出（e2e/单课调试用）。
+    `--traj-root` 下**已开课**的课程（账本 ∧ `training-enabled.txt`，见 `enabled_courses`），
+    之后每个空转拍再扫一次（新开课的课自动入队）；一门课都没有也能起，队列就空着等
+    （**不退出**：空队列是合法稳态，不是结束条件）。显式给 `courses` 时退化为「只看这几门」，
+    全收官即退出（e2e/单课调试用）。
+
+    ★ **发现判据从「有账本」改成「有开课标记」**（2026-09-20 用户口径：「课程开训需要用户
+    手动开启」）：旧判据下 tmp/ 里的历史课会被一起拉起来跑（实测一启动就 21 门）。
 
     每拍的**控制面**（`rl/loop_control.py`）：读 `tmp/loop-control.json` 的暂停意图 →
     `Supervisor.pause/resume`。暂停只影响调度，队列/账本不动（用户口径「保留队列，不删」）。
@@ -638,13 +648,13 @@ def serve(
     runtimes: dict[str, CourseRuntime] = {}
     explicit = list(courses or [])
     if discover:
-        explicit = discover_courses(traj_root)
+        explicit = enabled_courses(traj_root)
         if explicit:
-            log(f"[serve] 发现 {len(explicit)} 门课程：{', '.join(explicit)}")
+            log(f"[serve] 发现 {len(explicit)} 门已开课的课程：{', '.join(explicit)}")
         else:
             log(
-                f"[serve] {traj_root} 下暂无课程账本——进程照常运行，队列空着等"
-                "（有新课程账本出现即自动入队）"
+                f"[serve] {traj_root} 下暂无已开课的课程——进程照常运行，队列空着等"
+                "（先在控制台点「开课」：写 training-enabled.txt + 账本即自动入队）"
             )
     _open_courses(explicit, runtimes, report, argv=argv, traj_root=traj_root)
     if not runtimes and not discover:
@@ -695,7 +705,7 @@ def serve(
             if report.stop_reason == "all_settled" and not discover:
                 break
             if discover:
-                fresh = [c for c in discover_courses(traj_root) if c not in runtimes]
+                fresh = [c for c in enabled_courses(traj_root) if c not in runtimes]
                 # 被跳过过的课不再重试（课程文件缺失 = 这一轮修不好；避免每秒刷日志）
                 fresh = [c for c in fresh if c not in report.skipped]
                 if fresh:

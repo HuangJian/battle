@@ -15,11 +15,9 @@
  *  - stop / smoke：用不存在的课程名（这两条路径不校验课程名）⇒ 无登记、早退。
  * 账本经 BCITY_REGISTRY_FILE 重定向到临时目录，不碰线上 registry.json。
  *
- *  ★ R3-5 起「早退分支」不再是纯读：它照样做**本课准备**（机器侧旋钮写 rl-config、建课程账本、
- *  RL 课缺 weights.json 时从 BC 播种）。故夹具必须把这两处也重定向——否则这个用例会把断言
- *  挂在「本机 tmp/c5-gae 恰好有没有权重文件」上（2026-09-19 实测：真机上 BC 产物缺失 ⇒ 播种抛
- *  『初始权重缺失』⇒ 幂等早退变成失败，测的已经不是 busy 键了）。
- *  预置权重 + 临时 rl-config 之后，准备阶段全部落在临时目录、零外部依赖。
+ *  ★ 2026-09-20 起「早退分支」是**纯读**（用户口径：进程启动与课程解耦——准备/开课整体迁到
+ *  `course-lifecycle.ts`）⇒ 本文件的夹具不再需要预置权重：起进程不看课程，也没有任何按课程的
+ *  写盘。traj 根/rl-config 仍重定向，只是为了「就算它以后又碰了课程目录，也碰不到线上那份」。
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test'
@@ -93,9 +91,10 @@ describe('busy 键同源：guard 与 release 必须同键', () => {
     clearAnyComponent('trainingLoop', '')
   })
 
-  it('本课准备失败不得说成「启动失败」——trainer 在跑这个事实必须留住', async () => {
-    // 造一个**确定性**的准备失败：traj 根指向一个普通文件 ⇒ 播种/建目录/建账本三路都必抛，
-    // 与「本机恰好有没有 BC 产物」无关（否则这条用例会变成环境断言）。
+  it('★ 幂等早退：起进程**不碰课程**（traj 根坏掉也影响不了它）', async () => {
+    // 2026-09-20（进程与课程解耦）：启动路径不再有「本课准备」，所以「准备失败」这条分支
+    // 整个消失了——**这是**本轮要钉住的事：把 traj 根指向一个普通文件（旧形状下必抛）
+    // 也不能让「起进程」失败，更不能把它说成 trainer 起不来。
     const bogus = path.join(path.dirname(tmpRegistry), 'not-a-dir')
     writeFileSync(bogus, 'x')
     const prevLogs = process.env.BCITY_TMP_LOGS_DIR
@@ -107,14 +106,14 @@ describe('busy 键同源：guard 与 release 必须同键', () => {
         course: '',
       })
       const r = await actions.startComponent('trainingLoop', { course: COURSE })
-      expect(r.ok).toBe(false)
-      // ① 事实留住：进程在跑、服务所有课程。少了这句，操作员会去停/重启 trainer ——
-      //    而停共享 trainer = 停掉**所有**课程的训练。
+      expect(r.ok).toBe(true)
+      // 事实留住：进程在跑、服务所有课程（静默失败会让操作员去停/重启 trainer——
+      // 而停共享 trainer = 停掉**所有**课程的训练）。
       expect(r.message).toContain('已在运行')
       expect(r.message).toContain('服务所有课程')
-      // ② 失败归因到**本课**，不是「trainer 起不来」（那是另一条分支的话术）
-      expect(r.message).toContain('本课')
       expect(r.message).not.toContain('启动失败')
+      // 并指路到真正管课程的那个入口
+      expect(r.detail?.join('\n')).toContain('开课')
       expect([...actions.busy]).toEqual([])
     } finally {
       process.env.BCITY_TMP_LOGS_DIR = prevLogs

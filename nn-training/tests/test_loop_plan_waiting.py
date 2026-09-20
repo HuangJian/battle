@@ -19,6 +19,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -29,11 +31,12 @@ from rl.loop_plan import (
     WAIT_IDLE,
     WAIT_INFLIGHT,
     WAIT_READY,
+    enabled_courses,
     waiting_state,
 )
 from rl.loop_scheduler import CourseQueue, Supervisor
 from rl.loop_tasks import Task, TaskResult
-from run_rl_cluster import build_rows
+from run_rl_cluster import build_rows, main
 
 
 def _state(**kw: object) -> tuple[str, str]:
@@ -193,3 +196,36 @@ def test_build_rows_handles_course_without_any_disk_state(tmp_path: Path) -> Non
     # 空账本 ⇒ 指针从 1 起（LedgerView.next_it 的默认值就是「第一轮」）
     assert r["it"] == 1 and r["inflight"] == []
     assert r["waiting"]["kind"] in (WAIT_IDLE, WAIT_READY)
+
+
+# ────────────────────── 课程表为空：`--json` 仍回契约形状（2026-09-20） ──────────────────────
+
+
+def test_json_keeps_the_contract_shape_when_no_course_is_opened(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """**空课程表是默认稳态**：默认表 = 「已开课」的课，而开课是显式动作（用户 2026-09-20）。
+
+    控制台把 `--json` 的 stdout 直接 `JSON.parse`（`dashboard/server/api/loop-queue.ts`）——
+    空表回一行人话（“[cluster] 下没有已开课的课程”）就会让它报「输出不可解析」的红错，
+    而那正是启动后、开第一门课之前**长期存在**的状态。形状在所有分支里必须一致（`courses`
+    与 `pools` 两把键都在），否则洞会在最不该出错的那一瞬间露出来。
+    """
+    assert main(["--traj-root", str(tmp_path), "--json"]) == 0
+    body = json.loads(capsys.readouterr().out.strip())  # 不可解析即失败（这里就是回归点）
+    assert body["courses"] == []
+    assert "local_ppo" in body["pools"]  # 池容量是进程事实，与有没有课无关
+
+
+def test_discovery_defaults_to_opened_courses_only(tmp_path: Path) -> None:
+    """只读课程表的默认来源 = **已开课**（账本 ∧ `training-enabled.txt`）。
+
+    有账本 ≠ 在训：tmp/ 下每门历史课都有账本（2026-09-20 报障「一堆课程正在训练」的成因）。
+    """
+    for name, opened in (("opened", True), ("history", False)):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "training_log.jsonl").write_text("", encoding="utf-8")
+        if opened:
+            (d / "training-enabled.txt").write_text("", encoding="utf-8")
+    assert enabled_courses(tmp_path) == ["opened"]

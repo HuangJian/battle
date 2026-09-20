@@ -1628,22 +1628,8 @@ a.tc-preset {
   min-width: 0;
 }
 
-/* 正在训练的课程标签（课程 select 后高亮；脉冲绿点提醒查看课程 ≠ 训练课程） */
-.tc-training-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 10px;
-  border-radius: 999px;
-  background: var(--green-bg);
-  color: var(--green);
-  font-size: var(--fs-2);
-  font-weight: 700;
-  white-space: nowrap;
-}
-.tc-training-tag .tc-dot {
-  animation: tc-live 1.6s ease-in-out infinite;
-}
+/* （旧「正在训练：a、b、c」标签的样式已随 pill 行删除：2026-09-20 起每门在训课自己一个
+   pill —— 见下方 .tc-tpills；脉冲绿点的活留给了 pill 上的状态点。） */
 .tc-hero__iters .tc-table thead th {
   position: static;
 } /* 6 行紧凑表无需吸顶 */
@@ -1964,6 +1950,98 @@ a.tc-preset {
 }
 .tc-nodes .more:hover {
   text-decoration: underline;
+}
+
+/* ────────────── 在训课程 pill 行（2026-09-20：课程开训必须手动开） ──────────────
+   顶栏之下第一行：一门已开课的课程一个 pill（状态点 + 课名 + it 指针 + 一句状态 + ■ 停课）。
+   与节点 pill 同一套视觉语言（圆角胶囊 / 状态点色板 / hover 描边）——两行相邻的 pill 不该
+   长得像两个体系。 */
+.tc-tpills {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-3);
+  padding: 6px 12px;
+  margin-bottom: 10px;
+}
+.tc-tpills .lbl {
+  font-size: var(--fs-2);
+  color: var(--muted);
+  margin-right: var(--sp-1);
+}
+.tc-tpill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 6px 3px 12px;
+  font-size: var(--fs-2);
+  background: var(--card);
+  cursor: pointer;
+  flex-shrink: 0;
+  user-select: none;
+}
+.tc-tpill:hover {
+  border-color: var(--accent);
+}
+/* 当前查看的那门课高亮（用户指令：点击 pill 后高亮）——只看描边不够，加底色让它在
+   一排 pill 里一眼可辨。 */
+.tc-tpill--active {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+.tc-tpill b {
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-weight: 600;
+  font-size: var(--fs-2);
+}
+.tc-tpill .v {
+  color: var(--green);
+  font-weight: 700;
+  font-size: var(--fs-2);
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+}
+/* 状态字与圆点同色（g=绿 / y=琥珀 / r=红 / gray=灰）——颜色随 tone 走，一字两色会读成两个状态 */
+.tc-tpill__state {
+  color: var(--muted);
+  font-weight: 600;
+}
+.tc-tpill:has(.tc-dot--on) .tc-tpill__state {
+  color: var(--green);
+}
+.tc-tpill:has(.tc-dot--warn) .tc-tpill__state {
+  color: var(--yellow);
+}
+.tc-tpill:has(.tc-dot--dead) .tc-tpill__state {
+  color: var(--red);
+}
+/* BC 徽标（一小截字，与调度器卡上的 BC 徽标同一个信号：一轮 = 一个任务） */
+.tc-tpill__kind {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  padding: 0 4px;
+}
+/* ■ 停课：贴在 pill 右端的小方键（不抢 pill 本身的「点击切查看」语义） */
+.tc-tpill__stop {
+  border: 1px solid var(--border);
+  background: none;
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 5px;
+  cursor: pointer;
+}
+.tc-tpill__stop:hover {
+  border-color: var(--red);
+  color: var(--red);
 }
 
 /* 工具行（TrainingLoop 启动弹窗内） */

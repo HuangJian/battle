@@ -1,9 +1,8 @@
-/** start.ts — 组件启动（含 BC 循环启动与 run_bc 锁检查）。 */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'fs'
+/** start.ts — 组件启动（**只起进程**；课程生命周期见 `course-lifecycle.ts`）。 */
+import { appendFileSync, existsSync, readFileSync, statSync } from 'fs'
 import path from 'path'
-import { loadConfig, validateCourseArg } from '../../core/config'
+import { loadConfig } from '../../core/config'
 import { pidAlive, waitUntil } from '../../core/net'
-import { tmpLogsDir } from '../../core/paths'
 import { launchSpec } from '../../core/proc'
 import { clearAnyComponent, saveAnyComponent, scopeOf } from '../../core/registry'
 import { monitorTouch } from '../../core/reload-touch'
@@ -17,12 +16,6 @@ import {
 import type { Component, RlConfig } from '../../core/types'
 import { resolveVenvPython } from '../../core/venv'
 import {
-  type CourseMachineKnobs,
-  pruneLegacyCourseKnobs,
-  writeCourseMachineKnobs,
-} from '../../stack/course-knobs'
-import { isBcCourse, seedWeightsFromBc } from '../../stack/courses'
-import {
   hubServerHealthy,
   selfNodeHealthy,
   stepCloudflared,
@@ -32,10 +25,9 @@ import {
 } from '../../stack/hub'
 import { startLocalWorker } from '../../stack/local-worker'
 import { TRAINER_SERVE_ENTRY, trainerServeSpec } from '../../stack/specs'
-import { remoteExecutionFace } from '../../stack/push-config'
 import { entryOf, markCloudHaltRecovered } from './cloud-halt'
 import { restoreCourseModesNote } from './course-mode'
-import { COMPONENT_LABELS, runRlLockHolder, tailLines } from './labels'
+import { COMPONENT_LABELS, tailLines } from './labels'
 import { ActionError, ActionResult, busyKey, done, guard, release } from './result'
 
 // ────────────────────────── 组件启动 ──────────────────────────
@@ -48,7 +40,11 @@ export interface StartCtx {
    *  ★ 共享 trainer 不消费它（`trainerServeSpec` 不给 `REMOTE_PUSH_NODE`）；保留字段是因为
    *  预演（`train-smoke.ts`）仍用它把伪节点注入 env。 */
   pushNodeUrl?: string
-  /** T7：远端连败是否 opt-in 降级本机 PPO（默认 false = ABORT）。 */
+  /** T7：远端连败是否 opt-in 降级本机 PPO（默认 false = ABORT）。
+   *
+   *  ★ 2026-09-20：**共享 trainer 已不消费它** —— 它是**课程级**旋钮（落
+   *  `courses.<课>.remote_degrade_after`），随「开课」走（`course-lifecycle.ts`）。
+   *  保留字段是因为预演路径（`train-smoke.ts`）仍按旧形状传它。 */
   remoteDegrade?: boolean
 }
 
@@ -80,61 +76,6 @@ export function runClusterLockHolder(): number | null {
   }
 }
 
-/** 启动共享 trainer 前的**课程准备**：返回施加了机器侧旋钮的 config + 人读说明。
- *
- *  三件事各解决一个具体的坑（每一件都是「不做就会静默地不对」的那类）：
- *
- *   ① **权重播种**（RL 才有；BC 无 warm-start）：`tmp/<课>/weights.json` 不在则从 BC 种子复制。
- *      共享 trainer 不接受每课的权重参数，它按 traj 目录自己找（与 `run_rl.py` 同约定）。
- *   ② **发现事实**：`tmp/<课>/training_log.jsonl` 必须存在。训练侧的课程表**就是**这个文件
- *      （`rl/loop_plan.discover_courses` 与控制台 `discoverCourses` 同一判据），而共享 trainer 是
- *      「先起进程、后加课」的模型 —— 不建它，这门新课永远不会被发现（症状极难查：进程活着、
- *      队列正常、就是这门课一轮都不跑）。空账本 = 合法状态（第 1 轮从头开始）。
- *   ③ **机器侧旋钮 + legacy 清理**：`courses.<课>.{remote_degrade_after,gate_halt_mode}`（单进程
- *      没有「这门课的 flag」这一说，命令行只有一份），外加把旧的**传输耦合键**
- *      （`push_node_url`/`remote_transport`/`remote_hub_url`/`hub_push`）与伪节点条目清掉。
- *      后者不是洁癖：残留的传输键会让操作员以为「这门课还是我当年配的那条路」，而残留的
- *      `local_push` 节点**仍有读者**（python `_gpu_push_nodes` 全取登记节点）⇒ 会把训练指向
- *      一条没人服务的本机地址而「看起来正常」。
- *
- *  ★ **课程与 worker 节点正交**（2026-09-19 用户口径）：这里**不再**写任何按课程的传输裁决。
- *  哪条路生效是**部署事实**（`rl.hub_push` 缺省开 + 登记在册的 gpu_push 节点 + hub 队列）。 */
-export function prepareCourseForSharedTrainer(
-  cfg: RlConfig,
-  course: string,
-  ctx: StartCtx,
-): { cfg: RlConfig; notes: string[] } {
-  const notes: string[] = []
-  const bc = isBcCourse(course)
-  // 课程 traj 根：生产下就是仓根 `tmp/`（与训练侧同布局），单测用 BCITY_TMP_LOGS_DIR 重定向
-  const trajRoot = tmpLogsDir()
-  if (!bc) {
-    const weightsPath = path.join(trajRoot, course, 'weights.json')
-    if (!existsSync(weightsPath)) {
-      seedWeightsFromBc(course, weightsPath) // 缺文件即抛 → 调用方响亮失败（不静默跑新权）
-      notes.push(`已播种初始权重 tmp/${course}/weights.json`)
-    }
-  }
-  const traj = path.join(trajRoot, course)
-  mkdirSync(traj, { recursive: true })
-  const ledger = path.join(traj, 'training_log.jsonl')
-  if (!existsSync(ledger)) {
-    appendFileSync(ledger, '')
-    notes.push('已建课程账本 training_log.jsonl（共享 trainer 的课程发现判据）')
-  }
-  // legacy 清理（幂等）：全课范围一次做完——旧键 / 伪节点条目不该只对「这次启动的课」生效。
-  const pruned = pruneLegacyCourseKnobs(cfg)
-  if (pruned.removed.length > 0)
-    notes.push(`已清理 legacy 传输配置 ${pruned.removed.length} 项（课程与 worker 节点正交）`)
-  const knobs: CourseMachineKnobs = {}
-  if (ctx.remoteDegrade !== undefined) knobs.remoteDegradeAfter = ctx.remoteDegrade ? 3 : 0
-  const w = writeCourseMachineKnobs(pruned.cfg, course, knobs)
-  // 执行面说明放**第一条**：它是操作员最需要确认的一件事（「这轮 PPO 会去谁那儿」）
-  const face = remoteExecutionFace(pruned.cfg)
-  const knobNote = `本课（${course}）执行面：${face.text}${face.detail ? `（${face.detail}）` : ''}`
-  return { cfg: w.cfg, notes: [knobNote, ...notes] }
-}
-
 /** **启动共享 trainer**（`run_rl_cluster.py --serve`）——一个进程服务所有课程（R3-5）。
  *
  *  为什么不再是「每课一个 `run_rl.py --course`」：用户口径「hubserver/trainingloop/selfNode/
@@ -143,52 +84,29 @@ export function prepareCourseForSharedTrainer(
  *  而 BC 与 RL **共用 `trainingLoop` 这一个角色键** —— 两个进程并存是旧形状。
  *
  *  **不给 `--courses`（发现模式）**：课程 = 「`tmp/<课>/training_log.jsonl` 存在」这个文件系统
- *  事实（与 hub `--discover` 同一原则），所以「先起 trainer、后加课」不需要重启进程；
- *  代价是控制台得替**这门课**把账本文件建出来（见 prepare ②）。
+ *  事实（与 hub `--discover` 同一原则），所以「先起 trainer、后加课」不需要重启进程。
  *
- *  ⚠ 行为语义（操作员必须知道）：**停止 trainer = 停掉所有课程的训练**。停单门课用调度器卡片
- *  的「暂停」（控制文件，只影响调度、队列与账本一个字不动）。
+ *  ★ **本步骤不碰课程**（2026-09-20 用户指令：「服务进程启动不应与课程绑定。进程启动时不要
+ *  自动开启课程训练」）：课程准备（播权重 / 建账本 + `remote-jobs/` / 写课程旋钮 / 置 hub 模式）
+ *  整体迁到 `actions/course-lifecycle.ts::openCourse`。之前它挂在这里的代价是**时序错位**：
+ *  置 hub 模式发生在课程还不存在（hub 扫盘才发现课程）时，hub 回
+ *  `需要合法 course（[]）`——2026-09-20 那条「启动训练中断于 trainingLoop」的实测根因之一。
+ *
+ *  ⚠ 行为语义（操作员必须知道）：**停止 trainer = 停掉所有课程的训练**。停单门课用「开课/停课」
+ *  入口（停课 = 暂停意图 + 该课 hub 置离线；队列与账本一个字不动）。
  *
  *  BC 课与 RL 课走**同一条路**（R3-4 起 `--serve` 按课程种类选引擎/粒度/指针）：BC 不再有
  *  单独的 `run_bc.py` 启动分支。 */
 async function startSharedTrainer(
   cfg: RlConfig,
   venv: { python: string; sitePackages: string },
-  ctx: StartCtx,
 ): Promise<ActionResult> {
-  const course = ctx.course
-  const bc = isBcCourse(course)
   // 槽恒 `''`：共享实例不属于任何单门课（`entryOf` 内部走 scopeOf，读面自动同源）
   const prev = entryOf('trainingLoop')
-  if (pidAlive(prev?.pid)) {
-    // 幂等早退，但**先把本课意图落盘**：单进程的传输裁决住 rl-config（命令行只有一份），
-    // 早退前不写它，操作员的「给这门课换成 push」就成了静默无效的动作。
-    // 同时账本/权重那两件也照样做（新课的账本不建出来，发现扫拍永远看不见它）。
-    //
-    // ★ 准备失败**不改事实**：trainer 在跑、其它并行课程照常。若让它冒泡成
-    // `startComponent` 的通用失败（"TrainingLoop (trainer) 启动失败: …"），操作员会以为
-    // trainer 没起来，于是去停/重启它 —— 而停共享 trainer = 停掉**所有**课程的训练
-    // （本文件顶部那条 ⚠）。故这里自己接住：消息以「已在运行」开头，失败只说本课。
-    const running = `共享 trainer 已在运行 (PID ${prev!.pid})——一个进程服务所有课程（含 ${course}）`
-    const knobHint =
-      '★ 机器侧旋钮在**开课时**施加（python `apply_course_machine_overrides`）：' +
-      '已经开课的课程要等它重开才换传输——暂停该课 → 重启共享 trainer（或等引擎驱逐重开）'
-    let prep: { cfg: RlConfig; notes: string[] } | null = null
-    let prepErr = ''
-    try {
-      prep = prepareCourseForSharedTrainer(cfg, course, ctx)
-    } catch (e) {
-      prepErr = e instanceof Error ? e.message : String(e)
-    }
-    if (prepErr)
-      return done(false, `${running}；但**本课**（${course}）没准备好：${prepErr}`, [
-        '★ trainer 本身没问题，其它课程不受影响——**别停它**（停共享 trainer = 停掉所有并行课程的训练）；' +
-          '停单门课用调度器卡片的「暂停」。',
-        '★ 修好根因后重按「启动」即可补上本课准备（幂等：已在运行不会重复起进程）。',
-        knobHint,
-      ])
-    return done(true, running, [...prep!.notes, knobHint])
-  }
+  if (pidAlive(prev?.pid))
+    return done(true, `共享 trainer 已在运行 (PID ${prev!.pid})——一个进程服务所有课程`, [
+      '★ 「开哪门课」用课程入口（顶部课程选择旁的 开课/停课）：进程与课程是两件事。',
+    ])
   const clusterHolder = runClusterLockHolder()
   if (clusterHolder)
     return done(
@@ -197,21 +115,10 @@ async function startSharedTrainer(
         `（${path.join('nn-training', lockName('', 'run_cluster'))}）——一个进程服务所有课程，` +
         '先停掉它（或删除该锁文件）',
     )
-  // 本课的去重锁：serve 开课时会按课取锁（RL=run_rl / BC=run_bc），别的持有者会让它**响亮拒开
-  // 这门课**。在这里拦下来，操作员就从动作结果里看到原因，不用去日志里找。
-  const kind = bc ? 'run_bc' : 'run_rl'
-  const holder = bc ? runBcLockHolder(course) : runRlLockHolder(course)
-  if (holder)
-    return done(
-      false,
-      `${kind} 锁被 PID ${holder} 持有（${path.join('nn-training', lockName(course, kind))}）` +
-        '——先停止在跑的那一份训练（或删除该锁文件）',
-    )
-  const prep = prepareCourseForSharedTrainer(cfg, course, ctx)
   // 旧形状（每课一个 trainer 进程）**显式换代接管**：存活的会被停掉并清账，死条目的账也清
   // （与 hub/隧道同规，见 stack/hub.ts::supersedeLegacyInstances）。
   const superseded = await supersedeLegacyInstances('trainingLoop')
-  const spec = trainerServeSpec(prep.cfg, venv)
+  const spec = trainerServeSpec(cfg, venv)
   const baseline = (() => {
     try {
       return statSync(spec.log).size
@@ -228,10 +135,8 @@ async function startSharedTrainer(
     log: spec.log,
   })
   monitorTouch()
-  const detail = [
-    ...prep.notes,
-    ...(superseded.length > 0 ? [`旧形状 trainer 已换代接管：${superseded.join(', ')}`] : []),
-  ]
+  const detail =
+    superseded.length > 0 ? [`旧形状 trainer 已换代接管：${superseded.join(', ')}`] : []
   await waitUntil(
     async () => {
       if (!pidAlive(r.pid)) return true
@@ -267,13 +172,15 @@ async function startSharedTrainer(
       ...tailLines(spec.log),
     ])
   }
-  // §386：trainer 重启 = 停机条件消失 → 自动恢复停机状态。只解**本课**（共享 hub 上达令按课程
-  // 下发：无课程 = 全课程，会把并行训练的其它课一起解停）。
-  const rec = await markCloudHaltRecovered(prep.cfg, 'trainer 已重启（停机条件消失）', course)
+  // §386：trainer 重启 = 停机条件消失 → 自动恢复停机状态。
+  // **无课程 = 全课程**（刻意）：重启的是**共享** trainer，它是所有课程共同的停机条件——
+  // 被停掉的正是整个调度器，只解「当前查看的那门」会让其它课替它背锅（旧形状按课启动时
+  // 才需要按课解停，那时一个进程只服务一门课）。
+  const rec = await markCloudHaltRecovered(cfg, 'trainer 已重启（停机条件消失）')
   return done(
     true,
     `共享 trainer 已启动 (PID ${r.pid})——一个进程服务所有课程` +
-      (rec.ok && rec.message.includes('解除') ? '；本课云端停机状态已自动恢复' : ''),
+      (rec.ok && rec.message.includes('解除') ? '；云端停机状态已自动恢复' : ''),
     detail,
   )
 }
@@ -341,13 +248,11 @@ export async function startComponent(key: Component, ctx: StartCtx): Promise<Act
       }
       case 'trainingLoop': {
         // 共享 trainer（R3-5）：**一个进程服务所有课程**，BC 与 RL 走同一条路。
-        // 课程在这里的作用是「开哪门课」（种子权重 / 账本发现 / 机器侧旋钮），不是「起哪个进程」。
-        if (!ctx.course)
-          throw new ActionError(
-            'trainer 需要 course（先在顶部设置课程）——进程是共享的一份，但「开哪门课」由课程决定',
-          )
-        validateCourseArg(ctx.course)
-        return await startSharedTrainer(cfg, venv, ctx)
+        // ★ **不需要课程**（2026-09-20）：「开哪门课」是独立入口的事
+        // （`course-lifecycle.ts::{openCourse,stopCourse}`），本步骤只起进程——
+        // 启动阶段不再有任何按课程的副作用（旧形状把账本/权重/旋钮/hub 模式挂在这里，
+        // 于是「起进程」被迫先选一门课，置 hub 模式还会撞上「hub 还不认识这门课」）。
+        return await startSharedTrainer(cfg, venv)
       }
     }
   } catch (e) {
