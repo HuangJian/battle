@@ -244,6 +244,29 @@ def probe_hub(hub: str, token: str, log: Callable[[str], None], timeout: float =
         return False
 
 
+def _fetch_guarded(
+    url: str, headers: dict[str, str], log: Callable[[str], None], label: str, total_timeout: float
+) -> bytes:
+    """取一个**大 body**：走引导期传输护栏（进度行 / 停滞 / 超预算 / 低速重抽）。
+
+    护栏住 `tailscale_boot`（三个 notebook 都拉它）——它必须在 `code.zip` **之前**可用，
+    而任务包正是被下载的那个东西（鸡生蛋）。万一它没加载（纯离线兑底路径），退回
+    朴素整读并**响亮记一笔**：任务包几 MB～几十 MB，没护栏时一次坏签就是「一行日志
+    都没多，干等」——绝不静默降级。
+    """
+    try:
+        ts = _load_tailscale_boot()
+    except ImportError as e:
+        log(f"引导传输护栏不可用（{e}）——本次取包只有整超时，无停滞/低速判据")
+        req = urllib.request.Request(url, headers=headers)
+        with _build_opener().open(req, timeout=total_timeout) as resp:
+            return resp.read()  # type: ignore[no-any-return]
+    got: bytes = ts.fetch_guarded(
+        url, headers=headers, log=log, label=label, total_timeout=total_timeout, attempts=3
+    )
+    return got
+
+
 def fetch_task_pack(
     hub: str,
     token: str,
@@ -259,9 +282,9 @@ def fetch_task_pack(
     """
     url = f"{hub.rstrip('/')}/offline/task-pack?course={urllib.parse.quote(course)}"
     try:
-        req = urllib.request.Request(url, headers={"Authorization": "Bearer " + token})
-        with _build_opener().open(req, timeout=timeout) as resp:
-            raw = resp.read()
+        raw = _fetch_guarded(
+            url, {"Authorization": "Bearer " + token}, log, "task-pack", timeout
+        )
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
             log(f"取包被拒 HTTP {e.code} —— HUB_TOKEN 不一致（手动上传仍然可行）")

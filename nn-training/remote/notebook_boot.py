@@ -48,6 +48,10 @@ tailscale_boot = _load_tailscale_boot()
 
 CODE_DIR = "/tmp/worker-code"
 
+#: code.zip 单次传输的**墙钟上限**（秒）：停滞由护栏的 idle 判据管，这条管「一直在滴水」。
+#: 实测最坏一次 1.43 MB 用了 106 s（13.5 KB/s 的坏签）⇒ 300 s 足够宽，而超了就重抽/重领。
+CODE_TOTAL_TIMEOUT_SEC = 300.0
+
 
 def _build_opener() -> urllib.request.OpenerDirector:
     """显式 ProxyHandler —— Colab 的 urllib.request.urlopen() 不读 HTTP_PROXY 环境变量（2026-09-16 实测），
@@ -80,10 +84,18 @@ def _pull(cfg: dict, log, keepalive_stop, hub: str, hub_tok: str, push_tok: str)
     deadline = time.time() + 3600
     while True:
         try:
-            req = urllib.request.Request(
-                hub.rstrip("/") + "/code", headers={"Authorization": "Bearer " + hub_tok})
-            with opener.open(req, timeout=120) as resp:
-                raw = resp.read()
+            # 大 body 走**引导期护栏**（停滞/超预算响亮报错 + 低速换连接重抽，
+            # plan/minimize-payload.plan.md §4.0）：code.zip 正是「code.zip 之前就要下」
+            # 的那个东西，所以护栏住 tailscale_boot（三个 notebook 都拉它），不在这里再抄一份。
+            raw = tailscale_boot.fetch_guarded(
+                hub.rstrip("/") + "/code",
+                headers={"Authorization": "Bearer " + hub_tok},
+                log=log,
+                label="code.zip",
+                total_timeout=CODE_TOTAL_TIMEOUT_SEC,
+                attempts=3,
+                opener=opener,
+            )
             log(f"code.zip 就绪: {len(raw)} bytes sha12={hashlib.sha256(raw).hexdigest()[:12]}")
             break
         except urllib.error.HTTPError as e:
@@ -94,7 +106,9 @@ def _pull(cfg: dict, log, keepalive_stop, hub: str, hub_tok: str, push_tok: str)
         except Exception as e:
             if time.time() > deadline:
                 raise SystemExit("[FATAL] 等 code.zip 超 1h") from None
-            log(f"hub 异常（{type(e).__name__}）—— 30s 重试")
+            # 带正文：`type(e).__name__` 单独一面等于什么都没说（护栏异常的正文里有
+            # 已收字节/速率/原因）——这正是 2026-09-20 那条「静默卡死」的教训。
+            log(f"hub 异常（{type(e).__name__}: {e}）—— 30s 重试")
             time.sleep(30)
     Path(CODE_DIR).mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(io.BytesIO(raw)) as z:
@@ -268,6 +282,9 @@ def run(cfg: dict, log, secret, keepalive_stop) -> int:
         "ts_ephemeral": bool(cfg.get("ts_ephemeral", True)),
         "proxy_env": cfg.get("mode") == "rl",   # bc 要 git clone，别让它走 tailnet 代理
         "engine": str(cfg.get("ts_engine") or ""),
+        # 离线静态包：上传到 Drive/Dataset 后填 CFG，避免云机 curl install.sh
+        "ts_tarball": str(cfg.get("ts_tarball") or ""),
+        "ts_prefix": str(cfg.get("ts_prefix") or ""),
     }
     if not ts_cfg["ts_authkey"]:
         log("!! 未拿到 TS_AUTHKEY（环境变量 / Colab Secrets / Kaggle Secrets / CFG 四处都没有）")

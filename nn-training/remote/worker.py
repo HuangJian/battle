@@ -1431,6 +1431,7 @@ def _ensure_ts_code(
         raise ProtocolError("kind=iter 的 manifest 缺 ts_code_sha256——无法定位 TS 运行时")
     cache = ts_root / sha
     if cache.exists():
+        _wire_hit(jid, "ts_code")  # 零字节命中也要进账（与 code 同规，否则 wire 摘要读数失真）
         log(f"job {jid}: ts_code cache 命中（{sha[:12]}…）——跳过下载解压")
         return cache, 0, True
     raw = (preloaded or {}).get("ts_code_zip") or download_ts_code(base_url, token, jid, log=log)
