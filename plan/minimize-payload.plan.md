@@ -532,7 +532,9 @@ Have/omit 只是 **带宽优化提示**，不是正确性来源。实现与测�
 | Blob 端点 | `hub_server.py` `_get_blob` | 不变；miss 照旧 |
 | 发布 manifest 字段 | `hub_client.py` `publish_job` | 已有 opt_sha 等；一般不必加字段 |
 | 线格式 | `protocol.py` `pack_result_v2` / `pack_job_v2` | result **不减** opt；job push 可裁段 |
-| 扫描/诊断 | `tools/remote_wire_scan.py` | 改前后对比体积 |
+| **引导期护栏（§4.0.1）** | `remote/tailscale_boot.py::fetch_guarded` · `notebook_boot.py::_pull` · `offline_boot.py::fetch_task_pack` | 零协议；只动传输层 |
+| **账聚合（p50/p90）** | `tools/wire_report.py` | 只读日志；不砟网络 |
+| 体积扫描 | `tools/remote_wire_scan.py` ⚠ **本仓无此文件**（2026-09-20 核对：§1.2 的体量表无法就地复现）| 见 §7.3-2 的替代口径 |
 
 **方向红线**：`src/` 游戏核不依赖 `remote/`；本 plan 只动 `nn-training/remote/**`、
 必要时 `nn-training/tools/**` 与测试。`dashboard/` 非必须。
@@ -560,9 +562,13 @@ Have/omit 只是 **带宽优化提示**，不是正确性来源。实现与测�
 
 - [ ] **同一 sha 在一次会话内不得被传输两次**（含引导→worker 交接）：一次干净会话的 `wire:`
       摘要里每个 sha 只出现一次 download。
-- [ ] **坏签有界重抽**：低速（< `WIRE_MIN_RATE`）时 ≤3 次重抽内可完成；重抽不产生重复的全量
-      传输；日志有 `wire: re-roll` 行可统计坏签比例。
-- [ ] **报 p50/p90，不报均值**；每组 ≥10 job（§4.0-4）。
+- [x] **坏签有界重抽**（2026-09-20 达成）：低速（< `WIRE_MIN_RATE`）时 ≤3 次重抽内可完成；
+      重抽不产生重复的全量传输；日志有 `wire: re-roll` 行可统计坏签比例。
+      覆盖六段 GET：payload / code / ts_code / blob（worker）+ 引导期 code.zip / task-pack（§4.0.1）。
+      单测：`tests/test_wire_reroll.py` · `tests/test_boot_wire_guard.py`。
+- [x] **报 p50/p90，不报均值**（2026-09-20 工具就位）：`tools/wire_report.py`
+      （最近秩分位；速率改报 p50 + worst + bad%，理由见 §4.0-1）。仍欠的是**在实机上采一组
+      ≥10 job 的样本**并拿它校准 §8-4 的阀值——那需要一次真跑，属训练侧行动。
 - [ ] 旧 worker ↔ 新 hub、新 worker ↔ 旧 hub：任务可完成，无协议硬失败。
 - [ ] result 仍含完整 `weights_json` + `opt_tar`（含 `opt.pt`）；scan 工具可复核。
 - [ ] miss 路径：删掉本地 cache（**含删掉引导交接文件**）后仍能从 hub 全量装回并跑通。
@@ -576,11 +582,17 @@ Have/omit 只是 **带宽优化提示**，不是正确性来源。实现与测�
 ### 7.3 验证方法（开发自测）
 
 1. 本地 loopback hub + 两门假课程，连续发布 job，统计 download 次数应随命中下降。
-2. `tools/remote_wire_scan.py` 对改前后 result 体积：上行不应变大。
+2. **result 体积不变**：`tools/remote_wire_scan.py` **不在本仓**（§6 已标）——现在的等价手段是
+   ① worker 的 `wire:` 行里 `result=` 那段的字节数（改前后直接比）；② 协议层
+   `tests/test_remote_ppo.py` 的 `validate_result` / `pack_result_v2` 用例（含 `opt.pt` 必带）。
+   要恢复「合成路径扫描」得先把该工具写回仓——**独立小活，未做**。
 3. AI Studio 实机：看 `wire:` 日志，对比优化前后「payload/POST 耗时 / PPO 耗时」。
    ⚠ **方差下必须配对**：单跑对比是噪声（同机同 hub 实测 44× 双峰，§4.0）⇒ 每组 ≥10 job，
    优先用同一会话内的配对量（同 job 的 code 段 vs blob 段），报 p50/p90。
-4. `wire: re-roll` 行数 = **坏签比例的直接观测**（改前恒为 0——那时没有重抽）。
+4. `wire: re-roll` 行数 = **坏签比例的直接观测**（改前恒为 0——那时没有重抽）；
+   聚合成表：`python tools/wire_report.py <日志文件或目录>`（`--json` 给看板）。
+5. 校准阀值（§8-4）：当 bad% 一直远高于 0 而 p90s 仍高 ⇒ 阀值偏松（该多抽）；
+   若 reroll 频繁却拿不到好签（重抽后 p90s 不降）⇒ 阀值偏紧/预算不足。两个方向都能从表上读。
 
 ---
 
@@ -607,14 +619,21 @@ Have/omit 只是 **带宽优化提示**，不是正确性来源。实现与测�
    且 weights 已在 course_cache？
 3. Hub 是否要持久化 worker inventory 供 console 展示？（M4 可选）
 4. `WIRE_MIN_RATE` / `WIRE_REROLL_BUDGET` / `WIRE_REROLL_MAX` 的具体取值（先按 §4.0-2 的
-   80 KB/s · 20 s · 3 次，用实机 `wire:` 数据校准）
+   80 KB/s · 20 s · 3 次，用实机 `wire:` 数据校准）——**校准手段已就位**：
+   `python tools/wire_report.py <日志>` 直接给 bad%（改前恒 0）与重抽后的 p90s；
+   引导侧那套常量（`BOOT_*`）与 worker 侧同值，改一边要同步另一边（§4.0.1）
 5. **`blob_cache` 上限**（拍板项，见 §8 与 §2.3-3）
 
 ---
 
 ## 9. 证据与参考（仓内）
 
-- 字段体积扫描：`nn-training/tools/remote_wire_scan.py`
+- 字段体积扫描：`nn-training/tools/remote_wire_scan.py` ⚠ **本仓不存在**（2026-09-20 全仓核对：
+  `git ls-files | grep wire` 只有 `tests/test_wire_cf_tunnel.py` / `tests/test_wire_reroll.py`）。
+  §1.2 的两张体积表因此**无法就地复现**——它们是一次现场测量的记录，不是可重跑的工具输出。
+  要重跑就把该工具写回仓（未做，见 §7.3-2 的替代口径）。
+- 传输账聚合：`nn-training/tools/wire_report.py`（p50/p90 + bad% + reroll；纯只读）
+- 引导期护栏：`nn-training/remote/tailscale_boot.py::fetch_guarded`（§4.0.1）
 - Result v2 / Job v2：`nn-training/remote/protocol.py`（`pack_result_v2` / `pack_job_v2`）
 - Blob 安全阀：`nn-training/remote/worker.py` `_resolve_blob`
 - 发布 slim 字段：`nn-training/remote/hub_client.py` `publish_job`
@@ -630,8 +649,11 @@ Have/omit 只是 **带宽优化提示**，不是正确性来源。实现与测�
 ## 10. 一句话给接手 agent
 
 > **正确性只信 manifest 里的 sha；Have/omit 只为少传字节。**  
-> **先做 M0（引导↔worker 交接：同一 sha 不传两次）与 M1（测速 + 坏签重抽）**：这两件吃掉现场
-> 实测最大的两块（重复 1.43 MB / 106 s；坏签 100 s+），而且**零协议改动**。  
+> **M1（测速 + 坏签重抽）已完成且已收尾**（worker 四段 GET + 引导期两段 GET + p50/p90 聚合，
+> 见 §4.0.1 / §5-M1 的收尾表）；剩下优先级最高的是 **M0**（引导↔worker 交接：同一 sha 不传
+> 两次，现场实测白传 1.43 MB / 106 s），也是**零协议改动**。  
 > 再谈 omit 协商（pull 路径命中判定本就在 worker 本地，边际价值只剩一次探测往返）；
 > `course_cache` **先过 §4.3「init_weights 占多少字节」的门槛**再决定建不建。  
-> **result 必须继续完整回传 opt.pt。**
+> **result 必须继续完整回传 opt.pt。**  
+> 另外两件小活：§6/§9 里那个 `tools/remote_wire_scan.py` **根本不在仓里**（要用得先写回来）；
+> 实机采一组 ≥10 job 的 `wire:` 样本（`tools/wire_report.py`）才能把 §8-4 的阀值钉下来。
