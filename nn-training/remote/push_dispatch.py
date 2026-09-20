@@ -381,6 +381,7 @@ class PushDispatcher:
         *,
         poll_sec: float = PUSH_POLL_SEC,
         timeout_sec: float = PUSH_TIMEOUT_SEC,
+        push_attempts: int = 3,
         now_fn: Any = time.time,
         log: Any = _log_default,
     ) -> None:
@@ -389,6 +390,11 @@ class PushDispatcher:
         self.token = token  # 保留（worker authKey 优先；缺 authKey 的节点用它）
         self.poll_sec = float(poll_sec)
         self.timeout_sec = float(timeout_sec)
+        # 单次 job POST 的重试次数（透传给 push_client.submit_job）。生产缺省 3：
+        # 409「队满」/428/5xx 这类瞬时拒绝退避重试（2s/4s），换台前先等一等。
+        # **测试**里「409 ⇒ 回落队首换一台」是调度层行为，不该陪跑这条重试梯子：
+        # 实测 test_worker_refusing_job_requeues_to_another 为此白等 6s（2+4）。
+        self.push_attempts = int(push_attempts)
         self._now = now_fn or time.time
         self._log = log or _log_default
         self._lock = Lock()
@@ -547,6 +553,7 @@ class PushDispatcher:
                 code_bytes,
                 blobs=blobs,
                 ts_code_zip=ts_bytes,
+                attempts=self.push_attempts,
                 log=lambda m: self._log(f"{jid} -> {wid}: {m}"),
             )
             self.pushed += 1

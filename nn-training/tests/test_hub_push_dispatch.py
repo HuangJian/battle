@@ -394,8 +394,17 @@ def _dispatcher(
     *,
     poll_sec: float = 0.02,
     timeout_sec: float = 5.0,
+    push_attempts: int = 3,
 ) -> PushDispatcher:
-    return PushDispatcher(hub, ws, "sekret", poll_sec=poll_sec, timeout_sec=timeout_sec, log=_quiet)
+    return PushDispatcher(
+        hub,
+        ws,
+        "sekret",
+        poll_sec=poll_sec,
+        timeout_sec=timeout_sec,
+        push_attempts=push_attempts,
+        log=_quiet,
+    )
 
 
 def _workers_with(tmp_path: Path, factory, *specs) -> PushWorkers:
@@ -516,12 +525,55 @@ def test_worker_refusing_job_requeues_to_another(tmp_path: Path, worker_factory)
     hub = _hub(tmp_path, ["x2"])
     _publish(hub, "x2", "j" * 16)
     ws = _workers_with(tmp_path, worker_factory, (refusing, {"id": "g1"}), (ok, {"id": "g2"}))
-    disp = _dispatcher(hub, ws)
+    # attempts=1：本用例测的是**调度层**「409 ⇒ 回落队首换一台」，不是 push_client 的
+    # 瞬时重试梯子（2s/4s 退避白等 6s，2026-09-20 耗时预算揭出）。梯子本身由下面
+    # test_submit_job_transient_retry_ladder 直接钉住（快、不打真 sleep）。
+    disp = _dispatcher(hub, ws, push_attempts=1)
 
     disp.tick()
     assert _pump(disp, lambda: hub._stores["x2"].get_result("j" * 16) is not None)
     assert refusing.received == [] and ok.received == ["j" * 16]
     assert disp.state()["requeued"] >= 1
+
+
+def test_submit_job_transient_retry_ladder(monkeypatch) -> None:
+    """push_client.submit_job：409「队满」等瞬时拒绝按 2s/4s 退避重试，试满仍失败抛
+    `RetryableError`（零墙钟：把 sleep 换成记录）。
+
+    这是**生产**行为（节点轻微拥挤时先等一等，不要立刻整队回落）；此前只在
+    test_worker_refusing_job_requeues_to_another 里被顺带跑成 6s 真·sleep（2+4）——
+    那既不是该用例的判据，也把单测墙钟拖到耗时预算线。现在两件事各回本位：调度层
+    断言用 `push_attempts=1` 快跑，梯子本身在这里逐位钉住。
+    """
+    import types as _types
+
+    import remote.push_client as pc
+
+    # 缓存探间全命中，把 httpx 面收窄到 /job 这一跳。
+    monkeypatch.setattr(pc, "code_cached_on_node", lambda *a, **k: True)
+    monkeypatch.setattr(pc, "ts_code_cached_on_node", lambda *a, **k: True)
+    monkeypatch.setattr(pc, "blob_cached_on_node", lambda *a, **k: True)
+
+    calls = {"n": 0}
+    slept: list[float] = []
+
+    def fake_request(base_url, token, path, **_kw):
+        calls["n"] += 1
+        return 409, b"busy"
+
+    monkeypatch.setattr(pc, "_request", fake_request)
+    # 只替 pc 命名空间里的 time：不碰全局 time.sleep（其它线程/插件还要用）。
+    monkeypatch.setattr(
+        pc, "time", _types.SimpleNamespace(sleep=lambda s: slept.append(s), time=time.time)
+    )
+
+    manifest = {"job_id": "j" * 16, "code_sha256": "c" * 8}
+    with pytest.raises(pc.RetryableError):
+        pc.submit_job(
+            "http://node.local", "tok", manifest, b"payload", None, attempts=3, log=lambda _m: None
+        )
+    assert calls["n"] == 3, calls
+    assert slept == [2, 4], f"退避梯子应为 2s/4s（实测 {slept}）"
 
 
 def test_tampered_result_is_rejected_not_stored(tmp_path: Path, worker_factory) -> None:

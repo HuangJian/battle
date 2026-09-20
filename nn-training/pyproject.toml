@@ -225,8 +225,14 @@ python_functions = ["test_*"]
 addopts = "-ra -q --tb=short -x --timeout=60"
 # 2026-09-15：全局 per-test 超时护栏（--timeout=60，用户口径：**超过 1 分钟就是有问题**）。
 # 裸 `python -m pytest xxx`（编码 agent 沙箱常见）此前无任何超时，被沙箱节流的测试可拖成
-# 无限卡死（实测 test_volume_topup_iterates_until_wave_cap 卡数分钟）。60s 相对最慢实测
-# 22s 有 ~2.7× 余量；真的合法超 60s 的用例用 `@pytest.mark.timeout(N)` 显式放行。
+# 无限卡死（实测 test_volume_topup_iterates_until_wave_cap 卡数分钟）。
+# 2026-09-20：这是**挂起**护栏（兜死锁/卡死），与 `conftest.py` 的**耗时预算**护栏分工：
+#   conftest（根）：>5s 警告、>10s **报错**（用户口径）；覆盖两个层（tests/ + e2e/），
+#   `NN_TEST_WARN_S` / `NN_TEST_FAIL_S` / `--test-warn-s` / `--test-fail-s` 可覆盖，
+#   个别确需更长的用例用 `@pytest.mark.time_budget(N)`（写明理由）。
+#   引入背景：门禁墙钟 157s 里绝大部分是测试在**空等生产超时**（不占 CPU）——当时最慢单测
+#   30s（4 个 26.5s）；修完实测最慢 5s，全量 157s → 24s。详见 docs/nn.progress.md §98。
+# 真的合法超 60s 的用例用 `@pytest.mark.timeout(N)` 显式放行。
 # 优先级：CLI `--timeout=N` 覆盖 addopts（后者生效：门禁/task 仍是 50s）；长 e2e（真训练/
 # 真 sim）显式 `--timeout=0` 关闭。局限：pytest-timeout 兜不住 C 层原生阻塞（subprocess.wait
 # 等），但 Python 字节码级挂起必兜住并打印主线程栈。

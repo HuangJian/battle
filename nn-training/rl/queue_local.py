@@ -206,7 +206,12 @@ def rescan_nodes(
             or time.time() >= deadline
         ):
             return
-        next_probe_at = time.time() + max(1.0, rescan_sec)
+        # 下个 pass 的间隔：地板必须与上面 wait 的地板同源（0.05s）——写死 1.0s 会让
+        # `recoverPingSec` 这类旋钮在小值时不生效（配置与实际行为说谎，与上面注释同一
+        # 口径）。2026-09-20 实测代价：tests/test_rollout_dispatch_resilience.py 的回场
+        # 用例配 0.05s 却按 1.0s 走 ⇒ 4 轮回场要 >3s 纯等待（pytest-timeout 线程栈可见）。
+        # 生产缺省 20s/5s 远大于地板，不受影响；防忙等的下界由循环里的 0.05s wait 担任。
+        next_probe_at = time.time() + max(0.05, rescan_sec)
 
         # 候选 = 尚未孵化 ∪ 已停派（真故障熔断 / 连续瞬断软停）。
         with lock:

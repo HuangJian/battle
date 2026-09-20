@@ -479,6 +479,13 @@ class RolloutDispatcher:
         rescan_sec = float(policy.get("recoverPingSec", policy.get("agentRescanSec", 20)))
         recover_first_sec = float(policy.get("nodeRecoverFirstSec", 5.0))
         rearm_cap = int(policy.get("nodeRearmLimit", 3))
+        # 瞬断/背压退避上限（秒，2026-09-20 提为旋钮）：worker 撞上可刷新条件
+        # （502/503/504/超时/409）后退避再领下一任务。生产缺省 5s 不变；测试把它
+        # 调到 ms 级（与 nodeRecoverFirstSec/recoverPingSec 同款「小节奏」用法）——
+        # 否则每个瞬断错误白等满窗：test_rollout_dispatch_resilience 的 502/soft-streak
+        # 用例实测 3~5 次瞬断 ⇒ 15~26.5s/用例，是 nn 门禁墙钟的头号来源（纯 sleep，
+        # 不占 CPU——即「CPU 占用低、墙钟却很长」的直接成因）。
+        transient_backoff_sec = float(policy.get("transientBackoffSec", 5.0))
 
         # 任务 → 在跑副本数；任务 → 持有副本的节点集合（防竞速派回同节点）；
         # 任务 → 派发墙钟（超时 requeue）；任务 → 超时冷却节点集合。
@@ -946,7 +953,10 @@ class RolloutDispatcher:
                 # 背压退避：agent 满负荷 / 隧道抖 / 瞬断 → 本 worker 退避再领下一任务，
                 # 防提交洪峰（无限重排会把 attempt 刷到上百、日志洪水——实测 503 洪峰教训）。
                 if transient_err:
-                    time.sleep(min(5.0, max(0.5, deadline - time.time())))
+                    _cap = transient_backoff_sec
+                    # 地板 0.5s 与上限同源：旋钮配到 ms 级时地板必须跟着缩，否则
+                    # 「配置小节奏、实际仍睡 0.5s」，旋钮说谎。
+                    time.sleep(min(_cap, max(min(0.5, _cap), deadline - time.time())))
 
         threads: list[threading.Thread] = []
         extra_threads: list[threading.Thread] = []

@@ -78,9 +78,12 @@ class _Harness:
                 "nodeFailStreak": 3,
                 "queueWindowSec": 30,
                 "tailGraceJoinSec": 0,
-                # 测试用小节奏（真实缺省 5s / 20s）
+                # 测试用小节奏（真实缺省 5s / 20s / 5s）
                 "nodeRecoverFirstSec": 0.05,
                 "recoverPingSec": 0.05,
+                # 瞬断/背压退避拉满 5s×N 次是纯 sleep（不占 CPU），把这几个用例
+                # 从 15~26.5s 压回 <1s。断言只看取活次数与日志，不看时长。
+                "transientBackoffSec": 0.02,
                 **(policy or {}),
             },
         }
@@ -259,19 +262,42 @@ def test_soft_streak_still_bounded_when_cluster_is_down(tmp_path, monkeypatch, s
     """整体脉停（一直是瞬时错误）仍有上界：停派该节点，不把整轮拖到窗口超时。
 
     契约：软停一次 → 轮内回场一次（`nodeRearmLimit`=3）⇒ 4 轮 × 2 = 8 次取活。
+
+    2026-09-20（墙钟）：`queueWindowSec` 30 → **3**。本用例是**纯空闲等待**——
+    回场上界用尽后已无任何可服务的 worker（candidates 空、alive 空），剩余 4 局谁也
+    不会去结算，主循环/worker/rescan 三处全部停在 `all_settled.wait(0.5)` 直到 deadline
+    （pytest-timeout 线程栈实测，见 docs/nn.progress.md §98）；即实测的 26.5s = 30s 窗 − 前置。
+    窗口在这里只是**配速**（同 nodeRecoverFirstSec/recoverPingSec 的「小节奏」用法），
+    断言只看取活次数与漏局集，与窗口长度无关；配小后本用例 ~1.5s（不再 26.5s）。
+    注：回场节奏的 1.0s 地板当轮也会随之暴露（旋钮 0.05s 不生效）——已在
+    rl/queue_local.py 改为与 wait 同源地板，故 4 轮在这里只需零点几秒。
+    （遗留议题：生产缺省窗 1800s，「全员停派且回场用尽」时整轮会空等到窗口——
+     已在 §98 记录，属终止语义变更，未擅自改。）
     """
-    h = _Harness(tmp_path, monkeypatch, games=4, policy={"nodeSoftFailStreak": 2})
+    h = _Harness(
+        tmp_path,
+        monkeypatch,
+        games=4,
+        # 窗只要盖住「4 轮×2 取活」的工时（回场地板修好后 ~0.3s）+ 负载余量。
+        policy={"nodeSoftFailStreak": 2, "queueWindowSec": 1.5},
+    )
     calls = {"n": 0}
 
     def fetch(*_a, **_kw):
         calls["n"] += 1
         raise dist_common.DistError(status, "")
 
-    h.run(fetch)
+    report = h.run(fetch)
     assert calls["n"] == 8, f"软停 + 有界回场应共 8 次取活（实测 {calls['n']}）"
     joined = "\n".join(h.logs)
     assert "连续 2 次瞬时失败" in joined
     assert "circuit-broken" not in joined  # 措辞上必须与真故障区分
+    # 停派后有界收场：4 局全部进 missing（喂 volume 补波 / 下轮 resume），不静默丢。
+    assert report["dist"]["nodes"] == {}, report["dist"]
+    # missing 经 JSON 往返是 list（报告口径），比较前归一为 tuple。
+    assert [tuple(m) for m in report["missing"]] == [(2000, i + 1) for i in range(4)], report[
+        "missing"
+    ]
 
 
 def test_rescan_discovers_node_online_mid_round(tmp_path, monkeypatch) -> None:
@@ -349,9 +375,12 @@ def test_halt_stops_round_without_waiting_window(tmp_path, monkeypatch) -> None:
     halt = threading.Event()
 
     def fetch(*_a, **_kw):
+        # 首局一取活就置位（确定性）：旧写法用 0.3s 定时器，隐含前提是「0.3s 时轮
+        # 还在跑」——2026-09-20 回场节奏地板修正后轮在 <0.3s 就跑完了，halt 落空、
+        # `halt_aborted` 缺失（测试自身的时间依赖，不是生产行为回归）。
+        halt.set()
         raise dist_common.DistError(0, "validate: bad manifest")
 
-    threading.Timer(0.3, halt.set).start()
     t0 = time.monotonic()
     report = h.run(fetch, halt_event=halt)
     elapsed = time.monotonic() - t0

@@ -4,6 +4,78 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §98 门禁墙钟 157s → 24s：五个「测试替生产超时白等」的坑 + per-test 耗时预算护栏（2026-09-20）
+
+**一句话**：单测跑成 157~185s（文档基线 ~25s，用户口径「昨天还 <30s」）不是因为工作量变大，
+而是因为**多处测试在空等生产超时**——CPU 占用低、墙钟长。逐个定位（`--durations` +
+`pytest-timeout --timeout-method=thread` 线程栈）后改回去，并加护栏让这类退化不能再静默回来。
+
+### 定位手法（可复用）
+
+1. `--durations=30` 排序：四个参数化用例各 26.5s、三个相邻用例 15/20s——**整数秒**是 sleep 指纹；
+2. 单个用例 `--timeout=8 --timeout-method=thread`：栈里若全是
+   `all_settled.wait(...)` / `time.sleep(backoff)`，就是**纯空闲等**（不占 CPU 的那类）；
+3. 按「谁配的小节奏没生效」顺藤摸瓜，而不是按「哪个用例慢」逐个改。
+
+### 五个坑（均已修）
+
+| # | 位置 | 病因 | 修法 |
+|---|---|---|---|
+| 1 | `rl/dispatch.py` 瞬断背压退避 | 上限**硬编码 5s**：每个 502/503/504/超时 白等 5s ⇒ 3~5 次即 15~26.5s/用例 | 提为 policy `transientBackoffSec`（生产缺省 5s 不变），测试 0.02s |
+| 2 | `rl/queue_local.py` rescan 节奏 | `next_probe_at` 地板**写死 1.0s**，`recoverPingSec=0.05` 形同虚设 ⇒ 4 轮回场 ≥3s | 地板改为与 wait 同源 0.05s（生产缺省 20s/5s 远大于地板，不受影响） |
+| 3 | `remote/push_client.py` 409 重试梯子 | `backoff=min(2**attempt,8)`（2s+4s）被 `test_worker_refusing_job_requeues_to_another` **顺带**跑满 6s | 梯子提为 `PushDispatcher(push_attempts=)`，该用例 `=1`；梯子另用零墙钟用例逐个钉住（sleep 换记录，试满抛 `RetryableError`） |
+| 4 | `tests/test_rollout_dispatch_resilience.py` | harness `queueWindowSec=30`：回场上界用尽后无人能结算，三处线程全停在 `all_settled.wait` 直到 deadline（实测 26.5s） | 该用例窗 1.5s（配速旋钮，同 `nodeRecoverFirstSec` 用法）+ 断言 4 局全进 `missing`（喂 volume 补波/resume） |
+| 5 | 同文件 `test_halt_stops_round_without_waiting_window` | 用 0.3s 定时器置 halt，隐含「0.3s 时轮还在跑」——坑 2 修好后轮在 <0.3s 跑完，halt 落空 | 改为**首局取活即置位**（确定性，不依赖墙钟） |
+
+### 第 6 个坑：一个「先当真工作放过、实为死测试」的对拍（`test_serve_wiring`）
+
+`test_course_args_match_run_rl_echo_config` 实测 5.02s。我第一反应判它是**真工作**（起真 Python
+子进程 + 导入含 torch 的 `run_rl`），打算用 `@pytest.mark.time_budget(10)` 显式放宽——**判错了**，
+用户一句「为什么要依赖 torch，CI 又不真跑训练」点醒：
+
+- oracle 的 argv 是 `["run_rl.py", "--course", stem]`，**没传 `--echo-config`**；
+- 而 `run_rl.main()` 的 echo 调用点在 `if getattr(args, "echo_config", False):`
+  （run_rl.py:212）之后 ⇒ 那次 dump **从未被调用**；
+- 于是 main() 一路往下：`validate_args` → loop 启动 → `build_model` → **导入 torch** + 读
+  `weights/<course>/*.json` ⇒ 5s 全耗在这条与判据无关的链上；
+- 后果更重：本机缺权重 ⇒ 永远 skip（实测如此）；真机有权重 ⇒ 没 PARITY ⇒ `pytest.fail`。
+  即**这条对拍一直是死测试**（既没对拍上，又在有权重的环境必红）。
+
+修法：oracle 传 `--echo-config`，走**文档化短路**（echo → log → return，在 validate_args
+与任何权重/torch 之前）⇒ 0.24s、不依赖权重与 torch、任何环境都真跑。顺手去掉
+`echo_config` 键（调用开关，不算解析快照，否则就是唯一的假分叉——实测 98 项全同、仅此一项差）。
+`time_budget` 标记与 env-blocked 跳过一并删除（拿不到 PARITY 现在一律算真回归）。
+跳过数因此 4 → 3。
+
+### 新护栏：`nn-training/conftest.py`（根 conftest，用户口径）
+
+**单测 >5s 警告、>10s 报错**。放在**根** conftest 是因为门禁跑 `pytest tests/ e2e/`，两层要同规。
+实现用 `pytest_runtest_makereport` 改写 outcome（超预算即判 **failed**，不是 teardown 报错）⇒
+`-x`/xdist/summary 全是标准语义；只计 call 阶段（fixture 建拆不算）。阈值可用
+`NN_TEST_WARN_S` / `NN_TEST_FAIL_S` / `--test-warn-s` / `--test-fail-s` 覆盖；个别确需更长的用例用
+`@pytest.mark.time_budget(N)`（必须写明理由）。它抓的正是本节的退化形态：**不占 CPU 的等待、
+真实 sleep、被当成配速用的生产超时**，都会在耗时上现形。
+
+### 效果（同一 16 核容器）
+
+| 指标 | 修前 | 修后 |
+|---|---|---|
+| nn python gate 全量 | 157 / 182 / 185s | **24s** |
+| `pytest tests/ e2e/ -n 12` | 142.7s | **20.1s** |
+| 最慢单测 | 30.04s（4 个用例 26.5s） | **0.24s**（原 5.02s 的对拍；见上栏第 6 个坑） |
+| >5s 警告 | — | **0** |
+| 跳过 | 4 | **3**（serve_wiring 那条由「永远 skip」变为真跑） |
+
+结果：1822 passed / 3 skipped / 0 failed，ruff + mypy 全绿。
+
+### 遗留（未擅自改生产终止语义）
+
+「全员停派（软停/熔断）且 `nodeRearmLimit` 用尽」时，若只剩 pending 而无人能服务，整轮会
+**空等到 `queueWindowSec`**（生产缺省 1800s）才收官。测试里配小窗即可，但生产侧这条路径
+值得独立评估（早退 vs 等窗，与 volume 补波/resume 的交互）——属终止语义变更，不在本次范围。
+
+---
+
 ## §97 e2e `check()` 静默失败：autouse fixture `_fail_loudly` + 三条被它揭出的既存红（2026-09-20）
 
 **一句话**：`e2e/test_run_rl.py` 的 `check()` 只把失败追加进模块级 `FAILS`、**从不抛错**，

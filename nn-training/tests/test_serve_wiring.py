@@ -607,3 +607,59 @@ def test_course_args_refuses_a_course_flag() -> None:
 def test_course_args_unknown_course_is_loud() -> None:
     with pytest.raises((FileNotFoundError, SystemExit)):
         loop_serve.course_args("no-such-course-xyz")
+
+
+# 2026-09-20：argv 里必须有 `--echo-config`。原版没传——而 run_rl.main() 的 echo 调用点在
+# `if getattr(args, "echo_config", False):` 之后（run_rl.py:212），所以那次 dump **从来没
+# 被调用过**：main() 继续往下跑 validate_args → loop 启动 → build_model → 导入 torch
+# 并去找 weights/<course>/*.json ⇒ 表现为「本机缺权重 → skip」（本环境）或「有权重但没
+# PARITY → pytest.fail」（真机），把一个纯解析链对拍变成了环境/训练链依赖。
+# 传 --echo-config 即走**文档化短路**（echo → log → return，在 validate_args 与任何权重/torch
+# 之前）⇒ 子进程 ~0.3s、不依赖权重与 torch，任何环境都能真跑。
+# 代价：不再覆盖「echo 之后那条链」——那不是本用例的判据（course_args 的解析快照）。
+_ORACLE = """
+import json, sys
+sys.argv = ["run_rl.py", "--course", sys.argv[1], "--echo-config"]
+import rl.config as cfg
+def fake_echo(args, course, it=1):
+    # echo_config 本身不算解析快照（它只是调用方为了让 main() 走到这次 dump 而传的开关）：
+    # 不排除会变成「mine 无此键 / theirs 有」的假分叉（实测正是唯一的差异项）。
+    print("PARITY:" + json.dumps({k: repr(v) for k, v in vars(args).items()
+                                  if not k.startswith("_") and k != "echo_config"},
+                                 ensure_ascii=False))
+cfg.echo_config = fake_echo
+import run_rl
+run_rl.main()
+"""
+
+
+def test_course_args_match_run_rl_echo_config(tmp_path: Path) -> None:
+    """对拍：`course_args(stem)` ≡ `run_rl.py --course <stem> --echo-config` 的解析快照。
+
+    oracle = 在**子进程里跑 `run_rl.main()` 自己**、把 `echo_config` 换成 dump（同一调用点、
+    同一份解析链）——见 `_ORACLE` 上的注释：必须带 `--echo-config` 才会真的走到那次 dump，
+    否则会一路跑进训练链（导 torch + 读 weights），本用例就从「解析链对拍」退化成
+    「环境能跑训练吗」，实测 5.2s 且本机永远 skip。
+
+    故本用例**不需要**权重/torch（实测 ~0.3s）；拿不到 PARITY 一律算真回归（不再有
+    env-blocked 跳过：那条路的唯一成因就是把 torch/权重链误拖进来）。
+    """
+    stem = "c4-dodge"
+    proc = subprocess.run(
+        [sys.executable, "-c", _ORACLE, stem],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    line = next((ln for ln in proc.stdout.splitlines() if ln.startswith("PARITY:")), "")
+    if not line:
+        tail = proc.stderr.strip()[-300:]
+        pytest.fail(f"oracle 没吐出 PARITY（对拍链本身出了问题）：{tail}")
+    theirs = json.loads(line[len("PARITY:") :])
+    mine = {
+        k: repr(v)
+        for k, v in vars(loop_serve.course_args(stem)).items()
+        if not k.startswith("_") and k != "echo_config"  # 同上：调用开关，不算快照
+    }
+    assert mine == theirs
