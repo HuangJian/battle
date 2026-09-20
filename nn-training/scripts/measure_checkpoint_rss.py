@@ -159,13 +159,16 @@ def _rss_mb_windows() -> float | None:
             ("PeakPagefileUsage", ctypes.c_size_t),
         ]
 
+    # `ctypes.WinDLL` 只在 win32 的 typeshed 里声明 —— Linux 上 mypy 必报 attr-defined
+    # （.github/workflows/nn-training.yml 的 `uv run mypy .` 跑在 Linux），而本函数只在
+    # Windows 被调用（平台分派见上面 `rss_mb()`）。同款惯例见下方 os.sysconf 那行。
     try:
-        psapi = ctypes.WinDLL("psapi", use_last_error=True)
+        psapi = ctypes.WinDLL("psapi", use_last_error=True)  # type: ignore[attr-defined]
         psapi.GetProcessMemoryInfo.argtypes = [
             wintypes.HANDLE, ctypes.POINTER(ProcessMemoryCounters), wintypes.DWORD
         ]
         psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
-        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
         k32.GetCurrentProcess.restype = wintypes.HANDLE
         pmc = ProcessMemoryCounters()
         pmc.cb = ctypes.sizeof(pmc)

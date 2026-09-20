@@ -17,7 +17,9 @@
 #   tests/+e2e/ = 20.1s（即上述 27s 基线所在量级；中间曾退化到 142.7s，见
 #   docs/nn.progress.md §98）。同次引入 per-test 耗时预算护栏（nn-training/conftest.py：
 #   >5s 警告、>10s 报错；NN_TEST_WARN_S / NN_TEST_FAIL_S 可覆盖）——它专抓
-#   「不占 CPU 的等待」，这类退化不会再静默回来。e2e/ 自 60e5f69 起 hermetic（FakeServer + tmp 落盘，不需要
+#   「不占 CPU 的等待」，这类退化不会再静默回来。
+#
+#   e2e/ 自 60e5f69 起 hermetic（FakeServer + tmp 落盘，不需要
 #   bun / 真节点 / weights fixture），因此可以进门禁。
 #   层 = **路径**（tests/ = 单测层、e2e/ = 集成层），不再用 `-m "not heavy"`：
 #   tests/ 里 heavy 标记实测 0 个（该过滤早已空转），全仓唯一模块级 heavy 标记在 e2e。
