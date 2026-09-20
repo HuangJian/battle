@@ -867,9 +867,16 @@ def test_clear_halt_on_startup(tmp_path: Path) -> None:
         assert clear_halt_on_startup(base, "sekret", log=logs.append) is True
         assert hub_halted(base, "sekret") is False
         assert any("清空" in m for m in logs)
-        # 不可达 → False，不抛；空 url/token → True/None，不抛
-        assert clear_halt_on_startup("http://127.0.0.1:1", "sekret", log=lambda m: None) is False
-        assert hub_halted("http://127.0.0.1:1", "sekret") is None
+        # 不可达 → False，不抛；空 url/token → True/None，不抛。
+        # timeout=0.05：Windows 对关闭端口的 connect 也会空等（门禁实测 ~2s/次 ×
+        # 3 次调用 = 6.2s；同机 WSL 则秒拒）。测试只验语义，不等 TCP。
+        assert (
+            clear_halt_on_startup(
+                "http://127.0.0.1:1", "sekret", log=lambda m: None, timeout=0.05
+            )
+            is False
+        )
+        assert hub_halted("http://127.0.0.1:1", "sekret", timeout=0.05) is None
         assert clear_halt_on_startup("", "sekret", log=lambda m: None) is True
         assert hub_halted(base, "") is None
     finally:

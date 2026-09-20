@@ -127,15 +127,25 @@ def test_cli_requires_something_to_measure() -> None:
 
 
 def test_build_stack_is_cheap_and_keepalive_holds_it() -> None:
-    """真栈：参数量合理、每课增量远小于 torch 基线（这正是「缓存上限不是主约束」的结论）。
+    """真栈：参数量合理、理论占用 MB 级、keep 保命持有（2026-09-20 稳定化）。
 
     `keep` 非空 ⇒ 对象被保命持有（栈被 gc 掉时第 2 课的增量会变成 0，累计曲线就是假的）。
+
+    ★ **不断言绝对 RSS**（模块 docstring 既有口径：绝对值随 torch 版本/机器/xdist
+    负载浮动，拿它做断言就是给 CI 埋雷）。实测：Windows + xdist 下首次
+    `opt.step()` 的 RSS 差值可被 torch 运行时/分配器抬到 ~74MB，而 70K 参数的
+    Adam 理论占用只有 ~0.56MB——`total_mb < 50` 因此间歇红（同机 WSL 又常绿）。
+    结论要保护的是**架构事实**「学生网每课理论增量是 MB 级不是几十 MB」，改钉
+    `theory_mb`（params 的纯换算，确定性）+ 参数量带 + keep 存活。
     """
     pytest.importorskip("torch")
     keep: list[object] = []
     row = build_stack("per-tick:默认架构", [""], "per-tick", keep=keep)
     assert len(keep) == 1
     assert 10_000 < row.params < 500_000  # 小 CNN 学生：量级钉住（arch 变了也该在这个带内）
+    # 测量通道有输出（非负）；绝对 RSS 不设上界（见 docstring）。
     assert row.model_mb >= 0 and row.adam_mb >= 0 and row.refs_mb >= 0
-    assert row.total_mb < 50  # ★ 结论的保护带：每课增量是 MB 级，不是几十 MB
+    # 架构结论（确定性）：float32 × (w+g+m+v) ≈ params×16B ⇒ 70K ≈ 1.1MB，
+    # 远小于一个 256MB 缓存块——这才是 recommend() 用的「每课 MB 级」语义。
+    assert row.theory_mb < 5.0, f"理论增量应是 MB 级（got {row.theory_mb:.2f}MB）"
     assert row.weights == "" and row.skipped == ""  # 空候选 ⇒ 默认架构，且没有可跳过的候选

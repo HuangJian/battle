@@ -4,6 +4,47 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §103 Windows 门禁耗时：TCP 空等 + NTFS 大量小文件（2026-09-20）
+
+**一句话**：同一批用例在同机 WSL <5s、Windows 原生 python 5.5–9.1s 触发 >5s 警告。
+根因不是训练变慢，是两类 **Windows 税**：① `127.0.0.1:<closed>` 的 connect 空等
+（hub_client 默认 timeout=10/15，不可达路径 ×3 次调用 ≈ 6.2s）；② volume 桩按局数
+写 manifest，600000 配额 ×3 个 stub ≈ 3k 次 mkdir+write（NTFS 慢一个数量级）。
+
+### 修法（§98 同口径：把测试侧超时/体量拧小，生产缺省不变）
+
+| 用例 | 病因 | 修法 | 修后（xdist -n 8） |
+|---|---|---|---|
+| `test_clear_halt_on_startup` | 不可达 hub ×3 次默认 timeout | `clear_halt_on_startup(timeout=)` 透传；测试 0.05s | 0.58s |
+| `test_volume_topup_partial_ledger_*` | 每局一个 manifest，文件数爆炸 | 配额 600000→60000（g0=16/w2=8/w3=4），断言同比例更新 | 1.14s |
+| `test_bc_train_on_epoch_called_per_epoch` | 真 torch 2 epoch + xdist 抢 CPU | 语料 60→16、batch 32→8（钩子语义不测收敛） | 3.48s |
+| `test_bc_train_resume_continues_epoch_numbering` | 同上（两段训练） | 同上 | 0.79s |
+
+`clear_halt_on_startup` 新增 `timeout: float = 10.0` 透传给 `hub_halted`/`set_cloud_halt`
+（生产行为不变；测试才有办法在不可达地址上秒败）。
+
+---
+
+## §102 pathlib 钩子自证随 Py3.12 改写：accessor 已删、rglob 已并发容忍（2026-09-20）
+
+**一句话**：`tests/test_rl_resume.py` 的竞态钩子在 Python 3.12.13 上红——不是生产回归，
+是 pathlib 内部结构变了：① `_NormalAccessor`/`_Accessor` 已删；② `_WildcardSelector._select_from`
+对 scandir 的 `except OSError: pass`（pathlib.py:206）⇒ **rglob 本身已并发容忍**，
+旧自证「Path.rglob 必抛 FileNotFoundError」变成假红。
+
+### 改写口径
+
+- 钩子绑定点：`os.scandir` +（若存在）accessor 类 + `Path._scandir`（3.12 glob 真正拿走的绑定）。
+- `rmtree` 与钩子同走 `os.scandir` ⇒ 加 **re-entrancy 旗标**，否则 `RecursionError`（实测）。
+- 自证测试改名为 `test_hook_intercepts_scandir_and_deletes_victim`：断言
+  ① hook 拦到 `scandir(victim)`；② 拦截瞬间目录已删；③ 后续真实 scandir 抛 ENOENT。
+  —— 下方 walk/resume 绿色仍不可能是「钩子没生效」的假绿。
+- `_dir_signature` 断言侧 `\`→`/` 归一（Windows `relative_to` 反斜杠；缓存 key 本机自洽）。
+
+生产修法（`walk_shard_dirs` = `os.walk`）**不变**；本条只是 sentinel 随解释器演进。
+
+---
+
 ## §98 门禁墙钟 157s → 24s：五个「测试替生产超时白等」的坑 + per-test 耗时预算护栏（2026-09-20）
 
 **一句话**：单测跑成 157~185s（文档基线 ~25s，用户口径「昨天还 <30s」）不是因为工作量变大，
@@ -164,12 +205,12 @@ iter_shard_dirs`（发布端同一条竞态，同一 helper + `_shard_mtime` 兜
 
 ### 证据链
 
-- **先复现**：门禁实测栈（上表）＋ `tests/test_rl_resume.py::test_hook_makes_old_rglob_raise`
-  把旧实现在同一时序下**必抛**钉成断言（钩子有效性自证；将来 pathlib 若变得并发容忍，
-  这条会红——那时 guard 完成使命）。
+- **先复现**：门禁实测栈（上表）＋ `tests/test_rl_resume.py` 的确定性钩子自证
+  （原名 `test_hook_makes_old_rglob_raise`——「旧 rglob 必抛」；Py3.12 后 pathlib 已
+  并发容忍，自证改为 `test_hook_intercepts_scandir_and_deletes_victim`，见 §102）。
 - **确定性竞态钩子**：在 `scandir` 的实参 = 受害目录那一刻 rmtree（= 事故时序），
-  两个绑定点都要补：pathlib 把 `os.scandir` **锁存**成类属性（cpython 3.10
-  `pathlib.py:290  scandir = os.scandir`），只改 os 模块会让钩子静默失效（首版即踩）。
+  绑定点随 Python 版本：≤3.11 pathlib 锁存 `os.scandir` 成 accessor 类属性（cpython 3.10
+  `pathlib.py:290`）；≥3.12 改 `Path._scandir` + `os.scandir`（见 §102）。
 - **反面证据**：「retire 竞态」曾被怀疑是 collector 读 shard（`_shard_dir`）出错——实测
   不成立：把本地竞速副本拖慢以**确定性**制造 `dup settle … node=local (+retired …)`
   （`e2e/test_run_rl.py::test_it_stream_local_loser_retire`），collector 照常收官 4/4。

@@ -773,18 +773,29 @@ def test_volume_topup_partial_ledger_replays_same_continuation(
 
     plan §2.3 的三条一起验：(a) 同账本 ⇒ 同续跑（可 replay）；(b) 续跑派的每一签都
     出自该关该波同一条种子流（同源，不重抽）；(c) 已结算多的关补得少（分关独立）。
+
+    配额缩到 target=60000 / est=967 / samples=500（原 600000）：Windows NTFS 上
+    每局写一个 manifest，600000 配额 × 3 个 stub ≈ 3k 次 mkdir+write，call 7.8s
+    超 5s 预算（同机 WSL <5s）。缩小后 g0=16、w2=8、w3=4，文件数 ~10×↓，语义不变：
+    half(w2) = stage0/1 全额、2/3 仍缺；补波 0/1=4、2/3=8（原 36/75 的同比例结构）。
     """
-    full = _StubLoop(tmp_path / "full", target=600000, est=967, samples=500)
+    # 60000/4/967 → g0=16；初波后 short=7000 → w2=8；再 short=3000 → w3=4（w4 被
+    # DEFAULT_MAX_WAVES=3 挡住）。
+    _T, _EST, _S = 60000, 967, 500
+    full = _StubLoop(tmp_path / "full", target=_T, est=_EST, samples=_S)
     full._iteration_pairs(1)
     full._volume_waves = 1
     _settle_first_wave(full)
     full._volume_topup(1, None)
     assert len(full.dispatched) == 2
+    assert [len(w) for w in full.dispatched] == [4 * 8, 4 * 4]
 
     # 崩在第二波中间：只落了一半 shard（wave_pairs 按关升序 ⇒ 前一半 = stage 0/1 全额）
     half = full.dispatched[0][: len(full.dispatched[0]) // 2]
-    crashed = _topup_from_ledger(tmp_path / "crashed", half)
-    again = _topup_from_ledger(tmp_path / "crashed-again", half)
+    crashed = _topup_from_ledger(tmp_path / "crashed", half, target=_T, est=_EST, samples=_S)
+    again = _topup_from_ledger(
+        tmp_path / "crashed-again", half, target=_T, est=_EST, samples=_S
+    )
 
     # (a) 确定性：同账本 ⇒ 逐字节同续跑
     assert crashed.dispatched == again.dispatched
@@ -792,10 +803,10 @@ def test_volume_topup_partial_ledger_replays_same_continuation(
     full_w1 = {st: [sd for t, sd in full.dispatched[0] if t == st] for st in range(4)}
     for stage, seed in crashed.dispatched[0]:
         assert seed in full_w1[stage]
-    # (c) 分关独立：stage 0/1 已结算一半 ⇒ 缺口小、补得少；stage 2/3 仍需整波
+    # (c) 分关独立：stage 0/1 已结算 w2 ⇒ 缺口小、补得少；stage 2/3 仍要整波
     per_stage = {st: sum(1 for t, _ in crashed.dispatched[0] if t == st) for st in range(4)}
-    assert per_stage[0] == per_stage[1] == 36  # ceil(34500/967)
-    assert per_stage[2] == per_stage[3] == 75  # ceil(72000/967)
+    assert per_stage[0] == per_stage[1] == 4  # ceil(3000/967)
+    assert per_stage[2] == per_stage[3] == 8  # ceil(7000/967)
     assert (crashed._volume_collected or 0) > 0
 
 
@@ -877,9 +888,16 @@ def test_volume_topup_skips_when_disabled(tmp_path: Path, _patch_wver: None) -> 
     assert stub.dispatched == []
 
 
-def _topup_from_ledger(tmp: Path, half: list[tuple[int, int]]) -> _StubLoop:
+def _topup_from_ledger(
+    tmp: Path,
+    half: list[tuple[int, int]],
+    *,
+    target: int = 600000,
+    est: int = 967,
+    samples: int = 500,
+) -> _StubLoop:
     """造一个「初波已结算 + 第二波只落了一半」的循环桩，然后跑补波（崩后续跑）。"""
-    stub = _StubLoop(tmp, target=600000, est=967, samples=500)
+    stub = _StubLoop(tmp, target=target, est=est, samples=samples)
     stub._iteration_pairs(1)
     stub._volume_waves = 1
     _settle_first_wave(stub)

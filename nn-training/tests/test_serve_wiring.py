@@ -645,16 +645,24 @@ def test_course_args_match_run_rl_echo_config(tmp_path: Path) -> None:
     env-blocked 跳过：那条路的唯一成因就是把 torch/权重链误拖进来）。
     """
     stem = "c4-dodge"
+    # zh-CN Windows 默认 GBK：oracle stdout 含非 ASCII 时 text=True 会
+    # UnicodeDecodeError，subprocess 读线程挂掉 ⇒ proc.stdout 变 None
+    # （门禁实测 `AttributeError: 'NoneType' object has no attribute 'splitlines'`）。
+    # 显式 UTF-8 + errors=replace，并让子进程也按 UTF-8 吐字。
+    env = {**os.environ, "PYTHONUTF8": "1"}
     proc = subprocess.run(
         [sys.executable, "-c", _ORACLE, stem],
         cwd=str(ROOT),
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=300,
+        env=env,
     )
-    line = next((ln for ln in proc.stdout.splitlines() if ln.startswith("PARITY:")), "")
+    line = next((ln for ln in (proc.stdout or "").splitlines() if ln.startswith("PARITY:")), "")
     if not line:
-        tail = proc.stderr.strip()[-300:]
+        tail = (proc.stderr or "").strip()[-300:]
         pytest.fail(f"oracle 没吐出 PARITY（对拍链本身出了问题）：{tail}")
     theirs = json.loads(line[len("PARITY:") :])
     mine = {

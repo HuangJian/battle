@@ -113,7 +113,12 @@ def test_bc_resume_missing_is_404_semantic(tmp_path: Path) -> None:
 # ------------------------------------------------------------------ bc.on_epoch（接续训练钩子）
 
 
-def _make_corpus(tmp_path: Path, n: int = 60) -> Path:
+def _make_corpus(tmp_path: Path, n: int = 16) -> Path:
+    """最小语料：钩子语义只需要 on_epoch 被按全局 epoch 调用，不测收敛。
+
+    n=16（原 60）：Windows + xdist 下 2 epoch 真 torch 训练曾 5.5–6.2s 超 5s 预算
+    （同机 WSL <5s）；样本减到 1 个 batch 后 call 阶段回到 ~1–2s。语义断言不变。
+    """
     rng = np.random.default_rng(7)
     d = tmp_path / "shard0"
     d.mkdir(parents=True, exist_ok=True)
@@ -145,7 +150,7 @@ def _bc_args(tmp_path: Path, **over: object) -> types.SimpleNamespace:
         ckpt_every=0,
         checkpoint=None,
         epochs=2,
-        batch=32,
+        batch=8,
         lr=1e-3,
         val_split=0.2,
         mirror_p=0.0,
