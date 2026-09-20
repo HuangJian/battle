@@ -1952,20 +1952,27 @@ a.tc-preset {
   text-decoration: underline;
 }
 
-/* ────────────── 在训课程 pill 行（2026-09-20：课程开训必须手动开） ──────────────
-   顶栏之下第一行：一门已开课的课程一个 pill（状态点 + 课名 + it 指针 + 一句状态 + ■ 停课）。
-   与节点 pill 同一套视觉语言（圆角胶囊 / 状态点色板 / hover 描边）——两行相邻的 pill 不该
-   长得像两个体系。 */
+/* ────────────── 在训课程 pill（2026-09-20：课程开训必须手动开） ──────────────
+   一门已开课的课程一个 pill（状态点 + 课名 + it 指针 + 一句状态 + ■ 停课）。与节点 pill
+   同一套视觉语言（圆角胶囊 / 状态点色板 / hover 描边）——相邻的 pill 不该长得像两个体系。
+
+   ★ 它是**顶栏行里的一个 flex 项**（不再自占一行，用户 2026-09-20：「和课程 select 挤进
+   同一行，避免占用宝贵的纵向页面空间」）：无卡片底/边框/下边距（那是“一个面板”的语言，
+   而行内应只是几个胶囊）；pill 多时**本组自己横向滚动**，绝不 `flex-wrap` 撑出第二行
+   （那又回到吃纵向空间，还顺带把后面的「触发门禁」挤下去）。
+   `min-width: 0` 是横向滚动的必要条件：flex 项的默认 `min-width: auto` 拒绝缩到内容以下，
+   于是会把同一行的课程 select 挤没（而不是自己出滚动条）。 */
 .tc-tpills {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  flex-wrap: wrap;
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--r-3);
-  padding: 6px 12px;
-  margin-bottom: 10px;
+  /* 与课程 select 平分行内余地（两者都 `flex:1`）——没开课时本组件不渲染，select 照旧占满/居中 */
+  flex: 1 1 auto;
+  flex-wrap: nowrap;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  padding-bottom: 2px; /* 给细滚动条留位，避免贴住描述线 */
 }
 .tc-tpills .lbl {
   font-size: var(--fs-2);

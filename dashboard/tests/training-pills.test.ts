@@ -239,6 +239,21 @@ describe('顶部在训课程 pill 行（SSR）', () => {
     expect(html).not.toContain('class="tc-tpills"')
   })
 
+  it('pill 与课程 select 在同一行（顶栏行内，不再自占一行——纵向空间）', async () => {
+    const html = render.renderConsolePage(await viewWithPills())
+    const row = html.indexOf('tc-topbar__row')
+    const course = html.indexOf('tc-topbar__course')
+    const pills = html.indexOf('class="tc-tpills"')
+    const headerEnd = html.indexOf('</header>')
+    expect(row).toBeGreaterThan(-1)
+    // 同一行 = 栏行内、且先后出现课程 select → pill；在 </header> 之外 = 又单开了一行
+    expect(course).toBeGreaterThan(row)
+    expect(pills).toBeGreaterThan(course)
+    expect(pills).toBeLessThan(headerEnd)
+    // 开课按键也在同一行且排在 pill 之前（视觉读序：选课 → 开课 → 看哪几门在训）
+    expect(html.indexOf('>训练</button>')).toBeLessThan(pills)
+  })
+
   it('顶部「训练」按键恒在（开课入口与进程启动解耦），停课不在顶栏', async () => {
     const html = render.renderConsolePage(await viewWithPills())
     expect(html).toContain('>训练</button>')

@@ -1,4 +1,4 @@
-/** TrainingPills.tsx — 顶部**在训课程** pill 行（用户 2026-09-20 口径）。
+/** TrainingPills.tsx — 顶栏里的**在训课程** pill 组（用户 2026-09-20 口径）。
  *
  *  交互（用户原话：「顶部课程 select 选择某课程，点击「训练」按键；正在训练的所有课程，
  *  都在顶部显示为一个 pill，概览显示 it 数和状态（参考节点 pill），有停止按键，点击 pill 后
@@ -12,9 +12,15 @@
  *      同权），停课按钮点了由服务端 403 + flash 兜底（与其它动作键同哲学：只读是动作边界，
  *      不是按钮状态）。
  *
- *  为什么在顶部单开一行（而不是再塞进课程 select 里）：多课程并行时「哪几门在训」是操作员
- *  每分钟要看几十次的事实，而 select 只显示**选中的一门**——旧版把其余课程堆成一串文字
+ *  为什么在顶栏（而不是再塞进课程 select 里）：多课程并行时「哪几门在训」是操作员每分钟要看
+ *  几十次的事实，而 select 只显示**选中的一门**——旧版把其余课程堆成一串文字
  *  （「正在训练：a、b、c」），既读不出各自进度，也没有停课入口。
+ *
+ *  ★ 为什么**不单开一行**（用户 2026-09-20：「要和课程 select 挤进同一行，避免占用宝贵的纵向
+ *  页面空间」）：pill 数是零到几（0 时整个组件不渲染），而每一行都稳定吃掉 ~34px 纵向——那种
+ *  「有时有内容、有时空白」的行最亏。故它是顶栏行内的一个 flex 项、紧跟课程 select 与「训练」
+ *  按键（视觉上“选课 → 开课 → 看哪几门在训”连成一段）；pill 多时**本组内部横向滚动**，
+ *  不换行（换行 = 又占回纵向空间，还把「触发门禁」挤下一行）。
  */
 
 import { coursePills, type CoursePillTone, type LoopQueueRow } from '../../view'
@@ -54,7 +60,7 @@ export function TrainingPills({
   readOnly,
 }: TrainingPillsProps) {
   const pills = coursePills({ courses, rows, trainerRunning })
-  // 一门课都没开 ⇒ 不占一行（顶部保持干净：空行会被读成「有东西没加载出来」）。
+  // 一门课都没开 ⇒ 整个组件不渲染（顶部保持干净：空块/空行会被读成「有东西没加载出来」）。
   if (pills.length === 0) return null
   return (
     <div className="tc-tpills" aria-label="在训课程">

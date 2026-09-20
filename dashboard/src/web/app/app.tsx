@@ -1,6 +1,6 @@
 /** app.tsx — 训练控制台根组件（SSR + hydrate；一屏仪表盘布局，DECISIONS §355）。
  *
- *  布局：顶栏（课程▾ + 训练状态 chips + 刷新间隔 select + ⟳）→ Hero（胜率焦点 + 迷你条）
+ *  布局：顶栏（课程▾ + 「训练」按键 + 在训课程 pill + 刷新间隔 select + ⟳）→ Hero（胜率焦点 + 迷你条）
  *  → 组件 4 小卡 → 节点 pill 行 → 详情抽屉（指标 | 节点统计 | 日志）→ TrainingLoop 启动弹窗。
  *
  *  交互纪律：无「停止全部」（用户指令）· 无「暂停刷新」按钮（改刷新间隔 select）·
@@ -432,7 +432,7 @@ export function App({ initial }: AppProps) {
               位置 / 降级本机），确认即开课——写开课标记（训练侧/hub 的「在训」判据）+ 课程级
               旋钮 + 发现事实（账本/权重/`remote-jobs`）+ 解暂停 + 置 hub 模式（进程没跑也能开）。
 
-              **停课不在这里**：它在每门课的 pill 上（见下方 TrainingPills），按课停、按课消失
+              **停课不在这里**：它在每门课的 pill 上（同一行的 TrainingPills），按课停、按课消失
               ——一个按钮同时做「开这门」与「停这门」在两门课并存时语义不明。 */}
           {viewCourse ? (
             <button
@@ -452,6 +452,24 @@ export function App({ initial }: AppProps) {
               训练
             </button>
           ) : null}
+          {/* ── 在训课程 pill（用户 2026-09-20 口径）：一门课一个 pill（it 数 + 状态），
+               点 pill 切查看目标（Hero 趋势 + 指标表跟着走）并高亮，pill 上的 ■ 停课（非破坏）
+               ——停课后服务端 stamp 里不再有它，pill 自行从顶部消失（不做本地乐观删除：队列与
+               账本一字未动这件事只能由服务端事实说话）。
+               **与课程 select / 「训练」按键同一行**（用户口径「和课程 select 挤进同一行，避免
+               占用宝贵的纵向页面空间」）：pill 数是零到几，单独占一行每条都白花 ~34px 纵向；
+               pill 多时本组自身横向滚动（不把顶栏顶成两行 —— 那又回到吃纵向空间）。── */}
+          <PanelErrorBoundary>
+            <TrainingPills
+              courses={trainingCourses}
+              rows={stateView?.loopQueue?.rows ?? []}
+              trainerRunning={trainerRunning}
+              viewCourse={viewCourse}
+              onSelect={selectCourse}
+              onStop={(c) => void handleStopCourse(c)}
+              readOnly={readOnly}
+            />
+          </PanelErrorBoundary>
           {/* 门禁动作（**仅在有训练时显示**）：停机 = 触发门禁即下发 cloud halt；
               提示 = 只横幅告警，绝不杀云端 PPO worker。
               背景：G4(plateau) 的 REMEDIATE 每 5 轮必复现，c6-pickup3 / c6-bonus
@@ -537,21 +555,6 @@ export function App({ initial }: AppProps) {
           </div>
         </div>
       </header>
-      {/* ── 在训课程 pill 行（用户 2026-09-20 口径）：一门课一个 pill（it 数 + 状态），
-           点 pill 切查看目标（Hero 趋势 + 指标表跟着走）并高亮，pill 上的 ■ 停课（非破坏）
-           ——停课后服务端 stamp 里不再有它，pill 自行从顶部消失（不做本地乐观删除：队列与
-           账本一宇未动这件事只能由服务端事实说话）── */}
-      <PanelErrorBoundary>
-        <TrainingPills
-          courses={trainingCourses}
-          rows={stateView?.loopQueue?.rows ?? []}
-          trainerRunning={trainerRunning}
-          viewCourse={viewCourse}
-          onSelect={selectCourse}
-          onStop={(c) => void handleStopCourse(c)}
-          readOnly={readOnly}
-        />
-      </PanelErrorBoundary>
       {connError !== 'off' ? (
         <div className="tc-banner tc-banner--err" role="alert">
           <span>
