@@ -34,15 +34,9 @@
   --r-3: 14px;
   --sh-1: 0 1px 3px rgba(16, 24, 40, 0.05);
   --sh-2: 0 4px 16px rgba(16, 24, 40, 0.14);
-  --fs-1: 11.5px;
-  --fs-2: 12px;
-  --fs-25: 12.5px;
-  --fs-3: 13px;
-  --fs-4: 15px;
-  --fs-5: 20px;
 
   /* ── 外壳与栅格（docs/dashboard-redesign.md §4.1/§4.3） ────────────────────
-     旧 --fs-1..--fs-5 保留为别名（渐进替换，P4 收尾统一）：新代码一律用 --fs-* 阶梯。 */
+     全部字号取自下方 --fs-* 阶梯；旧 --fs-1..--fs-5 别名已于 P4 删除。 */
   --sidebar-w: 216px;
   --sidebar-w-rail: 56px;
   --topbar-h: 56px;
@@ -99,7 +93,7 @@ body {
     sans-serif;
   background: var(--bg);
   color: var(--text);
-  font-size: var(--fs-3);
+  font-size: var(--fs-base);
   line-height: 1.5;
 }
 /* ✖ `.tc-wrap`（页级容器：max-width 1180 + 居中 + 内边距）已删：唯一消费者是日志页根节点，
@@ -131,7 +125,7 @@ body {
   align-items: center;
   justify-content: center;
   gap: var(--sp-2);
-  font-size: var(--fs-2);
+  font-size: var(--fs-base);
   color: var(--muted);
   white-space: nowrap;
 }
@@ -140,7 +134,7 @@ body {
 }
 .tc-h1 {
   margin: 0;
-  font-size: var(--fs-5);
+  font-size: var(--fs-lg);
   font-weight: 700;
   letter-spacing: 0.2px;
   display: flex;
@@ -155,13 +149,13 @@ body {
   color: var(--accent);
   border-radius: 999px;
   padding: 2px 10px;
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
   font-weight: 600;
   white-space: nowrap;
 }
 .tc-topbar h1 {
   margin: 0;
-  font-size: var(--fs-5);
+  font-size: var(--fs-lg);
   font-weight: 700;
   letter-spacing: 0.2px;
   display: flex;
@@ -180,11 +174,11 @@ body {
   align-items: center;
   gap: var(--sp-3);
   flex-wrap: wrap;
-  font-size: var(--fs-25);
+  font-size: var(--fs-sm);
   margin-left: auto;
 } /* 右对齐到页面右侧（§367 UI） */
 .tc-topbar__ts {
-  font-size: var(--fs-25);
+  font-size: var(--fs-sm);
   color: var(--muted);
   white-space: nowrap;
 }
@@ -193,7 +187,7 @@ body {
   gap: var(--sp-2);
   flex-wrap: wrap;
   align-items: center;
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
 }
 .tc-anchor {
   color: var(--muted);
@@ -230,7 +224,7 @@ select.tc-sel {
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--card);
-  font-size: var(--fs-25);
+  font-size: var(--fs-base);
   cursor: pointer;
 }
 select.tc-sel:disabled {
@@ -244,7 +238,7 @@ button.tc-btn {
   border-radius: 8px;
   background: var(--card);
   cursor: pointer;
-  font-size: var(--fs-3);
+  font-size: var(--fs-base);
 }
 button.tc-btn:hover:not(:disabled) {
   border-color: var(--accent);
@@ -271,7 +265,7 @@ button.tc-btn--danger {
 }
 button.tc-btn--sm {
   padding: 2px 8px;
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
 }
 a.tc-btn {
   display: inline-block;
@@ -286,7 +280,7 @@ a.tc-btn {
   gap: var(--sp-3);
   padding: 6px 12px;
   border-radius: var(--r-2);
-  font-size: var(--fs-2);
+  font-size: var(--fs-base);
   margin-bottom: 8px;
   flex-wrap: wrap;
 }
@@ -348,13 +342,13 @@ a.tc-btn {
   border-bottom: 1px solid var(--border);
 }
 .tc-card__title {
-  font-size: var(--fs-4);
+  font-size: var(--fs-md);
   font-weight: 600;
   margin: 0;
 }
 .tc-card__sub {
   color: var(--muted);
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
   font-weight: 400;
 }
 .tc-card__actions {
@@ -370,7 +364,7 @@ a.tc-btn {
   padding: 3px 7px;
   border-radius: var(--r-1);
   color: var(--muted);
-  font-size: var(--fs-3);
+  font-size: var(--fs-base);
   line-height: 1;
 }
 .tc-iconbtn:hover {
@@ -383,7 +377,7 @@ a.tc-btn {
 .tc-card__foot {
   padding: var(--sp-2) var(--sp-4);
   border-top: 1px solid #f0f2f6;
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
   color: var(--muted);
 }
 .tc-card__err {
@@ -391,7 +385,7 @@ a.tc-btn {
   background: var(--red-bg);
   color: var(--red);
   padding: 6px 14px;
-  font-size: var(--fs-2);
+  font-size: var(--fs-base);
   display: flex;
   gap: var(--sp-3);
   align-items: center;
@@ -435,7 +429,7 @@ a.tc-btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
   color: var(--muted);
   cursor: default;
 }
@@ -445,7 +439,7 @@ a.tc-btn {
   display: inline-block;
   padding: 2px 9px;
   border-radius: 999px;
-  font-size: var(--fs-1);
+  font-size: var(--fs-xs);
   font-weight: 600;
   white-space: nowrap;
 }
@@ -473,7 +467,7 @@ a.tc-btn {
   display: inline-block;
   padding: 3px 11px;
   border-radius: 999px;
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
   font-weight: 600;
   line-height: 18px;
   white-space: nowrap;
@@ -538,7 +532,7 @@ a.tc-btn {
   border-bottom: 2px solid var(--border);
   text-align: left;
   padding: 11px 14px;
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
   font-weight: 600;
   color: var(--muted);
   cursor: pointer;
@@ -556,7 +550,7 @@ a.tc-btn {
 .tc-table tbody td {
   padding: 10px 14px;
   border-bottom: 1px solid #f0f2f6;
-  font-size: var(--fs-3);
+  font-size: var(--fs-base);
   vertical-align: middle;
   background: #fff;
 }
@@ -587,7 +581,7 @@ a.tc-btn {
 }
 .tc-table--dense tbody td {
   padding: 5px 10px;
-  font-size: var(--fs-25);
+  font-size: var(--fs-base);
 }
 .tc-table--dense thead th {
   padding: 7px 10px;
@@ -611,7 +605,7 @@ a.tc-btn {
 }
 .tc-row-expand td {
   background: #fafbfd;
-  font-size: var(--fs-2);
+  font-size: var(--fs-base);
   padding: 8px 14px;
   border-bottom: 1px solid #f0f2f6;
 }
@@ -641,17 +635,17 @@ a.tc-btn {
   padding: 20px;
   text-align: center;
   color: var(--muted);
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
 }
 .tc-errtext {
   color: var(--red);
-  font-size: var(--fs-2);
+  font-size: var(--fs-base);
   word-break: break-all;
 }
 .tc-caption {
   padding: 6px 16px;
   border-top: 1px solid #f0f2f6;
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
   color: var(--muted);
   line-height: 1.6;
 }
@@ -677,7 +671,7 @@ a.tc-btn {
 }
 .tc-eval-summary__title {
   margin: 0;
-  font-size: var(--fs-4);
+  font-size: var(--fs-md);
   font-weight: 700;
   display: flex;
   align-items: baseline;
@@ -722,7 +716,7 @@ a.tc-btn {
   gap: var(--sp-3);
   flex-wrap: wrap;
   padding: var(--sp-3) var(--sp-4) 0;
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
   color: var(--muted);
 }
 .tc-toolbar input[type='text'] {
@@ -730,7 +724,7 @@ a.tc-btn {
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--card);
-  font-size: var(--fs-2);
+  font-size: var(--fs-base);
 }
 .tc-toolbar__totop {
   margin-left: auto;
@@ -756,7 +750,7 @@ a.tc-btn {
   gap: 6px;
   padding: 3px 6px;
   cursor: pointer;
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
 }
 
 /* ── Segmented（统一胶囊分段控件：节点卡/密度/行过滤/trainer 模式） ── */
@@ -768,7 +762,7 @@ a.tc-btn {
   border: 1px solid var(--border);
   background: var(--card);
   padding: 3px 11px;
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
   color: var(--muted);
   cursor: pointer;
   transition: all 0.12s;
@@ -806,10 +800,10 @@ a.tc-btn {
   gap: 7px;
   margin: 4px 10px 4px 0;
   cursor: pointer;
-  font-size: var(--fs-3);
+  font-size: var(--fs-base);
 }
 .tc-toggle code {
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
   color: var(--muted);
 }
 .tc-toggle input[type='checkbox'] {
@@ -820,7 +814,7 @@ a.tc-btn {
   padding: 4px 7px;
   border: 1px solid var(--border);
   border-radius: 7px;
-  font-size: var(--fs-3);
+  font-size: var(--fs-base);
 }
 
 /* ── Modal 内 toggle 组（统一视觉，非散落独立按键） ────────── */
@@ -836,7 +830,7 @@ a.tc-btn {
   border: 1px solid var(--border);
   border-radius: var(--r-2);
   background: var(--card);
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
   font-weight: 600;
   transition: all 0.12s;
   min-width: 72px;
@@ -863,7 +857,7 @@ a.tc-btn {
   max-width: 460px;
   padding: 10px 14px;
   border-radius: var(--r-2);
-  font-size: var(--fs-3);
+  font-size: var(--fs-base);
   white-space: pre-wrap;
   z-index: 80;
   box-shadow: var(--sh-2);
@@ -911,7 +905,7 @@ a.tc-btn {
   pointer-events: none;
   white-space: nowrap;
   z-index: 5;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   line-height: 1.3;
   margin-top: -4px;
 }
@@ -935,7 +929,7 @@ a.tc-btn {
   border: 1px solid var(--border);
   background: var(--card);
   padding: 3px 11px;
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
   color: var(--muted);
   cursor: pointer;
   transition: all 0.12s;
@@ -980,7 +974,7 @@ a.tc-btn {
   color: var(--muted);
 }
 .tc-small {
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
 }
 /* ✖ 这里曾有一个「flex 行」版的 `.tc-row`（gap: sp-6）与它的搭档 `.tc-col`——2026-09-20 删除：
    ① 名为 `.tc-row` 的类在下方还有一份定义（StatusRow 的芯片行，P1），同为单类选择器、后者胜，
@@ -989,7 +983,7 @@ a.tc-btn {
 .tc-logtail {
   max-height: 150px;
   overflow: auto;
-  font-size: var(--fs-1);
+  font-size: var(--fs-base);
   background: #f7f8fa;
   padding: 6px 9px;
   border-radius: 8px;
@@ -999,7 +993,7 @@ a.tc-btn {
 }
 .tc-subhead {
   margin: 4px 0 2px;
-  font-size: var(--fs-3);
+  font-size: var(--fs-base);
   color: var(--muted);
 }
 .tc-link {
@@ -1008,7 +1002,7 @@ a.tc-btn {
   padding: 0;
   color: var(--accent);
   cursor: pointer;
-  font-size: var(--fs-2);
+  font-size: var(--fs-base);
   font-weight: 600;
 }
 .tc-link:hover {
@@ -1059,7 +1053,7 @@ a.tc-btn {
 }
 /* 不是 h1：页名由外壳 Topbar 承担（一面一 h1）——这里标识的是**哪个组件的**日志文件。 */
 .tc-loghead__title {
-  font-size: var(--fs-4);
+  font-size: var(--fs-md);
   margin: 0;
   display: flex;
   align-items: baseline;
@@ -1081,7 +1075,7 @@ a.tc-btn {
   min-width: 0;
 }
 .tc-logpath {
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
   color: var(--muted);
   white-space: nowrap;
   overflow: hidden;
@@ -1096,7 +1090,7 @@ a.tc-btn {
   gap: 4px;
   padding: 1px 8px;
   border-radius: 999px;
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
   background: var(--accent-bg);
   color: var(--accent);
   white-space: nowrap;
@@ -1144,7 +1138,7 @@ a.tc-btn {
   padding: 4px 10px;
   border: 1px solid var(--border);
   border-radius: 999px;
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
   color: var(--muted);
   text-decoration: none;
   white-space: nowrap;
@@ -1185,13 +1179,13 @@ a.tc-btn {
 }
 .tc-logtool__search-icon {
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--fs-base);
 }
 .tc-logtool__search input {
   border: none;
   outline: none;
   background: none;
-  font-size: var(--fs-2);
+  font-size: var(--fs-base);
   width: 100%;
   color: var(--text);
 }
@@ -1200,7 +1194,7 @@ a.tc-btn {
   background: none;
   color: var(--muted);
   cursor: pointer;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   padding: 0 2px;
 }
 .tc-logtool__clear:hover {
@@ -1210,7 +1204,7 @@ a.tc-btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
   color: var(--muted);
 }
 
@@ -1223,7 +1217,7 @@ a.tc-btn {
   border-radius: 999px;
   background: var(--yellow-bg);
   color: #b45309;
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
   font-weight: 600;
   white-space: nowrap;
 }
@@ -1244,7 +1238,7 @@ a.tc-btn {
   background: #161c26;
   border-bottom: 1px solid #232a36;
   color: #8b98ab;
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
 }
 .tc-logpanel__dots {
   display: inline-flex;
@@ -1278,7 +1272,7 @@ a.tc-btn {
   color: #28c840;
   font-weight: 700;
   letter-spacing: 0.5px;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
 }
 .tc-logpanel__live i {
   width: 7px;
@@ -1288,7 +1282,7 @@ a.tc-btn {
   animation: tc-live 1.6s ease-in-out infinite;
 }
 .tc-logpanel__count {
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
   color: #8b98ab;
 }
 
@@ -1305,7 +1299,7 @@ a.tc-btn {
   align-items: start;
   gap: 8px;
   padding: 1px 12px;
-  font-size: var(--fs-2);
+  font-size: var(--fs-base);
   line-height: 1.6;
   font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
   white-space: pre-wrap;
@@ -1391,7 +1385,7 @@ a.tc-btn {
   display: inline-block;
   padding: 0 7px;
   border-radius: 6px;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   font-weight: 700;
   background: #232a36;
   color: #aeb9c9;
@@ -1411,7 +1405,7 @@ a.tc-btn {
 }
 .tc-logkv__k {
   color: #7d8ea3;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
 }
 .tc-logkv__v {
   color: #dbe4f0;
@@ -1420,7 +1414,7 @@ a.tc-btn {
 .tc-logkv__err {
   color: #f3b4b4;
   font-weight: 600;
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
   word-break: break-all;
 }
 .tc-logempty {
@@ -1433,7 +1427,7 @@ a.tc-btn {
   text-align: center;
 }
 .tc-logempty__icon {
-  font-size: 26px;
+  font-size: var(--fs-xl);
 }
 
 /* 直达底部（工具栏内联按钮；§372 不再浮动） */
@@ -1445,7 +1439,7 @@ a.tc-btn {
   border-radius: 999px;
   background: var(--card);
   padding: 4px 12px;
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
   font-weight: 600;
   color: var(--text);
   cursor: pointer;
@@ -1461,7 +1455,7 @@ a.tc-btn {
 }
 .tc-logbtn__icon {
   color: var(--accent);
-  font-size: 13px;
+  font-size: var(--fs-base);
 }
 .tc-logbtn__badge {
   min-width: 18px;
@@ -1470,7 +1464,7 @@ a.tc-btn {
   border-radius: 999px;
   background: var(--accent);
   color: #fff;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   font-weight: 700;
   animation: tc-live 1.2s ease-in-out infinite;
 }
@@ -1506,11 +1500,11 @@ a.tc-btn {
   min-width: 170px;
 }
 .tc-hero__lbl {
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
   color: var(--muted);
 }
 .tc-hero__val {
-  font-size: 34px;
+  font-size: var(--fs-2xl);
   font-weight: 800;
   line-height: 1.1;
   font-variant-numeric: tabular-nums;
@@ -1523,7 +1517,7 @@ a.tc-btn {
   color: var(--green);
 }
 .tc-hero__sub {
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
   color: var(--muted);
 }
 .tc-hero__right {
@@ -1562,7 +1556,7 @@ a.tc-btn {
 .tc-tcell__lbl {
   color: var(--muted);
   font-weight: 600;
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
   white-space: nowrap;
 }
 .tc-tcell .spark {
@@ -1587,7 +1581,7 @@ a.tc-btn {
   gap: 5px;
   padding: 3px 12px;
   border-radius: 999px;
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
   font-weight: 600;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
@@ -1601,7 +1595,7 @@ a.tc-btn {
   color: var(--green);
 }
 .tc-phase__icon {
-  font-size: 13px;
+  font-size: var(--fs-base);
   line-height: 1;
 }
 .tc-phase__label {
@@ -1626,7 +1620,7 @@ a.tc-btn {
   align-items: center;
   justify-content: space-between;
   gap: var(--sp-3);
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
   color: var(--muted);
   font-weight: 600;
   margin-bottom: 2px;
@@ -1635,7 +1629,7 @@ a.tc-btn {
   border: none;
   background: none;
   color: var(--accent);
-  font-size: var(--fs-3);
+  font-size: var(--fs-base);
   cursor: pointer;
   padding: 0 2px;
   line-height: 1;
@@ -1657,7 +1651,7 @@ a.tc-btn {
   border-radius: 999px;
   background: var(--green-bg);
   color: var(--green);
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
   font-weight: 700;
   white-space: nowrap;
 }
@@ -1669,7 +1663,7 @@ a.tc-btn {
 } /* 6 行紧凑表无需吸顶 */
 .tc-hero__iters .tc-table tbody td {
   padding: 3px 8px;
-  font-size: var(--fs-2);
+  font-size: var(--fs-base);
 }
 .tc-hero__iters .tc-table thead th {
   padding: 4px 8px;
@@ -1712,7 +1706,7 @@ a.tc-btn {
   border: 1px solid var(--line);
   color: var(--muted);
   font-weight: 600;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   white-space: nowrap;
 }
 .tc-cc__scope--shared {
@@ -1730,7 +1724,7 @@ a.tc-btn {
   background: var(--accent-bg);
   color: var(--accent);
   font-weight: 700;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   white-space: nowrap;
   line-height: 18px;
   font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
@@ -1744,7 +1738,7 @@ a.tc-btn {
   padding: 0 7px;
   border-radius: 999px;
   font-weight: 700;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   white-space: nowrap;
   line-height: 18px;
   font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
@@ -1777,7 +1771,7 @@ a.tc-btn {
   border: 1px solid var(--border);
   border-radius: var(--r-1);
   padding: var(--sp-2) var(--sp-3);
-  font-size: 11px;
+  font-size: var(--fs-sm);
   font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
   color: var(--muted);
   white-space: pre-wrap;
@@ -1799,7 +1793,7 @@ a.tc-btn {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 11px;
+  font-size: var(--fs-sm);
   color: var(--muted);
   word-break: break-all;
   min-width: 0;
@@ -1907,7 +1901,7 @@ a.tc-btn {
   flex-wrap: wrap;
 }
 .tc-line .tc-muted {
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
 }
 
 /* 面板主体容器：竖直弹性链 面板→表根→tablewrap，表格整高铺满所在区块。
@@ -1953,7 +1947,7 @@ a.tc-btn {
 }
 .tc-modal h3 {
   margin: 0;
-  font-size: var(--fs-4);
+  font-size: var(--fs-md);
   font-weight: 700;
 }
 .tc-modal__foot .sp {
@@ -1992,7 +1986,7 @@ a.tc-btn {
 }
 .tc-replay-batch .tc-segmented__btn {
   padding: 1px 8px;
-  font-size: 11px;
+  font-size: var(--fs-sm);
 }
 .tc-replay-batch__sep {
   width: 1px;
@@ -2018,7 +2012,7 @@ a.tc-btn {
   border: 1px solid var(--border);
   border-radius: var(--r-1);
   padding: 2px 8px;
-  font-size: 11px;
+  font-size: var(--fs-sm);
   color: var(--muted);
   cursor: pointer;
   background: var(--card);
@@ -2034,14 +2028,14 @@ a.tc-btn {
 }
 .tc-copy--sm {
   padding: 1px 6px;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
 }
 /* §361①：无字图标复制键（仅 ⧉/✓，复制语义走 title/aria）。 */
 .tc-copy--icon {
   min-width: 22px;
   padding: 2px 6px;
   justify-content: center;
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 /* §361⑤：local 本机直跑行 = `.tc-row--local`（虚线描边，无点击语义）。 */
 
@@ -2069,11 +2063,11 @@ a.tc-btn {
   border: 1px solid var(--line);
   border-radius: 999px;
   color: var(--muted);
-  font-size: var(--fs-1);
+  font-size: var(--fs-sm);
 }
 .tc-mx__chip {
   color: var(--muted);
-  font-size: var(--fs-1);
+  font-size: var(--fs-sm);
   white-space: nowrap;
 }
 .tc-mx__chip--ok {
@@ -2151,7 +2145,7 @@ a.tc-btn {
 .tc-mx__todo {
   margin-left: 6px;
   color: var(--muted);
-  font-size: var(--fs-1);
+  font-size: var(--fs-sm);
   font-variant-numeric: tabular-nums;
 }
 
@@ -2203,7 +2197,7 @@ a.tc-btn {
 .tc-mx__foot {
   margin-top: var(--sp-1);
   color: var(--muted);
-  font-size: var(--fs-1);
+  font-size: var(--fs-sm);
 }
 
 /* ────────────── KPI 条（2026-09-20：6 格「一眼看完」的读数索引，问题 C1） ──────────────
@@ -2244,7 +2238,7 @@ a.tc-btn {
 .tc-kpi__tile--pending {
   grid-column: 1 / -1;
   color: var(--muted);
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
 }
 .tc-kpi__label {
   font-size: var(--fs-xs);
@@ -2290,7 +2284,7 @@ a.tc-btn {
 }
 .tc-kpi__sub {
   min-width: 0;
-  font-size: var(--fs-1);
+  font-size: var(--fs-sm);
   line-height: 1.35;
   color: var(--muted);
 }
@@ -2331,7 +2325,7 @@ a.tc-btn {
   border-left-width: 3px;
   border-radius: var(--r-2);
   background: var(--card);
-  font-size: var(--fs-2);
+  font-size: var(--fs-base);
   line-height: 1.6;
 }
 /* 严重度：左边框 + 底色两处编码（不只靠底色，色盲可辨）。 */
@@ -2371,7 +2365,7 @@ a.tc-btn {
 /* 依据行：老横幅里的长句全在这里（信息一字未删，只降了排版层级）。 */
 .tc-dock__detail {
   color: var(--muted);
-  font-size: var(--fs-1);
+  font-size: var(--fs-sm);
 }
 .tc-dock__acts {
   display: inline-flex;
@@ -2387,7 +2381,7 @@ a.tc-btn {
   background: none;
   color: var(--muted);
   font: inherit;
-  font-size: var(--fs-1);
+  font-size: var(--fs-sm);
   cursor: pointer;
 }
 .tc-dock__more:hover {
@@ -2412,7 +2406,7 @@ a.tc-btn {
   align-items: center;
   gap: var(--sp-2);
   flex-wrap: wrap;
-  font-size: var(--fs-2);
+  font-size: var(--fs-sm);
 }
 .tc-wreg__head .lbl {
   color: var(--muted);
@@ -2465,13 +2459,13 @@ a.tc-btn {
 }
 .tc-wreg__lbl {
   color: var(--muted);
-  font-size: var(--fs-1);
+  font-size: var(--fs-sm);
 }
 .tc-wreg__form input {
   padding: 3px 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
-  font-size: var(--fs-2);
+  font-size: var(--fs-base);
   min-width: 18ch;
   background: var(--card);
   color: inherit;
@@ -2724,6 +2718,101 @@ a.tc-btn {
   font-variant-numeric: tabular-nums;
 }
 
+/* ── 布局工具类（P4，docs/dashboard-redesign.md §4.1）─────────────────────────
+   取代 tsx 里的 `style={{ margin/gap/padding/width/display/flex }}` 字面量。只收
+   「跨文件同形」的单属性需求；组件内一次性的形态写成组件自己的 `__part` 类，别堆工具类。
+   间距一律走 --sp-* 阶梯，违反即为缺陷；CSS 里的极密内距（如诊断表的 2px 6px）是
+   比 --sp-1 更紧的一档，留在类内并在此注明，而不是散进 tsx。 */
+.tc-nowrap {
+  white-space: nowrap;
+}
+.tc-grow {
+  flex: 1;
+}
+.tc-center {
+  text-align: center;
+}
+.tc-m-0 {
+  margin: 0;
+}
+.tc-mt-0 {
+  margin-top: 0;
+}
+.tc-mt-1 {
+  margin-top: var(--sp-1);
+}
+.tc-mt-2 {
+  margin-top: var(--sp-2);
+}
+.tc-mt-3 {
+  margin-top: var(--sp-3);
+}
+.tc-mb-1 {
+  margin-bottom: var(--sp-1);
+}
+.tc-mb-2 {
+  margin-bottom: var(--sp-2);
+}
+.tc-mb-3 {
+  margin-bottom: var(--sp-3);
+}
+.tc-ml-2 {
+  margin-left: var(--sp-2);
+}
+.tc-push-right {
+  margin-left: auto;
+}
+/* 说明行贴紧上一行控件（原 `marginTop: -4` 内联）。 */
+.tc-hint {
+  margin-top: calc(var(--sp-1) * -1);
+}
+/* 粗体里放普通字重的说明（原 `fontWeight: 400` 内联）。 */
+.tc-muted--plain {
+  font-weight: 400;
+}
+/* `.tc-caption` 的贴底变体：无上边框、内距改由本类给（原两条内联）。 */
+.tc-caption--flush {
+  border: none;
+  padding: var(--sp-2) 0 0;
+}
+/* `.tc-toolbar` 的去顶内距变体。 */
+.tc-toolbar--flush {
+  padding: 0 0 var(--sp-2);
+}
+/* 模态内横幅：贴边（原 `margin: 0` 内联）。 */
+.tc-banner--flush {
+  margin: 0;
+}
+/* `.tc-card` 的无子结构变体：整块自持内距（BcPanel）。 */
+.tc-card--pad {
+  padding: var(--sp-3) 14px;
+}
+/* 启动模态的参数行标签列宽（对齐四行控件，原 4 处 `minWidth: 90` 内联）。 */
+.tc-launch__lbl {
+  min-width: 90px;
+}
+/* Hero 配对值：主值旁的 eval 基线（比主值轻一档，原 `fontWeight: 500` 内联）。 */
+.tc-tcell__pair {
+  font-weight: 500;
+  color: var(--muted);
+}
+/* 组件卡内嵌诊断表（WirePanel 三张）：极密键值表。 */
+.tc-wire__tbl th,
+.tc-wire__tbl td {
+  padding: 2px 6px;
+  white-space: nowrap;
+}
+.tc-wire__tbl th {
+  text-align: left;
+}
+.tc-wire__tbl--full {
+  width: 100%;
+}
+.tc-wire__sep {
+  border-top: 1px solid var(--border);
+  margin: var(--sp-2) 0;
+}
+
 @media (max-width: 1279px) {
   /* 图标条：栅格列宽恒为 56px（零重排），展开靠 fixed 浮层 */
   .tc-shell {
@@ -2934,7 +3023,7 @@ a.tc-btn {
   min-height: 18px;
 }
 .tc-row__detailttl {
-  font-size: var(--fs-1);
+  font-size: var(--fs-sm);
   font-weight: 700;
   letter-spacing: 0.02em;
   color: var(--muted);
@@ -2947,7 +3036,7 @@ a.tc-btn {
   background: none;
   color: var(--muted);
   font: inherit;
-  font-size: var(--fs-1);
+  font-size: var(--fs-sm);
   cursor: pointer;
 }
 .tc-row__collapse:hover {
@@ -2964,7 +3053,7 @@ a.tc-btn {
 .tc-notice {
   margin: 0 0 var(--sp-1);
   color: var(--muted);
-  font-size: var(--fs-2);
+  font-size: var(--fs-base);
   line-height: 1.6;
 }
 .tc-notice--wrap {

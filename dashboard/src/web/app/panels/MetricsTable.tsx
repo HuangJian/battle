@@ -151,7 +151,7 @@ function iterCol(ea: EvalACols): Col<MetricRow> {
     ...colDef('iter'),
     cell: (r) =>
       r.kind === 'main' ? (
-        <span style={{ whiteSpace: 'nowrap' }}>
+        <span className="tc-nowrap">
           <b>
             {r.main.iter}
             {r.main.halted ? <span className="tc-pill tc-pill--note">halted</span> : null}
@@ -159,8 +159,7 @@ function iterCol(ea: EvalACols): Col<MetricRow> {
           {!ea.readOnly && ea.course && !r.main.evalData ? (
             <button
               type="button"
-              className="tc-btn tc-btn--sm"
-              style={{ marginLeft: 6 }}
+              className="tc-btn tc-btn--sm tc-ml-2"
               disabled={ea.busyIters.has(r.main.iter) || !ckptForIter(ea.ckpts, r.main.iter)}
               title={
                 ckptForIter(ea.ckpts, r.main.iter)
@@ -174,7 +173,7 @@ function iterCol(ea: EvalACols): Col<MetricRow> {
           ) : null}
         </span>
       ) : (
-        <span className="tc-muted" style={{ whiteSpace: 'nowrap' }}>
+        <span className="tc-muted tc-nowrap">
           eval it{r.iter}
           {r.eval.dropped > 0 ? (
             <span
@@ -620,7 +619,7 @@ export function MetricsTable({
           </>
         }
       />
-      <p className="tc-caption" style={{ border: 'none', padding: '8px 0 0' }}>
+      <p className="tc-caption tc-caption--flush">
         胜局耗时/击杀/承伤·杀/道具 = <b>实际值</b>（it&#123;N&#125;/**/manifest.json 逐局聚合，
         道具列 = 每局平均拾取/掉落； stage+seed
         去重后留底缓存）；击杀=歼灭率（Σkills/Σ敌数），承伤·杀 =

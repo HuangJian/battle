@@ -197,20 +197,18 @@ export function TrainLaunchModal({
       >
         <h3>启动 TrainingLoop</h3>
         {readOnly ? (
-          <p className="tc-banner tc-banner--ro" style={{ margin: 0 }}>
+          <p className="tc-banner tc-banner--ro tc-banner--flush">
             🔒 只读模式：启动训练仅限本机 localhost 打开控制台操作。
           </p>
         ) : null}
-        <p className="tc-muted tc-small" style={{ marginTop: 0 }}>
+        <p className="tc-muted tc-small tc-mt-0">
           启动**不选模式**：编队恒为 本机 agent → 共享 hub → 共享 trainer。本轮的 PPO
           去哪，由**部署事实**决定—— 登记了 push worker 节点就走 hub 派发（配置入口在「push worker
           登记」面板，数据住 rl-config.json）；没登记则等 worker（云机 / 本机）自己来领，本机只需
           hub 在线（配以 tailscale 直连或 cloudflared 隧道）。
         </p>
         <div className="tc-line">
-          <span className="tc-muted tc-small" style={{ minWidth: 90 }}>
-            隧道
-          </span>
+          <span className="tc-muted tc-small tc-launch__lbl">隧道</span>
           <SegmentedControl<'http2' | 'quic' | 'auto'>
             value={cfProtocol}
             ariaLabel="隧道协议"
@@ -233,7 +231,7 @@ export function TrainLaunchModal({
             onChange={setCfEdgeIp}
           />
         </div>
-        <p className="tc-muted tc-small" style={{ marginTop: -4 }}>
+        <p className="tc-muted tc-small tc-hint">
           http2 = TCP/443（默认，绕开 ISP 对 QUIC 的 QoS 降质）；auto = 不传旗标（旧行为）。
           改动即时体现在下一次启动的 cloudflared 命令行。当前生效（rl-config）：
           <b>
@@ -243,9 +241,7 @@ export function TrainLaunchModal({
           。
         </p>
         <div className="tc-line">
-          <span className="tc-muted tc-small" style={{ minWidth: 90 }}>
-            瘦身
-          </span>
+          <span className="tc-muted tc-small tc-launch__lbl">瘦身</span>
           <SegmentedControl<SlimMode>
             value={slim}
             ariaLabel="协议瘦身"
@@ -256,16 +252,14 @@ export function TrainLaunchModal({
             onChange={setSlim}
           />
         </div>
-        <p className="tc-muted tc-small" style={{ marginTop: -4 }}>
+        <p className="tc-muted tc-small tc-hint">
           协议瘦身（M2）：开 = opt/ref 走内容寻址 blob，上行 ~4.43MB → ~1.2MB； 关 =
           逐字节回到旧行为（内联 base64 + payload 内冗余文件），拿来做 A/B 对照。
           当前生效（rl-config）：<b>{modes.slim === 'off' ? '关' : '开'}</b>
           ，取值随每轮写入「传输」页的 瘦身 列（事后可分组统计）。
         </p>
         <div className="tc-line">
-          <span className="tc-muted tc-small" style={{ minWidth: 90 }}>
-            训练模式
-          </span>
+          <span className="tc-muted tc-small tc-launch__lbl">训练模式</span>
           <SegmentedControl<TrainMode>
             value={trainMode}
             ariaLabel="训练模式"
@@ -277,7 +271,7 @@ export function TrainLaunchModal({
           />
         </div>
         {trainMode === 'offline' ? (
-          <p className="tc-muted tc-small" style={{ marginTop: -4 }}>
+          <p className="tc-muted tc-small tc-hint">
             训练模式 <b>离线</b>（缺省在线）：本机**不跑** rollout/PPO。启动后本课
             <code> rollout_src=run</code> + <code>run_iters=-1</code>（整段），并把 hub 这课置
             offline——整段 job 只交给**带标** worker（云机跑 <code>battle.offline.ipynb</code>）；
@@ -287,9 +281,7 @@ export function TrainLaunchModal({
         ) : (
           <>
             <div className="tc-line">
-              <span className="tc-muted tc-small" style={{ minWidth: 90 }}>
-                rollout
-              </span>
+              <span className="tc-muted tc-small tc-launch__lbl">rollout</span>
               <SegmentedControl<RolloutSrcMode>
                 value={rolloutSrc === 'run' ? 'local' : rolloutSrc}
                 ariaLabel="rollout 执行位置"
@@ -301,7 +293,7 @@ export function TrainLaunchModal({
                 onChange={setRolloutSrc}
               />
             </div>
-            <p className="tc-muted tc-small" style={{ marginTop: -4 }}>
+            <p className="tc-muted tc-small tc-hint">
               rollout 位置（M3）：本机 = 本机采样 + 只把 PPO 送云（历史行为）； 上云（节点）=
               本轮**整轮**上云（节点跑 exporter 产 shard 再跑 PPO，撤掉上行 1.2MB payload， 适合 TPU
               实例）；auto = 不表态，交回课程配置解析。 当前生效（rl-config）：

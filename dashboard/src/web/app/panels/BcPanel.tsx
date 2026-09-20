@@ -137,8 +137,8 @@ export function BcPanel({ course, enabled = true }: BcPanelProps) {
   )
 
   return (
-    <div className="tc-card" style="padding:12px 14px">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+    <div className="tc-card tc-card--pad">
+      <div className="tc-line tc-mb-2">
         <b>BC Epoch</b>
         {view.evalEveryEpochs !== null && view.evalEveryEpochs > 0 ? (
           <Pill tone="gray" title="课程 eval.every_epochs">
@@ -148,7 +148,7 @@ export function BcPanel({ course, enabled = true }: BcPanelProps) {
           <Pill tone="gray">eval 关闭</Pill>
         )}
         {error ? <Pill tone="r">{error}</Pill> : null}
-        <span style={{ flex: 1 }} />
+        <span className="tc-grow" />
         {epochs.length > 0 ? (
           <button
             type="button"
@@ -188,9 +188,7 @@ export function BcPanel({ course, enabled = true }: BcPanelProps) {
                   <b>{r.epoch}</b>
                 </td>
                 <td className="tc-num">{r.it}</td>
-                <td className="tc-muted" style={{ whiteSpace: 'nowrap' }}>
-                  {tsTime(r.ts)}
-                </td>
+                <td className="tc-muted tc-nowrap">{tsTime(r.ts)}</td>
                 <td className="tc-num">{fmt(r.trainLoss)}</td>
                 <td className="tc-num">{fmt(r.valLoss)}</td>
                 <td className="tc-num">{fmt(r.moveAcc, 3)}</td>
@@ -210,10 +208,10 @@ export function BcPanel({ course, enabled = true }: BcPanelProps) {
             aria-label="BC Epoch 完整指标表"
             onClick={(e) => e.stopPropagation()}
           >
-            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-              <h3 style={{ margin: 0 }}>BC Epoch 完整指标表</h3>
+            <div className="tc-line">
+              <h3 className="tc-m-0">BC Epoch 完整指标表</h3>
               <span className="tc-muted tc-small">共 {epochs.length} epoch</span>
-              <span style={{ flex: 1 }} />
+              <span className="tc-grow" />
               <button
                 type="button"
                 className="tc-btn tc-btn--sm"
@@ -235,8 +233,8 @@ export function BcPanel({ course, enabled = true }: BcPanelProps) {
           </div>
         </div>
       ) : null}
-      <div style="margin-top:14px">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <div className="tc-mt-3">
+        <div className="tc-line tc-mb-2">
           <b>BC Eval（多地图 · RL 口径）</b>
           <span className="tc-muted tc-small">
             win_rate / kills_mean / phits_mean / pickup_mean / timeout_frac

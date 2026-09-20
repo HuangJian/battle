@@ -91,7 +91,7 @@ function TrendCell({
         <b className={tone ? `tc-mtrend__val--${tone}` : undefined}>
           {fmt(last)}
           {seriesEval && lastEval != null ? (
-            <span className="tc-muted" style={{ fontWeight: 500 }}>
+            <span className="tc-tcell__pair">
               {' / '}
               {fmt(lastEval)}
             </span>
@@ -159,7 +159,7 @@ function PairedRefereeLine({ ref }: { ref: PairedReferee | null | undefined }) {
     '同语料逐 seed 配对（McNemar）：b01=基线输新权重赢（政绩）/b10=反之（学费）；' +
     '只看不一致对。灰=证据不够（正常态），不是故障；显著跌也只变色，不触发任何动作。'
   return (
-    <div className="tc-muted tc-small" title={title} style={{ marginBottom: 4 }} role="status">
+    <div className="tc-muted tc-small tc-mb-1" title={title} role="status">
       配对裁判（贪心同卷）
       {ref.vsFirst ? (
         <span>
@@ -226,9 +226,7 @@ function MainTable({
                 </span>
               ) : null}
             </td>
-            <td className="tc-muted" style={{ whiteSpace: 'nowrap' }}>
-              {r.time}
-            </td>
+            <td className="tc-muted tc-nowrap">{r.time}</td>
             <td>
               <Badge tone={winTone(r.winRate)}>{fmtPct(r.winRate)}</Badge>
             </td>
@@ -344,7 +342,7 @@ function EvalTable({ rows }: { rows: IterRow[] }) {
           <tr>
             {/* colSpan 由列模型算（此前手写 15，而 eval 表实为 16 列——空态那一行少跨一格，
                 没人会发现）。 */}
-            <td colSpan={EVAL_ROW_KEYS.length} className="tc-muted" style={{ textAlign: 'center' }}>
+            <td colSpan={EVAL_ROW_KEYS.length} className="tc-muted tc-center">
               该课程暂无 eval 评估记录
             </td>
           </tr>
@@ -356,9 +354,7 @@ function EvalTable({ rows }: { rows: IterRow[] }) {
             return (
               <tr key={`e${g.iter}`}>
                 <td>
-                  <span className="tc-muted" style={{ whiteSpace: 'nowrap' }}>
-                    eval it{g.iter}
-                  </span>
+                  <span className="tc-muted tc-nowrap">eval it{g.iter}</span>
                   {e.dropped > 0 ? (
                     <span
                       className="tc-pill tc-pill--note"
@@ -368,9 +364,7 @@ function EvalTable({ rows }: { rows: IterRow[] }) {
                     </span>
                   ) : null}
                 </td>
-                <td className="tc-muted" style={{ whiteSpace: 'nowrap' }}>
-                  {e.time}
-                </td>
+                <td className="tc-muted tc-nowrap">{e.time}</td>
                 <td>
                   {e.winRate !== null ? (
                     <>
