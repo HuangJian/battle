@@ -33,9 +33,9 @@ import { NodeStats } from './panels/NodeStats'
 import { LogNavCard } from './panels/LogNavCard'
 import { TrainLaunchModal, type TunnelLaunchOpts } from './panels/TrainLaunchModal'
 import { BcPanel } from './panels/BcPanel'
-import { CourseOverview } from './panels/CourseOverview'
+import { CourseMatrix } from './panels/CourseMatrix'
 import { WorkerRegistry } from './panels/WorkerRegistry'
-import { LoopQueue } from './panels/LoopQueue'
+
 import { TaskBundlePanel } from './panels/TaskBundlePanel'
 import { WirePanel } from './panels/WirePanel'
 import { EvalSummary } from './panels/EvalSummary'
@@ -560,20 +560,13 @@ export function App({ initial }: AppProps) {
                 readOnly={readOnly}
               />
             </PanelErrorBoundary>
-            {stateView?.isBc ? null : (
-              <PanelErrorBoundary>
-                <CourseOverview
-                  overview={stateView?.overview ?? null}
-                  course={viewCourse}
-                  onSelectCourse={selectCourse}
-                  onAction={doAction}
-                />
-              </PanelErrorBoundary>
-            )}
-            {/* 训练调度器（单例，**两区通用**）：每课任务队列 + 「在等什么」。
-                不受 isBc 门控——它是跨课程卡，一次列出所有账本可发现的课（每行自带 kind）。 */}
+            {/* 课程矩阵（**两区通用**，取代原「并行课程总览」+「训练调度器」两张表）：
+                hub 侧（派活/队列/离线段）与训练侧（指针/卡在哪一步/在等什么）合并成一行。
+                不受 isBc 门控——它是**跨课程**表，行自带 BC/RL 种类徽标；而两张表分开时
+               「hub 在派活但没进程」/「在训但 hub 没注册」这两种矛盾各自都是「正常」的。 */}
             <PanelErrorBoundary>
-              <LoopQueue
+              <CourseMatrix
+                overview={stateView?.overview ?? null}
                 loopQueue={stateView?.loopQueue ?? null}
                 course={viewCourse}
                 onSelectCourse={selectCourse}

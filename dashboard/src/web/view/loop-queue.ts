@@ -251,19 +251,25 @@ export function pauseTitle(row: LoopQueueRow): string {
   }
 }
 
-/** 事实徽标（意图未生效/正在生效时才上屏；没有可说的就返回 null）。 */
-export function pauseBadge(row: LoopQueueRow): { text: string; cls: string } | null {
+/** 事实徽标（意图未生效/正在生效时才上屏；没有可说的就返回 null）。
+ *
+ *  `tone` 而非类名：徽章词表已随 P1 收敛到 `StatusRow` 的 `tc-badge--<tone>`，
+ *  这里给出的是**语义**（已暂停 = info、待生效 = warn），映射成什么类由原语决定。 */
+export function pauseBadge(row: LoopQueueRow): { text: string; tone: PauseBadgeTone } | null {
   switch (pauseState(row)) {
     case 'paused':
-      return { text: '已暂停', cls: 'tc-loopq__pause--on' }
+      return { text: '已暂停', tone: 'info' }
     case 'pending':
-      return { text: '待生效', cls: 'tc-loopq__pause--pending' }
+      return { text: '待生效', tone: 'warn' }
     case 'resuming':
-      return { text: '恢复中', cls: 'tc-loopq__pause--pending' }
+      return { text: '恢复中', tone: 'warn' }
     default:
       return null
   }
 }
+
+/** 事实徽章的语义档（`info` = 正常态、`warn` = 与意图不一致需注意）。 */
+export type PauseBadgeTone = 'info' | 'warn'
 
 /** **「在训」的判据**（共享 trainer 时代）：**调度器进程活着** ∧ 这门课**没被收官**。
  *
@@ -296,11 +302,12 @@ export function withTraining(view: LoopQueueView, training: string[]): LoopQueue
  *  任务」、没有门禁 verdict、指标在 `bc_epoch`/`bc_eval` 事件里）——不标出来，操作员会把
  *  「待办 1」读成「这门课没活了」。
  */
-export function kindBadge(row: LoopQueueRow): { text: string; cls: string; title: string } | null {
+export function kindBadge(row: LoopQueueRow): { text: string; tone: 'a'; title: string } | null {
   if (row.kind !== 'bc') return null
   return {
     text: 'BC',
-    cls: 'tc-loopq__kind--bc',
+    // accent 而非灰：同表里 BC 行与 RL 行的形状不同，撞上灰徽章会被当成噪声略过。
+    tone: 'a',
     title:
       'BC（行为克隆）课程：一轮 = 采集语料 → 发布 job → 等 GPU 回传 → 落位归档；' +
       '没有 RL 的门禁 / verdict / 13 步表，指标看 bc_epoch / bc_eval 账本事件',
@@ -325,18 +332,45 @@ export function pendingTitle(row: LoopQueueRow): string {
   return `待办 ${row.pending.length} 步（顺序即依赖顺序）：${row.pending.join(' → ')}`
 }
 
-/** 「在等什么」的排序权重：进程外的等待（在飞）排最前，其余保持课程顺序。
+/** 未在训那一行的悬停全文（导出给用例断言，避免文案与断言两处漂移）。
  *
- *  排序是**读面**的事（运维先看谁在等外部），不是调度语义——故留在视图层，纯函数可测。
- */
-export function waitRank(kind: LoopWaitKind): number {
-  return { inflight: 0, collect: 1, idle: 2, ready: 3 }[kind] ?? 3
+ *  它说清两件事：为什么是「未在训」（**盘上事实**推出来的，不是没人跑），以及下面那些指针/
+ *  待办是不是真实读数（它们仍然是——只是没人执行）。 */
+export const STOPPED_TITLE =
+  '没有存活的共享 trainer 进程——下面是**盘上事实**推出的队列状态（若交给调度器会怎么做）'
+
+/** 「在等什么」的修饰类（课程矩阵按 kind 上色；`''` = 不上色）。
+ *
+ *  上色是**读面**的事（运维先看谁在等外部），不是调度语义——故留在视图层，纯函数可测。
+ *  曾经这里还有一个 `sortByWaiting`（按等待种类重排行），从未被任何面板接上，
+ *  随「并行课程总览 + 训练调度器」合并成课程矩阵时一并删除：矩阵的行序要保持稳定
+ *  （行随等待状态跳来跳去对扫读的伤害大于「等外部的排前面」那点收益）。 */
+export function waitCls(kind: LoopWaitKind): string {
+  switch (kind) {
+    // 在飞 = 结果在别的进程/机器上，运维唯一能干预的一类 → 最醒目
+    case 'inflight':
+      return 'tc-mx__wait--inflight'
+    case 'collect':
+      return 'tc-mx__wait--collect'
+    case 'idle':
+      return 'tc-mx__wait--idle'
+    default:
+      return ''
+  }
 }
 
-/** 稳定排序：等外部的课在前，同 kind 保持既有顺序（不改课程表的自然序）。 */
-export function sortByWaiting(rows: LoopQueueRow[]): LoopQueueRow[] {
-  return rows
-    .map((r, i) => ({ r, i }))
-    .sort((a, b) => waitRank(a.r.waiting.kind) - waitRank(b.r.waiting.kind) || a.i - b.i)
-    .map((x) => x.r)
+/** 「在等什么」的悬停全文（kind 的语义在 python `loop_plan.waiting_state` 里定死）。
+ *
+ *  与文案分成两个出口：矩阵既要「那句话」（这是卡片的产出），也要「为什么这么说」
+ *  （判据在哪算的），两处引用同一个常量以防漂移。 */
+export const WAIT_TITLES: Record<LoopWaitKind, string> = {
+  inflight: '已发布的 job 还没回传——结果在 GPU worker / 云机上；换节点或检查 worker 日志',
+  collect: '本轮采集还在落盘（局数来自 it<N>/ 下的 manifest，配额只有课程计划知道）',
+  idle: '本轮没有待办：账本已结算这一轮，或这门课还没开训',
+  ready: '盘上事实看不出外部等待——没有在飞 job，采集也没在跑',
+}
+
+/** 「在等什么」的悬停全文（按 kind 取）。 */
+export function waitTitle(kind: LoopWaitKind): string {
+  return WAIT_TITLES[kind]
 }

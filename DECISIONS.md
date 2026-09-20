@@ -4028,3 +4028,35 @@ CSS 里的空断言）· `web-wire-panel-wiring.test.ts`（抽屉接线 → 路�
 **P1 证据**：`cd dashboard` — `bun run typecheck` ✓ · `bun run test` **776 pass / 0 fail**
 （P1 前 746）· `bun src/server/build.ts` 三份 bundle 绿（app **69,987 B gzip** / 预算 150 KB）。
 
+**P2a 续（同一轮工作：课程矩阵）**：「并行课程总览」（hub 侧：注册/离线/队列/离线段）与
+「训练调度器」（训练侧：指针/卡在哪一步/在等什么）两张各写半边的表，按课程名 **outer join**
+合并为一张（C5）。新增 `web/view/course-matrix.ts`（纯函数）与 `web/app/panels/CourseMatrix.tsx`；
+**删除** `CourseOverview.tsx` · `LoopQueue.tsx` 与两套行样式（`.tc-cov__*` / `.tc-loopq__*`，~335 行 CSS）。
+合并的产出不是「少一块卡」，而是**两条从前两边的表各自都看不见的矛盾**上屏：
+
+- `在训 · hub 未注册`（warn）——rollout 在跑、hub 的课程表里没有它 ⇒ **PPO job 永远不会被派发**；
+- `hub 已注册 · 无进程`（warn）——hub 在给它派活、没有任何进程推进它 ⇒ **job 堆着没人消费**。
+  这条在合并前长得像普通的「停」（前者的两半在各自表里都完全正常）。
+
+**决定**：
+1. **矩阵用真 `<table>`，不用 `StatusRow` 芯片行**（与 `docs/dashboard-redesign.md` §4.2 的初稿相反）。
+   `StatusRow` 是 `inline-flex` 芯片行、**跨行不对齐**；矩阵七列要**竖着比**（哪门课队列最深 /
+   段内停最久），芯片拼出来的「表」同一列每行宽度不同，比较只能靠读。矩阵复用 `.tc-table` 基础
+   样式 + `tabular-nums`；**状态词表与语义档仍归 `matrixStatus` + `StatusDot` 一处**（一个状态只有
+   一个说法、一个色）——这条才是「同一语义只有一个原语」的实质。
+2. **「在训」判据两半同源，故不设「两表说法不一」的冲突**：服务端把 `trainingFromQueue`
+   （调度器存活 ∧ 该课未收官）**同时**咄给 overview 与 loopQueue，它们不会互相矛盾。会打架的是
+   **hub 注册与否 × 进程死活**，冲突判定因此建在这两条上。
+3. **状态词表择一：`未在训` 胜过 `停`**（同一局面两张表说法不同，合并必须选一个）。`停` 暗含
+   「被停过」这个我们**看不到**的事实。
+4. **矩阵两区通用**（不再 `isBc` 门控）：它是跨课程表、行自带 BC/RL 徽标；按「当前查看的课
+   是不是 BC」隐藏它，等于又回到 C5。
+
+**顺手修掉的真 bug**：原 `rowBadge` 的判据 `!hubSeen && training` 在 **hub 无应答**时也成立
+（队列整个读不到 ⇒ `hubSeen` 恒 false），于是每个在训课程都被贴上「hub 未注册」+「以 `--course`
+重启 hub」的**假诊断**，而同一张卡的表头正写着「hub 无应答」。新判据以 `hubOnline` 为前提，
+配两条回归闸（`web-course-matrix.test.ts` 与 `web-app-coursematrix.test.ts`）。
+
+**P2a 证据**：`bun run test` **804 pass / 0 fail**（90 文件；P2a 前 776 / 88）· `typecheck` ✓ ·
+`oxlint` 0/0 · `oxfmt` clean · 三份 bundle 绿（app **71,746 B gzip** / 预算 150 KB）。
+

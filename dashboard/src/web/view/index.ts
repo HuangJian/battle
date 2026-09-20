@@ -18,7 +18,8 @@
  *    loop-queue     调度器每课队列视图（单例卡片的读面）
  *    format / spark / series / phase / rows / interaction  纯函数工具
  *    legacy-keys    浏览器本地键迁移
- *    course-overview 多课程并行总览 / push worker 登记
+ *    course-overview 多课程并行总览（hub 侧）/ push worker 登记
+ *    course-matrix  课程矩阵：并行总览 × 训练调度器的 outer join（问题 C5）
  *    routes         控制台路由（路径 ↔ 页面键、导航项、激活判定）
  */
 
@@ -41,4 +42,5 @@ export * from './legacy-keys'
 export * from './cards'
 export * from './course-overview'
 export * from './loop-queue'
+export * from './course-matrix'
 export * from './routes'

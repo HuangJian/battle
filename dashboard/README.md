@@ -75,7 +75,7 @@ src/
       shell/        应用外壳（Shell / Sidebar / Topbar；三档响应式，见 docs/dashboard-redesign.md §3.1）
       app.tsx       外壳 + 路由页面分派（/ · /metrics · /nodes · /wire，服务端 stamp `page`）
     render.tsx theme.ts
-tests/        88 个本子系统的测试（原根 tests/ 的同名文件迁入 + 两巨型文件按分层拆开）
+tests/        90 个本子系统的测试（原根 tests/ 的同名文件迁入 + 两巨型文件按分层拆开）
 data/evalboard/  EvalBoard 账本数据根（默认值；EVALBOARD_DATA 可覆盖）
 ```
 
@@ -83,8 +83,8 @@ data/evalboard/  EvalBoard 账本数据根（默认值；EVALBOARD_DATA 可覆�
 
 测试**镜像 `src/` 的模块**（AGENTS §8）：一个测试文件对应它覆盖的那个模块，
 文件名形如 `web-view-rows` ↔ `src/web/view/rows.ts`、`server-api-pool` ↔
-`src/server/api`。dashboard 侧当前 **776 个用例 / 88 个文件**（2026-09-20；P1 行原语前为 746 / 87，
-重设计前基线 717 / 86），拆分产出的文件最大 264 行（单节走势图；其余均 <170 行）。
+`src/server/api`。dashboard 侧当前 **804 个用例 / 90 个文件**（2026-09-20；P2a 课程矩阵前为 776 / 88，
+P1 行原语前为 746 / 87，重设计前基线 717 / 86），拆分产出的文件最大 264 行（单节走势图；其余均 <170 行）。
 
 > ⚠ **web 用例只能断言结构，挡不住交互缺陷**：本仓 web 测试全部是 SSR（无 `happy-dom`/`jsdom`），
 > 而 `preact-render-to-string` **丢弃全部事件处理器**（实测 `h('pre', {onClick}, 'x')` → `<pre>x</pre>`）
