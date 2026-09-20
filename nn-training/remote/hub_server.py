@@ -84,6 +84,7 @@ from remote._port_guard import ensure_port_free
 from remote.protocol import (
     AUTH_HEADER,
     CLAIM_TTL_SEC,
+    COURSE_ENABLE_MARKER,
     COURSE_MODE_OFFLINE,
     COURSE_MODE_ONLINE,
     COURSE_MODES,
@@ -132,6 +133,18 @@ from remote.push_dispatch import (
 #: 实测方法：向隧道发带伪造值的无效鉴权，看本文件的 AUTH FAIL 审计行 src= 显示哪个）。
 #: 只认它，不认 `X-Forwarded-For`：后者是**可追加的逗号列表**，取哪一段都是语义游戏。
 CF_SOURCE_HEADER = "CF-Connecting-IP"
+
+#: 单次**响应发送**的超时（秒）：对端半开（隧道/代理侧掉了，本机 TCP 还挂着）时
+#: `wfile.write()` 会**永久**阻塞，那个 handler 线程就永久卡在写里。
+#:
+#: 2026-09-20 事故：4.8MB payload 卡在对端 ⇒ 云机侧「claim 后几分钟零日志」，而 hub 侧
+#: 日志**一个字都没有**（`/payload` 访问行属于高频静默规则）。有界即响亮：超时后打印
+#: 已发字节数并断开连接（HTTP/1.0 ⇒ 连接随即关闭，线程回归）。
+SEND_TIMEOUT_SEC = 60.0
+#: 发送切片（字节）：分片写让上面的超时**每片**都生效（一次大 write 只有整体超时）。
+SEND_CHUNK = 256 * 1024
+#: 打「发送完成」日志的最小 body（字节）：小 JSON 不打（高频），payload/code 这类必打。
+SEND_LOG_MIN_BYTES = 256 * 1024
 
 
 def _is_ip_literal(s: str) -> bool:
@@ -996,6 +1009,8 @@ class _HubQueue(_AuthGuard):
         self._discover_root: Path | None = Path(discover_root) if discover_root else None
         self._discover_fresh = float(discover_fresh_sec)
         self._discover_last = 0.0
+        #: 「跳过未开课课程」的告警去重集（每门课只喊一次，不刷屏）。
+        self._no_marker_warned: set[str] = set()
         md = modes or {}
         self._modes: dict[str, str] = {
             c: str(md.get(c) or COURSE_MODE_ONLINE) for c in self._order
@@ -1137,8 +1152,46 @@ class _HubQueue(_AuthGuard):
             print(f"[hub-server] discovered courses: {', '.join(added)}", flush=True)
         return added
 
+    def _serves_course(self, course: str) -> bool:
+        """派发闸：**发现模式**下课程目录必须仍带开课标记（`training-enabled.txt`）。
+
+        为什么发现时判过还要在这里再判一次（2026-09-20 事故）：课程表是**发现那一刻**
+        建的，而 `remote-jobs/` 里躺着的 pending job 不会自己消失。没有这道闸，任何
+        在旧表/旧代码里登记过的课程会把它的**陈旧 job 继续派给真 GPU worker**——
+        白烧租约，云端逐份失败（D14 血缘不匹配 / 旧 code.zip 触发自重启），而训练侧
+        什么都看不到（那门课早就不跑了）。用户口径：「课程开训需要用户手动开启」——
+        删掉标记就该立刻停止派发，不能等到下一次发现扫描或靠控制台记得置离线。
+
+        单课程模式（`--job-root` 直给、无 `--discover`）不受影响：那条路径的「开课」
+        就是有人显式起了这个 hub。
+        """
+        if self._discover_root is None:
+            return True
+        st = self._stores.get(course)
+        if st is None:
+            return False
+        if (st.job_root.parent / COURSE_ENABLE_MARKER).exists():
+            return True
+        with self._lock:
+            if course not in self._no_marker_warned:
+                self._no_marker_warned.add(course)
+                print(
+                    f"[hub-server] 跳过未开课的 {course}：无 {COURSE_ENABLE_MARKER}"
+                    "（控制台「训练」写入 / 「停课」删除）——队列原样保留，开课即恢复派发",
+                    flush=True,
+                )
+        return False
+
     def _course_dir_live(self, ent: Path, now: float) -> bool:
-        """课程目录「在跑」判据：`{remote-jobs,offline}` 存在，且自身或本课 jsonl 新鲜。"""
+        """课程目录「在训」判据：**已开课标记**存在，且 `{remote-jobs,offline}` 之一存在且新鲜。
+
+        ★ 开课标记（`training-enabled.txt`）是 2026-09-20 加的**显式闸**：没有它，hub 会把
+        tmp/ 下每一门历史课（都有 remote-jobs/ 残影）都当成「在跑的课」登记进课程表，并继续
+        把残留的 pending job 派给真 GPU worker（白烧租约）。用户口径：「课程开训需要用户手动
+        开启」；标记由控制台开课写、停课删（`remote.protocol.COURSE_ENABLE_MARKER`）。
+        """
+        if not (ent / COURSE_ENABLE_MARKER).exists():
+            return False
         for sub in ("remote-jobs", "offline"):
             d = ent / sub
             if not d.is_dir():
@@ -1366,6 +1419,8 @@ class _HubQueue(_AuthGuard):
         self.discover()
         active_workers = self.active_worker_count()
         for course in rotation_order(self._order, self._cursor):
+            if not self._serves_course(course):
+                continue
             offline = self.mode_of(course) == COURSE_MODE_OFFLINE
             if offline and not offline_ok:
                 continue
@@ -1796,6 +1851,14 @@ class HubHandler(BaseHTTPRequestHandler):
         ctype: str = "application/octet-stream",
         filename: str = "",
     ) -> None:
+        """发送整块 body：大 body **分片 + 有界**，且完成/停滞各有一行日志。
+
+        2026-09-20 事故（云机领到 job 后几分钟零输出）的 hub 侧半边：`wfile.write()`
+        没有超时，对端半开时阻塞**永不返回** ⇒ 客户端永远拿不到 payload，而 `/payload`
+        的访问行被高频静默规则吃掉 ⇒ 两端日志同时沉默（唯一的现象是「卡住」）。
+        现在：分片写（每片独立超时）⇒ 停滞 ≤SEND_TIMEOUT_SEC 内被断掉并**响亮打印**
+        已发字节数；≥SEND_LOG_MIN_BYTES 的 body 完成时也打一行（可对账传输时长/速率）。
+        """
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
@@ -1803,7 +1866,40 @@ class HubHandler(BaseHTTPRequestHandler):
             # 习惯文件名（下载时手一按就是这个名字，不必再改名）
             self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         self.end_headers()
-        self.wfile.write(data)
+        path = self.path.split("?", 1)[0]
+        total = len(data)
+        sent = 0
+        t0 = time.time()
+        stalled = False
+        try:
+            self.connection.settimeout(SEND_TIMEOUT_SEC)
+            view = memoryview(data)
+            while sent < total:
+                n = self.wfile.write(view[sent : sent + SEND_CHUNK])
+                if n is None:  # 缓冲写（wbufsize > 0）：视作整片已收
+                    n = min(SEND_CHUNK, total - sent)
+                if n <= 0:  # 0 = 对端不再接收（半开）——不能空转
+                    raise TimeoutError("write 返回 0——对端不再接收")
+                sent += n
+        except OSError as e:
+            stalled = True
+            print(
+                f"[{time.strftime('%H:%M:%S')}] [hub-server] 响应发送**停滞** {path}："
+                f"已发 {sent}/{total} bytes 后 {time.time() - t0:.0f}s 无进展（{e!r}）"
+                "——对端半开，断开连接（不再永久占住 handler 线程）",
+                flush=True,
+            )
+        finally:
+            try:
+                self.connection.settimeout(None)
+            except OSError:
+                pass
+        if not stalled and total >= SEND_LOG_MIN_BYTES:
+            print(
+                f"[{time.strftime('%H:%M:%S')}] [hub-server] 响应发送完成 {path} "
+                f"{sent} bytes in {time.time() - t0:.1f}s",
+                flush=True,
+            )
 
     def _job_id(self) -> str | None:
         """从路径 /jobs/{id}/... 取 job_id；非法 404。"""

@@ -1,4 +1,13 @@
-/** preset.ts — **启动训练**（一套编排，不再是 pull/push/local 三选一）。
+/** preset.ts — **启动服务进程**（一套编排，不再是 pull/push/local 三选一）。
+ *
+ *  ★ 2026-09-20 用户口径：「服务进程启动不应与课程绑定。进程启动时不要自动开启课程训练，
+ *  需要增加独立的入口开启/停止课程训练」。本动作因此**不再要课程**：
+ *   · 它做的是「起进程」：selfNode → hubServer → trainingLoop；
+ *   · 「开哪门课」是另一个入口的事：`course-lifecycle.ts::{openCourse,stopCourse}`
+ *     （顶部课程选择旁的开课/停课）。
+ *  旧形状把课程准备（播权重 / 建账本 / 写课程旋钮 / 置 hub 模式）挂在第三步上，代价是
+ *  ①「起个进程」被迫先选一门课；②置 hub 模式发生在课程还不存在时 → hub 回
+ *  `需要合法 course（[]）`（2026-09-20 实测）。
  *
  *  ★ 2026-09-19 用户口径：「启动课程训练时，trainloop 不需要指定 pull/push 模式。pull 模式是由
  *  远端 worker 自己请求，本机只需要保证 hub 在线，配以 tailscale/cloudflared tunnel。push 模式
@@ -16,26 +25,18 @@
  *  需要公网隧道时单独点「cloudflared」组件（不会自动跑）。
  *
  *  任一步失败即中断（已完成的组件保留，页面可单独停止）。 */
-import { loadConfig, saveConfig, validateCourseArg, writeRemoteHubUrl } from '../../core/config'
-import type {
-  CfEdgeIp,
-  CfProtocol,
-  Component,
-  RolloutSrcMode,
-  SlimMode,
-  TrainMode,
-} from '../../core/types'
+import { loadConfig, saveConfig, writeRemoteHubUrl } from '../../core/config'
+import type { CfEdgeIp, CfProtocol, Component, SlimMode } from '../../core/types'
 import { tailscaleIp } from '../../core/net'
 import { sharedHubUrl } from '../../core/slots'
 import { remoteExecutionFace } from '../../stack/push-config'
 import { rlConfigSmoke } from '../../stack/smoke'
-import { slimToCfg, trainModeKnobs } from '../../stack/specs'
+import { slimToCfg } from '../../stack/specs'
 import { saveConsoleState } from './console-state'
-import { setCourseMode } from './course-mode'
 import { ActionError, ActionResult, done, guard, release } from './result'
 import { startComponent, StartCtx } from './start'
 
-// ────────────────────────── 启动训练 ──────────────────────────
+// ────────────────────────── 启动服务进程 ──────────────────────────
 
 /** 启动顺序（恒一条路）：本机 agent → 共享 hub → 共享 trainer。 */
 export const TRAIN_START_ORDER: readonly Component[] = [
@@ -45,8 +46,6 @@ export const TRAIN_START_ORDER: readonly Component[] = [
 ] as const
 
 export interface PresetOpts {
-  /** T7：远端连败是否 opt-in 降级本机 PPO（默认 false）。 */
-  remoteDegrade?: boolean
   /** M1：隧道协议/边缘 IP（随启动回写 rl-config.rl.* + console-state 生效值）。 */
   cfProtocol?: CfProtocol
   cfEdgeIp?: CfEdgeIp
@@ -54,63 +53,26 @@ export interface PresetOpts {
    *  ⚠ 与 cf_* 不同：**不能**把字符串写进 rl-config（python `--remote-slim` 是
    *  `type=int, choices=(0,1)`），必须过 `slimToCfg()` 换算。 */
   slim?: SlimMode
-  /** M3：rollout 执行位置（随启动回写 rl-config.rl.rollout_src + console-state）。
-   *  ⚠ 与 slim **不同**：python `--rollout-src` 的 choices 就是这几个字符串——
-   *  直接写，**不要**过任何换算函数。 */
-  rolloutSrc?: RolloutSrcMode
-  /** 训练模式（2026-09-19）：`offline` ⇒ 写该课的 `{rollout_src:'run', run_iters:-1}`
-   *  并把该课 hub 模式置 offline（只有带标 worker 能领整段）；`online` ⇒ **删掉**该课的
-   *  这两个覆盖键（不删就「切回在线了但还在整段上云」）。域换算见 `trainModeKnobs`。 */
-  trainMode?: TrainMode
 }
 
-export async function startPreset(course: string, opts: PresetOpts = {}): Promise<ActionResult> {
+/** **启动服务进程**（selfNode → 共享 hub → 共享 trainer）。与课程无关：不传课程、
+ *  不建账本、不写课程旋钮、不置 hub 模式——那些是「开课」（`openCourse`）的事。 */
+export async function startPreset(opts: PresetOpts = {}): Promise<ActionResult> {
   guard('preset:train')
   try {
-    if (!course) throw new ActionError('需要 course（先在顶部设置课程）')
-    validateCourseArg(course)
-    saveConsoleState({ course })
     // M1：隧道选项随启动回写（rl-config 的 rl.* 键 + console-state 生效值）——
     // 留空 = 不动（沿用 rl-config 现值/缺省 http2/4）。
-    // 模式 → 课程级键的换算只走 `trainModeKnobs` 一处；全局面取它的 rolloutSrc，
-    // 而离线档算出来的就是 `run`——`run` **绝不写进全局 rl.rollout_src**（那个键是所有课
-    // 共用的默认面，落进去 = 把全部课程一起拖进离线，而用户在弹窗里只选了这一门课）。
-    const knobs = opts.trainMode ? trainModeKnobs(opts.trainMode, opts.rolloutSrc ?? 'local') : null
-    const globalRolloutSrc: RolloutSrcMode | undefined =
-      knobs === null ? opts.rolloutSrc : knobs.rolloutSrc === 'run' ? undefined : knobs.rolloutSrc
-    if (opts.cfProtocol || opts.cfEdgeIp || opts.slim || globalRolloutSrc || opts.trainMode) {
+    // ★ 这里只写 `rl.*`（全进程共用的默认面）：课程级选项（训练模式 / rollout 位置 /
+    //  降级本机）随「开课」走，写 `courses.<课>.*`。
+    if (opts.cfProtocol || opts.cfEdgeIp || opts.slim) {
       const cfgT = loadConfig()
       cfgT.rl = cfgT.rl || ({} as (typeof cfgT)['rl'])
       if (opts.cfProtocol) cfgT.rl.cf_protocol = opts.cfProtocol
       if (opts.cfEdgeIp) cfgT.rl.cf_edge_ip = opts.cfEdgeIp
       // M2：写数值域（`1|0`）——字符串会让训练侧 `choices=(0,1)` 直接报错退出。
       if (opts.slim) cfgT.rl.slim = slimToCfg(opts.slim)
-      // M3：rollout 位置是字符串域，原样落 rl-config（与 --rollout-src choices 同字面量）。
-      if (globalRolloutSrc) cfgT.rl.rollout_src = globalRolloutSrc
-      // 训练模式（2026-09-19）：离线是**课程级**决定（`courses.<课>.{rollout_src,run_iters}`），
-      // 不落 rl.*（那是所有课共用的默认面）。
-      if (knobs && opts.trainMode) {
-        cfgT.courses = cfgT.courses ?? {}
-        const row = (cfgT.courses[course] = cfgT.courses[course] ?? {})
-        if (opts.trainMode === 'offline') {
-          // 两个键缺一不可：`run` 是声明，`run_iters` 是段长（`-1` = 到课程末）。
-          row.rollout_src = knobs.rolloutSrc
-          row.run_iters = knobs.runIters ?? -1
-        } else {
-          // 切回在线 = **撤掉离线标记**：段长必删（留着它 = 下一轮又被当成段长 + 本机
-          // 采样 = 半状态），课程级的 `run` 也删。但**不能**顺手删掉别的课程级覆盖
-          // （有人显式写过 `rollout_src:'node'`，那是本课在线的另一个理由，不归这里管）。
-          delete row.run_iters
-          if (row.rollout_src === 'run') delete row.rollout_src
-        }
-      }
       saveConfig(cfgT)
-      saveConsoleState({
-        cfProtocol: opts.cfProtocol,
-        cfEdgeIp: opts.cfEdgeIp,
-        slim: opts.slim,
-        rolloutSrc: globalRolloutSrc,
-      })
+      saveConsoleState({ cfProtocol: opts.cfProtocol, cfEdgeIp: opts.cfEdgeIp, slim: opts.slim })
     }
     // hub 地址：把本机 tailnet IP 写进单键 `rl.remote_hub_url`（**pull 与 hub 派发都要它**）。
     // 没有它就只能直推节点——而「worker 自己来领」是默认路径，所以这一步不能省。
@@ -124,31 +86,22 @@ export async function startPreset(course: string, opts: PresetOpts = {}): Promis
     } else {
       hubNote = '；未检测到 Tailscale 网卡 IP——remote_hub_url 未改（worker 需自行可达共享 hub）'
     }
-    // 训练模式 = 离线时把该课的 hub 派发闸也切到 offline：整段 job 只能被**带标** worker
-    // 领走（hub 对离线课一律不放行普通 worker）。不切的话，整段 job 会被任意一台普通
-    // worker 领走并对着一份「跑不完的任务」开工。在线启动同样下发 online：训练模式字的
-    // 就是「本机跑 + 实时派发」，留着旧的 offline 会让在线启动静默停摆。
-    let modeNote = ''
-    if (opts.trainMode) {
-      const r = await setCourseMode(course, opts.trainMode === 'offline' ? 'offline' : 'online')
-      modeNote = `；训练模式 ${opts.trainMode === 'offline' ? '离线（整段上云）' : '在线'}：${r.message}`
-    }
-    const ctx: StartCtx = { course, remoteDegrade: !!opts.remoteDegrade }
+    // 进程编排：只起进程。`StartCtx.course` 恒空 —— 共享 hub / 共享 trainer 都不按课键控
+    // （本机 worker 同）。课程由「开课」入队。
+    const ctx: StartCtx = { course: '' }
     const detail: string[] = []
     for (const k of TRAIN_START_ORDER) {
       const r = await startComponent(k, ctx)
       detail.push(`${k}: ${r.message}${r.detail && !r.ok ? ` — ${r.detail[0] ?? ''}` : ''}`)
-      // trainer 是**共享**进程：它的首条详情是「本课执行面 = …」——启动之后最需要确认的就是这条
-      // （本轮 PPO 会去哪、缺什么会退到下一条路）。幂等早退（已在运行）时同样有这两行，故不按 ok 分支。
-      if (k === 'trainingLoop' && r.detail?.[0]) detail.push(`  ${r.detail[0]}`)
-      if (!r.ok) return done(false, `启动训练中断于 ${k}`, detail)
+      if (!r.ok) return done(false, `启动服务进程中断于 ${k}`, detail)
     }
     const face = remoteExecutionFace(loadConfig())
     return done(
       true,
-      `已启动训练栈 (course=${course})${hubNote}${modeNote}` +
-        `；本轮执行面：${face.text}` +
-        '（trainer 是共享进程：一个进程服务所有课程，停它 = 停全部）',
+      `已启动服务进程（本机 agent → 共享 hub → 共享 trainer）${hubNote}` +
+        `；执行面：${face.text}` +
+        '（进程与课程是两件事：**没有自动开课**——用顶部课程选择旁的「开课」把课程入队；' +
+        'trainer 是共享进程：一个进程服务所有课程，停它 = 停全部）',
       detail,
     )
   } catch (e) {

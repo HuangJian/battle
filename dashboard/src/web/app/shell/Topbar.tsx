@@ -7,12 +7,17 @@
  *
  *  阶段耗时由 App 的 10s ticker 驱动（轮询间隙不冻结），本组件只负责展示。
  *
+ *  **在训课程**：有 pill 行（`pills`）且真有在训课时，它是「在训 n/N」裸计数的**明细版**
+ *  （每门课一个 pill：it / 状态 / 停课）——同一份事实（`trainingCourses`）只上屏一次；
+ *  零门在训时 pill 行自身不渲染，这里退回裸计数 chip。
+ *
  *  **独立页复用（/eval · /log）**：标题/描述取自同一份 `PAGES`（`page` 取 `AnyPageKey`），
  *  而全局状态读数属于「此刻训练集群在干吗」——那是控制台**持有并轮询**的数据。独立页没有
  *  这份数据，所以 `stateView=null` 时顶栏自动退成「本页标题 + 刷新」，不伪造读数
  *  （这是 `stateView` 从一开始就可空的原因）。
  */
 
+import type { ComponentChildren } from 'preact'
 import { fmtElapsed, fmtTs, PAGES, type AnyPageKey, type ConsoleStateView } from '../../view'
 import { Badge } from '../../components/Pill'
 
@@ -22,8 +27,10 @@ export interface TopbarProps {
   stateView: ConsoleStateView | null
   /** 本阶段已耗时（ms）；null = 无阶段（idle）。 */
   phaseElapsedMs: number | null
-  /** 在训课程数（App 派生：共享 trainer 在跑 ∧ 该课未收官）。 */
+  /** 在训课程数（App 派生：已开课的课程门数）。 */
   trainingCount: number
+  /** 在训课程 pill 行（App 传入）。不传或零门在训时退回裸计数 chip。 */
+  pills?: ComponentChildren
   /** 课程总数。 */
   courseCount: number
   /** 算力摘要（本机槽位计入在线）；null = 无节点可报。 */
@@ -41,6 +48,7 @@ export function Topbar({
   stateView,
   phaseElapsedMs,
   trainingCount,
+  pills,
   courseCount,
   nodeSummary,
   connError = 'off',
@@ -78,7 +86,9 @@ export function Topbar({
             <span className="tc-phase__elapsed">{fmtElapsed(phaseElapsedMs)}</span>
           </span>
         ) : null}
-        {courseCount > 0 ? (
+        {pills && trainingCount > 0 ? (
+          pills
+        ) : courseCount > 0 ? (
           <span className="tc-badge--status" title="在训课程数 / 课程总数">
             <span className={trainingCount > 0 ? 'tc-dot tc-dot--on' : 'tc-dot tc-dot--empty'} />
             在训 {trainingCount}/{courseCount}

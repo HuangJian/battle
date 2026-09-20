@@ -523,11 +523,24 @@ def test_corpus_fp_ignores_volume_tuning_knobs() -> None:
 # plan §3-P2 的微课试点。
 
 
-def _manifest(d: Path, stage: int, seed: int, wver: str, n_samples: int) -> None:
+def _manifest(
+    d: Path,
+    stage: int,
+    seed: int,
+    wver: str,
+    n_samples: int,
+    outcome: str = "timeout",
+) -> None:
     p = d / f"rl_s{stage:02d}_seed{seed}"
     p.mkdir(parents=True, exist_ok=True)
     (p / "manifest.json").write_text(
-        json.dumps({"stage": stage, "seed": seed, "wver": wver, "nSamples": n_samples}),
+        json.dumps({
+            "stage": stage,
+            "seed": seed,
+            "wver": wver,
+            "nSamples": n_samples,
+            "outcome": outcome,
+        }),
         encoding="utf-8",
     )
 
@@ -560,6 +573,12 @@ class _StubLoop:
 
     def _volume_journal_replay(self, it: int) -> Any:
         return TrainingLoop._volume_journal_replay(cast(Any, self), it)
+
+    def _volume_stage_ests_map(self) -> dict[int, int]:
+        return TrainingLoop._volume_stage_ests_map(cast(Any, self))
+
+    def _volume_collect_continuous(self, it: int, dist_cfg: dict | None) -> None:
+        TrainingLoop._volume_collect_continuous(cast(Any, self), it, dist_cfg)
 
     def __init__(
         self,
@@ -724,6 +743,33 @@ def test_volume_stages_uses_explicit_stages(tmp_path: Path) -> None:
     assert stub._volume_stages() == [2000, 2001, 2002, 2003]
 
 
+def test_continuous_restart_quota_met_backfills_winrate_from_shards(
+    tmp_path: Path, _patch_wver: None
+) -> None:
+    """★ 配额已满重启：本进程零新采不得记 winRate=0（x20-steady it75→it76）。
+
+    停机前 quota 已采满（50086/48000）⇒ 新进程 continuous while 立刻 break、
+    combined=None ⇒ adopt_volume_report(None) 把除零保护的 0.0 写进账本。
+    磁盘上本轮 shard 的 outcome 必须回填——「打了 0 局」与「打了 N 局全输」
+    在数值上必须可区分。
+    """
+    stub = _StubLoop(tmp_path, target=200, est=20, samples=200, it=76)
+    # 上一进程已把本轮采满并落盘：4 关 × 2 局，胜败各半，nSamples 远超分关配额。
+    for stage in range(4):
+        for seed in range(2):
+            outcome = "stage_clear" if seed == 0 else "timeout"
+            _manifest(stub._traj_dir, stage, seed, _WVER, 200, outcome=outcome)
+    stub._volume_collect_continuous(76, None)
+    assert stub.dispatched == []  # 配额已满 ⇒ 零新采
+    assert stub._volume_waves == 0
+    # 报告口径 = 盘上本轮 shard，不是本进程 combine([]) 的空壳
+    assert stub._report["games"] == 8
+    assert stub._report["outcomes"].get("stage_clear") == 4
+    assert stub._report["outcomes"].get("timeout") == 4
+    assert stub._report["winRate"] == 0.5
+    assert stub._report["totalSamples"] == 8 * 200
+
+
 def test_volume_topup_quota_met_in_first_wave(tmp_path: Path, _patch_wver: None) -> None:
     """初波就达标：不补波，只记账（est 估准的正常情形）。"""
     stub = _StubLoop(tmp_path, target=600000, est=967, samples=967)
@@ -773,18 +819,29 @@ def test_volume_topup_partial_ledger_replays_same_continuation(
 
     plan §2.3 的三条一起验：(a) 同账本 ⇒ 同续跑（可 replay）；(b) 续跑派的每一签都
     出自该关该波同一条种子流（同源，不重抽）；(c) 已结算多的关补得少（分关独立）。
+
+    配额缩到 target=60000 / est=967 / samples=500（原 600000）：Windows NTFS 上
+    每局写一个 manifest，600000 配额 × 3 个 stub ≈ 3k 次 mkdir+write，call 7.8s
+    超 5s 预算（同机 WSL <5s）。缩小后 g0=16、w2=8、w3=4，文件数 ~10×↓，语义不变：
+    half(w2) = stage0/1 全额、2/3 仍缺；补波 0/1=4、2/3=8（原 36/75 的同比例结构）。
     """
-    full = _StubLoop(tmp_path / "full", target=600000, est=967, samples=500)
+    # 60000/4/967 → g0=16；初波后 short=7000 → w2=8；再 short=3000 → w3=4（w4 被
+    # DEFAULT_MAX_WAVES=3 挡住）。
+    _T, _EST, _S = 60000, 967, 500
+    full = _StubLoop(tmp_path / "full", target=_T, est=_EST, samples=_S)
     full._iteration_pairs(1)
     full._volume_waves = 1
     _settle_first_wave(full)
     full._volume_topup(1, None)
     assert len(full.dispatched) == 2
+    assert [len(w) for w in full.dispatched] == [4 * 8, 4 * 4]
 
     # 崩在第二波中间：只落了一半 shard（wave_pairs 按关升序 ⇒ 前一半 = stage 0/1 全额）
     half = full.dispatched[0][: len(full.dispatched[0]) // 2]
-    crashed = _topup_from_ledger(tmp_path / "crashed", half)
-    again = _topup_from_ledger(tmp_path / "crashed-again", half)
+    crashed = _topup_from_ledger(tmp_path / "crashed", half, target=_T, est=_EST, samples=_S)
+    again = _topup_from_ledger(
+        tmp_path / "crashed-again", half, target=_T, est=_EST, samples=_S
+    )
 
     # (a) 确定性：同账本 ⇒ 逐字节同续跑
     assert crashed.dispatched == again.dispatched
@@ -792,10 +849,10 @@ def test_volume_topup_partial_ledger_replays_same_continuation(
     full_w1 = {st: [sd for t, sd in full.dispatched[0] if t == st] for st in range(4)}
     for stage, seed in crashed.dispatched[0]:
         assert seed in full_w1[stage]
-    # (c) 分关独立：stage 0/1 已结算一半 ⇒ 缺口小、补得少；stage 2/3 仍需整波
+    # (c) 分关独立：stage 0/1 已结算 w2 ⇒ 缺口小、补得少；stage 2/3 仍要整波
     per_stage = {st: sum(1 for t, _ in crashed.dispatched[0] if t == st) for st in range(4)}
-    assert per_stage[0] == per_stage[1] == 36  # ceil(34500/967)
-    assert per_stage[2] == per_stage[3] == 75  # ceil(72000/967)
+    assert per_stage[0] == per_stage[1] == 4  # ceil(3000/967)
+    assert per_stage[2] == per_stage[3] == 8  # ceil(7000/967)
     assert (crashed._volume_collected or 0) > 0
 
 
@@ -877,9 +934,16 @@ def test_volume_topup_skips_when_disabled(tmp_path: Path, _patch_wver: None) -> 
     assert stub.dispatched == []
 
 
-def _topup_from_ledger(tmp: Path, half: list[tuple[int, int]]) -> _StubLoop:
+def _topup_from_ledger(
+    tmp: Path,
+    half: list[tuple[int, int]],
+    *,
+    target: int = 600000,
+    est: int = 967,
+    samples: int = 500,
+) -> _StubLoop:
     """造一个「初波已结算 + 第二波只落了一半」的循环桩，然后跑补波（崩后续跑）。"""
-    stub = _StubLoop(tmp, target=600000, est=967, samples=500)
+    stub = _StubLoop(tmp, target=target, est=est, samples=samples)
     stub._iteration_pairs(1)
     stub._volume_waves = 1
     _settle_first_wave(stub)

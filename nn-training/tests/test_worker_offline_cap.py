@@ -24,6 +24,7 @@ import remote.worker as W
 from remote.hub_server import _HubQueue, make_server
 from remote.protocol import (
     AUTH_HEADER,
+    COURSE_ENABLE_MARKER,
     COURSE_MODE_OFFLINE,
     OFFLINE_CAP_HEADER,
     OFFLINE_CAP_VALUE,
@@ -172,13 +173,15 @@ def test_run_job_forwards_the_hub_course_into_the_backfeed() -> None:
 
 
 def _publish_offline_course(root: Path, course: str, jid: str) -> None:
-    """在盘上造一门离线课（`remote-jobs/` + jsonl + 一份 kind=run 的 job）。"""
+    """在盘上造一门**已开课**的离线课（开课标记 + `remote-jobs/` + jsonl + kind=run 的 job）。"""
     from remote.hub_server import _JobStore
 
     job_root = root / course / "remote-jobs"
     job_root.mkdir(parents=True, exist_ok=True)
     jsonl = root / course / "training_log.jsonl"
     jsonl.touch()
+    # 开课标记 = hub/训练侧的「在训」闸（2026-09-20）；不写它，hub 不登记这门课。
+    (root / course / COURSE_ENABLE_MARKER).write_text("", encoding="utf-8")
     store = _JobStore(job_root, jsonl)
     store.publish(
         jid,

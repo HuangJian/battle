@@ -10,7 +10,27 @@
  */
 
 import { afterEach, describe, expect, it } from 'bun:test'
+import os from 'os'
+import path from 'path'
 import { api, view } from './helpers/console-fixture'
+
+/** 在「本机没有共享 trainer 在跑」的事实下跑一段（把 registry 指向不存在的文件）。
+ *
+ *  为什么必须造这份事实：`buildStateView` 的「在训」列 = registry 里的 `trainingLoop` 存活 ∧
+ *  该课未收官——直接读**本机真账本**就意味着这条用例假设「此刻操作员手上没在训练」，而真有一台
+ *  在跑恰恰是这台机器的**常态**（2026-09-20 pre-commit 实测：真 trainer 让 trainingCount 变 1
+ *  而红）。测试不得依赖机器上有没有活进程。
+ */
+async function withoutLiveTrainer<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = process.env.BCITY_REGISTRY_FILE
+  process.env.BCITY_REGISTRY_FILE = path.join(os.tmpdir(), 'bcity-loopq-no-trainer.json')
+  try {
+    return await fn()
+  } finally {
+    if (prev === undefined) delete process.env.BCITY_REGISTRY_FILE
+    else process.env.BCITY_REGISTRY_FILE = prev
+  }
+}
 
 /** python 的 `--json` 输出（形状与 run_rl_cluster.build_rows 逐字段一致）。 */
 const JSON_OUT = {
@@ -235,7 +255,7 @@ describe('buildLoopQueueView / buildStateView 注入', () => {
     // ——于是本用例既不真起 python，又能断言「服务端确实把它挂上去了」。
     api.invalidateLoopQueue()
     await api.getLoopQueueView(() => ok(JSON.stringify(JSON_OUT)))
-    const s = await api.buildStateView()
+    const s = await withoutLiveTrainer(() => api.buildStateView())
     expect(s.loopQueue?.rows.map((r) => r.course)).toEqual(['c4-dodge', 'c5-tick'])
     // 在训列 = registry 事实（本用例机器上没有真在跑的 trainingLoop ⇒ 全 false）
     expect(s.loopQueue!.trainingCount).toBe(0)
@@ -245,7 +265,7 @@ describe('buildLoopQueueView / buildStateView 注入', () => {
   it('读失败时 state 仍可用：loopQueue 带 error 而不是 null（UI 显因，不静默）', async () => {
     api.invalidateLoopQueue()
     await api.getLoopQueueView(() => ({ code: 3, stdout: '', stderr: 'boom', timeout: false }))
-    const s = await api.buildStateView()
+    const s = await withoutLiveTrainer(() => api.buildStateView())
     expect(s.loopQueue?.error).toContain('boom')
     expect(s.loopQueue?.rows).toEqual([])
   })

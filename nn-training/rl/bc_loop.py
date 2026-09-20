@@ -282,7 +282,11 @@ def publish_bc_job(
 
     round_name：语料轮目录名（真轮缺省 it{it}；smoke 轮 "smoke"——采集/发布/落位
     三处必须同目录，否则发布找不到 shard）。"""
-    shard_dirs = iter_bc_shard_dirs(traj, it, round_name, log=log)
+    # D14 血缘过滤：与云端逐 shard 拒收同判据（protocol.d14_corpus_match）——
+    # 异血缘 shard 不进 payload（2026-09-20 事故：混入即整份被云退回）。
+    shard_dirs = iter_bc_shard_dirs(
+        traj, it, round_name, log=log, course_fp=course_fp, corpus_fp=corpus_fp
+    )
     if not shard_dirs:
         raise SystemExit(
             f"[run_bc] it{it}: 无完整 BC shard（{traj / 'bc-data' / f'it{it}'} 空）——无法发布"

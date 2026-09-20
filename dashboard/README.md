@@ -11,6 +11,18 @@ bun run dashboard          # = cd dashboard && bun run start → http://127.0.0.
 **只读**查看任意课程/日志/节点统计；启 / 停 / 冒烟 / 模式 / 节点编辑等 POST 动作仅接受
 回环来源（fail closed：来源不可判定即拒）。
 
+## 组件级决策日志（复盘的第一现场）
+
+```
+tmp/training-start/console.log        # 每一次启 / 停 / 重启 / 判死 / 开课 / 停课一行
+```
+
+控制台是长驻进程，这份文件是**稳定文件名**（每次启动追加一行 `=== console session … ===`，
+超过 8MB 时启动时轮转一代 `console.log.1`）。它回答的是盘上其它证据回答不了的那个问题：
+**「这个组件是有人停的，还是自己死的」**——组件日志只会断在半分钟前，账本只会说条目没了。
+`tail -f` 它就能实时看到谁在何时动了什么（启动横幅里也会打印它的路径）；
+`BCITY_CONSOLE_LOG` 可重定向（单测用）。
+
 ## 依赖（自包含）
 
 本项目有自己的 `node_modules/`，**不依赖仓库根**的安装：
@@ -84,7 +96,7 @@ src/
       eval-app.tsx  评估页：同样套 Shell + NavSidebar（独立 bundle，见 P3b）
       log-app.tsx   日志页：同上（页头只说「哪个组件」，页名由外壳顶栏给）
     render.tsx theme.ts
-tests/        94 个本子系统的测试（原根 tests/ 的同名文件迁入 + 两巨型文件按分层拆开；
+tests/        98 个本子系统的测试（原根 tests/ 的同名文件迁入 + 两巨型文件按分层拆开；
               web-style-discipline.test.ts = 样式纪律闸：字号阶梯 / 内联样式 / 色值 token）
 data/evalboard/  EvalBoard 账本数据根（默认值；EVALBOARD_DATA 可覆盖）
 ```
@@ -93,7 +105,8 @@ data/evalboard/  EvalBoard 账本数据根（默认值；EVALBOARD_DATA 可覆�
 
 测试**镜像 `src/` 的模块**（AGENTS §8）：一个测试文件对应它覆盖的那个模块，
 文件名形如 `web-view-rows` ↔ `src/web/view/rows.ts`、`server-api-pool` ↔
-`src/server/api`。dashboard 侧当前 **889 个用例 / 94 个文件**（2026-09-20；P4a 样式纪律闸前为 878 / 93，
+`src/server/api`。dashboard 侧当前 **964 个用例 / 98 个文件**（2026-09-20；合入 `origin/goal-nn` 前为 889 / 94，
+P4a 样式纪律闸前为 878 / 93，
 P3c 列模型前为 867 / 92，
 P3b 独立页套壳前为 863 / 92，P2b 告警坞+KPI 条前为 804 / 90，P2a 课程矩阵前为 776 / 88，
 P1 行原语前为 746 / 87，重设计前基线 717 / 86），拆分产出的文件最大 264 行（单节走势图；其余 <170 行）。

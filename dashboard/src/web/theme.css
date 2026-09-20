@@ -1642,22 +1642,8 @@ a.tc-btn {
   min-width: 0;
 }
 
-/* 正在训练的课程标签（课程 select 后高亮；脉冲绿点提醒查看课程 ≠ 训练课程） */
-.tc-training-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 10px;
-  border-radius: 999px;
-  background: var(--green-bg);
-  color: var(--green);
-  font-size: var(--fs-sm);
-  font-weight: 700;
-  white-space: nowrap;
-}
-.tc-training-tag .tc-dot {
-  animation: tc-live 1.6s ease-in-out infinite;
-}
+/* （旧「正在训练：a、b、c」标签的样式已随 pill 行删除：2026-09-20 起每门在训课自己一个
+   pill —— 见下方 .tc-tpills；脉冲绿点的活留给了 pill 上的状态点。） */
 .tc-hero__iters .tc-table thead th {
   position: static;
 } /* 6 行紧凑表无需吸顶 */
@@ -1892,6 +1878,105 @@ a.tc-btn {
 /* 节点行的旧 chip 词汇（`.tc-npill*` / `.tc-nodes .lbl` / `.tc-nodes .more`）已随 P1
    迁移到行原语 `.tc-row*` + 区块头 `.tc-sechd*` 而删除（docs/dashboard-redesign.md §4.2）。
    不要把它们加回来——第四套行样式就是这么长出来的。 */
+
+/* ────────────── 在训课程 pill（2026-09-20：课程开训必须手动开） ──────────────
+   一门已开课的课程一个 pill（状态点 + 课名 + it 指针 + 一句状态 + ■ 停课）。与节点 pill
+   同一套视觉语言（圆角胶囊 / 状态点色板 / hover 描边）——相邻的 pill 不该长得像两个体系。
+
+   ★ 它是**顶栏行里的一个 flex 项**（不再自占一行，用户 2026-09-20：「和课程 select 挤进
+   同一行，避免占用宝贵的纵向页面空间」）：无卡片底/边框/下边距（那是“一个面板”的语言，
+   而行内应只是几个胶囊）；pill 多时**本组自己横向滚动**，绝不 `flex-wrap` 撑出第二行
+   （那又回到吃纵向空间，还顺带把后面的「触发门禁」挤下去）。
+   `min-width: 0` 是横向滚动的必要条件：flex 项的默认 `min-width: auto` 拒绝缩到内容以下，
+   于是会把同一行的课程 select 挤没（而不是自己出滚动条）。 */
+.tc-tpills {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  /* 与课程 select 平分行内余地（两者都 `flex:1`）——没开课时本组件不渲染，select 照旧占满/居中 */
+  flex: 1 1 auto;
+  flex-wrap: nowrap;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  padding-bottom: 2px; /* 给细滚动条留位，避免贴住描述线 */
+}
+.tc-tpills .lbl {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  margin-right: var(--sp-1);
+}
+.tc-tpill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 6px 3px 12px;
+  font-size: var(--fs-sm);
+  background: var(--card);
+  cursor: pointer;
+  flex-shrink: 0;
+  user-select: none;
+}
+.tc-tpill:hover {
+  border-color: var(--accent);
+}
+/* 当前查看的那门课高亮（用户指令：点击 pill 后高亮）——只看描边不够，加底色让它在
+   一排 pill 里一眼可辨。 */
+.tc-tpill--active {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+.tc-tpill b {
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-weight: 600;
+  font-size: var(--fs-sm);
+}
+.tc-tpill .v {
+  color: var(--green);
+  font-weight: 700;
+  font-size: var(--fs-sm);
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+}
+/* 状态字与圆点同色（g=绿 / y=琥珀 / r=红 / gray=灰）——颜色随 tone 走，一字两色会读成两个状态 */
+.tc-tpill__state {
+  color: var(--muted);
+  font-weight: 600;
+}
+.tc-tpill:has(.tc-dot--on) .tc-tpill__state {
+  color: var(--green);
+}
+.tc-tpill:has(.tc-dot--warn) .tc-tpill__state {
+  color: var(--yellow);
+}
+.tc-tpill:has(.tc-dot--dead) .tc-tpill__state {
+  color: var(--red);
+}
+/* BC 徽标（一小截字，与调度器卡上的 BC 徽标同一个信号：一轮 = 一个任务） */
+.tc-tpill__kind {
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  padding: 0 4px;
+}
+/* ■ 停课：贴在 pill 右端的小方键（不抢 pill 本身的「点击切查看」语义） */
+.tc-tpill__stop {
+  border: 1px solid var(--border);
+  background: none;
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  line-height: 1;
+  padding: 3px 5px;
+  cursor: pointer;
+}
+.tc-tpill__stop:hover {
+  border-color: var(--red);
+  color: var(--red);
+}
 
 /* 工具行（TrainingLoop 启动弹窗内） */
 .tc-line {
@@ -2620,6 +2705,12 @@ a.tc-btn {
 .tc-side__sec .tc-sel {
   width: 100%;
   max-width: 100%;
+}
+/* 开课键（「训练」）与课程选择器同宽：侧栏那一栏是竖直的，宽度对齐才读成一组
+   （读序：选课 → 训练 → 看哪几门在训）。 */
+.tc-side__sec .tc-btn {
+  width: 100%;
+  justify-content: center;
 }
 .tc-side__row {
   display: flex;

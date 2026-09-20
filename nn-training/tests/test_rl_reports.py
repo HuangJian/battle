@@ -1,7 +1,13 @@
 """rl/reports.py — aggregation invariants."""
 from __future__ import annotations
 
-from rl.reports import adopt_volume_report, aggregate_rollout_collect, combine_reports, win_of
+from rl.reports import (
+    adopt_volume_report,
+    aggregate_rollout_collect,
+    combine_reports,
+    merge_volume_report,
+    win_of,
+)
 
 
 def test_win_of() -> None:
@@ -137,3 +143,52 @@ def test_combine_reports_skips_empty_dicts() -> None:
     combined = combine_reports([{}, w0, {}])
     assert combined["games"] == 2
     assert combined["pure_collect_sec"] == 20.0
+
+
+def _disk_shard(stage: int, seed: int, outcome: str, n: int = 100) -> dict:
+    return {
+        "games": 1,
+        "stage": stage,
+        "seed": seed,
+        "outcomes": {outcome: 1},
+        "totalSamples": n,
+        "totalTicks": n * 10,
+        "scoreList": [],
+        "dimLists": {},
+    }
+
+
+def test_merge_volume_report_backfills_when_wave_empty() -> None:
+    """配额已满重启：wave=空 ⇒ 报告从盘上 shard 回填，不得留下 winRate=0 空壳。"""
+    disk = [
+        _disk_shard(0, 1, "stage_clear"),
+        _disk_shard(0, 2, "timeout"),
+        _disk_shard(1, 1, "stage_clear"),
+    ]
+    got = merge_volume_report(None, disk)
+    assert got["games"] == 3
+    assert got["outcomes"]["stage_clear"] == 2
+    assert got["winRate"] == round(2 / 3, 4)
+    assert got["totalSamples"] == 300
+
+
+def test_merge_volume_report_prefers_disk_over_partial_wave() -> None:
+    """重启后本进程只补缺口批：wave games < 盘上全量 ⇒ 仍以盘上全量为报告真源。"""
+    disk = [_disk_shard(0, i, "timeout" if i % 2 else "stage_clear") for i in range(4)]
+    partial = combine_reports([_disk_shard(0, 4, "timeout")])  # 本进程新采的 1 局
+    partial["pure_collect_sec"] = 12.0
+    partial["weights_dist_start_ts"] = 100.0
+    partial["collect_end_ts"] = 112.0
+    got = merge_volume_report(partial, disk)
+    assert got["games"] == 4  # 盘上全量，不是 partial 的 1
+    assert got["winRate"] == 0.5
+    assert got["pure_collect_sec"] == 12.0  # 本进程时间锚点保留
+    assert got["weights_dist_start_ts"] == 100.0
+
+
+def test_merge_volume_report_falls_back_to_wave_without_disk() -> None:
+    """盘上无 shard（或血缘过滤后为空）时仍采纳 wave；两者皆空 ⇒ 合法空 shape。"""
+    wave = combine_reports([_disk_shard(0, 1, "stage_clear")])
+    assert merge_volume_report(wave, [])["games"] == 1
+    empty = merge_volume_report(None, [])
+    assert empty["games"] == 0 and empty["winRate"] == 0.0

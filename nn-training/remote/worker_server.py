@@ -49,6 +49,7 @@ from remote.protocol import (
     normalize_manifest,
     unpack_job_v2,
 )
+from remote.worker import _wire_flush as worker_wire_flush
 from remote.worker import run_job
 
 AUTH_HEADER = "Authorization"
@@ -221,6 +222,9 @@ def _execute_job(
         state.set_error(jid, f"{type(e).__name__}: {e}", kind=type(e).__name__)
         log(f"job {jid} FAILED: {e}")
     finally:
+        # 每 job 一行传输账（push 模式不跑 pull 循环 ⇒ 没有别的 flush 点）：
+        # preloaded 命中 / blob 下载的 (bytes, sec) 都在这里可见。
+        worker_wire_flush(jid, log)
         state.kick()  # 失败不堵队：队首立即顶上（流水线无间隙）
 
 

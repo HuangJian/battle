@@ -5,10 +5,11 @@
  *
  *   ① **域换算**：模式 → 课程级 rl-config 键（`stack/specs.ts::trainModeKnobs` 是唯一推导点）。
  *      离线 = `{rollout_src:'run', run_iters:-1}`（声明 + 段长，缺一不可）；在线 = 撤掉离线标记。
- *   ② **落盘**：`preset.ts` 把换算结果写进 `courses.<课>.*`，且离线档的 `run` **绝不进**
- *      全局 `rl.rollout_src`（那会把所有课一起拖进离线）。
- *   ③ **入口**：route 白名单 + 弹窗控件（缺省在线；服务端生效值 `run` ⇒ 打开就已选中离线，
- *      否则重新开弹窗再点启动 = 静默把离线课拉回在线）。
+ *   ② **落盘**：`course-lifecycle.ts`（2026-09-20 起：训练模式是**开课**的选项，不再搭启动的车）
+ *      把换算结果写进 `courses.<课>.*`，且离线档的 `run` **绝不进**全局 `rl.rollout_src`
+ *      （那会把所有课一起拖进离线）。
+ *   ③ **入口**：route 白名单 + 开课弹窗（缺省在线；服务端生效值 `run` ⇒ 打开就已选中离线，
+ *      否则重新开课 = 静默把离线课拉回在线）。
  *   ④ **读面**：`/admin/offline` 的逐轮产物 → 总览行（段内那几轮**不在课程账本里**，
  *      只有这条通道能回答「云机在跑还是挂了」）。
  *
@@ -48,21 +49,21 @@ describe('trainModeKnobs：模式 → 课程级键（唯一推导点）', () => 
 
 // ────────────────────────── ② 落盘（preset） ──────────────────────────
 
-describe('preset：离线落课程级键 + hub 该课置 offline', () => {
-  const src = readSrc('src/server/actions/preset.ts')
+describe('course-lifecycle（开课）：离线落课程级键 + hub 该课置 offline', () => {
+  const src = readSrc('src/server/actions/course-lifecycle.ts')
 
   it('换算只走 trainModeKnobs（第二处推导 = 两处一定会漂开）', () => {
-    expect(src).toContain("trainModeKnobs(opts.trainMode, opts.rolloutSrc ?? 'local')")
+    expect(src).toContain("trainModeKnobs(trainMode, opts.rolloutSrc ?? 'local')")
     expect(src).toContain('row.rollout_src = knobs.rolloutSrc')
     expect(src).toContain('row.run_iters = knobs.runIters ?? -1')
   })
 
   it('离线档的 `run` 绝不写进全局 rl.rollout_src（否则全部课程一起离线）', () => {
-    // 全局面取 knobs.rolloutSrc，而离线算出来的就是 run ⇒ 置空
-    expect(src).toContain("knobs.rolloutSrc === 'run' ? undefined : knobs.rolloutSrc")
-    expect(src).toContain('cfgT.rl.rollout_src = globalRolloutSrc')
-    // 反向：没有一处把 opts.rolloutSrc 直接写进全局键
-    expect(src).not.toContain('cfgT.rl.rollout_src = opts.rolloutSrc')
+    // 写面只动 `courses.<课>` 那一行：整份文件里不得出现任何 `rl.rollout_src =` 赋值
+    expect(src).not.toMatch(/rl\.rollout_src\s*=/)
+    // 反向对照：**启动**侧也不碰它（课程级选项不回流向全局默认面）
+    const preset = readSrc('src/server/actions/preset.ts')
+    expect(preset).not.toMatch(/rl\.rollout_src\s*=/)
   })
 
   it('切回在线 = 撤掉离线标记（段长必删；只删 `run` 而不删段长 = 半状态）', () => {
@@ -72,12 +73,11 @@ describe('preset：离线落课程级键 + hub 该课置 offline', () => {
     expect(src).not.toContain('delete row.rollout_src\n')
   })
 
-  it('启动时把该课 hub 模式一起放对：离线 ⇒ 只让带标 worker 领；在线 ⇒ 恢复派发', () => {
-    expect(src).toContain(
-      "setCourseMode(course, opts.trainMode === 'offline' ? 'offline' : 'online')",
-    )
+  it('开课时把该课 hub 模式一起放对：离线 ⇒ 只让带标 worker 领；在线 ⇒ 恢复派发', () => {
+    expect(src).toContain("opts.trainMode === 'offline' ? 'offline' : 'online'")
+    expect(src).toContain('pushHubMode(c, trainMode')
     // 结果要回话（静默切模式 = 「我明明选了在线却不动」）
-    expect(src).toContain('modeNote')
+    expect(src).toContain('hubNote')
   })
 })
 
@@ -91,29 +91,32 @@ describe('入口接线：route 白名单 + app 透传 + 弹窗控件', () => {
     expect(src).toContain('trainMode: (trainMode || undefined) as TrainMode | undefined')
   })
 
-  it('app.tsx：trainMode 进 preset body（漏了 = 选了离线却照旧本机跑）', () => {
+  it('app.tsx：trainMode 进 **openCourse** body（漏了 = 选了离线却照旧本机跑）', () => {
     const src = readSrc('src/web/app/app.tsx')
-    expect(src).toContain('if (opts?.trainMode) body.trainMode = opts.trainMode')
+    expect(src).toContain("await doAction('openCourse', {")
+    expect(src).toContain('trainMode: opts.trainMode')
+    // ★ 启动链路不带它（那是「起进程」——不为某门课做决定）
+    expect(src).not.toContain('body.trainMode')
   })
 
-  it('弹窗：训练模式控件 + 选项带出去 + 选中即记住', () => {
-    const src = readSrc('src/web/app/panels/TrainLaunchModal.tsx')
-    expect(src).toContain("const TC_TRAIN_MODE = 'tc.trainMode'")
+  it('开课弹窗：训练模式控件 + 选项带出去 + 选中即记住', () => {
+    const src = readSrc('src/web/app/panels/OpenCourseModal.tsx')
+    expect(src).toContain("const TC_OPEN_TRAIN_MODE = 'tc.openCourse.trainMode'")
     expect(src).toContain('ariaLabel="训练模式"')
     expect(src).toContain("{ value: 'offline', label: '离线' }")
-    expect(src).toMatch(/onLaunch\(\{[^}]*\btrainMode\b/)
+    expect(src).toMatch(/onConfirm\(\{[^}]*\btrainMode\b/)
     expect(src).toContain('trainMode: TrainMode')
-    expect(src).toContain('writeLocal(TC_TRAIN_MODE, trainMode)')
-    // 缺省在线（用户口径）
-    expect(src).toContain("['online', 'offline'] as const, 'online'")
+    expect(src).toContain('writeLocal(TC_OPEN_TRAIN_MODE, trainMode)')
   })
 
-  it('弹窗：服务端生效值 `run` ⇒ 打开就选中离线（否则再点启动 = 静默拉回在线）', () => {
-    const src = readSrc('src/web/app/panels/TrainLaunchModal.tsx')
-    expect(src).toContain("modes.rolloutSrc === 'run' ? 'offline'")
-    // 且 `run` 不再是 rollout 源的选项之一
+  it('开课弹窗：服务端生效值 `run` ⇒ 打开就选中离线（否则再点开课 = 静默拉回在线）', () => {
+    const src = readSrc('src/web/app/panels/OpenCourseModal.tsx')
+    expect(src).toContain("modes.rolloutSrc === 'run'")
+    expect(src).toContain("'offline'")
+    // 且 `run` 不作为 rollout 源的选项出现（它是离线档的产物，不是一个可选位置）
     expect(src).not.toContain("{ value: 'run', label:")
-    expect(src).toContain("rolloutSrc === 'run' ? 'local' : rolloutSrc")
+    // 离线档忽略 rollout 选择（服务端同样忽略：只认 run/run_iters 那对键）
+    expect(src).toContain("trainMode === 'online' ? rolloutSrc : undefined")
   })
 })
 

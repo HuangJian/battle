@@ -93,6 +93,24 @@ dashboard 必改项、gate 改动、minibatch/PPO 超参联动。
 3. iteration 事件追加 `transitions_target` / `transitions_collected`
   （dashboard 可选消费，P3）。
 
+### 2.5 收官报告与配额账本同源（2026-09-20 补：修 it76 监控盲区）
+
+**问题**（x20-steady it75→it76 实测）：配额在停机前已采满 ⇒ 重启后新进程
+`batches=0`，`combine_reports([])` 的除零保护把 `winRate=0.0` 写进账本——账本上
+「0 局胜率 0」与「打了 N 局全输」不可区分；而盘上 238 个 shard 的 `stage_clear`
+无人重聚合。配额账本（`settled_stage_totals`）**早已**以盘上 manifest 为真，
+报告必须与它同源。
+
+**解法**：`rl/reports.py::merge_volume_report(wave_combined, disk_manifests)`——
+盘上有局数 ⇒ **以磁盘 combine 为报告体**，wave 只覆盖时间锚点
+（`pure_collect_sec` / `weights_dist_*` / `collect_end_ts`）；接线在
+`loop_core._volume_collect_continuous` 收官处（`resumed_manifests(traj/it{N}, wver,
+ extra_wver, course_fp)` + stages 过滤）。**否决**「仅 wave 为空时回填」：重启后本
+进程可能只补了缺口批，wave 有局数但仍小于盘上全量 ⇒ 低估胜率与局数。
+
+**遗留（未修，与本条独立）**：continuous `start_idx` 重启后从 0 重抽种子流，首批
+可能整批命中盘上已 done 的 pair（磁盘回填、不新采）；配额靠后续批推进。
+
 ---
 
 ## 3. 实施分期

@@ -32,6 +32,32 @@ function snap(file: string): Snap | null {
   }
 }
 
+/** 哨兵 mtime 与「进程启动时刻」的容差（ms）：文件刚落盘＋监视器刚拉起的同拍竞态，
+ *  不值得为它重启一次；真正的旧码差距是分钟/小时/天级。 */
+const STALE_SLACK_MS = 2000
+
+/** 运行中的进程是否跑着**早于磁盘**的代码。
+ *
+ *  为什么需要它（2026-09-20 事故）：本文件的监督循环只盯着它**登记那一刻**的哨兵
+ *  （`watch()` 以当下指纹为基线），而 watch 表住**内存**——控制台一重启就清空，
+ *  重启后的 `reconcileWatch()` 把在跑进程**重新基线化**成「现在就绪」，于是
+ *  「进程早于最后一次改码」这个事实永久消失：盘上加了新闸（课程开课标记），
+ *  hub 进程还是昨天的，云端照样领到未开课课程的陈旧 job。
+ *
+ *  判据 = 哨兵（入口 .py/.ts + 代码清单）的 mtime 晚于**该进程的启动时刻**
+ *  （账本 `startedAt`）。缺席（旧账本条目 / 手工起的进程）⇒ 不可判定 ⇒ 按旧码处理：
+ *  接管时重启一次，此后账本自带启动时刻，稳态零误报。无哨兵的组件恒 false。
+ */
+export function runningStaleCode(spec: ProcSpec, startedAt?: number): boolean {
+  if (spec.sentinels.length === 0) return false
+  if (!startedAt || !Number.isFinite(startedAt)) return true
+  for (const f of spec.sentinels) {
+    const s = snap(f)
+    if (s && s.mtimeMs > startedAt + STALE_SLACK_MS) return true
+  }
+  return false
+}
+
 interface WatchState {
   spec: ProcSpec
   pid: number

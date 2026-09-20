@@ -8,8 +8,14 @@
  *  只读可见性（§5.4）：LAN 只读常驻显示锁徽标（不可关闭），取代此前可关闭横幅的常驻职责；
  *  动作按钮**保持可点**（§7 O1 已决：物理禁用会让组件区看起来灰败破碎），误点由服务端 403 兜底。
  *
+ *  开课入口（2026-09-20 合并远端「进程与课程解耦」）：课程级旋钮（训练模式 / rollout 位置 /
+ *  降级本机）随「训练」键弹窗下发——它紧凑课程选择器（读序：选课 → 训经 → 看哪几门在训）。
+ *  **停课不在这里**：停在**每门课的 pill** 上（按课停、按课消失）；一个键同时做「开这门」
+ *  与「停这门」在两门课并存时语义不明。此前 select 后面挂的「还有在训：a、b」串行标签
+ *  已由顶栏的 pill 行取代（同一个事实不再上屏两次）。
+ *
  *  导航本体在 `NavSidebar.tsx`（/eval 与 /log 两个独立 bundle 复用同一组件，见该文件头注）；
- *  本文件只负责「控制台这一页多出来的东西」——课程、门禁、刷新间隔。
+ *  本文件只负责「控制台这一页多出来的东西」——课程、开课、门禁、刷新间隔。
  */
 
 import type { JSX } from 'preact'
@@ -22,9 +28,14 @@ export interface SidebarProps {
   /** 当前查看课程（空串 = 自动/最近活跃）。 */
   course: string
   courses: string[]
-  /** 在训课程（课程 select 内标 🔥；与顶栏「在训 n」同源）。 */
+  /** 在训课程（= 已开课；课程 select 内标 🔥，与顶栏 pill 行同源）。 */
   trainingCourses: string[]
   onCourseChange: (course: string) => void
+  /** 开课（弹窗）——课程级选项随它下发。 */
+  onOpenCourse: () => void
+  /** 该课是否已在课程表（`courseLifecycle.enabled`）；**null = 旧视图无此事实 ⇒ 不渲染该键**
+   *  （宁可少一个按钮，不可给一个假承诺）。 */
+  courseEnabled: boolean | null
   /** route 类导航项的点击（拦截为 pushState；link 类不传此回调，走真链接）。 */
   onNavigate: (page: PageKey, e: JSX.TargetedMouseEvent<HTMLAnchorElement>) => void
   /** 局域网只读（服务端 stamp）：锁徽标常驻。 */
@@ -56,13 +67,14 @@ export function Sidebar({
   courses,
   trainingCourses,
   onCourseChange,
+  onOpenCourse,
+  courseEnabled,
   onNavigate,
   readOnly,
   gate,
   refresh,
 }: SidebarProps) {
   const trainingSet = new Set(trainingCourses)
-  const otherTraining = trainingCourses.filter((c) => c !== course)
 
   return (
     <NavSidebar
@@ -88,23 +100,29 @@ export function Sidebar({
                 <option key={c} value={c}>
                   {trainingSet.has(c) ? '🔥 ' : ''}
                   {c}
-                  {trainingSet.has(c) ? '（正在训练）' : ''}
+                  {/* 「已开课」而不是「正在训练」：名单的事实源是**开课标记**（课程表），
+                      与「进程在不在跑」正交——开了课但 trainer 没起是合法稳态。 */}
+                  {trainingSet.has(c) ? '（已开课）' : ''}
                 </option>
               ))}
             </select>
-            {otherTraining.length > 0 ? (
-              <span
-                className="tc-training-tag"
+            {/* 开课键：只读视图**不物理禁用**（只读是动作边界，不是按钮状态——禁用会让整条
+                工具栏看起来灰败破碎；真点击由服务端 403 + flash 兜底）。 */}
+            {course && courseEnabled !== null ? (
+              <button
+                type="button"
+                className={`tc-btn tc-btn--sm${courseEnabled ? '' : ' tc-btn--primary'}`}
                 title={
-                  `在训课程共 ${trainingCourses.length} 门：${trainingCourses.join('、')}` +
-                  (course && trainingSet.has(course)
-                    ? '（含当前查看的这门）'
-                    : '——切换查看不影响训练')
+                  readOnly
+                    ? '只读模式：开课仅限本机 localhost'
+                    : courseEnabled
+                      ? `${course} 已在课程表（在训）。再点「训练」= 按当前选项重写课程级旋钮 + 重新置 hub 模式（机器侧旋钮要重开课才生效）`
+                      : `${course} 未开课。点「训练」= 开课：写开课标记 + 建账本/权重/remote-jobs + 按所选训练模式置 hub 派发闸（进程没跑也能开）`
                 }
+                onClick={onOpenCourse}
               >
-                <span className="tc-dot tc-dot--on" />
-                还有在训：{otherTraining.join('、')}
-              </span>
+                训练
+              </button>
             ) : null}
           </div>
 

@@ -1319,21 +1319,8 @@ class TrainingSteps:
         job_root = str(getattr(args, "remote_job_root", "") or "") or str(
             Path(args.traj) / "remote-jobs"
         )
-        # 本轮应训 shard 集（与 _serial_ppo load_episodes 装载口径一致）；
-        # 三条分支的判定抽在 `_gate_round_shards`（纯函数，回归见 test_remote_ppo_gate_fields）。
-        local_shards = iter_shard_dirs(
-            args.traj,
-            it,
-            log=(lambda _m: None) if (rollout_spec or export_path is not None) else log,
-        )
-        shard_dirs = _gate_round_shards(
-            local_shards=local_shards,
-            rollout_spec=rollout_spec,
-            exporting=export_path is not None,
-            it=it,
-            it_dir=str(it_dir),
-        )
         # 课程快照（D13/D14）：课程文件全文 + course_fp = sha256(文件字节)
+        # ★ 顺序：**先**算血缘（course_fp/corpus_fp）、**再**扫 shard——扫描要用它们过滤。
         course = getattr(args, "course_obj", None)
         if course is None:
             raise SystemExit(
@@ -1361,6 +1348,27 @@ class TrainingSteps:
         from rl.config import corpus_identity_fp
 
         corpus_fp = corpus_identity_fp(course)
+        # 本轮应训 shard 集（与 _serial_ppo load_episodes 装载口径一致）；
+        # 三条分支的判定抽在 `_gate_round_shards`（纯函数，回归见 test_remote_ppo_gate_fields）。
+        # D14 血缘过滤（2026-09-20 事故）：`it{it}` 是累积目录，课程文件被编辑过/换过
+        # runId 时里面会躺着旧血缘 shard；云端 worker 逐 shard 拒收 ⇒ 整份 job 退回，
+        # hub 侧永远等不到结果（训练轮空转 + worker 反复领同一份死活）。过滤判据
+        # 与云端同源（`remote.protocol.d14_corpus_match`），故「打进 payload 的集合」
+        # 恒等于「云端会接受的集合」；`verify_and_land` 用同样的两个 fp 重算 data_fp。
+        local_shards = iter_shard_dirs(
+            args.traj,
+            it,
+            log=(lambda _m: None) if (rollout_spec or export_path is not None) else log,
+            course_fp=course_fp,
+            corpus_fp=corpus_fp,
+        )
+        shard_dirs = _gate_round_shards(
+            local_shards=local_shards,
+            rollout_spec=rollout_spec,
+            exporting=export_path is not None,
+            it=it,
+            it_dir=str(it_dir),
+        )
         # ppo_schedule 解析后值（执行用）——_course_iter 已按 it 折算进 args
         from rl.reward_library import METRICS_VERSION
 

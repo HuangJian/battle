@@ -108,19 +108,29 @@ def _bash_is_wsl() -> bool:
 def _bash_path(p: Path) -> str:
     """把（可能 Windows 盘符形式的）路径转成当前 bash 可读形态。
 
-    非 WSL（MSYS/native Linux）原样返回 —— MSYS 层自动映射 /d/ 风格路径，native
-    Linux 本就是 POSIX。WSL 下经 wslpath -u 转 /mnt/<drive>/...；转换失败回退原样。
+    WSL 优先 `wslpath -u`（→ `/mnt/d/...`）；失败或非 WSL 时，盘符路径一律归一成
+    MSYS `/d/...`（WSL 再套 `/mnt`）。**绝不**把 `D:\\...` 直接喂给 bash——反斜杠
+    会被当转义吞掉（门禁 xdist 下 `_BASH_IS_WSL` 探测偶发假阴性时实测
+    `bash: D:githubbattle2... No such file`，rc=127，2026-09-20）。
     """
-    if not _BASH_IS_WSL:
-        return str(p)
-    try:
-        r = subprocess.run(
-            ["bash", "-lc", f"wslpath -u '{p}'"], capture_output=True, text=True, timeout=10
-        )
-    except (OSError, subprocess.SubprocessError):
-        return str(p)
-    out = r.stdout.strip()
-    return out if r.returncode == 0 and out else str(p)
+    msys_form = _msys(p)
+    if _BASH_IS_WSL:
+        try:
+            r = subprocess.run(
+                ["bash", "-lc", f"wslpath -u '{p}'"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            out = r.stdout.strip()
+            if r.returncode == 0 and out and ":" not in out.split("/", 1)[0]:
+                return out
+        except (OSError, subprocess.SubprocessError):
+            pass
+        # wslpath 不可用/失败：盘符 → `/mnt/d/...`（WSL 只认这一种）。
+        if re.match(r"^/[a-z]/", msys_form):
+            return "/mnt" + msys_form
+    return msys_form
 
 
 #: 模块级求值一次：探测本身要起子进程，不必每条用例重跑。

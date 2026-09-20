@@ -161,6 +161,12 @@ export interface ConsoleStateView {
   trainingCourses?: string[]
   /** 多课程并行总览（hub `/admin/queue` + 每课一行）；缺省/null = 无 hub 应答或未计算。 */
   overview?: ParallelOverviewView | null
+  /** 课程生命周期事实（2026-09-20：进程启动与课程解耦后，顶部「开课/停课」入口的判据）。
+   *  `enabled` = **开课标记**（`tmp/<课>/training-enabled.txt`）——训练侧 `enabled_courses`
+   *  与 hub `_course_dir_live` 的同一个闸（有账本 ≠ 在训：历史课都有账本）；
+   *  `paused` = 暂停意图已写（调度器卡片的「暂停」同一份契约）。
+   *  缺省/null = 无查看课程或旧视图（UI 不渲染该按钮，不编状态）。 */
+  courseLifecycle?: { enabled: boolean; paused: boolean } | null
   /** 训练调度器（**单例**：一个进程服务所有并行课程）的每课队列视图（R2c-3）。
    *  数据源 = `run_rl_cluster.py --json`（只读计划视图）+ registry 的调度器存活事实。
    *  缺省/null = 读失败（`error` 在视图里）或旧视图——UI 显空态，不编数据。 */

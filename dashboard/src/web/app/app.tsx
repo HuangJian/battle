@@ -20,6 +20,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'preact/hooks'
 import type { JSX } from 'preact'
+import type { RolloutSrcMode, TrainMode } from '../../core/types'
 import { AlertDock } from '../components/AlertDock'
 import { Flash, type FlashState } from '../components/Flash'
 import { KpiStrip } from '../components/KpiStrip'
@@ -35,6 +36,8 @@ import { NodePills } from './panels/NodePills'
 import { MetricsTable } from './panels/MetricsTable'
 import { NodeStats } from './panels/NodeStats'
 import { TrainLaunchModal, type TunnelLaunchOpts } from './panels/TrainLaunchModal'
+import { OpenCourseModal } from './panels/OpenCourseModal'
+import { TrainingPills } from './panels/TrainingPills'
 import { BcPanel } from './panels/BcPanel'
 import { CourseMatrix } from './panels/CourseMatrix'
 import { WorkerRegistry } from './panels/WorkerRegistry'
@@ -128,6 +131,9 @@ export function App({ initial }: AppProps) {
     typeof document === 'undefined' || !document.hidden,
   )
   const [trainOpen, setTrainOpen] = useState(false)
+  // 开课弹窗（2026-09-20：进程与课程解耦后，「开哪门课」的课程级旋钮住在这里——训练模式 /
+  // rollout 位置 / 降级本机；而「启动服务进程」弹窗只带进程级选项）。
+  const [openCourseModal, setOpenCourseModal] = useState(false)
   const [poolFreshNonce, setPoolFreshNonce] = useState(0)
   // 当前页面（§5.1）：首帧取服务端 stamp 的 page（SSR 与客户端同值 → hydrate 一致）；
   // URL 校准放到挂载后的 effect（`/api/state` 直接消费时 initial 无 page）。
@@ -260,6 +266,7 @@ export function App({ initial }: AppProps) {
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) return
       if (e.key === 'Escape') {
         setTrainOpen(false)
+        setOpenCourseModal(false)
       } else if (e.key.toLowerCase() === 'r') {
         void refreshState()
       }
@@ -323,22 +330,42 @@ export function App({ initial }: AppProps) {
     writeLocal(TC_GLOBAL_INTERVAL, String(v))
   }, [])
 
-  const handleLaunch = async (
-    opts?: TunnelLaunchOpts & { remoteDegrade?: boolean },
-  ): Promise<void> => {
+  const handleLaunch = async (opts?: TunnelLaunchOpts): Promise<void> => {
     setTrainOpen(false)
-    // 启动**不传模式**：执行面由 rl.hub_push + 登记节点推出来。
-    const body: Record<string, unknown> = {
-      remoteDegrade: opts?.remoteDegrade === true,
-    }
-    // M1/M2/M3：传输选项随启动回写 rl-config + console-state（未选 = 不传，沿用现值）。
+    // 启动**只带进程级选项**（2026-09-20）：本机 agent → 共享 hub → 共享 trainer。
+    // 课程级选项（训练模式 / rollout 位置 / 降级本机）随「开课」走（`openCourse`），
+    // 服务端也把往 preset 里塞这些字段当错误拒掉（响亮，而不是静默丢掉）。
+    const body: Record<string, unknown> = {}
+    // M1/M2：传输选项随启动回写 rl-config + console-state（未选 = 不传，沿用现值）。
     if (opts?.cfProtocol) body.cfProtocol = opts.cfProtocol
     if (opts?.cfEdgeIp) body.cfEdgeIp = opts.cfEdgeIp
     if (opts?.slim) body.slim = opts.slim
-    if (opts?.rolloutSrc) body.rolloutSrc = opts.rolloutSrc
-    // 训练模式：在线/离线。离线时服务端会忽略上面的 rolloutSrc（只写该课的课程级键）。
-    if (opts?.trainMode) body.trainMode = opts.trainMode
     await doAction('preset', body)
+  }
+
+  /** 开课：课程级选项随它一起下发（服务端写 `courses.<课>.*` + 建发现事实 + 解暂停 + 置 hub
+   *  模式；进程没跑也能开）。与「启动服务进程」解耦——进程是共享的一台，回答不了
+   *  「这门课怎么跑」。 */
+  const handleOpenCourse = async (opts: {
+    trainMode: TrainMode
+    rolloutSrc?: RolloutSrcMode
+    remoteDegrade: boolean
+  }): Promise<void> => {
+    setOpenCourseModal(false)
+    await doAction('openCourse', {
+      trainMode: opts.trainMode,
+      remoteDegrade: opts.remoteDegrade,
+      ...(opts.rolloutSrc ? { rolloutSrc: opts.rolloutSrc } : {}),
+    })
+  }
+
+  /** 停课：非破坏（删开课标记 + 写暂停意图 + 该课 hub 置离线；队列与账本一个字不动）。
+   *
+   *  ★ 课程显式带上（不依赖 doAction 的「当前查看课程」兜底）：停课入口在**每门课的 pill** 上，
+   *  点 A 课的 ■ 必须停 A —— 走兜底时，一旦查看目标与 pill 不同步（或两次渲染之间切了课）
+   *  就会停错一门，那是这里最贵的一类错误。 */
+  const handleStopCourse = async (course: string): Promise<void> => {
+    await doAction('stopCourse', { course })
   }
 
   // 课程锁已随「单 hub 多课程」解除：hub 现在一个进程托管 N 份账本，进程级状态不再与
@@ -361,16 +388,18 @@ export function App({ initial }: AppProps) {
   const phaseInfo = stateView?.phase ?? null
   const phaseElapsed = phaseInfo && phaseInfo.sinceMs != null ? now - phaseInfo.sinceMs : null
 
-  // 在训课程（**可多门**）：以服务端 stamp 的 `trainingCourses` 为准（共享 trainer 在跑
-  // ∧ 该课未收官）；旧视图缺字段时回退到「trainer 在跑就当作当前查看的这门课在跑」
-  // （失败方向是**少报**，不编）。
+  // 在训课程（**可多门**）：以服务端 stamp 的 `trainingCourses` 为准——2026-09-20 起它是
+  // **已开课**的课程（事实源 = 开课标记 `training-enabled.txt`，与训练侧 `enabled_courses` /
+  // hub `_course_dir_live` 同一个闸），不是「共享 trainer 在跑」（那是进程事实，两者正交：
+  // 开了课但进程没跑是合法稳态）。旧服务端没有该字段 ⇒ 空表（**不**回退到「trainer 在跑就
+  // 当作这门课在训」：那个回退会给一门从未开课的课挂上 pill，而 pill 上的停课键会真去停一门
+  // 没开的课）。
   const trainingLoop = (stateView?.components ?? []).find((c) => c.key === 'trainingLoop')
-  const trainingCourses =
-    stateView?.trainingCourses && stateView.trainingCourses.length > 0
-      ? stateView.trainingCourses
-      : trainingLoop?.status === 'running'
-        ? [trainingLoop.course || stateView?.course || ''].filter(Boolean)
-        : []
+  const trainingCourses = stateView?.trainingCourses ?? []
+  // 共享 trainer 是否在跑：「已开课」与「进程在跑」是两件事，pill 的状态字要把两半都说清。
+  const trainerRunning = trainingLoop?.status === 'running'
+  // 课程生命周期（开课入口的判据，服务端 stamp）；旧视图无此字段 ⇒ 不渲染该按钮（不编状态）。
+  const lifecycle = stateView?.courseLifecycle ?? null
 
   const courses = stateView?.courses ?? []
   // 算力摘要（Topbar chip）：本机直跑槽位计入「在线」（它没有 ping 语义，有槽位即在用）。
@@ -397,6 +426,9 @@ export function App({ initial }: AppProps) {
             courses={courses}
             trainingCourses={trainingCourses}
             onCourseChange={selectCourse}
+            // 开课入口（课程级）：紧挨课程选择器（操作读序：选课 → 训练 → 看哪几门在训）。
+            onOpenCourse={() => setOpenCourseModal(true)}
+            courseEnabled={lifecycle?.enabled ?? null}
             onNavigate={navigate}
             readOnly={readOnly}
             gate={{
@@ -415,6 +447,19 @@ export function App({ initial }: AppProps) {
             phaseElapsedMs={phaseElapsed}
             trainingCount={trainingCourses.length}
             courseCount={courses.length}
+            // 在训课程 pill 行 = 「在训 n/N」裸计数的**明细版**（每门课一个 pill：it / 状态 /
+            // 停课）。零门在训时 pill 行自身不渲染，顶栏退回裸计数 chip。
+            pills={
+              <TrainingPills
+                courses={trainingCourses}
+                rows={stateView?.loopQueue?.rows ?? []}
+                trainerRunning={trainerRunning}
+                viewCourse={viewCourse}
+                onSelect={selectCourse}
+                onStop={(c) => void handleStopCourse(c)}
+                readOnly={readOnly}
+              />
+            }
             nodeSummary={nodeSummary}
             connError={connError}
             onRetry={() => void refreshState()}
@@ -580,6 +625,16 @@ export function App({ initial }: AppProps) {
           onClose={() => setTrainOpen(false)}
           onAction={doAction}
           onLaunch={(opts) => void handleLaunch(opts)}
+          readOnly={readOnly}
+        />
+      ) : null}
+      {stateView ? (
+        <OpenCourseModal
+          open={openCourseModal}
+          course={viewCourse}
+          modes={stateView.modes}
+          onClose={() => setOpenCourseModal(false)}
+          onConfirm={(opts) => void handleOpenCourse(opts)}
           readOnly={readOnly}
         />
       ) : null}

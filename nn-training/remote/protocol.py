@@ -565,6 +565,26 @@ def data_fp_entries(entries: DataFpEntries) -> str:
     return h.hexdigest()
 
 
+def d14_corpus_match(job_course_fp: str, job_corpus_fp: str, shard_manifest: dict) -> bool:
+    """D14 装载校验的比对规则（DECISIONS §2026-09-13-level-extraction）。
+
+    双侧都有 corpus_fp（语料身份 = env+reward 解析值语义哈希）⇒ 比 corpus_fp——
+    预算/路径/注释类课程 mid-run 编辑只动 course_fp（文件血缘），不得触发拒收。
+    任一侧缺 corpus_fp（legacy shard / 旧 job）⇒ 回退文件血缘 course_fp 逐字比对。
+
+    ★ 为什么它住 protocol 而不是 worker：这条规则有**两个**执行端——云 worker 装载时
+    逐 shard 判（拒收），hub 打包时也逐 shard 判（`hub_client.iter_shard_dirs` 只挑
+    匹配的进 payload）。两份实现漂开就是一个死循环：发布端放进一个异血缘 shard、云端
+    整份 job 拒收、训练轮等一个永不回传的结果（2026-09-20 事故：c6-chip it16 的 payload
+    里混进了 21 个旧血缘 shard，云 worker 报 `D14 course_fp 不匹配` 整份退回）。
+    同一函数 = 同一判据，打包集恒等于云端会接受的集合。
+    """
+    s_corpus = str(shard_manifest.get("corpus_fp", "") or "")
+    if job_corpus_fp and s_corpus:
+        return job_corpus_fp == s_corpus
+    return str(shard_manifest.get("course_fp", "")) == job_course_fp
+
+
 def data_fp(shard_dirs: Sequence[str | Path]) -> str:
     """D1 data_fp：sha256(按字典序排列的 shard 相对路径 + 各 manifest {wver,stage,seed})。
 
@@ -789,6 +809,19 @@ FAIL_BODY_MAX = 64 * 1024
 #: 活着」——只证可达的探针会让「token 配错」在第一次上传 2MB 体之后才暴露，而且多一个
 #: 对公网泄露「hub 在线」的端点。带 token 探 `/ping` 一次同时证两件事。
 OFFLINE_ARTIFACT_PATH = "/offline/artifact"
+
+#: **「已开课」标记**文件名（落在课程 traj 目录下：`<traj-root>/<课>/training-enabled.txt`）。
+#:
+#: 控制台「开课」写它、「停课」删它；训练侧（`rl/loop_plan.enabled_courses`）与 hub
+#: （`_course_dir_live`）的**发现判据**都要求它存在。
+#:
+#: 为什么需要一个显式标记，而不是「有账本 = 在训」（2026-09-20 用户报障）：共享 trainer 是
+#: **发现式**的（扫 `<traj-root>/*/training_log.jsonl`），而 tmp/ 下堆着几十门历史课的账本
+#: ⇒ 进程一启动就把**所有历史课**一起拉进训练（实测：起 trainer 后控制台列出 21 门「正在
+#: 训练」）。用户口径（原文）：「课程开训需要用户手动开启」⇒ 课程表 = 账本 ∧ **开课标记**。
+#: 标记与账本同住课程目录：一个判据、一处位置，且开/停课各自是一次文件操作（不涉及共享
+#: JSON 的读-改-写竞态）。
+COURSE_ENABLE_MARKER = "training-enabled.txt"
 OFFLINE_RESULT_PATH = "/offline/result"
 #: 单轮补传体上限（weights ~0.3MB + opt ~1MB，base64 后 ~1.8MB；8MB 已极宽裕）。
 OFFLINE_ARTIFACT_BODY_MAX = 8 * 1024 * 1024

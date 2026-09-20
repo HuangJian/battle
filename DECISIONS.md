@@ -4279,3 +4279,547 @@ CSS 里的空断言）· `web-wire-panel-wiring.test.ts`（抽屉接线 → 路�
 `oxfmt` clean · 三份 bundle 绿（app gzip 75,877 B · log 17,386 B · eval 22,377 B；预算 150 KB）。
 **未做**（P4 余下）：三档响应式实测、空态四态审计、`?` 帮助与快捷键、README 目录树段落。
 
+## §2026-09-20-console-process-course-decoupled（2026-09-20，用户指令：服务进程启动与课程解耦 + 开课/停课独立入口）
+
+**背景（一次实测故障里其实躺着两件事）**：用户点「启动训练」（课程 `x20-steady`）失败，控制台输出：
+
+```
+❌ 启动训练中断于 trainingLoop
+selfNode: self-node 已在运行 (port 8443)
+hubServer: hub-server 已在运行 (port 8787)；已回灌 0 门课的离线/在线意图
+失败 x20-steady: 需要合法 course（[]）与 mode（['online', 'offline']）
+trainingLoop: 共享 trainer 启动即退出 (PID 2496)
+```
+
+- **① trainer 死因 = spec 漏挂 venv site-packages**（与课程耦合无关）：`venv.python` 是 uv 跳板的**真身**
+  （基础解释器——这台机器 `pyvenv.cfg` 无 `executable`，`resolveVenvPython` 只能从 `home` 取），第三方包
+  只能靠 `PYTHONPATH` 挂 venv site-packages。R3-5 新增的 `trainerServeSpec` 只挂了 `NN_TRAINING`
+  ⇒ `ModuleNotFoundError: No module named 'pydantic'` ⇒ 「启动即退出」（`tmp/trainer-cluster.log` 实锤）。
+  hub/其余组件无恙：它们要么只用 stdlib，要么本就带这一项（`localWorker` / `trainingLoop` / BC spec 都是
+  `${sitePackages};${NN_TRAINING}`）。**定案**：`trainerServeSpec` 与它们同规；实测 `run_rl_cluster.py --help`
+  在该 PYTHONPATH 下 import 链全通。
+- **② 「需要合法 course（[]）」= 时序错位**：hub 的课程表是**扫盘发现**
+  （`<traj-root>/<课>/{remote-jobs,offline}` 存在且新鲜，`_course_dir_live`），而旧形状把「置 hub 模式」挂在
+  **启动 trainer 的第三步**上——那一刻课程目录还没建出来（`remote-jobs/` 要等训练侧第一次发布 job）
+  ⇒ hub 诚实地回 400。
+
+**用户指令（原文）**：「服务进程启动不应与课程绑定。进程启动时不要自动开启课程训练，需要增加独立的入口
+开启/停止课程训练！」
+
+**定案**：
+
+1. **启动 = 只起进程**：`startPreset(opts)` 不再要课程；`startSharedTrainer` 不再有任何按课程的副作用（旧的
+   「播权重 / 建账本 / 写课程旋钮 / 置 hub 模式」四件全迁走）——「起个进程」不必先选一门课，② 的时序
+   也从结构上消失。停止语义随之更干净：重启共享 trainer 的自动解停改成**全课程**（无课程 = 全课程）——
+   被停掉的正是整个调度器，只解「当前查看的那门」会让其它课替它背锅。
+2. **开课 / 停课 = 独立入口**（`actions/course-lifecycle.ts`；路由 `openCourse` / `stopCourse`）：
+   - **开课** = 课程级旋钮（`courses.<课>.{rollout_src,run_iters,remote_degrade_after}`）+ 发现事实
+     （账本 + **`remote-jobs/`** + RL 权重播种）+ 解暂停 + 置 hub 模式（**有界重试** 3×2s：hub 扫到这门课
+     要一两拍）+ 报执行面。**进程没跑也能开**（trainer 是发现式的，下一拍就入队）。
+   - **停课** = **非破坏**：暂停意图（`tmp/loop-control.json`，与调度器卡片的「暂停」同一份契约）
+     + 该课 hub 置 offline。队列/账本/课程表一个字不动，恢复走开课。
+3. **课程级选项整体迁到「开课」**：训练模式（在线/离线）· rollout 位置 · 降级本机——它们落
+   `courses.<课>.*`，而进程是共享的一台。启动弹窗只剩进程级（隧道/瘦身/行为开关/预演）；`preset` 路由对
+   `trainMode`/`rolloutSrc`/`remoteDegrade` **响亮 400**（静默丢掉 = 一条假承诺）。
+4. **入口位置（用户选）**：顶部课程选择旁的按钮（已停课显示「开课」，否则「停课」）。判据由 `/api/state`
+   的 `courseLifecycle` stamp：`open` = 账本存在（与训练侧 `discover_courses` / hub `--discover` 同一判据）、
+   `stopped` = 暂停意图。只读视图**不物理禁用**按钮（只读是动作边界，不是按钮状态——
+   `web-ssr-readonly.test.ts` 钉着这条）。
+
+   ★ **本点当天即被取代**（同日晚些的报障）：判据「账本存在」= 历史课全在训（进程一起来把 tmp/ 下
+   21 门历史课一起拉去跑），按钮形状也被用户在后面的指令里改成「课程 select + 「训练」按键 +
+   每门课一个 pill（含停课）」——见 §2026-09-20-course-enable-marker-and-training-pills，
+   那里有完整的判据、形状与否决理由。
+
+**备选与否决**：
+
+- 停课 = **下架账本**（删/改名 `training_log.jsonl`，让调度器与 hub 都看不见它）——否：真从训练里消失，
+  但 iter/队列/账本等阅读面**同时**消失，且重开 = 重建账本（历史归零）。
+- 停课 = **只停本机**（只写暂停意图、不动 hub 派发）——否：云机仍会领走队列里已入队的整段 job 跑完，
+  而操作员以为停了。
+- 保留「启动时顺带开课」并加一个「启动后立即开课」勾选框——否：默认路径仍把两件事绑在一起，② 照旧存在。
+- 用 `core/config.ts::validateCourseArg` 做开课的课程校验——否：它最后一手是 `process.exit(1)`，对长驻的
+  控制台进程就是自杀（一次误点 = 整个控制台消失）；改成可捕获的 `ActionError`，判据保持一致。
+- 为让 hub 立刻认课而在 hub 侧加显式注册 API——否：hub 与 trainer 共享同一份盘，「课程在这跑」本来就写在
+  盘上（R3-5 的发现模式原则）；多一条注册旁路 = 会失败、会乱序、会忘了调的第二个事实源。开课改为先建
+  `remote-jobs/`（训练侧第一次发布时本就会建的那个目录），空目录 = hub 认课的锚点。
+
+**违反后果**：把课程准备重新挂回启动路径 ⇒ 「起进程先选一门课」与 ② 的 400 一起复活；停课改成下架账本 ⇒
+操作员看不到自己刚停的那门课的任何状态（阅读面连带消失）。
+
+**落地**：`dashboard/src/stack/specs.ts`（`trainerServeSpec` PYTHONPATH 修复）·
+`server/actions/{start,preset,course-lifecycle,index}.ts` · `server/api/{route,state-view}.ts` ·
+`web/view/console-types.ts` · `web/app/{app.tsx,panels/{TrainLaunchModal,OpenCourseModal}.tsx}`。
+
+**回归**：`dashboard/tests/course-lifecycle.test.ts`（新，19 例：开课把发现事实写全（含 `remote-jobs/`）·
+课程级旋钮两向（在线撤离线标记 / 离线成对落键）· 置 hub 模式的「hub 还不认识这门课」回归与有界重试 ·
+停课非破坏与可逆 · hub 不可达时意图照样落盘）· `training-shared-trainer.test.ts`（② 段改钉「准备只住
+course-lifecycle + 启动路径零课程写盘」）· `training-console-busy.test.ts`（幂等早退不碰课程：traj 根
+坏掉也必须成功）· `web-train-launch-wiring` / `train-mode-offline` / `rollout-src-launch-option` /
+`slim-launch-option` / `push-config`（课程级选项不得回流启动链路）。
+
+**gate**：dashboard **737 pass / 0 fail**（717 → 737）+ `tsc --noEmit` 干净 + 三份 bundle 构建通过
+（app 292245B / gzip 68110B）；根 `bun run check` **1938 pass / 0 fail**。
+
+**未做（明确记录，不是漏）**：① 实弹验证「停课后云机也不再领活」需要真节点（本轮全在假 fetch 下证明逻辑）；
+② 课程生命周期只在顶部按钮一处可见——`CourseOverview` 行内那格仍是「切离线」，两者语义不同
+（离线 ≠ 停课：离线课照旧在本机跑/整段上云）。（② 已被次日口径部分解决：在训课程现在顶部有
+pill 行，见下一条。）
+
+
+## §2026-09-20-course-enable-marker-and-training-pills（2026-09-20，用户报障 + 用户指令：课程开训必须手动开；在训课程显示为 pill）
+
+**背景（上一条落盘当天就撞上的两个洞）**：
+
+```
+启动trainingloop 成功后，界面显示一堆课程正在训练！！！ 课程开训需要用户手动开启！！！
+正在训练：c6-chip、remote-smoke、x1-rebirth、…（21 门）
+```
+
+- **① 课程表判据错了**：共享 trainer 是**发现式**的（扫 `<traj-root>/*/training_log.jsonl`），tmp/ 下堆着
+  几十门历史课的账本 ⇒ 进程一起就把它们**全部**拉进训练；hub 同理（`_course_dir_live` 只看
+  `remote-jobs/` 存在且新鲜）⇒ 残留的 pending job 还会被继续派给真 GPU worker（白烧租约）。
+- **② 顶部没有「哪几门在训」的样子**：旧形状把其余在训课程堆成一串文字（`正在训练：a、b、c`）
+  ——读不出各自进度，也没有停课入口（停课挂在「当前查看的那门课」的按钮上）。
+
+**用户指令（原文）**：「课程开训需要用户手动开启」·「顶部课程 select 选择某课程，点击「训练」按键；
+正在训练的所有课程，都在顶部显示为一个 pill，概览显示 it 数和状态（参考节点 pill），有停止按键，
+点击 pill 后切换显示其趋势图和指标表，并高亮 pill；点击停止按键后，停止课程，从顶部区域移除」。
+
+**定案**：
+
+1. **开课 = 一个显式标记文件**：`<traj-root>/<课>/training-enabled.txt`（`remote/protocol.py::COURSE_ENABLE_MARKER`，
+   控制台「开课」写 /「停课」删）。训练侧（`rl/loop_plan.enabled_courses` → `loop_serve` 发现模式、
+   `run_rl_cluster.py --json` 只读课程表）与 hub（`_course_dir_live`）的判据统一改成
+   **账本 ∧ 开课标记**；`discover_courses`（盘上跑过哪些课）**保持不变** —— 课程下拉仍要能选历史课。
+   照落点选目录内的独立文件（而不是共享 JSON）：一个判据、一处位置，开/停各是一次文件操作
+   （无读-改-写竞态），控制台重启不丢「哪几门开着」，且它同时是**证据**（写入了开课时刻）。
+2. **控制台的服务端事实同源**：`/api/state` 的 `trainingCourses` 改成**已开课课程**（标记扫描），
+   与 `courseLifecycle.enabled` 同一表达式——它同时供课程 select 的 🔥 标记、在训 pill 行、
+   `CourseOverview` 的「在训」列与「触发门禁」开关的可见性（一处算，四处用）。旧口径
+   （「共享 trainer 在跑 ∧ 队列未收官」）回答的是另一个问题：进程没跑时已开课的课会从顶部消失。
+3. **顶部形状**：课程 select + **「训练」按键**（弹 `OpenCourseModal` 收课程级选项：训练模式 /
+   rollout 位置 / 降级本机；已在课程表时再点 = 按当前选项重写旋钮并重置 hub 模式）+ **在训 pill 行**
+   （顶栏正下方，与节点 pill 同一套视觉语言）：每门课一个 pill = 状态点 + 课名 + `it<N>`（账本指针，
+   不是已结算轮数）+ 一句状态（采集中 / 等回传 / 推进中 / 空闲 / 待进程 / 已暂停 / 已收官 / 已中止 /
+   视图不可用）+ ■ 停课。**点 pill 切查看目标**（Hero 趋势 + 抽屉指标表随查看课程走）并高亮；
+   ■ 停课走 `stopCourse` 且**显式带课程名**（不走「当前查看课程」兜底——点 A 课的 ■ 必须停 A），
+   服务端下一拍 stamp 里不再有它 ⇒ pill 自行消失（**不做本地乐观删除**：队列/账本一个字没动这件事
+   只能由服务端事实说话）。没有在训课程时整行不渲染（空行会被读成「有东西没加载出来」）。
+4. **停课 = 删除开课标记** + 暂停意图 + 该课 hub 置 offline（仍是**非破坏**：队列/账本/课程表不动，
+   恢复走开课）。这是上一条停课语义的**必需补充**：只写暂停意图而不删标记，发现式的训练进程
+   下一拍又会把这门课拉起来。
+
+**备选与否决**：
+
+- **判据用「控制台自己记一份在训名单」**（`console-state.json` 里加 `enabledCourses`）——否：训练侧与 hub
+  必须知道同一件事，而它们读不到控制台的状态文件 ⇒ 只能各记一份（正是「一启动 21 门课」的成因）；
+  盘上的标记是三方（trainer / hub / 控制台）都能读到的那一份。
+- **判据用「有没有账本 mtime 新鲜」**——否：历史课目录随时因为动过账本而变新鲜，正是最贵的那类误派
+  （真 GPU worker 白烧租约）；且 freshness 是滑动的，操作员意图（开/停）会被时间悄悄改写。
+- **停课 = 删账本 / 改课程文件**——否（同上一条：阅读面连带消失、历史归零）。
+- **在训 pill 行的数据源用 python 的 `run_rl_cluster.py --json` 一门定生死**——否：它要起子进程（10s TTL），
+  读失败时 pill 会整行消失——**停课入口不能因观测面坏了就消失**。故 pill 的全集来自服务端 stamp 的
+  标记扫描（纯 fs），it/状态来自队列行（读面不可用时它才降级为「视图不可用」，pill 仍在、仍可停）。
+- **pill 上只给状态点不给 it 数**——否：多课程并行时操作员第一眼要看的就是「各自跑到第几轮」
+  （用户原话「概览显示 it 数和状态（参考节点 pill）」）。
+- **点 pill 时也把 localStorage/服务端操作员课程一并改掉**——否：那会把「看哪门课」变成持久副作用
+  （切一下看一眼就把动作目标换掉了）；`selectCourse` 本来就是「本浏览器查看 + 本机同步操作员课程」
+  的既有语义，pill 复用它。
+
+**违反后果**：把开课标记退回「有账本」⇒ 一次「启动服务进程」就把 tmp/ 下全部历史课拉起来跑（并让 hub
+继续派残留 job）；停课不删标记 ⇒ 点到「停课」后课程自己又回来（比没有停课更坏：操作员会以为停不掉）；
+在训名单在 TS 里按进程存活重算 ⇒ 进程一停已开课的课程全从顶部消失（开课与进程是两件事）。
+
+5. **「空课程表」必须回契约形状**：默认表 = 已开课的课，而开课是显式动作 ⇒「一门课都没开」是启动后的
+   **第一种状态**。只读入口 `run_rl_cluster.py --json` 的空表分支原本回一行人话，而控制台是直接
+   `JSON.parse` 这段 stdout（`server/api/loop-queue.ts`）⇒ 在默认状态下常年报「输出不可解析」的红错。
+   定案：空表也回 `{"courses": [], "pools": {...}}`（形状在所有分支一致；池容量是进程事实，与有没有课无关）。
+
+**落地**：`nn-training/remote/protocol.py`（`COURSE_ENABLE_MARKER`）· `nn-training/rl/loop_plan.py`
+（`course_enabled` / `enabled_courses`）· `nn-training/rl/loop_serve.py`（发现模式两处扫描）·
+`nn-training/run_rl_cluster.py`（只读课程表）· `nn-training/remote/hub_server.py`（`_course_dir_live`）·
+`dashboard/src/server/actions/course-lifecycle.ts`（标记写/删）· `dashboard/src/server/api/state-view.ts`
+（`trainingCourses` = 已开课）· `dashboard/src/web/view/loop-queue.ts`（`coursePills` 纯函数）·
+`dashboard/src/web/app/panels/TrainingPills.tsx`（新）· `dashboard/src/web/app/app.tsx`（顶部形状）·
+`dashboard/src/web/theme.css`（`.tc-tpills` / `.tc-tpill`）。
+
+**回归**：`nn-training/tests/test_loop_plan_waiting.py`（+2 例：空课程表的 `--json` 形状 · 默认课程表 = 已开课）·
+`dashboard/tests/training-pills.test.ts`（新，14 例：pill 推导四态 + 确定性事实优先 +
+「待进程」/「视图不可用」不编造 · `trainingCourses` = 标记而非账本 · SSR 上屏/高亮/BC 徽标/停课键/
+空行不渲染/顶栏只有「训练」）· `course-lifecycle.test.ts`（+2 例：开课写标记、停课删标记、可逆）·
+`web-ssr-readonly.test.ts`（旧 `tc-training-tag` 用例改写为「select 标记 + pill 行」）·
+nn python：`test_multi_course_hub.py`（`_enable` 助手 + 新回归「没开过课的目录不进课程表」）·
+`test_serve_wiring.py` / `test_offline_task_pack.py` / `test_worker_offline_cap.py`（造课目录的助手补写标记
+——它们钉的是各自那件事，不是「没标记也能被发现」）。
+
+**gate**：dashboard **752 pass / 0 fail** + `tsc --noEmit` + oxlint 0 warning + 三份 bundle 构建通过
+（app 296114B / gzip 69219B）；根 `bun run check` 绿；nn python 全量 **0 failed**（`bash tools/githook/nn-py-safe.sh`）。
+
+
+## §2026-09-20-publish-lineage-filter（2026-09-20，用户报障：云机领到 ppo 任务后一直报错）
+
+**症状（用户贴的云机日志）**：worker 领到 job 后逐份失败，刷屏三类错误：
+
+```
+job 2e2dabb810bf9299 REJECTED: D14 course_fp 不匹配：job=abbf8045102c… shard=e6c69a46167c… — skip (not retried)
+job 991b9e70a3e1efed FAILED: RuntimeError: CUDA error: uncorrectable ECC error（硬件，非本次）
+job 8d2ff3ab54e2b72b: 代码已变更：本进程加载 f4e2e4041c95… != job 要求 6224d4b41404… ⇒ 退出码 86 重启
+```
+
+**取证（`tmp/<课>/remote-jobs/<job>/payload.tar.xz` 逐 shard 读 manifest）**：`c6-chip` it16 那份
+payload 里**混着两个血缘**——550 份里 21 份的 `course_fp` 是 `e6c69a46…`（课程文件编辑前的旧版本），
+其余是 `abbf80451…`（= 当时的 job/课程指纹）。云端 `worker.py` 对**每一份** shard 判 D14
+（`d14_corpus_match`），一份不合就整份 job 拒收 ⇒ hub 侧永远等不到结果、worker 反复领同一份死活。
+
+**根因 = 发布端漏了血缘过滤**：`hub_client.iter_shard_dirs` 只按 `it{it}` 目录枚举（同名去重），
+而**对账端**（`rl/resume._scan_shards` 的 `course_fp` 过滤）与**云端**（逐 shard 拒收）都在判血缘
+——同一个目录三种口径。`it{it}` 是**累积**目录：课程文件被编辑过（改语料身份语义）/ 换过 runId 时，
+里面会同时躺着新旧两代 shard，于是「打进 payload 的集合」⊃「云端会接受的集合」。
+
+**定案**：
+
+1. **判据只有一份**：`d14_corpus_match` 从 `remote/worker.py` 搬到 **`remote/protocol.py`**
+   （`worker.py` 只做名字转发，既有 import/调用面/测试一字不改）。发布端与云端**同函数** ⇒
+   「打包集 ≡ 云端接受集」成为结构事实，而不是两处约定的巧合。
+2. **发布端过滤**：`iter_shard_dirs` / `iter_bc_shard_dirs` 新增 `course_fp=` / `corpus_fp=`
+   （仅关键字参数，缺省空串 = 旧行为逐字节不变），逐 shard 用同一条判据挑；剔除的**响亮日志**
+   （`D14: 剔除 N 个异血缘 shard …` + 每份一行），manifest 不可读的一律不收（宁可少一份，
+   也不让云端整份退回）。PPO 与 BC 同规（BC 语料同样带 `course_fp`，同一条链同一处坑）。
+3. **落位侧重算同参**：`verify_and_land` / `verify_and_land_bc` 用 manifest 自带的
+   `course_fp`/`corpus_fp` 走**同一次过滤**再算 `data_fp`（发布集 == 重算集 == 云接受集；
+   三者只要有一处口径不同，data_fp 校验就会把好结果判成「云训了别的语料」）。
+4. **调用方顺序**：`loop_steps._remote_ppo` 里「算血缘（`course_fp`/`corpus_fp`）」**提到**
+   「扫 shard」之前——扫描要用它们过滤（原来顺序相反，正是漏过滤的温床）。
+
+**备选与否决**：
+
+- **云端放宽（把拒收降级为「跳过该 shard 继续训」）**——否：那等于让「跨课程语料混训」静默发生
+  （D14 熔断的全部意义就是不许），且每份 payload 里混进来源不明的语料，结果无法归因到任何课程。
+- **云端多轮重试同一份 job**——否：payload 是**不可变**的（内容哈希进了 `payload_sha256`），
+  重试只是把同一个必然失败再烧一遍租约；病根在发布端。
+- **发布端过滤 + 云端仍逐 shard 判**——采纳：云端那道是**协议层不可绕**的守卫（防篡改/防旧 hub），
+  发布端这道是**不让坏包产生**。两道都在，且共用同一个判据函数。
+- **让 `it{it}` 目录物理隔离两代课程（每代一个目录）**——否：`it` 目录名是 `data_fp`/resume/
+  账本的公共契约（改名 = 全线血缘破裂）；过滤是局部且可逆的修复。
+- **顺带清掉盘上那份已在队的坏 job**——否：不删任何历史产物（非破坏纪律）；它属于未开课课程，
+  新派发闸已不再把它发给任何 worker，重开该课时训练侧的下一次发布也会按 §381 作废更早迭代的 pending。
+
+**gate**：nn python 全量（ruff + mypy + **1834 passed**）绿；新增回归
+`test_iter_shard_dirs_drops_foreign_lineage` / `test_iter_bc_shard_dirs_drops_foreign_lineage` /
+`test_d14_predicate_is_single_implementation`（首个用例同时断言「不过滤时会打进 3 份」= 修复前形状）。
+
+## §2026-09-20-hub-dispatch-gate-and-stale-adoption（2026-09-20，同一故障的第二/第三层根因）
+
+**为什么还有两层**：D14 那条修的是「坏包被造出来」；用户贴的日志里还有两个独立症状——
+**worker 领到的是 11 门课的陈旧 job**（x20-floor 6.8h、x20-powered 15.2h、c6-chip 157.8h…），
+且**盘上今天新加的课程闸对它无效**。
+
+**取证**：
+
+- `netstat` + `tmp/training-start/registry.json`：监听 :8787 的 hub = **PID 20860，今早 08:04 起的进程**
+  （新闸是之后落的盘）。`tmp/*/training-enabled.txt` 全盘只有 `x20-steady` 一个（10:38 开课）。
+  ⇒ 在跑的 hub 还把 20 门历史课留在自己的课程表里，继续把它们残留的 pending job 派给真 GPU worker。
+- 真盘只读探针（新代码）：`discover()` 只登记 `x20-steady` 并派发它那份新 job，20 个历史课目录一个不碰。
+
+**定案**：
+
+1. **派发闸 `_HubQueue._serves_course`**（发现模式）：课程目录必须仍带 `training-enabled.txt`，
+   否则 `claim_next` **当拍**跳过（告警每课一次，队列/账本一个字不动 = 停课仍是非破坏的）。
+   发现时判过还要在派发时再判，因为课程表是**发现那一刻**建的，而 `remote-jobs/` 里的 pending job
+   不会自己消失——没有这道闸，任何在旧表/旧代码里登记过的课程都能把陈旧 job 继续喂给云机。
+2. **控制台接管旧码进程**（`server.ts::reconcileWatch` + `core/reload.ts::runningStaleCode` +
+   账本新字段 `RegistryEntry.startedAt`）：`watch()` 以**当下**指纹为基线，而 watch 表住内存——
+   **控制台一重启就丢**，重启后的对账把在跑进程重新基线化成「就绪」，「这个进程早于最后一次改码」
+   从此永久不可见。现在启动对账先判 `runningStaleCode(spec, startedAt)`（哨兵 mtime > 启动时刻
+   +2s 容差；无记录 = 旧条目 ⇒ 按旧码处理），是旧码就**先 restart 再 watch**；每个 spawn 点
+   （selfNode / hubServer / trainer / localWorker / 监督重启 / 冒烟）都写 `startedAt`。
+   **不含 cloudflared**：第三方二进制跑的不是我们的代码，而重启它的代价是**隧道 URL 变化**
+   （云机手上那个 URL 立刻作废、在跑 job 无法回传）——零收益高代价，单独豁免。
+
+**备选与否决**：
+
+- **只在控制台 UI 提示「hub 可能是旧码，请手动重启」**——否：这正是今天发生的形态（「hub-server
+  已在运行」= 幂等成功），而「旧码」是不可见状态；把不可见交给操作员记着 = 下次照旧。
+- **hub 侧自行热重载代码**——否：python 进程热换模块语义不清（已 import 的模块/闭包/线程），
+  而仓库既有的契约就是**控制台监督重启**（reload.ts），这里只是补上「重启控制台后仍成立」。
+- **判据用已存在但未接线的 `lastMonitorChange()`（全局触点）**——否：它是**全局**时刻（任何组件
+  spawn 都会刷新），跨组件互相掩盖；`startedAt` 是每进程一份的精确值，且它本身就是证据。
+- **把「无 startedAt」也算作未知而不重启**——否：那正好放过今天这件事（旧条目就是问题所在）；
+  代价是**一次**接管重启，之后账本自带启动时刻，稳态零误报。
+- **重启 cloudflared 也纳入旧码接管**——否（见上：URL 作废）。
+- **顺手停掉/清掉那 11 份陈旧 pending job**——否：非破坏纪律（停课/历史产物一个不删）；闸挡住
+  派发就够了，重启该课时 `cancel_stale_jobs`（§381）自会作废更早迭代的 pending。
+
+**gate**：dashboard **760 pass / 0 fail**（新增 `supervisor-stale-code.test.ts` 8 例：判据边界 +
+接线门禁——含「每个 spawn 点都写 startedAt」「cloudflared 必须豁免」「restart 早于 watch」）；
+`tsc --noEmit` + oxlint 0 warning；根 `bun run check` 绿；nn python 全量
+（ruff + mypy + 1834 passed，含新 `test_stopped_course_stops_being_dispatched`）绿。
+
+---
+
+## §2026-09-20-body-transfer-stall-guard（2026-09-20，用户报障：云机 claim 第二个 job 后几分钟无动静、无日志）
+
+**背景**：云机领到 `it2` 的 PPO job（`a4b2e1e2d438c28a`）后卡在 payload 下载——
+日志从 `claim ... downloading payload` 到 5 分钟后的 socket 超时**一行都没有**（用户原话：
+「几分钟一直没有动静，也没有 log 打出」）。取证：`cloudflared` 日志同期每 5 分钟一条
+`lookup region1.v2.argotunnel.com: i/o timeout`（DNS 劣化窗口，隧道只有 1 条 ha-connection），
+**小 POST（心跳/轮询）照常、大 body 卡死**；hub 侧 `/payload` 的访问行属于高频静默规则 ⇒
+两端日志同时沉默。这不是「网络抖动」一种病，是**两侧都没有停滞判据**：
+
+1. worker `download_payload` 只有一把 `timeout=300` 的**整读**：停滞时静默等满 5 分钟，
+   而 socket 超时抛出的 `TimeoutError()` **没有正文**（`_get_with_retry` 只把 `repr(e)` 写进
+   日志）⇒ 连「为什么失败」都写不出来。下载过程本身**零进度输出**（分不清「在下」与「死了」）。
+2. hub `wfile.write()` **没有发送超时**：对端半开（隧道/代理侧掉了、本机 TCP 还挂着）时
+   永久阻塞，那个 handler 线程永久卡在写里——客户端永远拿不到 payload，而 hub 日志一个字没有。
+
+**决定**：传输层加**有界 + 有名字 + 有进度**三件套（数字都在源码注释里，改它们要连本文一起改）：
+
+| 位置 | 判据 | 行为 |
+|---|---|---|
+| `remote/worker.py::_read_body` | 空闲 45s（`BODY_IDLE_TIMEOUT_SEC`）无新字节 | 抛**有正文**的 `TimeoutError`：`body 停滞：45s 内没有新字节（已收 N bytes / 共 M）` |
+| 同上 | 总预算 300s（`BODY_TOTAL_TIMEOUT_SEC`） | 治「永远在滴水」（每个读都有字节、但总也读不完） |
+| `download_payload/code/ts_code/blob` | 进度回调（≥5s 一行） | `job X: payload 下载中 3.20 MB / 4.85 MB (66%) 用时 12s（270 KB/s）` |
+| `remote/hub_server.py::_bytes` | 发送超时 60s（`SEND_TIMEOUT_SEC`）+ 256KB 分片 | 停滞即断并打印 `已发 N/M bytes`；≥256KB 的 body 完成时打一行（可对账速率） |
+
+**关键不变量**：缺省路径（不给 `idle_timeout`/`progress`）**逐字节不变**——`_request` 只在
+下载路径上改走分块读，`poll_job`/`post_result` 等小请求行为不动。
+
+**备选与否决**：
+
+- **只把 `timeout` 由 300 调小（如 60）**——否：仍然只会在**整读**上炸一次，中间零输出；
+  而且分不清「链路慢但活」与「链路死了」（前者本来该让它跑完）。
+- **只在 worker 侧重试/加长租约**——否：治不了「不知道发生了什么」；重试前的 5 分钟静默仍在。
+- **把停滞做成静默重试（不打日志）**——否：这次事故的**全部**损失就是「静默」；
+  响亮一行（带字节数与原因）比安静重试值钱得多。
+- **hub 侧改成流式读盘（避免 4.8MB 进内存）**——本次不做：现有行为是 `read_bytes()`，
+  改动面（`record_payload_sent` 的字节口径、Content-Length 来源）大于收益；
+  分片**写**已经解掉「永久阻塞」这个真问题。
+- **顺手把 `/payload` 从高频静默规则里拿掉**——否：多 worker 下会刷爆 hub 日志；
+  改成「大 body 完成/停滞各一行」（有信息量、无噪声）。
+
+**同窗口的 hub 停服 = 人工操作（用户 2026-09-20 确认是手动关的）**：这也解释了取证里那个
+「疑点」——`hub-server.out` 停在 11:34:19、账本条目 `hubServers['']` 于 11:34:36 被清空、
+无"意外退出"标记：`stopComponent` 杀进程后本来就是 `clearAnyComponent`（条目没了 ⇒
+exit-watchdog 没有可标记的对象），控制台由此显示 `stopped`。**不是崩溃**，本次改动与它无关。
+
+**但它留下一条真教训**：组件级决策（谁在何时停/重启了什么）目前**只打控制台 stdout**、不落
+文件——所以从盘上的证据（组件日志 + 账本）**无法**区分「人工停的」与「自己死的」，
+排查会往「谁杀的」方向空转（本次就绕了这一圈）。下次同类「集群突然静默」的报障，**先问
+一句是不是手动停的**，再翻日志；要让机器自己回答，得把组件级决策也落盘。
+
+**gate**：nn python 全量 **1842 passed**（ruff + mypy 绿，含新 `tests/test_body_transfer_guard.py`
+8 例：停滞有名/进度可查/预算生效/停滞即响亮重试，以及真 TCP socket 的
+「读端不读 ⇒ hub ≤发送超时断开并打印已发字节数」）。
+
+---
+
+## §2026-09-20-console-decision-log（2026-09-20，用户指令：控制台的启/停/重启/判死要写日志文件）
+
+**背景**：上一节那条「同窗口 hub 停服」的复盘最后一公里——hub 被**人工**停掉后，盘上的证据
+（组件日志 + 账本 + console-state）只能显示「日志断在半分钟前」「账本条目没了」「没有意外退出
+标记」，**分不出**「人工停的」与「自己死的」，只能反过来去问操作员。根因不是「没写日志」：
+`core/log.ts` 早就是 stdout + 文件双写，但
+
+1. **控制台从没 arm 它**——只有 `launch/cli.ts`（一次性 python 启动）调 `initLog(tag)`；
+   `bun run dashboard` 走的是 `server/server.ts::main`，`logFile` 恒为空串；
+2. 监督器 / 启动对账 / 请求异常的判决用**裸 `console.*`**，连双写都绕过；
+3. **动作结果不落任何盘**——「谁在何时点了停/启/开课」只存在于 UI 回执与终端滚屏。
+
+**决定**：
+
+* `core/log.ts`：新增 `initConsoleLog()`——稳定文件名 `tmp/training-start/console.log`，
+  每次启动追加一行会话头 `=== console session <ISO> pid=N ===`，启动时超过 8MB 轮转一代
+  `.1`，任何 IO 失败 best-effort 不抛（**日志写不进绝不能搞停控制台**）；新增 `error()`
+  （stderr + 文件，与 log/warn/fail/info/ok 同规）。路径走 `paths.consoleLogPath()`
+  （惰性；`BCITY_CONSOLE_LOG` 可重定向，单测不污染仓根 tmp/）。
+* `server/server.ts::main`：在**任何决策之前** arm，并把路径打进启动横幅（不然没人知道去哪看）。
+* `server/api/route.ts`：唯一动作出口 `routeAction` 拆成 `dispatchAction` + 统一落盘——
+  **每个动作结果一行**（`[action] stop hubServer → ok (HTTP 200): …`，失败走 `warn` 带 ⚠️），
+  纯读接口 `getGateHaltMode` 排除（高频回读不是决策）。
+* 决策站点（`server.ts` / `exit-watchdog.ts` / `stack/hub.ts` / `route.ts` / `actions/stop.ts`）
+  不再有裸 `console.*`（接线门禁钉着）。
+
+**备选与否决**：
+
+* **每次会话一个新文件**（沿用 `initLog(tag)`）——否：操作员要的是「一个固定路径能翻到全部
+  决策」；会话边界用会话头表达，不必用文件名，顺带避免了百来个 `console-<ts>.log` 堆积。
+* **让操作员自己重定向 stdout（`bun run dashboard > x.log`）**——否：默认没人重定向
+  （2026-09-20 的现场就是这样），而且终端滚屏一关就没了。
+* **只记组件动作（start/stop/restart），不记其它 POST**——否：同一出口记全部才不漏
+  （「谁把课程切走了」「谁改了节点并发」同属决策），成本是一行/点击；只把纯读接口排除。
+* **引第三方日志库（分级/滚动）**——否（MANIFEST §14 零依赖精神）：`appendFileSync` + 一次
+  启动轮转足够，且行为可读。
+* **把日志按组件分文件**——否：决策的因果链跨越组件（「停 hub」→「trainer 等不到结果」），
+  一份按时间排的流水才能看出因果。
+
+**gate**：dashboard **785 pass / 0 fail**（新增 `console-decision-log.test.ts` 24 例：会话头 /
+追加不截断 / 阈值轮转 / 写不进不炸 / 路径惰性；接线门禁：决策站点无裸 `console.*`、`route.ts`
+唯一出口且结果落盘、`initConsoleLog` 早于 `startSupervisor` 调用、真动作的结果落盘）·
+`tsc --noEmit` · oxlint 0 warning · 真盘探针确认默认路径可写、会话头与两级行如期落盘。
+
+## §2026-09-20-open-course-lock-identity-and-write-order（2026-09-20，用户报障：开课被「自己人」的锁拒掉）
+
+**背景**：用户点开课，回执是
+
+```
+❌ x20-steady 未开课：run_rl 锁被 PID 18364 持有
+训练模式 在线：已撤掉离线标记（run/run_iters）
+rollout 位置覆盖：courses.x20-steady.rollout_src=local
+远端连败降级本机：关（连败即 ABORT）
+已写开课标记 training-enabled.txt（训练侧/hub 的「在训」判据）
+先停掉在跑的那一份（或删除锁文件）再开课——它与共享 trainer 抢同一批 traj。✕
+```
+
+两处独立缺陷叠在一起：
+
+1. **判据错**：PID 18364 = 控制台自己起的**共享 trainer**（`run_rl_cluster.py --serve`）。
+   它服务多课，每开一门课就取该课自己的**按课锁**（单进程多课模型的正常持有）——而检查的
+   判据是「该课锁活着就拒」⇒ **每次开课都被自己人拒**，只要 trainer 在跑就永远开不了课。
+   真冲突的形状是「另一份**按课** runner（手工 `run_rl.py --course <本课>`）活着」——它与
+   共享 trainer 抢同一批 traj（两套调度器各跑一半课程、互相覆盖权重）。
+2. **写序错**：检查排在写面**之后** ⇒ 被拒的那一次照样写了课程旋钮 + **开课标记**（标记就是
+   训练侧/hub 的「在训」闸）+ 撤了离线标记，而暂停意图还留着。于是三种口径并存：控制台说
+   「未开课」、hub/云机说「这课在训」、调度器按暂停意图一拍不推。
+
+**决定**：
+
+* **开课前置检查带身份看**（`course-lifecycle.ts::courseRunnerFacts`）：该课按课锁的存活持有人
+  == **共享 trainer 进程级锁**（`nn-training/.run_cluster.lock`）的持有人 ⇒ 同一个进程 ⇒
+  正常持有，**放行**并在回执里说明白（免得操作员在日志里找一个不存在的双开）；持有人活着但
+  不是它 ⇒ 真冲突，拒开课。陈旧锁（持有人已死）两侧都归 null ⇒ 不拦。BC 同规（锁名换 `run_bc`，
+  比较的仍是那把进程级锁）。
+* **写序 = 「会拒的先拒、会抛的最前、开课标记最后」**：① 全部会拒绝的判据零副作用先行
+  （锁身份 + **暂停意图文件健康**——`setCoursePaused` 对坏文件是保守拒绝、不覆盖）；② 写面
+  按 `saveConfig`（唯一会抛的一步，容量/槽位守卫）→ 解暂停意图 → `prepareCourseForOpen`
+  （旋钮/账本/`remote-jobs/`/**开课标记**）排序 ⇒ 任何失败都不留「已开课」的盘上假象。
+* 停课**不删**按课锁：锁归进程所有（停机时释放），控制台删它只会让「双开」的判据消失。
+
+**备选与否决**：
+
+* **去掉开课时的锁检查，直接开**——否：手工跑着 `run_rl.py --course <本课>` 时开课就是两套
+  调度器抢同一批 traj（静默互相覆盖权重），这一类必须拦。
+* **按「锁文件存在」判、不看持有人身份**——否：陈旧锁（崩溃残留）会把课永久锁死，而陈旧态
+  在盘上极常见（`nn-training/` 里就躺着 20+ 把 09-14/09-20 的旧锁）。
+* **把「共享 trainer 在服务本课」当成「已经开着」而直接返回成功**——否：回执会变成一个假
+  成功（暂停意图、hub 模式这些开课动作一步都没做）；这些动作是**幂等且有意义的**，照做并按
+  事实报告才对。
+* **开课失败时回滚已写的盘**（补偿事务）——否：写序已经让「被拒 = 零副作用」，补偿逻辑本身
+  是第二处可能出错的地方；真实失败的窗口只落在「旋钮已写、标记未写」（= 无人调度的旋钮，
+  重按一次开课即自愈）。
+
+**gate**：dashboard **792 pass / 0 fail**（`course-lifecycle.test.ts` 新增 9 例：共享 trainer
+持有按课锁 ⇒ 开课成功且回执说明「正常持有」／另一份按课 runner ⇒ 拒开且**零副作用**（无标记、
+无旋钮、无 `remote-jobs/`、没碰 hub）／陈旧锁不拦／三态判据 + BC 锁名 ／暂停意图文件坏了 ⇒
+拒开且不覆盖／`saveConfig` 抛 ⇒ 连暂停意图都不解／成功时回执行序与盘上一致）·
+`tsc --noEmit` · oxlint 0 warning · 三份 bundle 构建通过 · 根 `bun run check` 绿。
+**真盘验证**（只读探针，`nn-training/` 真锁）：`cluster()=18364`、`run_rl(x20-steady)=18364`、
+`facts={holder:18364,cluster:18364,conflict:null}` ⇒ 那次被拒的开课现在会放行。
+---
+
+## §2026-09-20-wire-slow-reroll（2026-09-20，用户报障：云机传输长时间卡在 6–9 KB/s；评审 plan/minimize-payload.plan.md 时的实测）
+
+**背景**：上一节（body 停滞判据）让「卡住」变得可见之后，现场读数暴露出**真正的病**：
+
+| 时刻 | 端点 | 字节 | 耗时 | 速率 |
+|------|------|------|------|------|
+| 10:41:35→10:43:04 | payload | 2,012,020 | 88.6 s | 22.7 KB/s |
+| 11:25:01→11:25:06 | payload | 4,848,536 | 4.9 s | 990 KB/s |
+| 12:49:28→12:49:32 | payload | 3,454,884 | 3.9 s | 885 KB/s |
+| 12:49:58→12:51:30 | **code** | 1,433,893 | 106 s | **13.5 KB/s** |
+| 12:51:30→12:51:42 | **blob（opt_init）** | —（无进度行 ⇒ <5 s） | — | ≥120 KB/s |
+| 12:59:29→13:04:51 | payload | 3,486,200 | 321.8 s | 首连接 **6–9 KB/s** 烧完 300 s 预算；**重试换连接后 354 KB/s** |
+
+12:49 那两行是**同机、同 hub、相邻 3 秒**的请求；12:59 那次「重试」本质就是一次**意外重抽**，
+只是由总预算在 300 s 后触发（321.8 s 里约 280 s 白等）。`urllib` 每个请求新建连接
+（`net_http.urlopen` → `OpenerDirector.open`，无 keep-alive 池）⇒ 速率由**这条连接**的
+路由质量决定，双峰 44×（13 KB/s ↔ 990 KB/s）。
+
+**决定**：把「换一条连接」做成**一等机制**（而不是继续优化平均字节数）——
+**先重抽，再瘦身**（`nn-training/remote/worker.py`；阈值只此一处实现）：
+
+| 判据 | 值 | 理由 |
+|---|---|---|
+| 坏签阈值 | `max(WIRE_MIN_RATE=80KB/s, 本会话最好速率/4)`（`_reroll_decision` 纯函数） | 相对判据：云机、本机、不同出口各自定标；只在「明显偏离」时动手 |
+| 触发条件 | 实测速率 < 阈值 **且** 按此速率**预计剩余 > 20 s** | 快跑完了不值得折腾 |
+| 判据时机 | **只在首块判一次**（`probed` 一次性） | 每次重抽浪费 ≤ 一块（256 KB）⇒ **不可能退化成「再整份重传一遍」** |
+| 重抽次数 | ≤ `WIRE_REROLL_MAX=3`，**不退避**（重抽的价值就在快） | |
+| 最后一次尝试 | **永不可重抽** | 6 KB/s 的坏签真实存在；重抽是赌，不能把赌注全压在赌上 ⇒ 慢链路不会变成「永远下不完」 |
+| 适用范围 | **只给幂等 GET**（payload/code/ts_code/blob）；POST result 永不重抽 | 产物上行不可重放，只走既有退避重试 |
+| 传输账 | 每 job 一行 `wire payload=… code=cache-hit … reroll=1(wasted 0.25MB) 合计=…`（`_wire_flush`） | 逐条进度行看不出全局；**零字节命中也要进账**（否则读数失真）；push 模式在 `worker_server` 的 finally flush；未 flush 的 job 封顶 4 个 |
+
+**备选与否决**：
+
+- **先做瘦身（`omit`/`Have` 协商，plan §4.1/M3）**——本次不做：实测慢腿是**连接**，
+  瘦身把 1.37 MB 变 0.5 MB 在 13 KB/s 下仍是 37 s，而重抽把它变成 ~1 s（重抽成本 ≈ 建连）。
+  协商机制仍留在 plan 里（M2/M3），但优先级降到「重抽之后」。
+- **把「出口限速」当环境事实（plan §1.4 原话）**——否：同机 3 秒后的 blob GET 有 ≥120 KB/s，
+  限速解释不了 13.5 KB/s；那是单连接抽签。
+- **发现问题就整份重下（无限重抽）**——否：坏签下会永远下不完；上限 3 次 + 末次禁止重抽。
+- **重抽也走指数退避**——否：重抽的价值就是**快**；退避只用于「链路真的坏了」的瞬态失败。
+- **把「同 sha 传两遍」当噪声**（本次同时查明的 code.zip 重复下载）——不当噪声：
+  引导 `notebook_boot` 已解到 `/tmp/worker-code`，而 worker 按 `work_dir/code_cache/<sha>` 判命中
+  （缺省 `/tmp/remote-worker`）⇒ 冷缓存重下**同一份 1,433,893 字节**。交接方案见
+  `plan/minimize-payload.plan.md` M0（零协议改动，本次**未实现**，只记在 plan 里）。
+
+**顺带修掉的 e2e flake（残留根）**：§97 的 `weights_push_cache_reset()` 只治「同进程顺序跑」，
+治不了**在途线程**——前一个用例的收尾 push 可能在下一个用例 reset **之后**才记账，而全仓库
+哑权重内容都是 `{"stub": true}` ⇒ `wver`（文件指纹）相同 ⇒ 被判 `kept / skip POST` ⇒
+`test_it_stream_smoke` 的 I3 断言假红（xdist 下随机）。修法：哑权重内容带**每用例唯一**标记
+（`{"stub": true, "case": <tmp 名>}`）——只有**键不同**才与线程时序无关；reset 保留作双保险。**gate**：nn python 全量 **1859 passed**（ruff + mypy 绿；新增 `tests/test_wire_reroll.py` 17 例：判据/相对阈值/上限/末次不重抽/浪费有界/账行形状/产物不重抽）。
+签入前与 §108（continuous 报告真源）合并复跑：**1863 passed in 34.65s**（ruff/mypy 绿）。
+
+---
+
+### §2026-09-20-merge-origin-goal-nn — 合并 `origin/goal-nn`：在训 pill 行 × 控制台重设计（IA 相撞的裁决）
+
+**背景**：本地 6 个重设计提交（P0…P4a，`2450301`…`5898936`）与 `origin/goal-nn` 的 7 个提交在
+`f883afb` 分叉。远端那条线**也动了 dashboard**——「课程开训改为显式开课」（进程与课程解耦）、
+「在训课程 pill 并入顶栏行」——但它们做在**被 P0 重写掉的老 `app.tsx`** 上（抽屉 + 顶栏居中课程
+select）。因此这不是文本冲突，是**两个版本的 IA 相撞**：11 个冲突块 / 5 个文件里，有 4 块是布局与
+归属之争，不是标点之争。
+
+**总则（先定后裁）**：**重设计的 IA 胜**（它是已批准的规格 `docs/dashboard-redesign.md`）；
+远端的**功能与语义原样保留、重新安放到新 IA 里**。不推翻重设计去迁就旧布局，也不因布局不同
+丢掉远端功能。理由：规格是 P0 就定下的、已落地 8 个阶段的骨架；远端那 7 个提交是**功能**提交，
+它们的价值在行为（开课/停课、pill 的 it 与状态），不在那个具体容器。
+
+**逐项裁决**：
+
+| 面 | 裁决 | 为什么 |
+|---|---|---|
+| `app.tsx` | 取我方（新外壳）为底，移植远端 handler/state（`openCourseModal`、`handleOpenCourse`/`handleStopCourse`、`courseLifecycle`、`trainerRunning`），`handleLaunch` 瘦身（课程级旋钮不再随启动走） | 新外壳是 8 个阶段的骨架，不可回退；远的 handler 是纯行为，可平移 |
+| 在训 pill 行 | 进**顶栏**：有在训课时它替代「在训 n/N」裸计数 chip | 「同一事实只上屏一次」——pill 是那个计数的明细版（本仓 P3d 下线 `LogNavCard` 同一判据） |
+| 开课键（「训练」） | 进**侧栏**，紧贴课程选择器 | 它作用的对象就是选中的那门课（课程级动作跟主语走）；两侧各自保持「一屏一问」 |
+| 停课 | 只在 pill 上 | 与远端一致；一个键同时做「开这门/停这门」在两门课并存时语义不明 |
+| 「还有在训：a、b」串行标签 | **下线**，`.tc-training-tag` 样式随之删 | 被 pill 行取代（远端已删，取远端；我方的重命名随之作废） |
+| select 的 `（正在训练）` | 改 `（已开课）` | `trainingCourses` 的语义 2026-09-20 已改为**开课标记**（与进程是否在跑正交） |
+| `trainingCourses` 取值 | 取远端 `stateView.trainingCourses ?? []`，**删我方「trainer 在跑就当作这门课在训」的回退** | 该回退会给从未开课的课挂上 pill，而 pill 的停课键会真去停它 |
+| `TrainLaunchModal` | 取远端拆分（训练模式/rollout 移入开课弹窗），叠我方 P4a 的内联样式纪律 | 两件都对：拆分是功能，`tc-mt-0` 是纪律 |
+| `theme.css` 那块 | 取远端删除（串行标签样式） | 见上 |
+| `server.ts` | 两边 import 取**并集** | 各自新增（我方 `pageForPath` 路由 / 远端 `ProcSpec`+`RegistryEntry`） |
+| 并入库的远端样式 | 旧字号 token 迁到我方阶梯（`--fs-2`→`--fs-sm`、`11px`/`10px`→`--fs-xs`）；`OpenCourseModal` 6 处内联样式改走已有类（`tc-banner--flush`/`tc-mt-0`/`tc-launch__lbl`/`tc-hint`） | 并进来的是 P4a **之前**的字号口径与内联习惯；不迁就会让 `var(--fs-2)` 变成**未定义**（静默丢字号），而纪律闸允许 `--fs-` 前缀，不一定报错 |
+
+**★ 顺手抓到一条假绿（远端测试）**：`training-pills.test.ts` 的「pill 与课程 select 在同一行」
+用 `indexOf('tc-topbar__row')` / `tc-topbar__course` 定位——这两个类名合并后**只存在于内联进首帧的
+`theme.css` 里**（我们的外壳叫 `tc-side`/`tc-top`），于是它靠**样式表**满足：DOM 完全错位也照样绿。
+已改为先切掉 `<head>`，再断言「`tc-side` 内 课程选择器 → 开课键」「`tc-top` 内 pill 行」
+（沿用 P3b 起的 `#root` 切片纪律；C15/C16/C18 同款，已记进审计）。
+
+**★ 顺手抓到一条 flake（远端测试）**：`training-pills.test.ts` 的 `courseLifecycle?.enabled`
+用的是**不传参**的 `buildStateView()`——`course` 由 `effectiveCourse(state, courses)` **推**出来
+（默认 = 最近活跃课），于是结论挂在真实工作目录的残影上；`--parallel` 下同进程其它文件会写真实
+`tmp/` 与 `nn-training/*.lock`。实测：**修前 4 跑 2 红**（另带 `server-api-overview` 一条同源假红），
+**修后 10 跑 10 绿**（964 用例 / 98 文件）。修法是把课程**钉死**（`buildStateView('c6-chip')`）+ 写明
+理由，而不是放宽断言。
+
+**残留风险（已知，本次未处理）**：**12 个测试文件**各自改 `process.env.BCITY_REGISTRY_FILE`，
+夹具另改 `BCITY_RL_CONFIG`/`BCITY_CONSOLE_STATE`，而被测模块**调用时才读**这些变量——
+`--parallel` 隐含的 `--isolate` 只隔离 global，**不隔离 `process.env`**，同进程其它文件仍会互相盖掉。
+旁证：**去掉 `--parallel` 跑同一套会红 30+ 条**（per-file 隔离是这套夹具的前提）。系统性做法是给这些
+路径换成显式传参的注入缝（本仓 `releaseTrainerLock` 有先例），**留作后续任务**——不在合并里做这种
+跨 12 文件的基建改造。
+
+**门禁（合并后实测）**：dashboard `964 pass / 0 fail`（98 文件，10 连跑全绿）· 根 `bun run check`
+`1934 pass / 4 skip / 0 fail` · nn python `1860 passed / 3 skipped` · 三份 bundle 绿
+（app gzip **78,006 B** / 日志 17,401 B / eval 22,394 B，预算 150 KB）· oxlint 0/0 · oxfmt clean。

@@ -69,6 +69,43 @@ def adopt_volume_report(wave_combined: dict[str, Any] | None) -> dict[str, Any]:
     return empty_collect_report()
 
 
+#: 本进程 wave 时间锚点（磁盘单局 manifest 通常没有；有则覆盖进合并结果）。
+_VOLUME_TIMING_KEYS = (
+    "weights_dist_start_ts",
+    "collect_end_ts",
+    "pure_collect_sec",
+    "rollout_collect_aggregated",
+    "rollout_collect_waves",
+    "weights_dist_start_at",
+    "weights_dist_done_at",
+)
+
+
+def merge_volume_report(
+    wave_combined: dict[str, Any] | None,
+    disk_manifests: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """连续配额收官报告 = **本轮盘上 shard**，wave 只补时间锚点。
+
+    x20-steady it75 停机后重启 it76：quota 停机前已采满 ⇒ 新进程 batches=0，
+    `combine_reports([])` 的除零保护把 winRate 填 0.0——与「打了 N 局全输」
+    在账本上不可区分（§107 监控盲区）。配额账本早已以盘上 manifest 为真
+    （`settled_stage_totals`），报告必须同源。
+
+    备选与否决：只在 wave 为空时回填 —— 否，重启后本进程可能只补了缺口批，
+    wave 有 games 但小于盘上全量，仍会低估 winRate/局数。
+    """
+    disk = combine_reports(disk_manifests) if disk_manifests else None
+    if disk is None or int(disk.get("games") or 0) <= 0:
+        return adopt_volume_report(wave_combined)
+    wave = wave_combined or {}
+    merged = dict(disk)
+    for k in _VOLUME_TIMING_KEYS:
+        if wave.get(k) is not None:
+            merged[k] = wave[k]
+    return adopt_volume_report(merged)
+
+
 def combine_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
     """跨 worker 精确重聚合（scoreList/dimLists 原始值列表）。
 

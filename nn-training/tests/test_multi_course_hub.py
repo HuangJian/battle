@@ -37,6 +37,7 @@ from remote.hub_server import _HubQueue, _JobStore, as_hub, make_server
 from remote.protocol import (
     AUTH_HEADER,
     CLAIM_TTL_SEC,
+    COURSE_ENABLE_MARKER,
     COURSE_MODE_OFFLINE,
     COURSE_MODE_ONLINE,
     HUB_SCOPE_HEADER,
@@ -718,12 +719,25 @@ def _discover_hub(tmp_path: Path, clock: _Clock | None = None) -> _HubQueue:
     return _HubQueue({}, now_fn=clock, discover_root=tmp_path)
 
 
+def _enable(root: Path, course: str) -> None:
+    """写**开课标记**（`<traj>/<课>/training-enabled.txt`）= 代操作员按一下控制台的「开课」。
+
+    生产里这个文件由控制台写（`actions/course-lifecycle.ts`）、由「停课」删；hub 与训练侧的
+    课程表判据都是 **账本 ∧ 开课标记**（`_course_dir_live` / `loop_plan.enabled_courses`）。
+    测试造课目录时不写它 ⇒ 那门课**不算在训**（2026-09-20：这正是「一启动就把 tmp/ 下
+    几十门历史课拉起来跑」的那条闸）。
+    """
+    (root / course).mkdir(parents=True, exist_ok=True)
+    (root / course / COURSE_ENABLE_MARKER).write_text("", encoding="utf-8")
+
+
 def _mk_course_dir(tmp_path: Path, name: str, *, age: float = 0.0) -> Path:
-    """造一个课程目录（`remote-jobs/` + 本课 jsonl）；`age` 秒把两者 mtime 拨到过去。"""
+    """造一个课程目录（`remote-jobs/` + 本课 jsonl + 开课标记）；`age` 秒把两者 mtime 拨到过去。"""
     d = tmp_path / name / "remote-jobs"
     d.mkdir(parents=True, exist_ok=True)
     log = tmp_path / name / "training_log.jsonl"
     log.write_text("", encoding="utf-8")
+    _enable(tmp_path, name)
     if age:
         past = time.time() - age
         os.utime(d, (past, past))
@@ -732,7 +746,8 @@ def _mk_course_dir(tmp_path: Path, name: str, *, age: float = 0.0) -> Path:
 
 
 def _publish_standalone(root: Path, course: str, jid: str, *, it: int = 1) -> None:
-    """在**hub 还不知道**这门课时就往盘上发一份 job（真实训练侧的写法）。"""
+    """在**hub 还不知道**这门课时就往盘上发一份 job（真实训练侧的写法，课已开）。"""
+    _enable(root, course)
     st = _JobStore(root / course / "remote-jobs", root / course / "training_log.jsonl")
     st.publish(jid, _manifest(jid, it=it), b"PK\x03\x04fake")
 
@@ -753,10 +768,32 @@ def test_discover_registers_published_course(tmp_path: Path) -> None:
     assert hub.mode_of("c1") == COURSE_MODE_OFFLINE
 
 
+def test_discover_skips_a_course_that_was_never_opened(tmp_path: Path) -> None:
+    """**没开过课的目录不进课程表**（2026-09-20 用户报障的回归）。
+
+    tmp/ 下堆着几十门历史课，每门都有 `remote-jobs/` 残影（「停课」是非破坏的：队列与账本
+    一个字不动）；只看「目录新鲜」的话，hub 会把它们全部登记进课程表，并把残留的 pending
+    job 继续派给真 GPU worker（白烧租约）——实测症状是「起了 trainer，控制台列出一堆课程
+    正在训练」。开课标记就是那道显式闸：删它 = 停课，写它 = 开课。
+    """
+    clock = _Clock()  # 扫描有最小间隔闸（claim_next 是派发热路径）——推进时钟才真重扫
+    hub = _discover_hub(tmp_path, clock)
+    _mk_course_dir(tmp_path, "never-opened")
+    # 停课 = 删开课标记（队列/账本原样保留，正是这里被误登记的盘上形状）
+    (tmp_path / "never-opened" / COURSE_ENABLE_MARKER).unlink()
+    assert hub.discover() == []
+    assert hub.courses() == []
+    # 再开课（写回标记）⇒ 下一次扫描就认它，不需要重启 hub
+    _enable(tmp_path, "never-opened")
+    clock.tick(hub.DISCOVER_SCAN_MIN_SEC + 0.5)
+    assert hub.discover() == ["never-opened"]
+
+
 def test_discover_skips_stale_and_non_course_dirs(tmp_path: Path) -> None:
     """陈旧实验目录（同样的磁盘形状、同样残留 pending job）与无关目录都不登记。
 
     误登记的代价是**真金白银**：已死课程的 pending job 会被继续派给真 GPU worker。
+    （`dead-old` 有开课标记但目录陈旧——两道闸各自独立，这条钉的是新鲜度那道。）
     """
     hub = _discover_hub(tmp_path)
     _mk_course_dir(tmp_path, "dead-old", age=hub.DISCOVER_FRESH_SEC * 3)
@@ -777,6 +814,34 @@ def test_discover_keeps_registered_course_after_it_goes_stale(tmp_path: Path) ->
     os.utime(tmp_path / "c1" / "training_log.jsonl", (past, past))
     assert hub.discover() == []
     assert hub.courses() == ["c1"], "已登记的课程不因目录变旧被摘掉"
+
+
+def test_stopped_course_stops_being_dispatched(tmp_path: Path) -> None:
+    """停课（删开课标记）⇒ **立刻**停止派发它的 pending job；重新开课即恢复。
+
+    2026-09-20 事故：课程表在**发现那一刻**建好就不再变，而 `remote-jobs/` 里的 pending
+    job 躺在盘上不会消失——在旧表/旧代码里登记过的课程会把陈旧 job 继续派给真 GPU
+    worker（云端逐份失败：D14 血缘不匹配 / 旧 code.zip 触发自重启），白烧租约，而
+    训练侧什么都看不到（那门课早就不跑了）。用户口径「课程开训需要用户手动开启」
+    ⇒ 删标记必须**当拍**断派发，不能等到下一次发现扫描，也不能靠控制台记得置离线。
+    """
+    hub = _discover_hub(tmp_path)
+    _publish_standalone(tmp_path, "c1", "j" * 16)
+    assert hub.discover() == ["c1"]
+    (tmp_path / "c1" / COURSE_ENABLE_MARKER).unlink()  # 停课（非破坏：队列/账本一个字不动）
+    assert hub.claim_next(worker_id="w1") is None, "未开课的课程不得派发"
+    assert hub.claimable_job_ids("c1") == ["j" * 16], "停课不动队列（非破坏暂停）"
+    _enable(tmp_path, "c1")  # 重新开课 ⇒ 立刻恢复派发（无需重启 hub）
+    assert _claim(hub, "w1")[0] == "c1"
+
+
+def test_single_course_hub_is_not_gated_by_enable_marker(tmp_path: Path) -> None:
+    """单课程模式（`--job-root` 直给、无 `--discover`）不受开课闸影响——
+    那条路径的「开课」就是有人显式起了这个 hub（既有数十个用例的夹具都是这个形状）。"""
+    st = _JobStore(tmp_path / "remote-jobs", tmp_path / "training_log.jsonl")
+    st.publish("j" * 16, _manifest("j" * 16), b"PK\x03\x04fake")
+    hub = as_hub(st)
+    assert hub.claim_next(worker_id="w1") is not None
 
 
 def test_discover_scan_is_throttled(tmp_path: Path) -> None:

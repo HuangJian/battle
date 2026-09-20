@@ -26,6 +26,7 @@
     "check": "tsc --noEmit --incremental && bun tools/check-decisions.ts && bun test --parallel --timeout=50000 --path-ignore-patterns='dashboard/**'",
     "freeze:check": "bash tools/probe-det-baseline.sh --golden",
     "freeze:l2": "bun tools/diag/archived-reach-audit.ts",
+    "pygate": "bash tools/githook/nn-python-gate.sh",
     "setup": "git config core.hooksPath tools/githook"
   },
   "devDependencies": {

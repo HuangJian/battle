@@ -514,13 +514,13 @@ def _itest_env(
 ) -> tuple[FakeServer, Path, dict, types.SimpleNamespace, str]:
     """为集成子测试拉起 FakeServer + 本地直跑打桩。调用方负责 try/finally 关闭 server。"""
     weights = tmp_path / "weights.json"
-    weights.write_text('{"stub": true}')
-    # 进程内已下发账本（_WEIGHTS_PUSHED）必须每个用例清零：本文件所有用例用的是
-    # 同一个哑权重内容 ⇒ weights_fingerprint 相同 ⇒ 若不清，第二个用例会走
-    # “kept / reuse … skip POST”而**根本不发权重**，“本轮真的下发过权重”这类断言
-    # （如 I3 的 eval-after-distribution）就成了对**用例执行顺序**的断言。
-    # 2026-09-20 实测：`-p no:randomly` 下 queue_normal → stream_smoke 必现（静默 FAIL，
-    # 由 _fail_loudly 揭出）；xdist 下取决于同 worker 顺序 —— 即门禁里那条“随机 flake”。
+    # 哑权重内容**必须每个用例唯一**：`wver` = 文件指纹（`weights_fingerprint`），而
+    # `_WEIGHTS_PUSHED` 是**进程内跨用例**的账本（键 `(kind, wver)`）——内容全同则后一个
+    # 用例（或前一个用例**仍在途的收尾线程**）会让本轮的权重下发走 “kept / reuse … skip
+    # POST”，于是「本轮真的下发过权重」这类断言退化成对**用例执行顺序**的断言
+    # （docs/nn.progress.md §97：门禁里那条随机 flake）。键不同就与线程时序无关。
+    weights.write_text(json.dumps({"stub": True, "case": tmp_path.name}))
+    # 账本清零保留作双保险（内容唯一已使撞键不可能）：防「手写同内容」的新用例把这个坑带回来。
     dist_common.weights_push_cache_reset()
     monkeypatch.setattr(_rdispatch, "run_local_rollout", _stub_local_rollout)
     srv = FakeServer(("127.0.0.1", 0), FakeAgent)
@@ -733,8 +733,21 @@ def test_it_stream_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
         check(sm["halted"] is False and sm["dropped_games"] == 0, "I3 no halt (cap high)")
         check(len(fired) == 1, f"I3 eval fired exactly once (got {len(fired)})")
         wts3 = [t for kind, t, _x in srv.events if kind == "weights"]
+        node_disp = [t for kind, t, _x in srv.events if kind == "dispatch"]
+        # 【2026-09-20 修订】原断言是「eval 晚于节点权重 POST」，而那不是本代码的性质：
+        # 本地槽是**复用**的，2 条本地腿 0.01s/局就能跑完 4 局 ⇒ 队列在后台 `weights-push`
+        # 仍**在途**时就清空（实测 push 落后 drain 19ms、`byNode={"local": 4}`）——§97 那句
+        # 「local_slots=2 < 4 ⇒ 队列只能靠节点线程清空」被实测推翻。真实契约见
+        # `rl/stream.py` 文档串：清空 = 「任务已交到节点/本地线程」；干净评估另走自己的
+        # kind='eval' 权重握手（`rl/eval_dispatch.py`），不依赖这条 rollout POST 的完成。
+        # 有结构保证的是这一条（断言它才有回归价值）：**节点采样派发**晚于其权重落地
+        # ——节点 worker 线程在 POST 成功后才孵化（`rl/dispatch.py::_push_need_and_spawn`）。
         check(
-            bool(wts3) and fired[0] > wts3[0], "I3 eval after weight distribution (queue-drained)"
+            not node_disp or (bool(wts3) and wts3[0] < node_disp[0]),
+            "I3 node sampling task dispatched only after weights pushed "
+            f"[weights_events={len(wts3)} first={wts3[0] if wts3 else None} "
+            f"first_node_dispatch={node_disp[0] if node_disp else None} "
+            f"eval_fired={fired[0] if fired else None}]",
         )
         check("_eval_thread" in rep3, "I3 eval thread returned via report")
     finally:

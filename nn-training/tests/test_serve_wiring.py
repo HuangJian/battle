@@ -30,9 +30,23 @@ import rl.loop_core as loop_core
 import rl.loop_plan as loop_plan
 import rl.loop_serve as loop_serve
 import rl.train_ledger as train_ledger
+from remote.protocol import COURSE_ENABLE_MARKER
 from rl.loop_round import STEP_METHOD
 from rl.loop_serve import CourseRuntime, serve
 from rl.loop_tasks import ROUND_TASKS
+
+
+def _enable_course(root: Path, name: str) -> None:
+    """代操作员按下「开课」：写账本 + **开课标记**（= `training-enabled.txt`）。
+
+    发现模式的课程表判据是 **账本 ∧ 开课标记**（`loop_plan.enabled_courses`）——
+    只写账本的目录在 2026-09-20 之后**不算在训**（用户口径：「课程开训需要用户手动开启」），
+    那正是「起了 trainer 就把 tmp/ 下几十门历史课一起拉起来跑」的闸。
+    """
+    d = root / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "training_log.jsonl").write_text("", encoding="utf-8")
+    (d / COURSE_ENABLE_MARKER).write_text("", encoding="utf-8")
 
 # --------------------------------------------------------------- 假件
 
@@ -329,10 +343,8 @@ def test_discover_mode_picks_up_a_course_that_appears_mid_run(env: SimpleNamespa
     clock = FakeClock()
 
     def spawn(_n: int) -> None:
-        if _n == 2:  # 第 2 次空转时，盘上出现一门新课
-            d = env.tmp / "a"
-            d.mkdir(parents=True, exist_ok=True)
-            (d / "training_log.jsonl").write_text("", encoding="utf-8")
+        if _n == 2:  # 第 2 次空转时，盘上出现一门新课（控制台此刻按下「开课」）
+            _enable_course(env.tmp, "a")
 
     clock.on_sleep = spawn
     rep = serve(
@@ -357,9 +369,7 @@ def test_discover_mode_picks_up_a_course_that_appears_mid_run(env: SimpleNamespa
 def test_discover_mode_opens_what_is_already_on_disk(env: SimpleNamespace) -> None:
     """启动时盘上已有两门课 ⇒ 一次全开、不重复开（`_open_courses` 幂等）。"""
     for name in ("a", "b"):
-        d = env.tmp / name
-        d.mkdir(parents=True, exist_ok=True)
-        (d / "training_log.jsonl").write_text("", encoding="utf-8")
+        _enable_course(env.tmp, name)
     clock = FakeClock()
 
     rep = serve(
@@ -407,9 +417,7 @@ def test_discover_mode_does_not_retry_a_broken_course(
     env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """开不起来的课（配置缺失/锁被占）只试一次——否则空转拍会每秒重试、把日志刷爆。"""
-    d = env.tmp / "bad"
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "training_log.jsonl").write_text("", encoding="utf-8")
+    _enable_course(env.tmp, "bad")
     attempts: list[str] = []
 
     def open_course(course: str, **kw: Any) -> CourseRuntime:
@@ -532,11 +540,18 @@ def test_missing_or_broken_control_file_keeps_training(
 # --------------------------------------------------------------- CLI 接线
 
 
-def test_cli_serve_without_courses_means_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_serve_without_courses_means_discovery(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """`--serve` 不给 `--courses` = 发现模式（**不再拒启**）——进程独立于课程。
 
     这里只钉转发形状（不真跑 supervisor：`serve` 被换成收参数的假件，因为它一旦真跑会
     先做启动前 `git push`）。
+
+    ★ 每个调子都显式带 `--cluster-lock <tmp>`（与同文件那条锁用例同规）：不给就走**默认**
+    锁文件 `nn-training/.run_cluster.lock`，而操作员手上真有一台 trainer 在跑是**常态**——
+    那时这条只关心 argv 转发形状的用例会因别人的锁 `SystemExit` 而红（2026-09-20 实测：
+    pre-commit 门禁被一条与本改动无关的活进程染红）。测试不得依赖「此刻本机没在训练」。
     """
     import run_rl_cluster
 
@@ -548,22 +563,23 @@ def test_cli_serve_without_courses_means_discovery(monkeypatch: pytest.MonkeyPat
         return loop_serve.ServeReport(stop_reason="stub")
 
     monkeypatch.setattr(loop_serve, "serve", fake_serve)
+    lock = ["--cluster-lock", str(tmp_path / ".run_cluster.lock")]
 
-    assert run_rl_cluster.main(["--serve"]) == 0
+    assert run_rl_cluster.main(["--serve", *lock]) == 0
     assert seen["courses"] is None  # 空表 ⇒ None（发现模式），不是空列表
     assert seen["control_file"] is None  # 未显式给 ⇒ 走 loop_control 的默认路径
     assert seen["traj_root"] == "tmp"
 
-    assert run_rl_cluster.main(["--serve", "--courses", "c4-dodge,c5-tick"]) == 0
+    assert run_rl_cluster.main(["--serve", "--courses", "c4-dodge,c5-tick", *lock]) == 0
     assert seen["courses"] == ["c4-dodge", "c5-tick"]
 
-    run_rl_cluster.main(["--serve", "--control-file", "tmp/ctl.json", "--mode", "goal"])
+    run_rl_cluster.main(["--serve", "--control-file", "tmp/ctl.json", "--mode", "goal", *lock])
     assert seen["control_file"] == "tmp/ctl.json"
     assert seen["argv"] == ["--mode", "goal"]  # `--mode` 是课程级参数，只透传它
 
     # `--ppo` 同规（控制台起的 trainer 一律 remote）：它必须是**显式声明**的 cluster 参数，
     # 否则 argparse 先以 unrecognized arguments 拒启（`--serve --mode goal` 的老坑）。
-    run_rl_cluster.main(["--serve", "--ppo", "remote", "--mode", "per-tick"])
+    run_rl_cluster.main(["--serve", "--ppo", "remote", "--mode", "per-tick", *lock])
     assert seen["argv"] == ["--mode", "per-tick", "--ppo", "remote"]
 
 
@@ -645,16 +661,24 @@ def test_course_args_match_run_rl_echo_config(tmp_path: Path) -> None:
     env-blocked 跳过：那条路的唯一成因就是把 torch/权重链误拖进来）。
     """
     stem = "c4-dodge"
+    # zh-CN Windows 默认 GBK：oracle stdout 含非 ASCII 时 text=True 会
+    # UnicodeDecodeError，subprocess 读线程挂掉 ⇒ proc.stdout 变 None
+    # （门禁实测 `AttributeError: 'NoneType' object has no attribute 'splitlines'`）。
+    # 显式 UTF-8 + errors=replace，并让子进程也按 UTF-8 吐字。
+    env = {**os.environ, "PYTHONUTF8": "1"}
     proc = subprocess.run(
         [sys.executable, "-c", _ORACLE, stem],
         cwd=str(ROOT),
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=300,
+        env=env,
     )
-    line = next((ln for ln in proc.stdout.splitlines() if ln.startswith("PARITY:")), "")
+    line = next((ln for ln in (proc.stdout or "").splitlines() if ln.startswith("PARITY:")), "")
     if not line:
-        tail = proc.stderr.strip()[-300:]
+        tail = (proc.stderr or "").strip()[-300:]
         pytest.fail(f"oracle 没吐出 PARITY（对拍链本身出了问题）：{tail}")
     theirs = json.loads(line[len("PARITY:") :])
     mine = {

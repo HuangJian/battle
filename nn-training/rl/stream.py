@@ -226,9 +226,12 @@ def run_rollout_stream(
         if cb is None:
             eval_fired[0] = False
             return
+        # 措辞按**真实契约**（2026-09-20 修订）：清空 = 「采集任务已全部交出（节点/本地）」，
+        # **不**等于「节点权重已落地」——本地槽复用可以让队列在后台 weights-push 仍在途时
+        # 就清空（实测 push 落后 drain 19ms）。评估腿自带 kind='eval' 权重握手，不依赖后者。
         log(
-            f"[stream] clean-eval dispatched ({tag}) — frozen weights on nodes, "
-            f"running parallel to collection"
+            f"[stream] clean-eval dispatched ({tag}) — 采集任务已全部交出（节点/本地在途），"
+            f"评估与其并行"
         )
         try:
             box["eval_thread"] = cb()

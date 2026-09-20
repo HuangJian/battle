@@ -42,6 +42,16 @@ export const START_LOG_DIR = path.join(LOG_DIR, 'training-start')
 /** 监控页热加载元数据文件（变更检测哨兵，实义为最后实际变更时间戳）。 */
 export const MONITOR_TOUCH = path.join(START_LOG_DIR, 'monitor-touch.json')
 
+/** 控制台**会话日志**（组件级决策：启/停/重启/判死/开课/停课…）。
+ *
+ *  与 `launch/cli.ts` 的 `initLog('train-cli')`（每次运行一个新文件）分工不同：控制台是
+ *  **长驻进程**，操作员要的是一个固定路径能翻到全部决策——所以文件名稳定，每次启动往同一份
+ *  里追加一行会话头（`=== console session <ISO> pid=N ===`），会话仍有边界。
+ *  单测以 `BCITY_CONSOLE_LOG` 重定向到临时文件（否则跑测试会往仓根 tmp/ 写），故**惰性**取值。 */
+export function consoleLogPath(): string {
+  return process.env.BCITY_CONSOLE_LOG ?? path.join(START_LOG_DIR, 'console.log')
+}
+
 /** 控制台状态文件（trainer 模式 / 当前课程 / 云端停机记录）。
  *  单测以 BCITY_CONSOLE_STATE 重定向到临时目录——故这里**惰性**取值。 */
 export function consoleStatePath(): string {

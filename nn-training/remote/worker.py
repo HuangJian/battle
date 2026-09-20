@@ -57,6 +57,9 @@ from remote.protocol import (
     unpack_payload,
     validate_result,
 )
+from remote.protocol import (
+    d14_corpus_match as protocol_d14_corpus_match,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -89,6 +92,230 @@ def _get_opener() -> urllib.request.OpenerDirector:
     return _opener
 
 
+#: 大 body 下载的**空闲超时**（秒）：这么久没有新字节 = 判停滞，立刻放弃并重试。
+#:
+#: 为什么不能只靠一把 `timeout=300`（2026-09-20 事故）：云机领到第二个 job 后卡在
+#: `resp.read()` 里 **5 分钟一行日志都没有**。操作员分不清「在下」还是「死了」，
+#: 而 socket 超时抛出的裸 `TimeoutError()` 连原因都写不出来（`_get_with_retry` 只把
+#: `repr(e)` 写进日志）。隧道/代理中途停滞正是这种形状：小 POST（心跳、轮询）照常，
+#: 大 body 卡死——同机 cloudflared 当时每 5min 一条 `DNS i/o timeout`。
+BODY_IDLE_TIMEOUT_SEC = 45.0
+#: 单次 body 下载的**墙钟上限**（秒）：空闲超时管「停滞」，这条管「永远在滴水」。
+BODY_TOTAL_TIMEOUT_SEC = 300.0
+#: 进度行最小间隔（秒）与读块（字节）。
+BODY_PROGRESS_MIN_SEC = 5.0
+BODY_CHUNK = 256 * 1024
+
+# ── 低速重抽（2026-09-20；plan/minimize-payload.plan.md §4.0 / M1）───────
+#: 坏签（连接抽签抽到慢连接）时**主动断开重发**：重抽成本 ≈1 s 建连，收益 ≈100 s。
+#: 实测依据（同机同 hub）：code GET 13.5 KB/s，而 3 秒后的 blob GET ≥120 KB/s；
+#: 12:59 那次 payload 以 6–9 KB/s 烧完 300 s 预算（到 75% 被总预算判死），
+#: **重试换连接后 354 KB/s** 跑完剩下 1.75 MB——那次重试其实就是一次「意外重抽」。
+WIRE_MIN_RATE = 80 * 1024.0
+#: 判据所需的最小观测：样本太小不下结论。
+WIRE_PROBE_BYTES = 128 * 1024
+WIRE_PROBE_SEC = 3.0
+#: 按当前速率**预计剩余**超过它才值得折腾（快跑完了就不动）。
+WIRE_REROLL_BUDGET_SEC = 20.0
+#: 单次下载的重抽上限（**只给幂等 GET**；POST result 永不重抽）。
+WIRE_REROLL_MAX = 3
+#: 会话最好速率的采样最小体量（小 body 的瞬时速率不代表链路，不参与判据）。
+WIRE_RATE_SAMPLE_MIN_BYTES = 256 * 1024
+#: 未 flush 的 job 传输账上限（push 模式没有 pull 循环的 flush 点）。
+WIRE_MAX_JOBS = 4
+
+#: 本会话已观测到的最好大 body 速率（bytes/s）——相对判据的参照。
+_BEST_RATE = 0.0
+
+#: 每 job 的传输账：jid -> {segs: {段名: [bytes, sec]}, hits: {段名: 说明},
+#: wasted: 重抽作废字节, rerolls: 次数}。跑完由 `_wire_flush` 打一行摘要并清空。
+_WIRE: dict[str, dict] = {}
+
+
+def _note_rate(rate: float, nbytes: int) -> None:
+    """记下本会话的**大 body** 最好速率（相对判据的参照）。"""
+    global _BEST_RATE
+    if nbytes >= WIRE_RATE_SAMPLE_MIN_BYTES and rate > _BEST_RATE:
+        _BEST_RATE = rate
+
+
+def _min_rate() -> float:
+    """坏签判据 = max(`WIRE_MIN_RATE`, 本会话最好速率 / 4)——只在「明显偏离」时动手。"""
+    return max(WIRE_MIN_RATE, _BEST_RATE / 4.0)
+
+
+def _reroll_decision(
+    got: int,
+    total: int,
+    elapsed: float,
+    *,
+    min_rate: float | None = None,
+    budget_sec: float = WIRE_REROLL_BUDGET_SEC,
+    probe_bytes: int = WIRE_PROBE_BYTES,
+    probe_sec: float = WIRE_PROBE_SEC,
+) -> tuple[bool, float, float]:
+    """是否该断开重抽 → `(决定, 实测速率, 按此速率的预计剩余秒数)`。
+
+    **纯函数**：判据只有一处实现（改阈值只改这里），也就能被单测直接钉住。
+    """
+    if total <= 0 or got <= 0 or got >= total:
+        return False, 0.0, 0.0  # 长度未知 / 已收完 / 零字节：都不判
+    if elapsed < probe_sec and got < probe_bytes:
+        return False, 0.0, 0.0  # 样本太小，不下结论
+    rate = got / elapsed if elapsed > 0 else float("inf")
+    floor = _min_rate() if min_rate is None else min_rate
+    remain_sec = (total - got) / rate if rate > 0 else float("inf")
+    return (rate < floor and remain_sec > budget_sec), rate, remain_sec
+
+
+class WireSlowError(Exception):
+    """慢连接（速率远低于阈值）：**放弃本次传输、换连接重抽**。
+
+    带正文（已收字节数 / 速率 / 预计剩余）——与裸 `TimeoutError()` 的教训同规：日志里必须
+    能读出「为什么断」，否则运维只看到「又重试了」。
+    """
+
+    def __init__(self, bytes_read: int, rate: float, remain_sec: float) -> None:
+        super().__init__(
+            f"慢连接：实测 {rate / 1024:.0f} KB/s（已收 {bytes_read} bytes，"
+            f"按此速率剩余 {remain_sec:.0f}s）"
+        )
+        self.bytes_read = bytes_read
+        self.rate = rate
+        self.remain_sec = remain_sec
+
+
+def _wire_bucket(jid: str) -> dict:
+    """取（或建）某 job 的传输账——并**封顶**未 flush 的 job 数（防 push 模式无界增长）。"""
+    w = _WIRE.get(jid)
+    if w is None:
+        while len(_WIRE) >= WIRE_MAX_JOBS:
+            _WIRE.pop(next(iter(_WIRE)), None)  # 最旧的直接丢（它的账已过期）
+        w = _WIRE[jid] = {"segs": {}, "hits": {}, "wasted": 0, "rerolls": 0}
+    return w
+
+
+def _wire_add(jid: str, seg: str, nbytes: int, sec: float) -> None:
+    """记一段**成功传输**（`(endpoint, bytes, sec)` 的原始账）。"""
+    if not jid or not seg or nbytes <= 0:
+        return
+    cur = _wire_bucket(jid)["segs"].setdefault(seg, [0, 0.0])
+    cur[0] += int(nbytes)
+    cur[1] += float(sec)
+
+
+def _wire_hit(jid: str, seg: str, why: str = "cache") -> None:
+    """记一次**零字节**命中（内容寻址缓存 / preloaded）——摘要里也要看得见。"""
+    if not jid or not seg:
+        return
+    _wire_bucket(jid)["hits"][seg] = why
+
+
+def _wire_note_reroll(jid: str, wasted: int) -> None:
+    """记一次重抽（及其作废字节）——坏签比例就靠它统计。"""
+    if not jid:
+        return
+    w = _wire_bucket(jid)
+    w["rerolls"] += 1
+    w["wasted"] += int(wasted)
+
+
+def _wire_flush(jid: str, log) -> None:
+    """打**一行**本 job 的传输账并清掉：`wire payload=… code=cache-hit reroll=1 合计=…`。
+
+    为什么必须有一行：逐条进度行看不出全局，而「坏签比例 / 命中比例 / 哪一段在吃时间」
+    只能从每 job 一行的账里读（与 hub 侧 `_bytes` 的完成行对账即可定位慢腿）。
+    """
+    w = _WIRE.pop(jid, None)
+    if not w:
+        return
+    mb = 1024.0 * 1024.0
+    parts: list[str] = []
+    tot_b = 0
+    tot_s = 0.0
+    for seg, (n, sec) in w["segs"].items():
+        tot_b += n
+        tot_s += sec
+        rate = n / sec / 1024.0 if sec > 0 else 0.0
+        parts.append(f"{seg}={n / mb:.2f}MB/{sec:.1f}s({rate:.0f}KB/s)")
+    for seg, why in w["hits"].items():
+        parts.append(f"{seg}={why}-hit")
+    if w["rerolls"]:
+        parts.append(f"reroll={w['rerolls']}(wasted {w['wasted'] / mb:.2f}MB)")
+    rate_all = tot_b / tot_s / 1024.0 if tot_s > 0 else 0.0
+    log(
+        f"job {jid}: wire "
+        + " ".join(parts)
+        + f" 合计={tot_b / mb:.2f}MB/{tot_s:.1f}s({rate_all:.0f}KB/s)"
+    )
+
+
+def _read_body(
+    resp: Any,
+    *,
+    idle_timeout: float,
+    total_timeout: float | None,
+    progress: Any = None,
+    allow_reroll: bool = False,
+) -> bytes:
+    """分块读 body：报进度 + **停滞/超预算即抛**（异常正文带已收字节数与原因）。
+
+    停滞异常必须**有正文**：上游 `_get_with_retry` 只把 `repr(e)` 写进日志，裸
+    `TimeoutError()` 打出来是 `TimeoutError()`——等于没写（2026-09-20 事故现场）。
+    """
+    total = 0
+    try:
+        total = int(resp.headers.get("Content-Length") or 0)
+    except Exception:  # 非标准响应 / 假响应（测试）没有 headers
+        total = 0
+    buf = bytearray()
+    t0 = time.time()
+    last = t0
+    probed = False
+    while True:
+        try:
+            block = resp.read(BODY_CHUNK)
+        except (TimeoutError, OSError) as e:
+            raise TimeoutError(
+                f"body 停滞：{idle_timeout:.0f}s 内没有新字节（已收 {len(buf)} bytes"
+                + (f" / 共 {total}" if total else "")
+                + "）——隧道或代理侧的问题，重试"
+            ) from e
+        if not block:
+            return bytes(buf)
+        buf += block
+        now = time.time()
+        if allow_reroll and not probed:
+            # 只在**首块**判一次（probed 一次性）：这样每次重抽的浪费 ≤ 一块（BODY_CHUNK），
+            # 绝不会退化成「再整份重传一遍」（plan §7.2 的硬要求）。
+            probed = True
+            should, rate, remain = _reroll_decision(len(buf), total, now - t0)
+            if should:
+                raise WireSlowError(len(buf), rate, remain)
+        if total_timeout is not None and now - t0 > total_timeout:
+            raise TimeoutError(
+                f"body 超时：总耗时 > {total_timeout:.0f}s（已收 {len(buf)} bytes"
+                + (f" / 共 {total}" if total else "")
+                + "）——链路太慢，重试"
+            )
+        if progress is not None and now - last >= BODY_PROGRESS_MIN_SEC:
+            last = now
+            progress(len(buf), total, now - t0)
+
+
+def _progress_logger(label: str, log: Any):
+    """进度行工厂：`job X: payload 下载中 3.20 MB / 4.85 MB (66%) 用时 12s（270 KB/s）`。"""
+
+    def _report(got: int, total: int, elapsed: float) -> None:
+        mb = 1024.0 * 1024.0
+        rate = (got / elapsed / 1024.0) if elapsed > 0 else 0.0
+        pct = f" ({got * 100 // total}%)" if total > 0 else ""
+        of = f" / {total / mb:.2f} MB" if total > 0 else ""
+        log(f"{label} 下载中 {got / mb:.2f} MB{of}{pct} 用时 {elapsed:.0f}s（{rate:.0f} KB/s）")
+
+    return _report
+
+
 def _request(
     base_url: str,
     token: str,
@@ -97,7 +324,20 @@ def _request(
     data: bytes | None = None,
     method: str | None = None,
     headers: dict[str, str] | None = None,
+    progress: Any = None,
+    idle_timeout: float | None = None,
+    total_timeout: float | None = None,
+    allow_reroll: bool = False,
 ) -> tuple[int, bytes]:
+    """单发 GET/POST。缺省（不给 `idle_timeout`/`progress`）行为与改造前逐字节相同。
+
+    给了 `idle_timeout`/`progress`（大 body 下载路径）才走**分块读**：socket 超时用
+    `idle_timeout` 而不是 `timeout`——`timeout` 在这些路径上是**总预算**语义，拿它当
+    socket 超时就是回到「静默 5 分钟」。
+
+    `allow_reroll=True`（幂等 GET 的大 body）时，首块就慢得离谱就抛 `WireSlowError`
+    交上层换连接重抽（调用方 = `_get_with_retry`，它负责计数与结束条件）。
+    """
     url = f"{base_url.rstrip('/')}{path}"
     req = urllib.request.Request(
         url,
@@ -105,11 +345,21 @@ def _request(
         headers={AUTH_HEADER: f"Bearer {token}", **(headers or {})},
         method=method,
     )
+    stream = idle_timeout is not None or progress is not None
+    sock_timeout = idle_timeout if idle_timeout is not None else timeout
     try:
         # 回环（本机 hub）绕开代理；非回环走进程内的显式 ProxyHandler（Colab 实测需要）。
         open_fn = net_http.urlopen if net_http.is_loopback(url) else _get_opener().open
-        with open_fn(req, timeout=timeout) as resp:
-            return resp.status, resp.read()
+        with open_fn(req, timeout=sock_timeout) as resp:
+            if not stream or resp.status != 200:
+                return resp.status, resp.read()
+            return resp.status, _read_body(
+                resp,
+                idle_timeout=sock_timeout,
+                total_timeout=total_timeout,
+                progress=progress,
+                allow_reroll=allow_reroll,
+            )
     except urllib.error.HTTPError as e:
         return e.code, e.read()
 
@@ -185,18 +435,61 @@ def _get_with_retry(
     timeout: float,
     attempts: int = 3,
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+    progress: Any = None,
+    idle_timeout: float | None = BODY_IDLE_TIMEOUT_SEC,
+    total_timeout: float | None = None,
+    wire_jid: str = "",
+    wire_seg: str = "",
+    reroll: bool = False,
 ) -> bytes:
     """GET + 瞬时失败退避重试：网络异常/5xx → 指数退避重试；4xx → ProtocolError。
 
     传输级抖动（连接重置/读超时/边缘 5xx）在租约窗口内就地消化，不再付
-    「放弃本次 → 30min 租约过期 → 重领」的惩罚（2026-09-05，DECISIONS §340）。"""
+    「放弃本次 → 30min 租约过期 → 重领」的惩罚（2026-09-05，DECISIONS §340）。
+
+    2026-09-20：body **分块读 + 空闲超时**（缺省 45s，见 BODY_IDLE_TIMEOUT_SEC）+
+    可选进度回调 ⇒ 下载停滞从「静默等到 socket 超时」变成「45s 一条带字节数的
+    停滞日志 + 退避重试」，且过程可见（进度行）。
+
+    2026-09-20 追加（plan §4.0 / M1）：① `reroll=True` 时启用**低速重抽**——首块速率远低于
+    阈值就断开重发（**不退避**：重抽的全部价值就在快）；② 成功即把 `(段名, bytes, sec)`
+    记进本 job 的传输账（`_wire_flush` 打一行）。POST 不走这里（不重抽）。
+    """
     last: str = ""
+    rerolls = 0
     for attempt in range(1, attempts + 1):
+        # 重抽只在前几次尝试上开放：**最后一次必然老老实实传完**（否则慢链路就变成
+        # 「永远下不完」——6 KB/s 的坏签确实存在，重抽是赌，不能把赌注全压在赌上）。
+        allow_reroll = reroll and attempt < attempts and rerolls < WIRE_REROLL_MAX
+        t_req = time.time()
         try:
-            status, body = _request(base_url, token, path, timeout=timeout)
+            status, body = _request(
+                base_url,
+                token,
+                path,
+                timeout=timeout,
+                progress=progress,
+                idle_timeout=idle_timeout,
+                total_timeout=total_timeout,
+                allow_reroll=allow_reroll,
+            )
+        except WireSlowError as e:
+            rerolls += 1
+            _wire_note_reroll(wire_jid, e.bytes_read)
+            floor = _min_rate()
+            log(
+                f"wire: re-roll #{rerolls}/{WIRE_REROLL_MAX} {wire_seg or path}: "
+                f"实测 {e.rate / 1024:.0f} KB/s < 阈值 {floor / 1024:.0f} KB/s"
+                f"（按此速率剩余 {e.remain_sec:.0f}s）——断开重发（已收 {e.bytes_read} bytes 作废）"
+            )
+            continue  # 立即换连接重抽（不退避）
         except Exception as e:  # 网络层抖动（URLError/timeout/reset）
             status, body = None, repr(e).encode()
         if status == 200:
+            elapsed = time.time() - t_req
+            _wire_add(wire_jid, wire_seg, len(body), elapsed)
+            if elapsed > 0:
+                _note_rate(len(body) / elapsed, len(body))
             return body
         if status is not None and 400 <= status < 500:
             raise ProtocolError(f"{path} failed: HTTP {status}")
@@ -218,8 +511,25 @@ def download_payload(
     attempts: int = 3,
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
 ) -> bytes:
+    """取 payload 归档：**分块 + 进度行 + 停滞即断**（2026-09-20 事故的修复面）。
+
+    停滞判据 = 45s 无新字节（`BODY_IDLE_TIMEOUT_SEC`），总预算 300s。原来只有
+    一个 `timeout=300` 的整读：隧道/代理中途停滞时，操作员看到的是**几分钟零输出**
+    且日志里连一句「失败」都没有（socket 超时的裸异常没有正文）。
+    """
     return _get_with_retry(
-        base_url, token, f"/jobs/{jid}/payload", timeout=300.0, attempts=attempts, log=log
+        base_url,
+        token,
+        f"/jobs/{jid}/payload",
+        timeout=BODY_TOTAL_TIMEOUT_SEC,
+        attempts=attempts,
+        log=log,
+        idle_timeout=BODY_IDLE_TIMEOUT_SEC,
+        total_timeout=BODY_TOTAL_TIMEOUT_SEC,
+        progress=_progress_logger(f"job {jid}: payload", log),
+        wire_jid=jid,
+        wire_seg="payload",
+        reroll=True,
     )
 
 
@@ -231,8 +541,20 @@ def download_code(
     attempts: int = 3,
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
 ) -> bytes:
+    # code.zip 同样走隧道（1-3MB）：与 payload 同规的停滞判据与进度行。
     return _get_with_retry(
-        base_url, token, f"/jobs/{jid}/code", timeout=120.0, attempts=attempts, log=log
+        base_url,
+        token,
+        f"/jobs/{jid}/code",
+        timeout=120.0,
+        attempts=attempts,
+        log=log,
+        idle_timeout=BODY_IDLE_TIMEOUT_SEC,
+        total_timeout=120.0,
+        progress=_progress_logger(f"job {jid}: code", log),
+        wire_jid=jid,
+        wire_seg="code",
+        reroll=True,
     )
 
 
@@ -249,7 +571,18 @@ def download_ts_code(
     代价只付一次：内容寻址缓存（`ts_code_cache/<sha>`）命中后同 sha 永不重下。
     """
     return _get_with_retry(
-        base_url, token, f"/jobs/{jid}/ts_code", timeout=300.0, attempts=attempts, log=log
+        base_url,
+        token,
+        f"/jobs/{jid}/ts_code",
+        timeout=BODY_TOTAL_TIMEOUT_SEC,
+        attempts=attempts,
+        log=log,
+        idle_timeout=BODY_IDLE_TIMEOUT_SEC,
+        total_timeout=BODY_TOTAL_TIMEOUT_SEC,
+        progress=_progress_logger(f"job {jid}: ts_code", log),
+        wire_jid=jid,
+        wire_seg="ts_code",
+        reroll=True,
     )
 
 
@@ -267,9 +600,15 @@ def download_blob(
         base_url,
         token,
         f"/jobs/{jid}/blob?name={name}",
-        timeout=300.0,
+        timeout=BODY_TOTAL_TIMEOUT_SEC,
         attempts=attempts,
         log=log,
+        idle_timeout=BODY_IDLE_TIMEOUT_SEC,
+        total_timeout=BODY_TOTAL_TIMEOUT_SEC,
+        progress=_progress_logger(f"job {jid}: blob {name}", log),
+        wire_jid=jid,
+        wire_seg=f"blob:{name}",
+        reroll=True,
     )
 
 
@@ -315,12 +654,14 @@ def _resolve_blob(
         if cp.exists():
             raw = cp.read_bytes()
             if _hl.sha256(raw).hexdigest() == sha:
+                _wire_hit(jid, f"blob:{name}")
                 return raw, True, "cache"
             log(f"blob {name}: cache 命中但 sha 不符（损坏）——重新取")
         pl = (preloaded or {}).get("blobs") or {}
         if name in pl:
             raw = pl[name]
             src = "preloaded"
+            _wire_hit(jid, f"blob:{name}", "preloaded")
         else:
             raw = download_blob(base_url, token, jid, name, log=log)
             src = "download"
@@ -359,6 +700,7 @@ def post_result(
     req_body_json = json.dumps(result, ensure_ascii=False).encode("utf-8")
     t0 = time.time()
     for attempt in range(1, attempts + 1):
+        t_a = time.time()  # 本次尝试的墙钟（传输账用；`t0` 含退避，不适合算速率）
         try:
             status, body = _request(
                 base_url,
@@ -376,6 +718,7 @@ def post_result(
         except Exception as e:
             status, body = None, repr(e).encode()
         if status in (200, 201):
+            _wire_add(jid, "result", len(req_body), time.time() - t_a)
             log(
                 f"result POST ok: {len(req_body)} bytes ({ctype.rsplit('/', 1)[-1]})"
                 f" in {time.time() - t0:.1f}s (attempt {attempt})"
@@ -389,6 +732,7 @@ def post_result(
         if status == 409:
             # 竞速广播下这是**输家的正常结局**：同 job 已被别人先回传，本份结果丢弃。
             # 绝不重试、绝不当失败上报（否则一个赢家会让 N-1 个 worker 白报错）。
+            _wire_add(jid, "result", len(req_body), time.time() - t_a)  # 字节确实出去了
             log("result POST 409（hub 已有同 job 结果：竞速输家/重复回传）——按成功丢弃")
             return 409
         if status is not None and 400 <= status < 500:
@@ -692,17 +1036,9 @@ def _ensure_commit(target: str, repo_root: Path = REPO_ROOT, log=lambda msg: Non
     return head == target
 
 
-def d14_corpus_match(job_course_fp: str, job_corpus_fp: str, shard_manifest: dict) -> bool:
-    """D14 装载校验的比对规则（DECISIONS §2026-09-13-level-extraction）。
-
-    双侧都有 corpus_fp（语料身份 = env+reward 解析值语义哈希）⇒ 比 corpus_fp——
-    预算/路径/注释类课程 mid-run 编辑只动 course_fp（文件血缘），不得触发拒收。
-    任一侧缺 corpus_fp（legacy shard / 旧 job）⇒ 回退文件血缘 course_fp 逐字比对。
-    """
-    s_corpus = str(shard_manifest.get("corpus_fp", "") or "")
-    if job_corpus_fp and s_corpus:
-        return job_corpus_fp == s_corpus
-    return str(shard_manifest.get("course_fp", "")) == job_course_fp
+# D14 比对规则的**唯一实现**住 `remote.protocol`（发布端 `hub_client.iter_shard_dirs`
+# 打包时用同一条规则挑选 shard）——这里只做名字转发，保持既有 import/调用面不变。
+d14_corpus_match = protocol_d14_corpus_match
 
 
 def _bc_fetch_resume(
@@ -1224,6 +1560,7 @@ def run_job(
     code_cache_dir = code_root / manifest["code_sha256"]
     if code_cache_dir.exists():
         sys.path.insert(0, str(code_cache_dir))
+        _wire_hit(jid, "code")  # 零字节命中也要进本 job 的传输账（否则摘要读数失真）
         log(f"job {jid}: code cache 命中（{manifest['code_sha256'][:12]}…）——跳过下载解压")
     else:
         if preloaded is not None and "code_zip" in preloaded:
@@ -2046,6 +2383,8 @@ def worker_loop(
             log(f"job {jid} FAILED: {type(e).__name__}: {e} — will re-poll (idempotent)")
             # 瞬态失败（网络/远端关闭）：租约未续会自动回池，重拉同 job 幂等
         finally:
+            # 每 job 一行传输账：payload/code/blob/result 的 (bytes, sec) + 零字节命中 + 重抽
+            _wire_flush(jid, log)
             _hb_stop.set()
             if hb_thread is not None:
                 hb_thread.join(timeout=HEARTBEAT_SEC + 5)

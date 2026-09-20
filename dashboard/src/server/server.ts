@@ -47,8 +47,14 @@ import {
   waitUntil,
 } from '../core/net'
 import { COMPONENT_KILL_TREE } from '../core/types'
-import { entryForCourse, loadRegistry, saveAnyComponent } from '../core/registry'
+import {
+  entryForCourse,
+  loadRegistry,
+  registryComponents,
+  saveAnyComponent,
+} from '../core/registry'
 import { launchSpec } from '../core/proc'
+import { error, info, initConsoleLog, log, warn } from '../core/log'
 import { monitorTouch } from '../core/reload-touch'
 import {
   buildBcEpochsView,
@@ -72,16 +78,20 @@ import {
   startSnapshotRefresher,
 } from './api'
 import { restartSpecFor } from './actions'
+import { runningStaleCode } from '../core/reload'
 import { handleDeliverUpload, taskBundleDownloadResponse, taskBundleInfo } from './bundles'
 import { runExitCheck } from './exit-watchdog'
 import { ensureBundle, type BundleTarget } from './build'
 import { renderConsolePage, renderEvalPage, renderLogPage } from '../web/render'
 import { pageForPath } from '../web/view'
-import type { Component } from '../core/types'
+import type { Component, ProcSpec, RegistryEntry } from '../core/types'
 
 interface ServeOpts {
   port: number
 }
+
+/** 监督器的重启回调（`(key, course)` 精确重建 → 整树杀 → spawn → 回灌账本）。 */
+type RestartFn = (spec: ProcSpec, oldPid: number) => Promise<number>
 
 function parseArgs(): ServeOpts {
   let port = 8900
@@ -105,12 +115,12 @@ function parseLogLines(raw: string | null, dft = 200): number | 'all' {
   return Math.min(Math.max(Number(raw ?? dft) || dft, 10), 2000)
 }
 
-/** 变更检测监督器（同 §349；页面动作与监督共用 busy 互斥语义在 actions 层）。 */
-function startSupervisor(): ReturnType<typeof createSupervisor> {
-  const restart = async (
-    spec: Parameters<Parameters<typeof createSupervisor>[0]>[0],
-    oldPid: number,
-  ): Promise<number> => {
+/** 变更检测监督器（同 §349；页面动作与监督共用 busy 互斥语义在 actions 层）。
+ *
+ *  返回监督器本体 + `restart`：启动对账（`reconcileWatch`）要用它接管「跑着旧码」的在跑进程，
+ *  而重启逻辑（整树杀、重建 spec、回灌槽位）只此一份。 */
+function startSupervisor(): { sup: ReturnType<typeof createSupervisor>; restart: RestartFn } {
+  const restart: RestartFn = async (spec, oldPid) => {
     const key = spec.key
     const course = spec.course ?? ''
     const tag = `${key}${course ? `[${course}]` : ''}`
@@ -118,9 +128,7 @@ function startSupervisor(): ReturnType<typeof createSupervisor> {
     const fresh = restartSpecFor(key, course)
     if (!fresh) {
       // 放弃重建必须可见（F-A4）：null 是「放弃」不是「没事发生」。
-      console.warn(
-        `[supervisor] ${tag}: 无法重建 spec（该 (key, course) 未登记或缺元数据）——跳过重启`,
-      )
+      warn(`[supervisor] ${tag}: 无法重建 spec（该 (key, course) 未登记或缺元数据）——跳过重启`)
       return oldPid
     }
     // 带子进程监督器的组件（localWorker）必须整树停：只杀父进程会给重启后的新实例
@@ -133,6 +141,9 @@ function startSupervisor(): ReturnType<typeof createSupervisor> {
       ...entryForCourse(loadRegistry(), key, course),
       pid: r.pid,
       course: course,
+      // 启动时刻每次重启都刷新（`runningStaleCode` 的比对面；不刷新 = 每轮对账都
+      // 把刚重启的新进程又当成旧码——15s 一次的重启风暴）。
+      startedAt: Date.now(),
       entry: fresh.sentinels[fresh.sentinels.length - 1],
       log: fresh.log,
     })
@@ -154,13 +165,13 @@ function startSupervisor(): ReturnType<typeof createSupervisor> {
     const portNote = (await ownsPort())
       ? ''
       : '；新实例未持有该端口（bind 失败，或旧实例仍在服务？）'
-    console.log(
+    log(
       `[supervisor] ${tag} 已应用最新代码 (PID ${r.pid}` +
         `${ready ? '' : '，45s 未就绪，继续观察'}${portNote})`,
     )
     return r.pid
   }
-  return createSupervisor(restart, { intervalMs: 5000 })
+  return { sup: createSupervisor(restart, { intervalMs: 5000 }), restart }
 }
 
 // ────────────────────────── bundle 服务（mtime 内存缓存 + 自动重建） ──────────────────────────
@@ -186,23 +197,51 @@ async function serveBundle(target: BundleTarget): Promise<Response> {
 
 async function main(): Promise<void> {
   const { port } = parseArgs()
-  if (shapeLoopbackNoProxy()) console.log('[console] 检测到代理环境变量——已追加 NO_PROXY 直连回环')
+  // ★ 组件级决策落盘（2026-09-20 用户指令）：必须在**任何**决策之前 arm，否则
+  //   「谁在何时停了/重启了什么」又只剩下终端滚屏（事故复盘时从盘上证据分不出
+  //   「人工停的」与「自己死的」——见 core/log.ts 模块头）。
+  const decisionLog = initConsoleLog()
+  if (shapeLoopbackNoProxy()) info('[console] 检测到代理环境变量——已追加 NO_PROXY 直连回环')
 
   // 变更检测监督：跟踪账本中已登记的全部组件。
-  const sup = startSupervisor()
+  const { sup, restart } = startSupervisor()
   // 监督单位 = (key, course)：多课程下同一组件有多份进程，按 key 单键会互相顶掉。
   const watched = new Set<string>()
   const reconcileWatch = async (): Promise<void> => {
     const state = await buildStateView()
+    // 账本原件（`startedAt` 在视图里没有，而判「跑的是不是旧码」只看它）。
+    const entries = new Map<string, RegistryEntry>(
+      registryComponents().map((e) => [`${e.key}|${e.course}`, e.entry]),
+    )
     for (const c of state.components) {
       const course = c.course ?? ''
       const id = `${c.key}|${course}`
       if (c.status !== 'running' || watched.has(id)) continue
       const spec = restartSpecFor(c.key as Component, course)
       if (!spec) continue
-      sup.watch(spec, c.pid ?? 0)
+      let pid = c.pid ?? 0
+      // ★ 接管在跑进程之前先判「它跑的是不是磁盘上的这份代码」（2026-09-20 事故）：
+      //   watch() 以**当下**指纹为基线，直接接管会把旧码永久冻结在「就绪」上——
+      //   于是盘上加的新闸对已在跑的组件永远不生效，而控制台一切显示正常。
+      //   判据的真相源是账本 `startedAt`（spawn/重启时写）；缺席 = 旧条目 ⇒ 按旧码处理。
+      //
+      //   ⚠ 适用范围**不含 cloudflared**：它是第三方二进制，跑的不是我们的代码（哨兵只是共用
+      //   SSOT 清单的代理），而重启它的代价是**隧道 URL 变化**：云机手上那个 URL 立刻作废、
+      //   正在跑的 job 无法回传（用户得回到 Colab 重新贴）。零收益、高代价 ⇒ 永不由「旧码」触发。
+      if (
+        pid > 0 &&
+        c.key !== 'cloudflared' &&
+        runningStaleCode(spec, entries.get(id)?.startedAt)
+      ) {
+        warn(
+          `[supervisor] ${c.key}${course ? `[${course}]` : ''} (PID ${pid}) 跑的是磁盘上更早的代码` +
+            '——接管并重启应用最新代码（旧进程的判据/课程表都停在它启动的那一刻）',
+        )
+        pid = await restart(spec, pid)
+      }
+      sup.watch(spec, pid)
       watched.add(id)
-      console.log(`[supervisor] 监督 ${c.key}${course ? `[${course}]` : ''} (PID ${c.pid})`)
+      log(`[supervisor] 监督 ${c.key}${course ? `[${course}]` : ''} (PID ${pid})`)
     }
   }
   await reconcileWatch()
@@ -214,7 +253,7 @@ async function main(): Promise<void> {
     try {
       const r = ladderTickAll(discoverCourses())
       if (r.enqueued.length > 0)
-        console.log(`[ladder] tick tasks=${r.tasks} enqueued=${r.enqueued.join(',')}`)
+        log(`[ladder] tick tasks=${r.tasks} enqueued=${r.enqueued.join(',')}`)
     } catch {
       /* ticker 永不炸循环 */
     }
@@ -417,19 +456,24 @@ async function main(): Promise<void> {
         }
         return new Response('not found', { status: 404 })
       } catch (e) {
-        console.error(`[console] ${req.method} ${url.pathname} failed:`, e)
+        // 单行（把 stack 拆进文件会把「一行一决策」打散；定位靠 message + 请求行）
+        error(
+          `[console] ${req.method} ${url.pathname} failed: ` +
+            (e instanceof Error ? e.message : String(e)),
+        )
         return json({ ok: false, message: e instanceof Error ? e.message : String(e) }, 500)
       }
     },
   })
   const cfgPath = path.relative(REPO_ROOT, CONFIG_PATH)
-  console.log(
-    `[console] NN 训练控制台: http://127.0.0.1:${server.port}/  (局域网只读 + localhost 控制)`,
-  )
-  console.log(
+  log(`[console] NN 训练控制台: http://127.0.0.1:${server.port}/  (局域网只读 + localhost 控制)`)
+  log(
     `[console] 局域网可查看任意课程/日志/节点统计（?course= 切换）；启停/冒烟/模式/节点编辑仅限本机。`,
   )
-  console.log(`[console] 配置回写: ${cfgPath} · 变更检测监督已启用 · 停止: Ctrl-C`)
+  log(`[console] 配置回写: ${cfgPath} · 变更检测监督已启用 · 停止: Ctrl-C`)
+  // 组件级决策（启/停/重启/判死/开课/停课/放弃重建）的落盘位置必须让操作员一眼看到
+  // ——它就是「盘上证据」那份：`tail -f` 它就能看到谁在何时动了什么。
+  log(`[console] 组件决策日志: ${path.relative(REPO_ROOT, decisionLog)}（追加；旋转保留一代 .1）`)
 }
 
 void main()
