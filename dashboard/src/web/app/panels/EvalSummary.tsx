@@ -20,6 +20,7 @@ import type {
 } from '../../view'
 import { EVAL_METRIC_KEYS } from '../../view'
 import { Pill } from '../../components/Pill'
+import { InlineNotice } from '../../components/InlineNotice'
 import { EvalMatrix } from './eval-matrix'
 import { usePolling } from '../lib/usePolling'
 import { fetchEvalBoard, fetchEvalCkpts, postAction } from '../lib/api-client'
@@ -315,7 +316,7 @@ export function EvalSummary({
             · 行 = B 层 iter · 列 = rung×指标（{course || '当前课程'}）
           </span>
         </h2>
-        <div className="tc-row tc-small">
+        <div className="tc-line tc-small">
           <label>
             iter{' '}
             <select
@@ -387,11 +388,7 @@ export function EvalSummary({
           {view.abWarn}
         </div>
       ) : null}
-      {flash ? (
-        <p className="tc-eval-summary__note tc-small" role="status">
-          {flash}
-        </p>
-      ) : null}
+      {flash ? <InlineNotice>{flash}</InlineNotice> : null}
       {error ? (
         <div className="tc-banner tc-banner--err" role="alert">
           {error}

@@ -160,21 +160,19 @@ export function TrainLaunchModal({
       >
         <h3>启动服务进程</h3>
         {readOnly ? (
-          <p className="tc-banner tc-banner--ro" style={{ margin: 0 }}>
+          <p className="tc-banner tc-banner--ro tc-banner--flush">
             🔒 只读模式：启动训练仅限本机 localhost 打开控制台操作。
           </p>
         ) : null}
-        <p className="tc-muted tc-small" style={{ marginTop: 0 }}>
+        <p className="tc-muted tc-small tc-mt-0">
           启动**只起进程**：编队恒为 本机 agent → 共享 hub → 共享 trainer。
-          <b>启动不会自动开课</b>——「开哪门课」用顶部课程选择旁的「开课」入口。 本轮的 PPO
+          <b>启动不会自动开课</b>——「开哪门课」用侧栏课程选择旁的「训练」键。 本轮的 PPO
           去哪，由**部署事实**决定—— 登记了 push worker 节点就走 hub 派发（配置入口在 「push worker
           登记」面板，数据住 rl-config.json）；没登记则等 worker（云机 / 本机） 自己来领，本机只需
           hub 在线（配以 tailscale 直连或 cloudflared 隧道）。
         </p>
         <div className="tc-line">
-          <span className="tc-muted tc-small" style={{ minWidth: 90 }}>
-            隧道
-          </span>
+          <span className="tc-muted tc-small tc-launch__lbl">隧道</span>
           <SegmentedControl<'http2' | 'quic' | 'auto'>
             value={cfProtocol}
             ariaLabel="隧道协议"
@@ -197,7 +195,7 @@ export function TrainLaunchModal({
             onChange={setCfEdgeIp}
           />
         </div>
-        <p className="tc-muted tc-small" style={{ marginTop: -4 }}>
+        <p className="tc-muted tc-small tc-hint">
           http2 = TCP/443（默认，绕开 ISP 对 QUIC 的 QoS 降质）；auto = 不传旗标（旧行为）。
           改动即时体现在下一次启动的 cloudflared 命令行。当前生效（rl-config）：
           <b>
@@ -207,9 +205,7 @@ export function TrainLaunchModal({
           。
         </p>
         <div className="tc-line">
-          <span className="tc-muted tc-small" style={{ minWidth: 90 }}>
-            瘦身
-          </span>
+          <span className="tc-muted tc-small tc-launch__lbl">瘦身</span>
           <SegmentedControl<SlimMode>
             value={slim}
             ariaLabel="协议瘦身"
@@ -220,7 +216,7 @@ export function TrainLaunchModal({
             onChange={setSlim}
           />
         </div>
-        <p className="tc-muted tc-small" style={{ marginTop: -4 }}>
+        <p className="tc-muted tc-small tc-hint">
           协议瘦身（M2）：开 = opt/ref 走内容寻址 blob，上行 ~4.43MB → ~1.2MB； 关 =
           逐字节回到旧行为（内联 base64 + payload 内冗余文件），拿来做 A/B 对照。
           当前生效（rl-config）：<b>{modes.slim === 'off' ? '关' : '开'}</b>

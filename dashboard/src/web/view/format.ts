@@ -194,3 +194,19 @@ export function phaseSecsTitle(p: PhaseSecs): string {
 export function stripIsoPrefix(text: string): string {
   return text.replace(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z?\s*/, '')
 }
+
+/** 时长展示：`45s` / `2m 5s` / `1h 20m`；null 或负数 → `—`。
+ *
+ *  用于训练阶段耗时（Topbar 阶段 chip）与任何「已经走了多久」的读数。
+ *  秒以下不显示（阶段量级是分钟到小时，秒以下的抖动是噪声）；整分/整时不带 `0s`/`0m`。 */
+export function fmtElapsed(ms: number | null | undefined): string {
+  if (ms == null || ms < 0) return '—'
+  const s = Math.floor(ms / 1000)
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  const rs = s % 60
+  if (m < 60) return `${m}m${rs > 0 ? ` ${rs}s` : ''}`
+  const h = Math.floor(m / 60)
+  const rm = m % 60
+  return `${h}h${rm > 0 ? ` ${rm}m` : ''}`
+}

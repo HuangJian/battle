@@ -94,11 +94,11 @@ export function OpenCourseModal({
       >
         <h3>开课 {course}</h3>
         {readOnly ? (
-          <p className="tc-banner tc-banner--ro" style={{ margin: 0 }}>
+          <p className="tc-banner tc-banner--ro tc-banner--flush">
             🔒 只读模式：开课/停课仅限本机 localhost 打开控制台操作。
           </p>
         ) : null}
-        <p className="tc-muted tc-small" style={{ marginTop: 0 }}>
+        <p className="tc-muted tc-small tc-mt-0">
           开课 = 把这门课**放进训练**：写课程级旋钮（<code>rl-config.json</code> 的{' '}
           <code>courses.{course}.*</code>）+ 建发现事实（
           <code>tmp/{course}/training_log.jsonl</code> 与 <code>remote-jobs/</code>）+ 解除暂停意图
@@ -107,9 +107,7 @@ export function OpenCourseModal({
           停课则相反（写暂停意图 + hub 置离线，队列与账本一个字不动）。
         </p>
         <div className="tc-line">
-          <span className="tc-muted tc-small" style={{ minWidth: 90 }}>
-            训练模式
-          </span>
+          <span className="tc-muted tc-small tc-launch__lbl">训练模式</span>
           <SegmentedControl<TrainMode>
             value={trainMode}
             ariaLabel="训练模式"
@@ -121,7 +119,7 @@ export function OpenCourseModal({
           />
         </div>
         {trainMode === 'offline' ? (
-          <p className="tc-muted tc-small" style={{ marginTop: -4 }}>
+          <p className="tc-muted tc-small tc-hint">
             离线（缺省在线）：本机**不跑** rollout/PPO。开课后本课 <code>rollout_src=run</code> +{' '}
             <code>run_iters=-1</code>（整段），hub 该课置 offline——整段 job 只交给**带标**
             worker（云机跑 <code>battle.offline.ipynb</code>）； 也可停课后在「导出」里拿{' '}
@@ -130,9 +128,7 @@ export function OpenCourseModal({
         ) : (
           <>
             <div className="tc-line">
-              <span className="tc-muted tc-small" style={{ minWidth: 90 }}>
-                rollout
-              </span>
+              <span className="tc-muted tc-small tc-launch__lbl">rollout</span>
               <SegmentedControl<RolloutSrcMode>
                 value={rolloutSrc}
                 ariaLabel="rollout 执行位置"
@@ -144,7 +140,7 @@ export function OpenCourseModal({
                 onChange={setRolloutSrc}
               />
             </div>
-            <p className="tc-muted tc-small" style={{ marginTop: -4 }}>
+            <p className="tc-muted tc-small tc-hint">
               rollout 位置：本机 = 本机采样 + 只把 PPO 送云； 上云（节点）= 本轮**整轮**上云； auto
               = 不表态，交回 <code>rl.rollout_src</code> 解析。写的是**本课**的覆盖 （
               <code>courses.{course}.rollout_src</code>）——不碰其它课程共用的默认面。

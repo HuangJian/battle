@@ -48,9 +48,6 @@ function upMbps(w: IterWire): string {
   return `${((w.upBytes * 8) / w.upSec / 1e6).toFixed(1)} Mbps`
 }
 
-const TH = { textAlign: 'left' as const, padding: '2px 6px', whiteSpace: 'nowrap' as const }
-const TD = { padding: '2px 6px', whiteSpace: 'nowrap' as const }
-
 function WireNow({ row }: { row: IterRow }) {
   const w = row.wire ?? null
   if (!w) return null
@@ -63,30 +60,24 @@ function WireNow({ row }: { row: IterRow }) {
   ]
   const worker = w.worker
   return (
-    <div style={{ marginBottom: 8 }}>
+    <div className="tc-mb-2">
       <div className="tc-small">
         <strong>本轮 it{row.iter}</strong> <span className="tc-muted">{row.time}</span>
       </div>
-      <table style={{ marginTop: 4 }}>
+      <table className="tc-wire__tbl tc-mt-1">
         <tbody>
           {items.map(([k, v]) => (
             <tr key={k}>
-              <th style={TH} className="tc-muted tc-small">
-                {k}
-              </th>
-              <td style={TD} className="tc-small">
-                {v}
-              </td>
+              <th className="tc-muted tc-small">{k}</th>
+              <td className="tc-small">{v}</td>
             </tr>
           ))}
           {/* worker 侧拆分（键集不固定，逐项列出——M0/M2 先后加过键，不硬编码白名单）。 */}
           {worker
             ? Object.entries(worker).map(([k, v]) => (
                 <tr key={`w.${k}`}>
-                  <th style={TH} className="tc-muted tc-small">
-                    worker.{k}
-                  </th>
-                  <td style={TD} className="tc-small">
+                  <th className="tc-muted tc-small">worker.{k}</th>
+                  <td className="tc-small">
                     {v === null ? '—' : k.endsWith('_bytes') ? fmtBytes(v) : v.toFixed(2)}
                   </td>
                 </tr>
@@ -94,7 +85,7 @@ function WireNow({ row }: { row: IterRow }) {
             : null}
         </tbody>
       </table>
-      <div className="tc-small tc-muted" style={{ marginTop: 4 }}>
+      <div className="tc-small tc-muted tc-mt-1">
         协议 {w.protocol ?? '—'} · 边缘 IP {w.edgeIp ?? '—'} · 瘦身{' '}
         {w.slim === null ? '—' : w.slim ? '开' : '关'} · rollout 源 {w.rolloutSrc ?? '—'}
       </div>
@@ -107,34 +98,22 @@ function WireTrend({ rows }: { rows: IterRow[] }) {
   const withWire = rows.filter((r) => (r.wire ?? null) !== null).slice(0, 12)
   if (withWire.length === 0) return null
   return (
-    <div style={{ marginBottom: 8 }}>
-      <div className="tc-small" style={{ marginBottom: 4 }}>
+    <div className="tc-mb-2">
+      <div className="tc-small tc-mb-1">
         <strong>最近 {withWire.length} 轮</strong>
       </div>
-      <table style={{ width: '100%' }}>
+      <table className="tc-wire__tbl tc-wire__tbl--full">
         <thead>
           <tr>
-            <th style={TH} className="tc-small tc-muted">
-              it
-            </th>
-            <th style={TH} className="tc-small tc-muted">
-              上行
-            </th>
-            <th style={TH} className="tc-small tc-muted">
-              上行秒
-            </th>
-            <th style={TH} className="tc-small tc-muted">
-              下行
-            </th>
-            <th style={TH} className="tc-small tc-muted" title="打包 tar.xz（关键路径上）">
+            <th className="tc-small tc-muted">it</th>
+            <th className="tc-small tc-muted">上行</th>
+            <th className="tc-small tc-muted">上行秒</th>
+            <th className="tc-small tc-muted">下行</th>
+            <th className="tc-small tc-muted" title="打包 tar.xz（关键路径上）">
               打包
             </th>
-            <th style={TH} className="tc-small tc-muted">
-              blob
-            </th>
-            <th style={TH} className="tc-small tc-muted">
-              协议 / 瘦身
-            </th>
+            <th className="tc-small tc-muted">blob</th>
+            <th className="tc-small tc-muted">协议 / 瘦身</th>
           </tr>
         </thead>
         <tbody>
@@ -142,25 +121,13 @@ function WireTrend({ rows }: { rows: IterRow[] }) {
             const w = r.wire as IterWire
             return (
               <tr key={r.iter}>
-                <td style={TD} className="tc-small">
-                  {r.iter}
-                </td>
-                <td style={TD} className="tc-small">
-                  {fmtBytes(w.upBytes)}
-                </td>
-                <td style={TD} className="tc-small">
-                  {sec(w.upSec)}
-                </td>
-                <td style={TD} className="tc-small">
-                  {fmtBytes(downBytesOf(w))}
-                </td>
-                <td style={TD} className="tc-small">
-                  {sec(w.packSec)}
-                </td>
-                <td style={TD} className="tc-small">
-                  {w.blobsMiss === null ? '—' : String(w.blobsMiss)}
-                </td>
-                <td style={TD} className="tc-small">
+                <td className="tc-small">{r.iter}</td>
+                <td className="tc-small">{fmtBytes(w.upBytes)}</td>
+                <td className="tc-small">{sec(w.upSec)}</td>
+                <td className="tc-small">{fmtBytes(downBytesOf(w))}</td>
+                <td className="tc-small">{sec(w.packSec)}</td>
+                <td className="tc-small">{w.blobsMiss === null ? '—' : String(w.blobsMiss)}</td>
+                <td className="tc-small">
                   {w.protocol ?? '—'} / {w.slim === null ? '—' : w.slim ? '开' : '关'}
                 </td>
               </tr>
@@ -180,7 +147,7 @@ function legLabel(leg: string): string {
 function TunnelAbRunTable({ run }: { run: TunnelAbRun }) {
   const mb = run.bytes > 0 ? `${(run.bytes / 1024 / 1024).toFixed(0)}MiB` : '?'
   return (
-    <div style={{ marginBottom: 10 }}>
+    <div className="tc-mb-3">
       <div className="tc-small">
         <strong>{run.file}</strong>{' '}
         <span className="tc-muted" title={fmtTs(run.mtime)}>
@@ -190,56 +157,34 @@ function TunnelAbRunTable({ run }: { run: TunnelAbRun }) {
           {mb} × {run.rounds} 发
         </span>
       </div>
-      <table style={{ marginTop: 4 }}>
+      <table className="tc-wire__tbl tc-mt-1">
         <thead>
           <tr>
-            <th style={TH} className="tc-small tc-muted">
-              腿
-            </th>
-            <th style={TH} className="tc-small tc-muted" title="push 模式的真实大头是上行">
+            <th className="tc-small tc-muted">腿</th>
+            <th className="tc-small tc-muted" title="push 模式的真实大头是上行">
               方向
             </th>
-            <th style={TH} className="tc-small tc-muted">
-              p50
-            </th>
-            <th style={TH} className="tc-small tc-muted">
-              p90
-            </th>
-            <th style={TH} className="tc-small tc-muted">
-              max
-            </th>
-            <th style={TH} className="tc-small tc-muted">
-              吞吐
-            </th>
+            <th className="tc-small tc-muted">p50</th>
+            <th className="tc-small tc-muted">p90</th>
+            <th className="tc-small tc-muted">max</th>
+            <th className="tc-small tc-muted">吞吐</th>
           </tr>
         </thead>
         <tbody>
           {run.rows.map((r) => (
             <tr key={`${r.leg}.${r.dir}`}>
-              <td style={TD} className="tc-small">
-                {legLabel(r.leg)}
-              </td>
-              <td style={TD} className="tc-small">
-                {r.dir === 'up' ? '上行' : '下行'}
-              </td>
-              <td style={TD} className="tc-small">
-                {sec(r.stat.p50Sec)}
-              </td>
-              <td style={TD} className="tc-small">
-                {sec(r.stat.p90Sec)}
-              </td>
-              <td style={TD} className="tc-small">
-                {sec(r.stat.maxSec)}
-              </td>
-              <td style={TD} className="tc-small">
-                {r.stat.p50Mbps.toFixed(1)} Mbps
-              </td>
+              <td className="tc-small">{legLabel(r.leg)}</td>
+              <td className="tc-small">{r.dir === 'up' ? '上行' : '下行'}</td>
+              <td className="tc-small">{sec(r.stat.p50Sec)}</td>
+              <td className="tc-small">{sec(r.stat.p90Sec)}</td>
+              <td className="tc-small">{sec(r.stat.maxSec)}</td>
+              <td className="tc-small">{r.stat.p50Mbps.toFixed(1)} Mbps</td>
             </tr>
           ))}
         </tbody>
       </table>
       {run.speedup.up !== null || run.speedup.down !== null ? (
-        <div className="tc-small" style={{ marginTop: 4 }}>
+        <div className="tc-small tc-mt-1">
           {run.speedup.up !== null ? (
             <span className="tc-badge tc-badge--g">
               http2 上行 p50 快 {run.speedup.up.toFixed(1)}×
@@ -262,7 +207,7 @@ export function WirePanel({ stateView, course }: WirePanelProps) {
 
   return (
     <div>
-      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
+      <div className="tc-line tc-mb-2">
         <span className="tc-badge tc-badge--a">传输账 wire</span>
         {latest?.wire?.protocol ? (
           <span className="tc-badge tc-badge--gray">隧道 {latest.wire.protocol}</span>
@@ -276,7 +221,7 @@ export function WirePanel({ stateView, course }: WirePanelProps) {
       </div>
 
       {latest === null ? (
-        <div className="tc-caption" style={{ marginBottom: 10 }}>
+        <div className="tc-caption tc-mb-3">
           尚无传输账：账本里还没有带 <code>wire</code> 子字典的 iteration 行（该字段 2026-09-17 随
           M0 上线）；旧行无此键是预期空态，不是故障。
         </div>
@@ -286,9 +231,9 @@ export function WirePanel({ stateView, course }: WirePanelProps) {
 
       <WireTrend rows={rows} />
 
-      <div style={{ borderTop: '1px solid var(--line, #ddd)', margin: '10px 0' }} />
+      <div className="tc-wire__sep" />
 
-      <div className="tc-small" style={{ marginBottom: 4 }}>
+      <div className="tc-small tc-mb-1">
         <strong>隧道 A/B 探针</strong>{' '}
         <span className="tc-muted tc-small">
           {course ? `本机闭环 · 与课程无关` : ''}（`tmp/tunnel-ab-*.json`，新→旧）

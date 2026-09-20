@@ -21,6 +21,10 @@ import type {
 import { EVAL_METRIC_KEYS, EVAL_METRIC_LABELS, buildEvalCsv, rungLabel } from '../view'
 import { Badge, Pill } from '../components/Pill'
 import { DataTable, type Col } from '../components/DataTable'
+import { InlineNotice } from '../components/InlineNotice'
+import { Shell } from './shell/Shell'
+import { NavSidebar } from './shell/NavSidebar'
+import { Topbar } from './shell/Topbar'
 import { EvalMatrix } from './panels/eval-matrix'
 import { fetchEvalBoard, postAction } from './lib/api-client'
 import { usePolling } from './lib/usePolling'
@@ -321,29 +325,40 @@ export function EvalApp({
   }, [ladderIter, options.readOnly, refresh, triggerCourse])
 
   return (
-    <div className="tc-evalpage">
-      <header className="tc-evalpage__hd">
-        <h1>EvalBoard 评估页</h1>
-        <div className="tc-row tc-small">
-          <a className="tc-btn tc-btn--sm" href="/">
-            ‹ 返回控制台
-          </a>
-          <button type="button" className="tc-btn tc-btn--sm" onClick={() => void refresh()}>
-            刷新
-          </button>
-          <button
-            type="button"
-            className="tc-btn tc-btn--sm"
-            disabled={!primary}
-            onClick={onExport}
-            title="导出当前视图（受指标显隐影响）：UTF-8 BOM + RFC4180"
-          >
-            导出 CSV
-          </button>
-        </div>
-      </header>
+    <Shell
+      sidebar={
+        <NavSidebar activePath="/eval" course={courses[0] ?? ''} readOnly={options.readOnly} />
+      }
+      topbar={
+        <Topbar
+          page="eval"
+          stateView={null}
+          phaseElapsedMs={null}
+          trainingCount={0}
+          courseCount={0}
+          nodeSummary={null}
+          onRefreshNow={() => void refresh()}
+        />
+      }
+    >
+      {/* 页内工具行：标题与导航已由外壳承担（2026-09-20），这里只剩本页自己的动作。
+          原先头部那个「‹ 返回控制台」链接已删——侧栏六个入口取代了它（进去就出不来的断层）。 */}
+      <div className="tc-line tc-small">
+        <button type="button" className="tc-btn tc-btn--sm" onClick={() => void refresh()}>
+          刷新
+        </button>
+        <button
+          type="button"
+          className="tc-btn tc-btn--sm"
+          disabled={!primary}
+          onClick={onExport}
+          title="导出当前视图（受指标显隐影响）：UTF-8 BOM + RFC4180"
+        >
+          导出 CSV
+        </button>
+      </div>
 
-      <section className="tc-evalpage__courses">
+      <section className="tc-line tc-small" aria-label="评估课程（可多选）">
         <b>课程</b>{' '}
         {options.allCourses.map((c) => (
           <label key={c} className="tc-small">
@@ -394,11 +409,7 @@ export function EvalApp({
         </div>
       ) : null}
 
-      {flash ? (
-        <p className="tc-small" role="status">
-          {flash}
-        </p>
-      ) : null}
+      {flash ? <InlineNotice>{flash}</InlineNotice> : null}
       {error ? (
         <div className="tc-banner tc-banner--err" role="alert">
           {error}
@@ -672,6 +683,6 @@ export function EvalApp({
           </button>
         </div>
       </section>
-    </div>
+    </Shell>
   )
 }

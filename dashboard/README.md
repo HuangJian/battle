@@ -78,11 +78,26 @@ src/
     eval-board/     评估板端点（视图合成 / 入账 / 探针 / 自动爬梯）
     iters.ts pool-history.ts exit-watchdog.ts build.ts
   web/         SSR + 浏览器 UI（禁 IO / 禁 node: / 禁 Bun 全局，有构建期禁词门禁）
-    view/           共享视图类型与纯函数（客户端安全，唯一事实源）
-    components/     通用 UI 原子（DataTable / TrendChart / Pill …）
+    view/           共享视图类型与纯函数（客户端安全，唯一事实源；`routes.ts` = 路由真相；
+                    `metric-columns.ts` = 逐轮指标列的**唯一一份**：表头文字/hover 口径/数字对齐，
+                    首页速览表与 /metrics 完整表都从它取，列顺序也只在那里）
+    components/     通用 UI 原子（DataTable / TrendChart / Pill …）；**P1 起的行/反馈原语**：
+                    StatusRow（行：状态点·名称·值·徽章·元信息·动作，含显式折叠头）/
+                    StatusDot / SectionHeader / Empty（四态）/ InlineNotice（面板内动作结果一行）；
+                    **P2b 起的总览两块**：AlertDock（告警坞：排序/折叠在 view/alerts.ts）/
+                    KpiStrip（六格 KPI 条：取值/口径在 view/kpi.ts）
+                    —— 「同一语义只有一个原语」，不要在面板里自绘（docs/dashboard-redesign.md §4.2）；
+                    坞与 KPI 的领域判据全在 view/ 的纯函数里（组件只管折叠开关与动作绑定）
     app/            SSR 首屏 + hydrate 的浏览器应用（app / log / eval 三入口 + panels）
+      shell/        应用外壳：Shell（只收**节点**，纯布局）/ NavSidebar（品牌 + 分组导航，
+                    全站共用）/ Sidebar（= NavSidebar + 控制台专有的课程·门禁·刷新区）/ Topbar
+                    （`page: AnyPageKey`，`stateView=null` 时退成「标题 + 刷新」不伪造读数）
+      app.tsx       外壳 + 路由页面分派（/ · /metrics · /nodes · /wire，服务端 stamp `page`）
+      eval-app.tsx  评估页：同样套 Shell + NavSidebar（独立 bundle，见 P3b）
+      log-app.tsx   日志页：同上（页头只说「哪个组件」，页名由外壳顶栏给）
     render.tsx theme.ts
-tests/        52 个本子系统的测试（原根 tests/ 的同名文件迁入 + 两巨型文件按分层拆开）
+tests/        98 个本子系统的测试（原根 tests/ 的同名文件迁入 + 两巨型文件按分层拆开；
+              web-style-discipline.test.ts = 样式纪律闸：字号阶梯 / 内联样式 / 色值 token）
 data/evalboard/  EvalBoard 账本数据根（默认值；EVALBOARD_DATA 可覆盖）
 ```
 
@@ -90,8 +105,35 @@ data/evalboard/  EvalBoard 账本数据根（默认值；EVALBOARD_DATA 可覆�
 
 测试**镜像 `src/` 的模块**（AGENTS §8）：一个测试文件对应它覆盖的那个模块，
 文件名形如 `web-view-rows` ↔ `src/web/view/rows.ts`、`server-api-pool` ↔
-`src/server/api`。dashboard 侧的 306 个用例在 52 个文件里，拆分产出的文件最大 264 行
-（单节走势图；其余均 <170 行）。
+`src/server/api`。dashboard 侧当前 **964 个用例 / 98 个文件**（2026-09-20；合入 `origin/goal-nn` 前为 889 / 94，
+P4a 样式纪律闸前为 878 / 93，
+P3c 列模型前为 867 / 92，
+P3b 独立页套壳前为 863 / 92，P2b 告警坞+KPI 条前为 804 / 90，P2a 课程矩阵前为 776 / 88，
+P1 行原语前为 746 / 87，重设计前基线 717 / 86），拆分产出的文件最大 264 行（单节走势图；其余 <170 行）。
+
+> ⚠ **样式层没有任何断言**：整份 `theme.css` 被内联进 SSR 的 `<style>`，因此**裸类名/裸字符串断言
+> 永远为真**（断言的是样式表，不是 DOM）——切出 `#root` 再断言（三个 SSR 测试文件均如此：
+> `web-ssr-console.test.ts::body()` / `web-ssr-eval-page.test.ts` / `web-ssr-log-page.test.ts`）。
+> **已咬过三次**：① P3b 删掉日志页「← 返回控制台」按钮后，那条
+> `expect(html).toContain('返回控制台')` **仍然通过**——满足它的是新写的一条 CSS **注释**；
+> ② 反过来也成立：`.tc-evalpage*` 写在标记里、样式表里**一条规则都没有**（从建页起就没样式），
+> 而测试看不见；③ `.tc-row` 同名**两套定义**，后者静默覆盖前者，前一套白写了很久（审记 C16）。
+> 纪律：**对 `html` 的裸字符串断言不可信**——断言 DOM 先切 `#root`，断言样式则读源文件。
+> 更极端的一类：**未定义的 CSS token 不会报错也不会崩**，只是那条声明静默失效
+> （实例：`var(--line)` 用了四处而 `--line` 从未定义，两个徐章没描边、矩阵操作列竖线不可见很久
+> 无人发现；见 `docs/dashboard-redesign.md` 审记 C15）。改样式后请 `grep` 新 token 有没有定义。
+>
+> ✅ **样式纪律现在有闸了**：`tests/web-style-discipline.test.ts`（P4a 起）用**源文件级扫描**管住
+> 三件容易静默退化的事——字号必须取自 `--fs-*` 阶梯（旧 `--fs-1..--fs-5` 不得复活）、
+> 除 `TrendChart` 的 3 处计算值外不得有内联布局 `style=`、十六进制色值只允许两处 SVG 豁免。
+> **要加新的样式纪律就往那里加一条**（同类闸的坑与前提闸写法见该文件头注与
+> `DECISIONS.md §2026-09-20-dashboard-shell-routing — P4a 续`）。
+
+> ⚠ **web 用例只能断言结构，挡不住交互缺陷**：本仓 web 测试全部是 SSR（无 `happy-dom`/`jsdom`），
+> 而 `preact-render-to-string` **丢弃全部事件处理器**（实测 `h('pre', {onClick}, 'x')` → `<pre>x</pre>`）
+> —— 一个挂了隐藏点击区的元素和没挂的，渲染出的 HTML 一模一样。所以「点这里会误触收起」
+> 这类缺陷靠读代码评审，别以为写了断言就守住了（实例与结论：`DECISIONS.md
+> §2026-09-20-dashboard-shell-routing` 的「P1 续」第 2 条）。
 
 按关注点聚合的两个巨型测试文件已按上表分层拆完：`training-console-preact.test.ts`
 （1234 行 / 19 个 describe）与 `training-console.test.ts`（1354 行 / 17 个 describe，

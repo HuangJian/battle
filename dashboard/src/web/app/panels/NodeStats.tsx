@@ -56,11 +56,7 @@ const poolColumns: Col<NodeHistoryRow>[] = [
     cell: (r) => (
       <b>
         {r.id}
-        {r.kind === 'local' ? (
-          <span className="tc-muted" style={{ fontWeight: 400 }}>
-            （本机直跑）
-          </span>
-        ) : null}
+        {r.kind === 'local' ? <span className="tc-muted tc-muted--plain">（本机直跑）</span> : null}
       </b>
     ),
   },
@@ -189,7 +185,7 @@ function rowExpand(r: NodeHistoryRow) {
         </div>
       )}
       {r.lastError ? (
-        <div className="tc-errtext" style={{ marginTop: 6 }}>
+        <div className="tc-errtext tc-mt-2">
           错误明细：{r.lastError}
           {r.lastFailTs ? <span className="tc-muted">（{r.lastFailTs}）</span> : null}
         </div>
@@ -245,8 +241,8 @@ export function NodeStats({ enabled, poolFreshNonce, course }: NodeStatsProps) {
     : all
   const st = pool.selfStatus
   return (
-    <div className="tc-drawer__panel">
-      <div className="tc-toolbar" style={{ padding: '0 0 8px' }}>
+    <div className="tc-panelbody">
+      <div className="tc-toolbar tc-toolbar--flush">
         {st ? (
           <span className="tc-badge tc-badge--a">
             workers {st.workers} · inflight {st.inflight} · done {st.gamesDoneTotal}
@@ -269,7 +265,7 @@ export function NodeStats({ enabled, poolFreshNonce, course }: NodeStatsProps) {
             缓存 {st.resultCacheItems}/{fmtBytes(st.resultCacheBytes)}
           </span>
         ) : null}
-        <label className="tc-toggle tc-small" style={{ marginLeft: 'auto' }}>
+        <label className="tc-toggle tc-small tc-push-right">
           <input
             type="checkbox"
             checked={showOnlyBad}
@@ -290,7 +286,7 @@ export function NodeStats({ enabled, poolFreshNonce, course }: NodeStatsProps) {
         emptyText="无节点历史数据"
         ariaLabel="节点统计"
       />
-      <p className="tc-caption" style={{ border: 'none', padding: '8px 0 0' }}>
+      <p className="tc-caption tc-caption--flush">
         状态 = 最近 10 次结算完成率（≥90% 健康 / ≥70% 波动 / &lt;70% 异常）；ping
         仅实时参考。平均耗时 = 最近 50 局节点侧服务时长滑动平均（接单→结果就绪，不含网络）。
         机侧墙钟 = 训练机派发→结算（含网络/轮询）；历史 meta 无 wallSec 时显示 -。

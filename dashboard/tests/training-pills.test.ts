@@ -11,7 +11,8 @@
  *   ② **推导**（视图层纯函数）：每门课 → it 指针 + 一句状态 + tone；队列视图里没有它时
  *      报「视图不可用」而不是编一个「空闲」（缺状态 ≠ 没卡住）；
  *   ③ **上屏**（SSR）：pill 行渲染课名/it/状态/■ 停课；当前查看的那门高亮；没有在训课程时
- *      整行不渲染（空行会被读成「有东西没加载出来」）；
+ *      整行不渲染（空行会被读成「有东西没加载出来」）；位置 = **顶栏内**（P0 重设计后
+ *      课程选择器住侧栏，pill 不再与它同行；开课键紧挨选择器）—— 见下面那条布局用例；
  *   ④ **动作接线**：点 pill 切查看课程（趋势图 + 指标表跟着走）、■ 停课带**显式课程名**
  *      （点 A 课的 ■ 必须停 A——兜底成「当前查看课程」在没同步时会停错一门）。
  *
@@ -155,7 +156,12 @@ describe('buildStateView：trainingCourses = 已开课（开课标记），不�
     course('x1-rebirth', false)
     course('x20-floor', false)
     course('c6-chip', true)
-    const s = await api.buildStateView()
+    // ★ 课程**显式传**：`courseLifecycle` 是「查看课程」的属性，而不传参时它是
+    //   `effectiveCourse(state, courses)` **推**出来的（默认 = 最近活跃课）——那个默认值
+    //   挂在真实工作目录的残影上（`--parallel` 下同进程的其它文件会写真实 tmp/ 与
+    //   nn-training/*.lock），于是这个断言变成看环境的。本用例要钉的是「已开课的判据 =
+    //   开课标记」，那就把课程钉死，别把结论挂在「谁的残影更新」上。
+    const s = await api.buildStateView('c6-chip')
     expect(s.trainingCourses).toEqual(['c6-chip'])
     expect(s.courseLifecycle?.enabled).toBe(true)
   })
@@ -239,19 +245,33 @@ describe('顶部在训课程 pill 行（SSR）', () => {
     expect(html).not.toContain('class="tc-tpills"')
   })
 
-  it('pill 与课程 select 在同一行（顶栏行内，不再自占一行——纵向空间）', async () => {
+  it('pill 行在顶栏内、开课键在侧栏课程选择器旁（提交后的 IA：选择器已在侧栏）', async () => {
     const html = render.renderConsolePage(await viewWithPills())
-    const row = html.indexOf('tc-topbar__row')
-    const course = html.indexOf('tc-topbar__course')
-    const pills = html.indexOf('class="tc-tpills"')
-    const headerEnd = html.indexOf('</header>')
-    expect(row).toBeGreaterThan(-1)
-    // 同一行 = 栏行内、且先后出现课程 select → pill；在 </header> 之外 = 又单开了一行
-    expect(course).toBeGreaterThan(row)
-    expect(pills).toBeGreaterThan(course)
-    expect(pills).toBeLessThan(headerEnd)
-    // 开课按键也在同一行且排在 pill 之前（视觉读序：选课 → 开课 → 看哪几门在训）
-    expect(html.indexOf('>训练</button>')).toBeLessThan(pills)
+    // ★ 必须先切掉 <head>：整份 theme.css 内联在首帧里，而**旧布局**的类名
+    //   （`tc-topbar__row` / `tc-topbar__course` / `.tc-topbar` 本身）仍留在样式表中 ——
+    //   不切片的 indexOf 会被样式表满足，于是「pill 在顶栏行内」这类断言在 DOM 完全
+    //   错位时照样是绿的（本仓已踩过三次：C15/C16/C18；合并时这条正是从假绿改过来的）。
+    const doc = html.slice(html.indexOf('id="root"'))
+    const side = doc.indexOf('class="tc-side"')
+    const course = doc.indexOf('id="courseSel"')
+    const open = doc.indexOf('>训练</button>')
+    const top = doc.indexOf('class="tc-top"')
+    const pills = doc.indexOf('class="tc-tpills"')
+    const topEnd = doc.indexOf('</header>')
+    expect(side).toBeGreaterThan(-1) // 前提：侧栏在场（否则下面的序判定会退化成比 -1）
+    expect(course).toBeGreaterThan(-1)
+    expect(open).toBeGreaterThan(-1)
+    expect(top).toBeGreaterThan(-1)
+    expect(pills).toBeGreaterThan(-1)
+    expect(topEnd).toBeGreaterThan(-1)
+    // 侧栏在顶栏之前，且：侧栏内 课程选择器 → 开课键；顶栏内 pill 行（不是又单开一行）
+    expect(top).toBeGreaterThan(side)
+    expect(course).toBeGreaterThan(side)
+    expect(open).toBeGreaterThan(course)
+    expect(pills).toBeGreaterThan(top)
+    expect(pills).toBeLessThan(topEnd)
+    // 读序：选课 → 训练 → 看哪几门在训（两者分居侧栏/顶栏，序由外壳的 DOM 序保证）
+    expect(open).toBeLessThan(pills)
   })
 
   it('顶部「训练」按键恒在（开课入口与进程启动解耦），停课不在顶栏', async () => {

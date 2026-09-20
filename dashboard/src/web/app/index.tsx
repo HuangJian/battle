@@ -6,10 +6,10 @@ import {
   cleanupNonTcKeys,
   LEGACY_KEY_RULES,
   migrateLegacyKey,
-  type ConsoleStateView,
+  type ConsoleBootstrap,
 } from '../view'
 
-declare const window: Window & { __INITIAL__?: ConsoleStateView }
+declare const window: Window & { __INITIAL__?: ConsoleBootstrap }
 
 const data = window.__INITIAL__
 if (!data) throw new Error('missing window.__INITIAL__（首屏 SSR 应内联 /api/state 快照）')

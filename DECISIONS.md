@@ -3957,6 +3957,328 @@ F1/F3 是 `nn-training/**`（不在 SSOT）⇒ 无需 push。另：F2 改动期�
 
 ---
 
+## §2026-09-20-dashboard-shell-routing（2026-09-20，训练控制台信息架构重设计 P0：应用外壳 + 路由化详情页；**路由实现 = 单 bundle + 服务端路由 SSR + pushState**）
+
+**背景**：控制台是单列纵向堆叠的 12 个平权面板（无分区/无导航），四类详情（指标/传输/节点统计/日志）
+住在全屏模态抽屉里（**没有 URL**：看不到也分享不了「我在看这个视图」），课程选择器（整页主语）被
+`flex: 1` 挤在顶栏正中间与状态 chip 抢权重，底部还有一段 299 字的说明文字占了主版面最长的文本块。
+全部问题按编号列在 `docs/dashboard-redesign.md` §1.2（C1–C13），目标形态在 §3。
+
+**决定（P0 已落地）**：
+1. **外壳**：`Sidebar(216px) + Topbar(56px) + 主内容`（`web/app/shell/{Shell,Sidebar,Topbar}.tsx`）。
+   课程选择器 + 触发门禁 + 刷新间隔一并移入**侧栏底部**——课程是整页主语，位置固定且全页唯一；
+   顶栏只剩「本页（标题 + 这一页回答什么）」与「全局状态（阶段/在训/节点/连接 + ⟳ + 更新时间）」。
+2. **详情路由化**：`/metrics` · `/nodes` · `/wire` 三个新路由接管原抽屉三个 tab；**`Drawer.tsx` 删除**
+   （无引用、无测试）。`/eval` 与 `/log/<key>` 维持独立页与独立 bundle，不并入控制台路由表。
+3. **路由真相只有一份**：`web/view/routes.ts`（`PageKey` / `PAGES` / `NAV_ITEMS` / `pageForPath` /
+   `bootstrapPage`，纯函数）。服务端 `server.ts` 通过 `pageForPath(url.pathname)` 判定页面并
+   `renderConsolePage(state, { page })` 注入 `window.__INITIAL__.page`，客户端据此渲染首帧。
+4. **首帧不读 `location`**：`page` 由服务端 stamp 决定（客户端用 `canonicalPath(page)` 推导航激活态），
+   挂载后的 effect 才按 URL 校准 + 监听 `popstate`。理由同既有 hydrate 纪律（SSR 无 `location`，
+   首帧读浏览器状态 = 水合错配）。
+
+**被否方案**：① **每页一个独立 bundle**（`/metrics.js` `/nodes.js` `/wire.js`）——三页共用同一份
+`/api/state` 快照，页面差异只是「渲染哪部分」；独立 bundle 换来 3 次额外构建、3 份 SSR 入口、3 套
+hydrate 路径，而收益只有体积（当前 app 包 68.7KB / 预算 150KB，远未吃满）。② **保留模态抽屉只重做视觉**
+——C2 的核心损失是「没有 URL + 打断监控上下文」，换皮不解决。③ **只读时物理禁用动作按钮**
+（原设计倾向）——owner 拍板维持既有哲学（物理禁用会让组件区灰败破碎），只读可见性改由
+侧栏常驻 `tc-lock` 锁徽标 + 首屏一次性横幅承担（`docs/dashboard-redesign.md` §7 O1–O4）。
+
+**落地范围**：`web/view/{routes.ts,format.ts(fmtElapsed)}` · `web/app/shell/{Shell,Sidebar,Topbar}.tsx` ·
+`web/app/app.tsx`（外壳 + 四页分派）· `web/render.tsx`（`ConsolePageOpts.page`）· `web/app/index.tsx`
+（`ConsoleBootstrap`）· `server/server.ts`（页面族路由）· `theme.css`（外壳 token + 12 栏栅格 + 三档响应式）。
+**删除**：`web/components/Drawer.tsx`。**尚未做（P1–P4）**：统一行原语 `StatusRow`（现 4 套行式实现）·
+`CourseMatrix` 合并「并行课程总览 + 训练调度器」· `AlertDock` 合并 7 类横幅 · `KpiStrip` ·
+空态四态 · 底部大段说明拆进各页口径折叠块 · 字号阶梯全量替换（现正文仍 11.5–12.5px）。
+
+**配套回归**（新增/改写）：`tests/web-view-routes.test.ts`（新，22 例：路径归一化/往返一致/URL 带课程/
+导航激活/路由表结构约束/引导载荷三层回退）· `web-ssr-console.test.ts`（改用 `#root` 切片断言 DOM——
+整个 `theme.css` 被内联进 `<style>`，类名断言此前靠样式表文本**假通过**；顺带揪出 `tc-cc__name` 只存在于
+CSS 里的空断言）· `web-wire-panel-wiring.test.ts`（抽屉接线 → 路由表/服务端/分派三处接线）·
+`web-ssr-readonly.test.ts`（角标 `tc-badge--ro` → 侧栏 `tc-lock`；标签文案「正在训练：」→「还有在训：」
+——后者会被读成「当前查看的这门在训」，而标签列的恰恰是别的课）。
+
+**证据**：`cd dashboard` — `bun run typecheck` ✓ · `oxlint` 0 警告 0 错误 · `bun run test` **746 pass / 0 fail**
+（P0 前基线 717 pass / 86 文件）· `bun src/server/build.ts` 三份 bundle 全绿（app 68.7KB gzip）。
+
+**已知局限**：① P0 只做外壳与路由，页面内仍是单列堆叠（栅格与面板归组是 P1/P2）；② 概览页三个面板
+（`MetricsTable`/`NodeStats`）仍带 `tc-drawer__panel` 类——抽屉没了但类名沿用，重命名随 P3 的 CSS 清理；
+③ `LogNavCard` 暂留在总览底部（与组件卡的「≡ 日志」入口职责有重叠，是否下线待 P3 定）。
+
+**P1 续（同一轮工作：行原语）**：四套「一行实体 + 状态 + 指标 + 动作」实现（`tc-comps` chip /
+`tc-npill` / `tc-wreg__pill` / `tc-cov__row`·`tc-loopq__row`）收敛为 `StatusRow` 单一原语
+（配 `StatusDot` / `SectionHeader` / `Empty`）；组件卡、节点行、worker 登记行已迁移，
+课程矩阵两行随 P2 合并时迁移。同类问题的第二个实例一并收敛（`docs/dashboard-redesign.md` §1.2
+新增 **C14**）：**动作结果反馈 6 处手写、5 种样式**（其中一处漏了 `tc-muted` 因而不灰，一处误用
+卡片页脚样式 `tc-caption` 而多画一条上边框）→ `InlineNotice`。
+
+**决定**：
+1. **动作反馈分两层，原计划的 `Toast` 作废**：`components/Flash.tsx` **本就是**右上角浮层
+   （`position: fixed` + 8s 自动隐藏），不存在「顶部 `Flash` 行」可替代——按原计划再新增 `Toast`
+   只会造出**第七处**同类实现。定为：跨面板的全局动作 → `Flash` 浮层；面板局部动作 →
+   `InlineNotice` **就地**（「在哪个按钮旁边」正是它的信息价值，搬到屏幕角落是净损失）。
+2. **不给 dashboard web 测试加 DOM 夹具**：实测 `preact-render-to-string` **丢弃全部事件处理器**
+   （`h('pre', {onClick}, 'x')` → `<pre>x</pre>`），而本仓 web 测试全是 SSR、无 `happy-dom`/`jsdom`。
+   于是**交互行为类缺陷在 HTML 上不可观测**，断言拦不住——实例：旧 `tc-cc__detail` 是
+   `<pre onClick={close}>`，在日志尾部拖选文字一按鼠标就误收起，而任何 SSR 断言都看不见它。
+   选择**不加依赖**（MANIFEST §14 零新依赖 + dashboard 自包含纪律），改用「结构断言钉形状 +
+   交互缺陷靠读代码评审」，并把这条局限写在用例头注里。**写新 web 用例时不要以为 SSR 断言
+   守住了点击行为。**
+
+**P1 证据**：`cd dashboard` — `bun run typecheck` ✓ · `bun run test` **776 pass / 0 fail**
+（P1 前 746）· `bun src/server/build.ts` 三份 bundle 绿（app **69,987 B gzip** / 预算 150 KB）。
+
+**P2a 续（同一轮工作：课程矩阵）**：「并行课程总览」（hub 侧：注册/离线/队列/离线段）与
+「训练调度器」（训练侧：指针/卡在哪一步/在等什么）两张各写半边的表，按课程名 **outer join**
+合并为一张（C5）。新增 `web/view/course-matrix.ts`（纯函数）与 `web/app/panels/CourseMatrix.tsx`；
+**删除** `CourseOverview.tsx` · `LoopQueue.tsx` 与两套行样式（`.tc-cov__*` / `.tc-loopq__*`，~335 行 CSS）。
+合并的产出不是「少一块卡」，而是**两条从前两边的表各自都看不见的矛盾**上屏：
+
+- `在训 · hub 未注册`（warn）——rollout 在跑、hub 的课程表里没有它 ⇒ **PPO job 永远不会被派发**；
+- `hub 已注册 · 无进程`（warn）——hub 在给它派活、没有任何进程推进它 ⇒ **job 堆着没人消费**。
+  这条在合并前长得像普通的「停」（前者的两半在各自表里都完全正常）。
+
+**决定**：
+1. **矩阵用真 `<table>`，不用 `StatusRow` 芯片行**（与 `docs/dashboard-redesign.md` §4.2 的初稿相反）。
+   `StatusRow` 是 `inline-flex` 芯片行、**跨行不对齐**；矩阵七列要**竖着比**（哪门课队列最深 /
+   段内停最久），芯片拼出来的「表」同一列每行宽度不同，比较只能靠读。矩阵复用 `.tc-table` 基础
+   样式 + `tabular-nums`；**状态词表与语义档仍归 `matrixStatus` + `StatusDot` 一处**（一个状态只有
+   一个说法、一个色）——这条才是「同一语义只有一个原语」的实质。
+2. **「在训」判据两半同源，故不设「两表说法不一」的冲突**：服务端把 `trainingFromQueue`
+   （调度器存活 ∧ 该课未收官）**同时**喂给 overview 与 loopQueue，它们不会互相矛盾。会打架的是
+   **hub 注册与否 × 进程死活**，冲突判定因此建在这两条上。
+3. **状态词表择一：`未在训` 胜过 `停`**（同一局面两张表说法不同，合并必须选一个）。`停` 暗含
+   「被停过」这个我们**看不到**的事实。
+4. **矩阵两区通用**（不再 `isBc` 门控）：它是跨课程表、行自带 BC/RL 徽标；按「当前查看的课
+   是不是 BC」隐藏它，等于又回到 C5。
+
+**顺手修掉的真 bug**：原 `rowBadge` 的判据 `!hubSeen && training` 在 **hub 无应答**时也成立
+（队列整个读不到 ⇒ `hubSeen` 恒 false），于是每个在训课程都被贴上「hub 未注册」+「以 `--course`
+重启 hub」的**假诊断**，而同一张卡的表头正写着「hub 无应答」。新判据以 `hubOnline` 为前提，
+配两条回归闸（`web-course-matrix.test.ts` 与 `web-app-coursematrix.test.ts`）。
+
+**P2a 证据**：`bun run test` **804 pass / 0 fail**（90 文件；P2a 前 776 / 88）· `typecheck` ✓ ·
+`oxlint` 0/0 · `oxfmt` clean · 三份 bundle 绿（app **71,746 B gzip** / 预算 150 KB）。
+
+### §2026-09-20-dashboard-shell-routing — P2b 续（KPI 条 + 告警坞）
+
+**背景**：总览页首屏没有任何**结论性读数**（胜率/阶段/算力/队列散在 5 块卡里，要滚屏拼），
+而页面顶部同时最多堆 **6 条同权重横幅**（停机 / 已恢复 / 训练完成 / PPO 排队超时 / 课程编辑被拒 /
+只读），谁更急、哪条已被 ack 过，全靠人读文字判断；`cloudHaltAcks` / `tc.ro-banner-dismissed` 等
+本地态也因此散在 3 处各自读写。
+
+**决定**：
+1. **横幅收敛为「告警坞」（`components/AlertDock.tsx` + `view/alerts.ts`）**：条目化 + 按严重度
+   `err > warn > info > history` 排序 + 默认展 2 条、其余折成「还有 N 条 ▸」；**全空时整坞不渲染**
+   （空坞等于给「一切正常」再画一块卡）。本地态读写与判据收进 `alerts.ts` 一处，组件纯渲染。
+2. **`title` 与 `detail` 分层而不是删信息**：`title` 是「只读第一行就能决策」的结论，原来那句长文案
+   **一字未删**地降到 `detail`——弱化的是排版层级，不是信息量。
+3. **`resume`（真调 API）与 `ack`（只写本地）在类型上分开**：两者长得像「按钮」，但一个会改训练
+   状态、一个只改本机可见性；混为一谈会在只读/LAN 场景点错。只读提示的 `ack` 走**自己的固定键**
+   （`tc.ro-banner-dismissed`），不复用停机那种按事件身份（`cloudHaltAcks[<id>]`）的键。
+4. **只读横幅归 `info`，且是坞里唯一的会话属性条目**：它带「关闭」语义（与其它 5 条事件型
+   警告不同）——是**会话属性**而非事件。常驻职责仍由侧栏 `tc-lock` 徽标承担，所以关掉它不会
+   让人看不见只读态。
+5. **KPI 条只给「有时序」的两格画微型走势**（采样胜率 / eval 胜率，52×18 inline SVG，复用仓库
+   里早已存在但**零消费者**的 `sparkPoints`）。阶段 / 在训课程 / 算力 / 队列**不补一条平线**——
+   平线看起来就是一个「一直没变」的结论，比没有走势更坏；空位留给副读数。
+6. **`kpiTiles(state, nowMs)` 用顶栏那个 10s ticker 的 `now`，不取当场 `Date.now()`**：它与顶栏
+   阶段 chip 显示同一个阶段的耗时，两处秒数不一致就是 bug。
+
+**顺手补掉一个潜伏 bug（审计 C15）**：`var(--line)` 在 `.tc-cc__scope` / `.tc-mx__singleton` /
+`.tc-comps__group + .tc-comps__group` / `.tc-mx__opsep` 四处被用了很久，而 `--line` **从未定义**
+——CSS 中无后备值的 `var()` 会让**整条声明作废**，于是两个徽章的描边根本没画、矩阵操作列之间
+那条 1px 竖线**完全不可见**（P2a 落地时无人察觉，因为「少一条 1px 线」不会让任何断言变红）。
+已在 `:root` 补齐。**教训：`var(--x)` 拼错一个 token 名不会报错，只会静默丢弃整条声明——
+新写 `var()` 时先 grep 该 token 是否定义过。**
+
+**P2b 证据**：**863 pass / 0 fail**（92 文件；P2a 后 804 / 90）· `typecheck` ✓ · `oxlint` 0/0 ·
+`oxfmt` clean · 三份 bundle 绿（app **75,713 B gzip** / 预算 150 KB）。
+
+### §2026-09-20-dashboard-shell-routing — P3 续（抽屉残留清理 + 独立页共用外壳）
+
+**背景**：抽屉 P0 已删，但它的痕迹分三类留着——① `.tc-drawer*` 一整块 CSS 还在服务两个面板；
+② `tc-drawer__panel` 这个类名还在两个面板的根节点上（抽屉不存在了，名字无法自解释）；
+③ /eval 与 /log 两个**独立 bundle** 各写一个「返回控制台」链接，与控制台没有共享外壳：从侧栏
+点进「评估」后侧栏连同六个入口一起消失，那是**导航断层**（进去就出不来，想去节点页得先回总览）。
+
+**决定**：
+1. **`tc-drawer__panel` → `tc-panelbody`**（唯一两个消费者：`MetricsTable` / `NodeStats`），
+   `.tc-drawer*` 整块（mask / drawer / __hd / __tabs / __tab / __tab--on / __body / __panel）删除。
+2. **抽屉回归闸做成三通道**：① 首帧 `#root` 切片（**不含** head 里内联的样式表）无该串；
+   ② `src/web/theme.css` 无 `^\.tc-drawer` **规则**（注释里允许留旧名说明改名史，故只锤行首
+   选择器而不锤字符串）；③ 遍历 `src/web/**/*.tsx` 无该串。另加**前提闸**（`html` 必含内联样式表），
+   免得 ① 退化成永真。原断言只查 `<aside class="tc-drawer"` 一个具体标签——换标签名、或把类名
+   写进字符串拼接就漏，那不是闸是装饰。
+3. **抽 `app/shell/NavSidebar.tsx`，而不是让独立页硬套 `Sidebar`**。`SidebarProps` 要的是课程
+   选择器 / 触发门禁 / 刷新间隔——那是**控制台才拥有的全局设置**（独立页各自的轮询节奏属于页面
+   自己）。硬塞就得上假数据（下拉框里列出假的刷新间隔），拿谎话换整齐。故按「**导航 vs 全局设置**」
+   切一刀：导航全站共用（含激活判定与 `?course=` 透传），设置各页自持（由可空 `footer` 插槽注入）。
+   导航项的点击回调也做成**可空**：不传 = 原生跳转——客户端 pushState 只能在**同一个 bundle** 的
+   路由表内切页，独立页拦截四页导航等于白屏。
+4. **`Shell` 由「收 props」改成「收节点」**（`sidebar` / `topbar` 为 `ComponentChildren`）：原签名
+   已把外壳焊在控制台的数据形状上，独立页永远进不来。节点化之后外壳真的只剩布局（与它自己的
+   头注一致：状态与动作的所有权留在各页 App）。
+5. **`PAGES` 扩容为 `AnyPageKey`（四页 + eval/log）**，但保留窄的 `PageKey` 用于路由判定——
+   独立页**要读同一份元信息**（否则顶栏标题只能写成散落在两个 bundle 里的字面量，两处描述同一页
+   迟早不一致），可它们**不参与本 bundle 路由**（`pageForPath` 对它们返回 null；窄类型保证
+   `bootstrapPage` 不可能返回独立页）。`Topbar` 随之退化为可复用：`stateView=null` 时不伪造读数、
+   `onRetry`/`onRefreshNow` 可空。
+6. **两大独立页删掉自己的「返回 / 回去」链接**（由侧栏六个入口取代），页名改由外壳顶栏给；
+   /log 的组件名从 `<h1>` 降为 `.tc-loghead__title`（一面一 h1）。
+
+**顺手修掉的两个真缺陷（都是「接进来才看得见」的那类）**：
+- **C16：`.tc-row` 在 theme.css 里有两套定义，且在先的那套被静默覆盖**（同为单类选择器，后者胜）。
+  旧版是页级「一行控件」的 flex（`gap: sp-6`）+ 搭档 `.tc-col`（**零消费者**）；新版是 P1 引入的
+  芯片行（StatusRow）。后果不仅难看：`TaskBundlePanel` 与 `LogNavCard` 的作者发现「行不成行」，
+  就地用内联 `style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}` 打了补丁
+  （这直接解释了审计 C10 的一部分实例）。已删死定义，行布局统一用本就存在的 `.tc-line`，
+  并拆掉两处内联补丁。
+- **C17：`.tc-evalpage*` 三个类名从未有过任何样式**（`git log -S` 查遍历史确认：不是迁移丢的，
+  而是写在标记里就没配过）⇒ 评测页从头到尾没有页级容器（贴窗口边缘、无最大宽、无留白）。
+  同类：`.tc-wrap` 只剩日志页一个消费者，与外壳 `.tc-main__body` 职责重叠。两者一并删掉
+  ——页面容器一律由外壳给。
+
+**顺手记下的测试纪律（C18）**：删掉日志页「← 返回控制台」按钮后，那条
+`expect(html).toContain('返回控制台')` **仍然通过**——因为整个 `theme.css` 被内联进 `<style>`，
+而新写的一条 **CSS 注释**里恰好写着那几个字。**断言实际检查的是样式表文本**。两个独立页的
+测试文件已同规改为先切 `#root` 再断言（与 `web-ssr-console.test.ts::body()` 一致）。
+
+**P3 证据**：**867 pass / 0 fail**（92 文件；P2b 后 863）· `typecheck` ✓ · `oxlint` 0/0 ·
+`oxfmt` clean · 三份 bundle 绿（app **75,872 B** / log **16,046 B** / eval **21,049 B** gzip）。
+
+### §2026-09-20-metric-table-single-home（2026-09-20，总览「最新 6 轮」与 `/metrics` 整表的**单一归属**；已决，**已落地**）
+
+**背景（用户要求「把重复收掉、定一个单一归属」）**：总览 Hero 的「最新 6 轮」表与 `/metrics` 的完整
+指标表展示同一批数字。查清后区分两层「重复」：
+- **页面层：不是重复。** `docs/dashboard-redesign.md` §3.3（已批准规格）故意同时保留两者，职责不同：
+  总览 = 「最新 6 轮」**速览**（全宽、可折叠、主行/eval 双视图、evalA 入队、导出 replay）；
+  `/metrics` = **全部 iter 的完整表**（搜索 / 排序 / 列显隐）。删掉总览那份 = 推翻已批准规格里
+  的「最新 6 轮指标表：Hero 现有表格原样保留」。
+- **代码层：是真重复。** 同一套 15+ 列被**手写了两遍**：`Hero.tsx` 是 15 个 `<th>`（含各自的
+  `title` 口径文案）+ 逐格 `<td>` 格式化；`MetricsTable.tsx` 是另一套 `Col<MetricRow>`
+  （`label` + `cell` + 排序/显隐）。两套**当前标签一致**，但那是人手抄得仔细的结果，不是结构保证
+  —— 改一处漏一处的漂移是时间问题（与 C6「动作反馈 6 处手写」/ C14 同一类缺陷）。
+
+**决定（owner 2026-09-20 拍板，选项 1）**：**保留总览速览，只收「实现重复」。**
+- 单一归属 = **列模型**（每列的 `label` / `title` 口径文案 / `num` 对齐 / 值格式化）只留一份在
+  `view/`；两个页面都从它取。总览渲染它的「最近 6 行 + 少量列」**投影**，`/metrics` 仍是
+  「全量 + 搜索/排序/列显隐」的唯一权威。
+- **不**删总览那份表（不推翻 §3.3）、**不**把 DataTable 搬进总览（那要给公共组件加 minimal 模式，
+  影响面大于收益）。
+- 落地形态（待做）：`view/metric-col-specs.ts`（纯数据，无 JSX：`key/label/title/num/side`）→ `Hero`
+  主行表与 eval 表改为按 spec 渲染表头并按 `key` 取值；`MetricsTable` 的 `Col` 改为 `{ ...spec,
+  cell }`（保留它自己的排序/显隐/配对逻辑）。验收：两处表头集合由 spec 驱动，且新增一条
+  **源文件级闸**（禁止再出现手写的 `胜局耗时`/`承伤/杀` 类表头字面量两份）。
+
+**已落地（2026-09-20）**：
+- 新增 `src/web/view/metric-columns.ts`：`METRIC_COLS`（23 列 × `label`/`title`/`num`）+ 两个顺序数组
+  （`MAIN_ROW_KEYS` / `EVAL_ROW_KEYS`）+ `colsOf()`。配对四列与过拟合列的 `title` 仍引用
+  `view/format.ts` 的既有常量（那份“防两处分化”的先例就是本次扩张的模板）。
+- `Hero.tsx`：两张表的表头改由 `colsOf(...).map(colHead)` 生成（文件里只剩 colHead 一处 `<th>` 模板）；
+  空态 `colSpan` 也改由模型算 —— **顺手修了一个没人会发现的 bug**：此前手写 `colSpan={15}`，
+  而 eval 表实为 16 列，空态那一行一直少跨一格。
+- `MetricsTable.tsx`：每个列壳改为 `...colDef('<key>')`，本文件零内联 `label`/`align`/`thTitle`。
+- 新用例 `tests/web-metric-columns.test.ts`（11 例）三层：模型完整性 / **源文件级闸**（Hero 只剩
+  1 处 `<th>` 模板；MetricsTable 零内联列字段）/ **渲染级闸**（首页主行表表头逐列 = 模型；指标页
+  表每个表头都能在模型里找到且口径一字不差；**指标页 eval 模式的列序逐列等于 `EVAL_ROW_KEYS`**
+  ——这一条是「两处 = 同一份」的交叉证据）。
+- **迁移中的自伤与拦截**：我建模型时漏给 `entropy` 标 `num`，直接把 `/metrics` 的熵列从右对齐
+  改成左对齐；被新用例的数字列断言拦住。另有两处是**测试自己的错**（这也是值得记的）：`<th([^>]*)>`
+  会先匹配到 `<thead>`（断言全错位），以及「零 `<th>`」的源文件闸把我自己的注释也算进去了。
+  教训：结构类断言要么看语义（`key`/顺序），要么就得让正则真的只匹配目标标签。
+
+**两处口径变更（有意统一，非意外）**：① `熵` 列在指标页原标 `entropy`，现统一为 `熵`（与另一侧的
+中文列名一致）；② `承伤/杀` 的 hover 口径两处原本略有出入（总览多一句「越小越会周旋」），现两边
+都用更完整的那一句。
+
+**证据**：**878 pass / 0 fail**（92 文件；本次前 867）· `typecheck` ✓ · `oxlint` 0/0 · `oxfmt` clean ·
+三份 bundle 绿。
+
+### §2026-09-20-dashboard-shell-routing — P3d 续（`LogNavCard` 下线：日志入口的单一归属）
+
+**背景**：P0 遗留 ③ —— 总览底部的「组件日志入口全集」面板（`LogNavCard`）与组件卡行内的
+「≡ 日志」链接职责重叠，定案留给了 P3。
+
+**决定：下线 `LogNavCard`**。判据不是「页面太挤」，而是**同一语义两个入口**：
+1. 组件卡行内已有指向 `/log/<key>` 的链接，同一页再列一遍同一组入口 = 一语义两入口。
+2. 它那句「日志页独立轮询（follow 2s / 关 4s），上滚读历史不被拉回」描述的是**日志页自己的行为**，
+   写在总览页本属错位——已并入组件卡「≡ 日志」的 `title`（入口与它的说明住同一处）。
+3. **「全组件」并不由它承担**：日志页内自带 `<nav class="tc-logtool__nav" aria-label="组件">`
+   的逐组件 chips，从侧栏「日志」进去即可切任意组件 ⇒ 下线不丢任何路径。
+连带下线 `.tc-preset` / `.tc-preset--on` / `a.tc-preset`（唯一消费者就是它），CSS 里留一条注释
+记明去向，免得日后被当成悬空规则重加。
+
+**新发现（写在这里是因为它决定闸的形态）**：组件卡行内的日志链接是**条件渲染**的——
+`exited && error` 走 ⚠ 入口（也指向 `/log/<key>`）、`running` 走 ≡ 入口、`stopped` **两个都不渲染**。
+所以「行内入口覆盖全部状态」是假的，**真正的兜底是侧栏「日志」+ 日志页组件导航**。
+
+**能力保全闸（此前零覆盖）**：面板下线前，本仓**没有任何断言**盯着「每张组件卡能去自己的日志页」
+——链接再被删掉也不会有测试变红，最后一条路径会默默消失。新闸分两层：
+- **渲染级**：fixture 中「退出且有错」的组件的 ⚠ `href` 按 key 指向自己的 `/log/<key>`；
+  且侧栏「日志」入口在场（一个进程都没跑时它是**唯一**入口）。
+- **源文件级**：`ComponentCards.tsx` 里 `href={logHref}` **恰好 2 处**（exited ⚠ + running ≡），
+  任一支被拆掉即红。
+- **日志页内组件导航（真正的全集载体）也要逐个断言**：`web-ssr-log-page.test.ts` 此前只查
+  `toContain('/log/trainingLoop')` **一个链接**——nav 退化成一个 chip、或某组件被漏掉，它照样绿。
+  已改为「逐组件断言 + `tc-lognav` 计数恰好等于 `state.components.length`」，并加一条**前提闸**
+  （组件数 > 0），免得两者同时为 0 时退回永真。
+
+> 初版闸写成 `expect(dom).toContain('aria-label="日志 ')`，**红了**——因为 fixture 里没有任何
+> `isRunning` 的组件。这次红灯不是噪声，它暴露的正是上面那条「条件渲染」事实，闸据此才拆成两层。
+
+**证据**：**878 pass / 0 fail**（93 文件）· `typecheck` ✓ · `oxlint` 0/0 · `oxfmt` clean ·
+三份 bundle 绿（app gzip **76,297 B**，本次 −224 B / log 17,386 B / eval 22,377 B）。
+
+---
+
+### §2026-09-20-dashboard-shell-routing — P4a 续（字号阶梯单一化 + 内联样式清零 + 样式纪律闸）
+
+**背景**：P4 视觉精修的 DoD 有两条硬口径——「正文 ≥ 13.5px；数字列 `tabular-nums`」与
+「无 tsx 内色值字面量；无 `style={{ margin/gap }}` 类布局内联」。计划里的底数（「10.5px ×7、11px ×1」
+/「31 处内联」）只数了 `theme.css` 与对象式内联，**实测差一个数量级**。
+
+**决定 1：字号阶梯 = `--fs-*` 唯一一份，旧别名 `--fs-1..--fs-5` 彻底删除。**
+- 实测 79 处消费者在用旧别名，新阶梯只有 20 处——所以这个阶段的**主体不是「替换字号」，是「迁消费者」**。
+- 阶梯：`xs 11 / sm 12 / base 13.5 / md 15 / lg 18 / xl 24 / 2xl 30`。119 条 `font-size` 声明
+  **全部**改取 `var(--fs-*)`（零字面量 px）。
+- **「正文 ≥ 13.5px」的判定口径写死在此**，免得下一个人重新争：`body` / 表格 `td` / 按钮 /
+  输入框 / 开关 / 横幅 = `--fs-base`（13.5px，旧基线 11.5–12.5px 已抬到可读线）。
+  留在 11px（15 条：胶囊/徽标/kicker/脚注）与 12px（63 条：标签、表头 `th`、说明文字、小号按钮）
+  的均**非正文**，逐个判过；表头小于单元格是有意的（标签在数据之上）。
+
+**决定 2：内联布局 style 只允许「计算值」，其余进 CSS 类。**
+- 实测 **80 处**（45 对象式 + 30 `style={常量}` 式 + 5 字符串式 `style="…"`），不是 31。
+- 唯一保留：`TrendChart` 的 3 处——图形 `height`、提示框按 x 比例 `left`。**SVG 坐标系运行时
+  才知道，写不成静态类名**；这是「计算值」的判据，不是「这文件特殊」。
+- `data-*` 常量式内联（`style={TH}`）与字符串式内联全部清零。
+
+**决定 3：新建源文件级纪律闸 `dashboard/tests/web-style-discipline.test.ts`（11 例）。**
+这是本仓库**第一个**盯「样式纪律」的测试——上面两条都是人手一次性扫全量做出来的，
+而**任何渲染级断言都不会因此变红**（样式表被内联进 SSR，裸类名断言恒真）。三组：
+1. 字号：阶梯定义在场（前提）· 每条 `font-size` 必带 `var(--fs-` · 档位严格递增 · 旧别名
+   定义与消费者均不得复活。
+2. 内联：除 `TrendChart` 的 **3 处**（写死次数）外 `style=` 为 0 · 无字符串式内联 ·
+   豁免处确实是计算值（`height: '12px'` 这类能写成类的要红）。
+3. 色值：十六进制字面量只允许两个文件并限次数（`render.tsx` 店标 SVG ×8、`TrendChart`
+   SVG 白描边 + `var(--eval-line, #…)` fallback ×2）· 字符串里的 CSS 颜色（`color: #…` /
+   `rgba(…)`）一律不许——**豁免只豁免 SVG 呈现属性**。
+
+**为何用「文件 + 次数的白名单」而不是「全绿」**：这两个豁免是真的（店标配色不跟主题走；SVG 标记
+要白描边），一律禁止只能靠把真豁免也改坏来满足。写死次数让**第 4 处/第 3 处成为一次显式决定**，
+而不是顺手加一个。
+
+> **闸验证过会红**：落盘后把 `font-size: 11px` 与一个 `style={{ marginTop: 8 }}` 注回去跑，
+> 两条分别 `(fail)`，随后恢复（残留计数 0）。前几轮吃过「闸写错但全绿」，这次先坏后好。
+>
+> 两个正则坑一并记下（下一个写同类闸的人会撞上）：
+> ① 三位色值正则会把 HTML 数字实体 `it&#123;N&#125;` 里的 `&#123` 当成 `#123`（假阳）——需 `(?<!&)`；
+> ② `font-size` 断言必须只匹配**声明**（`font-size:` 到分号），全文找名字会把自己的注释判红。
+
+**证据**：**889 pass / 0 fail**（94 文件；P4a 前 878 / 93）· `typecheck` ✓ · `oxlint` 0/0 ·
+`oxfmt` clean · 三份 bundle 绿（app gzip 75,877 B · log 17,386 B · eval 22,377 B；预算 150 KB）。
+**未做**（P4 余下）：三档响应式实测、空态四态审计、`?` 帮助与快捷键、README 目录树段落。
+
 ## §2026-09-20-console-process-course-decoupled（2026-09-20，用户指令：服务进程启动与课程解耦 + 开课/停课独立入口）
 
 **背景（一次实测故障里其实躺着两件事）**：用户点「启动训练」（课程 `x20-steady`）失败，控制台输出：
@@ -4484,7 +4806,9 @@ rollout 位置覆盖：courses.x20-steady.rollout_src=local
 * **ping 参与判定**（如「贡献 0 但 ping 通 ⇒ 慢」）——否：那正是本次要消除的混淆
   （ping 通而零贡献的节点是真没在产出）。
 * **健康节点写字「健康」**——否：绿点 + 并发数已经表达；字只留给异常态（缓慢 / 离线）。
-* **停用节点也显示贡献数**——否：它没在跑，数字只会误导。
+* **给停用行做减法（隐掉贡献数 / 并发数）**——否：重设计后的行是「同一形状、同一位置」
+  （`StatusRow` 原语），停用行仍出值列「停用」+ 元信息「上轮 N」；数字是事实，判断由
+  色 / 形 / 词给出——把数字藏掉反而让「它上轮还在贡献」这条信息消失。
 
 **违反后果**：回到「按最大 it 取对齐基准」⇒ 每轮开头那几十秒健康节点集体显示 0，
 操作员去查一台没问题的机器；用 ping 判健康 ⇒ 算力受限 / 网络抖动的节点被反复标红、
@@ -4509,3 +4833,58 @@ rollout 位置覆盖：courses.x20-steady.rollout_src=local
 无账本退化、安全阀、只认 iteration、`pickBaseIter`）· `tests/server-api-logs.test.ts`
 （+1 例：长行不截断）。**gate**：dashboard **808 pass / 0 fail** · `tsc --noEmit` ·
 oxlint 0 warning · 三份 bundle 构建通过 · 根 `bun run check` 绿。
+
+---
+
+### §2026-09-20-merge-origin-goal-nn — 合并 `origin/goal-nn`：在训 pill 行 × 控制台重设计（IA 相撞的裁决）
+
+**背景**：本地 6 个重设计提交（P0…P4a，`2450301`…`5898936`）与 `origin/goal-nn` 的 7 个提交在
+`f883afb` 分叉。远端那条线**也动了 dashboard**——「课程开训改为显式开课」（进程与课程解耦）、
+「在训课程 pill 并入顶栏行」——但它们做在**被 P0 重写掉的老 `app.tsx`** 上（抽屉 + 顶栏居中课程
+select）。因此这不是文本冲突，是**两个版本的 IA 相撞**：11 个冲突块 / 5 个文件里，有 4 块是布局与
+归属之争，不是标点之争。
+
+**总则（先定后裁）**：**重设计的 IA 胜**（它是已批准的规格 `docs/dashboard-redesign.md`）；
+远端的**功能与语义原样保留、重新安放到新 IA 里**。不推翻重设计去迁就旧布局，也不因布局不同
+丢掉远端功能。理由：规格是 P0 就定下的、已落地 8 个阶段的骨架；远端那 7 个提交是**功能**提交，
+它们的价值在行为（开课/停课、pill 的 it 与状态），不在那个具体容器。
+
+**逐项裁决**：
+
+| 面 | 裁决 | 为什么 |
+|---|---|---|
+| `app.tsx` | 取我方（新外壳）为底，移植远端 handler/state（`openCourseModal`、`handleOpenCourse`/`handleStopCourse`、`courseLifecycle`、`trainerRunning`），`handleLaunch` 瘦身（课程级旋钮不再随启动走） | 新外壳是 8 个阶段的骨架，不可回退；远的 handler 是纯行为，可平移 |
+| 在训 pill 行 | 进**顶栏**：有在训课时它替代「在训 n/N」裸计数 chip | 「同一事实只上屏一次」——pill 是那个计数的明细版（本仓 P3d 下线 `LogNavCard` 同一判据） |
+| 开课键（「训练」） | 进**侧栏**，紧贴课程选择器 | 它作用的对象就是选中的那门课（课程级动作跟主语走）；两侧各自保持「一屏一问」 |
+| 停课 | 只在 pill 上 | 与远端一致；一个键同时做「开这门/停这门」在两门课并存时语义不明 |
+| 「还有在训：a、b」串行标签 | **下线**，`.tc-training-tag` 样式随之删 | 被 pill 行取代（远端已删，取远端；我方的重命名随之作废） |
+| select 的 `（正在训练）` | 改 `（已开课）` | `trainingCourses` 的语义 2026-09-20 已改为**开课标记**（与进程是否在跑正交） |
+| `trainingCourses` 取值 | 取远端 `stateView.trainingCourses ?? []`，**删我方「trainer 在跑就当作这门课在训」的回退** | 该回退会给从未开课的课挂上 pill，而 pill 的停课键会真去停它 |
+| `TrainLaunchModal` | 取远端拆分（训练模式/rollout 移入开课弹窗），叠我方 P4a 的内联样式纪律 | 两件都对：拆分是功能，`tc-mt-0` 是纪律 |
+| `theme.css` 那块 | 取远端删除（串行标签样式） | 见上 |
+| `server.ts` | 两边 import 取**并集** | 各自新增（我方 `pageForPath` 路由 / 远端 `ProcSpec`+`RegistryEntry`） |
+| 并入库的远端样式 | 旧字号 token 迁到我方阶梯（`--fs-2`→`--fs-sm`、`11px`/`10px`→`--fs-xs`）；`OpenCourseModal` 6 处内联样式改走已有类（`tc-banner--flush`/`tc-mt-0`/`tc-launch__lbl`/`tc-hint`） | 并进来的是 P4a **之前**的字号口径与内联习惯；不迁就会让 `var(--fs-2)` 变成**未定义**（静默丢字号），而纪律闸允许 `--fs-` 前缀，不一定报错 |
+
+**★ 顺手抓到一条假绿（远端测试）**：`training-pills.test.ts` 的「pill 与课程 select 在同一行」
+用 `indexOf('tc-topbar__row')` / `tc-topbar__course` 定位——这两个类名合并后**只存在于内联进首帧的
+`theme.css` 里**（我们的外壳叫 `tc-side`/`tc-top`），于是它靠**样式表**满足：DOM 完全错位也照样绿。
+已改为先切掉 `<head>`，再断言「`tc-side` 内 课程选择器 → 开课键」「`tc-top` 内 pill 行」
+（沿用 P3b 起的 `#root` 切片纪律；C15/C16/C18 同款，已记进审计）。
+
+**★ 顺手抓到一条 flake（远端测试）**：`training-pills.test.ts` 的 `courseLifecycle?.enabled`
+用的是**不传参**的 `buildStateView()`——`course` 由 `effectiveCourse(state, courses)` **推**出来
+（默认 = 最近活跃课），于是结论挂在真实工作目录的残影上；`--parallel` 下同进程其它文件会写真实
+`tmp/` 与 `nn-training/*.lock`。实测：**修前 4 跑 2 红**（另带 `server-api-overview` 一条同源假红），
+**修后 10 跑 10 绿**（964 用例 / 98 文件）。修法是把课程**钉死**（`buildStateView('c6-chip')`）+ 写明
+理由，而不是放宽断言。
+
+**残留风险（已知，本次未处理）**：**12 个测试文件**各自改 `process.env.BCITY_REGISTRY_FILE`，
+夹具另改 `BCITY_RL_CONFIG`/`BCITY_CONSOLE_STATE`，而被测模块**调用时才读**这些变量——
+`--parallel` 隐含的 `--isolate` 只隔离 global，**不隔离 `process.env`**，同进程其它文件仍会互相盖掉。
+旁证：**去掉 `--parallel` 跑同一套会红 30+ 条**（per-file 隔离是这套夹具的前提）。系统性做法是给这些
+路径换成显式传参的注入缝（本仓 `releaseTrainerLock` 有先例），**留作后续任务**——不在合并里做这种
+跨 12 文件的基建改造。
+
+**门禁（合并后实测）**：dashboard `964 pass / 0 fail`（98 文件，10 连跑全绿）· 根 `bun run check`
+`1934 pass / 4 skip / 0 fail` · nn python `1860 passed / 3 skipped` · 三份 bundle 绿
+（app gzip **78,006 B** / 日志 17,401 B / eval 22,394 B，预算 150 KB）· oxlint 0/0 · oxfmt clean。

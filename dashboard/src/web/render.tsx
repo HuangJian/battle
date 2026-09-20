@@ -8,7 +8,14 @@ import { pageCss } from './theme'
 import { App } from './app/app'
 import { EvalApp } from './app/eval-app'
 import { LogApp } from './app/log-app'
-import type { ConsoleStateView, EvalPagePayload, LogPageOptions, LogPayload } from './view'
+import type {
+  ConsoleBootstrap,
+  ConsoleStateView,
+  EvalPagePayload,
+  LogPageOptions,
+  LogPayload,
+  PageKey,
+} from './view'
 
 // preact-render-to-string v6：SSR 期 ErrorBoundary 默认关闭，需显式开（DS-E3 服务端隔离）。
 ;(options as { errorBoundaries?: boolean }).errorBoundaries = true
@@ -54,10 +61,20 @@ function shell(title: string, bodyHtml: string, initialJson: string, scriptSrc: 
 </html>`
 }
 
-/** 控制台首屏（只含 /api/state；pool 卡 skeleton + 客户端异步拉，E8/R7）。 */
-export function renderConsolePage(state: ConsoleStateView, scriptSrc = '/app.js'): string {
-  const html = renderToString(<App initial={state} />)
-  return shell('炼丹炉', html, JSON.stringify(state), scriptSrc)
+export interface ConsolePageOpts {
+  /** 服务端按 URL 判定的页面（docs/dashboard-redesign.md §5.1）——决定 SSR 首帧渲染哪一页，
+   *  并随引导载荷下发给客户端，使 hydrate 与首帧一致（用户看不到「先画总览再跳指标」的闪跳）。 */
+  page?: PageKey
+  scriptSrc?: string
+}
+
+/** 控制台首屏（只含 /api/state；pool 卡 skeleton + 客户端异步拉，E8/R7）。
+ *
+ *  `page` 允许缺省（默认总览）：测试与旧调用方直接渲染时不需要知道路由。 */
+export function renderConsolePage(state: ConsoleStateView, opts: ConsolePageOpts = {}): string {
+  const bootstrap: ConsoleBootstrap = { ...state, page: opts.page ?? 'overview' }
+  const html = renderToString(<App initial={bootstrap} />)
+  return shell('炼丹炉', html, JSON.stringify(bootstrap), opts.scriptSrc ?? '/app.js')
 }
 
 /** 评估页（/eval，独立成页 R8）：SSR 首帧 + hydrate，bundle = /eval.js。 */
