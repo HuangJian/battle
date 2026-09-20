@@ -2,6 +2,7 @@
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'fs'
 import path from 'path'
 import { loadConfig } from '../../core/config'
+import { log, warn } from '../../core/log'
 import { NN_TRAINING, REPO_ROOT, loopControlPath } from '../../core/paths'
 import type {
   CfEdgeIp,
@@ -70,8 +71,55 @@ export function errResp(message: string, status: number): Response {
   return okResp({ ok: false, message }, status)
 }
 
-/** 解析/分发 POST /api/*。返回 null = 未匹配（调用方 404）。 */
+/** 读接口（不是决策）：高频轮询/回读不能往决策日志里刷行。 */
+const READONLY_ACTIONS = new Set(['getGateHaltMode'])
+
+/** **动作结果落一行盘**（组件级决策的「操作面」；2026-09-20 用户指令）。
+ *
+ *  为什么这一行是必需的：盘上的证据只有「组件日志 + 账本」，而组件状态变化之前
+ *  一定先有「有人点了什么」——但那件事以前只在终端滚屏 / UI 回执里存在。2026-09-20
+ *  的教训：hub 被人工停掉后，盘上只剩「日志断在半分钟前 + 账本条目没了」，从证据里
+ *  **分不出**「人工停的」与「自己死的」，只能反过来去问操作员。这一行就是那个因果。
+ *
+ *  失败走 `warn`（带 ⚠️）——「点了没成」与「点了成了」在日志里一眼可分。
+ *  任何解析/写盘异常都不影响动作本身（日志不是关键路径）。
+ */
+async function logActionDecision(
+  action: string,
+  body: PostBody,
+  resp: Response | null,
+): Promise<void> {
+  if (!resp || READONLY_ACTIONS.has(action)) return
+  const who = [bodyStr(body, 'course'), bodyStr(body, 'component')].filter(Boolean).join('/')
+  let ok: unknown = null
+  let message = ''
+  try {
+    const parsed = (await resp.clone().json()) as { ok?: unknown; message?: unknown }
+    ok = parsed?.ok ?? null
+    message = typeof parsed?.message === 'string' ? parsed.message : ''
+  } catch {
+    /* 非 JSON 响应：只记 HTTP 状态码 */
+  }
+  const line =
+    `[action] ${action}${who ? ` ${who}` : ''} → ${ok === true ? 'ok' : 'fail'}` +
+    ` (HTTP ${resp.status})${message ? `: ${message}` : ''}`
+  if (ok === true) log(line)
+  else warn(line)
+}
+
+/** 解析/分发 POST /api/*。返回 null = 未匹配（调用方 404）。
+ *
+ *  ★ 出口只有一个，且**结果必落盘**（`logActionDecision`）：这是「谁在何时对什么
+ *   做了什么」的唯一可靠来源（见上面那段理由）。新加动作自动继承，不需各自记得打日志。
+ */
 export async function routeAction(action: string, body: PostBody): Promise<Response | null> {
+  const resp = await dispatchAction(action, body)
+  await logActionDecision(action, body, resp)
+  return resp
+}
+
+/** 动作分发的内部实现（只被 `routeAction` 调用；落盘在那边统一做）。 */
+async function dispatchAction(action: string, body: PostBody): Promise<Response | null> {
   const ctx = actionCtx(body)
   try {
     switch (action) {

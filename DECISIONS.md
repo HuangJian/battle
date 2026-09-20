@@ -4289,3 +4289,107 @@ exit-watchdog 没有可标记的对象），控制台由此显示 `stopped`。**
 **gate**：nn python 全量 **1842 passed**（ruff + mypy 绿，含新 `tests/test_body_transfer_guard.py`
 8 例：停滞有名/进度可查/预算生效/停滞即响亮重试，以及真 TCP socket 的
 「读端不读 ⇒ hub ≤发送超时断开并打印已发字节数」）。
+
+---
+
+## §2026-09-20-console-decision-log（2026-09-20，用户指令：控制台的启/停/重启/判死要写日志文件）
+
+**背景**：上一节那条「同窗口 hub 停服」的复盘最后一公里——hub 被**人工**停掉后，盘上的证据
+（组件日志 + 账本 + console-state）只能显示「日志断在半分钟前」「账本条目没了」「没有意外退出
+标记」，**分不出**「人工停的」与「自己死的」，只能反过来去问操作员。根因不是「没写日志」：
+`core/log.ts` 早就是 stdout + 文件双写，但
+
+1. **控制台从没 arm 它**——只有 `launch/cli.ts`（一次性 python 启动）调 `initLog(tag)`；
+   `bun run dashboard` 走的是 `server/server.ts::main`，`logFile` 恒为空串；
+2. 监督器 / 启动对账 / 请求异常的判决用**裸 `console.*`**，连双写都绕过；
+3. **动作结果不落任何盘**——「谁在何时点了停/启/开课」只存在于 UI 回执与终端滚屏。
+
+**决定**：
+
+* `core/log.ts`：新增 `initConsoleLog()`——稳定文件名 `tmp/training-start/console.log`，
+  每次启动追加一行会话头 `=== console session <ISO> pid=N ===`，启动时超过 8MB 轮转一代
+  `.1`，任何 IO 失败 best-effort 不抛（**日志写不进绝不能搞停控制台**）；新增 `error()`
+  （stderr + 文件，与 log/warn/fail/info/ok 同规）。路径走 `paths.consoleLogPath()`
+  （惰性；`BCITY_CONSOLE_LOG` 可重定向，单测不污染仓根 tmp/）。
+* `server/server.ts::main`：在**任何决策之前** arm，并把路径打进启动横幅（不然没人知道去哪看）。
+* `server/api/route.ts`：唯一动作出口 `routeAction` 拆成 `dispatchAction` + 统一落盘——
+  **每个动作结果一行**（`[action] stop hubServer → ok (HTTP 200): …`，失败走 `warn` 带 ⚠️），
+  纯读接口 `getGateHaltMode` 排除（高频回读不是决策）。
+* 决策站点（`server.ts` / `exit-watchdog.ts` / `stack/hub.ts` / `route.ts` / `actions/stop.ts`）
+  不再有裸 `console.*`（接线门禁钉着）。
+
+**备选与否决**：
+
+* **每次会话一个新文件**（沿用 `initLog(tag)`）——否：操作员要的是「一个固定路径能翻到全部
+  决策」；会话边界用会话头表达，不必用文件名，顺带避免了百来个 `console-<ts>.log` 堆积。
+* **让操作员自己重定向 stdout（`bun run dashboard > x.log`）**——否：默认没人重定向
+  （2026-09-20 的现场就是这样），而且终端滚屏一关就没了。
+* **只记组件动作（start/stop/restart），不记其它 POST**——否：同一出口记全部才不漏
+  （「谁把课程切走了」「谁改了节点并发」同属决策），成本是一行/点击；只把纯读接口排除。
+* **引第三方日志库（分级/滚动）**——否（MANIFEST §14 零依赖精神）：`appendFileSync` + 一次
+  启动轮转足够，且行为可读。
+* **把日志按组件分文件**——否：决策的因果链跨越组件（「停 hub」→「trainer 等不到结果」），
+  一份按时间排的流水才能看出因果。
+
+**gate**：dashboard **785 pass / 0 fail**（新增 `console-decision-log.test.ts` 24 例：会话头 /
+追加不截断 / 阈值轮转 / 写不进不炸 / 路径惰性；接线门禁：决策站点无裸 `console.*`、`route.ts`
+唯一出口且结果落盘、`initConsoleLog` 早于 `startSupervisor` 调用、真动作的结果落盘）·
+`tsc --noEmit` · oxlint 0 warning · 真盘探针确认默认路径可写、会话头与两级行如期落盘。
+
+## §2026-09-20-open-course-lock-identity-and-write-order（2026-09-20，用户报障：开课被「自己人」的锁拒掉）
+
+**背景**：用户点开课，回执是
+
+```
+❌ x20-steady 未开课：run_rl 锁被 PID 18364 持有
+训练模式 在线：已撤掉离线标记（run/run_iters）
+rollout 位置覆盖：courses.x20-steady.rollout_src=local
+远端连败降级本机：关（连败即 ABORT）
+已写开课标记 training-enabled.txt（训练侧/hub 的「在训」判据）
+先停掉在跑的那一份（或删除锁文件）再开课——它与共享 trainer 抢同一批 traj。✕
+```
+
+两处独立缺陷叠在一起：
+
+1. **判据错**：PID 18364 = 控制台自己起的**共享 trainer**（`run_rl_cluster.py --serve`）。
+   它服务多课，每开一门课就取该课自己的**按课锁**（单进程多课模型的正常持有）——而检查的
+   判据是「该课锁活着就拒」⇒ **每次开课都被自己人拒**，只要 trainer 在跑就永远开不了课。
+   真冲突的形状是「另一份**按课** runner（手工 `run_rl.py --course <本课>`）活着」——它与
+   共享 trainer 抢同一批 traj（两套调度器各跑一半课程、互相覆盖权重）。
+2. **写序错**：检查排在写面**之后** ⇒ 被拒的那一次照样写了课程旋钮 + **开课标记**（标记就是
+   训练侧/hub 的「在训」闸）+ 撤了离线标记，而暂停意图还留着。于是三种口径并存：控制台说
+   「未开课」、hub/云机说「这课在训」、调度器按暂停意图一拍不推。
+
+**决定**：
+
+* **开课前置检查带身份看**（`course-lifecycle.ts::courseRunnerFacts`）：该课按课锁的存活持有人
+  == **共享 trainer 进程级锁**（`nn-training/.run_cluster.lock`）的持有人 ⇒ 同一个进程 ⇒
+  正常持有，**放行**并在回执里说明白（免得操作员在日志里找一个不存在的双开）；持有人活着但
+  不是它 ⇒ 真冲突，拒开课。陈旧锁（持有人已死）两侧都归 null ⇒ 不拦。BC 同规（锁名换 `run_bc`，
+  比较的仍是那把进程级锁）。
+* **写序 = 「会拒的先拒、会抛的最前、开课标记最后」**：① 全部会拒绝的判据零副作用先行
+  （锁身份 + **暂停意图文件健康**——`setCoursePaused` 对坏文件是保守拒绝、不覆盖）；② 写面
+  按 `saveConfig`（唯一会抛的一步，容量/槽位守卫）→ 解暂停意图 → `prepareCourseForOpen`
+  （旋钮/账本/`remote-jobs/`/**开课标记**）排序 ⇒ 任何失败都不留「已开课」的盘上假象。
+* 停课**不删**按课锁：锁归进程所有（停机时释放），控制台删它只会让「双开」的判据消失。
+
+**备选与否决**：
+
+* **去掉开课时的锁检查，直接开**——否：手工跑着 `run_rl.py --course <本课>` 时开课就是两套
+  调度器抢同一批 traj（静默互相覆盖权重），这一类必须拦。
+* **按「锁文件存在」判、不看持有人身份**——否：陈旧锁（崩溃残留）会把课永久锁死，而陈旧态
+  在盘上极常见（`nn-training/` 里就躺着 20+ 把 09-14/09-20 的旧锁）。
+* **把「共享 trainer 在服务本课」当成「已经开着」而直接返回成功**——否：回执会变成一个假
+  成功（暂停意图、hub 模式这些开课动作一步都没做）；这些动作是**幂等且有意义的**，照做并按
+  事实报告才对。
+* **开课失败时回滚已写的盘**（补偿事务）——否：写序已经让「被拒 = 零副作用」，补偿逻辑本身
+  是第二处可能出错的地方；真实失败的窗口只落在「旋钮已写、标记未写」（= 无人调度的旋钮，
+  重按一次开课即自愈）。
+
+**gate**：dashboard **792 pass / 0 fail**（`course-lifecycle.test.ts` 新增 9 例：共享 trainer
+持有按课锁 ⇒ 开课成功且回执说明「正常持有」／另一份按课 runner ⇒ 拒开且**零副作用**（无标记、
+无旋钮、无 `remote-jobs/`、没碰 hub）／陈旧锁不拦／三态判据 + BC 锁名 ／暂停意图文件坏了 ⇒
+拒开且不覆盖／`saveConfig` 抛 ⇒ 连暂停意图都不解／成功时回执行序与盘上一致）·
+`tsc --noEmit` · oxlint 0 warning · 三份 bundle 构建通过 · 根 `bun run check` 绿。
+**真盘验证**（只读探针，`nn-training/` 真锁）：`cluster()=18364`、`run_rl(x20-steady)=18364`、
+`facts={holder:18364,cluster:18364,conflict:null}` ⇒ 那次被拒的开课现在会放行。

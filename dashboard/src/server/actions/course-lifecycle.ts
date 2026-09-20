@@ -31,10 +31,11 @@ import { pruneLegacyCourseKnobs } from '../../stack/course-knobs'
 import { remoteExecutionFace } from '../../stack/push-config'
 import { trainModeKnobs } from '../../stack/specs'
 import { type CourseMode, setCourseMode } from './course-mode'
-import { setCoursePaused } from './loop-control'
+import { readLoopControl, setCoursePaused } from './loop-control'
+import { loopControlPath } from '../../core/paths'
 import { ActionError, ActionResult, done, guard, release } from './result'
 import { runRlLockHolder } from './labels'
-import { runBcLockHolder } from './start'
+import { runBcLockHolder, runClusterLockHolder } from './start'
 
 /** 开课参数（全部是**课程级**：绝不写进 `rl.*` 那块所有课程共用的默认面）。 */
 export interface OpenCourseOpts {
@@ -212,6 +213,34 @@ export async function pushHubMode(
 
 // ────────────────────────── 开课 / 停课 ──────────────────────────
 
+/** 本课的两个锁持有人事实 + 「是否真冲突」的判定（开课的前置检查只吃这一个真相）。
+ *
+ *  ★ **必须带身份看，不能只看「锁活着」**（2026-09-20 用户报障：「❌ x20-steady 未开课：
+ *  run_rl 锁被 PID 18364 持有」）——那个 PID 就是控制台自己起的**共享 trainer**
+ *  （`run_rl_cluster.py --serve`）：它服务多课，每开一门课就取该课自己的 per-course 锁
+ *  （单进程多课模型的正常持有）。把这种持有当成冲突 ⇒ **每次开课都被自己人拒**，
+ *  而拒的同时盘上已经写过开课标记（见下面 ① 的顺序注释）= 一句假回执。
+ *
+ *  判据：该课锁的持有人 == **共享 trainer 的进程级锁**（`nn-training/.run_cluster.lock`）
+ *  持有人 ⇒ 同一个进程 ⇒ 正常状态，不拦；持有者活着但不是它 ⇒ 真冲突（有人在手工跑
+ *  `run_rl.py --course <本课>`，与共享 trainer 抢同一批 traj）⇒ 拦。陈旧锁（持有人已死）
+ *  在 `runRlLockHolder` / `runBcLockHolder` 里已经归 null ⇒ 不拦。
+ */
+export interface CourseRunnerFacts {
+  /** 该课 per-course 锁的存活持有人（**含共享 trainer 自己**）；null = 无锁/持有人已死。 */
+  holder: number | null
+  /** 共享 trainer 进程级锁（`nn-training/.run_cluster.lock`）的存活持有人；null = 未在跑。 */
+  cluster: number | null
+  /** **真冲突**（按课的另一份 runner）的 PID；null = 不拦。 */
+  conflict: number | null
+}
+
+export function courseRunnerFacts(course: string, bc: boolean): CourseRunnerFacts {
+  const holder = bc ? runBcLockHolder(course) : runRlLockHolder(course)
+  const cluster = runClusterLockHolder()
+  return { holder, cluster, conflict: holder && holder !== cluster ? holder : null }
+}
+
 /** **开课**：把一门课放进训练（进程没跑也能放——训练进程是发现式的，下一拍就入队）。 */
 export async function openCourse(course: string, opts: OpenCourseOpts = {}): Promise<ActionResult> {
   guard(`course-open:${course}`)
@@ -220,30 +249,66 @@ export async function openCourse(course: string, opts: OpenCourseOpts = {}): Pro
     if (!c) throw new ActionError('需要课程（开课是按课程记的，见顶部课程选择）')
     validateCourseName(c)
     assertCourseExists(c)
-    // legacy 清理（幂等，全课范围）：旧键 / 伪节点条目不该只对「这次开的课」生效。
+    const bc = isBcCourse(c)
+    // ① **先做全部会拒绝的检查**（零副作用），再进写面。
+    //    2026-09-20 实测的顺序坑：检查原本排在写面**之后** ⇒ 被拒的那一次照样写了课程旋钮 +
+    //    **开课标记**（而标记就是训练侧/hub 的「在训」闸！）⇒ 回执照说「未开课」，盘上却已
+    //    经是开课状态（连 hub 派发闸都开了），而暂停意图还留着。控制台的回执与盘上事实必须
+    //    同向：拒绝就应该什么都没发生。
+    //    · 暂停意图文件必须**可读可解析**：`setCoursePaused` 对坏文件是保守拒绝（不覆盖，
+    //      可能有人在手改/另一份工具在写）——而它是写面里唯一会拒绝的一步。坏文件是
+    //      「已知事实」，体检放这里才叫「拒绝 = 零副作用」。
+    const control = readLoopControl()
+    if (control.error) {
+      return done(false, `${c} 未开课：控制文件有问题，未改动`, [
+        `${control.error}（${loopControlPath()}）`,
+        '本次开课**未写任何东西**——先修好意图文件（或删掉它）再开课。',
+      ])
+    }
+    const runners = courseRunnerFacts(c, bc)
+    if (runners.conflict) {
+      const runningPid = runners.conflict
+      // 真冲突：另一份**按课** runner 在跑（不是共享 trainer 自己）。到此处**一个字都没写**
+      // ——拒绝就应该是「什么都没发生」（下面的写面全在它后面）。
+      const lockName = `${bc ? 'run_bc' : 'run_rl'}.${c}.lock`
+      return done(
+        false,
+        `${c} 未开课：另一份按课 runner（PID ${runningPid}）正在跑（${bc ? 'run_bc' : 'run_rl'}）`,
+        [
+          '它与共享 trainer 抢同一批 traj（两套调度器会各跑一半课程、互相覆盖权重）。',
+          `先停掉那一份再开课（停 trainer 会按身份核验释放 .${lockName}；` +
+            `确实已死可手工删除 nn-training/.${lockName}）——本次开课**未写任何东西**。`,
+          `（不是共享 trainer 自己握的锁：后者与控制台自己起的进程同源，会被本检查放行）`,
+        ],
+      )
+    }
+    // ② 写面，三步的**顺序就是契约**（旋钮 → 解暂停 → 事实）：
+    //    · **会抛的一步排最前**：`saveConfig` 的容量/槽位守卫会抛（`core/config.ts`）——
+    //      它在最前 ⇒ 抛出的那一次盘上零变化（连暂停意图都没动）。
+    //    · 解暂停排第二：① 已体检过意图文件（坏文件在那里就拒了）⇒ 到这里不会再拒；
+    //      即便真拒，留下的也只是「未开课 + 旋钮已写」，不是「在训」假象。
+    //    · **开课标记排最后**：它是训练侧/hub 的「在训」闸，必须在一切之后才落 ——
+    //      前面任何一步失败都不许留下「已开课」的盘上事实（用户 2026-09-20 报障的正是
+    //      「回执说未开课、盘上却已开课」这种三种口径并存）。
     const pruned = pruneLegacyCourseKnobs(loadConfig())
+    const knobs = writeCourseConfigForOpen(c, opts)
+    const resume = setCoursePaused(c, false)
     const notes = [
-      ...writeCourseConfigForOpen(c, opts).notes,
+      ...knobs.notes,
       ...(pruned.removed.length > 0
         ? [`已清理 legacy 传输配置 ${pruned.removed.length} 项（课程与 worker 节点正交）`]
         : []),
+      `暂停意图：${resume.ok ? resume.message : `未改动（${resume.message}）`}`,
       ...prepareCourseForOpen(c).notes,
+      // 共享 trainer 已经握着本课的按课锁 = 正常状态（它服务多课，开一门取一门）——
+      // 说明白，免得操作员把它当成「双开」而在日志里找不存在的冲突。
+      ...(runners.holder && runners.holder === runners.cluster
+        ? [
+            `共享 trainer（PID ${runners.holder}）已在服务本课：按课锁由它自己取，` +
+              '这是已开课状态下的**正常持有**，不是冲突。',
+          ]
+        : []),
     ]
-    // 每课去重锁：serve 开课时会按课取锁（RL=run_rl / BC=run_bc）——别的持有者会让它
-    // **响亮拒开**这门课。在这里拦下来，操作员就从动作结果里看到原因，不用去日志里找。
-    const bc = isBcCourse(c)
-    const holder = bc ? runBcLockHolder(c) : runRlLockHolder(c)
-    if (holder) {
-      return done(false, `${c} 未开课：${bc ? 'run_bc' : 'run_rl'} 锁被 PID ${holder} 持有`, [
-        ...notes,
-        '先停掉在跑的那一份（或删除锁文件）再开课——它与共享 trainer 抢同一批 traj。',
-      ])
-    }
-    // 解除暂停意图（停课 = 非破坏暂停，开课要把它去掉；否则「开了课但不推进」）。
-    const resume = setCoursePaused(c, false)
-    if (!resume.ok) {
-      return done(false, `${c} 未开课：${resume.message}`, notes)
-    }
     // hub 模式：离线档 = 只让带标 worker 领整段；在线 = 恢复实时派发。
     const trainMode = opts.trainMode === 'offline' ? 'offline' : 'online'
     const hub = await pushHubMode(c, trainMode, opts.hubMode)
@@ -259,7 +324,6 @@ export async function openCourse(course: string, opts: OpenCourseOpts = {}): Pro
       [
         `本课（${c}）执行面：${face.text}${face.detail ? `（${face.detail}）` : ''}`,
         ...notes,
-        `暂停意图：${resume.message}`,
         hubNote,
         // 机器侧旋钮在**开课时**施加（python `apply_course_machine_overrides`）：已经开着的课
         // 要等它重开才换旋钮——暂停该课 → 重启共享 trainer（或等引擎驱逐重开）。

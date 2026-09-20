@@ -51,6 +51,7 @@ import {
   saveAnyComponent,
 } from '../core/registry'
 import { launchSpec } from '../core/proc'
+import { error, info, initConsoleLog, log, warn } from '../core/log'
 import { monitorTouch } from '../core/reload-touch'
 import {
   buildBcEpochsView,
@@ -123,9 +124,7 @@ function startSupervisor(): { sup: ReturnType<typeof createSupervisor>; restart:
     const fresh = restartSpecFor(key, course)
     if (!fresh) {
       // 放弃重建必须可见（F-A4）：null 是「放弃」不是「没事发生」。
-      console.warn(
-        `[supervisor] ${tag}: 无法重建 spec（该 (key, course) 未登记或缺元数据）——跳过重启`,
-      )
+      warn(`[supervisor] ${tag}: 无法重建 spec（该 (key, course) 未登记或缺元数据）——跳过重启`)
       return oldPid
     }
     // 带子进程监督器的组件（localWorker）必须整树停：只杀父进程会给重启后的新实例
@@ -162,7 +161,7 @@ function startSupervisor(): { sup: ReturnType<typeof createSupervisor>; restart:
     const portNote = (await ownsPort())
       ? ''
       : '；新实例未持有该端口（bind 失败，或旧实例仍在服务？）'
-    console.log(
+    log(
       `[supervisor] ${tag} 已应用最新代码 (PID ${r.pid}` +
         `${ready ? '' : '，45s 未就绪，继续观察'}${portNote})`,
     )
@@ -194,7 +193,11 @@ async function serveBundle(target: BundleTarget): Promise<Response> {
 
 async function main(): Promise<void> {
   const { port } = parseArgs()
-  if (shapeLoopbackNoProxy()) console.log('[console] 检测到代理环境变量——已追加 NO_PROXY 直连回环')
+  // ★ 组件级决策落盘（2026-09-20 用户指令）：必须在**任何**决策之前 arm，否则
+  //   「谁在何时停了/重启了什么」又只剩下终端滚屏（事故复盘时从盘上证据分不出
+  //   「人工停的」与「自己死的」——见 core/log.ts 模块头）。
+  const decisionLog = initConsoleLog()
+  if (shapeLoopbackNoProxy()) info('[console] 检测到代理环境变量——已追加 NO_PROXY 直连回环')
 
   // 变更检测监督：跟踪账本中已登记的全部组件。
   const { sup, restart } = startSupervisor()
@@ -226,7 +229,7 @@ async function main(): Promise<void> {
         c.key !== 'cloudflared' &&
         runningStaleCode(spec, entries.get(id)?.startedAt)
       ) {
-        console.warn(
+        warn(
           `[supervisor] ${c.key}${course ? `[${course}]` : ''} (PID ${pid}) 跑的是磁盘上更早的代码` +
             '——接管并重启应用最新代码（旧进程的判据/课程表都停在它启动的那一刻）',
         )
@@ -234,7 +237,7 @@ async function main(): Promise<void> {
       }
       sup.watch(spec, pid)
       watched.add(id)
-      console.log(`[supervisor] 监督 ${c.key}${course ? `[${course}]` : ''} (PID ${pid})`)
+      log(`[supervisor] 监督 ${c.key}${course ? `[${course}]` : ''} (PID ${pid})`)
     }
   }
   await reconcileWatch()
@@ -246,7 +249,7 @@ async function main(): Promise<void> {
     try {
       const r = ladderTickAll(discoverCourses())
       if (r.enqueued.length > 0)
-        console.log(`[ladder] tick tasks=${r.tasks} enqueued=${r.enqueued.join(',')}`)
+        log(`[ladder] tick tasks=${r.tasks} enqueued=${r.enqueued.join(',')}`)
     } catch {
       /* ticker 永不炸循环 */
     }
@@ -445,19 +448,24 @@ async function main(): Promise<void> {
         }
         return new Response('not found', { status: 404 })
       } catch (e) {
-        console.error(`[console] ${req.method} ${url.pathname} failed:`, e)
+        // 单行（把 stack 拆进文件会把「一行一决策」打散；定位靠 message + 请求行）
+        error(
+          `[console] ${req.method} ${url.pathname} failed: ` +
+            (e instanceof Error ? e.message : String(e)),
+        )
         return json({ ok: false, message: e instanceof Error ? e.message : String(e) }, 500)
       }
     },
   })
   const cfgPath = path.relative(REPO_ROOT, CONFIG_PATH)
-  console.log(
-    `[console] NN 训练控制台: http://127.0.0.1:${server.port}/  (局域网只读 + localhost 控制)`,
-  )
-  console.log(
+  log(`[console] NN 训练控制台: http://127.0.0.1:${server.port}/  (局域网只读 + localhost 控制)`)
+  log(
     `[console] 局域网可查看任意课程/日志/节点统计（?course= 切换）；启停/冒烟/模式/节点编辑仅限本机。`,
   )
-  console.log(`[console] 配置回写: ${cfgPath} · 变更检测监督已启用 · 停止: Ctrl-C`)
+  log(`[console] 配置回写: ${cfgPath} · 变更检测监督已启用 · 停止: Ctrl-C`)
+  // 组件级决策（启/停/重启/判死/开课/停课/放弃重建）的落盘位置必须让操作员一眼看到
+  // ——它就是「盘上证据」那份：`tail -f` 它就能看到谁在何时动了什么。
+  log(`[console] 组件决策日志: ${path.relative(REPO_ROOT, decisionLog)}（追加；旋转保留一代 .1）`)
 }
 
 void main()

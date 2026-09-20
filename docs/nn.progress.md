@@ -35,7 +35,9 @@
 **同窗口的 hub 停服 = 人工操作（用户确认手动关的）**：`stopComponent` 杀进程后正是
 `clearAnyComponent`（条目没了 ⇒ exit-watchdog 没有可标记的对象），不是崩溃。
 教训：组件级决策只打控制台 stdout、不落文件 ⇒ 从盘上证据无法区分「人工停的」与
-「自己死的」——同类报障**先问是不是手动停的**（详见 DECISIONS §2026-09-20-body-transfer-stall-guard）。
+「自己死的」——同类报障**先问是不是手动停的**；已修：控制台现在把启/停/重启/判死/开课/停课
+全部写到 `tmp/training-start/console.log`（稳定文件名 + 会话头，DECISIONS
+§2026-09-20-console-decision-log）。
 
 ---
 

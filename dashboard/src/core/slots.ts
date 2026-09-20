@@ -255,7 +255,18 @@ export function lockName(course: string, kind: LockKind): string {
   return c ? `.${kind}.${c}.lock` : `.${kind}.lock`
 }
 
-/** 锁文件绝对路径（nn-training/ 下；run_rl/train_loop 的锁都锚在脚本目录）。 */
+/** 锁文件目录（默认 `nn-training/`——python 侧 `course_lock_path` 也锚在脚本目录）。
+ *
+ *  单测以 `BCITY_LOCKS_DIR` 重定向：锁文件**真的会改变控制台判据**（「另一份按课 runner
+ *  在跑 ⇒ 拒开课」），而 `assertCourseExists` 又要求课程是真课程 ⇒ 测试若走真实派生路径
+ *  就会往仓库 `nn-training/` 里写 `.run_rl.<真课程>.lock`。默认行为零变化，故**惰性**取值
+ *  （与 `paths.ts` 里那几个 `BCITY_*` 重定向同一个规矩）。
+ */
+export function locksDir(): string {
+  return process.env.BCITY_LOCKS_DIR ?? NN_TRAINING
+}
+
+/** 锁文件绝对路径（`locksDir()` 下；run_rl/train_loop 的锁都锚在脚本目录）。 */
 export function lockPathFor(course: string, kind: LockKind): string {
-  return path.join(NN_TRAINING, lockName(course, kind))
+  return path.join(locksDir(), lockName(course, kind))
 }
