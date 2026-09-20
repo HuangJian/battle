@@ -69,13 +69,16 @@ src/
     view/           共享视图类型与纯函数（客户端安全，唯一事实源；`routes.ts` = 路由真相）
     components/     通用 UI 原子（DataTable / TrendChart / Pill …）；**P1 起的行/反馈原语**：
                     StatusRow（行：状态点·名称·值·徽章·元信息·动作，含显式折叠头）/
-                    StatusDot / SectionHeader / Empty（四态）/ InlineNotice（面板内动作结果一行）
-                    —— 「同一语义只有一个原语」，不要在面板里自绘（docs/dashboard-redesign.md §4.2）
+                    StatusDot / SectionHeader / Empty（四态）/ InlineNotice（面板内动作结果一行）；
+                    **P2b 起的总览两块**：AlertDock（告警坞：排序/折叠在 view/alerts.ts）/
+                    KpiStrip（六格 KPI 条：取值/口径在 view/kpi.ts）
+                    —— 「同一语义只有一个原语」，不要在面板里自绘（docs/dashboard-redesign.md §4.2）；
+                    坞与 KPI 的领域判据全在 view/ 的纯函数里（组件只管折叠开关与动作绑定）
     app/            SSR 首屏 + hydrate 的浏览器应用（app / log / eval 三入口 + panels）
       shell/        应用外壳（Shell / Sidebar / Topbar；三档响应式，见 docs/dashboard-redesign.md §3.1）
       app.tsx       外壳 + 路由页面分派（/ · /metrics · /nodes · /wire，服务端 stamp `page`）
     render.tsx theme.ts
-tests/        90 个本子系统的测试（原根 tests/ 的同名文件迁入 + 两巨型文件按分层拆开）
+tests/        92 个本子系统的测试（原根 tests/ 的同名文件迁入 + 两巨型文件按分层拆开）
 data/evalboard/  EvalBoard 账本数据根（默认值；EVALBOARD_DATA 可覆盖）
 ```
 
@@ -83,8 +86,15 @@ data/evalboard/  EvalBoard 账本数据根（默认值；EVALBOARD_DATA 可覆�
 
 测试**镜像 `src/` 的模块**（AGENTS §8）：一个测试文件对应它覆盖的那个模块，
 文件名形如 `web-view-rows` ↔ `src/web/view/rows.ts`、`server-api-pool` ↔
-`src/server/api`。dashboard 侧当前 **804 个用例 / 90 个文件**（2026-09-20；P2a 课程矩阵前为 776 / 88，
-P1 行原语前为 746 / 87，重设计前基线 717 / 86），拆分产出的文件最大 264 行（单节走势图；其余均 <170 行）。
+`src/server/api`。dashboard 侧当前 **863 个用例 / 92 个文件**（2026-09-20；P2b 告警坞+KPI 条前为
+804 / 90，P2a 课程矩阵前为 776 / 88，P1 行原语前为 746 / 87，重设计前基线 717 / 86），
+拆分产出的文件最大 264 行（单节走势图；其余均 <170 行）。
+
+> ⚠ **样式层没有任何断言**：整份 `theme.css` 被内联进 SSR 的 `<style>`，因此**裸类名/裸字符串断言
+> 永远为真**（断言的是样式表，不是 DOM）——切出 `#root` 再断言（`web-ssr-console.test.ts::body()`）。
+> 更极端的一类：**未定义的 CSS token 不会报错也不会崩**，只是那条声明静默失效
+> （实例：`var(--line)` 用了四处而 `--line` 从未定义，两个徐章没描边、矩阵操作列竖线不可见很久
+> 无人发现；见 `docs/dashboard-redesign.md` 审记 C15）。改样式后请 `grep` 新 token 有没有定义。
 
 > ⚠ **web 用例只能断言结构，挡不住交互缺陷**：本仓 web 测试全部是 SSR（无 `happy-dom`/`jsdom`），
 > 而 `preact-render-to-string` **丢弃全部事件处理器**（实测 `h('pre', {onClick}, 'x')` → `<pre>x</pre>`）

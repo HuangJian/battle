@@ -46,6 +46,11 @@ describe('console SSR renderConsolePage', () => {
     expect(dom).toContain('tc-comps') // 组件小卡
     expect(dom).toContain('tc-row') // 统一行原语（节点行等）
     expect(dom).toContain('训练状态') // hero aria-label
+    // KPI 条（P2b）：总览首屏第一块（告警坞之下、趋势之上），六格齐全
+    expect(dom).toContain('aria-label="关键指标"')
+    for (const label of ['采样胜率', 'eval 胜率', '当前阶段', '在训课程', '算力', '队列']) {
+      expect(dom).toContain(`>${label}</span>`)
+    }
     // 详情已路由化：首帧不渲染模态抽屉 / 弹窗（这是回归闸——抽屉已退役，别让它回来）
     expect(html).not.toContain('<aside class="tc-drawer"')
     expect(html).not.toContain('class="tc-modal-mask"')
@@ -78,11 +83,13 @@ describe('console SSR renderConsolePage', () => {
     const overview = body(render.renderConsolePage(s, { page: 'overview' }))
     expect(overview).toContain('tc-hero')
     expect(overview).toContain('总览') // 顶栏页面标题
+    expect(overview).toContain('aria-label="关键指标"') // KPI 条只属总览
 
     const metrics = body(render.renderConsolePage(s, { page: 'metrics' }))
     expect(metrics).toContain('指标') // 顶栏页面标题
     expect(metrics).not.toContain('tc-hero') // 指标页不重复渲染总览 hero
     expect(metrics).not.toContain('tc-comps') // 也不渲染总览的组件卡
+    expect(metrics).not.toContain('aria-label="关键指标"') // KPI 条不进详情页
 
     const nodes = body(render.renderConsolePage(s, { page: 'nodes' }))
     expect(nodes).toContain('节点')

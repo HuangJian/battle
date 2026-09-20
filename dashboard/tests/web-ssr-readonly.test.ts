@@ -28,7 +28,7 @@ describe('console 局域网只读边界（§…：LAN 查看 / localhost 控制�
     expect(s.components.find((c) => c.key === 'cloudflared')!.secret).toBeDefined()
   })
 
-  it('只读视图 SSR：readOnly=true 渲染只读角标 + 横幅，动作按钮不禁用；false 不渲染', async () => {
+  it('只读视图 SSR：readOnly=true 渲染只读角标 + 告警坞条目，动作按钮不禁用；false 不渲染', async () => {
     const base = await api.buildStateView()
     // 组件 busy 置空：pending/busy 锁与只读无关，避免 base 状态干扰禁用断言
     const clean = {
@@ -38,10 +38,14 @@ describe('console 局域网只读边界（§…：LAN 查看 / localhost 控制�
     const html = render.renderConsolePage({ ...clean, readOnly: true })
     // 只读可见面（docs/dashboard-redesign.md §5.4）：
     //   ① 侧栏常驻锁徽标 `tc-lock`（不可关闭，取代此前可关闭横幅的常驻职责）
-    //   ② 首屏只读横幅 `tc-banner--ro`（可关闭，仅提示一次）
+    //   ② 告警坞里的只读条目（可关闭，仅提示一次）—— P2b 前是独立横幅 `tc-banner--ro`
     expect(html).toContain('class="tc-lock"')
-    expect(html).toContain('tc-banner tc-banner--ro')
-    expect(html).toContain('🔒 只读模式')
+    // 告警圾条目：断言限定在坞内（整页还内联了 theme.css，裸词断言会假通过——
+    // `class="tc-dock"` 只在标记里出现，`:root` 里的 `.tc-dock {` 不会匹配）。
+    const dock = html.slice(html.indexOf('class="tc-dock"'), html.indexOf('class="tc-kpi"'))
+    expect(dock).toContain('tc-dock__item tc-dock__item--info')
+    expect(dock).toContain('tc-dock__icon')
+    expect(dock).toContain('只读模式：')
     // 只读视图不禁用动作按钮（物理禁用会让组件区灰败破碎——只读是动作边界，不是按钮状态）：
     // 悬停提示 + 真点击由服务端 403 + flash 兜底，按钮保持正常外观可点击。
     // （正则避开 <style> 内联 CSS 里的 :disabled 选择器）
@@ -50,9 +54,10 @@ describe('console 局域网只读边界（§…：LAN 查看 / localhost 控制�
     expect(html).toContain('title="只读模式：操作仅限本机 localhost"')
     const html2 = render.renderConsolePage({ ...clean, readOnly: false })
     expect(html2).not.toContain('class="tc-lock"')
-    expect(html2).not.toContain('class="tc-banner tc-banner--ro"')
-    expect(html2).not.toContain('🔒 只读模式')
     expect(html2).not.toContain('title="只读模式：操作仅限本机 localhost"')
+    // 空坞不出现（不留空壳、也不再有「暂无告警」占位）——但 KPI 条仍在（两区通用）
+    expect(html2).not.toContain('class="tc-dock"')
+    expect(html2).toContain('class="tc-kpi"')
   })
 
   it('hydrate 安全：首屏组件不得在 useState 初始化里读 localStorage（横幅关闭后样式崩的根因）', () => {

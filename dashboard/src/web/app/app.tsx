@@ -20,7 +20,9 @@
 
 import { useCallback, useEffect, useRef, useState } from 'preact/hooks'
 import type { JSX } from 'preact'
+import { AlertDock } from '../components/AlertDock'
 import { Flash, type FlashState } from '../components/Flash'
+import { KpiStrip } from '../components/KpiStrip'
 import { PanelErrorBoundary } from '../components/PanelErrorBoundary'
 import { usePolling } from './lib/usePolling'
 import { fetchState, postAction } from './lib/api-client'
@@ -41,22 +43,21 @@ import { WirePanel } from './panels/WirePanel'
 import { EvalSummary } from './panels/EvalSummary'
 import {
   bootstrapPage,
+  buildAlerts,
   canonicalPath,
   DEFAULT_PAGE,
-  fmtTs,
+  kpiTiles,
   latestRow,
   pageForPath,
   REFRESH_INTERVALS,
   TC_CLOUDHALT_ACK,
   TC_GLOBAL_INTERVAL,
   TC_RO_BANNER_DISMISSED,
-  cloudHaltAckKey,
   parseCloudHaltAcks,
   withCourse,
   type ConsoleBootstrap,
   type PageKey,
   type RefreshSec,
-  visibleCloudHalts,
 } from '../view'
 
 export interface AppProps {
@@ -419,118 +420,44 @@ export function App({ initial }: AppProps) {
           },
         }}
       >
-        {/* ── 告警坞（P2 会合并为单容器；P0 保持既有横幅不变） ── */}
-        {visibleCloudHalts(stateView?.cloudHalts, viewCourse)
-          .filter(([, h]) => h.status === 'halted')
-          .filter(
-            ([courseName, h]) =>
-              !cloudHaltAcks.includes(cloudHaltAckKey('halted', courseName, h.at)),
-          )
-          .map(([courseName, h]) => (
-            <div key={`halt-${courseName}`} className="tc-banner tc-banner--err" role="alert">
-              <span>
-                ⚠ {courseName ? `课程 ${courseName} ` : ''}停机中（{h.reason}
-                ）：已向云机下发停机命令——云机先尝试停机； 停不掉则照常执行任务（不闲置空烧）。 本地
-                hub/console 均正常。本课恢复训练会自动解除；其它课的停机状态见「多课总览」徽标。
-              </span>
-              <button
-                type="button"
-                className="tc-btn tc-btn--sm"
-                onClick={() => void doAction('cloud-resume', { course: courseName })}
-              >
-                立即恢复
-              </button>
-              <button
-                type="button"
-                className="tc-btn tc-btn--sm"
-                onClick={() => ackCloudHalt(cloudHaltAckKey('halted', courseName, h.at))}
-              >
-                知道了
-              </button>
-            </div>
-          ))}
-        {visibleCloudHalts(stateView?.cloudHalts, viewCourse)
-          .filter(([, h]) => h.status === 'recovered' && !!h.clearedAt)
-          .filter(
-            ([courseName, h]) =>
-              !cloudHaltAcks.includes(cloudHaltAckKey('recovered', courseName, h.clearedAt ?? '')),
-          )
-          .map(([courseName, h]) => (
-            <div key={`rec-${courseName}`} className="tc-banner tc-banner--muted" role="status">
-              <span>
-                {courseName ? `课程 ${courseName} ` : ''}曾停机（{h.reason}）· 已恢复（
-                {h.clearReason ?? '手动恢复'}，{' '}
-                {fmtTs(new Date(h.clearedAt ?? '').getTime(), Date.now())}）；停机期间
-                停不掉的云机继续工作，未闲置浪费。
-              </span>
-              <button
-                type="button"
-                className="tc-btn tc-btn--sm"
-                onClick={() =>
-                  ackCloudHalt(cloudHaltAckKey('recovered', courseName, h.clearedAt ?? ''))
-                }
-              >
-                知道了
-              </button>
-            </div>
-          ))}
-        {stateView?.loopComplete ? (
-          <div className="tc-banner tc-banner--muted" role="status">
-            <span>
-              ✅ 训练已完成（{stateView.loopComplete.reason}）：本地已停止采集，云机已停机省配额，
-              进程停车等待重启。改大 iters 后经「停止→启动」继续。
-            </span>
-          </div>
-        ) : null}
-        {stateView?.ppoQueueStall ? (
-          <div className="tc-banner tc-banner--err" role="alert">
-            <span>
-              ⚠ PPO 任务排队超时：job{' '}
-              <code>
-                {stateView.ppoQueueStall.it != null
-                  ? `it${stateView.ppoQueueStall.it}`
-                  : stateView.ppoQueueStall.jobId.slice(0, 12)}
-              </code>{' '}
-              已等待 {Math.floor(stateView.ppoQueueStall.waitedSec / 60)} 分
-              {stateView.ppoQueueStall.waitedSec % 60} 秒仍无 worker 领取——云端 worker
-              可能断连或未在轮询 hub。检查 Colab/Kaggle worker 日志与 hub 是否在线。
-            </span>
-          </div>
-        ) : null}
-        {stateView?.courseEdit?.verdict === 'rejected' ? (
-          <div className="tc-banner tc-banner--err" role="alert">
-            <span>
-              ⚠ 课程文件含<strong>语料身份</strong>改动（
-              {stateView.courseEdit.fields.join('、') || '未识别字段'}
-              ）——热加载已拒绝：沿用启动配置继续训练，编辑内容不进云端 payload。
-              要应用请派生新关卡/新课程（D14 语料血缘不可 mid-run 破坏）；改回原文件后自动解除。
-            </span>
-          </div>
-        ) : null}
-        {readOnly && !roBannerDismissed ? (
-          <div className="tc-banner tc-banner--ro" role="status">
-            <span>
-              🔒 只读模式：可查看任意课程/日志/节点统计；启停组件、冒烟、模式开关与节点编辑 仅在本机
-              localhost 打开控制台时可用（动作按钮可点击，执行时会被服务端拒绝并提示）。
-            </span>
-            <button
-              type="button"
-              className="tc-btn tc-btn--sm"
-              aria-label="关闭只读提示"
-              title="关闭后不再显示（侧栏常驻 🔒 徽标不受影响）"
-              onClick={() => {
-                writeLocal(TC_RO_BANNER_DISMISSED, '1')
-                setRoBannerDismissed(true)
-              }}
-            >
-              ✕
-            </button>
-          </div>
-        ) : null}
+        {/* ── 告警坞（P2b：原先 6 条同权重横幅收敛成一个容器，见 view/alerts.ts） ──
+            条目、排序、折叠判据全在纯函数层；这里只把动作绑到通道上。 */}
+        <AlertDock
+          items={buildAlerts({
+            cloudHalts: stateView?.cloudHalts,
+            viewing: viewCourse,
+            acks: cloudHaltAcks,
+            loopComplete: stateView?.loopComplete,
+            ppoQueueStall: stateView?.ppoQueueStall,
+            courseEdit: stateView?.courseEdit,
+            readOnly,
+            roDismissed: roBannerDismissed,
+            now: Date.now(),
+          })}
+          onAct={(act, body) => doAction(act, body)}
+          onAck={(key) => {
+            // 会话级一次性已读（只读提示）走自己的键；其余按事件身份记进停机 ack 表。
+            if (key === 'ro-banner-dismissed') {
+              writeLocal(TC_RO_BANNER_DISMISSED, '1')
+              setRoBannerDismissed(true)
+              return
+            }
+            ackCloudHalt(key)
+          }}
+        />
 
         {/* ══════════════════ 总览 ══════════════════ */}
         {page === 'overview' ? (
           <>
+            {/* KPI 条（P2b：6 格「一眼看完」的读数索引）——六个数合并前都散落在
+                趋势图右上角 / Hero 首行 / 总览表头 / 节点行里，回答「现在什么情况」
+                只能滚动读数。取值与口径全在 view/kpi.ts（纯函数）。
+                两区通用（BC 课的胜率/iter 同样成立，只是没有 eval 与调度读数）。 */}
+            <PanelErrorBoundary>
+              {/* 时刻用 ticker 驱动的 `now`（与顶栏阶段 chip 同一口时钟）而不是当场 Date.now()：
+                  两处显示的是同一个阶段的耗时，读不一样的秒数就是 bug。 */}
+              <KpiStrip tiles={kpiTiles(stateView, now)} onNavigate={navigate} />
+            </PanelErrorBoundary>
             {/* RL 区（与 BC 区互斥：isBc 课只出 BC 区；Hero/EvalBoard 只属 RL） */}
             {stateView?.isBc ? null : (
               <PanelErrorBoundary>
