@@ -4,7 +4,121 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
-## §72 x20-snowball 立项：里程碑 bonus 腿 + god-prefix 实现一半后否决 revert（2026-09-19）
+## §97 e2e `check()` 静默失败：autouse fixture `_fail_loudly` + 三条被它揭出的既存红（2026-09-20）
+
+**一句话**：`e2e/test_run_rl.py` 的 `check()` 只把失败追加进模块级 `FAILS`、**从不抛错**，
+只有手写了 `f0 = len(FAILS) … raise` 的用例才变红 —— `test_it_stream_smoke` 漏了那一段，
+它那条「I3 eval after weight distribution」断言于是**静默 FAIL 了很久**，直到 xdist `-n 12`
+下落到不同 worker 顺序才偶发红（门禁里被当作“随机 flake”）。
+
+### 根因（I3 那条为何是顺序相关的）
+
+`dist_common._WEIGHTS_PUSHED` 是**进程内账本**，键 `(kind, wver)`：
+`_itest_env` 给每个 e2e 用例写的哑权重内容都是 `{"stub": true}` ⇒
+`weights_fingerprint` 相同 ⇒ 同一 worker 里第二个用例的权重下发走 “kept / reuse
+… skip POST”，**根本不经 HTTP** ⇒ FakeServer 没有 `weights` 事件 ⇒ `bool(wts3)` 假。
+实测（`-p no:randomly`，`queue_normal → stream_smoke`）**必现**；单跑 smoke 则必过。
+
+### 修法
+
+| 位置 | 改动 |
+|---|---|
+| `e2e/test_run_rl.py` 模块级 | 新增 `@pytest.fixture(autouse=True) _fail_loudly`：测前快照 `len(FAILS)`，测后新增即 `raise AssertionError`——义务交给框架，新用例不可能再忘；三处手写 `f0/raise` 随之删除 |
+| `_itest_env()` | 每个用例开头 `dist_common.weights_push_cache_reset()`（进程内账本清零）⇒「本轮真的下发过权重」重新成为**结构性**前提而非对用例顺序的断言。排序那一半本就有结构保证：stream 模式 `local_slots=2 < 4` 对局数 ⇒ 队列只能靠 POST 成功后孵化的节点线程清空 |
+
+### 揭出的三条既存静默红（全在 `-n 12` 下）
+
+1. **`test_mirror_scalar_lockstep`**：`SCALAR_X_INDICES == [15,18]` 已过期——`schema.py:94`
+   追加了 `29=iceVx`（`SCALAR_DIM=30`）。改为 `[15,18,29]` 并补 29 的翻转断言（真语境：
+   iceVx 是 x 分量，必须镜像）。
+2. **`test_eval_local_gate` (phase B)**：原断言「gate 关闭 ⇒ 本地 runner 零调用」被
+   2026-09-15 的 `release_local_gate_if_starved`（无节点时轮末主动开闸，防 600s 空等）
+   **废除**；本地 worker 与那次开闸是竞态，单跑时 worker 已退（开闸是空操作）、`-n 12`
+   下它仍在等门而被放行。断言换成当下真值：无节点轮必被主动开闸 + 不挂死 + 0 结算
+   （“关门则让位”由 `hold_for_local` 单函数断言 + I7 慢 eval 用例覆盖）。
+3. **`test_it_longtail_race` (I6)**：**单节点**配置下 `pick_race_target` 的「本节点已持有
+   则不派回」（`queue_local.py:411`）恒假 ⇒ race lane **永不触发**（dispatches 恒=1），
+   与 v3.14 竞速用例同源——那例当时靠加第二个节点修好，本例漏了。补同款第二节点后
+   `dispatches=2`、单轮 0.2s（`race lane` 行重现）。曾误判为「负载把另一条任务也拖过慢窗」，
+   把 3.0s 慢窗调到 15s 后仍 `dispatches=1` ⇒ 反证竞速条件本身不成立，窗口长度不是变量。
+
+### 教训
+
+- **「静默聚合」型断言 = 事实上的注释**：绿只在有人记得写 raise 时成立。用 autouse fixture
+  把义务交给框架，而不是靠每个用例自觉（本例正是自觉漏掉的那一个）。
+- **单节点不会竞速**：任何基于 race lane 的用例，配置必须是 ≥2 个节点（`nd_id not in
+  inflight_nodes[task]` 是其唯一入口）。
+- **进程内账本/缓存必须在用例入口清零**，否则同一 worker 的用例顺序会改变被测行为
+  （`weights_push_cache_reset` 已是 `tests/test_dist_common_poll.py` 的既有惯例）。
+- **A/B 定位法**：把「只加 fixture、不加隔离」的副本跑一遍（`git show`+注入，不 stash），
+  就能把「fixture 揭出的既存红」与「本改动引入的红」分开——本例三条都在两版里同现。
+
+### 验证
+
+nn python gate 全绿 182s（含 `-n 12` e2e 12 用例）· `e2e/test_run_rl.py -n 12` **3/3 绿**
+（改前 3/3 红）· 单进程整文件绿 · standalone 入口 `RESULT: ALL PASS` · 根 `bun run check`
+1934 pass / 0 fail。
+
+---
+
+## §96 并发退场 × 磁盘遍历：`walk_shard_dirs`（os.walk）取代 shard 树上的 `Path.rglob`（2026-09-20）
+
+**一句话**：dup-settle 输家退场（结算线程 `rmtree` 它自己的 shard 目录）与主线程的
+`resumed_manifests` 磁盘对账**同轮并发**，`Path.rglob` 的 `scandir` 撞上删除即抛
+ENOENT——而该异常在 **for 语句的迭代**里（不在循环体内），调用方的 `try/except OSError`
+只裹了 `read_text`，挡不住 ⇒ `stream collector failed` / 整轮红。
+
+### 现场（门禁 e2e `-n 12`，栈完整）
+
+```
+rl/dispatch.py:1121 in run → resumed_manifests(...)
+rl/resume.py:248 in resumed_manifests → traj_dir.rglob("rl_s*_seed*/manifest.json")
+pathlib.py:440 in _select_from → with scandir(parent_path) as scandir_it:
+FileNotFoundError: [Errno 2] No such file or directory: '…/i9/dist/fake/rl_s0_seed111'
+⇒ RuntimeError: stream collector failed: …
+```
+
+**症状特征**（判据）：`No such file or directory` 后面跟的是**目录**路径（抛点在 scandir
+而非文件读）——这与「文件缺失」类 ENOENT 一眼可分。
+
+### 修法
+
+`rl/resume.py::walk_shard_dirs()`（新，单一口径）：`os.walk(root, followlinks=True)` +
+`fnmatch` 目录名，契约是「scandir 失败按 onerror=None 静默跳过该层」⇒ 遍历期被删的
+目录自然消失，其余 shard 照常对账（少一份已退役副本正是期望语义）。四处调用点换用它：
+`_dir_signature` / `_scan_shards`（`completed_pairs`）/ `resumed_manifests` /
+`trailing_stage_samples_per_game`（连带 `it_dirs` 的 `stat` 竞态）；`remote/hub_client.
+iter_shard_dirs`（发布端同一条竞态，同一 helper + `_shard_mtime` 兜底）。
+
+### 证据链
+
+- **先复现**：门禁实测栈（上表）＋ `tests/test_rl_resume.py::test_hook_makes_old_rglob_raise`
+  把旧实现在同一时序下**必抛**钉成断言（钩子有效性自证；将来 pathlib 若变得并发容忍，
+  这条会红——那时 guard 完成使命）。
+- **确定性竞态钩子**：在 `scandir` 的实参 = 受害目录那一刻 rmtree（= 事故时序），
+  两个绑定点都要补：pathlib 把 `os.scandir` **锁存**成类属性（cpython 3.10
+  `pathlib.py:290  scandir = os.scandir`），只改 os 模块会让钩子静默失效（首版即踩）。
+- **反面证据**：「retire 竞态」曾被怀疑是 collector 读 shard（`_shard_dir`）出错——实测
+  不成立：把本地竞速副本拖慢以**确定性**制造 `dup settle … node=local (+retired …)`
+  （`e2e/test_run_rl.py::test_it_stream_local_loser_retire`），collector 照常收官 4/4。
+
+### 教训
+
+1. 对**活的** shard 树做遍历的每一处都必须并发删除安全（退场是设计内的并发写者）；
+   新加 walker 时先问「谁会在我遍历时删这个目录」。
+2. `pathlib.rglob/glob` 的 ENOENT 抛在**迭代**里 —— 在循环体内 try 是无效防护，
+   必须换成遍历期本身安全的原语（os.walk）或自己 scandir + try。
+3. 竞态复现钩子要**自证有效性**（同一钩子下旧实现必须红），否则「钩子没生效」会被
+   当成「测试通过」。
+
+---
+
+---
+
+## §101 x20-snowball 立项：里程碑 bonus 腿 + god-prefix 实现一半后否决 revert（2026-09-19）
+
+> 合并说明（2026-09-20，rebase onto efae223）：本条在 `origin/goal-nn` 上原编号 **§72**，与本文件下方已有的 §72（「hub 中介 push 派发」）重号；合并取下一个空号 **§101**，条目内容未改。
+
 
 **假说证实**：通关局 1.22 pu/千tick vs 死亡局 0.64、早期死亡 0.20（2 倍差，存活
 归一化后依然）—— 开局拾取缺口是病，中盘到达率是症。新腿 thesis 单变量：
@@ -18,7 +132,12 @@ powered-opening（--player-level）/wPickup 剂量。re-warm（peak 在降温后
 与加 batch（plateau 在噪声带上清晰可见）同样证据性否决。详见 DECISIONS
 §2026-09-19-x20-snowball。
 
-## §71 x20-rebirth 终点结算：池外 it30 胜出但 c06 回测全超限，无合格终点 + 旧能力丢失（2026-09-19）
+---
+
+## §100 x20-rebirth 终点结算：池外 it30 胜出但 c06 回测全超限，无合格终点 + 旧能力丢失（2026-09-19）
+
+> 合并说明（2026-09-20，rebase onto efae223）：本条在 `origin/goal-nn` 上原编号 **§71**，与本文件下方已有的 §71（「多课程单 hub（P1）」）重号；合并取下一个空号 **§100**，条目内容未改。
+
 
 **池外段 412000**（800 局配对）：bc 3.3%/3.85杀 ｜ it30 **7.5%/6.10** ｜
 it96 8.0%/5.94。it30 vs it96 互不可区分（Δpass −0.37σ，Δkills 0.15<0.5 量程）
@@ -34,7 +153,12 @@ dmg +17.4% ⇒ 同样超限。**全超限 ⇒ 无合格终点，判语"旧能力
 兼容（+6~9pp）—— 容量/遗忘权衡，不是学不动。课程结算节已回填，行源
 `tmp/x20-settle/*.jsonl`。
 
-## §70 x20-rebirth 停腿结算：it97 意外退出（非门限触发），plateau 判负（2026-09-19）
+---
+
+## §99 x20-rebirth 停腿结算：it97 意外退出（非门限触发），plateau 判负（2026-09-19）
+
+> 合并说明（2026-09-20，rebase onto efae223）：本条在 `origin/goal-nn` 上原编号 **§70**，与本文件下方已有的 §70（「云端同机 rollout + PPO 全链路集成测试」）重号；合并取下一个空号 **§99**，条目内容未改。
+
 
 **停腿原因**：trainer 进程意外退出（console 注记 PID 21560），卡在 it97
 rollout→PPO publish 之间。it97 rollout 已收齐（132 局 9.85% / score 0.348），
@@ -54,6 +178,9 @@ PPO 全程健康 KL~0.02 / entropy~0.7）；③ kills 当进展读数——是�
 
 **待办**：M2 三选一（kills 最优 it30 / pass 最优 it30 / 末 it96）+ 池外段
 412000（800 局）判决 + c07/c06 回测门，终点才能归档。
+
+---
+
 
 ## §95 x20-rebirth it19 rollout 208s 复盘：权重并行下发 + kept 短路径 + tail-join grace 默认 0（2026-09-19）
 

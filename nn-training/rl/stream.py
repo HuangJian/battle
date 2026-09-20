@@ -61,6 +61,22 @@ def wave_params(
     return thr, cap
 
 
+def _exc_tail(e: BaseException, limit: int = 4000) -> str:
+    """异常现场（traceback 尾段）——与 remote/worker.py::_failure_detail 同口径。
+
+    只留 `str(e)` 时，形如「[Errno 2] No such file or directory: '…/i3/w2/rl_s0_seed111'」
+    的单行错在 e2e/门禁里**无从定位抛点**（2026-09-20 实测：一次 `-n 12` 下的 ENOENT
+    只能靠翻日志猜）。本模块不得 import remote.worker（那是训练侧，会拖 torch 进采样路径），
+    故就地保留同款小助手。
+    """
+    import traceback
+
+    try:
+        return traceback.format_exc()[-limit:]
+    except Exception:  # 极端情况下 format_exc 本身不可用——退回落单行
+        return f"{type(e).__name__}: {e}"[:limit]
+
+
 def _shard_dir(entry: str) -> str | None:
     """本地局 _dir 指向 rollout 工作目录（w9/rl_s30_seed619823394/*.npy 多一层
     子目录），远程局 _dir 直接就是 shard 目录（obs.npy 平铺）。探测含 obs.npy 的一层。"""
@@ -242,6 +258,7 @@ def run_rollout_stream(
             _fire_eval_once("collector done")
         except Exception as e:
             box["err"] = str(e)
+            box["err_tb"] = _exc_tail(e)
         finally:
             box["t_end"] = time.time()  # rollout_sec 锚点：collector 真实退出时刻
 
@@ -385,7 +402,10 @@ def run_rollout_stream(
         )
         _drain(True, cap=tw_cap)
     if "err" in box:
-        raise RuntimeError(f"stream collector failed: {box['err']}")
+        tb = str(box.get("err_tb") or "")
+        raise RuntimeError(
+            f"stream collector failed: {box['err']}" + (f"\n--- collector traceback ---\n{tb}" if tb else "")
+        )
     report: dict[str, Any] | None = box.get("report")
     if report is None:
         raise RuntimeError("stream collector produced no report")

@@ -51,6 +51,7 @@ from remote.protocol import (
 from remote.protocol import (
     job_id as make_job_id,
 )
+from rl.resume import walk_shard_dirs
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -114,8 +115,10 @@ def iter_shard_dirs(traj_dir: str | Path, it: int, log=lambda msg: None) -> list
     if not it_dir.exists():
         return []
     cands: dict[str, list[Path]] = {}
-    for p in it_dir.rglob("rl_s*_seed*/manifest.json"):
-        d = p.parent
+    # walk_shard_dirs 而非 rglob：发布与 dup-settle 输家退场（dispatch 结算线程 rmtree）
+    # 同轮并发，rglob 会在迭代里抛 FileNotFoundError 把发布打红（2026-09-20 事故：
+    # `stream collector failed` 同源；栈顶 pathlib._select_from）。见 rl/resume.py 的说明。
+    for d in walk_shard_dirs(it_dir, with_manifest=True):
         if not ((d / "obs.npy").exists() or (d / "metrics.npy").exists()):
             continue
         cands.setdefault(d.name, []).append(d)
@@ -123,11 +126,21 @@ def iter_shard_dirs(traj_dir: str | Path, it: int, log=lambda msg: None) -> list
     for name in sorted(cands):
         ds = cands[name]
         if len(ds) > 1:
-            ds.sort(key=lambda d: ((d / "manifest.json").stat().st_mtime, str(d)))
+            # mtime 也可能在 stat 前一刻被删（同一竞态）：取不到就当作已消失的输家，
+            # 排到最后（不是赢家），绝不因它整轮红。
+            ds.sort(key=lambda d: (_shard_mtime(d), str(d)))
             for loser in ds[1:]:
                 log(f"[publish] duplicate shard {name}: retire {loser} (keep {ds[0]})")
         dirs.append(ds[0])
     return dirs
+
+
+def _shard_mtime(d: Path) -> float:
+    """shard manifest 的 mtime；目录已被并发删除（输家退场）时返回 +inf（排到最后）。"""
+    try:
+        return (d / "manifest.json").stat().st_mtime
+    except OSError:
+        return float("inf")
 
 
 def iter_bc_shard_dirs(

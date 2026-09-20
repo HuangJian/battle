@@ -2,9 +2,47 @@
 
 from __future__ import annotations
 
+import fnmatch
 import json
+import os
 from collections.abc import Sequence
 from pathlib import Path
+
+MANIFEST_NAME = "manifest.json"
+#: shard 目录名（一局一目录，`dist_common.write_shard` / TS 导出器同形）。
+SHARD_DIR_GLOB = "rl_s*_seed*"
+
+
+def walk_shard_dirs(root: Path, *, with_manifest: bool = False) -> list[Path]:
+    """递归列出 root 下全部 `rl_s*_seed*` shard 目录（with_manifest：只列含 manifest.json 的）。
+
+    **必须容忍「遍历中途目录被删」**（2026-09-20 门禁事故）：dup-settle 输家退场由
+    dispatch 结算线程执行（`rmtree` 它自己的 shard 目录），与本函数**同轮并发**——
+    `Path.rglob` 遍历到某一层时 `scandir` 抛 FileNotFoundError，而该异常发生在
+    **for 语句的迭代**里（pathlib._select_from），循环体内的 try 挡不住 ⇒ 整轮红：
+
+        rl/dispatch.py:1121 in run → resumed_manifests 调用点
+        rl/resume.py:248 in resumed_manifests → traj_dir.rglob("rl_s*_seed*/manifest.json")
+        pathlib.py:440 in _select_from → scandir(parent_path)
+        FileNotFoundError: [Errno 2] No such file or directory: '…/i9/dist/fake/rl_s0_seed111'
+
+    （症状是「No such file or directory + 一个**目录**路径」，因为抛点在 scandir 而非文件读。）
+
+    `os.walk` 的契约天然免疫：scandir 失败按 onerror=None 静默跳过该层，遍历期被删的目录
+    自然消失，其余 shard 照常对账——而「少一份已退役的副本」正是期望语义（输家副本本就
+    不该进语料/报告）。followlinks=True 与 rglob 对齐（pathlib 用 entry.is_dir()，跟目录软链）。
+
+    口径与旧 rglob 一致：任意深度、目录名匹配 `rl_s*_seed*`、manifest 必须是该目录的直接
+    子文件；返回顺序 = os.walk 的目录遍历序（调用方各自需要时再 sort）。
+    """
+    out: list[Path] = []
+    for dirpath, _dirnames, filenames in os.walk(root, followlinks=True):
+        if not fnmatch.fnmatch(os.path.basename(dirpath), SHARD_DIR_GLOB):
+            continue
+        if with_manifest and MANIFEST_NAME not in filenames:
+            continue
+        out.append(Path(dirpath))
+    return out
 
 # P2-2（2026-09-02）：_scan_shards 目录签名缓存。run_rl 的轮询热路径每 2 秒调一次
 # completed_pairs——旧实现每次都 rglob 全树 + 逐个 JSON 解析（140 局 ≈ 25 万次
@@ -16,14 +54,17 @@ _SCAN_CACHE_MAX = 512
 
 
 def _dir_signature(traj_dir: Path) -> tuple:
-    """traj_dir 下全部 shard 目录的 (相对路径, mtime)——检测新增/完成的 shard。"""
+    """traj_dir 下全部 shard 目录的 (相对路径, mtime)——检测新增/完成的 shard。
+
+    走 walk_shard_dirs（并发删除安全，见其 docstring）：旧 rglob 在输家退场与轮询并发时
+    会在迭代里抛 FileNotFoundError，整轮红。
+    """
     sig = []
-    for p in traj_dir.rglob("rl_s*_seed*"):
-        if p.is_dir():
-            try:
-                sig.append((str(p.relative_to(traj_dir)), p.stat().st_mtime))
-            except OSError:
-                continue
+    for p in walk_shard_dirs(traj_dir):
+        try:
+            sig.append((str(p.relative_to(traj_dir)), p.stat().st_mtime))
+        except OSError:
+            continue
     return tuple(sorted(sig))
 
 
@@ -70,7 +111,8 @@ def _scan_shards(
     if cached is not None:
         return cached
     res: list[tuple[tuple[int, int], Path]] = []
-    for m in traj_dir.rglob("rl_s*_seed*/manifest.json"):
+    for d in walk_shard_dirs(traj_dir, with_manifest=True):
+        m = d / MANIFEST_NAME
         try:
             mm = json.loads(m.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -81,7 +123,7 @@ def _scan_shards(
             continue
         if course_fp is not None and mm.get("course_fp") != course_fp:
             continue  # D14：跨课程语料不参与对账
-        res.append(((int(st), int(sd)), m.parent))
+        res.append(((int(st), int(sd)), d))
     if len(_SCAN_CACHE) >= _SCAN_CACHE_MAX:
         _SCAN_CACHE.clear()
     _SCAN_CACHE[key] = res
@@ -188,15 +230,23 @@ def trailing_stage_samples_per_game(
     from collections import defaultdict
 
     stage_set = {int(s) for s in stages}
-    it_dirs = sorted(
-        (p for p in Path(traj_root).glob("it*") if p.is_dir()),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )[: max(1, int(window_iters))]
+    # stat 也要挡并发删除：轮目录/其子目录可能正被清场线程删除（与 walk 同一类竞态，
+    # 2026-09-20）。取不到 mtime 的候选直接跳过（该轮正在消失，不该进窗口）。
+    it_cands: list[tuple[float, Path]] = []
+    for p in Path(traj_root).glob("it*"):
+        try:
+            if p.is_dir():
+                it_cands.append((p.stat().st_mtime, p))
+        except OSError:
+            continue
+    it_dirs = [p for _mt, p in sorted(it_cands, key=lambda t: t[0], reverse=True)][
+        : max(1, int(window_iters))
+    ]
     games: dict[int, int] = defaultdict(int)
     samples: dict[int, int] = defaultdict(int)
     for it_dir in it_dirs:
-        for mp in it_dir.glob("**/rl_s*_seed*/manifest.json"):
+        for d in walk_shard_dirs(it_dir, with_manifest=True):
+            mp = d / MANIFEST_NAME
             try:
                 mm = json.loads(mp.read_text(encoding="utf-8"))
             except (OSError, ValueError):
@@ -245,7 +295,8 @@ def resumed_manifests(
     if not traj_dir.exists():
         return out
     skip = exclude or set()
-    for m in traj_dir.rglob("rl_s*_seed*/manifest.json"):
+    for d in walk_shard_dirs(traj_dir, with_manifest=True):
+        m = d / MANIFEST_NAME
         try:
             mm = json.loads(m.read_text(encoding="utf-8"))
         except (OSError, ValueError):

@@ -57,35 +57,60 @@ ITEST = os.environ.get("RUN_RL_ITEST") == "1" or "--itest" in sys.argv
 
 
 def check(cond: bool, msg: str) -> None:
-    global_n = len(FAILS)
     print(("  PASS " if cond else "  FAIL ") + msg, flush=True)
     if not cond:
         FAILS.append(msg)
-        _ = global_n
+
+
+@pytest.fixture(autouse=True)
+def _fail_loudly():
+    """任何 check() 记下的失败都必须让 pytest 变红（不许静默通过）。
+
+    历史坑（2026-09-20）：check() 只往模块级 FAILS 追加，只有**显式写了**
+    `f0 = len(FAILS) … raise` 的用例才会变红。`test_it_stream_smoke` 漏了那一段，
+    它的时序断言（I3 eval after weight distribution）于是静默 pass 了很久 ——
+    直到 xdist `-n 12` 下用例落到不同 worker/顺序才偶发红（门禁里表现为「随机
+    flake」）。这里用 autouse fixture 把义务交给框架：新增用例不可能再忘。
+    各用例手写的 f0/raise 已随之删除（本文件原设计）。
+    standalone 入口（main()）不走 fixture，但末尾 `if FAILS: SystemExit(1)` 兜同样的底。
+    """
+    f0 = len(FAILS)
+    yield
+    new = FAILS[f0:]
+    if new:
+        raise AssertionError("; ".join(new))
 
 
 def test_mirror_scalar_lockstep() -> None:
-    """M2 镜像索引锁步：SCALAR_X_INDICES 已迁移为 [15,18]（v2 重编号）——
-    mirrorX 前后 (obs, scalars, move) 自洽；旧索引 [20,23] 必须不再翻转（防回归）。"""
+    """M2 镜像索引锁步：SCALAR_X_INDICES = [15,18,29]（v2 重编号 [20,23]→[15,18]，
+    之后追加 29=iceVx，见 schema.py:94/127）——mirrorX 前后 (obs, scalars, move) 自洽；
+    旧索引 [20,23] 必须不再翻转（防回归）。"""
     from data.dataset import mirror_x
     from schema import SCALAR_DIM, SCALAR_X_INDICES
 
-    check(SCALAR_X_INDICES == [15, 18], f"SCALAR_X_INDICES == [15,18] (got {SCALAR_X_INDICES})")
+    # 2026-09-20：本行原写死 [15,18]，schema 追加 29=iceVx 后已过期 —— 因 check() 只聚合
+    # 不抛错，它**静默 FAIL 了很长一段时间**（由模块级 _fail_loudly 揭出）。
+    check(
+        SCALAR_X_INDICES == [15, 18, 29],
+        f"SCALAR_X_INDICES == [15,18,29] (got {SCALAR_X_INDICES})",
+    )
     n = 26
     # mirror_x expects (C, H, W) — the trailing (1,) batch dim was a historic typo.
     obs = np.zeros((14, n, n), dtype=np.uint8)
     # Buffer must span legacy slot 23 even when SCALAR_DIM (<24) has dropped those
-    # indices — mirror_x only mutates SCALAR_X_INDICES=[15,18], so dead-slot
-    # assertions are reachable for every SCALAR_DIM.
-    sc = np.zeros(max(SCALAR_DIM, 24), dtype=np.float32)
+    # indices, and slot 29 (iceVx, SCALAR_DIM=30) — so dead-slot assertions stay
+    # reachable for every SCALAR_DIM.
+    sc = np.zeros(max(SCALAR_DIM, 30), dtype=np.float32)
     sc[15] = 0.5  # nearestEnemyRelX → 翻转
     sc[18] = -0.25  # nearestBaseRelX → 翻转
+    sc[29] = 0.3  # iceVx（x 分量）→ 翻转
     sc[20] = 0.7  # 旧索引必须已是死位（不再参与翻转）
     sc[23] = 0.7
     obs2, sc2, mv2 = mirror_x(obs, sc, 3)  # left (3) → right (4)
     check(mv2 == 4, "move left<->right flip")
     check(abs(sc2[15] - (-0.5)) < 1e-6, "scalar[15] flips sign under mirrorX")
     check(abs(sc2[18] - 0.25) < 1e-6, "scalar[18] flips sign under mirrorX")
+    check(abs(sc2[29] - (-0.3)) < 1e-6, "scalar[29] (iceVx) flips sign under mirrorX")
     check(abs(sc2[20] - 0.7) < 1e-6, "legacy scalar[20] is now a dead slot (no flip)")
     check(abs(sc2[23] - 0.7) < 1e-6, "legacy scalar[23] is now a dead slot (no flip)")
 
@@ -490,6 +515,13 @@ def _itest_env(
     """为集成子测试拉起 FakeServer + 本地直跑打桩。调用方负责 try/finally 关闭 server。"""
     weights = tmp_path / "weights.json"
     weights.write_text('{"stub": true}')
+    # 进程内已下发账本（_WEIGHTS_PUSHED）必须每个用例清零：本文件所有用例用的是
+    # 同一个哑权重内容 ⇒ weights_fingerprint 相同 ⇒ 若不清，第二个用例会走
+    # “kept / reuse … skip POST”而**根本不发权重**，“本轮真的下发过权重”这类断言
+    # （如 I3 的 eval-after-distribution）就成了对**用例执行顺序**的断言。
+    # 2026-09-20 实测：`-p no:randomly` 下 queue_normal → stream_smoke 必现（静默 FAIL，
+    # 由 _fail_loudly 揭出）；xdist 下取决于同 worker 顺序 —— 即门禁里那条“随机 flake”。
+    dist_common.weights_push_cache_reset()
     monkeypatch.setattr(_rdispatch, "run_local_rollout", _stub_local_rollout)
     srv = FakeServer(("127.0.0.1", 0), FakeAgent)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -568,6 +600,98 @@ def test_it_halt_preset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
         check(rep2.get("halt_aborted") is True, "I2 halt_aborted flagged")
         check(len(rep2["missing"]) == 2 and rep2["games"] == 0, "I2 nothing dispatched/settled")
         check(calls == [], "I2 queue-drained NOT fired under pre-set halt")
+    finally:
+        srv.shutdown()
+
+
+def test_it_stream_local_loser_retire(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """I3b：**本地**竞速副本输给节点时（`dup settle … node=local — dropped (+retired …)`），
+    采集与流式训练必须照常收官。
+
+    背景（2026-09-20）：门禁一次 `-n 12` 下 `test_it_stream_smoke` 报
+    `RuntimeError: stream collector failed: [Errno 2] No such file or directory:
+    '…/i3/w2/rl_s0_seed111'`，同轮日志里正好有
+    `dup settle s0/seed111 node=local — dropped (+retired …/i3/w2/rl_s0_seed111)` ——
+    看起来像「retire 本地目录 × collector 还在用」的竞态。
+
+    这条路径**整套测试此前从未跑到过**：正常时序下本地副本总是先结算
+    （`tail-race node=local` → 节点副本变 `fanout copy` 输家，retire 的是
+    `dist/<nd>/rl_sX_seedY`），本地做输家需要节点比本地快。本用例把本地 stub
+    拖慢来**确定性**地制造它：慢 0.35s ⇒ 节点主副本先结算 ⇒ 本地副本
+    `dup settle node=local`，retire 的 victim 是 `w{idx}/rl_sX_seedY`（本地布局）。
+
+    判据：retire 行确实出现（分支被走到）＋ 本轮 4 局全部训练结算、无异常。
+    2026-09-20 实测：该分支下 collector 正常收官 —— 故「retire 竞态」**未被证实**；
+    这条用例把该分支钉住，避免它再次无人覆盖。
+    """
+    srv, WEIGHTS, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
+    # 捕获调度行：既给断言当证据，也保留原始 log 行为（诊断价值不减）。
+    lines: list[str] = []
+    _real_log = _rdispatch.log
+
+    def _capture_log(msg: str) -> None:
+        lines.append(msg)
+        _real_log(msg)
+
+    monkeypatch.setattr(_rdispatch, "log", _capture_log)
+
+    def _slow_stub(bun_: str, rl_path: str, traj_dir, idx: int, task, a, wver: str) -> dict:
+        time.sleep(0.35)  # 节点主副本必先结算 ⇒ 本地副本必为 dup 输家
+        return _stub_local_rollout(bun_, rl_path, traj_dir, idx, task, a, wver)
+
+    monkeypatch.setattr(_rdispatch, "run_local_rollout", _slow_stub)
+    try:
+        traj = tmp_path / "i3b"
+        traj.mkdir()
+        stub3b = _StubPpo(kl=1e-12)
+        cfg3b = json.loads(json.dumps(cfg))
+        cfg3b["policy"]["streamWaveGames"] = 2
+        cfg3b["policy"]["streamKlCap"] = 1e12
+        err: BaseException | None = None
+
+        def _on_collect_done():
+            th = threading.Thread(target=lambda: None)
+            th.start()
+            return th
+
+        try:
+            rep3b = _run_rollout_stream(
+                bun,
+                str(WEIGHTS),
+                traj,
+                [(0, 111), (0, 222), (1, 333), (1, 444)],
+                types.SimpleNamespace(**{**vars(args), "epochs": 1, "mb": 64}),
+                cfg3b,
+                "i3b.3",
+                None,
+                None,
+                "cpu",
+                on_collect_done=_on_collect_done,
+                backend=stub3b,
+            )
+        except BaseException as e:  # 回归证据：任何异常（含 BaseException）都要留成 FAILS
+            rep3b = None
+            err = e
+        # 输家的结算/retire 发生在**被放弃的 daemon worker 线程**里（tail-join 0s 后
+        # 主轮已收官）——必须等它落地，否则断言与 retire 行赛跑（实测首版即踩）。
+        deadline = time.time() + 5.0
+        while time.time() < deadline and not any("retired" in ln for ln in lines):
+            time.sleep(0.02)
+        retired = [ln for ln in lines if "retired" in ln]
+        local_retired = [ln for ln in retired if "node=local" in ln]
+        check(err is None, f"I3b collector 未抛（got {err!r}）")
+        check(
+            bool(local_retired),
+            f"I3b 本地副本做了 dup 输家并 retire 本地 shard 目录（got {retired}）",
+        )
+        check(
+            all("/dist/" not in ln for ln in local_retired),
+            f"I3b retire 的是本地布局 w{{idx}}/rl_sX_seedY（got {local_retired}）",
+        )
+        if rep3b is not None:
+            sm3b = rep3b.pop("_stream")
+            check(rep3b["games"] == 4 and sm3b["waves"] >= 1, "I3b 4 局全部训练结算")
+            check(sm3b["halted"] is False, "I3b 无熔断")
     finally:
         srv.shutdown()
 
@@ -691,6 +815,15 @@ def test_it_local_suspend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_it_longtail_race(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """I6：慢任务被空闲槽竞速复制（dispatches≥2），整轮不被慢副本拖死。
+
+    2026-09-20：本用例原为**单节点**配置——而 `pick_race_target` 的规则是「nd_id 已
+    持有该任务则不派回（每节点每任务最多 1 份）」（rl/queue_local.py:411）。单节点下
+    两个 worker 的 nd_id 都是 "fake"，慢任务的 inflight_nodes 也只含 "fake" ⇒ 竞速
+    条件恒假，**race lane 永不触发**（实测 dispatches 恒=1）。这与 v3.14 竞速测试同源
+    （该用例当时靠加第二个节点修好，注释见下）：本用例补同款第二节点。
+    此前该断言一直是**静默 FAIL**（check() 只聚合不抛错），故未暴露。
+    """
     srv, WEIGHTS, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
     try:
         traj = tmp_path / "i6"
@@ -698,6 +831,15 @@ def test_it_longtail_race(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
         srv.slow_first = {(0, 111)}
         srv._slowed_once = set()
         t0 = time.time()
+        cfg["nodes"].append(
+            {
+                "id": "fake2",
+                "url": f"http://127.0.0.1:{srv.server_address[1]}",
+                "authKey": "",
+                "concurrency": 4,
+                "enabled": True,
+            }
+        )
         rep6 = run_rl.run_rollout_queue(
             bun,
             str(WEIGHTS),
@@ -886,7 +1028,7 @@ def test_it_early_race_v314(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     #   - 或 "dup settle/fanout copy ... s0/seed111"（副本重复结算）
     # 三类行之一。无竞速（回归）时慢主副本独占结算，上述行不会出现 → 判据失败。
     # 另：check() 只聚合不抛错（main() 专属语义），pytest 模式下静默放行曾掩盖失败——
-    # 本测试结束时把本轮新增 FAILS 显式抛为 AssertionError。
+    # 现由模块级 autouse fixture `_fail_loudly` 统一兜底（本测试曾手写 f0/raise，已删）。
     #
     # 2026-09-10 **结构性修复（加第二个节点）**：原配置只有单一节点 "fake"，而 v3.10 race
     # lane 的 pick_race_target 会排除「当前节点已持有的任务」（`nd_id not in
@@ -927,7 +1069,6 @@ def test_it_early_race_v314(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     # 的 dup 槽（快副本获胜即把任务弹出 inflight → race lane 结构性选不中它）。本测试
     # 只测 race lane，让它成为唯一复制通道（fanout 语义由 I6/longtail 等测试覆盖）。
     cfg["policy"]["tailFanoutN"] = 0
-    f0 = len(FAILS)
     lines: list[str] = []
     _real_log = _dispatch_mod.log
 
@@ -975,8 +1116,6 @@ def test_it_early_race_v314(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
         # 可超 5s（2026-09-06 hook 门禁实测）→ 放宽到 30s，仍能抓住 queueWindowSec=120 的
         # 死锁空等（这才是本断言的目的：round 必须自己终结，不靠外部超时）。
         check(took9 < 30.0, f"I9 round terminates ({took9:.2f}s)")
-        if len(FAILS) > f0:
-            raise AssertionError("; ".join(FAILS[f0:]))
     finally:
         srv.slow_first = set()
         srv._slowed_once = set()
@@ -993,7 +1132,6 @@ def test_it_tail_join_grace_v317(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     tailGraceJoinSec（此处 2s）内返回，而不是等满 queueWindowSec+taskTimeout。
     """
     srv, WEIGHTS, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
-    f0 = len(FAILS)
     cfg["policy"]["tailGraceJoinSec"] = 2
     try:
         traj = tmp_path / "i10"
@@ -1015,8 +1153,6 @@ def test_it_tail_join_grace_v317(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         check(rep10["games"] == 3 and rep10["missing"] == [], "I10 all 3 settled")
         # 上界 15s：正常收官 ~2-4s（含 2s grace）；无兜底则须等满 dup_hang(30s)。
         check(took10 < 15.0, f"I10 tail join bounded by grace ({took10:.2f}s < 15s)")
-        if len(FAILS) > f0:
-            raise AssertionError("; ".join(FAILS[f0:]))
     finally:
         srv.dup_hang = 0.0
         srv.shutdown()
@@ -1181,9 +1317,10 @@ def test_eval_local_gate(tmp: Path) -> None:
             ),
             f"meta ledger records 6 eval games ({len(meta_rows)} rows)",
         )
-        # B：gate 从不放行 → runner 零新增调用，窗口到期自然收场（不挂死、不越权训练侧）。
+        # B：gate 从不放行，且**无可用节点** → 轮末必须主动放行本机（防 600s 空等，
+        # eval_local.release_local_gate_if_starved / 2026-09-15 用户口径），窗口到期自然
+        # 收场（不挂死、不越权训练侧）。
         # 用不同权重文件（不同 wver）确保 todo 非空，真正进入关门等待路径。
-        baseline_calls = len(calls)
         traj_b = work / "trajB"
         rl_b = work / "w2.json"
         rl_b.write_text('{"arch":{"h":32}}', encoding="utf-8")
@@ -1193,7 +1330,16 @@ def test_eval_local_gate(tmp: Path) -> None:
             "bun", str(rl_b), traj_b, mk_args(1), cfg, "rid.2", 2, local_gate=gate_open_never
         )
         took = time.time() - t0
-        check(len(calls) == baseline_calls, "gate closed → local runner never invoked")
+        # 2026-09-20：原断言是「gate 关闭 ⇒ runner 零调用」。自 2026-09-15 「无节点则轮末
+        # 主动开闸」后它**不再成立**：本地 worker 与那次开闸是竞态 —— 单跑时 worker 已在
+        # 窗口到期时退出（logger 里那句 released immediately 是个空操作），xdist -n 12 下
+        # 它仍在等门、被放行后就按 rl_b 跑（桩断言让这 6 局全部失败 ⇒ 仍 0 结算）。
+        # 故断言换成当下真值：无节点时闸真的被主动放行；不得挂死；不得结算任何一局。
+        # 「关门则让位」语义由 hold_for_local 单函数断言（本段上文）+ I7 慢 eval 用例覆盖。
+        check(
+            gate_open_never.is_set(),
+            "starved round releases local gate (anti-dead-wait, 2026-09-15)",
+        )
         check(took < 40, f"closed-gate round exits at window ({took:.1f}s)")  # 并行门禁放宽
         rows_b = [
             json.loads(line)
@@ -1201,6 +1347,8 @@ def test_eval_local_gate(tmp: Path) -> None:
             if line.strip()
         ]
         summ_b = [r for r in rows_b if r.get("event") == "eval_summary" and r.get("iter") == 2]
+        # 「0 结算 / 6 全丢」是确定性的：被放行后本地跑的也是 rl_b（桩按 phase-A 权重断言 ⇒
+        # 每局都失败），故不可能有局落账。
         check(
             bool(summ_b) and summ_b[-1]["games"] == 0 and summ_b[-1]["dropped"] == 6,
             "closed-gate round settles nothing, all dropped",
