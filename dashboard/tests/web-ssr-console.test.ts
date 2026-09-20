@@ -65,6 +65,25 @@ describe('console SSR renderConsolePage', () => {
     }
     // 详情已路由化：首帧不渲染模态抽屉 / 弹窗（这是回归闸——抽屉已退役，别让它回来）
     expect(html).not.toContain('class="tc-modal-mask"')
+
+    // 组件卡 → 各自日志页（2026-09-20 P3c：总览底部那个「日志入口全集」面板已下线）。
+    // 这是**能力保全闸**：面板下线前本仓没有一个断言盯着「每张卡能去自己的日志页」，
+    // 卡上的链接再被删掉也不会有测试变红——最后一条路径会默默消失。
+    // 链接分两个分支，各证各的（fixture 里没有运行中的进程，running 分支只能查源）：
+    //   ① 渲染级：退出且有错的组件，⚠ 入口按 key 指向自己的 /log/<key>；
+    //   ② 源文件级：running 分支的 ≡ 入口同样带 href —— 那是「正在跑」的组件读日志的路径。
+    const logHrefs = [...dom.matchAll(/href="\/log\/([A-Za-z0-9_-]+)/g)].map((m) => m[1])
+    expect(logHrefs).toContain('hubServer') // fixture：exited + error ⇒ ⚠ 入口
+    expect(logHrefs).toContain('trainingLoop')
+    // 一个进程都没跑时，侧栏「日志」是唯一入口——它必须一直在（否则日志页彻底不可达）。
+    expect(dom).toContain('>日志</span>')
+    const cardsSrc = readFileSync('src/web/app/panels/ComponentCards.tsx', 'utf8')
+    expect(cardsSrc).toContain('aria-label={`日志 ${c.label}`}')
+    // exited ⚠ + running ≡ = 恰好两处；少一处即某个分支被拆掉。
+    expect(cardsSrc.match(/href=\{logHref\}/g)?.length).toBe(2)
+    // 退役的面板不得复活（它的唯一产物是这些）：
+    expect(dom).not.toContain('日志 →')
+    expect(dom).not.toContain('tc-preset')
     // 无原始 <script> 注入风险：SSR 输出经 preact 转义
     expect(html).not.toContain('<script>alert')
   })

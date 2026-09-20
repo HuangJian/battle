@@ -795,24 +795,9 @@ a.tc-btn {
 .tc-segmented__btn--on:hover {
   color: #fff;
 }
-.tc-preset {
-  padding: 7px 14px;
-  border: 1.5px solid var(--border);
-  border-radius: 9px;
-  background: var(--card);
-  cursor: pointer;
-  font-size: var(--fs-3);
-}
-.tc-preset--on {
-  border-color: var(--accent);
-  background: var(--accent-bg);
-  color: var(--accent);
-  font-weight: 700;
-}
-a.tc-preset {
-  text-decoration: none;
-  display: inline-block;
-}
+/* ✖ `.tc-preset` / `--on` / `a.tc-preset` 已删（2026-09-20 P3c）：唯一消费者是总览底部那个
+   「组件日志入口全集」面板（LogNavCard），它已下线——全组件日志入口由组件卡行内的「≡ 日志」
+   与日志页内的组件导航承担。样式随组件下线，不留悬空规则。 */
 
 /* ── Toggle（原生 checkbox，语义自带） ───────────────────── */
 .tc-toggle {

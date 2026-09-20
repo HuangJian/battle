@@ -4147,7 +4147,7 @@ CSS 里的空断言）· `web-wire-panel-wiring.test.ts`（抽屉接线 → 路�
 **P3 证据**：**867 pass / 0 fail**（92 文件；P2b 后 863）· `typecheck` ✓ · `oxlint` 0/0 ·
 `oxfmt` clean · 三份 bundle 绿（app **75,872 B** / log **16,046 B** / eval **21,049 B** gzip）。
 
-### §2026-09-20-metric-table-single-home（2026-09-20，总览「最新 6 轮」与 `/metrics` 整表的**单一归属**；已决，**落地待做**）
+### §2026-09-20-metric-table-single-home（2026-09-20，总览「最新 6 轮」与 `/metrics` 整表的**单一归属**；已决，**已落地**）
 
 **背景（用户要求「把重复收掉、定一个单一归属」）**：总览 Hero 的「最新 6 轮」表与 `/metrics` 的完整
 指标表展示同一批数字。查清后区分两层「重复」：
@@ -4194,4 +4194,39 @@ CSS 里的空断言）· `web-wire-panel-wiring.test.ts`（抽屉接线 → 路�
 
 **证据**：**878 pass / 0 fail**（92 文件；本次前 867）· `typecheck` ✓ · `oxlint` 0/0 · `oxfmt` clean ·
 三份 bundle 绿。
+
+### §2026-09-20-dashboard-shell-routing — P3d 续（`LogNavCard` 下线：日志入口的单一归属）
+
+**背景**：P0 遗留 ③ —— 总览底部的「组件日志入口全集」面板（`LogNavCard`）与组件卡行内的
+「≡ 日志」链接职责重叠，定案留给了 P3。
+
+**决定：下线 `LogNavCard`**。判据不是「页面太挤」，而是**同一语义两个入口**：
+1. 组件卡行内已有指向 `/log/<key>` 的链接，同一页再列一遍同一组入口 = 一语义两入口。
+2. 它那句「日志页独立轮询（follow 2s / 关 4s），上滚读历史不被拉回」描述的是**日志页自己的行为**，
+   写在总览页本属错位——已并入组件卡「≡ 日志」的 `title`（入口与它的说明住同一处）。
+3. **「全组件」并不由它承担**：日志页内自带 `<nav class="tc-logtool__nav" aria-label="组件">`
+   的逐组件 chips，从侧栏「日志」进去即可切任意组件 ⇒ 下线不丢任何路径。
+连带下线 `.tc-preset` / `.tc-preset--on` / `a.tc-preset`（唯一消费者就是它），CSS 里留一条注释
+记明去向，免得日后被当成悬空规则重加。
+
+**新发现（写在这里是因为它决定闸的形态）**：组件卡行内的日志链接是**条件渲染**的——
+`exited && error` 走 ⚠ 入口（也指向 `/log/<key>`）、`running` 走 ≡ 入口、`stopped` **两个都不渲染**。
+所以「行内入口覆盖全部状态」是假的，**真正的兜底是侧栏「日志」+ 日志页组件导航**。
+
+**能力保全闸（此前零覆盖）**：面板下线前，本仓**没有任何断言**盯着「每张组件卡能去自己的日志页」
+——链接再被删掉也不会有测试变红，最后一条路径会默默消失。新闸分两层：
+- **渲染级**：fixture 中「退出且有错」的组件的 ⚠ `href` 按 key 指向自己的 `/log/<key>`；
+  且侧栏「日志」入口在场（一个进程都没跑时它是**唯一**入口）。
+- **源文件级**：`ComponentCards.tsx` 里 `href={logHref}` **恰好 2 处**（exited ⚠ + running ≡），
+  任一支被拆掉即红。
+- **日志页内组件导航（真正的全集载体）也要逐个断言**：`web-ssr-log-page.test.ts` 此前只查
+  `toContain('/log/trainingLoop')` **一个链接**——nav 退化成一个 chip、或某组件被漏掉，它照样绿。
+  已改为「逐组件断言 + `tc-lognav` 计数恰好等于 `state.components.length`」，并加一条**前提闸**
+  （组件数 > 0），免得两者同时为 0 时退回永真。
+
+> 初版闸写成 `expect(dom).toContain('aria-label="日志 ')`，**红了**——因为 fixture 里没有任何
+> `isRunning` 的组件。这次红灯不是噪声，它暴露的正是上面那条「条件渲染」事实，闸据此才拆成两层。
+
+**证据**：**878 pass / 0 fail**（93 文件）· `typecheck` ✓ · `oxlint` 0/0 · `oxfmt` clean ·
+三份 bundle 绿（app gzip **76,297 B**，本次 −224 B / log 17,386 B / eval 22,377 B）。
 

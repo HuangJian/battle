@@ -34,7 +34,6 @@ import { ComponentCards } from './panels/ComponentCards'
 import { NodePills } from './panels/NodePills'
 import { MetricsTable } from './panels/MetricsTable'
 import { NodeStats } from './panels/NodeStats'
-import { LogNavCard } from './panels/LogNavCard'
 import { TrainLaunchModal, type TunnelLaunchOpts } from './panels/TrainLaunchModal'
 import { BcPanel } from './panels/BcPanel'
 import { CourseMatrix } from './panels/CourseMatrix'
@@ -530,10 +529,9 @@ export function App({ initial }: AppProps) {
                 <BcPanel course={viewCourse} enabled={documentVisible} />
               </PanelErrorBoundary>
             ) : null}
-            {/* 组件日志入口全集（独立页 /log/<key>） */}
-            <PanelErrorBoundary>
-              <LogNavCard stateView={stateView} course={viewCourse} />
-            </PanelErrorBoundary>
+            {/* 组件日志入口由组件卡行内的「≡ 日志」承担（2026-09-20 P3c 下线 LogNavCard：
+                同一组入口在同页出现两处，且它那句轮询说明讲的是日志页自己的行为——
+                已并入组件卡的 ≡ 悬停文案）。 */}
           </>
         ) : null}
 

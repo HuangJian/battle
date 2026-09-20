@@ -39,7 +39,12 @@ describe('console/log viewer (§348 补 2)', () => {
     expect(dom).toContain('组件日志')
     expect(dom).toContain('id="logbox"')
     expect(dom).toContain('id="follow" checked')
-    expect(dom).toContain('/log/trainingLoop')
+    // 全组件导航 = 删掉 LogNavCard 之后「全组件日志入口」的**真正承担者**（2026-09-20 P3d），
+    // 所以这里必须逐个组件断言：只查 /log/trainingLoop 一个链接是装饰——
+    // nav 退化成一个 chip、或某组件被漏掉，都照样绿。
+    expect(state.components.length).toBeGreaterThan(0) // 前提闸：否则下面的循环与计数都是永真
+    for (const c of state.components) expect(dom).toContain(`href="/log/${c.key}`)
+    expect(dom.match(/class="tc-lognav/g)?.length).toBe(state.components.length)
     // 日志文本必须经转义（原始 <script> 不得出现在 logbox 内容里）
     expect(html).not.toContain('<script>alert')
   })

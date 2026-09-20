@@ -231,10 +231,15 @@ export function ComponentCards({
                             ◎
                           </button>
                         ) : null}
+                        {/* 全组件日志入口 = 这一行（2026-09-20 P3c：总览底部那个「日志入口全集」
+                            面板已下线，它的轮询口径说明并入这里的 title——入口与说明住在同一处）。 */}
                         <a
                           className="tc-iconbtn"
                           aria-label={`日志 ${c.label}`}
-                          title="日志"
+                          title={
+                            `${c.label} 的日志（独立页 /log/${c.key}）\n` +
+                            '日志页自行轮询：跟随中 2s / 自动刷新 4s；上滚读历史不被拉回，滚回底部自动恢复跟随。'
+                          }
                           href={logHref}
                         >
                           ≡
