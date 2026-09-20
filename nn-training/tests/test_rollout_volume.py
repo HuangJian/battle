@@ -523,11 +523,24 @@ def test_corpus_fp_ignores_volume_tuning_knobs() -> None:
 # plan §3-P2 的微课试点。
 
 
-def _manifest(d: Path, stage: int, seed: int, wver: str, n_samples: int) -> None:
+def _manifest(
+    d: Path,
+    stage: int,
+    seed: int,
+    wver: str,
+    n_samples: int,
+    outcome: str = "timeout",
+) -> None:
     p = d / f"rl_s{stage:02d}_seed{seed}"
     p.mkdir(parents=True, exist_ok=True)
     (p / "manifest.json").write_text(
-        json.dumps({"stage": stage, "seed": seed, "wver": wver, "nSamples": n_samples}),
+        json.dumps({
+            "stage": stage,
+            "seed": seed,
+            "wver": wver,
+            "nSamples": n_samples,
+            "outcome": outcome,
+        }),
         encoding="utf-8",
     )
 
@@ -560,6 +573,12 @@ class _StubLoop:
 
     def _volume_journal_replay(self, it: int) -> Any:
         return TrainingLoop._volume_journal_replay(cast(Any, self), it)
+
+    def _volume_stage_ests_map(self) -> dict[int, int]:
+        return TrainingLoop._volume_stage_ests_map(cast(Any, self))
+
+    def _volume_collect_continuous(self, it: int, dist_cfg: dict | None) -> None:
+        TrainingLoop._volume_collect_continuous(cast(Any, self), it, dist_cfg)
 
     def __init__(
         self,
@@ -722,6 +741,33 @@ def test_volume_stages_uses_explicit_stages(tmp_path: Path) -> None:
     stub = _StubLoop(tmp_path, target=600000)
     stub.args.stages = "2000-2003"
     assert stub._volume_stages() == [2000, 2001, 2002, 2003]
+
+
+def test_continuous_restart_quota_met_backfills_winrate_from_shards(
+    tmp_path: Path, _patch_wver: None
+) -> None:
+    """★ 配额已满重启：本进程零新采不得记 winRate=0（x20-steady it75→it76）。
+
+    停机前 quota 已采满（50086/48000）⇒ 新进程 continuous while 立刻 break、
+    combined=None ⇒ adopt_volume_report(None) 把除零保护的 0.0 写进账本。
+    磁盘上本轮 shard 的 outcome 必须回填——「打了 0 局」与「打了 N 局全输」
+    在数值上必须可区分。
+    """
+    stub = _StubLoop(tmp_path, target=200, est=20, samples=200, it=76)
+    # 上一进程已把本轮采满并落盘：4 关 × 2 局，胜败各半，nSamples 远超分关配额。
+    for stage in range(4):
+        for seed in range(2):
+            outcome = "stage_clear" if seed == 0 else "timeout"
+            _manifest(stub._traj_dir, stage, seed, _WVER, 200, outcome=outcome)
+    stub._volume_collect_continuous(76, None)
+    assert stub.dispatched == []  # 配额已满 ⇒ 零新采
+    assert stub._volume_waves == 0
+    # 报告口径 = 盘上本轮 shard，不是本进程 combine([]) 的空壳
+    assert stub._report["games"] == 8
+    assert stub._report["outcomes"].get("stage_clear") == 4
+    assert stub._report["outcomes"].get("timeout") == 4
+    assert stub._report["winRate"] == 0.5
+    assert stub._report["totalSamples"] == 8 * 200
 
 
 def test_volume_topup_quota_met_in_first_wave(tmp_path: Path, _patch_wver: None) -> None:

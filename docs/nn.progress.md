@@ -4,6 +4,128 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §108 continuous volume 报告真源 = 本轮盘上 shard（修 it76 winRate=0 监控盲区，2026-09-20）
+
+**一句话**：配额已满重启后，`_volume_collect_continuous` 零新采（batches=0）时不得把
+除零保护的 `winRate=0.0` 写进账本——报告与配额账本同源，从本轮 `traj/it{N}` 下
+wver/course 匹配的 shard manifest 重聚合 outcomes。
+
+- **根因**（用户诊断 + §107 缺口）：`combine_reports` 只统计本进程本轮新采局；
+  停机前 quota 已满（50086/48000）⇒ 新进程 while 立刻 break ⇒ `combined=None`
+  ⇒ `adopt_volume_report(None)` → `games=0, winRate=0.0`。磁盘上 238 个 shard 的
+  `stage_clear` 无人重聚合；账本上「0 局胜率 0」与「N 局全输」不可区分。
+- **决定**：`rl/reports.py::merge_volume_report(wave, disk_manifests)` —— 盘上有
+  games 则 **以 disk combine 为报告体**，wave 只覆盖时间锚点
+  （`pure_collect_sec` / `weights_dist_*` / `collect_end_ts`）。拒绝「仅 wave 为空时
+  回填」：重启后本进程可能只补缺口批，wave 有 games 但仍小于盘上全量，会低估。
+- **接线**：`loop_core._volume_collect_continuous` 收官处
+  `resumed_manifests(traj_dir, wver, extra_wver, course_fp)` + stages 过滤 → merge。
+  `_traj_dir = traj/it{N}` 已是迭代作用域。
+- **验证**：`tests/test_rollout_volume.py::test_continuous_restart_quota_met_backfills_winrate_from_shards`
+  + `tests/test_rl_reports.py` 三条 merge 不变量；volume/ledger/scheduler/e2e 相关
+  113 用例绿。
+- **不在 DECISIONS**：bugfix 口径（HOW-TO-ADD §1：防重犯靠测试断言 + 本条）。
+- **遗留（未修）**：continuous `start_idx` 重启后从 0 重抽种子流，首批可能整批命中
+  盘上已 done 的 pair（dispatch 磁盘回填、不新采）；配额靠后续批推进。与本 bug 独立。
+
+---
+
+## §107 x20-steady it76：中途停机 + 重启无损，代价是时间不是质量（2026-09-20）
+
+**一句话**：it75 完成时停机、16:47 重启，it76 的 PPO 照常消费了停机前已采满的
+50086 transitions —— 权重 / Adam / 种子 / 超参四续上，训练质量无损；
+`samples=0` 只是新进程本地零新采的计数假象（quota 停机前已满），不是"没数据"。
+
+- 恢复链（`trainer-cluster.log` 16:47:24–26）：`rotateSeed` 继承（corpus 轮转不断，
+  §15.1 合规）、weights ← it75 落盘、entropy peak 继承、kickstart kk=0 不变、
+  `resume iteration 76: keeping existing shards`（volume 已 50086/48000，
+  batches=0）。`ppo_schedule@it76` 与超参逐字不变。
+- Adam 动量经 opt blob 恢复（D5 连续性成立；云机侧 cache miss 重下 890KB，
+  `opt_restore_sec` 6s vs 平常 0.03s —— 只多花 6 秒，状态不丢）。
+- 真正的代价是墙钟 + GPU（hub 日志为证）：旧 job（`d387a…`）云端 16:43:39 回传时
+  接收端已停 ⇒ 成果丢弃（白算一次）；新 job（`08018589…`）16:47:34 发布，云机
+  16:51:42 才真正开工（两 worker 还 race 了一次，先认领的不下载、后者胜出）⇒
+  round-trip 369s vs 平常 ~113s，其中 ~277s 是"有 job 无人认领"的 pickup 延迟。
+- it80 回吐（low% 37.0→41.5）与重启无关：落在重启前噪声带内（it5 41.5 / it10 42.2 /
+  it70 40.0），重启后 it77–81 的 kl/ent/policy/value 全正常。唯一观测缺口：it76 的
+  rollout 监控是盲的（winRate/outcomes 全空），行为侧漂移那一轮不可见。
+- 教训：重启尽量在 iteration 落账**之后**停；旧 job 若晚几秒回传本可复用 —— 偶发
+  浪费，不值得为此加复用逻辑（cancel-stale 本来就是 §381 定死的语义）。
+
+---
+
+## §106 e2e 权重下发账本跨用例撞键：门禁随机 flake 的**残留根**（2026-09-20）
+
+**一句话**：§97 的 `weights_push_cache_reset()` 只治了「同进程顺序跑」，**没治在途线程**——
+前一个用例的收尾 `weights-push` 线程可能在下一个用例 reset **之后**才
+`note_weights_pushed(...)`；而全仓库的哑权重内容都是 `{"stub": true}` ⇒ `wver`（= **文件
+指纹**）完全相同、节点名也同为 `fake` ⇒ 下一个用例的权重下发被判 “kept / skip POST” ⇒
+FakeServer 收不到 weights 事件 ⇒ `test_it_stream_smoke` 的 I3 断言
+（`bool(wts3) and fired[0] > wts3[0]`）假红。xdist 下取决于「同 worker 的前置用例是哪个」，
+这就是门禁里那条**随机 flake**（本轮实测：`e2e/` 单跑 3 次 2 次红，日志指纹
+`weights[rollout] -> fake (kept, 0.0s)`）。
+
+### 修法（从根上不撞键，而不是再加一次 reset）
+
+哑权重内容**每个用例唯一**：`{"stub": true, "case": <tmp 目录名>}`。
+
+| 位置 | 改动 |
+|------|------|
+| `e2e/test_run_rl.py::_itest_env` | 每次写盘的哑权重带 `case` 字段（`tmp_path.name`） |
+| `e2e/test_volume_e2e.py`（weights 落盘处） | 同上（`tmp.name`） |
+
+**为什么改内容而不是再补一次 reset**：reset 管不了「reset 之后才落地的在途线程」，只有**键
+不同**才与线程时序无关；`weights_push_cache_reset()` 保留作双保险。顺带把「断言不该依赖
+进程内跨用例缓存」这条写进注释，避免下一个人再把哑权重改成全同内容。
+
+---
+
+## §105 大 body 低速重抽 + 每 job 传输账：痛在连接抽签的尾部，不在字节均值（2026-09-20）
+
+**一句话**：同机同 hub 的传输速率是 **44× 双峰**（13.5 KB/s ↔ 990 KB/s），所以「瘦身」不是
+第一杠杆——**换一条连接**才是。
+
+### 现场（同一台 V100 / 同一 hub / 同一隧道）
+
+| 时刻 | 端点 | 字节 | 耗时 | 速率 |
+|------|------|------|------|------|
+| 10:41:35→10:43:04 | payload | 2,012,020 | 88.6 s | **22.7 KB/s** |
+| 11:25:01→11:25:06 | payload | 4,848,536 | 4.9 s | 990 KB/s |
+| 12:49:28→12:49:32 | payload | 3,454,884 | 3.9 s | 885 KB/s |
+| 12:49:58→12:51:30 | code | 1,433,893 | 106 s | **13.5 KB/s** |
+| 12:51:30→12:51:42 | opt_init blob | —（无进度行 ⇒ <5 s） | — | ≥120 KB/s |
+| **12:59:29→13:04:51** | **payload** | **3,486,200** | **321.8 s** | 首连接 **6–9 KB/s** 烧完 300 s 预算；**重试换连接后 354 KB/s**（余下 0.6 MB 只用 5 s） |
+
+12:49 那两行是**相邻 3 秒的同机请求**；12:59 那次「重试」其实就是一次**意外重抽**——只是由
+`BODY_TOTAL_TIMEOUT_SEC` 在 **300 s 之后**触发（而不是首块的 ~39 s），321.8 s 里约 280 s 白等。
+`urllib` 每个请求新建连接（`net_http.urlopen` → `OpenerDirector.open`，无 keep-alive 池）
+⇒ 云机侧 ha-connection / 边缘节点决定这条连接的质量。
+
+### 修法（`nn-training/remote/worker.py`）
+
+- **判据**（纯函数 `_reroll_decision`，阈值只有一处实现）：首块速率 < `max(WIRE_MIN_RATE=80KB/s,
+  本会话最好速率/4)` **且** 按此速率预计剩余 > `WIRE_REROLL_BUDGET_SEC=20s` ⇒ 抛
+  `WireSlowError`（带已收字节数/速率/预计剩余，**有正文**：同裸 `TimeoutError()` 的教训）。
+- **只在首块判一次**（`probed` 一次性）⇒ 每次重抽浪费 ≤ 一块（256 KB），**不可能退化成
+  「再整份重传一遍」**。
+- **`_get_with_retry` 不退避重抽**（重抽的价值就在快）；上限 `WIRE_REROLL_MAX=3`，且
+  **最后一次尝试永不可重抽**——慢链路不会变成「永远下不完」。只对幂等 GET 开放。
+- **POST result 永不重抽**（产物上行，走既有 5 次退避）+ 只记账。
+- **每 job 一行传输账**：`job X: wire payload=3.32MB/321.8s(10KB/s) code=cache-hit
+  result=0.89MB/3.7s(245KB/s) reroll=1(wasted 0.25MB) 合计=…`；零字节命中（code/blob 缓存、
+  preloaded）也进账（否则读数失真）；push 模式（`worker_server`）同样 flush；未 flush 的 job
+  封顶 4 个（防无界增长）。
+
+### 验收基准与教训
+
+- 验收：12:59 那次若带本改动 ⇒ 首块（39 s 处）即判坏签 ⇒ 预期 ~50 s（而非 321.8 s）。
+- 教训：**可观测性先于优化**——「13.5 KB/s 与 3 秒后 ≥120 KB/s」这种对比，只有在有了进度行
+  之后才看得见；上一节（§104）加的停滞/进度判据是本节判据能出台的前提。
+- 门禁：nn python 全量 **1859 passed**（ruff + mypy 绿），新增 `tests/test_wire_reroll.py`
+  17 例（判据/相对阈值/上限/最后一次不重抽/浪费有界/账行形状/产物不重抽）。
+
+---
+
 ## §104 大 body 传输停滞：两侧同时沉默（2026-09-20，用户报障：云机 claim 第二个 job 后几分钟无动静、无日志）
 
 **一句话**：云机领到 `it2` 的 PPO job 后卡在 payload 下载里 **5 分钟一行日志都没有**——
@@ -208,6 +330,33 @@
 nn python gate 全绿 182s（含 `-n 12` e2e 12 用例）· `e2e/test_run_rl.py -n 12` **3/3 绿**
 （改前 3/3 红）· 单进程整文件绿 · standalone 入口 `RESULT: ALL PASS` · 根 `bun run check`
 1934 pass / 0 fail。
+
+### 2026-09-20 后续更正：I3 那条断言本身立不住（§97 的一句话被实测推翻）
+
+上文表格里「排序那一半本就有结构保证：stream 模式 `local_slots=2 < 4` 对局数 ⇒ 队列只能靠
+POST 成功后孵化的节点线程清空」 **是错的**——本地槽是**复用**的：2 条本地腿 0.01s/局，
+4 局全在本地跑完（`byNode={"local": 4}`），队列在后台 `weights-push` 仍**在途**时就清空。
+门禁复现（`-n 12`，3 次里红 1 次）拿到的原始读数：
+
+```
+[stream] clean-eval dispatched (dispatch queue drained)   ← eval 已派发
+eval_fired=1789903983.124095  weights POST 落地=1789903983.1436107   （push 落后 19.5ms）
+[dist] tail-join grace 0s 到期：7 个 worker 仍在收尾: ['weights-push', ...]
+```
+
+**结论**：I3 原断言的「eval 晚于节点权重 POST」**不是本代码的性质**——契约（`rl/stream.py`
+文档串）= 清空即「采集任务已全部交出（节点/本地）」，而干净评估另走自己的 `kind='eval'`
+权重握手（`rl/eval_dispatch.py`），从不依赖 rollout 那条 POST 的完成时刻。
+
+**改法（断言换成真性质 + 诊断带读数）**：
+
+| 位置 | 改动 |
+|---|---|
+| `e2e/test_run_rl.py` I3 | 改为 **`not node_disp or wts3[0] < node_disp[0]`**：有结构保证的是「**节点采样派发**晚于其权重落地」（节点 worker 在 POST 成功后才孵化，`dispatch.py::_push_need_and_spawn`）；本地腿跑完全部对局时该断言不适用（and 不该乱红）。消息里带 `weights_events/first/first_node_dispatch/eval_fired` 四个读数 |
+| `rl/stream.py` | 那行日志原写 “frozen weights on nodes” —— 同一误读，改成「采集任务已全部交出（节点/本地在途），评估与其并行」 |
+
+**教训**：断言「A 晚于 B」时必须确认 A 与 B 的因果关系**在每一条执行路径上**都成立；
+「上限（`local_slots<对局数`）」不等于「排他」（本地腿复用 ⇒ 上限不封吞吐）。
 
 ---
 

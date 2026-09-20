@@ -1328,12 +1328,28 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
             f"{len(stages) - len(unmet)}/{len(stages)} stats={stage_stats}"
         )
         self._volume_collected = collected_total
-        # 只采纳本轮 batch 聚合结果；禁止 combine 进上一轮 _report
-        # （否则 pure_collect_sec = now − run_start 轮轮暴涨）。
-        # 本轮无 batch 也必须落到合法空 shape，否则 _log_report 读 games KeyError。
-        from rl.reports import adopt_volume_report
+        # 报告真源 = 本轮盘上 shard（与 settled_stage_totals 同源）；wave 只补时间锚点。
+        # 禁止 combine 进上一轮 _report（pure_collect 起点会钉在历史波，§adopt_volume_report）。
+        # 配额已满重启 ⇒ batches=0，若只 adopt(combined=None) 会把除零保护的 winRate=0
+        # 写进账本（x20-steady it76 / §107）——必须从 shard 回填 outcomes。
+        from rl.reports import merge_volume_report
+        from rl.resume import resumed_manifests
 
-        self._report = adopt_volume_report(combined)
+        disk_reports = resumed_manifests(
+            self._traj_dir,
+            wver,
+            extra_wver=extra_wver,
+            course_fp=course_fp,
+        )
+        if stages:
+            stage_set = {int(s) for s in stages}
+            filtered: list[dict] = []
+            for r in disk_reports:
+                st = r.get("stage")
+                if st is None or int(st) in stage_set:
+                    filtered.append(r)
+            disk_reports = filtered
+        self._report = merge_volume_report(combined, disk_reports)
         if self._volume_waves > 0 and self._report.get("pure_collect_sec") is not None:
             log(
                 f"[volume] it{it}: rollout 聚合 batches={self._report.get('rollout_collect_waves', self._volume_waves)} "
