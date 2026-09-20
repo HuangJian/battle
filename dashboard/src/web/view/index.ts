@@ -12,7 +12,7 @@
  *
  *  模块地图（按数据来源分组）：
  *    console-types  控制台整页视图  |  metric-types / bc-types  训练指标与 BC 账本行
- *    component-groups 组件卡分组（服务面单例 vs 课程面按课程）
+ *    component-groups 组件卡分组（服务 vs 课程）|  component-roles  服务角色名与用途释义
  *    pool-types     节点池视图      |  eval-types / eval-export  评估板
  *    log-view       日志页          |  cards  卡片注册表
  *    loop-queue     调度器每课队列视图（单例卡片的读面）
@@ -21,13 +21,13 @@
  *    course-overview 多课程并行总览（hub 侧）/ push worker 登记
  *    course-matrix  课程矩阵：并行总览 × 训练调度器的 outer join（问题 C5）
  *    alerts         告警坞条目（严重度排序 + 折叠 + ack 可见性，问题 C4）
- *    kpi            KPI 条六格读数（全部由现有视图字段派生，问题 C1）
  *    routes         控制台路由（路径 ↔ 页面键、导航项、激活判定）
  */
 
 // ── 内部模块（唯一对外出口；调用方一律 import 本目录，不直连内部文件）──
 export * from './console-types'
 export * from './component-groups'
+export * from './component-roles'
 export * from './bc-types'
 export * from './log-view'
 export * from './metric-types'
@@ -46,6 +46,5 @@ export * from './course-overview'
 export * from './loop-queue'
 export * from './course-matrix'
 export * from './alerts'
-export * from './kpi'
 export * from './routes'
 export * from './metric-columns'

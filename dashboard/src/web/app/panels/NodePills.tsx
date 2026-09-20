@@ -8,9 +8,14 @@
  *
  *  状态三分（用户指令 2026-09-20：健康度**只由最近完成轮的贡献数**判定，不再看 ping）：
  *    · 健康   — 绿点 ●（贡献 ≥ 节点并发数）
- *    · 缓慢   — 琥珀菱形 ◆「缓慢」（0 < 贡献 < 并发数）
- *    · 离线   — 红方 ■「离线」（贡献 0；无池数据「上轮 —」同判离线）
+ *    · 缓慢   — 琥珀菱形 ◆（0 < 贡献 < 并发数）
+ *    · 离线   — 红方 ■（贡献 0；无池数据 `—` 同判离线）
  *    · 停用   — 灰环 ○「停用」（rl-config enabled=false）— 仍默认折叠
+ *
+ *  **状态不写字**（用户指令 2026-09-20）：「健康/缓慢/离线」三个词都不上屏——色 + 形 + 行级
+ *  修饰（`.tc-row--slow`）已经是三重编码，行里再写一个字只是重复。四档**一视同仁**：行内
+ *  只剩该行的两个数（并发 + 最近完成轮贡献），判据一律归悬停（点 title + 元信息 title）。
+ *  （中途曾让离线的行内改写判据句，用户 2026-09-20 明确收回：行内只留数。）
  *  贡献数取**最近完成轮**（`server/pool-history` 以训练账本的 `iteration` 事件为完成水位）：
  *  进行中那一轮的半截计数不算数——否则先交活的节点看着健康、还没轮到的看着掉线，而
  *  「这台机器上一轮到底交没交活」才是可用性的直接事实（ping 只是**可达性**）。
@@ -68,19 +73,15 @@ const STATE_CLS: Record<RowState, string> = {
   disabled: 'tc-row--off',
 }
 
-/** 状态词（健康态不出词：绿点 + 并发数已经是「满并发」的表达）。 */
-const STATE_WORD: Record<RowState, string> = {
-  healthy: '',
-  slow: '缓慢',
-  offline: '离线',
-  disabled: '停用',
-}
+/** 「停用」是唯一上屏的状态词：它不是健康度（是 `enabled=false` 的**配置事实**），
+ *  且停用行不出并发数——词与数字列是同一个位置，必须有一个说法。 */
+const DISABLED_WORD = '停用'
 
 /** 判据原文（悬停解释 = 把「贡献 vs 并发」当面写出来，颜色不是唯一信息载体）。 */
 function judgeText(state: RowState, contrib: number, concurrency: number): string {
   const c = `最近完成轮贡献 ${contribNum(contrib)}`
   if (state === 'slow') return `缓慢：${c} < 并发 ${concurrency}`
-  if (state === 'offline') return `离线：${c}`
+  if (state === 'offline') return offlineJudge(contrib, concurrency)
   if (state === 'healthy') return `健康：${c} ≥ 并发 ${concurrency}`
   return '停用（rl-config enabled = false）：不参与派发，也不探活。点开关即启用'
 }
@@ -90,22 +91,27 @@ function contribNum(v: number): string {
   return v > 0 ? String(v) : v === 0 ? '0' : '—'
 }
 
-/** 行内元信息文案（短；详细口径在 title 里）。 */
+/** 行内元信息文案：**只有那个数**（用户 2026-09-20：「不需要显示上轮字样，hover 时提示就好」）。
+ *
+ *  为什么删的是字样而不是整个数：行里的状态词（健康/缓慢/离线）已经由「贡献 vs 并发」判出来了，
+ *  而**交了多少**仍是一个可区分的事实（缓慢的 6 与 1 是两回事）——数留、话去，口径归悬停。 */
 function contribText(n: { lastContrib: number }): string {
-  return `上轮 ${contribNum(n.lastContrib)}`
+  return contribNum(n.lastContrib)
 }
 
-/** 贡献数的口径说明（唯一来源：最近**完成**轮，rollout + eval 合计）。 */
-const CONTRIB_TITLE = '最近完成轮贡献（rollout + eval；进行中那一轮不计；— = 无池数据）'
+/** 贡献数的口径说明（唯一来源：最近**完成**轮，rollout + eval 合计）。
+ *
+ *  行内不再写「上轮」⇒ 这句悬得把**数的含义 + 单位 + 缺失语义**全说完（悬停是它唯一的释义载体）。 */
+function contribTitle(v: number): string {
+  return `最近完成轮贡献 ${contribNum(v)} 局（rollout + eval 合计；进行中那一轮不计；— = 无池数据）`
+}
 
-/** 状态词徽章的语义色（与点的色/形三重编码对齐）。 */
-function stateBadge(
-  state: RowState,
-  judge: string,
-): { text: string; tone: 'y' | 'r'; title: string } | null {
-  const text = STATE_WORD[state]
-  if (!text) return null
-  return { text, tone: state === 'slow' ? 'y' : 'r', title: judge }
+/** 离线判据（**只进悬停**，用户 2026-09-20：行内不写「离线：…」）：
+ *  「零交活」与「从来没池数据」是两回事（运维的下一步动作不同），所以两句文案分开 ——
+ *  但它们始终只出现在悬停里（点 title + 元信息 title），行内那两格永远只是数。 */
+function offlineJudge(contrib: number, need: number): string {
+  if (contrib < 0) return '离线：无池数据（还没结算过这一轮）'
+  return `离线：最近完成轮贡献 ${contrib} 局 < 并发 ${need}`
 }
 
 /** 单行节点（健康/缓慢/离线/停用共用；展开 = 并发编辑）。
@@ -137,7 +143,6 @@ export function NodeRow({
   const state = rowState(n)
   const disabled = state === 'disabled'
   const judge = judgeText(state, n.lastContrib, n.concurrency)
-  const badge = stateBadge(state, judge)
   const toggler = (
     <Switch
       label={`${n.enabled ? '停用' : '启用'} ${n.id}`}
@@ -153,18 +158,20 @@ export function NodeRow({
       name={n.id}
       // 并发数恒出（用户的判据是「贡献 vs 并发」，少了并发数就核对不了）；
       // 去掉旧的前缀 ✓——它把「并发数」误读成「在线数」。停用行改出状态词。
-      value={disabled ? STATE_WORD.disabled : String(n.concurrency)}
+      value={disabled ? DISABLED_WORD : String(n.concurrency)}
       valueTitle={disabled ? judge : `并发数 ${n.concurrency}（判据：最近完成轮贡献 ≥ 它 ⇒ 健康）`}
-      badges={badge ? [badge] : undefined}
-      meta={[{ text: contribText(n), title: CONTRIB_TITLE }]}
+      // 状态不写字（见文件头注）：四档元信息都只是那个数（离线也一样），判据全归悬停。
+      meta={[
+        { text: contribText(n), title: state === 'offline' ? judge : contribTitle(n.lastContrib) },
+      ]}
       onToggle={onToggle}
       expanded={open}
       readOnly={readOnly}
       roTitle={readOnly ? RO_TITLE : undefined}
       ariaLabel={
         readOnly
-          ? `${n.id}，${disabled ? STATE_WORD.disabled : `并发 ${n.concurrency}，${judge}`}（只读）`
-          : `${n.id}，${disabled ? STATE_WORD.disabled : `并发 ${n.concurrency}，${judge}`}，点击展开并发编辑`
+          ? `${n.id}，${disabled ? DISABLED_WORD : `并发 ${n.concurrency}，${judge}`}（只读）`
+          : `${n.id}，${disabled ? DISABLED_WORD : `并发 ${n.concurrency}，${judge}`}，点击展开并发编辑`
       }
       className={STATE_CLS[state]}
       actions={toggler}
@@ -208,24 +215,28 @@ export function NodeRow({
 export function LocalRow({ local, off }: { local: NodeLocalView; off?: boolean }) {
   const state: RowState = off ? 'disabled' : nodeHealth(local.lastContrib, local.slots)
   const judge = judgeText(state, local.lastContrib, local.slots)
-  const badge = stateBadge(state, judge)
   return (
     <StatusRow
       tone={STATE_TONE[state]}
       dotTitle={off ? '本机直跑未启用（rl.local_slots = 0）' : judge}
       name="local"
-      // 槽位数恒出（§361⑤ 的展示契约：本机直跑行只读展示槽位 + 上轮贡献）
-      value={off ? STATE_WORD.disabled : `${local.slots}槽`}
+      // 槽位数恒出（§361⑤ 的展示契约：本机直跑行只读展示槽位 + 贡献数）
+      value={off ? DISABLED_WORD : `${local.slots}槽`}
       valueTitle={
         off
           ? '本机直跑未启用（rl-config rl.local_slots = 0）'
           : `本机直跑槽数（rl.local_slots；判据：最近完成轮贡献 ≥ 它 ⇒ 健康）`
       }
-      badges={badge ? [badge] : undefined}
-      meta={[{ text: contribText(local), title: CONTRIB_TITLE }]}
+      // 状态不写字：与节点行同规（行内只有那个数，判据归悬停）
+      meta={[
+        {
+          text: contribText(local),
+          title: state === 'offline' ? judge : contribTitle(local.lastContrib),
+        },
+      ]}
       // 行级 modifier 与节点行同源（`tc-row--local` 是身份、`tc-row--slow/off` 是状态）
       className={`tc-row--local${STATE_CLS[state] ? ` ${STATE_CLS[state]}` : ''}`}
-      ariaLabel={`本机直跑 ${local.slots} 槽，${off ? STATE_WORD.disabled : judge}`}
+      ariaLabel={`本机直跑 ${local.slots} 槽，${off ? DISABLED_WORD : judge}`}
     />
   )
 }

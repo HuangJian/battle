@@ -47,6 +47,9 @@ export interface StatusRowProps {
   dotTitle?: string
   /** 行主标识（组件 key / 节点 id / worker id / 课程名）。 */
   name: string
+  /** 行名的悬停释义（这个实体是什么/干什么用）。不给 = 名字没有额外释义。
+   *  与 `dotTitle` 分工：点说**此刻的状态**，名字说**它是什么**——两个问题，两个悬停。 */
+  nameTitle?: string
   /** 名称后的高亮短值（节点的 `✓4`、本机槽位的 `3槽`）。 */
   value?: string
   valueTitle?: string
@@ -75,6 +78,7 @@ export function StatusRow({
   tone,
   dotTitle,
   name,
+  nameTitle,
   value,
   valueTitle,
   badges,
@@ -121,7 +125,7 @@ export function StatusRow({
         }
       >
         <StatusDot tone={tone} title={dotTitle} />
-        <b>{name}</b>
+        <b title={nameTitle}>{name}</b>
         {value !== undefined ? (
           <span className="tc-row__val" title={valueTitle}>
             {value}

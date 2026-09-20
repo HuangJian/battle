@@ -30,10 +30,18 @@ describe('console 局域网只读边界（§…：LAN 查看 / localhost 控制�
 
   it('只读视图 SSR：readOnly=true 渲染只读角标 + 告警坞条目，动作按钮不禁用；false 不渲染', async () => {
     const base = await api.buildStateView()
-    // 组件 busy 置空：pending/busy 锁与只读无关，避免 base 状态干扰禁用断言
+    // 组件 busy 置空：pending/busy 锁与只读无关，避免 base 状态干扰禁用断言。
+    // ★ 坞的输入全部**显式清零**（2026-09-20 修）：本用例断言的是「空坞不渲染」这件事
+    //   本身，而坞的条目来自活状态（cloudHalts / loopComplete / ppoQueueStall / courseEdit）——
+    //   挂在活状态上 = 训练一收官或云机一停机，这条用例就变红，而它与只读视图毫无关系
+    //   （当天实测：21:55 一次「正常收官」把它打红）。夹具必须自己把「无告警」造成事实。
     const clean = {
       ...base,
       components: base.components.map((c) => ({ ...c, busy: false })),
+      cloudHalts: {},
+      loopComplete: null,
+      ppoQueueStall: null,
+      courseEdit: null,
     }
     const html = render.renderConsolePage({ ...clean, readOnly: true })
     // 只读可见面（docs/dashboard-redesign.md §5.4）：
@@ -42,7 +50,9 @@ describe('console 局域网只读边界（§…：LAN 查看 / localhost 控制�
     expect(html).toContain('class="tc-lock"')
     // 告警圾条目：断言限定在坞内（整页还内联了 theme.css，裸词断言会假通过——
     // `class="tc-dock"` 只在标记里出现，`:root` 里的 `.tc-dock {` 不会匹配）。
-    const dock = html.slice(html.indexOf('class="tc-dock"'), html.indexOf('class="tc-kpi"'))
+    // 切到下一区（组件卡）为止：**不再切到 `tc-kpi`**——KPI 条已于 2026-09-20 删除，
+    // 那个下标恒为 -1，`slice(start, -1)` 会默默把「坞之后的一切」都算进坞内。
+    const dock = html.slice(html.indexOf('class="tc-dock"'), html.indexOf('class="tc-comps"'))
     expect(dock).toContain('tc-dock__item tc-dock__item--info')
     expect(dock).toContain('tc-dock__icon')
     expect(dock).toContain('只读模式：')
@@ -55,9 +65,9 @@ describe('console 局域网只读边界（§…：LAN 查看 / localhost 控制�
     const html2 = render.renderConsolePage({ ...clean, readOnly: false })
     expect(html2).not.toContain('class="tc-lock"')
     expect(html2).not.toContain('title="只读模式：操作仅限本机 localhost"')
-    // 空坞不出现（不留空壳、也不再有「暂无告警」占位）——但 KPI 条仍在（两区通用）
+    // 空坞不出现（不留空壳、也不再有「暂无告警」占位）；KPI 条已下线（2026-09-20）
     expect(html2).not.toContain('class="tc-dock"')
-    expect(html2).toContain('class="tc-kpi"')
+    expect(html2).not.toContain('class="tc-kpi"')
   })
 
   it('hydrate 安全：首屏组件不得在 useState 初始化里读 localStorage（横幅关闭后样式崩的根因）', () => {

@@ -20,7 +20,7 @@ import { renderToString } from 'preact-render-to-string'
 import path from 'path'
 import { DASHBOARD_ROOT } from '../src/core/paths'
 import type { CourseOverviewRow, LoopQueueView, ParallelOverviewView } from '../src/web/view'
-import { STOPPED_TITLE, parseLoopQueue, withPausedFacts, withTraining } from '../src/web/view'
+import { parseLoopQueue, withPausedFacts, withTraining } from '../src/web/view'
 
 // ────────────────────────── 夹具 ──────────────────────────
 
@@ -134,27 +134,52 @@ async function render(
 
 // ────────────────────────── 合并后的状态列（新增信号） ──────────────────────────
 
-describe('课程矩阵：两半事实的冲突上状态列（C5 的核心产出）', () => {
-  it('五态同屏可分辨：在训 / 离线 / 在训·hub 未注册 / hub 已注册·无进程 / 未在训', async () => {
+describe('课程矩阵：只列在训课程（2026-09-20 用户指令）', () => {
+  it('在训三态同屏可分辨：在训 / 离线 / 在训·hub 未注册', async () => {
     const html = await render()
     expect(html).toContain('在训')
     expect(html).toContain('离线（只收回传）')
     expect(html).toContain('在训 · hub 未注册')
-    expect(html).toContain('hub 已注册 · 无进程')
-    expect(html).toContain('未在训')
-    // 徽章档位：在训 g / 离线 a / 两个冲突 y / 未在训 gray
+    // 徽章档位：在训 g / 离线 a / 冲突 y（fixture 里三行都在训）
     expect(html).toContain('tc-badge--g')
     expect(html).toContain('tc-badge--a')
     expect(html).toContain('tc-badge--y')
-    expect(html).toContain('tc-badge--gray')
+  })
+
+  it('★ 未在训的行不上屏（含「hub 已注册·无进程」这种未在训的冲突行），但计数上屏', async () => {
+    // 「hub 已注册·无进程」（stalled）以前是这张表的头等信号，但它是**未在训**的行（training=false）
+    // ⇒ 按用户口径不上屏。代价就在这里，所以这条用例必须存在：它守住「滤掉的是未在训的行」
+    // 而不是「凡是冲突都滤掉」（ghost 行在训且冲突，它必须留着）。
+    const html = await render()
+    // 行名渲染体是 `<b>{course}</b>`（标题在 aria-label/title 上）——未上屏 = 没有这个行名
+    expect(html).not.toContain('<b>stalled</b>')
+    expect(html).not.toContain('<b>dead</b>')
+    expect(html).toContain('未在训 2 门未列')
+    // 悬停里逐门点名 + 各自状态（「没上屏」不等于「不存在」——历史课会积几十门）
+    expect(html).toContain('stalled —— hub 已注册 · 无进程')
+    expect(html).toContain('dead —— 未在训')
   })
 
   it('冲突行整行标出（data-conflict），并在悬停里说清后果', async () => {
     const html = await render()
+    // 在训且 hub 没注册：行留着且整行标出
     expect(html).toContain('data-conflict="hub-unregistered"')
-    expect(html).toContain('data-conflict="hub-no-process"')
     expect(html).toContain('PPO job 永远不会被派发')
-    expect(html).toContain('没有人消费')
+  })
+
+  it('★ 0 门在训 ⇒ 空态显因（不整块消失，也不谎称「没有课程」）', async () => {
+    // 有课、一门都没在训（overview 也要显式给，否则默认夹具里那三行都是在训的）
+    const html = await render({ overview: null, loopQueue: queueView([lqRaw()], []) })
+    expect(html).toContain('当前没有在训课程')
+    expect(html).toContain('开课走侧栏')
+    expect(html).not.toContain('tc-mx__table') // 表格本身不渲染（不是渲染一张空表）
+    // 读面不可用与「没有课在训」是两件事（前者 = 不可知）
+    const noQueue = await render({
+      overview: ovView([ovRow({ course: 'stalled', iter: 3, hubSeen: true })]),
+      loopQueue: null,
+    })
+    expect(noQueue).toContain('不可知')
+    expect(noQueue).toContain('未在训 1 门未列')
   })
 
   it('★ 回归闸：hub 无应答时不得把「读不到课程表」读成「hub 未注册」', async () => {
@@ -177,8 +202,8 @@ describe('课程矩阵：两半事实的冲突上状态列（C5 的核心产出�
 describe('课程矩阵：七列都有读数（旧「总览」+「调度器」的断言在这里汇合）', () => {
   it('课程列：一行一门课，当前查看那行标 --cur + aria-current；切课入口带悬停', async () => {
     const html = await render({ course: 'c5' })
-    // 五个切课按钮（每行一个）；按钮只包住课程名，不是整行（否则表里的字选不中）
-    expect((html.match(/class="tc-mx__pick"/g) ?? []).length).toBe(5)
+    // 三个切课按钮（= 在训的行：c4 / c5 / ghost）；按钮只包住课程名，不是整行（否则表里的字选不中）
+    expect((html.match(/class="tc-mx__pick"/g) ?? []).length).toBe(3)
     expect(html).toContain('tc-mx__row tc-mx__row--cur')
     expect(html).toContain('aria-current="true"')
     expect(html).toContain('title="切到查看 c4"')
@@ -220,7 +245,7 @@ describe('课程矩阵：七列都有读数（旧「总览」+「调度器」的
   it('段内列：只给离线且已有产物的课；超 1 小时变醒目（云机挂了 vs 在跑）', async () => {
     const html = await render()
     expect(html).toContain('段内 3 轮')
-    expect((html.match(/tc-mx__seg\b/g) ?? []).length).toBe(5) // 每行都有这一格
+    expect((html.match(/tc-mx__seg\b/g) ?? []).length).toBe(3) // 每个上屏的行都有这一格
     expect((html.match(/段内 \d+ 轮/g) ?? []).length).toBe(1) // 只有 c5 有读数
     expect(html).not.toContain('tc-mx__seg--stale') // 1 分钟前 = 在跑
 
@@ -228,6 +253,7 @@ describe('课程矩阵：七列都有读数（旧「总览」+「调度器」的
       overview: ovView([
         ovRow({
           course: 'c5',
+          training: true, // 在训（否则这一行不上屏，段内列也就无从验证）
           offline: true,
           hubSeen: true,
           offlineRounds: 3,
@@ -267,11 +293,22 @@ describe('课程矩阵：七列都有读数（旧「总览」+「调度器」的
     expect(html).toContain('1 课等回传')
   })
 
-  it('未在训的行：淡一档 + 悬停说明「这是盘上事实推出的队列状态」', async () => {
-    const html = await render({ overview: null, loopQueue: queueView([lqRaw()], []) })
+  it('两侧不同步时（hub 说在训、训练侧说没进程）：行仍上屏但淡一档（这行最该看清）', async () => {
+    // 过滤后 `--stopped` 只剩这一条触发路径（两侧不一致）——而它恰恰是最该看清的一种：
+    // 盯着一张「在训」的名单时，「其实没有进程在推进它」必须看得出来。
+    const html = await render({
+      overview: ovView([ovRow({ course: 'c4', training: true, iter: 3, hubSeen: true })]),
+      loopQueue: queueView([lqRaw()], []),
+    })
     expect(html).toContain('tc-mx__row--stopped')
-    expect(html).toContain(STOPPED_TITLE)
-    expect(html).toContain('未在训')
+    expect(html).toContain('在训') // 状态列取 hub 侧（ov.training 优先）
+    // 反之：训练侧说在训、hub 侧没这行 ⇒ 也在训（任何一侧说在训就上屏）
+    const lqOnly = await render({
+      overview: ovView([]),
+      loopQueue: queueView([lqRaw()], ['c4']),
+    })
+    expect(lqOnly).toContain('<b>c4</b>')
+    expect(lqOnly).not.toContain('tc-mx__row--stopped')
   })
 })
 
@@ -364,8 +401,9 @@ describe('操作列：两个开关并列且归属分明（§7 O4）', () => {
   it('hub 开关的能力边界：只给 hub 在线且认识它的课（否则点下去一定 400）', async () => {
     const acts: Array<[string, Record<string, unknown>]> = []
     const html = await render({ onAction: (a, b) => acts.push([a, b]) })
-    // 默认夹具里 hubSeen 的课：c4 / c5 / stalled 三门 → 三个 hub 开关
-    expect((html.match(/tc-btn tc-btn--sm" aria-label="hub：/g) ?? []).length).toBe(3)
+    // 默认夹具里 hubSeen **且在训**的课：c4 / c5 两门 → 两个 hub 开关
+    // （未在训的 stalled 不上屏 ⇒ 它那个开关也就没有地方可以画）
+    expect((html.match(/tc-btn tc-btn--sm" aria-label="hub：/g) ?? []).length).toBe(2)
     expect(html).toContain('>恢复在线<') // c5 已离线
     expect(acts).toEqual([]) // SSR 不模拟点击
   })

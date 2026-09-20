@@ -15,6 +15,13 @@
  * 「ping 在线/慢/离线」换成「**最近完成轮贡献 vs 并发数**」——健康 / 缓慢 / 离线；
  * 旧用例的意图（慢与离线不折叠、停用折叠、状态点与文案三重区分）逐条保留，
  * 触发条件改由贡献数给出。
+ *
+ * 同日稍后（用户指令：节点行**不写**「缓慢/离线」字样）：行内文案只剩「数」——色 + 形
+ * （`tc-dot--warn` 菱形 / `tc-dot--dead` 方）+ 行级 modifier（`tc-row--slow` / `tc-row--off`）
+ * 承担状态，四档一视同仁。
+ * 再一日（用户明确收回「离线行内写判据」）：**行内连「离线：…」也不写**，判据只在悬停。
+ * 三条钉子：屏幕里不得出现「>缓慢</b> / >离线</b> / >离线：」；判据必须在 `title` 里；
+ * 离线行内仍要能看到那两个数（并发 + 贡献，`—` 不得冒充 `0`）。
  */
 
 import { describe, expect, it } from 'bun:test'
@@ -80,17 +87,23 @@ describe('nodeHealth（纯函数：贡献数 vs 并发数 → 健康/缓慢/离�
 })
 
 describe('NodePills（健康/缓慢/离线不折叠 · 停用折叠 · 启停 toggle）', () => {
-  it('缓慢节点（0 < 贡献 < 并发）始终展开显示「缓慢」（琥珀菱形），不进折叠桶', () => {
+  it('缓慢节点（0 < 贡献 < 并发）：琥珀菱形 ◆ 常展开，**行内不写「缓慢」**（用户 2026-09-20）', () => {
     const n = mkNode({ id: 'a95', concurrency: 4, lastContrib: 1 })
     const html = renderToString(h(NodePills, { nodes: [n], onAction: () => {}, onMore: () => {} }))
     expect(html).not.toContain('缓慢 1')
-    expect(html).not.toContain('>离线</span>')
     expect(html).toContain('tc-dot--warn')
     expect(html).toContain('<b>a95</b>')
-    expect(html).toContain('>缓慢</b>')
-    // 判据的两个数都在场：并发数（值列）+ 最近完成轮贡献（元信息）
+    // 状态**不写字**：三个词都不上屏（色+形+行级 tint 已是三重编码）
+    expect(html).not.toContain('>缓慢</b>')
+    expect(html).not.toContain('>离线</b>')
+    expect(html).not.toContain('>健康</b>')
+    // 判据的两个数都在场：并发数（值列）+ 最近完成轮贡献（元信息 = **只有那个数**，
+    // 不带「上轮」也不带「缓慢」——2026-09-20 用户指令：字样去掉，口径归悬停）
     expect(html).toContain('>4</span>')
-    expect(html).toContain('上轮 1')
+    expect(html).toContain('>1</span>')
+    expect(html).not.toContain('上轮')
+    // 判据完整地从悬停里说出来（行内无字的补偿：悬停是唯一释义载体）
+    expect(html).toContain('title="缓慢：最近完成轮贡献 1 &lt; 并发 4"')
     // 语义 modifier：缓慢 ≠ 离线 ≠ 停用（三重区分里的行级一重）
     expect(html).toContain('tc-row--slow')
   })
@@ -101,25 +114,34 @@ describe('NodePills（健康/缓慢/离线不折叠 · 停用折叠 · 启停 to
     expect(html).toContain('tc-dot--on')
     expect(html).not.toContain('✓')
     expect(html).toContain('>2</span>')
-    expect(html).toContain('上轮 5')
+    expect(html).toContain('>5</span>')
     expect(html).not.toContain('tc-row--slow')
   })
 
-  it('贡献 0 → 离线（红方）——**ping 通也照样离线**：健康度只看上一轮交没交活', () => {
+  it('贡献 0 → 离线（红方）——**ping 通也照样离线**；行内只有数，判据在悬停', () => {
     const n = mkNode({ id: 'a98', online: true, concurrency: 3, lastContrib: 0 })
     const html = renderToString(h(NodePills, { nodes: [n], onAction: () => {}, onMore: () => {} }))
     expect(html).toContain('tc-dot--dead')
-    expect(html).toContain('>离线</b>')
+    // 行内**不写**「离线：…」（用户 2026-09-20 明确要求：hover 提示就好）
+    expect(html).not.toContain('>离线：')
+    expect(html).not.toContain('>离线</b>')
     expect(html).not.toContain('离线 1')
-    expect(html).toContain('上轮 0')
+    // 判据完整地在悬停里（点 + 元信息两处都带）
+    expect(html).toContain('title="离线：最近完成轮贡献 0 局 &lt; 并发 3"')
+    // 行内那两格仍只是数：并发 3 + 贡献 0
+    expect(html).toContain('>3</span>')
+    expect(html).toContain('>0</span>')
   })
 
-  it('无池数据（-1）：离线 + 「上轮 —」（不是「上轮 0」：从没结算过 ≠ 这一轮没交活）', () => {
+  it('无池数据（-1）：离线**且悬停文案不同**（从没结算过 ≠ 这一轮没交活）——行内 `—` 不冒充 0', () => {
     const n = mkNode({ id: 'a98', online: false, lastContrib: -1 })
     const html = renderToString(h(NodePills, { nodes: [n], onAction: () => {}, onMore: () => {} }))
     expect(html).toContain('tc-dot--dead')
-    expect(html).toContain('>离线</b>')
-    expect(html).toContain('上轮 —')
+    expect(html).toContain('title="离线：无池数据（还没结算过这一轮）"')
+    expect(html).not.toContain('最近完成轮贡献 0 局') // 不把「无数据」写成「这轮交了 0 局」
+    expect(html).not.toContain('>离线：') // 行内无状态描述
+    expect(html).not.toContain('>离线</b>')
+    expect(html).toContain('>—</span>') // 元信息仍是「无池数据」的记号
   })
 
   it('ping 慢（online=false/slow=true）但上一轮有贡献 ⇒ 按贡献判健康，不再标「慢」', () => {
@@ -212,7 +234,7 @@ describe('NodePills（健康/缓慢/离线不折叠 · 停用折叠 · 启停 to
 })
 
 describe('NodePills · local（本机直跑）', () => {
-  it('本机直跑行：槽位 + 上轮贡献（只读展示，不可展开）', () => {
+  it('本机直跑行：槽位 + 贡献数（只读展示，不可展开）', () => {
     const html = renderToString(
       h(NodePills, {
         nodes: [],
@@ -224,12 +246,12 @@ describe('NodePills · local（本机直跑）', () => {
     expect(html).toContain('tc-row--local')
     expect(html).toContain('>local<')
     expect(html).toContain('3槽')
-    expect(html).toContain('上轮 4')
+    expect(html).toContain('>4</span>')
     expect(html).toContain('tc-dot--on')
     expect(html).not.toContain('停用 1')
   })
 
-  it('slots > 0 但上一轮零贡献：同节点口径判「离线」——槽位仍照出（本机直跑也是一个 rollout 执行面）', () => {
+  it('slots > 0 但上一轮零贡献：同节点口径判「离线」——槽位与贡献数照出，判据在悬停', () => {
     const html = renderToString(
       h(NodePills, {
         nodes: [],
@@ -239,11 +261,14 @@ describe('NodePills · local（本机直跑）', () => {
       }),
     )
     expect(html).toContain('tc-dot--dead')
-    expect(html).toContain('>离线</b>')
+    expect(html).not.toContain('>离线：') // 行内不写状态描述（同节点行）
+    expect(html).not.toContain('>离线</b>')
+    expect(html).toContain('title="离线：最近完成轮贡献 0 局 &lt; 并发 3"')
     expect(html).toContain('3槽')
+    expect(html).toContain('>0</span>')
   })
 
-  it('slots > 0 但贡献不足（0 < 2 < 3）：缓慢——槽位与状态词并列（§361⑤ 槽位展示不回退）', () => {
+  it('slots > 0 但贡献不足（0 < 2 < 3）：缓慢——槽位照出，状态不写字（§361⑤ 槽位展示不回退）', () => {
     const html = renderToString(
       h(NodePills, {
         nodes: [],
@@ -254,7 +279,8 @@ describe('NodePills · local（本机直跑）', () => {
     )
     expect(html).toContain('3槽')
     expect(html).toContain('tc-dot--warn')
-    expect(html).toContain('>缓慢</b>')
+    expect(html).not.toContain('>缓慢</b>')
+    expect(html).toContain('>2</span>') // 元信息只剩那个数
     expect(html).toContain('tc-row--slow')
   })
 

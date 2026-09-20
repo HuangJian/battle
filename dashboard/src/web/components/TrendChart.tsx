@@ -1,6 +1,21 @@
 /** TrendChart.tsx — 轻量 SVG 走势图：轴 + 网格 + 折线 + 悬停十字准星 + 坐标提示。
- *  支持双序列叠加（rollout 实线 + eval 虚线）：hover 同时提示两口径数值。
- *  数据侧由 sliceSeries 按范围档位截取后绘制；hover 状态纯客户端。 */
+ *
+ *  ★ **SVG 属性一律用 SVG 自己的拼法**（2026-09-20 实测踩到，见下）。JSX 里写 camelCase 是
+ *  React 的习惯，但 Preact 的两条路径不一致：
+ *    · `preact-render-to-string`（SSR）会把 `stopColor` 归一成 `stop-color`；
+ *    · 客户端 diff 在 SVG 命名空间下是 `setAttribute(name, value)` **原样照抄**（只修 xlink/sName），
+ *      于是 `stopColor` 成了一个 SVG 不认识的属性 → 被忽略 → `stop-color` 回默认值 **黑**。
+ *  症状（用户报告）：从其它页切回总览（Hero 重新挂载 = 客户端新建这些元素）时，趋势线与横轴
+ *  之间的**面积块变黑**；而硬刷新（= 用 SSR 那些正确的属性）一切正常。
+ *  所以：真 SVG 拼法是短横线的（stop-color / stroke-width / text-anchor / fill-opacity …）就写
+ *  短横线；本身就是 camelCase 的（viewBox / preserveAspectRatio / gradientUnits）保持 camelCase。
+ *  回归闸：`tests/web-style-discipline.test.ts` 扫 src/web 下全部 `.tsx`，禁 camelCase 拼法。
+ *  支持双序列叠加（rollout 实线 + eval 橙线）：hover 同时提示两口径数值。
+ *  数据侧由 sliceSeries 按范围档位截取后绘制；hover 状态纯客户端。
+ *
+ *  单序列也是它：数据源档位切到单边时调用方只传 `series`（不传 `series2`），
+ *  「只看 eval」另用 `color` 把唯一那条线染成 eval 橙——同一张图承担三种档位，
+ *  不再各写一个组件。 */
 
 import { useState } from 'preact/hooks'
 import type { JSX } from 'preact'
@@ -21,7 +36,9 @@ export interface TrendChartProps {
   /** y 轴**强制**下界（胜局耗时等需要按数据量级缩放时用）：轴下界 = yMin，
    *  可高于 dataMin（裁掉下方空白/低点）。与 yFloor 同传时 yMin 优先。 */
   yMin?: number
-  /** 主序列图例色（默认 accent）；叠加序列固定琥珀。 */
+  /** 主序列图例色（默认 accent）。 */
+  color?: string
+  /** 叠加序列（eval）色：固定桁色系。 */
   color2?: string
 }
 
@@ -32,8 +49,11 @@ const PAD_T = 6
 const PAD_B = 16
 /** 轴刻度统一字体（横/纵一致）。 */
 const AXIS_FONT = { fontSize: '8', fill: 'var(--muted)' } as const
-/** eval 叠加线：高饱和橙，与 accent 蓝 rollout 强对比；白描边保证压在面积上仍可读。 */
-const COLOR2_DEFAULT = 'var(--eval-line, #ea580c)'
+/** eval 线的口径色（**唯一出处**）：高饱和橙，与 accent 蓝 rollout 强对比；
+ *  白描边保证压在面积上仍可读。导出理由：Hero 的「只看 eval」档位把 eval 提为主序列时，
+ *  那条线也得是同一支色——色值的第二个字面量不该出现在面板里（口径色跨组件必须同源）。 */
+export const COLOR_EVAL = 'var(--eval-line, #ea580c)'
+const COLOR2_DEFAULT = COLOR_EVAL
 
 function pathFrom(
   vals: number[],
@@ -64,6 +84,7 @@ export function TrendChart({
   height = 56,
   yFloor,
   yMin,
+  color: colorProp,
   color2 = COLOR2_DEFAULT,
 }: TrendChartProps) {
   const [hover, setHover] = useState<number | null>(null)
@@ -116,14 +137,17 @@ export function TrendChart({
     area += `L${px(lastIdx).toFixed(1)} ${baseY.toFixed(1)} L${px(firstIdx).toFixed(1)} ${baseY.toFixed(1)} Z`
   }
 
+  // 主序列色：显式色 > tone 语义色 > accent。显式色是「只看 eval」档位用的（唯一那条线
+  // 是 eval ⇒ 染成桁色，图例色与口径对得上）。
   const color =
-    tone === 'g'
+    colorProp ??
+    (tone === 'g'
       ? 'var(--green)'
       : tone === 'y'
         ? 'var(--yellow)'
         : tone === 'r'
           ? 'var(--red)'
-          : 'var(--accent)'
+          : 'var(--accent)')
 
   const hx = hover != null ? px(hover) : null
   const hv = hover != null ? vals[hover] : null
@@ -155,9 +179,19 @@ export function TrendChart({
         aria-label={`${series.label}${series2 ? ` / ${series2.label}` : ''} 走势`}
       >
         <defs>
-          <linearGradient id={`tg-${series.key}`} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={color} stopOpacity="0.18" />
-            <stop offset="100%" stopColor={color} stopOpacity="0" />
+          {/* `gradientUnits="userSpaceOnUse"` + 用户坐标系的 y1/y2：渐变不再依赖**面积路径的
+             包围盒**。包围盒退化（恒定序列 ⇒ 面积零高）时 objectBoundingBox 的渐变没有可用的
+              坐标系，浏览器会把它画成黑色——而「平坦的一段」在训练曲线里很常见。 */}
+          <linearGradient
+            id={`tg-${series.key}`}
+            gradientUnits="userSpaceOnUse"
+            x1="0"
+            y1={PAD_T}
+            x2="0"
+            y2={PAD_T + plotH}
+          >
+            <stop offset="0%" stop-color={color} stop-opacity="0.18" />
+            <stop offset="100%" stop-color={color} stop-opacity="0" />
           </linearGradient>
         </defs>
 
@@ -173,13 +207,13 @@ export function TrendChart({
                 x2={VB_W - PAD_R}
                 y2={y.toFixed(1)}
                 stroke="var(--border)"
-                strokeWidth="1"
+                stroke-width="1"
               />
               <text
                 x={PAD_L - 4}
                 y={(y + 3).toFixed(1)}
-                textAnchor="end"
-                fontSize={AXIS_FONT.fontSize}
+                text-anchor="end"
+                font-size={AXIS_FONT.fontSize}
                 fill={AXIS_FONT.fill}
               >
                 {fmt(v)}
@@ -197,8 +231,8 @@ export function TrendChart({
               key={i}
               x={x.toFixed(1)}
               y={height - 2}
-              textAnchor="middle"
-              fontSize={AXIS_FONT.fontSize}
+              text-anchor="middle"
+              font-size={AXIS_FONT.fontSize}
               fill={AXIS_FONT.fill}
             >
               {iters[i]}
@@ -212,9 +246,9 @@ export function TrendChart({
           d={line}
           fill="none"
           stroke={color}
-          strokeWidth="1.8"
-          strokeLinejoin="round"
-          strokeLinecap="round"
+          stroke-width="1.8"
+          stroke-linejoin="round"
+          stroke-linecap="round"
         />
         {line2 ? (
           <>
@@ -223,18 +257,18 @@ export function TrendChart({
               d={line2}
               fill="none"
               stroke="#fff"
-              strokeWidth="3.6"
-              strokeLinejoin="round"
-              strokeLinecap="round"
+              stroke-width="3.6"
+              stroke-linejoin="round"
+              stroke-linecap="round"
               opacity="0.9"
             />
             <path
               d={line2}
               fill="none"
               stroke={color2}
-              strokeWidth="2.2"
-              strokeLinejoin="round"
-              strokeLinecap="round"
+              stroke-width="2.2"
+              stroke-linejoin="round"
+              stroke-linecap="round"
             />
             {/* 有效评估点打点：小圆点标位置，不遮 rollout 线 */}
             {vals2
@@ -262,8 +296,8 @@ export function TrendChart({
               x2={hx.toFixed(1)}
               y2={baseY}
               stroke={color}
-              strokeWidth="1"
-              strokeDasharray="2 2"
+              stroke-width="1"
+              stroke-dasharray="2 2"
               opacity="0.5"
             />
             {hy != null ? (
@@ -274,7 +308,7 @@ export function TrendChart({
                   cy={hy.toFixed(1)}
                   r="5.5"
                   fill={color}
-                  fillOpacity="0.18"
+                  fill-opacity="0.18"
                 />
               </>
             ) : null}
@@ -286,7 +320,7 @@ export function TrendChart({
                   cy={hy2.toFixed(1)}
                   r="5.5"
                   fill={color2}
-                  fillOpacity="0.18"
+                  fill-opacity="0.18"
                 />
               </>
             ) : null}

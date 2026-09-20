@@ -1,9 +1,14 @@
 /** Topbar.tsx — 顶栏：本页标题 + 一句话描述 + 全局状态 chips + 刷新。
  *
  *  分工契约（docs/dashboard-redesign.md §3.1）：顶栏只说**本页**与**全局**——
- *    - 「本页」= 标题 + 这一页回答什么问题（`PAGES[page].desc`；"一页一个问题"的可视化契约）
+ *    - 「本页」= 标题（这一页回答什么问题在 `PAGES[page].desc`，**只做标题悬停**：
+ *      它是一句话的"一页一个问题"契约，不是第二行标题——2026-09-20 用户指令下屏）
  *    - 「全局」= 阶段 · 在训课程 · 算力 · 连接状态 + 刷新 + 更新时间
  *  课程选择器、触发门禁、刷新间隔**不在这里**（见 Sidebar.tsx 的文件头）。
+ *
+ *  **布局（2026-09-20 用户指令）**：在训课程 pill 行**靠左**（紧接标题之后、自身
+ *  `flex: 1` 向右占位），全局读数（阶段 / 节点 / 刷新 / 更新时间）仍贴最右
+ *  （`__right` 的 `margin-left: auto`）——左半是"我在看什么"，右半是"集群现在怎样"。
  *
  *  阶段耗时由 App 的 10s ticker 驱动（轮询间隙不冻结），本组件只负责展示。
  *
@@ -62,11 +67,15 @@ export function Topbar({
   return (
     <header className="tc-top">
       <div className="tc-top__head">
-        <h1 className="tc-top__title">{meta.title}</h1>
-        <div className="tc-top__desc" title={meta.desc}>
-          {meta.desc}
-        </div>
+        {/* 页问题不上屏（用户 2026-09-20），但不当成死数据：挂到标题悬停上，
+            `PAGES[].desc` 仍是一份活的契约（web-view-routes.test.ts 守着它非空）。 */}
+        <h1 className="tc-top__title" title={meta.desc}>
+          {meta.title}
+        </h1>
       </div>
+      {/* 在训课程 pill 行：**左对齐**（标题之后、全局读数之前）。它是 flex:1 的项，
+          靠右的全局读数不会被它推到换行——只有它自己横向滚动。零门在训时不渲染。 */}
+      {pills && trainingCount > 0 ? pills : null}
       <div className="tc-top__right">
         {phase && phase.phase !== 'idle' ? (
           <span
@@ -86,9 +95,9 @@ export function Topbar({
             <span className="tc-phase__elapsed">{fmtElapsed(phaseElapsedMs)}</span>
           </span>
         ) : null}
-        {pills && trainingCount > 0 ? (
-          pills
-        ) : courseCount > 0 ? (
+        {/* 零门在训（或无 pill 通道）⇒ 退回裸计数 chip（同一份事实的降级形态）——
+            判据与左侧那句**互斥且穷尽**：`pills && trainingCount>0` 上屏 pill，否则这里报计数。 */}
+        {!(pills && trainingCount > 0) && courseCount > 0 ? (
           <span className="tc-badge--status" title="在训课程数 / 课程总数">
             <span className={trainingCount > 0 ? 'tc-dot tc-dot--on' : 'tc-dot tc-dot--empty'} />
             在训 {trainingCount}/{courseCount}

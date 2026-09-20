@@ -20,6 +20,14 @@
  *  所以矩阵用真表格（`tc-table` 基础样式 + `tabular-nums` 数字列），但**状态词表与语义档
  *  仍走 `matrixStatus` + `StatusDot`**（一个状态只有一个说法、一个颜色），这条才是 §4.2 的实质。
  *
+ *  ## 只列在训课程（2026-09-20 用户指令）
+ *
+ *  `mergeCourseRows` 给的是**全集**（outer join 不丢课）；这里用 `isTrainingRow` 再筛一道，
+ *  未在训的行不上屏——理由：这张表是「盯着正在跑的那几门」，而未在训的课在盘上会有几十门
+ *  （历史课都有账本与目录），它们把在训的行挤出首屏。**代价**：`hub 已注册 · 无进程` 这种
+ *  「两半事实打架」的行不再直接上屏 ⇒ 表头留一个计数 chip（悬停逐门点名 + 各自状态），
+ *  未列的课不静默消失（DECISIONS §2026-09-20-console-declutter）。
+ *
  *  ## 只读语义
  *
  *  LAN 只读时动作按钮**照常渲染且可点**（§7 O1）：只读是服务端边界（403），不是把按钮涂灰。
@@ -28,6 +36,7 @@
  */
 
 import {
+  isTrainingRow,
   kindBadge,
   type CourseMatrixRow,
   type LoopQueueView,
@@ -72,10 +81,13 @@ export function CourseMatrix({
 }: CourseMatrixProps) {
   // 「段内多久没动」要当下时刻：读表在这里发生，纯函数只收数字（可单测、可回放）。
   const nowSec = Math.floor(Date.now() / 1000)
-  const rows = mergeCourseRows({ overview, queue: loopQueue, viewing: course, nowSec })
+  const all = mergeCourseRows({ overview, queue: loopQueue, viewing: course, nowSec })
+  // 只列在训课程（见文件头注）：未在训的行留计数 chip，不静默消失。
+  const rows = all.filter(isTrainingRow)
+  const hidden = all.filter((r) => !isTrainingRow(r))
 
   // 两侧都没东西可说时不留空壳；但**读失败必须显因**（不静默）——那是运维唯一能修的线索。
-  if (rows.length === 0) {
+  if (all.length === 0) {
     const err = loopQueue?.error
     if (!err) return null
     return (
@@ -92,7 +104,10 @@ export function CourseMatrix({
       <SectionHeader
         title="课程"
         count={rows.length}
-        hint="每门课现在怎么样：hub 侧（派活/队列/离线段）与训练侧（指针/卡在哪一步/在等什么）合并成一行"
+        hint={
+          '只列在训课程（共享 trainer 在跑 ∧ 该课未收官）：hub 侧（派活/队列/离线段）与训练侧' +
+          '（指针/卡在哪一步/在等什么）合并成一行。未在训的课不在此表——表头 chip 给出未列门数'
+        }
       />
       <div className="tc-mx__meta">
         {/* 「单例」是训练进程的形态事实（不是读数）：一个进程服务所有并行课程，每课一条队列。 */}
@@ -108,38 +123,73 @@ export function CourseMatrix({
             {m.text}
           </span>
         ))}
+        {hidden.length > 0 ? (
+          // 未列的课：一句计数 + 悬停逐门点名（各自的状态词就是表里那个口径）——
+          // 「没上屏」不等于「不存在」（历史课会积几十门）。
+          <span
+            className="tc-mx__chip"
+            title={
+              `本表只列在训课程。未列的 ${hidden.length} 门：\n` +
+              hidden.map((r) => `· ${r.course} —— ${r.status.text}`).join('\n')
+            }
+          >
+            {`未在训 ${hidden.length} 门未列`}
+          </span>
+        ) : null}
       </div>
-      <div className="tc-tablewrap">
-        <table className="tc-table tc-mx__table">
-          <thead>
-            <tr>
-              <th scope="col">课程</th>
-              <th scope="col">状态</th>
-              <th scope="col" className="tc-mx__num">
-                iter
-              </th>
-              <th scope="col">本轮</th>
-              <th scope="col">在等什么</th>
-              <th scope="col" className="tc-mx__num">
-                队列 · 在飞
-              </th>
-              <th scope="col">段内</th>
-              {onAction ? <th scope="col">操作</th> : null}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => (
-              <MatrixTr
-                key={r.course}
-                row={r}
-                onSelectCourse={onSelectCourse}
-                onAction={onAction}
-              />
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <div className="tc-mx__foot">{matrixFoot({ queue: loopQueue, rows })}</div>
+      {rows.length === 0 ? (
+        // ★ 0 门在训是**合法稳态**（都收官了 / 进程没跑）：显因，不整块消失。
+        <Empty
+          kind={loopQueue?.error ? 'error' : 'empty'}
+          reason={
+            loopQueue?.error
+              ? `只读视图不可用：${loopQueue.error}`
+              : !loopQueue
+                ? '训练侧只读视图不可用——哪几门课在训**不可知**（不是「没有课在训」）'
+                : '当前没有在训课程：本表只列在训的课（已开课但 trainer 没跑、或 hub 单侧登记的课不在此表）'
+          }
+        >
+          {loopQueue && !loopQueue.error ? (
+            <>
+              开课走侧栏课程选择器旁的「训练」；在训课程另见顶栏 pill 行
+              {hidden.length > 0 ? `（未列的 ${hidden.length} 门见上方 chip 悬停）` : null}。
+            </>
+          ) : null}
+        </Empty>
+      ) : (
+        <div className="tc-tablewrap">
+          <table className="tc-table tc-mx__table">
+            <thead>
+              <tr>
+                <th scope="col">课程</th>
+                <th scope="col">状态</th>
+                <th scope="col" className="tc-mx__num">
+                  iter
+                </th>
+                <th scope="col">本轮</th>
+                <th scope="col">在等什么</th>
+                <th scope="col" className="tc-mx__num">
+                  队列 · 在飞
+                </th>
+                <th scope="col">段内</th>
+                {onAction ? <th scope="col">操作</th> : null}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <MatrixTr
+                  key={r.course}
+                  row={r}
+                  onSelectCourse={onSelectCourse}
+                  onAction={onAction}
+                />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {/* 页脚口径拿的是**全集**（它讲的是「谁在等外部 / 读面可不可用」，与上屏筛无关）。 */}
+      <div className="tc-mx__foot">{matrixFoot({ queue: loopQueue, rows: all })}</div>
     </section>
   )
 }

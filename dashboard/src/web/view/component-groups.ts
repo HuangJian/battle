@@ -1,8 +1,8 @@
 /** component-groups.ts — 组件卡分组（R3-3：**服务面**（单例角色）vs **课程面**（按课程））。
  *
- *  为什么分组，而不是继续排一行：
+ *  为什么分组，而不是继续排一行（且**分组标题本身就是作用域标签**，行内不再重复）：
  *
- *   - 单例角色（selfNode / hub / 隧道 / **trainer** / **本机 worker**）与当前查看的课程**无关**
+ *   - 单例角色（**trainer** / hub / selfNode / 隧道 / **本机 worker**，族内顺序即此序）与当前查看的课程**无关**
  *     ——0 门课也在、100 门课也是一份。混在按课的行里，操作员会去「给这门课再起一个 hub /
  *     trainer / worker」（而它们是共享的：第二个实例抢同一个端口、两套调度器抢同一批 traj、
  *     多份 worker 抢同一份 hub 队列），或者把「共享 hub 没起」读成「这门课自己的 hub 没起」；
@@ -27,26 +27,34 @@ import type { ComponentScope, ComponentView } from './console-types'
  *  2026-09-19 实际踩到：`Record<ComponentFamilyId, …>` 里那个 `node: []` 就让三份 bundle 全挂。 */
 export type ComponentFamilyId = 'service' | 'course'
 
-/** 族元数据（标题上屏；hint 是组标题的悬停/副标题——它回答「这一族的键是什么」）。 */
+/** 族元数据（标题上屏；hint 是组标题的悬停/副标题——它回答「这一族的键是什么」）。
+ *
+ *  2026-09-20（用户指令）：「服务面 · 单例」→「**服务**」（「课程面 · 按课程」→「课程」同理）：
+ *  标题只说**这一族是什么**，作用域细节由 `hint` 承担——逐行的「共享/单例」徽章已删，
+ *  标题也不必再挂一个全族同值的后缀。
+ */
 export const FAMILY_META: Record<'service' | 'course', { title: string; hint: string }> = {
   service: {
-    title: '服务面 · 单例',
+    title: '服务',
     hint:
-      '与课程数量无关：一个进程服务所有并行课程（0 门课也在，100 门课也只有一份）。' +
-      '「共享」= hub / 隧道 / trainer / 本机 worker（各一个进程服务所有课程）；' +
-      '「单例」= 本机 agent（全机一份）。',
+      '与课程数量无关：一个进程服务所有并行课程（0 门课也在，100 门课也只有一份）——' +
+      '门房（hub）/ 跑腿（隧道）/ 管事（trainer）/ 丹徒（本机 worker）各一个进程服务所有课程，' +
+      '采办（本机采样 agent）则全机一份。逐行悬停有各自的用途说明。',
   },
   course: {
-    title: '课程面 · 按课程',
-    hint: '卡片上的对象是**当前查看的那门课**——换课程 = 换对象（启动前先看清顶栏选的是哪门课）。',
+    title: '课程',
+    hint: '卡片上的对象是**当前查看的那门课**——换课程 = 换对象（启动前先看清侧栏选的是哪门课）。',
   },
 }
 
 /** 组内展示顺序（**纯化妆**：未列出的 key 落到组尾，绝不丢弃——成员资格只由 scope 决定）。 */
 const ORDER: Record<'service' | 'course', readonly string[]> = {
-  // 服务面按「谁依赖谁」排：agent（一切动作的落点）→ hub（调度中枢）→ 隧道（入站通道）
-  // → trainer（消费 hub 的作业队列、服务所有课程）→ 本机 worker（消费同一份队列里的活）。
-  service: ['selfNode', 'hubServer', 'cloudflared', 'trainingLoop', 'localWorker'],
+  // 服务面顺序 = **用户指令 2026-09-20**（不再是「谁依赖谁」的推演）：
+  //   trainer（训练实际在跑的那个）→ hub（作业中枢）→ agent（本机控制面）→ 隧道（入站通道）
+  //   → 本机 worker（消费同一份队列的活）。
+  // 读序理由：这一行最常问「训练在不在跑 / 队列通不通」，于是把 trainer 与 hub 提到最前；
+  // agent / 隧道 / worker 是支撑设施，靠后不档视线。
+  service: ['trainingLoop', 'hubServer', 'selfNode', 'cloudflared', 'localWorker'],
   // 课程面：**当前空**（2026-09-19 收敛完成：selfNode 单例，hub / 隧道 / trainer / 本机 worker
   // 四条共享，本机伪节点退出受管组件 —— 于是 `cardFamilies` 只渲染服务面一组，这不是坏了）。
   // `course` 族本身保留：它是 scope 的函数，日后真出现按课程的卡片会自然落进去，不必改代码。
@@ -91,30 +99,8 @@ export function cardFamilies(components: readonly ComponentView[]): ComponentFam
   return out
 }
 
-/** 作用域徽章：**只说 scope 说不出来的那件事**。
- *
- *  - `shared` ⇒ 「共享」（一个进程服务所有课程）——不说，操作员会以为「这门课自己的 hub 停了」
- *    而去重复启动（第二个 hub 抢同一端口）；
- *  - `singleton` ⇒ 「单例」（全机一份）；
- *  - `course` ⇒ **null**：按课程是这张卡片的**默认语义**（组标题已说「课程面 · 按课程」），
- *    每行再挂一个「本课」只是噪声——徽章的密度决定了它还读不读得出来。
- */
-export function scopeBadge(c: ComponentView): { text: string; cls: string; title: string } | null {
-  if (c.scope === 'shared') {
-    return {
-      text: '共享',
-      cls: 'tc-cc__scope--shared',
-      title:
-        '共享实例：一个进程服务所有并行课程（启动/停止/冒烟的操作对象是同一个），' +
-        '不属于任何单门课；重复启动会与现有实例抢同一端口。',
-    }
-  }
-  if (c.scope === 'singleton') {
-    return {
-      text: '单例',
-      cls: 'tc-cc__scope--singleton',
-      title: '单例：全机一份（所有课程共用同一个 agent——它服务任意课程的 rollout/eval 请求）。',
-    }
-  }
-  return null
-}
+// ★ `scopeBadge`（逐行「共享」/「单例」徽章）已于 2026-09-20 删除（用户指令：服务面每行为它不需要
+// 显示共享/单例）。它当初成立的偷设是「一行可能属于任意作用域」——而现在服务面**整族**就是同一个
+// 作用域（`hub`/`隧道`/`trainer`/本机 worker 共享 + selfNode 单例），族标题与 `FAMILY_META.hint`
+// 已经说了一次；逐行再挂就是同一句话重复 N 遍（徽章的密度决定了它还读不读得出来）。
+// 成员资格仍由 `scope` 决定（`FAMILY_OF_SCOPE`）——删的是标签，不是分组判据。

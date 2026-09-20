@@ -84,10 +84,10 @@ src/
     components/     通用 UI 原子（DataTable / TrendChart / Pill …）；**P1 起的行/反馈原语**：
                     StatusRow（行：状态点·名称·值·徽章·元信息·动作，含显式折叠头）/
                     StatusDot / SectionHeader / Empty（四态）/ InlineNotice（面板内动作结果一行）；
-                    **P2b 起的总览两块**：AlertDock（告警坞：排序/折叠在 view/alerts.ts）/
-                    KpiStrip（六格 KPI 条：取值/口径在 view/kpi.ts）
+                    AlertDock（告警坞：排序/折叠在 view/alerts.ts）
                     —— 「同一语义只有一个原语」，不要在面板里自绘（docs/dashboard-redesign.md §4.2）；
-                    坞与 KPI 的领域判据全在 view/ 的纯函数里（组件只管折叠开关与动作绑定）
+                    坞的领域判据全在 view/ 的纯函数里（组件只管折叠开关与动作绑定）。
+                    ※ KpiStrip（六格 KPI 条 + view/kpi.ts）已于 2026-09-20 下线删除（用户指令）
     app/            SSR 首屏 + hydrate 的浏览器应用（app / log / eval 三入口 + panels）
       shell/        应用外壳：Shell（只收**节点**，纯布局）/ NavSidebar（品牌 + 分组导航，
                     全站共用）/ Sidebar（= NavSidebar + 控制台专有的课程·门禁·刷新区）/ Topbar
@@ -96,7 +96,7 @@ src/
       eval-app.tsx  评估页：同样套 Shell + NavSidebar（独立 bundle，见 P3b）
       log-app.tsx   日志页：同上（页头只说「哪个组件」，页名由外壳顶栏给）
     render.tsx theme.ts
-tests/        98 个本子系统的测试（原根 tests/ 的同名文件迁入 + 两巨型文件按分层拆开；
+tests/        97 个本子系统的测试（原根 tests/ 的同名文件迁入 + 两巨型文件按分层拆开；
               web-style-discipline.test.ts = 样式纪律闸：字号阶梯 / 内联样式 / 色值 token）
 data/evalboard/  EvalBoard 账本数据根（默认值；EVALBOARD_DATA 可覆盖）
 ```
@@ -105,7 +105,8 @@ data/evalboard/  EvalBoard 账本数据根（默认值；EVALBOARD_DATA 可覆�
 
 测试**镜像 `src/` 的模块**（AGENTS §8）：一个测试文件对应它覆盖的那个模块，
 文件名形如 `web-view-rows` ↔ `src/web/view/rows.ts`、`server-api-pool` ↔
-`src/server/api`。dashboard 侧当前 **964 个用例 / 98 个文件**（2026-09-20；合入 `origin/goal-nn` 前为 889 / 94，
+`src/server/api`。dashboard 侧当前 **949 个用例 / 97 个文件**（2026-09-20；KPI 条下线删`web-kpi.test.ts` 前为 964 / 98,
+合入 `origin/goal-nn` 前为 889 / 94，
 P4a 样式纪律闸前为 878 / 93，
 P3c 列模型前为 867 / 92，
 P3b 独立页套壳前为 863 / 92，P2b 告警坞+KPI 条前为 804 / 90，P2a 课程矩阵前为 776 / 88，

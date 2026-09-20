@@ -274,6 +274,22 @@ describe('顶部在训课程 pill 行（SSR）', () => {
     expect(open).toBeLessThan(pills)
   })
 
+  it('★ pill 组：无「在训」文字标签、且在顶栏**靠左**（全局读数仍贴最右）', async () => {
+    // 2026-09-20 用户指令：「在训」（组前那个标签）去掉 + pill 行左对齐。
+    // 左边是「我在看什么」，右边是「集群现在怎样」——这条钉子钉的是**序**，不是样式表。
+    const html = render.renderConsolePage(await viewWithPills())
+    const doc = html.slice(html.indexOf('id="root"'))
+    const pills = doc.indexOf('class="tc-tpills"')
+    const right = doc.indexOf('class="tc-top__right"')
+    const head = doc.indexOf('class="tc-top"')
+    expect(pills).toBeGreaterThan(head) // 前提：pill 组在顶栏内（否则下标比较无意义）
+    expect(right).toBeGreaterThan(pills) // ★ pill 组在全局读数组之**前** = 靠左
+    // 组内不得再出现文字标签（`aria-label` 不算：它在页面上不可见，是屏幕阅读器的组名）
+    const group = doc.slice(pills, doc.indexOf('</header>'))
+    expect(group).not.toContain('class="lbl"')
+    expect(doc).toContain('aria-label="在训课程"')
+  })
+
   it('顶部「训练」按键恒在（开课入口与进程启动解耦），停课不在顶栏', async () => {
     const html = render.renderConsolePage(await viewWithPills())
     expect(html).toContain('>训练</button>')

@@ -13,6 +13,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import type { JSX } from 'preact'
 import {
+  componentHover,
+  componentName,
   formatBytes,
   fmtTs,
   parseLogLine,
@@ -223,7 +225,11 @@ export function LogApp({ initial, options }: LogAppProps) {
 
   const exists = payload.exists
   const meta = payload.log ?? ''
-  const label = payload.label
+  // 服务名 = **角色名**（单一源 `view/component-roles`，与总览的组件行同一份词）。
+  // `payload.label` 是服务端的长技术名（self-node (采集节点) …）——错误消息/账本里仍用它，
+  // 但页面上的服务名不再两套：这里与导航一起换成角色名，key 与用途留在悬停里。
+  const label = componentName(payload.component)
+  const labelHover = componentHover(payload.component)
 
   return (
     <Shell
@@ -249,7 +255,9 @@ export function LogApp({ initial, options }: LogAppProps) {
           />
           <div className="tc-loghead__title">
             组件日志 <span className="tc-loghead__sep">/</span>
-            <span className="tc-loghead__comp">{label}</span>
+            <span className="tc-loghead__comp" title={labelHover || undefined}>
+              {label}
+            </span>
           </div>
           <div className="tc-loghead__meta">
             {meta ? (
@@ -304,7 +312,7 @@ export function LogApp({ initial, options }: LogAppProps) {
                 href={`/log/${c.key}${course ? `?course=${encodeURIComponent(course)}` : ''}`}
               >
                 <span className={statusDot(c.status)} />
-                {c.label}
+                <span title={componentHover(c.key) || undefined}>{componentName(c.key)}</span>
               </a>
             ))}
           </nav>

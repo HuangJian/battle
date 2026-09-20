@@ -23,7 +23,6 @@ import type { JSX } from 'preact'
 import type { RolloutSrcMode, TrainMode } from '../../core/types'
 import { AlertDock } from '../components/AlertDock'
 import { Flash, type FlashState } from '../components/Flash'
-import { KpiStrip } from '../components/KpiStrip'
 import { PanelErrorBoundary } from '../components/PanelErrorBoundary'
 import { usePolling } from './lib/usePolling'
 import { fetchState, postAction } from './lib/api-client'
@@ -50,7 +49,6 @@ import {
   buildAlerts,
   canonicalPath,
   DEFAULT_PAGE,
-  kpiTiles,
   latestRow,
   pageForPath,
   REFRESH_INTERVALS,
@@ -499,15 +497,10 @@ export function App({ initial }: AppProps) {
         {/* ══════════════════ 总览 ══════════════════ */}
         {page === 'overview' ? (
           <>
-            {/* KPI 条（P2b：6 格「一眼看完」的读数索引）——六个数合并前都散落在
-                趋势图右上角 / Hero 首行 / 总览表头 / 节点行里，回答「现在什么情况」
-                只能滚动读数。取值与口径全在 view/kpi.ts（纯函数）。
-                两区通用（BC 课的胜率/iter 同样成立，只是没有 eval 与调度读数）。 */}
-            <PanelErrorBoundary>
-              {/* 时刻用 ticker 驱动的 `now`（与顶栏阶段 chip 同一口时钟）而不是当场 Date.now()：
-                  两处显示的是同一个阶段的耗时，读不一样的秒数就是 bug。 */}
-              <KpiStrip tiles={kpiTiles(stateView, now)} onNavigate={navigate} />
-            </PanelErrorBoundary>
+            {/* ★ KPI 条（「关键指标」六格）已于 2026-09-20 下线（用户指令）——连同
+                `components/KpiStrip.tsx` / `view/kpi.ts` / `tests/web-kpi.test.ts` 一并删除。
+                理由：它是「索引」型面板（六个数都能在 Hero / 节点行 / 课程表头读到同一个值），
+                首屏纵向空间给了**能直接动手**的那几区；留一个指针不如把那几区往上提。 */}
             {/* RL 区（与 BC 区互斥：isBc 课只出 BC 区；Hero/EvalBoard 只属 RL） */}
             {stateView?.isBc ? null : (
               <PanelErrorBoundary>

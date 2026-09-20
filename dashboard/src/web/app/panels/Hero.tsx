@@ -29,6 +29,9 @@ import {
   TC_HERO_ITER_VIEW,
   TC_HERO_ITERS_COLLAPSED,
   TC_TREND_RANGE,
+  TC_TREND_SOURCE,
+  isTrendSource,
+  TREND_SOURCE_OPTIONS,
   winTone,
   type ConsoleStateView,
   type EvalCkptFile,
@@ -37,10 +40,11 @@ import {
   type PairedReferee,
   type Series,
   type TrendRange,
+  type TrendSource,
 } from '../../view'
 import { Badge } from '../../components/Pill'
 import { SegmentedControl } from '../../components/SegmentedControl'
-import { TrendChart } from '../../components/TrendChart'
+import { COLOR_EVAL, TrendChart } from '../../components/TrendChart'
 import { InlineNotice } from '../../components/InlineNotice'
 import { ckptForIter, loadCourseCkpts, startEvalA } from '../lib/eval-a'
 import { ReplayExportModal } from './ReplayExportModal'
@@ -55,12 +59,31 @@ export interface HeroProps {
   readOnly?: boolean
 }
 
-/** 右侧趋势格：主序列实线 + 可选 eval 虚线叠加；hover 双口径。 */
-function TrendCell({
+/** 序列最后一个有效点（缺值 = null，不冒充 0）。 */
+function lastFinite(s: Series | undefined): number | null {
+  if (!s) return null
+  const v = s.vals.filter(Number.isFinite).slice(-1)[0]
+  return v === undefined ? null : v
+}
+
+/** 右侧趋势格：数据源档位决定画一条还是两条。
+ *
+ *  导出理由与 `NodeRow` 同：三种档位的**渲染形状**（一条还是两条、标签/线色是哪个口径）
+ *  必须能单独渲染断言——SSR 首帧恒为「全部」档，只测整页就只测到一条分支。
+ *
+ *  · `all`     —— 主序列（rollout 实线）+ 叠加序列（eval 橙线）；值列 `a / b` 双口径。
+ *  · `rollout` —— 只主序列（去掉橙线）。
+ *  · `eval`    —— 只 eval，且它**升为主序列**：标签/悬停用 eval 自己的词，线色改橙
+ *                  （口径色是身份，不变；语义 tone 只给值列）。
+ *
+ *  `toneOf` 是**函数**（而非一个已算好的档）：值列与线色必须跟着「当前显示的那条」走——
+ *  否则切到 eval 档时，eval 胜率会被 rollout 胜率的阈值染成色（一个已经过期的判断）。 */
+export function TrendCell({
   series,
   seriesEval,
+  source,
   fmt,
-  tone,
+  toneOf,
   range,
   yFloor,
   yMin,
@@ -68,8 +91,9 @@ function TrendCell({
 }: {
   series: Series | undefined
   seriesEval?: Series | undefined
+  source: TrendSource
   fmt: (v: number | null) => string
-  tone?: 'g' | 'y' | 'r'
+  toneOf?: (v: number) => 'g' | 'y' | 'r'
   range: TrendRange
   /** y 轴下界上限：击杀/道具 0；胜率 0.3（基底不得高于 30%）。 */
   yFloor?: number
@@ -78,37 +102,43 @@ function TrendCell({
   /** 标签悬停提示（口径说明）。 */
   title?: string
 }) {
-  const last = series ? (series.vals.filter(Number.isFinite).slice(-1)[0] ?? null) : null
-  const lastEval = seriesEval
-    ? (seriesEval.vals.filter(Number.isFinite).slice(-1)[0] ?? null)
-    : null
+  const evalOnly = source === 'eval'
+  const main = evalOnly ? seriesEval : series
+  const overlay = source === 'all' ? seriesEval : undefined
+  const last = lastFinite(main)
+  const lastOverlay = lastFinite(overlay)
+  const tone = toneOf && last != null ? toneOf(last) : undefined
   return (
     <div className="tc-tcell">
       <span className="tc-tcell__hd">
         <span className="tc-tcell__lbl" title={title}>
-          {series ? series.label : '—'}
+          {main ? main.label : '—'}
         </span>
         <b className={tone ? `tc-mtrend__val--${tone}` : undefined}>
           {fmt(last)}
-          {seriesEval && lastEval != null ? (
+          {overlay && lastOverlay != null ? (
             <span className="tc-tcell__pair">
               {' / '}
-              {fmt(lastEval)}
+              {fmt(lastOverlay)}
             </span>
           ) : null}
         </b>
       </span>
-      {series ? (
+      {main ? (
         <TrendChart
-          series={series}
-          series2={seriesEval}
+          series={main}
+          series2={overlay}
           range={range}
           fmt={fmt}
-          tone={tone}
+          // eval 档一条线：色 = 口径（橙），不叠语义 tone（值列已经把判断说完了）。
+          tone={evalOnly ? undefined : tone}
+          color={evalOnly ? COLOR_EVAL : undefined}
           height={56}
           yFloor={yFloor}
           yMin={yMin}
         />
+      ) : evalOnly && series ? (
+        <span className="tc-muted tc-small">该课程暂无干净评估</span>
       ) : null}
     </div>
   )
@@ -745,6 +775,26 @@ export function Hero({ stateView, onMore, onRefresh, readOnly = false }: HeroPro
     }
   }
 
+  // 走势数据源档位（全部叠加 / 只看 rollout / 只看 eval）；持久化与范围档同一个套路：
+  // SSR 首帧恒「全部」（= 原有画面），hydrate 后恢复偏好；非法值过 isTrendSource 遭退默认。
+  const [source, setSource] = useState<TrendSource>('all')
+  useEffect(() => {
+    try {
+      const v = localStorage.getItem(TC_TREND_SOURCE)
+      if (isTrendSource(v)) setSource(v)
+    } catch {
+      /* 隐私模式等不可写场景忽略 */
+    }
+  }, [])
+  const onSource = (s: TrendSource): void => {
+    setSource(s)
+    try {
+      localStorage.setItem(TC_TREND_SOURCE, s)
+    } catch {
+      /* ignore */
+    }
+  }
+
   if (!head) {
     return (
       <section className="tc-hero" aria-label="训练状态">
@@ -768,23 +818,30 @@ export function Hero({ stateView, onMore, onRefresh, readOnly = false }: HeroPro
     )
   }
 
-  const tone = winTone(head.winRate)
-
   return (
     <section className="tc-hero" aria-label="训练状态">
       <div className="tc-hero__right">
-        <div className="tc-trend-range" role="group" aria-label="走势范围">
-          {(['all', '30', '10'] as TrendRange[]).map((r) => (
-            <button
-              key={r}
-              type="button"
-              className={`tc-trend-range__btn${range === r ? ' tc-trend-range__btn--on' : ''}`}
-              aria-pressed={range === r}
-              onClick={() => onRange(r)}
-            >
-              {r === 'all' ? '全量' : `最近${r}`}
-            </button>
-          ))}
+        {/* 控制条：左 = 看哪条口径（数据源），右 = 看多少轮（范围）。两个问题独立，各一个档位。 */}
+        <div className="tc-trendctl">
+          <SegmentedControl<TrendSource>
+            value={source}
+            ariaLabel="走势数据源"
+            options={TREND_SOURCE_OPTIONS}
+            onChange={onSource}
+          />
+          <div className="tc-trend-range" role="group" aria-label="走势范围">
+            {(['all', '30', '10'] as TrendRange[]).map((r) => (
+              <button
+                key={r}
+                type="button"
+                className={`tc-trend-range__btn${range === r ? ' tc-trend-range__btn--on' : ''}`}
+                aria-pressed={range === r}
+                onClick={() => onRange(r)}
+              >
+                {r === 'all' ? '全量' : `最近${r}`}
+              </button>
+            ))}
+          </div>
         </div>
         {evalFlash ? <InlineNotice>{evalFlash}</InlineNotice> : null}
         <div className="tc-trends">
@@ -792,15 +849,17 @@ export function Hero({ stateView, onMore, onRefresh, readOnly = false }: HeroPro
           <TrendCell
             series={winSeries}
             seriesEval={evalSeries}
+            source={source}
             fmt={fmtPct}
-            tone={tone}
+            toneOf={winTone}
             range={range}
             yFloor={0.3}
-            title="rollout 采样胜率 + eval 胜率（橙色）"
+            title="rollout 采样胜率 + eval 胜率（橙色）；数据源档位可只看一边"
           />
           <TrendCell
             series={dmgPerKillSeries}
             seriesEval={evalDmgPerKillSeries}
+            source={source}
             fmt={fmtPct}
             range={range}
             yFloor={0}
@@ -809,6 +868,7 @@ export function Hero({ stateView, onMore, onRefresh, readOnly = false }: HeroPro
           <TrendCell
             series={winTicksSeries}
             seriesEval={evalWinTicksSeries}
+            source={source}
             fmt={fmtInt}
             range={range}
             yMin={winTicksYMin(winTicksSeries, evalWinTicksSeries)}
@@ -818,6 +878,7 @@ export function Hero({ stateView, onMore, onRefresh, readOnly = false }: HeroPro
           <TrendCell
             series={killsSeries}
             seriesEval={evalKillsSeries}
+            source={source}
             fmt={fmtPct}
             range={range}
             yFloor={0}
@@ -826,6 +887,7 @@ export function Hero({ stateView, onMore, onRefresh, readOnly = false }: HeroPro
           <TrendCell
             series={winHpSeries}
             seriesEval={evalWinHpSeries}
+            source={source}
             fmt={fmtPct}
             range={range}
             yFloor={0}
@@ -834,6 +896,7 @@ export function Hero({ stateView, onMore, onRefresh, readOnly = false }: HeroPro
           <TrendCell
             series={puSeries}
             seriesEval={evalPuSeries}
+            source={source}
             fmt={(v) => (v != null ? `${v.toFixed(2)}` : '—')}
             range={range}
             yFloor={0}

@@ -14,6 +14,17 @@
  *  算力白烧）。前者的每一半在各自表里都是正常的：hub 表上它是「在线」，训练表上它只是「未在训」
  *  ——一个看起来完全平静的行。这正是本模块存在的理由。
  *
+ *  ## 上屏的行：**只列在训课程**（2026-09-20 用户指令）
+ *
+ *  合并规则产出的仍是**全集**（outer join 不丢任何一门课——纯函数层不筛），筛在面板侧发生：
+ *  `CourseMatrix` 用 `isTrainingRow` 过滤，未在训的行**不渲染**（其计数与逐行状态在表头 chip 的
+ *  悬停里，不静默丢）。
+ *
+ *  为什么（用户的读序）：这门表的用途是「盯着正在跑的那几门」，而未在训的课在盘上可能积到几十门
+ *  （历史课都有账本与目录）——它们把在训的那几行挤到屏幕外。**代价**：`hub 已注册 · 无进程`
+ *  这种「两半事实打架」的行（合并的初衷之一，见上）不再直接上屏，只能从表头 chip 的计数看出
+ *  「有几门没列」——这是刻意用**读噪**换**信息密度**（DECISIONS §2026-09-20-console-declutter）。
+ *
  *  ## 合并规则（三条，都是「不编数据」的推论）
  *
  *  1. **并集做主键**：任一侧有的课程都要出行。只在 hub 表里（训练侧还不认识它）或只在训练侧
@@ -96,6 +107,22 @@ export const QUEUE_DOWN_TITLE =
 /** 单侧缺失时单元格里的占位符。**不是 0**：0 是「确定没有」，`—` 是「不知道」。 */
 export const CELL_UNKNOWN = '—'
 
+/** **「在训」判据**（本模块唯一出处）：两侧同源（都出自「调度器存活 ∧ 该课未收官」），
+ *  任一侧给了就用——不存在两说。
+ *
+ *  `ov` 先于 `lq` 取：hub 侧的 `training` 是会话级快照（`stateView.trainingCourses` 推导），
+ *  训练侧的是每拍队列读数；两者应当一致，不一致时以 hub 侧为准（合并前两张表就是这么读的）。 */
+export function rowTraining(ov: CourseOverviewRow | null, lq: LoopQueueRow | null): boolean {
+  return ov?.training ?? lq?.training ?? false
+}
+
+/** 行级包装：面板按它筛「哪些行上屏」（课程区只列在训课程）。
+ *
+ *  ★ 与 `matrixStatus` 用**同一个**判据：状态列说「在训」而这一行没上屏（或反过来）就是 bug。 */
+export function isTrainingRow(r: CourseMatrixRow): boolean {
+  return rowTraining(r.ov, r.lq)
+}
+
 /**
  * 一行 → 状态。优先级即「哪条信息最该先说」，与合并前两张表各自的顺序保持一致
  * （唯一的**新增**是第 4 档：hub 已注册但没进程——从前它落在「停」里，看不出区别）。
@@ -118,7 +145,7 @@ export function matrixStatus(
   hubOnline: boolean,
 ): MatrixStatus {
   // 「在训」的判据两侧同源（都出自调度器存活 ∧ 该课未收官），任一侧给了就用——不存在两说。
-  const training = ov?.training ?? lq?.training ?? false
+  const training = rowTraining(ov, lq)
   const hubKnown = ov !== null && hubOnline
   const hubSeen = hubKnown && ov.hubSeen
 
@@ -170,7 +197,7 @@ export function matrixConflict(
   lq: LoopQueueRow | null,
   hubOnline: boolean,
 ): MatrixConflict {
-  const training = ov?.training ?? lq?.training ?? false
+  const training = rowTraining(ov, lq)
   const hubKnown = ov !== null && hubOnline
   if (training && hubKnown && !ov.hubSeen) return 'hub-unregistered'
   if (!training && hubKnown && ov.hubSeen && !ov.offline) return 'hub-no-process'

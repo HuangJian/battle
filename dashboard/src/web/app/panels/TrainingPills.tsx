@@ -18,9 +18,12 @@
  *
  *  ★ 为什么**不单开一行**（用户 2026-09-20：「要和课程 select 挤进同一行，避免占用宝贵的纵向
  *  页面空间」）：pill 数是零到几（0 时整个组件不渲染），而每一行都稳定吃掉 ~34px 纵向——那种
- *  「有时有内容、有时空白」的行最亏。故它是顶栏行内的一个 flex 项、紧跟课程 select 与「训练」
- *  按键（视觉上“选课 → 开课 → 看哪几门在训”连成一段）；pill 多时**本组内部横向滚动**，
- *  不换行（换行 = 又占回纵向空间，还把「触发门禁」挤下一行）。
+ *  「有时有内容、有时空白」的行最亏。故它是顶栏行内的一个 flex 项；pill 多时**本组内部横向滚动**，
+ *  不换行（换行 = 又占回纵向空间）。
+ *
+ *  ★ 组前的「在训」文字标签与整组**靠左**（用户 2026-09-20）：标签已删——pill 自己带课名/
+ *  it/状态，而顶栏右半是全局读数（阶段 / 节点 / 刷新），左半是「我在看什么」；本组 `flex: 1`
+ *  接在标题之后，把全局读数顶到最右（课程选择器 2026-09-20 已在侧栏，与本组不再同行）。
  */
 
 import { coursePills, type CoursePillTone, type LoopQueueRow } from '../../view'
@@ -62,9 +65,10 @@ export function TrainingPills({
   const pills = coursePills({ courses, rows, trainerRunning })
   // 一门课都没开 ⇒ 整个组件不渲染（顶部保持干净：空块/空行会被读成「有东西没加载出来」）。
   if (pills.length === 0) return null
+  // 组前的文字标签「在训」已删（2026-09-20 用户指令）——`aria-label` 保留：屏幕阅读器
+  // 需要一个组名，而它在页面上不可见（不吃视觉噪声）。
   return (
     <div className="tc-tpills" aria-label="在训课程">
-      <span className="lbl">在训</span>
       {pills.map((p) => {
         const active = p.course === viewCourse
         return (

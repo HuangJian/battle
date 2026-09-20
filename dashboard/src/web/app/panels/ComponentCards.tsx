@@ -1,4 +1,4 @@
-/** ComponentCards.tsx — 组件卡：按族（服务面 · 单例 / 课程面 · 按课程）分组的组件行。
+/** ComponentCards.tsx — 组件卡：按族（服务 / 课程）分组的组件行。
  *
  *  2026-09-20（docs/dashboard-redesign.md P1）：行结构迁移到 `StatusRow` 原语——状态点、
  *  作用域/模式/执行面徽章、动作区、展开详情各归其位，不再手写一套 chip 布局。
@@ -12,7 +12,7 @@
 
 import { useState } from 'preact/hooks'
 import type { ComponentView, ConsoleStateView, PushFleetProbe } from '../../view'
-import { cardFamilies, pendingLockReleases, scopeBadge } from '../../view'
+import { cardFamilies, componentHover, componentName, pendingLockReleases } from '../../view'
 import { CopyButton } from '../../components/CopyButton'
 import { SectionHeader } from '../../components/SectionHeader'
 import { StatusRow, type RowBadge } from '../../components/StatusRow'
@@ -35,17 +35,26 @@ export interface ComponentCardsProps {
 /** 只读视图的动作按钮悬停提示（局域网用户误点前的说明）。 */
 const RO_TITLE = '只读模式：操作仅限本机 localhost'
 
-/** push 执行面徽章文案（机群级）：hub 派发 N 台 / 直推 N 台 / 等待拉取（+ 探活汇总）。
+/** push 执行面徽章（机群级，仅 trainer 行）：「这轮 PPO 会去哪」。
  *
- *  执行面不再按课程配（课程与 worker 节点正交）：它就是「这轮 PPO 会去哪」的一句话，
- *  数据源 = `stateView.pushFleet`（部署事实推出来，见 `stack/push-config.ts`）。 */
-function pushBadgeText(f: PushFleetProbe): string {
+ *  执行面不按课程配（课程与 worker 节点正交）：它是这一行的补充事实，
+ *  数据源 = `stateView.pushFleet`（部署事实推出来，见 `stack/push-config.ts`）。
+ *
+ *  **pull 模式不出徽章**（用户 2026-09-20：去掉「dispatch→拉取」）——没有登记节点时
+ *  「谁来领谁就跑」是**缺省态**，常年挂四个字只是噪声（它不随任何东西变化）；
+ *  非 pull 才是**需要解释的部署决定**（东西被推去哪、推通了没有），所以只有它有徽章。
+ *  「谁在跑这门课」那一问本就归节点行（登记事实 + 健康度），不靠这里重复。 */
+function pushBadge(f: PushFleetProbe): RowBadge | null {
+  if (f.mode === 'pull') return null
   const up = f.probes.filter((p) => p.healthy === true).length
   const down = f.probes.filter((p) => p.healthy === false).length
   const n = f.nodes
-  if (f.mode === 'pull') return 'dispatch→拉取'
   const head = f.mode === 'hub-dispatch' ? `hub→${n} 台` : `直推→${n} 台`
-  return down > 0 ? `${head}·${down} 台不通` : up > 0 ? head : `${head}·未探`
+  return {
+    text: down > 0 ? `${head}·${down} 台不通` : up > 0 ? head : `${head}·未探`,
+    cls: `tc-cc__push tc-cc__push--${f.mode}`,
+    title: pushBadgeTitle(f),
+  }
 }
 
 /** 徽章悬停详情：模式理由 / hub / 逐节点探活。 */
@@ -54,9 +63,6 @@ function pushBadgeTitle(f: PushFleetProbe): string {
   for (const p of f.probes) {
     const probe = p.healthy === true ? '通' : p.healthy === false ? '不通' : '未探（无鉴权键）'
     lines.push(`· ${p.id || '(未命名)'} ${p.url} — ${probe}`)
-  }
-  if (f.mode === 'pull') {
-    lines.push('没有登记节点时的必然结果：谁来领谁就跑（本机 worker 与云机同权）')
   }
   return lines.join('\n')
 }
@@ -127,7 +133,7 @@ export function ComponentCards({
   }
 
   if (!stateView) return null
-  // 两族（R3-3）：服务面（单例角色，与课程无关）vs 课程面（卡片对象 = 当前查看的那门课）。
+  // 两族（R3-3）：服务（单例角色，与课程无关）vs 课程（卡片对象 = 当前查看的那门课）。
   // 分组与顺序都出自 view 层的 `cardFamilies`（成员资格 = 服务端给的 scope，不在这里按 key 猜）。
   const families = cardFamilies(stateView.components)
 
@@ -142,31 +148,30 @@ export function ComponentCards({
             const locked = c.busy || pending[c.key] !== undefined
             const toggle = (): void => setOpen(isOpen ? null : c.key)
             const logHref = `/log/${c.key}${course ? `?course=${encodeURIComponent(course)}` : ''}`
-            const scope = scopeBadge(c)
+            // 行名 = **角色名**（用户指令 2026-09-20：trainingLoop→管事 / hubServer→门房 /
+            // selfNode→采办 / cloudflared→跑腿 / localWorker→丹徒）。key 不再上屏（它留在
+            // 悬停与 `/log/<key>` 里）——角色名是给人看的，key 是给机器对账的，两个问题。
+            const roleName = componentName(c.key)
+            const roleHover = componentHover(c.key)
             // 执行面徽章：贴在 trainer 卡上（「这轮 PPO 会去哪」只有这一个卡问得出口）。
             // 数据源是**机群级**事实（登记节点 + rl.hub_push + 探活），与当前查看的课程无关。
             const fleet = c.key === 'trainingLoop' ? (stateView.pushFleet ?? null) : null
             const badges: RowBadge[] = []
-            // `scope.cls` 只是修饰类（`tc-cc__scope--shared`）；基类在行里补上。
-            if (scope)
-              badges.push({
-                text: scope.text,
-                cls: `tc-cc__scope ${scope.cls}`,
-                title: scope.title,
-              })
+            // 作用域徽章（「共享」/「单例」）**不上屏**（2026-09-20 用户指令）：一族里每一行都
+            // 同一个作用域，逐行重复等于噪声；族标题已经说了这件事。
             if (c.mode) badges.push({ text: c.mode, cls: 'tc-cc__mode' })
-            if (fleet)
-              badges.push({
-                text: pushBadgeText(fleet),
-                cls: `tc-cc__push tc-cc__push--${fleet.mode}`,
-                title: pushBadgeTitle(fleet),
-              })
+            if (fleet) {
+              const pb = pushBadge(fleet)
+              if (pb) badges.push(pb)
+            }
             return (
               <StatusRow
                 key={c.key}
                 tone={dotTone(c)}
                 dotTitle={dotTitle(c)}
-                name={c.key}
+                name={roleName}
+                // 悬停 = 这个服务干什么用（用户指令 2026-09-20）+ key；没有角色名的 key 不出提示。
+                nameTitle={roleHover || undefined}
                 badges={badges}
                 onToggle={toggle}
                 expanded={isOpen}
@@ -174,8 +179,8 @@ export function ComponentCards({
                 roTitle={readOnly ? RO_TITLE : undefined}
                 ariaLabel={
                   readOnly
-                    ? `${c.label}（只读）`
-                    : `${c.label}，${isOpen ? '点击收起日志详情' : '点击展开日志详情'}`
+                    ? `${c.label}（${c.key}，只读）`
+                    : `${c.label}（${c.key}），${isOpen ? '点击收起日志详情' : '点击展开日志详情'}`
                 }
                 actions={
                   <>

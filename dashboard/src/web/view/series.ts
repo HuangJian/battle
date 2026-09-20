@@ -14,6 +14,23 @@ export interface Series {
 /** 走势图范围档位：全量 / 最近 30 轮 / 最近 10 轮。 */
 export type TrendRange = 'all' | '30' | '10'
 
+/** 走势图数据源档位（用户 2026-09-20）：全部 = rollout 实线 + eval 橙线叠加（原行为）；
+ *  rollout / eval = 只画一条——两种口径的量级/采样密度差很远（同图里 eval 常被压成孤点），
+ *  想看单边趋势时叠加反而是噪声。 */
+export type TrendSource = 'all' | 'rollout' | 'eval'
+
+/** 数据源档位选项（顺序即上屏顺序；view 层给词，组件只渲染——`TrendRange` 同类）。 */
+export const TREND_SOURCE_OPTIONS: Array<{ value: TrendSource; label: string }> = [
+  { value: 'all', label: '全部' },
+  { value: 'rollout', label: 'rollout' },
+  { value: 'eval', label: 'eval' },
+]
+
+/** 是否为合法数据源档位：localStorage 的值必须过这道闸（非法值退默认，不上屏）。 */
+export function isTrendSource(v: string | null | undefined): v is TrendSource {
+  return v === 'all' || v === 'rollout' || v === 'eval'
+}
+
 /** eval 源稀疏序列（干净评估只在部分迭代出现，中间轮 = NaN 缺口）：
  *  「最近 N」语义 = 最近 N 个有效评估点。双序列叠加时由 TrendChart 按主序列 iters 对齐。 */
 const SPARSE_SERIES_KEYS: ReadonlySet<string> = new Set([

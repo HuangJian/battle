@@ -15,7 +15,7 @@
 
 import { api, render } from './helpers/console-fixture'
 import { describe, expect, it } from 'bun:test'
-import { readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 
 /**
@@ -50,19 +50,22 @@ describe('console SSR renderConsolePage', () => {
     expect(html).toContain('炼丹炉')
     expect(dom).toContain('tc-side') // 应用外壳：侧栏
     expect(dom).toContain('tc-top') // 应用外壳：顶栏
-    // 组件小卡：名称渲染体是 `<b>{key}</b>`（标签在 aria-label 上）。
+    // 组件小卡：名称渲染体是**角色名**的 `<b>`（2026-09-20 用户指令：selfNode→采办 …），
+    // 机器 key 与用途释义走行名悬停（`<b title="采办（selfNode）—— …">`）；技术长名仍在 aria-label 上。
     // ⚠ 别再断言 `tc-cc__name`——那个类名只存在于 CSS 里，断言它等于断言样式表，
     // 永远为真（本文件切出 #root 后才暴露出来）。
+    expect(dom).toMatch(/<b title="采办（selfNode）[^"]*">采办<\/b>/)
     expect(dom).toContain('self-node (采集节点)')
     expect(dom).toContain('tc-hero') // 训练状态 hero（总览页）
     expect(dom).toContain('tc-comps') // 组件小卡
     expect(dom).toContain('tc-row') // 统一行原语（节点行等）
     expect(dom).toContain('训练状态') // hero aria-label
-    // KPI 条（P2b）：总览首屏第一块（告警坞之下、趋势之上），六格齐全
-    expect(dom).toContain('aria-label="关键指标"')
-    for (const label of ['采样胜率', 'eval 胜率', '当前阶段', '在训课程', '算力', '队列']) {
-      expect(dom).toContain(`>${label}</span>`)
-    }
+    // ★ KPI 条（「关键指标」六格）已下线（2026-09-20 用户指令）：**不得复活**。
+    // 三条一起查才算钉住：渲染里没有、组件文件没了、样式表里没有它的规则
+    // （只查渲染的话，下一个 agent 把面板挂回去只需改一行 —— 而这次是**删除**，不是隐藏）。
+    expect(dom).not.toContain('aria-label="关键指标"')
+    expect(existsSync('src/web/components/KpiStrip.tsx')).toBe(false)
+    expect(/^\.tc-kpi/m.test(readFileSync('src/web/theme.css', 'utf8'))).toBe(false)
     // 详情已路由化：首帧不渲染模态抽屉 / 弹窗（这是回归闸——抽屉已退役，别让它回来）
     expect(html).not.toContain('class="tc-modal-mask"')
 
@@ -113,13 +116,15 @@ describe('console SSR renderConsolePage', () => {
     const overview = body(render.renderConsolePage(s, { page: 'overview' }))
     expect(overview).toContain('tc-hero')
     expect(overview).toContain('总览') // 顶栏页面标题
-    expect(overview).toContain('aria-label="关键指标"') // KPI 条只属总览
+    // KPI 条已下线（见上一用例）：总览首屏第一块现在是告警坞 → Hero
+    expect(overview).toContain('tc-hero')
+    expect(overview).not.toContain('aria-label="关键指标"')
 
     const metrics = body(render.renderConsolePage(s, { page: 'metrics' }))
     expect(metrics).toContain('指标') // 顶栏页面标题
     expect(metrics).not.toContain('tc-hero') // 指标页不重复渲染总览 hero
     expect(metrics).not.toContain('tc-comps') // 也不渲染总览的组件卡
-    expect(metrics).not.toContain('aria-label="关键指标"') // KPI 条不进详情页
+    expect(metrics).not.toContain('aria-label="关键指标"') // KPI 条已下线（总览也不再有）
 
     const nodes = body(render.renderConsolePage(s, { page: 'nodes' }))
     expect(nodes).toContain('节点')

@@ -286,5 +286,35 @@ describe('console sparkline (ui/view)', () => {
       expect(html).toContain('最近30')
       expect(html).toContain('最近10')
     })
+
+    it('面积渐变的引用自洽 + 不依赖包围盒（恒定序列不得变黑）', () => {
+      const html = render.renderConsolePage(mkView(30, true))
+      // ① 每个 fill 引用都指向**同一份渲染里存在**的渐变 id（否则浏览器拿不到 paint server）
+      const refs = [...html.matchAll(/fill="url\(#([\w-]+)\)"/g)].map((m) => m[1])
+      expect(refs.length).toBeGreaterThanOrEqual(6) // 6 格各一块面积
+      for (const id of refs) expect(html, id).toContain(`id="${id}"`)
+      // ② 渐变用用户坐标系：`objectBoundingBox` 在面积路径退化（恒定序列 ⇒ 零高）时
+      //    没有可用的坐标系，浏览器会把它画成黑色——训练曲线里「平坦的一段」很常见。
+      expect(html).not.toContain('objectBoundingBox')
+      expect(html.match(/gradientUnits="userSpaceOnUse"/g)?.length).toBe(refs.length)
+    })
+
+    it('hero 数据源档位（全部/rollout/eval）：控制条与范围档同排，默认「全部」= 原画面', () => {
+      const html = render.renderConsolePage(mkView(30, true))
+      // 控制条：数据源在左、范围在右（两个独立问题，各自一个胶囊分段控件）
+      expect(html).toContain('aria-label="走势数据源"')
+      expect(html).toContain('<div class="tc-trendctl">')
+      const ctl = html.indexOf('aria-label="走势数据源"')
+      const range = html.indexOf('aria-label="走势范围"')
+      expect(ctl).toBeGreaterThan(0)
+      expect(range).toBeGreaterThan(ctl)
+      // 三个档位词都在，且默认压「全部」（首帧 = 叠加双线，与改造前逐帧一致）
+      for (const w of ['全部', 'rollout', 'eval']) expect(html).toContain(`>${w}</button>`)
+      expect(html).toMatch(/tc-segmented__btn--on[^>]*aria-pressed="true"[^>]*>全部</)
+      // 默认档位仍是双序列叠加（eval 橙线在）——档位是**新增开关**，不改默认语义
+      expect(html).toContain('stroke="var(--eval-line, #ea580c)"')
+      // 范围档位的默认（最近30）不受影响
+      expect(html).toMatch(/tc-trend-range__btn--on[^>]*aria-pressed="true"[^>]*>最近30</)
+    })
   })
 })

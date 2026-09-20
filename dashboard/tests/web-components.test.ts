@@ -131,7 +131,7 @@ describe('§361：icon 复制键 / cloudflared endpoint 截断与复制 / local 
     expect(body).not.toContain('trycloudflare.com')
   })
 
-  it('执行面徽章（机群级）：hub 派发 / 直推 / 等待拉取三态 + 探活汇总', () => {
+  it('执行面徽章（机群级）：hub 派发 / 直推两态 + 探活汇总（**pull 不出徽章**）', () => {
     // hub 派发：hub 按队列推给登记节点
     const hub = pageWithPushTarget(fleet())
     expect(hub).toContain('class="tc-cc__push tc-cc__push--hub-dispatch"')
@@ -149,13 +149,17 @@ describe('§361：icon 复制键 / cloudflared endpoint 截断与复制 / local 
     expect(direct).toContain('class="tc-cc__push tc-cc__push--direct-push"')
     expect(direct).toContain('直推→2 台·1 台不通')
 
-    // 等待拉取：没有登记节点（谁在轮询 hub 谁就能领到活）
+    // 等待拉取：**不出徽章**（2026-09-20 用户指令：去掉「dispatch→拉取」）。
+    // 理由：没有登记节点是缺省态，那两个字不随任何东西变化——常年挂着的徽章就是噪声；
+    // 「谁在跑这门课」归节点行回答。所以 pull 档要断言的是「没有」，不是「写着什么」。
     const pull = pageWithPushTarget(fleet({ mode: 'pull', nodes: 0, probes: [] }))
-    expect(pull).toContain('class="tc-cc__push tc-cc__push--pull"')
-    expect(pull).toContain('dispatch→拉取')
+    expect(pull).not.toContain('class="tc-cc__push')
+    expect(pull).not.toContain('dispatch→拉取')
+    // 缺省态下 trainer 行本身仍在（徽章消失 ≠ 卡整行消失）
+    expect(pull).toContain('>管事<')
   })
 
-  it('组件卡分族（R3-3）：服务面（单例角色）在前、课程面在后，族内顺序稳定', () => {
+  it('组件卡分族（R3-3）：服务（单例角色）在前、课程在后，族内顺序稳定', () => {
     // scope 由服务端按账本槽位规则填（这里照抄真值：selfNode 单例；hub / 隧道 / **trainer** /
     // **本机 worker** 共享——后两者分别自 2026-09-19 的 R3-5 与共享 worker 收敛起，各一个进程
     // 服务所有课程；本机伪节点同日退出受管组件）。
@@ -203,26 +207,45 @@ describe('§361：icon 复制键 / cloudflared endpoint 截断与复制 / local 
       localNode: null,
     } as ConsoleStateView
     const html = renderConsolePage(s)
-    // 两组标题都上屏（分组这件事本身要看得见，不能只靠间距）
-    expect(html).toContain('服务面 · 单例')
-    expect(html).toContain('课程面 · 按课程')
+    // 两组标题都上屏（分组这件事本身要看得见，不能只靠间距）——
+    // ★ 2026-09-20 用户指令：标题只说「这一族是什么」（不带作用域后缀）
+    expect(html).toContain('>服务</span>')
+    expect(html).toContain('>课程</span>')
     expect(html).toContain('data-family="service"')
     expect(html).toContain('data-family="course"')
-    // 服务面在前、课程面在后；族内顺序：agent → hub → 隧道 → trainer → 本机 worker
-    const order = ['selfNode', 'hubServer', 'cloudflared', 'trainingLoop', 'localWorker']
+    // 服务族在前、课程族在后；族内顺序 = 用户指令 2026-09-20：
+    // trainer → hub → agent → 隧道 → 本机 worker。**行内是角色名不 key**（同日用户指令）：
+    // trainingLoop→管事 / hubServer→门房 / selfNode→采办 / cloudflared→跑腿 / localWorker→丹徒。
+    const order: Array<[string, string]> = [
+      ['trainingLoop', '管事'],
+      ['hubServer', '门房'],
+      ['selfNode', '采办'],
+      ['cloudflared', '跑腿'],
+      ['localWorker', '丹徒'],
+    ]
     let prev = -1
-    for (const k of order) {
-      const idx = html.indexOf(`>${k}<`)
-      expect(idx, k).toBeGreaterThan(prev)
+    for (const [k, name] of order) {
+      const idx = html.indexOf(`<b title="${name}（${k}）`)
+      expect(idx, `${k} → ${name}`).toBeGreaterThan(prev)
       prev = idx
     }
-    // 课程面族在服务面之后（合成键所在那族；它本身也必须在卡行里出现过）
-    expect(html.indexOf('>someCourseThing<')).toBeGreaterThan(html.indexOf('>localWorker<'))
-    // 作用域徽章：共享四个（hub / 隧道 / trainer / 本机 worker）+ 单例一个（selfNode）；
-    // 按课程不挂标签（组标题已说）。断言整段 class 属性而不是子串——页面里内联了整份
-    // theme.css，类名本身也会出现。
-    expect(html.match(/class="tc-cc__scope tc-cc__scope--shared"/g)).toHaveLength(4)
-    expect(html.match(/class="tc-cc__scope tc-cc__scope--singleton"/g)).toHaveLength(1)
+    // key 不再上屏（它只在悬停与 /log/<key> 里）；页面上的服务名只有角色名
+    expect(html).not.toContain('>trainingLoop<')
+    expect(html).not.toContain('>hubServer<')
+    // 悬停 = 功能用途（用户指令：hover 提示各个服务的用途）+ key 对账
+    expect(html).toContain('训练循环本体（trainingLoop / trainer）')
+    expect(html).toContain('作业中枢（hubServer）')
+    expect(html).toContain('本机采样节点（selfNode / sampler-agent，端口 8443）')
+    expect(html).toContain('入站隧道（cloudflared）')
+    expect(html).toContain('本机 PPO worker（localWorker）')
+    // 课程面族在服务面之后（合成键所在那族）；**没有角色名**的 key 回落 key 本身（不空白）
+    expect(html.indexOf('>someCourseThing<')).toBeGreaterThan(html.indexOf('>丹徒<'))
+    // ★ 逐行作用域徐章（共享/单例）已下线（2026-09-20 用户指令）：行里不得再有它。
+    // 断言整段 class 属性而不是子串——页面里内联了整份 theme.css，注释里也提到这个类名。
+    expect(html.match(/class="tc-cc__scope/g)).toBeNull()
+    // 但「谁共享、谁单例」这件事仍要看得见：它在族标题的说明里（每个服务行同一句话，
+    // 不再重复 N 遍）——角色名同源，免得标题与行名各说一套。
+    expect(html).toContain('各一个进程服务所有课程')
   })
 
   it('cloudflared 进程在但 hub 不通 → 黄点（healthy=false）', () => {
@@ -262,7 +285,7 @@ describe('§361：icon 复制键 / cloudflared endpoint 截断与复制 / local 
     expect(pageWithPushTarget(null)).not.toContain('class="tc-cc__push')
   })
 
-  it('local 行：只读展示（槽位 + 上轮贡献）', () => {
+  it('local 行：只读展示（槽位 + 贡献数）', () => {
     const s = {
       time: 't',
       course: 'c',

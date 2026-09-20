@@ -45,6 +45,10 @@ describe('console/log viewer (§348 补 2)', () => {
     expect(state.components.length).toBeGreaterThan(0) // 前提闸：否则下面的循环与计数都是永真
     for (const c of state.components) expect(dom).toContain(`href="/log/${c.key}`)
     expect(dom.match(/class="tc-lognav/g)?.length).toBe(state.components.length)
+    // 导航里的**服务名** = 总览同一套角色名（2026-09-20 用户指令）；key 留在悬停里
+    // （日志页是同一个控制台：总览说「管事」、日志页说「TrainingLoop (trainer)」= 两套词）。
+    expect(dom).toContain('<span title="管事（trainingLoop）')
+    expect(dom).not.toContain('>TrainingLoop (trainer)<')
     // 日志文本必须经转义（原始 <script> 不得出现在 logbox 内容里）
     expect(html).not.toContain('<script>alert')
   })

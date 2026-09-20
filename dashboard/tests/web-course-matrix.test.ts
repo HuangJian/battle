@@ -17,7 +17,12 @@
  */
 
 import { describe, expect, it } from 'bun:test'
-import type { CourseOverviewRow, LoopQueueView, ParallelOverviewView } from '../src/web/view'
+import type {
+  CourseOverviewRow,
+  LoopQueueRow,
+  LoopQueueView,
+  ParallelOverviewView,
+} from '../src/web/view'
 import {
   CELL_UNKNOWN,
   HUB_DOWN_TITLE,
@@ -28,8 +33,10 @@ import {
   matrixDotTone,
   matrixFoot,
   matrixMeta,
+  isTrainingRow,
   matrixStatus,
   mergeCourseRows,
+  rowTraining,
   parseLoopQueue,
   pauseOp,
   queueCell,
@@ -402,5 +409,55 @@ describe('表头元信息与页脚：两侧各自缺什么都要说出来', () =
       nowSec: NOW,
     })
     expect(matrixFoot({ queue: null, rows: hubOnly })).toContain('只有 hub 侧事实')
+  })
+})
+
+// ────────────────────────── 上屏筛选（课程区只列在训课程） ──────────────────────────
+
+/** 合并出全集（与面板同形），供筛选断言用。 */
+function merged(): ReturnType<typeof mergeCourseRows> {
+  return mergeCourseRows({
+    overview: ovView([
+      ovRow({ course: 'live', training: true }),
+      ovRow({ course: 'done', training: false }), // hub 侧有它、没在训
+      ovRow({ course: 'conflict', training: true, hubSeen: false }),
+    ]),
+    // sync：只在训练侧出现（hub 没注册它）且在训 ⇒ 上屏；hub 独有且未在训的 done ⇒ 不上屏
+    queue: lqView([lqRow({ course: 'live' }), lqRow({ course: 'sync' })], ['live', 'sync']),
+    viewing: '',
+    nowSec: NOW,
+  })
+}
+
+describe('isTrainingRow：上屏筛选与状态列**同一个**判据', () => {
+  it('判据 = ov.training ?? lq.training ?? false（两侧同源，任一侧给了就用）', () => {
+    const lqTraining = { training: true } as unknown as LoopQueueRow
+    expect(rowTraining({ training: true } as CourseOverviewRow, null)).toBe(true)
+    expect(rowTraining({ training: false } as CourseOverviewRow, null)).toBe(false)
+    // ov 缺位 / 没有 training 字段 ⇒ 取训练侧
+    expect(rowTraining(null, lqTraining)).toBe(true)
+    expect(rowTraining({} as CourseOverviewRow, lqTraining)).toBe(true)
+    // 两侧都没有 ⇒ false（不是 true：没在跑就是没在跑）
+    expect(rowTraining(null, null)).toBe(false)
+  })
+
+  it('★ 筛出来的行与状态列的「在训」判词绝不背离（两处判据漂开就是 bug）', () => {
+    const all = merged()
+    const shown = all.filter(isTrainingRow)
+    expect(shown.map((r) => r.course)).toEqual(['live', 'conflict', 'sync'])
+    // 「在训」/「在训 · hub 未注册」这两个判词**只能**出现在在训的行上（反过来说：
+    // 写着在训却没上屏 = 漏筛了一条该看的行）；反之「未在训」/「hub 已注册 · 无进程」
+    // 只能出现在未在训的行上。
+    // 注：`离线（只收回传）` 不在该对应关系里——它是 hub 侧 offline 事实（与在训与否正交：
+    // 离线课可能仍在本地跑 rollout），矩阵状态列的顺序有意把它排在 training 之前。
+    const TRAINING_WORDS = ['在训', '在训 · hub 未注册']
+    const NOT_TRAINING_WORDS = ['未在训', 'hub 已注册 · 无进程']
+    for (const r of shown) expect(TRAINING_WORDS, r.course).toContain(r.status.text)
+    for (const r of all.filter((x) => !isTrainingRow(x)))
+      expect(NOT_TRAINING_WORDS, r.course).toContain(r.status.text)
+  })
+
+  it('合并产出的仍是全集（纯函数层不筛：计数与悬停点名靠它）', () => {
+    expect(merged().map((r) => r.course)).toEqual(['live', 'done', 'conflict', 'sync'])
   })
 })

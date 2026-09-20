@@ -3,9 +3,9 @@
   --bg: #f4f6f9;
   --card: #ffffff;
   --border: #e5e8ee;
-  /* 分割线/描边色（P2b 补定义）：`--line` 在 `.tc-cc__scope` / `.tc-mx__singleton` /
+  /* 分割线/描边色（P2b 补定义）：`--line` 在 `.tc-mx__singleton` /
      `.tc-comps__group + .tc-comps__group` / `.tc-mx__opsep` 四处被用了很久，但**从来没定义过**
-     ——`var()` 无后备值时整条声明作废 ⇒ 两个徐章只剩渲染成了无描边、矩阵操作列之间的 1px
+     ——`var()` 无后备值时整条声明作废 ⇒ 两个徽章只剩渲染成了无描边、矩阵操作列之间的 1px
      竖线直接不可见。这里补齐（与 `WirePanel.tsx` 里 `var(--line, #ddd)` 的预期同色）。 */
   --line: #d8dee9;
   --text: #1c2333;
@@ -918,12 +918,20 @@ a.tc-btn {
   font-variant-numeric: tabular-nums;
 }
 
+/* 走势控制条：左 = 数据源档位（全部/rollout/eval），右 = 范围档位（全量/最近30/最近10）。
+ * 两个档位是同一排的两个问题（看哪条口径 × 看多少轮），各自一个胶囊分段控件。 */
+.tc-trendctl {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+  align-self: flex-start;
+}
 /* 走势范围档位（全量 / 最近30 / 最近10）：胶囊分段控件，非独立按键 */
 .tc-trend-range {
   display: flex;
   gap: 0;
-  margin-bottom: 4px;
-  align-self: flex-start;
 }
 .tc-trend-range__btn {
   border: 1px solid var(--border);
@@ -1682,25 +1690,8 @@ a.tc-btn {
 }
 /* 组标题与组件名的旧类（`__glabel` / `tc-cc__name`）已随 P1 迁到
    `SectionHeader`（`.tc-sh__label`）与 `StatusRow`（`.tc-row__name`）。 */
-/* 作用域徽章（R3-3）：共享 = 一个进程服务所有并行课程；单例 = 全机一份。
-   按课程是默认语义（组标题已说），不给每行挂噪声标签。 */
-.tc-cc__scope {
-  display: inline-block;
-  margin-left: 6px;
-  padding: 0 7px;
-  border-radius: 999px;
-  border: 1px solid var(--line);
-  color: var(--muted);
-  font-weight: 600;
-  font-size: var(--fs-xs);
-  white-space: nowrap;
-}
-.tc-cc__scope--shared {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: var(--accent-bg);
-}
-
+/* 作用域徽章（.tc-cc__scope*，R3-3）已于 2026-09-20 删除（用户指令：服务面每行不需要
+   显示共享/单例——族标题已经说过一次）。 */
 /* trainingLoop 运行模式高亮徽章 */
 .tc-cc__mode {
   display: inline-block;
@@ -1888,12 +1879,13 @@ a.tc-btn {
    而行内应只是几个胶囊）；pill 多时**本组自己横向滚动**，绝不 `flex-wrap` 撑出第二行
    （那又回到吃纵向空间，还顺带把后面的「触发门禁」挤下去）。
    `min-width: 0` 是横向滚动的必要条件：flex 项的默认 `min-width: auto` 拒绝缩到内容以下，
-   于是会把同一行的课程 select 挤没（而不是自己出滚动条）。 */
+   于是会把右边的全局读数挤没（而不是自己出滚动条）。 */
 .tc-tpills {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  /* 与课程 select 平分行内余地（两者都 `flex:1`）——没开课时本组件不渲染，select 照旧占满/居中 */
+  /* 顶栏中段、**靠左**（用户 2026-09-20）：标题之后向右占位，把全局读数顶到最右；
+     没开课时本组件不渲染（顶栏只剩标题 + 全局读数）。 */
   flex: 1 1 auto;
   flex-wrap: nowrap;
   min-width: 0;
@@ -1901,11 +1893,8 @@ a.tc-btn {
   scrollbar-width: thin;
   padding-bottom: 2px; /* 给细滚动条留位，避免贴住描述线 */
 }
-.tc-tpills .lbl {
-  font-size: var(--fs-sm);
-  color: var(--muted);
-  margin-right: var(--sp-1);
-}
+/* ✖ `.tc-tpills .lbl`（pill 组前的「在训」文字标签）已于 2026-09-20 删除（用户指令）——
+   pill 自己带课名/it/状态；组名留给 `aria-label`（不可见，不吃视觉噪声）。 */
 .tc-tpill {
   display: inline-flex;
   align-items: center;
@@ -2285,112 +2274,9 @@ a.tc-btn {
   font-size: var(--fs-sm);
 }
 
-/* ────────────── KPI 条（2026-09-20：6 格「一眼看完」的读数索引，问题 C1） ──────────────
-   格子内容全在 view/kpi.ts；这里只管排版与档位配色。
-   档位色复用语义 token（--ok/--warn/--err/--neutral，与状态点同一套）。 */
-.tc-kpi {
-  display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: var(--sp-2);
-  margin-bottom: 12px;
-}
-.tc-kpi__tile {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-  padding: 8px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-2);
-  background: var(--card);
-  box-shadow: var(--sh-1);
-  color: var(--text);
-  text-align: left;
-  font: inherit;
-}
-/* 可点格子：光标 + hover 描边（深链到承载这一格的页） */
-.tc-kpi__tile--link {
-  cursor: pointer;
-}
-.tc-kpi__tile--link:hover {
-  border-color: var(--info-bd);
-  background: var(--row-hover);
-}
-.tc-kpi__tile--link:focus-visible {
-  outline: 2px solid var(--info-fg);
-  outline-offset: 1px;
-}
-.tc-kpi__tile--pending {
-  grid-column: 1 / -1;
-  color: var(--muted);
-  font-size: var(--fs-sm);
-}
-.tc-kpi__label {
-  font-size: var(--fs-xs);
-  color: var(--muted);
-  letter-spacing: 0.02em;
-}
-.tc-kpi__valrow {
-  display: flex;
-  align-items: baseline;
-  gap: 4px;
-  min-width: 0;
-}
-.tc-kpi__valrow b {
-  font-size: var(--fs-xl);
-  line-height: 1.15;
-  font-variant-numeric: tabular-nums;
-}
-/* 档位色：值本身的颜色就是信息（低胜率是红的） */
-.tc-kpi__val--ok {
-  color: var(--ok-fg);
-}
-.tc-kpi__val--warn {
-  color: var(--warn-fg);
-}
-.tc-kpi__val--err {
-  color: var(--err-fg);
-}
-.tc-kpi__val--off {
-  color: var(--neutral-fg);
-}
-.tc-kpi__unit {
-  font-size: var(--fs-sm);
-  color: var(--muted);
-}
-/* 最后一排：左副读数（可换行）+ 右微型走势。副读数换行不撑破格子：
-   网格行内各格 stretch 等高，字多的一格决定整行高。 */
-.tc-kpi__foot {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 6px;
-  margin-top: 2px;
-}
-.tc-kpi__sub {
-  min-width: 0;
-  font-size: var(--fs-sm);
-  line-height: 1.35;
-  color: var(--muted);
-}
-.tc-kpi__spark {
-  flex: 0 0 auto;
-  opacity: 0.85;
-}
-
-@media (max-width: 1279px) {
-  /* 中档（图标条）：6 格 → 3 列两行 */
-  .tc-kpi {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-}
-
-@media (max-width: 1023px) {
-  /* 窄档（顶部横条）：6 格 → 2 列三行 */
-  .tc-kpi {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
+/* ────────────── KPI 条（问题 C1）已于 2026-09-20 下线（用户指令）──────────────
+   整块样式（.tc-kpi*，含两个断点覆盖）随面板一起删：没有消费者了，留着就是
+   下一波「照抄一个类名出来」的诱因（类名在 CSS 里活着 = 看起来它还在用）。 */
 
 /* ────────────── 告警坞（2026-09-20：6 条同权重横幅收敛成一个容器） ──────────────
    排序/折叠判据在 view/alerts.ts；这里只管外观与严重度配色。
@@ -2747,13 +2633,8 @@ a.tc-btn {
   align-items: center;
   gap: var(--sp-2);
 }
-.tc-top__desc {
-  font-size: var(--fs-sm);
-  color: var(--muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
+/* ✖ `.tc-top__desc`（顶栏标题右边那句页问题）已于 2026-09-20 删除（用户指令「总览 现在能不能跑？
+   这轮跑到哪了？ -- 去掉」）：它现在只做标题悬停（`PAGES[].desc` 仍是活的契约数据）。 */
 .tc-top__right {
   margin-left: auto;
   display: flex;

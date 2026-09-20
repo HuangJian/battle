@@ -126,6 +126,83 @@ describe('视觉纪律：内联布局样式', () => {
   })
 })
 
+describe('视觉纪律：SVG 属性名用 SVG 自己的拼法（客户端 setAttribute 不归一）', () => {
+  // 为什么这条是**源码级**闸而不能靠渲染断言：Preact 的两条路径不一致——
+  //   · `preact-render-to-string`（SSR）会把 `stopColor` 归一成 `stop-color`；
+  //   · 客户端 diff 在 SVG 命名空间下是 `setAttribute(name, value)` 原样照抄，
+  //     于是 camelCase 成了 SVG 不认识的属性 → 被忽略 → 属性回默认值。
+  // 2026-09-20 实测症状：从指标页切回总览（Hero 重新挂载 = 客户端新建这些元素）时
+  // `stop-color` 缺失 ⇒ 渐变两段都是**默认黑** ⇒ 趋势线与横轴之间的面积块全黑；
+  // 硬刷新（用 SSR 的合法属性）就正常 —— 拿渲染断言查，两条路径产出看起来一样。
+  //
+  // 名单只收「SVG 里本来就是短横线」的那些：`viewBox` / `preserveAspectRatio` /
+  // `gradientUnits` / `clipPathUnits` / `markerWidth` 等在 SVG 里**本来就是 camelCase**，
+  // 写短横线反而是错的，所以不在名单里。
+  // 匹配形状 = **JSX 属性赋值**（`stopColor={…}` / `stopColor="…"`）：
+  //   · `=` 是必需的（否则 `AXIS_FONT.fontSize` 这种普通属性访问会被误报）；
+  //   · 前面不得是 `.`（属性访问）或 `-`（`data-strokeWidth` 之类）；
+  //   · `(?!=)` 排除 `==` 比较。
+  const CAMEL_SVG_ATTRS = new RegExp(
+    '(?<![\\w.-])(' +
+      [
+        'stopColor',
+        'stopOpacity',
+        'strokeWidth',
+        'strokeLinejoin',
+        'strokeLinecap',
+        'strokeDasharray',
+        'strokeDashoffset',
+        'strokeOpacity',
+        'strokeMiterlimit',
+        'fillOpacity',
+        'fillRule',
+        'clipRule',
+        'textAnchor',
+        'fontSize',
+        'fontFamily',
+        'floodColor',
+        'floodOpacity',
+        'colorInterpolationFilters',
+      ].join('|') +
+      ')(?![\\w-])\\s*=(?!=)',
+    'g',
+  )
+
+  /** 去掉注释再扫：本仓的注释大量引用这类属性名（解释历史用的），那是文档不是代码。 */
+  const stripComments = (src: string): string =>
+    src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1 ')
+
+  it('前提：正则确实能认出 camelCase 拼法（防止闸写成永真）', () => {
+    expect('stopColor="red"'.match(CAMEL_SVG_ATTRS)?.length).toBe(1)
+    expect('strokeWidth={1}'.match(CAMEL_SVG_ATTRS)?.length).toBe(1)
+    expect('stop-color="red"'.match(CAMEL_SVG_ATTRS)).toBeNull()
+    expect('stroke-width="1"'.match(CAMEL_SVG_ATTRS)).toBeNull()
+    // 合法 camelCase（SVG 拼法即如此）：不得误报
+    expect('viewBox="0 0 1 1"'.match(CAMEL_SVG_ATTRS)).toBeNull()
+    expect('preserveAspectRatio="none"'.match(CAMEL_SVG_ATTRS)).toBeNull()
+    expect('gradientUnits="userSpaceOnUse"'.match(CAMEL_SVG_ATTRS)).toBeNull()
+    // 普通属性访问 / 对象字面量键不是属性赋值，不得误报
+    expect('AXIS_FONT.fontSize'.match(CAMEL_SVG_ATTRS)).toBeNull()
+    expect('fontSize: 8'.match(CAMEL_SVG_ATTRS)).toBeNull()
+    // 更长的属性名不得被短名截断式命中（`strokeWidthX=` 不是 `strokeWidth=`）
+    expect('strokeWidthX="1"'.match(CAMEL_SVG_ATTRS)).toBeNull()
+    // 注释剔除确实生效
+    expect(stripComments('/* stopColor */')).not.toContain('stopColor')
+    expect(stripComments('// strokeWidth\nstroke-width')).toContain('stroke-width')
+  })
+
+  it('全 src/web 的 tsx 里不得出现 camelCase 的 SVG 属性（否则客户端会变成非法属性）', () => {
+    const files = webTsx()
+    expect(files.length).toBeGreaterThan(40) // 前提：扫描非空转
+    const hits: string[] = []
+    for (const f of files) {
+      const src = stripComments(read(f))
+      for (const m of src.matchAll(CAMEL_SVG_ATTRS)) hits.push(`${rel(f)}: ${m[0]}`)
+    }
+    expect(hits).toEqual([])
+  })
+})
+
 describe('视觉纪律：色值只能来自语义 token', () => {
   // 两处豁免都是「画店标 / 画 SVG 标记」，不是 UI 语义色：
   //  · render.tsx —— 品牌图标的内联 SVG（配色跟着 logo 走，不跟主题走）；

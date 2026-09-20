@@ -4888,3 +4888,206 @@ select）。因此这不是文本冲突，是**两个版本的 IA 相撞**：11 
 **门禁（合并后实测）**：dashboard `964 pass / 0 fail`（98 文件，10 连跑全绿）· 根 `bun run check`
 `1934 pass / 4 skip / 0 fail` · nn python `1860 passed / 3 skipped` · 三份 bundle 绿
 （app gzip **78,006 B** / 日志 17,401 B / eval 22,394 B，预算 150 KB）· oxlint 0/0 · oxfmt clean。
+
+---
+
+## §2026-09-20-console-declutter（2026-09-20，用户指令：课程区只列在训课程 / 服务面不显示共享·单例 / 删掉关键指标区）
+
+**背景**：控制台首屏纵向空间被三处「重复或索引式」的内容占掉——课程表里几十门未在训的历史课
+把在训的那几行挤出屏幕；服务面每行重复一个「共享/单例」（一族里每行都同一个值）；KPI 条六格是
+「索引」型面板（每个数都能在 Hero / 节点行 / 课程表头读到同一个值）。三条一起收。
+
+### ① 课程区只列在训课程
+
+- **判据只有一个出处**：`course-matrix.ts::rowTraining(ov, lq) = ov?.training ?? lq?.training ?? false`
+  （与状态列 `matrixStatus` **同一个函数**）。新导出 `isTrainingRow(row)` 供面板筛选——
+  「哪几行上屏」与「状态列说什么」漂开就是 bug，两条用例盯着这个双向关系。
+- **纯函数层不筛**：`mergeCourseRows` 仍产全集（outer join 不丢课）——计数、悬停点名、页脚
+  口径（「谁在等外部 / 读面可不可用」）都靠全集。筛选发生在面板一次，不是两张表。
+- **代价（刻意接受，留痕不静默）**：`hub 已注册 · 无进程` 这类「两半事实打架」的行（合并初衷之一）
+  不再直接上屏 ⇒ 表头 chip「未在训 N 门未列」，悬停逐门点名 + 各自状态词。这是用**读噪**换
+  **信息密度**：操作员要盯的是正在跑的那几门，而历史课在盘上会积到几十门。
+- **0 门在训不是「没有课程」**：空态显因（`Empty`），三种原因分开说——「当前没有在训课程」
+  （能开课）/「训练侧读面不可用 ⇒ 哪些课在训**不可知**」/「上一拍读失败」；不整块静默消失。
+- 副作用（已知，未回退）：`未在训` 状态词与 `STOPPED_TITLE` 在**面板上**已不可达（只有两侧不同步时
+  的 `--stopped` 行还看得见）——它们仍由纯函数层用例守着（状态语义不该因为面板筛行而被掏空）。
+
+### ② 服务面逐行不再显示「共享 / 单例」
+
+`scopeBadge()` 删除（`view/component-groups.ts`）+ 面板不再消费 + `theme.css` 的 `.tc-cc__scope*`
+整块删。**族归属仍由 `scope` 决定**（`FAMILY_OF_SCOPE` 不动，`componentScope` 对拍用例照旧）——
+删的是标签，不是分组判据；「trainer 是共享进程」这件事由族标题 + `FAMILY_META.hint` 承担
+（每行重复 N 遍同一句话就是噪声）。回归：`web-component-groups.test.ts` 的「scopeBadge 不再导出 /
+面板不再消费 / 样式表无规则」三通道 + `web-components.test.ts` 的渲染体无该 class 断言。
+
+### ③ 「关键指标」区下线（删除，不是隐藏）
+
+`app.tsx` 的 `<KpiStrip>` 下线；`web/components/KpiStrip.tsx` + `web/view/kpi.ts` +
+`tests/web-kpi.test.ts` 删除；`theme.css` 的 `.tc-kpi*` 整块（含两个断点覆盖）+ `view/index.ts`
+的 re-export 删除。**三条一起查才算钉住**（渲染里没有 / 组件文件不存在 / 样式表无规则）——
+只查渲染的话，把面板挂回去只需改一行；而这次是删除：留一个没人用的组件文件与样式块，就是
+下一波「照抄一个类名出来」的诱因。
+
+**门禁（实测）**：dashboard `949 pass / 0 fail`（97 文件；删掉的 `web-kpi.test.ts` 原有 35 例）·
+`tsc --noEmit` · oxlint **0 warning** · oxfmt clean · 三份 bundle 绿（app 306,847 B / gzip 75,325 B，
+预算 150 KB）· 根 `bun run check` 绿（跳过 nn/原生部分：改动全在 `dashboard/**`）。
+
+---
+
+## §2026-09-20-topbar-and-family-labels（2026-09-20，用户指令：顶栏去掉页问题/「在训」、pill 靠左；族标题改「服务」）
+
+**背景**：同一轮减肥的第二批（承接 §2026-09-20-console-declutter）。用户扫顶栏从左到右点出的四处：
+「总览 现在能不能跑？这轮跑到哪了？」、pill 组前的「在训」、pill 组的水平位置、组件区族标题。
+
+### ① 页问题不上屏（`tc-top__desc` 删除）
+
+顶栏只留 `<h1>{title}</h1>`；`PAGES[].desc`（"一页一个问题"契约）改为**标题悬停**。
+
+**为何不连数据一起删**：`desc` 是非空契约，`web-view-routes.test.ts` 守着（每页都要能一句话说清
+它回答什么）；删渲染 = 视觉噪声没了，删数据 = 把那句「这一页是干什么的」也一并丢了。故保留数据、
+换载体（悬停）。若日后确认悬停也多余，正确的删除顺序是「数据 + 契约测试 + 悬停」一起（留下没人读的字段
+比删错更贵）。四页**统一**处理（不只总览）：同一个元素只给一页去掉，看起来就是坏了。
+
+### ② pill 组前的「在训」标签删除 + ③ 整组靠左
+
+- 标签已删（pill 自带课名/it/状态，组名交给 `aria-label`——它在页面上不可见）。
+- 位置：`<Topbar>` 把 `{pills}` 从 `tc-top__right` 里**拿到 head 与 right 之间**——左半「我在看什么」
+  （标题 → pill 组），右半「集群现在怎样」（阶段 / 节点 / 刷新 / 更新时间，靠 `margin-left:auto` 贴最右）。
+  `.tc-tpills` 的 `flex: 1 1 auto` 保留：靠左 + 向右占位，左侧不再靠 `margin-left:auto` 碰运气。
+- 降级形态保住：`!(pills && trainingCount>0) && courseCount>0` 才退回「在训 n/N」裸计数 chip——
+  两侧**互斥且穷尽**（这笔一改漏，零门在训时顶栏会什么都不说）。回归：`training-pills.test.ts`
+  新增「无 `class="lbl"` + 组在 `tc-top__right` 之先 + 有 `aria-label`」一例（切 `#root` 后再断）。
+
+### ④ 组件区族标题：「服务面 · 单例」→「服务」（「课程面 · 按课程」→「课程」）
+
+理由：逐行「共享/单例」徐章已于上一批删除 ⇒ 全族同值的后缀挂在标题上也开始重复；标题只说**这一族是
+什么**，作用域事实下沉到 `FAMILY_META.hint`（「hub / 隧道 / trainer / 本机 worker 各一个进程服务所有课程，
+本机 agent 全机一份」）。课程族同理改成「课程」（那族当前无成员、不渲染，但两份标题必须同一口径）。
+
+**真盘只读探针**（真实 state，x20-steady 在训）：顶栏可见文本序 = `总览 | x20-steady it161 采集中 ■ | 节点 3/10 | ⟳ | 更新于 …`；
+DOM 序 `head(6768) < tc-tpills(6856) < tc-top__right(7326)`；`class="lbl"` 不在；`服务面 · 单例` 不在、`>服务</span>` 在。
+
+**门禁（实测）**：dashboard `950 pass / 0 fail`（97 文件）· `tsc --noEmit` · oxlint **0 warning** ·
+oxfmt clean · 三份 bundle 绿（app 306,461 B / gzip 75,297 B）· 根 `bun run check` 绿。
+
+### 补记（同日，同一轮用户指令的剩下两条）：节点行去「上轮」字样 + 服务族顺序
+
+1. **节点行元信息只剩那个数**（用户：「不需要显示上轮字样，hover 时提示就好」）。`contribText` 从
+   `上轮 N` 改成 `N`；释义全部移到 `contribTitle(v)` 悬停里：**数的含义 + 单位 + 缺失语义**
+   （「最近完成轮贡献 N 局（rollout + eval 合计；进行中那一轮不计；— = 无池数据）」）。
+   **为何删字样而不是删数**：行内状态词（健康/缓慢/离线）已由「贡献 vs 并发」判出，但**交了多少**
+   仍是个可区分的事实（缓慢的 6 与 1 是两回事）；行内不再有文字提示 ⇒ 悬停是它唯一的释义载体，
+   这句必须自洽完整。真盘（x20-steady）：`self 8 178 · mac 5 65 · a95 7 7 · a97 7 离线 0 · …`——
+   零个「上轮」。回归：`web-app-nodepills.test.ts`（+「不得再出现上轮」+ `—` 与 `0` 不得混同）。
+2. **服务族顺序 = 用户指令**：`trainingLoop → hubServer → selfNode → cloudflared → localWorker`
+   （不再是「谁依赖谁」的推演：这一行最常问「训练在不在跑 / 队列通不通」，trainer 与 hub 提到最前；
+   agent / 隧道 / worker 是支撑设施，靠后不档视线）。`component-groups.ts::ORDER.service` 一处改，
+   两份用例的顺序数组跟着改（真盘探针：427 < 1201 < 1872 < 2538 < 3487 升序）。
+
+**门禁（改后重跑）**：dashboard `950 pass / 0 fail` · `tsc --noEmit` · oxlint 0 warning · oxfmt clean ·
+三份 bundle 绿（app 306,527 B / gzip 75,306 B）· 根 `bun run check` 绿。
+
+---
+
+## §2026-09-20-console-naming-and-trend-source — 服务角色名 / 节点行不写字 / 走势数据源档位
+
+**用户指令（同一天追加的一轮）**：① 节点 pill 不显示「缓慢/离线」字样，离线时显示状态描述和判据；
+② trainingLoop pill 去掉「dispatch→拉取」描述；③ 顶部趋势图加「全部 / rollout / eval」toggle 切换数据源；
+④ 服务显示名换角色名（trainingLoop→管事 / hubServer→门房 / selfNode→采办 / cloudflared→跑腿 /
+localWorker→丹徒），hover 提示各服务用途。
+
+### ① 节点行：状态**不写字**（四档一视同仁）
+
+色 + 形（`tc-dot--warn` 菱形 ◆ / `tc-dot--dead` 方 ■）+ 行级 tint（`tc-row--slow`）已经是三重编码，
+行里再写一个字只是重复。**行内只剩该行的两个数**（并发 + 最近完成轮贡献），判据一律归悬停
+（点 title + 元信息 title）。
+
+**同日修正（用户明确收回）：最初让离线行在行内改写成判据句（`离线：最近完成轮贡献 0 局 < 并发 7` /
+`离线：无池数据（还没结算过这一轮）`），用户当场否掉——「行内不写「离线：xxxx」，hover 提示就好」。
+所以四档现在完全同规：行内只有数（贡献 `0` / `—`），两个不同的原因（零交活 / 从未结算）只在**悬停**里分开。
+真盘校验：可见文本 `self 8 136 · mac 5 76 · a95 7 12 · a97 7 6 · a96 7 0`（零个「离线：/缓慢/上轮」），
+悬停 `离线：最近完成轮贡献 0 局 < 并发 7`。**下次改这块的口径：先问「行里要不要字」，默认答案是不要。**
+
+### ② trainer 行：pull 档不出「dispatch→拉取」徽章
+
+没有登记节点是**缺省态**，那两个字不随任何东西变化 ⇒ 常年挂着的徽章只是噪声；非 pull 才是需要
+解释的部署决定（东西被推去哪、推通了没有）。`pushBadgeText` → `pushBadge(f): RowBadge | null`
+（pull 返回 null），pull 分支的悬停说明一并删（徽章不存在时它是死代码，留着下一个人会当漏了的功能加回来）。
+「谁在跑这门课」仍由节点行回答（登记事实 + 健康度）。
+
+### ③ 走势图数据源档位：全部 / rollout / eval
+
+`TrendSource` + `TREND_SOURCE_OPTIONS` + `isTrendSource` 落在 `view/series.ts`（与 `TrendRange` 同规）；
+档位与范围并排成一个控制条（`.tc-trendctl`：数据源在左、范围在右——看哪条口径 × 看多少轮，两个独立问题）。
+`eval` 档把 eval **升为主序列**：标签换 eval 自己的词、线色改 eval 橙（`TrendChart` 新增 `color` 覆盖并
+导出 `COLOR_EVAL` 作该色的**唯一出处**——面板里不得出现第二个色字面量）、`toneOf` 跟着**正在显示的那条**走
+（否则切到 eval 档时，rollout 的阈值会去染 eval 的数：一个已经过期的判断）。SSR 首帧恒「全部」
+（持久化偏好 hydrate 后恢复，与范围档同套路）⇒ 回归必须**单独渲染 TrendCell** 的三档。
+硬规矩：**夹具不能用默认参数**——`cell('eval', win, undefined)` 会静默落到默认值，
+「该课没有 eval 数据」这条分支看起来在测其实没测（实测报红才发现）。
+
+### ④ 服务名 = 角色名（key 仍是机器身份）
+
+单一源 = `web/view/component-roles.ts`（`COMPONENT_ROLES` + `componentName` / `componentPurpose` /
+`componentHover`），总览组件行、日志页导航、日志页页头**三处同一份词**；行名渲染成
+`<b title="管事（trainingLoop）—— 用途">管事</b>`（`StatusRow` 新增 `nameTitle`：点说「此刻状态」、
+名字说「它是什么」，两个问题两个悬停）。用例钉住两件易漂的事：**键集与 `core/types.Component` 逐字相同**
+（漏一个 = 那个服务在页面上露出 `hubServer`）、**用途里必须有 key**（悬停是 key 在上屏面的唯一落脚处）。
+
+**没有改 `COMPONENT_LABELS`**（服务端的长技术名）。它喂的是 flash 消息、exit-watchdog 记的
+`TrainingLoop (trainer)[<课>]`（`exit-watchdog.test.ts` 直接断言这个格式）与账本流——那些地方要的是
+**对账用的精确名**，跟着改会把日志格式与一批用例一起动。代价已记录：动作结果文本里的服务名仍是技术名；
+若日后要统一，改的是 `labels.ts` 一处 + 那条格式用例，而不是在 UI 侧再插一张表。
+
+**门禁（实测）**：dashboard `964 pass / 0 fail`（99 文件）· `tsc --noEmit` · oxlint 0 warning · oxfmt clean ·
+三份 bundle 绿（app 310,028 B / gzip 76,386 B）。
+
+---
+
+## §2026-09-20-preact-svg-attribute-spelling — 趋势图面积块变黑：Preact 客户端不归一 SVG 属性名
+
+**用户报告**：从「指标」页切回「总览」，趋势线与横轴之间的**面积块显示为黑色**；**硬刷新后恢复**。
+
+### 根因（两层，缺一不成立）
+
+1. **属性名写成了 camelCase**：`TrendChart` 里是 `<stop stopColor=… stopOpacity=…>`、`strokeWidth`、
+   `textAnchor`、`fillOpacity` 等 —— 这是 React 习惯。
+2. **Preact 两条路径对属性名的处理不一致**（实测读 `node_modules/preact/dist/preact.mjs`）：
+   - `preact-render-to-string`（SSR）把 camelCase **归一**成真 SVG 拼法（`stopColor` → `stop-color`）；
+   - 客户端 diff 在 SVG 命名空间下只做 `l.replace(/xlink(H|:h)/,'h').replace(/sName$/,'s')`，
+     其余 **原样 `setAttribute(l, u)`** ⇒ `stopColor` 是个 SVG 不认识的属性 ⇒ 被忽略 ⇒
+     `stop-color` 回默认值 **黑**（而 `stopOpacity` 同理丢失 ⇒ 不透明）。两块 stop 都黑 ⇒ 整个面积黑。
+
+这正好解释「为什么只在切页后出现」：切页 = Hero **卸载重挂** = 这些元素由客户端新建（拿到错误属性）；
+硬刷新 = 浏览器用的就是 SSR 那份**正确**的属性（hydrate 时 diff 只再叠一个无效属性，不影响已有的）。
+**所以渲染级断言永远抓不到它**（SSR 字符串看起来一模一样），只能靠源码级闸。
+
+### 修法（两处，都在 TrendChart）
+
+1. **属性名一律用 SVG 自己的拼法**：短横线的写短横线（`stop-color` / `stop-opacity` / `stroke-width` /
+   `stroke-linejoin` / `stroke-linecap` / `stroke-dasharray` / `fill-opacity` / `text-anchor` / `font-size`）；
+   本身就是 camelCase 的保持 camelCase（`viewBox` / `preserveAspectRatio` / `gradientUnits`）——
+   后者写短横线反而错（SSR 也不转它们）。
+2. **顺手把面积渐变改成 `gradientUnits="userSpaceOnUse"` + 用户坐标系的 y1/y2**：原 `objectBoundingBox`
+   依赖**面积路径的包围盒**，而包围盒退化（恒定序列 ⇒ 面积零高）时浏览器也会画成黑色；
+   训练曲线里「平坦的一段」很常见，这是第二颗同类地雷。
+
+### 回归闸（两条，都在现有文件里）
+
+- **源码级**：`tests/web-style-discipline.test.ts` 新增一组 —— 扫 src/web 下全部 `.tsx`（去注释后），
+  禁 18 个「SVG 里本来是短横线」的 camelCase 写法（匹配形状 = JSX 属性赋值 `name=`，避免误报
+  `AXIS_FONT.fontSize`）；含**自测**（正则对阳性/阴性样本各断言一次），防止闸写成永真。
+  已反向验证：故意把 `stop-color` 改回 `stopColor` ⇒ 该组立刻报红。
+- **渲染级**：hero 用例断言每个 `fill="url(#id)"` 都指向同一次渲染里存在的 `id`，且全部用
+  `gradientUnits="userSpaceOnUse"`（没有 `objectBoundingBox`）。
+
+**门禁（实测）**：改动文件各自的用例全绿（`web-style-discipline`、`web-view-trend-range`、
+`web-hero-trend-source`、`web-app-nodepills`）· `tsc --noEmit` · oxlint 0 warning · oxfmt clean ·
+三份 bundle 绿（app 310,051 B / gzip 76,424 B）。
+全量套件当时有 11 例红——**全部是工作区环境**，与本改动无关（已逐条归因）：
+① `nn-training/rl-config.json` 在 21:59:05 被写入一行 `"concurrency": 4,export HUB_TOKEN='<hub token>'`
+（人手粘贴事故）⇒ 文件不再是合法 JSON ⇒ 10 例读真配置的用例抛 `JSON Parse error`；
+② `web-ssr-readonly` 断言「空坞不出现」，而真状态此刻带一条 loop-complete 告警（21:55:03 正常收官）
+⇒ 坞里真的有东西 —— 这条用例本身就挂在**活状态**上（只有零告警时才成立）。**真盘只读探针**（真实 state）：五行角色名 + 各自用途悬停
+（`管事（trainingLoop）—— 训练循环本体…` …）；节点区可见文本零「上轮 / 缓慢」字样（仅离线判据句）；
+控制条 `走势数据源 → 走势范围`，默认压「全部」，6 条 eval 橙线。
