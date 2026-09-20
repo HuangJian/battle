@@ -134,6 +134,18 @@ from remote.push_dispatch import (
 #: 只认它，不认 `X-Forwarded-For`：后者是**可追加的逗号列表**，取哪一段都是语义游戏。
 CF_SOURCE_HEADER = "CF-Connecting-IP"
 
+#: 单次**响应发送**的超时（秒）：对端半开（隧道/代理侧掉了，本机 TCP 还挂着）时
+#: `wfile.write()` 会**永久**阻塞，那个 handler 线程就永久卡在写里。
+#:
+#: 2026-09-20 事故：4.8MB payload 卡在对端 ⇒ 云机侧「claim 后几分钟零日志」，而 hub 侧
+#: 日志**一个字都没有**（`/payload` 访问行属于高频静默规则）。有界即响亮：超时后打印
+#: 已发字节数并断开连接（HTTP/1.0 ⇒ 连接随即关闭，线程回归）。
+SEND_TIMEOUT_SEC = 60.0
+#: 发送切片（字节）：分片写让上面的超时**每片**都生效（一次大 write 只有整体超时）。
+SEND_CHUNK = 256 * 1024
+#: 打「发送完成」日志的最小 body（字节）：小 JSON 不打（高频），payload/code 这类必打。
+SEND_LOG_MIN_BYTES = 256 * 1024
+
 
 def _is_ip_literal(s: str) -> bool:
     """是否是合法的 IP 字面量（`ipaddress` 严格解析；带端口的 `1.2.3.4:56` 不算）。"""
@@ -1839,6 +1851,14 @@ class HubHandler(BaseHTTPRequestHandler):
         ctype: str = "application/octet-stream",
         filename: str = "",
     ) -> None:
+        """发送整块 body：大 body **分片 + 有界**，且完成/停滞各有一行日志。
+
+        2026-09-20 事故（云机领到 job 后几分钟零输出）的 hub 侧半边：`wfile.write()`
+        没有超时，对端半开时阻塞**永不返回** ⇒ 客户端永远拿不到 payload，而 `/payload`
+        的访问行被高频静默规则吃掉 ⇒ 两端日志同时沉默（唯一的现象是「卡住」）。
+        现在：分片写（每片独立超时）⇒ 停滞 ≤SEND_TIMEOUT_SEC 内被断掉并**响亮打印**
+        已发字节数；≥SEND_LOG_MIN_BYTES 的 body 完成时也打一行（可对账传输时长/速率）。
+        """
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
@@ -1846,7 +1866,40 @@ class HubHandler(BaseHTTPRequestHandler):
             # 习惯文件名（下载时手一按就是这个名字，不必再改名）
             self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         self.end_headers()
-        self.wfile.write(data)
+        path = self.path.split("?", 1)[0]
+        total = len(data)
+        sent = 0
+        t0 = time.time()
+        stalled = False
+        try:
+            self.connection.settimeout(SEND_TIMEOUT_SEC)
+            view = memoryview(data)
+            while sent < total:
+                n = self.wfile.write(view[sent : sent + SEND_CHUNK])
+                if n is None:  # 缓冲写（wbufsize > 0）：视作整片已收
+                    n = min(SEND_CHUNK, total - sent)
+                if n <= 0:  # 0 = 对端不再接收（半开）——不能空转
+                    raise TimeoutError("write 返回 0——对端不再接收")
+                sent += n
+        except OSError as e:
+            stalled = True
+            print(
+                f"[{time.strftime('%H:%M:%S')}] [hub-server] 响应发送**停滞** {path}："
+                f"已发 {sent}/{total} bytes 后 {time.time() - t0:.0f}s 无进展（{e!r}）"
+                "——对端半开，断开连接（不再永久占住 handler 线程）",
+                flush=True,
+            )
+        finally:
+            try:
+                self.connection.settimeout(None)
+            except OSError:
+                pass
+        if not stalled and total >= SEND_LOG_MIN_BYTES:
+            print(
+                f"[{time.strftime('%H:%M:%S')}] [hub-server] 响应发送完成 {path} "
+                f"{sent} bytes in {time.time() - t0:.1f}s",
+                flush=True,
+            )
 
     def _job_id(self) -> str | None:
         """从路径 /jobs/{id}/... 取 job_id；非法 404。"""

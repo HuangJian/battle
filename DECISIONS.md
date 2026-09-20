@@ -4233,3 +4233,59 @@ payload 里**混着两个血缘**——550 份里 21 份的 `course_fp` 是 `e6c
 接线门禁——含「每个 spawn 点都写 startedAt」「cloudflared 必须豁免」「restart 早于 watch」）；
 `tsc --noEmit` + oxlint 0 warning；根 `bun run check` 绿；nn python 全量
 （ruff + mypy + 1834 passed，含新 `test_stopped_course_stops_being_dispatched`）绿。
+
+---
+
+## §2026-09-20-body-transfer-stall-guard（2026-09-20，用户报障：云机 claim 第二个 job 后几分钟无动静、无日志）
+
+**背景**：云机领到 `it2` 的 PPO job（`a4b2e1e2d438c28a`）后卡在 payload 下载——
+日志从 `claim ... downloading payload` 到 5 分钟后的 socket 超时**一行都没有**（用户原话：
+「几分钟一直没有动静，也没有 log 打出」）。取证：`cloudflared` 日志同期每 5 分钟一条
+`lookup region1.v2.argotunnel.com: i/o timeout`（DNS 劣化窗口，隧道只有 1 条 ha-connection），
+**小 POST（心跳/轮询）照常、大 body 卡死**；hub 侧 `/payload` 的访问行属于高频静默规则 ⇒
+两端日志同时沉默。这不是「网络抖动」一种病，是**两侧都没有停滞判据**：
+
+1. worker `download_payload` 只有一把 `timeout=300` 的**整读**：停滞时静默等满 5 分钟，
+   而 socket 超时抛出的 `TimeoutError()` **没有正文**（`_get_with_retry` 只把 `repr(e)` 写进
+   日志）⇒ 连「为什么失败」都写不出来。下载过程本身**零进度输出**（分不清「在下」与「死了」）。
+2. hub `wfile.write()` **没有发送超时**：对端半开（隧道/代理侧掉了、本机 TCP 还挂着）时
+   永久阻塞，那个 handler 线程永久卡在写里——客户端永远拿不到 payload，而 hub 日志一个字没有。
+
+**决定**：传输层加**有界 + 有名字 + 有进度**三件套（数字都在源码注释里，改它们要连本文一起改）：
+
+| 位置 | 判据 | 行为 |
+|---|---|---|
+| `remote/worker.py::_read_body` | 空闲 45s（`BODY_IDLE_TIMEOUT_SEC`）无新字节 | 抛**有正文**的 `TimeoutError`：`body 停滞：45s 内没有新字节（已收 N bytes / 共 M）` |
+| 同上 | 总预算 300s（`BODY_TOTAL_TIMEOUT_SEC`） | 治「永远在滴水」（每个读都有字节、但总也读不完） |
+| `download_payload/code/ts_code/blob` | 进度回调（≥5s 一行） | `job X: payload 下载中 3.20 MB / 4.85 MB (66%) 用时 12s（270 KB/s）` |
+| `remote/hub_server.py::_bytes` | 发送超时 60s（`SEND_TIMEOUT_SEC`）+ 256KB 分片 | 停滞即断并打印 `已发 N/M bytes`；≥256KB 的 body 完成时打一行（可对账速率） |
+
+**关键不变量**：缺省路径（不给 `idle_timeout`/`progress`）**逐字节不变**——`_request` 只在
+下载路径上改走分块读，`poll_job`/`post_result` 等小请求行为不动。
+
+**备选与否决**：
+
+- **只把 `timeout` 由 300 调小（如 60）**——否：仍然只会在**整读**上炸一次，中间零输出；
+  而且分不清「链路慢但活」与「链路死了」（前者本来该让它跑完）。
+- **只在 worker 侧重试/加长租约**——否：治不了「不知道发生了什么」；重试前的 5 分钟静默仍在。
+- **把停滞做成静默重试（不打日志）**——否：这次事故的**全部**损失就是「静默」；
+  响亮一行（带字节数与原因）比安静重试值钱得多。
+- **hub 侧改成流式读盘（避免 4.8MB 进内存）**——本次不做：现有行为是 `read_bytes()`，
+  改动面（`record_payload_sent` 的字节口径、Content-Length 来源）大于收益；
+  分片**写**已经解掉「永久阻塞」这个真问题。
+- **顺手把 `/payload` 从高频静默规则里拿掉**——否：多 worker 下会刷爆 hub 日志；
+  改成「大 body 完成/停滞各一行」（有信息量、无噪声）。
+
+**同窗口的 hub 停服 = 人工操作（用户 2026-09-20 确认是手动关的）**：这也解释了取证里那个
+「疑点」——`hub-server.out` 停在 11:34:19、账本条目 `hubServers['']` 于 11:34:36 被清空、
+无"意外退出"标记：`stopComponent` 杀进程后本来就是 `clearAnyComponent`（条目没了 ⇒
+exit-watchdog 没有可标记的对象），控制台由此显示 `stopped`。**不是崩溃**，本次改动与它无关。
+
+**但它留下一条真教训**：组件级决策（谁在何时停/重启了什么）目前**只打控制台 stdout**、不落
+文件——所以从盘上的证据（组件日志 + 账本）**无法**区分「人工停的」与「自己死的」，
+排查会往「谁杀的」方向空转（本次就绕了这一圈）。下次同类「集群突然静默」的报障，**先问
+一句是不是手动停的**，再翻日志；要让机器自己回答，得把组件级决策也落盘。
+
+**gate**：nn python 全量 **1842 passed**（ruff + mypy 绿，含新 `tests/test_body_transfer_guard.py`
+8 例：停滞有名/进度可查/预算生效/停滞即响亮重试，以及真 TCP socket 的
+「读端不读 ⇒ hub ≤发送超时断开并打印已发字节数」）。

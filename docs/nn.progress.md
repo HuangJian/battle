@@ -4,6 +4,41 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §104 大 body 传输停滞：两侧同时沉默（2026-09-20，用户报障：云机 claim 第二个 job 后几分钟无动静、无日志）
+
+**一句话**：云机领到 `it2` 的 PPO job 后卡在 payload 下载里 **5 分钟一行日志都没有**——
+不是没做事，是**两侧都没有停滞判据**：worker 端 `download_payload` 只有一把 `timeout=300`
+的整读（socket 超时抛出的是**没有正文**的 `TimeoutError()`，`_get_with_retry` 把它 `repr`
+进日志 = `TimeoutError()`，等于没写；过程零进度输出），hub 端 `wfile.write()` 压根没有发送
+超时（对端半开 = 永久阻塞）。而 `/payload` 的访问行属于高频静默规则 ⇒ **两端日志同时一个字
+没有**，现场只剩「卡住」。
+
+诱因（同机取证）：`tmp/cloudflared-*.log` 同期每 5 分钟一条
+`lookup region1.v2.argotunnel.com: i/o timeout`（DNS 劣化窗口；隧道只有 1 条 ha-connection）——
+**小 POST（心跳/轮询）照常、大 body 卡死**是这类劣化的典型指纹。
+
+### 修法（卡住必须有名字、有进度、有界）
+
+| 位置 | 判据 | 行为 |
+|---|---|---|
+| `remote/worker.py::_read_body` | 空闲 45s（`BODY_IDLE_TIMEOUT_SEC`）无新字节 | 抛**有正文**的 `TimeoutError`：`body 停滞：45s 内没有新字节（已收 N bytes / 共 M）` |
+| 同上 | 总预算 300s（`BODY_TOTAL_TIMEOUT_SEC`） | 治「永远在滴水」 |
+| `download_payload / code / ts_code / blob` | 进度回调（≥5s 一行） | `job X: payload 下载中 3.20 MB / 4.85 MB (66%) 用时 12s（270 KB/s）` |
+| `remote/hub_server.py::_bytes` | 发送超时 60s（`SEND_TIMEOUT_SEC`）+ 256KB 分片 | 停滞即断并打印 `已发 N/M bytes`；≥256KB 的 body 完成时打一行（可对账速率） |
+
+缺省路径未变：`_request` 只在给了 `idle_timeout`/`progress` 的下载路径上改走分块读，
+`poll_job`/`post_result` 等小请求行为逐字节不变。
+
+回归：`tests/test_body_transfer_guard.py`（8 例；含真 TCP socket 的「读端不读 ⇒ hub
+≤发送超时断开并打印已发字节数」，以及「停滞 ⇒ 一条带原因的日志 + 退避重试」）。
+
+**同窗口的 hub 停服 = 人工操作（用户确认手动关的）**：`stopComponent` 杀进程后正是
+`clearAnyComponent`（条目没了 ⇒ exit-watchdog 没有可标记的对象），不是崩溃。
+教训：组件级决策只打控制台 stdout、不落文件 ⇒ 从盘上证据无法区分「人工停的」与
+「自己死的」——同类报障**先问是不是手动停的**（详见 DECISIONS §2026-09-20-body-transfer-stall-guard）。
+
+---
+
 ## §103 Windows 门禁耗时：TCP 空等 + NTFS 大量小文件（2026-09-20）
 
 **一句话**：同一批用例在同机 WSL <5s、Windows 原生 python 5.5–9.1s 触发 >5s 警告。

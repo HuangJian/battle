@@ -92,6 +92,78 @@ def _get_opener() -> urllib.request.OpenerDirector:
     return _opener
 
 
+#: 大 body 下载的**空闲超时**（秒）：这么久没有新字节 = 判停滞，立刻放弃并重试。
+#:
+#: 为什么不能只靠一把 `timeout=300`（2026-09-20 事故）：云机领到第二个 job 后卡在
+#: `resp.read()` 里 **5 分钟一行日志都没有**。操作员分不清「在下」还是「死了」，
+#: 而 socket 超时抛出的裸 `TimeoutError()` 连原因都写不出来（`_get_with_retry` 只把
+#: `repr(e)` 写进日志）。隧道/代理中途停滞正是这种形状：小 POST（心跳、轮询）照常，
+#: 大 body 卡死——同机 cloudflared 当时每 5min 一条 `DNS i/o timeout`。
+BODY_IDLE_TIMEOUT_SEC = 45.0
+#: 单次 body 下载的**墙钟上限**（秒）：空闲超时管「停滞」，这条管「永远在滴水」。
+BODY_TOTAL_TIMEOUT_SEC = 300.0
+#: 进度行最小间隔（秒）与读块（字节）。
+BODY_PROGRESS_MIN_SEC = 5.0
+BODY_CHUNK = 256 * 1024
+
+
+def _read_body(
+    resp: Any,
+    *,
+    idle_timeout: float,
+    total_timeout: float | None,
+    progress: Any = None,
+) -> bytes:
+    """分块读 body：报进度 + **停滞/超预算即抛**（异常正文带已收字节数与原因）。
+
+    停滞异常必须**有正文**：上游 `_get_with_retry` 只把 `repr(e)` 写进日志，裸
+    `TimeoutError()` 打出来是 `TimeoutError()`——等于没写（2026-09-20 事故现场）。
+    """
+    total = 0
+    try:
+        total = int(resp.headers.get("Content-Length") or 0)
+    except Exception:  # 非标准响应 / 假响应（测试）没有 headers
+        total = 0
+    buf = bytearray()
+    t0 = time.time()
+    last = t0
+    while True:
+        try:
+            block = resp.read(BODY_CHUNK)
+        except (TimeoutError, OSError) as e:
+            raise TimeoutError(
+                f"body 停滞：{idle_timeout:.0f}s 内没有新字节（已收 {len(buf)} bytes"
+                + (f" / 共 {total}" if total else "")
+                + "）——隧道或代理侧的问题，重试"
+            ) from e
+        if not block:
+            return bytes(buf)
+        buf += block
+        now = time.time()
+        if total_timeout is not None and now - t0 > total_timeout:
+            raise TimeoutError(
+                f"body 超时：总耗时 > {total_timeout:.0f}s（已收 {len(buf)} bytes"
+                + (f" / 共 {total}" if total else "")
+                + "）——链路太慢，重试"
+            )
+        if progress is not None and now - last >= BODY_PROGRESS_MIN_SEC:
+            last = now
+            progress(len(buf), total, now - t0)
+
+
+def _progress_logger(label: str, log: Any):
+    """进度行工厂：`job X: payload 下载中 3.20 MB / 4.85 MB (66%) 用时 12s（270 KB/s）`。"""
+
+    def _report(got: int, total: int, elapsed: float) -> None:
+        mb = 1024.0 * 1024.0
+        rate = (got / elapsed / 1024.0) if elapsed > 0 else 0.0
+        pct = f" ({got * 100 // total}%)" if total > 0 else ""
+        of = f" / {total / mb:.2f} MB" if total > 0 else ""
+        log(f"{label} 下载中 {got / mb:.2f} MB{of}{pct} 用时 {elapsed:.0f}s（{rate:.0f} KB/s）")
+
+    return _report
+
+
 def _request(
     base_url: str,
     token: str,
@@ -100,7 +172,16 @@ def _request(
     data: bytes | None = None,
     method: str | None = None,
     headers: dict[str, str] | None = None,
+    progress: Any = None,
+    idle_timeout: float | None = None,
+    total_timeout: float | None = None,
 ) -> tuple[int, bytes]:
+    """单发 GET/POST。缺省（不给 `idle_timeout`/`progress`）行为与改造前逐字节相同。
+
+    给了 `idle_timeout`/`progress`（大 body 下载路径）才走**分块读**：socket 超时用
+    `idle_timeout` 而不是 `timeout`——`timeout` 在这些路径上是**总预算**语义，拿它当
+    socket 超时就是回到「静默 5 分钟」。
+    """
     url = f"{base_url.rstrip('/')}{path}"
     req = urllib.request.Request(
         url,
@@ -108,11 +189,20 @@ def _request(
         headers={AUTH_HEADER: f"Bearer {token}", **(headers or {})},
         method=method,
     )
+    stream = idle_timeout is not None or progress is not None
+    sock_timeout = idle_timeout if idle_timeout is not None else timeout
     try:
         # 回环（本机 hub）绕开代理；非回环走进程内的显式 ProxyHandler（Colab 实测需要）。
         open_fn = net_http.urlopen if net_http.is_loopback(url) else _get_opener().open
-        with open_fn(req, timeout=timeout) as resp:
-            return resp.status, resp.read()
+        with open_fn(req, timeout=sock_timeout) as resp:
+            if not stream or resp.status != 200:
+                return resp.status, resp.read()
+            return resp.status, _read_body(
+                resp,
+                idle_timeout=sock_timeout,
+                total_timeout=total_timeout,
+                progress=progress,
+            )
     except urllib.error.HTTPError as e:
         return e.code, e.read()
 
@@ -188,15 +278,31 @@ def _get_with_retry(
     timeout: float,
     attempts: int = 3,
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+    progress: Any = None,
+    idle_timeout: float | None = BODY_IDLE_TIMEOUT_SEC,
+    total_timeout: float | None = None,
 ) -> bytes:
     """GET + 瞬时失败退避重试：网络异常/5xx → 指数退避重试；4xx → ProtocolError。
 
     传输级抖动（连接重置/读超时/边缘 5xx）在租约窗口内就地消化，不再付
-    「放弃本次 → 30min 租约过期 → 重领」的惩罚（2026-09-05，DECISIONS §340）。"""
+    「放弃本次 → 30min 租约过期 → 重领」的惩罚（2026-09-05，DECISIONS §340）。
+
+    2026-09-20：body **分块读 + 空闲超时**（缺省 45s，见 BODY_IDLE_TIMEOUT_SEC）+
+    可选进度回调 ⇒ 下载停滞从「静默等到 socket 超时」变成「45s 一条带字节数的
+    停滞日志 + 退避重试」，且过程可见（进度行）。
+    """
     last: str = ""
     for attempt in range(1, attempts + 1):
         try:
-            status, body = _request(base_url, token, path, timeout=timeout)
+            status, body = _request(
+                base_url,
+                token,
+                path,
+                timeout=timeout,
+                progress=progress,
+                idle_timeout=idle_timeout,
+                total_timeout=total_timeout,
+            )
         except Exception as e:  # 网络层抖动（URLError/timeout/reset）
             status, body = None, repr(e).encode()
         if status == 200:
@@ -221,8 +327,22 @@ def download_payload(
     attempts: int = 3,
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
 ) -> bytes:
+    """取 payload 归档：**分块 + 进度行 + 停滞即断**（2026-09-20 事故的修复面）。
+
+    停滞判据 = 45s 无新字节（`BODY_IDLE_TIMEOUT_SEC`），总预算 300s。原来只有
+    一个 `timeout=300` 的整读：隧道/代理中途停滞时，操作员看到的是**几分钟零输出**
+    且日志里连一句「失败」都没有（socket 超时的裸异常没有正文）。
+    """
     return _get_with_retry(
-        base_url, token, f"/jobs/{jid}/payload", timeout=300.0, attempts=attempts, log=log
+        base_url,
+        token,
+        f"/jobs/{jid}/payload",
+        timeout=BODY_TOTAL_TIMEOUT_SEC,
+        attempts=attempts,
+        log=log,
+        idle_timeout=BODY_IDLE_TIMEOUT_SEC,
+        total_timeout=BODY_TOTAL_TIMEOUT_SEC,
+        progress=_progress_logger(f"job {jid}: payload", log),
     )
 
 
@@ -234,8 +354,17 @@ def download_code(
     attempts: int = 3,
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
 ) -> bytes:
+    # code.zip 同样走隧道（1-3MB）：与 payload 同规的停滞判据与进度行。
     return _get_with_retry(
-        base_url, token, f"/jobs/{jid}/code", timeout=120.0, attempts=attempts, log=log
+        base_url,
+        token,
+        f"/jobs/{jid}/code",
+        timeout=120.0,
+        attempts=attempts,
+        log=log,
+        idle_timeout=BODY_IDLE_TIMEOUT_SEC,
+        total_timeout=120.0,
+        progress=_progress_logger(f"job {jid}: code", log),
     )
 
 
@@ -252,7 +381,15 @@ def download_ts_code(
     代价只付一次：内容寻址缓存（`ts_code_cache/<sha>`）命中后同 sha 永不重下。
     """
     return _get_with_retry(
-        base_url, token, f"/jobs/{jid}/ts_code", timeout=300.0, attempts=attempts, log=log
+        base_url,
+        token,
+        f"/jobs/{jid}/ts_code",
+        timeout=BODY_TOTAL_TIMEOUT_SEC,
+        attempts=attempts,
+        log=log,
+        idle_timeout=BODY_IDLE_TIMEOUT_SEC,
+        total_timeout=BODY_TOTAL_TIMEOUT_SEC,
+        progress=_progress_logger(f"job {jid}: ts_code", log),
     )
 
 
@@ -270,9 +407,12 @@ def download_blob(
         base_url,
         token,
         f"/jobs/{jid}/blob?name={name}",
-        timeout=300.0,
+        timeout=BODY_TOTAL_TIMEOUT_SEC,
         attempts=attempts,
         log=log,
+        idle_timeout=BODY_IDLE_TIMEOUT_SEC,
+        total_timeout=BODY_TOTAL_TIMEOUT_SEC,
+        progress=_progress_logger(f"job {jid}: blob {name}", log),
     )
 
 
