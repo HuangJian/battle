@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -154,6 +155,81 @@ def test_iter_shard_dirs_dedupes_same_name(tmp_path: Path) -> None:
     assert kept == old, "先写盘者（= 结算赢家）胜"
     assert any("retire" in m and "dist" in m for m in msgs), "退役目录要响亮日志"
     assert len(dirs) == len({d.name for d in dirs}), "payload 不再含重复 arcname"
+
+
+def _mk_shard(d: Path, manifest: dict) -> Path:
+    """建一个「完整」shard（obs.npy + manifest.json）——发布端可收的最小形状。"""
+    d.mkdir(parents=True)
+    (d / "obs.npy").write_bytes(b"x")
+    (d / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return d
+
+
+def test_iter_shard_dirs_drops_foreign_lineage(tmp_path: Path) -> None:
+    """D14（2026-09-20 事故回归）：it{it} 里混入异血缘 shard 时**不进 payload**。
+
+    事故形状：c6-chip it16 打出的 payload 里混了 21 份课程文件编辑前的旧血缘 shard，
+    云端 worker 逐 shard 拒收 ⇒ 整份 job 退回（`D14 course_fp 不匹配`），hub 侧永远
+    等不到结果、worker 反复领同一份死活。成因是发布端（本函数）没按血缘过滤，而
+    对账端（resume._scan_shards）与云端都在过滤——同一个目录两种口径。
+    """
+    from remote.hub_client import iter_shard_dirs
+
+    job_course, job_corpus = "A" * 64, "C" * 64
+    it = tmp_path / "it16"
+    # 同血缘（文件血缘 + 无 corpus_fp 的 legacy shard）
+    same = _mk_shard(it / "w0" / "rl_s2000_seed1", {"course_fp": job_course})
+    # 同**语料身份**、不同文件血缘（课程只改了预算/注释字段）⇒ 必须收
+    semantic = _mk_shard(
+        it / "w0" / "rl_s2000_seed2", {"course_fp": "B" * 64, "corpus_fp": job_corpus}
+    )
+    # 真跨语料（旧课程版本）⇒ 剔除
+    _mk_shard(it / "w0" / "rl_s2000_seed3", {"course_fp": "B" * 64, "corpus_fp": "D" * 64})
+
+    msgs: list[str] = []
+    dirs = iter_shard_dirs(
+        str(tmp_path), 16, log=msgs.append, course_fp=job_course, corpus_fp=job_corpus
+    )
+    assert sorted(d.name for d in dirs) == [same.name, semantic.name], (
+        "异血缘 shard 必须被挡在 payload 外（否则云端整份拒收）"
+    )
+    assert any("D14" in m and "剔除" in m for m in msgs), "剔除去向要响亮日志"
+
+    # 不过滤（旧调用形状）时见到全部 3 份——即修复前会打进 payload 的那个集合
+    assert len(iter_shard_dirs(str(tmp_path), 16, log=lambda _m: None)) == 3
+    # manifest 不可读 ⇒ 不收（宁可少一份，也不让云端整份退回）
+    (it / "w0" / "rl_s2000_seed4").mkdir()
+    (it / "w0" / "rl_s2000_seed4" / "obs.npy").write_bytes(b"x")
+    (it / "w0" / "rl_s2000_seed4" / "manifest.json").write_text("{", encoding="utf-8")
+    dirs2 = iter_shard_dirs(
+        str(tmp_path), 16, log=lambda _m: None, course_fp=job_course, corpus_fp=job_corpus
+    )
+    assert sorted(d.name for d in dirs2) == [same.name, semantic.name]
+
+
+def test_iter_bc_shard_dirs_drops_foreign_lineage(tmp_path: Path) -> None:
+    """BC 同规（plan/bc-cloud-integration）：BC shard 也带 course_fp，同一判据同一过滤。"""
+    from remote.hub_client import iter_bc_shard_dirs
+
+    job_course, job_corpus = "A" * 64, "C" * 64
+    root = tmp_path / "bc-data" / "it7"
+    same = _mk_shard(root / "bc_s0_seed1", {"course_fp": job_course, "corpus_fp": job_corpus})
+    _mk_shard(root / "bc_s0_seed2", {"course_fp": "B" * 64, "corpus_fp": "D" * 64})
+
+    dirs = iter_bc_shard_dirs(
+        str(tmp_path), 7, log=lambda _m: None, course_fp=job_course, corpus_fp=job_corpus
+    )
+    assert [d.name for d in dirs] == [same.name]
+    # 无血缘参数（旧调用形状）⇒ 不过滤（行为不变）
+    assert len(iter_bc_shard_dirs(str(tmp_path), 7, log=lambda _m: None)) == 2
+
+
+def test_d14_predicate_is_single_implementation() -> None:
+    """判据只有一份：发布端用的就是云端拒收用的那一个函数（漂开 = 发布出去的必被拒）。"""
+    from remote.protocol import d14_corpus_match as canonical
+    from remote.worker import d14_corpus_match as via_worker
+
+    assert via_worker is canonical
 
 
 def test_eval_seeds_support_200_games() -> None:

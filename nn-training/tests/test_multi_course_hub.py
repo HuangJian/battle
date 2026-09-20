@@ -816,6 +816,34 @@ def test_discover_keeps_registered_course_after_it_goes_stale(tmp_path: Path) ->
     assert hub.courses() == ["c1"], "已登记的课程不因目录变旧被摘掉"
 
 
+def test_stopped_course_stops_being_dispatched(tmp_path: Path) -> None:
+    """停课（删开课标记）⇒ **立刻**停止派发它的 pending job；重新开课即恢复。
+
+    2026-09-20 事故：课程表在**发现那一刻**建好就不再变，而 `remote-jobs/` 里的 pending
+    job 躺在盘上不会消失——在旧表/旧代码里登记过的课程会把陈旧 job 继续派给真 GPU
+    worker（云端逐份失败：D14 血缘不匹配 / 旧 code.zip 触发自重启），白烧租约，而
+    训练侧什么都看不到（那门课早就不跑了）。用户口径「课程开训需要用户手动开启」
+    ⇒ 删标记必须**当拍**断派发，不能等到下一次发现扫描，也不能靠控制台记得置离线。
+    """
+    hub = _discover_hub(tmp_path)
+    _publish_standalone(tmp_path, "c1", "j" * 16)
+    assert hub.discover() == ["c1"]
+    (tmp_path / "c1" / COURSE_ENABLE_MARKER).unlink()  # 停课（非破坏：队列/账本一个字不动）
+    assert hub.claim_next(worker_id="w1") is None, "未开课的课程不得派发"
+    assert hub.claimable_job_ids("c1") == ["j" * 16], "停课不动队列（非破坏暂停）"
+    _enable(tmp_path, "c1")  # 重新开课 ⇒ 立刻恢复派发（无需重启 hub）
+    assert _claim(hub, "w1")[0] == "c1"
+
+
+def test_single_course_hub_is_not_gated_by_enable_marker(tmp_path: Path) -> None:
+    """单课程模式（`--job-root` 直给、无 `--discover`）不受开课闸影响——
+    那条路径的「开课」就是有人显式起了这个 hub（既有数十个用例的夹具都是这个形状）。"""
+    st = _JobStore(tmp_path / "remote-jobs", tmp_path / "training_log.jsonl")
+    st.publish("j" * 16, _manifest("j" * 16), b"PK\x03\x04fake")
+    hub = as_hub(st)
+    assert hub.claim_next(worker_id="w1") is not None
+
+
 def test_discover_scan_is_throttled(tmp_path: Path) -> None:
     """最小间隔闸：`claim_next` 是派发热路径（worker 每几秒一轮询），不能每次都 readdir。"""
     clock = _Clock()

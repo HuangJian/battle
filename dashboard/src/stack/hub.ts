@@ -127,7 +127,7 @@ export async function stepSelfNode(cfg: RlConfig): Promise<void> {
   await reclaimPort(cfg.rl.agent_port)
   const spec = selfNodeSpec(cfg)
   const r = launchSpec(spec)
-  saveComponent('selfNode', { pid: r.pid, entry: SELF_NODE_ENTRY })
+  saveComponent('selfNode', { pid: r.pid, entry: SELF_NODE_ENTRY, startedAt: Date.now() })
   monitorTouch()
   if (await waitUntil(() => selfNodeHealthy(cfg), 30000)) {
     ok(`self-node 启动成功 (port ${cfg.rl.agent_port}, PID ${r.pid})`)
@@ -170,6 +170,8 @@ export async function stepHubServer(cfg: RlConfig): Promise<void> {
     course: '',
     log: spec.log,
     url: `http://127.0.0.1:${port}`,
+    // 启动时刻：接管对账（`server.ts::reconcileWatch`）判「这个进程跑的是不是旧码」靠它。
+    startedAt: Date.now(),
   })
   monitorTouch()
   // Python 冷启动（import 链）可达 10s+，以 /ping 探测为准，上限 45s

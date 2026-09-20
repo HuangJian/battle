@@ -63,6 +63,7 @@ async function smokeTrainBc(course: string): Promise<ActionResult> {
       entry: BC_LOOP_ENTRY,
       mode: 'remote',
       log: trainLog,
+      startedAt: Date.now(),
     })
     monitorTouch()
 
@@ -149,6 +150,7 @@ export async function smokeTrain(course: string): Promise<ActionResult> {
       entry: TRAINING_LOOP_ENTRY,
       mode: 'remote',
       log: trainLog,
+      startedAt: Date.now(),
     })
     monitorTouch()
 

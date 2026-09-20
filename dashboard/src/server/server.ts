@@ -44,7 +44,12 @@ import {
   waitUntil,
 } from '../core/net'
 import { COMPONENT_KILL_TREE } from '../core/types'
-import { entryForCourse, loadRegistry, saveAnyComponent } from '../core/registry'
+import {
+  entryForCourse,
+  loadRegistry,
+  registryComponents,
+  saveAnyComponent,
+} from '../core/registry'
 import { launchSpec } from '../core/proc'
 import { monitorTouch } from '../core/reload-touch'
 import {
@@ -69,15 +74,19 @@ import {
   startSnapshotRefresher,
 } from './api'
 import { restartSpecFor } from './actions'
+import { runningStaleCode } from '../core/reload'
 import { handleDeliverUpload, taskBundleDownloadResponse, taskBundleInfo } from './bundles'
 import { runExitCheck } from './exit-watchdog'
 import { ensureBundle, type BundleTarget } from './build'
 import { renderConsolePage, renderEvalPage, renderLogPage } from '../web/render'
-import type { Component } from '../core/types'
+import type { Component, ProcSpec, RegistryEntry } from '../core/types'
 
 interface ServeOpts {
   port: number
 }
+
+/** 监督器的重启回调（`(key, course)` 精确重建 → 整树杀 → spawn → 回灌账本）。 */
+type RestartFn = (spec: ProcSpec, oldPid: number) => Promise<number>
 
 function parseArgs(): ServeOpts {
   let port = 8900
@@ -101,12 +110,12 @@ function parseLogLines(raw: string | null, dft = 200): number | 'all' {
   return Math.min(Math.max(Number(raw ?? dft) || dft, 10), 2000)
 }
 
-/** 变更检测监督器（同 §349；页面动作与监督共用 busy 互斥语义在 actions 层）。 */
-function startSupervisor(): ReturnType<typeof createSupervisor> {
-  const restart = async (
-    spec: Parameters<Parameters<typeof createSupervisor>[0]>[0],
-    oldPid: number,
-  ): Promise<number> => {
+/** 变更检测监督器（同 §349；页面动作与监督共用 busy 互斥语义在 actions 层）。
+ *
+ *  返回监督器本体 + `restart`：启动对账（`reconcileWatch`）要用它接管「跑着旧码」的在跑进程，
+ *  而重启逻辑（整树杀、重建 spec、回灌槽位）只此一份。 */
+function startSupervisor(): { sup: ReturnType<typeof createSupervisor>; restart: RestartFn } {
+  const restart: RestartFn = async (spec, oldPid) => {
     const key = spec.key
     const course = spec.course ?? ''
     const tag = `${key}${course ? `[${course}]` : ''}`
@@ -129,6 +138,9 @@ function startSupervisor(): ReturnType<typeof createSupervisor> {
       ...entryForCourse(loadRegistry(), key, course),
       pid: r.pid,
       course: course,
+      // 启动时刻每次重启都刷新（`runningStaleCode` 的比对面；不刷新 = 每轮对账都
+      // 把刚重启的新进程又当成旧码——15s 一次的重启风暴）。
+      startedAt: Date.now(),
       entry: fresh.sentinels[fresh.sentinels.length - 1],
       log: fresh.log,
     })
@@ -156,7 +168,7 @@ function startSupervisor(): ReturnType<typeof createSupervisor> {
     )
     return r.pid
   }
-  return createSupervisor(restart, { intervalMs: 5000 })
+  return { sup: createSupervisor(restart, { intervalMs: 5000 }), restart }
 }
 
 // ────────────────────────── bundle 服务（mtime 内存缓存 + 自动重建） ──────────────────────────
@@ -185,20 +197,44 @@ async function main(): Promise<void> {
   if (shapeLoopbackNoProxy()) console.log('[console] 检测到代理环境变量——已追加 NO_PROXY 直连回环')
 
   // 变更检测监督：跟踪账本中已登记的全部组件。
-  const sup = startSupervisor()
+  const { sup, restart } = startSupervisor()
   // 监督单位 = (key, course)：多课程下同一组件有多份进程，按 key 单键会互相顶掉。
   const watched = new Set<string>()
   const reconcileWatch = async (): Promise<void> => {
     const state = await buildStateView()
+    // 账本原件（`startedAt` 在视图里没有，而判「跑的是不是旧码」只看它）。
+    const entries = new Map<string, RegistryEntry>(
+      registryComponents().map((e) => [`${e.key}|${e.course}`, e.entry]),
+    )
     for (const c of state.components) {
       const course = c.course ?? ''
       const id = `${c.key}|${course}`
       if (c.status !== 'running' || watched.has(id)) continue
       const spec = restartSpecFor(c.key as Component, course)
       if (!spec) continue
-      sup.watch(spec, c.pid ?? 0)
+      let pid = c.pid ?? 0
+      // ★ 接管在跑进程之前先判「它跑的是不是磁盘上的这份代码」（2026-09-20 事故）：
+      //   watch() 以**当下**指纹为基线，直接接管会把旧码永久冻结在「就绪」上——
+      //   于是盘上加的新闸对已在跑的组件永远不生效，而控制台一切显示正常。
+      //   判据的真相源是账本 `startedAt`（spawn/重启时写）；缺席 = 旧条目 ⇒ 按旧码处理。
+      //
+      //   ⚠ 适用范围**不含 cloudflared**：它是第三方二进制，跑的不是我们的代码（哨兵只是共用
+      //   SSOT 清单的代理），而重启它的代价是**隧道 URL 变化**：云机手上那个 URL 立刻作废、
+      //   正在跑的 job 无法回传（用户得回到 Colab 重新贴）。零收益、高代价 ⇒ 永不由「旧码」触发。
+      if (
+        pid > 0 &&
+        c.key !== 'cloudflared' &&
+        runningStaleCode(spec, entries.get(id)?.startedAt)
+      ) {
+        console.warn(
+          `[supervisor] ${c.key}${course ? `[${course}]` : ''} (PID ${pid}) 跑的是磁盘上更早的代码` +
+            '——接管并重启应用最新代码（旧进程的判据/课程表都停在它启动的那一刻）',
+        )
+        pid = await restart(spec, pid)
+      }
+      sup.watch(spec, pid)
       watched.add(id)
-      console.log(`[supervisor] 监督 ${c.key}${course ? `[${course}]` : ''} (PID ${c.pid})`)
+      console.log(`[supervisor] 监督 ${c.key}${course ? `[${course}]` : ''} (PID ${pid})`)
     }
   }
   await reconcileWatch()

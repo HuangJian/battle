@@ -133,6 +133,8 @@ async function startSharedTrainer(
     slot: 0,
     entry: TRAINER_SERVE_ENTRY,
     log: spec.log,
+    // 启动时刻：接管对账（server.ts::reconcileWatch）判「跑的是不是旧码」靠它。
+    startedAt: Date.now(),
   })
   monitorTouch()
   const detail =

@@ -26,7 +26,7 @@ import threading
 from pathlib import Path
 
 from remote.hub_server import _HubQueue, _JobStore, make_server
-from remote.protocol import COURSE_MODE_ONLINE, normalize_manifest
+from remote.protocol import COURSE_ENABLE_MARKER, COURSE_MODE_ONLINE, normalize_manifest
 from remote.worker import poll_job
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -80,6 +80,11 @@ def _hub(tmp_path: Path, courses: tuple[str, ...]) -> _HubQueue:
         c: _JobStore(tmp_path / c / "remote-jobs", tmp_path / c / "training_log.jsonl")
         for c in courses
     }
+    # 开课标记 = 代操作员按一下控制台的「训练」（`<课>/training-enabled.txt`）：发现模式下
+    # **派发闸**要求它存在（2026-09-20：没有它，未开课/历史课程的陈旧 pending job 会被继续
+    # 派给真 GPU worker）。夹具造的是「课已开、正在跑」的盘上形状，故两门课都写。
+    for c in courses:
+        (tmp_path / c / COURSE_ENABLE_MARKER).write_text("", encoding="utf-8")
     return _HubQueue(
         stores,
         order=list(courses),
@@ -148,6 +153,10 @@ def test_one_worker_serves_a_late_third_course(tmp_path: Path) -> None:
 
         # 后加一门课：只往队列里发布（worker 与 hub 都不重启）
         hub.add_course("c7-new")
+        # 「后加课」在生产 = 控制台开课（写 `training-enabled.txt`）+ 发布 job——两道事实
+        # 都要有（派发闸在发现模式下要求标记，见 `_hub` 注释）。
+        (tmp_path / "c7-new").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "c7-new" / COURSE_ENABLE_MARKER).write_text("", encoding="utf-8")
         _publish(hub, "c7-new", "b" * 16)
         nxt = poll_job(base, TOKEN, timeout=10, worker_id=WORKER_ID)
         assert nxt is not None, "新课的 job 必须被同一份 worker 领走"

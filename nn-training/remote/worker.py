@@ -57,6 +57,9 @@ from remote.protocol import (
     unpack_payload,
     validate_result,
 )
+from remote.protocol import (
+    d14_corpus_match as protocol_d14_corpus_match,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -692,17 +695,9 @@ def _ensure_commit(target: str, repo_root: Path = REPO_ROOT, log=lambda msg: Non
     return head == target
 
 
-def d14_corpus_match(job_course_fp: str, job_corpus_fp: str, shard_manifest: dict) -> bool:
-    """D14 装载校验的比对规则（DECISIONS §2026-09-13-level-extraction）。
-
-    双侧都有 corpus_fp（语料身份 = env+reward 解析值语义哈希）⇒ 比 corpus_fp——
-    预算/路径/注释类课程 mid-run 编辑只动 course_fp（文件血缘），不得触发拒收。
-    任一侧缺 corpus_fp（legacy shard / 旧 job）⇒ 回退文件血缘 course_fp 逐字比对。
-    """
-    s_corpus = str(shard_manifest.get("corpus_fp", "") or "")
-    if job_corpus_fp and s_corpus:
-        return job_corpus_fp == s_corpus
-    return str(shard_manifest.get("course_fp", "")) == job_course_fp
+# D14 比对规则的**唯一实现**住 `remote.protocol`（发布端 `hub_client.iter_shard_dirs`
+# 打包时用同一条规则挑选 shard）——这里只做名字转发，保持既有 import/调用面不变。
+d14_corpus_match = protocol_d14_corpus_match
 
 
 def _bc_fetch_resume(

@@ -39,6 +39,7 @@ from remote.protocol import (
     TS_CODE_NAME,
     JobFailedError,
     blob_path,
+    d14_corpus_match,
     data_fp,
     decode_opt_tar,
     decode_weights_json,
@@ -100,10 +101,24 @@ def _sha256_bytes(b: bytes) -> str:
 # ------------------------------------------------------------------ 打包
 
 
-def iter_shard_dirs(traj_dir: str | Path, it: int, log=lambda msg: None) -> list[Path]:
+def iter_shard_dirs(
+    traj_dir: str | Path,
+    it: int,
+    log=lambda msg: None,
+    *,
+    course_fp: str = "",
+    corpus_fp: str = "",
+) -> list[Path]:
     """本轮应训 shard 集：it{it} 下全部 rl_s*_seed*/manifest.json 目录（与
     `_serial_ppo` 的 load_episodes 装载口径一致——D1「wver 过滤 + resume 剔除
     后」由 _prepare_iter_dir 已保证目录内只有本轮 wver 匹配的完整 shard）。
+
+    ★ D14 语料血缘过滤（course_fp/corpus_fp 非空时）：只挑**云 worker 会接受**的
+    shard——判据就是 `protocol.d14_corpus_match`（云端逐 shard 拒收用的同一条规则）。
+    为什么必须在这里滤（2026-09-20 事故）：it{it} 目录是**累积**的，课程文件被编辑
+    过或换过 runId 时里面会同时躺着旧血缘 shard；而云端整份 job 拒收 ⇒ hub 侧
+    永远等不到结果、训练轮空转、worker 反复领同一份死活。对账（`resume._scan_shards`）
+    早就在滤血缘，只有发布端漏了——一次漏过滤 = 一份永远完不成的 job。
 
     同名 shard 去重（发布端不变量）：同一 seed 只允许一份进 payload——重复
     arcname 的 zip 由解包顺序决定训练吃哪份（偶然语义），且 data_fp 账面与
@@ -115,13 +130,22 @@ def iter_shard_dirs(traj_dir: str | Path, it: int, log=lambda msg: None) -> list
     if not it_dir.exists():
         return []
     cands: dict[str, list[Path]] = {}
+    skipped = 0
     # walk_shard_dirs 而非 rglob：发布与 dup-settle 输家退场（dispatch 结算线程 rmtree）
     # 同轮并发，rglob 会在迭代里抛 FileNotFoundError 把发布打红（2026-09-20 事故：
     # `stream collector failed` 同源；栈顶 pathlib._select_from）。见 rl/resume.py 的说明。
     for d in walk_shard_dirs(it_dir, with_manifest=True):
         if not ((d / "obs.npy").exists() or (d / "metrics.npy").exists()):
             continue
+        if (course_fp or corpus_fp) and not _shard_lineage_ok(d, course_fp, corpus_fp, log):
+            skipped += 1
+            continue
         cands.setdefault(d.name, []).append(d)
+    if skipped:
+        log(
+            f"[publish] D14: 剔除 {skipped} 个异血缘 shard（it{it} 内混入了别的课程版本/runId 的语料）"
+            "——云端会整份拒收，故不进 payload"
+        )
     dirs: list[Path] = []
     for name in sorted(cands):
         ds = cands[name]
@@ -135,6 +159,25 @@ def iter_shard_dirs(traj_dir: str | Path, it: int, log=lambda msg: None) -> list
     return dirs
 
 
+def _shard_lineage_ok(
+    d: Path, course_fp: str, corpus_fp: str, log=lambda msg: None
+) -> bool:
+    """shard 的 manifest 是否与本次 job 同血缘（读不到 = 不收，宁可少一份也不整份被云拒）。"""
+    try:
+        mm = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        log(f"[publish] D14: 剔除 {d.name}（shard manifest 不可读: {e}）")
+        return False
+    if d14_corpus_match(course_fp, corpus_fp, mm):
+        return True
+    log(
+        f"[publish] D14: 剔除 {d.name}（shard 血缘 "
+        f"{str(mm.get('course_fp'))[:12]}…/{str(mm.get('corpus_fp') or '-')[:12]}… != "
+        f"job {course_fp[:12]}…/{corpus_fp[:12] or '-'}…）"
+    )
+    return False
+
+
 def _shard_mtime(d: Path) -> float:
     """shard manifest 的 mtime；目录已被并发删除（输家退场）时返回 +inf（排到最后）。"""
     try:
@@ -144,21 +187,37 @@ def _shard_mtime(d: Path) -> float:
 
 
 def iter_bc_shard_dirs(
-    traj_dir: str | Path, it: int, round_name: str = "", log=lambda msg: None
+    traj_dir: str | Path,
+    it: int,
+    round_name: str = "",
+    log=lambda msg: None,
+    *,
+    course_fp: str = "",
+    corpus_fp: str = "",
 ) -> list[Path]:
     """本轮 BC 语料 shard 集（plan/bc-cloud-integration.plan.md §4）：
     `<traj>/bc-data/<round>/bc_s*_seed*/`（含 manifest.json）；round 缺省 = `it{it}`，
     smoke 轮传 "smoke"（冒烟语料与真轮隔离，2026-09-13）。
 
     同名 shard 去重与 PPO（iter_shard_dirs）同策略：按 manifest mtime 保留最早一份
-    （先写盘者 = 结算赢家），退役者响亮日志。"""
+    （先写盘者 = 结算赢家），退役者响亮日志。D14 血缘过滤同 PPO（同一判据、同一原因）。"""
     data_root = Path(traj_dir) / "bc-data" / (round_name or f"it{it}")
     if not data_root.exists():
         return []
     groups: dict[str, list[Path]] = {}
+    skipped = 0
     for p in data_root.glob("bc_s*_seed*"):
-        if p.is_dir() and (p / "manifest.json").is_file():
-            groups.setdefault(p.name, []).append(p)
+        if not (p.is_dir() and (p / "manifest.json").is_file()):
+            continue
+        if (course_fp or corpus_fp) and not _shard_lineage_ok(p, course_fp, corpus_fp, log):
+            skipped += 1
+            continue
+        groups.setdefault(p.name, []).append(p)
+    if skipped:
+        log(
+            f"[publish] D14: 剔除 {skipped} 个异血缘 BC shard（{round_name or f'it{it}'} 内混入了"
+            "别的课程版本的语料）——云端会整份拒收，故不进 payload"
+        )
     dirs: list[Path] = []
     for name in sorted(groups):
         ds = groups[name]
@@ -1142,7 +1201,16 @@ def verify_and_land(
     if str(m.get("kind", "ppo") or "ppo") == "iter":
         local_fp = str(m["data_fp"])
     else:
-        local_fp = data_fp(iter_shard_dirs(traj_dir, it, log=log))
+        # D14：与发布端同一条血缘过滤（打包集 == 云端接受集 == 这里重算的集合）。
+        local_fp = data_fp(
+            iter_shard_dirs(
+                traj_dir,
+                it,
+                log=log,
+                course_fp=str(m.get("course_fp") or ""),
+                corpus_fp=str(m.get("corpus_fp") or ""),
+            )
+        )
     if result["data_fp"] != local_fp:
         raise HubClientError(
             f"三重校验失败: data_fp 不匹配（云={result['data_fp'][:12]}… "
@@ -1202,7 +1270,16 @@ def verify_and_land_bc(
         raise HubClientError(
             "BC 校验失败: init_weights_fp 不匹配（result 与 manifest 错配）——拒收"
         )
-    local_fp = data_fp(iter_bc_shard_dirs(traj_dir, it, round_name, log=log))
+    local_fp = data_fp(
+        iter_bc_shard_dirs(
+            traj_dir,
+            it,
+            round_name,
+            log=log,
+            course_fp=str(m.get("course_fp") or ""),
+            corpus_fp=str(m.get("corpus_fp") or ""),
+        )
+    )
     if result["data_fp"] != local_fp:
         raise HubClientError(
             f"BC 校验失败: data_fp 不匹配（云={result['data_fp'][:12]}… "

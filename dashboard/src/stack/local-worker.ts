@@ -84,6 +84,8 @@ export async function startLocalWorker(ctx: LocalWorkerCtx): Promise<LocalWorker
     entry: LOCAL_WORKER_ENTRY,
     url: hubUrl,
     log: spec.log,
+    // 启动时刻：接管对账（server.ts::reconcileWatch）判「跑的是不是旧码」靠它。
+    startedAt: Date.now(),
   })
   monitorTouch()
   await sleep(1500)

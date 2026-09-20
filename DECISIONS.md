@@ -4134,3 +4134,102 @@ nn python：`test_multi_course_hub.py`（`_enable` 助手 + 新回归「没开�
 **gate**：dashboard **752 pass / 0 fail** + `tsc --noEmit` + oxlint 0 warning + 三份 bundle 构建通过
 （app 296114B / gzip 69219B）；根 `bun run check` 绿；nn python 全量 **0 failed**（`bash tools/githook/nn-py-safe.sh`）。
 
+
+## §2026-09-20-publish-lineage-filter（2026-09-20，用户报障：云机领到 ppo 任务后一直报错）
+
+**症状（用户贴的云机日志）**：worker 领到 job 后逐份失败，刷屏三类错误：
+
+```
+job 2e2dabb810bf9299 REJECTED: D14 course_fp 不匹配：job=abbf8045102c… shard=e6c69a46167c… — skip (not retried)
+job 991b9e70a3e1efed FAILED: RuntimeError: CUDA error: uncorrectable ECC error（硬件，非本次）
+job 8d2ff3ab54e2b72b: 代码已变更：本进程加载 f4e2e4041c95… != job 要求 6224d4b41404… ⇒ 退出码 86 重启
+```
+
+**取证（`tmp/<课>/remote-jobs/<job>/payload.tar.xz` 逐 shard 读 manifest）**：`c6-chip` it16 那份
+payload 里**混着两个血缘**——550 份里 21 份的 `course_fp` 是 `e6c69a46…`（课程文件编辑前的旧版本），
+其余是 `abbf80451…`（= 当时的 job/课程指纹）。云端 `worker.py` 对**每一份** shard 判 D14
+（`d14_corpus_match`），一份不合就整份 job 拒收 ⇒ hub 侧永远等不到结果、worker 反复领同一份死活。
+
+**根因 = 发布端漏了血缘过滤**：`hub_client.iter_shard_dirs` 只按 `it{it}` 目录枚举（同名去重），
+而**对账端**（`rl/resume._scan_shards` 的 `course_fp` 过滤）与**云端**（逐 shard 拒收）都在判血缘
+——同一个目录三种口径。`it{it}` 是**累积**目录：课程文件被编辑过（改语料身份语义）/ 换过 runId 时，
+里面会同时躺着新旧两代 shard，于是「打进 payload 的集合」⊃「云端会接受的集合」。
+
+**定案**：
+
+1. **判据只有一份**：`d14_corpus_match` 从 `remote/worker.py` 搬到 **`remote/protocol.py`**
+   （`worker.py` 只做名字转发，既有 import/调用面/测试一字不改）。发布端与云端**同函数** ⇒
+   「打包集 ≡ 云端接受集」成为结构事实，而不是两处约定的巧合。
+2. **发布端过滤**：`iter_shard_dirs` / `iter_bc_shard_dirs` 新增 `course_fp=` / `corpus_fp=`
+   （仅关键字参数，缺省空串 = 旧行为逐字节不变），逐 shard 用同一条判据挑；剔除的**响亮日志**
+   （`D14: 剔除 N 个异血缘 shard …` + 每份一行），manifest 不可读的一律不收（宁可少一份，
+   也不让云端整份退回）。PPO 与 BC 同规（BC 语料同样带 `course_fp`，同一条链同一处坑）。
+3. **落位侧重算同参**：`verify_and_land` / `verify_and_land_bc` 用 manifest 自带的
+   `course_fp`/`corpus_fp` 走**同一次过滤**再算 `data_fp`（发布集 == 重算集 == 云接受集；
+   三者只要有一处口径不同，data_fp 校验就会把好结果判成「云训了别的语料」）。
+4. **调用方顺序**：`loop_steps._remote_ppo` 里「算血缘（`course_fp`/`corpus_fp`）」**提到**
+   「扫 shard」之前——扫描要用它们过滤（原来顺序相反，正是漏过滤的温床）。
+
+**备选与否决**：
+
+- **云端放宽（把拒收降级为「跳过该 shard 继续训」）**——否：那等于让「跨课程语料混训」静默发生
+  （D14 熔断的全部意义就是不许），且每份 payload 里混进来源不明的语料，结果无法归因到任何课程。
+- **云端多轮重试同一份 job**——否：payload 是**不可变**的（内容哈希进了 `payload_sha256`），
+  重试只是把同一个必然失败再烧一遍租约；病根在发布端。
+- **发布端过滤 + 云端仍逐 shard 判**——采纳：云端那道是**协议层不可绕**的守卫（防篡改/防旧 hub），
+  发布端这道是**不让坏包产生**。两道都在，且共用同一个判据函数。
+- **让 `it{it}` 目录物理隔离两代课程（每代一个目录）**——否：`it` 目录名是 `data_fp`/resume/
+  账本的公共契约（改名 = 全线血缘破裂）；过滤是局部且可逆的修复。
+- **顺带清掉盘上那份已在队的坏 job**——否：不删任何历史产物（非破坏纪律）；它属于未开课课程，
+  新派发闸已不再把它发给任何 worker，重开该课时训练侧的下一次发布也会按 §381 作废更早迭代的 pending。
+
+**gate**：nn python 全量（ruff + mypy + **1834 passed**）绿；新增回归
+`test_iter_shard_dirs_drops_foreign_lineage` / `test_iter_bc_shard_dirs_drops_foreign_lineage` /
+`test_d14_predicate_is_single_implementation`（首个用例同时断言「不过滤时会打进 3 份」= 修复前形状）。
+
+## §2026-09-20-hub-dispatch-gate-and-stale-adoption（2026-09-20，同一故障的第二/第三层根因）
+
+**为什么还有两层**：D14 那条修的是「坏包被造出来」；用户贴的日志里还有两个独立症状——
+**worker 领到的是 11 门课的陈旧 job**（x20-floor 6.8h、x20-powered 15.2h、c6-chip 157.8h…），
+且**盘上今天新加的课程闸对它无效**。
+
+**取证**：
+
+- `netstat` + `tmp/training-start/registry.json`：监听 :8787 的 hub = **PID 20860，今早 08:04 起的进程**
+  （新闸是之后落的盘）。`tmp/*/training-enabled.txt` 全盘只有 `x20-steady` 一个（10:38 开课）。
+  ⇒ 在跑的 hub 还把 20 门历史课留在自己的课程表里，继续把它们残留的 pending job 派给真 GPU worker。
+- 真盘只读探针（新代码）：`discover()` 只登记 `x20-steady` 并派发它那份新 job，20 个历史课目录一个不碰。
+
+**定案**：
+
+1. **派发闸 `_HubQueue._serves_course`**（发现模式）：课程目录必须仍带 `training-enabled.txt`，
+   否则 `claim_next` **当拍**跳过（告警每课一次，队列/账本一个字不动 = 停课仍是非破坏的）。
+   发现时判过还要在派发时再判，因为课程表是**发现那一刻**建的，而 `remote-jobs/` 里的 pending job
+   不会自己消失——没有这道闸，任何在旧表/旧代码里登记过的课程都能把陈旧 job 继续喂给云机。
+2. **控制台接管旧码进程**（`server.ts::reconcileWatch` + `core/reload.ts::runningStaleCode` +
+   账本新字段 `RegistryEntry.startedAt`）：`watch()` 以**当下**指纹为基线，而 watch 表住内存——
+   **控制台一重启就丢**，重启后的对账把在跑进程重新基线化成「就绪」，「这个进程早于最后一次改码」
+   从此永久不可见。现在启动对账先判 `runningStaleCode(spec, startedAt)`（哨兵 mtime > 启动时刻
+   +2s 容差；无记录 = 旧条目 ⇒ 按旧码处理），是旧码就**先 restart 再 watch**；每个 spawn 点
+   （selfNode / hubServer / trainer / localWorker / 监督重启 / 冒烟）都写 `startedAt`。
+   **不含 cloudflared**：第三方二进制跑的不是我们的代码，而重启它的代价是**隧道 URL 变化**
+   （云机手上那个 URL 立刻作废、在跑 job 无法回传）——零收益高代价，单独豁免。
+
+**备选与否决**：
+
+- **只在控制台 UI 提示「hub 可能是旧码，请手动重启」**——否：这正是今天发生的形态（「hub-server
+  已在运行」= 幂等成功），而「旧码」是不可见状态；把不可见交给操作员记着 = 下次照旧。
+- **hub 侧自行热重载代码**——否：python 进程热换模块语义不清（已 import 的模块/闭包/线程），
+  而仓库既有的契约就是**控制台监督重启**（reload.ts），这里只是补上「重启控制台后仍成立」。
+- **判据用已存在但未接线的 `lastMonitorChange()`（全局触点）**——否：它是**全局**时刻（任何组件
+  spawn 都会刷新），跨组件互相掩盖；`startedAt` 是每进程一份的精确值，且它本身就是证据。
+- **把「无 startedAt」也算作未知而不重启**——否：那正好放过今天这件事（旧条目就是问题所在）；
+  代价是**一次**接管重启，之后账本自带启动时刻，稳态零误报。
+- **重启 cloudflared 也纳入旧码接管**——否（见上：URL 作废）。
+- **顺手停掉/清掉那 11 份陈旧 pending job**——否：非破坏纪律（停课/历史产物一个不删）；闸挡住
+  派发就够了，重启该课时 `cancel_stale_jobs`（§381）自会作废更早迭代的 pending。
+
+**gate**：dashboard **760 pass / 0 fail**（新增 `supervisor-stale-code.test.ts` 8 例：判据边界 +
+接线门禁——含「每个 spawn 点都写 startedAt」「cloudflared 必须豁免」「restart 早于 watch」）；
+`tsc --noEmit` + oxlint 0 warning；根 `bun run check` 绿；nn python 全量
+（ruff + mypy + 1834 passed，含新 `test_stopped_course_stops_being_dispatched`）绿。

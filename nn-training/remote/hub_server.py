@@ -997,6 +997,8 @@ class _HubQueue(_AuthGuard):
         self._discover_root: Path | None = Path(discover_root) if discover_root else None
         self._discover_fresh = float(discover_fresh_sec)
         self._discover_last = 0.0
+        #: 「跳过未开课课程」的告警去重集（每门课只喊一次，不刷屏）。
+        self._no_marker_warned: set[str] = set()
         md = modes or {}
         self._modes: dict[str, str] = {
             c: str(md.get(c) or COURSE_MODE_ONLINE) for c in self._order
@@ -1137,6 +1139,36 @@ class _HubQueue(_AuthGuard):
         if added:
             print(f"[hub-server] discovered courses: {', '.join(added)}", flush=True)
         return added
+
+    def _serves_course(self, course: str) -> bool:
+        """派发闸：**发现模式**下课程目录必须仍带开课标记（`training-enabled.txt`）。
+
+        为什么发现时判过还要在这里再判一次（2026-09-20 事故）：课程表是**发现那一刻**
+        建的，而 `remote-jobs/` 里躺着的 pending job 不会自己消失。没有这道闸，任何
+        在旧表/旧代码里登记过的课程会把它的**陈旧 job 继续派给真 GPU worker**——
+        白烧租约，云端逐份失败（D14 血缘不匹配 / 旧 code.zip 触发自重启），而训练侧
+        什么都看不到（那门课早就不跑了）。用户口径：「课程开训需要用户手动开启」——
+        删掉标记就该立刻停止派发，不能等到下一次发现扫描或靠控制台记得置离线。
+
+        单课程模式（`--job-root` 直给、无 `--discover`）不受影响：那条路径的「开课」
+        就是有人显式起了这个 hub。
+        """
+        if self._discover_root is None:
+            return True
+        st = self._stores.get(course)
+        if st is None:
+            return False
+        if (st.job_root.parent / COURSE_ENABLE_MARKER).exists():
+            return True
+        with self._lock:
+            if course not in self._no_marker_warned:
+                self._no_marker_warned.add(course)
+                print(
+                    f"[hub-server] 跳过未开课的 {course}：无 {COURSE_ENABLE_MARKER}"
+                    "（控制台「训练」写入 / 「停课」删除）——队列原样保留，开课即恢复派发",
+                    flush=True,
+                )
+        return False
 
     def _course_dir_live(self, ent: Path, now: float) -> bool:
         """课程目录「在训」判据：**已开课标记**存在，且 `{remote-jobs,offline}` 之一存在且新鲜。
@@ -1375,6 +1407,8 @@ class _HubQueue(_AuthGuard):
         self.discover()
         active_workers = self.active_worker_count()
         for course in rotation_order(self._order, self._cursor):
+            if not self._serves_course(course):
+                continue
             offline = self.mode_of(course) == COURSE_MODE_OFFLINE
             if offline and not offline_ok:
                 continue

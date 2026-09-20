@@ -195,7 +195,9 @@ describe('接线：启动步骤在 spawn 前回收端口', () => {
     // 独占的端口（bind 失败），而**旧僵尸**仍在那端口上答健康检查，监督器会把「僵尸的
     // 200」记成重启成功——账本记新 pid、实际服务的是旧进程（就是 2026-09-17 事故的相位）。
     const server = readFileSync(path.join(DASHBOARD_ROOT, 'src', 'server', 'server.ts'), 'utf-8')
-    const start = server.indexOf('const restart = async (')
+    // 锚 = `const restart` … `createSupervisor(restart`（2026-09-20 起 restart 带 `RestartFn`
+    // 注解：启动对账要复用它接管「跑着旧码」的在跑进程，故只钉区间、不钉推导式字面）。
+    const start = server.indexOf('const restart')
     expect(start).toBeGreaterThan(-1)
     const raw = server.slice(start, server.indexOf('createSupervisor(restart', start))
     // 去行注释再找：注释里提到 `healthy` 是**解释**（“只问 healthy 会踩…”），不是接线。

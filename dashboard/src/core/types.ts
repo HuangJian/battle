@@ -145,6 +145,13 @@ export type Component = 'selfNode' | 'hubServer' | 'cloudflared' | 'localWorker'
 /** 单组件登记条目（PID 账本 + 可选元数据）。 */
 export interface RegistryEntry {
   pid: number
+  /** 进程启动时刻（epoch ms，控制台 spawn 时写入）。
+   *
+   *  变更检测的补集：内存里的 watch 表（`core/reload.ts`）一重启控制台就丢，
+   *  而「这个进程早于最后一次改码」只能靠**启动时刻 vs 哨兵 mtime** 判
+   *  （`runningStaleCode`）——没有它，接管时只能把在跑进程当成「就绪」基线，
+   *  旧码从此永不更换（2026-09-20 事故）。缺席 = 旧条目/手工起的进程（按旧码处理）。 */
+  startedAt?: number
   /** 进程入口（监督重启/变更检测用）。 */
   entry?: string
   course?: string
