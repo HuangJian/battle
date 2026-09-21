@@ -40,12 +40,6 @@ export interface StartCtx {
    *  ★ 共享 trainer 不消费它（`trainerServeSpec` 不给 `REMOTE_PUSH_NODE`）；保留字段是因为
    *  预演（`train-smoke.ts`）仍用它把伪节点注入 env。 */
   pushNodeUrl?: string
-  /** T7：远端连败是否 opt-in 降级本机 PPO（默认 false = ABORT）。
-   *
-   *  ★ 2026-09-20：**共享 trainer 已不消费它** —— 它是**课程级**旋钮（落
-   *  `courses.<课>.remote_degrade_after`），随「开课」走（`course-lifecycle.ts`）。
-   *  保留字段是因为预演路径（`train-smoke.ts`）仍按旧形状传它。 */
-  remoteDegrade?: boolean
 }
 
 /** run_bc 单实例锁持有人（BC 课程；与 runRlLockHolder 同语义，锁名 run_bc）。 */

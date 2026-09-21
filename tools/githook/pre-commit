@@ -217,8 +217,12 @@ DASH_TSC_LOG="tmp/pre-commit-dash-$$.log"
 # `: > file` 是写入不是删除，任何删除拦截都对其失效；残留 0 字节文件在 gitignored
 # tmp/ 下由 periodic 清理兜底。清理自己的临时文件失败/被拦，没有任何理由决定提交成败。
 trap 'for __f in "$STAGED_LIST" "$DIRTY_LIST" "$TSC_LOG" "$GATE_LOG" "$DASH_TSC_LOG"; do [ -e "$__f" ] && : > "$__f"; done' EXIT
-git diff --cached --name-only > "$STAGED_LIST"
-git diff --name-only > "$DIRTY_LIST"
+# `--diff-filter=ACMR`（2026-09-21 修）：**删除的路径不能进归因清单** —— 各 linter 都是
+# 「按路径打开文件」，路径不存在就是硬错（实测：删掉 `nn-training/tests/test_remote_degrade.py`
+# 后被 ruff 判 `E902 The system cannot find the file specified` ⇒ 整次提交被拦，而代码本身全绿）。
+# 归因集只需要「这次提交**留下**了什么」；A/C/M/R 即此意（D/U 排除）。
+git diff --cached --name-only --diff-filter=ACMR > "$STAGED_LIST"
+git diff --name-only --diff-filter=ACMR > "$DIRTY_LIST"
 STAGED_N=$(wc -l < "$STAGED_LIST" | tr -d ' ')
 DIRTY_N=$(wc -l < "$DIRTY_LIST" | tr -d ' ')
 echo "  staged ${STAGED_N} 文件（门禁拦截归因集）；未暂存 ${DIRTY_N} 文件（他人改动，不参与拦截）"

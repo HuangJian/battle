@@ -1028,6 +1028,12 @@ def _job_failed_from_body(jid: str, body: bytes) -> JobFailedError:
     return JobFailedError(f"job {jid} 失败: {reason}{suffix}", kind=kind, detail=detail)
 
 
+#: 等待期「饥饿响亮」的默认节流（秒）：每 N 秒把「在等什么」写一行（见 `wait_job`）。
+#: 理由（plan/accident.plan.md §3）：零 worker 时训练侧原先只有超时一条路——job 被反复
+#: 派发/过期 3.5 小时而日志安静如常。等着可以，**安静地等**不行。
+WAIT_REPORT_SEC = 300.0
+
+
 #: 非阻塞探针的三态（`probe_job_result` 的 `state`）。
 PROBE_READY = "ready"  # 结果已落 hub，可取
 PROBE_PENDING = "pending"  # 还没回（正常排队）——**不等于失败**，过一会儿再问
@@ -1102,6 +1108,46 @@ def poll_job(
     return probe_job_result(base_url, token, jid, timeout=timeout).result
 
 
+def _wait_state_note(base_url: str, token: str, jid: str, waited: float) -> str:
+    """等待期的一行状态（best-effort，**绝不**把观测失败变成训练失败）。
+
+    区分两种「还没回」——它们对操作员是完全不同的两件事：
+      * `pending` = **没有任何 worker 认领**（饥饿）⇒ 要算就去控制台起 worker；
+      * `leased` = 已被认领、云机在跑（带租约剩余与上次心跳）⇒ 只能等。
+
+    在线 worker 数来自 `/admin/queue`（hub 已有面，不新造端点）；取不到就只说状态。
+    """
+    state = "?"
+    extra = ""
+    try:
+        st, body = _request(base_url, token, f"/jobs/{jid}/status", timeout=15.0)
+        if st == 200:
+            info = json.loads(body.decode("utf-8"))
+            if isinstance(info, dict):
+                state = str(info.get("state") or "?")
+                if state == "leased":
+                    left = info.get("lease_expires_in")
+                    hb = info.get("last_heartbeat_ago")
+                    extra = f"; 租约剩 {left}s, 上次心跳 {hb}s 前" if left is not None else ""
+    except Exception:  # 观测失败不影响等待语义（本行只为日志服务）
+        pass
+    if state == "leased":
+        return f"job {jid} 执行中（state=leased{extra}）（已等 {waited:.0f}s）"
+    workers = "?"
+    try:
+        st2, body2 = _request(base_url, token, "/admin/queue", timeout=15.0)
+        if st2 == 200:
+            q = json.loads(body2.decode("utf-8"))
+            if isinstance(q, dict) and q.get("active_workers") is not None:
+                workers = str(q["active_workers"])
+    except Exception:  # 同上：拿不到 worker 数就只说状态
+        pass
+    return (
+        f"job {jid} **等待认领中**（state={state}，已等 {waited:.0f}s；hub 在线 worker = {workers}）"
+        "——要算就去控制台起 worker（本机/云机同一认领协议），不要就停腿"
+    )
+
+
 def wait_job(
     base_url: str,
     token: str,
@@ -1110,6 +1156,8 @@ def wait_job(
     timeout_sec: float = 25 * 60,
     poll_sec: float = 5.0,
     poll_max_sec: float = 60.0,
+    report_every_sec: float = WAIT_REPORT_SEC,
+    now=time.time,
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
 ) -> dict:
     """阻塞等待 job 完成（worker 已 POST 结果）→ 返回结果 dict。超时抛 HubClientError。
@@ -1122,16 +1170,28 @@ def wait_job(
 
     单次探测与状态码分类在 `probe_job_result`（与 `poll_job` 同一实现）——本函数只负责
     「退避策略 + 超时收尾」，这正是它与非阻塞版该有的唯一区别。
+
+    饥饿响亮（2026-09-21，plan/accident.plan.md §3）：排队期每 `report_every_sec` 秒写一行
+    「在等什么」（等待认领 vs 执行中，见 `_wait_state_note`）——零 worker 时应当**响亮**地
+    等，而不是让操作员从超时反推（C 腿事故：无人认领空转 3.5 小时，日志只有超时）。
     """
-    deadline = time.time() + timeout_sec
+    t0 = now()
+    deadline = t0 + timeout_sec
     err_streak = 0
-    while time.time() < deadline:
+    next_report = t0 + report_every_sec if report_every_sec > 0 else float("inf")
+    while now() < deadline:
         probe = probe_job_result(base_url, token, jid, timeout=30.0)
         if probe.state == PROBE_READY:
             assert probe.result is not None  # ready 必带结果（probe_job_result 保证）
             return probe.result
         if probe.state == PROBE_PENDING:
             err_streak = 0  # 还没回 = 正常排队，复位退避
+            if now() >= next_report:
+                # 节流打点：按墙钟下一次报告点推进（不按「检查次数」——poll_sec 会被
+                # 调用方调成 0.01 的测试值，次数节流会当场把日志刷爆）。
+                waited = now() - t0
+                next_report = now() + report_every_sec
+                log(_wait_state_note(base_url, token, jid, waited))
             time.sleep(poll_sec)
             continue
         # 瞬时错误（隧道抖动/DNS/5xx）——与 404 同等续等，但按 2 的幂退避；
@@ -1160,9 +1220,19 @@ def wait_job(
             st2, body2 = _request(base_url, token, f"/jobs/{jid}/result", timeout=15.0)
             raise _job_failed_from_body(jid, body2 if st2 == 410 else s_body)
         elif state == "leased":
+            # 云仍在跑 ⇒ 再给一个完整预算（H3 原语义）。report/now 原样下传：
+            # 延长等待期仍要按同一节流继续「在等什么」的报告。
             log(f"wait_job: job {jid} 仍在 leased（云 PPO 执行中）——再等 {timeout_sec}s")
             return wait_job(
-                base_url, token, jid, timeout_sec=timeout_sec, poll_sec=poll_sec, log=log
+                base_url,
+                token,
+                jid,
+                timeout_sec=timeout_sec,
+                poll_sec=poll_sec,
+                poll_max_sec=poll_max_sec,
+                report_every_sec=report_every_sec,
+                now=now,
+                log=log,
             )
     raise HubClientError(f"wait_job: job {jid} 超时（>{timeout_sec}s）未完成")
 

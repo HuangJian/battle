@@ -183,32 +183,21 @@ def validate_args(args) -> None:
             "[run_rl] 启动参数非法（见上）——修复后重试；"
             "这些错误此前要等训练中途才暴露（P1-3 启动期校验）"
         ) from None
-    # ===== 远程模式（--ppo remote，plan §5）：内部强制 stream=0 + skip 模型构建；
-    # 与 --stream 1 / --double-buffer **显式互斥**——config 默认值（rl.<mode>.stream
-    # 对本地模式正确）静默降 0，用户显式传 --stream 1 / --double-buffer 1 才报错
-    # （run_rl.main 用 parse_args([]) 基线把显式性存到 args._explicit_*）。=====
-    if getattr(args, "ppo", "local") == "remote":
-        if getattr(args, "_explicit_stream", False) and int(getattr(args, "stream", 0) or 0):
-            raise SystemExit(
-                "[run_rl] --ppo remote 与显式 --stream 1 互斥（远程 = 每迭代结算一次 "
-                "PPO，wave 级 stream 只留本地模式）——删掉 --stream 1"
-            )
-        if getattr(args, "_explicit_double_buffer", False) and int(
-            getattr(args, "double_buffer", 0) or 0
-        ):
-            raise SystemExit(
-                "[run_rl] --ppo remote 与显式 --double-buffer 互斥（远程预采由 "
-                "--remote-precollect 控制，Q10 默认 0）——删掉 --double-buffer"
-            )
-        if getattr(args, "mode", "per-tick") != "per-tick":
-            raise SystemExit(
-                "[run_rl] --ppo remote 仅支持 per-tick 课程（v1 红线）——"
-                f"收到 mode={getattr(args, 'mode', 'per-tick')}"
-            )
-        # 静默降级（内部强制）：config 默认 stream/double-buffer 不适用于远程
-        args.stream = 0
-        args.double_buffer = 0
-        log("[run_rl] remote mode: stream/double-buffer forced to 0 (config defaults suppressed)")
+    # ===== 单一 PPO 路径（2026-09-21，plan/accident.plan.md §3）=====
+    # PPO 恒在 hub 队列上由 worker 认领执行 ⇒ 训练进程**没有**本机 PPO 能力。三条不变量：
+    #   ① 采集与 PPO 的 wave 级重叠（stream）不再存在：恒置 0（PPO 窗口由云 worker 承担，
+    #      本机没有 PPO 窗口可重叠）；
+    #   ② double-buffer 预采同规置 0；
+    #   ③ 本机 PPO 只有 per-tick 实现 ⇒ intent/goal 无路可走：**入口冻结、响亮拒启**
+    #      （实现保留，不静默报废能力）。盘上实测 0 门课程在用这两个 mode。
+    if getattr(args, "mode", "per-tick") != "per-tick":
+        raise SystemExit(
+            f"[run_rl] mode={getattr(args, 'mode', 'per-tick')!r} 无远端 PPO 实现（v1 红线只有 "
+            "per-tick）——本机 PPO 路径已随 §3 单一 PPO 路径退役，该 mode 入口暂冻结"
+            "（实现保留）；见 plan/accident.plan.md §3 的范围发现表"
+        )
+    args.stream = 0
+    args.double_buffer = 0
     # ===== BC-anchored kickstart（§363）：per-tick 缰绳双闸 =====
     # 缰绳必须 it1 就勒住（smash 轮）——warmup_iters!=0 会让首轮系数归零（见
     # run_rl.update_kwargs），属配置自相矛盾，启动期响亮拒绝。
@@ -806,6 +795,16 @@ class CourseConfig(BaseModel):
     difficulty: str = "hard"
     max_ticks: int = 12000
     seed_rotate: int = 0
+    #: 配对双臂共用的 rotateSeed（2026-09-21，plan/accident.plan.md §2）。
+    #: 配对比较要求两臂**同 rotateSeed**（`(rotateSeed, it)` 种子流逐轮一致 = McNemar 前提）。
+    #: 靠人手在命令行传会漏会错（实测 1789926833 vs 1789926915，差 82 秒抖动 ⇒ 配对失败返工）
+    #: ⇒ 值进**课程文件**（设计时写、可复现、可评审、可追溯），控制台开课原样透传。
+    #: `None`（缺席）= 老行为逐字节不变（`resolve_rotate_seed` 的继承/抖动三级）。
+    #: ⚠ 与 `seed_rotate` 一字之差、语义天壤（那个是“每关抽几局”的旧旋钮）——命名刻意区分。
+    #: ⚠ 经 `flat_overrides` 映射到 argparse dest `rotate_seed`（课程键与 dest 允许异名）；
+    #: 写 `null` 与**不写**不等价（`flat_overrides` 只看 `model_fields_set`：显式 null 会
+    #: 透传覆盖 ⇒ 调 CLI 后门请在课程文件里**删键**，不要写 null）。
+    paired_rotate_seed: int | None = None
     # ---- 按样本量动态采集（plan/dynamic-rollout-volume.plan.md；缺席 = 老行为逐字节不变）----
     #: 每轮目标 transitions（已结算 shard 的 nSamples 之和；分关达标线 = ceil(/关数)）。
     #: 0 = 关闭：走 seed_rotate 固定局数旧语义，`rl/volume_waves.py` 一个函数都不被调用。
@@ -997,6 +996,8 @@ class CourseConfig(BaseModel):
             "difficulty": "difficulty",
             "max_ticks": "max_ticks",
             "seed_rotate": "seed_rotate",
+            # 配对 rotateSeed：课程键 → argparse dest（§2；漏映射 = 静默失效，ent_break 前科）
+            "paired_rotate_seed": "rotate_seed",
             # 动态采集三键（缺席 = 老行为：args 走 rl-config/argparse 默认值 0）
             "target_transitions": "target_transitions",
             "est_samples_per_game": "est_samples_per_game",
@@ -1127,7 +1128,8 @@ def corpus_identity_fp(course: CourseConfig) -> str:
 
     覆盖 = 决定「一个样本是什么」的全部字段：**obs 编码布局（schema major + 指纹）** /
     mode / stages（解析后）/ difficulty / max_ticks / seed_rotate / seeds / player /
-    dodge / reward(formula+params+terminal+scheme)。
+    dodge / reward(formula+params+terminal+scheme)，以及**激活时**的
+    `paired_rotate_seed`（配对 rotateSeed，2026-09-21 §2）与 `target_transitions`。
     **刻意排除** iters/max_hours/eval_*/out/traj/bc/optimizer/schedule 等预算、测量、
     路径与优化器键——这些改动不构成语料混入，mid-run 编辑课程不得触发 D14 拒收
     （DECISIONS §2026-09-13-level-extraction 的配置修改分类学）。哈希**解析后**的值：
@@ -1175,6 +1177,11 @@ def corpus_identity_fp(course: CourseConfig) -> str:
 
         payload["volume_rule"] = VOLUME_RULE_V1
         payload["target_transitions"] = course.target_transitions
+    # 配对 rotateSeed（2026-09-21 §2）：与 seed_rotate 同类（决定**抽哪些**样本），故进身份；
+    # 但同样**仅在激活时**——无条件加入会让所有既有课程的指纹全体漂移（在跑的腿把已落盘
+    # shard 判成异身份，先例 `tests/test_rollout_volume.py:492-499`）。
+    if course.paired_rotate_seed is not None:
+        payload["paired_rotate_seed"] = int(course.paired_rotate_seed)
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 

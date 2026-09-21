@@ -161,7 +161,6 @@ def _reset() -> Any:
 def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     """假课程 + 假账本 + 假引擎：serve 的真接线、零真运算。"""
     monkeypatch.setattr(loop_core, "TrainingLoop", FakeLoop)
-    monkeypatch.setattr(loop_serve, "get_backend", lambda mode: f"backend:{mode}")
     ledger: dict[str, Any] = {"next_it": 1, "rows": []}
     monkeypatch.setattr(loop_plan, "load_ledger", lambda *a, **k: FakeLedger(**ledger))
     monkeypatch.setattr(
@@ -577,10 +576,10 @@ def test_cli_serve_without_courses_means_discovery(
     assert seen["control_file"] == "tmp/ctl.json"
     assert seen["argv"] == ["--mode", "goal"]  # `--mode` 是课程级参数，只透传它
 
-    # `--ppo` 同规（控制台起的 trainer 一律 remote）：它必须是**显式声明**的 cluster 参数，
+    # ★ §3：`--ppo` 已删除（单一 PPO 路径）——这里只剩 `--mode` 要钉。
     # 否则 argparse 先以 unrecognized arguments 拒启（`--serve --mode goal` 的老坑）。
-    run_rl_cluster.main(["--serve", "--ppo", "remote", "--mode", "per-tick", *lock])
-    assert seen["argv"] == ["--mode", "per-tick", "--ppo", "remote"]
+    run_rl_cluster.main(["--serve", "--mode", "per-tick", *lock])
+    assert seen["argv"] == ["--mode", "per-tick"]
 
 
 def test_cli_serve_takes_a_process_level_single_instance_lock(

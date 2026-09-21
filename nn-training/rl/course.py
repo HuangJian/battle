@@ -18,6 +18,22 @@ def parse_range(s: str) -> list[int]:
     return out
 
 
+def resolve_rotate_seed(seed: int, override: int | None, prev_rs: int | None, now_s: int) -> tuple[int, str]:
+    """rotateSeed 三级优先级（纯函数，返回 (值, 来源)）。
+
+    - explicit：`--rotate-seed` 显式覆盖（配对课程：两条腿传同一值 ⇒
+      `(rotateSeed, it)` 种子流逐轮一致，可配对比较；McNemar 前提）。
+    - inherited：续跑继承账本（课程连续 ⇒ 断点续跑剔除生效）。
+    - jitter：全新开始才用时刻抖动（旧行为逐字节不变）。
+    来源一并返回，供调用方响亮日志（配对核对读账本 run_start.rotateSeed）。
+    """
+    if override is not None:
+        return int(override) % (2**32), "explicit"
+    if prev_rs is not None:
+        return int(prev_rs), "inherited"
+    return (int(seed) * 1009 + 1 + int(now_s)) % (2**32), "jitter"
+
+
 def curriculum_active_count(order_len: int, it: int, start: int, every: int, grow: int) -> int:
     """课程模式第 `it` 轮激活的关卡数——(order_len, it) 的纯函数，断点续跑安全。
 

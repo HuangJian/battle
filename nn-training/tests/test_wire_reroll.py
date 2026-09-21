@@ -286,6 +286,29 @@ def test_download_payload_records_its_segment(monkeypatch) -> None:
     assert "payload=0.50MB/" in lines[0]
 
 
+def test_ts_code_cache_hit_is_accounted(tmp_path: Path) -> None:
+    """ts_code 命中也要进账（与 code 同规）：零字节命中不写进摘要 ⇒ 「本段没走网络」看不见。
+
+    实测教训：`code` 与 `blob` 都记了，`_ensure_ts_code` 那一处漏了——kind=iter 的会话里
+    ts_code 段就永远只是「缺席」（与 `cache-hit` 是两回事）。
+    """
+    sha = "c" * 64
+    (tmp_path / sha).mkdir()  # 内容寻址缓存已在盘上 ⇒ 命中路径
+    cache, nbytes, hit = worker_mod._ensure_ts_code(
+        "http://hub",
+        "t",
+        "j8",
+        {"ts_code_sha256": sha},
+        ts_root=tmp_path,
+        preloaded=None,
+        log=lambda _m: None,
+    )
+    assert hit is True and nbytes == 0 and cache == tmp_path / sha
+    lines: list[str] = []
+    worker_mod._wire_flush("j8", lines.append)
+    assert "ts_code=cache-hit" in lines[0]
+
+
 def test_post_result_never_rerolls_but_is_accounted(monkeypatch) -> None:
     """产物上行（POST result）：**永不重抽**（走既有 5 次退避），但字节要进账。"""
     seen: dict = {}

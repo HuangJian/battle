@@ -78,9 +78,9 @@ describe('任务包导出', () => {
     const args = taskBundleArgs(COURSE)
     expect(args[0]).toBe('nn-training/run_rl.py')
     expect(args).toContain(COURSE)
-    // 整段剩余：-1（跑到课程末尾）；--ppo remote（包里的 manifest 要云端 PPO 血缘）
+    // 整段剩余：-1（跑到课程末尾）；★ §3 起 argv 不再带 --ppo（单一 PPO 路径）
     expect(args[args.indexOf('--run-iters') + 1]).toBe('-1')
-    expect(args[args.indexOf('--ppo') + 1]).toBe('remote')
+    expect(args).not.toContain('--ppo')
     expect(args[args.indexOf('--export-bundle') + 1]).toBe(taskBundlePath(COURSE))
   })
 

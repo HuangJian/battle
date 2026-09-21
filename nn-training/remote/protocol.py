@@ -921,16 +921,45 @@ def _add_bytes(tf: tarfile.TarFile, name: str, data: bytes) -> None:
 
 
 def _extract_archive(src: Path, dest: Path) -> None:
-    """解包 payload 归档：**双读** zip / tar.xz（按内容判别，不看扩展名）。"""
-    if zipfile.is_zipfile(src):
+    """解包 payload 归档：**双读** tar 系 / zip（按内容**行为**判别，不看扩展名）。
+
+    ★ 判别顺序 = **先 tar 后 zip**（2026-09-21 事故，plan/accident.plan.md §4）：
+    原实现先问 `zipfile.is_zipfile()` —— 那是 stdlib 的 EOCD 形似字节启发式，xz 压缩
+    数据里恰好出现该形状时**会误报为 True**。实测事故：3501788 字节的**完好** tar.xz
+    被判成 zip ⇒ `BadZipFile: Bad offset for central directory` ⇒ worker 当瞬态重认领
+    ⇒ 同一份毒包每 5 分钟复现、零告警空转 3.5 小时。
+
+    反过来先试 tar 是**严格更可靠**的判别：tar 系靠 magic/透明度（`r:*`）认领，zip 的
+    local header（`PK\x03\x04`）永远过不了 tar 头验证 ⇒ 行为判别天然 try/except，不再
+    依赖任何启发式；legacy zip 包走后面的回退分支（tar.xz 化之前的包仍可解）。
+
+    打不开 = **内容决定性**失败 ⇒ `ProtocolError`（不是 `BadZipFile`/`TarError`）：
+    同一份字节重领永远不会自愈，必须让 worker 走确定性上报而不是重认领。
+    `OSError`（磁盘/权限）例外——那是基础设施瞬时故障，原样抛出交由重认领处理。
+    """
+    try:
+        with tarfile.open(src, "r:*") as tf:
+            try:
+                tf.extractall(dest, filter="data")
+            except TypeError:  # Python < 3.12 无 filter 参数
+                tf.extractall(dest)
+        return
+    except OSError:
+        raise  # 磁盘/权限类 = 瞬时基础设施问题，不归容器判别
+    except Exception as e:  # 非 tar 系（含 legacy zip）/ 损坏 —— 落 zip 分支再判一次
+        tar_err: BaseException = e
+    if not zipfile.is_zipfile(src):
+        raise ProtocolError(
+            f"payload 容器双读失败（tar 侧 {type(tar_err).__name__}: {tar_err}）——"
+            "内容确定性失败，重领同一份字节不会自愈"
+        ) from tar_err
+    try:
         with zipfile.ZipFile(src) as z:
             z.extractall(dest)
-        return
-    with tarfile.open(src, "r:*") as tf:
-        try:
-            tf.extractall(dest, filter="data")
-        except TypeError:  # Python < 3.12 无 filter 参数
-            tf.extractall(dest)
+    except Exception as e:
+        raise ProtocolError(
+            f"payload zip 解包失败（内容确定性）：{type(e).__name__}: {e}"
+        ) from e
 
 
 def pack_payload(
@@ -989,6 +1018,13 @@ def unpack_payload(payload_path: str | Path, dest: str | Path) -> tuple[dict, li
     dest_p = Path(dest)
     dest_p.mkdir(parents=True, exist_ok=True)
     _extract_archive(Path(payload_path), dest_p)
+    # 解包产物**非空**断言（2026-09-21，§4）：判别反转后"tar 打开成功却解出空包"是新
+    # 路径特有的失败形态（旧实现误判时是直接抛错）。空包必须响亮——否则下游按"零 shard"
+    # 静默继续（PPO 拿到空语料 = 比报错更坏的静默失败）。
+    if not any(dest_p.iterdir()):
+        raise ProtocolError(
+            f"payload 解包产物为空（{payload_path}）——容器判别/解包路径异常，拒绝静默继续"
+        )
     # M2（B1）：新 hub 产的 payload 不含根级 manifest.json（占位副本已删）——
     # 有则读、无则返回 {}（旧 payload 仍兼容；权威校验全走 job 记录 manifest）。
     mp = dest_p / "manifest.json"

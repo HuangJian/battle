@@ -207,57 +207,28 @@ def test_early_epoch_reached() -> None:
     assert early_epoch_reached(4, 4, 1) is True
 
 
-def test_dispatch_immediate_release_when_ppo_not_local(
+def test_dispatch_always_immediate_in_single_ppo_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """远端 PPO / 上云轮：本机份额立即放行（gate 置位 + 标记，非 R6）。"""
+    """派发期本机份额**恒**立即放行（§3 单一 PPO 路径：本机没有 PPO 窗口可争）。
+
+    历史（HEAD 之前）：这里分两档——远端 PPO ⇒ 立刻放行；本机 PPO ⇒ 让位到末 epoch
+    （`_local_gate_epoch_hook`）/ `_join_eval`。PPO 恒在 worker 上跑之后本机永不自己
+    训练，两档合并为恒 immediate（配套的 `_regate_local_eval` 也删了）。
+
+    为什么用**裸 args**（连 `ppo` 键都没有）钉：旧实现读的就是 `args.ppo`，那条读路径
+    一旦复活，这个用例当场红。
+    """
     import rl.eval_dispatch as ed
 
     monkeypatch.setattr(ed, "dispatch_eval_bg", lambda *a, **k: threading.Thread())
-    ts = _steps(tmp_path, ppo="remote")
+    ts = _steps(tmp_path, epochs=4)
     _archive(ts, 5, "{}")
     ts._dispatch_delayed_eval(6, {})
     assert ts._eval_gate is not None and ts._eval_gate.is_set()
-    assert ts._eval_gate_early_released is True
-    # 本机 PPO 接手（远端降级）⇒ 收回 R6
-    ts._regate_local_eval()
-    assert ts._eval_gate.is_set() is False
-    assert ts._eval_gate_early_released is False
-
-
-def test_dispatch_defers_local_share_on_local_ppo(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """本机 PPO：默认不放行（gate 未置位）；early_epochs>0 由 epoch 钩子放行。"""
-    import rl.eval_dispatch as ed
-
-    monkeypatch.setattr(ed, "dispatch_eval_bg", lambda *a, **k: threading.Thread())
-    ts = _steps(tmp_path, epochs=4)
-    _archive(ts, 5, "{}")
-    ts._dispatch_delayed_eval(6, {})
-    assert ts._eval_gate is not None and ts._eval_gate.is_set() is False
-    hook = ts._local_gate_epoch_hook()
-    assert hook is not None
-    hook(2, None)  # 还没到末 1 个 epoch
-    assert ts._eval_gate.is_set() is False
-    hook(3, None)  # 末 epoch 开始（4-1）
-    assert ts._eval_gate.is_set() is True
-    assert ts._local_gate_epoch_hook() is None  # 已开闸 → 不再注入钩子
-
-
-def test_dispatch_no_early_hook_when_disabled(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """policy.evalLocalEarlyEpochs=0 ⇒ 不加钩子，维持 R6（_join_eval 才放行）。"""
-    import rl.eval_dispatch as ed
-
-    monkeypatch.setattr(ed, "dispatch_eval_bg", lambda *a, **k: threading.Thread())
-    ts = _steps(tmp_path, epochs=4)
-    ts._last_dist_cfg = {"policy": {"evalLocalEarlyEpochs": 0}}
-    _archive(ts, 5, "{}")
-    ts._dispatch_delayed_eval(6, {})
-    assert ts._local_gate_epoch_hook() is None
-    assert ts._eval_gate is not None and ts._eval_gate.is_set() is False
+    # ★ 两个本机 PPO 专属方法随 §3 删除：复活即红（它们是「本机核心留给 PPO」的残留）
+    assert not hasattr(ts, "_regate_local_eval")
+    assert not hasattr(ts, "_local_gate_epoch_hook")
 
 
 class _AliveThread:

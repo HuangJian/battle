@@ -173,7 +173,6 @@ def world(bc_course: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Si
 
     # ---- RL 侧：假引擎 + 假 args（`open_course` 的 RL 分支不进真解析链）----
     monkeypatch.setattr(loop_core, "TrainingLoop", FakeRLLoop)
-    monkeypatch.setattr(loop_serve, "get_backend", lambda mode: f"backend:{mode}")
     monkeypatch.setattr(
         loop_plan, "load_ledger", lambda *a, **k: SimpleNamespace(next_it=1, rows=[])
     )

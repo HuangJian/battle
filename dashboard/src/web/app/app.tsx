@@ -130,7 +130,7 @@ export function App({ initial }: AppProps) {
   )
   const [trainOpen, setTrainOpen] = useState(false)
   // 开课弹窗（2026-09-20：进程与课程解耦后，「开哪门课」的课程级旋钮住在这里——训练模式 /
-  // rollout 位置 / 降级本机；而「启动服务进程」弹窗只带进程级选项）。
+  // rollout 位置；而「启动服务进程」弹窗只带进程级选项）。
   const [openCourseModal, setOpenCourseModal] = useState(false)
   const [poolFreshNonce, setPoolFreshNonce] = useState(0)
   // 当前页面（§5.1）：首帧取服务端 stamp 的 page（SSR 与客户端同值 → hydrate 一致）；
@@ -331,7 +331,7 @@ export function App({ initial }: AppProps) {
   const handleLaunch = async (opts?: TunnelLaunchOpts): Promise<void> => {
     setTrainOpen(false)
     // 启动**只带进程级选项**（2026-09-20）：本机 agent → 共享 hub → 共享 trainer。
-    // 课程级选项（训练模式 / rollout 位置 / 降级本机）随「开课」走（`openCourse`），
+    // 课程级选项（训练模式 / rollout 位置）随「开课」走（`openCourse`），
     // 服务端也把往 preset 里塞这些字段当错误拒掉（响亮，而不是静默丢掉）。
     const body: Record<string, unknown> = {}
     // M1/M2：传输选项随启动回写 rl-config + console-state（未选 = 不传，沿用现值）。
@@ -347,12 +347,10 @@ export function App({ initial }: AppProps) {
   const handleOpenCourse = async (opts: {
     trainMode: TrainMode
     rolloutSrc?: RolloutSrcMode
-    remoteDegrade: boolean
   }): Promise<void> => {
     setOpenCourseModal(false)
     await doAction('openCourse', {
       trainMode: opts.trainMode,
-      remoteDegrade: opts.remoteDegrade,
       ...(opts.rolloutSrc ? { rolloutSrc: opts.rolloutSrc } : {}),
     })
   }

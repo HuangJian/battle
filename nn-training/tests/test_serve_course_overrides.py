@@ -31,7 +31,6 @@ def _args(**kw: Any) -> Namespace:
     base: dict[str, Any] = {
         "remote_transport": "auto",
         "remote_hub_url": "",
-        "remote_degrade_after": 0,
         "gate_halt_mode": "halt",
         "push_node_url": "",
         "workers": 8,
@@ -54,7 +53,6 @@ def test_overlay_applies_only_the_whitelisted_keys() -> None:
     cfg = {
         "courses": {
             "c5-tick": {
-                "remote_degrade_after": 3,
                 "gate_halt_mode": "skip",
                 # ↓ 2026-09-19 起**已不是**被读的键（课程与节点正交）；留着不报错也不生效
                 "remote_transport": "pull",
@@ -66,8 +64,7 @@ def test_overlay_applies_only_the_whitelisted_keys() -> None:
         }
     }
     applied = loop_serve.apply_course_machine_overrides(args, "c5-tick", cfg, log_fn=lines.append)
-    assert applied == ["remote_degrade_after", "gate_halt_mode"]
-    assert args.remote_degrade_after == 3
+    assert applied == ["gate_halt_mode"]
     assert args.gate_halt_mode == "skip"
     # 非白名单键：**没有**被 setattr（它们属于别的读者，或者已无读者）
     assert args.remote_transport == "auto"
@@ -111,14 +108,14 @@ def test_transport_coupling_keys_are_not_read_anymore() -> None:
 def test_overlay_skips_keys_the_args_namespace_does_not_have() -> None:
     """BC 解析器比 RL 少几个键 ⇒ **响亮跳过**，不 setattr 造字段（造出来的字段没有读者）。"""
     lines: list[str] = []
-    args = Namespace(remote_degrade_after=0)  # 只有这一个字段
+    args = Namespace()  # 白名单键一个都没有（BC 解析器就是这个形状）
     applied = loop_serve.apply_course_machine_overrides(
         args,
         "c5-tick",
-        {"courses": {"c5-tick": {"remote_degrade_after": 3, "gate_halt_mode": "halt"}}},
+        {"courses": {"c5-tick": {"gate_halt_mode": "halt", "workers": 4}}},
         log_fn=lines.append,
     )
-    assert applied == ["remote_degrade_after"]
+    assert applied == []
     assert not hasattr(args, "gate_halt_mode")
     assert any("gate_halt_mode" in ln and "跳过" in ln for ln in lines)
 
@@ -145,7 +142,8 @@ def test_real_rl_config_keeps_course_args_unchanged() -> None:
     args = loop_serve.course_args("c4-dodge")
     assert args.remote_transport == "auto"  # rl-config 未配 ⇒ argparse 默认
     assert args.gate_halt_mode == "halt"
-    assert int(args.remote_degrade_after) == 0
+    # ★ §3：`--remote-degrade-after` 已删除 ⇒ 该字段不该再存在于 args
+    assert not hasattr(args, "remote_degrade_after")
 
 
 # ---------------------------------------------------------------- 单实例锁

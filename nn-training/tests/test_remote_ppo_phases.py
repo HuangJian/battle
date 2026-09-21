@@ -51,14 +51,13 @@ class _Rig:
 
     def __init__(self, *, probe_result: dict | None, policy_raises: bool = True) -> None:
         self.step = TrainingSteps()
-        self.step.args = types.SimpleNamespace(ppo="remote", remote_degrade_after=0)
+        self.step.args = types.SimpleNamespace()
         self.step._remote_fail = 0
-        self.step._remote_degraded = False
         self.calls: list[str] = []
         self.published: list[RemotePpoJob] = []
         self.landed: list[dict] = []
         self.policy_excs: list[BaseException] = []
-        #: 策略返回 True = 上抛；False = 已降级
+        #: 策略返回 True = 上抛（单一 PPO 路径无「降级到本机」档）
         self.policy_says_raise = policy_raises
         self.probe_result = probe_result
 
@@ -84,10 +83,6 @@ class _Rig:
         def policy(it: int, e: BaseException) -> bool:
             self.calls.append("policy")
             self.policy_excs.append(e)
-            if not self.policy_says_raise:
-                # 模拟真策略的降级副作用（`args.ppo` 置 local + 标记）
-                self.step.args.ppo = "local"
-                self.step._remote_degraded = True
             return self.policy_says_raise
 
         _stub(self.step, "_remote_ppo_publish", publish)
@@ -153,48 +148,47 @@ def test_probe_terminal_failure_goes_through_the_policy_and_reraises() -> None:
     assert isinstance(rig.policy_excs[0], JobFailedError)
 
 
-def test_publish_failure_can_degrade_to_local() -> None:
-    """发布失败也走**同一份**判决：策略说降级 ⇒ 返回 None 且 `args.ppo` 已置 local。"""
-    rig = _Rig(probe_result=None, policy_raises=False)
+def test_publish_failure_goes_through_the_policy_and_reraises() -> None:
+    """发布失败也走**同一份**判决：策略上抛 ⇒ 本轮失败（§3：无「降级到本机」档）。"""
+    rig = _Rig(probe_result=None)
 
     def boom(_it: int) -> RemotePpoJob:
         raise JobFailedError("job 失败: 节点干不了", kind="ProtocolError")
 
     _stub(rig.step, "_remote_ppo_publish", boom)
     ctx = RoundContext(it=1, resumable=True)
-    assert rig.step._remote_ppo_step(ctx) is None
-    assert rig.step.args.ppo == "local"  # 调用方据此接着跑本机 PPO
-    assert rig.step._remote_degraded is True
+    with pytest.raises(JobFailedError):
+        rig.step._remote_ppo_step(ctx)
+    assert rig.calls[-1] == "policy"
     assert ctx.remote is None  # 没发布成功 ⇒ 不留半个会话
 
 
 def test_real_policy_is_wired_into_the_phase_driver(
     tmp_path: Path,
 ) -> None:
-    """真策略（不是假件）连进三相驱动：连败达阈值 ⇒ 降级到本机并可继续跑。
+    """真策略（不是假件）连进三相驱动：任何一段失败都走同一份判决（连败 3 → ABORT 停腿）。
 
-    这条用例的目的是钉**接线**：三相里的任何一段失败都必须走进 `_handle_remote_failure`
-    的那套计数/停腿/降级判决（`tests/test_remote_degrade.py` 已验证判决本身）。
+    这条用例钉**接线**：三相里的失败必须走进 `_handle_remote_failure` 的计数/停腿判决；
+    单一 PPO 路径（§3）下**没有**"降级到本机"档，所以失败被上抛给调用方（本轮失败/停腿）。
+    `tests/test_remote_failure_policy.py` 验证判决本身的各档细节。
     """
     from remote.hub_client import HubClientError
 
     st = TrainingSteps()
-    st.args = types.SimpleNamespace(ppo="remote", remote_degrade_after=1)
-    st._remote_fail = 1  # 已经连败一次 ⇒ 本次失败即达阈值
+    st.args = types.SimpleNamespace()
+    st._remote_fail = 2  # 已连败两次 ⇒ 本次失败即达 3
     st._jsonl_path = tmp_path / "training_log.jsonl"
-    st._remote_degraded = False
-    _stub(st, "_ensure_local_ppo_stack", lambda: None)  # 不真建 torch 栈
+    st._leg_abort = False
 
     def boom(_it: int) -> RemotePpoJob:
-        # 502 = 瞬时错误（不是 401/403 那类「重试无意义」），所以会走到阈值判定
+        # 502 = 瞬时错误（不是 401/403 那类「重试无意义」），所以会走到连败判定
         raise HubClientError("probe_job_result: HTTP 502: bad gateway")
 
     _stub(st, "_remote_ppo_publish", boom)
-    ctx = RoundContext(it=3, resumable=True)
-    assert st._remote_ppo_step(ctx) is None  # 降级 ⇒ 调用方接着跑本机 PPO
-    assert st.args.ppo == "local"
-    assert st._remote_degraded is True
-    assert st._remote_fail == 2  # 失败已计账
+    with pytest.raises(HubClientError):
+        st._remote_ppo_step(RoundContext(it=3, resumable=True))
+    assert st._remote_fail == 3
+    assert st._leg_abort is True  # 停腿，绝不下沉到本机
 
 
 def test_land_failure_goes_through_the_policy() -> None:

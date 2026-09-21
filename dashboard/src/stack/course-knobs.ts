@@ -10,8 +10,12 @@
  *
  *  | 键 | 谁关心 | 为什么需要 |
  *  |---|---|---|
- *  | `remote_degrade_after` | T7 降级 | 远端连败是否 opt-in 降级本机（0 = 关，默认） |
  *  | `gate_halt_mode` | RL 门禁 | 门禁失败语义（halt = 打进停机态） |
+ *
+ *  ★ **2026-09-21：删掉了 `remote_degrade_after`**（plan/accident.plan.md §3「无 fallback」）。
+ *  单一 PPO 路径下「远端连败就降级到本机算」这个档位不存在：loop 自己没有计算能力，
+ *  无人认领就**等着**（状态响亮报「等待认领中」），永不自己算。留一把会写进 rl-config 的
+ *  死旋钮 = 给操作员一个不会发生的承诺 ⇒ 连同 UI/透传一起删，残留值进 legacy 清理名单。
  *
  *  ★ **2026-09-19：删掉了 `remote_transport` 与 `remote_hub_url`**（用户口径「课程任务与
  *  worker 节点互相正交」）。它们把「这门课走哪条传输路 / 打哪个 hub」变成课程属性：同一门课
@@ -26,8 +30,6 @@ import type { CourseConf, RlConfig } from '../core/types'
 
 /** 控制台会写的旋钮（未给的键**不动**——不写 = 沿用现有值，绝不「顺手清空」）。 */
 export interface CourseMachineKnobs {
-  /** T7：远端连败降级本机的阈值（0 = 关）。 */
-  remoteDegradeAfter?: number
   /** 门禁失败语义。 */
   gateHaltMode?: string
 }
@@ -37,7 +39,6 @@ export function courseMachineKnobs(cfg: RlConfig, course: string): CourseMachine
   const b = cfg.courses?.[course]
   if (!b) return {}
   const out: CourseMachineKnobs = {}
-  if (b.remote_degrade_after !== undefined) out.remoteDegradeAfter = b.remote_degrade_after
   if (b.gate_halt_mode !== undefined) out.gateHaltMode = b.gate_halt_mode
   return out
 }
@@ -54,10 +55,8 @@ export function writeCourseMachineKnobs(
 ): { cfg: RlConfig; changed: boolean } {
   const courses = { ...cfg.courses }
   const cur: CourseConf = { ...courses[course] }
-  const snap = (c: CourseConf): string =>
-    JSON.stringify([c.remote_degrade_after ?? null, c.gate_halt_mode ?? null])
+  const snap = (c: CourseConf): string => JSON.stringify([c.gate_halt_mode ?? null])
   const before = snap(cur)
-  if (knobs.remoteDegradeAfter !== undefined) cur.remote_degrade_after = knobs.remoteDegradeAfter
   if (knobs.gateHaltMode !== undefined) cur.gate_halt_mode = knobs.gateHaltMode
   if (snap(cur) === before) return { cfg, changed: false }
   courses[course] = cur
@@ -76,12 +75,17 @@ export function applyCourseMachineKnobs(
 
 // ────────────────────────── legacy 清理（2026-09-19） ──────────────────────────
 
-/** 已废的**课程级传输耦合**键（不再被任何读者读；旧预设写过）。 */
+/** 已废的课程级键（不再被任何读者读；旧预设/旧开课弹窗写过）。
+ *
+ *  `remote_degrade_after`（2026-09-21 / §3）：单一 PPO 路径下没有「降级本机」这个档位，
+ *  python 侧已从 `COURSE_MACHINE_OVERRIDE_KEYS` 白名单移除 ⇒ 它**已无读者**，留着只会
+ *  让操作员以为「我配过降级」。 */
 const LEGACY_COURSE_KEYS = [
   'push_node_url',
   'remote_transport',
   'remote_hub_url',
   'hub_push',
+  'remote_degrade_after',
 ] as const
 
 /** 已废的**本机伪节点**标记（R3-7：伪节点退出控制台，那条「一键本机 push」也删了）。
@@ -91,7 +95,7 @@ const LEGACY_NODE_FLAG = 'local_push' as const
 
 /** 清理 legacy 的传输耦合键与伪节点条目（幂等；返回删掉了什么，供日志/测试断言）。
  *
- *  为什么必须**删**而不只是「停止读取」：这些键描述的是「哪门课走哪条路 / 哪台机器」，
+ *  为什么必须**删**而不只是「停止读取」：这些键描述的是「哪门课走哪条路 / 哪台机器 / 怎么降级」，
  *  在新模型里是被部署决定的（`rl.hub_push` + 登记节点 + hub 队列）。留一条残留的
  *  `push_node_url` 或 `local_push` 节点：前者已无读者但会误导操作员「我配过执行面」，
  *  后者**仍有读者**（python `_gpu_push_nodes` 全取登记节点）⇒ 会把训练指向一条没人服务的

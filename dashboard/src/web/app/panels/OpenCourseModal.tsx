@@ -1,6 +1,6 @@
 /** OpenCourseModal.tsx — **开课**弹窗（2026-09-20 用户指令：进程与课程解耦后的独立入口）。
  *
- *  为什么课程级选项（训练模式 / rollout 位置 / 降级本机）住在这里而不是「启动服务进程」弹窗：
+ *  为什么课程级选项（训练模式 / rollout 位置）住在这里而不是「启动服务进程」弹窗：
  *  它们全是**课程级**旋钮（落 rl-config `courses.<课>.*`）——进程是共享的一台，回答不了
  *  「这门课怎么跑」。放在启动弹窗里，操作员点一次「启动」就被迫为一门课做决定；放在这里，
  *  才与「开哪门课」这个动作对齐。
@@ -11,7 +11,6 @@ import { useState } from 'preact/hooks'
 import type { RolloutSrcMode, TrainMode } from '../../../core/types'
 import type { ModeView } from '../../view'
 import { SegmentedControl } from '../../components/SegmentedControl'
-import { Toggle } from '../../components/Toggle'
 
 export interface OpenCourseModalProps {
   open: boolean
@@ -20,18 +19,13 @@ export interface OpenCourseModalProps {
   /** 该课当前生效值（`modes.rolloutSrc === 'run'` ⇒ 这把键已经是离线档）。 */
   modes: ModeView
   onClose: () => void
-  onConfirm: (opts: {
-    trainMode: TrainMode
-    rolloutSrc?: RolloutSrcMode
-    remoteDegrade: boolean
-  }) => void
+  onConfirm: (opts: { trainMode: TrainMode; rolloutSrc?: RolloutSrcMode }) => void
   /** 局域网只读视图：按钮禁用（服务端 403 兜底）。 */
   readOnly?: boolean
 }
 
 const TC_OPEN_TRAIN_MODE = 'tc.openCourse.trainMode'
 const TC_OPEN_ROLLOUT = 'tc.openCourse.rolloutSrc'
-const TC_OPEN_DEGRADE = 'tc.openCourse.degrade'
 
 function readLocal(key: string): string {
   try {
@@ -70,18 +64,15 @@ export function OpenCourseModal({
     if (local === 'local' || local === 'node' || local === 'auto') return local
     return modes.rolloutSrc === 'node' || modes.rolloutSrc === 'auto' ? modes.rolloutSrc : 'local'
   })
-  const [remoteDegrade, setRemoteDegrade] = useState(() => readLocal(TC_OPEN_DEGRADE) === '1')
 
   if (!open || !course) return null
   const confirm = (): void => {
     writeLocal(TC_OPEN_TRAIN_MODE, trainMode)
     writeLocal(TC_OPEN_ROLLOUT, rolloutSrc)
-    writeLocal(TC_OPEN_DEGRADE, remoteDegrade ? '1' : '0')
     onConfirm({
       trainMode,
       // 离线档忽略 rollout 选择（服务端也会忽略：离线只认 run/run_iters 那对键）。
       rolloutSrc: trainMode === 'online' ? rolloutSrc : undefined,
-      remoteDegrade,
     })
   }
   return (
@@ -147,20 +138,8 @@ export function OpenCourseModal({
             </p>
           </>
         )}
-        <div className="tc-line tc-toggle-group">
-          <Toggle
-            label="降级本机"
-            checked={remoteDegrade}
-            title={
-              '远端 PPO 连败是否降级到本机进程内 PPO（本课旋钮 courses.<课>.remote_degrade_after）。\n' +
-              '· 关（默认）：连败 3 次写 ABORT 停腿——不静默切慢速本机。\n' +
-              '· 开：连败 3 次后懒加载本机 torch/model 并继续训练。\n' +
-              '开课时施加；已开着的课要**停课 → 重新开课**（或重启共享 trainer）才换。'
-            }
-            disabled={readOnly}
-            onChange={setRemoteDegrade}
-          />
-        </div>
+        {/* ★ §3（2026-09-21）：删掉「降级本机」开关。单一 PPO 路径下没有这个档位——
+            PPO 恒为「发布到 hub 队列 + 等 worker 认领」，无人认领就响亮报「等待认领中」。 */}
         <div className="tc-modal__foot">
           <span className="sp" />
           <button type="button" className="tc-btn" onClick={onClose}>

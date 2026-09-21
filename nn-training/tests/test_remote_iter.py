@@ -974,8 +974,8 @@ def _stub_iter_spec(monkeypatch) -> None:
 def test_remote_iter_fatal_http_aborts_without_retry(tmp_path: Path, monkeypatch) -> None:
     """401/403（鉴权/闭锁类）在**上云轮**也必须第一次就写 ABORT 停腿。
 
-    上云轮不走 `_remote_ppo_or_degrade`（loop_core 在 `_node_rollout` 时跳过
-    `_serial_ppo`），所以那条路的「4xx 立即停腿」得在 `_remote_iter` 里补上——否则
+    上云轮不走 `_serial_ppo` 的远端三相（loop_core 在 `_node_rollout` 时跳过它，
+    直接调 `_remote_ppo` 组合入口），所以那条路的「4xx 立即停腿」得在 `_remote_iter` 里补上——否则
     x3-step 事故的同一浪费会重演：5×30s 重发同一个 job 才死。
     """
     from remote.hub_client import HubClientError

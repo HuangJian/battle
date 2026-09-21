@@ -55,7 +55,7 @@ from rl.loop_plan import (
 from rl.loop_runner import ROUND_KIND, LoopRunner
 from rl.loop_scheduler import ABORTED, QUEUE_DONE, Supervisor
 from rl.loop_tasks import RoundFacts, Task, pending_tasks
-from rl.modes import apply_mode_flags, get_backend, merged_mode_args, resolve_mode
+from rl.modes import apply_mode_flags, merged_mode_args, resolve_mode
 from rl.queue import REPO_ROOT
 from train.loop_util import acquire_lock, cleanup_lock, course_lock_path
 
@@ -159,7 +159,9 @@ def prepare_process(argv: list[str] | None = None) -> str:
 #: 为什么现在需要它们：单进程服务器（`--serve`）**无法**用进程级 CLI 表达「这门课怎么跑」
 #: ——一个进程服务 N 门课，命令行只有一份。控制台过去往**每门课**的 trainer 命令行里塞
 #: `--remote-degrade-after` / `--gate-halt-mode`，收敛成一个共享 trainer 后那些旋钮搬到这个块
-#: （per-course，且随盘持久——比一次性的 flag 耐久）。
+#: （per-course，且随盘持久——比一次性的 flag 耐久）。「塞进 argv」那种旋钮**现在一个都没有**：
+#: 2026-09-21（§3）`--ppo` 与 `--remote-degrade-after` 双删后，trainer 命令行上没有任何
+#: 与「PPO 跑在哪 / 怎么降级」相关的可调参数。
 #:
 #: ★ **2026-09-19 删掉了两个键**（用户口径「课程任务与 worker 节点互相正交」）：
 #: `remote_transport` 与 `remote_hub_url`。它们是「把**这门课**钉到某条传输路 / 某个 hub」的
@@ -168,8 +170,9 @@ def prepare_process(argv: list[str] | None = None) -> str:
 #: 静默失效）；控制台启动时会把它们连同 `push_node_url` / `hub_push` 一并清理（见
 #: `dashboard/src/stack/course-knobs.ts::pruneLegacyCourseKnobs`）。
 COURSE_MACHINE_OVERRIDE_KEYS: tuple[str, ...] = (
-    "remote_degrade_after",  # T7 远端连败降级本机的阈值（控制台的 opt-in 开关）
     "gate_halt_mode",  # 门禁失败语义（halt/skip…）
+    # ★ 2026-09-21 删掉 `remote_degrade_after`（plan/accident.plan.md §3）：单一 PPO 路径下
+    #   没有"就地下沉到本机算"这回事；旧配置里若还留着该键，**不再被读**（不报错）。
 )
 
 
@@ -419,17 +422,18 @@ def _open_bc_course(
 
 
 def ensure_ready(rt: CourseRuntime, engine: Any) -> None:
-    """首次执行前 `_setup()` 一次；同一对象再进（可能刚被池 `release_torch` 过）补齐栈。
+    """首次执行前 `_setup()` 一次。
 
     「引擎对象换了」= 新建（首用 / 被池驱逐后重建）⇒ 走 `_setup()`（与一次进程重启同义：
-    `run_start` 续写、账本指针仍是 SSOT）；「对象没换」⇒ `_ensure_local_ppo_stack()` 幂等补齐
-    （未被释放时立即返回，零代价）。
+    `run_start` 续写、账本指针仍是 SSOT）；「对象没换」⇒ 无事可做。
+
+    ★ 2026-09-21（§3）：原先这里还要 `_ensure_local_ppo_stack()` 补齐 torch 栈（池
+    `release_torch` 之后）。单一 PPO 路径下循环**不建** model/opt/ref ⇒ 没有栈要补，
+    本机也不再付 torch 基线内存（D2）。
     """
     if rt.engine is not engine:
         engine._setup()
         rt.engine = engine
-        return
-    engine._ensure_local_ppo_stack()
 
 
 def build_factory(
@@ -470,7 +474,8 @@ def build_factory(
             return engine
         from run_rl import update_kwargs
 
-        engine = TrainingLoop(rt.args, get_backend(rt.args.mode), bun, update_kwargs)
+        # ★ §3：单一 PPO 路径 ⇒ 引擎不建本机 PPO 栈，后端传 None（hub 免 torch，D2）。
+        engine = TrainingLoop(rt.args, None, bun, update_kwargs)
         rt.runner = LoopRunner(
             loop=engine,
             course=course,

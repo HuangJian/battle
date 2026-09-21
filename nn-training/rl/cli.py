@@ -302,6 +302,13 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
     )
     ap.add_argument("--seed", type=int, default=_d("seed", 7))
     ap.add_argument(
+        "--rotate-seed",
+        type=int,
+        default=None,
+        help="显式 rotateSeed 覆盖（配对课程）：两条腿传同一值 ⇒ (rotateSeed,it) "
+        "种子流逐轮一致，可配对比较；缺省 None = 旧行为（续跑继承账本 / 全新时刻抖动）",
+    )
+    ap.add_argument(
         "--normalize-ret",
         type=int,
         default=_d("normalize_ret", 0),
@@ -414,19 +421,14 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         default="",
         help="等价于 --course <路径>（显式文件路径形式；与 --course 互斥）",
     )
-    # ===== 远程 PPO（plan/remote-ppo-architecture.md §5/§9）：PPO 在云端 GPU，rollout 在本地 =====
-    # 默认 local = 现状逐字节回归基线；remote 内部强制 stream=0（每迭代结算一次 PPO）+
-    # skip 模型构建（hub 免 torch，D2），且与 --stream 1 / --double-buffer 显式互斥（fail-fast）。
-    ap.add_argument(
-        "--ppo",
-        default=_d("ppo", "local"),
-        choices=("local", "remote"),
-        help="PPO 执行面：local（现状，CPU/本机） / remote（云端 GPU worker，旁路 hub-server）",
-    )
+    # ===== 单一 PPO 路径（2026-09-21，plan/accident.plan.md §3）：`--ppo` 旗标**已删除** =====
+    # PPO 恒为「打包 → 发布到 hub 队列 → 等 worker 认领 → 三重校验落位」；循环自己没有计算
+    # 能力 ⇒「PPO 跑在哪」这个概念在训练侧不存在（想本机算，操作员在控制台起本机 worker，
+    # 与云机走**同一认领协议**）。local/remote 分支、launcher env、bare 缺省一并删除。
     ap.add_argument(
         "--smoke",
         action="store_true",
-        help="冒烟预演（配 --ppo remote）：收到冒烟回显结果（remote_worker --echo）后"
+        help="冒烟预演：收到冒烟回显结果（remote_worker --echo）后"
         "作废本轮并干净退出；it 不前进、不写 iteration 事件",
     )
     ap.add_argument(
@@ -523,7 +525,7 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         type=int,
         default=_d("run_iters", 0),
         help="半离线整段：一次领走 N 轮（kind=run job；<0 = 跑到课程末尾）——节点自主跑完"
-        "并逐轮落产物（K/D 官方目录，可打包下载）；0 = 关。要求 --ppo remote",
+        "并逐轮落产物（K/D 官方目录，可打包下载）；0 = 关",
     )
     ap.add_argument(
         "--export-bundle",
@@ -550,15 +552,6 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         default=_d("remote_iter_workers", 0),
         help="M3 rollout 上云：节点侧 rollout 并发（0 = 用 args.workers，即课程 quotas.workers；"
         "节点侧另有上限钳制）",
-    )
-    ap.add_argument(
-        "--remote-degrade-after",
-        type=int,
-        default=_d("remote_degrade_after", 0),
-        help="R9（2026-09-15 T7 默认改关）：远端 PPO 连续失败 N 次后降级本机进程内 PPO。"
-        "**默认 0 = 不自动降级**，连败 3 次写 ABORT 停腿（云端不可达应响亮失败，"
-        "不静默切慢速本机）。N>0 为操作员显式 opt-in（控制台启动弹窗开关）；"
-        "降级时会懒加载 torch + model/opt（T7 修复），本轮起本机 PPO",
     )
     ap.add_argument(
         "--gate-remediate-stop-after",

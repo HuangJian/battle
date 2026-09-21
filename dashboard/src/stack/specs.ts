@@ -382,12 +382,6 @@ export interface TrainingLoopSpecOpts {
   venv: { python: string; sitePackages: string }
   /** 门禁触发时的动作：halt = 下发云端停机达令（默认）；notify = 只提示不停机。 */
   gateHaltMode?: GateHaltMode
-  /**
-   * 远端 PPO 连败是否降级到本机进程内 PPO（T7，2026-09-15）。
-   * **默认 false** → `--remote-degrade-after 0`（连败 3 次 ABORT 停腿，不静默切本机）。
-   * true → `--remote-degrade-after 3`（显式 opt-in；降级前 Python 会懒加载本机栈）。
-   */
-  remoteDegrade?: boolean
 }
 
 /**
@@ -437,8 +431,9 @@ export function writeGateHaltMode(course: string, mode: GateHaltMode): GateHaltM
  *  「漏注册 ⇒ 那门课永久饿死而表面一切正常」。一门课都没有也照常运行（队列空着等）。
  *
  *  **不给每課 CLI 旋钮**：单进程没有「这门课的 flag」这一说——它住在机器侧覆盖
- *  `rl-config → courses.<课>.{remote_transport, remote_hub_url, remote_degrade_after, gate_halt_mode}`
- *  （serve 的 `apply_course_machine_overrides`）；`ppo=remote` 是**全进程同一个**，故走 argv。
+ *  `rl-config → courses.<课>.{gate_halt_mode}`（serve 的 `apply_course_machine_overrides`）。
+ *  ★ 2026-09-21（§3）：backend 不再是旋钮（`--ppo` 已删）——PPO 恒为「发布到 hub 队列 +
+ *  等 worker 认领」，故命令行上**一个 PPO 相关的旗标都没有**。
  *
  *  日志：stdout 落共享 `trainer-cluster.log`；**每课仍有自己的镜像**（serve 的行路由，
  *  路径 = 该课 traj 下的 `training-loop.log`）⇒ 组件卡的「日志增长」就绪判定与 `/log/trainingLoop`
@@ -464,9 +459,8 @@ export function trainerServeSpec(
       // traj 根必须绝对（hub 同一个坑：相对路径会指到控制台 cwd）
       '--traj-root',
       path.join(REPO_ROOT, 'tmp'),
-      // PPO 在云端 GPU（控制台起的训练一律 remote）
-      '--ppo',
-      'remote',
+      // ★ §3（2026-09-21）：`--ppo` 已删除 —— PPO 恒为「发布到 hub 队列 + 等 worker 认领」，
+      //   训练侧没有「跑在哪」这个参数；想要本机算，起本机 worker 组件（同一认领协议）。
       // 控制文件（暂停意图）：控制台写、训练侧每拍读——显式给绝对路径，不靠 cwd
       '--control-file',
       path.join(REPO_ROOT, 'tmp', 'loop-control.json'),
@@ -504,17 +498,13 @@ export function trainingLoopSpec(cfg: RlConfig, s: TrainingLoopSpecOpts): ProcSp
       path.join(REPO_ROOT, TRAINING_LOOP_ENTRY),
       '--course',
       s.course,
-      '--ppo',
-      'remote',
       // ★ 2026-09-19：**不再钉死传输**（同 BC 分支）：执行面由 `rl.hub_push` + 登记节点 +
       // hub 队列裁决；`--remote-transport` 一律交回训练侧 auto。冒烟预演靠 env
       // `REMOTE_PUSH_NODE` 定方向。
       ...hubFlags,
       ...(s.smoke ? ['--smoke'] : []),
       ...(s.gateHaltMode ? ['--gate-halt-mode', s.gateHaltMode] : []),
-      // T7：默认不自动降级本机。opt-in 时才给 N>0。
-      '--remote-degrade-after',
-      String(s.remoteDegrade ? 3 : 0),
+      // ★ §3：`--remote-degrade-after` 已删除（单一 PPO 路径无「就地降级本机」档）。
     ],
     env: {
       PYTHONPATH: `${s.venv.sitePackages}${path.delimiter}${NN_TRAINING}`,

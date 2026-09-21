@@ -12,13 +12,13 @@ from pathlib import Path
 from pid_probe import pid_alive as _pid_alive_impl
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from platform_utils import force_utf8_stdio
-from remote.protocol import coef_active
+from remote.protocol import COURSE_ENABLE_MARKER, coef_active
 from rl.archive import ensure_current_branch_pushed
 from rl.cli import build_argparser
 from rl.collect_only import run_collect_only
 from rl.log import Tee as _Tee
 from rl.log import log
-from rl.modes import apply_mode_flags, get_backend, merged_mode_args, resolve_mode
+from rl.modes import apply_mode_flags, merged_mode_args, resolve_mode
 from rl.queue import (  # noqa: F401 — run_rollout_queue re-exported for tests
     REPO_ROOT,
     run_rollout_queue,
@@ -154,6 +154,38 @@ def _cleanup_run_rl_lock(lock_path: str) -> None:
         pass
 
 
+def _require_course_open(args, traj_root: Path) -> None:
+    """开课闸（纯逻辑，可单测）：训练循环只认控制台写的「开课」标记。
+
+    ★ 2026-09-21（plan/accident.plan.md §1）：CLI detached 直启会绕过控制台开课流程
+    （漏开课标记 / 暂停意图解禁 / hub 课程模式三件套），并让 agent 去手写控制台拥有的
+    状态文件（`training-enabled.txt` / `loop-control.json`）与控制台写面打架。
+
+    判据**同源调用** `rl.loop_plan.course_enabled`（= `enabled_courses` 的谓词；标记与
+    traj 目录同址 `<traj>/training-enabled.txt`）——**禁**在这里另写第二份"标记存在性
+    检查"（第二份判据 drift 就是这类事故的老 pattern）。
+
+    ⚠ 落点：`--traj` 是**本课**的 traj 目录（run_rl 直接在那下面写 training_log.jsonl），
+    所以用谓词 `course_enabled(traj)`；**不得** `enabled_courses(traj)`（那会去扫子课程，
+    判据错位）。范围：只卡**训练循环** —— collect-only（调用点在其后）、`--smoke` 预演、
+    无课程（legacy 非课程路径）都不受影响。
+    """
+    if getattr(args, "smoke", False):
+        return
+    if getattr(args, "course_obj", None) is None:
+        return  # 非课程路径：老用法逐字节不变（开课标记只存在于课程 traj 目录下）
+    from rl.loop_plan import course_enabled
+
+    if course_enabled(traj_root):
+        return
+    name = str(getattr(args, "course_name", "") or "?")
+    raise SystemExit(
+        f"[run_rl] 课程 {name!r} 未开课：{Path(traj_root) / COURSE_ENABLE_MARKER} 不存在 ——\n"
+        "  训练只从控制台开课（dashboard → 课程 → 开课），不接受 CLI 直启：\n"
+        "  直启会漏掉开课标记 / 暂停意图解禁 / hub 课程模式三件套。"
+    )
+
+
 def main() -> None:
     # 子进程字节流恒 UTF-8（压过 PYTHONIOENCODING/PYTHONUTF8/代码页）——validate_args
     # 等的中文 SystemExit/日志对任何捕获方都是确定编码；配对消费方显式 utf-8 解码。
@@ -225,10 +257,10 @@ def main() -> None:
         raise SystemExit(f"[run_rl] {e}") from e
     # P1-3（2026-09-02）：启动期配置校验（互斥/范围 fail fast——此前这些错误
     # 要等训练中途才暴露）。课程覆盖后校验（课程值是单一事实来源）。
-    # 远程模式（--ppo remote）的 stream/double-buffer 显式互斥判定需要区分
-    # 「用户显式传参」与「吃 rl-config 默认值」——config 默认 stream=1 对本地模式
-    # 是对的，远程模式只对**显式** `--stream 1` 报错，config 默认值静默降为 0
-    # （plan §5「内部强制 stream=0」）。存到 args 供 validate_args 消费。
+    # stream/double-buffer 的显式传参判定：单一 PPO 路径下两者恒置 0（本机没有 PPO 窗口，
+    # 见 `rl/config.py` §3 块），但**显式** `--stream 1` / `--double-buffer 1` 仍要响亮报错
+    # （用户要求的能力已退役 ≠ 参数可以静默失效）⇒ 需区分「显式传参」与「吃 config 默认」。
+    # 存到 args 供 validate_args 消费。
     _defaults_ns2 = ap.parse_args([])
     args._explicit_stream = int(getattr(args, "stream", 0) or 0) != int(
         getattr(_defaults_ns2, "stream", 0) or 0
@@ -295,6 +327,10 @@ def main() -> None:
         return
     # ===== 双缓冲：collect-only 分支结束 =====
 
+    # ===== 开课闸（2026-09-21 事故，plan/accident.plan.md §1）=====
+    # 位置：collect-only 之后（预采子进程不受影响）、单实例锁之前（不占锁就响亮退出）。
+    _require_course_open(args, _traj_root)
+
     # ===== 单实例锁（2026-09-06 事故：--kill-previous 漏杀 → 双 trainer 并行写同一
     # traj 7 分钟，it57-59 各被两遍训练/落账）===== 仅训练主循环持锁；collect-only
     # 预采子进程（spawn_collect_next 的子代）不参与竞争。双开 = 响亮拒启。
@@ -337,7 +373,9 @@ def main() -> None:
     # ===== 主循环（rl/loop.py::run_training）=====
     from rl.loop import run_training
 
-    run_training(args, get_backend(args.mode), bun, update_kwargs)
+    # ★ 2026-09-21（§3 单一 PPO 路径）：训练进程不建本机 PPO 后端（hub 免 torch，D2）——
+    # 传 None；PPO 由 hub 队列上认领到的 worker 执行（本机 worker = 控制台起的同一协议）。
+    run_training(args, None, bun, update_kwargs)
 
 
 if __name__ == "__main__":

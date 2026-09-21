@@ -328,7 +328,7 @@ def _args_and_loop(tmp_path: Path, hub_url: str, weights: Path) -> tuple[Trainin
     traj.mkdir(parents=True, exist_ok=True)  # hub 的 _JobStore 可能已建（job_root 在 traj 下）
     # tiny-a = 自带说明书「多课程并行流程验证夹具」的微型课程（stage 1000，per-tick）：
     # 集成测试正是它的用途，不借能力训练腿的配置（§15.2 哨兵口径）。
-    args = build_argparser("per-tick", {}).parse_args(["--course", "tiny-a", "--ppo", "remote"])
+    args = build_argparser("per-tick", {}).parse_args(["--course", "tiny-a"])
     course = course_from_args(args)
     assert course is not None, "--course tiny-a 未解析出课程"
     apply_course(args, course)
@@ -341,7 +341,8 @@ def _args_and_loop(tmp_path: Path, hub_url: str, weights: Path) -> tuple[Trainin
     args.remote_hub_url = hub_url
     args.remote_token = TOKEN
     args.remote_transport = "pull"
-    # 整轮上云 = 每轮一次结算（--ppo remote 的语义；课程自带 stream=1 是本地腿的默认）。
+    # 整轮上云 = 每轮一次结算（单一 PPO 路径的语义；课程自带 stream=1 是历史本地腿的默认，
+    # 单一 PPO 路径下 stream/double-buffer 恒置 0——见 `rl/config.py` §3 块）。
     args.stream = 0
     args.max_ticks = 60
     loop = TrainingLoop(args, None, "bun", {})

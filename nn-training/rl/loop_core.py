@@ -11,7 +11,6 @@ mixin（rl/loop_guards.py）——mixin 方法以 self.* 共享 TrainingLoop 实
 
 from __future__ import annotations
 
-import gc
 import subprocess
 import sys
 import threading
@@ -24,7 +23,7 @@ from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from platform_utils import rmtree_best_effort
 from rl.breaker import CIRCUIT_EXIT_CODE
 from rl.collect_only import precollect_snapshot_wver
-from rl.course import build_pairs
+from rl.course import build_pairs, resolve_rotate_seed
 from rl.events import write_run_complete, write_run_start
 from rl.log import log
 from rl.loop_guards import TrainingGuards
@@ -44,7 +43,6 @@ from rl.loop_round import (
 )
 from rl.loop_round_steps import RoundSteps
 from rl.loop_steps import TrainingSteps, kickstart_coef
-from rl.modes import get_backend
 from rl.queue import REPO_ROOT, RUN_ID
 from rl.reports import combine_reports
 from rl.resume import (
@@ -215,9 +213,6 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
         self._stream_meta: dict | None = None
         self._eval_thread: threading.Thread | None = None
         self._eval_gate: threading.Event | None = None
-        # 2026-09-17：本机 eval 份额是否已被**我们**提前放行（非节点饥饿兜底），
-        # 供 `_regate_local_eval` 在本机 PPO 真接手时收回。
-        self._eval_gate_early_released = False
         # 2026-09-17：未收官的 eval 尾巴 (thread, 派发时刻)——由下一轮 rollout 收官时
         # 收拢（_sweep_eval_tail，不站等固定秒数）。
         self._eval_tail: tuple[threading.Thread, float] | None = None
@@ -235,7 +230,6 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
         self._halted_flag = False
         # R9（2026-09-10 c6 it50 事故）：远端失败计数 / 已降级 / 停腿标记。
         self._remote_fail = 0
-        self._remote_degraded = False
         self._leg_abort = False
         # G13 duty 的分子：累计有效训练秒（Σ 真训练秒 ppo_cloud_sec）。
         # 初值从账本重算（跨重启不被低估——否则重启后占空比误报"在烧事故"）。
@@ -447,138 +441,28 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
         # 此刻起才允许拉起 torch / ppo.* / models.*（CPU 上 ~3-8s 的 torch 加载不再
         # 出现在每轮的双缓冲预采子进程里）。=====
         #
-        # ===== 远程模式（--ppo remote，D2）：hub 免 torch——PPO 在云端 worker，
-        # 本机只做调度 + 文件搬运。跳过 build_model/opt/ref_model 全链（不 import
-        # torch / ppo.*），模型/优化器零加载（_serial_ppo 远程分支也不触碰）。=====
-        if getattr(args, "ppo", "local") == "remote":
-            import numpy as np
-
-            np.random.seed(args.seed)
-            self.ppo_backend = None
-            self._model = None
-            self._opt = None
-            self._device = None
-            self._ref_model = None
-            self._bc_ref = None
-            self._ppo_mod = None
-            self._ppo_goal = None
-            self._ppo_intent = None
-            self._save_weights_json = None
-            log(
-                "[run_rl] REMOTE PPO mode: hub torch-free (D2) — PPO runs on cloud worker; "
-                "rollout/eval stay local"
-            )
-            self._setup_common()
-            return
-
+        # ===== 单一 PPO 路径（2026-09-21，plan/accident.plan.md §3）：hub 免 torch（D2）=====
+        # PPO 恒在 hub 队列上由 worker 认领执行 ⇒ 训练进程**永不**建 model/opt/ref 栈：
+        # 不 import torch / ppo.*，模型与优化器零加载。C 腿式灾难（误配 → 本机 CPU PPO 慢 13
+        # 小时）在结构上不可能：loop 自己没有计算能力，误配无处发生。
         import numpy as np
 
         np.random.seed(args.seed)
-        self._ensure_local_ppo_stack()
-        self._setup_common()
-
-    def _ensure_local_ppo_stack(self) -> None:
-        """构建/恢复本机 PPO 栈（torch + backend + model + opt）。
-
-        本地启动路径与 **R9 降级**共用：remote 模式 D2 为 hub 省 torch 会把
-        `ppo_backend/model/opt` 置 None；一旦 `--remote-degrade-after>0` 触发降级
-        改走 `_serial_ppo` 本机路径，必须先补齐本方法，否则 `None.load_episodes`
-        （x3-power it1 实锤）。已初始化则幂等返回。
-        """
-        if self.ppo_backend is not None and self._model is not None:
-            return
-        args = self.args
-
-        import torch
-
-        import ppo.engine as ppo_mod
-        import ppo.goal as ppo_goal
-        import ppo.intent as ppo_intent
-        from data.weights_io import save_weights_json
-        from rl.model_build import build_model
-
-        self._ppo_mod = ppo_mod
-        self._ppo_goal = ppo_goal
-        self._ppo_intent = ppo_intent
-        self._save_weights_json = save_weights_json
-        self.ppo_backend = get_backend(args.mode)
-
-        device = torch.device("cpu")
-        model = build_model(args.bc, args.out, mode=args.mode, workers=args.workers)
-        model.to(device)
-        self._device = device
-        self._model = model
-        ref_model = None
-        if args.mode in ("intent", "goal") and args.kickstart_kl > 0:
-            # kickstarting 参考策略：B′ 冻结快照（须在 build_model 完成 init-from 落盘
-            # args.out 之后构建）。warmup 冻结主干+三头 → 策略与 B′ 一致。
-            ref_model = self.ppo_backend.build_rl_net(args.out)
-            if args.mode == "goal":
-                self._ppo_goal.load_goal_weights(ref_model, args.out)
-            else:
-                self._ppo_intent.load_intent_weights(ref_model, args.out)
-            for p in ref_model.parameters():
-                p.requires_grad = False
-            ref_model.eval()
-        self._ref_model = ref_model
-        # BC-anchored kickstart（§363）：ref = 课程 bc 冻结快照（validate_args 已
-        # 保 kickstart_ref 仅 per-tick 且 warmup_iters=0）。与 intent 取 args.out
-        # 不同：bc 文件不可变，重启断点续跑不改变锚点。
-        self._bc_ref = None
-        if args.mode == "per-tick" and bool(getattr(args, "kickstart_ref", False)):
-            from data.weights_io import load_state_into
-
-            bc_ref = self._ppo_mod.build_ppo(args.bc)
-            load_state_into(bc_ref, args.bc)
-            for p in bc_ref.parameters():
-                p.requires_grad = False
-            bc_ref.eval()
-            bc_ref.to(device)
-            self._bc_ref = bc_ref
-            log("[run_rl] kickstart ref built from course bc (frozen master)")
-        # M1c 冻结层/头（plan §7）：freeze/freeze_heads 前缀表 → requires_grad=False，
-        # 优化器只收可训参数（前缀 = name.startswith，前缀间不得父子歧义，见单测）。
-        freeze_prefixes = list(getattr(args, "freeze", []) or []) + list(
-            getattr(args, "freeze_heads", []) or []
-        )
-        n_frozen = 0
-        if freeze_prefixes:
-            for n, p_ in model.named_parameters():
-                if any(n.startswith(pre) for pre in freeze_prefixes):
-                    p_.requires_grad = False
-                    n_frozen += 1
-            log(
-                f"[run_rl] freeze: {n_frozen} params frozen by prefixes "
-                f"{freeze_prefixes}（优化器只含可训参数）"
-            )
-        trainable = [p_ for p_ in model.parameters() if p_.requires_grad]
-        if not trainable:
-            raise SystemExit(f"[run_rl] freeze 前缀 {freeze_prefixes} 冻结了全部参数——没有可训参数")
-        self._opt = torch.optim.Adam(trainable, lr=args.lr)
-        if n_frozen == 0 and freeze_prefixes:
-            log(f"[run_rl] WARN freeze prefixes matched nothing: {freeze_prefixes}")
-        log("[run_rl] local PPO stack ready")
-
-    def release_torch(self) -> None:
-        """释放本机 torch 栈（引擎池驱逐用；`_ensure_local_ppo_stack()` 可原样重建）。
-
-        置 None 的集合与 `_setup()` 的 remote 分支逐字段一致（同一份「栈已卸载」语义）。
-        **代价不对称**（plan/r2-loop-task-queue §6.2）：权重能从 `args.out` 重建，但
-        `torch.optim.Adam` 是新建的 ⇒ **动量丢失**。所以只在**任务之间**调用
-        （任务中途抽走栈会让 `_serial_ppo` 撞 `None.load_episodes`），且调用方必须响亮记录
-        ——`rl/engine_pool.EnginePool.drop` 已内含那行日志。
-        """
+        self.ppo_backend = None
         self._model = None
         self._opt = None
+        self._device = None
         self._ref_model = None
         self._bc_ref = None
-        self._device = None
-        self.ppo_backend = None
         self._ppo_mod = None
         self._ppo_goal = None
         self._ppo_intent = None
         self._save_weights_json = None
-        gc.collect()
+        log(
+            "[run_rl] single PPO path: hub torch-free (D2) — PPO runs on a claimed worker; "
+            "rollout/eval stay local"
+        )
+        self._setup_common()
 
     def _setup_common(self) -> None:
         """两模式（local/remote）共享的启动尾部：traj 目录 / rotateSeed / run_start 账本 /
@@ -600,11 +484,13 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
         # 下轮 (stage,seed) 与已落盘局一致 → 断点续跑剔除生效，不重跑已完成局）。
         # 全新开始（无 jsonl 历史，例如用户清空重建）才用当前时刻抖动种子。
         prev_rs = self._ledger.rotate_seed
-        if prev_rs is not None:
-            rotate_seed = prev_rs
+        rotate_seed, rs_source = resolve_rotate_seed(
+            args.seed, getattr(args, "rotate_seed", None), prev_rs, int(time.time())
+        )
+        if rs_source == "explicit":
+            log(f"[run_rl] rotateSeed explicit override={rotate_seed} (paired-course mode; prev={prev_rs})")
+        elif rs_source == "inherited":
             log(f"[run_rl] resume: inherited rotateSeed={prev_rs} (course continuity preserved)")
-        else:
-            rotate_seed = (args.seed * 1009 + 1 + int(time.time())) % (2**32)
         self._rotate_seed = rotate_seed
         # G13 duty 的分子：从账本重算累计有效训练（Σ 真训练秒）。
         # 进程内存累计重启会归零 → 占空比被低估 → 误报"在烧事故"；账本是 SSOT。

@@ -805,6 +805,31 @@ def _failure_detail(e: BaseException, limit: int = 4000) -> str:
         return f"{type(e).__name__}: {e}"[:limit]
 
 
+def unpack_payload_or_fail(payload_path, job_dir) -> tuple[dict, list[str]]:
+    """解包 payload；**内容决定性**失败统一转 `ProtocolError`（重认领不会自愈）。
+
+    ★ 2026-09-21（plan/accident.plan.md §4 根因）：`worker_loop` 的 `except Exception`
+    分支把「解包失败」一律当瞬态重认领 ⇒ 同一份字节每 5 分钟复现一次、零告警，空转
+    3.5 小时（实测：**完好** tar.xz 被 `zipfile.is_zipfile` 启发式误判成 zip ⇒
+    BadZipFile；job 永不回传，训练侧只看到 3×1800s 超时）。归档层异常在这里就转
+    `ProtocolError`：该分支早已有 `report_job_failure` → hub 落终局 failed → 训练侧
+    `JobFailedError` 停腿（整条链现成，不必改循环）。
+
+    只转**归档/内容**类异常；网络/远端关闭那类真瞬态仍走 `except Exception` 重认领
+    （`OSError` 刻意不在这里吞——磁盘/权限类也可能瞬时）。
+    """
+    import zipfile
+
+    try:
+        return unpack_payload(payload_path, job_dir)
+    except ProtocolError:
+        raise
+    except (zipfile.BadZipFile, tarfile.TarError, EOFError) as e:
+        raise ProtocolError(
+            f"payload 归档不可读（内容决定性，重领同一份字节不会自愈）：{type(e).__name__}: {e}"
+        ) from e
+
+
 def report_job_failure(
     base_url: str,
     token: str,
@@ -1545,7 +1570,8 @@ def run_job(
     # zip 内 manifest 是占位副本，解包仅取 shard 目录；权威校验全走 job 记录 manifest。
     # init_weights.json / opt_init.tar.b64 与 shard 目录同落 job_dir 根（解包天然如此）。
     t_unpack = time.time()
-    _unused_manifest, shard_dirs = unpack_payload(zip_path, job_dir)
+    # 解包失败 = 内容决定性失败（走 ProtocolError → 确定性上报，不重认领）——见 §4 事故。
+    _unused_manifest, shard_dirs = unpack_payload_or_fail(zip_path, job_dir)
     unpack_sec = round(time.time() - t_unpack, 3)
 
     # ---- commit 校验：下载 code.zip 解压到 sys.path（替代 git 同步，D6） ----
@@ -2382,7 +2408,10 @@ def worker_loop(
             )
         except Exception as e:
             log(f"job {jid} FAILED: {type(e).__name__}: {e} — will re-poll (idempotent)")
-            # 瞬态失败（网络/远端关闭）：租约未续会自动回池，重拉同 job 幂等
+            # 瞬态失败（网络/远端关闭）：租约未续会自动回池，重拉同 job 幂等。
+            # ★ 2026-09-21（§4）：本分支**只准**装真瞬态。内容决定性失败（解包/校验/
+            #   运行时能力缺失）必须在上游就转成 `ProtocolError`（见 unpack_payload_or_fail、
+            #   manifest 校验、bun 检测），否则同一份字节会无限重领（事故：40 次 / 3.5h 空转）。
         finally:
             # 每 job 一行传输账：payload/code/blob/result 的 (bytes, sec) + 零字节命中 + 重抽
             _wire_flush(jid, log)

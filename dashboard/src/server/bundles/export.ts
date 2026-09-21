@@ -107,8 +107,6 @@ export function taskBundleArgs(course: string): string[] {
     'nn-training/run_rl.py',
     '--course',
     course,
-    '--ppo',
-    'remote',
     '--run-iters',
     String(exportRunIters),
     '--export-bundle',

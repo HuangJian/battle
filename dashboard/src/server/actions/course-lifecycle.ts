@@ -46,8 +46,6 @@ export interface OpenCourseOpts {
   /** rollout 执行位置（在线时可选）：写课程级覆盖 `courses.<课>.rollout_src`，
    *  不碰全局 `rl.rollout_src`（那是所有课程共用的默认面）。离线档忽略它。 */
   rolloutSrc?: RolloutSrcMode
-  /** T7：远端连败是否 opt-in 降级本机 PPO（课程级旋钮 `remote_degrade_after`）。 */
-  remoteDegrade?: boolean
   /** hub 模式推送的有界重试（缺省 3 次 × 2s）。hub 的课程表是**扫盘发现**，新建的
    *  `remote-jobs/` 要等它扫到才认这门课；测试注入 1 次避免空等。 */
   hubMode?: { attempts?: number; delayMs?: number }
@@ -148,7 +146,10 @@ export function prepareCourseForOpen(course: string): { notes: string[] } {
 }
 
 /** 写本课的 rl-config 键（**唯一写面**）：训练模式（`rollout_src`/`run_iters`）、
- *  rollout 位置覆盖、降级本机（`remote_degrade_after`）。返回人读说明 + 最终模式。
+ *  rollout 位置覆盖。返回人读说明 + 最终模式。
+ *
+ *  ★ 2026-09-21（§3）：不再写 `remote_degrade_after`——单一 PPO 路径下没有「降级本机」这个
+ *  档位（loop 没有计算能力），残留值由 `pruneLegacyCourseKnobs` 清掉。
  *
  *  为什么这几把键住 `courses.<课>` 而不是 `rl.*`：`rl.*` 是所有课程共用的默认面 ——
  *  在弹窗里只选了这一门课却把 `rollout_src:'run'` 落进 `rl.*`，等于把全部课程一起拖进
@@ -181,10 +182,6 @@ export function writeCourseConfigForOpen(
   if (opts.rolloutSrc && trainMode === 'online') {
     row.rollout_src = opts.rolloutSrc
     notes.push(`rollout 位置覆盖：courses.${course}.rollout_src=${opts.rolloutSrc}`)
-  }
-  if (opts.remoteDegrade !== undefined) {
-    row.remote_degrade_after = opts.remoteDegrade ? 3 : 0
-    notes.push(`远端连败降级本机：${opts.remoteDegrade ? '开（连败 3 次）' : '关（连败即 ABORT）'}`)
   }
   courses[course] = row
   saveConfig({ ...cfg, courses })

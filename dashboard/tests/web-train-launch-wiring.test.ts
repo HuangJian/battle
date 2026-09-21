@@ -11,9 +11,10 @@
  *   ① pull 由远端 worker 自己来领（本机只需 hub 在线 + 可选隧道），push 只看系统里**是否登记了**
  *      push worker 节点（配置入口 = worker 登记面板，数据住 rl-config.json）⇒ 启动链路里
  *      **不再有 mode / endpoint / authKey**；
- *   ② 启动**只带进程级选项**（隧道/瘦身），课程级选项（训练模式 在线/离线 · rollout 位置 ·
- *      降级本机）整体迁到「开课」（`OpenCourseModal.tsx` → `openCourse` 动作，落
- *      `courses.<课>.*`）。
+ *   ② 启动**只带进程级选项**（隧道/瘦身），课程级选项（训练模式 在线/离线 · rollout 位置）
+ *      整体迁到「开课」（`OpenCourseModal.tsx` → `openCourse` 动作，落 `courses.<课>.*`）；
+ *      `remoteDegrade` 则是**删除**而非搬走（2026-09-21 / plan/accident.plan.md §3：单一
+ *      PPO 路径下没有「降级本机」档位）——旧客户端若还发它，preset 分支响亮拒绝。
  *
  * 本文件守三条：**选项不得在路上丢掉**（③ 那类假成功）· **模式不得复活** ·
  * **课程级选项不得回流进启动链路**（回流 = 又变成「起进程先选一门课」）。
@@ -104,6 +105,9 @@ describe('route.ts preset 分支：只认隧道/瘦身两个可选键（课程�
     expect(presetCase).toContain("['on', 'off']")
     // ★ 课程级选项在 preset 里**响亮拒绝**（静默丢掉 = 一条假承诺）
     expect(presetCase).toContain('已迁到「开课」')
+    // ★ §3：`remoteDegrade` 是**已删除**（不是搬走）——也得响亮拒绝，不是静默忽略
+    expect(presetCase).toContain('body.remoteDegrade !== undefined')
+    expect(presetCase).toContain('已删除')
   })
 
   it('openCourse 分支：课程级选项在这里（白名单 + 落到 openCourse）', () => {
@@ -117,6 +121,8 @@ describe('route.ts preset 分支：只认隧道/瘦身两个可选键（课程�
     expect(openCase).toContain("['online', 'offline']")
     expect(openCase).toContain("['auto', 'local', 'node', 'run']")
     expect(openCase).toContain('await openCourse(ctx.course')
+    // ★ §3：`remoteDegrade` 已删除——开课分支不得再读它（否则死旋钮复活）
+    expect(openCase).not.toContain('remoteDegrade')
     // 停课：非破坏（服务端只认课程名，没有别的旋钮）
     expect(route).toContain('await stopCourse(ctx.course)')
   })

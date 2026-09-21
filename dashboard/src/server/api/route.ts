@@ -172,10 +172,19 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
         // ★ 课程级选项（trainMode / rolloutSrc / remoteDegrade）**已迁到「开课」**
         // （2026-09-20：进程启动不再为某门课写配置）——还往这里发就是一条静默无效的承诺，
         // 所以响亮拒绝并指路，而不是默默丢掉。
-        for (const k of ['trainMode', 'rolloutSrc', 'remoteDegrade'] as const) {
+        for (const k of ['trainMode', 'rolloutSrc'] as const) {
           if (body[k] !== undefined) {
             return errResp(`${k} 是课程级选项，已迁到「开课」（openCourse）`, 400)
           }
+        }
+        // ★ §3（2026-09-21）：`remoteDegrade` **已删除**（不是搬走）——单一 PPO 路径下没有
+        //   「降级本机」档位。旧客户端还可能发它：响亮拒绝（静默忽略 = 一条不会发生的承诺）。
+        if (body.remoteDegrade !== undefined) {
+          return errResp(
+            'remoteDegrade 已删除：PPO 恒为「发布到 hub 队列 + 等 worker 认领」，' +
+              '没有就地降级本机这一档（plan/accident.plan.md §3）',
+            400,
+          )
         }
         return okResp(
           await startPreset({
@@ -202,9 +211,6 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
           await openCourse(ctx.course, {
             trainMode: (trainMode || undefined) as TrainMode | undefined,
             rolloutSrc: (rolloutSrc || undefined) as RolloutSrcMode | undefined,
-            // T7：显式给了才写（缺省 = 不动该课的降级旋钮）。
-            remoteDegrade:
-              body.remoteDegrade === undefined ? undefined : body.remoteDegrade === true,
           }),
         )
       }

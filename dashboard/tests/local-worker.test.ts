@@ -299,11 +299,12 @@ describe('local 预设与启动接线（共享形状）', () => {
   })
 
   // ── trainer 侧（本地 PPO = 本机 worker 领活）──
-  it('RL：恒 --ppo remote，且不注入 --remote-transport（交回训练侧 auto 裁决）', () => {
+  it('RL：不注入 --ppo（§3 单一 PPO 路径）也不注入 --remote-transport（交回训练侧 auto 裁决）', () => {
     const cfg = dualCourseCfg()
     const hub = sharedHubUrl(cfg)
     const spec = trainingLoopSpec(cfg, { course: 'course-a', hubUrl: hub, venv: VENV })
-    expect(flag(spec, '--ppo')).toBe('remote')
+    // ★ §3：`--ppo` 已删除 ⇒ argv 里不该再有它（传了 = argparse 直接拒启）
+    expect(spec.cmd).not.toContain('--ppo')
     expect(flag(spec, '--remote-transport')).toBeNull()
     expect(flag(spec, '--remote-hub-url')).toBe(hub)
     // 绝不出现进程内 PPO 旗标

@@ -113,14 +113,12 @@ def _make_loop(
 ) -> TrainingLoop:
     """造一个**真** TrainingLoop：重活全假，记账全真。
 
-    `remote=True`：`args.ppo="remote"` ⇒ 本轮 PPO 走三相路径（发布/探一次/落位），
+    `remote=True`：单一 PPO 路径 ⇒ 本轮 PPO 走三相路径（发布/探一次/落位），
     三个对外动作由 `_install_fake_remote` 替掉。
     """
     traj = tmp_path / course
     traj.mkdir(parents=True, exist_ok=True)
     ns = _args(traj, iters)
-    if remote:
-        ns.ppo = "remote"
     loop = TrainingLoop(ns, None, "bun", {})
     loop._setup_common()  # 真：写 run_start、定 _traj_root/_total/_jsonl_path/...
 
@@ -148,19 +146,41 @@ def _make_loop(
     def fake_rollout(it: int, pairs, dist_cfg, eval_on_round) -> None:
         loop._report = dict(REPORT)  # 让真 _record_iteration 有一份可写的报告
 
-    def fake_ppo(it: int) -> None:
-        # 只失败**一次**（第一次尝试）：之后的尝试成功 ⇒ 验证「原地重试后落账且不重复」
+    # ---- PPO：单一路径（§3）⇒ 所有腿都走远端三相；本 fixture 统一装假件 ----
+    # 故意**不**替换 `_remote_ppo_step`（让位点住在它里面，用例的价值就是走真驱动）；
+    # 只换三个对外动作。fail_rounds 用 TimeoutError 注入（在可重试集合里 ⇒ 与真链路的
+    # 连败计数/原地重试语义一致）。
+    from rl.loop_round import RemotePpoJob
+
+    def fake_publish(it: int) -> RemotePpoJob:
         if fail_rounds and it in fail_rounds:
             fail_rounds.discard(it)
-            raise RuntimeError("fake ppo 失败（模拟远端连败/引擎异常）")
+            raise TimeoutError("fake 远端发布失败（模拟链路异常；第一次尝试）")
+        return RemotePpoJob(
+            it=it,
+            jid=f"job-{course}-{it}",
+            manifest={"job_id": f"job-{course}-{it}"},
+            transport="hub",
+            hub_url="http://hub.invalid",
+            hub_token="t",
+            timeout_sec=60.0,
+        )
+
+    def fake_probe(_sess: RemotePpoJob) -> dict:
+        return {"agg": {"kl": 0.0, "entropy": 1.0, "chunks": 1, "steps": 10}}
+
+    def fake_land(_sess: RemotePpoJob, result: dict) -> dict:
         loop._ppo_sec = 1.0
         loop._ppo_cloud_sec = 0.5
         loop._total_steps = 10
         loop._chunks_n = 1
         loop._agg = None  # agg=None ⇒ 真 _breaker 短路（不进连击、不告警）
+        return result
 
     _stub(loop, "_rollout_phase", fake_rollout)
-    _stub(loop, "_serial_ppo", fake_ppo)
+    _stub(loop, "_remote_ppo_publish", fake_publish)
+    _stub(loop, "_remote_ppo_probe", fake_probe)
+    _stub(loop, "_remote_ppo_land", fake_land)
 
     # 真记账 + 事件痕迹（顺序断言用）
     real_record = loop._record_iteration

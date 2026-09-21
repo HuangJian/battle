@@ -315,7 +315,7 @@ def require_remote_transport(
     gpu_nodes: list[dict],
     env_push: str | None = None,
 ) -> None:
-    """`--ppo remote` 传输可用性门（纯 push 不再强制本地 hub-server/cloudflared）。
+    """PPO 传输可用性门（单一 PPO 路径；纯 push 不再强制本地 hub-server/cloudflared）。
 
     - 鉴权：token 非空，或 env 节点，或任一 gpu_push 节点带 authKey；
     - 传输：hub_url（pull）**或** gpu_nodes/env（push 直推云机隧道）。
@@ -324,12 +324,12 @@ def require_remote_transport(
     env = env_push if env_push is not None else os.environ.get("REMOTE_PUSH_NODE")
     if not token and not env and not any(n.get("authKey") for n in gpu_nodes):
         raise SystemExit(
-            "[run_rl] --ppo remote 需要 --remote-token"
+            "[run_rl] PPO 需要 --remote-token"
             "（或 rl-config gpu_push 节点 authKey / REMOTE_PUSH_NODE）"
         )
     if not hub_url and not gpu_nodes and not env:
         raise SystemExit(
-            "[run_rl] --ppo remote 需要 remote_hub_url（pull）"
+            "[run_rl] PPO 需要 remote_hub_url（pull）"
             "或 rl-config nodes[].gpu_push（push 直推云机隧道）——"
             "纯 push 模式不依赖本地 hub-server/cloudflared"
         )
@@ -477,7 +477,7 @@ def _wire_from_result(
 
 
 def _remote_forward_agg(agg: dict) -> dict:
-    """云 worker result agg → 训练侧结算 agg（与 _serial_ppo 的 ppo_update agg 同口径）。
+    """云 worker result agg → 训练侧结算 agg（与 PPO 引擎 update 的 agg 同口径）。
 
     2026-09-08 vk1 事故回归：R5§363 之后云端 agg 已携带 `kickstart`（缰绳遥测），
     结算端若丢弃该键 → iteration 行 kickstart 恒 None——worker 缰绳明明在跑、
@@ -532,7 +532,7 @@ FATAL_REMOTE_HTTP = (400, 401, 403)
 
 
 def remote_retryable_exceptions() -> tuple[type[BaseException], ...]:
-    """`_remote_ppo_or_degrade` 认可的远端失败异常集合。
+    """远端 PPO 路径认可的**可重试**远端失败异常集合（只走发布-等待单一路径）。
 
     `remote.hub_client` 只在远端路径延迟导入（见 `_remote_ppo`），异常类型同理延迟取。
 
@@ -634,9 +634,6 @@ class TrainingSteps:
     _stream_meta: dict | None
     _eval_thread: threading.Thread | None
     _eval_gate: threading.Event | None
-    #: 2026-09-17：`_eval_gate` 是否由**我们**提前放行（远端 PPO / 上云轮 / stream
-    #: 轮）。本机 PPO 真接手时用它判断是否需要收回（R6）；无节点时的饥饿放行不算。
-    _eval_gate_early_released: bool
     #: 本轮收官时仍未结束的 eval 尾巴 `(thread, 派发时刻)`——交给下一轮 rollout 收官
     #: 这个自然边界收拢（`_sweep_eval_tail`，不站等）。None = 无尾巴。
     #: 给类级默认值（而不只声明类型）：裸构造的实例（单测脚手架）没有 **init** 赋值。
@@ -657,22 +654,11 @@ class TrainingSteps:
     _agg: Any
     _kl_cum: Any
     _halted_flag: bool
-    #: R9：远端连续失败且禁用降级 → 写 ABORT 后停腿（loop 在 _serial_ppo 后检查）。
+    #: 远端连续失败 → 写 ABORT 后停腿（loop 在 PPO 步后检查）。
     _leg_abort: bool
-    #: R9：远端连续失败计数（成功即复位）与"已降级本机"标记。
+    #: 远端连续失败计数（成功即复位）。
     _remote_fail: int
 
-    def _ensure_local_ppo_stack(self) -> None:
-        """本机 PPO 栈（torch/backend/model/opt）——TrainingLoop 实现。
-
-        R9 降级前必调（remote D2 启动路径会把栈置 None）。mixin 只声明，
-        真身在 `loop_core.TrainingLoop`。
-        """
-        raise NotImplementedError
-
-    _remote_degraded: bool
-    #: 本 run 的 rotateSeed（loop_core 启动时抽一次；半离线段的计划要带上它，否则云机
-    #: 重放出的对集与 hub 不同——`pairs_fp` 会在节点侧跑第一局之前报错）。
     _rotate_seed: int
     _dropped_games: Any
     _load_sec: Any
@@ -1008,97 +994,6 @@ class TrainingSteps:
             return 0
         return int(target_per_stage(target, n_stages))
 
-    def _serial_ppo(self, it: int) -> None:
-        """串行路径（stream_meta 为空）的 PPO 更新：load → chunk → update。
-
-        远程模式（--ppo remote，D11）：改为「打包 → 发布 job → 轮询等待 → 三重校验
-        落位」——PPO 本体在云端 worker 执行，hub 只做调度 + 文件搬运（免 torch，D2）。
-        语义与 _serial_ppo 完全同构（阻塞等待一轮 PPO 结果后才进入导出/下一轮）。
-        """
-        if self._stream_meta is not None:
-            return
-        # 远端：成功即 return；降级后 args.ppo 已改 local → 落到本地路径继续本轮。
-        if getattr(self.args, "ppo", "local") == "remote" and self._remote_ppo_or_degrade(it):
-            return
-        args = self.args
-        traj_dir = self._traj_dir
-        # 本机 PPO 真在跑：若此前按「远端」提前放行了本机份额，现在收回（R6）——
-        # 远端降级的那一轮不得让本机 eval 局与 torch 抢核。
-        self._regate_local_eval()
-        # I1 WAL（hy E4/dsf）：提交序列 started/done 台账——重启后 pending() 即
-        # 「上一轮提交未完成」的账；本地路径由下方 ppo_ckpt epoch 级断点续跑。
-        self._commit_journal().start("ppo_local", str(it))
-        self._forensics(f"ppo_local_pre it{it}")
-        t_ppo = time.time()
-        # P1-7：--adv-norm none 时串行路径跳过 global 归一（对照实验）
-        # 严格样本量配额（target_transitions 路线）：逐关 ceil(target/关数) 步，
-        # 截断在 GAE **之前**（见 ppo/common.trim_shard_arrays）。mode 门在
-        # `_per_stage_quota()` 内部——serial 与 remote `publish_job` 共用同一个门，
-        # 不可能出现「一条 gate、另一条不 gate」。返 0 时**一个参数都不传** ⇒
-        # 老课程 / 非 per-tick 走到这里逐字节不变。
-        _psq = self._per_stage_quota()
-        _quota_kwargs: dict[str, int] = {"per_stage_quota": _psq} if _psq > 0 else {}
-        episodes = self.ppo_backend.load_episodes(
-            str(traj_dir),
-            float(getattr(args, "gamma", 0.995)),
-            float(getattr(args, "lam", 0.95)),
-            normalize_adv=getattr(args, "adv_norm", "auto") != "none",
-            normalize_ret=bool(getattr(args, "normalize_ret", 0)),
-            **_quota_kwargs,
-        )
-        total_steps = sum(e["obs"].shape[0] for e in episodes)
-        chunks = self.ppo_backend.chunk_episodes(episodes, args.mb)
-        # I1 取证：load 全量 episodes 是内存峰值点——贴顶即 OOM 候选实锤。
-        self._forensics(f"ppo_local_loaded it{it} steps={total_steps}")
-        # ppo_backend epoch 级断点续跑：崩溃重启后从最近 checkpoint 继续未完成批次
-        if args.mode in ("intent", "goal"):
-            agg = self.ppo_backend.update(
-                self._model,
-                self._opt,
-                chunks,
-                args.epochs,
-                self._device,
-                ckpt_path=str(traj_dir / "ppo_ckpt"),
-                **self.update_kwargs(args, it, self._start_it, self._ref_model),
-            )
-        else:
-            # BC-anchored kickstart（§363）：缰绳系数走 update_kwargs 衰减语义
-            # （warmup_iters=0 由 validate_args 强制，故 it1 即满额）；
-            # value_warmup_epochs 忽略（per-tick 无 warmup 概念，R5-warmup 另排）。
-            kick = 0.0
-            bc_ref = getattr(self, "_bc_ref", None)
-            if bc_ref is not None:
-                kick = kickstart_coef(args, it)
-            # 本机份额提前放行（2026-09-17）：末 `policy.evalLocalEarlyEpochs` 个 epoch
-            # 开始即开闸，让预留尾段与本机 PPO 尾部并行（0 = 不加钩子，R6 原语义）。
-            _gate_hook = self._local_gate_epoch_hook()
-            _upd_kw: dict = {
-                "kl_coef": float(getattr(args, "_kl_coef", 0.0) or 0.0),
-                "ent_coef": getattr(args, "_ent_coef", None),
-                "ref_model": bc_ref,
-                "kickstart_kl": kick,
-            }
-            if _gate_hook is not None:
-                _upd_kw["on_epoch_done"] = _gate_hook
-            agg = self._ppo_mod.ppo_update(
-                self._model,
-                self._opt,
-                chunks,
-                args.epochs,
-                self._device,
-                ckpt_path=str(traj_dir / "ppo_ckpt"),
-                **_upd_kw,
-            )
-        self._ppo_sec = round(time.time() - t_ppo, 1)  # 本机 PPO：真训练秒 == 往返秒
-        self._ppo_cloud_sec = self._ppo_sec
-        self._chunks_n = len(chunks)
-        self._total_steps = total_steps
-        self._agg = agg
-        self._kl_cum = agg["kl"] if agg else None  # 串行：单次大更新，均值即累计口径
-        # I1：提交序列完成（权重已由 backend 落盘、agg 已结算）——WAL 收口 + 临终对照快照。
-        self._forensics(f"ppo_local_post it{it}")
-        self._commit_journal().finish("ppo_local", str(it))
-
     def _abort_node_failure(self, it: int, e: BaseException, *, where: str) -> None:
         """节点已回报原因的**确定性**失败 → 写 ABORT 判决 + 停腿标记。
 
@@ -1121,53 +1016,25 @@ class TrainingSteps:
         log(f"[run_rl] GATE ABORT it{it}: {where} 节点报确定性失败——不重试，立即停腿：{reason}")
         self._leg_abort = True
 
-    def _remote_ppo_or_degrade(self, it: int) -> bool:
-        """R9（plan/feasibility-map.md §12）：远端失败计数与 **opt-in** 降级。
-
-        2026-09-15 T7：**默认不再自动降级本机**（`remote_degrade_after` 默认 0）。
-        原因：① 远端失败应响亮停腿，不静默切到慢一个量级的本机 PPO；
-        ② 旧默认 3 会撞上 remote 模式 `ppo_backend=None`（x3-power it1 打穿）。
-        控制台启动弹窗提供 opt-in；开启后降级前会 `_ensure_local_ppo_stack()`。
-
-        c6 it50 事故背景：单个 job 三次 1800s 超时、进程最终死在 eval 中途。
-        本方法三档处置：
-          · 成功 → 计数复位，True（调用方直接 return）；
-          · 失败且未达阈值 → 原样抛出（loop 原地重试同一 iter）；
-          · 失败达阈值 → `--remote-degrade-after N>0`：懒加载本机栈 + 改
-            `args.ppo="local"` + `remote_degrade` 事件；
-            **默认 N=0**：连败 3 次写 ABORT 判决后停腿。
-
-        返回 True = 远端已出结果（本轮 PPO 结束）；False = 调用方改走本地路径。
-        """
-        try:
-            self._remote_ppo(it)
-        except remote_retryable_exceptions() as e:
-            if self._handle_remote_failure(it, e):
-                raise
-            return False
-        self._remote_fail = 0
-        return True
-
     def _handle_remote_failure(self, it: int, e: BaseException) -> bool:
-        """远端失败的**唯一**处置策略（R9 三档）：`True` = 调用方原样上抛（本轮失败），
-        `False` = 已降级到本机（`args.ppo` 已置 local，调用方改走本地路径）。
+        """远端失败的**唯一**处置策略：`True` = 调用方原样上抛（本轮失败）。
+
+        ★ 2026-09-21（§3 单一 PPO 路径）：**没有**"降级到本机"这一档 —— 返回值恒为 True，
+        连败 3 次即 ABORT 停腿（原先的 `False = 已降级本机` 分支已连同旗标一并删除）。
+        要本机算，操作员在控制台起本机 worker（与云机同一认领协议）。
 
         为什么要抽出来：三相拆分之后，「发布失败」「取结果失败」「落位失败」是**同一类**
         失败，必须过同一份判决——三段各自演化出不同的连败计数/停腿口径，正是本仓最贵的
-        一类分叉（x3-step 事故就是「专为远端失败写的停腿判决一行没写」）。三档语义与每条
-        处置细则逐字见 `_remote_ppo_or_degrade` 的 docstring。
+        一类分叉（x3-step 事故就是「专为远端失败写的停腿判决一行没写」）。
         """
-        args = self.args
         if isinstance(e, JobFailedError):
             # 节点已回报原因的**确定性**失败（2026-09-17）：不消耗连败配额、不重试
             # ——重试只会再派给另一台同样干不了的机器，或等回同一个 410。
             self._abort_node_failure(it, e, where="远端 PPO")
             return True
-        self._remote_fail += 1
-        limit = int(getattr(args, "remote_degrade_after", 0) or 0)
-        # 401/403/400：token 不对、IP 被 hub 闭锁、或请求本身有问题——**重试多少次
-        # 都不会自愈**，继续消耗连败配额只是重复 publish 同一 job 并把停腿拖后
-        # （x3-step 事故：5×30s 空转 + 账本 5 条同 id job_pending，最后照样死）。
+        # 401/403/400：token 不对、IP 被 hub 闭锁、或请求本身有问题——**重试多少次都不会
+        # 自愈**，继续消耗连败配额只是重复 publish 同一 job 并把停腿拖后（x3-step 事故：
+        # 5×30s 空转 + 账本 5 条同 id job_pending，最后照样死）。
         fatal = fatal_remote_http(e)
         if fatal:
             write_gate_verdict(
@@ -1184,47 +1051,26 @@ class TrainingSteps:
             )
             self._leg_abort = True
             return True
+        # 只对**可重试**失败计账（确定性失败在上面两档已提前 return——它们不消耗配额）。
+        self._remote_fail += 1
         log(
             f"[run_rl] remote ppo it{it} FAILED ({type(e).__name__}: {str(e)[:200]}) — "
             f"consecutive={self._remote_fail}"
-            + (f"/{limit}" if limit > 0 else "（降级已禁用）")
         )
-        if limit <= 0:
-            # 显式关闭降级：连败 3 次即停腿（§12-R9 末句：仍失败写 ABORT 行）
-            if self._remote_fail >= 3:
-                write_gate_verdict(
-                    self._jsonl_path,
-                    it,
-                    "ABORT",
-                    f"远端 PPO 连续失败 {self._remote_fail} 次且 --remote-degrade-after=0",
-                    decider="loop",
-                )
-                log(f"[run_rl] GATE ABORT it{it}: 远端不可用且禁用降级——停腿")
-                self._leg_abort = True
-            return True
-        if self._remote_fail < limit:
-            return True  # 未达阈值：按既有语义原地重试（同一 iter，不推进）
-        # T7：降级前必须先建好本机 PPO 栈。remote 启动为 hub 省 torch 把
-        # backend/model/opt 置 None；直接改 args.ppo=local 会让 _serial_ppo
-        # 撞 None.load_episodes（x3-power it1 实锤）。
-        self._ensure_local_ppo_stack()
-        args.ppo = "local"
-        self._remote_degraded = True
-        write_event(
-            self._jsonl_path,
-            {
-                "event": "remote_degrade",
-                "iter": it,
-                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "after_failures": self._remote_fail,
-                "reason": f"{type(e).__name__}: {str(e)[:300]}",
-            },
-        )
-        log(
-            f"[run_rl] R9 DEGRADE it{it}: 远端连续失败 {self._remote_fail} 次 —— "
-            f"本腿改走本机 PPO（args.ppo=local）。恢复远端需重启训练并修好链路。"
-        )
-        return False
+        # ★ 单一 PPO 路径（2026-09-21 §3）：**没有**就地降级——连败 3 次即 ABORT 停腿。
+        # loop 自己不具计算能力；想要本机算，操作员在控制台起本机 worker（与云机同一认领
+        # 协议），而不是训练进程偷偷把 job 算在自己身上（C 腿事故的根）。
+        if self._remote_fail >= 3:
+            write_gate_verdict(
+                self._jsonl_path,
+                it,
+                "ABORT",
+                f"远端 PPO 连续失败 {self._remote_fail} 次（单一 PPO 路径：无本机降级）",
+                decider="loop",
+            )
+            log(f"[run_rl] GATE ABORT it{it}: 远端不可用（无本机降级）——停腿")
+            self._leg_abort = True
+        return True
 
     def _remote_ppo(
         self,
@@ -1235,7 +1081,7 @@ class TrainingSteps:
         wait_timeout_sec: float = 0.0,
         export_path: str | Path | None = None,
     ) -> dict:
-        """远端 PPO（--ppo remote，D11/D12）——**组合入口**：发布 → 等结果 → 落位。
+        """远端 PPO（单一发布-等待路径，D11/D12）——**组合入口**：发布 → 等结果 → 落位。
 
         R2c-3（2026-09-18）把原来那 400 行顺序函数拆成三相（`_remote_ppo_publish` /
         `_remote_ppo_probe` / `_remote_ppo_fetch` / `_remote_ppo_land`），本函数保持拆分前
@@ -1263,7 +1109,7 @@ class TrainingSteps:
         wait_timeout_sec: float = 0.0,
         export_path: str | Path | None = None,
     ) -> RemotePpoJob:
-        """远程 PPO（--ppo remote，D11/D12）：打包 → 发布 job → 轮询等待 → 三重校验落位。
+        """远程 PPO（单一发布-等待路径，D11/D12）：打包 → 发布 job → 轮询等待 → 三重校验落位。
 
         `rollout_spec` 非空 = **M3 整轮上云**（kind=iter）：本轮不发本地 shard（payload
         只有 init 权重 + 可选 blob），改随 job 发 rollout 规格 + TS 运行时；节点自己跑
@@ -1273,7 +1119,7 @@ class TrainingSteps:
 
         - 打包：本轮 traj it{it} 下 wver 匹配的 shard 集 + init 权重 + 上轮 opt tar；
         - 发布：磁盘 IPC（job 目录 + jsonl job_pending 事件）→ 旁路 hub-server；
-        - 等待：阻塞轮询 server 结果（语义与 _serial_ppo 同构）；
+        - 等待：阻塞轮询 server 结果（发布-等待是**唯一** PPO 路径）；
         - 校验：init_weights_fp == 当前 args.out 指纹 + data_fp == 本地重算 + commit 一致；
         - 落位：weights_json → args.out（原子 replace）+ opt tar → it{it}/ppo_ckpt_remote。
         hub 全程免 torch（D2）：只做文件搬运 + sha256。
@@ -1324,7 +1170,7 @@ class TrainingSteps:
         course = getattr(args, "course_obj", None)
         if course is None:
             raise SystemExit(
-                "[run_rl] --ppo remote 需要课程（--course <name>，D13 课程指针）——"
+                "[run_rl] PPO 走 hub 队列需要课程（--course <name>，D13 课程指针）——"
                 "reward 公式/超参/关卡由课程单一事实来源"
             )
         course_path = Path(getattr(args, "course_path", "") or "")
@@ -1851,7 +1697,7 @@ class TrainingSteps:
         try:
             result = self._remote_ppo(it, rollout_spec=spec)
         except remote_retryable_exceptions() as e:
-            # 上云轮**不经过** `_remote_ppo_or_degrade`（loop_core 在 _node_rollout 时
+            # 上云轮走的是 `_remote_ppo` 组合入口（loop_core 在 _node_rollout 时
             # 跳过 _serial_ppo），所以那条路的「鉴权/闭锁类失败立即 ABORT」得在这里
             # 补上：否则 401/403 会走通用兜底 5×30s 重发同一 job 再死（x3-step 事故
             # 的同一个浪费）。只贴判决，不在这里降级——上云轮没有本地 shard 可训练。
@@ -1906,11 +1752,8 @@ class TrainingSteps:
         P0 修过的「标签超前一轮」）。所以调用方在本轮**跳过** `_dispatch_delayed_eval`。
         """
         args = self.args
-        if str(getattr(args, "ppo", "") or "") != "remote":
-            raise SystemExit(
-                "[run_rl] 半离线整段（--run-iters）要求 --ppo remote：整段 rollout + PPO "
-                "都在节点上跑，本机只发计划、收结果"
-            )
+        # ★ 2026-09-21（§3）：原先这里有「要求 --ppo remote」的闸——旗标删除后它恒真、
+        # 会把整段误拒。单一 PPO 路径下「整段 rollout + PPO 都在节点上」本就是唯一形态。
         from rl.iter_job import build_iter_spec
         from rl.plan import RUN_NODE_LABEL, build_plan, dump_plan
 
@@ -2032,11 +1875,8 @@ class TrainingSteps:
         没跑过任何一轮（`args.out` 无权重）就拒导——包里没有起点的任务等于没任务。
         """
         args = self.args
-        if str(getattr(args, "ppo", "") or "") != "remote":
-            raise SystemExit(
-                "[run_rl] --export-bundle 要求 --ppo remote：包里的 manifest 需要云端 PPO 的"
-                "超参与策略血缘（本机模式没有这些字段，无法拼出可跑的任务）"
-            )
+        # ★ 2026-09-21（§3）：原先这里拒绝「非 remote」——`--ppo` 删除后该判据恒真、会把
+        #   整条导出路径误拒。单一 PPO 路径下「PPO 在节点上跑」是唯一形态，导出天然成立。
         iters_total = int(getattr(args, "iters", 0) or 0)
         if iters_total <= 0:
             raise SystemExit(
@@ -2084,44 +1924,21 @@ class TrainingSteps:
         self._remote_ppo(it, spec, plan_bytes=dump_plan(plan), export_path=str(args.export_bundle))
 
     def _export_weights(self, it: int) -> None:
-        """按模式导出权重（goal/intent/per-tick）并归档（只归档不自动清理）。
+        """权重归档（只归档不自动清理）。
 
-        远程模式（--ppo remote）：weights_json 已由云 worker 产出、`_remote_ppo`
-        三重校验落位到 args.out——这里只归档 + 日志（不再调 torch 导出，D2/D12）。
+        ★ 2026-09-21（§3 单一 PPO 路径）：weights_json 恒由**认领到 job 的 worker** 产出、
+        经 `_remote_ppo` 三重校验落位到 args.out（D2/D12）——本机不再有 torch 导出路径
+        （goal/intent 导出分支随本机 PPO 一并退役），这里只归档 + 日志。
         """
         args = self.args
         # 课程声明 backup_prefix/backup_dir 时优先（D6 课程单一事实来源）；缺省
         # 退回按模式前缀 + 默认 nn-training/weights（旧行为）。
         bak_prefix = str(getattr(args, "backup_prefix", "") or "") or _MODE_BACKUP_PREFIX[args.mode]
         bak_dir = str(getattr(args, "backup_dir", "") or "") or None
-        if getattr(args, "ppo", "local") == "remote":
-            bak = backup_weights(args.out, it, prefix=bak_prefix, backup_dir=bak_dir)
-            log(
-                f"[run_rl] remote ppo it{it}: weights already landed by cloud worker "
-                f"(D12) -> {args.out}"
-            )
-            if bak:
-                log(f"[run_rl] weights archived -> {bak}")
-            return
-        if args.mode == "goal":
-            from models.goal_net import GoalNet
-
-            self._ppo_goal.export_goal_weights(cast(GoalNet, self._model), args.out)
-        elif args.mode == "intent":
-            from models.intent_net import IntentNet
-
-            self._ppo_intent.export_intent_weights(cast(IntentNet, self._model), args.out)
-        else:
-            self._save_weights_json(self._model, args.out)
         bak = backup_weights(args.out, it, prefix=bak_prefix, backup_dir=bak_dir)
         log(
-            f"[run_rl] ppo it{it}: steps={self._total_steps} chunks={self._chunks_n} "
-            + (
-                f"policy={self._agg['policy']:.4f} value={self._agg['value']:.4f} "
-                f"entropy={self._agg['entropy']:.4f} kl={self._agg['kl']:.5f} -> {args.out}"
-                if self._agg is not None
-                else "metrics n/a — ppo_backend checkpoint completed by previous process"
-            )
+            f"[run_rl] ppo it{it}: weights already landed by the claimed worker "
+            f"(D12) -> {args.out}"
         )
         if bak:
             log(f"[run_rl] weights archived -> {bak}")
@@ -2142,45 +1959,11 @@ class TrainingSteps:
 
         return eval_join_soft_sec(self._eval_policy_cfg())
 
-    def _regate_local_eval(self) -> None:
-        """本机 PPO 接手本轮 ⇒ 收回「提前放行」，恢复 R6（本机份额让位 PPO）。
-
-        只收回**我们自己**提前放的 gate（`_eval_gate_early_released`）：无节点时
-        `release_local_gate_if_starved` 放行的 gate 不动（否则本机局被卡到收官）。
-        """
-        if not getattr(self, "_eval_gate_early_released", False):
-            return
-        if self._eval_gate is not None and self._eval_gate.is_set():
-            self._eval_gate.clear()
-            log("[eval] 本机 PPO 接手本轮 —— 本机份额重新让位（R6；等到 _join_eval 或末 epoch）")
-        self._eval_gate_early_released = False
-
-    def _local_gate_epoch_hook(self) -> Callable[[int, object], None] | None:
-        """本机 PPO 的提前放行钩子（末 `early` 个 epoch 开始即放行）；None = 不提前放行。
-
-        与吞吐 T4 预采同一判据（ppo_update 的 on_epoch_done 每完成一个 epoch 回调，
-        1 基）；`policy.evalLocalEarlyEpochs=0` → 返回 None，维持 R6 原语义。
-        """
-        from rl.eval_local import early_epoch_reached, eval_local_early_epochs
-
-        gate = self._eval_gate
-        if gate is None or gate.is_set():
-            return None
-        early = eval_local_early_epochs(self._eval_policy_cfg())
-        if early <= 0:
-            return None
-        epochs = int(getattr(self.args, "epochs", 1) or 1)
-
-        def _hook(ep_done: int, _model: object) -> None:
-            if not gate.is_set() and early_epoch_reached(int(ep_done), epochs, early):
-                gate.set()
-                log(
-                    f"[eval] 本机份额提前放行（本机 PPO epoch {ep_done}/{epochs}）"
-                    " —— reserved 尾段与 PPO 尾部并行"
-                )
-
-        return _hook
-
+    # ★ 2026-09-21（§3 单一 PPO 路径）：这里原先还有 `_regate_local_eval()`（本机 PPO 接手 ⇒
+    # 收回提前放行）与 `_local_gate_epoch_hook()`（末 early 个 epoch 放行本机份额）——两者
+    # 都是「本机自己跑 PPO，所以本机核心要留给它」那套 R6 语义。PPO 恒在 worker 上跑之后
+    # 本机没有 PPO 窗口可让，两个方法**零调用点**，一并删除（gate 与 `_join_eval` 收官放行
+    # 保留：本机 eval 份额与**本机 rollout** 仍共用核心）。
     def _sweep_eval_tail(self) -> None:
         """上一轮 eval 尾巴的**自然收拢点**：下一轮 rollout 收官时（2026-09-17 用户指令）。
 
@@ -2229,7 +2012,6 @@ class TrainingSteps:
         args = self.args
         if self._eval_gate is not None:
             self._eval_gate.set()
-        self._eval_gate_early_released = False
         eval_join_sec = 0.0
         eval_thread = self._eval_thread
         if eval_thread is not None and eval_thread.is_alive():
@@ -2309,21 +2091,21 @@ class TrainingSteps:
         from rl.eval_local import eval_local_early_epochs, local_gate_release_plan
 
         self._eval_gate = threading.Event()
-        self._eval_gate_early_released = False
         # 尾巴的窗口起点（收拢时判“是否跑过自己的窗口”）；只作时间基准，不参与等待。
         self._eval_tail_start = time.time()
         # 本机份额放行档（2026-09-17）：本轮本机不跑 PPO（远端 PPO / 整轮上云 / stream
         # 已在轮内跑完）⇒ 立刻放行（核心空闲，预留尾段即时开跑）；本机 PPO ⇒ 末 epoch
         # 放行（early=0 时维持 R6：_join_eval 才放行）。
         plan = local_gate_release_plan(
-            ppo_remote=str(getattr(args, "ppo", "local")) == "remote",
+            # ★ 2026-09-21（§3）：PPO 恒在节点上跑（本机不跑 PPO）⇒ 恒为 immediate 档。
+            # 不再从 `args.ppo` 推导（旗标已删，旧写法会恒判本机 PPO 而错拿 on_join）。
+            ppo_remote=True,
             node_rollout=bool(getattr(self, "_node_rollout", False)),
             stream_round=getattr(self, "_stream_meta", None) is not None,
             early_epochs=eval_local_early_epochs(self._eval_policy_cfg()),
         )
         if plan == "immediate":
             self._eval_gate.set()
-            self._eval_gate_early_released = True
             log("[eval] 本机份额提前放行（本轮 PPO 不在本机跑）——reserved 尾段立即开跑")
         self._eval_thread = dispatch_eval_bg(
             self.bun,

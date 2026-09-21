@@ -137,6 +137,18 @@ function courseKeys(course = COURSE): Record<string, unknown> {
   return cfg.courses?.[course] ?? {}
 }
 
+/** 往 rl-config 写本课的**旧形状**残留键（模拟历史开课弹窗留下的值）。
+ *
+ *  为什么走 Record 视图：这些键在类型表里已删 ⇒ 只有「文件里的残留值」这条路径还在。
+ */
+function seedCourseKnobs(keys: Record<string, unknown>, course = COURSE): void {
+  const cfg = JSON.parse(readFileSync(process.env.BCITY_RL_CONFIG!, 'utf-8')) as {
+    courses?: Record<string, Record<string, unknown>>
+  }
+  cfg.courses = { ...(cfg.courses ?? {}), [course]: { ...(cfg.courses?.[course] ?? {}), ...keys } }
+  writeFileSync(process.env.BCITY_RL_CONFIG!, JSON.stringify(cfg, null, 2))
+}
+
 // ────────────────────────── ① 开课：发现事实 ──────────────────────────
 
 describe('openCourse：把「这门课存在且可被调度」写到盘上', () => {
@@ -228,13 +240,13 @@ describe('openCourse：课程级旋钮只落 courses.<课>', () => {
     expect(cfg.rl.rollout_src).toBeUndefined()
   })
 
-  it('降级本机（T7）：给出才写；不给则不动该键（不顺手清空别人的配置）', async () => {
-    await openCourse(COURSE, { remoteDegrade: true, hubMode: { attempts: 1, delayMs: 0 } })
+  it('★ 降级本机（T7）已删除（§3）：开课**不再**写该键，历史残留值被 prune 清掉', async () => {
+    // 先说结论：单一 PPO 路径下没有「降级本机」档位（loop 没有计算能力）⇒
+    // 旧开课弹窗写过的 `remote_degrade_after` 已无读者，开课时随 legacy 清理一并删掉。
+    seedCourseKnobs({ remote_degrade_after: 3 })
     expect(courseKeys().remote_degrade_after).toBe(3)
     await openCourse(COURSE, { hubMode: { attempts: 1, delayMs: 0 } })
-    expect(courseKeys().remote_degrade_after).toBe(3)
-    await openCourse(COURSE, { remoteDegrade: false, hubMode: { attempts: 1, delayMs: 0 } })
-    expect(courseKeys().remote_degrade_after).toBe(0)
+    expect(courseKeys().remote_degrade_after).toBeUndefined()
   })
 
   it('离线档忽略 rollout 选择（服务端侧：只认 run/run_iters 那对键）', async () => {

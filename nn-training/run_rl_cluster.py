@@ -173,15 +173,8 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="--serve：**课程级**附加参数，原样透传给开课（per-tick/intent/goal…）；空 = 吃课程配置",
     )
-    # `--ppo` 同规：控制台起的 trainer 一律 remote（PPO 在云端 GPU）——单进程服务所有课程时
-    # 「怎么连」住 `courses.<课>` 机器侧覆盖，而 `ppo` 是**全进程同一个**（都是 remote），
-    # 所以它是 serve 级参数。不声明它 = argparse 以 unrecognized arguments 拒启（与 --mode 同坑）。
-    ap.add_argument(
-        "--ppo",
-        default="",
-        choices=("", "local", "remote"),
-        help="--serve：PPO 执行位置（控制台起的是 remote）；空 = 吃课程 / rl-config 默认",
-    )
+    # ★ 2026-09-21（§3）：`--ppo` 已删除——单一 PPO 路径下训练侧没有"跑在哪"这个概念，
+    # 也就没有 serve 级参数可声明/透传。
     ap.add_argument(
         "--cluster-lock",
         default="",
@@ -222,14 +215,12 @@ def main(argv: list[str] | None = None) -> int:
                 f"[serve] 已有单进程服务器在跑（锁 {lock_path}）——一个进程服务所有课程，"
                 "双开会两套调度器抢同一批 traj；先停掉它，或确认无人在跑后加 --force 接管"
             )
-        # `--mode`/`--ppo` 是**课程级**附加参数（rl-config 默认按模式取）——只有它们需要透传给
-        # 开课。它们必须是本解析器**显式声明**的参数：不声明则 argparse 先以 unrecognized
-        # arguments 拒启（`--serve --mode goal` 的老坑，`--ppo remote` 同一个坑）。
+        # `--mode` 是**课程级**附加参数（rl-config 默认按模式取）——只有它需要透传给开课。
+        # 它必须是本解析器**显式声明**的参数：不声明则 argparse 先以 unrecognized arguments
+        # 拒启（`--serve --mode goal` 的老坑）。★ §3：`--ppo` 已删除，无此项可透传。
         extra: list[str] = []
         if args.mode:
             extra += ["--mode", args.mode]
-        if args.ppo:
-            extra += ["--ppo", args.ppo]
         try:
             courses = [c.strip() for c in args.courses.split(",") if c.strip()]
             # 空课程表 = **发现模式**（进程不绑课程：扫 --traj-root 下所有**已开课**的课

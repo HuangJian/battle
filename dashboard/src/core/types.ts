@@ -47,8 +47,10 @@ export interface CourseConf {
   //  D14）——往里加一个旋钮，熔断会把同一份语料读成新语料。
   //  读面：python `rl/loop_serve.py::apply_course_machine_overrides`（开课时施加）。
   //  传输/节点指针**不在**这里（课程与 worker 节点正交）。
-  /** T7：远端连败降级本机的阈值（0 = 关）。 */
-  remote_degrade_after?: number
+  //
+  //  ★ 2026-09-21 删掉 `remote_degrade_after`（plan/accident.plan.md §3）：单一 PPO 路径下
+  //  「就近降级到本机算」这个档位不存在（loop 没有计算能力，无人认领就等着，永不自己算）。
+  //  旧 rl-config 里的残留值由 `pruneLegacyCourseKnobs` 清掉。
   /** 门禁失败语义（halt = 打进停机态）。 */
   gate_halt_mode?: string
 }
@@ -167,8 +169,6 @@ export interface RegistryEntry {
   jobRoot?: string
   /** trainingLoop 的 push 节点 URL（REMOTE_PUSH_NODE 重启注入）。 */
   pushNodeUrl?: string
-  /** T7：启动时是否 opt-in 远端连败降级本机 PPO（默认 false；监督重启复现）。 */
-  remoteDegrade?: boolean
   /** 启动模式：控制台 trainer 编排（pull/push/local）或 'remote'（冒烟预演）。 */
   mode?: 'pull' | 'push' | 'local' | 'remote'
   /** 本进程启动时实际生效的隧道选项（M1；复用判定用它检测「改了选项没生效」）。 */

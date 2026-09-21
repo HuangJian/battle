@@ -90,7 +90,6 @@ class RoundSteps:
     _dispatch_delayed_eval: Any
     _maybe_dispatch_baseline_eval: Any
     _log_report: Any
-    _serial_ppo: Any
     #: 远端 PPO 的三相驱动（实现在 `TrainingSteps`）：`None` = 已收口，否则 = 让位/停车。
     _remote_ppo_step: Callable[[RoundContext], StepResult | None]
     _export_weights: Any
@@ -334,21 +333,21 @@ class RoundSteps:
         （云机在跑），所以执行权交给别的课程是免费收益。`ctx.resumable` 为假（组合路径
         `run_one_round`）时退化成阻塞取结果，与拆分前逐字节一致。
 
-        R9：远端连败且 `--remote-degrade-after=0` 时判决已落盘 ⇒ 立刻停腿，不再空转重试。
+        R9（§3 单一 PPO 路径下已无「降级本机」档）：远端连败 / 确定性失败判决已落盘 ⇒
+        立刻停腿，不再空转重试。
         """
         it = ctx.it
+        if self._stream_meta is not None:
+            # stream（采集与 PPO 波次重叠）随单一 PPO 路径退役（§3）：本机没有 PPO 窗口，
+            # 也就没有「集群在 PPO 窗口闲置」这回事。留着响亮失败，绝不静默走错路。
+            raise SystemExit(
+                "[run_rl] stream 路径已随单一 PPO 路径退役（plan/accident.plan.md §3）："
+                "PPO 恒在 hub 队列上由 worker 认领，本机不再算 PPO"
+            )
         if not self._node_rollout:
-            remote_done = False
-            if self._stream_meta is None and getattr(self.args, "ppo", "local") == "remote":
-                res = self._remote_ppo_step(ctx)
-                if res is not None:
-                    return res  # 让位（或停车）
-                # 远端收口（成功或降级）都会把 args.ppo 变样或保持 remote：成功后必须
-                # **不再**走 `_serial_ppo`（否则会对同一轮再发布一次、再等一遍）。
-                remote_done = getattr(self.args, "ppo", "local") == "remote"
-            if not remote_done:
-                # 本机路径：本来就本机，或**本轮刚降级**（args.ppo 已置 local）
-                self._serial_ppo(it)
+            res = self._remote_ppo_step(ctx)
+            if res is not None:
+                return res  # 让位（或停车）
         if self._leg_abort:
             log(f"[run_rl] leg ABORTED at it{it}（远端不可用且禁用降级）")
             return finish(ROUND_STOP)
@@ -469,7 +468,7 @@ class RoundSteps:
         )
         if not isinstance(e, SystemExit) and getattr(self, "_leg_abort", False):
             # 已经被判死腿（如远端 401/403 这类重试无意义的失败，ABORT 判决已由
-            # _remote_ppo_or_degrade 落盘）——再按通用兜底重试只是重复 publish 同一 job、
+            # _handle_remote_failure 落盘）——再按通用兜底重试只是重复 publish 同一 job、
             # 把停腿拖后 5×30s（x3-step 事故）。直接上抛。
             raise
         if self._consec_fail >= 5:
