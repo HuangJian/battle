@@ -145,7 +145,8 @@ function seedCourseKnobs(keys: Record<string, unknown>, course = COURSE): void {
   const cfg = JSON.parse(readFileSync(process.env.BCITY_RL_CONFIG!, 'utf-8')) as {
     courses?: Record<string, Record<string, unknown>>
   }
-  cfg.courses = { ...(cfg.courses ?? {}), [course]: { ...(cfg.courses?.[course] ?? {}), ...keys } }
+  // 展开 `undefined` 本就是 no-op（unicorn/no-useless-fallback-in-spread），故不写 `?? {}`。
+  cfg.courses = { ...cfg.courses, [course]: { ...cfg.courses?.[course], ...keys } }
   writeFileSync(process.env.BCITY_RL_CONFIG!, JSON.stringify(cfg, null, 2))
 }
 
