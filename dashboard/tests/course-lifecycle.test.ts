@@ -464,4 +464,39 @@ describe('开课的写序：被拒 = 零副作用', () => {
     expect(readLoopControl().paused).not.toContain(COURSE)
     expect(existsSync(path.join(TRAJ, COURSE, COURSE_ENABLE_MARKER))).toBe(true)
   })
+
+  it('开课回执带 §5.3 起点-基线对照行（C 例：起点贴基线却配缺省 kk=1）', async () => {
+    // 事故里没人被告知的**就是这一行**：本腿恢复的权重已经在课程 bc 权重那一档，
+    // 却要以 kk=1 满额锚复活（it1 kl=0.90 连烧 30 轮）。回执必须把它说出口。
+    const prev = process.env.BCITY_CURRICULA_DIR
+    const cur = path.join(DIR, 'curricula')
+    const KK = 'kk-receipt-fixture'
+    mkdirSync(cur, { recursive: true })
+    // 课程文件：ref 开、缺省初值（= C 事故那一档配置）
+    writeFileSync(
+      path.join(cur, `${KK}.jsonc`),
+      JSON.stringify({ name: KK, kickstart_ref: true, warmup_iters: 0, mode: 'per-tick' }, null, 2),
+    )
+    process.env.BCITY_CURRICULA_DIR = cur
+    try {
+      mkdirSync(path.join(TRAJ, KK), { recursive: true })
+      writeFileSync(path.join(TRAJ, KK, 'weights.json'), '{}')
+      writeFileSync(
+        path.join(TRAJ, KK, 'eval_log.jsonl'),
+        `${[
+          JSON.stringify({ event: 'eval_summary', iter: 0, winRate: 0.355, games: 400 }),
+          JSON.stringify({ event: 'eval_summary', iter: 57, winRate: 0.352, games: 400 }),
+        ].join('\n')}\n`,
+      )
+      const r = await openCourse(KK, { hubMode: { attempts: 1, delayMs: 0 } })
+      expect(r.ok).toBe(true)
+      const text = r.detail!.join('\n')
+      expect(text).toContain('kk 初值 1（来源：缺省 1.0 ——')
+      expect(text).toContain('起点-基线对照：起点 35.2%（账本末次评估 it57')
+      expect(text).toContain('★ 起点与基线只差 0.3pp')
+    } finally {
+      if (prev === undefined) delete process.env.BCITY_CURRICULA_DIR
+      else process.env.BCITY_CURRICULA_DIR = prev
+    }
+  })
 })

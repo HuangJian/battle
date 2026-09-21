@@ -28,6 +28,7 @@ import { validateCourseName } from '../../core/slots'
 import type { RolloutSrcMode, TrainMode } from '../../core/types'
 import { isBcCourse, seedWeightsFromBc } from '../../stack/courses'
 import { pruneLegacyCourseKnobs } from '../../stack/course-knobs'
+import { kickstartReceipt } from '../../stack/kickstart-receipt'
 import { remoteExecutionFace } from '../../stack/push-config'
 import { trainModeKnobs } from '../../stack/specs'
 import { type CourseMode, setCourseMode } from './course-mode'
@@ -287,7 +288,8 @@ export async function openCourse(course: string, opts: OpenCourseOpts = {}): Pro
     //    · **开课标记排最后**：它是训练侧/hub 的「在训」闸，必须在一切之后才落 ——
     //      前面任何一步失败都不许留下「已开课」的盘上事实（用户 2026-09-20 报障的正是
     //      「回执说未开课、盘上却已开课」这种三种口径并存）。
-    const pruned = pruneLegacyCourseKnobs(loadConfig())
+    const cfg = loadConfig()
+    const pruned = pruneLegacyCourseKnobs(cfg)
     const knobs = writeCourseConfigForOpen(c, opts)
     const resume = setCoursePaused(c, false)
     const notes = [
@@ -297,6 +299,10 @@ export async function openCourse(course: string, opts: OpenCourseOpts = {}): Pro
         : []),
       `暂停意图：${resume.ok ? resume.message : `未改动（${resume.message}）`}`,
       ...prepareCourseForOpen(c).notes,
+      // §5.3 起点-基线对照行（plan/accident.plan.md）：C 事故里「本腿恢复的权重已经在 bc
+      // 权重那一档、却拿满额锚去拉」这个事实，开课前盘上就有——放在回执里，操作员点开课时
+      // 直接看见。与训练侧 `loop_core._kickstart_baseline_row` 同源同数（同一份账本、同一取法）。
+      ...kickstartReceipt(c, cfg),
       // 共享 trainer 已经握着本课的按课锁 = 正常状态（它服务多课，开一门取一门）——
       // 说明白，免得操作员把它当成「双开」而在日志里找不存在的冲突。
       ...(runners.holder && runners.holder === runners.cluster

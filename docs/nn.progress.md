@@ -4,6 +4,33 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §122 控制台：开课回执的「起点-基线对照行」（accident.plan §5.3，2026-09-21）
+
+**要治的那件事**：C 双臂从收敛权重（it175）以 `kk(1)=1` 满额缰绳复活，it1 kl=0.90、锚主导
+更新连烧 30 轮；两臂 ×12h 只换来「无结论」。开课前**盘上就已经有**的那个事实——「本腿恢复的
+权重已经贴着课程 bc 权重那一档（甚至更低），还要拿满额锚去拉」——当时没人被告知：训练侧第五轮
+已把这一行打进 `out.log`，但操作员的动作是「夜里点开课就走」。本轮回执把它摆在开课那一下。
+
+**落地**（控制台侧，`dashboard/`）：新模块 `stack/kickstart-receipt.ts`（纯函数组装 + 轻量账本
+读）→ `server/actions/course-lifecycle.ts::openCourse` 的 `detail`。读数与阈值全与执行面同源：
+基线 = `tmp/<课>/eval_log.jsonl` 文件序末条 it0 行的 winRate（同 `kickstart_burn.baseline_reading`），
+起点 = 末条 it>0 行；噪声带/点数走 `courses.<课>.kickstart_burn.{margin_pp,points}`（同
+`kickstart_burn.burn_overrides`）。★ 两支：起点低于基线 > 噪声带（熔断从第一个点起算）/
+起点在噪声带内且 kk ≥ 0.5（满额锚先把它拉回去，C 事故的那种配置）。
+
+**lesson**：
+- **镜像常量必须对着 python 源码核对**（单测读 `kickstart_burn.py`/`loop_core.py` 的文本取
+  字面量）：TS 侧抄一份阈值是不可避免的（控制台不能 import python），但抄完不设闸 = 两处判据
+  各自安好、对不上号（与 §2/A 的 course_fp/corpus_fp 同一个病的预防）。
+- **同一份账本两个读法要当面对账**：控制台的 `readEvalSummaries` 全量 parse（视图构建用），
+  回执读法按 `"eval_summary"` 子串预滤（18MB 账本、开课那一下）——单测钉「两者同数」，
+  免得快的那份悄悄漂成另一种口径。
+- 真盘实测：x20-clutch 差 -6.0pp（起点已低于基线）、x20-steady +2.0pp、x20-clutch-null -3.8pp
+  ——三门全是「配 kk=1 会先变差」的配置，回执现在会当场喊。
+
+**门禁**：`cd dashboard && bun run typecheck && bun run test` = **991 pass**（新增
+`tests/kickstart-receipt.test.ts` 23 + `course-lifecycle.test.ts` 集成 1）；根 `bun run check` 绿。
+
 ## §121 修复：本地 resume 的 D14 判据同源化（accident.plan §2/A，2026-09-21）
 
 **问题**：D14（跨课程语料不混训）有两把尺子——`course_fp` = 课程**文件字节** sha256，
