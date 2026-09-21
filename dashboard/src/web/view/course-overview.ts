@@ -11,6 +11,28 @@
 
 // ────────────────────────── hub 观测面（GET /admin/queue） ──────────────────────────
 
+/** hub 的毒包熔断阈值（`remote/hub_server.py::FREEZE_AFTER_RECLAIMS` 的**镜像常量**）。
+ *
+ *  为什么镜像在这里：面板要把「零回传 3 次」说成「到了阈值」才读得懂，而控制台不能 import python。
+ *  权威仍在 python —— `tests/poison-unfreeze.test.ts` 对着源码文本核对这一个字面量，
+ *  改了阈值不改这里就红（与 `kickstart-receipt` 的镜像常量同规）。 */
+export const FROZEN_RECLAIMS = 3
+
+/** 被毒包熔断冻住的一份 job（hub `_frozen` 的一条记录，plan/accident.plan.md §4.1）。
+ *
+ *  为什么要有它上屏：「已冻的 job 不在 pending 里」 ⇒ 只给队列深度的话，操作员看到的只是
+ *  「队列莫名其妙短了」，而真正的事实是「这份 payload 认领 N 次零回传，hub 主动把它拿出了池子」。
+ *  冻住 ≠ 死亡：人工确认（`POST /admin/unfreeze`）后回池可重领——这是熔断唯一的可逆口。 */
+export interface FrozenJobView {
+  jobId: string
+  /** 「认领后零回传」次数（熔断判据；hub 侧阈值 3）。 */
+  reclaims: number
+  /** 最后一次零回传的认领者身份（空串 = 无身份）。 */
+  worker: string
+  /** 落冻时刻（epoch 秒；0 = 缺失）。 */
+  ts: number
+}
+
 /** 单课程队列行（hub `queue_state()` 的一行）。 */
 export interface HubQueueCourseView {
   /** `online` = 参与实时派发；`offline` = 只收回传，不派活。 */
@@ -23,6 +45,8 @@ export interface HubQueueCourseView {
   nextJob: string | null
   /** 在飞持有人（worker 身份）；空串 = 无身份（旧 worker / 手写 curl）。 */
   holders: string[]
+  /** 毒包熔断冻结的 job（§4.1）；空数组 = 没有冻的（不是「不可知」）。 */
+  frozen: FrozenJobView[]
 }
 
 /** hub 调度面观测（`/admin/queue` 归一化后的视图）。 */
@@ -46,6 +70,26 @@ export interface HubQueueView {
 
 function num(v: unknown): number {
   return typeof v === 'number' && Number.isFinite(v) ? v : 0
+}
+
+/** 解析 `/admin/queue` 每课的 `frozen` 块（`{job_id: {reclaims, worker, ts}}`）→ 列表。
+ *
+ *  宽容解析（与整个 `/admin/queue` 同规）：形状不符 → 空数组（缺这一块 = 这个 hub 版本
+ *  还没有熔断，而不是「没有冻的 job」——但两者对操作员都是「无需处理」，故不另设不可知态）。 */
+export function parseFrozenBlock(raw: unknown): FrozenJobView[] {
+  if (!raw || typeof raw !== 'object') return []
+  const out: FrozenJobView[] = []
+  for (const [jobId, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (!jobId) continue
+    const rec = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>
+    out.push({
+      jobId,
+      reclaims: num(rec.reclaims),
+      worker: typeof rec.worker === 'string' ? rec.worker : '',
+      ts: num(rec.ts),
+    })
+  }
+  return out.sort((a, b) => b.reclaims - a.reclaims || a.jobId.localeCompare(b.jobId))
 }
 
 /** 解析 hub `/admin/queue` 的响应体 → 视图；形状不符 → null（UI 显示空态，不炸整页）。
@@ -74,6 +118,7 @@ export function parseHubQueue(body: unknown): HubQueueView | null {
       inflight: inflightRaw.length,
       nextJob: typeof c.next_job === 'string' ? c.next_job : null,
       holders,
+      frozen: parseFrozenBlock(c.frozen),
     }
   }
   return {
@@ -180,6 +225,8 @@ export interface CourseOverviewRow {
   offlineLastIter: number | null
   /** 段内最近一件产物的 mtime（epoch 秒）；0 = 无。 */
   offlineLastMtime: number
+  /** 该课被毒包熔断冻结的 job（§4.1）；空 = 没有（hub 无应答时也是空——见 `hubOnline`）。 */
+  frozen: FrozenJobView[]
 }
 
 /** 恒等在训课程 ∩ hub 课程表 ∩ 查看课程的课程清单（保持入参顺序 = 服务端的新→旧）。 */
@@ -223,8 +270,25 @@ export function buildCourseRows(input: {
       offlineRounds: seg.rounds,
       offlineLastIter: seg.lastIter,
       offlineLastMtime: seg.lastMtime,
+      frozen: q?.frozen ?? [],
     }
   })
+}
+
+/** 全 hub 范围被冻结的 job（跨课程展平，课程名有序）——面板「毒包熔断」横幅的数据源。
+ *
+ *  为什么展平：冻住的 job 是**事故现场**（同一份 payload 反复炸），操作员要看到的是
+ *  「哪门课、哪份 job、几次、被谁」，而逐课行里的一个小角标读不出这些；解冻是**逐 job** 的
+ *  动作（`POST /admin/unfreeze?job_id=`），所以列表形态最贴。 */
+export function frozenJobs(
+  overview: ParallelOverviewView | null,
+): ({ course: string } & FrozenJobView)[] {
+  if (!overview) return []
+  const out: ({ course: string } & FrozenJobView)[] = []
+  for (const row of overview.rows) {
+    for (const f of row.frozen) out.push({ course: row.course, ...f })
+  }
+  return out
 }
 
 /** 整页总览视图（hub 行 + 每课行）。 */

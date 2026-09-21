@@ -207,9 +207,9 @@
 // ⑥ 并行先查 `rl-config.json` 容量 + 登记 `slot`。
 // ⑦ 确认 a95/a97 在线。
 //
-// 启动（**用户手工；agent 不得启动训练**）：
-//   bun dashboard/src/launch/cli.ts --script run_rl.py --course x20-powered \
-//     --remote-transport pull
+// 启动：
+//   启动走**控制台开课**：`bun run dashboard` → http://127.0.0.1:8900 → 选本课 → 开课。
+//   （裸 CLI 启动已下线：绕过控制台 = 漏开课标记/暂停解禁/hub 模式三件套 —— plan/accident.plan.md §1；agent 不得启动训练）
 //
 // ── 诊断工具 ─────────────────────────────────────────────────────────────
 // · 带电日常：`eval-course-ckpt.ts ... --course nn-training/levels/ladder-c20-lives1-powered.jsonc \

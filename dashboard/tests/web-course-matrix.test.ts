@@ -60,6 +60,7 @@ function ovRow(patch: Partial<CourseOverviewRow> & { course: string }): CourseOv
     offlineRounds: 0,
     offlineLastIter: null,
     offlineLastMtime: 0,
+    frozen: [],
     ...patch,
   }
 }

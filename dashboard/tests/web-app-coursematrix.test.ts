@@ -36,6 +36,7 @@ function ovRow(patch: Partial<CourseOverviewRow> & { course: string }): CourseOv
     offlineRounds: 0,
     offlineLastIter: null,
     offlineLastMtime: 0,
+    frozen: [],
     ...patch,
   }
 }
@@ -470,6 +471,42 @@ describe('操作列：两个开关并列且归属分明（§7 O4）', () => {
   })
 })
 
+// ────────────────────────── §4.1 毒包熔断上屏 ──────────────────────────
+
+describe('毒包熔断（§4.1：冻住的 job **不在 pending 里**，只能单独说）', () => {
+  /** 在训 + 一份被冻的 job（C 事故的形状：it58 领 40 次零回传）。 */
+  const frozenRow = (patch: Partial<Parameters<typeof ovRow>[0]> = {}) =>
+    ovView([
+      ovRow({
+        course: 'x20-clutch',
+        training: true,
+        iter: 57,
+        hubSeen: true,
+        frozen: [{ jobId: 'it58-0c1f', reclaims: 3, worker: 'node-a', ts: NOW_SEC - 600 }],
+        ...patch,
+      }),
+    ])
+
+  it('逐条上屏：课程 · job · 零回传次数 · 最后认领者（只给队列深度看不出这件事）', async () => {
+    const html = await render({ overview: frozenRow() })
+    expect(html).toContain('毒包熔断 · x20-clutch · it58-0c1f')
+    expect(html).toContain('零回传 3 次 · 最后认领 node-a')
+    expect(html).toContain('aria-label="毒包熔断冻结"')
+    expect(html).toContain('解冻') // 唯一的可逆口在屏上（只读是服务端 403，不是涂灰）
+  })
+
+  it('没有冻的 job → 不出这一块（不是留个空壳横幅）', async () => {
+    expect(await render({ overview: defaultOverview() })).not.toContain('毒包熔断')
+  })
+
+  it('无身份的认领者照实说「（无身份）」——不许编一个人出来', async () => {
+    const html = await render({
+      overview: frozenRow({ frozen: [{ jobId: 'j1', reclaims: 5, worker: '', ts: 0 }] }),
+    })
+    expect(html).toContain('零回传 5 次 · 最后认领（无身份）')
+  })
+})
+
 // ────────────────────────── 接线（SSR 渲染不出点击，用源码断言兜底） ──────────────────────────
 
 describe('接线：面板挂载、跨区分流与动作路由同源', () => {
@@ -519,6 +556,17 @@ describe('接线：面板挂载、跨区分流与动作路由同源', () => {
   it('面板不直连服务端（分层铁律由 architecture-layering 用例兜底，这里挡住「顺手 import」）', () => {
     expect(panel).not.toContain('server/')
     expect(panel).not.toContain("from 'fs'")
+  })
+
+  it('§4.1 解冻按钮接的是 unfreeze-job；路由层有同一个口，且形状判据与动作层同源', () => {
+    const route = readFileSync(
+      path.join(DASHBOARD_ROOT, 'src', 'server', 'api', 'route.ts'),
+      'utf-8',
+    )
+    expect(panel).toContain("'unfreeze-job'")
+    expect(route).toContain("case 'unfreeze-job'")
+    // 关键：400 的判据不是路由自己再写一份正则（汄移就会变成「非法 job_id 拿 409 busy」）。
+    expect(route).toContain('jobIdError(')
   })
 
   it('动作走 route 表：setCourseMode（hub 侧）与 setCoursePaused（本地）都在，且作废调度器缓存', () => {

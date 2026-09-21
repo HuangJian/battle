@@ -134,6 +134,68 @@ def test_node_failure_aborts_on_first_failure_with_reason(tmp_path: Path) -> Non
     assert st._remote_fail == 0  # 确定性失败不消耗连败配额
 
 
+def test_jobfailed_marks_leg_dead_and_never_republishes(tmp_path: Path) -> None:
+    """§4 验收补条：「`JobFailedError` 之后**不得自动重发**同 job_id」（plan/accident.plan.md §4）。
+
+    为什么这条比「写没写 ABORT 判决」更关键：`hub_client.publish_job` 把重发当作重试语义
+    （重发同 job_id 会**清掉失败标记**）——所以只要失败之后还有任何一条路径回头重跑本轮，
+    P0 的收兵就被当场撤销，退回本次事故的形态（重发 → 同一份毒包 → 同一处炸）。
+
+    两段一起钉：
+      · 判决段：真 `_handle_remote_failure` 接 `JobFailedError` ⇒ 腿被判死（`_leg_abort`），
+        且不消耗连败配额（否则还会在 3/5 连击阶梯上再转几圈）；
+      · 重试段：已判死腿时 `round_failure` **直接上抛**——它才是「重跑本轮」的唯一入口
+        （ROUND_RETRY）。下面用发布钩子把「有没有人又发了一次」变成可断言的事实。
+    """
+    import remote.hub_client as hc
+    from rl.loop_core import TrainingLoop
+    from rl.loop_round import ROUND_RETRY
+
+    st = _Stub(tmp_path)
+    err = JobFailedError("job 43a4eb01cf9fe35c 失败: BadZipFile[kind=ProtocolError]", kind="ProtocolError")
+    st._handle_remote_failure(58, err)
+    assert st._leg_abort is True
+    assert st._remote_fail == 0  # 确定性失败不消耗连败配额
+
+    # 重试段：bare loop（不跑 __init__）+ 真 `round_failure`
+    loop = TrainingLoop.__new__(TrainingLoop)
+    loop.args = SimpleNamespace(smoke=False)
+    loop._consec_fail = 0
+    loop._jsonl_path = tmp_path / "loop_log.jsonl"
+    loop._leg_abort = True  # 由上面的判决段置位（真 mixin 写的）
+    sleep_calls: list[float] = []
+    publish_calls: list[str] = []
+    loop._ledger_apply = lambda _ev: None  # type: ignore[method-assign]
+    orig_sleep, orig_publish = hc.time.sleep, hc.publish_job
+    hc.time.sleep = lambda s: sleep_calls.append(float(s))  # type: ignore[assignment]
+
+    def _spy_publish(jid: str, *a: object, **kw: object) -> object:
+        publish_calls.append(str(jid))
+        raise AssertionError("已判死腿之后又发布了 job —— 这正是 §4 要挡的重发")
+
+    hc.publish_job = _spy_publish  # type: ignore[assignment]
+    try:
+        # `round_failure` 的「判死腿上抛」是**裸 raise**（重抛当前异常）⇒ 必须在 `except` 块里
+        # 调用（生产侧的调用点都在 `except ... as e:` 里；直接调会得到「No active exception」）。
+        try:
+            raise err
+        except JobFailedError as e:
+            with pytest.raises(JobFailedError):
+                loop.round_failure(e, 58, backoff=False)
+    finally:
+        hc.time.sleep, hc.publish_job = orig_sleep, orig_publish  # type: ignore[assignment]
+    assert publish_calls == []  # 一个字都没再发出去
+    assert sleep_calls == []  # 也没在「睡 30s 再试同一 job」的阶梯上转圈
+    assert loop._consec_fail == 1  # 失败留痕（iter_error）仍然照写；只是不再重试
+    # 对照：腿没被判死时同一条路会返回 ROUND_RETRY（重跑本轮 = 重发同一 job）——
+    # 也就是说「不重发」靠的正是上面那个 `_leg_abort` 闸。
+    loop._leg_abort = False
+    try:
+        raise TimeoutError("抖一下")
+    except TimeoutError as e:
+        assert loop.round_failure(e, 59, backoff=False).status == ROUND_RETRY
+
+
 def test_wait_job_poll_backoff_on_network_errors() -> None:
     """退避：连续网络错误按 2 的幂退避，成功即复位（不猛敲不可达边缘）。"""
     sleeps: list[float] = []

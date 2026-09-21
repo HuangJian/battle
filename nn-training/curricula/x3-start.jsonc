@@ -70,9 +70,9 @@
 //   ③ 在途 eval 行 iter=权重轮（P0 事后口径），日常数右移一轮读。
 //   后续：x3-power（杀/中信用比）接棒；本腿归档保留 it180/it333 双点。
 //
-// 启动（§5.6：禁裸 python，一律走启动器）：
-//   bun dashboard/src/launch/cli.ts --script run_rl.py --course x3-start
-// 后台常驻加 --detach；日常启停走控制台 bun run dashboard。
+// 启动：
+//   启动走**控制台开课**：`bun run dashboard` → http://127.0.0.1:8900 → 选本课 → 开课。
+//   （裸 CLI 启动已下线：绕过控制台 = 漏开课标记/暂停解禁/hub 模式三件套 —— plan/accident.plan.md §1；agent 不得启动训练）
 {
   "version": 5,
   "name": "x3-start",

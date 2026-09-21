@@ -162,6 +162,41 @@ def _kickstart_startup_check(args: Any, start_it: int) -> float:
     return kk0
 
 
+def _paired_seed_startup_check(args: Any, rotate_seed: int, rs_source: str) -> None:
+    """§2.5 配对 rotateSeed 启动自检（plan/accident.plan.md §2）。
+
+    两件事，分工明确：
+      · **拒启**（唯一无歧义的「不等」）：课程声明了 `paired_rotate_seed=V`，而实际生效的
+        rotateSeed ≠ V —— 那一定是「声明被静默丢弃」或「有人在跑一对只有一条腿带对 V 的腿」，
+        代价是一条腿按错误种子流跑满 80 轮（`ent_break` 漏映射前科同族）。
+      · **响亮报告**：同 V 课程（= 机器口径的「配对对端」）与各自账本末条 run_start.rotateSeed；
+        无对端 / 对端不在同 V 上 ⇒ WARNING（不阻断，理由见 `rl/paired.py` 头注：账本是历史累积，
+        用陈旧读数杀在跑的腿比漏报更贵——真正的 fail-fast 闸门在控制台开课回执那一屏）。
+
+    未声明 `paired_rotate_seed` 的课程照旧（单腿口径），只打一行说明——不打扰既有课程。
+    """
+    from rl.paired import declared_paired_seed, pair_check
+
+    course = getattr(args, "course_obj", None)
+    declared = declared_paired_seed(course)
+    if declared is not None and int(rotate_seed) != int(declared):
+        raise SystemExit(
+            f"[run_rl] paired_rotate_seed={declared} 但实际生效的 rotateSeed={rotate_seed}"
+            f"（来源 {rs_source}）—— 两条腿会跑在不同的种子流上，**配对前提已被破坏**。"
+            "查 flat_overrides 映射（课程键 → args.rotate_seed）与是否有人用 --rotate-seed 后门覆盖。"
+        )
+    traj_root = Path(getattr(args, "traj", "") or ".").parent
+    course_name = str(getattr(args, "course", "") or "")
+    for line in pair_check(
+        declared=declared,
+        effective=int(rotate_seed),
+        source=rs_source,
+        traj_root=traj_root,
+        self_name=course_name,
+    ):
+        log(line)
+
+
 #: 缺省初值大到该被警告的阀值（§5.1）。0.5 = 一半的锚权就已经能把更新压向 ref。
 KICKSTART_DEFAULT_WARN = 0.5
 
@@ -578,6 +613,9 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
         # build_pairs 是 (rotateSeed, it) 的纯函数：不持有任何跨迭代的随机流状态，
         # 同一 it 在任意时刻重启都得到完全相同的一批局（断点续跑剔除的前提）。
         write_run_start(self._jsonl_path, args, rotate_seed)
+        # §2.5 配对核对：本课声明 vs 实际生效（不等 ⇒ 拒启）+ 同 V 课程表与各臂账本读数（响亮）。
+        # 位置：写 run_start **之后**（核对要读到本臂刚落的这一条）。
+        _paired_seed_startup_check(args, rotate_seed, rs_source)
 
         log(
             f"[run_rl] mode={args.mode} "

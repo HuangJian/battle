@@ -471,11 +471,32 @@ describe('开课的写序：被拒 = 零副作用', () => {
     const prev = process.env.BCITY_CURRICULA_DIR
     const cur = path.join(DIR, 'curricula')
     const KK = 'kk-receipt-fixture'
+    const PEER = 'kk-receipt-peer'
     mkdirSync(cur, { recursive: true })
-    // 课程文件：ref 开、缺省初值（= C 事故那一档配置）
+    // 课程文件：ref 开、缺省初值（= C 事故那一档配置）+ 配对 V（§2.3 的口径）
     writeFileSync(
       path.join(cur, `${KK}.jsonc`),
-      JSON.stringify({ name: KK, kickstart_ref: true, warmup_iters: 0, mode: 'per-tick' }, null, 2),
+      JSON.stringify(
+        {
+          name: KK,
+          kickstart_ref: true,
+          warmup_iters: 0,
+          mode: 'per-tick',
+          paired_rotate_seed: 20260921,
+        },
+        null,
+        2,
+      ),
+    )
+    // 配对对端：同一把 V（机器口径的「兄弟」）+ 账本末条 run_start = 同一把 V
+    writeFileSync(
+      path.join(cur, `${PEER}.jsonc`),
+      JSON.stringify({ name: PEER, mode: 'per-tick', paired_rotate_seed: 20260921 }, null, 2),
+    )
+    mkdirSync(path.join(TRAJ, PEER), { recursive: true })
+    writeFileSync(
+      path.join(TRAJ, PEER, 'training_log.jsonl'),
+      `${JSON.stringify({ event: 'run_start', iter: 0, rotateSeed: 20260921 })}\n`,
     )
     process.env.BCITY_CURRICULA_DIR = cur
     try {
@@ -494,6 +515,9 @@ describe('开课的写序：被拒 = 零副作用', () => {
       expect(text).toContain('kk 初值 1（来源：缺省 1.0 ——')
       expect(text).toContain('起点-基线对照：起点 35.2%（账本末次评估 it57')
       expect(text).toContain('★ 起点与基线只差 0.3pp')
+      // §2.5：配对核对行（声明 V + 对端读数）必须在开课回执里
+      expect(text).toContain('配对 rotateSeed：V=20260921')
+      expect(text).toContain(`${PEER} 账本 run_start.rotateSeed=20260921 ✓ 同 V`)
     } finally {
       if (prev === undefined) delete process.env.BCITY_CURRICULA_DIR
       else process.env.BCITY_CURRICULA_DIR = prev

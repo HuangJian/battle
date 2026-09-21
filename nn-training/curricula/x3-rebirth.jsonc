@@ -340,9 +340,9 @@
 //    而控制台「hub-server 已在运行」是幂等成功**不报错** ⇒ 第二条腿会静默挂在第一条腿的 hub 上。
 // ⑥ rollout 节点：先把 a95/a97 弄活（a2 实测本机承担 98%），零代码 2×。
 //
-// 启动（**用户手工；agent 不得启动训练**）：
-//   bun dashboard/src/launch/cli.ts --script run_rl.py --course x3-rebirth \
-//     --remote-transport pull
+// 启动：
+//   启动走**控制台开课**：`bun run dashboard` → http://127.0.0.1:8900 → 选本课 → 开课。
+//   （裸 CLI 启动已下线：绕过控制台 = 漏开课标记/暂停解禁/hub 模式三件套 —— plan/accident.plan.md §1；agent 不得启动训练）
 //
 // ── 诊断工具 ─────────────────────────────────────────────────────────────
 // · 起跑线 / 边际 / EV 表：`tmp/x3-rebirth-probe.py`（照 x2 版改 4 关 + max_ticks 2700）

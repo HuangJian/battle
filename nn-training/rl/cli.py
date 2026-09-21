@@ -305,8 +305,11 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         "--rotate-seed",
         type=int,
         default=None,
-        help="显式 rotateSeed 覆盖（配对课程）：两条腿传同一值 ⇒ (rotateSeed,it) "
-        "种子流逐轮一致，可配对比较；缺省 None = 旧行为（续跑继承账本 / 全新时刻抖动）",
+        help="**调试专用**（训练配对以课程文件为准：`paired_rotate_seed`，两条腿各写同一把 V）"
+        "——显式 rotateSeed 覆盖：两条腿传同一值 ⇒ (rotateSeed,it) 种子流逐轮一致、"
+        "可配对比较；缺省 None = 旧行为（续跑继承账本 / 全新时刻抖动）。"
+        "训练启动请走控制台开课（plan/accident.plan.md §1/§2），本旗标只是后门；"
+        "后门用法 = 课程文件里**删键**（显式写 null 会覆盖它）",
     )
     ap.add_argument(
         "--normalize-ret",
@@ -489,8 +492,11 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         "--remote-precollect",
         type=int,
         default=_d("remote_precollect", 0),
+        # ⚠ `%%` 不是笔误：argparse 的 `_expand_help` 对 help 再做一次 `% params`，
+        # 裸 `%` 会让**整个 `--help` 崩**（ValueError: unsupported format character）
+        # ——2026-09-21 实测（本行曾是全仓唯一裸 `%`），由 `tests/test_cli_help.py` 守住。
         help="远程模式预采（D3/Q10，默认 0=测后开）：1=PPO 等待窗口 spawn 下一轮首波"
-        "预采（stale 上限 30%，超量下轮现场重采）",
+        "预采（stale 上限 30%%，超量下轮现场重采）",
     )
     ap.add_argument(
         "--remote-slim",

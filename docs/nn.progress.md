@@ -4,6 +4,42 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §123 accident.plan 收尾七项：配对核对 / 中点杀臂 / 毒包解冻 / 启动模板（2026-09-21）
+
+上一轮盘点出「计划里写了、盘上确认没做」五项 + 两处有意未做的控制台面，本轮全部收完
+（§1.3 启动模板、§2.3 课程文件写 V、§2.4 `--rotate-seed` 标调试专用、§2.5 开腿配对核对、
+§4 验收补条、§4.1 控制台冻结面、§5 附 中点杀臂）。两条最值得记的：
+
+**① 中点杀臂从「值班/闹钟」变成守卫**（`rl/paired_kill.py` + `loop_guards._paired_kill`）。
+C 事故的中点条件（同 it 配对差连续 2 点 <−3pp）在 it25+it30 **确实触发了**，但它是计划里的一句
+散文、凌晨没人执行——事后连「当时到底触发没触发」都只能靠人回看。落成守卫后：同 it 对齐（各取
+末条，续腿以最新为准）+ 尾部连续（中间反弹一次即清零，与 F4/kickstart-burn 同一连击语义）+ 停腿
++ `paired_kill` 事件（可回放）+ ABORT 判决 + 按课程下发云端 halt。
+- **前提闸比判得准更重要**：对端账本末条 `run_start.rotateSeed` ≠ 本课声明的 V 时**直接跳过**
+  ——不同种子流的读数不成对，拿错配读数杀一条**跑在正确 V 上**的腿，比漏报更贵。
+- **浮点边界**：`0.37 − 0.40 = −0.030000000000000027`，直接 `< −0.03` 会把「恰好压在阈值上」
+  判成杀臂 ⇒ 比较加 `1e-9` 容差（阈值是 pp 量级，容差只吃二进制表示误差）。
+
+**② §2.5 跨臂核对刻意只告警、不停止**（计划原文写「不等即停」）。拆成两类：本课声明 V ≠
+实际生效 rotateSeed ⇒ **拒启**（唯一无歧义的错配，代价是一条腿按错种子流跑满 80 轮）；跨臂不等
+⇒ 响亮 WARNING。理由：跨臂只能读对端**账本的末条 run_start**，而账本是历史累积——对端刚开课
+还没写、或对端上一腿用旧 V，都会让「不等」成立而并没出错配。fail-fast 闸门放在**开课那一刻**
+（控制台回执一屏：同 V 课程表 + 各臂账本读数），理由写在 `rl/paired.py` 头注里。
+
+**其余落地**：毒包熔断的控制台面（`CourseMatrix` 毒包横幅 + 「解冻」按钮 →
+`actions/poison.ts::unfreezeJob` → `POST /admin/unfreeze`；job_id 形状错 = **400** 不是 409，
+判据 `jobIdError` 路由与动作层同源）；`tests/test_remote_failure_policy.py` 补上
+「`JobFailedError` 之后不得自动重发同 job_id」的专门回归（发布钩子钉零重发）。
+
+**lesson**：计划里那些「必须有人/闹钟执行」的规则，最后都会退化成「规则不存在」——
+把判据写成纯函数 + 一个会落账、会停腿的守卫，比在计划里加粗一句话便宜得多。
+
+**门禁**：`bash tools/githook/nn-python-gate.sh` = **1986 passed**（ruff+mypy+全量 pytest）；
+`cd dashboard && bun run typecheck && bun run test` = **1020 pass**、`bun run build:ui` 三份 bundle 绿。
+⚠ 根 `bun run check` 的 `tsc` 被工作区另一个 agent 的**未跟踪**在飞文件挡住
+（`tools/sim/perf-conv-phases.ts:42/47`、`tools/sim/perf-sampler-pack.ts:14` 的 TS6133）；
+根测试面单跑 = 绿。
+
 ## §122 控制台：开课回执的「起点-基线对照行」（accident.plan §5.3，2026-09-21）
 
 **要治的那件事**：C 双臂从收敛权重（it175）以 `kk(1)=1` 满额缰绳复活，it1 kl=0.90、锚主导

@@ -118,8 +118,9 @@
 //   plan/dynamic-rollout-volume.plan.md:26 同错；rl/volume_waves.py 配额数学分子 samples
 //   配分母 est_ticks_per_game，差 10×（结课评审已用真函数跑出兑现 37% 触顶用例）。
 //
-// 启动（§5.6：禁裸 python，一律走启动器；用户手工开训）：
-//   bun dashboard/src/launch/cli.ts --script run_rl.py --course x3-power
+// 启动：
+//   启动走**控制台开课**：`bun run dashboard` → http://127.0.0.1:8900 → 选本课 → 开课。
+//   （裸 CLI 启动已下线：绕过控制台 = 漏开课标记/暂停解禁/hub 模式三件套 —— plan/accident.plan.md §1；agent 不得启动训练）
 {
   "version": 5,
   "name": "x3-power",

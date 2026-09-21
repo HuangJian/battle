@@ -93,9 +93,9 @@
 //   · 自锁（entropy→0）⇒ 停，回查 bc 缩放；
 //   · 无趋势 ⇒ 停，判「真实关卡从零不成立」，回落「BC 补 power 语料」方案。
 //
-// 启动（用户手工；agent 禁止）：
-//   bun dashboard/src/launch/cli.ts --script run_rl.py --course x1-rebirth \
-//     --remote-transport pull
+// 启动：
+//   启动走**控制台开课**：`bun run dashboard` → http://127.0.0.1:8900 → 选本课 → 开课。
+//   （裸 CLI 启动已下线：绕过控制台 = 漏开课标记/暂停解禁/hub 模式三件套 —— plan/accident.plan.md §1；agent 不得启动训练）
 //   开工前：hub 可达 + eval 节点 epoch 对齐（`plan/eval-outdated.plan.md` 检查单）。
 //
 // ── 关于「单变量」：本腿**不受其约束**（用户 2026-09-17 拍板）────────────────

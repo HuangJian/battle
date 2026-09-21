@@ -164,9 +164,9 @@
 // ⑥ 确认 `remote_hubs["x20-steady"]` 已写入 rl-config（若沿用默认值要人工核对）；
 //    ⚠ 上次 x20-floor 就出现过「run_rl 冻结的 hub ≠ rl-config 里课程隧道」的情况。
 //
-// 启动（**用户手工；agent 不得启动训练**）：
-//   bun dashboard/src/launch/cli.ts --script run_rl.py --course x20-steady \
-//     --remote-transport pull
+// 启动：
+//   启动走**控制台开课**：`bun run dashboard` → http://127.0.0.1:8900 → 选本课 → 开课。
+//   （裸 CLI 启动已下线：绕过控制台 = 漏开课标记/暂停解禁/hub 模式三件套 —— plan/accident.plan.md §1；agent 不得启动训练）
 //
 // 开训后 30 秒自检：`grep -h "hub=" tmp/x20-steady/training-loop.log | tail -1`
 //   必须等于 rl-config.json 里**当时活着**的那个 hub URL（否则全天 530 且不自愈，只能重启）。

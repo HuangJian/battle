@@ -6,9 +6,9 @@
 // 一值之差，机械可验）。用途：① 校准 run-to-run 方差（同课重跑不同 rollout 键）；
 // ② 若 k05/k10 相对本臂动了而相对冻结基线没动，说明是起点游走不是 chip 效应。
 // 其余（环境/起点/优化器/日程/verdict/熔断/DoD）与 k05 文件头同，执行者读 k05。
-// 启动（用户手工开训；agent 不得启动训练）：
-//   bun dashboard/src/launch/cli.ts --script run_rl.py --course x3-chip-k0 \
-//     --remote-transport pull
+// 启动：
+//   启动走**控制台开课**：`bun run dashboard` → http://127.0.0.1:8900 → 选本课 → 开课。
+//   （裸 CLI 启动已下线：绕过控制台 = 漏开课标记/暂停解禁/hub 模式三件套 —— plan/accident.plan.md §1；agent 不得启动训练）
 {
   "version": 5,
   "name": "x3-chip-k0",

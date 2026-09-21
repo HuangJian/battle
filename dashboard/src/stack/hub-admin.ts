@@ -163,6 +163,36 @@ export async function hubSetCourseMode(
   }
 }
 
+/** 人工解冻一份被毒包熔断冻住的 job（§4.1 唯一的可逆口）：`POST /admin/unfreeze?job_id=`。
+ *
+ *  语义（hub 侧同口径）：解冻 = 清冻结 + **清计数**（下一次重领从头计数）⇒ job 立即回池可重领。
+ *  重发（`publish`）**刻意不**走这条路（重发不清冻结，否则「重发即重试」会把熔断当场抹掉）；
+ *  所以这是操作员唯一的确认口：看懂了为什么它被冻（`reclaims` 次零回传）再放回去。
+ *
+ *  返回 `{ok, message}`：404（未知 job）/409（本来就没冻）都要把 hub 的原话带回来
+ *  ——「没冻可解」与「解冻失败」是两件事，静默把它们混成 false 会让操作员重复点。 */
+export async function hubUnfreeze(
+  url: string,
+  token: string,
+  jobId: string,
+): Promise<{ ok: boolean; message: string }> {
+  const base = url.replace(/\/+$/, '')
+  const qs = `job_id=${encodeURIComponent(jobId)}`
+  try {
+    const resp = await fetch(`${base}/admin/unfreeze?${qs}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(3000),
+    })
+    const body = (await resp.json().catch(() => null)) as { error?: unknown } | null
+    if (resp.status === 200) return { ok: true, message: '已解冻，回池可重领' }
+    const err = typeof body?.error === 'string' ? body.error : `HTTP ${resp.status}`
+    return { ok: false, message: err }
+  } catch (e) {
+    return { ok: false, message: `hub 不可达：${e instanceof Error ? e.message : String(e)}` }
+  }
+}
+
 /** 直探一台 worker_server 的 `/ping`（登记/列表用）：`{online, busy}`。
  *  `online=false` 与「未探」是**两种**状态：前者是探过不通（隧道没起来/机器没开），
  *  后者是根本没法探（无鉴权键 / 已停用）——面板要给不同的提示。 */

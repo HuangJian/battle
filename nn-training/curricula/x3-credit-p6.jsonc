@@ -49,9 +49,9 @@
 //
 // 熔断（s-dodge / x3-chip 先例，噪声带执行）：shots 崩（开火被吓没）或 kills 不升反降即停。
 //
-// 启动（用户手工开训；agent 禁止）：
-//   bun dashboard/src/launch/cli.ts --script run_rl.py --course x3-credit-p6 \
-//     --remote-transport pull
+// 启动：
+//   启动走**控制台开课**：`bun run dashboard` → http://127.0.0.1:8900 → 选本课 → 开课。
+//   （裸 CLI 启动已下线：绕过控制台 = 漏开课标记/暂停解禁/hub 模式三件套 —— plan/accident.plan.md §1；agent 不得启动训练）
 //   开工前：hub 可达＋eval 四节点 epoch 对齐（plan/eval-outdated.plan.md 检查单）。
 //   第二 run：`--course x3-credit-p6-r2`（本文件的路径分身，勿共用 traj）。
 //

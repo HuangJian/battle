@@ -36,6 +36,8 @@
  */
 
 import {
+  FROZEN_RECLAIMS,
+  frozenJobs,
   isTrainingRow,
   kindBadge,
   type CourseMatrixRow,
@@ -99,6 +101,9 @@ export function CourseMatrix({
   }
 
   const meta = matrixMeta({ overview, queue: loopQueue })
+  // §4.1：被毒包熔断冻住的 job（跨课程展平）。它们**不在 pending 里**——只给队列深度的话，
+  // 操作员看到的只是「队列短了」，看不到「这份 payload 已认领 N 次零回传、hub 把它拿出了池子」。
+  const frozen = frozenJobs(overview)
   return (
     <section className="tc-mx" aria-label="课程矩阵">
       <SectionHeader
@@ -109,6 +114,42 @@ export function CourseMatrix({
           '（指针/卡在哪一步/在等什么）合并成一行。未在训的课不在此表——表头 chip 给出未列门数'
         }
       />
+      {frozen.length > 0 ? (
+        <div className="tc-mx__frozen" role="group" aria-label="毒包熔断冻结">
+          {/* 一屏一条：事故现场（同一份 payload 反复炸）+ 唯一的可逆口（逐 job 人工解冻）。
+              解冻按钮**照常渲染**（只读是服务端边界 403，不是涂灰），无动作通道时才不渲染。 */}
+          {frozen.map((f) => (
+            <div key={`${f.course}/${f.jobId}`} className="tc-mx__frozenrow">
+              <span className="tc-mx__frozentitle">{`毒包熔断 · ${f.course} · ${f.jobId}`}</span>
+              <span
+                className="tc-mx__frozenmeta"
+                title={
+                  `认领后**零回传** ${f.reclaims} 次（hub 阈值 ${FROZEN_RECLAIMS}）⇒ 该 payload 已移出可领取池。` +
+                  '冻结 ≠ 死刑：确认它坏了就重发新字节（新 job_id，重发不解除冻结）；' +
+                  `确认无碍才解冻回池。最后认领者：${f.worker || '（无身份）'}`
+                }
+              >
+                {`零回传 ${f.reclaims} 次 · ${
+                  f.worker ? `最后认领 ${f.worker}` : '最后认领（无身份）'
+                }`}
+              </span>
+              {onAction ? (
+                <button
+                  type="button"
+                  className="tc-btn tc-btn--sm"
+                  aria-label={`解冻 ${f.course} 的 ${f.jobId}`}
+                  title={`人工解冻 ${f.jobId}：清冻结 + 清零回传计数，job 立即回池可重领`}
+                  onClick={() =>
+                    void onAction('unfreeze-job', { course: f.course, jobId: f.jobId })
+                  }
+                >
+                  解冻
+                </button>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
       <div className="tc-mx__meta">
         {/* 「单例」是训练进程的形态事实（不是读数）：一个进程服务所有并行课程，每课一条队列。 */}
         <span className="tc-mx__singleton" title="一个进程服务所有并行课程（每课一条任务队列）">

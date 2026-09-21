@@ -54,6 +54,11 @@
   // ── 起点：B 终点 it175（与 C-w 同起点 ⇒ 配对）────────────────────────────
   "bc": "nn-training/weights/x20-steady/x20-steady.it175.20260920-215502.json",
   "kickstart_ref": true,
+
+  // ── 配对（plan/accident.plan.md §2，2026-09-21）────────────────────────────
+  // 与 x20-clutch **同一把 V**（机器按「同 V = 配对」核对两臂账本 run_start.rotateSeed）。
+  // 20260921 = C 双腿实际起跑值（两臂账本一致）。改它 = corpus_identity_fp 变 ⇒ 本地一次重采。
+  "paired_rotate_seed": 20260921,
   "warmup_iters": 0,
 
   // ── 预算（两臂共享集群，各约半速）────────────────────────────────────────
@@ -93,12 +98,11 @@
 
 // ── 开工前置 ─────────────────────────────────────────────────────────────
 // ① bc 同 C-w（已存在）。② `remote_hubs["x20-clutch-null"]` 写入 rl-config，两课并行 slot。
-// ③ transport 必须显式 `--remote-transport pull`。④ 新 out/traj 目录。
-// ⑤ 同 `--seed` 且同 `--rotate-seed <V>` 配对（V 与 C-w 相同；开腿核对 rotateSeed）。
+// ③ 新 out/traj 目录。④ 配对 rotateSeed 写在课程文件里（`paired_rotate_seed`，与 C-w **同一把 V**；
+//    起跑即配对，不再经手指传——2026-09-21 §2 事故就是手工传错）。
 //
-// 启动（**用户手工；agent 不得启动训练**，与 C-w 同时开）：
-//   bun dashboard/src/launch/cli.ts --script run_rl.py --course x20-clutch-null \
-//     --remote-transport pull --rotate-seed <V> --detach
+// 启动：**控制台开课**（`bun run dashboard` → http://127.0.0.1:8900 → 选本课 → 开课），与 C-w 同时。
+//   裸 CLI 启动已下线（plan/accident.plan.md §1）；agent 不得启动训练。
 //
 // ── 结算节（跑完回填）────────────────────────────────────────────────────
 // 必填：① 判决段配对差 ② 本臂 vs it0 / B 终点绝对对照 ③ 分关表 ④ PPO 健康

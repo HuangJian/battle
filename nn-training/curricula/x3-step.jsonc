@@ -67,8 +67,8 @@
 //   胜率 Δ 仅作二级观察（≥+5pp 且 McNemar 单侧 p<0.05 才写「涨点」）。
 //
 // ── 启动（HOLD，以下命令**当前无效**，仅重设计批准后参考）────────────────────
-//   bun dashboard/src/launch/cli.ts --script run_rl.py --course x3-step \
-//     --remote-transport pull
+//   启动走**控制台开课**：`bun run dashboard` → http://127.0.0.1:8900 → 选本课 → 开课。
+//   （裸 CLI 启动已下线：绕过控制台 = 漏开课标记/暂停解禁/hub 模式三件套 —— plan/accident.plan.md §1；agent 不得启动训练）
 //   ⚠ 必须显式 `--remote-transport pull`（或先关掉/换掉 rl-config gpu1，把活 URL 写进
 //   本文件）。裸 CLI 默认 auto = 推 gpu1 快隧道，与「hub/pull」声明冲突。
 //   控制台 local 预设钉 pull，但仍建议命令行写死，防 preset 漂移。

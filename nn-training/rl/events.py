@@ -49,6 +49,40 @@ def write_stop_loss(jsonl_path: Path, it: int, streak: int, delta: float | None 
     )
 
 
+def write_paired_kill(
+    jsonl_path: Path,
+    it: int,
+    streak: int,
+    peer: str,
+    delta_pp: float | None = None,
+    own: float | None = None,
+    peer_wr: float | None = None,
+    margin_pp: float = 0.0,
+) -> dict:
+    """paired_kill 事件：配对中点杀臂的**计数与依据**落账（plan/accident.plan.md 附 §5）。
+
+    为什么必须落账：事故里那个条件**只在计划的散文里**（「连续 2 点 <−3pp」），于是它在
+    it25+it30 触发了却没人执行——事后连「当时到底触发没触发」都只能靠人回看计划。落成事件
+    之后：回放能重算同一个 `streak`（`rl/paired_kill.py` 是唯一判据），复盘能直接查账。
+
+    写时机 = 命中或计数变化（每轮都写会把账本淹掉，同 `kickstart_burn`）。
+    """
+    return write_event(
+        jsonl_path,
+        {
+            "event": "paired_kill",
+            "iter": it,
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "streak": streak,
+            "peer": peer,
+            "delta_pp": delta_pp,
+            "own": own,
+            "peer_wr": peer_wr,
+            "margin_pp": margin_pp,
+        },
+    )
+
+
 def write_kickstart_burn(
     jsonl_path: Path,
     it: int,

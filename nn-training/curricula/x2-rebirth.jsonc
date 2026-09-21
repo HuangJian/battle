@@ -394,9 +394,9 @@
 // ⑥ 并发配额：若与其它课并行，先确认 `rl-config.json` 的 `courses` 块总和不超裸机容量
 //    （`dashboard/src/core/slots.ts:checkCapacity`：Σmax(workers, local_slots) ≤ max(rl.workers, rl.local_slots)）。
 //
-// 启动（**用户手工；agent 不得启动训练**）：
-//   bun dashboard/src/launch/cli.ts --script run_rl.py --course x2-rebirth \
-//     --remote-transport pull
+// 启动：
+//   启动走**控制台开课**：`bun run dashboard` → http://127.0.0.1:8900 → 选本课 → 开课。
+//   （裸 CLI 启动已下线：绕过控制台 = 漏开课标记/暂停解禁/hub 模式三件套 —— plan/accident.plan.md §1；agent 不得启动训练）
 //
 // ── 诊断工具（本腿会用到）────────────────────────────────────────────────
 // · 起跑线 / 边际算术 / EV 表（两套语料已落盘）：

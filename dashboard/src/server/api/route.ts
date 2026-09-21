@@ -16,6 +16,7 @@ import {
   ActionError,
   type ActionResult,
   busy,
+  jobIdError,
   markCloudHaltRecovered,
   openCourse,
   registerPushWorker,
@@ -34,6 +35,7 @@ import {
   stopComponent,
   stopCourse,
   triggerCloudHalt,
+  unfreezeJob,
 } from '../actions'
 import {
   abortEvalBatch,
@@ -144,6 +146,15 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
         // 停机条件消失（手动恢复）：本课 hub resume + recovered（灰横幅保留历史）。
         const clearReason = bodyStr(body, 'reason') || '手动恢复'
         return okResp(await markCloudHaltRecovered(loadConfigSafe(), clearReason, ctx.course))
+      }
+      case 'unfreeze-job': {
+        // §4.1 毒包熔断的**人工解冻**（唯一的可逆口；重发刻意不解除冻结）。
+        // job_id 形状先在路由层挡一次：它是**参数错误**（400），不是 busy（409）——
+        // 判据与动作层同源（同一个 `jobIdError`）。
+        const jobId = bodyStr(body, 'jobId')
+        const badJob = jobIdError(jobId)
+        if (badJob) return errResp(badJob, 400)
+        return okResp(await unfreezeJob(ctx.course, jobId))
       }
       case 'smoke': {
         const key = bodyStr(body, 'component') as Component

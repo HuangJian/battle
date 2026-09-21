@@ -37,6 +37,7 @@ from rl.events import (
     write_circuit_break,
     write_gate_verdict,
     write_kickstart_burn,
+    write_paired_kill,
     write_stop_loss,
 )
 from rl.gate_check import (
@@ -50,6 +51,8 @@ from rl.gate_check import (
 )
 from rl.kickstart_burn import burn_overrides, burn_verdict
 from rl.log import log
+from rl.paired import declared_paired_seed, latest_run_start_seed, scan_paired_courses
+from rl.paired_kill import paired_kill_overrides, paired_kill_verdict
 from rl.stop_loss import eval_sigma, stop_loss_hit
 from rl.workdir_sweep import sweep_failed_wave_dirs
 
@@ -303,6 +306,98 @@ class TrainingGuards:
                 "ABORT",
                 f"kickstart-burn: {v.reason}",
                 decider="loop",
+            )
+        )
+        return True
+
+    def _paired_kill(self, it: int, dist_cfg: dict | None) -> bool:
+        """配对**中点杀臂**（结果面，plan/accident.plan.md 附 §5）：返 True = 停腿告警。
+
+        事故：中点条件（同 it 配对差连续 2 点 <−3pp）在 it25+it30 触发，**凌晨没人执行**。
+        计划原文的教训是「规则 Trustee 缺席 = 规则不存在」——这个守卫就是那个不用醒着的人：
+        判据在 `rl/paired_kill.py`（纯函数），这里只做「读 → 判 → 落账/停腿」。
+
+        与 `_kickstart_burn` 的分工：那个比的是**本腿 vs 自己的起点**（回锚/塌陷），
+        这个比的是**本臂 vs 对端**（同 V 的另一条腿）——一个问「我退了吗」，一个问
+        「我比对照臂差吗」。两者正交，都要。
+
+        **前提闸**（配对差只有在同种子流下才有意义）：本课声明了 `paired_rotate_seed`，
+        且对端账本末条 run_start 就是同一把 V；否则那两列读数来自不同种子流，Δ 不是配对差
+        ——宁可不判，不用错配的读数杀掉一条正在跑的腿（同 §2.5「跨臂只告警不停止」的理由）。
+        """
+        declared = declared_paired_seed(getattr(self.args, "course_obj", None))
+        if declared is None:
+            return False  # 单腿口径：没有「对端」这回事
+        self_name = str(getattr(self.args, "course", "") or "")
+        siblings = scan_paired_courses(declared, self_name=self_name)
+        if not siblings:
+            return False  # 无对端：启动自检已响亮告警过（§2.5），这里无可比
+        margin_pp, points = paired_kill_overrides(dist_cfg, course_key_of(self.args))
+        traj_root = Path(str(getattr(self, "_traj_root", Path(str(self._jsonl_path)).parent)))
+        try:
+            own_rows = read_trend_rows(traj_root / "eval_log.jsonl")
+        except Exception as e:  # 读账本失败不得阻断训练（同 _kickstart_burn 的兜底风格）
+            log(f"[run_rl] WARN paired-kill 读本臂账本失败（{type(e).__name__}: {e}）——本轮不判")
+            return False
+        # 多看个对端课程时取「落后最深」的那一个上账（对端只两门时就是唯一那个）。
+        best_peer = ""
+        best = None
+        for name, _v in siblings:
+            peer_dir = traj_root.parent / name
+            # 前提闸：对端**这一腿**确实在同一把 V 上（陈旧账本 / 未按课程文件起跑 ⇒ 不比）。
+            seed = latest_run_start_seed(peer_dir)
+            if seed is not None and int(seed) != int(declared):
+                log(
+                    f"[run_rl] paired-kill: 跳过对端 {name}——它账本末条 run_start.rotateSeed={seed}"
+                    f" ≠ V={declared}（不同种子流的读数不成对，不拿它杀臂）"
+                )
+                continue
+            try:
+                peer_rows = read_trend_rows(peer_dir / "eval_log.jsonl")
+            except Exception:
+                continue
+            v = paired_kill_verdict(own_rows, peer_rows, points=points, margin_pp=margin_pp)
+            if v.delta_pp is None:
+                log(f"[run_rl] paired-kill: {name} {v.reason}")
+                continue
+            if best is None or v.streak > best.streak or (v.tripped and not best.tripped):
+                best, best_peer = v, name
+        if best is None:
+            return False
+        streak = best.streak
+        prev = int(getattr(self, "_pair_kill_streak", 0) or 0)
+        if streak != prev:
+            # **状态转移才落账**（同 `_stop_loss` / `_kickstart_burn`）：0 → 0 无需记录。
+            if streak:
+                log(
+                    f"[run_rl] WARN paired-kill it{it}: 同 it 配对差连续 {streak}/{points} 个点"
+                    f" < −{margin_pp:.1f}pp（对端 {best_peer}）——再低就杀臂"
+                )
+            self._ledger_apply(
+                write_paired_kill(
+                    self._jsonl_path,
+                    it,
+                    streak,
+                    best_peer,
+                    best.delta_pp,
+                    best.own,
+                    best.peer,
+                    margin_pp,
+                )
+            )
+        self._pair_kill_streak = streak
+        if not best.tripped:
+            return False
+        reason = f"同 it 配对差连续 {streak} 个点 < −{margin_pp:.1f}pp（对端 {best_peer}）"
+        log(f"[run_rl] CRITICAL PAIRED-KILL it{it}: {reason}")
+        log(
+            f"[run_rl] training PAUSED; weights kept at {self.args.out}; "
+            f"对照臂 {best_peer} 仍在跑——检查本臂的奖励/超参变更是否真带来了分岔"
+        )
+        self._sync_cloud_halt(it, "ABORT")
+        self._ledger_apply(
+            write_gate_verdict(
+                self._jsonl_path, it, "ABORT", f"paired-kill: {reason}", decider="loop"
             )
         )
         return True

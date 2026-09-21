@@ -17,9 +17,9 @@
 // verdict：800 局 `--seed0 400000` 配对 vs 冻结基线 576/800（同环境/同起点/
 //   同分布同 eval，唯一变量＝奖励；基线复用合法）。日常 eval 只读 anchor_wr；
 //   结算标配 `paired-pd`＋fingerprints（`plan/t5-endpoint.plan.md` 工具链，~5 分钟）。
-// 启动（用户手工开训；agent 不得启动训练）：
-//   bun dashboard/src/launch/cli.ts --script run_rl.py --course x3-chip-k05 \
-//     --remote-transport pull
+// 启动：
+//   启动走**控制台开课**：`bun run dashboard` → http://127.0.0.1:8900 → 选本课 → 开课。
+//   （裸 CLI 启动已下线：绕过控制台 = 漏开课标记/暂停解禁/hub 模式三件套 —— plan/accident.plan.md §1；agent 不得启动训练）
 //   （781a5fc 后拉模式去 cloudflared 走 tailscale 直连；4xx 立即 ABORT；T7 已修）。
 // DoD：30 轮跑满或熔断停腿＋800-verdict 落账＋课程文件结算节
 //  （事件账/双池/口径声明缺一不可）。

@@ -47,9 +47,9 @@
 // 开工假说（§5.7）：kill/hit 稠密信号 + wWin 清场尖峰驱动，it40 前 pooled 爬升；
 //   60 轮内无爬升即证伪停腿（防 c6-bonus 式盲跑）。
 //
-// 启动（§5.6：禁裸 python，一律走启动器）：
-//   bun dashboard/src/launch/cli.ts --script run_rl.py --course x2-start
-// 后台常驻加 --detach；日常启停走控制台 bun run dashboard。
+// 启动：
+//   启动走**控制台开课**：`bun run dashboard` → http://127.0.0.1:8900 → 选本课 → 开课。
+//   （裸 CLI 启动已下线：绕过控制台 = 漏开课标记/暂停解禁/hub 模式三件套 —— plan/accident.plan.md §1；agent 不得启动训练）
 {
   "version": 5,
   "name": "x2-start",

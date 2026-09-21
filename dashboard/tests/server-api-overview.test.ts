@@ -74,6 +74,7 @@ describe('parseHubQueue（hub /admin/queue 的宽容解析）', () => {
       inflight: 0,
       nextJob: null,
       holders: [],
+      frozen: [],
     })
     expect(q.order).toEqual([])
     expect(q.activeCourses).toBe(0)

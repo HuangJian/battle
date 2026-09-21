@@ -77,7 +77,8 @@
 // ── 7. 复现 ─────────────────────────────────────────────────────────────
 //   python scripts/init_scratch_weights.py \
 //     --out nn-training/weights/x1-rebirth/scratch-init.json --seed 7
-//   bun dashboard/src/launch/cli.ts --script run_rl.py --course x1-rebirth-a2 --remote-transport pull
+//   启动走**控制台开课**：`bun run dashboard` → http://127.0.0.1:8900 → 选本课 → 开课。
+//   （裸 CLI 启动已下线：绕过控制台 = 漏开课标记/暂停解禁/hub 模式三件套 —— plan/accident.plan.md §1；agent 不得启动训练）
 // 诊断：`tmp/a2-report.py`（走势/eval/直方图）｜`tmp/a2-timing.py`（时间账）｜
 //       `tmp/x2-ev-table.py`（三策略 EV，EV_ROOT 指定语料）｜`tmp/obs-compress-probe.py`（obs 压缩比）
 //
@@ -185,9 +186,9 @@
 //
 // **止损**：若 it20 时 KL 仍 <0.005 且 entropy 降幅 <3% ⇒ 判「位移杠杆无效」，停腿。
 //
-// 启动（用户手工；agent 禁止）：
-//   bun dashboard/src/launch/cli.ts --script run_rl.py --course x1-rebirth-a2 \
-//     --remote-transport pull
+// 启动：
+//   启动走**控制台开课**：`bun run dashboard` → http://127.0.0.1:8900 → 选本课 → 开课。
+//   （裸 CLI 启动已下线：绕过控制台 = 漏开课标记/暂停解禁/hub 模式三件套 —— plan/accident.plan.md §1；agent 不得启动训练）
 //
 // ── ⚠ 已知局限（2026-09-17 评审记录，务必读）──────────────────────────────
 // 1. **本腿同时改了两个包，对照只能归因到「包 vs 包」**：

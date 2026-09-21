@@ -145,6 +145,13 @@
   // ── 起点：B 终点 it175（与 C-0 同起点 ⇒ 配对）────────────────────────────
   "bc": "nn-training/weights/x20-steady/x20-steady.it175.20260920-215502.json",
   "kickstart_ref": true,
+
+  // ── 配对（plan/accident.plan.md §2，2026-09-21）────────────────────────────
+  // 与 x20-clutch-null **同一把 V**（机器按「同 V = 配对」核对两臂账本的 run_start.rotateSeed）。
+  // 20260921 = 2026-09-21 C 双腿实际起跑用的那把值（`tmp/x20-clutch{,-null}/training_log.jsonl`
+  // 的 run_start.rotateSeed，两臂一致）——写进文件 = 复现那次配对，且不再靠人手传。
+  // ⚠ 改它 = `corpus_identity_fp` 变 ⇒ 本地一次全量重采（用户 2026-09-21 已裁决接受）。
+  "paired_rotate_seed": 20260921,
   "warmup_iters": 0,
 
   // ── 预算（两臂共享集群，各约半速）────────────────────────────────────────
@@ -186,20 +193,20 @@
 // ① bc = `nn-training/weights/x20-steady/x20-steady.it175.20260920-215502.json`（已存在）。
 // ② 两臂 hub 解析同源：`remote_hubs` 有条目用条目，无条目则确认两臂回落到**同一** hub 与
 //    默认（对称回落可比，非对称不可开；tunnel URL 高频变、rl-config 是 git-ignored 的 live
-//    配置，**不手改**，走控制台流程登记）。确认节点容量登记了**两课并行**的 slot；
-//    transport **必须显式 `--remote-transport pull`**。
-// ③ **两臂同 `--seed` 且同 `--rotate-seed <V>` 起跑**（配对要求，§5）；开腿后立刻核对两腿
-//    `training_log.jsonl` 首个 run_start.rotateSeed 是否相等 —— 不等 = 没配对 = verdict 走
-//    §3 回退分支（响亮记录，不许按配对口径结算）。
+//    配置，**不手改**，走控制台流程登记）。确认节点容量登记了**两课并行**的 slot。
+//    传输不再是课程/启动参数：`rl.hub_push`（缺省开）+ 登记节点 + hub 队列裁决
+//    （2026-09-19 起课程与 worker 节点正交；旧 `--remote-transport` 旗标仅历史记录）。
+// ③ **配对 rotateSeed 写在课程文件里**（`paired_rotate_seed`，见下面配置块）：两臂各自的
+//    文件写**同一把 V** ⇒ 起跑即配对，**不再经手指传**（2026-09-21 §2 事故：手工传漏/传错
+//    1789926833 vs 1789926915 ⇒ 配对失败返工）。`--rotate-seed` 仅作调试后门。
+//    同 V 即“配对”的机器含义：训练侧启动自检与控制台开课回执都按它核对两臂账本的
+//    `run_start.rotateSeed`（不等 ⇒ 响亮；本课声明与实际不符 ⇒ 拒启）。
 // ④ 新 out/traj 目录（禁续跑，§15.5）。
 // ⑤ 公式编译+行为已验证（本文件 §2，2026-09-20 venv 实测），开训无需代码前置。
 //
-// 启动（**用户手工；agent 不得启动训练**，两臂同时开，V 两臂相同）：
-//   bun dashboard/src/launch/cli.ts --script run_rl.py --course x20-clutch \
-//     --remote-transport pull --rotate-seed <V> --detach
-//   bun dashboard/src/launch/cli.ts --script run_rl.py --course x20-clutch-null \
-//     --remote-transport pull --rotate-seed <V> --detach
-// （2026-09-21 修正：必须 `--detach`，否则占住终端、关终端即死。）
+// 启动：**控制台开课**（`bun run dashboard` → http://127.0.0.1:8900，课程选择器选本课 → 开课；
+//   两臂各按一次）。裸 CLI 启动已下线（漏开课标记/暂停解禁/hub 模式三件套，plan/accident.plan.md §1）：
+//   任何训练操作经控制台；agent 不得启动训练。V 与 hub 解析都不再是启动参数。
 //
 // ── 诊断工具 ─────────────────────────────────────────────────────────────
 // · 日常差值：两臂同 it 的日常 low% 相减（`... --games 400 --seed0 860001` 各自口径，只做趋势）

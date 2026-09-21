@@ -2123,6 +2123,32 @@ a.tc-btn {
   padding: 6px 12px 8px;
   margin-bottom: 10px;
 }
+/* 毒包熔断（§4.1）：被冻住的 job **不在 pending 里**——只给队列深度看不出这件事。
+   逐条一行（课程 · job · 次数 · 最后认领者 + 解冻按钮），红调 = 需要人工判断。 */
+.tc-mx__frozen {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: var(--sp-1) 0 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--red);
+  border-radius: var(--r-2);
+  background: color-mix(in srgb, var(--red) 8%, transparent);
+}
+.tc-mx__frozenrow {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  font-size: var(--fs-sm);
+}
+.tc-mx__frozentitle {
+  color: var(--red);
+  font-weight: 700;
+}
+.tc-mx__frozenmeta {
+  color: var(--muted);
+}
 /* 表头一行：两半的机群级读数（不是每课事实）。各 chip 自带悬停说明判据。 */
 .tc-mx__meta {
   display: flex;

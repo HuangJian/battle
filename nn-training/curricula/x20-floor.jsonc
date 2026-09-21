@@ -213,9 +213,9 @@
 // ⑥ 确认 a95/a97 **以及本机 self（127.0.0.1:8443 的 agent）** 在线
 //    —— 本机 agent 不在会静默被 ping 门排除（0.05s 秒败），800 局墙钟差 4 倍。
 //
-// 启动（**用户手工；agent 不得启动训练**）：
-//   bun dashboard/src/launch/cli.ts --script run_rl.py --course x20-floor \
-//     --remote-transport pull
+// 启动：
+//   启动走**控制台开课**：`bun run dashboard` → http://127.0.0.1:8900 → 选本课 → 开课。
+//   （裸 CLI 启动已下线：绕过控制台 = 漏开课标记/暂停解禁/hub 模式三件套 —— plan/accident.plan.md §1；agent 不得启动训练）
 //
 // 开训后 30 秒自检：`grep -h "hub=" tmp/x20-floor/training-loop.log | tail -1`
 //   必须等于 rl-config.json 里当时活着的 hub URL（否则整天 HTTP 530 且永不自愈，只能重启）。
