@@ -53,7 +53,7 @@ native 与 wasm **除 `feat` 外逐字段相同**，native 快 **1.38–1.75×�
 影响：生产 `fetch_task` 默认走同步路径 ⇒ **节点上报的「服务耗时」系统性漏掉子进程冷启动**（手机上漏 2.5s/局），
 控制台的节点耗时会被低估；异步路径（1191 行）无此问题。
 
-**两个修法已落地（2026-09-21，commit 见下）**：
+**两个修法已落地并真机验证（2026-09-21，commit `4a14987`，已 push）**：
 · ② 结构上修：新增唯一出口 `serveResult(key, buf)`（盖章一次），同步/异步两处都只发它的返回值
   —— 「盖章值 == 对外值」由代码结构保证。判例 `tests/agent/result-stamp.test.ts`（纯函数，~2ms；含一条
   结构钉子：源码里不得再出现 `enqueue(new Uint8Array(buf))`）。
@@ -61,6 +61,19 @@ native 与 wasm **除 `feat` 外逐字段相同**，native 快 **1.38–1.75×�
   ⇒ eval 走长驻 worker，手机上每局省下 ~2.5s 与那次事件循环卡顿。判例
   `tests/export-eval-game-serve.test.ts`（握手 / 与一次性调用等价（除 `elapsedSec`）/ 坏行不致命 / 不串局；
   自带 ~0.3s，另一次 agent over-HTTP 的端到端判例实测在 `bun test` 里起不来（30s 超时）已弃用）。
+
+**真机复验（mac/a95 拉到 `4a14987` 后，同 stage/seed/权重）**：
+
+| 指标（a95） | 修前 | 修后 |
+|---|---|---|
+| 同步 eval 一局（含首次冷启动那轮） | wall 3.43s，manifest `elapsedSec` 0.7（真值 3.2） | wall **0.45s**，`elapsedSec` **0.4** |
+| 同局第二次（缓存命中） | 0.83s / 3.2（与第一次不等） | 0.06s / **0.4（与第一次相同）** |
+| 任务期间 `/v1/status` 首轮应答 | 被拖 **2.59s**（事件循环卡住） | **0.04s**（无卡顿） |
+| eval `feat` / 读数 | native / 同 | native / 同（`lives_exhausted` 与 ticks/score 逐值不变） |
+
+全节点复验：mac + a95 各 3 seed ×（rollout, eval）仍 **`feat=native` 12/12**，且与本机 win32-x64 native
+在 12 组上逐值一致（跨平台逐位一致未受影响）。仍存的一次性成本：**节点重启后的第一局**要付一次长驻
+worker 冷启动（a95 实测服务侧 6.6s/首局，之后回到 0.6–1.2s）——这是新口径（真实生命周期）下应看到的数。
 
 **未做**：云机（`ts_code.zip` 通道）仍只有 real-bun 哨兵 + 打包门禁的间接证据，没在真云机上确认
 一行 `feat=native`——那条通道的验收要等下一次离线训练任务时看 shard 的 `feat`。
