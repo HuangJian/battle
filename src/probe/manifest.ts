@@ -4,10 +4,12 @@ import type { StageData, TankKind } from '../types'
 // Human-opening probe — offline manifest contract
 // (human-opening-probe.plan v7 §1.1)
 //
-// `public/probe/x20-opening.json` is a BUILD ARTIFACT derived from
-// `nn-training/levels/ladder-c20-lives1.jsonc` + `tools/probe/x20-opening.games.json`
-// by `tools/probe/flatten-manifest.ts`. This module is the runtime side of that
-// contract: validate-and-parse (fail loud, never default a field) + lookups.
+// One manifest per served course: `public/probe/<course>.json`, a BUILD
+// ARTIFACT derived from `nn-training/levels/<level>.jsonc` +
+// `tools/probe/<course>.games.json` by `tools/probe/flatten-manifest.ts` (the
+// served course list lives in `public/probe/index.json` — see `./index.ts`).
+// This module is the runtime side of that contract: validate-and-parse (fail
+// loud, never default a field) + lookups.
 //
 // Every stage field is EXPLICIT. `enemySpawns` in particular must never be
 // omitted — falling back to the engine default (`ENEMY_SPAWNS`) silently runs a

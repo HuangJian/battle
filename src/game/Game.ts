@@ -31,7 +31,16 @@ import { SnapshotController } from './GameSnapshot'
 import { ReplayController } from './GameReplay'
 import { ProbeController, ProbeBootError } from './ProbeController'
 import { ProbeVerdictError, type ProbeBand } from '../probe/verdict'
-import { ProbeManifestError } from '../probe/manifest'
+import { ProbeManifestError, parseProbeManifestText } from '../probe/manifest'
+import {
+  PROBE_INDEX_PATH,
+  courseNameRule,
+  parseProbeCourseIndexText,
+  probeManifestPath,
+  type ProbeCourseIndex,
+} from '../probe/index'
+import { requestedProbeCourse } from '../probe/query'
+import type { ProbeCourseLinks } from '../presentation/ui/ControlCenter'
 
 /**
  * Game — top-level orchestrator. Owns the game loop, wires all systems.
@@ -678,8 +687,10 @@ export class Game {
   // Human-opening probe (human-opening-probe.plan v7 §T2–§T4)
   // ------------------------------------------------------------------
 
-  /** Manifest served from `public/` (build artifact, committed to the repo). */
-  static readonly probeManifestUrl = '/probe/x20-opening.json'
+  /**
+   * Which manifest to fetch is decided by the query's course name
+   * (`probeManifestPath`), one file per course — no course is hardcoded here.
+   */
 
   /** Wire the session bar to the Game-layer probe controller. */
   wireProbeUI(): void {
@@ -698,12 +709,24 @@ export class Game {
   /**
    * Boot a probe run from the launch query (`main.ts`, after `start()`).
    * Returns whether a run actually started; an invalid query is refused loudly
-   * (course mismatch / game out of range) instead of half-starting.
+   * (illegal/unknown course / game out of range / unparseable manifest) instead
+   * of half-starting.
    */
   async startProbeFromQuery(search: URLSearchParams): Promise<boolean> {
+    const course = requestedProbeCourse(search)
+    if (course === null) return false
+    const path = probeManifestPath(course)
+    if (path === null) {
+      // Refused before any fetch: the course name IS the URL segment, so an
+      // unvalidated name would turn the query into an arbitrary-path fetch.
+      const msg = `probe course 名不合法：${JSON.stringify(course)}（${courseNameRule()}）`
+      console.warn(`[probe] ${msg}`)
+      this.presentation.ui.notify(msg, 'warn')
+      return false
+    }
     let text: string
     try {
-      text = await this.fetchProbeManifestText()
+      text = await this.fetchProbeManifestText(path)
     } catch (err) {
       console.warn(`[probe] manifest 加载失败: ${String(err)}`)
       this.presentation.ui.notify(`probe manifest 加载失败: ${String(err)}`, 'warn')
@@ -725,18 +748,41 @@ export class Game {
   }
 
   /**
-   * DEVELOPER → Probe Launcher: fetch the manifest and hand the game links to
-   * the Control Center (display + navigation only — no probe state crosses
-   * that boundary).
+   * DEVELOPER → Probe Launcher: read the course index, load every course's
+   * manifest, and hand the per-course game links to the Control Center
+   * (display + navigation only — no probe state crosses that boundary).
+   *
+   * Manifests are PARSED here and never installed into the probe controller:
+   * the launcher only displays, and a boot-time install of some other course's
+   * manifest would leave leftovers in the controller. A course whose manifest
+   * is missing/unparseable is reported and skipped, so one broken course cannot
+   * hide the rest from the launcher.
    */
   async openProbeLauncher(): Promise<void> {
     const ui = this.presentation.ui
     try {
-      const manifest = this.probe.installManifestText(await this.fetchProbeManifestText())
-      ui.controlCenter.setProbeLinks(
-        manifest.course,
-        manifest.games.map((g) => ({ game: g.game, stage: g.stage, seed: g.seed, tag: g.tag })),
-      )
+      const index = await this.fetchProbeIndex()
+      const courses: ProbeCourseLinks[] = []
+      for (const course of index.courses) {
+        const path = probeManifestPath(course)
+        if (path === null) continue // the index parser already refuses these
+        try {
+          const manifest = parseProbeManifestText(await this.fetchProbeManifestText(path))
+          courses.push({
+            course,
+            games: manifest.games.map((g) => ({
+              game: g.game,
+              stage: g.stage,
+              seed: g.seed,
+              tag: g.tag,
+            })),
+          })
+        } catch (err) {
+          ui.notify(`probe 课程 ${course} 清单不可用: ${String(err)}`, 'warn')
+        }
+      }
+      if (courses.length === 0) throw new Error('课程表里没有可用的课程')
+      ui.controlCenter.setProbeCourses(courses)
     } catch (err) {
       ui.controlCenter.clearProbeLinks()
       ui.notify(`probe manifest 加载失败: ${String(err)}`, 'warn')
@@ -817,9 +863,16 @@ export class Game {
     setTimeout(() => URL.revokeObjectURL(url), 10_000)
   }
 
-  private async fetchProbeManifestText(): Promise<string> {
-    const res = await fetch(Game.probeManifestUrl)
-    if (!res.ok) throw new Error(`HTTP ${res.status} ${Game.probeManifestUrl}`)
+  private async fetchProbeIndex(): Promise<ProbeCourseIndex> {
+    const res = await fetch(PROBE_INDEX_PATH)
+    if (!res.ok) throw new Error(`HTTP ${res.status} ${PROBE_INDEX_PATH}`)
+    return parseProbeCourseIndexText(await res.text())
+  }
+
+  /** Fetch one course's manifest by its served path (see `probeManifestPath`). */
+  private async fetchProbeManifestText(path: string): Promise<string> {
+    const res = await fetch(path)
+    if (!res.ok) throw new Error(`HTTP ${res.status} ${path}`)
     return await res.text()
   }
 }

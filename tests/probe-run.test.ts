@@ -1,12 +1,9 @@
 import { describe, it, expect } from 'bun:test'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { InputRecorder } from '../src/replay/InputRecorder'
 import { worldTickHash } from '../src/replay/tickHash'
 import { ProbeController, ProbeBootError } from '../src/game/ProbeController'
-import { parseProbeManifestText } from '../src/probe/manifest'
 import { applyProbeRun } from '../src/probe/setup'
 import { DIFFICULTIES } from '../src/config/difficulty'
 import { RULES } from '../src/config/rules'
@@ -15,6 +12,9 @@ import type { InputLike } from '../src/game/Input'
 import type { Direction } from '../src/constants'
 import { ProbeVerdictError } from '../src/probe/verdict'
 import { readStoreZip } from '../src/probe/zip'
+// The course corpus is GENERATED (a probe course is a session, not a repo
+// artifact) — see tests/probe-fixture.ts.
+import { PROBE_MANIFEST as MANIFEST, PROBE_MANIFEST_TEXT as MANIFEST_TEXT } from './probe-fixture'
 
 // ============================================================
 // Human-opening probe — run lifecycle (plan v7 §T3 / §T5a)
@@ -23,12 +23,6 @@ import { readStoreZip } from '../src/probe/zip'
 // the headless twin, the archived tick-0 hash, and the parts of the controller
 // the loop depends on (budget, park-on-end, explicit recording, verdicts).
 // ============================================================
-
-const MANIFEST_TEXT = readFileSync(
-  join(import.meta.dir, '..', 'public/probe/x20-opening.json'),
-  'utf8',
-)
-const MANIFEST = parseProbeManifestText(MANIFEST_TEXT)
 
 const OPTIONS = {
   difficulty: MANIFEST.difficulty,

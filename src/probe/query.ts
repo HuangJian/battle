@@ -6,6 +6,12 @@ import type { ProbeManifest } from './manifest'
 // `?probe=<course>&game=<n>`, following the `?fireLineDetour=1` precedent in
 // main.ts (a boot-time launch configuration, never gameplay state).
 //
+// One course per manifest file, so the course name does double duty: it selects
+// the manifest to fetch (`/probe/<course>.json`, see `probe/index.ts`) and it is
+// re-checked against that manifest's own `course` field here. The name is read
+// BEFORE the fetch (`requestedProbeCourse`); this module only validates it
+// against a manifest that is already in hand.
+//
 // Runtime rejection is EXACTLY two paths — course name mismatch and
 // game out of range (plus an unparseable manifest, handled by the caller).
 // `courseSha` is NOT verified at runtime: `nn-training/levels/*.jsonc` is not
@@ -16,6 +22,16 @@ import type { ProbeManifest } from './manifest'
 // ================================================================
 
 export const PROBE_QUERY_KEY = 'probe'
+
+/**
+ * The course the launch query asks for, or null when the query is absent/empty.
+ * Read before the fetch: the name decides WHICH manifest file to request.
+ */
+export function requestedProbeCourse(search: string | URLSearchParams): string | null {
+  const params = typeof search === 'string' ? new URLSearchParams(search) : search
+  const course = params.get(PROBE_QUERY_KEY)
+  return course === null || course === '' ? null : course
+}
 
 export type ProbeTargetRejection =
   | 'absent'

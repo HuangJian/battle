@@ -1,11 +1,8 @@
 import { describe, it, expect } from 'bun:test'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { InputRecorder } from '../src/replay/InputRecorder'
 import { ProbeController } from '../src/game/ProbeController'
-import { parseProbeManifestText } from '../src/probe/manifest'
 import { parseReplayFile } from '../src/replay/file'
 import { verifyReplayText } from '../tools/replay/verify-replay'
 import { annotatePack } from '../tools/probe/annotate'
@@ -13,6 +10,9 @@ import { buildSessionPack } from '../src/probe/session'
 import { readStoreZip, writeStoreZip } from '../src/probe/zip'
 import type { InputLike } from '../src/game/Input'
 import type { Direction } from '../src/constants'
+// The course corpus is GENERATED (a probe course is a session, not a repo
+// artifact) — see tests/probe-fixture.ts.
+import { PROBE_MANIFEST as MANIFEST, PROBE_MANIFEST_TEXT as MANIFEST_TEXT } from './probe-fixture'
 
 // ============================================================
 // Human-opening probe — custom-stage recordings (plan v7 §T5b / §T6)
@@ -23,12 +23,6 @@ import type { Direction } from '../src/constants'
 // for: a probe recording must still reproduce its tick-hash chain, and the
 // offline annotator must read the pack back.
 // ============================================================
-
-const MANIFEST_TEXT = readFileSync(
-  join(import.meta.dir, '..', 'public/probe/x20-opening.json'),
-  'utf8',
-)
-const MANIFEST = parseProbeManifestText(MANIFEST_TEXT)
 
 const IDLE: InputLike = {
   getMoveDirection: () => null as Direction | null,

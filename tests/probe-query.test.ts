@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'bun:test'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { parseProbeManifestText } from '../src/probe/manifest'
-import { probeGameHref, resolveProbeTarget } from '../src/probe/query'
+import { probeGameHref, requestedProbeCourse, resolveProbeTarget } from '../src/probe/query'
+// The course corpus is GENERATED (a probe course is a session, not a repo
+// artifact) — see tests/probe-fixture.ts.
+import { PROBE_MANIFEST as MANIFEST } from './probe-fixture'
 
 // ============================================================
 // Human-opening probe — boot query (plan v7 §1.2 / T2)
@@ -11,10 +11,6 @@ import { probeGameHref, resolveProbeTarget } from '../src/probe/query'
 // `courseSha` is deliberately NOT checked at runtime — the browser cannot
 // recompute it (the level file is not served).
 // ============================================================
-
-const MANIFEST = parseProbeManifestText(
-  readFileSync(join(import.meta.dir, '..', 'public/probe/x20-opening.json'), 'utf8'),
-)
 
 describe('probe boot query', () => {
   it('accepts the course with an explicit game index', () => {
@@ -81,5 +77,18 @@ describe('probe boot query', () => {
     const href = probeGameHref('x20-opening', 5)
     expect(href).toBe('?probe=x20-opening&game=5')
     expect(resolveProbeTarget(href, MANIFEST)).toEqual({ ok: true, course: 'x20-opening', game: 5 })
+  })
+})
+
+describe('requested course (read BEFORE the manifest is fetched)', () => {
+  it('reads the course name out of the query', () => {
+    expect(requestedProbeCourse('?probe=x20-opening&game=3')).toBe('x20-opening')
+    expect(requestedProbeCourse(new URLSearchParams('probe=y30&game=0'))).toBe('y30')
+  })
+
+  it('is null when absent or empty — the caller then fetches nothing at all', () => {
+    expect(requestedProbeCourse('?game=3')).toBeNull()
+    expect(requestedProbeCourse('?probe=')).toBeNull()
+    expect(requestedProbeCourse('')).toBeNull()
   })
 })

@@ -1,35 +1,44 @@
 import { describe, it, expect } from 'bun:test'
 import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
 import {
   parseProbeManifest,
   parseProbeManifestText,
   ProbeManifestError,
   stageOfGame,
 } from '../src/probe/manifest'
-import { flatten, stableStringify, courseShaOf } from '../tools/probe/flatten-manifest'
+import {
+  flatten,
+  stableStringify,
+  courseShaOf,
+  defaultArgs,
+  parseArgs,
+} from '../tools/probe/flatten-manifest'
+import {
+  PROBE_GAMES,
+  PROBE_GAMES_JSON,
+  PROBE_LEVEL_PATH,
+  PROBE_MANIFEST_TEXT,
+} from './probe-fixture'
 
 // ============================================================
 // Human-opening probe — manifest + generator (plan v7 §T1)
 //
-// The generated manifest is a COMMITTED build artifact; these tests are the
-// drift gate: regenerate from the committed inputs and byte-compare.
+// The manifest is GENERATED per session, not committed: the list is scratch
+// (`tmp/probe/`), the served copies are gitignored, and the durable record of a
+// run is its session pack. So there is no golden file to compare against here —
+// the corpus is built in `tests/probe-fixture.ts` from the one committed input
+// (the level file) + the canonical rows, and what is asserted is the CONTRACT
+// (shape, validation, determinism), not a frozen copy of today's output.
 // ============================================================
 
-const ROOT = join(import.meta.dir, '..')
-const MANIFEST_PATH = join(ROOT, 'public/probe/x20-opening.json')
-const GAMES_PATH = join(ROOT, 'tools/probe/x20-opening.games.json')
-const LEVEL_PATH = join(ROOT, 'nn-training/levels/ladder-c20-lives1.jsonc')
-
-const LEVEL_TEXT = readFileSync(LEVEL_PATH, 'utf8')
-const GAMES_TEXT = readFileSync(GAMES_PATH, 'utf8')
-const MANIFEST_TEXT = readFileSync(MANIFEST_PATH, 'utf8')
+const LEVEL_TEXT = readFileSync(PROBE_LEVEL_PATH, 'utf8')
+const MANIFEST_TEXT = PROBE_MANIFEST_TEXT
 
 function cloneManifest(): Record<string, unknown> {
   return JSON.parse(MANIFEST_TEXT) as Record<string, unknown>
 }
 
-describe('probe manifest (committed artifact)', () => {
+describe('probe manifest (generated per session)', () => {
   it('parses with every field explicit', () => {
     const m = parseProbeManifestText(MANIFEST_TEXT)
     expect(m.course).toBe('x20-opening')
@@ -58,27 +67,33 @@ describe('probe manifest (committed artifact)', () => {
     expect(() => stageOfGame(m, m.games.length)).toThrow(ProbeManifestError)
   })
 
-  it('generator output is byte-identical to the committed file (CI drift gate)', () => {
-    const regenerated = flatten(LEVEL_TEXT, GAMES_TEXT).json
-    expect(regenerated).toBe(MANIFEST_TEXT)
+  it('a list is the whole definition of a course — two lists, two courses', () => {
+    const other = JSON.stringify({
+      course: 'y30-probe',
+      level: 'ladder-c20-lives1',
+      games: PROBE_GAMES.slice(0, 2).map((g, i) => ({ ...g, game: i })),
+    })
+    const a = flatten(LEVEL_TEXT, PROBE_GAMES_JSON)
+    const b = flatten(LEVEL_TEXT, other)
+    const bDoc = JSON.parse(b.json) as { course: string; games: unknown[] }
+    expect(bDoc.course).toBe('y30-probe')
+    expect(bDoc.games).toHaveLength(2)
+    expect(b.json).not.toBe(a.json)
+    // Reproducibility — not a committed copy — is what makes the manifest
+    // trustworthy: same level file + same list, same bytes, every time. (This
+    // is what replaced the old committed-artifact drift gate.)
+    expect(flatten(LEVEL_TEXT, PROBE_GAMES_JSON).json).toBe(a.json)
+    // The course name comes from the list, never from a flag — the manifest's
+    // basename has to match it for `?probe=<course>` to find the file.
+    expect(parseProbeManifestText(b.json).course).toBe('y30-probe')
   })
 
   it('generator is deterministic and key-order independent', () => {
     const a = stableStringify({ b: 1, a: [{ d: 2, c: 3 }] })
     const b = stableStringify({ a: [{ c: 3, d: 2 }], b: 1 })
     expect(a).toBe(b)
-    expect(flatten(LEVEL_TEXT, GAMES_TEXT).json).toBe(flatten(LEVEL_TEXT, GAMES_TEXT).json)
-  })
-
-  it('games.json mirrors the manifest games table', () => {
-    const doc = JSON.parse(GAMES_TEXT) as {
-      course: string
-      games: Array<{ game: number; stage: number; seed: number; tag: string }>
-    }
-    const m = parseProbeManifestText(MANIFEST_TEXT)
-    expect(doc.course).toBe(m.course)
-    expect(doc.games.map((g) => [g.game, g.stage, g.seed, g.tag])).toEqual(
-      m.games.map((g) => [g.game, g.stage, g.seed, g.tag]),
+    expect(flatten(LEVEL_TEXT, PROBE_GAMES_JSON).json).toBe(
+      flatten(LEVEL_TEXT, PROBE_GAMES_JSON).json,
     )
   })
 
@@ -141,5 +156,54 @@ describe('probe manifest validation (no silent defaults)', () => {
 
   it('rejects malformed JSON loudly', () => {
     expect(() => parseProbeManifestText('{ nope')).toThrow(ProbeManifestError)
+  })
+})
+
+describe('probe manifest generator — a second course needs no code change', () => {
+  it('reads scratch, writes served, and needs nothing versioned but the level file', () => {
+    const d = defaultArgs()
+    // The list is scratch and the served copies are generated (both gitignored
+    // — see .gitignore `/public/probe/`); the level file is the ONE committed
+    // input and it belongs to the training stack anyway.
+    expect(d.games.startsWith('tmp/')).toBe(true)
+    expect(d.out.startsWith('public/probe/')).toBe(true)
+    expect(d.index.startsWith('public/probe/')).toBe(true)
+    expect(d.level.startsWith('nn-training/levels/')).toBe(true)
+  })
+
+  it('zero args stay the default course', () => {
+    // Pinned literally on purpose: these are the paths the zero-arg command
+    // reads and writes, so shifting one silently changes what it generates.
+    expect(defaultArgs()).toEqual({
+      games: 'tmp/probe/x20-opening.games.json',
+      level: 'nn-training/levels/ladder-c20-lives1.jsonc',
+      out: 'public/probe/x20-opening.json',
+      index: 'public/probe/index.json',
+    })
+    expect(parseArgs([])).toEqual(defaultArgs())
+  })
+
+  it('another course is named by flags', () => {
+    const args = parseArgs([
+      '--games',
+      'tmp/probe/y30.games.json',
+      '--level',
+      'nn-training/levels/y30.jsonc',
+      '--out',
+      'public/probe/y30.json',
+      '--index',
+      'tmp/probe/y30-index.json',
+    ])
+    expect(args).toEqual({
+      games: 'tmp/probe/y30.games.json',
+      level: 'nn-training/levels/y30.jsonc',
+      out: 'public/probe/y30.json',
+      index: 'tmp/probe/y30-index.json',
+    })
+  })
+
+  it('refuses an unknown flag or a valueless one instead of guessing', () => {
+    expect(() => parseArgs(['--stage', '1'])).toThrow(/未知参数 --stage/)
+    expect(() => parseArgs(['--games'])).toThrow(/缺少取值/)
   })
 })

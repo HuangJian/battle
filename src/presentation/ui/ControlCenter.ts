@@ -18,6 +18,16 @@ import { probeGameHref } from '../../probe/query'
 // Read-only on the World; every action is a callback into Game.
 // ================================================================
 
+/**
+ * One course's worth of probe launcher links. The probe serves one course per
+ * manifest (`?probe=<course>`), so the launcher renders them grouped — with
+ * several courses the bare game numbers would be ambiguous.
+ */
+export interface ProbeCourseLinks {
+  course: string
+  games: readonly { game: number; stage: number; seed: number; tag: string }[]
+}
+
 export interface ControlCenterCallbacks {
   onManualSave: () => void
   onOpenBrowser: () => void
@@ -43,9 +53,9 @@ export interface ControlCenterCallbacks {
   /** Cycle 督战 (supervise) mode: OFF → 单玩家 (x1) → 双玩家 (x2) → OFF. */
   onCycleSpectate: () => void
   /**
-   * Fill the DEVELOPER probe launcher with the manifest's game links. The
+   * Fill the DEVELOPER probe launcher with the served courses' game links. The
    * Control Center stays display+navigation only: it renders what it is given
-   * (`setProbeLinks`) and never fetches or owns probe state.
+   * (`setProbeCourses`) and never fetches or owns probe state.
    */
   onOpenProbeLauncher?: () => void
   /** Snapshot counts for the status line. */
@@ -344,19 +354,22 @@ export class ControlCenter {
    * the boot query path (`main.ts` → `ProbeController.bootFromText`) is the one
    * entry point, shared with hand-typed URLs.
    */
-  setProbeLinks(
-    course: string,
-    games: readonly { game: number; stage: number; seed: number; tag: string }[],
-  ): void {
+  setProbeCourses(courses: readonly ProbeCourseLinks[]): void {
     const box = this.el.querySelector('[data-cc="probe-links"]') as HTMLElement | null
     if (!box) return
     box.innerHTML = ''
-    for (const g of games) {
-      const a = document.createElement('a')
-      a.className = 'cc-btn cc-probe-link'
-      a.href = probeGameHref(course, g.game)
-      a.textContent = `#${g.game}  S${g.stage}  ${g.seed}  ${g.tag}`
-      box.appendChild(a)
+    for (const { course, games } of courses) {
+      const head = document.createElement('div')
+      head.className = 'cc-probe-course'
+      head.textContent = `${course}（${games.length} 局）`
+      box.appendChild(head)
+      for (const g of games) {
+        const a = document.createElement('a')
+        a.className = 'cc-btn cc-probe-link'
+        a.href = probeGameHref(course, g.game)
+        a.textContent = `#${g.game}  S${g.stage}  ${g.seed}  ${g.tag}`
+        box.appendChild(a)
+      }
     }
     box.hidden = false
   }

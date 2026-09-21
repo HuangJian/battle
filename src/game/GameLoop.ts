@@ -11,6 +11,7 @@ import { RNG } from '../utils/RNG'
 import { GodAIInput } from '../ai/GodAIInput'
 import { AutoFireInput } from './AutoFireInput'
 import { cycleBattleSpeed } from './battleSpeed'
+import { probeTickAction, probeTerminalAction } from '../probe/lifecycle'
 import { t } from '../i18n'
 import type { Game } from './Game'
 
@@ -330,10 +331,15 @@ export class LoopController {
           this.g.world.state === 'stageclear' ||
           this.g.world.state === 'gameover'
         ) {
-          // Probe tick budget (⑧ max_ticks): `src/` never reads maxTicks, so the
+          // Probe tick budget (⑦ max_ticks): `src/` never reads maxTicks, so the
           // budget is a Game-layer concern. `finishRun` parks the world in
-          // 'paused', so no further tick can run after this break.
-          if (this.g.probe.isActive && this.g.probe.tickBudgetSpent) {
+          // 'paused', so no further tick can run after this break. The rule
+          // itself lives in the pure `probeTickAction`, so it is unit-tested
+          // without a Game/DOM (tests/probe-lifecycle.test.ts).
+          if (
+            probeTickAction(this.g.probe.isActive, this.g.probe.tickBudgetSpent) ===
+            'finish-timeout'
+          ) {
             this.g.probe.finishRun('timeout')
             break
           }
@@ -371,25 +377,27 @@ export class LoopController {
             this.g.godInput2?.reset()
           }
 
-          // Detect stage clear → save victory replay
-          if (this.g.world.state === 'stageclear' && this.g.prevWorldState !== 'stageclear') {
-            // Probe clears go to the session pack instead of the ReplayManager
-            // (the pack owns the exact bytes; retention must not evict them).
-            if (this.g.probe.isActive) this.g.probe.finishRun('clear')
-            else this.g.finalizeRecording('clear')
-          }
-
-          // Detect game over → intercept for recovery
-          if (this.g.world.state === 'gameover' && !enteredGameOver) {
+          // Terminal branches (⑧) — the DECISION is the pure
+          // `probeTerminalAction` (src/probe/lifecycle.ts), shared verbatim
+          // with its unit test: a probe clear goes to the session pack, a probe
+          // death never enters recovery, and a normal run behaves exactly as
+          // before.
+          const terminal = probeTerminalAction({
+            probeActive: this.g.probe.isActive,
+            state: this.g.world.state,
+            prevState: this.g.prevWorldState,
+            enteredGameOver,
+          })
+          if (terminal.kind === 'finish-probe') {
             enteredGameOver = true
-            // Probe runs never enter recovery (⑧): with one life, death is the
-            // expected end of most runs, and the snapshot-rewind menu would
-            // hijack the human's flow and break the "1 life" semantics. The
-            // recording goes to the session pack; `finishRun` parks the world.
-            if (this.g.probe.isActive) {
-              this.g.probe.finishRun('gameover')
-              break // stop ticking — the run is over
-            }
+            this.g.probe.finishRun(terminal.outcome)
+            // A probe clear parks the world in 'paused' (so the loop's own
+            // state gate stops it next iteration); a probe death breaks here.
+            if (terminal.stop) break
+          } else if (terminal.kind === 'finalize') {
+            this.g.finalizeRecording('clear')
+          } else if (terminal.kind === 'recover') {
+            enteredGameOver = true
             // Determine specific defeat cause for the four-state ReplayType
             const defeatType = this.g.world.tileMap.isBaseDestroyed() ? 'base' : 'died'
             this.g.finalizeRecording(defeatType)

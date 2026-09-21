@@ -5305,6 +5305,7 @@ KERNEL32/api-ms-win/ucrtbase/VCRUNTIME；有 llvm 时再断言 `llvm-nm -u` 空 
    并在 `tests/test_remote_iter_real_bun.py`（真 bun 哨兵）里把 zip 解到临时树、**以它为 cwd 跑 rollout**，
    断言 shard manifest 的 `feat == "native"`（探针验过这条断言是活的：改成期望 wasm 会红）。
    `bun run check` / `bun run build` / `nn-python-gate.sh` 绿。
+
 ## §2026-09-21-goalnn-probe-negative-arm（2026-09-21，用户指令：负向臂——人类每局都给结论，直接用）
 
 - **背景**：开局探针原口径是「存在性证明」：只能判「可动 / 未知」，`无解` band 在聚合时被降级成
@@ -5320,3 +5321,31 @@ KERNEL32/api-ms-win/ucrtbase/VCRUNTIME；有 llvm 时再断言 `llvm-nm -u` 空 
   **不可解**，并声明它**可被任一后续通关推翻**（同一 seed 后来者覆盖先前者）。
 - **违反后果**：继续把 `无解` 降级成「未知」，训练侧会把「读得出无路」的种子当成可学目标反复烧
   算力，而探针永远给不出否决。
+
+## §2026-09-21-goalnn-probe-multi-course（2026-09-21，用户指令：别把文件名绑死为 x20，以后还有很多关卡要人类探针）
+
+- **背景**：探针原设计一次只服务一门课 —— `Game.probeManifestUrl` 写死 `/probe/x20-opening.json`，
+  `flatten-manifest.ts` 三条路径写死。于是第二门课：链接永远取回 x20 的清单 → `course-mismatch` 被响亮
+  拒绝（**永远进不去**，看起来像链接打错），生成器零参则只会把 x20 的清单重写一遍（新清单不会出现）。
+- **备选与否决**：**一份 index 装所有课程**（一次 fetch 列全部，没有「猜 URL」面）—— 否：它要改已冻结的
+  `ProbeManifest` 契约（解析器/控制器/全部测试/会话包随之动），而探针是开发者工具、一次只判一门课，
+  换来的只是少一次 fetch。
+- **决定**：**一门课一个清单文件**。`?probe=<course>` 决定取 `/probe/<course>.json` —— 名字因此是
+  **URL 片段**：用 `^[a-z0-9][a-z0-9._-]*$` 白名单 + 保留名 `index` 校验（挡掉 `?probe=../../…` 变任意
+  路径 fetch），不合法者在 **fetch 之前**就响亮拒绝。课程表 `public/probe/index.json` 由**扫描
+  `public/probe/` 派生**（`flatten-manifest.ts` 重建），永不手工维护：加一门课 = 生成它的清单，索引
+  自动跟上。生成器参数化 `--games/--level/--out/--index`，默认值 = 原常量（零参行为逐字节不变）。
+- **验证**：临时造第二门课 → 生成 → 索引列出两门 → tick0 校验通过，且 x20 清单逐字节未变；
+  `bun run check`（含 `tools/check-decisions.ts`）绿。
+- **违反后果**：谁再把某门课写回运行时或生成器，第二门课就只剩「像链接打错」的拒绝，而一个 checkout
+  里又只能存在一门课。
+- **更正（同日，用户质疑「为什么要把这些探针局定义放进 git？用完即弃」）**：上条的隐含前提「局表+清单入库」
+  是从 `plan/human-opening-probe.plan.md:37`「构建产物，提交入库」抄来的，**我没质疑它**。实际使用面查清了：
+  这两个文件在 `nn-training/`、`dashboard/` 里**零引用**（纯叶子）；运行时只有 launcher 读清单，`tick0Hash`/
+  `layoutHash` 浏览器根本不读（会话包比的是逐帧 tick-hash 链），`courseSha` 随时可由关文件重算 ⇒ 都不需要
+  版本化；「探过什么」的收据是**会话包 zip**（自带 `(game,stage,seed)` + courseSha + 每局 replay + verdicts）。
+  而代价已经现形：换 seed（最常见的操作）要连带一次提交；那道漂移门在并发 agent 覆盖产物时还把门禁打红一次。
+  **改为**：局表落 `tmp/probe/<course>.games.json`，产物落 gitignore 的 `public/probe/`，提交的输入只剩关文件
+  （本属训练栈）；两条漂移门删除，测试改用 `tests/probe-fixture.ts` 从「关文件 + 规范局表」在内存生成语料
+  （无 golden 文件 ⇒ 无第二真相源）。**实测**：删掉整个 `public/probe/` 后 134 条 probe 用例仍全绿，一条命令
+  即重建且逐字节可重现。选种理由（nn1/nn2/god + note）属**决策记录**，应进 progress 文档而非一次性数据文件。

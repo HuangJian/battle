@@ -10,6 +10,7 @@ import {
   type ProbeManifest,
 } from '../probe/manifest'
 import { resolveProbeTarget, type ProbeTargetRejection } from '../probe/query'
+import type { ProbeRunOutcome } from '../probe/lifecycle'
 import { applyProbeRun } from '../probe/setup'
 import { buildSessionPack, type ProbeReplayFile, type ProbeSessionMeta } from '../probe/session'
 import {
@@ -39,7 +40,10 @@ import {
 // verdicts/attempts are session data. It is also not module-level (§2.2).
 // ================================================================
 
-export type ProbeRunOutcome = 'clear' | 'gameover' | 'timeout'
+// The outcome vocabulary is shared with the loop-lifecycle policy
+// (`src/probe/lifecycle.ts`), so the value the loop hands `finishRun` and the
+// value this controller records can never drift apart.
+export type { ProbeRunOutcome }
 
 export interface ProbeRunRecord {
   game: number

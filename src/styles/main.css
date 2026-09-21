@@ -2168,6 +2168,15 @@ body.theme-modern .ui-menu {
   text-decoration: none;
 }
 
+/* Course heading of a launcher group (one course per served manifest). */
+.cc-probe-course {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  opacity: 0.7;
+  margin-top: 2px;
+}
+
 .probe-bar {
   position: fixed;
   right: 12px;

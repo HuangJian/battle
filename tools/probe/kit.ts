@@ -27,8 +27,10 @@
  *     rendered as blank cells.
  *   • a band that contradicts the annotation's own outcome is flagged (a "solvable"
  *     verdict on a run the replay says ended in a death is a data-entry slip).
- *   • the §0 calibration gate: if game 0 does not come out `solvable`, the whole
- *     interpretation is void — said out loud, as an error.
+ *   • the §0 calibration gate: if game 0 is JUDGED and does not come out on a
+ *     "can clear" band, the whole interpretation is void — said out loud, as an
+ *     error. Unjudged game 0 (including a `retry`, which is not a judgment) is
+ *     `unknown`, not a failure.
  *
  * Pure core (`inspectPack` / `renderSheet`) + a thin CLI, so the sheet and the
  * checks are unit-tested without a browser.
@@ -110,7 +112,10 @@ export interface KitReport {
   findings: KitFinding[]
   /** §0 aggregation over every judged band: 可动 / 不可解 / 未知. */
   seedVerdict: SeedVerdict
-  /** game 0 gate: judged `solvable` = pass, judged otherwise = fail, unjudged = unknown. */
+  /**
+   * game 0 gate: judged `solvable` = pass, judged on any other verdict-bearing
+   * band = fail, unjudged or `retry` = unknown.
+   */
   calibration: 'pass' | 'fail' | 'unknown'
   captured: number[]
   judged: number[]
@@ -299,8 +304,12 @@ export function inspectPack(zipBytes: Uint8Array, manifest: ProbeManifest): KitR
   const bands = rows.map((r) => r.band).filter((b): b is ProbeBand => b !== null)
   const seedVerdict = aggregateSeedVerdict(bands)
   const calibrationRow = rows.find((r) => r.game === CALIBRATION_GAME) ?? null
+  // Unjudged = unknown, and that includes `retry` — whose contribution is null
+  // because it is by definition "not counted". Reading it as a failure would
+  // void the whole session over an operator note to themselves; only a band that
+  // actually lands a verdict can fail the gate.
   const calibration: KitReport['calibration'] =
-    calibrationRow?.band === null || calibrationRow === null
+    calibrationRow === null || calibrationRow.contribution === null
       ? 'unknown'
       : calibrationRow.contribution === 'solvable'
         ? 'pass'

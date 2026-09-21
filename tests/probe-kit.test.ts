@@ -1,12 +1,11 @@
 import { describe, it, expect } from 'bun:test'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { InputRecorder } from '../src/replay/InputRecorder'
 import { ProbeController } from '../src/game/ProbeController'
-import { parseProbeManifestText } from '../src/probe/manifest'
 import { buildSessionPack } from '../src/probe/session'
 import { writeStoreZip } from '../src/probe/zip'
 import {
@@ -22,6 +21,9 @@ import {
 import type { ProbeVerdict } from '../src/probe/verdict'
 import type { InputLike } from '../src/game/Input'
 import type { Direction } from '../src/constants'
+// The course corpus is GENERATED (a probe course is a session, not a repo
+// artifact) — see tests/probe-fixture.ts.
+import { PROBE_MANIFEST as MANIFEST, PROBE_MANIFEST_TEXT as MANIFEST_TEXT } from './probe-fixture'
 
 // ============================================================
 // Human-opening probe — operator kit (plan v7 §T7)
@@ -31,12 +33,6 @@ import type { Direction } from '../src/constants'
 // pack) the shared annotation, the filled table, and the review that catches
 // transcription slips before they reach the training side.
 // ============================================================
-
-const MANIFEST_TEXT = readFileSync(
-  join(import.meta.dir, '..', 'public/probe/x20-opening.json'),
-  'utf8',
-)
-const MANIFEST = parseProbeManifestText(MANIFEST_TEXT)
 
 const IDLE: InputLike = {
   getMoveDirection: () => null as Direction | null,
@@ -280,6 +276,22 @@ describe('probe kit — §0 aggregation and the calibration gate', () => {
     const report = inspectPack(packFor([1], [verdictFor(1, 'tough')]), MANIFEST)
     expect(report.calibration).toBe('unknown')
   })
+
+  it('a `retry` on the calibration game is not a failure — it is not a judgment', () => {
+    // `retry` means "another attempt, not counted", so it aggregates to nothing
+    // (contribution === null). Reading that as a failed calibration would void
+    // the whole session — and raise an error — over an operator note to self.
+    const report = inspectPack(packFor([0, 1], [verdictFor(0, 'retry')]), MANIFEST)
+    expect(report.rows[0].band).toBe('retry')
+    expect(report.rows[0].contribution).toBeNull()
+    expect(report.calibration).toBe('unknown')
+    expect(report.seedVerdict).toBe('unknown')
+    const sheet = renderSheet(report, MANIFEST, 'http://localhost:8956')
+    expect(sheet).toContain('校准局：未判读')
+    expect(report.findings.some((f) => f.level === 'error' && f.message.includes('作废'))).toBe(
+      false,
+    )
+  })
 })
 
 describe('probe kit — CLI plumbing', () => {
@@ -330,13 +342,16 @@ describe('probe kit — CLI plumbing', () => {
     }
   })
 
-  it('resolves the default manifest repo-relative, whatever the cwd is', () => {
+  it('resolves a repo-relative path repo-relative, whatever the cwd is', () => {
     // The operator realistically runs this from ~/Downloads with an absolute
     // script path — a cwd-relative default manifest silently broke that flow.
+    // The probe manifest itself can no longer be the probe: it is GENERATED
+    // into a gitignored dir, so in a fresh clone it does not exist and this
+    // assertion would pass only by accident of the local tree.
     const elsewhere = mkdtempSync(join(tmpdir(), 'kit-cwd-'))
     try {
-      expect(toolPath('public/probe/x20-opening.json', elsewhere)).toBe(
-        join(REPO_ROOT, 'public/probe/x20-opening.json'),
+      expect(toolPath('tools/probe/flatten-manifest.ts', elsewhere)).toBe(
+        join(REPO_ROOT, 'tools/probe/flatten-manifest.ts'),
       )
       // a path that exists nowhere falls back to cwd resolution
       expect(toolPath('nope.json', elsewhere)).toBe(join(elsewhere, 'nope.json'))
