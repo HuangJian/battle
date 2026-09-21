@@ -64,7 +64,6 @@ interface VerifyResult {
   file: string
   coop: boolean
   totalTicks: number
-  expectedType: string
   finalState: string
   endedAtTick: number
   score: number
@@ -74,6 +73,8 @@ interface VerifyResult {
   playerAlive: boolean
   verdict: 'OK' | 'DESYNC'
   reason: string
+  /** Declared outcome type, or undefined when the file declares none. */
+  expectedType: string | undefined
   /** True = every compared checkpoint matched, false = mismatch, null = no hash chain. */
   hashVerified: boolean | null
   firstHashMismatch: HashMismatchInfo | null
@@ -86,9 +87,18 @@ export function verifyReplayText(text: string, file: string, verbose = false): V
   const meta = replay.metadata
   const coop = Boolean((parsed.envelope as any)?.replay?.metadata?.coop)
 
-  // Expected outcome: filename convention `<difficulty>-s<NN>-<type>-...`
+  // Expected outcome — derived ONLY from a real declaration:
+  //   ① filename convention `<difficulty>-s<NN>-<type>-...` (exported replays)
+  //   ② `sim.status` (headless recordings)
+  // A browser recording carries NEITHER: the .replay envelope has no status for
+  // source='browser', and `parseReplayFile` defaults the parsed type to 'clear'.
+  // Consuming that default invented a demand for a stage-clear in EVERY defeat
+  // recording (reported as `expected stage clear, got 'gameover'`), which made
+  // the terminal check unusable for the human-opening probe — where most runs
+  // are deaths. An undeclared type = no terminal expectation; the tick-hash
+  // chain alone decides.
   const m = /-s\d+-([a-z]+)-/.exec(file)
-  const expectedType = m ? m[1] : replay.type
+  const expectedType: string | undefined = m ? m[1] : parsed.envelope.sim?.status
 
   // ---- Rebuild the world exactly as PlaybackController.start() does ----
   const world = new World()
@@ -151,9 +161,13 @@ export function verifyReplayText(text: string, file: string, verbose = false): V
   const playerAlive = Boolean(world.player?.alive)
 
   // Terminal-state match: only 'clear' expectations are verdict-bearing —
-  // a base/died/timeout label has no exact state to match against.
+  // a base/died/timeout label has no exact state to match against — and an
+  // undeclared expectation is never checked.
   const terminalMatch =
-    expectedType !== 'clear' || endState === 'stageclear' || endState === 'victory'
+    expectedType === undefined ||
+    expectedType !== 'clear' ||
+    endState === 'stageclear' ||
+    endState === 'victory'
 
   let verdict: 'OK' | 'DESYNC' = 'OK'
   let reason = 'replay reproduced the recorded outcome'

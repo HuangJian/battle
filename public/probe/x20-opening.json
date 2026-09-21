@@ -1,0 +1,373 @@
+{
+  "course": "x20-opening",
+  "courseSha": "1d6a923f4574f9087111af3546c1a1d8eac954449fa806216b2ab401f4c40a69",
+  "difficulty": "hard",
+  "games": [
+    {
+      "game": 0,
+      "seed": 414009,
+      "stage": 2000,
+      "tag": "calibration",
+      "tick0Hash": "07b322e0"
+    },
+    {
+      "game": 1,
+      "seed": 414013,
+      "stage": 2000,
+      "tag": "S1",
+      "tick0Hash": "fb89effc"
+    },
+    {
+      "game": 2,
+      "seed": 414085,
+      "stage": 2001,
+      "tag": "S1",
+      "tick0Hash": "818e61ff"
+    },
+    {
+      "game": 3,
+      "seed": 414021,
+      "stage": 2002,
+      "tag": "S1",
+      "tick0Hash": "30365eed"
+    },
+    {
+      "game": 4,
+      "seed": 414001,
+      "stage": 2003,
+      "tag": "S1",
+      "tick0Hash": "7717a80b"
+    },
+    {
+      "game": 5,
+      "seed": 414050,
+      "stage": 2001,
+      "tag": "S2-positive",
+      "tick0Hash": "55abb385"
+    },
+    {
+      "game": 6,
+      "seed": 414065,
+      "stage": 2002,
+      "tag": "S3-godweak",
+      "tick0Hash": "79021dbd"
+    }
+  ],
+  "level": 0,
+  "lives": 1,
+  "max_ticks": 12900,
+  "stages": [
+    {
+      "enemies": [
+        "basic",
+        "fast",
+        "power",
+        "armor",
+        "basic",
+        "fast",
+        "power",
+        "armor",
+        "basic",
+        "fast",
+        "power",
+        "armor",
+        "basic",
+        "fast",
+        "power",
+        "armor",
+        "basic",
+        "fast",
+        "power",
+        "armor"
+      ],
+      "enemyCount": 20,
+      "enemySpawns": [
+        {
+          "col": 2,
+          "row": 2
+        },
+        {
+          "col": 22,
+          "row": 2
+        },
+        {
+          "col": 22,
+          "row": 22
+        },
+        {
+          "col": 2,
+          "row": 22
+        }
+      ],
+      "id": 2000,
+      "layoutHash": "624fdf53",
+      "name": "ladder-c20-lives1-abcd",
+      "playerSpawn": {
+        "col": 12,
+        "row": 12
+      },
+      "tiles": [
+        "ssssssssssssssssssssssssss",
+        "ssssssssssssssssssssssssss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ssssssssssssssssssssssssss",
+        "ssssssssssssssssssssssssss"
+      ]
+    },
+    {
+      "enemies": [
+        "fast",
+        "power",
+        "armor",
+        "basic",
+        "fast",
+        "power",
+        "armor",
+        "basic",
+        "fast",
+        "power",
+        "armor",
+        "basic",
+        "fast",
+        "power",
+        "armor",
+        "basic",
+        "fast",
+        "power",
+        "armor",
+        "basic"
+      ],
+      "enemyCount": 20,
+      "enemySpawns": [
+        {
+          "col": 2,
+          "row": 2
+        },
+        {
+          "col": 22,
+          "row": 2
+        },
+        {
+          "col": 22,
+          "row": 22
+        },
+        {
+          "col": 2,
+          "row": 22
+        }
+      ],
+      "id": 2001,
+      "layoutHash": "6dee741d",
+      "name": "ladder-c20-lives1-bcda",
+      "playerSpawn": {
+        "col": 12,
+        "row": 12
+      },
+      "tiles": [
+        "ssssssssssssssssssssssssss",
+        "ssssssssssssssssssssssssss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ssssssssssssssssssssssssss",
+        "ssssssssssssssssssssssssss"
+      ]
+    },
+    {
+      "enemies": [
+        "power",
+        "armor",
+        "basic",
+        "fast",
+        "power",
+        "armor",
+        "basic",
+        "fast",
+        "power",
+        "armor",
+        "basic",
+        "fast",
+        "power",
+        "armor",
+        "basic",
+        "fast",
+        "power",
+        "armor",
+        "basic",
+        "fast"
+      ],
+      "enemyCount": 20,
+      "enemySpawns": [
+        {
+          "col": 2,
+          "row": 2
+        },
+        {
+          "col": 22,
+          "row": 2
+        },
+        {
+          "col": 22,
+          "row": 22
+        },
+        {
+          "col": 2,
+          "row": 22
+        }
+      ],
+      "id": 2002,
+      "layoutHash": "f8109543",
+      "name": "ladder-c20-lives1-cdab",
+      "playerSpawn": {
+        "col": 12,
+        "row": 12
+      },
+      "tiles": [
+        "ssssssssssssssssssssssssss",
+        "ssssssssssssssssssssssssss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ssssssssssssssssssssssssss",
+        "ssssssssssssssssssssssssss"
+      ]
+    },
+    {
+      "enemies": [
+        "armor",
+        "basic",
+        "fast",
+        "power",
+        "armor",
+        "basic",
+        "fast",
+        "power",
+        "armor",
+        "basic",
+        "fast",
+        "power",
+        "armor",
+        "basic",
+        "fast",
+        "power",
+        "armor",
+        "basic",
+        "fast",
+        "power"
+      ],
+      "enemyCount": 20,
+      "enemySpawns": [
+        {
+          "col": 2,
+          "row": 2
+        },
+        {
+          "col": 22,
+          "row": 2
+        },
+        {
+          "col": 22,
+          "row": 22
+        },
+        {
+          "col": 2,
+          "row": 22
+        }
+      ],
+      "id": 2003,
+      "layoutHash": "9fb8a4f7",
+      "name": "ladder-c20-lives1-dabc",
+      "playerSpawn": {
+        "col": 12,
+        "row": 12
+      },
+      "tiles": [
+        "ssssssssssssssssssssssssss",
+        "ssssssssssssssssssssssssss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ss......................ss",
+        "ssssssssssssssssssssssssss",
+        "ssssssssssssssssssssssssss"
+      ]
+    }
+  ]
+}

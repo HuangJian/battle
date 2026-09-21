@@ -51,6 +51,9 @@ export class SnapshotController {
       onTogglePerformance: () => this.g.setPerformanceMode(!this.g.settings.performanceMode),
       onToggleCoop: () => this.g.requestCoopToggle(),
       onCycleSpectate: () => this.g.cycleSpectate(),
+      // DEVELOPER → Probe Launcher (human-opening-probe.plan). The Control
+      // Center renders the links it is handed; Game fetches the manifest.
+      onOpenProbeLauncher: () => this.g.openProbeLauncher(),
       onOpenControls: () => {
         const s = this.g.world.state
         // The panel is a static modal; it opens over any static screen (menu /

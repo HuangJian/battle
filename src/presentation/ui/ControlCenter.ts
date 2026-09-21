@@ -1,6 +1,7 @@
 import type { World } from '../../game/World'
 import { THEME_DEFINITIONS } from '../../config/theme'
 import { i18n, t, localizeRoot } from '../../i18n'
+import { probeGameHref } from '../../probe/query'
 
 // ================================================================
 // Control Center (plan §13)
@@ -41,6 +42,12 @@ export interface ControlCenterCallbacks {
   onToggleCoop: () => void
   /** Cycle 督战 (supervise) mode: OFF → 单玩家 (x1) → 双玩家 (x2) → OFF. */
   onCycleSpectate: () => void
+  /**
+   * Fill the DEVELOPER probe launcher with the manifest's game links. The
+   * Control Center stays display+navigation only: it renders what it is given
+   * (`setProbeLinks`) and never fetches or owns probe state.
+   */
+  onOpenProbeLauncher?: () => void
   /** Snapshot counts for the status line. */
   getCounts: () => { total: number; manual: number; manualLimit: number }
   /** Replay counts for the status line. */
@@ -162,6 +169,10 @@ export class ControlCenter {
             <span data-i18n="cc.debugOverlay">Debug Overlay</span>
             <span class="cc-perf-meta"><span class="cc-perf-state" data-cc="perf-state">OFF</span><kbd>Alt+D</kbd></span>
           </button>
+          <button class="cc-btn" data-cc="probe" type="button" title="Human-opening probe" data-i18n-attr="title:cc.titleProbe">
+            <span data-i18n="cc.probeLauncher">Probe Launcher</span>
+          </button>
+          <div class="cc-probe-links" data-cc="probe-links" hidden></div>
         </section>
       </div>
     `
@@ -194,6 +205,7 @@ export class ControlCenter {
       this.updateLangName()
     })
     wire('[data-cc="perf"]', () => this.callbacks?.onTogglePerf())
+    wire('[data-cc="probe"]', () => this.callbacks?.onOpenProbeLauncher?.())
     wire('[data-cc="fullscreen"]', () => this.callbacks?.onToggleFullscreen())
     wire('[data-cc="perfmode"]', () => this.callbacks?.onTogglePerformance())
     wire('[data-cc="coop"]', () => this.callbacks?.onToggleCoop())
@@ -324,6 +336,37 @@ export class ControlCenter {
       mode === 'dual' ? 'x2' : mode === 'single' ? 'x1' : 'OFF',
       on,
     )
+  }
+
+  /**
+   * Render the probe launcher's game links (display + navigation only).
+   * `<a href>` navigation is deliberate: a probe run is a fresh page load, so
+   * the boot query path (`main.ts` → `ProbeController.bootFromText`) is the one
+   * entry point, shared with hand-typed URLs.
+   */
+  setProbeLinks(
+    course: string,
+    games: readonly { game: number; stage: number; seed: number; tag: string }[],
+  ): void {
+    const box = this.el.querySelector('[data-cc="probe-links"]') as HTMLElement | null
+    if (!box) return
+    box.innerHTML = ''
+    for (const g of games) {
+      const a = document.createElement('a')
+      a.className = 'cc-btn cc-probe-link'
+      a.href = probeGameHref(course, g.game)
+      a.textContent = `#${g.game}  S${g.stage}  ${g.seed}  ${g.tag}`
+      box.appendChild(a)
+    }
+    box.hidden = false
+  }
+
+  /** Hide the probe launcher links (manifest unavailable). */
+  clearProbeLinks(): void {
+    const box = this.el.querySelector('[data-cc="probe-links"]') as HTMLElement | null
+    if (!box) return
+    box.innerHTML = ''
+    box.hidden = true
   }
 
   /** Toggle the theme dropdown open/closed (and the button's aria state). */

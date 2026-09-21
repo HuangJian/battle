@@ -171,6 +171,12 @@ export class LoopController {
     // LOW_POWER state (e.g. 'gameover' at the end of a defeat replay).
     if (this.g.playback) return
     if (!LOW_POWER_STATES.has(this.g.world.state)) return
+    // Probe Esc works from the parked ('paused') end-of-run state too.
+    if (this.g.probe.isActive && this.g.input.wasPressed('Escape')) {
+      this.g.exitProbe()
+      this.g.input.endFrame()
+      return
+    }
     // UI modals own their own keyboard handling; never double-process.
     if (this.g.presentation.ui.snapshotBrowser.isOpen()) return
     if (this.g.presentation.ui.replayBrowser.isOpen()) return
@@ -282,6 +288,11 @@ export class LoopController {
   handleFrameInput(): void {
     if (this.g.playback) {
       this.g.handlePlaybackInput()
+    } else if (this.g.probe.isActive && this.g.input.wasPressed('Escape')) {
+      // Probe Esc leaves to the menu and clears the probe state (plan §T2).
+      // Consumed here, BEFORE the normal battle input, so a probe run can
+      // never fall through to the pause path.
+      this.g.exitProbe()
     } else {
       this.g.handleStateInput()
     }
@@ -319,6 +330,13 @@ export class LoopController {
           this.g.world.state === 'stageclear' ||
           this.g.world.state === 'gameover'
         ) {
+          // Probe tick budget (⑧ max_ticks): `src/` never reads maxTicks, so the
+          // budget is a Game-layer concern. `finishRun` parks the world in
+          // 'paused', so no further tick can run after this break.
+          if (this.g.probe.isActive && this.g.probe.tickBudgetSpent) {
+            this.g.probe.finishRun('timeout')
+            break
+          }
           this.g.simulation.tick()
           // Record THIS tick's input (one frame per tick).
           //
@@ -332,6 +350,8 @@ export class LoopController {
           // base). See AutoFireInput's contract: the decorated input is what
           // the replay records.
           this.g.recorder.recordFrame(this.g.simulation.input, this.g.simulation.input2)
+          // Probe runs count their own ticks for the max_ticks budget.
+          this.g.probe.noteTick()
 
           // Detect stage change → Stage Start snapshot (plan §3, §10)
           if (
@@ -353,15 +373,26 @@ export class LoopController {
 
           // Detect stage clear → save victory replay
           if (this.g.world.state === 'stageclear' && this.g.prevWorldState !== 'stageclear') {
-            this.g.finalizeRecording('clear')
+            // Probe clears go to the session pack instead of the ReplayManager
+            // (the pack owns the exact bytes; retention must not evict them).
+            if (this.g.probe.isActive) this.g.probe.finishRun('clear')
+            else this.g.finalizeRecording('clear')
           }
 
           // Detect game over → intercept for recovery
           if (this.g.world.state === 'gameover' && !enteredGameOver) {
+            enteredGameOver = true
+            // Probe runs never enter recovery (⑧): with one life, death is the
+            // expected end of most runs, and the snapshot-rewind menu would
+            // hijack the human's flow and break the "1 life" semantics. The
+            // recording goes to the session pack; `finishRun` parks the world.
+            if (this.g.probe.isActive) {
+              this.g.probe.finishRun('gameover')
+              break // stop ticking — the run is over
+            }
             // Determine specific defeat cause for the four-state ReplayType
             const defeatType = this.g.world.tileMap.isBaseDestroyed() ? 'base' : 'died'
             this.g.finalizeRecording(defeatType)
-            enteredGameOver = true
             this.g.startRecovery()
             break // stop ticking — simulation is now suspended
           }
@@ -489,7 +520,10 @@ export class LoopController {
    * canvas still shows the previous clean frame — no overlay, no flash).
    */
   stepSnapshots(dt: number): void {
-    if (this.g.world.state === 'playing' && !this.g.playback) {
+    // Auto snapshots are suppressed for probe runs: they exist for recovery,
+    // which the probe deliberately bypasses — and an auto 'stage-start' would
+    // fight the probe's own recording session.
+    if (this.g.world.state === 'playing' && !this.g.playback && !this.g.probe.isActive) {
       this.g.snapshots.updateAuto(this.g.world, dt)
     }
     if (this.g.replays.hasPendingThumbnails) {

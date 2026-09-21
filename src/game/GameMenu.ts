@@ -163,6 +163,11 @@ export class MenuController {
     if (this.g.input.isPausePressed()) {
       if (justExitedFullscreen) {
         // Consume the Esc without toggling pause
+      } else if (this.g.probe.runEnded) {
+        // A finished probe run is parked in 'paused' by ProbeController
+        // .finishRun — a lifecycle parking spot, not a user pause. Refusing the
+        // toggle is what stops P from resuming a world whose outcome is already
+        // recorded (the session bar's retry/navigate re-arm the run instead).
       } else {
         this.g.simulation.togglePause()
         this.g.audio.playPause()
@@ -174,7 +179,10 @@ export class MenuController {
       }
     }
     // Manual snapshot — Alt+S by default (plan §3, Manual); rebindable.
-    if (this.g.input.isSnapshotPressed()) {
+    // Skipped during a probe run: the probe bypasses recovery, so a manual
+    // snapshot has no consumer and would just evict a real one from the
+    // bounded manual retention slot.
+    if (this.g.input.isSnapshotPressed() && !this.g.probe.isActive) {
       this.g.manualSnapshot()
     }
     // Theme cycle — Alt+T (configurable). Pauses the game and advances to
@@ -183,7 +191,11 @@ export class MenuController {
       this.themeCycle()
     }
     if (this.g.input.isResetPressed()) {
-      this.g.resetToMenu()
+      // During a probe the global reset means "leave the session" — routing it
+      // through exitProbe clears the probe state (a bare resetToMenu would
+      // strand the session bar on the menu screen).
+      if (this.g.probe.isActive) this.g.exitProbe()
+      else this.g.resetToMenu()
     }
   }
 

@@ -29,6 +29,9 @@ import { LoopController } from './GameLoop'
 import { MenuController } from './GameMenu'
 import { SnapshotController } from './GameSnapshot'
 import { ReplayController } from './GameReplay'
+import { ProbeController, ProbeBootError } from './ProbeController'
+import { ProbeVerdictError, type ProbeBand } from '../probe/verdict'
+import { ProbeManifestError } from '../probe/manifest'
 
 /**
  * Game — top-level orchestrator. Owns the game loop, wires all systems.
@@ -55,6 +58,12 @@ export class Game {
   recovery: RecoveryController
   replays: ReplayManager
   recorder: InputRecorder
+  /**
+   * Human-opening probe (human-opening-probe.plan) — run lifecycle + session
+   * pack. Inert (isActive === false) unless the page was opened with
+   * `?probe=<course>&game=<n>`.
+   */
+  probe: ProbeController
   /** Presence flag — NOT a world state. When non-null, playback is active. */
   playback: PlaybackController | null = null
 
@@ -196,6 +205,8 @@ export class Game {
     this.replays = new ReplayManager({ backend: createReplayStorage() })
     this.recorder = new InputRecorder()
     this.wireReplayUI()
+    this.probe = new ProbeController({ world: this.world, recorder: this.recorder })
+    this.wireProbeUI()
 
     this.audio.setVolume(this.settings.volume)
 
@@ -661,5 +672,154 @@ export class Game {
 
   openReplayBrowser(): void {
     this.replayCtl.openReplayBrowser()
+  }
+
+  // ------------------------------------------------------------------
+  // Human-opening probe (human-opening-probe.plan v7 §T2–§T4)
+  // ------------------------------------------------------------------
+
+  /** Manifest served from `public/` (build artifact, committed to the repo). */
+  static readonly probeManifestUrl = '/probe/x20-opening.json'
+
+  /** Wire the session bar to the Game-layer probe controller. */
+  wireProbeUI(): void {
+    const ui = this.presentation.ui
+    this.probe.onChange((snap) => ui.probeBar.update(snap))
+    ui.probeBar.init({
+      onVerdict: (band, reason) => this.submitProbeVerdict(band, reason),
+      onNavigate: (delta) => this.navigateProbe(delta),
+      onRetry: () => this.retryProbe(),
+      onEndSession: () => this.endProbeSession(),
+      onExit: () => this.exitProbe(),
+    })
+    ui.probeBar.hide()
+  }
+
+  /**
+   * Boot a probe run from the launch query (`main.ts`, after `start()`).
+   * Returns whether a run actually started; an invalid query is refused loudly
+   * (course mismatch / game out of range) instead of half-starting.
+   */
+  async startProbeFromQuery(search: URLSearchParams): Promise<boolean> {
+    let text: string
+    try {
+      text = await this.fetchProbeManifestText()
+    } catch (err) {
+      console.warn(`[probe] manifest 加载失败: ${String(err)}`)
+      this.presentation.ui.notify(`probe manifest 加载失败: ${String(err)}`, 'warn')
+      return false
+    }
+    try {
+      const booted = this.probe.bootFromText(search, text)
+      if (!booted) return false
+    } catch (err) {
+      if (err instanceof ProbeBootError || err instanceof ProbeManifestError) {
+        console.warn(`[probe] ${err.message}`)
+        this.presentation.ui.notify(err.message, 'warn')
+        return false
+      }
+      throw err
+    }
+    this.afterProbeRunChange()
+    return true
+  }
+
+  /**
+   * DEVELOPER → Probe Launcher: fetch the manifest and hand the game links to
+   * the Control Center (display + navigation only — no probe state crosses
+   * that boundary).
+   */
+  async openProbeLauncher(): Promise<void> {
+    const ui = this.presentation.ui
+    try {
+      const manifest = this.probe.installManifestText(await this.fetchProbeManifestText())
+      ui.controlCenter.setProbeLinks(
+        manifest.course,
+        manifest.games.map((g) => ({ game: g.game, stage: g.stage, seed: g.seed, tag: g.tag })),
+      )
+    } catch (err) {
+      ui.controlCenter.clearProbeLinks()
+      ui.notify(`probe manifest 加载失败: ${String(err)}`, 'warn')
+    }
+  }
+
+  /**
+   * Re-arm the loop + presentation after a probe run (re)starts.
+   *
+   * `prevStageIndex` is set to the CURRENT index so the stage-change detector
+   * stays quiet: probe runs always load index 0, and the detector would
+   * otherwise fire after tick 1, call `recorder.startNew()` (wiping frame 1 and
+   * re-snapshotting a post-tick world) and file a bogus 'stage-start' snapshot.
+   */
+  afterProbeRunChange(): void {
+    this.prevStageIndex = this.world.stageIndex
+    this.prevWorldState = this.world.state
+    this.accumulator = 0
+    this.lastTime = performance.now()
+    this.input.reset()
+    this.presentation.reset()
+    this.presentation.updateUI(this.world)
+    this.presentation.markNeedsRender()
+    this.scheduleFrame()
+  }
+
+  /** Leave probe mode: clear the session surface and return to the menu. */
+  exitProbe(): void {
+    this.probe.exit()
+    this.resetToMenu()
+    this.refreshStaticScreen()
+  }
+
+  private submitProbeVerdict(band: ProbeBand, reason: string): void {
+    const bar = this.presentation.ui.probeBar
+    try {
+      this.probe.submitVerdict(band, reason)
+      bar.setMessage('')
+    } catch (err) {
+      // The protocol's single refusal: unsolvable without a reason (§4 rule 6).
+      bar.setMessage(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  private navigateProbe(delta: -1 | 1): void {
+    this.probe.navigate(delta)
+    this.afterProbeRunChange()
+  }
+
+  private retryProbe(): void {
+    this.probe.retry()
+    this.afterProbeRunChange()
+  }
+
+  private endProbeSession(): void {
+    const ui = this.presentation.ui
+    try {
+      this.downloadProbePack(this.probe.buildPack())
+      this.exitProbe()
+    } catch (err) {
+      ui.probeBar.setMessage(err instanceof ProbeVerdictError ? err.message : String(err))
+    }
+  }
+
+  private downloadProbePack(pack: { filename: string; bytes: Uint8Array }): void {
+    // `BlobPart` wants an ArrayBuffer-backed view; the ZIP writer returns an
+    // exact-length Uint8Array, so handing over its own buffer is safe.
+    const bytes = pack.bytes.buffer.slice(
+      pack.bytes.byteOffset,
+      pack.bytes.byteOffset + pack.bytes.byteLength,
+    ) as ArrayBuffer
+    const url = URL.createObjectURL(new Blob([bytes], { type: 'application/zip' }))
+    const a = document.createElement('a')
+    a.href = url
+    a.download = pack.filename
+    a.click()
+    // Deferred revoke (Safari aborts large downloads on a synchronous revoke).
+    setTimeout(() => URL.revokeObjectURL(url), 10_000)
+  }
+
+  private async fetchProbeManifestText(): Promise<string> {
+    const res = await fetch(Game.probeManifestUrl)
+    if (!res.ok) throw new Error(`HTTP ${res.status} ${Game.probeManifestUrl}`)
+    return await res.text()
   }
 }

@@ -2147,3 +2147,107 @@ body.theme-modern .ui-menu {
 .recovery-options .recovery-option {
   padding: 8px 14px;
 }
+
+/* ---- Human-opening probe (dev): Control Center launcher + session bar ----
+   HTML/CSS only — the canvas stays playfield-only (AGENTS §2.5). */
+.cc-probe-links {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.cc-probe-links[hidden] {
+  display: none;
+}
+
+.cc-probe-link {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  text-decoration: none;
+}
+
+.probe-bar {
+  position: fixed;
+  right: 12px;
+  bottom: 12px;
+  width: 330px;
+  z-index: 25;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  background: var(--theme-panel-bg);
+  border: 1px solid var(--theme-panel-border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 32px var(--theme-panel-shadow);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.probe-bar[hidden] {
+  display: none;
+}
+
+.probe-bar__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.probe-bar__title {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: var(--theme-accent-primary);
+}
+
+.probe-bar__progress,
+.probe-bar__target,
+.probe-bar__budget,
+.probe-bar__status,
+.probe-bar__message {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--theme-text-secondary);
+}
+
+.probe-bar__message:empty {
+  display: none;
+}
+
+.probe-bar__message {
+  color: var(--theme-danger);
+}
+
+.probe-bar__spacer {
+  flex: 1;
+}
+
+.probe-bar__bands,
+.probe-bar__nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.probe-bar__band,
+.probe-bar__nav .cc-btn {
+  width: auto;
+  padding: 5px 8px;
+  font-size: 10px;
+}
+
+.probe-bar__reason {
+  width: 100%;
+  resize: vertical;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  color: var(--theme-text-primary);
+  background: var(--theme-panel-bg);
+  border: 1px solid var(--theme-panel-border);
+  border-radius: var(--radius);
+  padding: 4px 6px;
+}

@@ -8,6 +8,7 @@ import { ReplayBrowser } from './ReplayBrowser'
 import { ControlCenter } from './ControlCenter'
 import { PerfOverlay } from './PerfOverlay'
 import { ReplayController } from './ReplayController'
+import { ProbeBar } from './ProbeBar'
 import { HudView } from './HudView'
 import { MenuScreen, type MenuActions } from './MenuScreen'
 import { ControlsPanel } from './ControlsPanel'
@@ -47,6 +48,8 @@ export class UIManager {
   readonly replayBrowser: ReplayBrowser
   readonly controlCenter: ControlCenter
   readonly perfOverlay: PerfOverlay
+  /** Human-opening probe session bar (hidden unless a probe run is active). */
+  readonly probeBar: ProbeBar
 
   /** Callback for the Take Over button (set by Game). */
   onSpectateTakeover: (() => void) | null = null
@@ -136,6 +139,11 @@ export class UIManager {
       <span>Alt+S</span> <span data-i18n="footer.save">Save</span> &nbsp;·&nbsp;
       <span>Alt+&lt; Alt+&gt;</span> <span data-i18n="footer.speed">Speed</span>
     `
+
+    // Probe session bar (human-opening-probe.plan) — hidden until a probe run
+    // is active. HTML/CSS only: the canvas stays playfield-only (AGENTS §2.5).
+    this.probeBar = new ProbeBar()
+    this.root.appendChild(this.probeBar.el)
 
     // Performance Observatory (Alt+D) — fixed-position dev overlay (read-only).
     this.perfOverlay = new PerfOverlay()
@@ -334,6 +342,12 @@ export class UIManager {
     ) {
       screen = 'playing'
     }
+    // A FINISHED probe run parks the world in 'paused' (ProbeController
+    // .finishRun) — a lifecycle parking spot, not a user pause. Keep the
+    // battlefield visible and never surface the PAUSED overlay/badge: the
+    // session bar owns the end-of-run UI, and a mid-run pause still shows
+    // normally (the run only parks once its outcome is recorded).
+    if (this.probeBar.isParked) screen = 'playing'
     this.showScreen(screen)
 
     // Take Over entry point lives on the HUD for BOTH 督战 (spectate) and

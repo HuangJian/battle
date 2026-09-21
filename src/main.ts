@@ -17,7 +17,14 @@ if (!app) throw new Error('#app element not found')
 
 // Create game — PresentationLayer builds the HTML structure inside #app
 const game = new Game(app)
-game.start()
+const started = game.start()
+
+// Human-opening probe (human-opening-probe.plan): `?probe=<course>&game=<n>`
+// boots a session run once the game has started. A launch configuration like
+// `?fireLineDetour=1` above — never gameplay state, never persisted.
+if (bootQuery.has('probe')) {
+  void started.then(() => game.startProbeFromQuery(bootQuery))
+}
 
 // Handle visibility — pause live gameplay when tab is hidden.
 // Skip during replay playback: PlaybackController manages its own pause state
