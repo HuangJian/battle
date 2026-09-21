@@ -121,7 +121,10 @@ def _kickstart_startup_check(args: Any, start_it: int) -> float:
     """BC 缰绳重启自检（纯逻辑，可单测；IO 仅读存在性 + 写一行日志）。
 
     ① bc 文件启动期即查（换机器漏同步权重 ≠ 静默裸奔；失败指到 in-use 备份）；
-    ② 返回并落日志 kk(start_it)（衰减按 run 原点续算，重启不再回满额）。
+    ② 返回并落日志 kk(start_it)（衰减按 run 原点续算，重启不再回满额）；
+    ③ §5.1：响亮报出**初值来源**（课程 `kickstart_init` 显式 / 缺省）——拿缺省大值
+       复活正是 C 事故的形状（kk=1 连烧 30 轮），这时该被拦下来问一句；
+    ④ §5.3：开腿前的**起点-基线对照行**（本腿起点的评估读数 vs 基线读数，读账本）。
     kickstart 未启用时返回 0.0 且零副作用。
     """
     if not bool(getattr(args, "kickstart_ref", False)):
@@ -133,11 +136,70 @@ def _kickstart_startup_check(args: Any, start_it: int) -> float:
             "从 nn-training/weights/in-use/ 常备备份恢复（§379），禁裸奔启动"
         )
     kk0 = kickstart_coef(args, start_it)
+    course = getattr(args, "course_obj", None)
+    explicit = course is not None and "kickstart_init" in getattr(course, "model_fields_set", set())
+    src = (
+        f"课程 kickstart_init={getattr(course, 'kickstart_init', None)}"
+        if explicit
+        else f"缺省（rl-config/argparse kickstart_kl={getattr(args, 'kickstart_kl', 0.0)}）"
+    )
     log(
         f"[run_rl] kickstart: ref={bc_path} "
-        f"kk(start_it={start_it})={kk0:.6g}（run 原点衰减，resume 不复位）"
+        f"kk(start_it={start_it})={kk0:.6g}（run 原点衰减，resume 不复位；初值来源：{src}）"
     )
+    if not explicit and kk0 >= KICKSTART_DEFAULT_WARN:
+        # 不断言、不断向后兼容：只是把「这条腿拿的是缺省大值」说出来。
+        log(
+            f"[run_rl] WARNING kickstart 初值未在课程里声明，用的是缺省 kk={kk0:.6g}"
+            f"（≥{KICKSTART_DEFAULT_WARN}）——从已收敛的权重复活时，满额锚会把起点洗回去"
+            "（C 事故：it1 kl=0.90 连烧 30 轮）。请在课程里显式写 kickstart_init（或调小它）"
+        )
+    _kickstart_baseline_row(args)
     return kk0
+
+
+#: 缺省初值大到该被警告的阀值（§5.1）。0.5 = 一半的锚权就已经能把更新压向 ref。
+KICKSTART_DEFAULT_WARN = 0.5
+
+
+def _kickstart_baseline_row(args: Any) -> None:
+    """§5.3 开腿前对照行：本腿起点（账本里最近的评估读数）vs 基线（it0 行）——只读、只打印。
+
+    为什么放在启动期而不是控制台：执行面才有 args/_jsonl_path，而一行「起点 35.5% vs
+    基线 35.0%（差 0.5pp）配 kk=1」正是 C 事故里**该被拦下来问一句**的那个事实
+    （差在噪声带里还配满额锚 = 无论如何都会先变差）。控制台要展示它得等下一轮开发，
+    而训练侧现在就能说——日志是它现成的展示面。读不到就静默（不阻断启动）。
+    """
+    traj = str(getattr(args, "traj", "") or "")
+    if not traj:
+        return
+    try:
+        from rl.gate_check import read_trend_rows
+        from rl.kickstart_burn import baseline_reading
+
+        # 与 `_gate` / 干烧熔断同一个读者与同一个文件（per-tick 评估行在 eval_log.jsonl）。
+        rows = read_trend_rows(Path(traj) / "eval_log.jsonl", include_baseline=True)
+        base = baseline_reading(rows)
+        last: float | None = None
+        for r in rows:
+            if isinstance(r, dict):
+                it = r.get("iter")
+                v = r.get("winRate")
+                if isinstance(it, int) and it > 0 and isinstance(v, (int, float)):
+                    last = float(v)
+        if base is None:
+            log("[run_rl] kickstart burn 基线：账本里无 it0 行（本腿还没跑过 bc 基线评估）")
+            return
+        if last is None:
+            log(f"[run_rl] kickstart burn 基线：{base * 100:.1f}%（起点对照行：账本无历史评估点）")
+            return
+        gap = (last - base) * 100
+        log(
+            f"[run_rl] kickstart burn 起点-基线对照：起点 {last * 100:.1f}% vs 基线 "
+            f"{base * 100:.1f}%（差 {gap:+.1f}pp）——差在噪声带里又配大 kk 就该先问一句"
+        )
+    except Exception as e:  # 对照行是观测，永不得阻断启动
+        log(f"[run_rl] WARN kickstart burn 对照行生成失败（{type(e).__name__}: {e}）")
 
 
 def should_park_on_done(args, smoke_void: bool) -> bool:

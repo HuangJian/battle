@@ -4,6 +4,43 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §120 教训：缰绳初值显式化 + 干烧熔断（accident.plan §5，2026-09-21）
+
+**事故**：C 双臂从收敛权重（it175）以 `kk(1)=1` 满 kickstart 复活，锚主导更新连烧 30 轮
+（it1 kl=0.90），两臂从 ~34 洗回 ~50；锚释放后平摆、又跑 140 轮没爬出来 ⇒ 两臂 ×12h
+只换来「无结论」。**过程熔断全程没响**（kl/ent 都正常）——坏的是**结果**。
+
+**① 初值显式化（四条管道，一条不通就静默失效，`ent_break` 前科）**：
+
+| 管道 | 落地 |
+|---|---|
+| 课程键 → args | `CourseConfig.kickstart_init` + `flat_overrides` **异名**映射 → `kickstart_kl` |
+| 热加载分类 | 进 `RESTART_ONLY_FIELDS`（与 `kickstart_ref` 同类）+ 新增 `RESTART_ONLY_ALIASES` 修异名字段的**假变更行** |
+| 语料身份 | **不进** `corpus_identity_fp`（ref/优化器语义 ≠「一个样本是什么」，进去全体课程指纹漂移） |
+| 公式 | 接 `args.kickstart_kl` ⇒ 仍是 `run_rl.update_kwargs` **唯一**一处衰减源，`coef_active` 精确归零链一字未动；`kk(it)=init×decay^(it-1)`（run 原点） |
+
+自洽拒启：声明 `kickstart_init>0` 却没开 `kickstart_ref` ⇒ 启动期 `SystemExit`（否则那个数被静默丢弃）。
+启动自检报**初值来源**（课程显式 / 缺省），缺省大值（≥0.5）warning——C 事故正是“拿缺省 kk=1 复活”。
+
+**② 干烧熔断落执行面**（新模块 `rl/kickstart_burn.py`，纯函数）：基线**不靠人填** =
+`eval_log.jsonl` 的 **it0 行**（课程 bc 权重的干净评估 = 缰绳锚定的同一份权重）；连续
+`points`（3）个评估点低于基线 `margin_pp`（5pp）⇒ 停腿告警「疑似回锚/塌陷」。阈值走执行面
+`courses.<课>.kickstart_burn`（课程 gates 块仍为空——阶梯课程不配 gates 是 I2 铁律）。
+
+- **判据同源**：给 `gate_check.read_trend_rows` 加 `include_baseline`（it0 默认仍被滤），
+  与 `_gate` 共用同一读者/同一文件；干烧计数落 `kickstart_burn` 事件 ⇒ 重启可回放。
+- **停腿而不只告警**：本地停腿 + ABORT 判决 + 按课程下发云端 halt——停腿的意义就是停止烧钱，
+  本地停了云机接着领活 = 白停。
+- **状态转移才落账**（同 `_stop_loss`）：streak 变才写，0→0 不写（否则每轮一行淹账本）。
+- 读数缺失的行（0 局的轮）**既不计数也不清零**：当 0 会误停腿，清零会打断真趋势。
+
+**验收（盘上）**：`tests/test_kickstart_plan.py`（15：四管道逐条 / 公式三点 / 缺席逐字节不变 /
+自洽拒启 / CLI 冲突仍被拦 / 基础线缺失不判 / 门槛边界 / 反弹清零 / 缺失读数 / 执行面阈值覆盖 /
+停腿+账本回放 / 云端达令按课程 / 缰绳关着零行为 / 计数不重复写）；nn 门禁全绿 **1955 passed**。
+未做（有意）：§5.3 的**控制台开课回执**（需 dashboard 侧开发；训练侧日志先行）。
+
+---
+
 ## §119 教训：毒包熔断 + worker 崩溃响亮回传 + claim 可观测 + 发布端自检（accident.plan §4.1/4.2/4.3/4.5/4.6，2026-09-21）
 
 **背景**：C-0 it58（job `43a4eb01cf9fe35c`）的 payload 被 hub served **约 40 次**（每 5 分钟

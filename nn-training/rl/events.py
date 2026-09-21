@@ -49,6 +49,37 @@ def write_stop_loss(jsonl_path: Path, it: int, streak: int, delta: float | None 
     )
 
 
+def write_kickstart_burn(
+    jsonl_path: Path,
+    it: int,
+    streak: int,
+    baseline: float | None = None,
+    last: float | None = None,
+    margin_pp: float = 0.0,
+) -> dict:
+    """kickstart_burn 事件：干烧熔断的**计数与判定依据**落账（§5.2，2026-09-21）。
+
+    为什么必须落账：与 `stop_loss` 同一个道理——「连续 N 点低于基线」若只活在内存里，
+    重启即归零，昨天的干烧今天又从 1 数起（正好是事故里那种一夜两条腿的形态）。
+    带上 `baseline/last/margin_pp` 是为了让账本**自洽可回放**：拿同一批 `eval_summary`
+    行重算，必须得到同一份 `streak`（`rl/kickstart_burn.py` 是唯一判据，这里只搬运数字）。
+
+    写入时机 = 命中或计数变化（每轮都写会把账本淹掉）。
+    """
+    return write_event(
+        jsonl_path,
+        {
+            "event": "kickstart_burn",
+            "iter": it,
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "streak": streak,
+            "baseline": baseline,
+            "last": last,
+            "margin_pp": margin_pp,
+        },
+    )
+
+
 def log_iter_error(jsonl_path: Path, it: int, err: str) -> dict | None:
     """迭代失败落 training_log.jsonl（iter_error 事件）。
 

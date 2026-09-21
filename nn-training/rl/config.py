@@ -839,6 +839,17 @@ class CourseConfig(BaseModel):
     # BC-anchored kickstart（§363）：True = per-tick 缰绳开（ref 取课程 bc 冻结
     # 快照）；默认 False 即历史行为。warmup_iters 课程 plumbing 见下（CLI 早有）。
     kickstart_ref: bool = False
+    #: 缰绳的**显式初值** `kk(1)`（plan/accident.plan.md §5.1，2026-09-21）。
+    #: 公式写死 `kk(it) = kickstart_init × decay^(it-1)`（run 原点，`loop_steps.kickstart_coef`）
+    #: ——**不**嗅探 `*.it<N>.*` 文件名判 continuation（脆弱，且违反「判据要有稳定锚点」）。
+    #: 缺席 = 沿用 rl-config/argparse 的 `kickstart_kl`（现状行为逐字节不变）。
+    #: 为什么要有这个键：C 事故那条腿没声明初值，拿到的就是缺省 kk=1 —— 满额复活、
+    #: 锚主导更新连烧 30 轮（it1 kl=0.90）。显式声明既让意图可读，也让启动自检
+    #: 能区分「课程写的」与「吃缺省」（缺省大值 = 响亮 warning）。
+    #: ⚠ 经 `flat_overrides` 映射到 argparse dest `kickstart_kl`（异名）；
+    #: 它**不进** `corpus_identity_fp`（ref/优化器语义 ≠ 「一个样本是什么」，进去会让
+    #: 全体课程指纹漂移）——见 `tests/test_kickstart_plan.py` 的断言。
+    kickstart_init: float | None = None
     gamma: float = 0.995
     lam: float = 0.95
     clip_eps: float | None = None
@@ -1010,6 +1021,8 @@ class CourseConfig(BaseModel):
             "mb": "mb",
             "normalize_ret": "normalize_ret",
             "kickstart_ref": "kickstart_ref",
+            # 缰绳初值 kk(1)：课程键 → argparse dest（异名；漏映射 = 静默失效，ent_break 前科）
+            "kickstart_init": "kickstart_kl",
             "warmup_iters": "warmup_iters",
             "gamma": "gamma",
             "lam": "lam",
@@ -1219,6 +1232,14 @@ def apply_course(args, course: CourseConfig) -> None:
         setattr(args, k, v)
     args.course_obj = course
     args.course_name = course.name
+    # 缰绳初值 vs 缰绳开关自洽（§5.1）：声明了初值却没开缰绳 = 配置自相矛盾
+    # （那个数会被静默丢弃；反过来人也以为自己在勒缰绳）。启动期响亮拒，不静默带过。
+    _ki = course.kickstart_init
+    if _ki is not None and float(_ki) > 0 and not bool(getattr(args, "kickstart_ref", False)):
+        raise SystemExit(
+            f"[course] {course.name}: kickstart_init={_ki} 但 kickstart_ref 未开 —— "
+            "缰绳没开，初值无消费方（要么两个都写，要么 kickstart_init 写 0）"
+        )
     # 进程级课程身份导出（v5 多课程，2026-09-18）：出站的权重上报/任务下发都带它，
     # agent 侧按 (course, kind) 分桶。住在这里是因为这是训练进程**唯一**知道课程名的
     # 地方（args.course_name 刚被挂上），而出口散在 6 个文件的不同闭包里。

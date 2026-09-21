@@ -102,6 +102,8 @@ class RoundSteps:
     _check_quota_incident: Any
     _breaker: Any
     _stop_loss: Any
+    # §5 干烧熔断（结果面，loop_guards.TrainingGuards）
+    _kickstart_burn: Any
     _gate: Any
     _budget_hard_cut: Any
     _consec_fail: int
@@ -401,6 +403,9 @@ class RoundSteps:
 
         ① F4 熔断（`agg is None` 的流式轮不计连击也不告警——本来就没有新的策略更新）；
         ② 止损（用 `ctx.eval_rec`）；
+        ②′ §5 干烧熔断（结果面：腿的读数连着低在起点以下；只在缰绳开着时守。
+           放在止损之后、课程门之前：它比课程门急（烧的是一整天算力），
+           又比过程熔断宽（要看几个评估点）。
         ③ M1 第四守卫课程结束门（无 gates 块的课程恒 False，零行为变化）；
         ④ G5 每轮预算兜底（`max_hours` 只在评估轮经门被查，非评估轮会过冲——到顶立即停车）。
         """
@@ -408,6 +413,8 @@ class RoundSteps:
         if self._agg is not None and self._breaker(it):
             return finish(ROUND_STOP)
         if self._stop_loss(it, ctx.eval_rec):
+            return finish(ROUND_STOP)
+        if self._kickstart_burn(it, ctx.dist_cfg):
             return finish(ROUND_STOP)
         if self._gate(it):
             return finish(ROUND_STOP)

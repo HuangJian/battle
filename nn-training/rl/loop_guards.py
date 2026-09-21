@@ -32,7 +32,13 @@ from rl.breaker import (
     KL_WARN,
     breaker_update,
 )
-from rl.events import write_circuit_break, write_gate_verdict, write_stop_loss
+from rl.config import course_key_of
+from rl.events import (
+    write_circuit_break,
+    write_gate_verdict,
+    write_kickstart_burn,
+    write_stop_loss,
+)
 from rl.gate_check import (
     BudgetInfo,
     count_iteration_events,
@@ -42,6 +48,7 @@ from rl.gate_check import (
     load_override,
     read_trend_rows,
 )
+from rl.kickstart_burn import burn_overrides, burn_verdict
 from rl.log import log
 from rl.stop_loss import eval_sigma, stop_loss_hit
 from rl.workdir_sweep import sweep_failed_wave_dirs
@@ -229,6 +236,76 @@ class TrainingGuards:
             log(f"STOP-LOSS CONFIRMED: {stop_reason}")
             return True
         return False
+
+    def _kickstart_burn(self, it: int, dist_cfg: dict | None) -> bool:
+        """§5 干烧熔断（结果面，plan/accident.plan.md §5.2）：返 True = 停腿告警。
+
+        只在缰绳开着（`kickstart_ref`）时守——干烧是「锚主导更新把起点洗回去」的形态，
+        没锚就没这回事。基线不靠人填：`eval_log.jsonl` 的 it0 行（课程 bc 权重的干净评估，
+        即缰绳锚定的同一份权重）；连续 `points` 个评估点低于基线 `margin_pp` ⇒ 停腿。
+
+        与 F4 过程熔断的分工：那个看更新健康度（kl/ent），这个看**结果有没有退回去**。
+        停腿而不只是告警：C 事故那里两臂 × 12h 全是白烧，读数是 `it1` 就低的；单点低是
+        噪声，连着三个点低是趋势（阈值走执行面 `courses.<课>.kickstart_burn`，缺席用常量）。
+
+        账本行是唯一数据源（`eval_log.jsonl` + `read_trend_rows(..., include_baseline=True)`）
+        ⇒ 重启可回放、控制台可复算；判据本体在 `rl/kickstart_burn.py`，此处只做
+        「读 → 判 → 落账/日志」。
+        """
+        args = self.args
+        if not bool(getattr(args, "kickstart_ref", False)):
+            return False
+        # 读 **eval_log.jsonl**（per-tick 的评估行落这里；`training_log.jsonl` 是训练事件册
+        # ——与 `_gate` 同一个源文件、同一个读者，不另开第二个读法）。
+        try:
+            rows = read_trend_rows(
+                getattr(self, "_traj_root", Path(str(self._jsonl_path)).parent) / "eval_log.jsonl",
+                include_baseline=True,
+            )
+        except Exception as e:  # 读账本失败不得阻断训练（同 _gate 的兜底风格）
+            log(f"[run_rl] WARN kickstart-burn 读账本失败（{type(e).__name__}: {e}）——本轮不判")
+            return False
+        margin_pp, points = burn_overrides(dist_cfg, course_key_of(args))
+        v = burn_verdict(rows, points=points, margin_pp=margin_pp)
+        if v.baseline is None:
+            return False
+        prev = int(getattr(self, "_burn_streak", 0) or 0)
+        if v.streak != prev:
+            # **状态转移才落账**（同 `_stop_loss` 的口径）：每轮都写会把账本淹掉，
+            # 而 0 → 0 无需记录。日志也只在计数上升时说，别拿同一句话刷屏。
+            if v.streak:
+                log(
+                    f"[run_rl] WARN kickstart-burn it{it}: 连续 {v.streak}/{points} 个评估点"
+                    f"低于基线 {margin_pp:.1f}pp"
+                    f"（基线 {v.baseline * 100:.1f}%，最新 {(v.last or 0.0) * 100:.1f}%）"
+                    "——再低就停腿（疑似回锚）"
+                )
+            self._ledger_apply(
+                write_kickstart_burn(self._jsonl_path, it, v.streak, v.baseline, v.last, margin_pp)
+            )
+        self._burn_streak = v.streak
+        if not v.tripped:
+            return False
+        log(f"[run_rl] CRITICAL KICKSTART-BURN it{it}: {v.reason}")
+        log(
+            f"[run_rl] training PAUSED; weights kept at {args.out}; "
+            "疑似回锚/塌陷——检查起点（bc 权重判决段读数）与 kk 初值是否匹配"
+        )
+        # 本地停腿（本轮即终点）之外，顺手把远端云机的达令也发下去（按课程，
+        # 共享 hub 不连坐其它课；无 hub/提示模式自动短路）——停腿的意义就是**停止烧钱**，
+        # 本地停了、云机接着领活就白停了。
+        self._sync_cloud_halt(it, "ABORT")
+        # kickstart_burn 事件已在上面「状态转移」处写过（不重复写）：这里只补判决。
+        self._ledger_apply(
+            write_gate_verdict(
+                self._jsonl_path,
+                it,
+                "ABORT",
+                f"kickstart-burn: {v.reason}",
+                decider="loop",
+            )
+        )
+        return True
 
     def _gate(self, it: int) -> bool:
         """第四守卫：课程结束门（M1，plan/course-exit-and-shutdown.md §4）。

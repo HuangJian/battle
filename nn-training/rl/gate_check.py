@@ -356,8 +356,15 @@ def normalize_rows(
     return tuple(rows)
 
 
-def read_trend_rows(jsonl_path: Path, course_fp: str = "", limit: int = 0) -> tuple[dict, ...]:
+def read_trend_rows(
+    jsonl_path: Path, course_fp: str = "", limit: int = 0, include_baseline: bool = False
+) -> tuple[dict, ...]:
     """读 `eval_log.jsonl`（per-tick 课程）里的 eval_summary 行；文件缺失返回 ()。
+
+    `include_baseline=True` 时**连 it0 基线行一起返回**（它们默认被滤掉，见下）——
+    §5 的干烧熔断需要「本腿起点」（it0 = 课程 bc 权重的干净评估）当基线，而判据必须
+    与训练进展同源：所以在这里开一扇门，而不是在别处再写一个读文件的循环（同源判据、
+    唯一入口）。
 
     **it0 基线行（`iter <= 0`）不进趋势**：那一行是课程 bc 权重的干净评估（主循环在
     首次 rollout 收官后补派，见 `loop_core._maybe_dispatch_baseline_eval`），它是监控/
@@ -380,7 +387,7 @@ def read_trend_rows(jsonl_path: Path, course_fp: str = "", limit: int = 0) -> tu
                 if not isinstance(r, dict) or r.get("event") != "eval_summary":
                     continue
                 it = r.get("iter")
-                if isinstance(it, int) and it <= 0:
+                if isinstance(it, int) and it <= 0 and not include_baseline:
                     continue  # it0 基线（bc 权重）：只作监控/配对参照，不进判据
                 fp = str(r.get("course_fp") or "")
                 if course_fp and fp and fp != course_fp:
