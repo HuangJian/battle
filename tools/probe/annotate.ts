@@ -38,11 +38,11 @@ import { STAGES } from '../../src/config/stages'
 import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { readStoreZip } from '../../src/probe/zip'
+import { parseProbeManifestText, type ProbeManifest } from '../../src/probe/manifest'
+import type { GameEvent } from '../../src/types'
 
 /** Read world.state without letting TS narrow it to the last assigned literal. */
 const stateOf = (w: World) => w.state
-import { parseProbeManifestText, type ProbeManifest } from '../../src/probe/manifest'
-import type { GameEvent } from '../../src/types'
 
 const DEFAULT_MANIFEST = 'public/probe/x20-opening.json'
 const OPENING_TICKS = 300
