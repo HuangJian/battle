@@ -791,9 +791,9 @@ export function runEvalOne(
   }
 }
 
-function main(): void {
+/** 单局主入口（argv 显式传入：serve 模式下每局从 stdin 取一份；也供单测在进程内对拍）。 */
+export function main(argv: string[]): void {
   const t0 = Date.now()
-  const argv = process.argv.slice(2)
   let outDir = 'tmp/eval-out'
   let difficulty = 'hard'
   let stageIdx = -1
@@ -945,4 +945,53 @@ function main(): void {
   )
 }
 
-if (import.meta.main) main()
+/**
+ * --serve：长驻模式（配合 sampler-agent 的 persist worker）。
+ *
+ * 为什么 eval 也要：agent 侧只有 `export-rl-rollout.ts` 走长驻 worker，eval/BC 每局都 `spawn`
+ * 一个新 bun —— 在这台手机上（a95/Termux）实测那一下要 **~2.5s**（mac 0.03s），而一局游戏本身
+ * 才 ~1s；更贵的是它把 agent 的事件循环占满（任务中 `/v1/status` 首轮应答被拖 2.59s），
+ * 并发吞吐被吃。协议与 export-rl-rollout 的 serve 完全一致：stdin 每行 = 一个任务的 argv
+ * （JSON 数组），跑完打印 `__SERVE_OK__`（失败 `__SERVE_ERR__ <msg>`）后继续等下一行；
+ * 每局仍走与一次性调用完全相同的 main 路径 ⇒ 产物逐字节一致。
+ */
+function serve(): void {
+  let buf = ''
+  const handle = (line: string): void => {
+    const t = line.trim()
+    if (!t) return
+    let argv: string[]
+    try {
+      argv = JSON.parse(t) as string[]
+    } catch {
+      process.stdout.write('__SERVE_ERR__ bad-json\n')
+      return
+    }
+    try {
+      main(argv)
+      process.stdout.write('__SERVE_OK__\n')
+    } catch (e) {
+      process.stdout.write(`__SERVE_ERR__ ${e instanceof Error ? e.message : String(e)}\n`)
+    }
+  }
+  process.stdin.setEncoding('utf8')
+  process.stdin.on('data', (c: string) => {
+    buf += c
+    let nl = buf.indexOf('\n')
+    while (nl >= 0) {
+      handle(buf.slice(0, nl))
+      buf = buf.slice(nl + 1)
+      nl = buf.indexOf('\n')
+    }
+  })
+  process.stdin.on('end', () => {
+    if (buf.trim()) handle(buf)
+    process.exit(0)
+  })
+  process.stdout.write('__SERVE_READY__\n')
+}
+
+if (import.meta.main) {
+  if (process.argv.includes('--serve')) serve()
+  else main(process.argv.slice(2))
+}

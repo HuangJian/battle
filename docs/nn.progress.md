@@ -4,6 +4,69 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §126 真机验收：mac(darwin-arm64) / a95(linux-arm64·Termux) 上 native 全绿（plan/rollout-eval-opt.plan.md T2/T3/T4，2026-09-21）
+
+**起因（用户指令）**：「mac 和 a95 节点都已经更新到最新代码，请做一轮真机 rollout/eval 测试」——
+补上 T2 DoD 唯一剩项（本机无法代跑的那一条）。
+
+**方法**（生产同源，不绕协议）：读 `rl-config.json` 的 mac/a95 → `dist_common.node_ping`（含
+`check_code_hash`）→ `post_weights`（rollout/eval 两个 kind）→ `fetch_task` 真派任务（
+per-tick rollout `kind=rollout` + 干净评估 `mode=eval,kind=eval`）→ 解容器读 manifest。
+环境与课程逐字同源：`x20-clutch`（stage 2000、stageJson 577B、lives 1、level 0、hard、12900 ticks），
+权重 = `it176`（wver `b414e7d7…`），3 个 seed（4242/4243/4244）。临时探针在 `tmp/probe-realnode-native.py`。
+
+**结果**：
+
+| 项 | mac (192.168.0.88) | a95 (192.168.0.95) |
+|---|---|---|
+| codeHash | `e96d12b8…` == 训练机 | 同 |
+| agent / 引擎 | `6ed7f11` / bun | 同 |
+| rollout ×3 · eval ×3 | **`feat=native` 6/6** | **`feat=native` 6/6** |
+| `validate_result` / `validate_eval_result` | 全 ok | 全 ok（无 409/超时/校验拒收） |
+| 服务时长（manifest `elapsedSec`） | rollout 0.3–0.6s · eval 0.3–1.1s | rollout 0.5–1.2s · eval 0.9–2.4s（手机 CPU，量级合理） |
+
+- **跨平台读数一致（最硬的一条）**：以本机 win32-x64 native 为基准，mac(darwin-arm64) 与
+a95(linux-arm64) 在 3 seed ×（rollout, eval）= **12 组上 outcome/ticks/score/kills/enemyHits 逐值相同**
+（例 s4242 rollout：`lives_exhausted` / 1062 ticks / score `0.23758612136100288` / kills 1 / enemyHits 6，三平台同）。
+`codeHash` 相等已保证三边拿的是**同一份 prebuilt 库字节**（`src/nn/**` 在 codeHash 集内）⇒ 这是
+「跨平台逐位一致」在真机上的证明，而不是单机声明。
+- **本机 A/B 对照臂**（`tmp/probe-local-ab.py`，win32-x64，同 stage/seed/权重，`NN_NATIVE=0` 关 native）：
+native 与 wasm **除 `feat` 外逐字段相同**，native 快 **1.38–1.75×（rollout）/ 1.54–1.67×（eval）**。
+
+**顺带发现（已查清，与 native 正交）**：a95 上 eval 局的客户端往返明显大于 manifest 服务时长
+（3.4–7.0s vs 0.8–1.1s）。两个实验定位到**两个独立问题**（探针 `tmp/probe-a95-eval-root-cause.py`、
+`tmp/probe-a95-spawn-timeline.py`）：
+
+**① 真因 = 每局一个新子进程的手机冷启动（~2.5s），且它会拖慢同节点其它请求。** 证据链：
+· eval / bc（都不在 `PERSIST_SERVE_ENTRIES` ⇒ 每局 `spawn` 一个新 bun）的 `提交→202` = 2.5s / 3.0s；
+  同节点 rollout（走长驻 persist worker）= 0.07s；mac 的同一个 eval = 0.03s（同一段代码 ⇒ 差异只可能在
+  `spawn()` 这一处）。
+· 该 2.5s **不是异步的**：任务进行中每 0.1s 打一次 `/v1/status`，第一次轮询的**应答被拖到 2.59s**，
+  随后的轮询都在 0.02–0.45s 内回 ⇒ 事件循环在那段被占满（子进程冷启动把手机 CPU 吃满/占着调度）。
+  实践含义：**手机上每局 eval 都会把 agent 卡死 ~2.5s**，并发吞吐被吃。
+· 量级对得上：同局生命周期 3.2s − 子进程内口径 0.7s = 2.5s（见②的两份读数）。
+
+**② 为什么它看起来像「接单前」且一直看不到真相：同步路径回给客户端的是**未盖章**的容器（真 bug）。**
+`tools/agent/sampler-agent.ts:1575-1582`：`lruPut(key, stampServiceSec(key, buf))` 把**盖章副本**放进缓存，
+但紧接着 `controller.enqueue(new Uint8Array(buf))` 发的是**原 buf**（子进程内口径）。⇒ 客户端第一次拿到
+0.7s，同一局再请求一次（结果缓存命中，走 `cached.buf`=已盖章）拿到 **3.2s**：同一局两个 elapsedSec。
+影响：生产 `fetch_task` 默认走同步路径 ⇒ **节点上报的「服务耗时」系统性漏掉子进程冷启动**（手机上漏 2.5s/局），
+控制台的节点耗时会被低估；异步路径（1191 行）无此问题。
+
+**两个修法已落地（2026-09-21，commit 见下）**：
+· ② 结构上修：新增唯一出口 `serveResult(key, buf)`（盖章一次），同步/异步两处都只发它的返回值
+  —— 「盖章值 == 对外值」由代码结构保证。判例 `tests/agent/result-stamp.test.ts`（纯函数，~2ms；含一条
+  结构钉子：源码里不得再出现 `enqueue(new Uint8Array(buf))`）。
+· ① `export-eval-game.ts` 加 `--serve`（协议与 `export-rl-rollout` 一字不差）+ 入 `PERSIST_SERVE_ENTRIES`
+  ⇒ eval 走长驻 worker，手机上每局省下 ~2.5s 与那次事件循环卡顿。判例
+  `tests/export-eval-game-serve.test.ts`（握手 / 与一次性调用等价（除 `elapsedSec`）/ 坏行不致命 / 不串局；
+  自带 ~0.3s，另一次 agent over-HTTP 的端到端判例实测在 `bun test` 里起不来（30s 超时）已弃用）。
+
+**未做**：云机（`ts_code.zip` 通道）仍只有 real-bun 哨兵 + 打包门禁的间接证据，没在真云机上确认
+一行 `feat=native`——那条通道的验收要等下一次离线训练任务时看 shard 的 `feat`。
+
+---
+
 ## §125 prebuilt 交叉编译分发：节点不再需要 clang（plan/rollout-eval-opt.plan.md §2.5/T2，2026-09-21）
 
 **起因（用户提问）**：「rollout 节点机器上可能没有 clang，能本机编译出所有平台 windows/macos/linux/

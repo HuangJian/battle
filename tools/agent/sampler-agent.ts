@@ -760,7 +760,16 @@ export function unpackContainer(buf: Buffer): {
 // 复用到同一进程（export-rl-rollout.ts --serve：stdin 一行一局，`__SERVE_OK__` /
 // `__SERVE_ERR__` 标记结果；per-game shard 与一次性路径逐字节一致，已实测）。
 // 只对 per-tick rollout 生效；worker 异常/超时 → 杀掉并**本局回退一次性 spawn**（不丢局）。
-const PERSIST_SERVE_ENTRIES = new Set(['tools/sim/export-rl-rollout.ts'])
+export const PERSIST_SERVE_ENTRIES = new Set([
+  'tools/sim/export-rl-rollout.ts',
+  // eval 也入池（2026-09-21 真机归因）：不在池里的条目每局都要 `spawn` 一个新 bun ——
+  // a95/Termux 实测那一下 ~2.5s（同机 rollout 走池 0.07s、mac eval 0.03s），且事件循环
+  // 被占满（`/v1/status` 首轮应答拖到 2.59s）⇒ 慢节点上「每局 eval 卡 agent 2.5s」。
+  // 该导出器已支持 `--serve`（协议同 rollout：stdin 一行一局，`__SERVE_OK__`/`__SERVE_ERR__`）。
+  // 代价（已知、可接受）：池上限仍是 `workers`，eval 进池后高峰可能占满池位 ⇒ 落单的 rollout
+  // 回落到一次性 spawn（只慢不错，与加池前的形态相同；一局 eval 通常比一局采样短）。
+  'tools/sim/export-eval-game.ts',
+])
 const PERSIST_TASK_TIMEOUT_MS = 600_000
 interface PoolWorker {
   child: ChildProcess
@@ -1098,12 +1107,17 @@ function jsonResponse(obj: unknown, status = 200, headers: Record<string, string
  * 被排除的冷启动）。实现 = 解包 BCV2 → 改写 manifest.elapsedSec → 重打包（~1MB
  * 容器 gunzip+gzip 十几 ms，相对整局可忽略）；解包失败不吞结果——容器原样返回
  * （保留旧口径）。纯游戏时长不再单列（shard 的 ticks 可间接推算）。 */
-function stampServiceSec(key: string, buf: Buffer): Buffer {
-  const startedAt = inflight.get(key)?.startedAt
-  if (!startedAt) return buf
+export function stampServiceSec(
+  key: string,
+  buf: Buffer,
+  /** 注入缝（单测）：缺省取 inflight 里的接单时刻。 */
+  startedAtMs: number | undefined = inflight.get(key)?.startedAt,
+  nowMs: number = Date.now(),
+): Buffer {
+  if (!startedAtMs) return buf
   try {
     const { manifest, entries } = unpackContainerV2(buf)
-    manifest.elapsedSec = +((Date.now() - startedAt) / 1000).toFixed(1)
+    manifest.elapsedSec = +((nowMs - startedAtMs) / 1000).toFixed(1)
     return buildPackV2(
       manifest,
       [...entries].map(([name, data]) => ({ name, data })),
@@ -1111,6 +1125,21 @@ function stampServiceSec(key: string, buf: Buffer): Buffer {
   } catch {
     return buf
   }
+}
+
+/**
+ * 结果容器的**唯一出口**：盖章一次，**同一个** buffer 既进缓存又发给客户端。
+ *
+ * 为什么要有这个函数（2026-09-21 真机归因，docs/nn.progress.md §126）：同步路径曾经
+ * `lruPut(key, stampServiceSec(key, buf))` 之后 `enqueue(new Uint8Array(buf))`——缓存里
+ * 是盖章的、发出去的是原件 ⇒ 客户端拿到的 elapsedSec 缺了子进程冷启动（a95 实测同一局
+ * 0.7s vs 真值 3.2s，只有第二次请求命中缓存才看到真值）。同步/异步两处都走这个出口，
+ * 「盖章值 == 对外值」由**代码结构**保证，不靠人记得改两遍。
+ */
+export function serveResult(key: string, buf: Buffer): Buffer {
+  const served = stampServiceSec(key, buf)
+  lruPut(key, served)
+  return served
 }
 
 // ---------------- HTTP handler ----------------
@@ -1188,7 +1217,7 @@ function beginTask(
     course,
   )
     .then((buf) => {
-      lruPut(key, stampServiceSec(key, buf))
+      serveResult(key, buf)
       gamesDoneTotal++
       gamesDoneByIter.set(iterId, (gamesDoneByIter.get(iterId) ?? 0) + 1)
     })
@@ -1572,11 +1601,13 @@ async function handle(req: Request): Promise<Response> {
         )
           .then((buf) => {
             if (hb) clearInterval(hb)
-            lruPut(key, stampServiceSec(key, buf))
+            // 盖章 = 唯一出口（2026-09-21 修）：此前存盖章副本、发原件，客户端拿到的
+            // elapsedSec 漏掉子进程冷启动（a95 实测 0.7s vs 真值 3.2s）。
+            const served = serveResult(key, buf)
             gamesDoneTotal++
             gamesDoneByIter.set(iterId, (gamesDoneByIter.get(iterId) ?? 0) + 1)
             try {
-              controller.enqueue(new Uint8Array(buf))
+              controller.enqueue(new Uint8Array(served))
               controller.close()
             } catch {
               /* client gone */
