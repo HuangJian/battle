@@ -92,7 +92,7 @@ export interface KitRow {
   reason: string
   attempts: number | null
   /** This band's contribution to the seed verdict (null = `retry` / unjudged). */
-  contribution: 'solvable' | 'unknown' | null
+  contribution: SeedVerdict | null
 }
 
 export interface KitFinding {
@@ -108,8 +108,8 @@ export interface KitReport {
   startedAt: string | null
   rows: KitRow[]
   findings: KitFinding[]
-  /** §0 aggregation over every judged band. */
-  seedVerdict: 'solvable' | 'unknown'
+  /** §0 aggregation over every judged band: 可动 / 不可解 / 未知. */
+  seedVerdict: SeedVerdict
   /** game 0 gate: judged `solvable` = pass, judged otherwise = fail, unjudged = unknown. */
   calibration: 'pass' | 'fail' | 'unknown'
   captured: number[]
@@ -370,7 +370,18 @@ const BAND_LABEL: Record<ProbeBand, string> = {
 }
 
 /** §0 aggregation targets (a band's `seedVerdict`, and the per-row contribution). */
-const SEED_LABEL: Record<SeedVerdict, string> = { solvable: '可动', unknown: '未知' }
+const SEED_LABEL: Record<SeedVerdict, string> = {
+  solvable: '可动',
+  unsolvable: '不可解',
+  unknown: '未知',
+}
+
+/** The conclusion line for each §0 outcome. */
+const SEED_VERDICT_LINE: Record<SeedVerdict, string> = {
+  solvable: '开局可动',
+  unsolvable: '人类判不可解（可被任一后续通关推翻）',
+  unknown: '仍未知（未读出「无路」；死亡本身不构成信息）',
+}
 
 /** The seven launch links, built with the same helper the in-game launcher uses. */
 export function gameLinks(manifest: ProbeManifest, base: string): string[] {
@@ -389,12 +400,19 @@ export function renderSheet(report: KitReport, manifest: ProbeManifest, base: st
   const out: string[] = []
   out.push(`# 开局可学性探针 —— 操作员表（${report.course}）`)
   out.push('')
-  out.push('协议：这是**存在性证明**，只能产出「开局可动 / 仍未知」；判「不可解」需要另立负向臂。')
+  out.push('协议：人类熟练玩家是关卡难度的唯一尺子 —— 每局的 band 就是结论，按一张表聚合。')
   out.push('1. verdict 的 band 由人类判读，不校验把数；`无解` 必须带理由（缺理由拒打包）。')
   out.push(
-    `2. **校准局 game ${CALIBRATION_GAME} 不通过 ⇒ 本次解读整体作废**，不要拿其余局去改训练侧。`,
+    '2. 判读口径：任一局「可解/略难」⇒ **可动**；否则任一局「无解+理由」⇒ **不可解**；' +
+      '其余（难/没判）⇒ **未知**（`再试一次` 不聚合）。',
   )
-  out.push('3. 判读口径：任一 seed 出「可解/略难」⇒ 可动；「难/无解」⇒ 未知（`再试一次` 不聚合）。')
+  out.push(
+    '3. 「不可解」是**判读不是证明**，天然可推翻：同一局后来的结论覆盖先前的，' +
+      '任何人后来打通了就当场划掉。',
+  )
+  out.push(
+    `4. **校准局 game ${CALIBRATION_GAME} 不通过 ⇒ 本次解读整体作废**，不要拿其余局去改训练侧。`,
+  )
   out.push('')
 
   out.push(`## 启动链接（dev server ${base}）`)
@@ -486,14 +504,11 @@ export function renderSheet(report: KitReport, manifest: ProbeManifest, base: st
             : '未判读'
       }`,
     )
-    out.push(
-      `- seed 聚合（§0 表）：**${
-        report.seedVerdict === 'solvable' ? '开局可动' : '仍未知（人类死亡不构成信息）'
-      }**`,
-    )
+    out.push(`- seed 聚合（§0 表）：**${SEED_VERDICT_LINE[report.seedVerdict]}**`)
     out.push('')
     out.push(
-      '> 「仍未知」不等于「不可解」——要否证需要负向臂（固定脚本 / 多操作员），本协议结构上做不到。',
+      '> 「不可解」是操作员读出「无路」的**判读**，不是穷举证明（60 帧动作空间搜不完，' +
+        '也不许拿 God AI/搜索当裁判）。它可推翻：任一后续通关直接划掉。',
     )
     out.push('')
   }

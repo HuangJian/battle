@@ -1,14 +1,26 @@
 // ================================================================
 // Human-opening probe — band → verdict aggregation
-// (human-opening-probe.plan v7 §0)
+// (human-opening-probe.plan v8 §0)
 //
-// The probe is an EXISTENCE PROOF, not a verdict: it can only ever conclude
-// "the opening is movable" (some seed turned out solvable) or "still unknown"
-// (human death carries no information). A negative arm would have to be a
-// separate protocol — see the plan §0.
+// The operator's per-game band IS the conclusion — skilled human play is the
+// repo's only difficulty yardstick (AGENTS §0.2), so nothing here second-guesses
+// it. ONE rule, ONE table:
 //
-// One aggregation rule, one table (plan §0). Same band vocabulary is used by
-// the session bar buttons and by `tools/probe/annotate.ts` output.
+//   any 「solvable/slight」    ⇒ solvable   (constructive: someone actually cleared it)
+//   else any 「unsolvable」    ⇒ unsolvable (the operator read "no path", reason recorded)
+//   else                       ⇒ unknown    (tough / not judged)
+//
+// The negative arm is therefore not a second protocol — it is the `unsolvable`
+// band the bar already collects, and this table is where it lands. It is a
+// JUDGEMENT, not a proof: it is refutable by construction (a later clear on the
+// same seed overwrites it — see `aggregateSeedVerdict`), because the 60 Hz action
+// space cannot be exhausted and using God AI / search as the referee is barred
+// ("the teacher is a flawed teacher, never a ceiling"). Read it as "a skilled
+// operator could not find a way", whose only job is to decide whether this seed
+// belongs in the training-side fix at all.
+//
+// Same band vocabulary is used by the session bar buttons, the offline kit's
+// table and the annotation output.
 //
 // Pure module: no DOM, no fs, no RNG.
 // ================================================================
@@ -16,7 +28,7 @@
 export const PROBE_BANDS = ['solvable', 'slight', 'tough', 'unsolvable', 'retry'] as const
 export type ProbeBand = (typeof PROBE_BANDS)[number]
 
-export type SeedVerdict = 'solvable' | 'unknown'
+export type SeedVerdict = 'solvable' | 'unsolvable' | 'unknown'
 
 export interface BandSpec {
   band: ProbeBand
@@ -45,7 +57,7 @@ export const BAND_TABLE: readonly BandSpec[] = [
     band: 'unsolvable',
     kills: '≤3',
     meaning: 'died inside ~1500t with a readable "no path" — reason required',
-    seedVerdict: 'unknown',
+    seedVerdict: 'unsolvable',
   },
   { band: 'retry', kills: '—', meaning: 'another attempt (not counted)', seedVerdict: null },
 ]
@@ -76,9 +88,22 @@ export function verdictOfBand(band: ProbeBand): SeedVerdict | null {
   return spec.seedVerdict
 }
 
-/** A seed is `solvable` iff at least one attempt aggregated to `solvable`. */
+/**
+ * §0 aggregation. Priority is `solvable` > `unsolvable` > `unknown`.
+ *
+ * A clear outranks a "no path" read on the same seed: finding an input sequence
+ * that survives is direct evidence one exists, while the negative read is a
+ * failure to find one — so a later clear WITHDRAWS the 不可解 label, and that is
+ * the whole falsifiability story of the negative arm.
+ */
 export function aggregateSeedVerdict(bands: readonly ProbeBand[]): SeedVerdict {
-  return bands.some((b) => verdictOfBand(b) === 'solvable') ? 'solvable' : 'unknown'
+  let sawUnsolvable = false
+  for (const band of bands) {
+    const verdict = verdictOfBand(band)
+    if (verdict === 'solvable') return 'solvable'
+    if (verdict === 'unsolvable') sawUnsolvable = true
+  }
+  return sawUnsolvable ? 'unsolvable' : 'unknown'
 }
 
 /** True for the one band that carries a mandatory free-text justification. */

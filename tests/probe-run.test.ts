@@ -289,8 +289,10 @@ describe('ProbeController — lifecycle', () => {
     // Then the protocol's own rule applies: unsolvable without a reason.
     expect(() => controller.submitVerdict('unsolvable', '  ')).toThrow(ProbeVerdictError)
     expect(controller.suggestedBand()).toBe('unsolvable')
+    // The operator's readable no-path read IS the negative arm (§0 v8): it is
+    // not discarded as "no information".
     controller.submitVerdict('unsolvable', 'spawn is walled in')
-    expect(controller.seedVerdict()).toBe('unknown')
+    expect(controller.seedVerdict()).toBe('unsolvable')
     controller.navigate(1)
     controller.finishRun('clear')
     controller.submitVerdict('solvable', '')

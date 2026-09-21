@@ -19,6 +19,7 @@ import {
   validateProbeVerdict,
   type ProbeBand,
   type ProbeVerdict,
+  type SeedVerdict,
 } from '../probe/verdict'
 
 // ================================================================
@@ -325,8 +326,12 @@ export class ProbeController {
     return this.replays.get(game)?.text ?? null
   }
 
-  /** Seed verdict aggregation over every submitted verdict (plan §0 table). */
-  seedVerdict(): 'solvable' | 'unknown' {
+  /**
+   * Seed verdict aggregation over every submitted verdict (plan §0 table).
+   * `solvable` / `unsolvable` / `unknown` — the negative arm is the operator's
+   * own `unsolvable` read, not a separate protocol.
+   */
+  seedVerdict(): SeedVerdict {
     return aggregateSeedVerdict([...this.verdicts.values()].map((v) => v.best.band))
   }
 

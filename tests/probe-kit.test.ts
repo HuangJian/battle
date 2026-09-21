@@ -114,8 +114,13 @@ describe('probe kit — prep mode (§T7 agent deliverable)', () => {
   })
 
   it('carries the protocol rules and the band legend from the one band table', () => {
-    expect(sheet).toContain('存在性证明')
+    // The three-way rule and the negative arm's refutability are stated up front.
+    expect(sheet).toContain('⇒ **可动**')
+    expect(sheet).toContain('⇒ **不可解**')
+    expect(sheet).toContain('判读不是证明')
     expect(sheet).toContain('校准局 game 0 不通过 ⇒ 本次解读整体作废')
+    // The legend comes from BAND_TABLE, including the negative arm's target.
+    expect(sheet).toContain('| 无解 (`unsolvable`) | ≤3 |')
     expect(sheet).toContain('再试一次 (`retry`)')
     expect(sheet).toContain('不聚合')
   })
@@ -230,7 +235,7 @@ describe('probe kit — pack mode (§T7 wrap-up)', () => {
 })
 
 describe('probe kit — §0 aggregation and the calibration gate', () => {
-  it('one solvable seed is enough: the protocol is an existence proof', () => {
+  it('one solvable seed is enough, and it outranks a no-path read', () => {
     const report = inspectPack(
       packFor([2, 5], [verdictFor(2, 'unsolvable', 'walled in'), verdictFor(5, 'slight')]),
       MANIFEST,
@@ -239,11 +244,16 @@ describe('probe kit — §0 aggregation and the calibration gate', () => {
     expect(renderSheet(report, MANIFEST, 'http://localhost:8956')).toContain('开局可动')
   })
 
-  it('all-unknown readings stay unknown — a human death is not information', () => {
-    const report = inspectPack(
-      packFor([0, 1], [verdictFor(0, 'tough'), verdictFor(1, 'unsolvable', 'no path')]),
-      MANIFEST,
-    )
+  it("the operator's 无解 read lands as 不可解 (the negative arm), stated as refutable", () => {
+    const report = inspectPack(packFor([0, 1], [verdictFor(0, 'unsolvable', 'no path')]), MANIFEST)
+    expect(report.seedVerdict).toBe('unsolvable')
+    const sheet = renderSheet(report, MANIFEST, 'http://localhost:8956')
+    expect(sheet).toContain('人类判不可解')
+    expect(sheet).toContain('可被任一后续通关推翻')
+  })
+
+  it('a plain failure to break through is still not a claim about existence', () => {
+    const report = inspectPack(packFor([0, 1], [verdictFor(0, 'tough')]), MANIFEST)
     expect(report.seedVerdict).toBe('unknown')
     const sheet = renderSheet(report, MANIFEST, 'http://localhost:8956')
     expect(sheet).toContain('仍未知')

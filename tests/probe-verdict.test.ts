@@ -21,11 +21,11 @@ describe('probe band table', () => {
     expect(BAND_TABLE.map((b) => b.band).sort()).toEqual([...PROBE_BANDS].sort())
   })
 
-  it('aggregates exactly per the plan table (solvable/slight → solvable)', () => {
+  it('aggregates exactly per the §0 table (incl. the negative arm on 无解)', () => {
     expect(verdictOfBand('solvable')).toBe('solvable')
     expect(verdictOfBand('slight')).toBe('solvable')
     expect(verdictOfBand('tough')).toBe('unknown')
-    expect(verdictOfBand('unsolvable')).toBe('unknown')
+    expect(verdictOfBand('unsolvable')).toBe('unsolvable')
     expect(verdictOfBand('retry')).toBeNull()
   })
 
@@ -55,12 +55,23 @@ describe('seed verdict aggregation', () => {
     expect(aggregateSeedVerdict(['tough', 'unsolvable', 'slight'])).toBe('solvable')
   })
 
+  it('a clear OUTRANKS a no-path read on the same seed', () => {
+    // Finding a surviving input sequence is direct evidence one exists; the
+    // negative read is only a failure to find one. This ordering IS the
+    // negative arm's falsifiability story.
+    expect(aggregateSeedVerdict(['unsolvable', 'solvable'])).toBe('solvable')
+    expect(aggregateSeedVerdict(['unsolvable', 'slight'])).toBe('solvable')
+  })
+
   it('retry never counts', () => {
     expect(aggregateSeedVerdict(['retry', 'retry'])).toBe('unknown')
   })
 
-  it('all-tough/unsolvable is still unknown (human death carries no information)', () => {
-    expect(aggregateSeedVerdict(['tough', 'unsolvable'])).toBe('unknown')
+  it("the operator's readable no-path read IS the negative arm", () => {
+    expect(aggregateSeedVerdict(['unsolvable'])).toBe('unsolvable')
+    expect(aggregateSeedVerdict(['unsolvable', 'retry'])).toBe('unsolvable')
+    // ...but a plain failure to break through is not a claim about existence.
+    expect(aggregateSeedVerdict(['tough', 'tough'])).toBe('unknown')
     expect(aggregateSeedVerdict([])).toBe('unknown')
   })
 })
