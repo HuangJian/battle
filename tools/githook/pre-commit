@@ -221,8 +221,17 @@ trap 'for __f in "$STAGED_LIST" "$DIRTY_LIST" "$TSC_LOG" "$GATE_LOG" "$DASH_TSC_
 # 「按路径打开文件」，路径不存在就是硬错（实测：删掉 `nn-training/tests/test_remote_degrade.py`
 # 后被 ruff 判 `E902 The system cannot find the file specified` ⇒ 整次提交被拦，而代码本身全绿）。
 # 归因集只需要「这次提交**留下**了什么」；A/C/M/R 即此意（D/U 排除）。
-git diff --cached --name-only --diff-filter=ACMR > "$STAGED_LIST"
-git diff --name-only --diff-filter=ACMR > "$DIRTY_LIST"
+#
+# ★ 单一来源（2026-09-21 二次修）：暂存清单只许由 `staged_paths()` 取。原先开头建基准与
+# 结尾并发守卫**各自跑一次**，修 E902 时只给基准那处加了过滤器 ⇒ 两处口径不一致，于是
+# **任何含删除的提交都被守卫误报**成「门禁期间他人追加」（实测：合并提交 fb16b62 删掉
+# `nn-training/tests/test_remote_degrade.py` 被点名，而那次提交内容完全正确）。现在过滤器与
+# 那次 diff 都只在这一处；`tests/pre-commit-staged-scope.test.ts` 钉住三条不变量
+# （只有一处、过滤器排除 D、守卫同源）。
+STAGED_FILTER=ACMR
+staged_paths() { git diff --cached --name-only --diff-filter="$STAGED_FILTER"; }
+staged_paths > "$STAGED_LIST"
+git diff --name-only --diff-filter="$STAGED_FILTER" > "$DIRTY_LIST"
 STAGED_N=$(wc -l < "$STAGED_LIST" | tr -d ' ')
 DIRTY_N=$(wc -l < "$DIRTY_LIST" | tr -d ' ')
 echo "  staged ${STAGED_N} 文件（门禁拦截归因集）；未暂存 ${DIRTY_N} 文件（他人改动，不参与拦截）"
@@ -447,8 +456,10 @@ else
 fi
 
 # ---------- 并发提示：门禁期间暂存区是否被他人追加 ----------
+# 走 `staged_paths()`（同一过滤器）——自己再跑一次不过滤的 diff 会把纯删除当成
+# 「新出现的路径」，于是每次带删除的提交都假警告（2026-09-21 回归，见上方注释）。
 if [ "$STAGED_N" -gt 0 ]; then
-  NEW_STAGED=$(git diff --cached --name-only | grep -Fvx -f "$STAGED_LIST" || true)
+  NEW_STAGED=$(staged_paths | grep -Fvx -f "$STAGED_LIST" || true)
   if [ -n "$NEW_STAGED" ]; then
     echo "⚠ 门禁期间暂存区新增文件（将随本次提交入库但未经本次门禁判定）——建议立即重新 commit:"
     printf '    %s\n' $NEW_STAGED
