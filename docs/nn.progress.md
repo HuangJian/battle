@@ -4,6 +4,44 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §119 教训：毒包熔断 + worker 崩溃响亮回传 + claim 可观测（accident.plan §4.1/4.2/4.3，2026-09-21）
+
+**背景**：C-0 it58（job `43a4eb01cf9fe35c`）的 payload 被 hub served **约 40 次**（每 5 分钟
+一次，对齐认领 TTL 300s），每次 worker 都在同一处 `BadZipFile` 炸掉、零回传，训练侧只有
+3×1800s 超时——**三方合谋烧 3.5 小时，零告警**。§4.0/4.4 已修「炸的那一处」（解包判别先
+tar 后 zip）；本轮补的是「**炸了要有人知道**」那一层。
+
+| 项 | 落地 |
+|---|---|
+| §4.1 熔断 | hub `_JobStore` 新增 `_reclaims`（认领后**零回传**计数）与 `_frozen`（冻结记录），阈值 `FREEZE_AFTER_RECLAIMS = 3`；冻结即移出可领取池 + 一行响亮告警（job/课程/最后认领者/次数）；`/status` 报 `frozen`、`/result` 报 410 + `fail_kind=PoisonFrozen` ⇒ 训练侧**立刻**带原因停腿；人工解冻 `POST /admin/unfreeze?job_id=` |
+| §4.2 崩溃响亮 | `remote/worker.py::job_body_error(phase, e)`：restore（model/opt、kickstart ref）与 grad（load_episodes/chunk/ppo_update）段的崩溃按**内容决定性**归 `ProtocolError` ⇒ 走**既有** `report_job_failure → JobFailedError` 链（带 traceback 摘要）；OOM / `OSError` / `MemoryError` 仍按瞬态 `raise` 回去重领 |
+| §4.3 claim 日志 | 每次 claim 一行（job/课程/worker/lease/`reclaims=` 非零才带），本次事故现场靠 `payload served ×40` 的 cadence 反推，太贵 |
+| 观测面 | `/admin/queue` 每课加 `frozen` 块（谁被冻、冻在几次）；冻结告警一次性（`consume_freeze_announcement`，不会每次轮询重喊） |
+
+**为什么熔断是「独立第二状态」而不是复用失败标记**：`hub_client.py` 规定「重发同 job_id
+清失败标记」（重发即重试）。冻结若住失败标记字段，**重发当场解冻**，本次事故照烧 3.5 小时。
+两者正交：重发不清冻结（`publish` 不碰 `_frozen`），解冻只走人工入口。
+
+**为什么计数点必须收在一个入口（本轮第二个坑）**：「租约过期」有三个观测入口——`claim()`、
+`lease_worker()`、`claimable_job_ids()` 的资格判定。只在 `claim()` 里贴计数会被控制台每秒轮询
+的 `/admin/queue`（走 `lease_worker`）抢在前面回收，计数**恒为 0、熔断永不触发**。处置：三者统一
+走 `_collect_expired_locked()`（持锁调用），并把这条写成用例（`test_admin_queue_observation_path_also_counts`）。
+这是本仓「判据要有唯一入口」的第三次同一教训。
+
+**为什么阈值是 3 而不是 1**：合法重试真实存在（worker 挂一次、换台机器接着跑），3 给了一轮
+自然愈合窗口（≈15 分钟），又不放过 3.5 小时的静默空转；拿不准的崩溃归瞬态——**熔断覆盖
+「未知死法」，判错方向有兜底，而错钉终局没有**。
+
+**验收（盘上）**：`tests/test_poison_freeze.py`（9：达阈冻结 / 主动 release 不算 / 已结算不算 /
+`/admin/queue` 路径也计数 / 告警只喊一次 / **重发不清冻结 + 解冻回池** / 训练侧立刻 `JobFailedError` /
+解冻端点 400·404·409 / claim 与冻结各一行日志）；`tests/test_job_body_crash.py`（5：内容决定性 →
+`ProtocolError`、瞬态原样放回、restore/grad 两段确实被包、已判定 `ProtocolError` 原样上抛）；
+顺带修掉一个**既有 flake**：`test_hub_push_dispatch.py` 用例依赖 mtime 判定，Windows 系统时钟
+节拍（~15.6ms）内两次写会拿到相同 mtime ⇒ 全量套件下偶发假红；改为显式 `os.utime` 递增。
+门禁：`bash tools/githook/nn-python-gate.sh` 全绿（ruff+mypy+**1933 passed**）。
+
+---
+
 ## §118 架构：单一 PPO 路径落地（`--ppo` / `--remote-degrade-after` 双删）——训练侧不再有「算力位置」旋钮（2026-09-21）
 
 **背景**：C 双臂事故（x20-clutch / -null）的第一根因是 `--ppo` 缺省 `local` 被漏传 ⇒

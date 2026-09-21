@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import sys
 import threading
 import time
@@ -340,13 +341,28 @@ def test_push_want_and_holder_identity() -> None:
 # ------------------------------------------------------------------ ② 登记表 + 探活
 
 
+def _write_cfg(cfg: Path, nodes: list[dict]) -> None:
+    """写 push 登记表，并**显式把 mtime 推到至少前一秒**。
+
+    为什么要挪时间戳：Windows 上 `st_mtime` 的落盘精度被系统时钟节拍卡住（~15.6ms），
+    同一拍内的两次写会拿到**相同**的 mtime ⇒ `PushWorkers.reload()` 的 mtime 判定看不见
+    这次改动。本用例要测的是「文件变了就重读」，不是「这台机器的时钟分辨率」——全量套件
+    + xdist 负载下实测偶发假红（2026-09-21，`test_push_workers_hot_reload_and_probe`）。
+    显式递增 = 与平台/负载无关。
+    """
+    try:
+        prev = cfg.stat().st_mtime
+    except OSError:
+        prev = time.time()
+    cfg.write_text(json.dumps({"nodes": nodes}), encoding="utf-8")
+    later = max(prev + 1.0, time.time())
+    os.utime(cfg, (later, later))
+
+
 def test_push_workers_hot_reload_and_probe(tmp_path: Path, worker_factory) -> None:
     """rl-config 热重载（mtime）+ 探活写回在线/忙闲；失败未达阈值不算离场但必须「当它在忙」。"""
     cfg = tmp_path / "rl-config.json"
-    cfg.write_text(
-        json.dumps({"nodes": [{"id": "g1", "url": "http://127.0.0.1:1", "gpu_push": True}]}),
-        encoding="utf-8",
-    )
+    _write_cfg(cfg, [{"id": "g1", "url": "http://127.0.0.1:1", "gpu_push": True}])
     ws = PushWorkers(cfg, log=_quiet, ping_timeout=_PING_TIMEOUT)
     assert ws.reload(force=True) is True
     assert [w["id"] for w in ws.snapshot()] == ["g1"]
@@ -354,17 +370,13 @@ def test_push_workers_hot_reload_and_probe(tmp_path: Path, worker_factory) -> No
     assert ws.reload() is False
     # 换成一台真活着的 worker：文件变了 ⇒ 拾取；状态从「未知」开始
     live = worker_factory()
-    cfg.write_text(
-        json.dumps(
-            {
-                "nodes": [
-                    {"id": "g1", "url": "http://127.0.0.1:1", "gpu_push": True},
-                    {"id": "g2", "url": live.url, "gpu_push": True, "authKey": "k"},
-                    {"id": "plain", "url": live.url},  # 非 gpu_push：不得进表
-                ]
-            }
-        ),
-        encoding="utf-8",
+    _write_cfg(
+        cfg,
+        [
+            {"id": "g1", "url": "http://127.0.0.1:1", "gpu_push": True},
+            {"id": "g2", "url": live.url, "gpu_push": True, "authKey": "k"},
+            {"id": "plain", "url": live.url},  # 非 gpu_push：不得进表
+        ],
     )
     assert ws.reload() is True
     assert {w["id"] for w in ws.snapshot()} == {"g1", "g2"}

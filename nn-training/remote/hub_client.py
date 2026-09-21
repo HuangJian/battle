@@ -1133,6 +1133,13 @@ def _wait_state_note(base_url: str, token: str, jid: str, waited: float) -> str:
         pass
     if state == "leased":
         return f"job {jid} 执行中（state=leased{extra}）（已等 {waited:.0f}s）"
+    if state == "frozen":
+        # §4.1 熔断：不该在这里长等——`/result` 会给 410 让探针当场抛 JobFailedError。
+        # 这一行只是「探测到 410 的那一拍」之前的过渡（例如冻结刚发生、本拍问的是 /status）。
+        return (
+            f"job {jid} **已被 hub 熔断冻结**（state=frozen，已等 {waited:.0f}s）"
+            "——需人工确认后解冻重发（POST /admin/unfreeze）"
+        )
     workers = "?"
     try:
         st2, body2 = _request(base_url, token, "/admin/queue", timeout=15.0)
@@ -1205,10 +1212,12 @@ def wait_job(
         )
         time.sleep(backoff)
         continue
-    # H3：超时前二次确认——leased（云仍在跑）→ 延长等待；done → 直接取结果
+    # H3：超时前二次确认——leased（云仍在跑）→ 延长等待；done → 直接取结果；
+    # frozen（§4.1 熔断）→ 立刻带原因收兵。
     s_status, s_body = _request(base_url, token, f"/jobs/{jid}/status", timeout=15.0)
     if s_status == 200:
-        state = json.loads(s_body.decode("utf-8")).get("state")
+        s_info = json.loads(s_body.decode("utf-8"))
+        state = s_info.get("state") if isinstance(s_info, dict) else None
         if state == "done":
             st2, body2 = _request(base_url, token, f"/jobs/{jid}/result", timeout=15.0)
             if st2 == 200:
@@ -1219,6 +1228,16 @@ def wait_job(
             # 终局（2026-09-17）：收尾确认时也要认失败——否则又多等一个超时窗口。
             st2, body2 = _request(base_url, token, f"/jobs/{jid}/result", timeout=15.0)
             raise _job_failed_from_body(jid, body2 if st2 == 410 else s_body)
+        elif state == "frozen":
+            # ★ 毒包熔断（§4.1）：不再「再给一个预算」——冻结就是「没人会来跑它了」，
+            # 立刻带着原因收兵（与 410 报的同一件事；两条路一致才不会各自漂）。
+            info = s_info if isinstance(s_info, dict) else {}
+            raise JobFailedError(
+                f"job {jid} 已被 hub 熔断冻结：连续 {int(info.get('reclaims', 0) or 0)} 次"
+                "认领后零回传（疑似内容决定性毒包）——人工确认后解冻重发",
+                kind="PoisonFrozen",
+                detail=str(info.get("last_worker", "")),
+            )
         elif state == "leased":
             # 云仍在跑 ⇒ 再给一个完整预算（H3 原语义）。report/now 原样下传：
             # 延长等待期仍要按同一节流继续「在等什么」的报告。

@@ -18,7 +18,10 @@
   GET  /jobs/{id}/payload       下载 payload zip
   POST /jobs/{id}/heartbeat     心跳续租（60s）
   POST /jobs/{id}/result        worker 回传结果（weights_json + opt_tar + agg）
-  GET  /jobs/{id}/status        训练主循环轮询 job 状态（pending/leased/done/failed）
+  GET  /jobs/{id}/status        训练主循环轮询 job 状态（pending/leased/done/failed/frozen）
+                                frozen = 毒包熔断（§4.1，认领后零回传达 3 次）；`/result`
+                                一并回 410 + 原因，训练侧不停在 25min 超时上
+  POST /admin/unfreeze?job_id=  人工解冻熔断的 job（回池可重领；重发**不**解冻）
   POST /jobs/{id}/release       worker 瞬时失败主动还租约（job 立即回池，2026-09-05）
   POST /jobs/{id}/fail          节点**确定性**失败回报原因（bun 装不上 / TS 运行时取不到
                                 / argv 非法）——落 `fail.json` 为终局，训练侧从
@@ -262,6 +265,18 @@ class _AuthGuard:
             return max(0.0, self._auth_blocked_until.get(ip, 0.0) - self._now())
 
 
+#: 毒包熔断阈值（plan/accident.plan.md §4.1，2026-09-21）：同一 job 被**认领后零回传**满这么多次
+#: ⇒ hub 冻结它并响亮告警。为什么是「零回传」而不是「失败」：worker 报得上来的失败早就有
+#: 确定性通道了（`POST /jobs/{id}/fail`，§4.0/P0）；这里兑的是**未知崩溃类型**——worker 连
+#: 报都报不上来（进程被杀 / OOM 硬死 / 归档层以外的死法），只能从「租约过期且无结果」的
+#: 节奏里认出来。本次事故：40 次 × 5 分钟，无告警、无计数。
+#:
+#: 为什么不用 1：合法重试是存在的（worker 挂掉一次、换台机器接着跑）——阈值 3 给了一轮
+#: 「换台机器 / 重启 worker」的自然愈合机会（认领 TTL 300s ⇒ 最多烧 ~15 分钟），又不至于
+#: 把 3.5 小时的静默空转让它过去。
+FREEZE_AFTER_RECLAIMS = 3
+
+
 class _JobStore(_AuthGuard):
     """磁盘 job 存储 + 内存租约状态。
 
@@ -291,6 +306,16 @@ class _JobStore(_AuthGuard):
         self._lease_workers: dict[str, str] = {}
         #: job_id -> 上一次租约**过期**时死掉的持有人（不避让自己时不清，避免误让）
         self._stale_holders: dict[str, str] = {}
+        #: job_id -> 「认领后零回传」次数（毒包熔断的判据，见 FREEZE_AFTER_RECLAIMS）。
+        #: 只在**租约过期且无结果/无失败标记**的那一刻 +1（主动 release 不算：那是 worker
+        #: 自己说「这个失败我能自愈」）。volatile：hub 重启即丢——重启本身就会重发未完成
+        #: job（D8），计数从头起不改变结论（再烧 N 次即再冻）。
+        self._reclaims: dict[str, int] = {}
+        #: job_id -> 冻结记录（毒包熔断的**独立第二状态**）：{"reclaims", "worker", "ts",
+        #: "announced"}。刻意**不**复用 `fail.json`（失败标记）：`publish_job` 重发同 job_id
+        #: 会清失败标记（“重发即重试”语义，见 `claimable_job_ids` 注释）——冻结若住那里，
+        #: 重发当场解冻，本次事故照烧 3.5 小时。两者正交：重发不清冻结，解冻只走人工入口。
+        self._frozen: dict[str, dict] = {}
         # 鉴权面（`_AuthGuard`）：进程级一份——多课程单 hub 下不按课程各算一套计数
         _AuthGuard.__init__(self, now_fn)
         #: 账本增量读缓存（H6）：文件 size -> 已解析事件列表
@@ -422,6 +447,11 @@ class _JobStore(_AuthGuard):
         now = self._now()
         eligible: list[tuple[str, float]] = []
         for jid, e in pending.items():
+            if jid in self._frozen:
+                # ★ 毒包熔断（§4.1）：认领后零回传满阈值 ⇒ 冻结，不再回池。
+                # 这是**独立于失败标记**的第二状态：重发同 job_id（publish_job）不清它，
+                # 解冻只走人工入口（`unfreeze`）——否则「重发即重试」会把冻结当场抹掉。
+                continue
             jd = self._job_dir(jid)
             if not jd.exists() or find_payload(jd) is None:
                 continue  # 目录不存在或 payload 未落盘——不可领取
@@ -538,6 +568,12 @@ class _JobStore(_AuthGuard):
         """
         import secrets
 
+        with self._lock:
+            if job_id in self._frozen:
+                # ★ 熔断（§4.1）：任何入口都不再下发（含竞速广播）。
+                # `claimable_job_ids` 已排除冻结的 job，这里是**纵深防御**：池快照与本次
+                # claim 之间隔着几行代码，而「已冻结」这件事必须与该快照无关地成立。
+                return None
         if race:
             with self._lock:
                 # 广播即**放弃独占**：先前那份独占租约（若有——先到的 worker 独领过，
@@ -557,12 +593,10 @@ class _JobStore(_AuthGuard):
             if lease is not None:
                 # 过期租约：回收并记下「谁跑死的」——下一个 worker 该顶上（而不是让它
                 # 自领自己跑死的活，那只是把同一个故障重演一遍）。
-                dead = self._lease_workers.get(job_id, "")
-                self._leases.pop(job_id, None)
-                self._lease_owners.pop(job_id, None)
-                self._lease_workers.pop(job_id, None)
-                if dead:
-                    self._stale_holders[job_id] = dead
+                self._collect_expired_locked(job_id)
+                if self._frozen.get(job_id):
+                    # ★ 刚达阈（或已冻结）：本次不给他，也不再回池（§4.1 熔断）。
+                    return None
             # 避让：上一份**过期死掉**的租约若就是这个请求者跑的，本次不给他（让别的
             # worker 顶上）。身份比对只能在这里做——上面刚完成租约回收，stale 记录此刻
             # 才是最新的；在队列层先判会恒为空（2026-09-18 实测）。
@@ -577,24 +611,92 @@ class _JobStore(_AuthGuard):
             self._last_heartbeat[job_id] = now
             return token
 
+    def _collect_expired_locked(self, job_id: str) -> str:
+        """回收过期租约（调用方**必须持锁**）：转 stale 记录 + **毒包计数 +1**。
+
+        为什么计数住这里而不是 `claim()` 里贴一段：过期这件事有三个观测入口
+        （`claim` / `lease_worker` / `claimable_job_ids` 的资格判定），谁先看到谁就回收。
+        早先只在 `claim` 里贴的写法会被 `/admin/queue` 的轮询（`lease_worker`，控制台
+        每秒都在调）抢在前面——计数恒为 0，熔断永远不触发（这就是「判据要有唯一入口」
+        在本仓的第三次同一教训）。
+
+        「零回传」只在**结果未落盘且失败标记不在**时计数——已结算的 job 不算毒包。
+        """
+        dead = self._lease_workers.get(job_id, "")
+        self._leases.pop(job_id, None)
+        self._lease_owners.pop(job_id, None)
+        self._lease_workers.pop(job_id, None)
+        if dead:
+            self._stale_holders[job_id] = dead
+        jd = self._job_dir(job_id)
+        unresolved = not (jd / "result").exists() and not (jd / FAIL_NAME).exists()
+        if unresolved:
+            n = self._reclaims.get(job_id, 0) + 1
+            self._reclaims[job_id] = n
+            if n >= FREEZE_AFTER_RECLAIMS and job_id not in self._frozen:
+                self._frozen[job_id] = {
+                    "reclaims": n,
+                    "worker": dead,
+                    "ts": self._now(),
+                    "announced": False,
+                }
+        return dead
+
+    def reclaims(self, job_id: str) -> int:
+        """「认领后零回传」次数（未发生 → 0）。观测面 + 熔断判据的可查值。"""
+        with self._lock:
+            return int(self._reclaims.get(job_id, 0))
+
+    def frozen_info(self, job_id: str) -> dict | None:
+        """冻结记录（未冻结 → None）。"""
+        with self._lock:
+            info = self._frozen.get(job_id)
+            return dict(info) if info else None
+
+    def frozen_job_ids(self) -> list[str]:
+        """已冻结的 job_id（观测面）。"""
+        with self._lock:
+            return sorted(self._frozen)
+
+    def consume_freeze_announcement(self, job_id: str) -> dict | None:
+        """取一次「刚刚落冻」的告警载荷（取过即清；未冻结/已喊过 → None）。
+
+        为什么需要「喊一次」的记账：检测点在 store（它才看得到租约），而告警要有课程名与
+        认领者（调用方才知道）。把它做成一次性事件，既不会漏喊，也不会每次轮询重喊。
+        """
+        with self._lock:
+            info = self._frozen.get(job_id)
+            if not info or info.get("announced"):
+                return None
+            info["announced"] = True
+            return dict(info)
+
+    def unfreeze(self, job_id: str) -> dict | None:
+        """人工解冻（**熔断唯一的可逆口**）：清除冻结与计数 ⇒ job 立即回池可重领。
+
+        重发（`publish`）刻意不走这里：重发不清冻结（见 `_frozen` 注释），否则「重发即重试」
+        会把熔断当场抹掉。返回被解冻的记录（本来就未冻结 → None）。
+        """
+        with self._lock:
+            info = self._frozen.pop(job_id, None)
+            self._reclaims.pop(job_id, None)
+            return dict(info) if info else None
+
     def stale_holder(self, job_id: str) -> str:
         """上一份**过期**租约的持有人（无 → 空串）。给 `/admin/queue` 观测用。"""
         with self._lock:
             return self._stale_holders.get(job_id, "")
 
     def lease_worker(self, job_id: str) -> str:
-        """当前租约持有人身份（无 → 空串）；同时在租约已过期时把它转成 stale 记录。"""
+        """当前租约持有人身份（无 → 空串）；同时在租约已过期时走**同一个**回收入口
+        （`_collect_expired_locked`：stale 记录 + 毒包计数）——本函数是 `/admin/queue`
+        每秒都在调的观测面，若绕开回收，计数会被它抢在前面吞掉。"""
         with self._lock:
             lease = self._leases.get(job_id)
             if lease is None:
                 return ""
             if lease <= self._now():
-                dead = self._lease_workers.get(job_id, "")
-                self._leases.pop(job_id, None)
-                self._lease_owners.pop(job_id, None)
-                self._lease_workers.pop(job_id, None)
-                if dead:
-                    self._stale_holders[job_id] = dead
+                self._collect_expired_locked(job_id)
                 return ""
             return self._lease_workers.get(job_id, "")
 
@@ -1437,7 +1539,21 @@ class _HubQueue(_AuthGuard):
                     jid, race=use_race, worker_id=worker_id, avoid_stale_holder=avoid
                 )
                 if tok is None:
-                    continue  # 活租约在持 / 本次该避让 / 并发领取竞负
+                    # ★ 毒包熔断告警（§4.1）——**在这里喊**：检测点在 store（它才看得到租约
+                    # 过期），而告警要课程名与认领者，两者都在本函数手上。一次性事件，
+                    # 不会每次轮询重喊。
+                    froze = st.consume_freeze_announcement(jid)
+                    if froze is not None:
+                        print(
+                            f"[{time.strftime('%H:%M:%S')}] [hub-server] ★ 熔断冻结："
+                            f"job={jid} course={course or '-'} "
+                            f"—— 连续 {froze.get('reclaims')} 次认领后零回传"
+                            f"（最后一次认领者={froze.get('worker') or '?'}）；"
+                            "已从可领取池移除，**重发不清冻结**；"
+                            f"确认后解冻：POST /admin/unfreeze job_id={jid}",
+                            flush=True,
+                        )
+                    continue  # 活租约在持 / 本次该避让 / 并发领取竞负 / 已熔断冻结
                 with self._lock:
                     self._cursor = course
                 return course, jid, tok
@@ -1538,6 +1654,11 @@ class _HubQueue(_AuthGuard):
                 "pending_n": len(pending),
                 "inflight": inflight,
                 "next_job": pending[0] if pending else None,
+                # §4.1 可观测（毒包熔断）：冻了谁、冻在几次；已冻的 job 已不在 pending 里，
+                # 不给这一行就只剩「队列莫名其妙短了」
+                "frozen": {
+                    jid: st.frozen_info(jid) for jid in st.frozen_job_ids()
+                },
             }
         return {
             "courses": courses,
@@ -1594,6 +1715,33 @@ class _HubQueue(_AuthGuard):
             worker_id=worker_id,
             avoid_stale_holder=avoid_stale_holder,
         )
+
+    def reclaims(self, job_id: str) -> int:
+        """该 job 的「认领后零回传」次数（§4.1 熔断判据；未知 job → 0）。"""
+        st = self._store_of(job_id)
+        return st.reclaims(job_id) if st else 0
+
+    def frozen_info(self, job_id: str) -> dict | None:
+        """该 job 的冻结记录（未冻结/未知 → None）。"""
+        st = self._store_of(job_id)
+        return st.frozen_info(job_id) if st else None
+
+    def consume_freeze_announcement(self, job_id: str) -> dict | None:
+        """取一次「刚刚落冻」的告警载荷（一次性；未冻结/已喊过 → None）。"""
+        st = self._store_of(job_id)
+        return st.consume_freeze_announcement(job_id) if st else None
+
+    def unfreeze(self, job_id: str) -> dict | None:
+        """人工解冻（§4.1 可逆口）：返回被解冻的记录（本来未冻结 → None）。"""
+        st = self._store_of(job_id)
+        return st.unfreeze(job_id) if st else None
+
+    def frozen_jobs(self) -> list[str]:
+        """全部已冻结 job（跨课程，观测面用）。"""
+        out: list[str] = []
+        for st in self._stores.values():
+            out.extend(st.frozen_job_ids())
+        return out
 
     def heartbeat(self, job_id: str, lease_token: str) -> bool:
         st = self._store_of(job_id)
@@ -1984,6 +2132,8 @@ class HubHandler(BaseHTTPRequestHandler):
                 self._post_bc_epoch()
             elif path == "/admin/race":
                 self._admin_race(set_mode=True)
+            elif path == "/admin/unfreeze":
+                self._admin_unfreeze()
             elif path == "/admin/courses":
                 self._admin_courses(set_mode=True)
             elif path == "/admin/push-workers":
@@ -2038,6 +2188,17 @@ class HubHandler(BaseHTTPRequestHandler):
             self._json({"job_id": None, "halt": self.hub.all_halted()})  # 无可领取 job
             return
         course, jid, lease_token = picked
+        # ★ 认领可观测（§4.3）：**每次** claim 一行（job/课程/worker/租约/次数）。
+        # 为什么必须每行都有：本次事故的现场重建只能靠「payload served ×40」的 cadence
+        # 反推认领循环——hub 日志里没有任何一行说「谁在什么时候领走了它」。
+        # `n=` 是「认领后零回传」计数：>0 说明这份 job 已经在被反复重领（熔断前兆）。
+        _n_reclaim = self.hub.reclaims(jid)
+        print(
+            f"[{time.strftime('%H:%M:%S')}] [hub-server] claim job={jid} course={course or '-'} "
+            f"worker={worker_id or '?'} lease={'race' if race else (lease_token[:8] if lease_token else '-')}"
+            + (f" reclaims={_n_reclaim}" if _n_reclaim else ""),
+            flush=True,
+        )
         if self.hub.mode_of(course) == COURSE_MODE_OFFLINE:
             # 发光的一行：离线课（整段）落到带标 worker 手上——这是「离线课真的在跑」
             # 在 hub 侧的唯一痕迹（它不进竞速判据，也不会被推送）。
@@ -2242,6 +2403,39 @@ class HubHandler(BaseHTTPRequestHandler):
         self.hub.clear_workers()  # 强制闸后清空历史登记：模式与陈旧证据不混用
         self._json({"mode": got, **self.hub.race_state()}, 200)
 
+    def _admin_unfreeze(self) -> None:
+        """`POST /admin/unfreeze?job_id=<jid>`：人工解冻一个被熔断（§4.1）的 job。
+
+        为什么必须有这个口：熔断的价值在于「停下来问人」，那“人”就得有个能做事的把手；
+        没有它，冻结就是不可逆死亡（与「重发不清冻结」合起来看更明显：重发不清、又无
+        解冻口 ⇒ 那份 job 永远烂在列表里）。解冻即回池（清计数），下一次重领从头计数。
+
+        job 不明 / 不属于本 hub → 404（响亮，不静默造一个无归属状态）；本来就未冻结 →
+        409（“没冻可解”要说出来，否则操作员会以为解冻失败）。
+        """
+        if not self._auth_ok():
+            return
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        jid = (qs.get("job_id") or qs.get("job") or [""])[0].strip()
+        if not jid:
+            self._json({"error": "需要 job_id=<jid>"}, 400)
+            return
+        if not (self.hub._job_dir(jid) / "manifest.json").exists():
+            self._json({"error": f"未知 job {jid}"}, 404)
+            return
+        info = self.hub.unfreeze(jid)
+        if info is None:
+            self._json({"job_id": jid, "unfrozen": False, "error": "该 job 未被冻结"}, 409)
+            return
+        print(
+            f"[{time.strftime('%H:%M:%S')}] [hub-server] 人工解冻：job={jid} "
+            f"（冻于 {info.get('reclaims')} 次零回传后）——已回池可重领",
+            flush=True,
+        )
+        self._json(
+            {"job_id": jid, "unfrozen": True, "reclaims": info.get("reclaims", 0)}, 200
+        )
+
     # ---- push worker 登记表（2026-09-18；控制台 worker 登记入口的服务面）----
     def _admin_push_workers(self, set_action: bool = False) -> None:
         """`GET /admin/push-workers` 看登记表 + 派发器状态；`POST` 增/删/热重载。
@@ -2443,6 +2637,7 @@ class HubHandler(BaseHTTPRequestHandler):
             self._json({"error": "unknown job"}, 404)
             return
         fail = self.hub.job_failure(jid)
+        frozen = self.hub.frozen_info(jid)
         if (jd / "result" / "result.json").exists():
             state = "done"
         elif fail is not None:
@@ -2451,9 +2646,17 @@ class HubHandler(BaseHTTPRequestHandler):
             state = "failed"
         elif (self.hub.lease_expires_in(jid) or 0.0) > 0:
             state = "leased"
+        elif frozen is not None:
+            # ★ 毒包熔断（§4.1）：终局状态之一（与 pending/leased 并列）。训练侧只要
+            # “还会不会有人来跑”这一个答案，而冻结的答案就是「不会，除非人工解冻」。
+            state = "frozen"
         else:
             state = "pending"
         resp: dict = {"job_id": jid, "state": state}
+        if frozen is not None:
+            resp["reclaims"] = int(frozen.get("reclaims", 0) or 0)
+            resp["frozen_at"] = float(frozen.get("ts", 0.0) or 0.0)
+            resp["last_worker"] = str(frozen.get("worker", "") or "")
         if fail is not None and state == "failed":
             resp["reason"] = str(fail.get("reason", ""))
             resp["fail_kind"] = str(fail.get("kind", ""))
@@ -2488,6 +2691,29 @@ class HubHandler(BaseHTTPRequestHandler):
                         "error": str(fail.get("reason", "job failed")),
                         "fail_kind": str(fail.get("kind", "")),
                         "fail_detail": str(fail.get("detail", "")),
+                    },
+                    410,
+                )
+                return
+            froze = self.hub.frozen_info(jid)
+            if froze is not None:
+                # ★ 毒包熔断（§4.1）：冻结也是「不会有结果」——不把训练侧挂在 25 分钟
+                # 超时上（那正是本次事故的形态：真实原因在最里面，外面只剩一行超时）。
+                # fail_kind 与节点失败区分开（控制台/日志能一眼看出这是熔断，不是能力缺失）。
+                self._json(
+                    {
+                        "job_id": jid,
+                        "failed": True,
+                        "error": (
+                            f"job 已被 hub 熔断冻结：连续 {int(froze.get('reclaims', 0) or 0)} 次"
+                            "认领后零回传（疑似内容决定性毒包）——人工确认后 "
+                            f"POST /admin/unfreeze job_id={jid} 解冻重发"
+                        ),
+                        "fail_kind": "PoisonFrozen",
+                        "fail_detail": (
+                            f"last_worker={froze.get('worker') or '?'} "
+                            f"reclaims={int(froze.get('reclaims', 0) or 0)}"
+                        ),
                     },
                     410,
                 )

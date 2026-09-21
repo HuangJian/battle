@@ -805,6 +805,42 @@ def _failure_detail(e: BaseException, limit: int = 4000) -> str:
         return f"{type(e).__name__}: {e}"[:limit]
 
 
+#: 作业体（restore/grad）崩溃里**仍按瞬态**处理的异常特征：换台机器 / 换个时机可能就好了。
+#: OOM 最重要（不同 worker 显存不同）；`OSError` 含磁盘/权限类瞬态（与 `unpack_payload_or_fail`
+#: 同口径：那里也刻意不吞 OSError）。
+_TRANSIENT_BODY_EXC = (RetryableError, MemoryError, OSError)
+_TRANSIENT_BODY_NAMES = ("OutOfMemoryError", "CudaOutOfMemoryError")
+_TRANSIENT_BODY_HINTS = ("out of memory", "no space left on device", "cuda error: initialization")
+
+
+def job_body_error(phase: str, e: BaseException) -> BaseException:
+    """把**作业体崩溃**归类（plan/accident.plan.md §4.2，2026-09-21）。
+
+    为什么需要这一步：`restore`（模型/优化器/ref 装载）与 `grad`（PPO 更新）里的
+    异常目前落到 `worker_loop` 的 `except Exception` ⇒ 只写一行云机日志就重领——
+    同一份字节上，这个崩溃会**逐一重演**，而训练侧只看到超时（§4 事故的同一形状：
+    真实原因在最里面，外面只剩一行“超时”）。
+
+    返回 `ProtocolError` = 内容/模型决定性 ⇒ 走既有确定性回传（`report_job_failure` →
+    hub 终局 failed → 训练侧 `JobFailedError` 带原因停腿）；返回原异常 = 真瞬态 ⇒ 调用方
+    `raise` 它，照旧靠租约过期/`release` 重领（钉成终局会把「换台机器就能跑」变成停腿）。
+
+    判据是**异常类型 + 消息特征**（不用白名单的另原因是：torch 的错误类型随版本漂，
+    把类别名硬编进去反而脆）。拿不准时归瞬态——熔断（§4.1）是那类“未知死法”兜底，
+    判错方向有兜底，而错钉终局没有。
+    """
+    if isinstance(e, _TRANSIENT_BODY_EXC):
+        return e
+    if type(e).__name__ in _TRANSIENT_BODY_NAMES:
+        return e
+    msg = str(e).lower()
+    if any(h in msg for h in _TRANSIENT_BODY_HINTS):
+        return e
+    return ProtocolError(
+        f"{phase} 崩溃（内容决定性：同一份字节重领也会同一处炸）：{type(e).__name__}: {e}"
+    )
+
+
 def unpack_payload_or_fail(payload_path, job_dir) -> tuple[dict, list[str]]:
     """解包 payload；**内容决定性**失败统一转 `ProtocolError`（重认领不会自愈）。
 
@@ -1864,28 +1900,35 @@ def run_job(
         )
     opt = None
     opt_restore_sec = 0.0
-    if opt_raw:
-        t_opt = time.time()
-        opt_dir = job_dir / "opt_init"
-        unpack_opt_tar(opt_raw, opt_dir)
-        # 必须在 model.to(device_t) 之前加载 state_dict，然后统一移到目标设备
-        model.load_state_dict(torch.load(opt_dir / "model.pt", map_location="cpu"))
-        model.to(device_t)
-        opt = torch.optim.Adam(model.parameters(), lr=float(manifest["lr"]))
-        # 统一 map_location="cpu"：Optimizer.load_state_dict 会把载入张量 cast 到
-        # param 所在设备，所以 XLA/CPU/CUDA 三条路都靠这一句完成搬迁（原先写死
-        # device_t 在 XLA 上会走 torch.load 的设备 hook，跨 runtime 不稳）。
-        opt.load_state_dict(torch.load(opt_dir / "opt.pt", map_location="cpu"))
-        opt_restore_sec = round(time.time() - t_opt, 3)
-        log(f"job {jid}: model/opt 从 opt_init（{opt_src}）恢复（Adam 动量延续，D5）")
-    else:
-        # 首轮/无 tar：从 init 权重 warm-start（hub 打包时写入 payload 的 weights_json）
-        if not init_w.exists():
-            raise ProtocolError("payload 缺 init_weights.json 且无 opt_init/blob——无法构建模型")
-        load_state_into(model, str(init_w))
-        model.to(device_t)
-        opt = torch.optim.Adam(model.parameters(), lr=float(manifest["lr"]))
-        log(f"job {jid}: 无 opt_init，从 init_weights warm-start + 新 Adam")
+    # ★ §4.2（2026-09-21）：restore 段的崩溃归确定性失败（带 traceback 摘要）——
+    # 它是本段最容易“静默重演”的一处（优化器/模型卷积不兼容会逐一重演到天亮）。
+    try:
+        if opt_raw:
+            t_opt = time.time()
+            opt_dir = job_dir / "opt_init"
+            unpack_opt_tar(opt_raw, opt_dir)
+            # 必须在 model.to(device_t) 之前加载 state_dict，然后统一移到目标设备
+            model.load_state_dict(torch.load(opt_dir / "model.pt", map_location="cpu"))
+            model.to(device_t)
+            opt = torch.optim.Adam(model.parameters(), lr=float(manifest["lr"]))
+            # 统一 map_location="cpu"：Optimizer.load_state_dict 会把载入张量 cast 到
+            # param 所在设备，所以 XLA/CPU/CUDA 三条路都靠这一句完成搬迁（原先写死
+            # device_t 在 XLA 上会走 torch.load 的设备 hook，跨 runtime 不稳）。
+            opt.load_state_dict(torch.load(opt_dir / "opt.pt", map_location="cpu"))
+            opt_restore_sec = round(time.time() - t_opt, 3)
+            log(f"job {jid}: model/opt 从 opt_init（{opt_src}）恢复（Adam 动量延续，D5）")
+        else:
+            # 首轮/无 tar：从 init 权重 warm-start（hub 打包时写入 payload 的 weights_json）
+            if not init_w.exists():
+                raise ProtocolError("payload 缺 init_weights.json 且无 opt_init/blob——无法构建模型")
+            load_state_into(model, str(init_w))
+            model.to(device_t)
+            opt = torch.optim.Adam(model.parameters(), lr=float(manifest["lr"]))
+            log(f"job {jid}: 无 opt_init，从 init_weights warm-start + 新 Adam")
+    except ProtocolError:
+        raise  # 上游已判定的确定性失败（缺 blob / 缺 init 权重）原样上抛
+    except Exception as e:
+        raise job_body_error("restore（model/opt 恢复）", e) from e
 
     # ---- 多卡（--device cuda-dp）----
     # 位置很重要：**必须在 load_state_dict / load_state_into + .to(device_t) 之后**再包，
@@ -1947,47 +1990,62 @@ def run_job(
             blob_miss_bytes += len(ref_raw)
         ref_path = job_dir / "ref_weights.json"
         ref_path.write_bytes(ref_raw)
-        ref_model = ppo_engine.build_ppo(str(ref_path))
-        load_state_into(ref_model, str(ref_path))
-        for p in ref_model.parameters():
-            p.requires_grad = False
-        ref_model.eval()
-        ref_model.to(device_t)
-        if use_dp:
-            ref_model = torch.nn.DataParallel(ref_model)
-        log(f"job {jid}: kickstart ref 已加载（BC 冻结 master，kl={kick_kl}）")
+        # ★ §4.2：ref 装载同属 restore——ref 与 policy 的架构/形状不合会在每一份字节上
+        # 重演（而它只会被写成一行云机日志，训练侧看到的是超时）。
+        try:
+            ref_model = ppo_engine.build_ppo(str(ref_path))
+            load_state_into(ref_model, str(ref_path))
+            for p in ref_model.parameters():
+                p.requires_grad = False
+            ref_model.eval()
+            ref_model.to(device_t)
+            if use_dp:
+                ref_model = torch.nn.DataParallel(ref_model)
+            log(f"job {jid}: kickstart ref 已加载（BC 冻结 master，kl={kick_kl}）")
+        except ProtocolError:
+            raise
+        except Exception as e:
+            raise job_body_error("restore（kickstart ref 装载）", e) from e
 
     # ---- PPO：load → chunk → update（同一 backend 调用链，D4） ----
+    # ★ §4.2（2026-09-21）：grad 段（含读 shard / 分块）的崩溃归确定性失败。
+    # 为什么连读 shard 一起包：那同样是「这份字节决定的」失败（缺字段/形状不符），
+    # 而 OOM 那类真瞬态由 `job_body_error` 原样放回重领路径。
     shards_root = str(job_dir)
     t_ppo = time.time()
-    episodes = ppo_engine.load_episodes(
-        shards_root,
-        float(manifest["gamma"]),
-        float(manifest["lam"]),
-        normalize_adv=str(manifest["adv_norm"]) != "none",
-        normalize_ret=bool(manifest.get("normalize_ret", False)),
-        # 严格样本量配额（target_transitions 路线）：逐关只收前 N 步，截断在 GAE
-        # 之前。0/缺失（旧 hub 产出的 manifest）= 全收，历史行为逐字节不变。
-        per_stage_quota=int(manifest.get("per_stage_quota", 0) or 0),
-    )
-    total_steps = sum(e["obs"].shape[0] for e in episodes)
-    chunks = ppo_engine.chunk_episodes(
-        episodes, int(manifest["mb"]), shuffle=bool(manifest["shuffle"])
-    )
-    agg = ppo_engine.ppo_update(
-        model,
-        opt,
-        chunks,
-        int(manifest["epochs"]),
-        device_t,
-        kl_coef=float(manifest["kl_coef"]),
-        # ent_coef：None（旧 hub / 未配）→ 引擎常量 ENT_COEF；0.0 是合法值，不能 `or` 兜底。
-        ent_coef=(
-            None if manifest.get("ent_coef") is None else float(manifest["ent_coef"])
-        ),
-        ref_model=ref_model,
-        kickstart_kl=kick_kl,
-    )
+    try:
+        episodes = ppo_engine.load_episodes(
+            shards_root,
+            float(manifest["gamma"]),
+            float(manifest["lam"]),
+            normalize_adv=str(manifest["adv_norm"]) != "none",
+            normalize_ret=bool(manifest.get("normalize_ret", False)),
+            # 严格样本量配额（target_transitions 路线）：逐关只收前 N 步，截断在 GAE
+            # 之前。0/缺失（旧 hub 产出的 manifest）= 全收，历史行为逐字节不变。
+            per_stage_quota=int(manifest.get("per_stage_quota", 0) or 0),
+        )
+        total_steps = sum(e["obs"].shape[0] for e in episodes)
+        chunks = ppo_engine.chunk_episodes(
+            episodes, int(manifest["mb"]), shuffle=bool(manifest["shuffle"])
+        )
+        agg = ppo_engine.ppo_update(
+            model,
+            opt,
+            chunks,
+            int(manifest["epochs"]),
+            device_t,
+            kl_coef=float(manifest["kl_coef"]),
+            # ent_coef：None（旧 hub / 未配）→ 引擎常量 ENT_COEF；0.0 是合法值，不能 `or` 兜底。
+            ent_coef=(
+                None if manifest.get("ent_coef") is None else float(manifest["ent_coef"])
+            ),
+            ref_model=ref_model,
+            kickstart_kl=kick_kl,
+        )
+    except ProtocolError:
+        raise
+    except Exception as e:
+        raise job_body_error("grad（PPO 更新）", e) from e
     ppo_sec = round(time.time() - t_ppo, 1)
     log(
         f"job {jid}: PPO done in {ppo_sec}s, steps={total_steps} chunks={len(chunks)} kl={agg.get('kl')}"
