@@ -218,6 +218,7 @@ export class Game {
     this.wireProbeUI()
 
     this.audio.setVolume(this.settings.volume)
+    this.wireAudioUnlock()
 
     // Apply saved settings
     const savedDiffIdx = DIFFICULTY_KEYS.indexOf(this.settings.difficulty)
@@ -227,6 +228,27 @@ export class Game {
 
     this.world.selectDifficulty(DIFFICULTY_KEYS[this.difficultyIndex])
     this.world.selectTheme(THEME_KEYS[this.themeIndex])
+  }
+
+  /**
+   * Unlock Web Audio on any user gesture, not just a menu one.
+   *
+   * An `AudioContext` may only be created inside a user gesture (autoplay
+   * policy), which is why the menu handlers call `audio.init()`. Wiring the
+   * unlock ONLY to the menu left every menu-less entry point mute for the
+   * whole session: a probe run booted straight from `?probe=<course>` never
+   * visits the menu, so the player's keypresses gave the page activation but
+   * nothing ever created the context. `init()` is idempotent and `resume()`
+   * no-ops on a running context, so the listeners stay armed: a context the
+   * browser suspended in the background comes back on the next keypress too.
+   */
+  private wireAudioUnlock(): void {
+    const unlock = (): void => {
+      this.audio.init()
+      this.audio.resume()
+    }
+    document.addEventListener('keydown', unlock)
+    document.addEventListener('pointerdown', unlock)
   }
 
   // ---- Lie-Back-Win-Mode: coop toggle ----

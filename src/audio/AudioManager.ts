@@ -1,5 +1,27 @@
 import type { GameEvent } from '../types'
 
+/** Master volume default (a Web Audio gain: 0 = silent, 1 = full). */
+export const DEFAULT_VOLUME = 0.3
+/** Gain bounds — everything outside is clamped, never passed to Web Audio. */
+export const VOLUME_MIN = 0
+/** Gain bounds — everything outside is clamped, never passed to Web Audio. */
+export const VOLUME_MAX = 1
+
+/**
+ * Coerce a volume to a usable gain: non-numbers and non-finite values (NaN,
+ * ±Infinity — a corrupt persisted setting, a bad caller) fall back to the
+ * default, finite ones are clamped to [`VOLUME_MIN`, `VOLUME_MAX`].
+ *
+ * Load-bearing: `AudioParam.value` throws on a non-finite value, and `init()`
+ * treats any throw as "Web Audio is unavailable" — so an unvalidated volume
+ * used to disable audio permanently, silently (the game stayed mute for the
+ * rest of the session with only a console warning).
+ */
+export function sanitizeVolume(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_VOLUME
+  return Math.min(VOLUME_MAX, Math.max(VOLUME_MIN, value))
+}
+
 /**
  * AudioManager — generates 8-bit style sound effects with Web Audio API.
  * No external audio files needed.
@@ -7,7 +29,7 @@ import type { GameEvent } from '../types'
 export class AudioManager {
   private ctx: AudioContext | null = null
   private masterGain: GainNode | null = null
-  private volume = 0.3
+  private volume = DEFAULT_VOLUME
   /**
    * Lie-Back-Win-Mode §3.7: id of the God AI's tank (player2). Bullets
    * whose ownerId matches this get the attenuated shoot sound (50% vol).
@@ -34,10 +56,16 @@ export class AudioManager {
     }
   }
 
+  /**
+   * Set the master volume. A non-finite / out-of-range value is sanitised
+   * rather than applied: assigning it to a GainNode throws inside `init()`,
+   * which would classify a bad volume as "no Web Audio" and mute the game for
+   * the whole session (see `sanitizeVolume`).
+   */
   setVolume(v: number): void {
-    this.volume = v
+    this.volume = sanitizeVolume(v)
     if (this.masterGain) {
-      this.masterGain.gain.value = v
+      this.masterGain.gain.value = this.volume
     }
   }
 

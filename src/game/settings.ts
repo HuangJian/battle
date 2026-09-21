@@ -1,3 +1,4 @@
+import { sanitizeVolume, DEFAULT_VOLUME } from '../audio/AudioManager'
 import { DEFAULT_KEYS, isModifierCode, parseBinding } from './Input'
 import { DEFAULT_THEME } from '../config/theme'
 import type { GameSettings, KeyBindings } from '../types'
@@ -11,7 +12,7 @@ export const SETTINGS_KEY = 'bc_settings'
  */
 export function loadSettings(): GameSettings {
   const defaults: GameSettings = {
-    volume: 0.3,
+    volume: DEFAULT_VOLUME,
     difficulty: 'classic',
     theme: DEFAULT_THEME,
     screenScale: 1,
@@ -28,6 +29,10 @@ export function loadSettings(): GameSettings {
       // modifier (e.g. the old "Alt+AltLeft" capture bug). Such a binding can
       // never fire, so we fall back to its default.
       merged.keys = sanitizeKeys(merged.keys)
+      // Same discipline for the volume: a corrupt value (null / NaN / a string
+      // / out of range) must never reach the Web Audio gain — it would throw
+      // inside AudioManager.init() and mute the whole session.
+      merged.volume = sanitizeVolume(merged.volume)
       return merged
     }
   } catch {
