@@ -13,7 +13,9 @@ import {
   createRolloutRunner,
   detectBestNode,
   detectNode,
+  ensureNativeAssets,
   ensureNodeBundle,
+  parseBench,
   parseNodeVersion,
   prepareBundleDir,
 } from '../../tools/agent/rollout-runner'
@@ -243,6 +245,53 @@ describe('createRolloutRunner', () => {
   })
 })
 
+describe('ensureNativeAssets（T2：资产就位/降级）', () => {
+  const setup = () => {
+    const repoRoot = mkdtempSync(path.join(tmpdir(), 'rr-nat-'))
+    const bundleDir = mkdtempSync(path.join(tmpdir(), 'rr-natb-'))
+    return { repoRoot, bundleDir }
+  }
+
+  it('仓里没有 native 源码 ⇒ 降级返回原因（不抛、不编译）', () => {
+    const { repoRoot, bundleDir } = setup()
+    const r = ensureNativeAssets(repoRoot, bundleDir, () => {})
+    expect(r.ok).toBe(false)
+    expect(r.reason).toMatch(/缺源文件|无共享库|无指纹/)
+  })
+
+  it('NN_NATIVE=0 ⇒ 直接关闭', () => {
+    const { repoRoot, bundleDir } = setup()
+    const prev = process.env.NN_NATIVE
+    process.env.NN_NATIVE = '0'
+    try {
+      const r = ensureNativeAssets(repoRoot, bundleDir, () => {})
+      expect(r.ok).toBe(false)
+      expect(r.reason).toBe('NN_NATIVE=0')
+    } finally {
+      if (prev === undefined) delete process.env.NN_NATIVE
+      else process.env.NN_NATIVE = prev
+    }
+  })
+
+  it('已有库（NN_NATIVE_LIB）⇒ 复制到 bundle 目录供打包产物解析', () => {
+    const { repoRoot, bundleDir } = setup()
+    const fake = path.join(repoRoot, 'libfake.bin')
+    writeFileSync(fake, 'NOT-A-REAL-LIB')
+    const prev = process.env.NN_NATIVE_LIB
+    process.env.NN_NATIVE_LIB = fake
+    try {
+      const r = ensureNativeAssets(repoRoot, bundleDir, () => {})
+      expect(r.ok).toBe(true)
+      expect(r.libPath).toBe(fake)
+      expect(r.sha.length).toBe(16)
+      expect(existsSync(path.join(bundleDir, 'libfake.bin'))).toBe(true)
+    } finally {
+      if (prev === undefined) delete process.env.NN_NATIVE_LIB
+      else process.env.NN_NATIVE_LIB = prev
+    }
+  })
+})
+
 describe('引擎微基准自动选择（§374）', () => {
   const setup = () => {
     const repoRoot = mkdtempSync(path.join(tmpdir(), 'rr-bench-'))
@@ -298,6 +347,34 @@ describe('引擎微基准自动选择（§374）', () => {
     expect(choiceValid(null, '1.4.2', 'v26.8.1', 'abc')).toBe(false)
   })
 
+  it('choiceValid：native 库指纹变了也失效（重建过就要重测）', () => {
+    const c: EngineChoice = {
+      winner: 'bun',
+      bunMs: 2.5,
+      nodeMs: 3.6,
+      bunVer: '1.4.2',
+      nodeVer: 'v26.8.1',
+      wasmSha: 'abc',
+      ts: 1,
+      bunArm: 'native',
+      nodeArm: 'wasm',
+      nativeSha: 'n1',
+    }
+    expect(choiceValid(c, '1.4.2', 'v26.8.1', 'abc', 'n1')).toBe(true)
+    expect(choiceValid(c, '1.4.2', 'v26.8.1', 'abc', 'n2')).toBe(false)
+    // 旧缓存（无 nativeSha 字段）遇到「现在有 native 库」⇒ 作废重测
+    const legacy = { ...c } as EngineChoice
+    delete legacy.nativeSha
+    expect(choiceValid(legacy, '1.4.2', 'v26.8.1', 'abc', 'n1')).toBe(false)
+  })
+
+  it('parseBench：取各轮最小值 + 认 BENCH-ARM', () => {
+    const out = ['BENCH 6.100', 'BENCH-ARM wasm', 'BENCH 5.900', 'BENCH-ARM native'].join('\n')
+    expect(parseBench(out)).toEqual({ ms: 5.9, arm: 'native' })
+    expect(parseBench('BENCH-ARM native')).toEqual({ ms: null, arm: 'native' })
+    expect(parseBench('garbage')).toEqual({ ms: null, arm: 'unknown' })
+  })
+
   it('node 明显更快 → 选 node 且落缓存；二次创建读缓存不再跑基准', () => {
     const { repoRoot, bundleDir } = setup()
     let benchCalls = 0
@@ -329,6 +406,50 @@ describe('引擎微基准自动选择（§374）', () => {
     const { repoRoot, bundleDir } = setup()
     const r = createRolloutRunner(opts(repoRoot, bundleDir, { bench: () => null }))
     expect(r.engine).toBe('bun')
+  })
+
+  it('native 臂让 bun 反超 node ⇒ 选 bun（T1′：native 参与引擎选择）', () => {
+    const { repoRoot, bundleDir } = setup()
+    // 本机实测量级：bun+native 2.5ms / bun+wasm 6.16ms / node+wasm 3.60ms
+    const withNative = createRolloutRunner(
+      opts(repoRoot, bundleDir, {
+        bench: () => ({
+          bunMs: 2.5,
+          nodeMs: 3.6,
+          bunArm: 'native' as const,
+          nodeArm: 'wasm' as const,
+        }),
+      }),
+    )
+    expect(withNative.engine).toBe('bun')
+    expect(withNative.reason).toMatch(/native/)
+
+    const { repoRoot: r2, bundleDir: b2 } = setup()
+    const withoutNative = createRolloutRunner(
+      opts(r2, b2, {
+        bench: () => ({
+          bunMs: 6.16,
+          nodeMs: 3.6,
+          bunArm: 'wasm' as const,
+          nodeArm: 'wasm' as const,
+        }),
+      }),
+    )
+    expect(withoutNative.engine).toBe('node')
+  })
+
+  it('native 资产不可用时仍能选引擎（只降级、不抛）', () => {
+    const { repoRoot, bundleDir } = setup()
+    const logs: string[] = []
+    const r = createRolloutRunner(
+      opts(repoRoot, bundleDir, {
+        log: (m: string) => logs.push(m),
+        native: () => ({ ok: false, libPath: null, sha: '', reason: '探针：无库' }),
+        bench: () => ({ bunMs: 6.16, nodeMs: 3.6 }),
+      }),
+    )
+    expect(r.engine).toBe('node')
+    expect(logs.join('\n')).toMatch(/native features 不可用/)
   })
 
   it('forceNode 直接选 node（跳过基准）', () => {

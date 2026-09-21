@@ -19,6 +19,7 @@ CI 上不会红）。
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 import zipfile
@@ -73,6 +74,27 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _host_native_lib_rel() -> str | None:
+    """本机在 native 矩阵里的目标库（相对仓根的 posix 路径）；不在矩阵里返回 None。
+
+    口径必须与 TS 侧一致（`process.platform` / `process.arch`）：python 的 machine()
+    给的是 `AMD64`/`x86_64`/`aarch64`/`arm64`，要映射成 TS 的 `x64`/`arm64`；
+    `darwin`/`linux`/`win32` 两边同名。
+    """
+    import platform as _pl
+
+    machine = _pl.machine().lower()
+    arch = "x64" if machine in ("amd64", "x86_64") else "arm64" if machine in ("aarch64", "arm64") else None
+    if arch is None:
+        return None
+    plat = sys.platform  # 'win32' / 'linux' / 'darwin'（与 process.platform 同名）
+    lib = {"win32": "conv_feats_native.dll", "darwin": "conv_feats_native.dylib"}.get(
+        plat, "conv_feats_native.so"
+    )
+    rel = f"src/nn/native/prebuilt/{plat}-{arch}/{lib}"
+    return rel if (REPO_ROOT / rel).exists() else None
+
+
 def _rollout_args() -> SimpleNamespace:
     return SimpleNamespace(
         goal_rollout=False,
@@ -115,6 +137,12 @@ def test_node_runner_shards_byte_identical_to_direct_run(tmp_path: Path) -> None
     assert (ts_root / "tools/sim/export-rl-rollout.ts").exists()
     assert (ts_root / "src/nn/wasm/conv_feats.wasm").exists(), \
         "wasm 权重没进 ts_code —— 云机上卷积会直接炸"
+    # native 共享库同理：云机没有 clang、也不持仓库，只能靠 ts_code 带过去；
+    # 漏了它不会报错，只会**静默**回落 wasm（每局 1338ms）。
+    host_lib = _host_native_lib_rel()
+    if host_lib is not None:
+        assert (ts_root / host_lib).exists(), \
+            f"native 库没进 ts_code（{host_lib}）——云机上会静默回落 wasm"
 
     # 两个目录各放一份同名权重（argv 里是 `--weights init_weights.json`，job 目录相对）
     dir_a = tmp_path / "direct"
@@ -157,6 +185,15 @@ def test_node_runner_shards_byte_identical_to_direct_run(tmp_path: Path) -> None
     rep_a = json.loads((dir_a / "w0" / "_rl_report.json").read_text(encoding="utf-8"))
     rep_b = json.loads((dir_b / "w0" / "_rl_report.json").read_text(encoding="utf-8"))
     assert rep_a.get("wver") == "WVER" * 16  # argv 里的 wver 真的进了 shard manifest
+    # 记账字段 `feat`：库在包里的前提下，云机布局（cwd=解包树）必须真的用上 native ——
+    # 这条同时证明「模块相对路径解析」在**搬过家的树**里成立（正是云机的情形）。
+    man_a = json.loads((dir_a / shard / "manifest.json").read_text(encoding="utf-8"))
+    man_b = json.loads((dir_b / shard / "manifest.json").read_text(encoding="utf-8"))
+    assert man_a.get("feat") == man_b.get("feat"), "两条路径的 features 后端不一致"
+    if host_lib is not None and os.environ.get("NN_NATIVE") != "0":
+        assert man_b.get("feat") == "native", (
+            f"云机布局下没走 native（feat={man_b.get('feat')}）—— 库在包里但加载失败？"
+        )
     rep_a.pop("elapsedSec", None)
     rep_b.pop("elapsedSec", None)
     assert rep_a == rep_b

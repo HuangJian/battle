@@ -975,6 +975,7 @@ async function runGame(
         nodeLabel,
         '--pack',
         packFile,
+        '--pack-memory',
       )
     } else {
       args = [entryTs, '--weights', wfile, '--out', gameDir]
@@ -1023,6 +1024,7 @@ async function runGame(
         // 拼装与仿真并行，不再阻塞 agent 主线程（8 workers 串行打包曾是吞吐瓶颈）。
         '--pack',
         packFile,
+        '--pack-memory',
       )
     }
     const plan = runner.launch(entryTs, args)

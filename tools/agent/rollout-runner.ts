@@ -28,6 +28,7 @@ import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+import { buildNative, nativeStaleReason, resolveNativeLib } from './native-build'
 
 /** node 最低可接受主版本（22.x LTS 起；实测 22.22 = 5.40ms、26.8 = 4.62ms）。 */
 export const MIN_NODE_MAJOR = 22
@@ -269,24 +270,53 @@ export interface EngineChoice {
   nodeVer: string
   wasmSha: string
   ts: number
+  /** bun 臂实测走的后端（native 臂 = 共享库已装且 attestation 过了）；旧缓存缺此字段即作废。 */
+  bunArm?: BenchArm
+  /** node 臂实测走的后端（正常就是 wasm）。 */
+  nodeArm?: BenchArm
+  /** native 共享库指纹（重建过就要重测）。 */
+  nativeSha?: string
 }
+
+/** features 实际用到的后端（与 src/nn/native-conv.ts 的 featuresEngine 对齐）。 */
+export type BenchArm = 'native' | 'wasm' | 'ts' | 'unknown'
 
 function sha256File(p: string): string {
   return createHash('sha256').update(fs.readFileSync(p)).digest('hex').slice(0, 16)
+}
+
+/** 缩短展示用指纹（native 库）。 */
+export function shortSha(p: string | null): string {
+  if (!p) return ''
+  try {
+    return sha256File(p)
+  } catch {
+    return ''
+  }
 }
 
 export function engineChoiceFile(bundleDir: string): string {
   return path.join(bundleDir, CHOICE_FILE)
 }
 
-/** 缓存是否仍有效（bun/node 版本与 wasm 都没变才算数）。 */
+/**
+ * 缓存是否仍有效：bun/node 版本、wasm sha、**native 库指纹**都没变才算数。
+ * nativeSha 是 2026-09-21 新加的口径（不带上它 ⇒ 换了 native 库还吃旧基准）。
+ */
 export function choiceValid(
   c: EngineChoice | null,
   bunVer: string,
   nodeVer: string,
   wasmSha: string,
+  nativeSha = '',
 ): boolean {
-  return !!c && c.bunVer === bunVer && c.nodeVer === nodeVer && c.wasmSha === wasmSha
+  return (
+    !!c &&
+    c.bunVer === bunVer &&
+    c.nodeVer === nodeVer &&
+    c.wasmSha === wasmSha &&
+    (c.nativeSha ?? '') === nativeSha
+  )
 }
 
 /** 迟滞判据：node 明显更快才选 node。 */
@@ -299,7 +329,86 @@ export function chooseByBench(
   return nodeMs <= bunMs * margin ? 'node' : 'bun'
 }
 
-/** 真跑微基准（bun 跑 TS 源 / node 跑打包 mjs，各自进程内计时，spawn 税不进数字）。 */
+export interface BenchResult {
+  bunMs: number
+  nodeMs: number
+  bunArm: BenchArm
+  nodeArm: BenchArm
+}
+
+/**
+ * native 共享库资产就位（T2，2026-09-21）：
+ *  1. `NN_NATIVE_LIB` 指路 / **入库 prebuilt**（节点默认走这条，**不需要 clang**）/ 本机
+ *     `tmp/native` 构建 ⇒ 直接用；
+ *  2. 都没有（prebuilt 矩阵没这个平台）⇒ 有编译器就建一次（`NN_NATIVE_BUILD=0` 可禁）；
+ *  3. 复制到 bundle 目录 ⇒ 打包后的 exporter 用模块相对路径也能找到（node 引擎用不上，
+ *     但 bun 引擎跑 bundle 时会用）。
+ * 失败永远只降级、不抛：native 是**可选加速**，掉了就回落 wasm（正确性另由首用 attestation 把关）。
+ */
+export function ensureNativeAssets(
+  repoRoot: string,
+  bundleDir: string,
+  log: (m: string) => void,
+): { ok: boolean; libPath: string | null; sha: string; reason: string } {
+  if (process.env.NN_NATIVE === '0')
+    return { ok: false, libPath: null, sha: '', reason: 'NN_NATIVE=0' }
+  const resolved = resolveNativeLib(repoRoot)
+  let lib: string | null = resolved.path
+  if (!lib && process.env.NN_NATIVE_BUILD !== '0') {
+    const r = buildNative(repoRoot, {})
+    log(
+      `[rollout-runner] native 构建${r.ok ? '成功' : `失败（${r.reason}）`}${r.log.length ? ` — ${r.log.join('; ')}` : ''}`,
+    )
+    lib = r.ok ? (r.lib ?? null) : null
+  }
+  if (!lib) {
+    const why =
+      process.env.NN_NATIVE_BUILD === '0' ? 'NN_NATIVE_BUILD=0' : nativeStaleReason(repoRoot)
+    return {
+      ok: false,
+      libPath: null,
+      sha: '',
+      reason: `${resolved.reason}${why ? `；本机指纹: ${why}` : ''}`,
+    }
+  }
+  log(`[rollout-runner] native 资产就绪 source=${resolved.kind ?? 'build'} lib=${lib}`)
+  const sha = shortSha(lib)
+  try {
+    const dst = path.join(bundleDir, path.basename(lib))
+    fs.mkdirSync(bundleDir, { recursive: true })
+    if (!fs.existsSync(dst) || shortSha(dst) !== sha) fs.copyFileSync(lib, dst)
+  } catch (e) {
+    log(
+      `[rollout-runner] native 库复制到 bundle 失败（不影响 cwd/源路径解析）: ${
+        e instanceof Error ? e.message : String(e)
+      }`,
+    )
+  }
+  return { ok: true, libPath: lib, sha, reason: 'ok' }
+}
+
+/** 解析基准输出（BENCH <ms> / BENCH-ARM <arm>）。 */
+export function parseBench(stdout: string): { ms: number | null; arm: BenchArm } {
+  let ms: number | null = null
+  let arm: BenchArm = 'unknown'
+  for (const line of stdout.split(/\r?\n/)) {
+    const t = line.trim()
+    const m = /^BENCH\s+([\d.]+)$/.exec(t)
+    if (m) {
+      const v = Number(m[1])
+      if (Number.isFinite(v) && (ms === null || v < ms)) ms = v
+    }
+    const a = /^BENCH-ARM\s+(\S+)$/.exec(t)
+    if (a) arm = a[1] as BenchArm
+  }
+  return { ms, arm }
+}
+
+/**
+ * 真跑微基准（bun 跑 TS 源 / node 跑打包 mjs，各自进程内计时，spawn 税不进数字）。
+ * 两侧都调用**生产入口**（native → wasm → TS），所以 bun 臂装上 native 时这里测到的
+ * 就是 native 的数字（BENCH-ARM native）—— 引擎选择因此能拿 native 与 node+wasm 比。
+ */
 export function runEngineBench(
   repoRoot: string,
   bundleDir: string,
@@ -307,7 +416,8 @@ export function runEngineBench(
   node: NodeRuntime,
   log: (m: string) => void,
   build?: BuildOptions['build'],
-): { bunMs: number; nodeMs: number } | null {
+  nativeLib: string | null = null,
+): BenchResult | null {
   try {
     fs.mkdirSync(bundleDir, { recursive: true })
     const mjs = path.join(bundleDir, BENCH_MJS)
@@ -328,33 +438,54 @@ export function runEngineBench(
         return null
       }
     }
+    // 打包臂要自带 wasm 资产（conv-wasm 按模块相对路径解析；缺了会静默回退 TS 路径）
     const wasm = path.join(repoRoot, 'src', 'nn', 'wasm', 'conv_feats.wasm')
     if (!fs.existsSync(wasm)) return null
-    const run = (cmd: string, entry: string): number | null => {
-      const r = spawnSync(cmd, [entry, wasm, String(BENCH_ROUNDS)], {
+    const wasmDst = path.join(bundleDir, 'wasm', 'conv_feats.wasm')
+    try {
+      fs.mkdirSync(path.dirname(wasmDst), { recursive: true })
+      if (!fs.existsSync(wasmDst)) fs.copyFileSync(wasm, wasmDst)
+    } catch {
+      /* 复制失败 → node 臂会回退 TS，基准数字自会露出来 */
+    }
+    // native 库经 env 明确告知两侧（bun 臂能用；node 臂即使拿到也用不了 bun:ffi）
+    const env = { ...process.env, ...(nativeLib ? { NN_NATIVE_LIB: nativeLib } : {}) }
+    const run = (
+      cmd: string,
+      entry: string,
+    ): { ms: number | null; arm: BenchArm; note: string } | null => {
+      const r = spawnSync(cmd, [entry, String(BENCH_ROUNDS)], {
         cwd: repoRoot,
+        env,
         encoding: 'utf8',
         timeout: 60_000,
         windowsHide: true,
       })
       if (r.status !== 0) return null
-      let best: number | null = null
-      for (const line of String(r.stdout ?? '').split(/\r?\n/)) {
-        const m = /^BENCH\s+([\d.]+)$/.exec(line.trim())
-        if (m) {
-          const v = Number(m[1])
-          if (best === null || v < best) best = v
-        }
+      const p = parseBench(String(r.stdout ?? ''))
+      return {
+        ms: p.ms,
+        arm: p.arm,
+        note: String(r.stderr ?? '')
+          .trim()
+          .slice(0, 200),
       }
-      return best
     }
-    const bunMs = run(bunPath, path.join(repoRoot, BENCH_ENTRY_TS))
-    const nodeMs = run(node.bin, mjs)
-    if (bunMs === null || nodeMs === null) {
-      log(`[rollout-runner] 微基准失败 bun=${bunMs} node=${nodeMs} → 略过`)
+    const bunR = run(bunPath, path.join(repoRoot, BENCH_ENTRY_TS))
+    const nodeR = run(node.bin, mjs)
+    if (!bunR || !nodeR || bunR.ms === null || nodeR.ms === null) {
+      log(
+        `[rollout-runner] 微基准失败 bun=${bunR?.ms ?? null}(${bunR?.arm ?? '?'}) node=${nodeR?.ms ?? null}(${nodeR?.arm ?? '?'}) → 略过`,
+      )
       return null
     }
-    return { bunMs, nodeMs }
+    // bun 臂若掉了 native，把原因记一行（否则「以为开了 native」无人知）
+    if (nativeLib && bunR.arm !== 'native') {
+      log(
+        `[rollout-runner] 注意：bun 臂未走 native（arm=${bunR.arm}）${bunR.note ? ` — ${bunR.note}` : ''}`,
+      )
+    }
+    return { bunMs: bunR.ms, nodeMs: nodeR.ms, bunArm: bunR.arm, nodeArm: nodeR.arm }
   } catch (e) {
     log(`[rollout-runner] 微基准异常: ${e instanceof Error ? e.message : String(e)} → 略过`)
     return null
@@ -379,7 +510,9 @@ export interface RunnerOptions {
   detect?: (opts: DetectOptions) => NodeRuntime | null
   build?: BuildOptions['build']
   /** 注入微基准（单测用）：返回 bun/node 稳态 forward ms；null=基准失败。缺省真跑。 */
-  bench?: () => { bunMs: number; nodeMs: number } | null
+  bench?: BenchFn
+  /** 注入 native 资产解析（单测用）。缺省 = ensureNativeAssets（可能触发一次编译）。 */
+  native?: () => { ok: boolean; libPath: string | null; sha: string; reason: string }
 }
 
 export interface RolloutRunner {
@@ -393,8 +526,16 @@ export interface RolloutRunner {
   noteFailure(engine: RolloutEngine, detail?: string): void
 }
 
+/** 注入式基准（单测用）：arms 可省（旧断言形状）。 */
+export type BenchFn = () => {
+  bunMs: number
+  nodeMs: number
+  bunArm?: BenchArm
+  nodeArm?: BenchArm
+} | null
+
 /**
- * 创建 runner：启动时探测一次 node + 预打包全部白名单 exporter。
+ * 创建 runner：启动时探测一次 node + native 资产 + 微基准，并按需预打包全部白名单 exporter。
  * 之后 launch() 只查缓存，不再做 IO。
  */
 export function createRolloutRunner(opts: RunnerOptions): RolloutRunner {
@@ -426,11 +567,19 @@ export function createRolloutRunner(opts: RunnerOptions): RolloutRunner {
       const wasmPath = path.join(opts.repoRoot, 'src', 'nn', 'wasm', 'conv_feats.wasm')
       const wasmSha = fs.existsSync(wasmPath) ? sha256File(wasmPath) : ''
       const choiceFile = engineChoiceFile(bundleDir)
+      // native 资产（rollout-eval-opt T2）：bun 臂的加速来源；失败只降级、不抛。
+      // 放在探测之后、基准之前 —— 基准要按「本机真实会跑的臂」计时。
+      const nat = (opts.native ?? (() => ensureNativeAssets(opts.repoRoot, bundleDir, log)))()
+      log(
+        nat.ok
+          ? `[rollout-runner] native features 资产就绪 lib=${nat.libPath} sha=${nat.sha}`
+          : `[rollout-runner] native features 不可用：${nat.reason}（bun 臂回落 wasm）`,
+      )
       let loaded: EngineChoice | null = null
       try {
         if (fs.existsSync(choiceFile)) {
           const j = JSON.parse(fs.readFileSync(choiceFile, 'utf8')) as EngineChoice
-          if (choiceValid(j, bunVer, node.version, wasmSha)) loaded = j
+          if (choiceValid(j, bunVer, node.version, wasmSha, nat.sha)) loaded = j
         }
       } catch {
         /* 缓存损坏 → 重测 */
@@ -439,13 +588,28 @@ export function createRolloutRunner(opts: RunnerOptions): RolloutRunner {
         engine = loaded.winner
         reason =
           `微基准缓存（winner=${loaded.winner}，bun ${loaded.bunMs.toFixed(2)}ms` +
-          (loaded.nodeMs !== null ? ` / node ${loaded.nodeMs.toFixed(2)}ms` : '') +
+          `${loaded.bunArm ? `[${loaded.bunArm}]` : ''}` +
+          (loaded.nodeMs !== null
+            ? ` / node ${loaded.nodeMs.toFixed(2)}ms${loaded.nodeArm ? `[${loaded.nodeArm}]` : ''}`
+            : '') +
           `，${bunVer} vs ${node.version}）`
       } else {
-        const bench = (
+        const benchFn: BenchFn =
           opts.bench ??
-          (() => runEngineBench(opts.repoRoot, bundleDir, process.execPath, node!, log, opts.build))
-        )()
+          (() =>
+            runEngineBench(
+              opts.repoRoot,
+              bundleDir,
+              process.execPath,
+              node!,
+              log,
+              opts.build,
+              nat.libPath,
+            ))
+        const raw = benchFn()
+        const bench: BenchResult | null = raw
+          ? { ...raw, bunArm: raw.bunArm ?? 'unknown', nodeArm: raw.nodeArm ?? 'unknown' }
+          : null
         if (!bench) {
           reason = `node ${node.version} 可用但微基准失败 → bun`
           node = null
@@ -459,6 +623,9 @@ export function createRolloutRunner(opts: RunnerOptions): RolloutRunner {
             nodeVer: node.version,
             wasmSha,
             ts: Date.now(),
+            bunArm: bench.bunArm,
+            nodeArm: bench.nodeArm,
+            nativeSha: nat.sha,
           }
           try {
             fs.mkdirSync(bundleDir, { recursive: true })
@@ -467,7 +634,8 @@ export function createRolloutRunner(opts: RunnerOptions): RolloutRunner {
             /* 缓存写失败不影响本次决策 */
           }
           reason =
-            `微基准：bun ${bench.bunMs.toFixed(2)}ms vs node ${bench.nodeMs.toFixed(2)}ms → ` +
+            `微基准：bun ${bench.bunMs.toFixed(2)}ms[${bench.bunArm}] vs ` +
+            `node ${bench.nodeMs.toFixed(2)}ms[${bench.nodeArm}] → ` +
             (engine === 'node' ? `node ${node.version}` : 'bun（node 未快过 3% 迟滞）') +
             `（${Date.now() - t0}ms）`
         }

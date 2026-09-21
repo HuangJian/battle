@@ -15,6 +15,7 @@
  */
 
 import { readFileSync } from 'fs'
+import { noteFeaturesEngine, runStudentConvNative } from './native-conv'
 
 interface WasmRunner {
   /** 上传权重（实例变化时）并跑 features → pooled 与 bufA 均已填。返回 true=本次成功。
@@ -160,7 +161,16 @@ export function studentConvWasm(): WasmRunner | null {
   return _runner
 }
 
-/** StudentModel.features 接入点：h64/d8/board26 时优先 wasm；返回 true=pooled+bufA 已填。 */
+/** bench/测试：强制关 wasm（null=已探测且禁用）或重置探测。生产路径不调用。 */
+export function setStudentConvWasmEnabled(enabled: boolean): void {
+  _runner = enabled ? undefined : null
+}
+
+/**
+ * wasm 后端（**强制**走 wasm，不走 native）：对拍/基准的参考实现，也是 native 的
+ * attestation 参照。生产路径请用 `runStudentFeatures`。
+ * 返回 true = pooled+bufA 已填。
+ */
 export function runStudentConvWasm(model: unknown): boolean {
   const m = model as {
     in16: Float32Array
@@ -188,3 +198,27 @@ export function runStudentConvWasm(model: unknown): boolean {
     return false // 运行时异常 → TS 原路径兜底
   }
 }
+
+/**
+ * StudentModel.features 的**生产接入点**（单一咽喉，rollout 与 eval 都走这里）：
+ *   native（共享库 + bun:ffi，仅 bun）→ wasm（conv_feats.wasm）→ TS（调用方兜底）。
+ *
+ * native 的准入不是「文件在就上」：首次调用会用**真实权重**做 3 次 native↔wasm 逐字节
+ * attestation（见 src/nn/native-conv.ts），不过就本进程关闭并打一行 warning。
+ * 返回 true = pooled+bufA 已填（由 native 或 wasm 之一完成）。
+ */
+export function runStudentFeatures(model: unknown): boolean {
+  if (runStudentConvNative(model, { runWasm: (m) => runStudentConvWasm(m) })) return true
+  if (runStudentConvWasm(model)) {
+    noteFeaturesEngine('wasm')
+    return true
+  }
+  return false
+}
+
+/** TS 特征路径（调用方兜底）实际生效时记账 —— 让「以为开了加速其实在 TS」能被看见。 */
+export function noteFeaturesTs(): void {
+  noteFeaturesEngine('ts')
+}
+
+export { featuresEngine } from './native-conv'

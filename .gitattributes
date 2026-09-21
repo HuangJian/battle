@@ -16,6 +16,11 @@ DECISIONS.md merge=union
 
 # 二进制：绝不参与行尾转换（binary = -text -diff）
 *.wasm binary
+# native prebuilt 共享库（交叉编译产物，随仓库分发给 rollout/eval 节点；
+# 节点多数没有 clang，见 src/nn/native-prebuilt.ts）—— 二进制，绝不参与行尾转换。
+*.dll binary
+*.dylib binary
+*.so binary
 *.png binary
 *.jpg binary
 *.jpeg binary

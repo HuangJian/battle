@@ -4,6 +4,142 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §125 prebuilt 交叉编译分发：节点不再需要 clang（plan/rollout-eval-opt.plan.md §2.5/T2，2026-09-21）
+
+**起因（用户提问）**：「rollout 节点机器上可能没有 clang，能本机编译出所有平台 windows/macos/linux/
+android termux 的 native 库直接给它们使用吗？」——查节点池：self(win x64) / mac / a95·a96·a97·a98
+(Android-Termux arm64) / lite / gcs，**异质且多数没有 clang**。原 T2「节点上自己编一次」等于 native 臂
+在远端永远开不起来（只会打一行「编译器不可用」）。答：能，且这正是 T2 的正解。
+
+**做了什么**：
+
+1. 训练机交叉编译 6 目标 → `src/nn/native/prebuilt/<id>/conv_feats_native.{dll,so,dylib}` + `manifest.json`
+   （源码 sha + flags + cc 版本 + 每目标 sha；共 ~78 KB），随既有 `git pull` 升级通道分发。
+   目标 = win32/linux/darwin × x64/arm64；**Termux 用 linux-arm64 那份**（platform 报 linux、arch 报 arm64）。
+2. **内核改免 libc**：交叉编译没有目标平台 sysroot，碰 `string.h`/`memset`/`memcpy` 就链不出来。
+   内核的零填与整行拷贝换成 `cf_zero/cf_copy`（float 按值赋值，结果逐字节不变 ⇒ 本机 parity 仍 8/8 绿）。
+   收益 = 产物**零动态依赖**（无 DT_NEEDED / LC_LOAD_DYLIB / PE 导入表）⇒ glibc / musl /
+   **bionic(Termux)** 都能 dlopen；代价 = padding 从 libc 向量化实现降级为自己写，实测 ~0–2%（2.52 → 2.53ms）。
+3. **x64 只到 AVX1**（`-mavx -msse4.2`）而不是 `-mavx2`：实测 SSE2/SSE4.2 = 3.46–3.53ms、
+   AVX1 = 2.60–2.64ms、AVX2 = 2.51–2.59ms ⇒ AVX1 已拿到全部收益（~27%），AVX2 只多 ~2%，
+   而 prebuilt 是发给别人用的，`-mavx2` 的代价是「2013 年前的 x64 CPU SIGILL」。依旧禁 `-march=native`。
+4. **解析顺序**：`NN_NATIVE_LIB` → **prebuilt** → `tmp/native` 本机构建 →（有编译器时）编一次。
+   节点走第 2 条 ⇒ **零工具链**。两处实现同序（`src/nn/native-conv.ts` 与 tools 侧 `resolveNativeLib`，
+   因 src/ 不许依赖 tools/）。
+5. **新鲜度只在仓库侧**（`--check-prebuilt` + `tests/native-prebuilt.test.ts`，跑在常规套件里 ⇒ 提交必然过闸）；
+   **不做运行期源码 sha 校验**——运行期真闸门是首用 attestation（native↔wasm 逐字节，不过即关 native）。
+
+**证据（本机可复跑）**：
+
+| 项 | 结果 |
+|---|---|
+| 6 目标产物 | linux/darwin 两份**逐字节可重现**；win32 差 9–13 字节（见坑 ① ） |
+| 零依赖（机械核对） | 逐目标断言 ELF ET_DYN+EM_X86_64/AARCH64、Mach-O MH_DYLIB+cputype、PE machine+`IMAGE_FILE_DLL`；且产物里不出现 `libc.so`/`ld-linux`/`libSystem`/`KERNEL32`/`ucrtbase`/`VCRUNTIME`；`llvm-nm -u` 空、ELF `NeededLibraries []` |
+| **真执行** | **WSL + python3 ctypes 加载入库 linux-x64 `.so`**：pooled+bufA 与 wasm **逐字节相同**（本机唯一能真跑非本平台产物的通道） |
+| win32-x64 | 生产入口 bun:ffi 真加载入库 DLL，attestation **3/3 逐字节 vs wasm**（`tests/native-parity.test.ts`，现加载的就是 prebuilt） |
+| 门禁 | `tests/native-prebuilt.test.ts` 16 例 + `bun run check` + `bun run build` 绿 |
+
+**踩到的三个坑（都写进注释/DECISIONS 免得重踩）**：
+
+① **Windows 免 CRT 的两件事**：任何浮点使用都会引用 `_fltused`（否则 `lld-link: undefined symbol: _fltused`）
+⇒ 内核在 `CF_FREESTANDING` 下自带该符号；免 CRT 的 DLL 没有 `_DllMainCRTStartup` ⇒ 链接期 `-Wl,-noentry`
+（PE 规范允许入口点 0，加载器跳过 init）。实测 bun:ffi 能正常加载。
+② **Mach-O 的可重现性**：不显式给 `-no_uuid` + `-install_name` 时，lld 会把**临时输出文件名**（带 pid）
+写进 LC_ID_DYLIB/UUID ⇒ 两次构建差 6 字节。给了这两个 flag 后 linux/darwin 均字节相同。
+③ **COFF 不追可重现**：lld-link 的 `/Brepro` 把 TimeDateStamp 换成含临时 .o 路径的哈希，`-fno-temp-file`
+也压不住（实测仍差 9–13 字节）。正确性靠 attestation、新鲜度靠 manifest sha256，都不依赖「重建字节相同」。
+
+**仍未做**：真节点上确认一行日志（`native 资产就绪 source=prebuilt …`）与一局 shard 的 `feat=native`
+—— 本机无法代跑；其余（格式/零依赖/本机加载/linux-x64 真执行）已全部进门禁。
+
+**补（同日，用户点名）：云机通道也得带库。** 离线训练任务的 rollout 是在 **PPO 云机**上执行的
+（`kind=iter`：训练侧把 TS 运行时打成 `ts_code.zip` 下发，worker 解到 `ts_cache/<sha>` 再
+`bun tools/sim/export-rl-rollout.ts`）。云机既没 clang 也不持仓库，那条白名单原本只收
+`.ts/.jsonc/.wasm` ⇒ 库根本不进包 ⇒ `native-conv` 找不到库 ⇒ 首用 attestation 直接跳过 ⇒
+**静默回落 wasm**（不报错，只是每局回到 1338ms）—— 正是最难查的那种。修法：新增
+`TS_CODE_BINARY_DIRS=("src/nn/native/prebuilt",)` + `TS_CODE_BINARY_SUFFIXES=(".dll",".so",".dylib")`
+（只对该目录生效，不给 `.so` 开全局口子），6 目标全带、写 0755，目录缺失就 `HubClientError`
++ 提示重建命令。门禁两道：`tests/test_ts_code_pack.py`（4 例）+ real-bun 哨兵里「把 zip 解到临时树、
+以它为 cwd 跑 rollout，断言 shard manifest `feat == native`」（探针验过断言是活的）。
+
+---
+
+## §124 rollout/eval 优化落地：native features 内核进生产（plan/rollout-eval-opt.plan.md，2026-09-21）
+
+**做了什么**：Student `features`（rollout/eval 的绝对瓶颈，本机一局 1338ms 里九成）接入 native 内核，
+与 wasm 逐位一致、且**门禁化**；选择的进程模型是**共享库 + `bun:ffi`**，不是起进程。
+
+**为什么不是「CLI + 常驻子进程」**（这一条是本轮最贵的判断）：features 是**逐决策顺序依赖**的
+（动作 → 下一状态），跨决策无法批量；每局 ~236 次调用，而本机进程启动实测 **42–54ms/次**
+（`cmd.exe` 42.1 / `hostname` 54.4，n=30）—— 起进程比整局 sim 还贵，等于负优化。
+FFI 每次 ~0.5µs，且 `in16/pooled/bufA` 直接传 JS 数组地址，连 wasm 的「拷进 48KB + 回拷 169KB」都省了。
+代价是 native 只在 bun 引擎可用（node 无 FFI）⇒ 引擎选择必须把 bun+native 当独立臂与 node+wasm 比。
+
+**实测（本机，可复跑）**：
+
+| 臂 | ms/次 forward | 出处 |
+|---|---|---|
+| TS（兜底） | 52.38 | `bun tools/sim/perf-conv-wasm.ts --iters 400` |
+| wasm | 6.04（对 TS 8.68×） | 同上 |
+| **native** | **2.62（对 wasm 2.31×、对 TS 20.0×）** | 同上 |
+
+单局端到端（同 seed 同权重，x20-clutch.it99，2400 ticks）：**1447ms → 853ms（1.70×）**，
+且 outcome/score/kills/ticks 逐字段一致。引擎选择实测：
+`bun 2.66ms[native] vs node 3.52ms[wasm] → bun` —— 在 native 之前这里会选 node（3.5 vs bun-wasm 6.2）。
+
+**四条纪律**（都写进了 `DECISIONS.md §2026-09-21-goalnn-native-features-engine`）：
+
+1. **flags 钉死 + 禁 `-march=native`**：它会开 FMA/AVX-512，而 clang 默认 `-ffp-contract=fast`
+   ⇒ 乘加融合 ⇒ 与 wasm 不再逐位 ⇒ 异质节点 shard 字节抖动。
+2. **首用 attestation**（本机真实权重 + 3 次 native↔wasm 逐字节）：节点是异质的，
+   「本机 8/8 逐位」不能外推，只能在**本机**验；不过就关 native + 一行 warning。
+   单测直接用「编一个输 0 的 poison 库」钉住这条守卫。
+3. **算法单源**：共享库与对拍 CLI 都链接 `src/nn/native/conv_feats_native.c`（CLI 只剩编解码）。
+   wasm 侧那份动不得（`wasm_simd128` intrinsics = 产品字节），所以两侧一致性交给
+   `tests/native-parity.test.ts` 逐字节断言，而不是「同序」的口头约定。
+4. **记账**：shard manifest 加 `feat`（native/wasm/ts），但**不进 `data_fp`**
+   （protocol.py 只对 dir/wver/stage/seed 求 sha）——「以为开了 native 其实回落了」事后能查。
+
+**顺手修掉的两个历史坑**：
+
+* `tools/agent/engine-bench.ts` 旧版**自绘 wasm 内存布局**，按 v2 的 16 通道算而 v3 已是 18 通道 ⇒
+  `offIn` 只留 16×SP，越界写进 bufA 区（dummy 数据所以没炸，但基准与生产不同构）。现已改为
+  调用生产入口，顺便让基准能测到 native 臂。
+* 旧的「8/8 逐位一致」只活在一个手工脚本里（硬编码 `tmp/conv_features_cli.exe`、脚本还不负责构建），
+  tmp 一清即失效。现由 `tools/agent/native-build.ts`（钉死 flags + 指纹 `native-build.json`）
+  + 门禁用例取代。
+
+**eval 侧端到端验收（T4，2026-09-21）**：`export-eval-game.ts` 与 rollout 共用 `infer.features`，
+它的 features 调用次数与 rollout 同量级（贪心逐步 argmax），所以收益同理：
+同权重（x20-clutch.it99）/同关（s0）/同 max-ticks（2400），**5 个 seed 逐个跑两臂**——
+单局 **1846ms → 1013ms（1.82×）**（5 局总计 9228ms → 5064ms）；
+报告 `_eval_report.json` 的**全部字段逐字段一致（唯一不同的字段是 `feat`：native vs wasm）**，
+即「换后端不改评估读数」（也再次印证逐位一致的工程价值）。
+同时给 eval 报告补上 `feat` 记账（与 rollout 的 shard manifest 同口径）——
+greedy eval 是节点侧跑的量最大的一类任务，这里看不见后端就等于「以为开了 native 其实回落」。
+注：`export-eval-game.ts` 在 dist 哈希集内 ⇒ 改它意味着节点需随新代码同步（既有惯例）。
+
+**补上的门禁（§3 遗留项）**：`tests/pack-memory-parity.test.ts`（3 例，~2.3s）把 `--pack-memory`
+与写盘路径的字节等价从「一次手工冒烟」变成门禁：① `shardNpyEntries` ≡ `writeRlShard` 落盘文件
+（逐字节 + 名字集合/顺序 == 导出的 `RL_SHARD_FILES`）；② `buildPack` 两份 entries 字节相同；
+③ 真跑两次 exporter：内存模式不写 npy 目录，且用消费端读者 `unpackContainer` 解回后
+10 个 npy **逐字节同一**、manifest 除 `elapsedSec` 外逐字段同一。
+
+**③ 这个用例本身抓到一个真事实**（第一次进全量套件时红了）：**pack 不是字节确定的** ——
+`packManifest` 带墙钟 `elapsedSec`（0.1s 粒度），并行负载下两条路径分别 0.3s / 0.2s ⇒ 包字节不等，
+而失败现场的 10 个 npy 与 manifest 其余字段**逐字节相同**（已从失败产物直接验证）。
+所以原稿「同 seed 冒烟两包字节相等（5561B）」是**舍入巧合**，已改成上面那条准确边界。
+教训：把「手工冒烟偶然成立」写成结论，会在门禁里以「看起来是 flaky」的形式还回来。
+
+**未做（诚实标注）**：真节点上的 T2（预编译库上传 / 本机编译）未验——代码路径在
+（`ensureNativeAssets` 三态 + bundle 复制 + `NN_NATIVE_LIB`），需在节点上跑一次
+`bun tools/agent/native-build.ts` 看启动日志与 shard 的 `feat=native`；
+`--pack-memory` 的两路径字节等价仍只有手工冒烟、未进门禁；P1 实验内核（`tools/agent/native/conv_feats_opt.c`）不接生产。
+
+**门禁**：`bun run check` 绿（tsc + 全量根套件，27s）；`bun run build` 绿；
+新增 `tests/native-parity.test.ts`（8，含 eval 侧 `feat` 记账用例）与 `tests/pack-memory-parity.test.ts`（3），
+`tests/agent/rollout-runner.test.ts` 扩到 32（含 native 臂反超 node、`nativeSha` 缓存失效、`parseBench`）。
+
 ## §123 accident.plan 收尾七项：配对核对 / 中点杀臂 / 毒包解冻 / 启动模板（2026-09-21）
 
 上一轮盘点出「计划里写了、盘上确认没做」五项 + 两处有意未做的控制台面，本轮全部收完

@@ -49,6 +49,7 @@ import { buildReplayFilename, serializeReplayFile } from '../../src/replay/file'
 import type { ReplayType } from '../../src/replay/types'
 import { ObsEncoder, computeMasks } from '../../src/nn/obs-encoder'
 import { buildModelFromText } from '../../src/nn/infer'
+import { featuresEngine } from '../../src/nn/conv-wasm'
 import { GoalExecutor } from '../../src/nn/goal-executor'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import type { InputLike } from '../../src/game/Input'
@@ -922,7 +923,10 @@ function main(): void {
     firstKillKind: res.firstKillKind,
     killOrder: res.killOrder,
     killerKinds: res.killerKinds,
-    ...(wver ? { wver, node: nodeLabel } : {}),
+    // feat：本局评估由哪条 features 后端产出（native / wasm / ts）。与 rollout 的 shard
+    // manifest 同口径（rollout-eval-opt.plan.md §4 记账）——「以为开了 native 其实回落了」
+    // 在 eval 侧同样要能事后看出来。不进任何 data_fp（eval 侧本就没有）。
+    ...(wver ? { wver, node: nodeLabel, feat: featuresEngine() } : {}),
   }
   writeFileSync(`${outDir}/_eval_report.json`, JSON.stringify(report, null, 2))
   if (packPath) {

@@ -1,0 +1,132 @@
+{
+  "abi": 1,
+  "cc": "clang",
+  "ccVersion": "clang version 20.1.0",
+  "sources": [
+    {
+      "path": "src/nn/native/conv_feats_native.h",
+      "sha256": "c1d555f322fbc2dda5f87757fef8bbd879873e1ef9649ac298106062e8a921cd"
+    },
+    {
+      "path": "src/nn/native/conv_feats_native.c",
+      "sha256": "94f3af324b647bb700e8d26f75cf63d1b1804c4d5b33245ad9cf767364974f12"
+    }
+  ],
+  "targets": [
+    {
+      "id": "win32-x64",
+      "triple": "x86_64-pc-windows-msvc",
+      "kind": "coff",
+      "lib": "conv_feats_native.dll",
+      "flags": [
+        "-O3",
+        "-ffp-contract=off",
+        "-fno-fast-math",
+        "-fno-stack-protector",
+        "-ffreestanding",
+        "-fno-builtin",
+        "-mavx",
+        "-msse4.2",
+        "-fvisibility=hidden",
+        "-DCF_FREESTANDING=1"
+      ],
+      "sha256": "fcf631f207f4398b1da43bc281055ee0fab3a22ec58b3d70dbad4c93097349c3",
+      "bytes": 14336
+    },
+    {
+      "id": "win32-arm64",
+      "triple": "aarch64-pc-windows-msvc",
+      "kind": "coff",
+      "lib": "conv_feats_native.dll",
+      "flags": [
+        "-O3",
+        "-ffp-contract=off",
+        "-fno-fast-math",
+        "-fno-stack-protector",
+        "-ffreestanding",
+        "-fno-builtin",
+        "-fvisibility=hidden",
+        "-DCF_FREESTANDING=1"
+      ],
+      "sha256": "ba65dcdc322a551c87ffed83e45c4ae076fbbde0f6a3e8e5d7a6aa463f865b8a",
+      "bytes": 8192
+    },
+    {
+      "id": "linux-x64",
+      "triple": "x86_64-unknown-linux-gnu",
+      "kind": "elf",
+      "lib": "conv_feats_native.so",
+      "flags": [
+        "-O3",
+        "-ffp-contract=off",
+        "-fno-fast-math",
+        "-fno-stack-protector",
+        "-ffreestanding",
+        "-fno-builtin",
+        "-mavx",
+        "-msse4.2",
+        "-fvisibility=hidden",
+        "-DCF_FREESTANDING=1"
+      ],
+      "sha256": "74c2130869a4e0b7f392621447e76b38edb5dba832447be58bd82f618b339e01",
+      "bytes": 13856
+    },
+    {
+      "id": "linux-arm64",
+      "triple": "aarch64-unknown-linux-gnu",
+      "kind": "elf",
+      "lib": "conv_feats_native.so",
+      "flags": [
+        "-O3",
+        "-ffp-contract=off",
+        "-fno-fast-math",
+        "-fno-stack-protector",
+        "-ffreestanding",
+        "-fno-builtin",
+        "-fvisibility=hidden",
+        "-DCF_FREESTANDING=1"
+      ],
+      "sha256": "d3f18b2e9d8e2ddbe3446d84cc0c11f582494a762370db2885492290c310adb6",
+      "bytes": 7664
+    },
+    {
+      "id": "darwin-x64",
+      "triple": "x86_64-apple-darwin",
+      "kind": "macho",
+      "lib": "conv_feats_native.dylib",
+      "flags": [
+        "-O3",
+        "-ffp-contract=off",
+        "-fno-fast-math",
+        "-fno-stack-protector",
+        "-ffreestanding",
+        "-fno-builtin",
+        "-mavx",
+        "-msse4.2",
+        "-fvisibility=hidden",
+        "-DCF_FREESTANDING=1"
+      ],
+      "sha256": "c489a28988cefcd18337d86bf7a4e454dae21d260aa0e84802c893f1fb9cb240",
+      "bytes": 16560
+    },
+    {
+      "id": "darwin-arm64",
+      "triple": "arm64-apple-darwin",
+      "kind": "macho",
+      "lib": "conv_feats_native.dylib",
+      "flags": [
+        "-O3",
+        "-ffp-contract=off",
+        "-fno-fast-math",
+        "-fno-stack-protector",
+        "-ffreestanding",
+        "-fno-builtin",
+        "-fvisibility=hidden",
+        "-DCF_FREESTANDING=1"
+      ],
+      "sha256": "ef9719584b878ad03605df904b99f975baa4d52c15ed7ee2ec1b2b879d9c1b70",
+      "bytes": 16864
+    }
+  ],
+  "builtAt": "2026-09-21T07:56:24.857Z"
+}

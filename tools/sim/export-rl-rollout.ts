@@ -69,10 +69,11 @@ import {
 } from '../../src/nn/arena-ladder'
 import { decodeStageGrid } from '../../src/nn/config-stage'
 import { buildModelFromText } from '../../src/nn/infer'
+import { featuresEngine } from '../../src/nn/conv-wasm'
 import { dodgeL0 } from '../../src/nn/dodge-l0'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import { RNG } from '../../src/utils/RNG'
-import { writeNpy } from '../../src/nn/npy'
+import { npyBytes } from '../../src/nn/npy'
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'fs'
 import { buildPack } from './pack-container'
 import {
@@ -91,7 +92,8 @@ const FIRE_DIM = 2
 export const MASK_DIM = MOVE_DIM + FIRE_DIM // 7 (v2: item head removed)
 
 // shard 文件名清单（与 writeRlShard 的 writeNpy 调用一一对应；--pack 打容器时按此顺序）。
-const RL_SHARD_FILES = [
+/** shard 落盘的文件清单（顺序 == manifest 里 files 的顺序；两条 pack 路径共用，测试也拿它当真相源）。 */
+export const RL_SHARD_FILES = [
   'obs.npy',
   'scalars.npy',
   'a_move.npy',
@@ -876,16 +878,20 @@ function visitedCellsAdd(set: Set<number>, col: number, row: number): void {
 }
 
 export function writeRlShard(dir: string, d: ShardData, manifest: unknown): void {
-  const N = d.n
-  if (N === 0) return
-  // 指标行数必须 = N+1（N 个决策快照 + 1 个终局快照）——reward 的 diff 基。
-  if (d.metrics.length !== N + 1) {
-    throw new Error(
-      `metrics row count ${d.metrics.length} != n+1=${N + 1} (${dir}) —— 指标行失配，拒绝写盘`,
-    )
+  mkdirSync(dir, { recursive: true })
+  for (const { name, data } of shardNpyEntries(d)) {
+    writeFileSync(`${dir}/${name}`, data)
   }
-  // 行宽 SSOT = 编码器常量（2026-09-14 x2-start it1 全灭回归：此处曾手写
-  // v2 字面量 14/19，编码器升 v3 后每局终局行 obs.set 越界，整腿零产出）。
+  writeFileSync(`${dir}/manifest.json`, JSON.stringify(manifest, null, 2))
+}
+
+/** 局末 shard → 内存 npy 字节（与 writeRlShard 同布局；sampler 热路径 / perf 对比用）。 */
+export function shardNpyEntries(d: ShardData): Array<{ name: string; data: Buffer }> {
+  const N = d.n
+  if (N === 0) return []
+  if (d.metrics.length !== N + 1) {
+    throw new Error(`metrics row count ${d.metrics.length} != n+1=${N + 1} —— 指标行失配，拒绝打包`)
+  }
   const obs = new Uint8Array(N * OBS_CHANNELS * BOARD * BOARD)
   const scalars = new Float32Array(N * SCALAR_DIM)
   const aMove = new Uint8Array(N)
@@ -910,17 +916,45 @@ export function writeRlShard(dir: string, d: ShardData, manifest: unknown): void
   for (let i = 0; i <= N; i++) {
     metrics.set(d.metrics[i], i * METRICS_DIM)
   }
-  writeNpy(`${dir}/obs.npy`, obs, [N, OBS_CHANNELS, BOARD, BOARD], 'u1')
-  writeNpy(`${dir}/scalars.npy`, scalars, [N, SCALAR_DIM], 'f4')
-  writeNpy(`${dir}/a_move.npy`, aMove, [N], 'u1')
-  writeNpy(`${dir}/a_fire.npy`, aFire, [N], 'u1')
-  writeNpy(`${dir}/lp_move.npy`, lpMove, [N], 'f4')
-  writeNpy(`${dir}/lp_fire.npy`, lpFire, [N], 'f4')
-  writeNpy(`${dir}/value.npy`, value, [N], 'f4')
-  writeNpy(`${dir}/metrics.npy`, metrics, [N + 1, METRICS_DIM], 'f8')
-  writeNpy(`${dir}/done.npy`, done, [N], 'u1')
-  writeNpy(`${dir}/mask.npy`, mask, [N, MASK_DIM], 'u1')
-  writeFileSync(`${dir}/manifest.json`, JSON.stringify(manifest, null, 2))
+  return [
+    { name: 'obs.npy', data: npyBytes(obs, [N, OBS_CHANNELS, BOARD, BOARD], 'u1') },
+    { name: 'scalars.npy', data: npyBytes(scalars, [N, SCALAR_DIM], 'f4') },
+    { name: 'a_move.npy', data: npyBytes(aMove, [N], 'u1') },
+    { name: 'a_fire.npy', data: npyBytes(aFire, [N], 'u1') },
+    { name: 'lp_move.npy', data: npyBytes(lpMove, [N], 'f4') },
+    { name: 'lp_fire.npy', data: npyBytes(lpFire, [N], 'f4') },
+    { name: 'value.npy', data: npyBytes(value, [N], 'f4') },
+    { name: 'metrics.npy', data: npyBytes(metrics, [N + 1, METRICS_DIM], 'f8') },
+    { name: 'done.npy', data: npyBytes(done, [N], 'u1') },
+    { name: 'mask.npy', data: npyBytes(mask, [N, MASK_DIM], 'u1') },
+  ]
+}
+
+/** bench / 进程内调用：与 CLI 同一 `runOne`（生产 sampler 仍 spawn 子进程）。 */
+export function runOneBench(
+  stageIdx: number,
+  stage: any,
+  seed: number,
+  difficulty: string,
+  maxTicks: number,
+  weightsText: string,
+  dodgeMode: 'off' | 'l0' | 'god' = 'off',
+  customStage = false,
+  livesOverride: number | null = null,
+  playerLevelOverride: number | null = null,
+): RunResult {
+  return runOne(
+    stageIdx,
+    stage,
+    seed,
+    difficulty,
+    maxTicks,
+    weightsText,
+    dodgeMode,
+    customStage,
+    livesOverride,
+    playerLevelOverride,
+  )
 }
 
 /**
@@ -984,6 +1018,8 @@ function main(argv: string[] = process.argv.slice(2)): void {
   // --pack <path>（v3.6）：把单局结果打成 BCV2 容器写到指定路径——sampler-agent 用它把
   // base64+gzip+JSON 拼装从主线程下沉到本子进程并行执行（tools/sim/pack-container.ts）。
   let packPath = ''
+  /** sampler HTTP：pack 直接用内存 entries，跳过 writeRlShard→read 回环（iter 仍写盘）。 */
+  let packMemory = false
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--out') outDir = args[++i]
     else if (args[i] === '--difficulty') difficulty = args[++i]
@@ -1002,6 +1038,7 @@ function main(argv: string[] = process.argv.slice(2)): void {
     else if (args[i] === '--course-fp') courseFp = args[++i]
     else if (args[i] === '--corpus-fp') corpusFp = args[++i]
     else if (args[i] === '--pack') packPath = args[++i]
+    else if (args[i] === '--pack-memory') packMemory = true
   }
   const stages = parseRange(stagesStr)
   const seeds = parseRange(seedsStr)
@@ -1013,6 +1050,7 @@ function main(argv: string[] = process.argv.slice(2)): void {
   // 2026-09-03 修正：此前 pack 用聚合 summary → dist/self 落盘缺 outcome →
   // engine 加载器把分布式局错标 timeout，奖励错算）。
   let lastShardManifest: Record<string, unknown> | null = null
+  let lastPackEntries: Array<{ name: string; data: Buffer }> | null = null
   const outcomes: Record<string, number> = {}
   const scores: number[] = []
   const scoresUngated: number[] = []
@@ -1116,13 +1154,20 @@ function main(argv: string[] = process.argv.slice(2)): void {
         playerDeaths: res.playerDeaths,
         puGotTank: res.puGotTank,
         puGotOther: res.puGotOther,
-        ...(wver ? { wver, node: nodeLabel } : {}),
+        // feat：本 shard 由哪条 features 后端产出（native / wasm / ts）。
+        // 加它是为了「以为开了 native 其实回落了」能被事后看见（评审 B5③）；
+        // 不进 data_fp（那个只对 dir/wver/stage/seed 求 sha，见 protocol.py::data_fp）。
+        ...(wver ? { wver, node: nodeLabel, feat: featuresEngine() } : {}),
         ...(courseFp ? { course_fp: courseFp } : {}),
         ...(corpusFp ? { corpus_fp: corpusFp } : {}),
       }
       if (res.shard.n > 0) {
-        writeRlShard(`${outDir}/${shardName}`, res.shard, manifest)
         lastShardManifest = manifest
+        if (packMemory && packPath) {
+          lastPackEntries = shardNpyEntries(res.shard)
+        } else {
+          writeRlShard(`${outDir}/${shardName}`, res.shard, manifest)
+        }
       }
       totalSamples += res.shard.n
       totalTicks += res.ticks
@@ -1206,20 +1251,22 @@ function main(argv: string[] = process.argv.slice(2)): void {
     if (stages.length !== 1 || seeds.length !== 1) {
       throw new Error('[export-rl-rollout] --pack requires exactly one stage and one seed')
     }
-    const shardDir = `${outDir}/rl_s${stages[0]}_seed${seeds[0]}`
-    // 0 样本局（maxTicks<K 等异常参数）不会写 shard 目录——显式报错而非 ENOENT 堆栈。
-    if (!existsSync(shardDir)) {
-      console.error(
-        `[export-rl-rollout] --pack: no shards written for s${stages[0]}/seed${seeds[0]} ` +
-          `(0 samples — check maxTicks/stage validity)`,
-      )
+    let entries: Array<{ name: string; data: Buffer }>
+    if (packMemory && lastPackEntries) {
+      entries = lastPackEntries
+    } else {
+      const shardDir = `${outDir}/rl_s${stages[0]}_seed${seeds[0]}`
+      if (!existsSync(shardDir)) {
+        console.error(
+          `[export-rl-rollout] --pack: no shards written for s${stages[0]}/seed${seeds[0]} ` +
+            `(0 samples — check maxTicks/stage validity)`,
+        )
+      }
+      entries = RL_SHARD_FILES.map((name) => ({
+        name,
+        data: readFileSync(`${shardDir}/${name}`),
+      }))
     }
-    const entries = RL_SHARD_FILES.map((name) => ({
-      name,
-      data: readFileSync(`${shardDir}/${name}`),
-    }))
-    // 溯源戳与 v1 agent 主线程所盖戳逐字段一致：validate_result 按
-    // manifest.stage/seed/wver 对账（标量），elapsedSec 语义改为子进程内耗时。
     const packManifest = {
       ...(lastShardManifest ?? summary),
       mode: 'rollout',

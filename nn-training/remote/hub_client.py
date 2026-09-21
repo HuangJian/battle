@@ -456,6 +456,19 @@ TS_CODE_DIRS: tuple[str, ...] = ("src", "tools")
 #: 允许进 zip 的后缀（.ts 源码 + .jsonc 数据 + .wasm 权重——`src/nn/conv-wasm.ts`
 #: 经 `import.meta.url` 读 `src/nn/wasm/conv_feats.wasm`，漏了它节点上卷积直接炸）。
 TS_CODE_SUFFIXES: tuple[str, ...] = (".ts", ".jsonc", ".wasm")
+#: **二进制加速后端**（2026-09-21）：native features 共享库按平台分（win/linux/darwin ×
+#: x64/arm64），`src/nn/native-conv.ts` 用**模块相对路径** `native/prebuilt/<平台>/…`
+#: 找它。云机（PPO/TPU 都是 linux-*）没有 clang、也不持仓库 —— **只能靠 ts_code.zip 带过去**。
+#: 漏了它的后果是最难查的那种静默：attestation 无库可加载 ⇒ 回落 wasm ⇒ 不报错、只是
+#: rollout 每局回到 1338ms（收益归零）。用户 2026-09-21 点名过这条（离线训练任务的 rollout
+#: 在 PPO 云机上执行）。
+#:
+#: 后缀单独一份、且**只对下面这个目录生效**：不给 `.so` 开全局口子（将来 `src/` 下若出现
+#: 别的原生产物，应由它自己的白名单决定，而不是被这条规则顺手卷进来）。
+#: 六个目标的库全带（~78 KB 原始字节）：云机 arch 在打包时未知，按需挑选反而会多一个
+#: “挑错了 ⇒ 静默回落”的失败面。
+TS_CODE_BINARY_DIRS: tuple[str, ...] = ("src/nn/native/prebuilt",)
+TS_CODE_BINARY_SUFFIXES: tuple[str, ...] = (".dll", ".so", ".dylib")
 #: 一律不进 zip 的目录名（含 node_modules —— rollout 零第三方运行时依赖，
 #: 只用到 node 内建 `fs`/`path`，所以云机**不必** bun install）。
 TS_CODE_EXCLUDE_DIRS: frozenset[str] = frozenset({
@@ -472,8 +485,9 @@ def pack_ts_code_zip(
     *,
     log=lambda msg: None,
 ) -> str:
-    """M3：把 rollout 用的 **TS 运行时** 打成 ts_code.zip（仅 `src/**` + `tools/sim/**`
-    下的 `.ts/.jsonc/.wasm`），返回字节 sha256。
+    """M3：把 rollout 用的 **TS 运行时** 打成 ts_code.zip（`src/**` + `tools/**` 下的
+    `.ts/.jsonc/.wasm`，**加** `src/nn/native/prebuilt/**` 下的 `.dll/.so/.dylib` 共享库），
+    返回字节 sha256。
 
     与 `pack_code_zip`（Python 侧，另走 zip+extract 到 sys.path）**完全独立**：这条
     链的消费者是 `bun`（节点上直接 `bun tools/sim/export-rl-rollout.ts`），不需要
@@ -493,6 +507,19 @@ def pack_ts_code_zip(
     n_files = 0
     n_bytes = 0
     with zipfile.ZipFile(zip_path_p, "w", zipfile.ZIP_DEFLATED) as z:
+
+        def _add(f: Path, mode: int = 0o644) -> None:
+            """固定时间戳写一件（sha 只由内容决定，否则 mtime 参与 → 缓存永远命中不了）。"""
+            nonlocal n_files, n_bytes
+            arc = str(f.relative_to(repo_p)).replace("\\", "/")
+            zi = zipfile.ZipInfo(arc, date_time=(1980, 1, 1, 0, 0, 0))
+            zi.compress_type = zipfile.ZIP_DEFLATED
+            zi.external_attr = mode << 16
+            data = f.read_bytes()
+            z.writestr(zi, data)
+            n_files += 1
+            n_bytes += len(data)
+
         for top in TS_CODE_DIRS:
             base = repo_p / top
             if not base.is_dir():
@@ -512,14 +539,31 @@ def pack_ts_code_zip(
                             continue
                     except OSError:
                         continue
-                    arc = str(f.relative_to(repo_p)).replace("\\", "/")
-                    zi = zipfile.ZipInfo(arc, date_time=(1980, 1, 1, 0, 0, 0))
-                    zi.compress_type = zipfile.ZIP_DEFLATED
-                    zi.external_attr = 0o644 << 16
-                    data = f.read_bytes()
-                    z.writestr(zi, data)
-                    n_files += 1
-                    n_bytes += len(data)
+                    _add(f)
+        # ② 二进制加速后端（native 共享库；见 TS_CODE_BINARY_DIRS 注释）。
+        #    排在 ① 之后 ⇒ 只增不减，① 的成员顺序不变（同内容 zip 的 sha 仍稳定）。
+        for top in TS_CODE_BINARY_DIRS:
+            base = repo_p / top
+            if not base.is_dir():
+                raise HubClientError(
+                    f"pack_ts_code_zip: 加速后端目录不存在 {base}（跑 "
+                    "bun tools/agent/native-build.ts --cross 重建）"
+                )
+            for dirpath, dirnames, filenames in os.walk(base):
+                dirnames[:] = [
+                    d for d in dirnames if d not in TS_CODE_EXCLUDE_DIRS and not d.startswith(".")
+                ]
+                dir_p = Path(dirpath)
+                for fn in sorted(filenames):
+                    if not fn.endswith(TS_CODE_BINARY_SUFFIXES):
+                        continue
+                    f = dir_p / fn
+                    try:
+                        if not f.is_file():
+                            continue
+                    except OSError:
+                        continue
+                    _add(f, 0o755)
     sha = _sha256_bytes(zip_path_p.read_bytes())
     if log:
         log(

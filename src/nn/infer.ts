@@ -16,7 +16,7 @@
  */
 
 import { OBS_CHANNELS, BOARD, SCALAR_DIM } from './obs-encoder'
-import { runStudentConvWasm } from './conv-wasm'
+import { noteFeaturesTs, runStudentFeatures } from './conv-wasm'
 
 export const MOVE_DIM = 5
 export const FIRE_DIM = 2
@@ -556,10 +556,12 @@ export class StudentModel implements ModelLike {
     for (let i = 0; i < oc * sp; i++) this.in16[i] = obs[i]
     this.in16.set(this.coords, oc * sp)
 
-    // 2026-09-03 wasm32 SIMD 后端（conv_feats.wasm，h64/d8/board26，DECISIONS §311）：
-    // 卷积段 ~6× 加速（probe pooled max|Δ|≈4.8e-6）。失败/架构不符 → false → TS 原路径。
-    const wasmOk = this.h === 64 && this.d === 8 && runStudentConvWasm(this as never)
-    if (!wasmOk) {
+    // 加速后端（rollout-eval-opt.plan.md §4）：native（共享库 + bun:ffi，rollout/eval 同
+    // 引擎）→ wasm32 SIMD（conv_feats.wasm，DECISIONS §311）→ TS 原路径兜底。
+    // 失败/架构不符 → false → TS 原路径（并记账，见 noteFeaturesTs）。
+    const accelOk = this.h === 64 && this.d === 8 && runStudentFeatures(this as never)
+    if (!accelOk) {
+      noteFeaturesTs()
       // stem: conv 3x3 (inCh+2=18)->h + ReLU
       this.conv3x3(this.in16, this.inCh + 2, this.stemW, this.stemB, this.bufA)
       this.reluInPlace(this.bufA)
