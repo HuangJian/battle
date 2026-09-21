@@ -139,6 +139,7 @@ class RolloutDispatcher:
         local_suspend: threading.Event | None = None,
         extra_wver: str | None = None,
         course_fp: str | None = None,
+        corpus_fp: str | None = None,
     ):
         self.bun = bun
         self.rl_path = rl_path
@@ -155,6 +156,7 @@ class RolloutDispatcher:
         self.local_suspend = local_suspend
         self.extra_wver = extra_wver
         self.course_fp = course_fp
+        self.corpus_fp = corpus_fp
 
     def run(self) -> dict:
         # 参数局部别名（OO 化：run 主体保持原函数体裸名，指向 self 状态）
@@ -173,6 +175,7 @@ class RolloutDispatcher:
         local_suspend = self.local_suspend
         extra_wver = self.extra_wver
         course_fp = self.course_fp
+        corpus_fp = self.corpus_fp
         t_queue_enter = time.time()  # ping+权重下发阶段计时起点（→ dist_phase_sec）
 
         policy = cfg.get("policy", {})
@@ -370,7 +373,13 @@ class RolloutDispatcher:
         # 重启同一迭代，it60 实测目录 235 局/计划 105 局），它们不在新计划里——既不重跑
         # 也不并入报告。done 一词自此恒指计划内已完成。
         plan_set = set(norm_pairs)
-        done_all = completed_pairs(traj_dir, wver, extra_wver=extra_wver, course_fp=course_fp)
+        done_all = completed_pairs(
+            traj_dir,
+            wver,
+            extra_wver=extra_wver,
+            course_fp=course_fp,
+            corpus_fp=corpus_fp,
+        )
         done = done_all & plan_set
         tasks = [p for p in norm_pairs if p not in done]
         if done_all:
@@ -393,7 +402,12 @@ class RolloutDispatcher:
             # 补齐 missing/expectedGames/dist：与全流程路径同 schema，下游免分支。
             combined = combine_reports(
                 resumed_manifests(
-                    traj_dir, wver, only=plan_set, extra_wver=extra_wver, course_fp=course_fp
+                    traj_dir,
+                    wver,
+                    only=plan_set,
+                    extra_wver=extra_wver,
+                    course_fp=course_fp,
+                    corpus_fp=corpus_fp,
                 )
             )
             combined["missing"] = []
@@ -1135,6 +1149,7 @@ class RolloutDispatcher:
                 only=plan_set,
                 extra_wver=extra_wver,
                 course_fp=course_fp,
+                corpus_fp=corpus_fp,
             )
         )
         combined["missing"] = [list(k) for k in missing]

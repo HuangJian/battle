@@ -41,7 +41,11 @@ def precollect_min_wave() -> int:
 
 
 def precollect_progress(
-    traj_root: Path, it: int, args, course_fp: str | None = None
+    traj_root: Path,
+    it: int,
+    args,
+    course_fp: str | None = None,
+    corpus_fp: str | None = None,
 ) -> int:
     """本轮预采已完整落盘的 shard 数（**只读盘，不 join 子进程，不睡**）。
 
@@ -53,7 +57,11 @@ def precollect_progress(
     wver = dist_common.weights_fingerprint(args.out)
     extra_wver = precollect_snapshot_wver(args.out, it)
     done = completed_pairs(
-        traj_root / f"it{it}", wver, extra_wver=extra_wver, course_fp=course_fp
+        traj_root / f"it{it}",
+        wver,
+        extra_wver=extra_wver,
+        course_fp=course_fp,
+        corpus_fp=corpus_fp,
     )
     return len(done)
 
@@ -64,6 +72,7 @@ def precollect_ready(
     it: int,
     args,
     course_fp: str | None = None,
+    corpus_fp: str | None = None,
 ) -> bool:
     """预采是否**已经可以开训**（非阻塞判据；R2c-3 的让位入口）。
 
@@ -75,7 +84,12 @@ def precollect_ready(
         return True
     if child.poll() is not None:
         return True
-    return precollect_progress(traj_root, it, args, course_fp=course_fp) >= precollect_min_wave()
+    return (
+        precollect_progress(
+            traj_root, it, args, course_fp=course_fp, corpus_fp=corpus_fp
+        )
+        >= precollect_min_wave()
+    )
 
 
 def join_precollect_child(
@@ -84,6 +98,7 @@ def join_precollect_child(
     it: int,
     args,
     course_fp: str | None = None,
+    corpus_fp: str | None = None,
 ) -> subprocess.Popen | None:
     """吞吐 T4：本轮开头检查预采子进程产出。
 
@@ -101,9 +116,13 @@ def join_precollect_child(
     _pre_deadline = time.time() + 3600
     _pre_ready = False
     while time.time() < _pre_deadline:
-        if precollect_ready(child, traj_root, it, args, course_fp=course_fp):
+        if precollect_ready(
+            child, traj_root, it, args, course_fp=course_fp, corpus_fp=corpus_fp
+        ):
             if child.poll() is None:
-                _pre_done = precollect_progress(traj_root, it, args, course_fp=course_fp)
+                _pre_done = precollect_progress(
+                    traj_root, it, args, course_fp=course_fp, corpus_fp=corpus_fp
+                )
                 log(
                     f"[double-buffer] precollect it{it}: {_pre_done} shards ready "
                     f"(≥{_pre_min_wave}), proceeding before subprocess exit"
@@ -137,6 +156,7 @@ def dispatch_rollout_phase(
     extra_wver: str | None,
     eval_on_round: bool,
     course_fp: str | None = None,
+    corpus_fp: str | None = None,
 ) -> tuple[
     dict,
     dict | None,
@@ -255,6 +275,7 @@ def dispatch_rollout_phase(
                 on_epoch_done=_on_epoch_done,
                 extra_wver=extra_wver,
                 course_fp=course_fp,
+                corpus_fp=corpus_fp,
                 **_stream_kwargs,
             )
             stream_meta = report
@@ -272,6 +293,7 @@ def dispatch_rollout_phase(
                 # 旧写法 `args.local_slots or None` 把 0 也吞成 None（关不掉）。
                 local_slots_max=local_slots_max_of(args),
                 course_fp=course_fp,
+                corpus_fp=corpus_fp,
             )
             # 串行：rollout 返回即 collector 收官。per-tick A-eval 不在此派发——
             # P0 修复：此处派发读到的活指针还是 W(it-1)（本轮 PPO 未跑）却标 itN。

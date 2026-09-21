@@ -118,7 +118,10 @@ def build_rollout_cmd(
 
 
 def course_fp_for_args(args) -> str:
-    """课程文件 sha256（D14 语料血缘）。无课程返回 ""（非课程路径不写 course_fp）。
+    """课程文件 sha256（D14 **文件**血缘）。无课程返回 ""（非课程路径不写 course_fp）。
+
+    ⚠ 它不是「语料血缘」——语料身份是 `corpus_fp_for_args`（语义哈希）。两者分工见
+    `rl/resume._scan_shards`；把文件字节当成语料身份正是 §2/A 误诊的源头。
 
     与远程发布（remote/hub_client.publish_job）同一算法：sha256(课程 jsonc 文件字节)。
     字节源 = **启动期冻结**（`args.course_frozen_bytes`，course_from_args 落）——

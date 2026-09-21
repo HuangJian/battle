@@ -4,6 +4,27 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §121 修复：本地 resume 的 D14 判据同源化（accident.plan §2/A，2026-09-21）
+
+**问题**：D14（跨课程语料不混训）有两把尺子——`course_fp` = 课程**文件字节** sha256，
+`corpus_fp` = 语料**语义**身份（env+reward 解析值哈希）。远端链路 2026-09-13 就改成语义优先
+（`remote.protocol.d14_corpus_match`，hub 打包 + worker 装载共用），但**本地对账**一直只比
+文件字节 ⇒ 改一下课程里的预算/路径/注释（字节变、语义不变）就把自己历史的 shard 全判成
+异血缘 ⇒ **全量重采**，而云端其实照收（同一个 D14 两份实现的代价）。
+
+**改动**：`_scan_shards` / `completed_pairs` / `settled_stage_totals` / `resumed_manifests`
+新增 `corpus_fp`，比较换调 `d14_corpus_match`；`loop_core` 加 `self._corpus_fp`
+（`rl.cmd.corpus_fp_for_args`，与远端发布同源）并沿 `rollout_phase` → `stream` / `queue` /
+`dispatch` 透传；扫描缓存键加上 `corpus_fp`（否则一份身份的缓存会冒充另一份的答案）。
+措辞同步：`_course_file_fp` / `cmd.course_fp_for_args` 改称「D14 **文件**血缘」并把
+“语料身份 = corpus_fp”写进同一段 docstring——误诊的源头就是那几句命名。
+
+**验收**：`tests/test_local_resume_lineage.py`（6：语义相同/字节不同 ⇒ 认（不再全量重采）；
+语义不同 ⇒ 不认；legacy manifest 无 corpus_fp → 回退字节（旧行为逐字节不变）；缓存键含
+corpus_fp；另两个消费点同源；`corpus_fp_for_args == corpus_identity_fp`）；门禁 **1961 passed**。
+
+---
+
 ## §120 教训：缰绳初值显式化 + 干烧熔断（accident.plan §5，2026-09-21）
 
 **事故**：C 双臂从收敛权重（it175）以 `kk(1)=1` 满 kickstart 复活，锚主导更新连烧 30 轮

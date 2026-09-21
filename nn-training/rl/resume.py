@@ -8,6 +8,10 @@ import os
 from collections.abc import Sequence
 from pathlib import Path
 
+# 判据同源（plan/accident.plan.md §2/A，2026-09-21）：本地对账用**和云端装载/发布同一把尺子**
+# ——`remote.protocol.d14_corpus_match`。方向安全：protocol 是底层模块，不 import 任何 rl/*。
+from remote.protocol import d14_corpus_match
+
 MANIFEST_NAME = "manifest.json"
 #: shard 目录名（一局一目录，`dist_common.write_shard` / TS 导出器同形）。
 SHARD_DIR_GLOB = "rl_s*_seed*"
@@ -73,6 +77,7 @@ def completed_pairs(
     wver: str,
     extra_wver: str | None = None,
     course_fp: str | None = None,
+    corpus_fp: str | None = None,
 ) -> set[tuple[int, int]]:
     """扫描 traj_dir 已完整落盘且 manifest.wver∈{wver, extra_wver} 的 (stage,seed)——rollout 断点。
 
@@ -80,14 +85,13 @@ def completed_pairs(
     θ_N（PPO 末写好），而预采首波 shard 的 wver = 快照指纹——必须双白名单，否则
     首波被当"未完成"重新派发/清场，预采白做。
 
-    course_fp（D14，2026-09-05）：课程文件 sha256（语料血缘）。非空时只认
-    manifest.course_fp == 该值的 shard——跨课程语料绝不混入本轮（课程切换后旧课程
-    shard 不参与断点对账，被当"未完成"重新派发）。None = 不过滤（旧行为逐字节不变）。
+    course_fp / corpus_fp（D14）：两把尺子的分工见 `_scan_shards`。两者都 None
+    = 不过滤（旧行为逐字节不变）。
 
     完整 shard 判定：write_shard 先写 12 npy 后写 manifest；存在 manifest.json ⇒ 目录完整。
     仅在 manifest 显式回显 stage/seed（agent 打包时回填）后才算数，否则不计入 done。
     """
-    return {p for p, _m in _scan_shards(traj_dir, wver, extra_wver, course_fp)}
+    return {p for p, _m in _scan_shards(traj_dir, wver, extra_wver, course_fp, corpus_fp)}
 
 
 def _scan_shards(
@@ -95,18 +99,28 @@ def _scan_shards(
     wver: str,
     extra_wver: str | None = None,
     course_fp: str | None = None,
+    corpus_fp: str | None = None,
 ) -> list[tuple[tuple[int, int], Path]]:
     """扫描 traj_dir 内 manifest.wver∈{wver, extra_wver} 的完整 shard，产出 (pair, dir)。
     dir = shard 目录（含 manifest.json），stream 用它把在盘的预采首波 shard 注入训练。
 
-    course_fp：非空时额外要求 manifest.course_fp 匹配（D14 语料血缘）。
+    **D14 血缘判据（§2/A，2026-09-21）**：调 `remote.protocol.d14_corpus_match`——
+    与云端装载 + 发布打包**同一个函数**。两把尺子分工：
+      * `course_fp` = 课程**文件字节** sha256（“这份配置长什么样”）；
+      * `corpus_fp` = 语料**语义**身份（env+reward 解析值哈希，“一个样本是什么”）。
+    双侧都有 corpus_fp ⇒ 比 corpus_fp；任一侧缺（legacy shard / 非课程运行）⇒ 回退文件字节。
+
+    为什么要这一修（旧行为不对）：这里以前只比 `course_fp` 文件字节，而远端/hub 早在
+    2026-09-13 就改成语义优先了——于是**本地**一改课程里任何预算/路径/注释（文件字节变、
+    语义不变）就把自己历史的 shard 全判成异血缘 ⇒ 全量重采（白烧一轮采集，云端其实照收）。
+    这就是「同一个 D14 有两份实现」的代价；现在本地也走 d14_corpus_match，判据只剩一处。
 
     目录签名缓存（P2-2）：签名未变（无新 shard / 无 shard 内容更新）时零 IO 复用。
     """
     if not traj_dir.exists():
         return []
     sig = _dir_signature(traj_dir)
-    key = (str(traj_dir), wver, extra_wver, course_fp, sig)
+    key = (str(traj_dir), wver, extra_wver, course_fp, corpus_fp, sig)
     cached = _SCAN_CACHE.get(key)
     if cached is not None:
         return cached
@@ -121,8 +135,10 @@ def _scan_shards(
         wv = mm.get("wver")
         if (wv != wver and wv != extra_wver) or not isinstance(st, int) or not isinstance(sd, int):
             continue
-        if course_fp is not None and mm.get("course_fp") != course_fp:
-            continue  # D14：跨课程语料不参与对账
+        if (course_fp or corpus_fp) and not d14_corpus_match(
+            str(course_fp or ""), str(corpus_fp or ""), mm
+        ):
+            continue  # D14：跨语料不参与对账（判据同源，见 docstring）
         res.append(((int(st), int(sd)), d))
     if len(_SCAN_CACHE) >= _SCAN_CACHE_MAX:
         _SCAN_CACHE.clear()
@@ -135,6 +151,7 @@ def settled_stage_totals(
     wver: str,
     extra_wver: str | None = None,
     course_fp: str | None = None,
+    corpus_fp: str | None = None,
 ) -> dict[int, tuple[int, int]]:
     """stage → (games, transitions)：已结算 shard 的局数与 `nSamples` 之和。
 
@@ -152,7 +169,7 @@ def settled_stage_totals(
     的关永远“零样本” ⇒ 补波永不达标（白烧到波次上限）。
     """
     out: dict[int, tuple[int, int]] = {}
-    for (stage, _seed), d in _scan_shards(traj_dir, wver, extra_wver, course_fp):
+    for (stage, _seed), d in _scan_shards(traj_dir, wver, extra_wver, course_fp, corpus_fp):
         try:
             mm = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -277,6 +294,7 @@ def resumed_manifests(
     only: set[tuple[int, int]] | None = None,
     extra_wver: str | None = None,
     course_fp: str | None = None,
+    corpus_fp: str | None = None,
 ) -> list[dict]:
     """收集本轮未采样（不在 exclude）且已 done（wver 匹配）shard 的单局摘要，
     重启续跑时并入聚合，使报告 games/outcomes 仍覆盖完整一轮。
@@ -305,8 +323,10 @@ def resumed_manifests(
         wv = mm.get("wver")
         if (wv != wver and wv != extra_wver) or not isinstance(st, int) or not isinstance(sd, int):
             continue
-        if course_fp is not None and mm.get("course_fp") != course_fp:
-            continue  # D14：跨课程语料绝不并入本轮报告
+        if (course_fp or corpus_fp) and not d14_corpus_match(
+            str(course_fp or ""), str(corpus_fp or ""), mm
+        ):
+            continue  # D14：跨语料绝不并入本轮报告（判据同源，见 _scan_shards）
         if (int(st), int(sd)) in skip:
             continue
         if only is not None and (int(st), int(sd)) not in only:

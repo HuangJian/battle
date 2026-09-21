@@ -62,7 +62,11 @@ WAIT_RETRY_SEC = 5.0
 
 
 def _course_file_fp(args) -> str | None:
-    """D14 语料血缘：课程文件 sha256；无课程返回 None（旧行为不过滤）。
+    """D14 **文件**血缘：课程文件 sha256；无课程返回 None（旧行为不过滤）。
+
+    ⚠ 措辞纪律（§2/A 误诊源头）：这是**文件字节**，不是「语料血缘」。语料身份是
+    `corpus_fp`（`corpus_fp_for_args` / `config.corpus_identity_fp`：env+reward 解析值）。
+    两者分工与优先级见 `rl/resume._scan_shards`（由 `d14_corpus_match` 统一裁决）。
 
     torch-free（hub 远程分支也调用——只读文件字节）。与
     remote/hub_client.publish_job 的 course_fp 同算法，两端必须一致。
@@ -342,7 +346,12 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
             it += 1
             # 吞吐 T4：本轮开头检查预采子进程产出（句柄消费后归零）
             self._collect_child = join_precollect_child(
-                self._collect_child, self._traj_root, it, args, course_fp=self._course_fp
+                self._collect_child,
+                self._traj_root,
+                it,
+                args,
+                course_fp=self._course_fp,
+                corpus_fp=self._corpus_fp,
             )
             if self._deadline is not None and time.time() >= self._deadline:
                 log(f"[run_rl] max-hours={args.max_hours} reached — stopping before it{it}")
@@ -534,8 +543,16 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
         traj_root.mkdir(parents=True, exist_ok=True)
         self._traj_root = traj_root
         self._jsonl_path = traj_root / "training_log.jsonl"
-        # D14 语料血缘：课程文件 sha256（None = 非课程运行，不过滤——旧行为字节不变）
+        # D14 **文件**血缘：课程文件 sha256（None = 非课程运行，不过滤——旧行为字节不变）
         self._course_fp = _course_file_fp(args)
+        # D14 **语义**身份（§2/A，2026-09-21）：与远端发布/hub 打包/worker 装载同源
+        # （`rl.cmd.corpus_fp_for_args` → `config.corpus_identity_fp`）。本地对账也要它：
+        # 只比文件字节时，改一下课程里的预算/路径/注释就把自己历史的 shard 全判成异血缘
+        # ⇒ 全量重采（而云端照收）。两者都传给 `completed_pairs`/`settled_stage_totals`，
+        # 由 `d14_corpus_match` 按同一条规则决定“优先比语义、缺则回退字节”。
+        from rl.cmd import corpus_fp_for_args
+
+        self._corpus_fp = corpus_fp_for_args(args)
 
         # R2a（plan/r2-loop-task-queue §5）：**一次扫描**得到账本视图——续跑指针、累计量、
         # 熔断连击、提示类判决次数全由它重建（旧实现是 5 个扫描器各读一遍全文件）。
@@ -759,7 +776,13 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
         extra_wver = precollect_snapshot_wver(args.out, it)
         self._extra_wver = extra_wver
         have_resume = bool(
-            completed_pairs(traj_dir, wver, extra_wver=extra_wver, course_fp=self._course_fp)
+            completed_pairs(
+                traj_dir,
+                wver,
+                extra_wver=extra_wver,
+                course_fp=self._course_fp,
+                corpus_fp=self._corpus_fp,
+            )
         )
         if have_resume:
             traj_dir.mkdir(parents=True, exist_ok=True)
@@ -849,6 +872,7 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
                 self._extra_wver,
                 eval_on_round,
                 course_fp=self._course_fp,
+                corpus_fp=self._corpus_fp,
             )
         )
         self._report = report
@@ -997,6 +1021,7 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
             self._extra_wver,
             False,
             course_fp=self._course_fp,
+            corpus_fp=self._corpus_fp,
         )
         if stream_meta is not None:
             raise SystemExit("[volume] 补波落到 stream 路径——v1 只支持串行路径")
@@ -1074,7 +1099,11 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
         while True:
             wver = dist_common.weights_fingerprint(args.out)
             totals = settled_stage_totals(
-                self._traj_dir, wver, extra_wver=self._extra_wver, course_fp=self._course_fp
+                self._traj_dir,
+                wver,
+                extra_wver=self._extra_wver,
+                course_fp=self._course_fp,
+                corpus_fp=self._corpus_fp,
             )
             collected = {s: totals.get(s, (0, 0))[1] for s in stages}
             games_done = {s: totals.get(s, (0, 0))[0] for s in stages}
@@ -1199,6 +1228,7 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
             game_cap = default_game_cap(quota, est_global)
         max_batches = int(getattr(args, "volume_max_batches", 0) or DEFAULT_MAX_BATCHES)
         course_fp = self._course_fp
+        corpus_fp = self._corpus_fp
         extra_wver = self._extra_wver
         start_idx = {s: 0 for s in stages}
         combined: dict | None = None
@@ -1208,7 +1238,11 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
         while self._volume_waves < max_batches:
             wver = dist_common.weights_fingerprint(args.out)
             totals = settled_stage_totals(
-                self._traj_dir, wver, extra_wver=extra_wver, course_fp=course_fp
+                self._traj_dir,
+                wver,
+                extra_wver=extra_wver,
+                course_fp=course_fp,
+                corpus_fp=corpus_fp,
             )
             collected = {s: int(totals.get(s, (0, 0))[1]) for s in stages}
             games_done = {s: int(totals.get(s, (0, 0))[0]) for s in stages}
@@ -1247,7 +1281,11 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
 
         wver = dist_common.weights_fingerprint(args.out)
         totals = settled_stage_totals(
-            self._traj_dir, wver, extra_wver=extra_wver, course_fp=course_fp
+            self._traj_dir,
+            wver,
+            extra_wver=extra_wver,
+            course_fp=course_fp,
+            corpus_fp=corpus_fp,
         )
         collected_total = sum(int(totals.get(s, (0, 0))[1]) for s in stages)
         unmet = {

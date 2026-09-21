@@ -89,6 +89,7 @@ def run_rollout_queue(
     local_suspend: threading.Event | None = None,
     extra_wver: str | None = None,
     course_fp: str | None = None,
+    corpus_fp: str | None = None,
 ) -> dict:
     """中央队列调度（薄包装：RolloutDispatcher 构造 + run，OO 实现在 rl/dispatch.py）。"""
     from rl.dispatch import RolloutDispatcher
@@ -109,4 +110,5 @@ def run_rollout_queue(
         local_suspend,
         extra_wver,
         course_fp,
+        corpus_fp,
     ).run()
