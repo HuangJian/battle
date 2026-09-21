@@ -4,7 +4,7 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
-## §119 教训：毒包熔断 + worker 崩溃响亮回传 + claim 可观测（accident.plan §4.1/4.2/4.3，2026-09-21）
+## §119 教训：毒包熔断 + worker 崩溃响亮回传 + claim 可观测 + 发布端自检（accident.plan §4.1/4.2/4.3/4.5/4.6，2026-09-21）
 
 **背景**：C-0 it58（job `43a4eb01cf9fe35c`）的 payload 被 hub served **约 40 次**（每 5 分钟
 一次，对齐认领 TTL 300s），每次 worker 都在同一处 `BadZipFile` 炸掉、零回传，训练侧只有
@@ -32,13 +32,34 @@ tar 后 zip）；本轮补的是「**炸了要有人知道**」那一层。
 自然愈合窗口（≈15 分钟），又不放过 3.5 小时的静默空转；拿不准的崩溃归瞬态——**熔断覆盖
 「未知死法」，判错方向有兜底，而错钉终局没有**。
 
+**§4.5/4.6 同轮落地（发布端把毒包拦在上传前）**：自检与重打循环长在 `hub_client.pack_payload_zip`
+（唯一发布侧打包入口 ⇒ 不存在“某个调用者忘了自检”；重发走同一函数，“重发复用 payload 同样先过此链”
+自动成立）。① **reader 全链自检**：调 `protocol.unpack_payload` **本体**（内部调 `_extract_archive`）
+再断言解包出的 shard 目录与打包输入**逐名相等**——“能打开”会被本次毒包穿透（它 tar 打开完全正常）；
+② **旧判别反向探测**：`zipfile.is_zipfile`（故意用旧启发式，旧 worker 发版前仍在跑），抽成
+`_old_heuristic_misjudges` 并写死注释“它存在的意义就是模拟旧 worker”；③ 不通过 ⇒ 重打，但重打**必须
+显式扰动**（写 `payload.perturb` = `repack-{n}`）：打包确定性 ⇒ 不扰动就逐字节相同、旧判在同一份
+字节上永远为真、闭环永不收敛（这是评审判死原“换 job_id 重打”方案的根据）；④ 上限
+`PAYLOAD_SELFCHECK_ATTEMPTS=3`，触顶 `ProtocolError` **响亮放弃、不发布**。
+
+**新发现（夹具是真字节）**：把一整个真 zip 接在真 tar.xz 之后 ⇒ `is_zipfile` 为 **True**
+（`_EndRecData` 只验 EOCD 的注释长度自洽，**不**验中央目录），而 `tarfile` 照旧完整打开——
+这就是本次事故字节形状的最小重现，也解释了“完好的 tar.xz 为什么会被判成 zip”。
+**成本实测（不是推算）**：16 核、240 shard / 480 文件 / 1.77MB ⇒ pack 0.67s、自检 **1.18s**
+（+1.2s/轮发布，几乎全在“建 480 个文件”）、探测 ≈0.000s；事故代价 3.5h。
+**坑**：试解目录**不能**用 `tempfile.TemporaryDirectory`（回收走 `shutil.rmtree`，本沙箱删除 shim
+会 `raise SystemExit` ⇒ `ignore_errors` 拦不住、当场打死线程）——改 job 目录下 `.selfcheck/` +
+`rmtree_best_effort`。
+
 **验收（盘上）**：`tests/test_poison_freeze.py`（9：达阈冻结 / 主动 release 不算 / 已结算不算 /
 `/admin/queue` 路径也计数 / 告警只喊一次 / **重发不清冻结 + 解冻回池** / 训练侧立刻 `JobFailedError` /
-解冻端点 400·404·409 / claim 与冻结各一行日志）；`tests/test_job_body_crash.py`（5：内容决定性 →
+解冻端点 400·404·409 / claim 与冻结各一行日志）；`tests/test_payload_selfcheck.py`（7：真字节分叉 /
+探测确实用旧启发式 / 好包一次通过且无扰动标记 / 产物不符·垃圾·缺额外文件三种不通过 / 误判 ⇒ 扰动重打 /
+自检失败也重打 / 触顶响亮放弃 + 三次字节各不相同）；`tests/test_job_body_crash.py`（5：内容决定性 →
 `ProtocolError`、瞬态原样放回、restore/grad 两段确实被包、已判定 `ProtocolError` 原样上抛）；
 顺带修掉一个**既有 flake**：`test_hub_push_dispatch.py` 用例依赖 mtime 判定，Windows 系统时钟
 节拍（~15.6ms）内两次写会拿到相同 mtime ⇒ 全量套件下偶发假红；改为显式 `os.utime` 递增。
-门禁：`bash tools/githook/nn-python-gate.sh` 全绿（ruff+mypy+**1933 passed**）。
+门禁：`bash tools/githook/nn-python-gate.sh` 全绿（ruff+mypy+**1940 passed**）。
 
 ---
 

@@ -880,6 +880,13 @@ def sanitize_run_id(raw: object) -> str:
     return s
 #: kind=iter 的 payload 内要点名的 init 权重文件名（节点跑 rollout 的 --weights）。
 INIT_WEIGHTS_NAME = "init_weights.json"
+#: 发布端自检要求重打时写进归档根的**扰动**文件名（plan/accident.plan.md §4.6，2026-09-21）。
+#: 它**不是数据**：存在的唯一意义是让重打的字节与上一次不同——打包是确定性的
+#: （shard 排序 + tar 记源文件 mtime、lzma 确定性），不扰动就会逐字节相同，旧判别
+#: （`zipfile.is_zipfile` 的 EOCD 启发式）在同一份字节上**永远**为真 ⇒ 重打闭环不收敛。
+#: worker 侧忽略根级未知文件（只按名取 init_weights.json / plan.json，shard 靠扫描
+#: 带 manifest.json 的子目录），故向前兼容。
+PAYLOAD_PERTURB_NAME = "payload.perturb"
 # 标注成 Literal：typeshed 的 tarfile.open("w:xz") 重载要求 preset 为 Literal[0..9]，
 # 普通 int 过不了 mypy。**改档位时这里要同步改**（比如变 5 就写 Literal[5]）。
 #
@@ -968,6 +975,7 @@ def pack_payload(
     out_path: str | Path,
     *,
     extra_files: Sequence[str | Path] | None = None,
+    perturb: bytes | None = None,
 ) -> str:
     """把 shard 目录（npy + manifest.json）打成 **tar.xz**，写 `out_path`。
 
@@ -979,6 +987,9 @@ def pack_payload(
     校验，D1——防隧道截断）。
 
     返回文件字节 sha256。调用方拿到后应把 sha 写入 job 记录/账本。
+
+    `perturb`（§4.6，2026-09-21）：非 None 时把这段字节以 `PAYLOAD_PERTURB_NAME` 写进
+    归档根——发布端自检要求重打时用它**显式扰动**字节（确定性打包下唯一的换字节手段）。
     """
     zpath = Path(out_path)
     zpath.parent.mkdir(parents=True, exist_ok=True)
@@ -999,6 +1010,10 @@ def pack_payload(
             fx = Path(xf)
             if fx.is_file():
                 tf.add(fx, arcname=fx.name)
+        # 显式扰动（仅发布端自检要求重打时；见 `PAYLOAD_PERTURB_NAME`）。写在 extra 之后、
+        # 归档根，非 shard 目录 ⇒ 不进 shard 名单、不影响任何按名取用的文件。
+        if perturb is not None:
+            _add_bytes(tf, PAYLOAD_PERTURB_NAME, bytes(perturb))
         # M2（B1）：不再写根级占位 manifest.json —— worker.py:896 一直把它当
         # `_unused_manifest` 丢弃（~0.89MB/轮纯冗余）。权威 manifest 走 job 记录
         # （/jobs/next 返回），本函数只负责搬运 shard 数据。`manifest` 形参保留
