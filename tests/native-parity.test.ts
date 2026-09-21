@@ -24,6 +24,8 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 process.chdir(ROOT)
 
 const { runStudentConvWasm, runStudentFeatures } = await import('../src/nn/conv-wasm.ts')
+// 生产模型构建入口（缓存键前提那条用例要断言它的实例语义）
+const { buildModelFromText } = await import('../src/nn/infer.ts')
 const {
   featuresEngine,
   nativeLibCandidates,
@@ -334,5 +336,53 @@ describe('attestation 守卫（B2/B4）', () => {
     )
     const why = nativeStaleReason(ROOT, { outDir: 'tmp/native-stale-probe' })
     expect(why).toMatch(/源码已变/)
+  })
+})
+
+/**
+ * 权重 blob 缓存键的**前提**（2026-09-21 评审 ①）。
+ *
+ * native 侧 `ensureBlob` 用 `k.blobOwner === m.stemW`、wasm 侧用 `uploaded !== stemW` 判
+ * 「要不要重传权重」——键是**引用身份**而不是内容。它安全的前提 = 权重视图不可变：每个
+ * 模型实例由 `buildModelFromText` 一次性构建，全仓没有原地改权重的路径（导出器每局新建
+ * 模型、权重文件按内容寻址 ⇒ 每局都是新数组）。
+ *
+ * 这条用例钉住那个前提本身：同一段权重文本两次构建 ⇒ **两个不同实例、内容相同**，且两次
+ * 跑出的 features 逐字节相同（缓存重建是幂等的）。将来若有人给 `buildModelFromText` 加
+ * 记忆化 / 复用 buffer，这里会红并给出该做什么（换缓存键或显式重建视图），而不是让 rollout
+ * 静默继续用旧权重、attestation 也拦不住（它只在首用跑一次）。
+ */
+describe('权重 blob 缓存键的前提：buildModelFromText 每次返回新实例', () => {
+  const TEXT = JSON.stringify({
+    arch: { kind: 'student', h: 64, d: 8 },
+    params: (
+      JSON.parse(
+        fs.readFileSync(path.join(ROOT, 'tests', 'fixtures', 'student-golden-wasm.json'), 'utf8'),
+      ) as {
+        params: Record<string, unknown>
+      }
+    ).params,
+  })
+
+  it('两次构建：引用不同、内容相同、features 逐字节相同', () => {
+    const a = buildModelFromText(TEXT) as unknown as TestModel
+    const b = buildModelFromText(TEXT) as unknown as TestModel
+    // ① 引用不同 ⇒ native/wasm 两个缓存都会判「换实例」并重传
+    expect(a.stemW).not.toBe(b.stemW)
+    expect(a.dwW[0]).not.toBe(b.dwW[0])
+    // ② 内容相同 ⇒ 重传幂等（是同一批权重，不是两份不同数据）
+    expect(bytesOf(a.stemW).equals(bytesOf(b.stemW))).toBe(true)
+    expect(bytesOf(a.dwW[0]).equals(bytesOf(b.dwW[0]))).toBe(true)
+    // ③ 消费端：同一份确定性输入各跑一次，pooled/bufA 逐字节相同
+    const rng = makeRng(11)
+    for (let i = 0; i < a.in16.length; i++) {
+      const v = (rng() - 0.5) * 2
+      a.in16[i] = v
+      b.in16[i] = v
+    }
+    expect(runStudentConvWasm(a)).toBe(true)
+    expect(runStudentConvWasm(b)).toBe(true)
+    expect(bytesOf(a.pooled).equals(bytesOf(b.pooled))).toBe(true)
+    expect(bytesOf(a.bufA).equals(bytesOf(b.bufA))).toBe(true)
   })
 })

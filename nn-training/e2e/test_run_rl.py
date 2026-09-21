@@ -567,10 +567,24 @@ def test_it_queue_normal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
         )
         wts = [t for kind, t, _x in srv.events if kind == "weights"]
         disp_pairs = {p for kind, _t, p in srv.events if kind == "dispatch"}
+        node_disp = [t for kind, t, _x in srv.events if kind == "dispatch"]
         check(rep.get("missing") == [] and rep["games"] == 2, "I1 settled fully")
         check(rep.get("dist_phase_sec") is not None, "I1 dist_phase_sec present")
         check(len(drained_ts) == 1, f"I1 queue-drained fired once (got {len(drained_ts)})")
-        check(bool(wts) and drained_ts[0] > wts[0], "I1 drained after weight distribution")
+        # 【2026-09-21 修订】原断言 `drained_ts[0] > wts[0]` 与本代码性质不符：本地槽是**复用**
+        # 的（`cap_full = max(1, min(workers, n_tasks))` ⇒ local_slots_max=0 也有 2 条本地
+        # 腿），2 局 × 0.01s 能在后台 `weights-push` 仍**在途**时就清空队列 ⇒ 与 I3 同一条
+        # 竞态（2026-09-20 已在 I3 下标明）。实测：同一份代码连跑 6 次，2 次红（≈1/3 flake，
+        # 与任何改动无关）——§97 同族。真正有结构保证、且断言它才有回归价值的是：**节点采样
+        # 派发晚于其权重落地**（节点 worker 线程在 POST 成功后才孵化，
+        # `rl/dispatch.py::_push_need_and_spawn`）。
+        check(
+            not node_disp or (bool(wts) and wts[0] < node_disp[0]),
+            "I1 node sampling task dispatched only after weights pushed "
+            f"[weights_events={len(wts)} first={wts[0] if wts else None} "
+            f"first_node_dispatch={node_disp[0] if node_disp else None} "
+            f"drained={drained_ts[0] if drained_ts else None}]",
+        )
         check(disp_pairs == {(0, 111), (3, 222)}, "I1 all pairs still dispatched")
         check(rep["dist"]["offPlanShards"] == 0, "I1 no off-plan shards")
     finally:

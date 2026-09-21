@@ -214,7 +214,17 @@ function loadKernel(): NativeKernel | null {
   }
 }
 
-/** 把模型的 7 组权重拼成 kernel 期望的单一 blob（实例变化时重建一次）。 */
+/**
+ * 把模型的 7 组权重拼成 kernel 期望的单一 blob（实例变化时重建一次）。
+ *
+ * **缓存键 = `m.stemW` 的引用身份**（与 wasm 侧 `uploaded !== stemW` 同族），它成立的
+ * 前提是**权重视图不可变**：`src/` 里模型由 `buildModelFromText` 一次性构建，之后没有任何
+ * 原地改权重的路径（导出器每局新建模型、权重文件按内容寻址 ⇒ 每局都是新数组）。
+ * 若将来出现「同一批 Float32Array 原地换权重」（如 load_state 复用 buffer），**这里与 wasm 的
+ * 上传缓存都会静默继续用旧权重**（attestation 已过、更难察觉）—— 那时的正确改法是换键
+ * （wver / 内容指纹）或在那条路径里显式重建视图（`resetNativeConvForTest()` 是现成的钩子），
+ * 不要只改一侧。
+ */
 function ensureBlob(k: NativeKernel, m: ConvModelView): Float32Array | null {
   if (k.blob && k.blobOwner === m.stemW) return k.blob
   const sizes = [

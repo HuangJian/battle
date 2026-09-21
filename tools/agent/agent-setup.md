@@ -55,14 +55,28 @@ bun tools/agent/sampler-agent.ts --port 8443 --workers <N>
 
 磁盘余量 ≥2GB（agent 自检 `minDiskFreeMB=2048`，不足拒单）。
 
-### 2.1 rollout 引擎：优先 node（DECISIONS §367，可选但推荐）
+### 2.1 rollout 引擎：微基准自动选（engine × features 后端，DECISIONS §367）
+
+⚠️ **别假设「node 一定比 bun 快」**——本机的微基准比的是 **(引擎 × features 后端)** 这个三元组，
+不是引擎单轴。装上共享库后 bun 会走 native，实测反而赢 node+wasm（本机 2.66ms vs 3.52ms
+⇒ 选 bun）。**唯一权威来源 = 启动日志/`GET /v1/ping` 的 `rolloutEngine` 与 bench 的
+`BENCH-ARM`；排障时以它们为准，不要按本条的经验数字推断。**
+
+三条臂与它们的量级（本机 win x64 稳态 forward）：
+
+| 臂 | 何时出现 | 相对 |
+|---|---|---|
+| **bun + native** | `src/nn/native/prebuilt/<本机目标>` 存在且首用 attestation 通过 | **最快**（~2.6ms） |
+| bun/node + wasm | 无共享库，或 attestation 失败响亮回落 | 中（bun ~7.6ms / node ~4.6ms） |
+| bun/node + TS | wasm 资产也缺（会静默变慢！） | 最慢（~14×） |
 
 同一个 `conv_feats.wasm` 推理，node(V8) 比 bun(JSC) 快 ~1.6×（本机实测 features 4.62ms vs
 7.55ms；端到端单局 ~1.4×）。**agent 本体始终跑 bun**，只是采样子进程交给 node：
 
-- **引擎=本机微基准自动选**（五平台实测：V8 只在 win/wsl x64 赢、mac/arm64 bun 赢）：
-  启动时对同一 conv_feats.wasm 实测两引擎稳态 forward（~0.3-0.5s/次），选快者（3% 迟滞）；
-  决策按 bun/node 版本 + wasm sha 缓存 → 日常重启零开销，升级后自动重测。
+- **引擎=本机微基准自动选**（五平台实测：V8 只在 win/wsl x64 赢、mac/arm64 bun 赢；装上
+  native 后 bun 臂通常翻盘）：启动时实测两引擎稳态 forward（~0.3-0.5s/次），选快者（3% 迟滞）；
+  决策按 bun/node 版本 + wasm sha + native 库 sha 缓存 → 日常重启零开销，升级后自动重测。
+  日志里 `BENCH-ARM native` 表示 bun 臂真走了 native（若是 wasm/ts 而本机有库 ⇒ 看 ATT 那一行）。
 - node 要求 **≥ v22**；选中 node 时 `bun build --target=node` 预打包 exporter。
 - 不满足/打包失败/子进程连续失败 2 次 → **自动回退 bun**，行为与旧版完全一致。
 - 开关：`--no-node` 或 `SAMPLER_ENGINE=bun` 强制 bun；`SAMPLER_ENGINE=node` 强制 node；

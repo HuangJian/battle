@@ -1156,8 +1156,11 @@ function main(argv: string[] = process.argv.slice(2)): void {
         puGotOther: res.puGotOther,
         // feat：本 shard 由哪条 features 后端产出（native / wasm / ts）。
         // 加它是为了「以为开了 native 其实回落了」能被事后看见（评审 B5③）；
+        // **与 wver 解耦**：本机直跑（无 --wver）也必须记，否则「本机看到的读数走哪条后端」
+        // 无从查证；只有真正依赖下发链路的 wver/node 才跟着 wver 走。
         // 不进 data_fp（那个只对 dir/wver/stage/seed 求 sha，见 protocol.py::data_fp）。
-        ...(wver ? { wver, node: nodeLabel, feat: featuresEngine() } : {}),
+        feat: featuresEngine(),
+        ...(wver ? { wver, node: nodeLabel } : {}),
         ...(courseFp ? { course_fp: courseFp } : {}),
         ...(corpusFp ? { corpus_fp: corpusFp } : {}),
       }
@@ -1243,7 +1246,13 @@ function main(argv: string[] = process.argv.slice(2)): void {
   console.log(`score=${JSON.stringify(summary.scoreStats)}`)
   console.log(`dims=${JSON.stringify(dimMeans)}`)
   console.log(`totalSamples=${totalSamples} totalTicks=${totalTicks}`)
-  console.log(`shards under: ${outDir}  (consume with ppo.py)`)
+  // --pack-memory：npy 只在内存里组装后进容器，盘上**没有** shard 目录 —— 再打
+  // 「shards under: …」会把排障的人往空目录引（sampler-agent 路径的实际消费方是 pack）。
+  console.log(
+    packMemory
+      ? 'pack-memory: shards 未落盘（内存直进容器，消费方 = sampler-agent 的 --pack）'
+      : `shards under: ${outDir}  (consume with ppo.py)`,
+  )
   writeFileSync(`${outDir}/_rl_report.json`, JSON.stringify(summary, null, 2))
 
   // ---- BCV2 结果容器（v3.6，sampler-agent 专用；本机直跑不带 --pack 时完全无感）----

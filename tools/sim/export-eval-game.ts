@@ -925,8 +925,10 @@ export function main(argv: string[]): void {
     killerKinds: res.killerKinds,
     // feat：本局评估由哪条 features 后端产出（native / wasm / ts）。与 rollout 的 shard
     // manifest 同口径（rollout-eval-opt.plan.md §4 记账）——「以为开了 native 其实回落了」
-    // 在 eval 侧同样要能事后看出来。不进任何 data_fp（eval 侧本就没有）。
-    ...(wver ? { wver, node: nodeLabel, feat: featuresEngine() } : {}),
+    // 在 eval 侧同样要能事后看出来。与 wver **解耦**（本机直跑无 wver 也要记）。
+    // 不进任何 data_fp（eval 侧本就没有）。
+    feat: featuresEngine(),
+    ...(wver ? { wver, node: nodeLabel } : {}),
   }
   writeFileSync(`${outDir}/_eval_report.json`, JSON.stringify(report, null, 2))
   if (packPath) {

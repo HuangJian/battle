@@ -90,6 +90,10 @@ function loadRunner(): WasmRunner | null {
     const offBufC = offBufB + H * SP * 4
     const offPooled = offBufC + H * SP * 4
 
+    // 上传缓存键 = stemW 的**引用身份**（与 native 侧 `k.blobOwner === m.stemW` 同族）：
+    // 成立前提是权重视图不可变（`buildModelFromText` 一次性构建，全仓无原地换权重的路径）。
+    // 若将来出现原地换权重，这里会静默继续用旧权重 —— 换键或显式换视图，别只改一侧
+    // （详见 native-conv.ts::ensureBlob 的同一段说明）。
     let uploaded: unknown = null
 
     const runner: WasmRunner = {

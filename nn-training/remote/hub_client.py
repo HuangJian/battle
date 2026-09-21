@@ -563,6 +563,10 @@ def pack_ts_code_zip(
                             continue
                     except OSError:
                         continue
+                    # 0o755：dlopen 只需读权限，位只是为了 `ls -l` 一眼认出是原生库。
+                    # 注：`ZipFile.extractall` 在 Linux 上未必恢复 unix mode（2026-09-21 评审
+                    # ⑨）——无影响，库是给 dlopen 用的；若将来直接 `./conv_features_cli` 执行，
+                    # 那边需自行 chmod +x。
                     _add(f, 0o755)
     sha = _sha256_bytes(zip_path_p.read_bytes())
     if log:

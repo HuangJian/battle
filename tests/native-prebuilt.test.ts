@@ -39,6 +39,8 @@ const {
 const { prebuiltStaleReason, resolveNativeLib, sha256File } =
   await import('../tools/agent/native-build.ts')
 const { runStudentConvWasm } = await import('../src/nn/conv-wasm.ts')
+// src/ 侧的同类解析（两处优先级必须一致：src/ 不得依赖 tools/ ⇒ 只能各写一份，见下一段用例）
+const { nativeLibCandidates, nativeStatus } = await import('../src/nn/native-conv.ts')
 
 const PREBUILT_DIR_ABS = path.join(ROOT, PREBUILT_DIR)
 const BOARD = 26
@@ -236,6 +238,34 @@ describe('共享库解析优先级（env → prebuilt → 本机构建）', () =
     >
     expect(r.kind).toBe('local')
     fs.rmSync(repo, { recursive: true, force: true })
+  })
+
+  // 2026-09-21 评审：两处解析并行实现（src/nn/native-conv.ts::nativeLibCandidates 与
+  // tools/agent/native-build.ts::resolveNativeLib，因 src/ 不得依赖 tools/）——优先级一旦漂移，
+  // 会出现「有的节点用 prebuilt、有的用本机构建」而 feat 分布莫名不均。这两条用例把两侧的
+  // 顺序与今天的解析结果都钉住。（dist 侧的顺序已由上面几条覆盖。）
+  it('src 侧候选顺序：env 最优先、prebuilt 先于本机构建', () => {
+    const env = path.join(os.tmpdir(), 'src-side-hand-placed.bin')
+    const c = withEnv(env, () => nativeLibCandidates())
+    expect(c[0]).toBe(env)
+    // 归一化只用字面量替换（正则里的反斜杠层数在源码里极易写错）
+    const norm = (p: string): string => p.split(path.sep).join('/')
+    const iP = c.findIndex((p) => norm(p).includes(PREBUILT_DIR))
+    const iL = c.findIndex((p) =>
+      norm(p).endsWith(`tmp/native/${nativeLibBasename(process.platform)}`),
+    )
+    expect(iP).toBeGreaterThan(-1)
+    expect(iL).toBeGreaterThan(-1)
+    expect(iP).toBeLessThan(iL)
+  })
+
+  it('两侧在本机解析到同一个库路径（今天都是 prebuilt）', () => {
+    const src = nativeStatus().libPath
+    const tools = resolveNativeLib(ROOT)
+    // 本仓同时存在入库 prebuilt 与（可能存在的）tmp/native 本机构建 ⇒ 两侧都必须选 prebuilt
+    expect(tools.kind).toBe('prebuilt')
+    expect(src).not.toBeNull()
+    expect(path.resolve(src!)).toBe(path.resolve(tools.path!))
   })
 
   it('既无 prebuilt 也无本机构建 ⇒ 响亮原因（不抛）', () => {
