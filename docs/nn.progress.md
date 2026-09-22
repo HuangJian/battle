@@ -5,6 +5,35 @@
 
 ---
 
+## §130 异步结果回传：把 `out` 从关键路径上摘下来（plan/transfer-scheduling P2.5，2026-09-22）
+
+**为什么做**：双课程单 worker（最典型场景）下 A 的 rollout 与 B 的 PPO 交错填空 ⇒ **算力已满**，
+再快只能把传输从关键路径上摘掉。现场账 `rollout/in/ppo/out = 45/15/50/25 s`（用户口径）：
+云侧只感知 `in/ppo/out`，而 **`out` 25s 比 `in` 15s 还大**、改造前又全程压在关键路径上——
+P2 预取只治 `in`，`out` 无人管。两者正交：命中让 `in`→0，`out` 不动。
+
+**做了什么**
+
+| 面 | 落地 |
+|---|---|
+| 新模块 | `remote/result_upload.py`：`ResultUploader`（有界队列 `depth=2` + 专用线程 + `drain`/`close` + 落定回调）；`sync` 模式逐字回旧行为 |
+| worker 接线 | `submit` 入队即返回 → 主循环立刻领下一份；`_result_settled` 在**落定那一刻**才 `_wire_flush(wall_end=…)`；job 级 `uploaded` 标志决定 finally 收不收；整段主循环包 `try/finally` 收尾 drain；`--result-upload {async,sync}`（缺省 async） |
+| 记账 | `_wire_flush(wall_end=)`：`wall` = **关键路径**（claim → 结果就绪），新增 `overlap=` 字段；`out` 秒数照报不抹 | 
+| 读方 | `tools/wire_report.py`：`overlap=` 可选组（旧日志当 0）+ `out_overlap_sec` + 渲染「不占关键路径 / 仍压在关键路径上」 |
+| 安全网 | 队列满 / 入队超时 / 上传器已收尾 ⇒ **退回同步**（绝不丢）；失败落带 jid 的 `★` 行 + 收尾汇总；`--once` 先 drain 再判成败（H8 不退让） |
+
+**验证**：`tests/test_async_result_upload.py`（18 例）——核心是 **A/B 次序**（async 下第二份 job
+开算早于第一份回传结束；sync 基线必须晚于，否则用例是空转），另有「退出必 drain」（用事件闸住上传，
+确定性可判，不赌调度）「队列满退同步不丢」「失败响亮」「每 job 恰好一行阶段账」「取消路径照旧收账」。
+**8 刀改坏必红全红**（submit 恒同步 / close 不等落定 / 队列满丢结果 / 失败不响亮 / 忘传 wall_end /
+finally 无条件收账 / --once 不等落定 / 读方不认 overlap）。nn 门禁 ruff+mypy+pytest
+**2051 passed / 3 skipped**；根 `bun run check` 2122 例 0 fail。
+
+**未做（明确入口）**：`out` 的**减重**（minimize-payload：让那 25s 本身变小）——与 P2.5 正交，
+两者都做才是全量收益。**P0.5 的实机数字**仍待现场（见 §128/§129）。
+
+---
+
 ## §129 竞速退役 + 控制台同批 + push 腿：P3 落地（plan/transfer-scheduling，2026-09-22）
 
 **起因**：§127/§128 把取活换到 `peek → priority → claim`、把传输拆成 bulk 单通道之后，**旧**的

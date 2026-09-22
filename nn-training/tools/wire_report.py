@@ -53,8 +53,11 @@ REROLL_RE = re.compile(
 HUB_RE = re.compile(r"响应发送完成 (\S+) (\d+) bytes in ([\d.]+)s")
 #: 阶段占比行（2026-09-22，P0.5 基线）：`phases in=…s out=…s ppo=…s other=…s wall=…s`。
 #: 由 `remote/worker.py::_wire_flush` 写在每 job 摘要行**尾部**（同一条 `wire` 行里）。
+#: 行尾的 `overlap=`（P2.5 异步回传，2026-09-22）**可选**：旧 worker 的日志没有它，
+#: 缺省当 0（= 回传当时就在关键路径里）——旧日志必须照样能聚合。
 PHASE_RE = re.compile(
     r"phases in=([\d.]+)s out=([\d.]+)s ppo=([\d.]+)s other=([\d.]+)s wall=([\d.]+)s"
+    r"(?: overlap=([\d.]+)s)?"
 )
 #: worker 摘要尾部那个「合计」（是各段之和，不是一段）——不进分段表。
 TOTAL_SEG = "合计"
@@ -141,22 +144,28 @@ class PhaseSums:
 
     jobs: int = 0
     in_sec: float = 0.0  # T_in：一切**入向**传输（payload/code/blob/预取）
-    out_sec: float = 0.0  # T_out：结果回传
+    out_sec: float = 0.0  # T_out：结果回传的**实际耗时**（不论在不在关键路径上）
     ppo_sec: float = 0.0  # T_ppo：计算
     other_sec: float = 0.0  # 其余（排队/装载/解包/落盘）——「GPU 空转」主要落这里
-    wall_sec: float = 0.0  # 本 job 墙钟（claim → 摘要行）
+    wall_sec: float = 0.0  # 本 job **关键路径**墙钟（claim → 结果就绪；P2.5 后不含回传）
+    #: T_out 里**与下一份 job 并发**的那部分（P2.5 异步回传）——**不占**关键路径。
+    #: 旧 worker 的日志没有这个字段 ⇒ 恒 0（那时回传确实在关键路径里）。
+    out_overlap_sec: float = 0.0
     in_share: list[float] = field(default_factory=list)  # 每 job 的 in/wall（%）
     out_share: list[float] = field(default_factory=list)
     ppo_share: list[float] = field(default_factory=list)
     other_share: list[float] = field(default_factory=list)
 
-    def add(self, tin: float, tout: float, ppo: float, other: float, wall: float) -> None:
+    def add(
+        self, tin: float, tout: float, ppo: float, other: float, wall: float, overlap: float = 0.0
+    ) -> None:
         self.jobs += 1
         self.in_sec += tin
         self.out_sec += tout
         self.ppo_sec += ppo
         self.other_sec += other
         self.wall_sec += wall
+        self.out_overlap_sec += overlap
         if wall > 0:
             self.in_share.append(100.0 * tin / wall)
             self.out_share.append(100.0 * tout / wall)
@@ -165,12 +174,16 @@ class PhaseSums:
 
 
 def parse_phases(lines: list[str]) -> PhaseSums:
-    """抽出 `phases …` 行 → `PhaseSums`（纯函数，无 IO）。"""
+    """抽出 `phases …` 行 → `PhaseSums`（纯函数，无 IO）。
+
+    行尾的 `overlap=` 是可选组：旧日志命中不了它（`None`）⇒ 当 0（= 那时回传确实在
+    关键路径里）。把 `None` 当 0 而不是丢行——丢行会让旧日志整段变成「无数据」。
+    """
     sums = PhaseSums()
     for line in lines:
         m = PHASE_RE.search(line)
         if m:
-            sums.add(*(float(g) for g in m.groups()))
+            sums.add(*(float(g) if g is not None else 0.0 for g in m.groups()))
     return sums
 
 
@@ -193,6 +206,8 @@ def summarize_phases(sums: PhaseSums) -> dict:
         "other_sec": round(sums.other_sec, 1),
         "in_pct": _pct(sums.in_sec),
         "out_pct": _pct(sums.out_sec),
+        "out_overlap_sec": round(sums.out_overlap_sec, 1),
+        "out_overlap_pct": _pct(sums.out_overlap_sec),
         "ppo_pct": _pct(sums.ppo_sec),
         "other_pct": _pct(sums.other_sec),
         "in_pct_p50": _q(sums.in_share, 0.5),
@@ -223,8 +238,16 @@ def render_phases(row: dict) -> str:
         f"  T_out = {row['out_sec']:>8}s ({row['out_pct']:>5}%)",
         f"  T_ppo = {row['ppo_sec']:>8}s ({row['ppo_pct']:>5}%)  每 job p50={_f(row['ppo_pct_p50'])}%",
         f"  other = {row['other_sec']:>8}s ({row['other_pct']:>5}%)  每 job p50={_f(row['other_pct_p50'])}%",
+        f"  回传重叠 = {row.get('out_overlap_sec', 0.0):>7}s ({row.get('out_overlap_pct', 0.0):>5}%)"
+        + (
+            "  ← 与下一份 job 并发，**不占关键路径**"
+            if row.get("out_overlap_sec")
+            else "  ← 回传仍压在关键路径上（sync 模式 / 旧 worker）"
+        ),
         "  （T_in = 所有入向传输；other = 排队/装载/解包/落盘——预取只值得做在"
         "「T_in 高 且 other 里在等下载」的现场）",
+        "  （判据：`in + ppo + other ≈ wall` 才算传输真的离开了关键路径；`out` 全额记在账上，"
+        "只是被重叠掉了——把它从账上抹掉 = 让人以为回传不花钱）",
     ]
     return "\n".join(lines)
 

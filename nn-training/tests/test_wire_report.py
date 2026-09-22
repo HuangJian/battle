@@ -291,3 +291,56 @@ def test_main_reads_files_and_dir(tmp_path: Path, capsys: pytest.CaptureFixture[
 def test_main_without_readable_files_is_loud(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert wr.main([str(tmp_path / "nope.log")]) == 2
     assert "没有可读的日志文件" in capsys.readouterr().err
+
+
+def test_async_upload_marks_out_as_overlapped_not_on_the_critical_path() -> None:
+    """P2.5（异步回传）：`out` 与下一份 job 并发 ⇒ 关键路径 `wall` **不含**它。
+
+    但 `out` 必须**仍然报出来**（差额进 `overlap=`）——两个数的用途不同：
+      · 只报 `overlap` ⇒ 读成「回传不花钱」（错，链路照样跑满）；
+      · 只报 `out` ⇒ 读成「那 25s 压在关键路径上」（那是改造前的真相，现在不是）。
+    本用例同时把 sync（旧口径）与 async（新口径）摆在一起，差额就是「摘掉的那一段」。
+    """
+    import remote.worker as W
+
+    def _one(*, wall_end: bool) -> Any:
+        W._WIRE.clear()
+        W._BULK.reset()
+        jid = "c" * 16
+        W._wire_start(jid)
+        W._wire_add(jid, "payload", 3 * MB, 15.0)  # T_in
+        W._wire_add(jid, "result", MB, 25.0)  # T_out（用户口径：25s，比 in 还大）
+        W._wire_time(jid, "ppo", 50.0)  # T_ppo
+        lines: list[str] = []
+        W._wire_flush(jid, lines.append, **({"wall_end": W.time.time()} if wall_end else {}))
+        W._WIRE.clear()
+        assert len(lines) == 1
+        assert " overlap=" in lines[0], f"阶段行缺 overlap 字段（读方读不出来）：{lines[0]}"
+        return wr.summarize_phases(wr.parse_phases(lines))
+
+    sync = _one(wall_end=False)
+    assert sync["wall_sec"] == pytest.approx(90.0, abs=0.5), "sync：墙钟含回传（改造前口径）"
+    assert sync["out_overlap_sec"] == 0.0, "sync：回传没有重叠面"
+
+    async_ = _one(wall_end=True)
+    assert async_["in_sec"] == pytest.approx(15.0)
+    assert async_["out_sec"] == pytest.approx(25.0), "回传的实际耗时不许被抹掉"
+    assert async_["wall_sec"] == pytest.approx(65.0, abs=0.5), "关键路径 = in + ppo（回传已摘掉）"
+    assert async_["out_overlap_sec"] == pytest.approx(25.0), "摘掉的那一段必须如实报"
+    assert async_["other_sec"] == 0.0
+    # 判据可读：关键路径上只剩 in + ppo + other（回传不再算在分母里）。
+    assert async_["wall_sec"] == pytest.approx(90.0 - 25.0, abs=0.5)
+
+
+def test_old_logs_without_overlap_still_aggregate() -> None:
+    """旧 worker 的日志（没有 `overlap=`）不得整段变空——缺省当 0 并说明原因。"""
+    row = wr.summarize_phases(wr.parse_phases([PHASE_LINE]))
+    assert row["jobs"] == 1
+    assert row["out_overlap_sec"] == 0.0
+    out = wr.render_phases(row)
+    assert "仍压在关键路径上" in out and "sync 模式" in out
+    # 新版（有 overlap）的读数说「不占关键路径」——两种现场不许共用一个说法。
+    newer = PHASE_LINE + " overlap=3.7s"
+    row2 = wr.summarize_phases(wr.parse_phases([newer]))
+    assert row2["out_overlap_sec"] == pytest.approx(3.7)
+    assert "不占关键路径" in wr.render_phases(row2)

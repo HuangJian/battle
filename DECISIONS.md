@@ -5839,3 +5839,50 @@ plan §8【R2-10c】写 supersede §2026-09-17，并**保留** `claim(mode="back
 - 顺手删备份副本（把它当竞速遗留）⇒ 掉队救援整条消失，重新掉进「多 worker 无排序硬抢」。
 - 删 `HUB_SCOPE_HEADER` 时连**登记表**一起删 ⇒ 避让链输入恒 0，静默失效（独苗也不肯自领或
   反复避让同一台死机）——这正是 R2-2 那条端到端用例存在的理由。
+
+## §2026-09-22-goalnn-async-result-upload（2026-09-22，plan/transfer-scheduling **P2.5**：
+结果回传异步化 —— 把 `out` 从关键路径上摘下来；阶段账新增 `overlap=` 字段）
+
+**决定**：`post_result` 不再同步阻塞主循环。结果**入队即返回**（`remote/result_upload.py::ResultUploader`，
+有界队列 + 专用上传线程），主循环立刻去领下一份 job；`--result-upload {async,sync}` 缺省 `async`。
+配套三条硬契约：① **退出前必 drain**（`close()` = drain + join，包住整段主循环的 `try/finally`，
+覆盖 `break` / `--once` / 热替换 `SystemExit(86)` / 任何异常）；② **绝不丢**（队列满、入队超时、
+上传器已收尾 ⇒ 一律**退回同步**发出）；③ **失败响亮**（重试耗尽/确定性拒绝落带 jid 的 `★` 行 +
+收尾汇总计数）。记账侧：`out` 的秒数**照报**，阶段行只多一个 `overlap=` 说明它被重叠掉了 ——
+判据从「`in+out+ppo+other ≈ wall`」变成「`in+ppo+other ≈ wall`（关键路径）」。
+
+**背景（用户 2026-09-22 给的两组事实，组成完整推导）**：
+- **双课程单 worker 是最典型场景**，A 课 rollout 与 B 课 PPO **交错填空** ⇒ **算力已经满了**，
+  再快只能把传输从关键路径上摘掉（挤算力没有余地）。
+- 现场账 `rollout/in/ppo/out = 45/15/50/25 s`。云机侧只感知 `in/ppo/out`（rollout 在**本机**跑，
+  `rollout_src=local` 缺省，账在本机 `rollout_sec`）。**`out` 25s 是 40s 传输里更大的那一半，
+  而改造前它全程压在关键路径上**——预取（P2）只治 `in`，`out` 当时无人管。
+- 与 P2 是**正交**收益：命中让 `in`→0，`out` 不动；两者叠加才是「传输全部离开关键路径」。
+
+**为什么是异步上传而不是别的**：下一份 job 的字节**多半已在本地**（P2 软持有预取），上传只吃
+**链路**、不吃 CPU/GPU ⇒ 两者资源不相交，天然可叠。反过来「让 hub 接受更晚的结果」或
+「少回传内容」都不解决**关键路径占用**（前者改变语义，后者是 minimize-payload 的另一条线）。
+
+**否决项**：
+- 只把 `post_result` 挪到别的线程但**无人收尾** ⇒ 进程退出时队列里的结果随 daemon 蒸发，
+  现象是训练侧干等租约过期才「发现」——**静默**，正是本仓最贵的一类事故（3.5 小时静默那族）。
+- async 下**照旧在 finally 收账** ⇒ `out` 还没记进来就 flush，阶段账把回传读成 `0s`
+  （最该看见的一段凭空消失），且落定回调会再收一次 = 每 job 两行账。
+- 把 `out` 从阶段账里**删掉**（只报 overlap）⇒ 读成「回传不花钱」（链路照样跑满），
+  比错报更危险。
+- 队列**无界**（永不背压）⇒ 结果是大 dict（权重），链路长期卡住时无界涨内存；
+  正确方向是背压 + 超时退同步。
+- `--once` 不等落定就判成败 ⇒ 回传失败被静默当成成功（退出码 0），而 smoke 只判 returncode。
+
+**违反后果**：任何「让结果回传重新同步阻塞」的写法都会把 `out` 那 25s 重新压回关键路径
+（双课程交错下 = 每份 job 白等 25s，吞吐掉约两成）；任何「退出不收尾」的写法会丢结果且**不报警**；
+任何「revert 时只删 async 但留着 `could`-style 半状态」的写法会让记账与关键路径口径分叉。
+回退粒度 = `--result-upload sync`（逐字回旧行为，无需改代码）或按 commit revert。
+
+**落地物**：`remote/result_upload.py`（新：`ResultUploader` / `UploadTask` / `Outcome` /
+`RESULT_UPLOAD_MODES`）· `remote/worker.py`（`worker_loop` 接线 + `_result_settled` 落定回调 +
+job 级 `uploaded` 标志 + 主循环 `try/finally` 收尾 + `--result-upload`；`_wire_flush(wall_end=)` +
+`overlap=` 字段；`WIRE_MAX_JOBS` 4→8）· `tools/wire_report.py`（可选 `overlap=` 组 +
+`out_overlap_sec` + 渲染行；旧日志缺省当 0）· `tests/test_async_result_upload.py`（新，18 例）·
+`tests/test_wire_report.py`（async/sync 对照 + 旧日志兼容）。设计稿 `plan/transfer-scheduling.plan.md`
+§1.1 / §4 P2.5 / §9.5；进度 `docs/nn.progress.md §130`。
