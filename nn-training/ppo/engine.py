@@ -42,6 +42,7 @@ import argparse
 import json
 import os
 import time
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -257,6 +258,19 @@ def load_episodes(
 # chunk_episodes 由 ppo_common 提供（re-export 见顶部 import），行为逐字节一致。
 
 
+def _demo_masked_ce(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """合法类掩码 CE，与 train.bc._masked_ce 同数学（非法类 -1e9 进分母剔除；
+    合法类 <2 的样本跳过；全跳过时返回零梯度标量）。PPO 内联一份，避免 engine
+    反向依赖 train.bc 的 CLI 模块（数值口径以本函数 + 单测为准）。"""
+    m = mask > 0
+    keep = m.sum(dim=-1) >= 2
+    if not keep.any():
+        return logits.sum() * 0.0
+    z = logits.masked_fill(~m, -1e9)
+    per = F.cross_entropy(z[keep], target[keep], reduction="none")
+    return per.mean()
+
+
 def ppo_update(
     model,
     opt,
@@ -269,6 +283,9 @@ def ppo_update(
     ref_model=None,
     kickstart_kl: float = 0.0,
     ent_coef: float | None = None,
+    demo_bank: dict | None = None,
+    demo_bc_coef: float = 0.0,
+    demo_per_mb: int = 0,
 ):
     """chunks: list of minibatch dicts (obs (B,14,26,26) / scalars (B,24) / ...).
 
@@ -291,6 +308,14 @@ def ppo_update(
     ref = BC 冻结快照（调用方 freeze＋eval）；两者就绪时 loss +=
     kickstart_kl · KL(π_curr ‖ π_BC)，分头 exact-KL（move＋fire 求和，与 entropy
     口径同构）。任一缺席即零开销恒等（默认路径数学逐字节不变）。
+
+    demo_bank + demo_bc_coef + demo_per_mb（demo 混 batch，x20 后续）：
+    demo_bank = {obs (N,16,26,26) u1 / scalars (N,30) f4 / actions (N,2) i64
+    [move,fire] / masks (N,7)}（与 rollout 同 ObsEncoder v3 口径）；每 PPO minibatch
+    步从 bank 均匀抽 demo_per_mb 个样本（np RNG ⇒ ckpt 断点续跑精确复现），
+    loss += demo_bc_coef · (CE_move + CE_fire)（合法类掩码 CE，与 train.bc._masked_ce
+    同数学：非法类 -1e9、单合法类样本跳过）。三者任一缺席/非正即关闭，默认路径
+    数学逐字节不变（含额外 stat 键 demo_bc，关闭时恒 0.0）。
     """
     model.train()
     clip = CLIP_EPS
@@ -301,7 +326,34 @@ def ppo_update(
     # values, ~epochs× less conversion overhead.
     tensored = tensored_chunks(chunks, device)
     total_steps = len(tensored) * epochs
-    log(f"[ppo] update start: {len(tensored)} chunks x {epochs} epochs (~{total_steps} grad steps)")
+    # ---- demo bank 物化（一次 numpy→torch；关闭时零开销） ----
+    demo_on = (
+        demo_bank is not None and float(demo_bc_coef) > 0.0 and int(demo_per_mb) > 0
+    )
+    demo_t: dict[str, Any] = {}
+    demo_n = 0
+    if demo_on:
+        assert demo_bank is not None  # 由 demo_on 保证，mypy 收窄用
+        try:
+            demo_t = tensored_chunks(
+                [
+                    {
+                        "obs": np.asarray(demo_bank["obs"]),
+                        "scalars": np.asarray(demo_bank["scalars"]).astype(np.float32),
+                        "actions": np.asarray(demo_bank["actions"]).astype(np.int64),
+                        "masks": np.asarray(demo_bank["masks"]).astype(np.float32),
+                    }
+                ],
+                device,
+            )[0]
+            demo_n = int(demo_t["actions"].shape[0])
+            demo_on = demo_n > 0
+        except (KeyError, ValueError, TypeError) as err:
+            raise ValueError(f"[ppo] demo_bank 字段缺失/形状非法——拒收（{err}）") from err
+    log(
+        f"[ppo] update start: {len(tensored)} chunks x {epochs} epochs (~{total_steps} grad steps)"
+        + (f" + demo_bc(coef={float(demo_bc_coef):g}, per_mb={int(demo_per_mb)}, N={demo_n})" if demo_on else "")
+    )
     t0 = time.time()
     last_hb = t0
     # ---- kickstart ref 前向预计算（2026-09-10，纯吞吐、数值逐位不变） ----
@@ -393,6 +445,17 @@ def ppo_update(
                 kl_f = (fire_logp.exp() * (fire_logp - ref_fire)).sum(dim=-1)
                 kick_mean = (kl_m + kl_f).mean()
                 loss = loss + kickstart_kl * kick_mean
+            demo_bc_mean = torch.zeros((), device=device)
+            if demo_on:
+                # np RNG ⇒ 与 chunk permutation 同一条 ckpt 流，断点续跑精确复现。
+                _didx = np.random.randint(0, demo_n, size=int(demo_per_mb))
+                _dm, _df, _ = model(demo_t["obs"][_didx], demo_t["scalars"][_didx])
+                _dmm = demo_t["masks"][_didx]
+                _dact = demo_t["actions"][_didx]
+                demo_bc_mean = _demo_masked_ce(
+                    _dm, _dact[:, 0], _dmm[:, :MOVE_DIM]
+                ) + _demo_masked_ce(_df, _dact[:, 1], _dmm[:, MOVE_DIM : MOVE_DIM + FIRE_DIM])
+                loss = loss + float(demo_bc_coef) * demo_bc_mean
 
             opt.zero_grad()
             loss.backward()
@@ -411,6 +474,7 @@ def ppo_update(
                             "entropy": entropy,
                             "kl": approx_kl_est(lp_old, lp_new),
                             "kickstart": kick_mean,
+                            "demo_bc": demo_bc_mean,
                             "mean_ret": ret.mean(),
                             "mean_adv": adv.mean(),
                             "gnorm": gn,
@@ -471,6 +535,7 @@ def ppo_update(
             "entropy": 0.0,
             "kl": 0.0,
             "kickstart": 0.0,
+            "demo_bc": 0.0,
             "gnorm": 0.0,
             "mean_ret": 0.0,
         }

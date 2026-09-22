@@ -341,6 +341,13 @@ MANIFEST_OPTIONAL_DEFAULTS: dict[str, object] = {
     #: raw 字节数（预检/日志；0 = 未知）。
     "opt_bytes": 0,
     "ref_bytes": 0,
+    # ---- demo 混 batch（x20 后续）：demo bank 内容寻址 + BC 系数 ----
+    #: demo bank npz 的 sha256；空 = 关（worker 走 getattr 缺省，老行为）。
+    "demo_sha": "",
+    #: demo BC 辅 loss 系数；0.0 = 关。
+    "demo_bc_coef": 0.0,
+    #: 每 PPO minibatch 步抽的 demo 样本数；0 = 关。
+    "demo_per_mb": 0,
     #: 本轮是否走瘦身路径（审计/A-B；False = 内联老字段，逐字节回到旧行为）。
     "slim": False,
 }
@@ -385,10 +392,11 @@ RUN_NODE_LABEL = "run"
 #: `--run-max-iters` 再降；计划的 end_it 一律按其与 iters_total 的交集钳制。
 RUN_MAX_ITERS_HARD_CAP = 500
 
-#: M2 blob 载荷名（pull 端点 `GET /jobs/{id}/blob?name=opt|ref`；push body `blobs`）。
+#: M2 blob 载荷名（pull 端点 `GET /jobs/{id}/blob?name=opt|ref|demo`；push body `blobs`）。
 BLOB_OPT = "opt"
 BLOB_REF = "ref"
-BLOB_NAMES: tuple[str, ...] = (BLOB_OPT, BLOB_REF)
+BLOB_DEMO = "demo"
+BLOB_NAMES: tuple[str, ...] = (BLOB_OPT, BLOB_REF, BLOB_DEMO)
 
 
 class ProtocolError(ValueError):
@@ -903,7 +911,7 @@ PAYLOAD_XZ_PRESET: Literal[3] = 3
 def blob_path(job_dir: str | Path, name: str) -> Path:
     """内容寻址 blob 在 job 目录内的落盘名（M2；hub 写、pull worker 取）。
 
-    `name` ∈ BLOB_NAMES（opt/ref）。raw 字节原样存（无 base64），sha 即键。
+    `name` ∈ BLOB_NAMES（opt/ref/demo）。raw 字节原样存（无 base64），sha 即键。
     """
     if name not in BLOB_NAMES:
         raise ProtocolError(f"未知 blob 名 {name!r}（只接受 {BLOB_NAMES}）")

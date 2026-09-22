@@ -109,16 +109,17 @@ def _job_body_error_call_phases(fn: ast.FunctionDef) -> list[str]:
 
 
 def test_run_job_wraps_restore_and_grad_phases() -> None:
-    """三处包装必须在：opt/init 恢复、kickstart ref 装载、grad（PPO 更新）。
+    """四处包装必须在：opt/init 恢复、kickstart ref 装载、demo bank 装载、grad（PPO 更新）。
 
     少一处的症状都是**静默**的：那个阶段退回「一行云机日志 + 无限重领」，训练侧只剩超时
     ——正是 §4 事故的形状。所以用调用点清单钉住（`run_job` 无法单测驱动，本仓既有同款
     源码守卫：`tests/test_worker_device.py`）。
     """
     phases = _job_body_error_call_phases(_run_job_node())
-    assert len(phases) == 3, f"应有 3 处包装（restore×2 + grad），实得 {phases}"
+    assert len(phases) == 4, f"应有 4 处包装（restore×3 + grad），实得 {phases}"
     assert any("restore" in p and "opt" in p for p in phases), phases
     assert any("restore" in p and "ref" in p for p in phases), phases
+    assert any("restore" in p and "demo" in p for p in phases), phases
     assert any("grad" in p for p in phases), phases
 
 
@@ -143,4 +144,4 @@ def test_wrapped_blocks_re_raise_protocol_error_untouched() -> None:
             h for h in n.handlers if isinstance(h.type, ast.Name) and h.type.id == "ProtocolError"
         ]
         assert bare, "包装块缺少 `except ProtocolError: raise`（会覆盖上游判定）"
-    assert handlers_with_body_error == 3, handlers_with_body_error
+    assert handlers_with_body_error == 4, handlers_with_body_error

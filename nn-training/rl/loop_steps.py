@@ -490,6 +490,8 @@ def _remote_forward_agg(agg: dict) -> dict:
         "kl": float(agg.get("kl", 0.0)),
         "mean_ret": float(agg.get("mean_ret", 0.0)),
         "kickstart": float(agg.get("kickstart", 0.0) or 0.0),
+        # demo 混 batch 遥测（同 kickstart additive；旧 worker 无此键 → 0.0）。
+        "demo_bc": float(agg.get("demo_bc", 0.0) or 0.0),
     }
 
 
@@ -1240,6 +1242,24 @@ class TrainingSteps:
         # 是 payload 里可观的一块）。系数退火到阈值以下就不再附字节。
         kick_live = kick_on and coef_active(kick_kl)
         ref_b64, ref_fp = _kickstart_ref_payload(args) if kick_live else ("", "")
+        # demo 混 batch（x20 后续）：bank 静态（同 run 内逐轮同字节），首轮读一次缓存。
+        # 三键半开即拒（缺 bank 发 coef = 静默纯 PPO，不可接受；缺 coef 发 bank = 空运）。
+        demo_bank_path = str(getattr(args, "demo_bank", "") or "")
+        demo_coef = float(getattr(args, "demo_bc_coef", 0.0) or 0.0)
+        demo_per_mb = int(getattr(args, "demo_per_mb", 0) or 0)
+        demo_raw: bytes | None = None
+        if demo_bank_path or demo_coef > 0 or demo_per_mb > 0:
+            if not (demo_bank_path and demo_coef > 0 and demo_per_mb > 0):
+                raise SystemExit(
+                    "[run_rl] demo 三键须齐全（demo_bank/demo_bc_coef/demo_per_mb）——半开拒发"
+                )
+            if not hasattr(self, "_demo_raw"):
+                bp = Path(demo_bank_path)
+                if not bp.exists():
+                    raise SystemExit(f"[run_rl] demo_bank 不存在：{demo_bank_path!r}——检查课程路径")
+                self._demo_raw = bp.read_bytes()
+                log(f"[run_rl] demo bank 已装载：{demo_bank_path} {len(self._demo_raw) / 1e6:.1f}MB")
+            demo_raw = self._demo_raw
         # I1 取证：publish 前的临终对照点（上传大 payload 前的 RSS/磁盘基线）。
         self._forensics(f"remote_pre_publish it{it}")
         # M0：打包（tar.xz + 编码）/ 落盘墙钟——iteration 事件的 wire.pack_sec。
@@ -1283,6 +1303,9 @@ class TrainingSteps:
             kickstart_kl=kick_kl,
             ref_weights_b64=ref_b64,
             ref_weights_fp=ref_fp,
+            demo_bank_bytes=demo_raw,
+            demo_bc_coef=demo_coef,
+            demo_per_mb=demo_per_mb,
             shuffle=True,
             schedule_raw=course.ppo_schedule_dicts(),
             # 严格样本量配额（target_transitions 路线）：与 _serial_ppo 同一个来源，
@@ -1516,6 +1539,7 @@ class TrainingSteps:
             f"steps={self._total_steps} chunks={self._chunks_n} "
             f"kl={self._agg['kl']:.5f} entropy={self._agg['entropy']:.4f} "
             + (f"kickstart={self._agg['kickstart']:.4f} " if sess.kick_on else "")
+            + (f"demo_bc={self._agg.get('demo_bc', 0.0):.4f} " if self._agg.get("demo_bc") else "")
             + f"({self._ppo_sec}s round-trip) -> {args.out}"
         )
         return result

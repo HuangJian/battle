@@ -57,10 +57,12 @@ from remote.artifacts import (
 from remote.bundle import CODE_NAME as BUNDLE_CODE_NAME
 from remote.offline_deliver import OfflineDeliverer, make_deliverer
 from remote.protocol import (
+    BLOB_DEMO,
     PAYLOAD_NAME,
     PLAN_NAME,
     ProtocolError,
     RetryableError,
+    blob_path,
     decode_opt_tar,
     decode_weights_json,
     encode_opt_tar,
@@ -311,9 +313,72 @@ def open_run_context(
             f"待投递 {st['pending']} 轮）——连不上就静默跳过，训练不受影响"
         )
     last = int(state.get("last_it", plan["start_it"]))
+    _seed_demo_blob_cache(
+        manifest=manifest,
+        job_dir=Path(job_dir),
+        work_dir=Path(work_dir),
+        artifacts_root=store.root,
+        log=log,
+    )
     _seed_start_checkpoint(ctx, job_dir=Path(job_dir), start_it=int(plan["start_it"]), last_it=last)
     _carry_ts_tree(ctx, ts_code_cache_dir=ts_code_cache_dir, ts_tree=ts_tree)
     return ctx
+
+
+def _seed_demo_blob_cache(
+    *,
+    manifest: dict,
+    job_dir: str | Path,
+    work_dir: str | Path,
+    artifacts_root: str | Path | None,
+    log: Callable[[str], None] = _log_default,
+) -> None:
+    """run 启动期 demo bank 种子（x20 后续）：manifest.demo_sha 非空时，把 demo 字节
+    落进 `work_dir/blob_cache/<sha>`（与 worker `_resolve_blob` 的缓存键同规），此后逐轮
+    缓存命中、零传输。
+
+    字节来源（按序）：产物目录 `demo.npz`（bundle 导入布局）→ job 目录 blob 文件
+    （hub-run 路径 post() 落盘）。任一命中但 sha 不符 = 跳过找下一个；全无 ⇒ 启动期
+    **响亮拒绝**（不等跑到 it1 的 PPO 才炸；修法写进错误里）。
+    run 模式没有可用的 hub blob 通道（逐轮 manifest 是节点本地合成的，hub 上无此 job），
+    所以这里**不**尝试联网下载——离线腿走 bundle（自动带包），半离线请预置文件或缓存。
+    """
+    sha = str(manifest.get("demo_sha", "") or "")
+    if not sha:
+        return
+    cache = Path(work_dir) / "blob_cache"
+    dst = cache / sha
+    if dst.is_file():
+        try:
+            if sha256_file(dst) == sha:
+                log(f"demo bank 缓存命中（{sha[:12]}…）——零传输")
+                return
+            log("demo bank 缓存损坏（sha 不符）——重新种子")
+        except OSError:
+            pass
+    cands: list[Path] = []
+    if artifacts_root is not None:
+        cands.append(Path(artifacts_root) / "demo.npz")
+    cands.append(blob_path(job_dir, BLOB_DEMO))
+    for c in cands:
+        try:
+            raw = c.read_bytes()
+        except OSError:
+            continue
+        if sha256_bytes(raw) != sha:
+            log(f"demo 候选 {c} sha 不符——跳过")
+            continue
+        cache.mkdir(parents=True, exist_ok=True)
+        tmp = dst.with_name(dst.name + ".tmp")
+        tmp.write_bytes(raw)
+        tmp.replace(dst)
+        log(f"demo bank 已种子进 blob_cache（{len(raw) / 1e6:.1f}MB，{sha[:12]}…）")
+        return
+    raise ProtocolError(
+        f"manifest 要 demo bank（sha={sha[:12]}…）但节点侧无字节：产物目录缺 demo.npz、"
+        "job 目录缺 blob.demo、blob_cache 未命中——修法：用带 demo 的任务包重导"
+        "（export_bundle 有课程 demo_bank 即自动打包），或把 demo.npz 放进产物目录"
+    )
 
 
 def _read_opt_file(root: Path, name: str) -> bytes:

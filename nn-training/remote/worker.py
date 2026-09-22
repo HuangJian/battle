@@ -34,6 +34,7 @@ from remote import net_http
 from remote.iter_rollout import run_iter_rollout
 from remote.protocol import (
     AUTH_HEADER,
+    BLOB_DEMO,
     BLOB_OPT,
     BLOB_REF,
     HEARTBEAT_SEC,
@@ -2007,6 +2008,53 @@ def run_job(
         except Exception as e:
             raise job_body_error("restore（kickstart ref 装载）", e) from e
 
+    # ---- demo 混 batch（x20 后续）：bank 内容寻址 + 装载校验 ----
+    # 安全阀同 ref：coef>0 而 bank 不可得 ⇒ 响亮失败，绝不静默降级为纯 PPO
+    # （那会让 demo 腿的整轮更新在日志一切正常下丢失 demo 项）。
+    demo_coef = float(manifest.get("demo_bc_coef", 0.0) or 0.0)
+    demo_per_mb = int(manifest.get("demo_per_mb", 0) or 0)
+    demo_bank: dict | None = None
+    if demo_coef > 0 and demo_per_mb > 0:
+        import io as _io
+
+        import numpy as _np
+
+        demo_sha = str(manifest.get("demo_sha", "") or "")
+        if not demo_sha:
+            raise ProtocolError(f"job {jid}: demo_bc_coef>0 但无 demo_sha——拒收")
+        demo_raw, demo_hit, demo_src = _resolve_blob(
+            blob_root=blob_root,
+            name=BLOB_DEMO,
+            sha=demo_sha,
+            inline_b64="",
+            jid=jid,
+            base_url=base_url,
+            token=token,
+            preloaded=preloaded,
+            log=log,
+        )
+        if demo_hit and demo_src == "cache":
+            blob_hits += 1
+        if demo_src == "download":
+            blob_miss_bytes += len(demo_raw)
+        if not demo_raw:
+            raise ProtocolError(f"job {jid}: demo_sha 存在但 blob 不可得——拒收")
+        try:
+            demo_bank = {k: _np.asarray(v) for k, v in dict(_np.load(_io.BytesIO(demo_raw))).items()}
+        except ProtocolError:
+            raise
+        except Exception as e:
+            raise job_body_error("restore（demo bank 装载）", e) from e
+        need = {"obs", "scalars", "actions", "masks"}
+        if not need.issubset(demo_bank.keys()):
+            raise ProtocolError(
+                f"job {jid}: demo bank 缺字段 {sorted(need - set(demo_bank.keys()))}——拒收"
+            )
+        log(
+            f"job {jid}: demo bank 已加载（N={demo_bank['obs'].shape[0]}"
+            f" coef={demo_coef:g} per_mb={demo_per_mb} src={demo_src}）"
+        )
+
     # ---- PPO：load → chunk → update（同一 backend 调用链，D4） ----
     # ★ §4.2（2026-09-21）：grad 段（含读 shard / 分块）的崩溃归确定性失败。
     # 为什么连读 shard 一起包：那同样是「这份字节决定的」失败（缺字段/形状不符），
@@ -2041,6 +2089,9 @@ def run_job(
             ),
             ref_model=ref_model,
             kickstart_kl=kick_kl,
+            demo_bank=demo_bank,
+            demo_bc_coef=demo_coef,
+            demo_per_mb=demo_per_mb,
         )
     except ProtocolError:
         raise
@@ -2083,6 +2134,7 @@ def run_job(
             "entropy": float(agg.get("entropy", 0.0)),
             "kl": float(agg.get("kl", 0.0)),
             "kickstart": float(agg.get("kickstart", 0.0)),
+            "demo_bc": float(agg.get("demo_bc", 0.0)),
             "mean_ret": float(agg.get("mean_ret", 0.0)),
             "steps": int(total_steps),
             "chunks": len(chunks),

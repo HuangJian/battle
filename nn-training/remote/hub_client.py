@@ -31,6 +31,7 @@ from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from platform_utils import rmtree_best_effort
 from remote.protocol import (
     AUTH_HEADER,
+    BLOB_DEMO,
     BLOB_OPT,
     BLOB_REF,
     FAIL_BODY_MAX,
@@ -621,6 +622,11 @@ def publish_job(
     ent_coef: float | None = None,
     ref_weights_b64: str = "",
     ref_weights_fp: str = "",
+    # demo 混 batch（x20 后续）：demo bank npz 原始字节（调用方读文件一次，见 loop_steps；
+    # 3MB 级，blob 走内容寻址，worker 首轮下载后缓存命中）。空 = 关。
+    demo_bank_bytes: bytes | None = None,
+    demo_bc_coef: float = 0.0,
+    demo_per_mb: int = 0,
     shuffle: bool = True,
     schedule_raw: list | None = None,
     # 严格样本量配额（target_transitions 路线）：训练侧逐关只收前 ceil(target/关数) 步。
@@ -717,6 +723,13 @@ def publish_job(
             ref_raw = b""
     # ref_sha 口径与 ref_weights_fp 同一（调用方对 raw 权重取 sha）——有字节才寻址。
     use_ref_blob = bool(slim and ref_weights_fp and ref_raw)
+    # demo bank 内容寻址：bank 静态（同 run 内逐轮同字节），sha 键天然跨轮复用。
+    # 非 slim 下无内联退路（3MB 进 manifest 不可接受）——响亮拒绝，调用方开 slim。
+    demo_raw = demo_bank_bytes or b""
+    if demo_raw and not slim:
+        raise HubClientError("demo bank 要求 slim=1（内容寻址；非 slim 无内联退路）——拒发")
+    use_demo_blob = bool(slim and demo_raw)
+    demo_sha = _sha256_bytes(demo_raw) if demo_raw else ""
     opt_init = (
         ""
         if use_opt_blob
@@ -756,6 +769,9 @@ def publish_job(
         "ref_sha": str(ref_weights_fp) if use_ref_blob else "",
         "opt_bytes": len(opt_raw) if use_opt_blob else 0,
         "ref_bytes": len(ref_raw) if use_ref_blob else 0,
+        "demo_sha": demo_sha if use_demo_blob else "",
+        "demo_bc_coef": float(demo_bc_coef),
+        "demo_per_mb": int(demo_per_mb),
         "slim": bool(slim),
         "data_fp": fp,
         "payload_sha256": "",
@@ -792,6 +808,8 @@ def publish_job(
         m.pop("schedule_raw", None)
         for k in ("opt_sha", "ref_sha", "opt_bytes", "ref_bytes", "slim"):
             m.pop(k, None)
+        for k in ("demo_sha", "demo_bc_coef", "demo_per_mb"):
+            m.pop(k, None)
         for k, v in (extra or {}).items():
             m[k] = v
     else:
@@ -826,6 +844,8 @@ def publish_job(
         blob_path(jd, BLOB_OPT).write_bytes(opt_raw)
     if use_ref_blob:
         blob_path(jd, BLOB_REF).write_bytes(ref_raw)
+    if use_demo_blob:
+        blob_path(jd, BLOB_DEMO).write_bytes(demo_raw)
     m = normalize_manifest(m)
     (jd / "manifest.json").write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8")
     # 重发同一个 job（同幂等键 → 同 job_id，逐轮重试走的正是这条路）必须清掉上一次的

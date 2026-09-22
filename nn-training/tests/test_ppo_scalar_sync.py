@@ -35,6 +35,7 @@ ENGINE_KEYS = {
     "entropy",
     "kl",
     "kickstart",
+    "demo_bc",
     "mean_ret",
     "mean_adv",
     "gnorm",

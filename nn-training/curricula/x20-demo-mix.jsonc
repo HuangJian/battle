@@ -1,0 +1,168 @@
+// 课程 x20-demo-mix —— **demo 混 batch 腿**（noexplore 基座 + 唯一变量：demo BC 辅 loss）
+//
+// 状态：**已起草，待用户手工开训**（agent 不得启动训练）。
+//
+// 立项（§117 处方①唯一活路；BC-ref 锚已死 §120/human-anchor 结算）：PPO 8.4M 全是 rush
+//   分布，V 自举不到没去过的"稳健开局"。本腿把 61 局人类 demo（38564 transitions）按小比例
+//   掺进 PPO batch（BC 辅 loss），只拽分布、不钉策略（§120 背题教训：demo 是调料不是老师）。
+//
+// 基座选择（2026-09-22 议定，from-105 优先）：从 noexplore 最优权重 it105 起跑，而非 it30。
+//   ① 奖励零断裂：基座沿用 noexplore 配置（wExplore=0），不切回 B 奖励——V 头无冲击；
+//   ② 配对对照天然存在：noexplore 用同 paired seed 跑完了 it106–181（无 demo），日志封存，
+//      本腿同种子流续跑 = 与已完赛历史臂逐轮配对（对照冻结、不可篡改，比跨腿活配对更干净）；
+//   ③ kickstart：noexplore 到 it105 时 kk≈0（decay 0.5^104， effectively 已无锚），故本腿
+//      `kickstart_ref=false`、bc=it105 纯 warm start——与 noexplore 后段 effective 机制一致，
+//      且绕开事故 §5 的 kk=1 复活禁令（禁的是 kk=1 裸续训，不是无锚续跑）。
+//   it30 方案留档（回答"demo 主效应"问题），本腿先行（回答"前沿+demo 能不能破局"，信息价值更高）。
+//
+// 单变量纯度：与 x20-noexplore **逐字相同**（奖励 wExplore=0、lam 0.95、采样 48000、
+//   mb 1024、lr/epochs/gamma/schedule 全同；kickstart OFF 与 noexplore 后段 effective 一致），
+//   只加 demo 三键。 comparator = noexplore 同 it 点历史（run 内 itN = 绝对 it105+N）。
+//   配对：`paired_rotate_seed` 与 noexplore 同值（1789876303）⇒ 续跑种子流与历史臂逐轮相同，
+//   low% 差异只能归因给 demo（demo 只动 loss 侧，不动 corpus；corpus_identity_fp 与 noexplore
+//   相等，已验证，见开工前置⑦）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 判据（ verdict 主段 = 415000，见污染预登记）
+// ══════════════════════════════════════════════════════════════════════════
+// **主读数 = 日常 low% 轨迹**（860001 段 400 局，每 5 轮，干净段）+ 与 noexplore 同绝对 it 点
+//   配对对照（run 内 itN = 绝对 it105+N；历史臂已封存）。it40 只记录、不停腿（it40 误杀门
+//   已废：B/noexplore 两次前科）。
+// **机制读数**（按出现顺序）：① rollout 开局行为哨兵（首 1000t 共访 cell / idle / 开火数，
+//   小样本审计："菜上桌"证据，看不到即停）② 顶部死亡占比（`tmp/topdeath/deathpos.ts` 现成，
+//   noexplore it105 基线 26.5% → 下降才是"不钻了"的直接证据）③ demo_bc 遥测：it1 校准必须
+//   非零（落地检查，mirror kickstart_warn；恒 0 = worker 没跑 demo 项，停腿查链路）。
+// **门**：415000 段 `low% 相对 noexplore 同 it 点改善 ≥3pp` 且 `p10 ≥ 2`（B 终点 38.9/7.76 作
+//   次级参照，不作门）。
+// **污染预登记**（开训前写定，事后不得改）：demo 种子全在 414xxx（与 414000 段 414000–414199
+//   重叠）⇒ 414000 只作次段（剔除 demo 种子局后计分）；415000（415000–415199）与日常段干净，
+//    verdict 以 415000 为准。另看背题指纹：demo 种子局 pass − 非 demo 种子局 pass，gap >15pp
+//   ⇒ 降 coef（0.02→0.005）或停腿（§120 复发）。
+// **约束（熔断优先级最高）**：日常 mean < 6.19 立即停；超时 >5% 立即停；kl 连续 3 轮 ≥0.075
+//   即停（demo 不应增方差，增了即停）。
+// **回测门**：终点候选 415000 不劣于 noexplore 同 it 点（同段同种子配对；此处 415000
+//   兼判决与回测，另取 416000 段 800 局作纯回测——开训前已登记，无事后挑选）。B 终点
+//   （38.9/7.76）作次级参照。
+// **判据一律不得由教师表现反推**（AGENTS §0.2；demo 是人类行为，God 不出现在任何位置）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 止损
+// ══════════════════════════════════════════════════════════════════════════
+//   · **it10 开局哨兵**：rollout 开局行为无人类形状（共访 cell/idle/开火三项皆无动）⇒ 停腿
+//     （demo 没上桌，后面全免谈；§120 式静默失败不再重演）。
+//   · **it20 demo 落地**：demo_bc 遥测恒 0 ⇒ 停腿查链路（mirror kickstart vk1 事故）。
+//   · **上/下限熔断**：mean < 6.19 或 timeout >5% ⇒ 立即停。
+//   · **机械横盘**：low% 连续 4 个 eval 点无改善 ⇒ 停腿；宽限一次 +10 轮（B 式误杀门教训下，
+//     宽限用完仍无改善才停，不提前）。
+//   · **背题熔断**：demo 种子内外 pass gap >15pp ⇒ 降 coef 一档；仍超 ⇒ 停腿。
+
+{
+  "version": 5,
+  "name": "x20-demo-mix",
+  "mode": "per-tick",
+  // 环境不变：ladder-c20-lives1（4 关 2000-2003、20 敌、max_ticks 12900、lives 1、hard）。
+  // 任务侧一个字不动（AGENTS §0.2）。
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：noexplore 原公式逐字（本腿不动奖励，wExplore=0 不变）──────────────
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited + wPickup*powerUpsCollected - wApproach * where(pickupDist < 0, 0, pickupDist)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wShot": 0.05,
+      "wExplore": 0.0,
+      "wPickup": 3.0,
+      "wApproach": 0.008
+    },
+    // dense-only（与父腿一致）：terminal 空表合法。
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：noexplore 最优 it105，纯 warm start ──────────────────────────────
+  // bc = 初始权重（kickstart_ref=false 时 bc 只做初始化，不做锚；二者可分，见立项③）。
+  "bc": "nn-training/weights/x20-noexplore/x20-noexplore.it105.20260922-053620.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  // ── 配对：续 noexplore 的种子流（1789876303，见 noexplore 文件评审注记）──────
+  // run 内 itN 吃的是 noexplore 绝对 it105+N 的种子 ⇒ 与历史臂逐轮同 batch。对照组已完赛
+  //   冻结，差异只能归因给 demo。⚠ 改它 = 退化成非配对对照。
+  "paired_rotate_seed": 1789876303,
+
+  // ── ★ 唯一变量：demo 混 batch 三键 ────────────────────────────────────────
+  // bank：nn-training/data/human-x20-corpus/demo_bank.npz（61 shards / 38564 样本，
+  //   `nn-training/tools/build_demo_bank.py` 可重建；sha5cb4cb56…；3.0MB，blob 首轮一传后缓存）。
+  // coef 量级锚：CE 均值 ~1.0，PPO 侧 value 项 ~0.25 ⇒ 0.02 ≈ 8% 梯度占比起步（预登记，
+  //   按 demo_bc 遥测占比调，不按感觉）。
+  "demo_bank": "nn-training/data/human-x20-corpus/demo_bank.npz",
+  "demo_bc_coef": 0.02,
+  "demo_per_mb": 128,
+
+  // ── 预算 ───────────────────────────────────────────────────────────────
+  "iters": 0,
+  "max_hours": 12,
+  "workers": 8,
+
+  // ── 位移包：回基线（与 noexplore 一致，数值与 B 同）─────────────────────────
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  // ── 采集：与 noexplore 一致 ────────────────────────────────────────────────
+  "target_transitions": 48000,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+
+  // ── 路径：新目录、禁续跑（§15.5）────────────────────────────────────────
+  "out": "tmp/x20-demo-mix/weights.json",
+  "traj": "tmp/x20-demo-mix",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/x20-demo-mix",
+  "backup_prefix": "x20-demo-mix",
+
+  // ── 评估 ───────────────────────────────────────────────────────────────
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
+
+// ── 开工前置 ─────────────────────────────────────────────────────────────
+// ① bc 文件存在（noexplore it105 最终候选，已验证：`nn-training/weights/x20-noexplore/
+//    x20-noexplore.it105.20260922-053620.json`）。
+// ② demo bank 存在（3.0MB，sha 首轮 worker 日志核对；重建命令见上）。
+// ③ transport：**必须显式 `--remote-transport pull`**；PPO 云机（禁本机 CPU，事故教训）。
+//    离线（cloud rollout＋PPO）：支持——任务包自动带 `demo.npz`（export_bundle，有 bank 即
+//    打包），节点启动期种子 blob_cache（run_loop，缺件启动期响亮拒绝，不等 it1 才炸）；
+//    push 模式经 BLOB_NAMES 自动带 blob；控制台不开离线入口，离线走 bundle CLI 手工流程。
+// ④ 新 out/traj 目录（禁续跑，§15.5）。
+// ⑤ remote_hubs 登记 + slot 容量 + worker 心跳（开训前确认）。
+// ⑥ 首轮 PPO 日志确认三项：demo bank 加载（N=38564）+ demo_bc 非零 + reward 指纹已变。
+//    任一缺席 = 链路断，停腿查（vk1/kickstart_warn 同规）。
+// ⑦ 血缘自检（已验证，结论存档）：`corpus_identity_fp(本课) == corpus_identity_fp(noexplore)`
+//    —— demo 三键 + kickstart OFF 纯属 loss/优化器侧，rollout 语料身份与父腿逐位相同；
+//    course_fp 照常不同（行为变了就该是新实验）。改本文件后重跑此检查（一条 python -c）。
+//
+// 启动（**用户手工；agent 不得启动训练**，经控制台）：
+//   开课 x20-demo-mix（训练模式 在线，rollout 本机，PPO 云机）。
+//
+// ── 诊断工具 ─────────────────────────────────────────────────────────────
+// · 日常趋势：it0/it5…（860001 段 400 局）low%/mean/p10 + 与 noexplore 同绝对 it 点配对对照表。
+// · 开局哨兵：rollout shard 抽样 → 首 1000t 共访 cell / idle / 开火（it10 前出数）。
+// · 机制读数：`tmp/topdeath/deathpos.ts`（顶部死亡占比，基线 = noexplore it105 的 26.5%）
+//   + demo_bc 遥测曲线。
+// · 背题指纹：demo 种子局 vs 非 demo 种子局 pass gap（判决段内计）。
+//
+// ── 结算节（跑完回填）────────────────────────────────────────────────────
+// 必填：① 日常 low% it0 → 终点 + 与 noexplore 同绝对 it 点配对对照 ② 415000 主段 +
+//   416000 纯回测（同种子配对，均 800 局）③ 分关表 ④ 顶部死亡占比 + 开局行为哨兵复核
+//   ⑤ demo_bc 遥测曲线 + 背题 gap ⑥ 超时/换血读数 ⑦ 实际轮数与耗时

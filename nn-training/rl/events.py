@@ -213,6 +213,8 @@ def write_iteration(jsonl_path: Path, args, it: int, report: dict, m: dict) -> d
             "mean_ret": agg["mean_ret"] if agg else None,
             # R5§363：缰绳遥测（旧 agg 无此键 → None，不破兼容）。
             "kickstart": (agg.get("kickstart") if agg else None),
+            # demo 混 batch 遥测（同上 additive；旧 agg 无此键 → None）。
+            "demo_bc": (agg.get("demo_bc") if agg else None),
             "lr": args.lr,
             # 动态采集（plan/dynamic-rollout-volume §2.4.3）：本轮配额与已结算量；
             # 未开该模式的课程为 None（additive，旧行无此键）。

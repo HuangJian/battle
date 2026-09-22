@@ -850,6 +850,16 @@ class CourseConfig(BaseModel):
     #: 它**不进** `corpus_identity_fp`（ref/优化器语义 ≠ 「一个样本是什么」，进去会让
     #: 全体课程指纹漂移）——见 `tests/test_kickstart_plan.py` 的断言。
     kickstart_init: float | None = None
+    #: demo 混 batch（x20 后续）：demo bank npz 路径（仓库相对，如
+    #: `nn-training/data/human-x20-corpus/demo_bank.npz`）；"" = 关闭，老行为逐字节不变。
+    #: 与 kickstart_init 同待遇：**不进** `corpus_identity_fp`（loss 侧数据 ≠ 「rollout
+    #: 样本是什么」；course_fp 照常覆盖整文件字节，行为变了就该是新实验）。
+    demo_bank: str = ""
+    #: demo BC 辅 loss 系数（loss += coef · (CE_move + CE_fire)）；0.0 = 关闭。
+    #: 量级锚：CE 均值 ~1.0，PPO 侧 value 项 ~0.25 ⇒ 0.02 ≈ 8% 梯度占比起步。
+    demo_bc_coef: float = 0.0
+    #: 每 PPO minibatch 步抽的 demo 样本数（np RNG，ckpt 精确复现）；0 = 关闭。
+    demo_per_mb: int = 0
     gamma: float = 0.995
     lam: float = 0.95
     clip_eps: float | None = None
@@ -1021,6 +1031,10 @@ class CourseConfig(BaseModel):
             "mb": "mb",
             "normalize_ret": "normalize_ret",
             "kickstart_ref": "kickstart_ref",
+            # demo 混 batch 三键（缺席 = 老行为：args 走 getattr 缺省，manifest 无键）
+            "demo_bank": "demo_bank",
+            "demo_bc_coef": "demo_bc_coef",
+            "demo_per_mb": "demo_per_mb",
             # 缰绳初值 kk(1)：课程键 → argparse dest（异名；漏映射 = 静默失效，ent_break 前科）
             "kickstart_init": "kickstart_kl",
             "warmup_iters": "warmup_iters",

@@ -5380,3 +5380,27 @@ KERNEL32/api-ms-win/ucrtbase/VCRUNTIME；有 llvm 时再断言 `llvm-nm -u` 空 
 - "B 腿证明 God 锚无害"——否（2026-09-21 agent 误述，已撤回）：B 的锚是自家 lineage，无外部先例。
 - "God bulk 打底 + 人类微调"作为默认配方——否：默认配方是**纯人类 ref**；God-bulk 是 fallback，
   开条件见上（flaw-audit 先行）。顺序不可反（先混后测 = 污染后无法归因）。
+---
+
+## §2026-09-22-demo-mix-bc-aux（2026-09-22，demo 混 batch 接线：BC 辅 loss，不是 kickstart）
+
+**否决的备选**：
+- kickstart 锚到人类 BC-ref——否：ref 在 held-out 挂零（§120），KL 朝常量坍缩策略锚定 = 投毒。
+- demo 内联进 payload（base64，旧 slim-off 口径）——否：3MB 进 manifest 不可接受；blob 内容寻址
+  首轮一传后缓存命中，与 opt/ref 同规（post() 内非 slim 带 bank 直接响亮拒绝）。
+- rollout 侧掺 demo——否：BC 梯度必须进 PPO update，采样侧掺只会污染 advantage 血缘。
+
+**落点**（单变量纯度：loss 侧加项，corpus 不动）：
+- `ppo/engine.ppo_update` 新三参（`demo_bank/demo_bc_coef/demo_per_mb`，缺省全关、数学逐字节不变）；
+  每 minibatch 步 np RNG 抽样（ckpt 精确复现）、合法类掩码 CE 与 `train.bc._masked_ce` 同数学。
+- worker 经 manifest 取 blob（`BLOB_DEMO`，缺 bank 而 coef>0 即拒收，mirror kickstart 安全阀）；
+  pack（hub_client.post）、训练侧（loop_steps 发布 + `_remote_forward_agg` + iteration 行
+  `demo_bc`）、课程 schema（CourseConfig 三键 + flat_overrides）全链打通。
+- `corpus_identity_fp` **刻意排除** demo 键（loss 语义 ≠ 「样本是什么」，与 kickstart_init 同待遇；
+  course_fp 照常覆盖整文件）；配对腿（demo-mix vs B）共享 `paired_rotate_seed`。
+- 污染预登记：demo 种子 ∈ 414xxx 与 414000 段重叠 ⇒ verdict 主段 415000 + 416000 纯回测，
+  414000 只作次段（剔除 demo 种子局）；背题指纹 = demo 内外 pass gap >15pp 即降 coef。
+- 系数锚：`demo_bc_coef=0.02`（CE~1.0 vs value 项~0.25 ⇒ ~8% 梯度占比起步，按 demo_bc 遥测调）。
+- 离线（2026-09-22 追记）：demo 腿支持 cloud rollout＋PPO 离线——bundle 自动带 `demo.npz`
+  （OPTIONAL_PARTS，导入即 sha 对账），节点 `open_run_context` 启动期种子 blob_cache
+  （缺件启动期响亮拒绝）；push 经 BLOB_NAMES 自动带 blob；pull 零改动。控制台不开离线入口。

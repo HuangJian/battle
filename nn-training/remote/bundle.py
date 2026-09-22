@@ -37,6 +37,7 @@ import zipfile
 from pathlib import Path
 
 from remote.protocol import (
+    BLOB_DEMO,
     BLOB_OPT,
     PLAN_NAME,
     ProtocolError,
@@ -58,7 +59,7 @@ README_NAME = "README.md"
 
 #: 包内「数据件」（其余是索引/说明）：逐件都要 sha 对账。
 DATA_PARTS = (PLAN_NAME, "manifest.json", "init_weights.json", COURSE_NAME, CODE_NAME)
-OPTIONAL_PARTS = ("opt.tar", "ts_code.zip")
+OPTIONAL_PARTS = ("opt.tar", "ts_code.zip", "demo.npz")
 
 
 def sha256_bytes(b: bytes) -> str:
@@ -134,6 +135,15 @@ def export_bundle(
             opt_raw = decode_opt_tar(str(m["opt_init"]))
         except Exception:  # 内联 opt 坏掉不值得让导出失败（代价 = 云上 Adam 从头）
             opt_raw = b""
+    # demo bank（x20 后续）：课程开了 demo 才有；随包走（3MB 级），节点启动时种子 blob_cache。
+    # 缺席 = 非 demo 腿，包里无此件（OPTIONAL_PARTS，导入侧不强制）。
+    demo_raw = b""
+    if jd is not None and blob_path(jd, BLOB_DEMO).exists():
+        demo_raw = blob_path(jd, BLOB_DEMO).read_bytes()
+    if demo_raw and sha256_bytes(demo_raw) != str(m.get("demo_sha", "") or ""):
+        raise ProtocolError(
+            "job 目录的 demo blob 与 manifest.demo_sha 不符——包与 job 不是同一份计划"
+        )
 
     parts: dict[str, bytes] = {
         PLAN_NAME: plan_raw,
@@ -147,6 +157,8 @@ def export_bundle(
         parts[COURSE_NAME] = course_text.encode("utf-8")
     if opt_raw:
         parts["opt.tar"] = opt_raw
+    if demo_raw:
+        parts["demo.npz"] = demo_raw
 
     index = {
         "magic": BUNDLE_MAGIC,
@@ -190,6 +202,7 @@ run_id      : {index['run_id']}    计划区间 : it{index['it']} → it{index['
   manifest.json     课程全文 + 超参 + 血缘（D13/D14）
   init_weights.json 起点权重（= it{index['it']} 的输入）
   opt.tar           Adam 动量（**续训必需**；缺失 = 动量静默归零）
+  demo.npz          demo bank（仅 demo 腿有；缺失而 manifest 要 demo = 导入后启动期拒收）
   code.zip          同 commit 的 python + TS 源码（云机不必有仓、不必联网）
   ts_code.zip       rollout 导出器的 TS 运行时树
   course.jsonc      课程文件快照（审计 / 热加载）

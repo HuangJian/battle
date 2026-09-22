@@ -341,3 +341,85 @@ def test_payload_of_offline_round_carries_init_weights(tmp_path: Path) -> None:
 
     run_standalone(artifacts_dir=dest, run_job_fn=_spy, code_cache_dir=tmp_path / "cc3", log=_quiet)
     assert seen and seen[0] == INIT_W
+
+
+# ────────────────────────── demo bank 离线件 ──────────────────────────
+
+DEMO_RAW = b"demo-npz" + b"y" * 64
+
+
+def test_export_import_carries_demo_blob(tmp_path: Path) -> None:
+    """demo 腿任务包自动带 demo.npz：job 目录 blob.demo → 包件 → 导入落盘（sha 对账）。"""
+    from remote.protocol import blob_path
+
+    plan = build_plan(
+        _args(), it=2, iters_total=4, rotate_seed=5, max_iters=3, log=_quiet
+    )
+    m = _manifest(plan, it=3, code_sha=sha256_bytes(CODE_ZIP))
+    m["demo_sha"] = sha256_bytes(DEMO_RAW)
+    m["demo_bc_coef"] = 0.02
+    m["demo_per_mb"] = 128
+    m = normalize_manifest(m)
+    src = tmp_path / "srcd"
+    src.mkdir(parents=True, exist_ok=True)
+    (src / "init_weights.json").write_bytes(INIT_W)
+    (src / "code.zip").write_bytes(CODE_ZIP)
+    with zipfile.ZipFile(src / "ts_code.zip", "w") as z:
+        z.writestr("tools/sim/export-rl-rollout.ts", "// ts\n")
+    jd = tmp_path / "job"
+    jd.mkdir(parents=True, exist_ok=True)
+    blob_path(jd, "demo").write_bytes(DEMO_RAW)
+    out = tmp_path / "task-demo.zip"
+    index = export_bundle(
+        out,
+        manifest=m,
+        plan_bytes=dump_plan(plan),
+        init_weights_path=src / "init_weights.json",
+        code_zip_path=src / "code.zip",
+        ts_code_zip_path=src / "ts_code.zip",
+        job_dir=jd,
+        hub_url="https://hub.example",
+        note="test demo export",
+    )
+    assert "demo.npz" in index["parts"], index["parts"].keys()
+    dest = tmp_path / "artd"
+    import_bundle(out, dest)
+    assert (dest / "demo.npz").read_bytes() == DEMO_RAW
+
+
+def test_seed_demo_blob_cache_from_artifacts(tmp_path: Path) -> None:
+    """启动期种子：产物目录 demo.npz → blob_cache/<sha>；二次调用命中；缺件响亮拒绝。"""
+    from remote.artifacts import sha256_bytes as _sha
+    from remote.run_loop import _seed_demo_blob_cache
+
+    raw = b"demo-npz" + b"z" * 32
+    sha = _sha(raw)
+    art = tmp_path / "art"
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "demo.npz").write_bytes(raw)
+    work = tmp_path / "work"
+    m = {"demo_sha": sha}
+    _seed_demo_blob_cache(
+        manifest=m, job_dir=tmp_path / "jd", work_dir=work, artifacts_root=art, log=_quiet
+    )
+    assert (work / "blob_cache" / sha).read_bytes() == raw
+    # 二次调用走缓存命中（删源文件仍能过）
+    (art / "demo.npz").unlink()
+    _seed_demo_blob_cache(
+        manifest=m, job_dir=tmp_path / "jd", work_dir=work, artifacts_root=art, log=_quiet
+    )
+    # 缺件：响亮拒绝（不等 it1 PPO 才炸）
+    with pytest.raises(ProtocolError):
+        _seed_demo_blob_cache(
+            manifest=m,
+            job_dir=tmp_path / "jd2",
+            work_dir=tmp_path / "work2",
+            artifacts_root=tmp_path / "empty",
+            log=_quiet,
+        )
+    # 未开 demo（无 sha）：静默 no-op
+    _seed_demo_blob_cache(
+        manifest={}, job_dir=tmp_path, work_dir=tmp_path / "work3", artifacts_root=None,
+        log=_quiet,
+    )
+    assert not (tmp_path / "work3" / "blob_cache").exists()
