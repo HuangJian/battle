@@ -1,0 +1,131 @@
+// 课程 x20-human-anchor —— **人类 demo 锚腿**（B 基准 + 唯一变量：kickstart 锚源）
+//
+// 状态：**已收官（2026-09-21，前置裁决死，未开训）** —— BC-ref 在 held-out 行为门挂零，
+//   bc 已回退占位符，**禁止开训**（本文件当前不可执行）。demo 路线只剩混 batch 一条（见结算节）。
+//
+// 立项（docs/nn.progress.md §116–§119）：人类 35+26 局全通关（NN 全灭 seed），
+// "不往敌人堆里钻"；分歧分析 verdict = 探索失败（策略库缺稳健开局），执行不背锅。
+// 本腿检验：kickstart 锚到人类行为，能否把开局拉回可活区。
+//
+// 单变量纯度：除 bc/kickstart_init 外与 B 终点配置逐字相同（奖励用 rebirth 原版，
+// **无惜败奖** —— clutch 是另一条未检验变量，不掺；采样 48000 / mb 1024 同 B）。
+// 对照：B 终点（it175，判决 low 35.5%）为绝对基线；verdict 走绝对门，不配对
+// （配对对照已死于 C 腿事故；若预算允许，另开 B-配置空跑臂再谈）。
+//
+// ⚠ kickstart 语义（DECISIONS §2026-09-21-god-bc-attractor-basin）：ref = 课程 bc。
+//   本腿 bc = 人类 BC-ref（外部锚，x 线首次）—— God 不出现在任何位置。
+//   kickstart_init 小值开（0.1），快衰减；锚是脚手架，不是天花板。
+
+{
+  "version": 5,
+  "name": "x20-human-anchor",
+  "mode": "per-tick",
+  // 环境不变：ladder-c20-lives1（4 关 2000-2003、20 敌、max_ticks 12900、lives 1、hard）。
+  // 任务侧一个字不动（AGENTS §0.2）。
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：B 原公式逐字（无惜败奖）────────────────────────────────────────
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited + wPickup*powerUpsCollected - wApproach * where(pickupDist < 0, 0, pickupDist)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wShot": 0.05,
+      "wExplore": 0.2,
+      "wPickup": 3.0,
+      "wApproach": 0.008
+    },
+    // dense-only：terminal 空表合法。
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点与锚 ─────────────────────────────────────────────────────────────
+  // bc = 初始权重 **兼** kickstart ref（机制如此，二者不可分，见 loop_steps）。
+  // ⚠ 2026-09-21 held-out 裁决：下行 ref 已判死刑（255 留出集 mean 0.00，行为坍缩为"按住上+不开火"），
+  //   禁止开训此文件指向死 ref —— 已回退占位符。ref 重训通过后再填。
+  "bc": "nn-training/weights/x20-human-bc/PLACEHOLDER-ref-rejected-on-heldout.json",
+  "kickstart_ref": true,
+  // 小 kk 开（C 腿 kk=1 洗回 ~50 的教训；0 会触发"未启用"分支，按缺省处理，故取 0.1）。
+  "kickstart_init": 0.1,
+  "warmup_iters": 0,
+
+  // ── 预算 ───────────────────────────────────────────────────────────────
+  "iters": 0,
+  "max_hours": 12,
+  "workers": 8,
+
+  // ── 位移包：回基线（与 B 一致）────────────────────────────────────────────
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  // ── 采集：与 B 一致 ──────────────────────────────────────────────────────
+  "target_transitions": 48000,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+
+  // ── 路径：新目录、禁续跑（§15.5）────────────────────────────────────────
+  "out": "tmp/x20-human-anchor/weights.json",
+  "traj": "tmp/x20-human-anchor",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/x20-human-anchor",
+  "backup_prefix": "x20-human-anchor",
+
+  // ── 评估 ───────────────────────────────────────────────────────────────
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
+
+// ── 开工前置 ─────────────────────────────────────────────────────────────
+// ① BC-ref 落盘（nn-training/weights/x20-human-bc/ 下确切文件），本文件 bc 替换占位符。
+// ② transport：**必须显式 `--remote-transport pull`**；PPO 云机（事故教训：禁本机 CPU）。
+// ③ 新 out/traj 目录（禁续跑，§15.5）。
+// ④ remote_hubs 登记 + slot 容量 + worker 心跳（开训前确认）。
+//
+// BC 训练命令（用户手工；语料 nn-training/data/human-x20-corpus/，61 shards / 38564 样本）：
+//   bash tools/githook/nn-py-safe.sh train/bc.py --data-dir nn-training/data/human-x20-corpus \
+//     --arch student --epochs 60 --batch 512 --lr 3e-3 --mirror-p 0.5 --val-split 0.1 \
+//     --ckpt-every 10 --out nn-training/weights/x20-human-bc/weights.json \
+//     --notes "human 35+26 demos, pure-human BC-ref, no God"
+//   （--device cuda 若可用；value_coef 缺省 0，沿用 bc-c4 教训；God 不出现在任何位置。）
+//
+// 启动（**用户手工；agent 不得启动训练**）：
+//   bun dashboard/src/launch/cli.ts --script run_rl.py --course x20-human-anchor \
+//     --remote-transport pull
+//
+// ── 判据 ─────────────────────────────────────────────────────────────────
+// 主读数（绝对门，与 B 同口径）：判决段 414000（800 局）low% ≤ 35% 且 p10 ≥ 2。
+// 机制读数：日常 low% 轨迹（开局是否活过 735t 中位？看 rollout 存活分布）+ mean 不得崩（熔断 6.19）。
+// 回测门：415000 不劣于 B 终点；held-out（剩 ~210 opening seed）low% 大幅好于 it175 起点行为。
+// 熔断：上限/超时/熵，同 B。
+//
+// ── 结算节（2026-09-21 回填，本腿 0 轮：死在 BC-ref 前置裁决，从未开训）────────
+// ① 语料（已核）：`nn-training/data/human-x20-corpus/` 61 shards / 38564 samples（manifest.json
+//    逐 shard 相加，teacher 全 human；wave1 7/7＋wave2 28/28＋2 无 verdict 局收编）；工具
+//    `tools/sim/export-replay-labels.ts`（与 export-godai-labels 同构：同 ObsEncoder、同
+//    decisionTick 事件谓词、同 masks 口径；obs [N,16,26,26] u1、masks 7 维；tickHashes 全对＋
+//    kills 对账，0 跳过）。
+// ② BC-ref（kaggle cuda，60 epochs）：`nn-training/weights/x20-human-bc/
+//    weights.20260921-151747_ep60_val0.7301.json`（＋ckpt 10–60）；val 0.7301 看似健康。
+// ③ held-out 行为门（255 局，裁决口径）：ref **mean 0.00 / low 100% / p10 0**；对照 it175 为
+//    mean 2.18 / low 100% / p10 1。门（low% ≤70% 且 mean +2.0）纹丝没碰 —— **判死刑**。
+//    解剖（2000/414037，807t 死）：ref 全程按住上、807 tick **零开火** —— val 集与训练同分布
+//    背题满分，分布外退化成常量策略。
+// ④ 教训：小样本纯人类 BC（61 局）不成锚；val-split 同分布验证是安慰剂，唯一可信的是 held-out
+//    行为门。bc 已回退 `PLACEHOLDER-ref-rejected-on-heldout.json`，禁开训（本文件 48 行原注保留）。
+// ⑤ 后续：BC-ref 锚路线已死；demo 注入只剩**混 batch**一条路（PPO batch 按小比例掺 demo，详见
+//    demo 机制说明）；God-bulk fallback 按 DECISIONS 入口排队（flaw-audit 先行）。
+// ⑥ 实际轮数与耗时：RL 0 轮；BC 训练在 kaggle cuda 完成（60 epochs，val 0.7301）。
+// 终局判语：**前置死**。不是"训不动"，是"锚本身立不住" —— 61 局人类 demo 撑不起一个可泛化的 BC
+//   锚；但语料本身有效（全通关人类开局正是 NN 缺货的行为），转混 batch 复用，无需重采。

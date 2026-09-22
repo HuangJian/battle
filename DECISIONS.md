@@ -5349,3 +5349,34 @@ KERNEL32/api-ms-win/ucrtbase/VCRUNTIME；有 llvm 时再断言 `llvm-nm -u` 空 
   （本属训练栈）；两条漂移门删除，测试改用 `tests/probe-fixture.ts` 从「关文件 + 规范局表」在内存生成语料
   （无 golden 文件 ⇒ 无第二真相源）。**实测**：删掉整个 `public/probe/` 后 134 条 probe 用例仍全绿，一条命令
   即重建且逐字节可重现。选种理由（nn1/nn2/god + note）属**决策记录**，应进 progress 文档而非一次性数据文件。
+
+---
+
+## §2026-09-21-god-bc-attractor-basin（2026-09-21，用户纠正 + 取证：God-BC 是陷阱，不是跳板）
+
+**前科（实证，非观点）**：
+
+1. `nn-training/curricula/x1-rebirth.jsonc` 头文件（2026-09-16 实测，2026-09-17 用户订正）：
+   BC 把教师的「先打 power」弄丢（首命中 power 33.3% → 0.5% → 训练后 0.0%）；
+   七条腿 per-iter KL 全锁 0.0018–0.0027，策略被 kl_coef=0.2 **钉在 BC 附近** ⇒
+   结论原文："从零学是唯一能离开「教师吸引域」的路径"。
+2. c 系：God-BC 起步，4 敌关难突破 ⇒ 重开 x 系（用户 2026-09-21 陈述；x1 头文件"纯从零 RL 臂（不蒸馏 God-AI）"即执行）。
+3. x 线监管链（已核）：x1(scratch, kickstart OFF) → x2…x6 → x20-rebirth → floor/steady，
+   kickstart ref 全是上一腿权重 —— x 线历史上**零 God 掺入**（God 只出现过 `--policy god` 参照臂）。
+
+**裁决**：God-BC 初始化/锚定**可以试验，但必须充分论证**（用户原话），论证模板如下，不接受"混一点试试"：
+
+- 先回答：本批 seed 上 God 自己什么水平？（x20 开局桶：God-1命 low 46.9% —— 平庸。蒸馏平庸之前先解释"锚定平庸何用"。）
+- 区分 INIT（永久起点，前科死因）与 anchor（衰减脚手架，未验证但机制不同）：anchor 必须配小 kk_init +
+  快衰减 + held-out 门，三件缺一即按 INIT 处理（= 禁止）。
+- 人类 demo ref 优先于 God ref：35 局人类开局在目标 seed 上全强（35/37 通关），God 在同批上弱 ——
+  强行为锚，弱行为不锚。God-bulk 预训练只在人类 ref 失败 held-out 后作为 fallback 候选，且须先过
+  flaw-audit（God-BC ref 在 held-out 开局上先跑分；≤ God-1命 水平即弃）。
+- 通用门（任何外部锚）：held-out（本任务：剩 ~240 opening seed）跑分 > 现任锚（x20-rebirth.it30），
+  否则不上桌。配方可疑，门不可疑。
+
+**备选与否决**：
+
+- "B 腿证明 God 锚无害"——否（2026-09-21 agent 误述，已撤回）：B 的锚是自家 lineage，无外部先例。
+- "God bulk 打底 + 人类微调"作为默认配方——否：默认配方是**纯人类 ref**；God-bulk 是 fallback，
+  开条件见上（flaw-audit 先行）。顺序不可反（先混后测 = 污染后无法归因）。

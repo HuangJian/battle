@@ -34,6 +34,8 @@ ab-test-*.ts
 
 nn-demo/
 nn-training/weights/**/*.json
+nn-training/weights/**/*.ckpt.*
+nn-training/weights/**/*.md
 nn-training/archive
 
 .venv/
