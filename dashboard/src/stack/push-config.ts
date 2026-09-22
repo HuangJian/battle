@@ -144,23 +144,52 @@ export interface PushFleetProbe extends RemoteExecutionFace {
   probes: Array<{ id: string; url: string; healthy: boolean | null }>
 }
 
-export async function probePushFleet(cfg: RlConfig, timeoutMs = 1500): Promise<PushFleetProbe> {
-  const face = remoteExecutionFace(cfg)
-  const nodes = enabledGpuPushNodes(cfg)
-  const probes = await Promise.all(
-    nodes.map(async (n) => {
+/** 逐节点探活（worker id → 通不通；未配 authKey / 无 url = null「探不了」）。
+ *  **贵**（每台 1.5s 超时）且与课程无关 ⇒ 进机群级 SWR 缓存（`snapshot-refresher`）。 */
+export async function probePushFleetHealth(
+  cfg: RlConfig,
+  timeoutMs = 1500,
+): Promise<Map<string, boolean | null>> {
+  const out = new Map<string, boolean | null>()
+  await Promise.all(
+    enabledGpuPushNodes(cfg).map(async (n): Promise<void> => {
+      const id = String(n.id ?? '')
       const url = String(n.url ?? '').replace(/\/+$/, '')
       const key = String(n.authKey ?? '').trim()
-      if (!url) return { id: String(n.id ?? ''), url, healthy: null }
-      if (!key) return { id: String(n.id ?? ''), url, healthy: null }
+      if (!url || !key) {
+        out.set(id, null)
+        return
+      }
       let healthy: boolean | null = null
       try {
         healthy = await httpOk(`${url}/ping`, key, timeoutMs)
       } catch {
         healthy = false
       }
-      return { id: String(n.id ?? ''), url, healthy }
+      out.set(id, healthy)
     }),
   )
-  return { ...face, probes }
+  return out
+}
+
+/** 执行面视图 = **结构**（cfg 现算：mode/台数/url）+ 逐节点探活（缓存或现探）。
+ *
+ *  结构现算的理由与节点行同（2026-09-22）：刚登记/停用的 worker 必须在**第一帧**就上屏，
+ *  不能等一次探活（那是那个「切课程/动作要等几秒」的同一条病）。 */
+export function assemblePushFleet(
+  cfg: RlConfig,
+  health: ReadonlyMap<string, boolean | null>,
+): PushFleetProbe {
+  return {
+    ...remoteExecutionFace(cfg),
+    probes: enabledGpuPushNodes(cfg).map((n) => {
+      const id = String(n.id ?? '')
+      return { id, url: String(n.url ?? '').replace(/\/+$/, ''), healthy: health.get(id) ?? null }
+    }),
+  }
+}
+
+/** 执行面探针：结构 + 现探一次拼成完整视图（直连调用方/单测用；机群级缓存路径分开用上面两个）。 */
+export async function probePushFleet(cfg: RlConfig, timeoutMs = 1500): Promise<PushFleetProbe> {
+  return assemblePushFleet(cfg, await probePushFleetHealth(cfg, timeoutMs))
 }

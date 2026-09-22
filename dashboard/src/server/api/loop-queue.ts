@@ -6,9 +6,18 @@
  *  第二份真相，两边会以不同的速度演化（R2b 否决 `loop-state.json` 的同一条理由）。
  *
  *  代价与预算：一次冷算 = python 解释器冷启 + 扫 N 课账本/journal/shard 目录（本机实测
- *  ~sub-second）。它**不在请求路径的必等部分**（懒算 + TTL + 单飞，与 hub 观测面同规），
+ *  ~sub-second）。它**不在请求路径的必等部分**（懒算 + TTL + 单飞 + SWR，与 hub 观测面同规），
  *  且调度器视图的粒度是「一轮」（分钟级），故 TTL 取 10s（比 hub 的 5s 宽）：
  *  每 10s 最多一次子进程，换「每课在等什么」这个今天只能翻 N 份日志才答得出的问题。
+ *
+ *  ★ 2026-09-22（动作后第一帧不冷算）：缓存换成 `core/swr-cache`——**陈旧先给旧值、重算丢后台**
+ *  ——并且默认执行体改成**异步**子进程（`runRunPythonAsyncScript`）。两条缺一不可：
+ *    · 此前动作用 `invalidateLoopQueue()` **硬清**（TTL 未到也丢），下一帧必须等一次
+ *      python 冷启（暂停/恢复/启停按钮点下去要先卡一下）；
+ *    · 而用 `spawnSync` 当重算体，「后台」是假的：事件循环被按住，旧值的响应照样发不出去。
+ *  「动作结果即时上屏」不受影响：暂停**意图与生效回执**每帧都从控制文件现读
+ *  （`readPauseFacts` → `withPausedFacts`，见 `buildLoopQueueView`），不经这份缓存；
+ *  python 侧的事实（队列/在等什么）本来就只有「一轮」级的变化，陈旧 ≤TTL + 一次后台重算。
  *
  *  容错：读失败（解释器缺失 / 超时 / 输出不可解析）**不抛**——`/api/state` 不该被一个
  *  观测面带崩（与 hub 总览 / 隧道 A/B 同口径），视图带 `error` 上屏，UI 显空态 + 原因。
@@ -16,6 +25,7 @@
 
 import path from 'path'
 import { REPO_ROOT } from '../../core/paths'
+import { createSwrCache } from '../../core/swr-cache'
 import {
   type LoopQueueView,
   parseLoopQueue,
@@ -23,7 +33,7 @@ import {
   withPausedFacts,
   withTraining,
 } from '../../web/view'
-import { type SyncRunResult, runRunPythonSyncScript } from '../run-python'
+import { type RunPythonResult, runRunPythonAsyncScript } from '../run-python'
 import { readPauseFacts } from '../actions/loop-control'
 
 /** 调度器视图的 TTL（10s：事实变化的粒度是「一轮」，冷算要起一个 python）。 */
@@ -31,11 +41,12 @@ export const LOOP_QUEUE_TTL_MS = 10_000
 /** 子进程墙钟上限（正常 <2s；给足余量，超时按读失败处理）。 */
 export const LOOP_QUEUE_TIMEOUT_MS = 20_000
 
-/** 读一次原始输出的执行体（测试注入点：**不跑 python**）。 */
-export type LoopQueueRunner = () => SyncRunResult
+/** 读一次原始输出的执行体（测试注入点：**不跑 python**）。同步执行体照样可用
+ *  （`await` 一个非 promise 是常量代价）——注入点不因默认执行体改异步而变。 */
+export type LoopQueueRunner = () => RunPythonResult | Promise<RunPythonResult>
 
-function defaultLoopQueueRunner(): SyncRunResult {
-  return runRunPythonSyncScript(
+function defaultLoopQueueRunner(): Promise<RunPythonResult> {
+  return runRunPythonAsyncScript(
     'nn-training/run_rl_cluster.py',
     ['--traj-root', path.join(REPO_ROOT, 'tmp'), '--json'],
     { timeoutMs: LOOP_QUEUE_TIMEOUT_MS },
@@ -46,7 +57,7 @@ function defaultLoopQueueRunner(): SyncRunResult {
  *
  *  纯函数（无 IO）——容错的每一条分支都值得单测，而它们与「子进程能不能起」无关。
  */
-export function viewFromRunResult(r: SyncRunResult): LoopQueueView {
+export function viewFromRunResult(r: RunPythonResult): LoopQueueView {
   const empty: LoopQueueView = { blockedCourses: [], pools: {}, rows: [], trainingCount: 0 }
   if (r.timeout) {
     return { ...empty, error: `只读调度器视图超时（>${LOOP_QUEUE_TIMEOUT_MS / 1000}s）` }
@@ -69,23 +80,20 @@ export function viewFromRunResult(r: SyncRunResult): LoopQueueView {
   return view
 }
 
-let cached: { at: number; view: LoopQueueView } | null = null
-let inFlight: Promise<LoopQueueView> | null = null
+const cache = createSwrCache<LoopQueueView>(LOOP_QUEUE_TTL_MS)
 
-/** 调度器视图（懒算 + TTL + 单飞）：并发请求共享同一次子进程。 */
+/** 调度器视图（懒算 + TTL + 单飞 + SWR）：并发请求共享同一次子进程。
+ *
+ *  读失败（含执行体抛异常）**不抛**：翻成带 `error` 的空视图（`viewFromRunResult` 的每一
+ *  条失败分支 + 起不了子进程）——`/api/state` 不该被一个观测面带崩。 */
 export async function getLoopQueueView(
   run: LoopQueueRunner = defaultLoopQueueRunner,
 ): Promise<LoopQueueView> {
-  const now = Date.now()
-  if (cached && now - cached.at < LOOP_QUEUE_TTL_MS) return cached.view
-  if (inFlight) return inFlight
-  const p = (async (): Promise<LoopQueueView> => {
-    let view: LoopQueueView
+  return cache.get(async (): Promise<LoopQueueView> => {
     try {
-      view = viewFromRunResult(run())
+      return viewFromRunResult(await run())
     } catch (e) {
-      // 起不了子进程（解释器/venv 缺失）也算「读失败」，不是控制台故障
-      view = {
+      return {
         blockedCourses: [],
         pools: {},
         rows: [],
@@ -93,18 +101,23 @@ export async function getLoopQueueView(
         error: `调度器视图读取失败：${e instanceof Error ? e.message : String(e)}`,
       }
     }
-    cached = { at: Date.now(), view }
-    return view
-  })()
-  inFlight = p.finally(() => {
-    inFlight = null
-  }) as Promise<LoopQueueView>
-  return inFlight
+  })
 }
 
-/** 动作后置空（与 `invalidateSlowSnapshot` / `invalidateHubAdmin` 同规）。 */
+/** **动作后的软作废**（`snapshot-refresher.invalidateAfterAction` 调用）：保留当前视图
+ *  供读路径立即返回，重算丢后台（见文件头）。
+ *
+ *  暂停/恢复的**即时反馈**不靠它：意图与生效回执每帧从控制文件现读（`readPauseFacts`），
+ *  所以这里保留旧 python 事实不会让按钮「看起来没反应」。 */
+export function refreshLoopQueue(): void {
+  cache.refresh()
+}
+
+/** **硬作废**（下一次读**必须**等新重算）：改了输入（课程/账本）或要隔离测试夹具时用。
+ *  生产路径已无调用点（动作走 `refreshLoopQueue`）——留在导出面上是**给门禁**用的：
+ *  用例靠它把模块级缓存归零，避免一个用例暖的假视图喂给下一个。 */
 export function invalidateLoopQueue(): void {
-  cached = null
+  cache.clear()
 }
 
 /** 组装：调度器视图 + **在训事实**（registry）+ **暂停意图/生效回执**（控制文件），逐行合并。

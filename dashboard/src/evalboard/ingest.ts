@@ -170,14 +170,19 @@ export function ingestEvalRow(raw: RawEvalRow, ctx: IngestCtx, ts?: string): Eva
   }
 }
 
-/** 批量 ingest（幂等）：返回 {appended, duplicate}。 */
+/**
+ * 批量 ingest（幂等）：返回 {appended, duplicate}。
+ *
+ * `known` 可由调用方传入（跨调用复用的去重键集，见 server/eval-board/ingest.ts
+ * `knownKeysFor`）——默认值才现扫一遍整个 store；读-through 这种高频路径不该每次重扫。
+ */
 export function ingestRows(
   dataRoot: string,
   raws: RawEvalRow[],
   ctx: IngestCtx,
+  known: Set<string> = loadDedupKeys(dataRoot),
 ): { appended: number; duplicate: number } {
   if (!dataRootOk(dataRoot)) throw new Error(`EvalStore 数据根不可用: ${dataRoot}`)
-  const known = loadDedupKeys(dataRoot)
   let appended = 0
   let duplicate = 0
   for (const raw of raws) {

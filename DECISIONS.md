@@ -5404,3 +5404,229 @@ KERNEL32/api-ms-win/ucrtbase/VCRUNTIME；有 llvm 时再断言 `llvm-nm -u` 空 
 - 离线（2026-09-22 追记）：demo 腿支持 cloud rollout＋PPO 离线——bundle 自动带 `demo.npz`
   （OPTIONAL_PARTS，导入即 sha 对账），节点 `open_run_context` 启动期种子 blob_cache
   （缺件启动期响亮拒绝）；push 经 BLOB_NAMES 自动带 blob；pull 零改动。控制台不开离线入口。
+## §2026-09-22-goalnn-course-switch-cache-tier（2026-09-22，用户报障：多课程并行切课程要等几秒）
+
+- **背景**：慢快照**整体**按课程键控，而其中最贵的几笔探测（节点 ping 1.5s、共享 hub 观测面 1.2s、
+  push 机群探活、池历史聚合）与「在看哪门课」无关 ⇒ 切到没看过的课要原地重做一遍（实测冷 2883ms /
+  暖 2ms）。**且「切课」自己发的 `setCourse` 会作废全部快照缓存**——作废缓存的动作与它保护的东西是同一个。
+- **备选与否决**：① 后台为**所有**课程各暖一份快照 —— 否，等于 N 门课各探一遍（§366 慢探测预算，
+  注释里已明令否决过）；② 切课时先给上一门课的快照、新课数据异步补 —— 否，「课程名 = B 而指标
+  是 A」是 WYSIWYG 违规，比慢更坏；③ 缩短/去掉节点 ping 与 hub 探测 —— 否，那是「离线 vs 慢节点」
+  的判据预算，砍了会把掉线说成健康。
+- **决定**：快照**分两层键控** —— **机群级**（节点 / 本机槽位 / push 群 / hub 观测面）单条目全局共用
+  （`core/swr-cache.ts`：新鲜直接给、陈旧先给旧值再后台重算、`clear()` 后必须等重算）；**课程级**
+  （组件表 / 日志尾 / 阶段 / 账本尾派生）按课程键控；视图态动作（`setCourse` / `getGateHaltMode`）
+  **不作废**任何快照缓存（判据 = `route.ts::VIEW_ONLY_ACTIONS`，`invalidatesSnapshot` 门禁钉住）。
+  修复后：切课零新增机群级探测、4ms 上屏（`tests/server-api-course-switch.test.ts`）。
+- **违反后果**：再把进程级探测放进按课程键控的缓存（或让视图态动作作废缓存），切课立刻退回「几秒」，
+  且没有任何页面会报错——只有用户手感能发现。
+- **追加（同日晚，用户指令：「让动作后的第一帧也不再冷算」）**——切课修好后只剩**动作路径**还在首帧冷算：
+  **按「重算贵不贵」分处置，而不是按「缓存住在哪个文件」**。① 动作路径收成**一个入口**
+  `api.invalidateAfterAction()`（server.ts 不再逐个缓存手写作废，漏一个就退化成「动作后卡几秒」）；
+  ② **课程级快照硬清**（`slowSnapshots.clear()`：重算毫秒级，组件存活/日志尾/阶段这类动作结果必须
+  即时上屏，不值得为它引入陈旧窗口）；③ **机群级探测 / hub 观测面 / 调度器视图软作废**（`refresh()`：
+  读路径先给旧值、重算丢后台）——它们的重算要等 1.2–20s 的探测或 python 子进程，让请求等它 = 动作后
+  首帧又卡几秒；④ 软作废的**前置条件**：重算体不许按住事件循环 —— 调度器视图的默认执行体从
+  `spawnSync` 改成异步孪生 `runRunPythonAsyncScript`，否则「后台重算」是假的（连能返回的旧值响应也发不
+  出去）；⑤ `invalidateSlowSnapshot()` / `invalidateLoopQueue()` 降为**硬清**（只给产物导入与测试夹具归零）。
+  「动作结果即时上屏」不靠缓存：结构（组件存活、节点行的 enabled/url、worker 行、执行面 mode）与
+  **暂停意图/生效回执**（`readPauseFacts` 现读控制文件）都在请求里现算。
+- **违反后果**（追加项）：把软作废改回硬清、或让重算体退回同步 `spawnSync`，首帧立刻退回「几秒/子进程
+  冷启」，而页面完全不报错；门禁侧靠**悬挂探测桩**把这种回归变成 1s 内明确红
+  （`tests/server-api-course-switch.test.ts` / `tests/server-api-loop-queue.test.ts`：把 `refresh()` 改回
+  `clear()` 可复现红），`tests/web-app-coursematrix.test.ts` 钉住「server.ts 不再逐个缓存手写作废」。
+- **追加②（用户指令：「复查其余动作路径（导入产物、冒烟、节点编辑）」——复查结论 + 一处漏网修复）**：
+  复查口径 = 「动作 POST 返回后，下一次 `/api/state` 要不要等一次机群级探测或子进程」（客户端动作后只重拉
+  `/api/state`，见 app.tsx `doAction`）。逐条查「动作后到底谁被作废」：
+  · **节点编辑**（`setNodeEnabled`/`setNodeConcurrency`/`registerPushWorker`/`removePushWorker`）：POST =
+    配置回写（毫秒级、无 HTTP），首帧 **6ms** ✔；
+  · **冒烟**（`smoke`/`smokeTrain`/`nodeSmoke`）：POST 本身是长动作（真 rollout / 里程碑等待，秒–分钟级，
+    **记在动作请求上**而不是帧上），首帧 **6ms** ✔；
+  · **导入产物**（`/api/deliverUpload`）**曾有漏网**：server.ts 自己写了两行**硬清**（`invalidateSlowSnapshot()
+    + invalidateHubAdmin()`）⇒ 导入后第一帧冷算机群级探测（本机实测 **1575ms 冷 / 6ms 暖**）。已改为同一个
+    `invalidateAfterAction()`——导入改的是**课程产物**（权重/账本/eval_log），「哪些节点在线」一个字都没变，
+    硬清它纯浪费；课程级那一半仍是硬清，所以新 iter / 评估行下一帧就上屏。
+  · **未改（观测，带实测）**：`/api/pool`（节点统计面板）冷 **2448–2503ms**（逐节点 ping 2.5s 超时 ∥ + 池历史
+    聚合 + codeHash），但它**不在动作路径上**（课程键控 30s TTL，动作一律不作废）⇒ 不是「首帧冷算」，而是
+    「最多 30s（TTL）/ 5min（面板轮询）陈旧」；客户端的 `poolFreshNonce`（切课 / iter 前进 / 连接恢复）会
+    `?fresh=1` 强制重算 ⇒ 那些时刻要等 2.5s（独立面板，不堵 `/api/state`）。
+  · 同族事实（已一并修，见追加④）：`importDeliverZip` 走 `spawnSync` —— 导入期间**事件循环被按住**，
+    其它请求与刷新器都排队。
+  · 门禁：`tests/web-app-coursematrix.test.ts` 钉住 server.ts 里**硬清函数一个都不许出现**
+    （`invalidateSlowSnapshot`/`invalidateHubAdmin`/`invalidateLoopQueue`）+ 必须有 `invalidateAfterAction()`。
+- **追加③（用户指令：「把 /api/pool 也改成 SWR，让节点编辑后池面板不再等 30s/5min」）**：池视图
+  （`/api/pool`）把一个 zip 里最贵的东西装在一块儿：**结构**（节点行 enabled/status、local 槽数，
+  来自 cfg）与**探测**（逐节点 ping 2.5s 超时 ∥ + 池历史聚合 + codeHash + selfNode `/v1/status`）。
+  写成「Map<课程, {at, view}> + 命中即返回」的硬 TTL 缓存，两个后果互为代价：① 动作（如「停用节点」）
+  不碰它 ⇒ 关掉的节点在池表里还能显示最多 **30s（TTL）/ 5min（面板轮询间隔）**，而同一页上方的注册表
+  行已改成「已停用」——两处事实不合；② 硬清它又要等 **2.5s 冷算**（实测 2448–2552ms）把面板按在
+  「池统计加载中…」。
+  · **决定**：池视图换成 `core/swr-cache`（**每课程一份**，课程键控不变）；动作后
+    `refreshPoolViews()` 软作废（写进 `invalidateAfterAction()` 这个唯一入口）；显式 `?fresh=1`
+    （手动刷新 / 重试）仍是**硬清 + 等重算**——那时操作员要的就是「现在就给我新的」。
+  · **客户端的另一半**（否则软作废没意义：池轮询间隔 300s，没人会去看它）：`doAction` 成功后推
+    `poolFreshNonce`，`NodeStats` 的再校验改成「立即软拉一次（即时、2ms）+ 在服务端 `cachedAt`
+    未推进前有界重拉（1.5s 间隔，最多 3 次）」；首读本来就是服务端现算的（`cachedAt ≈ 现在`，
+    例如切到一门没看过的课）则直接收工。**实测**：动作后首帧 **2ms**（旧值、`cachedAt` 未动），
+    **~2.5s** 后后台重算落地、面板自动变新（面板以 `cachedAt` 推进为「新的一份到了」的判据）；
+    旧行为是「最多 30s/5min 不变」或「硬清按住 2.5s」。
+  · 门禁：`tests/server-api-pool-swr.test.ts`（见追加⑤：已改成「第一帧就是新结构」）；共享桩提为
+    `tests/helpers/probe-stub.ts`（`probeStub()` + `guardMs()`）。
+- **追加⑤（用户指令：「把池视图的结构与探测拆成两层，让节点编辑真的第一帧就上屏」）**：追加③ 的 SWR
+  只是“首帧不卡”，**首帧给的是旧结构**：一个 zip 里两件快慢差三个数量级的事装在一条缓存里——
+  **结构**（节点行/顺序/`enabled`/local 槽数，cfg 事实、毫秒级，且就是操作员刚拨下的开关）与
+  **探测**（逐节点 ping 2.5s 超时 ∥ + 池历史聚合 + codeHash + selfNode `/v1/status`，冷算实测
+  2448–2552ms）。于是无论怎么处置都错：不碰 ⇒ 池表旧状态超 30s/5min（与同页注册表行矛盾）；
+  硬清 ⇒ 按住面板 2.5s；整条软作废 ⇒ 首帧仍是旧状态（要等后台重算 ~2.5s）。
+  · **根上的观察**：**这份视图里没有任何“按课程”的东西** —— cfg.nodes / rl.local_slots / tmp 下最新
+    活跃流（`aggregateNodeHistory` 不收课程参数，只扫 `tmp/**` 取 mtime 最新的 meta）/ 本机 codeHash /
+    selfNode 存活性全是**机器事实**；`course` 只是回显字段。
+  · **决定**：拆**探测层** `PoolProbes`（单条目全局 SWR，与 `snapshot-cache.FleetProbes` 同规）
+    ⊕ **结构层**（`assemblePoolView` 每请求现算：节点行/顺序/`enabled`→`status:disabled`、local 槽数）；
+    **删掉按课程键控的 `Map<课程, cache>`**（切课不再重算 2.5s 探测）。`cachedAt` 仍是**探测层**时刻
+    —— 客户端靠它推进判断「重算落地」（结构不需要任何再校验：它本来就实时）。
+  · **实测**：冷算（首次打开节点页）2520ms；**切换课程再读 0ms**（旧：每门课各 2.5s）；动作后第一读
+    **1ms** 且 `cachedAt` 未推进（结构已新、探测仍旧）；后台探测重算落地 2515ms。页面脚注同步改成
+    「结构实时；探测列 Ns 前更新」。
+  · **门禁**（`tests/server-api-pool-swr.test.ts` 改写）：第一帧就断言 `status:disabled` + local 槽数
+    已变 + `cachedAt` 未推进 + 停用行历史列仍属旧探测；已验：把整条视图按探测缓存（旧式单层）会红
+    （首帧拿到旧结构）。另：`tests/server-api-pool.test.ts` 钉住**跨课程共用同一份探测**。
+- **追加⑥（用户指令：「看看 /api/evalboard 是否也该按快慢分层」）——复查结论：**不需要分层**（它没有探测类
+  输入），但顺手补了一处**反向缺口**（动作后结果不即时）。
+  · **为何不分层**：它全部输入都是**读盘 + 纯聚合**，没有一笔 http/子进程/ping —— `loadRows`（store 按月分片）/`loadBatches`/`ladderWithGod`/`readRunnerState`/`read-through 入账`。本机实测：冷算
+    **0–1ms**；入账 2000 行 **4–8ms**（全重复去重路径 4000 行 5ms）；`loadBatches` 200 批 0ms；数据根
+    (`dashboard/data/evalboard`) 在本机是空的。所以池视图那条「结构 vs 2.5s 探测」的轴**在这里不存在**，
+    分层会是空重构。它如果哪天真变慢，那是**数据量轴**（eval_log 全量重解析 + store 全读 + 逐行去重）
+    → 该做的是增量入账（按字节偏移）与按课程分片，而不是本主题的 SWR。
+  · **反向缺口**（顺手修）：`invalidateEvalBoard()` 此前**只**由 30s 的爬梯 ticker 调；而写它输入的正是
+    那些动作（入队/中止/爬梯启停）——客户端确实在动作后 `refresh()`，但非 fresh 的读会命中 30s TTL 内的旧
+    视图 ⇒「已入队」的批次最长等 30s（TTL）/5min（页轮询）才上屏。已把 `invalidateEvalBoard()` 挂进同一入口
+    `invalidateAfterAction()`，用**硬清**（0–1ms 冷算，没有“先给旧值”的价值；且它按课程键控，整张清掉就是
+    每门课重读一次）。
+  · **门禁**：`tests/evalboard-board.test.ts` 新增「动作后非 fresh 的再读就能看到新批次」（暖一份空视图 →
+    入队 + 建批 → `invalidateAfterAction()` → 再读能看到）；已验：拿掉那句 invalidation 会红。
+- **追加⑧（用户指令：「把评估板视图的 loadRows 也做成增量（按课程分片或按字节偏移），让缓存未命中只剩纯聚合」）**：
+  追加⑦ 治掉了 eval_log，这一轮治账本行本身。
+  · **根因**：`store.loadRows` 每次全读 + 全解析 `games/*.jsonl`，且在**同一条缓存未命中路径**上；
+    `ladderTick` 更把它放进**课程循环里**（N 课 = 整本账读 N 遍）。实测 2 万行：单次 26ms，
+    ladderTick 3 课 **73ms**（每 30s 一轮）。
+  · **决定**：抽 `tail-read.ts`（「按字节偏移读新增尾巴」的**唯一**实现，`ingest.ts` 与 `rows.ts` 共用）：
+    `readTail` = 单窗口原语（含偏移/半行/不可信判据，与追加⑦ 同规），**`readTailDrained`** = 循环到
+    文件末尾的生产入口。`rows.ts::loadRowsCached` 按**分片**记住 `{pos, rows}`：分片未动 → 零 IO、
+    零解析、**连返回的数组都是同一个实例**；只增长（append-only 账本的常态）→ 只读尾巴、旧行**对象
+    实例**都不换；截断/同尺寸改写/inode 变 → 那一片整片重解析（安全侧）；分片被删/新增 → 相应增删。
+    行序 = 分片名排序（`YYYY-MM.jsonl` ⇒ 月份序，比 `readdirSync` 的返回顺序**更**确定）。
+    `view.ts` / `auto-ladder.ts` 改用它；`auto-ladder` 还把账本读取提到课程循环**外**（原本 N 课 N 遍）。
+    `store.loadRows` **保留原样**：CLI / 对账要的是「刚从盘上重读一遍」的语义，缓存版只服务于会话内视图。
+  · **实测踩到的坑（已修，且是必顶的）**：单窗口 4MB 对上一个 **4.5MB 的月分片**只读到前 **8006/20000**
+    行；而增量读只在文件**变动**时才回来 —— 剩下的行**永远补不上**。所以生产入口必须是
+    `readTailDrained`（循环到 EOF / 末尾半行）。该 bug 在写单窗口测试时是绿的（周分片小于窗口），
+    只有拿 2 万行真语料实测才炸出来。
+  · **实测**（2 万行）：未变动 **0.01ms**（旧 26ms）、追加 20 行 **0.38ms**；ladderTick 3 课 **73ms → 0.67ms**；
+    整视图冷算 **78ms → 38ms**（删掉的那 40ms 就是重复重解析，剩下的就是纯聚合）。
+  · **门禁**：`tests/evalboard-rows-incremental.test.ts` 9 例（**同实例身份** = 没重解析、只增长时旧行实例
+    不换、截断/同尺寸改写整片重读、新分片月份序、分片删除、末尾半行、坏行跳过、空根/多根隔离）；
+    **已验**：把 `loadRowsCached` 内部换成 `store.loadRows` → **3 例红**。另在 `tail-read` 侧加一例
+    「文件大于单窗口 → `readTailDrained` 一次读完整条尾巴（且 `readTail` 单窗口确实会丢）」钉住那个坑。
+- **追加⑩（用户指令：「把『输入指纹缓存』这套提炼成可复用原语，替掉控制台剩下那些拿时间当判据的
+  小 TTL 缓存」）**：追加⑨ 的那套判据落成原语 `dashboard/src/core/fingerprint-cache.ts`。
+  · **原语**（同步；与 `swr-cache` 分工见文件头）：`createFingerprintCache<T>({ signature, backstopMs,
+    now? })` —— 命中 = 指纹相同 **且** 未超兵底；指纹变了**立即**重算；命中返回**同一实例**（调用方
+    可拿它当「真的没重算」的证据）；`get / getWithStatus / peek / invalidate(key?) / clear / stats`。
+    兵底的定位写死在文档里：**兜「指纹清单将来漏了某个输入」的陈旧上限，不是 TTL**（取 600s > 所有
+    轮询间隔）。另配 `fileSignature` / `filesSignature`（清单式输入的公共写法，只 stat 不读内容）。
+  · **选型判据一并写进原语头注**（这是本追加最想留下的东西）：**采样**（活体观测，无法指纹化：节点
+    ping / hub HTTP / python 扫全部 tmp / 机群探活 → 继续用 `createSwrCache`，那里的窗口表达的是
+    「多久探一次」）· **失败兜底**（busy 5min 自解锁、坏配置 1s 重试：时间就是要表达的东西）·
+    **内容摘要**（`codeHash` / `engine_epoch`：输入就是全部内容，指纹不可能更便宜）· **重算本身很
+    便宜**（毫秒级 → 加缓存只是加复杂度）。
+  · **迁移/清理（都带实测）**：
+    ① 评估板视图改用它（判据不变，退化面为零）；实测 2 万行 **命中 0.041ms**（指纹本身 0.039ms：
+    行 0.010ms + 文件清单 stat）、冷算 62ms —— 原语没有引入开销；
+    ② `pool.ts` 的**本机 codeHash 5s TTL memo 直接删掉**：实测这份摘要只要 **3–5ms**（145 文件 /
+    2.1MB），而它住在自带 30s 节奏、本身要等 ~2.5s ping 的探测层里 —— 挂窗口换不到任何东西，只多一个
+    陈旧面；内容摘要这类**正确处置是「不用缓存」**，不是「换指纹」；
+    ③ `buildEvalCkptsView`（每请求扫 weights 目录）**不加缓存**：本机 `nn-training/weights` 不存在
+    （0 腿，实测 0.5ms），而它的成本=对文件逐个 stat，指纹也得做同一批 stat ⇒ 无收益（真变慢时该做
+    的是把「目录清单」与「逐文件 stat」分层）。
+  · **踩到的两个坑（都有门禁）**：
+    ① **原语会把 key 喂给 `signature`** —— 视图原来的 key 是装饰过的 `evalboard:<course>`，于是行指纹
+    算到一把**不存在的课程**上（恒为 `-`）⇒ 签名恒等 ⇒ **永不重算**（静默出错，四个用例当场红）。
+    已把 key 改成业务身份（课程名）并在原语文档里写死这条 + 加一条原语用例；
+    ② **测试桩「一次性放闸」是个陷阱**：`probe-stub.release()` 只放行当时已注册的探测，而后台重算里
+    探测的注册时刻取决于它前面的 `await`（`localCodeHash` 的 async import 恰好排在 ping 之前）⇒
+    放闸之后才注册的探测被**永久悬挂**，池视图用例从绿变红。已改成「关闸 + 放行」（`hold = false`）。
+  · **门禁**：新增 `tests/fingerprint-cache.test.ts` 10 例（命中同实例 / 指纹变立即重算 / 兵底到点重算 /
+    **重算后重取指纹**（入账场景：不会每读都重算）/ 按 key 分条 / `getWithStatus` 命中标记 / `peek` 不
+    记账 / invalidate 三态 / key 即身份 / `fileSignature`·`filesSignature`）；视图 16 例改到原语上仍全绿
+    （旧判据换回 `at < 30s` ⇒ 10 例红的性质未变）。
+- **追加⑨（用户指令：「看看评估板视图那 38ms 纯聚合能不能按课程缓存（只重算变化的课程）」）**：
+  追加⑧ 把未命中降到只剩聚合，这一轮把聚合本身也按课程缓存（但**不用 TTL 当判据**）。
+  · **根因**：视图缓存的判据是 `Date.now() - at < 30s` —— 与「数据变了没」毫无关系。于是
+    ① 没变也更每 30s 重算一次（`/eval` 页与首页摘要都是 **300s** 轮询，等于每轮都白付一次聚合：
+    实测 2 万行单课 22–85ms）；② 变了反而可能在 30s 内**拿旧视图**（新评估行/新批次最长等 30s）。
+    两个方向都错，根子是同一条：**拿时间当数据的代理**。
+  · **决定**：缓存键的判据换成**输入指纹**（`viewInputSignature`）——
+    `账本行（按课程，增量滚动 FNV）/ batches / requests / requests.done / ladder 工作副本 /
+    ladder 正本 / runner_state / space_calibration / eval_log 两个候选 / curricula` 的
+    `size:mtimeMs` + 行指纹。命中 = 指纹相同 **且** 未超 `VIEW_BACKSTOP_MS`；指纹变了就**立即**
+    重算（不等任何 TTL）。`VIEW_BACKSTOP_MS = 600s` 的定位是**兵底**（比 300s/15s 的轮询都长）：
+    万一将来有人给视图加了个读取却没进清单，陈旧上限就是它 —— 不是「过期就丢」的 TTL。
+  · **按课程**：行指纹按课程分隔（聚合视图 `course=''` 用全课程指纹）。实测 2 门课各 1 万行：
+    **命中 0.044ms**（旧口径每次 >30s 的读都 22ms+）；只改 cB 后 **cA 0.67ms（命中）/ cB 13ms
+    （重算）**；无变化的轮询 0.039ms。`fresh=1` 与 `invalidateEvalBoard()` 语义不变。
+  · **踩到的坑（差点静默丢数据）**：`eval_log` 一开始**没进清单** —— 它是**入账的触发源**，
+    不列它就会命中缓存、根本不跑入账 ⇒ 新评估永不上屏（新行只能等兵底或动作）。已把两个候选
+    路径都列进清单（`courseEvalLogCandidates`，日志后来才出现时指纹也会变），并单钉一条用例。
+  · **门禁**：`tests/evalboard-view-cache.test.ts` 16 例 —— 命中（内层数组同实例 + `ingested` 归 0）、
+    **过 30s/5min 仍是命中**、本课程新行/别的课程新行（只重算变化的那门）、聚合视图全课程指纹、
+    逐项输入变了都**立即**重算（行为断言：批次 / 请求→ladderState / runner_state / space_calibration /
+    阶梯工作副本 god 基线）、`eval_log` 新行→入账后立即重算、`fresh`/`invalidate`/兵底、以及
+    「清单含全部标签 + 改任一临时根文件指纹必变」（防清单漏项）。**已验**：把判据换回旧的
+    `at < 30s` ⇒ **16 例中 10 例红**。
+  · **语义变化（已写明）**：缓存命中时返回 `{...cached.view, ingested: 0}`（这次调用确实没读入
+    新行），内层数组实例不变 —— 客户端本来就不消费 `ingested`（`eval-types.ts` 已补注释）。
+- **追加⑦（用户指令：「给评估板入账做增量（按字节偏移），别每次缓存未命中都全量重解析 eval_log」）**：
+  追加⑥ 判明评估板的风险轴是**数据量**，这就是那一轴。
+  · **根因**：`ingestCourseEvalLog` 每次 `readFileSync` 整份 `eval_log.jsonl` 再逐行 `JSON.parse`；
+    `ingestRows` 每次 `loadDedupKeys` 读**整个 store**（全部课程、全部月份）。两者都在
+    `buildEvalBoardView` 的**缓存未命中**路径上（30s TTL 过期 / `?fresh=1` / 动作后重算），且随
+    账本与日志**线性增长**。本机 2.2MB / 2 万行语料实测：全量解析 **9–12ms** + 去重扫描 **81–83ms**
+    ≈ 每次未命中白付 **~93ms**。
+  · **决定**：入账改**按字节偏移只读新增尾巴**（`readEvalLogTail`，偏移语义=**最后一个换行之后**）：
+    ① 末尾半行**不消费**（训练进程可能在行中间 flush；现在切下来会被当坏 JSON 丢掉，而它下一拍就是
+    完整一行）；② 偏移**不可信**才从头读 = 首次 / 体积变小（截断）/ inode 变了 / **体积没变却被动过**
+    （同尺寸原地改写，无从知道改了哪一段——宁可整份重读，去重保证幂等）；③ 单次上限 4MB，窗口读满仍无
+    换行（单行超长）整窗消费，否则永远读不动；④ 位置 memo 键 = `<数据根>|<日志路径>`（store 是
+    append-only 账本、控制台无清库路径，故不为「库被清空」重置；换 `EVALBOARD_DATA` 即从零重读）。
+    另一半是 `knownKeysFor`：**去重键集 memo**（指纹 = `games/*.jsonl` 的 `name|size|mtimeMs`，只 stat
+    不读内容）——本进程 append 后刷新指纹（不自我失效），外部进程（回填 CLI / 另一个控制台）改过 store
+    指纹自变即重载。`ingestRows` 因此加了可选 `known` 形参（默认仍现扫，行为零变化）。
+    顺手把日志路径从硬编码 `REPO_ROOT/tmp` 改为 `tmpLogsDir()`（与课程发现**同源**；默认零变化）——
+    否则 `BCITY_TMP_LOGS_DIR` 重定向只重定向一半。
+  · **实测**（同样 2.2MB / 2 万行）：**无新增 0.06–0.08ms**、**新增 1 行 0.27–0.30ms**（旧：每次 ≈93ms）。
+  · **门禁**：`tests/evalboard-incremental-ingest.test.ts` 13 例——`readEvalLogTail` 钉**偏移契约**
+    （半行不消费→补齐才消费、截断 reset、同尺寸改写 reset、超长行不卡死且偏移每拍前进、无新增偏移不动、
+    文件不存在不抛），集成钉（首读全量→再读只认新增、末尾半行、轮转重开、空课程）；memo 钉（store 未变
+    复用**同一份** Set、本进程 append 后仍命中、外部改动重载并看到新键）。
+    **诚实说明**：这是**性能修复**，行为**不可观测**（去重幂等 ⇒ 重读与否入库结果相同），所以门禁是
+    「偏移契约」的单元测试 + 实测数字，而不是「旧实现会红」的行为用例；唯一行为差异是同尺寸原地改写
+    （新实现选整份重读=安全侧），已单独一条钉住。
+  · **未做（下一步的明确入口）**：缓存未命中路径上仍在 `loadRows`（store 全读；本机 2 万行 **69ms**，
+    整视图冷算 **86ms**）——要再砍就得做 per-course 分片 / 按字节偏移的增量 `loadRows`，那是下一轮。
+- **追加④（用户指令：「把产物导入的 python 调用改成异步，导入期间控制台不再整体卡住」）**：控制台服务端
+  **只有一个事件循环**，而导入路径上三处同步操作把它按住（上限 300s 的 `spawnSync` python 导入器 +
+  512MB 上传体的 `writeFileSync`）。按住期间 `/api/state`、5s 慢快照刷新器、局域网其它查看者的读取全部
+  排队（“导入时整个控制台卡住”），而且它让追加②/③ 的「重算丢后台」名存实亡（旧值响应要等 `spawnSync`
+  返回才发得出去）。
+  · **决定**：控制台跑 python **只有两种模式**——`spawnRunPython`（detach，长任务）与
+    `runRunPythonAsyncModule/Script`（异步捕获，要结果的短任务）；`importDeliverZip` 改用它并 `await`
+    （POST 本来就该等这次结果），`saveDeliverUpload` 改 `fs/promises.writeFile`；**删除**同步变体
+    `runRunPythonSyncModule/Script` 与私有的 `runSync`（留着就会被再次用上），`SyncRunResult` 更名为
+    `RunPythonResult`（名字不能再提「同步」）。语义不变：仍是「跑完拿结果 + 超时杀进程报 `timeout`」。
+  · **实测**（真 python）：`-m platform` 53ms 期间事件循环 tick 8 次（`spawnSync` 会是 0）；真实导入路径
+    （`importDeliverZip` 跑 `remote.deliver_zip`，坏 zip 快速失败）42ms 期间 tick 7 次，失败原因照旧翻成
+    人话上屏。
+  · **门禁**：`tests/server-no-blocking-python.test.ts`——扫 `src/server/**` 的**调用**（`spawnSync(` /
+    `execSync(`，注释里提名字不算），命中即红并列出文件；另有「两条路都在、同步孪生不得回来」一条。
+    （范围只限 `src/server/**`：`src/{core,launch,evalboard}` 是启动器/CLI，进程自己就是终点、无并发读要在乎。）

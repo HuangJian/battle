@@ -153,7 +153,7 @@ describe('产物导入', () => {
     expect(parseDeliverImportJson(`${deliverImportJsonMark}{坏 json`)).toBeNull()
   })
 
-  it('python 导入器 argv：--zip/--dest/--course，dest 是课程下的 deliver 根', () => {
+  it('python 导入器 argv：--zip/--dest/--course，dest 是课程下的 deliver 根', async () => {
     const calls: Array<{ module: string; args: string[] }> = []
     const runner = ((module: string, args: string[]) => {
       calls.push({ module, args })
@@ -175,7 +175,7 @@ describe('产物导入', () => {
         timeout: false,
       }
     }) as unknown as Parameters<typeof importDeliverZip>[1]
-    const r = importDeliverZip(
+    const r = await importDeliverZip(
       { course: COURSE, zipPath: '/x/deliver.zip', ...sandboxPaths() },
       runner,
     )
@@ -192,14 +192,17 @@ describe('产物导入', () => {
     expect(deliverImportRoot(COURSE)).toBe(path.join(REPO_ROOT, 'tmp', COURSE, 'deliver'))
   })
 
-  it('python 报错 → 控制台把它的最后一行转成人话（不吞掉真因）', () => {
+  it('python 报错 → 控制台把它的最后一行转成人话（不吞掉真因）', async () => {
     const runner = (() => ({
       code: 2,
       stdout: '',
       stderr: '[deliver] 导入失败：这个包里没有 it-NNN/weights.json——不是训练产物 zip\n',
       timeout: false,
     })) as unknown as Parameters<typeof importDeliverZip>[1]
-    const r = importDeliverZip({ course: COURSE, zipPath: '/x/bad.zip', ...sandboxPaths() }, runner)
+    const r = await importDeliverZip(
+      { course: COURSE, zipPath: '/x/bad.zip', ...sandboxPaths() },
+      runner,
+    )
     expect(r.ok).toBe(false)
     expect(r.message).toContain('weights.json')
   })
@@ -211,8 +214,9 @@ describe('产物导入', () => {
   writeFileSync(ckptPath, '{}')
 
   const deps = (over: Partial<DeliverUploadDeps> = {}): DeliverUploadDeps => ({
-    save: () => '/tmp/kept.zip',
-    importZip: () => ({
+    save: async () => '/tmp/kept.zip',
+    // 异步替身（与生产同形：导入器是异步子进程，调用方 await 它的结果）
+    importZip: async () => ({
       ok: true,
       message: '已导入 r1（2 轮，it3 → it4）',
       payload: {
@@ -274,7 +278,7 @@ describe('产物导入', () => {
   it('拿错课的文件名 / 非 zip / 超大 → 拒收且不调 python', async () => {
     let called = 0
     const d = deps({
-      importZip: () => {
+      importZip: async () => {
         called += 1
         return { ok: false, message: '不该被调用' }
       },

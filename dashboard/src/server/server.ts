@@ -69,9 +69,8 @@ import {
   discoverCourses,
   evalReplayFileResponse,
   getLoopQueueView,
-  invalidateHubAdmin,
-  invalidateLoopQueue,
-  invalidateSlowSnapshot,
+  invalidatesSnapshot,
+  invalidateAfterAction,
   ladderTickAll,
   routeAction,
   sanitizeViewCourse,
@@ -408,8 +407,14 @@ async function main(): Promise<void> {
         // ── 产物导入（multipart 上传 + 自动评估）：体积是 zip，不走 JSON 动作层 ──
         if (req.method === 'POST' && url.pathname === '/api/deliverUpload') {
           const resp = await handleDeliverUpload(req, viewCourse || '')
-          invalidateSlowSnapshot()
-          invalidateHubAdmin()
+          // 与其它动作同一个处置：**课程级硬清 + 机群级软作废**。
+          // ★ 曾经这里是硬清（理由写的是「换了盘上的东西，先给旧值没有必要」）——但
+          //   硬清会连**机群级探测**（节点 ping 1.5s / 共享 hub 2.5s）一起丢掉，而导入
+          //   一个 zip 一点都改不了「哪些节点在线」，于是导入后的下一次 /api/state 反而
+          //   要冷算这几笔（本机实测 1575ms 冷 vs 6ms 暖）——「动作后首帧又卡几秒」的第
+          //   三个出入口。导入改的是**课程级**产物（权重/账本/eval_log），那一半本来就是
+          //   硬清的，动作结果（新 iter、评估行）下一帧就上屏。
+          invalidateAfterAction()
           return resp
         }
         if (req.method === 'GET' && url.pathname === '/api/taskBundleInfo') {
@@ -442,16 +447,17 @@ async function main(): Promise<void> {
             /* empty body — actions that need params will 400 */
           }
           const resp = await routeAction(act, body)
-          // 动作改动组件/节点/课程 → 失效慢部件缓存，下次 buildStateView 冷算即时上屏（§366）。
-          // hub 观测面（队列/worker 登记表）同处失效：worker 登记写过 rl-config、启停 hub
-          // 都会改它的内容，下一拍不该再读旧观测（与慢快照同一时机 = 一个失效点）。
-          if (resp) {
-            invalidateSlowSnapshot()
-            invalidateHubAdmin()
-            // 调度器视图的 TTL 比 hub 观测面长（10s）：暂停/恢复动作后必须显式作废，
-            // 否则按钮点下去要到下一个 TTL 才看到意图上屏（回执面同理）。
-            invalidateLoopQueue()
-          }
+          // 动作改动组件/节点/课程 → 一次缓存处置（`api.invalidateAfterAction`）。
+          // **课程级硬清、机群级软作废**——动作后的第一帧也不冷算：结构（组件 running/stopped、
+          // 节点行的 enabled/url、worker 行、执行面 mode、暂停意图/生效回执）是现算的，动作结果
+          // 照样即时上屏；被软作废的只是探测列与调度器视图（ping / hub 应答 / 每课在等什么），
+          // 读路径先给旧值、重算丢后台（分工与理由见 snapshot-refresher.invalidateAfterAction）。
+          //
+          // ★ 视图态动作（setCourse / getGateHaltMode）**不作废**：它们不碰任何组件/节点
+          // 事实，而 setCourse 正是「切课」自己发的动作——一律作废 = 每切一次课都把机群级
+          // 探测（节点 ping 1.5s + 共享 hub 1.2s）丢掉重做，「切课要等几秒」有一半是它
+          // 自己造的（判据 = route.ts 的 VIEW_ONLY_ACTIONS/invalidatesSnapshot，门禁用例钉住）。
+          if (resp && invalidatesSnapshot(act)) invalidateAfterAction()
           return resp ?? json({ ok: false, message: `未知动作: ${act}` }, 404)
         }
         return new Response('not found', { status: 404 })

@@ -76,6 +76,24 @@ export function errResp(message: string, status: number): Response {
 /** 读接口（不是决策）：高频轮询/回读不能往决策日志里刷行。 */
 const READONLY_ACTIONS = new Set(['getGateHaltMode'])
 
+/** **视图态动作**：改的是「操作员在看哪门课」或一次只读回读——不碰任何组件/节点/队列事实。
+ *
+ *  ★ 为什么单列一张表（2026-09-22，多课程并行切课要等几秒的最后一块）：`setCourse` 是
+ *  **切课自己发出的动作**，只写 `console-state.course`；而 server.ts 此前对**所有**动作
+ *  一律作废慢快照 + hub 观测面 ⇒ 切一次课就把机群级探测（节点 ping 1.5s + 共享 hub 探测
+ *  1.2s）连同课程级快照一起丢掉，下一次 /api/state 必须冷算。也就是说：「切课要等几秒」
+ *  有一半是切课这个动作自己造成的——作废缓存的动作和它保护的东西是同一个。
+ *
+ *  `getGateHaltMode` 同列：它是客户端每次切课时顺带的只读回读（POST 只是传输方式），
+ *  返回一个标志文件的文本，快照里根本不含它。 */
+export const VIEW_ONLY_ACTIONS: ReadonlySet<string> = new Set(['setCourse', 'getGateHaltMode'])
+
+/** 动作是否要作废快照缓存（server.ts 的调用判据；见 `VIEW_ONLY_ACTIONS`）。
+ *  纯函数，便于门禁用例直接钉住（不再靠「server.ts 里那一行还在不在」）。 */
+export function invalidatesSnapshot(action: string): boolean {
+  return !VIEW_ONLY_ACTIONS.has(action)
+}
+
 /** **动作结果落一行盘**（组件级决策的「操作面」；2026-09-20 用户指令）。
  *
  *  为什么这一行是必需的：盘上的证据只有「组件日志 + 账本」，而组件状态变化之前

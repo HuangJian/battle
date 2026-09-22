@@ -35,12 +35,16 @@ describe('console 局域网只读边界（§…：LAN 查看 / localhost 控制�
     expect(s2.course).toBe(api.effectiveCourse(before, courses))
   })
 
-  it('buildPoolView 课程键控：course 覆盖改变返回课程（缓存 key 带课程）', async () => {
+  it('buildPoolView 尊重 course 覆盖（视图回显它；探测层跨课程共用，切课不重算）', async () => {
     const courses = api.discoverCourses(50)
     const target = courses[0]
     if (!target) return
     const p = await api.buildPoolView(false, target)
     expect(p.course).toBe(target)
+    // 缓存不再按课程键控（2026-09-22 两层拆分）：ping / 池历史 / codeHash / selfNode 都是
+    // **机器事实**，`course` 只是回显字段 —— 换课程不重算探测。
+    const other = await api.buildPoolView(false, courses[1] ?? target)
+    expect(other.cachedAt).toBe(p.cachedAt)
   })
 
   it('componentLogPayload 接受课程覆盖（日志页跟课程）', async () => {

@@ -108,6 +108,10 @@ describe('console/api.buildStateView', () => {
         },
       ]
       writeFileSync(scratchConfig, JSON.stringify(cfg, null, 2))
+      // ★ 配置被改 → **机群级**缓存（节点表 / push 机群）必须显式作废（2026-09-22）：
+      //   它现在跨课程共用（切课程不再重探），不再靠「换一门没看过的课」顺带重算。
+      //   与 `server-api-local-chips.test.ts` 的写法同规：改了 rl-config 就作废。
+      api.invalidateSlowSnapshot()
       // 课程侧**一个字都没配**（两个课程块只有 slot）——执行面仍然被登记节点抬起来，
       // 这正是「课程 ↔ worker 节点正交」：同一个机群服务所有课程，不按课认领。
       expect(JSON.stringify(cfg.courses)).not.toContain('push_node_url')
@@ -120,6 +124,7 @@ describe('console/api.buildStateView', () => {
       expect(probe?.healthy).toBe(false)
     } finally {
       writeFileSync(scratchConfig, prev)
+      api.invalidateSlowSnapshot() // 还原配置同样要作废（否则机群级缓存带着种下的节点泄漏给后序用例）
     }
   })
 

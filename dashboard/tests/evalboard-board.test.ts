@@ -11,6 +11,7 @@ import {
   enqueueProbeRun,
   iterFromCkpt,
 } from '../src/server/eval-board'
+import { invalidateAfterAction } from '../src/server/api'
 import { enemyBreakdown, rungLabel } from '../src/web/view'
 import { LADDER_CANON_PATH } from '../src/core/paths'
 
@@ -181,6 +182,39 @@ describe('看板合成端到端', () => {
     expect(it30!.n).toBe(800)
     expect(it30!.screening).toBe(true)
     expect(it30!.batchIds).toContain('b-e2e-0')
+  })
+})
+
+describe('看板缓存与动作路径（入队后立即可见）', () => {
+  it('动作后非 fresh 的再读就能看到新批次（不等 30s TTL / 5min 轮询）', () => {
+    // 先把一份**没有这个批**的视图暖进缓存
+    const before = buildEvalBoardView('cache-course', false)
+    expect(before.batches).toEqual([])
+
+    // 动作：入队请求 + runner 物化建批（生产里分别由 POST /api/evalProbeRun 与 runner 下窗做）
+    enqueueProbeRun({
+      course: 'cache-course',
+      rung_from: 'c4l1',
+      ckpt: 'w',
+      requester: 't',
+      iter: 1,
+    })
+    enqueueBatch(root, {
+      course: 'cache-course',
+      rung_from: 'c4l1',
+      ckpt: 'w',
+      requester: 't',
+      trigger: 'standalone',
+      iter: 1,
+    })
+    // 动作后的缓存处置（唯一入口）；缺了它，下面这一读会命中 TTL 内的旧视图（空的）
+    invalidateAfterAction()
+
+    const after = buildEvalBoardView('cache-course', false)
+    expect(after.batches.length).toBeGreaterThan(0)
+    expect(after.batches[0]!.course).toBe('cache-course')
+    // 全视图仍健康（粗数据仍与输入一致）
+    expect(after.cachedAt).toBeGreaterThanOrEqual(before.cachedAt)
   })
 })
 

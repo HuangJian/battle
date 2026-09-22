@@ -6,13 +6,20 @@
  *    · **worker 登记**：rl-config `nodes[].gpu_push` 为条目来源（写回即配置，hub 按 mtime
  *      热重载），hub 侧登记表只提供「它认为这台在不在线」这一列。
  *
- *  为什么不是慢快照的一部分：慢快照按课程键控（每个查看者各算一份），而 hub 观测面是
- *  **进程级全局**的——按课程各探一遍纯浪费。故独立一层 5s 缓存，与慢快照同节奏。
+ *  为什么不是慢快照的一部分：慢快照的**课程级**部分按课程键控（每个查看者各算一份），
+ *  而 hub 观测面是**进程级全局**的——按课程各探一遍纯浪费。故独立一层 5s 缓存，与慢快照同节奏。
+ *
+ *  ★ 2026-09-22：这个缓存的**键也要是全局的**（此前按课程键控）。共享单 hub 之后
+ *  `hubCandidates` 根本不看课程（只按账本里活着的 hub 条目挑基址），push worker 表也住在
+ *  `rl-config`（机群级）——按课程键控 = 切到没看过的课就把 hub（1.2s）+ 逐 worker 探活
+ *  重做一遍，正是「切课程要等几秒」的另一半。用 SWR 语义：陈旧先给旧值 + 后台重算，
+ *  动作后 `invalidateHubAdmin()` 硬作废（登记/移除 worker 必须即时上屏）。
  */
 
 import path from 'path'
 import { REPO_ROOT } from '../../core/paths'
 import { pidAlive } from '../../core/net'
+import { createSwrCache } from '../../core/swr-cache'
 import { entryForCourse, loadRegistry, scopeOf } from '../../core/registry'
 import type { RlConfig } from '../../core/types'
 import {
@@ -66,8 +73,19 @@ interface HubAdmin {
   pushMap: Map<string, boolean> | null
   /** 逐课程离线段进度（`/admin/offline`）；null = hub 不可达 / 端点不存在（旧版 hub）。 */
   offline: Record<string, Record<string, OfflineRunView>> | null
-  /** 已直探过的 push worker 行（**探活也在本缓存里**，不在请求路径上）。 */
+  /** worker 行 = **当下 cfg** ⊕ 探活列（探活取自下面的探测缓存）。 */
   workers: PushWorkerView[]
+}
+
+/** **hub 探测**结果（贵：hub 不可达时每个候选 1.2s + 逐 worker 探活 1.5s）。
+ *  共享单 hub ⇒ 与课程无关，故全局单条目缓存（见 `getHubAdmin`）。 */
+interface HubProbe {
+  url: string | null
+  queue: HubQueueView | null
+  pushMap: Map<string, boolean> | null
+  offline: Record<string, Record<string, OfflineRunView>> | null
+  /** worker 直探（id → online/busy；停用/无 key = 缺席）。 */
+  workerPing: Map<string, { online: boolean | null; busy: boolean | null }>
 }
 
 /** rl-config 里的 push worker 行（未探活）。 */
@@ -83,52 +101,64 @@ function workerRows(cfg: RlConfig): Array<Omit<PushWorkerView, 'online' | 'busy'
     }))
 }
 
-const hubCache = new Map<string, { at: number; val: HubAdmin }>()
-const hubInFlight = new Map<string, Promise<HubAdmin>>()
+/** hub 探测的全局缓存（单条目：共享单 hub ⇒ 结果与课程无关）。 */
+const hubCache = createSwrCache<HubProbe>(OVERVIEW_TTL_MS)
 
-/** 探测 hub 观测面（队列 + push 登记表）；5s 内命中缓存，并发共享同一次探测。 */
+/** hub 观测面 = **结构**（cfg 的 worker 行，现算）⊕ 探测（队列/登记表/逐 worker 探活，缓存）。
+ *
+ *  `course` 只作为**探测入口**的参数（`liveHub` 的候选清单来自账本，与课程无关）——
+ *  它**不是**缓存键：共享单 hub 下按课程各探一遍纯浪费，且切课会撞上 1.2s 探测超时。
+ *  结构现算的理由：刚登记/停用的 worker（与 `rl.hub_push` 开关）必须在**第一帧**就上屏。 */
 export async function getHubAdmin(cfg: RlConfig, course: string): Promise<HubAdmin> {
-  const now = Date.now()
-  const ent = hubCache.get(course)
-  if (ent && now - ent.at < OVERVIEW_TTL_MS) return ent.val
-  const inflight = hubInFlight.get(course)
-  if (inflight) return inflight
-  const p = (async (): Promise<HubAdmin> => {
-    const token = String(cfg.rl?.remote_token ?? '')
-    // 两段并行：worker 直探（与 hub 无关）与 hub 探测同时开跑——串行会把冷算拉
-    // 到 3×超时（hub → 登记表 → 工人），而它们之间无依赖。
-    const [probed, live] = await Promise.all([
-      withWorkerProbes(workerRows(cfg), cfg),
-      liveHub(cfg, course),
-    ])
-    // 两个 hub 端点**并行**探（登记表 + 离线进度）：串行会把冷算再拉一个超时窗口，
-    // 而它们互不依赖（同一个 hub 基址，各自独立问答）。
-    const [pushMap, offline] = live
-      ? await Promise.all([hubPushWorkers(live.url, token), hubOfflineProgress(live.url, token)])
-      : [null, null]
-    return {
-      url: live?.url ?? null,
-      queue: live?.queue ?? null,
-      pushMap,
-      offline,
-      workers: probed,
-    }
-  })().then(
-    (val) => {
-      hubCache.set(course, { at: Date.now(), val })
-      hubInFlight.delete(course)
-      return val
-    },
-    (e) => {
-      hubInFlight.delete(course)
-      throw e
-    },
-  )
-  hubInFlight.set(course, p)
-  return p
+  const p = await hubCache.get(() => probeHubAdmin(cfg, course))
+  return {
+    url: p.url,
+    queue: p.queue,
+    pushMap: p.pushMap,
+    offline: p.offline,
+    workers: workerRows(cfg).map((w) => ({
+      ...w,
+      online: p.workerPing.get(w.id)?.online ?? null,
+      busy: p.workerPing.get(w.id)?.busy ?? null,
+    })),
+  }
 }
 
-/** 动作后置空（与 invalidateSlowSnapshot 同规）：登记/移除 worker 后下一拍不读旧登记表。 */
+/** 真正探一次（不落缓存；落缓存由 getHubAdmin 负责）。 */
+async function probeHubAdmin(cfg: RlConfig, course: string): Promise<HubProbe> {
+  const token = String(cfg.rl?.remote_token ?? '')
+  // 两段并行：worker 直探（与 hub 无关）与 hub 探测同时开跑——串行会把冷算拉
+  // 到 3×超时（hub → 登记表 → 工人），而它们之间无依赖。
+  const [probed, live] = await Promise.all([
+    withWorkerProbes(workerRows(cfg), cfg),
+    liveHub(cfg, course),
+  ])
+  // 两个 hub 端点**并行**探（登记表 + 离线进度）：串行会把冷算再拉一个超时窗口，
+  // 而它们互不依赖（同一个 hub 基址，各自独立问答）。
+  const [pushMap, offline] = live
+    ? await Promise.all([hubPushWorkers(live.url, token), hubOfflineProgress(live.url, token)])
+    : [null, null]
+  return {
+    url: live?.url ?? null,
+    queue: live?.queue ?? null,
+    pushMap,
+    offline,
+    workerPing: new Map(probed.map((w) => [w.id, { online: w.online, busy: w.busy }])),
+  }
+}
+
+/** **动作后**的 hub 观测面处置（软作废）：worker 行本身（id/url/enabled/并发）与
+ *  `rl.hub_push` 是现算的 → 刚登记/停用的 worker **第一帧**就上屏；hub 侧的探活列
+ *  （`hubOnline`/`online`）本来就要一次 1.2–1.5s 探测，读路径先给旧值、重算丢后台
+ *  —— 否则「登记完要等几秒才看到它」又回来了（2026-09-22）。
+ *
+ *  生产调用点是 `snapshot-refresher.invalidateAfterAction()`（与慢快照同一时机）。 */
+export function refreshHubAdmin(): void {
+  hubCache.refresh()
+}
+
+/** **硬作废**（下一次读**必须**重探）：改了输入（rl-config / 账本 / registry）或要隔离测试
+ *  夹具时用。与 `refreshHubAdmin()` 的分工即 swr-cache 文件头的 ③/④。 */
 export function invalidateHubAdmin(): void {
   hubCache.clear()
 }

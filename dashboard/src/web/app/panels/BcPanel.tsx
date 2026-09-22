@@ -10,7 +10,7 @@
  * BC 课程未启用 eval 或无 epoch 数据 → 空态说明，不渲染误导空行。
  */
 
-import { useEffect, useState } from 'preact/hooks'
+import { useCallback, useEffect, useState } from 'preact/hooks'
 import type { BcEpochRow, BcEvalRow } from '../../view'
 import { DataTable, type Col } from '../../components/DataTable'
 import { Pill } from '../../components/Pill'
@@ -102,17 +102,25 @@ export function BcPanel({ course, enabled = true }: BcPanelProps) {
   const [error, setError] = useState<string | null>(null)
   const [fullOpen, setFullOpen] = useState(false)
 
+  const refresh = useCallback(async (): Promise<void> => {
+    const res = await fetch(`/api/bcEpochs?course=${encodeURIComponent(course ?? '')}`)
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    setView((await res.json()) as BcEpochsView)
+    setError(null)
+  }, [course])
+
   usePolling({
     enabled: enabled && !!course,
     intervalSec: 10,
-    fetch: async () => {
-      const res = await fetch(`/api/bcEpochs?course=${encodeURIComponent(course ?? '')}`)
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      setView((await res.json()) as BcEpochsView)
-      setError(null)
-    },
+    fetch: refresh,
     onError: (e) => setError(e instanceof Error ? e.message : String(e)),
   })
+
+  // 切课程**立即**重拉：`usePolling` 的链只按 `enabled` 重开（课程不是它的判据），
+  // 否则两门 BC 课之间切换会顶旧课数据最长 10s（与 App 的 stateView 同一条竞态纪律）。
+  useEffect(() => {
+    if (enabled && course) void refresh().catch(() => undefined)
+  }, [enabled, course, refresh])
 
   // 完整指标表 modal 的 Esc 关闭（自持，不依赖 App 全局键处理）。
   useEffect(() => {

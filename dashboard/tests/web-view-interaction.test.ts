@@ -11,6 +11,7 @@
 import { describe, expect, it } from 'bun:test'
 import {
   isDirty,
+  isStaleStateResponse,
   nextRefreshInterval,
   parsePhaseFromLog,
   refreshLabel,
@@ -81,6 +82,17 @@ describe('view 交互纯函数（§7 评审 E5 替代 DOM 测试）', () => {
       sinceMs: new Date().setHours(10, 4, 0, 0),
       iter: null,
     })
+  })
+
+  it('isStaleStateResponse：请求发起时的课程 ≠ 此刻的课程 ⇒ 迟到响应丢弃', () => {
+    // 没切过课：一律接受（含空串——「跟随服务端生效课程」这种请求同样受保护）
+    expect(isStaleStateResponse('c4', 'c4')).toBe(false)
+    expect(isStaleStateResponse('', '')).toBe(false)
+    // A→B 切过之后，A 的响应回来 → 丢弃（否则面板把 A 的指标/走势显示在 B 名下）
+    expect(isStaleStateResponse('c4', 'c5')).toBe(true)
+    // 空串 → 具体课程、具体课程 → 空串，两个方向都算切过
+    expect(isStaleStateResponse('', 'c5')).toBe(true)
+    expect(isStaleStateResponse('c4', '')).toBe(true)
   })
 
   it('shouldFollow：贴底跟随 / 上滚不跟随（阈值 24）', () => {

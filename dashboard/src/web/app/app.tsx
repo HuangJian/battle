@@ -56,6 +56,7 @@ import {
   TC_GLOBAL_INTERVAL,
   TC_RO_BANNER_DISMISSED,
   parseCloudHaltAcks,
+  isStaleStateResponse,
   withCourse,
   type ConsoleBootstrap,
   type PageKey,
@@ -201,9 +202,16 @@ export function App({ initial }: AppProps) {
   )
 
   // ── 拉取 /api/state（刷新间隔；单次失败 retry，连续 3 次 down） ──
+  //
+  //  ★ 切课竞态（2026-09-22）：请求**发起时**记下查看课程，响应回来时若已切走则丢弃——
+  //   否则 A→B 快速切换时 A 的迟到响应会把 stateView 覆盖成 A 的数据（面板显示另一门课
+  //   的指标/走势，要等下一次轮询才纠正）。服务端把切课做快到毫秒级后，这个竞态窗口更小，
+  //   但「点了两下」仍然会撞上——保护在这里，与服务端快慢无关。
   const refreshState = useCallback(async (): Promise<void> => {
+    const want = viewCourseRef.current
     try {
-      const s = await fetchState(viewCourseRef.current)
+      const s = await fetchState(want)
+      if (isStaleStateResponse(want, viewCourseRef.current)) return
       setStateView(s)
       setConnError('off')
       failCount.current = 0
@@ -283,9 +291,13 @@ export function App({ initial }: AppProps) {
       const r = await postAction(act, fullBody)
       setFlash({ ok: r.ok, message: r.message })
       void refreshState()
+      // 池面板（节点统计）与动作不同源：服务端已在动作后软作废那份视图（旧值 + 后台重算），
+      // 这里推一下 nonce 让面板**立即**再校验 —— 否则「停用节点」要等 300s 的下一次轮询
+      // 才在池表里上屏（同一页上下两处事实不合）。
+      if (!readOnly) setPoolFreshNonce((n) => n + 1)
       return { ok: r.ok }
     },
-    [refreshState],
+    [readOnly, refreshState],
   )
 
   // 首次进入/切课程时，用**服务端标志文件**校准本地开关（文件是真相，localStorage 只是记忆）。

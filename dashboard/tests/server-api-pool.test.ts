@@ -37,10 +37,15 @@ describe('/api/pool（buildPoolView）', () => {
     expect(typeof pv.localHash).toBe('string')
   })
 
-  it('缓存 key 带 course：同 course 命中（cachedAt 不变）；?fresh=1 bypass', async () => {
+  it('探测层缓存命中（cachedAt 不变）+ 跨课程共用；?fresh=1 bypass 重算', async () => {
     const a = await buildPoolView(false)
     const b = await buildPoolView(false)
     expect(b.cachedAt).toBe(a.cachedAt)
+    // ★ 探测层是**机器级**的（ping/池历史/codeHash/selfNode 都与看哪门课无关）：换个课程名
+    //   仍然命中同一份探测 —— 切课不该重算 2.5s 的探测（课程只在视图里回显）。
+    const other = await buildPoolView(false, 'another-course')
+    expect(other.course).toBe('another-course')
+    expect(other.cachedAt).toBe(a.cachedAt)
     const c = await buildPoolView(true)
     expect(c.cachedAt).toBeGreaterThanOrEqual(a.cachedAt)
   })
