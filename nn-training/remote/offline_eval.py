@@ -36,6 +36,10 @@ from pathlib import Path
 from typing import Any
 
 from platform_utils import cpu_worker_slots
+
+# 单局看门狗口径：**一律通过模块属性读**（`game_watch.X`）——import 会把值抄成第二份绑定，
+# 测试 patch 了 game_watch 那份、调用点还在读旧绑定就是静默的错口径。
+from remote import game_watch
 from rl.eval_local import (
     a_eval_seed_list,
     eval_done_keys,
@@ -45,8 +49,12 @@ from rl.eval_local import (
 )
 from rl.log import log as _rl_log
 
-#: 单局评估的超时（秒）——与 policy.taskTimeoutSec 的缺省一致（900）。
-DEFAULT_GAME_TIMEOUT_SEC = 900.0
+# 单局评估的硬顶：**与 rollout 共用一份口径**（`remote/game_watch.py`）。
+# 旧值 900s（= policy.taskTimeoutSec）：一个卡住的评估局会占着一个 slot 15 分钟，而本轮
+# `drain` 的预算只有 `DRAIN_TIMEOUT_SEC`（600s）——读数是「整轮丢掉」而不是「少一局」。
+# 单局正常是亚秒~几秒级（实测逐局 `wallSec`：p50 1.2~1.6s / p90 3.2~4.2s / p99 7~8s；
+# 用户口径 2026-09-22：「单局 >5s 肯定不正常」）⇒ 首次尝试 5s 就算超时，原地重跑，重试上限 ×4。
+# `game_timeout_sec` 给了正数就完全按它（且不对重试放大——配置说了算）。
 #: 新评估轮「上一轮还在飞」时的交接等待（秒）：**有界**等（不是无限 join）。
 EVAL_HANDOFF_WAIT_SEC = 120.0
 #: 段末收线的缺省时限（秒）：给还在飞的评估局一点时间落账；超时只记一笔（已落的行有效）。
@@ -321,7 +329,7 @@ def run_cloud_eval(
     course_fp: str = "",
     bun: str = "",
     slots: int = 0,
-    game_timeout_sec: float = DEFAULT_GAME_TIMEOUT_SEC,
+    game_timeout_sec: float = 0.0,
     rollout_winrate: float | None = None,
     log: Any = None,
 ) -> dict:
@@ -387,41 +395,87 @@ def run_cloud_eval(
         outcomes: dict[str, int] = {}
         node_games: dict[str, int] = {}
         failed: list[tuple[int, int, str]] = []
+        #: 逐局（成功那次尝试的）墙钟 + 局身份：轮末打分布用（5s 这条线靠真数据校准）。
+        game_walls: list[tuple[float, str]] = []
+        retried_games: list[int] = []
+        # 首次尝试的硬顶：调用方显式给了正数就完全按它（每次尝试都用它），否则节点兜底 +
+        # 重试放宽（`attempt_timeout_sec`）——理由与 rollout 逐字相同。
+        explicit = float(game_timeout_sec or 0.0) > 0
+        base_cap = float(game_timeout_sec) if explicit else game_watch.DEFAULT_GAME_TIMEOUT_SEC
 
         def run_one(task: tuple[int, int]) -> None:
             stage, seed = task
             game_dir = Path(work_dir) / f"eval-{int(it)}-s{stage}-d{seed}"
+            # 单局**原地重试**（与 rollout 同一口径，`remote/game_watch.py`）：单局的失败几乎
+            # 总是环境性的（宿主机饥饿/慢局/mini-batch 里卡住），而这一局是确定性的（种子固定）
+            # ⇒ 重跑同一命令要么拿到同一份结果，要么再次响亮失败。旧行为是一把不过就丢一局，
+            # 于是读数里那些「永远失败」的局每轮都没人管。
+            manifest: dict | None = None
+            err_txt = ""
+            lab = game_watch.game_label(stage, seed)
+            wall = 0.0
+            for attempt in range(1, game_watch.GAME_MAX_ATTEMPTS + 1):
+                cap = game_watch.attempt_timeout_sec(base_cap, attempt, explicit=explicit)
+                if attempt > 1:
+                    shutil.rmtree(game_dir, ignore_errors=True)  # 上一把可能留半截 _eval_report
+                    log(
+                        f"[eval-cloud] it{it}: "
+                        + game_watch.retry_line("eval", lab, attempt, err_txt, cap)
+                    )
+                t_game = time.time()
+                try:
+                    manifest = run_local_eval_game(
+                        bun_bin,
+                        str(wpath),
+                        int(stage),
+                        int(seed),
+                        game_dir,
+                        int(plan.max_ticks),
+                        plan.difficulty,
+                        float(cap),
+                        key16,
+                        stage_json=(course.stage_json(int(stage)) if course is not None else "") or "",
+                        lives_override=plan.lives,
+                        player_level=plan.level,
+                        cwd=str(ts),
+                        log_fn=log,
+                        attempt=attempt,
+                    )
+                    wall = time.time() - t_game
+                    break
+                except Exception as e:  # 单局失败只放弃这一局（下一轮/下次导入会重试）
+                    manifest = None
+                    wall = time.time() - t_game
+                    err_txt = f"{type(e).__name__}: {e}"
+            if manifest is None:
+                with lock:
+                    failed.append((int(stage), int(seed), err_txt))
+                return
             try:
-                manifest = run_local_eval_game(
-                    bun_bin,
-                    str(wpath),
-                    int(stage),
-                    int(seed),
-                    game_dir,
-                    int(plan.max_ticks),
-                    plan.difficulty,
-                    float(game_timeout_sec),
-                    key16,
-                    stage_json=(course.stage_json(int(stage)) if course is not None else "") or "",
-                    lives_override=plan.lives,
-                    player_level=plan.level,
-                    cwd=str(ts),
-                )
                 row = eval_row(
-                    manifest, it=int(it), key16=key16, task=(int(stage), int(seed)), node=CLOUD_NODE
+                    manifest,
+                    it=int(it),
+                    key16=key16,
+                    task=(int(stage), int(seed)),
+                    node=CLOUD_NODE,
+                    # 与 in-loop 腿同字段（`rl/eval_dispatch` 的 wallSec）⇒ 两腿逐字段可比。
+                    wall_sec=round(wall, 3),
                 )
                 with jsonl_lock, open(eval_jsonl, "a", encoding="utf-8") as f:
                     f.write(json.dumps(row, ensure_ascii=False) + "\n")
                 with lock:
                     seen.add((int(stage), int(seed)))
+                    game_walls.append((round(wall, 3), lab))
+                    if attempt > 1:
+                        retried_games.append(attempt)
                     wins[0] += int(row["win"])
                     cleared_total[0] += int(row["cleared"])
                     oc = str(row.get("outcome") or "?")
                     outcomes[oc] = outcomes.get(oc, 0) + 1
                     node_games[CLOUD_NODE] = node_games.get(CLOUD_NODE, 0) + 1
-            except Exception as e:  # 单局失败只放弃这一局（下一轮/下次导入会重试）
+            except Exception as e:  # 落到这一支 = 局跑完了但账落不下去（磁盘/账本格式）
                 with lock:
-                    failed.append((int(stage), int(seed), f"{type(e).__name__}: {e}"))
+                    failed.append((int(stage), int(seed), f"落账失败 {type(e).__name__}: {e}"))
 
         eval_jsonl.parent.mkdir(parents=True, exist_ok=True)
         if n_slots <= 1:
@@ -431,6 +485,11 @@ def run_cloud_eval(
             with ThreadPoolExecutor(max_workers=n_slots, thread_name_prefix="cloud-eval") as ex:
                 list(ex.map(run_one, todo))
 
+        # 单局耗时分布（每轮都打）：<5s 这条线（以及重试次数）靠真数据校准，不靠猜。
+        log(
+            f"[eval-cloud] it{it} "
+            + game_watch.game_time_summary("eval", game_walls, retried=len(retried_games))
+        )
         out["settled"] = len(seen)
         out["failed"] = len(failed)
         for stage, seed, err in failed[:5]:

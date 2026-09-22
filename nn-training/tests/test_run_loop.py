@@ -125,6 +125,7 @@ def _manifest(it: int = 1) -> dict:
 
 
 def _report(games: int = 4, win: float = 0.5) -> dict:
+    """与真 `combine_reports` 同形状的一轮采集报告（含 dimMeans/scoreStats）。"""
     return {
         "games": games,
         "shards": games,
@@ -133,6 +134,10 @@ def _report(games: int = 4, win: float = 0.5) -> dict:
         "totalTicks": games * 100,
         "elapsedSec": 1.5,
         "outcomes": {"win": int(games * win), "loss": games - int(games * win)},
+        # 控制台那几列（kills/accuracy/loot 与 score）的数据源。产物行必须带上它们：
+        # 不带 ⇒ 导入后那张表在云机腿上恒空（与「本机腿」同一张表逐列不可比）。
+        "dimMeans": {"progress": 0.4, "accuracy": 0.12, "loot": 0.3},
+        "scoreStats": {"mean": 0.87, "std": 0.05},
     }
 
 
@@ -357,6 +362,10 @@ def test_chain_runs_whole_plan_and_writes_artifacts(tmp_path: Path) -> None:
     rows = _ledger(art)
     assert [r["it"] for r in rows] == [plan["start_it"], *want]  # 账本 it 唯一
     assert rows[0]["phase"] == "anchor"  # 起点行（来自本轮结果）
+    # 逐维度/分数统计要进产物行（2026-09-22）：控制台的 kills/accuracy/loot 与 score 列读它，
+    # 而导入的离线产物腿要靠这行把同一批列点起来（不带就恒空）。
+    assert rows[1]["report"]["dimMeans"] == {"progress": 0.4, "accuracy": 0.12, "loot": 0.3}
+    assert rows[1]["report"]["scoreStats"]["mean"] == 0.87
     assert store.dir_for(2).name == "it-002"  # 人肉翻看友好
     st = json.loads((art / ArtifactStore.STATE_NAME).read_text(encoding="utf-8"))
     assert (st["state"], st["last_it"]) == ("complete", want[-1])

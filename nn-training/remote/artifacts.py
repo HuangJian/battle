@@ -141,6 +141,10 @@ class ArtifactStore:
     README_NAME = "README.txt"
     LATEST_ZIP = "LATEST.zip"
     ALL_ZIP = "artifacts.zip"
+    #: 逐局压缩画像的落盘名（**课程产物目录**侧：`tmp/<课>/it<N>/per-game.json`）。
+    #: 控制台的「耗时/击杀/残血/道具」列是逐局聚合的，而单局 manifest 只在跑它的那台机器上
+    #: （云机轮末就 prune 了）⇒ 产物行的 `perGame` 由落地方写成这个文件（读方优先它）。
+    PER_GAME_NAME = "per-game.json"
 
     def __init__(
         self,
@@ -412,6 +416,90 @@ run_id      : {self.run_id}
 """
 
 
+#: 产物账本行 → **课程账本行**（`training_log.jsonl` 的 `iteration` 事件）的字段搬运表。
+#: 左 = 课程账本字段名（`rl/events.py::write_iteration`，也是控制台读的那一份），
+#: 右 = (来源, 键)：`agg` = 产物行的聚合子字典，`report` = 采集报告子字典，`row` = 行本身；
+#: 键写成元组就是**下探路径**（如 `("scoreStats", "mean")`）——产物行是分层的，而课程账本平铺。
+#: 两个落地方（人工导入 `remote/deliver_zip`、实时补传 `remote/hub_server`）走**同一张表**：
+#: 两份翻译必然漂开，而「两腿同字段」正是这张表存在的意义。
+LEDGER_FIELDS: tuple[tuple[str, str, str | tuple[str, ...]], ...] = (
+    ("winRate", "report", "winRate"),
+    ("outcomes", "report", "outcomes"),
+    ("samples", "report", "totalSamples"),
+    ("ticks", "report", "totalTicks"),
+    # 控制台用 `ticks / expectedGames` 算「平均每局时长」⇒ 缺了它这一列恒为 0（看起来像
+    # 「跑了零 tick」）。本机账本里 expectedGames = 本轮**计划**局数（`len(pairs)`），
+    # 产物行的 report.games = 实际结算局数，两者在这条腿上相等（满配额采集）。
+    ("expectedGames", "report", "games"),
+    ("rollout_sec", "row", "rollout_sec"),
+    ("ppo_sec", "row", "ppo_sec"),
+    ("steps", "row", "steps"),
+    ("chunks", "row", "chunks"),
+    ("policy", "agg", "policy"),
+    ("value", "agg", "value"),
+    ("entropy", "agg", "entropy"),
+    ("kl", "agg", "kl"),
+    ("mean_ret", "agg", "mean_ret"),
+    # 逐维度画像与分数统计（控制台的 kills/accuracy/loot 与 score 列读它们）——
+    # 2026-09-22 起产物行的 report 里带这两块；更早打的包没有 ⇒ 那几列留空，不编数字。
+    ("dim_means", "report", "dimMeans"),
+    ("score_mean", "report", ("scoreStats", "mean")),
+    ("score_std", "report", ("scoreStats", "std")),
+)
+
+
+def ledger_row_from_metrics(row: Mapping[str, Any], *, run_id: str, source: str) -> dict | None:
+    """产物账本行 → 课程账本的 `iteration` 事件（形状不符/没有 it ⇒ None）。
+
+    `source` = 这一行是谁搬进来的（`deliver_import` / `offline_backfeed`）——控制台不读它，
+    但复盘/归因需要能一眼分辨「这条曲线从哪来」。`it0` 是起点快照（不是一轮训练）⇒ 不搬。
+    搬不到的字段（旧包没有 `dimMeans`/`scoreStats`）**留空**：写 0 会被读成真实读数
+    （「真的零击杀」），而缺数据与零不是一回事。
+    """
+    raw_it = row.get("it")
+    if not isinstance(raw_it, (int, float, str)):
+        return None
+    try:
+        it = int(raw_it)
+    except (TypeError, ValueError):
+        return None
+    if it < 1:
+        return None
+    ev: dict[str, Any] = {
+        "event": "iteration",
+        "iter": it,
+        "time": _ledger_time(row.get("ts")),
+        "run_id": str(run_id),
+        "source": str(source),
+    }
+    for name, src, key in LEDGER_FIELDS:
+        box = row if src == "row" else row.get(src)
+        v = _dig(box, key)
+        if v is not None:
+            ev[name] = v
+    return ev
+
+
+def _dig(box: object, key: str | tuple[str, ...]) -> object:
+    """从（可能分层的）产物行取值：`key` 是元组就逐层下探，任一层不是 dict 就 None。"""
+    cur: object = box
+    keys = key if isinstance(key, tuple) else (key,)
+    for k in keys:
+        if not isinstance(cur, Mapping):
+            return None
+        cur = cur.get(k)
+    return cur
+
+
+def _ledger_time(ts: object) -> str:
+    """账本 `time` 的格式（与 `rl/events.py` 逐字同规：本地时间 `YYYY-MM-DD HH:mm:ss`）。"""
+    secs = None
+    if isinstance(ts, (int, float)) and not isinstance(ts, bool) and ts > 0:
+        secs = float(ts)
+    t = time.localtime(secs) if secs is not None else time.localtime()
+    return time.strftime("%Y-%m-%d %H:%M:%S", t)
+
+
 def metrics_row(
     *,
     agg: Mapping[str, Any],
@@ -445,6 +533,25 @@ def metrics_row(
             "elapsedSec": float(report.get("elapsedSec", 0.0)),
             "outcomes": dict(report.get("outcomes", {})),
         }
+        # 逐维度均值与分数统计（2026-09-22，additive）：本机账本行是带 `dim_means`/`score_mean`
+        # 的（`rl/events.write_iteration` 读 `report.dimMeans`/`report.scoreStats`），而产物行
+        # 此前只留摘要 ⇒ 导入后控制台那张表的 kills/accuracy/loot 与 score 列恒空——同一张
+        # 表上「本机腿」与「导入腿」逐列不可比（两腿同字段是硬要求）。
+        # 代价：`dimMeans` ~15 个 float + 2 个 float/轮（刻意**不**搬 600 点的 scoreList）。
+        _dm = report.get("dimMeans")
+        if isinstance(_dm, Mapping) and _dm:
+            row["report"]["dimMeans"] = {str(k): float(v) for k, v in _dm.items()}
+        _ss = report.get("scoreStats")
+        if isinstance(_ss, Mapping) and _ss:
+            row["report"]["scoreStats"] = dict(_ss)
+    # 逐局压缩画像（2026-09-22，additive）：控制台的「耗时/击杀/残血/道具」是**逐局**聚合的
+    # （`dashboard/src/server/iters.ts::readRoundActuals`），而这些单局 manifest 只在跑它的那台
+    # 机器上——云机离线腿没人把分片拉回本机（轮末 prune 就删了）⇒ 那几列永远空。
+    # 带上它们（~200B/局）随轮账本行走，回传/导入都不需要额外通道；**不落课程账本**
+    # （那会让账本每轮大 65KB），而是由落地方写成 `it<N>/per-game.json`（读方按文件优先）。
+    _pg = report.get("perGame") if report else None
+    if isinstance(_pg, list) and _pg:
+        row["perGame"] = [e for e in _pg if isinstance(e, Mapping)]
     if extra:
         row.update({str(k): v for k, v in extra.items()})
     return row

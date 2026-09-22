@@ -29,12 +29,19 @@ from pathlib import Path
 from typing import Any
 
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+
+# 单局看门狗的口径常量与 eval **共用一份**（`remote/game_watch.py`）：点名线 5s、首次尝试硬顶
+# 也是 5s（用户口径「单局 >5s 肯定不正常」⇒ 超时原地重跑）、重试上限 ×4、最多 3 次、轮询 0.5s。
+# **一律通过模块属性读**（`game_watch.X`）而不是 `from ... import X`：import 会把值抄成第二份
+# 绑定，测试 patch 了 `game_watch` 的那一份、调用点却还在读旧绑定（两处不一致就是静默的错口径）。
+from remote import game_watch
 from remote.protocol import (
     ProtocolError,
     RetryableError,
     data_fp,
     iter_expected_data_fp,
     parse_shard_name,
+    shard_name,
 )
 
 #: 每局日志（诊断用；与本地 `run_rollout` 的 `w{i}/rollout.log` 同名同形）。
@@ -100,6 +107,68 @@ def _exec_argv(argv: list[str], job_dir: Path) -> list[str]:
     return out
 
 
+def _game_label(argv: list[str]) -> str:
+    """一局的身份（`s3/d7` 式）——诊断行必须能直接说清「是哪一局卡了」。
+
+    只有 argv 里的 `--stages`/`--seeds`（协议层已校验存在且是十进制整数）。缺了就退回问号，
+    绝不抛：诊断信息的生成不能成为新的失败点。
+    """
+
+    def val(flag: str) -> str:
+        try:
+            return argv[argv.index(flag) + 1]
+        except (ValueError, IndexError):
+            return "?"
+
+    return game_watch.game_label(val("--stages"), val("--seeds"))
+
+
+def _game_out_dir(argv: list[str]) -> str:
+    """argv 里的 `--out`（协议层已校验为 job 目录内相对路径）。"""
+    try:
+        return argv[argv.index("--out") + 1]
+    except (ValueError, IndexError):
+        return ""
+
+
+def _clean_attempt(job_dir: Path, argv: list[str]) -> None:
+    """删掉一次失败尝试可能留下的半截产出（**就地重跑前必须做**）。
+
+    为什么：卡死/被杀的 bun 可能已经写完 `manifest.json` 而 `obs.npy` 只写了一半——
+    `scan_shard_dirs` 只认「名字合法 + 有 manifest.json」，半截目录会被当成产出，
+    于是重跑成功与否都不影响它留在实产集里（读数静默错一局）。
+
+    只删 job 目录**里面**的东西（out 目录 + 同 (stage,seed) 的 shard 目录），任何越界路径一
+    律跳过——这个函数的输入全部来自协议层校验过的 argv，但删除是没得撤销的动作，值一道闸。
+    """
+    root = job_dir.resolve()
+    targets: list[Path] = []
+    out = _game_out_dir(argv)
+    if out:
+        targets.append(job_dir / out)
+    stage = seed = None
+    try:
+        stage = int(argv[argv.index("--stages") + 1])
+        seed = int(argv[argv.index("--seeds") + 1])
+    except (ValueError, IndexError):
+        pass
+    if stage is not None and seed is not None:
+        name = shard_name(stage, seed)
+        targets += list(job_dir.rglob(name))
+    for t in targets:
+        try:
+            if not t.exists():
+                continue
+            if root not in t.resolve().parents:
+                continue
+            if t.is_dir():
+                shutil.rmtree(t, ignore_errors=True)
+            else:
+                t.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def _run_one_game(
     bun: str,
     argv: list[str],
@@ -107,18 +176,28 @@ def _run_one_game(
     ts_dir: Path,
     out_dir: str,
     timeout_sec: float,
+    log=lambda msg: None,
+    attempt: int = 1,
 ) -> float:
     """跑一局：`bun <argv...>`（cwd = TS 代码根），日志落 `job_dir/out_dir/rollout.log`。
 
     返回墙钟秒。失败语义：
-      * 单局超时 → RetryableError（节点卡住 = 基础设施问题，作废重发该轮）；
+      * 超过 `timeout_sec`（**本次尝试的硬顶**，由 `_run_one_game_with_retries` 按尝试次数算：
+        首次 = plan 给的上限或 `DEFAULT_GAME_TIMEOUT_SEC`，重试放宽 `RETRY_TIMEOUT_FACTOR` 倍）
+        → kill 子进程 + RetryableError（调用方 `_run_one_game_with_retries` 就地重跑）；
       * rc != 0 → RetryableError（同上；本机路径是把 stderr 尾巴抛出去让 loop 重试）；
       * 日志写不进去（磁盘）→ OSError 原样上抛（worker 侧统一按失败处理）。
+
+    等待用**轮询**而不是一次 `p.wait(timeout=...)`：轮询让「单局异常慢」在卡住期间就能被
+    点名（软告警），而不是等硬顶到了才知道某一局有问题（2026-09-22 it34 的 651s 就是这么
+    发生的：10 局卡死，日志里只有计数）。
     """
     wdir = job_dir / out_dir
     wdir.mkdir(parents=True, exist_ok=True)
     log_path = wdir / ROLLOUT_LOG_NAME
+    label = _game_label(argv)
     t0 = time.time()
+    warned = False
     with open(log_path, "w", encoding="utf-8") as lf:
         p = subprocess.Popen(
             [bun, *_exec_argv(argv, job_dir)],
@@ -127,22 +206,86 @@ def _run_one_game(
             stderr=subprocess.STDOUT,
             **_POPEN_NO_WINDOW,
         )
-        try:
-            rc = p.wait(timeout=(timeout_sec or None))
-        except subprocess.TimeoutExpired:
-            p.kill()
-            p.wait()
-            raise RetryableError(
-                f"rollout 单局超时（>{timeout_sec:g}s）：{' '.join(argv[:4])}…（见 {log_path}）"
-            ) from None
+        while True:
+            try:
+                rc = p.wait(timeout=game_watch.GAME_POLL_SEC)
+                break
+            except subprocess.TimeoutExpired:
+                elapsed = time.time() - t0
+                # 默认口径下软告警与硬顶同值 ⇒ 只打超时行（它自己带着局身份）；调用方把上限
+                # 调高时这一层才有独立价值（跑完但慢的局也要被点名）。
+                if (
+                    not warned
+                    and not game_watch.warn_is_redundant(timeout_sec)
+                    and elapsed >= game_watch.SLOW_GAME_WARN_SEC
+                ):
+                    warned = True
+                    log(
+                        game_watch.slow_warn_line(
+                            "rollout", label, elapsed, timeout_sec, attempt, str(log_path)
+                        )
+                    )
+                if elapsed >= timeout_sec:
+                    p.kill()
+                    p.wait()
+                    raise RetryableError(
+                        game_watch.hard_cap_line(
+                            "rollout", label, elapsed, timeout_sec, str(log_path)
+                        )
+                        + f"（{' '.join(argv[:4])}…）"
+                    ) from None
     if rc != 0:
         tail = ""
         try:
             tail = log_path.read_text(encoding="utf-8", errors="replace")[-1500:]
         except OSError:
             pass
-        raise RetryableError(f"rollout 单局 rc={rc}（{' '.join(argv[:4])}…）：\n{tail}")
+        raise RetryableError(f"rollout 单局 rc={rc}（{label}；{' '.join(argv[:4])}…）：\n{tail}")
     return round(time.time() - t0, 3)
+
+
+def _run_one_game_with_retries(
+    bun: str,
+    argv: list[str],
+    job_dir: Path,
+    ts_dir: Path,
+    out_dir: str,
+    timeout_sec: float,
+    log=lambda msg: None,
+    explicit: bool = False,
+) -> tuple[float, int]:
+    """一局最多跑 `GAME_MAX_ATTEMPTS` 次（超时/rc≠0 都原地重跑），返回 `(墙钟秒, 尝试次数)`。
+
+    为什么重试是**必须**的：单局的失败几乎总是环境性的（宿主机一阵饥饿、bun 起不来、
+    半截写盘），而这一局是**确定性**的（种子在 argv 里）——重跑同一 argv 要么拿到同一份
+    结果，要么再次响亮失败。没有重试的旧行为是「一局卡住 → 撞硬顶 → 整轮（328 局）作废重发」，
+    代价比多跑几局大得多。
+
+    每次尝试的上限按 `attempt_timeout_sec` 算：首次 = `timeout_sec`（用户口径 5s），重试放宽
+    ×`RETRY_TIMEOUT_FACTOR`（除非 plan 显式给了上限——那是配置说了算，不做解释）。
+
+    全部尝试都失败 → RetryableError（整轮交给 worker 的既有重试语义）。
+    """
+    label = _game_label(argv)
+    last: Exception | None = None
+    for attempt in range(1, game_watch.GAME_MAX_ATTEMPTS + 1):
+        cap = game_watch.attempt_timeout_sec(timeout_sec, attempt, explicit=explicit)
+        if attempt > 1:
+            _clean_attempt(job_dir, argv)  # 上一次可能留了半截 shard（见 _clean_attempt）
+            log(game_watch.retry_line("rollout", label, attempt, last, cap))
+        try:
+            return (
+                _run_one_game(
+                    bun, argv, job_dir, ts_dir, out_dir, cap, log=log, attempt=attempt
+                ),
+                attempt,
+            )
+        except RetryableError as e:
+            last = e
+    raise RetryableError(
+        f"rollout 单局连续 {game_watch.GAME_MAX_ATTEMPTS} 次失败：{label}"
+        f"（最后一次：{last}）——这一局产不出 shard，整轮交回重发"
+    )
 
 
 def scan_shard_dirs(job_dir: Path) -> list[Path]:
@@ -239,7 +382,7 @@ def run_iter_rollout(
     `ts_dir` = 解包后的 TS 代码根（带 `src/` `tools/`）；缺省 = job 目录（单测里桩脚本
     是绝对路径，不需要独立的 TS 根）。真实节点侧必须传，否则 `tools/sim/...` 找不到。
     """
-    from rl.reports import combine_reports
+    from rl.reports import combine_reports, compact_per_game
 
     jd = Path(job_dir)
     tsd = Path(ts_dir) if ts_dir is not None else jd
@@ -250,28 +393,51 @@ def run_iter_rollout(
     ver = bun_version(bun)
     argvs: list[list[str]] = list(spec["argv"])
     workers = max(1, min(int(spec.get("workers") or 1), len(argvs), MAX_WORKERS))
-    timeout_sec = float(spec.get("game_timeout_sec") or 0.0)
+    # 首次尝试的硬顶：plan 给了正数就完全按它；**0/缺省就是节点兜底** `DEFAULT_GAME_TIMEOUT_SEC`
+    # （旧口径「0 = 不限」= 卡住的局可以永远等下去；本机历史行为不能当云机的安全策略）。
+    requested = float(spec.get("game_timeout_sec") or 0.0)
+    explicit = requested > 0
+    timeout_sec = requested if explicit else game_watch.DEFAULT_GAME_TIMEOUT_SEC
     log(
         f"kind=iter rollout: {len(argvs)} games, workers={workers}, "
-        f"bun={bun} ({ver or '?'}), timeout={timeout_sec or 'off'}, ts_root={tsd}"
+        f"bun={bun} ({ver or '?'}), ts_root={tsd}"
+    )
+    log(
+        f"kind=iter 单局看门狗：软告警 >{game_watch.SLOW_GAME_WARN_SEC:g}s（正常一局亚秒级），"
+        f"首次尝试硬顶 {timeout_sec:g}s"
+        + (
+            "（plan 指定，每次尝试都用它）"
+            if explicit
+            else f"（plan 未指定，用节点兜底 {game_watch.DEFAULT_GAME_TIMEOUT_SEC:g}s）"
+        )
+        + f"；超时/rc≠0 原地重跑同一 argv，最多 {game_watch.GAME_MAX_ATTEMPTS} 次"
+        + (
+            "（上限不放大）"
+            if explicit
+            else f"（重试上限 ×{game_watch.RETRY_TIMEOUT_FACTOR:g} = "
+            f"{game_watch.attempt_timeout_sec(timeout_sec, 2):g}s）"
+        )
     )
     game_secs: list[float] = [0.0] * len(argvs)
+    game_attempts: list[int] = [1] * len(argvs)
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futs = {
             ex.submit(
-                _run_one_game,
+                _run_one_game_with_retries,
                 bun,
                 argv,
                 jd,
                 tsd,
                 argv[argv.index("--out") + 1],
                 timeout_sec,
+                log,
+                explicit,
             ): i
             for i, argv in enumerate(argvs)
         }
         for done_n, fut in enumerate(as_completed(futs), 1):
             i = futs[fut]
-            game_secs[i] = fut.result()  # 异常在 worker 侧统一处理
+            game_secs[i], game_attempts[i] = fut.result()  # 异常在 worker 侧统一处理
             if done_n % 10 == 0 or done_n == len(argvs):
                 log(
                     f"kind=iter rollout: {done_n}/{len(argvs)} games settled "
@@ -280,6 +446,11 @@ def run_iter_rollout(
     shard_dirs = verify_shards(jd, iter_expected_data_fp(spec))
     reports = collect_reports(jd, spec)
     report = combine_reports(reports)
+    # 逐局压缩画像随轮账本行走：云机离线腿没人把单局 manifest 拉回本机（轮末 prune 就删了），
+    # 而控制台的「耗时/击杀/残血/道具」列是**逐局**聚合的 ⇒ 不带它那几列永远空（见
+    # `rl/reports.compact_per_game` 的 docstring）。在线腿已有 `dist/<节点>/rl_s*/` 路也不冲突
+    # （同一份数据，读方优先用账本里的这一块）。
+    report["perGame"] = compact_per_game(reports)
     report["shards"] = len(shard_dirs)
     report["elapsedSec"] = round(time.time() - t0, 3)
     report["perGameSecs"] = game_secs
@@ -289,6 +460,14 @@ def run_iter_rollout(
         f"kind=iter rollout done: shards={len(shard_dirs)} games={report['games']} "
         f"winRate={report['winRate']} samples={report['totalSamples']} "
         f"in {report['elapsedSec']}s"
+    )
+    # 单局耗时分布：<5s 这条线（以及重试次数）要靠每轮的真数据校准，不靠猜。
+    log(
+        game_watch.game_time_summary(
+            "rollout",
+            list(zip(game_secs, [_game_label(a) for a in argvs], strict=True)),
+            retried=sum(1 for a in game_attempts if a > 1),
+        )
     )
     return {
         "report": report,

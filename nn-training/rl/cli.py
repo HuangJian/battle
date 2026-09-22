@@ -30,6 +30,10 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
     def _d(name, fallback):
         return rl_args.get(name, fallback)
 
+    # 节点侧单局硬顶兜底值：**引用看门狗里的那个常量**（不在 help 里抄第二份数字——
+    # 抄了就会漂，而 help 说的必须就是代码做的事）。函数内 import：本模块顶层不拉重物。
+    from remote import game_watch
+
     ap = argparse.ArgumentParser()
     # ===== RL 入口整合（DECISIONS §307）：三模式后端 =====
     ap.add_argument(
@@ -549,8 +553,11 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         "--remote-iter-game-timeout",
         type=float,
         default=_d("remote_iter_game_timeout", 0.0),
-        help="M3 rollout 上云：节点侧单局墙钟上限（秒）。0 = 不限（默认，与本机同口径）；"
-        ">0 时节点杀超时局并按可重试失败处理（防单局挂死拖满整个租约窗口）",
+        help="M3 rollout 上云：节点侧单局墙钟上限（秒）。0 = 用节点兜底硬顶"
+        f"（{game_watch.DEFAULT_GAME_TIMEOUT_SEC:g}s，用户口径：单局 >{game_watch.SLOW_GAME_WARN_SEC:g}s"
+        "肯定不正常）；>0 时完全按它。超时的局被 kill 并**原地重跑**同一 argv"
+        f"（最多 {game_watch.GAME_MAX_ATTEMPTS} 次，未显式配置时重试上限放宽"
+        f" ×{game_watch.RETRY_TIMEOUT_FACTOR:g}），仍失败才算整轮失败",
     )
     ap.add_argument(
         "--remote-iter-workers",

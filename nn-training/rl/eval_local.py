@@ -17,6 +17,10 @@ from pathlib import Path
 from typing import Any
 
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+
+# 单局看门狗口径：**一律通过模块属性读**（`game_watch.X`）——import 会把值抄成第二份绑定，
+# 测试 patch 了 game_watch 那份、调用点还在读旧绑定就是静默的错口径。
+from remote import game_watch
 from rl.log import log
 
 REPO_ROOT = Path(__file__).resolve().parents[2]  # 仓库根 battle2（rl/ 上溯 3 层，修正 2026-09-03）
@@ -484,7 +488,14 @@ def append_eval_rows(dst_jsonl: Path, rows: list[dict]) -> int:
 
 
 def run_eval_runner_capture(
-    cmd: list[str], timeout_sec: float, cwd: str | None = None
+    cmd: list[str],
+    timeout_sec: float,
+    cwd: str | None = None,
+    *,
+    label: str = "",
+    log_fn: Any = None,
+    kind: str = "eval",
+    attempt: int = 1,
 ) -> subprocess.CompletedProcess[str]:
     """跑一次导出器并**捕获文本输出**（显式 UTF-8 + errors=replace）。
 
@@ -498,17 +509,51 @@ def run_eval_runner_capture(
 
     `cwd=None` 缺省 = 仓库根（本机/控制台路径，历史行为逐字节不变）；云机离线评估显式给
     TS 运行时树根（云上没有仓库，见 `run_local_eval_game` 的 `cwd` 形参）。
+
+    **停滞看门狗**（2026-09-22，与 rollout 同一套口径 `remote/game_watch.py`）：用 Popen +
+    轮询代替一次 `subprocess.run(timeout=)`——后者在局卡住期间什么都看不见，只能等超时；
+    现在单局超过 `SLOW_GAME_WARN_SEC`（5s，正常亚秒~几秒级）就**点名**打一行 WARN（带 `s3/d7`），
+    到 `timeout_sec` 才 kill 并按 `TimeoutExpired` 上抛（语义与 `subprocess.run` 逐字一致，
+    包括异常体里的 captured output——诊断不能被超时吃掉）。
+
+    软告警与硬顶同值（默认 5s = 5s）时不重复打 WARN：超时行的抛出体自己带着局身份与现场。
     """
-    return subprocess.run(
+    proc = subprocess.Popen(
         cmd,
         cwd=str(cwd or REPO_ROOT),
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=timeout_sec,
         **_POPEN_NO_WINDOW,
     )
+    t0 = time.time()
+    warned = False
+    while True:
+        try:
+            out, err = proc.communicate(timeout=game_watch.GAME_POLL_SEC)
+            break
+        except subprocess.TimeoutExpired:
+            elapsed = time.time() - t0
+            if (
+                not warned
+                and not game_watch.warn_is_redundant(timeout_sec)
+                and elapsed >= game_watch.SLOW_GAME_WARN_SEC
+            ):
+                warned = True
+                (log_fn or log)(
+                    game_watch.slow_warn_line(
+                        kind, label or "?", elapsed, timeout_sec, attempt, " ".join(cmd[:3])
+                    )
+                )
+            if elapsed >= timeout_sec:
+                proc.kill()
+                out, err = proc.communicate()  # kill 后把尾巴收干净（诊断就在这里面）
+                raise subprocess.TimeoutExpired(
+                    cmd, timeout_sec, output=out, stderr=err
+                ) from None
+    return subprocess.CompletedProcess(cmd, int(proc.returncode or 0), out, err)
 
 
 def run_local_eval_game(
@@ -534,6 +579,11 @@ def run_local_eval_game(
     # 的根（`ts_code_cache/<sha>/`）——云上没有「仓库」，`tools/sim/export-eval-game.ts`
     # 只在随包下发的 TS 树里。`tools/...` 相对路径与 bun 在 PATH 上都因此成立。
     cwd: str | None = None,
+    # 慢局告警的落点（缺省 = `rl.log` 的 log）。云机离线评估传 run_loop 自己的 log，
+    # 让「哪一局慢」与那段训练的日志同册（否则告警在另一条流里）。
+    log_fn: Any = None,
+    # 这是第几次尝试（重试由调用方负责，见 `remote/offline_eval`）——只进告警行。
+    attempt: int = 1,
 ) -> dict:
     """本机直跑一局贪心评估（与节点 agent 同一 runner / 同一报告 schema）。
 
@@ -576,7 +626,15 @@ def run_local_eval_game(
     if replay_dir:
         cmd += ["--replay", replay_dir]
     t0 = time.time()
-    proc = run_eval_runner_capture(cmd, timeout_sec, cwd=cwd)
+    proc = run_eval_runner_capture(
+        cmd,
+        timeout_sec,
+        cwd=cwd,
+        label=game_watch.game_label(stage, seed),
+        log_fn=log_fn,
+        kind="eval",
+        attempt=attempt,
+    )
     if proc.returncode != 0:
         raise RuntimeError(f"rc={proc.returncode} ({(proc.stderr or proc.stdout or '')[-160:]})")
     # json.loads 返回 Any；_eval_report.json 契约固定为 dict。

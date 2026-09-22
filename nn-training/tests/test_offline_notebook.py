@@ -179,6 +179,23 @@ def test_markdown_names_the_secrets_and_both_bootstrap_paths() -> None:
     assert "live_backfeed" in md, "回传开关要在说明里可见（它是「怎么把结果拿回来」的分叉点）"
 
 
+def test_boot_loader_refreshes_every_session_and_reports_the_revision() -> None:
+    """引导模块**每次会话都刷新**，并把实际加载的那份的 sha12 打进日志。
+
+    2026-09-22 事故：旧实现是「有缓存先用缓存」（`/tmp/battle-boot`）+ 日志只打 branch
+    ⇒ **同一个 kernel 里跑过一次旧代码之后，后续每次 Run 都还在跑那份旧的**，而日志看不出
+    来；实测症状是多课程 `CFG.course` 列表被旧 `offline_boot` 当成一门课名（拼出
+    `['x20-demo-mix', ...]` 这种目录名、去找一个不存在的任务包）。
+    """
+    cell = "\n".join(notebook_cells(NB, "code"))
+    assert "hashlib" in cell, "要算 sha12 就必须 import hashlib"
+    assert "已刷新" in cell, "拉到最新时必须明说刷新了（否则看不出缓存新旧）"
+    assert "@ sha12=" in cell, "加载日志必须带**实际加载那份**的 sha12（branch 不足以区分新旧）"
+    assert "用上一份缓存继续" in cell, "回落到缓存必须响亮说明（不能静默用旧版）"
+    assert ".replace(_dst)" in cell, "写回要用原子替换（半截写入不得留下坏模块）"
+    assert "_branch.txt" not in cell, "旧的「按分支名失效」缓存策略已退役（它不挡同分支的新旧）"
+
+
 def test_cell_has_no_key_material_or_hardcoded_course() -> None:
     text = "\n".join(notebook_cells(NB))
     # 空串 = 单课程老写法；空列表 = 多课程（用户 2026-09-22：course 要支持多门课）

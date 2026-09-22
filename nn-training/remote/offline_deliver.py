@@ -33,7 +33,11 @@ flush（默认 `DRAIN_FLUSH_SEC`，超时就放手——产物已在本地，不
   * *401/403 → **本会话停用**补传*（响亮记一行），不重试：hub 的 D9 闭锁是「同 IP 五次
     无效鉴权封 3600s」，拿错 token 每轮重试等于亲手把自己封掉；而且 token 错是配置问题，
     重试一百次也不会对。
-  * *400/413 → 本会话停用*：体是我们自己造的，被拒说明形状不对（版本不匹配），重试无意义。
+  * *400/413 内容拒收 → **只跳过这一轮**（本会话不再重试它），其余轮次照推*：
+    2026-09-22 事故——it1 的账本行被拒（旧口径「本会话停用补传」）⇒ **这一整段再没回传过
+    一轮**，而真因是本模块自己取错了账本行（`metrics.jsonl` 跨会话追加，同名 it 的历史行
+    被当成当前行；见 `_row_for`），本可以只丢一轮。现在：拒收→记进会话内 `_rejected`
+    →下拍从下一轮继续，响亮记一行「本轮跳过，其余照推（重启会话会再试一次）」。
   * *5xx / 网络异常 → 只记日志、下轮再试*（按 key 节流，不给日志刷屏）。
   * *传输编码复用 `encode_weights_json`/`encode_opt_tar`（gzip+base64）*：比裸容器多 33%
     体量（~0.5s/轮 @3.5Mbps 实测隧道），换来的是**同一个已被两端测过的编解码器**，且
@@ -156,6 +160,10 @@ class OfflineDeliverer:
         self._probed_at = 0.0
         self._last_log: dict[str, float] = {}
         self._delivered: set[int] = set()
+        #: 本会话被 hub **内容拒收**（400/413/422）的轮次 → 产物仍在本地产物目录里，但本会话
+        #: 不再重试它们（重试同一个体不会变对），**其余轮次照推**。刻意只住内存：新会话
+        #: 再试一次（那天可能已经换了代码/修好了行），而持久化就等于「一轮被拒＝永久不回传」。
+        self._rejected: dict[int, str] = {}
         self._result_done = False
         self._manifest_cache: dict | None = None
         # ---- 后台并行（单写者线程；除 submit_*/close 外所有状态读写都在它里面）----
@@ -383,7 +391,7 @@ class OfflineDeliverer:
             if not name.isdigit():
                 continue
             it = int(name)
-            if it in self._delivered:
+            if it in self._delivered or it in self._rejected:
                 continue
             if (d / "weights.json").exists():
                 out.append(it)
@@ -400,11 +408,25 @@ class OfflineDeliverer:
                 self._manifest_cache = {}
         return self._manifest_cache
 
-    def _row_for(self, it: int) -> dict | None:
-        """账本里第 `it` 轮那一行（跨会话补投时用它——本会话的内存账本不一定有）。"""
+    def _row_for(self, it: int, weights_fp: str) -> dict | None:
+        """账本里**与本轮权重字节相符**的那一行（同名 it 有多行时取**最后一个**）。
+
+        2026-09-22 事故的两个关键点（旧的「返回第一条同 it 行」两者都错）：
+
+          * `metrics.jsonl` 是**跨会话追加**的：同一个目录续跑/重开时，同一个 it 会再落一行
+            （`ArtifactStore.checkpoint` 追加，不重写）。旧实现返回**第一条**⇒ 拿上一会话的
+            行去配这一会话的权重，hub 侧「账本行与权重不符」直接 400 拒收（现场：
+            `行记 bff93df1… 实得 5f099e55…`）。这与控制台「同 iter 取最后一条 = 最新对账结果」
+            是同一条口径（`dashboard/src/server/iters.ts`）；
+          * 只有 `weights_fp` **对得上本轮字节**的行才是这一轮的行——配不上就宁可不发：
+            一个指错轮次的行比没有行危险得多（读数看起来完全正常）。
+
+        配不上时记一笔 WARN（两个前缀摆在一起，一眼看出是拿错了行还是文件被动过）。
+        """
         p = self.root / ArtifactStore.METRICS_NAME
         if not p.exists():
             return None
+        cands: list[dict] = []
         try:
             for line in p.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
@@ -415,9 +437,17 @@ class OfflineDeliverer:
                 except ValueError:
                     continue
                 if isinstance(row, dict) and int(row.get("it", -1)) == int(it):
-                    return row
+                    cands.append(row)
         except OSError:
             return None
+        for row in reversed(cands):  # 新→旧：最新的那一行最先被认
+            if str(row.get("weights_fp", "") or "") == weights_fp:
+                return row
+        if cands:
+            self.log(
+                f"补传 it{it}: 账本行与权重不符（行记 {str(cands[-1].get('weights_fp', ''))[:16]}… "
+                f"实得 {weights_fp[:16]}…）——本轮**不发 row**（宁少不错：指错轮次的行比缺行危险）"
+            )
         return None
 
     # ------------------------------------------------------------ 投递
@@ -471,21 +501,45 @@ class OfflineDeliverer:
                 self._repost.update(repost)  # 还没送到，下一拍再试（重投天然幂等）
             return 0
         done = 0
+        sent: list[int] = []
         for it in todo[: self.sync_cap]:
-            if not self._post_artifact(it):
+            outcome = self._post_artifact(it)
+            if outcome == "stop":
                 break  # 传输坏了就别接着打——剩下的下轮再补
-            done += 1
+            if outcome == "ok":
+                done += 1
+                sent.append(it)
+            # "skip" = 这一轮被内容拒收（已记进 `_rejected`）：跳过它，后面的照推
         if done:
             self._save_ledger()
             left = len(self.pending())
             self.log(
-                f"补传 {done} 轮（it{todo[0]}…it{todo[done - 1]}）→ {self.base_url}"
+                f"补传 {done} 轮（it{sent[0]}…it{sent[-1]}）→ {self.base_url}"
                 + (f"；仍积压 {left} 轮，下轮继续" if left else "")
             )
         return done
 
-    def _post_artifact(self, it: int) -> bool:
-        """投递一轮产物（权重 + opt + 账本行）。True = 这一轮可以记为已投递。"""
+    def _reject_round(self, it: int, reason: str) -> str:
+        """把这一轮记进**会话内**拒收集（`pending()` 从下拍起不再带它），返回 "skip"。
+
+        与 401/403 的「停用整条腿」严格区分：内容问题（体形状/账本行）只毁一轮，而停用
+        会把这一整段剩下的几十轮全部拦下（2026-09-22 事故：it1 一次 400 之后整段再没回过
+        一轮）；而鉴权问题每轮重试会把本 IP 封掉（D9）——两者代价完全不同，不能共用一个反应。
+        """
+        self._rejected[int(it)] = reason
+        self.log(
+            f"补传 it{it} **本轮跳过**（{reason}）——产物照常落本地；"
+            f"其余轮次照推（本会话不再重试这一轮，新会话会再试一次）"
+        )
+        return "skip"
+
+    def _post_artifact(self, it: int) -> str:
+        """投递一轮产物（权重 + opt + 账本行）。返回：
+
+          * ``"ok"`` —— 这一轮可以记为已投递（含 hub 409「已有这一轮」的幂等分支）；
+          * ``"skip"`` —— 这一轮被**内容**拒收（已记进 `_rejected`），继续推后面的轮次；
+          * ``"stop"`` —— 链路问题（没送达 / 5xx / 鉴权），这一拍到此为止、下轮再试。
+        """
         d = ArtifactStore(self.root, run_id=self.run_id)
         wp = d.weights_path(it)
         try:
@@ -494,10 +548,10 @@ class OfflineDeliverer:
             # 扫描时还在、读时没了（会话被杀/人删了）＝瞬时状态：**不标记已投递**，
             # 下轮重扫时它已经不在 `pending()` 里了（`pending` 只认存在的权重文件）。
             self.log(f"补传 it{it} 本轮跳过：读不到权重 {wp}（{e}）")
-            return False
+            return "stop"
         if not wj:
             self.log(f"补传 it{it} 本轮跳过：权重文件是空的（{wp}）")
-            return False
+            return "stop"
         opt = b""
         op = d.opt_path(it)
         if op.exists():
@@ -506,16 +560,17 @@ class OfflineDeliverer:
             except OSError:
                 opt = b""  # 动量缺失的代价是「hub 侧续跑 Adam 归零」，不是投递失败
         m = self._manifest()
+        wfp = sha256_bytes(wj)
         body = {
             "run_id": self.run_id,
             "it": int(it),
-            "weights_fp": sha256_bytes(wj),
+            "weights_fp": wfp,
             "weights_json": encode_weights_json(wj),
             "opt_fp": sha256_bytes(opt) if opt else "",
             "opt_tar_b64": encode_opt_tar(opt) if opt else "",
-            # 账本行**随本轮一起走**（hub 侧要拿它画曲线/对账）；跨会话补投时内存里没有，
-            # 从 metrics.jsonl 按 it 找回来（找不到就只发权重，不含 row）。
-            "row": self._row_for(it),
+            # 账本行**随本轮一起走**（hub 侧要拿它画曲线/对账）：只取**与本轮字节相符**的那一
+            # 行（同名 it 的历史行一律不取——见 `_row_for`）；找不到就只发权重（不含 row）。
+            "row": self._row_for(it, wfp),
             # 云机 A 层评估的就地读数（`eval_on_cloud`）：与权重同一趟回去，hub 侧并进
             # 课程账本（`_HubQueue.merge_eval_rows`）——否则控制台要等整段结束才知道读
             # 数，而「一条跑偏的腿」正是这条腿要尽早看见的东西。空列表 = 本轮没评。
@@ -531,30 +586,25 @@ class OfflineDeliverer:
             body["course"] = self.course
         raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         if len(raw) > OFFLINE_ARTIFACT_BODY_MAX:
-            self._disable(f"it{it} 补传体 {len(raw)}B 超上限——本会话停用补传")
-            return False
+            return self._reject_round(it, f"补传体 {len(raw)}B 超上限 {OFFLINE_ARTIFACT_BODY_MAX}B")
         status, resp = self._post(OFFLINE_ARTIFACT_PATH, raw)
         if not status:  # 没送达（_post 已记一笔）
-            return False
+            return "stop"
         if status in (200, 201, 409):
             self._delivered.add(it)
             if status == 409:
                 self.log(f"补传 it{it}：hub 已有这一轮（幂等，记为已投递）")
-            return True
+            return "ok"
         if status in (401, 403):
             self._disable(f"补传 it{it} 被拒（HTTP {status}）——本会话停用补传")
-            return False
+            return "stop"
         if status in (400, 413, 422):
-            self._disable(
-                f"补传 it{it} 体被拒（HTTP {status}: {_err_text(resp)}）——本会话停用补传"
-                "（体是自己造的，重试不会变对）"
-            )
-            return False
+            return self._reject_round(it, f"HTTP {status}: {_err_text(resp)}")
         self._reachable = False
         self._throttled_log(
             "post", f"补传 it{it} 失败（HTTP {status}: {_err_text(resp)}）——本轮放弃，下轮再试"
         )
-        return False
+        return "stop"
 
     #: 单轮补传携带的评估行上界（防体超限；正常一轮 A 层语料 = 关数×种子数，双轨 100）。
     EVAL_ROWS_CAP = 400
@@ -670,6 +720,7 @@ class OfflineDeliverer:
             "course": self.course,
             "delivered": len(self._delivered),
             "pending": len(self.pending()),
+            "rejected": dict(self._rejected),
             "result_done": self._result_done,
             "disabled_reason": self.disabled_reason,
             "background": self.background,

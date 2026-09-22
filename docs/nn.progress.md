@@ -4,6 +4,207 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §138 回传腿也点亮控制台（同步写 per-game.json + 课程账本行）（2026-09-22）
+
+用户之问（2026-09-22）：「**如果是云机通过网络请求回传，会算这些数据回显吗？**」——
+之前**不会**，而且这件事最刺眼的地方是**两条腿的观测面不一致**：人工导入能修（§137④），
+实时回传不能。
+
+### 缺口的确切形状
+
+回传（`POST /offline/artifact`）此前只做三件事：落 `offline/<run>/it-NNN/{weights,opt,row}.json`、
+往**本课程**账本追一条 `offline_artifact` 事件、回 200。而控制台那张表只读 `iteration` 事件
+（`state-view.ts` → `iters.readIterMetrics`），「耗时/击杀/残血/道具」四列更是**逐局**聚合的
+（`readRoundActuals`）——单局 manifest 只在跑它的那台机器上，云机轮末 `prune` 就删了 ⇒
+**权重在岸、末轮能评，但表一行不显、四列恒空**。
+
+### 修法：两条腿共用同一张翻译表 + 同一个落点
+
+* `remote/artifacts.ledger_row_from_metrics(row, run_id=…, source=…)`（新增，唯一翻译实现）：
+  产物账本行 → 课程账本 `iteration` 事件。`run_id` = 哪条腿/哪个包，`source` = 谁搬的
+  （`deliver_import` / `offline_backfeed`）——复盘时一眼分辨曲线从哪来。搬不到的字段**留空**
+  （写 0 会被读成「真的零击杀」）。
+* `remote/artifacts.metrics_row` 增补（additive，~17 float/轮）：`report.dimMeans` /
+  `report.scoreStats`（kills/accuracy/loot 与 score 列的来源）+ `report.perGame`
+  （`rl/reports.compact_per_game`，~200B/局）。**不落课程账本**（否则每轮 +65KB），
+  由落地方写成 `it<N>/per-game.json`。
+* 落地方两处：`remote/deliver_zip.write_per_game_files`（导入）+ `hub_server::_land_round_metrics`
+  （实时回传）。**幂等**：账户行同 `it` 已存在就不写；`duplicate` 投递根本走不到（只在接新时写）
+  ⇒ 同一轮不会出现两行（读方按 it 画曲线，两行=曲线打结）。
+* 读方 `dashboard/src/server/iters.ts`：`readRoundActuals` = **`it<N>/per-game.json` 优先**，
+  缺席才回落到 `manifest.json` 目录扫描；两路喂同一个 `aggregateActuals`。
+  `ACTUALS_SCHEMA_V` 3→4（旧缓存里的 manifest 值不得压住新落盘的画像文件）。
+
+### 验证
+
+* python：`tests/test_multi_course_hub.py::test_offline_backfeed_moves_the_console_table`
+  （回传一轮 ⇒ `it3/per-game.json` 逐字节等于 `row.perGame`、账本恰一行 `iteration`、
+  字段搬运 `winRate/samples/expectedGames/ticks/rollout_sec/ppo_sec/kl/dim_means/score_mean`、
+  重复投递仍是 `duplicate` 且不写第二行）；`tests/test_deliver_zip.py` 同规（来源标记键从
+  `import_run_id` 改为共享表的 `run_id`+`source`）。
+* dashboard：`tests/server-iters-round-actuals.test.ts` 5 例（只有 per-game.json 也能算四列 /
+  (stage,seed) 取样本多者 / 缺席回落 manifest / 坏 JSON 与非法行跳过 / `readIterMetrics` 行带
+  `actuals`）。
+* 门禁：`nn-python-gate` **2129 passed** 绿、根 `bun run check` 绿、dashboard
+  `typecheck+test` **1108 passed** 绿。
+
+### 留白（不假装完整）
+
+**已经打出来的旧包**（如 19:27 那份 `deliver-x20-demo-mix.zip`）里没有 `dimMeans`/`scoreStats`/
+`perGame` ⇒ 那份包的四列与 kills/accuracy/loot/score 仍是空（刻意不编数字）；**新打的包**
+（点「训练」重打包之后的每一轮）才会带上。回传腿同理：只有**新代码**跑出来的轮才有 `perGame`。
+
+## §137 补传 400 的真因 / 导入后指标表看得见 / 引导模块每次刷新（2026-09-22）
+
+用户 2026-09-22 问的四件事里剩下三件的收口（第一件＝单局看门狗，§136）。
+
+### ① 「it1 产物回传失败，且失败后再也不回传」——真因在**取错了账本行**
+
+现场：`补传 it1 体被拒（HTTP 400: 账本行与权重不符：行记 bff93df1… 实得 5f099e55…）——
+本会话停用补传`。两个独立缺陷叠在一起：
+
+* **取错行**：`OfflineDeliverer._row_for(it)` 从 `metrics.jsonl` 里返回**第一条**同 `it` 的行。
+  而 `ArtifactStore.checkpoint` 是**追写**的：续跑/重开同一目录时同一个 `it` 会再落一行 ⇒
+  拿上一会话的行去配这一会话的权重 ⇒ 指纹必然不符。现在：**新→旧扫描 + 只认 `weights_fp`
+  与本轮字节相符的行**（与控制台「同 iter 取最后一条 = 最新对账结果」同一口径）；
+  配不上就**宁可不发 row**（一个指错轮次的行比缺行危险得多），并记一行 WARN 把两个前缀并排。
+* **一次内容拒收停用整条腿**：旧口径 `400/413 → 本会话停用补传` 是照抄 401/403 的反应。
+  但两者代价不同：鉴权错每轮重试会把本 IP 封掉（hub D9 闭锁），内容错只毁**那一轮**。
+  现在：400/413/422 → 记进会话内 `_rejected`（每个 it 只跳一次）→ **其余轮次照推**；
+  401/403 仍然停用整条腿。`_post_artifact` 的返回值从 bool 改成 `"ok"/"skip"/"stop"`，
+  三态各自对应「记已投递 / 跳过这轮继续 / 这一拍到此为止」——把「一轮的代价」与
+  「整条腿的代价」在类型上分开。
+
+### ② 导入产物后控制台「各轮指标表」一行不显——账本没并
+
+那张表只读 `tmp/<课程>/training_log.jsonl` 的 `iteration` 事件（
+`dashboard/src/server/api/state-view.ts` → `iters.readIterMetrics`）。导入只落了产物目录
+（权重/优化器/`metrics.jsonl`）⇒ 权重可评估、末轮能评，但**表是空的**（用户实测）。
+现在导入器把包内 `metrics.jsonl` 的逐轮行搬进课程账本（`deliver_zip._merge_carried_metric_rows`）：
+只搬控制台真读的字段（`winRate/outcomes/samples/ticks/expectedGames/rollout_sec/ppo_sec/
+steps/chunks/kl/policy/value/entropy/mean_ret`），带 `import_run_id` 来源标记，按 `it` 幂等
+（账本已有一行就不写第二遍），失败只记一笔（导入的主价值是权重可评估）。
+`expectedGames ← report.games` 是必要的：控制台用 `ticks / expectedGames` 算平均每局时长，
+缺了它那一列恒为 0（看起来像「跑了零 tick」）。`dim_means`/`score_mean` 产物行里没有 ⇒
+那些列**留空，不编数字**。控制台回执也加了一句「逐轮指标 +N 行」——最贵的失败是
+「导进去了但表是空的」，它必须在上传后的第一眼就被看见。
+
+### ③ 多课程写法没生效——是**引导模块缓存**在跑旧版
+
+现场：`CFG.course` 给了三个课名，日志里却拼出 `['x20-demo-mix', ...]` 这种目录名，
+且去找一个不存在的任务包。多课程解析本身早已随 `05691e72` 入库（`offline_boot.courses_of`
+认字符串/列表/逗号分隔，串行跑完，`course_work_dir(multi=True)` 给每门课再套一层目录）；
+真因是 notebook 的 `_load_boot` 旧策略「**有缓存先用缓存**」：同一个 kernel 里跑过一次旧
+代码之后，之后每次 Run 都在跑那份旧的，而日志只打 branch（同分支看不出新旧）。
+现在：每次会话先拉最新、`Path.replace` **原子替换**，拉不到才回落到缓存（并响亮说明用的是
+上一份），并把**实际加载那份**的 `sha12` 打进日志。`tests/test_offline_notebook.py` 钉住这四点
+（旧策略的 `_branch.txt` 不得回潮）。
+
+#### 复审（2026-09-22 晚）：为什么用户导入后还是空的 + 补上两列
+
+用户报「导进去了但表还是空的」。实测现场（`tmp/x20-demo-mix/`）：
+
+* 那次导入跑在 **19:28**（`deliver-import.log` 的时间戳），而本节的合并代码写在 **20:54**
+  ——那次 `DELIVER_IMPORT_JSON` 里**根本没有 `metric_rows` 键**（旧代码的指纹）；
+* 包内**有** `metrics.jsonl`（49 行）：不是打包漏了；
+* 课程账本里当时 `iteration` 行 = **0** ⇒ 表当然一行不显。
+
+用当前代码重跑同一条导入命令：`metric_rows: 49`，账本 49 行，并用**控制台自己的读方**
+（`dashboard/src/server/iters.ts::readIterMetrics`）验证：49 行、winRate/kl/samples/
+rolloutSec/ppoSec 均真实。⇒ 「重复导入」是支持的（同 run_id ⇒ `rmtree` + 原子改名重解，
+新包胜；账本按 it 幂等合并），且不需要清目录重来。
+
+同时把两列补齐：
+
+* `expectedGames ← report.games`（否则控制台 `ticks/expectedGames` 恒 0）；
+* **产物行现在带 `dimMeans`/`scoreStats`**（`remote/artifacts.metrics_row`，additive，~17 个
+  float/轮）：本机账本行一直是带的（`rl/events` 读 `report.dimMeans/scoreStats`），而产物行
+  只留摘要 ⇒ 导入的那条腿在 kills/accuracy/loot 与 score 列上恒空，同一张表两条腿列不可比。
+  现在产物行带上、导入器按分层路径搬进账本。**旧包没有这两块** ⇒ 那几列仍留空（不写 0：
+  「缺数据」与「真的零击杀」不是一回事）。
+
+顺带坐实了 §137① 的根因：那个包的 `metrics.jsonl` 里**有两条 `it:1`**（`bff93df1…` ts=…2424
+与 `5f099e55…` ts=…3323）—— 与 hub 400 里那句「行记 `bff93df1`… 实得 `5f099e55`…」逐字对应：
+旧 `_row_for` 取的就是**第一条**（上一会话的）行。
+
+### 验证
+
+`nn-python-gate` 2128 passed（连跑绿）、根 `bun run check` 绿、`dashboard` typecheck+test
+1103 passed 绿。测试新增：`tests/test_deliver_zip.py` 三条（导入 ⇒ 账本 / 字段搬运（含
+`expectedGames`）/ it0 与坏行不进账本）；`tests/test_offline_deliver.py` 三条
+（`test_rejected_round_is_skipped_but_the_rest_keep_flowing` /
+`test_row_is_picked_by_matching_bytes_not_by_first_same_iter` /
+`test_row_with_mismatching_fingerprint_is_dropped_not_sent`）；`tests/test_offline_notebook.py`
+一条（引导模块每次刷新 + 实际加载那份的 sha12）。
+
+---
+
+## §136 云机 rollout/eval 的单局看门狗：**>5s 即杀、原地重跑同一 argv**（2026-09-22）
+
+用户口径（原话）：「或者超时重试！单局 >5s 肯定不正常。」起因是 it34 的一次现场：
+
+```
+[11:03:39] kind=iter rollout: 310/328 games settled (4s)
+[11:14:25] kind=iter rollout: 320/328 games settled (651s)   ← 剩下几局卡住，日志只有计数
+```
+
+10 局卡死、日志里既没有「哪一局」也没有「卡多久」——旧口径 `timeout=off`（0 = 不限）是
+**本机历史行为**，搬到云机上等于「一个卡住的 bun 子进程永远等下去」。
+
+### 口径（唯一定义点 `remote/game_watch.py`，rollout 与 eval 共用一份）
+
+| 常量 | 值 | 含义 |
+|---|---|---|
+| `SLOW_GAME_WARN_SEC` | 5.0 | 点名线：超过它打一行带局身份（`s3/d7`）的 WARN |
+| `DEFAULT_GAME_TIMEOUT_SEC` | 5.0 | **首次尝试**硬顶（= 点名线）：超时 ⇒ kill + 原地重跑 |
+| `RETRY_TIMEOUT_FACTOR` | 4.0 | **重试**尝试上限倍数（5s → 20s）；调用方显式配了就一字不改 |
+| `GAME_MAX_ATTEMPTS` | 3 | 一局最多跑几次（种子在 argv 里 ⇒ 重跑是确定性的） |
+| `GAME_POLL_SEC` | 0.5 | 轮询粒度（软告警与硬顶都靠它发现） |
+
+为什么重试反而**放宽**上限：单局墙钟是重尾的（本机强并发实测 rollout `perGameSecs`
+p50 1.8s / p90 3.4s / p99 16.8s；eval `wallSec` p50 1.2~1.6s / p90 3.2~4.2s / p99 7~8s，
+`tmp/x20-*/eval_log.jsonl`）。首次 >5s 已属异常（用户口径）值得杀；但重试是**兜底**——
+一次主机抖动把同一局连杀三次，代价是「整轮作废重发」或「评估少一局」（读数有偏），
+比多等十几秒贵得多。显式配置（`--remote-iter-game-timeout` / `--eval-game-timeout-sec`）
+对每次尝试一视同仁：配置说了算。
+
+### 为什么重试而不是「竞速副本」（用户提的另一条路）
+
+argv 不变 ⇒ out 目录不变 ⇒ 声明的 shard 集（`data_fp`）逐字节不变；副本会多产一个同
+(stage,seed) 的 shard 目录，直接撞上「实产集 == 声明集」那道门。竞速在**多节点**在线路径上
+成立是因为那里有 hub 侧候选表（`rl/queue_local.py::pick_race_target`）；云机离线只有一个节点，
+重试是同一效果的最小实现。
+
+### 落地
+
+* `remote/game_watch.py`（新）：五个常量 + `attempt_timeout_sec` / `warn_is_redundant` /
+  四行日志（`slow_warn_line` / `hard_cap_line` / `retry_line` / `game_time_summary`）。
+  **调用点一律模块属性读**（`game_watch.X`）——`from ... import X` 会抄出第二份绑定，
+  patch 了 game_watch 那份而调用点还在读旧绑定就是静默的错口径。
+* `remote/iter_rollout.py`：`Popen` + 轮询代替一次 `wait(timeout)`（卡住期间就有告警）；
+  `_run_one_game_with_retries` 逐尝试算上限、清理上一次的半截 shard 后重跑；整轮收尾打
+  **单局耗时分布**（p50/p90/p99/max + ≥5s 计数 + 重试次数 + 最慢 3 局点名）。
+* `remote/offline_eval.py` + `rl/eval_local.py`：同款看门狗（`run_eval_runner_capture` 的
+  Popen 轮询版保留 `TimeoutExpired` 的 captured output —— 诊断不被超时吃掉）；单局失败
+  原地重跑，且 `wall_sec` 与 in-loop 腿同字段（两腿逐条可比）。
+* `remote/protocol.py`：`game_timeout_sec` 的注释口径改写（0 = 节点兜底，不是「不限」）；
+  `remote/run_loop.py` 的 eval 侧**原样传 0**（不提前解析——「显式 vs 兜底」决定重试要不要
+  放宽，解析一次就丢了这个信息）。
+* 测试：`tests/test_game_watch.py`（7 条纯函数：默认值即用户口径 / 首试 vs 重试 / 显式优先 /
+  告警冗余判定 / 四行日志带局身份 / 分布行 / 零局不崩）；`tests/test_remote_iter.py` 加
+  「重试上限只在 plan 没给时放宽」与「轮末分布行」；`tests/test_offline_eval_cloud.py` 加
+  「首次 5s、重试 20s；显式 120 ⇒ 两次都 120」。
+
+### 未做（明确留白）
+
+* **在线多节点腿**（`rl/dispatch.py`）不变：它有 `taskTimeoutSec`（缺省 900s）+ 竞速候选表 +
+  超时冷却黑名单，是另一套成熟机制；本节只治云机离线这条腿。
+* **本机 in-loop eval**（`rl/eval_dispatch` / `rl/batch_eval`）的上限仍由调用方显式给：本机实测
+  eval p90 已 3~8s（机器慢、并发高），拿 5s 当硬顶会频繁误杀；云机 96 核上的 p50 亚秒，
+  两者不是同一档。
+
+---
+
 ## §135 程序缓存容量旋钮：找不到 ⇒ 改走**持久化编译缓存**（2026-09-22）
 
 §134 的遗留问题：ragged 形状（一轮只用一次）被挤出程序缓存 ⇒ 重编 ~14s/次。本轮按用户口径

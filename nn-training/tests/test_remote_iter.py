@@ -32,6 +32,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import remote.iter_rollout as iter_rollout
+from remote import game_watch
 from remote.iter_rollout import run_iter_rollout, scan_shard_dirs, verify_shards
 from remote.protocol import (
     INIT_WEIGHTS_NAME,
@@ -821,6 +822,224 @@ def test_run_iter_rollout_reports_rc_failure(tmp_path: Path, monkeypatch) -> Non
     with pytest.raises(RetryableError) as e:
         run_iter_rollout(job_dir, spec, log=lambda _m: None)
     assert "rc=3" in str(e.value)
+
+
+# ------------------------------------------------------------------ 单局看门狗（2026-09-22 it34 651s 停滞）
+
+#: 卡死的局：一个像素都不产（模拟 bun 子进程挂住）。
+_STUB_HANG = """\
+import time
+time.sleep(3600)
+"""
+
+#: 第一次失败（留下半截 shard 并以 rc=3 退场）、第二次正常产出的局（marker 文件区分两次尝试）。
+#:
+#: 刻意用 **rc≠0** 而不是卡死来造第一次失败：测试要的是「重试 + 清理半截产出」这条路径，
+#: 而卡死那条由看门狗用例（时间维度）覆盖——用 rc 就不依赖任何墙钟，重载机器上也不会闪红。
+#: 同样刻意不 import numpy（它要几百毫秒，在 xdist 并行满载时会越过测试里那个小硬顶）。
+_STUB_FLAKY = """\
+import json, sys
+from pathlib import Path
+a = sys.argv[1:]
+def val(flag):
+    return a[a.index(flag) + 1] if flag in a else ""
+out = Path(val("--out"))
+out.mkdir(parents=True, exist_ok=True)
+stage, seed, wver = int(val("--stages")), int(val("--seeds")), val("--wver")
+d = out / f"rl_s{stage}_seed{seed}"
+d.mkdir(parents=True, exist_ok=True)
+marker = Path(r"@MARKER@")
+if not marker.exists():
+    # 半截产出：manifest.json 已写、obs.npy 还没写 —— 被杀/崩掉时它就留在盘上，
+    # 而 scan_shard_dirs 只认「名字合法 + 有 manifest.json」，半截目录会被当成产出
+    (d / "manifest.json").write_text(json.dumps({"stage": stage, "seed": seed, "wver": wver, "half": True}))
+    marker.write_text("1")
+    sys.exit(3)
+(d / "obs.npy").write_bytes(b"OBS")
+(d / "manifest.json").write_text(json.dumps({"stage": stage, "seed": seed, "wver": wver, "half": False}))
+(out / "_rl_report.json").write_text(json.dumps({
+    "games": 1, "winRate": 1.0, "outcomes": {"stage_clear": 1},
+    "totalSamples": 2, "totalTicks": 20, "scoreList": [1.0], "dimLists": {"kills": [1.0]},
+}))
+"""
+
+
+def _one_game_spec(tmp_path: Path, script: Path, **over) -> dict:
+    """单局规格（假 bun = 本进程 python）。
+
+    缺省硬顶 3s（而不是 0.2s）：假 bun 是**真 python 进程启动**，xdist -n 12 满载时启动
+    就能到几百毫秒——0.2s 的硬顶会把「本该成功的局」误杀成失败（实测：整仓套件里闪红一次，
+    单跑却绿）。所以只有**故意要超时**的用例才显式给小于启动开销的硬顶。
+    """
+    argv = [[str(script), "--out", "w0", "--stages", "0", "--seeds", "0", "--wver", "W" * 64]]
+    s = {"argv": argv, "wver": "W" * 64, "workers": 1, "game_timeout_sec": 3.0,
+         "bun": sys.executable}
+    s.update(over)
+    return s
+
+
+def _fast_watchdog(monkeypatch: pytest.MonkeyPatch) -> None:
+    """把轮询粒度调小（生产 0.5s）——否则每个用例都要等秒级。
+
+    patch 的是 `remote.game_watch` 的常量（**单一来源**）：调用点读的都是模块属性，
+    所以改这一份就处处生效（import 成局部名会抄出第二份绑定，patch 不到）。
+    """
+    monkeypatch.setattr(game_watch, "GAME_POLL_SEC", 0.05)
+    monkeypatch.setattr(iter_rollout, "resolve_bun", lambda name="": sys.executable)
+    monkeypatch.setattr(iter_rollout, "bun_version", lambda bun: "")
+
+
+def test_hung_game_is_retried_then_fails_loud(tmp_path: Path, monkeypatch) -> None:
+    """卡死的局：原地重跑完所有尝试，报错里**点名是哪一局**（不是只有计数）。"""
+    _fast_watchdog(monkeypatch)
+    monkeypatch.setattr(game_watch, "GAME_MAX_ATTEMPTS", 2)
+    script = tmp_path / "hang.py"
+    script.write_text(_STUB_HANG, encoding="utf-8")
+    msgs: list[str] = []
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    with pytest.raises(RetryableError) as e:
+        run_iter_rollout(
+            job_dir, _one_game_spec(tmp_path, script, game_timeout_sec=0.2), log=msgs.append
+        )
+    text = str(e.value)
+    assert "连续 2 次失败" in text and "s0/d0" in text
+    assert any("单局重试 2/2" in m and "s0/d0" in m for m in msgs), msgs
+
+
+def test_flaky_game_is_retried_in_place_and_round_succeeds(tmp_path: Path, monkeypatch) -> None:
+    """第一次卡死的局：重跑成功 ⇒ 整轮成功，且**半截 shard 被清掉后重写**。"""
+    _fast_watchdog(monkeypatch)
+    marker = tmp_path / "flaky.marker"
+    script = tmp_path / "flaky.py"
+    script.write_text(_STUB_FLAKY.replace("@MARKER@", str(marker)), encoding="utf-8")
+    msgs: list[str] = []
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    out = run_iter_rollout(job_dir, _one_game_spec(tmp_path, script), log=msgs.append)
+    assert len(out["shard_dirs"]) == 1
+    shard = Path(out["shard_dirs"][0])
+    assert (shard / "obs.npy").exists(), sorted(p.name for p in shard.iterdir())
+    # 收下的必须是**重跑那一份**（`half=False`），不是被杀那一次留下的半截 manifest
+    assert json.loads((shard / "manifest.json").read_text()) ["half"] is False
+    assert out["report"]["games"] == 1 and out["report"]["totalSamples"] == 2
+    assert any("单局重试 2/3" in m and "rc=3" in m for m in msgs), msgs
+    assert marker.exists()
+
+
+def test_clean_attempt_removes_half_outputs_but_never_escapes_job_dir(tmp_path: Path) -> None:
+    """清理只在 job 目录内删（半截 shard / out 目录），越界路径一律跳过。"""
+    job_dir = tmp_path / "job"
+    argv = ["stub.py", "--out", "w0", "--stages", "0", "--seeds", "0"]
+    inside = job_dir / "w0" / "rl_s0_seed0"
+    inside.mkdir(parents=True)
+    (inside / "manifest.json").write_text("{}")
+    (job_dir / "w0" / "rollout.log").write_text("x")
+    # 同名的 shard 目录但**在 job 目录外面**（不得被删）
+    outside = tmp_path / "other" / "rl_s0_seed0"
+    outside.mkdir(parents=True)
+    (outside / "manifest.json").write_text("{}")
+    iter_rollout._clean_attempt(job_dir, argv)
+    assert not (job_dir / "w0").exists()
+    assert outside.exists() and (outside / "manifest.json").exists()
+
+
+def test_plan_without_timeout_uses_node_fallback_cap(tmp_path: Path, monkeypatch) -> None:
+    """plan 给 0 ⇒ **节点兜底硬顶**（旧口径「0 = 不限」= 卡住的局永远等下去）。"""
+    _fast_watchdog(monkeypatch)
+    monkeypatch.setattr(game_watch, "DEFAULT_GAME_TIMEOUT_SEC", 0.2)
+    monkeypatch.setattr(game_watch, "GAME_MAX_ATTEMPTS", 1)
+    script = tmp_path / "hang.py"
+    script.write_text(_STUB_HANG, encoding="utf-8")
+    msgs: list[str] = []
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    spec = _one_game_spec(tmp_path, script, game_timeout_sec=0.0)
+    with pytest.raises(RetryableError) as e:
+        run_iter_rollout(job_dir, spec, log=msgs.append)
+    assert "硬顶 0.2s" in str(e.value)
+    # 启动日志必须自报口径：是 plan 指定的还是节点兜底的（否则「为什么被杀了」无从归因）
+    assert any("看门狗" in m and "兜底" in m for m in msgs), msgs
+
+
+def test_retry_gets_relaxed_cap_only_when_plan_did_not_set_one(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """重试的上限：plan 没给 ⇒ ×4（兜底不让一次主机抖动判死整轮）；plan 给了 ⇒ 一字不改。"""
+    _fast_watchdog(monkeypatch)
+    monkeypatch.setattr(game_watch, "DEFAULT_GAME_TIMEOUT_SEC", 0.1)
+    script = tmp_path / "hang.py"
+    script.write_text(_STUB_HANG, encoding="utf-8")
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    msgs: list[str] = []
+    with pytest.raises(RetryableError):
+        run_iter_rollout(
+            job_dir, _one_game_spec(tmp_path, script, game_timeout_sec=0.0), log=msgs.append
+        )
+    assert any("本次上限 0.4s" in m for m in msgs), msgs  # 0.1s × RETRY_TIMEOUT_FACTOR(4)
+
+    msgs_explicit: list[str] = []
+    job_dir2 = tmp_path / "job2"
+    job_dir2.mkdir()
+    with pytest.raises(RetryableError):
+        run_iter_rollout(
+            job_dir2, _one_game_spec(tmp_path, script, game_timeout_sec=0.1), log=msgs_explicit.append
+        )
+    assert any("本次上限 0.1s" in m for m in msgs_explicit), msgs_explicit
+
+
+def test_round_logs_game_time_distribution(tmp_path: Path, monkeypatch) -> None:
+    """每轮收尾必须打单局耗时分布（<5s 这条线靠真数据校准，不靠猜）。"""
+    _fast_watchdog(monkeypatch)
+    marker = tmp_path / "flaky.marker"
+    script = tmp_path / "flaky.py"
+    script.write_text(_STUB_FLAKY.replace("@MARKER@", str(marker)), encoding="utf-8")
+    msgs: list[str] = []
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    run_iter_rollout(job_dir, _one_game_spec(tmp_path, script), log=msgs.append)
+    dist = [m for m in msgs if "单局耗时" in m]
+    assert len(dist) == 1, msgs
+    assert "p50=" in dist[0] and "最慢：s0/d0=" in dist[0] and "重试过的局 1 个" in dist[0]
+
+
+def test_slow_game_warn_names_the_game(tmp_path: Path, monkeypatch) -> None:
+    """慢局（>软告警阈值、未到硬顶）⇒ 当场点名，且不影响整轮成功。"""
+    _fast_watchdog(monkeypatch)
+    monkeypatch.setattr(game_watch, "SLOW_GAME_WARN_SEC", 0.1)
+    # 硬顶给得宽：这局只是慢（0.4s），不是卡死 —— 它必须跑完并成功
+    script = tmp_path / "slow-ok.py"
+    script.write_text(_STUB_SLOW.replace("@SECS@", "0.4"), encoding="utf-8")
+    msgs: list[str] = []
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    out = run_iter_rollout(job_dir, _one_game_spec(tmp_path, script, game_timeout_sec=20.0), log=msgs.append)
+    assert any("异常慢" in m and "s0/d0" in m for m in msgs), msgs
+    assert out["report"]["games"] == 1
+    assert not any("单局重试" in m for m in msgs), msgs  # 慢 ≠ 失败：不该重跑
+
+
+#: 只是慢、最终成功的局（软告警用；不卡死也不留半截产出）。
+_STUB_SLOW = """\
+import json, sys, time
+from pathlib import Path
+a = sys.argv[1:]
+def val(flag):
+    return a[a.index(flag) + 1] if flag in a else ""
+time.sleep(@SECS@)
+out = Path(val("--out"))
+out.mkdir(parents=True, exist_ok=True)
+stage, seed, wver = int(val("--stages")), int(val("--seeds")), val("--wver")
+d = out / f"rl_s{stage}_seed{seed}"
+d.mkdir(parents=True, exist_ok=True)
+(d / "obs.npy").write_bytes(b"OBS")
+(d / "manifest.json").write_text(json.dumps({"stage": stage, "seed": seed, "wver": wver}))
+(out / "_rl_report.json").write_text(json.dumps({
+    "games": 1, "winRate": 1.0, "outcomes": {"stage_clear": 1},
+    "totalSamples": 2, "totalTicks": 20, "scoreList": [1.0], "dimLists": {"kills": [1.0]},
+}))
+"""
 
 
 def test_resolve_bun_missing_is_loud() -> None:

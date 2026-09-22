@@ -255,26 +255,7 @@ export function readIterActuals(trajDir: string, iter: number): IterActuals | nu
   const itDir = join(trajDir, `it${iter}`)
   try {
     if (!existsSync(itDir)) return null
-    const best = new Map<
-      string,
-      {
-        nSamples: number
-        kills: number
-        pu: number
-        /** 单局掉落数；null = 无法推导。 */
-        puSpawn: number | null
-        ticks: number
-        residualHp: number | null
-        residualPct: number | null
-        /** outcome（stage_clear=胜局；null=manifest 未落盘）。 */
-        outcome: string | null
-        /** playerDamageTaken（全样本承伤，null=字段缺失 → 不计入承伤/杀）。 */
-        dmgTaken: number | null
-        /** 关卡敌数（manifest.enemyTotal 或 stage 反查；null=未知）。 */
-        enemyTotal: number | null
-        startLives: number | null
-      }
-    >()
+    const best = new Map<string, RawEntry>()
     const walk = (base: string, rel: string): void => {
       if (rel.split('/').length > 6) return
       let names: string[]
@@ -299,47 +280,13 @@ export function readIterActuals(trajDir: string, iter: number): IterActuals | nu
         }
         if (name !== 'manifest.json') continue
         try {
-          const m = JSON.parse(readFileSync(p, 'utf8')) as {
-            stage?: unknown
-            seed?: unknown
-            kills?: number
-            powerUpsCollected?: number
-            ticks?: number
-            nSamples?: number
-            outcome?: string
-            playerDamageTaken?: number
-            playerDeaths?: number
-            puGotTank?: number
-            enemyTotal?: number
-            startLives?: number
-          }
-          const stage = Number(m.stage)
-          const seed = Number(m.seed)
-          if (!Number.isFinite(stage) || !Number.isFinite(seed)) continue
-          const nSamples = Number(m.nSamples ?? 0)
-          const prev = best.get(`${stage}:${seed}`)
-          if (!prev || nSamples > prev.nSamples) {
-            const enemyTotal = resolveEnemyTotal(stage, m.enemyTotal, course)
-            best.set(`${stage}:${seed}`, {
-              nSamples,
-              kills: Number(m.kills ?? 0) || 0,
-              pu: Number(m.powerUpsCollected ?? 0) || 0,
-              puSpawn: puSpawnFromRow(m as Record<string, unknown>),
-              ticks: Number(m.ticks ?? 0) || 0,
-              residualHp: residualHpFromFields(m),
-              residualPct: residualHpPctFromFields(m),
-              outcome: typeof m.outcome === 'string' && m.outcome.length > 0 ? m.outcome : null,
-              dmgTaken:
-                typeof m.playerDamageTaken === 'number' && Number.isFinite(m.playerDamageTaken)
-                  ? m.playerDamageTaken
-                  : null,
-              enemyTotal,
-              startLives:
-                typeof m.startLives === 'number' && Number.isFinite(m.startLives)
-                  ? m.startLives
-                  : null,
-            })
-          }
+          const ent = entryFromManifest(
+            JSON.parse(readFileSync(p, 'utf8')) as Record<string, unknown>,
+            course,
+          )
+          if (!ent) continue
+          const prev = best.get(`${ent.stage}:${ent.seed}`)
+          if (!prev || ent.nSamples > prev.nSamples) best.set(`${ent.stage}:${ent.seed}`, ent)
         } catch {
           /* skip bad manifest */
         }
@@ -347,90 +294,200 @@ export function readIterActuals(trajDir: string, iter: number): IterActuals | nu
     }
     walk(itDir, '')
     if (best.size === 0) return null
-    let totalKills = 0
-    let totalPU = 0
-    let totalPUSpawn = 0
-    let totalPUSpawnN = 0
-    let totalTicks = 0
-    let residualSum = 0
-    let residualN = 0
-    let residualPctSum = 0
-    let residualPctN = 0
-    // 胜局/败局耗时（ticks）与 承伤/杀（全样本，分子分母同口径）
-    let winTickSum = 0
-    let winN = 0
-    let lossTickSum = 0
-    let lossN = 0
-    let dmgSum = 0
-    let dmgKills = 0
-    let dmgN = 0
-    // 歼灭率：仅累计「知道敌数」的局（Σkills / ΣenemyTotal）
-    let killRateKills = 0
-    let killRateEnemies = 0
-    let killRateN = 0
-    let startLivesSum = 0
-    let startLivesN = 0
-    for (const v of best.values()) {
-      totalKills += v.kills
-      totalPU += v.pu
-      if (v.puSpawn != null) {
-        totalPUSpawn += v.puSpawn
-        totalPUSpawnN++
-      }
-      totalTicks += v.ticks
-      if (v.residualHp !== null) {
-        residualSum += v.residualHp
-        residualN++
-      }
-      if (v.residualPct !== null) {
-        residualPctSum += v.residualPct
-        residualPctN++
-      }
-      if (v.outcome) {
-        if (v.outcome === 'stage_clear' && v.ticks > 0) {
-          winTickSum += v.ticks
-          winN++
-        } else if (v.outcome !== 'stage_clear' && v.ticks > 0) {
-          lossTickSum += v.ticks
-          lossN++
-        }
-      }
-      // 承伤/杀：全样本、不区分胜负；分子分母同口径 = 仅累计带有 playerDamageTaken 的局。
-      if (v.dmgTaken !== null) {
-        dmgSum += v.dmgTaken
-        dmgKills += v.kills
-        dmgN++
-      }
-      if (v.enemyTotal != null && v.enemyTotal > 0) {
-        killRateKills += v.kills
-        killRateEnemies += v.enemyTotal
-        killRateN++
-      }
-      if (v.startLives != null && v.startLives > 0) {
-        startLivesSum += v.startLives
-        startLivesN++
-      }
-    }
-    const dmgPerKillAbs = dmgN > 0 && dmgKills > 0 ? +(dmgSum / dmgKills).toFixed(1) : null
-    const meanStartLives = startLivesN > 0 ? startLivesSum / startLivesN : ASSUMED_START_LIVES
-    return {
-      games: best.size,
-      totalKills,
-      totalPU,
-      totalPUSpawn: totalPUSpawnN > 0 ? totalPUSpawn : null,
-      avgTicks: Math.round(totalTicks / best.size),
-      avgResidualHp: residualN > 0 ? Math.round(residualSum / residualN) : null,
-      avgWinTicks: winN > 0 ? Math.round(winTickSum / winN) : null,
-      avgLossTicks: lossN > 0 ? Math.round(lossTickSum / lossN) : null,
-      dmgPerKill: dmgPerKillAbs,
-      killRate: killRateN > 0 && killRateEnemies > 0 ? killRateKills / killRateEnemies : null,
-      dmgPerKillPct:
-        dmgPerKillAbs != null ? dmgPerKillAbs / dmgPerKillCapacity(meanStartLives) : null,
-      avgResidualHpPct: residualPctN > 0 ? residualPctSum / residualPctN : null,
-    }
+    return aggregateActuals([...best.values()])
   } catch {
     return null
   }
+}
+
+/** 一轮里一局的最小画像：manifest.json 与 per-game.json 两种来源的共同形状。 */
+export interface RawEntry {
+  stage: number
+  seed: number
+  nSamples: number
+  kills: number
+  pu: number
+  /** 单局掉落数；null = 无法推导。 */
+  puSpawn: number | null
+  ticks: number
+  residualHp: number | null
+  residualPct: number | null
+  /** outcome（stage_clear=胜局；null=manifest 未落盘）。 */
+  outcome: string | null
+  /** playerDamageTaken（全样本承伤，null=字段缺失 → 不计入承伤/杀）。 */
+  dmgTaken: number | null
+  /** 关卡敌数（manifest.enemyTotal 或 stage 反查；null=未知）。 */
+  enemyTotal: number | null
+  startLives: number | null
+}
+
+/**
+ * 把一份「单局行」翻成 RawEntry（字段名与本机 manifest 一致；云机侧
+ * `rl/reports.py::game_records` 逐字用的就是同一套名字，所以这里不需要翻译表）。
+ * stage/seed 缺失或非数 ⇒ null（跳过该行）。
+ */
+function entryFromManifest(
+  m: Record<string, unknown>,
+  course: string | undefined,
+): RawEntry | null {
+  const stage = Number(m.stage)
+  const seed = Number(m.seed)
+  if (!Number.isFinite(stage) || !Number.isFinite(seed)) return null
+  return {
+    stage,
+    seed,
+    nSamples: Number(m.nSamples ?? 0),
+    kills: Number(m.kills ?? 0) || 0,
+    pu: Number(m.powerUpsCollected ?? 0) || 0,
+    puSpawn: puSpawnFromRow(m),
+    ticks: Number(m.ticks ?? 0) || 0,
+    residualHp: residualHpFromFields(m),
+    residualPct: residualHpPctFromFields(m),
+    outcome: typeof m.outcome === 'string' && m.outcome.length > 0 ? m.outcome : null,
+    dmgTaken:
+      typeof m.playerDamageTaken === 'number' && Number.isFinite(m.playerDamageTaken)
+        ? m.playerDamageTaken
+        : null,
+    enemyTotal: resolveEnemyTotal(
+      stage,
+      typeof m.enemyTotal === 'number' && Number.isFinite(m.enemyTotal) ? m.enemyTotal : null,
+      course,
+    ),
+    startLives:
+      typeof m.startLives === 'number' && Number.isFinite(m.startLives) ? m.startLives : null,
+  }
+}
+
+/** 同一 (stage,seed) 只留样本数最多的那条（重跑/续跑会留下多份 manifest）。 */
+function pickBest(entries: RawEntry[]): RawEntry[] {
+  const best = new Map<string, RawEntry>()
+  for (const e of entries) {
+    const k = `${e.stage}:${e.seed}`
+    const prev = best.get(k)
+    if (!prev || e.nSamples > prev.nSamples) best.set(k, e)
+  }
+  return [...best.values()]
+}
+
+/** 逐局画像 → 表上读数。两条腿（本机扫描 / 回传 per-game 文件）共用这一份。 */
+function aggregateActuals(entries: RawEntry[]): IterActuals | null {
+  if (entries.length === 0) return null
+  let totalKills = 0
+  let totalPU = 0
+  let totalPUSpawn = 0
+  let totalPUSpawnN = 0
+  let totalTicks = 0
+  let residualSum = 0
+  let residualN = 0
+  let residualPctSum = 0
+  let residualPctN = 0
+  // 胜局/败局耗时（ticks）与 承伤/杀（全样本，分子分母同口径）
+  let winTickSum = 0
+  let winN = 0
+  let lossTickSum = 0
+  let lossN = 0
+  let dmgSum = 0
+  let dmgKills = 0
+  let dmgN = 0
+  // 歼灭率：仅累计「知道敌数」的局（Σkills / ΣenemyTotal）
+  let killRateKills = 0
+  let killRateEnemies = 0
+  let killRateN = 0
+  let startLivesSum = 0
+  let startLivesN = 0
+  for (const v of entries) {
+    totalKills += v.kills
+    totalPU += v.pu
+    if (v.puSpawn != null) {
+      totalPUSpawn += v.puSpawn
+      totalPUSpawnN++
+    }
+    totalTicks += v.ticks
+    if (v.residualHp !== null) {
+      residualSum += v.residualHp
+      residualN++
+    }
+    if (v.residualPct !== null) {
+      residualPctSum += v.residualPct
+      residualPctN++
+    }
+    if (v.outcome) {
+      if (v.outcome === 'stage_clear' && v.ticks > 0) {
+        winTickSum += v.ticks
+        winN++
+      } else if (v.outcome !== 'stage_clear' && v.ticks > 0) {
+        lossTickSum += v.ticks
+        lossN++
+      }
+    }
+    // 承伤/杀：全样本、不区分胜负；分子分母同口径 = 仅累计带有 playerDamageTaken 的局。
+    if (v.dmgTaken !== null) {
+      dmgSum += v.dmgTaken
+      dmgKills += v.kills
+      dmgN++
+    }
+    if (v.enemyTotal != null && v.enemyTotal > 0) {
+      killRateKills += v.kills
+      killRateEnemies += v.enemyTotal
+      killRateN++
+    }
+    if (v.startLives != null && v.startLives > 0) {
+      startLivesSum += v.startLives
+      startLivesN++
+    }
+  }
+  const dmgPerKillAbs = dmgN > 0 && dmgKills > 0 ? +(dmgSum / dmgKills).toFixed(1) : null
+  const meanStartLives = startLivesN > 0 ? startLivesSum / startLivesN : ASSUMED_START_LIVES
+  return {
+    games: entries.length,
+    totalKills,
+    totalPU,
+    totalPUSpawn: totalPUSpawnN > 0 ? totalPUSpawn : null,
+    avgTicks: Math.round(totalTicks / entries.length),
+    avgResidualHp: residualN > 0 ? Math.round(residualSum / residualN) : null,
+    avgWinTicks: winN > 0 ? Math.round(winTickSum / winN) : null,
+    avgLossTicks: lossN > 0 ? Math.round(lossTickSum / lossN) : null,
+    dmgPerKill: dmgPerKillAbs,
+    killRate: killRateN > 0 && killRateEnemies > 0 ? killRateKills / killRateEnemies : null,
+    dmgPerKillPct:
+      dmgPerKillAbs != null ? dmgPerKillAbs / dmgPerKillCapacity(meanStartLives) : null,
+    avgResidualHpPct: residualPctN > 0 ? residualPctSum / residualPctN : null,
+  }
+}
+
+/**
+ * 回传/导入腿的逐局画像入口：`it<N>/per-game.json`（云机 `remote/artifacts.py` 与
+ * `remote/deliver_zip.py` 落盘，字段名与本机 manifest 一致）。
+ * 文件缺席/为空/坏 JSON ⇒ null（交给 `readIterActuals` 的目录扫描）。
+ */
+function readPerGameFileEntries(trajDir: string, iter: number): RawEntry[] | null {
+  try {
+    const p = join(trajDir, `it${iter}`, PER_GAME_NAME)
+    if (!existsSync(p)) return null
+    const raw = JSON.parse(readFileSync(p, 'utf8')) as unknown
+    if (!Array.isArray(raw) || raw.length === 0) return null
+    const course = courseFromTrajDir(trajDir)
+    const out: RawEntry[] = []
+    for (const e of raw) {
+      if (e == null || typeof e !== 'object') continue
+      const ent = entryFromManifest(e as Record<string, unknown>, course)
+      if (ent) out.push(ent)
+    }
+    return out.length > 0 ? out : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 一轮的逐局读数：【耗时/击杀/残血/道具】那几列的数据源。
+ * 优先随包/回传落盘的 `per-game.json`（云机腿），缺席时回落到本机/在线腿的
+ * `manifest.json` 目录扫描；两路喂同一个 `aggregateActuals` ⇒ 两条腿列同口径。
+ */
+export function readRoundActuals(trajDir: string, iter: number): IterActuals | null {
+  const fromFile = readPerGameFileEntries(trajDir, iter)
+  if (fromFile) return aggregateActuals(pickBest(fromFile))
+  return readIterActuals(trajDir, iter)
 }
 
 // ---------------- 实际值留底缓存（计算一次永久使用） ----------------
@@ -445,8 +502,13 @@ export interface CachedActuals extends IterActuals {
 }
 
 /** 当前 actuals 缓存 schema 版本（门闩：旧缓存一律作废重建）。
- *  v3 = totalPUSpawn（道具掉落数）入聚合。 */
-const ACTUALS_SCHEMA_V = 3
+ *  v3 = totalPUSpawn（道具掉落数）入聚合；
+ *  v4 = 逐局画像改按 `it<N>/per-game.json` 优先（云机/回传跨腿）——旧缓存里那些
+ *       「本机 manifest 扫出来的值」不能继续压住新落盘的画像文件。 */
+const ACTUALS_SCHEMA_V = 4
+
+/** 逐局压缩画像的落盘名（回传/导入腿：`<课程>/it<N>/per-game.json`）。 */
+const PER_GAME_NAME = 'per-game.json'
 
 function actualsCachePath(trajDir: string): string {
   return join(trajDir, '.pool-actuals-cache.json')
@@ -1025,7 +1087,7 @@ export function readIterMetrics(trajDir: string): { rows: IterRow[] } {
             avgResidualHpPct: cached.avgResidualHpPct ?? null,
           }
         } else {
-          actuals = readIterActuals(trajDir, iter)
+          actuals = readRoundActuals(trajDir, iter)
           if (actuals) {
             actualsCache.set(iter, { ...actuals, time: rowTime, schemaV: ACTUALS_SCHEMA_V })
             cacheDirty = true

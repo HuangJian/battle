@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import threading
 import time
@@ -34,7 +35,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from platform_utils import cpu_worker_slots
-from remote import offline_eval
+from remote import game_watch, offline_eval
 from remote.artifacts import ArtifactStore, sha256_bytes, sha256_file
 from remote.offline_deliver import OfflineDeliverer
 from remote.offline_eval import (
@@ -229,6 +230,68 @@ def test_run_cloud_eval_survives_single_game_failures(
     assert out["failed"] == 2 and out["settled"] == 2
     assert any("失败" in m for m in logs)
     assert eval_jsonl.exists()
+
+
+def test_run_cloud_eval_watchdog_caps_and_retries_in_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """单局看门狗（与 rollout 同一口径）：首次卡住 ⇒ 按 5s 杀、原地重跑（上限 ×4）。
+
+    `game_timeout_sec=0`（= 没配）⇒ 首次 5s / 重试 20s；显式给了 120 ⇒ 每次都是 120。
+    """
+    timeouts: list[float] = []
+    attempts: dict[tuple[int, int], int] = {}
+
+    def flaky(bun, weights, stage, seed, out_dir, max_ticks, difficulty, timeout, wver, **kw):
+        timeouts.append(float(timeout))
+        key = (stage, seed)
+        attempts[key] = attempts.get(key, 0) + 1
+        if attempts[key] == 1:  # 第一把卡死（被看门狗杀了）⇒ 原地重跑
+            raise subprocess.TimeoutExpired(["bun", "export-eval-game.ts"], timeout)
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        return {"win": True, "cleared": True, "outcome": "win", "elapsedSec": 0.01}
+
+    monkeypatch.setattr(offline_eval, "run_local_eval_game", flaky)
+    monkeypatch.setattr(offline_eval, "find_bun", lambda *_a, **_k: "bun")
+    course = _course(eval_stages="0", eval_games_per_stage=1, eval_every=1)
+    logs, log = _logs()
+    out = run_cloud_eval(
+        plan=eval_plan_of(course),
+        it=1,
+        weights_path=_weights(tmp_path),
+        eval_jsonl=tmp_path / "eval_log.jsonl",
+        ts_root=_ts_root(tmp_path),
+        work_dir=tmp_path / "work",
+        course=course,
+        bun="bun",
+        slots=1,
+        game_timeout_sec=0.0,
+        log=log,
+    )
+    assert out["settled"] == 1 and out["failed"] == 0, "重跑成功 ⇒ 这局算落账，不是失败"
+    assert timeouts == [game_watch.DEFAULT_GAME_TIMEOUT_SEC, 20.0], timeouts
+    assert any("单局重试 2/3" in m and "本次上限 20s" in m for m in logs), logs
+    assert any("单局耗时" in m for m in logs), logs
+    rows = [json.loads(ln) for ln in (tmp_path / "eval_log.jsonl").read_text().splitlines()]
+    assert next(r for r in rows if r["event"] == "eval")["wallSec"] is not None, "两腿同字段可比"
+
+    # 显式给上限 ⇒ 每次尝试都用它（不对重试放大）
+    timeouts.clear()
+    attempts.clear()
+    run_cloud_eval(
+        plan=eval_plan_of(course),
+        it=2,
+        weights_path=_weights(tmp_path, b'{"w":2}'),
+        eval_jsonl=tmp_path / "eval_log2.jsonl",
+        ts_root=_ts_root(tmp_path),
+        work_dir=tmp_path / "work2",
+        course=course,
+        bun="bun",
+        slots=1,
+        game_timeout_sec=120.0,
+        log=log,
+    )
+    assert timeouts == [120.0, 120.0], timeouts
 
 
 def test_run_cloud_eval_skips_loudly_when_prerequisites_are_missing(

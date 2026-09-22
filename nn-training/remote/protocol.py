@@ -635,7 +635,11 @@ _ITER_PATH_FLAGS: tuple[str, ...] = ("--out", "--weights")
 ROLLOUT_SPEC_DEFAULTS: dict[str, object] = {
     "wver": "",
     "workers": 1,
-    "game_timeout_sec": 0.0,  # 0 = 不设单局超时（本机历史行为）
+    # 0 = plan 没给 ⇒ **节点兜底硬顶**（`iter_rollout.DEFAULT_GAME_TIMEOUT_SEC`）。
+    # 2026-09-22 改口径：旧注释写的是「0 = 不设单局超时（本机历史行为）」，也就是一个卡住的
+    # bun 子进程可以永远等下去——it34 实测 rollout 中途停了 651s（10 局卡死、日志只有计数）。
+    # 本机 rollout 不受影响（它不看这个字段），云端必须有个上限。
+    "game_timeout_sec": 0.0,
     "bun": "bun",  # 节点侧 bun 可执行名（PATH 查找）；空 = 用节点默认
 }
 
@@ -766,7 +770,9 @@ def validate_rollout_spec(spec: object) -> dict:
     if isinstance(_t, bool) or not isinstance(_t, (int, float)):
         raise ProtocolError(f"manifest.rollout.game_timeout_sec 必须是数字，收到 {_t!r}")
     if float(_t) < 0:
-        raise ProtocolError("manifest.rollout.game_timeout_sec 必须 >= 0（0 = 不限）")
+        raise ProtocolError(
+            "manifest.rollout.game_timeout_sec 必须 >= 0（0 = 节点兜底硬顶，不是不限）"
+        )
     out["game_timeout_sec"] = float(_t)
     out["bun"] = str(out["bun"] or "bun")
     return out

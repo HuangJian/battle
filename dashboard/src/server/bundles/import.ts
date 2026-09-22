@@ -70,6 +70,12 @@ export interface DeliverImportPayload {
   course: string
   source_zip: string
   bytes: number
+  /** 并进课程账本的逐轮训练行数（= 导入后「各轮指标表」会显示几轮）。
+   *
+   *  ★ 2026-09-22：导入只落产物目录时，指标表**一行都不显示**（那张表只读
+   *  `tmp/<课程>/training_log.jsonl` 的 `iteration` 事件）⇒ python 导入器现在顺手把
+   *  产物包的 `metrics.jsonl` 搬进账本，这个数就是搬了几行（0 = 账本里已有/包内没有）。 */
+  metric_rows?: number
 }
 
 /** 从 python 的 stdout 里切出机器可读那一行（前面的人读日志一分不丢）。 */
@@ -162,7 +168,12 @@ export async function importDeliverZip(
   }
   return {
     ok: true,
-    message: `已导入 ${payload.run_id}（${payload.iters.length} 轮，it${payload.iters[0]} → it${payload.last_it}）`,
+    // 「指标表看得见几轮」要写进结论：导入成功后用户第一眼看的正是那张表，而最贵的一种
+    // 失败是「导进去了但表是空的」（2026-09-22 实测）。
+    message:
+      `已导入 ${payload.run_id}（${payload.iters.length} 轮，it${payload.iters[0]} → ` +
+      `it${payload.last_it}）` +
+      (payload.metric_rows ? `；逐轮指标 +${payload.metric_rows} 行` : ''),
     payload,
   }
 }

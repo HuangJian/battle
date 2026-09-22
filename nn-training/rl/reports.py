@@ -106,6 +106,70 @@ def merge_volume_report(
     return adopt_volume_report(merged)
 
 
+#: 逐局**压缩画像**要带的原始字段。名字与单局 manifest（= 单局 `_rl_report.json`）逐字相同——
+#: 读方（`dashboard/src/server/iters.ts::aggregateActuals`，两条腿共用）因此不需要任何翻译层。
+#: 这几列就是控制台表上的「耗时/击杀/残血/道具」：`ticks` / `kills` / `playerDamageTaken`
+#: （+`startLives`/`playerDeaths`/`puGotTank` 推残血）/ `powerUpsCollected`（+`puSpawn*` 推掉落）。
+_PER_GAME_FIELDS: tuple[str, ...] = (
+    "stage",
+    "seed",
+    "nSamples",  # 同 (stage,seed) 多份时取样本多的那份（与读方同一去重口径）
+    "kills",
+    "ticks",
+    "outcome",  # 胜/败——残血与胜负耗时都只在这个前提下才算
+    "powerUpsCollected",
+    "playerDamageTaken",
+    "playerDeaths",
+    "puGotTank",
+    "startLives",
+    "enemyTotal",
+    "puSpawnBomb",
+    "puSpawnTank",
+    "puSpawnFreeze",
+    "puSpawnShield",
+    "puSpawnStar",
+    "score",
+)
+
+
+def compact_per_game(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """逐局摘要列表 → **压缩画像**（只留控制台那几列用得上的原始字段）。
+
+    为什么需要它：控制台的「耗时/击杀/残血/道具」是**逐局**聚合出来的（读方扫
+    `tmp/<课>/it<N>/…/manifest.json`），而那些单局 manifest 只在**跑它的那台机器**上：
+    在线腿由训练机把节点分片拉回盘（`dist/<节点>/rl_s*_seed*/`），云机离线腿则无人来拉——
+    轮末 `prune` 只留最近 2 个 job 目录，它们随后就没了。所以云机这一条腿的表永远空。
+
+    这里把「读方要的那几个原始字段」压成每局一行（~200B ≈ 满 328 局的 65KB/轮，
+    相对整份 manifest 的 590KB/轮小一个量级），随轮账本行一起走：回传/导入都不需要额外通道。
+    只带**非空**字段（旧版导出器少几个字段 ⇒ 对应的列留空，不编数字）；没有
+    (stage,seed) 的行直接丢（没身份就无法与别的腿配对/去重）。
+    """
+    out: list[dict[str, Any]] = []
+    for r in reports:
+        if not r:
+            continue
+        e: dict[str, Any] = {k: r[k] for k in _PER_GAME_FIELDS if r.get(k) is not None}
+        loot = _dim_value(r.get("dims"), "loot")
+        if loot is not None:
+            # 与读方同形（`dims.loot` 可以是标量或 {value}）——道具掉落的反推口径靠它。
+            e["dims"] = {"loot": loot}
+        if e.get("stage") is None or e.get("seed") is None:
+            continue
+        out.append(e)
+    return out
+
+
+def _dim_value(dims: Any, key: str) -> float | int | None:
+    """单局 `dims.<key>` 的值（manifest 里是 `{value,raw}`，eval 行里是标量）。"""
+    if not isinstance(dims, dict):
+        return None
+    v = dims.get(key)
+    if isinstance(v, dict):
+        v = v.get("value")
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
 def combine_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
     """跨 worker 精确重聚合（scoreList/dimLists 原始值列表）。
 

@@ -84,6 +84,10 @@ from remote._instance_lock import (
     release_instance_lock,
 )
 from remote._port_guard import ensure_port_free
+
+# 产物账本行 → 课程账本行的搬运**只在 remote.artifacts 实现一份**（人工导入与实时补传共用）：
+# 两份翻译必然漂开，而「两腿同字段」正是控制台那张表存在的意义。
+from remote.artifacts import ArtifactStore, ledger_row_from_metrics
 from remote.protocol import (
     AUTH_HEADER,
     CLAIM_TTL_SEC,
@@ -956,7 +960,45 @@ class _JobStore(_AuthGuard):
                     "ts": self._now(),
                 }
             )
+            self._land_round_metrics(row, run_id=run_id, it=int(it))
         return {"status": "accepted", "run_id": run_id, "it": int(it)}
+
+    def _land_round_metrics(self, row: object, *, run_id: str, it: int) -> None:
+        """把这一轮的度量搬进**课程侧**（实时回传也能让控制台指标表动起来）。
+
+        用户之问（2026-09-22）：「云机通过网络请求回传，会算这些数据回显吗？」——之前**不会**：
+        回传只落 `remote-jobs/offline/<run_id>/it-NNN/{weights,opt,row}.json` + 一条
+        `offline_artifact` 事件（没有 `iteration` 事件，也没人把逐局画像铺到读方能找到的地方）
+        ⇒ 权重/优化器都在、末轮也能评，但控制台的「各轮指标表」（含耗时/击杀/残血/道具）
+        一行不显示，而且「没有 `iteration` 事件」这件事连人工导入都能修正、实时回传不能。
+
+        现在：与人工导入（`remote/deliver_zip`）走**同一张翻译表**
+        （`remote.artifacts.ledger_row_from_metrics`）+ 同一个逐局画像落点
+        （`<课程>/it<N>/per-game.json`），两路结果逐字段一致。
+
+        只住课程目录（`jsonl_path` 的父目录）：hub 的 `--jsonl` 就是
+        `<traj_root>/training_log.jsonl`，课程侧与它是同一个根。重复投递（duplicate）根本走不到
+        这里---只有接新才写，所以同一轮不会出现两行。任何失败只记日志：回传的主价值是权重到岸。
+        """
+        if not isinstance(row, dict):
+            return
+        try:
+            ev = ledger_row_from_metrics(row, run_id=run_id, source="offline_backfeed")
+            traj = self.jsonl_path.parent
+            it_dir = traj / f"it{it}"
+            pg = row.get("perGame")
+            if isinstance(pg, list) and pg:
+                it_dir.mkdir(parents=True, exist_ok=True)
+                (it_dir / ArtifactStore.PER_GAME_NAME).write_text(
+                    json.dumps(pg, ensure_ascii=False), encoding="utf-8"
+                )
+            if ev is not None:
+                self._append_ledger(ev)
+        except Exception as e:  # 观测面不拖垮回传
+            print(
+                f"[hub-server] 补传 it{it} 的课程侧度量落位失败（忽略）：{type(e).__name__}: {e}",
+                flush=True,
+            )
 
     def store_offline_result(self, body: dict) -> dict:
         """落段末摘要（**覆盖写**：它是「这条腿现在到哪了」的最新答案，不是不可变快照）。"""

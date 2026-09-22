@@ -201,28 +201,102 @@ def test_bad_token_disables_delivery_after_one_attempt(tmp_path: Path) -> None:
     assert not (root / "delivered.json").exists()
 
 
-def test_rejected_body_disables_instead_of_retrying(tmp_path: Path) -> None:
-    """体被拒（400）重试不会变对：停用并留一行原因，别每轮白烧一个 ~1.9MB upload。"""
+def test_rejected_round_is_skipped_but_the_rest_keep_flowing(tmp_path: Path) -> None:
+    """一轮被内容拒收（400）⇒ **只丢这一轮**，其余照推（2026-09-22 事故：旧口径停掉整只腿）。
+
+    现场：it1 的账本行与权重不符（真因是 `_row_for` 取错了同名历史行）→ hub 400 → 旧行为
+    「本会话停用补传」⇒ 这一整段后面几十轮再没回过一轮；而那一轮本身根本不该连坐其余轮次。
+    """
     root = _make_artifacts(tmp_path / "art")
+    msgs: list[str] = []
 
     class _Op:
         def __init__(self) -> None:
             self.calls: list[str] = []
 
         def __call__(self, url: str, data: bytes, headers: dict, timeout: float):
-            self.calls.append(url)
             if url.endswith("/ping"):
+                self.calls.append("ping")
                 return 200, b"{}"
-            return 400, b'{"error":"\xe8\xa1\xa5\xe4\xbc\xa0\xe8\xa2\xab\xe6\x8b\x92"}'
+            it = json.loads(data)["it"]
+            self.calls.append(f"post:{it}")
+            if it == 1:
+                return 400, '{"error":"补传被拒：账本行与权重不符"}'.encode()
+            return 200, b"{}"
 
     op = _Op()
-    d = _deliverer("http://hub.invalid", root, opener=op)
-    assert d.sync() == 0
-    assert d.disabled_reason != "" and "400" in d.disabled_reason
-    assert d.pending() == [1, 2, 3]
+    d = OfflineDeliverer(
+        base_url="http://hub.invalid",
+        token="t",
+        run_id=RUN,
+        artifacts_dir=root,
+        opener=op,
+        log=msgs.append,
+    )
+    assert d.sync() == 2, "被拒的那一轮不得连坐后面的轮次"
+    assert "post:2" in op.calls and "post:3" in op.calls
+    assert d.disabled_reason == "", "内容拒收不是鉴权问题，不得停用整条腿"
+    assert d.pending() == [], "被拒轮次不再进待投集（1）、已投的也不进（2/3）"
+    assert any("本轮跳过" in m and "其余轮次照推" in m for m in msgs), msgs
     n = len(op.calls)
     d.sync()
-    assert len(op.calls) == n
+    assert len(op.calls) == n, "被拒的那一轮本会话不再重试（新会话会再试一次）"
+
+
+def test_row_is_picked_by_matching_bytes_not_by_first_same_iter(tmp_path: Path) -> None:
+    """同名 it 有多行（跨会话追加）⇒ 取**与本轮字节相符**的最后一行，不是第一条。
+
+    这正是 2026-09-22 那一次 400 的真因：续跑重跑同一 it，`metrics.jsonl` 追加了新行、
+    权重文件被覆写，而旧的「取第一条同 it 行」拿到上一会话的行 ⇒ 行/权重是两个会话的东西。
+    """
+    import hashlib
+
+    root = _make_artifacts(tmp_path / "art", iters=(1,))
+    w2 = json.dumps({"it": 1, "w": 99.0}).encode("utf-8")
+    (root / "it-001" / "weights.json").write_bytes(w2)  # 续跑重跑 ⇒ 权重换了字节
+    with open(root / "metrics.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps({"it": 1, "weights_fp": hashlib.sha256(w2).hexdigest(), "wall_sec": 2.0}) + "\n")
+
+    bodies: list[dict] = []
+
+    def op(url: str, data: bytes, headers: dict, timeout: float):
+        if url.endswith("/ping"):
+            return 200, b"{}"
+        bodies.append(json.loads(data))
+        return 200, b"{}"
+
+    d = _deliverer("http://hub.invalid", root, opener=op)
+    assert d.sync() == 1
+    row = bodies[0]["row"]
+    assert row is not None and row["wall_sec"] == 2.0, "取的必须是相符的那一行（最后一条）"
+    assert bodies[0]["weights_fp"] == hashlib.sha256(w2).hexdigest()
+
+
+def test_row_with_mismatching_fingerprint_is_dropped_not_sent(tmp_path: Path) -> None:
+    """账本里没有一行与本轮字节相符 ⇒ **只发权重、不发 row**（指错轮次的行比缺行危险）。"""
+    root = _make_artifacts(tmp_path / "art", iters=(1,))
+    (root / "it-001" / "weights.json").write_bytes(b'{"it": 1, "w": 123.0}')  # 旧行指纹不符
+    bodies: list[dict] = []
+    msgs: list[str] = []
+
+    def op(url: str, data: bytes, headers: dict, timeout: float):
+        if url.endswith("/ping"):
+            return 200, b"{}"
+        bodies.append(json.loads(data))
+        return 200, b"{}"
+
+    d = OfflineDeliverer(
+        base_url="http://hub.invalid",
+        token="t",
+        run_id=RUN,
+        artifacts_dir=root,
+        opener=op,
+        log=msgs.append,
+    )
+    assert d.sync() == 1, "行配不上不该拦住这一轮的权重"
+    assert bodies[0]["row"] is None, "配不上的行一律不发（否则 hub 会拒收整个体）"
+    assert any("账本行与权重不符" in m for m in msgs), msgs
+    assert d.pending() == [] and d.disabled_reason == ""
 
 
 class _FlakyOpener:

@@ -805,7 +805,11 @@ def _eval_job_builder(ctx: RunContext, ep: Any) -> Callable[[int], dict]:
             "course": ctx.course,
             "course_fp": str(ctx.manifest.get("course_fp", "") or ""),
             "slots": ctx.eval_slots,
-            "game_timeout_sec": (ctx.eval_game_timeout_sec or 900.0),
+            # **原样传 0（= 没指定）**：由 `run_cloud_eval` 按 `remote/game_watch.py` 解析成
+            # 「首次尝试 = 5s（用户口径：单局 >5s 肯定不正常）、重试 ×4」；显式给了正数就完全
+            # 按用户给的数且不对重试放大（配置说了算）。不在这里提前解析，是因为「显式 vs
+            # 兜底」这个区别决定了重试要不要放宽，解析一次就丢了这个信息。
+            "game_timeout_sec": float(ctx.eval_game_timeout_sec or 0.0),
             "log": ctx.log,
         }
 
@@ -1367,7 +1371,8 @@ def main(argv: list[str] | None = None) -> int:
         "--eval-game-timeout-sec",
         type=float,
         default=0.0,
-        help="云机评估单局超时（0 = 900s）",
+        help="云机评估单局超时（0 = 用节点兜底：首次尝试 5s、重试上限 ×4，见 "
+        "remote/game_watch.py；>0 时每次尝试都用它）",
     )
     ap.add_argument(
         "--resume-dir",

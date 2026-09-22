@@ -39,7 +39,14 @@ def _weights(it: int) -> bytes:
     return json.dumps({"it": it, "w": it * 0.5}).encode("utf-8")
 
 
-def _make_artifact_zip(tmp_path: Path, *, iters=(1, 2, 3), run_id="x1-demo", state="complete") -> Path:
+def _make_artifact_zip(
+    tmp_path: Path,
+    *,
+    iters=(1, 2, 3),
+    run_id="x1-demo",
+    state="complete",
+    row: dict | None = None,
+) -> Path:
     """用 `ArtifactStore` 亲手打一份真产物 zip（形状与云机产出的逐字段一致）。"""
     root = tmp_path / "art-src"
     store = ArtifactStore(root, run_id=run_id)
@@ -52,7 +59,7 @@ def _make_artifact_zip(tmp_path: Path, *, iters=(1, 2, 3), run_id="x1-demo", sta
             it,
             weights_json=_weights(it),
             opt_tar=b"opt-%d" % it,
-            row={"agg": {"kl": 0.01}, "wall_sec": 1.0},
+            row=row or {"agg": {"kl": 0.01}, "wall_sec": 1.0},
         )
     store.finalize(state=state, summary={"last_it": iters[-1]})
     out = tmp_path / "deliver-demo.zip"
@@ -87,6 +94,122 @@ def test_reimport_same_run_does_not_stack_directories(tmp_path: Path) -> None:
     assert second["iters"] == [1, 2, 3, 4]
     assert not (Path(second["dir"]) / "STALE.txt").exists()
     assert [p.name for p in dest.iterdir()] == ["x1-demo"]
+
+
+# ────────────────── 导入 ⇒ 课程账本（控制台「各轮指标表」的唯一数据源） ──────────────────
+
+
+def test_imported_rounds_land_in_the_course_ledger(tmp_path: Path) -> None:
+    """导入的逐轮训练行要并进 `tmp/<课程>/training_log.jsonl`（幂等）。
+
+    用户 2026-09-22 实测缺口：导入后控制台**各轮指标表一行都不显示**——因为那张表只读
+    课程账本的 `iteration` 事件（`dashboard/src/server/api/state-view.ts`），而导入只落
+    了产物目录（权重/优化器/`metrics.jsonl`）。
+    """
+    z = _make_artifact_zip(tmp_path, iters=(1, 2), run_id="r1")
+    dest = tmp_path / "demo" / "deliver"
+    log: list[str] = []
+    got = import_deliver_zip(z, dest, course="demo", log=log.append)
+    assert got["metric_rows"] == 2
+    ledger = dest.parent / "training_log.jsonl"
+    rows = [json.loads(ln) for ln in ledger.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert [r["iter"] for r in rows] == [1, 2]
+    assert all(r["event"] == "iteration" for r in rows)
+    # 来源标记由**共享翻译表**（`remote.artifacts.ledger_row_from_metrics`）打：`run_id` 指包，
+    # `source` 指谁搬的（导入 `deliver_import` / 实时补传 `offline_backfeed`）——两条腿同键名，
+    # 复盘时能一眼分辨曲线从哪来。
+    assert all(r["run_id"] == "r1" and r["source"] == "deliver_import" for r in rows)
+    assert rows[0]["kl"] == 0.01 and rows[0]["time"], "agg/time 要按账本口径搬运"
+    assert any("课程账本" in m for m in log), log
+    # 幂等：同一个包再导一次不写第二遍（账本是多写者文件，重导不应加倍）
+    got2 = import_deliver_zip(z, dest, course="demo", log=log.append)
+    assert got2["metric_rows"] == 0
+    assert len(ledger.read_text(encoding="utf-8").strip().splitlines()) == 2
+
+
+def test_imported_ledger_row_maps_report_and_agg(tmp_path: Path) -> None:
+    """字段搬运：report/agg → 账本字段名（控制台读的就是这些键）。"""
+    z = _make_artifact_zip(
+        tmp_path,
+        iters=(4,),
+        run_id="r2",
+        row={
+            "agg": {"kl": 0.02, "entropy": 0.5, "policy": 0.1, "value": 0.3, "mean_ret": 7.0},
+            "report": {
+                "games": 328,
+                "shards": 328,
+                "winRate": 0.11,
+                "totalSamples": 76800,
+                "totalTicks": 123456,
+                "elapsedSec": 650.7,
+                "outcomes": {"loss": 300},
+                # 逐维度/分数统计（2026-09-22 起产物行带）：控制台 kills/accuracy/loot 与
+                # score 列的数据源——旧包没这两块时对应列留空（下面另有一条用例钉它）。
+                "dimMeans": {"progress": 0.4, "accuracy": 0.12, "loot": 0.3},
+                "scoreStats": {"mean": 0.87, "std": 0.05},
+            },
+            "wall_sec": 94.5,
+            "ppo_sec": 88.9,
+            "rollout_sec": 4.6,
+            "steps": 48000,
+            "chunks": 47,
+        },
+    )
+    got = import_deliver_zip(z, tmp_path / "demo" / "deliver", course="demo", log=lambda _m: None)
+    assert got["last_it"] == 4
+    line = (tmp_path / "demo" / "training_log.jsonl").read_text(encoding="utf-8").strip()
+    ev = json.loads(line)
+    assert ev["iter"] == 4 and ev["event"] == "iteration"
+    assert ev["winRate"] == 0.11 and ev["samples"] == 76800 and ev["ticks"] == 123456
+    assert ev["rollout_sec"] == 4.6 and ev["ppo_sec"] == 88.9
+    assert ev["policy"] == 0.1 and ev["value"] == 0.3 and ev["kl"] == 0.02
+    assert ev["outcomes"] == {"loss": 300} and ev["steps"] == 48000
+    # 控制台用 ticks/expectedGames 算平均每局时长 ⇒ 映射了 report.games 这一列才不是 0
+    assert ev["expectedGames"] == 328 and ev["ticks"] // ev["expectedGames"] == 376
+    # 逐维度/分数：分层路径要翻译成平铺键（kills = dim_means.progress × 20）
+    assert ev["dim_means"] == {"progress": 0.4, "accuracy": 0.12, "loot": 0.3}
+    assert ev["score_mean"] == 0.87 and ev["score_std"] == 0.05
+
+
+def test_old_package_without_dims_leaves_those_columns_empty(tmp_path: Path) -> None:
+    """旧包（产物行没有 dimMeans/scoreStats）⇒ 那几列**留空**，不写 0。
+
+    写 0 在表上会被读成「真的零击杀/零命中」——缺数据与零是两件事，宁可空。
+    """
+    z = _make_artifact_zip(
+        tmp_path,
+        iters=(7,),
+        run_id="r7",
+        row={"agg": {"kl": 0.02}, "report": {"games": 328, "winRate": 0.1}, "wall_sec": 1.0},
+    )
+    import_deliver_zip(z, tmp_path / "demo" / "deliver", course="demo", log=lambda _m: None)
+    ev = json.loads(
+        (tmp_path / "demo" / "training_log.jsonl").read_text(encoding="utf-8").strip()
+    )
+    assert "dim_means" not in ev and "score_mean" not in ev and "score_std" not in ev
+    assert ev["winRate"] == 0.1, "能搬的照搬"
+    # 起点快照（it0）不是一轮：不写 iteration 行（控制台会把它当成轮次）
+    assert "dim_means" not in ev, "产物行里没有的东西不许编（那张表的列宁可为空）"
+
+
+def test_ledger_merge_skips_it0_and_bad_rows(tmp_path: Path) -> None:
+    """it0/坏行不进账本：只搬真正的一轮训练行。"""
+    root = tmp_path / "art-src"
+    store = ArtifactStore(root, run_id="r3")
+    store.start(
+        {"start_it": 0, "end_it": 1, "iters_total": 1, "pairs": {}},
+        {"runId": "r3", "commit": "c" * 40},
+    )
+    store.checkpoint(0, weights_json=_weights(0), opt_tar=b"", row=None)  # 起点快照
+    store.checkpoint(1, weights_json=_weights(1), opt_tar=b"o", row={"agg": {"kl": 0.0}})
+    store.finalize(state="complete", summary={"last_it": 1})
+    z = tmp_path / "deliver-demo.zip"
+    z.write_bytes((root / ArtifactStore.ALL_ZIP).read_bytes())
+    got = import_deliver_zip(z, tmp_path / "demo" / "deliver", course="demo", log=lambda _m: None)
+    assert got["metric_rows"] == 1, "it0 不进账本（它不是一轮训练）"
+    ledger = tmp_path / "demo" / "training_log.jsonl"
+    rows = [json.loads(ln) for ln in ledger.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert [r["iter"] for r in rows] == [1]
 
 
 def test_bundle_zip_is_rejected_with_a_pointed_message(tmp_path: Path) -> None:

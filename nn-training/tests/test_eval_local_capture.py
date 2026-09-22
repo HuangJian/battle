@@ -15,6 +15,8 @@ from __future__ import annotations
 import subprocess
 import sys
 
+import pytest
+
 from rl.eval_local import run_eval_runner_capture
 
 #: 故意混字节：UTF-8 的中文 + 单独的 0xaf（在 gbk 与 utf-8 下都不是合法序列）。
@@ -47,10 +49,14 @@ def test_capture_helper_is_what_the_runner_uses() -> None:
     src = (Path(__file__).resolve().parent.parent / "rl" / "eval_local.py").read_text(
         encoding="utf-8"
     )
-    # 允许带 cwd（云机离线评估要跑在 TS 树根上，见 `run_local_eval_game` 的 cwd 形参）
-    assert "proc = run_eval_runner_capture(cmd, timeout_sec" in src
-    # 不许再有裸的 text=True 捕获（那正是缺陷形态）
+    # 调用点带 cwd（云机离线评估要跑在 TS 树根上）+ 慢局告警的身份/落点（2026-09-22）
+    assert "proc = run_eval_runner_capture(" in src
+    assert "label=game_watch.game_label(stage, seed)" in src
+    # 看门狗口径一律走 game_watch 的模块属性（import 常量 = 第二份绑定，patch 不到）
+    assert "from remote.game_watch import" not in src
+    # 不许再有裸的 `subprocess.run(capture_output=True, text=True, timeout=...)`（那正是缺陷形态）
     assert "capture_output=True,\n        text=True,\n        timeout=timeout_sec" not in src
+    assert "subprocess.run(\n        cmd," not in src
 
 
 def test_capture_is_single_subprocess_invocation() -> None:
@@ -58,3 +64,38 @@ def test_capture_is_single_subprocess_invocation() -> None:
     proc = run_eval_runner_capture([sys.executable, "-c", "print('hi')"], 30.0)
     assert isinstance(proc, subprocess.CompletedProcess)
     assert proc.stdout.strip() == "hi"
+
+
+def test_capture_watchdog_warns_slow_game_by_identity(monkeypatch) -> None:
+    """慢局（卡住期间）就点名告警——不是等硬顶到了才知道某一局有问题（2026-09-22）。"""
+    from remote import game_watch
+
+    monkeypatch.setattr(game_watch, "GAME_POLL_SEC", 0.05)
+    monkeypatch.setattr(game_watch, "SLOW_GAME_WARN_SEC", 0.05)
+    msgs: list[str] = []
+    # 只「慢」不「卡」：0.4s 就出结果，但已越过被 monkeypatch 成 0.05s 的软告警线
+    child = (
+        "import sys, time\n"
+        "sys.stdout.write('partial'); sys.stdout.flush()\n"
+        "time.sleep(0.4)\n"
+    )
+    out = run_eval_runner_capture(
+        [sys.executable, "-c", child], 30.0, label="s2/d9", log_fn=msgs.append
+    )
+    assert out.returncode == 0 and "partial" in out.stdout
+    assert any("异常慢" in m and "s2/d9" in m for m in msgs), msgs
+
+
+def test_capture_hard_cap_kills_and_keeps_output(monkeypatch) -> None:
+    """硬顶：kill 子进程、抛 TimeoutExpired，但**捕获到的尾巴要留着**（诊断不被超时吃掉）。"""
+    from remote import game_watch
+
+    monkeypatch.setattr(game_watch, "GAME_POLL_SEC", 0.05)
+    child = (
+        "import sys, time\n"
+        "sys.stdout.write('partial'); sys.stdout.flush()\n"
+        "time.sleep(30)\n"
+    )
+    with pytest.raises(subprocess.TimeoutExpired) as e:
+        run_eval_runner_capture([sys.executable, "-c", child], 0.3, label="s2/d9")
+    assert "partial" in (e.value.output or ""), e.value.output

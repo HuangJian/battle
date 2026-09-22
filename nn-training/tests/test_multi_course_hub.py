@@ -957,6 +957,79 @@ def test_offline_backfeed_routes_by_the_declared_course(tmp_path: Path) -> None:
         th.join(timeout=5)
 
 
+def test_offline_backfeed_moves_the_console_table(tmp_path: Path) -> None:
+    """回传一轮 ⇒ 课程账本出现 `iteration` 行 + 逐局画像落 `it<N>/per-game.json`。
+
+    用户之问（2026-09-22）：「云机通过网络请求回传，会算这些数据回显吗？」——此前**不会**：
+    回传只落 `offline/<run>/it-NNN/{weights,opt,row}.json` + 一条 `offline_artifact` 事件，
+    控制台那张表（含耗时/击杀/残血/道具）一行不显，而这件事**人工导入能修、实时回传不能**
+    ⇒ 同一个 hub 上两条腿的观测面不一致。现在两路走同一张翻译表
+    （`remote.artifacts.ledger_row_from_metrics`）与同一个画像落点（控制台按文件优先读它）。
+    """
+    hub = _discover_hub(tmp_path)
+    _mk_course_dir(tmp_path, "c4")
+    assert hub.discover() == ["c4"], hub.courses()
+    base, _ref, srv, th = _boot(tmp_path, hub)
+    try:
+        row: dict = {
+            "it": 3,
+            "wall_sec": 91.0,
+            "rollout_sec": 4.5,
+            "ppo_sec": 33.9,
+            "steps": 48000,
+            "agg": {"kl": 0.011, "policy": 0.002, "value": 0.5, "entropy": 0.7},
+            "report": {
+                "games": 328,
+                "winRate": 0.25,
+                "totalSamples": 48000,
+                "totalTicks": 1234,
+                "dimMeans": {"kills": 0.3},
+                "scoreStats": {"mean": 1.5, "std": 0.2},
+            },
+            "perGame": [
+                {"stage": 1, "seed": 7, "nSamples": 5, "kills": 4, "ticks": 900},
+                {"stage": 2, "seed": 8, "nSamples": 5, "kills": 1, "ticks": 700},
+            ],
+        }
+        body = json.loads(_artifact_body("seg-1", 3, course="c4").decode("utf-8"))
+        body["row"] = row
+        payload = json.dumps(body).encode("utf-8")
+        st, res = _http(base, "/offline/artifact", method="POST", data=payload)
+        assert st == 200 and res["status"] == "accepted", res
+        traj = tmp_path / "c4"
+        # ① 逐局画像落到控制台读得到的地方（`iters.ts::readRoundActuals` 先看这个文件）
+        pg = traj / "it3" / "per-game.json"
+        assert pg.is_file(), "逐局画像没落盘 ⇒ 表上四列恒空"
+        assert json.loads(pg.read_text(encoding="utf-8")) == row["perGame"]
+        # ② 课程账本多一行 `iteration`（控制台按它画表）
+        ledger = [
+            json.loads(x)
+            for x in (traj / "training_log.jsonl").read_text(encoding="utf-8").splitlines()
+            if x.strip()
+        ]
+        its = [x for x in ledger if x.get("event") == "iteration"]
+        assert len(its) == 1 and its[0]["iter"] == 3, ledger
+        one = its[0]
+        assert one["winRate"] == 0.25 and one["samples"] == 48000
+        assert one["expectedGames"] == 328 and one["ticks"] == 1234
+        assert one["rollout_sec"] == 4.5 and one["ppo_sec"] == 33.9
+        assert one["kl"] == 0.011 and one["dim_means"] == {"kills": 0.3}
+        assert one["score_mean"] == 1.5 and one["source"] == "offline_backfeed"
+        # ③ 重复投递：绝不写第二行（读方按 it 画曲线，两行 = 曲线打结）
+        st, res = _http(base, "/offline/artifact", method="POST", data=payload)
+        assert st == 200 and res["status"] == "duplicate", res
+        ledger = [
+            json.loads(x)
+            for x in (traj / "training_log.jsonl").read_text(encoding="utf-8").splitlines()
+            if x.strip()
+        ]
+        assert len([x for x in ledger if x.get("event") == "iteration"]) == 1
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        th.join(timeout=5)
+
+
 def test_offline_backfeed_without_a_course_is_refused_loudly_on_a_multi_course_hub(
     tmp_path: Path,
 ) -> None:

@@ -39,7 +39,9 @@ import sys
 import zipfile
 from pathlib import Path
 
-from remote.artifacts import ArtifactStore
+# 产物账本行 → 课程账本行的搬运**只在 remote.artifacts 实现一份**（人工导入与实时补传共用）：
+# 两份翻译必然漂开，而「两腿同字段」正是那张表存在的意义。
+from remote.artifacts import ArtifactStore, ledger_row_from_metrics
 from remote.bundle import BUNDLE_INDEX, safe_extract_zip
 from remote.protocol import ProtocolError
 
@@ -186,6 +188,7 @@ def import_deliver_zip(
     )
     log(f"[deliver] 末轮权重：{final_ckpt}")
     n_eval = _merge_carried_eval_rows(final, dest_root)
+    n_rows = _merge_carried_metric_rows(final, dest_root, log=log)
     return {
         "run_id": final.name,
         "dir": str(final),
@@ -197,6 +200,7 @@ def import_deliver_zip(
         "state": str(st.get("state") or ""),
         "rows": len(iters),
         "eval_rows": n_eval,
+        "metric_rows": n_rows,
         "source_zip": str(src),
         "bytes": size,
     }
@@ -228,6 +232,127 @@ def _merge_carried_eval_rows(final: Path, dest_root: Path) -> int:
             flush=True,
         )
     return int(n)
+
+
+def _merge_carried_metric_rows(
+    final: Path, dest_root: Path, *, log=lambda _m: None
+) -> int:
+    """把产物包里的逐轮训练行（`metrics.jsonl`）并进课程账本，返回新增行数。
+
+    **为什么必须并**：控制台的「各轮指标表」只读课程账本（`tmp/<课程>/training_log.jsonl`
+    的 `iteration` 事件，见 `dashboard/src/server/api/state-view.ts` → `readIterMetrics`）
+    ——导入的产物不进账本时，权重/优化器都在盘上、末轮也能评，但**指标表一行都不显示**
+    （用户 2026-09-22 实测：导完看不出这条腿跑到哪）。
+
+    两件事，分开幂等：
+
+      * **课程账本行**：由 `remote.artifacts.ledger_row_from_metrics` 搬运（与实时补传
+        `remote/hub_server` 共用同一张翻译表），打上 `source="deliver_import"`；账本里已有
+        同 it 的 `iteration` 行就跳过（重复导入不写第二遍）。搬不到的（旧包没有
+        `dimMeans`/`scoreStats`）**留空**——写 0 会被读成「真的零击杀」。
+      * **逐局画像**：`it<N>/per-game.json`（读方优先它，见下）。控制台的「耗时/击杀/残血/
+        道具」是**逐局**聚合出来的，而单局 manifest 只在跑它的那台机器上（云机轮末就被
+        prune 删了）⇒ 产物行里的 `perGame` 必须在导入时落到读方能找到的地方。
+        **总是写**（与账本行是否已存在无关：同 run 的包可能是升级后才带上 perGame 的）。
+
+    任何失败只记一笔：导入的主价值是「权重可评估」，少一份曲线不是导入失败。
+    """
+    src_jsonl = final / ArtifactStore.METRICS_NAME
+    if not src_jsonl.exists():
+        return 0
+    traj = Path(dest_root).parent
+    dest = traj / "training_log.jsonl"
+    try:
+        rows: list[dict] = []
+        for line in src_jsonl.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                got = json.loads(line)
+            except ValueError:
+                continue  # 半截行（被 kill）——跳过，不毒死导入
+            if isinstance(got, dict):
+                rows.append(got)
+        events = [
+            ev
+            for ev in (
+                ledger_row_from_metrics(r, run_id=final.name, source="deliver_import")
+                for r in rows
+            )
+            if ev is not None
+        ]
+        n_pg = write_per_game_files(traj, rows)
+        if events:
+            seen: set[int] = set()
+            if dest.exists():
+                for line in dest.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        prev = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(prev, dict) or prev.get("event") != "iteration":
+                        continue
+                    raw_prev_it = prev.get("iter")
+                    if not isinstance(raw_prev_it, (int, float, str)):
+                        continue
+                    try:
+                        seen.add(int(raw_prev_it))
+                    except (TypeError, ValueError):
+                        continue
+            fresh = [ev for ev in events if int(ev["iter"]) not in seen]
+            if fresh:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                with open(dest, "a", encoding="utf-8") as f:
+                    for ev in fresh:
+                        f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+                log(
+                    f"[deliver] 逐轮指标已并入课程账本：+{len(fresh)} 行（it{fresh[0]['iter']} → "
+                    f"it{fresh[-1]['iter']} → {dest}）——控制台「各轮指标表」读的就是它"
+                )
+            else:
+                log(f"[deliver] 课程账本已有这些轮次（{len(events)} 行）——不重复写")
+        else:
+            fresh = []
+        if n_pg:
+            log(
+                f"[deliver] 逐局画像已落盘：{n_pg} 轮 → "
+                f"{traj}/it<N>/per-game.json（控制台的耗时/击杀/残血/道具列读它）"
+            )
+    except Exception as e:  # 磁盘/权限/格式——不拖垮导入
+        print(f"[deliver] 训练账本并入失败（忽略）: {type(e).__name__}: {e}", flush=True)
+        return 0
+    return len(fresh)
+
+
+def write_per_game_files(traj: Path, rows: list[dict]) -> int:
+    """把产物行的 `perGame`（逐局压缩画像）写成 `it<N>/per-game.json`，返回写了多少轮。
+
+    位置与读方约定：`dashboard/src/server/iters.ts` 先看 `it<N>/per-game.json`，没有才去扫
+    `it<N>/**/manifest.json`（本机/在线腿的老路径）。**单个文件而非 328 个小文件**：
+    一盘 300 轮 × 328 局 = 10 万个文件对谁都是负担，而读方本来就要把一轮的局凑齐再聚合。
+    没带 `perGame` 的行（旧包/旧代码）直接跳过。
+    """
+    n = 0
+    for r in rows:
+        raw_it = r.get("it")
+        if not isinstance(raw_it, (int, float, str)):
+            continue
+        try:
+            it = int(raw_it)
+        except (TypeError, ValueError):
+            continue
+        pg = r.get("perGame")
+        if it < 1 or not isinstance(pg, list) or not pg:
+            continue
+        it_dir = traj / f"it{it}"
+        it_dir.mkdir(parents=True, exist_ok=True)
+        (it_dir / ArtifactStore.PER_GAME_NAME).write_text(
+            json.dumps(pg, ensure_ascii=False), encoding="utf-8"
+        )
+        n += 1
+    return n
 
 
 def main(argv: list[str] | None = None) -> int:
