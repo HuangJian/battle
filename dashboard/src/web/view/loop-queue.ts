@@ -125,6 +125,9 @@ export function coursePills(input: {
   rows: LoopQueueRow[]
   /** 共享 trainer 是否在跑（进程事实，与「已开课」正交：开了课但进程没跑是合法稳态）。 */
   trainerRunning: boolean
+  /** ★2026-09-22：**离线课**（hub 标为只收回传）——顶部 pill 不显示本地「推进中/采集中」
+   *  等词（段由云机整段执行），统一改「回传中」。null/空 = 无离线课。 */
+  offline?: ReadonlySet<string> | null
 }): CoursePillView[] {
   const byCourse = new Map(input.rows.map((r) => [r.course, r]))
   return input.courses.map((course) => {
@@ -186,6 +189,19 @@ export function coursePills(input: {
         title:
           '已开课（在调度课程表里），但共享 trainer 没在跑——启动「服务进程」后下一拍就会入队。' +
           `· ${wait}`,
+      }
+    }
+    // ★2026-09-22（离线课 pill 修正）：离线课不提本地 waiting 词（推进中/采集中/等回传），
+    // 统一是「回传中」——段由云机整段执行，本地只收回传。放在确定性事实（暂停/收官/中止/
+    // 待进程）之后，保证它们优先级不变。
+    if (input.offline?.has(course)) {
+      return {
+        course,
+        kind,
+        it,
+        status: '回传中',
+        tone: 'g' as CoursePillTone,
+        title: `hub 离线（只收回传）：本段由云机整段执行，本地只收 it 权重/指标回传 · ${wait}`,
       }
     }
     switch (r.waiting.kind) {

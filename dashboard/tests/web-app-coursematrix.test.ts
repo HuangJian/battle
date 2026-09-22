@@ -55,6 +55,7 @@ function ovView(
     activeWorkers: 3,
     halt: false,
     recentDispatch: 'c4',
+    offline: [],
     offlineProgress: null,
     rows,
     ...patch,
@@ -265,6 +266,20 @@ describe('课程矩阵：七列都有读数（旧「总览」+「调度器」的
     })
     expect(stale).toContain('tc-mx__seg--stale')
     expect(stale).toContain('可能挂了')
+  })
+
+  it('★2026-09-22：离线课列走「云机回传」维度——不再显示本地「推进中/队列 0」，也不冒充本地指针', async () => {
+    const html = await render()
+    // iter 列 = 云机回传的最新 it（默认夹具 c5：offlineLastIter=9，ov.iter=7 被覆盖）
+    expect(html).toContain('>it9<')
+    // 本轮列 = 云机
+    expect(html).toContain('云机 it9')
+    // 在等什么列 = 云机运行中 · 已回传 N 轮（不提本地 13 步表的词）
+    expect(html).toContain('云机运行中 · 已回传 3 轮')
+    // 队列·在飞列 = 只收回传（不摆会误读的「队列 0 · 在飞 0」）
+    expect(html).toContain('只收回传')
+    // 段内列仍在（两列口径互补，不删）
+    expect(html).toContain('段内 3 轮')
   })
 
   it('「在等什么」：四态各自有修饰类；表头汇总等回传的**在训**课数', async () => {

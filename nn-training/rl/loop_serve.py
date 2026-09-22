@@ -54,7 +54,7 @@ from rl.loop_plan import (
 )
 from rl.loop_runner import ROUND_KIND, LoopRunner
 from rl.loop_scheduler import ABORTED, QUEUE_DONE, Supervisor
-from rl.loop_tasks import RoundFacts, Task, pending_tasks
+from rl.loop_tasks import RoundFacts, Task, abort, pending_tasks
 from rl.modes import apply_mode_flags, merged_mode_args, resolve_mode
 from rl.queue import REPO_ROOT
 from train.loop_util import acquire_lock, cleanup_lock, course_lock_path
@@ -94,6 +94,9 @@ class ServeReport:
 
     courses: dict[str, dict[str, Any]] = field(default_factory=dict)
     skipped: dict[str, str] = field(default_factory=dict)
+    #: 一步级 SystemExit 按课下线的原因（2026-09-22 事故：一门课的配置错误曾弄崩整个共享
+    #: trainer）——与 `skipped`（开课/入队阶段）分开，读面能区分「哪一步、为什么」。
+    failures: dict[str, str] = field(default_factory=dict)
     engines: dict[str, Any] = field(default_factory=dict)
     steps: int = 0
     stop_reason: str = ""
@@ -505,12 +508,21 @@ def build_factory(
 
 
 def build_executor(
-    pool: EnginePool, runtimes: dict[str, CourseRuntime]
+    pool: EnginePool,
+    runtimes: dict[str, CourseRuntime],
+    report: ServeReport | None = None,
 ) -> Callable[[Any, Any], Any]:
     """调度器执行体：取引擎（可能刚重建）→ 补齐栈 → 交给该课的 `LoopRunner.executor`。
 
     `prefix_scope` 是**行级课程归属**的落点：这一步（及其内部全部日志）带 `[课]` 前缀并镜像
     到该课日志文件。放在这里而不是引擎里，是因为「谁在执行哪门课」只有调度器知道。
+
+    **一步级 SystemExit 按课隔离**（2026-09-22 事故：run_rl 在 `--run-iters<0` 需要课程声明
+    iters 这类**课程配置错误**上抛 SystemExit 是 BaseException，穿透调度器 `except Exception`
+    的 RETRY 兜底，直接把整个共享 trainer 弄崩）。这里的 `except SystemExit` 把该课按
+    「只脏本课」的 ABORT 语义下线（调度器 L313-315 既有裁决：队列 ABORTED、不再被 `_pick`
+    选中、discover 因 `report.skipped` 不重试、`_settle_rounds` 不收官），**其余课程照跑**。
+    只捕 SystemExit、不扩到其它 BaseException：KeyboardInterrupt 仍能干净停 serve。
     """
 
     def execute(task: Any, queue: Any) -> Any:
@@ -518,8 +530,20 @@ def build_executor(
         engine = pool.get(task.course)
         ensure_ready(rt, engine)
         with prefix_scope(task.course):
-            assert rt.runner is not None  # factory 保证
-            return rt.runner.executor(task, queue)
+            try:
+                assert rt.runner is not None  # factory 保证
+                return rt.runner.executor(task, queue)
+            except SystemExit as e:
+                code = e.code if isinstance(e.code, str) else ""
+                detail = (code or str(e)).strip() or f"SystemExit({e.code!r})"
+                log(
+                    f"[serve] 课程 {task.course} 一步级 SystemExit——该课下线，其余课照跑："
+                    f"{task.kind}@{task.task_id}：{detail}（重启 trainer 后如课程文件已修好会自动重开）"
+                )
+                if report is not None:
+                    report.skipped[task.course] = detail
+                    report.failures[task.course] = detail
+                return abort(detail)
 
     return execute
 
@@ -674,7 +698,7 @@ def serve(
         mb=cache_mb,
     )
     sup = supervisor or Supervisor(
-        executor=build_executor(pool, runtimes),
+        executor=build_executor(pool, runtimes, report),
         planner=_planner(runtimes),
         capacities=dict(capacities or DEFAULT_CAPACITIES),
         now=now,

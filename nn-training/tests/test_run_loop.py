@@ -26,6 +26,7 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -33,6 +34,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import remote.run_loop as run_loop_mod
 from remote.artifacts import ArtifactStore, sha256_bytes, sha256_file
 from remote.protocol import (
     ProtocolError,
@@ -257,6 +259,70 @@ def _warm_code_cache(tmp_path: Path) -> Path:
 def _ledger(art: Path) -> list[dict]:
     p = art / ArtifactStore.METRICS_NAME
     return [json.loads(ln) for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+
+# ────────────────────────── ★2026-09-22 离线整段 course 接线回归 ──────────────────────────
+
+_COURSE_FIXTURE = (
+    '// 课程快照夹具（与 import_bundle 落盘的 course.jsonc 同形状）\n'
+    '{\n'
+    '  "name": "x20-fixture",\n'
+    '  "stages": "0-3",\n'
+    '  "max_ticks": 700,\n'
+    '  "reward": {"formula": "score"}\n'
+    '}\n'
+)
+
+
+def test_run_standalone_loads_course_snapshot_into_iter_spec(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★2026-09-22 事故回归：`run_standalone`（全离线腿）必须把产物 `course.jsonc` 快照
+    加载成 `CourseConfig` 传进 `iter_spec`。
+
+    此前它从不传 course ⇒ `iter_spec` 里 `stage_json_of(course, stage)` 拿不到自定义关
+    （ladder 2000+）⇒ `retarget_argv` 把计划里的 `--stage-json` 整对删掉 ⇒ 导出器解析
+    stage 失败 → **空局**（0 samples、rc=0、零 shard）→ 整段 rollout 被误报成环境/写盘
+    问题（半离线 worker 侧已传 course：worker.py run_plan_job(course=course)，只有这条漏）。
+    """
+    plan, m, job_dir, first = _prepare(tmp_path, iters=3, start_it=1)
+    art = tmp_path / "art"
+    # 先跑一段（anchor + 1 轮），让产物目录成形；再续跑就轮到 run_standalone 接管
+    run_plan_job(
+        job_id=m["job_id"],
+        manifest=m,
+        job_dir=job_dir,
+        work_dir=tmp_path / "work",
+        plan=plan,
+        plan_sha256=m["plan_sha256"],
+        first_result=first,
+        artifacts_dir=art,
+        run_job_fn=_FakeRunJob(tmp_path),
+        max_iters=1,
+        log=_quiet,
+    )
+    # 产物目录放课程快照（与 import_bundle 落盘同名同路径）
+    (art / "course.jsonc").write_text(_COURSE_FIXTURE, encoding="utf-8")
+    seen: dict[str, Any] = {"calls": 0}
+    real_iter_spec = run_loop_mod.iter_spec
+
+    def spy(*a: Any, **kw: Any) -> Any:
+        seen["calls"] = int(seen["calls"]) + 1
+        seen["course"] = kw.get("course")
+        return real_iter_spec(*a, **kw)
+
+    monkeypatch.setattr(run_loop_mod, "iter_spec", spy)
+    run_standalone(
+        artifacts_dir=art,
+        max_iters=0,
+        code_cache_dir=_warm_code_cache(tmp_path),
+        run_job_fn=_FakeRunJob(tmp_path),
+        log=_quiet,
+    )
+    assert (
+        seen["course"] is not None
+    ), f"iter_spec 必须拿到 CourseConfig（calls={seen['calls']}，course.jsonc 存在={(art / 'course.jsonc').exists()}）——缺它 --stage-json 被删、出空局"
+    assert getattr(seen["course"], "name", None) == "x20-fixture"
 
 
 # ────────────────────────── 链条 + 产物 ──────────────────────────

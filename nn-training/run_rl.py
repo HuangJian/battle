@@ -348,13 +348,24 @@ def main() -> None:
         )
     except ValueError as e:
         raise SystemExit(f"[run_rl] {e}") from e
-    if not _acquire_run_rl_lock(lock_path, force=bool(getattr(args, "force", False))):
+    if getattr(args, "export_bundle", ""):
+        # ★ 2026-09-22（§course-error-isolation-loud）：`--export-bundle` = **只读快照**
+        # （打 zip：manifest/计划/代码/当前权重；不推进账本、不落新权重——见
+        # `loop_steps._remote_ppo` 的 `export_path` 分支）。因此**不占 per-course 单实例锁**，
+        # 允许「共享 trainer 正在服务该课时随时导出」——锁是「同课两个写者」的护栏，
+        # 导出不是写者。与训练并行时以盘上当前权重/账本为快照（权重/账本落盘都是原子写）。
+        log(
+            f"[run_rl] --export-bundle：只读快照导出，不取 per-course 锁——若共享 trainer "
+            f"正服务本课（{_hub_course_key}），以此为并行快照；导出的包是导出那一刻的进度"
+        )
+    elif not _acquire_run_rl_lock(lock_path, force=bool(getattr(args, "force", False))):
         raise SystemExit(
             f"[run_rl] another run_rl is running for this course "
             f"(holder pid in {lock_path}) — refusing to start; "
             "kill the holder or pass --force to take over"
         )
-    atexit.register(_cleanup_run_rl_lock, lock_path)
+    else:
+        atexit.register(_cleanup_run_rl_lock, lock_path)
 
     # ===== 启动即清空 hub 停机态（2026-09-12 it17 复盘）：上轮门判/人工停机残留的
     # halt 若带进新 run，首轮 PPO job 直接进无人区（训练机空等 30min 超时）。

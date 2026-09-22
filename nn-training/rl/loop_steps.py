@@ -1334,13 +1334,18 @@ class TrainingSteps:
         # R2b（plan/r2-loop-task-queue §2.3）：把刚发布的 job 补进 WAL 的**在飞集**——
         # job_id 是 publish 的返回值（start 时还没有），只能上这条 attach。重启后
         # `_commit_journal` 就能报出「在等哪个 job、推给了谁」，而不是只报一个 round 号。
-        self._commit_journal().attach(
-            "ppo_remote",
-            str(it),
-            jid=jid,
-            dispatch="push" if hub_push else "pull",
-            ts=time.time(),
-        )
+        # ★ 2026-09-22（§course-error-isolation-loud）：`--export-bundle` 是只读快照且
+        # **不与训练抢 per-course 锁**——此时**不得**往 journal 写 attach：这份在飞集属于
+        # 真正服务的训练循环，导出并行写会让重启后「在等什么」报出一条永远等不到的幽灵
+        # job（与上方 `register=export_path is None` 同一个门）。
+        if export_path is None:
+            self._commit_journal().attach(
+                "ppo_remote",
+                str(it),
+                jid=jid,
+                dispatch="push" if hub_push else "pull",
+                ts=time.time(),
+            )
         pack_sec = round(time.time() - t_pack, 3)
         if export_path is not None:
             # 全离线：不等待、不发 job——把这一段任务打成能上传 Kaggle/Colab 的任务包。

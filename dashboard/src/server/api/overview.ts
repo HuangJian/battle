@@ -176,6 +176,7 @@ export async function buildOverview(
     activeWorkers: admin.queue?.activeWorkers ?? 0,
     halt: admin.queue?.halt ?? false,
     recentDispatch: admin.queue?.cursor ?? null,
+    offline: admin.queue?.offline ?? [],
     offlineProgress: admin.offline,
     rows: buildCourseRows({
       courses: names,

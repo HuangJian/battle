@@ -41,7 +41,6 @@ import { BcPanel } from './panels/BcPanel'
 import { CourseMatrix } from './panels/CourseMatrix'
 import { WorkerRegistry } from './panels/WorkerRegistry'
 
-import { TaskBundlePanel } from './panels/TaskBundlePanel'
 import { WirePanel } from './panels/WirePanel'
 import { EvalSummary } from './panels/EvalSummary'
 import {
@@ -450,6 +449,7 @@ export function App({ initial }: AppProps) {
                 courses={trainingCourses}
                 rows={stateView?.loopQueue?.rows ?? []}
                 trainerRunning={trainerRunning}
+                offline={stateView?.overview ? new Set(stateView.overview.offline ?? []) : null}
                 viewCourse={viewCourse}
                 onSelect={selectCourse}
                 onStop={(c) => void handleStopCourse(c)}
@@ -541,10 +541,8 @@ export function App({ initial }: AppProps) {
                 onAction={doAction}
               />
             </PanelErrorBoundary>
-            {/* 任务包（导出 task-<课程>.zip / 导入 deliver-<课程>.zip 并评估）：两区通用 */}
-            <PanelErrorBoundary>
-              <TaskBundlePanel course={viewCourse} enabled={documentVisible} readOnly={readOnly} />
-            </PanelErrorBoundary>
+            {/* ★2026-09-22 改版（用户指令）：首页不再有独立「任务包」区域——离线课程的
+                导出/下载/导入下沉到课程矩阵每行「操作」列（BundleRowActions）。 */}
             {/* EvalBoard 摘要（RL 区）：完整看板独立成页 /eval */}
             {stateView?.isBc ? null : (
               <PanelErrorBoundary>

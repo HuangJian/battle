@@ -216,8 +216,18 @@ export interface MatrixCell {
   warn?: boolean
 }
 
-/** 「队列 N · 在飞 N」——hub 侧事实。hub 无应答时是「不知道」，不是 0。 */
+/** 「队列 N · 在飞 N」——hub 侧事实。hub 无应答时是「不知道」，不是 0。
+ *
+ *  ★ 2026-09-22（离线课列修正）：hub 把课标了**离线**（只收回传、不实时派发 PPO）时，
+ *  队列深度不再适用——读面直接说「只收回传」，不摆一个会误读的「队列 0 · 在飞 0」。 */
 export function queueCell(ov: CourseOverviewRow | null, hubOnline: boolean): MatrixCell {
+  if (ov?.offline)
+    return {
+      text: '只收回传',
+      title:
+        'hub 离线模式：不实时派发 PPO，只接收 it 权重/指标回传——队列深度不适用；' +
+        '云机整段的段内进度见「段内」列（回传轮次/最近产物）。',
+    }
   if (!ov || !hubOnline) return { text: CELL_UNKNOWN, title: HUB_DOWN_TITLE }
   return {
     text: `队列 ${ov.queuePending} · 在飞 ${ov.inflight}`,
@@ -253,6 +263,26 @@ export function waitingCell(lq: LoopQueueRow | null): MatrixCell {
   }
 }
 
+/** 「在等什么」——**离线课**的（★2026-09-22 列修正）：不读本地 13 步表的「推进中/采集中」
+ *  等词——那段由云机整段执行，本地只收回传。有回传就说「云机运行中 · 已回传 N 轮」，
+ *  一次都还没回传就说「离线（只收回传）」。 */
+export function offlineWaitCell(ov: CourseOverviewRow): MatrixCell {
+  if (ov.offlineRounds > 0) {
+    return {
+      text: `云机运行中 · 已回传 ${ov.offlineRounds} 轮`,
+      title:
+        `云机整段在上跑：已回传的段内轮次 ${ov.offlineRounds} 轮，最新 it${ov.offlineLastIter ?? CELL_UNKNOWN}；` +
+        '本地 hub 只收回传、不实时派发 PPO（进度明细与「最近多久没动」见「段内」列）。',
+    }
+  }
+  return {
+    text: '离线（只收回传）',
+    title:
+      'hub 把该课标为离线：云机整段执行，本地只收 it 权重/指标回传；尚未有段内产物回传' +
+      '（刚开课 / 云机还没回第一件）。',
+  }
+}
+
 // ────────────────────────── 合并 ──────────────────────────
 
 export interface CourseMatrixRow {
@@ -261,9 +291,10 @@ export interface CourseMatrixRow {
   viewing: boolean
   status: MatrixStatus
   conflict: MatrixConflict
-  /** 账本指针（**优先训练侧**：它是「下一轮要跑的 it」，hub 侧那个只读账本尾行）。 */
+  /** 账本/队列指针（**优先训练侧**：它是「下一轮要跑的 it」，hub 侧那个只读账本尾行）。
+   *  ★2026-09-22：**离线课**给的是 `offline`——云机回传的最新 it（不是本地「下一轮」指针）。 */
   iter: number | null
-  iterSource: 'queue' | 'ledger' | null
+  iterSource: 'queue' | 'ledger' | 'offline' | null
   /** 两侧原始行（`null` = 那一侧没有这门课）。面板要用它们渲染各自的动作与徽章。 */
   ov: CourseOverviewRow | null
   lq: LoopQueueRow | null
@@ -315,19 +346,29 @@ export function mergeCourseRows(input: CourseMatrixInput): CourseMatrixRow[] {
     const lq = lqByCourse.get(course) ?? null
     const fromQueue = lq ? lq.it : null
     const fromLedger = ov ? ov.iter : null
-    const iter = fromQueue !== null ? fromQueue : fromLedger
+    // ★ 2026-09-22（离线课列修正）：离线课走「任务包+回传」维度——iter 列读**云机回传的最新
+    // it**（`offlineLastIter`），不是本地「下一轮要跑」的队列指针（那对本机读面是错的）。
+    const offlineIt = ov?.offline ? (ov.offlineLastIter ?? null) : null
+    const iter = offlineIt !== null ? offlineIt : fromQueue !== null ? fromQueue : fromLedger
     return {
       course,
       viewing: course === input.viewing,
       status: matrixStatus(ov, lq, hubOnline),
       conflict: matrixConflict(ov, lq, hubOnline),
       iter,
-      iterSource: fromQueue !== null ? 'queue' : fromLedger !== null ? 'ledger' : null,
+      iterSource:
+        offlineIt !== null
+          ? 'offline'
+          : fromQueue !== null
+            ? 'queue'
+            : fromLedger !== null
+              ? 'ledger'
+              : null,
       ov,
       lq,
       canToggleMode: hubOnline && (ov?.hubSeen ?? false),
       queue: queueCell(ov, hubOnline),
-      waiting: waitingCell(lq),
+      waiting: ov?.offline ? offlineWaitCell(ov) : waitingCell(lq),
       segment: segmentCell(ov, input.nowSec),
       kind: lq?.kind ?? 'rl',
     }

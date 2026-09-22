@@ -16,7 +16,7 @@ import { REPO_ROOT } from '../../core/paths'
 import { pidAlive, sleep } from '../../core/net'
 import { courseLogDir } from '../../stack/specs'
 import { busy, release } from '../actions/result'
-import { runRlLockHolder, tailLines } from '../actions/labels'
+import { tailLines } from '../actions/labels'
 import { spawnRunPython } from '../run-python'
 
 /** 一次导出的段长：`-1` = 到课程末尾（见文件头注释）。 */
@@ -73,30 +73,22 @@ export function taskBundleInfo(course: string): TaskBundleInfo {
   }
 }
 
-/** 导出前的门（纯函数；返回非空 = 拒启原因）。**两条理由各有各的代价**：
+/** 导出前的门（纯函数；返回非空 = 拒启原因）。
  *
- *  * **训练在跑**：`run_rl` 有 per-course 单实例锁（双开会让两条腿各自写同一门课的
- *    traj/权重）——导出跑的是同一个入口，所以**不绕过锁**，而是把话说清楚。
- *  * **没有起点权重**：包里必须有个起点（`--export-bundle` 在 python 一侧也拒导）。
+ *  ★ 2026-09-22（课程错误隔离 + 随时导出）：**不再以「训练在跑（run_rl 锁被占）」拒导**——
+ *  导出是只读快照（run_rl `--export-bundle` 不取 per-course 锁、不推进账本），
+ *  开课后随时可导出/重导（离线整段由此可反复以最新进度为起点出包）。
+ *  保留的拒绝理由：**没有起点权重**（包里必须有个起点，python 侧同判据）。
  */
-export function exportGuardReason(arg: {
-  lockHolder: number | null
-  weightsExists: boolean
-}): string | null {
-  if (arg.lockHolder)
-    return (
-      `训练正在跑（run_rl 锁被 PID ${arg.lockHolder} 持有）——先停止训练再导出：` +
-      '包里的起点权重就是当前进度，导出与训练并行会让两条腿从同一轮各自往下跑。'
-    )
+export function exportGuardReason(arg: { weightsExists: boolean }): string | null {
   if (!arg.weightsExists)
     return '没有起点权重（tmp/<课程>/weights.json）——先跑至少一轮，包里得有个起点'
   return null
 }
 
-/** 导出前的门（IO 壳：读锁 + 看权重在不在）。 */
+/** 导出前的门（IO 壳：看权重在不在）。 */
 export function exportGuard(course: string): string | null {
   return exportGuardReason({
-    lockHolder: runRlLockHolder(course),
     weightsExists: existsSync(path.join(REPO_ROOT, 'tmp', course, 'weights.json')),
   })
 }

@@ -38,9 +38,14 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
       metrics = { available: false, iters: [], error: e instanceof Error ? e.message : String(e) }
     }
   }
-  const ppoQueueStall = course
-    ? detectPpoQueueStall(path.join(REPO_ROOT, 'tmp', course, 'remote-jobs'))
-    : null
+  // ★2026-09-22（离线课）：离线（`rollout_src=run`，整段上云）课的 PPO job **不经 hub 队列
+  // 认领**——执行方是 bundle kernel（自跑 plan、产物走 /offline/artifact 回传）。排队暂停检测
+  // 对它是**结构性误报**（job 永远没人领 ≠ worker 断连），故离线课关闭这条红条告警。
+  const offlineRollout = course ? resolveRolloutSrc(cfg, course) === 'run' : false
+  const ppoQueueStall =
+    course && !offlineRollout
+      ? detectPpoQueueStall(path.join(REPO_ROOT, 'tmp', course, 'remote-jobs'))
+      : null
   // 多课程并行总览 + push worker 登记 + 调度器队列（2026-09-18/R2c-3）：三个面各有一处
   // catch——观测面坏掉（无 hub / 账本不可读 / 只读 CLI 起不来）只该让那一块显空态
   // （视图自带 error 交 UI 显因），不该把整页 /api/state 带崩。

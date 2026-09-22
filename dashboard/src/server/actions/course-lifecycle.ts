@@ -23,6 +23,7 @@
 import { appendFileSync, existsSync, mkdirSync, writeFileSync, rmSync } from 'fs'
 import path from 'path'
 import { loadConfig, saveConfig } from '../../core/config'
+import { readJsoncFile } from '../../core/jsonc'
 import { curriculaDir, tmpLogsDir } from '../../core/paths'
 import { validateCourseName } from '../../core/slots'
 import type { RolloutSrcMode, TrainMode } from '../../core/types'
@@ -35,6 +36,7 @@ import { trainModeKnobs } from '../../stack/specs'
 import { type CourseMode, setCourseMode } from './course-mode'
 import { readLoopControl, setCoursePaused } from './loop-control'
 import { loopControlPath } from '../../core/paths'
+import { launchTaskBundleExport } from '../bundles'
 import { ActionError, ActionResult, done, guard, release } from './result'
 import { runRlLockHolder } from './labels'
 import { runBcLockHolder, runClusterLockHolder } from './start'
@@ -67,6 +69,32 @@ function assertCourseExists(course: string): void {
     `课程 '${course}' 不存在（curricula/${course}.jsonc 或 curricula/${course}.bc.jsonc）——` +
       '先在 nn-training/curricula 下建课程文件',
   )
+}
+
+/** 课程文件声明的 `iters`（终点轮数）；读不到 / 没声明 → null。
+ *
+ *  与 python 侧 `run_rl` 的整段守卫同口径（`rl/loop_steps.py`：`--run-iters<0` 需要课程声明
+ *  iters——没有终点就不叫整段）：离线（整段上云）模式 = 跑到课程末尾，没有有限终点节点会
+ *  一直跑下去。开课预校验在这里读课程文件，**在 trainer 接触坏配置之前**就把配备错拦下。
+ *  JSONC 解析借 `core/jsonc.ts::readJsoncFile`（唯一 JSONC 解析器，别再手搓，见该文件头）。 */
+export function declaredCourseIters(course: string): number | null {
+  const files = [
+    path.join(curriculaDir(), `${course}.jsonc`),
+    path.join(curriculaDir(), `${course}.bc.jsonc`),
+  ]
+  for (const f of files) {
+    if (!existsSync(f)) continue
+    try {
+      const obj = readJsoncFile(f)
+      if (obj && typeof obj === 'object' && 'iters' in obj) {
+        const iters = (obj as { iters?: unknown }).iters
+        return typeof iters === 'number' ? iters : null
+      }
+    } catch {
+      return null // 课程文件解析失败 = 配影视作「未声明」（assertCourseExists 已保证存在）
+    }
+  }
+  return null
 }
 
 // ────────────────────────── 开课标记（发现判据的显式闸） ──────────────────────────
@@ -281,6 +309,20 @@ export async function openCourse(course: string, opts: OpenCourseOpts = {}): Pro
         ],
       )
     }
+    // ★ 2026-09-22 事故预校验：离线（整段上云）= 跑到课程末尾，课程必须声明有限 iters——
+    //   没有终点节点会一直跑下去（python 侧 `loop_steps` 的同款 SystemExit 曾把共享 trainer
+    //   整个弄崩）。在这里读课程文件、**在 trainer 接触坏配置之前**响亮拒绝（零副作用，
+    //   与上方其它预检同区）。
+    if (opts.trainMode === 'offline') {
+      const iters = declaredCourseIters(c)
+      if (iters === null || iters <= 0) {
+        throw new ActionError(
+          `课程 ${c} 声明 iters=${iters ?? '缺失'}≤0，离线（整段上云）要求 iters>0——` +
+            '没有终点就不叫整段，节点会一直跑下去。请改「在线」模式开课，' +
+            '或在课程文件里声明 iters>0 后再开离线。本次开课未写任何东西。',
+        )
+      }
+    }
     // ② 写面，三步的**顺序就是契约**（旋钮 → 解暂停 → 事实）：
     //    · **会抛的一步排最前**：`saveConfig` 的容量/槽位守卫会抛（`core/config.ts`）——
     //      它在最前 ⇒ 抛出的那一次盘上零变化（连暂停意图都没动）。
@@ -323,6 +365,15 @@ export async function openCourse(course: string, opts: OpenCourseOpts = {}): Pro
     const hubNote = hub.ok
       ? `hub 该课模式 = ${trainMode}`
       : `hub 尚未认下这门课（${hub.message}）——意图已记录，起 hub 时会按意图回灌`
+    // ★ 2026-09-22：离线开课 = **自动生成任务包**（随时可导：导出是只读快照、不与训练抢
+    // per-course 锁）。任务包不手工搬运——hub 的 `GET /offline/task-pack` 直接按课上架
+    // 这份 zip，Kaggle/Colab 离线 worker 探到 hub 即可拉取（离线课状态列据此显示）。
+    // BCITY_NO_AUTO_TASK_BUNDLE：测试逃生阀（课程生命周期用例不开真导出子进程）；
+    // 导出本身的正确性由 server-api-task-bundle 套件覆盖。
+    const autoExport =
+      trainMode === 'offline' && !process.env.BCITY_NO_AUTO_TASK_BUNDLE
+        ? launchTaskBundleExport(c)
+        : null
     return done(
       true,
       `已开课 ${c}（训练模式 ${trainMode === 'offline' ? '离线（整段上云）' : '在线'}）` +
@@ -332,6 +383,11 @@ export async function openCourse(course: string, opts: OpenCourseOpts = {}): Pro
         `本课（${c}）执行面：${face.text}${face.detail ? `（${face.detail}）` : ''}`,
         ...notes,
         hubNote,
+        ...(autoExport
+          ? autoExport.ok
+            ? [`任务包自动导出：${autoExport.message}`]
+            : [`任务包自动导出未能启动（${autoExport.message}）——可稍后在课程行手动「导出任务包」`]
+          : []),
         // 机器侧旋钮在**开课时**施加（python `apply_course_machine_overrides`）：已经开着的课
         // 要等它重开才换旋钮——暂停该课 → 重启共享 trainer（或等引擎驱逐重开）。
         '★ 机器侧旋钮（降级本机等）在开课时施加：已开着的课要**停课 → 重新开课**（或重启共享 trainer）才换。',

@@ -164,6 +164,25 @@ def scan_shard_dirs(job_dir: Path) -> list[Path]:
     return out
 
 
+def _first_rollout_log_tail(job_dir: Path, max_lines: int = 10) -> str:
+    """取第一个局的 rollout.log 尾（诊断「跑完却没 shard」时直接把现场摆出来）。
+
+    失败静默返回空串——诊断信息永远是 best-effort。
+    """
+    for w in sorted(job_dir.glob("w*")):
+        if not w.is_dir():
+            continue
+        log_p = w / ROLLOUT_LOG_NAME
+        if not log_p.exists():
+            continue
+        try:
+            lines = log_p.read_text(encoding="utf-8", errors="replace").splitlines()
+            return "\n".join(lines[-max_lines:]) or "(空日志)"
+        except OSError:
+            return ""
+    return ""
+
+
 def verify_shards(job_dir: Path, expected_fp: str) -> list[Path]:
     """实产 shard 集 vs 声明集：`data_fp` 两侧同函数，相等 ⇔ 集合逐条相同。
 
@@ -173,9 +192,13 @@ def verify_shards(job_dir: Path, expected_fp: str) -> list[Path]:
     """
     dirs = scan_shard_dirs(job_dir)
     if not dirs:
+        # ★ 2026-09-22 教训：空局（0 samples、rc=0）也会走到这里——把首个局日志尾
+        # 摆进报错，一屏内就能看出是「导出器空局（如 stage 解析失败）」还是「写盘失败」。
+        tail = _first_rollout_log_tail(job_dir)
         raise ProtocolError(
             f"kind=iter 跑完但 job 目录没有任何 shard（{job_dir}）——"
             "检查 rollout argv 的 --out 与导出器是否真的写盘"
+            + (f"\n首个局 rollout.log 尾：\n{tail}" if tail else "")
         )
     actual = data_fp(dirs)
     if actual != expected_fp:

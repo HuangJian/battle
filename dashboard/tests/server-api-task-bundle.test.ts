@@ -97,11 +97,9 @@ describe('任务包导出', () => {
     expect(info.name).toBe('task-__never-exported-course__.zip')
   })
 
-  it('拒启理由：训练在跑要说清为什么、缺起点权重也要说清（纯函数）', () => {
-    expect(exportGuardReason({ lockHolder: null, weightsExists: true })).toBeNull()
-    const held = exportGuardReason({ lockHolder: 4321, weightsExists: true })
-    expect(held).toContain('4321')
-    const noW = exportGuardReason({ lockHolder: null, weightsExists: false })
+  it('拒启理由只剩「缺起点权重」（★2026-09-22：训练运行中也要允许随时导出——锁不再挡）', () => {
+    expect(exportGuardReason({ weightsExists: true })).toBeNull()
+    const noW = exportGuardReason({ weightsExists: false })
     expect(noW).toContain('weights.json')
   })
 

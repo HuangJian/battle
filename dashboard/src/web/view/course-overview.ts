@@ -302,6 +302,8 @@ export interface ParallelOverviewView {
   halt: boolean
   /** 最近派发到的课程（hub 轮转游标）；null = 还没派过或 hub 不可达。 */
   recentDispatch: string | null
+  /** ★2026-09-22：**离线课程名**（hub 标为只收回传）——顶栏 pill / 矩阵据此走「回传」维度。 */
+  offline: string[]
   rows: CourseOverviewRow[]
   /** 逐课程的离线段进度（原始形状，UI 需要按 run 展开时用；缺 = 没读到）。 */
   offlineProgress: Record<string, Record<string, OfflineRunView>> | null

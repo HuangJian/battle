@@ -314,6 +314,33 @@ def test_broken_course_is_isolated(env: SimpleNamespace, monkeypatch: pytest.Mon
     assert rep2.stop_reason == "no_courses" and rep2.steps == 0
 
 
+def test_step_level_system_exit_takes_down_only_that_course(
+    env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """一步级 SystemExit（课程配置错误在跑时炸：如 run_rl 的 --run-iters<0 需要课程声明 iters）
+    ⇒ **只下线那门课**（ABORT「只脏本课」+ 记 `skipped`/`failures`），别的课照跑。
+
+    2026-09-22 事故回归：SystemExit 是 BaseException，穿透调度器 `except Exception` 的 RETRY
+    兜底，过去会把**整个共享 trainer** 弄崩（一门课的错炸穿所有课）。
+    """
+
+    def boom(self: FakeLoop, it: int) -> Any:
+        if self.course == "bad":
+            raise SystemExit("[run_rl] --run-iters<0 需要课程声明 iters——没有终点就不叫整段")
+        return loop_core.RoundOutcome(loop_core.ROUND_NEXT, int(it))
+
+    monkeypatch.setattr(FakeLoop, "run_one_round", boom)
+    rep = serve(["bad", "a"], prepare=False, bun="bun", iters=1, step_mode=False)
+
+    assert rep.stop_reason == "all_settled"
+    assert rep.courses["bad"]["state"] == "aborted"  # 只脏本课：下线，不是进程崩溃
+    assert rep.courses["bad"]["reason"] == "[run_rl] --run-iters<0 需要课程声明 iters——没有终点就不叫整段"
+    assert "bad" in rep.skipped and "iters" in rep.skipped["bad"]
+    assert rep.failures["bad"] == "[run_rl] --run-iters<0 需要课程声明 iters——没有终点就不叫整段"
+    # a 全程没被 bad 拖住：跑完它的轮
+    assert rep.courses["a"]["rounds_done"] == 1 and rep.courses["a"]["state"] == "done"
+
+
 # --------------------------------------------------------------- 发现模式（进程不绑课程）
 
 
@@ -440,6 +467,40 @@ def test_discover_mode_does_not_retry_a_broken_course(
     assert attempts == ["bad"]  # 一次，不是每次空转一次
     assert list(rep.skipped) == ["bad"]
     assert clock.sleeps >= 2  # 确实空转了好几拍
+
+
+def test_discover_mode_does_not_reopen_a_step_exit_course(
+    env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """一步级 SystemExit 打掉的课：发现模式不把它当新课重开（`report.skipped` 过滤，
+    与开课阶段被跳过的课同一判据）——否则每个空转拍都会重试、把日志刷爆。"""
+
+    def boom(self: FakeLoop, it: int) -> Any:
+        if self.course == "bad":
+            raise SystemExit("[run_rl] 课程 {self.course} 一步级炸")
+        return loop_core.RoundOutcome(loop_core.ROUND_NEXT, int(it))
+
+    monkeypatch.setattr(FakeLoop, "run_one_round", boom)
+    for name in ("bad", "a"):
+        _enable_course(env.tmp, name)
+    clock = FakeClock()
+    rep = serve(
+        None,
+        prepare=False,
+        bun="bun",
+        iters=1,
+        step_mode=False,
+        traj_root=str(env.tmp),
+        now=clock.now,
+        sleep=clock.sleep,
+        poll_sec=1.0,
+        max_seconds=8.0,
+    )
+
+    # 各只开一次——被 SystemExit 打掉的课不会被反复重开（顺序无关：发现扫描不保证字典序）
+    assert sorted(env.opened) == ["a", "bad"]
+    assert "bad" in rep.skipped
+    assert rep.courses["a"]["rounds_done"] == 1 and rep.courses["a"]["state"] == "done"
 
 
 # --------------------------------------------------------------- 控制面（暂停/恢复）

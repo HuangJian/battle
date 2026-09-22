@@ -38,6 +38,7 @@ import {
   recentPlannedStop,
   recordExitFailure,
   specPort,
+  tailFailureReason,
   tailNormalCompletion,
   type FailureLogIO,
 } from '../src/server/exit-watchdog'
@@ -283,6 +284,39 @@ describe('tailNormalCompletion（iters 跑满 ALL DONE 识别）', () => {
   })
 })
 
+describe('tailFailureReason（意外退出原因提取，2026-09-22 事故）', () => {
+  it('裸 `[run_rl]` 无时间戳行 = SystemExit abort 消息 → 返回（正常打时间戳的行不误中）', () => {
+    const tail = [
+      '[10:22:39] [run_rl] === iteration 1/∞ ===',
+      '[10:22:39] [x20-demo-mix] [volume] it1: continuous quota mode target=48000',
+      '[run_rl] --run-iters<0（跑到课程末尾）需要课程声明 iters——没有终点就不叫整段，节点会一直跑下去',
+    ]
+    expect(tailFailureReason(tail)).toContain('需要课程声明 iters')
+    expect(tailFailureReason(tail)).not.toContain('iteration 1/∞')
+  })
+
+  it('traceback 尾 → 返回末行异常消息', () => {
+    const tail = [
+      '[run_rl] boot...',
+      '[run_rl] === iteration 1 ===',
+      'Traceback (most recent call last):',
+      '  File "rl/loop_steps.py", line 1800, in <module>',
+      'SystemExit: bc 缺',
+    ]
+    expect(tailFailureReason(tail)).toBe('SystemExit: bc 缺')
+  })
+
+  it('正常尾（无错误形状）→ null', () => {
+    expect(tailFailureReason(['[10:22:39] [run_rl] === iteration 1/∞ ==='])).toBeNull()
+    expect(tailFailureReason([])).toBeNull()
+  })
+
+  it('超长原因截断 140 字符（进横幅 title 保持可扫读）', () => {
+    const long = `[run_rl] ${'x'.repeat(200)}`
+    expect(tailFailureReason([long])!.length).toBe(140)
+  })
+})
+
 describe('recordExitFailure（设计内停车）', () => {
   it('planned 传入 → 标记「已停车」且 save.error 以前缀「已停车」写账', () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), 'bcity-watchdog-planned-'))
@@ -318,6 +352,72 @@ describe('recordExitFailure（设计内停车）', () => {
         /* noop */
       }
     }
+  })
+})
+
+describe('recordExitFailure（意外退出：unplannedReason 带具体原因进横幅，2026-09-22）', () => {
+  it('unplannedReason 传入 → marker 与 save.error 带「意外退出——原因」', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'bcity-watchdog-failreason-'))
+    try {
+      const logAbs = path.join(dir, 'training-loop.log')
+      writeFileSync(logAbs, 'boot\n', 'utf-8')
+      const captured: { entry: RegistryEntry | null } = { entry: null }
+      const io: FailureLogIO = {
+        append: () => {},
+        warnFn: () => {},
+        save: (_k, _c, e) => {
+          captured.entry = e
+        },
+      }
+      const marker = recordExitFailure(
+        'trainingLoop',
+        '',
+        { pid: 99 },
+        logAbs,
+        [],
+        io,
+        '2026-09-22T02:22:46.000Z',
+        undefined,
+        '--run-iters<0 需要课程声明 iters——没有终点就不叫整段',
+      )
+      expect(marker).toContain('意外退出 (PID 99)')
+      expect(marker).toContain('原因：--run-iters<0 需要课程声明 iters')
+      expect(captured.entry?.error).toBe(
+        '意外退出 (PID 99)——原因：--run-iters<0 需要课程声明 iters——没有终点就不叫整段',
+      )
+      expect(captured.entry?.exitAt).toBe('2026-09-22T02:22:46.000Z')
+    } finally {
+      try {
+        rmSync(dir, { recursive: true, force: true })
+      } catch {
+        /* noop */
+      }
+    }
+  })
+
+  it('planned 优先于 unplannedReason（二者都传时按「已停车」写）', () => {
+    const captured: { entry: RegistryEntry | null } = { entry: null }
+    const io: FailureLogIO = {
+      append: () => {},
+      warnFn: () => {},
+      save: (_k, _c, e) => {
+        captured.entry = e
+      },
+    }
+    const marker = recordExitFailure(
+      'trainingLoop',
+      '',
+      { pid: 5 },
+      null,
+      [],
+      io,
+      'T',
+      '正常完成（ALL DONE）',
+      '--run-iters<0 需要 iters',
+    )
+    expect(marker).toContain('已停车（PID 5）')
+    expect(marker).not.toContain('意外退出')
+    expect(captured.entry?.error).toBe('已停车：正常完成（ALL DONE）')
   })
 })
 

@@ -726,6 +726,20 @@ def run_standalone(
     root = Path(artifacts_dir)
     if plan is None or manifest is None:
         plan, manifest = load_planned_manifest(root)
+    # ★ 2026-09-22 事故修复：**加载课程上下文**。此前 `run_standalone` 从不传 course ⇒
+    # `iter_spec` 里 `stage_json_of(course, stage)` 拿不到自定义关（ladder 2000+）的
+    # stageJson ⇒ `retarget_argv` 把计划里的 `--stage-json` **整对删掉** ⇒ 导出器解析
+    # stage 2000 失败 → 静默空局（0 samples、rc=0、零 shard）→「没有任何 shard」误报
+    # 成环境问题。与交互 worker 同款加载（`rl.config.load_course`，快照即来源）。
+    course_path = root / "course.jsonc"
+    course = None
+    if course_path.exists():
+        try:
+            from rl.config import load_course
+
+            course = load_course(str(course_path))
+        except Exception as e:
+            log(f"WARN: 课程快照加载失败（自定义关 stage 将不可解析，rollout 会出空局）: {e}")
     wd = Path(work_dir) if work_dir is not None else root / "work"
     sha = str(manifest.get("ts_code_sha256", "") or "")
     ts_root = ensure_ts_cache_layout(
@@ -745,6 +759,7 @@ def run_standalone(
         code_cache_dir=code_cache_dir,
         ts_code_cache_dir=ts_root,
         ts_tree=Path(ts_code_dir) if ts_code_dir is not None else root / TS_TREE_DIR,
+        course=course,
         max_iters=max_iters,
         budget_sec=budget_sec,
         hub_url=hub_url,

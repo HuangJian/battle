@@ -81,12 +81,18 @@ export function buildExitMarker(
   tail: string[],
   now: string,
   planned?: string | null,
+  failureReason?: string | null,
 ): string {
   const label = labelOf(key, course)
+  // `failureReason` = 意外退出的**具体原因**（非设计内停车）——与 `planned`（已停车）两条
+  // 通道互斥：planned 优先；都缺 = 泛化「意外退出」。保留「意外退出」字样（横幅/账本判别面）。
   const head = planned
     ? `[console] ${now} ${label} 已停车（PID ${entry.pid}）：${planned}`
-    : `[console] ${now} ${label} 意外退出 (PID ${entry.pid})——非正常退出，` +
-      '请检查下列日志；用控制台「启动」恢复（原因尾段见上）：'
+    : failureReason
+      ? `[console] ${now} ${label} 意外退出 (PID ${entry.pid})——原因：${failureReason}；` +
+        '请检查下列日志；用控制台「启动」恢复：'
+      : `[console] ${now} ${label} 意外退出 (PID ${entry.pid})——非正常退出，` +
+        '请检查下列日志；用控制台「启动」恢复（原因尾段见上）：'
   const lines = [head, ...(tail.length ? tail.map((l) => `  | ${l}`) : ['  | (日志缺失或为空)'])]
   return lines.join('\n')
 }
@@ -101,8 +107,9 @@ export function recordExitFailure(
   io: FailureLogIO = {},
   now: string = new Date().toISOString(),
   planned?: string | null,
+  failureReason?: string | null,
 ): string {
-  const marker = buildExitMarker(key, course, entry, tail, now, planned)
+  const marker = buildExitMarker(key, course, entry, tail, now, planned, failureReason)
   if (logAbs) {
     try {
       ;(io.append ?? ((p, t) => appendFileSync(p, t, 'utf-8')))(logAbs, `\n${marker}\n`)
@@ -111,10 +118,15 @@ export function recordExitFailure(
     }
   }
   ;(io.warnFn ?? warn)(marker.replace(/\n/g, ' '))
+  const error = planned
+    ? `已停车：${planned}`
+    : failureReason
+      ? `意外退出 (PID ${entry.pid})——原因：${failureReason}`
+      : `意外退出 (PID ${entry.pid})`
   ;(io.save ?? saveAnyComponent)(key, course, {
     ...entry,
     course: entry.course ?? course,
-    error: planned ? `已停车：${planned}` : `意外退出 (PID ${entry.pid})`,
+    error,
     exitAt: now,
   })
   return marker
@@ -178,6 +190,46 @@ export function tailNormalCompletion(tail: string[]): string | null {
     const line = tail[i]!.trim()
     if (!line) continue
     return line.includes('ALL DONE') ? '正常完成（ALL DONE）' : null
+  }
+  return null
+}
+
+/** 从日志尾提取「意外退出的**具体原因**」（区别于设计内停车场；无 → null 维持泛化文案）。
+ *
+ *  2026-09-22 事故：run_rl 的 SystemExit abort 消息（如
+ *  `[run_rl] --run-iters<0（跑到课程末尾）需要课程声明 iters——没有终点就不叫整段…`）
+ *  是**裸一行、无时间戳前缀**，而它的正常操作行都带 `[HH:MM:SS] ` 前缀——这就是判别面。
+ *
+ *  识别两类形状（都纯文本、可注入测试）：
+ *   1. python traceback 打到尾：末行是异常消息行，其**上一行**是
+ *      `Traceback (most recent call last):` 头或 `  File "…"` 框架行 → 返回末行
+ *      （如 `SystemExit: bc 缺`；只认这个邻接关系，旧 traceback 残留不误中）；
+ *   2. 自尾向前找第一条**裸 `[run_rl]` / `[serve]` / `[loop]` 行**（无 `[HH:MM:SS]` 前缀）
+ *      → SystemExit abort 消息 → 返回它。
+ *  返回统一截断 140 字符（进横幅 title，保持可扫读）。 */
+export function tailFailureReason(tail: string[]): string | null {
+  let last = -1
+  for (let i = tail.length - 1; i >= 0; i--) {
+    if (tail[i]!.trim()) {
+      last = i
+      break
+    }
+  }
+  if (last < 0) return null
+  const lastLine = tail[last]!.trim()
+  // traceback：末行就是异常消息行（如 `SystemExit: …`），其**上一行**是
+  // `Traceback (most recent call last):` 头或 `  File "…"` 框架行——只认这个邻接关系，
+  // 旧 traceback 残留（上邻不是帧/头）不会误中。
+  const above = last > 0 ? tail[last - 1]!.trim() : ''
+  // above 已 trim 过前导空格：`  File "…"` 去掉缩进后是 `File "…"`。
+  if (/^(?:File "|Traceback \(most recent call last\):)/.test(above)) {
+    return lastLine.slice(0, 140)
+  }
+  // SystemExit abort 消息：裸 `[run_rl]`/`[serve]`/`[loop]` 一行、无 `[HH:MM:SS]` 时间戳前缀。
+  for (let i = last; i >= 0; i--) {
+    const line = tail[i]!.trim()
+    if (!line) continue
+    if (/^\[(?:run_rl|serve|loop)\] /.test(line)) return line.slice(0, 140)
   }
   return null
 }
@@ -403,14 +455,20 @@ export async function runExitCheck(): Promise<number> {
           ? ((hit.course ? recentPlannedStop(join(dirname(logRel), 'training_log.jsonl')) : null) ??
             tailNormalCompletion(tail))
           : null
-      recordExitFailure(key, hit.course, entry, logRel, tail, {}, undefined, planned)
+      // §2026-09-22：设计内停车之外的**意外**退出，若日志尾能判出具体原因（SystemExit abort
+      // 消息 / traceback 末行）就把原因带进 marker/registry.error/停机 reason——横幅不再是
+      // 空洞的「意外退出 (PID …)」。
+      const failureReason = planned ? null : tailFailureReason(tail)
+      recordExitFailure(key, hit.course, entry, logRel, tail, {}, undefined, planned, failureReason)
       // §385 复审：TrainingLoop 一死（设计内停车或崩溃）→ 云端停机省 GPU 配额；
       // 本地 hubServer/console 一律不动。幂等由 triggerCloudHalt 守卫；
       // 停机命令按**该条目的课程**下发（多课下不得误停别课 hub）。
       if (key === 'trainingLoop') {
         const reason = planned
           ? `TrainingLoop 设计内停车：${planned}`
-          : `TrainingLoop 意外退出 (PID ${entry.pid})`
+          : failureReason
+            ? `TrainingLoop 意外退出 (PID ${entry.pid})——原因：${failureReason}`
+            : `TrainingLoop 意外退出 (PID ${entry.pid})`
         try {
           await triggerCloudHalt(cfg, reason, hit.course)
         } catch {

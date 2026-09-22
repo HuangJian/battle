@@ -79,6 +79,27 @@ describe('coursePills：把队列事实翻译成一行 pill', () => {
     expect(status({ kind: 'idle', text: '本轮无待办（账本已结算 / 未开训）' })).toBe('空闲')
   })
 
+  it('★2026-09-22：离线课 pill 不提本地「推进中/采集中」，统一「回传中」（段由云机整段执行）', () => {
+    const p = view.coursePills({
+      courses: ['x20-off'],
+      rows: [
+        row({ course: 'x20-off', waiting: { kind: 'ready', text: '无外部等待，下一步 ppo' } }),
+      ],
+      trainerRunning: true,
+      offline: new Set(['x20-off']),
+    })[0]!
+    expect(p).toMatchObject({ course: 'x20-off', status: '回传中', tone: 'g' })
+    expect(p.title).toContain('只收回传')
+    // 确定性事实（暂停 / 收官 / 中止）优先级不被动摇：离线集里也仍报「已暂停」
+    const paused = view.coursePills({
+      courses: ['x20-off'],
+      rows: [row({ course: 'x20-off', pausedIntent: true, pauseApplied: true })],
+      trainerRunning: true,
+      offline: new Set(['x20-off']),
+    })[0]!
+    expect(paused.status).toBe('已暂停')
+  })
+
   it('确定性事实优先于「在等什么」：暂停 / 收官 / 中止各占一态', () => {
     const pills = view.coursePills({
       courses: ['p', 'd', 'a'],

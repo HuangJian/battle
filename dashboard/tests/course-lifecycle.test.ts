@@ -37,6 +37,9 @@ process.env.BCITY_LOOP_APPLIED = path.join(DIR, 'loop-control.applied.json')
 // 锁文件目录：开课的前置检查**会读它**（另一份按课 runner 在跑 ⇒ 拒开课），而
 // `assertCourseExists` 又要求课程是真课程 ⇒ 不重定向就会往仓库 nn-training/ 写锁。
 process.env.BCITY_LOCKS_DIR = path.join(DIR, 'locks')
+// 离线开课会自动触发任务包导出（真起 run_rl 子进程）——本套件盯的是开课生命周期，
+// 关掉这个副作用（导出正确性由 server-api-task-bundle 套件覆盖）。
+process.env.BCITY_NO_AUTO_TASK_BUNDLE = '1'
 mkdirSync(path.join(DIR, 'traj'), { recursive: true })
 mkdirSync(path.join(DIR, 'locks'), { recursive: true })
 writeFileSync(
@@ -191,6 +194,68 @@ describe('openCourse：把「这门课存在且可被调度」写到盘上', () 
 
   it('空课程 ⇒ 拒绝（开课是按课程记的）', async () => {
     await expect(openCourse('')).rejects.toThrow(/需要课程/)
+  })
+})
+
+// ────────────────────────── ①b 开课：离线模式预校验（2026-09-22 事故回归） ──────────────────────────
+
+describe('openCourse：离线（整段上云）要求课程声明有限 iters', () => {
+  const FIX = path.join(DIR, 'curricula-fix') // 夹具课程目录（临时 BCITY_CURRICULA_DIR）
+  const trajOf = (c: string) => path.join(DIR, 'traj', c)
+
+  // 惰性 curriculaDir() 每次调用读 env ⇒ 测试内改 env 即生效；用毕删掉恢复真课程目录。
+  afterEach(() => {
+    delete process.env.BCITY_CURRICULA_DIR
+  })
+
+  function fixtureCourses(): void {
+    mkdirSync(FIX, { recursive: true })
+    // iters=0：事故原形（x20-demo-mix 就是这一形状）——普通 RL 课
+    writeFileSync(
+      path.join(FIX, 'x-iter0.jsonc'),
+      '{\n  "iters": 0,\n  "mode": "per-tick"\n}\n',
+      'utf-8',
+    )
+    // 未声明 iters：BC 课形状（兼作「在线不受闸约束」的夹具）
+    writeFileSync(path.join(FIX, 'x-noiters.bc.jsonc'), '{\n  "name": "x-noiters"\n}\n', 'utf-8')
+  }
+
+  it('iters=0 ⇒ 响亮 ActionError（可捕获，**不是** process.exit），文案给具体原因', async () => {
+    fixtureCourses()
+    process.env.BCITY_CURRICULA_DIR = FIX
+    await expect(
+      openCourse('x-iter0', { trainMode: 'offline', hubMode: { attempts: 1, delayMs: 0 } }),
+    ).rejects.toThrow(/没有终点/)
+    await expect(
+      openCourse('x-iter0', { trainMode: 'offline', hubMode: { attempts: 1, delayMs: 0 } }),
+    ).rejects.toThrow(/iters=0/)
+  })
+
+  it('未声明 iters ⇒ 同样拒绝（没有终点就不叫整段）', async () => {
+    fixtureCourses()
+    process.env.BCITY_CURRICULA_DIR = FIX
+    await expect(
+      openCourse('x-noiters', { trainMode: 'offline', hubMode: { attempts: 1, delayMs: 0 } }),
+    ).rejects.toThrow(/没有终点/)
+  })
+
+  it('拒绝 = 零副作用：不写开课标记 / 账本 / remote-jobs / 课程旋钮', async () => {
+    fixtureCourses()
+    process.env.BCITY_CURRICULA_DIR = FIX
+    await expect(openCourse('x-iter0', { trainMode: 'offline' })).rejects.toThrow(/没有终点/)
+    expect(existsSync(trajOf('x-iter0'))).toBe(false) // prepareCourseForOpen 未被触达
+    expect(Object.keys(courseKeys('x-iter0'))).toHaveLength(0) // 旋钮没写
+  })
+
+  it('在线开课不受这道闸约束（在线 = 跑到手动停，不需要有限终点）', async () => {
+    fixtureCourses()
+    process.env.BCITY_CURRICULA_DIR = FIX
+    const r = await openCourse('x-noiters', {
+      trainMode: 'online',
+      hubMode: { attempts: 1, delayMs: 0 },
+    })
+    expect(r.ok).toBe(true)
+    expect(r.message).toContain('已开课')
   })
 })
 

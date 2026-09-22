@@ -84,6 +84,7 @@ function ovView(
     activeWorkers: 3,
     halt: false,
     recentDispatch: 'c4',
+    offline: [],
     offlineProgress: null,
     rows,
     ...patch,

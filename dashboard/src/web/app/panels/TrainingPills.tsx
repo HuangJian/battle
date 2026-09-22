@@ -35,6 +35,8 @@ export interface TrainingPillsProps {
   rows: LoopQueueRow[]
   /** 共享 trainer 是否在跑（「已开课」与「进程在跑」是两件事，状态文案要说清）。 */
   trainerRunning: boolean
+  /** ★2026-09-22：离线课程名集（hub 只收回传）——pill 状态改「回传中」而非「推进中」。 */
+  offline?: ReadonlySet<string> | null
   /** 当前查看课程（高亮 + 「正在看」提示）。 */
   viewCourse: string
   onSelect: (course: string) => void
@@ -57,12 +59,13 @@ export function TrainingPills({
   courses,
   rows,
   trainerRunning,
+  offline,
   viewCourse,
   onSelect,
   onStop,
   readOnly,
 }: TrainingPillsProps) {
-  const pills = coursePills({ courses, rows, trainerRunning })
+  const pills = coursePills({ courses, rows, trainerRunning, offline })
   // 一门课都没开 ⇒ 整个组件不渲染（顶部保持干净：空块/空行会被读成「有东西没加载出来」）。
   if (pills.length === 0) return null
   // 组前的文字标签「在训」已删（2026-09-20 用户指令）——`aria-label` 保留：屏幕阅读器

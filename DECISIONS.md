@@ -5404,3 +5404,64 @@ KERNEL32/api-ms-win/ucrtbase/VCRUNTIME；有 llvm 时再断言 `llvm-nm -u` 空 
 - 离线（2026-09-22 追记）：demo 腿支持 cloud rollout＋PPO 离线——bundle 自动带 `demo.npz`
   （OPTIONAL_PARTS，导入即 sha 对账），节点 `open_run_context` 启动期种子 blob_cache
   （缺件启动期响亮拒绝）；push 经 BLOB_NAMES 自动带 blob；pull 零改动。控制台不开离线入口。
+
+## §2026-09-22-course-error-isolation-loud（2026-09-22，课程配置错误不得弄崩共享 trainer；控制台响亮报错）
+
+2026-09-22 事故：开课 x20-demo-mix 选「离线（整段上云）」但课程 `iters=0`，run_rl 的
+SystemExit（`--run-iters<0 需要课程声明 iters——没有终点就不叫整段`，BaseException）从一步级
+执行穿透调度器 `except Exception` 的 RETRY 兜底，把**整个共享 trainer**（一个进程服务所有课程）
+弄崩（PID 18748）→ exit-watchdog 判死 → 误向云机下发停机。用户口径：「控制台应响亮报错，
+而不是泛泛的意外退出」「课程设置错误，应该是把课程下线，而不是把基础设施弄崩」。
+
+**三层防线（本文落地）**：
+- **开课预校验（预防）**：`openCourse` 的零副作用预检区新增「离线模式要求课程声明有限
+  `iters>0`」，违规即 `ActionError`（文案与 python 守卫同口径：「没有终点就不叫整段」），
+  盘上零副作用——trainer 根本接触不到坏配置。
+- **一步级按课隔离（遏制）**：`rl/loop_serve.py::build_executor` 在课程归属内 catch `SystemExit`
+  （只此一类 BaseException，不动 Exception 的 RETRY 语义），转 `abort(...)` 走调度器既有
+  「ABORT：只脏本课（§4.3）」：该课队列 ABORTED + `report.skipped/failures` 记录原因，
+  发现模式不重试；**其余课照跑，进程不再被单课错误带崩**。KeyboardInterrupt 不受影响。
+- **意外退出原因进横幅（可观测）**：`exit-watchdog` 新增 `tailFailureReason`（traceback 末行 /
+  无时间戳裸 `[run_rl]`/`[serve]`/`[loop]` 前缀行两种形状），`runExitCheck` 在 `recentPlannedStop`/
+  `tailNormalCompletion` 之外命中即把具体原因写入 `registry.error` 与云停机 reason——横幅从
+  「意外退出 (PID …)」变为「意外退出 (PID …)——原因：…」（保留「意外退出」字样，与
+  「已停车」判别面不混）。
+
+**否决的备选**：
+- 给调度器 `except Exception` 直接扩成 `BaseException`——否：会把 KeyboardInterrupt 也吞成
+  RETRY（Ctrl-C 停不了 serve），且 RETRY 会无限重试刷日志；只按课捕 SystemExit 才能
+  "只脏本课"。
+- 开课预校验放 UI 弹窗——否：拒绝必须在服务端动作边界（UI 可绕过、且要零副作用保证），
+  放 `openCourse` 预检区与既有「被拒 = 什么都没发生」契约同区。
+
+## §2026-09-22-offline-bundle-autoready（2026-09-22，离线课开课自动出包 + 随时可导 + 行内操作 + 状态列修正）
+
+承接 §2026-09-22-course-error-isolation-loud 的离线链路收口（用户三条指令叠加）：
+①「离线课程开课后自动生成任务包，kaggle 配好接离线任务后经 hub 下载执行」；②「开课后
+也不应锁定任务包不给导出，应支持随时导出」；③「首页任务包区域去掉、导出/导入放课程行
+操作列；iter/本轮/在等什么/队列 列未正确显示离线课程状态，要修正」「总览离线课不应是
+「it1 推进中」」。
+
+**落地**：
+- **随时导出（python）**：`run_rl.py` 的 `--export-bundle` 分支**不取 per-course 单实例锁**
+  （导出=只读快照：打 zip 不推进账本/不落新权重）；`loop_steps._remote_ppo` 的导出分支同步
+  **跳过 commit-journal attach**（否则并行导出会给调度器在飞集写一条永远等不到的幽灵 job，
+  与 `register=export_path is None` 同一门）。共享 trainer 服务中也能导出/重导。
+- **开课自动导出（dashboard）**：`openCourse` 离线开课成功即 `launchTaskBundleExport`
+  （异步起进程、回执 note 带状态与日志路径；`BCITY_NO_AUTO_TASK_BUNDLE` 测试逃生阀）。
+  `exportGuard` 删除「run_rl 锁被占」拒绝（保留 weights 存在 + busy 互斥）。
+- **hub 分发**：`GET /offline/task-pack?course=` 已然在（`hub_server.py`），zip 落盘即原子
+  （`bundle.export_bundle` tmp+replace）——Kaggle/Colab 离线 worker 探到 hub 即自动拉取执行。
+- **UI 改版**：首页「任务包」面板下线（删 `TaskBundlePanel.tsx`）；导出/下载/导入下沉到
+  `CourseMatrix` 每行「操作」列（新 `BundleRowActions.tsx`，仅离线课行渲染；导出=postAction
+  `exportTaskBundle` + `/api/taskBundleInfo` 轮询自动亮「下载」；导入=`uploadDeliverZip`）。
+- **离线课状态列修正（任务包+回传维度；执行模型不变，本地照常派发）**：
+  `matrix` 离线行 iter 列读 `offlineLastIter`（云机回传最新 it，非本地「下一轮」指针）、
+  本轮列=「云机 itN」、在等什么=「云机运行中 · 已回传 N 轮」、队列列为「只收回传」；
+  总览 pill 离线课一律「回传中」非「推进中」（`coursePills.offline`，确定性事实暂停/收官/
+  中止优先级不动）；`ParallelOverviewView` 新字段 `offline: string[]`（来自 hub queue）。
+
+**否决的备选**：
+- 直扩调度器 `except BaseException`——否（§2026-09-22-course-error-isolation-loud 已拒）。
+- 导出继续锁互斥、让操作员先停课再导——否：用户要求随时可导；锁语义从「同课两写者护栏」
+  收窄为「训练写者独占」，导出按只读快照放行。

@@ -56,6 +56,7 @@ import {
 import { Empty } from '../../components/Empty'
 import { SectionHeader } from '../../components/SectionHeader'
 import { StatusDot } from '../../components/StatusDot'
+import { BundleRowActions } from './BundleRowActions'
 
 /** 切课按钮的悬停（导出给用例断言，避免文案与断言两处漂移）。 */
 export function pickTitle(course: string, viewing: boolean): string {
@@ -284,7 +285,15 @@ function MatrixTr({
         {r.iter === null ? '—' : `it${r.iter}`}
       </td>
       <td className="tc-mx__round">
-        {lq ? (
+        {r.ov?.offline ? (
+          // ★2026-09-22（离线课列修正）：本轮这列对离线课读「云机回传」——本地 13 步表的
+          // 步骤（publish/等回传…）对操作员无读面意义，段由云机整段执行。
+          <span
+            title={`云机整段执行中：最新回传 it${r.ov.offlineLastIter ?? '—'}（本地只收回传、不实时派发）`}
+          >
+            云机 it{r.ov.offlineLastIter ?? '—'}
+          </span>
+        ) : lq ? (
           <>
             <span title={stepTitle(lq)}>{lq.current || '—'}</span>
             <span className="tc-mx__todo" title={pendingTitle(lq)}>
@@ -368,14 +377,22 @@ function MatrixTr({
               ) : null}
             </>
           ) : null}
+          {/* ★2026-09-22 改版：离线课的任务包能力（导出/下载/导入）下沉到行内操作列——
+              「任务包」独立面板已从首页下线（无操作通道时不渲染，与其余行内动作同判据）。 */}
+          {r.ov?.offline ? <BundleRowActions course={r.course} /> : null}
         </td>
       ) : null}
     </tr>
   )
 }
 
-/** 指针悬停：说清它是「下一轮要跑的 it」以及**来自哪一侧**。 */
+/** 指针悬停：说清它是「下一轮要跑的 it」以及**来自哪一侧**（离线课 = 云机回传指针）。 */
 function iterTitle(r: CourseMatrixRow): string {
+  if (r.iterSource === 'offline')
+    return (
+      `回传指针 it${r.iter} —— 云机回传的最新段内 it（离线课：hub 只收回传、不实时派发；` +
+      '本地「下一轮」队列指针对这本段无读面意义，见 /metrics 的账本尾行）'
+    )
   const src = r.iterSource === 'queue' ? '训练侧队列（下一轮要跑）' : 'hub 侧账本尾行'
   const cross = r.iterSource === 'queue' ? '；hub 侧账本尾行另见 /metrics' : ''
   return `账本指针 it${r.iter} —— 来自${src}${cross}`
