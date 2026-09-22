@@ -77,7 +77,7 @@ def pytest_runtest_makereport(item, call):
         report.longrepr = (
             f"耗时预算超限：本用例 call 阶段 {secs:.2f}s > {fail:g}s（用户口径 >10s 报错）。\n"
             f"墙钟长而 CPU 低的典型成因是纯空闲等待（生产超时/固定 sleep）——请改成"
-            f"事件驱动，或用 policy 旋钮把配速调小（见 docs/nn.progress.md §98）。\n"
+            f"事件驱动，或用 policy 旋钮把配速调小（见 docs/nn/engineering.md §14）。\n"
             f"确需更长时用 @pytest.mark.time_budget(<秒数>) 显式放宽并写明理由。"
         )
     elif secs > warn:

@@ -1340,7 +1340,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 # 机器通道 = 纯 ASCII（\uXXXX 转义）：对消费方的解码编码完全免疫
                 # （裸 text=True 父进程 / agent 自带解码器都读不坏）；人类可读走
                 # 非 --json 分支。曾用 ensure_ascii=False 在 zh-CN Windows 上与
-                # GBK 解码父进程互炸——见 docs/nn.progress.md §30。
+                # GBK 解码父进程互炸——见 docs/nn/engineering.md §3。
                 ensure_ascii=True,
                 indent=2,
             )

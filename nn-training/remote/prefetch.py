@@ -35,7 +35,7 @@ from typing import Any
 #: 预取深度（缺省 3，§2.6）。`0` = 关预取（回退路径：只调度不预取）。
 PREFETCH_DEPTH_DEFAULT = 3
 #: 暂存区总字节上限（硬预算，§2.6：**必须写死一个数**）。缺省 64 MB —— 单 job payload 量级
-#: 是 3–10 MB（`docs/nn.progress.md` 的 wire 账），深度 3 的均值约 10–30 MB，留一倍余量。
+#: 是 3–10 MB（`docs/nn/remote-transport.md` 的 wire 账），深度 3 的均值约 10–30 MB，留一倍余量。
 PREFETCH_BUDGET_BYTES_DEFAULT = 64 * 1024 * 1024
 #: 暂存目录名（`work_dir/prefetch/`，单 hub ⇒ 不做 hub{i} 分区）。**必须在 prune 豁免名单里**。
 PREFETCH_DIR_NAME = "prefetch"

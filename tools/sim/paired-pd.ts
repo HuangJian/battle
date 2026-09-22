@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
  * paired-pd.ts — 同种子配对 verdict：pd / Δ / McNemar 精确检验 + 分关。
- * 口径：docs/nn.progress.md §50（x3-step：锚点 200 对 b01=7/b10=4 pd=5.5%；
+ * 口径：docs/nn/experiments.md §6（x3-step：锚点 200 对 b01=7/b10=4 pd=5.5%；
  * 800-verdict b01=12/b10=26 pd=4.75%）；T5「换尺」判决的 pd 尺。
  *
  * 输入：eval-course-ckpt.ts 的两份 JSONL（同 course / 同 games / 同 seed0

@@ -183,7 +183,7 @@ def attributed_source(peer: str, cf_header: str) -> tuple[str, str]:
     它自己编的），故直连路径只认 TCP 对端 IP；而回环对端意味着「由本机上的中继（cloudflared）
     转发进来」，此时头由 Cloudflare 边缘注入。
 
-    ⚠️ **假设与失效代价**（待实测，见 `docs/nn.progress.md` 的归因来源条目）：本规则成立的前提是
+    ⚠️ **假设与失效代价**（待实测，见 `docs/nn/remote-transport.md` §6 的归因来源条目）：本规则成立的前提是
     边缘**会覆写** `CF-Connecting-IP`。即使假设不成立（客户端能自带该头），最坏后果**两条都良性**：
       ① 轮换头值 ⇒ 攻击者拿不到封禁，效果退化为「回环豁免」（= 本方案之前的状态，不会更差）；
       ② 伪造别人（如某个 tailnet worker）的 IP ⇒ 那个 IP **只**会被拒「无效鉴权尝试」，带

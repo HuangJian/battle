@@ -305,7 +305,7 @@ class _Loop:
         if not out.exists():
             # 内容带本用例唯一标记：`wver` = 文件指纹，而 `_WEIGHTS_PUSHED` 是**进程内跨用例**
             # 的账本（键 `(kind, wver)`）——全仓库的哑权重若都是 `{"stub": true}`，后一个用例
-            # 就会走 “kept / skip POST”（docs/nn.progress.md §97；门禁里那条随机 flake 的根）。
+            # 就会走 “kept / skip POST”（docs/nn/engineering.md §13；门禁里那条随机 flake 的根）。
             out.write_text(json.dumps({"stub": True, "case": tmp.name}), encoding="utf-8")
         self.args = types.SimpleNamespace(
             target_transitions=target,

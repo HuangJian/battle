@@ -11,7 +11,7 @@ CPython 读线程在 ``subprocess._readerthread`` 里解码失败死亡 → ``st
   * 父侧：本 helper 显式 ``encoding="utf-8"`` 解码，并对 ``stdout is None``
     （读线程死亡的唯一痕迹）就地报错，而不是让它漏到远处的 TypeError。
 
-背景与复现矩阵：docs/nn.progress.md §30（2026-09-13，``test_cli_dry_run_exit_code``
+背景与复现矩阵：docs/nn/engineering.md §3（2026-09-13，``test_cli_dry_run_exit_code``
 在 PYTHONIOENCODING=utf-8 且无 PYTHONUTF8 的机器上必红）。
 """
 

@@ -518,7 +518,7 @@ def _itest_env(
     # `_WEIGHTS_PUSHED` 是**进程内跨用例**的账本（键 `(kind, wver)`）——内容全同则后一个
     # 用例（或前一个用例**仍在途的收尾线程**）会让本轮的权重下发走 “kept / reuse … skip
     # POST”，于是「本轮真的下发过权重」这类断言退化成对**用例执行顺序**的断言
-    # （docs/nn.progress.md §97：门禁里那条随机 flake）。键不同就与线程时序无关。
+    # （docs/nn/engineering.md §13：门禁里那条随机 flake）。键不同就与线程时序无关。
     weights.write_text(json.dumps({"stub": True, "case": tmp_path.name}))
     # 账本清零保留作双保险（内容唯一已使撞键不可能）：防「手写同内容」的新用例把这个坑带回来。
     dist_common.weights_push_cache_reset()

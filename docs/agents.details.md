@@ -53,7 +53,8 @@ teacher's only job is getting the NN started (BC distillation corpus + scaffoldi
   You extend it, not contradict it. Full bodies live in `docs/decisions.details.md` (foundational §1–§10,
   refactor/engineering §239–§271, God-AI freeze ops §273–§276, replay/RL-bridge §279–§280, NN epoch §289–§290)
   and the topic progress docs (`docs/god-ai-tuning.progress.md`, `docs/perf-optimization.progress.md`,
-  `docs/render-optimization.progress.md`, `docs/nn.progress.md`, `docs/nn.progress.intent.md`).
+  `docs/render-optimization.progress.md`, `docs/nn/*.md` (index: `docs/nn.progress.md`),
+  `docs/nn.progress.intent.md`).
 - `plan/mvp.md` — what the product is; its §10 MVP DoD applies to every change.
 - `plan/Snapshot-Management-Framework.md` and `plan/presentation-upgrade.md` — active feature plans;
   their "Definition of Done" sections are acceptance criteria.
@@ -426,12 +427,24 @@ here. Each pitfall below was hit and debugged (2026-08-27) — the "reproduce" o
   plans, and scratch docs are the human's curation domain; sweeping them into history creates churn
   the human then has to undo.)
 
-### 5.9 NN training progress must be recorded in `docs/nn.progress.md`
-Every architecture change, eval result, and lesson from NN training goes there — new entries
-appended at the top (reverse chronological) under numbered sections (§1, §2, …), each recording what
-changed, eval results (val_loss + sim win rate), root-cause analysis, and concrete lessons. It is the
-single source of truth for NN training history — not chat, not commit messages. Check it first
-before architectural changes (`model.py`, `infer.ts`, `obs-encoder.ts`).
+### 5.9 NN training progress must be recorded in the matching topic doc under `docs/nn/`
+Every architecture change, eval result, and lesson from NN training is logged — new entries appended
+at the top of the **topic doc that owns the area** (reverse chronological) under numbered sections,
+each recording what changed, eval results (val_loss + sim win rate), root-cause analysis, and concrete
+lessons. It is the single source of truth for NN training history — not chat, not commit messages.
+Check the topic doc first before architectural changes (`model.py`, `infer.ts`, `obs-encoder.ts`).
+
+- **Topic docs** (split 2026-09-23 out of the former single-file `docs/nn.progress.md`, 7.9k lines):
+  `docs/nn/legacy.md` (pre-2026-08-30 lineage archive) · `remote-transport.md` · `training-stack.md` ·
+  `experiments.md` (course verdicts / probes / negative results) · `engineering.md` (test discipline,
+  encoding contracts, gates, ledger schemas) · `console.md` · `runtime-opt.md` · `tpu-perf.md`.
+- **Numbering**: each file numbers its own sections ascending; a new entry is `当前最大号 + 1`
+  **inside that file** and goes at the top, so higher = newer, `§1` = oldest.
+- **`docs/nn.progress.md` is now the index** — accounting rule, topic-doc table, open threads, and
+  **Appendix A** (all 155 old `§N` → new doc mapping). Old external `§N` citations were rewritten
+  repo-wide on 2026-09-23; resolve an unfamiliar old number through Appendix A.
+- Entries are **append-only**: never rewrite an old entry's body; if it turns out wrong, add a new
+  entry that links it.
 
 ### 5.10 Style
 - No classes where a function suffices; no singletons for gameplay state.

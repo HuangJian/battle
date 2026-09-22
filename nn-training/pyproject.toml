@@ -231,7 +231,7 @@ addopts = "-ra -q --tb=short -x --timeout=60"
 #   `NN_TEST_WARN_S` / `NN_TEST_FAIL_S` / `--test-warn-s` / `--test-fail-s` 可覆盖，
 #   个别确需更长的用例用 `@pytest.mark.time_budget(N)`（写明理由）。
 #   引入背景：门禁墙钟 157s 里绝大部分是测试在**空等生产超时**（不占 CPU）——当时最慢单测
-#   30s（4 个 26.5s）；修完实测最慢 5s，全量 157s → 24s。详见 docs/nn.progress.md §98。
+#   30s（4 个 26.5s）；修完实测最慢 5s，全量 157s → 24s。详见 docs/nn/engineering.md §14。
 # 真的合法超 60s 的用例用 `@pytest.mark.timeout(N)` 显式放行。
 # 优先级：CLI `--timeout=N` 覆盖 addopts（后者生效：门禁/task 仍是 50s）；长 e2e（真训练/
 # 真 sim）显式 `--timeout=0` 关闭。局限：pytest-timeout 兜不住 C 层原生阻塞（subprocess.wait

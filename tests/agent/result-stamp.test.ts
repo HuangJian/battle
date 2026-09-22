@@ -7,7 +7,7 @@ import { buildPack, unpackContainer } from '../../tools/sim/pack-container'
 /**
  * 服务耗时戳（elapsedSec）的两个不变量。
  *
- * 背景（2026-09-21 真机归因，docs/nn.progress.md §126）：a95 上同一局「客户端看到 3.4s、
+ * 背景（2026-09-21 真机归因，docs/nn/runtime-opt.md §5）：a95 上同一局「客户端看到 3.4s、
  * manifest 只记 0.7s」，第二次请求（命中缓存）却记 3.2s —— 根因是同步路径把 `stampServiceSec`
  * 的**盖章副本**放进缓存、把**原 buf**发给客户端（缓存里那份才带真值）。
  *

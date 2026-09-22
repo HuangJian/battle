@@ -1,7 +1,7 @@
 # RL Training — Progress Log
 
 > RL 阶段（BC 热启动之后的 PPO/课程化训练）的全部进展、评估结果与教训记录于此。
-> 新条目置顶（倒序编号，`## §N`）；BC/蒸馏侧历史见 `docs/nn.progress.md` 与
+> 新条目置顶（倒序编号，`## §N`）；BC/蒸馏侧历史见 `docs/nn.progress.md`（索引）· `docs/nn/legacy.md`（早期谱系）与
 > `docs/goal-nn.progress.md`；God-AI 调参侧见 `docs/god-ai-tuning.progress.md`。
 
 ---

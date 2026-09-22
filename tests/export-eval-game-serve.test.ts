@@ -7,7 +7,7 @@ import { main } from '../tools/sim/export-eval-game'
 /**
  * `export-eval-game.ts --serve`：让 eval 也进 agent 的 persist 池（长驻 worker）。
  *
- * 为什么（docs/nn.progress.md §126 / plan/rollout-eval-opt.plan.md §4.1）：eval 原先每局
+ * 为什么（docs/nn/runtime-opt.md §5 / plan/rollout-eval-opt.plan.md §4.1）：eval 原先每局
  * `spawn` 一个新 bun，a95(Termux) 实测这一下 ~2.5s（一局游戏本身才 ~1s），而且会把 agent
  * 的事件循环占满（任务中 `/v1/status` 首轮应答被拖 2.59s）。协议与 export-rl-rollout 的
  * `--serve` 一字不差：stdin 每行 = 一个任务的 argv（JSON 数组，**不含入口路径**——agent 侧

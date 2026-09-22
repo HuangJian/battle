@@ -10,7 +10,7 @@
 > - 重构 / 工具链 / 回放 / RL 桥正文 → `docs/decisions.details.md` Part B–D
 > - God AI 调优历史（含基线 / golden） → `docs/god-ai-tuning.progress.md`
 > - 仿真 / 渲染性能 → `docs/perf-optimization.progress.md` / `docs/render-optimization.progress.md`
-> - NN 训练与意图策略 → `docs/nn.progress.md` / `docs/nn.progress.intent.md`
+> - NN 训练与意图策略 → `docs/nn.progress.md`（总索引 + 旧号对照）/ `docs/nn/*.md`（主题档案）/ `docs/nn.progress.intent.md`
 > - 功能 / 架构现状 → `docs/features.md` / `docs/architecture.md`
 >
 > **历史编号占位**（外部文档仍引用的旧编号，正文已归档）：
@@ -611,15 +611,15 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 
 ## 280. 否决 RL-WASM-Bridge（B3），改走 A'（bun 持久进程桥）(STATUS: 已决议) —— 全文 → docs/decisions.details.md（Part D §280，含 v3–v5 评审附录）· 评审 → plan/RL-WASM-Bridge.review.md · 执行 → plan/RL-Bun-Bridge.md
 
-### RL 训练基础设施（§281–§284，全文 → docs/nn.progress.md）
+### RL 训练基础设施（§281–§284，全文 → 见各条指向的主题档案）
 
-## 281. RL 训练断点续跑机制（服务随时停启）(STATUS: 完成, 2026-08-23) —— 全文 → docs/nn.progress.md §4（RL 训练断点续跑机制）
+## 281. RL 训练断点续跑机制（服务随时停启）(STATUS: 完成, 2026-08-23) —— 全文 → `docs/nn/legacy.md` §8（RL 训练断点续跑机制）
 
-## 282. RL 队列模式静默跳轮修复 — resumed_manifests 双 schema 归一 + 失败迭代原地重试 (STATUS: SHIPPED, 2026-08-24) —— 全文 → docs/nn.progress.md §5（队列模式静默跳轮修复 + 事故复盘）
+## 282. RL 队列模式静默跳轮修复 — resumed_manifests 双 schema 归一 + 失败迭代原地重试 (STATUS: SHIPPED, 2026-08-24) —— 全文 → `docs/nn/legacy.md` §9（队列模式静默跳轮修复 + 事故复盘）
 
-## 283. 干净评估嵌入分布式流水线 — PPO 空窗期全节点贪心局（STATUS: SHIPPED, 2026-08-24） —— 全文 → docs/nn.progress.md §7（干净评估嵌入分布式流水线）
+## 283. 干净评估嵌入分布式流水线 — PPO 空窗期全节点贪心局（STATUS: SHIPPED, 2026-08-24） —— 全文 → `docs/nn/legacy.md` §11（干净评估嵌入分布式流水线）
 
-## 284. 分布式协议 v3.6 — 结果容器 BCV2 子进程打包 + 任务获取异步化（STATUS: SHIPPED, 2026-08-25） —— 全文 → docs/nn.progress.md 分布式 BCV2 节 + plan/distributed-rollout.md v3.6
+## 284. 分布式协议 v3.6 — 结果容器 BCV2 子进程打包 + 任务获取异步化（STATUS: SHIPPED, 2026-08-25） —— 全文 → plan/distributed-rollout.md v3.6（原 `docs/nn.progress.md` 的分布式 BCV2 节在这次按主题重组中无对应节；早期流水线记录见 `docs/nn/legacy.md`）
 
 ## 285. M1 分歧探针 — 归因 ①/③ 边界（2026-08-26，plan/AI-No-Items-Warmstart.md §4）
 
@@ -812,7 +812,7 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 > **定案**：hub-start.ts 全原生 Bun 重写（Bun.connect/spawn/process.kill + 分文件注册账本）。四平台陷阱（勿再踩）：① Bun Job Object 默认 kill-on-close → 须 detached:true；② choco shim 另起真身不透传 stdio → 反推 lib\cloudflared	ools 直启 + --logfile；③ uv venv trampoline 杀跳板留孤儿 → 读 pyvenv.cfg executable 直启 + PYTHONPATH 挂 Lib\site-packages；④ 注册账本竞态 → registry.<name>.json 分文件。
 
 ## §340 冒烟预演设计：真课程 + echo 回显 + 作废轮，不建虚拟课程（2026-09-05，用户拍板）
-> **定案（用户拍板）**：冒烟预演走真课程路径（TrainingLoop + --smoke 真 job + 伪 Kaggle --echo 回显 + SmokeVoidRound 作废本轮），否决虚拟课程；硬门严格化（隧道/code.zip/self-rollout 任一失败 exit 1，--no-tunnel 逃生门）；补充：位置参数课程名 + 启动前课程快速失败；GPU↔HUB 通信分层重传加固（RetryableError 划界 / worker 下载 3 次退避 / post_result 5 次 / release 还租约 / 结果缓存复用）。实施记 docs/nn.progress.md §18。
+> **定案（用户拍板）**：冒烟预演走真课程路径（TrainingLoop + --smoke 真 job + 伪 Kaggle --echo 回显 + SmokeVoidRound 作废本轮），否决虚拟课程；硬门严格化（隧道/code.zip/self-rollout 任一失败 exit 1，--no-tunnel 逃生门）；补充：位置参数课程名 + 启动前课程快速失败；GPU↔HUB 通信分层重传加固（RetryableError 划界 / worker 下载 3 次退避 / post_result 5 次 / release 还租约 / 结果缓存复用）。实施记 `docs/nn/remote-transport.md` §1（冒烟预演）。
 
 ## §341 /pool 页面热加载——pool-page.ts 改动免重启 agent（2026-09-06，用户指令）
 > **定案**：pool-page.ts 改 mtime 键控动态 import 热加载（键=mtimeMs，文件版本只占一条模块记录；坏文件回退上版且页面 200）；
@@ -1472,7 +1472,7 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   wins-only 败局 = `kept:false` 空容器（合法结果非失败）；BC 课程独立文件种类
   `.bc.jsonc`（rl/bc_config.py，D14 同规 `bc_corpus_identity_fp`）；smoke = 尺寸压缩
   真一轮 + scratch 落位 + 账本零污染（不覆盖 out、不写 bc_round_completed）。
-- **教训入册**（docs/nn.progress.md §39）：单 shard 语料 shard 级切分 train=0 崩溃
+- **教训入册**（`docs/nn/remote-transport.md` §5）：单 shard 语料 shard 级切分 train=0 崩溃
   （make_loaders 回退样本级）；agent 结果缓存键不含任务参数 → smoke 独立 iterId 命名空间；
   LAN 节点需升级（git pull + restart）才有 `bcSupport` 能力位——升级前 fail-closed 不派。
 
@@ -1829,7 +1829,7 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   陡峭化（wKill 3.0→4.0 / wHit 0.3→0.15，即 10:1→27:1）单变量代理 30 轮。终局同批配对
   （池外种子 400000-400199，四关各 200）：**553/800 = 69.125% vs 基线 576/800 = 72.00%**，
   pooled **Δ=−2.875pp**，McNemar 单侧 p=0.9998（双侧 p=0.0011，净 −3.35σ），pd=5.9%
-  ⇒ 判线失败、**判负**。分关/伴随量/事件账全文在 `docs/nn.progress.md` §46。
+  ⇒ 判线失败、**判负**。分关/伴随量/事件账全文在 `docs/nn/experiments.md` §4。
 - **本条目立的是该腿派生的三条口径/程序（实验记录本身不进本文件）**：
   1. **判读禁令**：KL it30=0.00213（`kl_cap` 本路径不接线，见 §2026-09-15-goalnn-kl-cap-unwired）⇒ 结论的**唯一合法写法**是
      「**梯度无方向 / 执行瓶颈**」（指向 metrics v6，分敌种命中列 TS+Python 全链）；
@@ -1867,8 +1867,7 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 - **背景**：`ppo_schedule` 的 `kl_cap` 在 per-tick **remote/serial** 执行路径**不接线**——
   `ppo/engine.py::ppo_update` 无形参；`remote/worker.py` 只读 `kl_coef`；全仓消费者仅
   `rl/stream.py`（stream 波次闸）与 manifest 打包。x3 线 `stream=0`（remote 强制）⇒
-  字段写了也不生效。`p4-fast.jsonc` 已写对；但 x3-step / x3-power 结算 / `nn.progress.md`
-  §46、§19.1 仍把「kl_cap 从未咬合 / 回落兜底」当成生效护栏叙事。
+  字段写了也不生效。`p4-fast.jsonc` 已写对；但 x3-step / x3-power 结算 / `docs/nn/experiments.md` §4、`docs/nn/remote-transport.md` §2.1 仍把「kl_cap 从未咬合 / 回落兜底」当成生效护栏叙事。
 - **备选与否决**：A 继续当护栏写 —— 否，机制假、后腿会按「失去护栏」解释第二段；
   B 引擎接线硬顶 —— 否，属新训练变量/算法变更，须另立项，本条只钉口径；
   C 只改课程注释 —— 否，跨文件反复误用，须 DECISIONS 禁令。
@@ -1953,7 +1952,7 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 ## §2026-09-16-goalnn-x3-step-negative（2026-09-16，x3-step 授权照跑判负：工厂复合第二段禁作可测性治疗）
 
 - **背景**：x3-step 在 HOLD 下经用户授权按原工厂第二段（`kl_coef 0.03 + lr 5e-5` 复合处理）
-  跑满 30 轮；it21–30 KL 仅 1.286× x3-power 同窗，pd=5.5%（详账 `docs/nn.progress.md` §50）。
+  跑满 30 轮；it21–30 KL 仅 1.286× x3-power 同窗，pd=5.5%（详账 `docs/nn/experiments.md` §6）。
 - **备选与否决**：把本腿读成「任何放缰都无效」—— 否，重设计单旋钮 A/B 未测；把本腿读成
   「信用比有害/有益」—— 否，KL≈0.002 下奖励侧任何结论都不可测；继续在本复合段加轮数 ——
   否，与 x3-power 判负同构，测不出任何奖励重定价。
@@ -1970,7 +1969,7 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 
 - **背景**：T6 三剂量＋真复刻 k0 同批配对：69.1/72.1/69.8/71.1；同配方复刻对
   （x3-power/k0）差 2.0pp 且配对显著（p=0.028）⇒ run sd≈1.4–1.5pp；
-  k05−k0 仅 +1.0pp（null）。详账 `docs/nn.progress.md` §52。
+  k05−k0 仅 +1.0pp（null）。详账 `docs/nn/experiments.md` §8。
 - **决定**：① **run 噪声地板规则**：单 run 总 SE≈2.2pp（对局 1.6＋run 1.5）；
   声称效应 <2pp 须 ≥2 独立 run（跨 run 预注册 pooling），否则结算标「未过噪声地板」；
   配对 McNemar/配对 t 只消对局噪声，禁做跨 run 因果断言（纯噪声对 shots t=−2.46
@@ -1987,7 +1986,7 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 ## §2026-09-16-goalnn-t5-credit-negative（2026-09-16，T5双run一致判负⇒奖励重定价路线关闭）
 
 - **背景**：power 2×信用双 run 主端点 Δ−0.08/−0.03（判线 +0.7），转化率三臂 49.6%，
-  pd 全灰度 7–9%；详账 `docs/nn.progress.md` §54。
+  pd 全灰度 7–9%；详账 `docs/nn/experiments.md` §9。
 - **备选与否决**：加剂量到 3× —— 否，灰度带按冻结表不触发加剂量且方向为负；
   拿单 run p / 灰度 pd 断言 —— 否，run 噪声地板规则
   （§2026-09-16-goalnn-run-noise-floor）；再调奖励其他项 —— 否，七 run KL 窄带
@@ -2081,7 +2080,7 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   新旧混合部署时整轮 job 丢失；开瘦身却不在指标里记开关 ⇒ 无法归因。
 - **配套事实（M1 实测，2026-09-17 本机）**：`http2` 上行 p50 4.7–4.9s / `quic` 23–33s（2MiB，每臂 2 轮
   独立 run，run3 八连发无退化）⇒ **决策门 1 命中，默认 `http2`/`edge-ip-version 4` 有实测支撑**；
-  数字与探针用法见 `docs/nn.progress.md` §58（合并时为避开 origin 已推送的 §56 而改号）。同在那一轮量到的一个坑：本机 `HTTPS_PROXY=127.0.0.1:7890`
+  数字与探针用法见 `docs/nn/remote-transport.md` §7（合并时曾为避免撞号改号，2026-09-23 重组后统一重排）。同在那一轮量到的一个坑：本机 `HTTPS_PROXY=127.0.0.1:7890`
   而 `NO_PROXY` 不含 `*.trycloudflare.com` ⇒ **任何打隧道 URL 的本机客户端必须绕过代理**
   （不绕会拿回 `SSL: UNEXPECTED_EOF_WHILE_READING`，而 cloudflared 日志看起来完全健康）。
 - **B6（xz preset 3→6）已量、不采用**（2026-09-17，3 份真 payload）：体积只 −2.6…−3.0%（~34KB），
@@ -2132,12 +2131,12 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 - **配套事实**：逐位对拍已验（`tests/test_remote_iter_real_bun.py`，真 bun + 真权重，同 argv 跑两遍逐文件 diff，
   含 `_rl_report.json` 除 `elapsedSec` 全字段）；协议/规格/执行器/失败语义/传输端点共 ~70 例。
   **未做（不写成已做）**：真远程轮次的绝对值（`wire.up_sec`、每轮墙钟）与 TPU 腿上的 target ~10s ——
-  本机无节点可跑；M2 的云机绝对值确认同样仍欠。细节见 `docs/nn.progress.md` §59（合并时改号，原 §57）。
+  本机无节点可跑；M2 的云机绝对值确认同样仍欠。细节见 `docs/nn/remote-transport.md` §8（合并时曾改号，2026-09-23 重组后统一重排）。
 - **收益前提不变**：≥16 vCPU 的腿才成立（GPU T4×2 = 4 vCPU 直接否，见 `plan/kaggle-rollout-feasibility.md` §3.3）。
 ## §2026-09-17-hub-restart-deadlock-hardening（2026-09-17，hub-server 重启死锁：D9 改序 + 回环永不封禁 + 原子实例锁 + 停止 trainer 即释放锁）
 
 - **背景**：hub-server「崩溃后手动重启失败」，控制台只报「意外退出」，日志为 `端口 127.0.0.1:8787
-  已被占用——拒绝启动（禁止双监听）`。根因链与现场日志、备选否决的完整版见 `docs/nn.progress.md §56`。
+  已被占用——拒绝启动（禁止双监听）`。根因链与现场日志、备选否决的完整版见 `docs/nn/remote-transport.md` §6。
 - **根因（三层同族）**：① 旧 `_auth_ok` **先查封禁再验 token** ⇒ 本机组件用陈旧 token 连打 5 次就被
   封一小时，且**连正确 token 的健康检查/训练循环/worker 拉活一起 403**；② cloudflared 回源把隧道
   流量也归成 127.0.0.1，回环被封 = 整机服务面连坐；③ 封禁只住**进程内存**、只能重启清除，而旧实例
@@ -2268,7 +2267,7 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 - **违反后果**：任一入口把封顶 export 删掉、或把 worker 写死回 4，全量立刻退回 ~36s——而**用例仍全绿**，
   只有人肉计时才看得出来（静默退化）。由 `nn-training/tests/test_githook_scripts.py` 两条静态护栏钉住
   （已做变异验证：删 export / 退回 `-n 4` / 去上界 3/3 被抓住）。
-- **证据与完整表格**：`docs/nn.progress.md §57`。另：门禁不再重复加 `-q`（addopts 已有 ⇒ 原本
+- **证据与完整表格**：`docs/nn/engineering.md` §9。另：门禁不再重复加 `-q`（addopts 已有 ⇒ 原本
   `-qq` 吞掉了「N passed in Xs」，hook 日志里看不到用例数与耗时）。
 
 ## §2026-09-17-job-fail-report（2026-09-17，节点**确定性**失败必须带原因回传控制面：`POST /jobs/{id}/fail` + `/result` 410 终局）
@@ -2299,7 +2298,7 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   `release` 回池、**不报** `fail`。搞反的代价单边且严重：瞬时失败报成终局 = 可恢复的 job 被钉死；
   确定性失败报成瞬时 = 白烧一个超时窗口（本次要治的病）。`CodeChangedError` 刻意不报——它靠
   重启进程 + 租约回池自愈。
-- **落地**（9 个文件，逐处行为见 `docs/nn.progress.md §60`）：protocol（`FAIL_NAME`/`JobFailedError` 带
+- **落地**（9 个文件，逐处行为见 `docs/nn/remote-transport.md` §9）：protocol（`FAIL_NAME`/`JobFailedError` 带
   reason/kind/detail）、hub_server（端点 + 首写锁定 + 池排除 + 410 + `status=failed` + `job_failed` 账本）、
   hub_client（`report_job_failure` + 立即抛 + `publish_job` 清标记）、worker / worker_server（**500→410**）/ push_client、
   `rl/loop_steps.py`（首败即 ABORT + `_push_job_round` 不再包成 RetryableError）、dashboard `ppo-queue.ts`
@@ -2354,7 +2353,7 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   `python -m remote.run_loop --artifacts <dir>`）、`remote/protocol.py`、`remote/worker.py`、
   `remote/hub_client.publish_job`（计划进 payload）、`rl/loop_steps.py`（段长解析 + `_remote_run_segment`
   + `wait_timeout_sec`）、`rl/loop_core.py`（段优先 + 跳过中间轮 eval 派发）、`rl/cli.py`。
-  回归：`test_plan.py`(8) + `test_run_loop.py`(11) + `test_run_segment.py`(12)；细节 `docs/nn.progress.md §61`。
+  回归：`test_plan.py`(8) + `test_run_loop.py`(11) + `test_run_segment.py`(12)；细节 `docs/nn/remote-transport.md` §10。
 ## §2026-09-17-goalnn-offline-task-bundle（2026-09-17，全离线任务包：hub 导出 → Kaggle/Colab 上传 → 云机自主跑完；包是搬文件不是配网络）
 
 - **背景（用户需求，2026-09-17）**：「hub 支持打包导出训练任务（课程、初始权重、代码），以
@@ -2667,7 +2666,7 @@ hub 一重启就**静默**恢复派发。这是「功能存在但不可达 + 重
 - **本相位**刻意**的行为变化**（就是修复内容，必须知道）：门禁计数**不再随进程重启清零**——① I2「提示类门 REMEDIATE ×N 即停腿」的计数读**整条账本**（换新 traj = 新纪元，重新计数）；② F4 `kl_streak`/`ent_streak` 与 `ent_peak` 同源继承（连击是**连续**计数，只有下一轮再越线才续，继承既真又无害）；③ 止损连击靠新事件跨重启成立。**刻意不继承**：`_consec_fail`（重试连击是单腿内的进程护栏，继承会「重启即秒死」）、`_zero_shard_streak`（口径还依赖 `_node_rollout`，而 `iteration` 行今天没有 `rollout_src` ⇒ 从账本重算会对节点轮报假事故——R2b 给事件加该字段后再接）。
 - **备选与否决**：另造一份「训练状态账本」JSON 作 SSOT——否（两份真相必然分叉，且旧扫描器/读盘面/控制台全部已在读 `training_log.jsonl`）；把 13 步合并成「一轮一个任务」——否（用户定案：轮粒度下 executor 串行，一门课的远程等待会挡住其它课，单进程只省了进程数、没换来并行）；重启时把 torch 对象序列化恢复——否（Adam 动量序列化成本高且不必要：落盘面已有权重，缓存是**加速器**不是真相）；用 `Math.random`-式时间戳推断在飞任务 —— 否（幂等判据必须来自账本/盘面，不能来自时间猜测）。
 - **违反后果**：任何新增的跨轮门禁计数若写在内存里，就会重演本轮修掉的 bug（重启即洗白，`c6-pickup3` 6 次 / `c6-bonus` 10 次 REMEDIATE 那类判据被无限延长）；任何绕过 `_ledger_apply` 的账本写入会让视图与盘面分叉（R2b/R2c 的任务幂等判据随之失效）；把 E 类轮内瞬态写进 `loop-state.json` 会让重启后的记账与真实轮次错位。
-- **落地**：`nn-training/rl/train_ledger.py`（新）、`rl/events.py`（`write_*` 返回事件 + `write_stop_loss`）、`rl/loop_core.py`（`_setup_common` 继承）、`rl/loop_guards.py`（`_ledger_apply` + 止损落账）、`rl/loop_steps.py`（`_record_iteration` 增量并入 + 类型声明）；回归 `nn-training/tests/test_train_ledger.py`（15 例：与五个旧扫描器**奇偶**、增量==单遍、独立复算连击、坏行/未知事件透明）、`tests/test_train_ledger_wiring.py`（3 例：`_setup_common` 继承 + 继承计数当轮停腿 + 空账本从零）。设计稿 `plan/r2-loop-task-queue.md`；进度 `docs/nn.progress.md §76`。
+- **落地**：`nn-training/rl/train_ledger.py`（新）、`rl/events.py`（`write_*` 返回事件 + `write_stop_loss`）、`rl/loop_core.py`（`_setup_common` 继承）、`rl/loop_guards.py`（`_ledger_apply` + 止损落账）、`rl/loop_steps.py`（`_record_iteration` 增量并入 + 类型声明）；回归 `nn-training/tests/test_train_ledger.py`（15 例：与五个旧扫描器**奇偶**、增量==单遍、独立复算连击、坏行/未知事件透明）、`tests/test_train_ledger_wiring.py`（3 例：`_setup_common` 继承 + 继承计数当轮停腿 + 空账本从零）。设计稿 `plan/r2-loop-task-queue.md`；进度 `docs/nn/training-stack.md` §10。
 **R2b 落地（2026-09-18 续）——任务模型 + 在飞集，并把 `loop-state.json` 否决掉**：
 
 - **`rl/loop_tasks.py`**（新，纯逻辑）：`Task`（`task_id = course:it:kind` = 幂等键；重试只动 `attempt`）·
@@ -2978,7 +2977,7 @@ R2c 造好了调度器与任务体，但**没有驱动者**（至今仍是「一
   - **让位点只落在「等远端」这一段**：`BcLoop.run_one_round` 每次最多做一件事，等 GPU 回传时返回 `ROUND_WAIT`（新增的第三种轮终态：**本轮未完**，既不是失败也不是完成）⇒ 调度器把执行权交给别的课，过一会儿回来问同一轮。本机训练（`--local`）与 push 直推照旧阻塞（墙钟花在本机/邻居节点上，没有可让的余地）——与 RL 的 `eval_join` **刻意不进让位表**是同一条纪律。
 - **备选与否决**：让 serve 把 BC 课委托给 `bcRound(course, it)` 子任务类型（另一条执行路径）——否（第二条「一轮」实现，正是上面第一条要禁的）；把 BC 课也拆成细粒度步骤（采集/发布/等/落位各自一个任务）——本相位否（收益只是更细的让位点，而 BC 的墙钟几乎全在「等 GPU 回传」这一段，已让位；留作需要时再下沉）；让 `run_bc.py` 变成只 import 新模块的 re-export 壳（保持旧测试导入路径）——否（同一对象两个名字会让「谁是家」含混，改为把测试指向新家）；BC 课仍用一个专属进程（本轮不动）——否（与用户口径冲突）。
 - **违反后果**：任何在 `rl/bc_loop.py` 之外再写一遍「一轮」（含控制台/工具脚本自己发布 job）都会重新引入「重发布 ⇒ bc-resume 失效 ⇒ 从头训」这条最贵的错误；任何把 BC 课按 RL 读账本的地方都会得到 `next_it=1`（看起来「这课没在训」）；给 BC 课发 13 步任务表会让该课在第一次执行时就 ABORT。
-- **落地**：`nn-training/rl/bc_loop.py`（新，1395 行；14 个函数体从 `run_bc.py` **AST 逐字节搬迁**、`_append_ledger`/`_ledger_bc_epoch`/`_run_epoch_eval`/`_finish_all_rounds`/`_archive_round` 去下划线）· `rl/bc_ledger.py`（新，BC 指针/完成集/收口 job 的单一读面）· `rl/loop_round.py`（新终态 `ROUND_WAIT` + `RoundOutcome.detail`）· `rl/loop_runner.py`（`ROUND_WAIT` → `waiting(..., jid=..)`；`ledger_next_it` 钩子）· `rl/loop_core.py`（单课程驱动器对 `ROUND_WAIT` 的阻塞语义：退避重问同一轮）· `rl/loop_plan.py`（`course_kind` / `round_tasks_for` / `course_facts(course=)`）· `rl/bc_config.py`（`is_bc_course`）· `rl/loop_serve.py`（`_open_bc_course` + 工厂分派 + 入队粒度）· `run_bc.py`（薄壳）· `run_rl_cluster.py`（`build_rows` 带 `kind` + 人读表加种类列 + BC 行的 facts 行不再摆一排 RL 的零）· 控制台：`web/view/loop-queue.ts`（`LoopCourseKind` + `kindBadge`/`stepTitle`/`pendingTitle`）· `web/app/panels/LoopQueue.tsx` · `web/app/app.tsx`（解除 `isBc` 门控）· `web/theme.css`（`.tc-loopq__kind--bc`）。回归：`tests/test_bc_ledger.py`(9) · `tests/test_bc_loop.py`(16) · `tests/test_serve_bc.py`(5，serve × BC 集成：让位/驱逐认领/粒度/锁/故障隔离) · `tests/test_loop_plan_bc_rows.py`(9，读面：种类/指针/在飞/两行共存) · `dashboard/tests/web-app-loopqueue.test.ts`（+3：BC 行与 RL 行并列 / 悬停各说各的 / 卡片不再被 `isBc` 门控）· `dashboard/tests/server-api-loop-queue.test.ts`（+1：`kind` 的保守默认）· 既有 BC 用例改为指向新家（`tests/test_bc_course.py`、`tests/test_remote_transport.py`、`e2e/test_bc_epoch_e2e.py`）。进度 `docs/nn.progress.md §86/§87`；plan `plan/r2-loop-task-queue.md §8 R3-4`。
+- **落地**：`nn-training/rl/bc_loop.py`（新，1395 行；14 个函数体从 `run_bc.py` **AST 逐字节搬迁**、`_append_ledger`/`_ledger_bc_epoch`/`_run_epoch_eval`/`_finish_all_rounds`/`_archive_round` 去下划线）· `rl/bc_ledger.py`（新，BC 指针/完成集/收口 job 的单一读面）· `rl/loop_round.py`（新终态 `ROUND_WAIT` + `RoundOutcome.detail`）· `rl/loop_runner.py`（`ROUND_WAIT` → `waiting(..., jid=..)`；`ledger_next_it` 钩子）· `rl/loop_core.py`（单课程驱动器对 `ROUND_WAIT` 的阻塞语义：退避重问同一轮）· `rl/loop_plan.py`（`course_kind` / `round_tasks_for` / `course_facts(course=)`）· `rl/bc_config.py`（`is_bc_course`）· `rl/loop_serve.py`（`_open_bc_course` + 工厂分派 + 入队粒度）· `run_bc.py`（薄壳）· `run_rl_cluster.py`（`build_rows` 带 `kind` + 人读表加种类列 + BC 行的 facts 行不再摆一排 RL 的零）· 控制台：`web/view/loop-queue.ts`（`LoopCourseKind` + `kindBadge`/`stepTitle`/`pendingTitle`）· `web/app/panels/LoopQueue.tsx` · `web/app/app.tsx`（解除 `isBc` 门控）· `web/theme.css`（`.tc-loopq__kind--bc`）。回归：`tests/test_bc_ledger.py`(9) · `tests/test_bc_loop.py`(16) · `tests/test_serve_bc.py`(5，serve × BC 集成：让位/驱逐认领/粒度/锁/故障隔离) · `tests/test_loop_plan_bc_rows.py`(9，读面：种类/指针/在飞/两行共存) · `dashboard/tests/web-app-loopqueue.test.ts`（+3：BC 行与 RL 行并列 / 悬停各说各的 / 卡片不再被 `isBc` 门控）· `dashboard/tests/server-api-loop-queue.test.ts`（+1：`kind` 的保守默认）· 既有 BC 用例改为指向新家（`tests/test_bc_course.py`、`tests/test_remote_transport.py`、`e2e/test_bc_epoch_e2e.py`）。进度 `docs/nn/training-stack.md` §19 / `docs/nn/console.md` §6；plan `plan/r2-loop-task-queue.md §8 R3-4`。
 - **控制台半（2026-09-19 同日接上）**：调度器卡片是**跨课程**卡（一次列出所有账本可发现的课），BC 行与 RL 行**并列**——读面（`run_rl_cluster.py --json` 的 `kind`）早在 R3-4 就通了，缺的只是 UI。三处关键决定：
   - **行上带课程种类**（`build_rows` 的 `kind` / 视图层 `LoopCourseKind`）：BC 的指针（`bc_round_completed`）、粒度（单个轮任务）、在飞来源（账本 `job_pending`）与 RL 全不同，不带种类 UI 只能猜（猜错就把 BC 读成一排看着像真的零）。种类判据 = `curricula/<课>.bc.jsonc` 是否存在（`loop_plan.course_kind`，与控制台 `isBcCourse` 同源）。
   - **`kind` 缺省/未知一律按 `rl` 渲染**（保守方向单侧）：python 比控制台旧时（还没这个字段）少一个徽标只是少信息；凭空空贴 BC 标签则会对外宣称「一轮 = 一个任务」（而它有 13 步）——假承诺比缺标签贵。`BC` 这种大小写不符也不认（只认 python 的确切取值）。
@@ -2997,7 +2996,7 @@ R2c 造好了调度器与任务体，但**没有驱动者**（至今仍是「一
   - 徽章只标 scope 说不出来的那件事：`shared` ⇒ 「共享」、`singleton` ⇒ 「单例」、`course` ⇒ **无徽章**（按课程是默认语义，组标题已说；每行再挂一个只是噪声）。
 - **备选与否决**：① 继续排一行、只加徽章——否（这正是问题本身：单例角色与按课对象混在一个序列里）；② 在面板里写两族 key 名单——否（第二份真相，且新增组件会静默落进没人认识的桶）；③ 保留 `shared` 布尔再另加 `scope`——否（两个字段 = 两个真相，必然漂开）；④ 顺手把 trainer/localWorker 的账本键也收敛成共享槽——**本轮不做**（见下）。
 - **违反后果**：任何客户端按 key 自建族别名，都会在 registry 改规则的那天让某个组件**静默消失**；任何把 `shared` 语义空贴给按课程组件的写法，都会把「只停本课」演成「停全局」。
-- **落地**：`core/registry.ts`（`ComponentScope` + `componentScope`）· `server/api/views.ts`（`ComponentView.scope` 取代 `shared`）· `web/view/component-groups.ts`（新：`cardFamilies` / `scopeBadge` / `NODE_FACE_COMPONENTS` / `FAMILY_META`）· `web/app/panels/ComponentCards.tsx`（分组渲染）· `web/app/panels/LogNavCard.tsx`（复用例外常量）· `web/theme.css`（`.tc-comps__group*` / `.tc-cc__scope--*`）。回归：`tests/web-component-groups.test.ts`(11：分族与族内顺序 / 节点面例外是真组件 / **全组件恰好归属一处** / **与 registry 判据对拍** / `scope` 缺省保守 / 未列出的 key 不丢 / 空组不渲染 / 不改动调用方数组 / 徽章三态) · `tests/web-components.test.ts`（分族 SSR：两组标题与 `data-family`、族内顺序、共享×2+单例×1、节点面组件不在卡行）· `tests/single-hub-tunnel.test.ts`（`.shared` → `.scope`）。进度 `docs/nn.progress.md §88`。
+- **落地**：`core/registry.ts`（`ComponentScope` + `componentScope`）· `server/api/views.ts`（`ComponentView.scope` 取代 `shared`）· `web/view/component-groups.ts`（新：`cardFamilies` / `scopeBadge` / `NODE_FACE_COMPONENTS` / `FAMILY_META`）· `web/app/panels/ComponentCards.tsx`（分组渲染）· `web/app/panels/LogNavCard.tsx`（复用例外常量）· `web/theme.css`（`.tc-comps__group*` / `.tc-cc__scope--*`）。回归：`tests/web-component-groups.test.ts`(11：分族与族内顺序 / 节点面例外是真组件 / **全组件恰好归属一处** / **与 registry 判据对拍** / `scope` 缺省保守 / 未列出的 key 不丢 / 空组不渲染 / 不改动调用方数组 / 徽章三态) · `tests/web-components.test.ts`（分族 SSR：两组标题与 `data-family`、族内顺序、共享×2+单例×1、节点面组件不在卡行）· `tests/single-hub-tunnel.test.ts`（`.shared` → `.scope`）。进度 `docs/nn/console.md` §7。
 - **未做（明确记录，不是漏）**：账本键的真正收敛——`trainingLoop`/`localWorker` 仍是 per-course 键（控制台仍按课起 `run_rl.py --course`，尽管训练侧已有 `--serve` 单进程服务所有课程），`workerServe` 仍住 per-course 表（轴却是节点）。那是**启动面/监督面**的改动（含 `TrainLaunchModal` 的精简与旧条目换代接管），与本轮的「把两族读出来、说清楚」是两件事；本轮的分族恰好是它的前置（换成共享槽后，课程面只剩数据、进程面全在服务面）。
 - **一条构建期坑（值得记）**：客户端代码里写**未加引号的 `node:` 对象键**（`{ node: [] }`）会让三份 bundle 全红——`server/build.ts` 的禁词门禁把 `node:` 当「引入了 node 内置模块」。本文件已在 `ComponentFamilyId` 注释里写明。
 
@@ -3015,7 +3014,7 @@ R2c 造好了调度器与任务体，但**没有驱动者**（至今仍是「一
 - **备选与否决**：① 给 `--serve` 传 `--courses <课表>`——否（进程绑死课程表，「先起 trainer、后加课」当场失效，而 hub 已确立「课程 = 发现」的口径）；② 每课传输旋钮塞进 `curricula/*.jsonc`——否（熔断口径，见上）；③ 共享 trainer 改住扁平单例键——否（旧账本里的 per-course 条目必须继续可见、可枚举、可停止；静默失监督是事故。共用一张表天然做到，靠槽 `''` 区分）；④ 顺手把 `localWorker`/`workerServe` 也收敛——**不做**（本机 PPO worker 的语义就是「poll **本课** hub」，每课一个是对的；`worker_server` 的语义轴是节点，见 `NODE_FACE_COMPONENTS`）。
 - **违反后果**：任何「按课起一个 trainer」的残留路径都会与共享调度器抢同一批 traj（症状：同一轮被两个进程各跑一半、账本交错、锁语义失效）；任何把本课准备失败说成 trainer 启动失败的话术，都会让操作员停掉所有课程。
 - **落地（训练侧）**：`nn-training/rl/loop_serve.py`（`apply_course_machine_overrides` + 覆盖叠加与优先级 + 非法值响亮）· `nn-training/run_rl_cluster.py`（`--serve` 进程级单实例锁 + `--ppo` 直通）。回归：`tests/test_serve_course_overrides.py`(10：覆盖叠加/优先级/非法值响亮/未知键不认) · `tests/test_serve_wiring.py`(+1：单实例锁接线)。
-- **落地（控制台）**：`core/registry.ts`（`trainingLoop` 进共享表）· `core/slots.ts`（锁名归一）· `core/types.ts` · `launch/cli.ts` · `stack/specs.ts`（`trainerServeSpec`，发现模式 argv）· `stack/course-knobs.ts`（新：机器侧旋钮写面）· `server/actions/{start,stop,restart,preset,smoke,train-smoke}.ts`（启动/换代/锁/停止语义/冒烟独占）· `server/api/{overview,loop-queue,state-view}.ts`（在训判据）· `web/`（视图同源）。回归：`tests/training-shared-trainer.test.ts`(9：argv 不绑课程表 / 每课条目拒重建 / mode→transport 逐条 / 账本=发现判据 / 进程级锁 / 停止语义 / 冒烟独占) · `tests/training-console-busy.test.ts`(9：**幂等早退仍释放 busy 键** + **准备失败不许冒充「启动失败」**，夹具已重定向 traj 根与 rl-config——此前它把断言挂在「本机 tmp 恰好有没有权重文件」上)。进度 `docs/nn.progress.md §89`。
+- **落地（控制台）**：`core/registry.ts`（`trainingLoop` 进共享表）· `core/slots.ts`（锁名归一）· `core/types.ts` · `launch/cli.ts` · `stack/specs.ts`（`trainerServeSpec`，发现模式 argv）· `stack/course-knobs.ts`（新：机器侧旋钮写面）· `server/actions/{start,stop,restart,preset,smoke,train-smoke}.ts`（启动/换代/锁/停止语义/冒烟独占）· `server/api/{overview,loop-queue,state-view}.ts`（在训判据）· `web/`（视图同源）。回归：`tests/training-shared-trainer.test.ts`(9：argv 不绑课程表 / 每课条目拒重建 / mode→transport 逐条 / 账本=发现判据 / 进程级锁 / 停止语义 / 冒烟独占) · `tests/training-console-busy.test.ts`(9：**幂等早退仍释放 busy 键** + **准备失败不许冒充「启动失败」**，夹具已重定向 traj 根与 rl-config——此前它把断言挂在「本机 tmp 恰好有没有权重文件」上)。进度 `docs/nn/training-stack.md` §20。
 - **未做（明确记录，不是漏）**：① 真机「一个 serve 进程同时带 RL 课 + BC 课」的实弹运行（本轮全在夹具/假件下证明逻辑，与 R2e 同口径）；② `workerServe` 账本键的轴仍是课程（展示面已按节点例外声明，账本键未动）；③ `TrainLaunchModal` 的精简（模式仍按课选，落点已改为课程旋钮）。
 
 ## §2026-09-19-goalnn-shared-local-worker（2026-09-19，用户指令：localWorker 也不应绑定课程）
@@ -5748,7 +5747,7 @@ SystemExit（`--run-iters<0 需要课程声明 iters——没有终点就不叫�
 ## 2026-09-22-goalnn-bulk-single-channel — bulk 单通道 / 让路预算 / 软持有预取（plan/transfer-scheduling P0+P2）
 
 **背景**：§2026-09-22-goalnn-transfer-scheduling-pull 只换了 pull 线的取活面；本条落地「传输那半场」
-（`docs/nn.progress.md` §128）：三条流分层（P0 控制面 / P1 关键 bulk / P2 预取），让 GPU 不再被传输饿死。
+（`docs/nn/remote-transport.md` §29）：三条流分层（P0 控制面 / P1 关键 bulk / P2 预取），让 GPU 不再被传输饿死。
 
 **决定（后来者极容易做错，故入册）**
 
@@ -5902,3 +5901,4 @@ job 级 `uploaded` 标志 + 主循环 `try/finally` 收尾 + `--result-upload`�
   manifest，`--cross` / `--check-prebuilt` 一次抓全漏编；ABI 统一为单 blob + 4 参 `cf_student_features`。
 - **违反后果**：把 `CF_PW_PX` "简化"成单一常量 ⇒ native 白丢 ~5pp 或 wasm 溢写（两者都有实测数字）；
   任何**改动累加次序**的"优化"都会让 `native-parity` 红——那是语义变更（新 era），不在本决策范围内。
+§1.1 / §4 P2.5 / §9.5；进度 `docs/nn/remote-transport.md` §31。

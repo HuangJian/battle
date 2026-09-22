@@ -136,7 +136,7 @@ def run_rollout_stream(
     熔断与 collector 收官仅作兜底再触发点（护栏去重）。线程句柄经
     report["_eval_thread"] 回传主循环，下轮分发前 join。
 
-    与串行模式的语义差异（已记录 nn.progress.md §6.7）：①adv 归一化从"全轮"
+    与串行模式的语义差异（已记录 `docs/nn/legacy.md` §10.7）：①adv 归一化从"全轮"
     变为"每 wave"；②早期 wave 的更新发生在 θ 漂移更早处（PPO clip 容忍范围）；
     ③PPO epoch checkpoint 流式期间不落盘（崩溃重启该轮重训，语料靠
     completed_pairs 秒回）；④断点续跑轮里此前已落盘的旧局不参与本轮更新。

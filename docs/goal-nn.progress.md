@@ -24,7 +24,7 @@
 **验证**：`tests/test_eval_timing.py` 16 例（旋钮/坏值、放行档三分支、epoch 边界、派发即放行与降级收回、
 钩子不放/不放行、缺省零 join + 边界收拢、应急旋钮超预算夹回）；e2e `test_run_rl.py -k "eval_deferred|eval_post_ppo_weights|
 eval_local_gate|tail_join_grace|early_race"` 5 passed；nn python 全量绿 + ruff/mypy 干净。
-详见 `docs/nn.progress.md §66`、`DECISIONS.md §2026-09-17-goalnn-eval-wallclock`。
+详见 `docs/nn/runtime-opt.md` §1、`DECISIONS.md §2026-09-17-goalnn-eval-wallclock`。
 
 ## §26 test_integration 拆分 9 独立函数 + xdist 并行（DECISIONS §318）
 
@@ -67,7 +67,7 @@ test_integration 与 test_eval_local_gate 并发会踩共享状态。新增 Fake
 
 > ⚠ **2026-09-17 更正：那两条「worker 越少越好」的读数作废（含本条的 auto 反更慢）**——
 > 真因是 torch 默认内线程（= 物理核）与 worker 数相乘造成的**超订**，不是 import 开销。
-> 封到 1 线程后 n=12 反比 n=4 快 ~1/3。实测与决定见 `docs/nn.progress.md §57` /
+> 封到 1 线程后 n=12 反比 n=4 快 ~1/3。实测与决定见 `docs/nn/engineering.md` §9 /
 > `DECISIONS §2026-09-17-goalnn-python-gate-parallel-policy` / 门禁脚本头注。
 
 **落地**：make test → `pytest -n 4 -q`；gate 换 xdist `-n 4` **全量**（含 heavy/integration，
@@ -934,7 +934,7 @@ S1 开火命中 → S2 闪避走位 → S3 砖墙+道具 → S4 有基地→真�
 > **后续判定（§5）**：本节的 goal 0.05% 与 goal-god 0.0% 分别来自冻结修复前代码与失真探针，
 > 均不作为路线判定依据；路线已转向课程学习，两个数字由卡 A0 重测。
 >
-> **⚠️ 2026-09-10 追加：第四条归因（详见 `docs/nn.progress.md` §22.1）。**
+> **⚠️ 2026-09-10 追加：第四条归因（详见 `docs/nn/engineering.md` §1.1）。**
 > TS 侧 `conv-wasm` 卷积段只回拷 `pooled`、**漏拷 `offBufA`**，而 goal 热图头唯一消费 `bufA`
 > ⇒ **生产档 h=64/d=8 下热图恒为常量**，argmax 恒选同一格 —— 即**"目标选择轴"在本节的实验里
 > 从未真正生效**。本节 goal 前向探针跑的正是 h=64/d=8（见 §1「性能实测」），故 **goal 0.05%

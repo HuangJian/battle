@@ -143,7 +143,7 @@ superItemGuardThreat: 1 → 0
   - **≥50% → 进 M4**（取较优臂作 M4 起点）
   - 5–50% → 半通过：补人像轮次 +（必要时）特定弱关定向补打，复评
   - ≈0% → 不走 M4，回 M1 重查表达
-- 参照线：`--policy god` 同种子对比；历史基线 DAgger 后 = 0%、suite 0.1027（nn.progress.md §L950）。
+- 参照线：`--policy god` 同种子对比；历史基线 DAgger 后 = 0%、suite 0.1027（旧 nn.progress §L950 ⇒ `docs/nn/legacy.md` §5）。
 
 ---
 
@@ -163,7 +163,7 @@ superItemGuardThreat: 1 → 0
 - 课程：沿用现有课程（active 关数递增至 20/35，hard）。
 - 测量：胜率对**三个参照系**报告——M3 先验（**主对照**）、God-AI guard 前地板（hard 76%）、it36≈10%（**旧 schema 跨纪元背景，不可复跑，仅定性参照，不进验收表（⑥）**）；每 iter 沿用现有干净评估分发；同步跟踪 losses 带 baseIntegrity。
 - **守家回补追踪线（Q5，非 gate 必报）**：中期参照 = **hard 胜率 ≥76%**（追平摘除 guard 前的地板）；每 iter 报告「距 76% 差值」与「baseIntegrity 趋势」（⑫：**为报告项，不设二元截止**）；最终目标按 §1 的分阶段目标表执行。
-- **工程吸收（⑧，成本近零）**：PPO 波内 `target_kl` 早停（控 KL/step 上行，B3 已立项）+ `best-clean-eval` checkpoint 归档（当前权重只进不退无法回滚峰值，nn.progress.md §11.3-④ 已诊断）。
+- **工程吸收（⑧，成本近零）**：PPO 波内 `target_kl` 早停（控 KL/step 上行，B3 已立项）+ `best-clean-eval` checkpoint 归档（当前权重只进不退无法回滚峰值，（`docs/nn/legacy.md` §15.3-④ 已诊断）。
 - **课程消融开关（⑨）**：保留 `--course-ablate` 直接用全 35 关作对照（BC 起点已有全关先验）；默认沿用递增课程并标注为已知风险。
 - 验收：胜率稳定 >50% 且 > M3 先验；baseIntegrity 出现首次统计学上行；追踪线报告在案（自 −1pt 起计价，距 76% 差值趋势朝上即视为回补启动）。**口径统一（⑩）**：所有关卡指标一律写「胜率（WIN）」，不再混用"保留率"。
 - **收尾 cleanup（Q6 归属）**：M4 验收通过后，执行「删除 `src/ai/god/SuperItems.ts` 及其测试改写」cleanup 子任务（DECISIONS §167 在同次记录中修订为"机制退役"）。
@@ -178,7 +178,7 @@ superItemGuardThreat: 1 → 0
 | M1 探针 | 分钟级（纯重放分析） | — |
 | M2 语料重导 | 人像 104 局 < 1 min；God-AI wins 底料（60 seeds × 35 关 ≈ 2100 局，含 think 标定）≈ **15–30 min**（池化） | 单文件重试 >2 次仍 DESYNC 风暴 → 停，查明漂移 |
 | BC 训练（双臂 ×2） | 样本 100–300K 帧 × 20–50 epochs ≈ **1–3 h/臂** | loss 10 epochs 不降或 move acc 停在随机线 → 停，回 M1 |
-| 短 RL | 沿用现有课程；**实测每轮 ≈ 31 min**（nn.progress.md：全轮 30.9m，真实采集仅 ~9m，PPO+评估 ~20m）；预算 **10–20 iters ≈ 5–10 h**，**先跑 3 iter 取实测值再锁预算（⑫）** | 连续 5 iter 干净评估胜率无提升且 < 先验 → 停，复盘 reward/课程 |
+| 短 RL | 沿用现有课程；**实测每轮 ≈ 31 min**（`docs/nn/legacy.md` §10：全轮 30.9m，真实采集仅 ~9m，PPO+评估 ~20m）；预算 **10–20 iters ≈ 5–10 h**，**先跑 3 iter 取实测值再锁预算（⑫）** | 连续 5 iter 干净评估胜率无提升且 < 先验 → 停，复盘 reward/课程 |
 | 各门评估 | 每次 `m1-eval`/eval-suite ≈ 分钟级 | — |
 
 R3 排程约束更新：**重导窗口（≤30 min）与 RL 训练错峰**；BC 双臂可串行跑（A 先 B 后），不与采样器争核。
@@ -201,7 +201,7 @@ R3 排程约束更新：**重导窗口（≤30 min）与 RL 训练错峰**；BC 
 
 - 每个 bug 先写失败测试再修（§7）；确定性：无新 `Math.random()` 进 Simulation（§2.3）。
 - 结论级判据 ≥60 seeds（§6.3b）；语料/参数不变时只用失败子集复跑（§120）。
-- 每里程碑完成即记录：DECISIONS.md（foundational 级）+ `docs/god-ai-tuning.progress.md` / `docs/nn.progress.md`（tuning 全文）。
+- 每里程碑完成即记录：DECISIONS.md（foundational 级）+ `docs/god-ai-tuning.progress.md` / `docs/nn-*.md`（tuning 全文）。
 - 每个门过了才动下一个；门不过回环整改。
 
 ---

@@ -352,7 +352,7 @@
 //     后者即 rl-config 现节点[0]，enabled/conc=1；证据 training-loop.log push 行）。
 //     本文件开工阻塞段节点表已过期（仍写旧 tunnel +“开工前二选一”），标注过期，
 //     不改写历史，权威以 rl-config 现值为准。
-//   待办：verdict 已落账；在 docs/nn.progress.md 顶部记 §46（含 pooled Δ=−2.875pp、
+//   待办：verdict 已落账；在 docs/nn/experiments.md 记 §4（含 pooled Δ=−2.875pp、
 //     McNemar 单侧 p=0.9998、pd=5.9%、KL it30=0.00213、熔断干净、
 //     八字判决「梯度无方向/执行瓶颈」）；下一腿 metrics v6 立项。
 //   缺陷单（本腿发现、训练侧修，不属本文件）：① R9 降级 `load_episodes` None（§7 先复现后修）；

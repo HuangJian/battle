@@ -110,7 +110,7 @@ class BcTrainBlock(BaseModel):
     #: shard 级 train/val 切分比例
     val_split: float = 0.1
     #: >0 且语料带 returns.npy 时对 value 头做 MC 回归（历史教训：默认 0——
-    #: value MC 回归在 coef 0.05 下都爆，docs/nn.progress.md §15 M3）
+    #: value MC 回归在 coef 0.05 下都爆，docs/nn/legacy.md §20 M3）
     value_coef: float = 0.0
     seed: int = 1234
     #: 每 N epoch 中途 checkpoint（{out}.ckpt.{epoch}）；0 = 关

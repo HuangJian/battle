@@ -419,7 +419,7 @@ def xla_enable_compile_cache(path: object, *, enabled: bool | None = None) -> st
     的末 chunk：48000 % 1024 = 896）会被挤出 ⇒ 每个 epoch 重编两张图 ≈14~26s（单轮 85s 里
     的大头）。`torch_xla.runtime.initialize_cache(dir)` 把编译产物**落盘**，被挤出后再用到时
     是「从磁盘加载同一份可执行」而不是「重编」——**不改变任何数值**（同一 HLO 哈希 ⇒ 同一
-    程序；只把「重新编译」换成「读盘」）。真机日志参见 docs/nn.progress.md §134 的 ragged tail。
+    程序；只把「重新编译」换成「读盘」）。真机日志参见 docs/nn/tpu-perf.md §6 的 ragged tail。
 
     硬约束（torch_xla API）：必须在**任何计算发生之前**调用；同进程重复调用会抛，故这里
     记账做幂等。`enabled=False`（或 env `XLA_PERSISTENT_CACHE=0`）⇒ 完全跳过，行为与接线前

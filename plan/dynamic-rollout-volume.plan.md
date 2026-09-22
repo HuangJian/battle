@@ -1,6 +1,6 @@
 # 按样本量动态采集（Dynamic Rollout Volume）——全动态版实施计划
 
-> 状态：**已实现并验收**（2026-09-15；P0+P1+P2 完成，见 `docs/nn.progress.md` §44
+> 状态：**已实现并验收**（2026-09-15；P0+P1+P2 完成，见 `docs/nn/training-stack.md` §7
 > 与 `DECISIONS.md §2026-09-15-goalnn-dynamic-rollout-volume`）。模拟课程落
 > `nn-training/e2e/fixtures/tiny-vol.jsonc`（禁入 `curricula/`）。
 > 关系：本计划是**全动态版**（轮中按 transitions 配额补采）；折中版（轮首按

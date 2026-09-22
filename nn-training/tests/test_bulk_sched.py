@@ -1,6 +1,6 @@
 """test_bulk_sched.py — bulk 单通道 + 控制面让路（plan/transfer-scheduling §2.2 / P0，2026-09-22）。
 
-要钉住的三条不变量（现场依据：`docs/nn.progress.md` §104 —— 大 body 把控制环拖到分钟级、
+要钉住的三条不变量（现场依据：`docs/nn/remote-transport.md` §21 —— 大 body 把控制环拖到分钟级、
 两条大 body 并发让链路双侧静默）：
 
 1. **单通道**：任意并发申请下 `inflight_bulk == 1`（P1/P2 一起申请也只有一条在途）。

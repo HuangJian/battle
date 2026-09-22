@@ -250,7 +250,7 @@ while ($true) {
 
 ⚠️ **concurrency 必须 ≤ 该节点 agent 实际 `--workers`**。超出的任务会吃
 `HTTP 503 busy`，nodeFailStreak=3 连败即整轮熔断出局（2026-08-24 生产实测教训，
-详见 docs/nn.progress.md §6.4）。
+详见 docs/nn/legacy.md §10.4）。
 
 安全：authKey 是节点唯一门禁。走公网隧道时尤其保管好；疑似泄露就删掉该节点
 的 `tools/agent/agent.auth` 重启 agent 轮换，再同步更新 rl-config.json。

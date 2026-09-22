@@ -1,9 +1,9 @@
 // 课程 x3-credit-p6 —— T5 metrics v6：分敌种杀信用腿（power 2× 主臂 run1）
-// 状态：**2026-09-16 已结课**（双 run 一致判负；详账 docs/nn.progress.md §54）。
+// 状态：**2026-09-16 已结课**（双 run 一致判负；详账 docs/nn/experiments.md §9）。
 //   批准链：plan/t5-metrics-v6.plan.md（任务书）；前置：① 任务书获批；
 //   ② tie-break 加固（§5）已落实到判决表；③ 关键臂复刻预算获批（≥2 run）。
 //
-// 背景（勿重证，直接引用 plan §1 / docs/nn.progress.md §47＋§52）：
+// 背景（勿重证，直接引用 plan §1 / docs/nn/experiments.md §5＋§8）：
 //   败局几乎不对 power 开火（首命中 power 恒 0.0–0.5%、败局 power 命中 ~0.5–0.8/
 //   千tick），而凶手 ~64% 是 power；胜局 power 被打到 ~98%、转化 ~50%。
 //   ⇒ 信用盲区（账本不认"谁"），非执行器无能。观测通道已齐（ch7–ch10），

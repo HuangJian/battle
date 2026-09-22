@@ -266,7 +266,7 @@ def test_soft_streak_still_bounded_when_cluster_is_down(tmp_path, monkeypatch, s
     2026-09-20（墙钟）：`queueWindowSec` 30 → **3**。本用例是**纯空闲等待**——
     回场上界用尽后已无任何可服务的 worker（candidates 空、alive 空），剩余 4 局谁也
     不会去结算，主循环/worker/rescan 三处全部停在 `all_settled.wait(0.5)` 直到 deadline
-    （pytest-timeout 线程栈实测，见 docs/nn.progress.md §98）；即实测的 26.5s = 30s 窗 − 前置。
+    （pytest-timeout 线程栈实测，见 docs/nn/engineering.md §14）；即实测的 26.5s = 30s 窗 − 前置。
     窗口在这里只是**配速**（同 nodeRecoverFirstSec/recoverPingSec 的「小节奏」用法），
     断言只看取活次数与漏局集，与窗口长度无关；配小后本用例 ~1.5s（不再 26.5s）。
     注：回场节奏的 1.0s 地板当轮也会随之暴露（旋钮 0.05s 不生效）——已在

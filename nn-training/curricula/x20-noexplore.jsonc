@@ -4,7 +4,7 @@
 //   ~3min/轮）；最终候选 **it105**（不是终点）；判语：**现象阳性门边未过＋机制阴性，wExplore 无罪**
 //  （详见本文件结算节）。
 //
-// 立项（train-following-by-k3 §5.2；docs/nn.progress.md §116–§118）：
+// 立项（train-following-by-k3 §5.2；docs/nn/experiments.md §28–§30）：
 //   人类 35+26 局全通关，原则"不往敌人堆里钻"；NN 5/6 死在顶部敌区。
 //   wExplore 按新格子计价（+0.2/格），恰好奖励"往上逛" ——  Exploration 奖可能在教自杀
 //   （逛 ~25 格 +5 vs 死亡总价 -7.5，边际上 sightseeing-then-die 不亏）。

@@ -422,7 +422,7 @@ cadence 的 WIN 方差（达数 pp 即"切换时机有优化余量"的直接证�
 ## 11. 执行纪律（AGENTS 绑定）
 
 - 所有 bug 先写失败测试（§7）；确定性无悔改（§2.3）；One Author 不破（意图层是 Input 提供者）；
-- 训/评全部分层记录：DECISIONS.md（foundational）+ docs/nn.progress.md（tuning 全文）；
+- 训/评全部分层记录：DECISIONS.md（foundational）+ `docs/nn-*.md` 主题档案（tuning 全文）；
 - 训练必须经启动器；60-seed 才下结论；机时错峰（R3 类冲突不在同机并行重活）；
 - 方案修订必须回写本文件（预注册清单变动 = 新版本记录），禁止表外裁量。
 

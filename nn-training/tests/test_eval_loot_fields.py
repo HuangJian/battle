@@ -76,7 +76,7 @@ def test_writers_wire_three_loot_columns() -> None:
 
     2026-09-22：手动 evalA（`rl/eval_a_once.py`）不再自己写行——它改为薄包装
     `rl/eval_dispatch.py::dispatch_eval_round`（与 in-loop 同一条派发路），三个
-    写入方就此收敛成两个（见 docs/nn.progress.md §127）。
+    写入方就此收敛成两个（见 docs/nn/runtime-opt.md §6）。
 
     2026-09-22（云机评估）：行构造收敛为**唯一实现点** `rl/eval_local.eval_row`
     （in-loop 派发器与 `remote/offline_eval.py` 共用）。于是判据分两档：

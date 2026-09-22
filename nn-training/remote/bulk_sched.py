@@ -1,6 +1,6 @@
 """remote/bulk_sched.py — bulk 单通道 + 控制面让路（plan/transfer-scheduling §2.2 / P0）。
 
-要解决的问题（`docs/nn.progress.md` §104 的现场）：大 body（payload 下载 / result 回传）与
+要解决的问题（`docs/nn/remote-transport.md` §21 的现场）：大 body（payload 下载 / result 回传）与
 控制面小包共用一条链路时，**大 body 会把控制环拖到分钟级**（取消/问询读不到回音 ⇒ 调度开环），
 而两条大 body 并发会让链路双侧静默（§104）。
 

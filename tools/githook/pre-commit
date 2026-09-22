@@ -47,7 +47,7 @@
 #
 #   逃生口：NN_GATE_SKIP=<tools>（python 单工具，已有）、NN_GATE_SKIP_E2E=1
 #   （只退 python 门禁里的 e2e 集成层，单测层照跑——e2e 有竞速/负载敏感用例，
-#   见 docs/nn.progress.md §313）、SKIP_BUN_TEST=1、SKIP_DASHBOARD_GATE=1、
+#   见 docs/nn/engineering.md §7）、SKIP_BUN_TEST=1、SKIP_DASHBOARD_GATE=1、
 #   --no-verify（全跳，最后手段）。
 #   --selftest：不跑门禁，只对归因解析器跑内置断言（改本 hook 必跑）。
 #

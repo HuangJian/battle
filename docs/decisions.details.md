@@ -1094,7 +1094,7 @@ verdict 决策抽纯函数 `decideVerdict(hashVerified, terminalMatch)` 按 §1.
 
 **Implications:** B3 标记为否决（保留文件作反面案例，不删除）。A' 落地须先补齐真实 rl_env 契约
 （outcome 四态 + prev 值跟踪 + timeout），并**同步修模型架构**（增大容量 / 扩大感受野）——
-后者是 `docs/nn.progress.md` §1 指明的真正瓶颈，与选型无关。NN 训练方向由 BC 转 RL 本身正确
+后者是 `docs/nn/legacy.md` §3 指明的真正瓶颈，与选型无关。NN 训练方向由 BC 转 RL 本身正确
 （val_loss 是差的游戏性能代理，分布偏移 + 7×7 感受野是天花板）。
 > 评审全文 → plan/RL-WASM-Bridge.review.md
 > 执行计划 → plan/RL-Bun-Bridge.md（A'：bun 持久进程桥，~2 天桥接 + 确定性验证；v2 已落实评审全部 P0/P1/P2 修订）
@@ -1211,8 +1211,8 @@ CRUISE 双激活、PICKUP/CLEAR/ESCAPE 双不激活；
 | §122–§129 仿真性能 Round 10–13 | `docs/perf-optimization.progress.md` |
 | §235–§238 渲染优化 R6/P1-C/R7/R8 | `docs/render-optimization.progress.md`（同名节） |
 | §277–§278 all-on 全策略实验 | `docs/god-ai-tuning.progress.md` §239 / §240 |
-| §281–§284 RL 断点续跑 / 跳轮修复 / 干净评估 / BCV2 | `docs/nn.progress.md`（§4 / §5 / §7 / 分布式节） |
-| §285–§288 M1 分歧探针 / 语料纪元 / M3 双臂 / 回环整改 | `docs/nn.progress.md`（§13.2 / §14 / §15.1 / §15.4） |
+| §281–§284 RL 断点续跑 / 跳轮修复 / 干净评估 / BCV2 | `docs/nn/legacy.md`（§8 / §9 / §11） |
+| §285–§288 M1 分歧探针 / 语料纪元 / M3 双臂 / 回环整改 | `docs/nn/legacy.md`（§18.2 / §19 / §20.1 / §20.4） |
 | §291–§302 意图策略 M0b–M8 | `docs/nn.progress.intent.md`（§16–§27） |
 | §293-intent M4 完成 | `docs/nn.progress.intent.md` §19 |
 | §293-God AI 解冻纪元 | `docs/god-ai-tuning.progress.md` Part 0.1 |

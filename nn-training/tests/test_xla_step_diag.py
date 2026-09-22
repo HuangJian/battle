@@ -1,6 +1,6 @@
 """tests/test_xla_step_diag.py —— XLA 步耗诊断可读、可判、接线在（2026-09-22）。
 
-事故上下文（`docs/nn.progress.md` 与 test_tpu_backend_guard.py 同源）：Kaggle v5e-8 上
+事故上下文（`docs/nn/tpu-perf.md` 与 test_tpu_backend_guard.py 同源）：Kaggle v5e-8 上
 离线课程 PPO 单步 8~10s，而真机探针实测「一次新编译 7.7s、编译命中后单步执行 ~20-90ms」。
 结论指向「每个 chunk 迭代都在重新编译」，但这必须由日志定案，不能靠墙钟猜——于是
 `ppo/common.py` 加了快照/差分/格式化三个纯函数，`ppo/engine.py` 每 chunk 迭代打一行。
