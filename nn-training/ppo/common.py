@@ -21,9 +21,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from collections.abc import Callable, Sequence
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -221,10 +222,122 @@ def xla_mark_step(device) -> None:
         xm.mark_step()
 
 
+#: TPU 后端在设备属性里留下的指纹（CPU 后端的 XLA 设备没有这两个键）。
+TPU_ATTR_KEYS = ("coords", "core_on_chip")
+
+#: 设备自检的缓存（同一进程只测一次——它含一次 XLA 编译，按 job 跑会白付 300 次）。
+_SPEED_PROBE: dict[str, float] = {}
+
+
+def xla_fingerprint(device: object = None) -> dict:
+    """XLA 运行时的**后端指纹**（诊断与护栏用，2026-09-22）。
+
+    为什么需要：`xla_device()` 在 **CPU 后端**上照样返回 `xla:0`（XLA 的 CPU 插件是合法后端），
+    于是「`--device tpu`」可能整段跑在 CPU 上，而日志里看不出任何异常——2026-09-22 Kaggle
+    TPU 实例上离线课程 PPO 单步 8~9s（本地 CPU 基准 ~4.7s/step、TPU 参考 ~44ms）就是这个嫌疑。
+
+    **别拿 `world_size()` 当判据**：torch_xla 源码里无复制时它恒为 1（同一次实测：
+    `world_size=1` 而 `global_device_count=8`、`device_type=TPU`、matmul 快 12×）。
+
+    返回（读不到的项记 None，**绝不抛**——诊断不能反过来把训练搞挂）：
+      device_type              —— `torch_xla.runtime.device_type()`（= PJRT_DEVICE 的设备名部分）
+      global_device_count      —— XLA 运行时看到的设备总数（TPU v5e-8 = 8；CPU 后端 = 1）
+      addressable_device_count —— 本进程可见设备数
+      replication_devices      —— `_xla_get_replication_devices_count()`（0 = 无复制）
+      world_size               —— 仅记录（见上，**不是** TPU 判据）
+      attrs                    —— 设备属性原文（TPU 有 `coords`/`core_on_chip`）
+    """
+    out: dict = {
+        "device_type": None,
+        "global_device_count": None,
+        "addressable_device_count": None,
+        "replication_devices": None,
+        "world_size": None,
+        "attrs": None,
+    }
+    try:
+        import torch_xla
+        import torch_xla.runtime as xr
+    except Exception:
+        return out
+    for key, fn in (
+        ("device_type", lambda: xr.device_type()),
+        ("global_device_count", lambda: xr.global_device_count()),
+        ("addressable_device_count", lambda: xr.addressable_device_count()),
+        ("world_size", lambda: xr.world_size()),
+    ):
+        try:
+            out[key] = fn()
+        except Exception:
+            pass
+    try:
+        out["replication_devices"] = int(
+            torch_xla._XLAC._xla_get_replication_devices_count()
+        )
+    except Exception:
+        pass
+    try:
+        dev = str(device) if device is not None else str(xla_device())
+        out["attrs"] = str(xr.runtime_device_attributes(dev))
+    except Exception:
+        pass
+    return out
+
+
+def tpu_backend_missing_reason(fp: dict) -> str:
+    """指纹 → 「这**不是** TPU 后端」的原因；空串 = 看着就是 TPU（或读不到、无法证伪）。
+
+    判据两条，都不依赖 `world_size`：
+      ① `device_type != "TPU"`（PJRT_DEVICE 选的就不是 TPU）；
+      ② 设备属性里没有 `coords`/`core_on_chip`（XLA 的 CPU 插件没有这两个键）。
+    属性读不到（None）时**不**判负——宁可放过也不能把能跑的 TPU job 拦死。
+    """
+    dt = fp.get("device_type")
+    if dt is not None and str(dt).upper() != "TPU":
+        return f"device_type={dt}（PJRT_DEVICE 选的是 {dt}，不是 TPU）"
+    attrs = fp.get("attrs")
+    if attrs and not any(k in str(attrs) for k in TPU_ATTR_KEYS):
+        return f"设备属性里没有 TPU 指纹（attrs={attrs}）"
+    return ""
+
+
+def xla_device_speed_probe(device: object, *, n: int = 2048) -> float | None:
+    """一次 `n×n` matmul 的墙钟（秒）——**同一进程只测一次**，失败返回 None。
+
+    为什么它值得：TPU 与 CPU 的 XLA 后端在这一项上差一个数量级（Kaggle v5e-8 实测
+    **1.5ms vs 17.9ms**，快 12×）⇒ 它能把「日志说 TPU、实际跑 CPU」的静默降级照出来
+    （`xla_device()` 两种后端都返回 `xla:0`，指纹之外只剩速度能区分）。
+    """
+    key = str(device)
+    if key in _SPEED_PROBE:
+        return _SPEED_PROBE[key]
+    try:
+        import torch
+
+        # device 是 XLA 设备对象（torch 的 device 形参类型桩不认它）——显式 cast 说明意图。
+        dev = cast(Any, device if device is not None else xla_device())
+        a = torch.randn(n, n, device=dev)
+        b = torch.randn(n, n, device=dev)
+        t0 = time.perf_counter()
+        (a @ b).cpu()
+        xla_mark_step(dev)
+        sec = time.perf_counter() - t0
+    except Exception:
+        return None
+    _SPEED_PROBE[key] = sec
+    return sec
+
+
 def xla_world_size() -> int | None:
     """TPU 核数（诊断/日志用，2026-09-11）。新版 torch_xla 挪到
     torch_xla.runtime.world_size()；旧版 xm.xrt_world_size()。非 TPU 或读不到
-    返回 None（延迟 import，未装 torch_xla 的机器行为不变）。"""
+    返回 None（延迟 import，未装 torch_xla 的机器行为不变）。
+
+    ⚠ 2026-09-22 更正：torch_xla 的 `runtime.world_size()` 在**无复制时恒为 1**
+    （源码：`_xla_get_replication_devices_count() == 0` ⇒ 1），所以这个数**不能**当
+    TPU 判据（同一次实测 world_size=1 而 global_device_count=8、device_type=TPU）。
+    要判后端用 `xla_fingerprint()`。
+    """
     try:
         import torch_xla.runtime as xr
 
@@ -236,6 +349,147 @@ def xla_world_size() -> int | None:
             return int(xm.xrt_world_size())
         except Exception:
             return None
+
+
+# ---------------- XLA 步耗诊断（2026-09-22） ----------------
+# 背景：Kaggle v5e-8 上离线课程 PPO 单步 8~10s（同引擎在线课程 ~44ms/step，见 engine.py
+# 的 mark_step 注释），而真机探针实测：**一次新编译 7.7s**、编译命中后单步执行仅 ~20-90ms。
+# 也就是说「8s/步」最可能的解释是「每个 chunk 迭代都触发了一次新编译」——但这必须
+# 由证据定案，不能靠墙钟猜。于是把 XLA 自己的账本摊开：每个 chunk 迭代前后各取一次
+# metrics 快照，差分出「编译/执行/惰性追踪各占多少、命中缓存几次、新编译几次、图执行
+# 几次」，连同本步的**图签名**（batch 形状 + 哪些可选分支开着）一起进日志。
+# 纯观测：不碰 RNG、不改任何数值；非 XLA 机器（无 torch_xla）快照返空、调用点直接跳过。
+
+_DUR_RE = re.compile(r"(\d+(?:\.\d+)?)(ms|us|ns|h|m|s)")
+_UNIT_SEC = {"h": 3600.0, "m": 60.0, "s": 1.0, "ms": 1e-3, "us": 1e-6, "ns": 1e-9}
+
+#: 关心的 XLA 累积耗时指标（秒）与计数器（次数）。
+XLA_TIME_METRICS = (
+    "CompileTime",
+    "ExecuteTime",
+    "LazyTracing",
+    "TransferToDeviceTime",
+    "TransferFromDeviceTime",
+)
+XLA_COUNTERS = ("UncachedCompile", "CachedCompile", "ExecuteComputation", "MarkStep")
+
+
+def _parse_xla_duration(text: str) -> float:
+    """XLA 的 `07s703ms868.692us` 形态 → 秒（`TotalSamples: 42`/`1%=` 里的数字不会被误读）。"""
+    return sum(float(v) * _UNIT_SEC[u] for v, u in _DUR_RE.findall(text))
+
+
+def xla_metrics_snapshot() -> dict[str, float]:
+    """XLA 累积指标快照：`t.<Metric>` = 秒、`c.<Counter>` = 次数；非 XLA → {}。
+
+    读 `torch_xla.debug.metrics.metrics_report()`（C++ 侧文本，单次毫秒级）。任何异常
+    都吞掉并返回已读到的部分——诊断绝不能反过来把训练搞挂。
+    """
+    try:
+        import torch_xla.debug.metrics as met
+
+        report = met.metrics_report()
+    except Exception:
+        return {}
+    out: dict[str, float] = {}
+    # 前缀用非捕获组 + `[\s\S]*?`（不要 re.S：`(.*)$` 在 re.S|re.M 下会贪婪地
+    # 吞到报告末尾，把别的指标的耗时也加进来——正是本函数第一版踩的坑）。
+    # 捕获组 1 恒为我们要的那一行的值。
+    for name in XLA_TIME_METRICS:
+        m = re.search(
+            rf"^Metric: {name}\b[\s\S]*?^\s*Accumulator: ([^\n]*)", report, re.M
+        )
+        if m is not None:
+            out[f"t.{name}"] = _parse_xla_duration(m.group(1))
+    for name in XLA_COUNTERS:
+        m = re.search(rf"^Counter: {name}\b[\s\S]*?^\s*Value: ([\d.]+)", report, re.M)
+        if m is not None:
+            out[f"c.{name}"] = float(m.group(1))
+    return out
+
+
+#: 持久化编译缓存是否已初始化（同进程重复初始化会抛；记一笔做幂等，也供日志查询）。
+_XLA_CACHE_STATE: dict[str, str] = {}
+
+
+def xla_enable_compile_cache(path: object, *, enabled: bool | None = None) -> str:
+    """开启 torch_xla 的**持久化编译缓存**；返回一行状态（**绝不抛**）。
+
+    为什么（2026-09-22 真机定案）：XLA 的程序缓存是有界的。一轮只用一次的形状（离线课程里
+    的末 chunk：48000 % 1024 = 896）会被挤出 ⇒ 每个 epoch 重编两张图 ≈14~26s（单轮 85s 里
+    的大头）。`torch_xla.runtime.initialize_cache(dir)` 把编译产物**落盘**，被挤出后再用到时
+    是「从磁盘加载同一份可执行」而不是「重编」——**不改变任何数值**（同一 HLO 哈希 ⇒ 同一
+    程序；只把「重新编译」换成「读盘」）。真机日志参见 docs/nn.progress.md §134 的 ragged tail。
+
+    硬约束（torch_xla API）：必须在**任何计算发生之前**调用；同进程重复调用会抛，故这里
+    记账做幂等。`enabled=False`（或 env `XLA_PERSISTENT_CACHE=0`）⇒ 完全跳过，行为与接线前
+    逐字节一致。任何异常都吞掉并返回原因——缓存是加速手段，绝不能反过来把训练搞挂。
+    """
+    if enabled is None:
+        enabled = os.environ.get("XLA_PERSISTENT_CACHE", "1") not in ("0", "false", "False")
+    if not enabled:
+        return "已停用（XLA_PERSISTENT_CACHE=0）"
+    prev = _XLA_CACHE_STATE.get("dir")
+    if prev is not None:
+        return f"已开启（幂等：本进程已在用 {prev}）"
+    try:
+        import torch_xla.runtime as xr
+    except Exception as err:  # 未装 torch_xla（CPU/CUDA 机器）：与接线前一致
+        return f"不可用（{type(err).__name__}: 无 torch_xla）"
+    fn = getattr(xr, "initialize_cache", None)
+    if not callable(fn):
+        return "不可用（本版 torch_xla 无 runtime.initialize_cache）"
+    try:
+        path_s = str(path)
+        os.makedirs(path_s, exist_ok=True)
+        fn(path_s)
+    except Exception as err:
+        return f"初始化失败（{type(err).__name__}: {err}）"
+    _XLA_CACHE_STATE["dir"] = path_s
+    return f"已开启 → {path_s}（缓存被挤出时读盘而非重编，不改变数值）"
+
+
+def demo_index(buf: torch.Tensor | None, didx: npt.NDArray[np.int64]) -> Any:
+    """demo 混 batch 的索引：有设备缓冲就**复用同一张量**（`copy_` 就地改值）。
+
+    为什么必须复用（2026-09-22 真机定案）：XLA 下把 **host numpy 数组直接交给高级索引**
+    （`bank[_didx]`）会让索引数据进不了「图输入」那条路——同一批 B/flags 下每步都是一张
+    **新图** ⇒ 每步一次全图重编译。离线课程实录：单步 8~10s 而其中 2 次新编译 ≈11s；
+    同一进程里编译命中的那一步只要 **0.31s**（168 步的整轮本该 ~1 分钟，实际 35 分钟）。
+    微探针对照：每步新建 host 索引 → 连续两步各 `新=2`；复用设备张量 / 先物化 → `新=0`。
+
+    数值逐位相同：抽哪些样本完全不取决于索引张量的来路（RNG 仍是调用方的
+    `np.random.randint`，调用一次算一次）；`copy_` 走的是正常 host→device 传输。
+    `buf=None`（非 demo 路径）⇒ 原样返回 numpy 索引，行为与接线前逐字节一致。
+    """
+    if buf is None:
+        return didx
+    buf.copy_(torch.from_numpy(didx))
+    return buf
+
+
+def xla_metrics_delta(prev: dict[str, float], cur: dict[str, float]) -> dict[str, float]:
+    """两次快照的差（prev 缺项按 0）；cur 缺项不产生键。"""
+    return {k: v - prev.get(k, 0.0) for k, v in cur.items()}
+
+
+def xla_delta_str(d: dict[str, float]) -> str:
+    """一行紧凑的步耗增量：编译（含新编译/命中次数）/执行/惰性追踪/拷贝。"""
+
+    def _sec(key: str) -> float:
+        return float(d.get(f"t.{key}", 0.0))
+
+    def _cnt(key: str) -> int:
+        return int(d.get(f"c.{key}", 0.0))
+
+    return (
+        f"编译={_sec('CompileTime'):.2f}s(新={_cnt('UncachedCompile')}"
+        f",命中={_cnt('CachedCompile')})"
+        f" 执行={_sec('ExecuteTime'):.3f}s/{_cnt('ExecuteComputation')}次"
+        f" 追踪={_sec('LazyTracing'):.3f}s"
+        f" h2d={_sec('TransferToDeviceTime'):.3f}s"
+        f" d2h={_sec('TransferFromDeviceTime'):.3f}s"
+    )
 
 
 def _to_cpu_state(obj):

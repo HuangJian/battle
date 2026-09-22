@@ -62,14 +62,21 @@ from ppo.common import (
     cat_logprob,
     chunk_episodes,
     compute_gae,
+    demo_index,
     discover_shards,
+    is_xla,
     load_episodes_common,
     load_shard_fields,
     log,
     masked_logsoftmax,
     optimizer_step,
     sync_scalars,
+    xla_delta_str,
+    xla_device_speed_probe,
+    xla_fingerprint,
     xla_mark_step,
+    xla_metrics_delta,
+    xla_metrics_snapshot,
 )
 from ppo.trainer import aggregate_stats, tensored_chunks
 from schema import FIRE_DIM, MOVE_DIM
@@ -326,12 +333,50 @@ def ppo_update(
     # values, ~epochs× less conversion overhead.
     tensored = tensored_chunks(chunks, device)
     total_steps = len(tensored) * epochs
+    # ---- XLA 步耗诊断（2026-09-22，纯观测；非 XLA 机器零开销）----
+    # 见 ppo/common.xla_metrics_snapshot 的说明：把「是不是每个 chunk 迭代都触发一次
+    # 新编译」从猜测变成日志里的读数。PPO_XLA_DIAG=0 可关；基线与自检都取在循环之前，
+    # 免得把设备自检那一发编译算到第一步头上。
+    diag_prev: dict[str, float] = {}
+    diag_by_b: dict[int, dict[str, float]] = {}
+    diag_first = 12  # 前 N 步逐步取；之后每 EVERY 步取一次
+    diag_every = 16
+    diag_last_at = 0
+    diag_wall = 0.0
+    diag_compile = 0.0
+    diag_uncached = 0.0
+    # 环境开关关掉时一次快照都不取（非 XLA 机器上快照本身也返空）。
+    _diag_base = (
+        xla_metrics_snapshot()
+        if os.environ.get("PPO_XLA_DIAG", "1") not in ("0", "false", "False")
+        else {}
+    )
+    if _diag_base:
+        diag_first = max(1, int(os.environ.get("PPO_XLA_DIAG_FIRST", "12")))
+        diag_every = max(1, int(os.environ.get("PPO_XLA_DIAG_EVERY", "16")))
+        _fp = xla_fingerprint(device)
+        log(
+            f"[ppo] XLA 步耗诊断开启（PPO_XLA_DIAG=0 关闭）：device={device} "
+            f"device_type={_fp.get('device_type')} 设备数={_fp.get('global_device_count')} "
+            f"attrs={_fp.get('attrs')} 自检matmul2048={xla_device_speed_probe(device)}s"
+        )
+        log(
+            f"[ppo] 判读口径：新编译=1 且编译秒级 ⇒ 图签名每步都在变；新编译=0/命中>0"
+            f" 而墙钟仍秒级 ⇒ 病不在编译。采样节奏：前 {diag_first} 步逐步、之后每 "
+            f"{diag_every} 步一次（期间只累计墙钟，delta 是累积的）"
+        )
+        # 基线与设备自检都取在循环之前——别把自检那一发编译算到第一步头上。
+        diag_prev = xla_metrics_snapshot()
+    diag_on = bool(diag_prev)
     # ---- demo bank 物化（一次 numpy→torch；关闭时零开销） ----
     demo_on = (
         demo_bank is not None and float(demo_bc_coef) > 0.0 and int(demo_per_mb) > 0
     )
     demo_t: dict[str, Any] = {}
     demo_n = 0
+    # 复用的设备索引缓冲（见 ppo/common.demo_index）——XLA 上「每步现造 host 索引」会让
+    # 每步都是一张新图 ⇒ 每步一次全图重编译（真机实录 8~10s/步，编译命中时 0.31s/步）。
+    demo_idx_dev: torch.Tensor | None = None
     if demo_on:
         assert demo_bank is not None  # 由 demo_on 保证，mypy 收窄用
         try:
@@ -348,6 +393,15 @@ def ppo_update(
             )[0]
             demo_n = int(demo_t["actions"].shape[0])
             demo_on = demo_n > 0
+            if demo_on:
+                demo_idx_dev = torch.zeros(
+                    int(demo_per_mb), dtype=torch.int64, device=device
+                )
+                # 自描述标记：日志里没这行就说明跑的包里没有这个修复（别拿旧包的结果判修法）。
+                log(
+                    f"[ppo] demo 索引复用缓冲已启用（per_mb={int(demo_per_mb)}, int64, "
+                    f"{device}）——每步 copy_ 就地改值，避免 XLA 每步重编译"
+                )
         except (KeyError, ValueError, TypeError) as err:
             raise ValueError(f"[ppo] demo_bank 字段缺失/形状非法——拒收（{err}）") from err
     log(
@@ -395,6 +449,19 @@ def ppo_update(
             f"[ppo] kickstart ref 预计算完成：{len(tensored)} chunks（原每 epoch 重算）"
             f"，{time.time() - _t_ref:.1f}s（{device} 执行实耗，XLA 含编译）"
         )
+    # ---- XLA 预物化（2026-09-22）：chunk/demo/索引张量必须在**进入循环前**落设备 ----
+    # host→device 的惰性转移若发生在「首次使用」那一刻，就会随该步的图一起被内联成新签名
+    # ⇒ 每个 chunk 的首次使用各付一次全图编译（真机实录：epoch1 累计 41 次新编译、
+    # 单步 5.5s；epoch2 之后降到 0.9~2.4s/步——正是「变体集被填满」的形态）。
+    # 一次 mark 把全部待转移张量落盘，后续每步都只是同一张图 ⇒ 编译只付一次。
+    # 非 XLA 设备为 no-op（xla_mark_step 内部判断），CPU/CUDA 数值与行为逐位不变。
+    if is_xla(device):
+        xla_mark_step(device)
+        if diag_on:
+            log(
+                f"[ppo] XLA 预物化：{len(tensored)} 个 chunk + demo 张量已落设备"
+                f"（循环前一次 mark；否则每个 chunk 首次使用各付一次全图编译）"
+            )
     start_epoch = _ppo_load(ckpt_path, model, opt)
     if start_epoch:
         log(
@@ -405,6 +472,7 @@ def ppo_update(
         perm = np.random.permutation(len(tensored))
         n_ep_start = len(stats)
         for j, i in enumerate(perm):
+            _step_t0 = time.time()
             e = tensored[int(i)]
             obs = e["obs"]
             sc = e["scalars"]
@@ -449,9 +517,12 @@ def ppo_update(
             if demo_on:
                 # np RNG ⇒ 与 chunk permutation 同一条 ckpt 流，断点续跑精确复现。
                 _didx = np.random.randint(0, demo_n, size=int(demo_per_mb))
-                _dm, _df, _ = model(demo_t["obs"][_didx], demo_t["scalars"][_didx])
-                _dmm = demo_t["masks"][_didx]
-                _dact = demo_t["actions"][_didx]
+                # 索引必须先落到**复用的设备张量**上再索引（否则每步一张新图 ⇒ 每步重编译，
+                # 见 ppo/common.demo_index）；抽样本的数与序完全不变。
+                _didx_t = demo_index(demo_idx_dev, _didx)
+                _dm, _df, _ = model(demo_t["obs"][_didx_t], demo_t["scalars"][_didx_t])
+                _dmm = demo_t["masks"][_didx_t]
+                _dact = demo_t["actions"][_didx_t]
                 demo_bc_mean = _demo_masked_ce(
                     _dm, _dact[:, 0], _dmm[:, :MOVE_DIM]
                 ) + _demo_masked_ce(_df, _dact[:, 1], _dmm[:, MOVE_DIM : MOVE_DIM + FIRE_DIM])
@@ -488,8 +559,51 @@ def ppo_update(
             # 每步显式 mark 后 TPU 单步稳定 ~44ms（探针 E1+mark 实测收敛）。非 XLA
             # 设备为 no-op，CPU/CUDA 数值与行为逐位不变。
             xla_mark_step(device)
-            # Heartbeat: pure-print progress/health line; wall-clock only.
             now = time.time()
+            # XLA 步耗读数（必须在 mark_step 之后：编译/执行都已 drain，否则恒为 0）。
+            # 未取样的步只累计墙钟——delta 是累积的，中间发生的编译仍会落在下一次读数里。
+            if diag_on:
+                _done = ep * len(tensored) + j + 1
+                _wall_s = now - _step_t0
+                diag_wall += _wall_s
+                _acc = diag_by_b.setdefault(int(obs.shape[0]), {"iters": 0.0, "wall": 0.0})
+                _acc["iters"] += 1
+                _acc["wall"] += _wall_s
+                if _done <= diag_first or _done % diag_every == 0 or _done == total_steps:
+                    _snap = xla_metrics_snapshot()
+                    _dlt = xla_metrics_delta(diag_prev, _snap)
+                    diag_prev = _snap
+                    _cmp = float(_dlt.get("t.CompileTime", 0.0))
+                    _unc = int(_dlt.get("c.UncachedCompile", 0.0))
+                    diag_compile += _cmp
+                    diag_uncached += float(_unc)
+                    _span = _done - diag_last_at
+                    diag_last_at = _done
+                    _span_wall = diag_wall
+                    diag_wall = 0.0
+                    log(
+                        f"[ppo] diag s={_done}/{total_steps} 窗口={_span}步/{_span_wall:.2f}s"
+                        f"(单步均{_span_wall / max(_span, 1):.3f}s) 图签名=B{int(obs.shape[0])}"
+                        f"/demo{int(demo_per_mb) if demo_on else 0}"
+                        f"/kl{int(kl_coef > 0.0)}/ref{int(_ref is not None)}"
+                        f"/demo{int(demo_on)} {xla_delta_str(_dlt)}"
+                    )
+                    # 判定只在「编译占比落在 (50%, 100%] 这个物理上说得通的范围」时打。
+                    # XLA 的 metrics 会被重置（新 shape 出现/缓存事件）⇒ delta 可能为负或
+                    # 超过窗口墙钟（实录 编译=73.93s / 追踪=-52.57s）；那种窗口只信
+                    # 墙钟与「新编译次数」，不给百分比结论，免得误导。
+                    if 0.5 * _span_wall < _cmp <= _span_wall:
+                        log(
+                            f"[ppo] diag 判定：编译占本窗口 {100.0 * _cmp / _span_wall:.0f}%"
+                            f"（新编译 {_unc} 次）⇒ 墙钟买的是**编译**，不是算力"
+                        )
+                    elif _cmp > _span_wall:
+                        log(
+                            f"[ppo] diag 注意：本窗口 {_unc} 次新编译，但编译耗时读数"
+                            f"({_cmp:.1f}s) > 窗口墙钟({_span_wall:.1f}s) ⇒ XLA metrics "
+                            f"被重置，耗时数值不可信（只看「新编译次数」与墙钟）"
+                        )
+            # Heartbeat: pure-print progress/health line; wall-clock only.
             if now - last_hb >= HB_SEC:
                 last_hb = now
                 recent = stats[-32:]
@@ -524,6 +638,17 @@ def ppo_update(
             f"value={sum(s['value'] for s in ep_stats) / n_e:.4f} "
             f"gnorm={sum(s['gnorm'] for s in ep_stats) / n_e:.3f}"
         )
+        if diag_on:
+            # 按 chunk batch 形状汇总（累计）：若 B 只有一个值却仍「每步新编译」⇒ 形状不是原因。
+            _sum = " ".join(
+                f"B={_b}:{int(_a['iters'])}步/墙钟{_a['wall']:.0f}s"
+                for _b, _a in sorted(diag_by_b.items(), key=lambda kv: -kv[1]["wall"])
+            )
+            log(
+                f"[ppo] diag 累计汇总（到 epoch {ep + 1}）：{_sum} | "
+                f"累计编译={diag_compile:.0f}s（新编译 {diag_uncached:.0f} 次）/ "
+                f"总墙钟={time.time() - t0:.0f}s"
+            )
     # aggregate
     if not stats:
         # 断点续跑"剩余 0 epoch"路径（checkpoint 已完成）：无梯度步可跑，

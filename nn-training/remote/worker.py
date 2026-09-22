@@ -1858,11 +1858,47 @@ def run_job(
     use_dp = False
     if dev_str in ("tpu", "xla"):
         # 统一走 ppo.common.xla_device()（torch_xla.device() 优先，旧版回退 xm.xla_device()）
-        from ppo.common import xla_device, xla_world_size
+        from ppo.common import (
+            tpu_backend_missing_reason,
+            xla_device,
+            xla_device_speed_probe,
+            xla_enable_compile_cache,
+            xla_fingerprint,
+            xla_world_size,
+        )
 
+        # 持久化编译缓存：必须在**任何计算之前**（下面 xla_device() 之后的指纹/速度自检就会
+        # 产生第一张图）。缓存被挤出时读盘而非重编，不改变任何数值——真机 ragged tail 每轮
+        # 多付的 ~14s 就是缓存淘汰后的重编（docs/nn.progress.md §134）。
+        log(
+            f"job {jid}: XLA 持久化编译缓存 {xla_enable_compile_cache(work_dir / 'xla-compile-cache')}"
+        )
         device_t = xla_device()
-        log(f"job {jid}: TPU/XLA 设备 {device_t}，world_size={xla_world_size()}"
-            "（8=8 核；None=读不到，诊断用）")
+        # ★ 2026-09-22（Kaggle TPU 实例上离线课程 PPO 单步 8~9s ⇒ 疑似静默跑 CPU）：XLA 的
+        #   CPU 插件也返回 `xla:0`，所以「设备字符串」证明不了什么；这里把**后端指纹**与一次
+        #   速度自检打出来，并在后端不是 TPU 时**拒跑**（在 CPU 上跑完整段看起来一切正常，
+        #   只是慢两个数量级——正是最该响的那类静默降级）。
+        _fp = xla_fingerprint(device_t)
+        _spd = xla_device_speed_probe(device_t)
+        log(
+            f"job {jid}: TPU/XLA 设备 {device_t}｜device_type={_fp['device_type']}｜"
+            f"XLA 设备数={_fp['global_device_count']}（本进程可见 {_fp['addressable_device_count']}）｜"
+            f"replication={_fp['replication_devices']}｜attrs={_fp['attrs']}｜"
+            f"world_size={xla_world_size()}（无复制时恒 1，**别拿它当 TPU 判据**）｜"
+            f"2048² matmul {(_spd * 1000) if _spd is not None else float('nan'):.1f} ms"
+            "（TPU 量级 ~ms；~10ms+ = 后端是 CPU）"
+        )
+        _why = tpu_backend_missing_reason(_fp)
+        if _why:
+            raise ProtocolError(
+                f"job {jid}: 要的是 TPU，但 XLA 运行时不是 TPU 后端（{_why}）——**拒跑**。"
+                "在 CPU 上跑完整段会看起来完全正常、只慢两个数量级，所以这里宁可停下："
+                "① 确认 `PJRT_DEVICE=TPU` 在**任何** torch_xla import/初始化之前就已设置"
+                "（XLA 运行时一经初始化就不能再换后端）；"
+                "② Kaggle/Colab 上先单独打印 `torch_xla.runtime.device_type()` 与"
+                "`global_device_count()` 对账（TPU v5e-8 ⇒ 8）；"
+                "③ 若 ①② 都正常而设备属性仍无 TPU 指纹，重开 runtime（设备可能被别的进程占着）。"
+            )
     elif dev_str in ("cuda-dp", "dp"):
         # 多卡（2026-09-10 实测 1.92×）：torch.device("cuda-dp") 不是合法设备，
         # 必须显式落到 cuda；真正的包装在 state_dict 装载之后（见下方 use_dp 段）。

@@ -143,8 +143,16 @@ def test_build_stack_is_cheap_and_keepalive_holds_it() -> None:
     row = build_stack("per-tick:默认架构", [""], "per-tick", keep=keep)
     assert len(keep) == 1
     assert 10_000 < row.params < 500_000  # 小 CNN 学生：量级钉住（arch 变了也该在这个带内）
-    # 测量通道有输出（非负）；绝对 RSS 不设上界（见 docstring）。
-    assert row.model_mb >= 0 and row.adam_mb >= 0 and row.refs_mb >= 0
+    # 测量通道有输出：ΔRSS 必须是个「MB 量级的数」，**不钉符号**——分配器复用/回收会让
+    # 增量变负（2026-09-22 实录：同机 xdist -n 12 下 `adam_mb=-0.05`，单文件跑又恒为正）。
+    # 原断言 `>= 0` 把噪声当成不变量，满断言在整案并行下间歇红；绝对值与符号一律不钉
+    # （模块 docstring 既有口径），确定性结论由下面的 `theory_mb` 承担。
+    for _name, _val in (
+        ("model_mb", row.model_mb),
+        ("adam_mb", row.adam_mb),
+        ("refs_mb", row.refs_mb),
+    ):
+        assert abs(_val) < 100.0, f"{_name} 通道给出的不是 MB 量级（got {_val}）"
     # 架构结论（确定性）：float32 × (w+g+m+v) ≈ params×16B ⇒ 70K ≈ 1.1MB，
     # 远小于一个 256MB 缓存块——这才是 recommend() 用的「每课 MB 级」语义。
     assert row.theory_mb < 5.0, f"理论增量应是 MB 级（got {row.theory_mb:.2f}MB）"
