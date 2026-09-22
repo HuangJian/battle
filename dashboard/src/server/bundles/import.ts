@@ -14,10 +14,11 @@
  */
 
 import { existsSync, mkdirSync, writeFileSync } from 'fs'
+import { writeFile } from 'fs/promises'
 import path from 'path'
 import { REPO_ROOT } from '../../core/paths'
 import { launchEvalA } from '../eval-a-run'
-import { runRunPythonSyncModule } from '../run-python'
+import { type RunPythonResult, runRunPythonAsyncModule } from '../run-python'
 import { deliverImportJsonMark, deliverFileNamePrefix } from './marks'
 
 /** 上传原件留证目录（每次导入一份，不覆盖）。 */
@@ -97,22 +98,36 @@ export interface DeliverImportResult {
   payload?: DeliverImportPayload
 }
 
-/** 跑 python 导入器（同步：调用方要它的结果来决定「要不要接着起评估」）。
+/** 跑 python 导入器（**异步**：调用方 `await` 它的结果来决定「要不要接着起评估」）。
+ *
+ *  ★ 2026-09-22：从 `spawnSync` 换成异步子进程（`runRunPythonAsyncModule`）。旧写法把**整个
+ *  事件循环**按住十几秒：导入期间控制台的 `/api/state`、5s 快照刷新器、其它查看者的读取
+ *  全部排队（“导入时整个控制台卡住”），而 SWR 的「重算丢后台」也名存实亡。异步口径下
+ *  子进程交给 libuv，导入照旧要等（**这次 POST 本来就要等结果**），但控制台其余部分照常服务。
  *
  *  `runner` 是**可注入的接缝**（缺省就是真 python）：导入的判定（三道门 / 轮次发现）
  *  在 python 一侧、由 `nn-training/tests/test_deliver_zip.py` 钉死；这里注入替身是为了
  *  在不跑 python 的前提下把**控制台这一侧**的契约（argv 形状 / 标记解析 / 失败转述 / 要不要
  *  接着起评估）也测到——两边各测自己那一半，不在中间再叠一层端到端。
+ *  执行体可以是同步替身（`await` 一个非 promise 是常量代价），但**生产路径**没有同步实现。
  */
-export function importDeliverZip(
+export type DeliverZipRunner = (
+  module: string,
+  args: string[],
+  opts?: { timeoutMs?: number },
+) => RunPythonResult | Promise<RunPythonResult>
+
+export async function importDeliverZip(
   opts: { course: string; zipPath: string; logFile?: string; destRoot?: string },
-  runner: typeof runRunPythonSyncModule = runRunPythonSyncModule,
-): DeliverImportResult {
+  runner: DeliverZipRunner = runRunPythonAsyncModule,
+): Promise<DeliverImportResult> {
   // `destRoot` 与 `logFile` 一样是**测试接缝**：缺省落课程目录（生产语义），测试指到临时目录
   // ——否则一次测试就会在真实 `tmp/<课程>/` 里建 deliver/ 并往 deliver-import.log 追写。
   const root = opts.destRoot ?? deliverImportRoot(opts.course)
   mkdirSync(root, { recursive: true })
-  const r = runner('remote.deliver_zip', [
+  // argv 形状 = 「zip / 落地根 / 课程」；执行体是异步的，但这里**必须** await（导入结果就是
+  // 这一半全部的输出：没有它就没法决定要不要接着起评估）。
+  const r = await runner('remote.deliver_zip', [
     '--zip',
     opts.zipPath,
     '--dest',
@@ -164,12 +179,19 @@ function tail(s: string, n: number): string[] {
     .slice(-n)
 }
 
-/** 把上传的 zip 落盘（写进 `deliver-uploads/`，留证）。返回落地路径。 */
-export function saveDeliverUpload(course: string, fileName: string, bytes: ArrayBuffer): string {
+/** 把上传的 zip 落盘（写进 `deliver-uploads/`，留证）。返回落地路径。
+ *
+ *  **异步写**（2026-09-22，与导入器同一条理由）：单次上传上限 512MB，`writeFileSync` 写这么大
+ *  一块会按住事件循环（磁盘慢时秒级），而这一段时间控制台什么都没法服务。 */
+export async function saveDeliverUpload(
+  course: string,
+  fileName: string,
+  bytes: ArrayBuffer,
+): Promise<string> {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
   const dest = deliverUploadPath(course, fileName, stamp)
   mkdirSync(path.dirname(dest), { recursive: true })
-  writeFileSync(dest, new Uint8Array(bytes))
+  await writeFile(dest, new Uint8Array(bytes))
   return dest
 }
 
@@ -197,7 +219,7 @@ export function launchPostImportEval(
  *  结论**（面板直接上屏），detail 是失败时的诊断行。
  */
 export interface DeliverUploadDeps {
-  /** 上传落盘（测试注入替身 → 不往真实 tmp 里写）。 */
+  /** 上传落盘（异步写；测试注入替身 → 不往真实 tmp 里写）。 */
   save: typeof saveDeliverUpload
   /** python 导入器（测试注入替身 → 不跑 python）。 */
   importZip: typeof importDeliverZip
@@ -233,8 +255,8 @@ export async function handleDeliverUpload(
         },
         413,
       )
-    zipPath = deps.save(course, file.name, await file.arrayBuffer())
-    const imported = deps.importZip({ course, zipPath })
+    zipPath = await deps.save(course, file.name, await file.arrayBuffer())
+    const imported = await deps.importZip({ course, zipPath })
     if (!imported.ok || !imported.payload)
       return jsonResp({ ok: false, message: imported.message, detail: imported.detail }, 400)
     const payload = imported.payload

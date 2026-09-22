@@ -1,9 +1,10 @@
-/** view.ts — 评估板看板视图合成（阶梯 / 批次 / 告警 / 迭代行，含 TTL 缓存）。 */
+/** view.ts — 评估板看板视图合成（阶梯 / 批次 / 告警 / 迭代行，按课程 + 输入指纹缓存）。 */
 import { existsSync, readFileSync } from 'fs'
 import path from 'path'
 import { DIFFICULTIES } from '../../../../src/config/difficulty'
-import { REPO_ROOT } from '../../core/paths'
-import { loadBatches } from '../../evalboard/batches'
+import { LADDER_CANON_PATH, REPO_ROOT } from '../../core/paths'
+import { batchesPath, loadBatches } from '../../evalboard/batches'
+import { requestsDonePath, requestsPath } from '../../evalboard/requests'
 import { evaluateGate } from '../../evalboard/ladder'
 import {
   checkS1,
@@ -24,10 +25,12 @@ import {
   type TierMetrics,
   windowAgg,
 } from '../../evalboard/stats'
-import { type EvalGameRow, loadRows } from '../../evalboard/store'
+import type { EvalGameRow } from '../../evalboard/store'
+import { createFingerprintCache, filesSignature } from '../../core/fingerprint-cache'
+import { loadRowsCached, rowsSignatureFor } from './rows'
 import type { EvalAlert, EvalBatchRow, EvalBoardView, EvalLadderRow } from '../../web/view'
 import { ladderStateFor } from './auto-ladder'
-import { ingestCourseEvalLog } from './ingest'
+import { courseEvalLogCandidates, ingestCourseEvalLog } from './ingest'
 import { evalDataRoot, ladderWithGod, readRunnerState } from './ladder-data'
 
 // ────────────────────────── 视图 ──────────────────────────
@@ -35,8 +38,53 @@ import { evalDataRoot, ladderWithGod, readRunnerState } from './ladder-data'
 type LadderRowView = EvalLadderRow
 type BatchView = EvalBatchRow
 
-const VIEW_TTL_MS = 30_000
-export const viewCache = new Map<string, { at: number; view: EvalBoardView }>()
+/**
+ * 视图缓存：**按课程**记住「这份视图是用哪些输入算出来的」（原语 `core/fingerprint-cache`）。
+ *
+ * 一条口径：**输入没变就不重算**（缓存未命中路径的代价已降到只剩聚合，但它仍随行数线性增长，
+ * 而 `/eval` 页与首页摘要都是 300s 轮询、刚跑完批时还有 15s 的盯批循环）。
+ *   · 命中 = 输入指纹相同 **且** 距上次合成未超 `VIEW_BACKSTOP_MS` → 零重算；
+ *   · 输入指纹变了（某门课的行 / 批次 / 请求 / 阶梯 / runner 状态 / 课程文件）→ **立即**重算，
+ *     不等任何 TTL（另一半靠 `invalidateEvalBoard()`：动作后整张清掉）。
+ *
+ * `VIEW_BACKSTOP_MS` 的定位是**兵底**，不是 TTL：指纹清单（`viewInputFiles`）万一漏了某个
+ * 将来新增的读取，陈旧上限就是它。所以它比所有轮询间隔都长（600s > 300s/15s）。
+ */
+export const VIEW_BACKSTOP_MS = 600_000
+export const viewCache = createFingerprintCache<EvalBoardView>({
+  backstopMs: VIEW_BACKSTOP_MS,
+  signature: (course) => viewInputSignature(course),
+})
+
+/** 视图输入文件清单（**唯一一份**：改了 `buildEvalBoardView` 的读取就必须改这里）。 */
+export function viewInputFiles(course: string, root = evalDataRoot()): Array<[string, string]> {
+  const files: Array<[string, string]> = [
+    ['batches', batchesPath(root)],
+    ['requests', requestsPath(root)],
+    ['requests-done', requestsDonePath(root)],
+    ['ladder-work', path.join(root, 'ladder.json')],
+    ['ladder-canon', LADDER_CANON_PATH],
+    ['runner-state', path.join(root, 'runner_state.json')],
+    ['space-calib', path.join(root, 'space_calibration.json')],
+  ]
+  if (course) {
+    // eval_log 是**入账的触发源**：不列它就会命中缓存、根本不跑入账 ⇒ 新评估永不上屏
+    const [evalLog, evalLogTraj] = courseEvalLogCandidates(course)
+    files.push(['eval-log', evalLog], ['eval-log-traj', evalLogTraj])
+    files.push(['curricula', path.join(REPO_ROOT, 'nn-training', 'curricula', `${course}.jsonc`)])
+  }
+  return files
+}
+
+/**
+ * 视图输入指纹：账本行（**按课程**，增量维护）+ 上面那份文件清单。
+ *
+ * 行指纹自带 stat 级刷新（`rowsSignatureFor` 内部会先让行缓存追上盘），所以本函数拿到的
+ * 是**当下**输入的指纹——不必（也不该）由调用方先读一遍行。
+ */
+export function viewInputSignature(course: string, root = evalDataRoot()): string {
+  return `rows=${rowsSignatureFor(root, course)}\u0001${filesSignature(viewInputFiles(course, root))}`
+}
 
 function courseEvalEvery(course: string): number | null {
   try {
@@ -67,13 +115,23 @@ function toBatchView(b: ReturnType<typeof loadBatches>[number]): BatchView {
 }
 
 export function buildEvalBoardView(course = '', fresh = false): EvalBoardView {
-  const key = `evalboard:${course}`
-  const cached = viewCache.get(key)
-  if (!fresh && cached && Date.now() - cached.at < VIEW_TTL_MS) return cached.view
+  // 缓存键 = **业务身份**（课程名），不加装饰前缀：原语会把 key 喂给 `signature`，
+  // 装饰过的字符串会让指纹算到一把不存在的课程上（恒等 → 永不重算，静默出错）。
+  const key = course
+  if (fresh) viewCache.invalidate(key) // fresh=1 = 「现在就给我新算的」
+  // 命中判据全在缓存原语里（输入指纹；`viewInputSignature` 内部会把行缓存 stat 级追上盘，
+  // 所以指纹是**当下**输入的指纹）。
+  const { val, hit } = viewCache.getWithStatus(key, () => composeEvalBoardView(course))
+  // 命中 = 这次调用没读入任何新行（`ingested` 归 0 是实话）；`val` 的内层数组是同一实例
+  return hit ? { ...val, ingested: 0 } : val
+}
 
-  const ingested = ingestCourseEvalLog(course)
+/** 视图合成本体（唯一调用方 = `buildEvalBoardView` 的缓存未命中路径）。 */
+function composeEvalBoardView(course: string): EvalBoardView {
   const root = evalDataRoot()
-  const allRows = loadRows(root).filter((r) => !course || r.course === course)
+  const ingested = ingestCourseEvalLog(course)
+  // 增量读（`loadRowsCached`）：未命中的那一帧只付聚合成本，整本账不重解析（见 rows.ts）。
+  const allRows = loadRowsCached(root).filter((r) => !course || r.course === course)
   const batches = loadBatches(root)
     .filter((b) => !course || b.course === course)
     .sort((a, b) => (a.created_ts < b.created_ts ? -1 : 1))
@@ -391,7 +449,7 @@ export function buildEvalBoardView(course = '', fresh = false): EvalBoardView {
     runnerState: readRunnerState(),
     ladderState: ladderStateFor(course, allRows, batches),
   }
-  viewCache.set(key, { at: view.cachedAt, view })
+  // 指纹要在本次合成的**所有输入都已读取之后**取：入账可能刚往账本里写了新行
   return view
 }
 

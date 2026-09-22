@@ -59,7 +59,9 @@ export interface SelfStatus {
 }
 
 export interface PoolView {
-  /** 服务端结果缓存的构建时刻（ms）。 */
+  /** **探测层**（ping/池历史/codeHash/selfStatus）的算完时刻（ms）。
+   *  视图是两层拼的：结构（节点行/order/enabled/local 槽数）每请求现算、无缓存；
+   *  这个字段只标探测列的新鲜度 —— 也是客户端判定「后台重算落地了」的判据。 */
   cachedAt: number
   course: string
   epochMs: number

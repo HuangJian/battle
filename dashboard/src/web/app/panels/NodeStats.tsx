@@ -199,23 +199,50 @@ export function NodeStats({ enabled, poolFreshNonce, course }: NodeStatsProps) {
   const [err, setErr] = useState<string | null>(null)
   const [showOnlyBad, setShowOnlyBad] = useState(false)
 
+  /** 拉一次池视图。`fresh` = 显式「现在就给我新的」（服务端**硬清 + 等一次重算**，2.5s 级）；
+   *  其余一律软拉（服务端在动作后已软作废：立刻给旧值 + 后台重算）。返回本次视图供再校验比对。 */
   const load = useCallback(
-    async (fresh: boolean): Promise<void> => {
+    async (fresh: boolean): Promise<PoolView | null> => {
       try {
         const p = await fetchPool(fresh, course ?? '')
         setPool(p)
         setErr(null)
+        return p
       } catch (e) {
         setErr(e instanceof Error ? e.message : String(e))
+        return null
       }
     },
     [course],
   )
 
-  usePolling({ enabled, intervalSec: 300, fetch: () => load(false) })
+  usePolling({ enabled, intervalSec: 300, fetch: () => load(false).then(() => undefined) })
 
+  // ── 再校验（2026-09-22）──
+  // 动作 / 切课 / iter 前进 / 连接恢复 → `poolFreshNonce++`。这里**不再** `load(true)`：
+  // 那会硬清服务端缓存并**把面板按住 2.5s** 等逐节点 ping（实测冷 2448–2503ms）。现在是：
+  //   ① 立即**软拉**一次 —— 服务端的软作废保证这一读即时（旧值 + 重算已在后台跑）；
+  //   ② 服务端 `cachedAt` 没推进（= 重算还没落地）就在 1.5s 后重拉，最多 3 次（≈4.5s）
+  //      —— 池轮询间隔是 300s，少了这一步就会停在 5 分钟前的数字上（「停用节点」看不到反馈）；
+  //   ③ 首读本来就是服务端刚算的（cachedAt ≈ 现在，例如切到一门没看过的课 ⇒ 那一次本来就
+  //      得现算）就直接收工，不做无谓重拉。
   useEffect(() => {
-    if (enabled && poolFreshNonce > 0) void load(true)
+    if (!enabled || poolFreshNonce === 0) return
+    let cancelled = false
+    const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+    void (async () => {
+      const first = await load(false)
+      if (!first || Date.now() - first.cachedAt < 1000) return
+      for (let i = 0; i < 3; i++) {
+        await sleep(1500)
+        if (cancelled) return
+        const p = await load(false)
+        if (p && p.cachedAt !== first.cachedAt) return
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
   }, [enabled, poolFreshNonce, load])
 
   if (!pool) {
@@ -290,7 +317,8 @@ export function NodeStats({ enabled, poolFreshNonce, course }: NodeStatsProps) {
         状态 = 最近 10 次结算完成率（≥90% 健康 / ≥70% 波动 / &lt;70% 异常）；ping
         仅实时参考。平均耗时 = 最近 50 局节点侧服务时长滑动平均（接单→结果就绪，不含网络）。
         机侧墙钟 = 训练机派发→结算（含网络/轮询）；历史 meta 无 wallSec 时显示 -。
-        最近错误半小时窗口。服务端缓存 {Math.round((Date.now() - pool.cachedAt) / 1000)}s 前构建。
+        最近错误半小时窗口。启用/停用等结构是实时的（看当下配置）， 探测列（ping/完成率/版本）
+        {Math.round((Date.now() - pool.cachedAt) / 1000)}s 前更新。
       </p>
     </div>
   )

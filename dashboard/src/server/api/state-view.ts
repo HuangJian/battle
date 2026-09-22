@@ -9,7 +9,7 @@ import { readIterMetrics, readPairedReferee } from '../iters'
 import { loadConfigSafe } from './config'
 import { discoverCourses, effectiveCourse } from './courses'
 import { buildLoopQueueView } from './loop-queue'
-import { buildOverview, buildWorkerRegistry, sharedTrainerAlive } from './overview'
+import { buildOverview, buildWorkerRegistry, getHubAdmin, sharedTrainerAlive } from './overview'
 import { detectPpoQueueStall } from './ppo-queue'
 import { readTunnelAbRuns } from './tunnel-ab'
 import { getSlowSnapshot } from './snapshot-refresher'
@@ -20,6 +20,12 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
   const state = loadConsoleState()
   const courses = discoverCourses()
   const course = courseOverride || effectiveCourse(state, courses)
+  // 机群级两笔冷探测互不依赖，**并行起跑**：慢快照里的节点 ping（~1.5s）与 hub 观测面
+  // （`buildOverview`/`buildWorkerRegistry` 里的 ~1.2s）。串行时它们是相加的——冷启动/
+  // 动作后的第一帧实测 2.8s → 并行后 ~1.5s（2026-09-22）。下面三处 await 同一个
+  // 单飞 promise（缓存键同为全局），不会多探一次。
+  const hubProbe = getHubAdmin(cfg, course)
+  void hubProbe.catch(() => undefined) // 真 await 在下面；这里只防「无人接手」的 rejection
   const { components, nodes, localNode, phase, loopComplete, pushFleet } = await getSlowSnapshot(
     cfg,
     course,

@@ -584,7 +584,7 @@ describe('接线：面板挂载、跨区分流与动作路由同源', () => {
     expect(route).toContain('jobIdError(')
   })
 
-  it('动作走 route 表：setCourseMode（hub 侧）与 setCoursePaused（本地）都在，且作废调度器缓存', () => {
+  it('动作走 route 表：setCourseMode（hub 侧）与 setCoursePaused（本地）都在，且处置调度器/快照缓存', () => {
     const route = readFileSync(
       path.join(DASHBOARD_ROOT, 'src', 'server', 'api', 'route.ts'),
       'utf-8',
@@ -595,6 +595,21 @@ describe('接线：面板挂载、跨区分流与动作路由同源', () => {
     expect(route).toContain("case 'setCourseMode'")
     expect(route).toContain("case 'setCoursePaused'")
     expect(app).toContain('onAction={doAction}')
-    expect(server).toContain('invalidateLoopQueue()')
+    // 动作后走**单一处置入口**（2026-09-22）：课程级硬清 + 机群级/调度器软作废都收在它里面——
+    // server.ts 不再逐个缓存手写作废（漏一个就退化成「动作后第一帧卡几秒」）。
+    // 三个**硬清**函数（invalidateSlowSnapshot / invalidateHubAdmin / invalidateLoopQueue）在
+    // server.ts 里一个都不许出现：那是**测试夹具归零**用的；用在动作/导入路径就是首帧冷算。
+    // 产物导入（/api/deliverUpload）曾自己写两行硬清——它改的是**课程产物**（权重/账本/eval_log），
+    // 却把机群级探测（节点 ping 1.5s / hub 2.5s）一起丢掉，实测下一次 /api/state 1575ms（暖 6ms）。
+    expect(server).toContain('invalidateAfterAction()')
+    expect(server).not.toContain('invalidateSlowSnapshot')
+    expect(server).not.toContain('invalidateHubAdmin')
+    expect(server).not.toContain('invalidateLoopQueue')
+    const refresher = readFileSync(
+      path.join(DASHBOARD_ROOT, 'src', 'server', 'api', 'snapshot-refresher.ts'),
+      'utf-8',
+    )
+    expect(refresher).toContain('refreshLoopQueue()')
+    expect(refresher).toContain('refreshHubAdmin()')
   })
 })

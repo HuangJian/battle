@@ -211,6 +211,31 @@ describe('getLoopQueueView（懒算 + TTL + 单飞）', () => {
     expect(b).toBe(c)
   })
 
+  it('refreshLoopQueue（动作路径的软作废）：下一帧不等重算就给旧视图，重算仍起跑', async () => {
+    // 2026-09-22：暂停/恢复/启停按钮点下去时，此前是**硬清**——下一次读要等一次 python
+    // 子进程冷启（或者它悬挂的 20s 超时）。现在只软作废：先给旧视图，重算丢后台。
+    let calls = 0
+    const run = (): ReturnType<typeof ok> | Promise<never> => {
+      calls += 1
+      if (calls === 1) return ok(JSON.stringify(JSON_OUT))
+      return new Promise<never>(() => {
+        /* 悬挂：模拟一次还没回来的子进程 */
+      })
+    }
+    const a = await api.getLoopQueueView(run)
+    api.refreshLoopQueue()
+    let guard: ReturnType<typeof setTimeout> | null = null
+    const b = await Promise.race([
+      api.getLoopQueueView(run),
+      new Promise<never>((_, reject) => {
+        guard = setTimeout(() => reject(new Error('动作后仍在等调度器子进程（硬清回归？）')), 1000)
+      }),
+    ])
+    if (guard) clearTimeout(guard)
+    expect(b).toBe(a) // 先给旧值（同一对象），不是重算出来的等值物
+    expect(calls).toBe(2) // 软作废 ≠ 不作废：重算已经在读缓存时起跑
+  })
+
   it('执行体抛异常（解释器/venv 缺失）也当成读失败，不把请求路径炸掉', async () => {
     const v = await api.getLoopQueueView(() => {
       throw new Error('spawn python ENOENT')
@@ -236,6 +261,33 @@ describe('buildLoopQueueView / buildStateView 注入', () => {
     const v = await api.buildLoopQueueView(false, () => ok(JSON.stringify(JSON_OUT)))
     expect(v.rows.every((r) => !r.training)).toBe(true)
     expect(v.trainingCount).toBe(0)
+  })
+
+  it('动作后第一帧：意图/回执即时上屏（现读控制文件），不等悬挂的调度器重算', async () => {
+    // 「动作结果即时上屏」的那一半：暂停意图与生效回执从**文件**现读（不经这份缓存），
+    // 所以软作废不会让按钮「看着没反应」——本用例把执行体悬挂，上屏的意图照样是新的。
+    api.invalidateLoopQueue()
+    await api.getLoopQueueView(() => ok(JSON.stringify(JSON_OUT))) // 暖一份旧视图
+    api.refreshLoopQueue()
+    let guard: ReturnType<typeof setTimeout> | null = null
+    const v = await Promise.race([
+      api.buildLoopQueueView(
+        true,
+        () =>
+          new Promise<never>(() => {
+            /* 悬挂：重算丢后台 */
+          }),
+        { intent: ['c4-dodge', 'c5-tick'], applied: ['c4-dodge'] },
+      ),
+      new Promise<never>((_, reject) => {
+        guard = setTimeout(() => reject(new Error('动作后仍在等调度器子进程（硬清回归？）')), 1000)
+      }),
+    ])
+    if (guard) clearTimeout(guard)
+    expect(v.rows.map((r) => [r.course, r.pausedIntent, r.pauseApplied])).toEqual([
+      ['c4-dodge', true, true], // 意图 + 已生效
+      ['c5-tick', true, false], // 意图写了但训练进程还没施加
+    ])
   })
 
   it('buildLoopQueueView 把控制面事实（意图 + 生效回执）并进每一行', async () => {

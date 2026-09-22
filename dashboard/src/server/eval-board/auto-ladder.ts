@@ -7,7 +7,8 @@ import {
   pendingRequests,
 } from '../../evalboard/requests'
 import { deriveMetrics } from '../../evalboard/stats'
-import { type EvalGameRow, loadRows } from '../../evalboard/store'
+import type { EvalGameRow } from '../../evalboard/store'
+import { loadRowsCached } from './rows'
 import type { EvalBoardView } from '../../web/view'
 import { evalDataRoot, trackedLadder } from './ladder-data'
 import { viewCache } from './view'
@@ -207,8 +208,11 @@ export function ladderTick(courses: string[]): { tasks: number; enqueued: string
   let tasks = 0
   const order = ladderRungOrder()
   if (order.length === 0) return { tasks, enqueued }
+  // 账本行是**根级**的：一次读全（`loadRowsCached` 未变动时零 IO / 零解析），再按课程切——
+  // 此前每门课各 `loadRows(root)` 一次，等于把整本账读 N 遍（N 课的时间随课程数线性叠加）。
+  const allRowsAll = loadRowsCached(root)
   for (const course of courses) {
-    const allRows = loadRows(root).filter((r) => r.course === course)
+    const allRows = allRowsAll.filter((r) => r.course === course)
     const batches = loadBatches(root).filter((b) => b.course === course)
     const reqs = pendingRequests(root)
     for (const t of activeLadderTasks(course)) {

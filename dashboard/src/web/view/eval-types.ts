@@ -72,6 +72,7 @@ export interface EvalAlert {
 export interface EvalBoardView {
   cachedAt: number
   course: string
+  /** 本次合成时从 eval_log 入账的行数；**视图缓存命中时为 0**（那一次确实没读入新行）。 */
   ingested: number
   evalEvery: number | null
   abWarn: string | null
