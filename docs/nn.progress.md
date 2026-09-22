@@ -4,6 +4,47 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §127 传输∥PPO 优先级调度面（pull 线取活换面）：P1/P1.5/P2 落地（plan/transfer-scheduling，2026-09-22）
+
+**起因（用户指令）**：处理 `transfer-scheduling.review-R2.md` 的评审意见 → 自主开发/测试/审查/提交。
+plan 的完整语义是「软持有预取 + 优先级调度 + landed 取消 + 传输 QoS + 取代 race broadcast」，
+本次落地的是**其中依赖顺序最先可自洽交付的一段**：pull 线的**取活换面**。
+
+**改了什么（判据看函数名）**
+- `remote/worker.py`：`acquire_job`（取活三件套 = `peek_jobs` → `request_priority` → `claim_job`）、
+  `job_started` / `job_ready` / `abandon_job` / `job_status` / `start_cancel_watcher`；`worker_loop`
+  改走 `acquire_job`；`post_result(mode=…)` 把 backup 副本的 403 单列为**丢弃**；`run_job` 接
+  `should_cancel` / `on_ppo_start`，取消点 = `ppo_update(on_epoch_done=…)` 的 epoch 边界 + 开算前预检。
+- `remote/hub_server.py`：`GET /jobs/peek` 与 `POST /jobs/{priority,claim,start,ready,abandon}`；
+  `_JobStore.claim_outcome/_claim_locked`（唯一临界区）；`_claimed` / `_computing` / `_ready` /
+  `_epoch` / `_backup_authorized`；`scheduling_facts` / `priority_for` / `start_job` / `set_ready` /
+  `abandon_job`；`note_worker` 换源到 peek/priority 且 `hub_scope` 照旧上报（避让链输入不丢）。
+- `remote/protocol.py`：`job_priority`（§1.4 表纯函数：landed→none、ready→low、computing 超阈值→high、
+  未超→medium、claim→medium、无人→highest）、`JobCancelledError`、`CLAIM_MODE_*` / `PRIORITY_*` /
+  `STRAGGLER_SEC=180` / `JOB_CANCEL_POLL_SEC=1.5`。
+
+**关键取舍（详见 DECISIONS §2026-09-22-goalnn-transfer-scheduling-pull）**：备份副本**不 pop 原租约**
+（只加 `_backup_authorized` 放行回传）——pop 会让原 worker 硬死后无租约可过期 ⇒ 毒包熔断失明；
+`highest` 的唯一性闸与 claim 同临界区（epoch 只在 claim 一处校验）；掉队阈值只认 `computing_at`；
+取消只认 `landed` 且必须是独立异常（不可落进 `ProtocolError`/`RetryableError`）。
+
+**门禁**：`nn-training/tests/test_priority_schedule.py` 17 例（纯函数五分支 / 两把时钟 / 备份租约 /
+abandon 零 reclaim / highest 唯一性闸 / peek 无副作用 / 真实 HTTP 端到端 / 403 丢弃 / 取活三件套 /
+取消环 / 源码级接线断言）；迁移 3 个既有文件到 `acquire_job`（`test_remote_hotswap.py` /
+`test_worker_offline_cap.py` / `e2e/test_worker_queue.py`）。四刀改坏必红已自查（门禁有效性）。
+
+**未做（下一步入口）**：P0 传输 QoS（控制面旁路 + bulk 单通道）、P0.5 基线（`T_in/T_out/T_ppo` 与
+GPU 空转占比）、P2 的**预取半场**（`PrefetchQueue` + omit 协商）、P3 竞速退役（`/jobs/next` /
+race 判定 / `poll_job` + 控制台同批改造 + push 腿 R1-7）。**本批不动** `/jobs/next`、`poll_job`
+与 race 判定（两套并存，`test_race_broadcast.py` 仍绿），故 2026-09-17 的 race 条目尚未 supersede。
+
+**门禁口径**：nn 侧 `bash tools/githook/nn-py-safe.sh -m pytest -q tests/ e2e/` —— 全绿，唯一红是
+`tests/test_serve_wiring.py::test_course_args_match_run_rl_echo_config`（**既有环境失败**：本机
+`nn-training/rl-config.json` 是未入库的机器本地配置，`course_args` 吃到机器侧覆盖而 oracle 不会；
+已用「把三个文件还原成 HEAD 版本」在同一工作树上复现同一红，证明与本批无关）。
+
+---
+
 ## §138 回传腿也点亮控制台（同步写 per-game.json + 课程账本行）（2026-09-22）
 
 用户之问（2026-09-22）：「**如果是云机通过网络请求回传，会算这些数据回显吗？**」——

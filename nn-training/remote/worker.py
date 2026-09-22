@@ -37,14 +37,20 @@ from remote.protocol import (
     BLOB_DEMO,
     BLOB_OPT,
     BLOB_REF,
+    CLAIM_MODE_BACKUP,
+    CLAIM_MODE_EXCLUSIVE,
     HEARTBEAT_SEC,
     HUB_SCOPE_HEADER,
+    JOB_CANCEL_POLL_SEC,
     OFFLINE_CAP_HEADER,
     OFFLINE_CAP_VALUE,
     PAYLOAD_NAME,
+    PRIORITY_NONE,
+    PRIORITY_ORDER,
     WIRE_V2_CONTENT_TYPE,
     WORKER_ID_HEADER,
     CodeChangedError,
+    JobCancelledError,
     ProtocolError,
     RetryableError,
     coef_active,
@@ -428,6 +434,397 @@ def poll_job(
     return None
 
 
+# ---- 新调度面（2026-09-22，plan/transfer-scheduling）：peek / priority / claim ----
+
+def _sched_headers(
+    worker_id: str, *, offline_ok: bool = False, hub_scope: int | None = None
+) -> dict[str, str]:
+    """新面的公共头：worker 身份（必须） + 可选能力声明（离线课） + 服务 hub 数。
+
+    身份必须自报：隧道回源把全流量归成 127.0.0.1，源 IP 分不出 worker；而 hub 的
+    `active_worker_count()`（避让链的唯一输入）就靠它计数。`hub_scope` 是竞速判定的
+    既有输入（`note_worker` 的第二个字段）——新面**照旧上报**它，否则竞速判定会在
+    换面的那一刻静默退化（登记表里 scope 恒缺 ⇒ 恒不广播），而那是 P3 才做的事。
+    """
+    h: dict[str, str] = {}
+    if worker_id:
+        h[WORKER_ID_HEADER] = worker_id
+    if offline_ok:
+        h[OFFLINE_CAP_HEADER] = OFFLINE_CAP_VALUE
+    if hub_scope is not None:
+        h[HUB_SCOPE_HEADER] = str(int(hub_scope))
+    return h
+
+
+def peek_jobs(
+    base_url: str,
+    token: str,
+    *,
+    worker_id: str = "",
+    offline_ok: bool = False,
+    hub_scope: int | None = None,
+    n: int = 3,
+    timeout: float = 30.0,
+    log: Any = None,
+) -> tuple[list[dict], bool] | None:
+    """`GET /jobs/peek?n=K` → `([候选…], halt)`；hub 不可达/被拒 → None（已记日志）。
+
+    与旧 `poll_job` 的三点差别（都是设计意图，不是实现细节）：
+      ① **不认领**——返回的是候选，本地缓存它们（软持有/预取）不产生任何租约；
+      ② 无副作用：hub 侧不动轮转游标（R2-C2），所以「先看一眼」不会移走别人的轮次；
+      ③ 停机达令同行（承接退役的 `/jobs/next`）。
+    """
+    status, body = _request(
+        base_url,
+        token,
+        f"/jobs/peek?n={max(1, int(n))}",
+        timeout=timeout,
+        headers=_sched_headers(worker_id, offline_ok=offline_ok, hub_scope=hub_scope) or None,
+    )
+    if status != 200:
+        _warn_non_200(base_url, status, log)
+        return None
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    jobs = data.get("jobs")
+    cands = (
+        [j for j in jobs if isinstance(j, dict) and j.get("job_id")]
+        if isinstance(jobs, list)
+        else []
+    )
+    return cands, data.get("halt") is True
+
+
+def request_priority(
+    base_url: str,
+    token: str,
+    *,
+    worker_id: str = "",
+    hub_scope: int | None = None,
+    held: list[str] | tuple[str, ...] = (),
+    computing: str = "",
+    ready_upload: str = "",
+    timeout: float = 30.0,
+    log: Any = None,
+) -> dict:
+    """`POST /jobs/priority` → `{epoch, priorities, reasons}`；不可达 → `{epoch:None,...}`。
+
+    不可达时的回落是**有意的**：拿不到优先级就按「无人在做」（highest）选——
+    网络抖动不应该把 worker 变成只等不干的空转卡；唯一性由 hub 侧的 claim 闸兜底，
+    而「选一份别人正在算的活」的代价只是白算一份（首写定胜负），比空转便宜。
+    """
+    payload = json.dumps(
+        {
+            "worker_id": worker_id,
+            "held": [str(j) for j in held],
+            "computing": computing or None,
+            "ready_upload": ready_upload or None,
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    try:
+        status, body = _request(
+            base_url,
+            token,
+            "/jobs/priority",
+            timeout=timeout,
+            data=payload,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                **_sched_headers(worker_id, hub_scope=hub_scope),
+            },
+        )
+    except Exception as e:  # 不可达：按 highest 下垂（见 docstring）
+        if log is not None:
+            log(f"priority 问询失败（{type(e).__name__}）——按无人在做处理")
+        return {"epoch": None, "priorities": {}, "reasons": {}}
+    if status != 200:
+        _warn_non_200(base_url, status, log)
+        return {"epoch": None, "priorities": {}, "reasons": {}}
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return {"epoch": None, "priorities": {}, "reasons": {}}
+    if not isinstance(data, dict):
+        return {"epoch": None, "priorities": {}, "reasons": {}}
+    if not isinstance(data.get("priorities"), dict):
+        data["priorities"] = {}
+    return data
+
+
+def claim_job(
+    base_url: str,
+    token: str,
+    jid: str,
+    *,
+    mode: str = CLAIM_MODE_EXCLUSIVE,
+    worker_id: str = "",
+    expected_epoch: int | None = None,
+    timeout: float = 30.0,
+    log: Any = None,
+) -> dict | None:
+    """`POST /jobs/{id}/claim` → 响应 dict（`status ∈ ok|backup|demoted`）；拒收 → None。
+
+    语义要点：
+      · `expected_epoch` = 上一次 priority 响应的版本。不匹配**不是错误**（有人比我快）——
+        hub 会回 `demoted`，调用方按 low 处理（还有别的活就换，只剩它就算备份）；
+      · `status="backup"` 时 `lease_token` 为空串（备份无租约）⇒ 不心跳、不续租；
+      · 409（冻结/避让/未知 job）→ None，调用方丢副本。
+    """
+    payload = json.dumps(
+        {"mode": mode, "worker_id": worker_id, "expected_epoch": expected_epoch},
+        ensure_ascii=False,
+    ).encode("utf-8")
+    status, body = _request(
+        base_url,
+        token,
+        f"/jobs/{jid}/claim",
+        timeout=timeout,
+        data=payload,
+        method="POST",
+        headers={"Content-Type": "application/json", **_sched_headers(worker_id)},
+    )
+    if status != 200:
+        _warn_non_200(base_url, status, log)
+        return None
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _warn_non_200(base_url: str, status: int, log: Any) -> None:
+    """非 200 的节流告警（（url, status）每分钟最多一条）。
+
+    为什么要区分「队列空」与「被拒」（2026-09-16 x3-step 事故）：非 200 一律静默的话，
+    被 403 ip blocked 的 worker 日志与空队列完全一样（只有 "no job yet"），现场无法判断。
+    """
+    if log is None:
+        return
+    now = time.time()
+    key = f"{base_url}:{status}"
+    if now - _POLL_WARN_AT.get(key, 0.0) <= 60:
+        return
+    _POLL_WARN_AT[key] = now
+    hint = (
+        "鉴权失败或该 IP 已被 hub 封禁——检查 --token 与 hub 日志 AUTH FAIL/BLOCKED"
+        if status in (401, 403)
+        else "hub 异常，请检查 hub 进程与隧道"
+    )
+    log(f"调度请求 {base_url}: HTTP {status} — {hint}（这不是「队列空」）")
+
+
+def job_started(base_url: str, token: str, jid: str, *, worker_id: str = "", timeout: float = 15.0) -> None:
+    """`POST /jobs/{id}/start`：打 `computing_at`（掉队阈值的唯一时基，R2-C1）。
+
+    抛点 = PPO 真正启动前一刻（下载/解包/权重装载都已完成），**不是** claim 之后。
+    尽力而为：不可达不致命（最坏后果是这份 job 的掉队阈值晚一点起算）。
+    """
+    try:
+        _request(
+            base_url,
+            token,
+            f"/jobs/{jid}/start",
+            timeout=timeout,
+            data=json.dumps({"worker_id": worker_id}).encode("utf-8"),
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+    except Exception:
+        pass
+
+
+def job_ready(base_url: str, token: str, jid: str, *, worker_id: str = "", timeout: float = 15.0) -> None:
+    """`POST /jobs/{id}/ready`：算完待回传（P0 小包，只降别人的优先级、**永不**取消）。"""
+    try:
+        _request(
+            base_url,
+            token,
+            f"/jobs/{jid}/ready",
+            timeout=timeout,
+            data=json.dumps({"worker_id": worker_id}).encode("utf-8"),
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+    except Exception:
+        pass
+
+
+def abandon_job(
+    base_url: str,
+    token: str,
+    jid: str,
+    *,
+    worker_id: str = "",
+    reason: str = "",
+    timeout: float = 15.0,
+) -> None:
+    """`POST /jobs/{id}/abandon`：合法放弃（R1-3）= **release 租约** + 零 reclaim。
+
+    为什么不只 `release_job`：release 只还租约、不清 hub 侧的 `claimed/computing/ready`
+    可见性，那份 job 的优先级会永远上不到 highest（死 worker 的承诺挂着）。幂等。
+    """
+    try:
+        _request(
+            base_url,
+            token,
+            f"/jobs/{jid}/abandon",
+            timeout=timeout,
+            data=json.dumps({"worker_id": worker_id, "reason": reason}).encode("utf-8"),
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+    except Exception:
+        pass  # 不可达：租约过期兜底（与 release_job 同策略）
+
+
+def job_status(base_url: str, token: str, jid: str, *, timeout: float = 15.0) -> dict | None:
+    """`GET /jobs/{id}/status` → 摘要 dict；不可达/未知名 → None（调用方不据此取消）。"""
+    try:
+        status, body = _request(base_url, token, f"/jobs/{jid}/status", timeout=timeout)
+    except Exception:
+        return None
+    if status != 200:
+        return None
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def start_cancel_watcher(
+    base_url: str,
+    token: str,
+    jid: str,
+    stop: threading.Event,
+    cancelled: threading.Event,
+    *,
+    interval: float = JOB_CANCEL_POLL_SEC,
+    timeout: float = 15.0,
+    log: Any = None,
+) -> threading.Thread:
+    """计算期间盯 `landed`（**唯一**硬取消信号）——独立线程走 P0 小包。
+
+    为什么必须有它：backup 副本与掉了队的重领者都可能正在算一份**已经有人赢下**的 job，
+    而「谁赢了」只有 hub 知道（结果落盘）。轮询的代价是每 1.5s 一个小 GET，
+    收益是停止烧一张卡的 GPU（现网口径：T_ppo < 60s，一轮就是一次白算）。
+
+    `landed=True` 时置 `cancelled`，由 `run_job` 在 epoch 边界抛出 —— 延迟判据 <20s
+    （R1-6）；实测值由调用方记进 `cancel_latency_s`。
+    """
+
+    def _loop() -> None:
+        while not stop.wait(interval):
+            st = job_status(base_url, token, jid, timeout=timeout)
+            if st is None:
+                continue  # 问不到 ≠ 赢了：只看正面证据（宁多算一轮，不错杀）
+            if st.get("landed") is True:
+                if log is not None:
+                    log(f"job {jid}: hub 已有结果（landed）——请求停算（epoch 边界生效）")
+                cancelled.set()
+                return
+
+    th = threading.Thread(target=_loop, daemon=True, name=f"cancel-{jid[:8]}")
+    th.start()
+    return th
+
+
+def _priority_rank(prio: str) -> int:
+    """优先级排序键（越大越优先）。未知档位按最高处理（不确定时宁可去干，见 `request_priority`）。"""
+    try:
+        return PRIORITY_ORDER.index(prio)
+    except ValueError:
+        return len(PRIORITY_ORDER)
+
+
+def acquire_job(
+    base_url: str,
+    token: str,
+    *,
+    worker_id: str = "",
+    offline_ok: bool = False,
+    hub_scope: int | None = None,
+    depth: int = 3,
+    log: Any = None,
+) -> dict | None:
+    """job 边界的取活三件套：`peek → priority → claim`（§2.3 / §2.6）。
+
+    返回形状与旧 `poll_job` **逐字段兼容**（`{job_id, manifest, halt, lease_token, course}`
+    或 `{"halt": True}` 或 None）——`worker_loop` 的下游（心跳/停机达令/run_job）零改动。
+
+    选活规则：优先级降序，`none`（= 结果已落盘）**直接丢**（它同时是批量取消信号）；
+    同一档内按 peek 给的顺序（= hub 的跨课程轮转序）取第一份。claim 回 `demoted` 时
+    继续试下一份（§2.3 ④）——「还有别的活就换，只剩它就算备份」的对称面是：
+    demoted 的那一份**不**回头当备份（备份要有明确收益，交给预取/掉队救援去触发）。
+    """
+    peeked = peek_jobs(
+        base_url,
+        token,
+        worker_id=worker_id,
+        offline_ok=offline_ok,
+        hub_scope=hub_scope,
+        n=depth,
+        log=log,
+    )
+    if peeked is None:
+        return None
+    cands, halt = peeked
+    if not cands:
+        return {"halt": True} if halt else None
+    pr = request_priority(
+        base_url,
+        token,
+        worker_id=worker_id,
+        hub_scope=hub_scope,
+        held=[c["job_id"] for c in cands],
+        log=log,
+    )
+    prios = pr.get("priorities") or {}
+    epoch = pr.get("epoch") if isinstance(pr.get("epoch"), int) else None
+    # `none` **先整批处理**（不是排到队尾再跳过）：它是批量取消信号——本地软持有/
+    # 预取的副本此刻就该作废。放在排序里「顺手 skip」的话，一旦前一个候选 claim 成功
+    # 就 return 了，后面那些 none 副本永远不会被清（P2 预取落地后这条就是存储泄漏）。
+    alive = []
+    for cand in cands:
+        jid = str(cand["job_id"])
+        if str(prios.get(jid, "highest")) == PRIORITY_NONE:
+            if log is not None:
+                log(f"job {jid}: priority=none（别人已落盘）——丢弃本地副本，不再试领")
+            continue
+        alive.append(cand)
+    if not alive:
+        return {"halt": True} if halt else None
+    ranked = sorted(alive, key=lambda c: -_priority_rank(str(prios.get(c["job_id"], "highest"))))
+    for cand in ranked:
+        jid = str(cand["job_id"])
+        got = claim_job(
+            base_url,
+            token,
+            jid,
+            mode=CLAIM_MODE_EXCLUSIVE,
+            worker_id=worker_id,
+            expected_epoch=epoch,
+            log=log,
+        )
+        if got is None:
+            continue
+        if str(got.get("status")) == "demoted":
+            if log is not None:
+                log(f"job {jid}: claim 被降级（epoch 变过/已有承诺者）——试下一份")
+            continue
+        if got.get("job_id") and got.get("manifest"):
+            got.setdefault("course", cand.get("course"))
+            return got
+    return {"halt": True} if halt else None
+
+
 def _get_with_retry(
     base_url: str,
     token: str,
@@ -688,10 +1085,18 @@ def post_result(
     lease_token: str = "",
     timeout: float = 120.0,
     attempts: int = 5,
+    mode: str = "ok",
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
 ) -> int:
     """POST 结果：瞬时失败（网络/5xx）指数退避重试（最贵产物不允许最后一米丢失）；
-    4xx = 确定性拒绝立即抛 ProtocolError；409 = hub 已有同 job 结果（幂等，按成功）。"""
+    4xx = 确定性拒绝立即抛 ProtocolError；409 = hub 已有同 job 结果（幂等，按成功）。
+
+    `mode`（2026-09-22，R1-2）：本份是 **backup 副本**（`mode="backup"`）时，403
+    lease-mismatch 按**丢弃**处理（返回 403，不抛）——它是「这份活已被别人赢下」的
+    同义面，而不是确定性失败。不这么分的话 backup 副本会被读成
+    `ProtocolError` ⇒ `report_job_failure` ⇒ **训练停腿**（一个赢家把输家炸成事故）。
+    非 backup 的 403 仍走原路径（那才是真的协议违规）。
+    """
     last: str = ""
     # 方案B（2026-09-10）：v2 体 = gzip 裸二进制段（省掉 base64 的 33% 膨胀）。
     # 实测线上 1,150,292 -> 862,717 B（相对未压缩的 1,634,596 省 47.2%），上行 ~5.2 -> ~3.9 s。
@@ -736,6 +1141,11 @@ def post_result(
             _wire_add(jid, "result", len(req_body), time.time() - t_a)  # 字节确实出去了
             log("result POST 409（hub 已有同 job 结果：竞速输家/重复回传）——按成功丢弃")
             return 409
+        if status == 403 and mode == CLAIM_MODE_BACKUP:
+            # backup 副本被租约闸拦下（R1-2）：单列为「丢弃」，**绝不**进 ProtocolError
+            # （那会触发 report_job_failure ⇒ 训练停腿）。不重试：结果已在别人手里。
+            log("result POST 403（backup 副本非当前租约持有人）——按成功丢弃，不报失败")
+            return 403
         if status is not None and 400 <= status < 500:
             if ctype == WIRE_V2_CONTENT_TYPE and attempt < attempts:
                 # 旧 hub 进程（只认 application/json）会 4xx —— 退回 JSON 重发一次。
@@ -1548,6 +1958,14 @@ def run_job(
     artifacts_dir: str | Path | None = None,
     run_max_iters: int = 0,
     run_budget_sec: float = 0.0,
+    # ---- 调度面（2026-09-22，plan/transfer-scheduling R2-5）----
+    # `should_cancel()`：每 **epoch 边界** 问一次「结果是不是已经 landed」——是则抛
+    # `JobCancelledError`（停算丢弃，零回传/零 fail）。不在 chunk 内层加回调（用户拍板：
+    # 不值得为 15s→1s 去动 `ppo_update` 内层结构）。
+    # `on_ppo_start()`：PPO 真正启动前一刻打点（hub 把它记成 `computing_at` = 掉队阈值
+    # 的**唯一**时基；下载/解包/权重装载都已完成的那个瞬间）。
+    should_cancel: Any = None,
+    on_ppo_start: Any = None,
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
 ) -> dict:
     """执行单个 job：下载 → 校验 → PPO → 产出 weights_json + opt tar → POST。
@@ -2096,6 +2514,26 @@ def run_job(
     # 为什么连读 shard 一起包：那同样是「这份字节决定的」失败（缺字段/形状不符），
     # 而 OOM 那类真瞬态由 `job_body_error` 原样放回重领路径。
     shards_root = str(job_dir)
+    if on_ppo_start is not None:
+        try:
+            # 打点失败不致命：最坏后果是这份 job 的掉队阈值晚起算（多开一份备份）。
+            on_ppo_start()
+        except Exception:
+            pass
+
+    def _cancel_at_epoch_boundary(_ep_done: int, _mdl: Any) -> None:
+        """epoch 边界查一次取消（R1-6；延迟判据 <20s）——由 hub 的 landed 驱动。"""
+        if should_cancel is None or not should_cancel():
+            return
+        raise JobCancelledError(
+            f"job {jid}: 结果已 landed（别人先赢）——epoch {_ep_done} 边界停算丢弃"
+        )
+
+    if should_cancel is not None and should_cancel():
+        # 下载/解包/装载期间结果就已 landed：**开算前**就丢，别白烧一整轮 PPO。
+        # （epoch 边界那个回调只救得了「开算之后才 landed」的情形。）
+        raise JobCancelledError(f"job {jid}: 结果已 landed（下载期间）——开算前丢弃")
+
     t_ppo = time.time()
     try:
         episodes = ppo_engine.load_episodes(
@@ -2128,8 +2566,17 @@ def run_job(
             demo_bank=demo_bank,
             demo_bc_coef=demo_coef,
             demo_per_mb=demo_per_mb,
+            # ★ 取消接线（R2-5）：今天这条调用**没有**传它——不传则取消延迟永远是
+            # 「跑完才响应」。训练侧那条（`rl/stream.py`）传的是双缓冲预采回调，
+            # 与这里不是同一个调用点，别去动那一条。
+            on_epoch_done=_cancel_at_epoch_boundary if should_cancel is not None else None,
         )
     except ProtocolError:
+        raise
+    except JobCancelledError:
+        # 取消是**正常结局**（备份副本被首写锁定判负）：绝不能落到下面的
+        # `job_body_error`（它会把未知异常转成 ProtocolError ⇒ report_job_failure ⇒
+        # 训练停腿——把合法放弃报成确定性失败）。
         raise
     except Exception as e:
         raise job_body_error("grad（PPO 更新）", e) from e
@@ -2392,6 +2839,9 @@ def worker_loop(
       留共享根。异 commit job 由既有 _ACTIVE_CODE_SHA 守卫转 86 + 监督器重拉。
     """
     done = 0
+    # 身份只算一次（旧路径每个轮询都调 worker_tag()：hostname 系统调用不贵但没必要
+    # 每秒一次；而 hub 的登记表靠这个值去重，值必须稳定）。
+    worker_id = worker_tag()
     idle_since = time.time()
     _last_alive_log = time.time()
     _polls_since_log = 0
@@ -2415,16 +2865,21 @@ def worker_loop(
         try:
             _polls_since_log += 1
             _polls_since_accept += 1
-            job = poll_job(
+            # 取活三件套（2026-09-22）：peek（候选，**不认领**）→ priority（job 边界
+            # 问询）→ claim（独占）。`/jobs/next` 已退役（R1-9：不兼容旧 worker 是用户
+            # 授权的**一次性**切换）——旧 worker 会拿到 404 而不是静默错跑。
+            job = acquire_job(
                 base_url,
                 token,
-                log=log,
-                hub_scope=len(hubs),  # 竞速判定输入：本 worker 服务几个 hub
-                worker_id=worker_tag(),
+                worker_id=worker_id,
                 offline_ok=offline_ok,  # 能力自报：能自己跑完整段
+                # 竞速判定的既有输入（P3 删判定时与之一同移除）：新面照旧上报，
+                # 免得「换面」顺手把既有机群协同行为静默改掉。
+                hub_scope=len(hubs),
+                log=log,
             )
         except Exception as e:
-            log(f"poll failed: {e} — retry in {poll_sec}s")
+            log(f"acquire failed: {e} — retry in {poll_sec}s")
             time.sleep(poll_sec)
             hi = (hi + 1) % len(hubs)
             continue
@@ -2472,10 +2927,10 @@ def worker_loop(
         _polls_since_log = 0  # claim 即上报：alive 行下次只数 claim 之后的轮询，不与本行重复
         jid = job["job_id"]
         lease_token = str(job.get("lease_token", "") or "")
-        raced = bool(job.get("race"))  # 竞速副本（无租约）：先回传者胜，后到者 409 丢弃
+        claim_mode = str(job.get("status") or "ok")  # ok（独占）| backup（无租约副本）
         log(
-            f"job {jid} claimed"
-            + (" [RACE 副本：先回传者胜]" if raced else "")
+            f"job {jid} claimed [mode={claim_mode}]"
+            + ("" if lease_token else "（无租约：先回传者胜，后到者 409 丢弃）")
             + f" — downloading payload ({_polls_since_accept} polls since last accepted result)"
         )
         # 心跳线程仅在有租约时启动（P3b 独占 hub 下发 lease_token；无租约
@@ -2492,6 +2947,13 @@ def worker_loop(
             hb_thread = threading.Thread(target=_hb_loop, daemon=True, name=f"hb-{jid[:8]}")
             hb_thread.start()
         job_ok = False
+        # 取消环（2026-09-22）：唯一硬取消信号 = `landed`（结果已落盘）。backup 副本与
+        # 掉队重领者都可能正在算一份**别人已经赢下**的 job——停算的收益是省一张卡的 GPU，
+        # 代价是每 1.5s 一个 P0 小包。取消点在 epoch 边界（<20s），实测值进 cancel_latency_s。
+        _cancel = threading.Event()
+        _watch_stop = threading.Event()
+        start_cancel_watcher(base_url, token, jid, _watch_stop, _cancel, log=log)
+        _t_ppo0 = time.time()
         try:
             result = run_job(
                 base_url,
@@ -2507,15 +2969,39 @@ def worker_loop(
                 run_max_iters=run_max_iters,
                 run_budget_sec=run_budget_sec,
                 log=log,
+                should_cancel=_cancel.is_set,
+                on_ppo_start=lambda: job_started(base_url, token, jid, worker_id=worker_id),
             )
-            _post_st = post_result(base_url, token, jid, result, lease_token=lease_token)
+            # 算完待回传（P0 小包）：只降别人的优先级（低档备份保险），**永不**触发取消。
+            job_ready(base_url, token, jid, worker_id=worker_id)
+            _post_st = post_result(
+                base_url, token, jid, result, lease_token=lease_token, mode=claim_mode
+            )
             log(
                 f"job {jid} done — "
-                + ("lost the race (409, 赢家已落账) — 本份丢弃" if _post_st == 409 else "result accepted")
+                + (
+                    "lost the race (409, 赢家已落账) — 本份丢弃"
+                    if _post_st == 409
+                    else (
+                        "backup 副本被拒（403，非本 job 租约持有人）— 本份丢弃，不算失败"
+                        if _post_st == 403
+                        else "result accepted"
+                    )
+                )
             )
             done += 1
             _polls_since_accept = 0
             job_ok = True
+        except JobCancelledError as e:
+            # ★ 唯一正确的取消处置（§2.4）：不写 _result.json、不 POST、不报 fail、
+            # abandon（release 租约 + 零 reclaim），立刻去问 priority 选下家。
+            # 绝不能落到下方 except ProtocolError（= 把合法放弃报成确定性失败 ⇒ 训练停腿）
+            # 或 except RetryableError（= 把别人已赢下的活 release 回池）。
+            log(
+                f"job {jid} CANCELLED: {e} — 停算丢弃（零回传/零 fail），"
+                f"cancel_latency_s={time.time() - _t_ppo0:.1f}"
+            )
+            abandon_job(base_url, token, jid, worker_id=worker_id, reason="landed")
         except RetryableError as e:
             # 瞬时失败（网络/5xx/传输损坏）：主动还租约立即回池——不再付 30min 过期等待
             log(f"job {jid} 瞬时失败: {e} — release 租约回池，立即可重领")
@@ -2561,6 +3047,8 @@ def worker_loop(
         finally:
             # 每 job 一行传输账：payload/code/blob/result 的 (bytes, sec) + 零字节命中 + 重抽
             _wire_flush(jid, log)
+            # 取消环必须每 job 都收（否则一个 job 一个常驻线程，长跑 worker 会漏线程）
+            _watch_stop.set()
             _hb_stop.set()
             if hb_thread is not None:
                 hb_thread.join(timeout=HEARTBEAT_SEC + 5)

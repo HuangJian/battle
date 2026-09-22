@@ -208,7 +208,9 @@ def test_single_hub_unchanged_layout(tmp_path: Path) -> None:
     seen: dict = {}
     job = {"job_id": "j1", "manifest": {}}
     with (
-        patch.object(W, "poll_job", return_value=job),
+        # 取活已换面（2026-09-22：`acquire_job` = peek+priority+claim）——本用例只关心
+        # work 分区布局，故钉接线面而非取活实现。
+        patch.object(W, "acquire_job", return_value=job),
         patch.object(W, "run_job", side_effect=lambda *a, **k: seen.update(k) or {}) as _r,
         patch.object(W, "post_result", return_value=None),
     ):
@@ -234,7 +236,7 @@ def test_multi_hub_round_robin_and_partition(tmp_path: Path) -> None:
         return None
 
     with (
-        patch.object(W, "poll_job", side_effect=fake_poll),
+        patch.object(W, "acquire_job", side_effect=fake_poll),
         patch.object(W, "run_job", side_effect=lambda *a, **k: seen.update(k) or {}),
         patch.object(W, "post_result", return_value=None),
     ):

@@ -74,6 +74,7 @@ import sys
 import tempfile
 import time
 import urllib.parse
+from collections import namedtuple
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Lock, Thread
@@ -90,6 +91,9 @@ from remote._port_guard import ensure_port_free
 from remote.artifacts import ArtifactStore, ledger_row_from_metrics
 from remote.protocol import (
     AUTH_HEADER,
+    CLAIM_MODE_BACKUP,
+    CLAIM_MODE_EXCLUSIVE,
+    CLAIM_MODES,
     CLAIM_TTL_SEC,
     COURSE_ENABLE_MARKER,
     COURSE_MODE_OFFLINE,
@@ -108,6 +112,11 @@ from remote.protocol import (
     OFFLINE_RESUME_PATH,
     OFFLINE_TASK_PACK_PATH,
     PAYLOAD_NAME,
+    PRIORITY_HIGH,
+    PRIORITY_HIGHEST,
+    PRIORITY_LOW,
+    PRIORITY_MEDIUM,
+    PRIORITY_NONE,
     PUSH_POLL_SEC,
     PUSH_TIMEOUT_SEC,
     RACE_MODE_AUTO,
@@ -122,6 +131,7 @@ from remote.protocol import (
     decode_weights_json,
     find_payload,
     has_offline_capability,
+    job_priority,
     may_avoid_stale_holder,
     parse_course_arg,
     parse_hub_scope,
@@ -272,6 +282,18 @@ class _AuthGuard:
             return max(0.0, self._auth_blocked_until.get(ip, 0.0) - self._now())
 
 
+#: `claim_outcome()` 的返回形状（新 HTTP 面的出口；`token` 为空串 = 无租约/未拿到）。
+#: `status ∈ {"ok", "backup", "demoted", "held", "frozen", "stale_holder"}`——worker 侧
+#: 只关心「拿到了吗」+「没拿到是降级还是真轮不到」：前者丢副本、后者按 low 处理。
+ClaimOutcome = namedtuple("ClaimOutcome", "ok token status reason")
+
+#: `peek` 一次最多返回的候选数（软持有深度缺省 3 的上界；防一个 worker 把队首扫空）。
+PEEK_MAX = 16
+
+#: 新调度面（peek 除外的 POST）请求体上限：都是小 JSON（job_id/worker_id/held 列表），
+#: 比 fail 体小得多。有界是硬要求（远端体绝不信 Content-Length 之外的暗示）。
+PRIORITY_BODY_MAX = 64 * 1024
+
 #: 毒包熔断阈值（plan/accident.plan.md §4.1，2026-09-21）：同一 job 被**认领后零回传**满这么多次
 #: ⇒ hub 冻结它并响亮告警。为什么是「零回传」而不是「失败」：worker 报得上来的失败早就有
 #: 确定性通道了（`POST /jobs/{id}/fail`，§4.0/P0）；这里兑的是**未知崩溃类型**——worker 连
@@ -323,6 +345,27 @@ class _JobStore(_AuthGuard):
         #: 会清失败标记（“重发即重试”语义，见 `claimable_job_ids` 注释）——冻结若住那里，
         #: 重发当场解冻，本次事故照烧 3.5 小时。两者正交：重发不清冻结，解冻只走人工入口。
         self._frozen: dict[str, dict] = {}
+        # ---- 调度优先级（2026-09-22，plan/transfer-scheduling §2.1/§2.3）----
+        #: job_id -> {"worker", "at"}：**有人承诺在跑**（exclusive claim 成功/`/start` 时写）。
+        #: 与 `_leases` 的分工：租约管「别人现在不能领」，`_claimed` 管「有人在做这件事」
+        #: （优先级表中档的输入）。为啥不只看租约：备份副本**不设租约**，只看租约就判不出
+        #: 「别处在做」⇒ 所有 job 都会被判成 highest ⇒ 多张卡同抢一份（= race 换个名字）。
+        self._claimed: dict[str, dict] = {}
+        #: job_id -> {"worker", "at"}：**PPO 真正启动**（`POST /jobs/{id}/start` 打点）。
+        #: 掉队阈值的**唯一**时基（R2-C1）：claim 之后还有下载 + 解包，拿 claim 起算会把
+        #: 「下载慢」误判成「算得慢」，反而多开备份把本来就慢的链路压得更死。
+        self._computing: dict[str, dict] = {}
+        #: 已算完、尚未回传成功（`POST /jobs/{id}/ready`）的 job_id。
+        #: volatile：只影响优先级（低档备份），重启丢掉不影响正确性。
+        self._ready: set[str] = set()
+        #: 调度面版本号（§2.3 / R1-5）：`_claimed`/`_computing`/`_ready` 任一变化即 +1。
+        #: 只服务 highest 的唯一性闸（值本身无残留语义，重启归零）。
+        self._epoch: int = 0
+        #: 已被**显式授权备份**的 job_id ⇒ 它们的回传不吃 403（R2-3）。
+        #: 为什么不是「pop 掉原租约」（本轮评审推翻的写法）：pop 后原 worker 硬死无租约
+        #: 可过期 ⇒ 毒包熔断失明；job 立刻回池 ⇒ 第三/第四份可自由领取；push 腿
+        #: 「hub 持租约防同一份活两处跑」的自保也会失效。标记只放行回传，不动其它语义。
+        self._backup_authorized: set[str] = set()
         # 鉴权面（`_AuthGuard`）：进程级一份——多课程单 hub 下不按课程各算一套计数
         _AuthGuard.__init__(self, now_fn)
         #: 账本增量读缓存（H6）：文件 size -> 已解析事件列表
@@ -555,68 +598,262 @@ class _JobStore(_AuthGuard):
         race: bool = False,
         worker_id: str = "",
         avoid_stale_holder: bool = False,
+        mode: str | None = None,
+        expected_epoch: int | None = None,
     ) -> str | None:
-        """领取（设租约 + owner + last_heartbeat 三件套**同时置**）。
+        """领取（独占 = 设租约 + owner + last_heartbeat 三件套**同时置**）。
 
         B3 必杀细节：只写 `_leases` 不写 `_lease_owners` 会导致 heartbeat 恒 False，
         300s 后长 job 被重广播——故领取必须走本函数，不许手写 `_leases[jid] = ...`。
         活租约在持 → 返回 None（调用方跳过本 jid，不是阻塞等）。
 
-        race=True（竞速副本）：**不设租约**，返回空 token —— 每个 worker 都能拿到同一份
-        job，回传时无人持租约（`result_token_ok` 放行），胜负由 `store_result` 首写锁定决定。
-        空 token 在 worker 侧正是**既有**的「无租约」分支：不心跳、不续租（§343 时代语义），
-        故本模式不需要 worker 协议改动。
+        `mode`（2026-09-22，R1-1；默认由 `race` 推出，过渡期两者并存、P3 删 race 时
+        连 `race=` 一起删）：
+          * `"exclusive"` = 正常独占（设租约 + 写 `_claimed` + `epoch += 1`）；
+          * `"backup"` = **备份副本**：不设租约、返回空 token，胜负由 `store_result`
+            首写锁定决定。⚠ 它**不动**原持有者的租约（R2-3），只置 `_backup_authorized`
+            让备份的回传**不吃 403**——否则 `ProtocolError` ⇒ `report_job_failure` ⇒
+            训练停腿（这个坑本文件的旧注释里已写过一次：一个赢家把输家炸成事故）。
 
-        worker_id / avoid_stale_holder（2026-09-18 多课程单 hub）：领取时记下**是谁**在跑，
-        并在租约过期的那一刻把它转成 `_stale_holders`。`avoid_stale_holder=True` 时，若
-        请求者正是上一份死租约的持有人，**本次不给他**（返回 None）——按用户口径
-        「超时回落队首并改为推送其它 worker」。是否允许避让由调用方算（只剩一个活跃
-        worker 时必须允许自领，否则集群停摆，见 `protocol.avoid_expired_holder`）。
+        `expected_epoch`（§2.3 highest 唯一性闸）：版本不匹配**不是错误**，是「有人比我快」
+        的正常信号；本函数在**同一个临界区**内重新判定该 job 的优先级，仍为最高才放行。
+        要区分「降级」与「领不到」用 `claim_outcome()`（同一出口，两个返回形状）。
         """
-        import secrets
-
-        with self._lock:
-            if job_id in self._frozen:
-                # ★ 熔断（§4.1）：任何入口都不再下发（含竞速广播）。
-                # `claimable_job_ids` 已排除冻结的 job，这里是**纵深防御**：池快照与本次
-                # claim 之间隔着几行代码，而「已冻结」这件事必须与该快照无关地成立。
-                return None
-        if race:
+        if race and mode is None:
+            # 过渡期等价物（P3 删竞速判定时本分支与 `race=` 形参一起删，R1-9）：广播 =
+            # 放弃独占。注意它**只**服务旧的 `/jobs/next`+竞速判定路径；新路径（peek +
+            # claim）用的是 `mode="backup"`，后者**不动**原租约（R2-3）。
             with self._lock:
-                # 广播即**放弃独占**：先前那份独占租约（若有——先到的 worker 独领过，
-                # 之后第二个 worker 入场才转竞速）必须当场失效，否则第二名会被
-                # `result_token_ok` 按「非持有人」403 拒收——而那会被 worker 读成
-                # **确定性拒绝**并上报 job 失败，一个赢家把输家炸成事故。
                 self._leases.pop(job_id, None)
                 self._lease_owners.pop(job_id, None)
                 self._lease_workers.pop(job_id, None)
                 self._last_heartbeat[job_id] = self._now()  # 仅供观测（谁在跑）
+                self._drop_commitment_locked(job_id)  # 放弃独占 = 撕掉承诺痕迹
             return ""
+        ok, token, _why = self._claim_locked(
+            job_id,
+            ttl=ttl,
+            mode=mode or (CLAIM_MODE_BACKUP if race else CLAIM_MODE_EXCLUSIVE),
+            worker_id=worker_id,
+            avoid_stale_holder=avoid_stale_holder,
+            expected_epoch=expected_epoch,
+        )
+        return token if ok else None
+
+    def claim_outcome(
+        self,
+        job_id: str,
+        *,
+        mode: str = CLAIM_MODE_EXCLUSIVE,
+        worker_id: str = "",
+        avoid_stale_holder: bool = False,
+        expected_epoch: int | None = None,
+    ) -> ClaimOutcome:
+        """带原因的领取（新 HTTP 面的唯一入口）：区分「降级」与「领不到」。
+
+        为什么不给 `claim()` 换返回类型：`str | None` 被既有调用方（`claim_next`、push
+        派发、多份用例）依赖；而「降级 → 按 low 处理」只有新 worker 需要。两者共用同一个
+        `_claim_locked` ⇒ 不会出现「两处各自校验 epoch」的第二个事实源（§3.1 末段）。
+        """
+        ok, token, why = self._claim_locked(
+            job_id,
+            ttl=CLAIM_TTL_SEC,
+            mode=mode,
+            worker_id=worker_id,
+            avoid_stale_holder=avoid_stale_holder,
+            expected_epoch=expected_epoch,
+        )
+        if ok:
+            status = "backup" if mode == CLAIM_MODE_BACKUP else "ok"
+            return ClaimOutcome(True, token, status, why)
+        return ClaimOutcome(False, "", why, why)
+
+    def _claim_locked(
+        self,
+        job_id: str,
+        *,
+        ttl: float,
+        mode: str,
+        worker_id: str,
+        avoid_stale_holder: bool,
+        expected_epoch: int | None,
+    ) -> tuple[bool, str, str]:
+        """claim 的**唯一**临界区（返回 `(ok, token, 原因)`）。
+
+        ★ 别在别处手写租约写入：B3 的坑（只写 `_leases` 不写 `_lease_owners` ⇒ heartbeat
+        恒 False ⇒ 长 job 300s 后被重派）就靠「唯一入口」防住。
+        """
+        import secrets
+
+        if mode not in CLAIM_MODES:
+            # 纵深防御：队列层 handler 已按白名单拒收，但 store 才是**唯一**的租约写入
+            # 入口（B3：手写租约的坑靠入口唯一性防住）——一个写错的模式在这里被
+            # 当成独占静默放行，就是「以为在做备份、其实是独占」，必须响亮拒。
+            return False, "", "bad_mode"
         with self._lock:
+            if job_id in self._frozen:
+                # ★ 熔断（§4.1）：任何入口都不再下发（含备份副本）。
+                return False, "", "frozen"
             now = self._now()
+            if mode == CLAIM_MODE_BACKUP:
+                # 备份副本：不设租约、不动原租约（R2-3），只授权「你的回传不吃 403」。
+                self._backup_authorized.add(job_id)
+                self._last_heartbeat[job_id] = now  # 仅供观测（谁在跑）
+                return True, "", "backup"
             lease = self._leases.get(job_id)
-            if lease is not None and lease > now:
-                return None
-            if lease is not None:
+            recovering = lease is not None and lease <= now
+            if recovering:
                 # 过期租约：回收并记下「谁跑死的」——下一个 worker 该顶上（而不是让它
                 # 自领自己跑死的活，那只是把同一个故障重演一遍）。
                 self._collect_expired_locked(job_id)
                 if self._frozen.get(job_id):
-                    # ★ 刚达阈（或已冻结）：本次不给他，也不再回池（§4.1 熔断）。
-                    return None
+                    return False, "", "frozen"  # ★ 刚达阈（或已冻结）
+            if not recovering and job_id in self._claimed:
+                # ★ highest 唯一性闸（R1-5）：同一份 job 只能有一个「承诺在跑」的人。
+                # 这一条才是「N 个 worker 同拍问询全拿 highest」的真正闸门——epoch 只是
+                # 提醒「调度面变过」，不匹配本身不等于有人抢了**这一份**。
+                if expected_epoch is not None and int(expected_epoch) != self._epoch:
+                    return False, "", "demoted"
+                return False, "", "held"
+            # 调度面在问询之后变过 ⇒ **在该 job 上重新判一次**（§2.3 ③）：仍是最高才放行。
+            if (
+                expected_epoch is not None
+                and int(expected_epoch) != self._epoch
+                and self._job_priority_locked(job_id, exclude_worker=worker_id)
+                != PRIORITY_HIGHEST
+            ):
+                return False, "", "demoted"
             # 避让：上一份**过期死掉**的租约若就是这个请求者跑的，本次不给他（让别的
             # worker 顶上）。身份比对只能在这里做——上面刚完成租约回收，stale 记录此刻
             # 才是最新的；在队列层先判会恒为空（2026-09-18 实测）。
             if avoid_stale_holder and worker_id and self._stale_holders.get(job_id, "") == worker_id:
-                return None
+                return False, "", "stale_holder"
             token = secrets.token_hex(16)
             self._leases[job_id] = now + ttl
             self._lease_owners[job_id] = token
+            self._claimed[job_id] = {"worker": worker_id, "at": now}
             if worker_id:
                 self._lease_workers[job_id] = worker_id
                 self._stale_holders.pop(job_id, None)  # 有人接手了 ⇒ 避让记录使命结束
             self._last_heartbeat[job_id] = now
-            return token
+            self._bump_epoch_locked()
+            return True, token, "ok"
+
+    # ---- 调度面事实（优先级问询 / 掉队阈值的唯一事实源） ----
+    def _bump_epoch_locked(self) -> None:
+        """调度面版本 +1（调用方必须持锁）。只在 `_claimed`/`_computing`/`_ready` 变化时调。"""
+        self._epoch += 1
+
+    def scheduling_epoch(self) -> int:
+        """当前调度面版本（`POST /jobs/priority` 的响应字段）。"""
+        with self._lock:
+            return int(self._epoch)
+
+    def start_job(self, job_id: str, worker_id: str = "") -> bool:
+        """`POST /jobs/{id}/start`：打 **computing_at**（掉队阈值的唯一时基）+ `epoch += 1`。
+
+        「PPO 真正启动」与「claim 成功」是两把时钟（R2-C1）：claim 之后还有整包下载 +
+        解包 + 权重装载，拿 claim 起算会把慢链路误判成慢计算。
+
+        ⚠ 本端点**不**校验 `expected_epoch`（R2-C4）：闸只在 claim 一处，两处各自校验
+        就是第二个事实源。
+        """
+        with self._lock:
+            wid = str(worker_id or "").strip() or str((self._claimed.get(job_id) or {}).get("worker", ""))
+            self._computing[job_id] = {"worker": wid, "at": self._now()}
+            self._claimed.setdefault(job_id, {"worker": wid, "at": self._now()})
+            self._bump_epoch_locked()
+            return True
+
+    def set_ready(self, job_id: str, worker_id: str = "") -> bool:
+        """`POST /jobs/{id}/ready`：算完待回传（只降别人的优先级，**永不**触发取消）。"""
+        with self._lock:
+            self._ready.add(job_id)
+            if worker_id:
+                self._last_heartbeat[job_id] = self._now()
+            self._bump_epoch_locked()
+            return True
+
+    def abandon_job(self, job_id: str, worker_id: str = "") -> bool:
+        """`POST /jobs/{id}/abandon`：合法放弃（R1-3）。
+
+        = **release 租约** + 清 claimed/computing/ready 可见性 + **零 reclaim**。
+        为什么必须同时 release：job 在 `CLAIM_TTL_SEC=300` 内会被 `claimable_job_ids`
+        按「活租约」挡在池外，而租约自然过期又会走 `_collect_expired_locked` ⇒
+        `_reclaims+1` ⇒ 三度达 `FREEZE_AFTER_RECLAIMS` 被冻成毒包（合法放弃被读成
+        「认领后零回传」）。幂等：没租约/已清过 → 照样返回 True。
+        """
+        with self._lock:
+            self._leases.pop(job_id, None)
+            self._lease_owners.pop(job_id, None)
+            self._lease_workers.pop(job_id, None)
+            self._last_heartbeat.pop(job_id, None)
+            self._stale_holders.pop(job_id, None)  # 主动放弃 ≠ 跑死，不该触发避让
+            self._drop_commitment_locked(job_id)
+            return True
+
+    def scheduling_facts(self, job_id: str, *, exclude_worker: str = "") -> dict:
+        """单份 job 的调度事实（**只看别人**；问询者自己的痕迹被排除，§1.4）。
+
+        `landed` 走盘上的 `result/` 与失败标记——它是「无优先级」的唯一来源（唯一硬闸），
+        也是软持有副本的就地丢弃信号。
+
+        ⚠ 它只是 `_facts_locked` 的加锁包——**锁不可重入**，而优先级判定本身就在临界区里
+        调事实：直接互调会让第一次 `/jobs/{id}/status` 把 hub 线程永久卡死（本实现的第一版
+        就是这么写的，被 test_poison_freeze 当场抓出来）。
+        """
+        with self._lock:
+            return self._facts_locked(job_id, exclude_worker=exclude_worker)
+
+    def _facts_locked(self, job_id: str, *, exclude_worker: str = "") -> dict:
+        """事实面的**唯一**实现（调用方必须特锁）——见 `scheduling_facts` 的告警。"""
+        jd = self._job_dir(job_id)
+        claimed = dict(self._claimed.get(job_id) or {})
+        computing = dict(self._computing.get(job_id) or {})
+        if exclude_worker:
+            if str(claimed.get("worker", "")) == exclude_worker:
+                claimed = {}
+            if str(computing.get("worker", "")) == exclude_worker:
+                computing = {}
+        return {
+            "landed": (jd / "result").exists() or (jd / FAIL_NAME).exists(),
+                "ready": job_id in self._ready,
+                "claimed": bool(claimed),
+                "computing_at": (float(computing["at"]) if computing.get("at") else None),
+                "lease_holder": self._lease_workers.get(job_id, ""),
+        }
+
+    def _job_priority_locked(self, job_id: str, *, exclude_worker: str = "") -> str:
+        """该 job 当前的优先级（调用方**必须持锁**；用到 `_claimed`/`_computing`/`_ready`）。"""
+        facts = self._facts_locked(job_id, exclude_worker=exclude_worker)
+        return job_priority(
+            landed=bool(facts["landed"]),
+            ready_elsewhere=bool(facts["ready"]),
+            claimed_elsewhere=bool(facts["claimed"]),
+            computing_elsewhere_since=facts["computing_at"],
+            now=self._now(),
+        )
+
+    def priority_for(self, job_id: str, *, exclude_worker: str = "") -> tuple[str, str]:
+        """`(优先级, 一行理由)`——观测面与优先级 RPC 共用。"""
+        with self._lock:
+            p = self._job_priority_locked(job_id, exclude_worker=exclude_worker)
+            facts = self._facts_locked(job_id, exclude_worker=exclude_worker)
+        if p == PRIORITY_NONE:
+            why = "结果已落盘（唯一硬闸：放弃）"
+        elif p == PRIORITY_HIGH:
+            why = f"别处在算且超阈值（computing_at 起 {self._now() - float(facts['computing_at']):.0f}s）"
+        elif p == PRIORITY_MEDIUM and facts.get("computing_at"):
+            # 中档里再分一层：已开算 vs 只承诺（还在下载/装载）。R2-C1 的两把时钟在
+            # **观测行**上也要分得出来——否则「卡在下载」与「算得慢」在日志里同一句话。
+            why = f"别处在算（computing_at 起 {self._now() - float(facts['computing_at']):.0f}s，未超阈值）"
+        elif p == PRIORITY_MEDIUM:
+            why = "别处已承诺在跑（尚未开算：还在下载/装载）"
+        elif p == PRIORITY_LOW:
+            why = "别处算完待回传（低档备份保险）"
+        else:
+            why = "无人在做（独占）"
+        return p, why
 
     def _collect_expired_locked(self, job_id: str) -> str:
         """回收过期租约（调用方**必须持锁**）：转 stale 记录 + **毒包计数 +1**。
@@ -633,6 +870,9 @@ class _JobStore(_AuthGuard):
         self._leases.pop(job_id, None)
         self._lease_owners.pop(job_id, None)
         self._lease_workers.pop(job_id, None)
+        # 过期 = 承诺失效：不清的话「有人承诺在跑」会在死 worker 上永远挂着 ⇒
+        # 该 job 的优先级永远上不到 highest（唯一性闸的判据）。
+        self._drop_commitment_locked(job_id)
         if dead:
             self._stale_holders[job_id] = dead
         jd = self._job_dir(job_id)
@@ -648,6 +888,19 @@ class _JobStore(_AuthGuard):
                     "announced": False,
                 }
         return dead
+
+    def _drop_commitment_locked(self, job_id: str) -> None:
+        """撕掉「有人承诺在跑」的调度面痕迹（调用方**必须持锁**）+ 版本 +1。
+
+        为什么必须与租约同生共死：`_claimed` 是 highest 唯一性闸的**唯一**判据，而它的
+        生死有四个入口（主动还租约 / 租约过期熔断 / 合法放弃 abandon / 竞速广播放弃独占）。
+        漏一个入口，那份 job 就被自己人永远挡在门外：合法重领变成领不到——本实现被
+        `test_poison_freeze`（release）与 `test_race_broadcast`（广播）各抓出一次。
+        """
+        self._claimed.pop(job_id, None)
+        self._computing.pop(job_id, None)
+        self._ready.discard(job_id)
+        self._bump_epoch_locked()
 
     def reclaims(self, job_id: str) -> int:
         """「认领后零回传」次数（未发生 → 0）。观测面 + 熔断判据的可查值。"""
@@ -743,6 +996,7 @@ class _JobStore(_AuthGuard):
             self._lease_workers.pop(job_id, None)
             self._stale_holders.pop(job_id, None)  # 主动还租约 = 不是「跑死了」，不该避让
             self._last_heartbeat.pop(job_id, None)
+            self._drop_commitment_locked(job_id)  # 还租约 = 撒销承诺（见该方法 docstring）
             return True
 
     def result_token_ok(self, job_id: str, lease_token: str) -> bool:
@@ -751,7 +1005,12 @@ class _JobStore(_AuthGuard):
         with self._lock:
             if self._leases.get(job_id, 0) > self._now():
                 owner = self._lease_owners.get(job_id)
-                return bool(lease_token) and owner == lease_token
+                if bool(lease_token) and owner == lease_token:
+                    return True
+                # 备份副本（R2-3）：**显式授权**的重复计算 ⇒ 无租约回传也放行。
+                # 不这么做的话备份先到就吃 403 ⇒ ProtocolError ⇒ report_job_failure ⇒
+                # 训练停腿（409-先于-租约校验只在「结果已落盘」时救场，备份先到救不了）。
+                return job_id in self._backup_authorized
             return True
 
     # ---- 结果 ----
@@ -766,6 +1025,8 @@ class _JobStore(_AuthGuard):
                 json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
             )
             # weights_json / opt_tar 以 base64 存于 result.json（< 数 MB，可接受）
+            # 备份授权随胜负结束（同一份 job 不会再有人回传）：及时收紧 token 闸。
+            self._backup_authorized.discard(job_id)
             return True
 
     def store_job_failure(self, job_id: str, rec: dict) -> bool:
@@ -1616,20 +1877,7 @@ class _HubQueue(_AuthGuard):
                     jid, race=use_race, worker_id=worker_id, avoid_stale_holder=avoid
                 )
                 if tok is None:
-                    # ★ 毒包熔断告警（§4.1）——**在这里喊**：检测点在 store（它才看得到租约
-                    # 过期），而告警要课程名与认领者，两者都在本函数手上。一次性事件，
-                    # 不会每次轮询重喊。
-                    froze = st.consume_freeze_announcement(jid)
-                    if froze is not None:
-                        print(
-                            f"[{time.strftime('%H:%M:%S')}] [hub-server] ★ 熔断冻结："
-                            f"job={jid} course={course or '-'} "
-                            f"—— 连续 {froze.get('reclaims')} 次认领后零回传"
-                            f"（最后一次认领者={froze.get('worker') or '?'}）；"
-                            "已从可领取池移除，**重发不清冻结**；"
-                            f"确认后解冻：POST /admin/unfreeze job_id={jid}",
-                            flush=True,
-                        )
+                    self._announce_freeze(course, jid)
                     continue  # 活租约在持 / 本次该避让 / 并发领取竞负 / 已熔断冻结
                 with self._lock:
                     self._cursor = course
@@ -1873,6 +2121,27 @@ class _HubQueue(_AuthGuard):
                 return p
         return None
 
+    def _announce_freeze(self, course: str, jid: str) -> None:
+        """★ 毒包熔断告警（§4.1）——一次性事件，喊过就不重喊。
+
+        为什么在这里喊：检测点在 store（它才看得到租约过期），而告警要课程名与认领者，
+        两者都在队列层手上。**新 claim 面也必须喊**（R2-6）：否则 `/jobs/next` 退役后
+        熔断就只剩下「静默不再回池」，而那正是 §4.1 事故要治的东西。
+        """
+        st = self._store_of(jid)
+        froze = st.consume_freeze_announcement(jid) if st else None
+        if froze is None:
+            return
+        print(
+            f"[{time.strftime('%H:%M:%S')}] [hub-server] ★ 熔断冻结："
+            f"job={jid} course={course or '-'} "
+            f"—— 连续 {froze.get('reclaims')} 次认领后零回传"
+            f"（最后一次认领者={froze.get('worker') or '?'}）；"
+            "已从可领取池移除，**重发不清冻结**；"
+            f"确认后解冻：POST /admin/unfreeze job_id={jid}",
+            flush=True,
+        )
+
     def claimable_job_ids(self, course: str, race: bool = False) -> list[str]:
         st = self._stores.get(course)
         return st.claimable_job_ids(race=race) if st else []
@@ -1884,6 +2153,8 @@ class _HubQueue(_AuthGuard):
         race: bool = False,
         worker_id: str = "",
         avoid_stale_holder: bool = False,
+        mode: str | None = None,
+        expected_epoch: int | None = None,
     ) -> str | None:
         """（单份领取；多课程的挑选入口是 `claim_next`——离线课的能力闸在那边。）"""
         st = self._store_of(job_id)
@@ -1895,7 +2166,180 @@ class _HubQueue(_AuthGuard):
             race=race,
             worker_id=worker_id,
             avoid_stale_holder=avoid_stale_holder,
+            mode=mode,
+            expected_epoch=expected_epoch,
         )
+
+    # ---- 新调度面（2026-09-22，plan/transfer-scheduling）：peek / claim / priority ----
+    def peek_jobs(
+        self,
+        *,
+        worker_id: str = "",
+        offline_ok: bool = False,
+        hub_scope: int | None = None,
+        n: int = PEEK_MAX,
+    ) -> list[dict]:
+        """候选 job（**不认领**：无租约、无副作用、不动游标）——§2.6 的软持有候选来源。
+
+        与旧 `claim_next` 同三道闸：`_serves_course`（开课标记）、离线课的能力闸
+        （`offline_ok` = worker 自报能跑完整段）、冻结/已落盘的排除（在 `claimable_job_ids` 里）。
+
+        跨课程公平性：顺序取 `rotation_order(self._order, self._cursor)`，**只读不写**
+        （R2-C2）——游标由真正 claim 成功的那一方推进（`claim_job`）。若在这里推进，
+        「看一眼」就会移走别人的轮次；而若完全不推，轮转又会钉死在序首（一门课饿死）。
+
+        每课程**至多给一个**候选：候选是「这轮可以干哪几门课」，不是「把队首扫空」
+        （深度 3 的预取靠多轮 peek 填满，而不是靠一次拿 16 个）。
+        """
+        self.discover()
+        # R2-2：登记表（避让链与竞速判定的唯一输入）改由 peek/priority 喂；scope 照旧
+        # 透传——缺它就等于竞速判定在换面那一刻静默退化（P3 才删判定）。
+        self.note_worker(worker_id, hub_scope)
+        out: list[dict] = []
+        want = max(1, int(n))
+        for course in rotation_order(self._order, self._cursor):
+            if len(out) >= want:
+                break
+            if not self._serves_course(course):
+                continue
+            if self.mode_of(course) == COURSE_MODE_OFFLINE and not offline_ok:
+                continue
+            st = self._stores[course]
+            ids = st.claimable_job_ids()
+            if not ids:
+                continue
+            jid = ids[0]
+            man = self._manifest_summary(jid)
+            out.append(
+                {
+                    "job_id": jid,
+                    "course": course,
+                    "payload_bytes": man.get("payload_bytes", 0),
+                    "runId": man.get("runId"),
+                    "it": man.get("it"),
+                }
+            )
+        return out
+
+    def _manifest_summary(self, job_id: str) -> dict:
+        """候选的 manifest 摘要（**不**把整份 manifest 塞进 peek：那是认领后才需要的东西）。"""
+        jd = self._job_dir(job_id)
+        try:
+            man = json.loads((jd / "manifest.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(man, dict):
+            return {}
+        try:
+            pl = find_payload(jd)
+            size = pl.stat().st_size if pl is not None else 0
+        except OSError:
+            size = 0
+        return {
+            "runId": man.get("runId"),
+            "it": man.get("it"),
+            "payload_bytes": int(size),
+        }
+
+    def claim_job(
+        self,
+        job_id: str,
+        *,
+        mode: str = CLAIM_MODE_EXCLUSIVE,
+        worker_id: str = "",
+        expected_epoch: int | None = None,
+    ) -> ClaimOutcome:
+        """新 claim 面（`POST /jobs/{id}/claim`）的唯一实现入口。
+
+        与旧 `claim_next` 的差别：挑活已在客户端（peek + priority）；这里只负责「这一份
+        归不归你」+ 游标推进 + 熔断告警——**不再**在这里扫整张表。
+        避让的「允不允许」仍在调用方算（`may_avoid_stale_holder`，R2-2 的避让链）。
+        """
+        st = self._store_of(job_id)
+        if st is None:
+            return ClaimOutcome(False, "", "unknown", "unknown")
+        if mode not in CLAIM_MODES:
+            return ClaimOutcome(False, "", "bad_mode", f"mode 必须是 {list(CLAIM_MODES)}")
+        avoid = may_avoid_stale_holder(worker_id, self.active_worker_count())
+        out = st.claim_outcome(
+            job_id,
+            mode=mode,
+            worker_id=worker_id,
+            avoid_stale_holder=avoid,
+            expected_epoch=expected_epoch,
+        )
+        if out.ok:
+            course = self.course_of(job_id) or ""
+            with self._lock:
+                self._cursor = course  # R2-C2：只有真正拿到才推进轮转起点
+            return out
+        self._announce_freeze(self.course_of(job_id) or "", job_id)
+        return out
+
+    def priority_view(
+        self,
+        *,
+        worker_id: str = "",
+        hub_scope: int | None = None,
+        job_ids: list[str] | None = None,
+    ) -> tuple[int, dict[str, str], dict[str, str]]:
+        """`POST /jobs/priority` 的事实面：`(epoch, {jid: 优先级}, {jid: 一行理由})`。
+
+        问询的 job 集合 = 调用方给的 `held`（软持有 ∪ 已 claim 未开算）；`worker_id` 用来
+        把**自己的**痕迹排除掉——自己手里那份 computing 不叫「别处在算」（§1.4）。
+        """
+        self.note_worker(worker_id, hub_scope)  # R2-2
+        prios: dict[str, str] = {}
+        reasons: dict[str, str] = {}
+        epoch = 0
+        for jid in job_ids or []:
+            st = self._store_of(jid)
+            if st is None:
+                prios[jid] = PRIORITY_NONE
+                reasons[jid] = "unknown job（本 hub 无此 job）"
+                continue
+            p, why = st.priority_for(jid, exclude_worker=worker_id or "")
+            prios[jid] = p
+            reasons[jid] = why
+            epoch = max(epoch, st.scheduling_epoch())
+        if not job_ids:
+            epoch = max((st.scheduling_epoch() for st in self._stores.values()), default=0)
+        return epoch, prios, reasons
+
+    def start_job(self, job_id: str, worker_id: str = "") -> bool:
+        st = self._store_of(job_id)
+        return st.start_job(job_id, worker_id) if st else False
+
+    def set_ready(self, job_id: str, worker_id: str = "") -> bool:
+        st = self._store_of(job_id)
+        return st.set_ready(job_id, worker_id) if st else False
+
+    def abandon(self, job_id: str, worker_id: str = "") -> bool:
+        """合法放弃（R1-3）：release 租约 + 清可见性 + **零** reclaim。幂等。"""
+        st = self._store_of(job_id)
+        return st.abandon_job(job_id, worker_id) if st else False
+
+    def epoch_of(self, job_id: str) -> int:
+        """该 job 归属 store 的调度面版本（单课程/多课程统一口径；未知 → 0）。"""
+        st = self._store_of(job_id)
+        return st.scheduling_epoch() if st else 0
+
+    def job_status(self, job_id: str) -> dict:
+        """`GET /jobs/{id}/status` 的调度面摘要（cancel-watcher 的判据就在里面）。"""
+        st = self._store_of(job_id)
+        if st is None:
+            return {}
+        facts = st.scheduling_facts(job_id)
+        prio, why = st.priority_for(job_id)
+        return {
+            "landed": bool(facts["landed"]),
+            "ready": bool(facts["ready"]),
+            "computing_at": facts["computing_at"],
+            "lease_holder": facts["lease_holder"],
+            "epoch": st.scheduling_epoch(),
+            "priority": prio,
+            "reason": why,
+        }
 
     def reclaims(self, job_id: str) -> int:
         """该 job 的「认领后零回传」次数（§4.1 熔断判据；未知 job → 0）。"""
@@ -2254,6 +2698,8 @@ class HubHandler(BaseHTTPRequestHandler):
                 self._get_shared_code()
             elif path == "/jobs/next":
                 self._get_next()
+            elif path == "/jobs/peek":
+                self._get_peek()
             elif path == "/admin/workers/halt":
                 self._admin_halt(True, self._query_course())
             elif path == "/admin/workers/resume":
@@ -2307,6 +2753,16 @@ class HubHandler(BaseHTTPRequestHandler):
         try:
             if path.startswith("/jobs/") and path.endswith("/heartbeat"):
                 self._post_heartbeat()
+            elif path == "/jobs/priority":
+                self._post_priority()
+            elif path.startswith("/jobs/") and path.endswith("/claim"):
+                self._post_claim()
+            elif path.startswith("/jobs/") and path.endswith("/start"):
+                self._post_start()
+            elif path.startswith("/jobs/") and path.endswith("/ready"):
+                self._post_ready()
+            elif path.startswith("/jobs/") and path.endswith("/abandon"):
+                self._post_abandon()
             elif path.startswith("/jobs/") and path.endswith("/release"):
                 self._post_release()
             elif path.startswith("/jobs/") and path.endswith("/fail"):
@@ -2425,6 +2881,203 @@ class HubHandler(BaseHTTPRequestHandler):
                 "course": course,
             }
         )
+
+    # ---- 新调度面（2026-09-22，plan/transfer-scheduling）：peek / priority / claim / start / ready / abandon ----
+    def _query_int(self, key: str, default: int) -> int:
+        """整数查询参数（非法/缺失 → default）——`?n=` 这类别让写错就 500。"""
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        try:
+            return int((qs.get(key) or [str(default)])[0])
+        except (TypeError, ValueError):
+            return int(default)
+
+    def _worker_id(self) -> str:
+        return self.headers.get(WORKER_ID_HEADER, "")
+
+    def _log_claim(self, jid: str, course: str, worker_id: str, mode: str, token: str) -> None:
+        """★ 认领可观测（§4.3）：**每次** claim 一行（job/课程/worker/模式/租约/次数）。
+
+        为什么必须每行都有（2026-09-21 事故复盘的原话）：现场重建只能靠「payload served
+        ×40」的 cadence 反推认领循环——hub 日志里**没有任何一行**说「谁在什么时候领走了它」。
+        新面孔（`/jobs/{id}/claim`）与原 `/jobs/next` 共用本函数（R2-6）：换个端点就把这行
+        弄丢，等于把事故的取证面弄丢。`reclaims>0` 是「认领后零回传」计数（熔断前兆）。
+        """
+        n = self.hub.reclaims(jid)
+        print(
+            f"[{time.strftime('%H:%M:%S')}] [hub-server] claim job={jid} course={course or '-'} "
+            f"worker={worker_id or '?'} mode={mode} "
+            f"lease={token[:8] if token else 'none'}"
+            + (f" reclaims={n}" if n else ""),
+            flush=True,
+        )
+
+    def _get_peek(self) -> None:
+        """`GET /jobs/peek?n=K` —— **不认领**的候选查询（R1-4）；软持有的候选来源。
+
+        一次行程兼做三件事（都是旧 `/jobs/next` 的附带职责，退役后不能丢）：
+        ① 候选列表（无租约、无副作用、**不动 `_cursor`**）；
+        ② halt 达令（空轮询也要能感知停机）；
+        ③ 登记 worker（R2-2：`active_worker_count()` 是避让链的唯一输入）。
+        """
+        if not self._auth_ok():
+            return
+        n = max(1, min(int(self._query_int("n", 3)), PEEK_MAX))
+        offline_ok = has_offline_capability(self.headers.get(OFFLINE_CAP_HEADER, ""))
+        jobs = self.hub.peek_jobs(
+            worker_id=self._worker_id(),
+            offline_ok=offline_ok,
+            hub_scope=parse_hub_scope(self.headers.get(HUB_SCOPE_HEADER, "")),
+            n=n,
+        )
+        self._json({"jobs": jobs, "halt": self.hub.all_halted()})
+
+    def _post_priority(self) -> None:
+        """`POST /jobs/priority` —— job 边界问询：`{epoch, priorities, reasons}`（§2.3）。
+
+        响应里的 `none` **同时是批量取消信号**：worker 拿它就地丢弃已落盘的本地副本
+        （这也是它不能被合并进“claim-with-priority 一次往返”的原因）。
+        """
+        if not self._auth_ok():
+            return
+        body = self._read_json_body(PRIORITY_BODY_MAX)
+        if body is None:
+            return
+        held = body.get("held")
+        ids = [str(j) for j in held] if isinstance(held, list) else []
+        for extra in (body.get("computing"), body.get("ready_upload")):
+            if isinstance(extra, str) and extra and extra not in ids:
+                ids.append(extra)
+        epoch, prios, reasons = self.hub.priority_view(
+            worker_id=str(body.get("worker_id") or self._worker_id()),
+            hub_scope=parse_hub_scope(self.headers.get(HUB_SCOPE_HEADER, "")),
+            job_ids=ids,
+        )
+        self._json({"epoch": epoch, "priorities": prios, "reasons": reasons})
+
+    def _post_claim(self) -> None:
+        """`POST /jobs/{id}/claim` —— 新面（R1-9）；体 `{mode, expected_epoch}`。
+
+        返回：拿得 ⇒ `{lease_token, status, manifest?}`；命中 highest 闸 ⇒
+        `{status:"demoted", priority:"low"}`（**不是错误**，worker 按 low 处理）；
+        真的轮不到（冻结/避让/未知 job）⇒ 409。
+        """
+        if not self._auth_ok():
+            return
+        jid = self._job_id()
+        if jid is None:
+            self._json({"error": "not found"}, 404)
+            return
+        body = self._read_json_body(PRIORITY_BODY_MAX)
+        if body is None:
+            return
+        mode = str(body.get("mode") or CLAIM_MODE_EXCLUSIVE)
+        try:
+            want_epoch = body.get("expected_epoch")
+            want_epoch = None if want_epoch is None else int(want_epoch)
+        except (TypeError, ValueError):
+            self._json({"error": "expected_epoch 非法"}, 400)
+            return
+        worker_id = str(body.get("worker_id") or self._worker_id())
+        out = self.hub.claim_job(
+            jid, mode=mode, worker_id=worker_id, expected_epoch=want_epoch
+        )
+        course = self.hub.course_of(jid) or ""
+        if out.ok:
+            self._log_claim(jid, course, worker_id, mode, out.token)
+            # 领取标记（原 `/jobs/next` 也做这件事）：console 据此区分「排队等取」与「已在跑」。
+            claim = self.hub._job_dir(jid) / "claimed"
+            if not claim.exists():
+                try:
+                    claim.write_text(str(self.hub._now()), encoding="utf-8")
+                except OSError:
+                    pass
+            resp: dict = {
+                "job_id": jid,
+                "course": course,
+                "status": out.status,
+                "lease_token": out.token,
+                "halt": self.hub.halt_of(course),
+                "epoch": self.hub.epoch_of(jid),
+            }
+            try:
+                mp = self.hub._job_dir(jid) / "manifest.json"
+                resp["manifest"] = json.loads(mp.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pass
+            self._json(resp)
+            return
+        if out.status == "demoted":
+            # 「有人比我快」的正常信号：降为低档备份（§2.3 ④），**不得**报错。
+            self._json({"job_id": jid, "status": "demoted", "priority": PRIORITY_LOW})
+            return
+        self._json({"error": f"claim 被拒: {out.status} ({out.reason})"}, 409)
+
+    def _read_json_body(self, cap: int) -> dict | None:
+        """读并解析小 JSON 体；不合规 → 400/413 已回，返回 None。"""
+        raw = self._read_capped_body(cap)
+        if raw is None:
+            return None
+        try:
+            body = json.loads(raw.decode("utf-8")) if raw else {}
+        except (ValueError, UnicodeDecodeError) as e:
+            self._json({"error": f"bad json: {e}"}, 400)
+            return None
+        if not isinstance(body, dict):
+            self._json({"error": "体必须是 JSON 对象"}, 400)
+            return None
+        return body
+
+    def _post_start(self) -> None:
+        """`POST /jobs/{id}/start` —— 打 **computing_at**（掉队阈值的唯一时基；R2-C1）。
+
+        ⚠ 不校 `expected_epoch`（R2-C4）：闸只在 claim 一处。
+        """
+        if not self._auth_ok():
+            return
+        jid = self._job_id()
+        if jid is None or not (self.hub._job_dir(jid) / "manifest.json").exists():
+            self._json({"error": "not found"}, 404)
+            return
+        body = self._read_json_body(PRIORITY_BODY_MAX)
+        if body is None:
+            return
+        self.hub.start_job(jid, str(body.get("worker_id") or self._worker_id()))
+        self._json({"job_id": jid, "status": "computing"})
+
+    def _post_ready(self) -> None:
+        """`POST /jobs/{id}/ready` —— 算完待回传/在传（P0 小包，**永不**触发取消）。"""
+        if not self._auth_ok():
+            return
+        jid = self._job_id()
+        if jid is None:
+            self._json({"error": "not found"}, 404)
+            return
+        body = self._read_json_body(PRIORITY_BODY_MAX)
+        if body is None:
+            return
+        self.hub.set_ready(jid, str(body.get("worker_id") or self._worker_id()))
+        self._json({"job_id": jid, "status": "ready"})
+
+    def _post_abandon(self) -> None:
+        """`POST /jobs/{id}/abandon` —— 合法放弃（R1-3）：release 租约 + 零 reclaim，幂等。"""
+        if not self._auth_ok():
+            return
+        jid = self._job_id()
+        if jid is None:
+            self._json({"error": "not found"}, 404)
+            return
+        body = self._read_json_body(PRIORITY_BODY_MAX)
+        if body is None:
+            return
+        self.hub.abandon(jid, str(body.get("worker_id") or self._worker_id()))
+        print(
+            f"[{time.strftime('%H:%M:%S')}] [hub-server] abandon job={jid} "
+            f"course={self.hub.course_of(jid) or '-'} "
+            f"worker={body.get('worker_id') or self._worker_id() or '?'} "
+            f"reason={str(body.get('reason') or '-')[:80]}",
+            flush=True,
+        )
+        self._json({"job_id": jid, "status": "abandoned"})
 
     # ---- 云端停机 / 恢复（§386：停机=发"停机命令"随任务同发；云机先试停机停不掉照常干活） ----
     # 用法：console 在 TrainingLoop 死亡/设计内停车时 GET /admin/workers/halt 置停机态，
@@ -2920,6 +3573,15 @@ class HubHandler(BaseHTTPRequestHandler):
         else:
             state = "pending"
         resp: dict = {"job_id": jid, "state": state}
+        # 调度面摘要（2026-09-22）：cancel-watcher 靠 `landed` 判是否停算；`computing_at`
+        # 是掉队阈值的时基；`priority` 是「我该不该继续算」的现成答案。旧读方忽略未知字段。
+        sched = self.hub.job_status(jid)
+        for k in ("landed", "ready", "computing_at", "epoch"):
+            if k in sched:
+                resp[k] = sched[k]
+        if state in ("pending", "leased") and "priority" in sched:
+            resp["priority"] = sched["priority"]
+            resp["priority_reason"] = sched["reason"]
         if frozen is not None:
             resp["reclaims"] = int(frozen.get("reclaims", 0) or 0)
             resp["frozen_at"] = float(frozen.get("ts", 0.0) or 0.0)

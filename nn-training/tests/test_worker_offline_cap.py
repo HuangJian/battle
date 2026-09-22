@@ -65,14 +65,19 @@ def test_poll_job_sends_no_capability_header_by_default(monkeypatch: pytest.Monk
 
 
 def test_worker_loop_forwards_offline_ok(monkeypatch: pytest.MonkeyPatch) -> None:
-    """接线断言：主循环把 `offline_ok` 透传给 poll_job（漏了它 = 功能静默失效）。"""
+    """接线断言：主循环把 `offline_ok` 透传给取活面（漏了它 = 功能静默失效）。
+
+    2026-09-22 换面后取活 = `acquire_job`（peek → priority → claim）；它把 `offline_ok`
+    继续透给 `peek_jobs` 的 `X-Battle-Offline` 头（本文件下面的 `poll_job` 用例仍守着
+    旧面逐字节不变）。
+    """
     seen: list[dict] = []
 
     def _fake_poll(*a, **k):
         seen.append(k)
         return None  # once=True ⇒ 立刻干净退出
 
-    monkeypatch.setattr(W, "poll_job", _fake_poll, raising=True)
+    monkeypatch.setattr(W, "acquire_job", _fake_poll, raising=True)
     n = W.worker_loop(
         "http://hub", "tok", work_dir=Path("/tmp/x"), poll_sec=0.0, once=True, offline_ok=True
     )

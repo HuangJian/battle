@@ -5691,3 +5691,54 @@ SystemExit（`--run-iters<0 需要课程声明 iters——没有终点就不叫�
   · **门禁**：`tests/server-no-blocking-python.test.ts`——扫 `src/server/**` 的**调用**（`spawnSync(` /
     `execSync(`，注释里提名字不算），命中即红并列出文件；另有「两条路都在、同步孪生不得回来」一条。
     （范围只限 `src/server/**`：`src/{core,launch,evalboard}` 是启动器/CLI，进程自己就是终点、无并发读要在乎。）
+
+## §2026-09-22-goalnn-transfer-scheduling-pull（2026-09-22，传输∥PPO 的优先级调度面：P1/P1.5/P2 落地）
+
+- **背景**：多课程并行下网络传输耗时 ≈ rollout/PPO，串行 `claim → 下载 → PPO → 回传 → 轮询`
+  把 GPU 饿死在传输上。plan `transfer-scheduling.plan.md`（同日两轮评审 R1/R2）给出解法的
+  完整语义；本条目只记**已落地部分**里「后来者极容易重新做错」的几条决定与它们的否决面。
+- **落地范围（"绿"的判据看这些名字，不看行号）**：`remote/worker.py::acquire_job`
+  （= `peek_jobs` → `request_priority` → `claim_job` 取活三件套）、`peek_jobs` / `request_priority`
+  / `claim_job` / `job_started` / `job_ready` / `abandon_job` / `job_status` / `start_cancel_watcher`；
+  `remote/hub_server.py` 的 `GET /jobs/peek` 与 `POST /jobs/{priority|claim|start|ready|abandon}`、
+  `_JobStore.claim_outcome/_claim_locked`、`_claimed/_computing/_ready/_epoch/_backup_authorized`、
+  `scheduling_facts/priority_for/start_job/set_ready/abandon_job`；`remote/protocol.py` 的
+  `job_priority`（§1.4 优先级表纯函数）与 `JobCancelledError`。
+  门禁 = `nn-training/tests/test_priority_schedule.py`（17 例：纯函数五分支、两把时钟、备份租约、
+  abandon 零 reclaim、highest 唯一性闸、peek 无副作用、403 丢弃、取活三件套、取消环）。
+- **否决与否决理由（这几条是本条目的存在理由）**：
+  ① **`mode="backup"` 不是「pop 掉原租约」**（评审第二轮 R2-3 推翻第一版）：pop 掉会让原 worker
+    硬死之后**无租约可过期 ⇒ 毒包熔断失明**，job 立刻回池 ⇒ 第三/第四份可自由领取，且 push 腿
+    「hub 持租约防同一份活两处跑」的自保失效。改用「逐 job 的 `_backup_authorized` 标记 + 
+    `result_token_ok` 对该 job 放行」——只放行**回传**，租约与 `_claimed` 一字不动。
+    `tests/test_priority_schedule.py::test_backup_claim_does_not_poison_or_reclaim` 就是那个失明的探针。
+  ② **删 race 判定 ≠ 删机制**：`claim` 的无租约分支（原 `race=True`）换名为 `mode="backup"` 保留
+    ——它是「多卡空转防护」的唯一实现面；删掉就等于「空闲的卡只能空转」。
+  ③ **`highest` 的唯一性闸在 claim 的同一临界区**（不是「问询即授予」）：N 个 worker 同拍问询必然
+    都看到 highest（问询是纯读），唯一的闸门是 `_claim_locked` 里的 `_claimed` + `expected_epoch`；
+    一个 job 只能有一个「承诺在跑」的人。漏掉它 ⇒ 行为退化成「无排序的同 job 硬抢」= race 换名字。
+  ④ **`epoch` 只在 claim 一处校验**（`/jobs/{id}/start` 不校，R2-C4）：两处各自校验 = 第二个事实源。
+    且 epoch 不匹配**不是错误**（是「有人比我快」的正常信号）：回 `demoted`、不得转成
+    `ProtocolError`、不得触发 `report_job_failure`。
+  ⑤ **`ready` 判在 `computing` 之前**（同 job 上 ready 就是 computing 的后一阶段）：读成中档会丢掉
+    「算完待回传 = 只降优先级、别人尽管开备份」这个 §1.3.2 信号。
+  ⑥ **掉队阈值只认 `computing_at`**（`/jobs/{id}/start` 打点 = PPO 真启动），**不认 claim**：拿 claim
+    起算会把「下载慢」误判成「算得慢」⇒ 多开备份把本来就慢的链路压得更死（两把时钟在观测行上也分得出来）。
+  ⑦ **取消只认 `landed`**（结果已落盘）且必须是**独立异常** `JobCancelledError`：落进 `ProtocolError` ⇒
+    `report_job_failure`（把合法放弃报成确定性失败 ⇒ 训练停腿）、落进 `RetryableError` ⇒ 把别人已赢下的
+    活 release 回池。取消点 = `ppo_update` 的 **epoch 边界**（复用 `on_epoch_done`，实测延迟写
+    `cancel_latency_s`；**不**在 chunk 内层加回调——用户拍板不值得为 15s→1s 动内层结构）。
+  ⑧ **`abandon` = release 租约 + 清可见性 + 零 reclaim**：只清可见性不清租约 ⇒ job 在
+    `CLAIM_TTL_SEC=300` 内被挡在池外、过期后 `_reclaims+1` ⇒ 三度达阈被冻成毒包（合法放弃读成「认领后零回传」）。
+  ⑨ **`peek` 无副作用**（`claim` 才是认领）：不动 `_cursor`（只读轮转序），「先看一眼」不得移走别人的轮次。
+  ⑩ **登记表 `note_worker` 必须换源保留**（R2-2）：它是 `active_worker_count()`（避让链唯一输入）的
+    唯一写入点，原住在 `/jobs/next` 里。新面（peek/priority）接手，且 `hub_scope` 照旧上报——否则
+    「超时回落队首改为推送其它 worker」（2026-09-18 用户口径）会**静默消失**，而纯函数单测测不出「调用点为 0」。
+- **未做（明确入口，别当成已交付）**：**P0**（控制面旁路 + bulk 单通道的传输 QoS）、**P0.5**（先量
+  `T_in/T_out/T_ppo` 与 GPU 空转占比的基线）、**P3**（退役 `/jobs/next` + race 判定 + `poll_job`，
+  含 **push 腿 R1-7** 与 **控制台同批改造 R2-1**）。本批**只换 pull 线的取活面**：`/jobs/next`、
+  `poll_job`、race 判定原样保留继续可用（`tests/test_race_broadcast.py` 仍绿），故
+  2026-09-17 的 race broadcast 条目**尚未**被 supersede。P3 落地时按 plan §8【R2-10c】写 supersede。
+- **违反后果**：把 backup 改回 pop 租约 ⇒ 熔断失明 + 多份自由领取（无报错，只有冻结阈值悄悄失效）；
+  把 highest 闸去掉 ⇒ 多卡同抢一份（看着像「机群更快」，实际白烧 GPU）；把 `ready` 判在 computing 之后
+  ⇒ 备份保险消失；让取消落进 ProtocolError ⇒ 训练停腿且现场看着像「worker 确定性失败」。

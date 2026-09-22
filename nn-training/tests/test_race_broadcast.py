@@ -362,14 +362,22 @@ def test_worker_reports_identity_and_hub_scope(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_worker_loop_passes_hub_count() -> None:
-    """接线断言：主循环把 `len(hubs)` 当范围上报（漏了它 = 功能静默失效）。"""
+    """接线断言：主循环把 `len(hubs)` 当范围上报（漏了它 = 功能静默失效）。
+
+    2026-09-22 取活换面（`poll_job` → `acquire_job` = peek+priority+claim）：身份/范围
+    照旧上报（否则竞速判定会在换面那一刻静默退化），只是上报点从 poll_job 挪到新面；
+    身份改为每次循环只算一次（`worker_id = worker_tag()` 提在循环外）——登记表靠这个值
+    去重，值必须稳定。
+    """
     from pathlib import Path
 
     import remote.worker as w
 
     src = Path(w.__file__).read_text(encoding="utf-8")
     assert "hub_scope=len(hubs)" in src, "worker_loop 必须上报自己的 hub 数"
-    assert "worker_id=worker_tag()" in src, "worker_loop 必须上报自己的身份"
+    assert "worker_id=worker_id," in src, "取活面必须带上 worker_loop 的身份"
+    assert "worker_id = worker_tag()" in src, "身份必须算一次并保持稳定（hub 靠它去重）"
+    assert "def acquire_job(" in src, "取活入口（新面）不得回退成 /jobs/next"
 
 
 def test_admin_race_rejects_junk_mode(tmp_path: Path) -> None:

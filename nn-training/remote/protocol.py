@@ -152,6 +152,77 @@ def may_avoid_stale_holder(requester: str, active_workers: int) -> bool:
     return bool(requester) and int(active_workers) >= 2
 
 
+# ---- 调度优先级（2026-09-22，plan/transfer-scheduling §1.4 / §2.3）-----------------
+# 背景：多课程并行下网络传输 ≈ rollout 耗时，串行「claim → 下载 → PPO → 回传」把 GPU 饿死
+# 在传输上。解法 = worker 软持有预取 + job 边界问询优先级 + landed 是唯一硬取消信号。
+#: 领取模式：`exclusive` = 独占（设租约，正常的「这活归我」）；
+#: `backup` = **显式授权的**重复计算（软持有/掉队救援的落地面，无租约）。
+#: 为什么必须把 backup 留成一个**模式**而不是删掉：它是「多卡空转防护」的唯一实现面
+#: ——删了就没有任何合法途径让空闲的卡去算别人正在算的活（用户 2026-09-22 拍板）。
+CLAIM_MODE_EXCLUSIVE = "exclusive"
+CLAIM_MODE_BACKUP = "backup"
+CLAIM_MODES = (CLAIM_MODE_EXCLUSIVE, CLAIM_MODE_BACKUP)
+
+#: 优先级档位（§1.4 表）。`none` **同时是取消信号**：worker 拿它就地丢弃本地副本。
+PRIORITY_NONE = "none"
+PRIORITY_LOW = "low"
+PRIORITY_MEDIUM = "medium"
+PRIORITY_HIGH = "high"
+PRIORITY_HIGHEST = "highest"
+PRIORITY_ORDER = (PRIORITY_NONE, PRIORITY_LOW, PRIORITY_MEDIUM, PRIORITY_HIGH, PRIORITY_HIGHEST)
+
+#: 掉队阈值（秒）：超它就把该 job 提到 high（空闲卡去开备份救援），缺省 = 正常 PPO 一轮的 3×。
+STRAGGLER_SEC = 180.0
+
+#: cancel-watcher 轮询 `GET /jobs/{id}/status` 的间隔（秒）：1–2s 是用户口径。
+#: 它走 P0 小包，与 bulk 不同队列；太密会把 hub 的线程池当健康检查用（每 worker 每秒一请求）。
+JOB_CANCEL_POLL_SEC = 1.5
+
+
+def job_priority(
+    *,
+    landed: bool,
+    ready_elsewhere: bool,
+    claimed_elsewhere: bool,
+    computing_elsewhere_since: float | None,
+    now: float,
+    straggler_sec: float = STRAGGLER_SEC,
+) -> str:
+    """单份 job 的优先级（纯函数，可单测；§1.4 表的唯一实现）。
+
+    输入**必须只描述「别人」**（问询者视角）：自己手里那份 computing 不叫「别处在算」，
+    否则每个 worker 都会把自己判成中，highest 永远发不出去。
+
+    两把时钟（R2-C1，实施期澄清）：
+      · `claimed_elsewhere` = 有人 exclusive claim 了（=「承诺在跑」，但可能还在下载）；
+      · `computing_elsewhere_since` = `computing_at`（`/jobs/{id}/start` 打点，PPO 真启动了）。
+    掉队阈值**只认后者**：拿 claim 起算会把「下载慢」误判成「算得慢」，于是多开备份
+    把本来就慢的链路压得更死（§5 test_priority_rpc 钉这一条）。
+
+    映射（对应 §1.4 表的五行）：
+      landed                      → none（无优先级 = 放弃）
+      ready（算完待回传 / 在传）  → low（最末的备份保险）
+      computing 且超阈值          → high（掉队救援）
+      computing 且未超阈值        → medium（备份）
+      claimed 但未开算            → medium（有人在做；**永不**升 high）
+      无人在做                    → highest（独占；唯一性由 `epoch` 闸保证）
+
+    `ready` **判在 computing 之前**：同一份 job 上 `ready` 就是 computing 的**后一阶段**
+    （PPO 已跑完，只剩下传），拿还算着 `computing_at` 把它读成中档，就丢掉了「算完待回传 = 只
+    该排最末、别人尽管开备份」这个信号——而它正是 §1.3.2 与「ready 只降优先级」的落地处。
+    """
+    if landed:
+        return PRIORITY_NONE
+    if ready_elsewhere:
+        return PRIORITY_LOW
+    if computing_elsewhere_since is not None:
+        overdue = (float(now) - float(computing_elsewhere_since)) > float(straggler_sec)
+        return PRIORITY_HIGH if overdue else PRIORITY_MEDIUM
+    if claimed_elsewhere:
+        return PRIORITY_MEDIUM
+    return PRIORITY_HIGHEST
+
+
 # ---- hub 中介 push 派发（2026-09-18，P1 余下）----------------------------------
 #: 推给 GPU worker 的 job 体里带它，hub 据此认领「这份活该由 hub 推、不该等 pull」
 #: （旧 hub/旧 worker 忽略未知键 —— 缺席即 pull，行为逐字节不变）。
@@ -409,6 +480,20 @@ class RetryableError(Exception):
     与 ProtocolError 的分界（2026-09-05，DECISIONS §340 补充 3）：4xx/字段级校验
     失败 = 确定性拒绝（重试无意义）；网络层异常与 5xx = 可重试。worker_loop 捕获
     RetryableError 后主动 release 租约回池，立即可重领（不再干等 30min 过期）。"""
+
+
+class JobCancelledError(RuntimeError):
+    """本 job 已被**别人赢下**（结果已落盘）⇒ 停算丢弃，**不**回传、**不**报失败。
+
+    为什么它必须是**独立**异常（2026-09-22，plan/transfer-scheduling §2.4）：取消是一个
+    **正常**结局（备份副本被首写锁定判负），而 `worker_loop` 的两个既有分支都会把它读错——
+    `except ProtocolError` ⇒ `report_job_failure`（把合法放弃报成确定性失败 ⇒ 训练停腿）、
+    `except RetryableError` ⇒ `release` 租约（把别人已经赢下的活重新放回池子）。
+
+    唯一正确的处置：丢本地副本 + `POST /jobs/{id}/abandon`（幂等，含 release 租约）+ 走
+    priority 选下家。抛点 = `ppo_update` 的 **epoch 边界**（`on_epoch_done`），
+    实测延迟记 `cancel_latency_s`。
+    """
 
 
 class JobFailedError(RuntimeError):

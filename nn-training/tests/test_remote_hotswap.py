@@ -64,9 +64,13 @@ def test_request_reload_requires_supervisor(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_worker_loop_hotswap_exits_for_supervisor_respawn(monkeypatch: pytest.MonkeyPatch) -> None:
-    """有监督器（restart_argv 传入）→ release 租约 + 以 HOT_RELOAD_EXIT 退出交监督器。"""
+    """有监督器（restart_argv 传入）→ release 租约 + 以 HOT_RELOAD_EXIT 退出交监督器。
+
+    注：取活已换面（2026-09-22：`poll_job` → `acquire_job` = peek+priority+claim），
+    故此处钉的是**主循环接线**（拿到 job 后 run_job 抛热替换该走哪条路），不是取活实现。
+    """
     polls: list[dict | None] = [{"job_id": "j-hot", "manifest": {"job_id": "j-hot"}}, None]
-    monkeypatch.setattr(W, "poll_job", lambda *a, **k: polls.pop(0), raising=True)
+    monkeypatch.setattr(W, "acquire_job", lambda *a, **k: polls.pop(0), raising=True)
 
     def _raise_hotswap(*a, **k):
         raise CodeChangedError("a" * 64, "b" * 64)
@@ -97,7 +101,7 @@ def test_worker_loop_hotswap_exits_for_supervisor_respawn(monkeypatch: pytest.Mo
 def test_worker_loop_hotswap_no_supervisor_returns(monkeypatch: pytest.MonkeyPatch) -> None:
     """无监督器（restart_argv=None 的裸直调）→ 降级为提示人工重启并返回，不退出进程。"""
     polls: list[dict | None] = [{"job_id": "j-hot", "manifest": {"job_id": "j-hot"}}, None]
-    monkeypatch.setattr(W, "poll_job", lambda *a, **k: polls.pop(0), raising=True)
+    monkeypatch.setattr(W, "acquire_job", lambda *a, **k: polls.pop(0), raising=True)
 
     def _raise_hotswap(*a, **k):
         raise CodeChangedError("a" * 64, "b" * 64)
@@ -209,7 +213,7 @@ def test_worker_halt_attempts_stop_then_keeps_working(monkeypatch: pytest.Monkey
         {"halt": True, "job_id": "j1", "manifest": {"a": 1}},  # 达令 + 任务同批发
         None,  # 停机解除（真 poll_job 对 {"job_id":null,"halt":false} 返回 None）→ once 退出
     ]
-    monkeypatch.setattr(W, "poll_job", lambda *a, **k: polls.pop(0), raising=True)
+    monkeypatch.setattr(W, "acquire_job", lambda *a, **k: polls.pop(0), raising=True)
     ran: list[str] = []
 
     def _run_job(*a: object, **k: object) -> dict:
@@ -248,7 +252,7 @@ def test_worker_halt_attempt_once_then_reset_on_clear(
         {"halt": True, "job_id": None},  # 段 2：再次停机 → 复位后可再试(2)
         None,  # 收尾 None → idle 超限（job 重置点在 t=5，此处 15-5=10 ≥ max_idle）
     ]
-    monkeypatch.setattr(W, "poll_job", lambda *a, **k: polls.pop(0), raising=True)
+    monkeypatch.setattr(W, "acquire_job", lambda *a, **k: polls.pop(0), raising=True)
     monkeypatch.setattr(W, "run_job", lambda *a, **k: {"rc": 0}, raising=True)
     monkeypatch.setattr(W, "post_result", lambda *a, **k: None, raising=True)
     W.worker_loop(
@@ -269,7 +273,7 @@ def test_worker_halt_branch_still_logs_alive(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(W.time, "sleep", lambda s: t.update(v=t["v"] + s), raising=True)
     halts: list[dict | None] = [{"halt": True, "job_id": None}] * 8  # 8×10s→80s，跨过 60s 存活日志点
     monkeypatch.setattr(
-        W, "poll_job", lambda *a, **k: halts.pop(0) if halts else None, raising=True
+        W, "acquire_job", lambda *a, **k: halts.pop(0) if halts else None, raising=True
     )
     logs: list[str] = []
     W.worker_loop(
