@@ -6,9 +6,8 @@
 1. **单通道**：任意并发申请下 `inflight_bulk == 1`（P1/P2 一起申请也只有一条在途）。
 2. **P1 不被抢断**：`post_result` 一旦开传就只能等它传完（POST 大 body 没有安全 Range，
    抢断 = 整份白传）；P2 预取相反——被高优/控制面挤到就该**丢半截**（幂等可重下）。
-3. **让路预算有界**：单次让路 ≤ `BULK_YIELD_BUDGET_SEC`，且必须**同时**小于两侧超时
-   （worker `BODY_IDLE_TIMEOUT_SEC=45s` 的空闲判停 与 hub `SEND_TIMEOUT_SEC=60s` 的分片写
-   超时）。只写 45s 是最容易犯的错：撞上 60s 那一侧同样会被判停滞。
+3. **让路预算有界**：单次让路 ≤ `PAUSE_BUDGET_SEC`；常量与两侧超时的**安全裕度断言**
+   住在 `tests/test_pause_budget.py`（plan §5 点名的文件），这里只测「跑到预算就停」。
 """
 
 from __future__ import annotations
@@ -28,7 +27,6 @@ import remote.worker as W
 from remote.bulk_sched import (
     BULK_P1_CRITICAL,
     BULK_P2_PREFETCH,
-    BULK_YIELD_BUDGET_SEC,
     BULK_YIELD_STEP_SEC,
     BulkPreemptError,
     BulkScheduler,
@@ -192,13 +190,6 @@ def test_p1_not_preempted_by_control():
 
 
 # --------------------------------------------------------------- 3. 让路预算
-
-
-def test_yield_budget_bounded_and_below_both_timeouts():
-    """预算写死 ≤5s，且**同时**低于 45s（worker 空闲判停）与 60s（hub 分片写超时）。"""
-    assert BULK_YIELD_BUDGET_SEC <= 5.0
-    assert BULK_YIELD_BUDGET_SEC < W.BODY_IDLE_TIMEOUT_SEC, "让路长过 worker 的空闲判停 = 自判停滞"
-    assert BULK_YIELD_BUDGET_SEC < 60.0, "让路长过 hub 的 SEND_TIMEOUT_SEC = 被 hub 断流"
 
 
 def test_yield_stops_at_budget_even_if_control_stays():

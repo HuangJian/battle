@@ -4,7 +4,7 @@ import path from 'path'
 
 // ────────────────────────── PPO 队列排队超时（无 worker 领取 >5min → warning） ──────────────────────────
 
-/** 排队超时阈值：job 发布后若无任何 worker 通过 /jobs/next 领取（无 claimed 标记）
+/** 排队超时阈值：job 发布后若无任何 worker 领取（无 claimed 标记）
  *  超过该时长，控制台提示云端 worker 可能断连。 */
 export const PPO_QUEUE_STALL_MS = 5 * 60_000
 
@@ -50,7 +50,7 @@ function loadOpenPpoJobs(logPath: string): Map<string, number | null> | null {
 }
 
 /** 扫描 remote-jobs：有 payload、无 result、无 claimed，且目录 mtime 超过阈值。
- *  claimed 由 hub GET /jobs/next 首次下发时 touch——无 worker 轮询则永不出现。
+ *  claimed 由 hub 取活面（peek/claim）首次下发时 touch——无 worker 轮询则永不出现。
  *  必须同时在账本里仍是 open pending（无 completed/cancelled），否则悬空目录会永久误报。
  *  返回等待最久的一条；全部正常/无队列 → null。 */
 export function detectPpoQueueStall(

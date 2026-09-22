@@ -40,6 +40,7 @@ from test_remote_ppo import (  # type: ignore
     _boot_server,
     _http,
     _mini_manifest,
+    _next,
     normalize_manifest,
 )
 
@@ -99,8 +100,8 @@ def test_loopback_valid_token_always_200_and_business_alive(tmp_path: Path) -> N
             _http(base, BAD, "/ping")
 
         assert _ping(base, "sekret") == 200, "console 健康检查（回环 + 合法 token）必须 200"
-        st, body = _http(base, "sekret", "/jobs/next")
-        assert st == 200 and body["job_id"] == jid, f"worker 拉活必须 200: {st} {body!r}"
+        body = _next(base)
+        assert body["job_id"] == jid, f"worker 拉活必须成功: {body!r}"
         st, _ = _http(base, "sekret", f"/jobs/{jid}/status")
         assert st == 200, "训练主循环状态查询必须 200"
     finally:

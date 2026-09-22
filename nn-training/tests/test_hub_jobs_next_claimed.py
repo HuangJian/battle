@@ -1,4 +1,4 @@
-"""§7 复现 + 锁行为：/jobs/next 有可领任务时必须 200，且首次下发 touch claimed。
+"""§7 复现 + 锁行为：取活面有可领任务时必须 200，且首次下发 touch claimed。
 回归：self._now()（handler 无此属性）→ 500，云 worker 全取不到 job。
 
 P3b（supersede §343）：分发改独占加超时——首次下发带 lease_token 并设租约，
@@ -15,8 +15,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tests"))
 
 from test_remote_ppo import (  # type: ignore
     _boot_server,
-    _http,
     _mini_manifest,
+    _next,
     normalize_manifest,
 )
 
@@ -29,8 +29,7 @@ def test_jobs_next_touches_claimed_and_returns_200(tmp_path: Path) -> None:
         store.publish(jid, manifest, b"PK\x03\x04fake")
 
         # 修复前：handler 调 self._now() → AttributeError → 500
-        st, body = _http(base, "sekret", "/jobs/next")
-        assert st == 200, f"/jobs/next 应 200，实际 {st} {body!r}"
+        body = _next(base)
         assert body["job_id"] == jid
         assert body.get("lease_token"), "独占发放必须下发 lease_token（P3b）"
 
@@ -41,9 +40,9 @@ def test_jobs_next_touches_claimed_and_returns_200(tmp_path: Path) -> None:
 
         # 再次轮询：claimed 保持唯一，不重写导致 mtime 重置（排队时钟不被轮询打断）
         mtime1 = claimed.stat().st_mtime_ns
-        st2, body2 = _http(base, "sekret", "/jobs/next")
-        # P3b 独占：租约期内同一 job 不重发（§343 广播已废）——排队时钟同样不被打断
-        assert st2 == 200 and body2["job_id"] is None, body2
+        body2 = _next(base)
+        # P3b 独占：租约期内同一 job 不重发——排队时钟同样不被打断
+        assert body2["job_id"] is None, body2
         assert claimed.stat().st_mtime_ns == mtime1
     finally:
         srv.shutdown()

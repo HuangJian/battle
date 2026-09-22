@@ -4,8 +4,8 @@
 （「我能自己跑完整段」`kind="run"`），不是课程绑定——带标 worker 照样领在线课。
 
 本文件钉**跨层契约的两半**：
-  ① worker 侧：`--offline` → `/jobs/next` 带 `X-Battle-Offline: 1`（缺省**不带**，逐字不变）；
-  ② 端到端：真 hub（进程内 HTTP）+ 真 `poll_job` —— 离线课对无标 poller 不可见、对带标可见。
+  ① worker 侧：能力声明 → 取活面带 `X-Battle-Offline: 1`（缺省**不带**，逐字不变）；
+  ② 端到端：真 hub（进程内 HTTP）+ 真取活助手 —— 离线课对无标 poller 不可见、对带标可见。
 
 漏了哪一半的代价都是**静默**的：漏发头 = 离线课永远没人领（看着像「节点都不在线」），
 漏放行 = 离线课成了谁都领不到的坟墓（看着像「还没轮到」）。
@@ -30,6 +30,7 @@ from remote.protocol import (
     OFFLINE_CAP_VALUE,
     WORKER_ID_HEADER,
 )
+from tests.helpers.hub_poll import hub_poll
 
 TOKEN = "sekret"
 
@@ -37,30 +38,30 @@ TOKEN = "sekret"
 # ---------------------------------------------------------------- ① 头
 
 
-def test_poll_job_sends_capability_header_when_offline(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_peek_sends_capability_header_when_offline(monkeypatch: pytest.MonkeyPatch) -> None:
     """`offline_ok=True` ⇒ 带上能力头（值取协议常量，不在 worker 里再写一份字面量）。"""
     seen: list[dict] = []
 
     def _fake_request(base, token, path, timeout=30.0, data=None, method=None, headers=None):
         seen.append({"path": path, "headers": dict(headers or {})})
-        return 200, b'{"job_id": null, "halt": false}'
+        return 200, b'{"jobs": [], "halt": false}'
 
     monkeypatch.setattr(W, "_request", _fake_request)
-    assert W.poll_job("http://hub", "t", worker_id="host:1", offline_ok=True) is None
+    assert W.peek_jobs("http://hub", "t", worker_id="host:1", offline_ok=True) == ([], False)
     assert seen[0]["headers"][OFFLINE_CAP_HEADER] == OFFLINE_CAP_VALUE
     assert seen[0]["headers"][WORKER_ID_HEADER] == "host:1"
 
 
-def test_poll_job_sends_no_capability_header_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """旧调用方（不传 offline_ok）不发头 —— hub 侧按无能力处理，行为逐字节不变。"""
+def test_peek_sends_no_capability_header_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """不传 offline_ok ⇒ 不发头 —— hub 侧按无能力处理，行为逐字节不变。"""
     seen: list[dict] = []
 
     def _fake_request(base, token, path, timeout=30.0, data=None, method=None, headers=None):
         seen.append(dict(headers or {}))
-        return 200, b'{"job_id": null, "halt": false}'
+        return 200, b'{"jobs": [], "halt": false}'
 
     monkeypatch.setattr(W, "_request", _fake_request)
-    assert W.poll_job("http://hub", "t") is None
+    assert W.peek_jobs("http://hub", "t") == ([], False)
     assert OFFLINE_CAP_HEADER not in seen[0]
 
 
@@ -68,8 +69,8 @@ def test_worker_loop_forwards_offline_ok(monkeypatch: pytest.MonkeyPatch) -> Non
     """接线断言：主循环把 `offline_ok` 透传给取活面（漏了它 = 功能静默失效）。
 
     2026-09-22 换面后取活 = `acquire_job`（peek → priority → claim）；它把 `offline_ok`
-    继续透给 `peek_jobs` 的 `X-Battle-Offline` 头（本文件下面的 `poll_job` 用例仍守着
-    旧面逐字节不变）。
+    继续透给 `peek_jobs` 的 `X-Battle-Offline` 头（本文件上面的两个 `peek_jobs` 用例守着
+    这一跳）。
     """
     seen: list[dict] = []
 
@@ -160,7 +161,7 @@ def _boot(tmp_path: Path) -> tuple[str, _HubQueue, ThreadingHTTPServer]:
 
 
 def test_run_job_forwards_the_hub_course_into_the_backfeed() -> None:
-    """worker 把 `/jobs/next` 里的课程键透进 `run_plan_job`（补传的归位键）。
+    """worker 把取活面里的课程键透进 `run_plan_job`（补传的归位键）。
 
     为什么用源码断言：链路中段是「跑完一整段的真 PPO」——单测里跑不起来，而这一跳断掉的
     表现极其隐。：多课程 hub 下每条补传都被 400「无法归属课程」拒掉，节点侧补传整体停用，
@@ -217,9 +218,9 @@ def test_offline_course_is_invisible_to_plain_worker_and_claimable_by_marked(
         assert hub.set_mode("c5-gae", COURSE_MODE_OFFLINE) is True
 
         # 无标：hub 说「没有可领的 job」（离线课不实时派发，也不是谁都领得到的池子）
-        assert W.poll_job(base, TOKEN, worker_id="plain") is None
+        assert hub_poll(base, TOKEN, worker_id="plain") is None
         # 带标：同一份 job 立刻到手，并且响应自报归属课程（对账用）
-        got = W.poll_job(base, TOKEN, worker_id="marked", offline_ok=True)
+        got = hub_poll(base, TOKEN, worker_id="marked", offline_ok=True)
         assert got is not None and got["job_id"] == "j" * 16
         assert got["course"] == "c5-gae"
         assert got["manifest"]["kind"] == "run"

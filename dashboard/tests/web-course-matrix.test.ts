@@ -79,7 +79,6 @@ function ovView(
   return {
     hubUrl: 'http://127.0.0.1:18787',
     hubOnline: true,
-    raceActive: false,
     activeCourses: 2,
     activeWorkers: 3,
     halt: false,
@@ -346,10 +345,8 @@ describe('表头元信息与页脚：两侧各自缺什么都要说出来', () =
     expect(texts).toContain('hub 127.0.0.1:18787')
     expect(texts).toContain('在派发 2 / worker 3')
     expect(texts).toContain('最近派发 c4')
-    expect(texts.some((t) => t.includes('竞速'))).toBe(false)
     expect(texts.some((t) => t.includes('停机'))).toBe(false)
-    const on = matrixMeta({ overview: ov({ raceActive: true, halt: true }), queue: null })
-    expect(on.map((m) => m.text)).toContain('竞速')
+    const on = matrixMeta({ overview: ov({ halt: true }), queue: null })
     expect(on.map((m) => m.text)).toContain('停机中')
   })
 

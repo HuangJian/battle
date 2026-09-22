@@ -45,6 +45,7 @@ from remote.protocol import (
     WORKER_ID_HEADER,
     JobFailedError,
 )
+from tests.helpers.hub_poll import hub_poll
 
 TOKEN = "sekret"
 JID = "j" * 16
@@ -272,6 +273,14 @@ def _http(base: str, path: str, method: str = "GET", worker: str = "") -> tuple[
             return e.code, {}
 
 
+def _next(base: str, *, worker: str = "") -> dict:
+    """旧轮询面的同形替代（peek + claim；实现见 `tests/helpers/hub_poll`）。"""
+    got = hub_poll(base, TOKEN, worker_id=worker)
+    if got is None or not got.get("job_id"):
+        return {"job_id": None, "halt": bool(got and got.get("halt"))}
+    return got
+
+
 def test_frozen_job_tells_training_side_immediately(tmp_path: Path, capsys) -> None:
     """熔断后：/status=frozen、/result=410+PoisonFrozen、`wait_job` 当场带原因抛（不等超时）。"""
     clock = _Clock()
@@ -280,11 +289,11 @@ def test_frozen_job_tells_training_side_immediately(tmp_path: Path, capsys) -> N
         _publish(store)
         # 前 N-1 次：正常重领（每次领走都要推过期，模拟 worker 领了不回传）
         for n in range(FREEZE_AFTER_RECLAIMS):
-            _st, body = _http(base, "/jobs/next", worker=f"w{n}")
+            body = _next(base, worker=f"w{n}")
             assert body["job_id"] == JID, body
             _expire(clock)
-        # 第 N 次过期那一刻冻结：/jobs/next 已无活可派
-        _st, body = _http(base, "/jobs/next", worker="w-last")
+        # 第 N 次过期那一刻冻结：已无活可派
+        body = _next(base, worker="w-last")
         assert body["job_id"] is None, body
 
         st, status = _http(base, f"/jobs/{JID}/status")
@@ -314,15 +323,15 @@ def test_admin_unfreeze_endpoint_returns_job_to_pool(tmp_path: Path) -> None:
     try:
         _publish(store)
         for n in range(FREEZE_AFTER_RECLAIMS):
-            _http(base, "/jobs/next", worker=f"w{n}")
+            _next(base, worker=f"w{n}")
             _expire(clock)
-        _http(base, "/jobs/next", worker="w-last")  # 触发冻结
+        _next(base, worker="w-last")  # 触发冻结
         assert store.frozen_info(JID) is not None
 
         st, body = _http(base, f"/admin/unfreeze?job_id={JID}", method="POST")
         assert st == 200 and body["unfrozen"] is True, body
         assert store.frozen_info(JID) is None
-        _st, got = _http(base, "/jobs/next", worker="w-new")
+        got = _next(base, worker="w-new")
         assert got["job_id"] == JID, got  # 解冻即回池
 
         # 再解一次：409（不是静默 200）
@@ -344,7 +353,7 @@ def test_hub_logs_every_claim_and_the_freeze(tmp_path: Path, capsys) -> None:
         _publish(store)
         capsys.readouterr()  # 清掉启动噪声
         for n in range(FREEZE_AFTER_RECLAIMS):
-            _http(base, "/jobs/next", worker=f"w{n}")
+            _next(base, worker=f"w{n}")
             _expire(clock)
             out = capsys.readouterr().out
             assert f"claim job={JID}" in out, out
@@ -353,7 +362,7 @@ def test_hub_logs_every_claim_and_the_freeze(tmp_path: Path, capsys) -> None:
                 assert "reclaims=" not in out, "首次认领不该带计数"
             else:
                 assert f"reclaims={n}" in out, out
-        _http(base, "/jobs/next", worker="w-last")  # 触冻
+        _next(base, worker="w-last")  # 触冻
         out2 = capsys.readouterr().out
         assert "熔断冻结" in out2, out2
         assert f"job={JID}" in out2, out2
@@ -361,7 +370,7 @@ def test_hub_logs_every_claim_and_the_freeze(tmp_path: Path, capsys) -> None:
         assert f"{FREEZE_AFTER_RECLAIMS} 次认领后零回传" in out2, out2
         # 冻结后不再被派发 ⇒ 也不该再有 claim 行（否则日志在骗人）
         out3 = capsys.readouterr().out
-        _http(base, "/jobs/next", worker="w-last")
+        _next(base, worker="w-last")
         assert "claim job=" not in capsys.readouterr().out
         assert out3 == ""
     finally:

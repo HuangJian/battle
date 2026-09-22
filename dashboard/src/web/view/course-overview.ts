@@ -58,12 +58,10 @@ export interface HubQueueView {
   cursor: string | null
   /** 离线课程名（只收回传、不实时派发）。 */
   offline: string[]
-  /** 在实时派发的课程数（竞速判据之一）。 */
+  /** 在实时派发的课程数。 */
   activeCourses: number
-  /** 窗口内活跃 worker 数（竞速判据之二）。 */
+  /** 窗口内活跃 worker 数（避让链/观测用）。 */
   activeWorkers: number
-  /** 此刻是否在竞速广播（在派发课程数 < 活跃 worker 数）。 */
-  raceActive: boolean
   /** 云端停机达令（随任务同发；不停任务）。 */
   halt: boolean
 }
@@ -132,7 +130,6 @@ export function parseHubQueue(body: unknown): HubQueueView | null {
       : [],
     activeCourses: num(raw.active_courses),
     activeWorkers: num(raw.active_workers),
-    raceActive: raw.race_active === true,
     halt: raw.halt === true,
   }
 }
@@ -296,7 +293,6 @@ export interface ParallelOverviewView {
   /** 命中的 hub 基址（无 = 没有任何 hub 在应答 `/admin/queue`）。 */
   hubUrl: string | null
   hubOnline: boolean
-  raceActive: boolean
   activeCourses: number
   activeWorkers: number
   halt: boolean

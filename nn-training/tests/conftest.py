@@ -66,6 +66,28 @@ def bp_args(
 
 
 @pytest.fixture
+def worker_factory():
+    """造假 push worker 并统一收尸（RUF013 友好：显式列表 + finally）。
+
+    住在 conftest 而不是某个测试文件里：跨文件 `from tests.test_a import fixture`
+    会让 ruff 判 `F811`（夹具名遮蔽模块级 import），而 conftest 的夹具**无需 import**
+    就对所有用例可见。实现见 `tests/helpers/push_worker.py`。
+    """
+    from tests.helpers.push_worker import FakeWorker
+
+    made: list[FakeWorker] = []
+
+    def _make(**kw) -> FakeWorker:
+        w = FakeWorker(**kw)
+        made.append(w)
+        return w
+
+    yield _make
+    for w in made:
+        w.close()
+
+
+@pytest.fixture
 def tmp(tmp_path: Path) -> Iterator[Path]:
     """Legacy test_run_rl.py compat：直接复用（被覆盖的）tmp_path。"""
     yield tmp_path

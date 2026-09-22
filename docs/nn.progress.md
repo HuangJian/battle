@@ -2,6 +2,58 @@
 
 > All architecture changes, eval results, and lessons learned are recorded here.
 > New entries are appended at the top (reverse chronological).
+
+---
+
+## §129 竞速退役 + 控制台同批 + push 腿：P3 落地（plan/transfer-scheduling，2026-09-22）
+
+**起因**：§127/§128 把取活换到 `peek → priority → claim`、把传输拆成 bulk 单通道之后，**旧**的
+竞速广播判定（§2026-09-17）仍与新的优先级表并存——两套调度语义同时在跑。本批一次性删干净
+（plan §2.8「不留兼容短语」），并把 push 腿拉到同一张表上。
+
+**改了什么（判据看函数名）**
+- `remote/protocol.py`：删 `RACE_MODE_*` / `race_decision` / `parse_hub_scope` / `HUB_SCOPE_HEADER`；
+  `RACE_WORKER_WINDOW_SEC` → **`WORKER_SEEN_WINDOW_SEC`**（窗口本身还有用：登记表）。
+- `remote/hub_server.py`：删 `race_mode/race_active/set_race_mode/race_state/clear_workers`、
+  `GET|POST /admin/race`、`--race`、`/jobs/next`；`claim_next`/`claim(race=)` 的 race 分支删除。
+  **保留** `claim(mode="backup")` 机制与 `_backup_authorized`（删判定不删机制，R1-1）。
+- `remote/worker.py`：`poll_job` 整函数删除（取活只剩 `acquire_job`）；`--poll` 多值退化；
+  `/jobs/next` 的发送点删除。
+- `remote/push_dispatch.py`（R1-7）：同一张优先级表（`_priority_of_course`）、**1 主 + N 备份**
+  （`backups_per_course` 缺省 1；备份无租约、槽位键 `f"{jid}#b{n}"`）、派发后 `hub.start_job`
+  打 `computing_at`（否则掉队救援在 push 腿永久沉默）、landed 时 `_cancel_others` 推取消帧
+  （推不到 ⇒ 让它跑完 + 409 丢弃，**不算失败**）。
+- `dashboard/src/**`（R2-1，**同批**否则 hub 起不来）：去 `--race` 透传 / `RaceMode` / `raceActive`
+  渲染，删 `tests/hub-server-race-arg.test.ts`；连注释里也不再出现退役面名。
+- 测试侧：`tests/helpers/hub_poll.py`（新面拼回**与旧面逐字段同形**的返回值，10 个登录点机械替换，
+  不各写十份会各自漂的实现）；`tests/helpers/push_worker.py` + `tests/conftest.py::worker_factory`
+  （假 push worker 搬进 helper/conftest——跨测试文件 `from tests.test_a import fixture` 会撞
+  ruff `F811`，因为夹具名遮蔽模块级 import）。
+
+**门禁（常驻）**：`test_priority_schedule.py::test_race_judgment_has_no_production_path`（判定零命中）·
+`test_jobs_next_retired.py`（真 HTTP 404 + 生产零命中）· `test_scope_unrelated_race.py`（R1-10 负向：
+eval 侧长尾竞速**没有**被误删）· `test_push_priority_dispatch.py`（6）· `test_pause_budget.py`（4）。
+
+**改坏必红自查（五刀）**：① 生产里加回 `/jobs/next` 兼容别名；② 竞速判定改名加回；③ 备份副本改走
+租约；④ push 备份上限改 2；⑤ `peek` 不再登记 worker（避让链端到端用例）——五刀全红。
+
+**踩到的坑**
+- **跨测试文件 import 夹具 = ruff F811**：pytest 允许 `from tests.test_a import worker_factory`，
+  但参数名遮蔽模块级 import，ruff 判「redefinition of unused」。正解是把夹具放进 `conftest.py`
+  （无需 import 即全局可见）+ 实现搬 `tests/helpers/`，而不是加 `noqa`。
+- **`_POLL_WARN_AT` 随 `poll_job` 一起被删**：它是 `_warn_non_200` 的节流表，与取活面无关——
+  「整函数删除」时要清点的是**函数体引用的模块级名字**，不是函数名本身。
+- **注释也算「删除清单命中」**：控制台 7 处 prose 注释还在写 `/jobs/next`（讲「取活面不看课程」的
+  历史理由）。删除清单的 grep 若把控制台算进范围，注释必须一起改词——否则「零命中」是自欺。
+
+**一处改名（R2-10d 对齐）**：让路预算 `BULK_YIELD_BUDGET_SEC` → **`PAUSE_BUDGET_SEC`**（与 plan
+§2.2 #5 同名；§128 里写的是旧名），安全裕度断言从 `test_bulk_sched.py` 拆到 plan 点名的
+`tests/test_pause_budget.py`，并改为引用 hub 的 `SEND_TIMEOUT_SEC` 常量（原先写死 60.0）。
+
+**未完成（不是已交付）**：P0.5 的**实机数字**（阶段账 `in/out/ppo/wall` 占比、`p90` 取消延迟）
+——需一次云-hub-LAN 会话跑 `tools/wire_report.py`；在那之前 P2 预取的收益结论不成立，可用
+`--prefetch-depth 0` 关闭。
+
 ---
 
 ## §128 传输 QoS + 阶段账 + 软持有预取：P0 / P0.5（仪器）/ P2 落地（plan/transfer-scheduling，2026-09-22）

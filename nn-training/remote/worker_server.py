@@ -80,6 +80,9 @@ class WorkerServerState:
         self._queue: deque[str] = deque()  # 等待执行的 jid（FIFO）
         self._pending: dict[str, dict] = {}  # jid -> {manifest, payload_zip, code_zip, echo}
         self._starter: Starter | None = None  # make 侧注入
+        #: jid -> 取消 Event（push 腿 landed 取消的**节点侧落点**，R2-4b）：hub 推一帧
+        #: `POST /job/{id}/cancel` 置位，run_job 在 epoch 边界查到就抛 JobCancelledError。
+        self._cancel: dict[str, threading.Event] = {}
 
     def code_cached(self, code_sha256: str) -> bool:
         return (self.work_dir / "code_cache" / code_sha256).exists()
@@ -118,6 +121,27 @@ class WorkerServerState:
                 "kind": kind,
                 **{k: v for k, v in prev.items() if k == "result"},
             }
+
+    def cancel_event(self, jid: str) -> threading.Event:
+        """该 job 的取消 Event（幂等创建）——`_execute_job` 与 `/job/{id}/cancel` 共用一份。"""
+        with self._lock:
+            ev = self._cancel.get(jid)
+            if ev is None:
+                ev = threading.Event()
+                self._cancel[jid] = ev
+            return ev
+
+    def request_cancel(self, jid: str) -> bool:
+        """置该 job 的取消 Event（幂等）。返回是否**已知**该 jid（未知也置位）。"""
+        with self._lock:
+            known = jid in self.jobs or jid in self._pending
+        self.cancel_event(jid).set()
+        return known
+
+    def is_cancelled(self, jid: str) -> bool:
+        with self._lock:
+            ev = self._cancel.get(jid)
+        return bool(ev is not None and ev.is_set())
 
     def get(self, jid: str) -> dict | None:
         with self._lock:
@@ -211,6 +235,8 @@ def _execute_job(
                 "blobs": blobs or {},
             },
             log=log,
+            # landed 取消（R2-4b）：hub 推的取消帧置 Event → run_job 在 epoch 边界停。
+            should_cancel=lambda: state.is_cancelled(jid),
         )
         state.set_result(jid, result)
         log(f"job {jid} done — result ready for pickup")
@@ -324,6 +350,13 @@ def make_worker_server(
             try:
                 if not self._auth_ok():
                     self._json({"error": "unauthorized"}, 401)
+                    return
+                if path.startswith("/job/") and path.endswith("/cancel"):
+                    # landed 取消帧（R2-4b）：幂等置 Event。未知 jid 也 200（先到先得——
+                    # 取消帧常常比 job body 早到/晚到，都不该变成错误）。
+                    cid = path[len("/job/") : -len("/cancel")]
+                    known = state.request_cancel(cid)
+                    self._json({"job_id": cid, "cancel": True, "known": known}, 200)
                     return
                 if path != "/job":
                     self._json({"error": "not found"}, 404)

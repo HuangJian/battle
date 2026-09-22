@@ -8,7 +8,7 @@
     离线课（hub 侧 mode=offline）
         ↓  训练侧发一份**真 kind="run" 整段 job**（plan + rollout spec + ts_code 随 payload）
     hub 的待领池（普通 worker 领不到；带 `X-Battle-Offline` 的**带标** worker 领得到）
-        ↓  云机领走（真 HTTP /jobs/next）
+        ↓  云机领走（真 HTTP peek + claim）
     云机自己跑完整段（这里用 ArtifactStore 逐轮落产物代替真 rollout/PPO）
         ↓  每轮 best-effort 补传（真 OfflineDeliverer → POST /offline/artifact）
     hub 落 `<traj>/<课>/remote-jobs/offline/<run>/it-NNN/`
@@ -18,7 +18,7 @@
 守住的四件事（单进程单测各自绿、接起来却会断的那种）：
   ① **能力闸**：不带标的 poller 领不到离线课（它不是「谁都领得到的池子」），带标的领得到；
      带标仍可领在线课（能力声明 ≠ 课程绑定）；
-  ② **归位**：补传靠 `/jobs/next` 下发的课程键落进**本课**目录（多课程 hub 里没有它
+  ② **归位**：补传靠取活面下发的课程键落进**本课**目录（多课程 hub 里没有它
      每条补传都会 400「无法归属课程」）；
   ③ **读面**：`/admin/offline` 的 `{its, count, last_mtime}` 就是控制台段内进度的唯一来源；
   ④ **取包**：`GET /offline/task-pack?course=` 把控制台导出的那份 `task-<课>.zip` 递上云。
@@ -50,9 +50,9 @@ from remote.artifacts import ArtifactStore
 from remote.hub_client import publish_job
 from remote.offline_deliver import OfflineDeliverer
 from remote.protocol import COURSE_ENABLE_MARKER, TS_CODE_NAME, encode_weights_json
-from remote.worker import poll_job
 from rl.iter_job import build_iter_spec
 from rl.plan import build_plan, dump_plan
+from tests.helpers.hub_poll import hub_poll
 from tests.subproc_util import spawn_bound_port
 
 TOKEN = "e2e-offline-sekret"
@@ -319,18 +319,18 @@ def test_offline_segment_is_claimable_only_by_a_marked_worker(tmp_path: Path) ->
         hub.set_mode(C_OFF, "offline")
 
         # 普通 poller：离线课被跳过，先拿到在线课那份（能力闸不是「全都不给」）
-        plain = poll_job(hub.base, TOKEN, worker_id="plain-1")
+        plain = hub_poll(hub.base, TOKEN, worker_id="plain-1")
         assert plain is not None and plain["job_id"] == man_on["job_id"], plain
         assert plain["course"] == C_ON
 
         # 在线课那份已被领走（活租约）⇒ 普通 poller 再轮到离线课仍然是「没有可领的活」
-        assert poll_job(hub.base, TOKEN, worker_id="plain-1") is None
+        assert hub_poll(hub.base, TOKEN, worker_id="plain-1") is None
         q = hub.queue()
         assert q["courses"][C_OFF]["pending_n"] == 1, "离线课的 job 不该消失"
         assert q["courses"][C_OFF]["inflight"] == [], "离线课不该派给普通 worker"
 
         # 带标 poller：整段 job 立刻到手，且响应自报归属课程（补传的归位键）
-        marked = poll_job(hub.base, TOKEN, worker_id="marked-1", offline_ok=True)
+        marked = hub_poll(hub.base, TOKEN, worker_id="marked-1", offline_ok=True)
         assert marked is not None, f"带标 worker 领不到离线课；输出：{hub.output()}"
         assert marked["job_id"] == man_off["job_id"]
         assert marked["course"] == C_OFF
@@ -358,7 +358,7 @@ def test_segment_rounds_backfeed_into_the_right_course_and_show_up_on_the_read_f
     try:
         hub.ready(expect=[C_OFF, C_ON])
         hub.set_mode(C_OFF, "offline")
-        got = poll_job(hub.base, TOKEN, worker_id="marked-1", offline_ok=True)
+        got = hub_poll(hub.base, TOKEN, worker_id="marked-1", offline_ok=True)
         assert got is not None and got["job_id"] == man_off["job_id"], got
         course = got["course"]
 

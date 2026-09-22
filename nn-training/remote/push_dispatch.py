@@ -4,7 +4,8 @@
   · push 模式下，hub 按**队列顺序**轮番向**空闲** ppo worker 推送任务；
   · 已推送任务超时则**回落队首**并改为推送**其它** worker；
   · 离线模式的课程不实时派发 ppo，但仍接收 it 权重/指标回传；
-  · 课程数 < worker 数时沿用单课程那样的竞速（那条判据在 pull 侧的 `race_decision`）。
+  · 每课程 **1 主 + N 备份**（§2.9）：主副本分走课程内硬序，备份只在主副本已 ready 或
+    掉队（同一张优先级表）时由 hub 显式授权派发——空闲的卡不再靠「无排序硬抢」。
 
 形状（为什么这样切）：
   * **注册表**（`PushWorkers`）：读 rl-config `nodes[]` 里 `gpu_push` 的条目——控制台的
@@ -43,8 +44,14 @@ from remote import net_http
 from remote.protocol import (
     AUTH_HEADER,
     BLOB_NAMES,
+    CLAIM_MODE_BACKUP,
+    CLAIM_MODE_EXCLUSIVE,
     CLAIM_TTL_SEC,
     COURSE_MODE_OFFLINE,
+    PRIORITY_HIGH,
+    PRIORITY_HIGHEST,
+    PRIORITY_LOW,
+    PRIORITY_MEDIUM,
     PUSH_DEAD_MISSES,
     PUSH_PING_SEC,
     PUSH_POLL_SEC,
@@ -366,11 +373,12 @@ class PushDispatcher:
     """hub 中介 push 派发器：按队列顺序推给空闲 worker，超时回落队首换 worker。
 
     一拍（`tick`）做四件事：热重载登记表 → 到点探活 → 挑活挑人 → 起一条 job 线程。
-    **每课程至多一份在途**：课程内的轮次有硬序（轮 N+1 的 init 权重就是轮 N 的产出），
-    同时推两份没有意义；跨课程并行才是要的并行度。
+    **每课程 1 主 + N 备份**（§2.9）：课程内的轮次有硬序（轮 N+1 的 init 权重就是轮 N
+    的产出），主副本走序；备份只在主副本 **ready / 掉队**（hub 本地同一张优先级表）时
+    才派——空闲的卡不再靠「无排序硬抢」，而是被显式授权去追一份可能落空的活。
 
-    只推**队首**：队首不是 push job（`manifest.dispatch != "push"`）⇒ 这门课本拍不推。
-    不越过它推后面的——那会把轮次跑成乱序（pull 侧一直在按序取队首）。
+    主副本只推**队首**：队首不是 push job（`manifest.dispatch != "push"`）⇒ 这门课本拍
+    不推主副本。不越过它推后面的——那会把轮次跑成乱序（pull 侧一直在按序取队首）。
     """
 
     def __init__(
@@ -382,6 +390,7 @@ class PushDispatcher:
         poll_sec: float = PUSH_POLL_SEC,
         timeout_sec: float = PUSH_TIMEOUT_SEC,
         push_attempts: int = 3,
+        backups_per_course: int = 1,
         now_fn: Any = time.time,
         log: Any = _log_default,
     ) -> None:
@@ -395,6 +404,9 @@ class PushDispatcher:
         # **测试**里「409 ⇒ 回落队首换一台」是调度层行为，不该陪跑这条重试梯子：
         # 实测 test_worker_refusing_job_requeues_to_another 为此白等 6s（2+4）。
         self.push_attempts = int(push_attempts)
+        #: 每课程允许的**备份副本**数（§2.9；缺省 1 = 「主 + 一份备份」）。备份只能由
+        #: hub 显式授权（`mode="backup"`），worker 不得自升级。
+        self.backups_per_course = int(backups_per_course)
         self._now = now_fn or time.time
         self._log = log or _log_default
         self._lock = Lock()
@@ -458,49 +470,101 @@ class PushDispatcher:
             counts[wid] = counts.get(wid, 0) + 1
         return counts
 
-    def _course_inflight(self, course: str) -> bool:
+    def _course_counts(self, course: str) -> tuple[int, int]:
+        """该课在途的 `(主副本数, 备份数)` —— 上限 = 1 主 + N 备份（§2.9）。"""
         with self._lock:
-            return any(r.get("course") == course for r in self._inflight.values())
+            recs = [r for r in self._inflight.values() if r.get("course") == course]
+        prim = sum(1 for r in recs if r.get("mode") != CLAIM_MODE_BACKUP)
+        return prim, len(recs) - prim
+
+    def _job_priority_of(self, jid: str) -> str:
+        """hub 本地算优先级（push 腿不走 `/jobs/priority` 那趟往返；§2.9 同一张表）。"""
+        fn = getattr(self.hub, "job_priority_of", None)
+        if fn is None:
+            return PRIORITY_HIGHEST  # 老 hub / 测试替身：不知道就按「没人在做」
+        try:
+            return str(fn(jid))
+        except Exception:
+            return PRIORITY_HIGHEST
+
+    def _backup_target(self, course: str) -> str | None:
+        """该课「值得再派一份备份」的那份活的 jid；无 → None。
+
+        判据 = hub 本地那一份 `job_priority_of`：仍处 highest（没别人在做）不派备份；
+        ready / 掉队（low/medium/high）才派——与 pull 侧同一张表、同一套语义。
+        """
+        with self._lock:
+            recs = [r for r in self._inflight.values() if r.get("course") == course]
+        for r in recs:
+            if r.get("mode") == CLAIM_MODE_BACKUP:
+                continue
+            jid = str(r.get("job_id") or "")
+            if not jid:
+                continue
+            if self._job_priority_of(jid) in (
+                PRIORITY_HIGH,
+                PRIORITY_MEDIUM,
+                PRIORITY_LOW,
+            ):
+                return jid
+        return None
 
     def _dispatch(self) -> list[str]:
-        """挑活 + 挑人 + 起线程；返回本拍推出去的 job_id 列表。"""
+        """挑活 + 挑人 + 起线程；返回本拍推出去的 job_id 列表。
+
+        两条路（§2.9）：① 无主副本 ⇒ 派**主**（claimable 队首，独占 claim）；② 主副本在途、
+        备份未满、且那份活已 ready/掉队 ⇒ 派**备份**（`mode="backup"`，无租约；回传经
+        `_backup_authorized` 不吃 403）。landed 的 job 天然不在 `claimable_job_ids` 里，
+        所以「landed 后不再派新备份」不需要控制帧就成立。
+        """
         started: list[str] = []
         hub = self.hub
         for course in rotation_order(list(hub.courses()), getattr(hub, "_cursor", None)):
             if hub.mode_of(course) == COURSE_MODE_OFFLINE:
                 continue  # 离线课不实时派发（只收回传）
-            if self._course_inflight(course):
-                continue  # 该课已有一份在途（课程内串行）
-            queue = hub.claimable_job_ids(course)
-            if not queue:
+            prim, backup = self._course_counts(course)
+            if prim == 0:
+                jid, mode = self._pick_primary(course)
+            else:
+                if backup >= self.backups_per_course:
+                    continue
+                tgt = self._backup_target(course)
+                if tgt is None:
+                    continue
+                jid, mode = tgt, CLAIM_MODE_BACKUP
+            if not jid:
                 continue
-            jid = queue[0]
             jd = hub._job_dir(jid)
             try:
                 manifest = json.loads((jd / "manifest.json").read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 continue
-            if not push_job_wants_hub_push(manifest):
-                continue  # 队首这轮归 pull/本机 —— 不越序推后面的
             with self._lock:
                 avoid = set(self._avoid.get(jid, ()))
             worker = pick_push_worker(self.workers.snapshot(), self._worker_counts(), avoid)
             if worker is None:
                 continue  # 没有空闲 worker —— 等下一拍
             wid = str(worker["id"])
-            lease = hub.claim(jid, ttl=CLAIM_TTL_SEC, worker_id=push_worker_id_of(wid))
+            lease = hub.claim(
+                jid, ttl=CLAIM_TTL_SEC, worker_id=push_worker_id_of(wid), mode=mode
+            )
             if lease is None:
-                continue  # 活租约在持 / 并发领取竞负
+                continue  # 活租约在持 / 并发领取竞负 / 熔断冻结
+            slot = jid if mode != CLAIM_MODE_BACKUP else f"{jid}#b{backup}"
             rec = {
                 "job_id": jid,
+                "slot": slot,
                 "course": course,
                 "worker": wid,
                 "lease": lease,
+                "mode": mode,
+                "url": str(worker["url"]),
+                "key": str(worker.get("key") or self.token),
                 "state": "upload",
                 "started": self._now(),
             }
             with self._lock:
-                self._inflight[jid] = rec
+                self._inflight[slot] = rec
             t = threading.Thread(
                 target=self._run_one,
                 args=(course, jid, worker, lease, manifest, jd, rec),
@@ -510,6 +574,21 @@ class PushDispatcher:
             t.start()
             started.append(jid)
         return started
+
+    def _pick_primary(self, course: str) -> tuple[str, str]:
+        """主副本候选：claimable 队首（且必须是 push job）；无 → `("", "exclusive")`。"""
+        queue = self.hub.claimable_job_ids(course)
+        if not queue:
+            return "", CLAIM_MODE_EXCLUSIVE
+        jid = queue[0]
+        jd = self.hub._job_dir(jid)
+        try:
+            manifest = json.loads((jd / "manifest.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return "", CLAIM_MODE_EXCLUSIVE
+        if not push_job_wants_hub_push(manifest):
+            return "", CLAIM_MODE_EXCLUSIVE  # 队首这轮归 pull/本机 —— 不越序推后面的
+        return jid, CLAIM_MODE_EXCLUSIVE
 
     # ---- 一份 job 的整条腿（跑在自己的线程里） ----
     def _run_one(
@@ -558,6 +637,14 @@ class PushDispatcher:
             )
             self.pushed += 1
             self.workers.note_push(wid, True)
+            if rec.get("mode") != CLAIM_MODE_BACKUP:
+                # R2-4a：GPU 机**从不连 hub**（hub 是出站客户端 + 轮询取结果），没人会替它
+                # 调 `/jobs/{id}/start` —— 不在这里落 computing_at，掉队救援在 push 腿永久沉默。
+                # 上传完成 = 节点已拿到活，就是「开算」的最近似时刻。
+                try:
+                    self.hub.start_job(jid, worker_id=push_worker_id_of(wid))
+                except Exception:
+                    pass
             # 传输实测回写 job 的 wire 账（训练侧 `_wire_from_result(is_push=True)` 读它）：
             # 直推那条腿是训练侧自己记的，推经 hub 这条腿只能 hub 记——不记就是一轮
             # iteration 行的 up_bytes/up_sec 全空（多课程并行时无法按腿分组看流量）。
@@ -579,7 +666,7 @@ class PushDispatcher:
             self._requeue(jid, lease, wid, f"{type(e).__name__}: {e}", avoid_worker=True)
         finally:
             with self._lock:
-                self._inflight.pop(jid, None)
+                self._inflight.pop(str(rec.get("slot") or jid), None)
             self._wake.set()
 
     def _await_result(
@@ -629,13 +716,26 @@ class PushDispatcher:
                 code_, why = accept_result(self.hub, jid, result, lease, log=self._log)
                 if code_ == 200:
                     self._log(f"{jid} <- {wid} 结果已回灌（{self._now() - t0:.0f}s）")
-                elif code_ in (400, 403, 409):
+                    # landed ⇒ 给同 job 的其它在途副本推取消帧（§2.4/§2.9）。
+                    self._cancel_others(jid, wid)
+                elif code_ == 409:
+                    # 别人已胜（首写锁定）：这份是备份/重复，**直接丢弃** —— 不回落重派
+                    # （重派只会再输一次；§2.9 末段：409 与 403 不同待遇）。
+                    self._log(f"{jid} 结果被拒 409（{why}）——别人已胜，本份丢弃")
+                elif code_ in (400, 403):
                     # 结果本身不合契约：换一台重跑是合理的（不把这份结果投毒进账本）。
                     self._requeue(jid, lease, wid, f"结果入账被拒 HTTP {code_}: {why}",
                                   avoid_worker=True)
                 else:
                     self._log(f"{jid} 结果入账返回 HTTP {code_}（{why}）——继续等")
                 return
+            if status == 202:
+                # 节点在跑（accepted/running）：**等**，不是回落——把它读成「HTTP 202 ⇒
+                # 换台重推」会让每一拍都重推同一份活（并把它标进 `_avoid`，直到没有机器
+                # 能接），而 202 恰恰是推模式**正常**的在途答复（与 pull 侧
+                # `probe_job_result` 的 TRANSIENT 同义）。到点由上面的 deadline 兜底。
+                time.sleep(self.poll_sec)
+                continue
             if status == 410:
                 # 节点判定「这份活在这台机器上跑不成」（能力缺失类）：终局，落 fail.json，
                 # 训练侧随后从 /jobs/{id}/result 拿 410 + 原因立即停腿（不再等满超时）。
@@ -667,9 +767,36 @@ class PushDispatcher:
             return
         self._requeue(jid, lease, wid, "派发器停机", avoid_worker=False)
 
+    def _cancel_others(self, jid: str, winner: str) -> None:
+        """landed（结果已入账）⇒ 给同 job 的其它在途副本推取消帧（§2.4/§2.9）。
+
+        推不到（节点断连/超时）⇒ 让它跑完，回传时按 409 丢弃 —— 不算失败。取消防的是
+        「别人已经赢下的活还在烧 GPU」，不是正确性（正确性由首写锁定兜底）。
+        """
+        from remote.push_client import cancel_job
+
+        with self._lock:
+            others = [
+                (str(r.get("worker") or ""), str(r.get("url") or ""), str(r.get("key") or ""))
+                for r in self._inflight.values()
+                if r.get("job_id") == jid and str(r.get("worker") or "") != winner
+            ]
+        for wid, url, key in others:
+            if not url:
+                continue
+            ok = cancel_job(url, key or self.token, jid)
+            self._log(
+                f"{jid} landed ⇒ 向在途副本 {wid or '?'} 推取消帧"
+                + ("（已达：epoch 边界停算）" if ok else "（不可达：让它跑完，409 丢弃）")
+            )
+
     def _requeue(self, jid: str, lease: str, wid: str, why: str, *, avoid_worker: bool) -> None:
-        """回落队首（放掉租约 ⇒ job 立刻可再领）并记下「别再给这台」。"""
-        self.hub.release(jid, lease)
+        """回落队首（放掉租约 ⇒ job 立刻可再领）并记下「别再给这台」。
+
+        备份副本（`mode="backup"`）**没有租约**：`lease` 为空 ⇒ 跳过 release（它本就没占）。
+        """
+        if lease:
+            self.hub.release(jid, lease)
         self.requeued += 1
         if avoid_worker and wid:
             with self._lock:

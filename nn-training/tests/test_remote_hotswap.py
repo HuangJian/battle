@@ -66,7 +66,7 @@ def test_request_reload_requires_supervisor(monkeypatch: pytest.MonkeyPatch) -> 
 def test_worker_loop_hotswap_exits_for_supervisor_respawn(monkeypatch: pytest.MonkeyPatch) -> None:
     """有监督器（restart_argv 传入）→ release 租约 + 以 HOT_RELOAD_EXIT 退出交监督器。
 
-    注：取活已换面（2026-09-22：`poll_job` → `acquire_job` = peek+priority+claim），
+    注：取活已换面（2026-09-22：轮询面 → `acquire_job` = peek+priority+claim），
     故此处钉的是**主循环接线**（拿到 job 后 run_job 抛热替换该走哪条路），不是取活实现。
     """
     polls: list[dict | None] = [{"job_id": "j-hot", "manifest": {"job_id": "j-hot"}}, None]
@@ -211,7 +211,7 @@ def test_worker_halt_attempts_stop_then_keeps_working(monkeypatch: pytest.Monkey
     polls: list[dict | None] = [
         {"halt": True, "job_id": None},  # 停机达令（无任务）
         {"halt": True, "job_id": "j1", "manifest": {"a": 1}},  # 达令 + 任务同批发
-        None,  # 停机解除（真 poll_job 对 {"job_id":null,"halt":false} 返回 None）→ once 退出
+        None,  # 停机解除（acquire_job 对空候选返回 None）→ once 退出
     ]
     monkeypatch.setattr(W, "acquire_job", lambda *a, **k: polls.pop(0), raising=True)
     ran: list[str] = []
@@ -292,28 +292,6 @@ def test_release_cloud_machine_prompts_manual_outside_colab(
     W._release_cloud_machine(log=logs.append)
     joined = "\n".join(logs)
     assert "哨兵" in joined and ("手工断开" in joined or "keepalive" in joined)
-
-
-def test_poll_job_surfaces_halt(monkeypatch: pytest.MonkeyPatch) -> None:
-    """§386：/jobs/next 的 halt 标志被 poll_job 原样上浮（含"达令+任务同批"形态）。"""
-    monkeypatch.setattr(
-        W, "_request", lambda *a, **k: (200, b'{"halt": true, "job_id": null}'), raising=True
-    )
-    assert W.poll_job("http://hub", "tok") == {"halt": True}
-    monkeypatch.setattr(
-        W,
-        "_request",
-        lambda *a, **k: (200, b'{"job_id": "j2", "manifest": {"b": 2}, "halt": true}'),
-        raising=True,
-    )
-    got = W.poll_job("http://hub", "tok")
-    assert got is not None and got["job_id"] == "j2" and got["halt"] is True
-    monkeypatch.setattr(W, "_request", lambda *a, **k: (200, b'{"job_id": null}'), raising=True)
-    assert W.poll_job("http://hub", "tok") is None
-    monkeypatch.setattr(
-        W, "_request", lambda *a, **k: (200, b'{"job_id": "j1", "manifest": {"a": 1}}'), raising=True
-    )
-    assert W.poll_job("http://hub", "tok") == {"job_id": "j1", "manifest": {"a": 1}}
 
 
 def test_prune_job_dirs_keeps_recent_and_skips_code_cache(tmp_path: Path) -> None:

@@ -83,7 +83,7 @@ export function isCourseComponent(key: Component): key is CourseComponent {
  *
  *  ★ `localWorker` 为什么也进来（用户口径：「localWorker 也不应绑定课程，它和云端 worker 一样，
  *  只与 hub 通信（pull/push），领到任务后直接执行，完成后回传结果」）：它跑的就是云端那一条
- *  链路（`python -m remote_worker --poll <hub>`），而 `/jobs/next` **从来不看课程**——job 由
+ *  链路（`python -m remote_worker --poll <hub>`），而 hub 的取活面**从来不看课程**——job 由
  *  hub 按队列分发、manifest 自带课程快照、结果按 job_id 回家（hub 侧 `course` 只是随包
  *  告知的观测字段）。按课程键控因而只产生了三样副作用：一个进程只能服务一门课、同机多份
  *  进程抢同一批 job、以及「这门课的 worker」这个不存在的归属感。

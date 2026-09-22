@@ -15,7 +15,7 @@ import { agentSentinels, pySentinels } from '../core/sentinels'
 import { sharedHubUrl, sharedHubPort, sharedTunnelMetricsPort } from '../core/slots'
 import { portOwnedBy } from '../core/proc'
 import { resolveVenvPython } from '../core/venv'
-import { COMPONENT_KILL_TREE, normalizeRaceMode } from '../core/types'
+import { COMPONENT_KILL_TREE } from '../core/types'
 import type {
   CfEdgeIp,
   CfProtocol,
@@ -103,11 +103,6 @@ export function hubServerSpec(cfg: RlConfig): ProcSpec {
       '--traj-root',
       path.join(REPO_ROOT, 'tmp'),
       '--discover',
-      // 竞速广播（2026-09-17）：auto（缺省）= 本 hub 的 worker 全都只服务这一个 hub 时
-      // 广播最新 job；on/off 为运维强制。值先归一化——hub-server 的 argparse choices
-      // 对未知值直接退出，写错配置不能让整个 hub 起不来。
-      '--race',
-      normalizeRaceMode(cfg.rl.race_mode),
       // hub 中介 push 派发（2026-09-18）：`rl.hub_push` 打开时，hub 按队列顺序把 job 推给
       // **登记在册**的 GPU worker（登记表 = rl-config 的 `gpu_push` 节点，控制台的 worker
       // 登记入口回写的正是它 ⇒ 必须显式指向仓库那份 rl-config，而不是 per-course 目录）。
@@ -252,7 +247,7 @@ export const LOCAL_WORKER_ENTRY = 'nn-training/remote_worker.py'
  *  启停（与其它受管组件同规：账本 + 变更检测重启 + 整树停止）。
  *
  *  ★ **一个进程服务所有课程**（2026-09-19，用户口径：「它和云端 worker 一样，只与 hub 通信，
- *  领到任务后直接执行，完成后回传结果」）：`/jobs/next` 从来不看课程——job 由 hub 按队列
+ *  领到任务后直接执行，完成后回传结果」）：hub 的取活面从来不看课程——job 由 hub 按队列
  *  分发、manifest 自带课程快照、结果按 job_id 回家。故 spec 与**课程无关**（`course: ''`、
  *  单一 work 目录与日志）；「这门课的 worker」这个归属只存在于旧账本的每课条目里（启动时
  *  被换代接管收掉）。

@@ -201,7 +201,6 @@ export async function buildOverview(
   return {
     hubUrl: admin.url,
     hubOnline: admin.url !== null,
-    raceActive: admin.queue?.raceActive ?? false,
     activeCourses: admin.queue?.activeCourses ?? 0,
     activeWorkers: admin.queue?.activeWorkers ?? 0,
     halt: admin.queue?.halt ?? false,

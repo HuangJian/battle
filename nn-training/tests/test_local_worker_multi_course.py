@@ -3,10 +3,10 @@
 用户口径：「localWorker 也不应绑定课程，它和云端 worker 一样，只与 hub 通信（pull/push），
 领到任务后直接执行，完成后回传结果。」
 
-之所以是**事实**而不是需求：`GET /jobs/next` 从来不看课程 —— 挑活的是 hub 的队列（每课程一条
-FIFO + **跨课程轮转**），响应里自带 `course`；job 的 manifest 又自带整份课程快照（`course`
-字段是课程文件正文）。worker 侧因此没有任何课程参数可配：`poll_job` 的形参只有 URL / token /
-worker 身份 / hub 范围。
+之所以是**事实**而不是需求：取活面（peek + claim）从来不看课程 —— 挑活的是 hub 的队列
+（每课程一条 FIFO + **跨课程轮转**），响应里自带 `course`；job 的 manifest 又自带整份课程
+快照（`course` 字段是课程文件正文）。worker 侧因此没有任何课程参数可配：`acquire_job` 的
+形参只有 URL / token / worker 身份。
 
 本文件用**进程内真 hub（HTTP）+ 真 worker 领活函数**证明两件事（不跑任何真运算、不起 GPU）：
 
@@ -27,7 +27,7 @@ from pathlib import Path
 
 from remote.hub_server import _HubQueue, _JobStore, make_server
 from remote.protocol import COURSE_ENABLE_MARKER, COURSE_MODE_ONLINE, normalize_manifest
-from remote.worker import poll_job
+from remote.worker import acquire_job
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -111,8 +111,7 @@ def _boot(tmp_path: Path, hub: _HubQueue):
 def test_one_worker_takes_jobs_from_every_course(tmp_path: Path) -> None:
     """同一个 worker 身份依次领到两门课的活（跨课程轮转 + 响应自报 course）。
 
-    不发 `HUB_SCOPE` 头 = 「我服务几个 hub 未知」⇒ hub 按保守处理（不做竞速广播、保持独占
-    租约），这正是本机单 worker 的真实形态。
+    单 hub、单 worker 身份：独占租约（这正是本机单 worker 的真实形态）。
     """
     courses = ("c5-gae", "c6-chip")
     hub = _hub(tmp_path, courses)
@@ -122,7 +121,7 @@ def test_one_worker_takes_jobs_from_every_course(tmp_path: Path) -> None:
     try:
         seen: list[tuple[str, str]] = []
         for _ in courses:
-            got = poll_job(base, TOKEN, timeout=10, worker_id=WORKER_ID)
+            got = acquire_job(base, TOKEN, worker_id=WORKER_ID)
             assert got is not None, "应当有可领的 job（没有就是轮转/派发断了）"
             assert got.get("job_id"), f"空轮询：{got}"
             seen.append((str(got.get("course")), str(got["job_id"])))
@@ -131,7 +130,7 @@ def test_one_worker_takes_jobs_from_every_course(tmp_path: Path) -> None:
             hub._stores[str(got["course"])].mark_completed(str(got["job_id"]))
         assert [c for c, _ in seen] == list(courses), f"单 worker 未跨课领活：{seen}"
         # 两门课都领完 ⇒ 再轮询是空（不是把某一门重复领一遍）
-        assert poll_job(base, TOKEN, timeout=10, worker_id=WORKER_ID) is None
+        assert acquire_job(base, TOKEN, worker_id=WORKER_ID) is None
     finally:
         srv.shutdown()
         srv.server_close()
@@ -147,7 +146,7 @@ def test_one_worker_serves_a_late_third_course(tmp_path: Path) -> None:
     _publish(hub, "c5-gae", "a" * 16)
     base, srv, th = _boot(tmp_path, hub)
     try:
-        first = poll_job(base, TOKEN, timeout=10, worker_id=WORKER_ID)
+        first = acquire_job(base, TOKEN, worker_id=WORKER_ID)
         assert first is not None and first["course"] == "c5-gae"
         hub._stores["c5-gae"].mark_completed(str(first["job_id"]))
 
@@ -158,7 +157,7 @@ def test_one_worker_serves_a_late_third_course(tmp_path: Path) -> None:
         (tmp_path / "c7-new").mkdir(parents=True, exist_ok=True)
         (tmp_path / "c7-new" / COURSE_ENABLE_MARKER).write_text("", encoding="utf-8")
         _publish(hub, "c7-new", "b" * 16)
-        nxt = poll_job(base, TOKEN, timeout=10, worker_id=WORKER_ID)
+        nxt = acquire_job(base, TOKEN, worker_id=WORKER_ID)
         assert nxt is not None, "新课的 job 必须被同一份 worker 领走"
         assert nxt["course"] == "c7-new"
     finally:
@@ -176,9 +175,15 @@ def test_poll_path_has_no_course_input() -> None:
     哪天真有人给 worker 加上 `--course`（把进程按课绑回去），这条会红：那一刻「一个进程服务
     所有课程」就不成立了，而它不会以崩溃的形式暴露，只会表现为「另一门课的 job 永远没人领」。
     """
-    params = set(inspect.signature(poll_job).parameters)
+    params = set(inspect.signature(acquire_job).parameters)
     assert not any("course" in p.lower() for p in params), params
     # 真实 HTTP 路径也钉一道（URL 里带课程 = 把归属塞回请求侧）
-    src = inspect.getsource(poll_job)
-    assert "/jobs/next" in src
-    assert "course" not in src.lower(), "poll_job 的实现里出现了课程字样（请求侧不该有课程）"
+    # 取活必须经 peek + claim 两个面（任一面被换成「带课程参数」的单条腿，这里就红）
+    src = inspect.getsource(acquire_job)
+    assert "peek_jobs" in src and "claim_job" in src, "取活链路少了 peek/claim 之一"
+    assert "course=" not in src, "acquire_job 的请求里出现了课程参数"
+    # 三个 HTTP 面的形参也钉一道（响应侧当然会有 course —— 那是 hub 告诉我们的归属事实）
+    import remote.worker as W
+
+    for fn in (W.peek_jobs, W.request_priority, W.claim_job):
+        assert not any("course" in p.lower() for p in inspect.signature(fn).parameters), fn

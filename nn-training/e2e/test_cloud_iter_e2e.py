@@ -11,7 +11,7 @@ torch、不跑一局游戏）；其余每一段都走真代码。
       ├─ 真 publish_job（磁盘 IPC：job 目录三件套 + payload.tar.xz + 账本 job_pending）
       ├─ 真 hub-server（remote.hub_server，127.0.0.1 临时端口；真租约 / 真账本）
       ├─ 假云机（本测试的线程）
-      │    ├─ GET /jobs/next  → 真领取（真租约 token；单 worker 不触发竞速广播）
+      │    ├─ peek + claim  → 真领取（真租约 token）
       │    ├─ GET payload / code / ts_code → 真下载 + 逐 sha 对账（节点启动自检同规）
       │    ├─ 假 rollout：按 argv 逐局写**导出器同形**产物（w{i}/rl_sX_seedY + _rl_report.json）
       │    ├─ 真 verify_shards（实产集 == 声明集，data_fp 两侧同函数）
@@ -78,6 +78,7 @@ from rl.cli import build_argparser  # 模块级：真 CLI 解析器（大对象�
 from rl.config import apply_course, course_from_args
 from rl.loop_core import TrainingLoop
 from rl.reports import combine_reports
+from tests.helpers.hub_poll import hub_poll
 
 #: 本轮 it（>1，避免与 it0 基线评估的语义混淆）。
 IT = 7
@@ -295,12 +296,8 @@ class _FakeCloudNode(threading.Thread):
     def run(self) -> None:
         deadline = time.time() + 60.0
         while time.time() < deadline and self.result_status == 0 and not self.errors:
-            st, body = _req(f"{self.hub}/jobs/next")
-            if st != 200:
-                self.errors.append(f"/jobs/next HTTP {st}: {body[:200]!r}")
-                return
-            job = json.loads(body)
-            if not job.get("job_id"):
+            job = hub_poll(self.hub, TOKEN)
+            if job is None or not job.get("job_id"):
                 time.sleep(0.05)  # 还没发布：短轮询（真 worker 的 poll 节奏）
                 continue
             try:

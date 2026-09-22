@@ -119,7 +119,7 @@ def test_push_dispatch_loopback_bypasses_dead_proxy(local_server: str, dead_prox
 
 def test_worker_loopback_bypasses_dead_proxy(local_server: str, dead_proxy: str) -> None:
     """worker↔hub：本机 worker 轮询本机 hub 不该被代理截走（显式 ProxyHandler 只管非回环）。"""
-    status, body = worker_request(local_server, "tok", "/jobs/next", timeout=5.0)
+    status, body = worker_request(local_server, "tok", "/jobs/peek", timeout=5.0)
     assert status == 200 and json.loads(body)["ok"] is True
 
 

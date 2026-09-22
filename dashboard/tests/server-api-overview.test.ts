@@ -49,7 +49,6 @@ describe('parseHubQueue（hub /admin/queue 的宽容解析）', () => {
       offline: ['b'],
       active_courses: 1,
       active_workers: 2,
-      race_active: true,
       halt: false,
     })!
     expect(q.courses.a!.pending).toBe(3)
@@ -58,7 +57,6 @@ describe('parseHubQueue（hub /admin/queue 的宽容解析）', () => {
     expect(q.courses.a!.nextJob).toBe('j1')
     expect(q.courses.b!.mode).toBe('offline')
     expect(q.offline).toEqual(['b'])
-    expect(q.raceActive).toBe(true)
     expect(q.activeWorkers).toBe(2)
   })
 
@@ -78,7 +76,6 @@ describe('parseHubQueue（hub /admin/queue 的宽容解析）', () => {
     })
     expect(q.order).toEqual([])
     expect(q.activeCourses).toBe(0)
-    expect(q.raceActive).toBe(false)
     expect(q.halt).toBe(false)
   })
 })
@@ -229,12 +226,11 @@ const QUEUE = {
   offline: ['c5'],
   active_courses: 1,
   active_workers: 3,
-  race_active: true,
   halt: true,
 }
 
 describe('buildOverview（hub 观测 → 总览行）', () => {
-  it('hub 应答：基址/竞速/双方判据/停机 + 每课队列数上屏', async () => {
+  it('hub 应答：基址/双方判据/停机 + 每课队列数上屏', async () => {
     const hub = fakeHub({
       queue: QUEUE,
       pushWorkers: { dispatcher: {}, registry: { workers: [] } },
@@ -244,7 +240,6 @@ describe('buildOverview（hub 观测 → 总览行）', () => {
       const ov = await api.buildOverview(cfg(hub.url), ['c4'], 'c4')
       expect(ov.hubUrl).toBe(hub.url)
       expect(ov.hubOnline).toBe(true)
-      expect(ov.raceActive).toBe(true)
       expect(ov.activeCourses).toBe(1)
       expect(ov.activeWorkers).toBe(3)
       expect(ov.halt).toBe(true)

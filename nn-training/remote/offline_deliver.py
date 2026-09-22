@@ -143,7 +143,7 @@ class OfflineDeliverer:
         #: `locate_offline_course`），而补传体里**没有**可用的课程身份——`course_name`
         #: 是课程文件的 `name` 字段（`bc-c4-v3` 的 name 是 `bc-c4-v3-distill`），与 hub 侧
         #: 的课程键（`<traj>/<课>/` 目录名）不是一回事。值来源两处：领来的 job（hub 在
-        #: `/jobs/next` 里下发）或 `--hub-course`（全离线包那条腿，由 notebook 的 CFG 给）。
+        #: 轮询面里下发）或 `--hub-course`（全离线包那条腿，由 notebook 的 CFG 给）。
         #: 空 = 单课程 hub（那门课的键就是空串）：此时**不带这个键**（带空串与不带等价，
         #: 但不带更贴近旧字节行为）。
         self.course = str(course or "").strip()

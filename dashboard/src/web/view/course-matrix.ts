@@ -410,12 +410,6 @@ export function matrixMeta(input: {
         text: `最近派发 ${ov.recentDispatch}`,
         title: 'hub 轮转游标：上一份 job 派给了这门课（下一份从它的下一门开始扫）',
       })
-    if (ov.raceActive)
-      out.push({
-        text: '竞速',
-        title: '在派发课程数 < 活跃 worker 数 ⇒ 最新 job 广播给所有 worker，先回传者胜',
-        tone: 'warn',
-      })
     if (ov.halt)
       out.push({
         text: '停机中',

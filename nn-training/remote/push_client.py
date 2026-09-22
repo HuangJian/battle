@@ -217,6 +217,22 @@ def submit_job(
     raise RetryableError(f"job POST 重试 {attempts} 次仍失败: {last}")
 
 
+def cancel_job(base_url: str, token: str, jid: str, *, timeout: float = 15.0) -> bool:
+    """向节点推一帧 landed 取消（`POST /job/{id}/cancel`，幂等）。
+
+    语义（R2-4b / §2.4）：可达 ⇒ True（Event 已置，节点侧在 epoch 边界停算）；不可达/
+    非 200 ⇒ False —— **不算失败**：让它跑完，结果回传时按 409 丢弃（与「上传中/已传」
+    那一行的口径一致）。所以本函数**不抛**，调用方也不必包 try。
+    """
+    try:
+        status, _body = _request(
+            base_url, token, f"/job/{jid}/cancel", timeout=timeout, method="POST"
+        )
+    except Exception:
+        return False
+    return status == 200
+
+
 def poll_result(
     base_url: str,
     token: str,

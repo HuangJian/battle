@@ -40,18 +40,15 @@ from remote.protocol import (
     COURSE_ENABLE_MARKER,
     COURSE_MODE_OFFLINE,
     COURSE_MODE_ONLINE,
-    HUB_SCOPE_HEADER,
-    RACE_MODE_AUTO,
-    RACE_MODE_OFF,
     WORKER_ID_HEADER,
     ProtocolError,
     has_offline_capability,
     may_avoid_stale_holder,
     normalize_manifest,
     parse_course_arg,
-    race_decision,
     rotation_order,
 )
+from tests.helpers.hub_poll import hub_poll
 from tests.subproc_util import spawn_bound_port
 
 # ------------------------------------------------------------------ 纯函数
@@ -96,32 +93,6 @@ def test_may_avoid_stale_holder_needs_a_spare_worker() -> None:
     assert may_avoid_stale_holder("w1", 1) is False, "独苗必须能自领，否则谁都不干"
     assert may_avoid_stale_holder("", 3) is False, "身份未知不避让（旧 worker/手写 curl）"
     assert may_avoid_stale_holder("w1", 0) is False, "一个活跃 worker 都没有时不避让"
-
-
-def test_race_decision_active_courses() -> None:
-    """新口径：**不同 worker 数 > 在派发课程数** 才广播；缺省 1 课 = 旧口径逐字节等价。"""
-    now = 1000.0
-    three = [("a", now, 1), ("b", now, 1), ("c", now, 1)]
-    two = [("a", now, 1), ("b", now, 1)]
-    one = [("a", now, 1)]
-    # 缺省（单课程）：与旧行为一致
-    assert race_decision(RACE_MODE_AUTO, one, now) is False
-    assert race_decision(RACE_MODE_AUTO, two, now) is True
-    # 2 课 2 worker：各拿一条卡，谁也不多 ⇒ 独占
-    assert race_decision(RACE_MODE_AUTO, two, now, active_courses=2) is False
-    # 2 课 3 worker：多出来的那条卡去抢 ⇒ 竞速
-    assert race_decision(RACE_MODE_AUTO, three, now, active_courses=2) is True
-    # 3 课 3 worker：刚好够分 ⇒ 独占
-    assert race_decision(RACE_MODE_AUTO, three, now, active_courses=3) is False
-    # 1 课 3 worker：退化成单课程多卡竞速
-    assert race_decision(RACE_MODE_AUTO, three, now, active_courses=1) is True
-    # 多 hub worker 混入仍然一票否决（scope 是安全条件，不随课程数放宽）
-    assert (
-        race_decision(
-            RACE_MODE_AUTO, [("a", now, 1), ("b", now, 1), ("c", now, 2)], now, active_courses=1
-        )
-        is False
-    )
 
 
 # ------------------------------------------------------------------ 夹具
@@ -192,10 +163,10 @@ def _publish(hub: _HubQueue, course: str, jid: str, *, run: str = "run", it: int
 
 
 def _claim(
-    hub: _HubQueue, worker: str, *, race: bool = False, offline_ok: bool = False
+    hub: _HubQueue, worker: str, *, offline_ok: bool = False
 ) -> tuple[str, str, str]:
     """取下一份该派的 job；**没有必须是失败**（否则断言会变成静默跳过）。"""
-    picked = hub.claim_next(worker_id=worker, race=race, offline_ok=offline_ok)
+    picked = hub.claim_next(worker_id=worker, offline_ok=offline_ok)
     assert picked is not None, f"应当有可派给 {worker} 的 job"
     return picked
 
@@ -262,24 +233,6 @@ def test_marked_worker_still_claims_online_courses(tmp_path: Path) -> None:
     assert seen == {"c-online", "c-offline"}, f"带标 worker 应两门课都能领，实得 {seen}"
 
 
-def test_offline_job_is_never_race_broadcast(tmp_path: Path) -> None:
-    """离线课的整段 job **绝不**竞速广播（广播 = 每台带标 worker 各跑一遍完整课程）。
-
-    race 的判据是「在实时派发的课程数 < 窗口内活跃 worker 数」——只剩离线课时该判据反而
-    为真（离线课不算进分母），所以这里不能靠 race_active 自己收口，必须由 claim 路径显式屏蔽。
-    """
-    hub = _discover_hub(tmp_path)
-    _publish_standalone(tmp_path, "c1", "j" * 16)
-    hub.discover()
-    assert hub.set_mode("c1", COURSE_MODE_OFFLINE) is True
-
-    first = hub.claim_next(worker_id="w1", race=True, offline_ok=True)
-    assert first is not None
-    # race=True 下在线课会「不下租约、对所有人可见」（先落账者胜）；离线整段绝不能这样。
-    second = hub.claim_next(worker_id="w2", race=True, offline_ok=True)
-    assert second is None, "离线整段被广播给了第二台 worker（同一段会跑两遍）"
-
-
 def _boot(tmp_path: Path, hub: _HubQueue) -> tuple:
     srv = make_server(hub, 0, "sekret", host="127.0.0.1")
     port = srv.server_address[1]
@@ -323,13 +276,21 @@ def _http(
             return e.code, {}
 
 
+def _next(base: str, *, worker: str = "") -> dict:
+    """旧轮询面的同形替代（peek + claim；实现见 `tests/helpers/hub_poll`）。"""
+    got = hub_poll(base, "sekret", worker_id=worker)
+    if got is None or not got.get("job_id"):
+        return {"job_id": None, "halt": bool(got and got.get("halt"))}
+    return got
+
+
 # ------------------------------------------------------------------ 路由
 
 
 def test_course_of_uses_none_for_missing_not_empty_string(tmp_path: Path) -> None:
     """回归：单课程队列的课程名**就是空串**，所以「找不到」必须是 None。
 
-    2026-09-18 实测故障：`course_of` 用空串兼作缺失值 ⇒ 单课程下 `/jobs/next` 刚派出的
+    2026-09-18 实测故障：`course_of` 用空串兼作缺失值 ⇒ 单课程下刚派出的
     job 立刻解析不到归属，handler 打到哨兵路径上 500（每一次拉活都失败）。
     """
     hub = _hub(tmp_path, courses=("",))
@@ -415,19 +376,19 @@ def test_expired_lease_goes_to_another_worker(tmp_path: Path) -> None:
     hub = _hub(tmp_path, clock=clock)
     _publish(hub, "a", "a" * 16)
     # 两个 worker 都报过到（否则「独苗可自领」规则会放行 w1）
-    hub.note_worker("w1", 1)
-    hub.note_worker("w2", 1)
+    hub.note_worker("w1")
+    hub.note_worker("w2")
     first = _claim(hub, "w1")
     assert first[:2] == ("a", "a" * 16)
-    assert hub.claim_next(worker_id="w2", race=False) is None, "租约未过期 ⇒ 没人能抢"
+    assert hub.claim_next(worker_id="w2") is None, "租约未过期 ⇒ 没人能抢"
     clock.tick(CLAIM_TTL_SEC + 1)
-    # 活着的 worker 会持续轮询（协议就是它们每几秒打一次 /jobs/next），所以「活跃」要按
+    # 活着的 worker 会持续轮询（协议就是它们每几秒打一次轮询面），所以「活跃」要按
     # 真实节奏刷一遍。不刷的话两台都被当成已离场 ⇒ 活跃数 0 ⇒ 避让闸不开（这是对的：
     # 连一台活着的都没有时，避让只会让这活没人干）。租约 TTL(300s) 比
-    # RACE_WORKER_WINDOW_SEC(180s) 长，就是为此——一个 worker 停 poll 超窗口即可判离场。
-    hub.note_worker("w1", 1)
-    hub.note_worker("w2", 1)
-    assert hub.claim_next(worker_id="w1", race=False) is None, "刚跑死它的那台得让位"
+    # WORKER_SEEN_WINDOW_SEC(180s) 长，就是为此——一个 worker 停 poll 超窗口即可判离场。
+    hub.note_worker("w1")
+    hub.note_worker("w2")
+    assert hub.claim_next(worker_id="w1") is None, "刚跑死它的那台得让位"
     second = _claim(hub, "w2")
     assert second[1] == "a" * 16, "换一台 worker 就该给它"
 
@@ -437,7 +398,7 @@ def test_expired_lease_self_claim_allowed_when_sole_worker(tmp_path: Path) -> No
     clock = _Clock()
     hub = _hub(tmp_path, clock=clock)
     _publish(hub, "a", "a" * 16)
-    hub.note_worker("only", 1)
+    hub.note_worker("only")
     _claim(hub, "only")
     clock.tick(CLAIM_TTL_SEC + 1)
     assert _claim(hub, "only")[1] == "a" * 16
@@ -448,8 +409,8 @@ def test_release_clears_avoidance(tmp_path: Path) -> None:
     clock = _Clock()
     hub = _hub(tmp_path, clock=clock)
     _publish(hub, "a", "a" * 16)
-    hub.note_worker("w1", 1)
-    hub.note_worker("w2", 1)
+    hub.note_worker("w1")
+    hub.note_worker("w2")
     picked = _claim(hub, "w1")
     assert hub.release(picked[1], picked[2]) is True
     assert _claim(hub, "w1")[1] == "a" * 16, "还租约后自己该能立刻重新领到"
@@ -458,51 +419,13 @@ def test_release_clears_avoidance(tmp_path: Path) -> None:
 # ------------------------------------------------------------------ 竞速（多课程口径）
 
 
-def test_race_true_when_more_workers_than_courses(tmp_path: Path) -> None:
-    """2 课 3 worker ⇒ 广播：每门课的最新 job 都可被多人抢（先回传者胜）。"""
-    hub = _hub(tmp_path)
-    _publish(hub, "a", "a" * 16)
-    _publish(hub, "b", "b" * 16)
-    for w in ("w1", "w2", "w3"):
-        hub.note_worker(w, 1)
-    assert hub.race_active() is True
-    # 广播轮：不下租约 ⇒ 同一份能被第二个 worker 再领（先回传者胜）
-    assert _claim(hub, "w1", race=True)[1] == "a" * 16
-    assert _claim(hub, "w2", race=True)[1] == "b" * 16
-    assert _claim(hub, "w3", race=True)[1] == "a" * 16, "广播副本不落租约，可重复领"
-
-
-def test_race_false_when_workers_match_courses(tmp_path: Path) -> None:
-    """3 课 3 worker ⇒ 独占：每门课各拿一条卡，谁都不多余（不重复烧）。"""
-    hub = _hub(tmp_path, courses=("a", "b", "c"))
-    for c in ("a", "b", "c"):
-        _publish(hub, c, c * 16)
-    for w in ("w1", "w2", "w3"):
-        hub.note_worker(w, 1)
-    assert hub.race_active() is False
-    assert _claim(hub, "w1")[1] == "a" * 16
-    assert _claim(hub, "w2")[1] == "b" * 16
-    assert _claim(hub, "w3")[1] == "c" * 16
-
-
-def test_race_ignores_offline_course_in_denominator(tmp_path: Path) -> None:
-    """离线课不算「在派发」⇒ 2 活跃 worker 对 1 门在派发课就已该竞速。"""
-    hub = _hub(tmp_path, courses=("a", "b"), offline=("b",))
-    _publish(hub, "a", "a" * 16)
-    _publish(hub, "b", "b" * 16)
-    hub.note_worker("w1", 1)
-    hub.note_worker("w2", 1)
-    assert hub.race_active() is True
-
-
 # ------------------------------------------------------------------ HTTP 全链路
 
 
 def test_http_serves_all_courses_and_reports_course(tmp_path: Path) -> None:
-    """一个进程、一个端口服务两门课：/jobs/next 轮流给，并在响应里自报 course。
+    """一个进程、一个端口服务两门课：轮询面轮流给，并在响应里自报 course。
 
-    用 2 个 worker：worker 数 == 课程数 ⇒ 不竞速（独占），每门课各拿一条卡。
-    （3 个 worker 时会自动转竞速——那是 `test_race_*` 那一组的命题，见上面那条日志。）
+    独占口径：每门课各拿一条卡（租约在持不重发）。
     """
     hub = _hub(tmp_path)
     _publish(hub, "a", "a" * 16)
@@ -511,12 +434,10 @@ def test_http_serves_all_courses_and_reports_course(tmp_path: Path) -> None:
     try:
         seen = []
         for w in ("w1", "w2", "w1"):
-            st, body = _http(base, "/jobs/next", headers={WORKER_ID_HEADER: w, HUB_SCOPE_HEADER: "1"})
-            assert st == 200, body
+            body = _next(base, worker=w)
             if body["job_id"]:
                 seen.append(body["course"])
         assert seen == ["a", "b"], f"独占轮转跨课失效：{seen}"
-        assert hub.race_active() is False, "2 课 2 worker 不该竞速（除非多出来的卡）"
         # 第二门课的 payload 能按 job_id 反查归属取到（worker 不需要知道课程）
         st, body_b = _http_raw(base, f"/jobs/{'b' * 16}/payload")
         assert st == 200 and body_b == b"PK\x03\x04fake", (st, body_b[:16])
@@ -590,16 +511,16 @@ def test_halt_is_per_course(tmp_path: Path) -> None:
         # 达令跟**活所属的课**走：a 的 job 不带 halt，b 的带
         _publish(hub, "a", "a" * 16)
         _publish(hub, "b", "b" * 16)
-        _st, ra = _http(base, "/jobs/next", headers={WORKER_ID_HEADER: "w1"})
+        ra = _next(base, worker="w1")
         assert (ra["course"], ra["halt"]) == ("a", False), ra
-        _st, rb = _http(base, "/jobs/next", headers={WORKER_ID_HEADER: "w2"})
+        rb = _next(base, worker="w2")
         assert (rb["course"], rb["halt"]) == ("b", True), rb
 
         # 空闲轮询没有课程上下文 ⇒ 全部课都停才告诉它停（否则 idle worker 会被凭空停掉）
-        _st, idle = _http(base, "/jobs/next", headers={WORKER_ID_HEADER: "w3"})
+        idle = _next(base, worker="w3")
         assert idle["job_id"] is None and idle["halt"] is False
         _http(base, "/admin/workers/halt?course=a")
-        _st, idle2 = _http(base, "/jobs/next", headers={WORKER_ID_HEADER: "w3"})
+        idle2 = _next(base, worker="w3")
         assert idle2["halt"] is True
 
         # 单课程读取：`?course=` → 那一门课；体形状恒为 {"halt": ...}（console 读它）
@@ -687,24 +608,11 @@ def test_single_course_wrapper_keeps_legacy_semantics(tmp_path: Path) -> None:
     assert hub.halt_workers is True, "单课程：进程级状态读写都落在那一份 store 上"
     hub.halt_workers = False
     assert store.halt_workers is False
-    store.race_mode = RACE_MODE_OFF
-    assert hub.race_mode == RACE_MODE_OFF
     # 鉴权面同源（既有用例正是靠这点在 store 上预热封禁态再发 HTTP）
     for _ in range(5):
         hub.auth_failure("203.0.113.7")
     assert store.is_blocked("203.0.113.7") is True
     assert store._auth_fail == {}
-
-
-def test_single_course_race_matches_legacy_two_worker_rule(tmp_path: Path) -> None:
-    """单课程队列的竞速口径 = 旧口径（≥2 个不同 worker），不是 `1 < workers` 的另一种写法。"""
-    hub = _hub(tmp_path, courses=("",))
-    assert hub.race_active() is False
-    hub.note_worker("w1", 1)
-    assert hub.race_active() is False
-    hub.note_worker("w2", 1)
-    assert hub.race_active() is True
-    assert hub.race_state()["workers"] == 2
 
 
 # ------------------------------------------------------------------ 自动发现（--discover）
@@ -859,8 +767,8 @@ def test_discover_scan_is_throttled(tmp_path: Path) -> None:
 def test_discover_adopts_process_state_from_solo_store(tmp_path: Path) -> None:
     """单课程时进程级状态借 store；发现第二门课时必须**搬**过来，不能悄悄清掉。
 
-    不搬就是「新开一门课，把停机达令 / 竞速模式 / 鉴权闭锁一起清了」——三类事故
-    （云端不停机、竞速口径漂、封禁失效）都只在多课程同时跑时才出现。
+    不搬就是「新开一门课，把停机达令 / worker 登记 / 鉴权闭锁一起清了」——三类事故
+    （云端不停机、避让失灵、封禁失效）都只在多课程同时跑时才出现。
     """
     clock = _Clock()
     hub = _HubQueue(
@@ -876,7 +784,6 @@ def test_discover_adopts_process_state_from_solo_store(tmp_path: Path) -> None:
         discover_root=tmp_path,
     )
     hub.halt_workers = True
-    hub.race_mode = RACE_MODE_OFF
     for _ in range(5):
         hub.auth_failure("203.0.113.9")
     assert hub.is_blocked("203.0.113.9") is True, "预热：封禁态住在 store 里"
@@ -884,7 +791,6 @@ def test_discover_adopts_process_state_from_solo_store(tmp_path: Path) -> None:
     _mk_course_dir(tmp_path, "b")
     assert hub.discover() == ["b"]
     assert hub.halt_workers is True, "多一门课不该清停机达令"
-    assert hub.race_mode == RACE_MODE_OFF
     assert hub.is_blocked("203.0.113.9") is True, "鉴权闭锁跨课程延续（同进程一份）"
     # 搬完就不再借 store：此后写的是队列自己的状态
     hub.halt_workers = False
@@ -1145,8 +1051,8 @@ def test_main_discover_picks_up_course_from_disk(tmp_path: Path) -> None:
         assert seen["courses"]["late"]["pending_n"] == 1
 
         # 真 worker 轮询能领到它（端到端：不是只出现在观测面）
-        st, task = _http(base, "/jobs/next", headers={WORKER_ID_HEADER: "w1"})
-        assert st == 200 and task["course"] == "late", task
+        task = _next(base, worker="w1")
+        assert task["course"] == "late", task
     finally:
         proc.terminate()
         try:
@@ -1162,13 +1068,12 @@ def test_http_worker_picks_up_new_course_without_restart(tmp_path: Path) -> None
     hub = _discover_hub(tmp_path, clock)
     base, _hub_ref, srv, th = _boot(tmp_path, hub)
     try:
-        st, body = _http(base, "/jobs/next", headers={WORKER_ID_HEADER: "w1"})
-        assert st == 200 and not body["job_id"], "还没有课 ⇒ 空轮询（不是错误）"
+        body = _next(base, worker="w1")
+        assert not body["job_id"], "还没有课 ⇒ 空轮询（不是错误）"
         # 另一门课此刻才开跑（job 落盘）——真实世界里 hub 早就起着了
         _publish_standalone(tmp_path, "late", "L" * 16)
         clock.tick(hub.DISCOVER_SCAN_MIN_SEC + 1.0)  # 最小间隔闸：最坏等待就是这个量级
-        st, body = _http(base, "/jobs/next", headers={WORKER_ID_HEADER: "w1"})
-        assert st == 200, body
+        body = _next(base, worker="w1")
         assert (body["course"], body["job_id"]) == ("late", "L" * 16), body
         st, q = _http(base, "/admin/queue")
         assert st == 200 and "late" in q["courses"]

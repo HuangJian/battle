@@ -38,6 +38,7 @@ from remote.hub_server import _JobStore, make_server
 from remote.protocol import decode_weights_json, encode_weights_json
 from rl import bc_loop
 from rl.bc_config import BcEvalBlock, load_bc_course
+from tests.helpers.hub_poll import hub_poll
 
 TOKEN = "test-token"
 COURSE_FP = "course-fp-e2e"
@@ -64,7 +65,7 @@ def _boot_hub(tmp_path: Path) -> tuple[str, _JobStore, Any]:
 
 def _publish_bc_job(tmp_path: Path, store: _JobStore, *, epochs: int, jid: str) -> Path:
     """模拟 publish_job 的写盘行为（test_remote_ppo 同款磁盘 IPC）：manifest +
-    payload 存根 + job_pending 账本事件 → GET /jobs/next 可领取。"""
+    payload 存根 + job_pending 账本事件 → peek/claim 可领取。"""
     jd = store.job_root / jid
     jd.mkdir(parents=True, exist_ok=True)
     manifest = {
@@ -257,7 +258,7 @@ def test_e2e_bc_interrupt_resume_continue_and_zeroretrain(
     jd = _publish_bc_job(tmp_path, store, epochs=4, jid=jid)
     try:
         # ---- worker A：领取 + 回传 epoch 1..3（租约内）----
-        claim = worker_mod.poll_job(base, TOKEN)
+        claim = hub_poll(base, TOKEN)
         assert claim is not None and claim["job_id"] == jid
         tok_a = str(claim["lease_token"])
         for ep in (1, 2, 3):
@@ -273,7 +274,7 @@ def test_e2e_bc_interrupt_resume_continue_and_zeroretrain(
         assert store.release(jid, tok_a) is True
 
         # ---- worker B：重领同 job（新租约）；旧僵尸回传被 403 拒（不覆盖新 resume）----
-        claim_b = worker_mod.poll_job(base, TOKEN)
+        claim_b = hub_poll(base, TOKEN)
         assert claim_b is not None and claim_b["job_id"] == jid
         tok_b = str(claim_b["lease_token"])
         assert tok_b != tok_a

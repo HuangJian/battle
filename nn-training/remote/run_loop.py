@@ -890,7 +890,7 @@ def run_plan_job(
     hub_url: str = "",
     hub_token: str = "",
     #: 本份产物在 hub 里的**归位键**（多课程 hub 的课程键；见 `OfflineDeliverer.course`）。
-    #: 领活路径由 hub 在 `/jobs/next` 下发（`remote/worker.py` 传进来），全离线包那条腿
+    #: 领活路径由 hub 在轮询面下发（`remote/worker.py` 传进来），全离线包那条腿
     #: 由 `--hub-course` 给。空 = 单课程 hub。
     hub_course: str = "",
     deliver: bool = True,

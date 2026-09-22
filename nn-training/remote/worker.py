@@ -54,7 +54,6 @@ from remote.protocol import (
     CLAIM_MODE_BACKUP,
     CLAIM_MODE_EXCLUSIVE,
     HEARTBEAT_SEC,
-    HUB_SCOPE_HEADER,
     JOB_CANCEL_POLL_SEC,
     OFFLINE_CAP_HEADER,
     OFFLINE_CAP_VALUE,
@@ -475,88 +474,19 @@ def _request(
             return e.code, e.read()
 
 
-#: "base_url:status" -> 上次告警墙钟（节流：非 200 时每分钟最多一条，别刷屏）
-_POLL_WARN_AT: dict[str, float] = {}
-
-
-def poll_job(
-    base_url: str,
-    token: str,
-    timeout: float = 30.0,
-    log: Any = None,
-    hub_scope: int | None = None,
-    worker_id: str = "",
-    offline_ok: bool = False,
-) -> dict | None:
-    """GET /jobs/next → {job_id, manifest, halt} 或 None（无任务且无停机达令）。
-
-    `offline_ok`（2026-09-19 离线训练模式）：本会话**能自己跑完整段**（`kind="run"`）时
-    带上能力头 —— hub 只把离线课的 job 放给带标的 worker（普通逐轮 worker 领不到）。
-    这是能力声明，不是课程绑定：带标 worker 照样领在线课。
-
-    `hub_scope` / `worker_id`（2026-09-17 竞速广播）：本 worker 轮询几个 hub、以及自己
-    是谁。hub 靠这两个事实判定“机群是不是只服务单一课程”——**不报就按多 hub 保守**
-    （退回 P3b 独占）。身份必须自报：隧道回源把全流量归成 127.0.0.1，源 IP 分不出 worker。
-
-    停机达令（§386）随任务同发：有任务 → 原样上浮（含 halt 标志，worker 先试停机、
-    停不掉照常执行任务）；无任务但 halt → {"halt": True}；两者皆无 → None。
-
-    `log` 用于**区分「队列空」与「被 hub 拒绝」**（2026-09-16 x3-step 事故）：
-    此前非 200 一律静默返回 None，worker 被 403 ip blocked 时日志与空队列完全
-    一样（只有 "no job yet"），现场无法判断到底是没活还是被封。现在非 200 会
-    按 (url, status) 节流打印一条。"""
-    _poll_headers: dict[str, str] = {}
-    if worker_id:
-        _poll_headers[WORKER_ID_HEADER] = worker_id
-    if hub_scope is not None:
-        _poll_headers[HUB_SCOPE_HEADER] = str(int(hub_scope))
-    if offline_ok:
-        _poll_headers[OFFLINE_CAP_HEADER] = OFFLINE_CAP_VALUE
-    status, body = _request(
-        base_url, token, "/jobs/next", timeout=timeout, headers=_poll_headers or None
-    )
-    if status != 200:
-        if log is not None:
-            now = time.time()
-            key = f"{base_url}:{status}"
-            if now - _POLL_WARN_AT.get(key, 0.0) > 60:
-                _POLL_WARN_AT[key] = now
-                hint = (
-                    "鉴权失败或该 IP 已被 hub 封禁——检查 --token 与 hub 日志 AUTH FAIL/BLOCKED"
-                    if status in (401, 403)
-                    else "hub 异常，请检查 hub 进程与隧道"
-                )
-                log(f"poll {base_url}: HTTP {status} — {hint}（这不是「队列空」）")
-        return None
-    data = json.loads(body.decode("utf-8"))
-    if not isinstance(data, dict):
-        return None
-    if data.get("job_id"):
-        return data  # 有任务：halt 标志随任务同行（达令+任务同批）
-    if data.get("halt") is True:
-        return {"halt": True}
-    return None
-
-
 # ---- 新调度面（2026-09-22，plan/transfer-scheduling）：peek / priority / claim ----
 
-def _sched_headers(
-    worker_id: str, *, offline_ok: bool = False, hub_scope: int | None = None
-) -> dict[str, str]:
-    """新面的公共头：worker 身份（必须） + 可选能力声明（离线课） + 服务 hub 数。
+def _sched_headers(worker_id: str, *, offline_ok: bool = False) -> dict[str, str]:
+    """新面的公共头：worker 身份（必须） + 可选能力声明（离线课）。
 
     身份必须自报：隧道回源把全流量归成 127.0.0.1，源 IP 分不出 worker；而 hub 的
-    `active_worker_count()`（避让链的唯一输入）就靠它计数。`hub_scope` 是竞速判定的
-    既有输入（`note_worker` 的第二个字段）——新面**照旧上报**它，否则竞速判定会在
-    换面的那一刻静默退化（登记表里 scope 恒缺 ⇒ 恒不广播），而那是 P3 才做的事。
+    `active_worker_count()`（避让链的唯一输入）就靠它计数——缺它避让链静默失效。
     """
     h: dict[str, str] = {}
     if worker_id:
         h[WORKER_ID_HEADER] = worker_id
     if offline_ok:
         h[OFFLINE_CAP_HEADER] = OFFLINE_CAP_VALUE
-    if hub_scope is not None:
-        h[HUB_SCOPE_HEADER] = str(int(hub_scope))
     return h
 
 
@@ -566,24 +496,23 @@ def peek_jobs(
     *,
     worker_id: str = "",
     offline_ok: bool = False,
-    hub_scope: int | None = None,
     n: int = 3,
     timeout: float = 30.0,
     log: Any = None,
 ) -> tuple[list[dict], bool] | None:
     """`GET /jobs/peek?n=K` → `([候选…], halt)`；hub 不可达/被拒 → None（已记日志）。
 
-    与旧 `poll_job` 的三点差别（都是设计意图，不是实现细节）：
+    与旧轮询面的三点差别（都是设计意图，不是实现细节）：
       ① **不认领**——返回的是候选，本地缓存它们（软持有/预取）不产生任何租约；
       ② 无副作用：hub 侧不动轮转游标（R2-C2），所以「先看一眼」不会移走别人的轮次；
-      ③ 停机达令同行（承接退役的 `/jobs/next`）。
+      ③ 停机达令同行（承接退役的旧轮询面）。
     """
     status, body = _request(
         base_url,
         token,
         f"/jobs/peek?n={max(1, int(n))}",
         timeout=timeout,
-        headers=_sched_headers(worker_id, offline_ok=offline_ok, hub_scope=hub_scope) or None,
+        headers=_sched_headers(worker_id, offline_ok=offline_ok) or None,
     )
     if status != 200:
         _warn_non_200(base_url, status, log)
@@ -608,7 +537,6 @@ def request_priority(
     token: str,
     *,
     worker_id: str = "",
-    hub_scope: int | None = None,
     held: list[str] | tuple[str, ...] = (),
     computing: str = "",
     ready_upload: str = "",
@@ -640,7 +568,7 @@ def request_priority(
             method="POST",
             headers={
                 "Content-Type": "application/json",
-                **_sched_headers(worker_id, hub_scope=hub_scope),
+                **_sched_headers(worker_id),
             },
         )
     except Exception as e:  # 不可达：按 highest 下垂（见 docstring）
@@ -701,6 +629,10 @@ def claim_job(
     except (ValueError, UnicodeDecodeError):
         return None
     return data if isinstance(data, dict) else None
+
+
+#: "base_url:status" -> 上次告警墙钟（节流：非 200 时每分钟最多一条，别刷屏）
+_POLL_WARN_AT: dict[str, float] = {}
 
 
 def _warn_non_200(base_url: str, status: int, log: Any) -> None:
@@ -854,7 +786,6 @@ def acquire_job(
     *,
     worker_id: str = "",
     offline_ok: bool = False,
-    hub_scope: int | None = None,
     depth: int = 3,
     on_drop: Any = None,
     log: Any = None,
@@ -864,7 +795,7 @@ def acquire_job(
     `on_drop(jid)`：`none` 级的通知面（P2 用它丢本地预取副本——「别人已落盘」的 job
     再预取就是白花带宽；回调抛错不影响选活）。
 
-    返回形状与旧 `poll_job` **逐字段兼容**（`{job_id, manifest, halt, lease_token, course}`
+    返回形状与旧轮询面 **逐字段兼容**（`{job_id, manifest, halt, lease_token, course}`
     或 `{"halt": True}` 或 None）——`worker_loop` 的下游（心跳/停机达令/run_job）零改动。
 
     选活规则：优先级降序，`none`（= 结果已落盘）**直接丢**（它同时是批量取消信号）；
@@ -877,7 +808,6 @@ def acquire_job(
         token,
         worker_id=worker_id,
         offline_ok=offline_ok,
-        hub_scope=hub_scope,
         n=depth,
         log=log,
     )
@@ -890,7 +820,6 @@ def acquire_job(
         base_url,
         token,
         worker_id=worker_id,
-        hub_scope=hub_scope,
         held=[c["job_id"] for c in cands],
         log=log,
     )
@@ -2813,7 +2742,7 @@ def run_job(
             # 因此默认开着补传：hub 中途失联也不至于「跑完一整段、控制面一无所知」。
             hub_url=base_url,
             hub_token=token,
-            # 补传的**归位键**：hub 在 `/jobs/next` 里告诉我们这份活属于哪门课（多课程
+            # 补传的**归位键**：hub 在轮询面里告诉我们这份活属于哪门课（多课程
             # hub 里没有它，每条补传都会被 400 「无法归属课程」拒掉——而 manifest 里的
             # `course_name` 是课程文件的 name 字段，与 hub 的课程键不是一回事）。
             hub_course=str(job.get("course") or ""),
@@ -2962,7 +2891,6 @@ def _prefetch_fill(
     *,
     worker_id: str = "",
     offline_ok: bool = False,
-    hub_scope: int | None = None,
     depth: int = PREFETCH_DEPTH_DEFAULT,
     skip: set[str] | None = None,
     log: Any = None,
@@ -2988,7 +2916,6 @@ def _prefetch_fill(
                 token,
                 worker_id=worker_id,
                 offline_ok=offline_ok,
-                hub_scope=hub_scope,
                 n=max(1, int(depth)),
                 log=None,  # 预取的 peek 不进 poll 告警节流表（同一 url 会互相压报）
             )
@@ -3099,16 +3026,13 @@ def worker_loop(
             _polls_since_log += 1
             _polls_since_accept += 1
             # 取活三件套（2026-09-22）：peek（候选，**不认领**）→ priority（job 边界
-            # 问询）→ claim（独占）。`/jobs/next` 已退役（R1-9：不兼容旧 worker 是用户
+            # 问询）→ claim（独占）。旧轮询面已退役（R1-9：不兼容旧 worker 是用户
             # 授权的**一次性**切换）——旧 worker 会拿到 404 而不是静默错跑。
             job = acquire_job(
                 base_url,
                 token,
                 worker_id=worker_id,
                 offline_ok=offline_ok,  # 能力自报：能自己跑完整段
-                # 竞速判定的既有输入（P3 删判定时与之一同移除）：新面照旧上报，
-                # 免得「换面」顺手把既有机群协同行为静默改掉。
-                hub_scope=len(hubs),
                 # P2：已被别人落盘的 job（none 级）就地丢掉本地预取副本——再预取就白花带宽。
                 on_drop=(pf_store.drop if pf_store is not None else None),
                 log=log,
@@ -3192,7 +3116,6 @@ def worker_loop(
                 kwargs={
                     "worker_id": worker_id,
                     "offline_ok": offline_ok,
-                    "hub_scope": len(hubs),
                     "depth": prefetch_depth,
                     "skip": {jid},
                     "log": log,

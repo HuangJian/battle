@@ -1,13 +1,14 @@
 """test_priority_schedule.py — 传输∥PPO 的优先级调度面（plan/transfer-scheduling，2026-09-22）。
 
-本文件是**新调度面**的门禁（`/jobs/next` 竞速判定那条腿的老用例仍在
-`test_race_broadcast.py`，两者并存过渡期；P3 删竞速时后者整文件消失、由本文件承接）：
+本文件是**新调度面**的门禁（承接过 `test_race_broadcast.py`——P3 已把竞速**判定**
+整体删除；「删的是判定不是机制」的边界见 `test_jobs_next_retired.py` /
+`test_scope_unrelated_race.py`）：
 
   * §1.4 优先级表 = 纯函数五分支（`protocol.job_priority`），**时基只认 `computing_at`**
     ——「claim 之后下载了 5 分钟」不算掉队（R2-C1：拿 claim 起算会把慢链路误判成慢计算，
     于是多开备份把本来就慢的链路压得更死）。
   * `GET /jobs/peek`：**不认领**（无租约、无副作用、不动游标、不改可领取池）R1-4；
-    halt 达令同行（承接退役的 `/jobs/next`）；离线课的能力闸照旧。
+    halt 达令同行（承接退役的轮询面）；离线课的能力闸照旧。
   * `claim(mode="backup")`（R1-1 + R2-3）：无租约、**不动原持有者的租约**、
     授权「你的回传不吃 403」、不产 reclaim / 不进 stale 名单。
   * `abandon`（R1-3）：租约即释 + 零 reclaim（否则 TTL 过期 ⇒ 三度冻结成毒包）。
@@ -327,9 +328,9 @@ def test_peek_is_side_effect_free(tmp_path: Path) -> None:
 
 
 def test_peek_registers_worker_for_avoidance_chain(tmp_path: Path) -> None:
-    """R2-2：`active_worker_count()`（避让链唯一输入）必须仍被喂——登记点从
-    `/jobs/next` 搬到 peek/priority。漏了它 = 2026-09-18 的「超时回落队首改为推送
-    其它 worker」静默消失，而纯函数单测测不出「调用点为 0」。"""
+    """R2-2：`active_worker_count()`（避让链唯一输入）必须仍被喂——登记点在 peek/priority。
+    漏了它 = 2026-09-18 的「超时回落队首改为推送其它 worker」静默消失，而纯函数单测
+    测不出「调用点为 0」。"""
     _publish_online_course(tmp_path)
     with _hub(tmp_path) as (base, hub):
         assert hub.active_worker_count() == 0
@@ -341,7 +342,7 @@ def test_peek_registers_worker_for_avoidance_chain(tmp_path: Path) -> None:
 
 
 def test_peek_carries_halt_and_offline_gate(tmp_path: Path) -> None:
-    """halt 达令同行（承接退役的 `/jobs/next`）；离线课仍只对带标 worker 可见。"""
+    """halt 达令同行（承接退役的轮询面）；离线课仍只对带标 worker 可见。"""
     _publish_online_course(tmp_path)
     with _hub(tmp_path) as (base, hub):
         assert hub.set_mode("c5-gae", COURSE_MODE_OFFLINE) is True
@@ -652,3 +653,35 @@ def test_run_job_wires_cancel_callback_into_ppo() -> None:
     assert "raise JobCancelledError(" in src
     assert "except JobCancelledError:\n        # 取消是**正常结局**" in src
     assert JOB_CANCEL_POLL_SEC <= 2.0
+
+
+def test_race_judgment_has_no_production_path() -> None:
+    """R1-9：竞速**判定**（race_decision / race_mode / race_active / hub_scope / --race）
+    在生产代码里零命中——删的是判定，不是备份机制（`claim(mode="backup")` 仍在，
+    见上面的 backup 用例）。
+
+    为什么这条要在这里：把「竞速判定」与「备份副本」混为一谈是后人最容易犯的错——
+    前者是**无排序的重复烧卡**（§343 的历史），后者是**显式授权的掉队救援**。判定被
+    悄悄加回来，会让 `highest` 唯一性闸与 1 主 + N 备份的上限同时失效。
+    """
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    banned = (
+        "RACE_MODE_", "race_decision(", "race_activated", "race_mode", "race_active(",
+        "HUB_SCOPE", "parse_hub_scope", "set_race_mode", "race_state(",
+    )
+    hits: list[str] = []
+    for sub in ("remote", "rl"):
+        for f in (root / sub).rglob("*.py"):
+            text = f.read_text(encoding="utf-8")
+            for b in banned:
+                if b in text:
+                    hits.append(f"{f.relative_to(root)}: {b}")
+    for f in (root / "run_rl.py", root / "dist_common.py"):
+        text = f.read_text(encoding="utf-8")
+        for b in banned:
+            if b in text:
+                hits.append(f"{f.relative_to(root)}: {b}")
+    assert hits == [], f"竞速判定仍在生产代码里：{hits}"

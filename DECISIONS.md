@@ -5792,3 +5792,50 @@ sha 校验，重下即可）。把两者合成一条「可中断的队列」是�
 **未随本批落地（明确入口）**：P0.5 的**实机数字**（需真机会话）与 **P3 竞速退役**（`/jobs/next` /
 race 判定 / `poll_job` / `--race` / `/admin/race` + 控制台同批改造 + push 腿 R1-7）。P3 落地时按
 plan §8【R2-10c】写 supersede §2026-09-17，并**保留** `claim(mode="backup")` 机制（删判定不删机制）。
+
+---
+
+## §2026-09-22-goalnn-race-retired-priority-only（2026-09-22，落地 `plan/transfer-scheduling.plan.md` P3：
+竞速广播**判定**退役，取活只剩「peek → priority → claim」一条路；push 腿同表 + 备份副本）
+
+**supersede §2026-09-17-goalnn-race-broadcast**（以及它在 `dashboard/src/**` 的落地物）。该条目的
+**机制**被本条目取代：不再有「最新 job 广播给每个 worker、先回先胜」的判定，也不再需要
+`race_decision` / `race_mode` / `--race` / `/admin/race` / `hub_scope`。**保留**的是它当年解决掉的
+真实问题（多 worker 无排序地抢同一批 job）的替代解，以及两样与判定无关的机制：
+
+- **`claim(mode="backup")` 机制保留**（R1-1）——删的是**判定**，不是**机制**。备份副本仍无租约、
+  不进 `_stale_holders`、不产 `_reclaims`、回传经 `_backup_authorized` 放行（403 单列丢弃）。
+- **worker 登记表保留**（R2-2）——`WORKER_SEEN_WINDOW_SEC`（原 `RACE_WORKER_WINDOW_SEC`）窗口与
+  `note_worker` 仍在，只是换源到新面（peek/priority）；避让链 `active_worker_count()` →
+  `may_avoid_stale_holder()` 是 2026-09-18 用户口径的唯一实现，**输入不能断**（有端到端用例，
+  因为纯函数用例测不出「调用点为 0」）。
+
+**为什么必须 supersede 而不是并存**：竞速判定与「highest 唯一性闸 + 1 主 + N 备份上限」是
+**互斥**的两套语义——前者靠「无排序地重复烧卡」换延迟，后者靠「有排序地授权重复」换延迟。
+并存时两张调度器会同时生效：`highest` 的 epoch 闸会被判成「别处在做 ⇒ 全体 highest ⇒ 多卡同抢」，
+1 主 + N 备份的上限也随之失效。所以这是一次**协议面一次性切换**（R1-9）：不给旧 worker 兼容层，
+`/jobs/next` 已删 ⇒ 旧 worker 拿到 404，**响亮**而不是静默错跑。回退粒度 = 按 PR revert；
+**revert 时必须保留 `mode="backup"`**，否则等于连备份能力一起回退。
+
+**落地物**：`remote/protocol.py`（删 `RACE_MODE_*` / `race_decision` / `parse_hub_scope` /
+`HUB_SCOPE_HEADER`；`RACE_WORKER_WINDOW_SEC` → `WORKER_SEEN_WINDOW_SEC`）· `remote/hub_server.py`
+（删 `race_mode/race_active/set_race_mode/race_state/clear_workers`、`/admin/race`、`--race`、
+`/jobs/next` 与 `claim_next`/`claim(race=)` 的 race 分支）· `remote/worker.py`（`poll_job` 整函数删除，
+取活只剩 `acquire_job`）· `remote/push_dispatch.py`（同一张优先级表 + 1 主 + N 备份 +
+`hub.start_job` 打 `computing_at` + `_cancel_others` landed 取消帧）· `dashboard/src/**`（去
+`--race` / `RaceMode` / `raceActive`；注释里也不留退役面名）· `tests/helpers/hub_poll.py`（新面拼回
+旧同形，10 个登录点机械替换）· `tests/helpers/push_worker.py` + `tests/conftest.py`（共享假 worker：
+跨测试文件 import 夹具会撞 ruff `F811`）。
+
+**回归（常驻闸）**：`tests/test_priority_schedule.py::test_race_judgment_has_no_production_path`
+（判定零命中）· `tests/test_jobs_next_retired.py`（真 HTTP 404 + 生产零命中）·
+`tests/test_scope_unrelated_race.py`（R1-10 负向：eval 侧长尾竞速**没有**被误删）·
+`tests/test_push_priority_dispatch.py`（6）· `tests/test_pause_budget.py`（4）。
+
+**违反后果**
+
+- 把 `/jobs/next` 或 `race_decision` 当「兼容别名」加回来 ⇒ 两张调度器同时生效，highest 唯一性
+  与备份上限一起失效（现象：同 job 被多台机重复烧，日志上像「队列异常」）。
+- 顺手删备份副本（把它当竞速遗留）⇒ 掉队救援整条消失，重新掉进「多 worker 无排序硬抢」。
+- 删 `HUB_SCOPE_HEADER` 时连**登记表**一起删 ⇒ 避让链输入恒 0，静默失效（独苗也不肯自领或
+  反复避让同一台死机）——这正是 R2-2 那条端到端用例存在的理由。

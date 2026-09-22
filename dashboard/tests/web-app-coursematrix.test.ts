@@ -50,7 +50,6 @@ function ovView(
   return {
     hubUrl: 'http://127.0.0.1:18787',
     hubOnline: true,
-    raceActive: false,
     activeCourses: 2,
     activeWorkers: 3,
     halt: false,
@@ -342,20 +341,19 @@ describe('课程矩阵：表头两半的机群级读数与空态', () => {
     expect(html).toContain('local_ppo 1/1')
   })
 
-  it('竞速 / 停机徽标只在置位时出现', async () => {
+  it('停机徽标只在置位时出现', async () => {
     const off = await render()
     expect(off).not.toContain('tc-mx__chip--warn')
     const on = await render({
       overview: defaultOverview(),
       loopQueue: null,
     })
-    const raced = await render({
-      overview: ovView(defaultOverview().rows, { raceActive: true, halt: true }),
+    const halted = await render({
+      overview: ovView(defaultOverview().rows, { halt: true }),
       loopQueue: null,
     })
-    expect(on).not.toContain('竞速')
-    expect(raced).toContain('竞速')
-    expect(raced).toContain('停机中')
+    expect(on).not.toContain('停机中')
+    expect(halted).toContain('停机中')
   })
 
   it('排队等资源：表头点名被池挡住的课 + 页脚说明容量 1 的语义', async () => {

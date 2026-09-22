@@ -102,7 +102,7 @@ describe('① 槽位唯一：共享组件的账本槽恒为空串', () => {
     // trainer 也是共享的（2026-09-19 / R3-5）：一个进程服务所有课程，BC 与 RL 共用这个角色键
     expect(isSharedComponent('trainingLoop')).toBe(true)
     // 本机 worker 同理（2026-09-19）：「它和云端 worker 一样，只与 hub 通信，领到任务后直接
-    // 执行」——`/jobs/next` 不看课程，故「这门课的 worker」从来不是个概念
+    // 执行」——hub 的取活面不看课程，故「这门课的 worker」从来不是个概念
     expect(isSharedComponent('localWorker')).toBe(true)
     for (const c of ['course-a', 'course-b', '']) {
       expect(scopeOf('hubServer', c)).toBe('')

@@ -7,7 +7,7 @@
  *
  *  ★ 2026-09-19：**一个进程服务所有课程**（用户口径：「localWorker 也不应绑定课程，它和云端
  *  worker 一样，只与 hub 通信（pull/push），领到任务后直接执行，完成后回传结果」）。
- *  `/jobs/next` 从来不看课程——job 由 hub 按队列分发、manifest 自带课程快照、结果按 job_id
+ *  hub 的取活面从来不看课程——job 由 hub 按队列分发、manifest 自带课程快照、结果按 job_id
  *  回家。故本层不再接受 course 作为编排输入，与 trainer（R3-5）同一形状：共享槽 + 换代接管。
  */
 

@@ -15,7 +15,7 @@
   · **P2 bulk 低优** —— 预取下载（软持有）。避让 P0/P1；**可立即打断**（丢半截，稍后重下；
     payload 幂等 + `payload_sha256` 校验）。
 
-让路预算（硬约束，写死并有用例钉住）：单次让路总预算 ≤ `BULK_YIELD_BUDGET_SEC = 5s`，
+让路预算（硬约束，写死并有用例钉住）：单次让路总预算 ≤ `PAUSE_BUDGET_SEC = 5s`，
 上界取两侧较小者 —— worker 侧 `BODY_IDLE_TIMEOUT_SEC = 45s`（`_read_body` 的空闲超时：停久了
 会被判「body 停滞」而重试）与 hub 侧 `SEND_TIMEOUT_SEC = 60s`（分片写超时）。**两个都要看**，
 只看 45s 是最容易犯的错。
@@ -38,7 +38,7 @@ BULK_P1_CRITICAL = "P1"
 BULK_P2_PREFETCH = "P2"
 
 #: 单次让路的总预算（秒）——见模块 docstring 的上界推导（45s / 60s 取小）。
-BULK_YIELD_BUDGET_SEC = 5.0
+PAUSE_BUDGET_SEC = 5.0
 #: 让路的单步暂停（秒）：每步复查「控制面是否还需要带宽」，避免一口气停满预算。
 BULK_YIELD_STEP_SEC = 0.5
 #: 槽位等待的轮询步长（秒）：`Event.wait` 兜底用（真释放会立刻唤醒）。
@@ -69,7 +69,7 @@ class BulkScheduler:
         clock: Any = time.time,
         log: Any = None,
         wait_step_sec: float = BULK_WAIT_STEP_SEC,
-        yield_budget_sec: float = BULK_YIELD_BUDGET_SEC,
+        yield_budget_sec: float = PAUSE_BUDGET_SEC,
         yield_step_sec: float = BULK_YIELD_STEP_SEC,
     ) -> None:
         self._clock = clock
@@ -207,7 +207,7 @@ class BulkScheduler:
     def pause_if_needed(self, token: int) -> float:
         """bulk 分片间隙的让路点：控制面在途时暂停（预算内、逐步复查）。
 
-        返回本次实际暂停秒数（0.0 = 没有让路）。预算 = `BULK_YIELD_BUDGET_SEC`（单次动作），
+        返回本次实际暂停秒数（0.0 = 没有让路）。预算 = `PAUSE_BUDGET_SEC`（单次动作），
         写死且有用例钉住 —— 停久了会被 worker 自己的 `BODY_IDLE_TIMEOUT_SEC=45s` 判成
         「body 停滞」而整份重试，也会撞上 hub 的 `SEND_TIMEOUT_SEC=60s`。
         """

@@ -175,8 +175,6 @@ class _Hub:
                 str(push_config),
                 "--push-poll-sec",
                 "0.05",
-                "--race",
-                "off",  # 竞速广播会把同一份活推给两台——本用例要的是 1:1 派发
                 *(extra or []),
             ]
 

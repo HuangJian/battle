@@ -72,6 +72,7 @@ from remote.protocol import (
     job_id as make_job_id,
 )
 from rl.reward_library import METRICS_DIM  # numpy-only 模块，守免 torch 原则
+from tests.helpers.hub_poll import hub_poll
 
 REPO = ROOT.parent  # git 根（hub_client.REPO_ROOT 与 git_head 用）
 
@@ -729,6 +730,17 @@ def _http(
             return e.code, {}
 
 
+def _next(base: str, *, worker_id: str = "", offline_ok: bool = False) -> dict:
+    """旧轮询面的同形替代（peek + claim；实现见 `tests/helpers/hub_poll`）。
+
+    返回 `{job_id, manifest, halt, lease_token, course}`；无活 ⇒ `{"job_id": None, ...}`。
+    """
+    got = hub_poll(base, "sekret", worker_id=worker_id, offline_ok=offline_ok)
+    if got is None or not got.get("job_id"):
+        return {"job_id": None, "halt": bool(got and got.get("halt"))}
+    return got
+
+
 def _http_raw(base_url: str, token: str, path: str) -> tuple[int, bytes]:
     """payload 下载等二进制端点（响应体非 JSON）。"""
     import urllib.error
@@ -802,22 +814,22 @@ def test_hub_workers_halt_flow(tmp_path: Path) -> None:
         # 停机、无任务 → 达令仍送达（空闲 worker 也能感知停机）
         st, body = _http(base, "sekret", "/admin/workers/halt")
         assert st == 200 and body == {"halt": True}
-        st, body = _http(base, "sekret", "/jobs/next")
-        assert st == 200 and body == {"job_id": None, "halt": True}
+        body = _next(base)
+        assert body == {"job_id": None, "halt": True}
 
         # 停机状态下发布任务 → 任务与停机达令同批下发（云机先试停机、停不掉照常干活）
         manifest = normalize_manifest(_mini_manifest())
         jid = manifest["job_id"]
         store.publish(jid, manifest, b"PK\x03\x04fake")
-        st, body = _http(base, "sekret", "/jobs/next")
-        assert st == 200 and body["job_id"] == jid and body["halt"] is True
+        body = _next(base)
+        assert body["job_id"] == jid and body["halt"] is True
         assert body.get("lease_token"), "独占发放必须下发 lease_token（P3b）"
 
         # resume → halt 复位；已领走的任务不重发（P3b 独占：租约期内 job_id None）
         st, body = _http(base, "sekret", "/admin/workers/resume")
         assert st == 200 and body == {"halt": False}
-        st, body = _http(base, "sekret", "/jobs/next")
-        assert st == 200 and body["job_id"] is None and body["halt"] is False
+        body = _next(base)
+        assert body["job_id"] is None and body["halt"] is False
     finally:
         srv.shutdown()
         th.join()
@@ -980,8 +992,8 @@ def test_hub_wire_stats_recorded(tmp_path: Path) -> None:
         jid = manifest["job_id"]
         payload = b"PK\x03\x04" + b"x" * 123
         store.publish(jid, manifest, payload)
-        st, body = _http(base, "sekret", "/jobs/next")
-        assert st == 200 and body["job_id"] == jid
+        body = _next(base)
+        assert body["job_id"] == jid
         lease_token = body["lease_token"]
         st, got = _http_raw(base, "sekret", f"/jobs/{jid}/payload")
         assert st == 200 and got == payload
@@ -1221,7 +1233,7 @@ def test_hub_server_auth_and_job_lifecycle(tmp_path: Path) -> None:
         # 未带 token → 401
         import urllib.request
 
-        req = urllib.request.Request(base + "/jobs/next")
+        req = urllib.request.Request(base + "/jobs/peek")
         try:
             urllib.request.urlopen(req, timeout=5)
             raise AssertionError("无 token 应当 401")
@@ -1240,16 +1252,16 @@ def test_hub_server_auth_and_job_lifecycle(tmp_path: Path) -> None:
         store.publish(jid, manifest, b"PK\x03\x04fake")
 
         # P3b 独占加超时（supersede §343）：首个 open job 领取即设租约 + 下发 lease_token
-        st, body = _http(base, "sekret", "/jobs/next")
-        assert st == 200 and body["job_id"] == jid
+        body = _next(base)
+        assert body["job_id"] == jid
         assert body["manifest"]["data_fp"] == manifest["data_fp"]
         lease_token = body.get("lease_token")
         assert lease_token, "P3b 独占发放必须下发 lease_token"
         st2, payload_bytes = _http_raw(base, "sekret", f"/jobs/{jid}/payload")
         assert st2 == 200 and payload_bytes == b"PK\x03\x04fake"
         # 租约期内再次轮询 → 不再重发（独占，非竞速广播）
-        st3, body3 = _http(base, "sekret", "/jobs/next")
-        assert st3 == 200 and body3["job_id"] is None, "P3b 独占：租约期内不重发同一 job"
+        body3 = _next(base)
+        assert body3["job_id"] is None, "P3b 独占：租约期内不重发同一 job"
 
         # 结果 POST（带 lease_token + 正确 commit_echo）→ status done → 取回
         result = {
@@ -1403,13 +1415,13 @@ def test_hub_server_result_excludes_from_pool(tmp_path: Path) -> None:
         jid = manifest["job_id"]
         store.publish(jid, manifest, b"PK\x03\x04fake")
         # worker A 领取 → 设独占租约
-        st, body = _http(base, "sekret", "/jobs/next")
+        body = _next(base)
         assert body["job_id"] == jid
         lease_token = body.get("lease_token")
         assert lease_token, "独占发放必须下发 lease_token"
         # worker B 立即轮询 → 租约期内不重发（P3b 独占，非 §343 广播竞速）
-        st2, body2 = _http(base, "sekret", "/jobs/next")
-        assert st2 == 200 and body2["job_id"] is None, "P3b 独占：租约期内不重发同一 job"
+        body2 = _next(base)
+        assert body2["job_id"] is None, "P3b 独占：租约期内不重发同一 job"
         # A 回传结果 → 结果落盘 → job 从池中剔除
         result = {
             "job_id": jid,
@@ -1428,8 +1440,8 @@ def test_hub_server_result_excludes_from_pool(tmp_path: Path) -> None:
             extra_headers={"X-Lease-Token": lease_token},
         )
         assert st3 in (200, 201)
-        st4, body4 = _http(base, "sekret", "/jobs/next")
-        assert st4 == 200 and body4["job_id"] is None, "结果已落盘：不再派发"
+        body4 = _next(base)
+        assert body4["job_id"] is None, "结果已落盘：不再派发"
     finally:
         srv.shutdown()
         th.join(timeout=5)
