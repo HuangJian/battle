@@ -51,6 +51,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 
@@ -399,3 +400,144 @@ def wave_pairs(
         n = int(games_by_stage[stage])
         pairs.extend((stage, sd) for sd in wave_seeds(rotate_seed, it, stage, wave_idx, n))
     return pairs
+
+
+# ────────────────────────── 计划里的动态采集块（离线腿，2026-09-22）──────────────
+#
+# 问题：`target_transitions` 的**采集量**按计划反解（per_stage = ceil(target/关数)，
+# 初波 G0 = ceil(per_stage/est)），本地集群靠 `_volume_topup` 逐关补波逼近达标线。
+# 而全离线/半离线腿（kind=run）的语料来自 `rl/plan.pairs_for` → 老的 `build_pairs`
+# **完全不认 target_transitions**（只认 seeds_per_stage / seed_rotate）⇒ 云机采多少局
+# 是「课程里那个 seed_rotate 数字」决定的，与本地集群的采集量无关：轮转数配小了
+# （seed_rotate < G0）就**少采**，而云机没有补波机制（一轮一个 job，PPO 在 job 里跑完），
+# 少采的部分直接变成「这一轮训练的样本少于目标」——静默的配额缺口。
+#
+# 修法：把「初波对集」这个构造抽成**两侧共用的纯函数**（`initial_wave_pairs`），计划带上
+# 反解所需的全部数字（`volume_block`），节点用同一份代码重放 ⇒ 云机的每轮语料与本地
+# 集群的**初波**逐位相同（同 tag 0 种子流、同 G0），训练侧再用既有的 per_stage_quota
+# 截到与本地完全相同的样本量。
+#
+# ⚠ 残留（计划自带、节点无 hub 可查，所以只能这样）：云机**只跑初波**，补波是本地集群
+#   才有的机制。est 偏小（少采）时本地会补到达标，云机会短一点点；计划因此把 est **钉死**
+#   在导出那一刻的估计值上（见 `loop_steps._volume_plan_block`），而不是让节点现算。
+
+#: `plan["volume"]` 的字段集（hub 组装 / 节点重放共用的形状；少一个字段就拒收）。
+VOLUME_BLOCK_FIELDS: tuple[str, ...] = (
+    "target_transitions",
+    "est_samples_per_game",
+    "stages",
+    "games_per_stage",
+    "per_stage_quota",
+)
+
+
+def volume_block(args: Any, *, est_samples_per_game: int = 0) -> dict | None:
+    """args → 计划里的动态采集块；**None = 未开动态采集**（老口径 `build_pairs`）。
+
+    `target_transitions ≤ 0` ⇒ None（老课程一个函数都不调，逐字节不变）。开了就必须
+    齐全：缺显式 `--stages`（分关配额的分母）或 est ≤ 0 一律**响亮报错**——静默降级成
+    老口径会让云机的采集量与目标脱钩，正是这个块存在要防的事。
+
+    `est_samples_per_game` 由调用方给（hub 侧给的是**当前** trailing 估计，回退课程声明值）
+    ——与 `rl/loop_core._volume_est_samples` 同口径，两侧反解出同一个 G0。
+    """
+    target = int(getattr(args, "target_transitions", 0) or 0)
+    if target <= 0:
+        return None
+    raw = str(getattr(args, "stages", "") or "").strip()
+    if not raw:
+        raise ValueError(
+            "动态采集（target_transitions > 0）需要显式 --stages 才能分关配额"
+            "（缺它就只能静默按固定关集猜，采集量必然与目标不符）"
+        )
+    stages = parse_stages_arg(raw)
+    est = int(est_samples_per_game or getattr(args, "est_samples_per_game", 0) or 0)
+    if est <= 0:
+        raise ValueError(
+            "动态采集需要 est_samples_per_game（samples/局，≥1）才能反解局数"
+            "——课程声明里没有它就请显式给"
+        )
+    return {
+        "target_transitions": target,
+        "est_samples_per_game": est,
+        "stages": [int(s) for s in stages],
+        "games_per_stage": int(initial_games(target, len(stages), est)),
+        "per_stage_quota": int(target_per_stage(target, len(stages))),
+    }
+
+
+def validate_volume_block(block: object) -> dict:
+    """计划里的 `volume` 块形状校验（畸形 ⇒ ValueError；`rl/plan.validate_plan` 转协议错）。"""
+    if not isinstance(block, dict):
+        raise ValueError(f"volume 必须是对象，收到 {type(block).__name__}")
+    missing = [k for k in VOLUME_BLOCK_FIELDS if k not in block]
+    if missing:
+        raise ValueError(f"volume 缺字段: {missing}")
+    for k in ("target_transitions", "est_samples_per_game", "games_per_stage", "per_stage_quota"):
+        v = block[k]
+        if isinstance(v, bool) or not isinstance(v, int):
+            raise ValueError(f"volume.{k} 必须是整数，收到 {v!r}")
+        if v <= 0:
+            raise ValueError(f"volume.{k} 必须 ≥ 1，收到 {v!r}")
+    stages_raw = block["stages"]
+    if not isinstance(stages_raw, list) or not stages_raw:
+        raise ValueError(f"volume.stages 必须是非空数组，收到 {stages_raw!r}")
+    stages: list[int] = []
+    for s in stages_raw:
+        if isinstance(s, bool) or not isinstance(s, int):
+            raise ValueError(f"volume.stages 必须是整数数组，收到 {s!r}")
+        stages.append(int(s))
+    want_quota = target_per_stage(int(block["target_transitions"]), len(stages))
+    if want_quota != int(block["per_stage_quota"]):
+        raise ValueError(
+            f"volume.per_stage_quota={block['per_stage_quota']} 与"
+            f"ceil(target/关数)={want_quota} 不符（分关达标线两侧必须同源）"
+        )
+    want_g0 = initial_games(
+        int(block["target_transitions"]), len(stages), int(block["est_samples_per_game"])
+    )
+    if want_g0 != int(block["games_per_stage"]):
+        raise ValueError(
+            f"volume.games_per_stage={block['games_per_stage']} 与"
+            f"ceil(达标线/est)={want_g0} 不符（局数反解两侧必须同源）"
+        )
+    out = dict(block)
+    out["stages"] = stages
+    return out
+
+
+def initial_wave_pairs(
+    rotate_seed: int, it: int, *, stages: Sequence[int], games_per_stage: int
+) -> list[tuple[int, int]]:
+    """本轮的**初波前缀**对集：每关 `games_per_stage`（G0）局，按 stage 升序。
+
+    本地集群的预排表（`TrainingLoop._iteration_pairs` 的 volume 分支）与节点重放
+    （`rl/plan.pairs_for`）**共用本函数**——同一 (rotate_seed, it, 关, G0) ⇒ 同一批种子，
+    这是「云机的语料与本地集群 rollout 一致」的实现基础。
+
+    ★ 为什么它就是「本地集群实际采的前 G0 局」（2026-09-22 核过）：本轮本地走的是
+    **连续配额**（`rl/volume_quota`，VOLUME_RULE_V2），它的种子流键是
+    `[rotate_seed, 0x5EED, it, stage, 0]`，而本函数的 wave 0 流键是
+    `[rotate_seed, 0x5EED, it, stage, 0]` —— **同一个键**（见 `wave_seed_stream`：
+    `wave_idx <= 0` 取 tag 0x5EED，第 5 键就是 wave_idx 本身⇒ 0）。所以本函数输出的
+    正是各关连续流上 **第 0..G0 个** seed ⇒ 云机采的就是本地集群同一轮的前缀批
+    （`tests/test_volume_plan_block.py::test_initial_pairs_are_continuous_prefix` 钉住）。
+    """
+    return wave_pairs(
+        int(rotate_seed),
+        int(it),
+        {int(s): int(games_per_stage) for s in stages},
+        0,
+    )
+
+
+def volume_pairs_from_args(
+    args: Any, it: int, rotate_seed: int, *, est_samples_per_game: int = 0
+) -> list[tuple[int, int]] | None:
+    """args → 本轮初波对集（`None` = 未开动态采集）；计划发布期自检用它对照重放结果。"""
+    block = volume_block(args, est_samples_per_game=est_samples_per_game)
+    if block is None:
+        return None
+    return initial_wave_pairs(
+        rotate_seed, it, stages=block["stages"], games_per_stage=block["games_per_stage"]
+    )

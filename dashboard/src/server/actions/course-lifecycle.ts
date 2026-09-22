@@ -370,6 +370,10 @@ export async function openCourse(course: string, opts: OpenCourseOpts = {}): Pro
     // 这份 zip，Kaggle/Colab 离线 worker 探到 hub 即可拉取（离线课状态列据此显示）。
     // BCITY_NO_AUTO_TASK_BUNDLE：测试逃生阀（课程生命周期用例不开真导出子进程）；
     // 导出本身的正确性由 server-api-task-bundle 套件覆盖。
+    // ★ 离线开课（含「停课 → 重新开课」这种重启）= **重新打一份带当前代码的包**：
+    //   `launchTaskBundleExport` 会先把旧包作废（挪进 `tmp/<课>/stale-packs/`）再起导出，
+    //   否则代码变过之后云机在导出窗口里探到的仍是旧代码的包，而它会拿旧代码跑完整段。
+    //   作废后 hub 的 `/offline/task-pack` 404，云机的等包循环会一直等到新包写好。
     const autoExport =
       trainMode === 'offline' && !process.env.BCITY_NO_AUTO_TASK_BUNDLE
         ? launchTaskBundleExport(c)
@@ -385,8 +389,19 @@ export async function openCourse(course: string, opts: OpenCourseOpts = {}): Pro
         hubNote,
         ...(autoExport
           ? autoExport.ok
-            ? [`任务包自动导出：${autoExport.message}`]
+            ? [
+                `任务包自动导出：${autoExport.message}`,
+                ...(autoExport.invalidated
+                  ? [
+                      '★ 旧任务包已作废（代码可能已变）→ 已归档到 tmp/<课>/stale-packs/；' +
+                        '导出完成前云机取不到包（/offline/task-pack 404），它会等新包——这是预期行为，不是故障',
+                    ]
+                  : []),
+              ]
             : [`任务包自动导出未能启动（${autoExport.message}）——可稍后在课程行手动「导出任务包」`]
+          : []),
+        ...(trainMode === 'offline'
+          ? ['离线课重启 = 重新导出任务包（代码可能已变）：停课后重新开课即重打一份带当前代码的包']
           : []),
         // 机器侧旋钮在**开课时**施加（python `apply_course_machine_overrides`）：已经开着的课
         // 要等它重开才换旋钮——暂停该课 → 重启共享 trainer（或等引擎驱逐重开）。

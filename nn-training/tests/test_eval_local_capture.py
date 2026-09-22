@@ -47,7 +47,8 @@ def test_capture_helper_is_what_the_runner_uses() -> None:
     src = (Path(__file__).resolve().parent.parent / "rl" / "eval_local.py").read_text(
         encoding="utf-8"
     )
-    assert "proc = run_eval_runner_capture(cmd, timeout_sec)" in src
+    # 允许带 cwd（云机离线评估要跑在 TS 树根上，见 `run_local_eval_game` 的 cwd 形参）
+    assert "proc = run_eval_runner_capture(cmd, timeout_sec" in src
     # 不许再有裸的 text=True 捕获（那正是缺陷形态）
     assert "capture_output=True,\n        text=True,\n        timeout=timeout_sec" not in src
 

@@ -15,10 +15,13 @@ rl/queue.py 各自维护了一份逐字节相同的 `_POPEN_NO_WINDOW`（Windows
     （门禁抖动归因用，见 docstring）。
   force_utf8_stdio() —— CLI 入口调用：把本进程 stdout/stderr 运行时钉成 UTF-8
     （压过 PYTHONIOENCODING / PYTHONUTF8 / 控制台代码页；详见 docstring）。
+  cpu_worker_slots(cores=None) —— 本机 CPU 并行槽的**唯一口径**（见 docstring）：
+    rollout 与 eval 都用它，谁都不为对方预留核数。
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -111,6 +114,30 @@ def sandbox_delete_blocked(anchor: Any) -> bool:
     except Exception:
         return False
     return False
+
+
+#: CPU 并行槽的预留核数（给补传/日志/守护线程这类零碎常驻任务）。
+#: 大机器上真正生效的是下面 20% 那一支——留 4 核就够这些线程跑。
+CPU_RESERVE = 4
+
+
+def cpu_worker_slots(cores: int | None = None) -> int:
+    """本机该开几个 CPU 并行槽：``max(cores − 4, floor(cores × 0.8))``（至少 1）。
+
+    **唯一口径**（用户 2026-09-22）：「rollout 和 eval 是交替进行的，所以不应该为 eval 保留
+    CPU 核数——两者都使用 max(cores − 4, cores × 0.8)，只要留两三个核给数据回传任务就够」。
+
+    为什么不再「按对方留位」：云机离线段里 rollout 与 eval（以及 PPO）**是交替的**，
+    给 eval 扣掉 rollout 的并行度等于两次扣同一份钱——两边都按本函数满配，谁在跑谁就用满，
+    交错处自然错开。真正需要一直活着的只有补传线程/日志/守护，两三个核（大机器上 20% 的
+    那一支还会多留一些）绰绰有余。
+
+    参照：96 vCPU 的 Kaggle TPU 会话 ⇒ 92（旧口径：先扣 rollout 再卡 64 = 白扔三成）；
+    16 核 ⇒ 12（留 4）；8 核 ⇒ 6（留 2）。显式传 ``--eval-slots`` / ``--rollout-workers``
+    仍然完全照用户给的数走（本函数只管缺省）。
+    """
+    n = max(1, int(cores if cores is not None else (os.cpu_count() or 1)))
+    return max(1, min(n, max(n - CPU_RESERVE, int(n * 0.8))))
 
 
 def popen_kwargs(**extra: Any) -> dict[str, Any]:

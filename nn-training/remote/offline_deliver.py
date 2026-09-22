@@ -16,6 +16,15 @@
   3. **幂等且首写锁定**：hub 侧按 `(run_id, it)` 落盘，重复投递返回 duplicate；同一轮
      的权重是**不可变**的（同一 it 重算会得到不同权重——那是另一条腿，不是覆盖）。
 
+**后台并行**（`background=True`，2026-09-22 用户指令）：补传必须与 PPO **并行**，而旧实现是
+在 `_checkpoint()` 里**内联同步**跑的（`sync()` 最多 4 趟 POST、每趟 ~1.9MB/60s 超时）——
+那等于每轮拿网络往返给下一轮 PPO 收税，而且这段等待与训练**没有任何数据依赖**。现在：
+训练线程只 `submit_round()` **入队**（非阻塞），一个 daemon 线程独自拥有全部补传状态
+（`_delivered` / `delivered.json` / `_reachable`）并慢慢推；段末 `close(timeout)` 做**有界**
+flush（默认 `DRAIN_FLUSH_SEC`，超时就放手——产物已在本地，不值得为一个旧会话挂死进程）。
+单写者因此是**构造性质**：除 `submit_*`/`close`（只碰 Condition 与标志位）外，所有状态
+读写都发生在那个线程里。
+
 **几个刻意的判定**（都有代价，写在这里免得后来者「顺手改回去」）：
 
   * *探活走带 token 的 `GET /ping`，不新增无鉴权 `/health`*：探针要回答的是「**我能不能
@@ -35,6 +44,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -65,6 +75,13 @@ SYNC_CAP = 4
 HTTP_TIMEOUT_SEC = 60.0
 #: 同一类不可用日志的最小间隔（秒）——hub 关机时每轮一条就够了。
 LOG_THROTTLE_SEC = 300.0
+#: 段末有界 flush 的缺省预算（秒）：`close()` 最多为「把积压推完」等这么久。产物已在本地，
+#: 超过它就走（daemon 线程不会挂住进程退出）。
+DRAIN_FLUSH_SEC = 90.0
+#: 后台线程的空转唤醒间隔（秒）——没有新活时它就这么久醒一次看看有没有 stop。
+DRAIN_TICK_SEC = 0.5
+#: 一次 drain 里 `sync()` 的最多轮数（纯防御：`pending()` 单调收敛，正常远到不了）。
+DRAIN_MAX_PASSES = 256
 
 
 def _log_default(msg: str) -> None:
@@ -100,6 +117,9 @@ class OfflineDeliverer:
         timeout: float = HTTP_TIMEOUT_SEC,
         probe_ttl: float = PROBE_TTL_SEC,
         sync_cap: int = SYNC_CAP,
+        #: 后台并行模式（见模块 docstring）：True = 训练线程只入队，另一个线程推。
+        #: 缺省 False（同步老行为）——调用方明确要并行时开（`make_deliverer` 缺省已开）。
+        background: bool = False,
         opener: Callable[[str, bytes, dict, float], tuple[int, bytes]] | None = None,
         now_fn: Callable[[], float] | None = None,
         log: Callable[[str], None] = _log_default,
@@ -138,6 +158,16 @@ class OfflineDeliverer:
         self._delivered: set[int] = set()
         self._result_done = False
         self._manifest_cache: dict | None = None
+        # ---- 后台并行（单写者线程；除 submit_*/close 外所有状态读写都在它里面）----
+        self.background = bool(background)
+        self._cv = threading.Condition()
+        self._want_sync = False
+        #: 要**重投**的已投递轮次（云机评估落账后补读数；见 `submit_eval_round`）。
+        self._repost: set[int] = set()
+        self._final: tuple[int, str, dict] | None = None
+        self._stopping = False
+        self._drain_until = 0.0
+        self._thread: threading.Thread | None = None
         self._load_ledger()
         if not self.enabled and not self.disabled_reason:
             missing = []
@@ -148,6 +178,114 @@ class OfflineDeliverer:
             if not self.run_id:
                 missing.append(f"合法 run_id（收到 {str(run_id)[:40]!r}）")
             self.log(f"补传未启用（缺 {' / '.join(missing)}）——产物只落本地产物目录")
+
+    # ------------------------------------------------------------ 后台并行（submit / close）
+
+    def start(self) -> None:
+        """起后台补传线程（幂等；`background=False` 或未启用时什么也不做）。
+
+        未启用（没有 hub/token/run_id）时**不起线程**：那是「这条腿没有补传」，不是「失败了」。
+        """
+        if not self.background or not self.enabled or self._thread is not None:
+            return
+        self._thread = threading.Thread(
+            target=self._drain_loop, name="offline-deliver", daemon=True
+        )
+        self._thread.start()
+
+    def submit_round(self, it: int) -> None:
+        """一轮落盘后请求补传（**非阻塞**）：后台模式下只置位，立刻返回给训练循环。"""
+        if not self.background:
+            self.sync()
+            return
+        if self._thread is None:
+            return
+        with self._cv:
+            self._want_sync = True
+            self._cv.notify_all()
+
+    def submit_final(self, *, it_end: int, state: str, summary: dict | None = None) -> None:
+        """段末：先推积压，再推段末摘要（非阻塞；段末摘要不可变不了，只能最新有效）。"""
+        if not self.background:
+            self.sync()
+            self.deliver_result(it_end=int(it_end), state=str(state), summary=summary)
+            return
+        if self._thread is None:
+            return
+        with self._cv:
+            self._final = (int(it_end), str(state), dict(summary or {}))
+            self._cv.notify_all()
+
+    def close(self, timeout: float = DRAIN_FLUSH_SEC) -> None:
+        """段末**有界** flush：给后台线程最多 `timeout` 秒把积压推完，然后收线。
+
+        为什么是有界：产物已经在本地目录里（那才是交付面），补传只是第二份拷贝——
+        为一个慢隧道挂住整个会话不划算。线程是 daemon，超时也不会阻塞进程退出。
+        """
+        if self._thread is None:
+            return
+        budget = max(0.0, float(timeout))
+        with self._cv:
+            self._stopping = True
+            self._drain_until = self._now() + budget
+            self._want_sync = self._want_sync or bool(self.pending())
+            self._cv.notify_all()
+        # join 给内部预算之外的一点余量（线程要在自己那一侧判 deadline 并收尾）
+        self._thread.join(timeout=budget + 5.0)
+
+    def _drain_loop(self) -> None:
+        """后台线程主体：串行消费「该推一轮了」/「段末」两种请求。**永不退出到异常**。
+
+        每个请求各自兜异常（一个坏请求不得让整条补传腿永久哑掉）。
+        """
+        while True:
+            with self._cv:
+                while not (
+                    self._want_sync
+                    or self._final is not None
+                    or self._stopping
+                    or self._repost
+                ):
+                    self._cv.wait(timeout=DRAIN_TICK_SEC)
+                stopping = self._stopping
+                want_sync = self._want_sync
+                final = self._final
+                self._want_sync = False
+                self._final = None
+                deadline = self._drain_until
+            if want_sync or final is not None:
+                # 收线时强制探一次（绕过负结果 TTL）——否则整段最后一次 flush 会被上一次失败静默吞掉
+                self._guard(self._push_backlog, deadline, stopping)
+            if final is not None:
+                it_end, state, summary = final
+                self._guard(self.deliver_result, it_end=it_end, state=state, summary=summary)
+            elif stopping:
+                # 收线：本次 flush 已按预算跑完（推不完也走——产物在本地目录里）。
+                return
+
+    def _push_backlog(self, deadline: float, force_probe: bool = False) -> int:
+        """把积压尽量推完（每次 `sync()` 最多 sync_cap 轮，直到推空/推不动/超预算）。"""
+        total = 0
+        for _ in range(DRAIN_MAX_PASSES):
+            n = self._sync(force_probe=force_probe and total == 0)
+            if n <= 0:
+                return total
+            total += n
+            if deadline and self._now() >= deadline:
+                return total
+            if not self.pending():
+                return total
+        return total
+
+    def _guard(self, fn: Callable[..., object], *a: object, **kw: object) -> None:
+        """后台线程里执行一件补传工作：任何异常只记一笔（线程必须活到下次提交）。"""
+        try:
+            fn(*a, **kw)
+        except BaseException as e:  # 后台腿不得因任何异常静默死掉（含 KeyboardInterrupt 类）
+            try:
+                self.log(f"补传后台异常（忽略，线程继续）：{type(e).__name__}: {e}")
+            except Exception:
+                pass
 
     # ------------------------------------------------------------ 记账（delivered.json）
 
@@ -292,13 +430,45 @@ class OfflineDeliverer:
             self.log(f"补传异常（忽略，训练继续）：{type(e).__name__}: {e}")
             return 0
 
-    def _sync(self) -> int:
+    def submit_eval_round(self, it: int) -> None:
+        """云机评估落账后请求**重投**这一轮（幂等；非后台模式 = 空操作）。
+
+        为什么需要重投而非常规积压：产物 POST 发生在落盘之后而评估还在飞（两者刻意并行，
+        见 `remote/offline_eval.CloudEvalRunner`）⇒ 第一次投递时这一轮的 `eval_rows` 还不存在。
+        hub 侧对重复投递走幂等分支（权重早已收下、不重写）但**仍然并账** eval 行
+        （`_post_offline_artifact` → `merge_eval_rows`）⇒ 重投一次就把读数补齐。
+
+        非后台（同步）模式不做：那条路上评估本来就在投递之前跑完（`_close_eval` 的时序）。
+        """
+        if not self.background or self._thread is None:
+            return
+        with self._cv:
+            self._repost.add(int(it))
+            self._want_sync = True  # 唤醒后台线程（它的等待条件里也看 repost）
+            self._cv.notify_all()
+
+    def _sync(self, *, force_probe: bool = False) -> int:
+        """`force_probe` = 绕过探活的负结果 TTL。
+
+        为什么段末必须绕过：`probe()` 把「不可达」缓存 `PROBE_TTL_SEC` 秒，而段末收线是
+        **最后一次机会**——若最后一次探活在 60s 内失败过，不强制就会让整个段末 flush
+        静默什么都不做（最该送出去的那份摘要就此丢掉）。
+
+        排队顺序：真积压本轮的在前、重投（语评估行）的在后——重投那一轮的权重早在 hub 上，
+        它只是「把新的读数补上」，不该挡在真正的待投递轮次前面。
+        """
         if not self.enabled or self.disabled_reason:
             return 0
+        with self._cv:
+            repost = sorted(self._repost)
+            self._repost.clear()
         todo = self.pending()
+        todo += [it for it in repost if it not in todo]
         if not todo:
             return 0
-        if not self.probe():
+        if not self.probe(force=force_probe):
+            with self._cv:
+                self._repost.update(repost)  # 还没送到，下一拍再试（重投天然幂等）
             return 0
         done = 0
         for it in todo[: self.sync_cap]:
@@ -346,6 +516,10 @@ class OfflineDeliverer:
             # 账本行**随本轮一起走**（hub 侧要拿它画曲线/对账）；跨会话补投时内存里没有，
             # 从 metrics.jsonl 按 it 找回来（找不到就只发权重，不含 row）。
             "row": self._row_for(it),
+            # 云机 A 层评估的就地读数（`eval_on_cloud`）：与权重同一趟回去，hub 侧并进
+            # 课程账本（`_HubQueue.merge_eval_rows`）——否则控制台要等整段结束才知道读
+            # 数，而「一条跑偏的腿」正是这条腿要尽早看见的东西。空列表 = 本轮没评。
+            "eval_rows": self._eval_rows_for(it),
             # 血缘（hub 侧据此把这条腿接回某个 run；全是 manifest 里的原值）
             "plan_sha256": str(m.get("plan_sha256", "") or ""),
             "course_fp": str(m.get("course_fp", "") or ""),
@@ -381,6 +555,43 @@ class OfflineDeliverer:
             "post", f"补传 it{it} 失败（HTTP {status}: {_err_text(resp)}）——本轮放弃，下轮再试"
         )
         return False
+
+    #: 单轮补传携带的评估行上界（防体超限；正常一轮 A 层语料 = 关数×种子数，双轨 100）。
+    EVAL_ROWS_CAP = 400
+
+    def _eval_rows_for(self, it: int) -> list[dict]:
+        """产物目录里本轮的逐局评估行（`eval_log.jsonl`；没评过 = 空列表，永不抛）。
+
+        只取 `iter == it` 且没有 `source` 的逐局行（`source` 是 B/C evalboard 行的标记，
+        它们不是这条腿的读数）。上界 `EVAL_ROWS_CAP`：超过就只发前 N 条并记一笔
+        （宁少不错——体超限会让整个补传被拒，连权重一起丢）。
+        """
+        p = Path(self.root) / ArtifactStore.EVAL_LOG_NAME
+        rows: list[dict] = []
+        try:
+            if not p.exists():
+                return rows
+            for line in p.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    r = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(r, dict) or r.get("event") != "eval" or "source" in r:
+                    continue
+                if r.get("iter") != int(it):
+                    continue
+                rows.append(r)
+        except OSError:
+            return []
+        if len(rows) > self.EVAL_ROWS_CAP:
+            self.log(
+                f"补传 it{it}: 评估行 {len(rows)} 条 > 上界 {self.EVAL_ROWS_CAP}"
+                f"——只发前 {self.EVAL_ROWS_CAP} 条（其余随 artifacts zip 回去）"
+            )
+            rows = rows[: self.EVAL_ROWS_CAP]
+        return rows
 
     def deliver_result(self, *, it_end: int, state: str, summary: dict | None = None) -> bool:
         """段末摘要（跑到哪、什么状态、失败原因）。best-effort；**永不抛**。
@@ -461,6 +672,8 @@ class OfflineDeliverer:
             "pending": len(self.pending()),
             "result_done": self._result_done,
             "disabled_reason": self.disabled_reason,
+            "background": self.background,
+            "drain_alive": bool(self._thread is not None and self._thread.is_alive()),
         }
 
 
@@ -486,12 +699,16 @@ def make_deliverer(
     run_id: str,
     artifacts_dir: str | Path,
     course: str = "",
+    #: 后台并行（缺省开：补传与 PPO 并行是用户 2026-09-22 的硬要求，见模块 docstring）。
+    #: 只有需要「同步等它推完」的调用方（老测试/单步调试）才显式关掉。
+    background: bool = True,
     log: Callable[[str], None] = _log_default,
 ) -> OfflineDeliverer | None:
     """构造补传器：**缺 hub_url 或 token 就返回 None**（= 这条腿没有补传，不是错误）。
 
     调用方（`run_loop`）因此只需 `if d is not None`，不必自己判断「参数齐不齐」。
     `course` = 本份产物在 hub 里的归位键（多课程 hub 必需；见 `OfflineDeliverer.__init__`）。
+    需要后台并行时调用方还得调一次 `start()`（构造与起线程分开，便于测试注入替身）。
     """
     if not str(hub_url or "").strip() or not str(hub_token or "").strip():
         return None
@@ -501,6 +718,7 @@ def make_deliverer(
         run_id=run_id,
         artifacts_dir=artifacts_dir,
         course=course,
+        background=background,
         log=log,
     )
 

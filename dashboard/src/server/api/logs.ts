@@ -2,7 +2,7 @@
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'fs'
 import path from 'path'
 import { loadConfig } from '../../core/config'
-import { LOG_DIR, NN_TRAINING, REPO_ROOT } from '../../core/paths'
+import { NN_TRAINING, REPO_ROOT, tmpLogsDir } from '../../core/paths'
 import { entryForCourse, loadRegistry } from '../../core/registry'
 import type { Component, RlConfig } from '../../core/types'
 import type { LogPayload } from '../../web/view'
@@ -126,9 +126,16 @@ export function scanLatestLog(dir: string, key: Component, course: string): stri
   return bestP
 }
 
-/** 对真实 LOG_DIR 的动态查找（scanLatestLog 的默认目录版）。 */
+/** 对（默认）日志根的动态查找（scanLatestLog 的默认目录版）。
+ *
+ *  扫描根走 `tmpLogsDir()` 而**不是**常量 `LOG_DIR`：两者在生产环境是同一个目录（默认值
+ *  就是 LOG_DIR，行为零变化），但前者可被 `BCITY_TMP_LOGS_DIR` 重定向 —— 单测不重定向就会
+ *  扫**真实** `tmp/`，于是本机正在训练的那门课的 `training-loop.log` 会盖过被测课程
+ *  （2026-09-22：`server-api-course-switch.test.ts` 因此红——按课程解析退化成「别课最新
+ *  日志」，正是那条用例要防的串数据）。
+ */
 export function findLatestLog(key: Component, course: string): string | null {
-  return scanLatestLog(LOG_DIR, key, course)
+  return scanLatestLog(tmpLogsDir(), key, course)
 }
 
 /** 从文件末尾读取至多 maxLines 行（readFileSync 整文件读对 GB 级增长日志是浪费；

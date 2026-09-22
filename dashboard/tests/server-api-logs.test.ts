@@ -177,6 +177,30 @@ describe('console/log viewer (§348 补 2)', () => {
     }
   })
 
+  it('findLatestLog 的扫描根跟随 BCITY_TMP_LOGS_DIR（测试不再扫真实 tmp/）', () => {
+    // 为什么钉这条：扫描根若是常量 LOG_DIR（= 仓根 tmp/），单测就会去看这台机器此刻
+    // 谁在训——本机有活的 `tmp/<别课>/training-loop.log` 时，「按课程解析」退化成「别课最新」，
+    // 而用例要断言的是前者（2026-09-22 server-api-course-switch 因此红）。
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'bcity-logscan-root-'))
+    const prev = process.env.BCITY_TMP_LOGS_DIR
+    try {
+      const cDir = path.join(dir, 'course-b')
+      mkdirSync(cDir, { recursive: true })
+      const loopLog = path.join(cDir, 'training-loop.log')
+      writeFileSync(loopLog, 'b\n', 'utf-8')
+      const cf = path.join(dir, 'cloudflared-2026-09-22T00-00-00-a1.log')
+      writeFileSync(cf, 'cf\n', 'utf-8')
+      process.env.BCITY_TMP_LOGS_DIR = dir
+      expect(api.findLatestLog('trainingLoop', 'course-b')).toBe(loopLog)
+      // 能返回这个临时目录里的文件 ⇒ 扫的确实是重定向后的根（真实 tmp/ 里永远找不到它）
+      expect(api.findLatestLog('cloudflared', 'x')).toBe(cf)
+    } finally {
+      if (prev === undefined) delete process.env.BCITY_TMP_LOGS_DIR
+      else process.env.BCITY_TMP_LOGS_DIR = prev
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('componentLogPayload：已知组件返回载荷；未知组件 null', async () => {
     const p = await api.componentLogPayload('selfNode', 50)
     expect(p).not.toBeNull()

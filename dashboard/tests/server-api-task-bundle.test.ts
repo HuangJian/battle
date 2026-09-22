@@ -15,7 +15,7 @@
  */
 
 import { describe, expect, it } from 'bun:test'
-import { mkdtempSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
 import { REPO_ROOT } from '../src/core/paths'
@@ -35,7 +35,12 @@ import {
 } from '../src/server/bundles'
 import {
   exportGuardReason,
+  invalidateTaskBundle,
+  latestStalePack,
   launchTaskBundleExport,
+  restorePackIfMissing,
+  restoreTaskBundle,
+  stalePackDir,
   TASK_BUNDLE_BUSY_KEY,
   taskBundleArgs,
   taskBundleFileName,
@@ -101,6 +106,57 @@ describe('任务包导出', () => {
     expect(exportGuardReason({ weightsExists: true })).toBeNull()
     const noW = exportGuardReason({ weightsExists: false })
     expect(noW).toContain('weights.json')
+  })
+
+  it('旧任务包作废：挪进 stale-packs（不是删除），盘上原路径不再有包可递', () => {
+    // 用户 2026-09-22：「重启离线课程时，需要把最新代码重新打进任务包，因为代码可能已经
+    // 发生了变化」。作废这一步是必需的——hub 递的是**盘上那一刻的文件**，不作废的话云机在
+    // 导出窗口（几分钟）里探到的还是旧代码的包，而它会拿旧代码跑完整段、看起来完全正常。
+    const course = '__stale-pack-course__'
+    const live = path.join(REPO_ROOT, 'tmp', course, taskBundleFileName(course))
+    const stale = stalePackDir(course)
+    try {
+      mkdirSync(path.dirname(live), { recursive: true })
+      writeFileSync(live, 'OLD-CODE', { encoding: 'utf-8', flag: 'w' })
+      // 没有包时：不作废、不报错（云机会等新导出的那份）
+      expect(invalidateTaskBundle('__no-such-pack-course__').invalidated).toBe(false)
+      const r = invalidateTaskBundle(course)
+      expect(r.invalidated).toBe(true)
+      expect(existsSync(live)).toBe(false) // hub /offline/task-pack 从此 404（云机会等新包）
+      expect(r.archived.startsWith(stale)).toBe(true)
+      expect(readFileSync(r.archived, 'utf-8')).toBe('OLD-CODE') // 不丢件：导出失败时它还是唯一能跑的
+      // 幂等：再作废一次 = 没有包可作废（不抛）
+      expect(invalidateTaskBundle(course).invalidated).toBe(false)
+    } finally {
+      rmSync(path.join(REPO_ROOT, 'tmp', course), { recursive: true, force: true })
+    }
+  })
+
+  it('作废 + 导出没产出 ⇒ 旧包被恢复（作废不能把课变成「没有包」）', () => {
+    // 「先作废、再导出」有个必须堵死的前提：导出**失败**时不能留下「这门课没有包」——
+    // 旧包是此刻唯一还能跑的东西（用户点「训练」就是要立刻有东西能跑）。
+    const course = '__stale-restore-course__'
+    const live = path.join(REPO_ROOT, 'tmp', course, taskBundleFileName(course))
+    try {
+      mkdirSync(path.dirname(live), { recursive: true })
+      writeFileSync(live, 'OLD-CODE', { encoding: 'utf-8', flag: 'w' })
+      const r = invalidateTaskBundle(course)
+      expect(r.invalidated).toBe(true)
+      expect(existsSync(live)).toBe(false)
+      // 无归档的课：安全返回 null（不瞎恢复）
+      expect(latestStalePack('__no-such-stale-course__')).toBe(null)
+      expect(restorePackIfMissing('__no-such-stale-course__')).toBe(null)
+      // 导出没产出新包（线上路径空）⇒ 兜底把归档放回线上
+      expect(restorePackIfMissing(course)).toBeTruthy()
+      expect(existsSync(live)).toBe(true)
+      expect(readFileSync(live, 'utf-8')).toBe('OLD-CODE')
+      // 线上已有包 ⇒ 不动归档（不覆盖刚导出的新包）
+      expect(restorePackIfMissing(course)).toBe(null)
+      // 显式恢复：线上已有包时不覆盖
+      expect(restoreTaskBundle(course, latestStalePack(course) ?? '').restored).toBe(false)
+    } finally {
+      rmSync(path.join(REPO_ROOT, 'tmp', course), { recursive: true, force: true })
+    }
   })
 
   it('上一次导出还在跑 → 拒启（互斥键由子进程退出释放，不在请求里删）', () => {

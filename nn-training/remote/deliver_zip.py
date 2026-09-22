@@ -185,6 +185,7 @@ def import_deliver_zip(
         f"状态 {st.get('state') or '?'}）"
     )
     log(f"[deliver] 末轮权重：{final_ckpt}")
+    n_eval = _merge_carried_eval_rows(final, dest_root)
     return {
         "run_id": final.name,
         "dir": str(final),
@@ -195,9 +196,38 @@ def import_deliver_zip(
         "course_in_name": name_course,
         "state": str(st.get("state") or ""),
         "rows": len(iters),
+        "eval_rows": n_eval,
         "source_zip": str(src),
         "bytes": size,
     }
+
+
+def _merge_carried_eval_rows(final: Path, dest_root: Path) -> int:
+    """把产物包里带的云机 A 层评估行（`eval_log.jsonl`）并进课程账本，返回新增行数。
+
+    为什么在导入时并：产物包是**云机评过的读数回到本机的唯一载体**（连 hub 都不在场时
+    也成立），而控制台/门判只看 `tmp/<课程>/eval_log.jsonl`。盘上布局就是它的位置：
+    导入根是 `tmp/<课程>/deliver`，账本在它的同级（`tmp/<课程>/eval_log.jsonl`）。
+
+    任何失败都只记一笔：导入的主价值是「权重可评估」，少一份读数不是导入失败。
+    """
+    src_jsonl = final / ArtifactStore.EVAL_LOG_NAME
+    if not src_jsonl.exists():
+        return 0
+    try:
+        from rl.eval_local import merge_eval_rows
+
+        n = merge_eval_rows(src_jsonl, Path(dest_root).parent / "eval_log.jsonl")
+    except Exception as e:  # rl 包不在（截断快照）/磁盘错——不拖垮导入
+        print(f"[deliver] 评估账本并入失败（忽略）: {type(e).__name__}: {e}", flush=True)
+        return 0
+    if n:
+        print(
+            f"[deliver] 云机评估行并入课程账本：+{n}（源 {src_jsonl.name} → "
+            f"{Path(dest_root).parent / 'eval_log.jsonl'}）",
+            flush=True,
+        )
+    return int(n)
 
 
 def main(argv: list[str] | None = None) -> int:

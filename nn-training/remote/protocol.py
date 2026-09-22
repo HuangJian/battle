@@ -840,6 +840,14 @@ OFFLINE_DELIVERED_NAME = "delivered.json"
 #: 任务包端点（hub → 云机）：把本机的整段任务包 `task-<课>.zip` 递出去。
 #: 云机 notebook 的第一条路径就是「先连 hub，能通就从 hub 取包」（用户口径 2026-09-19）。
 OFFLINE_TASK_PACK_PATH = "/offline/task-pack"
+#: 续跑锚点端点（hub → 云机，2026-09-22）：任务包是导出那一刻的快照，而云机的中断/重领
+#: 发生在它之后——重领时 hub 手里可能有更新的（自回传的或人工导入的）**同轮齐全**轮次。
+#: `GET /offline/resume?course=<课>` 递元信息（it / 指纹 / 来源 / 指标行）；
+#: `GET /offline/resume/blob?course=<课>&it=N&name=weights.json|opt.tar|row.json` 递字节。
+OFFLINE_RESUME_PATH = "/offline/resume"
+OFFLINE_RESUME_BLOB_PATH = "/offline/resume/blob"
+#: 锚点字节端点允许的文件名（白名单：拒路径穿越与「借名读别的文件」）。
+OFFLINE_RESUME_BLOB_NAMES = ("weights.json", "opt.tar", "row.json")
 
 # ---- worker 能力自报（离线训练模式，2026-09-19）----
 # 离线课（`kind="run"` 整段）与在线课（逐轮）对 worker 的要求不同：前者要求节点

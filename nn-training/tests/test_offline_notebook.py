@@ -40,6 +40,10 @@ CFG_KEYS = (
     "threads",
     "max_iters",
     "budget_sec",
+    "eval_on_cloud",
+    "eval_slots",
+    "eval_game_timeout_sec",
+    "rollout_workers",
     "work_dir",
     "download_dir",
     "repo_url",
@@ -100,13 +104,21 @@ def test_cell_knows_the_code_zip_name(cell: str) -> None:
 def test_credentials_are_read_before_any_network_change() -> None:
     """凭据 → 取包 → （必要时才）tailscale：顺序反了就会「够不着平台 Secrets」。
 
-    静态一半：`run()` 里 `creds = {` 必须早于 `obtain_pack(`；而 tailscale 只在
+    静态一半：`run()` 里 `creds = {` 必须早于真正会碰网络的那一步；而 tailscale 只在
     `obtain_pack` 内部按**传进去的** creds 起（它拿不到别处的凭据 ⇒ 不可能抢在前面）。
+
+    2026-09-22（多课程）：取包与网络动作都搬进了逐课的 `run_one_course`，所以判据是
+    「`run()` 读完凭据之后才调 `run_one_course`，而 `obtain_pack` 只在 `run_one_course` 里」。
     """
     src = Path(offline_boot.__file__).read_text(encoding="utf-8")
     body = src[src.index("def run(") :]
     body = body[: body.index("\ndef ")]  # run() 的函数体（下一个顶层 def 之前）
-    assert body.index("creds = {") < body.index("pack = obtain_pack(")
+    assert body.index("creds = {") < body.index("run_one_course("), (
+        "取包/网络动作必须晚于凭据读取（2026-09-17 Kaggle 事故的时序约束）"
+    )
+    per_course = src[src.index("def run_one_course(") :]
+    assert "creds: dict" in per_course[:400], "run_one_course 必须收下已读好的凭据"
+    assert per_course.index("pack = obtain_pack(") > 0
     sig = src[src.index("def obtain_pack(") : src.index("def obtain_pack(") + 200]
     assert "creds: dict" in sig, "obtain_pack 必须收下已读好的凭据，而不是自己去读"
 
@@ -148,6 +160,17 @@ def test_boot_modules_are_fetched_by_name_and_exist(cell: str) -> None:
         assert (NN / "remote" / name).is_file(), f"cell 要拉 {name}，仓库里却没有"
 
 
+def test_markdown_documents_cloud_eval_and_resume() -> None:
+    """说明面必须看得见这两个开关（用户找不到的旋钮 = 不存在的旋钮）。"""
+    md = "\n".join(notebook_cells(NB, "markdown"))
+    assert "eval_on_cloud" in md, "云机评估开关要在说明书里"
+    assert "与下一轮 PPO 并行" in md, "并行语义是这条腿最容易被误解的地方，要写明"
+    assert "续跑" in md and "同轮齐全" in md
+    # 并发口径：rollout 与 eval **同一个公式**（交替跑，互不预留）——说明书与代码里必须一致
+    assert "rollout_workers" in md, "rollout 并发旋钮要在说明书里（它覆盖计划里的导出机规模）"
+    assert "max(CPU−4, CPU×0.8)" in md, "并发口径要写出公式（老口径「扣掉 rollout 再卡 64」已废）"
+
+
 def test_markdown_names_the_secrets_and_both_bootstrap_paths() -> None:
     md = "\n".join(notebook_cells(NB, "markdown"))
     for s in ("HUB_TOKEN", "HUB_IP", "TS_AUTHKEY"):
@@ -158,6 +181,9 @@ def test_markdown_names_the_secrets_and_both_bootstrap_paths() -> None:
 
 def test_cell_has_no_key_material_or_hardcoded_course() -> None:
     text = "\n".join(notebook_cells(NB))
-    assert '"course": ""' in text, "CFG.course 必须是空串让用户填（不许预置某门课）"
+    # 空串 = 单课程老写法；空列表 = 多课程（用户 2026-09-22：course 要支持多门课）
+    assert '"course": ""' in text or '"course": []' in text, (
+        "CFG.course 必须是空值让用户填（不许预置某门课）"
+    )
     for key in ("hub_token", "ts_authkey", "hub_ip"):
         assert f'"{key}": ""' in text, f"{key} 不该预置值（凭据走 Secret / 现场填）"

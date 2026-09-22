@@ -136,6 +136,8 @@ class ArtifactStore:
     METRICS_NAME = "metrics.jsonl"
     PLAN_NAME = "plan.json"
     MANIFEST_NAME = "manifest.json"
+    #: 云机 A 层评估账本（`eval_on_cloud`）：随 artifacts zip 回去，导入侧并进课程账本。
+    EVAL_LOG_NAME = "eval_log.jsonl"
     README_NAME = "README.txt"
     LATEST_ZIP = "LATEST.zip"
     ALL_ZIP = "artifacts.zip"
@@ -343,8 +345,13 @@ class ArtifactStore:
                     f = self.root / name
                     if f.exists():
                         z.write(f, arcname=name)
-                if (self.root / self.METRICS_NAME).exists():
-                    z.write(self.root / self.METRICS_NAME, arcname=self.METRICS_NAME)
+                for name in (self.METRICS_NAME, self.EVAL_LOG_NAME):
+                    # eval_log.jsonl 也要进包：云上评的读数只有这一条路回来
+                    # （`rl.eval_local.merge_eval_rows` 在导入时并进课程账本）——
+                    # 漏了它就等于「云上白评一轮」。
+                    f = self.root / name
+                    if f.exists():
+                        z.write(f, arcname=name)
                 for d in sorted(self.root.glob(f"{self.IT_PREFIX}*")):
                     if not d.is_dir():
                         continue
@@ -396,10 +403,12 @@ run_id      : {self.run_id}
      到点前**干净停机**（先落完当轮再退，产物天然可续）。
   3. 想改预算/换设备都不影响续跑性——计划与轮次只认 plan.json。
 
-怎么评估（本产物不含评估）
---------------------------
-  评估与门判是 hub 侧权威，本段**不**在云上自评。拿 it-NNN/weights.json 在本机按课程
-  跑 eval（`bun run eval:…` / EvalBoard）即可，口径与其它腿一致。
+怎么评估
+--------
+  评估与门判仍是 hub 侧权威。本段**可选**在云上自评（`--eval-on-cloud`）：打开时本目录
+  会多一份 `eval_log.jsonl`（A 层语料逐局行，与 in-loop 同一 schema/同一 wver 定义），
+  随本 zip 回到本机后由「导入产物」并进 `tmp/<课程>/eval_log.jsonl`——板子/门判读到的是
+  同一口径。没打开也不影响：拿 it-NNN/weights.json 在本机跑 evalA 即可。
 """
 
 

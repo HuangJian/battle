@@ -996,7 +996,7 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
             self._volume_collected = None
             return build_pairs(self.args, it, self._rotate_seed)
         from rl.volume_quota import target_per_stage
-        from rl.volume_waves import initial_games, wave_pairs
+        from rl.volume_waves import initial_games, initial_wave_pairs
 
         args = self.args
         stages = self._volume_stages()
@@ -1009,7 +1009,9 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
         self._volume_waves = 0
         self._volume_capped = False
         self._volume_stage_ests = None  # 连续采集启动时现算
-        pairs = wave_pairs(self._rotate_seed, it, {s: g0 for s in stages}, 0)
+        # 每关 G0 局的初波前缀（= 连续配额流的前 G0 个 seed）。**与 `rl/plan.pairs_for`
+        # 同一个函数**：云端重放的语料因此与本地集群同一轮的前缀批逐位相同（2026-09-22）。
+        pairs = initial_wave_pairs(self._rotate_seed, it, stages=stages, games_per_stage=g0)
         log(
             f"[volume] it{it}: continuous quota mode target={target} "
             f"per_stage={target_per_stage(target, len(stages))} est_global={est} "

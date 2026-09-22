@@ -1687,6 +1687,47 @@ class TrainingSteps:
         self._ts_code_sha256 = pack_ts_code_zip(repo_root, zp, log=log)
         self._ts_code_zip_path = zp
 
+    def _volume_plan_block(self) -> dict | None:
+        """计划要带上的**动态采集块**（`target_transitions > 0` 时；见 `rl/volume_waves`）。
+
+        为什么必须进计划：全离线/半离线腿（kind=run）的逐轮语料由 `rl/plan.pairs_for` 重放
+        而成，而 `build_pairs` 根本不认 `target_transitions` —— 不带这块，云机采多少局就由
+        课程里那个 `seed_rotate` 数字决定（配小了就是**静默少采**：训练的样本量低于目标，
+        而云机没有本地集群那种实时补救机制——一轮一个 job，PPO 在 job 里跑完）。
+
+        两个口径细节：
+          * **est 用当前估计**（trailing 均值，回退课程声明值）——与 `_volume_est_samples`
+            同函数同 window，所以计划里的 G0 就是**导出那一刻**本地循环会用的那个数；节点
+            没有 hub 的 jsonl，est 只能被钉在计划里（这也是「同一计划跨机器逐字节一致」的
+            前提：现算会让两侧解出不同的语料指纹）。
+          * **mode 门与 `_per_stage_quota` 同源**：`target_transitions` 只对 per-tick 有意义
+            ⇒ 非 per-tick 返 None（= 老口径，逐字节不变）。
+
+        `--stages` 缺失/不可解析、est ≤ 0 一律**响亮退出**：静默降级回老口径正是要防的事。
+        """
+        args = self.args
+        if str(getattr(args, "mode", "")) != "per-tick":
+            return None
+        if int(getattr(args, "target_transitions", 0) or 0) <= 0:
+            return None
+        from rl.resume import trailing_samples_per_game
+        from rl.volume_waves import volume_block
+
+        declared = int(getattr(args, "est_samples_per_game", 0) or 0)
+        jsonl = getattr(self, "_jsonl_path", None)
+        est = (
+            int(trailing_samples_per_game(jsonl, window=5, fallback=declared) or declared)
+            if jsonl
+            else declared
+        )
+        try:
+            return volume_block(args, est_samples_per_game=est)
+        except ValueError as e:
+            raise SystemExit(
+                f"[run_rl] 动态采集无法写进离线计划（{e}）——修好课程/参数再导出："
+                "盘里没有的采集量规则，云机无法自行补上"
+            ) from e
+
     def _remote_iter(self, it: int, pairs: list[tuple[int, int]]) -> None:
         """M3：**整轮上云**（kind=iter）——节点跑 rollout + PPO，hub 只发规格、收结果。
 
@@ -1820,6 +1861,7 @@ class TrainingSteps:
             workers=workers,
             game_timeout_sec=game_timeout,
             budget_sec=float(getattr(args, "run_budget_sec", 0.0) or 0.0),
+            volume=self._volume_plan_block(),
             log=log,
         )
         end_it = int(plan["end_it"])
@@ -1943,6 +1985,7 @@ class TrainingSteps:
             workers=workers,
             game_timeout_sec=game_timeout,
             budget_sec=float(getattr(args, "run_budget_sec", 0.0) or 0.0),
+            volume=self._volume_plan_block(),
             log=log,
         )
         log(

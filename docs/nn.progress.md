@@ -4,6 +4,131 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §131 并发口径统一：rollout 与 eval 共用 `max(cores−4, cores×0.8)`（2026-09-22）
+
+用户口径：**「rollout 和 eval 是交替进行的，所以不应该为 eval 保留 CPU 核数，两者都使用
+`max(cores − 4, cores × 0.8)`；只要留两三个核给数据回传任务就够了。」**
+
+* **唯一口径落地**：`platform_utils.cpu_worker_slots(cores=None)`（新）= `max(1, min(n, max(n−4,
+  floor(n×0.8))))`。96 核 → 92；40 → 36；16 → 12；8 → 6（留 2）；1 → 1。
+* **eval 侧**：`remote/offline_eval.default_slots()` 直接跟着它（**删掉**「扣 `plan.workers` 再卡
+  64」的老口径——96 核上那是白掉整三成；也删掉 `DEFAULT_SLOTS_CAP/RESERVE` 两个常量）。
+* **rollout 侧（云机）**：`remote/run_loop` 新增 `--rollout-workers`（0 = 同口径自动），装配时解析一次
+  写进 `RunContext.rollout_workers`，每轮用 `with_rollout_workers(spec, n)` 覆盖计划里钉着的
+  `plan.workers`——**那是导出机的规模**（常在 8~16 核的本机导出，却要在 96 vCPU 云机整段跑）。
+  `workers` 不进 `data_fp`（`iter_declared_entries` 只取 argv 的 stage/seed）⇒ 换并行度不动摇
+  任何指纹；每段开跑时把「本机值 / 计划值」一并日志报出（两者不同时能当场归因「为什么不见快」）。
+* **notebook**：`CFG.rollout_workers`（0 = 自动）+ 启动回显；配置表两行的口径文案同步（说明与代码
+  说的必须是同一个公式）。
+
+为什么不再互相预留：云机离线段是 rollout → PPO → eval **交替**推进的，给 eval 扣掉 rollout 的
+并行度等于两笔账扣同一份钱；真正需要一直活着的只有补传/日志/守护线程，几个核足够。
+
+测试：`test_offline_eval_cloud`（口径=同一公式，逐核数对账）、`test_offline_eval_wiring`
+（缺省不吃 `plan.workers`；`with_rollout_workers` 只换 workers、`data_fp` 不变、0/同值不动原对象）、
+`test_offline_notebook`（说明面写了公式与旋钮）。
+
+---
+
+## §130 离线课「点训练 = 重打包」：旧包先作废，导出失败再恢复（2026-09-22）
+
+用户口径：**「重启离线课程时，需要把最新代码重新打进任务包，因为代码可能已经发生了变化」**，
+并且明确**时机 = 用户点击「训练」那一刻**（`openCourse`），**不是** worker 取任务时实时打包
+——hub 的 `/offline/task-pack` 永远只递盘上那一刻的文件，不现场构造（无隐藏的第二份真相）。
+
+* **触发点**：`course-lifecycle.openCourse`（离线模式）→ `launchTaskBundleExport(c)`。停课 →
+  重新开课即重打一份；课已开着再点「训练」也会重打（开课无「已开课即拒」门）。
+* **为什么必须先把旧包作废**：包是**代码快照**（`code.zip`/`ts_code.zip`/`commit` + `code_sha256`），
+  而导出要跑几分钟。若只在后台重导、旧包仍躺在 `tmp/<课>/task-<课>.zip`，云机会在导出窗口里
+  探到**旧代码的包**并拿它跑完整段——且看起来完全正常。
+* **作废 = 挪走不是删除**：`tmp/<课>/stale-packs/task-<课>.zip.stale-<时间戳>`；此后
+  `/offline/task-pack` 404，而云机 `obtain_pack` 的等包循环本就按「404 → 稍后重试」处理
+  （默认 30 分钟）⇒ 它等新包，不退回旧代码。作废排在 `exportGuard` **之后**（拒启 = 零副作用，
+  与课程生命周期的既有约定一致）。
+* **作废的反面必须有人管**：导出启动失败 / 子进程中途死掉 → 盘上就没包了，而旧包是此刻唯一
+  还能跑的东西。两道恢复：启动 throw 时立刻 `restoreTaskBundle`；进程退出后 `watchExportExit`
+  兜底 `restorePackIfMissing`（线上路径没新包 ⇒ 把**最新**归档搬回来，并往 `export-bundle.log`
+  追一行 `[作废兜底]`）。
+* **回执必须说出来**：开课/导出的 detail 里明写「旧包已作废 → 导出完成前云机取不到包（404），
+  它会等新包——这是预期行为，不是故障」，否则「云机拉不到包」会被当成事故排查。
+* 测试：`dashboard/tests/server-api-task-bundle.test.ts`（作废挪走不丢件 / 幂等 / 无包不报错 /
+  失败恢复不覆盖新包）。
+
+---
+
+## §129 离线整段五件套：云机按计划采够样本 / 回传与 PPO 并行 / 云上 A 层 eval（与 PPO 并行）/ 多课程串行 / 断点续跑锚点（2026-09-22）
+
+用户指令五条（原文见下），一次做完并把「同口径」做成**构造性质**（共用同一份函数）
+而不是靠人比对。
+
+| # | 指令 | 落地 |
+|---|---|---|
+| 1 | 云端按 `target_transitions` 采够样本，与本地集群 rollout 一致 | `rl/volume_waves.volume_block/initial_wave_pairs` 抽成共享纯函数；计划带 `volume` 块，`pairs_for` 走它重放；训练侧 `per_stage_quota` 随逐轮 manifest 传递 |
+| 2 | 回传权重/opt/指标与 PPO **并行**，失败不打断 PPO | `offline_deliver` 后台单写者线程（`submit_round/submit_final/close`）+ `run_loop` 三出口有界 flush；同步模式保留（`background=False`） |
+| 3 | notebook 增加「是否在云机跑 eval」 | `CFG.eval_on_cloud`（+`eval_slots`/`eval_game_timeout_sec`）→ `--eval-on-cloud`；语料/行/结算全部取自 in-loop 同一份实现 |
+| 3b | 云机 eval 与下一轮 PPO **并行**（eval 吃 CPU，不该阻塞 PPO） | `remote/offline_eval.CloudEvalRunner`（后台线程 + 单飞 + 有界交接 + 段末有界 `drain`） |
+| 4 | `CFG.course` 支持多个离线课程名，云机串行逐个完成 | `offline_boot.courses_of`（字符串/列表/逗号通吃，按序串行，中途失败停在那里并列出剩余）；`run_one_course` 逐课一层工作目录 |
+| 5 | 断点续跑：回传或人工导入的权重/opt/指标，再领任务时交给云机续跑 | hub `GET /offline/resume`（+`/offline/resume/blob`）选**最新同轮齐全**的轮次；云机 `fetch_resume` → `run_loop --resume-dir` → `apply_resume_overlay` 采纳 |
+
+### 「同口径」在哪几处是**同一份代码**
+
+* 语料：`rl/eval_local.a_eval_seed_list`（双轨锚点 50 + 当轮轮转 50 也在内）——`remote/offline_eval.eval_pairs` 只是 `[ (s, sd) for s in stages for sd in a_eval_seed_list(it, n) ]`；
+* 行 schema：`rl/eval_local.eval_row` 是**唯一**的行构造点（in-loop 派发器 `record()` 里的 60 行字典已删、改调它）；
+* summary：`settle_eval_summary`（含双轨 `anchor_wr/rotor_wr`、技能子指标、掉落三列、`nodes` 分布）；
+* `wver`：权重**文件字节的 sha256**（`ArtifactStore.sha256_file` ≡ `dist_common.weights_fingerprint`）⇒ 云机评的 W(it) 与本地/节点评的同一 W(it) 在账本里同 wver，可直接配对。
+
+云机局的 `node` 字段写 `"cloud"`（与 `local`/节点 id 分开，summary 的 `nodes` 里一眼可辨）。
+
+### 并行语义（本次最容易被后人改回去的一处）
+
+`CloudEvalRunner`：`submit(it)` **立刻返回**（后台线程跑局）、同一时刻只评一轮（上一轮还在飞时
+有界等 120s 交接，仍不空闲就**跳过本轮**而不是排队——排队的 eval 只会越落越远）；段末 `drain`
+给在飞的局 600s 有界时间落账（超时只记 WARN：已落的逐局行有效）。三个出口（complete/noop/failed）
+都调 `_close_eval`，且**先收评估再 finalize**——否则 artifacts.zip 里少掉刚评的那一段。
+回归钉在 `tests/test_offline_eval_cloud.py::test_submit_does_not_block_ppo`（量的是提交耗时 < 0.5s，
+谁把它改回同步这个用例立刻红）。
+
+### 读数回程（三条，都必要）
+
+1. **artifacts zip**：`ArtifactStore.finalize` 把 `eval_log.jsonl` 打进包（原来只打 plan/manifest/
+   readme/state/metrics/it-*——云上白评一轮的那种漏）；
+2. **人工导入**：`remote.deliver_zip` 导入时把包里的 `eval_log.jsonl` 并进课程账本
+   （`<traj>/<课>/eval_log.jsonl`，按 `(iter,wver,stage,seed)` 去重；summary 不并——按合并后的
+   台账重算更可信）；
+3. **实时补传**：`_post_artifact` 的体里带 `eval_rows`（只本轮的、无 `source` 的逐局行，上界 400 条），
+   hub 侧 `_HubQueue.merge_eval_rows` 并进课程账本 ⇒ 段内就能在板子上看到读数。
+   ⚠ **时序陷阱**（并行带来的顺序后果）：产物 POST 发生在落盘之后而评估还在飞 ⇒ 第一次投递
+   时这一轮的 `eval_rows` 还不存在（若只做这一条，实时路径会**永不**带上读数——看着实现了、
+   实际零命中）。处置：`CloudEvalRunner` 的 `on_round_done` 钩子在评估落账后调
+   `OfflineDeliverer.submit_eval_round(it)` 把这**已投递的轮次重投一次**（hub 对重复投递幂等
+   但仍并账 eval 行）——重投排在真积压之后，探活失败则退回队里下次再试。
+
+### 断点续跑的锚点选法（用户口径：必须同轮齐全，否则退到更早轮）
+
+* hub 的两个来源：`<job_root>/offline/<run>/it-NNN/`（自回传）与 `<traj>/<课>/deliver/<run>/it-NNN/`
+  （控制台「导入产物」）；三件（`weights.json`/`opt.tar`/`row.json`）缺一就**不认**这一轮，从更大的
+  it 往下退；同一 it 两个来源取目录 mtime 更新的那份。缺 opt 只是 Adam 归零、缺 row 只是曲线少一点
+  ——两者都「看起来能跑」，所以判据卡在选轮这一步（`tests/test_offline_resume_anchor.py`）。
+* 云机侧：`fetch_resume` 三件拿不齐就**整个锚点作废**（半套锚点比没有更危险）；`apply_resume_overlay`
+  只采纳比产物当前 `last_it` 更新的锚点，指纹不符即拒（传输损坏不得进产物目录），同轮同名幂等。
+* 端点：`GET /offline/resume?course=X` 的 `resume: null` 是**正常应答**（云机要能区分「hub 说没有」
+  与「端点不可用」）；blob 端点只服务当前锚点 + 文件名白名单（不是通用文件服务）。
+
+### 别的
+
+* 一个真坑（ruff 抓的）：多课程重构后 `build_run_argv` 里的 `course` 变量已删但引用还在
+  （F821）——`--hub-course` 会带空串/直接炸；同处还修了 `RUF034` 的恒假三元。
+* `remote/offline_eval` 参与 `sys.path` 时的 stdlib `queue` 遮蔽风险：本模块**不用** `queue`，
+  用 `deque`+`Event` 手写单飞（`rl/queue.py` 会遮蔽 stdlib，历史上已踩过一次）。
+* 测试：`tests/test_offline_eval_cloud.py`（口径/执行/并行/采纳）、`tests/test_offline_resume_anchor.py`
+  （hub 选轮 + 端点 + 补传并账）、`tests/test_offline_eval_wiring.py`（装配/收线/argv/拉取/导入合并/多课程）。
+  门禁：`nn-python-gate`（ruff+mypy+pytest 2065 用例）39s 绿、`bun run check` 38s 绿。
+* **未做**（下一手可接）：云机 eval 的读数不进 `dist-agent-meta.jsonl`（采样机健康表不含云机腿）；
+  云机 eval 用的是云机自己的 CPU（不是节点池）——「云上的 eval 与 in-loop 的节点集群版差多少」
+  还没有同权重的对照实测（口径相同，算力不同）。
+
+---
+
 ## §128 本机评估的子进程捕获：gbk 解码把 stdout/stderr 丢成 None（顺带刷屏 65 行/100 局）（2026-09-22）
 
 `rl/eval_local.py::run_local_eval_game` 的 `subprocess.run(capture_output=True, text=True)` 没给
@@ -143,6 +268,17 @@ venv numpy 实载验证（BC 可直接消费；returns.npy 按 dual-head 可选�
 - **处方排序**：① demo 注入（7 份人类开局正是缺货的行为：BC 训 ref → kickstart 锚到它，复用现有缰绳机制；
   或 demo transitions 以固定比例混 PPO batch）；② wExplore 消融；③ horizon 动刀（方差风险，最后）；
   ④ 开局腿（等 demo 先验证"有货就能学会"）。
+
+**勘误（2026-09-22，开火读的口径修正；重算 `tmp/fire-compare.py`，数据 = 本节 traj 的 inputs 行）**：
+上文"NN 开火 20–160 vs 人类 119–275"是**总量**——总量是存活时间的镜像（NN 早死所以总量低），
+不携带行为差异信息。正确口径（同 seed 配对 + 速率 + 首 1000t 窗口）：
+- **双方通关的同种子对**（414009，n=1，待扩容）：NN 911 发 vs 人类 889 发，全程速率**逐位相同**
+  （169.3 vs 169.0 发/千tick）；首 1000t NN 反而更多（160 vs 119）。
+- **NN 早死的 6 局**：首 1000t（NN 不足 1000t 按实际寿命）速率 NN 71–160 vs 人类 132–275
+  发/千tick —— 速率差存在，但与成败**非单调**（通关对上两者相同）⇒ 开火差异**不能**作为
+  "接敌策略差异"的证据。稳定的行为差异仍是 **idle（moveHist[0] 口径：NN 全程 0 vs 人类
+  209–359）与走位**（本节主结论"策略库缺货"不变；demo 要拽的是**节奏**，不是站位——
+  noexplore 机制阴性佐证：顶部死亡全段基线仅 ~24%）。
 
 ---
 

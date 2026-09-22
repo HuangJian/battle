@@ -27,9 +27,8 @@ from rl.eval_local import (
     EVAL_LOCAL_SLOTS_DEFAULT,
     EVAL_TASK_ATTEMPTS,
     a_eval_seed_list,
-    eval_census_fields,
     eval_done_keys,
-    eval_loot_fields,
+    eval_row,
     hold_for_local,
     release_local_gate_if_starved,
     report_winrate_safe,  # noqa: F401 — re-exported（旧模块成员，兼容外部引用）
@@ -279,73 +278,13 @@ class EvalDispatcher:
                 task: tuple[int, int],
                 wall_sec: float | None = None,
             ) -> None:
-                # wall_sec = 训练机派发→结算墙钟；不覆盖 manifest.elapsedSec（节点服务时长）。
-                dims = manifest.get("dims") or {}
-                dim_vals = {
-                    k: (v.get("value") if isinstance(v, dict) else v) for k, v in dims.items()
-                }
-                win = 1 if manifest.get("win") else 0
-                # 全歼率（方案 A 口径，§15/P0-1）：export-eval-game 已透传 cleared——
-                # 敌人全灭即算歼灭，不受 BONUS TIME 窗口截断影响。门判定全歼必须读它，
-                # 否则 S3/S4a 的 timeout 局被系统性少算（eval_win 偏低 10-15pp）。
-                cleared = 1 if manifest.get("cleared") else 0
-                # x5⑧③：掉落三列（供给/构成可从 eval 直读，不再用 spawn 分项反推）。
-                loot = eval_loot_fields(manifest)
-                # Phase 0 逐敌种画像七列（T5 分敌种信用；旧报告缺键 = None）。
-                census = eval_census_fields(manifest)
-                row = {
-                    "event": "eval",
-                    "iter": it,
-                    "wver": key16,
-                    "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "stage": task[0],
-                    "seed": task[1],
-                    "node": nd_id,
-                    "outcome": manifest.get("outcome"),
-                    "win": win,
-                    "cleared": cleared,
-                    "ticks": manifest.get("ticks"),
-                    "score": manifest.get("score"),
-                    "quality": manifest.get("quality"),
-                    "dims": dim_vals,
-                    "kills": manifest.get("kills"),
-                    "enemyHits": manifest.get("enemyHits"),
-                    "hitRate": manifest.get("hitRate"),
-                    "powerUpsCollected": manifest.get("powerUpsCollected"),
-                    "powerUpsSpawned": loot["powerUpsSpawned"],
-                    "starsCollected": loot["starsCollected"],
-                    "playerDamageTaken": manifest.get("playerDamageTaken"),
-                    # T0.4 贯通（EvalBench §3.3 🟡🟠🔴）：export-eval-game 顶层直转，
-                    # 缺键（旧 agent/旧报告）= None，ingest 侧进覆盖率豁免清单。
-                    "playerHits": manifest.get("playerHits"),
-                    "policy": manifest.get("policy", "nn"),
-                    "enemyTotal": manifest.get("enemyTotal"),
-                    "playerDeaths": manifest.get("playerDeaths"),
-                    "playerShots": manifest.get("playerShots"),
-                    "playerLevel": manifest.get("playerLevel"),
-                    "cellsVisited": manifest.get("cellsVisited"),
-                    "firstKillTick": manifest.get("firstKillTick"),
-                    "stuckTicks": manifest.get("stuckTicks"),
-                    "puSpawnBomb": manifest.get("puSpawnBomb"),
-                    "puSpawnTank": manifest.get("puSpawnTank"),
-                    "puSpawnFreeze": manifest.get("puSpawnFreeze"),
-                    "puSpawnShield": manifest.get("puSpawnShield"),
-                    "puSpawnStar": manifest.get("puSpawnStar"),
-                    "puGotBomb": manifest.get("puGotBomb"),
-                    "puGotTank": manifest.get("puGotTank"),
-                    "puGotFreeze": manifest.get("puGotFreeze"),
-                    "puGotShield": manifest.get("puGotShield"),
-                    "puGotOther": loot["puGotOther"],
-                    "elapsedSec": manifest.get("elapsedSec"),
-                    "wallSec": wall_sec,
-                    "hitsByKind": census["hitsByKind"],
-                    "killsByKind": census["killsByKind"],
-                    "exposureByKind": census["exposureByKind"],
-                    "firstHitKind": census["firstHitKind"],
-                    "firstKillKind": census["firstKillKind"],
-                    "killOrder": census["killOrder"],
-                    "killerKinds": census["killerKinds"],
-                }
+                # 行构造的唯一实现点在 rl/eval_local.eval_row（云机离线评估用同一份）
+                row = eval_row(
+                    manifest, it=it, key16=key16, task=task, node=nd_id, wall_sec=wall_sec
+                )
+                # 累加器要的两个量从行里读回（它们本来就是同一份 manifest 的派生）
+                win = int(row["win"])
+                cleared = int(row["cleared"])
                 with jsonl_lock:
                     with open(eval_jsonl, "a", encoding="utf-8") as jf:
                         jf.write(json.dumps(row) + "\n")

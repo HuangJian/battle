@@ -99,6 +99,9 @@ from remote.protocol import (
     OFFLINE_CAP_HEADER,
     OFFLINE_RESULT_BODY_MAX,
     OFFLINE_RESULT_PATH,
+    OFFLINE_RESUME_BLOB_NAMES,
+    OFFLINE_RESUME_BLOB_PATH,
+    OFFLINE_RESUME_PATH,
     OFFLINE_TASK_PACK_PATH,
     PAYLOAD_NAME,
     PUSH_POLL_SEC,
@@ -808,6 +811,38 @@ class _JobStore(_AuthGuard):
     OFFLINE_METRICS_NAME = "metrics.jsonl"
     #: 段末摘要文件名（同一目录；覆盖写）。
     OFFLINE_RESULT_NAME = "result.json"
+
+    #: 续跑锚点必须**同轮齐全**的三件（用户 2026-09-22 口径：缺一件就退到更早轮）。
+    RESUME_PARTS: tuple[str, ...] = ("weights.json", "opt.tar", "row.json")
+
+    def complete_rounds(self) -> dict[int, dict]:
+        """自回传产物（`offline/<run_id>/it-NNN/`）里**三件齐全**的轮次：`{it: {run_id, dir}}`。
+
+        齐全 = weights + opt + row 都在：续跑要么重放 Adam 动量（缺 opt 就是动量归零），
+        要么丢指标行（那轮在曲线上消失）——两者都是「看起来能跑但读数少一截」。
+        """
+        out: dict[int, dict] = {}
+        base = self.job_root / self.OFFLINE_DIR
+        try:
+            run_dirs = sorted(p for p in base.iterdir() if p.is_dir())
+        except OSError:
+            return out
+        for run_dir in run_dirs:
+            try:
+                it_dirs = sorted(p for p in run_dir.iterdir() if p.is_dir())
+            except OSError:
+                continue
+            for it_dir in it_dirs:
+                if not it_dir.name.startswith("it-"):
+                    continue
+                try:
+                    it = int(it_dir.name[3:])
+                except ValueError:
+                    continue
+                if not all((it_dir / n).is_file() for n in self.RESUME_PARTS):
+                    continue
+                out[it] = {"run_id": run_dir.name, "dir": str(it_dir)}
+        return out
 
     def offline_run_dir(self, run_id: object) -> Path:
         """补传落位目录。`run_id` 来自远端 ⇒ 必须先过 `sanitize_run_id`（它会是目录名）。"""
@@ -1571,6 +1606,110 @@ class _HubQueue(_AuthGuard):
             return self._solo.job_root.parent.parent
         return None
 
+    def course_dir(self, course: str) -> Path:
+        """课程目录 `<traj>/<课>`（`job_root` = `<traj>/<课>/remote-jobs` 回推一级）。"""
+        return self._stores[course].job_root.parent
+
+    def resume_sources(self, course: str) -> list[dict]:
+        """一门课的续跑锚点来源（**两个来源、同一台机器**）：自回传 + 人工导入。
+
+        * `backfeed`：云机补传落下的 `<job_root>/offline/<run_id>/it-NNN/`；
+        * `import`  ：控制台「导入产物」解出的 `<traj>/<课>/deliver/<run_id>/it-NNN/`
+          （`remote.deliver_zip` 的落地布局，与回传同一形状——所以两边的判据能共用）。
+
+        两个来源都要：用户口径是「云机回传**或者**人工导入 权重/opt/指标 后」再领任务都要
+        能接上——只认回传就漏了手动那条路（而手动那条恰恰是 hub 不在场时的唯一路）。
+        """
+        st = self._stores[course]
+        out: list[dict] = []
+        for it, info in st.complete_rounds().items():
+            out.append(
+                {"it": int(it), "run_id": info["run_id"], "source": "backfeed", "dir": Path(info["dir"])}
+            )
+        deliver_root = st.job_root.parent / "deliver"
+        try:
+            runs = sorted(p for p in deliver_root.iterdir() if p.is_dir())
+        except OSError:
+            runs = []
+        for run_dir in runs:
+            try:
+                it_dirs = sorted(p for p in run_dir.iterdir() if p.is_dir())
+            except OSError:
+                continue
+            for it_dir in it_dirs:
+                if not it_dir.name.startswith("it-"):
+                    continue
+                try:
+                    it = int(it_dir.name[3:])
+                except ValueError:
+                    continue
+                if not all((it_dir / n).is_file() for n in _JobStore.RESUME_PARTS):
+                    continue
+                out.append(
+                    {"it": int(it), "run_id": run_dir.name, "source": "import", "dir": it_dir}
+                )
+        return out
+
+    def merge_eval_rows(self, course: str, rows: object) -> int:
+        """把离线补传来的云机 A 层评估行并进**课程账本** `eval_log.jsonl`，返回新增行数。
+
+        为什么要 hub 做这一步：那是控制台/门判唯一读的账本（`<traj>/<课>/eval_log.jsonl`），
+        而云机那侧只看得见自己的产物目录——不并进去，整段的评估读数要等「跑完人工导入」
+        才存在，而「一条跑偏的腿」正是这条腿要尽早看见的东西。
+
+        去重按 `(iter, wver, stage, seed)`（`rl.eval_local.eval_row_key`）：补传天然会重传
+        （重连/重启续投），重复行会让曲线出现两个同一点。只接 `event:"eval"` 逐局行——
+        summary 由课程侧按合并后的台账重算，云端那份不并（避免同 iter 两个 summary 打架）。
+        """
+        if not isinstance(rows, list) or not rows:
+            return 0
+        from rl.eval_local import append_eval_rows
+
+        ledger = self._stores[course].job_root.parent / "eval_log.jsonl"
+        return append_eval_rows(ledger, [r for r in rows if isinstance(r, dict)])
+
+    def resume_anchor(self, course: str) -> dict | None:
+        """最新一轮**同轮齐全**的续跑锚点（`None` = 没有可交回的进度）。
+
+        选法（用户 2026-09-22 口径「必须同轮齐全，否则退到更早轮」）：从最大的 it 往下找，
+        第一个三件齐全的轮次就是锚点；同一 it 有两个来源时取目录 mtime 更新的那个
+        （回传与导入可能各有一份，人刚导完的那份更可信）。**绝不**用「部分齐全」的轮次
+        凑数——那会静默丢掉 Adam 动量或那一轮的指标。
+        """
+        by_it: dict[int, list[dict]] = {}
+        for cand in self.resume_sources(course):
+            by_it.setdefault(int(cand["it"]), []).append(cand)
+        for it in sorted(by_it, reverse=True):
+            cands = by_it[it]
+            if len(cands) > 1:
+                try:
+                    cands = sorted(cands, key=lambda c: c["dir"].stat().st_mtime, reverse=True)
+                except OSError:
+                    pass
+            best = cands[0]
+            d = Path(best["dir"])
+            try:
+                row = json.loads((d / "row.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                row = {}
+            wfp = str((row or {}).get("weights_fp", "") or "")
+            if not wfp:
+                try:
+                    wfp = hashlib.sha256((d / "weights.json").read_bytes()).hexdigest()
+                except OSError:
+                    wfp = ""
+            return {
+                "course": course,
+                "it": int(it),
+                "run_id": str(best["run_id"]),
+                "source": str(best["source"]),
+                "weights_fp": wfp,
+                "opt_bytes": int(row.get("opt_bytes", 0) or 0),
+                "metrics": row if isinstance(row, dict) else {},
+                "_dir": str(d),
+            }
+        return None
+
     def task_pack_path(self, course: str) -> Path:
         """整段任务包落点：`<traj>/<课>/task-<课>.zip`（控制台导出的就是它）。
 
@@ -2093,6 +2232,10 @@ class HubHandler(BaseHTTPRequestHandler):
                 self._admin_offline()
             elif path == OFFLINE_TASK_PACK_PATH:
                 self._get_task_pack()
+            elif path == OFFLINE_RESUME_PATH:
+                self._get_offline_resume()
+            elif path == OFFLINE_RESUME_BLOB_PATH:
+                self._get_offline_resume_blob()
             elif path.startswith("/jobs/") and path.endswith("/payload"):
                 self._get_payload()
             elif path.startswith("/jobs/") and path.endswith("/ts_code"):
@@ -2340,6 +2483,88 @@ class HubHandler(BaseHTTPRequestHandler):
             flush=True,
         )
         self._bytes(data, 200, "application/zip", filename=p.name)
+
+    def _get_offline_resume(self) -> None:
+        """`GET /offline/resume?course=<课>`：递「最新同轮齐全的续跑锚点」元信息（2026-09-22）。
+
+        为什么单开一个端点而不是改进任务包：任务包是**导出那一刻**的只读快照（控制台写的
+        那个 zip，`plan_sha256` 都绑在它上面），当场重打一份就等于让 hub 去当一个「导出器」
+        ——那个能力只有 `run_rl --export-bundle` 有。所以锚点另走一条小消息：云机照旧取包，
+        再把锚点铺进产物目录（`remote.run_loop --resume-dir`）。
+
+        `resume: null` 是**正常应答**（没有比包更新的进度）——不是 404：云机要能区分
+        「hub 说没有」与「端点不可用/鉴权失败」。
+        """
+        if not self._auth_ok():
+            return
+        course = self._query_course()
+        if not course:
+            self._json({"error": "需要 ?course=<课>"}, 400)
+            return
+        try:
+            anchor = self.hub.resume_anchor(course)
+        except ProtocolError as e:
+            self._json({"error": str(e), "course": course}, 400)
+            return
+        except KeyError:
+            self._json({"error": f"未知课程 {course}", "course": course, "known": self.hub.courses()}, 404)
+            return
+        if anchor is None:
+            self._json({"course": course, "resume": None}, 200)
+            return
+        pub = {k: v for k, v in anchor.items() if not k.startswith("_")}
+        print(
+            f"[{time.strftime('%H:%M:%S')}] [hub-server] resume-anchor -> {course} "
+            f"it{pub['it']}（{pub['source']}, wfp={str(pub['weights_fp'])[:12]}…）",
+            flush=True,
+        )
+        self._json({"course": course, "resume": pub}, 200)
+
+    def _get_offline_resume_blob(self) -> None:
+        """`GET /offline/resume/blob?course=<课>&it=N&name=<件>`：递锚点轮次的字节。
+
+        三道门：鉴权 → `name` 白名单（`OFFLINE_RESUME_BLOB_NAMES`）→ 「该 it 就是当前锚点」
+        （只服务锚点本身，不接受任意 it/任意路径——这里不是通用文件服务）。
+        """
+        if not self._auth_ok():
+            return
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        course = (qs.get("course") or [""])[0].strip()
+        name = (qs.get("name") or [""])[0].strip()
+        try:
+            it = int((qs.get("it") or [""])[0])
+        except ValueError:
+            self._json({"error": "需要整数 ?it=N"}, 400)
+            return
+        if not course:
+            self._json({"error": "需要 ?course=<课>"}, 400)
+            return
+        if name not in OFFLINE_RESUME_BLOB_NAMES:
+            self._json(
+                {"error": f"name 必须是 {list(OFFLINE_RESUME_BLOB_NAMES)} 之一，收到 {name!r}"},
+                400,
+            )
+            return
+        anchor = self.hub.resume_anchor(course)
+        if anchor is None or int(anchor["it"]) != it:
+            self._json(
+                {
+                    "error": "该 it 不是当前续跑锚点（锚点可能已被更新的轮次取代）",
+                    "course": course,
+                    "it": it,
+                    "anchor_it": (int(anchor["it"]) if anchor else None),
+                },
+                409,
+            )
+            return
+        p = Path(str(anchor["_dir"])) / name
+        try:
+            data = p.read_bytes()
+        except OSError as e:
+            self._json({"error": f"读锚点件失败: {e}", "path": str(p)}, 500)
+            return
+        ctype = "application/json" if name.endswith(".json") else "application/octet-stream"
+        self._bytes(data, 200, ctype, filename=f"it-{it:03d}-{name}")
 
     def _admin_courses(self, set_mode: bool = False) -> None:
         """`GET /admin/courses` 看课程表；`POST ?course=X&mode=online|offline` 热切。
@@ -2879,6 +3104,22 @@ class HubHandler(BaseHTTPRequestHandler):
                     f"本 hub 的课程：{self.hub.courses()}"
                 )
             res = self.hub.store_offline_artifact(course, body)
+            # 本轮随体重一并到达的云机评估行 → 课程账本（去重；失败只记一笔，
+            # **不影响**补传本身的成功与否：权重才是这一趟的硬要求）。
+            try:
+                n_eval = self.hub.merge_eval_rows(course, body.get("eval_rows"))
+                if n_eval:
+                    print(
+                        f"[{time.strftime('%H:%M:%S')}] [hub-server] eval rows +{n_eval} "
+                        f"（course={course} it{body.get('it')}）",
+                        flush=True,
+                    )
+            except Exception as e:
+                print(
+                    f"[{time.strftime('%H:%M:%S')}] [hub-server] eval rows 并入失败"
+                    f"（忽略）: {type(e).__name__}: {e}",
+                    flush=True,
+                )
         except (ProtocolError, ValueError, UnicodeDecodeError) as e:
             self._json({"error": f"补传被拒: {e}"}, 400)
             return

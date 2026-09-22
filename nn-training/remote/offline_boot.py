@@ -304,6 +304,65 @@ def fetch_task_pack(
     return dest
 
 
+def fetch_resume(
+    hub: str,
+    token: str,
+    course: str,
+    dest_dir: Path,
+    log: Callable[[str], None],
+    timeout: float = PING_TIMEOUT,
+) -> Path | None:
+    """`GET /offline/resume?course=<课>` → 把锚点轮次铺进 `dest_dir`（秒级小请求，失败= None）。
+
+    云机重领任务时「任务包比 hub 上的进度旧」是常态（包是导出那一刻的快照，而云机可能
+    已被回收又重开）。锚点三件（weights/opt/指标行）拿到手后交给 `run_loop --resume-dir`，
+    它把那一轮采纳进产物目录、从之后接着跑（用户口径：必须**同轮齐全**，否则退到更早轮
+    ——所以这里只认 hub 给的那一轮，不在客户端自己扫描/凑件）。
+
+    任何失败都**不影响训练**（安静回 None，日志里留一行原因）：锚点只是「少跑几轮」的
+    优化，包自带的起点永远能跑。
+    """
+    url = f"{hub.rstrip('/')}/offline/resume?course={urllib.parse.quote(course)}"
+    try:
+        req = urllib.request.Request(url, headers={"Authorization": "Bearer " + token})
+        with _build_opener().open(req, timeout=timeout) as resp:
+            meta = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        log(f"取续跑锚点失败（{type(e).__name__}: {e}）——从任务包自带起点跑")
+        return None
+    resume = meta.get("resume") if isinstance(meta, dict) else None
+    if not isinstance(resume, dict):
+        log("hub 上没有比任务包更新的完整轮次——从任务包自带起点跑")
+        return None
+    try:
+        it = int(resume["it"])
+    except (KeyError, TypeError, ValueError):
+        log(f"续跑锚点元信息缺 it（{resume}）——忽略")
+        return None
+    ac_dir = dest_dir / f"it-{it:03d}"
+    ac_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("weights.json", "opt.tar", "row.json"):
+        q = f"{url}&it={it}&name={urllib.parse.quote(name)}"
+        try:
+            req = urllib.request.Request(q, headers={"Authorization": "Bearer " + token})
+            with _build_opener().open(req, timeout=timeout) as resp:
+                (ac_dir / name).write_bytes(resp.read())
+        except Exception as e:
+            # 三件不齐 = 这个锚点不可用（不是「少一件也能跑」）：静默退回包自带起点。
+            log(f"取续跑锚点件 {name} 失败（{type(e).__name__}: {e}）——放弃该锚点")
+            return None
+    (dest_dir / "resume.json").write_text(
+        json.dumps({**resume, "fetched_at": time.strftime("%Y-%m-%d %H:%M:%S")},
+                   ensure_ascii=False, indent=1),
+        encoding="utf-8",
+    )
+    log(
+        f"续跑锚点就位：it{it}（来源 {resume.get('source')}，run={resume.get('run_id')}，"
+        f"wfp={str(resume.get('weights_fp'))[:12]}…）——本段从它之后继续"
+    )
+    return dest_dir
+
+
 # ── 拿包：hub 与手动两条源，一个等待循环 ───────────────────────────────────
 
 
@@ -455,9 +514,19 @@ def write_token_file(dest_dir: Path, token: str) -> str:
 
 
 def build_run_argv(
-    cfg: dict, pack: Path, dest: Path, hub: str, token_file: str
+    cfg: dict,
+    pack: Path,
+    dest: Path,
+    hub: str,
+    token_file: str,
+    resume_dir: str | Path | None = None,
 ) -> list[str]:
-    """run_loop 的 argv（纯函数，便于单测钉住回传开关的两种形状）。"""
+    """run_loop 的 argv（纯函数，便于单测钉住回传/评估/锚点三组开关的形状）。
+
+    `cfg["course"]` 在这一层恒是**单个**课程名（`run_one_course` 已把多课程列表拆开），
+    它同时是补传的归位键（hub 侧 `<traj>/<课>/` 的目录名）与任务包名的一部分。
+    """
+    course = str(cfg.get("course") or "").strip()
     argv = ["--bundle", str(pack), "--artifacts", str(dest)]
     device = str(cfg.get("device") or "").strip()
     if device:
@@ -468,18 +537,94 @@ def build_run_argv(
         argv += ["--max-iters", str(int(cfg["max_iters"]))]
     if float(cfg.get("budget_sec") or 0):
         argv += ["--budget-sec", str(float(cfg["budget_sec"]))]
+    # rollout 并行局数：缺省（不传）= 按云机核数 `max(cores−4, cores×0.8)`，与云机 eval 同一口径。
+    # 传了就完全按它——两边都不为对方预留（rollout 与 eval 在这条链上是交替跑的）。
+    if int(cfg.get("rollout_workers") or 0):
+        argv += ["--rollout-workers", str(int(cfg["rollout_workers"]))]
+    # 云机 A 层评估（`eval_on_cloud`）：语料/口径全部由课程（随包的 course.jsonc）决定，
+    # 这里只传两个执行面旋钮（并发/单局超时）——不在 notebook 里重复一遍语料定义。
+    if bool(cfg.get("eval_on_cloud", False)):
+        argv += ["--eval-on-cloud"]
+        if int(cfg.get("eval_slots") or 0):
+            argv += ["--eval-slots", str(int(cfg["eval_slots"]))]
+        if float(cfg.get("eval_game_timeout_sec") or 0):
+            argv += ["--eval-game-timeout-sec", str(float(cfg["eval_game_timeout_sec"]))]
+    # 续跑锚点（hub 递回的最新「同轮齐全」轮次）：有它就从那儿接，没有就从包自带起点。
+    if resume_dir and Path(resume_dir).is_dir():
+        argv += ["--resume-dir", str(resume_dir)]
     if bool(cfg.get("live_backfeed", True)) and hub and token_file:
         argv += ["--hub-url", hub, "--hub-token-file", token_file]
         # 补传的**归位键**（多课程 hub 必需）：`CFG.course` 就是控制台里那门课的名字，
         # 也是 hub 侧 `<traj>/<课>/` 的目录名（hub 靠它把每一轮落进正确的课程目录）。
         # 缺了它，多课程 hub 会以「无法归属课程」把每条补传拒掉（400）——训练不受影响，
         # 但控制台上看不到段内进度，只剩「跑完自己下载导入」那条路。
-        course = str(cfg.get("course") or "").strip()
         if course:
             argv += ["--hub-course", course]
     else:
         argv += ["--no-deliver"]
     return argv
+
+
+#: 课程名的合法形状（与 `course_from_pack_name` 同一条口径：它是目录名/文件名，不是自由文本）。
+_COURSE_NAME_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
+
+
+def courses_of(cfg: dict) -> list[str]:
+    """`CFG.course` → **课程名列表**（去重、保序）：字符串 = 一门课，列表 = 串行多门。
+
+    用户指令（2026-09-22）：「battle.offline.ipynb 的 course 配置项，需支持多个离线课程名。
+    云机串行从 hub 取任务，逐个完成。」——列表即执行顺序（控制台里那几门课的名字，逐字相同）。
+
+    三种写法都认：`"c5-gae"`、`["c5-gae", "c6-gae"]`、`"c5-gae, c6-gae"`（逗号/空白分隔）。
+    空列表/空名/非法名（含路径分隔符、`..` 等）一律 SystemExit —— 课程名会被拼进目录名与
+    `task-<课>.zip`，含糊的名字在这里就得拦下，不能等到写盘。
+    """
+    raw = cfg.get("course")
+    items: list[str] = []
+    if isinstance(raw, (list, tuple)):
+        for x in raw:
+            items.extend(_split_course_names(str(x)))
+    else:
+        items.extend(_split_course_names(str(raw or "")))
+    out: list[str] = []
+    bad: list[str] = []
+    for name in items:
+        if not _COURSE_NAME_RE.fullmatch(name):
+            bad.append(name)
+            continue
+        if name not in out:
+            out.append(name)
+    if bad:
+        raise SystemExit(
+            f"[offline] CFG.course 里的课程名非法（只允许字母/数字/._-，≤64 字）：{bad}"
+            "——课程名会进目录名与任务包名，请与控制台课程名逐字对齐"
+        )
+    if not out:
+        raise SystemExit(
+            "[offline] CFG.course 没填 —— 取包/交付物都按课程名走，必须给"
+            "（支持多门课：列表按顺序串行跑完）"
+        )
+    return out
+
+
+def _split_course_names(text: str) -> list[str]:
+    """一个字符串 → 课程名（逗号/空白分隔；单名就是 [name]）。"""
+    return [p for p in re.split(r"[,\s]+", str(text).strip()) if p]
+
+
+def course_work_dir(cfg: dict, course: str, *, multi: bool) -> Path:
+    """该课的临时工作目录（包/产物/hub.token 都在这儿）。
+
+    单课与今日**逐字相同**（缺省 `<download_dir>/battle-offline/<课>`；显式 `work_dir`
+    原样用）；多课时即使给了显式 `work_dir` 也**再套一层课程名**——否则两门课共用
+    `<work_dir>/run/` 这个产物目录，第二门课的 run_loop 会把第一门的产物当成自己的
+    续跑点（权重接错课，且看起来完全正常）。
+    """
+    explicit = str(cfg.get("work_dir") or "").strip()
+    base = Path(explicit).expanduser() if explicit else download_dir(cfg) / "battle-offline"
+    if explicit and not multi:
+        return base
+    return base / course
 
 
 def download_dir(cfg: dict) -> Path:
@@ -519,36 +664,29 @@ def package_deliverable(
     return dest
 
 
-def run(
+def run_one_course(
     cfg: dict,
+    creds: dict,
     log: Callable[[str], None],
-    secret: Callable[..., str],
-    keepalive_stop: Any = None,
+    keepalive_stop: Any,
+    *,
+    course: str,
+    multi: bool = False,
+    run_loop_main: Callable[[list[str]], int] | None = None,
 ) -> int:
-    """cell 的唯一入口。返回 rc（交给 `SystemExit`）。
+    """跑**一门课**的整段：取包 → 引导代码 → `remote.run_loop` → 打交付物；返回 rc。
 
-    `cfg` 见 `ipynb/battle.offline.ipynb` 的 CFG（course / hub_url / device / task_zip /
-    wait_pack_sec / live_backfeed / budget_sec / threads / max_iters …）。
+    `multi=True`（同一会话里还有别的课）时工作目录再套一层课程名——见 `course_work_dir`。
+    `run_loop_main` 是测试用的注入点（生产走 `remote.run_loop.main`）。
     """
-    # ★ 凭据一律在任何网络改动**之前**读完（2026-09-17 Kaggle 事故的时序约束）：
-    #   userspace 引导会把平台 Secrets（公网 HTTPS）变成够不着的东西。
-    creds = {
-        "HUB_TOKEN": secret("HUB_TOKEN", cfg.get("hub_token")),
-        "HUB_IP": secret("HUB_IP", cfg.get("hub_ip")),
-        "TS_AUTHKEY": secret("TS_AUTHKEY", cfg.get("ts_authkey")),
-    }
-    log("凭据就绪（值不落日志）：" + (", ".join(k for k, v in creds.items() if v) or "（一个都没读到）"))
-    course = str(cfg.get("course") or "").strip()
-    if not course:
-        raise SystemExit("[offline] CFG.course 没填 —— 取包/交付物都按课程名走，必须给")
-
-    work = Path(str(cfg.get("work_dir") or "")).expanduser() if cfg.get("work_dir") else None
-    if work is None:
-        work = download_dir(cfg) / "battle-offline" / course
+    work = course_work_dir(cfg, course, multi=multi)
     work.mkdir(parents=True, exist_ok=True)
     log(f"工作目录: {work}")
+    # 本课自己的 cfg：`course` 恒是**单个字符串**（下游放包路径/交付物名/`--hub-course`
+    # 都按它拼；传原样的列表会拼出 "['a', 'b']" 这种目录名）。
+    ccfg = {**cfg, "course": course}
 
-    pack = obtain_pack(cfg, creds, log, work, stop=keepalive_stop)
+    pack = obtain_pack(ccfg, creds, log, work, stop=keepalive_stop)
     idx = read_pack_index(pack)
     log(
         f"任务包: {idx.get('run_id')} it{idx.get('it')} → it{idx.get('end_it')}"
@@ -564,42 +702,53 @@ def run(
 
     ensure_code(pack, log)
     from remote.notebook_runtime import resolve_device  # code.zip 已在 sys.path 上
-    from remote.run_loop import main as run_loop_main
 
-    if not str(cfg.get("device") or "").strip() or str(cfg["device"]).strip() == "auto":
+    if run_loop_main is None:
+        from remote.run_loop import main as _run_loop_main
+
+        run_loop_main = _run_loop_main
+    if not str(ccfg.get("device") or "").strip() or str(ccfg["device"]).strip() == "auto":
         # `auto` 不能原样传下去（下游不认这个名字，2026-09-15 事故）——先解析成 cuda/tpu/cpu。
-        cfg = {
-            **cfg,
+        ccfg = {
+            **ccfg,
             "device": resolve_device(
                 {
-                    "device": cfg.get("device", "auto"),
-                    "use_multi_gpu": bool(cfg.get("use_multi_gpu", True)),
+                    "device": ccfg.get("device", "auto"),
+                    "use_multi_gpu": bool(ccfg.get("use_multi_gpu", True)),
                 },
                 log,
             ),
         }
 
+    token = str(creds.get("HUB_TOKEN") or "")
     hub = ""
-    tok_file = ""
-    if bool(cfg.get("live_backfeed", True)):
-        for cand in hub_candidates(cfg, creds):
-            if probe_hub(cand, str(creds.get("HUB_TOKEN") or ""), log):
-                hub = cand
-                tok_file = write_token_file(work, str(creds.get("HUB_TOKEN") or ""))
-                log(f"实时回传开启 → {hub}（每轮 best-effort 推产物）")
-                break
+    # hub 探活**只做一次**：回传与「续跑锚点」两条腿共用同一个连通性结论（它们都是
+    # 「hub 此刻在不在」的问题，探两次只会让日志里出现两个可能不一致的结论）。
+    for cand in hub_candidates(ccfg, creds):
+        if probe_hub(cand, token, log):
+            hub = cand
+            break
+    resume_dir: Path | None = None
+    if hub:
+        # 续跑锚点：hub 手里可能有更新的（自回传 / 人工导入的）完整轮次。先取它，
+        # 再交给 run_loop——于是「重领任务」= 从最新进度接着跑，而不是从头重跑。
+        resume_dir = fetch_resume(hub, token, course, work / "resume", log)
+    if bool(ccfg.get("live_backfeed", True)):
+        if hub:
+            tok_file = write_token_file(work, token)
+            log(f"实时回传开启 → {hub}（每轮 best-effort 推产物）")
         else:
             log("实时回传开着，但此刻够不着 hub —— 改为纯离线（产物照样逐轮落盘）")
     else:
         log("实时回传关闭（CFG.live_backfeed=False）—— 跑完统一打包，手动下载导入")
 
     dest = work / "run"
-    argv = build_run_argv(cfg, pack, dest, hub, tok_file)
+    argv = build_run_argv(ccfg, pack, dest, hub, tok_file, resume_dir)
     log("开始训练：python -m remote.run_loop " + " ".join(_redact(argv)))
     rc = int(run_loop_main(argv) or 0)
     log(f"run_loop 退出 rc={rc}；产物目录 {dest}")
 
-    got = package_deliverable(dest, course, download_dir(cfg), log)
+    got = package_deliverable(dest, course, download_dir(ccfg), log)
     if hub:
         log(
             "轮次已尽力回传给 hub（控制台按课程账户看进度）；"
@@ -612,6 +761,59 @@ def run(
         )
     else:
         log(f"纯离线完成，但没打出交付物 zip（见上面的报错）—— 产物目录还在：{dest}")
+    return rc
+
+
+def run(
+    cfg: dict,
+    log: Callable[[str], None],
+    secret: Callable[..., str],
+    keepalive_stop: Any = None,
+) -> int:
+    """cell 的唯一入口。返回 rc（交给 `SystemExit`）。
+
+    `cfg` 见 `ipynb/battle.offline.ipynb` 的 CFG（course / hub_url / device / task_zip /
+    wait_pack_sec / live_backfeed / budget_sec / threads / max_iters / eval_on_cloud /
+    rollout_workers …）。
+
+    **多课程：串行跑完**（2026-09-22 用户指令）——`CFG.course` 给列表时按顺序逐门跑，
+    每门课都是完整一段（取包 → 训练 → 交付物）；哪一门没跑完就停在那里并把剩余课程
+    列出来（一门课的错误不该被下一门课的错误盖住；而“剩余课程名”是人在云机上最需要的
+    下一步）——不静默跳课。
+    """
+    # ★ 凭据一律在任何网络改动**之前**读完（2026-09-17 Kaggle 事故的时序约束）：
+    #   userspace 引导会把平台 Secrets（公网 HTTPS）变成够不着的东西。
+    creds = {
+        "HUB_TOKEN": secret("HUB_TOKEN", cfg.get("hub_token")),
+        "HUB_IP": secret("HUB_IP", cfg.get("hub_ip")),
+        "TS_AUTHKEY": secret("TS_AUTHKEY", cfg.get("ts_authkey")),
+    }
+    log("凭据就绪（值不落日志）：" + (", ".join(k for k, v in creds.items() if v) or "（一个都没读到）"))
+    courses = courses_of(cfg)
+    multi = len(courses) > 1
+    log(f"课程队列（{len(courses)} 门，串行）：{', '.join(courses)}")
+    rc = 0
+    for i, course in enumerate(courses):
+        rest = courses[i + 1 :]
+        log(f"===== [{i + 1}/{len(courses)}] 课程 {course} =====")
+        try:
+            rc = run_one_course(cfg, creds, log, keepalive_stop, course=course, multi=multi)
+        except SystemExit as e:
+            if rest:
+                log(
+                    f"课程 {course} 未跑完（{e.code}）——串行到此为止，剩余 {len(rest)} 门课未执行："
+                    f"{', '.join(rest)}"
+                )
+            raise
+        if rc != 0:
+            log(
+                f"课程 {course} 退出 rc={rc} ——串行到此为止；"
+                + (f"剩余 {len(rest)} 门课未执行：{', '.join(rest)}" if rest else "它已是最后一门课")
+            )
+            return rc
+        if rest:
+            log(f"课程 {course} 完成 —— 下一门：{rest[0]}")
+    log(f"全部课程完成（{len(courses)} 门）：{', '.join(courses)}")
     return rc
 
 

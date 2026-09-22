@@ -422,7 +422,14 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
         return okResp({
           ok: true,
           message: r.message,
-          detail: [`产物将落在 ${taskBundleInfo(ctx.course).path}`],
+          detail: [
+            // 旧包作废是**这条腿的语义**（导出 = 重新打一份带当前代码的包），面板必须说出来：
+            // 否则「重启后云机拉不到包」会被当成故障，而它是刻意等的。
+            ...(r.invalidated
+              ? ['旧任务包已作废（代码可能已变）——导出完成前云机取不到包（/offline/task-pack 404）']
+              : []),
+            `产物将落在 ${taskBundleInfo(ctx.course).path}`,
+          ],
         })
       }
       case 'evalReplays': {

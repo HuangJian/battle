@@ -332,8 +332,159 @@ def eval_census_fields(manifest: dict | None) -> dict:
     return out
 
 
+def eval_row(
+    manifest: dict,
+    *,
+    it: int,
+    key16: str,
+    task: tuple[int, int],
+    node: str,
+    wall_sec: float | None = None,
+) -> dict:
+    """一条逐局评估账本行（`eval_log.jsonl` 的 `event:"eval"` schema）。
+
+    这是**唯一**的行构造点：in-loop 派发器（`rl/eval_dispatch.EvalDispatcher.record`）与
+    云机离线评估（`remote/offline_eval.py`）都从这里取——两条腿的读数必须逐字段可比，
+    否则「离线跑的 eval 与 in-loop eval 是不是同一档」就只能靠人肉比对了。
+    键的取舍与理由（掉落三列 / Phase 0 七列 / wallSec 与 elapsedSec 之别）见各字段注释。
+    """
+    dims = manifest.get("dims") or {}
+    dim_vals = {k: (v.get("value") if isinstance(v, dict) else v) for k, v in dims.items()}
+    win = 1 if manifest.get("win") else 0
+    # 全歼率（方案 A 口径，§15/P0-1）：export-eval-game 已透传 cleared——
+    # 敌人全灭即算歼灭，不受 BONUS TIME 窗口截断影响。门判定全歼必须读它，
+    # 否则 S3/S4a 的 timeout 局被系统性少算（eval_win 偏低 10-15pp）。
+    cleared = 1 if manifest.get("cleared") else 0
+    # x5⑧③：掉落三列（供给/构成可从 eval 直读，不再用 spawn 分项反推）。
+    loot = eval_loot_fields(manifest)
+    # Phase 0 逐敌种画像七列（T5 分敌种信用；旧报告缺键 = None）。
+    census = eval_census_fields(manifest)
+    return {
+        "event": "eval",
+        "iter": it,
+        "wver": key16,
+        "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "stage": task[0],
+        "seed": task[1],
+        "node": node,
+        "outcome": manifest.get("outcome"),
+        "win": win,
+        "cleared": cleared,
+        "ticks": manifest.get("ticks"),
+        "score": manifest.get("score"),
+        "quality": manifest.get("quality"),
+        "dims": dim_vals,
+        "kills": manifest.get("kills"),
+        "enemyHits": manifest.get("enemyHits"),
+        "hitRate": manifest.get("hitRate"),
+        "powerUpsCollected": manifest.get("powerUpsCollected"),
+        "powerUpsSpawned": loot["powerUpsSpawned"],
+        "starsCollected": loot["starsCollected"],
+        "playerDamageTaken": manifest.get("playerDamageTaken"),
+        # T0.4 贯通（EvalBench §3.3 🟡🟠🔴）：export-eval-game 顶层直转，
+        # 缺键（旧 agent/旧报告）= None，ingest 侧进覆盖率豁免清单。
+        "playerHits": manifest.get("playerHits"),
+        "policy": manifest.get("policy", "nn"),
+        "enemyTotal": manifest.get("enemyTotal"),
+        "playerDeaths": manifest.get("playerDeaths"),
+        "playerShots": manifest.get("playerShots"),
+        "playerLevel": manifest.get("playerLevel"),
+        "cellsVisited": manifest.get("cellsVisited"),
+        "firstKillTick": manifest.get("firstKillTick"),
+        "stuckTicks": manifest.get("stuckTicks"),
+        "puSpawnBomb": manifest.get("puSpawnBomb"),
+        "puSpawnTank": manifest.get("puSpawnTank"),
+        "puSpawnFreeze": manifest.get("puSpawnFreeze"),
+        "puSpawnShield": manifest.get("puSpawnShield"),
+        "puSpawnStar": manifest.get("puSpawnStar"),
+        "puGotBomb": manifest.get("puGotBomb"),
+        "puGotTank": manifest.get("puGotTank"),
+        "puGotFreeze": manifest.get("puGotFreeze"),
+        "puGotShield": manifest.get("puGotShield"),
+        "puGotOther": loot["puGotOther"],
+        "elapsedSec": manifest.get("elapsedSec"),
+        "wallSec": wall_sec,
+        "hitsByKind": census["hitsByKind"],
+        "killsByKind": census["killsByKind"],
+        "exposureByKind": census["exposureByKind"],
+        "firstHitKind": census["firstHitKind"],
+        "firstKillKind": census["firstKillKind"],
+        "killOrder": census["killOrder"],
+        "killerKinds": census["killerKinds"],
+    }
+
+
+def eval_row_key(r: dict) -> tuple:
+    """一条逐局 eval 行的去重键 `(iter, wver, stage, seed)`（畸形行 → 哨兵键，永不被去重命中）。
+
+    `node` **不**进键：同一局在云机与节点各跑一次是同一份读数（同权重同 seed 是确定事件），
+    重复导入该被吃掉，而不是在趋势里出现两个点。
+    """
+    if not isinstance(r, dict) or r.get("event") != "eval":
+        return (None, "", -1, -1)
+    try:
+        return (r.get("iter"), str(r.get("wver", "")), int(r["stage"]), int(r["seed"]))
+    except (KeyError, TypeError, ValueError):
+        return (None, "", -1, -1)
+
+
+def eval_row_keys(rows: list[dict]) -> set[tuple]:
+    """账本去重键集（`eval_row_key` 的批量形式）——合并两条腿的 eval 行时用。"""
+    return {eval_row_key(r) for r in rows if isinstance(r, dict) and r.get("event") == "eval"}
+
+
+def read_eval_rows(eval_jsonl: Path) -> list[dict]:
+    """读账本里全部 `event:"eval"` 逐局行（文件缺失/坏行 = 跳过，绝不抛）。"""
+    rows: list[dict] = []
+    try:
+        if not eval_jsonl.exists():
+            return rows
+        for line in eval_jsonl.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(r, dict) and r.get("event") == "eval":
+                rows.append(r)
+    except OSError:
+        pass
+    return rows
+
+
+def merge_eval_rows(src_jsonl: Path, dst_jsonl: Path) -> int:
+    """把 `src_jsonl` 的逐局 eval 行并进 `dst_jsonl`（按 `eval_row_keys` 去重），返回新增行数。
+
+    离线腿的读数回到课程账本**只有**这一条路：云机跑的局写在产物目录的 `eval_log.jsonl`
+    里，随 artifacts zip 回来 → 导入时并进 `tmp/<课>/eval_log.jsonl`（板子读的就是它）。
+    只并 `event:"eval"` 逐局行：`eval_summary` 由课程侧按合并后的台账重算更可信
+    （云的 summary 也一起并会与本地 summary 打架——同一 iter 两行，板子按行画曲线）。
+
+    刻意**不**重算 summary：`settle_eval_summary` 读的是同一本账本，本地下一轮
+    （或控制台 evalA）自然会把合并后的分母算对。
+    """
+    return append_eval_rows(dst_jsonl, read_eval_rows(src_jsonl))
+
+
+def append_eval_rows(dst_jsonl: Path, rows: list[dict]) -> int:
+    """把若干逐局 eval 行并进 `dst_jsonl`（按键去重），返回新增行数；文件缺失即建。"""
+    src_rows = [r for r in rows if isinstance(r, dict) and r.get("event") == "eval"]
+    if not src_rows:
+        return 0
+    have = eval_row_keys(read_eval_rows(dst_jsonl))
+    fresh = [r for r in src_rows if eval_row_key(r) not in have]
+    if not fresh:
+        return 0
+    dst_jsonl.parent.mkdir(parents=True, exist_ok=True)
+    with open(dst_jsonl, "a", encoding="utf-8") as f:
+        for r in fresh:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    return len(fresh)
+
+
 def run_eval_runner_capture(
-    cmd: list[str], timeout_sec: float
+    cmd: list[str], timeout_sec: float, cwd: str | None = None
 ) -> subprocess.CompletedProcess[str]:
     """跑一次导出器并**捕获文本输出**（显式 UTF-8 + errors=replace）。
 
@@ -344,10 +495,13 @@ def run_eval_runner_capture(
       ② **captured stdout/stderr 直接丢成 None**（异常死在读线程，`communicate`
          不重抛）⇒ 下面那句失败 RuntimeError 只剩 rc、诊断信息全没（响亮错误变哑巴）。
     同 `rl/queue.bun_version` 的处置（那里早就写对了，这里是漏网的一个）。
+
+    `cwd=None` 缺省 = 仓库根（本机/控制台路径，历史行为逐字节不变）；云机离线评估显式给
+    TS 运行时树根（云上没有仓库，见 `run_local_eval_game` 的 `cwd` 形参）。
     """
     return subprocess.run(
         cmd,
-        cwd=str(REPO_ROOT),
+        cwd=str(cwd or REPO_ROOT),
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -376,6 +530,10 @@ def run_local_eval_game(
     # 控制台「导出 replay」（rl/eval_replays_once.py）：非空 = 整局输入录成 .replay
     # 写入该目录（export-eval-game --replay；评估语义零变化）。
     replay_dir: str = "",
+    # 导出器的执行根（缺省 = 仓库根，即本机/控制台的路径）。云机离线评估传 TS 运行时树
+    # 的根（`ts_code_cache/<sha>/`）——云上没有「仓库」，`tools/sim/export-eval-game.ts`
+    # 只在随包下发的 TS 树里。`tools/...` 相对路径与 bun 在 PATH 上都因此成立。
+    cwd: str | None = None,
 ) -> dict:
     """本机直跑一局贪心评估（与节点 agent 同一 runner / 同一报告 schema）。
 
@@ -418,7 +576,7 @@ def run_local_eval_game(
     if replay_dir:
         cmd += ["--replay", replay_dir]
     t0 = time.time()
-    proc = run_eval_runner_capture(cmd, timeout_sec)
+    proc = run_eval_runner_capture(cmd, timeout_sec, cwd=cwd)
     if proc.returncode != 0:
         raise RuntimeError(f"rc={proc.returncode} ({(proc.stderr or proc.stdout or '')[-160:]})")
     # json.loads 返回 Any；_eval_report.json 契约固定为 dict。

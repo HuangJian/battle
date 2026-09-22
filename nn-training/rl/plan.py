@@ -71,7 +71,26 @@ def pair_args(args: Any) -> dict:
 
 
 def pairs_for(plan: dict, it: int) -> list[tuple[int, int]]:
-    """用**同一个** `build_pairs` 重放第 `it` 轮的对集（计划是唯一的输入）。"""
+    """重放第 `it` 轮的对集（计划是唯一的输入）。
+
+    两条口径（同一个计划里互斥，由 `volume` 块的有无决定）：
+
+      * **无 `volume`**（老课程）：`build_pairs` 纯函数重放 —— 与 hub 侧逐字节一致；
+      * **有 `volume`**（`target_transitions > 0`）：`initial_wave_pairs` = 每关 G0 局的
+        **初波**对集，与本地集群 `TrainingLoop._iteration_pairs` 的 volume 分支**同函数**
+        —— 云机采的这批种子与本地集群该轮初波逐位相同（2026-09-22，见 `rl/volume_waves`
+        的「计划里的动态采集块」节）。
+    """
+    vol = plan.get("volume")
+    if isinstance(vol, dict):
+        from rl.volume_waves import initial_wave_pairs
+
+        return initial_wave_pairs(
+            int(plan["rotate_seed"]),
+            int(it),
+            stages=[int(s) for s in vol["stages"]],
+            games_per_stage=int(vol["games_per_stage"]),
+        )
     ns = SimpleNamespace(**plan["pair_args"])
     return build_pairs(ns, int(it), int(plan["rotate_seed"]))
 
@@ -208,6 +227,7 @@ def build_plan(
     budget_sec: float = 0.0,
     node_label: str = RUN_NODE_LABEL,
     template_wver: str = "",
+    volume: dict | None = None,
     log=lambda msg: None,
 ) -> dict:
     """组装计划（hub 侧）。`it` = 本 job 自己那一轮（其权重已在 payload 里）。
@@ -215,9 +235,16 @@ def build_plan(
     `max_iters`：本次最多自主跑几轮（0 = 跑到课程预算 `iters_total`）。`end_it` 取二者
     交集，并受 `RUN_MAX_ITERS_HARD_CAP` 钳制（手写/损坏的计划不许把节点按在机上一整天）。
 
-    自检（发布期，失败即拒发）：① 计划重放的对集必须 == 真 `args` 的 `build_pairs`
-    （`PAIR_ARG_FIELDS` 少字段会在这里暴露）；② `retarget_argv` 对模板本身必须是恒等
-    （模板就是目标轮的 argv——重定向逻辑的回归在**发出去之前**就被抓住）。
+    `volume`：动态采集块（`rl/volume_waves.volume_block(args)` 的产出；None = 老口径）。
+    带上它以后，节点重放出的对集不再是 `build_pairs` 的固定局数，而是**按
+    `target_transitions` 反解的初波**（与本地集群同函数、同种子）——这是「云端采样量与
+    本地集群 rollout 一致」的那一半；另一半（训练侧只收达标样本量）由 manifest 里的
+    `per_stage_quota` 承担（`remote/run_loop._run_iteration` 会把它从计划带进逐轮 manifest）。
+
+    自检（发布期，失败即拒发）：① 计划重放的对集必须 == 真 `args` 的对集
+    （`PAIR_ARG_FIELDS` 少字段会在这里暴露；volume 路线对的是 `volume_block` 重解）；
+    ② `retarget_argv` 对模板本身必须是恒等（模板就是目标轮的 argv——重定向逻辑的回归在
+    **发出去之前**就被抓住）。
     """
     it = int(it)
     iters_total = int(iters_total)
@@ -243,6 +270,13 @@ def build_plan(
         "game_timeout_sec": float(game_timeout_sec or 0.0),
         "budget_sec": float(budget_sec or 0.0),
     }
+    if volume is not None:
+        from rl.volume_waves import validate_volume_block
+
+        try:
+            plan["volume"] = validate_volume_block(volume)
+        except ValueError as e:
+            raise ProtocolError(f"build_plan: 动态采集块非法（拒发）：{e}") from e
     # 目标轮（= 本 job 之后那一轮）：argv 模板的目标就是它。
     tmpl_it = it + 1
     tmpl_pairs = pairs_for(plan, tmpl_it)
@@ -322,6 +356,14 @@ def validate_plan(plan: object) -> dict:
         )
     if not isinstance(plan["pair_args"], dict):
         raise ProtocolError("计划 pair_args 必须是对象")
+    vol = plan.get("volume")
+    if vol is not None:
+        from rl.volume_waves import validate_volume_block
+
+        try:
+            plan["volume"] = validate_volume_block(vol)
+        except ValueError as e:
+            raise ProtocolError(f"计划 volume 块非法：{e}") from e
     argv = plan["argv_template"]
     if not isinstance(argv, list) or not argv or not all(isinstance(a, list) for a in argv):
         raise ProtocolError("计划 argv_template 必须是非空二维数组")
@@ -331,20 +373,42 @@ def validate_plan(plan: object) -> dict:
 
 
 def check_plan_against_args(args: Any, plan: dict) -> None:
-    """发布期自检：计划重放 == 真 args 的 `build_pairs`；重定向对模板恒等。
+    """发布期自检：计划重放 == 真 args（的对集）；重定向对模板恒等。
 
     这是「云上是重放而不是重新发明」的守卫：`PAIR_ARG_FIELDS` 漏了字段、`build_pairs`
     新增了随机源、`retarget_argv` 改坏了替换语义——三种漂移都在**发出去之前**失败，
     而不是等节点跑完一半、拿一堆与 hub 不同的语料回来。
+
+    对集口径按计划有没有 `volume` 块分两条（与 `pairs_for` 同源）：volume 路线的对照物是
+    `volume_pairs_from_args`（按计划里钉住的 est 重解一遍）——它抓的是「块里写的
+    stages/target/G0 与 args 说的不一致」这类错（例如导出时用了别的课程的 --stages）。
     """
+    vol = plan.get("volume")
     for it in planned_iters(plan):
         mine = pairs_for(plan, it)
-        real = build_pairs(args, it, int(plan["rotate_seed"]))
+        if isinstance(vol, dict):
+            from rl.volume_waves import volume_pairs_from_args
+
+            real = volume_pairs_from_args(
+                args, it, int(plan["rotate_seed"]), est_samples_per_game=int(vol["est_samples_per_game"])
+            )
+            if real is None:
+                raise ProtocolError(
+                    "计划自检失败：计划带 volume 块，但 args 的 target_transitions ≤ 0"
+                    "（导出时用的课程与计划不是同一门？）"
+                )
+        else:
+            real = build_pairs(args, it, int(plan["rotate_seed"]))
         if mine != real:
             raise ProtocolError(
-                f"计划自检失败：it{it} 重放对集与 build_pairs 不一致"
+                f"计划自检失败：it{it} 重放对集与 args 重解不一致"
                 f"（计划 {len(mine)} 局 / 实际 {len(real)} 局；"
-                f"pair_args={sorted(plan['pair_args'])}）——PAIR_ARG_FIELDS 是否漏字段？"
+                + (
+                    f"volume={{stages={vol['stages']}, G0={vol['games_per_stage']}, "
+                    f"target={vol['target_transitions']}, est={vol['est_samples_per_game']}}}"
+                    if isinstance(vol, dict)
+                    else f"pair_args={sorted(plan['pair_args'])}）——PAIR_ARG_FIELDS 是否漏字段？"
+                )
             )
     tmpl_pairs = pairs_for(plan, int(plan["start_it"]) + 1)
     tmpl = plan["argv_template"]

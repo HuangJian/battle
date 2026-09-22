@@ -77,15 +77,27 @@ def test_writers_wire_three_loot_columns() -> None:
     2026-09-22：手动 evalA（`rl/eval_a_once.py`）不再自己写行——它改为薄包装
     `rl/eval_dispatch.py::dispatch_eval_round`（与 in-loop 同一条派发路），三个
     写入方就此收敛成两个（见 docs/nn.progress.md §127）。
+
+    2026-09-22（云机评估）：行构造收敛为**唯一实现点** `rl/eval_local.eval_row`
+    （in-loop 派发器与 `remote/offline_eval.py` 共用）。于是判据分两档：
+
+      * 走 `eval_row` 的写入方：三列由那一处保证（本文件只断言它们接了共享构造点）；
+      * 自己拼行的写入方（`rl/batch_eval.py`）：必须自己接到 `eval_loot_fields`。
     """
-    for rel in (
-        "rl/eval_dispatch.py",
-        "rl/batch_eval.py",
+    for rel, marker in (
+        ("rl/eval_dispatch.py", "eval_row"),
+        ("rl/batch_eval.py", "eval_loot_fields"),
+        ("remote/offline_eval.py", "eval_row"),
     ):
         src = (ROOT / rel).read_text(encoding="utf-8")
-        assert "eval_loot_fields" in src, rel
-        for key in EVAL_LOOT_KEYS:
-            assert f'"{key}"' in src, f"{rel} missing {key}"
+        assert marker in src, f"{rel} 没接上 {marker}（三列会静默缺传）"
+        if "eval_loot_fields" in src:
+            for key in EVAL_LOOT_KEYS:
+                assert f'"{key}"' in src, f"{rel} missing {key}"
+        else:
+            assert (
+                "eval_row" in src
+            ), f"{rel} 既不接 eval_loot_fields 也不接 eval_row —— 自己拼行会漏列"
 
 
 def test_m1_ingest_row_has_loot_schema_keys() -> None:

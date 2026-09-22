@@ -21,21 +21,35 @@
 import { guardMs, probeStub } from './helpers/probe-stub'
 import { api, readConfigText, scratchConfig } from './helpers/console-fixture'
 import { describe, expect, it } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
 
-/** 空账本（没有任何组件在跑）→ 课程级重算里也不会有 HTTP 探测，计数才可断言。 */
+/** 空账本（没有任何组件在跑）→ 课程级重算里也不会有 HTTP 探测，计数才可断言；
+ *  **同时把日志扫描根重定向**到空临时目录。
+ *
+ *  为什么日志也要重定向：组件日志的按课程解析（`resolveComponentLog`）在静态路径不存在时
+ *  会去扫日志根找「最近活跃」的文件，而那个根如果不重定向就是**真实** `tmp/` —— 本机只要
+ *  有另一门课在训（`tmp/<别课>/training-loop.log` 更新），扫描结果就指向别课，
+ *  `logOf(a)` 里就再也看不到 `course-a`。用例要钉的是「按当前课程解析」，不是
+ *  「这台机器此刻谁在训」（2026-09-22 本机因此红）。
+ */
 function withEmptyRegistry(): { restore: () => void } {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'bcity-switch-'))
   const file = path.join(dir, 'registry.json')
   writeFileSync(file, '{}')
+  const logs = path.join(dir, 'logs')
+  mkdirSync(logs, { recursive: true })
   const prev = process.env.BCITY_REGISTRY_FILE
   process.env.BCITY_REGISTRY_FILE = file
+  const prevLogs = process.env.BCITY_TMP_LOGS_DIR
+  process.env.BCITY_TMP_LOGS_DIR = logs
   return {
     restore: () => {
       if (prev === undefined) delete process.env.BCITY_REGISTRY_FILE
       else process.env.BCITY_REGISTRY_FILE = prev
+      if (prevLogs === undefined) delete process.env.BCITY_TMP_LOGS_DIR
+      else process.env.BCITY_TMP_LOGS_DIR = prevLogs
       rmSync(dir, { recursive: true, force: true })
     },
   }
