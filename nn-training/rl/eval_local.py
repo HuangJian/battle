@@ -332,6 +332,31 @@ def eval_census_fields(manifest: dict | None) -> dict:
     return out
 
 
+def run_eval_runner_capture(
+    cmd: list[str], timeout_sec: float
+) -> subprocess.CompletedProcess[str]:
+    """跑一次导出器并**捕获文本输出**（显式 UTF-8 + errors=replace）。
+
+    必须显式给 encoding：win32 中文机的 locale 是 gbk（cp936），而 bun 的输出里带
+    UTF-8 字节 ⇒ 默认解码在 `subprocess` 的 **reader 线程**里抛 UnicodeDecodeError，
+    后果两条（2026-09-22 evalA 实测，65 次/100 局）：
+      ① 父进程日志被整片 `Exception in thread ... _readerthread` traceback 刷屏；
+      ② **captured stdout/stderr 直接丢成 None**（异常死在读线程，`communicate`
+         不重抛）⇒ 下面那句失败 RuntimeError 只剩 rc、诊断信息全没（响亮错误变哑巴）。
+    同 `rl/queue.bun_version` 的处置（那里早就写对了，这里是漏网的一个）。
+    """
+    return subprocess.run(
+        cmd,
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout_sec,
+        **_POPEN_NO_WINDOW,
+    )
+
+
 def run_local_eval_game(
     bun: str,
     weights_snapshot: str,
@@ -393,14 +418,7 @@ def run_local_eval_game(
     if replay_dir:
         cmd += ["--replay", replay_dir]
     t0 = time.time()
-    proc = subprocess.run(
-        cmd,
-        cwd=str(REPO_ROOT),
-        capture_output=True,
-        text=True,
-        timeout=timeout_sec,
-        **_POPEN_NO_WINDOW,
-    )
+    proc = run_eval_runner_capture(cmd, timeout_sec)
     if proc.returncode != 0:
         raise RuntimeError(f"rc={proc.returncode} ({(proc.stderr or proc.stdout or '')[-160:]})")
     # json.loads 返回 Any；_eval_report.json 契约固定为 dict。

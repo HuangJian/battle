@@ -72,11 +72,15 @@ def test_missing_everywhere_returns_none() -> None:
 
 
 def test_writers_wire_three_loot_columns() -> None:
-    """源码级接线断言：三个 eval_log 写入方都必须落这三列。"""
+    """源码级接线断言：eval_log 的写入方都必须落这三列。
+
+    2026-09-22：手动 evalA（`rl/eval_a_once.py`）不再自己写行——它改为薄包装
+    `rl/eval_dispatch.py::dispatch_eval_round`（与 in-loop 同一条派发路），三个
+    写入方就此收敛成两个（见 docs/nn.progress.md §127）。
+    """
     for rel in (
         "rl/eval_dispatch.py",
         "rl/batch_eval.py",
-        "rl/eval_a_once.py",
     ):
         src = (ROOT / rel).read_text(encoding="utf-8")
         assert "eval_loot_fields" in src, rel

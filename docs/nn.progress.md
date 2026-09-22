@@ -4,6 +4,165 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §128 本机评估的子进程捕获：gbk 解码把 stdout/stderr 丢成 None（顺带刷屏 65 行/100 局）（2026-09-22）
+
+`rl/eval_local.py::run_local_eval_game` 的 `subprocess.run(capture_output=True, text=True)` 没给
+`encoding` —— win32 中文机 locale = gbk（cp936），而 bun 的输出带 UTF-8 字节 ⇒ 解码在 subprocess
+的 **reader 线程**里抛 UnicodeDecodeError。两个后果（不只是日志脏）：
+
+1. 父进程日志被 `Exception in thread ... _readerthread` traceback 刷屏（evalA 实测 **65 次/100 局**
+   = 每个本机局一次，与 `nodes:local` 局数逐一对应）；
+2. **captured stdout/stderr 直接丢成 `None`**（异常死在读线程、`communicate` 不重抛）⇒ 失败路径的
+   `RuntimeError(f"rc={rc} ({stderr[-160:]})")` 只剩 rc，诊断信息全没 —— 响亮错误变哑巴。
+
+修复：抽出 `run_eval_runner_capture(cmd, timeout)`，显式 `encoding="utf-8", errors="replace"`
+（`rl/queue.bun_version` 早就这么写，本处是漏网的一个）。复现/回归：
+`tests/test_eval_local_capture.py`（真子进程写不可解码字节，断言输出还在 + 中文正常 + 替换符命中；
+旧实现在同一命令下 `stdout`/`stderr` 都是 `None`）。实测同一 scratch 课程 100 局：traceback
+**65 → 0**，本机局输出全部可读。
+
+⚠ 同类隐患仍在别处（全量 grep `text=True` 尚有 13 处）：`dist_common._git_index_blobs`
+（`git ls-files`，默认 `core.quotepath=true` 会把非 ASCII 路径转义 ⇒ 现状安全，但哪天加
+`-c core.quotepath=false` 就中招）、`rl/archive.py` 的两处 git 调用同理。**新写 subprocess 捕获
+一律带上 `encoding="utf-8", errors="replace"`。**
+
+---
+
+## §127 手动 evalA 慢 6.7 倍的根因：绕开了节点池（339s → ~18s，改走 in-loop 同一派发器）（2026-09-22）
+
+现象：控制台指标表里手动点的 evalA 耗时 **339s**（x20-noexplore it177），而 in-loop eval ~60s。
+读数（同一份 `tmp/<课>/eval_log.jsonl` 的 `eval_summary`）：
+
+| 轮 | sec | nodes |
+|---|---|---|
+| it165/170/175/180（in-loop） | 50.8 / 57.8 / 50.8 / 63.7 | local 100–118 · mac 64–133 · self 167–218 |
+| **it177（手动 evalA）** | **339.2** | **`{"local-evalA": 400}`** |
+
+根因：**不是评估变慢，是手动触发绕开了节点池**。in-loop 的 ~60s 靠三台节点分摊 400 局；
+`rl/eval_a_once.py`（控制台 evalA 按钮 + 导入后自动评估的**唯一**启动点）自带一个
+`for stage, seed in todo:` **本机串行**循环 —— 339.2 / 400 = 0.848 s/局，与串行假设逐位吻合
+（`local-evalA` 这个 node 标签本身就是「自己跑的」指纹；同时刻并跑的 judge-414000 只贡献次要噪声）。
+
+修复（**用户 2026-09-22 指令：evalA 不要只在 local 跑，和 in-loop 等同对待**）：删掉自带的串行
+循环，改为**薄包装 `rl/eval_dispatch.py::dispatch_eval_round`**（= in-loop 的同一个
+`EvalDispatcher`），于是语料（`a_eval_seed_list` 双轨）、去重（`eval_done_keys(min_iter=1)`）、
+**节点门**（evalSupport / stageJsonSupport / bun 版本 / codeHash）、并行 ping + 并行权重下发、
+本机份额（`policy.evalLocalSlots`，缺省 4）、账本 schema（`node=<节点 id>` / `wallSec`）、
+summary 落账全部与 in-loop 同一份实现 —— 手动行与 in-loop 行从此可比。
+
+- 脚本自己要管的只剩一件：`EvalDispatcher` 在「同 wver 语料已评完」时**早退不写 summary**
+  （in-loop 有 `_drain` 覆盖判定兜底，手动触发没有）⇒ 保留按同 wver 回填本 iter 读数的
+  `_write_summary_for_wver`（控制台按 iter 挂 evalData，缺本 iter 的 summary 表上永远空）。
+- 布局与 in-loop 对齐：冻结权重快照 + 本机局目录都落 `traj/it<N>/`（`eval_replays_once` 的
+  权重解析按 `traj/it*/_eval_frozen_weights*.json` 找，同址才有得找）；本机局目录收工即清。
+- 本机 gate **立即置位**：手动评估不在训练的 PPO 窗口里，没有要让位的对象
+  （不置位 = 本机槽位一路空等到 deadline）。
+- ⚠ 一个必须先摘掉的坑：`rl/queue.py` 遮蔽 stdlib `queue`（脚本目录被插进 `sys.path[0]`），
+  而节点派发要走 `dist_common.ping_nodes_parallel` / `post_weights_parallel` 的
+  `concurrent.futures`（内部 `import queue`）⇒ **导入派发器之前必须先 scrub 脚本目录**，
+  否则一 ping 就炸（旧实现从不派发，所以这个坑从没暴露过；同 `eval_replays_once.py`）。
+
+验证（scratch 课程 `tmp/evala-smoke/smoke.jsonc`，1 关 × 双轨 100 局，**不碰任何真实账本**）：
+
+```
+[evalA] it105 … → 派发（与 in-loop 同路：节点池 ['self','mac','a97','a96'] + 本机份额）
+[eval] it105: dispatch 100 greedy games (corpus=100, done=0) [dual-track anchor+rotor]
+       -> [('self',8), ('mac',5), ('a97',7), ('a96',7)] [local tail-reserved ×4]
+[evalA] DONE it105 sec=17.8 games=100 winRate=0.11 nodes={'local': 63, 'mac': 37} elapsed=18s
+```
+
+节点确实参与（mac 37 局；self 背压停派、a97/a96 未结算 = 派发器既有的节点门/软失败熔断行为，
+in-loop 同样如此），100 局 18s 完成；it177 折算 339s → **~50s**（400 局，与 in-loop 50–64s 同量级）。
+回归测试 `tests/test_eval_a_once.py`（派发器接线 + summary 读回契约）。
+
+半路被否的方案（留档）：先只做了「本机并发」——`--workers`（min(8,CPU)）+ ThreadPoolExecutor，
+实测 7.3×（scratch 100 局 144.3s → 19.9s）。用户口径：手动 evalA 不是「另一套本机评估」，
+而是**同一次评估的手动触发**，必须与 in-loop 等同（节点池也不例外）；本机并发只是把单机吃满，
+仍然拿不到集群那 5–8 倍并发。**别再往「本机并行度」方向调**——那不是这条路径的杠杆。
+
+---
+
+## §120 人类 BC-ref 判死刑：held-out 255 局 mean 0.00，行为坍缩（2026-09-21）
+
+纯人类 61 demos → BC（kaggle cuda，60 epochs，val 0.7301 看似健康）→ held-out 255 开局事故：
+it175 对照 mean 2.18 / low 100% / p10 1，ref **mean 0.00 / low 100% / p10 0** —— 全线更差，
+门（low% ≤70% 且 mean +2.0）纹丝没碰。单局解剖（2000/414037，807t 死）：ref 全程按住上、
+807 tick **零开火** —— val 集与训练同分布，背题满分；分布外直接退化成常量策略。
+结论：61 局纯人类 BC 不成锚（`x20-human-anchor.jsonc` 的 bc 已回退占位，禁开训）。
+教训：val-split 同分布验证对小样本 BC 是安慰剂；唯一可信的是 held-out 行为门。
+God-bulk fallback 按 DECISIONS 入口排队（flaw-audit 先行），或转 wExplore/λ（与 ref 无关）。
+
+---
+
+## §119 人类 demo 转 BC 语料：37 局 → 24015 样本，工具落地（2026-09-21）
+
+新工具 `tools/sim/export-replay-labels.ts`（与 `export-godai-labels` 同构：同 ObsEncoder、
+同 decisionTick 事件谓词、同 masks 口径、同 npy 落盘；人类输入驱动同一仿真；God 不出现）：
+wave1 7/7 + wave2 28/28 + 无 verdict 两局（元数据 20 杀，按规则收编）= **37 shards / 24015 samples**
+（`tmp/human-shards/`），obs `[N,16,26,26]` u1、masks 7 维、actions 越界零、nSamples 全对齐，
+venv numpy 实载验证（BC 可直接消费；returns.npy 按 dual-head 可选口径不带）。
+保真门：tickHashes 全对 + kills 对账，不符响亮跳过（本次 0 跳过）。
+下一步：纯人类 BC-ref（`--resume` 不用，从随机起；early-stop + val-split；held-out 240 裁决 vs 现任锚）。
+
+---
+
+## §118 人类 wave2：28/28 通关，"不往敌人堆里钻就轻松过"（2026-09-21）
+
+`probe-x20-opening-20260921-wave2.zip`：30 replay（game 30/36 有录像无 verdict，计 played 未判），
+28 份 verdict **全 solvable、全 20 杀**，30 attempts（26 一次过 + 2 两次过），理由空（打得太顺）。
+合并 wave1：35/37 可解，2 局 played-pending。
+
+- 人类总结原话："只要不是太浪往敌人堆里钻，都能轻松过关。" —— NN 的死因（§117：直冲顶部敌区）
+  恰是人类口中唯一要避免的动作。策略差一句话能说清：**别 rush**。
+- wExplore 嫌疑升级（§117 次要嫌疑 → 主要）：探索奖按新格子计价，恰好奖励"往上逛" ——
+  奖在教自杀。消融优先级提到 demo 之前（改一个数 vs 训一个 ref，前者先出数）。
+- Demo 语料现 35 局（~175k transitions，开局+中段+残局全覆盖，God-弱关独家）：BC-anchor 材料已够
+  （锚≠蒸馏，不需要大样本；held-out 用剩下 ~240 opening seed）。
+- 支线转正确认（可选，不挡主线）；主线 C 重开三条件不变。
+
+---
+
+## §117 分歧分析 verdict：探索失败（策略库缺货），不是执行失败（2026-09-21）
+
+方法：7 个人类 probe 局 + NN it175 在同 7 seed 的贪心局（`export-eval-game --replay`），
+同一 resim 脚本（`tmp/diverge-resim.ts`，14/14 保真：kills 与元数据逐一一致）dump
+每 10t 快照 + 逐 tick 事件 + 输入统计。产物：`tmp/diverge/traj/*.jsonl`。
+
+- **路线 almost 不重叠**：首 1000t 人类/NN 共访 cell 仅 1–9 个。NN 5/6 死在顶部敌区
+  （y≤6），人类同期在中部（y≈10–14）；NN 全程零 idle（1000t 里 0），人类 idle 209–359；
+  NN 开火 20–160 vs 人类 119–275；NN 挨 2–3 发死，人类 0–1 发不死。凶手清一色 fast/power。
+- **执行不背锅**：NN 开火命中率 0.5–0.67（瞄准没问题）；活过 700t 就能 farm（终局通关证明残局能力）。
+- **决定性切割**：NN 唯一通关局（2000/414009）的开局 ≈ NN 死亡局（0 idle、meanY 7.7 上顶部），
+  ≠ 人类开局 —— NN 的通关靠 seed 运气（同风格 6 死 1 活），**它的训练数据里就没有"稳健开局"这种行为**。
+  PPO 强化不出生存 menu 上没有的菜；8.4M transitions 全是这个分布。
+- **结构机制（配置值推导）**：γ=0.998、λ=0.95、K=10 ⇒ 信用视界 ~150t；死亡截断数据，
+  V 无法自举没去过的状态（500t 之后的世界只存在于 10% 通关局里，而那些局的开局同样是 rush 风格）。
+  早期决策学不到"活下去再 farm"，因为"活下去"从没发生过。
+- **次要嫌疑（未判）**：wExplore=0.2 可能教 top-rush（novel cell +0.2 vs 死亡总价 -7.5，边际上 sightseeing-then-die
+  不亏）。待消融（wExplore=0 一条腿，或复盘 NN 出生 cell 价值），不是本次 verdict。
+- **处方排序**：① demo 注入（7 份人类开局正是缺货的行为：BC 训 ref → kickstart 锚到它，复用现有缰绳机制；
+  或 demo transitions 以固定比例混 PPO batch）；② wExplore 消融；③ horizon 动刀（方差风险，最后）；
+  ④ 开局腿（等 demo 先验证"有货就能学会"）。
+
+---
+
+## §116 人类探针 verdict：7/7 轻松可解，6 局首通 —— 开局无环境下限（2026-09-21）
+
+人类打完附录 7 局（`probe-x20-opening-20260921.zip`：7 `.replay` + verdicts.jsonl + session.json）：
+**7 局全 `solvable`、全 20 杀通关**（第 5 局 21 杀 = 20 + 1 平衡分兵，不计关），6 局一次过，
+1 局两次过，理由全是"轻松过关"。文件体积互相印证（15–17KB 全是整局长度，非 700t 早死局）。
+
+- 含 God-2命仅 6 杀的 2002/414021、仅 1 杀的 2002/414065 —— 人类 1 命首通。
+  NN 在这两局是 0 杀。
+- **"接受环境下限"对开局桶已死**：熟练人类觉得轻松的局，NN 用 8.4M transitions 学不会 ——
+  缺口在 learner（表示/探索/信用分配），不在任务。杠杆永远在训练侧（AGENTS §0.2 再确认）。
+- **附带解锁新杠杆**：7 份成功人类 demo 落在**恰恰 NN 全灭**的 seed 上 ⇒ BC 蒸馏/开局 shaping
+  有了现成的高价值语料（kickstart 锚旧 BC 权重，不如锚这 7 份人类开局）。
+- 按既定分支：开局支线转正为**可选**（不挡主线）；主线仍是通关转化（C 重开三条件）。
+  verdict 口径：§0 五档 + 校准局，见 `plan/human-opening-probe.plan.md`。
+
+---
+
 ## §126 真机验收：mac(darwin-arm64) / a95(linux-arm64·Termux) 上 native 全绿（plan/rollout-eval-opt.plan.md T2/T3/T4，2026-09-21）
 
 **起因（用户指令）**：「mac 和 a95 节点都已经更新到最新代码，请做一轮真机 rollout/eval 测试」——
