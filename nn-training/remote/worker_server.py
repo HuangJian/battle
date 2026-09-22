@@ -50,6 +50,7 @@ from remote.protocol import (
     unpack_job_v2,
 )
 from remote.worker import _wire_flush as worker_wire_flush
+from remote.worker import _wire_start as worker_wire_start
 from remote.worker import run_job
 
 AUTH_HEADER = "Authorization"
@@ -191,6 +192,7 @@ def _execute_job(
     """后台执行：run_job 全套（preloaded push 路径）→ 状态落表。异常进 failed（HUB 可见）。"""
     jid = manifest["job_id"]
     state.set_state(jid, "running")
+    worker_wire_start(jid)  # 阶段占比（in/out/ppo/other）的 wall 从开跑起算
     try:
         result = run_job(
             "",

@@ -49,7 +49,32 @@ import urllib.request
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CONFIG_PATH = os.path.join(REPO_ROOT, "nn-training", "rl-config.json")
+
+#: 机器本地启动配置的环境变量名（`rl-config.json` **永不入库**：`nn-training/.gitignore`
+#: 里 ignore 了它——它承载机器侧事实，控制台会直接改写它）。
+RL_CONFIG_ENV = "BCITY_RL_CONFIG"
+
+
+def rl_config_path() -> str:
+    """rl-config.json 的**唯一**路径来源（env `BCITY_RL_CONFIG` > `nn-training/rl-config.json`）。
+
+    为什么要有这个缝（2026-09-22，用户指令「测试应该使用自己的 fixtures」）：路径原本硬编码在
+    三处（`run_rl.py` / `rl/loop_serve.py::_read_rl_config` / 本文件），于是**任何读它的用例都
+    隐式依赖本机那份未入库的配置**——本机 `rl.stream=1` 就让「`course_args` ≡ `run_rl.py`」的
+    解析对拍变红（`tests/test_serve_wiring.py` 实测）：绿不绿取决于**别人机器上文件的内容**。
+    有缝之后用例自带 tmp 夹具，两侧的读取点都走同一个 env。
+
+    相对路径按「nn-training/ 下」解析（绝对路径原样），与默认值同一约定。
+    """
+    raw = (os.environ.get(RL_CONFIG_ENV) or "").strip()
+    if not raw:
+        return os.path.join(REPO_ROOT, "nn-training", "rl-config.json")
+    if os.path.isabs(raw):
+        return raw
+    return os.path.join(REPO_ROOT, "nn-training", raw)
+
+
+CONFIG_PATH = rl_config_path()
 
 SHARD_FILES = (
     "obs.npy",

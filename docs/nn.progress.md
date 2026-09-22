@@ -4,6 +4,52 @@
 > New entries are appended at the top (reverse chronological).
 ---
 
+## §128 传输 QoS + 阶段账 + 软持有预取：P0 / P0.5（仪器）/ P2 落地（plan/transfer-scheduling，2026-09-22）
+
+**起因**：§127 只交付了 pull 线的取活换面；本批补上「传输那半场」——bulk 单通道、控制面旁路、
+预取把下载叠到上一个 job 的 PPO 上，以及判 P2 盈亏所必需的阶段账。
+
+**改了什么（判据看函数名）**
+- `remote/bulk_sched.py`（新）：`BulkScheduler.slot`（**唯一** bulk 入口，任意并发下 `inflight≤1`）、
+  `pace`（分片间隙让路 + P2 抢占检查）、`pause_if_needed`（单次预算 `BULK_YIELD_BUDGET_SEC=5s`，
+  上界 = min(worker `BODY_IDLE_TIMEOUT_SEC`=45s, hub `SEND_TIMEOUT_SEC`=60s)——**两个都写进注释**）、
+  `control_path`（按**路径**分流：`/payload` `/result` `/code` `/ts_code` `/blob` 才是 bulk）、
+  `BulkPreemptError`（P2 被挤走 = 丢半截重下，**不**算失败）。
+- `remote/worker.py`：`_request` 按 `control_path` 标记控制面（控制面**不进**队列；`urllib` 每请求
+  新连接 = 独立 socket）；`_read_body(pace=…)` 每分片查一次让路；`post_result` 占 **P1** 槽
+  （不被抢断、退避睡眠在槽外）；`download_*(bulk_prio=…)` 缺省 P1、预取传 P2。
+- **阶段账（P0.5 仪器）**：`_wire_start`（claim 起算 wall）+ `_wire_time(jid,"ppo",sec)` +
+  `_wire_flush` 尾部 `phases in=…s out=…s ppo=…s other=…s wall=…s`；每 job 行另加
+  `wait=<queue_wait_sec>/yield=<yield_count>/p0_p95=<p0_rt_ms>`。
+- `remote/prefetch.py`（新）：`PrefetchStore`（无租约软持有；`work_dir/prefetch/<jid>/` 只存引用与
+  摘要，字节同时落内容寻址 `blob_cache/<sha>`；预算 64MB 超限按 `updated_at` 丢最旧；存取双向 sha
+  校验）+ `pick_candidates`（纯函数）。`worker.py::_prefetch_fill` 后台填充（候选 = `peek_jobs`，
+  下载 = **P2**，与 `run_job` 重叠），命中经**现成的** `run_job(preloaded=…)` 零下载开算；
+  `--prefetch-depth`（0 = 关）；`prefetch/` 进 `prune_job_dirs` 豁免名单。
+- `tools/wire_report.py`：阶段占比表（`parse_phases` / `summarize_phases` / `render_phases`：
+  总量占比 + 每 job p50/p90；`--json` 同步）。
+
+**关键取舍（DECISIONS §2026-09-22-goalnn-bulk-single-channel）**：让路**预算有界**（超 5s 会被 worker
+自己的 45s 空闲判停/hub 60s 分片写超时判成停滞，而两个上界必须同时看）；P1 **不可抢断**（POST 大 body
+没有安全 Range，抢断 = 整份白传）而 P2 **必须可弃**；预取**只走** `download_payload` 一条路（omit 协商
+落在那里，另写整包 GET 会把 minimize-payload 的瘦身吹回去）；预取失败**永不**转
+`ProtocolError`/`report_job_failure`。
+
+**门禁**：`test_bulk_sched.py`（11）· `test_control_plane_bypass.py`（2，真 HTTP：bulk 在途时控制面
+往返 <1s **且**量到并行）· `test_soft_hold_prefetch.py`（12）· `test_wire_report.py` 阶段账段（+5，
+含**写方/读方格式一致性**用例——防「阶段表静默变空」）。七刀改坏必红已自查（门禁有效性）。
+全量门禁：ruff + mypy + pytest `2050 passed / 3 skipped`（27s）。
+
+**未做（下一步入口）**
+1. **P0.5 的实机数字**：仪器与聚合口就绪，但本机没有真机 `wire` 日志可算 ⇒ 下一次云-hub-LAN 会话跑
+   `python nn-training/tools/wire_report.py <worker 日志>`，把阶段表贴到 plan §1.1 下方。
+   **在那之前 P2 的收益结论不成立**（机制可关：`--prefetch-depth 0`）。
+2. **P3 竞速退役**（`/jobs/next` / race 判定 / `poll_job` / `hub_scope` / `--race` / `/admin/race`
+   + 控制台同批改造 + push 腿 R1-7）：**本批未动**，两套仍并存且全绿。爆炸半径已清点（生产
+   `hub_server.py` 83 处、`protocol.py` 15、`worker.py` 9；测试 `test_race_broadcast.py` 57 整文件删、
+   `test_multi_course_hub.py` 50、`test_remote_ppo.py` 10、`test_poison_freeze.py` 9 + e2e 4 文件；
+   控制台 `--race` argv 必须同批，否则 hub argparse 未识别即退出）⇒ 建议单开一批。
+
 ## §127 传输∥PPO 优先级调度面（pull 线取活换面）：P1/P1.5/P2 落地（plan/transfer-scheduling，2026-09-22）
 
 **起因（用户指令）**：处理 `transfer-scheduling.review-R2.md` 的评审意见 → 自主开发/测试/审查/提交。

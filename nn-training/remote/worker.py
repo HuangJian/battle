@@ -27,11 +27,25 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
 from remote import net_http
+from remote.bulk_sched import (
+    BULK_P1_CRITICAL,
+    BULK_P2_PREFETCH,
+    BulkPreemptError,
+    BulkScheduler,
+    control_path,
+)
 from remote.iter_rollout import run_iter_rollout
+from remote.prefetch import (
+    PREFETCH_DEPTH_DEFAULT,
+    PREFETCH_DIR_NAME,
+    PrefetchStore,
+    pick_candidates,
+)
 from remote.protocol import (
     AUTH_HEADER,
     BLOB_DEMO,
@@ -135,8 +149,31 @@ WIRE_MAX_JOBS = 4
 _BEST_RATE = 0.0
 
 #: 每 job 的传输账：jid -> {segs: {段名: [bytes, sec]}, hits: {段名: 说明},
-#: wasted: 重抽作废字节, rerolls: 次数}。跑完由 `_wire_flush` 打一行摘要并清空。
+#: wasted: 重抽作废字节, rerolls: 次数, sched0: 建账时的调度器快照}。
+#: 跑完由 `_wire_flush` 打一行摘要并清空。
 _WIRE: dict[str, dict] = {}
+
+#: bulk 单通道调度器（plan/transfer-scheduling §2.2 / P0）：**一个进程一份**。
+#: 三条流的分工（控制面永不排队 / P1 至多一条在途且不被抢断 / P2 可打断）全在
+#: `remote/bulk_sched.py` 里；这里是它在本模块的落点：
+#:   · 控制面 —— `_request` 按**路径**分流（`control_path`），命中即标记让路；
+#:   · P1 —— `post_result` 与开算前的关键下载（`download_*` 缺省即 P1）；
+#:   · P2 —— 预取下载（`download_payload(bulk_prio=BULK_P2_PREFETCH)`）。
+_BULK = BulkScheduler()
+
+
+def set_bulk_log(log: Any) -> None:
+    """把 worker 的日志函数交给调度器（排队/让路/抢占要能在现场日志里看见）。"""
+    _BULK.set_log(log)
+
+
+def _bulk_pace(token: int, prio: str) -> Any:
+    """分片间隙的让路回调（交给 `_read_body`）：控制面在途 ⇒ 暂停；P2 被挤 ⇒ 中断。"""
+
+    def _pace() -> None:
+        _BULK.pace(token, prio)
+
+    return _pace
 
 
 def _note_rate(rate: float, nbytes: int) -> None:
@@ -198,8 +235,27 @@ def _wire_bucket(jid: str) -> dict:
     if w is None:
         while len(_WIRE) >= WIRE_MAX_JOBS:
             _WIRE.pop(next(iter(_WIRE)), None)  # 最旧的直接丢（它的账已过期）
-        w = _WIRE[jid] = {"segs": {}, "hits": {}, "wasted": 0, "rerolls": 0}
+        w = _WIRE[jid] = {
+            "segs": {},
+            "hits": {},
+            "times": {},  # 只有秒数的段（`ppo`）：阶段占比要用
+            "wasted": 0,
+            "rerolls": 0,
+            "sched0": _BULK.stats(),  # 本 job 起点的调度器快照（flush 时算增量）
+            "t0": time.time(),  # 建账时刻（claim 时会被 `_wire_start` 重写）
+        }
     return w
+
+
+def _wire_start(jid: str) -> None:
+    """标一个 job 的**起点**（claim 成功那一刻）：阶段占比的 `wall` 从它起算。
+
+    不标也不会丢账（建账时自带 t0），但那样 `wall` 从「第一段传完」起算，会系统性
+    少报排队/装载那一段——而那一段正是 P0.5 要看的「GPU 空转」主体。
+    """
+    if not jid:
+        return
+    _wire_bucket(jid)["t0"] = time.time()
 
 
 def _wire_add(jid: str, seg: str, nbytes: int, sec: float) -> None:
@@ -209,6 +265,14 @@ def _wire_add(jid: str, seg: str, nbytes: int, sec: float) -> None:
     cur = _wire_bucket(jid)["segs"].setdefault(seg, [0, 0.0])
     cur[0] += int(nbytes)
     cur[1] += float(sec)
+
+
+def _wire_time(jid: str, seg: str, sec: float) -> None:
+    """记一段**只有秒数**的账（`ppo`）：P0.5 的 `T_in / T_out / T_ppo / other` 占比靠它。"""
+    if not jid or not seg or sec < 0:
+        return
+    b = _wire_bucket(jid)
+    b["times"][seg] = float(b["times"].get(seg, 0.0)) + float(sec)
 
 
 def _wire_hit(jid: str, seg: str, why: str = "cache") -> None:
@@ -249,11 +313,35 @@ def _wire_flush(jid: str, log) -> None:
         parts.append(f"{seg}={why}-hit")
     if w["rerolls"]:
         parts.append(f"reroll={w['rerolls']}(wasted {w['wasted'] / mb:.2f}MB)")
+    # 调度账（§2.2/P0）：本 job 期间在 bulk 队列上等了多久、让路几次、控制面往返多快。
+    # `p0_rt_ms_p95` 是**会话级**读数（分位数不能做增量），其余按 job 起点快照取差。
+    s0 = w.get("sched0") or {}
+    s1 = _BULK.stats()
+    wait = float(s1.get("queue_wait_sec", 0.0)) - float(s0.get("queue_wait_sec", 0.0))
+    yields = int(s1.get("yield_count", 0)) - int(s0.get("yield_count", 0))
+    parts.append(
+        f"wait={wait:.1f}s/yield={yields}/p0_p95={float(s1.get('p0_rt_ms_p95', 0.0)):.0f}ms"
+    )
+    # 阶段占比（P0.5 基线）：T_in = 一切下载（payload/code/blob/预取），T_out = 结果回传，
+    # T_ppo = 计算，other = 其余（排队/装载/解包/落盘）——「GPU 空转」主要就落在这里。
+    # 这一行的用途是**判 P2 盈亏**：预取只值得做在「T_in 占比高 且 other 里有等下载」的现场。
+    for seg, sec in sorted((w.get("times") or {}).items()):
+        parts.append(f"{seg}={float(sec):.1f}s")
+    ppo_sec = float((w.get("times") or {}).get("ppo", 0.0))
+    out_sec = float(w["segs"].get("result", (0, 0.0))[1])
+    in_sec = tot_s - out_sec
+    # `wall` 取「实测墙钟」与「各阶段之和」的较大者：阶段是**已测量的区间**，
+    # 墙钟不可能比它们之和小（时钟粒度/人工拼接会给出略小的读数），而一个比
+    # 各阶段之和还小的分母会把占比算成荒谬值（读表的人会以为自己在看噪声）。
+    wall = max(time.time() - float(w.get("t0") or time.time()), in_sec + out_sec + ppo_sec)
+    other = max(wall - in_sec - out_sec - ppo_sec, 0.0)
     rate_all = tot_b / tot_s / 1024.0 if tot_s > 0 else 0.0
     log(
         f"job {jid}: wire "
         + " ".join(parts)
         + f" 合计={tot_b / mb:.2f}MB/{tot_s:.1f}s({rate_all:.0f}KB/s)"
+        + f" phases in={in_sec:.1f}s out={out_sec:.1f}s ppo={ppo_sec:.1f}s"
+        f" other={other:.1f}s wall={wall:.1f}s"
     )
 
 
@@ -264,8 +352,13 @@ def _read_body(
     total_timeout: float | None,
     progress: Any = None,
     allow_reroll: bool = False,
+    pace: Any = None,
 ) -> bytes:
     """分块读 body：报进度 + **停滞/超预算即抛**（异常正文带已收字节数与原因）。
+
+    `pace`（2026-09-22，P0）：每个分片间隙调一次的回调 —— 控制面在途时它会让路暂停，
+    P2 预取被挤时它抛 `BulkPreemptError` 丢掉半截。**在读之前**调（停读 = TCP 窗口回填
+    暂停，正是让控制面小包挤过去的方式）。
 
     停滞异常必须**有正文**：上游 `_get_with_retry` 只把 `repr(e)` 写进日志，裸
     `TimeoutError()` 打出来是 `TimeoutError()`——等于没写（2026-09-20 事故现场）。
@@ -280,6 +373,8 @@ def _read_body(
     last = t0
     probed = False
     while True:
+        if pace is not None:
+            pace()
         try:
             block = resp.read(BODY_CHUNK)
         except (TimeoutError, OSError) as e:
@@ -335,8 +430,13 @@ def _request(
     idle_timeout: float | None = None,
     total_timeout: float | None = None,
     allow_reroll: bool = False,
+    pace: Any = None,
 ) -> tuple[int, bytes]:
     """单发 GET/POST。缺省（不给 `idle_timeout`/`progress`）行为与改造前逐字节相同。
+
+    控制面旁路（2026-09-22，P0）：`control_path(path)` 命中的路径（peek/priority/claim/
+    start/ready/abandon/status/heartbeat/release/fail）只做一件事——**通知 bulk 让路**；
+    它们本身永不进 bulk 队列（`urllib` 每次请求新开连接，天然是独立 socket）。
 
     给了 `idle_timeout`/`progress`（大 body 下载路径）才走**分块读**：socket 超时用
     `idle_timeout` 而不是 `timeout`——`timeout` 在这些路径上是**总预算**语义，拿它当
@@ -354,21 +454,25 @@ def _request(
     )
     stream = idle_timeout is not None or progress is not None
     sock_timeout = idle_timeout if idle_timeout is not None else timeout
-    try:
-        # 回环（本机 hub）绕开代理；非回环走进程内的显式 ProxyHandler（Colab 实测需要）。
-        open_fn = net_http.urlopen if net_http.is_loopback(url) else _get_opener().open
-        with open_fn(req, timeout=sock_timeout) as resp:
-            if not stream or resp.status != 200:
-                return resp.status, resp.read()
-            return resp.status, _read_body(
-                resp,
-                idle_timeout=sock_timeout,
-                total_timeout=total_timeout,
-                progress=progress,
-                allow_reroll=allow_reroll,
-            )
-    except urllib.error.HTTPError as e:
-        return e.code, e.read()
+    # 控制面标记（P0）：命中即让 bulk 在分片间隙让路；控制面自己**不进** bulk 队列。
+    ctl = _BULK.control(label=path) if control_path(path) else nullcontext()
+    with ctl:
+        try:
+            # 回环（本机 hub）绕开代理；非回环走进程内的显式 ProxyHandler（Colab 实测需要）。
+            open_fn = net_http.urlopen if net_http.is_loopback(url) else _get_opener().open
+            with open_fn(req, timeout=sock_timeout) as resp:
+                if not stream or resp.status != 200:
+                    return resp.status, resp.read()
+                return resp.status, _read_body(
+                    resp,
+                    idle_timeout=sock_timeout,
+                    total_timeout=total_timeout,
+                    progress=progress,
+                    allow_reroll=allow_reroll,
+                    pace=pace,
+                )
+        except urllib.error.HTTPError as e:
+            return e.code, e.read()
 
 
 #: "base_url:status" -> 上次告警墙钟（节流：非 200 时每分钟最多一条，别刷屏）
@@ -752,9 +856,13 @@ def acquire_job(
     offline_ok: bool = False,
     hub_scope: int | None = None,
     depth: int = 3,
+    on_drop: Any = None,
     log: Any = None,
 ) -> dict | None:
     """job 边界的取活三件套：`peek → priority → claim`（§2.3 / §2.6）。
+
+    `on_drop(jid)`：`none` 级的通知面（P2 用它丢本地预取副本——「别人已落盘」的 job
+    再预取就是白花带宽；回调抛错不影响选活）。
 
     返回形状与旧 `poll_job` **逐字段兼容**（`{job_id, manifest, halt, lease_token, course}`
     或 `{"halt": True}` 或 None）——`worker_loop` 的下游（心跳/停机达令/run_job）零改动。
@@ -797,6 +905,11 @@ def acquire_job(
         if str(prios.get(jid, "highest")) == PRIORITY_NONE:
             if log is not None:
                 log(f"job {jid}: priority=none（别人已落盘）——丢弃本地副本，不再试领")
+            if on_drop is not None:
+                try:
+                    on_drop(jid)
+                except Exception:  # 丢副本失败绝不影响选活
+                    pass
             continue
         alive.append(cand)
     if not alive:
@@ -839,6 +952,7 @@ def _get_with_retry(
     wire_jid: str = "",
     wire_seg: str = "",
     reroll: bool = False,
+    bulk_prio: str = BULK_P1_CRITICAL,
 ) -> bytes:
     """GET + 瞬时失败退避重试：网络异常/5xx → 指数退避重试；4xx → ProtocolError。
 
@@ -852,6 +966,11 @@ def _get_with_retry(
     2026-09-20 追加（plan §4.0 / M1）：① `reroll=True` 时启用**低速重抽**——首块速率远低于
     阈值就断开重发（**不退避**：重抽的全部价值就在快）；② 成功即把 `(段名, bytes, sec)`
     记进本 job 的传输账（`_wire_flush` 打一行）。POST 不走这里（不重抽）。
+
+    2026-09-22（P0 bulk 单通道）：每次尝试整体占一个 bulk 槽位（`bulk_prio` 缺省 P1 = 关键
+    下载；预取路径传 `BULK_P2_PREFETCH`）。被 P1 挤走时 P2 抛 `BulkPreemptError`——**不背
+    退避、立刻重排**，重试次数用完就让上层丢弃（预取是提前量，不是必须品）。槽位**不含**
+    退避睡眠：绝不抱着唯一通道睡觉。
     """
     last: str = ""
     rerolls = 0
@@ -861,16 +980,24 @@ def _get_with_retry(
         allow_reroll = reroll and attempt < attempts and rerolls < WIRE_REROLL_MAX
         t_req = time.time()
         try:
-            status, body = _request(
-                base_url,
-                token,
-                path,
-                timeout=timeout,
-                progress=progress,
-                idle_timeout=idle_timeout,
-                total_timeout=total_timeout,
-                allow_reroll=allow_reroll,
-            )
+            with _BULK.slot(bulk_prio, label=wire_seg or path) as _tok:
+                status, body = _request(
+                    base_url,
+                    token,
+                    path,
+                    timeout=timeout,
+                    progress=progress,
+                    idle_timeout=idle_timeout,
+                    total_timeout=total_timeout,
+                    allow_reroll=allow_reroll,
+                    pace=_bulk_pace(_tok, bulk_prio),
+                )
+        except BulkPreemptError as e:
+            if attempt < attempts:
+                log(f"bulk {wire_seg or path}: {e} —— 立即重排（{attempt}/{attempts}）")
+                continue
+            log(f"bulk {wire_seg or path}: {e} —— 重试次数用完，放弃这份提前量")
+            raise
         except WireSlowError as e:
             rerolls += 1
             _wire_note_reroll(wire_jid, e.bytes_read)
@@ -907,13 +1034,21 @@ def download_payload(
     jid: str,
     *,
     attempts: int = 3,
+    bulk_prio: str = BULK_P1_CRITICAL,
+    wire_jid: str = "",
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
 ) -> bytes:
     """取 payload 归档：**分块 + 进度行 + 停滞即断**（2026-09-20 事故的修复面）。
 
+    `wire_jid`：传输账挂给哪个 job（缺省 = 本 job）。预取路径传合成 id，免得一份提前下载
+    的账记进「正在跑的那个 job」里——那会让阶段占比把预取时间算成别人的 T_in。
+
     停滞判据 = 45s 无新字节（`BODY_IDLE_TIMEOUT_SEC`），总预算 300s。原来只有
     一个 `timeout=300` 的整读：隧道/代理中途停滞时，操作员看到的是**几分钟零输出**
     且日志里连一句「失败」都没有（socket 超时的裸异常没有正文）。
+
+    `bulk_prio`（2026-09-22）：开算前的关键下载用缺省 P1；**预取**（软持有）传
+    `BULK_P2_PREFETCH`——它必须能在高优传输到达时丢掉半截（`BulkPreemptError`）。
     """
     return _get_with_retry(
         base_url,
@@ -925,9 +1060,10 @@ def download_payload(
         idle_timeout=BODY_IDLE_TIMEOUT_SEC,
         total_timeout=BODY_TOTAL_TIMEOUT_SEC,
         progress=_progress_logger(f"job {jid}: payload", log),
-        wire_jid=jid,
+        wire_jid=wire_jid or jid,
         wire_seg="payload",
         reroll=True,
+        bulk_prio=bulk_prio,
     )
 
 
@@ -1108,19 +1244,23 @@ def post_result(
     for attempt in range(1, attempts + 1):
         t_a = time.time()  # 本次尝试的墙钟（传输账用；`t0` 含退避，不适合算速率）
         try:
-            status, body = _request(
-                base_url,
-                token,
-                f"/jobs/{jid}/result",
-                timeout=timeout,
-                data=req_body,
-                method="POST",
-                headers={
-                    "Content-Type": ctype,
-                    # H2：结果回传须携带领取时下发的 lease_token（hub 校验后收）
-                    **({"X-Lease-Token": lease_token} if lease_token else {}),
-                },
-            )
+            # P1 关键回传：占唯一 bulk 通道且**不被抢断**（POST 大 body 没有安全 Range）。
+            # 占槽范围 = 单次尝试；退避睡眠在槽外（绝不抱着通道睡 16s）。
+            with _BULK.slot(BULK_P1_CRITICAL, label="result") as _tok:
+                status, body = _request(
+                    base_url,
+                    token,
+                    f"/jobs/{jid}/result",
+                    timeout=timeout,
+                    data=req_body,
+                    method="POST",
+                    headers={
+                        "Content-Type": ctype,
+                        # H2：结果回传须携带领取时下发的 lease_token（hub 校验后收）
+                        **({"X-Lease-Token": lease_token} if lease_token else {}),
+                    },
+                    pace=_bulk_pace(_tok, BULK_P1_CRITICAL),
+                )
         except Exception as e:
             status, body = None, repr(e).encode()
         if status in (200, 201):
@@ -1390,8 +1530,8 @@ def prune_job_dirs(work_dir: Path, keep: int = JOB_DIR_KEEP, log=lambda msg: Non
     """按 mtime 保留最近 `keep` 个 job 目录，其余删除。返回删除个数。
 
     只动 work_dir 下的 job 目录（按 jid 命名），**跳过 code_cache / blob_cache /
-    ts_code_cache**（按 sha 内容寻址，命中即省一次下载/上传）。删除失败（占用/沙箱
-    保护）跳过，不抛。
+    ts_code_cache / prefetch**（内容寻址缓存按 sha 复用；`prefetch/` 是 P2 的软持有暂存区，
+    删掉 = 下一轮预取白做）。删除失败（占用/沙箱保护）跳过，不抛。
 
     ⚠ 新增内容寻址缓存目录时必须加进这份豁免名单（2026-09-17 M2 事故：`blob_cache`
     漏了名单 → 每轮被当旧 job 目录删掉 → 缓存永远未命中，而现象看起来是「协议没生效」）。
@@ -1400,7 +1540,8 @@ def prune_job_dirs(work_dir: Path, keep: int = JOB_DIR_KEEP, log=lambda msg: Non
         dirs = [
             d
             for d in work_dir.iterdir()
-            if d.is_dir() and d.name not in ("code_cache", "blob_cache", "ts_code_cache")
+            if d.is_dir()
+            and d.name not in ("code_cache", "blob_cache", "ts_code_cache", PREFETCH_DIR_NAME)
         ]
     except OSError:
         return 0
@@ -2581,6 +2722,8 @@ def run_job(
     except Exception as e:
         raise job_body_error("grad（PPO 更新）", e) from e
     ppo_sec = round(time.time() - t_ppo, 1)
+    # P0.5：T_ppo 进传输账（与 T_in/T_out 同一条 `wire` 行 ⇒ 占比可复算，不用人肉拼日志）。
+    _wire_time(jid, "ppo", time.time() - t_ppo)
     log(
         f"job {jid}: PPO done in {ppo_sec}s, steps={total_steps} chunks={len(chunks)} kl={agg.get('kl')}"
     )
@@ -2804,6 +2947,86 @@ def _release_cloud_machine(
         pass
 
 
+#: 预取传输账的合成 job id（预取不属于任何在跑的 job，但又必须记字节——
+#: 否则「预取花了多少带宽」只能从 hub 侧对账，而 hub 看到的是同一张脸）。
+PREFETCH_WIRE_ID = "prefetch"
+#: 预取填充的轮询间隔（秒）：一轮填满后等这么久再问下一次 peek。
+PREFETCH_ROUND_SEC = 5.0
+
+
+def _prefetch_fill(
+    base_url: str,
+    token: str,
+    store: PrefetchStore,
+    stop: threading.Event,
+    *,
+    worker_id: str = "",
+    offline_ok: bool = False,
+    hub_scope: int | None = None,
+    depth: int = PREFETCH_DEPTH_DEFAULT,
+    skip: set[str] | None = None,
+    log: Any = None,
+) -> None:
+    """后台填充软持有队列（P2）：`peek`（控制面，无副作用）→ **P2** 下载 → 暂存。
+
+    与 `run_job` **重叠**运行——这就是预取的全部价值所在（§0：串行把 GPU 饿死在传输上）。
+    三条纪律：
+
+      · 下载一律走 `bulk_prio=BULK_P2_PREFETCH`：**可被控制面/关键传输当场打断**（丢半截，
+        幂等重下）。预取不该有能力拖慢在跑的 job 或控制环。
+      · 失败**不是失败**：被挤走/404/瞬时错误 → 就地丢掉、记一行、下一轮再来。
+        **绝不**进 `ProtocolError`/`report_job_failure`（否则网络抖动会被报成节点故障）。
+      · 预取只走 `download_payload` 一条路：minimize-payload 的 omit 协商落在那个函数里，
+        预取落地后**自动继承**；在这里另写一个「整包 GET」就是把已瘦身的部分又吹回去。
+    """
+    skip = skip or set()
+    log = log or (lambda _m: None)
+    while not stop.is_set():
+        try:
+            peeked = peek_jobs(
+                base_url,
+                token,
+                worker_id=worker_id,
+                offline_ok=offline_ok,
+                hub_scope=hub_scope,
+                n=max(1, int(depth)),
+                log=None,  # 预取的 peek 不进 poll 告警节流表（同一 url 会互相压报）
+            )
+        except Exception as e:
+            log(f"prefetch: peek 失败（{type(e).__name__}）——{PREFETCH_ROUND_SEC:.0f}s 后再试")
+            stop.wait(PREFETCH_ROUND_SEC)
+            continue
+        cands = list(peeked[0]) if peeked else []
+        picked = pick_candidates(cands, held=store.held(), skip=skip, depth=depth)
+        for cand in picked:
+            if stop.is_set():
+                break
+            jid = str(cand["job_id"])
+            try:
+                payload = download_payload(
+                    base_url,
+                    token,
+                    jid,
+                    bulk_prio=BULK_P2_PREFETCH,
+                    wire_jid=PREFETCH_WIRE_ID,  # 账记在合成 id 上，不污染在跑 job 的账
+                    log=lambda m, _j=jid: log(f"prefetch {_j[:8]}: {m}"),
+                )
+            except BulkPreemptError as e:
+                log(f"prefetch {jid[:8]}: {e}")
+                continue
+            except (ProtocolError, RetryableError, CodeChangedError) as e:
+                log(f"prefetch {jid[:8]}: 放弃（{type(e).__name__}）——预取失败不算失败")
+                continue
+            except Exception as e:
+                log(f"prefetch {jid[:8]}: 放弃（{type(e).__name__}: {e}）")
+                continue
+            if store.store(jid, payload, cand):
+                log(f"prefetch {jid[:8]}: 已预取 {len(payload)} bytes（软持有，无租约）")
+        _wire_flush(PREFETCH_WIRE_ID, log)  # 每轮一行预取传输账
+        stop.wait(PREFETCH_ROUND_SEC)
+    _wire_flush(PREFETCH_WIRE_ID, log)  # 收尾：最后一次没有等满一轮的也上账
+
+
 def worker_loop(
     base_url: str,
     token: str,
@@ -2823,6 +3046,8 @@ def worker_loop(
     run_budget_sec: float = 0.0,
     # 离线训练模式（2026-09-19）：本会话能自己跑完整段 ⇒ 带能力头领离线课
     offline_ok: bool = False,
+    # 软持有预取深度（P2，2026-09-22）：0 = 关预取（只调度不预取，§7 的回退档）
+    prefetch_depth: int = PREFETCH_DEPTH_DEFAULT,
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
 ) -> int:
     """无状态轮询主循环。返回处理的 job 数。
@@ -2839,6 +3064,7 @@ def worker_loop(
       留共享根。异 commit job 由既有 _ACTIVE_CODE_SHA 守卫转 86 + 监督器重拉。
     """
     done = 0
+    set_bulk_log(log)  # 调度器的排队/让路/抢占日志与 worker 同一条流
     # 身份只算一次（旧路径每个轮询都调 worker_tag()：hostname 系统调用不贵但没必要
     # 每秒一次；而 hub 的登记表靠这个值去重，值必须稳定）。
     worker_id = worker_tag()
@@ -2855,6 +3081,8 @@ def worker_loop(
     hi = 0
     # §386：停机状态感知（过渡尝试一次；halt 清除后复位，下次停机可再试）——按 hub 独立。
     halt_seen: dict[int, bool] = {}
+    # P2 软持有暂存区（按 hub 分区；`blob_cache` 共享根与 run_job 的口径一致）。
+    pf_stores: dict[int, PrefetchStore] = {}
     while True:
         base_url = hubs[hi]
         # work 分区（P3b C3）：多 hub 按源分区 hub0/<jid>…（分区才语义正确）；
@@ -2862,6 +3090,11 @@ def worker_loop(
         part_dir = work_dir / f"hub{hi}" if multi else work_dir
         if multi:
             part_dir.mkdir(parents=True, exist_ok=True)
+        if prefetch_depth > 0 and hi not in pf_stores:
+            pf_stores[hi] = PrefetchStore(
+                part_dir, log=log, blob_root=shared_code_cache.parent / "blob_cache"
+            )
+        pf_store = pf_stores.get(hi)
         try:
             _polls_since_log += 1
             _polls_since_accept += 1
@@ -2876,6 +3109,8 @@ def worker_loop(
                 # 竞速判定的既有输入（P3 删判定时与之一同移除）：新面照旧上报，
                 # 免得「换面」顺手把既有机群协同行为静默改掉。
                 hub_scope=len(hubs),
+                # P2：已被别人落盘的 job（none 级）就地丢掉本地预取副本——再预取就白花带宽。
+                on_drop=(pf_store.drop if pf_store is not None else None),
                 log=log,
             )
         except Exception as e:
@@ -2926,6 +3161,7 @@ def worker_loop(
         idle_since = time.time()
         _polls_since_log = 0  # claim 即上报：alive 行下次只数 claim 之后的轮询，不与本行重复
         jid = job["job_id"]
+        _wire_start(jid)  # 阶段占比（in/out/ppo/other）的 wall 从 claim 起算
         lease_token = str(job.get("lease_token", "") or "")
         claim_mode = str(job.get("status") or "ok")  # ok（独占）| backup（无租约副本）
         log(
@@ -2936,6 +3172,35 @@ def worker_loop(
         # 心跳线程仅在有租约时启动（P3b 独占 hub 下发 lease_token；无租约
         # （旧 hub/§343 时代）则不续租，结果胜负由首写锁定决定）。
         # job 执行期间 60s 周期续租（长 job 靠它活过 CLAIM_TTL_SEC），job 结束 join。
+        # ---- P2 预取填充（后台，与下面的 run_job 重叠）：PPO_A 跑着的时候下载 B ----
+        # 命中即零下载开算（`preloaded` 接缝）；未命中就是「先串行下载关键 payload」，
+        # 用命中率压掉空转。填充线程与 job 同生命周期（job 结束就停，绝不留常驻线程）。
+        preloaded: dict | None = None
+        _pf_stop = threading.Event()
+        pf_thread: threading.Thread | None = None
+        if pf_store is not None:
+            got = pf_store.take(jid)
+            want_sha = str((job.get("manifest") or {}).get("payload_sha256") or "")
+            if got is not None and (not want_sha or str(got.get("blob_sha")) == want_sha):
+                preloaded = {"payload_zip": got["payload_zip"]}
+            elif got is not None:
+                # 暂存副本与 claim 到的这份不是同一字节（hub 换过 job）：丢弃，走关键下载。
+                log(f"job {jid}: 预取副本 sha 与 claim manifest 不符——丢弃走关键下载")
+            pf_thread = threading.Thread(
+                target=_prefetch_fill,
+                args=(base_url, token, pf_store, _pf_stop),
+                kwargs={
+                    "worker_id": worker_id,
+                    "offline_ok": offline_ok,
+                    "hub_scope": len(hubs),
+                    "depth": prefetch_depth,
+                    "skip": {jid},
+                    "log": log,
+                },
+                daemon=True,
+                name=f"pf-{jid[:8]}",
+            )
+            pf_thread.start()
         _hb_stop = threading.Event()
         hb_thread = None
         if lease_token:
@@ -2968,6 +3233,7 @@ def worker_loop(
                 artifacts_dir=artifacts_dir,
                 run_max_iters=run_max_iters,
                 run_budget_sec=run_budget_sec,
+                preloaded=preloaded,  # P2 命中面：有它则 payload 段零网络
                 log=log,
                 should_cancel=_cancel.is_set,
                 on_ppo_start=lambda: job_started(base_url, token, jid, worker_id=worker_id),
@@ -3050,6 +3316,10 @@ def worker_loop(
             # 取消环必须每 job 都收（否则一个 job 一个常驻线程，长跑 worker 会漏线程）
             _watch_stop.set()
             _hb_stop.set()
+            # 预取填充线程同理：job 结束即停（它最多再跑一轮下载，join 有超时兜底）。
+            _pf_stop.set()
+            if pf_thread is not None:
+                pf_thread.join(timeout=30.0)
             if hb_thread is not None:
                 hb_thread.join(timeout=HEARTBEAT_SEC + 5)
         if once:
@@ -3082,6 +3352,14 @@ def main() -> None:
         help="冒烟：跳过 PPO，回显 init 权重为结果（hub-start 冒烟预演；消费方作废本轮）",
     )
     ap.add_argument("--max-idle-sec", type=float, default=0.0, help="空闲超时退出（0=永不）")
+    # P2 软持有预取：把一个 job 的下载叠到上一个 job 的 PPO 上（§2.6）。
+    # 0 = 关预取（只调度不预取，plan §7 的回退档）。深度缺省 3（跨课程轮转取）。
+    ap.add_argument(
+        "--prefetch-depth",
+        type=int,
+        default=PREFETCH_DEPTH_DEFAULT,
+        help=f"软持有预取深度（0=关；缺省 {PREFETCH_DEPTH_DEFAULT}）",
+    )
     # ---- 半离线（kind=run；2026-09-17）----
     # 产物目录：缺省按 Kaggle /kaggle/working → Colab Drive → <work>/artifacts 自动解析。
     ap.add_argument(
@@ -3156,6 +3434,7 @@ def main() -> None:
             run_max_iters=args.run_max_iters,
             run_budget_sec=args.run_budget_sec,
             offline_ok=args.offline,
+            prefetch_depth=args.prefetch_depth,
         )
         print(f"[{time.strftime('%H:%M:%S')}] [worker] done: {n} job(s) processed", flush=True)
         # H8：--once 失败（返回 -1）→ 非零退出码

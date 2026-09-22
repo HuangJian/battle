@@ -134,13 +134,58 @@ def test_overlay_reads_rl_config_through_one_seam(monkeypatch: pytest.MonkeyPatc
     assert args.gate_halt_mode == "notify"
 
 
-def test_real_rl_config_keeps_course_args_unchanged() -> None:
-    """真机 rl-config 今天没有 `courses.<课>` 覆盖块 ⇒ `course_args` 的输出与改造前一致。
+def test_rl_config_path_is_env_overridable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`BCITY_RL_CONFIG` = rl-config 路径的**唯一**缝（`rl.config` 委托 `dist_common`）。
 
-    （这条是**反悔门禁**：覆盖机制一旦被顺手写成「总是改写某些字段」，本用例会红。）
+    为什么这条重要（2026-09-22，用户指令「测试应该使用自己的 fixtures」）：rl-config.json
+    **永不入库**（gitignore），于是不用夹具的用例实际上是在「读别人机器上的文件」——
+    本机 `rl.stream=1` 曾让解析链对拍常年红（`tests/test_serve_wiring.py`）。
     """
+    import json as _json
+
+    from dist_common import rl_config_path as dist_path
+    from rl.config import read_rl_config_file, rl_config_path
+
+    fixture = tmp_path / "rl-config.fixture.json"
+    fixture.write_text(_json.dumps({"courses": {"c5-tick": {"gate_halt_mode": "notify"}}}), "utf-8")
+    monkeypatch.setenv("BCITY_RL_CONFIG", str(fixture))
+    assert rl_config_path() == fixture and Path(dist_path()) == fixture
+    assert read_rl_config_file()["courses"]["c5-tick"]["gate_halt_mode"] == "notify"
+    # 相对路径按 nn-training/ 下解析（与默认值同一约定）；未设 env ⇒ 仓里那份
+    monkeypatch.setenv("BCITY_RL_CONFIG", "rl-config.fixture.json")
+    assert rl_config_path() == Path(dist_path())
+    assert rl_config_path().name == "rl-config.fixture.json"
+    monkeypatch.delenv("BCITY_RL_CONFIG")
+    assert rl_config_path().name == "rl-config.json" and rl_config_path().parent.name == "nn-training"
+    # 形状坏了（顶层是数组）⇒ 空 dict，不是 AttributeError 落在开课路径上
+    fixture.write_text("[1, 2]", "utf-8")
+    monkeypatch.setenv("BCITY_RL_CONFIG", str(fixture))
+    assert read_rl_config_file() == {}
+
+
+def test_rl_config_is_gitignored_forever() -> None:
+    """rl-config.json **永不入库**（它承载机器侧事实且被控制台直接改写）。
+
+    这条守的是「有人为了让它可测就把它提交了」这种修法——那会把一台机器的 hub 端口 /
+    token / 节点表变成全仓契约。正确修法是夹具（见上一条）。
+    """
+    ignored = (Path(__file__).resolve().parent.parent / ".gitignore").read_text(encoding="utf-8")
+    assert "rl-config.json" in [ln.strip() for ln in ignored.splitlines()]
+
+
+def test_course_args_with_a_fixture_keeps_fields_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**夹具** rl-config（无 `courses.<课>` 覆盖块）⇒ `course_args` 输出与 argparse 默认一致。
+
+    （这条是**反悔门禁**：覆盖机制一旦被顺手写成「总是改写某些字段」，本用例会红。
+    夹具版比读本机真配置更强：不再依赖未入库文件的内容。）
+    """
+    fixture = tmp_path / "rl-config.fixture.json"
+    fixture.write_text('{"rl": {}}', encoding="utf-8")
+    monkeypatch.setenv("BCITY_RL_CONFIG", str(fixture))
     args = loop_serve.course_args("c4-dodge")
-    assert args.remote_transport == "auto"  # rl-config 未配 ⇒ argparse 默认
+    assert args.remote_transport == "auto"  # 夹具未配 ⇒ argparse 默认
     assert args.gate_halt_mode == "halt"
     # ★ §3：`--remote-degrade-after` 已删除 ⇒ 该字段不该再存在于 args
     assert not hasattr(args, "remote_degrade_after")

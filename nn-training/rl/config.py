@@ -27,6 +27,37 @@ from rl.reward_library import OUTCOMES
 
 #: 课程配置目录（nn-training/curricula/*.jsonc）
 CURRICULA_DIR = Path(__file__).resolve().parent.parent / "curricula"
+
+#: 机器本地启动配置（**永不入库**：`nn-training/.gitignore` 里 ignore 了 `rl-config.json`，
+#: 它承载机器侧事实——hub 端口/token/节点表/槽位/`courses.<课>` 旋钮，控制台会直接改写它）。
+RL_CONFIG_ENV = dist_common.RL_CONFIG_ENV
+
+
+def rl_config_path() -> Path:
+    """rl-config.json 的**唯一**路径来源（env `BCITY_RL_CONFIG` > `nn-training/rl-config.json`）。
+
+    实现委托给 `dist_common.rl_config_path()`（那里是路径常量的家：dist 层的 eval 脚本也用同一份
+    路径）——**一处实现、三处读取点共用**。缘由（2026-09-22，用户指令「测试应该使用自己的
+    fixtures」）：路径原本硬编码在多处，于是**任何读它的用例都隐式依赖本机那份未入库的配置**
+    ——本机 `rl.stream=1` 就让「`course_args` ≡ `run_rl.py`」的解析对拍变红
+    （`tests/test_serve_wiring.py` 实测）：绿不绿取决于**别人机器上文件的内容**。有缝之后
+    用例自带 tmp 夹具，两侧读取点都走同一个 env，对拍才是真对拍。
+    """
+    return Path(dist_common.rl_config_path())
+
+
+def read_rl_config_file() -> dict:
+    """读 rl-config.json（读不到 / 不是 dict → 空 dict）。
+
+    形状校验不是防御性装饰：读者按 `cfg.get("courses")` 取块，而一份顶层是数组/字符串的
+    JSON（手改坏了）会让 `.get` 直接 AttributeError 落在**开课路径**上——一门课开不起来还
+    看不出为什么。空 dict ⇒ 退化成「没配机器侧旋钮」，与文件不存在同一个结果。
+    """
+    try:
+        data: Any = json.loads(rl_config_path().read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 #: 关卡配置目录（nn-training/levels/*.jsonc）——地图/敌人队列/命/星等**环境语义**，
 #: 课程以 `"level": "<name>"` 引用（DECISIONS §2026-09-13-level-extraction）。
 LEVELS_DIR = Path(__file__).resolve().parent.parent / "levels"

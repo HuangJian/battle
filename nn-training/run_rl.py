@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import atexit
-import json
 import os
 import shutil
 import subprocess
@@ -206,12 +205,11 @@ def main() -> None:
     mode = resolve_mode(sys.argv[1:])
     # 启动参数默认取自 rl-config.json（单一事实来源；CLI 显式传参覆盖 json 默认）。
     # 查找优先级 rl.<mode> → intent_rl 遗留块（intent/goal 迁移期）→ rl（D2）。
-    try:
-        _cfg = json.loads(
-            (REPO_ROOT / "nn-training" / "rl-config.json").read_text(encoding="utf-8")
-        )
-    except Exception:
-        _cfg = {}
+    # 路径的唯一来源是 `rl.config.rl_config_path()`（`BCITY_RL_CONFIG` 可重定向）——与
+    # `rl/loop_serve.py::_read_rl_config` 同源，用例才能用自带夹具做「解析链对拍」。
+    from rl.config import read_rl_config_file
+
+    _cfg = read_rl_config_file()
     _rl_args, _rl_src = merged_mode_args(_cfg, mode)
 
     ap = build_argparser(mode, _rl_args)

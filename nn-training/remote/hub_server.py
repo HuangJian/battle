@@ -2215,6 +2215,7 @@ class _HubQueue(_AuthGuard):
                     "job_id": jid,
                     "course": course,
                     "payload_bytes": man.get("payload_bytes", 0),
+                    "payload_sha256": man.get("payload_sha256"),
                     "runId": man.get("runId"),
                     "it": man.get("it"),
                 }
@@ -2239,6 +2240,10 @@ class _HubQueue(_AuthGuard):
             "runId": man.get("runId"),
             "it": man.get("it"),
             "payload_bytes": int(size),
+            # `payload_sha256` 也进摘要（2026-09-22，P2）：预取拿到的字节必须能**就地**校验
+            # 是不是这份 job 的 payload——不带它的话，预取会把「sha 不符」的发现推到开算前
+            # （那时已占了 claim 租约，错一份就多一次租约往返）。
+            "payload_sha256": man.get("payload_sha256"),
         }
 
     def claim_job(

@@ -1,4 +1,4 @@
-"""tools/wire_report.py —— 把传输账（`wire:` 行）聚成 **p50/p90** 与坏签比例。
+"""tools/wire_report.py —— 把传输账（`wire:` 行）聚成 **p50/p90** 与坏签比例（+ 阶段占比）。
 
 为什么需要（plan/minimize-payload.plan.md §4.0 / §7.2）：验收口径是「**报 p50/p90，不报均值**；
 每组 ≥10 job」，而 `wire:` 是**逐 job 一行**原文——不聚合就只能靠人眼扫日志，而
@@ -51,6 +51,11 @@ REROLL_RE = re.compile(
 )
 #: hub 侧发送完成行：`响应发送完成 /jobs/x/payload 3486200 bytes in 321.8s`
 HUB_RE = re.compile(r"响应发送完成 (\S+) (\d+) bytes in ([\d.]+)s")
+#: 阶段占比行（2026-09-22，P0.5 基线）：`phases in=…s out=…s ppo=…s other=…s wall=…s`。
+#: 由 `remote/worker.py::_wire_flush` 写在每 job 摘要行**尾部**（同一条 `wire` 行里）。
+PHASE_RE = re.compile(
+    r"phases in=([\d.]+)s out=([\d.]+)s ppo=([\d.]+)s other=([\d.]+)s wall=([\d.]+)s"
+)
 #: worker 摘要尾部那个「合计」（是各段之和，不是一段）——不进分段表。
 TOTAL_SEG = "合计"
 #: 判据阈值（与 `remote/worker.py::WIRE_MIN_RATE` 同值）：低于它算一次**坏签**。
@@ -124,6 +129,104 @@ def parse_lines(lines: list[str]) -> dict[str, SegStats]:
             # 没走网络」，与速率样本分开计（它们没有秒数，混进去会把 p50 拉成 0）。
             bucket(f"job:{name}").hits += 1
     return out
+
+
+@dataclass
+class PhaseSums:
+    """阶段占比（**P0.5 基线**，plan/transfer-scheduling §4 P0.5）的累加账。
+
+    为什么要它：P2（软持有预取）的盈亏完全取决于现场**是不是**「T_in 占比高、且 other 里
+    在等下载」——没有这个数字就开 P2 等于拿直觉赌一个会花掉整机带宽的改动。
+    """
+
+    jobs: int = 0
+    in_sec: float = 0.0  # T_in：一切**入向**传输（payload/code/blob/预取）
+    out_sec: float = 0.0  # T_out：结果回传
+    ppo_sec: float = 0.0  # T_ppo：计算
+    other_sec: float = 0.0  # 其余（排队/装载/解包/落盘）——「GPU 空转」主要落这里
+    wall_sec: float = 0.0  # 本 job 墙钟（claim → 摘要行）
+    in_share: list[float] = field(default_factory=list)  # 每 job 的 in/wall（%）
+    out_share: list[float] = field(default_factory=list)
+    ppo_share: list[float] = field(default_factory=list)
+    other_share: list[float] = field(default_factory=list)
+
+    def add(self, tin: float, tout: float, ppo: float, other: float, wall: float) -> None:
+        self.jobs += 1
+        self.in_sec += tin
+        self.out_sec += tout
+        self.ppo_sec += ppo
+        self.other_sec += other
+        self.wall_sec += wall
+        if wall > 0:
+            self.in_share.append(100.0 * tin / wall)
+            self.out_share.append(100.0 * tout / wall)
+            self.ppo_share.append(100.0 * ppo / wall)
+            self.other_share.append(100.0 * other / wall)
+
+
+def parse_phases(lines: list[str]) -> PhaseSums:
+    """抽出 `phases …` 行 → `PhaseSums`（纯函数，无 IO）。"""
+    sums = PhaseSums()
+    for line in lines:
+        m = PHASE_RE.search(line)
+        if m:
+            sums.add(*(float(g) for g in m.groups()))
+    return sums
+
+
+def summarize_phases(sums: PhaseSums) -> dict:
+    """阶段占比读数：**总量占比** + 每 job 的 p50/p90（口径同前：报分位数，不报均值）。"""
+    tot = sums.wall_sec if sums.wall_sec > 0 else 0.0
+    def _pct(v: float) -> float:
+        return round(100.0 * v / tot, 1) if tot > 0 else 0.0
+
+    def _q(values: list[float], q: float) -> float | None:
+        v = percentile(values, q)
+        return None if math.isnan(v) else round(v, 1)
+
+    return {
+        "jobs": sums.jobs,
+        "wall_sec": round(sums.wall_sec, 1),
+        "in_sec": round(sums.in_sec, 1),
+        "out_sec": round(sums.out_sec, 1),
+        "ppo_sec": round(sums.ppo_sec, 1),
+        "other_sec": round(sums.other_sec, 1),
+        "in_pct": _pct(sums.in_sec),
+        "out_pct": _pct(sums.out_sec),
+        "ppo_pct": _pct(sums.ppo_sec),
+        "other_pct": _pct(sums.other_sec),
+        "in_pct_p50": _q(sums.in_share, 0.5),
+        "in_pct_p90": _q(sums.in_share, 0.9),
+        "ppo_pct_p50": _q(sums.ppo_share, 0.5),
+        "other_pct_p50": _q(sums.other_share, 0.5),
+        "_per_job": {
+            "in": sums.in_share,
+            "out": sums.out_share,
+            "ppo": sums.ppo_share,
+            "other": sums.other_share,
+        },
+    }
+
+
+def render_phases(row: dict) -> str:
+    """人读阶段占比：一屏回答「这台的瓶颈是传输还是算」（P2 的开关判据）。"""
+    if not row.get("jobs"):
+        return "阶段占比：无不含 `phases` 的摘要行（旧 worker 的日志？）"
+
+    def _f(v: object) -> str:
+        return "—" if v is None else f"{v}"
+
+    lines = [
+        f"阶段占比（P0.5 基线）: {row['jobs']} job，wall 合计={row['wall_sec']}s",
+        f"  T_in  = {row['in_sec']:>8}s ({row['in_pct']:>5}%)  每 job p50={_f(row['in_pct_p50'])}%"
+        f" p90={_f(row['in_pct_p90'])}%",
+        f"  T_out = {row['out_sec']:>8}s ({row['out_pct']:>5}%)",
+        f"  T_ppo = {row['ppo_sec']:>8}s ({row['ppo_pct']:>5}%)  每 job p50={_f(row['ppo_pct_p50'])}%",
+        f"  other = {row['other_sec']:>8}s ({row['other_pct']:>5}%)  每 job p50={_f(row['other_pct_p50'])}%",
+        "  （T_in = 所有入向传输；other = 排队/装载/解包/落盘——预取只值得做在"
+        "「T_in 高 且 other 里在等下载」的现场）",
+    ]
+    return "\n".join(lines)
 
 
 def _merge_rerolls(stats: dict[str, SegStats]) -> None:
@@ -235,13 +338,23 @@ def main(argv: list[str] | None = None) -> int:
     stats = parse_lines(lines)
     _merge_rerolls(stats)
     rows = summarize(stats)
+    phases = summarize_phases(parse_phases(lines))
+    phases.pop("_per_job", None)  # 逐 job 明细不进 JSON：那是给绘图 / 深挖用的内部量
     if args.json:
-        print(json.dumps({"files": [str(f) for f in files], "rows": rows}, ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                {"files": [str(f) for f in files], "rows": rows, "phases": phases},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
     elif not rows:
         print(f"{len(files)} 个文件里没有 wire 账（旧版本 worker 的日志？）")
     else:
         print(f"{len(files)} 个文件，{len(rows)} 个段：")
         print(render(rows))
+        print()
+        print(render_phases(phases))
     return 0
 
 

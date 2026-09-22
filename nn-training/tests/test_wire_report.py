@@ -1,4 +1,4 @@
-"""tests/test_wire_report.py —— 传输账聚合（`tools/wire_report.py`；plan §4.0 / §7.2）。
+"""tests/test_wire_report.py —— 传输账聚合（`tools/wire_report.py`；plan §4.0 / §7.2 / P0.5）。
 
 为什么有这组用例：plan §7.2 的验收口径是「**报 p50/p90，不报均值**；每组 ≥10 job」，
 而 §8 开放问题 4（阈值取值）要靠实机 `wire:` 数据校准——两者都需要一个**可复算**的聚合，
@@ -185,6 +185,83 @@ def test_boot_rerolls_are_attributed_to_the_boot_segment() -> None:
 # ────────────────────────── ⑤ 端到端：文件 → 表 ──────────────────────────
 
 
+# ────────────── ⑥ 阶段占比（P0.5 基线：T_in / T_out / T_ppo / other）──────────────
+
+#: 现场形状（新 worker 会写的那一行）：段账 + 调度账 + 阶段账，全在同一条 `wire` 行里。
+PHASE_LINE = (
+    "[13:04:51] [worker] job 3c8cf83ce824aef8: wire payload=3.32MB/321.8s(11KB/s) "
+    "result=0.89MB/3.7s(245KB/s) wait=12.0s/yield=2/p0_p95=41ms 合计=4.21MB/325.5s(13KB/s) "
+    "ppo=613.2s phases in=321.8s out=3.7s ppo=613.2s other=61.3s wall=1000.0s"
+)
+
+
+def test_phase_line_is_parsed_into_shares() -> None:
+    """`phases …` 行 → 总量占比（决策口径：T_in 高 = 链路是瓶颈，other 高 = 等活/装载）。"""
+    row = wr.summarize_phases(wr.parse_phases([PHASE_LINE]))
+    assert row["jobs"] == 1
+    assert row["in_sec"] == pytest.approx(321.8)
+    assert row["out_sec"] == pytest.approx(3.7)
+    assert row["ppo_sec"] == pytest.approx(613.2)
+    assert row["other_sec"] == pytest.approx(61.3)
+    assert row["wall_sec"] == pytest.approx(1000.0)
+    assert row["in_pct"] == pytest.approx(32.2, abs=0.1)
+    assert row["ppo_pct"] == pytest.approx(61.3, abs=0.1)
+    assert row["other_pct"] == pytest.approx(6.1, abs=0.1)
+
+
+def test_phase_shares_use_percentiles_not_means() -> None:
+    """多个 job 时给每 job 占比的 p50/p90（口径同段表：不报均值）。"""
+    lines = [
+        PHASE_LINE,
+        PHASE_LINE.replace("other=61.3s wall=1000.0s", "other=800.0s wall=1000.0s"),
+    ]
+    row = wr.summarize_phases(wr.parse_phases(lines))
+    assert row["jobs"] == 2
+    # 最近秩：两个样本时 p50 取较小的那个（不插值、不外推）。
+    assert row["other_pct_p50"] == pytest.approx(6.1, abs=0.1)
+    # 而「总量占比」是 ratio of sums（101.3/2000）：两个口径故意都报——
+    # 前者回答「典型一个 job 长什么样」，后者回答「这台机器的时间花在哪」。
+    assert row["other_pct"] == pytest.approx(43.1, abs=0.1)
+
+
+def test_lines_without_phases_are_reported_as_empty() -> None:
+    """旧 worker 的日志（没有 `phases`）不得伪造成 0 占比——空就是空。"""
+    assert wr.parse_phases([LIVE_SLOW]).jobs == 0
+    empty = wr.render_phases(wr.summarize_phases(wr.PhaseSums()))
+    assert "旧 worker" in empty and "T_in" not in empty  # 说清楚是「日志里没有」，不伪造成 0%
+
+
+def test_writer_and_reader_agree_on_the_phase_format() -> None:
+    """**写方与读方同一格式**：worker 的 `_wire_flush` 写出来的行，本工具必须能解析出来。
+
+    这是本组用例里最要紧的一条：格式漂了不会报错，只会让基线表**静默变空**——
+    而 P0.5 的意义就是「没有基线不许开 P2」，空表会被读成「没数据」而不是「坏了」。
+    """
+    import remote.worker as W
+
+    W._WIRE.clear()
+    W._BULK.reset()
+    jid = "a" * 16
+    W._wire_start(jid)
+    W._wire_add(jid, "payload", 3 * MB, 300.0)  # T_in
+    W._wire_add(jid, "result", MB, 4.0)  # T_out
+    W._wire_time(jid, "ppo", 610.0)  # T_ppo
+    lines: list[str] = []
+    W._wire_flush(jid, lines.append)
+    W._WIRE.clear()
+    assert len(lines) == 1
+    row = wr.summarize_phases(wr.parse_phases(lines))
+    assert row["jobs"] == 1, f"读不出阶段行（格式漂了）：{lines[0]}"
+    assert row["in_sec"] == pytest.approx(300.0)
+    assert row["out_sec"] == pytest.approx(4.0)
+    assert row["ppo_sec"] == pytest.approx(610.0)
+    # `wall` ≥ 各阶段之和（写方保证）：本用例里实测墙钟几乎为 0，所以它就取 914.0，
+    # `other` 被夹到 0——否则分母小于各部分之和会把占比算成荒谬值。
+    assert row["wall_sec"] == pytest.approx(914.0, abs=0.5)
+    assert row["other_sec"] == 0.0
+    assert row["in_pct"] == pytest.approx(32.8, abs=0.2)
+
+
 def test_main_reads_files_and_dir(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """CLI：给目录取全部 `*.log`；给文件取该文件；表里不出现均值（口径写死在验收里）。"""
     d = tmp_path / "logs"
@@ -200,6 +277,15 @@ def test_main_reads_files_and_dir(tmp_path: Path, capsys: pytest.CaptureFixture[
     assert wr.main([str(d / "b.log"), "--json"]) == 0
     js = capsys.readouterr().out
     assert '"seg": "boot:code.zip"' in js
+
+    # 阶段占比也上表（`--json` 里同一层）：`phases` 块必须在
+    (d / "c.log").write_text(PHASE_LINE + "\n", encoding="utf-8")
+    assert wr.main([str(d)]) == 0
+    out = capsys.readouterr().out
+    assert "阶段占比" in out and "T_in" in out
+    assert "均值" not in out.split("（bad%")[0]  # 表体里不出现均值口径
+    assert wr.main([str(d / "c.log"), "--json"]) == 0
+    assert '"phases"' in capsys.readouterr().out
 
 
 def test_main_without_readable_files_is_loud(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

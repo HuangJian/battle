@@ -693,11 +693,23 @@ def test_course_args_unknown_course_is_loud() -> None:
 # 传 --echo-config 即走**文档化短路**（echo → log → return，在 validate_args 与任何权重/torch
 # 之前）⇒ 子进程 ~0.3s、不依赖权重与 torch，任何环境都能真跑。
 # 代价：不再覆盖「echo 之后那条链」——那不是本用例的判据（course_args 的解析快照）。
+#
+# 2026-09-22（用户指令「测试应该使用自己的 fixtures」，修本机那条既有环境红）：
+#   ① **阶段对齐**：`--echo-config` 的 dump 在 `validate_args` **之前**（文档化短路），
+#      而 `course_args` 的返回值是 validate **之后**的终态 —— 两边比的是**不同阶段**，
+#      于是「单一 PPO 路径恒置 stream/double_buffer=0」（`rl/config.py` §3）这一归一化只在
+#      一侧生效。本机 `rl-config.json` 的 `rl.stream=1` 恰好让这个差异显形（本机红、别处绿，
+#      取决于未入库文件的内容）。现在 oracle 在 dump 前自己跑一次 `validate_args`，
+#      与 `course_args` 的终态同阶段 ⇒ 对拍才是真对拍（顺带把归一化也钉进去了）。
+#   ② **自带夹具**：两份读取点都走 `rl.config.rl_config_path()`（env `BCITY_RL_CONFIG`），
+#      于是用例可以用自己的 tmp 配置当夹具，不再隐式依赖本机那份**未入库**的 rl-config.json。
 _ORACLE = """
 import json, sys
 sys.argv = ["run_rl.py", "--course", sys.argv[1], "--echo-config"]
 import rl.config as cfg
 def fake_echo(args, course, it=1):
+    # 与 course_args 的终态对齐：它也跑 validate_args（单一 PPO 路径的归一化就在里面）。
+    cfg.validate_args(args)
     # echo_config 本身不算解析快照（它只是调用方为了让 main() 走到这次 dump 而传的开关）：
     # 不排除会变成「mine 无此键 / theirs 有」的假分叉（实测正是唯一的差异项）。
     print("PARITY:" + json.dumps({k: repr(v) for k, v in vars(args).items()
@@ -709,7 +721,7 @@ run_rl.main()
 """
 
 
-def test_course_args_match_run_rl_echo_config(tmp_path: Path) -> None:
+def test_course_args_match_run_rl_echo_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """对拍：`course_args(stem)` ≡ `run_rl.py --course <stem> --echo-config` 的解析快照。
 
     oracle = 在**子进程里跑 `run_rl.main()` 自己**、把 `echo_config` 换成 dump（同一调用点、
@@ -719,13 +731,24 @@ def test_course_args_match_run_rl_echo_config(tmp_path: Path) -> None:
 
     故本用例**不需要**权重/torch（实测 ~0.3s）；拿不到 PARITY 一律算真回归（不再有
     env-blocked 跳过：那条路的唯一成因就是把 torch/权重链误拖进来）。
+
+    **夹具**（2026-09-22）：`BCITY_RL_CONFIG` 指向本用例自己写的 tmp 配置，两侧都读它 ——
+    这样「绿不绿」不再取决于本机那份未入库的 `nn-training/rl-config.json`（本机 `rl.stream=1`
+    曾让这条对拍常年红）。fixture 里刻意把 stream/double_buffer 设成 1：它们会被 validate
+    归一化回 0，正是原先两阶段错位才暴露出来的那条差异。
     """
     stem = "c4-dodge"
+    fixture = tmp_path / "rl-config.fixture.json"
+    fixture.write_text(
+        json.dumps({"rl": {"stream": 1, "double_buffer": 1}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BCITY_RL_CONFIG", str(fixture))
     # zh-CN Windows 默认 GBK：oracle stdout 含非 ASCII 时 text=True 会
     # UnicodeDecodeError，subprocess 读线程挂掉 ⇒ proc.stdout 变 None
     # （门禁实测 `AttributeError: 'NoneType' object has no attribute 'splitlines'`）。
     # 显式 UTF-8 + errors=replace，并让子进程也按 UTF-8 吐字。
-    env = {**os.environ, "PYTHONUTF8": "1"}
+    env = {**os.environ, "PYTHONUTF8": "1", "BCITY_RL_CONFIG": str(fixture)}
     proc = subprocess.run(
         [sys.executable, "-c", _ORACLE, stem],
         cwd=str(ROOT),
@@ -741,9 +764,13 @@ def test_course_args_match_run_rl_echo_config(tmp_path: Path) -> None:
         tail = (proc.stderr or "").strip()[-300:]
         pytest.fail(f"oracle 没吐出 PARITY（对拍链本身出了问题）：{tail}")
     theirs = json.loads(line[len("PARITY:") :])
+    mine_args = loop_serve.course_args(stem)
     mine = {
         k: repr(v)
-        for k, v in vars(loop_serve.course_args(stem)).items()
+        for k, v in vars(mine_args).items()
         if not k.startswith("_") and k != "echo_config"  # 同上：调用开关，不算快照
     }
+    # 夹具确实生效 + 归一化确实双侧生效（否则「夹具文件写进去了但没人读」会静默绿）
+    assert int(mine_args.stream) == 0 and int(mine_args.double_buffer) == 0
+    assert int(theirs["stream"].strip("'")) == 0 and int(theirs["double_buffer"].strip("'")) == 0
     assert mine == theirs

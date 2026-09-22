@@ -30,7 +30,6 @@
 from __future__ import annotations
 
 import atexit
-import json
 import os
 import shutil
 import subprocess
@@ -208,18 +207,15 @@ def release_cluster_lock(lock_path: str) -> None:
 #: 课程文件里课程名 → 路径约定下的 stem（读 courses.<课> 块用）。
 
 def _read_rl_config() -> dict:
-    """读 rl-config.json（读不到 / 形状不对 → 空 dict）。**单独一个函数**：这是测试注入点
-    （用例不碰仓根的真 rl-config），也是「读面只读一处」的写法。
+    """读 rl-config.json（读不到 / 形状不对 → 空 dict）。
 
-    形状校验不是防御性装饰：读者按 `cfg.get("courses")` 取块，而一份顶层是数组/字符串的
-    JSON（手改坏了）会让 `.get` 直接 AttributeError 落在**开课路径**上——一门课开不起来还
-    看不出为什么。空 dict ⇒ 退化成「没配机器侧旋钮」，与文件不存在同一个结果。
+    **读面只读一处**：路径走 `rl.config.rl_config_path()`（env `BCITY_RL_CONFIG` 可重定向，
+    与 `run_rl.py` 完全同源）——否则「用例自带夹具」在 serve 侧做不到，读的还是本机那份
+    未入库的配置。本函数仍是测试注入点（用例可以直接换掉它）。
     """
-    try:
-        data: Any = json.loads((NN_DIR / "rl-config.json").read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+    from rl.config import read_rl_config_file
+
+    return read_rl_config_file()
 
 
 def apply_course_machine_overrides(
@@ -281,10 +277,7 @@ def course_args(course: str, argv: list[str] | None = None) -> Any:
         raise SystemExit("[serve] 课程由课程列表给出，不要在附加参数里再传 --course/--course-file")
 
     mode = resolve_mode(extra)
-    try:
-        cfg = json.loads((NN_DIR / "rl-config.json").read_text(encoding="utf-8"))
-    except Exception:
-        cfg = {}
+    cfg = _read_rl_config()  # 与 run_rl.py 同源（`BCITY_RL_CONFIG` 可重定向）
     rl_args, _src = merged_mode_args(cfg, mode)
 
     from rl.cli import build_argparser
