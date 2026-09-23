@@ -306,7 +306,17 @@ _remote_ppo_fetch(13) · _remote_ppo_probe(12) · _push_submit_first(10) · _rem
 | 5 个顶层纯函数（`_is_ip_literal` / `attributed_source` / `_is_loopback` / `_write_bytes` / `_deterministic_fill`） | 58 | 收益太小，**不单开一轮**（可随下面的刀顺手带走） |
 | `_AuthGuard`（57）· `as_hub` / `make_server` / `main`（240） | ~300 | 与 `HubHandler` 同生命周期，暂不动 |
 
-**推荐首刀：`HubHandler` 的 admin 控制面（9 方法 / 218 行）→ `remote/hub/admin.py::AdminRoutes` 混入**
+**首刀（已完成，同日）**：`HubHandler` 的 admin 控制面（9 方法 / 218 行）→ `remote/hub/admin.py::AdminRoutes`
+
+> 落地结果：`hub_server.py` 3974 → **3728** 行；守卫 `tests/test_hub_admin_split.py`（8 例）；门禁 **2274 passed**。
+> 决策 → `DECISIONS.md` §2026-09-23-goalnn-godmodule-hub-admin；全文 → `engineering.md` §23「第三步」。
+> 落地时额外摸到**两个坑**（均已避开）：
+> ① **名字成环**：admin 组读的 `NET_PROBE_MAX` / `_deterministic_fill` 必须**随迁**（留下会被
+>    「hub_server import admin 拿混入」反过来要 import ⇒ 双向环；已 grep 证实全仓无其它读者 ⇒ 零门面）；
+> ② **类型遮蔽（比成环更险）**：混入里把 `headers` / `rfile` 宽成 `Any` 会**盖掉类型库的精确类型**
+>    （`AdminRoutes` 在 MRO 里早于 `BaseHTTPRequestHandler`）⇒ 组合类里 `self.headers.get(...)` /
+>    `self.rfile.read(n)` 的推断拓成 `Any`，hub_server 里两个 `-> str` / `-> bytes | None` 的方法报
+>    `no-any-return`（**症状在组合类，病因在混入**）⇒ 混入里必须逐字照抄类型库。
 
 ```
 _admin_push_workers(57) · _admin_courses(36) · _admin_unfreeze(32) · _admin_net_probe_upload(27)

@@ -20,8 +20,8 @@
 hub 推送、节点 failover、kickstart 系数、远端可重试异常集合）——后者**没有一个是方法**，
 只是历史上「从 `loop_core.py` 拆出」时按大小切、没按职责切。S4 第一步把整簇**零逻辑改动**
 搬到 `rl/loop_transport.py`，`loop_steps` 只留门面 re-export（2328 → **1812** 行）。
-门禁 **2255 → 2262**（+7 守卫用例）全绿；同日第二步再拆远端 PPO 腿（见文末），终值
-**2266 passed / 3 skipped**。
+门禁 **2255 → 2262**（+7 守卫用例）全绿；同日第二步再拆远端 PPO 腿（见文末），再第三步拆
+`hub_server` 的 admin 控制面，终值 **2274 passed / 3 skipped**。
 
 ### 先量结构，再选刀口（拆前侦察，都是实测）
 
@@ -153,11 +153,62 @@ patch 目标从 `rl.loop_steps.*` 迁到 `rl.loop_remote.*`（否则 `AttributeE
 - 规模：`loop_steps.py` 1812 → **952** 行（连首簇共 2328 → 952）；`loop_remote.py` 984 行。
 - 门禁：**2266 passed / 3 skipped / 0 failed**，26s；mypy 364 源文件绿。
 
+### 第三步（同日完成）：`hub_server` 的 admin 控制面9 方法 → `remote/hub/admin.py`
+
+先量后动，**实测否掉了原计划的初判**：
+
+| 顶层节点 | 行数 | 占比 |
+|---|---|---|
+| `_JobStore`(1002) · `_HubQueue`(1033) · `HubHandler`(1343) | 3378 / 3974 | **85%** |
+| 5 个顶层纯函数（`_is_ip_literal` / `attributed_source` / `_is_loopback` / `_write_bytes` / `_deterministic_fill`） | **58** | 1.5% —— 原计划想先撇它们，收益太小，不单开一轮 |
+
+推荐首刀改为 `HubHandler`（49 方法 / 1343 行）里的 **admin 控制面 9 方法 / 218 行**（停机恢复 ·
+课程热切 · 队列与状态 · push-worker 清单 · net-probe）。三条依据都是量出来的：① `HubHandler`
+**只有 3 个类属性**（`hub` / `push` / `_blocked_logged`）⇒ 本组方法近乎无状态，搬迁不改语义；
+② 本组只往外调 4 个通用助手（`_auth_ok` / `_bytes` / `_json` / `_query_course`），反向只有
+`do_GET` / `do_POST` 的 `self._admin_*` 派发；③ ✭ **测试接缝为零**——全仓对 `remote.hub_server`
+的 patch 只有一处（`SEND_TIMEOUT_SEC`，不在本组），`tests/` 从它取的名字全是
+`_JobStore` / `_HubQueue` / `as_hub` / `make_server`，本组一个都没被外部 import。
+
+方向：`class HubHandler(AdminRoutes, BaseHTTPRequestHandler)`（组合类依赖混入，派发表调用它）。
+
+**两种环的坑（都已核实并避开）**：
+
+1. **名字成环**：admin 组读 `NET_PROBE_MAX`（顶层常量）与 `_deterministic_fill`（4 行函数），
+   二者都在 `hub_server` 顶层。若留下而由新模块 import ⇒ 与「`hub_server` import `admin` 拿混入」
+   成双向环 ⇒ **必须随迁**。已 grep 证实两者**全仓无其它读者** ⇒ 随迁后**不需要门面**。
+   同理 `import random` 只为 `_PROBE_BLOCK` 存在，一并迁走（否则恰下 F401）。
+   （顺带摸清：`_write_bytes` / `_is_ip_literal` 也无外部读者；但 `_is_loopback` / `attributed_source`
+   被 `tests/test_hub_auth_d9_order.py` 直接 import ⇒ 它们若搬必须留门面——两者都不在本组。）
+2. **类型遮蔽（新坑，其实比名字成环更险）**：混入里为 `headers` / `rfile` 声明类型时写了 `Any`，
+   而 `AdminRoutes` 在 MRO 里**早于** `BaseHTTPRequestHandler` ⇒ `Any` 会**盖掉**类型库的精确类型，
+   使组合类里 `self.headers.get(...)` / `self.rfile.read(n)` 的推断拓成 `Any`，进而让 `hub_server`
+   里做 `-> str` / `-> bytes | None` 的两个方法报 **`no-any-return`**（症状在 hub_server，病因在混入）。
+   ⇒ 混入里必须**逐字照抄类型库**：`headers: email.message.Message` · `rfile: BufferedIOBase` · `path: str`。
+   （同族的教训：前两刀里 `self.*` 声明用 `Any` 是安全的，因为那边没有「基类已提供同名精确类型」这层。）
+
+**测试侧的意外收获**：新守卫文件里写了带引号的 `\"remote.hub_server\"`（用做 import 边对账）——
+恰好命中 `tests/test_subproc_util.py` 的「起服务必须借端口」**源码守卫的标记**（那个标记就是
+带引号的点分路径，代表 patch 目标）。我的文件确实不起服务（用进程内 stub），所以改为**叶子名**
+判据（语义等价）而不是去假装借端口；同时确认 admin 路由的**端到端**已被既有
+`tests/test_multi_course_hub.py` 覆盖（`/admin/queue` · `/admin/courses` · `/admin/workers/halt|resume|status`），
+无需重复造 HTTP 用例。另：组合类断言改用 **AST 看基类顺序**（与运行期 `__mro__` 等价），
+既更贴合本仓源码守卫的风格，也避免了那个标记。
+
+- 守卫：`tests/test_hub_admin_split.py`（**8 例**）：9 方法只在 `AdminRoutes` · 基类顺序
+  `(AdminRoutes, BaseHTTPRequestHandler)` · 两个 net-probe 支撑名已随迁（且 `random.` 不再出现在
+  hub_server）· `remote/hub/` 不 import `hub_server` · 确定性填充的不变量（固定种子 / 64KiB 块重复 / 长度）·
+  下行越界 400 与合法回 N 字节 · 上行越界 **413** 且分块读尽 · 新模块无模块级可变状态。
+- 规模：`hub_server.py` 3974 → **3728** 行；新 `remote/hub/{__init__,admin}.py` 302 行。
+- 门禁：**2274 passed / 3 skipped / 0 failed**，26s；mypy 366 源文件绿。
+
 ### 未做完（S4 余下）
 
-`remote/worker.py`（68 顶层函数，有水平缝）与 `remote/hub_server.py`（3 个千行状态类，
-**有模块级可变状态** ⇒ 最后动）——设计见 `plan/nn-training-refactor.md` §5.3。`TrainingSteps`
-本体还剩 952 行 / 20 方法：本轮的切法是「按一条真实调用链切」，不是按行数等分。
+`remote/worker.py`（3475 行 / 68 顶层函数，有水平缝，但**遥测/节流状态模块级共享** ⇒ 拆前先补
+「同 seed 两遍逐字段相同」类用例）→ `hub_server` 其余路由组（`_get_*` 12 / `_post_*` 11 → 通用助手）
+→ 最后两个千行状态类（`_JobStore` / `_HubQueue`：拆 = 拆状态）。设计见
+`plan/nn-training-refactor.md` §5.3。`TrainingSteps` 本体还剩 952 行 / 20 方法（切法是「按一条真实
+调用链切」，不是按行数等分）。
 
 ---
 

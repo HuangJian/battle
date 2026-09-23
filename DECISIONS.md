@@ -2320,3 +2320,31 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
   `loop_steps.py` 1812 → **952** 行（含首簇共 2328 → 952）；`loop_remote.py` 984 行。门禁
   **2255 → 2262 → 2266 passed / 3 skipped**；mypy 364 源文件绿。
 —— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/engineering.md` §23「神模块拆分：`loop_steps` 的传输/发布簇与远端 PPO 腿」
+
+## §2026-09-23-goalnn-godmodule-hub-admin（2026-09-23，用户指令「重构 nn-training：降耦合 / 复用代码 / 可维护性」）
+
+- **背景**：`remote/hub_server.py` 3974 行 —— 三个大状态类（`_JobStore` 1002 / `_HubQueue` 1033 /
+  `HubHandler` 1343）占了 **85%**。原计划想先撇 5 个顶层纯函数，实测它们加起来只 **58 行 / 1.5%**
+  ⇒ **否决该初判**，改为从 `HubHandler`（49 方法 / 1343 行）里取最安全的一组。
+- **备选与否决**：先撇 5 个顶层纯函数——否（收益 1.5%，不单开一轮）；先拆 `HubHandler` 的
+  `do_GET` / `do_POST` 派发——否（派发链是路由真相，动它收益低风险高）；先拆两个千行状态类——否
+  （拆 = 拆状态，最后做）；**一次拆多个路由组**——否（每次只动一件事）。
+- **决定**：把 admin 控制面 **9 方法 / 218 行**（停机恢复 · 课程热切 · 队列与状态 · push-worker 清单 ·
+  net-probe）拆成 `remote/hub/admin.py::AdminRoutes`，方向 `class HubHandler(AdminRoutes,
+  BaseHTTPRequestHandler)`。三条依据是量出来的：`HubHandler` 只有 3 个类属性（本组近乎无状态）·
+  本组只往外调 4 个通用助手 · **本组测试接缝为零**（全仓对 `remote.hub_server` 的 patch 只有
+  `SEND_TIMEOUT_SEC`，且不在本组）。两个支撑名字 `NET_PROBE_MAX` / `_deterministic_fill`
+  **随迁**（只被本组用、全仓无其它读者）——留下会与「hub_server import admin 拿混入」成双向环；
+  随迁后**不需门面**。
+- **新坑（比名字成环更险）：混入里的类型声明会遮蔽类型库**。在混入里把 `headers` / `rfile` 声明成
+  `Any`，而 `AdminRoutes` 在 MRO 里**早于** `BaseHTTPRequestHandler` ⇒ `Any` 盖掉了类型库的精确类型，
+  使组合类里 `self.headers.get(...)` / `self.rfile.read(n)` 的推断拓成 `Any`，进而让 `hub_server` 里
+  两个做 `-> str` / `-> bytes | None` 的方法报 `no-any-return`（**症状在组合类，病因在混入**）。
+  ⇒ 混入里的这类声明必须**逐字照抄类型库**（`headers: email.message.Message` ·
+  `rfile: BufferedIOBase` · `path: str`）。前两刀的 `self.*` 用 `Any` 是安全的，因为那边没有
+  「基类已提供同名精确类型」这一层。
+- **违反后果**：把两个支撑名留在 hub_server 而由新模块 import ⇒ 包级环重现（新模块 ⇄ 组装模块）；
+  在混入里用 `Any` 声明基类属性 ⇒ 组合类类型推断退化（本仓当下就有两处 no-any-return 会红）；
+  把 `AdminRoutes` 写在 `BaseHTTPRequestHandler` **之后** ⇒ 同上且静默。
+- **门禁**：**2274 passed / 3 skipped**；mypy 366 源文件绿。`hub_server.py` 3974 → 3728 行。
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/engineering.md` §23「第三步」
