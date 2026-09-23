@@ -213,6 +213,17 @@ L2  remote/                                                         （传输；
 | `remote/worker.py` | 3475 | `remote/worker/`：`restore`（payload 还原）· `caches`（code.zip / ts_code 内容寻址缓存）· `procs`（子进程与监督）· `runjob`（run_job 主链） |
 | `rl/loop_steps.py` | 2328 | 按循环阶段切（评估步 / volume 步 / 提交步），或收进 `rl/loop_steps/` 包 |
 
+**实测侦察（2026-09-23，动手前先量；原计划只有「按关注点切」的猜测）**：
+
+| 文件 | 形态 | 可见缝 | 模块级可变状态 | 风险 |
+|---|---|---|---|---|
+| `rl/loop_steps.py` | 1 个类 `TrainingSteps`（1715 行 / 33 方法）+ 22 个顶层定义（~500 行） | 顶层函数已按关注点分簇：传输解析（`resolve_hub_push`/`resolve_transport`/`require_remote_transport`）· push（`_push_over_nodes`/`_push_job_round`）· kickstart（`kickstart_*`/`_kickstart_ref_payload`）· 阈值（`_course_cf_tunnel`/`_rollout_source`/`_run_segment_iters`/`_run_wait_sec`/`_gpu_push_nodes`）· 门/分片（`_gate_round_shards`）· 异常（`remote_retryable_exceptions`/`fatal_remote_http`） | **无** | **低**——最适合先拆（无状态、同包搬家、门面 re-export） |
+| `remote/worker.py` | 68 个顶层函数（无大类） | 水平缝清楚：wire 客户端（`_request`/`peek_jobs`/`claim_job`/`job_started`/`job_ready`/`post_result`/`heartbeat`/`release_job`/`download_*`，~L445–1462）· wire慢速遥测（`_wire_*`/`_reroll_decision`/`WireSlowError`，L182–369）· BC 助手（`_bc_*`/`normalize_ppo_device`/`resolve_bc_seed`，L1583–1753）· 缓存（`_cache_blob`/`_resolve_blob`/`_ensure_ts_code`/`prune_job_dirs`）· 作业执行（`run_job` 743 行 + `_run_bc_job` 190）· 监督循环（`supervise_worker`/`worker_loop`/`main`） | `_opener`（懒建 opener）、`_BEST_RATE`/`_ACTIVE_CODE_SHA`/`_bulk_log`/wire 桶（**随宿主走**，不得拆散） | 中——**遥测/节流状态模块级共享**，拆前先补「同 seed 两遍逐字段相同」类用例 |
+| `remote/hub_server.py` | 3 个千行状态类：`_JobStore`(1002) · `_HubQueue`(1033) · `HubHandler`(1343)；顶层只有 5 个小纯函数 | 顶层小纯函数（`attributed_source`/`_is_loopback`/`_is_ip_literal`/`_write_bytes`/`_deterministic_fill`，~58 行）可先撇到 `remote/hub/http.py` | 基本无 | **高**——主体是状态类，拆 = 拆状态；建议**最后做** |
+
+**建议顺序**：`rl/loop_steps.py`（无状态，先验证「搬家 + 门面」的套路）→ `remote/worker.py`（一簇一簇搬，每簇跑门禁）→
+`remote/hub_server.py`（状态类，最后；先把 `HubHandler` 的 `do_*` 按路由分组到 mixin 是可行起手）。
+
 **方法（防翻车，逐条都是本仓踩过的）**：
 
 1. **先抽无 `self` 的纯函数簇**（低耦合、零语义风险），再考虑带状态的类；
