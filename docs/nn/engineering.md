@@ -428,6 +428,43 @@ bulk_sched}`（全向下；`BODY_*` 从 `remote.http` 取单一定义）——�
 `_request` 调用点 / 顶层可变容器）；复原回绿。门禁 **2321 → 2331 passed / 3 skipped**；
 mypy **380** 源文件绿；根 `bun run check` 2120 pass / 0 fail。
 
+### 收口：`remote/` 内部依赖账本（同日，用户指令「把散在各子模块的『不得反向 import』断言收成一张 DAG 对账」）
+
+前八刀把「新模块不得反向 import `remote.worker`」这句话在**六个**拆分守卫里各写了一遍（其中三个
+还各带一份 `ALLOWED_IMPORTS` / `PROJECT_ROOTS`）。同一件事写六遍的坏处不是啰嗦而是**漂移**——
+§22 里首版 `test_layering` 就是「只给 `remote` 展开子模块、没给 `rl` 展开」而**静默变瞎**。
+
+现在收到 `tests/helpers/remote_dag.py`（账本 + 判据实现）与 `tests/test_remote_dag.py`（整图对账）：
+
+```
+LAYERS           remote/ 全部 35 个生产模块的层号（8 层，数字越小越底层）
+DEFERRED_CYCLES  唯一允许的环（仅限延迟 import，必须写明理由）
+```
+
+层号是**拓扑秩**（从叶子往上的最长路径），所以它读起来就是架构：L0 原语/叶子 → L1 单层传输/落盘
+→ L2 `http`/`push_client` → L3 业务簇（`bc_job`/`download`/`job_lifecycle`/`push_dispatch`）→
+L4 组装宿主（`worker`/`hub_server`）→ L5 入口编排（`run_loop`/`notebook_runtime`/…）→ L6 引导 →
+L7 `notebook_boot`。
+
+钉住的八条：账本**恰好**覆盖（增模块不给层号红 / 删了还留着也红）· **顶层**边严格向下（顶层环
+= 启动即 `ImportError`，无豁免）· **延迟**边同样严格向下（延迟 import 不是「可以往回指」的许可）·
+全图的环**恰好**等于 `DEFERRED_CYCLES`（多一个红、少一个也红）· **环里不许出现顶层边** ·
+三个自包含引导模块**顶层零 `remote.*`**（这条以前只是 `__init__.py` 里的注释）· 解析不出的
+`remote.*` 目标必须为 0（堵住「判据瞎了但全绿」）· 用**合成源码**自证检测器活性。
+
+**实测发现一件事**（不是新造的，是既有事实第一次被看见）：`remote/` 内部**真的有一个环**——
+`remote.run_loop ⇄ remote.worker`。两边都是**函数内延迟 import**：`run_loop._real_run_job` 为了
+顶层保持 torch-light（`worker` 拖整条 torch 链），`worker.run_job` 则是「编排入口不是宿主的依赖」。
+顶层图仍然是无环 DAG，所以它**不构成故障**；本轮的处置是把它**登记**成唯一被批准的延迟环
+（`DEFERRED_CYCLES`，带理由）+ 一条警报「环里不许出现顶层边」，而**不是**顺手改代码拆它
+（改哪边都得把 `verify_plan_file` / **`run_job` 的调用方式**搬动，属单开的决策）。
+
+**反探针六处全命中**（每一处都指名到唯一的用例）：顶层反向 import → 顶层分层红（整图 + 单模块
+两处）· 同层延迟边 → 延迟分层红 · 环里出现顶层边 → 分层 + 「环里不许有顶层边」两处红 ·
+新模块不登记 → 账本覆盖红 · `http` 顶层/延迟碰 `rl` → 单模块守卫红 · 摘掉声明环的两条边 →
+`stale` 红。门禁 **2331 → 2349 passed / 3 skipped**（+18）；mypy **382** 源文件绿；
+根 `bun run check` 2120 pass / 0 fail。
+
 ### 未做完（S4 余下）
 
 `remote/worker.py`（**1805 行**；余下是宿主 `run_job` / `worker_loop` / `main` 与 `_prefetch_fill`
@@ -436,9 +473,7 @@ mypy **380** 源文件绿；根 `bun run check` 2120 pass / 0 fail。
 拆 = 拆状态）。设计见 `plan/nn-training-refactor.md` §5.3。`TrainingSteps` 本体还剩 952 行 /
 20 方法（切法是「按一条真实调用链切」，不是按行数等分）。
 
-**挂着两项清理**（都已在计划里登记）：`remote/job_fs._ensure_commit` 是既存死代码（只搬不删）；
-`remote/` 内部还缺一条**无环守卫**（现在每个子模块只在自己的守卫里声明「不得 import
-`remote.worker`」，没有全局的 DAG 断言）。
+**还挂着一项清理**：`remote/job_fs._ensure_commit` 是既存死代码（全仓零调用，只搬未删）。
 
 ---
 

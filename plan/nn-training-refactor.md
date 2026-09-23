@@ -572,10 +572,35 @@ http, wire, bulk_sched}`（全向下，零 `worker`）。
 
 > **下一批刀口（worker 余下 1805 行）**：**已无可整块搬的叶子簇**——余下都是宿主
 > （`run_job` / `worker_loop` / `main` / `_prefetch_fill` 与它们的私有助手），再拆就是**拆宿主**
-> （切法参 `loop_steps` 那几刀：按一条真实调用链切，不按行数等分）。两条已登记的清理项：
-> ① `remote/job_fs._ensure_commit` 是既存死代码（全仓零调用，只搬不删）+ ② 给 `remote/` 加一条
-> **全局无环守卫**（现在每个子模块只在各自守卫里声明「不得 import `remote.worker`」）。
+> （切法参 `loop_steps` 那几刀：按一条真实调用链切，不按行数等分）。还剩一项已登记的清理：
+> `remote/job_fs._ensure_commit` 是既存死代码（全仓零调用，只搬不删）。
 > 之后转 `hub_server` 其余路由组（`_get_*` 12 / `_post_*` 11 → 通用助手）。
+
+#### 5.3.7 收口（2026-09-23，**已完成**）—— `remote/` 内部依赖账本（全局无环守卫）
+
+前八刀把「不得反向 import `remote.worker`」在**六个**拆分守卫里各写了一遍（三个还各带白名单）。
+现收到一处：`tests/helpers/remote_dag.py`（**账本 + 判据实现**）+ `tests/test_remote_dag.py`
+（整图对账，18 例）；六个拆分守卫改调 `assert_remote_module(module, allowed_project_imports=…)`。
+
+```
+LAYERS           remote/ 全部 35 个生产模块的层号（8 层，拓扑秩；数字越小越底层）
+DEFERRED_CYCLES  唯一允许的环（仅限延迟 import，必须写明理由）
+```
+
+分层读数（与代码结构一致）：L0 原语/叶子 → L1 单层传输/落盘 → L2 `http`/`push_client` →
+L3 业务簇（`bc_job`/`download`/`job_lifecycle`/`push_dispatch`）→ L4 组装宿主（`worker`/
+`hub_server`）→ L5 入口编排（`run_loop`/`notebook_runtime`/`worker_server`/`smoke_loopback`/
+`tunnel_ab_probe`）→ L6 引导（`offline_boot`/`push_bootstrap`）→ L7 `notebook_boot`。
+
+**★ 实测发现**：`remote/` 内部**真有一个环**——`remote.run_loop ⇄ remote.worker`，两边都是
+**函数内**延迟 import（`run_loop._real_run_job` 要顶层保持 torch-light；`worker.run_job` 不把编排
+入口当宿主的依赖）。顶层图仍是无环 DAG ⇒ **不构成故障**；处置是登记为唯一被批准的延迟环 +
+「环里不许出现顶层边」警报。**拆它的前提**（供将来单开）：要么把 `run_loop.verify_plan_file` /
+`run_plan_job` 下沉到 L1（比如 `remote/job_fs.py`）而 `worker` 直接拿，要么让 `worker.run_job`
+从调用方收这两个函数——两条都属决策，不该混进「加一条守卫」。
+
+> 决策 → `DECISIONS.md` §2026-09-23-goalnn-remote-dag-ledger；全文 → `engineering.md` §23
+> 「收口：`remote/` 内部依赖账本」。反探针六处全命中；门禁 **2349 passed / 3 skipped**。
 
 > **（历史）第二刀的预期执行清单**（已执行，保留供对照）：`_bc_fetch_resume` / `_bc_local_resume_dir` /
 > `_bc_store_local_resume` / `_bc_load_local_resume` / `_bc_post_epoch` / `_bc_device` /

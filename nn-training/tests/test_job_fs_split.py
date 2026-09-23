@@ -26,6 +26,7 @@ if str(ROOT) not in sys.path:
 
 import remote.job_fs as job_fs_mod
 import remote.worker as worker_mod
+from tests.helpers import remote_dag as dag
 
 JOBFS_FILE = ROOT / "remote" / "job_fs.py"
 WORKER_FILE = ROOT / "remote" / "worker.py"
@@ -61,16 +62,6 @@ def _defined(path: Path) -> set[str]:
     return out
 
 
-def _modules_imported(path: Path) -> set[str]:
-    out: set[str] = set()
-    for node in ast.walk(_tree(path)):
-        if isinstance(node, ast.Import):
-            out.update(a.name for a in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
-            out.add(node.module)
-    return out
-
-
 def test_moved_names_are_defined_in_job_fs_and_not_redefined_in_worker() -> None:
     """定义唯一：搬走的名字只在 `job_fs.py` 里实现。"""
     assert _defined(JOBFS_FILE) >= MOVED_NAMES, sorted(MOVED_NAMES - _defined(JOBFS_FILE))
@@ -78,11 +69,13 @@ def test_moved_names_are_defined_in_job_fs_and_not_redefined_in_worker() -> None
     assert leftovers == set(), f"worker.py 里仍在实现这些名字（应只做转发）：{sorted(leftovers)}"
 
 
-def test_job_fs_does_not_import_worker() -> None:
-    """无环：`job_fs.py` 不得反向 import `worker.py`；也不得碰 `rl`（L2 传输层）。"""
-    imported = _modules_imported(JOBFS_FILE)
-    assert "remote.worker" not in imported, "remote/job_fs.py 反向 import remote.worker ⇒ 环"
-    assert "rl" not in {m.split(".")[0] for m in imported}, "job_fs 是 L2 传输层，不得碰 rl"
+def test_job_fs_sits_below_its_remote_dependencies() -> None:
+    """无环 + 分层：对账走**全局账本**（`tests/helpers/remote_dag.py`），不再各自写一份。
+
+    原先这里是「不得 import `remote.worker`」的特指断言；现在是一般化的
+    「顶层 intra-remote 边必须严格向下」+「任何 import 不得碰 `rl`」。
+    """
+    dag.assert_remote_module("remote.job_fs")
 
 
 def test_worker_forwards_every_moved_name() -> None:

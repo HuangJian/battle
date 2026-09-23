@@ -33,6 +33,7 @@ if str(ROOT) not in sys.path:
 import remote.download as download_mod
 import remote.worker as worker_mod
 from common.protocol import BLOB_OPT
+from tests.helpers import remote_dag as dag
 
 DL_FILE = ROOT / "remote" / "download.py"
 WORKER_FILE = ROOT / "remote" / "worker.py"
@@ -53,20 +54,7 @@ ALLOWED_IMPORTS = {
     "remote.http",
     "remote.wire",
 }
-PROJECT_ROOTS = {
-    "common",
-    "remote",
-    "rl",
-    "data",
-    "train",
-    "models",
-    "ppo",
-    "scripts",
-    "dist_common",
-    "platform_utils",
-    "pid_probe",
-    "schema",
-}
+
 
 
 def _tree(path: Path) -> ast.Module:
@@ -85,17 +73,6 @@ def _defined(path: Path) -> set[str]:
     return out
 
 
-def _imports(path: Path, *, top_only: bool = False) -> set[str]:
-    nodes = _tree(path).body if top_only else list(ast.walk(_tree(path)))
-    out: set[str] = set()
-    for node in nodes:
-        if isinstance(node, ast.Import):
-            out.update(a.name for a in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
-            out.add(node.module)
-    return out
-
-
 def test_moved_names_are_defined_in_download_and_not_redefined_in_worker() -> None:
     """定义唯一：搬走的名字只在 `download.py` 里实现。"""
     assert _defined(DL_FILE) >= MOVED_NAMES, sorted(MOVED_NAMES - _defined(DL_FILE))
@@ -103,12 +80,13 @@ def test_moved_names_are_defined_in_download_and_not_redefined_in_worker() -> No
     assert leftovers == set(), f"worker.py 里仍在实现这些名字（应只做转发）：{sorted(leftovers)}"
 
 
-def test_download_does_not_import_worker_and_only_depends_downwards() -> None:
-    """无环 + 白名单：不得 import `remote.worker`；模块级只许向下依赖。"""
-    assert "remote.worker" not in _imports(DL_FILE), "download 反向 import worker ⇒ 环"
-    top = _imports(DL_FILE, top_only=True)
-    extra = {m for m in top if m.split(".")[0] in PROJECT_ROOTS and m not in ALLOWED_IMPORTS}
-    assert extra == set(), f"download.py 顶层出现未登记的仓内依赖：{sorted(extra)}"
+def test_download_only_depends_downwards_and_stays_within_its_whitelist() -> None:
+    """无环 + 白名单：对账走**全局账本**（`tests/helpers/remote_dag.py`），不再各自写一份。
+
+    原先这里是「不得 import `remote.worker`」+ 本地白名单；现在交付给共用实现：
+    顶层 intra-remote 边严格向下 · 任何 import 不得碰 `rl` · 顶层仓内依赖 ⊆ `ALLOWED_IMPORTS`。
+    """
+    dag.assert_remote_module("remote.download", allowed_project_imports=ALLOWED_IMPORTS)
 
 
 def test_worker_forwards_every_moved_name_as_the_same_object() -> None:

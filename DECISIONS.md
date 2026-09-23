@@ -2533,3 +2533,38 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
   反向探针四处均命中：`worker.py` 里重复定义 `peek_jobs` / `job_lifecycle` 反向 import `worker` /
   `worker.py` 出现 `_request` 调用点 / `job_lifecycle` 顶层可变容器。
 —— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/engineering.md` §23「第八刀」
+
+## §2026-09-23-goalnn-remote-dag-ledger（2026-09-23，用户指令「给 remote/ 加一条全局无环守卫，把散在各子模块的『不得反向 import』断言收成一张 DAG 对账」）
+
+- **背景**：S4 八刀把 `remote/worker.py` 拆成 `wire` / `http` / `job_fs` / `bc_job` / `download` /
+  `job_lifecycle` 后，「新模块不得反向 import `remote.worker`」在**六个**拆分守卫里各写了一遍
+  （其中三个还各带一份 `ALLOWED_IMPORTS` / `PROJECT_ROOTS`）。同一件事写六遍的坏处不是啰嗦而是
+  **漂移**——§22 里首版 `test_layering` 就因「只给 `remote` 展开子模块、没给 `rl` 展开」而
+  **静默变瞎**（测试全绿而守卫看不见那条边）。
+- **备选与否决**：把六份断言合成一个「禁止清单」（`remote.worker` 加进去就完事）——否（清单只能
+  指名道姓，新拆一个模块就得记着回来添一行，正是腐烂路径）；拿现成的 import 图工具——否（新依赖
+  要单独论证，而这件事 AST 五十行就完了，与 `test_layering.py` 同风格）；把 `remote/` 内部的环
+  **当场拆掉**——否（见下，它是两处**有意**的延迟 import，拆它要动 `run_loop` 的 torch-light 策略
+  或 `worker.run_job` 的调用方式，属单开的决策，不该混进「加一条守卫」里）。
+- **决定**：新增 `tests/helpers/remote_dag.py`（**账本 + 判据实现，只有一处**）与
+  `tests/test_remote_dag.py`（整图对账，18 例）；账本两个常量：
+  `LAYERS`（remote/ 全部 **35 个生产模块**的**拓扑秩**，8 层）与 `DEFERRED_CYCLES`
+  （**唯一**允许的环，仅限延迟 import，必须写明理由）。六个拆分守卫改调
+  `assert_remote_module(module, allowed_project_imports=…)`——原「不得 import `remote.worker`」
+  被**一般化**为「顶层 intra-remote 边必须严格向下」，另保留「任何 import 不得碰 `rl`」。
+- **钉住的实质性质**：顶层边严格向下（顶层环 = 启动即 `ImportError`，**无豁免**）· 延迟边同样
+  严格向下 · 全图的环**恰好**等于 `DEFERRED_CYCLES`（多一个红、少一个也红）· **环里不许出现
+  顶层边**（即「用延迟 import 掩盖循环」的反面判据）· 账本**双向**覆盖（增模块不给层号红 /
+  删了还留着也红）· 三个自包含引导模块顶层零 `remote.*`（以前只是 `remote/__init__.py` 的注释）·
+  解析不出的 `remote.*` 目标必须为 0（堵「判据瞎了但全绿」）· 用合成源码自证检测器活性。
+- **实测发现（既有事实首次被看见）**：`remote/` 内部**真有一个环**——`remote.run_loop ⇄
+  remote.worker`，两边都是**函数内**延迟 import（`run_loop._real_run_job` 要顶层保持 torch-light；
+  `worker.run_job` 不把编排入口当宿主的依赖）。顶层图仍是无环 DAG ⇒ **不构成故障**；处置是
+  **登记**为唯一被批准的延迟环（带理由）+ 「环里不许有顶层边」警报。
+- **违反后果**：若有人把 `run_loop → worker` 或 `worker → run_loop` 提到顶层，`ImportError` 会从
+  某条启动路径冒出来，而这条守卫在**提交时**就能拦（反探针实测：分层与「环里不许有顶层边」两处
+  同时红）。若新增模块不登记层号，它的所有边**不会**被对账（所以覆盖断言是这一层的必配）。
+- **门禁**：**2349 passed / 3 skipped**（2331 → +18）；mypy **382** 源文件绿；根 `bun run check`
+  2120 pass / 0 fail。反探针六处全命中：顶层反向 import · 同层延迟边 · 环里出现顶层边 ·
+  新模块不登记 · `http` 顶层/延迟碰 `rl` · 摘掉声明环的两条边（stale）。
+—— 全文（背景：为什么合并六份断判）→ `docs/nn/engineering.md` §23「收口：`remote/` 内部依赖账本」

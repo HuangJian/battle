@@ -29,6 +29,7 @@ if str(ROOT) not in sys.path:
 import remote.bc_job as bc_job_mod
 import remote.worker as worker_mod
 from common.protocol import d14_corpus_match
+from tests.helpers import remote_dag as dag
 
 BC_FILE = ROOT / "remote" / "bc_job.py"
 WORKER_FILE = ROOT / "remote" / "worker.py"
@@ -52,21 +53,7 @@ ALLOWED_IMPORTS = {
     "data.weights_io",
     "train.bc",
 }
-#: 仓内项目的顶层包/模块名（用来把 stdlib 排除在依赖断言之外）。
-PROJECT_ROOTS = {
-    "common",
-    "remote",
-    "rl",
-    "data",
-    "train",
-    "models",
-    "ppo",
-    "scripts",
-    "dist_common",
-    "platform_utils",
-    "pid_probe",
-    "schema",
-}
+
 
 
 def _tree(path: Path) -> ast.Module:
@@ -96,16 +83,6 @@ def _top_level_imports(path: Path) -> set[str]:
     return out
 
 
-def _all_imports(path: Path) -> set[str]:
-    out: set[str] = set()
-    for node in ast.walk(_tree(path)):
-        if isinstance(node, ast.Import):
-            out.update(a.name for a in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
-            out.add(node.module)
-    return out
-
-
 def test_moved_names_are_defined_in_bc_job_and_not_redefined_in_worker() -> None:
     """定义唯一：搬走的名字只在 `bc_job.py` 里实现。"""
     assert _defined(BC_FILE) >= MOVED_NAMES, sorted(MOVED_NAMES - _defined(BC_FILE))
@@ -113,14 +90,13 @@ def test_moved_names_are_defined_in_bc_job_and_not_redefined_in_worker() -> None
     assert leftovers == set(), f"worker.py 里仍在实现这些名字（应只做转发）：{sorted(leftovers)}"
 
 
-def test_bc_job_does_not_import_worker_and_only_depends_downwards() -> None:
-    """依赖方向：不得 import `remote.worker`；模块级只许 `common.protocol` / `remote.http` /
-    `remote.job_fs`（延迟 import 的 L1 包另算）。"""
-    top = _top_level_imports(BC_FILE)
-    assert "remote.worker" not in _all_imports(BC_FILE), "bc_job 反向 import worker ⇒ 环"
-    extra = {m for m in top if m.split(".")[0] in PROJECT_ROOTS and m not in ALLOWED_IMPORTS}
-    assert extra == set(), f"bc_job 顶层出现未登记的仓内依赖：{sorted(extra)}"
-    assert "rl" not in {m.split(".")[0] for m in _all_imports(BC_FILE)}
+def test_bc_job_only_depends_downwards_and_stays_within_its_whitelist() -> None:
+    """依赖方向：对账走**全局账本**（`tests/helpers/remote_dag.py`），不再各自写一份。
+
+    原先这里是「不得 import `remote.worker`」+ 本地白名单 + 本地 `rl` 检查；现在交付给共用实现：
+    顶层 intra-remote 边严格向下 · 任何 import 不得碰 `rl` · 顶层仓内依赖 ⊆ `ALLOWED_IMPORTS`。
+    """
+    dag.assert_remote_module("remote.bc_job", allowed_project_imports=ALLOWED_IMPORTS)
 
 
 def test_worker_forwards_every_moved_name_as_the_same_object() -> None:
