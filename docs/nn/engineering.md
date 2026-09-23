@@ -22,8 +22,8 @@ hub 推送、节点 failover、kickstart 系数、远端可重试异常集合）
 搬到 `rl/loop_transport.py`，`loop_steps` 只留门面 re-export（2328 → **1812** 行）。
 门禁 **2255 → 2262**（+7 守卫用例）全绿；同日第二步再拆远端 PPO 腿，第三步拆 `hub_server` 的
 admin 控制面，并为第四步（`worker.py`）先铺好**模块级状态契约**安全网（+13 例），第四步把
-wire 簇搬进 `remote/wire.py`（+8 例）、HTTP 传输核心搬进 `remote/http.py`（keystone，+7 例）——
-终值 **2302 passed / 3 skipped**。
+wire 簇搬进 `remote/wire.py`（+8 例）、HTTP 传输核心搬进 `remote/http.py`（keystone，+7 例）、
+作业工作区/TAR/git 物化搬进 `remote/job_fs.py`（+6 例）——终值 **2308 passed / 3 skipped**。
 
 ### 先量结构，再选刀口（拆前侦察，都是实测）
 
@@ -303,10 +303,39 @@ patch `worker._request` 的有 20+ 处，但它们分两类，而且**两类都�
 注入点口径各一条**——「patch http 成功而 worker 是炸弹」与「patch worker 成功而 http 是炸弹」/）。
 反向探针两处都命中。门禁 **2295 → 2302 passed / 3 skipped**；mypy **371** 源文件绿。
 
+### 第六步之一（同日）：作业工作区 / TAR / git 物化 → `remote/job_fs.py`
+
+刀口 = `REPO_ROOT` · `JOB_DIR_KEEP` · `_persist_result` · `prune_job_dirs` · `unpack_opt_tar` ·
+`pack_opt_tar` · `unpack_payload_or_fail` · `_git_head` · `_ensure_commit`（**128 行**）。
+`worker.py` **3030 → 2915**；新 `remote/job_fs.py` 184 行。依赖 `job_fs ← worker`（与 `http`/`wire`
+同形；守卫钉住不得反向 import）。
+
+**为什么它是 BC 的前置**：`_run_bc_job` 除 BC 簇外只依赖两个非 BC 的宿主名——`d14_corpus_match`
+（本可自 import）与 `_persist_result`（**`run_job` 也在用**）。把「作业 I/O 」这类**非 BC 专属**
+的东西先放到下面，BC 才能干净搬（否则 `bc_job ⇄ worker` 成环）。
+
+**这一刀是五刀里唯一 seam-free 的**：全仓对 `prune_job_dirs` / `unpack_payload_or_fail` /
+`_persist_result` 的引用都是**直接调用**（无 `setattr`）⇒ `worker` 的显式转发就够，测试一行不改。
+代价是它小（128 行），但换来的是下一刀的干净。
+
+**两个值得记的点**：
+
+* `REPO_ROOT` 是**由 `__file__` 推导**的常量（`Path(__file__).resolve().parent.parent`），换目录后
+  必须推导出**同一个** nn-training 根——这是搬这类常量唯一会出的错，而且静默。守卫用
+  `(REPO_ROOT / "remote" / "worker.py").exists()` + `== ROOT` 两面钉住。
+* 顺手发现：`_ensure_commit` **全仓零调用**（只有 `_git_head` 被它自己调）——是既有的死代码。
+  本刀**只搬不删**（删代码要单开一次并有决策），已登记为后续候选。
+
+**守卫**：`tests/test_job_fs_split.py`（**6 例**：定义唯一 / 不得反向 import / 转发同一对象 /
+`REPO_ROOT` 仍指向 nn-training 根 / 顶层无新增可变容器 / `prune_job_dirs` 的 `keep` 缺省仍绑
+`JOB_DIR_KEEP` 且 `run_job` 仍以常量显式调用）。反向探针：往 `worker.py` 追加 `def prune_job_dirs`
+⇒ 立刻点名。门禁 **2302 → 2308 passed / 3 skipped**；mypy **373** 源文件绿。
+
 ### 未做完（S4 余下）
 
-`remote/worker.py`（3030 行；底座已拆出，BC 簇现在可干净拆到 `remote/bc_job.py`——依赖
-`remote.http`，仍无环；刀口与门面清单见 `plan/nn-training-refactor.md` §5.3.5）→ `hub_server` 其余路由组
+`remote/worker.py`（2915 行；底座两件（`http` / `job_fs`）已拆出 ⇒ BC 簇现在可干净拆到
+`remote/bc_job.py`（依赖 `remote.http` / `remote.job_fs`，无环）；刀口与门面清单见
+`plan/nn-training-refactor.md` §5.3.5）→ `hub_server` 其余路由组
 （`_get_*` 12 / `_post_*` 11 → 通用助手）→ 最后两个千行状态类（`_JobStore` / `_HubQueue`：
 拆 = 拆状态）。设计见 `plan/nn-training-refactor.md` §5.3。`TrainingSteps` 本体还剩 952 行 /
 20 方法（切法是「按一条真实调用链切」，不是按行数等分）。

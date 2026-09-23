@@ -2411,3 +2411,26 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
   改三宿主后净 -1）；mypy **371** 源文件绿。反向探针：`remote/_probe_http.py::_POLL_WARN_AT`
   被状态守卫点名、`worker.py` 里重复实现 `_request` 被拆分守卫点名。
 —— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/engineering.md` §23「第五步」
+
+## §2026-09-23-goalnn-godmodule-jobfs（2026-09-23，用户指令「重构 nn-training：降耦合 / 复用代码 / 可维护性」）
+
+- **背景**：`remote/worker.py` 第六步的第一刀。原计划直接拆 BC 簇，但 BC 的 `_run_bc_job` 除
+  BC 自身外还依赖两个**非 BC 专属**的宿主名：`d14_corpus_match`（可自 import）与
+  `_persist_result`（**`run_job` 也在用**）⇒ 直接搬 BC 会成环。故先把「作业 I/O」下沉。
+- **备选与否决**：`_persist_result` 随 BC 一起搬（`worker` 改从 `bc_job` 导入）——否（无环但语义
+  不合：结果落盘不是 BC 专属）；给 `_run_bc_job` 加 `persist=` 参数或函数内延迟 import——否
+  （改签名会动 e2e；延迟 import 只是「把环藏起来」）；**一次把下载簇 + 工作区一起搬**——否
+  （下载簇依赖 `_progress_logger` 且体量更大，每次只动一件事）。
+- **决定**：把 `REPO_ROOT` · `JOB_DIR_KEEP` · `_persist_result` · `prune_job_dirs` ·
+  `unpack_opt_tar` · `pack_opt_tar` · `unpack_payload_or_fail` · `_git_head` · `_ensure_commit`
+  （128 行）搬进新 `remote/job_fs.py`；`worker.py` **3030 → 2915**；依赖 `job_fs ← worker`。
+  `REPO_ROOT` 随组搬迁（全仓无其它读者）——它在 `remote/` 下推导出的仍是同一个 nn-training 根。
+- **本刀唯一需要盯的静默风险**：`REPO_ROOT` 是**由 `__file__` 推导**的常量，换目录后必须推导出
+  同一个值——守卫用「`REPO_ROOT/remote/worker.py` 存在」+「`== ROOT`」两面钉住。
+- **副产品（已登记，不在本刀处理）**：`_ensure_commit` **全仓零调用**（只有 `_git_head` 被它自己
+  调）——既存死代码；删代码要单开一次并有决策。
+- **门禁**：**2308 passed / 3 skipped**（2302 → +6：新 `tests/test_job_fs_split.py` 6 例）；
+  mypy **373** 源文件绿。本刀是五刀里唯一 **seam-free** 的（全仓对本组都是直接调用，无
+  `setattr`）⇒ `worker` 的显式转发就够，测试一行不改。反向探针：往 `worker.py` 追加
+  `def prune_job_dirs` ⇒ 拆分守卫立刻点名。
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/engineering.md` §23「第六步之一」

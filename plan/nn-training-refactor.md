@@ -487,6 +487,29 @@ _admin_net_probe(20) · _admin_halt(18) · _admin_queue(10) · _admin_status(9) 
 
 ⇒ **建议第六步再拆两刀**：先 `remote/job_fs.py`（底座），再 `remote/bc_job.py`（业务）。
 
+> **第一刀已落地（同日）**：`remote/job_fs.py` 建成（184 行，128 行搬自 worker）：`REPO_ROOT` ·
+> `JOB_DIR_KEEP` · `_persist_result` · `prune_job_dirs` · `unpack_opt_tar` / `pack_opt_tar` ·
+> `unpack_payload_or_fail` · `_git_head` / `_ensure_commit`。`worker.py` **3030 → 2915**。
+> 依赖 `job_fs ← worker`（守卫钉住不得反向 import）。**五刀里唯一 seam-free 的一刀**：
+> 全仓对本组都是直接调用（无 `setattr`）⇒ 显式转发就够，测试一行不改。
+> 守卫 `tests/test_job_fs_split.py`（6 例）；反向探针往 worker 追加 `def prune_job_dirs` 即被点名。
+> 门禁 **2302 → 2308 passed / 3 skipped**；mypy 373 源文件绿。
+> 决策 → `DECISIONS.md` §2026-09-23-goalnn-godmodule-jobfs；全文 → `engineering.md` §23「第六步之一」。
+>
+> **顺带发现（已登记，未处理）**：`_ensure_commit` **全仓零调用**（只有 `_git_head` 被它自己调）
+> ——既存死代码；删代码要单开一次并有决策。
+
+> **第二刀（BC，下一步）执行清单**：`_bc_fetch_resume` / `_bc_local_resume_dir` /
+> `_bc_store_local_resume` / `_bc_load_local_resume` / `_bc_post_epoch` / `_bc_device` /
+> `normalize_ppo_device` / `resolve_bc_seed` / `_run_bc_job` → `remote/bc_job.py`（依赖
+> `remote.http` + `remote.job_fs`，无环；`d14_corpus_match` 自 `common.protocol` import）。
+> 门面（外部直接 import）：e2e 取 `_run_bc_job` / `_bc_fetch_resume` / `_bc_post_epoch`；
+> tests 取 `normalize_ppo_device` / `resolve_bc_seed` / `_bc_device`。seam：`_bc_fetch_resume` /
+> `_bc_post_epoch` / `_run_bc_job` 直调 `_request` ⇒ 搬走后 patch 目标随它们到 `remote.bc_job`
+> （现有 patch 点见 `tests/` / `e2e/test_bc_epoch_e2e.py`，逐点定档）。注意
+> `tests/test_worker_device.py` 有读 `worker.py` **源码文本**的守卫（`normalize_ppo_device(device)`
+> 计数 + 顺序，看的是 `run_job` 里的调用点=宿主）⇒ 应仍绿，但必须跑一遍确认。
+
 ### 5.4 本轮**不做**（已核，刻意保留）
 
 - `remote/notebook_boot.py` ↔ `remote/offline_boot.py` 的孪生助手（`_build_opener` /

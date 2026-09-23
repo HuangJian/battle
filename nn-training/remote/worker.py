@@ -28,8 +28,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-from common.fs import extract_tar_bytes
-from common.proc import run_capture
 from common.protocol import (
     BLOB_DEMO,
     BLOB_OPT,
@@ -54,7 +52,6 @@ from common.protocol import (
     job_seed,
     normalize_manifest,
     pack_result_v2,
-    unpack_payload,
     validate_result,
 )
 from common.protocol import (
@@ -107,9 +104,35 @@ from remote.http import (
     _warn_non_200 as _warn_non_200,
 )
 from remote.iter_rollout import run_iter_rollout
+
+# 作业工作区 / 产物落盘 / TAR / git 物化（S4 第六步 → `remote/job_fs.py`）：**显式转发**。
+# 本组无 monkeypatch 接缝（全仓都是直接调用）⇒ 转发即够。
+from remote.job_fs import (
+    JOB_DIR_KEEP as JOB_DIR_KEEP,
+)
+from remote.job_fs import (
+    _ensure_commit as _ensure_commit,
+)
+from remote.job_fs import (
+    _git_head as _git_head,
+)
+from remote.job_fs import (
+    _persist_result as _persist_result,
+)
+from remote.job_fs import (
+    pack_opt_tar as pack_opt_tar,
+)
+from remote.job_fs import (
+    prune_job_dirs as prune_job_dirs,
+)
+from remote.job_fs import (
+    unpack_opt_tar as unpack_opt_tar,
+)
+from remote.job_fs import (
+    unpack_payload_or_fail as unpack_payload_or_fail,
+)
 from remote.prefetch import (
     PREFETCH_DEPTH_DEFAULT,
-    PREFETCH_DIR_NAME,
     PrefetchStore,
     pick_candidates,
 )
@@ -193,8 +216,6 @@ from remote.wire import (
 from remote.wire import (
     set_bulk_log as set_bulk_log,
 )
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _progress_logger(label: str, log: Any):
@@ -921,31 +942,6 @@ def job_body_error(phase: str, e: BaseException) -> BaseException:
     )
 
 
-def unpack_payload_or_fail(payload_path, job_dir) -> tuple[dict, list[str]]:
-    """解包 payload；**内容决定性**失败统一转 `ProtocolError`（重认领不会自愈）。
-
-    ★ 2026-09-21（plan/accident.plan.md §4 根因）：`worker_loop` 的 `except Exception`
-    分支把「解包失败」一律当瞬态重认领 ⇒ 同一份字节每 5 分钟复现一次、零告警，空转
-    3.5 小时（实测：**完好** tar.xz 被 `zipfile.is_zipfile` 启发式误判成 zip ⇒
-    BadZipFile；job 永不回传，训练侧只看到 3×1800s 超时）。归档层异常在这里就转
-    `ProtocolError`：该分支早已有 `report_job_failure` → hub 落终局 failed → 训练侧
-    `JobFailedError` 停腿（整条链现成，不必改循环）。
-
-    只转**归档/内容**类异常；网络/远端关闭那类真瞬态仍走 `except Exception` 重认领
-    （`OSError` 刻意不在这里吞——磁盘/权限类也可能瞬时）。
-    """
-    import zipfile
-
-    try:
-        return unpack_payload(payload_path, job_dir)
-    except ProtocolError:
-        raise
-    except (zipfile.BadZipFile, tarfile.TarError, EOFError) as e:
-        raise ProtocolError(
-            f"payload 归档不可读（内容决定性，重领同一份字节不会自愈）：{type(e).__name__}: {e}"
-        ) from e
-
-
 def report_job_failure(
     base_url: str,
     token: str,
@@ -1035,124 +1031,13 @@ def _wire_block(**over: object) -> dict:
     return w
 
 
-def _persist_result(work_dir: Path, jid: str, result: dict) -> None:
-    """结果落盘 _result.json：回传失败后重领同 job 时直接复用，不重算 PPO。"""
-    rpath = work_dir / jid / "_result.json"
-    rpath.parent.mkdir(parents=True, exist_ok=True)
-    rpath.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
-
-
-#: worker 侧保留的 job 目录数（含在跑的本 job）。2026-09-11：c6b 单 job ≈280 MB
-#: （600 shard × 439 KB 解包后 + payload 归档 + code.zip），20 轮 ≈5.6 GB。
-#: ⚠ hub 侧 keep_iters=3 只轮转本地 it* 与 remote-jobs——**管不到**这里的
-#:   /tmp/remote-worker（云）与 tmp/remote-worker-serve（本机 self 节点）。
-#: 保留 2 个：上一个 job 的 _result.json 要留给"回传失败后重领同 job"的幂等路径。
-JOB_DIR_KEEP = 2
-
 #: 热替换退出码：worker 子进程代码变更时以该码退出，**监督器**（supervise_worker /
 #: 新版 main()）收到后用同一套参数重新拉起子进程（fresh 进程 → sys.modules 必然为空
 #: → 新代码生效）。不用 0（=正常完成）：处理失败/退出原因必须可区分。
 HOT_RELOAD_EXIT = 86
 
 
-def prune_job_dirs(work_dir: Path, keep: int = JOB_DIR_KEEP, log=lambda msg: None) -> int:
-    """按 mtime 保留最近 `keep` 个 job 目录，其余删除。返回删除个数。
-
-    只动 work_dir 下的 job 目录（按 jid 命名），**跳过 code_cache / blob_cache /
-    ts_code_cache / prefetch**（内容寻址缓存按 sha 复用；`prefetch/` 是 P2 的软持有暂存区，
-    删掉 = 下一轮预取白做）。删除失败（占用/沙箱保护）跳过，不抛。
-
-    ⚠ 新增内容寻址缓存目录时必须加进这份豁免名单（2026-09-17 M2 事故：`blob_cache`
-    漏了名单 → 每轮被当旧 job 目录删掉 → 缓存永远未命中，而现象看起来是「协议没生效」）。
-    """
-    try:
-        dirs = [
-            d
-            for d in work_dir.iterdir()
-            if d.is_dir()
-            and d.name not in ("code_cache", "blob_cache", "ts_code_cache", PREFETCH_DIR_NAME)
-        ]
-    except OSError:
-        return 0
-    if len(dirs) <= keep:
-        return 0
-    dirs.sort(key=lambda d: d.stat().st_mtime, reverse=True)
-    from platform_utils import rmtree_best_effort
-
-    removed = 0
-    for d in dirs[keep:]:
-        try:
-            # 计数必须挂在返回值上（与 rl/workdir_sweep 同策略）：沙箱删除保护拦截
-            # 时 rmtree_best_effort 返回 False，无条件 +1 会把没删掉的也算进 n。
-            if rmtree_best_effort(d, ignore_errors=True):
-                removed += 1
-        except BaseException as e:  # 含 SystemExit：沙箱删除守卫会打死调用线程
-            log(f"prune: 跳过 {d.name}（{type(e).__name__}）")
-    if removed:
-        log(f"prune: 删除 {removed} 个旧 job 目录（保留最近 {keep} 个）")
-    return removed
-
-
 # ------------------------------------------------------------------ PPO 执行
-
-
-def unpack_opt_tar(tar_bytes: bytes, dest: Path) -> None:
-    """opt_init base64 tar → dest。兼容 3.10（无 filter 参数）。
-
-    唯一实现见 `common.fs.extract_tar_bytes`（与 `remote/hub_client._extract_tar`
-    原是同款孪生，两侧都写了「Python < 3.12 无 filter」这条注释）。
-    """
-    extract_tar_bytes(tar_bytes, dest)
-
-
-def pack_opt_tar(src_dir: Path) -> bytes:
-    """_ppo_save 目录 → tar bytes（回传用）。
-
-    H5（review-hy）：**只打 model.pt + opt.pt，不打 state.json**——state.json 里的
-    numpy RNG 状态从未被读取（worker 每次按 per-job 种子重播，D5 自洽），tar 里躺着
-    死数据只会误导。Adam 动量（opt.pt）才是跨轮续跑真正需要的状态。
-    """
-    import io
-
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:") as tf:
-        for name in ("model.pt", "opt.pt"):
-            p = src_dir / name
-            if p.exists():
-                tf.add(p, arcname=name)
-    return buf.getvalue()
-
-
-def _git_head(repo_root: Path = REPO_ROOT) -> str:
-    try:
-        r = run_capture(["git", "rev-parse", "HEAD"], cwd=repo_root, timeout=30)
-        if r.returncode == 0:
-            return r.stdout.strip()
-    except Exception:
-        pass
-    return ""
-
-
-def _ensure_commit(target: str, repo_root: Path = REPO_ROOT, log=lambda msg: None) -> bool:
-    """确保本地 HEAD 等于 target commit。不等则 git fetch + checkout 自动修复。
-
-    返回 True（一致）或 False（重试 5 次后仍不一致）。
-    """
-    for attempt in range(5):
-        head = _git_head(repo_root)
-        if head and head == target:
-            return True
-        log(
-            f"commit mismatch: HEAD={head[:12] if head else '?'} "
-            f"target={target[:12]} — fetching (attempt {attempt + 1}/5)"
-        )
-        try:
-            run_capture(["git", "fetch", "origin"], cwd=repo_root, timeout=60)
-            run_capture(["git", "checkout", target], cwd=repo_root, timeout=30)
-        except Exception as e:
-            log(f"git fetch/checkout failed: {e}")
-    head = _git_head(repo_root)
-    return head == target
 
 
 # D14 比对规则的**唯一实现**住 `common.protocol`（发布端 `hub_client.iter_shard_dirs`
