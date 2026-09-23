@@ -45,7 +45,6 @@ from common.protocol import (
     ProtocolError,
     RetryableError,
     coef_active,
-    decode_opt_tar,
     encode_opt_tar,
     encode_weights_json,
     job_seed,
@@ -91,6 +90,34 @@ from remote.bulk_sched import (
     BULK_P1_CRITICAL,
     BULK_P2_PREFETCH,
     BulkPreemptError,
+)
+
+# 下载簇（S4 第七刀 → `remote/download.py`）：**显式转发**。宿主（run_job / _prefetch_fill）
+# 经这些转发名调用 ⇒ patch `remote.worker.download_*` 仍有效；但**组内互调**（`_resolve_blob`
+# → `download_blob`）解析在本模块 ⇒ 那类测试要 patch `remote.download`。
+from remote.download import (
+    _cache_blob as _cache_blob,
+)
+from remote.download import (
+    _ensure_ts_code as _ensure_ts_code,
+)
+from remote.download import (
+    _progress_logger as _progress_logger,
+)
+from remote.download import (
+    _resolve_blob as _resolve_blob,
+)
+from remote.download import (
+    download_blob as download_blob,
+)
+from remote.download import (
+    download_code as download_code,
+)
+from remote.download import (
+    download_payload as download_payload,
+)
+from remote.download import (
+    download_ts_code as download_ts_code,
 )
 from remote.http import (
     _POLL_WARN_AT as _POLL_WARN_AT,
@@ -245,19 +272,6 @@ from remote.wire import (
 from remote.wire import (
     set_bulk_log as set_bulk_log,
 )
-
-
-def _progress_logger(label: str, log: Any):
-    """进度行工厂：`job X: payload 下载中 3.20 MB / 4.85 MB (66%) 用时 12s（270 KB/s）`。"""
-
-    def _report(got: int, total: int, elapsed: float) -> None:
-        mb = 1024.0 * 1024.0
-        rate = (got / elapsed / 1024.0) if elapsed > 0 else 0.0
-        pct = f" ({got * 100 // total}%)" if total > 0 else ""
-        of = f" / {total / mb:.2f} MB" if total > 0 else ""
-        log(f"{label} 下载中 {got / mb:.2f} MB{of}{pct} 用时 {elapsed:.0f}s（{rate:.0f} KB/s）")
-
-    return _report
 
 
 def peek_jobs(
@@ -612,191 +626,6 @@ def acquire_job(
     return {"halt": True} if halt else None
 
 
-def download_payload(
-    base_url: str,
-    token: str,
-    jid: str,
-    *,
-    attempts: int = 3,
-    bulk_prio: str = BULK_P1_CRITICAL,
-    wire_jid: str = "",
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
-) -> bytes:
-    """取 payload 归档：**分块 + 进度行 + 停滞即断**（2026-09-20 事故的修复面）。
-
-    `wire_jid`：传输账挂给哪个 job（缺省 = 本 job）。预取路径传合成 id，免得一份提前下载
-    的账记进「正在跑的那个 job」里——那会让阶段占比把预取时间算成别人的 T_in。
-
-    停滞判据 = 45s 无新字节（`BODY_IDLE_TIMEOUT_SEC`），总预算 300s。原来只有
-    一个 `timeout=300` 的整读：隧道/代理中途停滞时，操作员看到的是**几分钟零输出**
-    且日志里连一句「失败」都没有（socket 超时的裸异常没有正文）。
-
-    `bulk_prio`（2026-09-22）：开算前的关键下载用缺省 P1；**预取**（软持有）传
-    `BULK_P2_PREFETCH`——它必须能在高优传输到达时丢掉半截（`BulkPreemptError`）。
-    """
-    return _get_with_retry(
-        base_url,
-        token,
-        f"/jobs/{jid}/payload",
-        timeout=BODY_TOTAL_TIMEOUT_SEC,
-        attempts=attempts,
-        log=log,
-        idle_timeout=BODY_IDLE_TIMEOUT_SEC,
-        total_timeout=BODY_TOTAL_TIMEOUT_SEC,
-        progress=_progress_logger(f"job {jid}: payload", log),
-        wire_jid=wire_jid or jid,
-        wire_seg="payload",
-        reroll=True,
-        bulk_prio=bulk_prio,
-    )
-
-
-def download_code(
-    base_url: str,
-    token: str,
-    jid: str,
-    *,
-    attempts: int = 3,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
-) -> bytes:
-    # code.zip 同样走隧道（1-3MB）：与 payload 同规的停滞判据与进度行。
-    return _get_with_retry(
-        base_url,
-        token,
-        f"/jobs/{jid}/code",
-        timeout=120.0,
-        attempts=attempts,
-        log=log,
-        idle_timeout=BODY_IDLE_TIMEOUT_SEC,
-        total_timeout=120.0,
-        progress=_progress_logger(f"job {jid}: code", log),
-        wire_jid=jid,
-        wire_seg="code",
-        reroll=True,
-    )
-
-
-def download_ts_code(
-    base_url: str,
-    token: str,
-    jid: str,
-    *,
-    attempts: int = 3,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
-) -> bytes:
-    """M3：取 TS 运行时 zip（kind=iter 的节点要用 bun 跑 rollout）。
-
-    代价只付一次：内容寻址缓存（`ts_code_cache/<sha>`）命中后同 sha 永不重下。
-    """
-    return _get_with_retry(
-        base_url,
-        token,
-        f"/jobs/{jid}/ts_code",
-        timeout=BODY_TOTAL_TIMEOUT_SEC,
-        attempts=attempts,
-        log=log,
-        idle_timeout=BODY_IDLE_TIMEOUT_SEC,
-        total_timeout=BODY_TOTAL_TIMEOUT_SEC,
-        progress=_progress_logger(f"job {jid}: ts_code", log),
-        wire_jid=jid,
-        wire_seg="ts_code",
-        reroll=True,
-    )
-
-
-def download_blob(
-    base_url: str,
-    token: str,
-    jid: str,
-    name: str,
-    *,
-    attempts: int = 3,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
-) -> bytes:
-    """M2 B3：取内容寻址 blob（raw opt/ref）。404 = 确定性缺失（响亮失败，非静默降级）。"""
-    return _get_with_retry(
-        base_url,
-        token,
-        f"/jobs/{jid}/blob?name={name}",
-        timeout=BODY_TOTAL_TIMEOUT_SEC,
-        attempts=attempts,
-        log=log,
-        idle_timeout=BODY_IDLE_TIMEOUT_SEC,
-        total_timeout=BODY_TOTAL_TIMEOUT_SEC,
-        progress=_progress_logger(f"job {jid}: blob {name}", log),
-        wire_jid=jid,
-        wire_seg=f"blob:{name}",
-        reroll=True,
-    )
-
-
-def _cache_blob(blob_root: Path, sha: str, raw: bytes, log) -> None:
-    """把 raw blob 写入 `blob_cache/<sha>`（原子改名；写失败只记日志）。"""
-    if not sha or not raw:
-        return
-    try:
-        blob_root.mkdir(parents=True, exist_ok=True)
-        p = blob_root / sha
-        if p.exists():
-            return
-        tmp = p.with_suffix(p.suffix + ".tmp")
-        tmp.write_bytes(raw)
-        tmp.replace(p)
-    except OSError as e:
-        log(f"blob cache 写失败（{e}）——下一轮将重传该 blob")
-
-
-def _resolve_blob(
-    *,
-    blob_root: Path,
-    name: str,
-    sha: str,
-    inline_b64: str,
-    jid: str,
-    base_url: str,
-    token: str,
-    preloaded: dict | None,
-    log,
-) -> tuple[bytes, bool, str]:
-    """解析一个 M2 blob → (raw, hit, src)；src ∈ cache|preloaded|download|inline|none。
-
-    安全阀（plan §4.3）：`sha` 非空时**只认内容寻址路径** —— 缓存命中 / preloaded /
-    HTTP 取，任一校验不过就响亮失败（RetryableError/ProtocolError）；**绝不**退回
-    内联或 warm-start（那会静默把 D5 的 Adam 动量丢掉）。`sha` 为空 = 未开瘦身/
-    旧 hub，走内联（内联也空则返回 none，由调用方决定策略）。
-    """
-    import hashlib as _hl
-
-    if sha:
-        cp = blob_root / sha
-        if cp.exists():
-            raw = cp.read_bytes()
-            if _hl.sha256(raw).hexdigest() == sha:
-                _wire_hit(jid, f"blob:{name}")
-                return raw, True, "cache"
-            log(f"blob {name}: cache 命中但 sha 不符（损坏）——重新取")
-        pl = (preloaded or {}).get("blobs") or {}
-        if name in pl:
-            raw = pl[name]
-            src = "preloaded"
-            _wire_hit(jid, f"blob:{name}", "preloaded")
-        else:
-            raw = download_blob(base_url, token, jid, name, log=log)
-            src = "download"
-        if _hl.sha256(raw).hexdigest() != sha:
-            # 传输损坏 = 瞬时（同 payload_sha256 口径）：重下可修复
-            raise RetryableError(f"blob {name} sha 不匹配——传输损坏（重下可修复）")
-        _cache_blob(blob_root, sha, raw, log)
-        return raw, False, src
-    if name == BLOB_OPT and inline_b64:
-        return decode_opt_tar(inline_b64), True, "inline"
-    if name == BLOB_REF and inline_b64:
-        import base64 as _b64
-
-        return _b64.b64decode(inline_b64.encode("ascii")), True, "inline"
-    return b"", False, "none"
-
-
 def post_result(
     base_url: str,
     token: str,
@@ -1072,66 +901,6 @@ HOT_RELOAD_EXIT = 86
 # D14 比对规则的**唯一实现**住 `common.protocol`（发布端 `hub_client.iter_shard_dirs`
 # 打包时用同一条规则挑选 shard）——这里只做名字转发，保持既有 import/调用面不变。
 d14_corpus_match = protocol_d14_corpus_match
-
-
-def _ensure_ts_code(
-    base_url: str,
-    token: str,
-    jid: str,
-    manifest: dict,
-    *,
-    ts_root: Path,
-    preloaded: dict | None,
-    log=lambda msg: None,
-) -> tuple[Path, int, bool]:
-    """M3 kind=iter：把 TS 运行时 zip 解包到内容寻址目录，返回 `(目录, 字节数, 缓存命中)`。
-
-    与 code.zip 同口径（按 sha 隔离 + tmp 原子改名），但**另一棵缓存树**：Python 代码走
-    `sys.path`，TS 代码走 bun 的 cwd —— 两者生命周期/内容无关，混在一起只会让删除豁免
-    名单变难维护。sha 不匹配 = 传输损坏（瞬时）⇒ RetryableError，与 payload/code 同规。
-
-    返回的字节数用于 M0 计量（`wire.ts_code_bytes`；缓存命中时为 0 = 本轮没走这条线）。
-    """
-    import zipfile
-
-    sha = str(manifest.get("ts_code_sha256", "") or "")
-    if not sha:
-        raise ProtocolError("kind=iter 的 manifest 缺 ts_code_sha256——无法定位 TS 运行时")
-    cache = ts_root / sha
-    if cache.exists():
-        _wire_hit(jid, "ts_code")  # 零字节命中也要进账（与 code 同规，否则 wire 摘要读数失真）
-        log(f"job {jid}: ts_code cache 命中（{sha[:12]}…）——跳过下载解压")
-        return cache, 0, True
-    raw = (preloaded or {}).get("ts_code_zip") or download_ts_code(base_url, token, jid, log=log)
-    if hashlib.sha256(raw).hexdigest() != sha:
-        raise RetryableError("ts_code_sha256 不匹配——传输损坏（重下可修复）")
-    tmp = ts_root / (sha + ".tmp")
-    if tmp.exists():
-        from platform_utils import rmtree_best_effort
-
-        rmtree_best_effort(tmp, ignore_errors=True)
-    tmp.mkdir(parents=True, exist_ok=True)
-    zip_path = tmp.parent / (sha + ".zip")
-    zip_path.write_bytes(raw)
-    with zipfile.ZipFile(zip_path) as zf:
-        zf.extractall(tmp)
-    ts_root.mkdir(parents=True, exist_ok=True)
-    if cache.exists():  # 并发窗口：别人已解好 → 用别人的
-        from platform_utils import rmtree_best_effort as _rm
-
-        _rm(tmp, ignore_errors=True)
-        _rm(zip_path, ignore_errors=True)
-        return cache, 0, True
-    tmp.rename(cache)
-    try:
-        zip_path.unlink()
-    except OSError:
-        pass
-    n_ts = len(list(cache.rglob("*.ts")))
-    log(
-        f"job {jid}: ts_code.zip unpacked ({len(raw)} bytes, {n_ts} .ts files) -> {cache.name}"
-    )
-    return cache, len(raw), False
 
 
 def run_job(

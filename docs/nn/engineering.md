@@ -24,7 +24,8 @@ hub 推送、节点 failover、kickstart 系数、远端可重试异常集合）
 admin 控制面，并为第四步（`worker.py`）先铺好**模块级状态契约**安全网（+13 例），第四步把
 wire 簇搬进 `remote/wire.py`（+8 例）、HTTP 传输核心搬进 `remote/http.py`（keystone，+7 例）、
 作业工作区/TAR/git 物化搬进 `remote/job_fs.py`（+6 例）、BC 作业搬进 `remote/bc_job.py`（+6 例，
-底座拆完后业务簇可整块搬）——终值 **2314 passed / 3 skipped**。
+底座拆完后业务簇可整块搬）、下载簇搬进 `remote/download.py`（+7 例）——终值
+**2321 passed / 3 skipped**。`remote/worker.py` 3450 → **2348**。
 
 ### 先量结构，再选刀口（拆前侦察，都是实测）
 
@@ -357,10 +358,37 @@ patch `worker._request` 的有 20+ 处，但它们分两类，而且**两类都�
 反向探针两处：往 `worker.py` 追加 `def normalize_ppo_device` 被点名；往 `bc_job.py` 顶层加
 `import torch` 被点名。门禁 **2308 → 2314 passed / 3 skipped**；mypy **375** 源文件绿。
 
+### 第七刀（同日）：下载簇 → `remote/download.py`
+
+刀口 = `_progress_logger` · `download_payload` / `download_code` / `download_ts_code` /
+`download_blob` · `_cache_blob` / `_resolve_blob` · `_ensure_ts_code`（**252 行**）。
+`worker.py` **2579 → 2348**；新 `remote/download.py` 313 行。依赖 `download → {http, wire,
+bulk_sched}`（全向下；`BODY_*` 从 `remote.http` 取单一定义）——实测本组**零跨组函数依赖**。
+
+**这一刀的核心是「注入点分档」的第一次真正双向验证**：
+
+| 调用点 | 解析在 | patch 目标 | 现有测试 |
+|---|---|---|---|
+| 组内互调：`_resolve_blob` → `download_blob`（`_ensure_ts_code` → `download_ts_code`） | **`remote.download`** | **`download`** | `tests/test_remote_ppo.py` 的 2 处（已迁） |
+| 宿主：`run_job` / `_prefetch_fill` → `download_*` | `remote.worker` | **`worker`**（**不动**） | `test_soft_hold_prefetch` / `test_remote_ppo` 缓存命中用例 |
+
+前者是「搬函数的刀里第一次出现**组内互调**」——前几刀的子模块都是一片叶子（只被宿主调），
+所以「转发就够」；本组里 `_resolve_blob` 是 `download_blob` 的调用者，两者一起搬后就换了命名空间。
+守卫把**两个方向**都钉住：一条证明「patch `download.download_blob` 生效而 `worker` 是炸弹」，
+另一条用 AST 证明「宿主把 `download_*` 当**裸名字**用」——后者是警报：哪天宿主改成
+`download.download_payload(...)`，现有 patch 会静默失效。
+
+**另一处附带修正**：`tests/test_common_layer.py` 有一条钉「`_progress_logger` 全仓恰好两份」
+的守卫（它是**有意的孪生**，tailscale_boot 要独立拉取）——它写死了 `remote/worker.py`，
+随本刀改为 `remote/download.py`；新守卫里也自包一份同样的断言。
+
+反向探针：往 `worker.py` 追加 `def download_payload` ⇒ 定义唯一被点名；往 `remote/` 放第三份
+`_progress_logger` ⇒ 孪生计数被点名。门禁 **2314 → 2321 passed / 3 skipped**；mypy **377** 源文件绿。
+
 ### 未做完（S4 余下）
 
-`remote/worker.py`（**2579 行**，仍含 `run_job` 743 / `worker_loop` 364 / 作业生命周期与下载簇）
-→ `hub_server` 其余路由组
+`remote/worker.py`（**2348 行**；余下主要是 `run_job` 743 / `worker_loop` 364 / `main` 与作业
+生命周期簇）→ `hub_server` 其余路由组
 （`_get_*` 12 / `_post_*` 11 → 通用助手）→ 最后两个千行状态类（`_JobStore` / `_HubQueue`：
 拆 = 拆状态）。设计见 `plan/nn-training-refactor.md` §5.3。`TrainingSteps` 本体还剩 952 行 /
 20 方法（切法是「按一条真实调用链切」，不是按行数等分）。

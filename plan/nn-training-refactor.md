@@ -511,13 +511,31 @@ _admin_net_probe(20) · _admin_halt(18) · _admin_queue(10) · _admin_status(9) 
 > 门禁 **2308 → 2314 passed / 3 skipped**；mypy 375 源文件绿。
 > 决策 → `DECISIONS.md` §2026-09-23-goalnn-godmodule-bcjob；全文 → `engineering.md` §23「第六步之二」。
 
-> **下一批刀口（worker 余下 2579 行）**：① 作业生命周期簇（`peek_jobs` / `request_priority` /
+> **第三刀已落地（同日）**：下载簇（**252 行**）搬进 `remote/download.py`（313 行）：
+> `_progress_logger` · `download_payload` / `download_code` / `download_ts_code` /
+> `download_blob` · `_cache_blob` / `_resolve_blob` · `_ensure_ts_code`。
+> `worker.py` **2579 → 2348**。依赖 `download → {http, wire, bulk_sched}`（全向下，无环）；
+> `BODY_*` 从 `remote.http` 取单一定义（不复制常量）。实测本组**零跨组函数依赖**。
+>
+> **本刀的核心是「注入点分档」第一次真正双向验证**：本组含**组内互调**
+> （`_resolve_blob` → `download_blob`、`_ensure_ts_code` → `download_ts_code`），
+> 搬走后这些调用解析在 **`remote.download`** ⇒ 已迁 2 处 patch（`tests/test_remote_ppo.py`）；
+> 而宿主（`run_job` / `_prefetch_fill`）仍把 `download_*` 当**裸名字**用 ⇒ 解析在 `worker`
+> ⇒ `test_soft_hold_prefetch` 等的 patch **一行不改**。守卫两个方向各一条断言，
+> 含「宿主不得改成属性式访问 `download.download_payload(...)`」的警报（那样现有 patch 会静默失效）。
+>
+> **附带修正**：`tests/test_common_layer.py` 那条钉「`_progress_logger` 全仓恰好两份」的守卫
+> 写死了 `remote/worker.py` ⇒ 随本刀改为 `remote/download.py`。
+> 反向探针两处均命中（worker 里重定义 `download_payload`、第三份 `_progress_logger`）。
+> 门禁 **2314 → 2321 passed / 3 skipped**；mypy **377** 源文件绿。
+> 决策 → `DECISIONS.md` §2026-09-23-goalnn-godmodule-download；全文 → `engineering.md` §23「第七刀」。
+
+> **下一批刀口（worker 余下 2348 行）**：① 作业生命周期簇（`peek_jobs` / `request_priority` /
 > `claim_job` / `job_started` / `job_ready` / `abandon_job` / `job_status` / `start_cancel_watcher` /
 > `_priority_rank` / `acquire_job` / `post_result` / `release_job` / `heartbeat` / `worker_tag` /
 > `_failure_detail` / `job_body_error` / `report_job_failure`）——
 > 注意这一簇的 **seam 很密**（测试大量 patch `worker.post_result` / `worker.run_job` /
-> `worker.acquire_job` 等），必须逐点定档；② 下载簇（`download_*` + `_resolve_blob` /
-> `_cache_blob` / `_ensure_ts_code` + `_progress_logger`）；③ `run_job`（743 行）/ `worker_loop`
+> `worker.acquire_job` 等），必须逐点定档；② `run_job`（743 行）/ `worker_loop`
 > （364）/ `main` 是宿主，**不动**。
 
 > **（历史）第二刀的预期执行清单**（已执行，保留供对照）：`_bc_fetch_resume` / `_bc_local_resume_dir` /
@@ -535,8 +553,8 @@ _admin_net_probe(20) · _admin_halt(18) · _admin_queue(10) · _admin_status(9) 
 
 - `remote/notebook_boot.py` ↔ `remote/offline_boot.py` 的孪生助手（`_build_opener` /
   `_load_tailscale_boot` / `_course_dirs`）：**结构性豁免**，共享即断链（§5.1 层契约）。
-- `remote/tailscale_boot.py::_progress_logger` ↔ `remote/worker.py::_progress_logger`：
-  同理只允许**两份**（`tests/test_common_layer.py` 钉住了这个数）。
+- `remote/tailscale_boot.py::_progress_logger` ↔ `remote/download.py::_progress_logger`：
+  同理只允许**两份**（`tests/test_common_layer.py` 与 `tests/test_download_split.py` 都钉住了这个数）。
 - `hub_server._json` / `worker_server._json`：是 **HTTP handler 的方法**，合需要 mixin；
   收益（7 行）远小于「给两个 handler 引入共同基类」的耦合成本。
 - `scripts/eval_intent_m5.py` ↔ `train/intent_probe.py` 的 `seq_features` / `build_injection`、

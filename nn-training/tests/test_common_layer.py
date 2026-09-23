@@ -319,8 +319,8 @@ def test_no_production_module_reintroduces_a_progress_logger_duplicate() -> None
     ⇒ 全仓**恰好两份**，谁再抄第三份就红。
     """
     assert _defs_of("_progress_logger") == [
+        "remote/download.py",
         "remote/tailscale_boot.py",
-        "remote/worker.py",
     ]
 
 

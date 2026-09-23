@@ -2462,3 +2462,35 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
   mypy **375** 源文件绿。反向探针：worker 里重复实现 `normalize_ppo_device`、bc_job 顶层
   `import torch`——两处都被点名。
 —— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/engineering.md` §23「第六步之二」
+
+## §2026-09-23-goalnn-godmodule-download（2026-09-23，用户指令「重构 nn-training：降耦合 / 复用代码 / 可维护性」）
+
+- **背景**：`remote/worker.py` 第七刀（第六步的第三刀）。BC 与作业 I/O 相继下沉后，下载簇成为
+  最独立的一组：AST 实测它**零跨组函数依赖**（只经 `remote.http` 的 `_request` / `_get_with_retry`
+  与 `remote.wire` 的账），且 `_progress_logger` 是它唯一的告警出口。
+- **备选与否决**：先拆作业生命周期簇——否（它的 seam 最密：测试大量 patch `worker.post_result` /
+  `acquire_job` / `run_job`，需逐点定档；下载簇则只有 2 处组内互调 seam，先做风险低的）；
+  把 `_progress_logger` 留在 `worker` 让下载簇 import——否（会构成 `download ⇄ worker` 环，
+  正是前几刀反复撞的那个坑）；把 `_progress_logger` 与 `tailscale_boot` 的孪生合并一份——否
+  （结构性豁免：tailscale_boot 要能独立拉取，见 plan §5.4）。
+- **决定**：`_progress_logger` · `download_payload` / `download_code` / `download_ts_code` /
+  `download_blob` · `_cache_blob` / `_resolve_blob` · `_ensure_ts_code`（**252 行**）搬进新
+  `remote/download.py`（313 行）；`worker.py` **2579 → 2348**。依赖
+  `download → {http, wire, bulk_sched}`（全向下，无环）。`BODY_*` 不复制——从 `remote.http` 取
+  单一定义（常量复制是比函数复制更隐蔽的漂移源）。
+- **本刀的核心（第一次真正双向验证「注入点分档」）**：前几刀的子模块都是**叶子**（只被宿主调），
+  所以「显式转发就够」；本组含**组内互调**（`_resolve_blob` → `download_blob`、
+  `_ensure_ts_code` → `download_ts_code`）⇒ 搬走后这两个调用点在 **`remote.download`** 命名空间，
+  对它们的 patch 必须改指 `download`（实迁 2 处，`tests/test_remote_ppo.py`）；而宿主
+  （`run_job` / `_prefetch_fill`）仍把 `download_*` 当**裸名字**用 ⇒ 解析在 `worker` ⇒
+  `tests/test_soft_hold_prefetch.py` / `test_remote_ppo.py` 的缓存命中用例**一行不改**。
+- **违反后果**：若宿主改成属性式访问（`download.download_payload(...)`），现有那批 patch 会
+  静默失效（测试全绿而注入无效）——守卫 `test_host_callers_still_resolve_the_worker_namespace`
+  就是这条警报。若 `_progress_logger` 留宿主而下载簇 import，则成环。
+- **附带修正**：`tests/test_common_layer.py` 有一条钉「`_progress_logger` 全仓**恰好两份**」的旧守卫
+  （它记录的是「tailscale_boot 的孪生是有意的」）——它写死了 `remote/worker.py`，随本刀改为
+  `remote/download.py`；新守卫也自包一份同样断言（两处都钉，免得任一侧漂移）。
+- **门禁**：**2321 passed / 3 skipped**（2314 → +7：新 `tests/test_download_split.py` 7 例）；
+  mypy **377** 源文件绿。反向探针两处均命中：往 `worker.py` 追加 `def download_payload`
+  ⇒「定义唯一」被点名；往 `remote/` 再放一份 `_progress_logger` ⇒ 孪生计数被点名。
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/engineering.md` §23「第七刀」

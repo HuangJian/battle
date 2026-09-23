@@ -1181,7 +1181,9 @@ def test_resolve_blob_safety_valve_and_inline_fallback(tmp_path: Path, monkeypat
     def _missing(*_a, **_k):
         raise ProtocolError("blob opt: HTTP 404")
 
-    monkeypatch.setattr(worker_mod, "download_blob", _missing)
+    # `_resolve_blob` 已随下载簇搬进 `remote.download`（S4 第七刀），它在本模块命名空间解析
+    # `download_blob` ⇒ 注入点必须是 `remote.download`（patch `worker` 会静默失效）。
+    monkeypatch.setattr(download_mod, "download_blob", _missing)
     with pytest.raises(ProtocolError):
         worker_mod._resolve_blob(
             blob_root=root,
@@ -1211,7 +1213,7 @@ def test_resolve_blob_safety_valve_and_inline_fallback(tmp_path: Path, monkeypat
 
 def test_resolve_blob_sha_mismatch_is_retryable(tmp_path: Path, monkeypatch) -> None:
     """M2：blob 取回字节 sha 不符 = 传输损坏 → RetryableError（重下可修复），非静默接受。"""
-    monkeypatch.setattr(worker_mod, "download_blob", lambda *_a, **_k: b"wrong-bytes")
+    monkeypatch.setattr(download_mod, "download_blob", lambda *_a, **_k: b"wrong-bytes")
     with pytest.raises(RetryableError):
         worker_mod._resolve_blob(
             blob_root=tmp_path / "blob_cache",
@@ -1466,6 +1468,7 @@ def test_claimable_pool_rebuilt_from_ledger(tmp_path: Path) -> None:
 
 # ------------------------------------------------------------------ 重传机制（2026-09-05，DECISIONS §340）
 
+import remote.download as download_mod
 import remote.http as http_mod
 import remote.worker as worker_mod
 from common.protocol import RetryableError
