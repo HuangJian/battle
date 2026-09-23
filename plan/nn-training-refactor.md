@@ -296,6 +296,52 @@ _remote_ppo_fetch(13) · _remote_ppo_probe(12) · _push_submit_first(10) · _rem
 ② 新模块需重导 36 个模块全局（含 `log`/`time`/`Path` 这些高频项）；③ 迁 2 处 e2e patch 目标；
 ④ 守卫扩展：在 `tests/test_loop_transport_split.py` 同口径加「定义只在 `loop_remote`」+「`_remote_ppo` 仍在组合类上」。
 
+#### 5.3.2 第三步侦察（2026-09-23，AST 实测）—— 拆 `remote/hub_server.py`（3974 行）
+
+实测形状（与其按「先撇 5 个顶层纯函数」的初判不同——那 5 个加起来只 **58 行 / 1.5%**，不值一轮）：
+
+| 顶层节点 | 行数 | 结论 |
+|---|---|---|
+| `_JobStore`（1002）· `_HubQueue`（1033）· `HubHandler`（1343） | 3378 / 3974 = **85%** | 三个大状态类才是本体 |
+| 5 个顶层纯函数（`_is_ip_literal` / `attributed_source` / `_is_loopback` / `_write_bytes` / `_deterministic_fill`） | 58 | 收益太小，**不单开一轮**（可随下面的刀顺手带走） |
+| `_AuthGuard`（57）· `as_hub` / `make_server` / `main`（240） | ~300 | 与 `HubHandler` 同生命周期，暂不动 |
+
+**推荐首刀：`HubHandler` 的 admin 控制面（9 方法 / 218 行）→ `remote/hub/admin.py::AdminRoutes` 混入**
+
+```
+_admin_push_workers(57) · _admin_courses(36) · _admin_unfreeze(32) · _admin_net_probe_upload(27)
+_admin_net_probe(20) · _admin_halt(18) · _admin_queue(10) · _admin_status(9) · _admin_offline(9)
+```
+
+为什么它是 `HubHandler`（49 方法 / 1343 行）里最安全的一组——三条都是量出来的：
+
+1. **类只有 3 个属性**（`hub: _HubQueue` / `push: PushDispatcher | None` / `_blocked_logged`），admin 组
+   只经 `self.hub` / `self.push` 拿状态 ⇒ 方法近乎无状态，搬迁不改语义；
+2. **admin 组只往外调 4 个通用助手**（`_auth_ok` / `_bytes` / `_json` / `_query_course`）；
+   反向只有「`do_GET` / `do_POST` 派发到它们」——派发靠 `table[path](self, ...)` 或 `self._admin_*`，
+   混入下天然可用；
+3. ✭ **测试接缝为零**：全仓对 `remote.hub_server` 的 patch 只有一处（`SEND_TIMEOUT_SEC`，不在本组），
+   而 `tests/` 从 `hub_server` 取的名字全是 `_JobStore` / `_HubQueue` / `as_hub` / `make_server`——
+   本组一个都没被外部 import。对比 S4 前两步的 seam 弯弯绕，这组几乎免费。
+
+**⚠ 两个必须随迁的名字（否则成环）**：admin 组读两个**定义在 `hub_server` 顶层**的名字——
+
+* `_deterministic_fill`（顶层函数，仅 4 行）—— 若留在 `hub_server` 而 `admin.py` 去 import 它，
+  就与「`hub_server` import `admin` 拿混入」形成**双向环**；
+* `NET_PROBE_MAX`（顶层常量，= 16MB）—— 同理。
+
+⇒ 两者**随 admin 组一起搬**到新模块。**已查明：两者全仓无其它读者**（grep `remote/ rl/ tests/ e2e/` 除
+`hub_server.py` 外零命中）⇒ **不需要门面 re-export**（比预想更干净）。
+本组另读的 `COURSE_MODES` / `ProtocolError` / `json` / `time` / `urllib` 均为正常 import。
+
+> 顺带查明（供后续刀参考）：其余 3 个顶层纯函数 `_write_bytes` / `_is_ip_literal` 也**无外部读者**；
+> 但 `_is_loopback` / `attributed_source` **被 `tests/test_hub_auth_d9_order.py` 直接 import** ⇒
+> 它们一旦搬迁必须留门面 re-export（好消息：两者都不在 admin 组里）。
+
+**后续顺序**（仍在 `remote/hub_server.py`）：`HubHandler` 的其余路由组（`_get_*` 12 个 / `_post_*` 11 个）
+→ 通用助手（`_auth_ok` / `_bytes` / `_json` / `_read_*_body` / `log_message`）→ 最后才动两个千行状态类
+（`_JobStore` / `_HubQueue`：拆 = 拆状态）。
+
 ### 5.4 本轮**不做**（已核，刻意保留）
 
 - `remote/notebook_boot.py` ↔ `remote/offline_boot.py` 的孪生助手（`_build_opener` /
