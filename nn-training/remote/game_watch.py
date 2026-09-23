@@ -25,6 +25,8 @@
   * ``GAME_MAX_ATTEMPTS`` (3) —— 一局最多跑几次：超时 / rc≠0 都**原地重跑同一 argv**
     （种子在 argv 里 ⇒ 同一局是确定性的：重跑要么拿到同一份结果，要么再次响亮失败）。
   * ``GAME_POLL_SEC`` (0.5) —— 轮询粒度：软告警与硬顶都靠它发现（一次 `wait(∞)` 什么都看不见）。
+  * ``PROGRESS_LOG_SEC`` (60.0) —— 进度行的节流间隔（`progress_due()`）：**按时间**而不是
+    按局数，因为这条线的成本只与墙钟有关（用户 2026-09-23：每分钟一句就够）。
 
 为什么重试而不是「竞速副本」（用户 2026-09-22 提的两条路）：argv 不变 ⇒ out 目录不变 ⇒
 声明的 shard 集（`data_fp`）逐字节不变；副本会多产一个同 (stage,seed) 的 shard 目录，直接撞上
@@ -45,6 +47,15 @@ GAME_MAX_ATTEMPTS = 3
 #: 轮询粒度（秒）：软告警与硬顶都靠它发现。
 GAME_POLL_SEC = 0.5
 
+#: 进度行（「N/M games settled」）的节流间隔（秒）。
+#:
+#: 用户口径 2026-09-23：云端离线课的日志被进度行刷屏（`[run] kind=iter rollout: 30/224
+#: games settled (18s)`）——**每分钟一句就够**。原来的节流是**按局数**（每 10 局一句），
+#: 而这条线的成本与局数无关、只与墙钟有关：8 并发下一轮 328 局 3 分钟打完 = 33 行，
+#: 而 220 并发的在线节点上是每秒数行。所以改成按**时间**节流（最后一句仍然必打，
+#: 否则「跑完了」这件事会没有落点）。
+PROGRESS_LOG_SEC = 60.0
+
 
 def attempt_timeout_sec(base_sec: float, attempt: int, explicit: bool = False) -> float:
     """第 `attempt` 次尝试的硬顶（秒）。
@@ -60,6 +71,20 @@ def attempt_timeout_sec(base_sec: float, attempt: int, explicit: bool = False) -
 def warn_is_redundant(timeout_sec: float) -> bool:
     """软告警是否与硬顶同值（同值 ⇒ 只打超时行，不再多打一行 WARN）。"""
     return float(timeout_sec) <= SLOW_GAME_WARN_SEC
+
+
+def progress_due(
+    done: int, total: int, now: float, last_at: float, *, every: float | None = None
+) -> bool:
+    """这一局结算完，该不该打进度行（rollout / eval 两条腿共用一个节流口径）。
+
+    `done >= total`（最后一句）恒 True——收尾那一行是「这一轮结束了」的唯一落点；
+    其余按 `now - last_at >= every`（缺省 `PROGRESS_LOG_SEC`）节流。调用方把返回值当
+    「现在是不是该打」的判据，并在打完之后把 `last_at` 更新成这次的 `now`。
+    """
+    if int(done) >= int(total):
+        return True
+    return (float(now) - float(last_at)) >= (PROGRESS_LOG_SEC if every is None else float(every))
 
 
 def game_label(stage: object, seed: object) -> str:

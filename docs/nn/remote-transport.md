@@ -7,6 +7,79 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §33 离线课运维四件套：hub 取包重试上限 / Kaggle 跳过 tailscale / 进度行每分钟一句 / 底部「中途取回」格（2026-09-23）
+
+> 编号说明：`§32` 是本文件的「决策正文归档」节，进度节从 **§33** 起（新条目置顶、号大）。
+> 四条都是用户 2026-09-23 的口径，全部落在 `remote/offline_boot.py` + `ipynb/battle.offline.ipynb`。
+
+**① hub 取包重试上限 10 轮 → 转「等上传」模式**（`CFG.hub_tries`，0=不限）
+
+- 旧行为：hub 候选每 `poll_sec`（缺省 15s）探活 + 取包，直到 `wait_pack_sec`（缺省 **30 分钟**）到点。
+  hub 还没导出包时，这就是 30 分钟 × 上百轮的无意义请求与同样多的日志行，而云机会话是按时间计费的。
+- 现行为：连试 `hub_tries`（缺省 `DEFAULT_HUB_TRIES` = 10）轮都没拿到 ⇒ **不再碰 hub**，
+  转入「等上传」模式并响亮说明（去控制台「导出任务包」→ 上传；或写进 `CFG['task_zip']`；
+  想让它自己再试就重跑本 cell）。上传那条路**一直在轮**（同一个循环），切模式不牺牲「人随手传上来」这条。
+- **否决**：① 无上限重试（旧行为）——把预算花在不会成功的请求上；② 到点后靠人重跑整个 cell
+  （人不在云机前时没人重跑）；③ 把上限合进 `wait_pack_sec`（语义混淆：一个是「等多久」，一个是「试几次」）。
+  ④ 上限用 `cfg.get("hub_tries") or DEFAULT` 兜底 —— **本批实测踩到**：`0`（不限轮数）会被
+  falsy-zero 吞成 10，判据必须 `is None`（`test_hub_tries_zero_means_no_cap` 盯着）。
+- 落地：`_try_hubs()`（一轮只真取一次）+ `obtain_pack()` 的 `hub_parked`；
+  测试 `test_hub_fetch_gives_up_after_the_cap_and_switches_to_upload`。
+- 「起隧道」与「取包」**分开判**：上限只管取包；tailscale 仍只在「所有候选都够不着」时试一次。
+
+**② Kaggle 上一律不起 tailscale（跳过全部 tailscale 步骤）**
+
+- 背景：2026-09-16/17 两次事故（`DECISIONS §2026-09-16-kaggle-kernel-no-torch` /
+  `§2026-09-17-kaggle-cred-before-proxy`）都出在「Kaggle 容器里做网络改造」这条路上：平台既不给
+  NET_ADMIN 也换不得网络命名空间，而 userspace 引导会把进程代理改写成只转发 Tailscale IP
+  ⇒ 平台 Secrets（公网 HTTPS）够不着、凭据读成空串 ⇒ `/code` 401 ⇒ 会话终结。
+- 现行为：`is_kaggle()` 为真时 —— `ensure_tailscale()` **短路在函数第一行**（不是调用点：将来新增的
+  调用点也绕不过），`hub_candidates()` **不给 tailnet 候选**（没隧道必然不通，留着只是每轮白等一个 8s 探活超时）。
+- **否决**：① 只在调用点判（多一个调用点就漏一次）；② 让 `tailscale_boot.ensure()` 自己判
+  （它必须在**动网络之前**就知道，而那时它已经改了代理环境）；③ 保留 tailnet 候选「试试看」。
+- 落地：`is_kaggle()`（判据与 `remote/artifacts.py::is_kaggle` 同源 —— 本模块不能 import remote，
+  所以抄一份并由 `test_is_kaggle_is_a_superset_of_the_artifacts_module` 对账「只许多认、不许漏认」）/
+  `ensure_tailscale()` / `hub_candidates()`；测试 `test_kaggle_skips_tailscale_entirely`（连
+  `_load_tailscale_boot` 都不许被调到）、`test_kaggle_drops_the_tailnet_candidate`、`test_colab_is_not_kaggle`。
+  说明书（notebook markdown）同步写明「Kaggle 上 `HUB_IP` / `TS_AUTHKEY` 会被忽略」。
+
+**③ 进度行按时间节流：每分钟一句**
+
+- 用户看到的那行是 `[run] kind=iter rollout: 30/224 games settled (18s)`。旧口径**按局数**（每 10 局一句）：
+  8 并发一轮 328 局 3 分钟 = 33 行；在线节点 220 并发时是每秒数行。这条线的成本只与**墙钟**有关 ⇒ 阀也拿墙钟量。
+- 现行为：`game_watch.progress_due(done, total, now, last_at)`（`PROGRESS_LOG_SEC = 60.0`），
+  **最后一句恒打**（那是「这一轮结束」的唯一落点）。两条 rollout 腿共用一份：`remote/iter_rollout.py`
+  （节点/云机）与 `rl/queue_local.py`（本机）；`ROLLOUT_LOG_EVERY`（按局数）随之退役 ——
+  `test_rollout_progress_paths_use_the_shared_cadence` 扫源码防它回来。
+- **否决**：① 保留按局数（快机器上等于没节流）；② 干脆删掉进度行（长轮次就完全没有「还活着」的信号）。
+
+**④ 底部新增「中途取回」格：跑到一半也能把产物交回控制台**
+
+- 场景：云机会话到点/被回收，而产物已经在盘上（`LATEST.zip` 每次 checkpoint 刷新；干净停机还写全量
+  `artifacts.zip`）。缺的只是一个**能交回控制台的名字**：导入侧 `remote/deliver_zip.py` 用文件名
+  `deliver-<课>.zip` **对账课程**（拿 A 课的权重去评 B 课，读数看起来完全正常，只有这道对账能拦）。
+- 现行为：cell 调 `offline_boot.package_partial(cfg, log)` —— 逐门课找 `<work>/run` 下**最能代表
+  当前进度**的包（`artifacts.zip` 优先，其次 `LATEST.zip`），复制成 `deliver-<课>.zip` 放进
+  `download_dir`（Kaggle=`/kaggle/working`、Colab=`/content`），Colab 上直接触发 `files.download()`；
+  只读 + 复制，不动产物、不训练、不碰网络；没有产物时**响亮说明是哪个目录空**（返回空列表，不抛）。
+- **否决**：① 让用户自己解压 `LATEST.zip` 再改名（改名 = 把课程对账让给运气）；② 训练中途后台线程自动打包
+  （单内核被训练 cell 占着跑不了第二格，且「什么时候想拿走」是人的判断）；③ 在 cell 里自己推导工作目录/包名
+  （工作目录有两层规则——多课程再套一层课程名——抄一份必然漂；所以那部分留在
+  `course_work_dir` / `package_partial`，cell 只做引导与本机下载）；④ 复用 `package_deliverable`
+  （它只认 `artifacts.zip`，而跑到一半时那个文件还不存在）。
+- 落地：`package_partial()` / `_partial_last_it()` / `PARTIAL_CANDIDATES`；notebook 第三格
+  （`test_notebook_has_a_mid_run_package_cell` 钉「恰一格 + 不含引导调用 + 走 runtime」）；
+  测试 `test_package_partial_*`（4 例，含用**真** `ArtifactStore` 造盘上那份 `LATEST.zip`）。
+
+**验证与边界**
+
+- 门禁：`bash tools/githook/nn-python-gate.sh` 绿（ruff + mypy + pytest）· 根 `bun run check` 绿。
+- 未验证（诚实边界）：**没有真 Kaggle 会话**跑过 —— 判据与环境变量由单测对账，而「真机上能不能起隧道」
+  本来就不再需要验（我们不再去起）；进度行的实际行数也没在真云机轮次里数过。
+- 回退粒度：`CFG.hub_tries`（0 = 旧行为）· 进度行改回按局数（改一处，两条腿同时变）·
+  尾部那格删掉不影响训练与交付（它是只读便利件）。
+
+---
 ## §31 异步结果回传：把 `out` 从关键路径上摘下来（plan/transfer-scheduling P2.5，2026-09-22）
 
 **为什么做**：双课程单 worker（最典型场景）下 A 的 rollout 与 B 的 PPO 交错填空 ⇒ **算力已满**，

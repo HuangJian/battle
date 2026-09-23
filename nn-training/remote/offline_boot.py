@@ -25,9 +25,24 @@
 产物补传腿（每轮 best-effort 推、`delivered.json` 记账、永不影响训练）。关掉则
 `--no-deliver`：跑完统一打 `deliver-<课>.zip`，用户下载后到控制台导入。
 
+**hub 取包有重试上限**（`CFG["hub_tries"]`，缺省 10；用户口径 2026-09-23）：连试这么多轮
+还没拿到包（hub 没导出 / 抖动 / 鉴权错都算），**不再碰 hub**，转入「等上传」模式并响亮说明
+——否则云机只会把整个 `wait_pack_sec`（缺省 30 分钟）耗在轮询上，而会话时间是花钱买的。
+注意「取包」与「起隧道」是两回事：上限只管前者，后者按下面的规则单独判。
+
+**Kaggle 上不使用 tailscale**（用户口径 2026-09-23）：平台容器既不给 NET_ADMIN 也换不得
+网络命名空间，而 userspace 引导会把进程代理改写成只转发 Tailscale IP 的代理——2026-09-17
+的 Kaggle 事故就是这么发生的（代理改写后平台 Secrets 够不着）。所以 `is_kaggle()` 为真时
+**跳过全部 tailscale 步骤**：不起隧道、也不把 tailnet IP 当候选（那种地址没有隧道必然不通）。
+
+**中途取回**（`package_partial`）：会话到点/被回收时，产物目录里已经有 `LATEST.zip`
+（每次 checkpoint 刷新）——本函数把它复制成控制台习惯的 `deliver-<课>.zip`，人下载后
+「导入产物」即可（与跑完时同一个名字、同一个导入路径）。
+
 **为什么本模块顶部不 import `remote.*`**：它在**拿到任务包之前**就要干活——那时
-`code.zip` 还没进 `sys.path`，`remote` 包根本不存在。索引名/代码名因此在这里各留一份
-常量（有测试盯着与 `remote/bundle.py` 逐字相同），读索引只用 `zipfile` + `json`。
+`code.zip` 还没进 `sys.path`，`remote` 包根本不存在（中途取回那条路也一样：包可能还没下来，
+而产物已经在盘上）。索引名/代码名/产物包名因此在这里各留一份常量（有测试盯着与
+`remote/bundle.py` / `remote/artifacts.py` 逐字相同），读索引只用 `zipfile` + `json`。
 `tailscale_boot` 按 `notebook_boot` 的做法双路加载（包内 `remote.tailscale_boot` 或
 顶层的 `tailscale_boot`）。
 """
@@ -58,10 +73,20 @@ BUNDLE_MAGIC = "battle2-task-bundle"
 #: 解包目录（与 notebook_boot 的 `CODE_DIR` 同值：同一个进程里两份引导不打架）。
 CODE_DIR = "/tmp/worker-code"
 
+#: 产物目录里的两个包名（与 `remote/artifacts.py::ArtifactStore` 逐字相同；测试守）。
+ALL_ZIP = "artifacts.zip"
+LATEST_ZIP = "LATEST.zip"
+#: 中途取回的优先顺序：全量包（已收尾）优先，其次最新一轮小包（跑到一半）。
+PARTIAL_CANDIDATES = (ALL_ZIP, LATEST_ZIP)
+#: `LATEST.zip` 里那行元信息（名字写死在 `remote/artifacts.py::_refresh_latest`）。
+LATEST_ROW_NAME = "metrics_row.json"
+
 #: 等包缺省时长（秒）：hub 没导出 / 用户还没上传，都在这条线上等。
 DEFAULT_WAIT_SEC = 1800.0
 #: 等包循环的轮询间隔（秒）——两条源都在这条间隔上轮。
 DEFAULT_POLL_SEC = 15.0
+#: hub 取包的重试上限（轮数；`CFG["hub_tries"]`，0 = 不限）。到顶就转「等上传」模式。
+DEFAULT_HUB_TRIES = 10
 #: 探活与取包的超时（秒）。取包给得宽：任务包几 MB～几十 MB，云机的下行不一定快。
 PING_TIMEOUT = 8.0
 PACK_TIMEOUT = 300.0
@@ -73,6 +98,19 @@ UPLOAD_GLOBS = (
     "/kaggle/input/*",
     "/content/drive/MyDrive",
 )
+
+
+def is_kaggle(env: dict | None = None, *, exists: Callable[[str], bool] = os.path.isdir) -> bool:
+    """是否在 Kaggle 容器里（与 `remote/artifacts.py::is_kaggle` 同一判据）。
+
+    本模块**不能** import `remote.*`（拿包之前它还不存在），所以判据在这里重写一份，
+    由 `tests/test_offline_boot.py` 盯着两边同值：官方标记 `KAGGLE_KERNEL_RUN_TYPE`、
+    本文件 `download_dir()` 已在用的 `KAGGLE_URL_BASE`，或 `/kaggle/working` 存在。
+    """
+    e = os.environ if env is None else env
+    if e.get("KAGGLE_KERNEL_RUN_TYPE") or e.get("KAGGLE_URL_BASE"):
+        return True
+    return bool(exists("/kaggle/working"))
 
 
 def _load_tailscale_boot() -> Any:
@@ -211,12 +249,16 @@ def hub_candidates(cfg: dict, creds: dict) -> list[str]:
 
     离线盘两条路都可能通：本机 hub 用 cloudflared 暴露成公网 URL 时**不需要 tailscale**；
     只有走 tailnet IP 时才需要（那条路才去起 tailscale）。
+
+    **Kaggle 上不给 tailnet 候选**（用户口径 2026-09-23）：起了隧道也不通，把它放在候选里
+    只会每次探活都白等一个超时；tailnet 地址与「起 tailscale」是同一条路的两半，一起跳过
+    （只留 `hub_url` 那条公网路）。
     """
     out: list[str] = []
     u = str(cfg.get("hub_url") or "").strip().rstrip("/")
     if u and "<" not in u:
         out.append(u)
-    ip = str(creds.get("HUB_IP") or "").strip()
+    ip = "" if is_kaggle() else str(creds.get("HUB_IP") or "").strip()
     if ip:
         try:
             resolved = _load_tailscale_boot().resolve_hub_url("", ip, int(cfg.get("hub_port") or 0))
@@ -366,6 +408,36 @@ def fetch_resume(
 # ── 拿包：hub 与手动两条源，一个等待循环 ───────────────────────────────────
 
 
+def _try_hubs(
+    hubs: list[str],
+    broken: list[str],
+    creds: dict,
+    course: str,
+    work_dir: Path,
+    log: Callable[[str], None],
+) -> Path | None:
+    """对着候选逐个试一轮取包（探活 → 取包），返回包或 None（纯函数壳，只求可测）。
+
+    `broken` 就地记下**探活失败**的候选：够不着 ≠ 取不到 —— 够不着的候选在本次等待里不再探
+    （探活超时 8s，无谓地重复探一个死地址就是白等），而「在线但没包」不算黑名单事件，
+    它由调用方的重试上限兜住。**一轮只真取一次**（第一个够得着的候选说了算）——
+    同一个包对 N 个候选各取一遍只是让日志变长。
+    """
+    tok = str(creds.get("HUB_TOKEN") or "")
+    for hub in hubs:
+        if hub in broken:
+            continue
+        if not probe_hub(hub, tok, log):
+            broken.append(hub)
+            continue
+        log(f"hub 在线: {hub}")
+        if not course:
+            log("没填 CFG.course —— 没法按课程取包（去控制台看课程名，或在 CFG 里填）")
+            return None
+        return fetch_task_pack(hub, tok, course, work_dir, log)
+    return None
+
+
 def obtain_pack(
     cfg: dict,
     creds: dict,
@@ -377,7 +449,12 @@ def obtain_pack(
 
     **两条源在同一个循环里轮询**（每轮先看落点、再试 hub）：用户随时可能上传，hub 也随时
     可能被点上「导出」——把它们排成先后两步，会让「上传之后又等满 hub 的超时」这种事发生。
-    到点仍无包 ⇒ `SystemExit`，正文就是下一步该做什么（不猜、不静默重试）。
+
+    **hub 只试 `CFG["hub_tries"]` 轮**（缺省 `DEFAULT_HUB_TRIES` = 10，0 = 不限）：连试这么多
+    轮还没拿到就不再碰 hub，**转入「等上传」模式**并响亮说明（用户口径 2026-09-23）。原来
+    没有上限，hub 没导出时就把 30 分钟全花在每 15s 一次的探活/取包上：云机侧看起来像死了，
+    而实际上它只是在一个永远不会成功的请求上刷日志。到点仍无包 ⇒ `SystemExit`，正文就是
+    下一步该做什么（不猜、不静默重试）。
     """
     explicit = str(cfg.get("task_zip") or "").strip()
     if explicit and Path(explicit).expanduser().is_file():
@@ -394,12 +471,20 @@ def obtain_pack(
     # 注意 `0` 是**合法**值（「不等待，立刻报错」）——不能用 `or` 兜底（falsy-zero 陷阱）。
     wait_s = DEFAULT_WAIT_SEC if cfg.get("wait_pack_sec") is None else float(cfg["wait_pack_sec"])
     poll_s = max(0.05, float(cfg.get("poll_sec") or DEFAULT_POLL_SEC))
+    # 同样注意 `0` 是**合法**值（不限轮数）——不能用 `or` 兜底（falsy-zero 陷阱，实测踩过）。
+    tries_raw = cfg.get("hub_tries")
+    max_hub_tries = DEFAULT_HUB_TRIES if tries_raw is None else max(0, int(tries_raw))
     deadline = time.time() + max(0.0, wait_s)
     hubs = hub_candidates(cfg, creds)
     hubs_tried_ts = False
     prompted = False
     hub_broken: list[str] = []
-    log(f"等任务包（上限 {wait_s:.0f}s）：hub 候选 {hubs or '(没配 hub 地址)'}")
+    hub_tries = 0
+    hub_parked = False
+    log(
+        f"等任务包（上限 {wait_s:.0f}s）：hub 候选 {hubs or '(没配 hub 地址)'}"
+        + (f"，hub 最多试 {max_hub_tries} 轮" if max_hub_tries else "，hub 不限轮数")
+    )
     while True:
         found = find_uploaded_pack(cfg, log)
         if found is not None:
@@ -407,30 +492,28 @@ def obtain_pack(
             return found
         if stop is not None and stop.is_set():
             raise SystemExit("[offline] 收到停机信号 —— 等包中止（未开始任何训练）")
-        for hub in hubs:
-            if hub in hub_broken:
-                continue
-            tok = str(creds.get("HUB_TOKEN") or "")
-            if not probe_hub(hub, tok, log):
-                hub_broken.append(hub)
-                continue
-            log(f"hub 在线: {hub}")
-            if not course:
-                log("没填 CFG.course —— 没法按课程取包（去控制台看课程名，或在 CFG 里填）")
-                break
-            got = fetch_task_pack(hub, tok, course, work_dir, log)
+        if not hub_parked and hubs:
+            hub_tries += 1
+            got = _try_hubs(hubs, hub_broken, creds, course, work_dir, log)
             if got is not None:
                 return got
-            break
-        if hubs and not hubs_tried_ts and all(h in hub_broken for h in hubs):
-            # 所有候选都够不着：**这时**才值得去起 tailscale（可能只是还没入 tailnet）。
-            ip = ensure_tailscale(cfg, creds, log)
-            hubs_tried_ts = True
-            if ip:
-                # 之前的失败是「还没入 tailnet」，不是「地址不对」——清掉黑名单重试全部候选。
-                hub_broken.clear()
-                hubs = hub_candidates(cfg, creds)
-                continue
+            if not hubs_tried_ts and all(h in hub_broken for h in hubs):
+                # 所有候选都够不着：**这时**才值得去起 tailscale（可能只是还没入 tailnet）。
+                ip = ensure_tailscale(cfg, creds, log)
+                hubs_tried_ts = True
+                if ip:
+                    # 之前的失败是「还没入 tailnet」，不是「地址不对」——清掉黑名单重试全部候选。
+                    hub_broken.clear()
+                    hubs = hub_candidates(cfg, creds)
+                    continue
+            if max_hub_tries and hub_tries >= max_hub_tries:
+                hub_parked = True
+                log(
+                    f"hub 取包试了 {hub_tries} 轮都没成功（CFG.hub_tries={max_hub_tries}）"
+                    "⇒ 转入「等上传」模式，不再轮询 hub：去控制台「导出任务包」→ 上传到本 "
+                    "notebook（Colab 上传框 / Kaggle Add Data），或写进 CFG['task_zip']；"
+                    "若你刚导出、想让它自己取，**重跑本 cell** 即可"
+                )
         if not prompted and cfg.get("prompt_upload", True) and wait_s > 0:
             prompted = True
             got = prompt_upload(log)
@@ -443,8 +526,8 @@ def obtain_pack(
     raise SystemExit(
         f"[offline] {wait_s:.0f}s 内没拿到任务包 —— 两条路任选其一：\n"
         f"  ① hub 取包：控制台「导出任务包」（导出要求该课训练已停）→ 保持 hub 在线"
-        f"（{'、'.join(hubs) if hubs else 'CFG.hub_url / HUB_IP 未配'}）→ 重跑本 cell；\n"
-        f"  ② 手动送包：控制台下载 `task-<课>.zip` → 上传到本 notebook（Colab 上传框 / "
+        f"（{'、'.join(hubs) if hubs else 'CFG.hub_url / HUB_IP 未配'}）→ 重跑本 cell；"
+        f"\n  ② 手动送包：控制台下载 `task-<课>.zip` → 上传到本 notebook（Colab 上传框 / "
         f"Kaggle Add Data）或写进 `CFG['task_zip']` → 重跑本 cell。"
     )
 
@@ -454,7 +537,14 @@ def ensure_tailscale(cfg: dict, creds: dict, log: Callable[[str], None]) -> str:
 
     ★ 凭据必须在进本函数之前读完：`ensure` 会把进程代理改写成只转发 Tailscale IP 的
     userspace 代理，之后平台 Secrets（公网 HTTPS）就够不着了（2026-09-17 Kaggle 事故）。
+
+    ★ **Kaggle 上一律跳过**（用户口径 2026-09-23）：那里既没有 NET_ADMIN 也换不得网络
+    命名空间，**正是**上面那个事故的现场；换不来隧道，只换来一个改坏了的代理环境。
+    所以这一层（而不是调用点）做短路：任何将来新增的调用点都不会绕过它。
     """
+    if is_kaggle():
+        log("Kaggle 环境 ⇒ 跳过 tailscale（起不来隧道，且 userspace 引导会改坏平台代理）")
+        return ""
     key = str(creds.get("TS_AUTHKEY") or "").strip()
     if not key:
         log("没有 TS_AUTHKEY —— 跳过 tailscale（只走公网 hub_url / 手动送包）")
@@ -664,6 +754,93 @@ def package_deliverable(
     return dest
 
 
+def _partial_last_it(art: Path, src: Path) -> str:
+    """产物目录/包里最新一轮的编号（纯日志用；拿不到就 `"-"`，不猜、不抛）。
+
+    两个来源：`state.json` 的 `last_it`（每轮都刷新，最权威），其次是包内的
+    `metrics_row.json`（`LATEST.zip` 带的）。中途取回是**人已经慌了才用的路**，
+    所以这一层绝不能因为一个缺字段就炸。
+    """
+    try:
+        st = json.loads((art / "state.json").read_text(encoding="utf-8"))
+        if isinstance(st, dict) and isinstance(st.get("last_it"), int):
+            return str(st["last_it"])
+    except (OSError, ValueError):
+        pass
+    try:
+        with zipfile.ZipFile(src) as zf:
+            row = json.loads(zf.read(LATEST_ROW_NAME).decode("utf-8"))
+        if isinstance(row, dict) and isinstance(row.get("it"), int):
+            return str(row["it"])
+    except (KeyError, OSError, ValueError, zipfile.BadZipFile):
+        pass
+    return "-"
+
+
+def package_partial(
+    cfg: dict,
+    log: Callable[[str], None],
+    *,
+    courses: list[str] | None = None,
+) -> list[Path]:
+    """把「跑到一半」的产物打成 `deliver-<课>.zip`（会话中途下载 → 控制台导入）。
+
+    用户口径 2026-09-23：「battle.offline.ipynb 底部增加一个 cell，用于将训练到中途的
+    课程结果打包下载回来，供导入至 dashboard。」
+
+    为什么需要它：云机会话会到点/被回收，而**跑到一半**的产物已经在盘上
+    （`LATEST.zip` 每次 checkpoint 都刷新）——但没有一个“能交回控制台”的名字，而控制台的
+    导入靠 `deliver-<课>.zip` **对账课程**（拿 A 课的权重去评 B 课，读数看起来完全正常，
+    只有对账能拦）。于是这里只做两件事：
+
+      1. 选出**最能代表当前进度**的那个包（全量包 `artifacts.zip` 优先，其次最新一轮小包
+         `LATEST.zip`——两者形状都被 `remote/deliver_zip.py` 接受）；
+      2. 复制成 `deliver-<课>.zip` 放进 `download_dir`（Kaggle=`/kaggle/working`、
+         Colab=`/content`、否则 cwd）——人一眼能找到、下载、导入。
+
+    **只读 + 复制**：不动产物、不训练、不碰网络。找不到产物就**响亮说明**是哪个目录为空
+    （第一轮 checkpoint 之前本来就没东西）并返回空列表，绝不因拿不到包而抛。
+    跑完全程时打的同名包是**全量**的（`package_deliverable`）——中途包被它覆盖是预期。
+    """
+    names = list(courses) if courses else courses_of(cfg)
+    multi = len(names) > 1
+    out_dir = download_dir(cfg)
+    made: list[Path] = []
+    for course in names:
+        work = course_work_dir(cfg, course, multi=multi)
+        art = work / "run"
+        src = next((art / n for n in PARTIAL_CANDIDATES if (art / n).exists()), None)
+        if src is None:
+            log(
+                f"[pack] {course}: 没有可打包的产物（{art} 下既没有 {ALL_ZIP} 也没有 "
+                f"{LATEST_ZIP}）——第一轮 checkpoint 之前都是这样"
+            )
+            continue
+        if src.name == LATEST_ZIP:
+            log(
+                f"[pack] {course}: 只找到 {LATEST_ZIP}（会话跑完/中途停机时打的全量包还不在）"
+                "——它含最新一轮的 weights/opt + 计划 + 清单，控制台「导入产物」接受"
+            )
+        dest = out_dir / (f"deliver-{course}.zip" if course else "deliver.zip")
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(src.read_bytes())
+        except OSError as e:
+            log(f"[pack] {course}: 复制失败（{e}）—— 手动取 {src}")
+            continue
+        log(
+            f"[pack] {course}: {dest}（{dest.stat().st_size} bytes，含到 it{_partial_last_it(art, src)}，"
+            f"来源 {src.name}）"
+        )
+        made.append(dest)
+    if made:
+        log(
+            "[pack] 下一步：把上面的 zip 下载到本机 → 控制台「导入产物」上传（中途包与跑完时的 "
+            "deliver-<课>.zip 同名同形，导入后自动起 A 层评估）"
+        )
+    return made
+
+
 def run_one_course(
     cfg: dict,
     creds: dict,
@@ -773,7 +950,7 @@ def run(
     """cell 的唯一入口。返回 rc（交给 `SystemExit`）。
 
     `cfg` 见 `ipynb/battle.offline.ipynb` 的 CFG（course / hub_url / device / task_zip /
-    wait_pack_sec / live_backfeed / budget_sec / threads / max_iters / eval_on_cloud /
+    wait_pack_sec / hub_tries / live_backfeed / budget_sec / threads / max_iters / eval_on_cloud /
     rollout_workers …）。
 
     **多课程：串行跑完**（2026-09-22 用户指令）——`CFG.course` 给列表时按顺序逐门跑，

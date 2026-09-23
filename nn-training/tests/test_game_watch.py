@@ -71,3 +71,30 @@ def test_game_time_summary_reports_distribution_slowest_and_retries() -> None:
 def test_game_time_summary_empty_is_not_a_crash() -> None:
     """零局也要有话说（别让诊断行自己成为失败点）。"""
     assert "没有跑成的局" in game_watch.game_time_summary("eval", [])
+
+
+def test_progress_lines_are_throttled_by_time() -> None:
+    """进度行按**时间**节流（用户 2026-09-23：云端离线课的日志刷屏，每分钟一句就够）。
+
+    旧口径是「每 10 局一句」：8 并发一轮 328 局 3 分钟打完是 33 行，而 220 并发的在线
+    节点上是每秒数行 —— 代价只与墙钟有关，所以阀也必须拿墙钟量。
+    """
+    assert game_watch.PROGRESS_LOG_SEC == 60.0
+    every = game_watch.PROGRESS_LOG_SEC
+    # 窗口内：不打
+    assert game_watch.progress_due(1, 328, now=100.0, last_at=100.0) is False
+    assert game_watch.progress_due(50, 328, now=100.0 + every - 0.001, last_at=100.0) is False
+    # 到点：打
+    assert game_watch.progress_due(51, 328, now=100.0 + every, last_at=100.0) is True
+    # **最后一句恒打**：它是「这一轮结束」的唯一落点，时间再近也不能省
+    assert game_watch.progress_due(328, 328, now=100.0, last_at=100.0) is True
+    # 阀可显式覆盖（测试与特殊调用点用）
+    assert game_watch.progress_due(2, 328, now=11.0, last_at=10.0, every=1.0) is True
+
+
+def test_rollout_progress_paths_use_the_shared_cadence() -> None:
+    """两条 rollout 腿都走 `progress_due`：各自留一份「每 N 局一句」就等于刷屏会重现。"""
+    for rel in ("remote/iter_rollout.py", "rl/queue_local.py"):
+        src = (ROOT / rel).read_text(encoding="utf-8")
+        assert "progress_due(" in src, f"{rel} 没用共享节流口径"
+        assert "ROLLOUT_LOG_EVERY" not in src, f"{rel} 还留着按局数节流的旧口径"

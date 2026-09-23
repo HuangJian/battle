@@ -16,13 +16,16 @@ from typing import Any
 
 import dist_common
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+from remote import game_watch  # 进度行节流口径与节点侧 rollout 共用一份（`progress_due`）
 from rl.cmd import build_rollout_cmd
 from rl.log import log
 from rl.reports import combine_reports
 
 REPO_ROOT = Path(__file__).resolve().parents[2]  # 仓库根 battle2（rl/ 上溯 3 层，修正 2026-09-02）
 
-ROLLOUT_LOG_EVERY = 10  # 本地 rollout 每 N 局结算打一条进度行
+# 进度行节流：旧口径是「每 N 局一句」（N=10）——在高并发轮上等于每秒数行，云端离线课的
+# 日志就是被它刷屏的（用户口径 2026-09-23：每分钟一句就够）。现在按**时间**节流，口径常量
+# 在 `remote/game_watch.PROGRESS_LOG_SEC`（与节点侧 `iter_rollout` 同一份，改一处两边同步）。
 
 
 def run_rollout(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, int]], args) -> dict:
@@ -67,15 +70,16 @@ def run_rollout(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, i
         return rc, report
 
     t0 = time.time()
+    last_log_at = t0
     results: list[tuple[int, dict | None]] = [(1, None)] * len(pairs)
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {ex.submit(run_one, i, si, sd): i for i, (si, sd) in enumerate(pairs)}
         for done_n, fut in enumerate(as_completed(futures), 1):
             results[futures[fut]] = fut.result()
-            if done_n % ROLLOUT_LOG_EVERY == 0 or done_n == len(pairs):
-                log(
-                    f"[rollout] local {done_n}/{len(pairs)} games settled ({time.time() - t0:.0f}s)"
-                )
+            now = time.time()
+            if game_watch.progress_due(done_n, len(pairs), now, last_log_at):
+                last_log_at = now
+                log(f"[rollout] local {done_n}/{len(pairs)} games settled ({now - t0:.0f}s)")
 
     failed = [i for i, (rc, _r) in enumerate(results) if rc != 0]
     if failed:

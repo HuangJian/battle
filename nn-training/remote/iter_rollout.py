@@ -492,13 +492,19 @@ def run_iter_rollout(
                 ): i
                 for i, argv in enumerate(argvs)
             }
+            last_log_at = t0
             for done_n, fut in enumerate(as_completed(futs), 1):
                 i = futs[fut]
                 game_secs[i], game_attempts[i] = fut.result()  # 异常在 worker 侧统一处理
-                if done_n % 10 == 0 or done_n == len(argvs):
+                # 进度行**按时间**节流（`game_watch.progress_due`，缺省每分钟一句）：原来的
+                # 「每 10 局一句」在高并发轮上是每秒数行 —— 云端离线课的日志就是被它刷屏的
+                # （用户口径 2026-09-23）。最后一句恒打（轮结束的唯一落点）。
+                now = time.time()
+                if game_watch.progress_due(done_n, len(argvs), now, last_log_at):
+                    last_log_at = now
                     log(
                         f"kind=iter rollout: {done_n}/{len(argvs)} games settled "
-                        f"({time.time() - t0:.0f}s)"
+                        f"({now - t0:.0f}s)"
                     )
     finally:
         if pool is not None:

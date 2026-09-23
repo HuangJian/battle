@@ -35,6 +35,7 @@ CFG_KEYS = (
     "task_zip",
     "wait_pack_sec",
     "prompt_upload",
+    "hub_tries",
     "live_backfeed",
     "device",
     "threads",
@@ -194,6 +195,40 @@ def test_boot_loader_refreshes_every_session_and_reports_the_revision() -> None:
     assert "用上一份缓存继续" in cell, "回落到缓存必须响亮说明（不能静默用旧版）"
     assert ".replace(_dst)" in cell, "写回要用原子替换（半截写入不得留下坏模块）"
     assert "_branch.txt" not in cell, "旧的「按分支名失效」缓存策略已退役（它不挡同分支的新旧）"
+
+
+def test_notebook_has_a_mid_run_package_cell() -> None:
+    """底部那格「中途取回」（用户口径 2026-09-23）：跑到一半也能把产物交回控制台。
+
+    守三件事：① 它**恰有一格**且不含引导调用（引导 cell 的唯一性靠 `_run(CFG` 判定，
+    多一个含它的 cell 会让那份 fixture 直接报错）；② 它走 runtime 的 `package_partial`
+    （工作目录的推导、包的选择、命名都在那里一份，cell 不许自己拼一份）；③ 名字与下一步
+    写明 —— 控制台靠 `deliver-<课>.zip` 对账课程，而人需要知道去哪里下载。
+    """
+    hits = [t for t in notebook_cells(NB, "code") if "package_partial" in t]
+    assert len(hits) == 1, f"期望恰好 1 个中途取回 cell，实际 {len(hits)}"
+    pack = hits[0]
+    assert "_run(CFG" not in pack, "中途取回 cell 不得含引导调用（会破坏引导 cell 的唯一性）"
+    assert "_ob.package_partial(CFG, _log)" in pack, "必须调 runtime 的 package_partial（单一实现）"
+    assert "导入产物" in pack, "要说清下一步是把包上传到控制台「导入产物」"
+    assert "deliver-<课>.zip" in pack, "要写明产出的名字（与跑完时同一个）"
+    assert "LATEST.zip" in pack or "artifacts.zip" in pack, "要说清包里装的是什么"
+    assert "_IS_COLAB" in pack, "Colab 上要直接触发下载（否则人得自己去文件树里找）"
+
+
+def test_markdown_documents_the_hub_retry_cap_and_kaggle_tailscale_skip() -> None:
+    """两个新口径必须在说明书里可见（用户找不到的旋钮 = 不存在的旋钮）。
+
+    2026-09-23 用户点名的两条：① hub 取包重试满 N 轮就转「等上传」；② 检测到 Kaggle
+    就跳过全部 tailscale 步骤。以及底部那格「中途取回」。
+    """
+    md = "\n".join(notebook_cells(NB, "markdown"))
+    assert "hub_tries" in md, "重试上限的旋钮要在说明书里（不然用户只能去读代码）"
+    assert "等上传" in md and "不再轮询 hub" in md, "切换后的行为要写明（否则看起来像挂了）"
+    assert "Kaggle" in md and "Tailscale" in md and "会被忽略" in md, (
+        "Kaggle 上跳过 tailscale 这条要写明（否则人会先去填 HUB_IP/TS_AUTHKEY 白忙）"
+    )
+    assert "中途取回" in md and "LATEST.zip" in md, "中途取回那格要在说明书里指出"
 
 
 def test_cell_has_no_key_material_or_hardcoded_course() -> None:

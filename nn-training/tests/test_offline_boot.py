@@ -79,6 +79,21 @@ def test_constants_track_the_exporter() -> None:
     assert offline_boot.BUNDLE_MAGIC == bundle_mod.BUNDLE_MAGIC
 
 
+def test_product_pack_names_track_the_artifact_store() -> None:
+    """中途取回认的两个包名也是**抄的一份**（本模块不能 import remote）——改名必须两边一起改。"""
+    from remote import artifacts as artifacts_mod
+    from remote.artifacts import ArtifactStore
+
+    assert offline_boot.ALL_ZIP == ArtifactStore.ALL_ZIP
+    assert offline_boot.LATEST_ZIP == ArtifactStore.LATEST_ZIP
+    assert offline_boot.PARTIAL_CANDIDATES == (ArtifactStore.ALL_ZIP, ArtifactStore.LATEST_ZIP)
+    # 元信息名写死在 `remote/artifacts.py::_refresh_latest` 里（没有常量可对）：扫源码对账
+    src = Path(str(artifacts_mod.__file__)).read_text(encoding="utf-8")
+    assert f'writestr("{offline_boot.LATEST_ROW_NAME}"' in src, (
+        f"{offline_boot.LATEST_ROW_NAME} 与 artifacts.py 写的那行对不上 —— 中途取回的进度行会退化成 '-'"
+    )
+
+
 def test_read_pack_index_accepts_a_pack_written_by_the_exporter(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -400,3 +415,200 @@ def test_course_from_pack_name_only_speaks_when_it_is_sure(tmp_path: Path) -> No
     assert offline_boot.course_from_pack_name("task-c5-gae.zip") == "c5-gae"
     assert offline_boot.course_from_pack_name(tmp_path / "deliver-c5-gae.zip") == ""
     assert offline_boot.course_from_pack_name("task-.zip") == ""
+
+
+# ────────────────────── hub 重试上限 → 转「等上传」模式（用户 2026-09-23）──────────────────
+
+
+def test_hub_fetch_gives_up_after_the_cap_and_switches_to_upload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """hub 取包试满 `CFG.hub_tries` 轮 ⇒ **不再碰 hub**，转入等上传（人一传上来就跑）。
+
+    这是用户 2026-09-23 的口径：云机不能把 `wait_pack_sec`（缺省 30 分钟）全花在
+    一个不会成功的请求上 —— 试满 10 轮就切到「上传任务包」模式。
+    """
+    assert offline_boot.DEFAULT_HUB_TRIES == 10
+    up = tmp_path / "up"
+    up.mkdir()
+    logs: list[str] = []
+    monkeypatch.setattr(offline_boot, "UPLOAD_GLOBS", (str(up),))
+    monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub.invalid"])
+    monkeypatch.setattr(offline_boot, "probe_hub", lambda *a, **k: True)
+    calls = {"n": 0}
+
+    def fetch(hub, token, course, dest_dir, log, timeout=0.0):
+        calls["n"] += 1
+        if calls["n"] == offline_boot.DEFAULT_HUB_TRIES:
+            fake_pack(up, course=course)  # 第 10 轮之后用户把包传上来了
+        return None
+
+    monkeypatch.setattr(offline_boot, "fetch_task_pack", fetch)
+    got = offline_boot.obtain_pack(
+        {"course": "c5-gae", "wait_pack_sec": 30, "poll_sec": 0.05, "prompt_upload": False},
+        {"HUB_TOKEN": "t"},
+        logs.append,
+        tmp_path / "w",
+    )
+    assert got is not None and got.name == "task-c5-gae.zip"
+    assert calls["n"] == offline_boot.DEFAULT_HUB_TRIES, "到顶后不许再碰 hub（否则上限等于没设）"
+    assert any("等上传" in m and "不再轮询 hub" in m for m in logs), (
+        f"切换到上传模式必须响亮说明，实际日志：{logs}"
+    )
+
+
+def test_hub_tries_zero_means_no_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`hub_tries=0` = 不限轮数（旧行为留一个把手：hub 稍后才会导出时用它）。"""
+    monkeypatch.setattr(offline_boot, "UPLOAD_GLOBS", (str(tmp_path / "none"),))
+    monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub.invalid"])
+    monkeypatch.setattr(offline_boot, "probe_hub", lambda *a, **k: True)
+    calls = {"n": 0}
+
+    def fetch(hub, token, course, dest_dir, log, timeout=0.0):
+        calls["n"] += 1
+        return None
+
+    monkeypatch.setattr(offline_boot, "fetch_task_pack", fetch)
+    with pytest.raises(SystemExit):
+        offline_boot.obtain_pack(
+            {
+                "course": "c5-gae",
+                # 轮询下限 0.05s/轮 ⇒ 1s 窗口里约 20 轮，足够越过缺省上限（10）
+                "wait_pack_sec": 1.0,
+                "poll_sec": 0.05,
+                "prompt_upload": False,
+                "hub_tries": 0,
+            },
+            {"HUB_TOKEN": "t"},
+            quiet,
+            tmp_path / "w",
+        )
+    assert calls["n"] > offline_boot.DEFAULT_HUB_TRIES, "0 = 不限轮数"
+
+
+# ────────────── Kaggle 上不使用 tailscale（用户 2026-09-23）──────────────
+
+
+def test_is_kaggle_is_a_superset_of_the_artifacts_module() -> None:
+    """本模块不能 import remote ⇒ 判据重写了一份：凡是 `remote.artifacts` 认的都必须认。
+
+    自这一侧只看多不少（额外认 `KAGGLE_URL_BASE`，本文件 `download_dir()` 已在用它）：
+    **漏判**的代价是「在 Kaggle 上去起 tailscale」（2026-09-17 事故那种），多判的代价只是
+    少一条本来就通不了的路 —— 所以这个方向的不对称是故意的。
+    """
+    from remote.artifacts import is_kaggle as artifacts_is_kaggle
+
+    for env, exists, expected in (
+        ({"KAGGLE_KERNEL_RUN_TYPE": "Batch"}, lambda p: False, True),
+        ({"KAGGLE_URL_BASE": "https://www.kaggle.com"}, lambda p: False, True),  # 额外认的标记
+        ({}, lambda p: p == "/kaggle/working", True),
+        ({}, lambda p: False, False),
+        ({"COLAB_RELEASE_TAG": "2026-01"}, lambda p: p == "/content", False),
+    ):
+        ours = offline_boot.is_kaggle(env, exists=exists)
+        theirs = artifacts_is_kaggle(env, exists=exists)
+        assert ours is expected, f"env={env} 我们判 {ours}，期望 {expected}"
+        assert (not theirs) or ours, f"env={env} artifacts 判 {theirs} 而我们判 {ours} —— 漏判"
+
+
+def test_kaggle_skips_tailscale_entirely(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Kaggle 上**一次都不碰** tailscale_boot：不是「起不来就算了」，是根本不去起。
+
+    2026-09-17 事故就出在这里：userspace 引导会把进程代理改写成只转发 Tailscale IP，
+    之后平台 Secrets（公网 HTTPS）够不着 ⇒ 凭据读成空串。
+    """
+    monkeypatch.setenv("KAGGLE_KERNEL_RUN_TYPE", "Batch")
+    monkeypatch.setattr(
+        offline_boot,
+        "_load_tailscale_boot",
+        lambda: (_ for _ in ()).throw(AssertionError("Kaggle 上不该去加载/启动 tailscale")),
+    )
+    logs: list[str] = []
+    assert offline_boot.ensure_tailscale({"ts_ephemeral": True}, {"TS_AUTHKEY": "k"}, logs.append) == ""
+    assert any("Kaggle" in m and "跳过 tailscale" in m for m in logs), logs
+
+
+def test_kaggle_drops_the_tailnet_candidate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """没隧道就必然不通 ⇒ Kaggle 上不给 tailnet 候选（只留公网 hub_url）。"""
+    monkeypatch.setenv("KAGGLE_KERNEL_RUN_TYPE", "Batch")
+    cfg = {"hub_url": "https://x.trycloudflare.com", "hub_port": 9999}
+    creds = {"HUB_IP": "100.64.0.5"}
+    assert offline_boot.hub_candidates(cfg, creds) == ["https://x.trycloudflare.com"]
+    monkeypatch.delenv("KAGGLE_KERNEL_RUN_TYPE")
+    assert offline_boot.hub_candidates(cfg, creds) == [
+        "https://x.trycloudflare.com",
+        "http://100.64.0.5:9999",
+    ], "非 Kaggle 时 tailnet 候选照旧"
+
+
+def test_colab_is_not_kaggle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Colab 不在跳过之列（它有正规网络与 secrets 通道，tailscale 那条路在那里是有效的）。"""
+    monkeypatch.delenv("KAGGLE_KERNEL_RUN_TYPE", raising=False)
+    monkeypatch.delenv("KAGGLE_URL_BASE", raising=False)
+    monkeypatch.setenv("COLAB_RELEASE_TAG", "2026-01")
+    assert offline_boot.is_kaggle(exists=lambda p: p == "/content") is False
+
+
+# ────────────────────── 中途取回（用户 2026-09-23）──────────────────────
+
+
+def _store_with_latest(art: Path, it: int = 1) -> Path:
+    """用**真** ArtifactStore 造一份「跑到一半」的产物目录（
+
+    不用手写 zip：`LATEST.zip` 的形状、`state.json` 的字段都是它的契约，自造一份就等于
+    把「中途取回认的包」与「训练写的包」拆成两个真相。
+    """
+    from remote.artifacts import ArtifactStore
+
+    store = ArtifactStore(art, run_id="run-off1")
+    store.checkpoint(it, weights_json=b'{"w":1}', opt_tar=b"opt", row={"stage": 0, "seed": 1})
+    return art / ArtifactStore.LATEST_ZIP
+
+
+def test_package_partial_copies_the_latest_pack_under_the_console_name(tmp_path: Path) -> None:
+    """跑到一半：把 `LATEST.zip` 复制成 `deliver-<课>.zip`（控制台导入靠文件名对账课程）。"""
+    work = tmp_path / "w"
+    latest = _store_with_latest(work / "run", it=3)
+    logs: list[str] = []
+    made = offline_boot.package_partial(
+        {"course": "c5-gae", "work_dir": str(work), "download_dir": str(tmp_path / "out")},
+        logs.append,
+    )
+    assert made == [tmp_path / "out" / "deliver-c5-gae.zip"]
+    assert made[0].read_bytes() == latest.read_bytes(), "中途包必须逐字节就是盘中那份"
+    joined = "\n".join(logs)
+    assert "deliver-c5-gae.zip" in joined and "含到 it3" in joined and "导入产物" in joined
+
+
+def test_package_partial_prefers_the_full_pack_when_it_exists(tmp_path: Path) -> None:
+    """跑完（或干净停机）之后：`artifacts.zip` 更全 ⇒ 优先它，而不是最新一轮小包。"""
+    work = tmp_path / "w"
+    _store_with_latest(work / "run", it=2)
+    (work / "run" / offline_boot.ALL_ZIP).write_bytes(b"full-pack")
+    made = offline_boot.package_partial(
+        {"course": "c5-gae", "work_dir": str(work), "download_dir": str(tmp_path / "out")}, quiet
+    )
+    assert made and made[0].read_bytes() == b"full-pack"
+
+
+def test_package_partial_is_a_noop_and_says_why_when_there_is_nothing(tmp_path: Path) -> None:
+    """第一轮 checkpoint 之前没东西可打 —— 说清是哪个目录空，不抛、不造空包。"""
+    logs: list[str] = []
+    made = offline_boot.package_partial(
+        {"course": "c5-gae", "work_dir": str(tmp_path / "w"), "download_dir": str(tmp_path / "out")},
+        logs.append,
+    )
+    assert made == [] and not (tmp_path / "out").exists()
+    assert any("没有可打包的产物" in m and "run" in m for m in logs), logs
+
+
+def test_package_partial_walks_the_course_queue(tmp_path: Path) -> None:
+    """多课程：每门课各自一份包；没有产物的那门只报一句（不挡别的课）。"""
+    dl = tmp_path / "dl"
+    _store_with_latest(dl / "battle-offline" / "c5-gae" / "run", it=1)
+    logs: list[str] = []
+    made = offline_boot.package_partial(
+        {"course": ["c5-gae", "c6-gae"], "download_dir": str(dl)}, logs.append
+    )
+    assert [p.name for p in made] == ["deliver-c5-gae.zip"]
+    assert any("c6-gae" in m and "没有可打包的产物" in m for m in logs), logs
