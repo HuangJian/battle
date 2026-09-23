@@ -20,8 +20,9 @@
 hub 推送、节点 failover、kickstart 系数、远端可重试异常集合）——后者**没有一个是方法**，
 只是历史上「从 `loop_core.py` 拆出」时按大小切、没按职责切。S4 第一步把整簇**零逻辑改动**
 搬到 `rl/loop_transport.py`，`loop_steps` 只留门面 re-export（2328 → **1812** 行）。
-门禁 **2255 → 2262**（+7 守卫用例）全绿；同日第二步再拆远端 PPO 腿（见文末），再第三步拆
-`hub_server` 的 admin 控制面，终值 **2274 passed / 3 skipped**。
+门禁 **2255 → 2262**（+7 守卫用例）全绿；同日第二步再拆远端 PPO 腿，第三步拆 `hub_server` 的
+admin 控制面，并为第四步（`worker.py`）先铺好**模块级状态契约**安全网（+13 例）——终值
+**2287 passed / 3 skipped**。
 
 ### 先量结构，再选刀口（拆前侦察，都是实测）
 
@@ -202,13 +203,36 @@ patch 目标从 `rl.loop_steps.*` 迁到 `rl.loop_remote.*`（否则 `AttributeE
 - 规模：`hub_server.py` 3974 → **3728** 行；新 `remote/hub/{__init__,admin}.py` 302 行。
 - 门禁：**2274 passed / 3 skipped / 0 failed**，26s；mypy 366 源文件绿。
 
+### 第四步前置（同日）：`remote/worker.py` 的**模块级状态契约**（拆之前先把静默故障变响）
+
+前三刀拆的都是**类**（`TrainingSteps` / `HubHandler`），刀口能靠「哪些方法互相调用」量出来。
+`worker.py` 不同：它是一整片**顶层函数**（68 个）——顶层函数与「模块级可变状态」**同生共死**。
+把 `_wire_*` 搬到 `remote/worker/wire.py`，它们读的就是**新模块的**全局 ⇒ `_WIRE` / `_BULK`
+变成两份互不相干的账，而测试里那些 `W._WIRE.clear()` / `W._BULK.reset()` **照旧绿**。
+这就是前三刀反复撞上的同一类故障，只不过这次会**一次撞上 6 个**。
+
+实测清点（AST）后补的安全网：`tests/test_worker_state_contract.py`（**13 例**）—— ① **清点不许
+漂移**（顶部可变容器 / `global` 重绑 / 顶层有状态实例各一张手工清单，且每个名字必须真被读到，
+防清单变僵尸）· ② **别处不许有自己的副本**（扫 `remote/**/*.py`，状态名不得在第二个模块再绑
+一次；`tailscale_boot._BEST_RATE` 走显式豁免表——那是独立引导模块的同名不同物）· ③ **行为可
+复现**（`_wire_flush` 的账行同序列跑两遍**逐字节相同** · `_wire_bucket` 写进模块那份 `_WIRE` 且
+封顶 `WIRE_MAX_JOBS` · 新建账的 `sched0` 取自模块那份 `_BULK`——即「子模块各拿一个调度器」的
+探测器 · `_note_rate` 会话语义 · `_warn_non_200` 的 60s 节流与 `log=None` 不占窗，**后者此前零覆盖**）。
+
+**两条可复用的手法**：① 「同序列跑两遍、逐字节相同」这类断言，不要重写一份被测逻辑到测试里
+（那只是在测自己的副本）——要挑**真实结算路径**（这里是 `_wire_flush` 打出的那行账）做对账；
+② 反向探针不是可选项：往 `remote/` 放一个 `_WIRE = {}` 的探针文件，守卫应**立刻点名**
+`remote/_probe_state.py::_WIRE`，删即回绿——否则这条守卫可能根本是瞎的。
+
+门禁 **2287 passed / 3 skipped**。6 处状态与刀口建议见 `plan/nn-training-refactor.md` §5.3.3。
+
 ### 未做完（S4 余下）
 
-`remote/worker.py`（3475 行 / 68 顶层函数，有水平缝，但**遥测/节流状态模块级共享** ⇒ 拆前先补
-「同 seed 两遍逐字段相同」类用例）→ `hub_server` 其余路由组（`_get_*` 12 / `_post_*` 11 → 通用助手）
-→ 最后两个千行状态类（`_JobStore` / `_HubQueue`：拆 = 拆状态）。设计见
-`plan/nn-training-refactor.md` §5.3。`TrainingSteps` 本体还剩 952 行 / 20 方法（切法是「按一条真实
-调用链切」，不是按行数等分）。
+`remote/worker.py`（状态契约与安全网**已就绪**，见上；下一步拆 wire 簇与 BC 助手簇，
+但**先**决定 6 处状态是「留宿主让子模块 import」还是「随簇搬迁」）→ `hub_server` 其余路由组
+（`_get_*` 12 / `_post_*` 11 → 通用助手）→ 最后两个千行状态类（`_JobStore` / `_HubQueue`：
+拆 = 拆状态）。设计见 `plan/nn-training-refactor.md` §5.3。`TrainingSteps` 本体还剩 952 行 /
+20 方法（切法是「按一条真实调用链切」，不是按行数等分）。
 
 ---
 

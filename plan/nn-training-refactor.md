@@ -352,6 +352,47 @@ _admin_net_probe(20) · _admin_halt(18) · _admin_queue(10) · _admin_status(9) 
 → 通用助手（`_auth_ok` / `_bytes` / `_json` / `_read_*_body` / `log_message`）→ 最后才动两个千行状态类
 （`_JobStore` / `_HubQueue`：拆 = 拆状态）。
 
+#### 5.3.3 第四步前置（2026-09-23，已完成）：`remote/worker.py` 的状态契约
+
+`worker.py` 要拆的不是类，而是**一整片顶层函数**（68 个）——而顶层函数与「模块级可变状态」
+同生共死：搬到 `remote/worker/wire.py` 后，它们读的就是**新模块的**全局 ⇒ `_WIRE` / `_BULK`
+变成两份互不相干的账，而测试里那些 `W._WIRE.clear()` / `W._BULK.reset()` **照旧绿**。
+这正是 S4 前两步反复撞上的那类静默故障，只不过这次会一次撞上 6 个。
+
+**实测清点（AST）——真·模块级可变状态共 6 处**：
+
+| 名字 | 形态 | 谁改 | 测试可见 |
+|---|---|---|---|
+| `_opener` | 懒建单例（`global`） | `_get_opener` | 否 |
+| `_BEST_RATE` | float（`global`） | `_note_rate` | **是**（`test_wire_reroll` / `test_boot_wire_guard` 重置它） |
+| `_WIRE` | `dict[str, dict]`（每 job 传输账） | `_wire_bucket` / `_wire_flush` | **是**（多文件 `.clear()` + 断言封顶） |
+| `_BULK` | `BulkScheduler()` **实例** | `set_bulk_log` / `pace` / `slot` / `control` / `reset` | **是**（直接 `.reset()` / `.inflight()`） |
+| `_POLL_WARN_AT` | `dict[str, float]`（告警节流 60s） | `_warn_non_200` | 否（**此前零覆盖**，本轮补上） |
+| `_ACTIVE_CODE_SHA` | `str \| None`（会话代码指纹） | `run_job`（`global`；**定义在 2757 行、用在 2141 行**） | 间接（`test_remote_hotswap` 测异常语义） |
+
+（`remote/tailscale_boot.py` 的同名 `_BEST_RATE` 是**结构性豁免**：独立引导模块，各有各的
+会话，不是同一个变量——别顺手合并。）
+
+**已铺好的安全网**：`tests/test_worker_state_contract.py`（**13 例**）三类断言：
+
+1. **清点不许漂移**：顶部可变容器 = `_WIRE` / `_POLL_WARN_AT` · `global` 重绑 = `_opener` /
+   `_BEST_RATE` / `_ACTIVE_CODE_SHA` · `_BULK` 是顶层 `BulkScheduler()` 调用 · 且每个名字都
+   真的被读到（防清单变僵尸）；
+2. **别处不许有自己的副本**：扫 `remote/**/*.py`，状态名不得在第二个模块里再绑一次
+   （`tailscale_boot._BEST_RATE` 走显式豁免表）；
+3. **行为可复现**：`_wire_flush` 的账行**同序列跑两遍逐字节相同** · `_wire_bucket` 写进模块那份
+   `_WIRE` 且封顶 `WIRE_MAX_JOBS` · `sched0` 取自模块那份 `_BULK`（跨模块各拿一个调度器的探测器）·
+   `_note_rate` 的会话语义 · `_warn_non_200` 的 60s 节流与 `log=None` 不占窗（此前零覆盖）。
+
+**反向探针已验证判据是活的**：在 `remote/` 放一个 `_WIRE = {}` 的探针文件 ⇒ 守卫立刻点名
+`remote/_probe_state.py::_WIRE`；删除即回绿。门禁 **2287 passed / 3 skipped**。
+
+**拆 worker 的建议刀口（下一步）**：wire 簇（`_wire_*` / `_bulk_pace` / `_reroll_decision` / 速率
+阈值常量，~L132‑340）与 BC 助手簇（`_bc_*` / `normalize_ppo_device` / `resolve_bc_seed`，~L1583‑1753）
+——**但首先**要决定 6 处状态是「留在宿主并让子模块 import」还是「随簇搬迁」（后者必须同步改
+`tests/` 的注入点；前两刀的 seam 迁移分录可直接照抄）。`supervise_worker` / `worker_loop` / `main`
+是宿主，**不动**。
+
 ### 5.4 本轮**不做**（已核，刻意保留）
 
 - `remote/notebook_boot.py` ↔ `remote/offline_boot.py` 的孪生助手（`_build_opener` /
