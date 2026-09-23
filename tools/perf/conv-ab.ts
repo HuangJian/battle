@@ -1,7 +1,8 @@
 /**
  * tools/perf/conv-ab.ts —— 卷积内核 **旧 vs 新** 的 A/B 探针（逐位等价 + 稳态计时）。
  *
- * 为什么要有它（plan `src/nn/conv/conv-optimize.plan.md` §6.4 第 1 项 + §2.5）：
+ * 为什么要有它（plan `plan/conv-optimize.plan.md` §6.4 第 1 项 + §2.5；该计划 2026-09-23 从
+ * `src/nn/conv/` 移出，理由见 `docs/nn/runtime-opt.md` §17）：
  *   优化内核的最低证据是两条：① **逐位等价**（新内核与原内核在同一份权重/输入下输出
  *   逐字节相同）② **实测加速**。两者都必须是「跑一次就能复现」的动作，而不是提交信息里的
  *   一行数字 —— 尤其 arm64 的计时**只能在 arm64 机器上测**（训练机是 x64，交叉编译出来的
@@ -20,8 +21,12 @@
  *   CONV_AB_OLD_LIB=<path> bun tools/perf/conv-ab.ts  # 直接用现成的旧库（无编译器时，或要与
  *                                                   # 历史 prebuilt 产物对齐时 —— 跳过现编）
  *
- * 旧侧定位：默认用 `git rev-list -1 HEAD -- <旧源码路径>`（= 最后一次改动该路径的提交，
+ * 旧侧定位：默认用 `git log --diff-filter=AM -1 -- <旧路径>`（= 最后一次**增改**该路径的提交，
  * 也就是它被删除前的那一版）—— 这样**重组之后仍然能跑**，不会因为 HEAD 上已无旧文件而失效。
+ * ⚠ 不能用 `git rev-list -1 HEAD -- <路径>`：它把**删除该路径的提交**也算作「改动」，
+ * 于是重组提交一旦进历史就会命中删除提交（其上文件已不存在）。2026-09-23 在 arm64 上就是这样
+ * 静默跳过了 wasm 对比（`[wasm-old] … 上无 src/nn/wasm/conv_feats.wasm ⇒ 跳过`）。
+ * 另：native 源码与 wasm 产物**最后一次增改未必同一次提交**，故各自定位。
  *
  * 输出：每侧的 ms/forward + `old/new` 加速比 + 四方（native old/new × wasm old/new）的
  * 逐位等价矩阵。全绿时最后一行 `[verdict]` 为 OK。
@@ -80,17 +85,18 @@ function git(ref: string, args: string[]): Buffer {
   return r.stdout
 }
 
-/** 旧内核所在提交：最后一次改动该路径的那一版（重组后 HEAD 已无该文件，故不能写死 HEAD）。 */
-function oldRef(): string {
+/** 旧产物所在提交：最后一次**增改**该路径的那一版（删除提交被 `--diff-filter=AM` 排除）。
+ *  `CONV_AB_OLD_REF` 可整体覆盖（两侧同用一格提交）。 */
+function refFor(p: string, what: string): string {
   const env = process.env.CONV_AB_OLD_REF
   if (env) return env
-  const r = spawnSync('git', ['rev-list', '-1', 'HEAD', '--', OLD_NATIVE_SRC], {
+  const r = spawnSync('git', ['log', '--diff-filter=AM', '-1', '--format=%H', '--', p], {
     cwd: ROOT,
     encoding: 'utf8',
   })
   const ref = (r.stdout ?? '').trim()
   if (r.status !== 0 || !ref) {
-    console.error(`无法定位旧内核提交（git rev-list ${OLD_NATIVE_SRC}）`)
+    console.error(`无法定位${what}（git log --diff-filter=AM -- ${p}）`)
     process.exit(2)
   }
   return ref
@@ -132,24 +138,39 @@ const blob = new Float32Array(BLOB)
 }
 const in16 = fill(rng, IN_CH * SP, 2)
 
-function bench(fn: () => void): number {
-  let best = Number.POSITIVE_INFINITY
+/** 稳态计时：两侧**按轮交错**（同一轮先 A 后 B，逐轮交替），每侧取各轮最优。
+ *
+ * 为什么必须交错（2026-09-23 实测）：原先「先跑完 A 的所有轮次、再跑 B」时，同一份二进制
+ * 跨相位能差 ±4%（本机同时跑着其它东西 + 手机/节点的频率漂移），而这个量级**与要读的差异
+ * 同阶** ⇒ 会把「变体更慢 2%」读成「更快 2%」。交错后两侧共享同一段机器状态，噪声主要落进
+ * 比值以外的绝对值里。 */
+function benchPair(a: () => void, b: () => void): [number, number] {
+  let bestA = Number.POSITIVE_INFINITY
+  let bestB = Number.POSITIVE_INFINITY
   for (let r = 0; r < ROUNDS; r++) {
-    for (let i = 0; i < 8; i++) fn()
-    const t0 = performance.now()
-    for (let i = 0; i < ITERS; i++) fn()
-    best = Math.min(best, (performance.now() - t0) / ITERS)
+    for (let i = 0; i < 8; i++) {
+      a()
+      b()
+    }
+    let t = performance.now()
+    for (let i = 0; i < ITERS; i++) a()
+    bestA = Math.min(bestA, (performance.now() - t) / ITERS)
+    t = performance.now()
+    for (let i = 0; i < ITERS; i++) b()
+    bestB = Math.min(bestB, (performance.now() - t) / ITERS)
   }
-  return best
+  return [bestA, bestB]
 }
 
 /** 旧库直接指定：没有本地编译器（如 WSL 只有 gcc、节点机器没工具链）或要与**历史 prebuilt 产物**
  *  对齐时用。取法示例：`git show <ref>:src/nn/native/prebuilt/linux-x64/conv_feats_native.so > old.so`。 */
 const OLD_LIB_ENV = process.env.CONV_AB_OLD_LIB ?? ''
 
-const REF = oldRef()
+const REF = refFor(OLD_NATIVE_SRC, '旧 native 内核')
+const REF_WASM = refFor(OLD_WASM, '旧 wasm 产物')
 say(
-  `[env] ${process.platform}-${process.arch} · bun ${process.versions.bun} · 旧内核 @ ${REF}` +
+  `[env] ${process.platform}-${process.arch} · bun ${process.versions.bun} · 旧 native @ ${REF}` +
+    (REF_WASM === REF ? '' : ` · 旧 wasm @ ${REF_WASM}`) +
     (OLD_LIB_ENV ? ` · 旧库=env ${OLD_LIB_ENV}` : ''),
 )
 
@@ -228,10 +249,8 @@ const eqPooled = bytesOf(pOld).equals(bytesOf(pNew))
 const eqBufA = bytesOf(aOld).equals(bytesOf(aNew))
 say(`[native] abi old=${libOld.symbols.cf_abi()} new=${libNew.symbols.cf_abi()}`)
 say(`[native] bitexact pooled=${eqPooled} bufA=${eqBufA}`)
-const tOldN = bench(
+const [tOldN, tNewN] = benchPair(
   () => void libOld.symbols.cf_student_features(wb, ip, ffi.ptr(pOld), ffi.ptr(aOld)),
-)
-const tNewN = bench(
   () => void libNew.symbols.cf_student_features(wb, ip, ffi.ptr(pNew), ffi.ptr(aNew)),
 )
 say(
@@ -273,12 +292,12 @@ function loadNewWasm(): WasmSide {
 }
 
 function loadOldWasm(): WasmSide | null {
-  const r = spawnSync('git', ['show', `${REF}:${OLD_WASM}`], {
+  const r = spawnSync('git', ['show', `${REF_WASM}:${OLD_WASM}`], {
     cwd: ROOT,
     maxBuffer: 64 * 1024 * 1024,
   })
   if (r.status !== 0) {
-    console.warn(`[wasm-old] ${REF} 上无 ${OLD_WASM} ⇒ 跳过 wasm 对比`)
+    console.warn(`[wasm-old] ${REF_WASM} 上无 ${OLD_WASM} ⇒ 跳过 wasm 对比`)
     return null
   }
   const inst = new WebAssembly.Instance(new WebAssembly.Module(r.stdout))
@@ -369,8 +388,10 @@ for (const [an, ab] of sides) {
 }
 
 if (wasmOld) {
-  const tOldW = bench(() => wasmOld.feats())
-  const tNewW = bench(() => wasmNew.feats())
+  const [tOldW, tNewW] = benchPair(
+    () => wasmOld.feats(),
+    () => wasmNew.feats(),
+  )
   say(
     `[wasm] ms/forward old=${tOldW.toFixed(4)} new=${tNewW.toFixed(4)} speedup=${(tOldW / tNewW).toFixed(3)}x`,
   )

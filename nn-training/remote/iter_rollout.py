@@ -4,7 +4,7 @@ job kind = `iter` 的语义：**一整轮**上云。节点拿到的 payload 里�
 权重 + 可选 blob），shard 由本模块现场产出：
 
   argv（hub 用 `rl/cmd.build_rollout_cmd` 拼的、逐局一条，路径一律 job 目录内相对路径）
-    → 线程池 spawn `bun tools/sim/export-rl-rollout.ts …`（cwd = job 目录）
+    → 线程池跑 `bun tools/sim/export-rl-rollout.ts …`（cwd = TS 代码根）
     → 每局一个 `w{i}/` 目录 + `_rl_report.json`
     → **逐位**校验实产 shard 集 == 声明集（data_fp 两侧同函数）
     → `combine_reports` 聚合（与本机 rollout 同一个聚合函数）
@@ -13,6 +13,13 @@ job kind = `iter` 的语义：**一整轮**上云。节点拿到的 payload 里�
 覆盖 + D14 血缘的唯一拼装点；节点重算就等于在协议里复制一份它的知识。用同一个函数的
 输出，计划 §5.5① 的「节点 shard 与本机 rollout 逐字节一致」是**构造性质**——命令都
 一样，剩下的只有导出器本身的确定性。
+
+执行方式：默认走 **长驻 worker 池**（`remote/serve_pool.py`，`--serve` 协议，与
+`sampler-agent` 的 `/v1/task` 路径同一份契约）—— 逐局 spawn 时每局都要重付 bun 启动 +
+wasm 编译 + 首用 attestation×3 + 权重解析，本模块实测 **1.45–1.47×**
+（`docs/nn/runtime-opt.md` §22；agent 侧同一机制为 §20 的 1.59×）。
+池只覆盖「省掉每局启动」：单局任何不确定（超时/worker 死掉/ERR/取不到位）都**当场回退**
+一次性 `Popen`，路径与池不存在时逐字节相同 ⇒ 只慢不错、绝不丢局。关池：`NN_SERVE_POOL=0`。
 
 本模块**不碰 torch / 不碰 PPO**：rollout 完就把 shard 目录交回 `worker.run_job` 的既有
 PPO 链路（load_episodes → chunk_episodes → ppo_update）。
@@ -34,7 +41,7 @@ from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 # 也是 5s（用户口径「单局 >5s 肯定不正常」⇒ 超时原地重跑）、重试上限 ×4、最多 3 次、轮询 0.5s。
 # **一律通过模块属性读**（`game_watch.X`）而不是 `from ... import X`：import 会把值抄成第二份
 # 绑定，测试 patch 了 `game_watch` 的那一份、调用点却还在读旧绑定（两处不一致就是静默的错口径）。
-from remote import game_watch
+from remote import game_watch, serve_pool
 from remote.protocol import (
     ProtocolError,
     RetryableError,
@@ -253,8 +260,12 @@ def _run_one_game_with_retries(
     timeout_sec: float,
     log=lambda msg: None,
     explicit: bool = False,
+    pool: serve_pool.ServePool | None = None,
 ) -> tuple[float, int]:
     """一局最多跑 `GAME_MAX_ATTEMPTS` 次（超时/rc≠0 都原地重跑），返回 `(墙钟秒, 尝试次数)`。
+
+    `pool` 非空时**先试长驻 worker**（`§20/§21` 的 1.59×）：池里跑成 = 直接返回，否则立刻回退
+    下面的一次性 `Popen` —— 回退路径与本参数不存在时逐字节相同（池只可能让它更快）。
 
     为什么重试是**必须**的：单局的失败几乎总是环境性的（宿主机一阵饥饿、bun 起不来、
     半截写盘），而这一局是**确定性**的（种子在 argv 里）——重跑同一 argv 要么拿到同一份
@@ -273,6 +284,19 @@ def _run_one_game_with_retries(
         if attempt > 1:
             _clean_attempt(job_dir, argv)  # 上一次可能留了半截 shard（见 _clean_attempt）
             log(game_watch.retry_line("rollout", label, attempt, last, cap))
+        if pool is not None:
+            # 送进池的 argv 必须与一次性路径**逐条相同**（含 job 相对路径的绝化）——worker 的
+            # cwd 是 TS 代码根，而 `--out`/`--weights` 是相对 job 目录的（见 `_exec_argv`）。
+            # 漏了这一步会让 worker 拿着错的权重路径直接报错（只慢不错地回落，但池就白建了）。
+            served = pool.try_pool(
+                _exec_argv(argv, job_dir),
+                job_dir / out_dir / ROLLOUT_LOG_NAME,
+                cap,
+                label=label,
+                attempt=attempt,
+            )
+            if served is not None:
+                return served, attempt
         try:
             return (
                 _run_one_game(
@@ -367,6 +391,23 @@ def collect_reports(job_dir: Path, spec: dict) -> list[dict[str, Any]]:
     return reports
 
 
+def _make_pool(
+    bun: str, ts_dir: Path, argvs: list[list[str]], workers: int, log
+) -> serve_pool.ServePool | None:
+    """按 spec 决定要不要建池；建不了就返回 None（整轮退回逐局 spawn，行为同上云前）。
+
+    本函数只管 iter 特有的一条前置：整轮的 argv 指向**同一个**脚本（池按脚本建，混脚本就得混池
+    —— iter 不会混）；剩下的（总开关 + `--serve` 白名单）与 eval 腿共用
+    `serve_pool.make_pool` 同一个准入。
+    """
+    if not argvs:
+        return None
+    scripts = {str(a[0]) for a in argvs if a}
+    if len(scripts) != 1:
+        return None
+    return serve_pool.make_pool(bun, argvs[0][0], ts_dir, workers, log)
+
+
 def run_iter_rollout(
     job_dir: str | Path,
     spec: dict,
@@ -418,31 +459,51 @@ def run_iter_rollout(
             f"{game_watch.attempt_timeout_sec(timeout_sec, 2):g}s）"
         )
     )
+    # 长驻 worker 池：逐局 spawn 的启动成本（bun + wasm 编译 + attestation×3 + 权重解析）
+    # 每局重付一次，实测 1.59×（§20）。池不可用/跑挂都回退一次性路径 —— 只慢不错。
+    pool = _make_pool(bun, tsd, argvs, workers, log)
+    if pool is not None:
+        ready_n = pool.start()
+        if ready_n:
+            log(
+                f"kind=iter 长驻 worker 池：{ready_n}/{workers} 就绪（{argvs[0][0]}）——"
+                "逐局进程启动/权重解析只付一次，单局失败自动回退一次性 spawn"
+            )
+        else:
+            log("kind=iter 长驻 worker 池起不来 ⇒ 本轮全部走一次性 spawn")
+            pool.close()
+            pool = None
     game_secs: list[float] = [0.0] * len(argvs)
     game_attempts: list[int] = [1] * len(argvs)
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = {
-            ex.submit(
-                _run_one_game_with_retries,
-                bun,
-                argv,
-                jd,
-                tsd,
-                argv[argv.index("--out") + 1],
-                timeout_sec,
-                log,
-                explicit,
-            ): i
-            for i, argv in enumerate(argvs)
-        }
-        for done_n, fut in enumerate(as_completed(futs), 1):
-            i = futs[fut]
-            game_secs[i], game_attempts[i] = fut.result()  # 异常在 worker 侧统一处理
-            if done_n % 10 == 0 or done_n == len(argvs):
-                log(
-                    f"kind=iter rollout: {done_n}/{len(argvs)} games settled "
-                    f"({time.time() - t0:.0f}s)"
-                )
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futs = {
+                ex.submit(
+                    _run_one_game_with_retries,
+                    bun,
+                    argv,
+                    jd,
+                    tsd,
+                    argv[argv.index("--out") + 1],
+                    timeout_sec,
+                    log,
+                    explicit,
+                    pool,
+                ): i
+                for i, argv in enumerate(argvs)
+            }
+            for done_n, fut in enumerate(as_completed(futs), 1):
+                i = futs[fut]
+                game_secs[i], game_attempts[i] = fut.result()  # 异常在 worker 侧统一处理
+                if done_n % 10 == 0 or done_n == len(argvs):
+                    log(
+                        f"kind=iter rollout: {done_n}/{len(argvs)} games settled "
+                        f"({time.time() - t0:.0f}s)"
+                    )
+    finally:
+        if pool is not None:
+            log("kind=iter " + pool.summary())
+            pool.close()
     shard_dirs = verify_shards(jd, iter_expected_data_fp(spec))
     reports = collect_reports(jd, spec)
     report = combine_reports(reports)
@@ -477,4 +538,14 @@ def run_iter_rollout(
         "game_secs": game_secs,
         "bun": bun,
         "workers": workers,
+        # 池的诊断计数（不在 report 里：它要过线，节点本地的观测不该改 wire 形状）
+        "serve_pool": None
+        if pool is None
+        else {
+            "served": pool.served,
+            "spawned": pool.spawned,
+            "killed": pool.killed,
+            "fallback": pool.fallback,
+            "reasons": dict(pool.fallback_reasons),
+        },
     }

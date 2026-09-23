@@ -32,7 +32,7 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | [`docs/nn/experiments.md`](nn/experiments.md) | 课程腿判决 / 探针 / 负结果归档（含人类探针与 BC-ref 判死） | 32 |
 | [`docs/nn/engineering.md`](nn/engineering.md) | 测试纪律 · 子进程编码契约 · 门禁耗时 · 账本与 metrics schema · 语料指纹 | 19 |
 | [`docs/nn/console.md`](nn/console.md) | dashboard 侧：组件面 / 调度器视图 / 任务包与产物两条腿 / 回显 | 10 |
-| [`docs/nn/runtime-opt.md`](nn/runtime-opt.md) | rollout / eval 运行时：native 内核 · 并发口径 · 派发 · 单局看门狗 | 12 |
+| [`docs/nn/runtime-opt.md`](nn/runtime-opt.md) | rollout / eval 运行时：native 内核 · 并发口径 · 派发 · 单局看门狗 · 长驻池 | 22 |
 | [`docs/nn/tpu-perf.md`](nn/tpu-perf.md) | TPU / XLA：设备实测 · 单步耗诊断 · 编译缓存 · PPO 吞吐 | 8 |
 
 > **另：每篇多了一个 `决策正文归档` 节（2026-09-23）**。`DECISIONS.md` 同日瘦身，把那批
@@ -63,9 +63,10 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
    哈希身份，故未动；§126 经附录 A = `docs/nn/runtime-opt.md` §5。
 2. 形如 `§N.M` 且指向 **plan / DECISIONS / AGENTS** 的子引用（如 `accident.plan §4.1`、
    `AGENTS §16.6`）不是本档节号，一律未改。
-3. `src/nn/conv/conv-optimize.plan.md`（与重排后的内核同目录）里引的 `docs/nn.progress.md §140–§142`
-   **有意未改**：`src/nn/**` 在 node codeHash 集内，改注释会顶掉节点引擎哈希身份（同上面 1 的理由）；
-   旧号经附录 A 消解为 `docs/nn/runtime-opt.md` §9–§11。
+3. ~~`src/nn/conv/conv-optimize.plan.md` 里引的 §140–§142 有意未改~~ **已解决（2026-09-23）**：
+   该文档已 **`mv` 到 `plan/conv-optimize.plan.md`**（`plan/**` 在 codehash 排除清单里），
+   其内部引用同步重写为 `docs/nn/runtime-opt.md` §9–§11 ⇒ 现在这条例外**不再存在**。
+   背景与理由见 `docs/nn/runtime-opt.md` **§17**。
 
 ## 3. 现行未决事项（open threads）
 
@@ -93,6 +94,8 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 |---|---|---|---|
 | 7 | 真云机 `ts_code.zip` 通道未确认（现只有 real-bun 哨兵 + 打包门禁的间接证据） | `docs/nn/runtime-opt.md` §5 | 真云机跑一轮 |
 | 8 | 真节点上的 T2（预编译 native 库上传 / 节点本机编译）未验 | `docs/nn/runtime-opt.md` §4 | 代码路径已在，缺真机验证 |
+| 10 | **arm64 节点的内核吞吐已到顶**：四项循环重排在这类机器上只值 ≈+5%（FP-op 受限，贴着 61–69% 上限），而 FMA 上限值 **+32%** —— 要不要为此开 **new era**（改数值 ⇒ 权重/语料/基线全重做） | `docs/nn/runtime-opt.md` §14 §15 | 二选一并写明：① 走「减少 MAC 数」（缩网络/换结构）⇒ 另立条目；② 接受 FMA 新纪 ⇒ 按 `AGENTS §6.3b` 的三件套（DECISIONS + 60-seed 三难度基线 + golden 重冻）执行。**在此之前 arm64 侧不要再提循环重排的优化**（已无空间） |
+| 11 | ~~云机离线 eval 腿仍未入池~~ **已收尾**：池已接入 `run_cloud_eval` + `run_local_eval_game`（每轮一个池、轮末关；上限 `min(slots, 局数)`），实测 **1.19–1.39×**（24/48 局），逐局 `_eval_report.json` **逐字段相同**（`elapsedSec` 除外） | `docs/nn/runtime-opt.md` §22.5 | ✅ 已验：`tests/test_offline_eval_pool.py`（接线 + 执行面，8 用例）+ `tools/perf/bench-eval-pool.py` 真机 A/B |
 
 ### 3.4 控制台
 
@@ -114,7 +117,8 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 
 > 旧号取自拆分前 `docs/nn.progress.md` 的 `## §N`（拆分时 155 行 = 155 个旧节）。
 > **拆分后新增**（上游 conv-optimize 批次，本索引收录并已归位）：§140–§143 与**重号 §131 的第二条**
-> （TPU ragged tail 收尾）—— 共 5 条，见下表末尾五行。
+> （TPU ragged tail 收尾）—— 共 5 条，见下表末尾五行；另有 **§144/§145**（arm64 计时与逐阶段归因）
+> 在拆分时尚未归档，后按主题文档局部编号补入 ⇒ 共 7 条，见下表末尾。
 > **重号说明**：拆分前有 18 个旧号各对应两个节（两条并行写入线合并所致）——
 > **§56、§108–§120、§127–§130、§131**；下表这些号各占两行，以标题区分。
 > 每篇主题文档末尾也各自带一份本文件范围的对照（`<!-- OLD-NUMBER-MAP -->` 之后）。
@@ -281,3 +285,5 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | §141 | docs/nn/runtime-opt.md §10 | goal/intent 导出器入池 + `--serve` 协议收敛（`tools/sim/serve-loop.ts`，2026-09-23） |
 | §142 | docs/nn/runtime-opt.md §11 | 卷积代码全部收进 `src/nn/conv/**` + wasm 产物可重现（2026-09-23） |
 | §143 | docs/nn/runtime-opt.md §12 | 端到端实测：内核优化在一局 rollout 里的确切倍率（2026-09-23） |
+| §144 | docs/nn/runtime-opt.md §14 | arm64 实机计时 + 逐项归因：无负项、零回落，但 x64 的 +44% 不迁移（2026-09-23） |
+| §145 | docs/nn/runtime-opt.md §15 | arm64 逐阶段归因：6.4 ms 花在哪 + 为什么四项不迁移（FMA 上限实验）（2026-09-23） |

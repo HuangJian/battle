@@ -2,7 +2,8 @@
 
 > **落地状态（2026-09-23）：Stage 1–4 全部落地**（内核四项 + 单源双目标 + 目录重组 + goal/intent 入池）——
 > 本批提交 = `git log --oneline -- src/nn/conv` 的首条（标题含 `plan conv-optimize`；**本文不写死 hash**，
-> 免得 amend 后自引用过期）。**唯一未完成项 = §0.3 最后一条：arm64 实机计时**（本机只有 x64；复跑命令见 §11.4）。
+> 免得 amend 后自引用过期）。**§0.3 已全部勾完** —— arm64（Redmi K30 Pro · proot）实机计时 + 逐项归因也已跑完：
+> 整批 **≈+5%**（wasm **1.28–1.30×**）、`pw8`/`nog3` ≈1.00 ⇒ **无一项为负、无需回落**，但 x64 的 +44% 不迁移（§11.4）。
 > 本文下文提到的 `src/nn/native/**`、`src/nn/wasm/**` 是**重组前的路径**；最终布局全在 `src/nn/conv/**`
 > （`conv.c` 单源 · `conv_native.h`/`conv_wasm.h` · `conv.ts`/`conv_native_adapter.ts`/`conv_wasm_adapter.ts`/
 > `conv_ts.ts` · `native-prebuilt.ts` 分发矩阵 · `prebuilt/**`）。
@@ -12,8 +13,12 @@
 > ⚠ 上面是**内核**口径；**端到端同日补测**（真导出器，同 stage/seed/权重，唯一变量 = 内核二进制）：
 > 生产形态 `--max-ticks 12900 --seeds 0-3` = `4275 → 2897 ms` = **1.48×**（扣启动 1.49–1.52×）；
 > 定长 4×2500 = **1.40×** · 单局 494 决策 = **1.30×** —— 三档差异来自每进程固定成本的摊薄比例，详见 §11.2。
-> 实测/门禁/偏差的完整记录在 §11；`docs/nn.progress.md` §140–§142 是同日流水账；
-> 内核 A/B 探针 = `bun tools/perf/conv-ab.ts`（`CONV_AB_OLD_LIB` 可指向历史 prebuilt 产物）。
+> 实测/门禁/偏差的完整记录在 §11；**本文档现址 = `plan/conv-optimize.plan.md`**
+> （2026-09-23 从 `src/nn/conv/` 移出：`src/nn/**` 在 node codeHash 集内、F3 过滤不排除 `.md`
+> ⇒ 每改一次本文都会触发一次节点升级波；`plan/**` 在排除清单里）。
+> 同日流水账 = `docs/nn/runtime-opt.md` §9–§11（拆分前的旧号 §140–§142）；
+> 内核 A/B 探针 = `bun tools/perf/conv-ab.ts`（`CONV_AB_OLD_LIB` 可指向历史 prebuilt 产物）；
+> **逐项归因**（「这一项在我的机器上值多少」）= `bun tools/perf/kernel-variants.ts` 生成变体库再拿探针对拍（§11.4）。
 
 > **本文档是交给实现方的交接件。** 读者没有参与过调研，因此每一处结论都附了证据与复跑方式；
 > 每一处「已否决」都写明**为什么不要再试**（有实测数字）。
@@ -61,7 +66,8 @@
 - [x] 一局 rollout 的 **npy sha256 与现役库对比** —— ✅ native 路径 vs `NN_NATIVE=0`（wasm 路径）逐字节相同，仅 manifest 的 `feat` 字段不同
 - [x] eval 输出**逐字段相同**，且单局墙钟下降 —— ✅ 8 轮交错 min/median `494/504 → 470/485` ⇒ **−19 ms/局**
 - [x] 四方 memcmp（native 旧/新 × wasm 旧/新）—— ✅ 全等（`bun tools/perf/conv-ab.ts`）
-- [ ] **arm64 实机计时**（a95/a96 Termux + mac）：证明不慢（attestation 只保证**正确**）← **唯一未完项**，命令见 §11.4
+- [x] **arm64 实机计时 + 逐项归因**（Redmi K30 Pro · proot/Ubuntu，2026-09-23）：整批 **≈+5%**（钉单核 best-of-N：1.017/1.054/1.057/1.061）、
+  wasm **1.28–1.30×**；`pw8`≈1.00 · `nog3`≈1.01 ⇒ **无一项为负**（**不回退、不拆三档**），但 x64 的 +44% 不迁移到 NEON（§11.4）
 - [x] 改动记进 `.workbuddy/memory/YYYY-MM-DD.md`；若出现"决策"级取舍再写 `DECISIONS.md` —— ✅ `DECISIONS.md §2026-09-23-goalnn-conv-single-source`
 
 ### 0.4 硬性前置 / 阻塞
@@ -887,7 +893,7 @@ git log -1 --pretty=fuller          # 每次都验证提交真的落下了
 ```
 - **绝不** `git stash`（任何子命令）、**绝不** `git push`（推送是人的事）。
 - 重命名/删除用文件系统 `mv`/`rm`，**不要** `git mv`/`git rm`。
-- **绝不** `git add` 未跟踪的 `*.md`。本文档本身也不要 add。
+- **绝不** `git add` 未跟踪的 `*.md`（本文档已入库：用户明确要求 ⇒ §5.8 的例外；2026-09-23 起住 `plan/`）。
 
 ### 6.4 本项目特有的等价性验证（**必做**）
 
@@ -1078,7 +1084,9 @@ CF_SP = 676 = 84×8 + 4  ⇒ pw 的 8px 主块有 4 像素余数（**必须保�
 | `tools/sim/export-rl-rollout.ts` | per-tick rollout（x20 课程走这条） |
 | `tools/sim/export-goal-rollout.ts` / `export-intent-rollout.ts` | goal / intent 模式（**已入池**，见 §4.6 / §11.1） |
 | `tools/sim/serve-loop.ts` | `--serve` 长驻协议的**唯一实现**（四个导出器共用） |
-| `tools/perf/conv-ab.ts` | 内核 A/B 探针（旧 vs 新四方 memcmp + 稳态计时；`CONV_AB_OLD_LIB` 指定旧库） |
+| `tools/perf/conv-ab.ts` | 内核 A/B 探针（旧 vs 新四方 memcmp + **逐轮交错**稳态计时；`CONV_AB_OLD_LIB` 指定旧库） |
+| `tools/perf/kernel-variants.ts` | **逐项归因**：从现役单源派生 `ctl`/`pw8`/`nog3` 变体库（配合上面的探针；见 §11.4） |
+| `tools/perf/kernel-phases.ts` | **逐阶段归因**：插桩 `cntvct_el0`/`rdtsc` 量 pad3/conv3/pad5/dw/pw/GAP 的 µs 与 GMAC/s（见 §11.6） |
 | `tools/sim/perf-cmp-rollout.ts` | wasm 内核 A/B（逐字节 + 性能） |
 | `plan/obs-schema-v3.plan.md §3.5` | 「同步链（13+ 处）」先例 —— **改内核前必读** |
 
@@ -1105,7 +1113,8 @@ CF_SP = 676 = 84×8 + 4  ⇒ pw 的 8px 主块有 4 像素余数（**必须保�
 ## 11. 落地记录与偏差（2026-09-23，实现方回报）
 
 > 本节是**结果**；上面 §0–§10 是调研与方案（**勿据本文正文的旧路径找文件** —— 现址见 §9 表与 §11.5）。
-> 同日流水账：`docs/nn.progress.md` §140（内核 + 重组）· §141（goal/intent 入池）· §142（TS 孪生/矩阵移入 + wasm 可重现 + WSL 实测）。
+> 同日流水账：`docs/nn/runtime-opt.md` §9（内核 + 重组）· §10（goal/intent 入池）· §11（TS 孪生/矩阵移入 + wasm 可重现 + WSL 实测）
+> （= 拆分前的旧号 §140–§142）。
 > 决策：`DECISIONS.md §2026-09-23-goalnn-conv-single-source`。提交：见 `git log --oneline -- src/nn/conv`
 > （整批 51 files，+3544 / −955）。
 
@@ -1115,7 +1124,7 @@ CF_SP = 676 = 84×8 + 4  ⇒ pw 的 8px 主块有 4 像素余数（**必须保�
 |---|---|---|
 | 0 | 前置检查（clang 20 + lld） | ✅ clang 20.1.0 + lld，`--cross` 全程可用 |
 | 1 | 四项循环重排（先只改 native） | ✅ 四项全做，但**与 Stage 3 同批**（见偏差 ①） |
-| 2 | 重出 6 目标 prebuilt + 跨平台确认 | ✅ 6 native + **wasm32 一并进门禁**；**arm64 实机计时未做**（本机无 arm64，见 §11.4） |
+| 2 | 重出 6 目标 prebuilt + 跨平台确认 | ✅ 6 native + **wasm32 一并进门禁**；**arm64 实机计时 + 逐项归因已做** = 整批 **≈+5%**、wasm **1.28–1.30×**、`pw8`/`nog3`≈1.00（§11.4） |
 | 3 | 单源双目标（`CF_PW_PX` 两档） | ✅ 按拍板方案 (b)：`conv.c` 单源、`CF_PW_PX` = wasm 8 / 其余 16；wasm 侧**不再手写 intrinsics** |
 | 4 | goal/intent 入池 | ✅ 两个导出器加 `--serve` 并入 `PERSIST_SERVE_ENTRIES`；协议收敛到 `tools/sim/serve-loop.ts` |
 | 额外 | —— | ① `infer.ts` 的 TS 卷积实现抽成 `conv_ts.ts`；② `native-prebuilt.ts` 移入 `src/nn/conv/`；③ **wasm 产物可重现**（`-Wl,--strip-all`，见偏差 ④） |
@@ -1127,7 +1136,10 @@ CF_SP = 676 = 84×8 + 4  ⇒ pw 的 8px 主块有 4 像素余数（**必须保�
 | win32-x64（bun 1.4.2） | native（prebuilt AVX1） | 2.31–2.39 ms | **1.64–1.73 ms** | **1.38–1.46×** |
 | win32-x64 | wasm（JSC） | 6.03–6.22 ms | **3.59–3.63 ms** | **1.67–1.71×** |
 | linux-x64（WSL2，Ryzen 7 5800H） | native | 2.37–2.47 ms | **1.53–1.55 ms** | **1.55–1.59×** |
+| **darwin-x64**（macOS） | native | ——（只记了倍率） | —— | **1.408×** |
 | linux-x64（WSL2） | wasm（JSC） | 4.34–4.50 ms | **2.59–2.63 ms** | **1.67–1.71×** |
+| **linux-arm64**（K30 Pro · proot/Ubuntu，bun 1.4.2） | native（prebuilt，NEON） | 6.70–6.87 ms | **6.38–6.59 ms** | **≈1.05×**（钉单核 best-of-N，n=4；不钉核时 0.99–1.10，见 §11.4） |
+| linux-arm64（同上） | wasm（JSC on Android） | 9.44–9.53 ms | **7.29–7.42 ms** | **1.28–1.30×**（n=13，±0.5%） |
 
 * 复跑：仓根 `bun tools/perf/conv-ab.ts 80 5`。**没有本地编译器**的机器（WSL 只有 gcc、arm64 节点）
   先取历史旧库再用 `CONV_AB_OLD_LIB` 指进去：
@@ -1138,8 +1150,14 @@ CF_SP = 676 = 84×8 + 4  ⇒ pw 的 8px 主块有 4 像素余数（**必须保�
 * 口径提醒：基线取「历史 prebuilt 产物」还是「现编同一份源码」本身有 ~3% 差（win32：1.378× vs 1.40–1.46×）；
   另有一条独立通道（python3 ctypes，无 ffi 调用开销）给出 linux native **1.42–1.46×**。
   **结论取：native ≈1.4×、wasm ≈1.7×。**
+* **darwin-x64 与 x64 同族同带**（实机 1.408×，补齐上表最后一格；流水账见 `docs/nn/runtime-opt.md` §16）
+  ⇒ **决定倍率的是 ISA 家族，不是 OS/工具链** ⇒ 后续按 x64 / arm64 两类评估即可。
 * **wasm 的 1.7× 是本批最大的意外收获**：`4oc×8px` 纯 C 在 wasm32 上**快过**原手写 `wasm_simd128`
   intrinsics ⇒ §4.2 担心的「单源可能要牺牲 wasm」不成立，**单源是纯赚**。
+* **arm64 与 x64 差一个数量级**（≈1.05× vs 1.40–1.59×）——已逐项量完：**不是某一项拖后腿**（`pw8`≈1.00、
+  `nog3`≈1.01，见 §11.4），而是这四项的机制（取数端口/寄存器平铺）在 NEON + 这台机器的**微架构上就不值钱**。
+  绝对耗时 6.4–6.9 ms/forward（x64 1.53–1.64）。⇒ 有 arm64 节点的课程调优**不要把 x64 的提速当成可用产能**。
+  （早先 1.078/1.106 那两轮是未钉核的噪声带，已归入 §11.4。）
 
 **端到端（同日补测）—— 真导出器 `export-rl-rollout.ts`，唯一变量 = 内核二进制**
 
@@ -1174,18 +1192,66 @@ CF_SP = 676 = 84×8 + 4  ⇒ pw 的 8px 主块有 4 像素余数（**必须保�
 | ⑥ | §4.6 预估 goal/intent 入池 15–19% | 每局固定开销实测 **spawn 176/172 ms → worker 22/19 ms**（8.15×/8.93×，120 tick 瘦身局）；生产局 ~1200 tick，占比落在计划的 15–19% 量级 |
 | ⑦ | §7.4 建议把 harness 放进 `tools/perf/` 提交（避开节点升级波） | 已做：只提交 A/B 探针 `tools/perf/conv-ab.ts`（`tools/perf/` 不在 codehash 集内）；其余 `tmp/perf/**` 调研台架仍留本地，按 §7.1 清单可重建 |
 | ⑧ | §4.6 的「过时注释」缺口（`sampler-agent.ts` 写 --persist 默认关） | 未单独改（不在本批范围）；`PERSIST_SERVE_ENTRIES` 现为 4 条（rl / eval / goal / intent），并有静态同规测试 `tests/export-goal-intent-serve.test.ts` 钉住「池里每个条目都真的走 `runServe`」 |
+| ⑨ | §2.1 记 pw `8px→16px` 单层再快 10–14%（整管 68.3%）；§2.2 记 conv3 4oc 分组 −2.7~−4.4%（整管 96–99%） | **在真内核里重测**（交错计时 + 变体库，x64，见 §11.4）：`pw8` = **1.07×**（16px 值 ~6%）、`nog3` = **1.14×** —— **conv3 分组的实际价值远大于 §2.2 的台架口径**。两组均同向，但都在**内联进 `cf_student_features` 的真产物**里量的 ⇒ 以后引用**以 `tools/perf/kernel-variants.ts` 的读数为准**，§2.1/§2.2 的旧数字视为「tmp 台架口径」 |
+| ⑩ | 计划没提 | **探针自身两处读数缺陷**（arm64 第一次真机运行暴露）：① 旧侧定位在重组提交进历史后命中**删除提交** ⇒ wasm 对比被静默跳过（`[wasm-old] … ⇒ 跳过`）；② 计时不分轮交错 ⇒ 同一二进制跨相位 ±4%。两者已修（`tools/perf/conv-ab.ts`） |
 
-### 11.4 唯一未完成项：arm64 实机计时（不可跳过）
+### 11.4 arm64 实机计时 + 逐项归因（**已做**，2026-09-23）：**没有负项，但 +44% 不迁移**
 
-attestation 只保证**正确**、不保证**不变慢**（先例 `8oc×8px`：AVX1 快 1.4× / AVX2 慢 2.9×）。
-**风险集中在 `conv3` 的 4oc 分组**（arm64 栈引用 18→102、mem +14%）；若变慢 ⇒ **只回退这一项**，其余三项保留；
-必要时把 `CF_PW_PX` 拆三档（给 arm64 单列一个 `#elif defined(__aarch64__)`）—— **不要**为了"统一"回退 native。
+> 流水账（含测量纪律与探针两处缺陷）：`docs/nn/runtime-opt.md` **§14**。
+
+**环境**：Redmi K30 Pro（M2002J9E · Snapdragon 865：4×1.8G 小核 + 大核 2.4G）· Android + **proot/Ubuntu** · bun 1.4.2。
+对比的库：old = git 里那份历史 prebuilt（`/tmp/old.so`，sha256 `d3f18b2e…`，7664B，**已当场核对**）；
+new = 仓库里的 `prebuilt/linux-arm64/conv_native.so`。
+
+**结论（一句话）**：四项**没有任何一项在 arm64 上是负的** ⇒ **不回退、也不拆三档**；
+但这台机器上整批只值 **≈+5%**，x64 的 **+44%**（wasm 1.7×）**不迁移**到 NEON（wasm 侧 1.28–1.30×）。
+
+| 对比（钉单核 `taskset -c 7` + best-of-N，100×6 除注明外） | 旧 | 新 | 比值 | n |
+|---|---|---|---|---|
+| **整批**（历史 prebuilt vs 现役） | 6.70–6.87 ms | 6.38–6.59 ms | **1.017 / 1.054 / 1.057 / 1.061** ⇒ **≈1.05×** | 4 |
+| `pw8` 变体（16px vs 8px） | 6.43–6.48 | 6.28–6.48 | **1.003 / 0.993 / 1.008** ⇒ **≈1.00** | 3 |
+| `nog3` 变体（conv3 分组 vs 展开） | 6.48–6.53 | 6.39–6.64 | **1.014 / 0.983 / 1.045** ⇒ **≈1.01** | 3 |
+| `ctl`（**与现役逐字节相同**的库） | 6.38 | 6.27 | **1.017** | 1 |
+| **wasm**（同一份源码的 wasm32 目标） | 9.44–9.53 | **7.29–7.42** | **1.275–1.295**（±0.5%） | 13 |
+
+* **判读**：`ctl`（**逐字节相同**的两份库）都能量出 1.017 ⇒ 这台机器 native 侧的**单次噪声 ≈ ±2%**；
+  `pw8`/`nog3` 与 1.00 不可区分 ⇒ 16px 在 NEON 上既不亏也不赚（**不要拆三档**），conv3 分组在这台机上约中性
+  （x64 是 1.14× ⇒ **保留**：arm64 不亏而 x64 大赚）。唯一稳定可见的是 wasm 的 **1.28–1.30×**。
+* **方法教训（引用 arm64 数字必须带）**：同一台机器**不钉核**时逐次比值能从 **0.988 冲到 1.096**（±5%，
+  与要读的效应同阶）；钉在**单个大核**（内核本来就单线程）+ best-of-N 后收敛到 ±2%。
+* 早先那一轮（未钉核）报出的 1.078/1.106 落在这条噪声带内 —— 当时「只有 x64 的一半」**方向对、数值不可引用**。
+* **「6.4 ms 到底花在哪」+「为什么这四项不迁移」已单独量完 ⇒ §11.6**（逐阶段归因 + FMA 上限实验）。
+
+**顺带修掉探针的两个读数缺陷（都影响结论，2026-09-23）**
+
+| # | 症状 | 根因 | 修法 |
+|---|---|---|---|
+| ① | 重组提交进历史后**静默跳过 wasm 对比** | 旧侧定位用 `git rev-list -1 HEAD -- <旧路径>`，而 **路径限制的历史把「删除该路径的提交」也算作一次改动** ⇒ 命中的正是删除提交（其上文件已不存在） | 换成 `git log --diff-filter=AM -1 -- <路径>`，且 native 源码与 wasm 产物**各自定位**（实测两者最后一次增改不同提交：`6ed7f11f` vs `7664673e`） |
+| ② | 同一份二进制跨相位差 **±4%**（与要读的差异同阶 ⇒ 会把结论读反） | 原计时「先跑完 A 的所有轮次、再跑 B」—— 频率漂移/后台负载整段偏到一侧 | 改为**逐轮交错 A/B**（`benchPair`），每侧取各轮最优。修后 x64 复测重复性 **≤1.5%** |
+
+**逐项归因的手段（已入库；下面是同一套手段在 x64 上的读数，作对照）**
+
+`bun tools/perf/kernel-variants.ts` 从**现役单源**派生「单项关闭/单档」的变体库（断言过的文本替换；
+conv3 的优化前实现从 git 取，不手抄）。变体**不需要探针加接口** —— old 侧本来就能指任意库：
 
 ```bash
-# a95/a96 Termux 或 mac（无编译器也行：基线用库内历史产物）
-git show 6ed7f11f:src/nn/native/prebuilt/linux-arm64/conv_feats_native.so > /tmp/old.so   # mac: darwin-arm64/…dylib
-CONV_AB_OLD_LIB=/tmp/old.so bun tools/perf/conv-ab.ts 100 4
-# 判据：末行 [verdict] bitexact=OK，且 speedup 与 x64 同号（≥1.0）
+bun tools/perf/kernel-variants.ts     # → tmp/kernel-variants/{ctl,pw8,nog3}/conv_native-<target>.*
+# 把目标平台的库拷到机器上（arm64 取 -linux-arm64.so），每份跑一次探针：
+CONV_AB_OLD_LIB=<变体库> bun tools/perf/conv-ab.ts 100 4
+```
+
+| 变体 | 改动 | x64 实测（交错 60×4 ×2 轮） | 读法 |
+|---|---|---|---|
+| `ctl` | **一字不改** | 1.016 / 0.992 ⇒ **≈1.00** | 偏置对照 = 零；arm64 上它与入库产物**逐字节相同**（`0909fd03…`，9288B）⇒ 变体只在想改的那一处不同 |
+| `pw8` | `CF_PW_PX 16 → 8` | 1.084 / 1.059 ⇒ **≈1.07** | 16px 在 x64 上比 8px 真快 ~6%（与 §2.1 预估同向，见偏差 ⑨） |
+| `nog3` | `conv3` 4oc 分组 → 展开的逐 oc | 1.148 / 1.142 ⇒ **≈1.14** | **去掉分组要慢 14%**（远大于 §2.2 记的 2.7–4.4%，见偏差 ⑨） |
+
+**arm64 上的读法**（已按此跑完）：`ctl ≈ 1.00` ✓（1.017）· `pw8` = 1.00 ⇒ **16px 保留，不拆三档** ·
+`nog3` = 1.01 ⇒ 4oc 分组**保留**（x64 上它是 1.14×）。⇒ **本项 DoD 结案：无回落、无分档**。
+在 arm64 上复跑（库在 `tmp/kernel-variants/*/conv_native-linux-arm64.so`，**务必钉核**）：
+
+```bash
+taskset -c 7 bun tools/perf/conv-ab.ts 100 6        # 100 iters × 6 rounds（best-of-6）
 ```
 
 ### 11.5 最终文件地图（= §9 现址表的目录视图）
@@ -1203,7 +1269,9 @@ src/nn/conv/
   native-prebuilt.ts     6+1 目标矩阵 / flags / ABI（分发物的单一事实来源）
   prebuilt/{win32,linux,darwin}-{x64,arm64}/conv_native.*
   prebuilt/wasm/conv.wasm + prebuilt/manifest.json
-  conv-optimize.plan.md  本文
+
+本文档：plan/conv-optimize.plan.md —— **刻意不放 `src/nn/` 下**（避开 codehash / 节点升级波）
+
 tools/agent/native-build.ts   --cross / --wasm / --check-prebuilt
 tools/perf/conv-ab.ts         内核 A/B 探针（旧 vs 新，四方 memcmp + 计时）
 tools/sim/serve-loop.ts       --serve 长驻协议唯一实现（rl / eval / goal / intent 共用）
@@ -1212,3 +1280,53 @@ tools/sim/serve-loop.ts       --serve 长驻协议唯一实现（rl / eval / goa
 ---
 
 *本节之后的任何内核改动都要重跑 §6.4 的等价性验证与 §11.2 的探针；**若动了累加次序，那是一次 new era**（新语料 + 重训），不在本文范围内。*
+
+### 11.6 arm64 逐阶段归因：那 6.4 ms 花在哪，以及**为什么四项不迁移**（`tools/perf/kernel-phases.ts`）
+
+> 流水账（相位表 + FMA 上限实验 + 未决事项）：`docs/nn/runtime-opt.md` **§15**。
+
+**方法**：把计时插桩**注入 `conv.c` 的一份副本**（断言过的文本替换；生产源码一字未改），
+各阶段用 aarch64 `cntvct_el0`（19.2 MHz）/ x86 `rdtsc` 取时；插桩库与生产库**逐字节同输出**（台架默认对拍，x64 上已验）。
+
+| 阶段 | x64 µs | x64 占比 | x64 GMAC/s | arm64 µs | arm64 占比 | arm64 GMAC/s | 两边倍差 |
+|---|---|---|---|---|---|---|---|
+| total | 1605 | 100% | 23.6 | **6463** | 100% | 5.85 | 4.0× |
+| pad3 | 2.1 | 0.1% | — | 6.1 | 0.1% | — | 2.9× |
+| conv3 | 343 | 21.4% | 20.4 | 1378 | 21.3% | **5.1** | 4.0× |
+| pad5×8 | 36 | 2.2% | — | 146 | 2.3% | — | 4.0× |
+| dw×8 | 594 | 37.0% | 14.6 | 1516 | 23.5% | **5.7** | 2.6× |
+| pw×8 | 599 | 37.3% | **37.0** | 3377 | **52.3%** | **6.6** | **5.6×** |
+| GAP | 30 | 1.9% | — | 36 | 0.6% | — | 1.2× |
+
+（两侧都是**优化后**的内核；x64 = win32-x64 AVX1 本机，arm64 = K30 Pro/proot `taskset -c 7`。
+对照 §1.3 的**优化前** x64 口径：pw 54.2% (17.5–19.2 GMAC/s) · conv3 26.1% (18.3) · dw 21.1% (16.9) —— pw 的 GMAC/s 翻了一倍，这正是 x64 +44% 的来源。）
+
+**① arm64 已经贴近自己的 FP 吞吐上限。** A77 只有 2 条 128-bit FP 管线（4 lane/条）且 mul 与 add **共用**它们；
+`-ffp-contract=off` 下 1 个 MAC = 2 个 FP op ⇒ 非 FMA 上限 ≈ 4 MAC/cycle × 2.4 GHz ≈ **9.6 GMAC/s**。
+实测整体 **5.85**、pw **6.6** GMAC/s ⇒ **61–69% 上限**。而 x64（Zen3）有 4 条 FP 管线且 mul/add 分开
+（非 FMA 也能源源 16 MAC/cycle；实测上限 52.4 GMAC/s，§1.3），它的短板是**取数端口**（2 个，§1.5）——
+所以「少取数」的四项在 x64 值 **+44%**、在 arm64 只剩 **+5%**。**不是某项拖后腿，是这台机器没有那个瓶颈可治。**
+
+**② FMA 是 arm64 唯一的大杠杆，但被逐位契约挡着。** 同机量上限（`KP_EXTRA_FLAGS=-ffp-contract=fast`，
+**故意破契约、只量上限、不是可用配置**）：
+
+| | total | conv3 | dw | pw |
+|---|---|---|---|---|
+| arm64 无 FMA | 6463 µs | 5.1 | 5.7 | 6.6 |
+| **arm64 +FMA** | **4893 µs（+32%）** | 6.8 | 7.0 | **9.1** |
+| x64 无 FMA | 1605 µs | 20.4 | 14.6 | 37.0 |
+| x64 +AVX2/FMA | **1414 µs（+14%）** | 20.5 | 17.7 | 43.0 |
+
+⇒ **同一个杠杆在 arm64 上值 +32%、在 x64 上只值 +14%**（§3.4 当年记的 ~5% 是**优化前**代码的口径）。
+但开 FMA = 改数值 = **new era**（权重/语料/基线全重做，§0.5 红线 ①）——**不是本批能动的**。
+记在这里是给下一个 agent 的判据：**arm64 节点想再上一个台阶，只剩「减少 MAC 数」或「接受 FMA 新纪」两条路**；
+继续抠循环重排没有空间（61–69% 已贴着上限）。相反对 x64，取数侧的重排仍是有效手段。
+
+**复跑**：
+
+```bash
+bun tools/perf/kernel-phases.ts 300                       # 本机（x64）：应与上表一致
+bun tools/perf/kernel-phases.ts --target linux-arm64      # 交叉构建 → 拷到 arm64 机器
+KP_EXTRA_FLAGS=-ffp-contract=fast bun tools/perf/kernel-phases.ts --target linux-arm64   # FMA 上限实验
+# 目标机器上（**必须钉核**）：taskset -c 7 bun tools/perf/kernel-phases.ts --lib /tmp/kernel-phases.so 300
+```

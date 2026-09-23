@@ -21,6 +21,7 @@ from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 # 单局看门狗口径：**一律通过模块属性读**（`game_watch.X`）——import 会把值抄成第二份绑定，
 # 测试 patch 了 game_watch 那份、调用点还在读旧绑定就是静默的错口径。
 from remote import game_watch
+from remote.serve_pool import EVAL_SCRIPT as _EVAL_SCRIPT
 from rl.log import log
 
 REPO_ROOT = Path(__file__).resolve().parents[2]  # 仓库根 battle2（rl/ 上溯 3 层，修正 2026-09-03）
@@ -584,6 +585,10 @@ def run_local_eval_game(
     log_fn: Any = None,
     # 这是第几次尝试（重试由调用方负责，见 `remote/offline_eval`）——只进告警行。
     attempt: int = 1,
+    # 长驻 worker 池（云端离线评估传，见 `remote/offline_eval.run_cloud_eval`）：非空时**先试池**，
+    # 池没能服务这一局就回退下面的一次性 `bun`（行为与池不存在时相同）。本机/控制台路径传 None，
+    # 它们走节点集群/本机自己的派发（池是节点侧执行面的事）。
+    pool: Any = None,
 ) -> dict:
     """本机直跑一局贪心评估（与节点 agent 同一 runner / 同一报告 schema）。
 
@@ -595,7 +600,8 @@ def run_local_eval_game(
     out_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
         bun,
-        "tools/sim/export-eval-game.ts",
+        # 单一来源（`remote/serve_pool.EVAL_SCRIPT`）：池按脚本名建，两侧写两份就等着谁先漂
+        _EVAL_SCRIPT,
         "--weights",
         weights_snapshot,
         "--out",
@@ -626,15 +632,36 @@ def run_local_eval_game(
     if replay_dir:
         cmd += ["--replay", replay_dir]
     t0 = time.time()
-    proc = run_eval_runner_capture(
-        cmd,
-        timeout_sec,
-        cwd=cwd,
-        label=game_watch.game_label(stage, seed),
-        log_fn=log_fn,
-        kind="eval",
-        attempt=attempt,
-    )
+    lab = game_watch.game_label(stage, seed)
+    # 长驻池优先（§22.7）：与一次性同行径的 argv、同样的硬顶与告警口径；池没能服务（超时/
+    # ERR/worker 死掉/没槽位…）就**当场回退**下面的 `run_eval_runner_capture` —— 只慢不错。
+    pooled = None
+    if pool is not None:
+        # `cmd[1:]`（去掉 bun 本身）：池的任务口径与 iter 腿逐字相同 —— 送进去的 argv 都以
+        # **导出器脚本**开头（`[script, …args]`），池内部再去掉脚本路径把 args 写进 stdin。
+        pooled = pool.try_capture(
+            cmd[1:],
+            timeout_sec,
+            label=lab,
+            attempt=attempt,
+            kind="eval",
+            where=str(out_dir),
+        )
+    if pooled is not None:
+        _sec, lines = pooled
+        proc: subprocess.CompletedProcess[str] = subprocess.CompletedProcess(
+            cmd, 0, "\n".join(lines), ""
+        )
+    else:
+        proc = run_eval_runner_capture(
+            cmd,
+            timeout_sec,
+            cwd=cwd,
+            label=lab,
+            log_fn=log_fn,
+            kind="eval",
+            attempt=attempt,
+        )
     if proc.returncode != 0:
         raise RuntimeError(f"rc={proc.returncode} ({(proc.stderr or proc.stdout or '')[-160:]})")
     # json.loads 返回 Any；_eval_report.json 契约固定为 dict。

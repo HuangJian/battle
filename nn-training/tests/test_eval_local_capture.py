@@ -51,7 +51,11 @@ def test_capture_helper_is_what_the_runner_uses() -> None:
     )
     # 调用点带 cwd（云机离线评估要跑在 TS 树根上）+ 慢局告警的身份/落点（2026-09-22）
     assert "proc = run_eval_runner_capture(" in src
-    assert "label=game_watch.game_label(stage, seed)" in src
+    assert "label=lab" in src
+    assert "lab = game_watch.game_label(stage, seed)" in src
+    # 长驻池优先、一次性兜底（`docs/nn/runtime-opt.md` §22.7）：顺序在源码里就得看得见
+    # （池只可能更快：它拿不到就当场回退下面这条路，行为与池不存在时相同）。
+    assert src.index("pool.try_capture(") < src.index("proc = run_eval_runner_capture(")
     # 看门狗口径一律走 game_watch 的模块属性（import 常量 = 第二份绑定，patch 不到）
     assert "from remote.game_watch import" not in src
     # 不许再有裸的 `subprocess.run(capture_output=True, text=True, timeout=...)`（那正是缺陷形态）

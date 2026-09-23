@@ -7,6 +7,453 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §22 A 方案落地：节点侧 rollout **与**云机离线 eval 接入长驻池（`remote/serve_pool.py`）—— 1.45–1.47× / 1.19–1.39×，产物逐位不变（2026-09-23）
+
+> 起因：§21 追证出「离线（云机自主段）三条腿全是逐局 spawn」；用户拍板走 **A 方案**（把 `--serve`
+> 长驻协议接进节点侧执行器），随后点名「云机离线 eval 也要池化」。本条 = 落地记录：改了什么、
+> 实测多少、踩到哪几个坑。
+>
+> **两条腿都吃到了**：rollout（kind=iter + kind=run）**1.45–1.47×**（§22.2）、云机离线 eval
+> **1.19–1.39×**（随每 lane 局数，§22.5）；两边的产物对拍都是**逐位/逐字段相同**。
+
+### 22.1 改了什么
+
+| 位置 | 内容 |
+|---|---|
+| **新增 `nn-training/remote/serve_pool.py`** | 节点侧池：协议与 `tools/sim/serve-loop.ts` **逐字对齐**（`__SERVE_READY__`/`__SERVE_OK__`/`__SERVE_ERR__`，stdin 一行 = 一局 argv 的 JSON **数组且不含入口路径**） |
+| `remote/iter_rollout.py` | **rollout 腿**：`run_iter_rollout` 建池（每 job 一个）→ `_run_one_game_with_retries` **先试池**、任何不确定立刻回退原本的逐局 `Popen`；轮末打一行 `serve_pool:` 汇总 |
+| `remote/offline_eval.py` + `rl/eval_local.py` | **云机离线 eval 腿**（同一份池，另一种消费方式）：`run_cloud_eval` 每轮建池 → 交给每局的 `run_local_eval_game` → 池里跑成就用它的输出行拼一个 `CompletedProcess`（该腿只把 stdout 当**失败尾巴**用，不需要逐局日志文件）；轮末 `finally` 关池 |
+| 开关 / 白名单 | `NN_SERVE_POOL=0` 整轮退回旧行为；`SERVE_CAPABLE_SCRIPTS`（= `sampler-agent.ts::PERSIST_SERVE_ENTRIES` 的节点侧镜像）外的脚本**连池都不建** |
+| wire 形状 | **零改动**：池的计数只进节点本地返回字典（`out["serve_pool"]`），不进 `report` ⇒ hub 侧不需要任何改动、不可能因此拒收 job |
+| 复用粒度 | rollout = **一个 job = 一个权重版本**；eval = **一轮评估**（两个 `finally` 都关池）。权重在池里**不需要作 key**：每局的 `--weights` 在 `main(argv)` 里逐局重读 ⇒ agent 侧那套 key（含 wver）匹配在这里天然不需要，也没有「槽位重建」 |
+| 诊断口径 | worker 的 stdout 是混流（所有局的日志挤一条），池**按任务收集、落回该局自己的 `w{i}/rollout.log`** —— 看门狗的超时行与 `_first_rollout_log_tail` 的诊断口径一字不变 |
+
+回退路径共 6 种（`no-slot` / `write-failed` / `no-stdin` / `err` / `dead` / `timeout`），**两条腿全部照此退回自己的
+一次性 `Popen`**：池只可能让这一局更快，**不可能把它变失败**（「只慢不错、绝不丢局」）。协议只有一个入口
+`_submit`，rollout 用 `try_pool`（顺手把该局 stdout 落回 `w{i}/rollout.log`）、eval 用 `try_capture`（行交回调用方）。
+
+### 22.2 实测（win32-x64 · Ryzen 7 5800H 16 线程 · 真 bun + 真导出器 + 真权重）
+
+口径：`stage 0`、`seeds 0..N-1`、`max-ticks 12900`、`hard`、`lives=1`、**workers=8**、
+`ts_dir` = 仓根、权重 = `bc-c4-v3.it1`；每档 **spawn / pool 交替跑两轮**（`bun` 臂 = `NN_SERVE_POOL=0`）。
+
+| 局数 | 每 lane 局数 | spawn（两轮） | pool（两轮） | 倍率 |
+|---|---|---|---|---|
+| 8 | 1 | 1.054 / 1.043 s | 0.923 / 0.951 s | 1.10–1.14× |
+| 16 | 2 | 2.111 / 2.119 s | 1.734 / 1.762 s | 1.20–1.22× |
+| 32 | 4 | 4.174 / 4.046 s | 2.839 / 2.845 s | 1.42–1.47× |
+| **328（生产形态）** | **41** | **37.791 / 38.209 s** | **25.644 / 26.298 s** | **1.45–1.47×** |
+
+* **复跑离散度（要引用就得带这个）**：同一份入库台架（`tools/perf/bench-iter-pool.py`）
+  在门禁刚跑完（机器有背景负载）时全套重跑一遍：8 局 **1.02–1.03×** · 16 局 **1.19–1.25×** ·
+  32 局 **1.36–1.37×** ⇒ 4 局/lane 的比值实际在 **1.36–1.47×** 之间漂，1 局/lane 的“+10%”落回 ≈1.0 ——
+  即**无复用时的差值是噪声**，有复用后的增益真实且稳定。
+* **逐位中性**：四个档的两臂 `data_fp` 完全相同（`f777d15b…` / `44e88f13…` / `624bafc2…` / `594331a0…`），
+  `totalTicks` 也全等（12686 / 27153 / 58328 / 553437）⇒ 池不改语义，纯提速。
+* pool 臂的 `spawned` 恒为 **8**（=workers）、`served` = 局数、`fallback=0`、`killed=0`。
+* **规律**：收益 ∝ 每 lane 局数 —— 每 lane 只省一次「冷启动 + 每局重启」，所以 1 局/lane 时两臂工作量相同
+  （≈1.0–1.14×，噪声）、2 局/lane 起单调拉开（1.19–1.25×）、4 局/lane 约 1.4×。生产一轮是 41 局/lane ⇒ 吃满。
+* 与 §20 的 1.59× 不矛盾：那条是**单局更长**（满 12900 tick）的训练机口径；本条这些局平均只 ~1700 tick，
+  单局越短、冷启动占比越高，池的**绝对**收益越大但两臂比值反而被「spawn 臂的固定成本本来就少」压住。
+
+### 22.3 实测抓到的两个坑（都已修，都写进代码注释）
+
+| # | 现象 | 根因 | 修法 |
+|---|---|---|---|
+| ① | 真 bun 端到端跑通、但 `served=0 / fallback=1(err)` —— **池白建**，全靠回退撑住 | worker 的 cwd 是 **TS 代码根**，而 `--out`/`--weights` 是**相对 job 目录**的；池直接送原始 argv ⇒ worker 拿着错的权重路径报错 | 池送 `_exec_argv(argv, job_dir)`（与一次性路径**同一条**绝化规则）。抓到它的是 `test_remote_iter_real_bun` 新加的 `served==1` 断言 —— **协议漂移的哨兵**（池失败只回落不报错，没这条断言就永远发现不了） |
+| ② | 8 局的轮上池**反而慢**（0.79–0.86×） | `start()` 串行等 8 个 worker 就绪 ⇒ 8 次冷启动排成一行；而逐局 spawn 臂的冷启动是彼此并发的 | `start()` 改成**并发起**（先全部 `Popen`、再统一等就绪，就绪上限整批共用）⇒ 8 局轮变 1.10× |
+
+**教训**：冷启动是可并行的资源，**永远不要串行化它**；以及「池接上了」本身需要一条断言，
+否则性能特性会静默消失（回落路径太快、太安静）。
+
+### 22.4 测试
+
+* 新增 `nn-training/tests/test_remote_serve_pool.py`（**23 用例**，池本体）：复用（`spawned` 不随局数涨 + 日志 pid 一致）/ 日志隔离（每局日志只含自己）/ `try_capture`（行交回、**不落盘**）/ 三类回退（ERR、进程死掉、硬顶超时）/ 白名单与开关（两条腿共用 `make_pool`）/ 同名脚本拒绝 / 端到端接线（同一批 shard + 报告 + 计数诚实）/ 开关退回旧行为 / 混脚本不建池。
+* 新增 `nn-training/tests/test_offline_eval_pool.py`（**8 用例**，eval 腿）：接线（一轮一池、每局拿到同一个池、`min(slots, 局数)` 上限、轮末关池且异常路径不漏关、池起不来则整轮一次性）+ 执行面（池优先时**绝不** spawn、池拒绝则回退且返回值形状不变、不传池时行为与加池前相同、`wver` 口径不变）。
+* `tests/test_remote_iter_real_bun.py` 补 `served == 1`（全仓唯一「真 bun + 真导出器」走池的路径）、`tests/test_eval_local_capture.py` 补「池优先于一次性」的源码顺序断言。
+* `tests/test_offline_eval_cloud.py` 加 autouse fixture 关池（那一层的假执行器让池无意义；接线由上面那个新文件验）。
+* 门禁：`bash tools/githook/nn-python-gate.sh` 绿（ruff + mypy + **2217 passed**）。
+
+### 22.5 云机离线 eval 腿（同日落地，用户点名）
+
+**接法**：§21 列出的三个差异点各自有了归属，没有一个是「照抄」能过的：
+
+| 差异点 | 处理 |
+|---|---|
+| ① 那条路走 `run_eval_runner_capture`（**捕获** stdout/stderr） | 池新增 `try_capture`：成功把行**交回调用方**（不落盘），`run_local_eval_game` 用它拼一个 `CompletedProcess(cmd, 0, "\n".join(lines), "")` ⇒ 下游（`rc != 0` 判定、失败尾巴）一字不改 |
+| ② 权重快照每轮变 | **不需要 key**：`--weights` 在导出器的 `main(argv)` 里逐局重读（池本就是「一个任务一局」）。池的生命周期 = **一轮评估**（`run_cloud_eval` 建/关），换轮自然换权重 |
+| ③ 重试在外层（`offline_eval` 的 attempt 循环） | 池只保证「**要么服务、要么立刻回退**」，失败语义全归调用方：池回退后 `run_local_eval_game` 当场走一次性 `run_eval_runner_capture`（硬顶/告警口径同一份 `game_watch`，`kind="eval"`）⇒ 与池不存在时逐字相同 |
+
+**实测**（win32-x64 / 真 bun + 真导出器 + 真权重 / workers=12 / max-ticks 12900 / 3 关 × seeds）：
+
+| 局数 | 每 lane | spawn（两轮） | pool（两轮） | 倍率 | 产物 |
+|---|---|---|---|---|---|
+| 24 | 2 | 4.115 / 4.199 s | 3.459 / 3.300 s | **1.19–1.27×** | 逐字段相同 |
+| 48 | 4 | 8.325 / 8.462 s | 6.061 / 6.098 s | **1.37–1.39×** | 逐字段相同 |
+
+「逐字段相同」= 逐局 `_eval_report.json` 全部字段（`elapsedSec` 除外）+ `ticks` 两臂完全一致
+（每臂 `served` = 局数、`spawned` = workers、`fallback=0`）。**台架**：`tools/perf/bench-eval-pool.py`。
+
+**密度决定收益**（与 rollout 同律）：云机这一腿的并发面很宽（`cpu_worker_slots()`：8 核→6、
+16 核→12、96 vCPU 的 Kaggle TPU 会话→92），而一轮 A 层语料是 `关数 × eval_games_per_stage`
+（典型 100 局）⇒ 96 vCPU 会话上约 1 局/lane，**基本持平（≈1.0）**；本地/中等节点 8 局/lane 则 1.19–1.39×。
+两个因此必须做的保守化：
+
+* **池上限取 `min(slots, 本轮局数)`**（否则 92 slots + 8 局的轮会为 8 局预热 92 个进程）；
+* 池**每轮建、轮末关**（不把常驻进程留到段末）——下一轮冷启动一轮只付一次，且 `close()` 幂等（
+  内层 `finally` 已关过就是空操作），`run_cloud_eval` 的多条 `return out` 出口都不会漏。
+
+**第三个坑（真机实测才暴露）**：`run_local_eval_game` 的 `cmd[0]` 是 **bun**，而池的任务口径与
+iter 腿一致（argv 以**导出器脚本**开头）⇒ 送 `cmd[1:]`。送错的症状是最难查的那种：
+池静默拒绝（`not-ours`）、一局都没服务、两臂看起来一样快（首轮实测 1.000×，`served=0`）。
+⇒ 再一次印证：**「池真接上了」需要断言**（`tests/test_offline_eval_pool.py` 钉 `try_capture` 的入参，
+`tests/test_remote_iter_real_bun.py` 钉真 bun 路径的 `served==1`）。
+
+### 22.6 复跑
+
+```bash
+# rollout 腿 A/B（真 bun + 真导出器；交替两轮，逐档给倍率 + data_fp 对拍）
+bash tools/githook/nn-py-safe.sh tools/perf/bench-iter-pool.py        # 默认 8,16,32
+NN_BENCH_GAMES=328 bash tools/githook/nn-py-safe.sh tools/perf/bench-iter-pool.py
+# eval 腿 A/B（同一台机器同一套纪律；EV_BENCH_* 调口径）
+bash tools/githook/nn-py-safe.sh tools/perf/bench-eval-pool.py        # 3 关 × 8 种子
+EV_BENCH_SEEDS=0,1,...,15 bash tools/githook/nn-py-safe.sh tools/perf/bench-eval-pool.py
+# 关池（两条腿一起回到旧行为，随时可回退）
+NN_SERVE_POOL=0 <原来那条命令>
+# 单测（池本体 + 两条腿的接线）
+bash tools/githook/nn-py-safe.sh -m pytest nn-training/tests/test_remote_serve_pool.py \
+  nn-training/tests/test_offline_eval_pool.py -q
+```
+
+---
+## §21 离线模式（云机自主段）**没有**长驻池：rollout/eval 都是逐局新建进程（2026-09-23 代码追证）
+
+> **后续（§22）**：本条的 **(A) 方案已落地，且 rollout 与 eval 两条腿都入池** ——
+> rollout（kind=iter + kind=run）实测 **1.45–1.47×**（§22.2）、云机离线 eval **1.19–1.39×**（§22.5）；
+> 本表三行的「❌」自本条起作废。
+
+> 起因：§20 量到「池 vs 逐局直开 = 1.59×」，那**离线（云机）模式**吃到这笔了吗？——**没有**。
+> 三条腿全部逐局 spawn，长驻池只存在于 sampler-agent 的 `/v1/task` 路径上。
+
+**证据链**（每个入口都读过实现）：
+
+| 腿 | 入口 | 执行方式 | 池？ |
+|---|---|---|---|
+| 逐轮上云（kind=iter） | `remote/worker.py:2236` | `remote/iter_rollout.py::run_iter_rollout` → **逐局 `subprocess.Popen([bun, export-rl-rollout.ts, …])`**（线程池控并发，:202） | ❌ |
+| 半离线整段 / 全离线包（kind=run） | `remote/run_loop.py`（模块 docstring：每轮合一个与 kind=iter **逐字段同构**的 job 再喂回 `run_job`） | 同上（走的就是同一条 iter 路径） | ❌ |
+| 云机离线 eval | `remote/offline_eval.py` → `rl/eval_local.py::run_local_eval_game` | 逐局 Popen `bun export-eval-game.ts`（:596–630 组 cmd + `game_watch`） | ❌ |
+
+* **池只存在于 `tools/agent/sampler-agent.ts`**（`persistPool` + `PERSIST_SERVE_ENTRIES` 里的 `--serve` 常驻进程），
+  而它只在 **hub/agent 的 `/v1/task` 认领路径**（`dist_common.fetch_task`）上被用到。离线包/半离线段
+  **不启动 agent**（`nn-training/**` 里 `sampler-agent` 只出现在注释里）⇒ 那条路永远拿不到池。
+* 池的**复用粒度 = 一次权重版本内**：`persistPool` 按 `key`（含 wver/argv）匹配，换 wver 后旧槽位被丢弃
+  （`sampler-agent.ts:828–831`）⇒ 每轮（新 wver）每槽重起一次、轮内所有局复用 —— §20 的 1.59× 正是这个口径。
+* **代价（实测口径）**：rollout 腿 = §20 的 **1.59×**（PC 19.60 → 12.12 s / 100 局 8 并发；手机 2165 → 3435 局/h 同值）。
+  对**整轮**的影响 = 由 rollout 占轮时比例决定，**不是** 1.59× 全量。
+* **要吃到这条路只有两种改法（都要立项，不是顺手改）**：
+  - **(A) 把 `--serve` 长驻协议接进 `iter_rollout.py`**：TS 侧已就绪（`tools/sim/serve-loop.ts`；rl/eval/goal/intent
+    四个导出器都支持，agent 池用的就是它），改动集中在 Python 侧的进程管理与**权重切换时的槽位重建**；
+  - **(B) 离线包里起本地 sampler-agent**，让 rollout/eval 走同一 `/v1/task` 协议（复用面最广，但要在 plan 里
+    重新论证离线包的「自包含」边界：agent 是本地进程，协议不出网）。
+
+---
+## §20 本机（self）100 局三口径对照：**长驻池 vs 每局直开 = 1.59×**；池的价值 = 免去每局 spawn（2026-09-23）
+
+> 问题：同一台机器、同样 8 并发、同样 100 局，**经过 sampler-agent（长驻池）** 与 **直接开导出器** 各是多少？
+> 结论：**agent 11.88–12.35 s vs 每局直开 19.60 s ⇒ 1.59×**，而 vs 「批化直开」只差 ~5%
+> ⇒ **池的收益全部来自「不再每局新建进程」**。
+
+**口径**（三者完全相同：同权重、`stage 0`、`seeds 0-99`、`max-ticks 12900`、`hard`、`lives=1`、并发 8、PC = Ryzen 7 5800H 16 线程；
+每个口径都校验了 `_rl_report.json` 里 `games` 求和 = 100、`totalTicks` 合计 = **272675**）：
+
+| 口径 | 100 局墙钟 | 吞吐 | 每局 ms（mean / p50 / p90 / max） |
+|---|---|---|---|
+| **A 经 agent（长驻池，`tools/perf/agent-bench.ts`）** | **11.88 / 12.35 s**（两轮） | **30306 / 29139 局/h** | 913 / **866** / 1562 / 1871（rep2） |
+| B2 直开 · 每进程连续 12-13 局（批化，**仅诊断口径**） | 12.60 s | 28508 局/h | 846 / 856 / 925 / 925 |
+| B1 直开 · **每局一个进程**（池前训练栈口径） | **19.60 s** | 18343 局/h | 1304 / 1277 / 1938 / 2193 |
+
+* **A ÷ B1 = 1.59×**（19.60 / 12.12 平均）；**A ÷ B2 = 1.05×**。
+* 分解：B1 每局比 A 多花 **~0.41 s**（p50 1277 → 866 ms）= bun 启动 + 模块加载 + 首用 attestation×3 + 权重加载
+  —— 在 8 条 lane 上就是 100 局 × 0.41 s ÷ 8 = **5.1 s**，正好是 19.60 − 12.12 的差。
+* ⚠ **B2 不是可部署选项**：hub 用 `rl/cmd.build_rollout_cmd` **逐局一条 argv**（`remote/iter_rollout.py` 也是），
+  批化只是用来把「池」与「批化」两个效应分开。两者都能干掉 per-game spawn ⇒ **池的独立价值很小（~5%）**，
+  真正值钱的是「别每局新起进程」（~1.6×）。
+* 手机侧同口径（均为 8 并发、100 局）：**逐局直开 13.30 s / 8 局 = 2165 局/h**（§18 并发实验）
+  对**池 104.80 s / 100 局 = 3435 局/h** ⇒ **1.59×**，与 PC 同值。
+  ⇒ **arm64/小设备节点不要跑「每局 spawn」的路径**（如 `remote/iter_rollout.py` 那种逐局 spawn）：
+  它把启动成本按局重付，而 §19 的 hub/agent 路径没这一项。
+* ⚠ **本节曾写过一条错的手机推论**（「池在手机上 ≈2.1–2.3×」）：那是拿「8 进程各跑 1 局」的单局延迟
+  （12.2–13.1 s，含 8 个启动同时抢 CPU）去比池的**稳态** p50（5.77 s）—— 两种结构不可比。
+  正确口径按时长除局数（已改成上面的 2165 → 3435 局/h）。
+* 新工具：`tools/perf/direct-bench.sh <spawn|batch> <并发> <局数> <标签>`（直开口径，自带产物校验）。
+* **踩过的坑（写进工具纪律）**：第一版脚本 `cd "$(dirname "$0")/.."` 少退一层（脚本在 `tools/perf/` 下）
+  ⇒ cwd 变成 `tools/`，100 次启动全部因找不到入口而秒退，却打出了「**8.6 s / 41643 局/h**」的漂亮数字。
+  ⇒ 长任务的度量脚本**必须校验产物**（本脚本：report 里 `games` 求和 ≠ 期望值 或 有非零退出 ⇒ 响亮失败退出），
+  否则「快速失败」会伪装成「性能突破」。
+
+---
+## §19 真实训练路径下的节点吞吐实测（sampler-agent 100 局 · PC 驱动）：**8.2–8.9×**，修正 §18 的「4–5×」（2026-09-23）
+
+> §18 量的是**单进程直跑**（4.2×）—— 只覆盖了 ISA 那一层；本节把**机器宽度与并发**也加进来
+> （真实 HTTP 协议 + 常驻池 + 各自 worker 数），得到训练栈真正会看到的数字：**8.5×**。
+> 两节都对，量的不是同一件事 —— **引用节点产能请用本节**。
+
+**方法**：手机上拉真 agent（`bun tools/agent/sampler-agent.ts --port 8443 --workers N`，proot 会话内常驻）；
+PC 侧新驱动 **`tools/perf/agent-bench.ts`** 走训练栈同一协议：
+`POST /v1/weights`（gzip 体 + `x-weights-sha256` = 未压缩 sha）→ 并发
+`GET /v1/task?iterId&wver&stage&seed&maxTicks&difficulty&livesOverride`（sync 直回整包；自动 strip 保活空格 + `unpackContainer` 校验）。
+同一份权重（wver `46e6285876a2…`）、同一批 `(stage 0, seed 0-99)`、同 `max-ticks 12900`、同 `difficulty hard`。
+
+| 机器 | workers | 100 局墙钟 | 吞吐 | 单局 mean / p50 / p90 / max |
+|---|---|---|---|---|
+| PC（Ryzen 7 5800H · 16 线程） | 8 | **12.35 s** | **29139 局/h** | 0.95 / 0.91 / 1.64 / 2.00 s |
+| 手机（SD865 · 8 线程 big.LITTLE） | 8 | 104.80 s | 3435 局/h | 8.23 / 5.77 / 12.14 / 40.92 s |
+| 手机 | **6** | **101.26 s** | **3555 局/h** ← 吞吐最优 | 5.93 / 4.34 / 9.67 / 30.13 s |
+| 手机 | 4 | 109.96 s | 3274 局/h | 4.31 / 3.77 / 6.81 / 24.65 s |
+
+* **吞吐比 8.2×（手机最优 6w 对 PC 8w）～ 8.5×（8w 对 8w）**；8w 对 8w 的单局延迟比 **8.7×**。
+  ⇒ **用户的「一个数量级」在真实路径上成立**（§18 的 4.2× 只是 ISA 那一半）。
+* **分解 = ISA 4×（§14/§15）× 机器宽度 ~2.1×**（16 线程全大核 vs 8 线程里只 1 个大核）。
+* **并发档位（每档两轮 100 局，交替跑）**：
+
+  | 手机 workers | 墙钟 rep1 / rep2 | 吞吐 rep1 / rep2 | p50 | p90 | max |
+  |---|---|---|---|---|---|
+  | 4 | 109.96 / 112.67 s | 3274 / **3195** 局/h | 3.77 / 3.79 s | 6.81 / 6.67 s | 24.7 / 26.1 s |
+  | **6** | **101.26 / 103.30 s** | **3555 / 3485** 局/h | 4.34 / 4.45 s | 9.67 / 9.05 s | 30.1 / 38.0 s |
+  | 8 | 104.80 / 113.87 s | 3435 / **3162** 局/h | 5.77 / 6.31 s | 12.14 / 13.37 s | 40.9 / 44.3 s |
+
+  ⇒ 重复后**吞吐排序稳定：6 > 8 ≈ 4**（6 对 4 两轮都 +9%；6 对 8 为 +3.5% / +10%），
+  而**延迟排序单调：4 < 6 < 8**（p90 6.7 / 9.1 / 13.4 s）；`rep` 内部离散：4 = 2.5% · 6 = 2.0% · **8 = 8.7%**
+  （8 worker 的离散度也最大——小核被抢得最凶）。
+* **结论（手机上该开几个 worker）**：**6** —— 吞吐最优（两轮一致）、且正好等于 python 侧
+  `cpu_worker_slots(8) = 6`（`platform_utils.py` 无需改）；**8 是双输**（吞吐无优势、延迟与离散度最差）。
+  只有**在乎单局延迟**（eval、以及 `remote/game_watch.py` 那个 5s 首轮硬顶，见下）时才降到 **4**
+  （p90 6.7 s vs 9.1 s，代价 ≈9% 吞吐）。
+* ⚠ **要核对的旋钮（本次未直接复现，但数摆着）**：`remote/game_watch.py` 的单局看门狗
+  首次尝试硬顶 **5s**（重试放宽 ×4 = 20s，最多 3 次）——手机上 8w 的 **p50 已经是 5.77 s**
+  ⇒ 走**节点侧逐局 spawn** 的路径（`remote/iter_rollout.py`，以及 eval 的 `--eval-game-timeout-sec`）时
+  会大量「首轮被砍→重跑」；而 hub/agent 路径（本节测的）trainer 只是等 HTTP，不受该硬顶影响。
+  建议：arm64/手机节点跑 iter/eval 时显式给 `--remote-iter-game-timeout`（给 ≥ 60s）并同步 eval 那一侧。
+* **跨平台确定性**：四种配置（含两端）`总 tick` 全部 **272675**，`unpack 失败=0`、`503 重试=0`
+  ⇒ HTTP 通道 + 常驻池不改语义，节点 shard 可被 PC 侧正常 unpack。
+* **常驻池确实生效**：agent 日志 `[sampler-agent] persist worker spawned (export-rl-rollout.ts)` ×N
+  （每槽惰性拉起、之后复用）⇒ §4.6 的固定成本收益在这条路径上真的拿到了。
+* **顺带实证 §17**：手机 codeHash `def22c1d…`（提交 `3c16255`）vs PC `7d3704…`（同一提交 + 本批把
+  `conv-optimize.plan.md` 移出 `src/nn/`）⇒ 「`src/nn/` 下**增删任何文件**（含 `.md`）都改 codeHash」。
+
+**复跑**：`tools/perf/phone-agent.sh`（手机侧起停，需在长驻 proot 会话内——`proot --kill-on-exit` ⇒ 会话结束即杀）
++ `tools/perf/agent-bench.ts`（PC 侧驱动，参数见文件头）；手机侧记得
+`bash /tmp/phone-agent.sh start 6 8443`，PC 侧 `--url http://<手机IP>:8443 --key $(cat agent.auth)`。
+
+---
+## §18 Android(arm64 · big.LITTLE) 上的 rollout 究竟慢多少：**实测量 4–5×**，不是 10×（adb 直驱分解，2026-09-23）
+
+> 起因：用户报告「Android 上 rollout 一局比 self/mac 慢一个数量级」。用 **adb 直驱**（Redmi K30 Pro ·
+> SD865 = 4×1.8G 小核 + 1×2.4G 大核 · Android + proot/Ubuntu · bun 1.4.2）复现并逐层分解。
+> **结论先行**：同一命令 / 同一权重 / 同一 (stage, seed) 下，手机只是 PC（Ryzen 7 5800H · 16 线程）的
+> **4.2×**（单局）与 **4.8×**（8 并发摊薄吞吐）—— **native 路径上不存在 10× 异常**，
+> 且无热降频、无钉核收益、无 proot 现象级开销。能凑出「一个数量级」的只有两种**不同口径的比法**（见下）。
+>
+> ⚠ **口径修正（同日紧接补测）**：本节是**单进程直跑**口径，只含 **ISA** 那一层。真实训练路径
+> （HTTP + 常驻池 + **各自 worker 数**）实测是 **8.2–8.9×** ⇒ 见 **§19**（含 4/6/8 worker 的吞吐与延迟表）。
+> **引用节点产能用 §19**；本节用来回答「慢在哪一段」。
+
+### 复现（与 PC 逐字相同的命令；两边的 `[OK]` 行逐字段相同 ⇒ 工作量相同）
+
+```bash
+bun tools/sim/export-rl-rollout.ts --weights <x20-noexplore.it181> --out /tmp/ro-ph \
+  --stages 0 --seeds 0-3 --difficulty hard --lives-override 1 --max-ticks 12900
+```
+
+| | 4 局批（14318 ticks / 1433 决策） | 扣启动后每决策 |
+|---|---|---|
+| PC（win32-x64 · 16 线程） | **2.615 s** | **1.68 ms** |
+| 手机（8 线程 big.LITTLE） | **10.83–11.30 s** | **7.06 ms** |
+| 比值 | **4.2×** | **4.2×** |
+
+* 进程启动（`--max-ticks 1`）：PC **0.203 s** / 手机 **0.715 s**（bun 启动 + 首用 attestation×3 + proot）。
+* 每决策 **7.06 ms（手机） vs 内核单独 6.4 ms（§14）** ⇒ 内核占 91%，与 x64 侧的 95% 同构
+  ⇒ **慢的全部是内核**，不是 JS/编码/仿真/GC。
+* 反证三条：**热降频**（3 连跑 10.96 / 10.82 / 11.01 s，平的）· **钉大核**（`taskset -c 7` 11.10 s，无改善）·
+  **调度迁移**（10.8–11.3 s 区间稳定）。
+
+### 三条后端链在两侧的真实代价（1 局 · max-ticks 2000 · 200 决策 · 含启动）
+
+| 后端 | PC | 手机 | 手机/PC | 每决策（扣启动）PC → 手机 |
+|---|---|---|---|---|
+| **native** | 0.614 s | 2.350 s | **3.8×** | 2.06 → 8.18 ms |
+| wasm | 0.919 s | 2.438 s | 2.7× | 3.58 → 8.62 ms |
+| **ts（兼底）** | 9.557 s | **23.795 s** | 2.5× | 46.8 → **115.4 ms** |
+
+* ⚠ **手机上的 native 只比 wasm 快 ~5%**（1.64 s vs 1.72 s 工作量），而 **TS 兼底比 native 慢 10.1×**。
+  ⇒ 「手机慢一个数量级」这个读数**只可能来自 TS 兼底**（或下面说的口径混比），**不可能是 native 路径**。
+* **第一诊断动作**：看 shard manifest 的 `"feat"`（或日志里 `[conv-wasm] 加载失败，回退 TS 特征路径`）。
+  `ts` ⇒ 10× 悬崖（产物没到位）· `wasm` ⇒ 只 +5%，可接受 · `native` ⇒ **无异常，慢的是 ISA**。
+
+### 并发：big.LITTLE 的代价在「单局延迟」，不在吞吐（8 线程手机 vs 16 线程 PC）
+
+| 并发 N（各 1 局 · seed0） | PC 每 worker 墙钟 | 手机 每 worker 墙钟 | PC 摊薄 ms/局 | 手机 摊薄 ms/局 |
+|---|---|---|---|---|
+| 1 | 1.08 s | 4.31 s | 1289 | 4548 |
+| 4 | 1.38–1.46 s | 6.05–7.57 s | **435** | 1938 |
+| 8 | 2.19–2.42 s | **12.2–13.1 s** | **348** | **1662** |
+
+* 手机 8 并发时**单局延迟 3.0×**（4.31 → 12.9 s）——8 个进程里有 4 个落在 1.8 GHz 小核上；
+  但**吞吐仍在涨**（1662 ms/局 @8 vs 4548 @1）⇒ 现行口径 `max(cores−4, cores×0.8)`（8 核 → 6 worker）
+  对**吞吐**是对的，只是把**单局延迟**放大了。
+* ⇒ **「一局慢一个数量级」极可能是两种口径混比**：手机在**自有 worker 数**下的单局延迟（~12.9 s）
+  对比 mac/PC **闲置时单局**（~1.1 s）= **11.9×**。**同口径比是 4–5×**；吞吐口径（同并发摊薄）**4.8×**。
+
+### 结论与可行动项
+
+1. **arm64 节点的慢是 ISA 决定的**（§14 / §15：FP-op 受限 · 内核 3.9×），**不是 Android / proot / bun 的锅**。
+2. **排课按 4–5× 折算**（吞吐），不按 10×；也**不要**把 x64 的内核提速算到 arm64 头上（§14）。
+3. **部署体检先看 `feat`**：若是 `ts`，问题不是「手机慢」而是**产物没到位**（10× 悬崖）
+   —— 先修分发再加机器；`wasm` 只 +5%。
+4. **arm64 上 native 只比 wasm 快 ~5%** ⇒ 想简化 arm64 产物分发（省掉 `.so` + attestation）时，
+   纯 wasm 是可接受的降级；**x64 则不行**（内核口径 native 比 wasm 快 2.2×，实测口径 1.7×）。
+
+**adb 直驱的三个招式**（本次用到的，可复用）：`export MSYS_NO_PATHCONV=1` → 载荷推 `/data/local/tmp`
+（Termux uid 读不到 `/sdcard`）→ `adb shell "run-as com.termux sh -c 'cp … <rootfs>/tmp/'"` 到 rootfs →
+`run-as com.termux sh <run.sh>`，run.sh 里 `PATH=$PREFIX/bin:/system/bin proot-distro login ubuntu -- bash -lc "…"`
+（`proot-distro` 需要显式 PATH，否则谎报「proot utility does not exist」）。这四个封装好的脚本已入
+`tools/perf/phone-{run,roll2,par,eng}.sh`（`tools/perf/**` 不在 codehash 集里，不会惊动节点）：
+`phone-run.sh "<容器内命令>"` · `phone-roll2.sh <标签> <max-ticks> <taskset 前缀>` ·
+`phone-par.sh <N> <每进程局数> <标签>` · `phone-eng.sh <标签> <native|wasm|ts>`。
+
+---
+## §17 计划文档移出 codehash 集：`src/nn/conv/conv-optimize.plan.md` → `plan/conv-optimize.plan.md`（2026-09-23）
+
+> **教训（值得下个 agent 记住）**：`tools/agent/codehash-files.txt` 收了**目录** `src/nn/`，而 F3 噪声过滤
+> 只排除隐藏项 / `__pycache__` / `node_modules` / `.pyc .orig .rej .bak .tmp .log .swp` / `~` 结尾
+> —— **`.md` 不在排除之列** ⇒ 放进 `src/nn/**` 的**任何文档改动都会改 codeHash ⇒ 触发一次节点升级波**
+>（`docs/nn.progress.md` 记的「reorg 那次有意不碰它」就是这个原因）。实施计划 / 调研 / 台架属于
+> `plan/**` · `docs/**` · `tools/perf/**`（都不在 codehash 集里）。
+
+* 动作：文件系统 `mv`（**不是** `git mv`，`AGENTS §0.1` #2）⇒ `plan/conv-optimize.plan.md`；
+  正文一字未动，只改了它自述的现址与顶部状态块里那条「旧号 §140–§142」的指向。
+* 顺带解掉一处旧号例外：该文档内部的 `docs/nn.progress.md §140–§142` 现重写为 `docs/nn/runtime-opt.md` §9–§11
+  ⇒ `docs/nn.progress.md`「旧号引用清理范围」第 3 条已标为**已解决**。
+* 代价：从 codeHash 集里**移走**一个文件同样改一次哈希 ⇒ 本批仍会有**一次**升级波；此后改这份计划不再触发。
+* 适用边界：`src/**` 只放**运行时语义**的东西（内核源码、适配器、分发矩阵）；文档与实验台架一律在外。
+* 残留：`tools/agent/sampler-agent.ts:773` 的注释仍写旧路径 —— **故意不动**（该文件在 codehash 集内，
+  改注释同样触发升级波；同 `docs/nn.progress.md` 里 `§126` 先例）。`tools/perf/conv-ab.ts` 不在集内，已改。
+
+---
+## §16 darwin-x64 实机计时：native **1.408×**（平台表补最后一格）（2026-09-23）
+
+> 补齐 §9 / `conv-optimize.plan.md` §11.2 平台表的最后一个 x64 组合。**用户实机读数（macOS x64）**：
+> `native speedup = 1.408×`（即 `tools/perf/conv-ab.ts` 的 `[native] … speedup=` 行）。
+
+| 平台 | native（内核单函数） | wasm（同源 wasm32 目标） |
+|---|---|---|
+| win32-x64 | 1.38–1.46× | 1.67–1.71× |
+| **darwin-x64** | **1.408×**（本次） | 未测 |
+| linux-x64（WSL2） | 1.55–1.59× | 1.67–1.71× |
+| linux-arm64（K30 Pro · proot） | **≈1.05×** | 1.28–1.30× |
+
+* **读法：决定倍率的是 ISA 家族，不是操作系统 / 工具链。** 三个 **x64** 平台落在同一带
+  （1.408 / 1.55 / 1.41），唯一掉到 ≈1.05 的是 **arm64（NEON）** —— 与 §15 的机制结论一致
+  （x64 是**取数端口**受限 ⇒ 少取数的平铺重排值 40–60%；arm64 是 **FP-op** 受限 ⇒ 同样重排只值 ~5%）。
+  ⇒ 后续评估这批内核优化**只需按 ISA 分（x64 / arm64）**，不必按 OS 分（darwin/win32/linux 同族同结论）。
+* 口径：这是**内核单函数**（一次 `cf_student_features`）倍率，不是端到端 —— 端到端见 §12（win32 生产形态 1.48×）。
+* 两个待澄清点（不影响上面读法，只影响可引用性）：① 若这台是 **Apple Silicon 上跑 x64 bun（Rosetta）**，
+  那就是模拟层口径，不能代表真 Intel Mac；② 本次只记了倍率，没记 `old= / new= ms`。
+  复跑一条命令即可补齐：`bun tools/perf/conv-ab.ts 80 5`
+  （要与**历史 prebuilt（入库产物）**而非现编旧源对比：`CONV_AB_OLD_LIB=<旧 darwin-x64 dylib> bun tools/perf/conv-ab.ts 80 5`）。
+
+---
+## §15 arm64 逐阶段归因：那 6.4 ms 花在哪、以及**为什么四项不迁移**（`tools/perf/kernel-phases.ts`，conv-optimize.plan.md §11.6，2026-09-23）
+
+> 承接 §14：既然四项在 arm64 上只值 ≈5%，就要回答「时间花在哪」与「为什么 x64 的 +44% 不迁移」。
+> 一句话：**arm64 已贴着自己机器的 FP 吞吐上限（61–69%）**，x64 的短板是**取数端口** ⇒
+> 「少取数」的重排在 arm64 上**没有瓶颈可治**。
+
+**方法（新台架，已入库）**：`tools/perf/kernel-phases.ts` 把计时插桩（aarch64 `cntvct_el0` 19.2 MHz / x86 `rdtsc`）
+**注入 `conv.c` 的一份副本**（断言过的文本替换；**生产源码一字未改**），导出 `cf_phase_profile` 抄回各阶段累计 ticks；
+插桩库与生产库**逐字节同输出**（台架默认对拍，防拼错）。旋钮：`--target <id>`（只交叉构建）· `--lib <库>`（在目标机上跑，无需编译器）·
+`KP_EXTRA_FLAGS=…` + `--no-eq`（破契约的上限实验）。
+
+**相位表**（两侧都是**优化后**内核；x64 = win32-x64 AVX1 本机，arm64 = K30 Pro/proot `taskset -c 7`）
+
+| 阶段 | x64 µs | x64 占比 | x64 GMAC/s | arm64 µs | arm64 占比 | arm64 GMAC/s | 倍差 |
+|---|---|---|---|---|---|---|---|
+| total | 1605 | 100% | 23.6 | **6463** | 100% | 5.85 | 4.0× |
+| pad3 | 2.1 | 0.1% | — | 6.1 | 0.1% | — | 2.9× |
+| conv3 | 343 | 21.4% | 20.4 | 1378 | 21.3% | **5.1** | 4.0× |
+| pad5×8 | 36 | 2.2% | — | 146 | 2.3% | — | 4.0× |
+| dw×8 | 594 | 37.0% | 14.6 | 1516 | 23.5% | **5.7** | 2.6× |
+| pw×8 | 599 | 37.3% | **37.0** | 3377 | **52.3%** | **6.6** | **5.6×** |
+| GAP | 30 | 1.9% | — | 36 | 0.6% | — | 1.2× |
+
+（对照 §9 里引的**优化前** x64 口径：pw 54.2% / 17.5–19.2 GMAC/s · conv3 26.1% / 18.3 · dw 21.1% / 16.9 ——
+pw 的吞吐翻倍正是 x64 +44%（§14）的来源。）
+
+**① arm64 已经贴近自己的 FP 上限**：A77 只有 2 条 128-bit FP 管线（4 lane/条）且 mul 与 add **共用**它们；
+`-ffp-contract=off` 下 1 MAC = 2 个 FP op ⇒ 上限 ≈ **9.6 GMAC/s**（4 MAC/cycle × 2.4 GHz）；
+实测整体 **5.85**、pw **6.6** ⇒ **61–69% 上限**。x64（Zen3）有 4 条 FP 管线且 mul/add 分开（实测上限 52.4 GMAC/s），
+它的短板是 2 个 **load 端口** ⇒ 同一批「少取数」的平铺重排：x64 **+44%**、arm64 只剩 **+5%**。
+**不是某一项拖后腿，是这台机器没有那个瓶颈可治。**
+
+**② FMA 上限实验**（`KP_EXTRA_FLAGS=-ffp-contract=fast`；**故意破契约、只量上限、不是可用配置**）
+
+| | total | conv3 | dw | pw |
+|---|---|---|---|---|
+| arm64 无 FMA | 6463 µs | 5.1 | 5.7 | 6.6 |
+| **arm64 +FMA** | **4893 µs（+32%）** | 6.8 | 7.0 | **9.1** |
+| x64 无 FMA | 1605 µs | 20.4 | 14.6 | 37.0 |
+| x64 +AVX2/FMA | **1414 µs（+14%）** | 20.5 | 17.7 | 43.0 |
+
+⇒ 同一个杠杆在 arm64 值 **+32%**、在 x64 只值 **+14%**（plan §3.4 当年记的「~5%」是**优化前**代码口径）。
+开 FMA = 改数值 = **new era**（权重/语料/基线全重做，`conv-optimize.plan.md` §0.5 红线 ①）⇒ **本批不动**，
+只把价签挂出来；「要不要为此开新纪」列进未决事项（`docs/nn.progress.md` §3.3）。
+
+**可行动结论**：**arm64 节点的内核已无微优化空间**（61–69% 贴顶），只剩「**减少 MAC 数**」或
+「**接受 FMA 新纪**」两条路；反过来对 x64，取数侧的重排仍是有效手段（dw 现在反而是最大头 37%）。
+
+**复跑**：`bun tools/perf/kernel-phases.ts 300`（本机 x64，应与上表一致）·
+`bun tools/perf/kernel-phases.ts --target linux-arm64`（交叉构建）→ 拷到机器上
+`taskset -c 7 bun tools/perf/kernel-phases.ts --lib /tmp/kernel-phases.so 300`（**必须钉核**）。
+
+---
+## §14 arm64 实机计时 + 逐项归因：**无负项、零回落**，但 x64 的 +44% 不迁移（`conv-optimize.plan.md` §11.4，2026-09-23）
+
+> **关闭 §9 的「⚠ 待办：arm64 实机计时」**（该待办的判据「证明不慢」已达成并超额：连「每一项各值多少」也量了）。
+> **编号来历**：这两条（§14/§15）在原 `docs/nn.progress.md` 里编 §144/§145，2026-09-23 拆分时尚未归档
+> ⇒ 按本文件局部编号补入（接在 §12 之后；`§13` 已被「决策正文归档」占用）。
+> 环境：Redmi K30 Pro（M2002J9E · SD865：4×1.8G + 1×2.4G）· Android + **proot/Ubuntu** · bun 1.4.2，
+> 经 **adb 驱动**（`run-as com.termux` + `/data/local/tmp` 中转 + `proot-distro login ubuntu -- bash -lc`；
+> 两个坑：Termux uid 读不到 `/sdcard`、`proot-distro` 要显式给 PATH）。
+
+**方法**：old = git 里的历史 prebuilt（`/tmp/old.so`，sha256 `d3f18b2e…`，7664B，**当场核对**）；new = 仓库里的
+`src/nn/conv/prebuilt/linux-arm64/conv_native.so`。**钉单个大核**（`taskset -c 7`，内核本来就单线程）+ best-of-N。
+
+| 对比（100×6，注明除外） | 旧 | 新 | 比值 | n |
+|---|---|---|---|---|
+| **整批**（历史 prebuilt vs 现役） | 6.70–6.87 ms | 6.38–6.59 ms | **1.017 / 1.054 / 1.057 / 1.061** ⇒ **≈1.05×** | 4 |
+| `pw8` 变体（`CF_PW_PX` 16→8） | 6.43–6.48 | 6.28–6.48 | **1.003 / 0.993 / 1.008** ⇒ **≈1.00** | 3 |
+| `nog3` 变体（conv3 4oc 分组→展开） | 6.48–6.53 | 6.39–6.64 | **1.014 / 0.983 / 1.045** ⇒ **≈1.01** | 3 |
+| `ctl`（**与现役逐字节相同**的库） | 6.38 | 6.27 | **1.017** = 噪声底线 | 1 |
+| **wasm**（同一份源码的 wasm32 目标） | 9.44–9.53 | **7.29–7.42** | **1.275–1.295**（±0.5%） | 13 |
+
+* **结论：四项没有一项在 arm64 上是负的 ⇒ 不回退、也不拆 `CF_PW_PX` 三档**（`pw8`≈1.00 ⇒ 16px 在 NEON 既不亏也不赚；
+  `nog3`≈1.01 而 x64 是 1.14× ⇒ **保留**分组）。整批 arm64 **≈+5%**（x64 +44%）、wasm **+28%**（x64 +69%）
+  ⇒ **给 arm64 节点排课程吞吐时，不能按 x64 的提速算产能**。
+* **测量纪律（引用 arm64 / 手机数字必须带）**：同一台机器**不钉核**时逐次比值从 **0.988 到 1.096**（±5%，与要读的效应同阶）；
+  钉单核 + best-of-N 后收敛到 ±2%。早先一轮报的 1.078/1.106 就落在这条噪声带内 —— **方向对、数值不可引用**。
+* **顺带修掉探针的两个读数缺陷**：① 旧侧定位用 `git rev-list -1 HEAD -- <路径>`，而**路径限制的历史把「删除该路径的提交」也算一次改动**
+  ⇒ 重组提交一进历史，命中的正是删除提交 ⇒ wasm 对比被**静默跳过**（改 `git log --diff-filter=AM -1 -- <路径>`；
+  且 native 源码与 wasm 产物**各自定位**，实测最后增改不是同一提交：`6ed7f11f` vs `7664673e`）；
+  ② 原计时「先跑完 A 的所有轮次、再跑 B」⇒ 频率漂移整段偏到一侧，同一份二进制跨相位 **±4%**
+  （改**逐轮交错** `benchPair`，修后 x64 重复性 ≤1.5%）。
+* 工具：`tools/perf/kernel-variants.ts`（从**现役单源**派生 `ctl`/`pw8`/`nog3` 变体库，断言过的文本替换；
+  conv3 的优化前实现从 git 取，不手抄）+ `tools/perf/conv-ab.ts`（`CONV_AB_OLD_LIB` 可指任意库 ⇒ 变体库**不需要探针加接口**）。
+  变体的 x64 先验：`ctl`≈1.00 / `pw8`≈1.07 / `nog3`≈**1.14**。
+* 「6.4 ms 到底花在哪 + 为什么这四项不迁移」⇒ **§15**（逐阶段归因 + FMA 上限实验）。
+* 平台表最后一格 **darwin-x64 = 1.408×**（与 x64 同族同带）⇒ **§16**。
+* **arm64 在真实 rollout 里的端到端代价**（含并发放大 / 启动 / TS 兼底悬崖）⇒ **§18**。
+
+---
 ## §12 端到端实测：内核优化在一局 rollout 里的确切倍率（`conv-optimize.plan.md` §11.2 补测，2026-09-23）
 
 > 补 §9–§11 缺的那一格：之前只量了**内核**（win32 native 1.40–1.46× / linux-x64 1.55–1.59×、wasm 1.67–1.71×），
@@ -997,4 +1444,4 @@ KERNEL32/api-ms-win/ucrtbase/VCRUNTIME；有 llvm 时再断言 `llvm-nm -u` 空 
 
 ## 附：本文件旧编号对照（拆分前 `docs/nn.progress.md` 的 § 号）
 
-旧 §66→§1 · 旧 §95→§2 · 旧 §124→§3 · 旧 §125→§4 · 旧 §126→§5 · 旧 §127→§6 · 旧 §131→§7 · 旧 §136→§8 · 旧 §140→§9 · 旧 §141→§10 · 旧 §142→§11 · 旧 §143→§12
+旧 §66→§1 · 旧 §95→§2 · 旧 §124→§3 · 旧 §125→§4 · 旧 §126→§5 · 旧 §127→§6 · 旧 §131→§7 · 旧 §136→§8 · 旧 §140→§9 · 旧 §141→§10 · 旧 §142→§11 · 旧 §143→§12 · 旧 §144→§14 · 旧 §145→§15

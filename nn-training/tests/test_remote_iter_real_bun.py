@@ -181,6 +181,14 @@ def test_node_runner_shards_byte_identical_to_direct_run(tmp_path: Path) -> None
     assert out["report"]["shards"] == 1
     assert out["report"]["games"] == 1
 
+    # 长驻池**真的接上了**（这是全仓唯一「真 bun + 真导出器」走池的路径）：
+    # 协议漂移（serve-loop.ts 改了标记/argv 约定）会让池静默回落一次性 —— 只慢不错，
+    # 所以必须在这里响亮地钉住「服务过」这个事实，否则 1.59× 会在无人察觉时消失。
+    stats = out["serve_pool"]
+    assert stats is not None and stats["served"] == 1, (
+        f"真 bun 路径没走长驻池：{stats}（--serve 协议漂移？）"
+    )
+
     # 报告口径与直跑一致（elapsedSec 是唯一允许不同的字段）
     rep_a = json.loads((dir_a / "w0" / "_rl_report.json").read_text(encoding="utf-8"))
     rep_b = json.loads((dir_b / "w0" / "_rl_report.json").read_text(encoding="utf-8"))

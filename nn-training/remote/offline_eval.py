@@ -39,7 +39,7 @@ from platform_utils import cpu_worker_slots
 
 # 单局看门狗口径：**一律通过模块属性读**（`game_watch.X`）——import 会把值抄成第二份绑定，
 # 测试 patch 了 game_watch 那份、调用点还在读旧绑定就是静默的错口径。
-from remote import game_watch
+from remote import game_watch, serve_pool
 from rl.eval_local import (
     a_eval_seed_list,
     eval_done_keys,
@@ -335,7 +335,10 @@ def run_cloud_eval(
 ) -> dict:
     """在云机跑第 `it` 轮的 A 层评估：逐局落账 + `settle_eval_summary`。**永不抛**。
 
-    返回 `{ran, games, settled, failed, skipped, wver, sec, error?}`（给调用方记日志/回传用）。
+    返回 `{ran, games, settled, failed, skipped, wver, sec, servePool, error?}`（给调用方记日志用）。
+
+    `servePool` 只是本轮的池诊断计数（served/spawned/killed/fallback/reasons；没建池 = None）——
+    **不进 wire**：它不经任何账本/manifest，hub 侧不需要认识这个键。
     """
     log = log or _rl_log
     out: dict[str, Any] = {
@@ -348,6 +351,9 @@ def run_cloud_eval(
         "sec": 0.0,
     }
     t0 = time.time()
+    # 池的所有权在本函数（创建 → 轮末关）；先声明成 None，好让 finally 对**任何**出口都成立
+    # （函数里有多处 `return out`，finally 一样会跑）。
+    pool = None
     try:
         if not plan.enabled:
             log(f"[eval-cloud] it{it}: 课程没配 eval 语料（eval_games_per_stage=0）——跳过")
@@ -387,6 +393,28 @@ def run_cloud_eval(
             f"[eval-cloud] it{it}: 开评 {len(todo)}/{len(pairs)} 局"
             f"（语料 {len(plan.stages)} 关 × {plan.n_seeds} 种，wver={key16[:12]}…，并发 {n_slots}）"
         )
+        # 长驻 worker 池（`docs/nn/runtime-opt.md` §22.7）：逐局 spawn 时每局重付一次 bun 启动 +
+        # wasm 编译 + 首用 attestation×3 + 权重解析。收益 ∝ **每 lane 局数**（§22.2）：本地 16 核
+        # （n_slots=12、100 局 ⇒ 8 局/lane）约 1.2–1.3×；96 vCPU 的 TPU 会话（92 slots、100 局
+        # ⇒ ~1 局/lane）则基本持平（冷启动本来就能并发，无复用）。池**每轮一个**并在轮末关掉：
+        # 不把常驻进程留到段末（空闲占内存），而冷启动一轮只付一次。
+        # 池上限取 `min(slots, 本轮局数)`：slots 远大于局数时（例：96 vCPU 会话给 92 slots、
+        # 本轮只有 8 局），按 slots 起池等于为 8 局预热 92 个进程 —— 纯浪费（冷启动排队）。
+        pool = serve_pool.make_pool(
+            bun_bin, serve_pool.EVAL_SCRIPT, ts, min(n_slots, len(todo)), log
+        )
+        if pool is not None:
+            ready_n = pool.start()
+            if ready_n:
+                log(
+                    f"[eval-cloud] it{it} 长驻 worker 池：{ready_n}/{min(n_slots, len(todo))} 就绪"
+                    f"（{serve_pool.EVAL_SCRIPT}）——逐局进程启动/权重解析只付一次，"
+                    "单局失败自动回退一次性 spawn"
+                )
+            else:
+                log(f"[eval-cloud] it{it} 长驻 worker 池起不来 ⇒ 本轮全部走一次性 spawn")
+                pool.close()
+                pool = None
         lock = threading.Lock()
         jsonl_lock = threading.Lock()
         seen: set[tuple[int, int]] = set()
@@ -440,6 +468,7 @@ def run_cloud_eval(
                         cwd=str(ts),
                         log_fn=log,
                         attempt=attempt,
+                        pool=pool,
                     )
                     wall = time.time() - t_game
                     break
@@ -478,17 +507,35 @@ def run_cloud_eval(
                     failed.append((int(stage), int(seed), f"落账失败 {type(e).__name__}: {e}"))
 
         eval_jsonl.parent.mkdir(parents=True, exist_ok=True)
-        if n_slots <= 1:
-            for task in todo:
-                run_one(task)
-        else:
-            with ThreadPoolExecutor(max_workers=n_slots, thread_name_prefix="cloud-eval") as ex:
-                list(ex.map(run_one, todo))
+        try:
+            if n_slots <= 1:
+                for task in todo:
+                    run_one(task)
+            else:
+                with ThreadPoolExecutor(
+                    max_workers=n_slots, thread_name_prefix="cloud-eval"
+                ) as ex:
+                    list(ex.map(run_one, todo))
+        finally:
+            if pool is not None:
+                log(f"[eval-cloud] it{it} " + pool.summary())
+                pool.close()
 
         # 单局耗时分布（每轮都打）：<5s 这条线（以及重试次数）靠真数据校准，不靠猜。
         log(
             f"[eval-cloud] it{it} "
             + game_watch.game_time_summary("eval", game_walls, retried=len(retried_games))
+        )
+        out["servePool"] = (
+            None
+            if pool is None
+            else {
+                "served": pool.served,
+                "spawned": pool.spawned,
+                "killed": pool.killed,
+                "fallback": pool.fallback,
+                "reasons": dict(pool.fallback_reasons),
+            }
         )
         out["settled"] = len(seen)
         out["failed"] = len(failed)
@@ -518,6 +565,8 @@ def run_cloud_eval(
         log(f"[eval-cloud] it{it} 评估异常（已忽略，训练继续）：{type(e).__name__}: {e}")
         out["error"] = f"{type(e).__name__}: {e}"
     finally:
+        if pool is not None:
+            pool.close()  # 幂等：内层 finally 已关过就是空操作（防「创建后、执行前」抛出的漏）
         out["sec"] = round(time.time() - t0, 2)
     if out["ran"]:
         log(

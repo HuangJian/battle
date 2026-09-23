@@ -35,7 +35,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from platform_utils import cpu_worker_slots
-from remote import game_watch, offline_eval
+from remote import game_watch, offline_eval, serve_pool
 from remote.artifacts import ArtifactStore, sha256_bytes, sha256_file
 from remote.offline_deliver import OfflineDeliverer
 from remote.offline_eval import (
@@ -46,6 +46,17 @@ from remote.offline_eval import (
     run_cloud_eval,
 )
 from rl.eval_local import a_eval_seed_list
+
+
+@pytest.fixture(autouse=True)
+def _no_serve_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """本文件的用例都把 `run_local_eval_game` 换成了假执行器 ⇒ **谢绝建池**。
+
+    池由 `run_cloud_eval` 建（真进程），而这一层的关切是「语料/落账/收线」，不是执行面；
+    不关的话每个用例会起几个真 bun 进程去跑一个假导出器。**池接线本身**由
+    `tests/test_offline_eval_pool.py` 专门验（那里用假池，不起进程）。
+    """
+    monkeypatch.setenv(serve_pool.ENV_SWITCH, "0")
 
 
 def _quiet(_msg: str) -> None:
