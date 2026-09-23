@@ -418,12 +418,48 @@ _admin_net_probe(20) · _admin_halt(18) · _admin_queue(10) · _admin_status(9) 
 
 > 决策 → `DECISIONS.md` §2026-09-23-goalnn-godmodule-wire；全文 → `engineering.md` §23「第四步」。
 
-**下一步（第五步）刀口**：BC 助手簇 —— `_bc_fetch_resume` / `_bc_local_resume_dir` /
-`_bc_store_local_resume` / `_bc_load_local_resume` / `_bc_post_epoch` / `_bc_device` /
-`normalize_ppo_device` / `resolve_bc_seed`（~L1583‑1753，现应为 ~L1350‑1520），与 `_run_bc_job`
-同生命周期。**先量**：它们读哪些模块全局、测试接缝在哪（`normalize_ppo_device` / `resolve_bc_seed`
-是公开名，可能有外部读者 ⇒ 需留门面）。`_run_bc_job`（190 行）/ `run_job`（743）/ `worker_loop`（364）
-是宿主，**不动**。
+**下一步（第五步）侦察（2026-09-23，AST 实测）：BC 簇与 HTTP 核心的依赖形状**
+
+先把「谁依赖谁」量清——这决定第五步能不能直接拆 BC：
+
+| 函数 | 行数 | 调用的顶层函数 | 读的模块级名 |
+|---|---|---|---|
+| `_bc_local_resume_dir` / `_bc_store_local_resume` / `_bc_load_local_resume` | 6 / 18 / 10 | 仅簇内 | 无 |
+| `_bc_device` / `normalize_ppo_device` / `resolve_bc_seed` | 9 / 25 / 18 | 无 | 无 |
+| `_bc_fetch_resume` / `_bc_post_epoch` | 30 / 41 | **`_request`**（宿主） | 无 |
+| `_run_bc_job` | 190 | `_request` 系 + `_persist_result` + 上面的助手 | `d14_corpus_match` |
+
+**关键发现**：BC 簇**零模块级状态**（不像 wire 簇），但它整簇站在 **HTTP 传输原语**（`_request` 系）
+上；宿主里其余 18 个函数也全站在同一原语上。⇒ **直接拆 BC 会造成环**（`bc_job` 要 `_request`、
+而 `worker` 又要 import `bc_job`），用延迟 import 换来的只是「把环藏起来」（本仓
+`tests/test_layering.py` 头部就记着这种「延迟 import 掩盖循环」的旧账）。
+
+**所以正确的下一刀是先把传输核心下沉**（它才是 keystone），再拆 BC：
+
+* **刀口 = `remote/http.py`**：`_opener` / `_get_opener` / `_POLL_WARN_AT` / `_warn_non_200` /
+  `_read_body` / `_request` / `_sched_headers` / `_get_with_retry`（≈ **253 行**，含 2 处状态）。
+  实测**自含**：组内只调自己 + `remote.wire`（`_BULK` / `_bulk_pace` / `_min_rate` /
+  `_note_rate` / `_reroll_decision` / `_wire_add` / `_wire_note_reroll` / `WireSlowError`），
+  零宿主依赖 ⇒ 依赖方向 `http ← worker`（与 `wire` 同形，无环）。搬后 `worker.py`
+  ≈ 3290 → 3040 行，而且 BC / 下载 / 作业生命周期三组从此可选送。
+* **seam 面比前几刀大，但同样是「按调用点定档」**：patch `worker._request` 的测试分两类——
+  ① 之后调**宿主**函数（`claim_job` / `heartbeat` / `post_result` / `download_*` / 离线配额 /
+  优先级调度）⇒ 解析在 `worker` 命名空间，**一行不改**；② 之后调**已搬走**的
+  `_get_with_retry` / `_read_body`（`tests/test_wire_reroll.py` 的 3 处 `_request` +
+  `_reroll_decision` 1 处，可能还有 `test_body_transfer_guard`）⇒ 必须改指 `remote.http`。
+  范本：第四步只动了一个文件的 autouse fixture（最后合计 2 行）。
+* **守卫**：`test_worker_state_contract` 再改一次宿主（`_opener` / `_POLL_WARN_AT` → `http`，
+  与 `wire` 同构：新增第三组清单）；新增 `tests/test_http_split.py`（照 `test_wire_split.py`
+  六条：定义唯一 / 不得反向 import / 同一对象 / 一份账 / 顶层可变容器清单 / 注入点口径）。
+* **再下一刀（第六步）才是 BC**：`_bc_*` ×7 + `normalize_ppo_device` + `resolve_bc_seed` +
+  `_run_bc_job` → `remote/bc_job.py`（依赖 `remote.http`，仍无环）；`_run_bc_job` /
+  `_bc_fetch_resume` / `_bc_post_epoch` 被 `e2e/test_bc_epoch_e2e.py` 直接 import ⇒ 留门面；
+  `normalize_ppo_device` / `resolve_bc_seed` / `_bc_device` 被 `tests/` 直接 import ⇒ 同上。
+  **注意** `tests/test_worker_device.py` 有一条读 `worker.py` **源码文本**的守卫
+  （`flat.count("normalize_ppo_device(device)") == 1`，且顺序在 `"kind"]) == "bc"` 之前）——
+  它看的是 `run_job` 里的调用点（宿主，不动）⇒ 应继续绿，但必须跑一遍确认。
+* 纯助手单独拆（只搬 6 个无依赖函数，≈ 86 行）**否决**：收益 2.6%，且把一个关注点劈成两个
+  模块——与「按职责切」相悖。
 
 ### 5.4 本轮**不做**（已核，刻意保留）
 
