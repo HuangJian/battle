@@ -29,7 +29,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from remote.protocol import (
+from common.protocol import (
     PLAN_PROTO,
     RUN_MAX_ITERS_HARD_CAP,
     RUN_NODE_LABEL,
@@ -484,7 +484,7 @@ def iter_spec(plan: dict, it: int, pairs: list[tuple[int, int]], *, wver: str, c
     交付 `remote/iter_rollout.run_iter_rollout` 前仍会过 `validate_rollout_spec`
     （协议白名单 + 相对路径 + 逐局 stage/seed）——模板损坏/被篡改在这里被抓住。
     """
-    from remote.protocol import validate_rollout_spec
+    from common.protocol import validate_rollout_spec
 
     return validate_rollout_spec(
         {

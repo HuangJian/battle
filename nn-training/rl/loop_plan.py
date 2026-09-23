@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from remote.protocol import COURSE_ENABLE_MARKER
+from common.protocol import COURSE_ENABLE_MARKER
 from rl.bc_ledger import inflight_jobs
 from rl.commit_journal import CommitJournal
 from rl.loop_tasks import RoundFacts, Task, pending_tasks, round_tasks

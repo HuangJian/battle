@@ -30,7 +30,7 @@ import rl.loop_core as loop_core
 import rl.loop_plan as loop_plan
 import rl.loop_serve as loop_serve
 import rl.train_ledger as train_ledger
-from remote.protocol import COURSE_ENABLE_MARKER
+from common.protocol import COURSE_ENABLE_MARKER
 from rl.loop_round import STEP_METHOD
 from rl.loop_serve import CourseRuntime, serve
 from rl.loop_tasks import ROUND_TASKS

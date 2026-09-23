@@ -43,6 +43,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from common.protocol import decode_weights_json
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from remote.hub_client import (
     git_head,
@@ -52,7 +53,6 @@ from remote.hub_client import (
     publish_job,
     verify_and_land_bc,
 )
-from remote.protocol import decode_weights_json
 from rl.archive import backup_weights
 from rl.bc_config import (
     BC_SUFFIX,

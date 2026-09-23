@@ -29,6 +29,15 @@ nn-training/
 ├── platform_utils.py        # 跨平台子进程（Windows CREATE_NO_WINDOW 等）
 ├── weights_prune.py         # 权重文件归档轮转管理器（保留最近 K 份，自动更新 WEIGHTS.md）
 │
+├── common/                  # 【共享原语层 L0】纯 stdlib，零上层依赖；单一定义防语义漂移
+│   ├── hashing.py           #    sha256_file / sha256_bytes / sha256_json
+│   ├── proc.py              #    run_capture（显式 utf-8 + errors=replace）/ bun_version / POPEN_NO_WINDOW
+│   ├── fs.py                #    原子写 / JSONL 追加 / tar 安全解包
+│   ├── text.py              #    exc_tail（异常尾部同口径截取）
+│   ├── logutil.py           #    default_log（统一带时间戳 log 工厂）
+│   ├── protocol.py          #    分布式采样器协议（原 remote/protocol.py，DECISIONS §2026-09-23）
+│   └── game_watch.py        #    对局转播纯逻辑（原 remote/game_watch.py，同上）
+│
 ├── models/                  # 【模型包】神经网络定义 + 权重导入导出
 │   ├── core.py              #    NNPolicy：Conv(14→32→48→64) + GAP + FC + 双头（BC 基座）
 │   ├── student.py           #    StudentNet / PPOStudent：CoordConv-ConvMixer-Lite（P1.5 蒸馏）

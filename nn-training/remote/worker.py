@@ -31,22 +31,9 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
-from remote import net_http
-from remote.bulk_sched import (
-    BULK_P1_CRITICAL,
-    BULK_P2_PREFETCH,
-    BulkPreemptError,
-    BulkScheduler,
-    control_path,
-)
-from remote.iter_rollout import run_iter_rollout
-from remote.prefetch import (
-    PREFETCH_DEPTH_DEFAULT,
-    PREFETCH_DIR_NAME,
-    PrefetchStore,
-    pick_candidates,
-)
-from remote.protocol import (
+from common.fs import extract_tar_bytes
+from common.proc import run_capture
+from common.protocol import (
     AUTH_HEADER,
     BLOB_DEMO,
     BLOB_OPT,
@@ -77,8 +64,24 @@ from remote.protocol import (
     unpack_payload,
     validate_result,
 )
-from remote.protocol import (
+from common.protocol import (
     d14_corpus_match as protocol_d14_corpus_match,
+)
+from common.text import exc_tail
+from remote import net_http
+from remote.bulk_sched import (
+    BULK_P1_CRITICAL,
+    BULK_P2_PREFETCH,
+    BulkPreemptError,
+    BulkScheduler,
+    control_path,
+)
+from remote.iter_rollout import run_iter_rollout
+from remote.prefetch import (
+    PREFETCH_DEPTH_DEFAULT,
+    PREFETCH_DIR_NAME,
+    PrefetchStore,
+    pick_candidates,
 )
 from remote.result_upload import (
     RESULT_UPLOAD_MODE_DEFAULT,
@@ -1296,15 +1299,10 @@ def worker_tag() -> str:
 def _failure_detail(e: BaseException, limit: int = 4000) -> str:
     """异常现场（traceback 尾段）——回报给人看，不参与任何判定。
 
-    截**尾**段而非头段：栈顶几帧是 transport 样板，真正的原因是最后一帧的
-    `ProtocolError: bun 未安装 …`。
+    唯一实现见 `common.text.exc_tail`（截尾不截头、绝不抛的理由都在那里）；本名保留
+    为调用点别名。`rl/stream.py::_exc_tail` 是本函数的同源孪生，两边现已同源。
     """
-    import traceback
-
-    try:
-        return traceback.format_exc()[-limit:]
-    except Exception:  # 极端情况下 format_exc 本身不可用——退回落单行
-        return f"{type(e).__name__}: {e}"[:limit]
+    return exc_tail(e, limit)
 
 
 #: 作业体（restore/grad）崩溃里**仍按瞬态**处理的异常特征：换台机器 / 换个时机可能就好了。
@@ -1519,15 +1517,12 @@ def prune_job_dirs(work_dir: Path, keep: int = JOB_DIR_KEEP, log=lambda msg: Non
 
 
 def unpack_opt_tar(tar_bytes: bytes, dest: Path) -> None:
-    """opt_init base64 tar → dest。兼容 3.10（无 filter 参数）。"""
-    import io
+    """opt_init base64 tar → dest。兼容 3.10（无 filter 参数）。
 
-    dest.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:") as tf:
-        try:
-            tf.extractall(dest, filter="data")
-        except TypeError:  # Python < 3.12
-            tf.extractall(dest)
+    唯一实现见 `common.fs.extract_tar_bytes`（与 `remote/hub_client._extract_tar`
+    原是同款孪生，两侧都写了「Python < 3.12 无 filter」这条注释）。
+    """
+    extract_tar_bytes(tar_bytes, dest)
 
 
 def pack_opt_tar(src_dir: Path) -> bytes:
@@ -1550,13 +1545,7 @@ def pack_opt_tar(src_dir: Path) -> bytes:
 
 def _git_head(repo_root: Path = REPO_ROOT) -> str:
     try:
-        r = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=str(repo_root),
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        r = run_capture(["git", "rev-parse", "HEAD"], cwd=repo_root, timeout=30)
         if r.returncode == 0:
             return r.stdout.strip()
     except Exception:
@@ -1569,8 +1558,6 @@ def _ensure_commit(target: str, repo_root: Path = REPO_ROOT, log=lambda msg: Non
 
     返回 True（一致）或 False（重试 5 次后仍不一致）。
     """
-    import subprocess as _sp
-
     for attempt in range(5):
         head = _git_head(repo_root)
         if head and head == target:
@@ -1580,27 +1567,15 @@ def _ensure_commit(target: str, repo_root: Path = REPO_ROOT, log=lambda msg: Non
             f"target={target[:12]} — fetching (attempt {attempt + 1}/5)"
         )
         try:
-            _sp.run(
-                ["git", "fetch", "origin"],
-                cwd=str(repo_root),
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            _sp.run(
-                ["git", "checkout", target],
-                cwd=str(repo_root),
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
+            run_capture(["git", "fetch", "origin"], cwd=repo_root, timeout=60)
+            run_capture(["git", "checkout", target], cwd=repo_root, timeout=30)
         except Exception as e:
             log(f"git fetch/checkout failed: {e}")
     head = _git_head(repo_root)
     return head == target
 
 
-# D14 比对规则的**唯一实现**住 `remote.protocol`（发布端 `hub_client.iter_shard_dirs`
+# D14 比对规则的**唯一实现**住 `common.protocol`（发布端 `hub_client.iter_shard_dirs`
 # 打包时用同一条规则挑选 shard）——这里只做名字转发，保持既有 import/调用面不变。
 d14_corpus_match = protocol_d14_corpus_match
 
@@ -2502,7 +2477,7 @@ def run_job(
     # ---- BC-anchored kickstart ref（§363）：有系数无尺子＝静默裸奔，不可接受——
     # 缺字节响亮拒绝；系数为 0 直接跳过（零开销，旧 manifest 行为不变）。
     kick_kl = float(manifest.get("kickstart_kl", 0.0) or 0.0)
-    # 阈值判据（见 remote/protocol.NEGLIGIBLE_COEF）：课程按几何衰减永远到不了精确 0，
+    # 阈值判据（见 common/protocol.NEGLIGIBLE_COEF）：课程按几何衰减永远到不了精确 0，
     # 实测 1.455e-11 时旧判据 `> 0` 仍会加载 ref 并每轮预计算 3 s。用 coef_active 兜底，
     # 也覆盖"旧 hub 产出的、仍带微小系数的在途 manifest"。
     if kick_kl != 0.0 and not coef_active(kick_kl):

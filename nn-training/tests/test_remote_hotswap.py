@@ -35,9 +35,9 @@ from pathlib import Path
 import pytest
 
 import platform_utils
+from common.protocol import CodeChangedError, ProtocolError
 from platform_utils import sandbox_delete_blocked
 from remote import worker as W
-from remote.protocol import CodeChangedError, ProtocolError
 from remote.worker import prune_job_dirs
 
 

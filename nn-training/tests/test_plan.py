@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from remote.protocol import ProtocolError
+from common.protocol import ProtocolError
 from rl.course import build_pairs
 from rl.plan import (
     argv_fp,

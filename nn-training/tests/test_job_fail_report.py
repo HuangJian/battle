@@ -39,9 +39,9 @@ if str(ROOT) not in sys.path:
 
 from test_remote_ppo import _boot_server, _http, _mini_manifest, _write_shard  # type: ignore
 
+from common.protocol import FAIL_NAME, JobFailedError, normalize_manifest
 from remote.hub_client import publish_job, report_job_failure, wait_job
 from remote.hub_server import _JobStore
-from remote.protocol import FAIL_NAME, JobFailedError, normalize_manifest
 
 _QUIET = lambda _m: None  # noqa: E731 — 测试日志静音
 

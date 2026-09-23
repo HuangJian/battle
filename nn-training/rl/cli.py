@@ -32,7 +32,7 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
 
     # 节点侧单局硬顶兜底值：**引用看门狗里的那个常量**（不在 help 里抄第二份数字——
     # 抄了就会漂，而 help 说的必须就是代码做的事）。函数内 import：本模块顶层不拉重物。
-    from remote import game_watch
+    from common import game_watch
 
     ap = argparse.ArgumentParser()
     # ===== RL 入口整合（DECISIONS §307）：三模式后端 =====

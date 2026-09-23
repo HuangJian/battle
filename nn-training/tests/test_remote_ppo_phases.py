@@ -25,7 +25,7 @@ if str(ROOT) not in sys.path:
 
 import pytest
 
-from remote.protocol import JobFailedError
+from common.protocol import JobFailedError
 from rl.loop_round import RemotePpoJob, RoundContext
 from rl.loop_steps import TrainingSteps
 

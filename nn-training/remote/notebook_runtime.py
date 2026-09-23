@@ -35,13 +35,20 @@ import time
 from pathlib import Path
 from typing import Any, cast
 
+from common.logutil import log_line
+from common.proc import run_capture
 from pid_probe import pid_alive
 
 # cell 端 /code 引导（fetch+unpack+sys.path）已完成；本模块只管运行时。
 
 
 def _log_default(msg: str) -> None:
-    print(f"[{time.strftime('%H:%M:%S')}] [battle-rl] {msg}", flush=True)
+    """默认日志（tag=`battle-rl`）——行格式见 `common.logutil`（`clock=time` 保可注入）。
+
+    ⚠ `tests/test_notebook_runtime.py` 用 `monkeypatch.setattr(nbr, "time", clock)`
+    注入假钟 ⇒ 必须把本模块的 `time` 传进去，不能让 logutil 自己取全局 `time`。
+    """
+    log_line("battle-rl", msg, clock=time)
 
 
 def _hub_open(req: Any, timeout: float = 15) -> Any:
@@ -106,7 +113,6 @@ def _probe_cuda(log) -> dict | None:
     崩溃 / 输出不可解析 → None。
     """
     import json as _json
-    import subprocess as _sp
 
     _probe = (
         "import json, torch\n"
@@ -115,9 +121,9 @@ def _probe_cuda(log) -> dict | None:
         " 'names': [torch.cuda.get_device_name(i) for i in range(n)]}), flush=True)\n"
     )
     try:
-        r = _sp.run(
-            [sys.executable, "-u", "-c", _probe], capture_output=True, text=True, timeout=60
-        )
+        # run_capture 显式 UTF-8：这台机器上 torch 可能吐出带中文的 warning/错误行，
+        # 裸 text=True 会在读线程里抛 UnicodeDecodeError ⇒ stdout 变成 None（§19）。
+        r = run_capture([sys.executable, "-u", "-c", _probe], timeout=60)
     except BaseException as e:  # 子进程起不来/超时——探测失败按无 CUDA
         log(f"torch 探测子进程异常（{type(e).__name__}: {e}）—— 按无 CUDA 处理")
         return None

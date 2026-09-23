@@ -29,8 +29,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from common.protocol import PAYLOAD_NAME, PAYLOAD_PERTURB_NAME, ProtocolError
 from remote import hub_client
-from remote.protocol import PAYLOAD_NAME, PAYLOAD_PERTURB_NAME, ProtocolError
 
 # ------------------------------------------------------------------ 夹具
 

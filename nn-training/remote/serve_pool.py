@@ -364,7 +364,7 @@ class ServePool:
             self._drop(w)
             return TaskOutcome(False, 0.0, [], "write-failed")
         # 轮询等待：软告警 + 硬顶都在这里判（与一次性路径同一套 game_watch 口径）
-        from remote import game_watch
+        from common import game_watch
 
         warned = False
         got = False

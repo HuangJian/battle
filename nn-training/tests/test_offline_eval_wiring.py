@@ -27,10 +27,10 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from common.game_watch import DEFAULT_GAME_TIMEOUT_SEC
 from platform_utils import cpu_worker_slots
 from remote import offline_boot, offline_eval
 from remote.artifacts import ArtifactStore
-from remote.game_watch import DEFAULT_GAME_TIMEOUT_SEC
 from remote.hub_server import _HubQueue, _JobStore
 from remote.run_loop import (
     _close_eval,
@@ -178,7 +178,7 @@ def test_rollout_workers_default_is_the_same_formula_as_eval(
 
 def test_with_rollout_workers_replaces_only_the_workers_field() -> None:
     """换并行度不得动摇声明集：`workers` 不进 `data_fp`（它只算 argv 的 stage/seed）。"""
-    from remote.protocol import iter_expected_data_fp
+    from common.protocol import iter_expected_data_fp
 
     spec = {
         "argv": [["bun", "export.ts", "--stages", "3", "--seeds", "11"]],

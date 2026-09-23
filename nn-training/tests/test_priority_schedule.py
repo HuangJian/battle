@@ -34,8 +34,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import remote.worker as W
-from remote.hub_server import _HubQueue, _JobStore, make_server
-from remote.protocol import (
+from common.protocol import (
     CLAIM_MODE_BACKUP,
     CLAIM_MODE_EXCLUSIVE,
     CLAIM_TTL_SEC,
@@ -55,6 +54,7 @@ from remote.protocol import (
     RetryableError,
     job_priority,
 )
+from remote.hub_server import _HubQueue, _JobStore, make_server
 
 TOKEN = "sekret"
 JID = "j" * 16

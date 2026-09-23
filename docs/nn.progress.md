@@ -30,7 +30,7 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | [`docs/nn/remote-transport.md`](nn/remote-transport.md) | hub / worker / 云机 / 隧道 / 离线任务包 / 产物回传 / 优先级调度 / wire 账 | 32 |
 | [`docs/nn/training-stack.md`](nn/training-stack.md) | 训练循环 · 调度器 · supervisor · 课程编排 · 采样配额 · 门禁与停车 · kickstart | 24 |
 | [`docs/nn/experiments.md`](nn/experiments.md) | 课程腿判决 / 探针 / 负结果归档（含人类探针与 BC-ref 判死） | 32 |
-| [`docs/nn/engineering.md`](nn/engineering.md) | 测试纪律 · 子进程编码契约 · 门禁耗时 · 账本与 metrics schema · 语料指纹 | 19 |
+| [`docs/nn/engineering.md`](nn/engineering.md) | 测试纪律 · 子进程编码契约 · 门禁耗时 · 账本与 metrics schema · 语料指纹 · **共享原语层与分层契约** | 22 |
 | [`docs/nn/console.md`](nn/console.md) | dashboard 侧：组件面 / 调度器视图 / 任务包与产物两条腿 / 回显 | 10 |
 | [`docs/nn/runtime-opt.md`](nn/runtime-opt.md) | rollout / eval 运行时：native 内核 · 并发口径 · 派发 · 单局看门狗 · 长驻池 | 22 |
 | [`docs/nn/tpu-perf.md`](nn/tpu-perf.md) | TPU / XLA：设备实测 · 单步耗诊断 · 编译缓存 · PPO 吞吐 | 8 |
@@ -287,3 +287,5 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | §143 | docs/nn/runtime-opt.md §12 | 端到端实测：内核优化在一局 rollout 里的确切倍率（2026-09-23） |
 | §144 | docs/nn/runtime-opt.md §14 | arm64 实机计时 + 逐项归因：无负项、零回落，但 x64 的 +44% 不迁移（2026-09-23） |
 | §145 | docs/nn/runtime-opt.md §15 | arm64 逐阶段归因：6.4 ms 花在哪 + 为什么四项不迁移（FMA 上限实验）（2026-09-23） |
+| §146 | docs/nn/engineering.md §21 | `common/` 共享原语层：12 组同名实现收敛 + 13 处 `text=True` 编码隐患（2026-09-23） |
+| §147 | docs/nn/engineering.md §22 | 断开 `rl` ↔ `remote` 包循环：纯逻辑叶子下沉 L0 + 分层守卫（2026-09-23） |

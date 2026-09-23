@@ -32,10 +32,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import dist_common
+from common.protocol import decode_weights_json, encode_weights_json
 from remote import worker as worker_mod
 from remote.hub_client import AUTH_HEADER
 from remote.hub_server import _JobStore, make_server
-from remote.protocol import decode_weights_json, encode_weights_json
 from rl import bc_loop
 from rl.bc_config import BcEvalBlock, load_bc_course
 from tests.helpers.hub_poll import hub_poll

@@ -78,17 +78,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Lock, Thread
 
-from remote._instance_lock import (
-    acquire_instance_lock,
-    default_instance_lock_path,
-    release_instance_lock,
-)
-from remote._port_guard import ensure_port_free
-
-# 产物账本行 → 课程账本行的搬运**只在 remote.artifacts 实现一份**（人工导入与实时补传共用）：
-# 两份翻译必然漂开，而「两腿同字段」正是控制台那张表存在的意义。
-from remote.artifacts import ArtifactStore, ledger_row_from_metrics
-from remote.protocol import (
+from common.fs import atomic_write_bytes
+from common.protocol import (
     AUTH_HEADER,
     CLAIM_MODE_BACKUP,
     CLAIM_MODE_EXCLUSIVE,
@@ -134,6 +125,16 @@ from remote.protocol import (
     sanitize_run_id,
     unpack_result_v2,
 )
+from remote._instance_lock import (
+    acquire_instance_lock,
+    default_instance_lock_path,
+    release_instance_lock,
+)
+from remote._port_guard import ensure_port_free
+
+# 产物账本行 → 课程账本行的搬运**只在 remote.artifacts 实现一份**（人工导入与实时补传共用）：
+# 两份翻译必然漂开，而「两腿同字段」正是控制台那张表存在的意义。
+from remote.artifacts import ArtifactStore, ledger_row_from_metrics
 from remote.push_dispatch import (
     DEFAULT_PUSH_CONFIG,
     PushDispatcher,
@@ -1547,7 +1548,7 @@ class _HubQueue(_AuthGuard):
         ★ 开课标记（`training-enabled.txt`）是 2026-09-20 加的**显式闸**：没有它，hub 会把
         tmp/ 下每一门历史课（都有 remote-jobs/ 残影）都当成「在跑的课」登记进课程表，并继续
         把残留的 pending job 派给真 GPU worker（白烧租约）。用户口径：「课程开训需要用户手动
-        开启」；标记由控制台开课写、停课删（`remote.protocol.COURSE_ENABLE_MARKER`）。
+        开启」；标记由控制台开课写、停课删（`common.protocol.COURSE_ENABLE_MARKER`）。
         """
         if not (ent / COURSE_ENABLE_MARKER).exists():
             return False
@@ -2352,11 +2353,12 @@ class _HubQueue(_AuthGuard):
 
 
 def _write_bytes(path: Path, data: bytes) -> None:
-    """tmp + replace（中断的补传 POST 不留半截文件——半截权重比没有权重更危险）。"""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_bytes(data)
-    os.replace(tmp, path)
+    """tmp + replace（中断的补传 POST 不留半截文件——半截权重比没有权重更危险）。
+
+    唯一实现见 `common.fs.atomic_write_bytes`（与 `remote/artifacts.atomic_write_bytes`
+    原是同款孪生）。
+    """
+    atomic_write_bytes(path, data)
 
 
 # ------------------------------------------------------------------ net-probe（M0）

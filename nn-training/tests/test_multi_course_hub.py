@@ -33,8 +33,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from remote.hub_server import _HubQueue, _JobStore, as_hub, make_server
-from remote.protocol import (
+from common.protocol import (
     AUTH_HEADER,
     CLAIM_TTL_SEC,
     COURSE_ENABLE_MARKER,
@@ -48,6 +47,7 @@ from remote.protocol import (
     parse_course_arg,
     rotation_order,
 )
+from remote.hub_server import _HubQueue, _JobStore, as_hub, make_server
 from tests.helpers.hub_poll import hub_poll
 from tests.subproc_util import spawn_bound_port
 
@@ -810,7 +810,7 @@ def _artifact_body(run_id: str, it: int, *, course: str = "") -> bytes:
     """一份最小合法补传体（权重自动算指纹；course 可选）。"""
     import hashlib
 
-    from remote.protocol import encode_weights_json
+    from common.protocol import encode_weights_json
 
     wj = json.dumps({"it": it, "w": it * 1.5}).encode("utf-8")
     body: dict = {

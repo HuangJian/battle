@@ -23,13 +23,14 @@ from remote.hub_server import _HubQueue, make_server
 from tests.helpers.hub_poll import hub_poll
 
 #: 生产代码（非测试）搜索根：这些一律不得再引用退役端点。
+#: `protocol.py` 2026-09-23 下沉到 `common/`（S3 断 rl↔remote 循环）——路径跟着走。
 _PROD_FILES = [
     ROOT / "remote" / "hub_server.py",
     ROOT / "remote" / "worker.py",
     ROOT / "remote" / "worker_server.py",
     ROOT / "remote" / "push_dispatch.py",
     ROOT / "remote" / "push_client.py",
-    ROOT / "remote" / "protocol.py",
+    ROOT / "common" / "protocol.py",
     ROOT / "remote" / "hub_client.py",
     ROOT / "remote" / "run_loop.py",
     ROOT / "remote" / "offline_deliver.py",

@@ -11,6 +11,7 @@ from typing import Any, TypedDict
 import numpy as np
 
 import dist_common
+from common.text import exc_tail
 from rl.log import log
 from rl.queue import local_slots_max_of, run_rollout_queue
 from rl.resume import _scan_shards, completed_pairs
@@ -62,19 +63,13 @@ def wave_params(
 
 
 def _exc_tail(e: BaseException, limit: int = 4000) -> str:
-    """异常现场（traceback 尾段）——与 remote/worker.py::_failure_detail 同口径。
+    """异常现场（traceback 尾段）——唯一实现见 `common.text.exc_tail`。
 
-    只留 `str(e)` 时，形如「[Errno 2] No such file or directory: '…/i3/w2/rl_s0_seed111'」
-    的单行错在 e2e/门禁里**无从定位抛点**（2026-09-20 实测：一次 `-n 12` 下的 ENOENT
-    只能靠翻日志猜）。本模块不得 import remote.worker（那是训练侧，会拖 torch 进采样路径），
-    故就地保留同款小助手。
+    本模块不得 import `remote.worker`（训练侧，会把 torch 拖进采样路径）——但这条
+    理由对 `common` **不成立**（它只依赖 stdlib）⇒ 原先「就地保留同款小助手」的豁免
+    不再需要。名字保留：本模块内的调用点与测试引用都不变。
     """
-    import traceback
-
-    try:
-        return traceback.format_exc()[-limit:]
-    except Exception:  # 极端情况下 format_exc 本身不可用——退回落单行
-        return f"{type(e).__name__}: {e}"[:limit]
+    return exc_tail(e, limit)
 
 
 def _shard_dir(entry: str) -> str | None:

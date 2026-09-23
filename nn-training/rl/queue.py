@@ -1,12 +1,17 @@
 from __future__ import annotations
 
-import json
 import secrets
-import subprocess
 import threading
 from pathlib import Path
 
-from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+# 以下五个名字是本模块的**公共 re-export 面**（原为本地定义，2026-09-23 收敛到唯一实现）。
+# 调用方（`rl/batch_eval.py` / `rl/eval_dispatch.py` / `rl/rollout_phase.py` / e2e）与
+# 既有测试都从 `rl.queue` 取这些名字 ⇒ 名字留在原位，定义只留一份。
+#   · bun_version / mm  → `common.proc`（版本探测与 major.minor 比对）
+#   · _record_agent_meta → `rl.agent_meta`（dist-agent-meta.jsonl 的唯一写面）
+from common.proc import bun_version as _bun_version
+from common.proc import version_mm as mm  # noqa: F401 — re-export
+from rl.agent_meta import record_agent_meta as _record_agent_meta  # noqa: F401 — re-export
 
 REPO_ROOT = Path(__file__).resolve().parents[2]  # 仓库根 = battle2（nn-training/rl/ 上溯 3 层）
 RUN_ID = secrets.token_hex(8)  # runId 使 iterId 全局唯一（跨 relaunch 防混叠）
@@ -39,38 +44,12 @@ def local_slots_max_of(args) -> int | None:
 
 
 def bun_version(bun: str) -> str:
-    try:
-        return (
-            subprocess.run(
-                [bun, "--version"],
-                capture_output=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=10,
-                **_POPEN_NO_WINDOW,
-            ).stdout.strip()
-            or "?"
-        )
-    except Exception:
-        return "?"
+    """`bun --version`；探测失败/空输出 → `"?"`（唯一实现见 `common.proc.bun_version`）。
 
-
-def mm(version: str) -> str:
-    return ".".join(str(version).split(".")[:2])
-
-
-def _record_agent_meta(meta_path: Path, rec: dict) -> None:
-    """追加一条节点采样元数据到 dist-agent-meta.jsonl（巡检读它聚合进 HTML）。
-
-    rec: {node, it, stage, seed, ok, [win, elapsedSec, wallSec | reason], ts}。
-    elapsedSec = 节点侧服务时长；wallSec = 训练机派发→结算墙钟（含网络）。
-    放锁内调用保证顺序；单局一次 IO，成本可忽略。
+    保留本名与 1 参签名（薄包装），因为 `rl/batch_eval.py` / `rl/eval_dispatch.py` 从中
+    import、且测试用 `monkeypatch.setattr(mod, "bun_version", …)` 打桩。
     """
-    try:
-        with open(meta_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    except OSError:
-        pass
+    return _bun_version(bun, fallback="?")
 
 
 def run_rollout_queue(

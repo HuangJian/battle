@@ -25,6 +25,13 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from common.protocol import (
+    ProtocolError,
+    encode_opt_tar,
+    encode_weights_json,
+    normalize_manifest,
+    unpack_payload,
+)
 from remote.artifacts import ArtifactStore, sha256_bytes
 from remote.bundle import (
     BUNDLE_INDEX,
@@ -32,13 +39,6 @@ from remote.bundle import (
     export_bundle,
     import_bundle,
     read_bundle_index,
-)
-from remote.protocol import (
-    ProtocolError,
-    encode_opt_tar,
-    encode_weights_json,
-    normalize_manifest,
-    unpack_payload,
 )
 from remote.run_loop import run_standalone
 from rl.plan import build_plan, dump_plan, planned_iters
@@ -350,7 +350,7 @@ DEMO_RAW = b"demo-npz" + b"y" * 64
 
 def test_export_import_carries_demo_blob(tmp_path: Path) -> None:
     """demo 腿任务包自动带 demo.npz：job 目录 blob.demo → 包件 → 导入落盘（sha 对账）。"""
-    from remote.protocol import blob_path
+    from common.protocol import blob_path
 
     plan = build_plan(
         _args(), it=2, iters_total=4, rotate_seed=5, max_iters=3, log=_quiet

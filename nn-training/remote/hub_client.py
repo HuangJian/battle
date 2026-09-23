@@ -16,7 +16,6 @@ job 队列/租约/鉴权全在旁路 hub-server（remote/hub_server.py）。
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import os
 import shutil
@@ -27,9 +26,10 @@ import zipfile
 from pathlib import Path
 from typing import NamedTuple
 
-from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
-from platform_utils import rmtree_best_effort
-from remote.protocol import (
+from common.fs import append_jsonl, extract_tar_bytes
+from common.hashing import sha256_bytes, sha256_file
+from common.proc import run_capture
+from common.protocol import (
     AUTH_HEADER,
     BLOB_DEMO,
     BLOB_OPT,
@@ -53,9 +53,10 @@ from remote.protocol import (
     unpack_payload,
     validate_rollout_spec,
 )
-from remote.protocol import (
+from common.protocol import (
     job_id as make_job_id,
 )
+from platform_utils import rmtree_best_effort
 from rl.resume import walk_shard_dirs
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -72,17 +73,8 @@ def git_head(repo_root: Path = REPO_ROOT) -> str:
     完成（更详细的 fail-fast 信息）；本函数只做 commit 解析，供 smoke_loopback 等
     各方使用（这些场景可能有未跟踪文件且不生产发布 job）。
     """
-    import subprocess
-
     try:
-        r: subprocess.CompletedProcess[str] = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=str(repo_root),
-            capture_output=True,
-            text=True,
-            timeout=30,
-            **_POPEN_NO_WINDOW,
-        )
+        r = run_capture(["git", "rev-parse", "HEAD"], cwd=repo_root, timeout=30)
         if r.returncode == 0:
             return r.stdout.strip()
     except Exception:
@@ -91,15 +83,13 @@ def git_head(repo_root: Path = REPO_ROOT) -> str:
 
 
 def _sha256_file(path: str) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
+    """文件字节 sha256（唯一实现见 `common.hashing.sha256_file`；本名保留为调用点别名）。"""
+    return sha256_file(path)
 
 
 def _sha256_bytes(b: bytes) -> str:
-    return hashlib.sha256(b).hexdigest()
+    """字节串 sha256（同上，别名）。"""
+    return sha256_bytes(b)
 
 
 # ------------------------------------------------------------------ 打包
@@ -329,7 +319,7 @@ def pack_payload_zip(
     blob 时也不写 init_weights.json（opt tar 已含 model+Adam）。布局 = shard 目录整体
     （+ 可选 init_weights.json）。`manifest` 形参保留只为调用签名兼容。
 
-    2026-09-17：实现改为**转调** `remote.protocol.pack_payload`（多了一个 `extra_files`
+    2026-09-17：实现改为**转调** `common.protocol.pack_payload`（多了一个 `extra_files`
     形参）——半离线（kind=run）的逐轮 payload 也要带额外文件，第三个 tar.xz 打包副本
     没有道理，而两份口径本就只差一个 extra 循环。
 
@@ -942,10 +932,8 @@ def _pack_opt_init(ckpt_remote_dir: str | Path | None) -> str:
 
 
 def _append_ledger(jsonl_path: str | Path, event: dict) -> None:
-    p = Path(jsonl_path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    with open(p, "a", encoding="utf-8") as f:
-        f.write(json.dumps(event, ensure_ascii=False) + "\n")
+    """追加一条账本事件（唯一实现见 `common.fs.append_jsonl`）。"""
+    append_jsonl(jsonl_path, event)
 
 
 def mark_job_completed(jsonl_path: str | Path, jid: str) -> None:
@@ -1585,11 +1573,5 @@ def verify_and_land_bc(
 
 
 def _extract_tar(tar_bytes: bytes, dest: Path) -> None:
-    import io
-
-    dest.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:") as tf:
-        try:
-            tf.extractall(dest, filter="data")
-        except TypeError:  # Python < 3.12
-            tf.extractall(dest)
+    """opt tar 字节 → `dest`（唯一实现见 `common.fs.extract_tar_bytes`）。"""
+    extract_tar_bytes(tar_bytes, dest)

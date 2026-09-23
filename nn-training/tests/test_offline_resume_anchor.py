@@ -28,14 +28,14 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from remote.hub_server import _HubQueue, _JobStore, make_server
-from remote.protocol import (
+from common.protocol import (
     AUTH_HEADER,
     OFFLINE_ARTIFACT_PATH,
     OFFLINE_RESUME_BLOB_PATH,
     OFFLINE_RESUME_PATH,
     encode_weights_json,
 )
+from remote.hub_server import _HubQueue, _JobStore, make_server
 
 TOKEN = "sekret"
 COURSE = "c5-gae"

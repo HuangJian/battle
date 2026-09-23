@@ -30,8 +30,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from common.protocol import RetryableError
 from remote import worker as worker_mod
-from remote.protocol import RetryableError
 
 MB = 1024 * 1024
 

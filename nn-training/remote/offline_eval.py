@@ -35,11 +35,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from platform_utils import cpu_worker_slots
-
 # 单局看门狗口径：**一律通过模块属性读**（`game_watch.X`）——import 会把值抄成第二份绑定，
 # 测试 patch 了 game_watch 那份、调用点还在读旧绑定就是静默的错口径。
-from remote import game_watch, serve_pool
+from common import game_watch
+from platform_utils import cpu_worker_slots
+from remote import serve_pool
 from rl.eval_local import (
     a_eval_seed_list,
     eval_done_keys,
@@ -49,7 +49,7 @@ from rl.eval_local import (
 )
 from rl.log import log as _rl_log
 
-# 单局评估的硬顶：**与 rollout 共用一份口径**（`remote/game_watch.py`）。
+# 单局评估的硬顶：**与 rollout 共用一份口径**（`common/game_watch.py`）。
 # 旧值 900s（= policy.taskTimeoutSec）：一个卡住的评估局会占着一个 slot 15 分钟，而本轮
 # `drain` 的预算只有 `DRAIN_TIMEOUT_SEC`（600s）——读数是「整轮丢掉」而不是「少一局」。
 # 单局正常是亚秒~几秒级（实测逐局 `wallSec`：p50 1.2~1.6s / p90 3.2~4.2s / p99 7~8s；
@@ -434,7 +434,7 @@ def run_cloud_eval(
         def run_one(task: tuple[int, int]) -> None:
             stage, seed = task
             game_dir = Path(work_dir) / f"eval-{int(it)}-s{stage}-d{seed}"
-            # 单局**原地重试**（与 rollout 同一口径，`remote/game_watch.py`）：单局的失败几乎
+            # 单局**原地重试**（与 rollout 同一口径，`common/game_watch.py`）：单局的失败几乎
             # 总是环境性的（宿主机饥饿/慢局/mini-batch 里卡住），而这一局是确定性的（种子固定）
             # ⇒ 重跑同一命令要么拿到同一份结果，要么再次响亮失败。旧行为是一把不过就丢一局，
             # 于是读数里那些「永远失败」的局每轮都没人管。

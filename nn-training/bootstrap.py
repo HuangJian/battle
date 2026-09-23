@@ -76,12 +76,20 @@ def _popen_kwargs(**extra: Any) -> dict[str, Any]:
 
 
 def run(cmd: list[str], *, timeout: int = 120, check: bool = False) -> tuple[int, str, str]:
-    """跑一条命令，返回 (returncode, stdout, stderr)。超时/异常不算崩溃。"""
+    """跑一条命令，返回 (returncode, stdout, stderr)。超时/异常不算崩溃。
+
+    `encoding` 与 `errors` **两个都要**：只写 errors 不定编码，解码仍按 locale
+    （zh-CN Windows = cp936），pip/uv 输出的 UTF-8 字节会在读线程里抛
+    UnicodeDecodeError ⇒ stdout 变 None（docs/nn/engineering.md §19）。本文件刻意
+    不 import `common.proc`：它要在**没有任何依赖**的系统 python 上跑（装依赖之前），
+    所以只保留这一份最小实现。
+    """
     try:
         p = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             errors="replace",
             timeout=timeout,
             **_popen_kwargs(),

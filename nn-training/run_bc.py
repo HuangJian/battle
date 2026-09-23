@@ -29,10 +29,9 @@ BC 的续跑判据是 `bc_round_completed` / job 认领 / bc-resume，任何一�
 from __future__ import annotations
 
 import os
-import subprocess
 from pathlib import Path
 
-from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+from common.proc import run_capture
 from platform_utils import force_utf8_stdio
 from rl.archive import ensure_current_branch_pushed
 from rl.bc_loop import BcLoop, bc_argparser, resolve_bc_runtime
@@ -63,13 +62,8 @@ def main(argv: list[str] | None = None) -> None:
             cleanup_lock(push_lock)
     import dist_common as dc
 
-    current_branch = subprocess.run(
-        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-        cwd=str(REPO_ROOT),
-        capture_output=True,
-        text=True,
-        timeout=30,
-        **_POPEN_NO_WINDOW,
+    current_branch = run_capture(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=REPO_ROOT, timeout=30
     ).stdout.strip()
     # 升级分支必须在 load_dist_config 之前钉住（节点远端分支的选择依赖它）。
     if current_branch and current_branch != "HEAD":

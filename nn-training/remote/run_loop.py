@@ -48,17 +48,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from platform_utils import cpu_worker_slots
-from remote.artifacts import (
-    ArtifactStore,
-    metrics_row,
-    resolve_artifact_dir,
-    sha256_bytes,
-    sha256_file,
-)
-from remote.bundle import CODE_NAME as BUNDLE_CODE_NAME
-from remote.offline_deliver import DRAIN_FLUSH_SEC, OfflineDeliverer, make_deliverer
-from remote.protocol import (
+from common.logutil import log_line
+from common.protocol import (
     BLOB_DEMO,
     PAYLOAD_NAME,
     PLAN_NAME,
@@ -75,9 +66,19 @@ from remote.protocol import (
     pack_payload,
     validate_result,
 )
-from remote.protocol import (
+from common.protocol import (
     job_id as make_job_id,
 )
+from platform_utils import cpu_worker_slots
+from remote.artifacts import (
+    ArtifactStore,
+    metrics_row,
+    resolve_artifact_dir,
+    sha256_bytes,
+    sha256_file,
+)
+from remote.bundle import CODE_NAME as BUNDLE_CODE_NAME
+from remote.offline_deliver import DRAIN_FLUSH_SEC, OfflineDeliverer, make_deliverer
 from rl.plan import iter_spec, pairs_for, plan_pairs_fp, planned_iters, validate_plan
 
 #: 产物目录里随段携带的 TS 运行时树（让「只下载产物 zip」的机器也能续跑）。
@@ -90,7 +91,12 @@ ITER_RETRIES = 2
 
 
 def _log_default(msg: str) -> None:
-    print(f"[{time.strftime('%H:%M:%S')}] [run] {msg}", flush=True)
+    """默认日志（tag=`run`）。行格式的唯一来源是 `common.logutil`。
+
+    `clock=time` 是显式传的：本模块的 `time` 引用可被测试重绑（假钟注入），
+    若改成让 logutil 自己抓 `time.strftime`，那些注入就失效了。
+    """
+    log_line("run", msg, clock=time)
 
 
 def _real_run_job(*args: Any, **kw: Any) -> dict:
@@ -805,7 +811,7 @@ def _eval_job_builder(ctx: RunContext, ep: Any) -> Callable[[int], dict]:
             "course": ctx.course,
             "course_fp": str(ctx.manifest.get("course_fp", "") or ""),
             "slots": ctx.eval_slots,
-            # **原样传 0（= 没指定）**：由 `run_cloud_eval` 按 `remote/game_watch.py` 解析成
+            # **原样传 0（= 没指定）**：由 `run_cloud_eval` 按 `common/game_watch.py` 解析成
             # 「首次尝试 = 5s（用户口径：单局 >5s 肯定不正常）、重试 ×4」；显式给了正数就完全
             # 按用户给的数且不对重试放大（配置说了算）。不在这里提前解析，是因为「显式 vs
             # 兜底」这个区别决定了重试要不要放宽，解析一次就丢了这个信息。
@@ -1372,7 +1378,7 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=0.0,
         help="云机评估单局超时（0 = 用节点兜底：首次尝试 5s、重试上限 ×4，见 "
-        "remote/game_watch.py；>0 时每次尝试都用它）",
+        "common/game_watch.py；>0 时每次尝试都用它）",
     )
     ap.add_argument(
         "--resume-dir",

@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from common.protocol import ProtocolError
 from remote.artifacts import ArtifactStore
 from remote.bundle import BUNDLE_INDEX
 from remote.deliver_zip import (
@@ -32,7 +33,6 @@ from remote.deliver_zip import (
     import_deliver_zip,
     main,
 )
-from remote.protocol import ProtocolError
 
 
 def _weights(it: int) -> bytes:

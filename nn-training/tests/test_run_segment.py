@@ -27,8 +27,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from common.protocol import PLAN_NAME, TS_CODE_NAME, unpack_payload
 from remote.hub_client import HubClientError, publish_job
-from remote.protocol import PLAN_NAME, TS_CODE_NAME, unpack_payload
 from rl.cli import build_argparser
 from rl.iter_job import build_iter_spec
 from rl.loop_steps import (
@@ -259,7 +259,7 @@ def test_publish_run_needs_ts_code_sha(tmp_path: Path) -> None:
 
 def test_published_manifest_accepted_by_protocol(tmp_path: Path) -> None:
     """发布的 manifest 自己过得了 `normalize_manifest`（kind=run 的必填三件套齐）。"""
-    from remote.protocol import normalize_manifest
+    from common.protocol import normalize_manifest
 
     m, _ = _publish(tmp_path)
     again = normalize_manifest(json.loads(json.dumps(m)))

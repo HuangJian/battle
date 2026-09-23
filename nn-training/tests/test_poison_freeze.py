@@ -35,9 +35,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from remote.hub_client import wait_job
-from remote.hub_server import FREEZE_AFTER_RECLAIMS, _JobStore, make_server
-from remote.protocol import (
+from common.protocol import (
     AUTH_HEADER,
     CLAIM_TTL_SEC,
     FAIL_NAME,
@@ -45,6 +43,8 @@ from remote.protocol import (
     WORKER_ID_HEADER,
     JobFailedError,
 )
+from remote.hub_client import wait_job
+from remote.hub_server import FREEZE_AFTER_RECLAIMS, _JobStore, make_server
 from tests.helpers.hub_poll import hub_poll
 
 TOKEN = "sekret"

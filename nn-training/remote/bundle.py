@@ -36,7 +36,7 @@ import time
 import zipfile
 from pathlib import Path
 
-from remote.protocol import (
+from common.protocol import (
     BLOB_DEMO,
     BLOB_OPT,
     PLAN_NAME,
@@ -62,21 +62,14 @@ DATA_PARTS = (PLAN_NAME, "manifest.json", "init_weights.json", COURSE_NAME, CODE
 OPTIONAL_PARTS = ("opt.tar", "ts_code.zip", "demo.npz")
 
 
-def sha256_bytes(b: bytes) -> str:
-    import hashlib
-
-    return hashlib.sha256(b).hexdigest()
-
-
-def sha256_file(p: str | Path) -> str:
-    import hashlib
-
-    h = hashlib.sha256()
-    with open(p, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
+# 文件/字节 sha256 —— 唯一实现见 `common.hashing`（本处 re-export：同包调用点与测试不变）。
+# 历史：本模块自留一份（还在函数里 import hashlib），与 `remote.artifacts` /
+# `remote.hub_client._sha256_file` 字形相同——包的索引对账全靠「同字节同哈希」，
+# 定义必须只有一处。
+from common.hashing import (
+    sha256_bytes,
+    sha256_file,  # noqa: F401 — re-export（历史公开名，本模块自身未用）
+)
 
 # ------------------------------------------------------------------ 导出（hub 侧）
 

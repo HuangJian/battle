@@ -61,9 +61,7 @@ if str(ROOT) not in sys.path:
 #: 仓根（只读面板源码做双端锚，见用例末尾）。
 _REPO = ROOT.parent
 
-from remote.hub_server import _JobStore, make_server
-from remote.iter_rollout import collect_reports, verify_shards
-from remote.protocol import (
+from common.protocol import (
     decode_opt_tar,
     encode_opt_tar,
     encode_weights_json,
@@ -73,6 +71,8 @@ from remote.protocol import (
     unpack_payload,
     validate_result,
 )
+from remote.hub_server import _JobStore, make_server
+from remote.iter_rollout import collect_reports, verify_shards
 from remote.worker import d14_corpus_match  # 该模块顶层零 torch（延迟导入）
 from rl.cli import build_argparser  # 模块级：真 CLI 解析器（大对象，别在用例内首次 import）
 from rl.config import apply_course, course_from_args

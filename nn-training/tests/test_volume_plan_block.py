@@ -40,7 +40,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from remote.protocol import ProtocolError, normalize_manifest
+from common.protocol import ProtocolError, normalize_manifest
 from rl.plan import (
     build_plan,
     check_plan_against_args,
@@ -269,8 +269,8 @@ def test_iteration_manifest_carries_per_stage_quota(tmp_path: Path) -> None:
     （或反过来），两台机器的读数就不可比。
     """
     import remote.run_loop as run_loop_mod
+    from common.protocol import encode_opt_tar, encode_weights_json
     from remote.artifacts import sha256_bytes
-    from remote.protocol import encode_opt_tar, encode_weights_json
 
     args = _args(**X20)
     plan = build_plan(

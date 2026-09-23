@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from remote.protocol import COURSE_ENABLE_MARKER
+from common.protocol import COURSE_ENABLE_MARKER
 from run_rl import _require_course_open
 
 

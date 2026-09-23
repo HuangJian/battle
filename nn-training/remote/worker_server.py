@@ -36,19 +36,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from remote._instance_lock import (
-    acquire_instance_lock,
-    default_instance_lock_path,
-    release_instance_lock,
-)
-from remote._port_guard import ensure_port_free
-from remote.protocol import (
+from common.protocol import (
     WIRE_JOB_MAGIC,
     CodeChangedError,
     ProtocolError,
     normalize_manifest,
     unpack_job_v2,
 )
+from remote._instance_lock import (
+    acquire_instance_lock,
+    default_instance_lock_path,
+    release_instance_lock,
+)
+from remote._port_guard import ensure_port_free
 from remote.worker import _wire_flush as worker_wire_flush
 from remote.worker import _wire_start as worker_wire_start
 from remote.worker import run_job

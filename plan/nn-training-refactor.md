@@ -112,3 +112,117 @@ P0 ──→ P1 ──→ P3 ──→ P4
 ```
 
 每完成一个阶段即打一个 commit，独立可回滚。
+
+---
+
+## 5. 第三轮（2026-09-23）—— 现状已大变，本文件 §1.1 规模数早已过期
+
+> ⚠ §1.1 写的「~50 个 Python 文件 / ~7000 行」是 2026-09-02 的读数。**现在**：
+> 生产代码 ~118K 行 / 200+ 模块；单文件最大 `remote/hub_server.py` **3972 行**、
+> `remote/worker.py` 3475、`rl/loop_steps.py` 2328。门禁 = `ruff + mypy + pytest`
+> （tests/ + e2e/ 同一次 xdist），基线 **2230 passed / 3 skipped / ~27s**。
+> 用户指令（2026-09-23）：降低模块耦合 + 尽量复用代码 + 提可维护性与可扩展性。
+
+### 5.1 已完成 —— S1：`common/` 共享原语层（去重，零行为变化）
+
+新增 stdlib-only 包 **`nn-training/common/`**（`hashing` / `proc` / `fs` / `text` / `logutil`），
+把 12 组「同名各写 2~4 份」的原语收敛成唯一实现；上层只留 re-export / 薄包装
+（历史名字与 monkeypatch 接缝**一个没动**）。同时把 **13 处裸 `text=True` 捕获**统一到
+`common.proc.run_capture`（显式 UTF-8）——那正是 `docs/nn/engineering.md` §19/§30 记的
+「响亮错误变哑巴」坑。
+
+- 决策：`DECISIONS.md` §2026-09-23-goalnn-common-primitives-layer
+- 全文与教训：`docs/nn/engineering.md` §21
+- 回归防线：`tests/test_common_layer.py`（17 例，含 AST 源码守卫与层契约守卫）
+- **门禁：2247 passed / 3 skipped / 0 failed**（ruff + mypy 绿）。
+- 层契约（**动 `common/` 前必读**）：只依赖 stdlib、不反向 import 上层、无副作用、
+  无模块级可变状态；**三个从 GitHub raw 单独拉取的引导模块**
+  （`remote/tailscale_boot.py` / `notebook_boot.py` / `offline_boot.py`）**禁用 `common/`**
+  ——它们要在拿到 `code.zip` 之前被 import，其重复是结构性豁免。
+
+### 5.2 已完成 —— S3：断开 `rl` ↔ `remote` 包循环（2026-09-23）
+
+> **编号口径**：本节曾写作「S2」，与 `docs/nn/engineering.md` §22 / `DECISIONS.md`
+> §2026-09-23-goalnn-layering-common-sink 的「S3」不一致 ⇒ 现统一为文档口径：
+> S1 = `common/` 原语层（§5.1，已完成）· S2 = `text=True` 编码隐患（附于 S1，已完成）·
+> **S3 = 包循环断开（本节，已完成）** · S4 = 拆神模块（§5.3，待办）。
+
+**结论（已落地）**：`protocol`（92 处 / 65 文件）与 `game_watch`（14 处 / 12 文件）
+已下沉为 `common/` 成员；`ppo/` `train/` `models/` `data/` `scripts/` 对 `remote` 引用**归零**；
+新增 `tests/test_layering.py`（5 例）把单一直向钉住（含「白名单未用即红」）。
+`rl/` 遗留 **4 项过渡白名单**（§5.2 步骤 ④ 的待办）。
+
+- 决策：`DECISIONS.md` §2026-09-23-goalnn-layering-common-sink
+- 全文与教训：`docs/nn/engineering.md` §22
+- **门禁：2252 passed / 3 skipped / 0 failed**
+
+<details><summary>原诊断与设计（保留供追溯）</summary>
+
+**现状（实测，不是印象）**：依赖是**双向**的——
+
+```
+rl  → remote ：10 个文件（protocol / game_watch / serve_pool / hub_client / push_client）
+remote → rl  ： 8 个文件（resume.walk_shard_dirs / eval_local.* / plan.* / config.load_course /
+                            reward_library.* / reward_context.update / course.parse_range / log.log）
+```
+
+一个双向的包依赖 = 谁都可能拿到半初始化的对方；`rl/queue.py` 已经在用**函数内延迟 import**
+（`from rl.dispatch import RolloutDispatcher`）绕，而 `rl/dispatch.py` 又想 import `rl/queue`
+——这类「靠延迟 import 换来的平静」是下一个事故的温床。
+
+**目标分层（单一直向）**：
+
+```
+L0  common/ · platform_utils · pid_probe · dist_common · schema     （stdlib-only，无 torch）
+L1  rl/ · ppo/ · models/ · data/ · train/                            （纯逻辑，可脱离 torch 单测）
+L2  remote/                                                         （传输；可依赖 L0/L1，反之禁止）
+```
+
+**落地顺序（每步独立可回滚、门禁绿才走下一步）**：
+
+| 步 | 动作 | 依据 |
+|---|---|---|
+| ① | 先写**分层守卫测试**（AST 扫模块级 import，断言不存在 `rl → remote` 边；现状红/白名单先行） | 没有守卫的分层重构 = 下一次提交就退回双向 |
+| ② | `remote/protocol.py` → `common/protocol.py`（**stdlib-only 纯编解码器**，无 torch、无网络）。全仓调用点改 import，删旧文件（**不留 shim**——shim 是「聪明」，本仓偏好直白） | 这是 `rl → remote` 的**主边**（5 文件） |
+| ③ | `remote/game_watch.py` 同样下沉（先核 stdlib-only） | `rl/queue_local` / `rl/eval_local` 的第二条边 |
+| ④ | `rl → remote.{hub_client,push_client,serve_pool}` 三条边：把「取活/回传/评估脚本名」抽成**注入式接口**（rl 侧收一个 callable / 协议对象），而不是让 rl 直接 import 传输实现 | 这三条是「策略层直接调传输层」，耦合最贵 |
+| ⑤ | `remote → rl` 的 8 条边**保留并写进守卫白名单**（方向合法） | 单向即可，不必追求「谁也不依赖谁」 |
+
+**验收**：守卫测试绿 + `bun run check` 绿 + 门禁全绿；`rl/` 可在**不 import `remote` 任何模块**
+的前提下通过全部单测。
+
+**落地实测**：①②③已完成，⑤已由 `tests/test_layering.py` 承担（`rl/` 白名单 + 白名单不腐烂）。
+**④ 仍待办**——即 `tests/test_layering.py::RL_TO_REMOTE_WHITELIST` 里的 4 项
+（`remote.bundle` / `hub_client` / `push_client` / `serve_pool`）；做完 ④ 则把它们从白名单删掉
+（**不删即红**，这是守卫设计的自清机制）。
+
+</details>
+
+### 5.3 待办 —— S4：拆神模块（收益最大、风险也最大，**独立一轮**）
+
+| 文件 | 行数 | 建议切法（按关注点，不是按行数等分） |
+|---|---|---|
+| `remote/hub_server.py` | 3972 | `remote/hub/`：`pack_exchange`（任务包导出/导入）· `offline`（离线产物面）· `results`（结果/指标摄取）· `registry`（节点登记与状态）· `admin`（net-probe / 健康）· `httpd`（Handler + 启动）；**保留 `remote/hub_server.py` 作门面 re-export**（测试与 dashboard 都从它取名字） |
+| `remote/worker.py` | 3475 | `remote/worker/`：`restore`（payload 还原）· `caches`（code.zip / ts_code 内容寻址缓存）· `procs`（子进程与监督）· `runjob`（run_job 主链） |
+| `rl/loop_steps.py` | 2328 | 按循环阶段切（评估步 / volume 步 / 提交步），或收进 `rl/loop_steps/` 包 |
+
+**方法（防翻车，逐条都是本仓踩过的）**：
+
+1. **先抽无 `self` 的纯函数簇**（低耦合、零语义风险），再考虑带状态的类；
+2. 每次只搬一个簇 ⇒ **跑门禁**（~30s，比事后定位便宜得多）；
+3. 搬家时保留原模块的 **re-export**，测试与外部调用点**一行不改**——名字是契约，位置不是；
+4. 模块级可变状态（如 `rl/log.py` 的前缀路由）**随宿主走**，不拆散；
+5. 同步更新 `README.md` 模块地图 + `docs/nn/*.md` 的引用路径（本仓有试读 README 的用例，
+   `tests/test_notebook_runtime.py` 之类会盯着路径）。
+
+### 5.4 本轮**不做**（已核，刻意保留）
+
+- `remote/notebook_boot.py` ↔ `remote/offline_boot.py` 的孪生助手（`_build_opener` /
+  `_load_tailscale_boot` / `_course_dirs`）：**结构性豁免**，共享即断链（§5.1 层契约）。
+- `remote/tailscale_boot.py::_progress_logger` ↔ `remote/worker.py::_progress_logger`：
+  同理只允许**两份**（`tests/test_common_layer.py` 钉住了这个数）。
+- `hub_server._json` / `worker_server._json`：是 **HTTP handler 的方法**，合需要 mixin；
+  收益（7 行）远小于「给两个 handler 引入共同基类」的耦合成本。
+- `scripts/eval_intent_m5.py` ↔ `train/intent_probe.py` 的 `seq_features` / `build_injection`、
+  两个 `build_model`：属**模型构造/特征口径**，正确落点是 `models/intent_net.py` 的类方法，
+  属「改模型面」——单开一轮，别混进纯工程重构。

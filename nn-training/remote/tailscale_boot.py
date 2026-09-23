@@ -105,10 +105,16 @@ UNPRIV_USERS = ("irc", "nobody")
 
 
 def _ts(*args: str, timeout: int = 30) -> subprocess.CompletedProcess[str]:
+    # encoding/errors 必须**就地**写全：本模块从 GitHub raw 单独拉取，拿不到
+    # `common.proc.run_capture`（见 common/__init__.py「谁不能用本包」）。
+    # 裸 text=True 按 locale 解码（zh-CN Windows = cp936），tailscale 的输出可能带
+    # 非 ASCII ⇒ 读线程抛 UnicodeDecodeError、stdout 变 None（docs/nn/engineering.md §19）。
     return subprocess.run(
         ["tailscale", f"--socket={SOCK}", *args],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=timeout,
     )
 
@@ -300,7 +306,10 @@ def _read_tail(path: str, n: int = 2000) -> str:
 
 
 def _user_exists(user: str) -> bool:
-    r = subprocess.run(["id", user], capture_output=True, text=True, timeout=15)
+    # 编码必填：同上（本模块独立拉取，不能走 common.proc）。
+    r = subprocess.run(
+        ["id", user], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15
+    )
     return r.returncode == 0
 
 
@@ -752,7 +761,11 @@ def diagnose(cfg: dict, log) -> None:
             cmd = ["curl", "-sS", "-m", "20", "-o", "/dev/null", "-w", "%{http_code}",
                    "-H", "Authorization: Bearer " + token, *extra, t]
             try:
-                c = subprocess.run(cmd, capture_output=True, text=True, timeout=40)
+                # 编码必填：同上（本模块独立拉取，不能走 common.proc）。
+                c = subprocess.run(
+                    cmd, capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", timeout=40,
+                )
                 log(f"  {label} {t} -> code={c.stdout.strip()} err={c.stderr.strip()[:160]}")
             except Exception as e:
                 log(f"  {label} {t} -> {type(e).__name__}: {e}")

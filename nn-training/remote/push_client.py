@@ -18,13 +18,13 @@ NODE_RESULT_PATH = "/job/{jid}/result"
 
 # `_request` / `_job_failed_from_body` 仍是本模块其它函数（缓存查询、submit）的实现细节；
 # 结果探测自身走 `probe_job_result`（状态码分类的唯一实现，见 hub_client）。
-from remote.hub_client import PROBE_READY, PROBE_TRANSIENT, _request, probe_job_result
-from remote.protocol import (
+from common.protocol import (
     WIRE_JOB_CONTENT_TYPE,
     ProtocolError,
     RetryableError,
     pack_job_v2,
 )
+from remote.hub_client import PROBE_READY, PROBE_TRANSIENT, _request, probe_job_result
 
 
 def _default_log(msg: str) -> None:

@@ -41,9 +41,9 @@ ROOT = Path(__file__).resolve().parent.parent  # nn-training/
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from common.protocol import COURSE_ENABLE_MARKER
 from remote import net_http
 from remote.hub_client import mark_job_completed, publish_job, wait_job
-from remote.protocol import COURSE_ENABLE_MARKER
 from remote.worker_server import WorkerServerState, make_worker_server
 from tests.subproc_util import spawn_bound_port
 

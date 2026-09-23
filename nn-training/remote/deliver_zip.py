@@ -39,11 +39,12 @@ import sys
 import zipfile
 from pathlib import Path
 
+from common.protocol import ProtocolError
+
 # 产物账本行 → 课程账本行的搬运**只在 remote.artifacts 实现一份**（人工导入与实时补传共用）：
 # 两份翻译必然漂开，而「两腿同字段」正是那张表存在的意义。
 from remote.artifacts import ArtifactStore, ledger_row_from_metrics
 from remote.bundle import BUNDLE_INDEX, safe_extract_zip
-from remote.protocol import ProtocolError
 
 #: 机器可读结果的标记（控制台按它切 stdout 的末行；前面的人读日志随便打）。
 IMPORT_JSON_MARK = "DELIVER_IMPORT_JSON="

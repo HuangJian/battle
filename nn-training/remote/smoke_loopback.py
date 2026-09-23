@@ -38,6 +38,7 @@ ROOT = Path(__file__).resolve().parent.parent  # nn-training/
 REPO = ROOT.parent  # git 根
 sys.path.insert(0, str(ROOT))
 
+from common.protocol import find_payload
 from remote.hub_client import (
     git_head,
     iter_shard_dirs,
@@ -47,7 +48,6 @@ from remote.hub_client import (
     wait_job,
 )
 from remote.hub_server import _JobStore, make_server
-from remote.protocol import find_payload
 from rl.config import load_course
 from rl.reward_library import METRICS_VERSION
 from schema import BOARD, OBS_CHANNELS, SCALAR_DIM  # v3：合成语料形状随 schema

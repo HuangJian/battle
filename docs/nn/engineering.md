@@ -5,8 +5,165 @@
 > **来源**：2026-09-23 由 `docs/nn.progress.md`（单文件 7.9k 行）按主题拆分；本节内编号
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
+>
+> **编号说明**：`§20` 是本文件的「决策正文归档」节（搬自 `DECISIONS.md`），**进度节从 §21 起**
+> （新条目置顶、号大）。
 
 ---
+
+## §22 断开 `rl` ↔ `remote` 包循环：把纯逻辑叶子下沉到 L0，用测试钉住依赖方向（2026-09-23，用户指令「重构 nn-training：降低耦合 / 复用代码 / 提可维护性」）
+
+### 一句话
+
+`remote/protocol.py`（采样协议）与 `remote/game_watch.py`（对局转播纯逻辑）**模块级零上层依赖**
+⇒ 下沉为 `common/protocol.py` / `common/game_watch.py`；新增 `tests/test_layering.py` 把
+「`L2 remote → L1 纯逻辑 → L0 原语`」的**单一依赖方向**变成断言，并配一张**会腐烂就会红**的
+过渡白名单。门禁 **2247 → 2252**（+5 守卫用例）全绿。
+
+### 循环的现场
+
+S1 结束时测到：`rl/` 有 **10 个文件** import `remote/*`，`remote/` 有 **8 个文件** import `rl/*`
+—— 双向。当年靠 `rl/queue.py` 里一处**函数内延迟 import** 维持「能跑」：延迟 import 把失败
+从 import 期推到调用期，于是环在启动时看不出来。这就是本仓记过的「延迟 import 掩盖循环」先例。
+
+先做**判据**再动手（否则只是把环换个地方）：AST 扫全部 import 节点（含函数内），量出两件事——
+
+| 事实 | 值 |
+|---|---|
+| `common.protocol` 的引用面 | 92 处 / **65 个文件** |
+| `common.game_watch` 的引用面 | 14 处 / **12 个文件** |
+| 三个独立引导模块是否引用它们 | **否**（安全：不触 §21 契约 4） |
+| `protocol.py` 模块级可变状态 | **无**（只有常量） |
+
+两条最容易踩的坑，提前钉住：
+
+* **门面不能用 `import *`**：`game_watch.__all__` **漏了** `PROGRESS_LOG_SEC` / `progress_due`，
+  而 `rl/queue_local` 正在用 ⇒ `import *` 会静默少导出。故 `remote/game_watch.py` 保留显式
+  `from common.game_watch import (...)` 完整清单的门面，`protocol` 同理（别名 re-export 保住
+  全部历史名字，30+ 调用点与 `monkeypatch.setattr(mod, "bun_version", …)` 类接缝**零改动**）。
+* **多模块混合导入**：原文有 `from remote import game_watch, serve_pool` 这种一行导两个模块的写法，
+  机械替换只改了其中一个 ⇒ mypy 才炸。逐个复核修为「`game_watch` 走 `common`、`serve_pool` 留 `remote`」。
+
+### 分层契约（`tests/test_layering.py` 是权威）
+
+```
+L0  common/ · platform_utils · pid_probe · dist_common · schema     （stdlib-only，无 torch）
+L1  models/ · ppo/ · data/ · train/ · rl/ · scripts/                （纯逻辑）
+L2  remote/ · 根入口（run_rl.py / run_bc.py …）                      （传输 / 应用）
+```
+
+下沉之后的实测收益（不是设计意图，是量出来的）：
+
+* `ppo/` `train/` `models/` `data/` `scripts/` 对 `remote` 的引用 **归零**（测试断言 `== 0`）；
+* `remote/` 依赖 `rl` / `ppo` / `train` / `data` 属**合法方向**（传输层在最上），不动；
+* `rl/` 只剩 **4 项过渡白名单**：`remote.bundle`（打离线任务包）/ `remote.hub_client`
+  （poll/wait/verify_and_land）/ `remote.push_client`（hub-push 派发腿）/ `remote.serve_pool`
+  （`rl/eval_local.py` 模块级 `EVAL_SCRIPT` 常量）——即 `plan/nn-training-refactor.md` §5.2
+  第 ④ 步「改注入式接口」的待办。
+
+守卫做**两件**事，第二件才是关键：① 任何未列入白名单的新边即红；
+**② 白名单里某项已无引用 ⇒ 红**（提示删掉）。否则这类清单必然腐烂成「合法的历史遗留」——
+那正是白名单最坏的结局。另附机械事实守卫：`protocol.py` / `game_watch.py` 不得再出现在 `remote/` 下。
+
+守卫的两条自纠（都是判据写过头，不是实现错）：① 首版把 `from remote.hub_client import` 误记成
+裸 `remote`（违反「只看具体子模块」）⇒ 修；② 修过头，把 `remote.hub_client` **展开**成
+`remote.hub_client.x` 兄弟别名 ⇒ 精确为「只有 `from remote import x` 才展开」。
+
+### 被否决的备选
+
+| 备选 | 否决理由 |
+|---|---|
+| 让 `remote` 反过来 import `rl` 时全部改注入（一次做完） | 涉及 8 个 remote 文件的重签；先拿到**单向可达**的增量并钉住，再逐项改注入（白名单就是为了让第二步可增量） |
+| `remote/protocol.py` 保留为薄门面（不删） | 多一层空壳、多一处「到底哪份是真的」；本仓先例是 `pid_probe` 式的**真下沉**，不留壳 |
+| 用 `import *` 做门面省事 | `game_watch.__all__` 已漏两项且正被使用 ⇒ 静默少导出 |
+| 把分层守卫写成 grep/lint 规则 | 需要**跨文件**判断 + 白名单双向对账，lint 规则表达不了「未使用即红」；且 AST 才看得见函数内延迟 import |
+
+### 验证与回归防线
+
+- `tests/test_layering.py`（5 例）：L0 不得依赖 L1/L2 · L1 不得依赖 `remote`（`rl/` 白名单除外）·
+  白名单不得腐烂 · `common/` 是叶子包 · 搬迁模块已离开 `remote/`。
+- **断言是活的**：临时写 `rl/_probe_tmp.py` 故意 `import remote.worker` ⇒ 守卫立刻点名
+  `rl/_probe_tmp.py -> remote.worker`（验证后已删）。
+- 落盘验证：ruff + mypy 绿；grep 残留 `remote.protocol` / `remote.game_watch` = 0（注释里的路径引用
+  也一并同步，避免文档说谎）；`tests/test_jobs_next_retired.py` 里硬编码的 `remote/protocol.py` 源码
+  路径守卫同步为 `common/protocol.py`。
+- 门禁：**2252 passed / 3 skipped / 0 failed**，23s；根项目 `bun run check` 2120 pass / 0 fail。
+
+### 违反后果
+
+- 重新从 `rl/` 里 `import remote.*`（白名单外）⇒ `code.zip` 侧「纯逻辑」包被迫拖入传输依赖，
+  云机/无 bun 环境首包即断。
+- 把 `protocol.py` / `game_watch.py` 搬回 `remote/` ⇒ 包循环重新出现，测试红（这正是守卫存在的理由）。
+
+---
+
+## §21 `common/` 共享原语层：同口径写进注释不算单一实现（2026-09-23，用户指令「重构 nn-training：降低耦合 / 复用代码 / 提可维护性」）
+
+### 一句话
+
+新增 stdlib-only 的 `common/` 包（hashing / proc / fs / text / logutil），把**同名各写 2~4 份**的
+原语收敛成唯一实现；上层只保留 re-export 与薄包装，**零行为变化**（门禁 2230 → 2247 全绿）。
+
+### 现场：十二份「同口径」实现
+
+用 AST 扫全仓（按「去掉 docstring 后函数体逐字节相同」聚合），生产代码面命中 12 组重复；
+更要紧的是**语义已经漂移**的那几组——漂移是无声的，因为两侧各自自洽、测试各自绿：
+
+| 原语 | 份数 | 漂移形态 |
+|---|---|---|
+| `sha256_file` / `sha256_bytes` | 3 份 + 1 处 inline | `dist_common.weights_fingerprint` / `remote.artifacts` / `remote.hub_client._sha256_file` / `remote.bundle`（这份还在函数里 `import hashlib`） |
+| `bun_version` | 3 份 | 训练机侧失败返 `"?"`（timeout 10）；节点侧失败返 `""`（timeout 30、且要求 `rc==0`） |
+| `exc_tail` | 2 份 | `remote/worker.py::_failure_detail` ↔ `rl/stream.py::_exc_tail`，后者 docstring 写着「与前者同口径…**故就地保留同款小助手**」 |
+| 原子写 | 2 份 | `remote/artifacts.atomic_write_bytes` ↔ `remote/hub_server._write_bytes`（两份注释都在解释「半截文件比没有文件更危险」） |
+| 追加 JSONL | 2 份 | `rl/bc_ledger.append_ledger` ↔ `remote/hub_client._append_ledger` |
+| tar 解包 | 2 份 | `remote/worker.unpack_opt_tar` ↔ `remote/hub_client._extract_tar`（都要兼容 Py<3.12 的 `filter=`） |
+| `_log_default`（tag 化日志） | 4 份 | 差别只有 tag（`[run]` / `[hub-push]` / `[deliver]` / `[battle-rl]`），格式字面量被抄 4 遍 |
+| 子进程捕获 | **13 处裸 `text=True`** | 见 §19——这条正是「封装各写各的」的直接代价 |
+
+「同口径就地保留」那句话就是本节的判决：**口径写进注释不算单一实现**。先例是
+`pid_probe.pid_alive`（其 docstring 已有「唯一实现」论证），本层沿用同一模式并把它扩成一条**层契约**。
+
+### 层契约（`common/__init__.py` 是权威，测试守着）
+
+1. **只依赖 stdlib**（外加 `platform_utils`）——本包要随 `code.zip` 解到**没有 torch/numpy** 的云机上；
+2. **不得反向 import 上层**（依赖方向永远 `上层 → common`）；
+3. **无副作用、无模块级可变状态**；
+4. **三个引导模块不得用本包**：`remote/tailscale_boot.py` / `notebook_boot.py` / `offline_boot.py`
+   —— 它们从 GitHub raw **单独拉取**，cell 侧在拿到 `code.zip` **之前**就要 `import` 它们。
+   它们的重复是**结构性豁免**，不是漏网；用测试把这个事实钉住（谁再「顺手合并」即红）。
+
+### 被否决的备选
+
+| 备选 | 否决理由 |
+|---|---|
+| 分散合并（`remote/` 内部一份 sha256、`rl/` 内部一份…） | 跨包重复（`rl`↔`remote`、`ppo`↔`rl`）正是漂移发生的地方；包内合并治不了 §19 这类「捕获封装」问题 |
+| 塞进 `dist_common` | 它是**采样协议**模块（含网络/threading）；`remote/artifacts` 明确要「纯 stdlib、可单独搬运」的落点，协议模块不是那个落点 |
+| 把 `bun_version` 的分歧「统一」掉 | 那是**静默行为变更**（改动某一侧在非零退出码上的返回值）。改为显式形参 `require_zero`，两侧口径各留一行文档 |
+| 新文件承载 `record_agent_meta` | 改用 `rl/agent_meta.py`——与 `bc_ledger` / `train_ledger` / `ladder_ledger` 的「一账本一模块」惯例一致 |
+| 顺手合并 notebook_boot / offline_boot 的孪生助手 | 违反契约 4（独立拉取 ⇒ 拿不到 `common`） |
+
+### 验证与回归防线
+
+- `tests/test_common_layer.py`（17 例）：单一实现（`_defs_of` 源码扫描 + `is` 同一对象）、
+  独立重实现对账（不调被测函数）、§19 编码回归（真子进程写不可解码字节 ⇒ 断言 `stdout` 不为 `None`
+  + 中文原样 + 替换符命中）、**AST 源码守卫**（生产代码不得再有裸 `text=True` 捕获）、`code.zip`
+  必须含 `common/`、以及「豁免是结构性的」两条（引导模块零依赖 / `_progress_logger` 恰好两份）。
+  > 守卫两条注意：① 源码守卫必须走 **AST**——行文本会把 docstring 里引用的 `text=True` 判成缺陷；
+  > ② 「恰好两份」而不是「唯一一份」：`tailscale_boot` 不能共享 ⇒ 两份是**正确**的终态。
+- 门禁：**2247 passed / 3 skipped / 0 failed**，ruff + mypy 绿，27s。
+- 曾观察到一次 `tests/test_bulk_sched.py::test_yield_stops_at_budget_even_if_control_stays`
+  在 `-n 12` 下红（约束 `elapsed <= 0.39s`，实测 2.08s）：单跑 3/3 绿、下一次全量绿 ⇒
+  **既存的墙钟容差 flake**（与本轮改动无关），本轮未动它。
+
+### 违反后果
+
+- 在 `common/` 里 import `torch` / `rl.*` / `remote.*` ⇒ 云机解开 `code.zip` 即 `ImportError`
+  （本机全绿、只有云机炸）。
+- 给「顺手把 notebook_boot / offline_boot 合并掉」开口子 ⇒ cell 引导链断在首包之前。
+- 重新抄一份 `sha256_*` / `bun_version` ⇒ 账本「同字节同哈希」契约与版本对账重新变成两份真相。
+
+---
+
 ## §19 本机评估的子进程捕获：gbk 解码把 stdout/stderr 丢成 None（顺带刷屏 65 行/100 局）（2026-09-22）
 
 `rl/eval_local.py::run_local_eval_game` 的 `subprocess.run(capture_output=True, text=True)` 没给

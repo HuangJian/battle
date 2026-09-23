@@ -24,8 +24,8 @@ if str(ROOT) not in sys.path:
 
 from test_remote_ppo import _boot_server, _mini_manifest  # type: ignore
 
+from common.protocol import normalize_manifest
 from remote.hub_client import wait_job
-from remote.protocol import normalize_manifest
 
 
 def _publish_unclaimed(tmp_path: Path):

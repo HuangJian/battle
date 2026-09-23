@@ -55,9 +55,8 @@ import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 
-from remote import net_http
-from remote.artifacts import ArtifactStore, atomic_write_json, sha256_bytes
-from remote.protocol import (
+from common.logutil import log_line
+from common.protocol import (
     AUTH_HEADER,
     OFFLINE_ARTIFACT_BODY_MAX,
     OFFLINE_ARTIFACT_PATH,
@@ -68,6 +67,8 @@ from remote.protocol import (
     encode_weights_json,
     sanitize_run_id,
 )
+from remote import net_http
+from remote.artifacts import ArtifactStore, atomic_write_json, sha256_bytes
 
 #: 探活结果的缓存秒数（训练一轮动辄几分钟，没必要每轮都探两次：`sync()` 前探一次即可，
 #: 只读的 `/ping` 也便宜——但 hub 不可达时每次 `urlopen` 都要等超时，才是真成本）。
@@ -89,7 +90,8 @@ DRAIN_MAX_PASSES = 256
 
 
 def _log_default(msg: str) -> None:
-    print(f"[{time.strftime('%H:%M:%S')}] [deliver] {msg}", flush=True)
+    """默认日志（tag=`deliver`）——行格式见 `common.logutil`（`clock=time` 保可注入）。"""
+    log_line("deliver", msg, clock=time)
 
 
 def _urllib_opener(url: str, data: bytes, headers: dict, timeout: float) -> tuple[int, bytes]:

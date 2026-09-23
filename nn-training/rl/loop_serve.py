@@ -32,14 +32,13 @@ from __future__ import annotations
 import atexit
 import os
 import shutil
-import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+from common.proc import run_capture
 from platform_utils import force_utf8_stdio
 from rl.engine_pool import DEFAULT_CACHE_COURSES, DEFAULT_CACHE_MB, EnginePool
 from rl.log import close_course_sinks, log, open_course_sink, prefix_scope
@@ -132,13 +131,8 @@ def prepare_process(argv: list[str] | None = None) -> str:
             "[serve] WARN: 另一进程正在 git push（.git_push.lock 被占）——跳过本次启动前推送，"
             "节点沿用远端已有分支；如远端长期无新提交请检查持锁进程"
         )
-    branch = subprocess.run(
-        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-        cwd=str(REPO_ROOT),
-        capture_output=True,
-        text=True,
-        timeout=30,
-        **_POPEN_NO_WINDOW,
+    branch = run_capture(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=REPO_ROOT, timeout=30
     ).stdout.strip()
     if branch and branch != "HEAD":
         import dist_common as _dc

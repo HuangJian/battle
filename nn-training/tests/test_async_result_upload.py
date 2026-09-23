@@ -32,7 +32,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import remote.worker as W
-from remote.protocol import RetryableError
+from common.protocol import RetryableError
 from remote.result_upload import ResultUploader, UploadTask
 
 JID1 = "a1" * 8
@@ -388,7 +388,7 @@ def test_cancelled_job_never_uploads_and_still_gets_its_wire_line(
 
     这是「推迟 flush」最容易漏的一条：只有 `uploaded=True` 那条分支才该等落定。
     """
-    from remote.protocol import JobCancelledError
+    from common.protocol import JobCancelledError
 
     _patch_hub(monkeypatch, [_job(JID1)])
 

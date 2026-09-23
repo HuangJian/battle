@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from remote.protocol import ProtocolError, RetryableError
+from common.protocol import ProtocolError, RetryableError
 from remote.worker import job_body_error
 
 #: `torch.cuda.OutOfMemoryError` 的真实类名（torch 里这个类就叫这个）——按名字判，

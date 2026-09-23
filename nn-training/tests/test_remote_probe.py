@@ -25,6 +25,7 @@ import pytest
 
 import remote.hub_client as hc
 import remote.push_client as pc
+from common.protocol import JobFailedError
 from remote.hub_client import (
     PROBE_PENDING,
     PROBE_READY,
@@ -32,7 +33,6 @@ from remote.hub_client import (
     HubClientError,
     probe_job_result,
 )
-from remote.protocol import JobFailedError
 
 
 class _FakeHTTP:

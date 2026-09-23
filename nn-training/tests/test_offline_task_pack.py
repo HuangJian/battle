@@ -24,14 +24,14 @@ from pathlib import Path
 
 import pytest
 
-from remote.hub_server import _HubQueue, _JobStore, as_hub, make_server
-from remote.protocol import (
+from common.protocol import (
     AUTH_HEADER,
     COURSE_ENABLE_MARKER,
     OFFLINE_CAP_VALUE,
     OFFLINE_TASK_PACK_PATH,
     ProtocolError,
 )
+from remote.hub_server import _HubQueue, _JobStore, as_hub, make_server
 
 TOKEN = "sekret"
 
@@ -196,7 +196,7 @@ def test_offline_capability_header_name_is_shared_with_workers() -> None:
 
     这里钉的是**字面量**（worker 侧那条断言在 `tests/test_worker_offline_cap.py`）。
     """
-    from remote.protocol import OFFLINE_CAP_HEADER
+    from common.protocol import OFFLINE_CAP_HEADER
 
     assert OFFLINE_CAP_HEADER == "X-Battle-Offline"
     assert OFFLINE_CAP_VALUE == "1"

@@ -35,14 +35,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
-from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
-
-# 单局看门狗的口径常量与 eval **共用一份**（`remote/game_watch.py`）：点名线 5s、首次尝试硬顶
+# 单局看门狗的口径常量与 eval **共用一份**（`common/game_watch.py`）：点名线 5s、首次尝试硬顶
 # 也是 5s（用户口径「单局 >5s 肯定不正常」⇒ 超时原地重跑）、重试上限 ×4、最多 3 次、轮询 0.5s。
 # **一律通过模块属性读**（`game_watch.X`）而不是 `from ... import X`：import 会把值抄成第二份
 # 绑定，测试 patch 了 `game_watch` 的那一份、调用点却还在读旧绑定（两处不一致就是静默的错口径）。
-from remote import game_watch, serve_pool
-from remote.protocol import (
+from common import game_watch
+from common.proc import bun_version as _bun_version
+from common.protocol import (
     ProtocolError,
     RetryableError,
     data_fp,
@@ -50,6 +49,8 @@ from remote.protocol import (
     parse_shard_name,
     shard_name,
 )
+from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+from remote import serve_pool
 
 #: 每局日志（诊断用；与本地 `run_rollout` 的 `w{i}/rollout.log` 同名同形）。
 ROLLOUT_LOG_NAME = "rollout.log"
@@ -72,23 +73,14 @@ def resolve_bun(name: str = "") -> str:
 
 
 def bun_version(bun: str) -> str:
-    """`bun --version`（启动自检行用；失败返回空串，不致命）。
+    """`bun --version`（节点启动自检行用；失败返回空串，不致命）。
 
-    encoding=utf-8：裸 text=True 在 zh-CN Windows 按 cp936 解码，读线程死亡时
-    stdout=None（§30 / test_remote_iter_real_bun GBK 事故同源）。
+    唯一实现见 `common.proc.bun_version`（显式 UTF-8 解码的坑见其模块 docstring，
+    正是本处原先注释引的 §30）。本处只钉**节点侧口径**：超时 30s、失败空串、
+    非零退出码一律当失败。1 参签名保留——测试与服池用
+    `monkeypatch.setattr(iter_rollout, "bun_version", …)` 打桩。
     """
-    try:
-        p = subprocess.run(
-            [bun, "--version"],
-            capture_output=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=30,
-            **_POPEN_NO_WINDOW,
-        )
-        return (p.stdout or "").strip().splitlines()[0] if p.returncode == 0 else ""
-    except (OSError, subprocess.SubprocessError, IndexError):
-        return ""
+    return _bun_version(bun, timeout=30.0, fallback="", require_zero=True)
 
 
 #: argv 里必须“按 job 目录解析”的路径 flag（见 `_exec_argv`）。

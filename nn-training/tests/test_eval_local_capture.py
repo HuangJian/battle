@@ -57,7 +57,7 @@ def test_capture_helper_is_what_the_runner_uses() -> None:
     # （池只可能更快：它拿不到就当场回退下面这条路，行为与池不存在时相同）。
     assert src.index("pool.try_capture(") < src.index("proc = run_eval_runner_capture(")
     # 看门狗口径一律走 game_watch 的模块属性（import 常量 = 第二份绑定，patch 不到）
-    assert "from remote.game_watch import" not in src
+    assert "from common.game_watch import" not in src
     # 不许再有裸的 `subprocess.run(capture_output=True, text=True, timeout=...)`（那正是缺陷形态）
     assert "capture_output=True,\n        text=True,\n        timeout=timeout_sec" not in src
     assert "subprocess.run(\n        cmd," not in src
@@ -72,7 +72,7 @@ def test_capture_is_single_subprocess_invocation() -> None:
 
 def test_capture_watchdog_warns_slow_game_by_identity(monkeypatch) -> None:
     """慢局（卡住期间）就点名告警——不是等硬顶到了才知道某一局有问题（2026-09-22）。"""
-    from remote import game_watch
+    from common import game_watch
 
     monkeypatch.setattr(game_watch, "GAME_POLL_SEC", 0.05)
     monkeypatch.setattr(game_watch, "SLOW_GAME_WARN_SEC", 0.05)
@@ -92,7 +92,7 @@ def test_capture_watchdog_warns_slow_game_by_identity(monkeypatch) -> None:
 
 def test_capture_hard_cap_kills_and_keeps_output(monkeypatch) -> None:
     """硬顶：kill 子进程、抛 TimeoutExpired，但**捕获到的尾巴要留着**（诊断不被超时吃掉）。"""
-    from remote import game_watch
+    from common import game_watch
 
     monkeypatch.setattr(game_watch, "GAME_POLL_SEC", 0.05)
     child = (

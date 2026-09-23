@@ -33,14 +33,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import remote.iter_rollout as iter_rollout
-from remote.hub_client import pack_ts_code_zip
-from remote.iter_rollout import run_iter_rollout
-from remote.protocol import (
+from common.protocol import (
     TS_CODE_NAME,
     data_fp,
     iter_expected_data_fp,
     validate_rollout_spec,
 )
+from remote.hub_client import pack_ts_code_zip
+from remote.iter_rollout import run_iter_rollout
 from rl.iter_job import build_iter_spec
 from tests.subproc_util import run_utf8
 

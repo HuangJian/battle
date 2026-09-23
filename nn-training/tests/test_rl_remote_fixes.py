@@ -226,7 +226,7 @@ def test_iter_bc_shard_dirs_drops_foreign_lineage(tmp_path: Path) -> None:
 
 def test_d14_predicate_is_single_implementation() -> None:
     """判据只有一份：发布端用的就是云端拒收用的那一个函数（漂开 = 发布出去的必被拒）。"""
-    from remote.protocol import d14_corpus_match as canonical
+    from common.protocol import d14_corpus_match as canonical
     from remote.worker import d14_corpus_match as via_worker
 
     assert via_worker is canonical

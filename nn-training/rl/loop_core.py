@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import dist_common
-from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+from common.proc import run_capture
 from platform_utils import rmtree_best_effort
 from rl.breaker import CIRCUIT_EXIT_CODE
 from rl.collect_only import precollect_snapshot_wver
@@ -101,7 +101,7 @@ def run_inspect(bun: str, it: int, traj_dir: Path) -> None:
     非致命：巡检失败仅记录 warning，绝不中断训练主线（AGENTS §14 / 训练可用性优先）。
     显式传 --traj-dir（intent/goal 的非默认 traj 也要能出巡检 HTML）。"""
     try:
-        subprocess.run(
+        run_capture(
             [
                 bun,
                 "tools/diag/rl-hourly-inspect.ts",
@@ -110,11 +110,8 @@ def run_inspect(bun: str, it: int, traj_dir: Path) -> None:
                 "--traj-dir",
                 str(traj_dir),
             ],
-            cwd=str(REPO_ROOT),
+            cwd=REPO_ROOT,
             timeout=180,
-            capture_output=True,
-            text=True,
-            **_POPEN_NO_WINDOW,
         )
         log(f"[run_rl] inspection HTML regenerated (up to it{it})")
     except Exception as e:

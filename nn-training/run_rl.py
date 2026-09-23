@@ -3,15 +3,14 @@ from __future__ import annotations
 import atexit
 import os
 import shutil
-import subprocess
 import sys
 import time
 from pathlib import Path
 
+from common.proc import run_capture
+from common.protocol import COURSE_ENABLE_MARKER, coef_active
 from pid_probe import pid_alive as _pid_alive_impl
-from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from platform_utils import force_utf8_stdio
-from remote.protocol import COURSE_ENABLE_MARKER, coef_active
 from rl.archive import ensure_current_branch_pushed
 from rl.cli import build_argparser
 from rl.collect_only import run_collect_only
@@ -295,13 +294,8 @@ def main() -> None:
             "[run_rl] WARN: 另一进程正在 git push（.git_push.lock 被占）——跳过本次"
             "启动前推送，节点沿用远端已有分支；如远端长期无新提交请检查持锁进程"
         )
-    _current_branch = subprocess.run(
-        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-        cwd=str(REPO_ROOT),
-        capture_output=True,
-        text=True,
-        timeout=30,
-        **_POPEN_NO_WINDOW,
+    _current_branch = run_capture(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=REPO_ROOT, timeout=30
     ).stdout.strip()
     if _current_branch and _current_branch != "HEAD":
         import dist_common as _dc

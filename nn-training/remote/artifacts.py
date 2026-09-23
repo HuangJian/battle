@@ -28,7 +28,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import time
@@ -37,23 +36,13 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from common.fs import atomic_write_bytes, atomic_write_json
+from common.hashing import sha256_bytes, sha256_file  # re-export：调用点与测试不变
 
-def sha256_file(path: str | Path) -> str:
-    """文件字节 sha256（与 `dist_common.weights_fingerprint` / hub 的 `_sha256_file` 同义）。
-
-    三处同定义不是巧合：`wver` / `init_weights_fp` / blob 键都靠「同一份字节同一个哈希」
-    串起来。**不**依赖 dist_common 的导入，纯 stdlib（云端产物目录也可能被单独搬运）。
-    """
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def sha256_bytes(b: bytes) -> str:
-    return hashlib.sha256(b).hexdigest()
-
+# 本模块此前自留一份 `sha256_file` / `sha256_bytes`，注释理由是「不依赖 dist_common 的
+# 导入，纯 stdlib（云端产物目录也可能被单独搬运）」。诉求成立，落点换成 `common.hashing`
+# ——它同样是纯 stdlib，且全仓只有一份定义（`wver` / init 指纹 / blob 键的「同字节同
+# 哈希」契约不再靠四处字形相同的实现维持）。名字在这里 re-export，历史调用点不动。
 
 # ------------------------------------------------------------------ 目录解析
 
@@ -103,21 +92,9 @@ def resolve_artifact_dir(
     return Path(work_dir) / "artifacts" / tag
 
 
-def atomic_write_bytes(path: Path, data: bytes) -> None:
-    """tmp + replace：任何时刻读到的都是完整文件（会话被 kill 也不留半截）。
-
-    公开（同一包内被测代码共用）：补传端写 `delivered.json` 时也必须走这一条——
-    「半截的记账文件」与「半截的产物」一样会把续跑判据带偏（读方拿 OSError/ValueError
-    当「没记过」，于是重复投递，或者更糟：把已投递的当成未投递）。
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_bytes(data)
-    os.replace(tmp, path)
-
-
-def atomic_write_json(path: Path, obj: Any) -> None:
-    atomic_write_bytes(path, json.dumps(obj, ensure_ascii=False, indent=1).encode("utf-8"))
+# 原子写 / JSON 原子写 —— 唯一实现见 `common.fs`（re-export；同包调用点与测试不变）。
+# 历史：本模块与 `remote/hub_server._write_bytes` 各有一份字形相同的实现，两份的注释
+# 都在解释同一件事（「半截的记账文件会把续跑判据带偏」）——口径写在注释里不算单实现。
 
 
 # ------------------------------------------------------------------ 产物目录

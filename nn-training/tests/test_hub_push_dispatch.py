@@ -29,8 +29,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from remote.hub_server import _HubQueue, _JobStore, make_server
-from remote.protocol import (
+from common.protocol import (
     AUTH_HEADER,
     ProtocolError,
     normalize_manifest,
@@ -39,6 +38,7 @@ from remote.protocol import (
     push_worker_from_node,
     push_worker_id_of,
 )
+from remote.hub_server import _HubQueue, _JobStore, make_server
 from remote.push_dispatch import PushDispatcher, PushWorkers
 from tests.helpers.push_worker import PAYLOAD
 

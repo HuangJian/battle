@@ -1,4 +1,4 @@
-"""remote/game_watch.py —— 单局子进程的**停滞看门狗**（rollout 与 eval 共用同一套口径）。
+"""common/game_watch.py —— 单局子进程的**停滞看门狗**（rollout 与 eval 共用同一套口径）。
 
 **为什么需要它**（2026-09-22 两起实测）：
 

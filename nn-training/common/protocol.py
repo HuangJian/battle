@@ -1,4 +1,4 @@
-"""remote/protocol.py — remote PPO job protocol (pure, torch-free, stdlib-only).
+"""common/protocol.py — remote PPO job protocol (pure, torch-free, stdlib-only).
 
 Single source of truth for the wire contract between the hub (TrainingLoop remote
 branch + hub-server) and the cloud worker (`python -m remote_worker`). Design doc:

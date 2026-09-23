@@ -24,6 +24,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from common.fs import append_jsonl
+
 #: BC 轮完成事件名（唯一判据；外加 `job_completed` 标记 job 已收口）。
 ROUND_DONE_EVENT = "bc_round_completed"
 #: job 收口事件名（`remote.hub_client.mark_job_completed` 写；用于分辨「这轮的 job 还没回来」）。
@@ -36,11 +38,12 @@ JOB_CANCELLED_EVENT = "job_cancelled"
 
 
 def append_ledger(jsonl_path: str | Path, event: dict) -> None:
-    """追加一条账本事件（父目录按需创建）。"""
-    p = Path(jsonl_path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    with open(p, "a", encoding="utf-8") as f:
-        f.write(json.dumps(event, ensure_ascii=False) + "\n")
+    """追加一条账本事件（父目录按需创建）。
+
+    唯一实现见 `common.fs.append_jsonl`——`remote/hub_client._append_ledger` 原是同款
+    孪生；两边都是「单行 JSON + 换行、父目录按需创建、只追加不读改写」这一条写协议。
+    """
+    append_jsonl(jsonl_path, event)
 
 
 def read_events(jsonl_path: str | Path) -> list[dict]:

@@ -12,7 +12,6 @@ DECISIONS.md 记录原因（这是对账基准，不是随手能刷的数字）�
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
 from pathlib import Path
 
@@ -23,6 +22,7 @@ REPO = ROOT.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from common.proc import run_capture
 from rl.reward_library import METRIC_INDEX, METRICS_DIM
 
 GOLDEN_DIR = ROOT / "tests" / "golden"
@@ -83,14 +83,7 @@ def main() -> None:
     rows = _rows()
     jsonl = "\n".join(json.dumps(metrics_to_counters(m)) for m in rows)
     oracle_script = REPO / "tools" / "diag" / "v7-phi-oracle.ts"
-    proc = subprocess.run(
-        ["bun", str(oracle_script)],
-        input=jsonl,
-        capture_output=True,
-        text=True,
-        cwd=str(REPO),
-        timeout=120,
-    )
+    proc = run_capture(["bun", str(oracle_script)], input=jsonl, cwd=REPO, timeout=120)
     if proc.returncode != 0:
         raise SystemExit(f"v7-phi-oracle 失败: {proc.stderr[:2000]}")
     phi = json.loads(proc.stdout)

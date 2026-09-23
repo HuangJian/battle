@@ -21,8 +21,7 @@ from pathlib import Path
 import pytest
 
 import remote.worker as W
-from remote.hub_server import _HubQueue, make_server
-from remote.protocol import (
+from common.protocol import (
     AUTH_HEADER,
     COURSE_ENABLE_MARKER,
     COURSE_MODE_OFFLINE,
@@ -30,6 +29,7 @@ from remote.protocol import (
     OFFLINE_CAP_VALUE,
     WORKER_ID_HEADER,
 )
+from remote.hub_server import _HubQueue, make_server
 from tests.helpers.hub_poll import hub_poll
 
 TOKEN = "sekret"

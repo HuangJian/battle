@@ -46,6 +46,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from common.hashing import sha256_file
+from common.proc import run_capture
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -177,12 +179,13 @@ def load_dist_config(path: str = CONFIG_PATH) -> dict | None:
 
 
 def weights_fingerprint(path: str) -> str:
-    """sha256(weights.json 文件字节) —— 版本过滤键（语义：样本确由该权重产生）。"""
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
+    """sha256(weights.json 文件字节) —— 版本过滤键（语义：样本确由该权重产生）。
+
+    唯一实现见 `common.hashing.sha256_file`（本名保留：它是调用面最广的公共 API，
+    20+ 处调用与账本口径都认这个名字）。本模块曾是「同字节同哈希」契约的三个定义点
+    之一（另两个在 `remote.artifacts` / `remote.hub_client`），现在只剩 `common.hashing`。
+    """
+    return sha256_file(path)
 
 
 def compute_code_hash() -> str:
@@ -636,14 +639,9 @@ def _git_index_blobs(rels: list[str]) -> dict[str, str]:
     """索引中 rel → blob sha 映射；未跟踪路径不出现在结果里。"""
     if not rels:
         return {}
-    proc = subprocess.run(
-        ["git", "ls-files", "-s", "--", *rels],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=15,
-        **_POPEN_NO_WINDOW,
-    )
+    # 显式 UTF-8：`text=True` 单独用会按 locale 解码（zh-CN Windows = cp936），
+    # 中文路径/非 ASCII 会静默丢输出（docs/nn/engineering.md §19）。走 run_capture 统一。
+    proc = run_capture(["git", "ls-files", "-s", "--", *rels], cwd=REPO_ROOT, timeout=15)
     if proc.returncode != 0:
         return {}
     out: dict[str, str] = {}

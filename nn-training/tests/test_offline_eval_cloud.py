@@ -34,8 +34,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from common import game_watch
 from platform_utils import cpu_worker_slots
-from remote import game_watch, offline_eval, serve_pool
+from remote import offline_eval, serve_pool
 from remote.artifacts import ArtifactStore, sha256_bytes, sha256_file
 from remote.offline_deliver import OfflineDeliverer
 from remote.offline_eval import (

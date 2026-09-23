@@ -14,7 +14,7 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from remote.protocol import WIRE_JOB_MAGIC, normalize_manifest, unpack_job_v2
+from common.protocol import WIRE_JOB_MAGIC, normalize_manifest, unpack_job_v2
 
 PAYLOAD = b"PK\x03\x04fake-payload-bytes"
 

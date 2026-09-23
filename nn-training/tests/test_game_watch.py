@@ -1,4 +1,4 @@
-"""test_game_watch.py — 单局看门狗的口径常量与四行日志（`remote/game_watch.py`，纯函数）。
+"""test_game_watch.py — 单局看门狗的口径常量与四行日志（`common/game_watch.py`，纯函数）。
 
 为什么单独测这一层：rollout 与 eval 两条腿**必须逐字同口径**（软告警线、首次硬顶、重试倍数），
 两份实现各自漂一格就会造出「同一台机器上 rollout 的 5s 就是 eval 的 30s」这种静默错口径。
@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from remote import game_watch
+from common import game_watch
 
 
 def test_defaults_are_the_user_line() -> None:

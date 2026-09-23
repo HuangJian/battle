@@ -9,8 +9,8 @@ from collections.abc import Sequence
 from pathlib import Path
 
 # 判据同源（plan/accident.plan.md §2/A，2026-09-21）：本地对账用**和云端装载/发布同一把尺子**
-# ——`remote.protocol.d14_corpus_match`。方向安全：protocol 是底层模块，不 import 任何 rl/*。
-from remote.protocol import d14_corpus_match
+# ——`common.protocol.d14_corpus_match`。方向安全：protocol 是底层模块，不 import 任何 rl/*。
+from common.protocol import d14_corpus_match
 
 MANIFEST_NAME = "manifest.json"
 #: shard 目录名（一局一目录，`dist_common.write_shard` / TS 导出器同形）。
@@ -104,7 +104,7 @@ def _scan_shards(
     """扫描 traj_dir 内 manifest.wver∈{wver, extra_wver} 的完整 shard，产出 (pair, dir)。
     dir = shard 目录（含 manifest.json），stream 用它把在盘的预采首波 shard 注入训练。
 
-    **D14 血缘判据（§2/A，2026-09-21）**：调 `remote.protocol.d14_corpus_match`——
+    **D14 血缘判据（§2/A，2026-09-21）**：调 `common.protocol.d14_corpus_match`——
     与云端装载 + 发布打包**同一个函数**。两把尺子分工：
       * `course_fp` = 课程**文件字节** sha256（“这份配置长什么样”）；
       * `corpus_fp` = 语料**语义**身份（env+reward 解析值哈希，“一个样本是什么”）。

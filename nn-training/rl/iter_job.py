@@ -9,14 +9,14 @@
 
 于是「节点跑的采集」与「本机跑的采集」逐字节同命令（计划 §5.5① 逐位对拍的前提），
 而协议层只需校验 argv 本身的形状（白名单 + 相对路径 + 逐局 stage/seed，见
-`remote.protocol.validate_rollout_spec`）。
+`common.protocol.validate_rollout_spec`）。
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from remote.protocol import INIT_WEIGHTS_NAME, ITER_NODE_LABEL
+from common.protocol import INIT_WEIGHTS_NAME, ITER_NODE_LABEL
 from rl.cmd import build_rollout_cmd
 
 

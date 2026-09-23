@@ -1,4 +1,4 @@
-"""remote/protocol.py — BC（kind=bc）任务契约测试（plan/bc-cloud-integration.plan.md §1）。
+"""common/protocol.py — BC（kind=bc）任务契约测试（plan/bc-cloud-integration.plan.md §1）。
 
 红线：
   * kind 缺省 = ppo（旧 manifest wire 兼容；PPO 行为零变化）；
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from remote.protocol import (
+from common.protocol import (
     MANIFEST_BC_EXTRA,
     ProtocolError,
     normalize_manifest,
@@ -161,7 +161,7 @@ def test_bc_result_fencing() -> None:
 
 
 def test_bc_job_id_stable_and_kind_independent_of_key() -> None:
-    from remote.protocol import job_id
+    from common.protocol import job_id
 
     m1 = normalize_manifest(_bc_manifest())
     m2 = normalize_manifest(_bc_manifest())

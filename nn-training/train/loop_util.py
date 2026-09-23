@@ -18,9 +18,9 @@ import sys
 import threading
 import time
 
-# Windows：spawn 子进程时用 CREATE_NO_WINDOW，避免黑控制台窗口反复弹出抢焦点。
+# 子进程捕获统一走 common.proc.run_capture（显式 UTF-8 + Windows 隐藏窗口）。
+from common.proc import run_capture
 from pid_probe import pid_alive
-from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 
 NN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO_ROOT = os.path.dirname(NN_ROOT)
@@ -355,13 +355,10 @@ def auto_export_corpus(data_dir: str, log=None) -> int:
         *ndjson_files,
     ]
     try:
-        result = subprocess.run(
+        result = run_capture(
             cmd,
             cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
             timeout=300,  # 5 min budget — 101 replays take ~9s
-            **_POPEN_NO_WINDOW,
         )
         dt = time.time() - t0
         # Print last few lines of output (summary)

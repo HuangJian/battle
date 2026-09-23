@@ -45,11 +45,11 @@ if str(ROOT) not in sys.path:
 
 import hashlib
 
+from common.protocol import COURSE_ENABLE_MARKER, TS_CODE_NAME, encode_weights_json
 from remote import net_http
 from remote.artifacts import ArtifactStore
 from remote.hub_client import publish_job
 from remote.offline_deliver import OfflineDeliverer
-from remote.protocol import COURSE_ENABLE_MARKER, TS_CODE_NAME, encode_weights_json
 from rl.iter_job import build_iter_spec
 from rl.plan import build_plan, dump_plan
 from tests.helpers.hub_poll import hub_poll

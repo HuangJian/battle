@@ -40,8 +40,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from remote import net_http
-from remote.protocol import (
+from common.logutil import log_line
+from common.protocol import (
     AUTH_HEADER,
     BLOB_NAMES,
     CLAIM_MODE_BACKUP,
@@ -69,13 +69,15 @@ from remote.protocol import (
     rotation_order,
     validate_result,
 )
+from remote import net_http
 
 #: 缺省登记来源：仓库的 `nn-training/rl-config.json`（控制台 worker 登记入口回写的那个文件）。
 DEFAULT_PUSH_CONFIG = Path(__file__).resolve().parents[1] / "rl-config.json"
 
 
 def _log_default(msg: str) -> None:
-    print(f"[{time.strftime('%H:%M:%S')}] [hub-push] {msg}", flush=True)
+    """默认日志（tag=`hub-push`）——行格式见 `common.logutil`（`clock=time` 保可注入）。"""
+    log_line("hub-push", msg, clock=time)
 
 
 def _http(

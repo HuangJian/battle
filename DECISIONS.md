@@ -2235,3 +2235,39 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
 **为什么不能只挂 `bun run check`**：纯文档提交会整跳根套件（`tools/test-silent.ts`），而往 `AGENTS.md`
 追加正文正是这类提交 —— 只有在 hook 里才在最该生效的场景生效。
 —— 全文（背景 / 阈值推导 / 度量口径 / 归因语义）→ `docs/agents.details.md` §0.1
+
+## §2026-09-23-goalnn-common-primitives-layer（2026-09-23，用户指令「重构 nn-training：降耦合 / 复用代码 / 提可维护性」）
+
+- **背景**：同名原语各写 2~4 份且**语义已漂移**（`sha256_file` / `bun_version` 各三份、`_log_default` 四份、
+  13 处裸 `text=True` 捕获 = §19 那类「响亮错误变哑巴」的温床）。重复处的注释写着「与 X 同口径…故就地保留同款
+  助手」——**口径写进注释不算单一实现**。
+- **备选与否决**：分散合并（`remote/` 内一份、`rl/` 内一份）——否，跨包重复正是漂移发生处；塞进 `dist_common`
+  ——否，那是采样协议模块，不是「纯 stdlib、可单独搬运」的落点；把 `bun_version` 两侧分歧「统一」掉——否
+  （那是静默行为变更；改用显式 `require_zero` 形参，两侧口径各留一行文档）。
+- **决定**：新增 **stdlib-only 的 `common/` 包**（hashing / proc / fs / text / logutil）作共享原语层；上层只留
+  re-export / 薄包装（历史名字与 monkeypatch 接缝全保留）⇒ **零行为变化**（门禁 2230 → 2247 全绿）。层契约：
+  只依赖 stdlib、不反向 import 上层、无副作用、无模块级可变状态。**结构性例外**：三个从 GitHub raw 单独拉取的
+  引导模块（`tailscale_boot` / `notebook_boot` / `offline_boot`）**禁用本包**——cell 侧在拿到 `code.zip` 之前
+  就要 import 它们；其重复是豁免，不是漏网（测试守着）。
+- **违反后果**：`common/` 里 import `torch` / `rl.*` ⇒ 云机解开 `code.zip` 当即 ImportError（本机全绿、只有云机炸）；
+  重抄一份 `sha256_*` / `bun_version` ⇒ 账本「同字节同哈希」与版本对账重回两份真相；合并引导模块孪生 ⇒ cell
+  引导链断在首包之前。
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/engineering.md` §21「`common/` 共享原语层」
+
+## §2026-09-23-goalnn-layering-common-sink（2026-09-23，用户指令「重构 nn-training：降耦合 / 复用代码 / 提可维护性」）
+
+- **背景**：`rl/` 有 10 个文件 import `remote/*`，`remote/` 有 8 个文件 import `rl/*` —— 双向包循环，
+  当年靠 `rl/queue.py` 一处**函数内延迟 import** 维持「能跑」（延迟 import 把失败推到调用期，启动时看不出环）。
+- **备选与否决**：一次把 `remote → rl` 的 8 处全改注入式——否（先拿到**单向可达**的增量并钉住，再逐项改）；
+  `remote/protocol.py` 留薄门面——否（多一层空壳 + 「哪份是真的」歧义，本仓先例是 `pid_probe` 式真下沉）；
+  门面用 `import *` 省事——否（`game_watch.__all__` 已漏 `PROGRESS_LOG_SEC` / `progress_due` 且正被使用 ⇒ 静默少导出）；
+  分层守卫写成 grep/lint 规则——否（需跨文件判断 + 白名单双向对账，且 AST 才看得见函数内延迟 import）。
+- **决定**：把**模块级零上层依赖**的 `remote/protocol.py`（92 处 / 65 文件引用）与 `remote/game_watch.py`
+  （14 处 / 12 文件）下沉为 `common/` 成员；`remote/` 保留**显式清单**门面（不用 `import *`）。确立分层
+  `L0 common/·platform_utils·pid_probe·dist_common·schema → L1 models/·ppo/·data/·train/·rl/·scripts/
+  → L2 remote/·根入口`，允许 `L2→L1→L0`、反向禁止，由 `tests/test_layering.py` 断言。`rl/` 保留 4 项
+  **过渡白名单**（`remote.bundle` / `hub_client` / `push_client` / `serve_pool` = plan §5.2 第 ④ 步待办）；
+  白名单**未使用即红**，防其腐烂成「合法的历史遗留」。
+- **违反后果**：`rl/` 白名单外再 `import remote.*` ⇒ 纯逻辑包被迫拖入传输依赖，云机无 bun 首包即断；
+  把两模块搬回 `remote/` ⇒ 包循环重现，守卫红。
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/engineering.md` §22「断开 rl ↔ remote 包循环」

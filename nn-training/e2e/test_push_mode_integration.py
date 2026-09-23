@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from remote.protocol import (
+from common.protocol import (
     WIRE_JOB_CONTENT_TYPE,
     WIRE_JOB_MAGIC,
     ProtocolError,
@@ -391,7 +391,7 @@ def test_push_over_nodes_prefers_the_deterministic_cause() -> None:
     2026-09-17：不这样就会让「bun 装不上」被上层当瞬时失败重试 3 次（每次重新 push +
     等满超时）。这条是组合路径与拆相路径**共用**的那份 failover 判决。
     """
-    from remote.protocol import JobFailedError
+    from common.protocol import JobFailedError
     from rl.loop_steps import _push_over_nodes
 
     def step(i: int, _node: dict):
@@ -408,7 +408,7 @@ def test_push_over_nodes_prefers_the_deterministic_cause() -> None:
 
 def _push_session(tmp_path: Path, *, bad_first: bool = True):
     """造一份直推会话 + 真 job 目录（换节点时要重读盘上 payload）。"""
-    from remote.protocol import PAYLOAD_NAME
+    from common.protocol import PAYLOAD_NAME
     from rl.loop_round import RemotePpoJob
     from rl.loop_steps import TrainingSteps
 

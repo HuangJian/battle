@@ -23,8 +23,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from common.protocol import JobFailedError
 from remote.hub_client import wait_job
-from remote.protocol import JobFailedError
 from rl.loop_steps import TrainingSteps
 
 

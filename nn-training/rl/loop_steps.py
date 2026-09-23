@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import dist_common
-from remote.protocol import (
+from common.protocol import (
     JobFailedError,
     ProtocolError,
     RetryableError,
@@ -1201,7 +1201,7 @@ class TrainingSteps:
         # D14 血缘过滤（2026-09-20 事故）：`it{it}` 是累积目录，课程文件被编辑过/换过
         # runId 时里面会躺着旧血缘 shard；云端 worker 逐 shard 拒收 ⇒ 整份 job 退回，
         # hub 侧永远等不到结果（训练轮空转 + worker 反复领同一份死活）。过滤判据
-        # 与云端同源（`remote.protocol.d14_corpus_match`），故「打进 payload 的集合」
+        # 与云端同源（`common.protocol.d14_corpus_match`），故「打进 payload 的集合」
         # 恒等于「云端会接受的集合」；`verify_and_land` 用同样的两个 fp 重算 data_fp。
         local_shards = iter_shard_dirs(
             args.traj,
@@ -1562,7 +1562,7 @@ class TrainingSteps:
         _pl = find_payload(job_dir)
         if _pl is None:
             raise ProtocolError(f"job {sess.jid}: payload 不在盘上（push 无法发送）")
-        from remote.protocol import BLOB_NAMES, blob_path
+        from common.protocol import BLOB_NAMES, blob_path
 
         blobs = {
             n: bp.read_bytes()

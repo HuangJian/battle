@@ -30,9 +30,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from common.protocol import AUTH_HEADER, RetryableError
 from remote import worker as worker_mod
 from remote.hub_server import _JobStore, make_server
-from remote.protocol import AUTH_HEADER, RetryableError
 
 
 class _FakeResp:

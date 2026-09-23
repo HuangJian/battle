@@ -27,7 +27,7 @@ if str(ROOT) not in sys.path:
 
 import remote.iter_rollout as iter_rollout
 import remote.serve_pool as serve_pool
-from remote import game_watch
+from common import game_watch
 from remote.serve_pool import ServePool
 
 # ------------------------------------------------------------------ 桩

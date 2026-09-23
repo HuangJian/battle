@@ -97,7 +97,7 @@ def test_worker_bc_device_passthrough(arg: str, expect: str) -> None:
 
 
 def test_worker_bc_device_tpu_rejected() -> None:
-    import remote.protocol
+    import common.protocol
 
-    with pytest.raises(remote.protocol.ProtocolError, match="cuda/cuda-dp"):
+    with pytest.raises(common.protocol.ProtocolError, match="cuda/cuda-dp"):
         _bc_device("tpu")

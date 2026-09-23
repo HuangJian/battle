@@ -27,8 +27,8 @@ if str(ROOT) not in sys.path:
 
 from test_offline_deliver import RUN, _make_artifacts  # type: ignore
 
+from common.protocol import OFFLINE_ARTIFACT_PATH, OFFLINE_RESULT_PATH
 from remote.offline_deliver import OfflineDeliverer
-from remote.protocol import OFFLINE_ARTIFACT_PATH, OFFLINE_RESULT_PATH
 
 
 class _Recorder:

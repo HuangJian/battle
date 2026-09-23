@@ -32,9 +32,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import remote.iter_rollout as iter_rollout
-from remote import game_watch
-from remote.iter_rollout import run_iter_rollout, scan_shard_dirs, verify_shards
-from remote.protocol import (
+from common import game_watch
+from common.protocol import (
     INIT_WEIGHTS_NAME,
     ROLLOUT_SCRIPTS,
     TS_CODE_NAME,
@@ -51,6 +50,7 @@ from remote.protocol import (
     validate_result,
     validate_rollout_spec,
 )
+from remote.iter_rollout import run_iter_rollout, scan_shard_dirs, verify_shards
 from rl.iter_job import build_iter_spec
 from rl.loop_steps import TrainingSteps
 
@@ -567,7 +567,7 @@ def test_publish_iter_manifest_and_layout(tmp_path: Path) -> None:
     """发布 iter job：无 shard、data_fp 是声明集、ts_code 拷进 job 目录、init 权重在 payload。"""
     import tarfile as _tarfile
 
-    from remote.protocol import find_payload
+    from common.protocol import find_payload
 
 
     spec = validate_rollout_spec(_spec([(3, 7), (3, 8)]))
@@ -677,8 +677,8 @@ def test_verify_and_land_iter_uses_declared_data_fp(tmp_path: Path) -> None:
     import io
     import tarfile as _tarfile
 
+    from common.protocol import encode_opt_tar, encode_weights_json
     from remote.hub_client import HubClientError, verify_and_land
-    from remote.protocol import encode_opt_tar, encode_weights_json
 
     m, w = _publish_iter(tmp_path)
     buf = io.BytesIO()
@@ -817,7 +817,7 @@ def test_run_iter_rollout_reports_rc_failure(tmp_path: Path, monkeypatch) -> Non
     }
     job_dir = tmp_path / "job"
     job_dir.mkdir()
-    from remote.protocol import RetryableError
+    from common.protocol import RetryableError
 
     with pytest.raises(RetryableError) as e:
         run_iter_rollout(job_dir, spec, log=lambda _m: None)
@@ -881,7 +881,7 @@ def _one_game_spec(tmp_path: Path, script: Path, **over) -> dict:
 def _fast_watchdog(monkeypatch: pytest.MonkeyPatch) -> None:
     """把轮询粒度调小（生产 0.5s）——否则每个用例都要等秒级。
 
-    patch 的是 `remote.game_watch` 的常量（**单一来源**）：调用点读的都是模块属性，
+    patch 的是 `common.game_watch` 的常量（**单一来源**）：调用点读的都是模块属性，
     所以改这一份就处处生效（import 成局部名会抄出第二份绑定，patch 不到）。
     """
     monkeypatch.setattr(game_watch, "GAME_POLL_SEC", 0.05)

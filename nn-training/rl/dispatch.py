@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import random
 import secrets
-import subprocess
 import threading
 import time
 from collections import deque
@@ -13,11 +12,11 @@ from pathlib import Path
 
 import dist_common
 
-# Windows：spawn 本地对局子进程（self.bun/node 跑游戏模拟）时使用 CREATE_NO_WINDOW，
-# 否则每个本地槽位都会开一个黑色 cmd 控制台窗口，反复弹出抢占焦点。stdout/stderr
-# 已重定向到文件，故隐藏窗口不影响日志落盘。（非 win32 平台此 dict 为空，无副作用）
-from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+# 本地对局子进程的无窗口 spawn 由 `rl.queue_local` 负责（Windows 下不弹黑色 cmd 抢焦点）。
+from common.proc import bun_version as _bun_version
+from common.proc import version_mm as _mm
 from platform_utils import rmtree_best_effort
+from rl.agent_meta import record_agent_meta as _record_agent_meta_impl
 from rl.log import log
 from rl.queue_local import (
     pick_race_target,
@@ -80,39 +79,13 @@ def _ensure_games(m: dict) -> dict:
     }
 
 
-def bun_version(bun: str) -> str:
-    try:
-        return (
-            subprocess.run(
-                [bun, "--version"],
-                capture_output=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=10,
-                **_POPEN_NO_WINDOW,
-            ).stdout.strip()
-            or "?"
-        )
-    except Exception:
-        return "?"
-
-
-def mm(version: str) -> str:
-    return ".".join(str(version).split(".")[:2])
-
-
-def _record_agent_meta(meta_path: Path, rec: dict) -> None:
-    """追加一条节点采样元数据到 dist-agent-meta.jsonl（巡检读它聚合进 HTML）。
-
-    rec: {node, it, stage, seed, ok, [win, elapsedSec, wallSec | reason], ts}。
-    elapsedSec = 节点侧服务时长；wallSec = 训练机派发→结算墙钟（含网络）。
-    放锁内调用保证顺序；单局一次 IO，成本可忽略。
-    """
-    try:
-        with open(meta_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    except OSError:
-        pass
+# 版本探测 / major.minor 比对 / 节点采样账本 —— 唯一实现见 `common.proc` 与
+# `rl.agent_meta`（本处 re-export：本模块内的调用点与测试的 monkeypatch 接缝都不变）。
+# 历史：本模块与 `rl/queue.py` 各有一份字形相同的三件套（bun_version / mm /
+# _record_agent_meta），差别只在哪一份先被谁 import——两份注释都在解释同一件事。
+bun_version = _bun_version
+mm = _mm
+_record_agent_meta = _record_agent_meta_impl
 
 
 class RolloutDispatcher:

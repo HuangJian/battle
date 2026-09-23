@@ -35,8 +35,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import remote.run_loop as run_loop_mod
-from remote.artifacts import ArtifactStore, sha256_bytes, sha256_file
-from remote.protocol import (
+from common.protocol import (
     ProtocolError,
     RetryableError,
     encode_opt_tar,
@@ -46,6 +45,7 @@ from remote.protocol import (
     unpack_payload,
     validate_result,
 )
+from remote.artifacts import ArtifactStore, sha256_bytes, sha256_file
 from remote.run_loop import (
     _combined,
     open_run_context,

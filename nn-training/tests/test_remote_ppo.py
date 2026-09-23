@@ -36,8 +36,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from remote.hub_server import _JobStore, make_server
-from remote.protocol import (
+from common.protocol import (
     AUTH_HEADER,
     BLOB_OPT,
     BLOB_REF,
@@ -68,9 +67,10 @@ from remote.protocol import (
     unpack_result_v2,
     validate_result,
 )
-from remote.protocol import (
+from common.protocol import (
     job_id as make_job_id,
 )
+from remote.hub_server import _JobStore, make_server
 from rl.reward_library import METRICS_DIM  # numpy-only 模块，守免 torch 原则
 from tests.helpers.hub_poll import hub_poll
 
@@ -1467,7 +1467,7 @@ def test_claimable_pool_rebuilt_from_ledger(tmp_path: Path) -> None:
 # ------------------------------------------------------------------ 重传机制（2026-09-05，DECISIONS §340）
 
 import remote.worker as worker_mod
-from remote.protocol import RetryableError
+from common.protocol import RetryableError
 
 
 @pytest.fixture()

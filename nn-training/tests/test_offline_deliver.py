@@ -38,14 +38,14 @@ if str(ROOT) not in sys.path:
 from test_remote_ppo import _boot_server, _http  # type: ignore
 from test_run_loop import _FakeRunJob, _prepare, _quiet  # type: ignore
 
-from remote.offline_deliver import OfflineDeliverer
-from remote.protocol import (
+from common.protocol import (
     OFFLINE_ARTIFACT_PATH,
     OFFLINE_RESULT_PATH,
     ProtocolError,
     encode_weights_json,
     sanitize_run_id,
 )
+from remote.offline_deliver import OfflineDeliverer
 from remote.run_loop import run_plan_job
 
 RUN = "run-offline-1"

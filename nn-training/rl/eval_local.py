@@ -16,11 +16,10 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
-
 # 单局看门狗口径：**一律通过模块属性读**（`game_watch.X`）——import 会把值抄成第二份绑定，
 # 测试 patch 了 game_watch 那份、调用点还在读旧绑定就是静默的错口径。
-from remote import game_watch
+from common import game_watch
+from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from remote.serve_pool import EVAL_SCRIPT as _EVAL_SCRIPT
 from rl.log import log
 
@@ -511,7 +510,7 @@ def run_eval_runner_capture(
     `cwd=None` 缺省 = 仓库根（本机/控制台路径，历史行为逐字节不变）；云机离线评估显式给
     TS 运行时树根（云上没有仓库，见 `run_local_eval_game` 的 `cwd` 形参）。
 
-    **停滞看门狗**（2026-09-22，与 rollout 同一套口径 `remote/game_watch.py`）：用 Popen +
+    **停滞看门狗**（2026-09-22，与 rollout 同一套口径 `common/game_watch.py`）：用 Popen +
     轮询代替一次 `subprocess.run(timeout=)`——后者在局卡住期间什么都看不见，只能等超时；
     现在单局超过 `SLOW_GAME_WARN_SEC`（5s，正常亚秒~几秒级）就**点名**打一行 WARN（带 `s3/d7`），
     到 `timeout_sec` 才 kill 并按 `TimeoutExpired` 上抛（语义与 `subprocess.run` 逐字一致，

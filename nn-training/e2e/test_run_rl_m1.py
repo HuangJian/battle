@@ -241,7 +241,7 @@ def test_kickstart_coef_anneals_to_exact_zero() -> None:
     ref 前向；而数学贡献 ≈1.8e-12，相对 policy≈0.005 完全可忽略。
     用户已确认课程不会回抬 kickstart。
     """
-    from remote.protocol import NEGLIGIBLE_COEF, coef_active
+    from common.protocol import NEGLIGIBLE_COEF, coef_active
 
     args = types.SimpleNamespace(
         epochs=4, warmup_iters=0, kickstart_kl=1.0, kickstart_decay=0.5, seed=7
