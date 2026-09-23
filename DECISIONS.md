@@ -2280,3 +2280,28 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
   另：反向探针揪出判据盲点——`from <pkg> import <mod>` 只给 `remote` 展开、没给 `rl` 展开 ⇒
   两条断言静默失效（全绿但守卫是瞎的）；改为按实存子包统一展开。
 —— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/engineering.md` §22「断开 rl ↔ remote 包循环」
+
+## §2026-09-23-goalnn-godmodule-loop-transport（2026-09-23，用户指令「重构 nn-training：降耦合 / 复用代码 / 提可维护性」）
+
+- **背景**：`rl/loop_steps.py` 2328 行里混着两种东西——`TrainingSteps` mixin（1 个 **1715 行**类）与
+  **19 个模块级自由函数 + 2 异常类 + 4 常量**（课程/rollout 源解析、transport 选择、hub 推送、节点 failover、
+  kickstart 系数、远端可重试异常集合），后者**没有一个是方法**，只是历史上「从 `loop_core.py` 拆出」时
+  按大小切、没按职责切。
+- **备选与否决**：把 `dist_common` / `_push_*` 改成**参数注入**（一次做完）——否（牵动 20+ 调用点与类方法，
+  而下一步「拆那个 1715 行类」还要动同一批函数 = 两个高风险重构叠加）；把两份**同名 DI seam 规范化成一份**
+  ——否（等于同时改注入语义 + 搬文件，且类方法确实需要自己的注入点 ⇒ 改为**显式记录成契约**）；删掉门面、
+  全仓 `import` 改指 `loop_transport`——否（20+ 调用点 + 4 个测试文件 patch 目标要一起改，diff 大而无行为收益）；
+  一次拆三个神模块——否（`hub_server` 3972 行还有**模块级可变状态**，风险高；每次只动一件事）。
+- **决定**：把 `loop_steps` 的**模块级函数簇（43–611 行）零逻辑改动**搬到新 `rl/loop_transport.py`
+  （传输/发布策略的唯一实现），`loop_steps` 只留**显式清单门面** + 列全的 `__all__`（2328 → 1812 行），
+  既有 `from rl.loop_steps import X` 调用点零改动。**关键口径**：DI seam 是**模块全局**，patch 目标
+  **随实现走**——`_push_job_round`（已搬）读 `rl.loop_transport._push_submit`，而 `TrainingSteps` 的
+  方法（未搬，闭包/直读）仍读 `rl.loop_steps._push_submit`；**同名 seam 两份不是重复，是两个各自真实的
+  注入点**（由 `tests/test_loop_transport_split.py` 守住两边并存）。`loop_transport` 登记进
+  `RL_ORCHESTRATION` 声明式快照。
+- **违反后果**：把传输函数搬回 / 就地再定义一个 ⇒ 守卫红；seam 只留一边却共用函数体 ⇒ 注入**静默失效**
+  （绿而无效，e2e 的 patch 成了摆设）；新 `rl/*.py` 偷 import `remote.push_client` 不登记 ⇒ 分层快照红。
+- **教训（已写进 §23）**：`import rl.loop_steps as ls; ls._push_submit = …` **不含**字面量
+  `rl.loop_steps.`（少了那个点），按「patch 字符串」grep 的清单抓不到——是**全量门禁**点名的。
+  ⇒ seam 清点要比文本 grep 多想一层：**模块对象别名也是一个注入点**。
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/engineering.md` §23「神模块拆分第一步：`loop_steps` 的传输/发布簇搬进 `loop_transport`」

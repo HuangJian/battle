@@ -79,7 +79,7 @@ def test_illegal_value_rejected_loudly() -> None:
 
 
 def test_cli_value_wins_without_touching_config() -> None:
-    with patch("rl.loop_steps.dist_common") as dc:
+    with patch("rl.loop_transport.dist_common") as dc:
         dc.load_dist_config.return_value = _cfg({"cf_protocol": "auto"}, {"s-dodge": {"cf_protocol": "quic"}})
         got = _course_cf_tunnel(_args(COURSE, remote_cf_protocol="http2", remote_cf_edge_ip="6"))
     assert got == ("http2", "6")
@@ -89,13 +89,13 @@ def test_cli_value_wins_without_touching_config() -> None:
 def test_course_override_beats_rl_block() -> None:
     """per-course 覆盖最贴近「这一课真正用的值」——rl.* 只是全局缺省。"""
     courses = {"s-dodge": {"cf_protocol": "quic", "cf_edge_ip": "6"}}
-    with patch("rl.loop_steps.dist_common") as dc:
+    with patch("rl.loop_transport.dist_common") as dc:
         dc.load_dist_config.return_value = _cfg({"cf_protocol": "http2", "cf_edge_ip": "4"}, courses)
         assert _course_cf_tunnel(_args(COURSE)) == ("quic", "6")
 
 
 def test_rl_block_used_when_course_has_no_override() -> None:
-    with patch("rl.loop_steps.dist_common") as dc:
+    with patch("rl.loop_transport.dist_common") as dc:
         dc.load_dist_config.return_value = _cfg(
             {"cf_protocol": "http2", "cf_edge_ip": "4"}, {"s-dodge": {}}
         )
@@ -105,7 +105,7 @@ def test_rl_block_used_when_course_has_no_override() -> None:
 def test_other_course_is_not_leaked() -> None:
     """别的课的覆盖不得串台（按 stem 查表，不是「取第一个」）。"""
     courses = {"other": {"cf_protocol": "quic"}}
-    with patch("rl.loop_steps.dist_common") as dc:
+    with patch("rl.loop_transport.dist_common") as dc:
         dc.load_dist_config.return_value = _cfg({"cf_protocol": "http2"}, courses)
         assert _course_cf_tunnel(_args(COURSE)) == ("http2", None)
 
@@ -115,20 +115,20 @@ def test_other_course_is_not_leaked() -> None:
 
 def test_no_args_attributes_at_all_is_safe() -> None:
     """旧 args（没这两个属性）→ (None, None)，不 AttributeError。"""
-    with patch("rl.loop_steps.dist_common") as dc:
+    with patch("rl.loop_transport.dist_common") as dc:
         dc.load_dist_config.return_value = _cfg({"cf_protocol": "http2"})
         assert _course_cf_tunnel(_args("")) == (None, None)
 
 
 def test_config_read_failure_is_silent() -> None:
     """读 rl-config 抛异常 = 记录缺失，不是训练故障（wire 字段允许 None）。"""
-    with patch("rl.loop_steps.dist_common") as dc:
+    with patch("rl.loop_transport.dist_common") as dc:
         dc.load_dist_config.side_effect = RuntimeError("boom")
         assert _course_cf_tunnel(_args(COURSE, remote_cf_protocol="http2")) == ("http2", None)
 
 
 def test_no_course_path_skips_config_entirely() -> None:
-    with patch("rl.loop_steps.dist_common") as dc:
+    with patch("rl.loop_transport.dist_common") as dc:
         assert _course_cf_tunnel(_args("")) == (None, None)
         assert not dc.load_dist_config.called
 
@@ -137,7 +137,7 @@ def test_wire_from_result_records_resolved_values() -> None:
     """端到端锁：解析出的值进了 wire 子字典（不再恒 None）。"""
     from rl.loop_steps import _wire_from_result
 
-    with patch("rl.loop_steps.dist_common") as dc:
+    with patch("rl.loop_transport.dist_common") as dc:
         dc.load_dist_config.return_value = _cfg({"cf_protocol": "http2", "cf_edge_ip": "4"})
         proto, edge = _course_cf_tunnel(_args(COURSE))
     w = _wire_from_result({}, is_push=True, cfg={"protocol": proto, "edge_ip": edge, "slim": True})

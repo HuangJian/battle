@@ -75,6 +75,7 @@ nn-training/
 │   ├── eval_m1.py           #    M1 评估协议（intent/goal 干净评估 + Δ 止损）
 │   ├── archive.py           #    RL 权重归档轮转 + 分支 push
 │   ├── log.py               #    log() 落盘（带时间戳统一格式）
+│   ├── loop_transport.py    #    传输/发布层：rollout 源解析 + transport 选择 + hub 推送 + 节点 failover（2026-09-23 从 loop_steps.py 拆出，S4）
 │   └── __init__.py          #    包入口文档
 │
 ├── scripts/                 # 【辅助脚本】一次性/诊断工具

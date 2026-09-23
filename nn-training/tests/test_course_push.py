@@ -42,7 +42,7 @@ def test_all_enabled_gpu_push_nodes_are_candidates() -> None:
         {"url": "https://a.example", "authKey": "k", "gpu_push": True, "enabled": True},
         {"url": "https://b.example", "authKey": "k", "gpu_push": True, "enabled": True},
     ]
-    with patch("rl.loop_steps.dist_common") as dc:
+    with patch("rl.loop_transport.dist_common") as dc:
         dc.load_dist_config.return_value = _cfg(nodes)
         got = _gpu_push_nodes("tok")
     assert [n["url"] for n in got] == ["https://a.example", "https://b.example"]
@@ -55,7 +55,7 @@ def test_course_block_does_not_filter_the_node_list() -> None:
         {"url": "https://b.example", "authKey": "k", "gpu_push": True},
     ]
     courses = {"s-dodge": {"push_node_url": "https://a.example"}}
-    with patch("rl.loop_steps.dist_common") as dc:
+    with patch("rl.loop_transport.dist_common") as dc:
         dc.load_dist_config.return_value = _cfg(nodes, courses)
         got = _gpu_push_nodes("tok")
     assert [n["url"] for n in got] == ["https://a.example", "https://b.example"]
@@ -73,7 +73,7 @@ def test_env_override_is_exclusive(monkeypatch) -> None:
     """env `REMOTE_PUSH_NODE`（冒烟预演）= 只推它：真 GPU 节点不得抢走预演的 job。"""
     monkeypatch.setenv("REMOTE_PUSH_NODE", "http://127.0.0.1:9999")
     nodes = [{"url": "https://a.example", "authKey": "k", "gpu_push": True, "enabled": True}]
-    with patch("rl.loop_steps.dist_common") as dc:
+    with patch("rl.loop_transport.dist_common") as dc:
         dc.load_dist_config.return_value = _cfg(nodes)
         got = _gpu_push_nodes("tok")
     assert [n["url"] for n in got] == ["http://127.0.0.1:9999"]
@@ -85,7 +85,7 @@ def test_disabled_or_non_push_nodes_excluded() -> None:
         {"url": "https://off.example", "authKey": "k", "gpu_push": True, "enabled": False},
         {"url": "https://pull.example", "authKey": "k"},
     ]
-    with patch("rl.loop_steps.dist_common") as dc:
+    with patch("rl.loop_transport.dist_common") as dc:
         dc.load_dist_config.return_value = _cfg(nodes)
         assert _gpu_push_nodes("tok") == []
 
@@ -103,27 +103,27 @@ def test_course_push_url_reader_is_gone() -> None:
 
 def test_hub_push_defaults_on_when_unset() -> None:
     """用户口径「配了节点就默认走 hub 中介派发」：`rl.hub_push` 缺省 = 允许。"""
-    with patch("rl.loop_steps.dist_common") as dc:
+    with patch("rl.loop_transport.dist_common") as dc:
         dc.load_dist_config.return_value = {"rl": {}}
         assert _hub_push_opt_in() is True
 
 
 def test_hub_push_can_be_turned_off_explicitly() -> None:
     """显式 `rl.hub_push: false` → 回直推节点（部署事实住全局一个键，不再按课程读）。"""
-    with patch("rl.loop_steps.dist_common") as dc:
+    with patch("rl.loop_transport.dist_common") as dc:
         dc.load_dist_config.return_value = {"rl": {"hub_push": False}}
         assert _hub_push_opt_in() is False
 
 
 def test_hub_push_ignores_the_course_block() -> None:
     """课程块里的 `hub_push` 不再被读（课程与派发路径正交）。"""
-    with patch("rl.loop_steps.dist_common") as dc:
+    with patch("rl.loop_transport.dist_common") as dc:
         dc.load_dist_config.return_value = {"rl": {}, "courses": {"s-dodge": {"hub_push": False}}}
         assert _hub_push_opt_in() is True
 
 
 def test_hub_push_survives_a_broken_config() -> None:
     """配置读不到 ⇒ 缺省（允许）——不炸训练；真生效还需 hub_url+token（resolve_hub_push 管）。"""
-    with patch("rl.loop_steps.dist_common") as dc:
+    with patch("rl.loop_transport.dist_common") as dc:
         dc.load_dist_config.side_effect = RuntimeError("boom")
         assert _hub_push_opt_in() is True

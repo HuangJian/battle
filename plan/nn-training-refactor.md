@@ -145,7 +145,8 @@ P0 ──→ P1 ──→ P3 ──→ P4
 > **编号口径**：本节曾写作「S2」，与 `docs/nn/engineering.md` §22 / `DECISIONS.md`
 > §2026-09-23-goalnn-layering-common-sink 的「S3」不一致 ⇒ 现统一为文档口径：
 > S1 = `common/` 原语层（§5.1，已完成）· S2 = `text=True` 编码隐患（附于 S1，已完成）·
-> **S3 = 包循环断开（本节，已完成）** · S4 = 拆神模块（§5.3，待办）。
+> **S3 = 包循环断开（本节，已完成）** · S4 = 拆神模块（§5.3，**首簇已完成**：
+> `loop_steps` 的传输/发布簇 → `rl/loop_transport.py`）。
 
 **结论（已落地）**：`protocol`（92 处 / 65 文件）与 `game_watch`（14 处 / 12 文件）
 已下沉为 `common/` 成员；`ppo/` `train/` `models/` `data/` `scripts/` 对 `remote` 引用**归零**；
@@ -205,13 +206,26 @@ L2  remote/                                                         （传输；
 
 </details>
 
-### 5.3 待办 —— S4：拆神模块（收益最大、风险也最大，**独立一轮**）
+### 5.3 S4：拆神模块（收益最大、风险也最大，**独立一轮**）
+
+> **进度（2026-09-23）**：第一步已完成 —— `rl/loop_steps.py` 的模块级**传输/发布簇**
+> （19 函数 + 2 异常 + 4 常量，43–611 行）**零逻辑改动**搬到 `rl/loop_transport.py`，
+> `loop_steps` 只留显式清单门面（2328 → 1812 行）。
+> 决策 → `DECISIONS.md` §2026-09-23-goalnn-godmodule-loop-transport；全文与教训 →
+> `docs/nn/engineering.md` §23；守卫 → `tests/test_loop_transport_split.py`（7 例）。
+> **门禁：2262 passed / 3 skipped / 0 failed**。
+> **最大教训**：DI seam 是**模块全局**（`dist_common` / `_push_submit` / `_push_wait_result`），
+> patch 目标**随实现走**——同名 seam 在两处并存是两个真实注入点，不是重复；且
+> `import rl.loop_steps as ls; ls._push_submit = …` 这种**别名形态**是文本 grep 抓不到的注入点
+> （被全量门禁点名）。
+> **下一步**：拆那个 **1715 行**的 `TrainingSteps` 类（方法组），再 `remote/worker.py`，
+> 最后 `remote/hub_server.py`（状态类）。
 
 | 文件 | 行数 | 建议切法（按关注点，不是按行数等分） |
 |---|---|---|
 | `remote/hub_server.py` | 3972 | `remote/hub/`：`pack_exchange`（任务包导出/导入）· `offline`（离线产物面）· `results`（结果/指标摄取）· `registry`（节点登记与状态）· `admin`（net-probe / 健康）· `httpd`（Handler + 启动）；**保留 `remote/hub_server.py` 作门面 re-export**（测试与 dashboard 都从它取名字） |
 | `remote/worker.py` | 3475 | `remote/worker/`：`restore`（payload 还原）· `caches`（code.zip / ts_code 内容寻址缓存）· `procs`（子进程与监督）· `runjob`（run_job 主链） |
-| `rl/loop_steps.py` | 2328 | 按循环阶段切（评估步 / volume 步 / 提交步），或收进 `rl/loop_steps/` 包 |
+| `rl/loop_steps.py` | 2328 → **1812** | ~~按循环阶段切~~：顶层函数簇已搬（见上方进度）；**余下** = 拆 `TrainingSteps`（1715 行 / 33 方法）的方法组（评估步 / volume 步 / 提交步），或收成 `rl/loop_steps/` 包 |
 
 **实测侦察（2026-09-23，动手前先量；原计划只有「按关注点切」的猜测）**：
 

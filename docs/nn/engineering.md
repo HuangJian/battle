@@ -11,6 +11,101 @@
 
 ---
 
+## §23 神模块拆分第一步：`loop_steps` 的传输/发布簇搬进 `loop_transport`（2026-09-23，用户指令「重构 nn-training：降低耦合 / 复用代码 / 提可维护性」）
+
+### 一句话
+
+`rl/loop_steps.py`（2328 行）里混着**两种东西**：`TrainingSteps` mixin（单轮结算与梯度步）
+与**19 个模块级自由函数 + 2 个异常类 + 4 个常量**（课程/rollout 源解析、transport 选择、
+hub 推送、节点 failover、kickstart 系数、远端可重试异常集合）——后者**没有一个是方法**，
+只是历史上「从 `loop_core.py` 拆出」时按大小切、没按职责切。S4 第一步把整簇**零逻辑改动**
+搬到 `rl/loop_transport.py`，`loop_steps` 只留门面 re-export（2328 → **1812** 行）。
+门禁 **2255 → 2262**（+7 守卫用例）全绿。
+
+### 先量结构，再选刀口（拆前侦察，都是实测）
+
+| 神模块 | 行数 | 形状 | 模块级可变状态 |
+|---|---|---|---|
+| `remote/hub_server.py` | 3972 | 3 个千行状态类 | 有 ⇒ 风险高，**不在首刀** |
+| `remote/worker.py` | 3475 | 68 个顶层函数，有水平缝 | 只有 1 个懒建 opener |
+| `rl/loop_steps.py` | 2328 | 1 个 **1715 行**类 + 19 个顶层函数 | **零** ⇒ 最安全起手 |
+
+刀口选在 `loop_steps` 的**模块级函数簇**（43–611 行），不是类内部：① 零模块级可变状态；
+② 整簇逐字可搬（不碰任何 `self` 语义）；③ 类只**调用**它们，搬走后由门面接管名字。
+
+### 最大的坑：DI seam 是**模块全局**，且同名 seam 有**两份**
+
+本模块的依赖注入靠**模块全局**（测试 patch 它们），于是「搬函数」= 「换命名空间」：
+
+```
+dist_common · _push_submit · _push_wait_result      ← 被测试以 rl.loop_steps.X 注入
+```
+
+函数一搬走，它就去 `loop_transport` 里找这些全局 ⇒ **旧 patch 目标静默失效**：测试会绿，
+而注入根本没生效。更微妙的是**同一个全局名在两处都是注入点**：
+
+| 调用者 | 读哪个命名空间的 `_push_submit` | patch 目标 |
+|---|---|---|
+| `_push_job_round`（自由函数，**已搬**） | `rl.loop_transport` | `rl.loop_transport._push_submit` |
+| `TrainingSteps._push_submit_first` 的**闭包** / `_push_fetch` 直读（类方法，**未搬**） | `rl.loop_steps` | `rl.loop_steps._push_submit`（**不变**） |
+
+所以 e2e `test_push_mode_integration.py` 里：测 `_push_job_round` 的三个 patch 目标迁到
+`rl.loop_transport.*`，而测 `TrainingSteps` 方法的 `test_push_publish_phase_…`（`st._push_submit_first`）
+**留在** `rl.loop_steps.*`。**这不是重复定义，是两个各自真实的注入点**——由守卫钉住两边都存在。
+
+**漏网教训**：`import rl.loop_steps as ls; ls._push_submit = …`（`tests/test_job_fail_report.py`）
+**不含字面量** `rl.loop_steps.`（少了那个点），按「patch 字符串」grep 的清单抓不到它——
+是**全量门禁**点名的（`test_push_round_promotes_node_failure_over_retryable` 红）。
+⇒ seam 清点必须比「文本 grep patch 目标」多想一层：**模块对象别名也算一个注入点**。
+
+另：`loop_steps` 里 `log`（被 `tests/test_remote_iter.py` patch）与已退休名 `_course_push_url`
+**不在**迁走的簇内 ⇒ 保持不动（搬走才会误伤）。
+
+### 门面（`rl/loop_steps.py`）
+
+显式 `from rl.loop_transport import (…25 个名字…)` + **列全的 `__all__`**——没有 `__all__` 时
+ruff 的 F401 会把「有意的 re-export」判成「漏删的导入」。`__all__` 里**也含私有名**
+（`_gpu_push_nodes` 等）：`from X import Y` 不看 `__all__`，而全仓无人 `import *`，故这纯粹是
+给 linter 的意图声明。先例同 §22（`game_watch` 门面用显式清单、不用 `import *`）。
+
+### 被否决的备选
+
+| 备选 | 否决理由 |
+|---|---|
+| 把 `dist_common` / `_push_*` 改成**参数注入**（一次做完） | 牵动 20+ 调用点与类方法；而下一步「拆那个 1715 行类」还要动同一批函数 ⇒ 两个高风险重构叠加。先拿到「零逻辑改动的搬迁」增量 |
+| 把两份同名 seam **规范化成一份** | 等于同时改注入语义 + 搬文件；且类方法确实需要自己的注入点。改为**显式记录成契约** |
+| 删掉门面、全仓 `import` 改指 `loop_transport` | 20+ 调用点 + 4 个测试文件的 patch 目标一起改，diff 大而无行为收益；门面 = 零成本 |
+| 一次拆三个神模块 | 违反「每次只动一件事」；`hub_server` 还有模块级可变状态 |
+| 顺手把类的**方法组**也切出去 | 方法体内的 `self.X` 与模块全局混合，切法不机械；本轮只做「模块级函数整簇搬迁」 |
+
+### 验证与回归防线
+
+- `tests/test_loop_transport_split.py`（**7 例**）：定义只在 `loop_transport`（`loop_steps` 里
+  **不得**再有同名顶层定义，防「就地补一个」）· `TrainingSteps` 仍在 `loop_steps` · 门面 re-export
+  是**同一对象**（`is`）· 门面名在 `__all__` 里 · `loop_transport` 不反向 import `loop_steps`（门面不得成环）·
+  **seam 功能性断言**（把 `loop_steps` 的 seam 换成「一读就炸」，`_push_job_round` 仍应跑完）·
+  类方法的 seam 仍在 `loop_steps`。
+- **seam 反向探针**（先于测试跑过）：patch `loop_transport._push_submit` ⇒ 生效；
+  patch `loop_steps._push_submit` ⇒ 对「已搬的自由函数」**无影响**（证明迁移到位）。
+- 落盘验证：ruff + mypy 绿（362 源文件）；`import rl.loop_steps, rl.loop_transport` 与门面 `is` 同一性手工确认；
+  迁走块内的陈旧路径引用一并同步（如 docstring 里的 `loop_steps kick_live` → `loop_transport`）。
+- 门禁：**2262 passed / 3 skipped / 0 failed**，26s。
+
+### 违反后果
+
+- 有人把传输/发布函数**搬回** `loop_steps`（或就地再定义一个）⇒ 守卫红（这正是它存在的理由）。
+- 新写 `rl/*.py` 偷偷 import `remote.push_client` 而不登记 ⇒ `tests/test_layering.py` 的
+  声明式快照 `RL_ORCHESTRATION` 红（`loop_transport` 已是其中一员）。
+- 若把 seam 只留在一边、却让两边共用一个函数体 ⇒ 注入静默失效（绿而无效），本节的守卫会点名。
+
+### 未做完（S4 余下）
+
+`remote/hub_server.py`（3 个千行状态类）/ `remote/worker.py`（68 顶层函数）/ `TrainingSteps`
+那个 **1715 行类**的方法组拆分——设计见 `plan/nn-training-refactor.md` §5.3。首刀只动
+「模块级函数簇」的原因已在上文量过（可变状态 / 刀口机械性）。
+
+---
+
 ## §22 断开 `rl` ↔ `remote` 包循环：把纯逻辑叶子下沉到 L0，用测试钉住依赖方向（2026-09-23，用户指令「重构 nn-training：降低耦合 / 复用代码 / 提可维护性」）
 
 ### 一句话

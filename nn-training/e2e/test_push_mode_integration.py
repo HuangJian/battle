@@ -353,8 +353,9 @@ def test_push_job_round_failover_to_second_node(monkeypatch: pytest.MonkeyPatch)
         waited.append(url)
         return {"job_id": jid, "from": url}
 
-    monkeypatch.setattr("rl.loop_steps._push_submit", fake_submit)
-    monkeypatch.setattr("rl.loop_steps._push_wait_result", fake_wait)
+    # `_push_job_round` 住在 rl/loop_transport.py（S4 拆出）——patch 目标随实现走。
+    monkeypatch.setattr("rl.loop_transport._push_submit", fake_submit)
+    monkeypatch.setattr("rl.loop_transport._push_wait_result", fake_wait)
     nodes = [
         {"url": "http://bad.example", "authKey": "k"},
         {"url": "http://good.example", "authKey": "k"},
@@ -371,7 +372,7 @@ def test_push_job_round_all_nodes_fail(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_submit(url, key, manifest, payload, code, *, echo=False, log=None, **kw):
         raise RetryableError(f"node {url} down")
 
-    monkeypatch.setattr("rl.loop_steps._push_submit", fake_submit)
+    monkeypatch.setattr("rl.loop_transport._push_submit", fake_submit)
     with pytest.raises(RetryableError, match="全部节点失败"):
         _push_job_round(
             [{"url": "http://a", "authKey": "k"}, {"url": "http://b", "authKey": "k"}],

@@ -79,7 +79,7 @@ def test_segment_iters_defaults_to_off() -> None:
 
 def test_segment_iters_cli_wins_over_config() -> None:
     """CLI > courses.<课> > rl.*：显式给的值不许被 rl-config 覆盖。"""
-    with patch("rl.loop_steps.dist_common") as dc:
+    with patch("rl.loop_transport.dist_common") as dc:
         dc.load_dist_config.return_value = {"courses": {"x1": {"run_iters": 9}}, "rl": {"run_iters": 5}}
         assert _run_segment_iters(_args(run_iters=2, course_path="curricula/x1.jsonc")) == 2
 
@@ -89,7 +89,7 @@ def test_segment_iters_reads_course_then_rl() -> None:
     from train.loop_util import course_key_from_path
 
     stem = course_key_from_path("curricula/x1.jsonc")
-    with patch("rl.loop_steps.dist_common") as dc:
+    with patch("rl.loop_transport.dist_common") as dc:
         dc.load_dist_config.return_value = {"courses": {stem: {"run_iters": 6}}, "rl": {"run_iters": 3}}
         assert _run_segment_iters(_args(course_path="curricula/x1.jsonc")) == 6
         dc.load_dist_config.return_value = {"courses": {}, "rl": {"run_iters": 3}}
@@ -111,7 +111,7 @@ def test_rollout_src_run_is_a_declared_source() -> None:
     with pytest.raises(SystemExit, match="未知 --rollout-src"):
         _rollout_source(_args(rollout_src="cloud"))
     # 配置里给了垃圾值 ⇒ 容忍成 local（旧行为逐字节不变：配置写错不该炸训练）
-    with patch("rl.loop_steps.dist_common") as dc:
+    with patch("rl.loop_transport.dist_common") as dc:
         dc.load_dist_config.return_value = {"courses": {"x1": {"rollout_src": "cloud"}}}
         assert _rollout_source(_args(rollout_src="auto", course_path="curricula/x1.jsonc")) == "local"
 
@@ -128,7 +128,7 @@ def test_segment_wait_sec_default_and_override() -> None:
     """等待上限：CLI > rl.run_wait_sec > 缺省 8h（整段墙钟量级，不是 30min）。"""
     assert _run_wait_sec(_args()) == RUN_WAIT_DEFAULT_SEC
     assert _run_wait_sec(_args(run_wait_sec=60.0)) == 60.0
-    with patch("rl.loop_steps.dist_common") as dc:
+    with patch("rl.loop_transport.dist_common") as dc:
         dc.load_dist_config.return_value = {"rl": {"run_wait_sec": 7200}}
         assert _run_wait_sec(_args()) == 7200.0
         # CLI 仍压过配置

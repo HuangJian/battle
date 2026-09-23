@@ -302,18 +302,19 @@ def test_push_round_promotes_node_failure_over_retryable() -> None:
     """push：节点 410（JobFailedError）不得被包成 RetryableError（那会重试 3 次）。"""
     from types import SimpleNamespace
 
-    import rl.loop_steps as ls
+    # `_push_job_round` 与其 DI seam 都住在 rl/loop_transport.py（S4 拆出）。
+    import rl.loop_transport as lt
 
     def _boom(*_a: object, **_k: object) -> dict:
         raise JobFailedError("job j 失败: bun 未安装 [kind=ProtocolError]", kind="ProtocolError")
 
-    orig_submit, orig_wait = ls._push_submit, ls._push_wait_result
-    ls._push_submit = lambda *a, **k: {}  # type: ignore[assignment]
-    ls._push_wait_result = _boom  # type: ignore[assignment]
+    orig_submit, orig_wait = lt._push_submit, lt._push_wait_result
+    lt._push_submit = lambda *a, **k: {}  # type: ignore[assignment]
+    lt._push_wait_result = _boom  # type: ignore[assignment]
     try:
         nodes = [{"url": "http://a", "authKey": ""}, {"url": "http://b", "authKey": ""}]
         with pytest.raises(JobFailedError) as ei:
-            ls._push_job_round(
+            lt._push_job_round(
                 nodes,
                 {},
                 "j",
@@ -325,7 +326,7 @@ def test_push_round_promotes_node_failure_over_retryable() -> None:
             )
         assert "bun" in str(ei.value)  # 原因原样上浮，不被 RetryableError 吃掉
     finally:
-        ls._push_submit, ls._push_wait_result = orig_submit, orig_wait  # type: ignore[assignment]
+        lt._push_submit, lt._push_wait_result = orig_submit, orig_wait  # type: ignore[assignment]
 
 
 def test_push_node_failure_is_410_and_fails_fast(tmp_path: Path) -> None:

@@ -63,6 +63,8 @@ L2_PACKAGES = ("remote",)
 #: 多一个 / 少一个都红。2026-09-23 下沉 `EVAL_SCRIPT` 后由 17 个收敛到 11 个——
 #: `eval_local` / `eval_dispatch` / `gate_check` / `batch_eval` / `eval_a_once` /
 #: `eval_replays_once` 原来只是**经由 `eval_local` 间接**碰到传输层，环一断就回了纯逻辑。
+#: 2026-09-23（S4）：`loop_steps` 拆出 `loop_transport`（传输/发布策略的独立实现），
+#: 后者成为新的一员（它直接 import `remote.push_client`）——由本快照强制登记。
 RL_ORCHESTRATION = frozenset(
     {
         "bc_loop",
@@ -75,6 +77,7 @@ RL_ORCHESTRATION = frozenset(
         "loop_runner",
         "loop_serve",
         "loop_steps",
+        "loop_transport",
         "rollout_phase",
     }
 )
