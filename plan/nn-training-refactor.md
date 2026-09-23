@@ -247,6 +247,43 @@ L2  remote/                                                         （传输；
 5. 同步更新 `README.md` 模块地图 + `docs/nn/*.md` 的引用路径（本仓有试读 README 的用例，
    `tests/test_notebook_runtime.py` 之类会盯着路径）。
 
+#### 5.3.1 第二步侦察（2026-09-23，AST 实测）—— 拆 `TrainingSteps`（1715 行 / 33 方法）
+
+量出来三件事决定切法：
+
+| 事实 | 值 | 含义 |
+|---|---|---|
+| 类规模 | 33 方法 / 1715 行 | 比首簇（569 行）大 3 倍 |
+| **声明的实例属性** | **67 个** | 真正的耦合不是模块全局，而是**共用的 `self.*`**；混入切法不消除它（这是**有意保留**的：它们本就是同一个 `TrainingLoop` 的状态） |
+| 模块全局共读 | `log` **22 个方法** · `time` 9 · `RemotePpoJob` 7 · `Path` 6 · `write_gate_verdict` 4 · `fatal_remote_http`/`JobFailedError`/`remote_retryable_exceptions`/`dist_common` 各 3 | 搬走的方法要在新模块重导这些名；`log` 22 处意味着**不能**按「谁用 log 谁搬」切 |
+
+**测试真注入点 ∩ 方法读取 = 4 个**：`_push_submit` · `_push_wait_result` · `kickstart_coef` · `resolve_transport`。
+（`e2e/test_push_mode_integration.py` 的 `test_push_publish_phase_…` patch 前两个以驱动 `st._push_submit_first` /
+`st._push_fetch` ⇒ **这两个方法一旦搬走，那两处 patch 目标必须同步迁**；同 S4 首簇的教训 ——
+patch 目标随实现走，别名形态（`import rl.loop_steps as ls; ls.X = …`）也是注入点。）
+
+**推荐首刀：远端 PPO 腿（13 方法 / 862 行 = 整类 50%）→ 新 `rl/loop_remote.py` 混入**
+
+```
+_remote_ppo_publish(302) · _remote_ppo_land(116) · _remote_run_segment(127) · _remote_iter(74)
+_remote_ppo_step(46) · _push_submit_node(34) · _push_fetch(25) · _abort_node_failure(21)
+_remote_ppo_fetch(13) · _remote_ppo_probe(12) · _push_submit_first(10) · _remote_ppo · _handle_remote_failure
+```
+
+切法可执行的三个根据（都是量出来的，不是估计）：
+
+1. **入口单一**：外界→簇只有 `self._remote_ppo` 一条（`run_training` 调用）；簇→外界只有 5 个小助手
+   （`_commit_journal` / `_ensure_ts_code` / `_forensics` / `_per_stage_quota` / `_volume_plan_block`）。
+   混入切法下两者的 `self.*` 互调**天然可用**（同在 `TrainingLoop` 组合类上）⇒ 不需改一行调用。
+2. **内聚理由真实**：这 13 个方法共享「发布 → 领取 → 三重校验落位 → failover → 事件落账」一条链，
+   与评估/报告/日志那几个方法（`_drain_pending_eval` / `_log_report` / `_write_iter_stats` …）职责分明。
+3. **satisfies S4 首簇**：新模块可直接 `from rl.loop_transport import ...` 拿传输原语（门面只是兼容层，
+   不是唯一入口）——这是首簇搬迁的预期收益开始兑现。
+
+**第二步的已知代价（必须一并做）**：① 组合类 `TrainingLoop(TrainingSteps, TrainingGuards)` 要加一个基类；
+② 新模块需重导 36 个模块全局（含 `log`/`time`/`Path` 这些高频项）；③ 迁 2 处 e2e patch 目标；
+④ 守卫扩展：在 `tests/test_loop_transport_split.py` 同口径加「定义只在 `loop_remote`」+「`_remote_ppo` 仍在组合类上」。
+
 ### 5.4 本轮**不做**（已核，刻意保留）
 
 - `remote/notebook_boot.py` ↔ `remote/offline_boot.py` 的孪生助手（`_build_opener` /
