@@ -7,6 +7,46 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §12 两腿同字段收口：`demo_bc`/`kickstart` 进搬运表 + 逐局画像改取**单局 manifest**（2026-09-23）
+
+承 §10。两个都是「同一张表两条腿不可比」的缺口，都在**数据源**上，不是显示层。
+
+### ① 搬运表漏了 `agg.kickstart` / `agg.demo_bc`（用户发现「demo_bc 全缺」）
+
+产物行的 `agg` 里**一直有**这两个键（`remote/worker.py` 的 `result.agg`），只是
+`remote/artifacts.LEDGER_FIELDS` 没收 ⇒ 回传/导入腿的 `iteration` 行永远看不到 demo 与
+缰绳遥测，而本机腿（`rl/events.write_iteration`）逐轮都写。**不是没跑，是记丢了。**
+修法一行两键；口径不变：`_dig` 给 None 就不写（旧包无此键 → 留空），真 0 照写。
+
+### ② 「耗时/击杀/残血/道具」四列的逐局画像取错了源（**四列永远空**的真因）
+
+链路上游：`readRoundActuals`（`iters.ts`）优先读 `<traj>/it<N>/per-game.json`，而那个文件由落地方
+按 `row.perGame` 写。实测 `x20-demo-mix` 的 `remote-jobs/offline/a477f…/it-124/row.json`：
+
+```
+report = {games, shards, winRate, totalSamples, totalTicks, elapsedSec,
+          outcomes, dimMeans, scoreStats}        ← 没有 perGame
+find tmp -name per-game.json → 0 个
+```
+
+根因：`iter_rollout` 当时喂给 `compact_per_game` 的是 `collect_reports` = 每局的
+**`_rl_report.json`（批次摘要）**——它的 `stage`/`seed` 是**复数数组** `stages`/`seeds`、
+没有 `kills` 这些单局字段 ⇒ `compact_per_game` 的「无 (stage,seed) 就丢」把**每一行**都丢掉
+⇒ `perGame` 恒 `[]` ⇒ 落地方不写 `per-game.json` ⇒ 四列**从没进过回传体**。
+
+修法：新增 `iter_rollout.collect_shard_manifests(shard_dirs)`，逐局画像改从 **shard 目录的单局
+`manifest.json`** 生成——那是唯一带齐那套字段、且与读方/本机腿（读方按 manifest 扫描）**同名同形**
+的来源（无需翻译层）。`scan_shard_dirs` 已保证每个 shard 目录都有它；真缺了只少一局读数并计数。
+轮末日志加 `…s｜逐局画像 N/M 行`（0 行时响亮提示）。
+
+**留白**：已落地的旧轮（如 it-048…124）`row.json` 里根本没有 `perGame` ⇒ 这四列对它们**仍然空**
+（刻意不写 0：缺数据与真零不是一回事）；重打包后的新轮才有。
+
+**验证**：`test_deliver_zip`（两键搬进 + 缺键不留 0）、`test_remote_iter`（单局 manifest 收得下、
+四列原始字段齐、批次摘要的反例、缺/坏 manifest 只少一局）、dashboard `server-iters-round-actuals`
+（读方聚合）。提交 `7130f880`。
+
+---
 ## §10 回传腿也点亮控制台（同步写 per-game.json + 课程账本行）（2026-09-22）
 
 用户之问（2026-09-22）：「**如果是云机通过网络请求回传，会算这些数据回显吗？**」——

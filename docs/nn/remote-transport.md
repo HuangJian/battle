@@ -7,6 +7,65 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §34 回传轮的课程侧三处落位：交付镜像 / 活动权重 / 权重归档（2026-09-23）
+
+用户 2026-09-23 实测（`x20-demo-mix` seg-2，it49–124）：产物**都在盘上**
+（`<traj>/remote-jobs/offline/<run>/it-NNN/{weights,opt,row}` —— 77 轮，含 opt），但
+
+| # | 现象 | 机制 | 影响 |
+|---|---|---|---|
+| ① | seg-2 不在 `deliver/` | `deliver/` 只有人工导入写 | 两段分居两棵树，找东西要翻两处 |
+| ② | `<traj>/weights.json` 停在 `11ac6161…` | 推进它的只有本机循环的「发布→等结果→落位」；回传腿只写自己的 `offline/` 树 | 该指纹 = 这个 run 的 **it0**（init）⇒ 段期间「活动权重」是假的（`eval_replays_once` 兜底、本机续跑、控制台显示都读它） |
+| ③ | `nn-training/weights/<课>/` 零轮 | 归档只在**本机循环**每轮 `_export_weights → backup_weights` | 控制台 evalA 的 iter 选择器只扫那个目录 ⇒ **回传段的任何一轮都选不到**（唯一真正的「没落盘」） |
+
+### 落位（`hub_server._land_offline_round_extras`，新回传轮自动做）
+
+全部 **best-effort**：回传的主价值是权重到岸（调用方已三校验地落定），这三处失败只记一行，
+不把一轮合法回传判负。
+
+* **①交付镜像** `<traj>/deliver/<run>/it-NNN/{weights,opt,row}` —— 与导入腿同路径同文件名
+  ⇒ 两腿同构（幂等：已存在不重写）。
+* **②活动权重** `<traj>/weights.json` —— 判据是**课程账本**：`_ledger_has_newer_iter(it)` 看有没有
+  `iteration.iter` / `offline_artifact.it` **大于 `it`**。为什么是账本：它**两条腿都写**（本机循环
+  每轮写 `iteration`，回传腿经 `_land_round_metrics` 也写）⇒ 「课程已知的最新轮」是两腿合用的
+  单一判据，不需要额外 sidecar，也不会出现「另一条腿推进了我不知道」。
+  * 只认那两种事件：`job_pending`/`job_cancelled` 也带 `it`，但它们说的是**某台机器上的一个 job**
+    （发了还没落权重）⇒ 拿它们当判据会让「发了又取消的更大 it」永久挡住推进。
+  * 账本**不存在**（新课程）⇒ 判「没有更新轮」（否则新课第一轮永远不推进）；存在却读不到 ⇒
+    保守不写。
+* **③归档** `<归档根>/<课>/<prefix>.it<N>.<时间戳>.json`（复用 `rl.archive.backup_weights`）。
+  `prefix`/`dir` 从 `curricula/<课>.jsonc` 读（与 `rl/config.py`、dashboard 同一份单一事实来源），
+  缺配置才用「课名 + 归档根/<课>」兜底 —— 两种缺省（那边按 mode 前缀）混用会把不同课程的
+  归档倒进同一目录。同一轮**已有归档即跳过**（否则补做/重跑堆积同轮副本）。
+
+### 测试隔离（必须有，否则污染控制台）
+
+归档根的开关做成 env：`BCITY_WEIGHTS_ARCHIVE_ROOT`（`_weights_archive_root()` **调用时读**）。
+为什么不是只留可 patch 的模块常量：`e2e/test_offline_training_e2e.py` 拉的是**真 hub 子进程**，
+patch 传不进去。三个碰补传的测试文件（`test_multi_course_hub` / `test_offline_deliver` /
+那个 e2e）都加了 autouse fixture 指到 `tmp_path` —— 否则工装用例会往真
+`nn-training/weights/` 撒 `<课>.it<N>.<时间戳>.json`，而控制台的 evalA 选择器会把它们当成
+**真训练轮次**列出来。
+
+### 历史轮补做：`remote/backfill_offline.py`（**尚未跑**）
+
+新代码只对**未来**的轮生效，而实测那 77 轮已经落过了 ⇒ 一次性工具：每个三件齐全的已落地轮调
+**同一个** `_land_offline_round_extras`（不复制第二份落位逻辑），按 it 升序（老段账本还没行时
+靠「最后处理的是最大 it」）。幂等：第二遍 `archived=0`、盘上归档名集合不变。
+
+```
+bun dashboard/src/launch/cli.ts --script remote/backfill_offline.py -- \\
+    --traj-root tmp --course x20-demo-mix
+```
+
+⚠ **跑它会推进 `weights.json` 到段尾（it124）** ⇒ 下次导出任务包的段起点从它来。若打算用新规则
+（`T=49152` + mb 对齐，见 tpu-perf §8/§10）从 it0 重跑，就别跑（或只补镜像/归档）。**用户 2026-09-23
+裁决：先不跑，只提交代码。**
+
+**磁盘代价**：镜像会再存一份（每轮 ≈ weights 380KB + opt 890KB ≈ 1.3MB；一课 300 轮 ≈ 390MB）。
+提交 `99a945d0`。
+
+---
 ## §33 离线课运维四件套：hub 取包重试上限 / Kaggle 跳过 tailscale / 进度行每分钟一句 / 底部「中途取回」格（2026-09-23）
 
 > 编号说明：`§32` 是本文件的「决策正文归档」节，进度节从 **§33** 起（新条目置顶、号大）。
