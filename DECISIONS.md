@@ -2304,4 +2304,19 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
 - **教训（已写进 §23）**：`import rl.loop_steps as ls; ls._push_submit = …` **不含**字面量
   `rl.loop_steps.`（少了那个点），按「patch 字符串」grep 的清单抓不到——是**全量门禁**点名的。
   ⇒ seam 清点要比文本 grep 多想一层：**模块对象别名也是一个注入点**。
-—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/engineering.md` §23「神模块拆分第一步：`loop_steps` 的传输/发布簇搬进 `loop_transport`」
+- **同日第二步（2026-09-23）**：继续拆该文件里那个 **1715 行 / 33 方法 / 67 个声明实例属性**的
+  `TrainingSteps`——把**远端 PPO 腿** 13 方法 / **862 行（整类的 50%）**搬到 `rl/loop_remote.py`
+  的 `TrainingRemote`（发布 → 领取 → 三重校验落位 → failover → 事件落账，覆盖 `kind=run` 半离线段
+  与 `kind=iter` 整轮上云）。**方向修正**（与最初设计不同）：不改成「给组合类加基类」，而是
+  **`class TrainingSteps(TrainingRemote)`**——簇的唯一入口 `_remote_ppo` 正是**被 TrainingSteps
+  其余方法调用**的，所以「调用者依赖被调用者」就是这个方向；收益是组合类不变 · 零 MRO 变化 ·
+  4 个「继承真混入」的测试宿主一行不改。切法依据（均是量出来的）：外界→簇只有 `self._remote_ppo`
+  一条入口 · 簇→外界只 5 个小助手 · `log` 被 22 方法共读（⇒ 不能按「谁用 log 谁搬」切）。
+  mypy 两个坑都是「混入状态契约必须逐文件可见」：5 个跨混入助手要声明（按 `_ledger_apply` 先例用
+  `Any`）；7 个从未声明、只在方法体自赋值的属性也要补声明（其中 `_ts_code_zip_path` 是**非簇**方法
+  赋值、**簇**方法读）；同一判据筛掉 `_evalboard_idle`（它是方法不是属性）。
+  **seam 从两份收敛到一份**：`_push_submit` / `_push_wait_result` 搬走后 `loop_steps` 连 import 都
+  没有（ruff F401 证实）⇒ e2e 两处 patch 目标迁 `rl.loop_remote.*`（否则 `AttributeError`）。
+  `loop_steps.py` 1812 → **952** 行（含首簇共 2328 → 952）；`loop_remote.py` 984 行。门禁
+  **2255 → 2262 → 2266 passed / 3 skipped**；mypy 364 源文件绿。
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/engineering.md` §23「神模块拆分：`loop_steps` 的传输/发布簇与远端 PPO 腿」

@@ -218,8 +218,16 @@ L2  remote/                                                         （传输；
 > patch 目标**随实现走**——同名 seam 在两处并存是两个真实注入点，不是重复；且
 > `import rl.loop_steps as ls; ls._push_submit = …` 这种**别名形态**是文本 grep 抓不到的注入点
 > （被全量门禁点名）。
-> **下一步**：拆那个 **1715 行**的 `TrainingSteps` 类（方法组），再 `remote/worker.py`，
-> 最后 `remote/hub_server.py`（状态类）。
+>
+> **第二步已完成（同日）**：远端 PPO 腿 **13 方法 / 862 行（整类 50%）** → `rl/loop_remote.py::
+> TrainingRemote`。**方向修正**（与下方 §5.3.1 的建议不同）：不是「给组合类加基类」，而是
+> **`class TrainingSteps(TrainingRemote)`**（调用者依赖被调用者）⇒ 组合类不变 · 零 MRO 变化 ·
+> 4 个「继承真混入」的测试宿主一行不改。`loop_steps.py` 1812 → **952** 行（含首簇共 2328 → 952）。
+> mypy 的两个坑：5 个跨混入助手 + 7 个从未声明、只在方法体自赋值的属性都要在新文件里补声明。
+> seam 由两份**收敛为一份**（`loop_steps` 连 import 都没了 ⇒ e2e 两处 patch 迁 `rl.loop_remote.*`）。
+> 门禁 **2266 passed / 3 skipped**；mypy 364 源文件绿。
+> **下一步**：`remote/worker.py`（一簇一簇搬）→ `remote/hub_server.py`（状态类，最后）。
+> `TrainingSteps` 本体还剩 952 行 / 20 方法（切法是「按一条真实调用链切」，不是按行数等分）。
 
 | 文件 | 行数 | 建议切法（按关注点，不是按行数等分） |
 |---|---|---|
@@ -262,7 +270,11 @@ L2  remote/                                                         （传输；
 `st._push_fetch` ⇒ **这两个方法一旦搬走，那两处 patch 目标必须同步迁**；同 S4 首簇的教训 ——
 patch 目标随实现走，别名形态（`import rl.loop_steps as ls; ls.X = …`）也是注入点。）
 
-**推荐首刀：远端 PPO 腿（13 方法 / 862 行 = 整类 50%）→ 新 `rl/loop_remote.py` 混入**
+**首刀（已完成，见上方进度）：远端 PPO 腿（13 方法 / 862 行 = 整类 50%）→ `rl/loop_remote.py` 混入**
+
+> ⚠ **落地时改了方向**：下面「第二步的已知代价」一条里写的「组合类 `TrainingLoop` 要加一个基类」
+> **没有采用**——实际是 `class TrainingSteps(TrainingRemote)`（调用者依赖被调用者）。理由与收益见
+> `docs/nn/engineering.md` §23「第二步」一节。下文保留原始设计供追溯。
 
 ```
 _remote_ppo_publish(302) · _remote_ppo_land(116) · _remote_run_segment(127) · _remote_iter(74)

@@ -1,21 +1,29 @@
-"""S4 契约（2026-09-23）—— 传输/发布层的实现只有一份，`rl/loop_steps.py` 只是门面。
+"""S4 契约（2026-09-23）—— `rl/loop_steps.py` 的两次拆分不得腐烂。
 
-`rl/loop_steps.py` 原本把两件事塞在一个 2328 行文件里：`TrainingSteps` mixin（单轮结算与
-梯度步）**与**一组模块级自由函数（课程/rollout 源解析、transport 选择、hub 推送、节点
-failover、kickstart 系数、远端可重试异常集合）。后者没有一个是方法，只是历史上按大小
-拆文件时被一起搬了过来。S4 把它们整体移到 `rl/loop_transport.py`，`loop_steps` 留门面
-re-export——所有既有的 `from rl.loop_steps import X` 调用点因此不必改。
+`rl/loop_steps.py` 原本 2328 行，里面塞着两种东西：
 
-本文件钉住这次拆分**不会腐烂**的四条：
+* **S4 第一步**：一组**模块级自由函数**（课程/rollout 源解析、transport 选择、hub 推送、
+  节点 failover、kickstart 系数、远端可重试异常集合）——没有一个是方法 ⇒ 整体搬到
+  `rl/loop_transport.py`，`loop_steps` 留门面 re-export（既有 `from rl.loop_steps import X`
+  调用点不必改）。
+* **S4 第二步**：`TrainingSteps`（1715 行）里的**远端 PPO 腿** 13 个方法（发布 → 领取 →
+  三重校验落位 → failover → 事件落账）⇒ 搬到 `rl/loop_remote.py::TrainingRemote`，
+  方向是 **`class TrainingSteps(TrainingRemote)`**（调用者依赖被调用者：簇的唯一入口
+  `_remote_ppo` 由 TrainingSteps 的其余方法调用）。这样组合类与测试宿主都不必改。
 
-1. 那些名字在 `loop_transport` 里**定义**，且**不再**在 `loop_steps` 里定义（门面只能是
-   门面，不许哪天有人「就地补一个」）；
+本文件钉住两次拆分**不会腐烂**的六条：
+
+1. 那些名字在目标模块里**定义**，且**不再**在 `loop_steps` 里定义（门面只能是门面，
+   不许哪天有人「就地补一个」）；
 2. 门面 re-export 的是**同一个对象**（`is`，不是同名副本）；
-3. **DI seam 随实现走**：`_push_job_round` 读 `rl.loop_transport._push_submit`，而
-   `TrainingSteps` 的方法仍读 `rl.loop_steps._push_submit`——两边各自解析自己的模块全局。
-   这一条是功能性的（真调一次 `_push_job_round`），因为「patch 目标写错」正是这类拆分最
-   容易犯、且**最静默**的错：测试会绿，而注入根本没生效。
-4. `loop_transport` 不得反向 import `rl.loop_steps`（否则门面会变成环）。
+3. **DI seam 随实现走**：`_push_job_round` 读 `rl.loop_transport._push_submit`，
+   `TrainingRemote._push_submit_first/_push_fetch` 读 `rl.loop_remote._push_submit`——
+   同名 seam 在多个模块并存是**几个各自真实的注入点**，不是重复定义。
+   这一条是功能性的（真调一次），因为「patch 目标写错」正是这类拆分最容易犯、
+   且**最静默**的错：测试会绿，而注入根本没生效。
+4. 两个新模块都不得反向 import `rl.loop_steps`（否则门面会变成环）。
+5. 继承方向不得反过来（`TrainingRemote` 不能是 `TrainingSteps` 的子类）。
+6. `loop_remote` 直接从 `rl.loop_transport` 拿传输原语（首簇搬迁的预期收益）。
 """
 
 from __future__ import annotations
@@ -146,12 +154,16 @@ def test_moved_push_path_reads_the_loop_transport_seams(
         return {"job_id": jid, "from": url}
 
     def boom(*_a: object, **_k: object) -> None:
-        raise AssertionError("读了 rl.loop_steps 的 seam——DI seam 未随实现迁移")
+        raise AssertionError("读了别的模块的 seam——DI seam 未随实现迁移")
+
+    # `rl.loop_steps` 现在**根本不持有**这两个名字（S4 第二步后连 import 都没有）——
+    # 这正是「seam 只剩一份、住在实现所在模块」的机械形式。
+    for name in ("_push_submit", "_push_wait_result"):
+        assert name not in vars(steps), f"{name} 不应再出现在 rl.loop_steps 的命名空间"
+        monkeypatch.setattr(transport, name, boom, raising=False)
 
     monkeypatch.setattr(transport, "_push_submit", fake_submit)
     monkeypatch.setattr(transport, "_push_wait_result", fake_wait)
-    monkeypatch.setattr(steps, "_push_submit", boom)
-    monkeypatch.setattr(steps, "_push_wait_result", boom)
 
     out = transport._push_job_round(
         [{"url": "http://a.example", "authKey": "k"}],
@@ -168,12 +180,78 @@ def test_moved_push_path_reads_the_loop_transport_seams(
     assert out["from"] == "http://a.example"
 
 
-def test_loop_steps_seam_still_exists_for_class_methods() -> None:
-    """类方法用的同名 seam 仍在 `rl.loop_steps`（e2e/test_push_mode_integration.py 的 patch 目标）。
+# ────────────────────────── S4 第二步：远端 PPO 腿（loop_remote） ──────────────────────────
 
-    两边**各自**解析自己的模块全局——这不是重复定义，而是两个不同的注入点。功能侧的
-    证明在 e2e 的 `test_push_publish_phase_submits_and_wait_phase_switches_node`（它 patch
-    `rl.loop_steps.*` 并驱动 `TrainingSteps` 的方法）。
+#: 搬到 `TrainingRemote` 的 13 个方法（远端 PPO 腿，862 行）。
+REMOTE_LEG = (
+    "_abort_node_failure",
+    "_handle_remote_failure",
+    "_remote_ppo",
+    "_remote_ppo_fetch",
+    "_remote_ppo_land",
+    "_remote_ppo_probe",
+    "_remote_ppo_publish",
+    "_remote_ppo_step",
+    "_remote_iter",
+    "_remote_run_segment",
+    "_push_fetch",
+    "_push_submit_first",
+    "_push_submit_node",
+)
+
+
+def _class_methods(path: Path, cls_name: str) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    cls = next(
+        n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == cls_name
+    )
+    return {m.name for m in cls.body if isinstance(m, ast.FunctionDef)}
+
+
+def test_remote_leg_is_defined_in_loop_remote_only() -> None:
+    """远端 PPO 腿定义在 `TrainingRemote`；`TrainingSteps` 里**不得**再有同名方法。"""
+    defined = _class_methods(NN_ROOT / "rl" / "loop_remote.py", "TrainingRemote")
+    assert set(REMOTE_LEG) <= defined, sorted(set(REMOTE_LEG) - defined)
+    left = _class_methods(NN_ROOT / "rl" / "loop_steps.py", "TrainingSteps")
+    crept_back = sorted(set(REMOTE_LEG) & left)
+    assert crept_back == [], f"这些方法又回到 TrainingSteps 了：{crept_back}"
+
+
+def test_training_steps_inherits_training_remote() -> None:
+    """方向是**调用者依赖被调用者**：`TrainingSteps(TrainingRemote)`（不是反过来）。"""
+    from rl.loop_remote import TrainingRemote
+
+    assert issubclass(steps.TrainingSteps, TrainingRemote)
+    assert not issubclass(TrainingRemote, steps.TrainingSteps)
+    assert steps.TrainingSteps.__mro__[1] is TrainingRemote
+    # 组合类与四个「继承真混入」的测试宿主因此都不必改。
+    assert TrainingRemote._remote_ppo.__module__ == "rl.loop_remote"
+
+
+def test_loop_remote_does_not_import_loop_steps() -> None:
+    """不得成环：`loop_remote` 不许 import `loop_steps`（它只靠 `self.*` 回调）。"""
+    assert "rl.loop_steps" not in _imports(NN_ROOT / "rl" / "loop_remote.py")
+
+
+def test_loop_remote_uses_the_transport_layer_directly() -> None:
+    """首簇搬迁的预期收益：新模块直接从 `rl.loop_transport` 取传输原语（不经门面往返）。"""
+    assert "rl.loop_transport" in _imports(NN_ROOT / "rl" / "loop_remote.py")
+
+
+def test_remote_leg_methods_read_the_loop_remote_seams() -> None:
+    """seam 住在实现所在模块：那 13 个方法的**方法体**里必须真的读 `rl.loop_remote` 的全局。
+
+    结构断言（读 AST 的 Name 载入），功能侧的证明在 e2e 的
+    `test_push_publish_phase_submits_and_wait_phase_switches_node`（patch `rl.loop_remote.*`
+    并驱动真宿主 `st._push_submit_first` / `st._push_fetch`）。
     """
-    for name in ("_push_submit", "_push_wait_result", "dist_common"):
-        assert name in vars(steps), f"类方法的 seam {name} 不应离开 rl.loop_steps"
+    tree = ast.parse((NN_ROOT / "rl" / "loop_remote.py").read_text(encoding="utf-8"))
+    cls = next(
+        n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "TrainingRemote"
+    )
+    reads: set[str] = set()
+    for node in ast.walk(cls):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            reads.add(node.id)
+    for name in ("_push_submit", "_push_wait_result", "dist_common", "log"):
+        assert name in reads, f"TrainingRemote 的方法体里应读到 {name}"

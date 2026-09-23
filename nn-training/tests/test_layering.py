@@ -65,6 +65,8 @@ L2_PACKAGES = ("remote",)
 #: `eval_replays_once` 原来只是**经由 `eval_local` 间接**碰到传输层，环一断就回了纯逻辑。
 #: 2026-09-23（S4）：`loop_steps` 拆出 `loop_transport`（传输/发布策略的独立实现），
 #: 后者成为新的一员（它直接 import `remote.push_client`）——由本快照强制登记。
+#: 同日 S4 第二步再拆出 `loop_remote`（远端 PPO 腿 13 个方法的混入），它也直接
+#: import `remote.push_client` 与 `rl.loop_transport`。两次都是本快照先红、再登记。
 RL_ORCHESTRATION = frozenset(
     {
         "bc_loop",
@@ -75,6 +77,7 @@ RL_ORCHESTRATION = frozenset(
         "loop_plan",
         "loop_round_steps",
         "loop_runner",
+        "loop_remote",
         "loop_serve",
         "loop_steps",
         "loop_transport",

@@ -456,8 +456,10 @@ def test_push_publish_phase_submits_and_wait_phase_switches_node(
             raise RetryableError("node down mid-wait")
         return {"job_id": jid, "from": url}
 
-    monkeypatch.setattr("rl.loop_steps._push_submit", fake_submit)
-    monkeypatch.setattr("rl.loop_steps._push_wait_result", fake_wait)
+    # `_push_submit_first` / `_push_fetch` 住在 rl/loop_remote.py（S4 第二步）——patch 目标
+    # 随实现走（同名 seam 在 loop_steps 里已不再被任何方法读取）。
+    monkeypatch.setattr("rl.loop_remote._push_submit", fake_submit)
+    monkeypatch.setattr("rl.loop_remote._push_wait_result", fake_wait)
     st, sess = _push_session(tmp_path)
 
     st._push_submit_first(sess)

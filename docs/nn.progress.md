@@ -289,4 +289,4 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | §145 | docs/nn/runtime-opt.md §15 | arm64 逐阶段归因：6.4 ms 花在哪 + 为什么四项不迁移（FMA 上限实验）（2026-09-23） |
 | §146 | docs/nn/engineering.md §21 | `common/` 共享原语层：12 组同名实现收敛 + 13 处 `text=True` 编码隐患（2026-09-23） |
 | §147 | docs/nn/engineering.md §22 | 断开 `rl` ↔ `remote` 包循环：纯逻辑叶子下沉 L0 + 导出器路径单源化 + 分层守卫（SCC 证实零跨包环）（2026-09-23） |
-| §148 | docs/nn/engineering.md §23 | 神模块拆分第一步：`loop_steps` 的传输/发布簇（19 函数 + 2 异常 + 4 常量）零逻辑改动搬进 `loop_transport`；DI seam 随实现迁移（同名 seam 两份是两个真实注入点）（2026-09-23） |
+| §148 | docs/nn/engineering.md §23 | 神模块拆分：`loop_steps` 的传输/发布簇（19 函数 + 2 异常 + 4 常量）搬进 `loop_transport`；远端 PPO 腿（13 方法/862 行）搬进 `loop_remote` 作 `TrainingSteps` 的基类（依赖方向 = 调用者依赖被调用者）；DI seam 随实现迁移（2026-09-23） |

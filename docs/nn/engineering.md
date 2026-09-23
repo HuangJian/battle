@@ -20,7 +20,8 @@
 hub 推送、节点 failover、kickstart 系数、远端可重试异常集合）——后者**没有一个是方法**，
 只是历史上「从 `loop_core.py` 拆出」时按大小切、没按职责切。S4 第一步把整簇**零逻辑改动**
 搬到 `rl/loop_transport.py`，`loop_steps` 只留门面 re-export（2328 → **1812** 行）。
-门禁 **2255 → 2262**（+7 守卫用例）全绿。
+门禁 **2255 → 2262**（+7 守卫用例）全绿；同日第二步再拆远端 PPO 腿（见文末），终值
+**2266 passed / 3 skipped**。
 
 ### 先量结构，再选刀口（拆前侦察，都是实测）
 
@@ -98,11 +99,65 @@ ruff 的 F401 会把「有意的 re-export」判成「漏删的导入」。`__al
   声明式快照 `RL_ORCHESTRATION` 红（`loop_transport` 已是其中一员）。
 - 若把 seam 只留在一边、却让两边共用一个函数体 ⇒ 注入静默失效（绿而无效），本节的守卫会点名。
 
+### 第二步（同日完成）：远端 PPO 腿 13 方法搬进 `rl/loop_remote.py`
+
+首簇搬完后接着拆那个 **1715 行 / 33 方法**的 `TrainingSteps`。先量三件事（AST）：
+
+| 事实 | 值 | 含义 |
+|---|---|---|
+| 类规模 | 33 方法 / 1715 行 / **67 个声明实例属性** | 真正的耦合是**共用 `self.*`**，不是模块全局；混入切法**不消除**它（它本就是同一个 `TrainingLoop` 的状态） |
+| 模块全局共读 | `log` **22 个方法** · `time` 9 · `RemotePpoJob` 7 · `Path` 6 | ⇒ 不能按「谁用 `log` 谁搬」切 |
+| 测试真注入点 ∩ 方法读取 | 仅 **4 个**（`_push_submit` / `_push_wait_result` / `kickstart_coef` / `resolve_transport`） | seam 面比首簇小得多 |
+
+**切法与方向（与初版设计不同，理由在下面）**：远端 PPO 腿 **13 方法 / 862 行（整类的 50%）**
+—— 发布 → 领取 → 三重校验落位 → failover → 事件落账，覆盖 `kind=run` 半离线段与 `kind=iter`
+整轮上云 —— 搬到新 `rl/loop_remote.py::TrainingRemote`。
+
+```
+_remote_ppo_publish(302) · _remote_run_segment(127) · _remote_ppo_land(116) · _remote_iter(74)
+_remote_ppo_step(46) · _push_submit_node(34) · _push_fetch(25) · _abort_node_failure(21)
+_remote_ppo_fetch(13) · _remote_ppo_probe(12) · _push_submit_first(10) · _remote_ppo · _handle_remote_failure
+```
+
+切法的三个根据都是量出来的：① **入口单一**——外界→簇只有 `self._remote_ppo` 一条
+（`run_training` 调用），簇→外界只有 5 个小助手；② **内聚理由真实**（一条链 vs 评估/报告/日志）；
+③ 新模块可直接 `from rl.loop_transport import ...`（首簇的收益开始兑现）。
+
+**方向修正（相对最初设计）**：最初写的是「给组合类加一个基类
+`TrainingLoop(RoundSteps, TrainingRemote, TrainingSteps, TrainingGuards)`」。看实际调用方向后改成
+**`class TrainingSteps(TrainingRemote)`** —— 簇的唯一入口 `_remote_ppo` 是**被 `TrainingSteps`
+其余方法调用的**，所以「调用者依赖被调用者」就是这个方向。收益是爆炸半径小一个量级：
+**组合类不变 · 零 MRO 变化 · 4 个「继承真混入」的测试宿主（`_Stub(TrainingSteps)` 等）一行不改**。
+（反向回调 5 个助手靠 `self.*` 在组合实例上动态解析——混入的常态。）
+
+**mypy 的两个坑（都是「混入状态契约必须逐文件可见」）**：
+
+1. 9 处 `attr-defined`：那 5 个留在 `TrainingSteps` 的助手（`_commit_journal` / `_ensure_ts_code` /
+   `_forensics` / `_per_stage_quota` / `_volume_plan_block`）必须在新文件里声明——按本仓既有先例
+   （`TrainingSteps._ledger_apply: Any`）声明为 `Any`。
+2. 7 个属性**从未被显式声明过**（`_code_zip_path` / `_ts_code_zip_path` / `_demo_raw` / `_wire` /
+   `_bundle_index` / `_code_sha256` / `_collect_child`），只在方法体里自赋值。其中
+   `_ts_code_zip_path` 是「**非簇**方法 `_ensure_ts_code` 赋值、**簇**方法 `_push_submit_node` 读」
+   —— 跨类读到时 mypy 会判「TrainingRemote 无此属性」⇒ 必须在 `TrainingRemote` 里补声明
+   （一律 `Any`）。同一判据也筛掉了 `_evalboard_idle`：它是 `TrainingLoop` 的**方法**，不是属性。
+
+**seam 收敛了**（首簇时是「两份同名 seam」，这次只剩一份）：`_push_submit` / `_push_wait_result`
+在本簇搬走后，`rl/loop_steps.py` **连 import 都没有了**（ruff F401 亲手证实）⇒ e2e 那两处
+patch 目标从 `rl.loop_steps.*` 迁到 `rl.loop_remote.*`（否则 `AttributeError`）。守卫因此新增
+一条机械形式：「`loop_steps` 命名空间里不得再有这两个名字」。
+
+- 守卫：`tests/test_loop_transport_split.py` 新增 5 例（13 方法只在 `TrainingRemote` /
+  `TrainingSteps(TrainingRemote)` 且 MRO 第 2 位 / `loop_remote` 不 import `loop_steps` /
+  它直接用 `rl.loop_transport` / 方法体真的读本模块 seam），并把过时的一条换成上述机械断言。
+- 分层快照同步：`loop_remote` 加进 `RL_ORCHESTRATION`（它直接 import `remote.push_client`）。
+- 规模：`loop_steps.py` 1812 → **952** 行（连首簇共 2328 → 952）；`loop_remote.py` 984 行。
+- 门禁：**2266 passed / 3 skipped / 0 failed**，26s；mypy 364 源文件绿。
+
 ### 未做完（S4 余下）
 
-`remote/hub_server.py`（3 个千行状态类）/ `remote/worker.py`（68 顶层函数）/ `TrainingSteps`
-那个 **1715 行类**的方法组拆分——设计见 `plan/nn-training-refactor.md` §5.3。首刀只动
-「模块级函数簇」的原因已在上文量过（可变状态 / 刀口机械性）。
+`remote/worker.py`（68 顶层函数，有水平缝）与 `remote/hub_server.py`（3 个千行状态类，
+**有模块级可变状态** ⇒ 最后动）——设计见 `plan/nn-training-refactor.md` §5.3。`TrainingSteps`
+本体还剩 952 行 / 20 方法：本轮的切法是「按一条真实调用链切」，不是按行数等分。
 
 ---
 
