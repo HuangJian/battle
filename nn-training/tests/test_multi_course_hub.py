@@ -51,6 +51,19 @@ from remote.protocol import (
 from tests.helpers.hub_poll import hub_poll
 from tests.subproc_util import spawn_bound_port
 
+
+@pytest.fixture(autouse=True)
+def _isolate_weights_archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """把**权重归档根**指到 tmp（2026-09-23）。
+
+    回传轮会往归档根写 `<课>.it<N>.<时间戳>.json`（用户口径的 ③：让控制台的 evalA 选择器
+    看得见回传段的轮次）。工装用例若往真 `nn-training/weights/` 撒这些文件，它们会被
+    `eval-board/ckpts.ts` 当成**真训练轮次**列出来 —— 所以每个碰补传的测试文件都要隔离。
+    用 env 而不是 patch 模块常量：e2e 那条是**真子进程**，patch 传不进去。
+    """
+    monkeypatch.setenv("BCITY_WEIGHTS_ARCHIVE_ROOT", str(tmp_path / "weights-archive"))
+
+
 # ------------------------------------------------------------------ 纯函数
 
 
@@ -934,6 +947,67 @@ def test_offline_backfeed_moves_the_console_table(tmp_path: Path) -> None:
         srv.shutdown()
         srv.server_close()
         th.join(timeout=5)
+
+
+def test_offline_backfeed_mirrors_advances_active_weights_and_archives(tmp_path: Path) -> None:
+    """回传轮的**三处课程侧落位**（用户 2026-09-23 口径 ①②③）。
+
+    实测缺口：seg-1（人工导入）在 `deliver/<run>/it-000…048`，而 seg-2（回传）只在
+    `remote-jobs/offline/<run>/it-048…124` ⇒ 两段分居两棵树；`<traj>/weights.json` 整段
+    停在段起点（= 该 run 的 it0 指纹）；`nn-training/weights/<课>/` 一个回传轮都没有
+    —— 而控制台 evalA 的 iter 选择器只扫那个目录 ⇒ **回传段的权重"看不见"**（真正意义上
+    的"没落盘"）。三条一起钉，外加"不倒退"。
+    """
+    hub = _discover_hub(tmp_path)
+    _mk_course_dir(tmp_path, "c4")
+    assert hub.discover() == ["c4"], hub.courses()
+    base, _ref, srv, th = _boot(tmp_path, hub)
+    try:
+        traj = tmp_path / "c4"
+        wj3 = json.dumps({"it": 3, "w": 4.5}).encode("utf-8")
+        st, res = _http(
+            base, "/offline/artifact", method="POST", data=_artifact_body("seg-2", 3, course="c4")
+        )
+        assert st == 200 and res["status"] == "accepted", res
+        # ① 交付镜像：与导入腿同路径同文件名（两腿同构 ⇒ 找东西只翻一棵树）
+        mir = traj / "deliver" / "seg-2" / "it-003"
+        assert (mir / "weights.json").read_bytes() == wj3, "镜像要落同一份字节"
+        assert (mir / "row.json").is_file()
+        # ② 活动权重推进到该轮
+        assert (traj / "weights.json").read_bytes() == wj3, "活动权重要跟着段尾走"
+        # ③ 归档（evalA 的 iter 选择器只看这里）——隔离根由 autouse fixture 指到 tmp
+        root = Path(os.environ["BCITY_WEIGHTS_ARCHIVE_ROOT"]) / "c4"
+        arch = sorted(root.glob("c4.it3.*.json"))
+        assert len(arch) == 1 and arch[0].read_bytes() == wj3, list(root.glob("*"))
+        # ② 不倒退：账本已有更新的轮（本机循环落的 it5）⇒ 晚到的 it4 不得覆盖活动权重
+        with open(traj / "training_log.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps({"event": "iteration", "iter": 5, "kl": 0.0}) + "\n")
+        st, res = _http(
+            base, "/offline/artifact", method="POST", data=_artifact_body("seg-2", 4, course="c4")
+        )
+        assert st == 200 and res["status"] == "accepted", res
+        assert (traj / "weights.json").read_bytes() == wj3, "旧轮不得覆盖活动权重"
+        assert (traj / "deliver" / "seg-2" / "it-004" / "weights.json").is_file(), "镜像照落"
+        assert list(root.glob("c4.it4.*.json")), "归档照落（可见性不该被活动权重门挡住）"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        th.join(timeout=5)
+
+
+def test_backup_target_follows_the_course_config(tmp_path: Path) -> None:
+    """归档 `(prefix, dir)` 要跟**课程配置**走（而不是硬编码课名）——真课程声明了就用它。"""
+    st = _JobStore(tmp_path / "c4" / "remote-jobs", tmp_path / "c4" / "training_log.jsonl")
+    # 仓里有真课程配置的课（x20-noexplore 声明 backup_dir/backup_prefix）
+    assert st._course_backup_target("x20-noexplore") == (
+        "x20-noexplore",
+        str(ROOT.parent / "nn-training" / "weights" / "x20-noexplore"),
+    )
+    # 没配置的课（工装/新课）：同构缺省落到**当前归档根**（env 隔离的那一个）
+    assert st._course_backup_target("no-such-course") == (
+        "no-such-course",
+        str(Path(os.environ["BCITY_WEIGHTS_ARCHIVE_ROOT"]) / "no-such-course"),
+    )
 
 
 def test_offline_backfeed_without_a_course_is_refused_loudly_on_a_multi_course_hub(

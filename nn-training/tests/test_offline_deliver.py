@@ -48,6 +48,15 @@ from remote.protocol import (
 )
 from remote.run_loop import run_plan_job
 
+
+@pytest.fixture(autouse=True)
+def _isolate_weights_archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """把**权重归档根**指到 tmp（2026-09-23）：回传轮会往它写 `<课>.it<N>.<时间戳>.json`
+    （用户口径的 ③），工装用例不得往真 `nn-training/weights/` 撒文件 —— 那些会被控制台
+    的 evalA 权重选择器当成真训练轮次列出来。"""
+    monkeypatch.setenv("BCITY_WEIGHTS_ARCHIVE_ROOT", str(tmp_path / "weights-archive"))
+
+
 RUN = "run-offline-1"
 
 

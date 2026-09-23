@@ -299,6 +299,29 @@ PRIORITY_BODY_MAX = 64 * 1024
 #: 把 3.5 小时的静默空转让它过去。
 FREEZE_AFTER_RECLAIMS = 3
 
+#: 仓库根（`nn-training/remote/hub_server.py` 上溯 3 层）——课程配置与权重归档的相对路径基准。
+REPO_ROOT = Path(__file__).resolve().parents[2]
+#: 权重归档根（`nn-training/weights/`；即 `rl.archive.backup_weights` 的缺省目录）。
+WEIGHTS_ARCHIVE_ROOT = REPO_ROOT / "nn-training" / "weights"
+#: 归档根的**测试隔离开关**（2026-09-23）：设了就改用它。为什么必须有：回传轮会往归档根写
+#: `<课>.it<N>.<时间戳>.json`，而工装用例不得往真归档目录撒文件——那些文件会被控制台的
+#: evalA 权重选择器（`eval-board/ckpts.ts` 扫 `nn-training/weights/<leg>/`）当成真训练轮次
+#: 列出来。env 形态（而不是只留可 patch 的模块常量）是因为 e2e 那条是真子进程
+#: （`e2e/test_offline_training_e2e.py` 拉 `remote.hub_server`），patch 传不进去。
+WEIGHTS_ARCHIVE_ROOT_ENV = "BCITY_WEIGHTS_ARCHIVE_ROOT"
+
+
+def _weights_archive_root() -> Path:
+    """当前归档根（`BCITY_WEIGHTS_ARCHIVE_ROOT` 优先，缺省 `nn-training/weights`）。
+
+    **调用时读** env（不是 import 时算一次）——这样测试能在同一进程里 monkeypatch，
+    也让这条路径与 `remote/game_watch` 的看门狗常量同样“只读一份绑定”。
+    """
+    raw = os.environ.get(WEIGHTS_ARCHIVE_ROOT_ENV, "")
+    return Path(raw) if raw else WEIGHTS_ARCHIVE_ROOT
+#: 课程配置目录（`nn-training/curricula/<课>.jsonc`）——归档 prefix/dir 的单一事实来源。
+CURRICULA_DIR = REPO_ROOT / "nn-training" / "curricula"
+
 
 class _JobStore(_AuthGuard):
     """磁盘 job 存储 + 内存租约状态。
@@ -1001,6 +1024,13 @@ class _JobStore(_AuthGuard):
     #: 续跑锚点必须**同轮齐全**的三件（用户 2026-09-22 口径：缺一件就退到更早轮）。
     RESUME_PARTS: tuple[str, ...] = ("weights.json", "opt.tar", "row.json")
 
+    #: 回传轮的**交付镜像**目录名（`<traj>/deliver/<run_id>/it-NNN/`）。`deliver/` 此前只有
+    #: 人工导入写（`dashboard/src/server/bundles/import.ts`）⇒「导入的段」与「回传的段」分居
+    #: 两棵树、找东西要翻两处（用户 2026-09-23 口径：统一命名空间）。
+    DELIVER_DIR = "deliver"
+    #: 段内**活动权重**指针（`<traj>/weights.json`）——本机循环与回传腿共用同一个文件。
+    ACTIVE_WEIGHTS_NAME = "weights.json"
+
     def complete_rounds(self) -> dict[int, dict]:
         """自回传产物（`offline/<run_id>/it-NNN/`）里**三件齐全**的轮次：`{it: {run_id, dir}}`。
 
@@ -1143,6 +1173,9 @@ class _JobStore(_AuthGuard):
                 }
             )
             self._land_round_metrics(row, run_id=run_id, it=int(it))
+            self._land_offline_round_extras(
+                it=int(it), run_id=run_id, weights_json=wj, opt=opt, row=row
+            )
         return {"status": "accepted", "run_id": run_id, "it": int(it)}
 
     def _land_round_metrics(self, row: object, *, run_id: str, it: int) -> None:
@@ -1179,6 +1212,152 @@ class _JobStore(_AuthGuard):
         except Exception as e:  # 观测面不拖垮回传
             print(
                 f"[hub-server] 补传 it{it} 的课程侧度量落位失败（忽略）：{type(e).__name__}: {e}",
+                flush=True,
+            )
+
+    def _ledger_has_newer_iter(self, it: int) -> bool:
+        """课程账本里是否存在**比 `it` 更新**的已落轮次（`iteration.iter` / `offline_artifact.it`）。
+
+        为什么用账本而不是另开一个 sidecar：这张账本**两条腿都写**（本机循环每轮写
+        `iteration`、回传腿经 `_land_round_metrics` 也写），所以「课程已知的最新轮」是两腿
+        合用的单一判据 —— 不需要额外状态，也就不会出现「另一条腿推进了我不知道」的打架。
+
+        只认这两种事件：`job_pending`/`job_cancelled` 之类虽然也带 `it`，但它们说的是**某台
+        机器上的一个 job**（发了还没落权重），不是「这一轮已落」——拿它们当判据会让一个发了
+        又取消的更大 it 永久挡住活动权重推进。
+        账本不存在 ⇒ False（新课程，没有任何更新轮次）；存在却读不到 ⇒ True（保守不推进：
+        宁可不写，也不覆盖可能更新的权重）。
+        """
+        best = 0
+        if not self.jsonl_path.exists():
+            return False  # 新课程还没有账本 ⇒ 没有任何更新轮次（不是“读不到”）
+        try:
+            text = self.jsonl_path.read_text(encoding="utf-8")
+        except OSError:
+            return True  # 存在却读不到 ⇒ 保守不推进
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue  # 坏行跳过：一个坏行不该冻结活动权重
+            if not isinstance(ev, dict):
+                continue
+            kind = ev.get("event")
+            if kind == "iteration":
+                v = ev.get("iter")
+            elif kind == "offline_artifact":
+                v = ev.get("it")
+            else:
+                continue
+            if isinstance(v, int) and not isinstance(v, bool) and v > best:
+                best = v
+        return best > int(it)
+
+    def _course_backup_target(self, course: str) -> tuple[str, str]:
+        """课程配置里的归档 `(prefix, dir)`；缺配置/读不动 ⇒ `(课名, <归档根>/<课>)`。
+
+        单一事实来源 = `nn-training/curricula/<课>.jsonc`（与 `rl/config.py` 同一份文件，
+        命名约定与 dashboard 的课程发现一致：`<课>.jsonc` / `<课>.bc.jsonc`）。
+        课程没声明归档键时按**同构缺省**（课名 + `<归档根>/<课>`）—— 与
+        `TrainingLoop._export_weights` 的缺省（按 mode 前缀）**不是**同一套，所以这里必须先
+        读课程：两种缺省混用会把不同课程的归档倒进同一个目录。
+
+        `backup_dir` 是**仓根相对**路径（`rl.archive.backup_weights` 的契约，课程值形如
+        `nn-training/weights/<课>`）；绝对路径原样用。
+        """
+        for name in (f"{course}.jsonc", f"{course}.bc.jsonc"):
+            p = CURRICULA_DIR / name
+            if not p.is_file():
+                continue
+            try:
+                from rl.jsonc import strip_comments
+
+                cfg = json.loads(strip_comments(p.read_text(encoding="utf-8")))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(cfg, dict):
+                continue
+            prefix = str(cfg.get("backup_prefix") or course)
+            raw = cfg.get("backup_dir")
+            if isinstance(raw, str) and raw:
+                bdir = Path(raw)
+                bdir = bdir if bdir.is_absolute() else REPO_ROOT / bdir
+            else:
+                bdir = _weights_archive_root() / course
+            return prefix, str(bdir)
+        return course, str(_weights_archive_root() / course)
+
+    def _land_offline_round_extras(
+        self, *, it: int, run_id: str, weights_json: bytes, opt: bytes, row: object
+    ) -> None:
+        """回传轮在**课程侧**的三处落位（2026-09-23 用户口径；全部 best-effort）。
+
+        ① **交付镜像**：同一轮也写进 `<traj>/deliver/<run_id>/it-NNN/`。`deliver/` 此前只有
+           人工导入写 ⇒「导入的段」与「回传的段」分居两棵树，找东西要翻两处。
+        ② **活动权重推进**：`<traj>/weights.json` 在**确证没有更新的轮次**时原子替换。此前它
+           整段不动（x20-demo-mix 实测停在段起点指纹），而 `rl/eval_replays_once` 的「活动
+           权重」兜底、本机续跑、控制台显示读的都是它 ⇒ 整段期间「当前权重」是假的。
+        ③ **归档**：`<归档根>/<课>/<prefix>.it<N>.<时间戳>.json`（同 `rl.archive.backup_weights`）。
+           控制台 evalA 的 iter 选择器只扫那个目录（`eval-board/ckpts.ts`）⇒ 不归档就看不见
+           回传段的任何一轮 —— 这才是真正意义上的「权重没落盘」。
+
+        为什么 best-effort：回传的主价值是**权重到岸**（调用方已经三校验地落定了），这三处是
+        可见性/观感 —— 任何一步失败都只记一行，不该把一轮合法回传判负。
+        """
+        traj = self.jsonl_path.parent
+        course = traj.name
+        it_dir = self.offline_run_dir(run_id) / f"it-{int(it):03d}"
+        row_bytes = json.dumps(
+            row if isinstance(row, dict) else {"it": int(it)}, ensure_ascii=False, indent=1
+        ).encode("utf-8")
+        # ① 交付镜像（幂等：已存在即不重写；与导入腿同路径同文件名 ⇒ 两腿同构）
+        mirror = traj / self.DELIVER_DIR / run_id / f"it-{int(it):03d}"
+        try:
+            if not (mirror / "weights.json").exists():
+                mirror.mkdir(parents=True, exist_ok=True)
+                _write_bytes(mirror / "weights.json", weights_json)
+                if opt:
+                    _write_bytes(mirror / "opt.tar", opt)
+                _write_bytes(mirror / "row.json", row_bytes)
+        except OSError as e:
+            print(f"[hub-server] 补传 it{it} 交付镜像失败（忽略）：{e}", flush=True)
+        # ② 活动权重推进（只在没有更新的轮次时；判据是账本，两腿共用）
+        if not self._ledger_has_newer_iter(int(it)):
+            try:
+                _write_bytes(traj / self.ACTIVE_WEIGHTS_NAME, weights_json)
+                fp12 = hashlib.sha256(weights_json).hexdigest()[:12]
+                print(
+                    f"[hub-server] 活动权重推进 → it{it}（{fp12}…，源 run={run_id}）",
+                    flush=True,
+                )
+            except OSError as e:
+                print(f"[hub-server] 补传 it{it} 活动权重推进失败（忽略）：{e}", flush=True)
+        # ③ 归档（evalA 的 iter 选择器只扫归档目录；**同一轮只写一次**）
+        try:
+            from rl.archive import backup_weights
+
+            prefix, bdir = self._course_backup_target(course)
+            # 幂等：这一轮的归档已在就不再写。归档名带时间戳（同轮重跑用改名区分），任其重写
+            # 会让归档目录堆积同轮副本；而本轮的权重是不可变快照（存储层拒绝覆写），所以
+            # “已在”就是全部要告诉我们的信息。
+            if sorted(Path(bdir).glob(f"{prefix}.it{int(it)}.*.json")):
+                print(f"[hub-server] 补传 it{it} 归档已在（跳过重复）", flush=True)
+            else:
+                dst = backup_weights(
+                    str(it_dir / "weights.json"), int(it), prefix=prefix, backup_dir=bdir
+                )
+                print(
+                    f"[hub-server] 补传 it{it} 权重已归档 → {dst}"
+                    if dst
+                    else f"[hub-server] 补传 it{it} 归档未成（见上一条 WARN）",
+                    flush=True,
+                )
+        except Exception as e:  # 归档不该拖垮回传（含 rl 包不在的截断快照）
+            print(
+                f"[hub-server] 补传 it{it} 归档不可用（忽略）：{type(e).__name__}: {e}",
                 flush=True,
             )
 
