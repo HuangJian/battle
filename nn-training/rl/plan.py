@@ -239,7 +239,7 @@ def build_plan(
     带上它以后，节点重放出的对集不再是 `build_pairs` 的固定局数，而是**按
     `target_transitions` 反解的初波**（与本地集群同函数、同种子）——这是「云端采样量与
     本地集群 rollout 一致」的那一半；另一半（训练侧只收达标样本量）由 manifest 里的
-    `per_stage_quota` 承担（`remote/run_loop._run_iteration` 会把它从计划带进逐轮 manifest）。
+    `per_stage_quota` 承担（`remote/plan_run._run_iteration` 会把它从计划带进逐轮 manifest）。
 
     自检（发布期，失败即拒发）：① 计划重放的对集必须 == 真 `args` 的对集
     （`PAIR_ARG_FIELDS` 少字段会在这里暴露；volume 路线对的是 `volume_block` 重解）；

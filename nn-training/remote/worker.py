@@ -543,12 +543,18 @@ def run_job(
     ts_code_bytes = 0
     ts_code_hit = False
     # ---- 半离线（kind=run）：先把计划接过来校验（**跑第一局之前**）----
-    # 三道门（sha / 形状 / 全段对集指纹）都在 run_loop.verify_plan_file 里；失败 = 计划
-    # 与 hub 侧不一致，此时不跑任何一局，也不写任何产物。
+    # 三道门（sha / 形状 / 全段对集指纹）都在 `remote/plan_run.verify_plan_file` 里；失败 =
+    # 计划与 hub 侧不一致，此时不跑任何一局，也不写任何产物。
+    #
+    # 为什么是 `plan_run` 而不是 `run_loop`：执行引擎已下沉到 L2（`worker` 在它上面），
+    # 而 `plan_run` **不 import worker**——「一轮怎么跑」由我们**注入自己**（`run_job_fn=run_job`，
+    # 见下面 run_plan_job 的尾巴）。这条注入把原先 `run_loop ⇄ worker` 的延迟环拆掉了
+    # （`tests/helpers/remote_dag.py` 的 DEFERRED_CYCLES 因此为空）。仍然是**函数内**延迟
+    # import：保持本模块顶层的 import 面不变。
     run_plan: dict | None = None
     run_plan_sha = ""
     if str(manifest["kind"]) == "run":
-        from remote.run_loop import verify_plan_file
+        from remote.plan_run import verify_plan_file
 
         run_plan, run_plan_sha = verify_plan_file(job_dir, manifest, log=log)
     if str(manifest["kind"]) in ("iter", "run"):
@@ -1071,7 +1077,7 @@ def run_job(
     # ---- 半离线尾巴（kind=run）：本轮跑完 → 把计划里剩下的轮次自己跑完 ----
     # 位置在前面的自查**之前**：合并结果是「末轮形状 + iters 明细」，自查要用最终形状。
     if str(manifest["kind"]) == "run" and not echo:
-        from remote.run_loop import run_plan_job
+        from remote.plan_run import run_plan_job
 
         assert run_plan is not None  # kind=run 必过 verify_plan_file（上面已抛）
         result = run_plan_job(
@@ -1098,6 +1104,9 @@ def run_job(
             # hub 里没有它，每条补传都会被 400 「无法归属课程」拒掉——而 manifest 里的
             # `course_name` 是课程文件的 name 字段，与 hub 的课程键不是一回事）。
             hub_course=str(job.get("course") or ""),
+            # ★ 注入：引擎不替我们决定「一轮怎么跑」——把**自己**传进去。原先引擎里那个
+            # `_real_run_job` 兜底会反向 import 本模块（`run_loop ⇄ worker` 环的成因）。
+            run_job_fn=run_job,
             log=log,
         )
     validate_result(result, manifest, commit_echo_must_match=False)  # 自查

@@ -45,6 +45,7 @@ from common.protocol import (
     unpack_payload,
     validate_result,
 )
+from remote import plan_run as plan_run_mod
 from remote.artifacts import ArtifactStore, sha256_bytes, sha256_file
 from remote.run_loop import (
     _combined,
@@ -309,14 +310,17 @@ def test_run_standalone_loads_course_snapshot_into_iter_spec(
     # 产物目录放课程快照（与 import_bundle 落盘同名同路径）
     (art / "course.jsonc").write_text(_COURSE_FIXTURE, encoding="utf-8")
     seen: dict[str, Any] = {"calls": 0}
-    real_iter_spec = run_loop_mod.iter_spec
+    # 注入点分档（2026-09-23 拆 `plan_run` 之后）：`iter_spec` 的**调用点在执行引擎**
+    # （`plan_run._run_iteration`）⇒ 必须 patch `remote.plan_run`；`remote.run_loop` 只是
+    # 入口/门面，且已**不再转发**这个名字（patch 它 = AttributeError，不是静默失效）。
+    real_iter_spec = plan_run_mod.iter_spec
 
     def spy(*a: Any, **kw: Any) -> Any:
         seen["calls"] = int(seen["calls"]) + 1
         seen["course"] = kw.get("course")
         return real_iter_spec(*a, **kw)
 
-    monkeypatch.setattr(run_loop_mod, "iter_spec", spy)
+    monkeypatch.setattr(plan_run_mod, "iter_spec", spy)
     run_standalone(
         artifacts_dir=art,
         max_iters=0,

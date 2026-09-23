@@ -25,9 +25,11 @@ admin 控制面，并为第四步（`worker.py`）先铺好**模块级状态契�
 wire 簇搬进 `remote/wire.py`（+8 例）、HTTP 传输核心搬进 `remote/http.py`（keystone，+7 例）、
 作业工作区/TAR/git 物化搬进 `remote/job_fs.py`（+6 例）、BC 作业搬进 `remote/bc_job.py`（+6 例，
 底座拆完后业务簇可整块搬）、下载簇搬进 `remote/download.py`（+7 例）、作业取活/生命周期/
-回传面搬进 `remote/job_lifecycle.py`（+8 例，seam 最密的一刀）——终值
-**2331 passed / 3 skipped**。`remote/worker.py` 3450 → **1805**（`wire` 289 / `http` 366 /
-`job_fs` 184 / `bc_job` 422 / `download` 313 / `job_lifecycle` 682）。
+回传面搬进 `remote/job_lifecycle.py`（+8 例，seam 最密的一刀）、`remote/` 依赖账本收口（+18 例）、
+拆掉账本里唯一那个延迟环（+11 例）——终值 **2359 passed / 3 skipped**。`remote/worker.py`
+3450 → **1805**（拆各簇；`wire` 289 / `http` 366 / `job_fs` 184 / `bc_job` 422 / `download` 313 /
+`job_lifecycle` 682）。最后一步把 `remote/run_loop.py` **1451 → 491**：半离线执行引擎（963 行）
+下沉成 `remote/plan_run.py`（**1035 行**，L2）——见下「拆环」节。
 
 ### 先量结构，再选刀口（拆前侦察，都是实测）
 
@@ -458,6 +460,7 @@ L7 `notebook_boot`。
 顶层图仍然是无环 DAG，所以它**不构成故障**；本轮的处置是把它**登记**成唯一被批准的延迟环
 （`DEFERRED_CYCLES`，带理由）+ 一条警报「环里不许出现顶层边」，而**不是**顺手改代码拆它
 （改哪边都得把 `verify_plan_file` / **`run_job` 的调用方式**搬动，属单开的决策）。
+**（同日该决策已单开并执行：环已拆掉，`DEFERRED_CYCLES` 现为空 —— 见下「拆环」节。）**
 
 **反探针六处全命中**（每一处都指名到唯一的用例）：顶层反向 import → 顶层分层红（整图 + 单模块
 两处）· 同层延迟边 → 延迟分层红 · 环里出现顶层边 → 分层 + 「环里不许有顶层边」两处红 ·
@@ -465,8 +468,77 @@ L7 `notebook_boot`。
 `stale` 红。门禁 **2331 → 2349 passed / 3 skipped**（+18）；mypy **382** 源文件绿；
 根 `bun run check` 2120 pass / 0 fail。
 
+### 拆环：半离线执行引擎下沉 `plan_run`，`worker` / `run_loop` 都从上面拿（同日，用户指令
+「拆掉 `remote/` 里唯一那个被登记的延迟环」）
+
+上节把 `run_loop ⇄ worker` **登记**成唯一被批准的延迟环，并写下两条拆除路线。本步执行它，
+并且**两条路线都没照原样走**——量完之后发现它们都不够：
+
+| 原路线 | 为什么不照做 |
+|---|---|
+| 把 `verify_plan_file` / `run_plan_job` 沉到 L1（如塞进 `remote/job_fs.py`）让 `worker` 直接拿 | 这两个函数的**传递闭包就是整个执行引擎**（`RunContext` + 单轮执行 + 主循环 + 云机评估装配 ≈ **963 行**）。塞进 184 行的作业 I/O 模块 = 把一个 L1 模块变成第二个神模块 |
+| 让 `worker.run_job` 从调用方收这两个函数 | 方向对了（**注入**）但对象错了：这两函数只是引擎的**门面**，真正要注入的是「**一轮怎么跑**」（`run_job` 自己） |
+
+**实际刀口**：引擎**整块**搬到新模块 `remote/plan_run.py`（**1035 行**，L2），`run_loop.py`
+只留 CLI / 独立续跑 / 门面（1451 → **491** 行）；「一轮怎么跑」由调用方**注入**：
+
+```
+plan_run（L2；不 import worker / run_loop）      ← 引擎：计划交接 + 运行上下文 + 单轮 + 主循环
+   ↑                          ↑
+worker（L4，kind=run 尾巴）  run_loop（L5，CLI / 独立续跑 / 门面）
+   └─ run_job_fn=run_job ─┘ └─ run_job_fn=_real_run_job ─┘
+```
+
+**引擎里那个 `_real_run_job` 兜底被删掉**（它就是环的成因：引擎替调用方决定用谁的 job 执行器）。
+漏注入时**响亮** `RuntimeError`，而不是静默跑错执行器——三个直接调用点（`worker.run_job`、
+`run_standalone`、以及测试里那批替身）**全都显式注入**，所以删兜底不影响任何人。
+
+#### ★ 选层：层号是**算**出来的，不是贴上去的（用户口径「沉到 L1」为何落成 L2）
+
+用户口径是「下沉到 L1」。仲裁依据不是口味而是账本的**拓扑秩**定义（`LAYERS[m] = 1 + max(依赖层)`）：
+`plan_run` 顶层依赖 `offline_deliver`(L1)、延迟依赖 `offline_eval`(L1) ⇒ 它**只能是** L2；标 L1 就是标错，
+而且会让 `worker → plan_run`(L4→L1) 与「`http`(L2) → `wire`(L1)」这类的秩关系自相矛盾。
+本步顺手把这条**加成了守卫**：`test_every_layer_number_equals_its_topological_rank` 对全部 36 个模块
+逐条验算 `1 + max(依赖层)`——今天全绿（即：不只是 `plan_run`，整张 `LAYERS` 表都真的是秩）。
+反探针：把 `plan_run` 手改成 L1 ⇒ 该用例 + 两条分层用例同时红（顺带证明「沉到 L1」若按字面执行，
+真正该做的是**再把共同依赖往下拉一层**）。
+
+#### seam（本刀是「拆环」而不是「拆文件」，所以分档第一次是**跨模块**的）
+
+| 名字 | 调用点解析在 | patch 目标 |
+|---|---|---|
+| `iter_spec` / `pairs_for` / `time` / `DRAIN_FLUSH_SEC` …（引擎读的模块全局） | `remote.plan_run` | **`plan_run`**（`run_loop` **不再转发** `iter_spec` ⇒ 打错模块是 `AttributeError`，**响亮**而非静默失效） |
+| 引擎公开名（`run_plan_job` / `verify_plan_file` / `RunContext` / `_drive` …） | `run_loop` 只做 `X as X` 门面 | 取名字可以，**patch 无效**（同一对象） |
+
+实迁 **1 处** `monkeypatch.setattr`（`tests/test_run_loop.py`：`run_loop_mod.iter_spec` →
+`plan_run_mod.iter_spec`）。其余全部**一行不改**：测试都走 `from remote.run_loop import …` 门面，
+`e2e/` 与 `tests/test_volume_plan_block.py` 亦然。
+
+#### 守卫（新 `tests/test_plan_run_split.py`，10 例）+ 反探针
+
+定义唯一（引擎名只在 `plan_run`，`run_loop` 不得再实现）· 入口名不得倒灌进引擎 · **`plan_run`
+不得 import `remote.worker` / `remote.run_loop`（含延迟）** · **兜底 `_real_run_job` 必须不存在**
+（AST 三层：名字零 `Load`、`_run_iteration` 里 `run_job` 赋值只能有一处且值恰为 `ctx.run_job_fn`、
+漏注入的 `RuntimeError` 文本在）· `worker` 尾巴延迟 import **引擎**且 `run_job_fn=run_job` ·
+门面同一对象 · **门面不许漏**（从入口源码动态取读到的引擎名）· `iter_spec` seam 在 `plan_run`
+且测试跟着迁了 · 账本 `DEFERRED_CYCLES == {}` 且全图零环 · 分层关系 `plan_run < worker < run_loop`。
+
+**反探针七处全命中**（每处指名到唯一用例）：`plan_run` 延迟 import `worker` → 4 处红（含零环）·
+`worker` 尾巴改回 import `run_loop` → 4 处红 · 拿掉 `run_job_fn=run_job` 注入 → 1 处红 ·
+引擎里恢复 `or _real_run_job` 回落 → 1 处红 · 门面漏 `_drive` → 1 处红 · `run_loop` 又转发
+`iter_spec` → 1 处红 · `plan_run` 标成 L1 → 3 处红（秩 + 两条分层）。
+
+#### 账本变更
+
+`DEFERRED_CYCLES` 从「一个带理由的环」变成**空字典**，且新增两条硬断言：`undeclared == []`
+（= 全图零环，比原来「恰好等于声明值」更严）+ `not dag.DEFERRED_CYCLES`（**要网开一面必须先改守卫**）。
+机制（`cycles` / `undeclared_cycles` / `stale`）保留：真要再引入环，它会**归入「已声明」而不是静静绿着**。
+
+门禁 **2349 → 2359 passed / 3 skipped**；mypy **383** 源文件绿；根 `bun run check` 2120 pass / 0 fail。
+
 ### 未做完（S4 余下）
 
+`remote/` 内部**已零环**（见上「拆环」节），S4 余下是纯结构工作：
 `remote/worker.py`（**1805 行**；余下是宿主 `run_job` / `worker_loop` / `main` 与 `_prefetch_fill`
 等——**已无可整块搬的叶子簇**，再拆就是拆宿主）→ `hub_server` 其余路由组
 （`_get_*` 12 / `_post_*` 11 → 通用助手）→ 最后两个千行状态类（`_JobStore` / `_HubQueue`：

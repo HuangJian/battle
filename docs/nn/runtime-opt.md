@@ -140,7 +140,7 @@ bash tools/githook/nn-py-safe.sh -m pytest nn-training/tests/test_remote_serve_p
 | 腿 | 入口 | 执行方式 | 池？ |
 |---|---|---|---|
 | 逐轮上云（kind=iter） | `remote/worker.py:2236` | `remote/iter_rollout.py::run_iter_rollout` → **逐局 `subprocess.Popen([bun, export-rl-rollout.ts, …])`**（线程池控并发，:202） | ❌ |
-| 半离线整段 / 全离线包（kind=run） | `remote/run_loop.py`（模块 docstring：每轮合一个与 kind=iter **逐字段同构**的 job 再喂回 `run_job`） | 同上（走的就是同一条 iter 路径） | ❌ |
+| 半离线整段 / 全离线包（kind=run） | `remote/plan_run.py`（模块 docstring：每轮合一个与 kind=iter **逐字段同构**的 job 再喂回 `run_job`；CLI/入口在 `remote/run_loop.py`） | 同上（走的就是同一条 iter 路径） | ❌ |
 | 云机离线 eval | `remote/offline_eval.py` → `rl/eval_local.py::run_local_eval_game` | 逐局 Popen `bun export-eval-game.ts`（:596–630 组 cmd + `game_watch`） | ❌ |
 
 * **池只存在于 `tools/agent/sampler-agent.ts`**（`persistPool` + `PERSIST_SERVE_ENTRIES` 里的 `--serve` 常驻进程），

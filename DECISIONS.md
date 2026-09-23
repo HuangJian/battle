@@ -2568,3 +2568,37 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
   2120 pass / 0 fail。反探针六处全命中：顶层反向 import · 同层延迟边 · 环里出现顶层边 ·
   新模块不登记 · `http` 顶层/延迟碰 `rl` · 摘掉声明环的两条边（stale）。
 —— 全文（背景：为什么合并六份断判）→ `docs/nn/engineering.md` §23「收口：`remote/` 内部依赖账本」
+
+## §2026-09-23-goalnn-remote-ring-split（2026-09-23，用户指令「拆掉 remote/ 里唯一那个被登记的延迟环：把 run_loop 的 verify_plan_file / run_plan_job 下沉到 L1，让 worker 直接拿」）
+
+- **背景**：上一条账本收口时实测发现 `remote/` 内部真有**一个**环：`run_loop ⇄ worker`（两边都是
+  函数内延迟 import——`run_loop._real_run_job` 为顶层 torch-light，`worker.run_job` 为「不把编排入口
+  当宿主依赖」），当时**登记**而非拆（拆它要动 torch-light 策略或调用方式，属单开决策）。本条就是那次
+  单开。
+- **备选与否决**：① 照用户字面把 `verify_plan_file` / `run_plan_job` 塞进 `remote/job_fs.py`（L1）
+  ——否：这两个函数的**传递闭包就是整个执行引擎**（`RunContext` + 单轮 + 主循环 + 云机评估装配 ≈963 行），
+  塞进 184 行的作业 I/O 模块 = 造第二个神模块；② 让 `worker.run_job` 从调用方收这两个函数——方向对
+  （注入）但对象错：这两个只是引擎的门面，真正要注入的是「**一轮怎么跑**」（`run_job` 自己）；
+  ③ 只把 `run_loop → worker` 那条边提到顶层——否：顶层就不 torch-light 了，等于拿启动开销换账本好看。
+- **决定**：引擎**整块**下沉到新模块 `remote/plan_run.py`（**L2**），`run_loop.py` 只留 CLI /
+  独立续跑 / 门面（1451 → **491** 行）；「一轮怎么跑」由调用方**注入**（`worker` 传 `run_job_fn=run_job`，
+  CLI 侧传 `_real_run_job`）。**引擎里那个 `_real_run_job` 兜底删掉**（它正是反向 import 的成因）：
+  漏注入时响亮 `RuntimeError`，而不是静默跑错执行器。依赖变成 `worker → plan_run`、`run_loop → plan_run`
+  （纯向下）+ 参数注入 ⇒ 环消失。
+- **层号为 L2 而非用户口径的 L1（带理由的偏离）**：账本把 `LAYERS` 定义为**拓扑秩**
+  （`LAYERS[m] = 1 + max(依赖层)`），而 `plan_run` 顶层依赖 `offline_deliver`(L1)、延迟依赖
+  `offline_eval`(L1) ⇒ 它**只能是** L2；标 L1 会与自身依赖同层（分层断言当场红）。本步把这句话加成
+  守卫 `test_every_layer_number_equals_its_topological_rank`（对全部 36 个模块逐条验算，今天全绿）
+  ——**「沉到 L1」若真要按字面执行，该做的是再把共同依赖往下拉一层**，而不是把标签改小。
+- **seam 分档（第一次为「拆环」而非「拆文件」）**：引擎读的模块全局（`iter_spec` / `pairs_for` / `time` /…）
+  调用点在 `plan_run` ⇒ patch 目标迁 `remote.plan_run`，且 `run_loop` **不再转发** `iter_spec`
+  （打错模块 = `AttributeError`，**响亮**而非静默失效，守卫钉住）；引擎公开名由 `run_loop` 做 `X as X`
+  门面转发（取名字可以、patch 无效）。实迁 **1 处** setattr，其余测试/e2e **一行不改**。
+- **账本变更**：`DEFERRED_CYCLES` 清空 + 两条硬断言（`undeclared == []` = 全图**零环**，比原来
+  「恰好等于声明值」更严；`not dag.DEFERRED_CYCLES` = 要网开一面必须先改守卫）。机制保留：真要再引入环，
+  它会归入「已声明」而不是静静绿着。**本仓从此没有「用延迟 import 换环」这条路**——只有下沉与注入。
+- **违反后果**：引擎里一旦再出现 `remote.worker` / `remote.run_loop` 的 import，或有人拿掉
+  `run_job_fn=run_job`，守卫在**提交时**就红（反探针七处全命中）；`worker.run_job` 漏注入则云机上
+  kind=run 尾巴**立即** `RuntimeError`（不是静默少跑几轮）。
+- **门禁**：**2349 → 2359 passed / 3 skipped**；mypy **383** 源文件绿；根 `bun run check` 2120 pass / 0 fail。
+—— 全文（引擎/入口的职责划分 / 反探针清单 / 选层推导）→ `docs/nn/engineering.md` §23「拆环：半离线执行引擎下沉 `plan_run`」

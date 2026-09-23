@@ -76,7 +76,7 @@ class CloudEvalPlan:
     level: int | None
     #: 同时段在跑的 rollout 并行度（`plan.workers`；0 = 未知）。**只用于缺省并发**：
     #: 它不是课程属性（课程不知道包里的计划），所以由 `eval_plan_of` 留 0、调用方
-    #: `dataclasses.replace` 补上（见 `remote/run_loop._setup_cloud_eval`）。
+    #: `dataclasses.replace` 补上（见 `remote/plan_run._setup_cloud_eval`）。
     rollout_workers: int = 0
 
     @property
@@ -386,7 +386,7 @@ def run_cloud_eval(
             log(f"[eval-cloud] it{it}: wver={key16[:12]}… 已评过（{len(pairs)} 局）——跳过")
             return out
 
-        # 调用方（`run_loop._setup_cloud_eval`）通常已经把缺省解析成具体数；直接调本函数时
+        # 调用方（`plan_run._setup_cloud_eval`）通常已经把缺省解析成具体数；直接调本函数时
         # 退回 `default_slots()`——同一口径，不依赖任何「对方在抢」的估算。
         n_slots = max(1, int(slots or 0) or default_slots())
         log(

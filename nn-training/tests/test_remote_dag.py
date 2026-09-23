@@ -10,10 +10,13 @@
    （这条是防「账本腐烂成合法的历史遗留」的那一半）；
 2. **顶层图是严格分层的 DAG**：每条顶层 import 边 `LAYERS[src] > LAYERS[dst]`；顶层 SCC 为空。
    顶层环 = 启动即 `ImportError`，**没有豁免**；
-3. **延迟图**：每条函数内 import 边同样严格向下，除非落在 `DEFERRED_CYCLES` 声明的环里；
-4. **全图的环恰好等于 `DEFERRED_CYCLES`**：多一个红、少一个也红；
-5. **环里不许出现顶层边**——「用延迟 import 掩盖循环」是本仓记过一次的手法
-   （`tests/test_layering.py` 头部），所以声明过的环必须**仍然是延迟的**；
+3. **层号就是拓扑秩**：`LAYERS[m] == 1 + max(LAYERS[依赖])`——所以「某模块该在第几层」不是口味问题，
+   是可以算出来的（`remote/plan_run` 因此是 L2 而不是 L1：它延迟依赖 `offline_eval`(L1)）；
+4. **延迟图**：每条函数内 import 边同样严格向下（延迟 import 不是「可以往回指」的许可）；
+5. **全图零环**（2026-09-23 起，比「恰好等于声明值」更严）：`remote/` 内部一条环都不许有，
+   `DEFERRED_CYCLES` 现在是**空的**且不许再登记——环的处理方式只有「下沉共同依赖」与「参数注入」
+   两种（`plan_run` 就是这条规矩的产物：原先 `run_loop ⇄ worker` 那个环两边都是延迟 import，
+   仍然被拆掉）。「环里不许出现顶层边」的机制保留着，今天它关于空集恒真；
 6. **三个自包含引导模块顶层不得 import 任何 `remote.*`**（`remote/__init__.py` 写着的
    结构例外——它们要从 GitHub raw 单独拉取）——这条以前只是注释，现在机械钉住；
 7. **扫描器不许瞎**：解析不出来的 `remote.*` 目标必须为 0（`from <pkg> import <mod>` 与相对
@@ -62,6 +65,31 @@ def test_layer_numbers_are_dense_and_meaningful() -> None:
     )
 
 
+def test_every_layer_number_equals_its_topological_rank() -> None:
+    """★ 层号 = **拓扑秩**：`LAYERS[m] == 1 + max(LAYERS[全部依赖])`（含延迟边；无仓内依赖 = L0）。
+
+    这条把「该放第几层」从口味问题变成算术问题——也是本仓 2026-09-23 那条「引擎下沉」的选层依据：
+    `remote/plan_run` 的依赖最深到 L1（`offline_deliver` 顶层、`offline_eval` 延迟）⇒ 它**只能是**
+    L2，放进 L1 就不再是秩（而「沉到 L1」若按字面执行，就该是「把共同依赖再往下拉一层」）。
+
+    编号必须**全局一致**（一个模块改了层号，整张表要重排）——这也是为什么它是「秩」而不是标签。
+    """
+    offenders: list[str] = []
+    for module in sorted(dag.LAYERS):
+        deps = {d for d in (set(TOP[module]) | set(DEFERRED[module])) if d in dag.LAYERS}
+        if not deps:
+            continue
+        want = 1 + max(dag.LAYERS[d] for d in deps)
+        if dag.LAYERS[module] != want:
+            deepest = sorted((dag.LAYERS[d], d) for d in deps)[-1]
+            offenders.append(
+                f"{module} 标 L{dag.LAYERS[module]}，但它依赖 {deepest[1]}(L{deepest[0]}) ⇒ 应为 L{want}"
+            )
+    assert offenders == [], (
+        "层号不是拓扑秩（层号是算出来的，不是贴上去的）：\n  " + "\n  ".join(offenders)
+    )
+
+
 # ───────────────────── ② 顶层图：严格分层的 DAG ─────────────────────
 
 
@@ -87,37 +115,40 @@ def test_deferred_edges_respect_layering_except_declared_cycles() -> None:
 # ─────────────────── ③④⑤ 环：恰好是声明的那一个 ───────────────────
 
 
-def test_the_only_cycles_are_the_declared_ones() -> None:
-    """全图的环**恰好**等于 `DEFERRED_CYCLES`：多一个红，少一个也红。"""
+def test_the_whole_intra_remote_graph_is_acyclic() -> None:
+    """★ **全图零环**（比「声明相等」更严）：`remote/` 内部一条环都不许有。
+
+    2026-09-23 拆 `plan_run` 之后这是可以达到的形态：需要「互相调用」时，把能力**下沉**到更低
+    的层（`plan_run` 在 L2），让两侧都从上面拿；而「一轮怎么跑」这类要回指的东西用
+    **参数注入**（`run_job_fn`），不让下层反向 import 上层。
+
+    原来唯一那个环（`run_loop ⇄ worker`，两边都是函数内延迟 import）已消失——它当时不是错，
+    但它换来的东西（`run_loop` 顶层 torch-light）用「延迟 import **下沉后的模块**」同样能得到。
+    """
     undeclared, stale = dag.undeclared_cycles(TOP, DEFERRED)
     assert undeclared == [], (
-        f"出现未声明的环：{undeclared}\n"
-        "  环只能靠「下沉公共依赖」或「函数内延迟 import」两种方式处理；"
-        "后者要登记进 tests/helpers/remote_dag.py 的 DEFERRED_CYCLES 并写明理由"
+        f"`remote/` 内部出现环：{undeclared}\n"
+        "  处理方式只有两种：把共同依赖**下沉**到环上方的层（"
+        "例：`plan_run` 之于 `worker`/`run_loop`），或把「往上指的依赖」改成**参数注入**。"
     )
-    assert stale == [], (
-        f"这些已声明的环其实不存在了（账本腐烂，删掉那行）：{stale}"
+    assert stale == [], f"账本里声明的环其实不存在了（删掉那行）：{stale}"
+    assert not dag.DEFERRED_CYCLES, (
+        "有人把环重新登记进 DEFERRED_CYCLES —— 本仓已有「下沉 + 注入」这个手段，"
+        "要网开一面请先在 DECISIONS 里论证并改这条守卫"
     )
 
 
-def test_declared_cycles_never_contain_a_top_level_edge() -> None:
-    """★ 环里**不许**出现顶层边：那才是「用延迟 import 掩盖循环」的反面判据。
-
-    今天唯一被批准的环（`run_loop ⇄ worker`）两边都是函数内 import——`run_loop` 为了顶层保持
-    torch-light，`worker` 为了不把编排入口变成宿主的依赖。哪天有人把其中一条提到顶层，
-    这条会红：那时要做的不是改账本，而是先把那条边下沉。
-    """
-    offenders: list[str] = []
-    for src, dsts in sorted(TOP.items()):
-        for dst in sorted(dsts):
-            if dag._in_declared_cycle(src, dst):
-                offenders.append(f"{src} -> {dst}")
+def test_no_declared_cycle_is_hiding_a_top_level_edge() -> None:
+    """环里**不许**出现顶层边（顶层 import 参与环 = 真环）——机制保留，今天账本为空。"""
+    offenders = [
+        f"{src} -> {dst}"
+        for src, dsts in sorted(TOP.items())
+        for dst in sorted(dsts)
+        if dag._in_declared_cycle(src, dst)
+    ]
     assert offenders == [], (
         f"已声明的延迟环里出现了顶层边（顶层 import 参与环 = 真环）：{offenders}"
     )
-    # 而且这两个方向的边**确实存在**（防「环是空话」）
-    for src, dst in (("remote.run_loop", "remote.worker"), ("remote.worker", "remote.run_loop")):
-        assert dst in DEFERRED.get(src, set()), f"{src} -> {dst} 不见了（账本该删那行）"
 
 
 # ─────────────────── ⑥ 引导模块：顶层零 remote.* ───────────────────

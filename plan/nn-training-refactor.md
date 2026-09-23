@@ -613,6 +613,45 @@ L3 业务簇（`bc_job`/`download`/`job_lifecycle`/`push_dispatch`）→ L4 组�
 > `tests/test_worker_device.py` 有读 `worker.py` **源码文本**的守卫（`normalize_ppo_device(device)`
 > 计数 + 顺序，看的是 `run_job` 里的调用点=宿主）⇒ 应仍绿，但必须跑一遍确认。
 
+#### 5.3.8 拆环（2026-09-23，**已完成**）—— 半离线执行引擎下沉 `plan_run`
+
+§5.3.7 末尾留了两条拆除路线；实测后**两条都没照原样走**（量完才知道它们都不够）：
+
+| 原路线 | 为什么不照做 |
+|---|---|
+| `verify_plan_file` / `run_plan_job` 沉到 L1（如 `remote/job_fs.py`）让 `worker` 直接拿 | 这两函数的**传递闭包 = 整个执行引擎**（`RunContext` + 单轮 + 主循环 + 云机评估装配 ≈ **963 行**）⇒ 塞进 184 行的作业 I/O 模块 = 造第二个神模块 |
+| `worker.run_job` 从调用方收这两个函数 | 方向对（注入）但**对象错**：这两个只是**门面**，要注入的是「**一轮怎么跑**」（`run_job` 自己） |
+
+**实际刀口**：引擎整块 → 新模块 `remote/plan_run.py`（**1035 行**，**L2**）；`run_loop.py` 只留
+CLI / 独立续跑 / 门面（**1451 → 491**）；「一轮怎么跑」由调用方注入（`worker` 传 `run_job_fn=run_job`，
+CLI 侧传 `_real_run_job`）。引擎里那个 `_real_run_job` **兜底删掉**（它就是环的成因）⇒ 依赖变成
+`worker → plan_run`、`run_loop → plan_run`（纯向下）⇒ **环消失，`DEFERRED_CYCLES` 清空**。
+
+**★ 层号落成 L2 而不是用户口径的 L1（带理由的偏离）**：账本把 `LAYERS` 定义为**拓扑秩**
+（`LAYERS[m] = 1 + max(依赖层)`），而 `plan_run` 依赖最深到 L1（`offline_deliver` 顶层 /
+`offline_eval` 延迟）⇒ **只能是** L2；标 L1 会与自身依赖同层（分层断言当场红）。本步把这条加成
+守卫 `test_every_layer_number_equals_its_topological_rank`（全部 36 个模块逐条验算 `1+max(依赖)`，
+今天全绿）——「沉到 L1」若真要按字面执行，该做的是**再把共同依赖往下拉一层**，而不是改标签。
+
+**seam**：引擎读的模块全局（`iter_spec` / `pairs_for` / `time` / `DRAIN_FLUSH_SEC` …）调用点在
+`plan_run` ⇒ 迁 `remote.plan_run`；且 `run_loop` **不再转发** `iter_spec`（打错模块 = `AttributeError`，
+**响亮**而非静默失效，守卫钉住）。引擎公开名由 `run_loop` 做 `X as X` 门面（取名字可以、patch 无效）。
+实迁 **1 处** `setattr`（`tests/test_run_loop.py`），其余测试与 `e2e/` **一行不改**。
+
+**守卫**：新 `tests/test_plan_run_split.py`（**10 例**）：定义唯一 · 入口名不倒灌 · **`plan_run`
+不得 import `worker` / `run_loop`（含延迟）** · **兜底 `_real_run_job` 必须不存在**（AST 三层）·
+`worker` 尾巴延迟 import 引擎且注入自己 · 门面同一对象 + **不许漏**（从入口源码动态取读到的引擎名）·
+`iter_spec` seam 在 `plan_run` 且测试跟着迁了 · 账本空且全图零环 · 分层 `plan_run < worker < run_loop`。
+**反探针七处全命中**（含 `plan_run` 标成 L1 → 3 处红）。
+
+> 决策 → `DECISIONS.md` §2026-09-23-goalnn-remote-ring-split；全文 → `engineering.md` §23「拆环」。
+> 门禁 **2349 → 2359 passed / 3 skipped**；mypy **383** 源文件绿；根 `bun run check` 2120 pass / 0 fail。
+
+**下一步（供将来对照）**：`remote/` 内部已零环，S4 余下是纯结构工作 —— `worker.py` 的宿主
+（`run_job` 743 / `worker_loop` 364 / `main`）按**一条真实调用链**切（不按行数等分）→ `hub_server`
+其余路由组（`_get_*` 12 / `_post_*` 11 → 通用助手）→ 两个千行状态类（拆 = 拆状态）。还挂着一项清理：
+`remote/job_fs._ensure_commit` 是既存死代码（全仓零调用，只搬未删，删要单开）。
+
 ### 5.4 本轮**不做**（已核，刻意保留）
 
 - `remote/notebook_boot.py` ↔ `remote/offline_boot.py` 的孪生助手（`_build_opener` /

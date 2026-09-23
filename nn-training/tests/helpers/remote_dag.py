@@ -27,8 +27,8 @@ DEFERRED_CYCLES  : 唯一允许「环」的地方（仅限延迟 import，且必
 
 本仓的既有结论（`tests/test_layering.py` 头部）：「函数内 import 同样是一条依赖边，只是它把失败
 推迟到调用时——本仓就有过『延迟 import 掩盖了循环』的先例」。所以延迟边不豁免**分层**，
-只豁免**环**（且必须声明）。今天全仓只有**一个**被批准的延迟环：`run_loop ⇄ worker`
-（理由见 `DEFERRED_CYCLES`）。
+只豁免**环**（且必须声明）——而 `DEFERRED_CYCLES` 今天是**空的**：全仓 `remote/` 内部**零环**
+（原来那一个 `run_loop ⇄ worker` 已由「引擎下沉 `plan_run` + 调用方注入 `run_job_fn`」拆掉）。
 
 ## 判据自身的坑（抄 `test_layering` 的教训）
 
@@ -55,7 +55,8 @@ REMOTE_DIR = ROOT / "remote"
 #:   结果上传器、serve_pool、三个自包含引导模块、`hub.admin`、`colab_bc`；
 #: * **L1 单层传输/落盘**：`wire`（传输账）· `job_fs`（作业工作区）· `hub_client` ·
 #:   `offline_deliver` · `offline_eval` · `deliver_zip` · `iter_rollout`；
-#: * **L2 传输核心**：`http`（所有业务簇的公共底座）· `push_client`；
+#: * **L2 传输核心**：`http`（所有业务簇的公共底座）· `push_client` · `plan_run`（半离线执行引擎：
+#:   `worker` 与 `run_loop` 都站在它上面，它自己谁都不靠上层靠）；
 #: * **L3 业务簇**：`bc_job` · `download` · `job_lifecycle` · `push_dispatch`；
 #: * **L4 组装/宿主**：`worker`（作业生命周期宿主）· `hub_server`（hub 侧组装）；
 #: * **L5 入口编排**：`run_loop` · `notebook_runtime` · `worker_server` · `smoke_loopback` ·
@@ -83,6 +84,7 @@ LAYERS: dict[str, int] = {
     "remote.offline_eval": 1,
     "remote.wire": 1,
     "remote.http": 2,
+    "remote.plan_run": 2,
     "remote.push_client": 2,
     "remote.bc_job": 3,
     "remote.download": 3,
@@ -100,19 +102,17 @@ LAYERS: dict[str, int] = {
     "remote.notebook_boot": 7,
 }
 
-#: **唯一**允许的环（键 = 参与环的模块集合，值 = 为什么这是对的）。
+#: 允许的环（键 = 参与环的模块集合，值 = 为什么这是对的）。
 #:
-#: 这不是「豁免名单」而是一条**有理由的结构决定**：`worker.run_job` 需要在 hub 侧编排段里拿
-#: `run_loop.verify_plan_file` / `run_plan_job`，而 `run_loop` 需要在真正执行时拿
-#: `worker.run_job`——两边都**故意**用函数内延迟 import：`run_loop` 是为了顶层保持
-#: torch-light（`worker` 拖整条 torch 链），`worker` 侧则是「编排入口不是宿主的依赖」。
-#: 顶层图仍然是无环 DAG（守卫 ② 单独钉这条：**环里不许出现顶层边**）。
-DEFERRED_CYCLES: dict[frozenset[str], str] = {
-    frozenset({"remote.worker", "remote.run_loop"}): (
-        "worker.run_job ⇄ run_loop 的编排入口：两边都是函数内延迟 import。"
-        "run_loop 顶层保持 torch-light（worker 拖 torch 链），worker 不把编排入口当宿主的依赖。"
-    ),
-}
+#: **今天为空**——这是「引擎下沉 + 调用方注入」的结果，不是碰巧：原来 `remote/` 内部唯一那个环
+#: （`run_loop ⇄ worker`）已拆掉：执行引擎下沉到 `remote/plan_run.py`（L2，**不** import
+#: `worker`），`worker` 与 `run_loop` 都从它上面拿 `verify_plan_file` / `run_plan_job`，而「一轮
+#: 怎么跑」由调用方**注入**（`worker` 传 `run_job_fn=run_job`；CLI 侧传 `_real_run_job`）。
+#:
+#: 机制保留是有用的：真要再引入一个环，必须写在这里 + 在 DECISIONS 里论证，且守卫会把它归入
+#: 「已声明」（而不是静静绿着）。但 `test_remote_dag.py` 里那条**全图零环**的断言比它更严：
+#: 即使有声明也会红——因为本仓已经有「下沉 + 注入」这个手段，无需再用环换任何东西。
+DEFERRED_CYCLES: dict[frozenset[str], str] = {}
 
 #: 三个**自包含引导模块**（从 GitHub raw 单独拉取，cell 拿到 `code.zip` 之前就要 import）：
 #: 它们**顶层不得** import 任何 `remote.*`（见 `remote/__init__.py`）。延迟 import 允许
@@ -298,7 +298,11 @@ def layering_violations(
                         src,
                         dst,
                         f"L{LAYERS[src]} → L{LAYERS[dst]} 不是严格向下；"
-                        f"若这是新的环，先想清楚再登记 DEFERRED_CYCLES（现状只允许 {sorted(DEFERRED_CYCLES)[0]}）",
+                        + (
+                            f"若这是新的环，先想清楚再登记 DEFERRED_CYCLES（现已声明 {len(DEFERRED_CYCLES)} 个）"
+                            if DEFERRED_CYCLES
+                            else "本仓现在的形态是「下沉 + 参数注入」，`remote/` 内部零环"
+                        ),
                     )
                 )
     return top_bad, deferred_bad
