@@ -580,7 +580,7 @@ pull 模式下 `hub_server._get_payload()` 是 `self._bytes(p.read_bytes())`，*
 ---
 
 
-## §8 决策正文归档（搬自 `DECISIONS.md`，2026-09-23）
+## §9 决策正文归档（搬自 `DECISIONS.md`，2026-09-23）
 
 > 2026-09-23 把 `DECISIONS.md` 里这些条目的**正文全文**搬到这里（索引行与编号仍留在
 > `DECISIONS.md` —— 编号永不重排）。锚点 = `### §<旧编号>`。

@@ -721,7 +721,7 @@ stream 腿才可见），已在上一轮的流检查中记录，待单独处置�
 ---
 
 
-## §9 决策正文归档（搬自 `DECISIONS.md`，2026-09-23）
+## §13 决策正文归档（搬自 `DECISIONS.md`，2026-09-23）
 
 > 2026-09-23 把 `DECISIONS.md` 里这些条目的**正文全文**搬到这里（索引行与编号仍留在
 > `DECISIONS.md` —— 编号永不重排）。锚点 = `### §<旧编号>`。
@@ -974,6 +974,22 @@ KERNEL32/api-ms-win/ucrtbase/VCRUNTIME；有 llvm 时再断言 `llvm-nm -u` 空 
    并在 `tests/test_remote_iter_real_bun.py`（真 bun 哨兵）里把 zip 解到临时树、**以它为 cwd 跑 rollout**，
    断言 shard manifest 的 `feat == "native"`（探针验过这条断言是活的：改成期望 wasm 会红）。
    `bun run check` / `bun run build` / `nn-python-gate.sh` 绿。
+
+### §2026-09-23-goalnn-conv-single-source
+
+- **背景**：卷积内核占一步 rollout 的 95%（features ~2.4ms/次），原为**两份实现**：native 纯 C 4oc×4px
+  / wasm32 手写 `wasm_simd128` intrinsics 4oc×4px（§368），两者的一致性只靠 `native-parity` 逐字节对拍。
+- **备选与否决**：① **全局 8px 单一常量** —— 否：native 白吐 ~5pp（实测 iso 8px 31.8–33.0 vs 16px
+  35.1–37.4 GMAC/s；本机端到端 1.47× vs 预计 ~1.5×）；② **wasm 也设 16px** —— 否：wasm 只有
+  16×v128 = 64 float 寄存器容量，16px 需 20/16 ⇒ 溢写（实测 locals 373→455 ⇒ 局部变量爆表）；
+  ③ **保留两份实现、各自优化** —— 否：同一份算术两份代码 ⇒ 同步链漏编（wasm 漏编 = 静默回落 TS
+  = 41ms/forward > 帧预算，仓库记录过的最危险失败模式）。
+- **决定**：单源 `src/nn/conv/conv.c`（纯 C，无 intrinsics）编 native 与 wasm32 两目标，差异只有目标
+  条件常量 `CF_PW_PX`（wasm 8 / 其余 16）；它**只决定哪些像素进同一条向量寄存器，不改每元素的累加
+  次序** ⇒ 两侧输出逐位相同（`native-parity` 是它的守卫）。wasm 产物与 6 个 native 目标**同入** prebuilt
+  manifest，`--cross` / `--check-prebuilt` 一次抓全漏编；ABI 统一为单 blob + 4 参 `cf_student_features`。
+- **违反后果**：把 `CF_PW_PX` "简化"成单一常量 ⇒ native 白丢 ~5pp 或 wasm 溢写（两者都有实测数字）；
+  任何**改动累加次序**的"优化"都会让 `native-parity` 红——那是语义变更（新 era），不在本决策范围内。
 
 ---
 

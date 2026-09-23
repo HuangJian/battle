@@ -1036,7 +1036,7 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   no-op，CPU/CUDA 数值逐位不变）+ ref 预计算后一次 mark（防首步巨图）+ worker 日志打印
   device/world_size。**修正旧结论**：`plan/ppo-optimization.plan.md` §0.5「TPU 快 GPU 4.7× /
   44ms」是 ≤3 步微基准测量假象；44ms 只属于「每步有 mark」形态。
-—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/tpu-perf.md` §8「决策正文归档」· 锚 `### §2026-09-11-ppo-tpu-step-mark`
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/tpu-perf.md` §9「决策正文归档」· 锚 `### §2026-09-11-ppo-tpu-step-mark`
 
 ## §2026-09-11-remote-worker-hotswap-supervisor（2026-09-11，云端热更新事故修复：os.execve 打掉 notebook kernel，改监督器+子进程）
 
@@ -1152,7 +1152,7 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   M1 配置化）引入。
 - **污染范围**：e828331 → 1ee8955 之间所有课程的 **local 直跑 rollout 轨迹**（PPO 吃进
   3命1星环境的样本）。各课程 local 局占比实测（`tmp/<course>/dist-agent-meta.jsonl`）：
-—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/runtime-opt.md` §9「决策正文归档」· 锚 `### §2026-09-12-rollout-flag-bug`
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/runtime-opt.md` §13「决策正文归档」· 锚 `### §2026-09-12-rollout-flag-bug`
 
 ## §2026-09-13-reward-wdmg-dead-term（2026-09-13，wDmg 死项修复：击杀/承伤/死亡语义各归其位）
 
@@ -1677,7 +1677,7 @@ hub 一重启就**静默**恢复派发。这是「功能存在但不可达 + 重
   `rl/dispatch.py` 先起 local/reuse 采样线程，need 节点后台 POST 成功立刻 spawn（边分发边开采）。
   `weights_dist_start_at` / `weights_dist_done_at` 作诊断锚点；`dist_phase_sec` 仍为
   ping→权重分发完成（与采集重叠部分不再从 rollout 里抠掉）。
-—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/runtime-opt.md` §9「决策正文归档」· 锚 `### §2026-09-19-rollout-pipeline-metric`
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/runtime-opt.md` §13「决策正文归档」· 锚 `### §2026-09-19-rollout-pipeline-metric`
 
 ## §2026-09-19-volume-continuous-quota（2026-09-19，用户指令：退役离散补波 → 配额感知连续派发）
 
@@ -1707,7 +1707,7 @@ hub 一重启就**静默**恢复派发。这是「功能存在但不可达 + 重
   绝不返回 `{}` —— 否则 `_log_report`/events 读 `games` KeyError，2026-09-19 同日回归已修：
   combine 跳过空 dict、日志/events 用 `.get`）。历史 jsonl 的
   pure_collect/samples 累加行**作废对照**，请改看同轮 `rollout_sec`/`transitions_collected`。
-—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/runtime-opt.md` §9「决策正文归档」· 锚 `### §2026-09-19-volume-purecollect-stale-merge`
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/runtime-opt.md` §13「决策正文归档」· 锚 `### §2026-09-19-volume-purecollect-stale-merge`
 
 ## §2026-09-19-console-wallsec-undefined-guard（2026-09-19，bugfix：节点统计「机侧墙钟」显示 undefineds）
 
@@ -1774,7 +1774,7 @@ hub 一重启就**静默**恢复派发。这是「功能存在但不可达 + 重
   ≈300 行）。用户裁定同一口径——**Python 侧已有实战版，别再在 TS 重建**。新增
   `nn-training/eval_m1_once.py`（spec → `rl/batch_eval.BatchEvalRunner` → 逐局行），TS 只做
   「写 spec → 经 nn-py-safe.sh 调 Python → 读回逐局行 → scoreV7/报告/HTML/banner」。
-—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/runtime-opt.md` §9「决策正文归档」· 锚 `### §2026-09-19-m1-eval-python-dispatch`
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/runtime-opt.md` §13「决策正文归档」· 锚 `### §2026-09-19-m1-eval-python-dispatch`
 
 ## §2026-09-19-x20-snowball（2026-09-19，x20 后继腿：中盘激励，里程碑 bonus 单变量 + god-prefix 否决）
 
@@ -2081,7 +2081,7 @@ native 2.6ms per forward；每局 ~236 次调用 ⇒ 单局 sim 1338ms 里九成
 1. **单一咽喉 + 选择链**：`src/nn/conv-wasm.ts::runStudentFeatures` = `native → wasm → TS`，
    `infer.features` 只调它 ⇒ rollout 与 eval **同引擎**（T4 免费达成）。native 失败一律回落，
    调用方永不感知；TS 实际生效时 `noteFeaturesTs()` 记账（防「以为开了加速其实在 TS」）。
-—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/runtime-opt.md` §9「决策正文归档」· 锚 `### §2026-09-21-goalnn-native-features-engine`
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/runtime-opt.md` §13「决策正文归档」· 锚 `### §2026-09-21-goalnn-native-features-engine`
 
 ## §2026-09-21-goalnn-native-prebuilt-distribution（2026-09-21，落地 `plan/rollout-eval-opt.plan.md` §2.5/T2：native 库改「训练机交叉编译 + 随仓库分发」）
 
@@ -2093,7 +2093,7 @@ native 2.6ms per forward；每局 ~236 次调用 ⇒ 单局 sim 1338ms 里九成
 1. **训练机交叉编译 6 目标入库**：`src/nn/native/prebuilt/<platform>-<arch>/conv_feats_native.{dll,so,dylib}`
    + `manifest.json`（源码 sha + flags + cc 版本 + 每目标产物 sha，共 ~78 KB）。目标 = `win32/linux/darwin ×
    x64/arm64`。分发通道就是既有的 `git pull`（节点升级本来就是同一分支 ff-only）。
-—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/runtime-opt.md` §9「决策正文归档」· 锚 `### §2026-09-21-goalnn-native-prebuilt-distribution`
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/runtime-opt.md` §13「决策正文归档」· 锚 `### §2026-09-21-goalnn-native-prebuilt-distribution`
 
 ## §2026-09-21-goalnn-probe-negative-arm（2026-09-21，用户指令：负向臂——人类每局都给结论，直接用）
 
@@ -2133,7 +2133,7 @@ native 2.6ms per forward；每局 ~236 次调用 ⇒ 单局 sim 1338ms 里九成
 **落点**（单变量纯度：loss 侧加项，corpus 不动）：
 - `ppo/engine.ppo_update` 新三参（`demo_bank/demo_bc_coef/demo_per_mb`，缺省全关、数学逐字节不变）；
   每 minibatch 步 np RNG 抽样（ckpt 精确复现）、合法类掩码 CE 与 `train.bc._masked_ce` 同数学。
-—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/tpu-perf.md` §8「决策正文归档」· 锚 `### §2026-09-22-demo-mix-bc-aux`
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/tpu-perf.md` §9「决策正文归档」· 锚 `### §2026-09-22-demo-mix-bc-aux`
 
 ## §2026-09-22-course-error-isolation-loud（2026-09-22，课程配置错误不得弄崩共享 trainer；控制台响亮报错）
 
@@ -2190,11 +2190,9 @@ SystemExit（`--run-iters<0 需要课程声明 iters——没有终点就不叫�
 body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口**，不要在别处再加一个「临时并行」旁路。
 ② **让路预算有界，且上界要同时看两个**（`BULK_YIELD_BUDGET_SEC=5s`）：worker 侧
 `BODY_IDLE_TIMEOUT_SEC=45s`（分块读的空闲判停）与 hub 侧 `SEND_TIMEOUT_SEC=60s`（分片写超时）。
-—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/remote-transport.md` §32「决策正文归档」· 锚 `### §2026-09-22-goalnn-bulk-single-channel`
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/remote-transport.md` §32「决策正文归档」· 锚 `### 2026-09-22-goalnn-bulk-single-channel`
 
-## §2026-09-22-goalnn-race-retired-priority-only（2026-09-22，落地 `plan/transfer-scheduling.plan.md` P3：
-
-竞速广播**判定**退役，取活只剩「peek → priority → claim」一条路；push 腿同表 + 备份副本）
+## §2026-09-22-goalnn-race-retired-priority-only（2026-09-22，落地 `plan/transfer-scheduling.plan.md` P3：竞速广播**判定**退役，取活只剩「peek → priority → claim」一条路；push 腿同表 + 备份副本）
 **supersede §2026-09-17-goalnn-race-broadcast**（以及它在 `dashboard/src/**` 的落地物）。该条目的
 **机制**被本条目取代：不再有「最新 job 广播给每个 worker、先回先胜」的判定，也不再需要
 `race_decision` / `race_mode` / `--race` / `/admin/race` / `hub_scope`。**保留**的是它当年解决掉的
@@ -2204,9 +2202,7 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
 - **worker 登记表保留**（R2-2）——`WORKER_SEEN_WINDOW_SEC`（原 `RACE_WORKER_WINDOW_SEC`）窗口与
 —— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/remote-transport.md` §32「决策正文归档」· 锚 `### §2026-09-22-goalnn-race-retired-priority-only`
 
-## §2026-09-22-goalnn-async-result-upload（2026-09-22，plan/transfer-scheduling **P2.5**：
-
-结果回传异步化 —— 把 `out` 从关键路径上摘下来；阶段账新增 `overlap=` 字段）
+## §2026-09-22-goalnn-async-result-upload（2026-09-22，plan/transfer-scheduling **P2.5**：结果回传异步化 —— 把 `out` 从关键路径上摘下来；阶段账新增 `overlap=` 字段）
 **决定**：`post_result` 不再同步阻塞主循环。结果**入队即返回**（`remote/result_upload.py::ResultUploader`，
 有界队列 + 专用上传线程），主循环立刻去领下一份 job；`--result-upload {async,sync}` 缺省 `async`。
 配套三条硬契约：① **退出前必 drain**（`close()` = drain + join，包住整段主循环的 `try/finally`，
@@ -2214,60 +2210,19 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
 上传器已收尾 ⇒ 一律**退回同步**发出）；③ **失败响亮**（重试耗尽/确定性拒绝落带 jid 的 `★` 行 +
 收尾汇总计数）。记账侧：`out` 的秒数**照报**，阶段行只多一个 `overlap=` 说明它被重叠掉了 ——
 判据从「`in+out+ppo+other ≈ wall`」变成「`in+ppo+other ≈ wall`（关键路径）」。
-
-**背景（用户 2026-09-22 给的两组事实，组成完整推导）**：
-- **双课程单 worker 是最典型场景**，A 课 rollout 与 B 课 PPO **交错填空** ⇒ **算力已经满了**，
-  再快只能把传输从关键路径上摘掉（挤算力没有余地）。
-- 现场账 `rollout/in/ppo/out = 45/15/50/25 s`。云机侧只感知 `in/ppo/out`（rollout 在**本机**跑，
-  `rollout_src=local` 缺省，账在本机 `rollout_sec`）。**`out` 25s 是 40s 传输里更大的那一半，
-  而改造前它全程压在关键路径上**——预取（P2）只治 `in`，`out` 当时无人管。
-- 与 P2 是**正交**收益：命中让 `in`→0，`out` 不动；两者叠加才是「传输全部离开关键路径」。
-
-**为什么是异步上传而不是别的**：下一份 job 的字节**多半已在本地**（P2 软持有预取），上传只吃
-**链路**、不吃 CPU/GPU ⇒ 两者资源不相交，天然可叠。反过来「让 hub 接受更晚的结果」或
-「少回传内容」都不解决**关键路径占用**（前者改变语义，后者是 minimize-payload 的另一条线）。
-
-**否决项**：
-- 只把 `post_result` 挪到别的线程但**无人收尾** ⇒ 进程退出时队列里的结果随 daemon 蒸发，
-  现象是训练侧干等租约过期才「发现」——**静默**，正是本仓最贵的一类事故（3.5 小时静默那族）。
-- async 下**照旧在 finally 收账** ⇒ `out` 还没记进来就 flush，阶段账把回传读成 `0s`
-  （最该看见的一段凭空消失），且落定回调会再收一次 = 每 job 两行账。
-- 把 `out` 从阶段账里**删掉**（只报 overlap）⇒ 读成「回传不花钱」（链路照样跑满），
-  比错报更危险。
-- 队列**无界**（永不背压）⇒ 结果是大 dict（权重），链路长期卡住时无界涨内存；
-  正确方向是背压 + 超时退同步。
-- `--once` 不等落定就判成败 ⇒ 回传失败被静默当成成功（退出码 0），而 smoke 只判 returncode。
-
-**违反后果**：任何「让结果回传重新同步阻塞」的写法都会把 `out` 那 25s 重新压回关键路径
-（双课程交错下 = 每份 job 白等 25s，吞吐掉约两成）；任何「退出不收尾」的写法会丢结果且**不报警**；
-任何「revert 时只删 async 但留着 `could`-style 半状态」的写法会让记账与关键路径口径分叉。
-回退粒度 = `--result-upload sync`（逐字回旧行为，无需改代码）或按 commit revert。
-
-**落地物**：`remote/result_upload.py`（新：`ResultUploader` / `UploadTask` / `Outcome` /
-`RESULT_UPLOAD_MODES`）· `remote/worker.py`（`worker_loop` 接线 + `_result_settled` 落定回调 +
-job 级 `uploaded` 标志 + 主循环 `try/finally` 收尾 + `--result-upload`；`_wire_flush(wall_end=)` +
-`overlap=` 字段；`WIRE_MAX_JOBS` 4→8）· `tools/wire_report.py`（可选 `overlap=` 组 +
-`out_overlap_sec` + 渲染行；旧日志缺省当 0）· `tests/test_async_result_upload.py`（新，18 例）·
-`tests/test_wire_report.py`（async/sync 对照 + 旧日志兼容）。设计稿 `plan/transfer-scheduling.plan.md`
-§1.1 / §4 P2.5 / §9.5；进度 `docs/nn.progress.md §130`。
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/remote-transport.md` §32「决策正文归档」· 锚 `### §2026-09-22-goalnn-async-result-upload`
 
 ## §2026-09-23-goalnn-conv-single-source（2026-09-23，conv-optimize.plan.md §4.2 落地）
 
-- **背景**：卷积内核占一步 rollout 的 95%（features ~2.4ms/次），原为**两份实现**：native 纯 C 4oc×4px
-  / wasm32 手写 `wasm_simd128` intrinsics 4oc×4px（§368），两者的一致性只靠 `native-parity` 逐字节对拍。
-- **备选与否决**：① **全局 8px 单一常量** —— 否：native 白吐 ~5pp（实测 iso 8px 31.8–33.0 vs 16px
-  35.1–37.4 GMAC/s；本机端到端 1.47× vs 预计 ~1.5×）；② **wasm 也设 16px** —— 否：wasm 只有
-  16×v128 = 64 float 寄存器容量，16px 需 20/16 ⇒ 溢写（实测 locals 373→455 ⇒ 局部变量爆表）；
-  ③ **保留两份实现、各自优化** —— 否：同一份算术两份代码 ⇒ 同步链漏编（wasm 漏编 = 静默回落 TS
-  = 41ms/forward > 帧预算，仓库记录过的最危险失败模式）。
-- **决定**：单源 `src/nn/conv/conv.c`（纯 C，无 intrinsics）编 native 与 wasm32 两目标，差异只有目标
-  条件常量 `CF_PW_PX`（wasm 8 / 其余 16）；它**只决定哪些像素进同一条向量寄存器，不改每元素的累加
-  次序** ⇒ 两侧输出逐位相同（`native-parity` 是它的守卫）。wasm 产物与 6 个 native 目标**同入** prebuilt
-  manifest，`--cross` / `--check-prebuilt` 一次抓全漏编；ABI 统一为单 blob + 4 参 `cf_student_features`。
-- **违反后果**：把 `CF_PW_PX` "简化"成单一常量 ⇒ native 白丢 ~5pp 或 wasm 溢写（两者都有实测数字）；
-  任何**改动累加次序**的"优化"都会让 `native-parity` 红——那是语义变更（新 era），不在本决策范围内。
-§1.1 / §4 P2.5 / §9.5；进度 `docs/nn/remote-transport.md` §31。
-—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/remote-transport.md` §32「决策正文归档」· 锚 `### §2026-09-22-goalnn-async-result-upload`
+卷积内核**单源化**：`src/nn/conv/conv.c` 一份纯 C 编 native 与 wasm32 两目标，差异只有目标条件常量
+`CF_PW_PX`（wasm 8 / 其余 16 —— 只决定「哪些像素同处一条向量寄存器」，**不改每元素累加次序**）。
+**决定**：单源 + 统一 ABI（native 的单 blob + 4 参 `cf_student_features`）；wasm 产物与 6 个 native 目标
+同入 prebuilt manifest ⇒ `--cross` / `--check-prebuilt` 一次抓全「改了 conv.c 漏重编某个目标」。
+**被否决**：全局 8px 单一常量（native 白吐 ~5pp）· wasm 也设 16px（寄存器溢写，locals 373→455）·
+保留两份实现各自优化（同步链漏编 = 静默回落 TS = 41ms/forward > 帧预算）。
+**违反后果**：把 `CF_PW_PX`「简化」成单一常量 ⇒ native 白丢 ~5pp 或 wasm 溢写；任何改动**累加次序**的
+「优化」都会让 `native-parity` 红 —— 那是语义变更（新纪元），须走 AGENTS §6.3b 的三件套。
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/runtime-opt.md` §13「决策正文归档」· 锚 `### §2026-09-23-goalnn-conv-single-source`
 
 ## §2026-09-23-goalnn-agents-injection-budget（2026-09-23，用户指令：AGENTS.md 加预算门禁）
 
