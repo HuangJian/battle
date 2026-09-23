@@ -368,9 +368,18 @@ MANIFEST_OPTIONAL_DEFAULTS: dict[str, object] = {
 # 与 BC 同一条 kind 通道（照 MANIFEST_BC_* 的先例），mode 红线互斥。
 #: kind=iter 追加必填：TS 运行时 zip 的 sha256 + rollout 规格。
 MANIFEST_ITER_EXTRA: tuple[str, ...] = ("ts_code_sha256", "rollout")
+# ------------------------------------------------------------------ TS 导出器路径
+# `tools/sim/*.ts` 的真实文件名 —— 这是 **TS↔Python 的产物契约**，故与 wire 协议同住一层：
+# 长驻池按脚本名建（`remote/serve_pool.py`）、本机停等 cmd 由此拼（`rl/cmd.py`）、
+# 云机找 TS 根时按它探路（`remote/run_loop.py`）—— 各处抄一份字面量就等着谁先漂。
+#: 逐局 rollout 导出器（kind=iter / kind=run）。
+ROLLOUT_SCRIPT = "tools/sim/export-rl-rollout.ts"
+#: 离线评估导出器（云机评估；`rl/eval_local.py` 建 cmd 时也用它）。
+EVAL_SCRIPT = "tools/sim/export-eval-game.ts"
+
 #: TS 源码 zip 里允许出现的 exporter（argv[0] 白名单）。**只**放行 rollout 采集器：
 #: argv 来自 hub（可信方），但白名单让「协议字段被误当命令执行」不可能发生。
-ROLLOUT_SCRIPTS: tuple[str, ...] = ("tools/sim/export-rl-rollout.ts",)
+ROLLOUT_SCRIPTS: tuple[str, ...] = (ROLLOUT_SCRIPT,)
 #: rollout 规格里 argv 内嵌路径的允许前缀（job 目录内的相对路径，防越界）。
 #: 端口无关：worker 一律以 job 目录为 cwd 执行 argv。
 ITER_OUT_REL = "w"

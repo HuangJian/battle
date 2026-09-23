@@ -37,6 +37,7 @@ import time
 from pathlib import Path
 from typing import NamedTuple
 
+from common import protocol as _protocol
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 
 #: 与 `tools/sim/serve-loop.ts` 逐字对齐的三个标记（改一侧必须同步另一侧）。
@@ -47,10 +48,11 @@ SERVE_ERR = "__SERVE_ERR__"
 #: 支持 `--serve` 的导出器白名单 —— `tools/agent/sampler-agent.ts::PERSIST_SERVE_ENTRIES`
 #: 的节点侧镜像。**只按这份名单建池**：名单外的 argv（单测里的 python 桩、将来新加的导出器）
 #: 一律走一次性路径，池连起都不起 —— 否则「不支持 serve 的脚本」会安静吃掉一个就绪超时。
-#: rollout 导出器（kind=iter / kind=run 的逐局 rollout）。
-ROLLOUT_SCRIPT = "tools/sim/export-rl-rollout.ts"
-#: eval 导出器（云机离线评估；`rl/eval_local.py` 建 cmd 时也用这个常量）。
-EVAL_SCRIPT = "tools/sim/export-eval-game.ts"
+#: 导出器路径的**唯一来源**是 `common/protocol.py`（TS↔Python 产物契约）——此处只做本地名
+#: re-export：`serve_pool.EVAL_SCRIPT` / `serve_pool.ROLLOUT_SCRIPT` 的既有调用点与
+#: `tests/test_remote_serve_pool.py` 零改动。
+ROLLOUT_SCRIPT = _protocol.ROLLOUT_SCRIPT
+EVAL_SCRIPT = _protocol.EVAL_SCRIPT
 
 SERVE_CAPABLE_SCRIPTS: frozenset[str] = frozenset({ROLLOUT_SCRIPT, EVAL_SCRIPT})
 

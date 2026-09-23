@@ -20,6 +20,10 @@
 「`L2 remote → L1 纯逻辑 → L0 原语`」的**单一依赖方向**变成断言，并配一张**会腐烂就会红**的
 过渡白名单。门禁 **2247 → 2252**（+5 守卫用例）全绿。
 
+> **同日修订（见文末「同日修订」节）**：第 ④ 步的**注入式接口方案当天被否决**，改为
+> 「结构性编排层 + 导出器路径单源化」；白名单换成声明式快照，另补两条性质断言（真切线 /
+> 环已断）。**包级环已断**由 SCC 分析证实；门禁终值 **2255 passed / 3 skipped**。
+
 ### 循环的现场
 
 S1 结束时测到：`rl/` 有 **10 个文件** import `remote/*`，`remote/` 有 **8 个文件** import `rl/*`
@@ -60,6 +64,9 @@ L2  remote/ · 根入口（run_rl.py / run_bc.py …）                      （
   （poll/wait/verify_and_land）/ `remote.push_client`（hub-push 派发腿）/ `remote.serve_pool`
   （`rl/eval_local.py` 模块级 `EVAL_SCRIPT` 常量）——即 `plan/nn-training-refactor.md` §5.2
   第 ④ 步「改注入式接口」的待办。
+  > ⚠ **该口径已在同日修订中作废**：`EVAL_SCRIPT` 收进 `common/protocol.py` 后 `eval_local`
+  > 回纯逻辑，白名单改为声明式快照 `RL_ORCHESTRATION`（11 个模块），第 ④ 步的注入方案被否决。
+  > 以「同日修订」节为准。
 
 守卫做**两件**事，第二件才是关键：① 任何未列入白名单的新边即红；
 **② 白名单里某项已无引用 ⇒ 红**（提示删掉）。否则这类清单必然腐烂成「合法的历史遗留」——
@@ -94,6 +101,49 @@ L2  remote/ · 根入口（run_rl.py / run_bc.py …）                      （
 - 重新从 `rl/` 里 `import remote.*`（白名单外）⇒ `code.zip` 侧「纯逻辑」包被迫拖入传输依赖，
   云机/无 bun 环境首包即断。
 - 把 `protocol.py` / `game_watch.py` 搬回 `remote/` ⇒ 包循环重新出现，测试红（这正是守卫存在的理由）。
+
+### 同日修订（2026-09-23）：第 ④ 步不做注入，改「结构性编排层 + 导出器路径单源化」
+
+原计划第 ④ 步是「把 `rl → remote.{bundle,hub_client,push_client,serve_pool}` 抽成**注入式
+接口**」。看清楚依赖形状后**否决了注入**，理由都是量出来的：
+
+| 发现 | 含义 |
+|---|---|
+| `rl/loop_steps.py` / `rl/loop_guards.py` **外部使用者为零** | 它们不是「被复用的库」，而是 `rl/` 内部的**应用层**；给它们注入一个 client 对象只是把 import 换成字段，换不来解耦 |
+| `rl/loop_steps.py` **2328 行**，正是 S4 要拆的神模块 | 在它身上同时做「注入改造 + 拆分」= 两个高风险重构叠加，违反「每次只动一件事」 |
+| `rl/bc_loop.py` 的测试 monkeypatch 的是 `remote.hub_client._request` | 改注入要连测试接缝一起改，而**接缝本身就是被验证的契约** |
+| `rl/eval_local.py` 对 remote 的**唯一**依赖是 `EVAL_SCRIPT`（一个字符串） | 环的真正入口是「一个 TS 文件路径被抄在传输层」，不是一个需要注入的能力 |
+
+**于是先做了一件小得多、收益却大的事**：把 TS 导出器路径收进 `common/protocol.py`
+（`ROLLOUT_SCRIPT` / `EVAL_SCRIPT`，`ROLLOUT_SCRIPTS` 由前者派生）；`remote/serve_pool.py`
+只做 re-export，`rl/eval_local.py` 改从 `common.protocol` 取。**一条边消失 ⇒ 编排层从 17 个
+模块塌到 11 个**：`eval_local` / `eval_dispatch` / `gate_check` / `batch_eval` / `eval_a_once` /
+`eval_replays_once` 原来只是**经由 `eval_local` 间接**碰到传输层，环一断就回了纯逻辑。
+
+**验证环真的断了**（不是靠“看着像”）：跑全仓生产模块图的 **Tarjan 强连通分量**分析——
+现在零个 `rl` ↔ `remote` 环（剩下的三个环是 `rl.reward_builtin↔reward_library`（注册表惯用法）、
+`remote.run_loop↔remote.worker`（两个神模块，S4 目标）、以及 `rl.loop_*` 编排簇 + `run_rl`
+内部互相可达——都不跨包，是包内的下一批目标）。
+
+**守卫改造**：白名单（列举「允许 import 哪个 remote 子模块」）换成**声明式快照**
+`RL_ORCHESTRATION`（列举 rl 里哪些模块属于应用层），并把测试从 5 条加到 8 条：
+
+| 断言 | 性质 |
+|---|---|
+| 快照 vs 「rl 中可达 remote 的集合」**双向对账** | 多一个红、**少一个也红** —— 清单不会腐烂 |
+| 纯逻辑 rl 不得 import 编排 rl | **真切线**（否则「纯」名不副实） |
+| `remote` 不得（传递地）触及任何编排模块 | **环已断**的机械形式 |
+| `ppo/train/models/data/scripts` 不得 import 编排 rl | 采样器/训练器不被间接拖入传输层 |
+
+**⚠ 探针揪出的判据盲点（值得单独记）**：改完先跑反向探针，发现 `P2`（纯逻辑 `from rl import
+loop_steps`）与 `P3`（`remote` 里 `from rl import loop_steps`）**都没报错**——因为 `from <pkg>
+import <mod>` 在 AST 里只给裸包名，而首版的展开只给 `remote` 开了小灶、没给 `rl`/`models` 展开。
+后果：**测试全绿但守卫是瞎的**，而且是那种「下一轮重构时看着有护栏、实际没有」的瞎。
+修法：`_subpackages()` 按实存的包子目录统一展开，**不再逐个包开小灶**；四条探针（纯逻辑碰
+remote / 纯逻辑碰编排 / remote 碰编排 / 上层包碰 remote）全部命中后才算完。
+
+**仍未做**：把 11 个编排模块**物理搬出** `rl/`（成独立应用层包）——守卫已经用断言代替了这一步，
+搬家的收益主要是「import 路径说实话」；它触碰 ~30 个调用点与测试，值得独立一轮。
 
 ---
 

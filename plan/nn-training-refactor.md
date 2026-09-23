@@ -149,8 +149,8 @@ P0 ──→ P1 ──→ P3 ──→ P4
 
 **结论（已落地）**：`protocol`（92 处 / 65 文件）与 `game_watch`（14 处 / 12 文件）
 已下沉为 `common/` 成员；`ppo/` `train/` `models/` `data/` `scripts/` 对 `remote` 引用**归零**；
-新增 `tests/test_layering.py`（5 例）把单一直向钉住（含「白名单未用即红」）。
-`rl/` 遗留 **4 项过渡白名单**（§5.2 步骤 ④ 的待办）。
+新增 `tests/test_layering.py`（8 例）把单一直向钉住：编排层声明快照双向对账（多/少都红）、
+纯逻辑切线、环已断、上层包不得引编排。
 
 - 决策：`DECISIONS.md` §2026-09-23-goalnn-layering-common-sink
 - 全文与教训：`docs/nn/engineering.md` §22
@@ -185,16 +185,23 @@ L2  remote/                                                         （传输；
 | ① | 先写**分层守卫测试**（AST 扫模块级 import，断言不存在 `rl → remote` 边；现状红/白名单先行） | 没有守卫的分层重构 = 下一次提交就退回双向 |
 | ② | `remote/protocol.py` → `common/protocol.py`（**stdlib-only 纯编解码器**，无 torch、无网络）。全仓调用点改 import，删旧文件（**不留 shim**——shim 是「聪明」，本仓偏好直白） | 这是 `rl → remote` 的**主边**（5 文件） |
 | ③ | `remote/game_watch.py` 同样下沉（先核 stdlib-only） | `rl/queue_local` / `rl/eval_local` 的第二条边 |
-| ④ | `rl → remote.{hub_client,push_client,serve_pool}` 三条边：把「取活/回传/评估脚本名」抽成**注入式接口**（rl 侧收一个 callable / 协议对象），而不是让 rl 直接 import 传输实现 | 这三条是「策略层直接调传输层」，耦合最贵 |
+| ④ | ~~`rl → remote.{hub_client,push_client,serve_pool}` 三条边：把「取活/回传/评估脚本名」抽成**注入式接口**~~ —— **当天否决**（见下方「落地实测」） | 原判据：这三条是「策略层直接调传输层」；实际发现它们属于应用层，且正被 S4 拆 |
 | ⑤ | `remote → rl` 的 8 条边**保留并写进守卫白名单**（方向合法） | 单向即可，不必追求「谁也不依赖谁」 |
 
 **验收**：守卫测试绿 + `bun run check` 绿 + 门禁全绿；`rl/` 可在**不 import `remote` 任何模块**
 的前提下通过全部单测。
 
-**落地实测**：①②③已完成，⑤已由 `tests/test_layering.py` 承担（`rl/` 白名单 + 白名单不腐烂）。
-**④ 仍待办**——即 `tests/test_layering.py::RL_TO_REMOTE_WHITELIST` 里的 4 项
-（`remote.bundle` / `hub_client` / `push_client` / `serve_pool`）；做完 ④ 则把它们从白名单删掉
-（**不删即红**，这是守卫设计的自清机制）。
+**落地实测**：①②③已完成；⑤ 改由 `tests/test_layering.py` 以「纯逻辑不得 import 编排」+「remote
+不得传递触及编排（环已断）」两条性质断言承担。
+
+**④（注入式接口）当天被否决**（理由与替代方案 → `docs/nn/engineering.md` §22「同日修订」）：
+`loop_steps`/`loop_guards` 外部使用者为零且正要被 S4 拆、`bc_loop` 的测试直接 monkeypatch
+`remote.hub_client._request`。改做「导出器路径单源化（`EVAL_SCRIPT` 进 `common/protocol.py`）」
+⇒ `rl/eval_local` 回纯逻辑，**编排层 17 → 11 模块**；白名单→声明式快照 `RL_ORCHESTRATION`（双向对账）。
+
+**剩余（下一轮）**：把 11 个编排模块**物理搬出** `rl/`（成独立应用层包）—— 守卫已用断言代替
+这一步，搬家的收益主要是「import 路径说实话」；另有两个包内环：`rl.loop_*` 编排簇（含 `run_rl`）
+与 `remote.run_loop ↔ remote.worker`（后者随 S4 拆）。
 
 </details>
 

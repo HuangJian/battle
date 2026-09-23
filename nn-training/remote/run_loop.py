@@ -51,6 +51,7 @@ from typing import Any
 from common.logutil import log_line
 from common.protocol import (
     BLOB_DEMO,
+    EVAL_SCRIPT,
     PAYLOAD_NAME,
     PLAN_NAME,
     ProtocolError,
@@ -456,7 +457,7 @@ def _ts_tree_root(cache_dir: Path | None, manifest: dict) -> Path | None:
     """TS 运行时树的根（评估器的 `cwd`）：`<cache>/<ts_code_sha256>`，缺 sha 时退回 cache 本体。
 
     内容寻址的 cache 布局是 `<cache>/<sha>/{tools/sim,src,...}`（`ensure_ts_cache_layout`）；
-    云机评估最终要的是「有 `tools/sim/export-eval-game.ts` 的那个目录」，所以宁可在这里
+    云机评估最终要的是「有 `EVAL_SCRIPT`（`common/protocol.py`）的那个目录」，所以宁可在这里
     多探一层，也不把「相对路径 + bun 在 PATH」这条前提留在调用点靠猜。
     """
     if cache_dir is None:
@@ -465,7 +466,7 @@ def _ts_tree_root(cache_dir: Path | None, manifest: dict) -> Path | None:
     sha = str(manifest.get("ts_code_sha256", "") or "")
     cand = cache / sha if sha else None
     for p in (cand, cache):
-        if p is not None and (Path(p) / "tools" / "sim" / "export-eval-game.ts").exists():
+        if p is not None and (Path(p) / EVAL_SCRIPT).exists():
             return Path(p)
     return cand if (cand is not None and Path(cand).is_dir()) else None
 

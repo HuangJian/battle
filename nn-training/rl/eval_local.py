@@ -19,8 +19,8 @@ from typing import Any
 # 单局看门狗口径：**一律通过模块属性读**（`game_watch.X`）——import 会把值抄成第二份绑定，
 # 测试 patch 了 game_watch 那份、调用点还在读旧绑定就是静默的错口径。
 from common import game_watch
+from common.protocol import EVAL_SCRIPT as _EVAL_SCRIPT
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
-from remote.serve_pool import EVAL_SCRIPT as _EVAL_SCRIPT
 from rl.log import log
 
 REPO_ROOT = Path(__file__).resolve().parents[2]  # 仓库根 battle2（rl/ 上溯 3 层，修正 2026-09-03）
@@ -599,7 +599,7 @@ def run_local_eval_game(
     out_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
         bun,
-        # 单一来源（`remote/serve_pool.EVAL_SCRIPT`）：池按脚本名建，两侧写两份就等着谁先漂
+        # 单一来源（`common/protocol.EVAL_SCRIPT`）：池按脚本名建，两侧写两份就等着谁先漂
         _EVAL_SCRIPT,
         "--weights",
         weights_snapshot,

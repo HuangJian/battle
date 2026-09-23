@@ -288,4 +288,4 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | §144 | docs/nn/runtime-opt.md §14 | arm64 实机计时 + 逐项归因：无负项、零回落，但 x64 的 +44% 不迁移（2026-09-23） |
 | §145 | docs/nn/runtime-opt.md §15 | arm64 逐阶段归因：6.4 ms 花在哪 + 为什么四项不迁移（FMA 上限实验）（2026-09-23） |
 | §146 | docs/nn/engineering.md §21 | `common/` 共享原语层：12 组同名实现收敛 + 13 处 `text=True` 编码隐患（2026-09-23） |
-| §147 | docs/nn/engineering.md §22 | 断开 `rl` ↔ `remote` 包循环：纯逻辑叶子下沉 L0 + 分层守卫（2026-09-23） |
+| §147 | docs/nn/engineering.md §22 | 断开 `rl` ↔ `remote` 包循环：纯逻辑叶子下沉 L0 + 导出器路径单源化 + 分层守卫（SCC 证实零跨包环）（2026-09-23） |

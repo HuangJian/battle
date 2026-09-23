@@ -35,8 +35,9 @@ nn-training/
 │   ├── fs.py                #    原子写 / JSONL 追加 / tar 安全解包
 │   ├── text.py              #    exc_tail（异常尾部同口径截取）
 │   ├── logutil.py           #    default_log（统一带时间戳 log 工厂）
-│   ├── protocol.py          #    分布式采样器协议（原 remote/protocol.py，DECISIONS §2026-09-23）
+│   ├── protocol.py          #    分布式采样器协议 + TS 导出器路径唯一来源（原 remote/protocol.py，DECISIONS §2026-09-23）
 │   └── game_watch.py        #    对局转播纯逻辑（原 remote/game_watch.py，同上）
+│                             #   层契约 + 依赖方向由 tests/test_layering.py 断言
 │
 ├── models/                  # 【模型包】神经网络定义 + 权重导入导出
 │   ├── core.py              #    NNPolicy：Conv(14→32→48→64) + GAP + FC + 双头（BC 基座）

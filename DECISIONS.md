@@ -2268,6 +2268,15 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
   → L2 remote/·根入口`，允许 `L2→L1→L0`、反向禁止，由 `tests/test_layering.py` 断言。`rl/` 保留 4 项
   **过渡白名单**（`remote.bundle` / `hub_client` / `push_client` / `serve_pool` = plan §5.2 第 ④ 步待办）；
   白名单**未使用即红**，防其腐烂成「合法的历史遗留」。
-- **违反后果**：`rl/` 白名单外再 `import remote.*` ⇒ 纯逻辑包被迫拖入传输依赖，云机无 bun 首包即断；
+- **违反后果**：`rl/` 编排层外再 `import remote.*` ⇒ 纯逻辑包被迫拖入传输依赖，云机无 bun 首包即断；
   把两模块搬回 `remote/` ⇒ 包循环重现，守卫红。
+- **同日修订（2026-09-23，原计划第 ④ 步被否决）**：原定把 `rl → remote.{bundle,hub_client,
+  push_client,serve_pool}` 抽成**注入式接口**；实测后否决（`loop_steps` 2328 行且外部用户为零、
+  正要被 S4 拆；`bc_loop` 的测试直接 monkeypatch `remote.hub_client._request`，接缝本身是契约）。
+  改做两件更小的事：① 把 TS 导出器路径收进 `common/protocol.py`（`ROLLOUT_SCRIPT` / `EVAL_SCRIPT`），
+  `serve_pool` 只 re-export ⇒ `rl/eval_local` 回纯逻辑，**编排层 17 → 11 个模块**；② 白名单换成
+  **声明式快照 `RL_ORCHESTRATION`** + 两条性质断言（纯逻辑不得 import 编排；`remote` 不得传递
+  触及编排 = 环已断）。环的断开由全仓 **SCC 分析**证实（零个跨包环）。门禁 **2255 passed / 3 skipped**。
+  另：反向探针揪出判据盲点——`from <pkg> import <mod>` 只给 `remote` 展开、没给 `rl` 展开 ⇒
+  两条断言静默失效（全绿但守卫是瞎的）；改为按实存子包统一展开。
 —— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/engineering.md` §22「断开 rl ↔ remote 包循环」
