@@ -11,8 +11,12 @@
 3. **转发同一对象** + **状态一份**（`worker._POLL_WARN_AT` 与 `http._POLL_WARN_AT` 同一个 dict）；
 4. **注入点分档**（这一步最容易静默坏）：`_get_with_retry` / `_read_body` 在 `http` 命名空间
    解析 `_request` / `_reroll_decision` / `BODY_PROGRESS_MIN_SEC` ⇒ 必须 patch `remote.http`；
-   而直调 `_request` 的**宿主**函数（`post_result` 等）仍解析在 `worker` 命名空间 ⇒ patch
-   `remote.worker` 照旧有效。两个方向各一条断言，防止「patch 打偏而测试全绿」。
+   而直调 `_request` 的**作业面**（`post_result` 等）在**各自定义模块**的命名空间解析 ⇒ patch
+   那个模块。两个方向各一条断言，防止「patch 打偏而测试全绿」。
+
+⚠ 2026-09-23 第八刀之后：「直调 `_request` 的作业面」已搬到 `remote/job_lifecycle.py` ⇒
+档位二的注入点随它改指 `remote.job_lifecycle`；`remote.worker._request` 仍是**转发名**
+（`tests/test_loopback_http_no_proxy.py` 直接 import 它），但 `worker.py` 里**已无调用点**。
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import remote.http as http_mod
+import remote.job_lifecycle as jl_mod
 import remote.worker as worker_mod
 
 HTTP_FILE = ROOT / "remote" / "http.py"
@@ -89,13 +94,57 @@ def test_http_does_not_import_worker() -> None:
     assert "rl" not in {m.split(".")[0] for m in imported}, "http 是 L2 传输层，不得碰 rl"
 
 
+#: 转发名会**停在旧值**的宿主状态（`global` 重绑）：`_get_opener()` 里 `global _opener` 懒建，
+#: 于是 `worker._opener` 永远是 import 那一刻的快照。对它们只能断言「名字在」，
+#: 不能断言 `is` —— 那会随**文件顺序**红绿翻转（见下面那条语义用例）。
+REBOUND_NAMES = {"_opener"}
+
+
 def test_worker_forwards_every_moved_name() -> None:
-    """`worker` 的命名空间里每个搬走的名字都在，且函数/常量是**同一个对象**。"""
-    for name in MOVED_NAMES:
+    """`worker` 的命名空间里每个搬走的名字都在，且**函数/常量**是同一个对象。
+
+    `REBOUND_NAMES`（重绑式标量）只查「名字还在」：它们的注入点是所有者模块（`remote.http`），
+    转发名只是兼容壳。
+    """
+    for name in sorted(MOVED_NAMES - REBOUND_NAMES):
         assert hasattr(worker_mod, name), f"remote.worker 丢了 {name}"
         assert getattr(worker_mod, name) is getattr(http_mod, name), (
             f"remote.worker.{name} 不是 remote.http.{name}（转发成了副本）"
         )
+    for name in sorted(REBOUND_NAMES):
+        assert hasattr(worker_mod, name), f"remote.worker 丢了转发名 {name}"
+
+
+def test_opener_forwarding_name_is_a_snapshot_by_design_not_an_identity() -> None:
+    """★ `_opener` 是**重绑式**宿主状态（`http._get_opener` 里 `global _opener` 懒建）⇒
+    转发名 `worker._opener` 会停在 import 时的值。
+
+    这条原先写成了 `is` 恒等断言，于是红绿取决于**文件顺序**（先跑的测试有没有触发懒建）：
+    `pytest tests/test_priority_schedule.py tests/test_http_split.py` 红、单跑本文件绿
+    ——于 2026-09-23 第八刀时实测到（HEAD 上同样可复现，与本刀无关）。
+    现在钉住的是与顺序无关的**语义**：重绑只发生在 `http`（唯一所有者），`worker` 侧只有转发
+    ⇒ `_opener` 的注入点只能是 `remote.http`（`remote.worker._opener` 改了不改变任何行为）。
+    """
+    get_opener = next(
+        node
+        for node in _tree(HTTP_FILE).body
+        if isinstance(node, ast.FunctionDef) and node.name == "_get_opener"
+    )
+    rebinds = [
+        node.names
+        for node in ast.walk(get_opener)
+        if isinstance(node, ast.Global) and "_opener" in node.names
+    ]
+    assert rebinds, "`_get_opener` 不再重绑 `_opener` ⇒ 懒建语义变了，注入点需重判"
+    worker_globals = [
+        node.names
+        for node in ast.walk(_tree(WORKER_FILE))
+        if isinstance(node, ast.Global) and "_opener" in node.names
+    ]
+    assert worker_globals == [], f"worker.py 里重绑了 `_opener`（所有者只能是 http）：{worker_globals}"
+    assert "_opener as _opener" in WORKER_FILE.read_text(encoding="utf-8"), (
+        "worker 侧 `_opener` 不再是转发名（有测试/宿主 import 它）"
+    )
 
 
 def test_poll_warn_state_stays_a_single_account_across_both_entry_points() -> None:
@@ -139,18 +188,37 @@ def test_request_seam_for_the_moved_callers_is_the_http_module(
     assert out == b"payload-bytes"
 
 
-def test_request_seam_for_host_callers_is_still_the_worker_module(monkeypatch) -> None:
-    """档位二：直调 `_request` 的**宿主**函数（`post_result`）解析在 **worker** 命名空间。
+def test_request_seam_for_the_job_face_is_the_job_lifecycle_module(monkeypatch) -> None:
+    """档位二：直调 `_request` 的**作业面**（`post_result`）解析在**定义它的模块**命名空间。
 
-    所以「patch `remote.worker._request`，同时把 `remote.http._request` 换成炸弹」
-    必须仍然成功——这证明我们只迁移了该迁移的那一部分 seam。
+    S4 第五步时这一档是 `worker`；第八刀把作业面搬到 `remote/job_lifecycle.py` 后，注入点
+    随它改指该模块。所以「patch `remote.job_lifecycle._request`，同时把 `remote.http._request`
+    换成炸弹」必须仍然成功。
     """
     monkeypatch.setattr(
         http_mod, "_request", lambda *a, **k: (_ for _ in ()).throw(AssertionError("打偏"))
     )
-    monkeypatch.setattr(worker_mod, "_request", lambda *a, **k: (200, b"{}"))
-    rc = worker_mod.post_result("http://hub", "t", "jid1", {"job_id": "jid1"}, log=lambda _m: None)
+    monkeypatch.setattr(jl_mod, "_request", lambda *a, **k: (200, b"{}"))
+    rc = jl_mod.post_result("http://hub", "t", "jid1", {"job_id": "jid1"}, log=lambda _m: None)
     assert rc == 200
+
+
+def test_worker_module_has_no_request_call_site_any_more() -> None:
+    """★ 警报（第八刀）：`worker.py` 里已**没有** `_request` 的调用点。
+
+    它仍转发 `_request`（`tests/test_loopback_http_no_proxy.py` 直接 import 这个名字），
+    但「patch `remote.worker._request` 期望某个函数行为改变」从此是**空操作**——写这类测试
+    的人应该去 patch `remote.job_lifecycle` / `remote.http`（看调用点在哪）。
+    """
+    src = WORKER_FILE.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    calls = {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "_request" not in calls, "worker.py 里又出现了 `_request` 调用点——seam 分档需重判"
+    assert hasattr(worker_mod, "_request"), "`_request` 的转发名不该消失（有测试 import 它）"
 
 
 def test_body_progress_threshold_is_read_from_the_http_module(monkeypatch) -> None:
@@ -166,7 +234,7 @@ def test_body_progress_threshold_is_read_from_the_http_module(monkeypatch) -> No
             return self._chunks.pop(0) if self._chunks else b""
 
     seen: list[tuple[int, int, float]] = []
-    monkeypatch.setattr(worker_mod, "BODY_PROGRESS_MIN_SEC", 1e9)  # 打偏：不该生效
+    monkeypatch.setattr(worker_mod, "BODY_PROGRESS_MIN_SEC", 1e9)  # 打偏：不该生效（转发名）
     monkeypatch.setattr(http_mod, "BODY_PROGRESS_MIN_SEC", 0.0)
     out = worker_mod._read_body(
         _Resp(), idle_timeout=45.0, total_timeout=None, progress=lambda g, t, e: seen.append((g, t, e))

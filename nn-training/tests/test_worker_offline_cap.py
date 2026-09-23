@@ -20,6 +20,9 @@ from pathlib import Path
 
 import pytest
 
+# 第八刀起，本簇住在 `remote/job_lifecycle.py`：**簇内互调**与直调 `_request` / `_wire_add`
+# 的调用点解析在该模块 ⇒ 那类 patch 目标必须是 `JL`（宿主调用的仍 patch `W`）。
+import remote.job_lifecycle as JL
 import remote.worker as W
 from common.protocol import (
     AUTH_HEADER,
@@ -46,7 +49,7 @@ def test_peek_sends_capability_header_when_offline(monkeypatch: pytest.MonkeyPat
         seen.append({"path": path, "headers": dict(headers or {})})
         return 200, b'{"jobs": [], "halt": false}'
 
-    monkeypatch.setattr(W, "_request", _fake_request)
+    monkeypatch.setattr(JL, "_request", _fake_request)
     assert W.peek_jobs("http://hub", "t", worker_id="host:1", offline_ok=True) == ([], False)
     assert seen[0]["headers"][OFFLINE_CAP_HEADER] == OFFLINE_CAP_VALUE
     assert seen[0]["headers"][WORKER_ID_HEADER] == "host:1"
@@ -60,7 +63,7 @@ def test_peek_sends_no_capability_header_by_default(monkeypatch: pytest.MonkeyPa
         seen.append(dict(headers or {}))
         return 200, b'{"jobs": [], "halt": false}'
 
-    monkeypatch.setattr(W, "_request", _fake_request)
+    monkeypatch.setattr(JL, "_request", _fake_request)
     assert W.peek_jobs("http://hub", "t") == ([], False)
     assert OFFLINE_CAP_HEADER not in seen[0]
 

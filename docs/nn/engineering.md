@@ -24,8 +24,10 @@ hub 推送、节点 failover、kickstart 系数、远端可重试异常集合）
 admin 控制面，并为第四步（`worker.py`）先铺好**模块级状态契约**安全网（+13 例），第四步把
 wire 簇搬进 `remote/wire.py`（+8 例）、HTTP 传输核心搬进 `remote/http.py`（keystone，+7 例）、
 作业工作区/TAR/git 物化搬进 `remote/job_fs.py`（+6 例）、BC 作业搬进 `remote/bc_job.py`（+6 例，
-底座拆完后业务簇可整块搬）、下载簇搬进 `remote/download.py`（+7 例）——终值
-**2321 passed / 3 skipped**。`remote/worker.py` 3450 → **2348**。
+底座拆完后业务簇可整块搬）、下载簇搬进 `remote/download.py`（+7 例）、作业取活/生命周期/
+回传面搬进 `remote/job_lifecycle.py`（+8 例，seam 最密的一刀）——终值
+**2331 passed / 3 skipped**。`remote/worker.py` 3450 → **1805**（`wire` 289 / `http` 366 /
+`job_fs` 184 / `bc_job` 422 / `download` 313 / `job_lifecycle` 682）。
 
 ### 先量结构，再选刀口（拆前侦察，都是实测）
 
@@ -385,13 +387,58 @@ bulk_sched}`（全向下；`BODY_*` 从 `remote.http` 取单一定义）——�
 反向探针：往 `worker.py` 追加 `def download_payload` ⇒ 定义唯一被点名；往 `remote/` 放第三份
 `_progress_logger` ⇒ 孪生计数被点名。门禁 **2314 → 2321 passed / 3 skipped**；mypy **377** 源文件绿。
 
+### 第八刀（同日）：作业取活 / 生命周期 / 回传面 → `remote/job_lifecycle.py`
+
+刀口 = **一整块连续 543 行 / 17 个顶层名**：`peek_jobs` · `request_priority` · `claim_job` ·
+`_priority_rank` · `acquire_job` · `job_started` · `job_ready` · `abandon_job` · `job_status` ·
+`start_cancel_watcher` · `post_result` · `release_job` · `worker_tag` · `_failure_detail` ·
+`job_body_error` · `report_job_failure` · `heartbeat`。`worker.py` **2348 → 1805**；新模块 682 行。
+依赖 `job_lifecycle → {common.protocol, common.text, http, wire, bulk_sched}`（全向下，零 `worker`）。
+
+**这是 S4 里 seam 最密的一刀**（全仓对这簇有 60+ 处 `monkeypatch.setattr`）。切前先把 seam
+**逐点定档**成一张表，判据只有一条——**看调用点解析在哪个命名空间**：
+
+| 调用点 | 解析在 | patch 目标 | 结果 |
+|---|---|---|---|
+| 宿主（`worker_loop` / `run_job` / `_prefetch_fill`）→ `acquire_job` / `job_ready` / … | `remote.worker` | **`worker`** | 不动 |
+| 簇内互调：`acquire_job` → `peek_jobs` / `request_priority` / `claim_job` / `_priority_rank`；`start_cancel_watcher` → `job_status`；`report_job_failure` → `worker_tag` | **`remote.job_lifecycle`** | **`job_lifecycle`** | 迁 14 处 |
+| 本簇直调 `_request` / `_wire_add` / `_bulk_pace` / `_sched_headers` / `_warn_non_200` | **`remote.job_lifecycle`** | **`job_lifecycle`** | 迁 8 处 |
+
+**★ 本刀新增的判据：「引用即接缝」**。审计初版只把「裸名字**调用**」当成调用点，于是把
+`worker_loop` 里的 `ResultUploader(upload=post_result, …)` 判成「worker 里已无 `post_result`
+调用点 ⇒ 那 9 处 `patch remote.worker.post_result` 全失效」。**错了**：它是把 `post_result` 当
+**值**读一次 `worker` 的模块全局，patch 照旧生效。审计脚本改成看 AST 的 **`Load`**（任何引用）
+之后，全仓真正的空操作注入点只剩 **1 处**——而且正是 `test_http_split.py` 里那条**故意**的
+反例（「patch `worker.BODY_PROGRESS_MIN_SEC` 是打偏的」）。这条判据已写进新守卫。
+
+**★ 顺带修掉一条既存的顺序敏感守卫**（本刀实测到，HEAD 上同样可复现）：
+`tests/test_http_split.py::test_worker_forwards_every_moved_name` 原来对**所有**搬走的名字断言
+`is` 恒等，包括 `_opener`——而 `_opener` 是 `http._get_opener` 里 `global _opener` **重绑**的
+懒建单例，`worker._opener` 注定停在 import 时的快照。于是红绿取决于**文件顺序**：
+`pytest tests/test_priority_schedule.py tests/test_http_split.py` 红、单跑该文件绿（全量 xdist 下
+恰好绿，所以此前没被发现）。改为「重绑式标量只查名字在」+ 一条**与顺序无关的语义断言**
+（重绑只发生在 `http`、`worker` 侧无 `global`）—— 语义用例同时把「`_opener` 的注入点只能是
+`remote.http`」钉住。
+
+新守卫 `tests/test_job_lifecycle_split.py`（**8 例**）：定义唯一 · 不得反向 import · 转发同一
+对象 · 顶层零可变状态与零 `global` · **档位二功能性**（`acquire_job` 只 patch `job_lifecycle`
+时成功、worker 侧全放炸弹）· **档位一功能性**（`_prefetch_fill` 必须走 `worker.peek_jobs`，
+有界线程 + 记数）· `_request` 一族在 worker 已无调用点（警报）· 「引用即接缝」保住
+`post_result` 的 9 处 patch。反向探针四处全部命中（重复定义 / 反向 import / worker 里冒出
+`_request` 调用点 / 顶层可变容器）；复原回绿。门禁 **2321 → 2331 passed / 3 skipped**；
+mypy **380** 源文件绿；根 `bun run check` 2120 pass / 0 fail。
+
 ### 未做完（S4 余下）
 
-`remote/worker.py`（**2348 行**；余下主要是 `run_job` 743 / `worker_loop` 364 / `main` 与作业
-生命周期簇）→ `hub_server` 其余路由组
+`remote/worker.py`（**1805 行**；余下是宿主 `run_job` / `worker_loop` / `main` 与 `_prefetch_fill`
+等——**已无可整块搬的叶子簇**，再拆就是拆宿主）→ `hub_server` 其余路由组
 （`_get_*` 12 / `_post_*` 11 → 通用助手）→ 最后两个千行状态类（`_JobStore` / `_HubQueue`：
 拆 = 拆状态）。设计见 `plan/nn-training-refactor.md` §5.3。`TrainingSteps` 本体还剩 952 行 /
 20 方法（切法是「按一条真实调用链切」，不是按行数等分）。
+
+**挂着两项清理**（都已在计划里登记）：`remote/job_fs._ensure_commit` 是既存死代码（只搬不删）；
+`remote/` 内部还缺一条**无环守卫**（现在每个子模块只在自己的守卫里声明「不得 import
+`remote.worker`」，没有全局的 DAG 断言）。
 
 ---
 

@@ -33,6 +33,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# 第八刀起，本簇住在 `remote/job_lifecycle.py`：**簇内互调**与直调 `_request` / `_wire_add`
+# 的调用点解析在该模块 ⇒ 那类 patch 目标必须是 `JL`（宿主调用的仍 patch `W`）。
+import remote.job_lifecycle as JL
 import remote.worker as W
 from common.protocol import (
     CLAIM_MODE_BACKUP,
@@ -434,7 +437,7 @@ def test_claim_unknown_job_409(tmp_path: Path) -> None:
 
 
 def _patch_request(monkeypatch: pytest.MonkeyPatch, status: int, body: bytes = b"{}") -> None:
-    monkeypatch.setattr(W, "_request", lambda *a, **k: (status, body), raising=True)
+    monkeypatch.setattr(JL, "_request", lambda *a, **k: (status, body), raising=True)
 
 
 def test_post_result_403_backup_is_discard_not_failure(
@@ -446,7 +449,7 @@ def test_post_result_403_backup_is_discard_not_failure(
     （「一个赢家把输家炸成事故」，hub 侧注释里已写过一次）。
     """
     _patch_request(monkeypatch, 403, b'{"error":"lease mismatch"}')
-    monkeypatch.setattr(W, "_wire_add", lambda *a, **k: None, raising=True)
+    monkeypatch.setattr(JL, "_wire_add", lambda *a, **k: None, raising=True)
     result = {"job_id": JID, "weights_json": "", "opt_tar_b64": ""}
     assert W.post_result("http://hub", "tok", JID, result, mode=CLAIM_MODE_BACKUP) == 403
     with pytest.raises(ProtocolError):
@@ -458,7 +461,7 @@ def test_post_result_409_is_success_for_both_modes(
 ) -> None:
     """409 = 别人已落盘（幂等成功）——两种模式都按丢弃，绝不报失败。"""
     _patch_request(monkeypatch, 409, b'{"error":"already stored"}')
-    monkeypatch.setattr(W, "_wire_add", lambda *a, **k: None, raising=True)
+    monkeypatch.setattr(JL, "_wire_add", lambda *a, **k: None, raising=True)
     result = {"job_id": JID, "weights_json": "", "opt_tar_b64": ""}
     assert W.post_result("http://hub", "tok", JID, result) == 409
     assert W.post_result("http://hub", "tok", JID, result, mode=CLAIM_MODE_BACKUP) == 409
@@ -474,7 +477,7 @@ def test_job_cancelled_is_not_a_failure_class() -> None:
 def test_acquire_job_prefers_highest_and_skips_none(monkeypatch: pytest.MonkeyPatch) -> None:
     """取活三件套：`none`（已 landed）必弃、demoted 换下家、选到最高档的就 claim。"""
     monkeypatch.setattr(
-        W,
+        JL,
         "peek_jobs",
         lambda *a, **k: (
             [
@@ -487,7 +490,7 @@ def test_acquire_job_prefers_highest_and_skips_none(monkeypatch: pytest.MonkeyPa
         raising=True,
     )
     monkeypatch.setattr(
-        W,
+        JL,
         "request_priority",
         lambda *a, **k: {
             "epoch": 7,
@@ -504,7 +507,7 @@ def test_acquire_job_prefers_highest_and_skips_none(monkeypatch: pytest.MonkeyPa
             return {"job_id": jid, "manifest": {"job_id": jid}, "status": "ok", "lease_token": "t"}
         return None
 
-    monkeypatch.setattr(W, "claim_job", _claim, raising=True)
+    monkeypatch.setattr(JL, "claim_job", _claim, raising=True)
     logs: list[str] = []
     got = W.acquire_job("http://hub", "tok", worker_id="A", log=logs.append)
     assert got is not None and got["job_id"] == "free1"
@@ -515,13 +518,13 @@ def test_acquire_job_prefers_highest_and_skips_none(monkeypatch: pytest.MonkeyPa
 def test_acquire_job_demoted_moves_to_next_candidate(monkeypatch: pytest.MonkeyPatch) -> None:
     """claim 回 demoted ⇒ 试下一份（§2.3 ④：还有别的活就换）。"""
     monkeypatch.setattr(
-        W,
+        JL,
         "peek_jobs",
         lambda *a, **k: ([{"job_id": "a1", "course": "cA"}, {"job_id": "b1", "course": "cB"}], False),
         raising=True,
     )
     monkeypatch.setattr(
-        W,
+        JL,
         "request_priority",
         lambda *a, **k: {"epoch": 1, "priorities": {}, "reasons": {}},
         raising=True,
@@ -532,18 +535,18 @@ def test_acquire_job_demoted_moves_to_next_candidate(monkeypatch: pytest.MonkeyP
             return {"job_id": jid, "status": "demoted", "priority": PRIORITY_LOW}
         return {"job_id": jid, "manifest": {"job_id": jid}, "status": "ok", "lease_token": "t"}
 
-    monkeypatch.setattr(W, "claim_job", _claim, raising=True)
+    monkeypatch.setattr(JL, "claim_job", _claim, raising=True)
     got = W.acquire_job("http://hub", "tok", worker_id="A", log=lambda m: None)
     assert got is not None and got["job_id"] == "b1"
 
 
 def test_acquire_job_halt_and_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
     """停机达令上浮；hub 不可达（peek 返回 None）⇒ None（外层按「无 job」退避重试）。"""
-    monkeypatch.setattr(W, "peek_jobs", lambda *a, **k: ([], True), raising=True)
+    monkeypatch.setattr(JL, "peek_jobs", lambda *a, **k: ([], True), raising=True)
     assert W.acquire_job("http://hub", "tok", worker_id="A", log=lambda m: None) == {"halt": True}
-    monkeypatch.setattr(W, "peek_jobs", lambda *a, **k: None, raising=True)
+    monkeypatch.setattr(JL, "peek_jobs", lambda *a, **k: None, raising=True)
     assert W.acquire_job("http://hub", "tok", worker_id="A", log=lambda m: None) is None
-    monkeypatch.setattr(W, "peek_jobs", lambda *a, **k: ([], False), raising=True)
+    monkeypatch.setattr(JL, "peek_jobs", lambda *a, **k: ([], False), raising=True)
     assert W.acquire_job("http://hub", "tok", worker_id="A", log=lambda m: None) is None
 
 
@@ -552,16 +555,16 @@ def test_acquire_job_falls_back_to_highest_when_priority_unreachable(
 ) -> None:
     """priority 问询失败不空转：按「无人在做」选（唯一性由 hub 的 claim 闸兜底）。"""
     monkeypatch.setattr(
-        W, "peek_jobs", lambda *a, **k: ([{"job_id": "solo", "course": "cA"}], False), raising=True
+        JL, "peek_jobs", lambda *a, **k: ([{"job_id": "solo", "course": "cA"}], False), raising=True
     )
     monkeypatch.setattr(
-        W,
+        JL,
         "request_priority",
         lambda *a, **k: {"epoch": None, "priorities": {}, "reasons": {}},
         raising=True,
     )
     monkeypatch.setattr(
-        W,
+        JL,
         "claim_job",
         lambda base, token, jid, **k: {
             "job_id": jid,
@@ -613,7 +616,7 @@ def test_worker_loop_cancel_abandons_and_never_reports_failure(
 def test_cancel_watcher_sets_event_only_on_landed(monkeypatch: pytest.MonkeyPatch) -> None:
     """取消环：只有**正面证据**（`landed=True`）才置位；问不到（None）不算赢。"""
     states: list[dict | None] = [None, {"landed": False}, {"landed": True}]
-    monkeypatch.setattr(W, "job_status", lambda *a, **k: states.pop(0), raising=True)
+    monkeypatch.setattr(JL, "job_status", lambda *a, **k: states.pop(0), raising=True)
     stop = threading.Event()
     fired = threading.Event()
     th = W.start_cancel_watcher(
@@ -625,7 +628,7 @@ def test_cancel_watcher_sets_event_only_on_landed(monkeypatch: pytest.MonkeyPatc
 
     stop2 = threading.Event()
     never = threading.Event()
-    monkeypatch.setattr(W, "job_status", lambda *a, **k: {"landed": False}, raising=True)
+    monkeypatch.setattr(JL, "job_status", lambda *a, **k: {"landed": False}, raising=True)
 
     def _stop_soon() -> None:
         import time as _t

@@ -30,6 +30,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# 第八刀起，本簇住在 `remote/job_lifecycle.py`：**簇内互调**与直调 `_request` / `_wire_add`
+# 的调用点解析在该模块 ⇒ 那类 patch 目标必须是 `JL`（宿主调用的仍 patch `W`）。
+import remote.job_lifecycle as JL
 from common.protocol import RetryableError
 from remote import http as http_mod
 from remote import wire as wire_mod
@@ -328,7 +331,7 @@ def test_post_result_never_rerolls_but_is_accounted(monkeypatch) -> None:
         seen.update(kw)
         return 200, b'{"ok":1}'
 
-    monkeypatch.setattr(worker_mod, "_request", fake)
+    monkeypatch.setattr(JL, "_request", fake)
     status = worker_mod.post_result("http://hub", "t", "j7", {"a": 1}, log=lambda _m: None)
     assert status == 200
     assert not seen.get("allow_reroll", False)

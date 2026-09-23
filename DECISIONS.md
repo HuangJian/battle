@@ -2494,3 +2494,42 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
   mypy **377** 源文件绿。反向探针两处均命中：往 `worker.py` 追加 `def download_payload`
   ⇒「定义唯一」被点名；往 `remote/` 再放一份 `_progress_logger` ⇒ 孪生计数被点名。
 —— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/engineering.md` §23「第七刀」
+
+## §2026-09-23-goalnn-godmodule-joblifecycle（2026-09-23，用户指令「重构 nn-training：降耦合 / 复用代码 / 可维护性」）
+
+- **背景**：`remote/worker.py` 第八刀。前七刀（wire / http / job_fs / bc_job / download）把**底座**
+  与**叶子簇**拆完后，作业取活 / 生命周期 / 回传面是剩下一块**连续 543 行 / 17 个顶层名**的整块
+  代码，且只向下依赖已下沉的 `http` / `wire` / `bulk_sched` / `common.*`。
+- **备选与否决**：先拆 `_prefetch_fill` / 预取簇——否（它只有约 130 行，且与 `PrefetchStore`
+  和 `worker_loop` 的启动/收尾强耦合，切下去就要动宿主）；把 `worker_tag` 留下（它被
+  `worker_loop` 直接调用）——否（它是 `report_job_failure`（已搬）的**被调者**，留下就成环；
+  实测它全仓只被「簇内 + 宿主」两处引用，转发即可）；把 `post_result` 留在 `worker`——否
+  （簇内 `ResultUploader` 引用它、且它是回传语义的主体，与 `acquire_job` 同生命周期；
+  且「引用即接缝」使得留下与搬走的测试效果等同，搬走更干净）。
+- **决定**：整块搬进新 `remote/job_lifecycle.py`（682 行）：`peek_jobs` · `request_priority` ·
+  `claim_job` · `_priority_rank` · `acquire_job` · `job_started` · `job_ready` · `abandon_job` ·
+  `job_status` · `start_cancel_watcher` · `post_result` · `release_job` · `worker_tag` ·
+  `_failure_detail` · `job_body_error` · `report_job_failure` · `heartbeat`。`worker.py`
+  **2348 → 1805**；依赖 `job_lifecycle → {common.protocol, common.text, http, wire, bulk_sched}`
+  （全向下，零 `worker`，守卫钉住）。
+- **seam 口径（本仓最密的一组，60+ 处 patch）**：只按「调用点解析在哪个命名空间」分档——宿主
+  调用（`worker_loop` / `run_job` / `_prefetch_fill`）仍 patch `remote.worker`；**簇内互调**
+  （`acquire_job` → `peek_jobs` / `request_priority` / `claim_job` / `_priority_rank`、
+  `start_cancel_watcher` → `job_status`、`report_job_failure` → `worker_tag`）与本簇直调
+  `_request` / `_wire_add` / `_bulk_pace` / `_sched_headers` / `_warn_non_200` 全部改指
+  `remote.job_lifecycle`（共迁 22 处 seam）。
+- **★ 新判据：「引用即接缝」**。「worker 里已无 `post_result` 调用点」**不等于**「patch
+  `remote.worker.post_result` 失效」：`worker_loop` 把它当**值**传给
+  `ResultUploader(upload=post_result, …)`，读的仍是 `worker` 的模块全局。审计必须用 AST 的
+  **`Load`**（任何引用）而不是 `Call`——否则会误判并去改 9 处**本来正确**的 patch。
+- **附带修正**：`tests/test_http_split.py::test_worker_forwards_every_moved_name` 对 `_opener`
+  做 `is` 恒等断言是错的——`_opener` 是 `http._get_opener` 里 `global` **重绑**的懒建单例，
+  `worker._opener` 注定停在 import 时的快照。该断言的红绿取决于**文件顺序**（
+  `pytest tests/test_priority_schedule.py tests/test_http_split.py` 红、单跑绿），且在全量
+  xdist 下恰好撞不出来。改为「重绑式标量只查名字在」+ 一条与顺序无关的语义断言（重绑只发生
+  在 `http`、worker 侧无 `global`）。
+- **门禁**：**2331 passed / 3 skipped**（2321 → +10：新 `tests/test_job_lifecycle_split.py` 8 例
+  + `test_http_split.py` 新增 2 例）；mypy **380** 源文件绿；根 `bun run check` 2120 pass / 0 fail。
+  反向探针四处均命中：`worker.py` 里重复定义 `peek_jobs` / `job_lifecycle` 反向 import `worker` /
+  `worker.py` 出现 `_request` 调用点 / `job_lifecycle` 顶层可变容器。
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/engineering.md` §23「第八刀」

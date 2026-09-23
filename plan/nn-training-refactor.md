@@ -530,13 +530,52 @@ _admin_net_probe(20) · _admin_halt(18) · _admin_queue(10) · _admin_status(9) 
 > 门禁 **2314 → 2321 passed / 3 skipped**；mypy **377** 源文件绿。
 > 决策 → `DECISIONS.md` §2026-09-23-goalnn-godmodule-download；全文 → `engineering.md` §23「第七刀」。
 
-> **下一批刀口（worker 余下 2348 行）**：① 作业生命周期簇（`peek_jobs` / `request_priority` /
+> **（已执行）下一批刀口（worker 余下 2348 行）**：① 作业生命周期簇（`peek_jobs` / `request_priority` /
 > `claim_job` / `job_started` / `job_ready` / `abandon_job` / `job_status` / `start_cancel_watcher` /
 > `_priority_rank` / `acquire_job` / `post_result` / `release_job` / `heartbeat` / `worker_tag` /
 > `_failure_detail` / `job_body_error` / `report_job_failure`）——
 > 注意这一簇的 **seam 很密**（测试大量 patch `worker.post_result` / `worker.run_job` /
 > `worker.acquire_job` 等），必须逐点定档；② `run_job`（743 行）/ `worker_loop`
 > （364）/ `main` 是宿主，**不动**。
+
+#### 5.3.6 第八刀（2026-09-23，**已完成**）—— 作业取活 / 生命周期 / 回传面 → `remote/job_lifecycle.py`
+
+刀口 = **连续 543 行 / 17 个顶层名**（清单见上「已执行」那节，逐字对应）。`worker.py`
+**2348 → 1805**；新模块 **682 行**。依赖 `job_lifecycle → {common.protocol, common.text,
+http, wire, bulk_sched}`（全向下，零 `worker`）。
+
+**seam 定档表（逐点实测，非推断）**：宿主 `worker_loop` / `run_job` / `_prefetch_fill` 的调用点
+仍解析在 `worker` ⇒ 不迁；**簇内互调**（`acquire_job` → `peek_jobs` / `request_priority` /
+`claim_job` / `_priority_rank`；`start_cancel_watcher` → `job_status`；`report_job_failure` →
+`worker_tag`）与本簇直调 `_request` / `_wire_add` / `_bulk_pace` / `_sched_headers` /
+`_warn_non_200` ⇒ 改指 `remote.job_lifecycle`，共迁 **17 处 `setattr` 调用点 / 5 个测试文件**
+（`test_priority_schedule` 10：`_request` 1 + `_wire_add` 2 + `claim_job` 2 + `peek_jobs` 3 +
+`job_status` 2 · `test_remote_ppo` 3 · `test_worker_offline_cap` 2 · `test_wire_reroll` 1 ·
+`test_http_split` 1）。`test_soft_hold_prefetch` / `test_async_result_upload` /
+`test_remote_hotswap` 里对 `W.post_result` / `W.peek_jobs` 的 patch **一行不改**——它们是档位一
+（宿主引用 / 调用），见下。
+
+**两条可复用的结论**（已写进 `tests/test_job_lifecycle_split.py` 头部）：
+
+1. ✭ **「引用即接缝」**——判「worker 侧 patch 是否失效」要用 AST 的 **`Load`**（任何引用）而不是
+   `Call`。`worker_loop` 的 `ResultUploader(upload=post_result, …)` 是**传值引用**，那 9 处
+   `patch remote.worker.post_result` 照旧有效；只按 `Call` 判会得出错误结论。按新判据重扫，
+   全仓真正的空操作注入点只剩 `test_http_split.py` 里那条**故意**的反例。
+2. ✭ **重绑式标量不做 `is` 恒等断言**——`_opener` 是 `http._get_opener` 里 `global` 重绑的懒建
+   单例，`worker._opener` 停在 import 快照。`tests/test_http_split.py` 原先对它做 `is` 断言，
+   红绿取决于**文件顺序**（`pytest tests/test_priority_schedule.py tests/test_http_split.py` 红、
+   单跑绿；全量 xdist 下恰好绿所以长期未被发现；本刀在 HEAD 上复现并修掉）。新口径：重绑式
+   标量只查「名字在」+ 一条与顺序无关的语义断言（重绑只发生在所有者模块）。
+
+> 决策 → `DECISIONS.md` §2026-09-23-goalnn-godmodule-joblifecycle；全文 → `engineering.md` §23「第八刀」。
+> 守卫 → `tests/test_job_lifecycle_split.py`（8 例）。
+
+> **下一批刀口（worker 余下 1805 行）**：**已无可整块搬的叶子簇**——余下都是宿主
+> （`run_job` / `worker_loop` / `main` / `_prefetch_fill` 与它们的私有助手），再拆就是**拆宿主**
+> （切法参 `loop_steps` 那几刀：按一条真实调用链切，不按行数等分）。两条已登记的清理项：
+> ① `remote/job_fs._ensure_commit` 是既存死代码（全仓零调用，只搬不删）+ ② 给 `remote/` 加一条
+> **全局无环守卫**（现在每个子模块只在各自守卫里声明「不得 import `remote.worker`」）。
+> 之后转 `hub_server` 其余路由组（`_get_*` 12 / `_post_*` 11 → 通用助手）。
 
 > **（历史）第二刀的预期执行清单**（已执行，保留供对照）：`_bc_fetch_resume` / `_bc_local_resume_dir` /
 > `_bc_store_local_resume` / `_bc_load_local_resume` / `_bc_post_epoch` / `_bc_device` /

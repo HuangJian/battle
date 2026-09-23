@@ -1470,6 +1470,10 @@ def test_claimable_pool_rebuilt_from_ledger(tmp_path: Path) -> None:
 
 import remote.download as download_mod
 import remote.http as http_mod
+
+# 第八刀起，本簇住在 `remote/job_lifecycle.py`：**簇内互调**与直调 `_request` / `_wire_add`
+# 的调用点解析在该模块 ⇒ 那类 patch 目标必须是 `JL`（宿主调用的仍 patch `W`）。
+import remote.job_lifecycle as JL
 import remote.worker as worker_mod
 from common.protocol import RetryableError
 
@@ -1521,7 +1525,7 @@ def test_post_result_retry_then_success(monkeypatch, _no_sleep) -> None:
     def fake_request(base_url, token, path, timeout=30.0, **kw):
         return next(statuses), b"{}"
 
-    monkeypatch.setattr(worker_mod, "_request", fake_request)
+    monkeypatch.setattr(JL, "_request", fake_request)
     rc = worker_mod.post_result(
         "http://hub",
         "t",
@@ -1534,7 +1538,7 @@ def test_post_result_retry_then_success(monkeypatch, _no_sleep) -> None:
 
 
 def test_post_result_409_is_idempotent_success(monkeypatch, _no_sleep) -> None:
-    monkeypatch.setattr(worker_mod, "_request", lambda *_a, **_k: (409, b"duplicate"))
+    monkeypatch.setattr(JL, "_request", lambda *_a, **_k: (409, b"duplicate"))
     rc = worker_mod.post_result(
         "http://hub",
         "t",
@@ -1559,7 +1563,7 @@ def test_post_result_4xx_rejected_no_retry(monkeypatch, _no_sleep) -> None:
         posted.append(kw.get("data") or b"")
         return 400, b"result rejected: bad fingerprints"
 
-    monkeypatch.setattr(worker_mod, "_request", fake_request)
+    monkeypatch.setattr(JL, "_request", fake_request)
     with pytest.raises(ProtocolError, match="400"):
         worker_mod.post_result("http://hub", "t", "jid1", {"x": 1}, log=lambda _m: None)
     assert len(posted) == 2, f"v2 -> 一次 JSON 退路 -> 抛错（实得 {len(posted)} 次）"
