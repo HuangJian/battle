@@ -23,7 +23,12 @@ import { afterEach, describe, expect, it } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
-import type { ConsoleStateView, LoopQueueRow } from '../src/web/view'
+import type {
+  ConsoleStateView,
+  CourseOverviewRow,
+  LoopQueueRow,
+  ParallelOverviewView,
+} from '../src/web/view'
 import { api, render, view } from './helpers/console-fixture'
 
 // ────────────────────────── 纯函数：pill 推导 ──────────────────────────
@@ -54,6 +59,39 @@ function row(over: Partial<LoopQueueRow> & { course: string }): LoopQueueRow {
   }
 }
 
+/** 一行 hub 侧总览行（只填本用例关心的事实，其余走真实缺省形状）。 */
+function ovRow(course: string, over: Partial<CourseOverviewRow> = {}): CourseOverviewRow {
+  return {
+    course,
+    training: true,
+    iter: 37,
+    offline: true,
+    hubSeen: true,
+    queuePending: 0,
+    inflight: 0,
+    offlineRounds: 0,
+    offlineLastIter: null,
+    offlineLastMtime: 0,
+    frozen: [],
+    ...over,
+  }
+}
+
+/** hub 侧总览视图（`offline` 名集按行推，与 buildCourseRows 同口径）。 */
+function ov(...rows: CourseOverviewRow[]): ParallelOverviewView {
+  return {
+    hubUrl: 'http://hub:8787',
+    hubOnline: true,
+    activeCourses: rows.length,
+    activeWorkers: 0,
+    halt: false,
+    recentDispatch: null,
+    offline: rows.filter((r) => r.offline).map((r) => r.course),
+    rows,
+    offlineProgress: null,
+  }
+}
+
 describe('coursePills：把队列事实翻译成一行 pill', () => {
   it('在跑 + 采集中 ⇒ 绿点「采集中」+ it 指针（指针用账本下一轮，不是已结算轮数）', () => {
     const [p] = view.coursePills({
@@ -79,25 +117,75 @@ describe('coursePills：把队列事实翻译成一行 pill', () => {
     expect(status({ kind: 'idle', text: '本轮无待办（账本已结算 / 未开训）' })).toBe('空闲')
   })
 
-  it('★2026-09-22：离线课 pill 不提本地「推进中/采集中」，统一「回传中」（段由云机整段执行）', () => {
+  it('★2026-09-22：离线课 pill 不提本地「推进中/采集中」，走「回传」维度（段由云机整段执行）', () => {
     const p = view.coursePills({
       courses: ['x20-off'],
       rows: [
         row({ course: 'x20-off', waiting: { kind: 'ready', text: '无外部等待，下一步 ppo' } }),
       ],
       trainerRunning: true,
-      offline: new Set(['x20-off']),
+      overview: ov(ovRow('x20-off', { offlineRounds: 7, offlineLastIter: 42 })),
     })[0]!
     expect(p).toMatchObject({ course: 'x20-off', status: '回传中', tone: 'g' })
     expect(p.title).toContain('只收回传')
-    // 确定性事实（暂停 / 收官 / 中止）优先级不被动摇：离线集里也仍报「已暂停」
+    expect(p.title).toContain('已回传 7 轮')
+    // 确定性事实（暂停 / 收官 / 中止）优先级不被动摇：离线课也仍报「已暂停」
     const paused = view.coursePills({
       courses: ['x20-off'],
       rows: [row({ course: 'x20-off', pausedIntent: true, pauseApplied: true })],
       trainerRunning: true,
-      offline: new Set(['x20-off']),
+      overview: ov(ovRow('x20-off', { offlineRounds: 7 })),
     })[0]!
     expect(paused.status).toBe('已暂停')
+  })
+
+  it('★2026-09-23：离线 ∧ **0 回传** ⇒ 「等云机」（不说「回传中」——那是进度断言）', () => {
+    // 用户报障原文：三个离线课「两个显示「回传中」，一个显示「等回传」，实际上三个都没有被
+    // 云机接收」。旧形状只能回答「hub 说不说它离线」，于是把「还没取走包」写成「回传中」
+    // ——读着像在跑（而 hub 侧离线段进度是空的）。0 回传只能说「等云机」。
+    const p = view.coursePills({
+      courses: ['x20-a', 'x20-b'],
+      rows: [row({ course: 'x20-a' }), row({ course: 'x20-b' })],
+      trainerRunning: true,
+      overview: ov(ovRow('x20-a'), ovRow('x20-b')),
+    })
+    expect(p.map((x) => [x.status, x.tone])).toEqual([
+      ['等云机', 'y'],
+      ['等云机', 'y'],
+    ])
+    expect(p[0]!.title).toContain('还没有任何段内产物回传')
+  })
+
+  it('★2026-09-23：意图与 hub 事实不一致 ⇒ 「意图未生效」（那个「等回传」的真相）', () => {
+    // 三个离线课里那个显示「等回传」的，正是 hub 侧还留在 online 的那一门：pill 此前读的是
+    // 本地 waiting 词（等远端回传），看着像正常的在线课。两个源摆在一起才看得见失配。
+    const p = view.coursePills({
+      courses: ['x20-drift'],
+      rows: [row({ course: 'x20-drift', waiting: { kind: 'inflight', text: '等远端回传' } })],
+      trainerRunning: true,
+      overview: ov(ovRow('x20-drift', { offline: false })),
+      modeIntents: { 'x20-drift': 'offline' },
+    })[0]!
+    expect(p).toMatchObject({ status: '意图未生效', tone: 'y' })
+    expect(p.title).toContain('意图没落地')
+    // 一致时（意图离线 ∧ hub 离线）不画漂移：回落到「回传」维度那两态
+    const ok = view.coursePills({
+      courses: ['x20-off'],
+      rows: [row({ course: 'x20-off' })],
+      trainerRunning: true,
+      overview: ov(ovRow('x20-off', { offlineRounds: 3 })),
+      modeIntents: { 'x20-off': 'offline' },
+    })[0]!
+    expect(ok.status).toBe('回传中')
+    // hub 不认识这门课 ⇒ 无从判断（**不编**漂移：那时只有一侧事实）
+    const unknown = view.coursePills({
+      courses: ['x20-new'],
+      rows: [row({ course: 'x20-new' })],
+      trainerRunning: true,
+      overview: ov(),
+      modeIntents: { 'x20-new': 'offline' },
+    })[0]!
+    expect(unknown.status).toBe('采集中')
   })
 
   it('确定性事实优先于「在等什么」：暂停 / 收官 / 中止各占一态', () => {

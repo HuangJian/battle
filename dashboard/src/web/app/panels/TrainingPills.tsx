@@ -26,7 +26,12 @@
  *  接在标题之后，把全局读数顶到最右（课程选择器 2026-09-20 已在侧栏，与本组不再同行）。
  */
 
-import { coursePills, type CoursePillTone, type LoopQueueRow } from '../../view'
+import {
+  coursePills,
+  type CoursePillTone,
+  type LoopQueueRow,
+  type ParallelOverviewView,
+} from '../../view'
 
 export interface TrainingPillsProps {
   /** 服务端 stamp 的已开课课程（`trainingCourses`，事实源 = 开课标记）。 */
@@ -35,8 +40,15 @@ export interface TrainingPillsProps {
   rows: LoopQueueRow[]
   /** 共享 trainer 是否在跑（「已开课」与「进程在跑」是两件事，状态文案要说清）。 */
   trainerRunning: boolean
-  /** ★2026-09-22：离线课程名集（hub 只收回传）——pill 状态改「回传中」而非「推进中」。 */
-  offline?: ReadonlySet<string> | null
+  /** ★2026-09-22：hub 侧总览（离线标记 / 段内已回传轮数 / hub 是否认得这门课）——
+   *  离线课 pill 走「回传」维度（段由云机整段执行）。
+   *
+   *  ★2026-09-23 由「离线课名集」改为整个视图：旧形状只能回答「hub 说不说它离线」，
+   *  于是**一件产物都没回传**的课也被写成「回传中」（用户报障：三个离线课显示为
+   *  「回传中 ×2 + 等回传 ×1」，而三个都还没被云机取走）。`null` = hub 侧不可读。 */
+  overview?: ParallelOverviewView | null
+  /** 控制台记录的每课 hub 派发意图（与 hub 事实不一致 = 「意图未生效」）。 */
+  modeIntents?: Record<string, 'online' | 'offline'> | null
   /** 当前查看课程（高亮 + 「正在看」提示）。 */
   viewCourse: string
   onSelect: (course: string) => void
@@ -59,13 +71,14 @@ export function TrainingPills({
   courses,
   rows,
   trainerRunning,
-  offline,
+  overview,
+  modeIntents,
   viewCourse,
   onSelect,
   onStop,
   readOnly,
 }: TrainingPillsProps) {
-  const pills = coursePills({ courses, rows, trainerRunning, offline })
+  const pills = coursePills({ courses, rows, trainerRunning, overview, modeIntents })
   // 一门课都没开 ⇒ 整个组件不渲染（顶部保持干净：空块/空行会被读成「有东西没加载出来」）。
   if (pills.length === 0) return null
   // 组前的文字标签「在训」已删（2026-09-20 用户指令）——`aria-label` 保留：屏幕阅读器

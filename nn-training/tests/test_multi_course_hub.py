@@ -498,6 +498,41 @@ def test_admin_queue_and_courses_surfaces(tmp_path: Path) -> None:
         th.join(timeout=5)
 
 
+def test_mode_post_discovers_the_course_on_demand(tmp_path: Path) -> None:
+    """`POST /admin/courses` 指名的课**刚建好目录、扫描还没轮到**时，也必须靠按需真扫接住。
+
+    2026-09-23 用户报障（真机日志）：共享 hub 刚重启（`courses=[]`）——控制台那份「离线意图
+    回灌」跑在第一次顺带扫描**之前**，九条 POST 全 400；随后三个离线课各自靠「开课时有界
+    重试（3×2s）」去赌发现时机，**恰有一门输掉**（最后一次重试 20:29:46、发现也 20:29:46）
+    ⇒ 该课静默留在 online，面板一直显示「在训 / 切离线」，而操作员以为自己开的是离线课。
+    修法：POST 只在「课不在表里」时跳间隔闸真扫一次再试（模式非法不白扫盘）。
+    """
+    clock = _Clock()
+    hub = _discover_hub(tmp_path, clock)
+    base, _hub_ref, srv, th = _boot(tmp_path, hub)
+    try:
+        # 第一次顺带扫描之后才开课（模拟「刚建好 remote-jobs/」）——此刻闸还没过期
+        _mk_course_dir(tmp_path, "late")
+        clock.tick(hub.DISCOVER_SCAN_MIN_SEC / 2)
+        assert hub.courses() == []
+        st, r = _http(base, "/admin/courses?course=late&mode=offline", method="POST")
+        assert st == 200, r
+        assert r["mode"] == "offline"
+        assert hub.courses() == ["late"] and hub.mode_of("late") == COURSE_MODE_OFFLINE
+        st, q = _http(base, "/admin/queue")
+        assert q["offline"] == ["late"]
+        # 真不存在的课仍然 400（按需发现不是「什么都接受」），且不改变课程表
+        st, _r = _http(base, "/admin/courses?course=ghost&mode=offline", method="POST")
+        assert st == 400 and hub.courses() == ["late"]
+        # 模式非法不用扫盘：直接 400
+        st, _r = _http(base, "/admin/courses?course=late&mode=bogus", method="POST")
+        assert st == 400 and hub.mode_of("late") == COURSE_MODE_OFFLINE
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        th.join(timeout=5)
+
+
 def test_halt_is_per_course(tmp_path: Path) -> None:
     """停机达令**按课程**（单 hub 化的关键副作用）。
 

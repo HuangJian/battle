@@ -303,6 +303,28 @@ export interface CourseMatrixRow {
    *  不满足时任一侧点下去都是 400（hub 不认识它 / 根本没 hub）——画一个一定失败的按钮
    *  就是假承诺，这不是「只读不禁用」那条：只读是权限边界，这里是能力边界。 */
   canToggleMode: boolean
+  /** 控制台意图（`console-state.courseModes`）与 hub 事实**不一致**时的两侧取值。
+   *
+   *  这不是猜测：两个源都能读到才判（意图存在 ∧ hub 认识这门课），不一致就是「意图没落地」
+   *  ——2026-09-23 实测：hub 重启时控制台的回灌跑在 hub 发现这门课之前（POST 400），该课
+   *  静默留在 online，面板一路显示「在训 / 切离线」（而操作员以为自己开的是离线课），
+   *  直到翻 hub 日志才发现。UI 的职责是把这两个源摆在一起，不是替哪一边编状态。
+   *
+   *  `null` = 无从判断（没有意图 / hub 不认识它 —— 那时只有一侧事实）。
+   *
+   *  ★ 带上两侧取值（而不是一个 bool）：渲染层要用它们写清「意图是 X、hub 现在当 Y」，
+   *  否则组件就得自己去读那份意图表 —— 又一条知道真相的路径。 */
+  modeDrift: { intent: 'online' | 'offline'; hubOffline: boolean } | null
+  /** 行内是否给**任务包操作**（导出/导入训练结果）。
+   *
+   *  判据 = `hub 标了离线 ∨ 控制台意图是离线`（**两个源任一为离线**）。
+   *
+   *  ★2026-09-23（用户指令）：此前只看 hub 事实（`ov.offline`）——那形成一个死锁：
+   *  离线课**需要任务包**才能上云跑，而「导出任务包」键却要等 hub 先接受离线模式才出现；
+   *  偏偏回灌失配时（hub 仍当它在线，见 `modeDrift`）那个键正好不见了——最需要它的那一刻。
+   *  任务包能力是**课程级**的（与 hub 此刻派不派活正交：包就是给云机用的），故把意图也计入。
+   *  两个源都是「离线」时仍然只有一个键（不是两个）。 */
+  bundleOps: boolean
   queue: MatrixCell
   waiting: MatrixCell
   segment: MatrixCell | null
@@ -315,9 +337,32 @@ export interface CourseMatrixInput {
   overview: ParallelOverviewView | null
   /** 训练侧（`null` = 只读视图不可用）。 */
   queue: LoopQueueView | null
+  /** 控制台记录的每课派发**意图**（`stateView.courseModeIntents`；缺省 = 旧视图/无意图）。
+   *
+   *  与 `overview` 里的 hub 事实**分开收**：一个是运维的决定，一个是 hub 此刻的表。
+   *  摆在一起才能看出「意图没落地」（`modeDrift`）——不在这里替任何一侧编事实。 */
+  modeIntents?: Record<string, 'online' | 'offline'> | null
   viewing: string
   /** 判定「段内多久没动」的当下时刻（epoch 秒）——调用方给，便于单测。 */
   nowSec: number
+}
+
+/** 意图 vs hub 事实：不一致 = 「意图没落地」（`null` = 无从判断，只一侧有事实）。
+ *
+ *  为什么是 `null` 而不是 `false`：没有意图（从没点过切离线 / 历史课）或 hub 不认识这门课时，
+ *  「一致」根本没有内容——把「不知道」画成「没问题」正是这一整类事故的成因。
+ */
+export function modeDriftOf(
+  course: string,
+  ov: CourseOverviewRow | null,
+  hubOnline: boolean,
+  intents?: Record<string, 'online' | 'offline'> | null,
+): { intent: 'online' | 'offline'; hubOffline: boolean } | null {
+  const intent = intents?.[course]
+  if (!intent) return null
+  if (!ov || !hubOnline || !ov.hubSeen) return null
+  if (ov.offline === (intent === 'offline')) return null
+  return { intent, hubOffline: ov.offline }
 }
 
 /** 两侧 outer join（顺序：先 hub 侧给出的序，再补训练侧独有的课 —— 稳定且「在训的在前」）。 */
@@ -367,6 +412,8 @@ export function mergeCourseRows(input: CourseMatrixInput): CourseMatrixRow[] {
       ov,
       lq,
       canToggleMode: hubOnline && (ov?.hubSeen ?? false),
+      modeDrift: modeDriftOf(course, ov, hubOnline, input.modeIntents),
+      bundleOps: (ov?.offline ?? false) || input.modeIntents?.[course] === 'offline',
       queue: queueCell(ov, hubOnline),
       waiting: ov?.offline ? offlineWaitCell(ov) : waitingCell(lq),
       segment: segmentCell(ov, input.nowSec),

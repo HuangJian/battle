@@ -460,3 +460,80 @@ describe('isTrainingRow：上屏筛选与状态列**同一个**判据', () => {
     expect(merged().map((r) => r.course)).toEqual(['live', 'done', 'conflict', 'sync'])
   })
 })
+
+// ────────────────────────── 意图 vs hub 事实（2026-09-23 事故） ──────────────────────────
+
+describe('modeDrift：控制台意图 ≠ hub 此刻的表', () => {
+  // 真机事故（用户 2026-09-23 报障）：hub 重启时 `courses=[]`，控制台那份「离线意图回灌」
+  // 跑在 hub 发现课程**之前**（POST 400）——三门离线课里恰有一门输掉，静默留在 online：
+  // 面板显示「在训 / 切离线」，操作员以为自己开的是离线课。两个源摆在一起才看得见。
+  it('意图离线 ∧ hub 在线 ⇒ 漂移（带上两侧取值，供渲染层写清「意图是 X、hub 当 Y」）', () => {
+    const row = mergeCourseRows({
+      overview: ovView([ovRow({ course: 'x20-demo-mix', training: true, offline: false })]),
+      queue: lqView([lqRow({ course: 'x20-demo-mix' })], ['x20-demo-mix']),
+      modeIntents: { 'x20-demo-mix': 'offline' },
+      viewing: '',
+      nowSec: NOW,
+    })[0]!
+    expect(row.modeDrift).toEqual({ intent: 'offline', hubOffline: false })
+  })
+
+  it('一致（两种方向都算一致）⇒ null：不画漂移', () => {
+    const drift = (offline: boolean, intent: 'online' | 'offline'): unknown =>
+      mergeCourseRows({
+        overview: ovView([ovRow({ course: 'c4', offline })]),
+        queue: lqView([lqRow({ course: 'c4' })], ['c4']),
+        modeIntents: { c4: intent },
+        viewing: '',
+        nowSec: NOW,
+      })[0]!.modeDrift
+    expect(drift(true, 'offline')).toBeNull()
+    expect(drift(false, 'online')).toBeNull()
+  })
+
+  it('**无从判断** ⇒ null（不把「不知道」画成「没问题」）', () => {
+    const drift = (
+      patch: Partial<CourseOverviewRow>,
+      intents: Record<string, 'online' | 'offline'> | null,
+      hubOnline = true,
+    ): unknown =>
+      mergeCourseRows({
+        overview: ovView([ovRow({ course: 'c4', ...patch })], { hubOnline }),
+        queue: lqView([lqRow({ course: 'c4' })], ['c4']),
+        modeIntents: intents,
+        viewing: '',
+        nowSec: NOW,
+      })[0]!.modeDrift
+    expect(drift({}, null)).toBeNull() // 没有意图（从没点过切离线 / 历史课）
+    expect(drift({ hubSeen: false }, { c4: 'offline' })).toBeNull() // hub 不认识它
+    expect(drift({}, { c4: 'offline' }, false)).toBeNull() // hub 不可达
+  })
+
+  it('★2026-09-23 bundleOps：hub 标离线 **∨** 意图离线（两个源任一为离线就给任务包键）', () => {
+    // 用户指令的动机：离线课**要先有任务包才能上云跑**，而“意图离线但 hub 还当它在线”
+    // 这个失配时刻，旧判据（只看 hub 事实）恰好把「导出任务包」键藏了——最需要它的时候。
+    const ops = (offline: boolean, intents: Record<string, 'online' | 'offline'> | null): boolean =>
+      mergeCourseRows({
+        overview: ovView([ovRow({ course: 'c5', offline })]),
+        queue: lqView([lqRow({ course: 'c5' })], ['c5']),
+        modeIntents: intents,
+        viewing: '',
+        nowSec: NOW,
+      })[0]!.bundleOps
+    expect(ops(true, null)).toBe(true) // hub 标离线（旧判据，不变）
+    expect(ops(true, { c5: 'offline' })).toBe(true) // 两个源都离线 → 仍只有一个键
+    expect(ops(false, { c5: 'offline' })).toBe(true) // ★失配时也给（本次改动）
+    expect(ops(false, { c5: 'online' })).toBe(false) // 明确在线 ⇒ 不给（不所有课都挂包）
+    expect(ops(false, null)).toBe(false) // 无意图、hub 也说在线 ⇒ 不给
+  })
+
+  it('旧服务端（没有 courseModeIntents 字段）⇒ null：不编状态、不报错', () => {
+    const row = mergeCourseRows({
+      overview: ovView([ovRow({ course: 'c4', offline: false })]),
+      queue: lqView([lqRow({ course: 'c4' })], ['c4']),
+      viewing: '',
+      nowSec: NOW,
+    })[0]!
+    expect(row.modeDrift).toBeNull()
+  })
+})

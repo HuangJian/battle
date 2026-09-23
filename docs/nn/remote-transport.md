@@ -7,6 +7,53 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §36 hub 的课程发现：写动作也该触发一次真扫（回灌跑在发现之前 = 静默失配）（2026-09-23）
+
+用户 2026-09-23 报障：新开的三个离线课里，`x20-demo-mix` 在 hub 里**不是** offline（而另两个
+是），于是控制台把那门课当在线课渲染（课程区「在训」、顶栏没有离线态、操作列给「切离线」），
+而操作员以为自己开的是离线课。
+
+### 根因（hub 日志实锤）：发现是**顺带**跑在读路径上的，而回灌跑在它之前
+
+```
+[hub-server] courses=0 [] … listening on 0.0.0.0:8787 courses=[]      ← hub 起来时课程表是空的
+[20:28:46] POST /admin/courses?course=x20-…&mode=offline × 9 → 400    ← 控制台回灌九条意图，全被拒
+[20:28:47] GET /admin/queue → 200                                     ← 这次**读**才触发 discover()
+[hub-server] discovered courses: x20-demo-mix, x20-firstkill, x20-terminal
+```
+
+两处缺陷叠在一起：
+
+1. `set_mode` 只查 `self._stores`（已登记课程），而 `discover()` 只在 `claim_next` / `queue_state`
+   这些**读**路径里被顺带调用（且有 `DISCOVER_SCAN_MIN_SEC` 间隔闸）⇒ 谁先读谁决定课程表；
+   回灌跑在第一次读之前 ⇒ **刚起 hub 的那一轮回灌必然全 400**。
+2. 控制台那侧的回灌是**单发**（带重试的 `pushHubMode` 只有「开课」那条路在用）⇒ 三个课各自靠
+   开课时的 3×2s 重试去赌发现时机，**恰有一门输掉**（最后一次重试 20:29:46、发现也 20:29:46）。
+
+### 修法
+
+* **hub（本次）**：`POST /admin/courses` 在「课不在表里」时按需 `discover(force=True)`
+  （`force` 跳过 `DISCOVER_SCAN_MIN_SEC` 间隔闸）再试一次。指名一门课的**写**动作有资格要求一次真扫；
+  模式非法不扫盘（直接 400），真不存在的课仍 400 且不改变课程表。
+* **控制台（本次）**：`restoreCourseModes` 每课有界重试（3×2s），**只对「需要合法 course」这一类**
+  错误重试（hub 连不上不重试——白等只让「起 hub」变慢）。全文 → `docs/nn/console.md §14`。
+
+### 门禁
+
+`nn-training`：`tests/test_multi_course_hub.py::test_mode_post_discovers_the_course_on_demand`
+（刚建目录、间隔闸未过期时，一条 mode POST 必须接住；`ghost` 课仍 400 且不改变课程表；非法模式不扫盘）；
+`dashboard`：`tests/course-mode.test.ts` 两例（重试成功 / 连不上不重试）。
+
+### 未决 / 口径
+
+* hub 那份课程表**仍是唯一权威**（它是事实源，控制台那份是**意图**）；本次只让写动作能触发发现，
+  不顺带改「谁决定在训」的判据。
+* 已失配的那一门课**不会自愈**：意图只在「起 hub」那一步回灌 ⇒ 手工口 = 在该行点一次
+  「切离线/恢复在线」（幂等），或点「hubServer」让它重灌全部意图；矩阵/pill 的「意图未生效」
+  徽标就是为了让这种失配**看得见**（`docs/nn/console.md §14`）。
+
+---
+
 ## §35 云腿评估读数的 summary 也要并（`eval_summary` 是控制台/门判唯一认的键）（2026-09-23）
 
 用户 2026-09-23 实测：`x20-demo-mix` 云腿 **it50–110、每 5 轮 400 局、`node=cloud`** 的读数

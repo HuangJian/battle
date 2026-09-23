@@ -461,7 +461,8 @@ export function App({ initial }: AppProps) {
                 courses={trainingCourses}
                 rows={stateView?.loopQueue?.rows ?? []}
                 trainerRunning={trainerRunning}
-                offline={stateView?.overview ? new Set(stateView.overview.offline ?? []) : null}
+                overview={stateView?.overview ?? null}
+                modeIntents={stateView?.courseModeIntents ?? null}
                 viewCourse={viewCourse}
                 onSelect={selectCourse}
                 onStop={(c) => void handleStopCourse(c)}
@@ -548,13 +549,14 @@ export function App({ initial }: AppProps) {
               <CourseMatrix
                 overview={stateView?.overview ?? null}
                 loopQueue={stateView?.loopQueue ?? null}
+                modeIntents={stateView?.courseModeIntents ?? null}
                 course={viewCourse}
                 onSelectCourse={selectCourse}
                 onAction={doAction}
               />
             </PanelErrorBoundary>
             {/* ★2026-09-22 改版（用户指令）：首页不再有独立「任务包」区域——离线课程的
-                导出/下载/导入下沉到课程矩阵每行「操作」列（BundleRowActions）。 */}
+                导出（点一下即取回）/ 导入训练结果下沉到课程矩阵每行「操作」列（BundleRowActions）。 */}
             {/* EvalBoard 摘要（RL 区）：完整看板独立成页 /eval */}
             {stateView?.isBc ? null : (
               <PanelErrorBoundary>

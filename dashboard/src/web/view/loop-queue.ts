@@ -14,6 +14,8 @@
  *  （与 hub 队列/隧道 A/B 的只读面容错口径一致）。
  */
 
+import type { ParallelOverviewView } from './course-overview'
+
 /** 「在等什么」的取值域（与 python `loop_plan.WAIT_*` 逐字对应）。 */
 export type LoopWaitKind = 'inflight' | 'collect' | 'idle' | 'ready'
 
@@ -125,11 +127,21 @@ export function coursePills(input: {
   rows: LoopQueueRow[]
   /** 共享 trainer 是否在跑（进程事实，与「已开课」正交：开了课但进程没跑是合法稳态）。 */
   trainerRunning: boolean
-  /** ★2026-09-22：**离线课**（hub 标为只收回传）——顶部 pill 不显示本地「推进中/采集中」
-   *  等词（段由云机整段执行），统一改「回传中」。null/空 = 无离线课。 */
-  offline?: ReadonlySet<string> | null
+  /** hub 侧事实（`stateView.overview`）：离线标记、**段内已回传轮数**、hub 是否认得这门课。
+   *
+   *  ★2026-09-23：由「离线课名集」升级为整个总览视图——旧形状只能回答「hub 说不说它离线」，
+   *  于是**一件产物都没回传**的课也被写成「回传中」（用户报障：三个离线课里两个「回传中」
+   *  一个「等回传」，而三个都还没被云机取走）。「回传中」是一个**进度断言**，必须有
+   *  `offlineRounds > 0` 才配得上；0 回传只能说「等云机」。`null`/缺省 = hub 侧不可读
+   *  （那时不编离线状态，退回本地「在等什么」）。 */
+  overview?: ParallelOverviewView | null
+  /** 控制台记录的每课 hub 派发**意图**（`stateView.courseModeIntents`）：与 hub 事实不一致
+   *  = 「意图未生效」（2026-09-23 实测的那种静默失配）——pill 上照实点名，而不是替 hub
+   *  那份 volatile 的表说话。`null`/缺省 = 无意图（不画漂移，不编状态）。 */
+  modeIntents?: Record<string, 'online' | 'offline'> | null
 }): CoursePillView[] {
   const byCourse = new Map(input.rows.map((r) => [r.course, r]))
+  const hubByCourse = new Map((input.overview?.rows ?? []).map((r) => [r.course, r]))
   return input.courses.map((course) => {
     const r = byCourse.get(course)
     if (!r) {
@@ -191,17 +203,53 @@ export function coursePills(input: {
           `· ${wait}`,
       }
     }
-    // ★2026-09-22（离线课 pill 修正）：离线课不提本地 waiting 词（推进中/采集中/等回传），
-    // 统一是「回传中」——段由云机整段执行，本地只收回传。放在确定性事实（暂停/收官/中止/
-    // 待进程）之后，保证它们优先级不变。
-    if (input.offline?.has(course)) {
+    // ★2026-09-23：离线课不再一刀切「回传中」——那是**进度断言**，只有真收到过产物才配说。
+    // 三个离线课都还没被云机取走时，旧口径会出现「回传中 ×2 + 等回传 ×1」（那个「等回传」
+    // 是 hub 侧还留在 online 的漂移课，走的本地 waiting 词）。现在：
+    //   意图 ≠ hub 事实 ⇒ 「意图未生效」（点名，操作员才知道该再推一次）
+    //   hub 离线 ∧ 已回传 > 0 ⇒ 「回传中」（绿点）
+    //   hub 离线 ∧ 0 回传 ⇒ 「等云机」（⚠ 还没取走包 —— 此前被说成「回传中」，读着像在跑）
+    // 位置仍在确定性事实（暂停/收官/中止/待进程）之后，它们的优先级不被动摇。
+    const hub = hubByCourse.get(course)
+    const intent = input.modeIntents?.[course]
+    if (intent && hub?.hubSeen && hub.offline !== (intent === 'offline')) {
       return {
         course,
         kind,
         it,
-        status: '回传中',
-        tone: 'g' as CoursePillTone,
-        title: `hub 离线（只收回传）：本段由云机整段执行，本地只收 it 权重/指标回传 · ${wait}`,
+        status: '意图未生效',
+        tone: 'y' as CoursePillTone,
+        title:
+          `控制台意图是「${intent === 'offline' ? '离线' : '在线'}」，而 hub 现在把 ${course} 当「${
+            hub.offline ? '离线' : '在线'
+          }」——意图没落地（常见成因：hub 刚重启，回灌跑在它发现这门课之前）。` +
+          '在课程矩阵里点该课「切离线/切换成在线」再推一次（幂等），或点「hubServer」回灌全部意图。' +
+          ` · ${wait}`,
+      }
+    }
+    if (hub?.offline) {
+      if (hub.offlineRounds > 0) {
+        return {
+          course,
+          kind,
+          it,
+          status: '回传中',
+          tone: 'g' as CoursePillTone,
+          title:
+            `hub 离线（只收回传）：本段由云机整段执行，已回传 ${hub.offlineRounds} 轮` +
+            `${hub.offlineLastIter == null ? '' : `（最新 it${hub.offlineLastIter}）`} · ${wait}`,
+        }
+      }
+      return {
+        course,
+        kind,
+        it,
+        status: '等云机',
+        tone: 'y' as CoursePillTone,
+        title:
+          'hub 离线（只收回传）：本段交给云机整段执行，但**还没有任何段内产物回传**——' +
+          '云机可能还没取走任务包、或还在跑第一轮（本地 hub 只收回传、不实时派发）。' +
+          `进度与「最近多久没动」见课程矩阵的「段内」列 · ${wait}`,
       }
     }
     switch (r.waiting.kind) {

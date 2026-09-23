@@ -50,6 +50,19 @@ async function pushMode(
   return last
 }
 
+/** 「hub 活着，但它的课程表里还没有这门课」的错误指纹。
+ *
+ *  **只有这一类错误值得重试**：hub 的课程表是**扫盘发现**的（`_course_dir_live` 看
+ *  `<traj>/<课>/{remote-jobs,offline}` 是否新鲜），而回灌跑在 `start hub` 之后**紧接着**
+ *  的那一拍 —— 磁盘事实可能还没落（课程刚建目录）或 hub 还没扫到。2026-09-23 实测：
+ *  hub 重启时 `courses=[]`，九条回灌 POST 全 400，三个离线课里**恰有一门**的重试窗口整段
+ *  落在发现之前 ⇒ 该课静默留在 online（面板一路显示「在训/切离线」）。
+ *
+ *  反过来，**hub 根本连不上**（ECONNREFUSED / 超时）不该重试：那不会因为等 2 秒而好，
+ *  而回灌在 `start` 的返回路径上 —— 白等 N×2s 只是让「起 hub」这个动作变慢。
+ */
+const UNKNOWN_COURSE_RE = /需要合法 course|未知课程|unknown course/i
+
 /** 热切一门课：hub 接受与否都落意图（意图是运维决定；回灌见 `restoreCourseModes`）。 */
 export async function setCourseMode(
   course: string,
@@ -81,20 +94,50 @@ export async function setCourseMode(
   }
 }
 
+/** 回灌的有界重试（`attempts` 含首试；测试注入小值避免空等）。 */
+export interface ModeRetry {
+  attempts?: number
+  delayMs?: number
+}
+
+/** 推一门课，**只对「hub 还不认识这门课」做有界重试**（判据见 `UNKNOWN_COURSE_RE`）。 */
+async function pushModeWithRetry(
+  cfg: RlConfig,
+  course: string,
+  mode: CourseMode,
+  only?: string,
+  retry: ModeRetry = {},
+): Promise<string | null> {
+  const attempts = Math.max(1, retry.attempts ?? 3)
+  const delayMs = Math.max(0, retry.delayMs ?? 2000)
+  let last = await pushMode(cfg, course, mode, only)
+  for (let i = 1; i < attempts && last !== null && UNKNOWN_COURSE_RE.test(last); i++) {
+    if (delayMs > 0) await Bun.sleep(delayMs)
+    last = await pushMode(cfg, course, mode, only)
+  }
+  return last
+}
+
 /** 起 hub 后回灌全部意图（幂等；hub 不可达只如实报告，不抛）。
  *
  *  回灌**两种模式都发**（不是只发 offline）：控制台的意图是权威的——hub 可能被以别的
  *  启动参数拉起来（例如 `--offline c5`），只补 offline 会让「我明明点过在线」悄悄失效。
+ *
+ *  ★ 2026-09-23：每门课**有界重试**（只对「不认识这门课」）——回灌跑在 hub 刚起来那一拍，
+ *  而 hub 的课程表是扫盘发现的，磁盘事实/扫描都可能晚一两拍。此前是单发：偏巧落在发现之前
+ *  的那一门课意图就静默失配（真机实测三门里的一门）。重试耗尽仍**不是失败**（意图已落盘，
+ *  且 hub 侧现在也会在 mode POST 时按需真扫），只是如实报进 `failed`。
  */
 export async function restoreCourseModes(
   cfg: RlConfig,
   only?: string,
+  retry: ModeRetry = {},
 ): Promise<{ restored: number; failed: string[] }> {
   const modes = readCourseModes()
   const failed: string[] = []
   let restored = 0
   for (const course of Object.keys(modes).sort()) {
-    const err = await pushMode(cfg, course, modes[course], only)
+    const err = await pushModeWithRetry(cfg, course, modes[course], only, retry)
     if (err) failed.push(`${course}: ${err}`)
     else restored += 1
   }
@@ -102,8 +145,12 @@ export async function restoreCourseModes(
 }
 
 /** 回灌结果 → 一行摘要（无意图 → 空串：调用方不要为「什么都没做」编文案）。 */
-export async function restoreCourseModesNote(cfg: RlConfig, only?: string): Promise<string> {
-  const { restored, failed } = await restoreCourseModes(cfg, only)
+export async function restoreCourseModesNote(
+  cfg: RlConfig,
+  only?: string,
+  retry: ModeRetry = {},
+): Promise<string> {
+  const { restored, failed } = await restoreCourseModes(cfg, only, retry)
   if (restored === 0 && failed.length === 0) return ''
   const head = `已回灌 ${restored} 门课的离线/在线意图`
   return failed.length ? `${head}；失败 ${failed.join('、')}` : head

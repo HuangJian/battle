@@ -3,7 +3,7 @@ import { existsSync } from 'fs'
 import path from 'path'
 import { REPO_ROOT } from '../../core/paths'
 import type { ConsoleStateView, MetricsView } from '../../web/view'
-import { courseEnableMarkerPath, loadConsoleState } from '../actions'
+import { courseEnableMarkerPath, loadConsoleState, readCourseModes } from '../actions'
 import { resolveCfTunnel, resolveRolloutSrc, resolveSlim } from '../../stack/specs'
 import { readIterMetrics, readPairedReferee } from '../iters'
 import { loadConfigSafe } from './config'
@@ -100,6 +100,11 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     // 与门禁动作开关**同源**——一处判据修三次才会三处各说各话，故只在这里算一次。
     trainingCourses: training,
     overview,
+    // 每课 hub 派发**意图**（控制台那份，权威）：hub 的 mode 是 volatile（重启回启动参数），
+    // 而这份由「切离线/切换成在线」与「离线开课」写入、起 hub 时回灌。UI 拿它跟 `overview`
+    // 里的 hub 事实比对 ⇒ 「意图未生效」可见（2026-09-23：回灌抢在发现之前 400，一门课
+    // 静默留在 online，面板却显示「在训/切离线」，操作员直到今天才发现）。
+    courseModeIntents: readCourseModes(),
     workerRegistry,
     loopQueue,
     courseLifecycle,

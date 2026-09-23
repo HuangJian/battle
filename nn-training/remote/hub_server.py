@@ -1647,10 +1647,18 @@ class _HubQueue(_AuthGuard):
         self._auth_blocked_until = dict(st._auth_blocked_until)
         self._solo = None
 
-    def discover(self) -> list[str]:
+    def discover(self, force: bool = False) -> list[str]:
         """扫 `<traj_root>/<course>/{remote-jobs,offline}`，把新鲜且未登记的课程登记进来。
 
         返回本次新增的课程（目录序，稳定）。`--discover` 未开 → 恒空（零开销）。
+
+        `force=True` 跳过一次扫描的最小间隔闸：**只在人工动作（`POST /admin/courses`）
+        指名要某门课时用**。为什么需要它（2026-09-23 事故，用户报障「三个离线课里有一个
+        显示在训」）：间隔闸是为了给派发热路径（`claim_next` 每拍调）减去重扫成本，但
+        它也让「刚建好 `remote-jobs/` 的课」在下一次顺带扫描之前不存在于 `_stores` 里
+        ——而那个窗口里打来的 mode POST 只会得到 400（「需要合法 course」），控制台
+        那一次有界重试（默认 3×2s）可能整段落在窗口内 ⇒ 意图从此静默失配（该课留在
+        online，面板一直显示「在训/切离线」）。指名一门课的写动作有资格要求一次真扫。
 
         为什么以**磁盘**为发现源、而不是让控制台/训练器走一次 HTTP 注册：训练侧把 job
         发布到 `<traj>/remote-jobs` 是**文件系统事实**（hub 与 trainer 共享同一份盘），
@@ -1662,7 +1670,7 @@ class _HubQueue(_AuthGuard):
         if root is None:
             return []
         now = self._now()
-        if now - self._discover_last < self.DISCOVER_SCAN_MIN_SEC:
+        if not force and now - self._discover_last < self.DISCOVER_SCAN_MIN_SEC:
             return []
         self._discover_last = now
         try:
@@ -3240,6 +3248,15 @@ class HubHandler(BaseHTTPRequestHandler):
         qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         course = (qs.get("course") or [""])[0]
         mode = (qs.get("mode") or [""])[0]
+        # 课程未知 ⇒ **按需真扫一次再试**（2026-09-23）：`set_mode` 只认已登记的课程，
+        # 而登记依赖顺带扫描（`claim_next`/`queue_state` 触发、有 2s 间隔闸）。于是
+        # 「刚开课 / hub 刚重启」那一刻打来的 mode POST 必然 400——控制台那侧的重试窗口
+        # 一旦整段落在发现之前，意图就静默失配（课留在 online，面板显示「在训/切离线」，
+        # 用户实测：三个离线课里恰有一个如此）。指名一门课的写动作有资格要求一次真扫。
+        # 只在「课不在表里」时扫（模式非法就不必扫盘了，直接落到下面 400）。
+        if not self.hub.set_mode(course, mode) and course and course not in self.hub.courses():
+            self.hub.discover(force=True)
+            self.hub.set_mode(course, mode)
         if not self.hub.set_mode(course, mode):
             self._json(
                 {

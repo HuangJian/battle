@@ -49,12 +49,20 @@ interface Call {
 let calls: Call[] = []
 /** 假 hub：`ok` = 200；`reject` = 400 + error；`throw` = 连不上。 */
 let mode: 'ok' | 'reject' | 'throw' = 'ok'
+/** 前 N 次请求先回 400（模拟「hub 课程表还没扫到这门课」），之后恢复正常。 */
+let rejectFirst = 0
 
 globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
   const url = String(input)
   const headers = (init?.headers ?? {}) as Record<string, string>
   calls.push({ url, method: String(init?.method ?? 'GET'), auth: headers.Authorization ?? '' })
   if (mode === 'throw') throw new Error('ECONNREFUSED 127.0.0.1:18787')
+  if (rejectFirst > 0) {
+    rejectFirst -= 1
+    return new Response(JSON.stringify({ error: '需要合法 course（[c5, c6]）与 mode' }), {
+      status: 400,
+    })
+  }
   if (mode === 'reject') {
     return new Response(JSON.stringify({ error: '需要合法 course（[c5, c6]）与 mode' }), {
       status: 400,
@@ -66,6 +74,7 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
 beforeEach(() => {
   calls = []
   mode = 'ok'
+  rejectFirst = 0
   saveConsoleState({ courseModes: {} })
 })
 
@@ -148,13 +157,45 @@ describe('restoreCourseModes（起 hub 后回灌）', () => {
   it('全部失败：逐课点名，摘要含「失败」（不谎报已回灌）', async () => {
     saveConsoleState({ courseModes: { c5: 'offline' } })
     mode = 'reject'
-    const note = await restoreCourseModesNote({
-      version: 1,
-      nodes: [],
-      rl: { hub_port: 18787, remote_token: 'tok' },
-    } as never)
+    const note = await restoreCourseModesNote(
+      {
+        version: 1,
+        nodes: [],
+        rl: { hub_port: 18787, remote_token: 'tok' },
+      } as never,
+      undefined,
+      { attempts: 2, delayMs: 0 },
+    )
     expect(note).toContain('失败')
     expect(note).toContain('c5')
+  })
+
+  it('★2026-09-23：「hub 还没扫到这门课」⇒ 有界重试（回灌跑在 hub 刚起来那一拍）', async () => {
+    // 真机事故（用户 2026-09-23 报障）：hub 重启时 courses=[]，九条回灌 POST 全 400；
+    // 三门离线课各自靠开课时那次重试去赌发现时机，**恰有一门输掉**（最后一次重试与发现
+    // 同一秒）⇒ 该课静默留在 online，面板一路显示「在训/切离线」。回灌必须自己重试。
+    saveConsoleState({ courseModes: { c5: 'offline' } })
+    rejectFirst = 2 // 前两次 400，第三次被接受
+    const r = await restoreCourseModes(
+      { version: 1, nodes: [], rl: { hub_port: 18787, remote_token: 'tok' } } as never,
+      undefined,
+      { attempts: 3, delayMs: 0 },
+    )
+    expect(r).toEqual({ restored: 1, failed: [] })
+    expect(calls).toHaveLength(3)
+  })
+
+  it('★2026-09-23：hub 连不上 ⇒ **不重试**（白等 N×2s 只让「起 hub」变慢，不会因为等而好）', async () => {
+    saveConsoleState({ courseModes: { c5: 'offline', c6: 'online' } })
+    mode = 'throw'
+    const r = await restoreCourseModes(
+      { version: 1, nodes: [], rl: { hub_port: 18787, remote_token: 'tok' } } as never,
+      undefined,
+      { attempts: 3, delayMs: 0 },
+    )
+    expect(r.restored).toBe(0)
+    expect(r.failed).toHaveLength(2)
+    expect(calls).toHaveLength(2) // 每门课只打一次
   })
 
   it('无意图：摘要为空串（调用方不该为「什么都没做」编文案）', async () => {
