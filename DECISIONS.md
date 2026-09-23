@@ -2348,3 +2348,37 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
   把 `AdminRoutes` 写在 `BaseHTTPRequestHandler` **之后** ⇒ 同上且静默。
 - **门禁**：**2274 passed / 3 skipped**；mypy 366 源文件绿。`hub_server.py` 3974 → 3728 行。
 —— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/engineering.md` §23「第三步」
+
+## §2026-09-23-goalnn-godmodule-wire（2026-09-23，用户指令「重构 nn-training：降耦合 / 复用代码 / 可维护性」）
+
+- **背景**：`remote/worker.py` 3450 行 / 68 个顶层函数，是 S4 最后两个神模块之一。它与前三刀
+  有本质差别——前三刀拆的是**类**（刀口靠「方法互调」量得出），这里要拆的是一整片顶层函数，
+  而顶层函数与**模块级可变状态同生共死**（先铺的安全网 `tests/test_worker_state_contract.py`
+  就是为这一步准备的）。
+- **备选与否决**：状态**留在宿主**、新模块延迟 import 回来——否（`wire` 读 `worker` 的全局 =
+  反向边，而 `worker` 又 import `wire` 拿函数 = 环；且 `_note_rate` 用 `global` **重绑**
+  `_BEST_RATE`，跨模块只改自己那份）；只搬**无状态**的几个函数——否（本簇 15 个函数里 6 个读
+  状态，拆一半只剩半张账）；连 `_wire_block` 一起搬——否（它是结果 payload 里的 `wire` 子字典，
+  **同名不同物**，属 `run_job` 的输出结构）；保留 `__all__` 之外的「隐式 re-export」——否
+  （ruff F401 会报未使用导入）。
+- **决定**：`WIRE_*` 阈值 7 个 + 状态 3 份（`_WIRE` / `_BEST_RATE` / `_BULK`）+ 15 个自由函数
+  （`set_bulk_log` · `_bulk_pace` · `_note_rate` · `_min_rate` · `_reroll_decision` ·
+  `WireSlowError` · `_wire_bucket` … `_wire_flush`）整簇搬进新 `remote/wire.py`；**状态随簇搬迁**，
+  `remote/wire.py` 是这三份状态的**唯一所有者**，`remote/worker.py` 只做
+  `from remote.wire import … as …` 的**显式转发**（自别名的写法是 ruff 认可的 re-export 写法）。
+  `_BULK` 同时被 `worker.py` 的传输核心（`_request` / `_get_with_retry` / `post_result`）使用——
+  同一实例经转发共享，`_wire_flush` 里的 `sched0` 增量（`s1 - s0`）才不会失真。
+- **注入点（这是本刀唯一需要迁移的 seam）**：`_WIRE` / `_BULK` 是**原地可变**（`.clear()` /
+  `.reset()`）——转发名指向同一对象，任意入口都一样（`test_wire_report` / `test_bulk_sched` /
+  `test_async_result_upload` / `test_control_plane_bypass` **一行不改**）；`_BEST_RATE` 是**重绑式**
+  会话标量——`worker._BEST_RATE = 0.0` 只换转发名，`_min_rate` 读不到，注入点**必须**是
+  `remote.wire._BEST_RATE`（只改了 `tests/test_wire_reroll.py` 的 autouse fixture）。
+- **违反后果**：状态留宿主而延迟 import ⇒ 两份账（`_wire_flush` 只读其中一份，静默的读数损失）；
+  新模块各自 `BulkScheduler()` ⇒ `sched0` 快照取自另一个实例、增量永久失真；把 `_BEST_RATE`
+  的注入点留在 `worker` ⇒ 测试重置无效而**照旧绿**（`_min_rate` 沿用会话旧值）；`_wire_block`
+  误随迁 ⇒ `run_job` 的结果 payload 缺字段。
+- **门禁**：**2295 passed / 3 skipped**（2287 → +8：状态守卫 13 → 15 例 + 新 `test_wire_split.py`
+  6 例）；mypy 369 源文件绿。`worker.py` 3450 → **3245** 行；`remote/wire.py` 289 行。
+  反向探针：`remote/_probe_wire.py::_WIRE` 被状态守卫点名、`worker.py` 里重复实现 `_wire_flush`
+  被拆分守卫点名。
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/engineering.md` §23「第四步」

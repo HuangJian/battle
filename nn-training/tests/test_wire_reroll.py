@@ -31,6 +31,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from common.protocol import RetryableError
+from remote import wire as wire_mod
 from remote import worker as worker_mod
 
 MB = 1024 * 1024
@@ -38,12 +39,17 @@ MB = 1024 * 1024
 
 @pytest.fixture(autouse=True)
 def _clean_wire_state():
-    """本文件的用例都动模块级状态（传输账 + 会话最好速率）——每例前后清干净。"""
+    """本文件的用例都动模块级状态（传输账 + 会话最好速率）——每例前后清干净。
+
+    `_WIRE` 是原地可变（`.clear()`），从 `worker` 或 `wire` 进都是同一份账；
+    而 `_BEST_RATE` 是**重绑式**会话标量，实现与注入点都在 `remote.wire`——
+    从 `worker` 重绑只会改名而不改值（S4 第四步拆分的 seam，见 `remote/wire.py`）。
+    """
     worker_mod._WIRE.clear()
-    worker_mod._BEST_RATE = 0.0
+    wire_mod._BEST_RATE = 0.0
     yield
     worker_mod._WIRE.clear()
-    worker_mod._BEST_RATE = 0.0
+    wire_mod._BEST_RATE = 0.0
 
 
 class _FakeResp:

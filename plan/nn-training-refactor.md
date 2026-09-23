@@ -393,6 +393,38 @@ _admin_net_probe(20) · _admin_halt(18) · _admin_queue(10) · _admin_status(9) 
 `tests/` 的注入点；前两刀的 seam 迁移分录可直接照抄）。`supervise_worker` / `worker_loop` / `main`
 是宿主，**不动**。
 
+#### 5.3.4 第四步落地（2026-09-23，已完成）—— wire / 低速重抽 / bulk 节流簇 → `remote/wire.py`
+
+**刀口**：`WIRE_*` 阈值 7 个 + 状态 3 份（`_WIRE` / `_BEST_RATE` / `_BULK`）+ 15 个自由函数
+（`set_bulk_log` · `_bulk_pace` · `_note_rate` · `_min_rate` · `_reroll_decision` · `WireSlowError` ·
+`_wire_bucket` · `_wire_start` · `_wire_add` · `_wire_time` · `_wire_hit` · `_wire_note_reroll` ·
+`_wire_flush`）。`worker.py` **3450 → 3245** 行；`remote/wire.py` 289 行。
+
+**§5.3.3 留的那个问题已定：状态随簇搬迁。** 留宿主只能靠延迟 import（`wire` 读 `worker` 的全局
+= 反向边，`worker` 又 import `wire` 拿函数 = 环），而且 `_note_rate` 用 `global` **重绑**
+`_BEST_RATE`——跨模块只改自己那份。⇒ `wire.py` 是这三份状态的**唯一所有者**，`worker.py` 只做
+`from remote.wire import … as …` 的**显式转发**（自别名是 ruff 认可的 re-export 写法）。
+
+**注入点分裂只有一处**：`_WIRE` / `_BULK` 原地可变（`.clear()` / `.reset()`）⇒ 任意入口都是同一对象
+（`test_wire_report` / `test_bulk_sched` / `test_async_result_upload` / `test_control_plane_bypass`
+**一行不改**）；`_BEST_RATE` 重绑 ⇒ 注入点**必须** `remote.wire._BEST_RATE`（只改了
+`tests/test_wire_reroll.py` 的 autouse fixture）。
+
+**守卫**：`tests/test_worker_state_contract.py` 改 **owner-aware**（13 → 15 例：清单按宿主分两组 ·
+扫副本跳过两个宿主 · 新增「转发必须 `is` 同一对象」）· 新 `tests/test_wire_split.py`（**6 例**：
+定义唯一 · 不得反向 import · 同一对象 · 一份账 · 顶层可变容器只许 `_WIRE` · 注入点口径）。
+反向探针两处都命中（`remote/_probe_wire.py::_WIRE` / `worker.py` 里重复实现 `_wire_flush`）。
+门禁 **2295 passed / 3 skipped**。
+
+> 决策 → `DECISIONS.md` §2026-09-23-goalnn-godmodule-wire；全文 → `engineering.md` §23「第四步」。
+
+**下一步（第五步）刀口**：BC 助手簇 —— `_bc_fetch_resume` / `_bc_local_resume_dir` /
+`_bc_store_local_resume` / `_bc_load_local_resume` / `_bc_post_epoch` / `_bc_device` /
+`normalize_ppo_device` / `resolve_bc_seed`（~L1583‑1753，现应为 ~L1350‑1520），与 `_run_bc_job`
+同生命周期。**先量**：它们读哪些模块全局、测试接缝在哪（`normalize_ppo_device` / `resolve_bc_seed`
+是公开名，可能有外部读者 ⇒ 需留门面）。`_run_bc_job`（190 行）/ `run_job`（743）/ `worker_loop`（364）
+是宿主，**不动**。
+
 ### 5.4 本轮**不做**（已核，刻意保留）
 
 - `remote/notebook_boot.py` ↔ `remote/offline_boot.py` 的孪生助手（`_build_opener` /

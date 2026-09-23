@@ -21,8 +21,8 @@ hub 推送、节点 failover、kickstart 系数、远端可重试异常集合）
 只是历史上「从 `loop_core.py` 拆出」时按大小切、没按职责切。S4 第一步把整簇**零逻辑改动**
 搬到 `rl/loop_transport.py`，`loop_steps` 只留门面 re-export（2328 → **1812** 行）。
 门禁 **2255 → 2262**（+7 守卫用例）全绿；同日第二步再拆远端 PPO 腿，第三步拆 `hub_server` 的
-admin 控制面，并为第四步（`worker.py`）先铺好**模块级状态契约**安全网（+13 例）——终值
-**2287 passed / 3 skipped**。
+admin 控制面，并为第四步（`worker.py`）先铺好**模块级状态契约**安全网（+13 例），第四步把
+wire 簇搬进 `remote/wire.py`（+8 例）——终值 **2295 passed / 3 skipped**。
 
 ### 先量结构，再选刀口（拆前侦察，都是实测）
 
@@ -226,10 +226,51 @@ patch 目标从 `rl.loop_steps.*` 迁到 `rl.loop_remote.*`（否则 `AttributeE
 
 门禁 **2287 passed / 3 skipped**。6 处状态与刀口建议见 `plan/nn-training-refactor.md` §5.3.3。
 
+### 第四步（同日）：wire / 低速重抽 / bulk 节流簇 → `remote/wire.py`（**状态随簇搬迁**）
+
+刀口 = `worker.py` 里那一整簇「传输账 + 低速重抽 + bulk 节流」：`WIRE_*` 阈值 7 个 ·
+状态 3 份（`_WIRE` / `_BEST_RATE` / `_BULK`）· 15 个自由函数（`set_bulk_log` / `_bulk_pace` /
+`_note_rate` / `_min_rate` / `_reroll_decision` / `WireSlowError` / `_wire_bucket` … `_wire_flush`）。
+新 `remote/wire.py` **289 行**；`worker.py` **3450 → 3245**。
+
+**唯一的新决策：状态随簇搬迁，宿主做显式转发。** 前置侦察里留的那个问题（「留宿主让子模块
+import」还是「随簇搬迁」）答案很硬——留宿主就只能靠**延迟 import**（`wire` 读 `worker` 的全局 =
+反向边，`worker` 又 import `wire` 拿函数 = 环），而且顶层函数读的是**导入时绑定的那个名字**：
+`_note_rate` 用 `global` **重绑** `_BEST_RATE`，一旦跨模块就只改自己那份。所以 `wire.py` 是这三份
+状态的**唯一所有者**，`worker.py` 只留 `from remote.wire import … as…` 的转发。
+
+**收益：注入点的分裂只有一处，而且分得很干净**
+
+| 状态 | 可变方式 | 注入点 | 为什么 |
+|---|---|---|---|
+| `_WIRE` / `_BULK` | **原地**（`.clear()` / `.reset()`） | 任意入口皆是同一对象 | 转发名指向同一个 dict / 调度器 ⇒ `worker._WIRE.clear()` 照旧有效 |
+| `_BEST_RATE` | **重绑**（`global`） | **只能** `remote.wire._BEST_RATE` | `worker._BEST_RATE = 0.0` 只换转发名，`_min_rate` 读不到（**静默**） |
+
+这比前三刀都干净：只动**一个**测试文件的一处 seam（`tests/test_wire_reroll.py` 的 autouse
+fixture 改重绑 `remote.wire._BEST_RATE`），另外 4 个直接 `.clear()` / `.reset()` 的测试文件
+**一行不改**。
+
+**守卫跟着换宿主（不是删掉）**：`tests/test_worker_state_contract.py` 改成 **owner-aware**
+（13 → **15 例**）：清单按宿主分成 `WORKER_*` / `WIRE_*` 两组 · 「别处副本」扫描跳过两个宿主 ·
+新增 `test_worker_reexports_are_the_same_objects`（**必须 `is` 同一对象**——这才是「两份账」
+的正面判据）与 wire 侧容器清点；`test_wire_reroll` 的 seam 语义写进 fixture docstring。
+另加 `tests/test_wire_split.py`（**6 例**）：定义唯一（搬走的名字不许在 `worker.py` 里再实现）·
+`wire` 不得反向 import `worker`（环）· 每个名字都是**同一对象**的转发 · `_WIRE` / `_BULK`
+跨两个入口仍是**一份账** · `wire.py` 顶层可变容器只许 `_WIRE` · **注入点口径**（重绑
+`worker._BEST_RATE` 不改判据、重绑 `wire._BEST_RATE` 才改）。
+
+**两个小坑**：① `wire.py` 有 `__all__`（一个顶层 `ast.List`），状态清点的「可变容器」判据差点
+把它记成新共享状态 ⇒ 判据跳过 `__` 前缀；② 转发导入必须写成 `from remote.wire import x as x`
+（ruff 只看自别名才认这是**有意 re-export**，否则 F401 报「未使用导入」）。
+
+**反向探针（判据是活的）**：往 `remote/` 放 `_WIRE: dict = {}` 探针 ⇒ 状态守卫点名
+`remote/_probe_wire.py::_WIRE`；往 `worker.py` 追加一个 `def _wire_flush` ⇒ 拆分守卫报
+`{'_wire_flush'}`；两处复原即回绿。门禁 **2287 → 2295 passed / 3 skipped**，mypy 369 源文件绿。
+
 ### 未做完（S4 余下）
 
-`remote/worker.py`（状态契约与安全网**已就绪**，见上；下一步拆 wire 簇与 BC 助手簇，
-但**先**决定 6 处状态是「留宿主让子模块 import」还是「随簇搬迁」）→ `hub_server` 其余路由组
+`remote/worker.py`（状态契约与 wire 簇**已就绪**，见上；下一步拆 BC 助手簇 `_bc_*` /
+`normalize_ppo_device` / `resolve_bc_seed`，刀口见 `plan/nn-training-refactor.md` §5.3.3/§5.3.4）→ `hub_server` 其余路由组
 （`_get_*` 12 / `_post_*` 11 → 通用助手）→ 最后两个千行状态类（`_JobStore` / `_HubQueue`：
 拆 = 拆状态）。设计见 `plan/nn-training-refactor.md` §5.3。`TrainingSteps` 本体还剩 952 行 /
 20 方法（切法是「按一条真实调用链切」，不是按行数等分）。
