@@ -31,6 +31,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from common.protocol import RetryableError
+from remote import http as http_mod
 from remote import wire as wire_mod
 from remote import worker as worker_mod
 
@@ -143,7 +144,9 @@ def _rerolling_request(monkeypatch, waste_bytes: int = 256 * 1024):
             raise worker_mod.WireSlowError(waste_bytes, 6.4 * 1024, 1180.0)
         return 200, body
 
-    monkeypatch.setattr(worker_mod, "_request", fake)
+    # 注入点 = `remote.http`：`_get_with_retry` 已搬进 http（S4 第五步），它在本模块命名空间
+    # 解析 `_request` ⇒ patch `worker` 会静默失效（patch 后调**宿主**函数的仍是 `worker`）。
+    monkeypatch.setattr(http_mod, "_request", fake)
     return calls, body
 
 
@@ -212,7 +215,7 @@ def test_exhausted_rerolls_still_fail_loudly(monkeypatch) -> None:
     def fake(base_url: str, token: str, path: str, **kw):
         return 500, b"boom"
 
-    monkeypatch.setattr(worker_mod, "_request", fake)
+    monkeypatch.setattr(http_mod, "_request", fake)
     with pytest.raises(RetryableError):
         worker_mod._get_with_retry(
             "http://hub",
@@ -233,7 +236,8 @@ def test_read_body_probes_only_its_first_chunk(monkeypatch) -> None:
         seen.append((got, total, elapsed))
         return True, 6.4 * 1024, 1180.0  # 第一次就判「该重抽」
 
-    monkeypatch.setattr(worker_mod, "_reroll_decision", spy)
+    # 同上：`_read_body` 在 `remote.http` 里解析 `_reroll_decision`。
+    monkeypatch.setattr(http_mod, "_reroll_decision", spy)
     resp = _FakeResp([b"x" * 256, b"y" * 256, b"z" * 256], total=768)
     with pytest.raises(worker_mod.WireSlowError):
         worker_mod._read_body(
@@ -283,8 +287,9 @@ def test_wire_buckets_are_capped() -> None:
 
 def test_download_payload_records_its_segment(monkeypatch) -> None:
     """真实下载路径（`download_payload`）自带记账：成功即落 `payload=` 段。"""
+    # `download_payload` 走 `_get_with_retry`（已搬 `remote.http`）⇒ 注入点在 http。
     monkeypatch.setattr(
-        worker_mod, "_request", lambda *a, **kw: (200, b"p" * (512 * 1024))
+        http_mod, "_request", lambda *a, **kw: (200, b"p" * (512 * 1024))
     )
     worker_mod.download_payload("http://hub", "t", "j6", log=lambda _m: None)
     lines: list[str] = []

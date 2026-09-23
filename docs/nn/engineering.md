@@ -22,7 +22,8 @@ hub 推送、节点 failover、kickstart 系数、远端可重试异常集合）
 搬到 `rl/loop_transport.py`，`loop_steps` 只留门面 re-export（2328 → **1812** 行）。
 门禁 **2255 → 2262**（+7 守卫用例）全绿；同日第二步再拆远端 PPO 腿，第三步拆 `hub_server` 的
 admin 控制面，并为第四步（`worker.py`）先铺好**模块级状态契约**安全网（+13 例），第四步把
-wire 簇搬进 `remote/wire.py`（+8 例）——终值 **2295 passed / 3 skipped**。
+wire 簇搬进 `remote/wire.py`（+8 例）、HTTP 传输核心搬进 `remote/http.py`（keystone，+7 例）——
+终值 **2302 passed / 3 skipped**。
 
 ### 先量结构，再选刀口（拆前侦察，都是实测）
 
@@ -267,10 +268,45 @@ fixture 改重绑 `remote.wire._BEST_RATE`），另外 4 个直接 `.clear()` / 
 `remote/_probe_wire.py::_WIRE`；往 `worker.py` 追加一个 `def _wire_flush` ⇒ 拆分守卫报
 `{'_wire_flush'}`；两处复原即回绿。门禁 **2287 → 2295 passed / 3 skipped**，mypy 369 源文件绿。
 
+### 第五步（同日）：`remote/worker.py` 的 HTTP 传输核心 → `remote/http.py`（keystone）
+
+刀口 = worker 里**所有**业务功能的公共底座：`_opener` + `_get_opener` · `BODY_*` 阈值 ·
+`_read_body` · `_POLL_WARN_AT` + `_warn_non_200` · `_request` · `_sched_headers` ·
+`_get_with_retry`（**281 行**，含 2 处状态）。`worker.py` **3290 → 3030**；新 `remote/http.py` 366 行。
+
+**为什么先拆它而不是先拆业务（这一刀选得比前四刀更关键）**：实测 BC 簇（`_bc_*` ×7 +
+`normalize_ppo_device` + `resolve_bc_seed` + `_run_bc_job`）**零模块级状态**，本可以直接搬——
+但它整簇站在 `_request` 上，而宿主里另外 18 个函数（作业生命周期 / 下载 / 结果回传）也站在
+同一原语上。先搬业务 = `worker ⇄ bc_job` 成环，延迟 import 只是「把环藏起来」（本仓
+`test_layering.py` 头部就记着这种旧账）。先下沉底座后，依赖变成 `http ← wire ← worker`（DAG），
+BC / 下载 / 作业生命周期三组从此都可选送。
+
+**依赖方向核实过**：`http.py` 只依赖 `remote.wire`（bulk 让路 / 重抽判据 / 传输账）与
+`remote.bulk_sched` / `common.protocol`，**不** import `remote.worker`（有守卫钉住）。
+
+**这一刀最有价值的发现：seam 要按「**调用点解析在哪个命名空间**」分档**。测试里
+patch `worker._request` 的有 20+ 处，但它们分两类，而且**两类都得留**：
+
+| 调用点 | 解析在 | patch 目标 | 例子 |
+|---|---|---|---|
+| `_get_with_retry` / `_read_body`（已搬） | `remote.http` | **`http`** | 下载族（`download_*` 走 `_get_with_retry`） |
+| 直调 `_request` 的宿主函数 | `remote.worker` | **`worker`**（**不动**） | `post_result` / `peek_jobs` / `claim_job` / `heartbeat` / `_bc_fetch_resume` |
+
+只迁了 3 个文件的 7 处（`test_wire_reroll` 4 · `test_body_transfer_guard` 3 · `test_remote_ppo` 3，其中
+`download_*` 那几处都是同一原因）。**教训**：上一刀我按「patch 后调宿主函数就不动」粗分，结果
+漏了「宿主函数**内部**走 `_get_with_retry`」这一类——它们是宿主的外形、传输层的里子，
+只有跑门禁才点得出来（就是 `test_download_payload_records_its_segment`）。
+
+**守卫**：`tests/test_worker_state_contract.py` 改成**三宿主**（`worker` / `wire` / `http` 各一张
+清单，`_POLL_WARN_AT` / `_opener` 归 `http`）· 新 `tests/test_http_split.py`（**8 例**：定义唯一 /
+不得反向 import / 转发同一对象 / 状态一份 / 顶层可变容器只许 `_POLL_WARN_AT` / **两个方向的
+注入点口径各一条**——「patch http 成功而 worker 是炸弹」与「patch worker 成功而 http 是炸弹」/）。
+反向探针两处都命中。门禁 **2295 → 2302 passed / 3 skipped**；mypy **371** 源文件绿。
+
 ### 未做完（S4 余下）
 
-`remote/worker.py`（状态契约与 wire 簇**已就绪**，见上；下一步拆 BC 助手簇 `_bc_*` /
-`normalize_ppo_device` / `resolve_bc_seed`，刀口见 `plan/nn-training-refactor.md` §5.3.3/§5.3.4）→ `hub_server` 其余路由组
+`remote/worker.py`（3030 行；底座已拆出，BC 簇现在可干净拆到 `remote/bc_job.py`——依赖
+`remote.http`，仍无环；刀口与门面清单见 `plan/nn-training-refactor.md` §5.3.5）→ `hub_server` 其余路由组
 （`_get_*` 12 / `_post_*` 11 → 通用助手）→ 最后两个千行状态类（`_JobStore` / `_HubQueue`：
 拆 = 拆状态）。设计见 `plan/nn-training-refactor.md` §5.3。`TrainingSteps` 本体还剩 952 行 /
 20 方法（切法是「按一条真实调用链切」，不是按行数等分）。

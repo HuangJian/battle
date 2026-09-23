@@ -31,6 +31,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from common.protocol import AUTH_HEADER, RetryableError
+from remote import http as http_mod
 from remote import worker as worker_mod
 from remote.hub_server import _JobStore, make_server
 
@@ -66,7 +67,8 @@ def test_body_stall_raises_named_timeout_with_byte_count() -> None:
 
 def test_body_progress_is_reported_and_budget_enforced(monkeypatch) -> None:
     """每片都报进度（节流值置 0）；总预算到点即抛（治「永远在滴水」）。"""
-    monkeypatch.setattr(worker_mod, "BODY_PROGRESS_MIN_SEC", 0.0)
+    # 注入点 = `remote.http`：`_read_body` 已搬进 http（S4 第五步），它读的是本模块的全局。
+    monkeypatch.setattr(http_mod, "BODY_PROGRESS_MIN_SEC", 0.0)
     seen: list[tuple[int, int, float]] = []
     resp = _FakeResp([b"a" * 700, b"b" * 700], headers={"Content-Length": "1400"})
     out = worker_mod._read_body(
@@ -103,7 +105,7 @@ def test_download_payload_passes_idle_guard(monkeypatch) -> None:
         seen["timeout"] = timeout
         return 200, b"payload"
 
-    monkeypatch.setattr(worker_mod, "_request", fake_request)
+    monkeypatch.setattr(http_mod, "_request", fake_request)
     assert worker_mod.download_payload("http://hub", "t", "jid1", log=lambda _m: None) == b"payload"
     assert seen["idle_timeout"] == worker_mod.BODY_IDLE_TIMEOUT_SEC
     assert seen["total_timeout"] == worker_mod.BODY_TOTAL_TIMEOUT_SEC
@@ -122,7 +124,7 @@ def test_stalled_download_is_loud_and_retried(monkeypatch) -> None:
             raise TimeoutError("body 停滞：45s 内没有新字节（已收 131072 bytes / 共 4848536）")
         return 200, b"payload-bytes"
 
-    monkeypatch.setattr(worker_mod, "_request", fake_request)
+    monkeypatch.setattr(http_mod, "_request", fake_request)
     out = worker_mod.download_payload("http://hub", "t", "jid1", log=logs.append)
     assert out == b"payload-bytes" and len(calls) == 2
     retry = [line for line in logs if "瞬时失败" in line and "停滞" in line]
@@ -133,7 +135,7 @@ def test_stalled_download_exhausts_into_retryable(monkeypatch) -> None:
     """停滞耗尽重试 → RetryableError（释放租约、重新领取；语义与旧行为一致）。"""
     monkeypatch.setattr(worker_mod.time, "sleep", lambda _s: None)
     monkeypatch.setattr(
-        worker_mod,
+        http_mod,
         "_request",
         lambda *_a, **_k: (_ for _ in ()).throw(TimeoutError("body 停滞：45s 无新字节")),
     )

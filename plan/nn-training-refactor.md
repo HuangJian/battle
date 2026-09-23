@@ -418,7 +418,9 @@ _admin_net_probe(20) · _admin_halt(18) · _admin_queue(10) · _admin_status(9) 
 
 > 决策 → `DECISIONS.md` §2026-09-23-goalnn-godmodule-wire；全文 → `engineering.md` §23「第四步」。
 
-**下一步（第五步）侦察（2026-09-23，AST 实测）：BC 簇与 HTTP 核心的依赖形状**
+#### 5.3.5 第五步（2026-09-23，**已完成**）—— HTTP 传输核心 → `remote/http.py`，BC 留待第六步
+
+侦察（AST 实测）—— BC 簇与 HTTP 核心的依赖形状：
 
 先把「谁依赖谁」量清——这决定第五步能不能直接拆 BC：
 
@@ -457,9 +459,20 @@ _admin_net_probe(20) · _admin_halt(18) · _admin_queue(10) · _admin_status(9) 
   `normalize_ppo_device` / `resolve_bc_seed` / `_bc_device` 被 `tests/` 直接 import ⇒ 同上。
   **注意** `tests/test_worker_device.py` 有一条读 `worker.py` **源码文本**的守卫
   （`flat.count("normalize_ppo_device(device)") == 1`，且顺序在 `"kind"]) == "bc"` 之前）——
-  它看的是 `run_job` 里的调用点（宿主，不动）⇒ 应继续绿，但必须跑一遍确认。
-* 纯助手单独拆（只搬 6 个无依赖函数，≈ 86 行）**否决**：收益 2.6%，且把一个关注点劈成两个
-  模块——与「按职责切」相悖。
+  它看的是 `run_job` 里的调用点（宿主，不动）⇒ 应继续绿，但必须跑一遍确认。* 纯助手单独拆（只搬 6 个无依赖函数，≈ 86 行）**否决**：收益 2.6%，且把一个关注点劈成
+  两个模块——与「按职责切」相悖。
+
+> **落地结果（同日）**：`remote/http.py` 已建成（366 行，281 行搬自 worker）；`worker.py`
+> **3290 → 3030** 行；依赖方向 `http ← wire ← worker`（DAG，守卫钉住 `http` 不 import `worker`）。
+> seam 实际只迁了 3 个文件的 7 处（`test_wire_reroll` 4 · `test_body_transfer_guard` 3 ·
+> `test_remote_ppo` 3）。守卫：状态契约改**三宿主**（`worker` / `wire` / `http`）＋新增
+> `tests/test_http_split.py`（**8 例**，含两个方向的注入点口径各一条）。
+> 反向探针两处命中。门禁 **2295 → 2302 passed / 3 skipped**；mypy 371 源文件绿。
+> 决策 → `DECISIONS.md` §2026-09-23-goalnn-godmodule-http；全文 → `engineering.md` §23「第五步」。
+>
+> ⚠ **差点漏掉的 seam 类**：`download_payload` 这样的**宿主外形、传输层里子**（在 `worker` 里，
+> 但走 `_get_with_retry`）——注入点在 `http`，是跑门禁才点出来的。第六步拆 BC 时同理：
+> `_bc_fetch_resume` / `_bc_post_epoch` / `_run_bc_job` 直调 `_request`，搬走后注入点随它们走。
 
 ### 5.4 本轮**不做**（已核，刻意保留）
 

@@ -2382,3 +2382,32 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
   反向探针：`remote/_probe_wire.py::_WIRE` 被状态守卫点名、`worker.py` 里重复实现 `_wire_flush`
   被拆分守卫点名。
 —— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/engineering.md` §23「第四步」
+
+## §2026-09-23-goalnn-godmodule-http（2026-09-23，用户指令「重构 nn-training：降耦合 / 复用代码 / 可维护性」）
+
+- **背景**：拆 `remote/worker.py` 的第五刀。原计划是拆 BC 簇（`_bc_*` ×7 +
+  `normalize_ppo_device` + `resolve_bc_seed` + `_run_bc_job`），但 AST 实测发现：BC 簇虽然
+  **零模块级状态**，却整簇站在 HTTP 传输原语（`_request` 系）上，而宿主里另外 18 个函数
+  （作业生命周期 / 下载 / 结果回传）也站在同一原语上。
+- **备选与否决**：直接拆 BC 簇——否（`bc_job` 要 `_request`、而 `worker` 又要 import `bc_job` ⇒
+  环；用函数内延迟 import 只是「把环藏起来」，本仓 `tests/test_layering.py` 头部专门记过这种旧账）；
+  只拆无依赖的纯助手（6 个无依赖函数，≈86 行）——否（收益 2.6%，且把一个关注点劈成两个模块）；
+  一步拆到底（连下载 / 作业生命周期一起搬）——否（每次只动一件事）。
+- **决定**：先把**公共底座**下沉为 `remote/http.py`：`_opener` + `_get_opener` · `BODY_*` 阈值 ·
+  `_read_body` · `_POLL_WARN_AT` + `_warn_non_200` · `_request` · `_sched_headers` ·
+  `_get_with_retry`（281 行，含 2 处状态）。状态仍**随簇搬迁**（与第四步同规），`worker.py`
+  只做显式转发。依赖方向核实为 `http ← wire ← worker`（DAG；`http` 不 import `worker`）。
+  搬完 `worker.py` 3290 → **3030** 行，BC / 下载 / 作业生命周期三组从此可选送。
+- **seam 分档（本步最有价值的结论，也是差点静默坏掉的地方）**：测试里 patch
+  `worker._request` 的有 20+ 处，必须按「调用点解析在哪个命名空间」分两类，**两类都得留**：
+  已搬的 `_get_with_retry` / `_read_body` 在 `remote.http` 解析 ⇒ 必须改指 `http`；
+  直调 `_request` 的宿主函数（`post_result` / `peek_jobs` / `claim_job` / `heartbeat` /
+  `_bc_fetch_resume`）仍在 `worker` 解析 ⇒ **一行不改**。实际只迁了 3 个文件的 7 处。
+  `BODY_PROGRESS_MIN_SEC` 同理（`_read_body` 读 `http` 的全局）。
+- **违反后果**：先拆业务簇 ⇒ `worker ⇄ bc_job` 环（下一次改动就会破）；seam 只迁一半 ⇒
+  「patch 打偏而测试全绿」（下载族尤其隐蔽：它们是**宿主的外形、传输层的里子**——
+  `download_payload` 在 `worker` 里、但它走 `_get_with_retry`，所以注入点在 `http`）。
+- **门禁**：**2302 passed / 3 skipped**（2295 → +7：新 `tests/test_http_split.py` 8 例，状态守卫
+  改三宿主后净 -1）；mypy **371** 源文件绿。反向探针：`remote/_probe_http.py::_POLL_WARN_AT`
+  被状态守卫点名、`worker.py` 里重复实现 `_request` 被拆分守卫点名。
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/engineering.md` §23「第五步」
