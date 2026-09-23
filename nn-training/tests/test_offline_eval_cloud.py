@@ -549,13 +549,17 @@ def test_backfeed_body_carries_only_this_rounds_eval_rows(tmp_path: Path) -> Non
         {"event": "eval", "iter": 2, "wver": "a" * 16, "stage": 0, "seed": 1},
         {"event": "eval", "iter": 3, "wver": "a" * 16, "stage": 0, "seed": 1},
         {"event": "eval", "iter": 2, "wver": "a" * 16, "stage": 0, "seed": 2, "source": "batcheval"},
-        {"event": "eval_summary", "iter": 2, "wver": "a" * 16},
+        # 本轮 summary 随体同行（控制台的 eval 列只认它；别轮的、B/C 的一律不带）
+        {"event": "eval_summary", "iter": 2, "wver": "a" * 16, "games": 4, "wins": 1},
+        {"event": "eval_summary", "iter": 3, "wver": "a" * 16, "games": 4, "wins": 2},
     ]
     (tmp_path / ArtifactStore.EVAL_LOG_NAME).write_text(
         "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8"
     )
     got = d._eval_rows_for(2)
-    assert [r["seed"] for r in got] == [1], "只发自家的、本轮的逐局行（source 行与 summary 不随行）"
+    assert [r["event"] for r in got] == ["eval", "eval_summary"], got
+    assert got[0]["seed"] == 1, "逐局行只发自家的、本轮的（source 行不随行）"
+    assert got[1]["games"] == 4
     assert d._eval_rows_for(9) == []
 
     # 上界：超出只发前 N 条（宁少不错——体超限会让整趟补传被拒，连权重一起丢）

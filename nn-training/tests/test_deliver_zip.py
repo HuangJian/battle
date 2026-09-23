@@ -46,6 +46,7 @@ def _make_artifact_zip(
     run_id="x1-demo",
     state="complete",
     row: dict | None = None,
+    eval_rows: list[dict] | None = None,
 ) -> Path:
     """用 `ArtifactStore` 亲手打一份真产物 zip（形状与云机产出的逐字段一致）。"""
     root = tmp_path / "art-src"
@@ -60,6 +61,10 @@ def _make_artifact_zip(
             weights_json=_weights(it),
             opt_tar=b"opt-%d" % it,
             row=row or {"agg": {"kl": 0.01}, "wall_sec": 1.0},
+        )
+    if eval_rows is not None:
+        (root / ArtifactStore.EVAL_LOG_NAME).write_text(
+            "\n".join(json.dumps(r) for r in eval_rows) + "\n", encoding="utf-8"
         )
     store.finalize(state=state, summary={"last_it": iters[-1]})
     out = tmp_path / "deliver-demo.zip"
@@ -124,6 +129,46 @@ def test_imported_rounds_land_in_the_course_ledger(tmp_path: Path) -> None:
     # 幂等：同一个包再导一次不写第二遍（账本是多写者文件，重导不应加倍）
     got2 = import_deliver_zip(z, dest, course="demo", log=log.append)
     assert got2["metric_rows"] == 0
+    assert len(ledger.read_text(encoding="utf-8").strip().splitlines()) == 2
+
+
+def test_imported_cloud_eval_summary_reaches_the_course_ledger(tmp_path: Path) -> None:
+    """云机 A 层评估（逐局行 **+ summary**）导入后都要落进课程账本。
+
+    用户 2026-09-23 实测：`x20-demo-mix` 云腿 it50–110、每 5 轮 400 局、`node=cloud` 的
+    读数全在账本里，控制台却一栏不显示——两条腿合并都只并 `event:"eval"` 逐局行，
+    把 summary 丢了，而控制台 eval 列 / eval 弹窗 / 开课回执与门判据**只读 summary**
+    （`readEvalSummaries` 只在 `event == "eval_summary"` 时建条目）。
+    """
+    z = _make_artifact_zip(
+        tmp_path,
+        iters=(1, 2),
+        run_id="r3",
+        eval_rows=[
+            {"event": "eval", "iter": 2, "wver": "a" * 16, "stage": 0, "seed": 1, "node": "cloud"},
+            {
+                "event": "eval_summary",
+                "iter": 2,
+                "wver": "a" * 16,
+                "games": 400,
+                "wins": 44,
+                "winRate": 0.11,
+                "nodes": {"cloud": 400},
+            },
+        ],
+    )
+    dest = tmp_path / "demo" / "deliver"
+    log: list[str] = []
+    got = import_deliver_zip(z, dest, course="demo", log=log.append)
+    assert got["eval_rows"] == 1 and got["eval_summaries"] == 1
+    ledger = dest.parent / "eval_log.jsonl"
+    rows = [json.loads(ln) for ln in ledger.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert [r["event"] for r in rows] == ["eval", "eval_summary"]
+    assert rows[1]["games"] == 400 and rows[1]["nodes"] == {"cloud": 400}
+    assert any("summary" in m for m in log), log
+    # 幂等：同一个包再导一次，两类都不再写
+    got2 = import_deliver_zip(z, dest, course="demo", log=log.append)
+    assert (got2["eval_rows"], got2["eval_summaries"]) == (0, 0)
     assert len(ledger.read_text(encoding="utf-8").strip().splitlines()) == 2
 
 

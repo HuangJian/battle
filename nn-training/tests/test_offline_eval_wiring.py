@@ -363,7 +363,8 @@ def test_deliver_import_merges_carried_eval_rows_into_the_course_ledger(tmp_path
     rows = [
         {"event": "eval", "iter": 3, "wver": "a" * 16, "stage": 0, "seed": 860001, "node": "cloud"},
         {"event": "eval", "iter": 3, "wver": "a" * 16, "stage": 0, "seed": 860002, "node": "cloud"},
-        {"event": "eval_summary", "iter": 3, "wver": "a" * 16},
+        # summary 也要并：控制台的 eval 列只读它（2026-09-23 修）
+        {"event": "eval_summary", "iter": 3, "wver": "a" * 16, "games": 400, "wins": 30},
     ]
     with zipfile.ZipFile(src, "w") as z:
         z.writestr("plan.json", "{}")
@@ -374,15 +375,18 @@ def test_deliver_import_merges_carried_eval_rows_into_the_course_ledger(tmp_path
 
     course_dir = tmp_path / "tmp" / COURSE
     got = import_deliver_zip(src, course_dir / "deliver", course=COURSE, log=_quiet)
-    assert got["eval_rows"] == 2, "逐局行必须并进课程账本（summary 不并：按合并后的台账重算）"
+    assert (got["eval_rows"], got["eval_summaries"]) == (2, 1), (
+        "逐局行与 summary 都要并进课程账本（后者是控制台 eval 列的唯一数据源）"
+    )
     ledger = course_dir / "eval_log.jsonl"
     merged = [json.loads(ln) for ln in ledger.read_text(encoding="utf-8").splitlines()]
-    assert [r["seed"] for r in merged] == [860001, 860002]
+    assert [r.get("seed") for r in merged] == [860001, 860002, None]
+    assert merged[-1]["event"] == "eval_summary" and merged[-1]["games"] == 400
 
-    # 再导一次（同一个包）⇒ 去重，不会再写一行
+    # 再导一次（同一个包）⇒ 去重，两类都不会再写
     got2 = import_deliver_zip(src, course_dir / "deliver", course=COURSE, log=_quiet)
-    assert got2["eval_rows"] == 0
-    assert len(ledger.read_text(encoding="utf-8").strip().splitlines()) == 2
+    assert (got2["eval_rows"], got2["eval_summaries"]) == (0, 0)
+    assert len(ledger.read_text(encoding="utf-8").strip().splitlines()) == 3
 
 
 def test_deliver_zip_without_eval_log_is_unaffected(tmp_path: Path) -> None:
@@ -437,7 +441,15 @@ def test_backfeed_body_includes_eval_rows_for_the_round(tmp_path: Path) -> None:
     store.start({"start_it": 1, "end_it": 3, "pair_args": {}}, {"runId": "run-x"}, plan_sha256="s" * 64)
     store.checkpoint(2, weights_json=b'{"w":2}', opt_tar=b"o", row={"it": 2})
     (art / ArtifactStore.EVAL_LOG_NAME).write_text(
-        json.dumps({"event": "eval", "iter": 2, "wver": "a" * 16, "stage": 0, "seed": 1}) + "\n",
+        "\n".join(
+            json.dumps(r)
+            for r in (
+                {"event": "eval", "iter": 2, "wver": "a" * 16, "stage": 0, "seed": 1},
+                # summary 一并随体（重投那次才有的那份）：控制台的 eval 列只认它
+                {"event": "eval_summary", "iter": 2, "wver": "a" * 16, "games": 4, "wins": 1},
+            )
+        )
+        + "\n",
         encoding="utf-8",
     )
     sent: list[dict] = []
@@ -456,7 +468,7 @@ def test_backfeed_body_includes_eval_rows_for_the_round(tmp_path: Path) -> None:
         log=_quiet,
     )
     assert d._post_artifact(2)
-    assert sent and [r["seed"] for r in sent[0]["eval_rows"]] == [1]
+    assert sent and [r["event"] for r in sent[0]["eval_rows"]] == ["eval", "eval_summary"]
     assert sent[0]["it"] == 2 and sent[0]["weights_json"]
 
 

@@ -27,11 +27,11 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | 文档 | 覆盖 | 节数 |
 |---|---|---|
 | [`docs/nn/legacy.md`](nn/legacy.md) | **早期谱系归档**（2026-08-18 ~ 08-29）：v1/v2 student、P1.5 蒸馏、BC 热启动、无道具纪元、第一代 RL 流水线 —— 已被 goal-space 取代，只作史实与教训 | 22 |
-| [`docs/nn/remote-transport.md`](nn/remote-transport.md) | hub / worker / 云机 / 隧道 / 离线任务包 / 产物回传 / 优先级调度 / wire 账 | 33 |
+| [`docs/nn/remote-transport.md`](nn/remote-transport.md) | hub / worker / 云机 / 隧道 / 离线任务包 / 产物回传 / 优先级调度 / wire 账 | 34 |
 | [`docs/nn/training-stack.md`](nn/training-stack.md) | 训练循环 · 调度器 · supervisor · 课程编排 · 采样配额 · 门禁与停车 · kickstart | 24 |
 | [`docs/nn/experiments.md`](nn/experiments.md) | 课程腿判决 / 探针 / 负结果归档（含人类探针与 BC-ref 判死） | 32 |
 | [`docs/nn/engineering.md`](nn/engineering.md) | 测试纪律 · 子进程编码契约 · 门禁耗时 · 账本与 metrics schema · 语料指纹 | 19 |
-| [`docs/nn/console.md`](nn/console.md) | dashboard 侧：组件面 / 调度器视图 / 任务包与产物两条腿 / 回显 | 11 |
+| [`docs/nn/console.md`](nn/console.md) | dashboard 侧：组件面 / 调度器视图 / 任务包与产物两条腿 / 回显 | 12 |
 | [`docs/nn/runtime-opt.md`](nn/runtime-opt.md) | rollout / eval 运行时：native 内核 · 并发口径 · 派发 · 单局看门狗 · 长驻池 | 22 |
 | [`docs/nn/tpu-perf.md`](nn/tpu-perf.md) | TPU / XLA：设备实测 · 单步耗诊断 · 编译缓存 · PPO 吞吐 | 9 |
 

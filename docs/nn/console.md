@@ -7,6 +7,27 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §13 云腿 eval 在表上看不见：读方只认 `eval_summary`，而两腿都没并它（2026-09-23）
+
+> 全文（根因 / 修法 / 单调规则 / 为什么不在读方合成）在
+> `docs/nn/remote-transport.md §35`——控制台侧只记这条链的读方事实。
+
+用户实测：`x20-demo-mix` 云腿 **it50–110、每 5 轮 400 局、`node=cloud`** 的读数全在
+`tmp/<课>/eval_log.jsonl` 里（`wver` 逐轮不同、轨迹连贯），控制台**一栏不显示**。
+
+根因不在读方（读方没错），在写方：数据是**逐局行在、summary 行缺**，而本文件涉及的四个读方
+全部**只建 summary 条目**：
+
+| 读方 | 位置 | 建条目的条件 |
+|---|---|---|
+| 指标表 eval 列 / 配对基准 / 衍生列（`avgTicks` 等） | `server/iters.ts::readEvalSummaries` | `event === 'eval_summary'` |
+| eval 逐局弹窗 | `iters.ts::readLatestEvalGames` | 先按 summary 找最大 iter |
+| 开课回执「起点-基线对照」 | `stack/kickstart-receipt.ts` | 同 |
+| 门判据趋势（python 侧） | `rl/gate_check.py::read_trend_rows` | 同 |
+
+⇒ 修在写方（回传/导入合并时把 summary 一并并进去，单调规则），**读方一字未动**。
+
+---
 ## §12 两腿同字段收口：`demo_bc`/`kickstart` 进搬运表 + 逐局画像改取**单局 manifest**（2026-09-23）
 
 承 §10。两个都是「同一张表两条腿不可比」的缺口，都在**数据源**上，不是显示层。

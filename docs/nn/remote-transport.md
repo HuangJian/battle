@@ -7,6 +7,55 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §35 云腿评估读数的 summary 也要并（`eval_summary` 是控制台/门判唯一认的键）（2026-09-23）
+
+用户 2026-09-23 实测：`x20-demo-mix` 云腿 **it50–110、每 5 轮 400 局、`node=cloud`** 的读数
+全在课程账本里（`wver` 逐轮不同、轨迹连贯），**控制台却一栏都不显示**。
+
+### 根因：两条腿都只并逐局行，而读方只认 summary
+
+`rl/eval_local.merge_eval_rows`（人工导入腿）与 `remote/hub_server.merge_eval_rows`（实时补传腿）
+都只并 `event:"eval"` 逐局行，把 `event:"eval_summary"` **丢掉**；而读方一律只建 summary：
+
+| 读方 | 建条目/行的条件 |
+|---|---|
+| `dashboard/src/server/iters.ts::readEvalSummaries`（指标表 eval 列、配对基准、`davgTicks` 等衍生列） | `r.event === 'eval_summary'` |
+| `iters.ts::readLatestEvalGames`（eval 弹窗） | 先找 summary 的最大 iter，再取该 `(iter,wver)` 的逐局行 |
+| `stack/kickstart-receipt.ts`（开课回执基线对照） | 同 |
+| `rl/gate_check.py::read_trend_rows`（门判据趋势） | 同 |
+
+丢 summary 的原始依据是「summary 由课程侧按合并后的台账重算」。**对纯云腿这条退路不存在**
+——全程没有本地循环（下一轮 PPO 在云上跑），没人替它算 ⇒ 数据在账本里、读数在屏幕上为零。
+
+### 修法：云机自己那份 summary 一并并进去（单调）
+
+* `rl/eval_local`：新增 `eval_summary_key` / `read_eval_summary_rows` / `append_eval_summaries`；
+  `merge_eval_rows` 改为返回 `(逐局行数, summary 行数)`。
+* **单调规则**：只在该 `(iter, wver)` 尚无 summary、或新来的 `games` **更多**时追加
+  （断点续跑「先部分 200 局、后补齐 400 局」要能升级）；后到的旧 summary 一律不覆盖新的。
+  读方「同 iter 多条取最后一条」⇒ 有效读数就是补齐后的那一份；重投/重导幂等。
+* **补传体补上 summary**：`OfflineDeliverer._eval_rows_for` 原只发逐局行（上界 400 条）⇒ 现在
+  连本轮的 summary 行一起发（每个 `(iter,wver)` 至多一行，不占上界）。这正是既有「评估落账后
+  重投一次」那条路（`on_round_done` → `submit_eval_round`）该带的东西。
+* **报告/日志分两类计数**：导入回执新增 `eval_summaries` 键，hub 端点打
+  `eval rows +N / summary +M`——少一类时能一眼看出（否则又是「看着导入了、实际表里没数」）。
+
+### 为什么不改成「读方从逐局行合成 summary」
+
+读方合成 = 在两处（TS 视图、Python 门）各写一套聚合口径，与 `settle_eval_summary` 三足鼎立
+——口径一分为二正是 §10/§12 治的那个病。把云机**同一份实现**（它自己就调
+`settle_eval_summary`）算出的 summary 搬回账本，才是「同一份读数」。
+
+**验证**：`tests/test_eval_ledger_merge.py`（单调/幂等/坏行不抛/两类计数）、
+`tests/test_offline_resume_anchor.py`（端到端补传：summary 落账 + 重投幂等）、
+`tests/test_offline_eval_wiring.py`（体里带 summary + 导入腿并两类）、
+`tests/test_offline_eval_cloud.py`（`_eval_rows_for` 只带本轮、不带 B/C 与别轮）、
+`tests/test_deliver_zip.py`（包里的 summary 落到课程账本）。
+
+**存量数据**：已并过但无 summary 的旧轮（如那份 it50–110）**只能重导一遍产物 zip** 才能补上
+（重导对逐局行幂等、对 summary 是新增）；数据目录已删则不可补（本轮修复只对未来生效）。
+
+---
 ## §34 回传轮的课程侧三处落位：交付镜像 / 活动权重 / 权重归档（2026-09-23）
 
 用户 2026-09-23 实测（`x20-demo-mix` seg-2，it49–124）：产物**都在盘上**
@@ -466,9 +515,11 @@ rolloutSec/ppoSec 均真实。⇒ 「重复导入」是支持的（同 run_id �
 1. **artifacts zip**：`ArtifactStore.finalize` 把 `eval_log.jsonl` 打进包（原来只打 plan/manifest/
    readme/state/metrics/it-*——云上白评一轮的那种漏）；
 2. **人工导入**：`remote.deliver_zip` 导入时把包里的 `eval_log.jsonl` 并进课程账本
-   （`<traj>/<课>/eval_log.jsonl`，按 `(iter,wver,stage,seed)` 去重；summary 不并——按合并后的
-   台账重算更可信）；
-3. **实时补传**：`_post_artifact` 的体里带 `eval_rows`（只本轮的、无 `source` 的逐局行，上界 400 条），
+   （`<traj>/<课>/eval_log.jsonl`，按 `(iter,wver,stage,seed)` 去重）——**含 summary**：
+   2026-09-23 之前只并逐局行、把 summary 丢掉，而控制台的表/弹窗/开课回执与门判据
+   只认 summary（「课程侧重算」对纯云腿不成立）⇒ 整段读数上不了屏，见 **§35**；
+3. **实时补传**：`_post_artifact` 的体里带 `eval_rows`（只本轮的、无 `source` 的逐局行，上界 400 条；
+   **另带本轮 summary 一行**，见 §35），
    hub 侧 `_HubQueue.merge_eval_rows` 并进课程账本 ⇒ 段内就能在板子上看到读数。
    ⚠ **时序陷阱**（并行带来的顺序后果）：产物 POST 发生在落盘之后而评估还在飞 ⇒ 第一次投递
    时这一轮的 `eval_rows` 还不存在（若只做这一条，实时路径会**永不**带上读数——看着实现了、

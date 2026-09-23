@@ -610,14 +610,20 @@ class OfflineDeliverer:
     EVAL_ROWS_CAP = 400
 
     def _eval_rows_for(self, it: int) -> list[dict]:
-        """产物目录里本轮的逐局评估行（`eval_log.jsonl`；没评过 = 空列表，永不抛）。
+        """产物目录里本轮的评估读数（`eval_log.jsonl`；没评过 = 空列表，永不抛）。
 
-        只取 `iter == it` 且没有 `source` 的逐局行（`source` 是 B/C evalboard 行的标记，
+        逐局行：只取 `iter == it` 且没有 `source` 的（`source` 是 B/C evalboard 行的标记，
         它们不是这条腿的读数）。上界 `EVAL_ROWS_CAP`：超过就只发前 N 条并记一笔
         （宁少不错——体超限会让整个补传被拒，连权重一起丢）。
+
+        **summary 行也一起发**（每个 `(iter,wver)` 至多一行，不占上界）：它是控制台指标表
+        eval 列 / eval 弹窗 / 开课回执 / 门判据唯一认的读数键（2026-09-23：只发逐局行
+        ⇒ 云腿整段的评估在控制台上不可见），而云机自己的账本就是它唯一的产地——
+        本地没有这条腿的循环，没人替它算。
         """
         p = Path(self.root) / ArtifactStore.EVAL_LOG_NAME
         rows: list[dict] = []
+        summary: list[dict] = []
         try:
             if not p.exists():
                 return rows
@@ -628,9 +634,14 @@ class OfflineDeliverer:
                     r = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if not isinstance(r, dict) or r.get("event") != "eval" or "source" in r:
+                if not isinstance(r, dict) or "source" in r:
                     continue
                 if r.get("iter") != int(it):
+                    continue
+                if r.get("event") == "eval_summary":
+                    summary.append(r)
+                    continue
+                if r.get("event") != "eval":
                     continue
                 rows.append(r)
         except OSError:
@@ -641,7 +652,7 @@ class OfflineDeliverer:
                 f"——只发前 {self.EVAL_ROWS_CAP} 条（其余随 artifacts zip 回去）"
             )
             rows = rows[: self.EVAL_ROWS_CAP]
-        return rows
+        return rows + summary
 
     def deliver_result(self, *, it_end: int, state: str, summary: dict | None = None) -> bool:
         """段末摘要（跑到哪、什么状态、失败原因）。best-effort；**永不抛**。

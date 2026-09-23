@@ -204,6 +204,15 @@ def test_backfeed_eval_rows_land_in_the_course_ledger(tmp_path: Path) -> None:
     base, hub, srv = _boot(tmp_path)
     try:
         wj = b'{"w":1}'
+        summary = {
+            "event": "eval_summary",
+            "iter": 2,
+            "wver": "a" * 16,
+            "games": 4,
+            "wins": 1,
+            "winRate": 0.25,
+            "nodes": {"cloud": 4},
+        }
         rows = [
             {
                 "event": "eval",
@@ -214,7 +223,9 @@ def test_backfeed_eval_rows_land_in_the_course_ledger(tmp_path: Path) -> None:
                 "node": "cloud",
                 "win": 1,
             },
-            {"event": "eval_summary", "iter": 2, "wver": "a" * 16},  # 不该进逐局账本
+            # summary **要**进账本：控制台 eval 列 / 弹窗 / 开课回执与门判据只认它
+            # （2026-09-23：只并逐局行 ⇒ 云腿整段的读数在控制台上不可见）
+            summary,
         ]
         body = {
             "run_id": "run-a",
@@ -229,24 +240,27 @@ def test_backfeed_eval_rows_land_in_the_course_ledger(tmp_path: Path) -> None:
         assert status == 200, raw[:200]
         ledger = tmp_path / COURSE / "eval_log.jsonl"
         got = [json.loads(ln) for ln in ledger.read_text(encoding="utf-8").splitlines()]
-        assert len(got) == 1 and got[0]["seed"] == 860001 and got[0]["node"] == "cloud"
+        assert [r["event"] for r in got] == ["eval", "eval_summary"], got
+        assert got[0]["seed"] == 860001 and got[0]["node"] == "cloud"
+        assert got[1]["games"] == 4 and got[1]["winRate"] == 0.25
 
-        # 幂等重投（补传天然会重传）：同一行不再写第二次
+        # 幂等重投（补传天然会重传）：两类都不再写第二次
         status2, _ = _post(base, OFFLINE_ARTIFACT_PATH, body)
         assert status2 in (200, 409)
         got2 = [json.loads(ln) for ln in ledger.read_text(encoding="utf-8").splitlines()]
-        assert len(got2) == 1
+        assert len(got2) == 2
     finally:
         srv.shutdown()
 
 
-def test_course_specific_ledger_helper_is_idempotent(tmp_path: Path) -> None:
+def test_course_specific_ledger_helper_reports_both_kinds(tmp_path: Path) -> None:
     base, hub, srv = _boot(tmp_path)
     try:
         row = {"event": "eval", "iter": 1, "wver": "b" * 16, "stage": 3, "seed": 7}
-        assert hub.merge_eval_rows(COURSE, [row, "junk", {"event": "eval_summary"}]) == 1
-        assert hub.merge_eval_rows(COURSE, [row]) == 0
-        assert hub.merge_eval_rows(COURSE, None) == 0
+        # 返回 (逐局行, summary) 两个计数；「junk」与无身份的形状不计（不猜）
+        assert hub.merge_eval_rows(COURSE, [row, "junk", {"event": "eval_summary"}]) == (1, 0)
+        assert hub.merge_eval_rows(COURSE, [row]) == (0, 0)
+        assert hub.merge_eval_rows(COURSE, None) == (0, 0)
         ledger = tmp_path / COURSE / "eval_log.jsonl"
         assert json.loads(ledger.read_text(encoding="utf-8").strip())["seed"] == 7
     finally:
