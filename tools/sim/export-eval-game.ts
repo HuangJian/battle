@@ -49,7 +49,7 @@ import { buildReplayFilename, serializeReplayFile } from '../../src/replay/file'
 import type { ReplayType } from '../../src/replay/types'
 import { ObsEncoder, computeMasks } from '../../src/nn/obs-encoder'
 import { buildModelFromText } from '../../src/nn/infer'
-import { featuresEngine } from '../../src/nn/conv-wasm'
+import { featuresEngine } from '../../src/nn/conv/conv'
 import { GoalExecutor } from '../../src/nn/goal-executor'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import type { InputLike } from '../../src/game/Input'
@@ -86,6 +86,7 @@ function enemyKindIndex(kind: string): number {
   }
 }
 import { buildPack } from './pack-container'
+import { runServe } from './serve-loop'
 
 const MAX_TICKS = 36000
 const K = 10
@@ -479,8 +480,15 @@ export function runEvalOne(
   while (t < maxTicks) {
     // v3.7：意图执行器每 tick 内部自决（replan 帧跑 NN），无需手动 forward。
     if (policy === 'nn' || policy === 'nn-goal') {
-      encoder.encode(world)
       if (t % K === 0) {
+        // 编码**只在决策 tick**（与 export-rl-rollout.ts 的 §368 提速③ 同式，2026-09-22 补上）：
+        // obs 只被下一行的 forward 消费，而 forward 每 K 个 tick 才跑一次 ⇒ 原先把
+        // encode 放在守卫外是每 tick 白编码（K=10 ⇒ 9 次浪费）。代价不小：编码器 14–18 µs/次，
+        // 大头是上帝 AI 的 killAssessment（obs 规格要求的一段重计算，不是平凡数组填充）。
+        // 实测单局省 ~20 ms = eval 单局游戏时间 −4.2%，且报告逐字段相同（卷积优化计划 §4.7.4
+        // 的真 A/B：outcome/ticks/win/score/kills/hitRate/pickups 全同）。
+        // 这条会随内核优化变得更值钱：浪费占比 ≈ 9 × 编码µs / featuresµs。
+        encoder.encode(world)
         model!.forward(encoder.obs, encoder.scalars)
         if (t === 0 && process.env.EVAL_DEBUG) {
           console.error(
@@ -947,53 +955,7 @@ export function main(argv: string[]): void {
   )
 }
 
-/**
- * --serve：长驻模式（配合 sampler-agent 的 persist worker）。
- *
- * 为什么 eval 也要：agent 侧只有 `export-rl-rollout.ts` 走长驻 worker，eval/BC 每局都 `spawn`
- * 一个新 bun —— 在这台手机上（a95/Termux）实测那一下要 **~2.5s**（mac 0.03s），而一局游戏本身
- * 才 ~1s；更贵的是它把 agent 的事件循环占满（任务中 `/v1/status` 首轮应答被拖 2.59s），
- * 并发吞吐被吃。协议与 export-rl-rollout 的 serve 完全一致：stdin 每行 = 一个任务的 argv
- * （JSON 数组），跑完打印 `__SERVE_OK__`（失败 `__SERVE_ERR__ <msg>`）后继续等下一行；
- * 每局仍走与一次性调用完全相同的 main 路径 ⇒ 产物逐字节一致。
- */
-function serve(): void {
-  let buf = ''
-  const handle = (line: string): void => {
-    const t = line.trim()
-    if (!t) return
-    let argv: string[]
-    try {
-      argv = JSON.parse(t) as string[]
-    } catch {
-      process.stdout.write('__SERVE_ERR__ bad-json\n')
-      return
-    }
-    try {
-      main(argv)
-      process.stdout.write('__SERVE_OK__\n')
-    } catch (e) {
-      process.stdout.write(`__SERVE_ERR__ ${e instanceof Error ? e.message : String(e)}\n`)
-    }
-  }
-  process.stdin.setEncoding('utf8')
-  process.stdin.on('data', (c: string) => {
-    buf += c
-    let nl = buf.indexOf('\n')
-    while (nl >= 0) {
-      handle(buf.slice(0, nl))
-      buf = buf.slice(nl + 1)
-      nl = buf.indexOf('\n')
-    }
-  })
-  process.stdin.on('end', () => {
-    if (buf.trim()) handle(buf)
-    process.exit(0)
-  })
-  process.stdout.write('__SERVE_READY__\n')
-}
-
 if (import.meta.main) {
-  if (process.argv.includes('--serve')) serve()
+  if (process.argv.includes('--serve')) runServe(main)
   else main(process.argv.slice(2))
 }

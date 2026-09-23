@@ -88,10 +88,10 @@ def _host_native_lib_rel() -> str | None:
     if arch is None:
         return None
     plat = sys.platform  # 'win32' / 'linux' / 'darwin'（与 process.platform 同名）
-    lib = {"win32": "conv_feats_native.dll", "darwin": "conv_feats_native.dylib"}.get(
-        plat, "conv_feats_native.so"
+    lib = {"win32": "conv_native.dll", "darwin": "conv_native.dylib"}.get(
+        plat, "conv_native.so"
     )
-    rel = f"src/nn/native/prebuilt/{plat}-{arch}/{lib}"
+    rel = f"src/nn/conv/prebuilt/{plat}-{arch}/{lib}"
     return rel if (REPO_ROOT / rel).exists() else None
 
 
@@ -135,8 +135,8 @@ def test_node_runner_shards_byte_identical_to_direct_run(tmp_path: Path) -> None
     with zipfile.ZipFile(ts_zip) as zf:
         zf.extractall(ts_root)
     assert (ts_root / "tools/sim/export-rl-rollout.ts").exists()
-    assert (ts_root / "src/nn/wasm/conv_feats.wasm").exists(), \
-        "wasm 权重没进 ts_code —— 云机上卷积会直接炸"
+    assert (ts_root / "src/nn/conv/prebuilt/wasm/conv.wasm").exists(), \
+        "wasm 内核没进 ts_code —— 云机上卷积会直接炸"
     # native 共享库同理：云机没有 clang、也不持仓库，只能靠 ts_code 带过去；
     # 漏了它不会报错，只会**静默**回落 wasm（每局 1338ms）。
     host_lib = _host_native_lib_rel()

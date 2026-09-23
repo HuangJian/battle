@@ -2,10 +2,12 @@
  * native-parity.test.ts —— native features 内核 vs wasm 的**逐字节**等价门（评审 B2/B3）。
  *
  * 为什么这个测试必须存在（rollout-eval-opt.plan.md §4 T0′）：
- *  原先「native 与 wasm 8/8 逐位一致」只存在于一个手工脚本里（硬编码 tmp/conv_features_cli.exe、
- *  脚本自己不构建），tmp 一清就再也验不了；而 native 侧内核与 wasm 侧内核是**两份独立实现**
- *  （wasm 用 wasm_simd128 intrinsics，动它就是动产品字节，不能共享源码）。所以两侧的一致性
- *  只能靠机械对拍钉住，而不是靠"同序"的口头约定。
+ *  原先「native 与 wasm 8/8 逐位一致」只存在于一个手工脚本里（硬编码 tmp/conv_cli.exe、
+ *  脚本自己不构建），tmp 一清就再也验不了。2026-09-22 起两侧已是**同一份内核源码**
+ *  （`src/nn/conv/conv.c`，native 与 wasm32 两个编译目标），但本门禁**仍然必要**：
+ *  两侧唯一的差异量是目标条件常量 `CF_PW_PX`（wasm 8 / native 16），它只决定「哪些像素进
+ *  同一条向量寄存器」，契约要求两侧输出**逐位相同**；哪天有人动了累加次序（或删了
+ *  `-ffp-contract=off`），先红的就是这条。逐位一致性只靠机械对拍钉住，不靠"同序"的口头约定。
  *
  * 覆盖三件：
  *  ① 共享库（bun:ffi，生产路径）对 wasm：8 次随机输入，pooled 与 bufA **逐字节**相等；
@@ -23,7 +25,7 @@ import { fileURLToPath } from 'node:url'
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 process.chdir(ROOT)
 
-const { runStudentConvWasm, runStudentFeatures } = await import('../src/nn/conv-wasm.ts')
+const { runStudentConvWasm, runStudentFeatures } = await import('../src/nn/conv/conv.ts')
 // 生产模型构建入口（缓存键前提那条用例要断言它的实例语义）
 const { buildModelFromText } = await import('../src/nn/infer.ts')
 const {
@@ -33,7 +35,7 @@ const {
   resetNativeConvForTest,
   runStudentConvNative,
   setNativeConvEnabled,
-} = await import('../src/nn/native-conv.ts')
+} = await import('../src/nn/conv/conv_native_adapter.ts')
 const { buildNative, nativeArtifactNames, nativeStaleReason } =
   await import('../tools/agent/native-build.ts')
 
@@ -98,7 +100,7 @@ function bytesOf(a: Float32Array): Buffer {
   return Buffer.from(a.buffer, a.byteOffset, a.byteLength)
 }
 
-/** 参考 CLI 的入参协议：magic u32 + in16 + wblob（顺序见 conv_feats_native.h）。 */
+/** 参考 CLI 的入参协议：magic u32 + in16 + wblob（顺序见 conv_native.h）。 */
 function packCliInput(m: TestModel): Buffer {
   const parts: Float32Array[] = [m.in16, m.stemW, m.stemB, ...m.dwW, ...m.dwB, ...m.pwW, ...m.pwB]
   return Buffer.concat([
@@ -188,7 +190,7 @@ describe('native 选择链（T1′：native → wasm → TS）', () => {
 
   it('入库 prebuilt 排在候选里、且优先于本机构建（分发物 = 生产路径）', () => {
     const rel = `${process.platform}-${process.arch}`
-    const pb = path.join(ROOT, 'src', 'nn', 'native', 'prebuilt', rel)
+    const pb = path.join(ROOT, 'src', 'nn', 'conv', 'prebuilt', rel)
     if (!fs.existsSync(pb)) {
       console.warn(`[native-parity] 仓里无 ${rel} 的 prebuilt → 优先级断言跳过（非静默变绿）`)
       return
@@ -202,15 +204,16 @@ describe('native 选择链（T1′：native → wasm → TS）', () => {
 
   it('库路径候选：env 最优先，且覆盖 bundle 同级 / bundle 的 wasm 子目录 / cwd 的 tmp/native', () => {
     const prev = process.env.NN_NATIVE_LIB
-    process.env.NN_NATIVE_LIB = 'X:/probe/conv_feats_native.dll'
+    process.env.NN_NATIVE_LIB = 'X:/probe/conv_native.dll'
     try {
       const c = nativeLibCandidates()
-      expect(c[0]).toBe('X:/probe/conv_feats_native.dll')
+      expect(c[0]).toBe('X:/probe/conv_native.dll')
       // cwd 的 tmp/native（源路径裸跑 / 一次性 spawn，cwd=仓根）
       expect(c.some((p) => p.includes(path.join('tmp', 'native')))).toBe(true)
-      // bundle 同级（打包产物用 import.meta.url 相对解析）与其 wasm/ 子目录
+      // 模块相对（源码 = src/nn/conv/prebuilt/<目标>/；bundle = 同相对路径的镜像副本）
+      // 与 cwd（仓根）相对的同名副本
       expect(c.length).toBeGreaterThanOrEqual(4)
-      expect(c.filter((p) => p.includes('conv_feats_native')).length).toBeGreaterThanOrEqual(4)
+      expect(c.filter((p) => p.includes('conv_native')).length).toBeGreaterThanOrEqual(4)
     } finally {
       if (prev === undefined) delete process.env.NN_NATIVE_LIB
       else process.env.NN_NATIVE_LIB = prev
@@ -325,7 +328,7 @@ describe('attestation 守卫（B2/B4）', () => {
         ccVersion: 'probe',
         target: `${process.platform}-${process.arch}`,
         flags: [],
-        sources: [{ path: 'src/nn/native/conv_feats_native.c', sha256: 'deadbeef' }],
+        sources: [{ path: 'src/nn/conv/conv.c', sha256: 'deadbeef' }],
         artifacts: {
           lib: { name: 'x', sha256: 'x', bytes: 1 },
           exe: { name: 'y', sha256: 'y', bytes: 1 },

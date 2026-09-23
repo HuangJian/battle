@@ -16,14 +16,16 @@
 #   1) 任一路径段以 '.' 开头（隐藏项：.git / .DS_Store / .venv / 编辑器临时文件）；
 #   2) 目录名 __pycache__ / node_modules；
 #   3) 文件后缀 .pyc .orig .rej .bak .tmp .log .swp 或以 '~' 结尾。
-# 保留：*.ts / *.c / *.wasm（src/nn/wasm/conv_feats.wasm 是受跟踪构建产物，仍在集内）。
+# 保留：*.ts / *.c / *.wasm（src/nn/conv/ 下的 conv.c / conv_*.h / prebuilt/** 都是受跟踪的
+# 内核源码与构建产物——prebuilt/wasm/conv.wasm 与 6 个平台的 conv_native.* 同属分发物）。
 # 实现：dist_common._skip_codehash_dir/_skip_codehash_file ↔
 #   tools/agent/codehash-files.ts isSkippedCodeHashDir/isSkippedCodeHashFile。
 #
 # 纳入原则（2026-09-17 起 = 节点可用性的唯一事实来源）：影响节点采样/评估语义或
 # agent 协议行为的代码，必须入集——rollout 门与 eval 门都只比这一份清单的结果。
 #   src/nn/**                    策略网络（infer / obs-encoder / goal / intent / rl-reward …）
-#   tools/sim/export-*           采样导出器（per-tick / 意图 / 干净评估 schema / BC）
+#   tools/sim/export-*           采样导出器（per-tick / 意图 / goal / 干净评估 schema / BC）
+#   tools/sim/serve-loop.ts      长驻 worker 协议（四个导出器共用；改它 = 改 agent 侧协议行为）
 #   tools/agent/*.ts             agent 本体 + /v1/restart 护栏（重启行为修复须触发升级）
 #   src/types.ts                 事件类型（enemy_hit 等埋点契约）
 #   src/game/**                  Simulation 引擎（改引擎 ⇒ 采样与 eval 的 gameplay 都变）
@@ -44,8 +46,10 @@ tools/agent/restart-guard.ts
 tools/agent/codehash-files.ts
 tools/sim/export-rl-rollout.ts
 tools/sim/export-intent-rollout.ts
+tools/sim/export-goal-rollout.ts
 tools/sim/export-eval-game.ts
 tools/sim/export-godai-bc.ts
+tools/sim/serve-loop.ts
 src/types.ts
 src/game/
 src/config/

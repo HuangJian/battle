@@ -49,6 +49,7 @@ import { writeNpy } from '../../src/nn/npy'
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs'
 import { RNG } from '../../src/utils/RNG'
 import { buildPack } from './pack-container'
+import { runServe } from './serve-loop'
 import { INTENT_REWARD, potential } from '../../src/nn/intent-rl-reward'
 import {
   scoreRun,
@@ -69,7 +70,7 @@ const FINE_DIM = 676
 const COARSE_SIDE = 13
 const COARSE_DIM = 169
 
-const GOAL_SHARD_FILES = [
+export const GOAL_SHARD_FILES = [
   'obs.npy',
   'scalars.npy',
   'inject.npy',
@@ -572,9 +573,9 @@ function parseRange(s: string): number[] {
   return out
 }
 
-function main(): void {
+export function main(argv: string[] = process.argv.slice(2)): void {
   const t0 = Date.now()
-  const args = process.argv.slice(2)
+  const args = argv
   let outDir = 'tmp/goal-rl-traj'
   let difficulty = 'hard'
   let stagesStr = '0-3'
@@ -718,4 +719,7 @@ function main(): void {
   }
 }
 
-if (import.meta.main) main()
+if (import.meta.main) {
+  if (process.argv.includes('--serve')) runServe(main)
+  else main(process.argv.slice(2))
+}

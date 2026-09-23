@@ -1,5 +1,6 @@
 /**
- * native-conv.ts —— StudentModel.features 的 native 后端（共享库 + bun:ffi，**同步零 IPC**）。
+ * conv_native_adapter.ts —— StudentModel.features 的 native 后端（共享库 + bun:ffi，
+ * **同步零 IPC**）。生产入口在 ./conv.ts（native → wasm → TS 的选择链）。
  *
  * 为什么是 FFI 而不是「CLI + 常驻子进程」（2026-09-21 评审 B1）：
  * features 是**逐决策顺序依赖**的（动作 → 下一状态），跨决策无法批量；而每局有 ~236 次
@@ -14,7 +15,7 @@
  *
  * 共享库从哪来（三条路，按优先级；节点上通常只有第 ② 条可用）：
  *   ① `NN_NATIVE_LIB` 显式指路；
- *   ② **入库 prebuilt**（交叉编译随仓库分发，节点无需 clang —— 见 src/nn/native-prebuilt.ts）；
+ *   ② **入库 prebuilt**（交叉编译随仓库分发，节点无需 clang —— 见 native-prebuilt.ts）；
  *   ③ 本机 `bun tools/agent/native-build.ts` 的 tmp/native 产物。
  *
  * 三条铁律（评审 B2/B4）：
@@ -42,7 +43,7 @@ const IN_CH = 18
 const STEM_W = IN_CH * 576
 const DW_W = D * H * 25
 const PW_W = D * H * H
-/** 权重 blob 的 float 数（顺序必须与 src/nn/native/conv_feats_native.h 一致）。 */
+/** 权重 blob 的 float 数（顺序必须与 src/nn/conv/conv_native.h 一致）。 */
 const BLOB_FLOATS = STEM_W + H + DW_W + D * H + PW_W + D * H
 const ABI = NATIVE_ABI
 
@@ -118,10 +119,11 @@ function requireBunFfi(): FfiLib | null {
 /**
  * 候选库路径，按优先级：
  *   ① `NN_NATIVE_LIB`（显式指路，含节点上手工放库的场合）
- *   ② **入库 prebuilt**（`src/nn/native/prebuilt/<platform>-<arch>/…`，模块相对 → cwd 相对）
+ *   ② **入库 prebuilt**（`src/nn/conv/prebuilt/<platform>-<arch>/…`，**模块相对**）
  *      —— 节点机器多数没有 clang，这是它们在远端唯一能拿到的 native 臂（native-prebuilt.ts）。
- *   ③ 与模块同级 / bundle 同级 / bundle 的 wasm/ 子目录（rollout-runner 会把解析到的库
- *      拷到 bundle 旁，让打包产物也能用相对路径找到它）
+ *      打包产物走同一条：rollout-runner 把库按同一相对路径 `prebuilt/<目标>/` 拷进 bundle，
+ *      于是 `import.meta.url` 相对解析在"源码"与"bundle"两种形态下都成立。
+ *   ③ 同一份 prebuilt 的 **cwd（仓根）相对**路径（源码被打包到别处、cwd 仍是仓根时用）
  *   ④ cwd（仓根）的 tmp/native：本机 `bun tools/agent/native-build.ts` 的开发产物
  */
 export function nativeLibCandidates(): string[] {
@@ -131,21 +133,13 @@ export function nativeLibCandidates(): string[] {
   if (env) out.push(env)
   const id = `${process.platform}-${process.arch}`
   if (nativeTargetFor(process.platform, process.arch)) {
-    // 模块生在 `<repo>/src/nn/` ⇒ 相对它就落到 prebuilt 根；打包产物里这条不存在，
-    // 那时靠 cwd（仓根）那条与 ③ 的同级副本（rollout-runner 放的）。
+    // 本模块生在 `<repo>/src/nn/conv/` ⇒ 相对它就落到 prebuilt 根。
     try {
-      out.push(fileURLToPath(new URL(`native/prebuilt/${id}/${n}`, import.meta.url)))
+      out.push(fileURLToPath(new URL(`prebuilt/${id}/${n}`, import.meta.url)))
     } catch {
       /* ignore */
     }
     out.push(path.join(process.cwd(), PREBUILT_DIR, id, n))
-  }
-  for (const rel of [n, `wasm/${n}`]) {
-    try {
-      out.push(fileURLToPath(new URL(rel, import.meta.url)))
-    } catch {
-      /* ignore */
-    }
   }
   out.push(path.join(process.cwd(), 'tmp', 'native', n))
   return out

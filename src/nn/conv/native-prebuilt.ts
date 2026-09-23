@@ -1,5 +1,6 @@
 /**
- * native-prebuilt.ts —— 随仓库分发的 native features 共享库矩阵（**唯一事实来源**）。
+ * native-prebuilt.ts —— 随仓库分发的 features 内核产物矩阵（**唯一事实来源**）：
+ * 6 个 native 共享库目标 + 1 个 wasm32 目标（都是同一份 `src/nn/conv/conv.c` 编出来的）。
  *
  * ## 为什么要有 prebuilt（2026-09-21 用户提问）
  *
@@ -9,10 +10,16 @@
  * 于是把 6 个目标平台的库**在训练机交叉编译好、随仓库入库**，节点 `git pull` 直接拿到
  * （节点升级本来就是 `git pull` 同一分支，见 docs/goal-nn-handoff.md §4）。
  *
+ * **同源（2026-09-22）**：native 与 wasm 现在是同一份 `src/nn/conv/conv.c` 的两个目标 ——
+ * 唯一差异是目标条件常量 `CF_PW_PX`（wasm 8 / native 16，理由与实测见 conv_native.h），
+ * 它不动每元素的累加次序 ⇒ 两侧输出逐位相同（tests/native-parity.test.ts）。
+ * 因此 wasm 产物也进本矩阵/ manifest：**「改了 conv.c 忘了重编哪个目标」由唯一的门禁
+ * `--check-prebuilt` 一次抓完**（此前 wasm 漏编只能靠人记得，是仓库记录过的最危险失败模式）。
+ *
  * ## 三条设计约束
  *
  * ① **免 libc（freestanding）**：交叉编译时手上只有 Windows 的 MSVC 头/库，没有目标平台
- *    的 sysroot —— 只要内核碰 libc 就链不出来（`src/nn/native/conv_feats_native.c` 里
+ *    的 sysroot —— 只要内核碰 libc 就链不出来（`src/nn/conv/conv.c` 里
  *    的 `cf_zero`/`cf_copy` 就是这个原因的产物）。反过来这带来一个好处：
  *    产物**零动态依赖**（无 DT_NEEDED / LC_LOAD_DYLIB / 导入表），于是同一份 linux-arm64
  *    库在 glibc / musl / **bionic（Android-Termux）** 上都能 dlopen，不必为 Termux 单独
@@ -25,16 +32,18 @@
  * ③ **不做运行期「源码 sha 是否变过」的检查**：那份判断的归宿是仓库侧门禁
  *    （`tests/native-prebuilt.test.ts` + `--check-prebuilt`）——提交里 prebuilt 与源码
  *    必然同源；而**运行期的正确性闸门始终是首用 attestation**（真实权重下 native 与 wasm
- *    逐字节对拍，不过就关 native 并响亮回落，见 src/nn/native-conv.ts）。节点上多读 3 个
+ *    逐字节对拍，不过就关 native 并响亮回落，见 src/nn/conv/conv_native_adapter.ts）。节点上多读 3 个
  *    源文件哈希换不来更安全的结论，只会把「文件在 bundle 里、源码不在」这类正常情形
  *    误判成不可用。
  *
  * 产物布局（入库，进 codeHash —— `src/nn/` 在 tools/agent/codehash-files.txt 里）：
  *
- *   src/nn/native/prebuilt/<platform>-<arch>/conv_feats_native.{dll,so,dylib}
- *   src/nn/native/prebuilt/manifest.json      # 源码 sha + flags + cc 版本 + 每目标产物 sha
+ *   src/nn/conv/prebuilt/<platform>-<arch>/conv_native.{dll,so,dylib}
+ *   src/nn/conv/prebuilt/wasm/conv.wasm       # wasm32 目标（JS 生产路径的字节定义者）
+ *   src/nn/conv/prebuilt/manifest.json        # 源码 sha + flags + cc 版本 + 每目标产物 sha
  *
- * 先例：`src/nn/wasm/conv_feats.wasm` 就是入库的构建产物（受跟踪、在 codeHash 集内）。
+ * 先例：`src/nn/wasm/conv_feats.wasm`（今 `prebuilt/wasm/conv.wasm`）就是入库的构建产物
+ * （受跟踪、在 codeHash 集内）。
  *
  * ## 可重现性（实测，避免下一个 agent 重踩）
  *
@@ -42,6 +51,8 @@
  * |---|---|---|
  * | linux-x64 / linux-arm64 | ✅ 相同 | ELF 无时间戳/路径字段 |
  * | darwin-x64 / darwin-arm64 | ✅ 相同 | 需显式 `-no_uuid` + `-install_name`（否则 LC_ID_DYLIB 带 pid） |
+ * | wasm32 | ✅ 相同 | **必须**带 `-Wl,--strip-all`（见 `wasmBuildFlags`）：否则 `name` 段的 module name
+ *   就是输出文件名，而构建写的是 `${out}.tmp-<pid>` ⇒ 每次重建字节都不同（2026-09-23 实测） |
  * | win32-x64 / win32-arm64 | ❌ 9–13 字节不同 | lld-link 的 `/Brepro` 把 TimeDateStamp 换成**输入（含临时 .o 路径）哈希**，
  *   clang 给 MSVC 目标编译时用的是随机临时对象名，故哈希随构建而变。试过 `-fno-temp-file` 也无效 ⇒
  *   不追这一项：正确性由 attestation 保证，新鲜度由 manifest 里的 sha256 钉住，两者都不靠「重建字节相同」。
@@ -66,8 +77,49 @@ export interface NativeTarget {
 export const NATIVE_ABI = 1
 
 /** prebuilt 根目录（相对仓根，posix）。 */
-export const PREBUILT_DIR = 'src/nn/native/prebuilt'
+export const PREBUILT_DIR = 'src/nn/conv/prebuilt'
 export const PREBUILT_MANIFEST_NAME = 'manifest.json'
+
+/** wasm32 目标（与 6 个 native 目标同一份 conv.c，只是编到另一个目标）。 */
+export const WASM_TARGET = {
+  id: 'wasm32',
+  /** prebuilt 下的子目录名。 */
+  dir: 'wasm',
+  lib: 'conv.wasm',
+} as const
+
+/**
+ * wasm 编译/链接 flags（**唯一来源**：native-build.ts --wasm 与测试共用）。
+ *
+ * `-ffp-contract=off` 在 wasm 上同样是硬要求：wasm 指令集本身没有 FMA，这条让「同源 =
+ * 同字节」成为**结构性事实**而不是当前目标的巧合（哪天 wasm 加了乘加融合指令，缺这条就会
+ * 静默改变产品字节）。`-nostdlib` + `--no-entry` = 无 libc、无入口点，默认导出（默认名
+ * `features`）由 conv_wasm.h 的 `export_name` 改成 `cf_student_features`。
+ * `--export-memory` 必须留：JS 侧要在同一块线性内存里放权重/输入/输出。
+ *
+ * `--strip-all` = **可重现性**（2026-09-23 实测发现）：wasm-ld 会把 `name` 自定义段的
+ * **module name 写成输出文件名**，而构建为了原子落盘用的是 `${out}.tmp-<pid>` 临时名 ⇒
+ * 每次重建的字节都不同（实测同一份源码连编三次三个 sha；直接 clang 对比确认差异就在文件尾
+ * 的 `name` 段，内容就是 `w-a.wasm`/`w-b.wasm` 这种输出名）。`--name=` 这个参数 wasm-ld
+ * 不认，所以用 `--strip-all` 把 `name` 段整体去掉：实测「换输出名 → 字节相同」，同时产物
+ * 小 270B，导出表（`cf_abi`/`cf_student_features`/`memory`）不受影响（都在 export 段）。
+ * 代价：wasm 栈追踪少函数名（内核 7KB，需要时本地去掉这个 flag 重编即可）。
+ */
+export function wasmBuildFlags(): string[] {
+  return [
+    '--target=wasm32',
+    '-msimd128',
+    '-O3',
+    '-ffp-contract=off',
+    '-fno-fast-math',
+    '-fno-builtin',
+    '-fno-stack-protector',
+    '-nostdlib',
+    '-Wl,--no-entry',
+    '-Wl,--export-memory',
+    '-Wl,--strip-all',
+  ]
+}
 
 /**
  * 分发矩阵。**顺序 = 生成顺序**；`--cross` 全量重建，缺一个即失败（矩阵不许悄悄缩水）。
@@ -77,42 +129,42 @@ export const NATIVE_TARGETS: readonly NativeTarget[] = [
     id: 'win32-x64',
     triple: 'x86_64-pc-windows-msvc',
     kind: 'coff',
-    lib: 'conv_feats_native.dll',
+    lib: 'conv_native.dll',
     vector: ['-mavx', '-msse4.2'],
   },
   {
     id: 'win32-arm64',
     triple: 'aarch64-pc-windows-msvc',
     kind: 'coff',
-    lib: 'conv_feats_native.dll',
+    lib: 'conv_native.dll',
     vector: [],
   },
   {
     id: 'linux-x64',
     triple: 'x86_64-unknown-linux-gnu',
     kind: 'elf',
-    lib: 'conv_feats_native.so',
+    lib: 'conv_native.so',
     vector: ['-mavx', '-msse4.2'],
   },
   {
     id: 'linux-arm64',
     triple: 'aarch64-unknown-linux-gnu',
     kind: 'elf',
-    lib: 'conv_feats_native.so',
+    lib: 'conv_native.so',
     vector: [],
   },
   {
     id: 'darwin-x64',
     triple: 'x86_64-apple-darwin',
     kind: 'macho',
-    lib: 'conv_feats_native.dylib',
+    lib: 'conv_native.dylib',
     vector: ['-mavx', '-msse4.2'],
   },
   {
     id: 'darwin-arm64',
     triple: 'arm64-apple-darwin',
     kind: 'macho',
-    lib: 'conv_feats_native.dylib',
+    lib: 'conv_native.dylib',
     vector: [],
   },
 ] as const
@@ -120,10 +172,10 @@ export const NATIVE_TARGETS: readonly NativeTarget[] = [
 /** 本平台的库文件名（不依赖汇编：这里只按平台命名）。 */
 export function nativeLibBasename(platform: string): string {
   return platform === 'win32'
-    ? 'conv_feats_native.dll'
+    ? 'conv_native.dll'
     : platform === 'darwin'
-      ? 'conv_feats_native.dylib'
-      : 'conv_feats_native.so'
+      ? 'conv_native.dylib'
+      : 'conv_native.so'
 }
 
 export function nativeTargetFor(platform: string, arch: string): NativeTarget | null {
@@ -214,13 +266,25 @@ export interface PrebuiltEntry {
   bytes: number
 }
 
-/** `src/nn/native/prebuilt/manifest.json`（入库；仓库侧门禁按它核对产物与源码同源）。 */
+/** wasm32 产物条目（同属 prebuilt 矩阵；门禁与 native 目标同规核对）。 */
+export interface PrebuiltWasmEntry {
+  id: string
+  lib: string
+  flags: string[]
+  sha256: string
+  bytes: number
+}
+
+/** `src/nn/conv/prebuilt/manifest.json`（入库；仓库侧门禁按它核对产物与源码同源）。 */
 export interface PrebuiltManifest {
   abi: number
   cc: string
   ccVersion: string
   sources: Array<{ path: string; sha256: string }>
   targets: PrebuiltEntry[]
+  /** wasm32 产物（与 6 个 native 目标**同一门禁**：改了 conv.c 就必须重编）。
+   *  缺这个键 = 上一次构建没编成 wasm ⇒ `--check-prebuilt` 会响亮报「缺 wasm32 产物」。 */
+  wasm?: PrebuiltWasmEntry
   builtAt: string
 }
 

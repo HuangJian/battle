@@ -34,6 +34,7 @@ import { writeNpy } from '../../src/nn/npy'
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs'
 import { RNG } from '../../src/utils/RNG'
 import { buildPack } from './pack-container'
+import { runServe } from './serve-loop'
 import { INTENT_IDS } from '../../src/ai/intent/vocab'
 import {
   INTENT_REWARD,
@@ -61,7 +62,7 @@ const INTENT_DIM = INTENT_IDS.length // 8
 const INTENT_MASK = [1, 1, 1, 1, 1, 1, 1, 0] as const
 
 // shard 文件名清单（--pack 打容器时按此顺序）。
-const INTENT_SHARD_FILES = [
+export const INTENT_SHARD_FILES = [
   'obs.npy',
   'scalars.npy',
   'inject.npy',
@@ -488,9 +489,9 @@ function parseRange(s: string): number[] {
   return out
 }
 
-function main(): void {
+export function main(argv: string[] = process.argv.slice(2)): void {
   const t0 = Date.now()
-  const args = process.argv.slice(2)
+  const args = argv
   let outDir = 'tmp/intent-rl-traj'
   let difficulty = 'hard'
   let stagesStr = '0-3'
@@ -647,4 +648,7 @@ function main(): void {
   }
 }
 
-if (import.meta.main) main()
+if (import.meta.main) {
+  if (process.argv.includes('--serve')) runServe(main)
+  else main(process.argv.slice(2))
+}

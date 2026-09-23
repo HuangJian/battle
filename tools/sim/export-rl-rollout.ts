@@ -69,13 +69,14 @@ import {
 } from '../../src/nn/arena-ladder'
 import { decodeStageGrid } from '../../src/nn/config-stage'
 import { buildModelFromText } from '../../src/nn/infer'
-import { featuresEngine } from '../../src/nn/conv-wasm'
+import { featuresEngine } from '../../src/nn/conv/conv'
 import { dodgeL0 } from '../../src/nn/dodge-l0'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import { RNG } from '../../src/utils/RNG'
 import { npyBytes } from '../../src/nn/npy'
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'fs'
 import { buildPack } from './pack-container'
+import { runServe } from './serve-loop'
 import {
   scoreRun,
   V7_SCORE_CONFIG,
@@ -1285,53 +1286,7 @@ function main(argv: string[] = process.argv.slice(2)): void {
   }
 }
 
-/**
- * --serve：长驻模式（§368 提速④，配合 sampler-agent `--persist`）。
- * stdin 每行 = 一个任务的 argv（JSON 数组），跑完一局打印 `OK`（失败打印 `ERR <msg>`）
- * 后继续等下一行——进程/JIT/wasm 编译与权重解析只在首个任务付一次。
- * 每局仍走与一次性调用完全相同的 runOne 路径（World 每局新建）⇒ 产物逐字节一致。
- *
- * 协议极简：agent 只看行首是 `OK` 还是 `ERR`，其余 stdout 输出（对局日志/汇总）忽略。
- */
-function serve(): void {
-  const chunks: string[] = []
-  process.stdin.setEncoding('utf8')
-  let buf = ''
-  const handle = (line: string): void => {
-    const t = line.trim()
-    if (!t) return
-    let argv: string[]
-    try {
-      argv = JSON.parse(t) as string[]
-    } catch {
-      process.stdout.write('__SERVE_ERR__ bad-json\n')
-      return
-    }
-    try {
-      main(argv)
-      process.stdout.write('__SERVE_OK__\n')
-    } catch (e) {
-      process.stdout.write(`__SERVE_ERR__ ${e instanceof Error ? e.message : String(e)}\n`)
-    }
-  }
-  process.stdin.on('data', (c: string) => {
-    buf += c
-    let nl = buf.indexOf('\n')
-    while (nl >= 0) {
-      handle(buf.slice(0, nl))
-      buf = buf.slice(nl + 1)
-      nl = buf.indexOf('\n')
-    }
-  })
-  process.stdin.on('end', () => {
-    if (buf.trim()) handle(buf)
-    process.exit(0)
-  })
-  process.stdout.write('__SERVE_READY__\n')
-  void chunks
-}
-
 if (import.meta.main) {
-  if (process.argv.includes('--serve')) serve()
+  if (process.argv.includes('--serve')) runServe(main)
   else main()
 }

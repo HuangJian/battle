@@ -2,7 +2,7 @@
  * rollout-runner.ts —— rollout 子进程的运行时选择（DECISIONS §353）
  *
  * 背景（本机实测 2026-09-08，bun 1.4.2 / node 26.8.1，CPU 空闲）：
- *   同一个 conv_feats.wasm 模块（37M MACs/forward）
+ *   同一个 wasm 内核模块（37M MACs/forward；今 src/nn/conv/prebuilt/wasm/conv.wasm）
  *     bun  (JSC) 7.55 ms/次
  *     node (V8)  4.62 ms/次      → V8 快 ~1.63×
  *   端到端单局（1200 tick）1904 ms → 1546 ms（扣进程启动后 ~1.4×）。
@@ -12,14 +12,16 @@
  * 策略：**agent 自身仍跑在 bun**（Bun.serve / 版本门 / codeHash 口径不变），只把
  * rollout 采样子进程的引擎交给**本机微基准自动选择**（§374/§378）：五平台实测 V8
  * 只在 win/wsl x64 赢 14-30%，mac/arm64 是 bun 赢 3-6% —— 版本门槛修不出平台差异，
- * 故启动时对同一 conv_feats.wasm 实测两引擎稳态 forward，选快者（3% 迟滞；结果按
+ * 故启动时对同一 wasm 内核实测两引擎稳态 forward，选快者（3% 迟滞；结果按
  * bun/node 版本 + wasm sha 缓存，日常重启零开销）。用 node 时执行 `bun build
  * --target=node` 预打包 exporter。
  *
- * ⚠️ 打包产物必须自带 wasm：`conv-wasm.ts` 用 `new URL('./wasm/conv_feats.wasm',
- * import.meta.url)` 定位，打包后是相对**产物**解析的。缺文件不会报错，而是**静默
- * 回退 TS 特征路径（4.4ms → 62.7ms，14× 慢）** —— 因此 ensureBundle 一定会把
- * conv_feats.wasm 复制到产物同级 `wasm/` 下（本坑实测代价：一整天的数据）。
+ * ⚠️ 打包产物必须自带两个资产：内核 wasm 与 native 共享库 —— 两者都是用
+ * `new URL(<相对路径>, import.meta.url)` 定位的，打包后变成相对**产物**解析。缺文件
+ * 不会报错，而是**静默回退**（wasm 缺 → TS 特征路径 4.4ms → 62.7ms，14× 慢；
+ * native 缺 → 静默回落 wasm）—— 因此 ensureNodeBundle/ensureNativeAssets 会把它们
+ * 按**同一相对路径**（`prebuilt/wasm/conv.wasm`、`prebuilt/<平台>/<库>`）复制到产物旁
+ * （本坑实测代价：一整天的数据）。
  *
  * 降级链：node 不存在 / major < MIN_NODE_MAJOR / 打包失败 / node 子进程连续失败
  * ≥ NODE_FAIL_LIMIT 次 → 永久退回 bun（`--no-node` 可强制）。
@@ -29,6 +31,12 @@ import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { buildNative, nativeStaleReason, resolveNativeLib } from './native-build'
+
+/** 内核 wasm 资产：仓根相对（源）与产物相对（bundle 里的镜像路径）。
+ *  后者必须 == conv_wasm_adapter.ts 里 `new URL('./prebuilt/wasm/conv.wasm', import.meta.url)`
+ *  的相对部分 —— 打包后 import.meta.url 就是产物自身。 */
+const WASM_ASSET_REL = 'src/nn/conv/prebuilt/wasm/conv.wasm'
+const WASM_BUNDLE_REL = 'prebuilt/wasm/conv.wasm'
 
 /** node 最低可接受主版本（22.x LTS 起；实测 22.22 = 5.40ms、26.8 = 4.62ms）。 */
 export const MIN_NODE_MAJOR = 22
@@ -174,12 +182,14 @@ export function ensureNodeBundle(entryTs: string, opts: BuildOptions): string | 
     )
     return null
   }
-  // ⚠️ wasm 资产必须与产物同级：否则 conv-wasm 静默回退 TS 路径（14× 慢）。
+  // ⚠️ wasm 资产必须与产物同级（**同一相对路径**）：conv_wasm_adapter 用
+  // `new URL('./prebuilt/wasm/conv.wasm', import.meta.url)` 定位 ⇒ 打包后相对产物解析。
+  // 缺文件不报错，而是静默回退 TS 路径（14× 慢）。
   try {
-    const src = path.join(opts.repoRoot, 'src', 'nn', 'wasm', 'conv_feats.wasm')
-    const dstDir = path.join(opts.bundleDir, 'wasm')
-    fs.mkdirSync(dstDir, { recursive: true })
-    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dstDir, 'conv_feats.wasm'))
+    const src = path.join(opts.repoRoot, WASM_ASSET_REL)
+    const dst = path.join(opts.bundleDir, WASM_BUNDLE_REL)
+    fs.mkdirSync(path.dirname(dst), { recursive: true })
+    if (fs.existsSync(src)) fs.copyFileSync(src, dst)
   } catch (e) {
     opts.log?.(
       `[rollout-runner] wasm 资产复制失败（将回退 TS 路径）: ${
@@ -278,7 +288,7 @@ export interface EngineChoice {
   nativeSha?: string
 }
 
-/** features 实际用到的后端（与 src/nn/native-conv.ts 的 featuresEngine 对齐）。 */
+/** features 实际用到的后端（与 src/nn/conv/conv_native_adapter.ts 的 featuresEngine 对齐）。 */
 export type BenchArm = 'native' | 'wasm' | 'ts' | 'unknown'
 
 function sha256File(p: string): string {
@@ -374,8 +384,16 @@ export function ensureNativeAssets(
   log(`[rollout-runner] native 资产就绪 source=${resolved.kind ?? 'build'} lib=${lib}`)
   const sha = shortSha(lib)
   try {
-    const dst = path.join(bundleDir, path.basename(lib))
-    fs.mkdirSync(bundleDir, { recursive: true })
+    // 按**同一相对路径**镜像进 bundle：native 适配器的候选里有
+    // `new URL(\`prebuilt/<平台>/<库>\`, import.meta.url)`，于是打包产物与源码两种形态
+    // 走同一条解析路径（不再依赖“库与产物同级”的旧约定）。
+    const dst = path.join(
+      bundleDir,
+      'prebuilt',
+      `${process.platform}-${process.arch}`,
+      path.basename(lib),
+    )
+    fs.mkdirSync(path.dirname(dst), { recursive: true })
     if (!fs.existsSync(dst) || shortSha(dst) !== sha) fs.copyFileSync(lib, dst)
   } catch (e) {
     log(
@@ -438,10 +456,10 @@ export function runEngineBench(
         return null
       }
     }
-    // 打包臂要自带 wasm 资产（conv-wasm 按模块相对路径解析；缺了会静默回退 TS 路径）
-    const wasm = path.join(repoRoot, 'src', 'nn', 'wasm', 'conv_feats.wasm')
+    // 打包臂要自带 wasm 资产（wasm 适配器按模块相对路径解析；缺了会静默回退 TS 路径）
+    const wasm = path.join(repoRoot, WASM_ASSET_REL)
     if (!fs.existsSync(wasm)) return null
-    const wasmDst = path.join(bundleDir, 'wasm', 'conv_feats.wasm')
+    const wasmDst = path.join(bundleDir, WASM_BUNDLE_REL)
     try {
       fs.mkdirSync(path.dirname(wasmDst), { recursive: true })
       if (!fs.existsSync(wasmDst)) fs.copyFileSync(wasm, wasmDst)
@@ -564,7 +582,7 @@ export function createRolloutRunner(opts: RunnerOptions): RolloutRunner {
     } else {
       // 微基准自动选：缓存优先（bun/node 版本 + wasm 未变即复用）
       const bunVer = engineVersion()
-      const wasmPath = path.join(opts.repoRoot, 'src', 'nn', 'wasm', 'conv_feats.wasm')
+      const wasmPath = path.join(opts.repoRoot, WASM_ASSET_REL)
       const wasmSha = fs.existsSync(wasmPath) ? sha256File(wasmPath) : ''
       const choiceFile = engineChoiceFile(bundleDir)
       // native 资产（rollout-eval-opt T2）：bun 臂的加速来源；失败只降级、不抛。

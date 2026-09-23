@@ -20,7 +20,11 @@
  * 不改任何仓库文件：产物全在 tmp/perf-cmp.<pid>/，内核通过「打包产物同级 wasm/ 目录」
  * 切换（conv-wasm 相对产物解析 wasm，见 agent-setup.md §2.1 的坑）。
  * 旧内核来源：--old-wasm / $OLD_WASM / git 祖先 blob（提交前=HEAD；提交后=HEAD~1），
- *   取与工作区 sha 不同的最近一个。
+ *   取与工作区 sha 不同的最近一个（新址 prebuilt/wasm/conv.wasm，旧址 src/nn/wasm/conv_feats.wasm）。
+ * **不跨 ABI 变更**：2026-09-23 内核单源化把 wasm ABI 从 11 参 `features(...)` 改成 4 参
+ *   `cf_student_features(...)`，现役适配器只认后者；拿旧 ABI 的产物来比会**静默回落 TS 路径**
+ *   （= 量到的是 TS，不是旧内核）。故这里显式核对 `cf_abi` 导出，不兼容即判「旧内核不可用」并
+ *   指向 `bun tools/perf/conv-ab.ts`（它从 git 取旧**源码**现编/现装，跨 ABI 也成立）。
  * 退出码：0=全 PASS；1=有字节不一致或执行失败；2=用法/前置错误。
  */
 import { spawn, spawnSync } from 'node:child_process'
@@ -197,7 +201,9 @@ say(`权重(自动最新): ${WEIGHTS} (${readFileSync(WEIGHTS).length}B sha256:$
 
 // ---------------- 工作区 + 打包 ----------------
 const WORK = path.join(ROOT, 'tmp', `perf-cmp.${process.pid}`)
-const WASMDIR = path.join(WORK, 'wasm')
+// 内核经「打包产物同级的 prebuilt/wasm/」切换（wasm 适配器按模块相对路径解析，
+// 见 src/nn/conv/conv_wasm_adapter.ts 的读文件行）
+const WASMDIR = path.join(WORK, 'prebuilt', 'wasm')
 const OUTROOT = path.join(WORK, 'out')
 mkdirSync(WASMDIR, { recursive: true })
 mkdirSync(OUTROOT, { recursive: true })
@@ -205,7 +211,7 @@ process.on('exit', () => {
   if (!KEEP) rmSync(WORK, { recursive: true, force: true })
 })
 
-const KERNEL_NEW = path.join(ROOT, 'src', 'nn', 'wasm', 'conv_feats.wasm')
+const KERNEL_NEW = path.join(ROOT, 'src', 'nn', 'conv', 'prebuilt', 'wasm', 'conv.wasm')
 if (!existsSync(KERNEL_NEW)) die(`缺少 ${KERNEL_NEW}`)
 const KERNEL_NEW_SHA = shaOf(KERNEL_NEW)
 const BUNDLE = path.join(WORK, 'export-rl-rollout.mjs')
@@ -227,24 +233,55 @@ if (!NO_OLD) {
     copyFileSync(OLD_WASM, OLD_PATH)
     OLD_AVAIL = true
   } else {
-    for (const ref of ['HEAD~1', 'HEAD']) {
-      const g = spawnSync('git', ['show', `${ref}:src/nn/wasm/conv_feats.wasm`], {
-        encoding: 'buffer',
-      })
+    // 2026-09-22 内核单源化后产物路径改为 prebuilt/wasm/conv.wasm；更早的提交里它是
+    // src/nn/wasm/conv_feats.wasm（两个都试，比较链不受路径改名影响）。
+    const cands: Array<[string, string]> = [
+      ['HEAD~1', 'src/nn/conv/prebuilt/wasm/conv.wasm'],
+      ['HEAD', 'src/nn/conv/prebuilt/wasm/conv.wasm'],
+      ['HEAD~1', 'src/nn/wasm/conv_feats.wasm'],
+      ['HEAD', 'src/nn/wasm/conv_feats.wasm'],
+    ]
+    let incompatible = ''
+    for (const [ref, p] of cands) {
+      const g = spawnSync('git', ['show', `${ref}:${p}`], { encoding: 'buffer' })
       if (g.status !== 0 || !g.stdout?.length) continue
       writeFileSync(OLD_PATH, g.stdout)
-      if (shaOf(OLD_PATH) !== KERNEL_NEW_SHA) {
-        OLD_AVAIL = true
-        say(`旧内核取自 git ${ref}（sha256:${shaOf(OLD_PATH)}）`)
-        break
+      if (shaOf(OLD_PATH) === KERNEL_NEW_SHA) continue
+      if (!wasmAbiOk(OLD_PATH)) {
+        incompatible = `${ref}:${p}`
+        continue
       }
+      OLD_AVAIL = true
+      say(`旧内核取自 git ${ref}（${p}，sha256:${shaOf(OLD_PATH)}）`)
+      break
+    }
+    if (!OLD_AVAIL && incompatible) {
+      say(`⚠ git 里找到的旧内核是**旧 ABI**（${incompatible}，无 cf_abi 导出）⇒ 跳过旧内核对比项`)
+      say('   跨 ABI 的对比请用：bun tools/perf/conv-ab.ts（取旧源码现编，两侧逐位对拍）')
     }
   }
-  if (!OLD_AVAIL) say('⚠ 未找到旧内核（--old-wasm / git 祖先与工作区相同？）→ 旧内核对比项跳过')
+  if (!OLD_AVAIL && !NO_OLD)
+    say('⚠ 未找到旧内核（--old-wasm / git 祖先与工作区相同？）→ 旧内核对比项跳过')
 }
 if (OLD_AVAIL) say(`新旧内核 sha256: new=${KERNEL_NEW_SHA} old=${shaOf(OLD_PATH)}`)
 
 // ---------------- 工具函数 ----------------
+/**
+ * 旧内核产物是否与现役 ABI 兼容（能被 `conv_wasm_adapter` 直接实例化）。
+ *
+ * 判据是 `cf_abi` + `cf_student_features` 两个导出：旧 ABI（≤2026-09-22，11 参 `features(...)`）
+ * 两条都没有 ⇒ 现役适配器首用 attestation 失败 ⇒ **静默回落 TS 路径**。此时继续跑不会报错，
+ * 只会把「TS 的耗时」当成「旧内核的耗时」写进结论。
+ */
+function wasmAbiOk(p: string): boolean {
+  try {
+    const inst = new WebAssembly.Instance(new WebAssembly.Module(readFileSync(p)))
+    return 'cf_abi' in inst.exports && 'cf_student_features' in inst.exports
+  } catch {
+    return false
+  }
+}
+
 /** 展开 stage/seed 规格："0-2,5" → [0,1,2,5] */
 function expandSpec(spec: string): number[] {
   const out: number[] = []
@@ -309,7 +346,7 @@ function runOneGame(
   const out = path.join(OUTROOT, `${tag}.byte`)
   rmSync(out, { recursive: true, force: true })
   mkdirSync(out, { recursive: true })
-  copyFileSync(kernel, path.join(WASMDIR, 'conv_feats.wasm'))
+  copyFileSync(kernel, path.join(WASMDIR, 'conv.wasm'))
   const r = spawnSync(
     engine,
     [
@@ -362,7 +399,7 @@ async function runGridParallel(
     stages.length >= seeds.length
       ? chunkSpec(stages, PARALLEL).map((s) => ({ stages: s, seeds: seedSpec }))
       : chunkSpec(seeds, PARALLEL).map((s) => ({ stages: stageSpec, seeds: s }))
-  copyFileSync(kernel, path.join(WASMDIR, 'conv_feats.wasm'))
+  copyFileSync(kernel, path.join(WASMDIR, 'conv.wasm'))
   const t0 = Date.now()
   const jobs = parts.map(async (part, k) => {
     const out = path.join(OUTROOT, `${prefix}.p${k}`)

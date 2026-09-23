@@ -111,9 +111,10 @@ let missLogSuppressed = 0
 }
 
 // ---------------- rollout 子进程运行时（node/V8 vs bun/JSC，§353） ----------------
-// 推理同一个 conv_feats.wasm：node(V8) 4.62ms vs bun(JSC) 7.55ms（本机实测 ×1.63）。
+// 推理同一个 wasm 内核（现址 src/nn/conv/prebuilt/wasm/conv.wasm）：node(V8) 4.62ms
+// vs bun(JSC) 7.55ms（本机实测 ×1.63）。
 // agent 自身仍在 bun（Bun.serve / bunVersion 版本门 / codeHash 口径不变），只把
-// 采样子进程交给 node：预打包 exporter（--target=node）+ 产物同级放 conv_feats.wasm。
+// 采样子进程交给 node：预打包 exporter（--target=node）+ 产物同级放 prebuilt/wasm/conv.wasm。
 let _runner: RolloutRunner | null = null
 /** 子进程失败摘要（2026-09-14 mac 节点 BC 语料事故）。
  *
@@ -769,6 +770,11 @@ export const PERSIST_SERVE_ENTRIES = new Set([
   // 代价（已知、可接受）：池上限仍是 `workers`，eval 进池后高峰可能占满池位 ⇒ 落单的 rollout
   // 回落到一次性 spawn（只慢不错，与加池前的形态相同；一局 eval 通常比一局采样短）。
   'tools/sim/export-eval-game.ts',
+  // goal/intent 也入池（2026-09-23，plan `src/nn/conv/conv-optimize.plan.md` §4.6 Stage 4）：
+  // 这两个模式原先每局一个 bun，局数多、单局短 ⇒ spawn 成本占比最高（预估 +15–19%）。
+  // 协议一字不差，实现收在 tools/sim/serve-loop.ts（`runServe`）。
+  'tools/sim/export-goal-rollout.ts',
+  'tools/sim/export-intent-rollout.ts',
 ])
 const PERSIST_TASK_TIMEOUT_MS = 600_000
 interface PoolWorker {

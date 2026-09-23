@@ -1,14 +1,14 @@
-/* conv_features_cli.c —— native features CLI（字节对拍 + 离线基准的参考可执行文件）。
+/* conv_cli.c —— native features CLI（字节对拍 + 离线基准的参考可执行文件）。
  *
  * 算法**不在这里**：本文件只做 stdin/stdout 编解码，计算全部来自
- * `conv_feats_native.c`（共享库同源）。T0 的「native 与 wasm 逐位一致」由
+ * `conv.c`（与生产共享库同源）。T0 的「native 与 wasm 逐位一致」由
  * tests/native-parity.test.ts 用共享库断言；本 CLI 保留是因为它是最容易在任意
  * 机器上复现的独立参考（无需 JS/FFI）。
  *
  * 二进制协议（小端）:
  *   magic u32 = 0x434F4E56 ('CONV')
  *   in16  f32[IN_CH*SP]  IN_CH=18 SP=676
- *   wblob f32[CF_BLOB_FLOATS]（顺序见 conv_feats_native.h：stemW/stemB/dwW/dwB/pwW/pwB）
+ *   wblob f32[CF_BLOB_FLOATS]（顺序见 conv_native.h：stemW/stemB/dwW/dwB/pwW/pwB）
  * 输出 stdout:
  *   pooled f32[64]
  *   bufA   f32[64*SP]
@@ -18,7 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "conv_feats_native.h"
+#include "conv_native.h"
 
 #ifdef _WIN32
 #include <fcntl.h>

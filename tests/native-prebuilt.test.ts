@@ -1,16 +1,17 @@
 /**
  * native-prebuilt.test.ts —— 「随仓库分发的 native 库」门禁（rollout-eval-opt.plan.md T2）。
  *
- * 为什么要有这个测试：节点机器多数**没有 clang**，所以 native 库改成训练机交叉编译后随
- * 仓库分发（`src/nn/native/prebuilt/`，见 src/nn/native-prebuilt.ts）。于是「分发物」本身
+ * 为什么要有这个测试：节点机器多数**没有 clang**，所以内核产物改成训练机交叉编译后随
+ * 仓库分发（`src/nn/conv/prebuilt/`，见 src/nn/conv/native-prebuilt.ts）。于是「分发物」本身
  * 成了一个必须被机械核对的契约，分四块：
  *
- *  ① **同源 / 齐全**：manifest 里每个目标的 sha256 与盘上文件一致、ABI 对、源码未变
- *     （这一条 = `--check-prebuilt`，也就是「改了内核忘了重建 prebuilt」的拦网）；
+ *  ① **同源 / 齐全**：manifest 里每个目标（**含 wasm32**）的 sha256 与盘上文件一致、ABI 对、
+ *     源码未变（这一条 = `--check-prebuilt`，也就是「改了 conv.c 忘了重建 prebuilt/wasm」
+ *     的拦网 —— 漏编 wasm 会静默回落 TS 路径，是仓库记录过的最危险失败模式）；
  *  ② **格式与依赖**：每个产物的文件头对得上它的目标（ELF/Mach-O/PE + 架构），且**零 libc/CRT
  *     依赖** —— 这是「同一份 linux-arm64 库在 glibc / musl / bionic(Termux) 上都能 dlopen」
  *     的机械依据；同时断言两个导出符号还在（免得 optimize 掉了导出）。
- *  ③ **解析优先级**：env → prebuilt → 本机构建（与 src/nn/native-conv.ts 一致）。
+ *  ③ **解析优先级**：env → prebuilt → 本机构建（与 src/nn/conv/conv_native_adapter.ts 一致）。
  *  ④ **跨平台执行证据**：WSL + python3 ctypes **真加载** linux-x64 产物，与 wasm 逐字节比对。
  *     本机没有 mac/arm64 机器 ⇒ 那两个目标只能靠「节点首用 attestation」把关（见 native-conv.ts），
  *     但 linux-x64 这一份可以在这里真跑 —— 它是「prebuilt 不只是编出来了，而是真的算对」
@@ -32,15 +33,17 @@ const {
   NATIVE_ABI,
   NATIVE_TARGETS,
   PREBUILT_DIR,
+  WASM_TARGET,
   prebuiltLibPath,
   nativeTargetFor,
   nativeLibBasename,
-} = await import('../src/nn/native-prebuilt.ts')
+  wasmBuildFlags,
+} = await import('../src/nn/conv/native-prebuilt.ts')
 const { prebuiltStaleReason, resolveNativeLib, sha256File } =
   await import('../tools/agent/native-build.ts')
-const { runStudentConvWasm } = await import('../src/nn/conv-wasm.ts')
+const { runStudentConvWasm } = await import('../src/nn/conv/conv_wasm_adapter.ts')
 // src/ 侧的同类解析（两处优先级必须一致：src/ 不得依赖 tools/ ⇒ 只能各写一份，见下一段用例）
-const { nativeLibCandidates, nativeStatus } = await import('../src/nn/native-conv.ts')
+const { nativeLibCandidates, nativeStatus } = await import('../src/nn/conv/conv_native_adapter.ts')
 
 const PREBUILT_DIR_ABS = path.join(ROOT, PREBUILT_DIR)
 const BOARD = 26
@@ -81,10 +84,11 @@ describe('prebuilt 分发物（同源/齐全）', () => {
     expect(why).toBe('')
   })
 
-  it('矩阵 6 目标齐全，manifest 记的 sha256 与文件一致、ABI 一致', () => {
+  it('矩阵 6 native 目标 + wasm32 齐全，manifest 记的 sha256 与文件一致、ABI 一致', () => {
     const m = JSON.parse(fs.readFileSync(path.join(PREBUILT_DIR_ABS, 'manifest.json'), 'utf8')) as {
       abi: number
       targets: Array<{ id: string; sha256: string; bytes: number; lib: string }>
+      wasm?: { id: string; sha256: string; bytes: number; lib: string; flags: string[] }
     }
     expect(m.abi).toBe(NATIVE_ABI)
     expect(m.targets.map((t) => t.id).sort()).toEqual(NATIVE_TARGETS.map((t) => t.id).sort())
@@ -94,6 +98,16 @@ describe('prebuilt 分发物（同源/齐全）', () => {
       expect(sha256File(p)).toBe(t.sha256)
       expect(fs.statSync(p).size).toBe(t.bytes)
     }
+    // wasm32 与 6 个 native 目标同一门禁（缺条目/字节不符 ⇒ 一定有人漏重编）
+    expect(m.wasm?.id).toBe(WASM_TARGET.id)
+    const wp = path.join(PREBUILT_DIR_ABS, WASM_TARGET.dir, WASM_TARGET.lib)
+    expect(
+      fs.existsSync(wp),
+      `缺 ${path.relative(ROOT, wp)}（跑 bun tools/agent/native-build.ts --wasm）`,
+    ).toBe(true)
+    expect(sha256File(wp)).toBe(m.wasm!.sha256)
+    expect(fs.statSync(wp).size).toBe(m.wasm!.bytes)
+    expect(m.wasm!.flags.join(' ')).toBe(wasmBuildFlags().join(' '))
   })
 })
 
@@ -144,6 +158,14 @@ describe('prebuilt 产物格式 + 零外部依赖', () => {
       }
     })
   }
+
+  it(`${WASM_TARGET.id}：wasm 魔数 + 三个导出（cf_student_features / cf_abi / memory）`, () => {
+    const b = fs.readFileSync(path.join(PREBUILT_DIR_ABS, WASM_TARGET.dir, WASM_TARGET.lib))
+    expect([b[0], b[1], b[2], b[3]]).toEqual([0x00, 0x61, 0x73, 0x6d])
+    for (const sym of ['cf_student_features', 'cf_abi', 'memory']) {
+      expect(hasAscii(b, sym), `wasm 缺导出 ${sym}`).toBe(true)
+    }
+  })
 
   const nm =
     spawnSync('llvm-nm', ['--version'], { encoding: 'utf8', windowsHide: true }).status === 0
@@ -240,7 +262,7 @@ describe('共享库解析优先级（env → prebuilt → 本机构建）', () =
     fs.rmSync(repo, { recursive: true, force: true })
   })
 
-  // 2026-09-21 评审：两处解析并行实现（src/nn/native-conv.ts::nativeLibCandidates 与
+  // 2026-09-21 评审：两处解析并行实现（src/nn/conv/conv_native_adapter.ts::nativeLibCandidates 与
   // tools/agent/native-build.ts::resolveNativeLib，因 src/ 不得依赖 tools/）——优先级一旦漂移，
   // 会出现「有的节点用 prebuilt、有的用本机构建」而 feat 分布莫名不均。这两条用例把两侧的
   // 顺序与今天的解析结果都钉住。（dist 侧的顺序已由上面几条覆盖。）
@@ -280,12 +302,10 @@ describe('共享库解析优先级（env → prebuilt → 本机构建）', () =
 
   it('路径映射：prebuiltLibPath / nativeLibBasename 与目标 id 一致', () => {
     expect(prebuiltLibPath('darwin', 'arm64')).toBe(
-      `${PREBUILT_DIR}/darwin-arm64/conv_feats_native.dylib`,
+      `${PREBUILT_DIR}/darwin-arm64/conv_native.dylib`,
     )
-    expect(prebuiltLibPath('linux', 'arm64')).toBe(
-      `${PREBUILT_DIR}/linux-arm64/conv_feats_native.so`,
-    )
-    expect(prebuiltLibPath('win32', 'x64')).toBe(`${PREBUILT_DIR}/win32-x64/conv_feats_native.dll`)
+    expect(prebuiltLibPath('linux', 'arm64')).toBe(`${PREBUILT_DIR}/linux-arm64/conv_native.so`)
+    expect(prebuiltLibPath('win32', 'x64')).toBe(`${PREBUILT_DIR}/win32-x64/conv_native.dll`)
     expect(prebuiltLibPath('freebsd', 'x64')).toBe('')
     expect(nativeTargetFor('plan9', 'x64')).toBeNull()
   })
@@ -318,7 +338,7 @@ if (!WSL_OK)
 
 describe('linux-x64 prebuilt 真执行（WSL + python3 ctypes）vs wasm 逐字节', () => {
   it.skipIf(!WSL_OK)('WSL 里 dlopen 入库 .so，pooled+bufA 与 wasm 逐字节相同', () => {
-    const so = path.join(PREBUILT_DIR_ABS, 'linux-x64', 'conv_feats_native.so')
+    const so = path.join(PREBUILT_DIR_ABS, 'linux-x64', 'conv_native.so')
     expect(fs.existsSync(so)).toBe(true)
 
     // 确定性输入（LCG，同 native-parity 口径）：in16 + 权重 blob，直接写 float32 小端

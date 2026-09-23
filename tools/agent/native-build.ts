@@ -7,29 +7,31 @@
  *     `-ffp-contract=fast` ⇒ 乘加融合 ⇒ 与 wasm 路径不再逐位（累加顺序没变也救不了
  *     收缩）。异质节点（win/mac/a95/a97 混跑）各自编译 ⇒ 同一 job 的 shard 字节抖动
  *     ⇒ data_fp 漂移、历史语料被判异血缘。故 flags/link 参数只在
- *     `src/nn/native-prebuilt.ts` 里定一次，本脚本照用（`-ffp-contract=off`、
+ *     `src/nn/conv/native-prebuilt.ts` 里定一次，本脚本照用（`-ffp-contract=off`、
  *     `-fno-fast-math`、x64 只到 AVX1）。
  *  ② **可复现**：T0 的「8/8 逐位一致」原先只剩一个手工脚本 + tmp 里的 .exe（工具还不
  *     负责构建），tmp 一清就再验不了。本脚本产出 `native-build.json` 指纹（源码 sha +
  *     flags + cc 版本 + 产物 sha），`--check` 可判「盘上产物是否仍是这份源码编的」。
- *  ③ **单源**：共享库与 CLI 都链接 `src/nn/native/conv_feats_native.c`，算法只有一份。
+ *  ③ **单源**：共享库、wasm 与 CLI 都是 `src/nn/conv/conv.c` —— native 与 wasm32 只是同一
+ *     份算术的两个编译目标（差异仅 `CF_PW_PX`：wasm 8 / native 16，见 conv_native.h）。
  *  ④ **prebuilt（2026-09-21 新增）**：节点机器多数没有 clang，`--cross` 在训练机上把
  *     6 个目标平台（win/linux/darwin × x64/arm64，Termux 用 linux-arm64 那一份）的库
- *     交叉编译进 `src/nn/native/prebuilt/`，随 git pull 分发 —— 详见
- *     `src/nn/native-prebuilt.ts` 头注与 `--check-prebuilt`（仓库侧新鲜度门禁）。
+ *     交叉编译进 `src/nn/conv/prebuilt/`（含 wasm32 产物），随 git pull 分发 —— 详见
+ *     `src/nn/conv/native-prebuilt.ts` 头注与 `--check-prebuilt`（仓库侧新鲜度门禁）。
  *
  * 用法（仓根）:
  *   bun tools/agent/native-build.ts               # 本机共享库 + CLI → tmp/native（默认）
  *   bun tools/agent/native-build.ts --check       # 校验本机指纹/产物是否过期（exit 1 = 过期）
- *   bun tools/agent/native-build.ts --cross       # 全量交叉编译 prebuilt → src/nn/native/prebuilt
+ *   bun tools/agent/native-build.ts --cross       # 全量交叉编译 prebuilt → src/nn/conv/prebuilt
+ *   bun tools/agent/native-build.ts --wasm        # 只重建 wasm32 产物 → prebuilt/wasm/conv.wasm
  *   bun tools/agent/native-build.ts --check-prebuilt   # prebuilt 与源码/产物 sha 是否同源
  *   bun tools/agent/native-build.ts --json        # 构建后打印 manifest（供 runner/测试读）
  *   bun tools/agent/native-build.ts --out-dir tmp/native --cc clang
  *
  * 产物（默认 tmp/native/，gitignored）:
- *   conv_feats_native.{dll,so,dylib}   生产共享库（bun:ffi 同步调用）
- *   conv_features_cli[.exe]            独立参考 CLI（字节对拍/离线基准；需系统 libc，仅本机构建）
- *   native-build.json                  指纹
+ *   conv_native.{dll,so,dylib}   生产共享库（bun:ffi 同步调用）
+ *   conv_cli[.exe]               独立参考 CLI（字节对拍/离线基准；需系统 libc，仅本机构建）
+ *   native-build.json            指纹
  */
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -41,14 +43,17 @@ import {
   NATIVE_TARGETS,
   PREBUILT_DIR,
   PREBUILT_MANIFEST_NAME,
+  WASM_TARGET,
   nativeFlags,
   nativeLibBasename,
   nativeLinkArgs,
   nativeTargetFor,
+  wasmBuildFlags,
   type NativeTarget,
   type PrebuiltEntry,
   type PrebuiltManifest,
-} from '../../src/nn/native-prebuilt'
+  type PrebuiltWasmEntry,
+} from '../../src/nn/conv/native-prebuilt'
 
 export { NATIVE_ABI, PREBUILT_DIR, PREBUILT_MANIFEST_NAME }
 export type { PrebuiltEntry, PrebuiltManifest }
@@ -82,29 +87,36 @@ export function nativeArtifactNames(platform: string = process.platform): {
 } {
   return {
     lib: nativeLibBasename(platform),
-    exe: platform === 'win32' ? 'conv_features_cli.exe' : 'conv_features_cli',
+    exe: platform === 'win32' ? 'conv_cli.exe' : 'conv_cli',
   }
 }
 
-/** 共享库真正依赖的源码（算法核心 + ABI 头）。 */
+/** 卷积内核目录（现址；相对仓根的路径只在下面几个函数里出现）。 */
+export const CONV_SRC_DIR = 'src/nn/conv'
+
+/**
+ * 内核真正依赖的源码（算法核心 + 两个目标的 ABI 头）。
+ *
+ * 三个文件放同一份：`conv_wasm.h` 只影响 wasm 目标、`conv_native.h` 只影响 native 目标，
+ * 但预编产物（6 native + 1 wasm）是**一起发**的 ⇒ 用同一份源码清单才能一次抓全
+ * 「改了 conv.c/头文件却只重编了一部分」这种缺口（`--check-prebuilt` 是唯一闸门）。
+ */
 export function nativeLibSourceFiles(repoRoot: string): string[] {
   return [
-    path.join(repoRoot, 'src', 'nn', 'native', 'conv_feats_native.h'),
-    path.join(repoRoot, 'src', 'nn', 'native', 'conv_feats_native.c'),
+    path.join(repoRoot, 'src', 'nn', 'conv', 'conv_native.h'),
+    path.join(repoRoot, 'src', 'nn', 'conv', 'conv_wasm.h'),
+    path.join(repoRoot, 'src', 'nn', 'conv', 'conv.c'),
   ]
 }
 
 /**
- * 本机构建指纹涉及的源码（= 共享库依赖 + CLI 编解码）。
+ * 本机构建指纹涉及的源码（= 内核 + CLI 编解码）。
  *
- * prebuilt 用 `nativeLibSourceFiles`（只算库）：`--cross` 根本不编 CLI，把 CLI 的 sha
+ * prebuilt 用 `nativeLibSourceFiles`（只算内核）：本机构建会多编一个 CLI，把 CLI 的 sha
  * 也算进 prebuilt 新鲜度只会得到「改了一行 CLI → 强制重跑一次无意义的 --cross」的假警报。
  */
 export function nativeSourceFiles(repoRoot: string): string[] {
-  return [
-    ...nativeLibSourceFiles(repoRoot),
-    path.join(repoRoot, 'src', 'nn', 'native', 'conv_features_cli.c'),
-  ]
+  return [...nativeLibSourceFiles(repoRoot), path.join(repoRoot, 'src', 'nn', 'conv', 'conv_cli.c')]
 }
 
 export interface NativeArtifact {
@@ -202,8 +214,8 @@ export function buildNative(repoRoot: string, opts: BuildOptions = {}): BuildRes
 
   const target = hostTarget(platform, arch)
   const flags = nativeFlags(target)
-  const srcCore = path.join(repoRoot, 'src', 'nn', 'native', 'conv_feats_native.c')
-  const srcCli = path.join(repoRoot, 'src', 'nn', 'native', 'conv_features_cli.c')
+  const srcCore = path.join(repoRoot, 'src', 'nn', 'conv', 'conv.c')
+  const srcCli = path.join(repoRoot, 'src', 'nn', 'conv', 'conv_cli.c')
   // 先查源文件再问编译器：没有源码的仓（测试桩）不该白跑一次 clang
   for (const f of [srcCore, srcCli]) {
     if (!fs.existsSync(f)) return { ok: false, reason: `缺源文件: ${f}`, dir, log }
@@ -393,6 +405,70 @@ export interface PrebuiltBuildResult {
   log: string[]
 }
 
+/** wasm32 产物路径（`prebuilt/wasm/conv.wasm`）。 */
+export function prebuiltWasmPath(dir: string): string {
+  return path.join(dir, WASM_TARGET.dir, WASM_TARGET.lib)
+}
+
+export interface WasmBuildResult {
+  ok: boolean
+  path: string
+  sha256?: string
+  bytes?: number
+  reason?: string
+}
+
+/**
+ * 编译 wasm32 产物（与 6 个 native 目标**同一份** `conv.c`）。
+ *
+ * 与 buildPrebuilt 一样**不做 reuse**：漏编 wasm 是仓库记录过的最危险失败模式
+ * （`run()` 静静回落 TS 路径 = 41 ms/forward > 16.7 ms 帧预算，plan/obs-schema-v3.plan.md
+ * §3.5），宁可多花一秒重编。
+ */
+export function buildWasm(
+  repoRoot: string,
+  opts: { outDir?: string; cc?: string; run?: CcRunner } = {},
+): WasmBuildResult {
+  const dir = prebuiltOutDir(repoRoot, opts.outDir)
+  const cc = opts.cc ?? process.env.NN_CC ?? 'clang'
+  const run = opts.run ?? defaultRun
+  const srcCore = path.join(repoRoot, 'src', 'nn', 'conv', 'conv.c')
+  if (!fs.existsSync(srcCore)) return { ok: false, path: '', reason: `缺源文件 ${srcCore}` }
+  const ver = run(cc, ['--version'])
+  if (ver.status !== 0) return { ok: false, path: '', reason: `编译器不可用: ${cc}` }
+  const out = prebuiltWasmPath(dir)
+  fs.mkdirSync(path.dirname(out), { recursive: true })
+  const tmp = `${out}.tmp-${process.pid}`
+  const r = run(cc, [...wasmBuildFlags(), '-o', tmp, srcCore])
+  if (r.status !== 0 || !fs.existsSync(tmp)) {
+    try {
+      fs.rmSync(tmp, { force: true })
+    } catch {
+      /* ignore */
+    }
+    const why = `rc=${r.status}: ${r.stderr.split(/\r?\n/).find((l) => l.trim()) ?? ''}`.slice(
+      0,
+      300,
+    )
+    return { ok: false, path: out, reason: why }
+  }
+  fs.renameSync(tmp, out)
+  return { ok: true, path: out, sha256: sha256File(out), bytes: fs.statSync(out).size }
+}
+
+/** 盘上 wasm 产物的 manifest 条目（不存在返回 null）。 */
+export function wasmEntryOf(dir: string): PrebuiltWasmEntry | null {
+  const p = prebuiltWasmPath(dir)
+  if (!fs.existsSync(p)) return null
+  return {
+    id: WASM_TARGET.id,
+    lib: WASM_TARGET.lib,
+    flags: wasmBuildFlags(),
+    sha256: sha256File(p),
+    bytes: fs.statSync(p).size,
+  }
+}
+
 export interface PrebuiltBuildOptions {
   outDir?: string
   cc?: string
@@ -416,11 +492,12 @@ export function buildPrebuilt(
   const dir = prebuiltOutDir(repoRoot, opts.outDir)
   const cc = opts.cc ?? process.env.NN_CC ?? 'clang'
   const run = opts.run ?? defaultRun
-  const srcCore = path.join(repoRoot, 'src', 'nn', 'native', 'conv_feats_native.c')
+  const srcCore = path.join(repoRoot, 'src', 'nn', 'conv', 'conv.c')
   if (!fs.existsSync(srcCore)) {
     return { ok: false, dir, targets: [], log: [`缺源文件 ${srcCore}`] }
   }
   const ver = run(cc, ['--version'])
+  // wasm 与 native 目标同一份 conv.c：源码不在就一起失败（不用先跑一遍再发现）
   if (ver.status !== 0) {
     return {
       ok: false,
@@ -481,8 +558,28 @@ export function buildPrebuilt(
     log.push(`ok   ${t.id}: ${path.relative(repoRoot, out)} ${bytes}B ${sha.slice(0, 12)}…`)
   }
 
-  // `--only` 时保留未重建目标的旧条目（它们仍在盘上、仍是这份源码编的）
+  // ---- wasm32 目标（与 6 个 native 目标同门禁：改 conv.c 就必须重编） ----
+  // `--only` 未点名 wasm32 时沿用旧条目；否则重建（失败则不写条目 ⇒ --check-prebuilt 报「缺」）
   const prev = readPrebuiltManifest(dir)
+  const wantWasm = !only || only.has(WASM_TARGET.id)
+  let wasmEntry: PrebuiltWasmEntry | undefined
+  let wasmOk = true
+  if (wantWasm) {
+    const w = buildWasm(repoRoot, { outDir: opts.outDir, cc, run })
+    if (!w.ok) {
+      wasmOk = false
+      log.push(`FAIL ${WASM_TARGET.id}: ${w.reason}`)
+    } else {
+      wasmEntry = wasmEntryOf(dir) ?? undefined
+      log.push(
+        `ok   ${WASM_TARGET.id}: ${path.relative(repoRoot, w.path)} ${w.bytes}B ${(w.sha256 ?? '').slice(0, 12)}…`,
+      )
+    }
+  } else {
+    wasmEntry = prev?.wasm ?? wasmEntryOf(dir) ?? undefined
+  }
+
+  // `--only` 时保留未重建目标的旧条目（它们仍在盘上、仍是这份源码编的）
   if (only && prev) {
     for (const e of prev.targets) if (!only.has(e.id)) entries.push(e)
     for (const e of prev.targets) {
@@ -510,14 +607,22 @@ export function buildPrebuilt(
       sha256: sha256File(p),
     })),
     targets: entries,
+    wasm: wasmEntry,
     builtAt: new Date().toISOString(),
   }
   fs.writeFileSync(prebuiltManifestPath(dir), `${JSON.stringify(manifest, null, 2)}\n`, {
     encoding: 'utf8',
   })
-  log.push(`manifest ok: ${PREBUILT_MANIFEST_NAME}（${entries.length} 目标）`)
+  log.push(
+    `manifest ok: ${PREBUILT_MANIFEST_NAME}（${entries.length} native 目标` +
+      `${wasmEntry ? ' + wasm32' : '（缺 wasm32）'}）`,
+  )
   return {
-    ok: results.every((r) => r.ok) && entries.length === NATIVE_TARGETS.length,
+    ok:
+      wasmOk &&
+      results.every((r) => r.ok) &&
+      entries.length === NATIVE_TARGETS.length &&
+      (wantWasm ? wasmEntry !== undefined : true),
     dir,
     targets: results,
     manifest,
@@ -546,6 +651,15 @@ export function prebuiltStaleReason(
     return `prebuilt 是另一版编译器编的（盘上 ${m.ccVersion}）`
   const srcProblem = sourcesStaleReason(repoRoot, m.sources)
   if (srcProblem) return `prebuilt 过期：${srcProblem}`
+  // wasm32（与 native 同门禁；缺条目 = 上一次 --cross 没编成，绝不能默默过）
+  if (!m.wasm)
+    return `prebuilt 缺 ${WASM_TARGET.id} 产物（跑 bun tools/agent/native-build.ts --wasm）`
+  const wp = prebuiltWasmPath(dir)
+  if (!fs.existsSync(wp)) return `prebuilt 缺 wasm 产物 ${path.relative(repoRoot, wp)}`
+  if (sha256File(wp) !== m.wasm.sha256)
+    return `prebuilt wasm 产物已变 ${path.relative(repoRoot, wp)}（需 --wasm 重建）`
+  if (m.wasm.flags.join(' ') !== wasmBuildFlags().join(' '))
+    return `prebuilt wasm flags 已变 ${WASM_TARGET.id}（需 --wasm 重建）`
   for (const t of NATIVE_TARGETS) {
     const e = m.targets.find((x) => x.id === t.id)
     if (!e) return `prebuilt 缺目标 ${t.id}`
@@ -569,7 +683,7 @@ export interface ResolvedNativeLib {
 }
 
 /**
- * 运行期解析共享库（rollout-runner 与测试共用；src/ 侧的同类解析在 native-conv.ts，
+ * 运行期解析共享库（rollout-runner 与测试共用；src/ 侧的同类解析在 conv_native_adapter.ts，
  * 那是因为 src/ 不许依赖 tools/，两处的**候选顺序**保持一致：env → prebuilt → 本机构建）。
  *
  * prebuilt 排在「本机构建」之前：分发的产物与本机编的是同一配方（同一 flags/链接参数），
@@ -632,7 +746,40 @@ function main(): void {
       console.error(`[native-build] PREBUILT STALE: ${why}`)
       process.exit(1)
     }
-    console.log(`[native-build] prebuilt fresh: ${NATIVE_TARGETS.length} 目标与源码同源`)
+    console.log(
+      `[native-build] prebuilt fresh: ${NATIVE_TARGETS.length} native 目标 + ${WASM_TARGET.id} 与源码同源`,
+    )
+    return
+  }
+
+  if (argv.includes('--wasm')) {
+    const dir = arg('prebuilt-dir', PREBUILT_DIR)
+    const w = buildWasm(repoRoot, { outDir: dir, cc })
+    if (!w.ok) {
+      console.error(`[native-build] WASM FAILED: ${w.reason}`)
+      process.exit(1)
+    }
+    console.log(
+      `[native-build] wasm ok: ${path.relative(repoRoot, w.path)} (${w.bytes}B ${(w.sha256 ?? '').slice(0, 12)}…）`,
+    )
+    // 同步 manifest 的 wasm 条目：不同步的话 --check-prebuilt 会把刚编好的产物判成
+    // 「产物已变（需 --wasm 重建）」—— 只重编 wasm 时 native 条目与 sources 保持不变。
+    const dirAbs = path.isAbsolute(dir) ? dir : path.join(repoRoot, dir)
+    const prev = readPrebuiltManifest(dirAbs)
+    const entry = wasmEntryOf(dirAbs)
+    if (prev && entry) {
+      fs.writeFileSync(
+        prebuiltManifestPath(dirAbs),
+        `${JSON.stringify({ ...prev, wasm: entry }, null, 2)}\n`,
+        { encoding: 'utf8' },
+      )
+      console.log(`[native-build] manifest ok: wasm 条目已更新`)
+    } else {
+      console.warn(
+        `[native-build] 无 ${PREBUILT_MANIFEST_NAME} ⇒ 只重编了 wasm（--check-prebuilt 仍会红：先跑 --cross）`,
+      )
+    }
+    if (argv.includes('--json')) console.log(JSON.stringify(entry))
     return
   }
 
@@ -654,8 +801,8 @@ function main(): void {
       process.exit(1)
     }
     console.log(
-      `[native-build] cross ok: ${path.relative(repoRoot, r.dir)}（${r.targets.length} 目标，` +
-        `cc=${r.manifest!.ccVersion}）`,
+      `[native-build] cross ok: ${path.relative(repoRoot, r.dir)}（${r.targets.length} native 目标` +
+        `${r.manifest!.wasm ? ` + ${WASM_TARGET.id}` : ''}，cc=${r.manifest!.ccVersion}）`,
     )
     if (argv.includes('--json')) console.log(JSON.stringify(r.manifest))
     return

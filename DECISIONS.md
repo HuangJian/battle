@@ -5886,3 +5886,19 @@ job 级 `uploaded` 标志 + 主循环 `try/finally` 收尾 + `--result-upload`�
 `out_overlap_sec` + 渲染行；旧日志缺省当 0）· `tests/test_async_result_upload.py`（新，18 例）·
 `tests/test_wire_report.py`（async/sync 对照 + 旧日志兼容）。设计稿 `plan/transfer-scheduling.plan.md`
 §1.1 / §4 P2.5 / §9.5；进度 `docs/nn.progress.md §130`。
+
+## §2026-09-23-goalnn-conv-single-source（2026-09-23，conv-optimize.plan.md §4.2 落地）
+
+- **背景**：卷积内核占一步 rollout 的 95%（features ~2.4ms/次），原为**两份实现**：native 纯 C 4oc×4px
+  / wasm32 手写 `wasm_simd128` intrinsics 4oc×4px（§368），两者的一致性只靠 `native-parity` 逐字节对拍。
+- **备选与否决**：① **全局 8px 单一常量** —— 否：native 白吐 ~5pp（实测 iso 8px 31.8–33.0 vs 16px
+  35.1–37.4 GMAC/s；本机端到端 1.47× vs 预计 ~1.5×）；② **wasm 也设 16px** —— 否：wasm 只有
+  16×v128 = 64 float 寄存器容量，16px 需 20/16 ⇒ 溢写（实测 locals 373→455 ⇒ 局部变量爆表）；
+  ③ **保留两份实现、各自优化** —— 否：同一份算术两份代码 ⇒ 同步链漏编（wasm 漏编 = 静默回落 TS
+  = 41ms/forward > 帧预算，仓库记录过的最危险失败模式）。
+- **决定**：单源 `src/nn/conv/conv.c`（纯 C，无 intrinsics）编 native 与 wasm32 两目标，差异只有目标
+  条件常量 `CF_PW_PX`（wasm 8 / 其余 16）；它**只决定哪些像素进同一条向量寄存器，不改每元素的累加
+  次序** ⇒ 两侧输出逐位相同（`native-parity` 是它的守卫）。wasm 产物与 6 个 native 目标**同入** prebuilt
+  manifest，`--cross` / `--check-prebuilt` 一次抓全漏编；ABI 统一为单 blob + 4 参 `cf_student_features`。
+- **违反后果**：把 `CF_PW_PX` "简化"成单一常量 ⇒ native 白丢 ~5pp 或 wasm 溢写（两者都有实测数字）；
+  任何**改动累加次序**的"优化"都会让 `native-parity` 红——那是语义变更（新 era），不在本决策范围内。

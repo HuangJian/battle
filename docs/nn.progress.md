@@ -5,6 +5,401 @@
 
 ---
 
+## §143 端到端实测：内核优化在一局 rollout 里的确切倍率（`conv-optimize.plan.md` §11.2 补测，2026-09-23）
+
+> 补 §140–§142 缺的那一格：之前只量了**内核**（win32 native 1.40–1.46× / linux-x64 1.55–1.59×、wasm 1.67–1.71×），
+> plan §11.3 ③ 当时明写「端到端没有单独量，按占比估 1.3–1.45×，要引用确切数字请自己量一次」。本次用**真导出器**量了。
+
+**方法（唯一变量 = 内核二进制，其余全部相同）**
+
+* 同一份代码 + 同一权重（`nn-training/weights/x20-noexplore/x20-noexplore.it181.20260922-083734.json`）
+  + 同 `--stages/--seeds/--difficulty/--lives-override`；走的正是训练路径 `export-rl-rollout.ts`。
+* **旧内核臂** = 把重组前的入库产物取出来再用 env 指进去：
+  `git show <重组前提交>:src/nn/native/prebuilt/win32-x64/conv_feats_native.dll > tmp/old.dll`，
+  然后 `NN_NATIVE_LIB=tmp/old.dll`（适配器按 env → prebuilt 顺序解析；日志里 `lib=` 行可确认实际加载的是哪一个，
+  两臂的 `attest=3/3 逐字节 vs wasm` 都通过）。⇒ 不需要旧工作区、不需要重编，同一进程结构对拍。
+* 交错 **A/B/A/B**（各 3 轮取最优）；启动基线 = 同命令 `--max-ticks 1`（同一 env，两臂各测）。
+
+**结果（win32-x64 · bun 1.4.2 · 真 FFI + 真权重）**
+
+| 配置 | 决策 / tick | 旧内核 | 新内核 | 提速（raw 墙钟） | 扣启动 |
+|---|---|---|---|---|---|
+| `--max-ticks 12900 --seeds 0-3`（生产形态，= plan §7.3 的命令） | 1433 / 14318 | 4275 ms | **2897 ms** | **1.48×** | 1.49–1.52× |
+| `--max-ticks 2500 --seeds 0-3`（定长局） | 1000 / 10000 | 2914 ms | **2085 ms** | **1.40×** | 1.46× |
+| `--max-ticks 12000 --seeds 0`（4940 tick 后 gameover） | 494 / 4940 | 1527 ms | **1178 ms** | **1.30×** | 1.34× |
+
+* **每决策边际成本**（生产形态，扣启动）：旧 2.76–2.80 ms → 新 **1.84–1.85 ms**（1.49–1.52×）；4 局批 = **1069 → 724 ms/局**。
+* 三轮的离散度很小（旧 4275/4284/4340 · 新 2897/2898/2946）⇒ 比值稳在 **1.45–1.50×**。
+* 三档 raw 比不同不是噪声，是**每进程固定成本**（§1.4：89–107 ms + bun 启动）摊薄比例不同：
+  局越短 / 进程数越多，raw 越低。**引用时必须带配置**；对外一律用生产形态的 **1.48×**。
+* **等价性**：三个配置、两臂的 npy shard sha256 **全等**（含 `--max-ticks 1` 的 `18201299dc637d68`）
+  ⇒ 提速是白拿的，语料血缘不变（与 §140 的四重验证同结论，这次是**端到端**通道）。
+
+**一处偏离预估（记为观察，未深究）**：按内核占比 86.5–95.2%（§1.2 / §4.7.2）+ 内核 1.40–1.46× 反推，
+端到端应 ≈1.35–1.46×；实测生产形态 1.48× 略超上沿，且**每决策省 0.92–0.96 ms 大于内核单独口径的 0.67–0.75 ms**
+⇒ 真训练进程里内核的实际时间占比高于 profiler 抽样给的那一份（采样器对 JS/native 混合栈的归属偏差所致，未进一步归因）。
+
+**复跑**：见 `conv-optimize.plan.md` §11.2 的「端到端」块（Windows/WSL 同一套 `NN_NATIVE_LIB` 覆盖；
+把 `<重组前提交>` 换成 `git log --format=%H -1 <重组前>`，即本批提交的父提交）。
+
+---
+
+## §142 卷积代码全部收进 `src/nn/conv/**` + wasm 产物可重现（2026-09-23）
+
+> 接 §140/§141：用户要求「infer.ts 里的纯 TS 卷积实现也拆出来、native-prebuilt.ts 也移进去」。
+> 于是**内核（C）/ 两个加速后端 / TS 孪生 / 分发矩阵**现在都在一个目录里。
+
+### 做了什么
+
+* **TS 孪生实现独立成模块**：`StudentModel` 的 `conv3x3` / `conv5x5dw` / `conv1x1` / `reluInPlace`
+  与 features() 里的 GAP 循环 ⇒ **`src/nn/conv/conv_ts.ts::runStudentConvTs(view)`**（含 `ConvTsView`）。
+  infer.ts 的兜底变成一行调用；视图在**构造期建一次**（`tsConvView`）⇒ 每 tick 零分配（§14 口径不变）。
+  为什么值得：三个后端并排可见（改 conv.c 时能一眼看到 TS 侧对应实现），且 conv_ts 不 import 任何模型
+  类型（入参只是 buffer 视图）⇒ 可单独当作参考实现对拍。
+* **`src/nn/native-prebuilt.ts` → `src/nn/conv/native-prebuilt.ts`**（分发矩阵 / 构建 flags / ABI 与内核同目录；
+  `tools/agent/native-build.ts` 仍在 tools/ —— 它是构建器不是卷积代码）。引用同步：两个适配器 ·
+  native-build · tests/native-prebuilt · tools/perf/conv-ab · `nn-training/tests/test_ts_code_pack.py` 的
+  打包清单。`src/nn/` 本就在 codeHash 目录集内 ⇒ 无需改 `codehash-files.txt`。
+* **wasm 产物可重现（实测发现并修复）**：`conv.wasm` **每次重建 sha 都不同**（连编 3 次 3 个 sha）。
+  定位：wasm-ld 把 `name` 自定义段的 **module name 写成输出文件名**，而构建为原子落盘写的是
+  `${out}.tmp-<pid>` ⇒ 每次不同（直接 clang 对比确认差异就在文件尾 `name` 段，内容就是 `w-a.wasm` /
+  `w-b.wasm`）。`-Wl,--name=` 参数 wasm-ld 不认 ⇒ 用 **`-Wl,--strip-all`** 去掉 `name` 段：实测
+  「换输出名 → 字节相同」，连编 3 次同 sha，产物小 270B（7620→7350B），导出表
+  （`cf_abi` / `cf_student_features` / `memory`）不受影响。代价：wasm 栈追踪少函数名。
+
+### WSL / linux-x64 实测（2026-09-23 追加，`opencode` 发行版 · Ryzen 7 5800H · WSL2 6.18.33.2 · bun 1.4.2）
+
+同一个探针在 Linux 上跑。WSL 里只有 gcc 没有 clang（现编旧内核那一步做不了），所以给探针加了
+**`CONV_AB_OLD_LIB`** 覆盖：直接指向 git 里的旧 prebuilt 产物 —— 顺带让「没本地工具链的机器（含
+arm64 节点）」也能测。取旧库：`git show <ref>:src/nn/native/prebuilt/linux-x64/conv_feats_native.so > old.so`。
+
+| 后端（linux-x64） | 旧 | 新 | 提速 |
+|---|---|---|---|
+| native（入库 prebuilt，AVX1） | 2.37–2.47 ms | **1.53–1.55 ms** | **1.55–1.59×** |
+| wasm（bun/JSC on Linux） | 4.34–4.50 ms | **2.59–2.63 ms** | **1.67–1.71×** |
+
+* 四方（native 旧/新 × wasm 旧/新）**memcmp 全等**，`[verdict] bitexact=OK`；被计时的 native 新库
+  sha256 就是 manifest 里 linux-x64 那一条（`35f32107…`）。
+* **独立第二通道**（纯 python3 ctypes，无 bun-ffi 调用开销）：native 旧 2.31–2.40 → 新 **1.63** ms =
+  **1.42–1.46×** —— 比值更低是因为去掉 ffi 开销后「内核占比」变大；两条通道结论一致（native **≥1.4×**）。
+* 跨平台对照：**wasm 的比值在 Windows 与 Linux 上相同（1.67–1.71×）**；native 比值 Linux 略高（1.55–1.59×
+  vs win32 1.40–1.46×）。绝对耗时 Linux 两侧都更快（wasm 3.59→2.60、native 1.64→1.53）—— 纯执行侧差异，
+  与包大小/磁盘无关（内核数据全在几百 KB，计时循环内无 I/O）。
+* 旧库口径说明：win32 的探针在同样口径下用**旧 prebuilt dll** 作基线是 1.378×（vs 现编旧源码 1.40–1.46×），
+  即基线取「历史产物」还是「现编同一份源码」本身就有 ~3% 差；两个数都应记为 native **≈1.4×**。
+
+### 验证
+
+* `bun run check` 绿（2126 pass / 0 fail）· `bun run build` 绿 · `--check-prebuilt` 通过（6 native + wasm32 同源）。
+* 逐位：`tests/native-parity.test.ts` + `tests/native-prebuilt.test.ts` 29 例全绿（含 WSL 真 dlopen 新
+  linux-x64 `.so` ↔ 新 wasm 逐字节）；`bun tools/perf/conv-ab.ts 30 3` 四方（native 旧/新 × wasm 旧/新）
+  **memcmp 全等**（native 1.46× / wasm 1.77× vs 重组前内核）。
+* TS 兜底路径由 `tests/nn/student-infer.test.ts` 等 golden 锚定（h16/d2 瘦身 fixture **必走 TS**）——
+  4 个文件 25 例全绿 ⇒ 抽取没有动算术。
+* 顺带把「重建可重现」台账做实：只改注释后重建，**linux/darwin 四个目标 sha 逐字节不变**，只有 win32
+  两个变了（lld-link `/Brepro` 把输入临时路径哈希进 TimeDateStamp，头注已录）。
+* **文档**：计划 `src/nn/conv/conv-optimize.plan.md` 随本批入库并更新到「已落地」状态（顶部状态块 +
+  §0.3 DoD 勾选 + §9 现址表 + 新增 **§11 落地记录与偏差**：四个 Stage 的实际做法、两平台 × 两后端
+  实测表、八条与计划的偏差、arm64 复跑命令、最终文件地图）。
+
+---
+
+## §141 goal/intent 导出器入池 + `--serve` 协议收敛（`tools/sim/serve-loop.ts`，conv-optimize.plan.md §4.6 Stage 4，2026-09-23）
+
+### 做了什么
+
+* **协议收敛为单一实现**：新增 `tools/sim/serve-loop.ts::runServe(main)` —— rl / eval / goal / intent
+  四个导出器共用一份 `--serve` 长驻协议（`__SERVE_READY__` / `__SERVE_OK__` / `__SERVE_ERR__ <msg>`）。
+  原先 rl 与 eval 各抄一份（两份逐行相同）—— 进池的导出器将来只会更多，协议留在四处就是下次漂移的温床。
+  顺手硬化：**合法但非数组**的 JSON（`123` / `{}`）也判 `bad-json` —— 放进去 `main` 拿不到 argv，会静默
+  按默认网格跑 16 局（报错比跑错便宜）。
+* **goal/intent 入池**：`export-goal-rollout.ts` / `export-intent-rollout.ts` 加 `--serve`
+  （`main(argv)` 可注入，`GOAL_SHARD_FILES` / `INTENT_SHARD_FILES` 导出供测试对拍），
+  `sampler-agent.ts::PERSIST_SERVE_ENTRIES` 加这两条 —— 这两个模式**局数多、单局短**，是 spawn 成本
+  占比最高的地方（计划预估该模式 +15–19%）。
+* **静态同规门禁**：`tests/export-goal-intent-serve.test.ts` 读 `PERSIST_SERVE_ENTRIES` 字面量，断言每个
+  条目文件都存在且都走 `runServe(main)` —— 堵「加了池条目但导出器没实现 `--serve`」（一进池就 spawn 一个
+  跑默认网格的进程再退出，只在 agent 的熔断计数上留痕）。
+
+### 实测（本机 x64，120 tick 瘦身局，真子进程）
+
+| 导出器 | 一次性 spawn | persist worker | 每局固定开销差 |
+|---|---|---|---|
+| goal | 176 ms/局 | 22 ms/局 | **8.15×**（省 154 ms） |
+| intent | 172 ms/局 | 19 ms/局 | **8.93×**（省 152 ms） |
+
+口径提醒（§16.1）：这张表量的是**每局固定开销**（瘦身局 120 tick，游戏本体只占很小一块）；生产局
+~1200 tick 时长得多，收益占比落在计划预估的 **15–19%** 量级 —— 而 a95/Termux 上 spawn 那一跳 ~2.5s
+（§126 实测），占比比本机更高。
+
+### 等价性（`tests/export-goal-intent-serve.test.ts`）
+
+每个导出器只起**一个**子进程，基线在进程内跑：① READY/OK 握手；② serve 与一次性调用的 **shard 树逐字节
+相同** + 容器内 shard 条目逐字节相同（manifest 只除墙钟 `elapsedSec`）；③ 坏行（非法 JSON / 非数组 JSON）
+响亮报错、worker 不倒；④ 同 worker 换 seed 的第二局按本局成包（不串局、worker 仍挺）。
+rl/eval 改用共享实现后 `tests/export-eval-game-serve.test.ts` 仍绿（协议未变）。
+
+### 门禁
+
+`bun run check` 绿（2126 pass / 0 fail，+3 用例）· `bun run build` 绿。
+
+---
+
+## §140 卷积内核单源化 + 四项循环重排（`src/nn/conv/**`，conv-optimize.plan.md 落地，2026-09-23）
+
+> 编号取 §140 而非 §139：2026-09-22 的 memory 把「TPU ragged tail 收尾」记作 §139，
+> 而它在本文件里编号是 §131（当日的编号出现过漂移）—— 避开这个歧义，从 140 起用。
+
+### 做了什么
+
+* **目录重组**：`src/nn/native/**` + `src/nn/wasm/**` ⇒ **`src/nn/conv/**`** ——
+  `conv.c`（唯一算法源）· `conv_native.h`（共享常量 / blob 顺序 / `CF_ABI`）· `conv_wasm.h`（wasm 导出层）·
+  `conv_cli.c`（对拍 CLI）· `conv.ts`（生产咽喉 native→wasm→TS）· `conv_native_adapter.ts`（bun:ffi + 首用 attestation）·
+  `conv_wasm_adapter.ts`（wasm 后端）· `prebuilt/{win32,linux,darwin}-{x64,arm64}/conv_native.{dll,so,dylib}` +
+  `prebuilt/wasm/conv.wasm` + `manifest.json`。**`tools/agent/native-build.ts` 留在原址**
+  （它是构建器，不是卷积计算；`native-prebuilt.ts` 于 §142 一并移入本目录）。
+* **四项循环重排**（conv-optimize.plan.md §2，全部**不动每元素累加次序** ⇒ 逐位不变）：
+  ① `pad5` 只清边框（原实现先清整张 30×30 再覆盖内部）② `conv3` 4oc 分组 + 权标量预取
+  ③ `conv5dw` 权预取 `kw[25]` ④ `conv1x1_res` 像素块 4 → `CF_PW_PX`（**native 16 / wasm 8**）。
+* **单源双目标**：wasm 侧不再手写 `wasm_simd128` intrinsics（§368 那一版 4oc×4px）——
+  **同一份纯 C** 编两个目标，唯一差异是目标条件常量 `CF_PW_PX`（它只决定「哪些像素进同一条向量寄存器」，
+  不改累加序 ⇒ 两侧逐位相同）；ABI 统一为 native 的 **单 blob + 4 参**
+  `cf_student_features(wblob,in16,pooled,bufA)`（wasm 侧原来的 bufB/bufC 由内核静态区承担）。
+* **wasm 进门禁**：`conv.wasm` 进 `prebuilt/manifest.json`（`--wasm` 重建 + `--check-prebuilt` 核对），
+  连同 6 个 native 目标**一次抓全**「改了 conv.c 却漏重编某个目标」——此前 wasm 漏编只能靠人记得，
+  是仓库记录过的最危险失败模式（静默回落 TS = 41ms/forward > 帧预算）。
+* **eval 每 tick 白编码**（conv-optimize.plan.md §4.7）：`export-eval-game.ts` 的 `encoder.encode(world)`
+  移进 `t % K === 0` 守卫（与 `export-rl-rollout.ts` 的 §368 同式）。
+
+### 实测（本机 x64 / bun，真 FFI + 真权重；探针已入库 = `bun tools/perf/conv-ab.ts 30 3`）
+
+| 口径 | 旧 | 新 | 比 |
+|---|---|---|---|
+| native ms/forward（x64 AVX1，16px） | 2.38 | **1.63** | **1.47×** |
+| wasm ms/forward（bun/JSC，8px 纯 C vs 手写 intrinsics 4px） | 6.13 | **3.64** | **1.69×** |
+| eval 单局墙钟（stage7/seed860001，1294 tick，8 轮交错 min/median） | unfixed 494/504 | fixed 470/485 | **−19 ms/局** |
+
+**逐位等价（四重）**：① 四方等价矩阵（native 旧/新 × wasm 旧/新）同一权重+输入下 pooled+bufA **memcmp 全等**；
+② `tests/native-parity.test.ts` native(16px) ↔ wasm(8px) 逐字节（8 次随机输入 + 参考 CLI）；
+③ 一局 rollout（`export-rl-rollout --stages 0 --seeds 0`）native 路径 vs `NN_NATIVE=0`（wasm 路径）
+`obs/scalars/a_move/a_fire/lp_*/mask/done/metrics/value.npy` **逐字节相同**，仅 manifest 的 `feat` 字段不同；
+④ eval 报告逐字段相同（outcome/ticks/win/score/kills/hitRate/pickups）。
+回滚粒度：`NN_NATIVE=0`（真 wasm）或按 commit revert；内核无运行期开关。
+
+### 栅栏（跨平台）
+
+* 6 目标 prebuilt 全量重出（`--cross`，clang 20.1.0 + lld）；`prebuilt/linux-x64` 在 WSL+ctypes 真加载，
+  与 wasm 逐字节一致（`tests/native-prebuilt.test.ts` ④）。
+* **⚠ 待办：arm64 实机计时**（a95/a96 Termux + mac）——本机只有 x64，静态普查只能证「结构没坏」。
+  复测命令：`bun tools/perf/conv-ab.ts 30 3`（**在 arm64 机器上跑**；探针自带旧内核定位
+  `git rev-list -1 HEAD -- src/nn/native/conv_feats_native.c`，故重组后仍能取到旧源码现编对拍，
+  最后一行 `[verdict] bitexact=OK` 是判据）。
+  风险集中在 **conv3 4oc 分组**（arm64 栈引用 18→102、mem +14%）：若 arm64 变慢，**只回退这一项**，
+  其余三项保留（plan §2.2 / §5 Stage 2）。
+* `--check-prebuilt` 同时守 6 native + wasm32；`bun run check` / `bun run build` 绿；
+  nn-training `test_ts_code_pack.py` 绿（白名单已跟着换路径）。
+
+### 决策
+
+`DECISIONS.md §2026-09-23-goalnn-conv-single-source`（单源 + `CF_PW_PX`；被否决的「全局 8px」实测白吐 ~5pp）。
+
+---
+
+## §131 TPU ragged tail 收尾：`target_transitions` 取成 mb 的倍数（2026-09-22）
+
+承 §134/§135。用户口径（2026-09-22）：「**那就把 target_transitions 参数调成 1024 的倍数**」
+——并裁决「**两件一起做**（既调倍数，也保留持久化编译缓存），`target_transitions` 取 **49152**，
+**只改 x20-demo-mix**」。
+
+### 机制（为什么倍数就够）
+
+`chunk_episodes(episodes, mb)` 是**全局**切片（`shuffle=True`：展平全部 episode → 一次
+permutation → `range(0, n, mb)`），所以 ragged tail = `n % mb`，与「哪一关」无关。而收进 PPO 的
+总步数：
+
+```
+quota/关 = ceil(target_transitions / S)      # rl/volume_quota.target_per_stage
+n = S × quota                                # 各关收满时
+```
+
+原 `T=48000, S=4, mb=1024` ⇒ `quota=12000` ⇒ `n=48000` ⇒ `48000 % 1024 = 896`（真机日志逐字
+对上：`B=896:4步 / B=1024:184步`）。
+
+**不变量：`S × ceil(T/S) ≡ 0 (mod mb)`。** 最省事的充分条件是「T 取 mb 的整数倍且 S | T」。
+
+### 取值对比
+
+| T | quota/关 | n | n/mb | 相对 48000 |
+|---|---|---|---|---|
+| 48000（原） | 12000 | 48000 | 46.875 ⇒ **尾巴 896** | — |
+| 48128 | 12032 | 48128 | 47 整 | +0.27% |
+| **49152（采纳）** | **12288** | **49152** | **48 整** | **+2.4%** |
+| 45056 | 11264 | 45056 | 44 整 | −6.1% |
+
+**为什么优于 Plan A（末 chunk 补到 mb + 权重掩码）**：这是**纯数据侧选择**——不补行、不掩码、
+**零数学改动、无 ulp 差**；Plan A 会改归约树形状（末步 ulp 级差异）。两者都只动训练侧，不碰
+任务定义（命数/敌数/关卡/终局）。
+
+### 落地
+
+* `curricula/x20-demo-mix.jsonc`：`target_transitions 48000 → 49152`（+1152 样本，+2.4%），
+  并在文件里写下「不变量」与「TPU 步耗」注（含配对降级的诚实声明）。**只此一门课**。
+* 持久化编译缓存（§135）保留 —— 两件一起做：形状从源头消掉 + 万一还有别的形状，被挤出时读盘
+  而非重编。
+* 与 §15.5：采样量变更 = **新账本**（旧 48000 轮 it1–6 与新轮不同账本，混读以新轮为准）。
+
+### 必须点明的两个边界（不假装是硬保证）
+
+1. **软保证**：`n = S·quota` 只在**每关都收满**时成立。某关供给不足（日志 `SHORT (供给不足)`）
+   ⇒ `n` 掉到非 mb 倍数 ⇒ 尾巴回来。当前 demo-mix 每轮恰 `kept 48000 / 4 stages`（收满），但这是
+   数据供给的偶然，不是不变量。
+2. **配对降级**：`paired_rotate_seed` 仍与 noexplore 同值，但每轮派局数变多 ⇒ 各关种子流消耗
+   速率与历史臂不再逐轮相同 ⇒「同种子同 batch」不再逐字成立；归因按 **准配对** 看。
+
+### 验证顺序
+
+两条都需**点「训练」重打包**后才在任务包里生效。真机读数应看到：
+
+* `job <id>: XLA 持久化编译缓存 已开启 → .../xla-compile-cache（缓存被挤出时读盘而非重编…）`
+  （自描述：**日志里没有这行 = 旧包**）；
+* `diag 累计汇总` 里 **只有 `B=1024`**（不再出现 `B=896`）。
+
+### ⚠ 修正预期（2026-09-22，用户质询后翻 27 份账本重新定标）——「~15s」**不是本配置的数**
+
+用户质询：「我印象中在线课程 PPO（48000×4ep）TPU 约 ~15s，重新评估你的 60s」；并给出下一手：
+「翻 x 系列和 c 系列训练日志，ppo<20s 的轮次肯定是用 TPU 跑的，看对应课程设置」。
+
+**先摆正量纲**（这一步之前就错了）：**云机自报的 PPO 时长 = `ppo_cloud_sec` = `wire.worker.grad_sec`**；
+`ppo_sec` 是 **loop 侧墙钟**（含派发/等待/回传），**不是云机算的**。看 `ppo_sec` 会把两条腿比错。
+
+#### 全库扫描（`tmp/*/training_log.jsonl`，27 份账本，`iteration` 事件）
+
+**`ppo_cloud_sec < 20s` 的轮次只存在 4 门课，且全是同一个配置**：
+
+| 课程 | mb | 采样/轮 | epochs | grad steps | `grad_sec` |
+|---|---|---|---|---|---|
+| x5-approach | 512 | 24000 | 6 | 47×6 = **282** | **16.2–17.3**（191/201 轮 <20s）|
+| x7-rebirth | 512 | 24000 | 6 | 282 | **16.3–17.3**（170/211 轮）|
+| x5-rebirth | 512 | 24000 | 6 | 282 | 16.4–18.0（27 轮）|
+| x3-chip-k05 / k10 | 512 | ~23300 | 4 | ~184 | 10.8 / 10.7（各 1–2 轮）|
+
+⇒ **「~15s」是 `mb=512 / 24000 samples / 6 epochs`（x5/x7 族），不是 48000×4**。用户确实记错了样本量
+（他们自己也在怀疑）。x5/x7 的配方是 `lr 0.0005`（x20 是 3e-4）。
+
+**而 x20 配置（`mb=1024 / 48000 / 4ep`）自带的干净基线是 ~44–50s**：
+
+| 课程 | grad steps | `grad_sec`（min / 中位）|
+|---|---|---|
+| x20-noexplore | 188 | 49.5 / **50.2** |
+| x20-clutch | 188 | 43.9 / 44.7 |
+| x20-lambda | 188 | 49.7 / 50.3 |
+
+关键：**`x20-noexplore` 没有 demo** ⇒ 不可能踩到 §133 的 host-index 每步重编译那条根因；它的 **50s
+就是这条配置在 TPU 上的「干净上限」**。⇒ 我此前「目标 ~15s」是**第二次错**：**15s 从来不是 x20
+工作量的数**。
+
+#### 本修法修正后的正确预期
+
+账（修后未消 ragged 的 it6 真机读数）：
+
+| 项 | 值 | 说明 |
+|---|---|---|
+| PPO 单轮 | 85.0s | diag 总墙钟 84s |
+| 累计编译 | **51s**（新编译 8 次） | 其中 B=1024 窗内 ~37s + ragged 4 步 ~14s |
+| 188 grad steps × 0.174s/step | **~33s** | 稳态（`新=0, 命中=160`，编译=0） |
+| 51 + 33 | 84 ✓ | 自洽 |
+
+⇒ **编译全消后的地板 = 188 × 0.174 ≈ 33s**；参照 **x20 干净基线 ~50s**（noexplore，无 demo）⇒
+本腿修完预计 **~33–50s**。**不是 60s，也不是 15s。**
+
+旁证：我们的稳态 **174ms/步** 其实**比 x20 在线腿的 266ms/步（=50s/188）还快** ⇒「修完进 50s 以内」
+是有底的（同一工作量，不比在线腿差）。
+
+#### 两个必须挂上的不确定性（不假装是结论）
+
+1. **同配置不同速**：x3-rebirth 与 x5-rebirth 是**逐字相同的配置**（mb512/24000/6），`grad_sec` 却是
+   **33.8 vs 17.2**，差 2×。⇒ `grad_sec` **依 worker/设备而变**，而账本**不记 device**（全库搜过：
+   无 `device`/`tpu`/`cuda` 字段）。所以**跨课程比 `grad_sec` 不可靠**，唯一可信的比较是 **x20 系列内部**。
+2. x5-approach 是**单关**（`stages=2000`），x7-rebirth 是 4 关 —— 两者都 17s ⇒「关数」不是快慢主因；
+   真正的主因（设备？模型大小？宿主竞争？）**账本回答不了**，不要拿它下结论。
+
+**正确口径（以后引用）**：本修法目标 = **85s → ~33–50s**（对齐 x20 自身基线），**不是对着 15s 定**。
+
+#### ⚠⚠ 第三次修正（2026-09-22 又一轮用户质询）——x20 的 ~50s 是 **GPU** 数，作废
+
+用户补充两条事实：① **x20 系列课程都是 GPU 机器跑的**（⇒ 上面那张 44–50s 表**不能当 TPU 标尺**）；
+② 同一课程从 **GPU 换 TPU：~40s → ~15s**（~2.7×，用户口径，带问号）。
+
+⇒ 上一条「对齐 ~50s」**作废**。重定 TPU 标尺——用**真正 TPU 的那些轮次**：
+
+| 课程 | 配置 | grad steps | `grad_sec` | 每步（@B=512）|
+|---|---|---|---|---|
+| x5-approach | mb512/24000/6ep | 282 | 16.2–17.3 | **~60ms** |
+| x7-rebirth | mb512/24000/6ep | 282 | 16.3–17.3 | **~60ms** |
+| x3-chip-k05/k10（单轮）| mb512/~23300/4ep | ~184 | 10.7–10.8 | **~59ms** |
+
+三者每步耗时**彼此一致（~60ms/步）**，且与用户 A/B（2.7×）量级相洽 ⇒ **TPU 上 B=512 ≈ 60ms/步**。
+
+**这顺手解掉了上一条的「不确定性①」**：x3-rebirth(33.8) vs x5-rebirth(17.2) 同配置差 2× = **GPU vs TPU**
+（池子混装，`grad_sec` 依领取的 worker 而变）。按此读：x3/x4/x6 在 ~32–36 簇（GPU），x5/x7 在 ~16 簇（TPU）。
+
+**折算到本腿（mb=1024，188 步）**：TPU 上 B=512 ≈60ms/步 ⇒ B=1024 若近似线性 ≈**120ms/步** ⇒ 188 步 ≈ **~23s**。
+我们实测稳态 **174ms/步（33s）** ⇒ 距 TPU 标称差 **~45%**，**不是 2×**。
+
+差额的候选解释（**假设，待真机验证，不是结论**）：**demo 路径的额外工作**——多一遍 demo 前向/反向 + BC loss，
+且 `_demo_masked_ce` 的 `keep.any()` 是**设备→主机同步**，会把 XLA 图切开；it6 实录 **10 次 ExecuteComputation/步**、
+**d2h ~126ms/步**。这台机器上 x5/x7 没有 demo。⇒ **不是编译问题**（编译已单独计过 51s）。
+
+思索：我们的 174ms/步是在**同节点 220 个 rollout 工人并发**（`workers=220`）下量的，与在线腿同样有宿主竞争。
+
+**三次修正后的口径（以后引用）**：**85s → ~23–33s**（TPU 标称参考），**不是 50s，也不是 15s**。
+若需坐实 15–20s，得先把「demo 开销之外的残余」与设备级常态分开——需真机一轮 diag 对比同配置无 demo 腿。
+
+**待用户一句话**：那次 GPU→TPU 的 A/B 是**哪门课**？若是 x20 系列（mb1024/48000/4ep），则
+188 步 / 15s ⇒ **80ms/步**，我方 174ms/步就是 **2.2× 差**，那时 demo 开销之外还得再查；若是别的课，按步数折算。
+
+#### ⚠⚠⚠ 第四次修正：A/B **不用回想，账本里就有**（同课双簇）
+
+用户答「记不清了」⇒ 改从数据取证：**同一门课的 `grad_sec` 若中途换设备，会留下双峰**。扫 27 份账本
+（按时间序压缩成高低簇），**找到了两例同课切换**：
+
+| 课程 | 早段（疑似 GPU） | 晚段（疑似 TPU） | 倍数 |
+|---|---|---|---|
+| **x7-rebirth**（mb512/24000/6ep）| it1–27：**42.9s**（38.5–53.3）⇒ **159 ms/步** | it28–211：**16.7s** ⇒ **59 ms/步** | **2.6×** |
+| x5-rebirth（同配置）| it1–28：**73.6s** ⇒ 261 ms/步 | it29–63：**16.9s** ⇒ 60 ms/步 | 4.4× |
+
+⇒ 用户记忆的「同课 GPU ~40s → TPU ~15s」几乎逐字对上 **x7-rebirth 的 it28 切换（42.9→16.7s，2.6×）**，
+只是那次 A/B 的课是 **x7 的配置（24000/6ep），不是 x20 的（48000/4ep）**。
+
+**TPU 标尺现已四处自洽（每步 59–60ms @ B=512）**：x7-rebirth、x5-rebirth、x5-approach、x3-chip-k05/k10。
+GPU 侧则散（159 / 261 ms/步），符合「池子里的 GPU 型号不一」。
+
+**另：x20 系列全账本无双峰**（标度扫描里一个 x20 都没出现）⇒ **x20 全程单设备**，独立印证用户的
+「x20 都是 GPU 跑的」。
+
+#### 最终定标（本腿 = mb1024/188 步）
+
+| 折算方式 | 结果 |
+|---|---|
+| 按每步线性折（2×59ms ⇒ 118ms/步）| 188 × 0.118 ≈ **22s** |
+| 按样本量折（282步×512=144k 用 16.7s ⇒ 本腿 188×1024=192k = 1.33×）| 16.7 × 1.33 ≈ **22s** |
+| 我方实测稳态 | 174 ms/步 = **33s** |
+
+⇒ **TPU 标称 ≈ 22s，我方 33s，残余 ~1.5×**（不是 2×，也不是 4×）。残余的候选仍然是
+**demo 路径额外工作**（多一遍 demo 前/反向 + `keep.any()` host sync 切图），**不是编译**（已单计 51s）。
+
+**唯一能一锤定音的对照实验（待做）**：把 **x20-noexplore 放到离线 TPU 上跑**（与 demo-mix 同配置、
+无 demo）⇒ 直接分离「设备/配置基线」与「demo 开销」：
+* 若 noexplore-离线-TPU ≈ 22s ⇒ 那 11s 残余计入 demo，可立项优化 demo 路径；
+* 若 ≈ 33s ⇒ 残余在配置/设备侧，demo 是「免费」的，本腿已经到位，无需再动。
+
+
+
+测试：本轮只改课程配置（无代码路径变更）；配置经 jsonc 解析 + 不变量核算（`quota=12288`,
+`n=49152=48×1024`, `ragged=0`）。
+
+---
+
 ## §130 异步结果回传：把 `out` 从关键路径上摘下来（plan/transfer-scheduling P2.5，2026-09-22）
 
 **为什么做**：双课程单 worker（最典型场景）下 A 的 rollout 与 B 的 PPO 交错填空 ⇒ **算力已满**，
@@ -18,7 +413,7 @@ P2 预取只治 `in`，`out` 无人管。两者正交：命中让 `in`→0，`ou
 |---|---|
 | 新模块 | `remote/result_upload.py`：`ResultUploader`（有界队列 `depth=2` + 专用线程 + `drain`/`close` + 落定回调）；`sync` 模式逐字回旧行为 |
 | worker 接线 | `submit` 入队即返回 → 主循环立刻领下一份；`_result_settled` 在**落定那一刻**才 `_wire_flush(wall_end=…)`；job 级 `uploaded` 标志决定 finally 收不收；整段主循环包 `try/finally` 收尾 drain；`--result-upload {async,sync}`（缺省 async） |
-| 记账 | `_wire_flush(wall_end=)`：`wall` = **关键路径**（claim → 结果就绪），新增 `overlap=` 字段；`out` 秒数照报不抹 | 
+| 记账 | `_wire_flush(wall_end=)`：`wall` = **关键路径**（claim → 结果就绪），新增 `overlap=` 字段；`out` 秒数照报不抹 |
 | 读方 | `tools/wire_report.py`：`overlap=` 可选组（旧日志当 0）+ `out_overlap_sec` + 渲染「不占关键路径 / 仍压在关键路径上」 |
 | 安全网 | 队列满 / 入队超时 / 上传器已收尾 ⇒ **退回同步**（绝不丢）；失败落带 jid 的 `★` 行 + 收尾汇总；`--once` 先 drain 再判成败（H8 不退让） |
 
@@ -5152,7 +5547,7 @@ T5 仍是主路径（T6 需另行批准＋破规立案），但后腿引用 T3 �
 同一条 target=600000、4 关：新语义（est=98 samples）`G0=1531` **一波达标**；旧语义（est=980 ticks）
 `G0=154` **补满 `DEFAULT_MAX_WAVES`=3 波仍 < 达标线的 1/3**。另加
 `test_t9_old_ticks_key_name_is_rejected`（改名护栏：旧键照写必须响亮报错）。桩里 `totalTicks` 刻意写成
-`10×samples`，任何误读 ticks 的路径都会 10× 暴露。回归：`tests/test_rollout_volume.py` 52 用例 + 
+`10×samples`，任何误读 ticks 的路径都会 10× 暴露。回归：`tests/test_rollout_volume.py` 52 用例 +
 `e2e/test_volume_e2e.py` 10 用例（真调度器/真 shard）绿，nn python gate + 根 `bun run check` 绿。
 
 ---

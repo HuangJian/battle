@@ -66,12 +66,12 @@ bun tools/agent/sampler-agent.ts --port 8443 --workers <N>
 
 | 臂 | 何时出现 | 相对 |
 |---|---|---|
-| **bun + native** | `src/nn/native/prebuilt/<本机目标>` 存在且首用 attestation 通过 | **最快**（~2.6ms） |
+| **bun + native** | `src/nn/conv/prebuilt/<本机目标>` 存在且首用 attestation 通过 | **最快**（~2.6ms；内核重排后约 1.6ms） |
 | bun/node + wasm | 无共享库，或 attestation 失败响亮回落 | 中（bun ~7.6ms / node ~4.6ms） |
 | bun/node + TS | wasm 资产也缺（会静默变慢！） | 最慢（~14×） |
 
-同一个 `conv_feats.wasm` 推理，node(V8) 比 bun(JSC) 快 ~1.6×（本机实测 features 4.62ms vs
-7.55ms；端到端单局 ~1.4×）。**agent 本体始终跑 bun**，只是采样子进程交给 node：
+同一个 wasm 内核（`src/nn/conv/prebuilt/wasm/conv.wasm`）推理，node(V8) 比 bun(JSC) 快 ~1.6×
+（本机实测 features 4.62ms vs 7.55ms；端到端单局 ~1.4×）。**agent 本体始终跑 bun**，只是采样子进程交给 node：
 
 - **引擎=本机微基准自动选**（五平台实测：V8 只在 win/wsl x64 赢、mac/arm64 bun 赢；装上
   native 后 bun 臂通常翻盘）：启动时实测两引擎稳态 forward（~0.3-0.5s/次），选快者（3% 迟滞）；
@@ -83,8 +83,9 @@ bun tools/agent/sampler-agent.ts --port 8443 --workers <N>
   `SAMPLER_NODE_BIN=/path/to/node` 指定参与基准的 node。
 - 自检：启动行含 `rolloutEngine=node (v26.8.1)`；`GET /v1/ping` 有 `rolloutEngine` /
   `nodeVersion` 字段。
-- ⚠️ 若打包产物的同级 `wasm/conv_feats.wasm` 缺失，会**静默回退 TS 路径（14× 慢）**——
-  不要手工删 `tmp/dist-agent/node-bundle/`。
+- ⚠️ 若打包产物里 `prebuilt/wasm/conv.wasm`（与 `prebuilt/<平台>/conv_native.*`）缺失，
+  会**静默回退**（wasm 缺失 ⇒ TS 路径 14× 慢；native 缺失 ⇒ 回落 wasm）——
+  rollout-runner 会按同一相对路径把它们镜像进产物，不要手工删 `tmp/dist-agent/node-bundle/`。
 
 ## 3. Android 平板（Termux，局域网直连）
 
@@ -303,7 +304,7 @@ diff local.tsv mac.tsv
 | 节点多出 `.DS_Store` / 临时文件（`.pyc`/`*~`/`*.log` 等） | 删除；此类噪声已由 F3 过滤规则永久免疫（双侧同规则） |
 | 节点有本地未提交改动 | 决定 commit+push，或 `git checkout -- <文件>` 还原（**禁用 git stash**） |
 | `core.autocrlf` 与训练机（`input`）不一致 | 对齐后重新 checkout 集内文件 |
-| `src/nn/wasm/conv_feats.wasm` 字节不同 | 从训练机复制覆盖，勿在节点本地重编 |
+| `src/nn/conv/prebuilt/wasm/conv.wasm`（或 `prebuilt/<平台>/conv_native.*`）字节不同 | 从训练机复制覆盖，勿在节点本地重编（`bun tools/agent/native-build.ts --cross` 一次重出 6 native + wasm） |
 | 分支/目录不对 | 确认 agent 的 `REPO_ROOT` 与分支 = 训练机 `UPGRADE_BRANCH` |
 
 > 训练机侧自身先自查：`dist_common.dirty_hash_files()` 非空（集内有未提交改动）时，远端

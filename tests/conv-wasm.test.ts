@@ -1,8 +1,12 @@
 /**
- * conv-wasm.test.ts —— conv_feats.wasm 与 TS 参考实现的数值对拍（DECISIONS §311）。
- * wasm（conv_feats.wasm，clang -O3 -msimd128 外积排布）替换 StudentModel 卷积段
- * 前，必须保证 pooled 与 TS naive 实现 ≤1e-3（累加顺序级差异）。权重/输入合成随机
- * （无需真实权重文件），固定 seed 可复现。
+ * conv-wasm.test.ts —— wasm 内核（conv/prebuilt/wasm/conv.wasm）与 TS 参考实现的数值对拍
+ * （DECISIONS §311）。wasm 由 clang -O3 -msimd128 编自 `src/nn/conv/conv.c`（与 native
+ * **同一份源码**，2026-09-22 单源化）替换 StudentModel 卷积段前，必须保证 pooled 与
+ * TS naive 实现 ≤1e-3（累加顺序级差异）。权重/输入合成随机（无需真实权重文件），固定 seed 可复现。
+ *
+ * 本用例直接按**原始 ABI** 驱动 wasm（单 blob + 4 参，与 native 侧同一个入口），
+ * 不复用适配器 —— 它要验的正是内存布局与导出名本身；走生产入口的那条链由
+ * tests/native-parity.test.ts（native↔wasm 逐字节）守护。
  */
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'fs'
@@ -117,29 +121,39 @@ function tsFeatures(
   return pooled
 }
 
-describe('conv_feats.wasm vs TS naive（数值对拍）', () => {
+describe('conv.wasm vs TS naive（数值对拍）', () => {
   test('随机权重 × 3 帧 pooled ≤1e-3', () => {
-    const wasmBytes = readFileSync(new URL('../src/nn/wasm/conv_feats.wasm', import.meta.url))
+    const wasmBytes = readFileSync(
+      new URL('../src/nn/conv/prebuilt/wasm/conv.wasm', import.meta.url),
+    )
     const inst = new WebAssembly.Instance(new WebAssembly.Module(wasmBytes))
     const mem = inst.exports.memory as WebAssembly.Memory
-    const need =
-      (1 << 20) + (10368 + 8 * (1600 + 64 + 4096 + 64)) * 4 + 18 * SP * 4 + 3 * H * SP * 4 + H * 4
+    const STEM_W = 18 * 576,
+      DW_W = D * H * 25,
+      PW_W = D * H * H
+    const BLOB = STEM_W + H + DW_W + D * H + PW_W + D * H
+    // base 必须在模块自己的静态区之后（内核 scratch/bufB 在 BSS，不在数据段）
+    const base = Math.max(1 << 20, mem.buffer.byteLength)
+    const need = base + BLOB * 4 + 18 * SP * 4 + H * 4 + H * SP * 4
     const grow = Math.ceil((need - mem.buffer.byteLength) / 65536)
     if (grow > 0) mem.grow(grow)
-    const base = 1 << 20
     const f32At = (o: number) => new Float32Array(mem.buffer, o)
     const oStemW = base,
-      oStemB = oStemW + 10368 * 4,
-      oDwW = oStemB + 64 * 4
-    const oDwB = oDwW + D * H * 25 * 4,
+      oStemB = oStemW + STEM_W * 4,
+      oDwW = oStemB + H * 4
+    const oDwB = oDwW + DW_W * 4,
       oPwW = oDwB + D * H * 4,
-      oPwB = oPwW + D * H * H * 4
-    const oIn = oPwB + D * H * 4,
-      oBufA = oIn + 18 * SP * 4,
-      oBufB = oBufA + H * SP * 4
-    const oBufC = oBufB + H * SP * 4,
-      oPool = oBufC + H * SP * 4
-    const feats = inst.exports['features'] as (...a: number[]) => void
+      oPwB = oPwW + PW_W * 4
+    const oIn = base + BLOB * 4,
+      oPool = oIn + 18 * SP * 4,
+      oBufA = oPool + H * 4
+    expect((inst.exports['cf_abi'] as () => number)()).toBe(1)
+    const feats = inst.exports['cf_student_features'] as (
+      wblob: number,
+      in16: number,
+      pooled: number,
+      bufA: number,
+    ) => number
 
     for (let frame = 0; frame < 3; frame++) {
       const rnd = mulberry(0xc0ffee + frame * 97)
@@ -172,7 +186,7 @@ describe('conv_feats.wasm vs TS naive（数值对拍）', () => {
         f32At(oPwB + i * H * 4).set(pwB[i])
       }
       f32At(oIn).set(in16)
-      feats(oIn, oStemW, oStemB, oDwW, oDwB, oPwW, oPwB, oBufA, oBufB, oBufC, oPool)
+      expect(feats(oStemW, oIn, oPool, oBufA)).toBe(0)
       const wm = f32At(oPool).subarray(0, H)
       let maxD = 0
       let maxA = 0

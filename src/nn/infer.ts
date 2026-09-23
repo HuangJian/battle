@@ -16,7 +16,8 @@
  */
 
 import { OBS_CHANNELS, BOARD, SCALAR_DIM } from './obs-encoder'
-import { noteFeaturesTs, runStudentFeatures } from './conv-wasm'
+import { noteFeaturesTs, runStudentFeatures } from './conv/conv'
+import { runStudentConvTs, type ConvTsView } from './conv/conv_ts'
 
 export const MOVE_DIM = 5
 export const FIRE_DIM = 2
@@ -324,6 +325,10 @@ export class StudentModel implements ModelLike {
   private hidden: Float32Array // [headHidden]
   /** inject concat buffer (M4): hidden(128) + inject(9) -> [137]. */
   private hiddenInject: Float32Array
+  /** TS 卷积兜底（conv/conv_ts.ts）的 buffer 视图：构造期建一次 ⇒ 每 tick 零分配。
+   *  它同时是「这些字段确实被用到」的显式声明：加速后端经 `this as never` 取字段，
+   *  TS 侧则走这份类型化视图。 */
+  private readonly tsConvView: ConvTsView
   readonly moveLogits: Float32Array
   readonly fireLogits: Float32Array
   readonly valueOut: Float32Array
@@ -446,6 +451,24 @@ export class StudentModel implements ModelLike {
     this.anchorLogits = new Float32Array(16)
     this.goalHeatmap = new Float32Array(sp)
     this.engageLogits = new Float32Array(2)
+
+    // TS 卷积兜底视图（构造期一次分配；features() 每 tick 复用它）。
+    this.tsConvView = {
+      h,
+      d: this.d,
+      inCh: this.inCh,
+      in16: this.in16,
+      stemW: this.stemW,
+      stemB: this.stemB,
+      dwW: this.dwW,
+      dwB: this.dwB,
+      pwW: this.pwW,
+      pwB: this.pwB,
+      bufA: this.bufA,
+      bufB: this.bufB,
+      bufC: this.bufC,
+      pooled: this.pooled,
+    }
   }
 
   forward(obs: Uint8Array, scalars: Float32Array): void {
@@ -557,33 +580,13 @@ export class StudentModel implements ModelLike {
     this.in16.set(this.coords, oc * sp)
 
     // 加速后端（rollout-eval-opt.plan.md §4）：native（共享库 + bun:ffi，rollout/eval 同
-    // 引擎）→ wasm32 SIMD（conv_feats.wasm，DECISIONS §311）→ TS 原路径兜底。
+    // 引擎）→ wasm32 SIMD（conv/prebuilt/wasm/conv.wasm，DECISIONS §311）→ TS 原路径兜底。
     // 失败/架构不符 → false → TS 原路径（并记账，见 noteFeaturesTs）。
     const accelOk = this.h === 64 && this.d === 8 && runStudentFeatures(this as never)
     if (!accelOk) {
       noteFeaturesTs()
-      // stem: conv 3x3 (inCh+2=18)->h + ReLU
-      this.conv3x3(this.in16, this.inCh + 2, this.stemW, this.stemB, this.bufA)
-      this.reluInPlace(this.bufA)
-
-      // d ConvMixer blocks: depthwise 5x5 + pointwise 1x1 + residual.
-      for (let i = 0; i < this.d; i++) {
-        this.conv5x5dw(this.bufA, this.dwW[i], this.dwB[i], this.bufB)
-        this.reluInPlace(this.bufB)
-        this.conv1x1(this.bufB, this.pwW[i], this.pwB[i], this.bufC)
-        this.reluInPlace(this.bufC)
-        // residual: bufA += bufC
-        for (let j = 0; j < this.bufA.length; j++) this.bufA[j] += this.bufC[j]
-      }
-
-      // GAP
-      this.pooled.fill(0)
-      for (let ch = 0; ch < h; ch++) {
-        const base = ch * sp
-        let sum = 0
-        for (let i = 0; i < sp; i++) sum += this.bufA[base + i]
-        this.pooled[ch] = sum / sp
-      }
+      // TS 原路径：conv/conv_ts.ts（conv.c 的 TS 孪生实现；写 bufA + pooled）。
+      runStudentConvTs(this.tsConvView)
     }
 
     // fc: hidden = relu(fused · fcW^T + fcB)
@@ -595,10 +598,6 @@ export class StudentModel implements ModelLike {
       for (let i = 0; i < this.scalarDim; i++) acc += this.fcW[wb + h + i] * scalars[i]
       this.hidden[o] = RELU(acc)
     }
-  }
-
-  private reluInPlace(buf: Float32Array): void {
-    for (let i = 0; i < buf.length; i++) if (buf[i] < 0) buf[i] = 0
   }
 
   /** head = W · h + b ; W is [outDim, inDim] (PyTorch Linear layout). */
@@ -615,108 +614,6 @@ export class StudentModel implements ModelLike {
       const wb = o * inDim
       for (let i = 0; i < inDim; i++) acc += w[wb + i] * h[i]
       out[o] = acc
-    }
-  }
-
-  /** Conv 3x3, padding 1, stride 1, no groups (matches stem / BC conv2d). */
-  private conv3x3(
-    input: Float32Array,
-    inCh: number,
-    w: Float32Array,
-    b: Float32Array,
-    out: Float32Array,
-  ): void {
-    const outCh = b.length
-    const board = this.board
-    const sp = board * board
-    for (let oc = 0; oc < outCh; oc++) {
-      const wBase = oc * inCh * 9
-      const oBase = oc * sp
-      const bias = b[oc]
-      for (let oh = 0; oh < board; oh++) {
-        for (let ow = 0; ow < board; ow++) {
-          let acc = bias
-          for (let ic = 0; ic < inCh; ic++) {
-            const iBase = ic * sp
-            const wBaseIc = wBase + ic * 9
-            // kh = 0
-            let ih = oh - 1
-            let iw = ow - 1
-            if (ih >= 0 && iw >= 0) acc += w[wBaseIc + 0] * input[iBase + ih * board + iw]
-            iw = ow
-            if (ih >= 0) acc += w[wBaseIc + 1] * input[iBase + ih * board + iw]
-            iw = ow + 1
-            if (ih >= 0 && iw < board) acc += w[wBaseIc + 2] * input[iBase + ih * board + iw]
-            // kh = 1
-            ih = oh
-            iw = ow - 1
-            if (iw >= 0) acc += w[wBaseIc + 3] * input[iBase + ih * board + iw]
-            iw = ow
-            acc += w[wBaseIc + 4] * input[iBase + ih * board + iw]
-            iw = ow + 1
-            if (iw < board) acc += w[wBaseIc + 5] * input[iBase + ih * board + iw]
-            // kh = 2
-            ih = oh + 1
-            iw = ow - 1
-            if (ih < board && iw >= 0) acc += w[wBaseIc + 6] * input[iBase + ih * board + iw]
-            iw = ow
-            if (ih < board) acc += w[wBaseIc + 7] * input[iBase + ih * board + iw]
-            iw = ow + 1
-            if (ih < board && iw < board) acc += w[wBaseIc + 8] * input[iBase + ih * board + iw]
-          }
-          out[oBase + oh * board + ow] = acc
-        }
-      }
-    }
-  }
-
-  /** Depthwise conv 5x5, padding 2, stride 1, groups=outCh. */
-  private conv5x5dw(
-    input: Float32Array,
-    w: Float32Array,
-    b: Float32Array,
-    out: Float32Array,
-  ): void {
-    const outCh = b.length // == input channel count (depthwise)
-    const board = this.board
-    const sp = board * board
-    for (let oc = 0; oc < outCh; oc++) {
-      const wBase = oc * 25
-      const base = oc * sp
-      const bias = b[oc]
-      for (let oh = 0; oh < board; oh++) {
-        for (let ow = 0; ow < board; ow++) {
-          let acc = bias
-          // kh 0..4 / kw 0..4 with zero padding (out of [0, board) => 0)
-          for (let kh = 0; kh < 5; kh++) {
-            const ih = oh + kh - 2
-            if (ih < 0 || ih >= board) continue
-            const rowBase = base + ih * board
-            for (let kw = 0; kw < 5; kw++) {
-              const iw = ow + kw - 2
-              if (iw < 0 || iw >= board) continue
-              acc += w[wBase + kh * 5 + kw] * input[rowBase + iw]
-            }
-          }
-          out[base + oh * board + ow] = acc
-        }
-      }
-    }
-  }
-
-  /** Pointwise conv 1x1 (h -> h), no groups. */
-  private conv1x1(input: Float32Array, w: Float32Array, b: Float32Array, out: Float32Array): void {
-    const outCh = b.length
-    const sp = this.board * this.board
-    for (let oc = 0; oc < outCh; oc++) {
-      const wBase = oc * outCh
-      const oBase = oc * sp
-      const bias = b[oc]
-      for (let p = 0; p < sp; p++) {
-        let acc = bias
-        for (let ic = 0; ic < outCh; ic++) acc += w[wBase + ic] * input[ic * sp + p]
-        out[oBase + p] = acc
-      }
     }
   }
 }

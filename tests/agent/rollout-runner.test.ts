@@ -102,8 +102,8 @@ describe('ensureNodeBundle', () => {
     const bundleDir = mkdtempSync(path.join(tmpdir(), 'rr-bundle-'))
     mkdirSync(path.dirname(path.join(repoRoot, ENTRY_RL)), { recursive: true })
     writeFileSync(path.join(repoRoot, ENTRY_RL), '// stub\n')
-    mkdirSync(path.join(repoRoot, 'src', 'nn', 'wasm'), { recursive: true })
-    writeFileSync(path.join(repoRoot, 'src', 'nn', 'wasm', 'conv_feats.wasm'), 'WASM')
+    mkdirSync(path.join(repoRoot, 'src', 'nn', 'conv', 'prebuilt', 'wasm'), { recursive: true })
+    writeFileSync(path.join(repoRoot, 'src', 'nn', 'conv', 'prebuilt', 'wasm', 'conv.wasm'), 'WASM')
     return { repoRoot, bundleDir }
   }
   const okBuild = (out: string) => {
@@ -120,8 +120,8 @@ describe('ensureNodeBundle', () => {
     })
     expect(out).toBe(path.join(bundleDir, 'export-rl-rollout.mjs'))
     expect(existsSync(out!)).toBe(true)
-    // 关键断言：wasm 必须与产物同级 wasm/ 下
-    expect(existsSync(path.join(bundleDir, 'wasm', 'conv_feats.wasm'))).toBe(true)
+    // 关键断言：wasm 必须按适配器的模块相对路径进产物（prebuilt/wasm/）
+    expect(existsSync(path.join(bundleDir, 'prebuilt', 'wasm', 'conv.wasm'))).toBe(true)
   })
 
   it('打包失败 → null（调用方回退 bun）', () => {
@@ -165,8 +165,8 @@ describe('createRolloutRunner', () => {
     const bundleDir = mkdtempSync(path.join(tmpdir(), 'rr-bundle2-'))
     mkdirSync(path.dirname(path.join(repoRoot, ENTRY_RL)), { recursive: true })
     writeFileSync(path.join(repoRoot, ENTRY_RL), '// stub\n')
-    mkdirSync(path.join(repoRoot, 'src', 'nn', 'wasm'), { recursive: true })
-    writeFileSync(path.join(repoRoot, 'src', 'nn', 'wasm', 'conv_feats.wasm'), 'WASM')
+    mkdirSync(path.join(repoRoot, 'src', 'nn', 'conv', 'prebuilt', 'wasm'), { recursive: true })
+    writeFileSync(path.join(repoRoot, 'src', 'nn', 'conv', 'prebuilt', 'wasm', 'conv.wasm'), 'WASM')
     return { repoRoot, bundleDir }
   }
   const opts = (repoRoot: string, bundleDir: string, extra: Record<string, unknown> = {}) => ({
@@ -273,7 +273,7 @@ describe('ensureNativeAssets（T2：资产就位/降级）', () => {
     }
   })
 
-  it('已有库（NN_NATIVE_LIB）⇒ 复制到 bundle 目录供打包产物解析', () => {
+  it('已有库（NN_NATIVE_LIB）⇒ 按适配器的模块相对路径镜像进 bundle 目录', () => {
     const { repoRoot, bundleDir } = setup()
     const fake = path.join(repoRoot, 'libfake.bin')
     writeFileSync(fake, 'NOT-A-REAL-LIB')
@@ -284,7 +284,14 @@ describe('ensureNativeAssets（T2：资产就位/降级）', () => {
       expect(r.ok).toBe(true)
       expect(r.libPath).toBe(fake)
       expect(r.sha.length).toBe(16)
-      expect(existsSync(path.join(bundleDir, 'libfake.bin'))).toBe(true)
+      // 打包产物按 `prebuilt/<平台>/<库名>` 相对解析（见 nativeLibCandidates）
+      const mirrored = path.join(
+        bundleDir,
+        'prebuilt',
+        `${process.platform}-${process.arch}`,
+        path.basename(fake),
+      )
+      expect(existsSync(mirrored)).toBe(true)
     } finally {
       if (prev === undefined) delete process.env.NN_NATIVE_LIB
       else process.env.NN_NATIVE_LIB = prev
@@ -298,8 +305,8 @@ describe('引擎微基准自动选择（§374）', () => {
     const bundleDir = mkdtempSync(path.join(tmpdir(), 'rr-benchb-'))
     mkdirSync(path.dirname(path.join(repoRoot, ENTRY_RL)), { recursive: true })
     writeFileSync(path.join(repoRoot, ENTRY_RL), '// stub\n')
-    mkdirSync(path.join(repoRoot, 'src', 'nn', 'wasm'), { recursive: true })
-    writeFileSync(path.join(repoRoot, 'src', 'nn', 'wasm', 'conv_feats.wasm'), 'WASM')
+    mkdirSync(path.join(repoRoot, 'src', 'nn', 'conv', 'prebuilt', 'wasm'), { recursive: true })
+    writeFileSync(path.join(repoRoot, 'src', 'nn', 'conv', 'prebuilt', 'wasm', 'conv.wasm'), 'WASM')
     return { repoRoot, bundleDir }
   }
   const node = (v = 'v26.8.1') => ({

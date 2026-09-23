@@ -4,12 +4,16 @@
   "ccVersion": "clang version 20.1.0",
   "sources": [
     {
-      "path": "src/nn/native/conv_feats_native.h",
-      "sha256": "c1d555f322fbc2dda5f87757fef8bbd879873e1ef9649ac298106062e8a921cd"
+      "path": "src/nn/conv/conv_native.h",
+      "sha256": "ac55fbbb325f60703c46a96a772263adde063d518afe10b3ac75ab4e2aafeda8"
     },
     {
-      "path": "src/nn/native/conv_feats_native.c",
-      "sha256": "94f3af324b647bb700e8d26f75cf63d1b1804c4d5b33245ad9cf767364974f12"
+      "path": "src/nn/conv/conv_wasm.h",
+      "sha256": "0fb94b558489d023d0586e3d409d6983feddb90617e5a5fc7158f8424b0d38f6"
+    },
+    {
+      "path": "src/nn/conv/conv.c",
+      "sha256": "6966d0ea1c3116ec99a15c8edb11d277dfe80cda11146d9db698ae5cb2834320"
     }
   ],
   "targets": [
@@ -17,7 +21,7 @@
       "id": "win32-x64",
       "triple": "x86_64-pc-windows-msvc",
       "kind": "coff",
-      "lib": "conv_feats_native.dll",
+      "lib": "conv_native.dll",
       "flags": [
         "-O3",
         "-ffp-contract=off",
@@ -30,14 +34,14 @@
         "-fvisibility=hidden",
         "-DCF_FREESTANDING=1"
       ],
-      "sha256": "fcf631f207f4398b1da43bc281055ee0fab3a22ec58b3d70dbad4c93097349c3",
-      "bytes": 14336
+      "sha256": "56dc78ee30ae94ffbd973d687936646f7524fe034c448cd6b8b9114e64469c81",
+      "bytes": 16384
     },
     {
       "id": "win32-arm64",
       "triple": "aarch64-pc-windows-msvc",
       "kind": "coff",
-      "lib": "conv_feats_native.dll",
+      "lib": "conv_native.dll",
       "flags": [
         "-O3",
         "-ffp-contract=off",
@@ -48,14 +52,14 @@
         "-fvisibility=hidden",
         "-DCF_FREESTANDING=1"
       ],
-      "sha256": "ba65dcdc322a551c87ffed83e45c4ae076fbbde0f6a3e8e5d7a6aa463f865b8a",
-      "bytes": 8192
+      "sha256": "bff06abeea3c417199e130ffc7f513d94255c6a82e8ab5fad535de9d05843972",
+      "bytes": 9728
     },
     {
       "id": "linux-x64",
       "triple": "x86_64-unknown-linux-gnu",
       "kind": "elf",
-      "lib": "conv_feats_native.so",
+      "lib": "conv_native.so",
       "flags": [
         "-O3",
         "-ffp-contract=off",
@@ -68,14 +72,14 @@
         "-fvisibility=hidden",
         "-DCF_FREESTANDING=1"
       ],
-      "sha256": "74c2130869a4e0b7f392621447e76b38edb5dba832447be58bd82f618b339e01",
-      "bytes": 13856
+      "sha256": "35f321071695ccb1a8adfd2c61f9755adedb16409edbde75af049237fd6ed33c",
+      "bytes": 15856
     },
     {
       "id": "linux-arm64",
       "triple": "aarch64-unknown-linux-gnu",
       "kind": "elf",
-      "lib": "conv_feats_native.so",
+      "lib": "conv_native.so",
       "flags": [
         "-O3",
         "-ffp-contract=off",
@@ -86,14 +90,14 @@
         "-fvisibility=hidden",
         "-DCF_FREESTANDING=1"
       ],
-      "sha256": "d3f18b2e9d8e2ddbe3446d84cc0c11f582494a762370db2885492290c310adb6",
-      "bytes": 7664
+      "sha256": "0909fd03202cdf563dfff2060f93c3568ad42a23d88acea3f5b594902f246906",
+      "bytes": 9288
     },
     {
       "id": "darwin-x64",
       "triple": "x86_64-apple-darwin",
       "kind": "macho",
-      "lib": "conv_feats_native.dylib",
+      "lib": "conv_native.dylib",
       "flags": [
         "-O3",
         "-ffp-contract=off",
@@ -106,14 +110,14 @@
         "-fvisibility=hidden",
         "-DCF_FREESTANDING=1"
       ],
-      "sha256": "c489a28988cefcd18337d86bf7a4e454dae21d260aa0e84802c893f1fb9cb240",
+      "sha256": "eb5ef94443610ab356d5a847855480ccd9653e843f9d803fbe1ca8da840c4afb",
       "bytes": 16560
     },
     {
       "id": "darwin-arm64",
       "triple": "arm64-apple-darwin",
       "kind": "macho",
-      "lib": "conv_feats_native.dylib",
+      "lib": "conv_native.dylib",
       "flags": [
         "-O3",
         "-ffp-contract=off",
@@ -124,9 +128,28 @@
         "-fvisibility=hidden",
         "-DCF_FREESTANDING=1"
       ],
-      "sha256": "ef9719584b878ad03605df904b99f975baa4d52c15ed7ee2ec1b2b879d9c1b70",
+      "sha256": "e146e3d84d74db927812591c77666f3a5087404d0a4060130e9075dac6d21c73",
       "bytes": 16864
     }
   ],
-  "builtAt": "2026-09-21T07:56:24.857Z"
+  "wasm": {
+    "id": "wasm32",
+    "lib": "conv.wasm",
+    "flags": [
+      "--target=wasm32",
+      "-msimd128",
+      "-O3",
+      "-ffp-contract=off",
+      "-fno-fast-math",
+      "-fno-builtin",
+      "-fno-stack-protector",
+      "-nostdlib",
+      "-Wl,--no-entry",
+      "-Wl,--export-memory",
+      "-Wl,--strip-all"
+    ],
+    "sha256": "5b77cb4df5a14fcccfb789a6e2565be1dfa7962892918f360b6f1c8ce1583cdb",
+    "bytes": 7350
+  },
+  "builtAt": "2026-09-22T23:50:20.990Z"
 }

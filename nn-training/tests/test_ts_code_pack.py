@@ -2,9 +2,10 @@
 
 为什么值得一条单测：离线训练任务的 rollout 跑在 PPO 云机上，云机**既没有 clang、也不持仓库**
 （worker 只拿到 ts_code.zip 解出来的一棵树，见 remote/worker.py::_ensure_ts_code）。native
-features 后端是 `src/nn/native-conv.ts` 用**模块相对路径** `native/prebuilt/<平台>/…` 找库的，
-所以只要打包白名单漏了 `.dll/.so/.dylib`，云机上就是「无库可加载 ⇒ 首用 attestation 跳过 ⇒
-静默回落 wasm」——不报错、只是每局回到 1338ms。这条测试就是那个静默的哨兵。
+features 后端是 `src/nn/conv/conv_native_adapter.ts` 用**模块相对路径** `prebuilt/<平台>/…`
+找库的，所以只要打包白名单漏了 `.dll/.so/.dylib`，云机上就是「无库可加载 ⇒ 首用 attestation
+跳过 ⇒ 静默回落 wasm」——不报错、只是每局回到 1338ms。这条测试就是那个静默的哨兵。
+（wasm 内核 `src/nn/conv/prebuilt/wasm/conv.wasm` 走 `.wasm` 后缀那条链，同样必须在包里。）
 
 覆盖三件：
   ① 产物齐全：`manifest.json` 里登记的每个目标都在包里（且是 0755，便于 dlopen）；
@@ -53,13 +54,17 @@ def test_native_prebuilt_libs_are_packed(tmp_path: Path) -> None:
             info = z.getinfo(arc)
             assert info.file_size == t["bytes"], f"{arc} 字节数不符（被打包/传输改过？）"
             assert info.external_attr >> 16 & 0o111, f"{arc} 没有可执行位"
-    # 库里只有共享库后缀，不该有别的杂物
+    # prebuilt 里的产物只有共享库后缀（+ wasm 内核）——不该有别的杂物
     stray = [
         n
         for n in names
-        if n.startswith(PREBUILT_REL + "/") and not n.endswith(TS_CODE_BINARY_SUFFIXES)
+        if n.startswith(PREBUILT_REL + "/")
+        and not n.endswith(TS_CODE_BINARY_SUFFIXES)
+        and not n.endswith(".wasm")
     ]
-    assert stray == [], f"prebuilt 目录里混进了非共享库文件：{stray}"
+    assert stray == [], f"prebuilt 目录里混进了非产物文件：{stray}"
+    # wasm 内核也必须在包里（它与 6 个 native 目标同源、同一门禁）
+    assert f"{PREBUILT_REL}/wasm/conv.wasm" in names, "ts_code 缺 wasm 内核（云机上会静默回落 TS）"
 
 
 def test_whitelist_still_covers_ts_runtime(tmp_path: Path) -> None:
@@ -67,9 +72,11 @@ def test_whitelist_still_covers_ts_runtime(tmp_path: Path) -> None:
     _out, _sha, names = _pack(tmp_path)
     for arc in (
         "tools/sim/export-rl-rollout.ts",
-        "src/nn/wasm/conv_feats.wasm",
-        "src/nn/native-conv.ts",  # native 后端的加载器本身也得在
-        "src/nn/native-prebuilt.ts",  # 平台→目录名映射（漏了它云机上找不到库）
+        "src/nn/conv/prebuilt/wasm/conv.wasm",
+        "src/nn/conv/conv.ts",  # 生产咽喉（native → wasm → TS）
+        "src/nn/conv/conv_native_adapter.ts",  # native 后端的加载器本身也得在
+        "src/nn/conv/conv_wasm_adapter.ts",  # wasm 后端
+        "src/nn/conv/native-prebuilt.ts",  # 平台→目录名映射（漏了它云机上找不到库）
     ):
         assert arc in names, f"ts_code 缺 {arc}"
     # 不该进包的（噪声 / 依赖树 / 临时物）

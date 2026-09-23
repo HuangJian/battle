@@ -8,7 +8,7 @@
  * ★ 2026-09-21 改（评审 B1/B3）：旧版在文件里**自绘一份 wasm 内存布局**再直接调 `features`，
  *   于是①通道数在 v2→v3（16→18）时就漂了（旧布局 offIn 只留 16 通道，越界写进 bufA 区）；
  *   ②永远测不到 native 臂。现在改为调用**生产入口** `runStudentFeatures`（native → wasm →
- *   TS 同一条链，见 src/nn/conv-wasm.ts），基准测的就是生产真正走的路：
+ *   TS 同一条链，见 src/nn/conv/conv.ts），基准测的就是生产真正走的路：
  *     - bun 臂装了共享库 ⇒ 测出来是 native（且首用 attestation 已被 warmup 吸收）；
  *     - node 臂无 bun:ffi ⇒ 测出来是 wasm；
  *     - 两者都没有 ⇒ TS（BENCH-ARM ts，调用方据此知道"加速没生效"）。
@@ -30,7 +30,7 @@ const IN_CH = 18
 
 // 静态 import：node 打包（bun build --target=node）能把它内联进来；
 // 用动态 URL import 在产物里会指向不存在的源文件（裸跑才有）。
-import { featuresEngine, runStudentFeatures } from '../../src/nn/conv-wasm'
+import { featuresEngine, runStudentFeatures } from '../../src/nn/conv/conv'
 
 /** 确定性伪随机（LCG）；只为形状合法的假权重，不用 Math.random。 */
 function makeRng(seed: number): () => number {

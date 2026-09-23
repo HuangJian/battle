@@ -1,21 +1,29 @@
 /**
- * conv-wasm.ts —— StudentModel.features 的 wasm32 SIMD 后端（DECISIONS §311 提速①）。
+ * conv_wasm_adapter.ts —— StudentModel.features 的 wasm32 SIMD 后端（DECISIONS §311 提速①）。
  *
- * conv_feats.wasm 由 clang --target=wasm32 -O3 -msimd128 编译（外积排布自动向量化），
- * probe 实测 features ~6.9ms vs TS ~41ms（×6），pooled max|Δ|≈4.8e-6（累加顺序级）。
+ * conv.wasm 由**与 native 同一份** `conv.c` 编译（clang --target=wasm32 -msimd128 -O3
+ * -ffp-contract=off …，命令与 flags 见 native-prebuilt.ts::wasmBuildFlags 与
+ * tools/agent/native-build.ts --wasm；产物入库在 prebuilt/wasm/conv.wasm）。
  *
- * 契约：仅适用于 h=64 / d=8 / board=26 的 per-tick/intent/goal student 特征（共享
- * StudentModel.features 骨架，卷积段布局一致）。不匹配 → 返回 false 走 TS 原路径。
+ * 单源化（2026-09-22）之后两侧的差异只剩一个常量：`CF_PW_PX`（wasm 8 / 其余 16，
+ * 只决定「哪些像素进同一条向量寄存器」，**不改变任何元素的累加次序**）。因此这里调用的是
+ * native 侧同一个入口 `cf_student_features(wblob, in16, pooled, bufA)`：
+ * 权重是**单 blob**（顺序 == conv_native.h::CF_BLOB_FLOATS == native 侧 ensureBlob），
+ * 不再有六区分别上传 + 11 参调用，bufB/bufC 由内核自己的静态区承担。
+ * 两侧输出逐位一致由 tests/native-parity.test.ts 钉死（native↔wasm 逐字节）。
  *
- * 内存布局（单例，线性内存自 1MB 起，避开模块 .bss scratch）：权重区一次性上传
- * （按实例引用变化重传），每 forward 拷 in16（43KB）+ 读回 pooled（256B）+ bufA
- * （169KB，目标热图头消费）。bufA 回拷实测 +2.9 µs/次 ≈ features 的 0.04%——无条件
- * 拷贝，以杜绝"某个头悄悄读到陈旧空间特征"这类静默 bug（2026-09-10 的 goalForward
- * 常量热图即此因，见 run() 注释）。
+ * 契约：仅适用于 h=64 / d=8 / board=26 / IN_CH=18 的 per-tick/intent/goal student 特征
+ * （共享 StudentModel.features 骨架）。不匹配 / 缺 wasm / ABI 不符 → 返回 false 走 TS 原路径。
+ *
+ * 内存布局（单例；线性内存自 base 起，base = max(1MB, 模块初始内存) —— 内核的静态
+ * scratch/bufB 落在模块自己的 BSS 里，避开它才不会互相踩）：
+ *     [wblob CF_BLOB_FLOATS][in16 18×676][pooled 64][bufA 64×676]
+ * 每 forward 拷 in16（48KB）+ 读回 pooled（256B）+ bufA（169KB）。bufA 回拷实测
+ * +2.9 µs/次 ≈ features 的 0.04%——无条件拷贝，以杜绝“某个头悄悄读到陈旧空间特征”
+ * 这类静默 bug（2026-09-10 的 goalForward 常量热图即此因）。
  */
 
 import { readFileSync } from 'fs'
-import { noteFeaturesEngine, runStudentConvNative } from './native-conv'
 
 interface WasmRunner {
   /** 上传权重（实例变化时）并跑 features → pooled 与 bufA 均已填。返回 true=本次成功。
@@ -39,61 +47,68 @@ interface WasmRunner {
 }
 
 const BOARD = 26
-// v3：stem 输入通道 = 16 obs + 2 coord（obs-schema-v3.plan.md v4.0；hy E4 链）
+// v3（obs-schema-v3.plan.md v4.0）：stem 输入通道 = 16 obs + 2 coord（hy E4 链）
 const IN_CH = 18
 const SP = BOARD * BOARD
 const H = 64
 const D = 8
+const STEM_W = IN_CH * 576
+const DW_W = D * H * 25
+const PW_W = D * H * H
+/** 权重 blob 的 float 数（== conv_native.h::CF_BLOB_FLOATS）。 */
+const BLOB_FLOATS = STEM_W + H + DW_W + D * H + PW_W + D * H
+const ABI = 1
 
 let _runner: WasmRunner | null | undefined = undefined // undefined=未探测
 
 function loadRunner(): WasmRunner | null {
   try {
-    const bytes = readFileSync(new URL('./wasm/conv_feats.wasm', import.meta.url))
+    const bytes = readFileSync(new URL('./prebuilt/wasm/conv.wasm', import.meta.url))
     const mod = new WebAssembly.Module(bytes)
     const inst = new WebAssembly.Instance(mod)
-    const mem = inst.exports.memory as WebAssembly.Memory
-    const need =
-      (1 << 20) +
-      (IN_CH * 576 + 8 * (1600 + 64 + 4096 + 64)) * 4 + // 权重（stem/dw/pw + biases）
-      IN_CH * SP * 4 + // in16（v3：18 通道 = 16 obs + 2 coord）
-      3 * H * SP * 4 + // bufA/B/C
-      H * 4 // pooled
+    const mem = inst.exports.memory as WebAssembly.Memory | undefined
+    if (!mem) {
+      console.error('[conv-wasm] 模块未导出 memory（构建需带 -Wl,--export-memory）→ 回退 TS')
+      return null
+    }
+    const abi = inst.exports['cf_abi'] as (() => number) | undefined
+    const feats = inst.exports['cf_student_features'] as
+      | ((wblob: number, in16: number, pooled: number, bufA: number) => number)
+      | undefined
+    if (!feats) {
+      console.error('[conv-wasm] 模块缺 cf_student_features 导出 → 回退 TS')
+      return null
+    }
+    const got = abi?.()
+    if (got !== ABI) {
+      console.error(`[conv-wasm] ABI 不符（wasm ${String(got)} ≠ 期望 ${ABI}）→ 回退 TS`)
+      return null
+    }
+    // base 必须在模块自己的静态区（内核 scratch/bufB，落在 BSS）之后：BSS 不进数据段，
+    // 只能问模块实例化后的初始内存。1MB 是历史下界（旧版内核 + 旧 JS 布局），保留它
+    // 是为了让内存布局与旧产物在数值上完全可比。
+    const base = Math.max(1 << 20, mem.buffer.byteLength)
+    const need = base + BLOB_FLOATS * 4 + IN_CH * SP * 4 + H * 4 + H * SP * 4
     const grow = Math.ceil((need - mem.buffer.byteLength) / 65536)
     if (grow > 0) mem.grow(grow)
-    const base = 1 << 20
-    const feats = inst.exports['features'] as (
-      a: number,
-      b: number,
-      c: number,
-      d: number,
-      e: number,
-      f: number,
-      g: number,
-      h: number,
-      i: number,
-      j: number,
-      k: number,
-    ) => void
     const f32At = (byteOff: number): Float32Array => new Float32Array(mem.buffer, byteOff)
 
-    // 固定字节偏移布局
-    const offStemW = base
-    const offStemB = offStemW + IN_CH * 576 * 4
-    const offDwW = offStemB + 64 * 4
-    const offDwB = offDwW + D * H * 25 * 4
+    // 固定字节偏移布局：单个连续 blob（与 native 侧 ensureBlob 拼的顺序逐字段一致）
+    const offBlob = base
+    const offStemW = offBlob
+    const offStemB = offStemW + STEM_W * 4
+    const offDwW = offStemB + H * 4
+    const offDwB = offDwW + DW_W * 4
     const offPwW = offDwB + D * H * 4
-    const offPwB = offPwW + D * H * H * 4
-    const offIn = offPwB + D * H * 4
-    const offBufA = offIn + IN_CH * SP * 4
-    const offBufB = offBufA + H * SP * 4
-    const offBufC = offBufB + H * SP * 4
-    const offPooled = offBufC + H * SP * 4
+    const offPwB = offPwW + PW_W * 4
+    const offIn = offBlob + BLOB_FLOATS * 4
+    const offPooled = offIn + IN_CH * SP * 4
+    const offBufA = offPooled + H * 4
 
     // 上传缓存键 = stemW 的**引用身份**（与 native 侧 `k.blobOwner === m.stemW` 同族）：
     // 成立前提是权重视图不可变（`buildModelFromText` 一次性构建，全仓无原地换权重的路径）。
     // 若将来出现原地换权重，这里会静默继续用旧权重 —— 换键或显式换视图，别只改一侧
-    // （详见 native-conv.ts::ensureBlob 的同一段说明）。
+    // （详见 conv_native_adapter.ts::ensureBlob 的同一段说明）。
     let uploaded: unknown = null
 
     const runner: WasmRunner = {
@@ -104,7 +119,7 @@ function loadRunner(): WasmRunner | null {
             throw new Error(`[conv-wasm] ${name} 越界: off=${off} len=${len} mem=${memNow}`)
         }
         if (uploaded !== stemW) {
-          // 首次或换实例：整批上传权重
+          // 首次或换实例：按 blob 内的固定偏移逐区上传（无需先在 JS 侧拼一份大数组）
           check('stemW', offStemW, stemW.length)
           f32At(offStemW).set(stemW)
           check('stemB', offStemB, stemB.length)
@@ -127,19 +142,8 @@ function loadRunner(): WasmRunner | null {
         f32At(offIn).set(in16)
         check('pooled', offPooled, pooled.length)
         check('bufA', offBufA, bufA.length)
-        feats(
-          offIn,
-          offStemW,
-          offStemB,
-          offDwW,
-          offDwB,
-          offPwW,
-          offPwB,
-          offBufA,
-          offBufB,
-          offBufC,
-          offPooled,
-        )
+        const rc = feats(offBlob, offIn, offPooled, offBufA)
+        if (rc !== 0) throw new Error(`[conv-wasm] kernel rc=${rc}`)
         // 目标 pooled(64) 短于 buffer 尾部 view —— 必须 subarray 限长，否则 set 抛 Range
         pooled.set(f32At(offPooled).subarray(0, pooled.length))
         // bufA 同理限长。缺这一行 ⇒ 目标热图在生产档（h64/d8 必走 wasm）退化为常量：
@@ -172,7 +176,7 @@ export function setStudentConvWasmEnabled(enabled: boolean): void {
 
 /**
  * wasm 后端（**强制**走 wasm，不走 native）：对拍/基准的参考实现，也是 native 的
- * attestation 参照。生产路径请用 `runStudentFeatures`。
+ * attestation 参照。生产路径请用 ./conv.ts 的 `runStudentFeatures`。
  * 返回 true = pooled+bufA 已填。
  */
 export function runStudentConvWasm(model: unknown): boolean {
@@ -202,27 +206,3 @@ export function runStudentConvWasm(model: unknown): boolean {
     return false // 运行时异常 → TS 原路径兜底
   }
 }
-
-/**
- * StudentModel.features 的**生产接入点**（单一咽喉，rollout 与 eval 都走这里）：
- *   native（共享库 + bun:ffi，仅 bun）→ wasm（conv_feats.wasm）→ TS（调用方兜底）。
- *
- * native 的准入不是「文件在就上」：首次调用会用**真实权重**做 3 次 native↔wasm 逐字节
- * attestation（见 src/nn/native-conv.ts），不过就本进程关闭并打一行 warning。
- * 返回 true = pooled+bufA 已填（由 native 或 wasm 之一完成）。
- */
-export function runStudentFeatures(model: unknown): boolean {
-  if (runStudentConvNative(model, { runWasm: (m) => runStudentConvWasm(m) })) return true
-  if (runStudentConvWasm(model)) {
-    noteFeaturesEngine('wasm')
-    return true
-  }
-  return false
-}
-
-/** TS 特征路径（调用方兜底）实际生效时记账 —— 让「以为开了加速其实在 TS」能被看见。 */
-export function noteFeaturesTs(): void {
-  noteFeaturesEngine('ts')
-}
-
-export { featuresEngine } from './native-conv'

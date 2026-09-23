@@ -454,12 +454,13 @@ def pack_code_zip(
 #: 手写「该包哪几个子目录」就是在猜依赖图；靠
 #: `tests/test_remote_iter_real_bun.py` 真跑一遍才是判据（那条测试就是这个事故的哨兵）。
 TS_CODE_DIRS: tuple[str, ...] = ("src", "tools")
-#: 允许进 zip 的后缀（.ts 源码 + .jsonc 数据 + .wasm 权重——`src/nn/conv-wasm.ts`
-#: 经 `import.meta.url` 读 `src/nn/wasm/conv_feats.wasm`，漏了它节点上卷积直接炸）。
+#: 允许进 zip 的后缀（.ts 源码 + .jsonc 数据 + .wasm 权重——`src/nn/conv/conv_wasm_adapter.ts`
+#: 经 `import.meta.url` 读 `src/nn/conv/prebuilt/wasm/conv.wasm`，漏了它节点上卷积直接炸）。
 TS_CODE_SUFFIXES: tuple[str, ...] = (".ts", ".jsonc", ".wasm")
 #: **二进制加速后端**（2026-09-21）：native features 共享库按平台分（win/linux/darwin ×
-#: x64/arm64），`src/nn/native-conv.ts` 用**模块相对路径** `native/prebuilt/<平台>/…`
-#: 找它。云机（PPO/TPU 都是 linux-*）没有 clang、也不持仓库 —— **只能靠 ts_code.zip 带过去**。
+#: x64/arm64），`src/nn/conv/conv_native_adapter.ts` 用**模块相对路径** `prebuilt/<平台>/…`
+#: 找它（同一目录下还有 wasm 产物，走上面的 .wasm 后缀）。
+#: 云机（PPO/TPU 都是 linux-*）没有 clang、也不持仓库 —— **只能靠 ts_code.zip 带过去**。
 #: 漏了它的后果是最难查的那种静默：attestation 无库可加载 ⇒ 回落 wasm ⇒ 不报错、只是
 #: rollout 每局回到 1338ms（收益归零）。用户 2026-09-21 点名过这条（离线训练任务的 rollout
 #: 在 PPO 云机上执行）。
@@ -468,7 +469,7 @@ TS_CODE_SUFFIXES: tuple[str, ...] = (".ts", ".jsonc", ".wasm")
 #: 别的原生产物，应由它自己的白名单决定，而不是被这条规则顺手卷进来）。
 #: 六个目标的库全带（~78 KB 原始字节）：云机 arch 在打包时未知，按需挑选反而会多一个
 #: “挑错了 ⇒ 静默回落”的失败面。
-TS_CODE_BINARY_DIRS: tuple[str, ...] = ("src/nn/native/prebuilt",)
+TS_CODE_BINARY_DIRS: tuple[str, ...] = ("src/nn/conv/prebuilt",)
 TS_CODE_BINARY_SUFFIXES: tuple[str, ...] = (".dll", ".so", ".dylib")
 #: 一律不进 zip 的目录名（含 node_modules —— rollout 零第三方运行时依赖，
 #: 只用到 node 内建 `fs`/`path`，所以云机**不必** bun install）。
@@ -487,7 +488,7 @@ def pack_ts_code_zip(
     log=lambda msg: None,
 ) -> str:
     """M3：把 rollout 用的 **TS 运行时** 打成 ts_code.zip（`src/**` + `tools/**` 下的
-    `.ts/.jsonc/.wasm`，**加** `src/nn/native/prebuilt/**` 下的 `.dll/.so/.dylib` 共享库），
+    `.ts/.jsonc/.wasm`，**加** `src/nn/conv/prebuilt/**` 下的 `.dll/.so/.dylib` 共享库），
     返回字节 sha256。
 
     与 `pack_code_zip`（Python 侧，另走 zip+extract 到 sys.path）**完全独立**：这条
