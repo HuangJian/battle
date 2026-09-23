@@ -19,7 +19,7 @@ JSONL。节点的活全部交给 `BatchEvalRunner`。
 批次身份：**临时批次**（用户 2026-09-19 拍板）——不登记语料、不写 EvalBoard 台账，
 `EVALBOARD_DATA` 指向本次运行的 runDir，跑完只留 JSONL 与 runDir 内的原始账本。
 
-用法（必须走官方解释器包装，见 AGENTS §0.1 规则 13）：
+用法（必须走官方解释器包装，见 AGENTS §5）：
   bun tools/sim/eval-course-ckpt.ts --course ... --weights ...            # TS 侧自动调用
   bash tools/githook/nn-py-safe.sh nn-training/rl/eval_course_once.py --spec tmp/spec.json
 """

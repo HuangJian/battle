@@ -266,5 +266,7 @@ if [ "$RC" -eq 0 ]; then
   echo "✓ nn-training python gate done in $((t1 - t0))s"
 else
   echo "✗ nn-training python gate FAILED in $((t1 - t0))s"
+  echo "  → 规则：AGENTS §5（nn python / pytest 一律 `bash tools/githook/nn-py-safe.sh …`；per-test 60s、-m pytest 另套 480s 外墙钟）"
+  echo "    细节：docs/agents.details.md §5.6；单跑绿 / 全量红且日志有 [safe-delete] = 环境，不是回归（details §5.2）"
 fi
 exit "$RC"

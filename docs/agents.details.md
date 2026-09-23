@@ -1,9 +1,14 @@
 # AGENTS Rules — Details & Rationale (docs/agents.details.md)
 
-> Companion to the slim `AGENTS.md`. Same section numbering (§0–§14) and rule IDs;
+> Companion to the slim `AGENTS.md`. Same section numbering (§0–§17) and rule IDs;
 > every rule's 缘由 (why it exists), operational detail, examples, and incident history
 > live here. When this doc and `AGENTS.md` disagree, `AGENTS.md` wins (it is the contract);
 > file a fix rather than drifting.
+>
+> **Relocation contract (2026-09-23 slim pass).** `AGENTS.md` carries only the imperative form of
+> each rule; everything explanatory lives here, and the gates carry their own fix guidance (see
+> §0.1). When you add or tighten a rule: put the instruction in `AGENTS.md`, the why/recipe/history
+> in this file under the same number — never leave a rule whose rationale exists nowhere.
 
 ---
 
@@ -15,6 +20,45 @@
   moment, it does not belong here, however clever.
 - MANIFEST §13 "The Three Gates" (enjoyable · simple · faithful) is the operational form of this
   sentence; AGENTS §2.7 repeats it because it is the final arbiter for ambiguity.
+
+### 0.1 Context budget — why `AGENTS.md` is slim
+**Fact (measured 2026-09-10).** The copy of `AGENTS.md` injected into an agent's context is
+**truncated at ≈26%**. Against the old 35.4k-char file the cut fell at ≈9.2k chars, i.e. **inside
+§4** — so everything from §5 down (hard rules, testing, gates, assets, perf, long-run discipline,
+Windows text-splicing) was invisible to most agents while they "followed" the file. That mismatch,
+not rule quality, was the root cause of rules being ignored.
+
+This is why the file was slimmed to **≤ ~9.0k chars** (2026-09-23: 35.4k → 9.0k chars, same rule set):
+
+- **Target**: keep the whole file under the ~9.2k cut so every section is actually read — enforced by
+  **`bun tools/check-agents-budget.ts`** (also `bun run budget:check`), not by discipline.
+- **The budget gate** (added 2026-09-23, DECISIONS §2026-09-23-goalnn-agents-injection-budget):
+  **hard limit 9,200 characters** (the ≈9,205 measured cut, floored), **warn at 9,100** (the next new
+  rule should move text, not append), plus a **structure** check that both this file and `AGENTS.md`
+  still contain §0–§17 (a silently deleted section is a broken citation + a vanished rule, so it is an
+  error, not a warning). `--verbose` prints per-section character counts — that is how you find the
+  section to relocate instead of guessing.
+  - **Metric is characters, not bytes** (CJK costs 1 char / 3 bytes; the same file is ~65% "larger" in
+    bytes, which would false-red and tempt someone into raising the limit). The check normalizes CRLF
+    first for the same reason: a Windows checkout must not measure differently from the injected copy.
+  - **Wired twice on purpose**: `bun run check` (root) *and* an unconditional block in
+    `tools/githook/pre-commit`. The hook placement is the load-bearing one — a **pure-docs commit skips
+    the root suite entirely** (`tools/test-silent.ts`), and appending prose to `AGENTS.md` is exactly
+    that kind of commit, so a suite-only gate would be blind precisely where it matters.
+  - **Attribution follows the hook's usual rule**: the check measures the *working tree*; if it fails and
+    `AGENTS.md` is in the staged list the commit is blocked, if it fails only in someone else's unstaged
+    edits it warns and lets the commit through (same semantics as the mypy/tsc blocks).
+  - **Never raise `HARD_LIMIT`** to fit a new rule in — the cut is decided by the harness, not by us;
+    relocate text instead (`tests/agents-budget.test.ts` pins the metric, the wiring and the behavior).
+- **Where text goes**: instruction → `AGENTS.md`; why / incident history / recipes / enumerations →
+  this file; fix guidance for a gate-enforced rule → the gate's own failure output (as the budget gate
+  does: its failure prints this section and the relocation recipe).
+- **Section numbering is the contract**: both files share `§N`, and code/tests/plans cite `AGENTS §N`
+  or `details §N`. Renumbering a section means grepping the repo for its citations
+  (`rg 'AGENTS(\.md)? §'`) and repointing them; rule IDs inside a section (`§2.3`, `§16.7`, `§17.1` …)
+  are cited too, so keep them stable.
+- **If you see the file end mid-section** (e.g. no §17, or §16 cut in half), you are reading a
+  truncated injection copy — read the file from disk before acting.
 
 ### 0.2 Training-objective discipline — God is not a ceiling
 
@@ -481,7 +525,9 @@ mid-transaction) — **do not try to reproduce it.**
 **Why "just this once" is never acceptable (the actual failure mode, 2026-09-06):**
 the operator knew an A/B comparison was needed and reached for the most convenient command instead
 of reading the rulebook first. Two compounding gaps: the auto-injected AGENTS.md preview is truncated
-before §5 (the git-discipline section), and §5.12 lived only in `docs/agents.details.md`. Any agent
+before §5 (the git-discipline section), and §5.12 lived only in `docs/agents.details.md`. (The
+truncation gap was closed on 2026-09-23 — `AGENTS.md` now fits the injection budget and carries the
+git rules inline; §0.1.) Any agent
 about to run a git write that is not `add`/`commit`/`push`/`fetch`/`pull` **must Read this section
 first** — the cost is seconds; the cost of not doing it was a full repo restore.
 
@@ -685,6 +731,16 @@ passes after your change.**
 
 ## §9 Quality gates — Definition of Done
 
+**Most of this list is enforced automatically** — the pre-commit hook runs typecheck / tests / lint /
+format / freeze / the dashboard gate / the nn python gate and **attributes failures to staged files**
+(escape hatches: `SKIP_BUN_TEST=1`, `SKIP_TSC=1`, `SKIP_DASHBOARD_GATE=1`, `NN_GATE_SKIP=<tool>`,
+`NN_GATE_SKIP_E2E=1`, `--no-verify`; full table in the hook's header). `bun run check` (root) and
+`bun tools/check-decisions.ts` cover the rest. **Each gate prints its own fix guidance**, including the
+`AGENTS.md` § it enforces — so a red gate should tell you which rule you broke without a doc lookup:
+DECISIONS numbering → `docs/decisions/HOW-TO-ADD.md`; freeze/golden red → `AGENTS §6.3b` (new-era
+triple); nn python timeout/hang → `AGENTS §5`; dashboard bundle budget / forbidden words → `AGENTS §9`.
+When you add a new gate, make its failure output name the rule and the fix.
+
 A task is done when **all** hold:
 
 - [ ] `bun run check` green (test + typecheck + lint + format)
@@ -736,8 +792,28 @@ results or tool errors. Supplemental only: never replaces the deliverable or the
 
 ## §12 Quick reference
 
-The constants block in `AGENTS.md` mirrors `src/constants.ts` (verified 2026-08-28). If code and this
-file ever disagree, the code wins — fix this file.
+`AGENTS.md` §12 now only names the sources (the numbers moved here during the 2026-09-23 slim).
+Single source of truth for constants is `src/constants.ts` (verified 2026-08-28; re-verified
+2026-09-23) — if code and any doc disagree, the code wins and the doc gets fixed:
+
+```
+CELL = 16            // sub-block px
+GRID = 26            // sub-blocks per side
+FIELD = 416          // playfield px (GRID × CELL)
+TANK = 32            // tank px (2 × CELL)
+TICK_MS = 1000/60    // fixed timestep
+MAX_ENEMIES_ALIVE = 4
+ENEMIES_PER_STAGE = 20
+START_LIVES = 3
+PLAYER_SPAWN = { col: 8, row: 24 }
+BASE_POS = { col: 12, row: 24 }   // base eagle, 2×2 at rows 24-25 / cols 12-13
+ENEMY_SPAWNS = [ {0,0}, {12,0}, {6,0} ]   // tile coords
+```
+
+Tank kinds `'player' | 'basic' | 'fast' | 'power' | 'armor'` (players wear stars, enemies wear
+faces); terrain chars in stage grids `'.' 'b' 's' 'w' 'f' 'i' 'E'` (empty/brick/steel/water/forest/
+ice/base); game states `'menu' | 'playing' | 'paused' | 'stageclear' | 'gameover' | 'victory' |
+'recovery'` — also from `src/config/` / `src/types.ts`, never re-typed inline.
 
 ---
 
@@ -785,6 +861,25 @@ the tests pass.
 - **14.6 Reuse the `allTanks` buffer — don't rebuild.** `World.allTanks` rebuilds `_allTanksBuf` per
   call; consumers needing the list multiple times in one tick call the getter once and pass the
   reference (perceive() takes an optional `all?` param and passes it to `canStep()` 4×).
+
+### 5.14 The training backend has no user-tunable knobs (never degrade in place)
+**Rule (AGENTS §5):** PPO always runs as *publish to the hub queue → wait for a worker to claim it*.
+`--ppo`, backend env vars and `--remote-degrade-after` were **deleted**; course files have no
+`backend` key. To compute locally, start a local worker from the console — it speaks the same claim
+protocol and is indistinguishable to the loop.
+
+- **Zero workers = loudly wait for a worker**, never silently fall back to local compute. The failure
+  mode this prevents: a run that looks like cloud training while a single laptop core grinds out the
+  update, so throughput collapses without any signal in the logs (and the "waiting for claim" line is
+  the diagnostic you would otherwise never see).
+- **Why the console is the only entry** (AGENTS §5): the launcher tripod — training-enabled marker
+  (`<traj>/training-enabled.txt`, same predicate as `rl/loop_plan.py::course_enabled`), pause/release
+  bookkeeping, and hub mode — is applied at the console/launch layer. Bypassing it
+  (`python nn-training/run_rl.py` directly) hits the gateway and refuses loudly, but a partial bypass
+  that satisfies the gateway while skipping the other two leaves the course un-pausable/un-resumable —
+  the accounting the loop reads is then wrong.
+- **Deployment mode ≠ sampling mode** is a related trap: a policy's greedy/deployment win rate is not
+  its training-sampling win rate (AGENTS §15.3).
 
 ### 5.13 Never sleep-wait on long tasks — notification + marker-grep, never fixed `sleep N`
 
@@ -996,7 +1091,7 @@ if [ "$rc" -eq 0 ]; then rm -f tmp/logs/pytest.log; else tail -n 40 tmp/logs/pyt
 exit "$rc"
 ```
 
-（`bash tools/githook/nn-py-safe.sh` 而不是裸 `python -m pytest`——AGENTS §0.1-13；
+（`bash tools/githook/nn-py-safe.sh` 而不是裸 `python -m pytest`——AGENTS §5；
 `-n auto` + 线程封顶 = 实测最优组合，完整数据与「为什么必须成对」在
 `tools/githook/nn-python-gate.sh` 头注。）
 

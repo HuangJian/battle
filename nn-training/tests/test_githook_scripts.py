@@ -4,7 +4,7 @@
 
 1. **nn-py-safe.sh 在原生 Linux 上跑不了 pytest**（2026-09-15 实测）。它对 `-m pytest`
    分支无条件套 MSYS 盘符改写，`/home/<user>/battle/tools/githook` 被 `s|^/([a-z])|\\1:|`
-   误伤成 `h:ome/...` ⇒ exit 2「can't open file '.../nn-wall.py'」。而 AGENTS §0.1-13
+   误伤成 `h:ome/...` ⇒ exit 2「can't open file '.../nn-wall.py'」。而 AGENTS §5
    钦定它是**唯一**合规的 pytest 入口 —— 入口坏掉时没有任何测试会红，只有人肉发现。
    修法：路径改写仅在 MSYS/MINGW 下生效。本测试真起一次子进程验证（`--version`
    不收集用例、秒级返回）。
@@ -154,7 +154,7 @@ def test_py_safe_wrapper_launches_pytest() -> None:
         timeout=30,  # pytest 全局 per-test 上限 60s，这里必须更短
     )
     assert proc.returncode == 0, (
-        "nn-py-safe.sh 起不了 pytest（AGENTS §0.1-13 的唯一合规入口）——"
+        "nn-py-safe.sh 起不了 pytest（AGENTS §5 的唯一合规入口）——"
         f"rc={proc.returncode}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
     )
     assert "pytest" in (proc.stdout + proc.stderr).lower()

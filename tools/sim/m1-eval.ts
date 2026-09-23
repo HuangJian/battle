@@ -70,7 +70,7 @@ import { BatchLedger, ledgerKey } from '../lib/batch-ledger'
 
 /**
  * 分派链的 Python 入口（节点通信/重试/权重下发/rescan 的唯一实现，见文件头）。
- * 经 `nn-py-safe.sh`（AGENTS §0.1 规则 13：nn python 一律走官方解释器包装）。
+ * 经 `nn-py-safe.sh`（AGENTS §5：nn python 一律走官方解释器包装）。
  */
 const PY_ENTRY = 'nn-training/eval_m1_once.py'
 const PY_SAFE = 'tools/githook/nn-py-safe.sh'

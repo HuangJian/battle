@@ -117,6 +117,8 @@ if [ "$MODE" = "--golden" ]; then
     done < "$OUT"
     if [ -n "$sec_file" ]; then printf '%s  %s\n' "$(hash256 "$sec_file")" "$sec_name"; rm -f "$sec_file"; fi
     echo "next step: either roll back, or run the new-era triple (DECISIONS entry + 60-seed baseline + golden update)"
+    echo "  → 规则：AGENTS §6.3b / docs/agents.details.md §6.3b（golden 更新是强制的显式判断，不是报错）"
+    echo "  → 可达性审计：bun run freeze:l2（归档候选是否又被走到）"
     exit 1
   fi
 fi

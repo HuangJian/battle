@@ -20,7 +20,7 @@ PPO 不参与（本验证只覆盖「采多少」）。
 
     bash tools/githook/nn-py-safe.sh -m pytest e2e/test_volume_e2e.py -n 4 -q
 
-（勿用裸 `python -m pytest`——AGENTS §0.1-13：沙箱删除守卫下会静默挂死。）
+（勿用裸 `python -m pytest`——AGENTS §5：沙箱删除守卫下会静默挂死。）
 """
 
 from __future__ import annotations

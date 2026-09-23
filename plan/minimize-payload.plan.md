@@ -556,7 +556,7 @@ Have/omit 只是 **带宽优化提示**，不是正确性来源。实现与测�
   - sha 不符回源（含**本地交接文件** sha 不符）；
   - 协议兼容：无 omit 字段的 response 旧 worker 可跑。
 - 若改 hub/worker 集成：按仓库惯例 `bash tools/githook/nn-py-safe.sh` 跑 pytest，
-  **禁止**裸 `python -m pytest`（AGENTS §0.1）。
+  **禁止**裸 `python -m pytest`（AGENTS §5）。
 
 ### 7.2 Definition of Done
 

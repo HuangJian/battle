@@ -594,7 +594,7 @@ async function main(): Promise<void> {
       ` iterId=${iterId} runDir=${runDir}\n`,
   )
 
-  // 走官方解释器包装（AGENTS §0.1 规则 13：nn python 一律经 nn-py-safe.sh）
+  // 走官方解释器包装（AGENTS §5：nn python 一律经 nn-py-safe.sh）
   const proc = spawnSync('bash', [PY_SAFE, PY_ENTRY, '--spec', specPath], {
     cwd: REPO_ROOT,
     stdio: ['ignore', 'inherit', 'inherit'],

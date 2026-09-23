@@ -2268,3 +2268,15 @@ job 级 `uploaded` 标志 + 主循环 `try/finally` 收尾 + `--result-upload`�
   任何**改动累加次序**的"优化"都会让 `native-parity` 红——那是语义变更（新 era），不在本决策范围内。
 §1.1 / §4 P2.5 / §9.5；进度 `docs/nn/remote-transport.md` §31。
 —— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/remote-transport.md` §32「决策正文归档」· 锚 `### §2026-09-22-goalnn-async-result-upload`
+
+## §2026-09-23-goalnn-agents-injection-budget（2026-09-23，用户指令：AGENTS.md 加预算门禁）
+
+`AGENTS.md` 的注入预算由 `tools/check-agents-budget.ts` 强制：**字符**数 ≤ 9,200（2026-09-10 实测注入
+截断点 ≈9,205），≥9,100 告警，两文件必须仍含 §0–§17。
+**决定**：挂 `bun run check` + pre-commit 一个**无条件**跑的小块（并在 pre-commit 里按文件归因：超预算
+且 `AGENTS.md` 在暂存清单 ⇒ 拦；只在他人未暂存改动里 ⇒ 告警放行）。
+**违反后果**：超预算 ⇒ §5 之后的规则对 agent 不可见（截断口落在 §4，正是原来「规矩被读一半」的根因）
+⇒ 规则静默回归「不被遵守」；**调大 `HARD_LIMIT` 等于自欺**——截断点由 harness 决定，不由本仓库决定。
+**为什么不能只挂 `bun run check`**：纯文档提交会整跳根套件（`tools/test-silent.ts`），而往 `AGENTS.md`
+追加正文正是这类提交 —— 只有在 hook 里才在最该生效的场景生效。
+—— 全文（背景 / 阈值推导 / 度量口径 / 归因语义）→ `docs/agents.details.md` §0.1

@@ -20,7 +20,7 @@
   * 断点续跑 = runDir 里的 eval_log（同 wver 的 (stage,seed) 由 `_done_keys` 跳过）；
     `fresh=true` 先清空该文件。
 
-用法（必须走官方解释器包装，见 AGENTS §0.1 规则 13）：
+用法（必须走官方解释器包装，见 AGENTS §5）：
   bun tools/sim/m1-eval.ts --stages all --seeds 1-10 --policy goal ...   # TS 侧自动调用
   bash tools/githook/nn-py-safe.sh nn-training/eval_m1_once.py --spec tmp/spec.json
 """

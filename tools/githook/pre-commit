@@ -250,6 +250,25 @@ ROOT_TS_STAGED=$(grep -E '\.(ts|js|mjs|cjs|tsx|jsx)$' "$STAGED_LIST" | grep -v '
 FREEZE_STAGED=$(grep -E '\.(ts|js|mjs|cjs|tsx|jsx)$|^src/' "$STAGED_LIST" \
   | grep -v '^dashboard/' | grep -vE '^(tests/|src/assets/)' || true)
 
+# ---------- AGENTS.md 注入预算（无触发条件：单文件量字符，微秒级） ----------
+# 规则：`AGENTS.md` 必须整份短于 harness 的**注入截断点**（≈9,205 字符，2026-09-10 实测），
+# 否则 §5 之后（硬规则 / 门禁 / 长任务纪律 / Windows 拼接…）对 agent 不可见 ——
+# 「规矩被读一半」才是规则不被遵守的根因，不是规则质量。缘由与修法：
+# docs/agents.details.md §0.1（Relocation contract：指令留 AGENTS，解释进 details 同号 §）。
+# 为什么放这里而不是只放 `bun run check`：**纯文档提交会整跳根套件**（test-silent 对
+# 纯 md 改动直接跳过）——而往 AGENTS.md 里追加文字正是最典型的那种提交，只靠套件
+# 等于在这个门禁最该生效的场景里不生效。
+# 归因（与 mypy/tsc 块同一语义）：量的是**工作树**内容，失败时看 AGENTS.md 在不在
+# 暂存清单里 —— 在 ⇒ 拦下你的提交；只在他人未暂存改动里 ⇒ 告警放行，由对方后继自理。
+echo " ▸ AGENTS.md budget (char count vs injection cut)"
+if ! "$BUN" tools/check-agents-budget.ts; then
+  if grep -Fxq 'AGENTS.md' "$STAGED_LIST"; then
+    echo "✗ AGENTS.md 超注入预算，且本次提交改了它（修法见上方指引）"
+    exit 1
+  fi
+  echo "⚠ AGENTS.md 在工作树里超预算，但不在本次暂存清单（他人的在途改动）——本次不拦，请汇报对方"
+fi
+
 # ---------- nn-training python 门禁（ruff staged 范围 + mypy/pytest 全量归因） ----
 # 触发条件收窄到 **staged 的 nn-training python 文件**（2026-09-14）：原判定是
 # `^nn-training/`，于是纯数据/文档提交（nn-training/weights/WEIGHTS.md、

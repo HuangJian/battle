@@ -32,7 +32,7 @@ function readTop(argv: string[]): number {
 }
 
 /**
- * 单文件墙钟（ms）：与真实调用同 flag（`--timeout=50000`，见 AGENTS §5.4）。
+ * 单文件墙钟（ms）：与真实调用同 flag（`--timeout=50000`，见 AGENTS §5 / details §5.4）。
  * 返回 exit code —— 非 0 说明该文件本身是红的，它的「快」不算数（剖面前提是全绿）。
  */
 async function timeFile(file: string): Promise<{ ms: number; code: number }> {

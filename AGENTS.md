@@ -1,441 +1,165 @@
 # AGENTS.md — Battle City Web
 
-> **Operating manual for any coding agent working in this repository.** One sentence per rule; the
-> why and full detail for every rule live in **`docs/agents.details.md`** (same section numbering).
-> The creed lives in `MANIFEST.md`; decisions are indexed in `DECISIONS.md`; verbose tuning logs in
-> `docs/*.progress.md`; plans in `plan/`.
-
----
+> **Operating manual.** 规则只留指令；why / 事故史 / 配方 / 枚举明细 → **`docs/agents.details.md` 同号 §**。
+> creed → `MANIFEST.md` · 决策索引 → `DECISIONS.md` · 调参日志 → `docs/*.progress.md` · 计划 → `plan/`。
+> 旧版 35K，注入时在 ~9.2K 字符处截断（§5 之后全丢 = 规矩只被读一半）；**看不到 §17 ⇒ 这是截断副本，去读文件**。
 
 ## 0. The One-Sentence Mission
 
-> Open the browser, play for five minutes, leave with a smile. (MANIFEST §1) — when unsure, this sentence decides.
+> Open the browser, play for five minutes, leave with a smile. (MANIFEST §1) — 拿不准时它说了算。
 
-### 0.1 Rules that bite — read this even if you read nothing else
+### 0.2 训练目标最高纪律 — God 不是天花板
 
-The copy of this file injected into an agent's context is **truncated at ≈26%** (measured
-2026-09-10: the cut lands inside §4), so everything from §5 down is invisible unless you
-open the file. That is not a reason to skip those rules — it is the reason they are
-duplicated here. Each line below is an order, not advice; the bracketed section is the
-authority and is worth reading before you touch that area.
-
-1. **Never `git stash`** — any subcommand, any flag; it has destroyed this repo's object
-   store twice. A/B comparisons use `git worktree add --detach <dir> HEAD`. Any git write
-   that is not `add`/`commit`: read §5.12 first; **never `git push`** — pushing is the
-   human's job. [details §5.12]
-2. **Git path arguments never contain `..`**; never `2>/dev/null` a git command; never
-   chain two git writes with `||`. Rename/delete with filesystem `mv`/`rm`, not `git mv`/
-   `git rm` (third incident, 2026-09-08: `git rm` deleted a whole directory). [§5]
-3. **Long tasks log to a file**: `> run.log 2>&1`, never a `| tail`/pipe. Capture **once**
-   and diagnose from that file — re-running just to watch output is the anti-pattern — and
-   delete the log on green unless it is the evidence. [§16.2, §16.7]
-4. **Don't re-run what you already ran**: iterate on the failure subset, not the full
-   sweep/suite. Single-file green + full-suite red (with `[safe-delete]` in the log) is the
-   environment, not a regression. [details §4.7, §16]
-5. **Verify every write landed** — this repo has "reported success, disk unchanged" cases;
-   grep the anchor or `ast.parse` after patching. [§17.4]
-6. **`pwsh`, never bare `powershell`** (5.1 is broken here and cannot be uninstalled). [§17.7]
-7. **Commit via a temp message file** (`git commit -F tmp/<ascii-file>`), then verify with
-   `git log -1 --pretty=fuller` — silent `-m` failures have happened. [details §5.7]
-8. **Never add an untracked `*.md` to git tracking.** [§5.8]
-9. **"Green" means the gate ran** — `bun run check` / `make python-gate` — not "looks fine". [§9]
-10. **One Author**: only `Simulation` mutates `World`; everything else observes read-only. [§2.1]
-11. **A `DECISIONS.md` entry is the exception, not the reflex** — derive, then pass §6.3's admission gates expecting "don't write". [§6.3]
-12. **God-AI is a flawed teacher, never a ceiling** — the whole point of training the NN is to surpass it; never judge stage learnability, DoD thresholds, stage difficulty, or difficulty gradients by teacher performance. Human skilled play is the only difficulty yardstick. [§0.2]
-13. **Run nn-python/pytest via `bash tools/githook/nn-py-safe.sh`, never bare `python -m pytest`** — the agent delete-sandbox (WorkBuddy/Mimo) intercepts python-internal file ops (delete + writes into policed tmp dirs) and hangs pytest silently (2026-09-15, three incidents). The wrapper sanitizes the env (deletes the sandbox guard) then execs; becomes the ONLY sanctioned way to run pytest / nn python here. pytest has a global 60s/test cap (`nn-training/pyproject.toml` addopts) plus a 480s process-outside wall clock on `-m pytest` (`NN_PYTEST_WALL_S` → `tools/githook/nn-wall.py`) — a hang becomes loud instead of endless. Bare `python -m pytest` was the last uncovered hole; closing it is this rule. [§5]
-
----
-
-### 0.2 训练目标最高纪律 — God 不是天花板（用户 2026-09-11/12 多次强调）
-
-God AI 是**有缺陷的规则系统**。训练 NN 的目的就是**超越它、达到它永远无法触及的目标**。教师只承担一件事——**帮 NN 顺利起步**（BC 蒸馏语料源 + 脚手架）。教师已知缺陷（`plan/Intent-Policy-NN-Plan.md:437` §12.1，均属执行器实施层，意图头训练无法直接修复；move/fire 层级学习已被判死）：① 冰冻期间在不同目标间摇摆；② 不会清墙开路（NN 极少选 CLEAR 0.4–3%）；③ 追击走并行车道横向开火不并入目标后方。§12.2 另有 20+ 项实测阴性归档作对照基线。
-
-- **四条禁令**（不得用教师表现做）：① 判定关卡"还有没有可学的"；② 设定/评估 DoD 阈值；③ 评定关卡难度或优化目标；④ 设计难度梯度。
-- **关卡难度的唯一评级口径 = 人类熟练玩家的体验**。用户口径：当前课程熟练玩家都能轻松通关 ⇒ NN 只到个位数～六成胜率 = **NN/训练问题，不是关卡难** ⇒ **杠杆在训练侧，不降难度**。
-- **"超越教师"是起点不是终点**；教师胜率（c4 68% / c5 47% / c6 50%）**不是任何形式的天花板**，不得用于判决课程成败。
-- **任务定义不得为训练方便降级**：`player.lives: 1`（目标「1 命杀 20 敌」）是任务定义的一部分；禁减敌数 / 放松关卡形态 / 降终局标准。稀疏终局信号是任务固有难点。**训练侧可动**（奖励塑形、GAE λ、value 头、算法），**任务侧不可动**（命数、敌数、关卡形态、终局标准）。
-
----
+- **四条禁令**（不得用教师表现做）：① 判关卡「还有没有可学的」 ② 定/评 DoD 阈值 ③ 评关卡难度或优化目标 ④ 设计难度梯度。
+- 关卡难度**唯一口径 = 人类熟练玩家体验**；NN 胜率低 ⇒ **训练侧问题，不降难度**；「超越教师」是起点不是终点，教师胜率**不是天花板**。
+- **任务侧不可动**（命数/敌数/关卡形态/终局标准）· **训练侧可动**（奖励塑形/GAE λ/value 头/算法）。
 
 ## 1. Read These Before Writing Any Code
 
-1. `MANIFEST.md` (the creed; its §13 "Three Gates" is the final arbiter) → `DECISIONS.md` (extend, never contradict) → the active plans (`plan/mvp.md`, `plan/Snapshot-Management-Framework.md`, `plan/presentation-upgrade.md` — their "Definition of Done" sections are acceptance criteria) → this file.
-2. `docs/presentation-audit.md` is a historical pre-upgrade baseline — read it for method/structure, not for current facts.
-3. If a plan contradicts the MANIFEST, the MANIFEST wins — stop and record the conflict in `DECISIONS.md` before proceeding (§6).
-
----
+`MANIFEST.md`（§13「三关」终审）→ `DECISIONS.md`（只扩展不违背）→ 活跃 plan（`plan/mvp.md` §10 的 MVP DoD 对每个改动都成立；
+`plan/Snapshot-Management-Framework.md`、`plan/presentation-upgrade.md` 的 DoD = 验收标准）→ 本文件。
+plan 与 MANIFEST 冲突 ⇒ MANIFEST 赢，先记进 DECISIONS 再动手。`docs/presentation-audit.md` 只读方法不读事实。
 
 ## 2. Architecture Invariants — Non-Negotiable
 
-Violating any of these is a bug even if the tests pass (details & gray-zone exemptions: `docs/agents.details.md` §2).
+违反即 bug，**测试绿也算**（含义 + 灰区豁免 → details §2）。
 
-- **2.1 One Author** — only `Simulation` may modify the `World`; everything else observes read-only (RecoveryController restores atomically; controller state-transitions and `genId()` are the documented exemptions).
-- **2.2 No Hidden State** — all gameplay state lives on the `World` object; never in a singleton, module variable, or closure.
-- **2.3 Determinism Is a Promise** — fixed timestep; all randomness through `world.rng` (never `Math.random()` inside the Simulation); input recordable ⇒ identical replay.
-- **2.4 Data Over Code** — tanks/stages/themes/difficulty are config rows in `src/config/`; "add a tank = add a row", never hardcode entity behavior into a system.
-- **2.5 Presentation Is Disposable** — particles/camera/animation never live in the World; `PresentationLayer.reset()` rebuilds them on rewind/menu.
-- **2.6 Zero-Asset Discipline (SVG)** — sprites are hand-authored SVG pre-rasterized via `SpriteCache`; audio is Web-Audio-synthesized; future bitmaps extend, never replace.
-- **2.7 The Three Gates (MANIFEST §13)** — more enjoyable + architecture simple + spirit of the original: all three, or reject.
-
----
+- **2.1 One Author** — 只有 `Simulation` 可改 `World`，其余只读。
+- **2.2 No Hidden State** — 玩法状态只住 `World`，不进单例 / 模块变量 / 闭包。
+- **2.3 Determinism** — 固定步长；随机只走 `world.rng`；Simulation 禁 `Math.random()`；输入可录 ⇒ 回放逐帧一致。
+- **2.4 Data Over Code** — 坦克/关卡/主题/难度 = `src/config/` 数据行；加坦克 = 加一行，不硬编码实体行为。
+- **2.5 Presentation Is Disposable** — 粒子/相机/动画不进 `World`；`PresentationLayer.reset()` 重建。
+- **2.6 Zero-Asset** — 精灵手写 SVG 经 `SpriteCache` 预光栅化；音效 Web Audio 合成；位图只能扩展不能替换。
+- **2.7 Three Gates** — 更好玩 + 架构更简 + 原作精神，三者齐才收（MANIFEST §13）。
 
 ## 3. Repository Map
 
-> **The annotated tree lives in `docs/agents.details.md` §3.** It is reference data, not a
-> rule — and at 5.1K chars it was eating 63% of the context an agent actually receives
-> (this file is injected truncated at ≈26%; see §0.1). Look it up there when you need a
-> file's home. What stays here is the layer contract and the conventions you must not break.
-
-- **Layers**: `src/game/` = Simulation (the only writer of `World`) · `src/ai/` = God AI +
-  enemy AI · `src/presentation/` = read-only renderer/UI · `src/config/` = data rows (§2.4) ·
-  `src/{snapshot,replay,audio,utils,assets,perf}/` = support. `tests/` mirrors `src/` by concern.
-- **Canvas is playfield-only**: 416×416 logical, DPR-scaled via an offscreen buffer (`SpriteCache`, `GameRenderer`). HUD/menu/overlays are HTML/CSS in `UIManager`. Do not move UI back onto the canvas.
-- **Tank sprites face UP** in the SVG; the renderer rotates per direction. Preserve this convention when adding sprites.
-- **`genId()`** (`World.ts`) is the single source of entity IDs.
-- **`dashboard/` = 训练控制台（独立 bun 项目）** — 自带 `package.json` / `tsconfig.json` / `tests/`；
-  **启动命令 = `bun run dashboard`**（= `cd dashboard && bun run start`，:8900）。内部按职责分层：
-  `src/core/` 基础原语 · `src/stack/` 训练栈组件 · `src/launch/` python 无头启动器 ·
-  `src/evalboard/` 评估板领域 · `src/server/` HTTP 与服务端逻辑 · `src/web/` SSR + 浏览器 UI。
-  它是仓库内**唯一**允许跨项目 import 的边界：只读消费 `src/` 的游戏契约（stages / arena-ladder /
-  config-stage / difficulty）与 `tools/agent/codehash-files`；反向（`src/` 依赖 dashboard）永远禁止。
-  调用方一律 import 各目录的 `index.ts` 桶，不直连内部文件。
-  **依赖自包含**：自带 `node_modules/` 与**入库**的 `bun.lock`（`cd dashboard && bun install`
-  一次即可）；根 `package.json`、根 `tsconfig.json`、根套件**都不含** dashboard ——
-  它的门禁是 `cd dashboard && bun run typecheck && bun run test`（+ `bun run build:ui` 三份 bundle 预算），
-  pre-commit 在 staged 含 `dashboard/` 时自动跑，CI 侧由 `.github/workflows/dashboard.yml` 承担 ——
-  后者**同时**按它只读消费的 10 个仓根模块触发（触发清单不落后于真实 import 由
-  `dashboard/tests/ci-scope.test.ts` 核对；见 DECISIONS §2026-09-15-gate-trigger-scope · 全文 → docs/nn/engineering.md §20）。
-
----
+- **分层**：`src/game/` 仿真（`World` 唯一写者）· `src/ai/` · `src/presentation/` 只读渲染/UI · `src/config/` 数据行 ·
+  `src/{snapshot,replay,audio,utils,assets,perf}/` 支撑 · `tests/` 镜像关注点（目录树 → details §3）。
+- **canvas 只画战场**（416×416，DPR 走 offscreen）；HUD/菜单/浮层是 HTML/CSS，不得搬回 canvas。**坦克精灵朝上**（渲染按方向旋转）；`genId()` 是实体 ID 唯一来源。
+- **`dashboard/` = 训练控制台**（独立 bun 项目，:8900）：只 import 各目录 `index.ts` 桶；仓库内**唯一**允许跨项目 import 的边界
+  （只读消费 `src/` 契约与 `tools/agent/codehash-files`），反向禁止；自带 `node_modules` + 入库 `bun.lock`（门禁见 §9）。
 
 ## 4. Development Workflow — Executing a Plan Autonomously
 
-Handed a plan (`plan/*.md`, a `tasks.chat.md` directive, or an inline task), follow the loop; do not ask permission for steps the MANIFEST already answers (full detail: `docs/agents.details.md` §4).
-
-1. **Decode** the task: deliverable, touched invariants (§2), constraining `DECISIONS.md` entries — vague tasks take their spec from the Three Gates (§2.7) + MANIFEST §12.
-2. **Audit before build:** read the area's audit doc if one exists; for non-trivial refactor-grade work without one, write a short current-state/target-state note in `docs/`.
-3. **Implement** per §5, keeping Simulation pure, Presentation read-only, data in `config/` — and run the quality gates (§9) continuously.
-4. **Verify** against the relevant plan's DoD and the MVP DoD (plan/mvp.md §10): works · no TS errors · no runtime errors · 60 FPS · integrates · restartable · no hidden state.
-5. **Record** non-obvious decisions in `DECISIONS.md` (§6) and a line in the workspace memory log (§11).
-6. **Hand off green:** `bun run check` must pass; present the result.
-7. **Debug re-runs use the failure subset only** (DECISIONS §120): when tooling invalidates previously collected forensics data, re-run only the recorded failure subset via `run-forensics.ts --from-json` — full sweep only when the corpus itself changed.
-
----
+1. **Decode**：交付物、触及的不变式（§2）、约束它的 DECISIONS 条目；规格含糊 ⇒ 取三关（§2.7）+ MANIFEST §12。
+2. **Audit before build**：有审计文档先读；非平凡重构无文档 ⇒ 先在 `docs/` 写现状/目标短记。
+3. **Implement** 守 §5 并持续跑门禁（§9）→ **Verify** plan DoD + MVP DoD（plan/mvp.md §10）：能跑 · 无 TS/运行期错 · 60 FPS · 能整合 · 可重启 · 无隐藏状态。
+4. **Record** 决策进 `DECISIONS.md`（§6）+ memory 一行（§11）→ **Hand off green**：`bun run check` 过才交付。
+5. **调试重跑只用失败子集**（DECISIONS §120）：`bun tools/diag/run-forensics.ts --from-json <corpus>`；只有语料变了才全量。
 
 ## 5. Code Conventions
 
 ### Hard rules (NEVER)
 
-- **Never `git stash`** — in this sandbox the stash's object writes get silently intercepted and can delete the whole object store. **TWO incidents**: 2026-08-28 (all packs vanished, 503 commits unreadable) and **2026-09-06 (`git stash push` deleted `objects/pack/*.pack` + `refs/` + branch reflogs)**. Any subcommand (`push`/`pop`/`apply`/`drop`/`clear`) is banned; for A/B comparisons use `git worktree add` or a scratch clone, never stash. Normal git flow (`add`/`commit`/`push`/`fetch`/`pull`) writes `.git` all the time and is safe — no backup needed; back up `.git/objects` only before a genuinely destructive command (`reset --hard`, `filter-branch`, `gc`, `repack`, `prune`). **Commit, never push** — pushing is the human's job; 2026-09-06 was lossless only because every commit already existed on `origin`. Remote access is HTTPS-only here (origin is already switched; SSH is unreachable from the sandbox). Recovery runbook + why "just this once" is never acceptable: `docs/agents.details.md` §5.12.
-- **Never start the dev server** (or spin up a browser) to validate your own changes — validation is the automated gates only (`bun run check` / `bun run build`; for UI work untestable by units: `tsc --noEmit` + oxlint + a successful `vite build`).
-- **训练操作的唯一入口是控制台**（或其同源 HTTP API）：开课/停课/暂停/恢复/重开一律走 `bun run dashboard` → http://127.0.0.1:8900；`nn-training/run_rl.py` 自带开课闸（缺 `<traj>/training-enabled.txt` 即响亮拒绝，判据同源 `rl/loop_plan.py::course_enabled`）——绕过控制台 = 漏掉开课标记/暂停解禁/hub 模式三件套。
-- **训练 backend 无用户可调参数**：PPO 恒为「发布到 hub 队列 → 等 worker 认领」（单一路径）；`--ppo` / backend env / `--remote-degrade-after` **均已删除**，课程文件也没有 backend 键。想本机算就在控制台起本机 worker（与云机走同一认领协议，对 loop 不可区分）；零 worker = 响亮报「等待认领中」，**永不**就地下沉本机算。
-- **Never launch NN training with raw `python`** — headless one-shots go via `bun dashboard/src/launch/cli.ts --script <name>.py` (venv setup, single-instance locking, smoke gates, `--check` / `--echo`)；日常训练组件管理（启/停/冒烟/模式/节点/变更检测重启）走训练控制台 `bun run dashboard` → http://127.0.0.1:8900（局域网只读：可查看任意课程/日志/节点统计，启停/冒烟/模式/节点编辑仅本机 localhost，§2026-09-09-goalnn-console-lan-readonly；旧统一启动器 `start.ts` 与 `nn-training/start-training.{sh,ps1}` 均已删除；控制台是**独立 bun 项目** `dashboard/`（自带 package.json/tsconfig/tests/**node_modules**，`cd dashboard && bun install`，详见 `dashboard/README.md`）；details: `docs/agents.details.md` §5.6）。
-- **Record every NN-training architecture change/eval/lesson in the matching topic doc under `docs/nn/*.md`** (top, `## §<该文件当前最大号+1>`, number incrementing *within that file* — index in `docs/nn.progress.md`, which also carries the old-§ → new-doc map) — and check the topic doc before architectural changes.
-
-- **On PowerShell, commit via a temp message file** — `git commit -F tmp/<ascii-file>` (delete after; `--amend -F` likewise); heredocs and non-ASCII `-m` args fail silently, and the pre-commit hook's failing output is swallowed — diagnose with `bash tools/githook/pre-commit > tmp/hook.txt 2>&1; echo "EXIT=$LASTEXITCODE"`, and verify every commit with `git log -1 --pretty=fuller` (full recipe: `docs/agents.details.md` §5.7).
-- **Never `git add` an untracked `*.md`** (and no blanket `git add -A`/`git add .`) — commit tracked markdown freely, and only the markdown the human explicitly requested (details: `docs/agents.details.md` §5.8).
-- **Never sleep-wait on a long task** — launch it in the background (the harness notifies on exit) and continue other work; while waiting only peek at the log with short non-blocking `tail` reads, and when a wait is unavoidable use a bounded marker-grep loop that exits the moment the done-marker appears (never a fixed `sleep N`; recipes: `docs/agents.details.md` §5.13).
+- **Never `git stash`** —— 任何子命令/flag（两次毁过对象库）；A/B 用 `git worktree add --detach <dir> HEAD`。
+- **永不 `git push`**（推是人的事）· git 路径不含 `..` · 不给 git 命令接 `2>/dev/null` · 不用 `||` 串两个 git 写 · 改名/删除用 `mv`/`rm`（**非** `git mv`/`git rm`）。
+- **Never start the dev server / 开浏览器**验证改动（验证 = 门禁；UI 例外 → details §5.5）。
+- **训练操作唯一入口 = 控制台**（`bun run dashboard` :8900）或同源 API；绕过 = 漏课程开关 / 暂停解禁 / hub 三件套。
+- **训练 backend 无参可调**：PPO 恒为「发布 → 等 worker 认领」；本机算在控制台起本机 worker，零 worker 就等，**永不**就地降级。
+- **起 NN 训练禁裸 `python`**：无头 → `bun dashboard/src/launch/cli.ts --script <x>.py`；日常组件管理 → 控制台。
+- **NN 训练变更/评估/教训 → `docs/nn/*.md` 顶部**（`## §<该文件当前最大号+1>`；索引 `docs/nn.progress.md`）；改架构前先读该档。
+- **提交走临时消息文件** `git commit -F tmp/<ascii-file>`，完成后 `git log -1 --pretty=fuller` 核对（`-m` 会静默失败）。
+- **未跟踪的 `*.md` 不得 `git add`**（也禁 `git add -A` / `git add .`）；只提交已跟踪的与人点名的那份。
+- **长任务不 sleep 等待**：后台跑 + 干别的活；必须等时用有界 marker-grep 循环（命中即退）。
 
 ### Language & tooling
 
-- TypeScript `strict` (the compiler is a reviewer — never silence it with `any`/`@ts-ignore`); Bun is the all-in-one tool (runtime, `bun test`, packages); Vite dev/build with target `es2020`; oxlint + oxfmt only — no ESLint/Prettier.
-- **跑 nn python/pytest 一律 `bash tools/githook/nn-py-safe.sh …`**（先进程树级拉闸删沙箱再 exec python；默认 `nn-training/.venv`，`NN_PY` 可覆盖）；**严禁裸 `python -m pytest`**——删除保护沙箱（WorkBuddy/Mimo）会在 python 进程内拦 os/shutil/pathlib 的删/写（含写进其管辖的 tmp 目录），pytest 静默挂死（2026-09-15 三起）。pytest 全局 `--timeout=60`/用例（pyproject addopts，>1 分钟即红旗）；`-m pytest` 再自动套 480s 进程外墙钟（`NN_PYTEST_WALL_S`，tools/githook/nn-wall.py）——挂起变成响亮超时而非无限等。门禁（nn-python-gate.sh）与 task.py 已同规。
+- TS `strict`（编译器是评审：禁 `any` / `@ts-ignore` 消音）· Bun 一把梭 · Vite target `es2020` · 只用 oxlint + oxfmt。
+- **nn python / pytest 一律 `bash tools/githook/nn-py-safe.sh …`；严禁裸 `python -m pytest`**（删除保护沙箱拦 python 内的删/写 ⇒ pytest 静默挂死）。60s/用例上限，`-m pytest` 另套 480s 外墙钟。
 
 ### Commands (canonical)
 
 ```
-bun run dev          # vite dev server on :8956
-bun run build        # oxlint && tsc && vite build  (the gate before merge)
-bun run test         # SCOPED: runs only tests tied to local git changes, prints only failures
-bun test --parallel --timeout=50000 --path-ignore-patterns='dashboard/**'   # full ROOT suite — ALWAYS pass these flags
-bun run typecheck    # tsc --noEmit --incremental
-bun run lint         # oxlint
-bun run format       # oxfmt
-bun run check        # full gate (ROOT only): tsc --noEmit --incremental && bun test --parallel --timeout=50000 --path-ignore-patterns='dashboard/**'
-bun run setup        # git config core.hooksPath tools/githook  (enables pre-commit hook)
+bun run check   # green 的定义（只判根项目；组成见 §9 / details §5.2）
+bun run build   # oxlint && tsc && vite build（shipping gate）
+bun run test    # 按本地 git 改动跑，只打印失败  |  typecheck / lint / format / dev(:8956) / setup(装 hook)
+bun run freeze:check  # God-AI det 签名 vs golden（~4s）红 ⇒ 新纪元三件套（§6.3b）；freeze:l2 可达性审计
+cd dashboard && bun install && bun run typecheck && bun run test   |   bun run dashboard（:8900）
 ```
 
-`dashboard/` 是**独立 bun 项目**，用**它自己**的 `node_modules` 与门禁（根 `check` 不含它；
-`tests` 之类的**位置参数是子串过滤**，排除目录只能用 `--path-ignore-patterns`）：
+- `bun run test` 何时跑/跳、`HEAVY_TESTS` 名单的判据与复测法 → details §5.3。
+- `bun test` 必带 `--parallel --timeout=50000`；位置参数是子串过滤，排除目录只能用 `--path-ignore-patterns`。
 
-```
-cd dashboard && bun install     # 一次性；从入库的 dashboard/bun.lock 还原
-cd dashboard && bun run typecheck
-cd dashboard && bun run test    # 306 用例（staged 含 dashboard/ 时 pre-commit 自动跑）
-bun run dashboard               # 启动控制台 → http://127.0.0.1:8900
-```
+### Style & placement
 
-God AI freeze gates (DECISIONS §272/§293; pre-commit runs the first one):
-
-```
-bun run freeze:check # det 21-combo signature vs frozen golden (~4s) — red ⇒ new-era triple
-bun run freeze:l2    # archived-candidate reachability audit over the same corpus (~1s)
-```
-
-`bun run check` is the definition of "green". Run it before declaring a task done.
-
-- `bun run test` is the token-saving runner: **code changes run the full suite** (it prints only failures, and skips entirely for doc-only / dashboard-only changes); the one heavy gate (`godai-score-gate`, ~12s) is excluded from it — run the full suite before landing God-AI changes. `HEAVY_TESTS` (`tools/test-silent.ts`) excludes a file only when its **standalone wall time ≥ the whole non-heavy suite's** (~6s), i.e. it alone costs as much as the entire suite; re-measure with `bun tools/measure-suite.ts` before editing the list (`calibration` was removed from it 2026-09-15 — measured 0.7s, far below the bar). Basename-based narrowing was **removed 2026-09-15** (it under-sampled: a `src/config/stages.ts` edit ran 1 of the 50 tests that import it) — do not re-add it (details: `docs/agents.details.md` §5.3, DECISIONS §2026-09-15-gate-trigger-scope · 全文 → docs/nn/engineering.md §20).
-- `bun test` always takes `--parallel --timeout=50000` — both flags mandatory (details: `docs/agents.details.md` §5.4).
-
-### Style
-
-- No classes where a function suffices; no singletons for gameplay state; prefer pure functions in `utils/` — Simulation methods may mutate the World they own.
-- Gameplay-affecting randomness only via seeded `world.rng`; `Math.random()` only in presentation code that never feeds back into the World.
-- Keep the bundle small — a new dependency ⇒ justify in `DECISIONS.md` (MANIFEST §14).
-
-### File placement
-
-- Gameplay system → `src/game/` (called from `Simulation.updatePlaying()`); visual system → `src/presentation/` (no imports from `src/game/` except types); content → `src/config/`; sprite → `src/assets/sprites/*.svg` + register in `SPRITE_URLS` (96×96 viewBox, tanks face UP); test → `tests/` mirroring the concern.
-
----
+- 能写成函数就别写类；玩法状态不用单例；`utils/` 优先纯函数（Simulation 方法可改自己拥有的 World）。
+- 影响玩法的随机只走 seeded `world.rng`；`Math.random()` 只在回灌不到 World 的表现层；保持包小，新依赖要在 `DECISIONS.md` 论证。
+- 玩法 → `src/game/` · 视觉 → `src/presentation/`（除类型外不得 import `src/game/`）· 内容 → `src/config/` ·
+  精灵 → `src/assets/sprites/*.svg` + 注册 `SPRITE_URLS` · 测试 → `tests/` 镜像关注点。
 
 ## 6. When in Doubt — Derive, Then Execute; Recording Is the Exception
 
-The autonomy contract: make judgment calls instead of stalling (full detail + entry template: `docs/agents.details.md` §6).
-
-- **6.1 Identify the doubt** — plan silent on a design point / two reasonable implementations unpicked / plan-vs-MANIFEST conflict / unspecified tunable value.
-- **6.2 Derive the solution** in priority order: MANIFEST → DECISIONS precedent → existing-code consistency → classic Famicom authenticity → the plan's stated rationale.
-- **6.3 Record only what survives the three admission gates** (rejected alternative · future re-offence · not-expressible-nearby) — most doubts are execution, not decisions, and are carried by a comment / test assertion / commit message instead; routing, entry template and the `--write-baseline` caveat: `docs/agents.details.md` §6.3.
-
-- **6.3b God-AI behavior changes = a new era** — required triple: new `DECISIONS.md` entry + 60-seed three-difficulty baseline (eval-suite v7; `hard` primary, classic/chaos reference) + frozen-signature golden update (`bun run freeze:check` going red is the forced explicit judgment, not an error); tune on `hard`, conclude only on ≥60 seeds — current official baseline: `docs/god-ai-tuning.progress.md` Part 0.1 (DECISIONS §293).
-
-### 6.4 Execute
-
-Implement the decision; if it proves wrong mid-way, update its record with a dated note and proceed — never silently deviate.
-
-### 6.5 What NOT to decide alone
-
-Escalate to the human (ask, don't guess) only for: One-Author breaks the MANIFEST forbids · a new runtime dependency or build tool · public game-feel changes the plan did not contemplate (tank speed defaults, new game modes) · deleting/rewriting a system with no test coverage and no audit doc — everything else is yours to decide and execute.
-
----
+- **6.1 识别**：plan 没定的设计点 / 两种合理实现没挑 / plan 与 MANIFEST 冲突 / 未定的可调值。
+- **6.2 推导优先级**：MANIFEST → DECISIONS 先例 → 现有代码一致性 → FC 原作性 → plan 的理由。
+- **6.3 只记过三问的**（有被否决备选 · 未来会重犯 · 不能就近表达）；其余由注释 / 测试断言 / commit 承担（模板 → details §6.3）。
+- **6.3b God-AI 行为改动 = 新纪元三件套**：新 DECISIONS 条目 + 60-seed 三难度基线（eval-suite v7，`hard` 为主）+ golden 更新；`hard` 上调参，≥60 seed 才下结论。
+- **6.4 Execute**：按决策实现；中途发现错了补一条带日期的说明再继续，绝不静默偏离。
+- **6.5 只有这四类才问人**：MANIFEST 禁的 One-Author 破例 · 新运行时依赖/构建工具 · plan 没想过的公开手感变化 · 删改既无测试覆盖又无审计文档的系统；其余自己定并执行。
 
 ## 7. Bug-Fix Workflow — Reproduce With a Test Before You Fix
 
-Mandatory, no exceptions: **a bug is not fixed until a failing test proves it existed and then passes after your change.**
-
-- **7.1 Reproduce first** — a minimal, deterministic failing test in `tests/` (fixed seed, no `Math.random()`/wall-clock; codecs get independent re-implementations like `tests/stages.test.ts`), confirmed failing on the unmodified codebase before touching production code.
-- **7.2 Then fix minimally** — the smallest change that turns the test green; no opportunistic refactoring (note cleanups as follow-up tasks, don't bundle).
-- **7.3 Then verify** — the new test passes and `bun run check` is green.
-
----
+**没写失败测试就不算修好**：① `tests/` 里写最小确定性失败用例（固定 seed、无 `Math.random()`/墙钟；codec 用独立重实现），并在未改动代码上确认红 →
+② 只做让它转绿的最小改动（顺手重构另开任务）→ ③ 新用例绿且 `bun run check` 绿。
 
 ## 8. Testing Conventions
 
-- **Runner**: `bun:test` (`import { describe, it, expect } from 'bun:test'`). Tests live in `tests/`.
-- **Mirror the concern**: `tests/stages.test.ts` ↔ `src/config/stages.ts`. Name new test files after the module or system they cover.
-- **Prefer independent re-implementations for codecs/data**: see `tests/stages.test.ts` for the pattern — it re-decodes the level data locally and asserts equality with the production decoder. This catches decoder regressions that a "golden file" test would miss.
-- **No DOM in unit tests** unless the system under test requires it. `Simulation`/`World`/`TileMap`/`SnapshotManager` are pure logic — test them headlessly.
-- **Snapshot/restoration tests** must assert the full field list (see plan/Snapshot-Management-Framework.md §7 and tests/snapshot-framework.test.ts): player position, enemy positions, bullets, terrain destruction, items, score, lives, timers, enemy queue, RNG state.
-- **Determinism tests**: when adding RNG-consuming logic, add a test that runs the same seed twice and asserts identical World state.
-
----
+`bun:test`；测试住 `tests/` 并按关注点镜像；codec/数据优先**独立重实现**对账（`tests/stages.test.ts` 抓得住 golden 测试漏的解码器回归）；
+单测不开 DOM，除非被测系统要（`Simulation`/`World`/`TileMap`/`SnapshotManager` 纯逻辑，无头测）；快照/恢复用例断言**全字段**；
+新增消耗 RNG 的逻辑 ⇒ 补「同 seed 两遍、World 逐字段相同」用例。
 
 ## 9. Quality Gates — Definition of Done
 
-A task is done when **all** of these hold:
+（多数由 pre-commit / `bun run check` 自动判定，失败指引见门禁输出 → details §9）
 
-- [ ] `bun run check` is green (test + typecheck + lint + format)。它**只判根项目**：根 `tsconfig.json` 的 `include` 无 `dashboard`，根 `bun test` 用 `--path-ignore-patterns='dashboard/**'` 排除 `dashboard/tests/`。
-- [ ] 动过 `dashboard/**`（或 CI `dashboard.yml` 触发清单里的那 10 个仓根模块）时，`cd dashboard && bun run typecheck && bun run test` 也绿（它有自己的 `node_modules` 与门禁；pre-commit 在 staged 含 `dashboard/` 时会自动跑，CI `dashboard.yml` 覆盖 src/tools 侧触发）。
-- [ ] `bun run build` succeeds (this is what ships).
-- [ ] 改动 `dashboard/src/web/**` 时，`bun dashboard/src/server/build.ts` 三份 bundle 均构建通过（gzip 预算 + 客户端禁词门禁）。
-- [ ] No new `Math.random()` in Simulation paths (§2.3).
-- [ ] No new module-level mutable gameplay state (§2.2).
-- [ ] No new UI drawn on the game canvas (§2.5 — UI is HTML/CSS).
-- [ ] The relevant plan's "Definition of Done" checklist is satisfied.
-- [ ] New decisions recorded in `DECISIONS.md` (§6).
-- [ ] Bug fixes have a reproducing test (§7).
-- [ ] 60 FPS maintained on a typical machine (MANIFEST §14, plan/mvp.md §10). If your change is expensive, profile it.
-- [ ] Memory stays bounded — snapshot history is bounded by per-type retention policies (circular 20 for auto/pause/stage-start, 100 for manual never-overwritten); do not introduce unbounded growth (plan/Snapshot-Management-Framework.md).
-
----
+- [ ] `bun run check` 绿（只判根项目）· 动过 `dashboard/**` ⇒ `cd dashboard && bun run typecheck && bun run test` 也绿 · `bun run build` 过
+      （动过 `dashboard/src/web/**` ⇒ `bun dashboard/src/server/build.ts` 三份 bundle 也过）。
+- [ ] 无新增 Simulation `Math.random()` / 模块级可变玩法状态 / canvas UI（§2.3/§2.2/§2.5）。
+- [ ] plan DoD 满足 · 新决策已记（§6）· bugfix 有复现用例（§7）· 60 FPS · 内存有界（保留策略 → plan/Snapshot-Management-Framework.md）。
 
 ## 10. Asset Pipeline
 
-- **Author sprites as SVG** in `src/assets/sprites/`, 96×96 viewBox. Tanks face UP.
-- **Register** each new sprite in `src/assets/sprites/index.ts` → `SPRITE_URLS` (key like `tank.<kind>`, `terrain.<type>`, `fx.<name>`, `item.<type>`).
-- **Regenerate the library** with `node tools/gen-sprites.mjs` if you are adjusting the generator rather than hand-editing SVGs.
-- **Consume** via `SpriteLibrary` (preloads) → `SpriteCache` (pre-rasterizes to canvas bitmaps at DPR) → `SpriteArtist`/`GameRenderer` (draws). Do not bypass the cache by loading images inline in the render loop.
-- **Terrain tiles must be seamless** (working memory: 96×96 full-frame, texture period must divide 96 — no inset borders, no centered shrink, no mosaic seams). See the Modern Retro design conventions for the palette and per-tile rules.
-- **Themability**: sprite colors that vary by theme come from `ThemeColors` (`src/config/types.ts`, re-exported by the root `src/types.ts`) applied at draw time, not baked into the SVG. Keep gameplay-neutral color in the SVG; keep theme-reactive color in config.
-
----
+SVG 手写于 `src/assets/sprites/`（96×96 viewBox，坦克朝上），注册进 `src/assets/sprites/index.ts` → `SPRITE_URLS`；改生成器用 `node tools/gen-sprites.mjs` 重建整库。
+消费链固定 `SpriteLibrary` → `SpriteCache` → `SpriteArtist`/`GameRenderer`，**不得**在渲染循环里绕开缓存 inline 加载（地形无缝 / 主题色 → details §10）。
 
 ## 11. Memory & Continuity
 
-After substantive work, append a brief note to `.workbuddy/memory/YYYY-MM-DD.md` (repo-relative, append-only; create if missing) and durable conventions to `.workbuddy/memory/MEMORY.md`: what was built/changed, the decision rationale (link the `DECISIONS.md` entry), pitfalls discovered, and the next sensible step — never transient search results or tool errors. Supplemental only: never replaces the actual deliverable or your reply to the user.
+干完实质工作，追加 `.workbuddy/memory/YYYY-MM-DD.md`（append-only，缺则建）+ 持久约定进 `MEMORY.md`：做了什么 · 决策理由（链 DECISIONS）· 坑 · 下一步。它是补充，不替代交付物与回复。
 
----
+## 12. Quick Reference
 
-## 12. Quick Reference — Constants You Will Need
-
-```
-CELL = 16            // sub-block px
-GRID = 26            // sub-blocks per side
-FIELD = 416          // playfield px (GRID × CELL)
-TANK = 32            // tank px (2 × CELL)
-TICK_MS = 1000/60    // fixed timestep
-MAX_ENEMIES_ALIVE = 4
-ENEMIES_PER_STAGE = 20
-START_LIVES = 3
-PLAYER_SPAWN = { col: 8, row: 24 }
-BASE_POS = { col: 12, row: 24 }   // base eagle, 2×2 at rows 24-25 / cols 12-13
-ENEMY_SPAWNS = [ {0,0}, {12,0}, {6,0} ]   // tile coords
-```
-
-Tank kinds: `'player' | 'basic' | 'fast' | 'power' | 'armor'` (MANIFEST: players wear stars, enemies wear faces).
-Terrain chars in stage grids: `'.' 'b' 's' 'w' 'f' 'i' 'E'` (empty/brick/steel/water/forest/ice/base).
-Game states: `'menu' | 'playing' | 'paused' | 'stageclear' | 'gameover' | 'victory' | 'recovery'`.
-
----
+常量 / 坦克种类 / 地形字符 / 游戏状态的单一来源 = `src/constants.ts` + `src/config/` + `src/types.ts`（数值一览 → details §12）。**代码与本文冲突 ⇒ 代码赢**（改本文）。
 
 ## 13. The Rule Behind All the Rules
 
 > Simple beats clever. Readable in six months is worth more than elegant today. (MANIFEST §10)
 
-When this file and your instincts disagree, this file wins. When this file and the MANIFEST disagree, the MANIFEST wins. When the MANIFEST is silent, choose the option that keeps the game small, the architecture clean, and the player smiling — then write it down in `DECISIONS.md` so the next agent does not have to re-derive it.
-
----
+本文件 vs 直觉 ⇒ 本文件赢；vs MANIFEST ⇒ MANIFEST 赢；都没说 ⇒ 选让**游戏更小、架构更干净、玩家更开心**的，再记进 `DECISIONS.md`。
 
 ## 14. Performance Anti-Patterns — Hot-Path Rules
 
-> The God-AI tuning loop runs thousands of headless simulations: any per-tick allocation or redundant scan is amplified ×millions (evidence via `bun --cpu-prof` + determinism-signature verification: `docs/perf-optimization.progress.md`). Violating these in hot paths is a bug even if the tests pass; details/examples: `docs/agents.details.md` §14.
+违反即 bug（测试绿也算）：调参跑上千局无头仿真，每 tick 的分配与冗余扫描被放大百万倍（示例 → details §14）。
+**14.1** 每 tick 不分配数组 · **14.2** 热路径返回值不分配对象 · **14.3** `.sort()` 前判空 · **14.4** 地形保持字符串（改数字查表实测 -28%）·
+**14.5** 不链 `.filter()`+`.sort()` · **14.6** `World.allTanks` 取一次传引用。
 
-- **14.1** No array allocations in per-tick functions — hoist constant arrays to module scope, inline `if` guards instead of `.filter()`, local booleans instead of tiny result arrays.
-- **14.2** No object allocations for hot-path return values — reuse a result buffer on the owning class or return a primitive.
-- **14.3** Guard `.sort()` against empty arrays (`if (arr.length > 1) arr.sort(...)`).
-- **14.4** Don't fight V8 string interning — keep terrain as strings in the TileMap; never "optimize" through mutable numeric lookup objects (measured 28% regression).
-- **14.5** No `.filter()` + `.sort()` chains in per-tick paths — prefer inline scoring with a running best.
-- **14.6** Reuse the `World.allTanks` buffer — call the getter once and pass the reference to same-tick consumers.
+## 15. Closed-loop corpus discipline (RL / CMA-ES / sweep)
 
----
-
-## 15. Closed-loop corpus discipline (training / CMA-ES / sweep loops)
-
-> Any "evaluate → update → re-evaluate" loop (RL/PPO, BC-DAgger, CMA-ES, parameter
-> sweeps) optimizes its evaluation set itself — without corpus rotation the score
-> rises while the capability does not. Case study & recipes:
-> `docs/agents.details.md` §15 (s1-cap: a locked 12-game set produced a 23->44% memorized win curve while greedy eval sat at 26.7% with 60/60 identical games across two policies).
-
-- **15.1 Rotate the corpus every round**: the (stage, seed) pairs of round *it*
-  must not repeat any earlier round (draw keyed by `(runSeed, it)`, resume-safe).
-  Re-grinding a fixed set = memorization; treat those metrics as void.
-- **15.2 Micro-corpus is a sentinel, not a verdict**: small fast loops (<~50
-  games/round, order-of-magnitude — re-estimate with cluster size) only validate
-  "pipeline works / reward arm has gradient / incident attribution"; their win
-  curves are never a capability conclusion. Capability claims need a corpus that
-  saturates the cluster plus an independent validation channel (e.g. clean eval).
-- **15.3 Evaluate the deployment mode separately**: training sampling win rate ≠
-  greedy/deployment win rate — argmax converges onto fixed routines that sampling
-  would escape. The gap between the two, and "different weights produce 60/60
-  identical greedy games", are mode-collapse fingerprints worth acting on.
-- **15.4 Large batches are the KL stabilizer**: size closed-loop updates (PPO
-  etc.) so advantage normalization is not dominated by single-episode luck;
-  kl / entropy / value / gnorm are the four must-read numbers of every update.
-- **15.5 Changing corpus / curriculum / reward semantics = a new experiment**:
-  fresh `--out/--traj` directories + a DECISIONS entry; never resume across the
-  change (the accounting contract has changed).
-- **15.6 RL training defaults to stream mode** (collection and PPO waves
-  overlap): serial mode idles the entire collection cluster during every PPO
-  window (~half of wall time at 150 games/iter). Pass `--stream 0` only with a
-  stated reason; keep the stream path exercised — it rotted once unnoticed
-  (`ppo.update` alias missing for the plain backend).
+任何「评估 → 更新 → 再评估」的环都在自优化评估集：不轮换语料，分数涨而能力不涨（案例 → details §15）
+**15.1** 每轮换语料：第 *it* 轮 `(stage, seed)` 不得与更早轮重复（抽 key 带 `runSeed, it`，resume-safe）；重磨固定集 = 记忆化，指标作废 ·
+**15.2** 微语料是哨兵不是判决 · **15.3** 部署模式单独评估（采样 ≠ greedy；不同权重 60/60 相同对局 = 坍缩指纹）·
+**15.4** 每次 update 必读 kl / entropy / value / gnorm（大批次是 KL 稳定器）· **15.5** 改语料/课程/奖励语义 = 新实验：新 `--out`/`--traj` + 一条 DECISIONS，**不得跨改动续跑** ·
+**15.6** RL 默认 stream 模式，`--stream 0` 写理由且保持 stream 路径有人跑。
 
 ## 16. Long-Run Task Discipline — Budget, Parallelism & Observability
 
-> Any long task (training runs, batch sims, full test suites) costs hours of wall
-> time, and two failure modes make it cost twice: a duration estimate off by an
-> order of magnitude, and output you cannot read until the process exits. Both
-> are preventable. Case study: `docs/agents.details.md` §16 (2026-09-04 BC
-> distillation — 11 min/epoch measured vs ~85 s extrapolated from a 723-frame
-> smoke (8× miss, "~60 min" run took ~11 h), and a `| tail` pipe hid every epoch
-> line so the miss was invisible until the end).
-
-- **16.1 Speed-budget before launch**: any run expected to take >5 min gets
-  1-2 epochs/batches measured on the REAL corpus first — read the log
-  timestamps, then scale. Never extrapolate per-step cost from a kilo-sample
-  smoke: fixed overhead (validation, augmentation, per-epoch stats) is invisible
-  there and dominates at scale.
-- **16.2 Logs go to files, always**: redirect long-task output to a log file
-  (`> run.log 2>&1`); never feed it into a `| tail`/pipe that buffers until
-  exit. Unreadable output = unverifiable progress = one step from a wasted
-  restart.
-- **16.3 Progress observable mid-run**: emit a per-epoch/per-batch line (loss,
-  metric, elapsed) to the log, and checkpoint weight-producing runs every N
-  epochs (`train/bc.py --ckpt-every N`) so any moment is a valid stopping point —
-  an over-budget or crashed run keeps its best work instead of starting over.
-- **16.4 Decide kill-vs-wait from measurements**: when a run overruns budget,
-  sample its CPU time twice across ~20 s (rising CPU-seconds = working, flat CPU
-  + climbing memory = leak/hang). Kill or wait on data, not vibes.
-- **16.5 Parallelize every shardable long task — never default to single-core**:
-  corpus/data collection splits by (stage, seed) across N processes; batch sims
-  run through `worker-pool.ts`/`sim-pool.ts` (its determinism contract makes
-  parallel == serial byte-for-byte when tasks are pure); RL uses stream mode +
-  node concurrency + local slots; tests take `--parallel` (bun) / `-n` (pytest
-  xdist). Parallelism is the default, not an optimization — serial is the
-  exception, stated with a reason (order-sensitive debug, memory-bound, tiny
-  workload where spawn cost dominates). Shell-level seed sharding is the
-  fallback when a tool has no built-in pool (e.g. `export-godai-labels.ts`:
-  8-way shard split measured ~4 min for 2000 games vs unbounded serial).
-- **16.6 Verify parallel == serial once per tool**: before trusting a parallel
-  path, byte-compare its output against a serial run on the same inputs (the
-  worker-pool determinism note assumes pure tasks — confirm the tool honors it).
-- **16.7 Capture the log once, delete it on green**: every gate / sim / probe /
-  long run writes its full output to a log file and is diagnosed from that file
-  — never re-run the task just to watch the output again; when the run succeeded
-  and its log holds nothing worth keeping, delete the log in the same step.
-  `tools/githook/run-logged.sh <log> -- <cmd>` does both (red keeps + echoes the
-  tail, green deletes it); `KEEP_LOG=1` keeps it when the log is the evidence.
+（配方与事故 → details §16）**16.1** >5min 的跑先在**真语料**量 1–2 epoch/batch 再外推 · **16.2** 日志一律进文件，禁 `| tail`/管道 ·
+**16.3** 每 epoch/batch 打一行（loss/metric/elapsed），产权重的跑每 N epoch 存 checkpoint · **16.4** kill/等由测量定（跨 ~20s 两次 CPU 时间）·
+**16.5** 可切分任务一律并行（分片 / 池 / `--parallel` / `-n` → details §16.5），串行写理由 · **16.6** 并行与串行逐字节对账 ·
+**16.7** 日志只捕获一次、绿了删（`tools/githook/run-logged.sh <log> -- <cmd>`；`KEEP_LOG=1` 留证据）。
 
 ## 17. Editing Files on Windows — Text-Splicing Discipline
 
-> Text splicing through PowerShell/bash on Windows fails constantly: heredoc
-> quoting, nested quotes, CRLF vs LF, `|` buffering, and path mangling (`/tmp`
-> resolves to `D:\tmp` under native Python, not Git Bash's `/tmp`). In-repo
-> agent runs confirmed it — most edit attempts that piped text through the
-> shell mis-landed or silently no-op'd, while scripted replacements succeeded.
-> Full case study: `docs/agents.details.md` §17.
-
-- **17.1 Scripted replacements for multi-hunk edits**: read the file once in
-  Python, apply each hunk behind `assert old.count(...) == expected`, write
-  back only after every hunk matched — all-or-nothing, a failed run leaves the
-  file untouched and is safe to retry.
-- **17.2 Keep hunk text out of the shell**: quoted heredocs (`<<'EOF'`) stop
-  bash expansion, but nested/triple quotes still corrupt inline `python -c`
-  and heredoc scripts. Beyond a one-liner, write the patch to a temp `.py`
-  with the file tools, run it, delete it.
-- **17.3 Windows path discipline**: native Python resolves `/tmp` to `D:\tmp`,
-  not Git Bash's `/tmp`; keep throwaway scripts repo-relative (cwd), never in
-  shell temp dirs. Use the managed runtime's absolute python path or a venv
-  path relative to the dir you `cd`'d into — bare `./.venv` fails from the
-  repo root.
-- **17.4 Verify the write landed**: after patching, run a cheap check (`python
-  ast.parse`, `bun build <file>`, grep the anchor). "Reported success" is not
-  "on disk" — silent rollback has happened here.
-- **17.5 Anchor multi-line hunks on unique context**: replace a signature plus
-  its neighbors, never a bare line that recurs (wrong-count asserts catch the
-  rest).
-- **17.6 Shell encoding facts on this machine (zh-CN Windows)**: the
-  PowerShell tool runs pwsh 7.6.5 Core (not 5.1) as a clean session that does
-  NOT load `$PROFILE`, and `[Console]::OutputEncoding` defaults to gb2312
-  (cp936) — CJK text printed to the console comes back garbled under UTF-8.
-  When a command must emit or capture CJK, set both
-  `[Console]::OutputEncoding` and `$OutputEncoding` to UTF-8 first, or (better)
-  route text through the python channel of 17.1 with explicit
-  `encoding='utf-8'`. Never rely on a user profile to fix this.
-  **User env (2026-09-15)**: `PYTHONIOENCODING=UTF-8` is set at the **user level**
-  (`HKCU\Environment`; `setx`-equivalent) — NEW python processes inherit it, so
-  stdout/stderr written to files/logs are UTF-8 by default; do NOT add per-file
-  `PYTHONIOENCODING`/reconfigure hacks in scripts. Caveats: only affects
-  processes started AFTER the env change (restart stale terminals/agents);
-  console *display* is still gb2312-codepage-bound (redirect to a file for clean
-  UTF-8); the entry-point reconfigure in `platform_utils.py` is the repo's
-  per-subprocess pin and coexists (overrides env).
-
-- **17.7 PowerShell invocations use `pwsh` only — never bare `powershell`**
-  (2026-09-04, DECISIONS §323): repo scripts, run-books, Makefiles, and examples
-  invoke `pwsh` (PowerShell 7; this machine runs 7.6.5). Bare `powershell`
-  resolves to inbox Windows PowerShell 5.1
-  (`C:\Windows\System32\WindowsPowerShell\v1.0`), an OS component that cannot
-  be uninstalled and must not be called from the repo — the two coexist
-  side-by-side and only `pwsh` is used.
+（案例与模板 → details §17）**17.1** 多 hunk 改动写脚本 + 逐 hunk `assert old.count(...) == expected`，全命中才写盘 ·
+**17.2** hunk 文本不进 shell；超一行用文件工具写临时 `.py`，跑完删 · **17.3** 用托管 runtime 的绝对 python 路径（别写裸 `./.venv`）；脚本放仓库内 —— 原生 Python 的 `/tmp` = `D:\tmp` ·
+**17.4** 写完验证落盘（语法 / 构建 / grep 锚点）· **17.5** 多行 hunk 锚唯一上下文，不替换会重复的裸行 · **17.6** 输出 CJK 重定向到文件或用 §17.1 通道显式
+`encoding='utf-8'`（控制台是 gb2312；`PYTHONIOENCODING` 已用户级设好，别再 reconfigure）· **17.7** 只 `pwsh`，禁裸 `powershell`（DECISIONS §323）。

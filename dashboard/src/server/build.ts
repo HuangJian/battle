@@ -103,7 +103,7 @@ async function doBuild(target: BundleTarget, analyze: boolean): Promise<Uint8Arr
   })
   if (!out.success) {
     for (const log of out.logs) console.error(log)
-    throw new Error(`bundle ${target.key} 构建失败:`)
+    throw new Error(`bundle ${target.key} 构建失败（AGENTS §9：三份 bundle 必须全部构建通过）:`)
   }
   const artifact = out.outputs[0]
   if (!artifact) throw new Error(`bundle ${target.key} 无产物`)
@@ -114,7 +114,8 @@ async function doBuild(target: BundleTarget, analyze: boolean): Promise<Uint8Arr
   for (const re of FORBIDDEN) {
     if (re.test(text)) {
       throw new Error(
-        `bundle ${target.key} 含禁词 ${re.toString()} —— 客户端引入了服务端能力，违反分层铁律`,
+        `bundle ${target.key} 含禁词 ${re.toString()} —— 客户端引入了服务端能力，违反分层铁律` +
+          `（规则：AGENTS §9 / §3「dashboard 只 import 各目录 index.ts 桶」；细节：docs/agents.details.md §9）`,
       )
     }
   }
@@ -151,7 +152,8 @@ export async function ensureBundle(
     const gzipBytes = Bun.gzipSync(new Uint8Array(raw)).byteLength
     if (gzipBytes > BUNDLE_GZIP_BUDGET) {
       throw new Error(
-        `bundle ${target.key} gzip ${(gzipBytes / 1024).toFixed(0)}KB 超预算 ${Math.round(BUNDLE_GZIP_BUDGET / 1024)}KB —— 硬门禁`,
+        `bundle ${target.key} gzip ${(gzipBytes / 1024).toFixed(0)}KB 超预算 ${Math.round(BUNDLE_GZIP_BUDGET / 1024)}KB —— 硬门禁` +
+          `（规则：AGENTS §9 物化于 dashboard 的 bundle 预算；细节：docs/agents.details.md §9）`,
       )
     }
     console.log(

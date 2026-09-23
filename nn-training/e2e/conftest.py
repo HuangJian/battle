@@ -8,7 +8,7 @@ tmp 落盘，不需要 bun / 真节点 / weights fixture），所以能进门禁
     bash tools/githook/nn-py-safe.sh -m pytest e2e/ -n 4 -q
     # 或：make test-e2e / python task.py test-e2e
 
-（勿用裸 `python -m pytest`——AGENTS §0.1-13：沙箱删除守卫下会静默挂死。）
+（勿用裸 `python -m pytest`——AGENTS §5：沙箱删除守卫下会静默挂死。）
 夹具与 tests/conftest.py 共用（tmp_path 覆盖、通过即清、失败保留）。
 """
 
