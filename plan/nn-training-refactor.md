@@ -474,6 +474,19 @@ _admin_net_probe(20) · _admin_halt(18) · _admin_queue(10) · _admin_status(9) 
 > 但走 `_get_with_retry`）——注入点在 `http`，是跑门禁才点出来的。第六步拆 BC 时同理：
 > `_bc_fetch_resume` / `_bc_post_epoch` / `_run_bc_job` 直调 `_request`，搬走后注入点随它们走。
 
+**第六步的最后一个待决点（先想清再动手）**：`_run_bc_job` 除 BC 簇外还调两个**非 BC** 的
+宿主名——`_persist_result`（结果落盘，仅 5 行，**宿主 `run_job` 也在用**）与 `d14_corpus_match`
+（`common.protocol` 的导入名）。若把 `_run_bc_job` 搬进 `bc_job`：
+
+* `d14_corpus_match` 不是问题（`bc_job` 自己从 `common.protocol` import 即可）；
+* `_persist_result` **必须决定归属**：(a) 随 BC 搬（`worker` 改从 `bc_job` 导入它——无环但不合语义：
+  结果落盘不是 BC 专属）；(b) 与 `unpack_opt_tar` / `pack_opt_tar` / `prune_job_dirs` / `_git_head`
+  / `_ensure_commit` / `_ensure_ts_code` / `_cache_blob` / `_resolve_blob` 一起先下沉一个
+  `remote/job_fs.py`（作业工作区/缓存/TAR 组，≈ 250 行）——**我倾向 (b)**：它和 `http` 一样是
+  「业务簇的公共底座」，先下沉后 BC 与下载簇都能干净选送。
+
+⇒ **建议第六步再拆两刀**：先 `remote/job_fs.py`（底座），再 `remote/bc_job.py`（业务）。
+
 ### 5.4 本轮**不做**（已核，刻意保留）
 
 - `remote/notebook_boot.py` ↔ `remote/offline_boot.py` 的孪生助手（`_build_opener` /
