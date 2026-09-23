@@ -499,7 +499,28 @@ _admin_net_probe(20) · _admin_halt(18) · _admin_queue(10) · _admin_status(9) 
 > **顺带发现（已登记，未处理）**：`_ensure_commit` **全仓零调用**（只有 `_git_head` 被它自己调）
 > ——既存死代码；删代码要单开一次并有决策。
 
-> **第二刀（BC，下一步）执行清单**：`_bc_fetch_resume` / `_bc_local_resume_dir` /
+> **第二刀已落地（同日）**：BC 簇（**363 行**，本来就是连续一块）整块搬进 `remote/bc_job.py`
+> （422 行）：`_bc_fetch_resume` / `_bc_local_resume_dir` / `_bc_store_local_resume` /
+> `_bc_load_local_resume` / `_bc_post_epoch` / `_bc_device` / `normalize_ppo_device` /
+> `resolve_bc_seed` / `_run_bc_job`。`worker.py` **2915 → 2579**。依赖
+> `bc_job → {http, job_fs}`（向下，无环）。**同样 seam-free**：全仓对 BC 名字只有直接调用与
+> `from remote.worker import …` ⇒ 显式转发就够，e2e / tests **一行不改**。
+> 新守卫 `tests/test_bc_job_split.py`（6 例），其中
+> `test_torch_stays_a_deferred_import_inside_run_bc_job` 是**「顶层零 torch」这条老规矩第一次被
+> 机械钉住**（同时断言顶层没 torch 与函数体内有）。反向探针两处均命中。
+> 门禁 **2308 → 2314 passed / 3 skipped**；mypy 375 源文件绿。
+> 决策 → `DECISIONS.md` §2026-09-23-goalnn-godmodule-bcjob；全文 → `engineering.md` §23「第六步之二」。
+
+> **下一批刀口（worker 余下 2579 行）**：① 作业生命周期簇（`peek_jobs` / `request_priority` /
+> `claim_job` / `job_started` / `job_ready` / `abandon_job` / `job_status` / `start_cancel_watcher` /
+> `_priority_rank` / `acquire_job` / `post_result` / `release_job` / `heartbeat` / `worker_tag` /
+> `_failure_detail` / `job_body_error` / `report_job_failure`）——
+> 注意这一簇的 **seam 很密**（测试大量 patch `worker.post_result` / `worker.run_job` /
+> `worker.acquire_job` 等），必须逐点定档；② 下载簇（`download_*` + `_resolve_blob` /
+> `_cache_blob` / `_ensure_ts_code` + `_progress_logger`）；③ `run_job`（743 行）/ `worker_loop`
+> （364）/ `main` 是宿主，**不动**。
+
+> **（历史）第二刀的预期执行清单**（已执行，保留供对照）：`_bc_fetch_resume` / `_bc_local_resume_dir` /
 > `_bc_store_local_resume` / `_bc_load_local_resume` / `_bc_post_epoch` / `_bc_device` /
 > `normalize_ppo_device` / `resolve_bc_seed` / `_run_bc_job` → `remote/bc_job.py`（依赖
 > `remote.http` + `remote.job_fs`，无环；`d14_corpus_match` 自 `common.protocol` import）。

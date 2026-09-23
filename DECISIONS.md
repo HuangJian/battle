@@ -2434,3 +2434,31 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
   `setattr`）⇒ `worker` 的显式转发就够，测试一行不改。反向探针：往 `worker.py` 追加
   `def prune_job_dirs` ⇒ 拆分守卫立刻点名。
 —— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/engineering.md` §23「第六步之一」
+
+## §2026-09-23-goalnn-godmodule-bcjob（2026-09-23，用户指令「重构 nn-training：降耦合 / 复用代码 / 可维护性」）
+
+- **背景**：`remote/worker.py` 第六步的第二刀（`plan §5.3.5` 清单里的业务簇）。BC 簇在文件里本来就**连续
+  363 行**，且对外只经两个向下依赖：`remote.http._request`（第五步已下沉）与
+  `remote.job_fs._persist_result`（第六步之一已下沉）。
+- **备选与否决**：先直接搬 BC（前几轮已否决：与 `worker` 成环）；把 BC 拆成「hub 交互 / 本地
+  resume / 设备与种子」三个小模块——否（它们是同一条链的代名与助手，拆开只增加导入面）；
+  把 `normalize_ppo_device` 留在 `worker`（它是 PPO 语义）——否（它在 `run_job` 里只是**调用**，
+  定义搬走不改变调用面；留在 worker 又会让 `_run_bc_job` 反向依赖）。
+- **决定**：`_bc_fetch_resume` · `_bc_local_resume_dir` · `_bc_store_local_resume` ·
+  `_bc_load_local_resume` · `_bc_post_epoch` · `_bc_device` · `normalize_ppo_device` ·
+  `resolve_bc_seed` · `_run_bc_job`（**363 行**）整块搬进新 `remote/bc_job.py`；`worker.py`
+  **2915 → 2579**；依赖 `bc_job → {http, job_fs}`（向下，无环）。
+  `d14_corpus_match` 两边各自从 `common.protocol` 取（worker 那份是 `run_job` 在用，不随簇走）——
+  守卫钉住两边是**同一个函数对象**。
+- **本仓一条老规矩第一次被机械钉住**：**顶层零 torch**（hub 侧与协议单测不得拉 torch）。新守卫
+  `test_torch_stays_a_deferred_import_inside_run_bc_job` 同时断言「模块级确实没有 torch / train.bc」
+  与「`_run_bc_job` 体内确实有」（前者防回归，后者防漏搬）。
+- **本刀 seam-free**：全仓对 BC 名字只有直接调用与 `from remote.worker import …`（无 `setattr`）
+  ⇒ 显式转发就够；`e2e/test_bc_epoch_e2e.py` 与 `tests/`（取 `normalize_ppo_device` /
+  `resolve_bc_seed` / `_bc_device`）一行不改。注意 `tests/test_worker_device.py` 有一条读
+  `worker.py` **源码文本**的守卫（`normalize_ppo_device(device)` 计数 + 顺序）——它看的是
+  `run_job` 里的调用点（宿主），本刀后仍绿（已跑确认）。
+- **门禁**：**2314 passed / 3 skipped**（2308 → +6：新 `tests/test_bc_job_split.py` 6 例）；
+  mypy **375** 源文件绿。反向探针：worker 里重复实现 `normalize_ppo_device`、bc_job 顶层
+  `import torch`——两处都被点名。
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/engineering.md` §23「第六步之二」
