@@ -35,7 +35,12 @@ ID：`§YYYY-MM-DD-<branch>-<slug>`（branch 去连字符，如 `god-ai` → `go
 ## 3. 规则
 
 - 只追加：新条目只写文件**末尾**，禁止中部插入（合并冲突靠 `.gitattributes` union）。
-- 被取代的条目标 `_(superseded by §ID)_`，永不删除。
+- 被取代的条目标 `_(superseded by §ID)_`，永不删除；取代者只在文档/代码里落地的（无对应 §ID）
+  写路径代替，如 `_(superseded by docs/nn/training-stack.md §23 —— --remote-degrade-default 已删除)_`。
+- **正文去哪**：条目只写索引形态（标题 + 决定 + 指针）。成篇正文按主题落到
+  ① 主题档 `docs/nn/*.md` / `docs/*.progress.md` 末尾的 **「决策正文归档」** 节（锚点 `### §<编号>`），
+  或 ② `docs/decisions/details/<领域>.md`（锚点 `## §<编号>`）；索引行末尾加
+  `—— 全文（背景 / 备选与否决 / 证据 / 后果）→ <路径> §N`。同一条正文只存一处，禁双写。
 - 正确性由 `bun run check` 里的 `tools/check-decisions.ts` 强制（撞号 / 丢号 / 格式）。
 - 加条目**不需要**跑 `--write-baseline`：校验会自动把「基线里没有的新日期 ID」识别为新增；
   重写基线只会制造机械 diff，并让已存在的撞号（count 2）永久合法化。

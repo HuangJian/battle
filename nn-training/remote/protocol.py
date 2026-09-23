@@ -598,7 +598,7 @@ def data_fp_entries(entries: DataFpEntries) -> str:
 
 
 def d14_corpus_match(job_course_fp: str, job_corpus_fp: str, shard_manifest: dict) -> bool:
-    """D14 装载校验的比对规则（DECISIONS §2026-09-13-level-extraction）。
+    """D14 装载校验的比对规则（DECISIONS §2026-09-13-level-extraction · 全文 → docs/nn/training-stack.md §25）。
 
     双侧都有 corpus_fp（语料身份 = env+reward 解析值语义哈希）⇒ 比 corpus_fp——
     预算/路径/注释类课程 mid-run 编辑只动 course_fp（文件血缘），不得触发拒收。

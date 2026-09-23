@@ -128,7 +128,7 @@ P1 行原语前为 746 / 87，重设计前基线 717 / 86），拆分产出的�
 > 三件容易静默退化的事——字号必须取自 `--fs-*` 阶梯（旧 `--fs-1..--fs-5` 不得复活）、
 > 除 `TrendChart` 的 3 处计算值外不得有内联布局 `style=`、十六进制色值只允许两处 SVG 豁免。
 > **要加新的样式纪律就往那里加一条**（同类闸的坑与前提闸写法见该文件头注与
-> `DECISIONS.md §2026-09-20-dashboard-shell-routing — P4a 续`）。
+> `DECISIONS.md §2026-09-20-dashboard-shell-routing · 全文 → docs/nn/console.md §11 — P4a 续`）。
 
 > ⚠ **web 用例只能断言结构，挡不住交互缺陷**：本仓 web 测试全部是 SSR（无 `happy-dom`/`jsdom`），
 > 而 `preact-render-to-string` **丢弃全部事件处理器**（实测 `h('pre', {onClick}, 'x')` → `<pre>x</pre>`）

@@ -313,7 +313,7 @@
 //   训练（tmp/x3-power/training_log.jsonl，30 个 iteration 事件齐）：rollout wr 全程
 //     0.6292–0.7417 无趋势；KL it1 0.000581 → it30 0.002133，全程 max 0.00231（it25），
 //     kl_cap=0.006 在本路径**不接线**（remote/serial 无消费者；打包≠生效，
-//     DECISIONS §2026-09-15-goalnn-kl-cap-unwired）——旧「从未咬合」作废；
+//     DECISIONS §2026-09-15-goalnn-kl-cap-unwired · 全文 → docs/nn/experiments.md §33）——旧「从未咬合」作废；
 //     KL≈0.002 由 kl_coef 0.2 软惩罚 + 小步长决定，与「死护栏」叙事无关。
 //   日常 anchor（只读 anchor_wr；it30 因 engine_epoch mismatch 回落 local，只跑了锚点 200 局，
 //     rotor 缺席 ⇒ it30 的过拟合窗记不完整）：it0 0.65 → it5 0.655 → it10 0.68 →

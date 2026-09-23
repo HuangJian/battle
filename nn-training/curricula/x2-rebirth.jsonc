@@ -335,7 +335,7 @@
     //   「尾段缺席无害 / 在 serial/remote 路径不接线、恒不生效」——**前半对，后半把话说满了**：
     //   · **对的部分**：per-tick 的 **remote/serial 路径确实不接线** —— `ppo_update` 无形参、
     //     `remote/worker.py` 只读 `kl_coef`，全仓消费者只有 `rl/stream.py`（+ manifest 打包）
-    //     ⇒ DECISIONS §2026-09-15-goalnn-kl-cap-unwired 已把口径钉死，并**明令不得**把它写成
+    //     ⇒ DECISIONS §2026-09-15-goalnn-kl-cap-unwired · 全文 → docs/nn/experiments.md §33 已把口径钉死，并**明令不得**把它写成
     //     生效硬顶/「咬合」。本腿默认就走这条路径：`rl-config.json` 的 `rl.stream = 0` 压过
     //     `cli.py:_d("stream", 1)` 的 argparse 兜底（**已实测 `args.stream = 0`**），
     //     `--ppo remote` 还会在 `rl/config.py:207` 再强制置 0

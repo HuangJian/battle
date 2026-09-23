@@ -42,7 +42,7 @@ flush（默认 `DRAIN_FLUSH_SEC`，超时就放手——产物已在本地，不
   * *传输编码复用 `encode_weights_json`/`encode_opt_tar`（gzip+base64）*：比裸容器多 33%
     体量（~0.5s/轮 @3.5Mbps 实测隧道），换来的是**同一个已被两端测过的编解码器**，且
     hub 落盘路径与 result 链路逐字同形。这是 best-effort 的旁路，不值得为它再引入一种
-    容器格式（备选与代价见 DECISIONS §2026-09-17-goalnn-offline-reconnect-delivery）。
+    容器格式（备选与代价见 DECISIONS §2026-09-17-goalnn-offline-reconnect-delivery · 全文 → docs/nn/remote-transport.md §32）。
 """
 
 from __future__ import annotations

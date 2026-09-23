@@ -35,6 +35,11 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | [`docs/nn/runtime-opt.md`](nn/runtime-opt.md) | rollout / eval 运行时：native 内核 · 并发口径 · 派发 · 单局看门狗 | 12 |
 | [`docs/nn/tpu-perf.md`](nn/tpu-perf.md) | TPU / XLA：设备实测 · 单步耗诊断 · 编译缓存 · PPO 吞吐 | 8 |
 
+> **另：每篇多了一个 `决策正文归档` 节（2026-09-23）**。`DECISIONS.md` 同日瘦身，把那批
+> 正文 >10 行的决策全文按主题搬进这些文档（共 105 条进本目录，2 条进 `docs/decisions/details/`）。
+> 该节锚点是 `### §<DECISIONS 编号>`，与上面的 `## §N` 进度节**不同一套号**；上表「节数」
+> 只数 NN 进度节，不含这个归档节。`DECISIONS.md` 的索引行末尾写明了每条正文落在哪一节的哪一锚点。
+
 **相邻文档（本轮未动）**：`docs/nn-diagnosis-methodology.md`（诊断流程纪律）、
 `docs/nn-diagnosis-toolkit.md`（诊断脚本源码快照）、`docs/nn.progress.intent.md`（意图头）、
 `docs/rl.progress.md`（RL 阶段）、`docs/goal-nn.progress.md`（goal-space 重建）、
@@ -169,7 +174,7 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | §46 | docs/nn/experiments.md §4 | x3-power 结课：判负（2026-09-15；课程 `nn-training/curricula/x3-power.jsonc`「终点结算」节） |
 | §47 | docs/nn/experiments.md §5 | Phase 0 逐敌种画像（T3）：**败局 = 从不碰 power**，判决 T5（2026-09-15；`plan/x3-power-followup.plan.md` §T3） |
 | §48 | docs/nn/training-stack.md §9 | 采集配额量纲 10× 修（T9）：`est_ticks_per_game` → `est_samples_per_game`（2026-09-15；`plan/x3-power-followup.plan.md` §T9） |
-| §49 | **已删除** | R9 远端降级：默认 ABORT + 启动界面 opt-in（T7，2026-09-15；DECISIONS §2026-09-15-goalnn-r9-default-abort） |
+| §49 | **已删除** | R9 远端降级：默认 ABORT + 启动界面 opt-in（T7，2026-09-15；DECISIONS §2026-09-15-goalnn-r9-default-abort · 全文 → docs/nn/experiments.md §33） |
 | §50 | docs/nn/experiments.md §6 | x3-step it30 结课：可测性未恢复（工厂第二段复证）；主路径仍 T5（2026-09-16） |
 | §51 | docs/nn/experiments.md §7 | x3-chip-k05 结课：预注册池判阴，单变量池＋3pp 待 k0 定案（2026-09-16） |
 | §52 | docs/nn/experiments.md §8 | T6 剂量定案：全噪音；run 噪声地板≈2pp 实测；T5 开工条件（2026-09-16） |

@@ -1,4 +1,4 @@
-"""课程热加载（DECISIONS §2026-09-13-hot-reload）：每 iter 重读课程文件，按语料身份分流。
+"""课程热加载（DECISIONS §2026-09-13-hot-reload · 全文 → docs/nn/training-stack.md §25）：每 iter 重读课程文件，按语料身份分流。
 
 分类学沿用 §2026-09-13-level-extraction：
 - **非语料改动**（corpus_identity_fp 不变；B/C 类）：白名单字段直接写回 args——消费点

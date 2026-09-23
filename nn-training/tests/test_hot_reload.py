@@ -1,4 +1,4 @@
-"""课程热加载（DECISIONS §2026-09-13-hot-reload）。
+"""课程热加载（DECISIONS §2026-09-13-hot-reload · 全文 → docs/nn/training-stack.md §25）。
 
 覆盖：① plan_reload 分类学（same/apply/rejected——语料身份变了整单拒绝，不做部分
 应用）；② apply_hot_fields 白名单写回 + restart-only 记账（`*` 后缀）；③ 启动冻结

@@ -810,7 +810,7 @@ KL≥0.005＋pd 过地板为产出，待批准；用户手工开训）；若 A �
 ## §8 T6 剂量定案：全噪音；run 噪声地板≈2pp 实测；T5 开工条件（2026-09-16）
 
 **为什么记这一笔**：k0 真复刻落 569/800，四臂凑齐。这是 T6 终判账（课程三文件
-剂量行同步；DECISIONS §2026-09-16-goalnn-run-noise-floor：地板规则＋wChip 判死）。
+剂量行同步；DECISIONS §2026-09-16-goalnn-run-noise-floor · 全文 → 本文件 §33：地板规则＋wChip 判死）。
 k05/k10 结算里的"待定"至此全部兑现，§7 本体不动（账本只增不改）。
 
 **四臂定案表**（同批配对；k0 干净：单 run_start 零 error，eval 满血，KL 死水）：
@@ -1054,7 +1054,7 @@ T6（wChip）排序第二（① 也成立，但归属不在先；且须用户明
   非熔断停腿，是**跑满的干净证伪**（预注册「不升反降即停」按噪声带执行）。
 - 训练（`tmp/x3-power/training_log.jsonl`，30 个 iteration 齐）：**KL it1 0.000581 → it30
   0.002133**（全程 max **0.00231**@it25；⚠ `kl_cap=0.006` **在本路径不接线**
-  （remote/serial 无人消费，DECISIONS §2026-09-15-goalnn-kl-cap-unwired）——旧文
+  （remote/serial 无人消费，DECISIONS §2026-09-15-goalnn-kl-cap-unwired · 全文 → 本文件 §33）——旧文
   「从未咬合」改读为「该键未生效，谈不上咬合」）；rollout wr
   0.6292–0.7417 无趋势；日常 anchor（只读 `anchor_wr`）it0 0.65 → it30 0.64（128/200）
   横盘，最大 Δ+3.5pp ≈0.75σ；rotor gap 从未触发 ≥5pp×3 轮 ⇒ 无过拟合。
@@ -1095,7 +1095,7 @@ it1 独占 2h54m）。15:00 `wait_result` 超时 1800s → 15:02/15:03 HTTP 530 
 
 ## §3 wDmg 死项修复：c6-dmgfix 基座腿就绪（2026-09-13，用户拍板「先做」）
 
-**机制定案（代码核验，DECISIONS §2026-09-13-reward-wdmg-dead-term）**：玩家非致命命中推
+**机制定案（代码核验，DECISIONS §2026-09-13-reward-wdmg-dead-term · 全文 → 本文件 §33）**：玩家非致命命中推
 `player_damage`（累计 `playerDamageTaken`）、致命命中推 `player_hit`（`playerHits++`；
 另一触发 = 3★ 星盾消耗，本族课程不可达）⇒ **1 命课程 `playerHits` 恒等于败局指示器**
 （实测败局分布 {1:110, 2:1}）。`- wDmg*playerHits` 因此是死项：零挨打信息 + 与
@@ -1193,6 +1193,505 @@ it30 vs bc，逐局证据 `tmp/c4chip03-it30-probe.jsonl`）：
 + McNemar 翻盘 32 局的「在动但净零」读数，到 200 局口径收敛为「dmg 显著降、胜率平」；
 小效应判据必须配大 n 配对 + 分桶，否则会在 it10 误判为「零信号」。
 
+---
+
+---
+
+
+## §33 决策正文归档（搬自 `DECISIONS.md`，2026-09-23）
+
+> 2026-09-23 把 `DECISIONS.md` 里这些条目的**正文全文**搬到这里（索引行与编号仍留在
+> `DECISIONS.md` —— 编号永不重排）。锚点 = `### §<旧编号>`。
+
+### §2026-09-10-goalnn-rleval（2026-09-10，plan/rl-eval-system.md P0–P4 自主实施）
+
+- **背景**：跨课程 RL 评估从人工翻日志变为自动账本。P0 数据底座/入账/字段贯通、P1 阶梯+God 透传、
+  P2 批次派发、P3 统计/哨兵/网页、P4 回填验收工具链一次落地；T0.6/T1.3/P4 实测需集群+活腿，标 TBD(标定)。
+- **备选与否决**：扩 codehash-files.txt 纳 gameplay 集 —— 否，升级波前科+两套生命周期，另立 engine_epoch
+  （表与配方单源 codehash-files.ts 集内文件，TS/Python 双语指纹已对拍一致；**2026-09-17 撤销**——见
+  §2026-09-17-goalnn-unified-node-gate：gameplay 集已并入 codehash-files.txt，epoch 收敛为 `sha256(codeHash)[0:16]`）；训练循环内改 A 层语料轮转 —— 否，
+  A 层钉死 EVAL_SEEDS 是历史可比基石，B 层 16 段轮转（§11-4）；TS 重写 fetch_task —— 否，双语协议维护翻倍，
+  执行侧走 Python 复用原语；阶梯 max_ticks 沿 §4.2 例 2400 —— 否，实测 god 在 s1 仅 6 杀被截断，改 12000 对齐训练口径。
+- **决定**：B/C 节点门 engine_epoch 严格拒派，A 层过渡期旧 agent 记日志放行（舰队升级完收紧）；W1 入账走控制台
+  read-through（训练循环零改动）；A/B 按 eval_on_round 确定性分配；agent taskKey 无 policy 分量 ←→
+  iterId 命名空间隔离 god/nn（不动节点缓存键，避升级波外负担）。
+- **违反后果**：跨 policy 串键（同 iterId 混 god/nn）、stale 节点产出异构 gameplay 仍过门、2400 截断压胜率抬超时门。
+
+---
+
+### §2026-09-11-c6-review-disposition（2026-09-11，§12 复盘评审的处置：逐条核数据，非照单全收）
+
+- **背景**：用户转来一份对 `plan/feasibility-map.md` §12（c6 复盘）的评审，要求谨慎评估、
+  充分论证。评审指认三处事实错误（F1 kickstart 机制、F2 it50 口径、F3 R1 设施状态）、
+  三点诊断偏漏、以及"R 清单缺执行顺序"这一最大缺口。
+- **核实方法**：一律回到盘面与代码——`tmp/c6-margin/{training_log,eval_log}.jsonl`、
+  `remote-jobs/*/manifest.json`、`rl/reward_library.reward_from_spec`（真实公式而非笔算）。
+- **接受（已改文档/配置）**：① D10 单变量失真（c6 注释写"单变量=敌数"，但 bc 同时
+  从 c4-it140 换成 c5-it40）；② D11 无梯度假说链（稀疏通关+廉价死亡+时间税 → terminal
+  主导 → PPO 只能学"更快结束"）；③ `§12.3.1` Phase 0–4 执行顺序 + R3/R4/R5 互斥；
+  ④ ADVANCE 加 effect size ≥+5pp；⑤ 预算拆"有效训练 ≥2h"与"事故熔断"两件事；
+  ⑥ R2 依赖 R9；⑦ R4 准入加测学生零样本；⑧ verdict 从"零学习"收敛为
+  "当前定价下无存活梯度"；⑨ it50 从 eval 全表剔除。
+- **部分接受（评审数字不准、方向对）**：F2 说 it50 是"105 局/31.4%"——磁盘是
+  **100 局/33 胜**（另有 4 条 `games=0/dropped=100` 作废 summary），但"该点采集于事故中、
+  不能当第 10 点"成立，全表回到 9 点均值 24.8。F1 说 kickstart"it49 仍活跃"——爬升的是
+  **KL(π‖BC) 距离**（0.0041→0.1453），惩罚项 = kk×KL 中 kk = 0.5^(it−1)，**it10 后 ≈0**；
+  但旧版"ks 衰减到 0.01"确是量纲错误，已按两条轨迹分别重写。
+- **否决（有实测依据）**：① 评审建议 R3 同步抬 `lives_exhausted` —— 本腿速死已 −2.33
+  对全歼 −26.78，再抬只放大 terminal 主导（D5 方差来源）且构成双变量，留 R5 单独腿；
+  ② 评审说 R7"先 600 是加压"——实测远端 PPO 中位 **70s**@150 局（rollout 32s），
+  ×4 ≈4.7min ≪ 1800s 超时，c6 的 it50 是**隧道不可达**而非 payload 过大（前 49 轮同尺寸
+  全部成功）。
+- **过时**：F3 称 R1 求值器/守卫未接线 —— 已于 1380b6e 落地；但"per-tick 止损恒 False 是
+  设计如此"的指正成立，课程止损改由 gates 承担，不再动 `stop_loss_hit`。
+- **配置随之改动**：`c6b-margin.jsonc` 定位为 **Phase 1 探针腿** → `iters=20`、
+  `max_hours=4`、`est_iter_min=8`；头注释写明"R3+R7 双变量，结论不可拆"，bc 不换。
+- **评审建议落码（2026-09-11 第二批）**：不止改文档——① `wins_mastery` 加
+  `min_gain_pp`（effect size，参照 `GatesSpec.baseline_win_rate` 零样本起点）与
+  `require_rising`（窗口斜率 ≥0，"≥3 点同向"机器化）；② `GatesSpec.min_train_hours`
+  （ADVANCE 前置：有效训练不足 → HOLD）；③ 新增 kind **`duty`**（G13 事故熔断：
+  `Σ ppo_sec / 墙钟 < min_train_frac` → REMEDIATE；分子跨重启从 iteration 账本重算，
+  事故轮走 iter_error 不入分子、入分母——占空比下降正是想要的语义）。
+  c6b 的 G1 配 5pp+同向、新增 G13 duty(0.35)、`min_train_hours=2.0`、
+  `baseline_win_rate=0.26`（⚠ 开腿前须重测回填，改值 = course_fp 变 = 新实验）。
+- **2026-09-11 后续（dated note）**：`min_train_hours` 已**移除**（字段 + 求值逻辑 +
+  测试 + 课程键全部清理），改由 `GatesSpec.min_train_samples`（Σ samples×epochs）承担
+  ADVANCE 的证据充分性判定。原因：远端模式的 `ppo_sec` 是往返墙钟（含打包上传/排队/
+  下载），排队越久越"达标"，且本地采样期间云端空转——照烧 Kaggle 配额——它看不见；
+  且 c6b 的 20 轮上限（Σppo ≈1.5h）根本够不到 2.0h，该门在本腿物理不可达。
+  同期 `train_sec` 改用云端自报的真训练秒 `ppo_cloud_sec`，G13 duty 的分子随之更准。
+- **违反后果**：不查数据照单全收会把 105/31.4% 这类错数字写进复盘；把 R3/R4/R5 混在
+  一条腿里开跑则违反单变量纪律，下一腿仍无法归因。
+
+---
+
+### §2026-09-11-c4dodge-course（2026-09-11，用户拍板：c4 残血/闪避后继腿，wChip 单变量 0.005→0.02）
+
+- **背景**：c4-margin.it140（c4 上 72%）零样本 c5/c6 = 39%/18%；c5/c6 平台期的直接死因是
+  无闪避——胜局掉血中位 144（剩 119/263 ≈45% 血），败局掉血中位 216–228（≈3 发快弹磨死），
+  c6 连胜局都挨 200 血（margin 归零）。c5/c6/c6b 三腿已证"该关形态无梯度"，问题不在定价在
+  生存技能，而 c4 是唯一可教闪避的练兵场（已能清场，才有余力学"赢得干净"）。
+- **备选与否决**：再练 c5 —— 否，74 轮/14 点已充分表征为平台，且 reward 里没有闪避信号
+  （wChip 0.005 太小、wDmg 只计死亡、wTick 0.01 罚多活），续跑是负 ROI；c6b 只降 wTick 不
+  动 wChip → "多活不再是负债、闪避仍不赚钱"，正好解释其无效；R5（1→2 命）—— 否，是方差
+  控制不是闪避本身，留作后续。
+- **决定**：新建 `nn-training/curricula/c4-dodge.jsonc`（派生 c4-margin，单变量 = wChip
+  0.005→0.02，其余学习侧全锁；bc = c4-margin.it140；iters=160 + max_hours=10）。闪避目标 =
+  wChip 抬到"挨 144 血 ≈1 个击杀"开始值钱。门：机器 catalog 无 margin 类，故 G1 胜率轨
+  （池化 3 点 ≥77.5%）作 ADVANCE 代理 + G2/G7 防苟活 + G4/G5/G13 护栏，margin 门
+  （胜局掉血中位 <120，超老师一档；God 同语料实测 68%/144）留人读复核。**教师基线重测**：
+  in-loop 语料 = EVAL_SEEDS 860001-860100@stage2000（非 §2 的 seeds 0-99），God = 68/100
+  （旧 64 不可比，c6b 教训）。开腿前先跑 3 轮看 G13 duty 与 ppo_sec。
+- **违反后果**：任何人把 c4-dodge 的 wTick 一起改掉（c6b 已证 wTick 单测无效）或把 ADVANCE
+  判据只放胜率不等人读 margin，都会污染"wChip 教闪避"这一单变量归因；结业后必须做 c5/c6
+  零样本转移验证（残血可转移的唯一证明）。
+- **补记（R7 加样本量，13:30）**：用户拍板 GPU 余粮充足，`seed_rotate` 150→600（次变量）。
+  理由：①弱信号腿吃梯度质量（600 局/轮 advantage 噪声小）；②固定开销摊薄（同 2.1 万局
+  ≈4h vs 7h，省 ~40% 墙钟）；③R7 有 c6b 中性前科（600 vs 150 结局相同），归因仍落 wChip。
+  `eval_every` 5→3（测量侧）、`min_train_samples` 2M→4M（600 局下 2M 只挡 7 轮）。已声明
+  双变量。**实测踩坑**：腿 13:16 以旧文件（150 局）启动，it1-4 后 G13 duty=0.31 设计内停车
+  （150 局/轮 ppo_cloud_sec 太小撑不起 0.35 占空比）——600 局顺带解决 duty（~130s/350s≈0.37）。
+  console cloud-resume + start 重启后已按 600 续跑（it4 权重保留，150 局 4 轮有效数据作废
+  不可惜）。
+- **补记（转移阴性 + 停机轴修正，17:30）**：① 用 it18/21/30/33 跑 c5/c6 零样本转移——
+  **阴性**：胜率 c5 34–44%（基线 39）、c6 6–20%（基线 18）全部平，c5 胜局掉血不降反升
+  （128→144/158/172）——"残血→c5/c6 余地"假说被证伪。且在场敌数上限=4（MAX_ENEMIES_ALIVE），
+  c5/c6 难在**总清场队列 5→6 杀**（拖长暴露 25–50%），不是密度；c4 的 144→100 是节奏红利
+  （胜局 tick 1341→1231）非可泛化闪避，节奏不转移（c5 平均 tick 不降反升）。
+  ② **停机轴错误修正**：c4-dodge 目标=ticks/hp，但门系统趋势源无这两项，我原先 G1/G4
+  锚在 win_rate/kills_mean → G4 以错误指标判平台停车。修正 = 删 G1/G4，skill_floor 不能
+  休眠（§3.3）故 G2 也删（防苟活条件保留人读 DoD），仅留 G5/G7/G9/G13 护栏；毕业=人读
+  margin DoD（掉血<120 已稳定达标 6 点）。教训：**margin 腿的门必须锚 margin 轴，
+  门系统缺该轴时宁可不配机器 ADVANCE，也不要用 win_rate 当代理**。
+
+---
+
+### §2026-09-12-c5-gae（2026-09-12，用户指令：先建 c5-gae，c5-tick 继续跑）
+
+- **背景**：c5-tick（wTick 0.01→0.003 单变量）it20 判一级门 FAIL：value loss 纹丝不动（~0.75，
+  目标 ≤0.65），eval 32/43/47/35 无趋势——**"wTick 方差主导 ⇒ value 头不 fit"被自己数据证伪**
+  （降 57%→10% 方差占比后 value 不动；熵稳定 0.49 也否定了"value 欠拟合 ⇒ 熵失控"的链条，
+  熵失控是 c5-ent 的 ent_coef=0.05 吹出来的）。按预注册转进 λ 轴。
+- **备选与否决**：停 c5-tick —— 用户否（继续跑着）；同轮再试 wTick=0 或 wChip 抬升 —— 否，
+  单变量纪律，c5-tick 还没跑完；直接改 normalize_ret —— 否，变量太多。
+- **决定**：新建 `nn-training/curricula/c5-gae.jsonc`（c5-margin 派生，唯一变量 lam 0.99→0.95，
+  wTick 锁 0.01 不回继承 c5-tick；kl_coef 末段 0.03 护栏非变量；不写 ent_coef；bc=c4-margin.it140；
+  80 轮/12h；无 gates 块）。诚实声明：λ 只测"advantage 方差 ↓ ⇒ 策略动起来"，不声称救 value 头。
+  判据：配对胜率 >39%（起点）+ McNemar p<0.05 为主；value/entropy 作参考。
+- **违反后果**：若 c5-gae 又顺手改 wTick/ent_coef/normalize_ret，λ 的归因被污染；若把 value loss
+  当主判据，会重蹈 c5-tick"假说与数据不符"的覆辙——value 欠拟合的成因在关卡随机结构，
+  不是任何单一超参能救的。
+
+---
+
+### §2026-09-12-c5-gae-finale（2026-09-12，λ 修复 160 轮显著破平台；c6 转移稳定）
+
+- **c5-gae 终判（it160 收官）**：λ=0.95 修好 value 头后，160 轮配对语料（seeds 0-99 vs
+  起点 39%）**it145=57%（2p=0.010）/ it160=55%（2p=0.023）——统计显著 +16-18pp**，全项目
+  第一条 hard 5 敌关显著爬升腿。战斗质量全面升级（击杀 3.15→3.7+、被击 60→42-44）。in-loop
+  中枢 ~40%→~44-45%（it125 53% 是尖峰）。机制全程健康（value 0.50-0.62、熵稳定 0.33-0.40）。
+  全轨：腿初 28-37% → 中段 40-52% → 终局 55-57%。此前所有"c5 平台"判断 = 机制坏+训练不足。
+- **c5→c6 转移（稳定弱阳性）**：c5-gae it100/145/160 零样本 c6 = 29/27/23% vs 基线 18%
+  （池化不一致对 72:47，2p=0.027）；击杀 2.64→3.34 大涨但收不了 6 敌关。零样本 ~26% ≈
+  c6b 直接训 20 轮的 22%——强 c5 执行器跨关能力 ≈ c6 自己训一点，卡点全在"6 敌收关"。
+- **道具（pickup）缺口分析（任务口径，教师只作参考 §0.2）**：c5 上平坦不是缺陷的判据
+  = 任务目标而非教师水平；c6 上学生 0.82/局（God 参考 1.26）未跟上道具密度（c5 0.88 → c6
+  0.82 反降）。"道具→star→击杀吞吐→破 c6/c7/c8 清场瓶颈"任务级假设成立 ⇒ wPickup 作为
+  **c6 基线腿之后**的单变量（不混进 c6 腿的 bc/λ）。
+- **下一条腿**：`c6-gae`（c6-margin 派生：bc=c5-gae.it160、λ=0.95、wPickup=1.5 锁定、
+  seed_rotate 150、无 gates 块；起点基线 23%）。问题：机制修复后 c6 能否从 23% 爬 +
+  策略是否自发多捡。
+
+---
+
+### §2026-09-13-reward-wdmg-dead-term（2026-09-13，wDmg 死项修复：击杀/承伤/死亡语义各归其位）
+
+- **机制（代码核验）**：`src/game/SimulationCombat.ts:599` 口径下，玩家**非致命**命中推
+  `player_damage`（累计入 `playerDamageTaken`），**致命**命中推 `player_hit`（`playerHits++`；
+  另一触发 = 3★ 星盾消耗，本族课程 level=0 起步不可达）。⇒ **1 命课程里 `playerHits` 恒等于
+  败局指示器**（胜局 0 / 败局 1，c6 实测败局分布 {1:110, 2:1}）。
+- **判决**：reward 里的 `- wDmg*playerHits` 是**死项**——不承载挨打信息、与
+  `terminal.lives_exhausted=-1.0` 重复扣败局分（败局合计 −2）、且伪装成「挨打惩罚」
+  （历史上对 wDmg 的任何调参实际都是在调死刑）。修复 = **新课程删除该项与 `params.wDmg`**；
+  承伤定价唯一归 `wChip*playerDamageTaken`，死亡定价唯一归 `terminal.lives_exhausted`。
+  历史课程**不回改**（死项是每败局常数 −1，只平移败局回报、不改局内 credit assignment 时序，
+  已收官结论仍成立）；自本条起新课程模板不再含 wDmg。基座课程 = `c6-dmgfix.jsonc`
+  （由 c6-pickup 派生，单变量删死项，wChip 保持 0.005，bc=c6-pickup.it35，iters=60，eval 200）。
+- **后果**：此后任何课程若再引用 `playerHits` 作「承伤」语义 = 违反本条；调「挨打痛感」
+  只允许动 `wChip`（或后续承伤项），调「死刑」只允许动 `terminal.lives_exhausted`。
+
+---
+
+### §2026-09-15-goalnn-xn-absorb（2026-09-15，用户拍板 B 案）
+
+- **背景**：同 count 三套任务定义并存（v2 cN / 工厂 ladder-cNN / 手工 xN+arenaN），
+  数字不可比、维护×3。工厂输出跑不起来：v2 残留奖励（wTick/wPickup/wStuck，
+  codex 明禁）+ 单 ab 循环零类型覆盖 + BC 权重文件不存在——xN 是等不起才无尘室重造。
+- **备选与否决**：A（xN 转正、工厂废弃）—— 否，I3 自动生成是立项基建；
+  C（长期分工）—— 否，数字永不对账，等于把失血合法化。
+- **决定**：工厂模板吸收 xN 语义——c01-c03 多变体（C(4,1/2/3)=4/6/4 关）+
+  干净奖励（与 x2/x3-start 逐字同构）；c04+ v2 词干逐字节不动；
+  seed_rotate 保持 600（xN 的 240 不吸收）；ladder-c02/c03 与 arena2/3 逐关
+  同形由单测钉死；xN 转试点存档（权重链保留，探针表头仍住 xN 文件，JSON 无注释位）。
+- **违反后果**：再手造第四套任务定义 ⇒ 对账地狱；改 c04+ 奖励不经单独立项 ⇒
+  17 级语义漂移无人察觉。遗留债：c04+ v2 残留奖励、BC 腿权重缺失、工厂探针表头无位。
+- **追加（2026-09-15）：arena2/arena3 已退役删除**（与 ladder-c02/c03 除名字外
+  逐字节同、顺序一致；x2-start/x3-start/x3-power 的 `level` 已切过去，stage ID
+  段不变；`test_arena_retired_single_source` 锁死不再复活；arena2-acbc 是偏科
+  子集、无工厂等价物，保留）。
+
+---
+
+### §2026-09-15-goalnn-x3-power-negative（2026-09-15，x3-power 判负派生的三条口径令：判读禁令 / transitions=samples / wChip 破规程序）
+
+- **背景**：含 power 关恒差 15-20pp 被归因「伤害摊薄零代价」，x3-power 用**杀/中信用比**
+  陡峭化（wKill 3.0→4.0 / wHit 0.3→0.15，即 10:1→27:1）单变量代理 30 轮。终局同批配对
+  （池外种子 400000-400199，四关各 200）：**553/800 = 69.125% vs 基线 576/800 = 72.00%**，
+  pooled **Δ=−2.875pp**，McNemar 单侧 p=0.9998（双侧 p=0.0011，净 −3.35σ），pd=5.9%
+  ⇒ 判线失败、**判负**。分关/伴随量/事件账全文在 `docs/nn/experiments.md` §4。
+- **本条目立的是该腿派生的三条口径/程序（实验记录本身不进本文件）**：
+  1. **判读禁令**：KL it30=0.00213（`kl_cap` 本路径不接线，见 §2026-09-15-goalnn-kl-cap-unwired）⇒ 结论的**唯一合法写法**是
+     「**梯度无方向 / 执行瓶颈**」（指向 metrics v6，分敌种命中列 TS+Python 全链）；
+     **禁**写「信用比无效」（须 KL≥0.01 而 Δ≈0 才成立）与「信用比有害」
+     （单腿 −2.9pp 可来自起点游走 + 目标关噪声，且四关同降 ≠ 因果）。
+  2. **量纲令：`transitions = samples`**（`rl/resume.py::settled_stage_totals` 自声明「nSamples
+     之和」，ticks 只是 clocks，K=10 降采样）。一切「X 万 transitions」规划按 **samples/局 ≈ 97**
+     重算（本腿实测 samples/轮均值 23343 ≈ **2.33 万 transitions/轮**）；旧「23.5 万 transitions/轮」
+     = ticks，**10×，作废**（c4-dodge 的「66 万+」同理 ≈6.6 万）。同错已蔓延四处
+     （`curricula/x3-start.jsonc:66`、`_example-custom-stage.jsonc:77`、
+     `plan/dynamic-rollout-volume.plan.md:26`、`rl/volume_waves.py` 分子 samples 配分母
+     `est_ticks_per_game`）⇒ 单独立项修（缺陷单 T9，钉「600000/4/980 语义」单测）。
+  3. **wChip 生存腿程序占位（批准后激活）**：wChip 上 1 命早期关**破** roadmap N3
+     （「c01-c03 承伤基数极小不上 wChip」，§5.3 表 c01 行同引 R5）；实测局均 dmg ~97–124
+     已证伪「基数极小」前提，且败局死因正是挨打（败 dmg≈196 vs 胜≈94）。**激活三者缺一不可**：
+     用户明示批准 + 本条破规条款落地 + 单变量课程（`wChip=k/97`，k∈{0, 0.5, 1.0}→{0, 0.005, 0.010}，
+      每臂 30 轮，范围仅早期关；c4 的 0.03 翻车案在前故零头起步）。**未获批前本占位不生效**
+      （勿据此开腿）。
+      **已激活（2026-09-16）**：用户明示批准开课 T6，三门已齐（T3 门控过＋批准＋本条）。
+      课程 `nn-training/curricula/x3-chip-k{0,05,10}.jsonc`（wChip＝k/97，k∈{0,0.5,1.0}→
+      {0,0.005,0.010}，相对 x3-power 唯一训练变量＝奖励加项；同 bc/同 ladder-c03/
+      同日程；verdict 共用冻结基线 576/800）。破规范围仅早期关 ladder-c03。
+- **三问门（通过）**：① 被否决备选——见下；② 未来再犯——量纲错**已实际蔓延四处**（下一腿
+  照抄即 10× 缺口，volume_waves 已跑出「兑现 37% 触顶」用例），判读外推会错误回滚 x2/x3 全系
+  奖励语义；③ 无法就近表达——跨 4 个文件的量纲口径 + 一条铁律级破规程序，无单一代码位置承载。
+- **被否决的备选**：① 把判负写成「信用比有害」并回滚奖励语义 —— 否，单腿显著≠因果，预注册
+  只允许判「梯度无方向」；② 继续调 wKill/wHit 剂量 —— 否（同剂量轴第二腿，先做 metrics v6）；
+  ③ wChip 直接开腿、不立案 —— 否，破 N3/R5 须留可追溯破规记录，审批是人的动作。
+- **违反后果**：按 ticks 口径规划采集量 ⇒ 下一腿照抄 10× 误差、配额缺口 90%；把判负外推成
+  「信用比有害」⇒ 错误回滚奖励语义、丢掉「执行瓶颈」这一真信号；未立案开 wChip ⇒
+  N3/R5 被静默架空，日后无从追溯何时因何破了哪条规则。
+
+---
+
+### §2026-09-15-goalnn-kl-cap-unwired（2026-09-15，x3-step 评审 P0-1：串行/远端路径 kl_cap 不接线）
+
+- **背景**：`ppo_schedule` 的 `kl_cap` 在 per-tick **remote/serial** 执行路径**不接线**——
+  `ppo/engine.py::ppo_update` 无形参；`remote/worker.py` 只读 `kl_coef`；全仓消费者仅
+  `rl/stream.py`（stream 波次闸）与 manifest 打包。x3 线 `stream=0`（remote 强制）⇒
+  字段写了也不生效。`p4-fast.jsonc` 已写对；但 x3-step / x3-power 结算 / `docs/nn/experiments.md` §4、`docs/nn/remote-transport.md` §2.1 仍把「kl_cap 从未咬合 / 回落兜底」当成生效护栏叙事。
+- **备选与否决**：A 继续当护栏写 —— 否，机制假、后腿会按「失去护栏」解释第二段；
+  B 引擎接线硬顶 —— 否，属新训练变量/算法变更，须另立项，本条只钉口径；
+  C 只改课程注释 —— 否，跨文件反复误用，须 DECISIONS 禁令。
+- **决定**：**禁**在串行/远端课程、结算、progress 中把 `kl_cap` 写成生效硬顶或「咬合」；
+  本路径生效旋钮只有 `kl_coef`（软惩罚）+ `lr` + F4 `KL_BREAK`。stream 路径才读
+  `args._kl_cap` / `policy.streamKlCap`。x3-power「kl_cap 从未咬合」改读为
+  **「该键本路径未接线，谈不上咬合；KL≈0.002 由 kl_coef+小步长决定」**。
+  判负八字判决（梯度无方向/执行瓶颈）本身不受影响。
+- **违反后果**：后腿把「第二段无 kl_cap」当成第二变量或「失去紧护栏」⇒ 错误解释 KL
+  不升的原因，继续烧 2–4h 腿；或反向去「修」一个根本没接线的键。
+
+---
+
+### §2026-09-15-goalnn-r9-default-abort（2026-09-15，T7：远端连败默认 ABORT，降级本机 opt-in）
+
+- **背景**：x3-power it1 远端连败触发 R9 自动降级 → `None.load_episodes` ×3（remote
+  模式 D2 把 `ppo_backend` 置 None，降级只改 `args.ppo` 未建栈）。用户拍板：**不**默认
+  静默降级到本机；启动界面提供开关，**默认关**。
+- **备选与否决**：A 只修 None bug 仍默认降级 3 —— 否，远端失败应响亮停腿，静默切慢速
+  本机会把事故吞掉；B 维持旧默认 —— 否，已打穿过一次；C 直接删 R9 —— 否，opt-in
+  仍有价值（长腿/无值守）。
+- **决定**：`--remote-degrade-after` **默认 0**（连败 3 次写 `gate_verdict: ABORT` 停腿）。
+  N>0 为显式 opt-in：控制台启动弹窗「降级本机」（localStorage + registry 复现）→
+  `--remote-degrade-after 3`；降级前必调 `loop_core._ensure_local_ppo_stack()` 懒加载
+  torch/model/opt。
+- **违反后果**：再默认降级 ⇒ 静默切慢速本机 + 无栈时 None crash；不建栈就改 ppo=local
+  ⇒ x3-power it1 事故复现。
+
+---
+
+### §2026-09-16-goalnn-x3-step-negative（2026-09-16，x3-step 授权照跑判负：工厂复合第二段禁作可测性治疗）
+
+- **背景**：x3-step 在 HOLD 下经用户授权按原工厂第二段（`kl_coef 0.03 + lr 5e-5` 复合处理）
+  跑满 30 轮；it21–30 KL 仅 1.286× x3-power 同窗，pd=5.5%（详账 `docs/nn/experiments.md` §6）。
+- **备选与否决**：把本腿读成「任何放缰都无效」—— 否，重设计单旋钮 A/B 未测；把本腿读成
+  「信用比有害/有益」—— 否，KL≈0.002 下奖励侧任何结论都不可测；继续在本复合段加轮数 ——
+  否，与 x3-power 判负同构，测不出任何奖励重定价。
+- **决定**：① 工厂复合第二段（放缰 + 降 lr 同施）**禁**再用作可测性治疗；可测性证明只认
+  单旋钮 A/B 或 pd/指纹主端点。② `Δ≤pd` 为判决硬约束：pd<5% 时 +5pp 判线不可观测，
+  verdict 可按先例显式注销。
+- **三问门（通过）**：① 被否决备选见上；② 未来再犯 —— HOLD 禁令下本腿仍被跑起来，
+  「松一下缰绳试试」的诱惑持续存在，且 `Δ>0` 式无阈值判据会反复出现；③ 无法就近表达 ——
+  禁令横跨课程 / 评审 / 训练三处，无单一落点。
+- **违反后果**：再跑复合段 ⇒ 2–4h 换回 1.3× KL 与噪声内胜率；用胜率点估计判奖励好坏 ⇒
+  x2-acbc 式误判重演。
+
+---
+
+### §2026-09-16-goalnn-run-noise-floor（2026-09-16，T6 四臂定案：run 噪声地板规则＋wChip 判死）
+
+- **背景**：T6 三剂量＋真复刻 k0 同批配对：69.1/72.1/69.8/71.1；同配方复刻对
+  （x3-power/k0）差 2.0pp 且配对显著（p=0.028）⇒ run sd≈1.4–1.5pp；
+  k05−k0 仅 +1.0pp（null）。详账 `docs/nn/experiments.md` §8。
+- **决定**：① **run 噪声地板规则**：单 run 总 SE≈2.2pp（对局 1.6＋run 1.5）；
+  声称效应 <2pp 须 ≥2 独立 run（跨 run 预注册 pooling），否则结算标「未过噪声地板」；
+  配对 McNemar/配对 t 只消对局噪声，禁做跨 run 因果断言（纯噪声对 shots t=−2.46
+  的 demo）。现有 +5pp 门线安全（5＞2×1.5＋余量），不动。
+  ② **wChip 可耐受剂量判死**：dmg/kill 四臂无方向、指纹复印、T6 字面叙事证伪；
+  不再开 chip 腿（c4-0.03 前科并案）。③ §46/§50 判负加幅度 caveat
+  （未经重复 run 验证），结论不动（详 §52）。
+- **三问门（通过）**：① 被否决备选见 §52（单调 H1/倒 U/第二半裂）；② 未来再犯 ——
+  单 run p<0.05 的因果冲动每条腿都会出现，且"非单调⇒噪声"偷运单调假设；
+  ③ 无法就近表达 —— 横跨 verdict 口径/门禁数学/课程 DoD，无单一落点。
+- **违反后果**：单 run ±3pp 定方向 ⇒ 复刻即翻案（k05 案）；改旧账字 ⇒ 账本失信；
+  带着旧 tie-break 进 T5 ⇒ 标签硬币重演。
+
+---
+
+### §2026-09-16-goalnn-t5-credit-negative（2026-09-16，T5双run一致判负⇒奖励重定价路线关闭）
+
+- **背景**：power 2×信用双 run 主端点 Δ−0.08/−0.03（判线 +0.7），转化率三臂 49.6%，
+  pd 全灰度 7–9%；详账 `docs/nn/experiments.md` §9。
+- **备选与否决**：加剂量到 3× —— 否，灰度带按冻结表不触发加剂量且方向为负；
+  拿单 run p / 灰度 pd 断言 —— 否，run 噪声地板规则
+  （§2026-09-16-goalnn-run-noise-floor）；再调奖励其他项 —— 否，七 run KL 窄带
+  0.0018–0.0027 证明位移不足、非选错项。
+- **决定**：① 奖励侧重定价路线在 `ladder-c03` 关闭（幅度/方向/粒度均已证伪，
+  不再开奖励腿）。② pd 尺修正：本分布 pd≈8% 为噪声地板，5–10% 灰度带无判别力、
+  不单独判决。③ 下一腿只认单旋钮放缰 A（零奖励改动；产出＝KL≥0.005＋pd 过地板），
+  否则转执行器分支。
+- **三问门（通过）**：① 被否决备选见上；② 未来再犯 —— “信用不够再加价 / 灰度 pd
+  读成动了”每条腿都会出现；③ 无法就近表达 —— 横跨课程 verdict 口径 / 门禁数学 /
+  后继路线，无单一落点。
+- **违反后果**：再开奖励腿 ⇒ 2–4h 换复印零；拿灰度 pd 或单 run 显著断言 ⇒ k05 翻案重演。
+
+---
+
+### §2026-09-19-evalboard-verdict-batch（2026-09-19，判决批走 B 层：语料注册表 + 多 ckpt 批类型（中方案 P2））
+
+- **背景**：T5 判决语料 = 课程关卡文件 stages[] × **池外** seed 段（400600+，与训练池
+  860001-860200 及已用池外段 400000/400200 不相交，§15.1 轮转纪律）× ≥2 个 ckpt
+  **同种子逐局配对**（§3.5④ 不许事后求交集）。执行层（`mode=eval` + stageJson +
+  lives/level 覆盖 + `export-eval-game.ts`）本来就在复用，缺的是**驱动器**：A 层
+  （`EvalDispatcher`）语料写死在课程配置、单权重、无外部语料入口；B 层批键 =
+  `(course, rung_from, ckpt)` ⇒ 一批一个 ckpt，且 ladder rung 承载「arena 阶梯几何 +
+  段推进」语义。用户 2026-09-19 拍板「中方案」并选定两个分叉：**新建语料注册表** +
+  **新增判决批类型**（见 `docs/evalboard-phase0-census.md` §3/§6）。
+- **备选与否决**：① 给 A 层加 `--seed0/--games/多 --weights` —— 否，判决语料混装进
+  训练课程配置会破坏「轮转键控」纪律（判决与日常读数本就该吃不同语料）；② 把语料塞进
+  `ladder.json` 的 rungs —— 否，污染阶梯几何/段推进/去重键/ladder_pos 四处；③ 改造现有
+  批键支持多权重 —— 否，动到 A/B/C 全链去重语义与历史行；④ 判决继续各造临时 JSONL ——
+  否（这就是要修的现状：读数永不沉淀、控制台看不到趋势）。
+- **决定**：① 语料身份独立成注册表 `dashboard/src/evalboard/corpora.json`
+  （`{id, level, seed0, games_per_stage, policy?}`，读/校验/身份派生在 `corpora.ts`，
+  坏行**响亮失败**）；② 新批类型 `kind='verdict'`（`trigger='verdict'`、`corpus`、
+  `ckpts[]`），**`course/rung_from/ckpt` 置空串**——键空间分离靠 `kind` 判别，不用假 course
+  去骗旧读方的键；③ 台账**单写者**不变：`verdict-cli.ts` 只往 `requests.jsonl` 追加
+  `kind='verdict'` 请求，物化由 runner/`kick-once` 完成；④ unit = 一个 (ckpt × 关卡)，
+  **权重在 unit 上**（批次级无权重 ⇒ 多 ckpt 批成立），每 ckpt 每关跑同一 seed 段；
+  ⑤ 展开只有一处（`plan_verdict_units` / `units_for_batch`），训练内派发与一次性 kick
+  共用。
+- **违反后果**：语料登记进 rungs ⇒ 阶梯推进/去重/ladder_pos 全按假 rung 走；判决批填假
+  `course` ⇒ 旧读方按 ladder 键匹配，判决行被并进课程读数；unit 不带权重而回落批次级
+  `rl_path` ⇒ 多 ckpt 批实际全跑同一个权重（配对数看着齐、其实是同一策略）；两侧各写一份
+  unit 展开 ⇒ 训练内能用而一次性 kick 跑不了（或将来的漂移）。
+- **落地**：`dashboard/src/evalboard/{corpora.json,corpora.ts,verdict-cli.ts}`、
+  `{batches,requests}.ts`（`kind/corpus/ckpts` + `verdictQueued/verdictCovered`，键 = 语料 id +
+  ckpt **标签序**，顺序敏感）、`kick-once.py`（先 `consume_requests` 再 claim，`units_for_batch`
+  统一展开；同批修其 `ROOT` 少算两层的既有 bug）；`nn-training/rl/batch_eval.py`
+  （`load_corpora/corpus_doc/plan_verdict_units/units_for_batch` + `consume_requests` 判决分支
+  + 单元权重透传）。**同批修两处硬伤**：god 局不 POST 权重且 wver 传 12 位 `key16` ⇒ agent
+  `/v1/task` 按全量 sha 查桶必然 409（现 god 也 POST 占位 `{}` 并把其 sha 当 wver；`key16`
+  仍是行身份/续跑键）；`kick-once.py` 的 `ROOT` 路径算错（2026-09-15 目录迁移遗留）⇒ 脚本
+  一直 import 不到 nn-training。回归：`nn-training/tests/test_verdict_corpus.py`（10 例）+
+  `dashboard/tests/evalboard-corpora.test.ts`（17 例）+ `test_batch_eval_wver.py` +
+  `test_kick_once_paths.py`。验证：一次真判决批 kick（本机 self）行带齐 Phase-0 七列 +
+  真 batch_id；nn-python-gate 1277 绿 · dashboard typecheck + 530 绿 · 根 `bun run check`
+  1875 绿。**未做**：判决读数自动入 store（需显式 `ingest-cli.ts` 一步，属 P3）、控制台发起
+  按钮。
+
+---
+
+### §2026-09-19-x20-snowball（2026-09-19，x20 后继腿：中盘激励，里程碑 bonus 单变量 + god-prefix 否决）
+
+- **背景**：x20 结算（池外 it30 7.5%/6.10杀，无合格终点＋旧能力丢失）＋ 用户假说
+  "通关靠捡道具滚雪球"。证实：it30 池外段通关局 1.22 pu/千tick vs 死亡局 0.64、
+  早期死亡局 0.20（存活归一化仍 2 倍）；早期死亡局 0.12 个/局；凶手四类全有 ⇒
+  开局拾取缺口＋全面中盘续航赤字。线性 wKill 在中盘（5–12杀）是回报洼地。
+- **本腿 thesis（单变量）**：`wMS8/12/16 = 6/9/12` edge-trigger bonus（Φ-diff，
+  数值已验：7→8 跨越精确 +6.0 一次）。坐 EV 不动（到 8 杀概率 0）⇒ 走>莽>坐不变。
+- **证据性否决（不做的理由）**：re-warm——peak it30 落在 it25 降温**之后**，冻结说
+  证伪；加 batch——plateau 在噪声带之上清晰可见，batch 非瓶颈；容量——用户指令不动；
+  gamma/lam——value-loss 不可观测（remote 只回 kl/entropy），不盲调。
+- **god-prefix 中盘开局否决（本条核心）**：agent 已实现一半（export-rl-rollout
+  前缀分支＋回退设计）后叫停并全 revert（git diff 确认零残留）。理由：prefix
+  跳过开局，但缺口恰在开局拾取 —— 学生永远学不到"如何到达中盘"，药下错地方；
+  且代价是热路径＋六文件垂直链＋节点升级波。fallback ① 改为 powered-opening
+  （现成 --player-level，零引擎改动）/wPickup 剂量腿；god-prefix 重提需"到达后
+  转化率瓶颈"的新证据。
+- **§15.5 合规**：reward 语义变化 ⇒ 新实验：fresh `tmp/x20-snowball/` ＋ 本条目 ＋
+  判决段 413000（已查 413000–413999 全空）；命数 tier 未变 ⇒ D11 不触发；
+  c06 回测门按用户指令删除（c07 保留）；bc = it30（池外三选一胜者）。
+- **落地**：`nn-training/curricula/x20-snowball.jsonc`（CourseConfig 校验通过；
+  里程碑 8→12→16→20，分母池外 6.10；pass 门 ≥30% 不动；it40 主检点 kills<7.0 停；
+  超时/换血/横盘/M2 全延续）。开训后填 it0 三件套。
+
+---
+
+### §2026-09-20-eval-prefers-dist（2026-09-20，用户指令：评估慢是原罪，走分布式；`--no-dist` 下不为例）
+
+**背景**：x20-steady 终点判决（`eval-course-ckpt.ts`，800 局）为求"确定性"用了
+`--no-dist`（本机单跑 2.2局/s，约 6 分钟/800 局）。用户纠正：分布式本就能保证
+逐字一致，慢是白付的代价。
+
+**为什么分布式同样逐字一致**：仿真是确定性的（固定步长 + `world.rng`，§2.3）⇒
+同一 `(weights, stage, seed)` 在哪台机器跑都是同一行 JSON；分布式 tail-race /
+duplicate-settle/drop 只是"同一内容的多个拷贝留哪一份"，不改变数值。it0 判决基线
+文档自己就写了"`--no-dist` 跑，与分布式逐字等价"（`plan/x20-floor.plan.md:122`）——
+等价是双向的，只敢用单向是多余的保守。
+
+**定案**：`eval-course-ckpt.ts` 默认即分布式（有 nodes 的 `rl-config.json` 自动进；
+零远端参与时工具自己告警并退回本机 —— 白付代价前会先响）。`--no-dist` 只留给
+"远端不可用"的降级，不作日常选项。
+
+**备选与否决**：
+
+- **判决继续 `--no-dist` 求稳**——否：收益为零（上段已证等价），每 800 局多付数分钟；
+  判决/回测动辄 1600+ 局，慢就是原罪。
+- **为此给评估加确定性回归**——否：确定性已由仿真层不变量 + it0 基线的"逐字等价"
+  实测共同担保，不再为已成立的事加闸。
+
+---
+
+---
+
+### §2026-09-21-goalnn-probe-negative-arm（2026-09-21，用户指令：负向臂——人类每局都给结论，直接用）
+
+- **背景**：开局探针原口径是「存在性证明」：只能判「可动 / 未知」，`无解` band 在聚合时被降级成
+  「未知（人类死无信息）」。于是探针**结构上说不出「这个种子别练了」**，而它唯一要服务的问题正是
+  「杠杆在训练侧还是关卡侧」——一个永远说不出「不」的测量并不是在测量。
+- **备选与否决**：① **K 人复核 + 能力对照局**——否：人类熟练玩家已是关卡难度的唯一尺子
+  （AGENTS §0.2），单次判读即结论，再加一层「谁够格」的仪式只是把已收上来的数据重新解释一遍；
+  ② **固定操作脚本**——否：脚本跑通只能证明「这局能过」（正向），脚本死了推不出「没人能过」，
+  当不了负向臂；③ **God AI / 搜索当裁判**——否：违反「教师不是天花板」（§0.2），且 60 帧动作
+  空间搜不完，不能当证明。
+- **决定**：负向臂**不是新协议**，就是操作员手里已有的 `无解 + 理由` 按钮；聚合改三态，优先级
+  **可解 > 无解 > 未知**（通关是构造性证据，优先于「没找到路」的判读），`无解` 由「未知」改为判
+  **不可解**，并声明它**可被任一后续通关推翻**（同一 seed 后来者覆盖先前者）。
+- **违反后果**：继续把 `无解` 降级成「未知」，训练侧会把「读得出无路」的种子当成可学目标反复烧
+  算力，而探针永远给不出否决。
+
+---
+
+### §2026-09-21-goalnn-probe-multi-course（2026-09-21，用户指令：别把文件名绑死为 x20，以后还有很多关卡要人类探针）
+
+- **背景**：探针原设计一次只服务一门课 —— `Game.probeManifestUrl` 写死 `/probe/x20-opening.json`，
+  `flatten-manifest.ts` 三条路径写死。于是第二门课：链接永远取回 x20 的清单 → `course-mismatch` 被响亮
+  拒绝（**永远进不去**，看起来像链接打错），生成器零参则只会把 x20 的清单重写一遍（新清单不会出现）。
+- **备选与否决**：**一份 index 装所有课程**（一次 fetch 列全部，没有「猜 URL」面）—— 否：它要改已冻结的
+  `ProbeManifest` 契约（解析器/控制器/全部测试/会话包随之动），而探针是开发者工具、一次只判一门课，
+  换来的只是少一次 fetch。
+- **决定**：**一门课一个清单文件**。`?probe=<course>` 决定取 `/probe/<course>.json` —— 名字因此是
+  **URL 片段**：用 `^[a-z0-9][a-z0-9._-]*$` 白名单 + 保留名 `index` 校验（挡掉 `?probe=../../…` 变任意
+  路径 fetch），不合法者在 **fetch 之前**就响亮拒绝。课程表 `public/probe/index.json` 由**扫描
+  `public/probe/` 派生**（`flatten-manifest.ts` 重建），永不手工维护：加一门课 = 生成它的清单，索引
+  自动跟上。生成器参数化 `--games/--level/--out/--index`，默认值 = 原常量（零参行为逐字节不变）。
+- **验证**：临时造第二门课 → 生成 → 索引列出两门 → tick0 校验通过，且 x20 清单逐字节未变；
+  `bun run check`（含 `tools/check-decisions.ts`）绿。
+- **违反后果**：谁再把某门课写回运行时或生成器，第二门课就只剩「像链接打错」的拒绝，而一个 checkout
+  里又只能存在一门课。
+- **更正（同日，用户质疑「为什么要把这些探针局定义放进 git？用完即弃」）**：上条的隐含前提「局表+清单入库」
+  是从 `plan/human-opening-probe.plan.md:37`「构建产物，提交入库」抄来的，**我没质疑它**。实际使用面查清了：
+  这两个文件在 `nn-training/`、`dashboard/` 里**零引用**（纯叶子）；运行时只有 launcher 读清单，`tick0Hash`/
+  `layoutHash` 浏览器根本不读（会话包比的是逐帧 tick-hash 链），`courseSha` 随时可由关文件重算 ⇒ 都不需要
+  版本化；「探过什么」的收据是**会话包 zip**（自带 `(game,stage,seed)` + courseSha + 每局 replay + verdicts）。
+  而代价已经现形：换 seed（最常见的操作）要连带一次提交；那道漂移门在并发 agent 覆盖产物时还把门禁打红一次。
+  **改为**：局表落 `tmp/probe/<course>.games.json`，产物落 gitignore 的 `public/probe/`，提交的输入只剩关文件
+  （本属训练栈）；两条漂移门删除，测试改用 `tests/probe-fixture.ts` 从「关文件 + 规范局表」在内存生成语料
+  （无 golden 文件 ⇒ 无第二真相源）。**实测**：删掉整个 `public/probe/` 后 134 条 probe 用例仍全绿，一条命令
+  即重建且逐字节可重现。选种理由（nn1/nn2/god + note）属**决策记录**，应进 progress 文档而非一次性数据文件。
+
+---
+
+---
+
+### §2026-09-21-god-bc-attractor-basin（2026-09-21，用户纠正 + 取证：God-BC 是陷阱，不是跳板）
+
+**前科（实证，非观点）**：
+
+1. `nn-training/curricula/x1-rebirth.jsonc` 头文件（2026-09-16 实测，2026-09-17 用户订正）：
+   BC 把教师的「先打 power」弄丢（首命中 power 33.3% → 0.5% → 训练后 0.0%）；
+   七条腿 per-iter KL 全锁 0.0018–0.0027，策略被 kl_coef=0.2 **钉在 BC 附近** ⇒
+   结论原文："从零学是唯一能离开「教师吸引域」的路径"。
+2. c 系：God-BC 起步，4 敌关难突破 ⇒ 重开 x 系（用户 2026-09-21 陈述；x1 头文件"纯从零 RL 臂（不蒸馏 God-AI）"即执行）。
+3. x 线监管链（已核）：x1(scratch, kickstart OFF) → x2…x6 → x20-rebirth → floor/steady，
+   kickstart ref 全是上一腿权重 —— x 线历史上**零 God 掺入**（God 只出现过 `--policy god` 参照臂）。
+
+**裁决**：God-BC 初始化/锚定**可以试验，但必须充分论证**（用户原话），论证模板如下，不接受"混一点试试"：
+
+- 先回答：本批 seed 上 God 自己什么水平？（x20 开局桶：God-1命 low 46.9% —— 平庸。蒸馏平庸之前先解释"锚定平庸何用"。）
+- 区分 INIT（永久起点，前科死因）与 anchor（衰减脚手架，未验证但机制不同）：anchor 必须配小 kk_init +
+  快衰减 + held-out 门，三件缺一即按 INIT 处理（= 禁止）。
+- 人类 demo ref 优先于 God ref：35 局人类开局在目标 seed 上全强（35/37 通关），God 在同批上弱 ——
+  强行为锚，弱行为不锚。God-bulk 预训练只在人类 ref 失败 held-out 后作为 fallback 候选，且须先过
+  flaw-audit（God-BC ref 在 held-out 开局上先跑分；≤ God-1命 水平即弃）。
+- 通用门（任何外部锚）：held-out（本任务：剩 ~240 opening seed）跑分 > 现任锚（x20-rebirth.it30），
+  否则不上桌。配方可疑，门不可疑。
+
+**备选与否决**：
+
+- "B 腿证明 God 锚无害"——否（2026-09-21 agent 误述，已撤回）：B 的锚是自家 lineage，无外部先例。
+- "God bulk 打底 + 人类微调"作为默认配方——否：默认配方是**纯人类 ref**；God-bulk 是 fallback，
+  开条件见上（flaw-audit 先行）。顺序不可反（先混后测 = 污染后无法归因）。
 ---
 
 ---

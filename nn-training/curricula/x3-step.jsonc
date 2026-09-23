@@ -20,7 +20,7 @@
 //   manifest 打包。x3 线全部 `stream=0`（remote 强制，`rl/config.py`）⇒ **it1–30 无硬顶**。
 //   本腿真正生效的 KL 治理只有 `kl_coef` 软惩罚 + F4 breaker（`KL_BREAK=0.075` 连 3 轮，
 //   量级差 30 倍，本腿够不着）。`p4-fast.jsonc` 早已写对；本文件与 x3-power/§46/§19.1
-//   的「kl_cap 咬合/回落」表述作废（见 DECISIONS §2026-09-15-goalnn-kl-cap-unwired）。
+//   的「kl_cap 咬合/回落」表述作废（见 DECISIONS §2026-09-15-goalnn-kl-cap-unwired · 全文 → docs/nn/experiments.md §33）。
 // - P0-2 工厂第二段不是「放缰治疗」：x3-start 第二段（同 kl_coef 0.03 / lr 5e-5）
 //   **全 333 轮 max KL = 0.00353**（x3-power 校准段已引），≥0.005 = 0；it41 处无台阶。
 //   且第二段同时把 lr 1.5e-4→5e-5（÷3.3 踩刹车）与 kl_coef ÷6.7 放缰 = **复合处理**。

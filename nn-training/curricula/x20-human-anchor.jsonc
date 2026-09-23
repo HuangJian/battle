@@ -12,7 +12,7 @@
 // 对照：B 终点（it175，判决 low 35.5%）为绝对基线；verdict 走绝对门，不配对
 // （配对对照已死于 C 腿事故；若预算允许，另开 B-配置空跑臂再谈）。
 //
-// ⚠ kickstart 语义（DECISIONS §2026-09-21-god-bc-attractor-basin）：ref = 课程 bc。
+// ⚠ kickstart 语义（DECISIONS §2026-09-21-god-bc-attractor-basin · 全文 → docs/nn/experiments.md §33）：ref = 课程 bc。
 //   本腿 bc = 人类 BC-ref（外部锚，x 线首次）—— God 不出现在任何位置。
 //   kickstart_init 小值开（0.1），快衰减；锚是脚手架，不是天花板。
 

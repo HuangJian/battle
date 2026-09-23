@@ -6,7 +6,7 @@
 //   · 课程文件通过 `"level": "arena4"` 引用本文件；课程**不得**重复声明这四类键
 //     （stages / difficulty / max_ticks / player —— load_course 冲突即 raise）。
 //
-// ── 配置修改分类学（DECISIONS §2026-09-13-level-extraction）───────────────────
+// ── 配置修改分类学（DECISIONS §2026-09-13-level-extraction · 全文 → docs/nn/training-stack.md §25）───────────────────
 //   · **A 关卡/语料身份（本文件 + 课程的 reward/mode/seed_rotate）**：改动 = 语料破裂，
 //     禁止对在跑腿修改；要变 = 派生新关卡/新课程。D14 混训校验以 corpus_fp（本文件
 //     解析结果的语义哈希）为准——文件内注释/格式变动不影响身份。

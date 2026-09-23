@@ -12,7 +12,7 @@
       "row": 12,
     },
   },
-  "max_ticks_rule": "600 * count + 900 — DECISIONS §2026-09-13-goalnn-max-ticks-rule（D7 一次性）",
+  "max_ticks_rule": "600 * count + 900 — DECISIONS §2026-09-13-goalnn-max-ticks-rule · 全文 → docs/nn/training-stack.md §25（D7 一次性）",
   "shard_keep_policy": "keep latest 2 iters per leg; archive graduated weights (.xz 惯例)",
   "gates": null,
   "levels": [

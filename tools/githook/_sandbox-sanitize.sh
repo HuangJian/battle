@@ -3,7 +3,7 @@
 #
 # 用途：pre-commit（tools/githook/pre-commit）与通用 python 启动器
 # （tools/githook/nn-py-safe.sh）必须共享这一份——禁止复制粘贴造成漂移。
-# 决策索引：DECISIONS §2026-09-15-sandbox-precommit-immunity。
+# 决策索引：DECISIONS §2026-09-15-sandbox-precommit-immunity · 全文 → docs/decisions/details/repo-governance.md §2026-09-15-sandbox-precommit-immunity。
 #
 # 机理（2026-09-14 实测 / 2026-09-15 Mimo 再犯）：
 # WorkBuddy / Mimo 类编码 agent 自带 python 运行时 + 「删除保护沙箱」，环境变量随

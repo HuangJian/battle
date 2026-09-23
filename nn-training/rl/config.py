@@ -59,7 +59,7 @@ def read_rl_config_file() -> dict:
     except Exception:
         return {}
 #: 关卡配置目录（nn-training/levels/*.jsonc）——地图/敌人队列/命/星等**环境语义**，
-#: 课程以 `"level": "<name>"` 引用（DECISIONS §2026-09-13-level-extraction）。
+#: 课程以 `"level": "<name>"` 引用（DECISIONS §2026-09-13-level-extraction · 全文 → docs/nn/training-stack.md §25）。
 LEVELS_DIR = Path(__file__).resolve().parent.parent / "levels"
 #: stageJson 查询串上限（评审 LC §4.4）：13×13 grid ~700 字节，4KB 留足余量
 STAGE_JSON_MAX_BYTES = 4096
@@ -1142,7 +1142,7 @@ def load_course(path: str | Path) -> CourseConfig:
 
     `"level": "<name|path>"` 引用关卡文件（levels/*.jsonc）：stages/difficulty/
     max_ticks/player 由关卡文件注入；课程侧显式声明其中任一键 = 配置冲突 raise
-    （关卡 = 环境语义唯一来源，DECISIONS §2026-09-13-level-extraction）。
+    （关卡 = 环境语义唯一来源，DECISIONS §2026-09-13-level-extraction · 全文 → docs/nn/training-stack.md §25）。
     """
     from rl.jsonc import load as _load_jsonc
 
@@ -1190,7 +1190,7 @@ def corpus_identity_fp(course: CourseConfig) -> str:
     `paired_rotate_seed`（配对 rotateSeed，2026-09-21 §2）与 `target_transitions`。
     **刻意排除** iters/max_hours/eval_*/out/traj/bc/optimizer/schedule 等预算、测量、
     路径与优化器键——这些改动不构成语料混入，mid-run 编辑课程不得触发 D14 拒收
-    （DECISIONS §2026-09-13-level-extraction 的配置修改分类学）。哈希**解析后**的值：
+    （DECISIONS §2026-09-13-level-extraction · 全文 → docs/nn/training-stack.md §25 的配置修改分类学）。哈希**解析后**的值：
     内联 stages 与 level 引用同形同指纹；关卡文件内的注释/格式变动不影响身份。
 
     ⚠ schema 必须在内（2026-09-13 补，与 BC 侧 bc_corpus_identity_fp 同一坑）：
@@ -1260,7 +1260,7 @@ def course_from_args(args) -> CourseConfig | None:
     args.course_path = str(p)
     # 启动期冻结课程文件字节：D13 全文快照 / course_fp / shard --course-fp 一律用
     # 冻结字节——mid-run 的热加载编辑（含被拒绝的语料身份改动）永不进云端 payload
-    # （DECISIONS §2026-09-13-hot-reload「不要泄漏到云端」）。
+    # （DECISIONS §2026-09-13-hot-reload · 全文 → docs/nn/training-stack.md §25「不要泄漏到云端」）。
     args.course_frozen_bytes = p.read_bytes()
     return load_course(p)
 

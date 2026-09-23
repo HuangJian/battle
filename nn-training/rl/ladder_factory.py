@@ -5,7 +5,7 @@
   · 几何 = 空场 arena 常量（源 = levels/arena4.jsonc：边界钢环 + 四角 4 出生点 + 中央
     player_spawn；无基地无掩体——用户定案 D3）
   · count / lives / max_ticks 每级参数化；lives：count≤7→1、8-14→2、15-20→3（D1/D2）；
-    max_ticks = 600 × count + 900（终局标准一次性立案，见 DECISIONS §2026-09-13-goalnn-max-ticks-rule）
+    max_ticks = 600 × count + 900（终局标准一次性立案，见 DECISIONS §2026-09-13-goalnn-max-ticks-rule · 全文 → docs/nn/training-stack.md §25）
   · forces 长**恒 20**（断言；spawn 取循环 `enemies[i % len]`，World.ts:501-505，
     count≤20 时与截断等价——ms F4）
   · 掉落规则全阶梯 modern（D9）：bonusEnemyEveryNpawns=4 + score 里程碑掉宝，
@@ -18,7 +18,7 @@
     c05 两档小剂量扫描重标定。c01-c03 承伤基数极小 **不上 wChip**（公式项不出现）
   · **wDmg 全阶梯移除**（N3 定案：1 命下致死命中归 terminal 计价；非致命星盾命中
     待事件子类拆分后再计价）
-  · c01-c03 干净奖励（B 案吸收 xN 试点语义，DECISIONS §2026-09-15-goalnn-xn-absorb）：
+  · c01-c03 干净奖励（B 案吸收 xN 试点语义，DECISIONS §2026-09-15-goalnn-xn-absorb · 全文 → docs/nn/experiments.md §33）：
     公式/params/terminal 与 x2/x3-start 逐字同构（杀/中/过关 + 死亡 terminal）；
     c04+ 沿用 v2 词干（_FORMULA_LEGACY_V2，有意不动，技术债见 DECISIONS）。
   · c01-c03 多变体（B 案）：C(4,1/2/3) = 4/6/4 关（arena2 六对 / arena3 四组试点）；
@@ -62,7 +62,7 @@ DAMAGE_BASE_SLOPE = 34.0
 #: 终局标准（D7 一次性立案）：max_ticks = MAX_TICKS_PER_ENEMY×count + MAX_TICKS_OVERHEAD
 MAX_TICKS_PER_ENEMY = 600
 #: 固定项 = 接敌 / 穿场 / 生成节奏的一次性开销；纯比例式在低 count 端会塌缩（c01→600
-#: 会截断教师 30% 的局），实测饱和点见 DECISIONS §2026-09-13-goalnn-max-ticks-rule
+#: 会截断教师 30% 的局），实测饱和点见 DECISIONS §2026-09-13-goalnn-max-ticks-rule · 全文 → docs/nn/training-stack.md §25
 MAX_TICKS_OVERHEAD = 900
 
 
@@ -82,7 +82,7 @@ def max_ticks_for(count: int) -> int:
 
     斜率 600 = roadmap 原式 `ceil(2400×count/4)` 的斜率（c04-c06 现线证据沿用，实测
     该斜率在 c05-c07 恰好解除截断）；固定项 900 补上原式缺失的接敌/穿场开销。
-    饱和点实测与判据见 DECISIONS §2026-09-13-goalnn-max-ticks-rule。
+    饱和点实测与判据见 DECISIONS §2026-09-13-goalnn-max-ticks-rule · 全文 → docs/nn/training-stack.md §25。
     """
     return MAX_TICKS_PER_ENEMY * count + MAX_TICKS_OVERHEAD
 
@@ -99,7 +99,7 @@ def wchip_for(count: int) -> float | None:
     return round(W_CHIP_K / damage_base(count), 4)
 
 
-#: c01-c03 干净奖励（B 案吸收 xN 语义，DECISIONS §2026-09-15-goalnn-xn-absorb）：
+#: c01-c03 干净奖励（B 案吸收 xN 语义，DECISIONS §2026-09-15-goalnn-xn-absorb · 全文 → docs/nn/experiments.md §33）：
 #: 只保留击杀/命中/统一过关 + 死亡 terminal——codex 第 1 条（不用 wDmg/wChip/
 #: wTick/wStuck）+ 第 21 行（只保留击杀/命中/终局）。与 x2/x3-start 逐字同构。
 _FORMULA_CLEAN_EARLY = "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0)"
@@ -107,7 +107,7 @@ _PARAMS_CLEAN_EARLY: dict[str, float] = {"wKill": 3.0, "wHit": 0.3, "wWin": 2.0}
 _TERMINAL_CLEAN_EARLY: dict[str, float] = {"lives_exhausted": -1.0}
 
 #: v2 残留词干（仅 c04+ 沿用；B 案有意不动——17 级的语义回归超出本次范围，
-#: 技术债见 DECISIONS §2026-09-15-goalnn-xn-absorb）。
+#: 技术债见 DECISIONS §2026-09-15-goalnn-xn-absorb · 全文 → docs/nn/experiments.md §33）。
 _FORMULA_LEGACY_V2 = (
     "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected"
     " - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots - wTick*ticks"
@@ -351,7 +351,7 @@ def plan_doc(arena: dict[str, Any]) -> dict[str, Any]:
             "spawn_points": len(arena["enemy_spawns"]),
             "player_spawn": arena["player_spawn"],
         },
-        "max_ticks_rule": "600 * count + 900 — DECISIONS §2026-09-13-goalnn-max-ticks-rule（D7 一次性）",
+        "max_ticks_rule": "600 * count + 900 — DECISIONS §2026-09-13-goalnn-max-ticks-rule · 全文 → docs/nn/training-stack.md §25（D7 一次性）",
         "shard_keep_policy": "keep latest 2 iters per leg; archive graduated weights (.xz 惯例)",
         "gates": None,  # I2：阶梯课程一律不配 gates
         "levels": levels,

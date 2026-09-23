@@ -106,7 +106,7 @@ def build_rollout_cmd(
             cmd += ["--course-fp", cfp]
         # D14 语义版：corpus_fp = 语料身份（env+reward 解析值哈希）与文件血缘并存。
         # 预算/路径/注释类编辑只动 course_fp，不动 corpus_fp ⇒ 不触发混训拒收
-        # （DECISIONS §2026-09-13-level-extraction；worker 侧优先比 corpus_fp）。
+        # （DECISIONS §2026-09-13-level-extraction · 全文 → docs/nn/training-stack.md §25；worker 侧优先比 corpus_fp）。
         cfp2 = corpus_fp_for_args(args)
         if cfp2:
             cmd += ["--corpus-fp", cfp2]

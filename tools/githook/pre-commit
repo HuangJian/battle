@@ -30,7 +30,7 @@
 #   bun test        仅当 staged 含根项目 TS/JS（排除 dashboard/）时运行；
 #                   跑的是**全量**（非 heavy）——test-silent 已删除 basename 窄跑
 #                   （它欠采样：改 stages.ts 只跑 1 个而 50 个依赖它；
-#                   DECISIONS §2026-09-15-gate-trigger-scope）；纯文档/课程配置与
+#                   DECISIONS §2026-09-15-gate-trigger-scope · 全文 → docs/nn/engineering.md §20）；纯文档/课程配置与
 #                   只改 dashboard 仍直接跳过。红 → 拦 + 归因指引（SKIP_BUN_TEST=1 定向跳过重试）
 #   oxfmt           逐 staged 文件格式化 + re-add；**另有未暂存改动（MM）的
 #                   文件跳过** —— 格式化工作树内容会把未暂存编辑折进提交
@@ -63,7 +63,7 @@
 set -e
 
 # --- 沙箱删除免疫（进程树级；唯一实现 = tools/githook/_sandbox-sanitize.sh）-----
-# 机理 / 铁律 / 被否备选：DECISIONS §2026-09-15-sandbox-precommit-immunity。
+# 机理 / 铁律 / 被否备选：DECISIONS §2026-09-15-sandbox-precommit-immunity · 全文 → docs/decisions/details/repo-governance.md §2026-09-15-sandbox-precommit-immunity。
 # 一句话：WorkBuddy / Mimo 的删除保护沙箱经环境变量随进程树注入（BASH_ENV 包装
 # rm 函数 + python sitecustomize 守卫），子进程照拦不误；本 hook 与 nn-py-safe.sh
 # 共享下面这份拉闸（BASH_ENV→/dev/null、unset 注入变量、python 守卫=0、PATH 滤 shim）。
@@ -320,7 +320,7 @@ fi
 
 # ---------- dashboard 门禁（独立 bun 项目；仅在 staged 含 dashboard/ 时跑） ----------
 # dashboard/ 自带 package.json / bun.lock / node_modules，且**不在**根 tsconfig 与根
-# 套件之内（DECISIONS §2026-09-14-goalnn-dashboard-project）。因此它必须有自己的
+# 套件之内（DECISIONS §2026-09-14-goalnn-dashboard-project · 全文 → docs/nn/console.md §11）。因此它必须有自己的
 # 门禁块：否则「把 dashboard 切出根门禁」会静默降级为「没人跑 dashboard 门禁」。
 # 归因语义与上方 mypy / 下方 tsc 块一致：报错前缀 dashboard/ 后与 staged 求交。
 DASH_STAGED=$(grep '^dashboard/' "$STAGED_LIST" || true)

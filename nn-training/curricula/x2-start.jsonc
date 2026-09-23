@@ -5,7 +5,7 @@
 // emit_course(count=2)；奖励按 N3 + rewards.codex.md；c01-c03 不上 wChip
 // （roadmap 总规则优先，表内「轻剂量」作废，以总规则为准）。
 // xN 与工厂 ladder-c02 曾是两套 count=2 任务定义并存；B 案落地后工厂已吸收
-// xN 语义（DECISIONS §2026-09-15-goalnn-xn-absorb），本课 level 已切到
+// xN 语义（DECISIONS §2026-09-15-goalnn-xn-absorb · 全文 → docs/nn/experiments.md §33），本课 level 已切到
 // ladder-c02（与 arena2 逐关同形；arena2 退役删除）。试点存档腿，权重链保留。
 //
 // 环境：`"level": "ladder-c02"` —— 空场 2 敌，**六种类型对**（ab/ac/ad/bc/bd/cd，

@@ -73,7 +73,7 @@
 - **P1 已落地（2026-09-19）**：`eval_census_fields` 单源 + 四写点接线 + ingest/store schema +
   `PHASE0_FIELDS` 豁免清单。证据：真实 `_eval_report.json` 七列齐全可抽；
   `nn-python-gate` 1263 绿 · dashboard typecheck + 513 绿 · 根 `bun run check` 1875 绿。
-  口径记录：DECISIONS §2026-09-19-evalboard-phase0-census。
+  口径记录：DECISIONS §2026-09-19-evalboard-phase0-census · 全文 → docs/nn/console.md §11。
 - P1（原计划）：`rl/eval_local.py::eval_census_fields`（单源，仿 `eval_loot_fields`）+ 4 个写点接线；
   `ingest.ts` 映射；`store.ts` schema/字段集。验证：`nn-training` pytest（新
   `test_eval_census_fields.py`）+ `dashboard` 套件（新 ingest 映射用例）+ 根 `bun run check`。

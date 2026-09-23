@@ -1,4 +1,4 @@
-"""关卡抽离（DECISIONS §2026-09-13-level-extraction）：level 引用 + corpus_fp 语义身份。
+"""关卡抽离（DECISIONS §2026-09-13-level-extraction · 全文 → docs/nn/training-stack.md §25）：level 引用 + corpus_fp 语义身份。
 
 覆盖四件事：
 ① `load_course` 的 level 合并（stages/difficulty/max_ticks/player 归关卡文件唯一持有，

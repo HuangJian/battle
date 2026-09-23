@@ -1,6 +1,6 @@
 {
   // tiny-vol — 按样本量动态采集的**集成测试专用**模拟课程
-  // （plan/dynamic-rollout-volume §3-P2；DECISIONS §2026-09-15-goalnn-dynamic-rollout-volume）。
+  // （plan/dynamic-rollout-volume §3-P2；DECISIONS §2026-09-15-goalnn-dynamic-rollout-volume · 全文 → docs/nn/training-stack.md §25）。
   //
   // 归属纪律（用户 2026-09-15 指令）：集成/微课试点用的模拟课程一律写在本目录，
   // **禁止**落入 `nn-training/curricula/`（那是生产课程表）或写进生产 weights 归档。

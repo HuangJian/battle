@@ -301,7 +301,7 @@
     // · **lr 砍半（5e-4→2.5e-4）**：尾段改成「小步精修 + 靠 kl 放松维持空间」，
     //   与早段的「大步探索」形成有意的不对称。
     // · **kl_cap 尾段缺席**：【2026-09-17 订正】原文「不接线、**恒不生效**、无害」里，
-    //   「remote/serial 不接线」**是对的**（DECISIONS §2026-09-15-goalnn-kl-cap-unwired），
+    //   「remote/serial 不接线」**是对的**（DECISIONS §2026-09-15-goalnn-kl-cap-unwired · 全文 → docs/nn/experiments.md §33），
     //   但「**恒**不生效 / 无害」**把话说满了** —— 漏了 stream 路径：
     //   `args._kl_cap = sch.get("kl_cap")` 每轮**整个重赋**（`rl/loop_steps.py:771`）
     //   ⇒ **本段缺席即 None ⇒ 回落 `policy.streamKlCap`**（`rl/stream.py:163-166`），

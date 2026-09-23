@@ -2,7 +2,7 @@
 //
 // 这是**BC 课程**（curricula/<name>.bc.jsonc），与 RL 课程（<name>.jsonc）分文件种类：
 //   · 环境语义（stages/difficulty/max_ticks/player）经 `"level": "arena4"` 引用关卡文件
-//     注入（DECISIONS §2026-09-13-level-extraction：关卡 = 环境语义唯一来源）；
+//     注入（DECISIONS §2026-09-13-level-extraction · 全文 → docs/nn/training-stack.md §25：关卡 = 环境语义唯一来源）；
 //   · 语料 = God-AI 教师在 arena4 上自对弈（wins-only），LAN 集群分 (stage,seed) 采集；
 //   · 训练 = 云端 train/bc.py（arch=student 蒸馏主线；value_coef=0——历史教训
 //     docs/nn/legacy.md §20 M3：value MC 回归在 coef 0.05 下都爆，纯 BC 起步）；

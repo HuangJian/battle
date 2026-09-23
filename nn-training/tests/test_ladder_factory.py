@@ -43,7 +43,7 @@ def test_tier_lives_rejects_out_of_ladder() -> None:
 
 
 def test_max_ticks_fixed_overhead_plus_per_enemy() -> None:
-    """D7 立案规则 `600×count + 900`（DECISIONS §2026-09-13-goalnn-max-ticks-rule）。
+    """D7 立案规则 `600×count + 900`（DECISIONS §2026-09-13-goalnn-max-ticks-rule · 全文 → docs/nn/training-stack.md §25）。
 
     斜率 600 沿用 roadmap 原式；固定项 900 修原式在低 count 端的塌缩——原式 c01=600
     实测截断教师 61/200 局（0 击杀），低 count 端不可用。

@@ -10,7 +10,7 @@ import {
 
 /**
  * `dashboard/` 是独立 bun 项目（自带 package.json / bun.lock / node_modules，
- * DECISIONS §2026-09-14-goalnn-dashboard-project），**不在**根套件之内。
+ * DECISIONS §2026-09-14-goalnn-dashboard-project · 全文 → docs/nn/console.md §11），**不在**根套件之内。
  *
  * 这两条约束就靠这里锁住：
  *   · 根套件枚举 dashboard 测试 → 根门禁反向依赖 dashboard 的安装状态；

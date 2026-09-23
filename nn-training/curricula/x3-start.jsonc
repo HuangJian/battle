@@ -5,7 +5,7 @@
 // emit_course(count=3)；奖励按 N3 + rewards.codex.md；c01-c03 不上 wChip
 // （roadmap 总规则优先，表内「轻剂量」作废，以总规则为准）。
 // xN 与工厂 ladder-c03 曾是两套 count=3 任务定义并存；B 案落地后工厂已吸收
-// xN 语义（多变体 + 干净奖励，DECISIONS §2026-09-15-goalnn-xn-absorb），
+// xN 语义（多变体 + 干净奖励，DECISIONS §2026-09-15-goalnn-xn-absorb · 全文 → docs/nn/experiments.md §33），
 // ladder-c03 与 arena3 逐关同形（单测钉死），x3-start 转为试点存档腿（权重链保留）。
 //
 // 环境：`"level": "arena3"` —— 空场 3 敌，**四种三元组**（abc/abd/acd/bcd，

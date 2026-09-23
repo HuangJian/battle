@@ -49,12 +49,15 @@ teacher's only job is getting the NN started (BC distillation corpus + scaffoldi
 **Rule (AGENTS §1):** read MANIFEST → DECISIONS → active plans → this file, every session; MANIFEST wins over plans.
 
 - `MANIFEST.md` — the creed; §13 settles most doubts. Non-negotiable.
-- `DECISIONS.md` — the decision **index**: one line per decision (§ + one-sentence status + pointer).
-  You extend it, not contradict it. Full bodies live in `docs/decisions.details.md` (foundational §1–§10,
-  refactor/engineering §239–§271, God-AI freeze ops §273–§276, replay/RL-bridge §279–§280, NN epoch §289–§290)
+- `DECISIONS.md` — the decision **index**: per decision a heading (§ number + date/source), a compact
+  `决定` (+ `违反后果`) and a pointer. You extend it, not contradict it. **Each index line names where its
+  full body is** (`—— 全文（…）→ <path> §N`); after the 2026-09-23 slim that is either a topic doc's
+  `决策正文归档` section (`### §<id>` anchor) or `docs/decisions/details/<domain>.md` (`## §<id>` anchor).
+  Older bodies live in `docs/decisions.details.md` (foundational §1–§10, refactor/engineering §239–§271,
+  God-AI freeze ops §273–§276, replay/RL-bridge §279–§280, NN epoch §289–§290)
   and the topic progress docs (`docs/god-ai-tuning.progress.md`, `docs/perf-optimization.progress.md`,
   `docs/render-optimization.progress.md`, `docs/nn/*.md` (index: `docs/nn.progress.md`),
-  `docs/nn.progress.intent.md`).
+  `docs/nn.progress.intent.md`). Read the index line first, follow the pointer second, git history last.
 - `plan/mvp.md` — what the product is; its §10 MVP DoD applies to every change.
 - `plan/Snapshot-Management-Framework.md` and `plan/presentation-upgrade.md` — active feature plans;
   their "Definition of Done" sections are acceptance criteria.
@@ -295,7 +298,7 @@ prints one summary line). It skips entirely only when the change set is provably
 docs/notebook/course-config only, or all-dashboard. `tools/runner.ts` holds the shared
 `spawnCapture`/`gitChangedFiles`/printing helpers.
 
-**Basename-based narrowing was removed 2026-09-15** (DECISIONS §2026-09-15-gate-trigger-scope). The old
+**Basename-based narrowing was removed 2026-09-15** (DECISIONS §2026-09-15-gate-trigger-scope · 全文 → docs/nn/engineering.md §20). The old
 heuristic ran only the tests whose basename matched a changed file, and it **under-sampled**: editing
 `src/config/stages.ts` ran 1 test while 50 files import it; `src/config/difficulty.ts` ran 1 of 39;
 `src/config/combat.ts` 3 of 13. A non-heavy full run costs ~6s (tools-only subset ~5s), so narrowing
@@ -359,7 +362,7 @@ was folded into them; it had already replaced `nn-training/start-training.{sh,ps
 - **Headless one-shot runner**: `bun dashboard/src/launch/cli.ts --script <name>.py [args]`
   (venv setup, single-instance locking, smoke gates, `--force`, `--kill-previous`, `--detach`,
   `--torch-threads`, `--check`, `--echo`).
-- **Dependency isolation** (2026-09-14, DECISIONS §2026-09-14-goalnn-dashboard-project):
+- **Dependency isolation** (2026-09-14, DECISIONS §2026-09-14-goalnn-dashboard-project · 全文 → docs/nn/console.md §11):
   `dashboard/` is self-contained — its own `node_modules/` + committed `bun.lock`
   (`cd dashboard && bun install`), and it is absent from the root `package.json` (no `preact`),
   the root `tsconfig.json` `include`, and the root suite (which passes
@@ -577,7 +580,9 @@ bugfix / UI 调整 / 运维清理 → **commit message only**（要防重犯处�
    新日期 ID 格式"，基线里没有的新 ID 会被正常识别为 added）。重写基线 = 一个纯机械 diff，
    且会把**已有的撞号合法化**（基线写入 count=2 后就再也不报）。
 3. **自创字段 / 超长** —— 模板是固定的 4 段（背景 / 备选与否决 / 决定 / 违反后果）且 **≤12 行**；
-   单条正文 >40 行会触发 `check-decisions` 告警（该搬 progress 文档了）。
+   单条正文 >40 行会触发 `check-decisions` 告警（该搬 progress 文档了）。2026-09-23 已把 107 条
+   超长条目按同一口径搬走（正文 → 主题档 `决策正文归档` 节 / `docs/decisions/details/`），索引行
+   只留 `决定` + `违反后果` + 指针；新写条目**直接写索引形态**，正文按主题落一处，禁双写。
 
 **真写才走的流程（只有过闸门才执行）**：
 - **New-entry ID (自治理生效起)**: `§YYYY-MM-DD-<branch>-<slug>`（branch 去连字符，如

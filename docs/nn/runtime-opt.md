@@ -522,7 +522,7 @@ FFI 每次 ~0.5µs，且 `in16/pooled/bufA` 直接传 JS 数组地址，连 wasm
 且 outcome/score/kills/ticks 逐字段一致。引擎选择实测：
 `bun 2.66ms[native] vs node 3.52ms[wasm] → bun` —— 在 native 之前这里会选 node（3.5 vs bun-wasm 6.2）。
 
-**四条纪律**（都写进了 `DECISIONS.md §2026-09-21-goalnn-native-features-engine`）：
+**四条纪律**（都写进了 `DECISIONS.md §2026-09-21-goalnn-native-features-engine · 全文 → 本文件 §9`）：
 
 1. **flags 钉死 + 禁 `-march=native`**：它会开 FMA/AVX-512，而 clang 默认 `-ffp-contract=fast`
    ⇒ 乘加融合 ⇒ 与 wasm 不再逐位 ⇒ 异质节点 shard 字节抖动。
@@ -613,7 +613,7 @@ greedy eval 是节点侧跑的量最大的一类任务，这里看不见后端�
 4. **同 it 波次权重复用**（本条追加）：`dist_common` 进程内 `_WEIGHTS_PUSHED[wver]→nodes`。
    `partition_weights_nodes` 拆 reuse/need；补波只对 need POST。ping/codeHash/bun
    exclude 时 `forget_weights_node`。`post_weights_parallel` 成功后自动 note。
-5. **边分发边开采 + rollout 口径**（用户 2026-09-19，DECISIONS §2026-09-19-rollout-pipeline-metric）：
+5. **边分发边开采 + rollout 口径**（用户 2026-09-19，DECISIONS §2026-09-19-rollout-pipeline-metric · 全文 → 本文件 §9）：
    `pure_collect_sec` = **权重开始分发 → 样本齐可交 PPO**（`last_settle − t_dist_start`，
    含与采集重叠的分发墙钟）。`post_weights_parallel(..., on_alive=)` 每节点成功即 spawn
    采样线程；local/reuse 先开采。旧口径「末局 − 全节点 ready」作废。
@@ -717,6 +717,263 @@ ruff + mypy 干净。
 ≤min(window+60,600)s）；② intent/goal 全预算 join。per-tick 主链现在**不为 eval 站等一秒**。
 另：stream 路径「标签超前一轮 + 同 iter 双点」的缺陷**未动**（`--ppo remote` 下不可达，本地
 stream 腿才可见），已在上一轮的流检查中记录，待单独处置。
+
+---
+
+
+## §9 决策正文归档（搬自 `DECISIONS.md`，2026-09-23）
+
+> 2026-09-23 把 `DECISIONS.md` 里这些条目的**正文全文**搬到这里（索引行与编号仍留在
+> `DECISIONS.md` —— 编号永不重排）。锚点 = `### §<旧编号>`。
+
+### §2026-09-12-rollout-flag-bug（2026-09-12，local rollout 3命1星污染事件；已修、已记录、暂不重训）
+
+- **背景**：`nn-training/rl/cmd.py` `build_rollout_cmd` 用 `f"--{k}"` 拼 override 键
+  （`lives_override`/`player_level` 下划线），而 `tools/sim/export-rl-rollout.ts` 只认连字符
+  `--lives-override`/`--player-level`（未知 flag 静默忽略）⇒ **local 直跑全程以 hard 缺省
+  （3命1星）执行，远端节点以课程覆盖（1命0星）执行**。commit `1ee8955`（2026-09-12 16:55）
+  修复（下划线→连字符，`tests/test_rl_cmd.py` 锁死口径）。bug 自 `e828331`（2026-09-02 22:55，
+  M1 配置化）引入。
+- **污染范围**：e828331 → 1ee8955 之间所有课程的 **local 直跑 rollout 轨迹**（PPO 吃进
+  3命1星环境的样本）。各课程 local 局占比实测（`tmp/<course>/dist-agent-meta.jsonl`）：
+  c4-kb1 **39.1%**、c4-margin 28.3%、c6-gae 21.1%、c5-gae/c5-margin/c5-ent ~14-15%、
+  c6-margin/c6b-margin 11-13.6%、c5-tick/c6-pickup 13.3-13.8%。**样本量权重更高**：it160
+  local 45 局 7204 样本（avgTicks 1595）vs remote 105 局 11631 样本（avgTicks 1103）⇒
+  c6-gae 污染在 PPO 中的实际权重 ≈ **38%**（> 局数占比 21%，3命局活更久）。
+- **关键事实（判定可信的依据）**：eval 链路（`export-eval-game.ts` + `run_local_eval_game` +
+  sampler-agent）与 rollout 命令模板（cmd.py）是**两套独立代码**，eval 一直用正确连字符
+  flag ⇒ **所有 eval 口径结论（c5-gae 55% 爬升、c6-gae +7pp 等）未被污染**。修复后实测
+  it160 归档权重 1命0星采样 rollout = 27% ≈ eval 29% ≈ 配对 30%，三口径回归一致。
+- **c6-pickup 探针（污染窗口内训的 it35，修复后评估）**：c6 关 seeds 0-99 配对
+  **38% vs 起点 23% = +15pp，McNemar p=0.025 显著**；且高于 c6-gae 160 轮的 30%（in-loop
+  eval it5=38%/it35=34% 同步确认，非单点假象）。污染排除：污染更重的 c6-gae 反而不如它 ⇒
+  **38% 落在 wPickup 1.5→3.0 杠杆上（唯一变量）**，道具杠杆真效初证。
+- **处置（用户拍板）**：① 已收官课程（c5-gae/c6-gae/c5-tick 等）**不重训**——判定全走 eval
+  （干净），权重保留作 bc/参考，但出身含 X% 多命样本需知情；② c6-pickup **暂不重启**
+  （it36 权重 PPO 未完成即停，归档停在 it35；训练进程内存旧 cmd.py，修复不会热更新）；
+  重启时须用修复后代码、以 c6-pickup.it35 为 bc 续跑 it36+。
+- **违反后果**：任何人拿 training_log 的 rollout winRate 当能力口径（虚高 17pp 量级）；
+  任何人把污染窗口课程的权重当作"纯 1命0星数据"训出的（引用前必须查本条目占比表）；
+  任何人未经"修复后代码 + 冻结快照"就用本地直跑出教训性结论。
+
+---
+
+### §2026-09-19-rollout-pipeline-metric（2026-09-19，边分发边开采 + rollout 耗时口径，用户定义）
+
+- **口径（用户拍板）**：rollout 耗时 = **权重就绪开始分发 → 所有样本采集完毕可交 PPO**。
+  `pure_collect_sec` = `last_settle − t_dist_start`（**含**与采集重叠的分发墙钟，端到端）。
+  旧口径（2026-08-24：末局结算 − **全部**权重分发完毕）作废——在「先等全节点再开采」下
+  把分发墙钟藏进 net/dist_phase，volume 多波时 dashboard 显示的 rollout 与真实采集周期脱节。
+- **实现**：`dist_common.post_weights_parallel(..., on_alive=)` 每节点 POST 成功即回调；
+  `rl/dispatch.py` 先起 local/reuse 采样线程，need 节点后台 POST 成功立刻 spawn（边分发边开采）。
+  `weights_dist_start_at` / `weights_dist_done_at` 作诊断锚点；`dist_phase_sec` 仍为
+  ping→权重分发完成（与采集重叠部分不再从 rollout 里抠掉）。
+- **备选与否决**：保持「等全节点 ready 再开采 + pure_collect=末局−全 ready」——否，与用户
+  端到端口径冲突，且 it19 实测串行分发 50s×多波白白空转；rollout 只记纯仿真（末局−各节点
+  自 ready）——否，用户明确要「开始分发→样本齐」一体读数。
+- **落地**：`dist_common.rollout_collect_sec` / `partition_weights_nodes` / `_WEIGHTS_PUSHED`
+  同 it 补波复用；dashboard `phaseSecs` 注释同步。DECISIONS 本条 = 口径变更备案（防再
+  「优化」回旧锚点）。
+- **多波聚合（同日补充）**：`rl/reports.aggregate_rollout_collect`——volume 各波报告带
+  `weights_dist_start_ts` / `collect_end_ts`，`combine_reports` 压成 it 级
+  `pure_collect_sec = min(start)→max(end)`（首波分发→全部样本齐，含波间空隙）。无 ts
+  时回退 max(per-wave) 并标 `rollout_collect_aggregated=False`。iteration 事件附加
+  `rollout_collect_aggregated` / `rollout_collect_waves`。
+
+---
+
+### §2026-09-19-volume-purecollect-stale-merge（2026-09-19，bugfix：指标表 rollout 时间轮轮累加）
+
+- **背景**：x20-powered/x20-snowball 的 `pure_collect_sec`（指标表 rollout 列）it1≈30s
+  起每轮 +70~100s，it6 达 425s；同轮真采集 `rollout_sec` 始终 ~25–36s。
+- **根因**：`_volume_collect_continuous` 收官时 `combine_reports([self._report, combined])`，
+  而 `self._report` **未在轮初清空**——仍带上一轮 `weights_dist_start_ts`；
+  `aggregate_rollout_collect` 的 min(start) 被钉在 run 起点，pure_collect ≈ 累计墙钟。
+  同路径 `totalSamples` 也被跨轮相加（jsonl `samples` 虚高；`transitions_collected` 正常）。
+- **备选与否决**：在 combine 前手工剥掉 prior 的 ts —— 否，prior 整份都不该进本轮报告
+  （games/score 会双计）；dashboard 改读 `rolloutSec` 回避 —— 否，掩盖错误账本；
+  保留跨轮 combine「凑完整 run 窗口」—— 否，与用户定义的「本轮采集」口径冲突。
+- **决定**：轮初 `self._report = {}`；continuous 收官只采纳本轮
+  `adopt_volume_report(combined)`（无 batch 时返回**合法空 shape** `combine_reports([])`，
+  绝不返回 `{}` —— 否则 `_log_report`/events 读 `games` KeyError，2026-09-19 同日回归已修：
+  combine 跳过空 dict、日志/events 用 `.get`）。历史 jsonl 的
+  pure_collect/samples 累加行**作废对照**，请改看同轮 `rollout_sec`/`transitions_collected`。
+- **违反后果**：任何把上一轮 `_report` 再 combine 进本轮采集的改动，都会让指标表
+  rollout 列再次单调暴涨；任何让 volume 收官后 `_report` 停在 `{}` 的改动都会
+  在 `_log_report` 打 KeyError 打死 trainer。
+- **落地**：`nn-training/rl/reports.py`（`adopt_volume_report`/`empty_collect_report`/combine 跳空）、
+  `loop_core.py`（轮初复位 + continuous 恒 adopt）、`loop_steps.py`/`events.py`（.get）；
+  回归 `tests/test_rl_reports.py::test_adopt_volume_report_*`。
+
+---
+
+### §2026-09-19-m1-eval-python-dispatch（2026-09-19，m1-eval 分派链回归 Python：TS 只写 spec/读行/打分）
+
+- **决定**：上一轮的「仍留的重复」点名的就是 `m1-eval.ts` 自己的分派链（判门/rescan/尾竞速/权重下发
+  ≈300 行）。用户裁定同一口径——**Python 侧已有实战版，别再在 TS 重建**。新增
+  `nn-training/eval_m1_once.py`（spec → `rl/batch_eval.BatchEvalRunner` → 逐局行），TS 只做
+  「写 spec → 经 nn-py-safe.sh 调 Python → 读回逐局行 → scoreV7/报告/HTML/banner」。
+- **边界（明确划出，不是半途而废）**：只有**分派**回归 Python。`--no-dist` 仍走本机 in-process
+  worker 池——那是游戏引擎本身、不涉节点通信，且 `tools/perf/scan-intent-concurrency.ts` 正是量它的
+  并发度；非分派 policy（`nn` 走 `--weights-dir` 自动发现、无文件可上传，`intent`/`intent-oracle`
+  与 cadence 探针）也留在本机池。`goal-god` **不再分派**：远端 goal 执行器需要 goal 权重桶，
+  而它按 kind='none' 分派时远端必然缺权重（旧实现看似分派、实则不可用）⇒ 要跑用 `--no-dist`。
+- **Python 侧三处扩展（都是加法；既有调用方行为逐字节不变）**：
+  1. `rl/batch_eval.py`：`kind` 由 policy 推（`KIND_FOR_POLICY`：intent-exec→'intent'、goal→'goal'、
+     nn/god→'rollout'），**上传与查询同 kind**（此前写死 'rollout' ⇒ intent/goal 一律 409）；
+     `include_scorable`（默认关；True 时逐局行多带 agent 报告的原始 `scorable` = scoreV7 的完整输入，
+     原样回传、不做字段级搬运 ⇒ 不可能两端漂移）；unit 的 `lives`/`level` 缺省 = **不覆盖**
+     （difficulty/关卡默认说了算；写死 3 会把「难度默认」硬编码成常数，改难度即错）。
+  2. `rl/eval_m1.py`：`subprocess.run(text=True)` 补 `encoding="utf-8", errors="replace"`——父进程不传
+     encoding 时按 locale 解码（zh-CN Windows = cp936），而 m1-eval 的 stderr 带中文 ⇒
+     UnicodeDecodeError 被 `dispatch_eval_bg_m1` 的 except 吞成「clean eval failed (ignored)」，
+     **干净评估静默消失**（2026-09-19 实测：本地/分布式两种调用都复现；与 gate_check §30 同类坑，
+     那边靠 ensure_ascii 免疫）。
+  3. 两个一次性入口（m1 / course）把 `sys.stdout` 改道 stderr：训练栈 `rl.log.log()` 按设计写 stdout，
+     而这两个入口的 stdout 是调用方的**产物通道**（m1 的 JSON 报告 / 课程行）——实测 `[dist] weights[…]`
+     行混进 stdout 后 `json.loads(stdout)` 取 perGame 会**静默失败**（D5(a) 入账缺口）。
+- **验证（真集群 + 真消费方）**：
+  - 三种分派 policy 实跑（`god` / `intent-exec` 用 `tools/gen-intent-weights.ts` 生成的全尺寸权重 /
+    `goal` 用形状合法的合成权重）：6 节点在线、配置 `rl.local_slots: 0` ⇒ 逐局 `node:…` 全远端、本地 0；
+  - **跨 runner 对拍**（同 stage/seed/权重，dist=export-eval-game vs 本机池=sim-worker）：逐字段一致，
+    唯一差异是 `firstKillTick` ±1 tick 的采样口径（scoreV7 suite 完全相同）；
+  - **训练循环真入口** `rl/eval_m1.py::run_clean_eval` 实跑 35 关 × 1 seed →
+    `winRate=0.714 total=35 cleared=25 error=0 retries=0 perGame=35`；
+  - 断点：dist 走 Python run dir 台账（二次运行 `already settled — skip`，0.0s；`--fresh` 才清），
+    本机池仍走 TS ledger（`ledger resume: N/M already settled`）——两套各自完整，不叠加。
+- **门禁**：根 `bun run check` 绿 · `nn-python-gate` 绿（ruff/mypy）。新增 Python 6 例
+  （spec→unit 归一/行映射/kind 表与 DISPATCHABLE 对齐）+ TS 7 例（spec 构造/行映射/白名单）。
+
+---
+
+### §2026-09-21-goalnn-native-features-engine（2026-09-21，落地 `plan/rollout-eval-opt.plan.md` §4：native 内核进入**生产** features 路径）
+
+**背景**：Student `features` 是 rollout/eval 的绝对大头（本机实测：TS 52.4ms / wasm 6.0ms /
+native 2.6ms per forward；每局 ~236 次调用 ⇒ 单局 sim 1338ms 里九成）。native 与 wasm
+**逐字节一致**（`tests/native-parity.test.ts` 现为门禁，8 次随机输入 pooled+bufA 逐位相等），
+但「怎么接进生产」此前没有任何裁决：进程模型没定、跨平台字节一致没保、资产分发没写。
+
+**决定**：
+
+1. **单一咽喉 + 选择链**：`src/nn/conv-wasm.ts::runStudentFeatures` = `native → wasm → TS`，
+   `infer.features` 只调它 ⇒ rollout 与 eval **同引擎**（T4 免费达成）。native 失败一律回落，
+   调用方永不感知；TS 实际生效时 `noteFeaturesTs()` 记账（防「以为开了加速其实在 TS」）。
+2. **进程模型 = 共享库 + `bun:ffi`（同步零 IPC）**，不是「CLI + 常驻子进程」。features 是
+   **逐决策顺序依赖**的（动作→下一状态）⇒ 跨决策不能批量；而本机进程启动实测 42–54ms/次
+   （`cmd.exe` 42.1 / `hostname` 54.4，n=30），×236 次/局比整局 sim 还贵 ⇒ 起进程 = 负优化。
+   FFI 每次调用 ~0.5µs，且 `in16/pooled/bufA` 直接以 JS 数组地址传入（连 wasm 的拷进 48KB+
+   回拷 169KB 都省了）。代价：**native 只在 bun 引擎可用**（node 无 FFI，不做 napi 插件）——
+   故 bun 臂的基准数字就是 native 的数字，与 node+wasm 比完再定引擎（见第 5 条）。
+3. **准入 = 本机首用 attestation**：加载后先拿**真实权重**做 3 次 native↔wasm 逐字节对拍，
+   过了才投产；不过 / 库缺失 / ABI 不符 / 参考不可用 ⇒ 本进程关闭 + 一行 warning；
+   运行期任何异常 ⇒ 本进程**永久**关闭（不静默重试）。理由：节点是异质的，
+   「本机 8/8 逐位一致」不能外推，只能在**本机**验（评审 B2/B4）。
+4. **构建钉死 flags + 指纹**（`tools/agent/native-build.ts`）：`-O3 -ffp-contract=off
+   -fno-fast-math`（x64 另加 `-mavx2 -msse4.2`；**已被 §2026-09-21-goalnn-native-prebuilt-distribution
+   第 3 条修订为 `-mavx -msse4.2`** —— 收益已由 AVX1 吃满，AVX2 只多 ~2% 而代价是老 CPU SIGILL），
+   **禁 `-march=native`** —— 它会打开 FMA/
+   AVX-512，而 clang 默认 `-ffp-contract=fast` ⇒ 乘加融合 ⇒ 与 wasm 不再逐位、跨节点
+   shard 字节抖动。产物 + `native-build.json`（源码 sha + flags + cc 版本 + 产物 sha）
+   落在 `tmp/native/`（gitignored）；`--check` 判「盘上产物是不是这份源码编的」。
+   native 侧**单源**：共享库与对拍 CLI 都链接 `src/nn/native/conv_feats_native.c`。
+5. **引擎选择纳入 native 臂**：`tools/agent/engine-bench.ts` 改为调用**生产入口**（不再自绘
+   wasm 内存布局——旧版按 v2 的 16 通道算、v3 已是 18 通道），输出 `BENCH` + `BENCH-ARM`；
+   `chooseByBench` 语义不变（node 需快过 bun 臂 3% 才入选），但 `EngineChoice` 新增
+   `bunArm/nodeArm/nativeSha`，**native 库指纹进缓存键**（重建过就重测）。
+   资产进 bundle（`ensureNativeAssets`）+ 构建失败/缺库只降级不抛。
+6. **记账**：shard manifest 新增 `feat`（`native|wasm|ts`）；**不进 `data_fp`**
+   （`protocol.py::data_fp` 只对 dir/wver/stage/seed 求 sha，已核）。
+
+**备选与否决**：
+
+* **常驻子进程 + 二进制分帧 IPC**——否：见第 2 条的实测（42–54ms/次 vs 236 次/局），且要自己
+  写同步管道读（Node 侧 pipe 非阻塞、`fs.readSync` 要 EAGAIN 重试），复杂度全换来负收益。
+* **让 wasm 与 native 共享同一份 C 源**——否：wasm 内核用 `wasm_simd128` intrinsics，**改它就是
+  改产品字节**（= 新 era，浏览器路径也要重验）。改为「native 侧单源 + 两侧逐字节对拍进门禁」。
+* **用 golden 哈希替代本机 wasm attestation**——暂不做：省下的只是 ~10ms/进程，却要多维护一套
+  golden 版本化；本机 wasm 参考一直都在（缺 wasm 时本模块直接关 native，保守优先）。
+* **`-march=native` 换一点速度**——否：见第 4 条。
+* **node 侧也用 native（napi 插件 / node-gyp）**——否：要每个节点有编译工具链 + ABI 随 node
+   主版本漂，收益已被「bun+native < node+wasm」覆盖（本机 2.66ms vs 3.52ms）。
+
+**gate**：`tests/native-parity.test.ts`（7 例：共享库 8 次逐字节 / 参考 CLI 逐字节 /
+架构守卫 / 选择链 / 库路径候选 / poison 库 attestation 守卫 / 指纹过期）；
+`tests/agent/rollout-runner.test.ts` 32 例（含 native 臂反超 node、nativeSha 失效、parseBench）；
+`bun run check` + `bun run build` 绿。实测（`bun tools/sim/perf-conv-wasm.ts`）：
+TS 52.4ms / wasm 6.0ms / native 2.6ms（**对 wasm 2.3×、对 TS 20×**）；
+单局端到端（同 seed 同权重、x20-clutch.it99、2400 ticks）：**1447ms → 853ms（1.70×）**，
+outcome/score/kills/ticks 完全一致；引擎选择实测 `bun 2.66ms[native] vs node 3.52ms[wasm] → bun`。
+
+---
+
+---
+
+### §2026-09-21-goalnn-native-prebuilt-distribution（2026-09-21，落地 `plan/rollout-eval-opt.plan.md` §2.5/T2：native 库改「训练机交叉编译 + 随仓库分发」）
+
+**背景**：原 T2 是「节点上自己 `bun tools/agent/native-build.ts` 编一次」。用户提问（2026-09-21）：
+「rollout 节点机器上可能没有 clang，能本机编译出所有平台的 native 库直接给它们使用吗？」——查节点池
+（docs/goal-nn-handoff.md §4：self(win) / mac / a95·a96·a97·a98(Android-Termux) / lite / gcs）可见节点是
+异质的且**多数没有 clang**，原设计等于 native 臂在远端永远开不起来（只会得到「编译器不可用」一行）。
+
+**决定**：
+
+1. **训练机交叉编译 6 目标入库**：`src/nn/native/prebuilt/<platform>-<arch>/conv_feats_native.{dll,so,dylib}`
+   + `manifest.json`（源码 sha + flags + cc 版本 + 每目标产物 sha，共 ~78 KB）。目标 = `win32/linux/darwin ×
+   x64/arm64`。分发通道就是既有的 `git pull`（节点升级本来就是同一分支 ff-only）。
+   **Termux 不单列目标**：它 `process.platform=linux`、arch=arm64 ⇒ 用 linux-arm64 那一份。
+2. **内核改免 libc（freestanding）**：交叉编译时只有 Windows 的 MSVC 头/库、没有目标平台 sysroot，
+   一旦 `#include <string.h>` / 引用 `memset/memcpy` 就链不出来（`-nostdlib`）。内核里 padding 的零填与
+   整行拷贝改为本地 `cf_zero/cf_copy`（float 按值赋值，语义与 memset/memcpy 逐字节等价 ⇒ 不改结果）。
+   收益：产物**零动态依赖**（无 DT_NEEDED / LC_LOAD_DYLIB / PE 导入表）⇒ 同一份 linux-arm64 在
+   glibc / musl / **bionic(Termux)** 上都能 dlopen，不必为 Termux 单独出目标。
+3. **x64 只到 AVX1（`-mavx -msse4.2`），不用 `-mavx2`**：实测量化（ffi 微基准，x20-clutch.it176）
+   SSE2/SSE4.2 = 3.46–3.53ms · AVX1 = 2.60–2.64ms · AVX2 = 2.51–2.59ms ⇒ AVX1 已拿到全部收益（~27%），
+   AVX2 只多 ~2%；而 prebuilt 是**发给别人**用的，`-mavx2` 的代价是「2013 年前的 x64 CPU 直接 SIGILL」。
+   依旧**禁 `-march=native`**（FMA 收缩 ⇒ 与 wasm 不再逐位，见 §2026-09-21-goalnn-native-features-engine 第 4 条）。
+4. **新鲜度判断只在仓库侧**（`--check-prebuilt` + `tests/native-prebuilt.test.ts`），**不做运行期源码 sha 校验**：
+   提交时 prebuilt 与源码必然同源（门禁钉死）；而运行期真闸门始终是**首用 attestation**（真实权重下
+   native↔wasm 逐字节，不过即关 native + 响亮回落）。节点上多读 3 个源文件换不来更安全的结论，只会把
+   「库在 bundle 里、源码不在」这种正常情形误判成不可用。
+5. **解析顺序统一为 env → prebuilt → 本机构建**（`src/nn/native-conv.ts` 与 `tools/agent/native-build.ts::resolveNativeLib`
+   两处同序，因 src/ 不许依赖 tools/ 而各写一份）。prebuilt 排在「本机构建」之前：它是所有节点都会拿到的
+   那一份，让本机也用它 = 暴露差异的机会最多。**节点因此完全不需要编译器**。
+6. **prebuilt 放在 `src/nn/` 下 ⇒ 进 codeHash 集**（`tools/agent/codehash-files.txt` 的 `src/nn/`）：换了库
+   就触发一次正常的节点升级波（与 `src/nn/wasm/conv_feats.wasm` 同一先例：受跟踪的构建产物）。
+7. **云机通道也要带库（`ts_code.zip`，2026-09-21 用户点名）**：离线训练任务的 rollout 在 PPO 云机上
+   执行（`kind=iter`：训练侧把 TS 运行时打成 `ts_code.zip` 下发，worker 解到 `ts_cache/<sha>` 后跑
+   `bun tools/sim/export-rl-rollout.ts`）——云机**既没 clang 也不持仓库**，所以那条白名单
+   （`src/**` + `tools/**` 的 `.ts/.jsonc/.wasm`）漏了库就等于「无库可加载 ⇒ attestation 跳过 ⇒
+   **静默**回落 wasm」。故新增 `TS_CODE_BINARY_DIRS = ("src/nn/native/prebuilt",)` +
+   `TS_CODE_BINARY_SUFFIXES = (".dll",".so",".dylib")`（**只对该目录生效**，不给 `.so` 开全局口子），
+   6 个目标全带（云机 arch 打包时未知），二进制写 `0755`，目录缺失则 `HubClientError` + 提示重建命令。
+
+**备选与否决**：
+
+* **让节点各带工具链**——否：异质（Windows/mac/Android）且多数装不上/不该装；也要为每台机器维护编译
+  环境，收益却只是「native 在少数机器可用」。
+* **hub 侧下发二进制 / LFS / 独立 CDN**——否：节点升级链路已经是 git pull；多一条分发通道就多一处
+  版本错配与运维面（且 codeHash 升级波无法覆盖它）。
+* **`-march=native` / `-mavx2` 换一点速度**——否：见第 3 条（AVX2 收益噪声级、代价是 SIGILL）。
+* **追 COFF 字节可重现**——不追：lld-link 的 `/Brepro` 把 TimeDateStamp 换成含临时 .o 路径的哈希
+  （`-fno-temp-file` 也压不住），win 两份差 9–13 字节；而正确性靠 attestation、新鲜度靠 manifest sha256，
+  都不依赖「重建字节相同」。（linux/darwin 两份**已**字节相同：darwin 需显式 `-no_uuid` + `-install_name`，
+  否则 LC_ID_DYLIB 里带临时文件名的 pid。）
+* **node 侧也吃 prebuilt（napi）**——否：node 无 FFI（沿用前述条目的否决）。
+
+**gate / 证据**：`tests/native-prebuilt.test.ts`（16 例）——
+① 同源：`prebuiltStaleReason` 为空、6 目标 sha/尺寸/ABI 与 manifest 一致；
+② 格式与依赖：逐目标断言文件头与架构（ELF ET_DYN/EM_X86_64|AARCH64、Mach-O MH_DYLIB + cputype、
+PE `PE\0\0` + machine + `IMAGE_FILE_DLL`）、两个导出符号在、且**不出现** libc.so/ld-linux/libSystem/
+KERNEL32/api-ms-win/ucrtbase/VCRUNTIME；有 llvm 时再断言 `llvm-nm -u` 空 + ELF `NeededLibraries []`；
+③ 解析优先级（env/prebuilt/local/无，含路径映射）；
+④ **真执行**：WSL + python3 ctypes 加载入库的 linux-x64 `.so`，pooled+bufA 与 wasm **逐字节相同**
+   （本机唯一能真跑非本平台产物的通道；win32-x64 那份由 `tests/native-parity.test.ts` 在生产入口真加载
+   + attestation 3/3 覆盖；darwin/*-arm64 只能靠节点首用 attestation）。
+⑤ **云机通道**：`nn-training/tests/test_ts_code_pack.py`（4 例：manifest 每个目标都进包且字节数/可执行位对、
+   `.ts/.wasm/native-conv.ts/native-prebuilt.ts` 仍在包、同内容两次打包 sha 相同、缺目录响亮报错）；
+   并在 `tests/test_remote_iter_real_bun.py`（真 bun 哨兵）里把 zip 解到临时树、**以它为 cwd 跑 rollout**，
+   断言 shard manifest 的 `feat == "native"`（探针验过这条断言是活的：改成期望 wasm 会红）。
+   `bun run check` / `bun run build` / `nn-python-gate.sh` 绿。
 
 ---
 

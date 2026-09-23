@@ -1,7 +1,7 @@
 // 课程 x3-chip-k05 —— T6 wChip 生存腿（k=0.5 主臂）
 // 状态：**2026-09-16 已结课**（预注册池判阴；单变量池＋3.0pp 待 k0 定案，判待定）。
 //   批准链：用户明示批准；T6 三门已齐（T3 门控过＋批准＋
-//   DECISIONS §2026-09-15-goalnn-x3-power-negative 条目 3 已激活）。
+//   DECISIONS §2026-09-15-goalnn-x3-power-negative · 全文 → docs/nn/experiments.md §33 条目 3 已激活）。
 //
 // 立项（plan/x3-power-followup.plan.md §T6）：死因是挨打（败 dmg≈196 vs 胜≈94）；
 // N3「c01-c03 承伤基数极小不上 wChip」前提被局均 ~97–124 证伪。本腿破 N3/R5，

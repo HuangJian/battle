@@ -579,6 +579,57 @@ pull 模式下 `hub_server._get_payload()` 是 `self._bytes(p.read_bytes())`，*
 
 ---
 
+
+## §8 决策正文归档（搬自 `DECISIONS.md`，2026-09-23）
+
+> 2026-09-23 把 `DECISIONS.md` 里这些条目的**正文全文**搬到这里（索引行与编号仍留在
+> `DECISIONS.md` —— 编号永不重排）。锚点 = `### §<旧编号>`。
+
+### §2026-09-11-ppo-tpu-step-mark（2026-09-11，c6b-margin 首个 TPU job 单步 45~52s / eta 5.9h 根因定案）
+
+- **背景**：Colab worker PPO 每梯度步 24→45→52s **线性递增**（142 chunks × 4 ep ≈ 7h，hub
+  wait_job 1800s 必超时）；探针 E 段真机复现（Colab/Kaggle TPU）：E0/E1/E2（含已 warmup 的
+  干净基准）全部 ~10s+/step 递增，`--tail 0` 固定 shape 亦不例外。
+- **备选与否决**：ref 预计算执行时机 —— 否，E1≈E0 同速；尾块 shape 编译税 —— 否，
+  tail=0 仍慢；多 chunk/perm 结构 —— 否，E2（bench_case warmup 后）亦 10s+；归因设备
+  （PJRT 回退）—— 否，E1 + 每步 mark **收敛回 44ms**，正是旧微基准数字。
+- **决定**：根因 = torch_xla 惰性模式下 `.tolist()` materialize 只断言依赖子图，backward/
+  optimizer 在途节点不 drain、跨步骤累积 → 图线性变大 → 单步耗时 ∝ 步数。修复 =
+  `ppo/engine.py::ppo_update` 每步 stats 后 `xla_mark_step(device)`（图执行边界；非 XLA
+  no-op，CPU/CUDA 数值逐位不变）+ ref 预计算后一次 mark（防首步巨图）+ worker 日志打印
+  device/world_size。**修正旧结论**：`plan/ppo-optimization.plan.md` §0.5「TPU 快 GPU 4.7× /
+  44ms」是 ≤3 步微基准测量假象；44ms 只属于「每步有 mark」形态。
+- **违反后果**：任何 torch_xla 持续训练循环若每步只有 materialize 而无显式 mark，都会再现
+  「单步递增、多步后爆炸」；TPU 吞吐评估必须以 ≥6 步持续循环口径，且读「引擎即有 44ms」前
+  必须先确认每步有图边界。后续 TPU 端 ppo_sec 读数均须按此修正解读。
+
+---
+
+### §2026-09-22-demo-mix-bc-aux（2026-09-22，demo 混 batch 接线：BC 辅 loss，不是 kickstart）
+
+**否决的备选**：
+- kickstart 锚到人类 BC-ref——否：ref 在 held-out 挂零（§120），KL 朝常量坍缩策略锚定 = 投毒。
+- demo 内联进 payload（base64，旧 slim-off 口径）——否：3MB 进 manifest 不可接受；blob 内容寻址
+  首轮一传后缓存命中，与 opt/ref 同规（post() 内非 slim 带 bank 直接响亮拒绝）。
+- rollout 侧掺 demo——否：BC 梯度必须进 PPO update，采样侧掺只会污染 advantage 血缘。
+
+**落点**（单变量纯度：loss 侧加项，corpus 不动）：
+- `ppo/engine.ppo_update` 新三参（`demo_bank/demo_bc_coef/demo_per_mb`，缺省全关、数学逐字节不变）；
+  每 minibatch 步 np RNG 抽样（ckpt 精确复现）、合法类掩码 CE 与 `train.bc._masked_ce` 同数学。
+- worker 经 manifest 取 blob（`BLOB_DEMO`，缺 bank 而 coef>0 即拒收，mirror kickstart 安全阀）；
+  pack（hub_client.post）、训练侧（loop_steps 发布 + `_remote_forward_agg` + iteration 行
+  `demo_bc`）、课程 schema（CourseConfig 三键 + flat_overrides）全链打通。
+- `corpus_identity_fp` **刻意排除** demo 键（loss 语义 ≠ 「样本是什么」，与 kickstart_init 同待遇；
+  course_fp 照常覆盖整文件）；配对腿（demo-mix vs B）共享 `paired_rotate_seed`。
+- 污染预登记：demo 种子 ∈ 414xxx 与 414000 段重叠 ⇒ verdict 主段 415000 + 416000 纯回测，
+  414000 只作次段（剔除 demo 种子局）；背题指纹 = demo 内外 pass gap >15pp 即降 coef。
+- 系数锚：`demo_bc_coef=0.02`（CE~1.0 vs value 项~0.25 ⇒ ~8% 梯度占比起步，按 demo_bc 遥测调）。
+- 离线（2026-09-22 追记）：demo 腿支持 cloud rollout＋PPO 离线——bundle 自动带 `demo.npz`
+  （OPTIONAL_PARTS，导入即 sha 对账），节点 `open_run_context` 启动期种子 blob_cache
+  （缺件启动期响亮拒绝）；push 经 BLOB_NAMES 自动带 blob；pull 零改动。控制台不开离线入口。
+
+---
+
 <!-- OLD-NUMBER-MAP: 自动生成，勿手改 -->
 
 ## 附：本文件旧编号对照（拆分前 `docs/nn.progress.md` 的 § 号）

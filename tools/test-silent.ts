@@ -54,7 +54,7 @@ const TEST_RE = /\.test\.(ts|tsx|js|jsx)$/
  * 不参与根套件的路径前缀。
  *
  * `dashboard/` 是**独立 bun 项目**（自带 package.json / bun.lock / node_modules，
- * 见 DECISIONS §2026-09-14-goalnn-dashboard-project），它的测试由自己的门禁跑
+ * 见 DECISIONS §2026-09-14-goalnn-dashboard-project · 全文 → docs/nn/console.md §11），它的测试由自己的门禁跑
  * （`cd dashboard && bun run test`，pre-commit 里的 dashboard 门禁块）。根套件若
  * 继续枚举它，就会把「两份 node_modules 互不重叠」重新耦合回去 —— 根门禁将反过来
  * 依赖 dashboard 的安装状态。镜像关系：根 tsconfig 的 include 同样不含 dashboard。

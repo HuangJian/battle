@@ -278,7 +278,7 @@
     { "until_iter": 25, "kl_coef": 0.02, "lr": 0.0005, "kl_cap": 0.2 },
     // 尾段 it26+：kl 继续放松 + lr 砍半做小步精修（无限轮腿里它会一直跑到停腿为止）。
     // ⚠ `kl_cap` 两段**都显式写**：它在 per-tick 的 serial/remote 路径**不接线**
-    // （DECISIONS §2026-09-15-goalnn-kl-cap-unwired，`ppo_update` 无形参），
+    // （DECISIONS §2026-09-15-goalnn-kl-cap-unwired · 全文 → docs/nn/experiments.md §33，`ppo_update` 无形参），
     // 但 stream 路径会读；段内缺席即 None ⇒ 回落 `policy.streamKlCap`（本仓 0.18）
     // ⇒ 会与 kl_coef 的放松方向打架。**别把它当护栏，也别留缺席。**
     { "kl_coef": 0.01, "lr": 0.00025, "kl_cap": 0.2 },

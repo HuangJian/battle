@@ -112,7 +112,7 @@
 > eval_m1 补 perGame 落盘）+ P1（ladder.json 8 关冻结、policy=god 端到端 1 局通过、
 > max_ticks 12000 对齐训练口径）+ P2（BatchEvalRunner/双模态 hook/队列文件桥/
 > engine_epoch 门）+ P3（stats/哨兵 S1–S12/EvalBoard 网页入抽屉）+ P4（backfill/verify-p4 工具）。
-> 决策 → DECISIONS §2026-09-10-goalnn-rleval。`bun run check` 1911 pass + build OK。
+> 决策 → DECISIONS §2026-09-10-goalnn-rleval · 全文 → docs/nn/experiments.md §33。`bun run check` 1911 pass + build OK。
 >
 > **TBD(标定，须集群+活腿，代码路径已就绪）**：① 200 局打表（c4l1/c20l3/s1l3b1 分档 T）；
 > ② 真实训练中 B 单元墙钟 + 同窗等待（per-tick/serial）；③ Δ_space（God probe0 vs eval860k
