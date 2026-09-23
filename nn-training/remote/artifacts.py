@@ -440,6 +440,13 @@ LEDGER_FIELDS: tuple[tuple[str, str, str | tuple[str, ...]], ...] = (
     ("entropy", "agg", "entropy"),
     ("kl", "agg", "kl"),
     ("mean_ret", "agg", "mean_ret"),
+    # 缰绳与 demo 遥测（2026-09-23，用户发现「demo_bc 全缺」）：这两个键**产物行里一直有**
+    # （`agg.kickstart` / `agg.demo_bc`，见 `remote/worker.py` 的 result.agg），只是这张
+    # 搬运表没收 ⇒ `iteration` 行永远看不到它们——本机腿（`rl/events.write_iteration`）
+    # 逐轮都写，回传/导入腿却恒空，同一张表两腿不可比。「缺数据」与「真的为 0」也不是
+    # 一回事：`_dig` 给 None 就不写（旧包无此键），真 0 照写。
+    ("kickstart", "agg", "kickstart"),
+    ("demo_bc", "agg", "demo_bc"),
     # 逐维度画像与分数统计（控制台的 kills/accuracy/loot 与 score 列读它们）——
     # 2026-09-22 起产物行的 report 里带这两块；更早打的包没有 ⇒ 那几列留空，不编数字。
     ("dim_means", "report", "dimMeans"),

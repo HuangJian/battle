@@ -341,6 +341,81 @@ def test_scan_finds_nested_shards_but_ignores_incomplete(tmp_path: Path) -> None
     ]
 
 
+def test_per_game_comes_from_shard_manifests_not_batch_reports(tmp_path: Path) -> None:
+    """逐局画像必须取自**单局 manifest**——批次 `_rl_report.json` 会让它全丢。
+
+    2026-09-23 用户实测定位：「耗时/击杀/残血/道具」四列在云机腿上永远空。根因不是没回传，
+    是回传体里的 `perGame` **恒为 `[]`**：它由 `compact_per_game` 从**批次摘要**
+    （`collect_reports` 读的 `_rl_report.json`）生成，而那份摘要的 `stage`/`seed` 是复数
+    数组 `stages`/`seeds`、没有 `kills` 这些单局字段 ⇒ 「无 (stage,seed) 就丢」把每行都丢掉
+    ⇒ 落地方不写 `it<N>/per-game.json` ⇒ 读方（`readRoundActuals`）四列恒空。
+    """
+    from rl.reports import compact_per_game
+
+    # 真实单局 manifest 的字段集（`tools/sim/export-rl-rollout.ts` 的 manifest 对象）：
+    # 读方 `entryFromManifest` 读的就是这一套名字（两腿同字段，没有翻译层）。
+    def _game(d: Path, seed: int, kills: int) -> None:
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "stage": 2000,
+                    "seed": seed,
+                    "nSamples": 220,
+                    "kills": kills,
+                    "ticks": 2100,
+                    "outcome": "stage_clear",
+                    "powerUpsCollected": 3,
+                    "playerDamageTaken": 2,
+                    "playerDeaths": 0,
+                    "puGotTank": 1,
+                    "startLives": 3,
+                    "enemyTotal": 20,
+                    "score": 0.42,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    _game(tmp_path / "w0" / shard_name(2000, 11), 11, 5)
+    _game(tmp_path / "w1" / shard_name(2000, 12), 12, 9)
+    dirs = sorted(scan_shard_dirs(tmp_path))
+    ms = iter_rollout.collect_shard_manifests(dirs)
+    assert len(ms) == 2, "每个 shard 目录都有一份单局 manifest"
+    pg = compact_per_game(ms)
+    assert sorted(e["seed"] for e in pg) == [11, 12], "单局 manifest 带 (stage,seed) ⇒ 收得下"
+    assert all(e["stage"] == 2000 for e in pg)
+    # 四列的原始字段必须在（读方就是拿这些算 耗时/击杀/残血/道具）。
+    by_seed = {e["seed"]: e for e in pg}
+    assert by_seed[11]["kills"] == 5 and by_seed[12]["kills"] == 9
+    for e in pg:
+        assert {
+            "ticks",
+            "outcome",
+            "powerUpsCollected",
+            "playerDamageTaken",
+            "playerDeaths",
+            "puGotTank",
+            "startLives",
+            "enemyTotal",
+            "score",
+        } <= set(e), f"缺字段 {e}"
+    # 反例（旧口径）：批次摘要抽不出任何一行 ⇒ perGame 空 ⇒ 四列没有数据源。
+    batch = {"games": 2, "stages": [2000], "seeds": [11, 12], "totalTicks": 900}
+    assert compact_per_game([batch]) == []
+
+
+def test_collect_shard_manifests_skips_missing_manifest(tmp_path: Path) -> None:
+    """缺/坏 manifest 只少一局读数（scan_shard_dirs 保证场上都有；真缺了不能拖垮整轮回传）。"""
+    good = tmp_path / "w0" / shard_name(1, 5)
+    _write_shard(good, 1, 5)
+    bad = tmp_path / "w1" / shard_name(1, 6)
+    bad.mkdir(parents=True)
+    (bad / "manifest.json").write_text("{not json", encoding="utf-8")
+    got = iter_rollout.collect_shard_manifests([bad, good])
+    assert [m["seed"] for m in got] == [5], "坏行跳过，好行保留"
+
+
 # ------------------------------------------------------------------ result
 
 

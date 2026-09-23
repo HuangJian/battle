@@ -134,7 +134,17 @@ def test_imported_ledger_row_maps_report_and_agg(tmp_path: Path) -> None:
         iters=(4,),
         run_id="r2",
         row={
-            "agg": {"kl": 0.02, "entropy": 0.5, "policy": 0.1, "value": 0.3, "mean_ret": 7.0},
+            "agg": {
+                "kl": 0.02,
+                "entropy": 0.5,
+                "policy": 0.1,
+                "value": 0.3,
+                "mean_ret": 7.0,
+                # 缰绳/demo 遥测：产物行的 agg 里**一直有**，2026-09-23 才进搬运表
+                # （用户发现「demo_bc 全缺」——不是没跑，是记丢了）。
+                "kickstart": 0.02,
+                "demo_bc": 1.45,
+            },
             "report": {
                 "games": 328,
                 "shards": 328,
@@ -163,6 +173,7 @@ def test_imported_ledger_row_maps_report_and_agg(tmp_path: Path) -> None:
     assert ev["winRate"] == 0.11 and ev["samples"] == 76800 and ev["ticks"] == 123456
     assert ev["rollout_sec"] == 4.6 and ev["ppo_sec"] == 88.9
     assert ev["policy"] == 0.1 and ev["value"] == 0.3 and ev["kl"] == 0.02
+    assert ev["kickstart"] == 0.02 and ev["demo_bc"] == 1.45, "缰绳/demo 遥测要搬进账本"
     assert ev["outcomes"] == {"loss": 300} and ev["steps"] == 48000
     # 控制台用 ticks/expectedGames 算平均每局时长 ⇒ 映射了 report.games 这一列才不是 0
     assert ev["expectedGames"] == 328 and ev["ticks"] // ev["expectedGames"] == 376
@@ -187,6 +198,8 @@ def test_old_package_without_dims_leaves_those_columns_empty(tmp_path: Path) -> 
         (tmp_path / "demo" / "training_log.jsonl").read_text(encoding="utf-8").strip()
     )
     assert "dim_means" not in ev and "score_mean" not in ev and "score_std" not in ev
+    # 旧包/未配 demo 的轮没有这两个键 ⇒ 账本里也**不下落成 0**（与上面同一口径）。
+    assert "kickstart" not in ev and "demo_bc" not in ev
     assert ev["winRate"] == 0.1, "能搬的照搬"
     # 起点快照（it0）不是一轮：不写 iteration 行（控制台会把它当成轮次）
     assert "dim_means" not in ev, "产物行里没有的东西不许编（那张表的列宁可为空）"

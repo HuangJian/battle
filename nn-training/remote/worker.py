@@ -2642,6 +2642,9 @@ def run_job(
         chunks = ppo_engine.chunk_episodes(
             episodes, int(manifest["mb"]), shuffle=bool(manifest["shuffle"])
         )
+        # mb 对齐（2026-09-23）后**实际训练**的步数 = Σchunk，比池子少尾部 `n % mb`
+        # （≤1023 步）。两个数字都报：只报池子会把「采到的」当「训过的」，运维按
+        # samples 复算吞吐/样本效率时会差一个尾巴。
         agg = ppo_engine.ppo_update(
             model,
             opt,
@@ -2676,7 +2679,9 @@ def run_job(
     # P0.5：T_ppo 进传输账（与 T_in/T_out 同一条 `wire` 行 ⇒ 占比可复算，不用人肉拼日志）。
     _wire_time(jid, "ppo", time.time() - t_ppo)
     log(
-        f"job {jid}: PPO done in {ppo_sec}s, steps={total_steps} chunks={len(chunks)} kl={agg.get('kl')}"
+        f"job {jid}: PPO done in {ppo_sec}s, "
+        f"steps={sum(c['obs'].shape[0] for c in chunks)}/{total_steps}（训练/池子） "
+        f"chunks={len(chunks)} kl={agg.get('kl')}"
     )
 
     # ---- 产物：weights_json（save_weights_json，D12/G1）+ _ppo_save tar（D5） ----
@@ -2713,7 +2718,10 @@ def run_job(
             "kickstart": float(agg.get("kickstart", 0.0)),
             "demo_bc": float(agg.get("demo_bc", 0.0)),
             "mean_ret": float(agg.get("mean_ret", 0.0)),
-            "steps": int(total_steps),
+            # mb 对齐（2026-09-23）后 = **实际训练**的步数（≤池子，差尾部 n%mb）。
+            # 池子总量另有 transitions_collected 一栏，不靠这里兼职。
+            "steps": int(sum(c["obs"].shape[0] for c in chunks)),
+            "steps_pooled": int(total_steps),
             "chunks": len(chunks),
         },
         "commit_echo": manifest["commit"],

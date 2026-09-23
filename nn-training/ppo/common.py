@@ -540,7 +540,7 @@ def _ppo_load(ckpt_path: str | None, model, opt) -> int:
 
 # ---------------- minibatch chunking ----------------
 def chunk_episodes(episodes: list[dict], mb: int, shuffle: bool = True) -> list[dict]:
-    """Split per-episode dicts into fixed-size minibatch chunks (last chunk ragged).
+    """Split per-episode dicts into fixed-size minibatch chunks (every chunk exactly `mb`).
 
     GAE is computed per-episode BEFORE chunking; chunks are only an update-
     granularity unit (bounds activation memory, adds gradient steps).
@@ -552,6 +552,16 @@ def chunk_episodes(episodes: list[dict], mb: int, shuffle: bool = True) -> list[
     GAE/adv/ret 是逐 transition 存储的，重排不改变任何数学（on-policy 正确性
     不受影响）；RNG 用全局 np.random（由 main 播种，可复现）。
     shuffle=False 保留旧行为（逐字节一致，供对照实验）。
+
+    mb 对齐（2026-09-23，见 docs/nn.progress.md §140）：重排路径**丢弃尾部
+    `n % mb` 步**，让每个 chunk 恰为 `mb` 行（旧行为是末块 ragged）。为什么值这个
+    代价：ragged 末块每个 epoch 只用一次，中间隔着几十个满块步 ⇒ XLA 的程序缓存
+    必然把它挤出、下一 epoch 重新编译（真机实录 12~13s × epochs；it98 一轮 83.8s
+    里 50s 是它，而满块稳态只要 0.179s/步）。形状恒定后图签名恒为 `B{mb}`，编译
+    只付一次。丢的是重排序列的**尾部** ⇒ 均匀随机子集，无偏；`n % mb == 0` 时
+    逐字节不变（`idx` 的抽样顺序未动）。
+    归一化（load_episodes_common 的 adv/ret）覆盖**整池**（含被丢的 <mb 步）——
+    刻意保持「归一化粒度 = 本轮池」的既有语义，不因丢弃而改变。
     """
     if not shuffle or len(episodes) <= 1:
         out: list[dict] = []
@@ -564,7 +574,20 @@ def chunk_episodes(episodes: list[dict], mb: int, shuffle: bool = True) -> list[
     flat = {k: np.concatenate([e[k] for e in episodes], axis=0) for k in keys}
     n = flat["obs"].shape[0]
     idx = np.random.permutation(n)
-    return [{k: v[idx[s : s + mb]] for k, v in flat.items()} for s in range(0, n, mb)]
+    n_used = (n // mb) * mb
+    if n_used == 0:
+        # 池子不足一个 mb（只在小样本冒烟/单测里出现）：保留旧的一块 ragged。
+        # 丢弃会得到 0 个 chunk ⇒ 静默不训练，比多付一次小 shape 编译糟得多。
+        log(f"[chunk] WARN 池子 {n} 步 < mb={mb} ⇒ 不裁剪（单独一块 ragged）")
+        n_used = n
+    elif n_used < n:
+        log(
+            f"[chunk] mb 对齐：pooled={n} 步 → 丢弃尾部 {n - n_used} 步"
+            f"（{n_used // mb} 块 × {mb}；无 ragged 末块 ⇒ XLA 图签名恒定、不重编）"
+        )
+    return [
+        {k: v[idx[s : s + mb]] for k, v in flat.items()} for s in range(0, n_used, mb)
+    ]
 
 
 # ---------------- episode loading skeleton (ppo / ppo_intent 共用) ----------------

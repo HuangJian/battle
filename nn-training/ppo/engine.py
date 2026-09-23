@@ -431,8 +431,10 @@ def ppo_update(
         # 编译后命中缓存，与 chunk 数无关。非 XLA 设备为 no-op，CPU/CUDA 数值
         # 逐位不变（执行时机对 eager 无感）；XLA 上 ref_model 冻结 + no_grad ⇒
         # 逐位不变（只改变图切分，不改变算子与数据）。
-        # 例外：末 chunk ragged（见 chunk_episodes）——tail 的 B' = n % mb 仍随每轮
-        # transition 数漂移，故每个 job 最多再付一次小 shape 编译（full-B + tail 各一）。
+        # 例外已消除（2026-09-23，见 chunk_episodes 的 mb 对齐）：旧行为下末 chunk
+        # 是 ragged（B' = n % mb，随每轮 transition 数漂移）⇒ 每轮/每 epoch 各付一次
+        # 小 shape 编译（§134 的 ~14s、§140 实测 12.5s × 4）。现在池子先裁到 mb 的
+        # 整数倍，图形状恒为 (mb,14,26,26)，"每 chunk 一次 mark" 就足以覆盖全部步。
         _t_ref = time.time()
         with torch.no_grad():
             for _i, _e in enumerate(tensored):

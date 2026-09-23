@@ -1206,14 +1206,24 @@ def test_compute_gae() -> None:
 def test_chunk_episodes() -> None:
     import ppo as ppo_mod
 
-    print("[fast] ppo.chunk_episodes (ragged 尾巴)")
-    eps = [{"obs": np.zeros((1000, 2)), "adv": np.arange(1000)}]
+    print("[fast] ppo.chunk_episodes (mb 对齐；无 ragged 末块)")
+    # 多 episode 池才走「全局重排」路径——单池分支不重排（对齐单池会丢到"局末"，有偏）。
+    eps = [
+        {"obs": np.zeros((600, 2)), "adv": np.arange(600)},
+        {"obs": np.zeros((400, 2)), "adv": np.arange(400)},
+    ]
     chs = ppo_mod.chunk_episodes(eps, 600)
     sizes = [c["obs"].shape[0] for c in chs]
-    check(sizes == [600, 400], f"ragged tail split (got {sizes})")
+    # 2026-09-23：全部恰好 mb；尾部 1000%600=400 步被丢弃（旧行为是一块 ragged 400）。
+    check(sizes == [600], f"all chunks exactly mb (got {sizes})")
     total = sum(c["obs"].shape[0] for c in chs)
-    check(total == 1000, "no samples lost")
+    check(total == 600, f"尾部按 mb 对齐丢弃 (got total={total})")
     check(all(set(c.keys()) == set(eps[0].keys()) for c in chs), "keys preserved per chunk")
+    # shuffle=False（对照路径）与单池路径保持旧行为。
+    seq = ppo_mod.chunk_episodes(eps, 600, shuffle=False)
+    check([c["obs"].shape[0] for c in seq] == [600, 400], "shuffle=False 逐字节保留 ragged")
+    one = ppo_mod.chunk_episodes([eps[1]], 600)
+    check([c["obs"].shape[0] for c in one] == [400], "单池不重排、不对齐")
 
 
 def test_backup_weights(tmp: Path) -> None:

@@ -31,6 +31,7 @@ import json
 import shutil
 import subprocess
 import time
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -391,6 +392,31 @@ def collect_reports(job_dir: Path, spec: dict) -> list[dict[str, Any]]:
     return reports
 
 
+def collect_shard_manifests(shard_dirs: Sequence[Path]) -> list[dict[str, Any]]:
+    """读每个 shard 目录里的**单局** `manifest.json`（缺/坏则跳过，返回里只留读到的）。
+
+    为什么逐局画像不能用 `collect_reports`（2026-09-23 定位）：那是每局的
+    `_rl_report.json` = **批次摘要**（`games`/`winRate`/`totalTicks`/`scoreStats`…），
+    它的 `stage`/`seed` 是**复数数组**（`stages`/`seeds`）、且没有 `kills` 这些单局字段
+    ⇒ `compact_per_game` 的「无 (stage,seed) 就丢」会把**每一行**都丢掉 ⇒ `perGame` 恒为
+    `[]` ⇒ 落地方不写 `it<N>/per-game.json` ⇒ 控制台的「耗时/击杀/残血/道具」四列在
+    云机腿上永远空。**不是没回传，是从没进过回传体**。
+
+    单局 manifest 是唯一带齐那套字段、且与本机腿（读方按 manifest 扫描）**同名同形**的来源
+    ——读方因此不需要任何翻译层。`scan_shard_dirs` 已保证每个 shard 目录都有它；真缺了
+    也只少一局读数，不该让整轮回传失败（计数会打进轮末日志，不静默）。
+    """
+    out: list[dict[str, Any]] = []
+    for d in shard_dirs:
+        try:
+            m = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(m, dict):
+            out.append(m)
+    return out
+
+
 def _make_pool(
     bun: str, ts_dir: Path, argvs: list[list[str]], workers: int, log
 ) -> serve_pool.ServePool | None:
@@ -513,11 +539,12 @@ def run_iter_rollout(
     shard_dirs = verify_shards(jd, iter_expected_data_fp(spec))
     reports = collect_reports(jd, spec)
     report = combine_reports(reports)
+    per_game = collect_shard_manifests(shard_dirs)
     # 逐局压缩画像随轮账本行走：云机离线腿没人把单局 manifest 拉回本机（轮末 prune 就删了），
     # 而控制台的「耗时/击杀/残血/道具」列是**逐局**聚合的 ⇒ 不带它那几列永远空（见
     # `rl/reports.compact_per_game` 的 docstring）。在线腿已有 `dist/<节点>/rl_s*/` 路也不冲突
     # （同一份数据，读方优先用账本里的这一块）。
-    report["perGame"] = compact_per_game(reports)
+    report["perGame"] = compact_per_game(per_game)
     report["shards"] = len(shard_dirs)
     report["elapsedSec"] = round(time.time() - t0, 3)
     report["perGameSecs"] = game_secs
@@ -526,7 +553,12 @@ def run_iter_rollout(
     log(
         f"kind=iter rollout done: shards={len(shard_dirs)} games={report['games']} "
         f"winRate={report['winRate']} samples={report['totalSamples']} "
-        f"in {report['elapsedSec']}s"
+        f"in {report['elapsedSec']}s｜逐局画像 {len(report['perGame'])}/{len(shard_dirs)} 行"
+        + (
+            "（四列数据源；0 行 = 控制台耗时/击杀/残血/道具恒空，查单局 manifest）"
+            if not report["perGame"]
+            else ""
+        )
     )
     # 单局耗时分布：<5s 这条线（以及重试次数）要靠每轮的真数据校准，不靠猜。
     log(
