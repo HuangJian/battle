@@ -364,6 +364,7 @@ class FakeAgent(BaseHTTPRequestHandler):
                         if ver != "?":
                             cache["bun"] = ver
                             break
+                        # sleep-ok: 轮询步长（等的是「bun 版本已可问出」这个状态）
                         time.sleep(0.05)
                     else:
                         cache["bun"] = "?"
@@ -388,6 +389,7 @@ class FakeAgent(BaseHTTPRequestHandler):
             self._srv.events.append(("dispatch", time.time(), key))
             # 重复派发 = 竞速副本：挂住 dup_hang 秒（慢节点 + 同步 agent 的不可中断路径）
             if self._srv.dup_hang > 0 and key in self._srv.dispatched:
+                # sleep-ok: 夹具模拟的工作量：竞速副本在慢节点上挂住 dup_hang 秒
                 time.sleep(self._srv.dup_hang)
             self._srv.dispatched.add(key)
             if key in self._srv.slow_first and key not in self._srv._slowed_once:
@@ -405,10 +407,12 @@ class FakeAgent(BaseHTTPRequestHandler):
                 while time.time() < deadline:
                     if self._srv.fetch_n.get(key, 0) >= 2:
                         break
+                    # sleep-ok: 轮询步长（等的是「第二份 fetch 已发生」这个状态）
                     time.sleep(0.05)
             if q.get("mode") == "eval" and self._srv.eval_delay > 0:
                 self._srv.eval_dispatched.set()  # I7 栅栏：eval 已派发（首局即置位）
-                time.sleep(self._srv.eval_delay)  # I7 慢 eval（后台消化模拟）
+                # sleep-ok: 夹具模拟的工作量：I7 慢 eval（后台消化模拟）
+                time.sleep(self._srv.eval_delay)
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
             body = _pack_container(*key, q["wver"], mode=q.get("mode"))
@@ -650,7 +654,9 @@ def test_it_stream_local_loser_retire(tmp_path: Path, monkeypatch: pytest.Monkey
     monkeypatch.setattr(_rdispatch, "log", _capture_log)
 
     def _slow_stub(bun_: str, rl_path: str, traj_dir, idx: int, task, a, wver: str) -> dict:
-        time.sleep(0.35)  # 节点主副本必先结算 ⇒ 本地副本必为 dup 输家
+        # 赌的是**相对快慢**（节点那侧是即时假服务），不是「等对方先跑」；
+        # sleep-ok: 夹具模拟的工作量：让本地 worker 比节点慢一拍（制造本地做 dup 输家）
+        time.sleep(0.35)
         return _stub_local_rollout(bun_, rl_path, traj_dir, idx, task, a, wver)
 
     monkeypatch.setattr(_rdispatch, "run_local_rollout", _slow_stub)
@@ -690,6 +696,7 @@ def test_it_stream_local_loser_retire(tmp_path: Path, monkeypatch: pytest.Monkey
         # 主轮已收官）——必须等它落地，否则断言与 retire 行赛跑（实测首版即踩）。
         deadline = time.time() + 5.0
         while time.time() < deadline and not any("retired" in ln for ln in lines):
+            # sleep-ok: 轮询步长（等的是「retire 行已落日志」这个状态，5s 只当挂起兜底）
             time.sleep(0.02)
         retired = [ln for ln in lines if "retired" in ln]
         local_retired = [ln for ln in retired if "node=local" in ln]

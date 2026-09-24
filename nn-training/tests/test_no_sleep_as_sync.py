@@ -6,7 +6,10 @@ serve_pool 端到端 / `bulk_sched` 单通道 / `eval_local` 硬顶 / `push_prio
 `offline_deliver`、`rollout rescan`、`async_result`。共同特征：**拿绝对数字当同步手段**
 —— `sleep(N)` 赌「对方已经到了」、`elapsed < N` 赌「机器够快」。
 
-本守卫钉住最容易复发、也最容易静态判定的那一条：`tests/` 里每一处 `.sleep(...)` 调用
+适用于**两层**：`tests/`（单测层）与 `e2e/`（集成层）—— 两层同一次 xdist 调用里跑，
+同样的 flake 机理与同样的纪律。
+
+本守卫钉住最容易复发、也最容易静态判定的那一条：两层的每一处 `.sleep(...)` 调用
 都必须**显式标注**它为什么不是同步，且理由必须落在**两族**之内：
 
   * ``轮询步长`` —— 循环里等的是谓词/状态（`while not pred(): time.sleep(step)`），
@@ -43,6 +46,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 TESTS = Path(__file__).resolve().parent
+E2E = ROOT / "e2e"
+#: 扫描根（两层同一套判据）：`tests/` 单测层 + `e2e/` 集成层。
+SCAN_ROOTS = (TESTS, E2E)
 
 #: 标注关键字 + 理由（同一行尾注或上一行注释里出现即可）。
 _MARK = re.compile(r"sleep-ok:\s*(?P<why>[^\r\n]*)")
@@ -103,10 +109,13 @@ def _problems(py: Path) -> list[str]:
 
 
 def test_every_sleep_in_tests_declares_a_reason_from_the_two_families() -> None:
-    """`tests/` 里每一处 `.sleep(...)` 都要有落进两族的 `# sleep-ok: <理由>`。"""
+    """`tests/` + `e2e/` 里每一处 `.sleep(...)` 都要有落进两族的 `# sleep-ok: <理由>`。"""
     problems: list[str] = []
-    for py in sorted(TESTS.rglob("*.py")):
-        problems += _problems(py)
+    for root in SCAN_ROOTS:
+        for py in sorted(root.rglob("*.py")):
+            if "__pycache__" in py.parts:
+                continue
+            problems += _problems(py)
     assert not problems, (
         "tests/ 里的 sleep 必须标注理由，且理由要落进「轮询步长」/「夹具模拟」两族"
         "（说明它等的是谓词或模拟的工作量，而不是「等对方先跑」）：\n  "

@@ -298,7 +298,8 @@ class _FakeCloudNode(threading.Thread):
         while time.time() < deadline and self.result_status == 0 and not self.errors:
             job = hub_poll(self.hub, TOKEN)
             if job is None or not job.get("job_id"):
-                time.sleep(0.05)  # 还没发布：短轮询（真 worker 的 poll 节奏）
+                # sleep-ok: 轮询步长（等的是「hub 已发布 job」这个状态，60s 只当挂起兜底）
+                time.sleep(0.05)  # 短轮询（真 worker 的 poll 节奏）
                 continue
             try:
                 self._handle(job)

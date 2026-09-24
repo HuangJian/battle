@@ -292,6 +292,7 @@ class _Hub:
             st, body = _http(self.base, "/admin/queue", token=TOKEN)
             if st == 200 and sorted(body.get("courses") or {}) == sorted(expect):
                 return
+            # sleep-ok: 轮询步长（等的是「hub 已就绪且课程表已登记」这个状态）
             time.sleep(0.1)
         raise AssertionError(
             f"hub-server 未就绪或课程表不对（rc={self.proc.poll()}）；输出：{self.output()}"

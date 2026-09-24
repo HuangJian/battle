@@ -528,6 +528,7 @@ def _wait_ready(url: str, token: str) -> None:
                 return
         except Exception:
             pass
+        # sleep-ok: 轮询步长（等的是「worker_server 已就绪」这个状态，deadline 只当兜底）
         time.sleep(0.05)
     raise RuntimeError("worker_server did not become ready")
 

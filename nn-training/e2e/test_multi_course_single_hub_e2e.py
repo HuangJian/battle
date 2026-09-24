@@ -99,6 +99,7 @@ def _wait_until(pred, *, timeout: float = 30.0, step: float = 0.1) -> bool:
     while time.time() < end:
         if pred():
             return True
+        # sleep-ok: 轮询步长（等的是谓词/状态，超时只当挂起兜底）
         time.sleep(step)
     return bool(pred())
 
@@ -205,6 +206,7 @@ class _Hub:
             st, body = _http(self.base, "/admin/queue", timeout=2.0)
             if st == 200 and sorted(body.get("courses") or {}) == sorted(expect):
                 return
+            # sleep-ok: 轮询步长（等的是「hub 已就绪且课程表已登记」这个状态）
             time.sleep(0.1)
         raise AssertionError(
             f"hub-server 未就绪或课程表不对（rc={self.proc.poll()}）；输出：{self.output()}"
@@ -419,8 +421,13 @@ def test_offline_course_is_parked_and_resumes_on_going_online(tmp_path: Path) ->
 
         m_off = _publish(c_off, dirs[c_off][0], dirs[c_off][1], traj, code_zip)
         jid_off = m_off["job_id"]
-        # 离线课的活躺在队首、没人碰：等足若干部拍（0.05s/拍）仍是 pending
-        time.sleep(1.5)
+        # 离线课的活躺在队首、没人碰：等**派发器真的转过 10 拍**（`ticks` 计数 = 事件）
+        # 再断言它仍 pending —— 原来 `sleep(1.5)` 是拿时长猜「拍数应该够了」
+        # （--push-poll-sec 0.05 ⇒ 1.5s≈30 拍），满载时会睡多/睡少（2026-09-24）。
+        t0 = hub.push_state()["ticks"]
+        assert _wait_until(lambda: hub.push_state()["ticks"] >= t0 + 10, timeout=30.0), (
+            "派发器 30s 内没转过 10 拍（线程死了？）——负向断言失去前提"
+        )
         q = hub.queue()
         assert q["courses"][c_off]["pending_n"] == 1, "离线课的 job 不该消失"
         assert q["courses"][c_off]["inflight"] == [], "离线课不该被派发"
