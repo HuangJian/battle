@@ -337,6 +337,38 @@ def eval_census_fields(manifest: dict | None) -> dict:
     return out
 
 
+#: metrics v8 危险暴露四列（plan/x20-dodge-avoidance §2；`src/nn/danger-metrics.ts`
+#: 同名同义）。`export-eval-game.ts` 顶层直出（2026-09-24）；旧报告/未同步节点缺键 = None。
+EVAL_V8_KEYS = (
+    "playerHpRatio",
+    "dangerTicks",
+    "threatTicks",
+    "dmgFirst600",
+)
+
+
+def eval_v8_fields(manifest: dict | None) -> dict:
+    """从 eval 报告 manifest 抽出 v8 四列（缺键 = 整键省略，不写 None）。
+
+    与 `eval_census_fields` 同形、但缺省语义**故意不同**：下游汇总
+    （`tools/sim/eval-course-ckpt.ts`）以“键缺席”判未知（`!== undefined` 才计入
+    `dmg600Known` 分母）；若写显式 None，JSON 落盘为 null，会被误计入分母、
+    稀释 `clean600%`。合法的 0 值（前 600t 零承伤的干净局）必须保留，
+    故只过滤 None、保留 0。
+    `rl/batch_eval.py::record`（in-loop 日常评估的行构造点）必须经本函数取数，
+    与 `eval_row` 同源——两处行构造点不得各自手写字段表（2026-09-24：v8 提交只改了
+    TS 侧，Python 两处全漏，日常 eval 失明）。
+    """
+    out: dict = {}
+    if not isinstance(manifest, dict):
+        return out
+    for k in EVAL_V8_KEYS:
+        v = manifest.get(k)
+        if v is not None:
+            out[k] = v
+    return out
+
+
 def eval_row(
     manifest: dict,
     *,
@@ -397,6 +429,8 @@ def eval_row(
         "cellsVisited": manifest.get("cellsVisited"),
         "firstKillTick": manifest.get("firstKillTick"),
         "stuckTicks": manifest.get("stuckTicks"),
+        # metrics v8 危险暴露四列（与 batch_eval.record 同源，见 eval_v8_fields）。
+        **eval_v8_fields(manifest),
         "puSpawnBomb": manifest.get("puSpawnBomb"),
         "puSpawnTank": manifest.get("puSpawnTank"),
         "puSpawnFreeze": manifest.get("puSpawnFreeze"),

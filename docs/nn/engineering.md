@@ -7,6 +7,38 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §24 metrics v8 的 Python 半链补记：两处 `eval_log` 行构造点 + 缺键语义（2026-09-25，补 §23 漏项）
+
+**症状**：`eval_log.jsonl` 的逐局行里 `playerHpRatio`/`dangerTicks`/`threatTicks`/`dmgFirst600`
+四列全缺 —— TS 探针表（`tmp/human-v8.ts` / `tmp/mirror-probe.ts`，走 `export-eval-game.ts`）读数正常，
+**账本没有**：过程读数在采集腿与 EvalBoard 上失明（探针看得到、逐轮行看不到）。
+
+**成因**：§23 的 lockstep 清单在 Python 侧只点了 ④（`METRICS`/版本/行数断言），漏掉**行构造点**：
+`rl/eval_local.eval_row`（本地 resim 逐局行）与 `rl/batch_eval.record`（in-loop 日常评估行）。
+v8 提交只改了 TS 导出器 + `reward_library.py`，两处 Python 行构造点**各自手写字段表** ⇒ 新列无声掉地。
+注意 ④ 类的行宽/列名对账**全绿也抓不到** —— 缺的是「行里有没有这个键」，不是「行宽对不对」。
+
+**修法（同源 helper，禁两处手写）**：`rl/eval_local.eval_v8_fields(manifest)` 单点取数，
+`eval_row` 与 `batch_eval.record` 都 `**eval_v8_fields(manifest)` 展开。
+
+**缺键语义（与 census 列故意不同，别「统一」）**：缺键 ⇒ **整键省略**，不是写 `None`。
+下游 `tools/sim/eval-course-ckpt.ts` 以「键缺席」判未知（`!== undefined` 才进 `dmg600Known` 分母）；
+写显式 `None` 落盘成 `null` 会被误计入分母、稀释 `clean600%`。合法 `0`（前 600t 零承伤的干净局）
+必须保留 ⇒ 只滤 `None`、保留 `0`。旧节点/旧报告缺键 = 未知，正是想要的。
+
+**清单据此扩到八处**：⑧ = Python 两处 `eval_log` 行构造点（经同一 helper）。加列工单见
+`plan/x20-dodge-avoidance.plan.md §2` 的八行表。
+
+**遗留（未做，非本次范围）**：m1 链路（`eval_m1_once.to_m1_row` → `rl/eval_m1` →
+`eval_ingest.m1_game_row`）不带 v8 四列 —— `tools/sim/m1-eval.ts` 的 `perGame` 契约未含
+（sim-worker telemetry 无 danger 累加器），与 `eval_ingest` docstring 记的既有缺列同口径。
+
+**验证**：新增 `tests/test_eval_row_v8.py`（4 例：helper 逐值透传 / 旧 manifest 整键省略 /
+`eval_row` 带全四列 / `batch_eval.record` 必须经 helper 的源码哨兵）；nn 门禁 ruff+mypy+pytest 绿。
+顺带修一条既有测试 bug：该用例原按仓根相对路径读源码，而门禁 cwd 是 `nn-training/` ⇒
+`FileNotFoundError`（改用 `pathlib.Path(__file__).resolve().parents[2]`）。
+
+---
 ## §23 metrics v8：危险暴露四列（idx41–44）+「加列 = 全链 lockstep」（2026-09-24，plan/x20-dodge-avoidance §2）
 
 **背景**：audit §6.1 —— 41 列指标里有 `playerLevel` 却没有 hp、有 `pickupDist` 却没有威胁，
@@ -27,6 +59,9 @@
 行数断言 45 · ⑤ `reward_validation.DEFAULT_RANGES` 四列（`test_all_metrics_have_envelope_range` 锁） ·
 ⑥ golden 重生成（`reward_golden.json` 版本号 + `v7_phi_ts_oracle.json` 宽度同步） ·
 ⑦ 测试（行宽/跨语言列名/独立重实现/确定性/口径源码哨兵）。
+
+> ⚠ 2026-09-25 补：本清单漏了第 ⑧ 项 —— Python 两处 `eval_log` 行构造点
+> （`rl/eval_local.eval_row` / `rl/batch_eval.record`），实测就是这么漏掉的，见 §24。
 
 **验证（实测）**：reward golden **64/64 case 的 reward 逐位不变**、前 41 列逐位不变；
 `v7_phi_ts_oracle` phi **逐位不变**（256 行，前 31 列亦逐位不变）；nn 门禁 ruff+mypy+pytest

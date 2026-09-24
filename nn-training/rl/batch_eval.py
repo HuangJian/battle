@@ -37,6 +37,7 @@ from rl.eval_local import (
     EVAL_TASK_ATTEMPTS,
     eval_census_fields,
     eval_loot_fields,
+    eval_v8_fields,
     run_local_eval_game,
 )
 from rl.jsonc import load as jsonc_load
@@ -1164,6 +1165,9 @@ class BatchEvalRunner:
                 "firstKillKind": census["firstKillKind"],
                 "killOrder": census["killOrder"],
                 "killerKinds": census["killerKinds"],
+                # metrics v8 危险暴露四列（与 eval_row 同源，见 eval_v8_fields；
+                # 缺键（旧节点/旧报告）= None，下游按缺省处理，不伪造）。
+                **eval_v8_fields(manifest),
                 # B 层归属（ingest → EvalStore 直读）
                 "batch_id": self.batch.get("batch_id"),
                 "batch_unit": {"idx": self.unit_idx, "of": self.unit_of},
