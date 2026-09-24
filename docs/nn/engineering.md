@@ -838,13 +838,107 @@ per-sha 目录），读的人要靠上下文猜——这刀顺手把这个名字
 > ⚠ mypy 报的 `sorted()` 类型变量错（新守卫里 `halted` 混了 `str|bytes|int|float|...`）——
 > AST `Constant.value` 的静态类型就是那个联合，`bool(...)` 一下即可；`ruff check` 看不见这类错。
 
+### 第十四刀（2026-09-24）：拆状态 —— `_JobStore`（1002 行 / 49 方法）按**域**拆成六个状态混入
+
+`remote/hub_server.py` **3017 → 2072 行**（−31%），新 `remote/hub/store_*.py` 六块共 **1273 行**
+（47 个方法与本体 895 行搬走，外加 4 个状态钩子）：
+
+| 新模块 | 类 | 方法 | 本体行数 | 层 |
+|---|---|---|---|---|
+| `hub/store_ledger.py` | `LedgerMixin` | 7 | 123 | 0 |
+| `hub/store_wire.py` | `WireMeterMixin` | 4 | 32 | 0 |
+| `hub/store_scheduling.py` | `SchedulingMixin` | 9 | 118 | 0 |
+| `hub/store_leases.py` | `LeaseMixin` | 17 | 322 | 0 |
+| `hub/store_results.py` | `ResultsMixin` | 5 | 87 | 0 |
+| `hub/store_offline.py` | `OfflineRoundsMixin` | 5 | 213 | **1** |
+
+#### ★ 拆法：**混入**而不是协作对象（三条实测判据）
+
+拆状态类最容易想到的是「拆成几个各自持锁的协作对象」——本刀**否决**它，因为那不是重构
+而是**换语义**：
+
+1. **一把锁是类的不变式**：49 个方法里 **30 个**在同一把 `_lock` 下（`_*_locked` 后缀标的就是
+   临界区内的那半）。协作对象各持一把锁 = 并发行为不同，不满足「零行为变化」；
+2. **跨域互调是常态**（**37/49**）：`_claim_locked` → `_job_priority_locked` /
+   `_collect_expired_locked` → `_drop_commitment_locked` → `_bump_epoch_locked`…拆成协作对象要
+   么把这条链改成「A 调 B 再调 C」，要么把方法搬到公共基类（等于没拆）。混入把它们留在
+   `self.X` 上 ⇒ **零 seam**（第十刀那种「迁移 vs 注入」的对账全免了）；
+3. **tests 直接读私有属性**：`store._leases` / `._lease_owners` / `._stale_holders` / `._claimed` /
+   `._backup_authorized` / `._last_heartbeat` / `halt_workers` ——20+ 处断言。协作对象会让这些
+   **全部改路**（还得给它们加上「测试专用」的访问器）；混入是**同一个对象** ⇒ 一行测试不改。
+
+于是组合类只剩「组合 + 构造 + 进程级状态」，`HubHandler` 那套混入先例直接复用：
+
+```python
+class _JobStore(LedgerMixin, WireMeterMixin, SchedulingMixin, LeaseMixin,
+                ResultsMixin, OfflineRoundsMixin, _AuthGuard):
+```
+
+#### 代价：状态声明分散 ⇒ 用**显式钩子**把顺序钉在一个地方
+
+四个有状态的域各有一个 `_init_<域>(self)`（`store_results` / `store_offline` **真的没有**常驻状态，
+所以它们没有钩子），组合类的 `__init__` 把四次调用**逐个写出来**——不用 `super().__init__()`
+链：MRO 链会把「谁先初始化、`_lock` 从哪来」隐式化（本仓先例：`_AuthGuard.__init__` 也是被显式调用的）。
+
+顺手清掉一个**既存陷阱**：旧 `_JobStore.__init__` 先 `self._lock = Lock()`，末尾又调
+`_AuthGuard.__init__`（它自己也建锁）⇒ 前一把是个**被丢弃的锁对象**。第十四刀删了前者，
+并在 `__init__` 注释里写明「`_lock` 由 `_AuthGuard` 提供」；守卫正面钉住「组合类不得再自建锁」。
+
+#### 混入只见 `self`：声明怎么写（`hub/*` 那段注释的教训）
+
+混入要引用兄弟簇的状态与组合类提供的 `_lock` / `_now` / `job_root`，mypy 会报 `attr-defined`。
+规矩：
+
+* **状态用精确类型**（`_leases: dict[str, float]`）——`Any` 会顺着 MRO 把组合类的推断拓成 `Any`
+  （路由混入当年踩过：`headers` 声明成 `Any` 就丢了 `Message` 的方法）；
+* **兄弟簇的「方法」用 `Any`**（它们是行为不是数据，写 `Callable` 只是假精确）；
+* 声明是**裸注解**（无值）⇒ 不进 `__dict__` ⇒ 与「实现唯一」的守卫不冲突（守卫只看 `__dict__`
+  里的函数与 `_init_*` 里的赋值）。
+
+#### `ClaimOutcome` / `FREEZE_AFTER_RECLAIMS` 的去向
+
+两者随租约簇搬进 `store_leases.py`，`hub_server` **反过来** import 它们——因为 `_HubQueue` 与
+`tests/test_poison_freeze.py` 都要这两个名字，而谁都 import 不了 `hub_server`（成环）。自别名转发
+（`FREEZE_AFTER_RECLAIMS as FREEZE_AFTER_RECLAIMS`）保住 `remote.hub_server.FREEZE_AFTER_RECLAIMS`
+这个**取名字的入口**（同第十三刀那条「名字是契约，位置不是」）。
+
+`_write_bytes` 同理随它的**唯一调用方**（离线簇）搬走——`hub_server` 里那份已经没有任何读者。
+
+#### 纯搬对账（不能用「测试绿」代替）
+
+写了个对账脚本：按 AST 取每个成员（方法 / 类常量）的源码文本，`HEAD` vs 新家逐字符比——
+**58 个成员逐字节等价，零差异**；旧 `__init__` 的 **21 条赋值 + 43 行字段注释**全部逐字出现在
+新家（只少了那把被丢弃的 `Lock()`）。测试只覆盖跑到的路径，这种规模的搬运必须另立尺子。
+
+#### 守卫（`tests/test_hub_job_store_split.py`，17 例）+ 反探针 **11/11 命中**
+
+定义唯一（47 + 2 = 49 个方法各住一家）· `_JobStore.X is Mixin.X`（**对象级**接线）· MRO 逐项对账 ·
+**类常量经 MRO 可达**（`OFFLINE_DIR` / `RESUME_PARTS` / `BC_*`）· **同一对象的私有状态**（直读测试的
+前提）· **状态归属唯一**（钩子赋值集合 == 声明清单，六个域两两不交）· **没钩子的域真的零状态**
+（不造 `pass` 空钩的对价）· 钩子在 `__init__` 里各调**恰好一次** · 混入**彼此零 import** ·
+层号关系 · `_write_bytes` 只剩一份 · **★ 两条功能性**：跨域链路（发布 → 认领 → 计量）落点全在同一个
+对象上；**持有 `_lock` 时连最「独立」的计量簇也必须阻塞**（证明那是同一把锁，不只是同名属性）。
+
+反探针：租约簇又实现一份 `wire_stats` · 组合类又定义 `claim` · 混入没接进 MRO · `__init__` 漏调钩子 ·
+混入 import 兄弟 · 无钩子的域冒出常驻状态 · 裸注解带值 · 组合类又自建锁 · `hub_server` 又留一份
+`_write_bytes` · 账本把 `store_wire` 标上层 · 状态归属窜门。
+
+门禁 **2406 → 2423 passed / 3 skipped**（+17 全是本守卫）；mypy **394 → 401** 源文件；
+根 `bun run check` 2120 pass / 0 fail。
+
+> 决策 → `DECISIONS.md` §2026-09-24-goalnn-hub-jobstore-mixins。
+> ⚠ 又一次（第三次）撞上「读源码文本的守卫」：`tests/test_subproc_util.py` 按**带引号的 argv 元素**
+> 扫「起真服务进程」，本守卫里 `"remote.hub_server"`（注释性断言 + 账本键）被当成 spawn marker。
+> 修法比前两次更彻底：**从对象取名字**（`hs.__name__` 当模块名与账本键）——既没字面量，
+> 也不会因改名失效。
+
 ### 未做完（S4 余下）
 
 `remote/` 内部**已零环**（见「拆环」节），`worker.py` 的拆分面**已收口**：只剩三个宿主函数
 （`run_job` 300 / `worker_loop` 197 / `main` 127）+ 287 行转发门面，且「为什么不继续切」有明文理由
-（见第十三刀）。S4 余下是纯结构工作：
-`remote/hub_server.py` 余 **3017 行**，路由面已全部切完，只剩两个千行状态类
-`_JobStore` / `_HubQueue`（拆 = 拆状态，风险与切法都不同）与引导链。
+（见第十三刀）。`_JobStore`（拆状态）也已切完（第十四刀）。S4 余下是纯结构工作：
+`remote/hub_server.py` 余 **2072 行**——路由面与状态面都已切完，只剩 `_HubQueue`
+（多课程调度面，1035 行，与 `_JobStore` 同类的状态类）与引导链。
 设计见 `plan/nn-training-refactor.md` §5.3。
 `TrainingSteps` 本体还剩 952 行 / 20 方法（切法是「按一条真实调用链切」，不是按行数等分）。
 

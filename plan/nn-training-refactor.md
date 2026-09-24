@@ -764,6 +764,45 @@ CLI 侧传 `_real_run_job`）。引擎里那个 `_real_run_job` **兜底删掉**
 
 > 决策 → `DECISIONS.md` §2026-09-24-goalnn-worker-landing-trio；全文 → `engineering.md` §23「第十三刀」。
 
+#### 5.3.13 第十四刀（2026-09-24，**已完成**）—— 拆状态：`_JobStore` 按**域**拆成六个混入
+
+按用户指令「拆 hub_server 的 `_JobStore` 状态类（先定档接缝与拆法）」执行。
+
+| 新模块 | 类 | 方法 | 层 |
+|---|---|---|---|
+| `remote/hub/store_ledger.py` | `LedgerMixin` | 7 | 0 |
+| `remote/hub/store_wire.py` | `WireMeterMixin` | 4 | 0 |
+| `remote/hub/store_scheduling.py` | `SchedulingMixin` | 9 | 0 |
+| `remote/hub/store_leases.py` | `LeaseMixin` | 17 | 0 |
+| `remote/hub/store_results.py` | `ResultsMixin` | 5 | 0 |
+| `remote/hub/store_offline.py` | `OfflineRoundsMixin` | 5 | **1**（另需 `remote.artifacts`） |
+
+`hub_server.py` **3017 → 2072**（−31%）；新六块共 **1273 行**；47 个方法与本体 895 行搬走。
+组合类只留 `__init__` / `note_worker` 与进程级状态（`halt_workers` / `_workers`）。
+
+**定档的结论：拆法 = 混入，不是协作对象。** 三条实测判据：① 49 个方法里 **30 个**在同一把
+`_lock` 下（各持一把锁 = 换并发语义）；② 跨域互调 **37/49**（`_claim_locked` →
+`_job_priority_locked` / `_collect_expired_locked` → `_drop_commitment_locked` →
+`_bump_epoch_locked`）⇒ 混入留在 `self.X` 上 = **零 seam**；③ tests 直读 `store._leases` 一类
+私有属性（20+ 处断言）⇒ 协作对象会全部改路。**混入 = 同一个对象、同一把锁、零行为变化。**
+
+代价是状态声明分散 ⇒ 四个有状态的域各一个 `_init_<域>(self)`，组合类 `__init__` 逐个**显式**调用
+（不用 `super()` 链）；`store_results` / `store_offline` 真无常驻状态，**不造 `pass` 空钩**
+（守卫正面断言「它俩方法体里零赋值」）。顺手删掉旧 `__init__` 里那把**被 `_AuthGuard` 覆盖掉**的
+`Lock()`（一个被丢弃的锁对象是下次读的人的陷阱）。
+
+**纯搬对账**（本刀的尺子）：AST 逐成员比对 HEAD vs 新家 ⇒ **58 个成员逐字节等价、零差异**；
+旧 `__init__` 的 **21 条赋值 + 43 行字段注释**全部逐字在新家。
+
+守卫 `tests/test_hub_job_store_split.py`（**17 例**，含两条功能性：跨域链路落在同一个对象上 ·
+持有 `_lock` 时最独立的计量簇也阻塞）；反探针 **11/11 命中**。门禁 **2406 → 2423**。
+
+> 决策 → `DECISIONS.md` §2026-09-24-goalnn-hub-jobstore-mixins；全文 → `engineering.md` §23「第十四刀」。
+
+**下一刀**：`hub_server` 只剩 `_HubQueue`（多课程调度面，1035 行，与 `_JobStore` 同类的状态类，
+1035 行里相当一部分是 28 个与 `_JobStore` **同名**的委托方法——那里可能藏着「不必逐一手写」的机会）
+与引导链。
+
 ### 5.4 本轮**不做**（已核，刻意保留）
 
 - `remote/notebook_boot.py` ↔ `remote/offline_boot.py` 的孪生助手（`_build_opener` /

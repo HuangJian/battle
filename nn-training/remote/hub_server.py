@@ -67,20 +67,16 @@ import atexit
 import hashlib
 import ipaddress
 import json
-import os
 import sys
 import tempfile
 import time
 import urllib.parse
-from collections import namedtuple
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Lock, Thread
 
-from common.fs import atomic_write_bytes
 from common.protocol import (
     AUTH_HEADER,
-    CLAIM_MODE_BACKUP,
     CLAIM_MODE_EXCLUSIVE,
     CLAIM_MODES,
     CLAIM_TTL_SEC,
@@ -88,28 +84,19 @@ from common.protocol import (
     COURSE_MODE_OFFLINE,
     COURSE_MODE_ONLINE,
     COURSE_MODES,
-    FAIL_NAME,
     OFFLINE_ARTIFACT_PATH,
     OFFLINE_RESULT_PATH,
     OFFLINE_RESUME_BLOB_PATH,
     OFFLINE_RESUME_PATH,
     OFFLINE_TASK_PACK_PATH,
-    PAYLOAD_NAME,
     PEEK_MAX,
-    PRIORITY_HIGH,
-    PRIORITY_HIGHEST,
-    PRIORITY_LOW,
-    PRIORITY_MEDIUM,
     PRIORITY_NONE,
     PUSH_POLL_SEC,
     PUSH_TIMEOUT_SEC,
     WORKER_ID_HEADER,
     WORKER_SEEN_WINDOW_SEC,
     ProtocolError,
-    decode_opt_tar,
-    decode_weights_json,
     find_payload,
-    job_priority,
     may_avoid_stale_holder,
     parse_course_arg,
     rotation_order,
@@ -121,18 +108,35 @@ from remote._instance_lock import (
     release_instance_lock,
 )
 from remote._port_guard import ensure_port_free
-from remote.artifacts import ArtifactStore, ledger_row_from_metrics
 
-# 产物账本行 → 课程账本行的搬运**只在 remote.artifacts 实现一份**（人工导入与实时补传共用）：
-# 两份翻译必然漂开，而「两腿同字段」正是控制台那张表存在的意义。
-# HTTP 路由组（S4 第十一刀）：四组域混入，派发表（do_GET / do_POST，仍在 HubHandler）调它们。
-# 它们只向外调通用助手（`_auth_ok` / `_json` / `_bytes` / `_job_id` / `_read_json_body` …），
-# 那些助手仍住本模块 —— 混入把它们声明成 `Any`（同 `hub.admin` 的先例）。
+# 状态类（S4 第十四刀）：`_JobStore` 按域拆成六个混入 —— **同一把 `_lock`、同一个 `self`**，
+# 所以 `store._leases[...]` 这类直读、`patch remote.hub_server._JobStore`、`_JobStore.X` 常量
+# （`OFFLINE_DIR` / `RESUME_PARTS` / `BC_EPOCH_BODY_MAX`）全部照旧走 MRO 解析。
+# `remote/hub/*` **不得** import 本模块（否则与「本模块 import 混入」成环）。
 from remote.hub.admin import AdminRoutes
 from remote.hub.blob import BlobRoutes
 from remote.hub.offline import OfflineRoutes
 from remote.hub.result import ResultRoutes
 from remote.hub.schedule import ScheduleRoutes
+from remote.hub.store_leases import (
+    FREEZE_AFTER_RECLAIMS as FREEZE_AFTER_RECLAIMS,  # 测试从这里取（名字是契约，位置不是）
+)
+from remote.hub.store_leases import (
+    ClaimOutcome,
+    LeaseMixin,
+)
+
+# 产物账本行 → 课程账本行的搬运**只在 remote.artifacts 实现一份**（人工导入与实时补传共用）：
+# 两份翻译必然漂开，而「两腿同字段」正是控制台那张表存在的意义。（第十四刀后本模块不再直
+# 接用它——离线段带走了唯一的调用点，`store_offline.py` 自己 import。）
+# HTTP 路由组（S4 第十一刀）：四组域混入，派发表（do_GET / do_POST，仍在 HubHandler）调它们。
+# 它们只向外调通用助手（`_auth_ok` / `_json` / `_bytes` / `_job_id` / `_read_json_body` …），
+# 那些助手仍住本模块 —— 混入把它们声明成 `Any`（同 `hub.admin` 的先例）。
+from remote.hub.store_ledger import LedgerMixin
+from remote.hub.store_offline import OfflineRoundsMixin
+from remote.hub.store_results import ResultsMixin
+from remote.hub.store_scheduling import SchedulingMixin
+from remote.hub.store_wire import WireMeterMixin
 from remote.push_dispatch import (
     DEFAULT_PUSH_CONFIG,
     PushDispatcher,
@@ -274,24 +278,39 @@ class _AuthGuard:
             return max(0.0, self._auth_blocked_until.get(ip, 0.0) - self._now())
 
 
-#: `claim_outcome()` 的返回形状（新 HTTP 面的出口；`token` 为空串 = 无租约/未拿到）。
-#: `status ∈ {"ok", "backup", "demoted", "held", "frozen", "stale_holder"}`——worker 侧
-#: 只关心「拿到了吗」+「没拿到是降级还是真轮不到」：前者丢副本、后者按 low 处理。
-ClaimOutcome = namedtuple("ClaimOutcome", "ok token status reason")
 
-#: 毒包熔断阈值（plan/accident.plan.md §4.1，2026-09-21）：同一 job 被**认领后零回传**满这么多次
-#: ⇒ hub 冻结它并响亮告警。为什么是「零回传」而不是「失败」：worker 报得上来的失败早就有
-#: 确定性通道了（`POST /jobs/{id}/fail`，§4.0/P0）；这里兑的是**未知崩溃类型**——worker 连
-#: 报都报不上来（进程被杀 / OOM 硬死 / 归档层以外的死法），只能从「租约过期且无结果」的
-#: 节奏里认出来。本次事故：40 次 × 5 分钟，无告警、无计数。
-#:
-#: 为什么不用 1：合法重试是存在的（worker 挂掉一次、换台机器接着跑）——阈值 3 给了一轮
-#: 「换台机器 / 重启 worker」的自然愈合机会（认领 TTL 300s ⇒ 最多烧 ~15 分钟），又不至于
-#: 把 3.5 小时的静默空转让它过去。
-FREEZE_AFTER_RECLAIMS = 3
+# ───────────────── 状态类：六个域混入 + 组合（S4 第十四刀）─────────────────
+#
+# `_JobStore` **按域拆成六个混入**，而**不是**拆成各自持锁的协作对象——三条实测判据：
+#
+# 1. **一把锁是类的不变式**：30/49 个方法在同一把 `_lock` 下（`_*_locked` 后缀标的就是
+#    临界区内的那半）。协作对象各持一把锁 = **换语义**（并发行为不同），不满足「零行为
+#    变化」；
+# 2. **跨域互调是常态**（37/49）：`_claim_locked` → `_job_priority_locked` /
+#    `_collect_expired_locked` → `_drop_commitment_locked` → `_bump_epoch_locked` …
+#    混入把它们留在 `self.X` 上 ⇒ **零 seam**（既不用迁移也不用注入）；
+# 3. **tests 直接读私有属性**（`store._leases` / `._lease_owners` / `._stale_holders` /
+#    `._claimed` / `._backup_authorized` / `._last_heartbeat` / `halt_workers`，20+ 处
+#    断言）——协作对象会让这些**全部改路**；混入是同一个对象 ⇒ 一行测试都不用改。
+#
+# 代价（明确记在案）：**状态声明分散到六个 `_init_*` 里**。所以组合类的 `__init__` 把六次
+# 调用**逐个显式写出来**，而不是走 `super().__init__()` 链：谁初始化了什么、什么顺序，
+# 只有读这一个地方才对得齐；MRO 链会让顺序隐式化（本仓先例：`_AuthGuard.__init__` 也是
+# 被显式调用的）。
+#
+# 混入顺序只影响同名的解析，而六个混入**零重名**（守卫
+# `tests/test_hub_job_store_split.py` 钉住）；这里按「越底层越靠后」排在便于读。
 
 
-class _JobStore(_AuthGuard):
+class _JobStore(
+    LedgerMixin,
+    WireMeterMixin,
+    SchedulingMixin,
+    LeaseMixin,
+    ResultsMixin,
+    OfflineRoundsMixin,
+    _AuthGuard,
+):
     """磁盘 job 存储 + 内存租约状态。
 
     事实来源 = 磁盘（jsonl 账本 + job 目录）；内存只存租约（重启即丢，符合
@@ -306,59 +325,22 @@ class _JobStore(_AuthGuard):
         self.job_root = Path(job_root)
         self.job_root.mkdir(parents=True, exist_ok=True)
         self.jsonl_path = Path(jsonl_path)
-        self._lock = Lock()
-        #: job_id -> lease 到期时间戳（monotonic 无关；用墙钟，重启即空）
-        self._leases: dict[str, float] = {}
-        #: job_id -> 租约持有人 lease_token（H2；重启即丢，随租约重建）
-        self._lease_owners: dict[str, str] = {}
-        #: job_id -> 最近一次心跳（领取算一次）墙钟（P3b 可观测；/jobs/status 暴露）
-        self._last_heartbeat: dict[str, float] = {}
-        #: job_id -> 租约持有人的 worker 身份（v5 多课程单 hub，2026-09-18）。
-        #: 与 `_lease_owners`（token，鉴权用）**分工不同**：这个只用来回答「上一份租约是
-        #: 谁跑死的」，从而在超时回收时把那台 worker 排除在本次重派之外（用户口径：
-        #: 超时回落队首后「改为推送其它 worker」）。无身份（旧 worker / 手写 curl）不记。
-        self._lease_workers: dict[str, str] = {}
-        #: job_id -> 上一次租约**过期**时死掉的持有人（不避让自己时不清，避免误让）
-        self._stale_holders: dict[str, str] = {}
-        #: job_id -> 「认领后零回传」次数（毒包熔断的判据，见 FREEZE_AFTER_RECLAIMS）。
-        #: 只在**租约过期且无结果/无失败标记**的那一刻 +1（主动 release 不算：那是 worker
-        #: 自己说「这个失败我能自愈」）。volatile：hub 重启即丢——重启本身就会重发未完成
-        #: job（D8），计数从头起不改变结论（再烧 N 次即再冻）。
-        self._reclaims: dict[str, int] = {}
-        #: job_id -> 冻结记录（毒包熔断的**独立第二状态**）：{"reclaims", "worker", "ts",
-        #: "announced"}。刻意**不**复用 `fail.json`（失败标记）：`publish_job` 重发同 job_id
-        #: 会清失败标记（“重发即重试”语义，见 `claimable_job_ids` 注释）——冻结若住那里，
-        #: 重发当场解冻，本次事故照烧 3.5 小时。两者正交：重发不清冻结，解冻只走人工入口。
-        self._frozen: dict[str, dict] = {}
-        # ---- 调度优先级（2026-09-22，plan/transfer-scheduling §2.1/§2.3）----
-        #: job_id -> {"worker", "at"}：**有人承诺在跑**（exclusive claim 成功/`/start` 时写）。
-        #: 与 `_leases` 的分工：租约管「别人现在不能领」，`_claimed` 管「有人在做这件事」
-        #: （优先级表中档的输入）。为啥不只看租约：备份副本**不设租约**，只看租约就判不出
-        #: 「别处在做」⇒ 所有 job 都会被判成 highest ⇒ 多张卡同抢一份（= race 换个名字）。
-        self._claimed: dict[str, dict] = {}
-        #: job_id -> {"worker", "at"}：**PPO 真正启动**（`POST /jobs/{id}/start` 打点）。
-        #: 掉队阈值的**唯一**时基（R2-C1）：claim 之后还有下载 + 解包，拿 claim 起算会把
-        #: 「下载慢」误判成「算得慢」，反而多开备份把本来就慢的链路压得更死。
-        self._computing: dict[str, dict] = {}
-        #: 已算完、尚未回传成功（`POST /jobs/{id}/ready`）的 job_id。
-        #: volatile：只影响优先级（低档备份），重启丢掉不影响正确性。
-        self._ready: set[str] = set()
-        #: 调度面版本号（§2.3 / R1-5）：`_claimed`/`_computing`/`_ready` 任一变化即 +1。
-        #: 只服务 highest 的唯一性闸（值本身无残留语义，重启归零）。
-        self._epoch: int = 0
-        #: 已被**显式授权备份**的 job_id ⇒ 它们的回传不吃 403（R2-3）。
-        #: 为什么不是「pop 掉原租约」（本轮评审推翻的写法）：pop 后原 worker 硬死无租约
-        #: 可过期 ⇒ 毒包熔断失明；job 立刻回池 ⇒ 第三/第四份可自由领取；push 腿
-        #: 「hub 持租约防同一份活两处跑」的自保也会失效。标记只放行回传，不动其它语义。
-        self._backup_authorized: set[str] = set()
-        # 鉴权面（`_AuthGuard`）：进程级一份——多课程单 hub 下不按课程各算一套计数
+        # 域私有状态：**随所属域进了各自混入**（第十四刀）——四个有状态的域各有一个钩子，
+        # 逐个显式调用，理由见本类上方那段「为什么不用 super() 链」。
+        # （`store_results` / `store_offline` **没有钩子**：它们真的没有常驻状态——
+        # 守卫对它们改成正面断言「方法体里零 `self.X = …` 赋值」，不造 `pass` 空钩。）
+        LedgerMixin._init_ledger(self)
+        WireMeterMixin._init_wire(self)
+        SchedulingMixin._init_scheduling(self)
+        LeaseMixin._init_leases(self)
+        # 鉴权面（`_AuthGuard`）：进程级一份——多课程单 hub 下不按课程各算一套计数。
+        # 它同时建了**本 store 唯一的那把 `_lock`** ⇒ 组合类不再自建一把（旧的
+        # `self._lock = Lock()` 本来就会被这一行覆盖掉：一个被丢弃的锁对象是下次读的人
+        # 的陷阱，第十四刀顺手删了）。
         _AuthGuard.__init__(self, now_fn)
-        #: 账本增量读缓存（H6）：文件 size -> 已解析事件列表
-        self._ledger_cache: tuple[int, list[dict]] = (0, [])
-        #: job_id -> {"sent_bytes", "recv_bytes"}（M0 统一计量：传输层实测字节，
-        #: 供 iteration 事件的 wire 子字典对账 / M1 A-B 归因）。volatile，重启即丢，
-        #: 只做观测，不参与任何调度决策。
-        self._wire: dict[str, dict] = {}
+        # ---- 进程级状态（多课程单 hub 下 `_HubQueue` **借**的就是这一份）----
+        # 它们不属于任何域：job 账本每课程一份，而「停机达令 / worker 登记」是**进程**概念
+        # （借用关系写在 `_HubQueue` docstring ③）。
         #: 云端停机标志（§386：停机命令随任务同发；云机先试停机、停不掉照常干活）。
         #: 置位后 /jobs/peek 响应带 halt:true；由 console 经 /admin/workers/{halt,resume}
         #: 控制；hub 重启即复位（volatile）。停机**不拦任务分发**。
@@ -375,924 +357,6 @@ class _JobStore(_AuthGuard):
             return
         with self._lock:
             self._workers[wid] = self._now()
-
-    # ---- jsonl 账本（job_pending / job_completed 双态，§3.1/D8） ----
-    def _read_ledger(self) -> list[dict]:
-        if not self.jsonl_path.exists():
-            self._ledger_cache = (0, [])
-            return []
-        size = self.jsonl_path.stat().st_size
-        cached_size, cached = self._ledger_cache
-        if cached_size == size:
-            return list(cached)  # 未变化：零 IO 复用
-        out: list[dict] = []
-        try:
-            with open(self.jsonl_path, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        e = json.loads(line)
-                    except ValueError:
-                        continue
-                    if e.get("event") in ("job_pending", "job_completed", "job_cancelled"):
-                        out.append(e)
-        except OSError:
-            return list(cached)
-        self._ledger_cache = (size, out)
-        return list(out)
-
-    def _append_ledger(self, event: dict) -> None:
-        self.jsonl_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.jsonl_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(event, ensure_ascii=False) + "\n")
-
-    # ---- 可领取池（jsonl + 结果落盘重算，D8） ----
-    def claimable_job_ids(self) -> list[str]:
-        """job_pending 且未 job_completed 且 payload 在盘且**结果未落盘**的 job_id，按发布序。
-
-        P3b 独占加超时（supersede §343）：持有**未过期租约**的 job 不在池中——
-        worker 领到 PPO 任务后超时前不被别 worker 重领。过期租约自动回池
-        （死 worker 回收只管这一条，不管调大 TTL——it24 倒车禁令）。
-        已有结果未验收的 job 从池中剔除——首写锁定兜底（hub 重启丢租约时用）。
-        """
-        pending: dict[str, dict] = {}
-        for e in self._read_ledger():
-            jid = e.get("job_id")
-            if not isinstance(jid, str):
-                continue
-            if e["event"] == "job_pending":
-                pending[jid] = e
-            elif e["event"] in ("job_completed", "job_cancelled"):
-                pending.pop(jid, None)
-        now = self._now()
-        eligible: list[tuple[str, float]] = []
-        for jid, e in pending.items():
-            if jid in self._frozen:
-                # ★ 毒包熔断（§4.1）：认领后零回传满阈值 ⇒ 冻结，不再回池。
-                # 这是**独立于失败标记**的第二状态：重发同 job_id（publish_job）不清它，
-                # 解冻只走人工入口（`unfreeze`）——否则「重发即重试」会把冻结当场抹掉。
-                continue
-            jd = self._job_dir(jid)
-            if not jd.exists() or find_payload(jd) is None:
-                continue  # 目录不存在或 payload 未落盘——不可领取
-            if (jd / "result").exists():
-                continue  # 结果已落盘待验收——首写已分胜负，不再领取
-            if (jd / FAIL_NAME).exists():
-                # 节点已报**确定性失败**（POST /jobs/{id}/fail）：再派给别的节点只是把
-                # 同一个失败重演一遍（能力缺失类失败与节点无关地稳定复现），而训练侧
-                # 此刻已经拿着原因停腿了。重发同 job（同幂等键 → 同 job_id）由
-                # publish_job 清标记——重试路径不受影响。
-                continue
-            eligible.append((jid, float(e.get("ts", 0.0) or 0.0)))
-        eligible.sort(key=lambda kv: kv[1])  # 发布序（同 P3b 的池排序）
-        return [jid for jid, _ts in eligible if not (self._leases.get(jid, 0) > now)]
-
-    def _job_dir(self, job_id: str) -> Path:
-        return self.job_root / job_id
-
-    # ---- 统一计量（M0）：传输层实测字节 ----
-    def record_payload_sent(self, job_id: str, n: int) -> None:
-        """记一次 /jobs/{id}/payload 服务出去的字节数（累积——重下会累加）。"""
-        with self._lock:
-            w = self._wire.setdefault(job_id, {})
-            w["sent_bytes"] = int(w.get("sent_bytes", 0)) + int(n)
-
-    def record_push_wire(self, job_id: str, n: int, payload_bytes: int, upload_sec: float) -> None:
-        """记一次 **hub 中介推送**的传输实测（push 腿的 `wire_hub` 来源）。
-
-        字段名与直推（训练侧 `submit_job` 自己返回的那份）**逐字一致**
-        （body_bytes/payload_bytes/upload_sec），所以训练侧 `_wire_from_result(is_push=True)`
-        读法完全一样——两种 push 的可观测性不该一个有一个无（多课程并行时，哪条腿在吃
-        流量要靠它分组）。重推同一 job 累加 body_bytes（与 payload_sent 同规）。
-        """
-        with self._lock:
-            w = self._wire.setdefault(job_id, {})
-            w["body_bytes"] = int(w.get("body_bytes", 0)) + int(n)
-            w["payload_bytes"] = int(payload_bytes)
-            w["upload_sec"] = round(float(upload_sec), 3)
-
-    def record_result_recv(self, job_id: str, n: int) -> None:
-        """记一次 /jobs/{id}/result 收到的请求体字节数（= 云上行 result 体大小）。"""
-        with self._lock:
-            w = self._wire.setdefault(job_id, {})
-            w["recv_bytes"] = int(w.get("recv_bytes", 0)) + int(n)
-
-    def wire_stats(self, job_id: str) -> dict:
-        """该 job 的传输层实测字节（无记录 = {}）。只读快照。"""
-        with self._lock:
-            return dict(self._wire.get(job_id, {}))
-
-    # ---- 发布（训练主循环调用：写磁盘 + 账本） ----
-    def publish(self, job_id: str, manifest: dict, payload_zip: bytes) -> None:
-        """hub 发布 job：落盘 payload.zip + manifest.json + 账本 job_pending。
-
-        幂等：同 job_id 已发布 → 覆盖 payload 但**不重复**追加 job_pending
-        （账本按 job_id 去重——重启后重发布不产生双 pending）。
-        """
-        with self._lock:
-            jd = self._job_dir(job_id)
-            jd.mkdir(parents=True, exist_ok=True)
-            (jd / PAYLOAD_NAME).write_bytes(payload_zip)
-            (jd / "manifest.json").write_text(
-                json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-            pending_ids = {
-                e.get("job_id") for e in self._read_ledger() if e.get("event") == "job_pending"
-            }
-            completed_ids = {
-                e.get("job_id") for e in self._read_ledger() if e.get("event") == "job_completed"
-            }
-            if job_id not in pending_ids and job_id not in completed_ids:
-                self._append_ledger(
-                    {
-                        "event": "job_pending",
-                        "job_id": job_id,
-                        "runId": manifest.get("runId"),
-                        "it": manifest.get("it"),
-                        "ts": self._now(),
-                    }
-                )
-
-    # ---- 租约（P3b 独占加超时：领取即设租约，心跳续租，过期回池） ----
-    def claim(
-        self,
-        job_id: str,
-        ttl: float = CLAIM_TTL_SEC,
-        worker_id: str = "",
-        avoid_stale_holder: bool = False,
-        mode: str | None = None,
-        expected_epoch: int | None = None,
-    ) -> str | None:
-        """领取（独占 = 设租约 + owner + last_heartbeat 三件套**同时置**）。
-
-        B3 必杀细节：只写 `_leases` 不写 `_lease_owners` 会导致 heartbeat 恒 False，
-        300s 后长 job 被重广播——故领取必须走本函数，不许手写 `_leases[jid] = ...`。
-        活租约在持 → 返回 None（调用方跳过本 jid，不是阻塞等）。
-
-        `mode`（2026-09-22，R1-1）：
-          * `"exclusive"` = 正常独占（设租约 + 写 `_claimed` + `epoch += 1`）；
-          * `"backup"` = **备份副本**：不设租约、返回空 token，胜负由 `store_result`
-            首写锁定决定。⚠ 它**不动**原持有者的租约（R2-3），只置 `_backup_authorized`
-            让备份的回传**不吃 403**——否则 `ProtocolError` ⇒ `report_job_failure` ⇒
-            训练停腿（这个坑本文件的旧注释里已写过一次：一个赢家把输家炸成事故）。
-
-        `expected_epoch`（§2.3 highest 唯一性闸）：版本不匹配**不是错误**，是「有人比我快」
-        的正常信号；本函数在**同一个临界区**内重新判定该 job 的优先级，仍为最高才放行。
-        要区分「降级」与「领不到」用 `claim_outcome()`（同一出口，两个返回形状）。
-        """
-        ok, token, _why = self._claim_locked(
-            job_id,
-            ttl=ttl,
-            mode=mode or CLAIM_MODE_EXCLUSIVE,
-            worker_id=worker_id,
-            avoid_stale_holder=avoid_stale_holder,
-            expected_epoch=expected_epoch,
-        )
-        return token if ok else None
-
-    def claim_outcome(
-        self,
-        job_id: str,
-        *,
-        mode: str = CLAIM_MODE_EXCLUSIVE,
-        worker_id: str = "",
-        avoid_stale_holder: bool = False,
-        expected_epoch: int | None = None,
-    ) -> ClaimOutcome:
-        """带原因的领取（新 HTTP 面的唯一入口）：区分「降级」与「领不到」。
-
-        为什么不给 `claim()` 换返回类型：`str | None` 被既有调用方（`claim_next`、push
-        派发、多份用例）依赖；而「降级 → 按 low 处理」只有新 worker 需要。两者共用同一个
-        `_claim_locked` ⇒ 不会出现「两处各自校验 epoch」的第二个事实源（§3.1 末段）。
-        """
-        ok, token, why = self._claim_locked(
-            job_id,
-            ttl=CLAIM_TTL_SEC,
-            mode=mode,
-            worker_id=worker_id,
-            avoid_stale_holder=avoid_stale_holder,
-            expected_epoch=expected_epoch,
-        )
-        if ok:
-            status = "backup" if mode == CLAIM_MODE_BACKUP else "ok"
-            return ClaimOutcome(True, token, status, why)
-        return ClaimOutcome(False, "", why, why)
-
-    def _claim_locked(
-        self,
-        job_id: str,
-        *,
-        ttl: float,
-        mode: str,
-        worker_id: str,
-        avoid_stale_holder: bool,
-        expected_epoch: int | None,
-    ) -> tuple[bool, str, str]:
-        """claim 的**唯一**临界区（返回 `(ok, token, 原因)`）。
-
-        ★ 别在别处手写租约写入：B3 的坑（只写 `_leases` 不写 `_lease_owners` ⇒ heartbeat
-        恒 False ⇒ 长 job 300s 后被重派）就靠「唯一入口」防住。
-        """
-        import secrets
-
-        if mode not in CLAIM_MODES:
-            # 纵深防御：队列层 handler 已按白名单拒收，但 store 才是**唯一**的租约写入
-            # 入口（B3：手写租约的坑靠入口唯一性防住）——一个写错的模式在这里被
-            # 当成独占静默放行，就是「以为在做备份、其实是独占」，必须响亮拒。
-            return False, "", "bad_mode"
-        with self._lock:
-            if job_id in self._frozen:
-                # ★ 熔断（§4.1）：任何入口都不再下发（含备份副本）。
-                return False, "", "frozen"
-            now = self._now()
-            if mode == CLAIM_MODE_BACKUP:
-                # 备份副本：不设租约、不动原租约（R2-3），只授权「你的回传不吃 403」。
-                self._backup_authorized.add(job_id)
-                self._last_heartbeat[job_id] = now  # 仅供观测（谁在跑）
-                return True, "", "backup"
-            lease = self._leases.get(job_id)
-            recovering = lease is not None and lease <= now
-            if recovering:
-                # 过期租约：回收并记下「谁跑死的」——下一个 worker 该顶上（而不是让它
-                # 自领自己跑死的活，那只是把同一个故障重演一遍）。
-                self._collect_expired_locked(job_id)
-                if self._frozen.get(job_id):
-                    return False, "", "frozen"  # ★ 刚达阈（或已冻结）
-            if not recovering and job_id in self._claimed:
-                # ★ highest 唯一性闸（R1-5）：同一份 job 只能有一个「承诺在跑」的人。
-                # 这一条才是「N 个 worker 同拍问询全拿 highest」的真正闸门——epoch 只是
-                # 提醒「调度面变过」，不匹配本身不等于有人抢了**这一份**。
-                if expected_epoch is not None and int(expected_epoch) != self._epoch:
-                    return False, "", "demoted"
-                return False, "", "held"
-            # 调度面在问询之后变过 ⇒ **在该 job 上重新判一次**（§2.3 ③）：仍是最高才放行。
-            if (
-                expected_epoch is not None
-                and int(expected_epoch) != self._epoch
-                and self._job_priority_locked(job_id, exclude_worker=worker_id)
-                != PRIORITY_HIGHEST
-            ):
-                return False, "", "demoted"
-            # 避让：上一份**过期死掉**的租约若就是这个请求者跑的，本次不给他（让别的
-            # worker 顶上）。身份比对只能在这里做——上面刚完成租约回收，stale 记录此刻
-            # 才是最新的；在队列层先判会恒为空（2026-09-18 实测）。
-            if avoid_stale_holder and worker_id and self._stale_holders.get(job_id, "") == worker_id:
-                return False, "", "stale_holder"
-            token = secrets.token_hex(16)
-            self._leases[job_id] = now + ttl
-            self._lease_owners[job_id] = token
-            self._claimed[job_id] = {"worker": worker_id, "at": now}
-            if worker_id:
-                self._lease_workers[job_id] = worker_id
-                self._stale_holders.pop(job_id, None)  # 有人接手了 ⇒ 避让记录使命结束
-            self._last_heartbeat[job_id] = now
-            self._bump_epoch_locked()
-            return True, token, "ok"
-
-    # ---- 调度面事实（优先级问询 / 掉队阈值的唯一事实源） ----
-    def _bump_epoch_locked(self) -> None:
-        """调度面版本 +1（调用方必须持锁）。只在 `_claimed`/`_computing`/`_ready` 变化时调。"""
-        self._epoch += 1
-
-    def scheduling_epoch(self) -> int:
-        """当前调度面版本（`POST /jobs/priority` 的响应字段）。"""
-        with self._lock:
-            return int(self._epoch)
-
-    def start_job(self, job_id: str, worker_id: str = "") -> bool:
-        """`POST /jobs/{id}/start`：打 **computing_at**（掉队阈值的唯一时基）+ `epoch += 1`。
-
-        「PPO 真正启动」与「claim 成功」是两把时钟（R2-C1）：claim 之后还有整包下载 +
-        解包 + 权重装载，拿 claim 起算会把慢链路误判成慢计算。
-
-        ⚠ 本端点**不**校验 `expected_epoch`（R2-C4）：闸只在 claim 一处，两处各自校验
-        就是第二个事实源。
-        """
-        with self._lock:
-            wid = str(worker_id or "").strip() or str((self._claimed.get(job_id) or {}).get("worker", ""))
-            self._computing[job_id] = {"worker": wid, "at": self._now()}
-            self._claimed.setdefault(job_id, {"worker": wid, "at": self._now()})
-            self._bump_epoch_locked()
-            return True
-
-    def set_ready(self, job_id: str, worker_id: str = "") -> bool:
-        """`POST /jobs/{id}/ready`：算完待回传（只降别人的优先级，**永不**触发取消）。"""
-        with self._lock:
-            self._ready.add(job_id)
-            if worker_id:
-                self._last_heartbeat[job_id] = self._now()
-            self._bump_epoch_locked()
-            return True
-
-    def abandon_job(self, job_id: str, worker_id: str = "") -> bool:
-        """`POST /jobs/{id}/abandon`：合法放弃（R1-3）。
-
-        = **release 租约** + 清 claimed/computing/ready 可见性 + **零 reclaim**。
-        为什么必须同时 release：job 在 `CLAIM_TTL_SEC=300` 内会被 `claimable_job_ids`
-        按「活租约」挡在池外，而租约自然过期又会走 `_collect_expired_locked` ⇒
-        `_reclaims+1` ⇒ 三度达 `FREEZE_AFTER_RECLAIMS` 被冻成毒包（合法放弃被读成
-        「认领后零回传」）。幂等：没租约/已清过 → 照样返回 True。
-        """
-        with self._lock:
-            self._leases.pop(job_id, None)
-            self._lease_owners.pop(job_id, None)
-            self._lease_workers.pop(job_id, None)
-            self._last_heartbeat.pop(job_id, None)
-            self._stale_holders.pop(job_id, None)  # 主动放弃 ≠ 跑死，不该触发避让
-            self._drop_commitment_locked(job_id)
-            return True
-
-    def scheduling_facts(self, job_id: str, *, exclude_worker: str = "") -> dict:
-        """单份 job 的调度事实（**只看别人**；问询者自己的痕迹被排除，§1.4）。
-
-        `landed` 走盘上的 `result/` 与失败标记——它是「无优先级」的唯一来源（唯一硬闸），
-        也是软持有副本的就地丢弃信号。
-
-        ⚠ 它只是 `_facts_locked` 的加锁包——**锁不可重入**，而优先级判定本身就在临界区里
-        调事实：直接互调会让第一次 `/jobs/{id}/status` 把 hub 线程永久卡死（本实现的第一版
-        就是这么写的，被 test_poison_freeze 当场抓出来）。
-        """
-        with self._lock:
-            return self._facts_locked(job_id, exclude_worker=exclude_worker)
-
-    def _facts_locked(self, job_id: str, *, exclude_worker: str = "") -> dict:
-        """事实面的**唯一**实现（调用方必须特锁）——见 `scheduling_facts` 的告警。"""
-        jd = self._job_dir(job_id)
-        claimed = dict(self._claimed.get(job_id) or {})
-        computing = dict(self._computing.get(job_id) or {})
-        if exclude_worker:
-            if str(claimed.get("worker", "")) == exclude_worker:
-                claimed = {}
-            if str(computing.get("worker", "")) == exclude_worker:
-                computing = {}
-        return {
-            "landed": (jd / "result").exists() or (jd / FAIL_NAME).exists(),
-                "ready": job_id in self._ready,
-                "claimed": bool(claimed),
-                "computing_at": (float(computing["at"]) if computing.get("at") else None),
-                "lease_holder": self._lease_workers.get(job_id, ""),
-        }
-
-    def _job_priority_locked(self, job_id: str, *, exclude_worker: str = "") -> str:
-        """该 job 当前的优先级（调用方**必须持锁**；用到 `_claimed`/`_computing`/`_ready`）。"""
-        facts = self._facts_locked(job_id, exclude_worker=exclude_worker)
-        return job_priority(
-            landed=bool(facts["landed"]),
-            ready_elsewhere=bool(facts["ready"]),
-            claimed_elsewhere=bool(facts["claimed"]),
-            computing_elsewhere_since=facts["computing_at"],
-            now=self._now(),
-        )
-
-    def priority_for(self, job_id: str, *, exclude_worker: str = "") -> tuple[str, str]:
-        """`(优先级, 一行理由)`——观测面与优先级 RPC 共用。"""
-        with self._lock:
-            p = self._job_priority_locked(job_id, exclude_worker=exclude_worker)
-            facts = self._facts_locked(job_id, exclude_worker=exclude_worker)
-        if p == PRIORITY_NONE:
-            why = "结果已落盘（唯一硬闸：放弃）"
-        elif p == PRIORITY_HIGH:
-            why = f"别处在算且超阈值（computing_at 起 {self._now() - float(facts['computing_at']):.0f}s）"
-        elif p == PRIORITY_MEDIUM and facts.get("computing_at"):
-            # 中档里再分一层：已开算 vs 只承诺（还在下载/装载）。R2-C1 的两把时钟在
-            # **观测行**上也要分得出来——否则「卡在下载」与「算得慢」在日志里同一句话。
-            why = f"别处在算（computing_at 起 {self._now() - float(facts['computing_at']):.0f}s，未超阈值）"
-        elif p == PRIORITY_MEDIUM:
-            why = "别处已承诺在跑（尚未开算：还在下载/装载）"
-        elif p == PRIORITY_LOW:
-            why = "别处算完待回传（低档备份保险）"
-        else:
-            why = "无人在做（独占）"
-        return p, why
-
-    def _collect_expired_locked(self, job_id: str) -> str:
-        """回收过期租约（调用方**必须持锁**）：转 stale 记录 + **毒包计数 +1**。
-
-        为什么计数住这里而不是 `claim()` 里贴一段：过期这件事有三个观测入口
-        （`claim` / `lease_worker` / `claimable_job_ids` 的资格判定），谁先看到谁就回收。
-        早先只在 `claim` 里贴的写法会被 `/admin/queue` 的轮询（`lease_worker`，控制台
-        每秒都在调）抢在前面——计数恒为 0，熔断永远不触发（这就是「判据要有唯一入口」
-        在本仓的第三次同一教训）。
-
-        「零回传」只在**结果未落盘且失败标记不在**时计数——已结算的 job 不算毒包。
-        """
-        dead = self._lease_workers.get(job_id, "")
-        self._leases.pop(job_id, None)
-        self._lease_owners.pop(job_id, None)
-        self._lease_workers.pop(job_id, None)
-        # 过期 = 承诺失效：不清的话「有人承诺在跑」会在死 worker 上永远挂着 ⇒
-        # 该 job 的优先级永远上不到 highest（唯一性闸的判据）。
-        self._drop_commitment_locked(job_id)
-        if dead:
-            self._stale_holders[job_id] = dead
-        jd = self._job_dir(job_id)
-        unresolved = not (jd / "result").exists() and not (jd / FAIL_NAME).exists()
-        if unresolved:
-            n = self._reclaims.get(job_id, 0) + 1
-            self._reclaims[job_id] = n
-            if n >= FREEZE_AFTER_RECLAIMS and job_id not in self._frozen:
-                self._frozen[job_id] = {
-                    "reclaims": n,
-                    "worker": dead,
-                    "ts": self._now(),
-                    "announced": False,
-                }
-        return dead
-
-    def _drop_commitment_locked(self, job_id: str) -> None:
-        """撕掉「有人承诺在跑」的调度面痕迹（调用方**必须持锁**）+ 版本 +1。
-
-        为什么必须与租约同生共死：`_claimed` 是 highest 唯一性闸的**唯一**判据，而它的
-        生死有三个入口（主动还租约 / 租约过期熔断 / 合法放弃 abandon）。
-        漏一个入口，那份 job 就被自己人永远挡在门外：合法重领变成领不到——本实现被
-        `test_poison_freeze`（release）与 `test_priority_schedule`（放弃独占）各抓出一次。
-        """
-        self._claimed.pop(job_id, None)
-        self._computing.pop(job_id, None)
-        self._ready.discard(job_id)
-        self._bump_epoch_locked()
-
-    def reclaims(self, job_id: str) -> int:
-        """「认领后零回传」次数（未发生 → 0）。观测面 + 熔断判据的可查值。"""
-        with self._lock:
-            return int(self._reclaims.get(job_id, 0))
-
-    def frozen_info(self, job_id: str) -> dict | None:
-        """冻结记录（未冻结 → None）。"""
-        with self._lock:
-            info = self._frozen.get(job_id)
-            return dict(info) if info else None
-
-    def frozen_job_ids(self) -> list[str]:
-        """已冻结的 job_id（观测面）。"""
-        with self._lock:
-            return sorted(self._frozen)
-
-    def consume_freeze_announcement(self, job_id: str) -> dict | None:
-        """取一次「刚刚落冻」的告警载荷（取过即清；未冻结/已喊过 → None）。
-
-        为什么需要「喊一次」的记账：检测点在 store（它才看得到租约），而告警要有课程名与
-        认领者（调用方才知道）。把它做成一次性事件，既不会漏喊，也不会每次轮询重喊。
-        """
-        with self._lock:
-            info = self._frozen.get(job_id)
-            if not info or info.get("announced"):
-                return None
-            info["announced"] = True
-            return dict(info)
-
-    def unfreeze(self, job_id: str) -> dict | None:
-        """人工解冻（**熔断唯一的可逆口**）：清除冻结与计数 ⇒ job 立即回池可重领。
-
-        重发（`publish`）刻意不走这里：重发不清冻结（见 `_frozen` 注释），否则「重发即重试」
-        会把熔断当场抹掉。返回被解冻的记录（本来就未冻结 → None）。
-        """
-        with self._lock:
-            info = self._frozen.pop(job_id, None)
-            self._reclaims.pop(job_id, None)
-            return dict(info) if info else None
-
-    def stale_holder(self, job_id: str) -> str:
-        """上一份**过期**租约的持有人（无 → 空串）。给 `/admin/queue` 观测用。"""
-        with self._lock:
-            return self._stale_holders.get(job_id, "")
-
-    def lease_worker(self, job_id: str) -> str:
-        """当前租约持有人身份（无 → 空串）；同时在租约已过期时走**同一个**回收入口
-        （`_collect_expired_locked`：stale 记录 + 毒包计数）——本函数是 `/admin/queue`
-        每秒都在调的观测面，若绕开回收，计数会被它抢在前面吞掉。"""
-        with self._lock:
-            lease = self._leases.get(job_id)
-            if lease is None:
-                return ""
-            if lease <= self._now():
-                self._collect_expired_locked(job_id)
-                return ""
-            return self._lease_workers.get(job_id, "")
-
-    def inflight(self) -> list[str]:
-        """持有**未过期**租约的 job_id（在飞）。观测面与「在派发课程数」共用一份口径。"""
-        now = self._now()
-        with self._lock:
-            return [jid for jid, exp in self._leases.items() if exp > now]
-
-    def heartbeat(self, job_id: str, lease_token: str) -> bool:
-        """心跳续租（60s 节奏；H2：非原租者拒续）。
-        返回 True = 续租成功；False = job 不存在 / lease_token 不符。
-
-        B3 必杀细节：续租必须改用 CLAIM_TTL_SEC（本函数是 claim/heartbeat/
-        _get_status 的**唯一** TTL 来源）——否则死 worker 隐身 30min（LEASE_SEC）。
-        """
-        with self._lock:
-            if not (self._job_dir(job_id) / "manifest.json").exists():
-                return False
-            owner = self._lease_owners.get(job_id)
-            if owner is None or owner != lease_token:
-                return False
-            now = self._now()
-            self._leases[job_id] = now + CLAIM_TTL_SEC
-            self._last_heartbeat[job_id] = now
-            return True
-
-    def release(self, job_id: str, lease_token: str) -> bool:
-        """worker 瞬时失败主动还租约（2026-09-05）：job 立即回池可重领，
-        不再干等 LEASE_SEC 过期。H2：仅租约持有人可释放。返回 False = 无租约/非持有人。"""
-        with self._lock:
-            owner = self._lease_owners.get(job_id)
-            if not lease_token or owner != lease_token:
-                return False
-            self._leases.pop(job_id, None)
-            self._lease_owners.pop(job_id, None)
-            self._lease_workers.pop(job_id, None)
-            self._stale_holders.pop(job_id, None)  # 主动还租约 = 不是「跑死了」，不该避让
-            self._last_heartbeat.pop(job_id, None)
-            self._drop_commitment_locked(job_id)  # 还租约 = 撒销承诺（见该方法 docstring）
-            return True
-
-    def result_token_ok(self, job_id: str, lease_token: str) -> bool:
-        """结果回传鉴权（P3b）：有活租约 → 须持有人 token；无租约（过期/释放/
-        从未领取/旧 worker）→ 照收。HTTP 层薄调用本函数。"""
-        with self._lock:
-            if self._leases.get(job_id, 0) > self._now():
-                owner = self._lease_owners.get(job_id)
-                if bool(lease_token) and owner == lease_token:
-                    return True
-                # 备份副本（R2-3）：**显式授权**的重复计算 ⇒ 无租约回传也放行。
-                # 不这么做的话备份先到就吃 403 ⇒ ProtocolError ⇒ report_job_failure ⇒
-                # 训练停腿（409-先于-租约校验只在「结果已落盘」时救场，备份先到救不了）。
-                return job_id in self._backup_authorized
-            return True
-
-    # ---- 结果 ----
-    def store_result(self, job_id: str, result: dict) -> bool:
-        """落盘 worker 回传结果（result/ 目录）。返回 False = 该 job 已有结果（防重复写回）。"""
-        with self._lock:
-            rdir = self._job_dir(job_id) / "result"
-            if rdir.exists():
-                return False
-            rdir.mkdir(parents=True, exist_ok=True)
-            (rdir / "result.json").write_text(
-                json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-            # weights_json / opt_tar 以 base64 存于 result.json（< 数 MB，可接受）
-            # 备份授权随胜负结束（同一份 job 不会再有人回传）：及时收紧 token 闸。
-            self._backup_authorized.discard(job_id)
-            return True
-
-    def store_job_failure(self, job_id: str, rec: dict) -> bool:
-        """落盘节点确定性失败（`fail.json`）。返回 False = 已有结果 / 已有失败记录。
-
-        两条首写规则，都是为了「训练侧看到的那一条」不被后到的写方改掉：
-          * **有结果就不收失败**——结果已落盘时失败是过时信息（迟到的失败回报不得
-            盖掉成功的产物，与 `store_result` 的首写锁定同向）；
-          * **首个失败原因胜出**——多节点都失败时，第一个报上来的才是训练侧读到的
-            那条，后到的只保留在值里（不再改动）。"""
-        with self._lock:
-            jd = self._job_dir(job_id)
-            if (jd / "result").exists():
-                return False
-            dst = jd / FAIL_NAME
-            if dst.exists():
-                return False
-            jd.mkdir(parents=True, exist_ok=True)
-            # 原子写：tmp + replace（中断的 POST 不留半截失败记录——半截 JSON 会让
-            # _get_result 把它当「没有失败」继续等满超时，正是要治的那个病）。
-            tmp = jd / (FAIL_NAME + ".tmp")
-            tmp.write_text(json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
-            os.replace(tmp, dst)
-            return True
-
-    def job_failure(self, job_id: str) -> dict | None:
-        """该 job 的失败记录（无 = None）。损坏/半截文件按「无」处理（不毒死端点）。"""
-        p = self._job_dir(job_id) / FAIL_NAME
-        if not p.exists():
-            return None
-        try:
-            with open(p, encoding="utf-8") as f:
-                loaded = json.load(f)
-                return loaded if isinstance(loaded, dict) else None
-        except (OSError, ValueError):
-            return None
-
-    # ---- 产物补传（offline 腿；2026-09-17）----
-    # 语义：节点自主段的**第二份拷贝**。产物本来就已经落在节点本地目录里（那是它的交付
-    # 面）；这里接收的是「中途发现 hub 可达」时顺手推上来的那一份，让控制面不用等人搬 zip。
-    # 与 job 队列**完全隔离**：不写 job_pending/job_completed（补传没有 job 也没有租约，
-    # 这条腿不存在「谁来领」的问题），只落 `offline/<run_id>/` 与账本 audit 事件。
-    #: 补传落位根目录名（`<job_root>/offline/<run_id>/`）。
-    OFFLINE_DIR = "offline"
-    #: 补传账本文件名（`offline/<run_id>/` 下；与 job 队列的 jsonl **不同文件**——
-    #: 补传不是 job，混进同一本账会让「一行一 job」的读方（控制台/池重建）出现怪行）。
-    OFFLINE_METRICS_NAME = "metrics.jsonl"
-    #: 段末摘要文件名（同一目录；覆盖写）。
-    OFFLINE_RESULT_NAME = "result.json"
-
-    #: 续跑锚点必须**同轮齐全**的三件（用户 2026-09-22 口径：缺一件就退到更早轮）。
-    RESUME_PARTS: tuple[str, ...] = ("weights.json", "opt.tar", "row.json")
-
-    def complete_rounds(self) -> dict[int, dict]:
-        """自回传产物（`offline/<run_id>/it-NNN/`）里**三件齐全**的轮次：`{it: {run_id, dir}}`。
-
-        齐全 = weights + opt + row 都在：续跑要么重放 Adam 动量（缺 opt 就是动量归零），
-        要么丢指标行（那轮在曲线上消失）——两者都是「看起来能跑但读数少一截」。
-        """
-        out: dict[int, dict] = {}
-        base = self.job_root / self.OFFLINE_DIR
-        try:
-            run_dirs = sorted(p for p in base.iterdir() if p.is_dir())
-        except OSError:
-            return out
-        for run_dir in run_dirs:
-            try:
-                it_dirs = sorted(p for p in run_dir.iterdir() if p.is_dir())
-            except OSError:
-                continue
-            for it_dir in it_dirs:
-                if not it_dir.name.startswith("it-"):
-                    continue
-                try:
-                    it = int(it_dir.name[3:])
-                except ValueError:
-                    continue
-                if not all((it_dir / n).is_file() for n in self.RESUME_PARTS):
-                    continue
-                out[it] = {"run_id": run_dir.name, "dir": str(it_dir)}
-        return out
-
-    def offline_run_dir(self, run_id: object) -> Path:
-        """补传落位目录。`run_id` 来自远端 ⇒ 必须先过 `sanitize_run_id`（它会是目录名）。"""
-        return self.job_root / self.OFFLINE_DIR / sanitize_run_id(run_id)
-
-    def store_offline_artifact(self, body: dict) -> dict:
-        """落一轮补传产物，返回 {"status": "accepted"|"duplicate", "it": n, "run_id": r}。
-
-        校验（任一不过抛 ProtocolError → 400，且**不落盘任何东西**）：
-          * `run_id` 合法（目录名的唯一防护面）；
-          * `it` 是非负整数；
-          * `weights_json` 能解码出**非空**字节；
-          * **声明指纹与实际字节相符**——传输损坏（截断/串包）必须在入口拦住，否则一条
-            损坏的权重会以「hub 上的产物」身份进入 eval/续跑，而真因在几千行日志之外。
-
-        幂等：`it-NNN/weights.json` 已存在 ⇒ duplicate（**不改写**）。同一轮权重是不可变
-        快照：覆盖它意味着「谁先到」决定了历史，而补传天然会重传（重连、重启续投）。
-        """
-        run_id = sanitize_run_id(body.get("run_id"))
-        it = body.get("it")
-        if not isinstance(it, int) or isinstance(it, bool) or it < 0:
-            raise ProtocolError(f"补传 it 非法（要求非负整数）: {it!r}")
-        wj_raw = body.get("weights_json")
-        if not isinstance(wj_raw, str) or not wj_raw:
-            raise ProtocolError("补传缺 weights_json（权重是这一轮唯一不可再生的东西）")
-        wj = decode_weights_json(wj_raw)
-        if not wj:
-            raise ProtocolError("补传 weights_json 解码后为空")
-        declared = str(body.get("weights_fp", "") or "")
-        got = hashlib.sha256(wj).hexdigest()
-        if declared and declared != got:
-            raise ProtocolError(
-                f"补传 it{it} 的权重指纹不符：声明 {declared[:16]}… 实得 {got[:16]}…"
-                "（传输损坏）——拒收"
-            )
-        row = body.get("row")
-        # 账本行自称的权重指纹必须与实收字节一致：这是**节点自己产的**一致性证据
-        # （`ArtifactStore.checkpoint` 写权重后当场算的 sha）。不符 = 产物目录内部不一致
-        # （人改过 / 半截写入），把这样的权重收成「hub 上的产物」比拒收危险得多。
-        if isinstance(row, dict) and row.get("weights_fp"):
-            row_fp = str(row["weights_fp"])
-            if row_fp != got:
-                raise ProtocolError(
-                    f"补传 it{it} 的账本行与权重不符：行记 {row_fp[:16]}… 实得 {got[:16]}…"
-                    "（产物目录内部不一致）——拒收"
-                )
-        opt = b""
-        opt_raw = body.get("opt_tar_b64")
-        if isinstance(opt_raw, str) and opt_raw:
-            try:
-                opt = decode_opt_tar(opt_raw)
-            except Exception:  # opt 损坏不必拒整轮：代价只是「hub 侧续跑 Adam 归零」
-                opt = b""
-        with self._lock:
-            d = self.offline_run_dir(run_id)
-            it_dir = d / f"it-{int(it):03d}"
-            if (it_dir / "weights.json").exists():
-                return {"status": "duplicate", "run_id": run_id, "it": int(it)}
-            it_dir.mkdir(parents=True, exist_ok=True)
-            _write_bytes(it_dir / "weights.json", wj)
-            if opt:
-                _write_bytes(it_dir / "opt.tar", opt)
-            _write_bytes(
-                it_dir / "row.json",
-                json.dumps(
-                    row if isinstance(row, dict) else {"it": int(it)},
-                    ensure_ascii=False,
-                    indent=1,
-                ).encode("utf-8"),
-            )
-            if not (d / "run.json").exists():
-                _write_bytes(
-                    d / "run.json",
-                    json.dumps(
-                        {
-                            "run_id": run_id,
-                            "plan_sha256": str(body.get("plan_sha256", "") or ""),
-                            "course_fp": str(body.get("course_fp", "") or ""),
-                            "commit": str(body.get("commit", "") or ""),
-                            "source_dir": str(body.get("source_dir", "") or "")[:300],
-                            "first_seen": self._now(),
-                        },
-                        ensure_ascii=False,
-                        indent=1,
-                    ).encode("utf-8"),
-                )
-            # 账本一行 = 一轮（只在**接新**时追加；重复投递不再写——否则同一轮会出现两行，
-            # 而这个文件的读方（人/控制台）按 it 画曲线）。
-            with open(d / self.OFFLINE_METRICS_NAME, "a", encoding="utf-8") as f:
-                f.write(
-                    json.dumps(
-                        {
-                            "event": "offline_artifact",
-                            "run_id": run_id,
-                            "it": int(it),
-                            "weights_fp": got,
-                            "opt_bytes": len(opt),
-                            **(row if isinstance(row, dict) else {}),
-                            "ts": self._now(),
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n"
-                )
-            self._append_ledger(
-                {
-                    "event": "offline_artifact",
-                    "run_id": run_id,
-                    "it": int(it),
-                    "weights_fp": got,
-                    "ts": self._now(),
-                }
-            )
-            self._land_round_metrics(row, run_id=run_id, it=int(it))
-        return {"status": "accepted", "run_id": run_id, "it": int(it)}
-
-    def _land_round_metrics(self, row: object, *, run_id: str, it: int) -> None:
-        """把这一轮的度量搬进**课程侧**（实时回传也能让控制台指标表动起来）。
-
-        用户之问（2026-09-22）：「云机通过网络请求回传，会算这些数据回显吗？」——之前**不会**：
-        回传只落 `remote-jobs/offline/<run_id>/it-NNN/{weights,opt,row}.json` + 一条
-        `offline_artifact` 事件（没有 `iteration` 事件，也没人把逐局画像铺到读方能找到的地方）
-        ⇒ 权重/优化器都在、末轮也能评，但控制台的「各轮指标表」（含耗时/击杀/残血/道具）
-        一行不显示，而且「没有 `iteration` 事件」这件事连人工导入都能修正、实时回传不能。
-
-        现在：与人工导入（`remote/deliver_zip`）走**同一张翻译表**
-        （`remote.artifacts.ledger_row_from_metrics`）+ 同一个逐局画像落点
-        （`<课程>/it<N>/per-game.json`），两路结果逐字段一致。
-
-        只住课程目录（`jsonl_path` 的父目录）：hub 的 `--jsonl` 就是
-        `<traj_root>/training_log.jsonl`，课程侧与它是同一个根。重复投递（duplicate）根本走不到
-        这里---只有接新才写，所以同一轮不会出现两行。任何失败只记日志：回传的主价值是权重到岸。
-        """
-        if not isinstance(row, dict):
-            return
-        try:
-            ev = ledger_row_from_metrics(row, run_id=run_id, source="offline_backfeed")
-            traj = self.jsonl_path.parent
-            it_dir = traj / f"it{it}"
-            pg = row.get("perGame")
-            if isinstance(pg, list) and pg:
-                it_dir.mkdir(parents=True, exist_ok=True)
-                (it_dir / ArtifactStore.PER_GAME_NAME).write_text(
-                    json.dumps(pg, ensure_ascii=False), encoding="utf-8"
-                )
-            if ev is not None:
-                self._append_ledger(ev)
-        except Exception as e:  # 观测面不拖垮回传
-            print(
-                f"[hub-server] 补传 it{it} 的课程侧度量落位失败（忽略）：{type(e).__name__}: {e}",
-                flush=True,
-            )
-
-    def store_offline_result(self, body: dict) -> dict:
-        """落段末摘要（**覆盖写**：它是「这条腿现在到哪了」的最新答案，不是不可变快照）。"""
-        run_id = sanitize_run_id(body.get("run_id"))
-        it_end = body.get("it_end")
-        if not isinstance(it_end, int) or isinstance(it_end, bool) or it_end < 0:
-            raise ProtocolError(f"补传 it_end 非法（要求非负整数）: {it_end!r}")
-        state = str(body.get("state", "") or "")[:40]
-        rec: dict = {
-            "run_id": run_id,
-            "it_end": int(it_end),
-            "state": state,
-            "delivered": (body.get("delivered") if isinstance(body.get("delivered"), int) else 0),
-            "summary": body.get("summary") if isinstance(body.get("summary"), dict) else {},
-            "plan_sha256": str(body.get("plan_sha256", "") or ""),
-            "course_fp": str(body.get("course_fp", "") or ""),
-            "commit": str(body.get("commit", "") or ""),
-            "source_dir": str(body.get("source_dir", "") or "")[:300],
-            "received_at": self._now(),
-        }
-        with self._lock:
-            d = self.offline_run_dir(run_id)
-            d.mkdir(parents=True, exist_ok=True)
-            _write_bytes(
-                d / self.OFFLINE_RESULT_NAME,
-                json.dumps(rec, ensure_ascii=False, indent=1).encode("utf-8"),
-            )
-            self._append_ledger(
-                {
-                    "event": "offline_result",
-                    "run_id": run_id,
-                    "it_end": int(it_end),
-                    "state": state,
-                    "ts": self._now(),
-                }
-            )
-        return {"status": "accepted", "run_id": run_id, "it_end": int(it_end)}
-
-    # ---- BC 每 epoch 回传（2026-09-13，plan/bc-cloud-integration.plan.md）----
-    #: 单文件覆盖存最新 resume（磁盘有界：每 job 恒 1 份权重，~0.5MB）；指标追加 jsonl。
-    BC_RESUME_NAME = "bc-resume.json"
-    BC_METRICS_NAME = "bc-metrics.jsonl"
-    #: epoch POST 体上限（weights ~0.5MB b64 后 ~0.7MB；4MB 已极宽裕）
-    BC_EPOCH_BODY_MAX = 4 * 1024 * 1024
-
-    def store_bc_epoch(self, job_id: str, body: dict) -> bool:
-        """BC epoch 回传落盘：bc-resume.json（单文件原子覆盖 = 最新 epoch 权重）+
-        bc-metrics.jsonl（追加一行指标）。返回 False = 体非法。调用方已验租约。"""
-        with self._lock:
-            epoch = body.get("epoch")
-            if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 1:
-                return False
-            if not isinstance(body.get("weights"), str) or not body["weights"]:
-                return False
-            jd = self._job_dir(job_id)
-            jd.mkdir(parents=True, exist_ok=True)
-            # 原子覆盖：tmp + replace——中断的 POST 不留半截 resume
-            tmp = jd / (self.BC_RESUME_NAME + ".tmp")
-            tmp.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
-            os.replace(tmp, jd / self.BC_RESUME_NAME)
-            metrics = body.get("metrics")
-            if isinstance(metrics, dict):
-                row = {"epoch": epoch, **metrics, "ts": self._now()}
-                with open(jd / self.BC_METRICS_NAME, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
-            return True
-
-    def get_bc_resume(self, job_id: str) -> dict | None:
-        p = self._job_dir(job_id) / self.BC_RESUME_NAME
-        if not p.exists():
-            return None
-        try:
-            with open(p, encoding="utf-8") as f:
-                loaded = json.load(f)
-                return loaded if isinstance(loaded, dict) else None
-        except (OSError, ValueError):
-            return None
-
-    def get_bc_metrics(self, job_id: str) -> list[dict]:
-        p = self._job_dir(job_id) / self.BC_METRICS_NAME
-        if not p.exists():
-            return []
-        out: list[dict] = []
-        try:
-            with open(p, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        e = json.loads(line)
-                    except ValueError:
-                        continue
-                    if isinstance(e, dict):
-                        out.append(e)
-        except OSError:
-            return []
-        return out
-
-    def mark_completed(self, job_id: str) -> None:
-        """训练主循环验收落位后写 job_completed 账本事件（§3.1）。幂等。"""
-        with self._lock:
-            self._leases.pop(job_id, None)
-            self._lease_owners.pop(job_id, None)
-            self._last_heartbeat.pop(job_id, None)
-            completed_ids = {
-                e.get("job_id") for e in self._read_ledger() if e.get("event") == "job_completed"
-            }
-            if job_id not in completed_ids:
-                self._append_ledger({"event": "job_completed", "job_id": job_id, "ts": self._now()})
-
-    def get_result(self, job_id: str) -> dict | None:
-        p = self._job_dir(job_id) / "result" / "result.json"
-        if not p.exists():
-            return None
-        try:
-            with open(p, encoding="utf-8") as f:
-                loaded = json.load(f)
-                return loaded if isinstance(loaded, dict) else None
-        except (OSError, ValueError):
-            return None
 
 
 # ------------------------------------------------------------------ 多课程调度面
@@ -2340,15 +1404,6 @@ class _HubQueue(_AuthGuard):
 
     def store_offline_result(self, course: str, body: dict) -> dict:
         return self._stores[course].store_offline_result(body)
-
-
-def _write_bytes(path: Path, data: bytes) -> None:
-    """tmp + replace（中断的补传 POST 不留半截文件——半截权重比没有权重更危险）。
-
-    唯一实现见 `common.fs.atomic_write_bytes`（与 `remote/artifacts.atomic_write_bytes`
-    原是同款孪生）。
-    """
-    atomic_write_bytes(path, data)
 
 
 # ------------------------------------------------------------------ HTTP

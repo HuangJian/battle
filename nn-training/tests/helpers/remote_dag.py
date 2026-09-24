@@ -52,9 +52,11 @@ REMOTE_DIR = ROOT / "remote"
 #: 这份数字不是拍脑袋排的，是**拓扑秩**（从叶子往上的最长路径长度）——所以它读起来就是架构：
 #:
 #: * **L0 原语/叶子**：锁、端口守卫、产物存储、bulk 调度器、bundle、net_http、prefetch、
-#:   结果上传器、serve_pool、三个自包含引导模块、`hub.admin`、`colab_bc`；
+#:   结果上传器、serve_pool、三个自包含引导模块、`hub.admin`、`colab_bc`、`hub.store_*` 里
+#:   除 `store_offline` 外的五个状态混入（账本 / 计量 / 调度 / 租约 / 结果：只靠 `common.protocol`）；
 #: * **L1 单层传输/落盘**：`wire`（传输账）· `job_fs`（作业工作区）· `hub_client` ·
-#:   `offline_deliver` · `offline_eval` · `deliver_zip` · `iter_rollout`；
+#:   `offline_deliver` · `offline_eval` · `deliver_zip` · `iter_rollout` ·
+#:   `hub.store_offline`（离线段产物：要靠 L0 的 `artifacts` + `common.fs`，比同族高一层）；
 #: * **L2 传输核心**：`http`（所有业务簇的公共底座）· `push_client` · `plan_run`（半离线执行引擎：
 #:   `worker` 与 `run_loop` 都站在它上面，它自己谁都不靠上层靠）；
 #: * **L3 业务簇**：`bc_job` · `download`（取字节 + **物料落地三兄弟** `_ensure_payload` /
@@ -78,6 +80,13 @@ LAYERS: dict[str, int] = {
     "remote.hub.blob": 0,
     "remote.hub.offline": 0,
     "remote.hub.schedule": 0,
+    # 状态类拆分（S4 第十四刀）：`_JobStore` 的六个域混入。五个只靠协议层；`store_offline`
+    # 另需 `remote.artifacts`（L0）⇒ 高一档住 L1。它们彼此**零 import**（跨域调用经 `self`）。
+    "remote.hub.store_ledger": 0,
+    "remote.hub.store_scheduling": 0,
+    "remote.hub.store_leases": 0,
+    "remote.hub.store_results": 0,
+    "remote.hub.store_wire": 0,
     "remote.net_http": 0,
     "remote.prefetch": 0,
     "remote.result_upload": 0,
@@ -85,6 +94,7 @@ LAYERS: dict[str, int] = {
     "remote.tailscale_boot": 0,
     "remote.deliver_zip": 1,
     "remote.hub_client": 1,
+    "remote.hub.store_offline": 1,
     "remote.iter_rollout": 1,
     "remote.job_fs": 1,
     "remote.offline_deliver": 1,

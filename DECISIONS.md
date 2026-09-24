@@ -2738,3 +2738,47 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
   **提交时**红（守卫 +4 例，反探针 **11/11** 命中）。
 - **门禁**：**2402 → 2406 passed / 3 skipped**；mypy **394** 源文件绿；根 `bun run check` 2120 pass / 0 fail。
 —— 全文（三兄弟判据表 / NamedTuple 的理由 / 注入点第三档表）→ `docs/nn/engineering.md` §23「第十三刀」
+
+## §2026-09-24-goalnn-hub-jobstore-mixins（2026-09-24，用户指令「拆 hub_server 的 _JobStore 状态类（先定档接缝与拆法）」）
+
+- **背景**：`remote/hub_server.py` 3017 行里 `_JobStore` 独占 **1002 行 / 49 方法 / 19 个状态字段**，
+  而**一把 `_lock` 守着全部**（49 个方法里 30 个取锁，`_*_locked` 后缀标的就是临界区内的那半）。
+  前十三刀分别拆了「执行」与「路由」，状态类一直刻意留着（第十/十一刀都把它写进「本轮不做」）。
+- **备选与否决**：
+  1. **拆成几个各自持锁的协作对象**（`self.leases = LeaseTable(...)` 那种）——否（**本轮的核心否决**）：
+     30/49 个方法在同一把 `_lock` 下，「所有状态一把锁」就是**类的不变式**；各持一把锁 = 换并发
+     语义，不满足「零行为变化」。而且 3 个 tests 文件直接读 `store._leases` / `._lease_owners` /
+     `._stale_holders` / `._claimed` / `._backup_authorized` / `._last_heartbeat` / `halt_workers`
+     （20+ 处断言）⇒ 协作对象要让这些**全部改路**。
+  2. **按「锁内 / 锁外」拆**——否：锁外那批（`_job_dir` / `_read_ledger` / `get_bc_*`…）彼此没有
+     业务粘性，按锁的边界切出来的模块读起来是「一堆巧合同处一室的函数」；域才是变更的边界。
+  3. **拆完顺手把 `_HubQueue` 也按同法拆**——否：`_HubQueue` 是**另一个**状态类（多课程调度面，
+     1035 行），拆法与验证都要重新定档；混做会让 seam 对账失焦（同第十/十一刀理由）。
+  4. **把 `_write_bytes` 留在 `hub_server`**——不可能：它随离线簇走（唯一调用方在那里），而
+     `hub/*` 反向 import `hub_server` 会成环。⇒ 搬进 `store_offline.py`。
+- **决定**：`_JobStore` 按**域**拆成六个**混入**（`remote/hub/store_{ledger,wire,scheduling,leases,`
+  `results,offline}.py`），组合类只留 `__init__` / `note_worker` 与**进程级状态**
+  （`halt_workers` / `_workers`——多课程单 hub 下 `_HubQueue` 借的就是这一份）。
+  `hub_server.py` **3017 → 2072**（−31%）；新六块共 1273 行；47 个方法与本体 895 行搬走。
+- **★ 拆法判据（三条实测）**：① 一把锁是不变式（30/49）；② 跨域互调 37/49（`_claim_locked` →
+  `_job_priority_locked` / `_collect_expired_locked` → `_drop_commitment_locked` → `_bump_epoch_locked`）
+  ⇒ 混入留在 `self.X` 上 = **零 seam**；③ tests 直读私有属性 ⇒ 协作对象会全改路。**混入 = 同一个
+  对象、同一把锁、零行为变化**。
+- **状态声明分散的对价**：四个有状态的域各有一个 `_init_<域>(self)`（`store_results` /
+  `store_offline` 真无常驻状态 ⇒ **不造 `pass` 空钩**，守卫改成正面断言「其方法体里零
+  `self.X = …` 赋值」）；组合类 `__init__` **逐个显式调用**钩子（不用 `super()` 链：顺序要读得出来）。
+- **顺手清掉的既存陷阱**：旧 `_JobStore.__init__` 先 `self._lock = Lock()`、末尾又调
+  `_AuthGuard.__init__`（它也建锁）⇒ 前一把被丢弃。删掉前者，守卫钉住「组合类不得再自建锁」。
+- **随簇搬走的两个对外名字**：`ClaimOutcome` / `FREEZE_AFTER_RECLAIMS` → `store_leases`，由
+  `hub_server` 反过来 import（`FREEZE_AFTER_RECLAIMS as FREEZE_AFTER_RECLAIMS` 保住测试的取名字入口）；
+  `_write_bytes` → `store_offline`（唯一调用方）。
+- **纯搬对账**：AST 逐成员比对 HEAD vs 新家 ⇒ **58 个成员逐字节等价、零差异**；旧 `__init__` 的
+  21 条赋值 + 43 行字段注释全部逐字在新家。**规模到这个量级时「测试绿」不是搬运等价性的尺子**。
+- **违反后果**：任何域又实现一份兄弟方法 / 组合类又定义被搬走的方法 / 混入没接进 MRO / `__init__` 漏调
+  钩子 / 混入 import 兄弟混入 / 无钩子的域冒出常驻状态 / 裸注解带值 / 组合类又自建锁 / `hub_server`
+  又留 `_write_bytes` / 层号标错 / 状态归属窜门——十一类都在**提交时**红
+  （新守卫 17 例 + 反探针 **11/11** 命中）。
+- **门禁**：**2406 → 2423 passed / 3 skipped**；mypy **394 → 401** 源文件绿；根 `bun run check`
+  2120 pass / 0 fail；`check-decisions` 通过。
+—— 全文（拆法三判据 / 显式钩子 vs super 链 / 声明怎么写 / 逐字节对账怎么做）→
+`docs/nn/engineering.md` §23「第十四刀」
