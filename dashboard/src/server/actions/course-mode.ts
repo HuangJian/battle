@@ -18,12 +18,26 @@
  *    · `pushCourseMode`：**只**推 hub + 落意图（开课/停课/回灌共用，绝不写配置）；
  *    · `setCourseMode`：**那颗开关** = `applyTrainModeToConfig`（唯一配置写面）+ `pushCourseMode`；
  *    · `restoreCourseModes`：起 hub 回灌（只推 hub：回灌不是用户动作，不该改训练配置）。
+ *
+ *  ★ 2026-09-25（plan/offline-switch-auto-bundle）：这颗开关还要**顺手把任务包导出来**——
+ *  「切离线」= 「让云机去跑整段」，而云机取的是 `tmp/<课>/task-<课>.zip`；此前只有**开课**
+ *  才导包（`course-lifecycle.openCourse`），热切离线不导 ⇒ 在线课切成离线后云机 404 干等
+ *  `wait_pack_sec`（30 分钟）才由一句 `SystemExit` 告诉人（用户 2026-09-25 报障）。
+ *  规则 = `autoBundleDecision`（缺包才导、有包不动、导不出只说清不改 `ok`）。
  */
 
 import { loadConfig } from '../../core/config'
 import type { RlConfig } from '../../core/types'
 import { hubCandidates, hubSetCourseMode } from '../../stack/hub-admin'
+import {
+  TASK_BUNDLE_BUSY_KEY,
+  exportGuard,
+  launchTaskBundleExport,
+  taskBundleInfo,
+  type TaskBundleInfo,
+} from '../bundles'
 import { loadConsoleState, saveConsoleState } from './console-state'
+import { busy } from './result'
 import { applyTrainModeToConfig } from './train-mode'
 
 export type CourseMode = 'online' | 'offline'
@@ -121,10 +135,71 @@ export async function pushCourseMode(
  *  ⚠ 生效时机是**段边界**不是秒级：`run_iters<0` 时一段 job 覆盖到课程末，trainer 阻塞在段等待里
  *  （plan §2.4 F8）——文案里写明，免得被当成「点了没反应」。
  */
+/** 自动导出的**输入事实**（全部由调用方查好：纯函数不碰 IO，规则表见 plan §3.1）。 */
+export interface AutoBundleFacts {
+  /** 目标模式。 */
+  mode: string
+  /** ② hub 镜像是否被接受（`res.ok`）。**没接受就不导**：离线意图没落地，包没有消费者。 */
+  hubAccepted: boolean
+  /** `BCITY_NO_AUTO_TASK_BUNDLE` 已设（测试逃生阀：用例不该起真导出子进程）。 */
+  valve: boolean
+  /** 导出互斥键忙（导出是分钟级长任务，`launchTaskBundleExport` 也会自己拒第二次）。 */
+  busy: boolean
+  /** `exportGuard` 的拒启原因（`null` = 可以导）。 */
+  guardReason: string | null
+  /** 盘上已有包的形状（`taskBundleInfo`）。 */
+  pack: TaskBundleInfo
+}
+
+/** 自动导出的结果：`started` 给人/测试断言，`note` 是人读一行（空串 = 没什么可说）。 */
+export interface AutoBundleResult {
+  started: boolean
+  note: string
+}
+
+/** **切离线要不要顺手导一次任务包**（纯函数：规则表逐条可单测，全表见 plan §3.1）。
+ *
+ *  按序判定（第一条命中即返回）：
+ *    ① 非离线 ⇒ 不动（导包只属于离线语义）；
+ *    ② hub 没接受这次模式 ⇒ 不导（离线意图没落地，包没有消费者——顺序上导出在 ② 之后，
+ *       这条把「排在 ② 之后」与「② 失败不导」两句话对齐）；
+ *    ③ 逃生阀 ⇒ 不导；
+ *    ④ 导出忙 ⇒ 不导（已有一次在跑，成果一样会被取到）；
+ *    ⑤ 缺起点权重（`exportGuard`）⇒ 不导，**原样转述原因** + 指路；
+ *    ⑥ 盘上已有包 ⇒ **不导也不作废**（热切不是重开课；包作废是 `launchTaskBundleExport`
+ *       的内建行为（`export.ts` 的 `invalidateTaskBundle`），一旦调用就把旧包挪进
+ *       `stale-packs/` ⇒ 云机在导出窗口里探到 404）；
+ *    ⑦ 其余（缺包且可导）⇒ 导。
+ *
+ *  失败语义：**任何**结局都不改 `setCourseMode` 的 `ok`（模式切换本身已经成功了）。
+ */
+export function autoBundleDecision(f: AutoBundleFacts): AutoBundleResult {
+  const skip = (note: string): AutoBundleResult => ({ started: false, note })
+  if (f.mode !== 'offline') return skip('')
+  if (!f.hubAccepted) {
+    return skip('hub 未接受离线意图 —— 未自动导出任务包（修好 hub 后再切一次即可）')
+  }
+  if (f.valve) return skip('（测试逃生阀 BCITY_NO_AUTO_TASK_BUNDLE：未自动导出任务包）')
+  if (f.busy) return skip('上一次任务包导出还在跑 —— 未重复触发（完成后云机即可取到包）')
+  if (f.guardReason) {
+    return skip(`${f.guardReason} —— 未自动导出；先跑至少一轮（或导入一份权重）再切离线/重导`)
+  }
+  if (f.pack.exists) {
+    return skip(
+      `已有任务包 ${f.pack.path}（${f.pack.bytes} bytes）—— 云机可直接取；` +
+        '要重打请点「导出任务包」（那会先把旧包作废）',
+    )
+  }
+  return {
+    started: true,
+    note: '任务包导出已启动（导出完成前 hub 的 /offline/task-pack 会 404，云机会等新包）',
+  }
+}
+
 export async function setCourseMode(
   course: string,
   mode: string,
-): Promise<{ ok: boolean; message: string }> {
+): Promise<{ ok: boolean; message: string; bundle?: AutoBundleResult }> {
   const c = String(course ?? '').trim()
   const m = String(mode ?? '').trim() as CourseMode
   if (!c) return { ok: false, message: '需要课程（hub 的模式是按课程记的）' }
@@ -156,13 +231,38 @@ export async function setCourseMode(
   // 配置侧的实情也回执（write 的 notes）：尤其「rollout 位置恢复为 node」这种——
   // 不说出来，操作员没法知道往返没把原来的选择弄丢。
   const cfgNote = notes.length > 0 ? notes.join('；') : ''
+  // ③ 派生动作：切离线**顺手出包**（规则表 = autoBundleDecision）。
+  //    位置契约：排在本机配置 ① 与 hub 镜像 ② **之后**，且 `hubAccepted` 传进去 ⇒ ②
+  //    失败时决定必然是「不导」（plan §3.1 的第 ② 条）。顺序之外**不改 ok**。
+  let bundle: AutoBundleResult = autoBundleDecision({
+    mode: m,
+    hubAccepted: res.ok,
+    valve: Boolean(process.env.BCITY_NO_AUTO_TASK_BUNDLE),
+    busy: busy.has(TASK_BUNDLE_BUSY_KEY),
+    guardReason: exportGuard(c),
+    pack: taskBundleInfo(c),
+  })
+  if (bundle.started) {
+    const launched = launchTaskBundleExport(c)
+    bundle = launched.ok
+      ? { started: true, note: launched.message }
+      : {
+          started: false,
+          note: `任务包导出未能启动（${launched.message}）—— 可稍后点「导出任务包」重试`,
+        }
+  }
   if (!res.ok) {
     return {
       ok: false,
-      message: [res.message, cfgNote, timing].filter(Boolean).join('；'),
+      message: [res.message, cfgNote, timing, bundle.note].filter(Boolean).join('；'),
+      bundle,
     }
   }
-  return { ok: true, message: [head, cfgNote, timing].filter(Boolean).join('；') }
+  return {
+    ok: true,
+    message: [head, cfgNote, timing, bundle.note].filter(Boolean).join('；'),
+    bundle,
+  }
 }
 
 /** 回灌的有界重试（`attempts` 含首试；测试注入小值避免空等）。 */

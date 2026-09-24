@@ -446,7 +446,9 @@ def test_task_pack_endpoint_hands_over_the_console_export(tmp_path: Path) -> Non
 
         # 没有这门课的包 ⇒ 404 + 人读下一步（「先去控制台导出」），而不是空体
         st, raw = _http_bytes(hub.base, f"/offline/task-pack?course={C_ON}")
-        assert st == 404 and "先在控制台导出" in raw.decode("utf-8"), (st, raw[:200])
+        # 文案 2026-09-25 改过（plan/offline-switch-auto-bundle §3.2/评审 F3）：「导出要求训练已停」是过期
+        # 口径（`exportGuard` 早就不以「训练在跑」拒导）⇒ 现在写「随时可导，不必停训」。
+        assert st == 404 and "导出任务包" in raw.decode("utf-8"), (st, raw[:200])
 
         # 未鉴权 ⇒ 401（token 是唯一入口；任务包里有课程全文与权重）
         st, _raw = _http_bytes(hub.base, f"/offline/task-pack?course={C_OFF}", token="")

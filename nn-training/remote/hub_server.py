@@ -183,8 +183,14 @@ TASK_PACK_STALE_THROTTLE_SEC = 600.0
 #: 为什么必须有上界：只要还有别的 worker 在回传，`weights.json` 就一直在动 ⇒ 判据是**移动靶**，
 #: 没有上界时云机会被 409 卡到 deadline（30 分钟）然后 `SystemExit`（评审 F5）。
 TASK_PACK_STALE_TRIGGER_LIMIT = 2
+#: 「**缺包**」的上界（比过期那条宽一档）：缺包是**确定要造一份**，多试两次值；
+#: 到顶仍没包 ⇒ 不再触发，只在 404 正文里指路手动（plan/offline-switch-auto-bundle §3.4）。
+TASK_PACK_MISS_TRIGGER_LIMIT = 3
 #: 同课程的触发账本（进程内；hub 重启即清——与租约同风格，重启后重触发一次无害）。
 _TASK_PACK_TRIGGERS: dict[str, dict[str, float]] = {}
+#: **缺包**用另一本账（与过期那条腿分开）：两本账在同一个重导窗口里各自记账，
+#: 所以同一门课在窗口内最多被推 2 次（过期 1 + 缺包 1）——这是刻意的，不是 bug。
+_TASK_PACK_MISS_TRIGGERS: dict[str, dict[str, float]] = {}
 _TASK_PACK_LOCK = Lock()
 
 
@@ -258,6 +264,19 @@ def reset_task_pack_triggers(course: str = "") -> None:
             _TASK_PACK_TRIGGERS.pop(course, None)
         else:
             _TASK_PACK_TRIGGERS.clear()
+
+
+def reset_task_pack_miss_triggers(course: str = "") -> None:
+    """清**缺包**账本（包重新出现时调；`course=""` 清全部）。
+
+    为什么必须在「包又在了」时清：不清就等于**一次上界用一辈子**——运维修完再删包
+    （或干脆重导失败）时，hub 再也不会替云机推一次（plan §3.6-10）。
+    """
+    with _TASK_PACK_LOCK:
+        if course:
+            _TASK_PACK_MISS_TRIGGERS.pop(course, None)
+        else:
+            _TASK_PACK_MISS_TRIGGERS.clear()
 
 
 def trigger_task_bundle_export(course: str, log=_hub_log) -> tuple[bool, str]:
@@ -1916,19 +1935,24 @@ class _HubQueue(_AuthGuard):
         """
         if not (ent / COURSE_ENABLE_MARKER).exists():
             return False
-        for sub in ("remote-jobs", "offline"):
-            d = ent / sub
-            if not d.is_dir():
+        # ★ 2026-09-25（评审 S-1）：活证据多一条「**已导出的任务包**」，且不再要求
+        #   `remote-jobs`/`offline` 目录存在。为什么：**离线课本机不训练** ⇒ 那两个目录与
+        #   training_log 一小时后全部变旧，而这门课在 hub 表里消失会造成两处静默失效：
+        #   ① 控制台「切离线」的 mode POST 会 400（`set_mode` 只认已登记课）⇒ 意图失配；
+        #   ② 云机取包的 404 正文里 `known_courses` 也不会有它（排障人被指向错方向）。
+        #   包是文件系统事实（与 `task_pack_path` 同源推导），与「开课标记」一样可靠。
+        newest = 0.0
+        for p in (
+            ent / "remote-jobs",
+            ent / "offline",
+            ent / "training_log.jsonl",
+            ent / f"task-{ent.name}.zip",
+        ):
+            try:
+                newest = max(newest, p.stat().st_mtime)
+            except OSError:
                 continue
-            newest = 0.0
-            for p in (d, ent / "training_log.jsonl"):
-                try:
-                    newest = max(newest, p.stat().st_mtime)
-                except OSError:
-                    continue
-            if newest > 0 and now - newest <= self._discover_fresh:
-                return True
-        return False
+        return newest > 0 and now - newest <= self._discover_fresh
 
     # ---- 进程级状态（单课程借 store，多课程用自己那份） ----
     #: 进程级读写（`all_halted()` 的旧名）：既有测试/调用方直接读写它。
@@ -3376,12 +3400,14 @@ class HubHandler(BaseHTTPRequestHandler):
             self._json(
                 {
                     "error": (
-                        f"没有任务包 {p.name}——先在控制台导出（导出要求训练已停），"
-                        "或检查课程名"
+                        f"没有任务包 {p.name}——先在控制台「导出任务包」"
+                        "（随时可导，不必停训），或检查课程名"
                     ),
                     "course": course,
                     "path": str(p),
                     "known_courses": known,
+                    # ★ 2026-09-25（G7）：**缺包**也要自愈一次（此前这条路径零自愈）。
+                    **self._task_pack_miss_gate(course, p),
                 },
                 404,
             )
@@ -3392,6 +3418,8 @@ class HubHandler(BaseHTTPRequestHandler):
         if gate is not None:
             self._json(gate[0], gate[1])
             return
+        # 包就在盘上（新鲜，或过期到上界后降级照发）⇒ **缺包账本清零**：下次真缺包能重新触发。
+        reset_task_pack_miss_triggers(course)
         try:
             data = p.read_bytes()
         except OSError as e:
@@ -3403,6 +3431,99 @@ class HubHandler(BaseHTTPRequestHandler):
             flush=True,
         )
         self._bytes(data, 200, "application/zip", filename=p.name)
+
+    def _task_pack_miss_candidate(self, course: str) -> tuple[bool, str]:
+        """「这门课该不该替它造一份包」——**盘上的事实优先于「hub 扫到了没有」**（评审 S-1）。
+
+        为什么不只认 `courses()`：课程表是「1 小时新鲜度扫描」的产物，而**离线课本机不训练**
+        ⇒ 冷掉或 hub 重启之后它从表里消失；那时只认表就会让「缺包自愈」在最需要它的场景里
+        静默失效（云机 404 里 `known_courses` 也没有它，排障被指向错方向）。判据：
+          ① hub 表里有它且**明确是 online** ⇒ 不替它导（云机来取包是配置误会）；
+          ② 其余情形只要盘上有它的开课标记（`training-enabled.txt`，控制台开课写的）就算
+             「这是门真课」——拼错的课程名不会在盘上有这个文件；
+          ③ 表里是 offline 但标记被删（停课残留）⇒ 也替它导（mode 是更权威的意图）。
+        """
+        in_table = course in self.hub.courses()
+        if in_table and self.hub.mode_of(course) != COURSE_MODE_OFFLINE:
+            return False, (
+                "这门课在 hub 里是 online（云机来取包是配置误会，不替它导）："
+                "先到控制台把它切成离线；若刚重启过 hub，检查启动参数里的课程模式"
+            )
+        root = self.hub.traj_root()
+        if root is not None and (root / course / COURSE_ENABLE_MARKER).exists():
+            return True, ""
+        if in_table:
+            return True, ""
+        return False, (
+            "hub 的表里没有这门课，且盘上没有它的开课标记"
+            "（检查课程名 / hub 的 --traj-root 是否就是控制台的 tmp）"
+        )
+
+    def _task_pack_miss_gate(self, course: str, p: Path) -> dict:
+        """「**缺包**」自愈门（plan/offline-switch-auto-bundle §3.4）：并入 404 正文的字段。
+
+        为什么要有它：包不存在时 `_task_pack_gate` 根本不跑（它只处理「过期」）⇒ 这条路径
+        此前**零自愈**：云机等满 `wait_pack_sec`（30 分钟）再由一句 `SystemExit` 告诉人
+        （用户 2026-09-25 报障）。现在 hub 替这门课触发一次控制台重导，带节流 + 上界；
+        到上界/控制台不可达 ⇒ **不制造新的等待理由**，只在正文里说清真因并指路手动。
+
+        返回字段（全部如实，不猜）：`triggered` / `trigger_note` / `give_up`（还有节流时的
+        `retry_after`）。与过期那条腿的 409 区别：那里 `triggered` 兼表「已有触发在飞」，
+        这里只表「**本次**真的推了一次」。
+        """
+        ok, why = self._task_pack_miss_candidate(course)
+        if not ok:
+            return {"triggered": False, "trigger_note": f"未触发重导：{why}", "give_up": False}
+        now = time.time()
+        with _TASK_PACK_LOCK:
+            st = _TASK_PACK_MISS_TRIGGERS.setdefault(course, {})
+            verdict = decide_task_pack(
+                stale=f"缺包 {p.name}",
+                secs_since_trigger=(now - float(st.get("last", 0.0))) if st.get("last") else 1e9,
+                triggers=int(st.get("count", 0)),
+                throttle_sec=TASK_PACK_STALE_THROTTLE_SEC,
+                limit=TASK_PACK_MISS_TRIGGER_LIMIT,
+            )
+            if verdict == "trigger":
+                st["last"] = now
+                st["count"] = int(st.get("count", 0)) + 1
+        if verdict == "trigger":
+            ok2, why2 = trigger_task_bundle_export(course)
+            if ok2:
+                return {
+                    "triggered": True,
+                    "trigger_note": "已替你触发一次重导，稍后重试（导出约需数分钟）",
+                    "retry_after": TASK_PACK_STALE_THROTTLE_SEC,
+                    "give_up": False,
+                }
+            return {
+                "triggered": False,
+                "trigger_note": (
+                    f"想替你触发重导，但控制台不可达/不接受（{why2}）"
+                    "：请到控制台点一次「导出任务包」"
+                ),
+                "give_up": False,
+            }
+        if verdict == "throttled":
+            return {
+                "triggered": False,
+                "trigger_note": "刚刚已触发过重导（节流窗内不再重复打扰控制台）",
+                "retry_after": TASK_PACK_STALE_THROTTLE_SEC,
+                "give_up": False,
+            }
+        _hub_log(
+            f"task-pack {course}: 缺包已连续触发 {TASK_PACK_MISS_TRIGGER_LIMIT} 次仍没有包"
+            "——不再触发，只指路手动"
+        )
+        return {
+            "triggered": False,
+            "trigger_note": (
+                f"已连续触发 {TASK_PACK_MISS_TRIGGER_LIMIT} 次重导仍没有包"
+                "——请到控制台手动「导出任务包」，并确认 tmp/<课>/weights.json 存在"
+                "（导出要有起点权重）"
+            ),
+            "give_up": True,
+        }
 
     def _task_pack_gate(self, course: str, p: Path) -> tuple[dict, int] | None:
         """过期门（plan §8.3）：返回 `(响应体, 状态码)` = 该拒；`None` = 照发。

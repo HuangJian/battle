@@ -138,8 +138,17 @@ export function BundleRowActions({ course }: BundleRowActionsProps) {
           <span className="tc-caption">{fmtBytes(info.bytes)}</span>
         </span>
       ) : (
-        <span className="tc-caption" title="还没有导出过任务包（点「导出任务包」生成并自动下载）">
-          未导出
+        // ★ 2026-09-25（plan/offline-switch-auto-bundle §3.3）：缺一步在 UI 上曾经是**静默**的
+        //（只有 hover 小字「未导出」）⇒ 云机取包 404 干等 30 分钟时才在云机日志里发现。
+        // 现在给一个看得见的警示徽标 + 下一步（切离线会自动导，也可点钮立刻导）。
+        <span
+          className="tc-badge tc-badge--y"
+          title={
+            '还没有导出过任务包：切离线时会自动导一次；也可以点「导出任务包」立刻生成并下载' +
+            '（离线课没有包 ⇒ 云机取包 404，会一直等到 wait_pack_sec 用尽）'
+          }
+        >
+          未导出 · 切离线自动导
         </span>
       )}
       <button

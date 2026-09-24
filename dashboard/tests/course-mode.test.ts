@@ -19,6 +19,9 @@ const DIR = mkdtempSync(path.join(os.tmpdir(), 'bcity-cmode-'))
 process.env.BCITY_CONSOLE_STATE = path.join(DIR, 'console-state.json')
 process.env.BCITY_REGISTRY_FILE = path.join(DIR, 'registry.json')
 process.env.BCITY_RL_CONFIG = path.join(DIR, 'rl-config.json')
+// ★ 2026-09-25：切离线会顺手导任务包（真起 run_rl 子进程）。本套件钉的是「意图落盘 +
+// 回灌」，不该被导出副作用牵着走——置逃生阀（导出自身的规则由 course-mode-bundle 套件钉）。
+process.env.BCITY_NO_AUTO_TASK_BUNDLE = '1'
 writeFileSync(
   process.env.BCITY_RL_CONFIG,
   JSON.stringify({ version: 1, nodes: [], rl: { hub_port: 18787, remote_token: 'tok' } }),

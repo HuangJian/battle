@@ -383,20 +383,48 @@ def _fetch_guarded(
     return got
 
 
-def _http_error_body(e: urllib.error.HTTPError, limit: int = 400) -> str:
-    """HTTPError 的响应正文（优先取 json 的 `error` 字段；读不到就说清「无正文」）。"""
+class PackUnavailableError(SystemExit):
+    """「这门课没拿到任务包」——**只表示取包失败**，不等于训练失败。
+
+    单开一类（`SystemExit` 的子类，message 逐字不变）是为了让 `run()` 能**只**放行这一类：
+    多课程串行时跳过它继续下一门（plan/offline-switch-auto-bundle §3.5），而课程名不一致、
+    产物目录不完整这类**配置错误**照旧立即停（继续跑没有意义）。
+
+    为什么必须是 `SystemExit` 子类：既有用例与 notebook 都按 `SystemExit` 处理取包失败
+    （`pytest.raises(SystemExit)` / cell 末尾 `raise SystemExit(_rc)`）——子类让它们逐字不变。
+    """
+
+
+def _http_error_parts(
+    e: urllib.error.HTTPError, limit: int = 400
+) -> tuple[str, dict]:
+    """HTTPError 的响应正文 → `(人读正文, 解析出的 dict)`。**只读一次**。
+
+    为什么要合成一个函数（评审 F2）：HTTPError 的 fp **读完即空** ⇒ 「先 `_http_error_body(e)`
+    再读一次拿 `path`/`known_courses`」第二次只会拿到 `b""`（现场表现是「hub 说：（空正文）」）。
+    这里一次 `e.read()`，正文文本与结构体都从同一份 bytes 出。
+    """
     try:
         raw = e.read()
     except Exception:  # 正文读不出来不该盖掉 HTTP 状态本身
-        return "（无正文）"
+        return "（无正文）", {}
     try:
         loaded = json.loads(raw.decode("utf-8", "replace"))
     except ValueError:
         loaded = None
-    if isinstance(loaded, dict) and loaded.get("error"):
-        return str(loaded["error"])[:limit]
+    doc = loaded if isinstance(loaded, dict) else {}
+    if doc.get("error"):
+        return str(doc["error"])[:limit], doc
     text = raw.decode("utf-8", "replace").strip()
-    return (text[:limit] or "（空正文）")
+    return (text[:limit] or "（空正文）"), doc
+
+
+def _http_error_body(e: urllib.error.HTTPError, limit: int = 400) -> str:
+    """HTTPError 的响应正文（优先取 json 的 `error` 字段；读不到就说清「无正文」）。
+
+    ⚠ 只能读一次：既要不只正文、又要正文里的字段时用 `_http_error_parts`（F2）。
+    """
+    return _http_error_parts(e, limit)[0]
 
 
 def fetch_task_pack(
@@ -421,7 +449,34 @@ def fetch_task_pack(
         if e.code in (401, 403):
             log(f"取包被拒 HTTP {e.code} —— HUB_TOKEN 不一致（手动上传仍然可行）")
         elif e.code == 404:
+            # ★ 2026-09-25（plan/offline-switch-auto-bundle §3.2）：hub 的 404 正文里带
+            #   诊断字段（`path` / `known_courses` / 触发回执），而此前只打一行固定文案 ⇒
+            #   现场无法区分「包没导出」「hub 的 traj-root 不对」「hub 压根没发现这门课」
+            #   （三条的表现逐字相同，用户 2026-09-25 因此白等 28 分钟）。这里把正文读出来。
+            body, doc = _http_error_parts(e)
             log(f"hub 上还没有 task-{course}.zip —— 先在控制台「导出任务包」")
+            if body and body not in ("（空正文）", "（无正文）"):
+                log(f"  hub 说：{body}")
+            path_s = str(doc.get("path") or "")
+            known = doc.get("known_courses")
+            if path_s:
+                log(f"  hub 找的落点：{path_s}")
+            if isinstance(known, list):
+                names = ", ".join(str(x) for x in known)
+                if course in [str(x) for x in known]:
+                    log(f"  hub 已知课程：{names or '（无）'}（含本门 ⇒ hub 找得到课，只是没这个包）")
+                else:
+                    log(
+                        f"  hub 已知课程：{names or '（一门都没有）'}（**没有本门** ⇒ hub 还没发现"
+                        "这门课：课程名不一致 / 训练目录不新鲜 / hub 的 --traj-root 不是本机 tmp）"
+                    )
+            if doc:
+                if doc.get("give_up"):
+                    log("  hub 动作：重导已到上界 —— 请到控制台手动「导出任务包」")
+                elif doc.get("triggered"):
+                    log(f"  hub 动作：{doc.get('trigger_note') or '已替我们触发了一次重导'}，稍后会重试")
+                elif doc.get("trigger_note"):
+                    log(f"  hub 动作：{doc['trigger_note']}")
         elif e.code == 409:
             # 409 = hub 判「包已过期」（可能已经替我们触发重导）——**正文就是下一步**：
             # 只打一个数字的话，人在云机上看到的是「取包失败」，而真实原因已经写在正文里了
@@ -636,7 +691,7 @@ def obtain_pack(
     if optional:
         log("本机优先：这次没取到包 —— 代码/TS 从产物目录取，回传 best-effort（不因此停跑）")
         return None
-    raise SystemExit(
+    raise PackUnavailableError(
         f"[offline] {wait_s:.0f}s 内没拿到任务包 —— 两条路任选其一：\n"
         f"  ① hub 取包：控制台「导出任务包」（导出要求该课训练已停）→ 保持 hub 在线"
         f"（{'、'.join(hubs) if hubs else 'CFG.hub_url / HUB_IP 未配'}）→ 重跑本 cell；"
@@ -1242,12 +1297,18 @@ def run(
 
     `cfg` 见 `ipynb/battle.offline.ipynb` 的 CFG（course / hub_url / device / task_zip /
     force_pack / wait_pack_sec / hub_tries / live_backfeed / budget_sec / threads / max_iters /
-    eval_on_cloud / rollout_workers …）。`force_pack=True` = 显式要老行为（包覆盖本机计划/清单）。
+    eval_on_cloud / rollout_workers …）。    `force_pack=True` = 显式要老行为（包覆盖本机计划/清单）。
 
     **多课程：串行跑完**（2026-09-22 用户指令）——`CFG.course` 给列表时按顺序逐门跑，
-    每门课都是完整一段（取包 → 训练 → 交付物）；哪一门没跑完就停在那里并把剩余课程
-    列出来（一门课的错误不该被下一门课的错误盖住；而“剩余课程名”是人在云机上最需要的
-    下一步）——不静默跳课。
+    每门课都是完整一段（取包 → 训练 → 交付物）。
+
+    ★ 2026-09-25（plan/offline-switch-auto-bundle §3.5）：失败分两类处置——
+      · **取不到任务包**（`PackUnavailableError`）⇒ 记一行、**跳过继续下一门**；
+        末尾必须汇总（完成 N / 跳过 M + 课名）且 **M>0 ⇒ 非零 rc**；
+      · 其它 `SystemExit`（课程名不一致、产物目录不完整）与 **训练失败（rc≠0）**⇒
+        照旧**立即停**并把剩余课程列出来（配置错误/真失败，继续没有意义）。
+    一条边界要记牢：**这里的「全被跳过」= 「CFG 点名要跑的课一份包都没拿到」⇒ 响亮失败**。
+    将来若引入「向 hub 问清单、没有活干就收工」，**队列为空 ≠ 全被跳过**（那是正常的没事干）。
     """
     # ★ 凭据一律在任何网络改动**之前**读完（2026-09-17 Kaggle 事故的时序约束）：
     #   userspace 引导会把平台 Secrets（公网 HTTPS）变成够不着的东西。
@@ -1261,11 +1322,20 @@ def run(
     multi = len(courses) > 1
     log(f"课程队列（{len(courses)} 门，串行）：{', '.join(courses)}")
     rc = 0
+    skipped: list[str] = []
     for i, course in enumerate(courses):
         rest = courses[i + 1 :]
         log(f"===== [{i + 1}/{len(courses)}] 课程 {course} =====")
         try:
             rc = run_one_course(cfg, creds, log, keepalive_stop, course=course, multi=multi)
+        except PackUnavailableError as e:
+            # ★ 只放宽「取不到包」这一类（顺序必须在 `except SystemExit` **之前**，
+            #   否则会被父类吃掉）：记一行 + 继续下一门；汇总与非零退出在循环之后。
+            skipped.append(course)
+            log(f"课程 {course} 跳过（取不到任务包）：{e.code}")
+            if rest:
+                log(f"  —— 继续下一门：{rest[0]}（末尾会汇总；训练失败/配置错误仍然立即停）")
+            continue
         except SystemExit as e:
             if rest:
                 log(
@@ -1281,6 +1351,23 @@ def run(
             return rc
         if rest:
             log(f"课程 {course} 完成 —— 下一门：{rest[0]}")
+    if skipped:
+        done = len(courses) - len(skipped)
+        log(
+            f"本会话完成 {done} 门 / 跳过 {len(skipped)} 门（取不到任务包）"
+            f"：{', '.join(skipped)}"
+        )
+        if done == 0:
+            # 响亮失败：一门都没跑（**不谎报成功**）。注意这与「向 hub 问清单、队列为空」
+            # 是两回事 —— 后者是正常的没事干（plan/offline-task-discovery §3.3）。
+            raise SystemExit(
+                f"[offline] 没有任何一门课拿到任务包（{len(skipped)} 门全被跳过）："
+                f"{', '.join(skipped)}\n"
+                "  ① hub 取包：控制台「导出任务包」→ 保持 hub 在线 → 重跑本 cell；\n"
+                "  ② 手动送包：控制台下载 task-<课>.zip → 上传到本 notebook（或写进 "
+                "CFG['task_zip']）→ 重跑本 cell。"
+            )
+        return rc if rc else 1
     log(f"全部课程完成（{len(courses)} 门）：{', '.join(courses)}")
     return rc
 

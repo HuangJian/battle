@@ -21,6 +21,7 @@ import hashlib
 import io
 import json
 import sys
+import urllib.error
 import zipfile
 from pathlib import Path
 
@@ -430,3 +431,174 @@ def test_obtain_pack_optional_still_uses_the_hub_when_it_has_one(
     )
     assert got is not None and got.name == "task-c5-gae.zip"
     assert n["calls"] == 1, "optional 模式只该问一次"
+
+# ------------------------------------------------- X1：取不到包**跳过**，配置错误照旧**立即停**
+#
+# 评审 X1：plan 1（切离线自动导包）说「全被跳过 ⇒ 非零退出」，plan 2（向 hub 问清单）说
+# 「清单为空 = 正常收工」——两句都对，但**必须按来源分开**：CFG 点名要跑的课取不到包是
+# 异常（响亮），队伍里本来就没活干是正常（安静）。这里钉前一半。
+
+
+def _run_many(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    courses: list[str],
+    outcomes: list[object],
+    lines: list[str] | None = None,
+) -> tuple[int, list[str], list[str]]:
+    """跑一次 `run()`（`run_one_course` 换成给定结局：异常对象 = 抛，int = rc）。
+
+    返回 `(rc, 被点到的课, 日志行)`；**不吞 `SystemExit`**——要钉「响亮失败」的用例自己套
+    `pytest.raises`，并把 `lines` 传进来（异常不带走日志）。
+    """
+    seen: list[str] = []
+    it = iter(outcomes)
+
+    def fake_one(cfg, creds, log, stop, course=None, multi=False):
+        seen.append(str(course))
+        nxt = next(it)
+        if isinstance(nxt, BaseException):
+            raise nxt
+        assert isinstance(nxt, int), nxt  # 结局只有两类：异常对象 / rc
+        return nxt
+
+    monkeypatch.setattr(offline_boot, "courses_of", lambda cfg: list(courses))
+    monkeypatch.setattr(offline_boot, "run_one_course", fake_one)
+    bag = lines if lines is not None else []
+    rc = offline_boot.run({"course": list(courses)}, bag.append, lambda _k, _d=None: "", None)
+    return rc, seen, bag
+
+
+def test_run_skips_a_course_without_a_pack_and_keeps_going(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """第一门取不到包 ⇒ 继续第二门，末尾汇总点名 + **非零 rc**（跳过不算跑完）。"""
+    rc, seen, lines = _run_many(
+        tmp_path, monkeypatch, ["a", "b"], [offline_boot.PackUnavailableError("没包"), 0]
+    )
+    assert rc == 1, lines
+    assert seen == ["a", "b"], "取不到包的课不该吃掉后面那门"
+    joined = "\n".join(lines)
+    assert "课程 a 跳过（取不到任务包）" in joined
+    assert "本会话完成 1 门 / 跳过 1 门" in joined and "a" in joined
+
+
+def test_run_all_skipped_is_a_loud_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """一门都没跑 ⇒ 响亮失败（**不谎报成功**），且把课名点出来 + 两条路（hub 取包 / 手动送包）。"""
+    with pytest.raises(SystemExit) as ei:
+        _run_many(
+            tmp_path,
+            monkeypatch,
+            ["a", "b"],
+            [offline_boot.PackUnavailableError("没包"), offline_boot.PackUnavailableError("没包")],
+        )
+    msg = str(ei.value)
+    assert "没有任何一门课拿到任务包" in msg and "a" in msg and "b" in msg
+    assert "导出任务包" in msg and "task_zip" in msg, "光说失败不够：要给人两条下一步"
+
+
+def test_run_still_stops_at_a_config_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """课程名不一致/产物目录不完整这类 `SystemExit` 照旧**立即停**（继续跑没有意义）。
+
+    判据用日志拿：把那门课点名为「未跑完 + 剩余列表」，且**没有**给它印「跳过」那一行。
+    """
+    lines: list[str] = []
+    with pytest.raises(SystemExit):
+        _run_many(tmp_path, monkeypatch, ["a", "b"], [SystemExit("课程名不一致"), 0], lines)
+    joined = "\n".join(lines)
+    assert "课程 a 未跑完（课程名不一致）" in joined and "剩余 1 门课未执行：b" in joined
+    assert "跳过" not in joined, "配置错误不是「跳过」——混了会让人以为课被安静地丢了"
+
+
+def test_run_stops_at_a_failed_course(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """训练真失败（rc≠0）⇒ 停在当场、把剩余课列出来（与「跳过」区分开）。"""
+    rc, seen, lines = _run_many(tmp_path, monkeypatch, ["a", "b"], [3, 0])
+    assert rc == 3 and seen == ["a"]
+    assert "课程 a 退出 rc=3" in "\n".join(lines)
+
+
+# ------------------------------------------------- F2/S3：hub 的正文只能读一次、诊断要进日志
+
+
+def _http_error(code: int, body: bytes) -> urllib.error.HTTPError:
+    import email.message
+
+    return urllib.error.HTTPError(
+        "http://hub/offline/task-pack", code, "err", email.message.Message(), io.BytesIO(body)
+    )
+
+
+class _RaisingFetcher:
+    """`_load_tailscale_boot()` 的替身：`fetch_guarded` 直接抛（把护栏换成一次固定应答）。"""
+
+    def __init__(self, err: BaseException) -> None:
+        self._err = err
+
+    def fetch_guarded(self, *_a: object, **_kw: object) -> bytes:
+        raise self._err
+
+
+def test_http_error_parts_reads_the_body_exactly_once() -> None:
+    """F2：HTTPError 的 fp **读完即空** ⇒ 正文与字段必须从同一份 bytes 出。
+
+    这条断言钉的是**危险本身**：第二次读只能拿到「（空正文）」，所以现场那条「先打正文、
+    再解析 `path`/`known_courses`」的写法会打出「hub 说：（空正文）」。
+    """
+    body = b'{"error":"no pack","path":"D:/tmp/c/task-c.zip","known_courses":["a"]}'
+    err = _http_error(404, body)
+    text, doc = offline_boot._http_error_parts(err)
+    assert text == "no pack"
+    assert doc["path"].endswith("task-c.zip") and doc["known_courses"] == ["a"]
+    assert offline_boot._http_error_body(err) == "（空正文）"
+
+
+def test_fetch_task_pack_logs_the_hub_diagnostics_on_404(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """S3：404 的 `path`/`known_courses`/触发回执必须进日志（三条病因此前长得一模一样）。"""
+    body = json.dumps(
+        {
+            "error": "没有任务包 task-c5-gae.zip——先在控制台「导出任务包」（随时可导，不必停训）",
+            "course": "c5-gae",
+            "path": "D:/traj/c5-gae/task-c5-gae.zip",
+            "known_courses": ["c5-gae"],
+            "triggered": True,
+            "trigger_note": "已替你触发一次重导，稍后重试（导出约需数分钟）",
+            "give_up": False,
+        }
+    ).encode("utf-8")
+    monkeypatch.setattr(offline_boot, "_load_tailscale_boot", lambda: _RaisingFetcher(_http_error(404, body)))
+    lines: list[str] = []
+    got = offline_boot.fetch_task_pack("http://hub", "tok", "c5-gae", tmp_path, lines.append)
+    assert got is None
+    joined = "\n".join(lines)
+    assert "hub 说：没有任务包" in joined
+    assert "hub 找的落点：D:/traj/c5-gae/task-c5-gae.zip" in joined
+    assert "含本门" in joined, "本门在 known_courses 里 ⇒ 病因是「没这个包」而不是「不认识这门课」"
+    assert "已替你触发一次重导" in joined
+
+
+def test_fetch_task_pack_flags_a_course_the_hub_does_not_know(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """反向判据：本门**不在** `known_courses` 里 ⇒ 日志必须指向「hub 还没发现这门课」。"""
+    body = json.dumps(
+        {"error": "没有任务包", "course": "c5-gae", "known_courses": ["other"], "triggered": False}
+    ).encode("utf-8")
+    monkeypatch.setattr(offline_boot, "_load_tailscale_boot", lambda: _RaisingFetcher(_http_error(404, body)))
+    lines: list[str] = []
+    offline_boot.fetch_task_pack("http://hub", "tok", "c5-gae", tmp_path, lines.append)
+    joined = "\n".join(lines)
+    assert "**没有本门**" in joined and "--traj-root" in joined
+
+
+def test_fetch_task_pack_prints_the_409_body(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """409（过期）的正文就是下一步——只打一个数字等于把原因留在云机上。"""
+    body = json.dumps({"error": "任务包已过期（起点权重 sha 不符）", "stale": True}).encode("utf-8")
+    monkeypatch.setattr(offline_boot, "_load_tailscale_boot", lambda: _RaisingFetcher(_http_error(409, body)))
+    lines: list[str] = []
+    offline_boot.fetch_task_pack("http://hub", "tok", "c5-gae", tmp_path, lines.append)
+    joined = "\n".join(lines)
+    assert "409" in joined and "起点权重 sha 不符" in joined

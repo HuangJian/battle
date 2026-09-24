@@ -97,6 +97,7 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | 10 | **arm64 节点的内核吞吐已到顶**：四项循环重排在这类机器上只值 ≈+5%（FP-op 受限，贴着 61–69% 上限），而 FMA 上限值 **+32%** —— 要不要为此开 **new era**（改数值 ⇒ 权重/语料/基线全重做） | `docs/nn/runtime-opt.md` §14 §15 | 二选一并写明：① 走「减少 MAC 数」（缩网络/换结构）⇒ 另立条目；② 接受 FMA 新纪 ⇒ 按 `AGENTS §6.3b` 的三件套（DECISIONS + 60-seed 三难度基线 + golden 重冻）执行。**在此之前 arm64 侧不要再提循环重排的优化**（已无空间） |
 | 11 | ~~云机离线 eval 腿仍未入池~~ **已收尾**：池已接入 `run_cloud_eval` + `run_local_eval_game`（每轮一个池、轮末关；上限 `min(slots, 局数)`），实测 **1.19–1.39×**（24/48 局），逐局 `_eval_report.json` **逐字段相同**（`elapsedSec` 除外） | `docs/nn/runtime-opt.md` §22.5 | ✅ 已验：`tests/test_offline_eval_pool.py`（接线 + 执行面，8 用例）+ `tools/perf/bench-eval-pool.py` 真机 A/B |
 | 12 | **离线开课补 it0 基线的真机判据未取**（代码/单测已齐，见 `docs/nn/remote-transport.md` §42） | `docs/nn/remote-transport.md` §42 | 点一次离线开课 ⇒ `tmp/<课>/evalA.log` 出现 `[evalA] DONE it0 … games=<关数×每关局数>`；**等第一轮回传落账后**控制台指标表出现 it0 行、配对基线回到 0（不再是「首条 eval 轮」） |
+| 13 | **切离线自动出包的真机判据未取**（代码/单测已齐，见 `docs/nn/remote-transport.md` §43） | `docs/nn/remote-transport.md` §43 | 在线课点「切离线」⇒ 回执带「任务包导出已启动」且 `tmp/<课>/task-<课>.zip` 出现；云机日志出现 `hub 找的落点：…`（不再是固定文案）；**包在导出窗口里云机会等到它**（不再等满 1800s） |
 
 ### 3.4 控制台
 
