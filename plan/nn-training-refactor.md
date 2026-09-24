@@ -906,6 +906,39 @@ dashboard **1105 pass / 0 fail** + typecheck 绿。
 里前两个已拆完并收口（第十三·十六刀），第四个见 §5.2。余下可做的是**同一套手法**在
 `rl/` 侧继续（`TrainingSteps` 本体 952 行 / 20 方法，切法 = 按一条真实调用链切）。
 
+#### 5.3.16 第十七刀（2026-09-24，**已完成**）—— `TrainingSteps` 的 in-loop 评估链 → `rl/loop_eval.py`
+
+按用户指令「按同一条『真实调用链』手法拆 `rl/loop_steps.py` 的 `TrainingSteps` 本体（952 行 /
+20 方法）」执行。**`rl/loop_steps.py` 940 → 666 行**（累计 2328 → 666）；新模块
+`rl/loop_eval.py`（375 行）承载 `TrainingEval`（8 成员）——**混入**，同一对象、零行为变化。
+
+| 判据 | 实测 | 用在哪 |
+|---|---|---|
+| 20 个方法里互相调用的 | **7 个**，连成**一条链** | 簇 = 这条链（+ `_eval_on_round` 占位） |
+| 链的外部入口 | 3（轮内 2 + 收官 1） | 方向 = 调用者依赖被调用者 ⇒ 本簇当基类 |
+| 状态槽 | 5 个，只被这簇读写 | 随簇搬；两处**跨模块手**经继承（闭集表钉住） |
+| 模块级名字 | **零** | ⇒ **零 patch 点迁移**（前两刀最贵的那步这次是空的） |
+
+**基类元组是追加**：`class TrainingSteps(TrainingRemote, TrainingEval)` —— 2026-09-23 写下的
+`__mro__[1] is TrainingRemote` 与四个「继承真混入」的测试宿主逐字仍成立（追加而非插队）。
+
+**守卫** `tests/test_loop_eval_split.py`（11 例）：成员闭集 · 对象恒等 · 基类元组 + 组合类不变 ·
+五槽位单处声明 · 跨模块手闭集 · 顶层 import 闭集 + DI 只许延迟 · 不得反向 import · **两条功能性**
+（跨模块交棒 · 占位响亮失败）。反探针 **14/14**。纯搬对账 **8/8**（1 处申报差异）。
+
+**⚠ 坑**：按路径读 `loop_steps.py` 的守卫（`tests/test_eval_a_once.py`）随搬家红——修法升级成
+「在 `rl/` 树里找谁持有这个名字」+「拿到它的模块里住着 `_dispatch_delayed_eval`」；
+`ruff format --check` 不是门禁（HEAD 上本来就不格式），别顺手 format。
+
+**下一刀（如果要继续）**：`loop_steps.py` 余 **666 行**，剩下的 12 个方法**都是叶子**（无方法间
+调用链）——`_log_report` / `_write_iter_stats` / `_record_iteration` / `_commit_journal` /
+`_forensics`（报告与落账）· `_volume_plan_block` / `_export_offline_bundle` / `_export_weights` /
+`_ensure_ts_code` / `_per_stage_quota`（导出与配额）· `_course_iter` / `_hot_reload_course`（课程）。
+⇒ 下一刀若仍要**按链**切，可考虑「报告与落账」那条（`_write_iter_stats → _log_report →
+_record_iteration` 的**数据流**，不是调用流）或「导出与配额」（`_volume_plan_block` 被
+`_export_offline_bundle` 调用，其余靠 `self`）；再往下就是**按职责**切而不是按链切，收益递减——
+判据要先量（叶子之间有没有共享状态、有没有数据流边），别按行数等分。
+
 ### 5.4 本轮**不做**（已核，刻意保留）
 
 - `remote/notebook_boot.py` ↔ `remote/offline_boot.py` 的孪生助手（`_build_opener` /

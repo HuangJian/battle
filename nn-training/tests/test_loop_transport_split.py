@@ -1,4 +1,4 @@
-"""S4 契约（2026-09-23）—— `rl/loop_steps.py` 的两次拆分不得腐烂。
+"""S4 契约（2026-09-23）—— `rl/loop_steps.py` 的头两次拆分不得腐烂。
 
 `rl/loop_steps.py` 原本 2328 行，里面塞着两种东西：
 
@@ -11,7 +11,13 @@
   方向是 **`class TrainingSteps(TrainingRemote)`**（调用者依赖被调用者：簇的唯一入口
   `_remote_ppo` 由 TrainingSteps 的其余方法调用）。这样组合类与测试宿主都不必改。
 
-本文件钉住两次拆分**不会腐烂**的六条：
+* **S4 第十七刀**：`TrainingSteps` 里的 **in-loop 评估链** 8 个成员（派发 → 尾巴收拢 →
+  join/交棒 → 收官 drain，即本类里唯一一条真正的方法间调用链）⇒ 搬到
+  `rl/loop_eval.py::TrainingEval`，**追加**在既有基类之后
+  （`class TrainingSteps(TrainingRemote, TrainingEval)`）。本文件只跟着改两条与基类元组
+  相关的断言，完整契约在新家：`tests/test_loop_eval_split.py`。
+
+本文件钉住头两次拆分**不会腐烂**的六条：
 
 1. 那些名字在目标模块里**定义**，且**不再**在 `loop_steps` 里定义（门面只能是门面，
    不许哪天有人「就地补一个」）；
@@ -218,12 +224,19 @@ def test_remote_leg_is_defined_in_loop_remote_only() -> None:
 
 
 def test_training_steps_inherits_training_remote() -> None:
-    """方向是**调用者依赖被调用者**：`TrainingSteps(TrainingRemote)`（不是反过来）。"""
+    """方向是**调用者依赖被调用者**：`TrainingSteps(TrainingRemote, TrainingEval)`。
+
+    S4 第十七刀**追加**了 `TrainingEval`：追加而不是插队 ⇒ 2026-09-23 写下的那句
+    `__mro__[1] is TrainingRemote` 逐字仍然成立（追加时特意保住它，见
+    `rl/loop_steps.py` 的 import 注释）。这里补上完整元组，免得「追加」变成「随便插」。
+    """
+    from rl.loop_eval import TrainingEval
     from rl.loop_remote import TrainingRemote
 
     assert issubclass(steps.TrainingSteps, TrainingRemote)
     assert not issubclass(TrainingRemote, steps.TrainingSteps)
     assert steps.TrainingSteps.__mro__[1] is TrainingRemote
+    assert steps.TrainingSteps.__bases__ == (TrainingRemote, TrainingEval)
     # 组合类与四个「继承真混入」的测试宿主因此都不必改。
     assert TrainingRemote._remote_ppo.__module__ == "rl.loop_remote"
 

@@ -77,6 +77,7 @@ nn-training/
 │   ├── log.py               #    log() 落盘（带时间戳统一格式）
 │   ├── loop_transport.py    #    传输/发布层：rollout 源解析 + transport 选择 + hub 推送 + 节点 failover（2026-09-23 从 loop_steps.py 拆出，S4）
 │   ├── loop_remote.py       #    远端 PPO 腿 mixin：发布 → 领取 → 三重校验落位 → failover → 事件落账（TrainingSteps 的基类，S4 第二步）
+│   ├── loop_eval.py         #    in-loop 评估链 mixin：派发 → 尾巴收拢 → PPO 收官 join/交棒 → 收官 drain（TrainingSteps 的基类，S4 第十七刀）
 │   └── __init__.py          #    包入口文档
 │
 ├── scripts/                 # 【辅助脚本】一次性/诊断工具

@@ -17,7 +17,8 @@
   stream.py        流式迭代（采集与 PPO 波次重叠）
   loop.py          run_training 入口（薄包装）
   loop_core.py     TrainingLoop 主循环（setup / 迭代编排 / 目录 / 采集派发）
-  loop_steps.py    TrainingSteps mixin（结算 / 串行 PPO / 导出 / eval join / 落账）
+  loop_steps.py    TrainingSteps mixin（结算 / 导出 / 落账；基类 TrainingRemote + TrainingEval）
+  loop_eval.py     TrainingEval mixin（in-loop 评估链：派发 / 尾巴收拢 / join / 收官 drain；S4 第十七刀）
   loop_guards.py   TrainingGuards mixin（F4 熔断 / 止损 / keepIters 轮转）
   rollout_phase.py 单轮采集派发三路 + 双缓冲预采句柄
   events.py        training_log.jsonl 事件写入（run_start/iteration/circuit_break/iter_error）

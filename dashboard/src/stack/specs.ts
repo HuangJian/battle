@@ -209,7 +209,7 @@ export function resolveRolloutSrc(cfg: RlConfig, course = ''): RolloutSrcMode {
   const raw = cc?.rollout_src ?? cfg.rl.rollout_src
   // `run`（离线训练模式；2026-09-19）也是合法值——漏掉它 = 离线课在 UI 上显示成 `local`，
   // 而那正是「云机在跑」与「本机在跑」看起来一样的那类静默分叉。域与 python
-  // `rl/loop_steps.py::ROLLOUT_SRCS` 同源（有测试对账）。
+  // `rl/loop_transport.py::ROLLOUT_SRCS` 同源（有测试对账；S4 首簇前在 `loop_steps.py`）。
   return raw === 'node' || raw === 'run' || raw === 'auto' ? raw : 'local'
 }
 

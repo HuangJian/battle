@@ -2867,3 +2867,48 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
   0 fail；dashboard `bun run test` **1105 pass / 0 fail** + `typecheck` 绿；`check-decisions` 通过。
 —— 全文（层号级联表 / patch 同源的两条机械判据 / 四条读源码守卫的迁移表 / 跨项目盲区）→
 `docs/nn/engineering.md` §23「第十六刀」
+
+## §2026-09-24-goalnn-loop-eval-chain-split（2026-09-24，用户指令「按同一条「真实调用链」手法拆 rl/loop_steps 的 TrainingSteps 本体（952 行 / 20 方法）」）
+
+拆 `rl/loop_steps.py`：**940 → 666 行**；`TrainingSteps`（845 行 / 20 方法）里**唯一一条真正的
+方法间调用链**（8 成员 / 275 行 / 5 个状态槽）搬到新模块 `rl/loop_eval.py::TrainingEval`
+（375 行）。
+
+- **刀口怎么选的（先量后定，不按行数等分）**：20 个方法里只有 7 个**互相调用**，且连成一条链
+  （`_dispatch_delayed_eval → _sweep_eval_tail` · `_drain_pending_eval → _eval_covered/_eval_on_round/
+  _sweep_eval_tail` · `_join_eval → _eval_join_soft_sec → _eval_policy_cfg`）；其余 13 个都是被轮内
+  步骤各自调用的**叶子**（外部入口只有 3 个：轮内 `_dispatch_delayed_eval` / `_join_eval`、收官
+  `_drain_pending_eval`）。⇒ 簇 = 这条链（含消费 `_eval_on_round` 的占位）。
+- **切法仍是混入**（同一对象、同一把锁、零行为变化，测试一行不改），但**基类元组是追加**：
+  `class TrainingSteps(TrainingRemote, TrainingEval)`。追加而非插队的判据是硬的 —— 2026-09-23
+  写下的 `TrainingSteps.__mro__[1] is TrainingRemote` 与四个「继承真混入」的测试宿主**逐字仍成立**；
+  两混入间零重名、零互调、零 `super()` ⇒ 顺序今天完全惰性，没有理由去动已记录的 MRO。
+- **状态归属唯一**：五个 eval 槽位（`_eval_thread` / `_eval_gate` / `_eval_tail` / `_eval_tail_start` /
+  `_eval_join_sec`）声明**只在** `TrainingEval`。旧类里剩下两处**跨模块使用**（`_log_report` 把 stream
+  报告里的线程句柄写进 `_eval_thread`、`_record_iteration` 读 `_eval_join_sec`）**经继承**解析 ——
+  它们被写成一张闭集表（`CROSS_MODULE_HANDS`），第三条手出现即红。
+- **★ 本刀与前两刀最大的不同：零模块级名字**。搬走的全是方法 + 槽位，所以**没有任何 patch 点需要
+  迁移**（对 `rl.loop_steps.*` 的注入本来就是空操作：那些名字从来没住在那儿）。DI 目标照旧是
+  方法体内延迟 import `rl.eval_dispatch` / `rl.eval_local` / `rl.queue` / `rl.archive`，测试 patch 的
+  一直是那些**实现模块**。
+- **守卫 = 契约**（`tests/test_loop_eval_split.py`，11 例）：8 成员定义只在 `TrainingEval`（**闭集**，
+  顺手加 helper 会红）· `TrainingSteps.X is TrainingEval.X` 对象恒等 · `__bases__ == (TrainingRemote,
+  TrainingEval)` 且组合类三件套不变 · 真实现在 `loop_core` 仍胜过占位 · 五槽位**单处声明**（旧类里
+  再声明即红）· 跨模块手闭集 · 顶层 import **闭集** + DI 只许延迟 · 不得反向 import `rl.loop_steps` /
+  `rl.loop_core` · **两条功能性**：跨模块交棒（`_log_report` 写 → `_join_eval` 读 → `_eval_tail` 落在
+  同一实例）· 占位**响亮失败**（`raise NotImplementedError` 而不是静默返回 falsy 把 eval 全关掉）。
+- **⚠ 第六次撞上「按路径读源码的守卫」**：`tests/test_eval_a_once.py` 断言 `"eval_dispatch import
+  dispatch_eval_bg" in loop_steps 源码` ⇒ 搬走后**红**（这次是响亮失败，运气）。修法升级为
+  **在 `rl/` 源码树里找谁持有这个名字**，并要求「拿到它的模块里住着 `_dispatch_delayed_eval`」——
+  既不怕改名，也不会在搬走后退化成「另一个无关模块替我绿」。
+- **⚠ `ruff format --check` 不是门禁**：HEAD 上 `loop_steps.py` 本来就有两处不满足 `ruff format`
+  （line-length 100 下的隐式拼接/长行）⇒ 别顺手 `ruff format`（会往 diff 里掺进与本案无关的重排）。
+  只认 `ruff check`（I001：新建的注释块与 import 之间要空行）。
+- **纯搬对账**：AST 逐成员 ⇒ **8/8**（其中 1 处**申报差异**：占位 raise 文案 `TrainingSteps` →
+  `TrainingEval`，点名新家）+ **5/5 槽位逐字随簇** + 旧类零残余。
+- **违反后果**：就地补同名方法 / 新家塞 helper / 基类插队 / 组合类重复接线 / 删掉 `loop_core` 的真实
+  实现 / 抹掉槽位默认值 / 旧类重复声明槽位 / 跨模块手改成 `getattr` / DI 提到顶层 / 顶层长重依赖 /
+  反向 import 门面 / 占位改静默 / 交棒断链 / 尾巴丢掉 —— 十四类都在**提交时**红（反探针 **14/14**）。
+- **门禁**：nn **2462 → 2473 passed / 3 skipped**；mypy **418** 源文件绿；根 `bun run check`
+  2119 pass（1 例 `dist-node-gate`「单次慢响应不判死」在全量并发下计时 flake，单独复跑 3/3 绿）。
+—— 全文（选簇判据 / 调用图 / 守卫表 / 坑）→ `docs/nn/engineering.md` §23「第十七刀」。

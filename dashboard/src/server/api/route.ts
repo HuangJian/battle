@@ -231,7 +231,7 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
         if (trainMode && !['online', 'offline'].includes(trainMode)) {
           return errResp(`未知训练模式: ${trainMode}（只接受 online|offline）`, 400)
         }
-        // rollout 位置：与 python `rl/loop_steps.py::ROLLOUT_SRCS` 同字面量域。
+        // rollout 位置：与 python `rl/loop_transport.py::ROLLOUT_SRCS` 同字面量域。
         const rolloutSrc = bodyStr(body, 'rolloutSrc')
         if (rolloutSrc && !['auto', 'local', 'node', 'run'].includes(rolloutSrc)) {
           return errResp(`未知 rollout 位置: ${rolloutSrc}（只接受 auto|local|node|run）`, 400)

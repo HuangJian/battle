@@ -2,8 +2,9 @@
 
 入口 rl/loop.py::run_training 是薄包装（构造 TrainingLoop + run()）。本模块
 承载主循环骨架：setup / run() 迭代编排 / 迭代目录 / 采集派发接线；单轮结算与
-梯度步在 TrainingSteps mixin（rl/loop_steps.py），训练护栏在 TrainingGuards
-mixin（rl/loop_guards.py）——mixin 方法以 self.* 共享 TrainingLoop 实例状态。
+梯度步在 TrainingSteps mixin（rl/loop_steps.py），in-loop 评估链在 TrainingEval
+mixin（rl/loop_eval.py），训练护栏在 TrainingGuards mixin（rl/loop_guards.py）
+——mixin 方法以 self.* 共享 TrainingLoop 实例状态。
 
 重构纪律：控制流与日志逐字节沿用旧 run_training 内联实现——每段提取为私有
 方法，跨阶段共享状态放 self._*（run() 局部别名 + 实例属性，不重排执行顺序）。
@@ -249,8 +250,9 @@ def should_park_on_done(args, smoke_void: bool) -> bool:
 class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
     """RL 迭代主循环（run_training 的 OO 化；run() 为入口，失败重试内置）。
 
-    MRO：RoundSteps（轮内 13 步，R2c-3）→ TrainingSteps（结算/PPO/导出/eval join/落账）
-    → TrainingGuards（熔断/止损/轮转）→ 本类（setup / 迭代编排 / 目录 / 采集派发）。
+    MRO：RoundSteps（轮内 13 步，R2c-3）→ TrainingSteps（结算/导出/落账；自身的基类 =
+    TrainingRemote 远端 PPO 腿 + TrainingEval in-loop 评估链）→ TrainingGuards（熔断/止损/轮转）
+    → 本类（setup / 迭代编排 / 目录 / 采集派发）。
     """
 
     def __init__(self, args, ppo_backend, bun, update_kwargs) -> None:
@@ -705,7 +707,10 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
 
     def _eval_on_round(self, it: int) -> bool:
         """吞吐 T3：本轮是否派发干净评估。per-tick 按 eval-games/eval-every/eval-at
-        三条件；intent/goal 按 eval_at（默认 '5,10,15'）——别的模式不派发不 join。"""
+        三条件；intent/goal 按 eval_at（默认 '5,10,15'）——别的模式不派发不 join。
+
+        本实现 MRO 胜过 `TrainingEval._eval_on_round` 的占位（`rl/loop_eval.py`，
+        S4 第十七刀）——占位存在是为了「MRO 被改坏就响亮失败」。"""
         args = self.args
         if args.mode == "per-tick":
             return (

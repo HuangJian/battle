@@ -1143,6 +1143,100 @@ dashboard 侧只在动过 `dashboard/**` 时才跑。修法不是「换一个写
 
 > 决策 → `DECISIONS.md` §2026-09-24-goalnn-hub-entry-split。
 
+### 第十七刀（2026-09-24）：`TrainingSteps` 的 **in-loop 评估链** → `rl/loop_eval.py`
+
+按用户指令「按同一条『真实调用链』手法拆 `rl/loop_steps.py` 的 `TrainingSteps` 本体（952 行 /
+20 方法）」执行。**`rl/loop_steps.py` 940 → 666 行**；新模块 `rl/loop_eval.py::TrainingEval` **375 行**。
+
+#### 刀口怎么选的（先量后定，不按行数等分）
+
+| 判据 | 实测 | 含义 |
+|---|---|---|
+| 20 个方法里有多少**互相调用** | **7 个**，且连成**一条链** | 其余 13 个是被轮内步骤各自调用的**叶子** |
+| 链的外部入口 | 3 个：轮内 `_dispatch_delayed_eval` / `_join_eval`（由 `RoundSteps` 调）、收官 `_drain_pending_eval`（由 `TrainingLoop` 调） | 方向 = 调用者依赖被调用者 ⇒ 本簇当**基类** |
+| 状态槽 | 5 个（`_eval_thread` / `_eval_gate` / `_eval_tail` / `_eval_tail_start` / `_eval_join_sec`），只被这一簇读写 | 随簇搬；两处例外见下 |
+| **模块级名字** | **零** | ⇒ **没有任何 patch 点需要迁移**（与前两刀最大的不同） |
+
+调用图（链的形状）：
+
+```
+_eval_policy_cfg ← _eval_join_soft_sec ← _sweep_eval_tail ← _dispatch_delayed_eval
+                                          ↑                        ↑
+_join_eval ←──────────────────────────────┘                        │
+_eval_covered ← _drain_pending_eval ────────────────────────────────┘
+（`_eval_on_round` 是这簇消费的占位：真实现在 loop_core，MRO 胜过）
+```
+
+#### 切法：混入（同源判据）+ **基类元组是追加**
+
+仍是「同一对象、同一把锁、零行为变化」，测试一行不改。**基类元组追加**而不是插队：
+
+```python
+class TrainingSteps(TrainingRemote, TrainingEval):   # 新混入追加在既有基类之后
+```
+
+判据是硬的、可执行的：2026-09-23 为 S4 第二步写下的
+`TrainingSteps.__mro__[1] is TrainingRemote` 与四个「继承真混入」的测试宿主（`_Stub(TrainingSteps)`）
+**逐字仍然成立**。两混入间**零重名、零互调、零 `super()`** ⇒ 顺序在今天是纯惰性的，没有理由去动
+一条已经写进文档与守卫的 MRO；反过来，「追加」也不等于「随便插」，新守卫把完整元组钉住了。
+
+#### 状态归属：五槽随簇，两处**跨模块手**经继承
+
+五个槽位（含两个类级默认 `_eval_tail = None` / `_eval_join_sec = 0.0`）的声明**只有 `TrainingEval`
+一处**。旧类里剩下两处跨模块使用——它们是**继承**，不是重复声明：
+
+| 手 | 住哪 | 做什么 |
+|---|---|---|
+| `_log_report` → `self._eval_thread = report.pop("_eval_thread", None)` | `rl/loop_steps.py` | R4：stream 报告里的 eval 线程句柄，jsonl 写回前 join |
+| `_record_iteration` → `self._eval_join_sec` | `rl/loop_steps.py` | 落账（本链在外面等的秒数） |
+
+这两条被写成守卫里的一张**闭集表**（`CROSS_MODULE_HANDS`）：第三条手、或把它们改成 `getattr`
+（= 悄悄放弃归属），都在提交时红。**★ 功能性守卫**正对着第一条：`_log_report`（旧模块）写 →
+`_join_eval`（新模块）读 → 没跑完的尾巴交棒给下一轮 rollout 边界，落在**同一个实例**上。
+
+#### 守卫 = 契约（`tests/test_loop_eval_split.py`，11 例）
+
+8 成员定义只在 `TrainingEval`（**闭集**：顺手加个 helper 也红）· `TrainingSteps.X is TrainingEval.X`
+对象恒等 · `__bases__ == (TrainingRemote, TrainingEval)` + 组合类三件套不变 + 真实现在 `loop_core`
+仍胜过占位 · 五槽位**单处声明**（旧类里再声明即红）且类级默认值在 · 跨模块手闭集 ·
+**顶层 import 闭集** + DI 目标只许方法体内延迟 import · 不得反向 import `rl.loop_steps` / `rl.loop_core`
+· **两条功能性**：跨模块交棒 · 占位**响亮失败**（`raise NotImplementedError`，不是静默返回 falsy
+把 eval 全关掉——那会让账本上只看到「这几轮没评估」而没有任何报错）。
+
+**反探针 14/14 命中**（就地补同名方法 / 新家塞 helper / 基类插队 / 组合类重复接线 / 删掉 `loop_core`
+的真实实现 / 抹掉槽位默认值 / 旧类重复声明 / 跨模块手改 `getattr` / DI 提到顶层 / 顶层长重依赖 /
+反向 import 门面 / 占位改静默 / 交棒断链 / 尾巴丢掉）。每条先 `assert count(old) == 1`——S15 的教训：
+「没红」有守卫空档与锚点写错两种成因，不区分就会把锚点错当成守卫强。
+
+#### ⚠ 坑
+
+1. **第六次撞上「按路径读源码的守卫」**：`tests/test_eval_a_once.py` 断言
+   `"eval_dispatch import dispatch_eval_bg" in (ROOT/"rl"/"loop_steps.py").read_text()` ⇒ 该方法搬走后
+   当场红（这次是**响亮失败**，运气：它断言的是「存在」，不是「不存在」）。修法**升级**为在 `rl/`
+   源码树里找谁持有这个名字，并要求「拿到它的模块里住着 `_dispatch_delayed_eval`」——既不怕改名，
+   也不会在搬走后退化成「另一个无关模块（`loop_core` / `rollout_phase` 也持有这个名字）替我绿」。
+2. **`ruff format --check` 不是门禁**：HEAD 上 `loop_steps.py` 本来就有两处不满足 `ruff format`
+   （line-length 100 下可合并的隐式拼接 + 一条恰好超长的 `log(...)`）。跑 `ruff format` 会把这些
+   **与本案无关**的行一起重排、把 diff 弄脏。只认门禁真正跑的 `ruff check`（这次的新错只有 I001：
+   新建的注释块与既有 import 之间要空行）。
+3. **纯搬对账允许「申报差异」**：8 个成员里 7 个逐字节等价，第 8 个（`_eval_on_round` 占位的
+   `raise` 文案）**有意**把 `TrainingSteps` 改成 `TrainingEval`——文案里写死旧家名字本身就是个小谎言，
+   而脚本文案里那句「MRO 破坏」才是它存在的理由。对账脚本要求**申报**（`DECLARED_DELTA`），
+   于是「有意的 1 处」与「漏搬的 N 处」在输出里分得开。
+
+#### 验证
+
+- **纯搬对账**：AST 逐成员 ⇒ **8/8**（1 处申报差异）+ **5/5 槽位逐字随簇** + 旧类零残余；
+  `loop_steps.py` 940 → 666 行（余 51 个成员：39 声明 + 12 方法）。
+- **门禁**：nn **2462 → 2473 passed / 3 skipped**；mypy **418** 源文件绿；根 `bun run check`
+  2119 pass（1 例 `dist-node-gate`「单次慢响应不判死」在全量并发下计时 flake —— 单独复跑 3/3 绿，
+  与本刀无关：那是根项目的 TS 计时用例）。
+- **顺手同步的 provenance**：`rl/__init__.py` 模块表 · `rl/loop_core.py`（模块 docstring + MRO
+  docstring + `_eval_on_round` 真实实现的注记）· `rl/loop_guards.py`（`_eval_on_round: Any` 的注释）·
+  `rl/loop_round_steps.py`（`_dispatch_delayed_eval` 声明的注释）· `README.md` 模块表 ·
+  `tests/test_loop_transport_split.py`（docstring 第 3 条 + `__bases__` 断言）。
+
+
 ### 未做完（S4 余下）
 
 `remote/` 内部**已零环**（见「拆环」节），`worker.py` 的拆分面**已收口**：只剩三个宿主函数
@@ -1152,7 +1246,9 @@ dashboard 侧只在动过 `dashboard/**` 时才跑。修法不是「换一个写
 **hub_server 的收口（第十六刀）也已完成**：`remote/hub_server.py` **3017 → 100 行**（累计 **−97%**），
 HTTP 面（`hub/http_face.py` L5）与引导链（`hub/boot.py` L6）分开，入口退成薄门面（L7）。
 设计见 `plan/nn-training-refactor.md` §5.3。
-`TrainingSteps` 本体还剩 952 行 / 20 方法（切法是「按一条真实调用链切」，不是按行数等分）。
+`TrainingSteps` 本体的**第一条真实调用链已切**（第十七刀：in-loop 评估链 8 成员 →
+`rl/loop_eval.py`，`loop_steps.py` 940 → 666 行）；余下 12 个方法是**被轮内步骤各自调用的
+叶子**（报告/落账/导出/热加载/配额），没有新的方法间调用链可顺手牵出来。
 
 **✅ 清理已做（2026-09-24，第十二刀）：`remote/job_fs._ensure_commit` 已删**——第六步之一登记的
 既存死代码（全仓零调用，只搬未删）。同时删 `job_fs.__all__` 条目、`worker.py` 的门面转发、

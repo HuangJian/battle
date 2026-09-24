@@ -1109,7 +1109,9 @@ greedy eval 是节点侧跑的量最大的一类任务，这里看不见后端�
 
 **为什么记这一笔**：用户检查训练流程后确认「eval 已藏进下一轮 PPO」——`_dispatch_delayed_eval(it)`
 排在 `_serial_ppo(it)` **之前**、读归档 W(it-1)、事后只软等（`select_delayed_eval_it(6)==5`）。
-但仍有**两段墙钟暴露在 PPO 之后**（都在 `rl/loop_steps.py`）：
+但仍有**两段墙钟暴露在 PPO 之后**（写这段时都在 `rl/loop_steps.py` —— S4 第十七刀（2026-09-24）后这一簇（`_join_eval` /
+`_sweep_eval_tail` / `_dispatch_delayed_eval` 等 8 个成员）搬到了 `rl/loop_eval.py::TrainingEval`；
+下文方法名不变）：
 
 ```
 改前： it6 collect(W5) ─┬─ 派发 eval(W5) ─┬─ PPO(6)  ◄── 节点侧 eval 藏在这里 ✅

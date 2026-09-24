@@ -87,6 +87,8 @@ class RoundSteps:
     #: 配额课程判据 + 连续配额采集（VOLUME_RULE_V2，2026-09-19）。
     _volume_active: Any
     _volume_collect_continuous: Any
+    #: in-loop 评估链的入口（`_join_eval` / `_drain_pending_eval` 同簇）——独立实现住在
+    #: `rl/loop_eval.py::TrainingEval`（S4 第十七刀）。
     _dispatch_delayed_eval: Any
     _maybe_dispatch_baseline_eval: Any
     _log_report: Any

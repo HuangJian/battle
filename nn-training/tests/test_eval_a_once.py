@@ -33,9 +33,18 @@ def test_eval_a_once_dispatches_through_in_loop_dispatcher() -> None:
     assert "run_local_eval_game" not in src
     # 本机份额来自 policy（与 in-loop 同一旋钮），不是脚本自造的并发数
     assert "evalLocalSlots" in src
-    # in-loop 的调用点也用同一模块（两边同源，不是各写一套）
-    loop_src = (ROOT / "rl" / "loop_steps.py").read_text(encoding="utf-8")
-    assert "eval_dispatch import dispatch_eval_bg" in loop_src
+    # in-loop 的调用点也用同一模块（两边同源，不是各写一套）。
+    # 2026-09-24（S4 第十七刀）：in-loop 派发链（`_dispatch_delayed_eval` / `_drain_pending_eval`）
+    # 从 `rl/loop_steps.py` 搬到 `rl/loop_eval.py`。这里**在 rl/ 源码树里找**「谁从 eval_dispatch
+    # 拿 `dispatch_eval_bg`」，而不是写死一个路径 —— 写死的那份会在搬文件时静默失效（本仓已撞过
+    # 五次）；同时把「拿到这个名字的模块里必须住着 in-loop 那一簇」也钉住，免得将来搬到别处后
+    # 这句断言退化成一个跟 in-loop 无关的模块在替它绿。
+    holders = {
+        p.stem: p for p in (ROOT / "rl").glob("*.py")
+        if "eval_dispatch import dispatch_eval_bg" in p.read_text(encoding="utf-8")
+    }
+    assert "loop_eval" in holders, sorted(holders)
+    assert "_dispatch_delayed_eval" in holders["loop_eval"].read_text(encoding="utf-8")
 
 
 def _row(**kw) -> dict:
