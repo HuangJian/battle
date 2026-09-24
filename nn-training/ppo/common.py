@@ -631,6 +631,7 @@ def load_episodes_common(
     load_log_every: int = 128,
     normalize_adv: bool = True,
     per_stage_quota: int = 0,
+    bundle: Any = None,
 ) -> list[dict]:
     """Discover shards → per-shard GAE → global normalize → episode dicts.
 
@@ -643,7 +644,13 @@ def load_episodes_common(
     shards = discover_shards(data_root, need_files)
     if not shards:
         raise SystemExit(f"[{label}] no {shard_kind} shards found under {data_root}")
-    log(f"[{label}] loaded {len(shards)} {shard_kind} shards from {data_root}")
+    # ★ 2026-09-24（日志节食）：这四行是「装载阶段」的读数集合，传给 bundle 时攒进调用方
+    # 的那**一行**（见 `log_bundle.py`）；bundle=None 时逐字节保持原输出（goal/intent/
+    # 本机三条线共用本函数，行为不变）。
+    if bundle is not None:
+        bundle.add("shards", f"{len(shards)} {shard_kind} ← {data_root}")
+    else:
+        log(f"[{label}] loaded {len(shards)} {shard_kind} shards from {data_root}")
 
     episodes: list[dict] = []
     seen_steps: dict[int, int] = {}  # stage → 已收步数（仅 per_stage_quota > 0 时启用）
@@ -651,7 +658,10 @@ def load_episodes_common(
     t_load = time.time()
     for k, sd in enumerate(shards):
         if k > 0 and k % load_log_every == 0:
-            log(f"[{label}] loading shards {k}/{len(shards)} ({time.time() - t_load:.0f}s)")
+            if bundle is not None:
+                bundle.add("装载", f"{k}/{len(shards)} {time.time() - t_load:.0f}s")
+            else:
+                log(f"[{label}] loading shards {k}/{len(shards)} ({time.time() - t_load:.0f}s)")
         d = shard_loader(sd)
         N = d["obs"].shape[0]
         if N == 0:
@@ -677,10 +687,15 @@ def load_episodes_common(
         episode["ret"] = ret.astype(np.float32)
         episodes.append(episode)
 
-    log(
-        f"[{label}] shard IO + {gae_name} done for {len(episodes)} episodes "
+    _io_line = (
+        f"shard IO + {gae_name} done for {len(episodes)} episodes "
         f"({time.time() - t_load:.0f}s)"
     )
+    if bundle is not None:
+        bundle.add("装载", f"{len(shards)}/{len(shards)} {time.time() - t_load:.0f}s")
+        bundle.add("episodes", f"{len(episodes)} eps（{gae_name} 已算）")
+    else:
+        log(f"[{label}] {_io_line}")
     if per_stage_quota > 0:
         total = sum(seen_steps.values())
         short = {
@@ -688,11 +703,17 @@ def load_episodes_common(
             for s, n in sorted(seen_steps.items())
             if n < per_stage_quota
         }
-        log(
-            f"[{label}] per-stage quota={per_stage_quota}: kept {total} steps / "
+        _quota_line = (
+            f"per-stage quota={per_stage_quota}: kept {total} steps / "
             f"{len(seen_steps)} stages, dropped {dropped_shards} shards"
-            + (f"; SHORT (供给不足) stages={short}" if short else "")
         )
+        if bundle is not None:
+            bundle.add("配额", _quota_line)
+            if short:
+                # 供给不足是**要看的**（缺哪关、缺多少），攒行不能把它埋掉 ⇒ 单独一句。
+                bundle.note(f"SHORT (供给不足) stages={short}")
+        else:
+            log(f"[{label}] {_quota_line}" + (f"; SHORT (供给不足) stages={short}" if short else ""))
     # P1-7（2026-09-02）：adv 归一化粒度参数化（normalize_adv=False 供
     # --adv-norm none 对照实验；默认 True 保持全局归一现状）。
     if normalize_adv:

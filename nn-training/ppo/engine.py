@@ -51,6 +51,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from data.weights_io import load_weights_json, save_weights_json
+from log_bundle import LogBundle
 from models.student import PPOStudent
 
 # 共享 PPO 基础设施（ppo_common.py；行为与旧内联实现逐字节一致，见其模块 doc）。
@@ -234,6 +235,7 @@ def load_episodes(
     normalize_adv: bool = True,
     normalize_ret: bool = False,
     per_stage_quota: int = 0,
+    bundle: Any = None,
 ) -> list[dict]:
     """Discover trajectory shards under `data_root`, compute per-episode GAE,
     and normalize advantages across the whole batch. Shared by this CLI's
@@ -257,6 +259,8 @@ def load_episodes(
         normalize_adv=normalize_adv,
         normalize_ret=normalize_ret,
         per_stage_quota=per_stage_quota,
+        # ★ 2026-09-24（日志节食）：装载读数攒进调用方的那一行（None = 逐字节原行为）。
+        bundle=bundle,
     )
 
 
@@ -293,6 +297,8 @@ def ppo_update(
     demo_bank: dict | None = None,
     demo_bc_coef: float = 0.0,
     demo_per_mb: int = 0,
+    progress: LogBundle | None = None,
+    progress_head: str = "[ppo] PPO",
 ):
     """chunks: list of minibatch dicts (obs (B,14,26,26) / scalars (B,24) / ...).
 
@@ -345,6 +351,18 @@ def ppo_update(
     diag_wall = 0.0
     diag_compile = 0.0
     diag_uncached = 0.0
+    # ★ 2026-09-24（日志节食）：逐窗口**只累计**、阶段完成打**一行**。原来每个采样窗口
+    # 打一行（默认开，192 步 ≈ 23 行/轮）+ 判定行 + 每 epoch 汇总行 —— 云端整段跑几小时
+    # 会把控制台的日志面板拖死（用户报障）。判决要素全留：**最慢窗口**、编译占比、
+    # 新编译次数、图签名、按 B 的形状汇总。
+    diag_worst: dict[str, float] = {}
+    diag_worst_delta = ""  # 最慢窗口那一次的原始指标串（编译/执行/追踪/h2d/d2h）
+    diag_sig = ""
+    diag_compile_dom = 0  # 编译占比落在 (50%, 100%] 的窗口数（说人话：墙钟买的是编译）
+    diag_reset = 0  # 编译读数 > 窗口墙钟的窗口数（XLA metrics 被重置，那个数不可信）
+    # 组 2 的落点：设备/口径/预物化/逐 epoch 汇总/最慢窗口… 全攒进这一个 bundle，
+    # 在 update 收尾打**一行**（用户口径 2026-09-24：「整合到一行，完成时打印」）。
+    diag_b = LogBundle(log)
     # 环境开关关掉时一次快照都不取（非 XLA 机器上快照本身也返空）。
     _diag_base = (
         xla_metrics_snapshot()
@@ -355,13 +373,15 @@ def ppo_update(
         diag_first = max(1, int(os.environ.get("PPO_XLA_DIAG_FIRST", "12")))
         diag_every = max(1, int(os.environ.get("PPO_XLA_DIAG_EVERY", "16")))
         _fp = xla_fingerprint(device)
-        log(
-            f"[ppo] XLA 步耗诊断开启（PPO_XLA_DIAG=0 关闭）：device={device} "
-            f"device_type={_fp.get('device_type')} 设备数={_fp.get('global_device_count')} "
-            f"attrs={_fp.get('attrs')} 自检matmul2048={xla_device_speed_probe(device)}s"
+        diag_b.add(
+            "设备",
+            f"{device} device_type={_fp.get('device_type')} "
+            f"设备数={_fp.get('global_device_count')} attrs={_fp.get('attrs')} "
+            f"自检matmul2048={xla_device_speed_probe(device)}s",
         )
-        log(
-            f"[ppo] 判读口径：新编译=1 且编译秒级 ⇒ 图签名每步都在变；新编译=0/命中>0"
+        # 判读口径是**静态说明**（不是读数）：进 note，收尾那一行里只出现一次。
+        diag_b.note(
+            f"判读口径：新编译=1 且编译秒级 ⇒ 图签名每步都在变；新编译=0/命中>0"
             f" 而墙钟仍秒级 ⇒ 病不在编译。采样节奏：前 {diag_first} 步逐步、之后每 "
             f"{diag_every} 步一次（期间只累计墙钟，delta 是累积的）"
         )
@@ -460,9 +480,10 @@ def ppo_update(
     if is_xla(device):
         xla_mark_step(device)
         if diag_on:
-            log(
-                f"[ppo] XLA 预物化：{len(tensored)} 个 chunk + demo 张量已落设备"
-                f"（循环前一次 mark；否则每个 chunk 首次使用各付一次全图编译）"
+            diag_b.add(
+                "预物化",
+                f"{len(tensored)} 个 chunk + demo 张量已落设备"
+                f"（循环前一次 mark；否则每个 chunk 首次使用各付一次全图编译）",
             )
     start_epoch = _ppo_load(ckpt_path, model, opt)
     if start_epoch:
@@ -583,29 +604,37 @@ def ppo_update(
                     diag_last_at = _done
                     _span_wall = diag_wall
                     diag_wall = 0.0
-                    log(
-                        f"[ppo] diag s={_done}/{total_steps} 窗口={_span}步/{_span_wall:.2f}s"
-                        f"(单步均{_span_wall / max(_span, 1):.3f}s) 图签名=B{int(obs.shape[0])}"
+                    # 星 2026-09-24（日志节食）：逐窗口**只累计**，不打行。判决必需的三样
+                    # 都留下：最慢窗口（带它的编译/新编译数）、编译主导窗口计数、图签名。
+                    _per = _span_wall / max(_span, 1)
+                    diag_sig = (
+                        f"B{int(obs.shape[0])}"
                         f"/demo{int(demo_per_mb) if demo_on else 0}"
                         f"/kl{int(kl_coef > 0.0)}/ref{int(_ref is not None)}"
-                        f"/demo{int(demo_on)} {xla_delta_str(_dlt)}"
+                        f"/demo{int(demo_on)}"
                     )
-                    # 判定只在「编译占比落在 (50%, 100%] 这个物理上说得通的范围」时打。
+                    if _per > float(diag_worst.get("per", -1.0)):
+                        diag_worst_delta = xla_delta_str(_dlt)
+                        diag_worst = {
+                            "per": _per,
+                            "span": float(_span),
+                            "wall": _span_wall,
+                            "compile": _cmp,
+                            "uncached": float(_unc),
+                            "at": float(_done),
+                        }
+                    # 判定只在「编译占比落在 (50%, 100%] 这个物理上说得通的范围」时算。
                     # XLA 的 metrics 会被重置（新 shape 出现/缓存事件）⇒ delta 可能为负或
                     # 超过窗口墙钟（实录 编译=73.93s / 追踪=-52.57s）；那种窗口只信
                     # 墙钟与「新编译次数」，不给百分比结论，免得误导。
                     if 0.5 * _span_wall < _cmp <= _span_wall:
-                        log(
-                            f"[ppo] diag 判定：编译占本窗口 {100.0 * _cmp / _span_wall:.0f}%"
-                            f"（新编译 {_unc} 次）⇒ 墙钟买的是**编译**，不是算力"
-                        )
+                        diag_compile_dom += 1
                     elif _cmp > _span_wall:
-                        log(
-                            f"[ppo] diag 注意：本窗口 {_unc} 次新编译，但编译耗时读数"
-                            f"({_cmp:.1f}s) > 窗口墙钟({_span_wall:.1f}s) ⇒ XLA metrics "
-                            f"被重置，耗时数值不可信（只看「新编译次数」与墙钟）"
-                        )
+                        diag_reset += 1
             # Heartbeat: pure-print progress/health line; wall-clock only.
+            # ★ 2026-09-24（日志节食）：给了 progress bundle 就攒进去 + 按 60s 节流打一行
+            # （用户口径：「完成时打印，或者未完成时每 60s 打印一次」）；不给（旧调用方、
+            # `python -m ppo.engine` CLI）时逐字节保持原输出。
             if now - last_hb >= HB_SEC:
                 last_hb = now
                 recent = stats[-32:]
@@ -613,8 +642,8 @@ def ppo_update(
                 done_steps = ep * len(tensored) + j + 1
                 elapsed = now - t0
                 eta = elapsed / done_steps * (total_steps - done_steps)
-                log(
-                    f"[ppo] ep {ep + 1}/{epochs} chunk {j + 1}/{len(tensored)} "
+                _hb = (
+                    f"ep {ep + 1}/{epochs} chunk {j + 1}/{len(tensored)} "
                     f"step {done_steps}/{total_steps} "
                     f"elapsed={elapsed:.0f}s eta~{eta:.0f}s "
                     f"kl={sum(s['kl'] for s in recent) / n_r:.4f} "
@@ -623,14 +652,19 @@ def ppo_update(
                     f"value={sum(s['value'] for s in recent) / n_r:.4f} "
                     f"gnorm={sum(s['gnorm'] for s in recent) / n_r:.3f}"
                 )
+                if progress is not None:
+                    progress.add("进度", _hb)
+                    progress.beat(progress_head)
+                else:
+                    log(f"[ppo] {_hb}")
         if ckpt_path:
             _ppo_save(ckpt_path, model, opt, ep + 1)
         if on_epoch_done is not None:
             on_epoch_done(ep + 1, model)
         ep_stats = stats[n_ep_start:]
         n_e = max(1, len(ep_stats))
-        log(
-            f"[ppo] epoch {ep + 1}/{epochs} done ({time.time() - t0:.0f}s total, "
+        _ep_line = (
+            f"epoch {ep + 1}/{epochs} done ({time.time() - t0:.0f}s total, "
             f"{len(ep_stats)} chunks)"
             + (", ckpt saved" if ckpt_path else "")
             + f": kl={sum(s['kl'] for s in ep_stats) / n_e:.4f} "
@@ -640,17 +674,57 @@ def ppo_update(
             f"value={sum(s['value'] for s in ep_stats) / n_e:.4f} "
             f"gnorm={sum(s['gnorm'] for s in ep_stats) / n_e:.3f}"
         )
+        if progress is not None:
+            # 组 3：epoch 行不再单独打 —— 攒进这一轮的**同一行**，并在此（真实事件：一个
+            # epoch 跑完）按 60s 节流心跳；收尾由调用方 emit（它还要补 steps/chunks/秒数）。
+            progress.add("进度", _ep_line)
+            # 逐 epoch 的 kl/entropy/… 只留**最后一个 epoch** 的读数：一行里塞 N 份同名字段
+            # 读起来是噪声；趋势由调用方账本（iter stats）承担。
+            progress.add("kl", f"{sum(s['kl'] for s in ep_stats) / n_e:.4f}")
+            progress.add("entropy", f"{sum(s['entropy'] for s in ep_stats) / n_e:.4f}")
+            progress.add("policy", f"{sum(s['policy'] for s in ep_stats) / n_e:.4f}")
+            progress.add("value", f"{sum(s['value'] for s in ep_stats) / n_e:.4f}")
+            progress.add("gnorm", f"{sum(s['gnorm'] for s in ep_stats) / n_e:.3f}")
+            progress.beat(progress_head)
+        else:
+            log(f"[ppo] {_ep_line}")
         if diag_on:
             # 按 chunk batch 形状汇总（累计）：若 B 只有一个值却仍「每步新编译」⇒ 形状不是原因。
+            # ★ 2026-09-24：不再单独打，改成**一个 epoch 一个字段**留在诊断行里 —— 系列还在
+            # （编译税是逐 epoch 涨还是稳定，一眼能看出来），但一行不增。
             _sum = " ".join(
                 f"B={_b}:{int(_a['iters'])}步/墙钟{_a['wall']:.0f}s"
                 for _b, _a in sorted(diag_by_b.items(), key=lambda kv: -kv[1]["wall"])
             )
-            log(
-                f"[ppo] diag 累计汇总（到 epoch {ep + 1}）：{_sum} | "
-                f"累计编译={diag_compile:.0f}s（新编译 {diag_uncached:.0f} 次）/ "
-                f"总墙钟={time.time() - t0:.0f}s"
+            diag_b.add(
+                f"到 epoch {ep + 1}",
+                f"{_sum} | 累计编译={diag_compile:.0f}s（新编译 {diag_uncached:.0f} 次）/ "
+                f"总墙钟={time.time() - t0:.0f}s",
             )
+    # ---- 组 2 收尾：诊断一行（完成为止的读数集合，等价替换原来的 ~25 行/轮）----
+    if diag_on:
+        _sw = diag_worst.get("span", 0.0)
+        if _sw:
+            diag_b.add(
+                "最慢窗口",
+                f"{int(_sw)} 步/{diag_worst['wall']:.2f}s（单步均"
+                f"{diag_worst['per']:.3f}s）在 s={int(diag_worst['at'])} "
+                f"编译={diag_worst['compile']:.2f}s（新={int(diag_worst['uncached'])}）",
+            )
+        diag_b.add(
+            "编译主导窗口",
+            f"{diag_compile_dom} 个（编译占 (50%,100%] 墙钟 ⇒ 墙钟买的是**编译**不是算力）",
+        )
+        diag_b.add(
+            "读数异常窗口",
+            f"{diag_reset} 个（编译读数 > 窗口墙钟 ⇒ XLA metrics 被重置，那个数不可信）",
+        )
+        if diag_worst_delta:
+            # 最慢窗口那一次的**原始**指标串（编译/执行/追踪/h2d/d2h）——XLA metrics 会被
+            # 重置，只对「最慢那一刻」的原样读数才值得信。
+            diag_b.add("最慢窗口指标", diag_worst_delta)
+        diag_b.add("图签名", diag_sig or "-")
+        diag_b.emit(f"[ppo] XLA 步耗诊断（{total_steps} 步 / {time.time() - t0:.0f}s）")
     # aggregate
     if not stats:
         # 断点续跑"剩余 0 epoch"路径（checkpoint 已完成）：无梯度步可跑，

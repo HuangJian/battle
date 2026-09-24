@@ -31,6 +31,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
+from log_bundle import LogBundle
 from remote import net_http
 from remote.bulk_sched import (
     BULK_P1_CRITICAL,
@@ -1477,7 +1478,9 @@ JOB_DIR_KEEP = 2
 HOT_RELOAD_EXIT = 86
 
 
-def prune_job_dirs(work_dir: Path, keep: int = JOB_DIR_KEEP, log=lambda msg: None) -> int:
+def prune_job_dirs(
+    work_dir: Path, keep: int = JOB_DIR_KEEP, log=lambda msg: None, bundle: Any = None
+) -> int:
     """按 mtime 保留最近 `keep` 个 job 目录，其余删除。返回删除个数。
 
     只动 work_dir 下的 job 目录（按 jid 命名），**跳过 code_cache / blob_cache /
@@ -1511,7 +1514,12 @@ def prune_job_dirs(work_dir: Path, keep: int = JOB_DIR_KEEP, log=lambda msg: Non
         except BaseException as e:  # 含 SystemExit：沙箱删除守卫会打死调用线程
             log(f"prune: 跳过 {d.name}（{type(e).__name__}）")
     if removed:
-        log(f"prune: 删除 {removed} 个旧 job 目录（保留最近 {keep} 个）")
+        # 日志节食：给了 bundle 就攒进调用方那一行（prune 与 payload/设备/装载同属
+        # 「本 job 准备」阶段）。
+        if bundle is not None:
+            bundle.add("prune", f"删 {removed} 个旧 job 目录（保留最近 {keep} 个）")
+        else:
+            log(f"prune: 删除 {removed} 个旧 job 目录（保留最近 {keep} 个）")
     return removed
 
 
@@ -1979,6 +1987,7 @@ def _ensure_ts_code(
     ts_root: Path,
     preloaded: dict | None,
     log=lambda msg: None,
+    bundle: Any = None,
 ) -> tuple[Path, int, bool]:
     """M3 kind=iter：把 TS 运行时 zip 解包到内容寻址目录，返回 `(目录, 字节数, 缓存命中)`。
 
@@ -1996,7 +2005,10 @@ def _ensure_ts_code(
     cache = ts_root / sha
     if cache.exists():
         _wire_hit(jid, "ts_code")  # 零字节命中也要进账（与 code 同规，否则 wire 摘要读数失真）
-        log(f"job {jid}: ts_code cache 命中（{sha[:12]}…）——跳过下载解压")
+        if bundle is not None:
+            bundle.add("ts_code", f"cache 命中（{sha[:12]}…）——跳过下载解压")
+        else:
+            log(f"job {jid}: ts_code cache 命中（{sha[:12]}…）——跳过下载解压")
         return cache, 0, True
     raw = (preloaded or {}).get("ts_code_zip") or download_ts_code(base_url, token, jid, log=log)
     if hashlib.sha256(raw).hexdigest() != sha:
@@ -2024,9 +2036,11 @@ def _ensure_ts_code(
     except OSError:
         pass
     n_ts = len(list(cache.rglob("*.ts")))
-    log(
-        f"job {jid}: ts_code.zip unpacked ({len(raw)} bytes, {n_ts} .ts files) -> {cache.name}"
-    )
+    _line = f"ts_code.zip unpacked ({len(raw)} bytes, {n_ts} .ts files) -> {cache.name}"
+    if bundle is not None:
+        bundle.add("ts_code", _line)
+    else:
+        log(f"job {jid}: {_line}")
     return cache, len(raw), False
 
 
@@ -2058,6 +2072,11 @@ def run_job(
     # 的**唯一**时基；下载/解包/权重装载都已完成的那个瞬间）。
     should_cancel: Any = None,
     on_ppo_start: Any = None,
+    # 日志节食（2026-09-24）：本 job 的「入口 + 启动 + 装载」读数攒进这个 bundle。
+    # 调用方（`rl/` 的常驻轮 loop）先往里放它自己那几行（`it<N>: N 局 wver=…`），本函数
+    # 再把入口/设备/装载读数放进去，装载完成时打**一行**（`nn-training/log_bundle.py`）；
+    # 不传就自建（只在行数上有差别，信息量不变）。
+    prep: Any = None,
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
 ) -> dict:
     """执行单个 job：下载 → 校验 → PPO → 产出 weights_json + opt tar → POST。
@@ -2076,6 +2095,8 @@ def run_job(
     """
     jid = job["job_id"]
     manifest = normalize_manifest(job["manifest"])
+    prep_b = LogBundle(log) if prep is None else prep
+    t_prep = time.time()
 
     # ---- 结果复用（2026-09-05）：上次已算完但回传失败 → 本地缓存直接重传，不重算 PPO ----
     cached_path = work_dir / jid / "_result.json"
@@ -2109,12 +2130,12 @@ def run_job(
     t_dl = time.time()
     if preloaded is not None and "payload_zip" in preloaded:
         raw = preloaded["payload_zip"]
-        log(f"job {jid}: payload from push ({len(raw)} bytes)")
+        prep_b.add("payload", f"push {len(raw)} bytes")
         payload_dl_sec = 0.0
     else:
         raw = download_payload(base_url, token, jid)
         payload_dl_sec = round(time.time() - t_dl, 3)
-        log(f"job {jid}: payload downloaded ({len(raw)} bytes in {payload_dl_sec:.1f}s)")
+        prep_b.add("payload", f"下载 {len(raw)} bytes / {payload_dl_sec:.1f}s")
     if hashlib.sha256(raw).hexdigest() != manifest["payload_sha256"]:
         # 传输损坏属瞬时故障：重下即可修复（RetryableError → 释放租约立即重领重下）
         raise RetryableError("payload_sha256 不匹配——传输损坏（重下可修复）")
@@ -2126,7 +2147,7 @@ def run_job(
         rmtree_best_effort(job_dir)
     job_dir.mkdir(parents=True)
     # 磁盘：本 job 之后最多留 JOB_DIR_KEEP 个目录（放开头 = 失败轮也照样清理）
-    prune_job_dirs(work_dir, JOB_DIR_KEEP, log=log)
+    prune_job_dirs(work_dir, JOB_DIR_KEEP, log=log, bundle=prep_b)
     zip_path = job_dir / PAYLOAD_NAME
     zip_path.write_bytes(raw)
     # zip 内 manifest 是占位副本，解包仅取 shard 目录；权威校验全走 job 记录 manifest。
@@ -2150,7 +2171,7 @@ def run_job(
     if code_cache_dir.exists():
         sys.path.insert(0, str(code_cache_dir))
         _wire_hit(jid, "code")  # 零字节命中也要进本 job 的传输账（否则摘要读数失真）
-        log(f"job {jid}: code cache 命中（{manifest['code_sha256'][:12]}…）——跳过下载解压")
+        prep_b.add("code", f"cache 命中（{manifest['code_sha256'][:12]}…）——跳过下载解压")
     else:
         if preloaded is not None and "code_zip" in preloaded:
             code_raw = preloaded["code_zip"]
@@ -2170,9 +2191,10 @@ def run_job(
         code_cache_dir.parent.mkdir(parents=True, exist_ok=True)
         code_extract_tmp.rename(code_cache_dir)
         sys.path.insert(0, str(code_cache_dir))
-        log(
-            f"job {jid}: code.zip unpacked ({len(code_raw)} bytes, "
-            f"{len(list(code_cache_dir.rglob('*.py')))} .py files) -> sys.path[0]"
+        prep_b.add(
+            "code",
+            f"解包 {len(code_raw)} bytes / "
+            f"{len(list(code_cache_dir.rglob('*.py')))} .py → sys.path[0]",
         )
 
     # ---- 热替换护栏（2026-09-11）：本进程已 import 的代码版本必须 == 本 job 要求 ----
@@ -2182,7 +2204,7 @@ def run_job(
     _job_sha = str(manifest["code_sha256"])
     if _ACTIVE_CODE_SHA is None:
         _ACTIVE_CODE_SHA = _job_sha
-        log(f"job {jid}: 本进程加载代码 sha={_job_sha[:12]}…（后续 job 若变化将自重启）")
+        prep_b.add("进程代码 sha", f"{_job_sha[:12]}…（后续 job 若变化将自重启）")
     elif _job_sha != _ACTIVE_CODE_SHA:
         raise CodeChangedError(_ACTIVE_CODE_SHA, _job_sha)
 
@@ -2243,7 +2265,14 @@ def run_job(
             else code_root.parent / "ts_code_cache"
         )
         _ts_dir, ts_code_bytes, ts_code_hit = _ensure_ts_code(
-            base_url, token, jid, manifest, ts_root=ts_root, preloaded=preloaded, log=log
+            base_url,
+            token,
+            jid,
+            manifest,
+            ts_root=ts_root,
+            preloaded=preloaded,
+            log=log,
+            bundle=prep_b,
         )
         if echo:
             log(f"job {jid}: kind=iter + echo——跳过 rollout（只验传输链）")
@@ -2395,8 +2424,9 @@ def run_job(
         # 持久化编译缓存：必须在**任何计算之前**（下面 xla_device() 之后的指纹/速度自检就会
         # 产生第一张图）。缓存被挤出时读盘而非重编，不改变任何数值——真机 ragged tail 每轮
         # 多付的 ~14s 就是缓存淘汰后的重编（docs/nn/tpu-perf.md §6）。
-        log(
-            f"job {jid}: XLA 持久化编译缓存 {xla_enable_compile_cache(work_dir / 'xla-compile-cache')}"
+        prep_b.add(
+            "XLA 编译缓存",
+            f"{xla_enable_compile_cache(work_dir / 'xla-compile-cache')}",
         )
         device_t = xla_device()
         # ★ 2026-09-22（Kaggle TPU 实例上离线课程 PPO 单步 8~9s ⇒ 疑似静默跑 CPU）：XLA 的
@@ -2405,16 +2435,19 @@ def run_job(
         #   只是慢两个数量级——正是最该响的那类静默降级）。
         _fp = xla_fingerprint(device_t)
         _spd = xla_device_speed_probe(device_t)
-        log(
-            f"job {jid}: TPU/XLA 设备 {device_t}｜device_type={_fp['device_type']}｜"
+        prep_b.add(
+            "设备",
+            f"{device_t}｜device_type={_fp['device_type']}｜"
             f"XLA 设备数={_fp['global_device_count']}（本进程可见 {_fp['addressable_device_count']}）｜"
             f"replication={_fp['replication_devices']}｜attrs={_fp['attrs']}｜"
             f"world_size={xla_world_size()}（无复制时恒 1，**别拿它当 TPU 判据**）｜"
             f"2048² matmul {(_spd * 1000) if _spd is not None else float('nan'):.1f} ms"
-            "（TPU 量级 ~ms；~10ms+ = 后端是 CPU）"
+            "（TPU 量级 ~ms；~10ms+ = 后端是 CPU）",
         )
         _why = tpu_backend_missing_reason(_fp)
         if _why:
+            # 拒跑是**要看的**：把攒着的设备读数先落下来（否则这行永远不出现）。
+            prep_b.emit(f"job {jid}: 后端不是 TPU——拒跑")
             raise ProtocolError(
                 f"job {jid}: 要的是 TPU，但 XLA 运行时不是 TPU 后端（{_why}）——**拒跑**。"
                 "在 CPU 上跑完整段会看起来完全正常、只慢两个数量级，所以这里宁可停下："
@@ -2478,7 +2511,7 @@ def run_job(
             # device_t 在 XLA 上会走 torch.load 的设备 hook，跨 runtime 不稳）。
             opt.load_state_dict(torch.load(opt_dir / "opt.pt", map_location="cpu"))
             opt_restore_sec = round(time.time() - t_opt, 3)
-            log(f"job {jid}: model/opt 从 opt_init（{opt_src}）恢复（Adam 动量延续，D5）")
+            prep_b.add("opt", f"从 opt_init（{opt_src}）恢复（Adam 动量延续，D5）")
         else:
             # 首轮/无 tar：从 init 权重 warm-start（hub 打包时写入 payload 的 weights_json）
             if not init_w.exists():
@@ -2486,7 +2519,7 @@ def run_job(
             load_state_into(model, str(init_w))
             model.to(device_t)
             opt = torch.optim.Adam(model.parameters(), lr=float(manifest["lr"]))
-            log(f"job {jid}: 无 opt_init，从 init_weights warm-start + 新 Adam")
+            prep_b.add("opt", "无 opt_init，从 init_weights warm-start + 新 Adam")
     except ProtocolError:
         raise  # 上游已判定的确定性失败（缺 blob / 缺 init 权重）原样上抛
     except Exception as e:
@@ -2611,9 +2644,10 @@ def run_job(
             raise ProtocolError(
                 f"job {jid}: demo bank 缺字段 {sorted(need - set(demo_bank.keys()))}——拒收"
             )
-        log(
-            f"job {jid}: demo bank 已加载（N={demo_bank['obs'].shape[0]}"
-            f" coef={demo_coef:g} per_mb={demo_per_mb} src={demo_src}）"
+        prep_b.add(
+            "demo bank",
+            f"N={demo_bank['obs'].shape[0]} coef={demo_coef:g} "
+            f"per_mb={demo_per_mb} src={demo_src}",
         )
 
     # ---- PPO：load → chunk → update（同一 backend 调用链，D4） ----
@@ -2642,6 +2676,7 @@ def run_job(
         raise JobCancelledError(f"job {jid}: 结果已 landed（下载期间）——开算前丢弃")
 
     t_ppo = time.time()
+    train_b = LogBundle(log)
     try:
         episodes = ppo_engine.load_episodes(
             shards_root,
@@ -2652,7 +2687,11 @@ def run_job(
             # 严格样本量配额（target_transitions 路线）：逐关只收前 N 步，截断在 GAE
             # 之前。0/缺失（旧 hub 产出的 manifest）= 全收，历史行为逐字节不变。
             per_stage_quota=int(manifest.get("per_stage_quota", 0) or 0),
+            bundle=prep_b,
         )
+        # ★ 装载完成 = 「本 job 准备」这一段结束：**一行**把所有入口/设备/opt/demo/装载
+        # 读数一次说清（原来 ~10 行），随后才进 PPO。
+        prep_b.emit(f"job {jid}: 准备完成 {time.time() - t_prep:.1f}s")
         total_steps = sum(e["obs"].shape[0] for e in episodes)
         chunks = ppo_engine.chunk_episodes(
             episodes, int(manifest["mb"]), shuffle=bool(manifest["shuffle"])
@@ -2680,6 +2719,9 @@ def run_job(
             # 「跑完才响应」。训练侧那条（`rl/stream.py`）传的是双缓冲预采回调，
             # 与这里不是同一个调用点，别去动那一条。
             on_epoch_done=_cancel_at_epoch_boundary if should_cancel is not None else None,
+            # 组 3（日志节食）：epoch 行 + PPO 完成行攒成一行，未完成时每 60s 心跳一次。
+            progress=train_b,
+            progress_head=f"job {jid}: PPO 训练中",
         )
     except ProtocolError:
         raise
@@ -2693,11 +2735,12 @@ def run_job(
     ppo_sec = round(time.time() - t_ppo, 1)
     # P0.5：T_ppo 进传输账（与 T_in/T_out 同一条 `wire` 行 ⇒ 占比可复算，不用人肉拼日志）。
     _wire_time(jid, "ppo", time.time() - t_ppo)
-    log(
-        f"job {jid}: PPO done in {ppo_sec}s, "
-        f"steps={sum(c['obs'].shape[0] for c in chunks)}/{total_steps}（训练/池子） "
-        f"chunks={len(chunks)} kl={agg.get('kl')}"
+    train_b.add(
+        "steps", f"{sum(c['obs'].shape[0] for c in chunks)}/{total_steps}（训练/池子）"
     )
+    train_b.add("chunks", len(chunks))
+    train_b.add("kl", agg.get("kl"))
+    train_b.emit(f"job {jid}: PPO done in {ppo_sec}s")
 
     # ---- 产物：weights_json（save_weights_json，D12/G1）+ _ppo_save tar（D5） ----
     # XLA：先落图执行边界再物化回主机。否则 state_dict() / save_weights_json 读到的是

@@ -48,6 +48,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from log_bundle import LogBundle
 from platform_utils import cpu_worker_slots
 from remote.artifacts import (
     ArtifactStore,
@@ -605,15 +606,22 @@ def _run_iteration(ctx: RunContext, it: int, *, prev_it: int) -> dict:
     spec = iter_spec(ctx.plan, it, pairs, wver=init_fp, course=ctx.course)
     spec = with_rollout_workers(spec, int(ctx.rollout_workers or 0))
     vol = ctx.plan.get("volume")
-    ctx.log(
-        f"it{it}: {len(pairs)} 局（{len({s for s, _ in pairs})} 关）wver={init_fp[:12]}…"
+    # ★ 2026-09-24（日志节食）：这几行与 `run_job` 自己的入口/设备/装载读数是**同一个阶段**
+    # （本轮上云从拼 spec 到 PPO 开算），所以攒进同一个 bundle，由 `run_job` 在装载完成时
+    # 打**一行**（原来这里是 1 行 + 它那边 9 行）。
+    prep_b = LogBundle(ctx.log)
+    prep_b.add(
+        f"it{it}",
+        f"{len(pairs)} 局（{len({s for s, _ in pairs})} 关）wver={init_fp[:12]}…"
         + (
-            f" [动态采集：每关初波 {vol['games_per_stage']} 局，训练侧配额 "
-            f"{vol['per_stage_quota']}/关]"
+            f" 动态采集：每关初波 {vol['games_per_stage']} 局，训练侧配额 "
+            f"{vol['per_stage_quota']}/关"
             if isinstance(vol, dict)
             else ""
-        )
-        + ("（带 Adam 动量）" if ctx.last_opt_sha else "（无 opt：Adam 从头）")
+        ),
+    )
+    prep_b.add(
+        "动量", "带 Adam 动量" if ctx.last_opt_sha else "无 opt：Adam 从头"
     )
     # ---- 合成第 it 轮 manifest：与 hub 发布的 kind=iter 逐字段同构 ----
     m = dict(ctx.manifest)
@@ -673,6 +681,7 @@ def _run_iteration(ctx: RunContext, it: int, *, prev_it: int) -> dict:
         preloaded=preloaded,
         code_cache_dir=ctx.code_cache_dir,
         ts_code_cache_dir=ctx.ts_code_cache_dir,
+        prep=prep_b,
         log=ctx.log,
     )
     validate_result(result, m, commit_echo_must_match=False)

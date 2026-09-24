@@ -7,6 +7,38 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §22 云端日志节食：碎日志攒成**一行**（2026-09-24，用户报障「log 刷屏几小时把浏览器卡死」）
+
+**症状**：Kaggle / Colab 上一次离线整段训练跑几小时，控制台的日志面板是**流式**的（每多一行
+多一个 DOM 节点）⇒ 几小时后浏览器被拖死。刷屏的那几族行有个共同点 —— **没有一行是「必须
+立刻知道」的**：启动读数（编译缓存/设备/opt/demo/payload/code/ts_code/prune）、XLA 步耗诊断
+（默认开，192 步 ≈ 23 行/轮）、epoch 收尾 + PPO 完成、rollout 的设置/看门狗/池/进度。
+
+**决定**：新增原语 `nn-training/log_bundle.py::LogBundle` —— 按 key **就地替换**地攒 `k=v`，
+在**阶段完成**（`emit`，一行打完并清空）或**每 60s 心跳**（`beat`，按墙钟节流、**不清空**，
+`final_only` 字段只在完成时出现）时打一行。时钟可注入（`clock=`）⇒ 心跳节流是纯函数式的，
+测试零 `sleep`（对齐 §21 的静态守卫）。五处接线（完成时那一行 = 原来那几族行）：
+
+| 阶段 | 攒什么 | 完成行 |
+|---|---|---|
+| 本轮上云 + 本 job 准备 | `it<N>`/动量（`run_loop`）＋ payload/prune/code/ts_code/XLA 缓存/设备/opt/demo bank（`worker.run_job`）＋ shards/装载/episodes/配额（`ppo.common.load_episodes_common`） | `job <jid>: 准备完成 <t>s` |
+| PPO 训练 | epoch 行（只留**最后一个 epoch** 的 kl/entropy/policy/value/gnorm）＋ 60s 心跳 | `job <jid>: PPO done in <t>s` |
+| XLA 步耗诊断 | 逐窗口**只累计**：最慢窗口（带它那次的原始指标串）、编译主导窗口计数、metrics 重置计数、图签名、逐 epoch 汇总 | `[ppo] XLA 步耗诊断（N 步 / T s）` |
+| iter rollout | 设置/看门狗口径/池/进度/收尾/单局耗时分布 | `kind=iter rollout done in <t>s`（中断另有 `… 中断`） |
+
+**刻意**保持独立行的（事故信号，不许被埋进汇总）：**重试**与慢局点名（`game_watch.retry_line`）、
+慢局告警、`SHORT (供给不足)`、`逐局画像 0 行`、`prune: 跳过`（沙箱守卫）、后端不是 TPU 的
+**拒跑**（先 `emit` 把攒着的设备读数落下来再抛）。
+
+**回退路径逐字节不变**：`bundle=None`（`load_episodes_common`）/ 不传 `progress`（`ppo_update`）/ 
+不传 `prep`（`run_job`）时走原逐行输出 —— goal/intent/本机三条线共用这些函数，行为不变。
+
+**测试**：`tests/test_log_bundle.py`（原语契约）+ `tests/test_log_diet.py`（四处接线：给了 bundle
+一行都不 log、收尾行里字段齐全、无 bundle 时逐字原样）；`tests/test_xla_step_diag.py` 增源码钉
+（`[ppo] diag s=` 不许回来，判决要素一个不丢）。收益是**行数**（跑一次算不出来），所以用测试
+钉住 —— 为了调试改回逐行打印，这两条必须先红。
+
+---
 ## §21 门禁 flake 清场：把「睡固定时长当同步」全部改成事件驱动（2026-09-24）
 
 **现场**：CPU 满即时连跑 8 次 `nn-python-gate.sh`（xdist `-n 12` + ruff/mypy 三路并行，

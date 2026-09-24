@@ -36,6 +36,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
+from log_bundle import LogBundle
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 
 # 单局看门狗的口径常量与 eval **共用一份**（`remote/game_watch.py`）：点名线 5s、首次尝试硬顶
@@ -465,12 +466,17 @@ def run_iter_rollout(
     requested = float(spec.get("game_timeout_sec") or 0.0)
     explicit = requested > 0
     timeout_sec = requested if explicit else game_watch.DEFAULT_GAME_TIMEOUT_SEC
-    log(
-        f"kind=iter rollout: {len(argvs)} games, workers={workers}, "
-        f"bun={bun} ({ver or '?'}), ts_root={tsd}"
-    )
-    log(
-        f"kind=iter 单局看门狗：软告警 >{game_watch.SLOW_GAME_WARN_SEC:g}s（正常一局亚秒级），"
+    # ★ 2026-09-24（日志节食）：本轮的「设置 + 看门狗口径 + 池 + 进度 + 收尾 + 单局耗时」
+    # 攒成**一行**（完成时打；未完成时每 60s 心跳一次）。原来这七行随轮刷，云端整段跑几
+    # 小时会把控制台日志面板拖死（用户报障）。例外：**重试**与**慢局点名**仍是「发生了才
+    # 打」的独立行 —— 它们是事故信号，不该被埋进汇总里。
+    rb = LogBundle(log)
+    rb.add("games", len(argvs))
+    rb.add("workers", workers)
+    rb.add("bun", f"{bun} ({ver or '?'})")
+    rb.add("ts_root", tsd)
+    rb.note(
+        f"单局看门狗：软告警 >{game_watch.SLOW_GAME_WARN_SEC:g}s（正常一局亚秒级），"
         f"首次尝试硬顶 {timeout_sec:g}s"
         + (
             "（plan 指定，每次尝试都用它）"
@@ -491,16 +497,17 @@ def run_iter_rollout(
     if pool is not None:
         ready_n = pool.start()
         if ready_n:
-            log(
-                f"kind=iter 长驻 worker 池：{ready_n}/{workers} 就绪（{argvs[0][0]}）——"
+            rb.note(
+                f"长驻 worker 池：{ready_n}/{workers} 就绪（{argvs[0][0]}）——"
                 "逐局进程启动/权重解析只付一次，单局失败自动回退一次性 spawn"
             )
         else:
-            log("kind=iter 长驻 worker 池起不来 ⇒ 本轮全部走一次性 spawn")
+            rb.note("长驻 worker 池起不来 ⇒ 本轮全部走一次性 spawn")
             pool.close()
             pool = None
     game_secs: list[float] = [0.0] * len(argvs)
     game_attempts: list[int] = [1] * len(argvs)
+    ok = False
     try:
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futs = {
@@ -526,16 +533,20 @@ def run_iter_rollout(
                 # 「每 10 局一句」在高并发轮上是每秒数行 —— 云端离线课的日志就是被它刷屏的
                 # （用户口径 2026-09-23）。最后一句恒打（轮结束的唯一落点）。
                 now = time.time()
+                rb.add("进度", f"{done_n}/{len(argvs)} games settled ({now - t0:.0f}s)")
                 if game_watch.progress_due(done_n, len(argvs), now, last_log_at):
                     last_log_at = now
-                    log(
-                        f"kind=iter rollout: {done_n}/{len(argvs)} games settled "
-                        f"({now - t0:.0f}s)"
-                    )
+                    rb.beat("kind=iter rollout", now=now)
+        ok = True
     finally:
         if pool is not None:
-            log("kind=iter " + pool.summary())
+            # 池的收益与代价（served/spawned/killed/fallback）进同一行的收尾字段。
+            rb.note(pool.summary(), final_only=True)
             pool.close()
+        if not ok:
+            # 中断也要交代现场（看门狗口径/池计数/已结算到哪一局）——否则「为什么被杀了」
+            # 无从归因。重试/慢局那几行已经在抛出前各自打过了。
+            rb.emit("kind=iter rollout 中断")
     shard_dirs = verify_shards(jd, iter_expected_data_fp(spec))
     reports = collect_reports(jd, spec)
     report = combine_reports(reports)
@@ -550,24 +561,25 @@ def run_iter_rollout(
     report["perGameSecs"] = game_secs
     # 与本机 rollout 的 manifest 同规（`rl/cmd` 的 --node-label 决定；上云 = "node"）。
     report["rolloutSrc"] = "node"
-    log(
-        f"kind=iter rollout done: shards={len(shard_dirs)} games={report['games']} "
-        f"winRate={report['winRate']} samples={report['totalSamples']} "
-        f"in {report['elapsedSec']}s｜逐局画像 {len(report['perGame'])}/{len(shard_dirs)} 行"
-        + (
-            "（四列数据源；0 行 = 控制台耗时/击杀/残血/道具恒空，查单局 manifest）"
-            if not report["perGame"]
-            else ""
-        )
-    )
+    rb.add("shards", len(shard_dirs))
+    rb.add("games", report["games"])
+    rb.add("winRate", report["winRate"])
+    rb.add("samples", report["totalSamples"])
+    rb.add("逐局画像", f"{len(report['perGame'])}/{len(shard_dirs)} 行")
+    if not report["perGame"]:
+        # 四列数据源没了是**要看的**（控制台耗时/击杀/残血/道具会恒空）。
+        rb.note("逐局画像 0 行 = 控制台耗时/击杀/残血/道具恒空，查单局 manifest")
     # 单局耗时分布：<5s 这条线（以及重试次数）要靠每轮的真数据校准，不靠猜。
-    log(
+    # `final_only`：轮末才有，心跳里不该出现半个分布。
+    rb.note(
         game_watch.game_time_summary(
             "rollout",
             list(zip(game_secs, [_game_label(a) for a in argvs], strict=True)),
             retried=sum(1 for a in game_attempts if a > 1),
-        )
+        ),
+        final_only=True,
     )
+    rb.emit(f"kind=iter rollout done in {report['elapsedSec']}s")
     return {
         "report": report,
         "shard_dirs": [str(d) for d in shard_dirs],
