@@ -1,5 +1,10 @@
 """拆分的**契约守卫**：`_JobStore` 的六个域混入永住 `remote/hub/store_*.py`（S4 第十四刀，2026-09-24）。
 
+> **S4 第十五刀补记**：第十四刀只搬了**六个混入**，组合类 `_JobStore` 还留在 `hub_server.py`；
+> 第十五刀（`_HubQueue` 拆分）把组合类与鉴权原语一起下沉到 `hub/store.py` / `hub/auth.py`。
+> 本文件读**源码文本**的那几条因此改读新家（`STORE_MOD` / `AUTH_MOD`）——
+> 「名字是契约，位置不是」对**对象**成立（`hs._JobStore` 仍解析），对**源码文本**不成立。
+
 ## 这一刀切了什么
 
 `remote/hub_server.py` 3017 → 2072 行：`_JobStore`（1002 行 / 49 方法）按**域**拆成六个混入，
@@ -65,6 +70,11 @@ from tests.helpers import remote_dag as dag
 NN_ROOT = ROOT
 HUB_DIR = NN_ROOT / "remote" / "hub"
 HUB_SERVER = NN_ROOT / "remote" / "hub_server.py"
+#: 组合类与鉴权原语的**新家**（S4 第十五刀从 `hub_server.py` 搬出）。本文件原先一律读
+#: `HUB_SERVER` 取 `_JobStore` / `_AuthGuard` 的类体；搬走之后读源码的那几条要改路
+#: ——「名字是契约，位置不是」对**对象**成立（`hs._JobStore` 仍可解析），对**源码文本**不成立。
+STORE_MOD = HUB_DIR / "store.py"
+AUTH_MOD = HUB_DIR / "auth.py"
 
 #: 域 -> （混入类, 文件内实现的方法, 该域在 `_init_*` 里声明的状态）
 DOMAINS: dict[str, tuple[type, tuple[str, ...], tuple[str, ...]]] = {
@@ -159,8 +169,20 @@ STATELESS = tuple(d for d, (_, _, st) in DOMAINS.items() if not st)
 OWN_METHODS = ("__init__", "note_worker")
 PROCESS_STATE = ("halt_workers", "_workers")
 
-#: 六个混入允许的仓内依赖（多一个就说明又搬漏/搬多了）。
+#: 六个混入 + 两个「搬出后新增的邻居」允许的仓内依赖（多一个就说明又搬漏/搬多了）。
 ALLOWED_IMPORTS = {
+    # 鉴权原语（S4 第十五刀）：只靠标准库（`time` / `threading`）⇒ 零仓内依赖。
+    "remote.hub.auth": set(),
+    # 组合类的**新家**（S4 第十五刀）：六个混入 + 鉴权原语，全是向下。
+    "remote.hub.store": {
+        "remote.hub.auth",
+        "remote.hub.store_ledger",
+        "remote.hub.store_leases",
+        "remote.hub.store_offline",
+        "remote.hub.store_results",
+        "remote.hub.store_scheduling",
+        "remote.hub.store_wire",
+    },
     "remote.hub.store_ledger": {"common.protocol"},
     "remote.hub.store_wire": set(),
     "remote.hub.store_scheduling": {"common.protocol"},
@@ -232,7 +254,7 @@ def _self_assignments(path: Path, cls_name: str) -> set[str]:
 
 def test_every_method_lives_in_exactly_one_mixin() -> None:
     """每个方法只在一个混入里**实现**；`_JobStore` 不得再定义任何一个（组合类只组合）。"""
-    own = _own_defs(HUB_SERVER, "_JobStore")
+    own = _own_defs(STORE_MOD, "_JobStore")
     assert sorted(own & set(MIXIN_METHODS)) == [], (
         f"这些方法又回到 _JobStore 了：{sorted(own & set(MIXIN_METHODS))}"
     )
@@ -356,10 +378,10 @@ def test_a_domain_without_a_hook_really_has_no_state() -> None:
 
 def test_the_init_calls_every_hook_exactly_once() -> None:
     """组合类的 `__init__` **逐个显式**调用钩子（不用 `super()` 链：顺序要读得出来）。"""
-    src = HUB_SERVER.read_text(encoding="utf-8")
+    src = STORE_MOD.read_text(encoding="utf-8")
     init = next(
         n
-        for n in _cls(_tree(HUB_SERVER), "_JobStore").body
+        for n in _cls(_tree(STORE_MOD), "_JobStore").body
         if isinstance(n, ast.FunctionDef) and n.name == "__init__"
     )
     calls: list[str] = []
@@ -380,13 +402,13 @@ def test_the_init_calls_every_hook_exactly_once() -> None:
     for domain in STATEFUL:
         cls, _, _ = DOMAINS[domain]
         call = f"{cls.__name__}._init_{domain.removeprefix('store_')}(self)"
-        assert src.count(call) == 1, f"{call} 在 hub_server.py 里出现 {src.count(call)} 次"
+        assert src.count(call) == 1, f"{call} 在 hub/store.py 里出现 {src.count(call)} 次"
     # `_lock` 只有一个来源（`_AuthGuard.__init__`）——旧 `_JobStore.__init__` 自建的那把
     # 会被它覆盖掉（一个被丢弃的锁对象），第十四刀顺手删了；这条钉住不再长回来。
-    assert "_lock" not in _init_state(HUB_SERVER, "_JobStore", "__init__"), (
+    assert "_lock" not in _init_state(STORE_MOD, "_JobStore", "__init__"), (
         "组合类又在自建锁——`_lock` 由 `_AuthGuard.__init__` 提供"
     )
-    assert "_lock" in _init_state(HUB_SERVER, "_AuthGuard", "__init__"), "`_AuthGuard` 不再建锁"
+    assert "_lock" in _init_state(AUTH_MOD, "_AuthGuard", "__init__"), "`_AuthGuard` 不再建锁"
 
 
 def test_mixin_declarations_are_annotations_or_owned_constants() -> None:
@@ -418,7 +440,7 @@ def test_process_state_names_are_declared_only_by_the_composed_class() -> None:
         assigned = _self_assignments(HUB_DIR / f"{domain}.py", cls.__name__)
         for name in PROCESS_STATE:
             assert name not in assigned, f"{domain} 动了进程级状态 {name}"
-    combo = _self_assignments(HUB_SERVER, "_JobStore")
+    combo = _self_assignments(STORE_MOD, "_JobStore")
     for name in PROCESS_STATE:
         assert name in combo, f"组合类没声明进程级状态 {name}"
 
@@ -427,9 +449,27 @@ def test_process_state_names_are_declared_only_by_the_composed_class() -> None:
 
 
 def test_the_mixins_only_import_downward() -> None:
-    """六个混入的仓内依赖是登记过的那些（多一个就说明搬漏/搬多了）。"""
+    """六个混入（+ `hub.auth` / `hub.store`）的仓内依赖是登记过的那些（多一个就说明搬漏/搬多了）。"""
     for mod, allowed in ALLOWED_IMPORTS.items():
         dag.assert_remote_module(mod, allowed_project_imports=allowed)
+
+
+def test_the_composed_class_moved_below_the_mixins() -> None:
+    """★ 第十五刀的使能缝：组合类的家必须在六个混入**上面**、在宿主**下面**。
+
+    这是「下游要构造/注解 `_JobStore`，而 `remote/hub/*` 不得 import `hub_server`」那条约束的
+    机械化形式——若哪天有人把 `_JobStore` 搬回 `hub_server`，层号算术当场对不上。
+    """
+    for domain in DOMAINS:
+        assert dag.LAYERS[f"remote.hub.{domain}"] < dag.LAYERS["remote.hub.store"], domain
+    assert dag.LAYERS["remote.hub.auth"] < dag.LAYERS["remote.hub.store"]
+    assert dag.LAYERS["remote.hub.store"] < dag.LAYERS[hs.__name__]
+    # 组合类的类体只剩三样：docstring · 两个成员 · 零个「域」方法
+    body = _cls(_tree(STORE_MOD), "_JobStore").body
+    kinds = [
+        type(n).__name__ for n in body if not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant))
+    ]
+    assert kinds == ["FunctionDef", "FunctionDef"], kinds
 
 
 def test_the_mixins_never_import_each_other() -> None:

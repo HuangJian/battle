@@ -2782,3 +2782,47 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
   2120 pass / 0 fail；`check-decisions` 通过。
 —— 全文（拆法三判据 / 显式钩子 vs super 链 / 声明怎么写 / 逐字节对账怎么做）→
 `docs/nn/engineering.md` §23「第十四刀」
+
+## §2026-09-24-goalnn-hub-hubqueue-mixins（2026-09-24，用户指令「拆 _HubQueue 多课程调度面（先侦察那 28 个同名委托方法）」）
+
+拆 `_HubQueue`（1033 行 / 76 方法）——**先侦察那 28 个同名委托方法**，侦察结论改变了整刀的切法。
+
+- **先决条件（A 相）**：第七个混入要按课程构造/注解 `_JobStore`，而 `remote/hub/*` 不得 import
+  `hub_server`（成环）⇒ 先把 `_AuthGuard` + `_is_loopback` 搬到 `remote/hub/auth.py`、把 `_JobStore`
+  组合类搬到 `remote/hub/store.py`。`hub_server` **自别名 re-export** 保住 `hs._JobStore` /
+  `hs._AuthGuard` / `patch remote.hub_server.*` 这些既有入口（名字是契约，位置不是）。
+- **★ 那 28 个同名方法是门面，不是可删的重复**（三条判据）：① 签名分三档 —— 28 条逐参数一致、
+  3 条多一个**前置 `course`**（store 每课程一份、队列要跨课程寻址）、1 条**改名**（`abandon` →
+  `abandon_job`）；② 缺归属时返回值**逐方法不同**（`False` / `None` / `{}` / `[]` / `0`）⇒
+  `__getattr__` 收不掉（得把 31 行「空值表」藏进字符串）；③ 它是类 docstring 写下的对外承诺，
+  `__getattr__` 会让 mypy 看不见、IDE 跳不过去。⇒ 三张写死闭集表 + **可执行断言**，不是承诺。
+- **★ 另一个结构决定：`queue_peer.QueuePeer` = 只有声明的柱子**（74 个 `def X(...) -> T: ...`，零实现）。
+  七个混入必须互不 import（本刀要消灭耦合），但各自要调兄弟方法 ⇒ mypy 一片 `attr-defined`。
+  「各造一份 Protocol」= 七份会漂；「import 兄弟」= 违反本刀目标；**共同声明面**两者皆免：
+  运行时由后续混入的活动实现覆盖，mypy 看声明，守卫看真身。`_store_of` **刻意不进**它
+  （那要 import `hub.store` ⇒ `queue_peer` L3 ⇒ 混入 ≥L4 ⇒ `hub.queue` L5 ⇒ `hub_server` L6 =
+  与 `smoke_loopback`(L6) 同层），守卫正面断言它不在里面并写明这条推论链。
+- **拆法判据与第十四刀同源**（一把 `_lock` 是类的不变式、跨域互调是常态、tests 直读私有状态）
+  ⇒ 仍然是**混入**（同一个对象、同一把锁、零行为变化），**测试一行没改**。
+- **★ 与第十四刀刻意相反的一条：`__init__` 不拆钩子**。`_JobStore` 那时拆成四个 `_init_*`（状态散在
+  900 行、四域独立）；这里只有 44 行且几处**咬合**（`_solo` 决定 `_now`、`_discover_root` 决定
+  `_discover_last` 初值、`_adopt_solo` 运行期把三个字段从 store 搬到 `self`）⇒ 拆开只会把直线扯成跳转。
+  守卫改为正面断言「组合类体只有那两个类常量 + `__init__` 每条状态声明都带值 + 申报字段集恰好是状态表的键集」。
+- **★ 门面的两面对账（签名 + 活性）**：签名一致抓不住「方法还在、活不干了」。活性判据**不看名字看结构**：
+  方法体里**恰好一处**「拿到 store 的取用」且转发目标名等于声明值。取用**四种写法都认**
+  （`_store_of(job_id)` / `_stores[course]` / `_stores.get(course)` / `_solo`）—— 这是跑出来的不是先验的：
+  第一版只认前两种，`note_worker` 与 `claimable_job_ids` 立刻顶出来。`note_worker` 因此被认定为
+  **唯一一条非转发的同名方法**（队列自己就是登记表的拥有者），写成独占例外表 `FACADE_OWN` + 一条反面断言。
+- **纯搬对账**：AST 逐成员比对 ⇒ **76/76 逐字节等价**；旧 `__init__` 的 16 条字段声明 + 43 行字段注释
+  逐字在新家；七混入**零重名**。
+- **违反后果**：域成员换家 / MRO 换序 / 门面签名漂 / 门面转错名字 / 门面多取一次 store /
+  `note_worker` 变转发 / 混入带值类常量 / `__init__` 冒出未登记字段 / 状态写者漂 / 声明面长出实现 /
+  声明面收 `_store_of` / 混入偷 import 兄弟 / 层号漂 / 改名转发漂 —— 十四类都在**提交时**红
+  （新守卫 25 例 + 反探针 **14/14** 命中）。
+- **门禁**：**2423 → 2449 passed / 3 skipped**；mypy **401 → 413** 源文件绿；根 `bun run check`
+  2120 pass / 0 fail；`check-decisions` 通过。`hub_server.py` 累计 **3017 → 887 行（−71%）**。
+- **⚠ 操作教训**：反探针的**锚点也要断言命中次数**——⑨ 选 `set_halt` 写 `_halts` 时同方法后面还有
+  `_halts.clear()`（也是写者），⑭ 的 `abandon` 锚点少写了第二个实参：两次「没红」都不是守卫空档
+  而是锚点写错。脚本现每条 `assert count(old) == 1`。
+—— 全文（八模块表 / 三档签名 / 声明面推论链 / `__init__` 不拆的两条理由 / 逐字节对账）→
+`docs/nn/engineering.md` §23「第十五刀」

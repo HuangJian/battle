@@ -932,13 +932,129 @@ class _JobStore(LedgerMixin, WireMeterMixin, SchedulingMixin, LeaseMixin,
 > 修法比前两次更彻底：**从对象取名字**（`hs.__name__` 当模块名与账本键）——既没字面量，
 > 也不会因改名失效。
 
+### 第十五刀（2026-09-24）：`_HubQueue`（1033 行 / 76 方法）拆七混入 —— 并且**先把两个类搬出 `hub_server`**
+
+`remote/hub_server.py` **2072 → 887 行**（连第十四刀的 3017 ⇒ 累计 −71%）。这一刀分两相：
+
+**A 相（使能）：把两个类搬出宿主。** 第七个混入（`queue_resume`）要按课程构造/注解 `_JobStore`，
+而 `remote/hub/*` **不得** import `hub_server`（会成环）——所以先搬：
+
+| 名字 | 从 | 到 | 行 |
+|---|---|---|---|
+| `_AuthGuard` + `_is_loopback` | `hub_server.py` | `hub/auth.py` | 101 |
+| `_JobStore`（组合类本身） | `hub_server.py` | `hub/store.py` | 108 |
+
+`hub_server` 用**自别名 re-export** 保住入口（`from remote.hub.auth import _AuthGuard as _AuthGuard`）：
+约 10 个测试与 e2e 按 `hs._JobStore` / `hs._AuthGuard` 取名字、按 `remote.hub_server.*` 打 patch——
+**名字是契约，位置不是**（第十刀起的老规矩，本刀第三十次兑现）。
+
+**B 相：七个域混入 + 一个组合类**（`hub/queue.py`，164 行 = docstring + 两个类常量 + `__init__`）：
+
+| 新模块 | 类 | 成员 | 行 | 层 |
+|---|---|---|---|---|
+| `hub/queue_scope.py` | `QueueScopeMixin` | 15 | 222 | 2 |
+| `hub/queue_discover.py` | `QueueDiscoverMixin` | 3 | 164 | 2 |
+| `hub/queue_auth.py` | `QueueAuthMixin` | 5 | 68 | 1 |
+| `hub/queue_claims.py` | `QueueClaimsMixin` | 9 | 294 | 2 |
+| `hub/queue_resume.py` | `QueueResumeMixin` | 10 | 258 | 1 |
+| `hub/queue_observe.py` | `QueueObserveMixin` | 14 | 199 | 2 |
+| `hub/queue_store_face.py` | `QueueStoreFaceMixin` | 18 | 137 | 1 |
+| `hub/queue_peer.py` | `QueuePeer`（**声明面**，无实现） | 74 | 178 | 1 |
+
+#### ★ 本刀的核心发现：那 28 个「同名委托方法」是**门面**，不是可删的重复
+
+侦察第一步就是量这个：`_HubQueue` 有 31 个方法名与 `_JobStore` 重合。看着像「纯委托、可
+用一个 `__getattr__` 收掉」——**否决**。三条判据：
+
+1. **签名不是逐条相同，而是分三档**：28 条逐参数一致；3 条多一个**前置 `course`**
+   （`claimable_job_ids` / `store_offline_artifact` / `store_offline_result` —— store 是**每课程一份**，
+   队列要跨课程寻址，所以队列侧先收课程名）；1 条**改名**（`abandon` → `abandon_job`）；
+2. **缺归属时的返回值逐方法不同**（`False` / `None` / `{}` / `[]` / `0`），这正是 `__getattr__`
+   做不到的：它得知道每个名字的「空值」是什么，等于把 31 行表藏在字符串里；
+3. **它是一条记录下来的对外契约**：类 docstring 写着「对外的 job 作用域方法与 `_JobStore`
+   同名同签名」。`__getattr__` 会让这句话**不可静态检查**（mypy 看不见，IDE 跳不过去）。
+
+于是这 31 条变成**可执行断言**（守卫里三张写死的闭集表），而不是一句随人漂的承诺。
+
+#### 门面的**活性**也要量（否则「空实现」照样绿）
+
+签名对账抓不住「方法还在、活不干了」。活性判据**不看名字看结构**：方法体里**恰好一处**
+「拿到 store 的取用」，且转发目标名等于声明值。取用有四种写法（`_store_of(job_id)` /
+`_stores[course]` / `_stores.get(course)` / `_solo`），四种都认——这是写这条断言时**跑出来的**，
+不是先验的：第一版只认前两种，`note_worker` 与 `claimable_job_ids` 立刻把它顶出来。
+
+`note_worker` 于是暴露成**唯一一条非转发的同名方法**（队列自己就是登记表的拥有者：
+`_registry()` 单课程取 store 的 `_workers`、多课程取自己的）—— 它被写成一条**独占的例外表**
+`FACADE_OWN`，并配一条**反面**断言（它必须碰不到 `_store_of` / `_stores` / `_solo`）。
+
+#### ★ 第二处结构创新：`QueuePeer` —— 一个**只有声明**的柱子
+
+七个混入互相不知道对方存在（不得 import 兄弟），但每个都要在**自己**的方法里调兄弟的方法
+（`claim_next` 要调 `discover` / `_serves_course` / `mode_of`…），mypy 遂报一片 `attr-defined`。
+三条路里选了第三条：
+
+* 每个混入声明 `class QueueScopeMixin(Protocol)` 似的自造协议 —— 七份，漂开无人管；
+* 混入 import 兄弟 —— 直接违反「互不 import」，也是本刀要消灭的耦合；
+* **共同声明面**：`queue_peer.QueuePeer` 里 74 个 `def X(...) -> T: ...`，**零实现**。
+  混入 `class QueueScopeMixin(QueuePeer)` ⇒ 名字在**运行时**由后续混入的活动实现覆盖，
+  mypy 看声明，测试看真身。
+
+配套两条守卫：① 每个方法体**只有 `...`**（长出实现就是第二份实现）；② 声明面与真实现
+**逐参数一致**（漂了就是一根骗 mypy 的柱子）。⚠ 第一版把「纯声明」判成「body 里只有
+`ast.Expr(Constant)`」——把 `...` 自己也滤掉了，`halt_of` 带 docstring 才暴露；只在滤**字符串**常量。
+
+**`_store_of` 刻意不进 `QueuePeer`**：那要 import `hub.store` ⇒ `queue_peer` 升 L3 ⇒ 混入 ≥L4 ⇒
+`hub.queue` L5 ⇒ `hub_server` L6 = 与 `smoke_loopback`(L6) 同层。守卫正面断言它不在里面，
+并写明这个推论链。
+
+#### 为什么要 `__init__` 拆成七个钩子 —— 这次**不拆**（与第十四刀刻意相反）
+
+第十四刀（`_JobStore`）把状态声明拆到四个 `_init_<域>` 钩子，理由是状态散在 900 行里、四个域
+真独立。这里**不拆**，两条理由：
+
+* `__init__` 只有 44 行，是**一块连续**的声明，读一遍就对得齐 —— 拆开要跳七个文件；
+* 几处状态**互相咬合**：`_solo` 决定 `_now`（时钟必须与单课程 store 同源，否则 claimed 标记
+  会混入真实墙钟）、`_discover_root` 决定 `_discover_last` 初值、`_adopt_solo` 运行期还要把
+  `_halt_default` / `_workers` / `_auth_fail` 从 store 搬到 `self`。按域切只会把直线扯成跳转。
+
+守卫因此断言：组合类体里只有那两个类常量；`__init__` 里**每条状态声明都带值**（裸注解只住
+七个混入）；且 `__init__` 申报的字段集**恰好**是状态表的键集（少两个：`_auth_blocked_until` /
+`_auth_fail` 的声明点在 `hub/auth.py::_AuthGuard.__init__` —— 同一个对象的两段 `__init__`）。
+
+#### 对账：76 个成员**逐字节**等价 + 零重名
+
+搬 1033 行 / 76 个成员跨八个文件，「测试绿」照样不是等价性的尺子。AST 取每个成员源码逐字符
+比 HEAD vs 新家：**76/76 逐字节等价**，旧 `__init__` 的 16 条字段声明与 43 行字段注释全部逐字在新家，
+且七混入**零重名**（`test_the_eight_mixins_do_not_share_any_realized_name`）。
+
+#### 验证
+
+* 守卫 `tests/test_hub_queue_split.py` **25 例**：域成员唯一归属 · 混入零重名 · 对象级接线 ·
+  MRO 逐项 · 同名面**闭集**（31 条）· 28 条签名逐参数 · 3 条只多前置 `course`（且 `course` 无默认值）·
+  **31 条活性** · `note_worker` 反面 · 缺归属返回值逐方法对账 · 状态归属表 · 带值声明只在组合类 ·
+  `QueuePeer` 纯声明 + 签名一致 · 改名转发 · `queue_resume` 的 `rl` 只有延迟引用 · 混入互不 import ·
+  层号对账 · 哨兵随唯一读者搬走 · **三条功能性**（跨域链路在同一个对象上 / 同一把 `_lock` 连最外层
+  门面也阻塞 / `_adopt_solo` 跨域搬进程状态）。
+* 反探针 **14/14 命中**（域成员换家 · MRO 换序 · 门面签名漂 · 转错名字 · 多取一次 store ·
+  `note_worker` 变转发 · 混入带值类常量 · `__init__` 冒出未登记字段 · 状态写者漂 · 声明面长出实现 ·
+  声明面收 `_store_of` · 混入偷 import 兄弟 · 层号漂 · 改名转发漂）。
+* nn 门禁 **2423 → 2449 passed / 3 skipped**；mypy **401 → 413** 源文件；根 `bun run check`
+  2120 pass / 0 fail；`check-decisions` 通过。
+
+> 决策 → `DECISIONS.md` §2026-09-24-goalnn-hub-hubqueue-mixins。
+> ⚠ 反探针的两条锚点第一版选错，都不是「守卫空档」：⑨ 选了 `set_halt` 写 `_halts`，但同方法后面
+> 还有 `_halts.clear()`（也是写者）⇒ 换成 `discover` 写 `_discover_last`；⑭ 的 `abandon` 锚点少写了
+> 第二个实参。**反探针自身的锚点也要断言命中次数**，否则「没红」与「没改」（锚点写错）分不开 ——
+> 本脚本第一版正是这么骗过自己的：`probe_s15` 现在每条都 `assert count(old) == 1`。
+
 ### 未做完（S4 余下）
 
 `remote/` 内部**已零环**（见「拆环」节），`worker.py` 的拆分面**已收口**：只剩三个宿主函数
 （`run_job` 300 / `worker_loop` 197 / `main` 127）+ 287 行转发门面，且「为什么不继续切」有明文理由
-（见第十三刀）。`_JobStore`（拆状态）也已切完（第十四刀）。S4 余下是纯结构工作：
-`remote/hub_server.py` 余 **2072 行**——路由面与状态面都已切完，只剩 `_HubQueue`
-（多课程调度面，1035 行，与 `_JobStore` 同类的状态类）与引导链。
+（见第十三刀）。`_JobStore`（拆状态）也已切完（第十四刀）。`_HubQueue`（多课程调度面，
+1033 行 / 76 方法）也已拆完（第十五刀，含把 `_AuthGuard` / `_JobStore` 两个类搬出宿主）。
+S4 余下是纯结构工作：`remote/hub_server.py` 已从 **3017 → 887 行**（累计 **−71%**），剩下的
+**只有引导链与 HTTP 面**（handler / 派发表 / `main`）—— 迭代器与状态类都已不在里面。
 设计见 `plan/nn-training-refactor.md` §5.3。
 `TrainingSteps` 本体还剩 952 行 / 20 方法（切法是「按一条真实调用链切」，不是按行数等分）。
 

@@ -58,12 +58,15 @@ REMOTE_DIR = ROOT / "remote"
 #:   `offline_deliver` · `offline_eval` · `deliver_zip` · `iter_rollout` ·
 #:   `hub.store_offline`（离线段产物：要靠 L0 的 `artifacts` + `common.fs`，比同族高一层）；
 #: * **L2 传输核心**：`http`（所有业务簇的公共底座）· `push_client` · `plan_run`（半离线执行引擎：
-#:   `worker` 与 `run_loop` 都站在它上面，它自己谁都不靠上层靠）；
+#:   `worker` 与 `run_loop` 都站在它上面，它自己谁都不靠上层靠）· `hub.store`（`_JobStore`
+#:   组合类：六个混入的组装，因 `store_offline` 在 L1 ⇒ 它只能是 L2）；
 #: * **L3 业务簇**：`bc_job` · `download`（取字节 + **物料落地三兄弟** `_ensure_payload` /
 #:   `_ensure_code` / `_ensure_ts_code`，因此也依赖 L1 的 `job_fs`）· `job_lifecycle` · `push_dispatch`；
-#: * **L4 组装**：`hub_server`（hub 侧组装）· `train_core`（训练核：模型/opt/kickstart/demo/PPO/产物
-#:   —— 它靠 L3 的业务簇组装出一个轮次，因此**必须在宿主下面**）· `job_round`（每 job 一轮：
-#:   旁路线程组 + 注入的 `run_job_fn` + 交回传 —— 与 `train_core` 同层同理由）；
+#: * **L4 组装**：`hub_server`（hub 侧组装）· `hub.queue`（`_HubQueue` 组合类：七个 L3 混入的
+#:   组装）· `hub.result`（回传路由：要让推与拉共用同一个校验函数，因此要 `push_dispatch` L3）·
+#:   `train_core`（训练核：模型/opt/kickstart/demo/PPO/产物 —— 它靠 L3 的业务簇组装出一个轮次，
+#:   因此**必须在宿主下面**）· `job_round`（每 job 一轮：旁路线程组 + 注入的 `run_job_fn` +
+#:   交回传 —— 与 `train_core` 同层同理由）；
 #: * **L5 宿主/入口编排**：`worker`（作业壳：网络/校验/上报）· `run_loop` · `notebook_runtime` ·
 #:   `worker_server` · `smoke_loopback` · `tunnel_ab_probe`；
 #: * **L6 引导**：`offline_boot` · `push_bootstrap`；
@@ -77,6 +80,9 @@ LAYERS: dict[str, int] = {
     "remote.bundle": 0,
     "remote.colab_bc": 0,
     "remote.hub.admin": 0,
+    # 鉴权原语（S4 第十五刀）：`_is_loopback` + `_AuthGuard`（D9 闭锁）从 `hub_server` 下沉到这里。
+    # 只靠标准库 ⇒ L0；`hub.store`（组合类）与 `hub.queue_auth`（鉴权域混入）都站在它上面。
+    "remote.hub.auth": 0,
     "remote.hub.blob": 0,
     "remote.hub.offline": 0,
     "remote.hub.schedule": 0,
@@ -89,12 +95,30 @@ LAYERS: dict[str, int] = {
     "remote.hub.store_wire": 0,
     "remote.net_http": 0,
     "remote.prefetch": 0,
+
     "remote.result_upload": 0,
     "remote.serve_pool": 0,
     "remote.tailscale_boot": 0,
     "remote.deliver_zip": 1,
     "remote.hub_client": 1,
     "remote.hub.store_offline": 1,
+    # `_JobStore` 组合类（S4 第十五刀）：第十四刀把六个域混入拆到 `hub/store_*.py`，本刀把组合类
+    # 本身也从 `hub_server` 搬出来 —— 不是对称好看，而是 `_HubQueue` 的课程表域要**构造** store、
+    # `_store_of` 要**注解**它，而 `remote/hub/*` 不得 import `hub_server`（成环）。
+    # 它依赖六个混入（最深 `store_offline` L1）⇒ 拓扑秩 **L2**。
+    "remote.hub.store": 2,
+    # `_HubQueue` 的七个域混入（S4 第十五刀）：全部站在 `hub.store`（L2）上 —— 不是「都往
+    # 高层次凑」，而是每一簇都要**注解** `_stores` / `_solo` / `_store_of` 的形状，而
+    # `from __future__ import annotations` 只推迟求值，mypy 仍要模块级能解析那个名字；
+    # 又不能用 `TYPE_CHECKING` 包（`remote_dag._collect` 把 `if` 体当**顶层**边，会造成上向边）。
+    # 于是七个都是 **L3**。
+    "remote.hub.queue_auth": 3,
+    "remote.hub.queue_claims": 3,
+    "remote.hub.queue_discover": 3,
+    "remote.hub.queue_observe": 3,
+    "remote.hub.queue_resume": 3,
+    "remote.hub.queue_scope": 3,
+    "remote.hub.queue_store_face": 3,
     "remote.iter_rollout": 1,
     "remote.job_fs": 1,
     "remote.offline_deliver": 1,
@@ -107,6 +131,13 @@ LAYERS: dict[str, int] = {
     "remote.download": 3,
     "remote.job_lifecycle": 3,
     "remote.push_dispatch": 3,
+    # `QueuePeer`（S4 第十五刀）：七个混入的**共同声明面**（只声明跨域方法的真签名，不带实现）。
+    # 它**不能**声明 `_store_of`（那要 import `hub.store` ⇒ 本模块 L3 ⇒ 七个混入 ≥L4 ⇒
+    # `hub.queue` L5 ⇒ `hub_server` L6，与 `smoke_loopback`(L6) 同层而后者 import 前者）——
+    # 那条名字由调用它的三簇自己声明。所以本模块只靠 `common.protocol` +
+    # `store_leases`（`ClaimOutcome`）⇒ **L1**。
+    "remote.hub.queue_peer": 1,
+    "remote.hub.queue": 4,
     "remote.hub.result": 4,
     "remote.job_round": 4,
     "remote.train_core": 4,

@@ -799,9 +799,64 @@ CLI 侧传 `_real_run_job`）。引擎里那个 `_real_run_job` **兜底删掉**
 
 > 决策 → `DECISIONS.md` §2026-09-24-goalnn-hub-jobstore-mixins；全文 → `engineering.md` §23「第十四刀」。
 
-**下一刀**：`hub_server` 只剩 `_HubQueue`（多课程调度面，1035 行，与 `_JobStore` 同类的状态类，
-1035 行里相当一部分是 28 个与 `_JobStore` **同名**的委托方法——那里可能藏着「不必逐一手写」的机会）
-与引导链。
+#### 5.3.14 第十五刀（2026-09-24，**已完成**）—— `_HubQueue` 拆七混入（先办两相：先把两个类搬出宿主）
+
+按用户指令「拆 `_HubQueue` 多课程调度面（**先侦察那 28 个同名委托方法**）」执行。侦察结论改变了切法。
+
+**A 相（使能）**：`queue_resume` 要按课程构造/注解 `_JobStore`，而 `remote/hub/*` 不得 import
+`hub_server`（成环）⇒ 先搬两个类：`_AuthGuard` + `_is_loopback` → `hub/auth.py`（101 行）、
+`_JobStore` 组合类 → `hub/store.py`（108 行）。两处都**自别名 re-export**（`hs._AuthGuard` /
+`hs._JobStore` / `patch remote.hub_server.*` 照旧）。
+
+**B 相**：`hub_server.py` **2072 → 887 行**（累计 **3017 → 887，−71%**）。新八块共 **1684 行**：
+
+| 新模块 | 类 | 成员 | 行 | 层 |
+|---|---|---|---|---|
+| `hub/queue_scope.py` | `QueueScopeMixin` | 15 | 222 | 2 |
+| `hub/queue_discover.py` | `QueueDiscoverMixin` | 3 | 164 | 2 |
+| `hub/queue_auth.py` | `QueueAuthMixin` | 5 | 68 | 1 |
+| `hub/queue_claims.py` | `QueueClaimsMixin` | 9 | 294 | 2 |
+| `hub/queue_resume.py` | `QueueResumeMixin` | 10 | 258 | 1 |
+| `hub/queue_observe.py` | `QueueObserveMixin` | 14 | 199 | 2 |
+| `hub/queue_store_face.py` | `QueueStoreFaceMixin` | 18 | 137 | 1 |
+| `hub/queue_peer.py` | `QueuePeer`（**纯声明**） | 74 | 178 | 1 |
+| `hub/queue.py` | `_HubQueue`（组合类） | `__init__` + 2 常量 | 164 | — |
+
+**★ 侦察推翻的第一个直觉：那 28 个同名委托方法不能收成 `__getattr__`**。三条判据：① 签名分
+三档 —— 28 条逐参数一致、3 条多一个**前置 `course`**（`claimable_job_ids` / `store_offline_artifact` /
+`store_offline_result`：store 每课程一份、队列要跨课程寻址）、1 条**改名**（`abandon` →
+`abandon_job`）；② 缺归属时的返回值**逐方法不同**（`False`/`None`/`{}`/`[]`/`0`）⇒ 得把一张
+31 行「空值表」藏进字符串；③ 它是类 docstring 写下的对外承诺，`__getattr__` 会让 mypy 看不见。
+⇒ 三张**写死闭集表** + 可执行断言（同名面闭集 · 28 条签名逐参数 · 3 条只多前置 `course`）。
+
+**★ 侦察带来的第二个结构决定：`QueuePeer` 共同声明面**。七混入必须互不 import（本刀要消灭耦合），
+但各自要调兄弟方法 ⇒ mypy 一片 `attr-defined`。三条路里选第三条：74 个 `def X(...) -> T: ...`
+（**零实现**），混入继承它 ⇒ mypy 看声明、运行时由后续混入的活动实现覆盖。`_store_of` **刻意不进**
+（那要 import `hub.store` ⇒ L3 ⇒ 混入 ≥L4 ⇒ `hub.queue` L5 ⇒ `hub_server` L6 = 与
+`smoke_loopback`(L6) 同层）。守卫两条：纯声明（体里只有 `...`）+ 与真实现逐参数一致。
+
+**★ 门面的活性也要量**：签名一致抓不住「方法还在、活不干了」。判据**不看名字看结构**：体里
+**恰好一处**「拿到 store 的取用」且转发目标名等于声明值。取用**四种写法都认**（`_store_of(job_id)` /
+`_stores[course]` / `_stores.get(course)` / `_solo`）—— 这是跑出来的：第一版只认前两种，
+`note_worker` 与 `claimable_job_ids` 立刻顶出来；`note_worker` 因此被认定为**唯一一条非转发的
+同名方法**（队列自己就是登记表的拥有者），写成例外表 `FACADE_OWN` + 一条**反面**断言。
+
+**★ 与第十四刀刻意相反：`__init__` 不拆钩子。** `_JobStore` 那时拆四个 `_init_*`（状态散在 900 行、
+四域独立）；这里 44 行且几处**咬合**（`_solo` 决定 `_now`、`_discover_root` 决定 `_discover_last`
+初值、`_adopt_solo` 运行期把 `_halt_default` / `_workers` / `_auth_fail` 从 store 搬到 `self`）
+⇒ 按域切只会把直线扯成跳转。
+
+**纯搬对账**：AST 逐成员比对 ⇒ **76/76 逐字节等价**；旧 `__init__` 的 16 条字段声明 + 43 行字段注释
+逐字在新家；七混入**零重名**。
+
+守卫 `tests/test_hub_queue_split.py`（**25 例**，含三条功能性：跨域链路落在同一个对象上 ·
+持有 `_lock` 时最外层门面也阻塞 · `_adopt_solo` 跨域搬进程状态）；反探针 **14/14 命中**。
+门禁 **2423 → 2449**；mypy **401 → 413**。
+
+> 决策 → `DECISIONS.md` §2026-09-24-goalnn-hub-hubqueue-mixins；全文 → `engineering.md` §23「第十五刀」。
+
+**下一刀**：`hub_server` 余 **887 行** —— 迭代器与两个状态类都已不在里面，只剩**引导链与 HTTP 面**
+（handler / 派发表 / `main` / 启动参数）。这是 S4 的最后一块结构面。
 
 ### 5.4 本轮**不做**（已核，刻意保留）
 
