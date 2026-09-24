@@ -55,6 +55,12 @@ import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import type { InputLike } from '../../src/game/Input'
 import { IntentExecutor } from '../../src/nn/intent-executor'
 import { GoalSteering, goalMoveBias } from '../../src/nn/goal-mask'
+import {
+  DANGER_HP_THRESHOLD,
+  DMG_FIRST_WINDOW_TICKS,
+  inThreatLane,
+  playerHpRatio,
+} from '../../src/nn/danger-metrics'
 import { RNG } from '../../src/utils/RNG'
 import { writeFileSync, mkdirSync, readFileSync } from 'fs'
 import { scoreRun, V7_SCORE_CONFIG, type DimensionKey } from '../eval/godai-score'
@@ -196,6 +202,14 @@ interface Telemetry {
    * 上报取整局 max streak，供 T3 stuckP95）。
    */
   stuckTicks: number
+  // ---- metrics v8：危险暴露（plan/x20-dodge-avoidance.plan.md §2；与 export-rl-rollout
+  // 同语义，同一实现 `src/nn/danger-metrics.ts`）----
+  /** 累计 `hpRatio < 0.4` 的 tick（仅玩家存活时计）。 */
+  dangerTicks: number
+  /** 累计「在敌方弹道/炮口线上」的 tick（仅玩家存活时计）。 */
+  threatTicks: number
+  /** tick < 600 的累计承伤（`player_damage` 本就不含致死一击）。 */
+  dmgFirst600: number
   /**
    * Phase 0 逐敌种画像（T3；索引 = ENEMY_KIND_ORDER）：
    * `hitsByKind` = `enemy_hit` 事件按**目标 kind** 累计；`killsByKind` = `by='player'`
@@ -274,6 +288,12 @@ interface EvalResult {
   playerHits: number
   /** 非致命扣血累计（player_damage 事件）。 */
   playerDamageTaken: number
+  /** metrics v8 危险暴露（plan/x20-dodge-avoidance §2）：终局 hp/maxHp + 整局累计
+   *  danger/threat tick + 开局窗（tick<600）承伤。与 rollout metrics 列同名同义。 */
+  playerHpRatio: number
+  dangerTicks: number
+  threatTicks: number
+  dmgFirst600: number
   playerShots: number
   powerUpsCollected: number
   /** T0.4 提顶层（scorable 有、需提顶层 §3.3 🟠）。 */
@@ -457,6 +477,9 @@ export function runEvalOne(
     puGotShield: 0,
     puGotOther: 0,
     stuckTicks: 0,
+    dangerTicks: 0,
+    threatTicks: 0,
+    dmgFirst600: 0,
     hitsByKind: [0, 0, 0, 0],
     killsByKind: [0, 0, 0, 0],
     exposureByKind: [0, 0, 0, 0],
@@ -568,6 +591,8 @@ export function runEvalOne(
         tel.playerHits++
       } else if (e.type === 'player_damage') {
         tel.playerDamageTaken += (e as { damage: number }).damage
+        // metrics v8：开局窗累计（事件属 tick t-1；tick < 600 即局内前 600 tick）。
+        if (t - 1 < DMG_FIRST_WINDOW_TICKS) tel.dmgFirst600 += (e as { damage: number }).damage
       } else if (e.type === 'bullet_fired' && (e as any).bullet?.isPlayer) {
         tel.playerShots++
       } else if (e.type === 'enemy_hit') {
@@ -621,6 +646,11 @@ export function runEvalOne(
         stuckStreak = 0
       }
       prevCell = { col: pcx, row: pcy }
+    }
+    // 危险暴露累加（metrics v8）：与 stuck 检出同刻（本 tick 终态）；玩家阵亡期间不计。
+    if (world.player?.alive) {
+      if (playerHpRatio(world) < DANGER_HP_THRESHOLD) tel.dangerTicks++
+      if (inThreatLane(world)) tel.threatTicks++
     }
     if (t % TELEMETRY_SAMPLE_TICKS === 0) {
       tel.basePressureSum += sampleBasePressure(world)
@@ -775,6 +805,13 @@ export function runEvalOne(
     enemyTotal: tel.enemyTotal,
     playerDeaths: tel.playerDeaths,
     playerLevel: world.playerLevel,
+    // metrics v8 危险暴露（本路径 = 每局终局快照；逐决策步分布走 rollout metrics shard）：
+    // `playerHpRatio` 为终局值（0 = 阵亡），danger/threat 为整局累计 tick，dmgFirst600 为
+    // 开局窗承伤（其 == 0 即「前 600 tick 零承伤」，plan §1 T2 的读数）。
+    playerHpRatio: playerHpRatio(world),
+    dangerTicks: tel.dangerTicks,
+    threatTicks: tel.threatTicks,
+    dmgFirst600: tel.dmgFirst600,
     cellsVisited: tel.cellsVisited.size,
     firstKillTick: tel.firstKillTick ?? null,
     stuckTicks: tel.stuckTicks,
@@ -903,6 +940,10 @@ export function main(argv: string[]): void {
     enemyHits: res.enemyHits,
     playerHits: res.playerHits,
     playerDamageTaken: res.playerDamageTaken,
+    playerHpRatio: +res.playerHpRatio.toFixed(4),
+    dangerTicks: res.dangerTicks,
+    threatTicks: res.threatTicks,
+    dmgFirst600: res.dmgFirst600,
     hitRate: res.playerShots > 0 ? +(res.enemyHits / res.playerShots).toFixed(4) : 0,
     powerUpsCollected: res.powerUpsCollected,
     // T0.4 顶层贯通（§3.3 🟠🔴）：EvalStore / eval_dispatch.record() 直读这些键。

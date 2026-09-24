@@ -250,6 +250,15 @@ interface LabelAgg {
   playerDamageTaken: number
   playerShots: number
   ticks: number
+  /** metrics v8 危险暴露：累计 tick / 开局窗承伤（可选字段，远端旧行的 `0` 不计入
+   *  `clean600` 分母——分母只数“字段存在”的局，不伪造缺失值）。 */
+  dangerTicks: number
+  threatTicks: number
+  dmgFirst600: number
+  /** 有 `dmgFirst600` 字段的局数（clean600 的分母）。 */
+  dmg600Known: number
+  /** `dmgFirst600 === 0` 的局数（「前 600 tick 零承伤」，plan §1 T2）。 */
+  clean600: number
 }
 
 function summarize(
@@ -277,6 +286,11 @@ function summarize(
         playerDamageTaken: 0,
         playerShots: 0,
         ticks: 0,
+        dangerTicks: 0,
+        threatTicks: 0,
+        dmgFirst600: 0,
+        dmg600Known: 0,
+        clean600: 0,
       }
       agg.set(r.label, a)
     }
@@ -291,15 +305,24 @@ function summarize(
     a.playerDamageTaken += r.playerDamageTaken
     a.playerShots += r.playerShots
     a.ticks += r.ticks
+    a.dangerTicks += r.dangerTicks ?? 0
+    a.threatTicks += r.threatTicks ?? 0
+    a.dmgFirst600 += r.dmgFirst600 ?? 0
+    if (r.dmgFirst600 !== undefined) {
+      a.dmg600Known++
+      if (r.dmgFirst600 === 0) a.clean600++
+    }
   }
   const el = ((Date.now() - t0) / 1000).toFixed(1)
   process.stderr.write(
     `\n[eval-course-ckpt] ${rows.length} games in ${el}s (${(rows.length / Number(el) || 0).toFixed(1)} games/s)\n`,
   )
   process.stderr.write(
-    `${'label'.padEnd(28)} pass   kills  hit(敌) beHit(玩家) dmg     shots  avgTicks  max_ticks gameover\n`,
+    `${'label'.padEnd(28)} pass   kills  hit(敌) beHit(玩家) dmg     shots  avgTicks  max_ticks gameover` +
+      ` dmg600  thrTk  dngTk  clean600\n`,
   )
   for (const a of agg.values()) {
+    const per = Math.max(1, a.games)
     process.stderr.write(
       `${a.label.padEnd(28)} ${`${a.passed}/${a.games}`.padEnd(6)} ${String(a.kills).padEnd(6)} ` +
         `${String(a.enemyHits).padEnd(7)} ${String(a.playerHits).padEnd(10)} ` +
@@ -307,7 +330,15 @@ function summarize(
         `${Math.round(a.ticks / Math.max(1, a.games))
           .toString()
           .padEnd(9)} ` +
-        `${String(a.outcomes['max_ticks'] ?? 0).padEnd(9)} ${a.outcomes['gameover'] ?? 0}\n`,
+        `${String(a.outcomes['max_ticks'] ?? 0).padEnd(9)} ${a.outcomes['gameover'] ?? 0} ` +
+        // metrics v8 危险暴露（plan/x20-dodge-avoidance §3 探针表）：均值 + 开局干净局占比。
+        `${Math.round(a.dmgFirst600 / per)
+          .toString()
+          .padEnd(7)} ${Math.round(a.threatTicks / per)
+          .toString()
+          .padEnd(7)} ${Math.round(a.dangerTicks / per)
+          .toString()
+          .padEnd(7)} ${`${a.clean600}/${a.dmg600Known}`}\n`,
     )
   }
   // 参与度账（provenance）：**谁跑的必须自证**。只打汇总表会让“熔断/满负荷静默降本地”

@@ -7,6 +7,35 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §23 metrics v8：危险暴露四列（idx41–44）+「加列 = 全链 lockstep」（2026-09-24，plan/x20-dodge-avoidance §2）
+
+**背景**：audit §6.1 —— 41 列指标里有 `playerLevel` 却没有 hp、有 `pickupDist` 却没有威胁，
+「生存只能事后罚款」。四列 = `playerHpRatio`(41) · `dangerTicks`(42) · `threatTicks`(43) ·
+`dmgFirst600`(44)；**只加观测、不进任何现存公式**；`METRICS_DIM 41→45` · `METRICS_VERSION 7→8`。
+
+**口径冻结（改动 = 改实验，须另立决策）**：`threatTicks` = 累计「在敌方弹道/炮口线上」的 tick
+—— 同轴 ±0.75 格 + ≤6 格 +（弹：逼近 / 车：炮口朝玩家）；常数与 `src/nn/dodge-l0.ts` 同值，
+**不判墙体遮挡**（c20 阶梯关是全空场，audit §7.3；用于其它地形前必须重估）。
+`dangerTicks` 阈值 0.4 与 `goal-mask.ts` 的撤退阈值同源；`dmgFirst600` 窗 = `tick < 600`，
+`player_damage` 事件本就不含致死一击（`SimulationCombat.ts:604-609`）。
+共享实现 `src/nn/danger-metrics.ts`（纯函数、零分配、两导出器同源）；判定在 `sim.tick()`
+之后、与 `stuckTicks` 同刻累加，玩家阵亡期间不计。
+
+**lockstep 七处（漏一处 = 静默错读，成因见 §2 的 P0）**：① TS 行构造 + 两个常量 + 列注释 ·
+② `export-eval-game.ts`（Phase 2 探针走这条链） · ③ `eval-course-ckpt(.ts/-worker.ts)` 逐局行
+透传 + 汇总新增 `dmg600/thrTk/dngTk/clean600` 列 · ④ Python `METRICS` + `METRICS_VERSION` +
+行数断言 45 · ⑤ `reward_validation.DEFAULT_RANGES` 四列（`test_all_metrics_have_envelope_range` 锁） ·
+⑥ golden 重生成（`reward_golden.json` 版本号 + `v7_phi_ts_oracle.json` 宽度同步） ·
+⑦ 测试（行宽/跨语言列名/独立重实现/确定性/口径源码哨兵）。
+
+**验证（实测）**：reward golden **64/64 case 的 reward 逐位不变**、前 41 列逐位不变；
+`v7_phi_ts_oracle` phi **逐位不变**（256 行，前 31 列亦逐位不变）；nn 门禁 ruff+mypy+pytest
+**2279 passed**；`bun run check` 绿。
+
+**后果**：旧 v7 shard 与新版本不兼容（加载期按行宽/版本响亮报错，不静默错读）；
+Phase 2 探针表与训练侧读数从此同口径可比 —— 这是「加列是独立工程」的收益，代价是语料不通用。
+
+---
 ## §22 云端日志节食：碎日志攒成**一行**（2026-09-24，用户报障「log 刷屏几小时把浏览器卡死」）
 
 **症状**：Kaggle / Colab 上一次离线整段训练跑几小时，控制台的日志面板是**流式**的（每多一行
@@ -1182,6 +1211,49 @@ argmax 恒选同一格。
   - **实测读数（非判决段，仅吞吐参考）**：800/800 全远端 · **local=0** · 653.2s / 1.2 games/s；
     来源分布 self=356 · mac=251 · gcs=122 · a96=32 · a95=25 · a97=14；pass 82/800=10.3% ·
     kills 6.27（与首轮逐值相同：同种子确定性 ✓）。**不要拿它当 it96 capability 读数**（段未预注册）。
+
+### §2026-09-24-goalnn-x20-metrics-v8（2026-09-24，plan/x20-dodge-avoidance.plan.md §2）
+
+**决定**：给 metrics 向量永久追加四列（idx41–44）——`playerHpRatio`（hp/maxHp，clamp01，
+与 obs s19 同源）· `dangerTicks`（累计 hpRatio<0.4 的 tick）· `threatTicks`（累计「在敌方弹道/
+炮口线上」的 tick）· `dmgFirst600`（tick<600 累计承伤）。`METRICS_DIM 41→45`、
+`METRICS_VERSION 7→8`。**四列只加观测、不进任何现存公式**（reward 逐位不变）。
+
+**口径冻结点（不是随手写的常数）**：`threatTicks` = 同轴 ±0.75 格 + ≤6 格 +（弹：逼近 /
+车：炮口朝玩家）；6 格与 0.75 格取自 `src/nn/dodge-l0.ts`（同一反应半径，L0 保底层用的是它）；
+**不判墙体遮挡** —— c20 阶梯 4 关是「全空场 + 钢边」（audit §7.3），遮挡在该形态下不存在，
+用于其它地形课程前必须重估。`dangerTicks` 阈值 0.4 与 `goal-mask.ts` 的撤退阈值同源。窗口 600
+与 paired 报告 §5.1 的 `dmgFirst600` 同名同义；`player_damage` 本就不含致死一击
+（`SimulationCombat.ts:604-609`）⇒ 「不含致死那一击」是天然成立的，不是额外逻辑。
+
+**被否决的备选**：① 只放「敌方子弹」不算敌车炮口线（那样只能惩罚「已经在弹道上」，教不了
+「别站在炮口前」；audit 原话是「敌车/敌弹同轴」）；② 判墙体遮挡（每 tick 逐弹 raycast，热路径
+代价 + c20 形态下零收益）；③ 用 `dmgFirst300` 对齐人类「前 300t 100% 零承伤」锚点
+（300t 恰好在人类全清的区间，无区分度；600 落在 500t=89% / 1000t=66% 两个锚点之间，取
+「≥89%」为读法）；④ **不 bump 版本只加列**（下游按 `shape[0]` 推局长 ⇒ 静默错读，§2 的 P0 同源）；
+⑤ 把时长型计数器直接写进奖励（Φ 是逐行差分 ⇒ 等价每 tick 罚款且 Φ 无界，另见 plan §4.3：
+要入公式请用 `playerHpRatio` 的深度型势或封顶）。
+
+**违反后果**：无视 lockstep 任一处（尤其 ⑤/④）⇒ 采集腿零产出或语义静默分叉；
+改口径常数而不更新本锚点 ⇒ Phase 2 基线表与 L2b 腿读数不可比（实验白白重跑一轮）。
+
+### §2026-09-24-goalnn-halt-crash-vs-conservative（2026-09-24，plan/x20-dodge-avoidance.plan.md §4.1）
+
+**决定**：x20 闪避系列的熔断分**两类**，处置不同 —— ① **崩溃类**（日常 `mean < 6.19` /
+`timeout > 5%` / `kl` 连 3 轮 ≥ 0.075）走控制台 `gate-halt-mode=notify`（**只记录，不自动停**）
++ 人工盯盘决策；② **保守陷阱类**（`cellsVisited` / `move%` / `pass` 任一显著下降）
+**保留杀腿权**：立即停腿，不是「记录并继续」。停腿决定与依据写入该课程文件的结算节。
+
+**为什么这么分**：A 腿（`x20-floor`）就是被「变保守」杀掉的（low% 44.0→41.2，门 −7.9pp）——
+保守陷阱是这一系列的最大失败模式，不是噪声；而崩溃类留人看表是用户 2026-09-24 的明确选择。
+**代价（已接受）**：`docs/nn/experiments.md:56` 记的 `notify` 放行形态（起点 8.14/36.0 →
+it10 5.43/50.5 未被停）可能重演；`demo-mix` 的 300 轮白烧同源。
+
+**被否决的备选**：① 全程 `halt`（与用户「人看表」口径冲突）；② 全程 `notify`（等于把
+`x20-noexplore.jsonc:36` 写死的「监控有杀腿权」与 audit 通用护栏一起作废）；③ 只改课程文件注释
+不改机制（`gate_halt_mode` 是**每轮读盘**的热切开关，注释不管用）。
+
+**回收条件**：任一次崩溃类漏停造成 ≥10 轮白烧 ⇒ 该类恢复 `halt`，并另起决策条目记录。
 
 ---
 

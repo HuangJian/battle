@@ -78,6 +78,9 @@ function mkTel(): Telemetry {
     killsByKind: [0, 0, 0, 0],
     hitsByKind: [0, 0, 0, 0],
     stuckTicks: 0,
+    dangerTicks: 0,
+    threatTicks: 0,
+    dmgFirst600: 0,
   }
 }
 

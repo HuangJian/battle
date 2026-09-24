@@ -71,6 +71,12 @@ import { decodeStageGrid } from '../../src/nn/config-stage'
 import { buildModelFromText } from '../../src/nn/infer'
 import { featuresEngine } from '../../src/nn/conv/conv'
 import { dodgeL0 } from '../../src/nn/dodge-l0'
+import {
+  DANGER_HP_THRESHOLD,
+  DMG_FIRST_WINDOW_TICKS,
+  inThreatLane,
+  playerHpRatio,
+} from '../../src/nn/danger-metrics'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import { RNG } from '../../src/utils/RNG'
 import { npyBytes } from '../../src/nn/npy'
@@ -126,12 +132,19 @@ export const RL_SHARD_FILES = [
 // idx40=pickupDist（metrics v7 头牌列，plan/pickup-shaping.plan.md §3）：每决策步玩家
 //   到最近**存活**拾取（powerUp.alive）中心格的曼哈顿距离；无存活拾取或玩家不在场时
 //   填哨兵 `PICKUP_DIST_SENTINEL`（-1，公式侧用 where 归零）。势能法趋近塑形项的量纲。
+// idx41–44=危险暴露四列（metrics v8，plan/x20-dodge-avoidance.plan.md §2）：
+//   playerHpRatio（hp/maxHp，clamp01，与 obs s19 同源）· dangerTicks（累计 hpRatio<0.4 的
+//   tick）· threatTicks（累计「在敌方弹道/炮口线上」的 tick，口径**冻结**在
+//   `src/nn/danger-metrics.ts`）· dmgFirst600（tick<600 的累计承伤；`player_damage`
+//   事件本就不含致死一击，见 `SimulationCombat.ts:604-609`）。与 v7 同规：**不进任何
+//   现存公式**（只加观测、不改公式），但 bump METRICS_VERSION ⇒ 旧 v7 语料不兼容
+//   （加载期按行宽/版本响亮报错，不静默错读）。
 // **本常量必须与 `buildMetricsRow` 的行宽一致** —— 2026-09-12 的 P0：只改了行、没改
 // 这里，`metrics.set(row, i * METRICS_DIM)` 每局越界抛 RangeError，整条采集腿零产出。
 // 导出仅供测试断言行宽（tests/export-rl-rollout-metrics.test.ts）。
-export const METRICS_DIM = 41
-/** metrics v7：puGotOther（idx39）+ pickupDist（idx40）。与 Python METRICS_VERSION 同步。 */
-export const METRICS_VERSION = 7
+export const METRICS_DIM = 45
+/** metrics v8：危险暴露四列（idx41–44）。与 Python METRICS_VERSION 同步。 */
+export const METRICS_VERSION = 8
 /**
  * pickupDist 哨兵：无存活拾取（或玩家不在场）时填此值 —— 与 firstKillTick/clearTick
  * 的 -1 哨兵同构。真实曼哈顿距离恒 ≥0（同格 = 0），-1 不可能与真实值混淆。
@@ -285,6 +298,13 @@ export interface Telemetry {
   hitsByKind: [number, number, number, number]
   /** 连续「原地 + 未命中」tick 数。 */
   stuckTicks: number
+  // ---- metrics v8：危险暴露（plan/x20-dodge-avoidance.plan.md §2）----
+  /** 累计 `hpRatio < DANGER_HP_THRESHOLD` 的 tick（仅玩家存活时计）。 */
+  dangerTicks: number
+  /** 累计「在敌方弹道/炮口线上」的 tick（仅玩家存活时计；口径 = danger-metrics.ts）。 */
+  threatTicks: number
+  /** tick < `DMG_FIRST_WINDOW_TICKS` 的累计承伤（致死一击本就不在 player_damage 里）。 */
+  dmgFirst600: number
 }
 
 function countBaseWall(world: World): number {
@@ -385,6 +405,10 @@ export function buildMetricsRow(t: number, world: World, tel: Telemetry): number
     tel.hitsByKind[3], // 38 hitsArmor
     tel.puGotOther, // 39 puGotOther（v7：四桶外拾取残差，x5⑩ 全零 bug 补桶）
     nearestPickupDist(world), // 40 pickupDist（v7：最近存活拾取中心格曼哈顿距离，哨兵 -1）
+    playerHpRatio(world), // 41 playerHpRatio（v8：hp/maxHp，clamp01；玩家不在场 = 0）
+    tel.dangerTicks, // 42 dangerTicks（v8：累计 hpRatio<0.4 的 tick）
+    tel.threatTicks, // 43 threatTicks（v8：累计在敌方弹道/炮口线上的 tick）
+    tel.dmgFirst600, // 44 dmgFirst600（v8：tick<600 的累计承伤，不含致死一击）
   ]
 }
 
@@ -511,6 +535,10 @@ interface RunResult {
   powerUpsCollected: number
   playerDamageTaken: number
   stuckTicks: number
+  /** metrics v8 危险暴露（每局标量读数；逐决策步分布见 metrics 行）。 */
+  dmgFirst600: number
+  dangerTicks: number
+  threatTicks: number
   enemyTotal: number
   startLives: number
   puGotTank: number
@@ -602,6 +630,9 @@ function runOne(
     killsByKind: [0, 0, 0, 0],
     hitsByKind: [0, 0, 0, 0],
     stuckTicks: 0,
+    dangerTicks: 0,
+    threatTicks: 0,
+    dmgFirst600: 0,
   }
   const seenPuIds = new Set<number>()
   let prevLivePuIds = new Set<number>()
@@ -727,6 +758,8 @@ function runOne(
         tel.playerHits++
       } else if (e.type === 'player_damage') {
         tel.playerDamageTaken += e.damage
+        // metrics v8：开局窗累计（事件属 tick t-1；tick < 600 即局内前 600 tick）。
+        if (t - 1 < DMG_FIRST_WINDOW_TICKS) tel.dmgFirst600 += e.damage
       } else if (e.type === 'bullet_fired' && (e as any).bullet?.isPlayer) {
         tel.playerShots++
       } else if (e.type === 'powerup_collected') {
@@ -776,6 +809,14 @@ function runOne(
       tel.stuckTicks = 0
     }
     prevCell = cur ?? { col: -1, row: -1 }
+
+    // 危险暴露累加（metrics v8）：与 stuckTicks 同刻（`sim.tick()` 之后，代表本 tick 的
+    // 终态）。两条都是零分配纯判定（AGENTS §14.1–14.2）；玩家阵亡期间不计
+    // （「残血」以活着为前提，死亡帧不算暴露）。
+    if (world.player?.alive) {
+      if (playerHpRatio(world) < DANGER_HP_THRESHOLD) tel.dangerTicks++
+      if (inThreatLane(world)) tel.threatTicks++
+    }
 
     if (t % TELEMETRY_SAMPLE_TICKS === 0) {
       tel.basePressureSum += sampleBasePressure(world)
@@ -867,6 +908,9 @@ function runOne(
     powerUpsCollected: tel.powerUpsCollected,
     playerDamageTaken: tel.playerDamageTaken,
     stuckTicks: tel.stuckTicks,
+    dmgFirst600: tel.dmgFirst600,
+    dangerTicks: tel.dangerTicks,
+    threatTicks: tel.threatTicks,
     enemyTotal: tel.enemyTotal,
     startLives: tel.startLives,
     puGotTank: tel.puGotTank,

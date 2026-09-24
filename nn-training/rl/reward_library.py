@@ -111,13 +111,30 @@ METRICS: tuple[str, ...] = (
     "pickupDist",  # 40  ← v7 头牌列：每决策步玩家到最近**存活**拾取中心格的曼哈顿
     #              距离（powerUp.alive；玩家不在场或无存活拾取 = 哨兵 -1）。势能法
     #              趋近塑形项（-wApproach*pickupDist）的量纲，公式侧 where 归零。
+    # ---- metrics v8：危险暴露四列（plan/x20-dodge-avoidance.plan.md §2；
+    #      idx 永久追加在尾部，0–40 列号不动）----
+    "playerHpRatio",  # 41  ← v8：hp/maxHp（clamp01；玩家不在场 = 0，与 obs s19 同源）。
+    #                     冻结点：阈值类塑形项 `max(0, w - playerHpRatio)` 的可用量纲。
+    "dangerTicks",  # 42  ← v8：累计 `hpRatio < 0.4` 的 tick（仅玩家存活时计；
+    #                     阈值与 src/nn/goal-mask.ts 的撒退阈值同源）。
+    #                     ⚠ 时长型计数器：Φ 是**逐行差分**（r[i]=Φ[i+1]−Φ[i]）⇒ 直接
+    #                     用它作奖励 = 每 tick 罚款且 Φ 无界；要入公式请用封顶或
+    #                     改用 playerHpRatio 的深度型势（plan §4.3）。
+    "threatTicks",  # 43  ← v8：累计「在敌方弹道/炮口线上」的 tick（仅玩家存活时计）。
+    #                     口径**冻结**在 src/nn/danger-metrics.ts（同轴 ±0.75 格、逼近
+    #                     弹 / 炮口朝玩家的敌车、≤ 6 格；不判墙体遮挡 —— c20 阶梯关是
+    #                     全空场，见 audit §7.3）。上界同 ticks（0–36000）。
+    "dmgFirst600",  # 44  ← v8：tick < 600 的累计承伤（开局窗）。`player_damage` 事件本就
+    #                     不含致死一击（src/game/SimulationCombat.ts:604-609）⇒ 与
+    #                     paired §5.1 的「不含致死那一击」口径天然一致。
 )
 
 METRIC_INDEX: dict[str, int] = {name: i for i, name in enumerate(METRICS)}
 METRICS_DIM = len(METRICS)
-#: shard manifest 版本：`[N+1,41] f8（idx0–40）` 布局。任何用 `shape[0]` 推 episode 长度的
+#: shard manifest 版本：`[N+1,45] f8（idx0–44）` 布局。任何用 `shape[0]` 推 episode 长度的
 #: 下游在版本不匹配时必须响亮报错，而非静默错读（评审 LC §1.1）。
-METRICS_VERSION = 7
+#: v8（plan/x20-dodge-avoidance §2）：危险暴露四列 —— 旧 v7 语料与本版不兼容。
+METRICS_VERSION = 8
 
 #: 终局 outcome 名（与 TS `manifest.outcome` 同源）；未列出的 terminal 键 = 0。
 OUTCOMES: tuple[str, ...] = ("stage_clear", "lives_exhausted", "timeout", "base_destroyed")
@@ -843,7 +860,8 @@ def assert_no_time_axis_reducers() -> None:
 
 def _self_check() -> None:
     assert_no_time_axis_reducers()
-    assert len(METRICS) == METRICS_DIM == 41, METRICS_DIM  # v7：追加 idx39–40 puGotOther/pickupDist
+    # v8：追加 idx41–44 playerHpRatio/dangerTicks/threatTicks/dmgFirst600
+    assert len(METRICS) == METRICS_DIM == 45, METRICS_DIM
     assert len(set(METRICS)) == METRICS_DIM
 
 

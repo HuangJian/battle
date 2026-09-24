@@ -62,6 +62,12 @@ export interface EvalCourseRow {
   playerShots: number
   powerUpsCollected: number
   score: number
+  /** metrics v8 危险暴露（可选：远端/旧 bundle 的行没有这些字段，汇总侧按缺省处理）。
+   *  `dmgFirst600 === 0` 即「前 600 tick 零承伤」（plan §1 T2 的读数）。 */
+  playerHpRatio?: number
+  dangerTicks?: number
+  threatTicks?: number
+  dmgFirst600?: number
   /** Phase 0 逐敌种画像（T3）：索引 = ENEMY_KIND_ORDER = [basic, fast, power, armor]。
    *  `exposureByKind` = 存活×接战 tick 积分（④ 的归一化分母）。 */
   hitsByKind: number[]
@@ -120,6 +126,10 @@ self.onmessage = (ev: MessageEvent<EvalCourseWorkerPayload>): void => {
         playerShots: res.playerShots,
         powerUpsCollected: res.powerUpsCollected,
         score: res.score,
+        playerHpRatio: res.playerHpRatio,
+        dangerTicks: res.dangerTicks,
+        threatTicks: res.threatTicks,
+        dmgFirst600: res.dmgFirst600,
         hitsByKind: res.hitsByKind,
         killsByKind: res.killsByKind,
         exposureByKind: res.exposureByKind,

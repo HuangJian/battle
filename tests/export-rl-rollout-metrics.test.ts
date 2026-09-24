@@ -56,6 +56,9 @@ function makeTelemetry(over: Partial<Telemetry> = {}): Telemetry {
     killsByKind: [0, 0, 0, 0],
     hitsByKind: [0, 0, 0, 0],
     stuckTicks: 0,
+    dangerTicks: 0,
+    threatTicks: 0,
+    dmgFirst600: 0,
     ...over,
   }
 }
@@ -95,6 +98,43 @@ describe('export-rl-rollout metrics 行宽', () => {
     expect(names[38]).toBe('hitsArmor')
     expect(names[39]).toBe('puGotOther')
     expect(names[40]).toBe('pickupDist')
+    // metrics v8（plan/x20-dodge-avoidance §2）：危险暴露四列，永久追加在尾部
+    expect(names[41]).toBe('playerHpRatio')
+    expect(names[42]).toBe('dangerTicks')
+    expect(names[43]).toBe('threatTicks')
+    expect(names[44]).toBe('dmgFirst600')
+    // 列数变更必须 bump 版本（旧 shard 靠它响亮报错，不静默错读）
+    expect(py).toContain('METRICS_VERSION = 8')
+  })
+
+  it('危险暴露四列写入 idx41–44（metrics v8）', () => {
+    const w = seedWorld(3)
+    w.startGame('hard', 'modern', 0)
+    w.player!.maxHp = 200
+    w.player!.hp = 50 // hpRatio = 0.25
+    const row = buildMetricsRow(
+      0,
+      w,
+      makeTelemetry({ dangerTicks: 7, threatTicks: 9, dmgFirst600: 42 }),
+    )
+    expect(row.length).toBe(METRICS_DIM)
+    // idx41 独立重算（不看生产 helper）：clamp01(hp/maxHp)
+    const p = w.player!
+    expect(row[41]).toBe(Math.max(0, Math.min(1, p.hp / p.maxHp)))
+    expect(row[41]).toBe(0.25)
+    expect(row[42]).toBe(7) // dangerTicks
+    expect(row[43]).toBe(9) // threatTicks
+    expect(row[44]).toBe(42) // dmgFirst600
+  })
+
+  it('无玩家时 idx41 = 0（哨兵语义），且不影响行宽', () => {
+    const w = seedWorld(4) // 未 startGame ⇒ 无玩家
+    const row = buildMetricsRow(0, w, makeTelemetry())
+    expect(row.length).toBe(METRICS_DIM)
+    expect(row[41]).toBe(0)
+    expect(row[42]).toBe(0)
+    expect(row[43]).toBe(0)
+    expect(row[44]).toBe(0)
   })
 
   it('分敌种击杀/命中写入 idx31–38（metrics v6）', () => {
