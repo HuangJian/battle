@@ -858,6 +858,54 @@ CLI 侧传 `_real_run_job`）。引擎里那个 `_real_run_job` **兜底删掉**
 **下一刀**：`hub_server` 余 **887 行** —— 迭代器与两个状态类都已不在里面，只剩**引导链与 HTTP 面**
 （handler / 派发表 / `main` / 启动参数）。这是 S4 的最后一块结构面。
 
+#### 5.3.15 第十六刀（2026-09-24，**已完成**）—— `hub_server` 收口：HTTP 面 / 引导链 / 薄入口
+
+按用户指令「拆 hub_server 剩下的引导链与 HTTP 面，收口 S4」执行。**`remote/hub_server.py`
+887 → 100 行**（累计 3017 → 100，**−97%**），且剩余部分只有 20 行代码。
+
+| 新模块 | 层 | 行 | 内容 |
+|---|---|---|---|
+| `remote/hub/http_face.py` | **L5** | 575 | 来源判定（`CF_SOURCE_HEADER` / `SEND_*` / `_is_ip_literal` / `attributed_source`）+ `HubHandler`（五组路由混入的组装 + 5 个通用助手） |
+| `remote/hub/boot.py` | **L6** | 310 | 引导链：`DISCOVER_SCAN_SEC` · `as_hub` · `make_server` · `main` |
+| `remote/hub_server.py` | **L7** | 100 | 入口（`python -m remote.hub_server`）+ 17 条自别名 re-export + `__all__` 契约 |
+
+**为什么两处而不是一处**：HTTP 面对每个请求负责，引导链对一次进程启动负责 —— 读者、生命周期、
+失败模式（请求级 500 vs 启动即 `exit(1)`）都不同。合成一个模块就得让 argparse 与
+`BaseHTTPRequestHandler` 住同一文件。
+
+**层号先算后切**：`LAYERS` 是拓扑秩 ⇒ 中间插一层会顺反向边涨上去。先模拟后实测 ⇒ **级联只有 3 个**：
+`hub_server` 5→7、`smoke_loopback` / `tunnel_ab_probe` 6→8。顺带修掉账本顶部那段把 `hub_server`
+列在「L4 组装」的**过时散文**（数字有守卫管，散文没人管）。
+
+**门面 = 契约**：入口现在**零定义**（守卫正面断言：无 `def`/`class`，唯一赋值是 `__all__`）——
+比「11 个搬走的成员不在」更硬，它挡的是「顺手补个小函数」。配套对象恒等 + 17 名闭集 +
+不得挂实现 import。
+
+**★ 踩到的坑**：`SEND_TIMEOUT_SEC` 的唯一读者 `HubHandler._bytes` 读的是**所在模块的全局** ⇒
+搬走后对入口 `setattr` 变成**静默空操作**（第十三刀「名字 ≠ 注入点」第二次现身）。守卫机械化：
+裸 `Name` 读 + 全仓恰好一处 patch 且写在实现模块上。
+
+**⚠ 搬走代码会静默废掉四条读源码的守卫**（`_class_methods(HUB_SERVER, …)` → `StopIteration`；
+`test_hub_admin_split` 的「不在 hub_server 里」变成恒真空话；`test_jobs_next_retired::_PROD_FILES`
+扫空壳 ⇒ 退役端点回流不会被发现）。⇒ **搬文件时必须一条条问「谁会按路径读它」。**
+
+**★ 顺手修掉一个跨项目静默回归（第十四刀留下、HEAD 上已经红）**：dashboard 的镜像常量守卫
+`poison-unfreeze.test.ts` 按写死路径读 `hub_server.py` 找 `FREEZE_AFTER_RECLAIMS`，而该常量第十四刀
+已搬到 `hub/store_leases.py` ⇒ 用例失败但**无任何门禁会发现**（nn 侧不跑 dashboard 测试）。改成
+**在 python 源码树里搜定义**。同族盲区：dashboard 监督器哨兵只盯入口文件 ⇒ 改 `hub/http_face.py`
+不会触发重启（第十一刀起如此）；修成 `hubImplementationFiles()` 枚举 `remote/hub/*.py` + 一条新守卫。
+
+守卫 `tests/test_hub_entry_split.py`（**13 例**，含两条功能性：从门面拿 `make_server` 真起服务打通
+`/ping` 且错 token 401 · `as_hub` 幂等）；纯搬对账 **11/11 逐字节等价**、旧 body 零残余；
+反探针 **12/12 命中**。nn 门禁 **2449 → 2462**；mypy **413 → 415**；根 `bun run check` 2120 pass；
+dashboard **1105 pass / 0 fail** + typecheck 绿。
+
+> 决策 → `DECISIONS.md` §2026-09-24-goalnn-hub-entry-split；全文 → `engineering.md` §23「第十六刀」。
+
+**S4 到此收口**：`remote/` 的四个神模块（`worker` / `hub_server` / `loop_steps` / `TrainingSteps`）
+里前两个已拆完并收口（第十三·十六刀），第四个见 §5.2。余下可做的是**同一套手法**在
+`rl/` 侧继续（`TrainingSteps` 本体 952 行 / 20 方法，切法 = 按一条真实调用链切）。
+
 ### 5.4 本轮**不做**（已核，刻意保留）
 
 - `remote/notebook_boot.py` ↔ `remote/offline_boot.py` 的孪生助手（`_build_opener` /

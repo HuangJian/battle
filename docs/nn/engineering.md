@@ -1047,14 +1047,110 @@ class _JobStore(LedgerMixin, WireMeterMixin, SchedulingMixin, LeaseMixin,
 > 第二个实参。**反探针自身的锚点也要断言命中次数**，否则「没红」与「没改」（锚点写错）分不开 ——
 > 本脚本第一版正是这么骗过自己的：`probe_s15` 现在每条都 `assert count(old) == 1`。
 
+### 第十六刀（2026-09-24）：`hub_server` 收口 —— HTTP 面 / 引导链 / 薄入口三件
+
+`remote/hub_server.py` **887 → 100 行**（累计 **3017 → 100，−97%**）。这一刀之后它只剩 **20 行代码**，
+其余是 docstring 与门面：
+
+| 新模块 | 层 | 行 | 内容 |
+|---|---|---|---|
+| `hub/http_face.py` | **L5** | 575 | 来源判定（`CF_SOURCE_HEADER` / `SEND_*` / `_is_ip_literal` / `attributed_source`）+ `HubHandler`（五组路由混入的组装 + 通用助手 `_auth_ok` / `_json` / `_bytes` / `_job_or_404` …） |
+| `hub/boot.py` | **L6** | 310 | 引导链：`DISCOVER_SCAN_SEC` · `as_hub` · `make_server` · `main`（argparse + 单实例锁 + 端口守卫 + 发现线程 + push 派发） |
+| `hub_server.py` | **L7** | 100 | 入口与门面：`python -m remote.hub_server` + 17 条自别名 re-export |
+
+**为什么是两处而不是一处**：HTTP 面对**每个请求**负责，引导链对**一次进程启动**负责 —— 它们的读者、
+生命周期与失败模式（请求级 500 vs 启动即 `exit(1)`）完全不同。合成一个模块就得让 argparse 与
+`BaseHTTPRequestHandler` 住同一个文件里。
+
+#### ★ 层号是**先算后切**的：级联只有 3 个模块
+
+`LAYERS` 是拓扑秩，所以「在中间插一层」会顺着反向边一路涨上去。切之前先模拟：
+
+| 模块 | 之前 | 之后 |
+|---|---|---|
+| `hub.http_face` | — | **L5**（= `1 + max(hub.result L4)`，与 `worker` 同层：两个宿主各组装自己的 L4 执行单元） |
+| `hub.boot` | — | **L6**（站在 http_face 上；与 `run_loop` / `worker_server` 同层） |
+| `hub_server` | L5 | **L7** |
+| `smoke_loopback` / `tunnel_ab_probe` | L6 | **L8**（都 import 入口起真服务） |
+
+**涨层的只有 3 个**（`audit_s16b.py` 先算、切完实测复核）。顺带修掉账本顶部那段**过时的散文**
+（它把 `hub_server` 列在「L4 组装」里，而字典早已是 5 —— 数字是守卫在管的，散文没人管）。
+
+#### ★ 这一刀踩到的真坑：`SEND_TIMEOUT_SEC` 的 patch 变成静默空操作
+
+`SEND_TIMEOUT_SEC` 的唯一读者是 `HubHandler._bytes`，它读的是**所在模块的全局**。搬走之后
+`remote.hub_server.SEND_TIMEOUT_SEC` 只是同一个对象的 re-export ⇒
+`monkeypatch.setattr("remote.hub_server.SEND_TIMEOUT_SEC", 0.5)` = **名字还在、没人读它**
+（第十三刀「名字 ≠ 注入点」的第二次现身）。`tests/test_body_transfer_guard.py` 的
+「对端半开必须在超时内断开并打印」当场变红（hub 一个字都没打）—— 这类失效**只在真跑时可见**，
+所以守卫里专门有一条把它机械化：
+
+* `HubHandler._bytes` 里 `SEND_TIMEOUT_SEC` 必须是**裸 `Name`**（吃本模块全局）；写成属性访问即红；
+* 全仓**恰好一处** `setattr(…, "…SEND_TIMEOUT_SEC")`，且必须写在**实现所在模块**上（AST 判据）。
+
+#### ★ 第二处结构创新：薄入口的 `__all__` 就是契约
+
+`hub_server.py` 现在**零定义**（没有 `def` / `class`，唯一的赋值是 `__all__`）。守卫正面断言这条，
+比「11 个搬走的成员不在」更硬 —— 它挡的是「顺手在入口里补个小函数」（入口一旦重新长出实现，
+「薄入口」就退化成第二个组装点，而层号是看不出「只长了一个小函数」的）。
+
+配套三条：① `hs.X is 新家.X` 逐条对象恒等（同名副本会让 `hs.X = …` 静默失效）；
+② `__all__` **恰好**是那份 17 个名字的闭集（少一条 = 某个测试 ImportError 才知道；多一条 = 死门面）；
+③ 入口不得挂实现用的 import（`argparse` / `ipaddress` / `http.server` / `_instance_lock` …）。
+
+#### ⚠ 搬走代码会**静默**废掉四条读源码的守卫（本仓第三/四/五次撞上）
+
+搬完之后「按路径读 `remote/hub_server.py` 取类体/扫文本」的守卫读到的是**只剩 re-export 的空壳**，
+于是断言变成对空气下判据 —— 而它们**都是绿的**：
+
+| 守卫 | 症状 | 修法 |
+|---|---|---|
+| `test_hub_routes_split` · `test_hub_admin_split` | `_class_methods(HUB_SERVER, "HubHandler")` → `StopIteration` | 改读 `hub/http_face.py`（响亮） |
+| `test_hub_admin_split::…net_probe_support_names…` | 「名字不在 `hub_server` 里」恒真 = 空话 | 改成「不在入口**也不在** http_face」 |
+| `test_jobs_next_retired::_PROD_FILES` | 退役端点扫描扫一个空壳 ⇒ 有人把 `/jobs/next` 加回路由表**不会被发现** | 把 `hub/http_face.py` 加进扫描集 |
+| 本守卫自己的 docstring | 里面写着 `setattr("remote.hub_server.SEND_TIMEOUT_SEC", 0.5)`（讲解用）⇒ 被 `test_subproc_util` 的 spawn marker / 被本文件的 patch 判据当成**真代码** | 判据改 **AST**；取名字改 `hs.__name__` |
+
+最后一条值得单记：`test_hub_entry_split.py` 里那条「patch 点必须写在实现模块上」的守卫，第一版是
+**逐行找子串**，于是被自己 docstring 里那段「这个坑长什么样」的原文判红 —— 与
+`test_subproc_util`（spawn marker）和两处 prefix 匹配同族。**判据读源码文本时，要连自己的解释一起想**。
+
+#### 验证
+
+* 守卫 `tests/test_hub_entry_split.py` **13 例**：定义唯一（双向）· 入口零实现 · `__main__` 落到真
+  `main` · 门面对象恒等 + 闭集 · 入口不挂实现 import · **读者与 patch 点同源** · 层号算术 ·
+  两个新模块只向下 import · **两条功能性**（从门面拿 `make_server` 真起服务打通 `/ping` + 错 token 401 ·
+  `as_hub` 幂等）· 入口形状（无副作用）。
+* 纯搬对账：AST 逐成员比对 ⇒ **11/11 逐字节等价**（含 411 行的 `HubHandler` 与 202 行的 `main`）；
+  旧 body **零残余**；docstring 只改首行（59 行里唯一改动）。
+* 反探针 **12/12 命中**（实现搬回入口 · 入口长小函数 · 门面少一条 · 门面被同名副本顶替 ·
+  入口挂回实现 import · `_bytes` 改用属性读 · patch 写回入口 · 入口层号标错 · 引导链反向 import ·
+  `__main__` 调错东西 · 组装链断 · 入口自己起服务）。
+* nn 门禁 **2449 → 2462 passed / 3 skipped**；mypy **413 → 415** 源文件；根 `bun run check`
+  2120 pass / 0 fail；dashboard `bun run test` **1105 pass / 0 fail** + `bun run typecheck` 绿。
+
+#### ★ 顺手修掉一个**跨项目**的静默回归（第十四刀留下、在 HEAD 上已经是红的）
+
+dashboard 的镜像常量守卫 `poison-unfreeze.test.ts` 读 `nn-training/remote/hub_server.py` 的**文本**找
+`FREEZE_AFTER_RECLAIMS = …`。第十四刀把这个常量搬到 `hub/store_leases.py`（入口只留同名 re-export），
+于是该用例**当场失败** —— 而**没有任何门禁会发现**：nn 侧的 pre-commit 不会跑 dashboard 的测试，
+dashboard 侧只在动过 `dashboard/**` 时才跑。修法不是「换一个写死的路径」（下次搬家再断一次），
+而是**在 python 源码树里搜定义**（搬家不会红，只有常量真的消失才红）。
+
+同一类盲区还有 dashboard 的**监督器哨兵**：`pySentinels(HUB_SERVER_ENTRY)` 只盯入口那一个文件，
+而入口现在只有 re-export ⇒ **改 `hub/http_face.py` 不会触发重启**，监督器会让进程继续跑旧代码
+（第十一刀起就已经这样了：`hub/schedule.py` 等一直不在哨兵里）。修成
+`hubImplementationFiles()`（枚举 `remote/hub/*.py`），并加一条 dashboard 守卫钉住「哨兵覆盖全部实现文件」。
+
+> 决策 → `DECISIONS.md` §2026-09-24-goalnn-hub-entry-split。
+
 ### 未做完（S4 余下）
 
 `remote/` 内部**已零环**（见「拆环」节），`worker.py` 的拆分面**已收口**：只剩三个宿主函数
 （`run_job` 300 / `worker_loop` 197 / `main` 127）+ 287 行转发门面，且「为什么不继续切」有明文理由
 （见第十三刀）。`_JobStore`（拆状态）也已切完（第十四刀）。`_HubQueue`（多课程调度面，
 1033 行 / 76 方法）也已拆完（第十五刀，含把 `_AuthGuard` / `_JobStore` 两个类搬出宿主）。
-S4 余下是纯结构工作：`remote/hub_server.py` 已从 **3017 → 887 行**（累计 **−71%**），剩下的
-**只有引导链与 HTTP 面**（handler / 派发表 / `main`）—— 迭代器与状态类都已不在里面。
+**hub_server 的收口（第十六刀）也已完成**：`remote/hub_server.py` **3017 → 100 行**（累计 **−97%**），
+HTTP 面（`hub/http_face.py` L5）与引导链（`hub/boot.py` L6）分开，入口退成薄门面（L7）。
 设计见 `plan/nn-training-refactor.md` §5.3。
 `TrainingSteps` 本体还剩 952 行 / 20 方法（切法是「按一条真实调用链切」，不是按行数等分）。
 

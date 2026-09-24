@@ -2826,3 +2826,44 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
   而是锚点写错。脚本现每条 `assert count(old) == 1`。
 —— 全文（八模块表 / 三档签名 / 声明面推论链 / `__init__` 不拆的两条理由 / 逐字节对账）→
 `docs/nn/engineering.md` §23「第十五刀」
+
+## §2026-09-24-goalnn-hub-entry-split（2026-09-24，用户指令「拆 hub_server 剩下的引导链与 HTTP 面，收口 S4」）
+
+收口 `remote/hub_server.py`：**887 → 100 行**（累计 3017 → 100，**−97%**），且里面只剩 20 行代码。
+
+- **三件东西，两个新家**：`hub/http_face.py`（**L5**，575 行：来源判定 + `HubHandler` + 通用助手）·
+  `hub/boot.py`（**L6**，310 行：`as_hub` / `make_server` / `main` + `DISCOVER_SCAN_SEC`）·
+  `hub_server.py`（**L7**，100 行：入口 + 17 条自别名 re-export）。理由：HTTP 面对**每个请求**负责、
+  引导链对**一次进程启动**负责 —— 读者/生命周期/失败模式（请求级 500 vs 启动即 exit(1)）都不同。
+- **层号先算后切**：`LAYERS` 是拓扑秩 ⇒ 在中间插一层会顺反向边涨上去。`audit_s16b.py` 先模拟、
+  切完实测复核 ⇒ **级联只有 3 个模块**：`hub_server` 5→7 · `smoke_loopback` / `tunnel_ab_probe` 6→8。
+  顺带修掉账本顶部把 `hub_server` 列在「L4 组装」的**过时散文**（数字有守卫管，散文没人管）。
+- **★ 薄入口的 `__all__` 就是契约**：`hub_server` 现在**零定义**（无 `def`/`class`，唯一赋值是
+  `__all__`）。守卫正面断言这条 —— 它挡的是「顺手在入口补个小函数」，而层号看不出「只长了一个小函数」。
+  配套：`hs.X is 新家.X` 逐条对象恒等 · `__all__` 恰好 17 名闭集 · 入口不得挂实现用 import。
+- **★ 踩到的真坑：`SEND_TIMEOUT_SEC` 的 patch 变成静默空操作**。它唯一的读者是
+  `HubHandler._bytes`，读的是**所在模块的全局**；搬走后入口上那个只是同一个对象的 re-export ⇒
+  `setattr("remote.hub_server.SEND_TIMEOUT_SEC", …)` 名字还在、没人读它（第十三刀「名字 ≠ 注入点」
+  第二次现身，由 `test_body_transfer_guard` 真跑时当场报出）。守卫两条机械化：`_bytes` 里必须是**裸
+  `Name`** + 全仓**恰好一处** patch 且写在**实现所在模块**上（AST 判据）。
+- **⚠ 搬走代码会静默废掉四条读源码的守卫**（本仓第三/四/五次撞上）：`_class_methods(HUB_SERVER,
+  "HubHandler")` → `StopIteration`（改读 http_face）；`test_hub_admin_split` 的「名字不在 hub_server 里」
+  变成恒真空话（改成「不在入口也不在 http_face」）；`test_jobs_next_retired::_PROD_FILES` 扫一个只剩
+  re-export 的空壳 ⇒ 有人把退役端点加回路由表**不会被发现**（把 http_face 加进扫描集）。
+  ⇒ **搬文件时必须一条条问「谁会按路径读它」。**
+- **★ 顺手修掉一个跨项目静默回归（第十四刀留下、HEAD 上已经红）**：dashboard 的镜像常量守卫
+  `poison-unfreeze.test.ts` 按写死路径读 `hub_server.py` 找 `FREEZE_AFTER_RECLAIMS`，第十四刀把那常量搬到
+  `hub/store_leases.py` ⇒ 该用例当场失败，**但没有任何门禁会发现**（nn 侧 pre-commit 不跑 dashboard 测试；
+  dashboard 侧只在动过 `dashboard/**` 才跑）。修法不是换一个写死路径，而是**在 python 源码树里搜定义**
+  （搬家不再红，常量真消失才红）。同一类盲区：dashboard 监督器哨兵只盯入口那一个文件 ⇒ **改
+  `hub/http_face.py` 不会触发重启**（第十一刀起就这样，`hub/schedule.py` 等一直不在哨兵里）；修成
+  `hubImplementationFiles()` 枚举 `remote/hub/*.py`，并加 dashboard 守卫钉住「哨兵覆盖全部实现文件」。
+- **纯搬对账**：AST 逐成员 ⇒ **11/11 逐字节等价**（含 411 行 `HubHandler` + 202 行 `main`）；
+  旧 body 零残余；docstring 59 行只改首行。
+- **违反后果**：实现搬回入口 / 入口长小函数 / 门面少一条 / 门面被同名副本顶替 / 入口挂回实现 import /
+  `_bytes` 改用属性读 / patch 写回入口 / 入口层号标错 / 引导链反向 import / `__main__` 调错东西 /
+  组装链断 / 入口自己起服务 —— 十二类都在**提交时**红（新守卫 13 例 + 反探针 **12/12** 命中）。
+- **门禁**：nn **2449 → 2462 passed / 3 skipped**；mypy **413 → 415**；根 `bun run check` 2120 pass /
+  0 fail；dashboard `bun run test` **1105 pass / 0 fail** + `typecheck` 绿；`check-decisions` 通过。
+—— 全文（层号级联表 / patch 同源的两条机械判据 / 四条读源码守卫的迁移表 / 跨项目盲区）→
+`docs/nn/engineering.md` §23「第十六刀」

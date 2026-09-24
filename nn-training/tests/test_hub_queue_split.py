@@ -77,6 +77,8 @@ from tests.helpers import remote_dag as dag
 NN_ROOT = ROOT
 HUB_DIR = NN_ROOT / "remote" / "hub"
 HUB_SERVER = NN_ROOT / "remote" / "hub_server.py"
+#: 引导链的家（S4 第十六刀）：`main` 的 argparse 缺省值用到的那个常量住这里。
+BOOT = HUB_DIR / "boot.py"
 QUEUE_MOD = HUB_DIR / "queue.py"
 
 #: 域 -> （混入类, 该域实现的成员）。七个域的并集**恰好**是拆分前 `_HubQueue` 的 75 个域成员
@@ -831,25 +833,31 @@ def test_the_mixins_never_import_each_other_nor_the_host() -> None:
 
 def test_the_layers_match_the_ledger() -> None:
     """层号是算出来的：七个混入 L3（站在 `queue_peer`(L1) + `hub.store`(L2) 上），
-    组合类 L4，组装模块 L5 —— 而 `smoke_loopback` 是 L6，它 import 组装模块，必须仍严格向下。"""
+    组合类 L4，HTTP 面（组装 `HubHandler` 的那层）L5，而 `hub_server` 这个**入口**在 L7
+    （S4 第十六刀把它收口成薄门面，它下面还有 `hub.boot`(L6)）——`smoke_loopback` 站在入口上
+    ⇒ 随迁 L8，必须仍严格向下。"""
     for domain in DOMAINS:
         assert dag.LAYERS[f"remote.hub.{domain}"] == 3, domain
     assert dag.LAYERS["remote.hub.queue_peer"] == 1
     assert dag.LAYERS["remote.hub.store"] == 2
     assert dag.LAYERS["remote.hub.queue"] == 4
-    assert dag.LAYERS[hs.__name__] == 5
-    assert dag.LAYERS["remote.smoke_loopback"] == 6
+    assert dag.LAYERS["remote.hub.http_face"] == 5
+    assert dag.LAYERS["remote.hub.boot"] == 6
+    assert dag.LAYERS[hs.__name__] == 7
+    assert dag.LAYERS["remote.smoke_loopback"] == 8
 
 
 def test_the_sentinel_moved_with_its_only_reader() -> None:
-    """`_MISSING_ROOT` 的唯一读者是 `_job_dir` ⇒ 它随簇搬进 `queue_observe`，宿主不再留一份。"""
+    """`_MISSING_ROOT` 的唯一读者是 `_job_dir` ⇒ 它随簇搬进 `queue_observe`，入口不再留一份。"""
     assert observe_mix._MISSING_ROOT.name == "hub-queue-missing"
     assert not hasattr(hs, "_MISSING_ROOT"), "hub_server 还留着一份 _MISSING_ROOT（搬漏）"
     assert "_MISSING_ROOT = " not in HUB_SERVER.read_text(encoding="utf-8")
-    # `DISCOVER_SCAN_SEC`（后台兜底线程的节拍）只被 `main` 的 argparse 缺省值用 ⇒ **留在宿主**，
-    # 与发现簇的 `DISCOVER_SCAN_MIN_SEC`（派发路径上的最小间隔闸）是两件事。
+    # `DISCOVER_SCAN_SEC`（后台兜底线程的节拍）只被 `main` 的 argparse 缺省值用 ⇒ 随引导链住
+    # `hub/boot.py`（S4 第十六刀；本刀之前住 `hub_server`），与发现簇的 `DISCOVER_SCAN_MIN_SEC`
+    # （派发路径上的最小间隔闸）仍是两件事。
     assert hs.DISCOVER_SCAN_SEC == 5.0
-    assert "DISCOVER_SCAN_SEC = " in HUB_SERVER.read_text(encoding="utf-8")
+    assert "DISCOVER_SCAN_SEC = " in BOOT.read_text(encoding="utf-8")
+    assert "DISCOVER_SCAN_SEC = " not in HUB_SERVER.read_text(encoding="utf-8")
 
 
 # ────────────── ⑦ ★ 功能性（跳出结构，真的跑） ──────────────

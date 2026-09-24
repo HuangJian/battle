@@ -14,7 +14,7 @@
  */
 
 import { afterAll, describe, expect, it } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
 
@@ -41,15 +41,34 @@ import { FROZEN_RECLAIMS, frozenJobs, parseFrozenBlock, parseHubQueue } from '..
 // ────────────────────────── ⓪ 镜像常量（权威在 python；这里防漂） ──────────────────────────
 
 describe('镜像常量（权威在 python）', () => {
-  it('面板说的阈值 = `remote/hub_server.py::FREEZE_AFTER_RECLAIMS`', () => {
+  it('面板说的阈值 = python 里 `FREEZE_AFTER_RECLAIMS` 的定义值', () => {
     // 源码级核对：不 import python，只读文本（同 `kickstart-receipt.test.ts` 的做法）。
-    const src = readFileSync(
-      path.join(REPO_ROOT, 'nn-training', 'remote', 'hub_server.py'),
-      'utf-8',
-    )
-    const m = src.match(/^FREEZE_AFTER_RECLAIMS\s*=\s*([0-9]+)/m)
-    expect(m, 'FREEZE_AFTER_RECLAIMS 未在 hub_server.py 里找到（改名了？同步镜像常量）')
-    expect(FROZEN_RECLAIMS).toBe(Number(m![1]))
+    //
+    // ⚠ 这里曾写死 `remote/hub_server.py`：S4 第十四刀把常量随租约簇搬到 `hub/store_leases.py`
+    //   （hub_server 只留同名 re-export），于是本用例静默变成「找不到常量」——**跨项目布局耦合
+    //   的守卫没有任何门禁能自动发现**（nn 侧的门禁不会跑 dashboard 的测试）。现改成**在
+    //   python 源码树里搜定义**：搬家不会让它变红，只有常量真的消失才会（而且会响亮地报出
+    //   它找了哪些文件）。
+    const dirs = ['nn-training/remote', 'nn-training/remote/hub', 'nn-training/common']
+    const hits: { file: string; value: number }[] = []
+    for (const rel of dirs) {
+      for (const f of readdirSync(path.join(REPO_ROOT, rel))) {
+        if (!f.endsWith('.py')) continue
+        const file = `${rel}/${f}`
+        const m = readFileSync(path.join(REPO_ROOT, file), 'utf-8').match(
+          /^FREEZE_AFTER_RECLAIMS\s*=\s*([0-9]+)/m,
+        )
+        if (m) hits.push({ file, value: Number(m[1]) })
+      }
+    }
+    expect(
+      hits.length,
+      `FREEZE_AFTER_RECLAIMS 在 ${dirs.join(' / ')} 下找不到唯一一份定义（改名了？）`,
+    ).toBe(1)
+    expect(
+      FROZEN_RECLAIMS,
+      `面板镜像常量与 ${hits[0]!.file} 的定义值漂了（同步 FROZEN_RECLAIMS）`,
+    ).toBe(hits[0]!.value)
   })
 })
 

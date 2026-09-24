@@ -25,6 +25,10 @@ from tests.helpers.hub_poll import hub_poll
 #: 生产代码（非测试）搜索根：这些一律不得再引用退役端点。
 #: `protocol.py` 2026-09-23 下沉到 `common/`（S3 断 rl↔remote 循环）——路径跟着走。
 _PROD_FILES = [
+    # S4 第十六刀：路由表（`/jobs/...` 的派发）从 `hub_server.py` 搬到 `hub/http_face.py` ——
+    # 这条扫描必须**跟着代码走**，否则搬完就变成「扫一个只剩 re-export 的空壳」，
+    # 而且会**静默地**放过一个把退役端点加回路由表的人（本仓第三次撞上这类盲区）。
+    ROOT / "remote" / "hub" / "http_face.py",
     ROOT / "remote" / "hub_server.py",
     ROOT / "remote" / "worker.py",
     ROOT / "remote" / "worker_server.py",

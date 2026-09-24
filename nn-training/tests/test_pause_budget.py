@@ -18,7 +18,11 @@ if str(ROOT) not in sys.path:
 
 import remote.worker as W
 from remote.bulk_sched import PAUSE_BUDGET_SEC
-from remote.hub_server import SEND_TIMEOUT_SEC
+
+# 常量从**它住的地方**取（S4 第十六刀把它随 `HubHandler._bytes` 搬到 `hub/http_face.py`）。
+# `remote.hub_server.SEND_TIMEOUT_SEC` 仍是同一个对象的 re-export（名字是契约），但它是**读**的
+# 入口而非 patch 点 —— 这里要比的就是那个值本身，所以从实现侧取。
+from remote.hub.http_face import SEND_TIMEOUT_SEC
 
 
 def test_pause_budget_is_small_in_absolute_terms() -> None:

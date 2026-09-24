@@ -174,8 +174,14 @@ def test_hub_big_send_is_bounded_and_loud(tmp_path, monkeypatch, capfd) -> None:
 
     修复前：`wfile.write()` 永久阻塞 ⇒ handler 线程永久卡在写里、日志一个字没有
     （= 云机侧「claim 后零日志」的服务器半边）。
+
+    ⚠ patch 点是**实现所在的模块**（S4 第十六刀）：`SEND_TIMEOUT_SEC` 的唯一读者是
+    `hub/http_face.py::HubHandler._bytes`，它在函数体里读的是 **http_face 的模块全局**。
+    而 `remote.hub_server.SEND_TIMEOUT_SEC` 只是同一个对象的 re-export ⇒ 对它 patch 是
+    **静默空操作**（名字还在、没人读它）：本用例第一版正是这么挂的（hub 一个字都没打）。
+    `tests/test_hub_entry_split.py` 把「谁读它」机械钉住。
     """
-    monkeypatch.setattr("remote.hub_server.SEND_TIMEOUT_SEC", 0.5)
+    monkeypatch.setattr("remote.hub.http_face.SEND_TIMEOUT_SEC", 0.5)
     payload = b"P" * (4 * 1024 * 1024)
     srv, port, jid = _payload_server(tmp_path, payload)
     try:

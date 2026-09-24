@@ -14,13 +14,17 @@ HubHandler(AdminRoutes, ScheduleRoutes, ResultRoutes, BlobRoutes, OfflineRoutes,
     offline    离线段：task-pack · resume · resume_blob · artifact · result
 ```
 
-## 为什么 `result` 那组让 `hub_server` 升到 L5
+## 为什么 `result` 那组让 handler 升到 L5
 
 `_post_result` 走 `remote.push_dispatch.accept_result`——「推模式与拉模式必须用**同一个**校验
 函数」这条纪律（一份对不上账的结果被静默落盘成一轮看起来正常的训练，就是那条纪律要挡的事）。
-于是 `hub.result` 的拓扑秩是 **4**，宿主 `hub_server` 被迫升到 **5**（与 `remote.worker` 对称：
-两个宿主各组装自己的 L4 执行单元），`smoke_loopback` / `tunnel_ab_probe` 随迁到 6。账本的秩断言
-会把标错层的当场报出来——这不是口味问题。
+于是 `hub.result` 的拓扑秩是 **4**，handler 被迫升到 **5**（与 `remote.worker` 对称：
+两个宿主各组装自己的 L4 执行单元）。
+
+> **S4 第十六刀之后**：这个「handler 层」有了自己的模块 `hub/http_face.py`（L5），而 `hub_server`
+> 退成薄入口门面（L7，连 `smoke_loopback` / `tunnel_ab_probe` 一起到 L8）—— 本文件因此改成读
+> `HTTP_FACE` 取 `HubHandler` 的类体，层号断言也同步成 5 / 7。账本的秩断言会把标错层的当场
+> 报出来——这不是口味问题。
 
 ## Phase B：把重复了 3–5 遍的形状收成 5 个通用助手
 
@@ -36,7 +40,8 @@ HubHandler(AdminRoutes, ScheduleRoutes, ResultRoutes, BlobRoutes, OfflineRoutes,
 
 1. **定义唯一**：25 个方法住混入，`HubHandler` 不得再定义任何一个（组合类只能是组合类）；
 2. **接线正确**：`HubHandler.X is Mixin.X`（同一函数对象——MRO 真的把它们接上了）；
-3. **★ 助手唯一实现 + 活着**：5 个助手只住 `hub_server`，且各自都有调用点（死助手 = 绿着的空话）；
+3. **★ 助手唯一实现 + 活着**：5 个助手只住 `HubHandler`（S4 第十六刀起 = `hub/http_face.py` =
+   它自己就在 L5），且各自都有调用点（死助手 = 绿着的空话）；
 4. **★ 漂移警报**：混入里**不许**再出现那四种被收掉的内联形状（谁再抄一遍就红）；
 5. **鉴权只在没有 job 的地方内联**（`_get_peek` / `_post_priority` 等）——计数与位置都钉住；
 6. **依赖方向**：四组都零上向依赖，且 `hub/` 包不 import 组装模块；
@@ -62,6 +67,10 @@ from tests.helpers import remote_dag as dag
 NN_ROOT = Path(__file__).resolve().parent.parent
 HUB_DIR = NN_ROOT / "remote" / "hub"
 HUB_SERVER = NN_ROOT / "remote" / "hub_server.py"
+#: ★ `HubHandler` 的**真家**（S4 第十六刀从 `hub_server.py` 搬出）。本文件里凡是「读 `HubHandler`
+#: 的类体 / 看它挂着哪些 import」的地方都必须读**这里** —— 读 `HUB_SERVER` 会读到薄入口（只
+#: 剩 re-export），于是断言变成「对空气下判据」（第十六刀前它就是那么挂的：`StopIteration`）。
+HTTP_FACE = HUB_DIR / "http_face.py"
 
 MIXINS: dict[str, tuple[type, tuple[str, ...]]] = {
     "schedule": (
@@ -154,7 +163,7 @@ def _code(path: Path) -> str:
 
 def test_every_route_method_lives_in_its_mixin() -> None:
     """★ 25 个路由方法**定义**在混入里；`HubHandler` 不得再定义任何一个。"""
-    defined_here = _class_methods(HUB_SERVER, "HubHandler")
+    defined_here = _class_methods(HTTP_FACE, "HubHandler")
     for mod, (cls, methods) in MIXINS.items():
         in_mixin = _class_methods(HUB_DIR / f"{mod}.py", cls.__name__)
         missing = sorted(set(methods) - in_mixin)
@@ -171,10 +180,14 @@ def test_the_mixins_are_actually_wired_into_the_handler() -> None:
             assert getattr(hs.HubHandler, m) is getattr(cls, m), f"{mod}::{m} 没接上 HubHandler"
 
 
-def test_hub_server_no_longer_needs_the_route_only_imports() -> None:
-    """搬走之后，`hub_server` 不该还挂着只有路由用过的协议名（否则是搬漏的痕迹）。"""
+def test_the_http_face_no_longer_needs_the_route_only_imports() -> None:
+    """搬走之后，handler 那一侧不该还挂着只有路由组用过的协议名（否则是搬漏的痕迹）。
+
+    S4 第十六刀之前这条读 `hub_server.py`；现在 `HubHandler` 住 `hub/http_face.py` ⇒ 读那里
+    —— 否则它测的就只是「薄入口没有 protocol import」（那条永远为真，等于空话）。
+    """
     # 这几个名字现在只被路由组读（实现搬到 common.protocol 的常量不在此列）。
-    src = HUB_SERVER.read_text(encoding="utf-8")
+    src = HTTP_FACE.read_text(encoding="utf-8")
     for name in (
         "FAIL_BODY_MAX",
         "WIRE_V2_MAGIC",
@@ -193,10 +206,10 @@ def test_hub_server_no_longer_needs_the_route_only_imports() -> None:
 
 
 def test_the_shared_helpers_have_exactly_one_implementation() -> None:
-    """★ 5 个助手只住 `hub_server`：混入里不许再实现一遍（那正是这一刀要消掉的东西）。"""
-    root_defs = _class_methods(HUB_SERVER, "HubHandler")
+    """★ 5 个助手只住 `HubHandler`（S4 第十六刀起 = `hub/http_face.py`）：混入里不许再实现一遍。"""
+    root_defs = _class_methods(HTTP_FACE, "HubHandler")
     for name in SHARED_HELPERS:
-        assert name in root_defs, f"remote/hub_server.HubHandler 少了助手 {name}"
+        assert name in root_defs, f"hub/http_face.py::HubHandler 少了助手 {name}"
         for mod in MIXINS:
             assert name not in _class_methods(HUB_DIR / f"{mod}.py", MIXINS[mod][0].__name__), (
                 f"{mod}.py 又实现了一份 {name}"
@@ -276,8 +289,10 @@ def test_the_ledger_puts_the_handler_above_all_mixins() -> None:
     # `result` 那一组的秩是**算出来的**：`accept_result` 在 L3 ⇒ 它只能 L4，宿主因此 L5。
     assert layers["remote.hub.result"] == 4
     assert layers["remote.push_dispatch"] < layers["remote.hub.result"] < server
-    # 与 worker 对称：两个宿主同层（各组装自己的 L4 执行单元）。
-    assert server == layers[_ledger_key("worker")] == 5
+    # S4 第十六刀之后 `HubHandler` 住 `hub/http_face.py`（L5）：它才是「组装五组混入」的那一层，
+    # 与 `worker`（作业壳）同层；而 `hub_server` 这个**入口**在它上面两格（L7）。
+    assert layers["remote.hub.http_face"] == layers[_ledger_key("worker")] == 5
+    assert server == 7
 
 
 # ───────────────────────── ④ 功能性：真 HubHandler，无 socket ─────────────────────────

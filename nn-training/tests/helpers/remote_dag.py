@@ -62,15 +62,19 @@ REMOTE_DIR = ROOT / "remote"
 #:   组合类：六个混入的组装，因 `store_offline` 在 L1 ⇒ 它只能是 L2）；
 #: * **L3 业务簇**：`bc_job` · `download`（取字节 + **物料落地三兄弟** `_ensure_payload` /
 #:   `_ensure_code` / `_ensure_ts_code`，因此也依赖 L1 的 `job_fs`）· `job_lifecycle` · `push_dispatch`；
-#: * **L4 组装**：`hub_server`（hub 侧组装）· `hub.queue`（`_HubQueue` 组合类：七个 L3 混入的
-#:   组装）· `hub.result`（回传路由：要让推与拉共用同一个校验函数，因此要 `push_dispatch` L3）·
-#:   `train_core`（训练核：模型/opt/kickstart/demo/PPO/产物 —— 它靠 L3 的业务簇组装出一个轮次，
-#:   因此**必须在宿主下面**）· `job_round`（每 job 一轮：旁路线程组 + 注入的 `run_job_fn` +
+#: * **L4 状态类/组合层**：`hub.queue`（`_HubQueue` 组合类：七个 L3 混入的组装）· `hub.result`
+#:   （回传路由：要让推与拉共用同一个校验函数，因此要 `push_dispatch` L3）· `train_core`
+#:   （训练核：模型/opt/kickstart/demo/PPO/产物 —— 它靠 L3 的业务簇组装出一个轮次，因此
+#:   **必须在宿主下面**）· `job_round`（每 job 一轮：旁路线程组 + 注入的 `run_job_fn` +
 #:   交回传 —— 与 `train_core` 同层同理由）；
-#: * **L5 宿主/入口编排**：`worker`（作业壳：网络/校验/上报）· `run_loop` · `notebook_runtime` ·
-#:   `worker_server` · `smoke_loopback` · `tunnel_ab_probe`；
-#: * **L6 引导**：`offline_boot` · `push_bootstrap`；
-#: * **L7**：`notebook_boot`（最外层，只经延迟 import 碰其它模块）。
+#: * **L5 HTTP 面**：`hub.http_face`（`HubHandler` = 五组路由混入的组装 + 通用助手 + 来源判定；
+#:   最深依赖 `hub.result`(L4) ⇒ 只能是 L5）；**与 `worker` 同层**（作业壳：网络/校验/上报）；
+#: * **L6 宿主编排/引导链**：`run_loop` · `notebook_runtime` · `worker_server` ·
+#:   `hub.boot`（`as_hub` / `make_server` / `main`：argparse + 锁 + 端口守卫 + 发现线程）；
+#: * **L7 入口门面 / 独立引导**：`hub_server`（hub-server 进程入口 + re-export 门面，第十七刀起
+#:   它自己不再有实现）· `offline_boot` · `push_bootstrap`；
+#: * **L8 站在门面之上的探针**：`smoke_loopback` · `tunnel_ab_probe`（都 import `hub_server`
+#:   起真服务）· `notebook_boot`（最外层，只经延迟 import 碰其它模块）。
 LAYERS: dict[str, int] = {
     "remote._instance_lock": 0,
     "remote._port_guard": 0,
@@ -141,15 +145,25 @@ LAYERS: dict[str, int] = {
     "remote.hub.result": 4,
     "remote.job_round": 4,
     "remote.train_core": 4,
-    "remote.hub_server": 5,
+    # HTTP 面（S4 第十六刀）：`HubHandler` 本体 + 通用助手 + 来源判定从 `hub_server` 搬到这里。
+    # 它组装五组路由混入（最深 `hub.result` L4）⇒ 秩算出来是 **L5**（不是「随便挑一层」，
+    # 而是 1 + max(deps)）；`boot` 与 `hub_server` 因此分别在 L6 / L7。
+    "remote.hub.http_face": 5,
     "remote.worker": 5,
+    # 引导链（S4 第十六刀）：`as_hub` / `make_server` / `main`。它站在 L5 的 `http_face` 上 ⇒ **L6**。
+    # 读者是 `hub_server`（L7）—— 方向是「入口 → 引导链 → HTTP 面 → 路由混入」，不反向。
+    "remote.hub.boot": 6,
     "remote.notebook_runtime": 6,
     "remote.run_loop": 6,
-    "remote.smoke_loopback": 6,
-    "remote.tunnel_ab_probe": 6,
     "remote.worker_server": 6,
+    # hub-server 入口 + 门面（S4 第十六刀收口）：本模块自己**零实现**，只剩 re-export 与
+    # `python -m remote.hub_server` 的分发。依赖最深到 `hub.boot`(L6) ⇒ **L7**。
+    "remote.hub_server": 7,
     "remote.offline_boot": 7,
     "remote.push_bootstrap": 7,
+    # 站在门面之上的探针：都 import `hub_server` 起真服务 ⇒ 随它 ****L6 → L8**（第十六刀的级联）。
+    "remote.smoke_loopback": 8,
+    "remote.tunnel_ab_probe": 8,
     "remote.notebook_boot": 8,
 }
 

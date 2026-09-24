@@ -69,10 +69,14 @@ def _imports(path: Path) -> set[str]:
 
 
 def test_admin_methods_are_defined_in_admin_routes_only() -> None:
-    """定义在 `AdminRoutes`；`HubHandler` 里**不得**再有同名定义（也别「就地补一个」）。"""
+    """定义在 `AdminRoutes`；`HubHandler` 里**不得**再有同名定义（也别「就地补一个」）。
+
+    S4 第十六刀：`HubHandler` 的类体从 `hub_server.py` 搬到 `hub/http_face.py` ⇒ 这条要读
+    **新家**（读旧路会 `StopIteration` —— 薄入口里根本没有那个类）。
+    """
     defined = _class_methods(NN_ROOT / "remote" / "hub" / "admin.py", "AdminRoutes")
     assert set(ADMIN_METHODS) <= defined, sorted(set(ADMIN_METHODS) - defined)
-    left = _class_methods(NN_ROOT / "remote" / "hub_server.py", "HubHandler")
+    left = _class_methods(NN_ROOT / "remote" / "hub" / "http_face.py", "HubHandler")
     crept_back = sorted(set(ADMIN_METHODS) & left)
     assert crept_back == [], f"这些方法又回到 HubHandler 了：{crept_back}"
 
@@ -89,11 +93,11 @@ def test_hub_handler_declares_all_mixins_before_the_base_handler() -> None:
     把声明换成 `Any`）会把组合类里 `self.headers.get(...)` / `self.rfile.read(n)` 的推断拓成
     `Any` ⇒ `hub_server` 里做 `-> str` / `-> bytes | None` 的方法报 `no-any-return`。
 
-    ⚠ 本文件**故意不 import `remote.hub_server`**（本测试不起服务进程，也不需要那个类）；
-    它也因此不触发 `tests/test_subproc_util.py` 的「起服务必须借端口」源码守卫
-    （那个守卫以字面量 `remote.hub_server` 为标记）。
+    ⚠ 本文件**故意不 import 起服务的模块**（本测试不起进程，也不需要那个类）；
+    它也因此不触发 `tests/test_subproc_util.py` 的「起服务必须借端口」源码守卫。
     """
-    tree = ast.parse((NN_ROOT / "remote" / "hub_server.py").read_text(encoding="utf-8"))
+    # S4 第十六刀：类体现在住 `hub/http_face.py`。
+    tree = ast.parse((NN_ROOT / "remote" / "hub" / "http_face.py").read_text(encoding="utf-8"))
     cls = next(
         n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "HubHandler"
     )
@@ -108,11 +112,16 @@ def test_hub_handler_declares_all_mixins_before_the_base_handler() -> None:
 
 
 def test_net_probe_support_names_moved_with_the_group() -> None:
-    """两个只被本组使用的名字随迁（否则 hub_server ↔ admin 成环）；无其它读者故不留门面。"""
+    """两个只被本组使用的名字随迁（否则 handler 侧 ↔ admin 成环）；无其它读者故不留门面。
+
+    S4 第十六刀：由「不在 `hub_server` 里」改成「不在 `hub_server` **也不在** `hub/http_face.py`
+    里」—— 旧写法在新布局下是空话（薄入口本来就没有实现），而 handler 侧才是可能长回来的地方。
+    """
     assert NET_PROBE_MAX == 16 * 1024 * 1024
-    src = (NN_ROOT / "remote" / "hub_server.py").read_text(encoding="utf-8")
-    for name in ("NET_PROBE_MAX", "_deterministic_fill", "_PROBE_BLOCK", "random."):
-        assert name not in src, f"{name} 仍留在 hub_server（应随 admin 组迁走）"
+    for rel in ("remote/hub_server.py", "remote/hub/http_face.py"):
+        src = (NN_ROOT / rel).read_text(encoding="utf-8")
+        for name in ("NET_PROBE_MAX", "_deterministic_fill", "_PROBE_BLOCK", "random."):
+            assert name not in src, f"{name} 仍留在 {rel}（应随 admin 组迁走）"
 
 
 def test_hub_package_never_imports_hub_server() -> None:

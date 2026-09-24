@@ -6,7 +6,7 @@
  *  重建 spec，因此重启永远用最新配置与最新哨兵。
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'fs'
 import path from 'path'
 import { CONFIG_PATH, LOG_DIR, NN_TRAINING, REPO_ROOT } from '../core/paths'
 import { httpOk, pidAlive, portListen } from '../core/net'
@@ -75,6 +75,26 @@ export function selfNodeSpec(cfg: RlConfig): ProcSpec {
 
 export const HUB_SERVER_ENTRY = 'nn-training/remote/hub_server.py'
 
+/** hub 的**实现文件**（`nn-training/remote/hub/*.py`，仓库相对 posix 路径，排序）。
+ *
+ *  为什么哨兵必须跟着实现走（2026-09-24 S4 第十六刀）：hub 的代码在三次拆分（路由混入 / 状态类 /
+ *  调度面 / HTTP 面 / 引导链）中散到了 `remote/hub/` 下，而哨兵集一直只写入口那一个文件 ⇒
+ *  **改 `hub/http_face.py` 的 handler 不会触发重启**，监督器会让进程继续跑旧代码（而 `hub_server.py`
+ *  自己已经只剩 re-export，它的 mtime 不再随实现变）。目录哨兵也不行：`sentinelsChangedSince`
+ *  比的是文件 mtime，目录 mtime 只在增删条目时变。所以这里**枚举文件**；`readdirSync` 失败
+ *  （部署环境没有源码）就返回空——宁少不炸（本函数只在构造 spec 时调用，不碰网络）。 */
+export function hubImplementationFiles(): string[] {
+  const rel = 'nn-training/remote/hub'
+  try {
+    return readdirSync(path.join(REPO_ROOT, rel))
+      .filter((f) => f.endsWith('.py'))
+      .sort()
+      .map((f) => `${rel}/${f}`)
+  } catch {
+    return []
+  }
+}
+
 /** 共享 hub-server spec：**一个进程服务所有并行课程**（2026-09-18 用户指令）。
  *
  *  课程表为什么不在这里给（`--course`）：训练侧把 job 发布到 `<repo>/tmp/<course>/remote-jobs`
@@ -119,7 +139,9 @@ export function hubServerSpec(cfg: RlConfig): ProcSpec {
     // 就绪归属：旧僵尸 hub 可能替新进程答 /ping（新实例被双监听守卫拒绝后秒退），
     // 那样账本会记新 pid 而实际服务的是旧进程（2026-09-17 事故相位）。
     ownsResource: (pid) => portOwnedBy(pid, port),
-    sentinels: pySentinels(HUB_SERVER_ENTRY),
+    // 入口 + **全部实现文件**：`hub_server.py` 现在只有 re-export，单看它会在「实现被改」时
+    // 判「代码没变」。
+    sentinels: pySentinels(HUB_SERVER_ENTRY, ...hubImplementationFiles()),
   }
 }
 
