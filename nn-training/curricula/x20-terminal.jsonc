@@ -1,0 +1,154 @@
+// 课程 x20-terminal —— **死亡终局腿：lives_exhausted 定价 −4**（train-following §5.6）
+//
+// 状态：**已起草，待用户手工开训**（agent 不得启动训练）。
+//
+// 立项：dense-only 的另一半。1 命任务里 `lives_exhausted` 每个失败局**恰好发生一次** ⇒
+//   它在失败域是 100% 稠密信号，不是稀疏终局。当前死亡代价只经"少杀的未来击杀"间接传导，
+//   被信用窗衰减殆尽；本腿给死亡事件本身定价（toy scheme：末样本 += terminal[outcome]）。
+//   与 A 腿的本质区别：A 罚**承伤量**（环境常数 2.6 发，零区分度，注定无效）；本腿罚**死亡事件**
+//   （每轨迹恰好一次，有区分度）。A 的死因恰好是本项的立项依据。
+//
+// EV 剂量：X=4.0 ≈ −1.3 杀（wKill=3.0），约典型局 return（~20+）的 15–20%——疼到能感到，
+//   不到改写整局目标。plan 原定 X ∈ 3~6 起标定；取中 4 首发，结算时按 V/行为复核剂量是否合适。
+//   ⚠ 诚实注记：终局奖仍经 GAE（λ=0.95，信用窗 ~150t）反传，早期决策几乎感觉不到——λ 腿已证
+//   "V 够不到死亡链"。本项赌的是**密度**（每失败局一次，失败局占 85%+），不是窗口；若无效，
+//   与 λ 腿结论一致（行为库问题，非信用问题）。
+//
+// 单变量纯度：与 x20-noexplore **逐字相同**，只改 `terminal: {} → {"lives_exhausted": -4.0}`
+//   （terminal_spread=false 不动，多一个变量就不纯；scheme toy 不动。terminal 进血缘是正确的
+//   —— reward(formula+params+terminal+scheme) 全进 corpus_identity_fp，已验证指纹变化）。
+//   采样 48000 / mb 1024 / lr / epochs / gamma / lam / schedule / seed_rotate 全同。
+//
+// 起点：noexplore 最优 it105（`x20-noexplore.it105`），纯 warm start，`kickstart_ref=false`
+//   （理由同 firstkill 腿：noexplore 后段 effective kk≈0；绕开事故 §5）。
+//   comparator = noexplore 同绝对 it 点历史（run 内 itN = 绝对 it105+N；历史臂已封存）。
+//   配对：`paired_rotate_seed` 与 noexplore 同值 ⇒ 续跑种子流逐轮相同（无 demo 参与，
+//   414000 无污染，判决主段 = 414000，与 B/A 同口径可比）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 判据
+// ══════════════════════════════════════════════════════════════════════════
+// **主读数 = 日常 low% 轨迹**（860001 段 400 局，每 5 轮）+ 与 noexplore 同绝对 it 点配对对照。
+//   it40 只记录、不停腿（it40 误杀门已废）。
+// **机制读数**（按顺序）：① low% 是否下移 ② 顶部死亡占比（`tmp/topdeath/deathpos.ts` 现成，
+//   基线 it105 26.5%——死亡变贵了还往上钻 ⇒ 定价传导失败）③ 消极指纹：超时占比 + base 毁伤局
+//   占比（罚重变缩头乌龟的指纹：家门口蹲到超时/基地被偷，超时熔断与 base 计数盯着）。
+// **门**：414000 段 `low% 相对 noexplore 同 it 点改善 ≥3pp` 且 `p10 ≥ 2`（noexplore it105 段值：
+//   33.0/8.33/p2；B 终点 35.5/7.84 作次级参照）。
+// **约束（熔断优先级最高）**：日常 mean < 6.19 立即停；超时 >5% 立即停（本腿罚死亡，超时上行
+//   是第一副作用，熔断从严：连续 2 个 eval 点超时 >3% 即停，不等 5%）；kl 连续 3 轮 ≥0.075 即停。
+// **回测门**：终点候选 415000 不劣于 noexplore 同 it 点（同段同种子配对）。
+// **判据一律不得由教师表现反推**（AGENTS §0.2）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 止损
+// ══════════════════════════════════════════════════════════════════════════
+//   · **消极熔断（本腿特有）**：超时连续 2 个 eval 点 >3% 或 base 毁伤局占比翻倍 ⇒ 停腿
+//     （定价把策略吓成了缩头乌龟——方向错了，不是剂量问题）。
+//   · **上/下限熔断**：mean < 6.19 或 timeout >5% ⇒ 立即停。
+//   · **机械横盘**：low% 连续 4 个 eval 点无改善 ⇒ 停腿；宽限一次 +10 轮。
+
+{
+  "version": 5,
+  "name": "x20-terminal",
+  "mode": "per-tick",
+  // 环境不变：ladder-c20-lives1（4 关 2000-2003、20 敌、max_ticks 12900、lives 1、hard）。
+  // 任务侧一个字不动（AGENTS §0.2）。
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：noexplore 原公式逐字 + ★死亡终局项 ────────────────────────────
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited + wPickup*powerUpsCollected - wApproach * where(pickupDist < 0, 0, pickupDist)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wShot": 0.05,
+      "wExplore": 0.0,
+      "wPickup": 3.0,
+      "wApproach": 0.008
+    },
+    // ★ 唯一变量：死亡事件定价（toy：末样本 += terminal[outcome]）。
+    "terminal": {
+      "lives_exhausted": -4.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：noexplore 最优 it105，纯 warm start ──────────────────────────────
+  "bc": "nn-training/weights/x20-noexplore/x20-noexplore.it105.20260922-053620.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  // ── 配对：续 noexplore 的种子流（1789876303）────────────────────────────────
+  // run 内 itN 吃 noexplore 绝对 it105+N 的种子 ⇒ 与历史臂逐轮同 batch。⚠ 改它 = 非配对。
+  "paired_rotate_seed": 1789876303,
+
+  // ── 预算 ───────────────────────────────────────────────────────────────
+  "iters": 300,
+  "max_hours": 12,
+  "workers": 8,
+
+  // ── 位移包：回基线（与 noexplore 一致）────────────────────────────────────
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  // ── 采集：与 noexplore **一处刻意不同**（mb 对齐，TPU 步耗收尾）────────────────
+  // 49152 = 48 × mb(1024)；per-stage quota = ceil(49152/4) = 12288 = 12 × mb ⇒ 收满时总步数
+  //   恒为 48 个满 chunk ⇒ **无 ragged tail**（原 48000 % 1024 = 896 ⇒ 每 epoch 一次 ~14s
+  //   的形状洗牌重编）。⚠ 软保证：仅当每关都收满成立（某关 SHORT 时尾巴会回来）。
+  "target_transitions": 49152,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+
+  // ── 路径：新目录、禁续跑（§15.5）────────────────────────────────────────
+  "out": "tmp/x20-terminal/weights.json",
+  "traj": "tmp/x20-terminal",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/x20-terminal",
+  "backup_prefix": "x20-terminal",
+
+  // ── 评估 ───────────────────────────────────────────────────────────────
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
+
+// ── 开工前置 ─────────────────────────────────────────────────────────────
+// ① bc 文件存在（noexplore it105 最终候选，已验证）。
+// ② terminal 键合法性验证（已验证：lives_exhausted ∈ OUTCOMES，validate 零错误；开训后
+//    首轮 PPO 日志确认 reward 指纹已变——terminal 进血缘是正确的）。
+// ③ transport：**必须显式 `--remote-transport pull`**；PPO 云机（禁本机 CPU，事故教训）。
+// ④ 新 out/traj 目录（禁续跑，§15.5）。
+// ⑤ remote_hubs 登记 + slot 容量 + worker 心跳（开训前确认）。
+//
+// 启动（**用户手工；agent 不得启动训练**，经控制台）：
+//   开课 x20-terminal（训练模式 在线，rollout 本机，PPO 云机）。
+//
+// ── 诊断工具 ─────────────────────────────────────────────────────────────
+// · 日常趋势：it0/it5…（860001 段 400 局）low%/mean/p10/timeout/base毁伤 + 配对对照表。
+// · 机制读数：`tmp/topdeath/deathpos.ts`（顶部死亡占比，基线 26.5%）。
+//
+// ── 结算节（2026-09-24 回填，判负且不完整；详见 docs/nn/experiments.md §35）──────
+// ① 日常 it5→45（9点）：mean 6.92~8.07，low 33.8~41.5，最优 it20（8.07/33.8）；
+//    配对 9 点平均 Δ −0.16 mean/−0.24pp ≈ 0。相对 it20 最优 it25→45 共 5 连无刷新
+//    （it40 只记录，it50 宽限到期点未到——非规则停）。
+// ② 414000 主段（800局）：it20 7.89/36.8/p2/pass16.5｜it45 7.92/37.0/p1/pass14.8，
+//    基线 8.33/33.0/p2/pass18.1——门 fail（+3.8/+4.0pp；配对同it点 +2.6/0pp）；
+//    415000 回测：it20 7.77/37.5/p2｜it45 7.59/39.8/p1，基线 7.44/36.9/p1——劣
+//    （it45 +2.9pp）。③ 分关（it20）：s2000 7.5/40｜s2001 8.0/36｜s2002 7.5/38｜
+//    s2003 8.7/33。④ 顶部死亡 it20 31.4%｜it45 30.6% vs 基线 27.0%（反升 ~4pp ≈
+//    2.6σ：死亡变贵还往上钻，定价传导失败指纹）；超时全0（无缩头乌龟）；lossDetail
+//    全 lives_exhausted（base 毁伤 0%，消极熔断两项全未触发）。⑤ dmg ~250平。
+// ⑥ 实际 46 轮（09-24 07:41→07:59）；停腿性质：infra ABORT（云节点缺 bun），it50
+//    判决点没走到——但 9 点零位移 + 双候选判决全败，补跑期望≈0，不续。产物
+//    tmp/x20-terminal/settle/（4×800局 + deathpos 2权重×4分片，mism 全0）。
+//    判语：lives_exhausted −4.0 单变量无效；赌密度输给了 λ 窗口（与 λ 腿结论一致）。

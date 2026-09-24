@@ -1,0 +1,149 @@
+// 课程 x20-firstkill —— **点火腿：首杀 shaping**（train-following §5.3）
+//
+// 状态：**已起草，待用户手工开训**（agent 不得启动训练）。
+//
+// 立项：A 腿罚支出侧（承伤）已封路；本腿加收入侧信号——`firstKillTick`（metric idx16，
+//   无首杀 = −1）入势函数，给雪球一个点火扳机。零 schema 改动（metric 早已落盘）。
+//   与 A 腿的区别：A 在"走"的代价上定价，本腿在"杀"的时机上定价。
+//
+// EV 剂量（2026-09-22 实测，noexplore it105 日常 400 局）：首杀分布紧——p0 241 / 中位 353 /
+//   p90 523，无首杀 6 局（0 杀）；早杀≈多杀（t<300 8.73 vs 300–600 8.23 vs 600+ 7.69，~1 杀梯度）。
+//   窗取 /600（覆盖 p0–p90）：中位 bonus (1−353/600)≈0.41，wFirst=3.0 ⇒ 典型 +1.2 ≈ 0.4 杀，
+//   不主导（局均 return ~20+）；最早首杀 ≈ 白送 1 杀（与 wKill=3.0 同量纲，可比）。
+//   ⚠ 诚实注记：早杀–多杀相关很可能是混杂（rush 风格既早杀又多杀）——本项可能只是在奖励 rush。
+//   注册证伪：firstKillTick 前移但 low% 不动 ⇒ 瓶颈在"点火后的生存"，不在点火（本腿即死）。
+//
+// 单变量纯度：与 x20-noexplore **逐字相同**，只加公式尾项 + `wFirst` 参数（公式编译已验证
+//   零错误，reward 指纹照常变更，进血缘是正确的）。采样 48000 / mb 1024 / lr / epochs /
+//   gamma / lam / schedule / seed_rotate 全同。
+//
+// 起点：noexplore 最优 it105（`x20-noexplore.it105`），纯 warm start，`kickstart_ref=false`
+//   （noexplore 到 it105 时 kk≈0，与后段 effective 一致；绕开事故 §5 kk=1 复活禁令）。
+//   comparator = noexplore 同绝对 it 点历史（run 内 itN = 绝对 it105+N；历史臂已封存）。
+//   配对：`paired_rotate_seed` 与 noexplore 同值 ⇒ 续跑种子流逐轮相同（demo 不参与本腿，
+//   414000 无污染，判决主段 = 414000，与 B/A 同口径可比）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 判据
+// ══════════════════════════════════════════════════════════════════════════
+// **主读数 = 日常 low% 轨迹**（860001 段 400 局，每 5 轮）+ 与 noexplore 同绝对 it 点配对对照。
+//   it40 只记录、不停腿（it40 误杀门已废）。
+// **机制读数**（按顺序）：① firstKillTick 分布前移（日常 eval 自带，无需 resim）② low% 是否跟随
+//   下移 ③ 顶部死亡占比（`tmp/topdeath/deathpos.ts` 现成，基线 it105 26.5%——若点火奖只是在
+//   奖励 rush，顶部死亡应升，low% 不降反升，这是最坏剧本的指纹）。
+// **门**：414000 段 `low% 相对 noexplore 同 it 点改善 ≥3pp` 且 `p10 ≥ 2`（noexplore it105 段值：
+//   33.0/8.33/p2；B 终点 35.5/7.84 作次级参照）。
+// **约束（熔断优先级最高）**：日常 mean < 6.19 立即停；超时 >5% 立即停；kl 连续 3 轮 ≥0.075 即停。
+// **回测门**：终点候选 415000 不劣于 noexplore 同 it 点（同段同种子配对）。
+// **判据一律不得由教师表现反推**（AGENTS §0.2）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 止损
+// ══════════════════════════════════════════════════════════════════════════
+//   · **注册证伪优先**：firstKillTick 中位前移 ≥50t 但 low% 连续 3 个 eval 点无改善 ⇒ 停腿
+//     （瓶颈在点火后生存，点火奖无用——比横盘门更早的专属死刑）。
+//   · **上/下限熔断**：mean < 6.19 或 timeout >5% ⇒ 立即停。
+//   · **机械横盘**：low% 连续 4 个 eval 点无改善 ⇒ 停腿；宽限一次 +10 轮。
+
+{
+  "version": 5,
+  "name": "x20-firstkill",
+  "mode": "per-tick",
+  // 环境不变：ladder-c20-lives1（4 关 2000-2003、20 敌、max_ticks 12900、lives 1、hard）。
+  // 任务侧一个字不动（AGENTS §0.2）。
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：noexplore 原公式 + ★点火项 ────────────────────────────────────
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited + wPickup*powerUpsCollected - wApproach * where(pickupDist < 0, 0, pickupDist) + wFirst * where(firstKillTick < 0, 0, max(0, 1 - firstKillTick/600))",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wShot": 0.05,
+      "wExplore": 0.0,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wFirst": 3.0
+    },
+    // dense-only（与父腿一致）：terminal 空表合法。
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：noexplore 最优 it105，纯 warm start ──────────────────────────────
+  "bc": "nn-training/weights/x20-noexplore/x20-noexplore.it105.20260922-053620.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  // ── 配对：续 noexplore 的种子流（1789876303）────────────────────────────────
+  // run 内 itN 吃 noexplore 绝对 it105+N 的种子 ⇒ 与历史臂逐轮同 batch。⚠ 改它 = 非配对。
+  "paired_rotate_seed": 1789876303,
+
+  // ── 预算 ───────────────────────────────────────────────────────────────
+  "iters": 300,
+  "max_hours": 12,
+  "workers": 8,
+
+  // ── 位移包：回基线（与 noexplore 一致）────────────────────────────────────
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  // ── 采集：与 noexplore **一处刻意不同**（mb 对齐，TPU 步耗收尾）────────────────
+  // 49152 = 48 × mb(1024)；per-stage quota = ceil(49152/4) = 12288 = 12 × mb ⇒ 收满时总步数
+  //   恒为 48 个满 chunk ⇒ **无 ragged tail**（原 48000 % 1024 = 896 ⇒ 每 epoch 一次 ~14s
+  //   的形状洗牌重编）。⚠ 软保证：仅当每关都收满成立（某关 SHORT 时尾巴会回来）。
+  "target_transitions": 49152,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+
+  // ── 路径：新目录、禁续跑（§15.5）────────────────────────────────────────
+  "out": "tmp/x20-firstkill/weights.json",
+  "traj": "tmp/x20-firstkill",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/x20-firstkill",
+  "backup_prefix": "x20-firstkill",
+
+  // ── 评估 ───────────────────────────────────────────────────────────────
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
+
+// ── 开工前置 ─────────────────────────────────────────────────────────────
+// ① bc 文件存在（noexplore it105 最终候选，已验证）。
+// ② 公式编译验证（已验证：validate_reward 零错误零警告；开训后首轮 PPO 日志确认 reward
+//    指纹已变——wFirst 进血缘是正确的）。
+// ③ transport：**必须显式 `--remote-transport pull`**；PPO 云机（禁本机 CPU，事故教训）。
+// ④ 新 out/traj 目录（禁续跑，§15.5）。
+// ⑤ remote_hubs 登记 + slot 容量 + worker 心跳（开训前确认）。
+//
+// 启动（**用户手工；agent 不得启动训练**，经控制台）：
+//   开课 x20-firstkill（训练模式 在线，rollout 本机，PPO 云机）。
+//
+// ── 诊断工具 ─────────────────────────────────────────────────────────────
+// · 日常趋势：it0/it5…（860001 段 400 局）low%/mean/p10/firstKillTick 中位 + 配对对照表。
+// · 机制读数：`tmp/topdeath/deathpos.ts`（顶部死亡占比，基线 26.5%）。
+//
+// ── 结算节（2026-09-24 回填，判负；详见 docs/nn/experiments.md §34）────────────
+// ① 日常 it5→50（10点）：mean 7.29~7.99，low 33.2~39.5，最优 it10（7.78/33.2）；
+//    配对 10 点平均 Δ −0.20 mean/−0.73pp ≈ 0（正负交替，全在噪声带）。
+//    相对 it10 最优 it15→50 共 9 连无刷新（宽限 it40 已耗尽）。
+// ② 414000 主段（800局）：it10 7.67/34.8/p2/pass13.6｜it50 7.80/35.6/p2/pass15.6，
+//    基线 8.33/33.0/p2/pass18.1——门（−3pp）fail（+1.8/+2.6pp；配对同it点 −1.7/−1.4pp
+//    亦不够）；415000 回测：it10 7.50/37.0/p2｜it50 7.47/37.0/p2，基线 7.44/36.9/p1
+//    ——基本持平（low +0.1pp 噪声）。③ 分关（it50）：7.8/7.8/7.9/7.7，均匀无亮点。
+// ④ fk_med 全程 330~354（基线353），最大位移 it50 −23t（<50t 注册线一半）；首杀种类/
+//    走位/开火全平；顶部死亡 it10 21.0%｜it50 16.9% vs 基线 27.0%（下降，非rush恶化）。
+//    注册证伪的触发条件（fk前移≥50t）本身就没成立——火没点着。⑤ 超时全0；dmg ~250平。
+// ⑥ 实际 55 轮（09-23 23:04→23:44，offline_backfeed）；停腿性质：横盘规则满足 + 今晨重开
+//    infra ABORT（云节点缺 bun，ProtocolError）。产物 tmp/x20-firstkill/settle/（4×800局
+//    + deathpos 2权重×4分片，mism 全0）。判语：wFirst=3.0 单变量无效。
