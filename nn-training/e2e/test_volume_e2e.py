@@ -766,16 +766,19 @@ def test_racing_with_tight_budget_stops_loud_not_silent(
     tmp: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """竞速 + 短局关 ⇒ 波次预算耗尽 ⇒ **响亮**停（日志给出未达标清单），不静默短采。"""
-    import rl.loop_core as loop_mod
+    # 补丁打在**实现模块**的命名空间上：`_volume_topup` 的日志（「未达标」/`wave_cap`）
+    # 住在 `rl/loop_volume.py`（S4 第十八刀从 loop_core 搬来）——打 `rl.loop_core.log`
+    # 是**静默空操作**（同名 seam 在两个命名空间里是两个各自真实的注入点）。
+    import rl.loop_volume as vol_mod
 
     lines: list[str] = []
-    real_log = loop_mod.log
+    real_log = vol_mod.log
 
     def _capture(msg: str) -> None:
         lines.append(str(msg))
         real_log(str(msg))
 
-    monkeypatch.setattr(loop_mod, "log", _capture)
+    monkeypatch.setattr(vol_mod, "log", _capture)
     srv, cfg, _ = _env(tmp, monkeypatch, fanout=True, n_0=5, n_1=50)
     try:
         # stage 0 每局 5t（估 10 ⇒ 初波 10 局只到 50t）⇒ 两波补到 90t 后触波次上限；

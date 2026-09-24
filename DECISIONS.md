@@ -2912,3 +2912,49 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
 - **门禁**：nn **2462 → 2473 passed / 3 skipped**；mypy **418** 源文件绿；根 `bun run check`
   2119 pass（1 例 `dist-node-gate`「单次慢响应不判死」在全量并发下计时 flake，单独复跑 3/3 绿）。
 —— 全文（选簇判据 / 调用图 / 守卫表 / 坑）→ `docs/nn/engineering.md` §23「第十七刀」。
+
+## §2026-09-25-goalnn-loop-volume-chain-split（2026-09-25，用户指令「全程自主，继续按同一手法拆 `rl/` 侧神模块」）
+
+拆 `rl/loop_core.py`：**1386 → 931 行**（搬走的块共 462 行 —— 445 行方法 + 9 行分节注释；
+留下的 8 行是旧位置的**指路注释**）；`TrainingLoop`（25 方法 / 1089 行）里**唯一一条真正的
+方法间调用链**（9 成员 / 445 行 = 原模块 32%，且恰是旧类的**尾块**）搬到新模块
+`rl/loop_volume.py::TrainingVolume`（**573 行** = 445 行方法 + 前导 docstring/import/声明块）。
+
+- **刀口先量后定（工具化）**：新写 AST 侦察工具（`nn-training/tmp/recon_god.py`）把「类内调用图 +
+  连通分量 + 每方法读的模块全局 + 写槽」一次量出。同一份量法在 `rl/batch_eval.py` / `rl/bc_loop.py` /
+  `rl/loop_core.py` 上跑，结论：`loop_core` 有 **3 条独立链**（volume 9 成员 / 生命周期 7 / 基线评估 2），
+  最大且最内聚的是 volume（9 成员，一个连通分量，5 个共享槽）；
+- **方向 = 调用者依赖被调用者**（与 S4 第二步、第十七刀同源）：本簇的**生产入口全部**在
+  `RoundSteps`（`step_course_iter` → `_iteration_pairs`；`step_rollout` → `_volume_active` /
+  `_volume_collect_continuous`）⇒ **`class RoundSteps(TrainingVolume)`**。
+  **刻意不走「给 `TrainingLoop` 加基类」**：那要改组合类 + 四个「继承真混入」的测试宿主，并让
+  第十七刀守卫里「组合类三件套不变」那句失守 —— 走调用者一侧 ⇒ `TrainingLoop.__bases__ ==
+  (RoundSteps, TrainingSteps, TrainingGuards)` 与**全部既有守卫一行不改**。
+- **`_volume_topup`（离散补波）自 VOLUME_RULE_V2 起已退役**：生产路径全走 `_volume_collect_continuous`，
+  `step_volume_topup` 只是 `STEP_ORDER` 要求的**空步**、不调本簇任何方法（本刀的守卫会断言这两条）。
+  它仍留在此簇，因为既有 e2e/单测以 unbound 形式直接驱动它（`volume_waves` 的纯逻辑是那条规则的可复算实现）。
+- **本刀唯一要迁的 patch 目标 = `log`**：`_volume_topup` 的日志按**模块全局**解析 ⇒
+  `monkeypatch.setattr(rl.loop_core, "log", …)`（`e2e/test_volume_e2e.py`）搬后成**静默空操作**
+  （同名 seam 在两个命名空间里是两个各自真实的注入点 —— S4 第二步的教训第三次现身），已改到
+  `rl.loop_volume.log`。判定 `dist_common` 的两个方法内重复 import 后：**删顶层那份**（而不是删方法内那份）
+  —— 这是唯一能保持「方法体逐字节不变」的改法（`ruff` 的 F401/F811 只认前者）。
+- **纯搬对账**：AST 逐成员比对 HEAD vs 新家 ⇒ **9/9 逐字节等价、零申报差异**（与前两刀不同：本刀
+  连文案都不用改，占位/异常都没有）；旧类在**同一位置**留下**指路注释**（读者找 `_volume_topup` 不两手空空）。
+- **守卫 = 契约**（`tests/test_loop_volume_split.py`，11 例）：9 成员定义只在 `TrainingVolume`（**闭集**）·
+  `TrainingLoop.X is TrainingVolume.X` 对象恒等（既有用例用的是 unbound 绑定）· `RoundSteps.__bases__`
+  + 组合类三件套 + **判定 MRO 逐项** · 七槽位声明在新家且 `__init__` 仍全部赋值 · **跨模块手闭集**
+  （`__init__` Store×7 + `_record_iteration` Load×3 —— 量出来的，不是猜的）· 顶层 import 闭集 ·
+  `rl.volume_waves` / `rl.volume_quota` 只许延迟 import · 不得反向 import · **两条功能性**：
+  `log` seam 在本模块（打 `rl.loop_core.log` 一个字节都收不到）· unbound 绑定经 MRO 取到真实现。
+  反探针 **14/14 命中**（每条先 `assert count(old) == 1`）。
+- **⚠ 坑（两个，都是「散文会撒谎」）**：① 侦察初稿把「外部入口全在 `RoundSteps`」写成了
+  「`step_rollout` / `step_volume_topup`」——而后者是**退役空步**，`_volume_topup` 生产零调用点；
+  守卫里那句「RoundSteps 真的在调它」当场把它顶出来 ⇒ 四处散文（两处 docstring + 指路注释 + 模块头）改对。
+  ② 分层快照按设计**先红再登记**：`rl/loop_volume.py → rl.rollout_phase` 使 `loop_volume` 成为
+  「经 rl 传递可达 remote」的一员 ⇒ 登记进 `tests/test_layering.py::RL_ORCHESTRATION`（第三次依此流程）。
+- **违反后果**：就地补同名方法 / 新家塞 helper / 基类不继承 / 组合类改元组 / 调用方就地重定义入口 /
+  反向 import / 顶层长重依赖 / 延迟 import 提到顶层 / 删槽位声明 / 新增跨模块手 / 宿主不初始化槽位 /
+  删指路注释 / 退役空步接回生产 / `log` seam 改经宿主命名空间 —— 十四类都在**提交时**红。
+- **门禁**：nn **2473 → 2484 passed / 3 skipped**（+11 = 新守卫）；ruff / mypy **420** 源文件绿；
+  根 `bun run check` 2120 pass / 0 fail；dashboard 未动（本刀零 `dashboard/**` 改动，故不触发其门禁）。
+—— 全文（侦察表 / 调用图 / 守卫表 / 坑 / 下一刀候选的实测理由）→ `docs/nn/engineering.md` §23「第十八刀」。

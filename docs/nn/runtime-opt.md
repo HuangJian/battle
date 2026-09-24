@@ -1070,7 +1070,8 @@ greedy eval 是节点侧跑的量最大的一类任务，这里看不见后端�
    `rollout_collect_aggregated` / `rollout_collect_waves`。
 6. **连续配额采集 VOLUME_RULE_V2**（用户 2026-09-19，DECISIONS
    §2026-09-19-volume-continuous-quota）：**退役离散补波**——串行 volume 路径改为
-   `loop_core._volume_collect_continuous`：读账本 → 按分关差额+软停
+   `loop_core._volume_collect_continuous`（S4 第十八刀后搬到 `rl/loop_volume.py::TrainingVolume`，
+下文方法名与路径不变）：读账本 → 按分关差额+软停
    （`collected+inflight*est_s≥quota` 不再派）→ 小批派发 → 直到达标/game_cap/
    batch 安全阀。种子 `(it,stage,k)`；`resume.trailing_stage_samples_per_game`
    提供 est_s。wave 纯函数保留（旧 e2e）；生产不再走 `_volume_topup`。

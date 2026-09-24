@@ -939,6 +939,37 @@ _record_iteration` 的**数据流**，不是调用流）或「导出与配额」
 `_export_offline_bundle` 调用，其余靠 `self`）；再往下就是**按职责**切而不是按链切，收益递减——
 判据要先量（叶子之间有没有共享状态、有没有数据流边），别按行数等分。
 
+#### 5.3.17 第十八刀（2026-09-25，**已完成**）—— `TrainingLoop` 的动态采集链 → `rl/loop_volume.py`
+
+按用户指令「全程自主，继续按同一手法拆 `rl/` 侧神模块」执行。**`rl/loop_core.py` 1386 → 931 行**
+（−33%；搬走 462 行 = 445 方法 + 9 行分节注释，留下 8 行指路注释）；新模块
+`rl/loop_volume.py::TrainingVolume`（**573 行**）。
+
+| 判据 | 实测 | 用在哪 |
+|---|---|---|
+| `TrainingLoop`（25 方法 / 1089 行）的连通分量 | **3 条链**：volume **9** · 生命周期 7 · 基线 2 | 取最大且最内聚的 volume |
+| 9 成员是否同一条链 | 是（一个连通分量，5 个共享槽） | 簇 = 这条链；且恰是旧类的**尾块**（连续 462 行） |
+| 生产入口在哪 | **全部在 `RoundSteps`**（`step_course_iter` → `_iteration_pairs`；`step_rollout` → `_volume_active` / `_volume_collect_continuous`） | 方向 = 调用者依赖被调用者 ⇒ **`class RoundSteps(TrainingVolume)`** |
+| `_volume_topup` 的调用点 | **生产零调用点**（VOLUME_RULE_V2 后 `step_volume_topup` 是空步）；只由 e2e/单测以 unbound 形式驱动 | 写进散文与守卫（不然散文会撒谎） |
+| 模块级名字（patch 点） | **1 个**：`log` | 迁 `1` 处 `setattr`（`e2e/test_volume_e2e.py`） |
+| 跨模块手 | `__init__` Store×7 + `_record_iteration` Load×3（量出来的） | 写成闭集表 |
+
+**为什么不「给 `TrainingLoop` 加基类」**：那要改组合类 + 四个「继承真混入」的测试宿主，并让第十七刀
+守卫里「组合类三件套不变」那句失守；走调用者一侧 ⇒ `TrainingLoop.__bases__` 与**全部既有守卫一行不改**。
+
+**守卫** `tests/test_loop_volume_split.py`（11 例）：成员闭集 · 对象恒等（既有用例的 unbound 绑定形态）·
+`RoundSteps.__bases__` + 组合类三件套 + 判定 MRO 逐项 · 七槽位声明在新家且 `__init__` 仍全部赋值 ·
+跨模块手闭集 · 顶层 import 闭集 · 延迟 import 白名单 · 不得反向 import · **两条功能性**（`log` seam
+在本模块 · unbound 绑定经 MRO 取真实现）。反探针 **14/14**；纯搬对账 **9/9 逐字节、零申报差异**。
+
+**⚠ 两个坑**：① 散文宣称「`step_volume_topup` 调 `_volume_topup`」而它其实是**退役空步** ⇒ 被自己的
+守卫顶出来（四处散文改对）；② 分层快照按设计**先红再登记**（`loop_volume → rl.rollout_phase` ⇒
+登记进 `RL_ORCHESTRATION`）。
+
+**下一刀候选（已量）**：`rl/batch_eval.py`（1785 行，全仓最大）的 35 个顶层函数是**一个 28 节点巨团**
+⇒ 按链切不动，要拆得先设计「批存储」接口（真设计改动）；`loop_core.py` 余下的生命周期链（7 成员）
+就是「主循环骨架」本身，切开前需先答「拆出去后谁是宿主」。
+
 ### 5.4 本轮**不做**（已核，刻意保留）
 
 - `remote/notebook_boot.py` ↔ `remote/offline_boot.py` 的孪生助手（`_build_opener` /

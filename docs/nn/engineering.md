@@ -1237,6 +1237,123 @@ class TrainingSteps(TrainingRemote, TrainingEval):   # 新混入追加在既有�
   `tests/test_loop_transport_split.py`（docstring 第 3 条 + `__bases__` 断言）。
 
 
+### 第十八刀（2026-09-25）：`TrainingLoop` 的**动态采集链** → `rl/loop_volume.py`
+
+`remote/` 侧四大神模块收口后，同一套手法继续用在 `rl/` 侧（第十七刀切 `TrainingSteps` 的 in-loop
+评估链，本刀切 `loop_core` 的采集编排）。**`rl/loop_core.py` 1386 → 931 行**（−33%；搬走的块
+462 行 = 445 行方法 + 9 行分节注释，留下的 8 行是旧位置的**指路注释**）；新模块
+`rl/loop_volume.py::TrainingVolume` **573 行**（9 成员 / 445 行 + 前导 docstring/import/声明块）。
+
+#### 刀口怎么选的：先把「量法」工具化，再在三份候选上跑同一把尺
+
+前几刀的选簇靠一次性的 AST 脚本，本刀把它写成可复用工具（`nn-training/tmp/recon_god.py`）：
+一次输出①顶层节点行数降序 ②每个类的**类内调用边**（`self.x()` 且 x 是本类方法）③每方法的
+同族出/入边 + 读的模块全局 + 写的槽 ④**连通分量分组**（= 「一条真实调用链」的量化形态）。
+
+同一把尺跑了三份候选（不按行数等分）：
+
+| 候选 | 实测 | 结论 |
+|---|---|---|
+| `rl/loop_core.py`（1386） | `TrainingLoop` 25 方法 / 1089 行，**3 个连通分量**：volume **9** · 生命周期 7 · 基线评估 2 | **取 volume**（最大且最内聚） |
+| `rl/batch_eval.py`（1785） | 35 个顶层函数 / 681 行，调用图是**一个 28 节点的巨团**（`consume_requests ↔ claim_pending ↔ read/write_batches ↔ mark_unit_done ↔ _requeue ↔ _persist_of ↔ maybe_dispatch_batch ↔ units_for_batch → plan_units/plan_verdict_units`） | **不动**：没有可「按链切」的缝；硬拆得先造一个「批存储」接口 = 真设计改动，另开一轮 |
+| `rl/bc_loop.py`（1433） | `BcLoop` 14 方法 / 263 行，其中只有一个 9 方法分量 | 次选（收益小） |
+
+volume 簇的形态（9 成员全在一个连通分量里）：
+
+```
+_iteration_pairs ─┬─► _volume_active
+（轮内预排表入口）  ├─► _volume_est_samples ─► _volume_stage_ests_map ─┐
+                  └─► _volume_stages ────────────────────────────────┼─► _dispatch_volume_wave
+_volume_topup ─┬─► _volume_journal_replay                           │
+（wave 规则）  └─► _volume_active                                   │
+_volume_collect_continuous（VOLUME_RULE_V2 生产路径）────────────────┘
+```
+
+#### 切法：仍走调用者一侧（`class RoundSteps(TrainingVolume)`）而不是给组合类加基类
+
+「调用者依赖被调用者」在本仓已经是写进文档与守卫的规则（第二步 `class TrainingSteps(TrainingRemote)`）。
+量出本簇的生产入口**全在 `RoundSteps`**（`step_course_iter` → `_iteration_pairs`；`step_rollout` →
+`_volume_active` / `_volume_collect_continuous`）⇒ 新建基类挂在 `RoundSteps` 上。
+
+**为什么不“给 `TrainingLoop` 加一个基类”**（看起来更直接）：那要改组合类 + 四个「继承真混入」的
+测试宿主，并让第十七刀守卫里「组合类三件套不变」那句失守（本刀**零守卫改动**，只有一处 patch 目标迁移）。
+代价是两个散文需要改对（见下「坑」第一条）——远比改 MRO 便宜。
+
+#### 状态归属：七槽随簇，跨模块手是**量出来的**三处
+
+七个 volume 槽位（`_volume_target` / `_volume_collected` / `_volume_waves` / `_volume_g0` /
+`_volume_est` / `_volume_capped` / `_volume_stage_ests`）的**声明**随簇到 `TrainingVolume`；
+`TrainingLoop.__init__` 仍负责**赋值**（跨轮字段的持有者不变）。侦察（`tmp/recon_volume.py`）按
+「谁定义/声明了它」把 `self.*` 面分成三档：本簇真方法 / 别的混入的方法（只一条：`_commit_journal`）/
+纯槽位。后者逐个查「是不是只被这一簇读写」，得到**闭集**：
+
+| 手 | 住哪 | 做什么 |
+|---|---|---|
+| `__init__` → 七个槽位（Store） | `rl/loop_core.py` | 跨轮字段初始化（宿主持有） |
+| `_record_iteration` → `_volume_target` / `_volume_collected` / `_volume_capped`（Load） | `rl/loop_steps.py` | 落 iteration 事件 |
+
+另有三处**有意并存**的声明：`TrainingSteps` 不继承 `TrainingVolume`（继承它的是 `RoundSteps`），
+不给这三个名字再声明一次 mypy 就报 attr-defined——与 `loop_eval.py` 里同族声明的理由逐字相同。
+
+#### 守卫 = 契约（`tests/test_loop_volume_split.py`，11 例）
+
+9 成员定义只在 `TrainingVolume`（**闭集**：顺手加 helper 也红）· `TrainingLoop.X is TrainingVolume.X`
+对象恒等（既有用例用的正是 `TrainingLoop._volume_topup(cast(Any, stub), …)` 这种 **unbound 绑定**，
+这条确保那一路径不断）· `RoundSteps.__bases__ == (TrainingVolume,)` + `RoundSteps.__mro__[1]` +
+**组合类三件套逐字不变** + **判定 MRO 逐项对账** · 七槽位声明在新家且 `__init__` 仍全部赋值 ·
+**跨模块手闭集** · 顶层 import 闭集 · `rl.volume_waves` / `rl.volume_quota` 只许方法体内延迟 import ·
+不得反向 import `rl.loop_core` / `rl.loop_steps` / `rl.loop_round_steps` · **两条功能性**：
+① `log` seam 在**本模块**（打在本模块 → 命中；打在 `rl.loop_core` → 一个字节都收不到）；
+② unbound 绑定经 MRO 取到真实现（`TrainingLoop._volume_active(cast(Any, stub))`）。
+
+**反探针 14/14 命中**（就地补同名方法 / 新家塞 helper / 基类不继承 / 组合类改元组 / 调用方就地重定义
+入口 / 反向 import / 顶层长重依赖 / 延迟 import 提到顶层 / 删槽位声明 / 新增跨模块手 / 宿主不初始化槽位 /
+删指路注释 / 退役空步接回生产 / `log` seam 改经宿主命名空间）。每条先 `assert count(old) == 1`。
+
+#### ★ 本刀唯一的 patch 点迁移：`log`
+
+`_volume_topup` 的「未达标 / 触单关局数硬顶」等日志按**模块全局**解析 ⇒ `e2e/test_volume_e2e.py` 里
+`monkeypatch.setattr(rl.loop_core, "log", …)` 在搬家后是**静默空操作**。该用例自己会在
+`assert unmet` 上红（响亮），但「名字还在、没人读它」这个形状与第十六刀的 `SEND_TIMEOUT_SEC` 同源
+——所以守卫把两个方向都打了一遍而不是只改一行路径。判定 `dist_common`：两个方法内各有一份
+重复 import ⇒ **删顶层那份**（而非方法内），这是唯一能保持「9/9 方法体逐字节不变」的改法。
+
+#### ⚠ 坑（两个）
+
+1. **散文会撒谎，而且守卫抓得到**：侦察初稿把方向判据写成「外部入口全在 `RoundSteps`
+   （`step_rollout` / `step_volume_topup`）」——但 `step_volume_topup` 是 **VOLUME_RULE_V2 之后的
+   退役空步**（`return None`），`_volume_topup` 在生产路径里**零调用点**（只由既有 e2e/单测以
+   unbound 形式驱动）。写进新模块 docstring 的那句断言被守卫里「RoundSteps 真的在调它」当场顶出来
+   ⇒ 四处散文（模块头 + 类 docstring + 指路注释 + `RoundSteps` docstring）改对，并把「退役空步」
+   本身也写成守卫（`self._volume_topup(` 不得出现在 `RoundSteps` 里 + 空步体以 `return None` 结尾）。
+2. **分层快照按设计先红再登记（第三次）**：`rl/loop_volume.py → rl.rollout_phase` 使 `loop_volume`
+   成为「经 rl 传递可达 remote」的一员 ⇒ `test_layering` 两条同时红（纯逻辑不得 import 编排 / 快照集合
+   多一个）。登记进 `RL_ORCHESTRATION` 并写明**与既有两条不同的理由**：它自己不经 remote，只是经 rl 传递。
+
+#### 验证
+
+- **纯搬对账**：AST 逐成员 ⇒ **9/9 逐字节等价、零申报差异**（本刀没有占位、没有异常文案，连一处
+  申报差异都不需要）+ 旧类零残余 + 新家成员闭集；`loop_core.py` 1386 → 931 行，新模块 573 行。
+- **门禁**：nn **2473 → 2484 passed / 3 skipped**（+11 = 新守卫）；ruff `All checks passed`；mypy **420**
+  源文件绿；根 `bun run check` 2120 pass / 0 fail；**未动 `dashboard/**`**（本刀零跨项目改动）。
+- **顺手同步的 provenance**：`rl/__init__.py` 模块表 · `README.md` 模块表 · `rl/loop_core.py`（模块
+  docstring + MRO docstring + 旧位置留**指路注释**）· `rl/loop_round_steps.py`（docstring + 基类 +
+  删掉四条已被继承取代的 `Any` 声明并注明理由）· `rl/volume_waves.py`（5 处模块路径引用）·
+  `rl/loop_steps.py`（`_volume_stages` 的「定义在 `TrainingLoop` 上」改写为 `TrainingVolume`）·
+  `tests/test_layering.py`（快照 + 理由）。
+- **刻意不动（写明理由，避免下次又被“顺手修”）**：`curricula/x1-rebirth.jsonc` 与 `x3-power.jsonc`
+  里两处注释仍写 `rl/loop_core.py:_volume_stages` —— 课程文件的**字节**就是 `course_fp` 血缘
+  （`_course_file_fp` 取 sha256），为一句注释改字节会让在飞腿的课程身份漂移；留给下一次**真有内容改动**
+  时一并同步。`DECISIONS.md` / `plan/dynamic-rollout-volume.plan.md` 里的旧路径是**当时的事实记录**，不改写历史。
+
+#### 下一刀候选（已量，未做）
+
+`rl/batch_eval.py`（1785 行，全仓最大）的 35 个顶层函数是**一个 28 节点巨团**，按链切不动；要拆得先
+设计「批存储」接口（把 `read/write_batches` + `_claim_locked` 从模块全局收成一个对象）——那是设计
+改动，不是搬家。`loop_core.py` 余下的两个簇也可切：生命周期（7 成员：`run` / `_setup` / `_setup_common`
+/ `run_one_round` / `_park_after_completion` / `finish_course` / `_evalboard_idle`）与基线评估（2 成员）
+——但前者就是「主循环骨架」本身，切开需先答「拆出去后谁是宿主」。
+
 ### 未做完（S4 余下）
 
 `remote/` 内部**已零环**（见「拆环」节），`worker.py` 的拆分面**已收口**：只剩三个宿主函数
@@ -1249,6 +1366,9 @@ HTTP 面（`hub/http_face.py` L5）与引导链（`hub/boot.py` L6）分开，�
 `TrainingSteps` 本体的**第一条真实调用链已切**（第十七刀：in-loop 评估链 8 成员 →
 `rl/loop_eval.py`，`loop_steps.py` 940 → 666 行）；余下 12 个方法是**被轮内步骤各自调用的
 叶子**（报告/落账/导出/热加载/配额），没有新的方法间调用链可顺手牵出来。
+`rl/` 侧的继续：**第十八刀**切了 `loop_core` 里最大的一条链（动态采集 9 成员 / 445 行 →
+`rl/loop_volume.py`，`loop_core.py` 1386 → 931 行）——「下一刀候选」与它们的**实测理由**
+（含为什么最大文件 `batch_eval.py` 反而先不动）写在那节末尾。
 
 **✅ 清理已做（2026-09-24，第十二刀）：`remote/job_fs._ensure_commit` 已删**——第六步之一登记的
 既存死代码（全仓零调用，只搬未删）。同时删 `job_fs.__all__` 条目、`worker.py` 的门面转发、

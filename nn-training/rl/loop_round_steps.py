@@ -52,14 +52,21 @@ from rl.loop_steps import (
     _run_segment_iters,
 )
 from rl.loop_tasks import ROUND_TASKS
+from rl.loop_volume import TrainingVolume
 from rl.rollout_phase import join_precollect_child, precollect_ready, spawn_next_collect
 
 
-class RoundSteps:
+class RoundSteps(TrainingVolume):
     """轮内 13 步（mixin；与 `TrainingSteps` / `TrainingGuards` 以 `self.*` 共享引擎状态）。
 
     MRO 里排在最前（`TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards)`）：它只定义
     `step_*` 与本文件新引入的名字，不与既有方法重名。
+
+    基类 `TrainingVolume`（`rl/loop_volume.py`，S4 第十八刀）= 动态采集（按样本量）编排：
+    本类的 `step_course_iter`（`_iteration_pairs`）与 `step_rollout`（`_volume_active` /
+    `_volume_collect_continuous`）是那一簇的**全部生产入口**，所以方向是「调用者依赖被调用者」
+    （同 `class TrainingSteps(TrainingRemote)`；`TrainingLoop.__bases__` 因此一行不改）。
+    （`step_volume_topup` 是保留的**空步**：离散补波退役于 VOLUME_RULE_V2，它不调那一簇。）
     """
 
     # 依赖的 TrainingLoop 实例属性（声明类型供 mypy/阅读；实际赋值在 TrainingLoop）
@@ -76,17 +83,15 @@ class RoundSteps:
     _prepare_iter_dir: Any
     _hot_reload_course: Any
     _course_iter: Any
-    _iteration_pairs: Any
+    # 动态采集的四个入口（`_iteration_pairs` / `_volume_active` / `_volume_collect_continuous` /
+    # `_volume_topup`）**就是真方法**：随基类 `TrainingVolume` 继承而来（`rl/loop_volume.py`，
+    # S4 第十八刀）。这里**不再**声明为 `Any`——那会遮住基类实现（mypy 也会报不兼容）。
     _evalboard_yield: Any
     _evalboard_idle: Any
     _export_offline_bundle: Any
     _remote_run_segment: Any
     _remote_iter: Any
     _rollout_phase: Any
-    _volume_topup: Any
-    #: 配额课程判据 + 连续配额采集（VOLUME_RULE_V2，2026-09-19）。
-    _volume_active: Any
-    _volume_collect_continuous: Any
     #: in-loop 评估链的入口（`_join_eval` / `_drain_pending_eval` 同簇）——独立实现住在
     #: `rl/loop_eval.py::TrainingEval`（S4 第十七刀）。
     _dispatch_delayed_eval: Any

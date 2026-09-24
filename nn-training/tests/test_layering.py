@@ -67,6 +67,9 @@ L2_PACKAGES = ("remote",)
 #: 后者成为新的一员（它直接 import `remote.push_client`）——由本快照强制登记。
 #: 同日 S4 第二步再拆出 `loop_remote`（远端 PPO 腿 13 个方法的混入），它也直接
 #: import `remote.push_client` 与 `rl.loop_transport`。两次都是本快照先红、再登记。
+#: 2026-09-25（S4 第十八刀）：`loop_core` 拆出 `loop_volume`（动态采集编排 9 个方法的混入），
+#: 它接过 `rl.rollout_phase` 的 `dispatch_rollout_phase`（补波/连续配额的派发口）⇒ 与本快照
+#: 预期的形状**不同但同因**：它自己不经 remote，只是**经 rl 传递可达**——同样先红、再登记。
 RL_ORCHESTRATION = frozenset(
     {
         "bc_loop",
@@ -81,6 +84,7 @@ RL_ORCHESTRATION = frozenset(
         "loop_serve",
         "loop_steps",
         "loop_transport",
+        "loop_volume",
         "rollout_phase",
     }
 )

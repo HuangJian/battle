@@ -459,8 +459,9 @@ class TrainingSteps(TrainingRemote, TrainingEval):
         （intent/goal 不支持动态采集）⇒ 非 per-tick 一律返 0。放在这里而不是各调用点，
         是为了让 serial 与 remote `publish_job` 两条路径**不可能一个 gate 一个不 gate**。
 
-        关集解析**不调 `self._volume_stages()`**：后者定义在 `TrainingLoop` 上，本 mixin
-        （`TrainingSteps`）在类型层看不到它（mypy attr-defined）。`--stages` 缺席/不可解析
+        关集解析**不调 `self._volume_stages()`**：后者定义在 `TrainingVolume`（`rl/loop_volume.py`，
+        S4 第十八刀）上，本 mixin（`TrainingSteps`）在类型层看不到它（mypy attr-defined）。
+        `--stages` 缺席/不可解析
         ⇒ 返 0（静默降级为全收）；**响亮报错留在 `_volume_topup`** —— 采集侧先跑，
         真配错了在那里就炸，不必在这里重复炸一次。
         """

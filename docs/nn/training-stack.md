@@ -102,7 +102,8 @@ wver/course 匹配的 shard manifest 重聚合 outcomes。
   games 则 **以 disk combine 为报告体**，wave 只覆盖时间锚点
   （`pure_collect_sec` / `weights_dist_*` / `collect_end_ts`）。拒绝「仅 wave 为空时
   回填」：重启后本进程可能只补缺口批，wave 有 games 但仍小于盘上全量，会低估。
-- **接线**：`loop_core._volume_collect_continuous` 收官处
+- **接线**：`loop_core._volume_collect_continuous` 收官处（S4 第十八刀后该簇住
+  `rl/loop_volume.py::TrainingVolume`，方法名不变）
   `resumed_manifests(traj_dir, wver, extra_wver, course_fp)` + stages 过滤 → merge。
   `_traj_dir = traj/it{N}` 已是迭代作用域。
 - **验证**：`tests/test_rollout_volume.py::test_continuous_restart_quota_met_backfills_winrate_from_shards`
@@ -1520,7 +1521,9 @@ C 预算测量路径（iters/eval_*/out 等，随时可改）。
   `max_games_per_stage`（0 = 默认「初波 × 4」）。语义：分关达标线 `ceil(target/关数)`；初波
   `G0 = max(1, ceil(关达标线/est))`；结算后**逐关独立**补波 `ceil(缺口/est)`，每关至多 3 波；掉局零样本不计
   （天然触发补采——特性）、超时局计入；触硬顶 = 停采 + 响亮日志 + iteration 事件 `transitions_capped`。
-  纯逻辑住 `rl/volume_waves.py`，账本口径 `rl/resume.settled_stage_totals`，接线 `rl/loop_core.py::_volume_topup`；
+  纯逻辑住 `rl/volume_waves.py`，账本口径 `rl/resume.settled_stage_totals`，接线 `rl/loop_core.py::_volume_topup`
+  （S4 第十八刀后接线整簇搬到 `rl/loop_volume.py::TrainingVolume`；`_volume_topup` 的 wave 规则自
+  VOLUME_RULE_V2 起退役，生产路径走 `_volume_collect_continuous`）；
   iteration 事件追加 `transitions_target` / `transitions_collected`（additive，旧行无此键）。
 - **两条派生偏离计划的地方（本决策的实质）**：
   1. **种子流按 (stage, wave) 独立**，不是「初波沿用今日单条顺序流」。计划 §2.2.1 说「种子流与今日
@@ -1933,7 +1936,8 @@ R2c 造好了调度器与任务体，但**没有驱动者**（至今仍是「一
   wave 纯函数（`volume_waves.plan_topup` 等）仍保留供旧单测/e2e；**生产串行路径**
   已切 `_volume_collect_continuous`（`loop_core`）。`resume.trailing_stage_samples_per_game`
   提供分关 est_s。
-- **落地**：`rl/volume_quota.py`、`loop_core._volume_collect_continuous`、
+- **落地**：`rl/volume_quota.py`、`loop_core._volume_collect_continuous`（S4 第十八刀后住
+  `rl/loop_volume.py`）、
   `tests/test_volume_quota.py`。回归：相关 pytest + parse 绿。
 
 ---

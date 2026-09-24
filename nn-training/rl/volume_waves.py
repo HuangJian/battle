@@ -5,7 +5,7 @@
 
 本模块只有纯函数与常量（无 IO、无 torch）：配额数学、波次种子流、终止谓词、补波计划。
 shard 账本读取在 `rl/resume.py`（settled_stage_totals / trailing_samples_per_game），
-loop 接线在 `rl/loop_core.py::_volume_topup`。
+loop 接线在 `rl/loop_volume.py::_volume_topup`（S4 第十八刀从 `loop_core` 搬来）。
 
 ## 量纲（★ 2026-09-15 T9 定案；改这条 = 新实验 §15.5）
 
@@ -100,7 +100,7 @@ def parse_stages_arg(raw: str) -> list[int]:
     """`--stages` 字符串 → 关号列表（**共享解析器**）。
 
     抽出来是为了消除「同一份 `--stages` 被两处各解析一遍」的漂移风险：
-      · `loop_core._volume_stages()`（采集侧）：解析失败**响亮 SystemExit**；
+      · `loop_volume._volume_stages()`（采集侧）：解析失败**响亮 SystemExit**；
       · `loop_steps._per_stage_quota()`（训练侧）：解析失败**静默返 0**（= 全收 = 老行为）。
     两者对同一输入的处理策略不同是**有意的**（采集侧必须响亮，训练侧缺省即老行为），
     但「什么算可解析」必须是同一个判断——否则会出现「采集说合法、训练说非法」的裂缝。
@@ -122,7 +122,7 @@ def target_per_stage(target_transitions: int, n_stages: int) -> int:
     P2-6（2026-09-15）：`target_transitions ≤ 0` 也响亮报错。原先 `max(0, target)`
     把 0 静默变成「达标线 0」⇒ 每关第一波就 `quota_met` 立即停，采集量掉到 G0
     而不报错——是那种最难发现的静默失效。开动态采集的前提就是 target > 0
-    （`loop_core._volume_active` 同口径），所以这里报错不会误伤老课程：
+    （`loop_volume._volume_active` 同口径），所以这里报错不会误伤老课程：
     老课程根本不会调到本函数。
     """
     if n_stages <= 0:
@@ -320,7 +320,7 @@ class WaveRecord:
     finished: bool
 
 
-#: commit journal 里本模块使用的相位名（与 loop_core 的 `_volume_topup` 同一常量）。
+#: commit journal 里本模块使用的相位名（与 `loop_volume` 的 `_volume_topup` 同一常量）。
 WAVE_PHASE = "volume_wave"
 
 
@@ -439,7 +439,7 @@ def volume_block(args: Any, *, est_samples_per_game: int = 0) -> dict | None:
     老口径会让云机的采集量与目标脱钩，正是这个块存在要防的事。
 
     `est_samples_per_game` 由调用方给（hub 侧给的是**当前** trailing 估计，回退课程声明值）
-    ——与 `rl/loop_core._volume_est_samples` 同口径，两侧反解出同一个 G0。
+    ——与 `rl/loop_volume._volume_est_samples` 同口径，两侧反解出同一个 G0。
     """
     target = int(getattr(args, "target_transitions", 0) or 0)
     if target <= 0:
