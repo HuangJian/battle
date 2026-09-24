@@ -84,10 +84,15 @@ def test_run_job_normalizes_device_once_before_kind_fork() -> None:
     # `torch.device(...)` 的实参 —— 走 AST，不用子串：
     # 注释里为说明本次事故必须写出 `torch.device(device)` 这个字样，
     # 子串断言会把它当成真代码而误报（本仓已知坑）。
+    #
+    # 2026-09-24（S9）：这两个 `torch.device(...)` 调用点在**训练核**里（模型构建 / cuda-dp 包装），
+    # 随 `run_job` 的 650-1076 行一起下沉到 `remote/train_core.py`；上面的「归一化一次且在
+    # 分叉前」仍在作业壳（`worker.run_job`）——两半各查各的模块。
+    core_src = (ROOT / "remote" / "train_core.py").read_text(encoding="utf-8")
     fn = next(
         n
-        for n in ast.parse(src).body
-        if isinstance(n, ast.FunctionDef) and n.name == "run_job"
+        for n in ast.parse(core_src).body
+        if isinstance(n, ast.FunctionDef) and n.name == "run_training_core"
     )
     dev_args: list[str] = []
     for n in ast.walk(fn):

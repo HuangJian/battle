@@ -650,7 +650,10 @@ def test_run_job_wires_cancel_callback_into_ppo() -> None:
     表现极隐（取消延迟永远是「跑完才响应」，日志上完全正常）。这是 **epoch 级**取消点
     （R1-6）——别去动 `ppo_update` 内层结构，也别往 chunk 里加回调。
     """
-    src = (ROOT / "remote" / "worker.py").read_text(encoding="utf-8")
+    # 2026-09-24（S9）：四句都在**训练核**里——取消回调、epoch 级取消点、以及「停算丢弃」
+    # 那条 `except JobCancelledError`（它包的是 PPO 调用本身）。该链随 PPO 那段搬迁到
+    # `remote/train_core.py`；作业壳那份同名 `except` 是**另一件事**（回传/上报侧的处置）。
+    src = (ROOT / "remote" / "train_core.py").read_text(encoding="utf-8")
     assert "on_epoch_done=_cancel_at_epoch_boundary if should_cancel is not None else None" in src
     assert "def _cancel_at_epoch_boundary" in src
     assert "raise JobCancelledError(" in src

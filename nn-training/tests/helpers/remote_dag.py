@@ -58,9 +58,10 @@ REMOTE_DIR = ROOT / "remote"
 #: * **L2 传输核心**：`http`（所有业务簇的公共底座）· `push_client` · `plan_run`（半离线执行引擎：
 #:   `worker` 与 `run_loop` 都站在它上面，它自己谁都不靠上层靠）；
 #: * **L3 业务簇**：`bc_job` · `download` · `job_lifecycle` · `push_dispatch`；
-#: * **L4 组装/宿主**：`worker`（作业生命周期宿主）· `hub_server`（hub 侧组装）；
-#: * **L5 入口编排**：`run_loop` · `notebook_runtime` · `worker_server` · `smoke_loopback` ·
-#:   `tunnel_ab_probe`；
+#: * **L4 组装**：`hub_server`（hub 侧组装）· `train_core`（训练核：模型/opt/kickstart/demo/PPO/产物
+#:   —— 它靠 L3 的业务簇组装出一个轮次，因此**必须在宿主下面**）；
+#: * **L5 宿主/入口编排**：`worker`（作业壳：网络/校验/上报）· `run_loop` · `notebook_runtime` ·
+#:   `worker_server` · `smoke_loopback` · `tunnel_ab_probe`；
 #: * **L6 引导**：`offline_boot` · `push_bootstrap`；
 #: * **L7**：`notebook_boot`（最外层，只经延迟 import 碰其它模块）。
 LAYERS: dict[str, int] = {
@@ -68,6 +69,7 @@ LAYERS: dict[str, int] = {
     "remote._port_guard": 0,
     "remote.artifacts": 0,
     "remote.bulk_sched": 0,
+    "remote.worker_proc": 0,
     "remote.bundle": 0,
     "remote.colab_bc": 0,
     "remote.hub.admin": 0,
@@ -91,15 +93,16 @@ LAYERS: dict[str, int] = {
     "remote.job_lifecycle": 3,
     "remote.push_dispatch": 3,
     "remote.hub_server": 4,
-    "remote.worker": 4,
-    "remote.notebook_runtime": 5,
-    "remote.run_loop": 5,
+    "remote.train_core": 4,
+    "remote.worker": 5,
+    "remote.notebook_runtime": 6,
+    "remote.run_loop": 6,
     "remote.smoke_loopback": 5,
     "remote.tunnel_ab_probe": 5,
-    "remote.worker_server": 5,
-    "remote.offline_boot": 6,
-    "remote.push_bootstrap": 6,
-    "remote.notebook_boot": 7,
+    "remote.worker_server": 6,
+    "remote.offline_boot": 7,
+    "remote.push_bootstrap": 7,
+    "remote.notebook_boot": 8,
 }
 
 #: 允许的环（键 = 参与环的模块集合，值 = 为什么这是对的）。

@@ -652,6 +652,41 @@ CLI 侧传 `_real_run_job`）。引擎里那个 `_real_run_job` **兜底删掉**
 其余路由组（`_get_*` 12 / `_post_*` 11 → 通用助手）→ 两个千行状态类（拆 = 拆状态）。还挂着一项清理：
 `remote/job_fs._ensure_commit` 是既存死代码（全仓零调用，只搬未删，删要单开）。
 
+#### 5.3.9 第九刀（2026-09-24，**已完成**）—— 拆宿主：训练核下沉 + 进程链分离
+
+`worker.py` 余下 1805 行全是宿主（`run_job` 752 / `worker_loop` 364 / `main` 127 /
+`_prefetch_fill` 69）。按**一条真实调用链**（不是按行数）切三块，`worker.py` **1814 → 1281**：
+
+| 块 | 行数 | 去向 | 秩 |
+|---|---|---|---|
+| **训练核**（`run_job` 650-1076：课程→模型→opt→多卡→ref→demo→PPO→产物） | 427 | 新 `remote/train_core.py::run_training_core` | **L4** |
+| **进程生命周期**（`HOT_RELOAD_EXIT`/`_request_reload`/`supervise_worker`/`_release_cloud_machine`） | 110 | 新 `remote/worker_proc.py`（纯 stdlib） | **L0** |
+| `_wire_block`（两个调用方都要） | 19 | `remote/wire.py` | L1 |
+
+**先量再下刀**（AST）：核的自由变量 = 11 个块外局部 + 9 个形参；输出只有 **2** 个
+（`result`/`course`）；`global`/`nonlocal` 0；测试 patch 过这一族名字 **0** 个 ⇒ **seam-free**。
+唯一语义改动：核只收 `payload_bytes`（不收 `raw`）。漏传的检查交给 ruff `F821`（实测报出）。
+
+**选层级联**（账本 `LAYERS` = 拓扑秩）：核依赖最深到 L3 ⇒ 秩只能是 4，`worker` 4→5；
+`run_loop`/`notebook_runtime`/`worker_server` 5→6；`offline_boot`/`push_bootstrap` 6→7；
+`notebook_boot` 7→8。全部由 `test_remote_dag.py` 的**秩断言 + 分层断言**双向护住。
+
+**源文本守卫迁移**（四个老守卫按行文字面找调用点，搬家后它们「找不到就红」——正是我们要的响亮）：
+`test_job_body_crash`（4 处 `job_body_error`）· `test_tpu_backend_guard.TestWorkerWiring`（xla 接线）·
+`test_worker_device`（`torch.device(...)` 实参：分叉前归一化仍查壳、两个调用点查核）·
+`test_priority_schedule`（取消回调接线 → 核；壳里那份同名 `except` 是另一件事）。
+
+新守卫 `tests/test_train_core_split.py`（**14 例**）；反探针**七处全命中**。门禁 **2359 → 2374**。
+
+> 决策 → `DECISIONS.md` §2026-09-24-goalnn-godmodule-traincore；全文 → `engineering.md` §23「第九刀」。
+
+**下一刀（侦察已做）**：`worker_loop` 的「每 job 一轮」（取活后的**旁路线程组**（预取填充 / 心跳续租 /
+取消环）+ `run_job` + 回传落定，约 160 行）→ 新 `remote/job_round.py`（同样 L4；`_prefetch_fill` 与
+`PREFETCH_*` 随之搬，否则同层边）。**它是 seam 最密的一刀**：
+`setattr(W, "job_ready"/"abandon_job"/"release_job"/"_release_cloud_machine"/"start_cancel_watcher"/
+"peek_jobs"/"download_payload")` 全部会搬进新命名空间 ⇒ 要么逐点迁移，要么改成注入
+（`run_job_fn` 那种 —— 宿主侧的直接调用点改成 `ctx.xxx`）。先做 seam 定档再动刀。
+
 ### 5.4 本轮**不做**（已核，刻意保留）
 
 - `remote/notebook_boot.py` ↔ `remote/offline_boot.py` 的孪生助手（`_build_opener` /

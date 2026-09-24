@@ -17,10 +17,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib
 import json
 import os
-import subprocess
 import sys
 import tarfile
 import threading
@@ -29,19 +27,14 @@ from pathlib import Path
 from typing import Any
 
 from common.protocol import (
-    BLOB_DEMO,
-    BLOB_OPT,
-    BLOB_REF,
     HEARTBEAT_SEC,
     PAYLOAD_NAME,
     CodeChangedError,
     JobCancelledError,
     ProtocolError,
     RetryableError,
-    coef_active,
     encode_opt_tar,
     encode_weights_json,
-    job_seed,
     normalize_manifest,
     pack_result_v2,
     validate_result,
@@ -250,6 +243,9 @@ from remote.result_upload import (
     ResultUploader,
     UploadTask,
 )
+from remote.train_core import (
+    run_training_core as run_training_core,
+)
 
 # 传输账 / 低速重抽 / bulk 节流（S4 拆分 → `remote/wire.py`）。这里是**显式转发**：
 # 状态与实现同住 `wire`，避免模块全局在拆分后变成两份账（见 `remote/wire.py` 头部）。
@@ -303,6 +299,9 @@ from remote.wire import (
     _wire_add as _wire_add,
 )
 from remote.wire import (
+    _wire_block as _wire_block,
+)
+from remote.wire import (
     _wire_bucket as _wire_bucket,
 )
 from remote.wire import (
@@ -323,34 +322,18 @@ from remote.wire import (
 from remote.wire import (
     set_bulk_log as set_bulk_log,
 )
-
-
-def _wire_block(**over: object) -> dict:
-    """M0 统一计量：worker 侧 `wire` 子字典（全 additive——旧 hub 的 validate_result
-    不校验未知字段，旧读方忽略）。over 里 None 的键保留默认值（不把缺失写成 null）。"""
-    w: dict = {
-        "payload_bytes": 0,
-        "payload_dl_sec": 0.0,
-        "unpack_sec": 0.0,
-        "opt_restore_sec": 0.0,
-        "grad_sec": 0.0,
-        "blob_hits": 0,
-        "blob_miss_bytes": 0,
-        "result_bytes": 0,
-        # M3 kind=iter（其余 job 恒 0/False = 本轮没走这条线）；rollout_sec / bun_version
-        # 不在这里给默认值——缺席就代表「本轮没有节点侧 rollout」，不能写成 0 冒充。
-        "ts_code_bytes": 0,
-        "ts_code_hit": False,
-    }
-    w.update({k: v for k, v in over.items() if v is not None})
-    return w
-
-
-#: 热替换退出码：worker 子进程代码变更时以该码退出，**监督器**（supervise_worker /
-#: 新版 main()）收到后用同一套参数重新拉起子进程（fresh 进程 → sys.modules 必然为空
-#: → 新代码生效）。不用 0（=正常完成）：处理失败/退出原因必须可区分。
-HOT_RELOAD_EXIT = 86
-
+from remote.worker_proc import (
+    HOT_RELOAD_EXIT as HOT_RELOAD_EXIT,
+)
+from remote.worker_proc import (
+    _release_cloud_machine as _release_cloud_machine,
+)
+from remote.worker_proc import (
+    _request_reload as _request_reload,
+)
+from remote.worker_proc import (
+    supervise_worker as supervise_worker,
+)
 
 # ------------------------------------------------------------------ PPO 执行
 
@@ -647,433 +630,31 @@ def run_job(
         log(f"job {jid}: ECHO (smoke) — init 权重原样回传（未跑 PPO）")
         return result
 
-    # ---- 课程上下文：快照全文 → CourseConfig → reward_fn（D1/D6/D13） ----
-    import numpy as np
 
-    course_text = manifest["course"]
-    course_path = job_dir / "course.jsonc"
-    course_path.write_text(course_text, encoding="utf-8")
-    from rl.config import load_course
-
-    course = load_course(str(course_path))
-    if course.reward_spec().identity() != manifest["formula_hash"]:
-        raise ProtocolError(
-            f"course formula_hash 与快照不符：manifest={manifest['formula_hash']} "
-            f"本地算={course.reward_spec().identity()}"
-        )
-    from rl.reward_context import update as ctx_update
-    from rl.reward_library import build_reward_fn
-
-    reward_fn = build_reward_fn(course.reward_spec())
-    ctx_update(
-        reward_fn=reward_fn,
-        gamma=float(manifest["gamma"]),
-        lam=float(manifest["lam"]),
-        it=int(manifest["it"]),
-        metrics_version=int(manifest["metrics_version"]),
-        identity={"course": course.name, "formula_hash": manifest["formula_hash"]},
-    )
-
-    # ---- 延迟导入 torch / ppo 后端（B7 同款；本模块顶层零 torch） ----
-    import torch
-
-    if torch_threads > 0:
-        torch.set_num_threads(torch_threads)
-    import ppo.engine as ppo_engine
-    from data.weights_io import load_state_into, save_weights_json
-
-    # ---- per-job 确定性种子（D5）：load/chunk/update 前重新播种 ----
-    # numpy RandomState 种子必须 < 2^32：sha256 前 8 个 hex 字符（32 bit）
-    seed_hex = job_seed(manifest["runId"], int(manifest["it"]), manifest["init_weights_fp"])
-    np.random.seed(int(seed_hex[:8], 16))
-
-    # ---- 模型构建：opt_init（_ppo_save tar）优先，否则 init 权重 + 新 opt ----
-    # hub 侧免 torch（D2）：模型权重/opt 由 tar 或 weights_json 提供，worker 负责
-    # 重建——tar 内 model.pt = 上一轮 PPO 终态（含 Adam 动量，D5）。
-    init_w = job_dir / "init_weights.json"
-    # 标注为 torch.nn.Module（而非推断出的 PPOStudent）：多卡分支要把 model 换成
-    # DataParallel，且下游 save_weights_json / load_state_into 收的就是 Module。
-    # M2（B4）：有 opt blob 时 payload 不再带 init_weights.json（model+Adam 都在 opt
-    # tar 里）——build_ppo 只借它读 arch，缺文件走默认（per-tick 固定 64/8/128）。
-    model: torch.nn.Module = ppo_engine.build_ppo(str(init_w) if init_w.exists() else None)
-    # 设备解析（2026-09-10 TPU 接力）：--device tpu/xla 走 torch_xla 的 xla_device()，
-    # 而不是 torch.device("xla")——后者在部分 torch_xla 版本上拿不到带序号的设备句柄。
-    # torch_xla 只在真的选了 TPU 时才 import（未装 torch_xla 的机器行为不变）。
-    # `device` 已在 run_job 入口（kind 分叉之前）过 normalize_ppo_device，"auto" 不再可能到达这里。
-    dev_str = str(device)
-    use_dp = False
-    if dev_str in ("tpu", "xla"):
-        # 统一走 ppo.common.xla_device()（torch_xla.device() 优先，旧版回退 xm.xla_device()）
-        from ppo.common import (
-            tpu_backend_missing_reason,
-            xla_device,
-            xla_device_speed_probe,
-            xla_enable_compile_cache,
-            xla_fingerprint,
-            xla_world_size,
-        )
-
-        # 持久化编译缓存：必须在**任何计算之前**（下面 xla_device() 之后的指纹/速度自检就会
-        # 产生第一张图）。缓存被挤出时读盘而非重编，不改变任何数值——真机 ragged tail 每轮
-        # 多付的 ~14s 就是缓存淘汰后的重编（docs/nn/tpu-perf.md §6）。
-        log(
-            f"job {jid}: XLA 持久化编译缓存 {xla_enable_compile_cache(work_dir / 'xla-compile-cache')}"
-        )
-        device_t = xla_device()
-        # ★ 2026-09-22（Kaggle TPU 实例上离线课程 PPO 单步 8~9s ⇒ 疑似静默跑 CPU）：XLA 的
-        #   CPU 插件也返回 `xla:0`，所以「设备字符串」证明不了什么；这里把**后端指纹**与一次
-        #   速度自检打出来，并在后端不是 TPU 时**拒跑**（在 CPU 上跑完整段看起来一切正常，
-        #   只是慢两个数量级——正是最该响的那类静默降级）。
-        _fp = xla_fingerprint(device_t)
-        _spd = xla_device_speed_probe(device_t)
-        log(
-            f"job {jid}: TPU/XLA 设备 {device_t}｜device_type={_fp['device_type']}｜"
-            f"XLA 设备数={_fp['global_device_count']}（本进程可见 {_fp['addressable_device_count']}）｜"
-            f"replication={_fp['replication_devices']}｜attrs={_fp['attrs']}｜"
-            f"world_size={xla_world_size()}（无复制时恒 1，**别拿它当 TPU 判据**）｜"
-            f"2048² matmul {(_spd * 1000) if _spd is not None else float('nan'):.1f} ms"
-            "（TPU 量级 ~ms；~10ms+ = 后端是 CPU）"
-        )
-        _why = tpu_backend_missing_reason(_fp)
-        if _why:
-            raise ProtocolError(
-                f"job {jid}: 要的是 TPU，但 XLA 运行时不是 TPU 后端（{_why}）——**拒跑**。"
-                "在 CPU 上跑完整段会看起来完全正常、只慢两个数量级，所以这里宁可停下："
-                "① 确认 `PJRT_DEVICE=TPU` 在**任何** torch_xla import/初始化之前就已设置"
-                "（XLA 运行时一经初始化就不能再换后端）；"
-                "② Kaggle/Colab 上先单独打印 `torch_xla.runtime.device_type()` 与"
-                "`global_device_count()` 对账（TPU v5e-8 ⇒ 8）；"
-                "③ 若 ①② 都正常而设备属性仍无 TPU 指纹，重开 runtime（设备可能被别的进程占着）。"
-            )
-    elif dev_str in ("cuda-dp", "dp"):
-        # 多卡（2026-09-10 实测 1.92×）：torch.device("cuda-dp") 不是合法设备，
-        # 必须显式落到 cuda；真正的包装在 state_dict 装载之后（见下方 use_dp 段）。
-        device_t = torch.device("cuda")
-        use_dp = torch.cuda.is_available() and torch.cuda.device_count() > 1
-    else:
-        # 必须用**归一化后**的 dev_str，不是原始 device —— 2026-09-15 二次事故：
-        # 上一版只把分派条件换成 dev_str，这里仍写 `torch.device(device)`，
-        # 于是 auto 照样被喂进 torch.device（日志上「兜底为 cuda」打了、job 仍炸 auto）。
-        device_t = torch.device(dev_str)
-    # ---- M2 B3：opt 内容寻址解析（cache / preloaded / download / inline）----
-    # 安全阀（plan §4.3）：opt_sha 存在而 blob 不可得 → 响亮失败，绝不静默 warm-start
-    # （那会把 D5 的 Adam 动量悄悄归零，日志上却一切正常）。
-    opt_sha = str(manifest.get("opt_sha", "") or "")
-    blob_hits = 0
-    blob_miss_bytes = 0
-    opt_raw, opt_hit, opt_src = _resolve_blob(
-        blob_root=blob_root,
-        name=BLOB_OPT,
-        sha=opt_sha,
-        inline_b64=str(manifest.get("opt_init", "") or ""),
+    # ---- 训练核（2026-09-24）：从算子到产物整段在 `remote/train_core.py`（L4）----
+    # 本模块只剩「作业壳」：网络 / 校验 / 分叉 / 上报。核不认识 hub 的作业面，也不 import
+    # 本模块（守卫钉住）；它读的模块全局都是**它自己命名空间**的（seam-free，见那边头部）。
+    result, course = run_training_core(
+        base_url,
+        token,
         jid=jid,
-        base_url=base_url,
-        token=token,
-        preloaded=preloaded,
-        log=log,
-    )
-    if opt_hit and opt_src == "cache":
-        blob_hits += 1
-    if opt_src == "download":
-        blob_miss_bytes += len(opt_raw)
-    if opt_sha and not opt_raw:
-        raise ProtocolError(
-            f"job {jid}: opt_sha={opt_sha[:12]}… 存在但 blob 不可得——拒收"
-            "（不许静默退回 warm-start，D5）"
-        )
-    opt = None
-    opt_restore_sec = 0.0
-    # ★ §4.2（2026-09-21）：restore 段的崩溃归确定性失败（带 traceback 摘要）——
-    # 它是本段最容易“静默重演”的一处（优化器/模型卷积不兼容会逐一重演到天亮）。
-    try:
-        if opt_raw:
-            t_opt = time.time()
-            opt_dir = job_dir / "opt_init"
-            unpack_opt_tar(opt_raw, opt_dir)
-            # 必须在 model.to(device_t) 之前加载 state_dict，然后统一移到目标设备
-            model.load_state_dict(torch.load(opt_dir / "model.pt", map_location="cpu"))
-            model.to(device_t)
-            opt = torch.optim.Adam(model.parameters(), lr=float(manifest["lr"]))
-            # 统一 map_location="cpu"：Optimizer.load_state_dict 会把载入张量 cast 到
-            # param 所在设备，所以 XLA/CPU/CUDA 三条路都靠这一句完成搬迁（原先写死
-            # device_t 在 XLA 上会走 torch.load 的设备 hook，跨 runtime 不稳）。
-            opt.load_state_dict(torch.load(opt_dir / "opt.pt", map_location="cpu"))
-            opt_restore_sec = round(time.time() - t_opt, 3)
-            log(f"job {jid}: model/opt 从 opt_init（{opt_src}）恢复（Adam 动量延续，D5）")
-        else:
-            # 首轮/无 tar：从 init 权重 warm-start（hub 打包时写入 payload 的 weights_json）
-            if not init_w.exists():
-                raise ProtocolError("payload 缺 init_weights.json 且无 opt_init/blob——无法构建模型")
-            load_state_into(model, str(init_w))
-            model.to(device_t)
-            opt = torch.optim.Adam(model.parameters(), lr=float(manifest["lr"]))
-            log(f"job {jid}: 无 opt_init，从 init_weights warm-start + 新 Adam")
-    except ProtocolError:
-        raise  # 上游已判定的确定性失败（缺 blob / 缺 init 权重）原样上抛
-    except Exception as e:
-        raise job_body_error("restore（model/opt 恢复）", e) from e
-
-    # ---- 多卡（--device cuda-dp）----
-    # 位置很重要：**必须在 load_state_dict / load_state_into + .to(device_t) 之后**再包，
-    # 否则 ckpt 的键会长出 "module." 前缀。raw_model 始终指向未包装模块，产物落盘用它。
-    # ⚠ DP 会改变梯度归约顺序 ⇒ 末位 ulp 变化，与单卡 run 的逐位 A/B 不可比；
-    #   它是新开一条实验臂的开关，不是透明加速（plan/ppo-optimization.plan.md §3.4）。
-    raw_model = model
-    if dev_str in ("cuda-dp", "dp"):
-        if use_dp:
-            _n = torch.cuda.device_count()
-            _mb = int(manifest.get("mb", 0) or 0)
-            model = torch.nn.DataParallel(model)
-            log(
-                f"job {jid}: DataParallel 生效（{_n} 卡"
-                + (f"，mb={_mb} -> 每卡 {_mb // _n}" if _mb else "")
-                + "）——梯度归约顺序变化，与单卡 run 数值不可逐位比"
-            )
-        else:
-            log(
-                f"job {jid}: 请求了 cuda-dp 但只可见 {torch.cuda.device_count()} 张卡"
-                " —— 退化为单卡（行为等同 --device cuda）"
-            )
-
-    # ---- BC-anchored kickstart ref（§363）：有系数无尺子＝静默裸奔，不可接受——
-    # 缺字节响亮拒绝；系数为 0 直接跳过（零开销，旧 manifest 行为不变）。
-    kick_kl = float(manifest.get("kickstart_kl", 0.0) or 0.0)
-    # 阈值判据（见 common/protocol.NEGLIGIBLE_COEF）：课程按几何衰减永远到不了精确 0，
-    # 实测 1.455e-11 时旧判据 `> 0` 仍会加载 ref 并每轮预计算 3 s。用 coef_active 兜底，
-    # 也覆盖"旧 hub 产出的、仍带微小系数的在途 manifest"。
-    if kick_kl != 0.0 and not coef_active(kick_kl):
-        log(f"job {jid}: kickstart_kl={kick_kl:g} 低于阈值 —— 按关闭处理（省 ref 加载+预计算）")
-        kick_kl = 0.0
-    ref_model: torch.nn.Module | None = None
-    if kick_kl > 0:
-        import hashlib as _hl
-
-        ref_sha = str(manifest.get("ref_sha", "") or "")
-        ref_b64 = str(manifest.get("ref_weights_b64", "") or "")
-        ref_fp = str(manifest.get("ref_weights_fp", "") or "")
-        # M2 B3：ref 也走内容寻址（ref_sha = sha256(raw 权重) = ref_weights_fp）。
-        ref_raw, ref_hit, ref_src = _resolve_blob(
-            blob_root=blob_root,
-            name=BLOB_REF,
-            sha=ref_sha,
-            inline_b64=ref_b64,
-            jid=jid,
-            base_url=base_url,
-            token=token,
-            preloaded=preloaded,
-            log=log,
-        )
-        if not ref_raw:
-            raise ProtocolError(f"job {jid}: kickstart_kl={kick_kl} 但无 ref_weights——拒收")
-        if ref_fp and _hl.sha256(ref_raw).hexdigest() != ref_fp:
-            raise ProtocolError(f"job {jid}: ref_weights 指纹不符——拒收")
-        if ref_hit and ref_src == "cache":
-            blob_hits += 1
-        if ref_src == "download":
-            blob_miss_bytes += len(ref_raw)
-        ref_path = job_dir / "ref_weights.json"
-        ref_path.write_bytes(ref_raw)
-        # ★ §4.2：ref 装载同属 restore——ref 与 policy 的架构/形状不合会在每一份字节上
-        # 重演（而它只会被写成一行云机日志，训练侧看到的是超时）。
-        try:
-            ref_model = ppo_engine.build_ppo(str(ref_path))
-            load_state_into(ref_model, str(ref_path))
-            for p in ref_model.parameters():
-                p.requires_grad = False
-            ref_model.eval()
-            ref_model.to(device_t)
-            if use_dp:
-                ref_model = torch.nn.DataParallel(ref_model)
-            log(f"job {jid}: kickstart ref 已加载（BC 冻结 master，kl={kick_kl}）")
-        except ProtocolError:
-            raise
-        except Exception as e:
-            raise job_body_error("restore（kickstart ref 装载）", e) from e
-
-    # ---- demo 混 batch（x20 后续）：bank 内容寻址 + 装载校验 ----
-    # 安全阀同 ref：coef>0 而 bank 不可得 ⇒ 响亮失败，绝不静默降级为纯 PPO
-    # （那会让 demo 腿的整轮更新在日志一切正常下丢失 demo 项）。
-    demo_coef = float(manifest.get("demo_bc_coef", 0.0) or 0.0)
-    demo_per_mb = int(manifest.get("demo_per_mb", 0) or 0)
-    demo_bank: dict | None = None
-    if demo_coef > 0 and demo_per_mb > 0:
-        import io as _io
-
-        import numpy as _np
-
-        demo_sha = str(manifest.get("demo_sha", "") or "")
-        if not demo_sha:
-            raise ProtocolError(f"job {jid}: demo_bc_coef>0 但无 demo_sha——拒收")
-        demo_raw, demo_hit, demo_src = _resolve_blob(
-            blob_root=blob_root,
-            name=BLOB_DEMO,
-            sha=demo_sha,
-            inline_b64="",
-            jid=jid,
-            base_url=base_url,
-            token=token,
-            preloaded=preloaded,
-            log=log,
-        )
-        if demo_hit and demo_src == "cache":
-            blob_hits += 1
-        if demo_src == "download":
-            blob_miss_bytes += len(demo_raw)
-        if not demo_raw:
-            raise ProtocolError(f"job {jid}: demo_sha 存在但 blob 不可得——拒收")
-        try:
-            demo_bank = {k: _np.asarray(v) for k, v in dict(_np.load(_io.BytesIO(demo_raw))).items()}
-        except ProtocolError:
-            raise
-        except Exception as e:
-            raise job_body_error("restore（demo bank 装载）", e) from e
-        need = {"obs", "scalars", "actions", "masks"}
-        if not need.issubset(demo_bank.keys()):
-            raise ProtocolError(
-                f"job {jid}: demo bank 缺字段 {sorted(need - set(demo_bank.keys()))}——拒收"
-            )
-        log(
-            f"job {jid}: demo bank 已加载（N={demo_bank['obs'].shape[0]}"
-            f" coef={demo_coef:g} per_mb={demo_per_mb} src={demo_src}）"
-        )
-
-    # ---- PPO：load → chunk → update（同一 backend 调用链，D4） ----
-    # ★ §4.2（2026-09-21）：grad 段（含读 shard / 分块）的崩溃归确定性失败。
-    # 为什么连读 shard 一起包：那同样是「这份字节决定的」失败（缺字段/形状不符），
-    # 而 OOM 那类真瞬态由 `job_body_error` 原样放回重领路径。
-    shards_root = str(job_dir)
-    if on_ppo_start is not None:
-        try:
-            # 打点失败不致命：最坏后果是这份 job 的掉队阈值晚起算（多开一份备份）。
-            on_ppo_start()
-        except Exception:
-            pass
-
-    def _cancel_at_epoch_boundary(_ep_done: int, _mdl: Any) -> None:
-        """epoch 边界查一次取消（R1-6；延迟判据 <20s）——由 hub 的 landed 驱动。"""
-        if should_cancel is None or not should_cancel():
-            return
-        raise JobCancelledError(
-            f"job {jid}: 结果已 landed（别人先赢）——epoch {_ep_done} 边界停算丢弃"
-        )
-
-    if should_cancel is not None and should_cancel():
-        # 下载/解包/装载期间结果就已 landed：**开算前**就丢，别白烧一整轮 PPO。
-        # （epoch 边界那个回调只救得了「开算之后才 landed」的情形。）
-        raise JobCancelledError(f"job {jid}: 结果已 landed（下载期间）——开算前丢弃")
-
-    t_ppo = time.time()
-    try:
-        episodes = ppo_engine.load_episodes(
-            shards_root,
-            float(manifest["gamma"]),
-            float(manifest["lam"]),
-            normalize_adv=str(manifest["adv_norm"]) != "none",
-            normalize_ret=bool(manifest.get("normalize_ret", False)),
-            # 严格样本量配额（target_transitions 路线）：逐关只收前 N 步，截断在 GAE
-            # 之前。0/缺失（旧 hub 产出的 manifest）= 全收，历史行为逐字节不变。
-            per_stage_quota=int(manifest.get("per_stage_quota", 0) or 0),
-        )
-        total_steps = sum(e["obs"].shape[0] for e in episodes)
-        chunks = ppo_engine.chunk_episodes(
-            episodes, int(manifest["mb"]), shuffle=bool(manifest["shuffle"])
-        )
-        agg = ppo_engine.ppo_update(
-            model,
-            opt,
-            chunks,
-            int(manifest["epochs"]),
-            device_t,
-            kl_coef=float(manifest["kl_coef"]),
-            # ent_coef：None（旧 hub / 未配）→ 引擎常量 ENT_COEF；0.0 是合法值，不能 `or` 兜底。
-            ent_coef=(
-                None if manifest.get("ent_coef") is None else float(manifest["ent_coef"])
-            ),
-            ref_model=ref_model,
-            kickstart_kl=kick_kl,
-            demo_bank=demo_bank,
-            demo_bc_coef=demo_coef,
-            demo_per_mb=demo_per_mb,
-            # ★ 取消接线（R2-5）：今天这条调用**没有**传它——不传则取消延迟永远是
-            # 「跑完才响应」。训练侧那条（`rl/stream.py`）传的是双缓冲预采回调，
-            # 与这里不是同一个调用点，别去动那一条。
-            on_epoch_done=_cancel_at_epoch_boundary if should_cancel is not None else None,
-        )
-    except ProtocolError:
-        raise
-    except JobCancelledError:
-        # 取消是**正常结局**（备份副本被首写锁定判负）：绝不能落到下面的
-        # `job_body_error`（它会把未知异常转成 ProtocolError ⇒ report_job_failure ⇒
-        # 训练停腿——把合法放弃报成确定性失败）。
-        raise
-    except Exception as e:
-        raise job_body_error("grad（PPO 更新）", e) from e
-    ppo_sec = round(time.time() - t_ppo, 1)
-    # P0.5：T_ppo 进传输账（与 T_in/T_out 同一条 `wire` 行 ⇒ 占比可复算，不用人肉拼日志）。
-    _wire_time(jid, "ppo", time.time() - t_ppo)
-    log(
-        f"job {jid}: PPO done in {ppo_sec}s, steps={total_steps} chunks={len(chunks)} kl={agg.get('kl')}"
-    )
-
-    # ---- 产物：weights_json（save_weights_json，D12/G1）+ _ppo_save tar（D5） ----
-    # XLA：先落图执行边界再物化回主机。否则 state_dict() / save_weights_json 读到的是
-    # 尚未执行的惰性图（权重是最新一轮 `mark_step` 时的快照，不是本轮终态）。
-    from ppo.common import _ppo_save, xla_mark_step
-
-    xla_mark_step(device_t)
-    # ⚠ 用 raw_model 而非 model：DP 包装的 state_dict 键带 "module." 前缀（已实证），
-    #   写出去会让 ckpt 与单卡路径互不兼容（课程 resume 会炸）。raw_model 与 DP 共享
-    #   同一批参数对象，.to("cpu") 对两者等价。
-    raw_model.to("cpu")
-    wj_path = job_dir / "weights.json"
-    save_weights_json(raw_model, str(wj_path))
-    ckpt_dir = job_dir / "ppo_final"
-    _ppo_save(str(ckpt_dir), raw_model, opt, int(manifest["epochs"]))
-    opt_tar_raw = pack_opt_tar(ckpt_dir)
-    opt_tar_b64 = encode_opt_tar(opt_tar_raw)
-    # M2 B3：把刚产出的 raw opt tar 写进 blob_cache（键 = sha256）——下一轮 hub 的
-    # opt_sha 由 verify_and_land 落盘的同一份原始字节算出，故同会话内 100% 命中。
-    _cache_blob(blob_root, hashlib.sha256(opt_tar_raw).hexdigest(), opt_tar_raw, log)
-
-    result = {
-        "job_id": jid,
-        "data_fp": manifest["data_fp"],
-        "init_weights_fp": manifest["init_weights_fp"],
-        "weights_json": encode_weights_json(wj_path.read_bytes()),
-        "opt_tar_b64": opt_tar_b64,
-        "agg": {
-            "policy": float(agg.get("policy", 0.0)),
-            "value": float(agg.get("value", 0.0)),
-            "entropy": float(agg.get("entropy", 0.0)),
-            "kl": float(agg.get("kl", 0.0)),
-            "kickstart": float(agg.get("kickstart", 0.0)),
-            "demo_bc": float(agg.get("demo_bc", 0.0)),
-            "mean_ret": float(agg.get("mean_ret", 0.0)),
-            "steps": int(total_steps),
-            "chunks": len(chunks),
-        },
-        "commit_echo": manifest["commit"],
-        "ppo_sec": ppo_sec,
-    }
-    if iter_info is not None:
-        # M3：节点自己跑的 rollout 的采集口径（协议层必校——hub 侧无本地 shard 可算）。
-        result["report"] = iter_info["report"]
-    result["wire"] = _wire_block(
+        job_dir=job_dir,
+        work_dir=work_dir,
+        manifest=manifest,
+        iter_info=iter_info,
+        blob_root=blob_root,
         payload_bytes=len(raw),
         payload_dl_sec=payload_dl_sec,
         unpack_sec=unpack_sec,
-        opt_restore_sec=opt_restore_sec,
-        grad_sec=ppo_sec,
-        blob_hits=blob_hits,
-        blob_miss_bytes=blob_miss_bytes,
         ts_code_bytes=ts_code_bytes,
         ts_code_hit=ts_code_hit,
-        rollout_sec=(iter_info or {}).get("rollout_sec"),
-        bun_version=(iter_info or {}).get("bun_version"),
+        device=device,
+        torch_threads=torch_threads,
+        preloaded=preloaded,
+        should_cancel=should_cancel,
+        on_ppo_start=on_ppo_start,
+        log=log,
     )
-    # 两遍收敛（同 echo 路径）：result_bytes 与自身体长自指，一遍差它的十进制位数。
-    result["wire"]["result_bytes"] = len(pack_result_v2(result))
-    result["wire"]["result_bytes"] = len(pack_result_v2(result))
     # ---- 半离线尾巴（kind=run）：本轮跑完 → 把计划里剩下的轮次自己跑完 ----
     # 位置在前面的自查**之前**：合并结果是「末轮形状 + iters 明细」，自查要用最终形状。
     if str(manifest["kind"]) == "run" and not echo:
@@ -1121,120 +702,6 @@ def run_job(
 _ACTIVE_CODE_SHA: str | None = None
 
 
-def _request_reload(restart_argv: list[str] | None, log=lambda msg: None) -> bool:
-    """热替换：有监督器 → 以 HOT_RELOAD_EXIT 干净退出，交监督器拉起新进程；无 → False。
-
-    为什么不再 os.execve（2026-09-11 线上事故）：notebook 里 worker_loop 跑在 kernel
-    进程内，execv 会**原地替换 kernel 镜像**——ipykernel 对 sys.stdout 的重定向对象
-    随之丢失（单元格输出直接断流，只剩 kernel server 的控制台能看见），且 ZMQ 执行
-    服务不再应答，Jupyter 判定 kernel 死。用户看到"自重启"后单元格没下文 → 按停止 →
-    SIGINT 打断正在跑的 worker → kernel 重启 → 云端会话报废（本次事故的完整链条）。
-
-    现统一契约：worker 以退出码 HOT_RELOAD_EXIT 退出，由 **监督器**（supervise_worker）
-    用同一套参数重新拉起子进程——fresh 进程里 sys.modules 必然为空，新代码一定生效；
-    监督器本身（notebook 的 kernel）不 execv、输出流不断、也不被判定死亡。
-
-    restart_argv 仍只认**显式传入**：notebook 里 sys.argv 是 kernel 自己的参数。
-    None = 没有监督器（裸 worker_loop 直调）→ 返回 False，调用方降级为提示人工重启。
-    """
-    if not restart_argv:
-        log("自重启不可用：未提供 restart_argv（无监督器可拉起新进程）")
-        return False
-    log(f"代码已变更 —— 以退出码 {HOT_RELOAD_EXIT} 交监督器重启（fresh 进程加载新代码）")
-    raise SystemExit(HOT_RELOAD_EXIT)
-
-
-def supervise_worker(
-    restart_argv: list[str],
-    *,
-    cmd: list[str] | None = None,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker-supervisor] {msg}", flush=True),
-) -> int:
-    """监督器：worker 跑在**子进程**里，热替换以 exit(HOT_RELOAD_EXIT) 请求重启。
-
-    - 输出转发：子进程 stdout/stderr → 本进程 stdout 逐行转发。notebook 里本函数在
-      kernel 进程内执行，转发让日志持续进单元格；CLI 下等价于直通。
-    - 热替换：子进程退 HOT_RELOAD_EXIT → 用同一套参数重新拉起（fresh 进程加载新代码）。
-      换代码从"打掉 kernel"变成一次无害的拉起重演，kernel/输出流永不中断。
-    - KeyboardInterrupt：先终止子进程再上抛（中断单元格不会留下孤儿 worker）。
-    - 返回子进程最终退出码（热替换已内部消化，不会带 86 返回）。
-
-    cmd：测试注入口（默认 [sys.executable, -u, -m, remote.worker, *restart_argv]）。
-    """
-    nn_root = str(Path(__file__).resolve().parents[1])  # remote/ -> nn-training/
-    if cmd is None:
-        cmd = [
-            sys.executable,
-            "-u",
-            "-m",
-            "remote.worker",
-            *(str(a) for a in restart_argv),
-        ]
-    while True:
-        env = dict(os.environ)
-        # 子进程要能 import remote.worker（notebook 的 sys.path 不进子进程，只能靠 PYTHONPATH）
-        env["PYTHONPATH"] = nn_root + os.pathsep + env.get("PYTHONPATH", "")
-        # 子进程 main() 看到该标记直跑 worker_loop，不再递归监督
-        env["REMOTE_WORKER_CHILD"] = "1"
-        log(f"spawn worker 子进程（{len(restart_argv)} 参数）")
-        proc = subprocess.Popen(
-            cmd,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-        try:
-            child_out = proc.stdout
-            if child_out is None:  # stdout=PIPE，结构化保证非空；只为让我 mypy 类型收窄
-                raise RuntimeError("supervise_worker: stdout=PIPE 却拿不到管道（不该发生）")
-            for line in child_out:  # `-u` 保证子进程每行即刷，转发不滞后
-                print(line, end="", flush=True)
-            rc = proc.wait()
-        except KeyboardInterrupt:
-            log("收到中断 —— 终止 worker 子进程")
-            try:
-                proc.kill()
-            except Exception:
-                pass
-            raise
-        if rc == HOT_RELOAD_EXIT:
-            log("worker 代码已变更 —— 重新拉起子进程加载新代码（输出流不中断）")
-            continue
-        return rc
-
-
-def _release_cloud_machine(
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
-) -> None:
-    """尽力真释放云机（§386，用户确认：worker 退出≠停机省钱）。
-
-    worker 是 supervise_worker 拉起的**子进程**，不在 IPython kernel 里——
-    `google.colab.runtime.unassign()` 需要 `get_ipython().kernel`，子进程里是 None。
-    所以写哨兵文件，由 notebook cell 的 keepalive 循环（跑在 kernel 里）检测并执行 unassign。
-
-    - Colab：写 /tmp/battle-halt-request 哨兵 → keepalive 检测 → kernel 里调 unassign()。
-    - 其它（Kaggle 等）：无释放 API——诚实提示必须人工在宿主页面断开/关闭会话。
-    任何失败都不抛（停机链路绝不能反过来崩 worker）。
-    """
-    sentinel = Path("/tmp/battle-halt-request")
-    try:
-        sentinel.write_text(str(time.time()))
-        log("已写停机哨兵 /tmp/battle-halt-request（notebook keepalive 将检测并释放实例）")
-    except OSError as e:
-        log(f"写停机哨兵失败：{e}——请手工断开宿主会话")
-    # 兼容：如果 worker 恰好跑在 kernel 里（单测 / 非 supervise 场景），直接试一次
-    try:
-        runtime_mod: Any = importlib.import_module("google.colab.runtime")
-        ipython_mod = importlib.import_module("IPython")
-        if ipython_mod.get_ipython() is not None:
-            log("检测到 Colab kernel 环境 → 直接调用 runtime.unassign()")
-            runtime_mod.unassign()
-            return
-    except Exception:
-        pass
 
 
 #: 预取传输账的合成 job id（预取不属于任何在跑的 job，但又必须记字节——

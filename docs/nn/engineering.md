@@ -26,10 +26,11 @@ wire 簇搬进 `remote/wire.py`（+8 例）、HTTP 传输核心搬进 `remote/ht
 作业工作区/TAR/git 物化搬进 `remote/job_fs.py`（+6 例）、BC 作业搬进 `remote/bc_job.py`（+6 例，
 底座拆完后业务簇可整块搬）、下载簇搬进 `remote/download.py`（+7 例）、作业取活/生命周期/
 回传面搬进 `remote/job_lifecycle.py`（+8 例，seam 最密的一刀）、`remote/` 依赖账本收口（+18 例）、
-拆掉账本里唯一那个延迟环（+11 例）——终值 **2359 passed / 3 skipped**。`remote/worker.py`
-3450 → **1805**（拆各簇；`wire` 289 / `http` 366 / `job_fs` 184 / `bc_job` 422 / `download` 313 /
-`job_lifecycle` 682）。最后一步把 `remote/run_loop.py` **1451 → 491**：半离线执行引擎（963 行）
-下沉成 `remote/plan_run.py`（**1035 行**，L2）——见下「拆环」节。
+拆掉账本里唯一那个延迟环（+11 例）、拆宿主（+14 例）——终值 **2374 passed / 3 skipped**。
+`remote/worker.py` 3450 → **1281**（拆各簇；`wire` 312 / `http` 366 / `job_fs` 184 / `bc_job` 422 /
+`download` 313 / `job_lifecycle` 682 / **`train_core` 516** / **`worker_proc` 153**）。
+`remote/run_loop.py` **1451 → 491**：半离线执行引擎（963 行）下沉成 `remote/plan_run.py`
+（**1035 行**，L2）——见下「拆环」节；worker 的宿主见「第九刀」节。
 
 ### 先量结构，再选刀口（拆前侦察，都是实测）
 
@@ -536,11 +537,80 @@ worker（L4，kind=run 尾巴）  run_loop（L5，CLI / 独立续跑 / 门面）
 
 门禁 **2349 → 2359 passed / 3 skipped**；mypy **383** 源文件绿；根 `bun run check` 2120 pass / 0 fail。
 
+### 第九刀（2026-09-24）：拆宿主 —— `run_job` 的**训练核**下沉 `train_core`，进程生命周期 → `worker_proc`
+
+上两节把 `remote/` 的依赖账本收口后，`worker.py` 余下的 **1805 行全是宿主**（`run_job` 752 /
+`worker_loop` 364 / `main` 127 / `_prefetch_fill` 69）。本刀按**一条真实调用链**切（不是按行数等分）：
+
+```
+run_job（作业壳）      网络 / 三道校验 / kind 分叉 / 冒烟回显 / 落盘 / 上报 / 半离线尾巴
+   └─ run_training_core() ──► train_core.py（L4）   课程→模型→opt→多卡→ref→demo→PPO→产物（427 行）
+worker 的进程生命周期 ─────► worker_proc.py（L0）  监督 / 热替换（exit 86）/ 云机停机（110 行）
+_wire_block（两个调用方） ─► wire.py（L1）          M0 wire 子字典（19 行）
+```
+
+`worker.py` **1805 → 1281**；`run_job` **752 → 325**（余下全是网络/校验/上报/尾巴）。
+
+#### ★ 先量接口，再下刀（AST 自由变量清点）
+
+搬 427 行最怕的是「漏传一个自由变量」——那些分支（TPU/XLA、cuda-dp、kickstart、demo）在
+测试里**跑不到**，漏了就是云机上炸。所以先把块内/块外的**每一个名字**算清楚（AST）：
+
+| 量到的量 | 值 |
+|---|---|
+| 块内自由变量（必须当参数） | **11** 个块外局部（`jid`/`job_dir`/`manifest`/`blob_root`/`iter_info`/`payload_*`/`unpack_sec`/`ts_code_*`…）+ **9** 个 `run_job` 形参 |
+| 逃出去的输出 | **2** 个（`result`、`course`）—— 其余 40+ 个赋值全部块内自用 |
+| `global` / `nonlocal` | 0（`_ACTIVE_CODE_SHA` 的重绑在壳里，不随簇走） |
+| 测试 patch 过这一族名字 | **0**（`_resolve_blob` / `time` / `pack_opt_tar` / `job_body_error` / `_wire_block` …）⇒ **seam-free** |
+
+**唯一一处语义改动**：核不再拿 payload 字节本身，只拿 `payload_bytes`（`raw` 留在壳里）——
+这正是「壳测好的事实下传、训练的活下沉」那条界。**漏传的检查交给了编译器**：ruff `F821`
+在生成后当场报出 `payload_bytes=len(raw)` 里那个不存在的 `raw`（实测命中，已修）。
+
+#### 选层：训练核是 **L4**，`worker` 因此升到 **L5**
+
+它依赖最深到 L3（`download`/`job_lifecycle`）⇒ 秩只能是 4（账本 `LAYERS` = **拓扑秩**）。
+插入它之后重算全表：`worker` 4→5、`run_loop`/`notebook_runtime`/`worker_server` 5→6、
+`offline_boot`/`push_bootstrap` 6→7、`notebook_boot` 7→8（**7 个数字 + 1 个新模块**，机械且被
+秩断言/分层断言双向护住）。`worker_proc` 纯 stdlib ⇒ 秩 0。
+
+#### seam / 源文本守卫
+
+本刀**零 `setattr` 迁移**（那一族名字没人 patch）。真正要改的是**读源码文本**的守卫——
+它们按行文字面找调用点，代码一搬家就「找不到」（这是好事：**响亮**而不是静默绿）：
+
+| 守卫 | 原来读 | 现在读 |
+|---|---|---|
+| `test_job_body_crash`（4 处 `job_body_error` 包装） | `worker.run_job` | `train_core.run_training_core` |
+| `test_tpu_backend_guard.TestWorkerWiring`（xla 接线 3 条） | `worker.py` | `train_core.py` |
+| `test_worker_device`（`torch.device(...)` 实参） | `worker.run_job` | 分叉前归一化仍查壳，两个 `torch.device` 调用点查核 |
+| `test_priority_schedule`（取消回调接线） | `worker.py` | `train_core.py`（壳里那份同名 `except` 是**另一件事**） |
+
+#### 新守卫（`tests/test_train_core_split.py`，14 例）+ 反探针
+
+定义唯一（壳里不许再有训练核的调用点，AST 判 `Call`）· **★ 接口双向一致**（调用点的位置实参
+个数与关键字集合 == 核的形参集合；漏一个就红——本刀最可能的失误形态）· 核里不得有 `**kwargs`
+吞接口 · 核不得 import `worker`/`run_loop`（含延迟）· 顶层零 torch/numpy/ppo **且**函数体内确实有 ·
+零模块级可变容器 · `worker_proc` 纯 stdlib + 四个转发名同一对象 + `_request_reload` 抛的正是
+`supervise_worker` 认的那个码 · `_wire_block` 定义唯一且在 `wire` · 账本层关系。
+**反探针七处全命中**（壳里冒出 `_resolve_blob` 调用 → 1 处红 · 调用点漏传 `log=log` → 1 处 ·
+核延迟 import `worker` → 核守卫 + 账本 3 处 · 核顶层 `import torch` → 1 处 · `worker` 重复实现
+`_wire_block` → 1 处 · `worker_proc` import `remote.download` → 1 处 · `train_core` 标成 L3 → 秩 +
+分层 2 处）。
+
+门禁 **2359 → 2374 passed / 3 skipped**；mypy **387** 源文件绿；根 `bun run check` 2120 pass / 0 fail。
+
+> 决策 → `DECISIONS.md` §2026-09-24-goalnn-godmodule-traincore；全文 → 本节。
+
 ### 未做完（S4 余下）
 
-`remote/` 内部**已零环**（见上「拆环」节），S4 余下是纯结构工作：
-`remote/worker.py`（**1805 行**；余下是宿主 `run_job` / `worker_loop` / `main` 与 `_prefetch_fill`
-等——**已无可整块搬的叶子簇**，再拆就是拆宿主）→ `hub_server` 其余路由组
+`remote/` 内部**已零环**（见「拆环」节），S4 余下是纯结构工作：
+`remote/worker.py`（**1281 行**：`worker_loop` 364 / `main` 127 / `_prefetch_fill` 69 / `run_job` 325）
+——下一刀是 **`worker_loop` 的「每 job 一轮」**（取活后的旁路线程组 + `run_job` + 回传落定，约 160 行）：
+它需要 `job_lifecycle`(L3) 与 `_prefetch_fill`，所以同样是**下沉到 L4**（新模块 `job_round`），
+但 **seam 很密**（`setattr(W, "job_ready"/"abandon_job"/"release_job"/"_release_cloud_machine"/
+"start_cancel_watcher"/"peek_jobs"/"download_payload"…)` 会被搬进新命名空间 ⇒ 全部要迁移或
+改成注入）。之后 → `hub_server` 其余路由组
 （`_get_*` 12 / `_post_*` 11 → 通用助手）→ 最后两个千行状态类（`_JobStore` / `_HubQueue`：
 拆 = 拆状态）。设计见 `plan/nn-training-refactor.md` §5.3。`TrainingSteps` 本体还剩 952 行 /
 20 方法（切法是「按一条真实调用链切」，不是按行数等分）。

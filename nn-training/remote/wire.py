@@ -47,6 +47,7 @@ __all__ = [
     "_note_rate",
     "_reroll_decision",
     "_wire_add",
+    "_wire_block",
     "_wire_bucket",
     "_wire_flush",
     "_wire_hit",
@@ -55,6 +56,28 @@ __all__ = [
     "_wire_time",
     "set_bulk_log",
 ]
+
+# ── M0 统一计量：worker 侧 `wire` 子字典（2026-09-24 从 `worker.py` 下沉）──
+def _wire_block(**over: object) -> dict:
+    """M0 统一计量：worker 侧 `wire` 子字典（全 additive——旧 hub 的 validate_result
+    不校验未知字段，旧读方忽略）。over 里 None 的键保留默认值（不把缺失写成 null）。"""
+    w: dict = {
+        "payload_bytes": 0,
+        "payload_dl_sec": 0.0,
+        "unpack_sec": 0.0,
+        "opt_restore_sec": 0.0,
+        "grad_sec": 0.0,
+        "blob_hits": 0,
+        "blob_miss_bytes": 0,
+        "result_bytes": 0,
+        # M3 kind=iter（其余 job 恒 0/False = 本轮没走这条线）；rollout_sec / bun_version
+        # 不在这里给默认值——缺席就代表「本轮没有节点侧 rollout」，不能写成 0 冒充。
+        "ts_code_bytes": 0,
+        "ts_code_hit": False,
+    }
+    w.update({k: v for k, v in over.items() if v is not None})
+    return w
+
 
 # ── 低速重抽（2026-09-20；plan/minimize-payload.plan.md §4.0 / M1）───────
 #: 坏签（连接抽签抽到慢连接）时**主动断开重发**：重抽成本 ≈1 s 建连，收益 ≈100 s。

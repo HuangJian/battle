@@ -87,9 +87,16 @@ def test_classifier_returns_exception_not_raises() -> None:
 
 
 def _run_job_node() -> ast.FunctionDef:
-    src = (ROOT / "remote" / "worker.py").read_text(encoding="utf-8")
+    """四处 `job_body_error` 包装的宿主：**训练核**（2026-09-24 S9 从 `run_job` 下沉）。
+
+    它们服务的是「跑一个轮次」那条链（opt/ref/demo 装载与 PPO 更新），所以随训练核搬到
+    `remote/train_core.py::run_training_core`——作业壳（`worker.run_job`）只剩网络/校验/上报。
+    """
+    src = (ROOT / "remote" / "train_core.py").read_text(encoding="utf-8")
     return next(
-        n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == "run_job"
+        n
+        for n in ast.parse(src).body
+        if isinstance(n, ast.FunctionDef) and n.name == "run_training_core"
     )
 
 
@@ -112,8 +119,8 @@ def test_run_job_wraps_restore_and_grad_phases() -> None:
     """四处包装必须在：opt/init 恢复、kickstart ref 装载、demo bank 装载、grad（PPO 更新）。
 
     少一处的症状都是**静默**的：那个阶段退回「一行云机日志 + 无限重领」，训练侧只剩超时
-    ——正是 §4 事故的形状。所以用调用点清单钉住（`run_job` 无法单测驱动，本仓既有同款
-    源码守卫：`tests/test_worker_device.py`）。
+    ——正是 §4 事故的形状。所以用调用点清单钉住（这条链无法单测驱动，本仓既有同款源码
+    守卫：`tests/test_worker_device.py`）。
     """
     phases = _job_body_error_call_phases(_run_job_node())
     assert len(phases) == 4, f"应有 4 处包装（restore×3 + grad），实得 {phases}"

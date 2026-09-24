@@ -2602,3 +2602,34 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
   kind=run 尾巴**立即** `RuntimeError`（不是静默少跑几轮）。
 - **门禁**：**2349 → 2359 passed / 3 skipped**；mypy **383** 源文件绿；根 `bun run check` 2120 pass / 0 fail。
 —— 全文（引擎/入口的职责划分 / 反探针清单 / 选层推导）→ `docs/nn/engineering.md` §23「拆环：半离线执行引擎下沉 `plan_run`」
+
+## §2026-09-24-goalnn-godmodule-traincore（2026-09-24，用户指令「拆 worker.py 的宿主：按一条真实调用链把 run_job / worker_loop 里的簇切出去」）
+
+- **背景**：S4 前八刀 + 账本收口后，`remote/worker.py` 余下 **1805 行全是宿主**（`run_job` 752 /
+  `worker_loop` 364 / `main` 127 / `_prefetch_fill` 69）——叶子簇已全搬完，再拆就是拆宿主。
+- **备选与否决**：① 按行数对半切——否（会把一条调用链切两半，两半都要读对方的局部量）；② 把
+  `run_job` 拆成 5-6 个同文件小函数——否（不降耦合，只把 752 行的直线变成 752 行的跳动）；
+  ③ 先拆 `worker_loop` 的「每 job 一轮」——缓（它需要 `job_lifecycle`(L3) 与 `_prefetch_fill`，
+  同属下L4，但 seam 很密：`setattr(W, "job_ready"/"abandon_job"/…)` 会被搬进新命名空间 ⇒
+  那是单开一刀，本刀先切 seam-free 的那一半）。
+- **决定**：按**一条真实调用链**切，共三块（`worker.py` 1814 → **1281**）：
+  ① **训练核**（`run_job` 650-1076，427 行）→ 新 `remote/train_core.py::run_training_core`：
+     课程上下文/reward_fn → torch+种子 → 模型构建（`opt_init` 优先）→ opt 内容寻址解析 → 多卡 →
+     kickstart ref → demo bank → PPO → 产物/`result`；
+  ② **进程生命周期**（`HOT_RELOAD_EXIT` / `_request_reload` / `supervise_worker` /
+     `_release_cloud_machine`）→ 新 `remote/worker_proc.py`（纯 stdlib，**L0**）；
+  ③ `_wire_block`（两个调用方都要）→ `remote/wire.py`（L1）。
+- **接口（先量后下刀，AST 清点）**：块内自由变量 = 11 个块外局部 + 9 个 `run_job` 形参；逃出去的
+  输出只有 **2** 个（`result` / `course`）；`global`/`nonlocal` **0**；测试 patch 过这一族名字
+  **0 个** ⇒ **seam-free**。**唯一语义改动**：核不再拿 payload 字节，只拿 `payload_bytes`
+  （“壳测好的事实下传、训练的活下沉”就是这条界）；漏传的检查交给了编译器——ruff `F821` 当场报出
+  `len(raw)` 里那个不存在的 `raw`。
+- **选层**：核依赖最深到 L3（`download`/`job_lifecycle`）⇒ 拓扑秩只能是 **L4**；`worker` 因此升
+  **L5**，其余 6 个下游各升一层（手工重算 + 秩/分层两条断言双向护住）。`worker_proc` = **L0**。
+- **违反后果**：壳里再出现训练核的调用点 / 调用点漏传一个关键字 / 核反向 import 宿主 / 核顶层
+  拉 torch / `worker_proc` 引入 `remote.*` / `_wire_block` 被抄第二份——六类都会在**提交时**红
+  （新守卫 14 例 + 反探针七处全命中）。读源码文本的四个老守卫（`test_job_body_crash` /
+  `test_tpu_backend_guard` / `test_worker_device` / `test_priority_schedule`）随本次改指新模块：
+  它们「找不到就红」的性质正是本刀需要的那种响亮。
+- **门禁**：**2359 → 2374 passed / 3 skipped**；mypy **387** 源文件绿；根 `bun run check` 2120 pass / 0 fail。
+—— 全文（接口清点表 / 分层级联 / 源文本守卫迁移表）→ `docs/nn/engineering.md` §23「第九刀：拆宿主」

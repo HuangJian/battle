@@ -119,10 +119,15 @@ class TestSpeedProbe:
 
 
 class TestWorkerWiring:
-    """源码守线：tpu 分支必须报指纹并拒跑（这条接线掉了，上面所有判据都是空转）。"""
+    """源码守线：tpu 分支必须报指纹并拒跑（这条接线掉了，上面所有判据都是空转）。
+
+    2026-09-24（S9）：tpu/xla 接线随**训练核**搬到 `remote/train_core.py`（它本来就在
+    run_job 的模型构建那一段里；`worker.py` 现在是作业壳，一点 xla 都不碰）。
+    逐条接线本身没变，只换了被读的模块。
+    """
 
     def setup_method(self) -> None:
-        self.src = (ROOT / "remote" / "worker.py").read_text(encoding="utf-8")
+        self.src = (ROOT / "remote" / "train_core.py").read_text(encoding="utf-8")
 
     def test_tpu_branch_logs_fingerprint_and_speed(self) -> None:
         assert "xla_fingerprint(device_t)" in self.src
