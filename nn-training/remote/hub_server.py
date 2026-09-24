@@ -72,7 +72,10 @@ import random
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
+import zipfile
 from collections import namedtuple
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -88,6 +91,7 @@ from remote._port_guard import ensure_port_free
 # 产物账本行 → 课程账本行的搬运**只在 remote.artifacts 实现一份**（人工导入与实时补传共用）：
 # 两份翻译必然漂开，而「两腿同字段」正是控制台那张表存在的意义。
 from remote.artifacts import ArtifactStore, ledger_row_from_metrics
+from remote.net_http import urlopen as _net_urlopen
 from remote.protocol import (
     AUTH_HEADER,
     CLAIM_MODE_BACKUP,
@@ -100,6 +104,7 @@ from remote.protocol import (
     COURSE_MODES,
     FAIL_BODY_MAX,
     FAIL_NAME,
+    INIT_WEIGHTS_NAME,
     OFFLINE_ARTIFACT_BODY_MAX,
     OFFLINE_ARTIFACT_PATH,
     OFFLINE_CAP_HEADER,
@@ -157,6 +162,136 @@ CF_SOURCE_HEADER = "CF-Connecting-IP"
 SEND_TIMEOUT_SEC = 60.0
 #: 发送切片（字节）：分片写让上面的超时**每片**都生效（一次大 write 只有整体超时）。
 SEND_CHUNK = 256 * 1024
+
+# ── 任务包新鲜度门（plan/offline-rerun-local-first §8，2026-09-24）────────────────
+#
+# 为什么 hub 要管这个：`GET /offline/task-pack` 原来只递文件，而**课程状态会前进、包不会**
+# （回传轮把 `tmp/<课>/weights.json` 推着走，`_land_offline_round_extras`）。云机整机重启、
+# 产物全丢时，只要 resume 锚点那条腿断了，兜底起点就是**开课时那份旧包** —— 从旧起点重跑
+# 几十上百轮，白烧算力。过期的包比没有包更危险（404 只让云机多等一拍），所以宁可偏严。
+
+#: 包索引名（与 `remote/bundle.py::BUNDLE_INDEX` 逐字相同；本模块不 import bundle 以免边，测试守）。
+TASK_PACK_INDEX_NAME = "task.json"
+#: 控制台地址（触发「重导任务包」用）：**调用时读** env（测试要能 monkeypatch）。
+CONSOLE_URL_ENV = "BCITY_CONSOLE_URL"
+DEFAULT_CONSOLE_URL = "http://127.0.0.1:8900"
+#: 触发控制台的超时（秒）：控制台不在本机/不可达时必须**快速降级**，不能把取包请求拖住。
+TASK_PACK_TRIGGER_TIMEOUT_SEC = 8.0
+#: 同一门课两次触发的最小间隔（秒）：防多台云机连打，也防"刚导完又判过期"的抖动。
+TASK_PACK_STALE_THROTTLE_SEC = 600.0
+#: 连续触发上界：到顶仍判过期 ⇒ 照发旧包 + 告警（**不 brick 云机**）。
+#: 为什么必须有上界：只要还有别的 worker 在回传，`weights.json` 就一直在动 ⇒ 判据是**移动靶**，
+#: 没有上界时云机会被 409 卡到 deadline（30 分钟）然后 `SystemExit`（评审 F5）。
+TASK_PACK_STALE_TRIGGER_LIMIT = 2
+#: 同课程的触发账本（进程内；hub 重启即清——与租约同风格，重启后重触发一次无害）。
+_TASK_PACK_TRIGGERS: dict[str, dict[str, float]] = {}
+_TASK_PACK_LOCK = Lock()
+
+
+def _hub_log(msg: str) -> None:
+    """hub 侧一行日志（带时刻；与文件里其它 `print` 同形）。"""
+    print(f"[{time.strftime('%H:%M:%S')}] [hub-server] {msg}", flush=True)
+
+
+def _file_sha256(path: Path) -> str:
+    """整个文件（可读时）的 sha256；读不到（不存在/权限）→ `""` = 不参与判定。"""
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError:
+        return ""
+    return h.hexdigest()
+
+
+def task_pack_stale_reason(*, pack_init_sha: str, active_sha: str) -> str:
+    """包是否过期（纯函数，§8.2 主判据）。
+
+    判据：`sha256(tmp/<课>/weights.json)` ≠ 包内 `init_weights.json` 的 sha ⇒ 包的起点已不是
+    课程当前起点。**两侧任何一侧读不到 ⇒ 返回 `""`（不判过期，照发）**：本端点首先是文件
+    递送，判不了就不该把云机拦在门外（评审 F7）。
+    """
+    if not pack_init_sha or not active_sha:
+        return ""
+    if pack_init_sha == active_sha:
+        return ""
+    return (
+        f"包起点 sha12={pack_init_sha[:12]}… ≠ 课程当前权重 sha12={active_sha[:12]}…"
+    )
+
+
+def decide_task_pack(
+    *,
+    stale: str,
+    secs_since_trigger: float,
+    triggers: int,
+    throttle_sec: float = TASK_PACK_STALE_THROTTLE_SEC,
+    limit: int = TASK_PACK_STALE_TRIGGER_LIMIT,
+) -> str:
+    """过期时该干什么（纯函数）：`serve` / `trigger` / `throttled` / `give_up`。"""
+    if not stale:
+        return "serve"
+    if triggers >= limit:
+        return "give_up"
+    if secs_since_trigger < throttle_sec:
+        return "throttled"
+    return "trigger"
+
+
+def pack_index_part_sha(pack_path: Path, part: str) -> str:
+    """从包的 `task.json` 里取某件的 sha256（**不解压整包**；读不到 → `""`）。"""
+    try:
+        with zipfile.ZipFile(pack_path) as zf:
+            idx = json.loads(zf.read(TASK_PACK_INDEX_NAME).decode("utf-8"))
+    except Exception:
+        return ""
+    parts = idx.get("parts") if isinstance(idx, dict) else None
+    rec = parts.get(part) if isinstance(parts, dict) else None
+    return str(rec.get("sha256", "") or "") if isinstance(rec, dict) else ""
+
+
+def reset_task_pack_triggers(course: str = "") -> None:
+    """清触发账本（判据回到"新鲜"时/测试用）：`course=""` 清全部。"""
+    with _TASK_PACK_LOCK:
+        if course:
+            _TASK_PACK_TRIGGERS.pop(course, None)
+        else:
+            _TASK_PACK_TRIGGERS.clear()
+
+
+def trigger_task_bundle_export(course: str, log=_hub_log) -> tuple[bool, str]:
+    """POST 控制台 action `exportTaskBundle`（控制台是**唯一打包者**，hub 只触发）。
+
+    返回 `(是否算触发成功, 原因)`。`busy`（上一次导出还在跑 ⇒ HTTP 409）**算触发成功**
+    ——它本来就会产出新包。控制台不可达/只读门控（403）⇒ 不算，调用方降级成"请手动导出"。
+    回环地址经 `remote.net_http.urlopen`（用户级 HTTP_PROXY 会认不出 `127.*`，实测踩过）。
+    """
+    base = os.environ.get(CONSOLE_URL_ENV, "").strip() or DEFAULT_CONSOLE_URL
+    body = json.dumps({"course": course}, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        base.rstrip("/") + "/api/exportTaskBundle",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with _net_urlopen(req, timeout=TASK_PACK_TRIGGER_TIMEOUT_SEC) as resp:
+            resp.read()
+    except urllib.error.HTTPError as e:
+        if e.code == 409:
+            log(f"task-pack {course}: 控制台说上一次导出还在跑（HTTP 409）——视为已触发")
+            return True, "busy"
+        if e.code in (401, 403):
+            log(f"task-pack {course}: 控制台拒绝触发（HTTP {e.code}，只读门控？）——降级为手动导出")
+            return False, f"http {e.code}"
+        log(f"task-pack {course}: 控制台触发失败 HTTP {e.code}——降级为手动导出")
+        return False, f"http {e.code}"
+    except Exception as e:
+        log(f"task-pack {course}: 控制台不可达（{type(e).__name__}: {e}）——降级为手动导出")
+        return False, f"{type(e).__name__}"
+    log(f"task-pack {course}: 已触发控制台重导（旧包已作废，窗口期本端点会 404）")
+    return True, "ok"
 #: 打「发送完成」日志的最小 body（字节）：小 JSON 不打（高频），payload/code 这类必打。
 SEND_LOG_MIN_BYTES = 256 * 1024
 
@@ -3251,6 +3386,12 @@ class HubHandler(BaseHTTPRequestHandler):
                 404,
             )
             return
+        # 新鲜度门（§8）：旧包比没包更危险（云机会从旧起点重跑几十轮）⇒ 过期就触发重导 + 409；
+        # 判定不了（包不是 zip / 没索引 / 课程还没权重）⇒ 照发——本端点首先是文件递送。
+        gate = self._task_pack_gate(course, p)
+        if gate is not None:
+            self._json(gate[0], gate[1])
+            return
         try:
             data = p.read_bytes()
         except OSError as e:
@@ -3262,6 +3403,73 @@ class HubHandler(BaseHTTPRequestHandler):
             flush=True,
         )
         self._bytes(data, 200, "application/zip", filename=p.name)
+
+    def _task_pack_gate(self, course: str, p: Path) -> tuple[dict, int] | None:
+        """过期门（plan §8.3）：返回 `(响应体, 状态码)` = 该拒；`None` = 照发。
+
+        四种结局都在这里定死（纯判据在 `decide_task_pack`/`task_pack_stale_reason`）：
+        `trigger` 触发重导后 409 ↦ `throttled` 窗内不再触发、直接 409 ↦ `give_up` 到顶
+        **照发 + 告警**（不把云机 brick 到 deadline）↦ 判不了/新鲜：`None`。
+        """
+        pack_init = pack_index_part_sha(p, INIT_WEIGHTS_NAME)
+        # 活动权重就在包的**同一个课程目录**（`<traj>/<课>/weights.json`，回传轮推进它）：
+        # 从包路径反推而非查 store —— 未发现的课程名也能判（`task_pack_path` 也是这么算的）。
+        active_sha = _file_sha256(p.parent / _JobStore.ACTIVE_WEIGHTS_NAME)
+        stale = task_pack_stale_reason(pack_init_sha=pack_init, active_sha=active_sha)
+        if not stale:
+            reset_task_pack_triggers(course)  # 判据回到"新鲜" ⇒ 计数清零
+            return None
+        now = time.time()
+        with _TASK_PACK_LOCK:
+            st = _TASK_PACK_TRIGGERS.setdefault(course, {})
+            # 显式传两个旋钮（不靠默认参数）：默认值在 import 时绑定，改不了、也不该被改。
+            verdict = decide_task_pack(
+                stale=stale,
+                secs_since_trigger=(now - float(st.get("last", 0.0))) if st.get("last") else 1e9,
+                triggers=int(st.get("count", 0)),
+                throttle_sec=TASK_PACK_STALE_THROTTLE_SEC,
+                limit=TASK_PACK_STALE_TRIGGER_LIMIT,
+            )
+            if verdict == "trigger":
+                # 先记账再发请求：并发请求里只有第一个真去触发（窗内其余看到 throttled）。
+                st["last"] = now
+                st["count"] = int(st.get("count", 0)) + 1
+            warn_once = verdict == "give_up" and not st.get("warned")
+            if warn_once:
+                st["warned"] = 1.0
+        if verdict == "trigger":
+            ok, why = trigger_task_bundle_export(course)
+            detail = (
+                "已触发控制台重导，请稍后重试"
+                if ok
+                else f"控制台不可达/不接受触发（{why}）：请到控制台点一次「导出任务包」，稍后重试"
+            )
+            return (
+                {
+                    "error": f"任务包已过期（{stale}）——{detail}",
+                    "course": course,
+                    "stale": True,
+                    "triggered": ok,
+                },
+                409,
+            )
+        if verdict == "throttled":
+            return (
+                {
+                    "error": f"任务包已过期（{stale}）——刚刚已触发过重导，请稍后重试",
+                    "course": course,
+                    "stale": True,
+                    "triggered": True,
+                },
+                409,
+            )
+        # give_up：到上界仍过期 ⇒ 照发旧包（起点仍由 resume 锚点兜）——把保险丝说出来。
+        if warn_once:
+            _hub_log(
+                f"task-pack {course}: 连续触发 {TASK_PACK_STALE_TRIGGER_LIMIT} 次仍判过期"
+                f"（{stale}）——先照发旧包（云机侧靠 resume 锚点续跑），不再刷触发"
+            )
+        return None
 
     def _get_offline_resume(self) -> None:
         """`GET /offline/resume?course=<课>`：递「最新同轮齐全的续跑锚点」元信息（2026-09-22）。

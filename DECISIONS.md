@@ -2329,3 +2329,31 @@ worker 侧五源：payload → `blob_cache` → preloaded → `GET ?name=init` �
 保留 `model.pt` 让旧 worker 不炸 · 给 `_resolve_blob` 加 `cache` 开关。
 **升级顺序**：停 worker → 升 hub → 升 worker（禁半套回退；混跑时旧 hub + 换机必然响亮失败）。
 —— 全文（背景 / 实测量 / 五源 / 顺序 / 落地差异 / 判据 / 未决）→ `docs/nn/remote-transport.md` §40 · 锚 `## §40`
+
+## §2026-09-24-goalnn-offline-local-first（2026-09-24，plan/offline-rerun-local-first.plan.md）
+
+**重跑离线 cell 时，起点、计划、代码一律以「机器上已经跑过的那份产物」为准**。决策与实现都落在
+`remote/offline_boot.py`（notebook 每次会话从 GitHub raw 刷新它），**不碰 `run_loop`/`bundle` 的导入语义**。
+判据（`local_artifacts`）：产物目录三件齐全（`state.json` + `plan.json` + `manifest.json`）⇒ **本机优先**：
+`run_loop` 的 argv **不带 `--bundle`**（`--artifacts` 单用），包只当代码/TS 的**备源**；取包改走
+`obtain_pack(optional=True)`（只试一次 hub、取不到返回 `None`、不弹上传框、**不 `SystemExit`**）⇒ 本机有
+进度时不再为取包白等 30 分钟。`CFG.force_pack=true` 或显式 `CFG.task_zip` = 显式老行为（包覆盖计划/清单）。
+有 `state.json` 而缺计划/清单 ⇒ **响亮拒**（让包补齐会重置本机 state 并**重跑**已跑过的 `it-NNN`）。
+代码/TS「跟着产物走」：`<dest>/code.zip` → 包 → hub `/code` 逐候选用 **manifest 的 sha** 选中，全部对不上
+⇒ 拒（不写 `CODE_DIR`）；选中字节 ≠ 现盘 `<dest>/code.zip` 时**用同 sha 副本修复**（`run_loop` 读的是那份）。
+**为什么决策不住在 `run_loop`/`bundle`**：那两份来自**代码快照**（= 本机优先要保护的那份，可能很旧），
+新参数传给旧快照要么 argparse 崩、要么静默退化 ⇒ 跨层 version skew。**不变式**：同一进程里住着
+① raw 刷新的 `offline_boot.py` 与 ② 产物 `code.zip` 的 `remote.*`，跨这条边界只允许走两条腿都认的东西
+（argv/`--artifacts`），不得新增只有新代码认识的参数。
+**§8 附则（云机重启 + 包必须跟课程状态走）**：`GET /offline/task-pack` 递包前判
+`sha256(tmp/<课>/weights.json)` 是否等于包内 `init_weights.json` 的 sha（导出本来就是 `args.out` 的原字节，
+判据可满足）；过期 ⇒ 触发控制台 action `exportTaskBundle`（控制台是唯一打包者）+ **409**（含节流 600s、
+连续触发上界 2）；到上界仍过期 ⇒ **照发旧包 + 告警**（不把云机 brick 到 deadline，起点仍由 resume 锚点兜）；
+控制台不可达/只读门控 ⇒ 降级 409+指引；**判不了（索引不可读/课程无权重）⇒ 照发**。
+**被否决**：`bundle.preserve_existing` + `safe_extract_zip(skip_existing)` + `run_loop --force-pack`
+（跨层 version skew；逐件对账读的是**落点**，保留件必然与包索引不符 ⇒ 第一次真实重跑就 `ProtocolError`；
+`skip_existing` 会填补 `code.zip`/`it-N/weights.json` ⇒ 包代码 + 本机 manifest 混血，报错还指向"传输损坏"）·
+hub 自己重打包（造第二份打包逻辑）· 进度停滞时自动清空 `dest` 重开（**绝不**静默重跑）。
+**违反后果**：按包覆盖计划 ⇒ 从旧起点重跑几十上百轮（白烧算力，本条目要修的就是它）；
+把进度停滞当成"没什么可做" ⇒ 人看不出下一步是清目录还是等新包。
+—— 全文（现状七环 / 判定表 / 评审 F1–F8 处置 / §8 判据与上界）→ `docs/nn/remote-transport.md` §41 · 锚 `## §41`

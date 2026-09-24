@@ -476,6 +476,52 @@ def test_standalone_resume_continues_without_duplicate_rows(tmp_path: Path) -> N
     assert json.loads((art / ArtifactStore.STATE_NAME).read_text())["state"] == "complete"
 
 
+def test_main_accepts_artifacts_only_and_leaves_the_local_plan_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """本机优先的真入口：`--artifacts` **单用**是合法的，且不 import 包 ⇒ 本机 plan/manifest 不动。
+
+    离线 notebook 的本机优先路径就是这条 argv（不传 `--bundle`）——它以前不存在
+    （`--bundle` 是必经之路），所以这条断言是「本机优先」的地基（plan §4.1 第 3 条）。
+    """
+    _plan, _m, _fake, _result, art = _run(tmp_path)  # 一份完整产物
+    plan_before = (art / ArtifactStore.PLAN_NAME).read_bytes()
+    man_before = (art / ArtifactStore.MANIFEST_NAME).read_bytes()
+    seen: dict[str, Any] = {}
+
+    def spy(*_a: Any, **kw: Any) -> dict[str, Any]:
+        seen.update(kw)
+        return {"it_end": 3, "run_state": "noop", "artifacts": {"dir": str(art), "zip": "x"}}
+
+    monkeypatch.setattr(run_loop_mod, "run_standalone", spy)
+    assert run_loop_mod.main(["--artifacts", str(art)]) == 0
+    assert Path(str(seen["artifacts_dir"])) == art
+    assert seen["plan"] and seen["plan"]["end_it"] > 0, "计划/清单必须从产物目录读"
+    assert (art / ArtifactStore.PLAN_NAME).read_bytes() == plan_before
+    assert (art / ArtifactStore.MANIFEST_NAME).read_bytes() == man_before
+
+
+def test_drive_says_the_local_segment_is_done_not_just_noop(tmp_path: Path) -> None:
+    """G3：`todo` 空**且** `start_from >= end_it` ⇒ 文案要点明「本机段落已完成」与下一步。
+
+    两种「空 todo」原来共用一句「无事可做」：重跑 cell 的人看不出下一步是「清目录/等新包」
+    还是「真的什么都不用做」（plan/offline-rerun-local-first §4.2）。
+    """
+    _plan, _m, _fake, _result, art = _run(tmp_path)  # 整段已跑完
+    logs: list[str] = []
+    run_standalone(
+        artifacts_dir=art,
+        max_iters=0,
+        code_cache_dir=_warm_code_cache(tmp_path),
+        run_job_fn=_FakeRunJob(tmp_path),
+        log=logs.append,
+    )
+    hit = [m for m in logs if "段落已完成" in m]
+    assert hit, logs
+    assert "清空" in hit[0] and "force_pack" in hit[0], hit
+    assert not any("无事可做" in m for m in logs), "已完成 ≠ 无事可做（两种空必须分开说）"
+
+
 def test_reclaim_skips_iterations_already_in_artifacts(tmp_path: Path) -> None:
     """同 job 重领（产物跑到一半被回收）：从产物接上，锚点轮不重复记账。"""
     plan, m, _fake, _r, art = _run(tmp_path, max_iters=2)

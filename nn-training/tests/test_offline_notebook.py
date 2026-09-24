@@ -33,6 +33,7 @@ CFG_KEYS = (
     "hub_url",
     "ts_authkey",
     "task_zip",
+    "force_pack",
     "wait_pack_sec",
     "prompt_upload",
     "hub_tries",
@@ -132,7 +133,7 @@ def test_run_reads_secrets_first_at_runtime(tmp_path: Path, monkeypatch: pytest.
         order.append(f"secret:{key}")
         return "tok" if key == "HUB_TOKEN" else ""
 
-    def spy_obtain(cfg: dict, creds: dict, log, work, stop=None):
+    def spy_obtain(cfg: dict, creds: dict, log, work, stop=None, **kw):
         order.append("obtain_pack")
         assert creds["HUB_TOKEN"] == "tok", "取包时凭据还没就绪 —— 时序反了"
         raise SystemExit("stop-here")

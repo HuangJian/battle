@@ -7,6 +7,92 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §41 离线 cell 重跑以本机产物为准 + hub 递包前判新鲜度（plan/offline-rerun-local-first.plan.md，2026-09-24）
+
+用户 2026-09-24 口径两条：①「停止 cell 后再 run，应该要能接着机器上已经跑过的 it 继续跑，而不是从 hub 取
+（可能过时的）任务包」；②「即使云机重启、之前的工作目录全丢，重新请求离线任务包时，hub 端也要基于课程的
+**最新状态**重新打包（可能开课后已有离线 worker 回传了很多轮权重），避免重复训练浪费算力」。
+
+### 现状（为什么用户会有①的体感）
+
+起点计算（`run_standalone` 的 `start_from = state.last_it`）本来就是本机优先，坏的是另外三环：
+`run_one_course` 无条件先取包（`wait_pack_sec` 缺省 **1800s**，等不到就 `SystemExit`）· `ensure_code`
+无条件用**包里**的代码覆盖运行时 · argv 恒带 `--bundle` ⇒ `import_bundle` 无条件解压 ⇒ **包覆盖本机的
+`plan.json`/`manifest.json`**（段参数、`end_it`、`code_sha256` 全换成包里那份）。所以真因是
+「计划/代码被包改写 + 白等取包」，不是起点算错。
+
+### 决定
+
+1. **判据 `offline_boot.local_artifacts(dest)`**：`state.json` + `plan.json` + `manifest.json` 三件齐全
+   ⇒ 本机优先。三件都要（`run_loop.load_planned_manifest` 就是这么判的）。
+2. **本机优先 = argv 不带 `--bundle`**（`build_run_argv(local_first=True)` ⇒ `--artifacts` 单用；
+   `run_loop.main` 一直允许它，只是此前没人走）。包降级为**代码/TS 的备源**，不再参与计划/清单。
+3. **取包变可选**：`obtain_pack(optional=True)` —— `wait_s` 归零、不弹上传框、取不到返回 `None`（**不抛**；
+   `0s` 的既有语义是"不等待，立刻报错"，与本模式无关）。本机有进度时不再为取包白等。
+4. **半截产物目录响亮拒**：有 `state.json` 而缺计划/清单 ⇒ 拒（两条出路：补回缺件 / 清空 `dest`）。
+   理由：让包补齐会走 `ArtifactStore.start` 的"plan_sha/run_id 不符 ⇒ 重开一段"分支 ⇒ 本机 `it-NNN`
+   被**重跑覆盖**。绝不静默重跑。
+5. **代码/TS 跟着产物走**（`ensure_code` / `ensure_ts_tree`）：候选 = `<dest>/code.zip` → 包 → hub `/code`，
+   逐候选用 **`<dest>/manifest.json` 的 `code_sha256`** 选中；全部对不上 ⇒ 拒且**不写 `CODE_DIR`**；
+   选中字节 ≠ 现盘 `<dest>/code.zip` ⇒ **用同 sha 副本修复**它（`run_loop` 读的是那份：
+   `_read_opt_file(root, "code.zip")`；不修会在 worker 侧报"传输损坏"，一条指向错误原因的报错）。
+   TS 同规（`ts_code_sha256`），已有 `ts_code/` 就直接用、不重解。
+6. **`CFG.force_pack` / `CFG.task_zip` = 显式老行为**（包覆盖计划/清单，日志写明本机 it 与计划区间）。
+   `CFG.force_pack` 是本 plan 新加的 notebook 键（`tests/test_offline_notebook.py` 的 `CFG_KEYS` 守着）。
+7. **G3 文案**（`run_loop._drive`）：`todo` 空时区分「本机段落已完成（it{N} ≥ end_it{M}）——要用新段请清空
+   产物目录 / 等新包（或置 `CFG.force_pack`）」与「计划内的轮次都已在产物里——无事可做」。
+8. **为什么决策住在 `offline_boot` 而不是 `run_loop`/`bundle`**（评审 F1，P0）：notebook 每次会话从
+   **GitHub raw 刷新** `offline_boot.py`（+`tailscale_boot.py`），而 `remote.run_loop`/`remote.bundle` 来自
+   **代码快照**（`ensure_code` 解出的 `code.zip`）——正是本机优先要保护的那份，可能很旧。把新开关写进
+   `run_loop` 会在**本 plan 要救的那台机器上恰好不生效**（旧快照 = 老实现），而新 flag 传给旧
+   `run_loop.main` 直接 `unrecognized arguments` 崩。
+   **不变式（三份代码）**：同一进程里住着 ① raw 刷新的 `offline_boot.py` 与 ② 产物 `code.zip` 的 `remote.*`；
+   跨这条边界只允许走两条腿都认的东西（argv / `--artifacts`），**不得**新增只有新代码认识的参数。
+
+### 被否决（评审 F3/F4 的现场证据）
+
+`bundle.preserve_existing` + `safe_extract_zip(skip_existing)` + `run_loop --force-pack` 一并砍掉：
+(i) **跨层 version skew**（见上）；(ii) `import_bundle` 的逐件对账读的是**落点文件**（`bundle.py` 的
+`f = root/name; raw = f.read_bytes()`），保留件按定义与包索引不符 ⇒ 第一次真实重跑就
+`ProtocolError("… 与索引不符（搬运截断/损坏？）——拒收")`；(iii) `skip_existing` 只跳**已存在**件，
+缺失件仍会被包写入（`code.zip`/`it-N/weights.json`）⇒「本机 manifest + 包里代码」混血，而失败现场是
+worker 侧 `RetryableError("code_sha256 不匹配——传输损坏")`（白烧重试后死于误导性文案）。
+另外：进度停滞时**自动清空 `dest` 重开**也被否决（那就是静默重跑）。
+
+### §8 附则：`GET /offline/task-pack` 的新鲜度门
+
+判据（`hub_server.task_pack_stale_reason`）：`sha256(tmp/<课>/weights.json)` ≠ 包内 `init_weights.json`
+的 sha ⇒ 过期。**可满足性有据**：导出就是 `init_weights_path=args.out` 的**原字节**，而课程 `out` 恒为
+`tmp/<课>/weights.json`（`_land_offline_round_extras` 推进的同一个文件）。
+决策（`decide_task_pack`，纯函数）：`trigger`（触发控制台 action `exportTaskBundle` —— 控制台是唯一打包者，
+hub 只触发；`remote/net_http.urlopen` 保证回环不走代理）⇒ 409「已触发重导，请稍后重试」；`throttled`
+（同课 600s 窗内不重复触发）⇒ 409；`give_up`（连续触发上界 **2** 次仍过期）⇒ **照发旧包 + 一行告警**；
+**判不了（索引不可读 / 课程还没权重）⇒ 照发**（本端点首先是文件递送）。
+* **为什么必须有上界**：只要还有别的 worker 在回传，`weights.json` 就一直在动 ⇒ 判据是**移动靶**；
+  没有上界时云机会被 409 卡到 `wait_pack_sec`（30 分钟）然后 `SystemExit` —— 那就从"白烧算力"变成
+  "白烧整台机器"。到顶照发时起点仍由 resume 锚点兜（包与锚点互补，起点 = max(包 it, 锚点 it)）。
+* **为什么不 hub 自己重打包**：那会造出与 `run_rl --export-bundle` 分叉的第二份打包逻辑（原注释"不造第二份
+  真相"）。打包只有一个产地 = 控制台/python 侧；hub 只触发。
+* **404 窗口是刻意的**：重导先作废旧包（挪进 `stale-packs/`），窗口内取包会 404 —— 这正是"不拿旧包"的代价；
+  重导失败有 `restoreTaskBundle` 把旧包放回。
+* **409 的正文要到云机日志**：`offline_boot.fetch_task_pack` 为 409 单开一支，把正文里的 `error` 打出来
+  （原来只打一个 code，排障等于没有信息）。
+
+### 证据（真代码 / 测试）
+
+* `nn-training/remote/offline_boot.py`：`local_artifacts` / `describe_local_vs_pack` / `obtain_pack(optional=)` /
+  `build_run_argv(local_first=)` / `ensure_code`（三源 + sha 门 + 修复）/ `ensure_ts_tree` / `_http_error_body`，
+  以及 `run_one_course` 的判定表；顺带修掉一个既有崩溃：`live_backfeed=False`（或 hub 不可达）时 `tok_file`
+  从未赋值却传进 `build_run_argv` ⇒ `NameError`（纯离线盘一直没跑到）。
+* `nn-training/remote/run_loop.py`：`_drive` 的两种"空 todo"文案（G3）。`--bundle` 分支与 `bundle.py` **未改**。
+* `nn-training/remote/hub_server.py`：`TASK_PACK_INDEX_NAME` / `CONSOLE_URL_ENV` / `TASK_PACK_STALE_THROTTLE_SEC` /
+  `TASK_PACK_STALE_TRIGGER_LIMIT` / `task_pack_stale_reason` / `decide_task_pack` / `pack_index_part_sha` /
+  `trigger_task_bundle_export` / `reset_task_pack_triggers` + `_get_task_pack` 的新鲜度门。
+* 测试：`tests/test_offline_local_first.py`（20 条：判定表 / sha 门 / 修复 / 半截目录 / optional 取包 /
+  argv 形状）· `tests/test_offline_task_pack.py` 新增 11 条（新鲜⇒逐字节一致 / 过期⇒409 且恰好触发一次 /
+  节流 / 上界⇒照发 / 控制台不可达⇒降级 / 无权重⇒照发 / busy 视为成功）· `tests/test_run_loop.py` 新增 2 条
+  （`--artifacts` 单用合法且不动本机 plan/manifest · G3 文案）。
+
 ## §40 opt blob 只装优化器状态、权重走内容寻址：每轮上行 −35.3%（plan/opt-blob-diet.plan.md，2026-09-24）
 
 用户 2026-09-23 指令：把「同一份权重传两遍」这件事的精减写成 plan。实测（`tmp/x20-clutch`

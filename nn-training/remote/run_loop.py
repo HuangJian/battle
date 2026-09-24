@@ -1164,7 +1164,16 @@ def _drive(ctx: RunContext, *, session: list[dict], start_from: int) -> dict:
     """从 `start_from` 之后跑到计划末尾（受预算/上限约束），返回合并结果。"""
     todo = [it for it in ctx.planned_range() if it > start_from]
     if not todo:
-        ctx.log("计划内的轮次都已在产物里——无事可做")
+        end_it = int(ctx.plan.get("end_it", 0) or 0)
+        if start_from >= end_it:
+            # G3（plan/offline-rerun-local-first §4.2）：区分「本机段落已完成」（下一步是清目录/
+            # 等新包）与「无事可做」。前者原来是同一个词 —— 人看不出该动哪一步。
+            ctx.log(
+                f"本机段落已完成（it{start_from} ≥ end_it{end_it}）——没有要跑的轮次；"
+                f"要用新段请清空 {ctx.store.root} 或等新包（或置 CFG.force_pack=true）"
+            )
+        else:
+            ctx.log("计划内的轮次都已在产物里——无事可做")
         ctx.store.finalize(state="complete", summary={"last_it": start_from, "rows": len(ctx.store.rows)})
         # 无事可做也可能**有东西要补传**：上次会话断网、这次连上了，积压全在这一步补完。
         ctx.deliver_final(it_end=start_from, state="noop", summary={"rows": len(ctx.store.rows)})

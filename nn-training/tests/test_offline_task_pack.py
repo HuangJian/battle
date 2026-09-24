@@ -19,11 +19,13 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 
+from remote import hub_server
 from remote.hub_server import _HubQueue, _JobStore, as_hub, make_server
 from remote.protocol import (
     AUTH_HEADER,
@@ -189,6 +191,202 @@ def test_admin_offline_is_empty_when_nothing_landed(tmp_path: Path) -> None:
     st, raw, _h = _get(base, "/admin/offline")
     assert st == 200
     assert _as_json(raw)["progress"] == {}
+
+
+# --------------------------------------------------- 新鲜度门（§8，2026-09-24）
+#
+# 用户口径：「即使云机重启、之前的工作目录全丢，重新请求离线任务包时 hub 端也要基于课程的
+# **最新状态**重新打包，而不是继续使用开课时那份任务包，避免重复训练浪费算力」。
+# 过期的包比没包更危险（404 只让云机多等一拍），所以：过期 ⇒ 触发重导 + 409；
+# 到上界仍过期 ⇒ 照发 + 告警（**不把云机 brick 到 deadline**）；判不了 ⇒ 照发。
+
+INIT = b'{"format":"nn-weights-json","params":{"w":1}}'
+
+
+@pytest.fixture(autouse=True)
+def _clean_trigger_ledger():
+    """触发账本是模块级的（要跨请求存活）——每个用例前后清干净，否则会互相串。"""
+    hub_server.reset_task_pack_triggers()
+    yield
+    hub_server.reset_task_pack_triggers()
+
+
+def _export_real_pack(tmp_path: Path, course: str, init: bytes, monkeypatch) -> Path:
+    """用**真导出器**写一个包：判据的输入就是索引里的 `parts[...]` sha。"""
+    from remote import bundle as bundle_mod
+    from remote.artifacts import sha256_bytes
+
+    monkeypatch.setattr(bundle_mod, "normalize_manifest", lambda m: m)
+    src = tmp_path / "_src"
+    src.mkdir(parents=True, exist_ok=True)
+    (src / "init_weights.json").write_bytes(init)
+    (src / "code.zip").write_bytes(b"PK\x03\x04code")
+    with zipfile.ZipFile(src / "ts_code.zip", "w") as z:
+        z.writestr("tools/sim/x.ts", "// ts\n")
+    plan = json.dumps({"start_it": 1, "end_it": 5}).encode("utf-8")
+    out = tmp_path / course / f"task-{course}.zip"
+    bundle_mod.export_bundle(
+        out,
+        manifest={
+            "kind": "run",
+            "runId": "run-off",
+            "it": 1,
+            "plan_sha256": sha256_bytes(plan),
+            "commit": "c" * 40,
+        },
+        plan_bytes=plan,
+        init_weights_path=src / "init_weights.json",
+        code_zip_path=src / "code.zip",
+        ts_code_zip_path=src / "ts_code.zip",
+    )
+    return out
+
+
+def _stub_trigger(monkeypatch, result: tuple[bool, str] = (True, "ok")) -> list[str]:
+    calls: list[str] = []
+
+    def fake(course: str, log=None):
+        calls.append(course)
+        return result
+
+    monkeypatch.setattr(hub_server, "trigger_task_bundle_export", fake)
+    return calls
+
+
+def test_task_pack_index_name_tracks_the_exporter() -> None:
+    """索引名在 hub 侧又拄了一份（过期判定要读它）——改名必须两边一起。"""
+    from remote.bundle import BUNDLE_INDEX
+
+    assert hub_server.TASK_PACK_INDEX_NAME == BUNDLE_INDEX
+
+
+def test_stale_reason_only_speaks_when_both_sides_are_readable() -> None:
+    """判据（纯函数）：两侧都可读且不等 ⇒ 过期；任一不可读 ⇒ 不判（照发）。"""
+    assert hub_server.task_pack_stale_reason(pack_init_sha="a" * 64, active_sha="a" * 64) == ""
+    assert hub_server.task_pack_stale_reason(pack_init_sha="", active_sha="a" * 64) == ""
+    assert hub_server.task_pack_stale_reason(pack_init_sha="a" * 64, active_sha="") == ""
+    why = hub_server.task_pack_stale_reason(pack_init_sha="a" * 64, active_sha="b" * 64)
+    assert "sha12=aaaaaaaaaaaa" in why and "sha12=bbbbbbbbbbbb" in why
+
+
+def test_decide_task_pack_is_a_total_table() -> None:
+    """四种结局定死：serve / trigger / throttled / give_up（上界优先于节流）。"""
+    assert hub_server.decide_task_pack(stale="", secs_since_trigger=0.0, triggers=0) == "serve"
+    assert hub_server.decide_task_pack(stale="x", secs_since_trigger=1e9, triggers=0) == "trigger"
+    assert hub_server.decide_task_pack(stale="x", secs_since_trigger=10.0, triggers=1) == "throttled"
+    assert (
+        hub_server.decide_task_pack(
+            stale="x", secs_since_trigger=1e9, triggers=hub_server.TASK_PACK_STALE_TRIGGER_LIMIT
+        )
+        == "give_up"
+    )
+
+
+def test_task_pack_fresh_is_byte_identical_and_silent(tmp_path, monkeypatch) -> None:
+    """反向判据：包已是最新 ⇒ 不触发、不 409、不多一次请求（与今天逐字节一致）。"""
+    calls = _stub_trigger(monkeypatch)
+    pack = _export_real_pack(tmp_path, "c5-gae", INIT, monkeypatch)
+    (tmp_path / "c5-gae" / "weights.json").write_bytes(INIT)  # 课程当前位置 == 包起点
+    base, _hub, _srv = _boot(tmp_path)
+
+    st, raw, headers = _get(base, f"{OFFLINE_TASK_PACK_PATH}?course=c5-gae")
+    assert st == 200, raw[:200]
+    assert raw == pack.read_bytes()
+    assert "task-c5-gae.zip" in headers.get("Content-Disposition", "")
+    assert calls == [], "最新就不该触发重导"
+
+
+def test_task_pack_stale_triggers_exactly_once_and_answers_409(tmp_path, monkeypatch) -> None:
+    calls = _stub_trigger(monkeypatch)
+    _export_real_pack(tmp_path, "c5-gae", INIT, monkeypatch)
+    (tmp_path / "c5-gae" / "weights.json").write_bytes(INIT + b"-moved-on")
+    base, _hub, _srv = _boot(tmp_path)
+
+    st, raw, _h = _get(base, f"{OFFLINE_TASK_PACK_PATH}?course=c5-gae")
+    body = _as_json(raw)
+    assert st == 409, body
+    assert body["stale"] is True and body["triggered"] is True
+    assert "已触发" in body["error"], body
+    assert calls == ["c5-gae"], "恰好触发一次"
+
+
+def test_task_pack_throttle_stops_a_second_trigger(tmp_path, monkeypatch) -> None:
+    """多台云机同时问不该各触发一次；窗内第二次直接 409（不触发）。"""
+    calls = _stub_trigger(monkeypatch)
+    _export_real_pack(tmp_path, "c5-gae", INIT, monkeypatch)
+    (tmp_path / "c5-gae" / "weights.json").write_bytes(INIT + b"-moved-on")
+    base, _hub, _srv = _boot(tmp_path)
+
+    first = _get(base, f"{OFFLINE_TASK_PACK_PATH}?course=c5-gae")
+    second = _get(base, f"{OFFLINE_TASK_PACK_PATH}?course=c5-gae")
+    assert first[0] == 409 and second[0] == 409
+    assert "刚刚已触发" in _as_json(second[1])["error"]
+    assert calls == ["c5-gae"]
+
+
+def test_task_pack_gives_up_and_serves_after_the_trigger_limit(tmp_path, monkeypatch) -> None:
+    """上界（不 brick 保险丝）：连触发到顶仍过期 ⇒ **照发旧包** + 一行告警。
+
+    为什么非有不可：只要还有别的 worker 在回传，`weights.json` 就一直在动 ⇒ 判据是移动靶，
+    没有上界时云机会被 409 卡到 deadline（30 分钟）然后 SystemExit。
+    """
+    monkeypatch.setattr(hub_server, "TASK_PACK_STALE_THROTTLE_SEC", 0.0)  # 让每次请求都可触发
+    calls = _stub_trigger(monkeypatch)
+    pack = _export_real_pack(tmp_path, "c5-gae", INIT, monkeypatch)
+    (tmp_path / "c5-gae" / "weights.json").write_bytes(INIT + b"-moved-on")
+    base, _hub, _srv = _boot(tmp_path)
+
+    for _ in range(hub_server.TASK_PACK_STALE_TRIGGER_LIMIT):
+        assert _get(base, f"{OFFLINE_TASK_PACK_PATH}?course=c5-gae")[0] == 409
+    served = _get(base, f"{OFFLINE_TASK_PACK_PATH}?course=c5-gae")
+    assert served[0] == 200, served[1][:200]
+    assert served[1] == pack.read_bytes()
+    assert calls == ["c5-gae"] * hub_server.TASK_PACK_STALE_TRIGGER_LIMIT
+
+
+def test_task_pack_degrades_to_guidance_when_the_console_is_unreachable(tmp_path, monkeypatch) -> None:
+    """控制台不可达/不属本机（只读门控 403）⇒ 降级为 409 + 指引，**不抛**（云机还得能排障）。"""
+    _stub_trigger(monkeypatch, (False, "unreachable"))
+    _export_real_pack(tmp_path, "c5-gae", INIT, monkeypatch)
+    (tmp_path / "c5-gae" / "weights.json").write_bytes(INIT + b"-moved-on")
+    base, _hub, _srv = _boot(tmp_path)
+
+    st, raw, _h = _get(base, f"{OFFLINE_TASK_PACK_PATH}?course=c5-gae")
+    body = _as_json(raw)
+    assert st == 409, body
+    assert body["triggered"] is False
+    assert "导出任务包" in body["error"], body
+
+
+def test_task_pack_without_active_weights_is_served(tmp_path, monkeypatch) -> None:
+    """课程还没权重（从未回传/冷启动）⇒ 判不了 ⇒ 照发（不把云机拦在门外）。"""
+    calls = _stub_trigger(monkeypatch)
+    pack = _export_real_pack(tmp_path, "c5-gae", INIT, monkeypatch)
+    base, _hub, _srv = _boot(tmp_path)
+    st, raw, _h = _get(base, f"{OFFLINE_TASK_PACK_PATH}?course=c5-gae")
+    assert st == 200 and raw == pack.read_bytes()
+    assert calls == []
+
+
+def test_trigger_marks_busy_as_success(tmp_path, monkeypatch) -> None:
+    """控制台回 409（上一次导出还在跑）⇒ **算触发成功**（它本来就会产新包）。"""
+    import urllib.error
+
+    def fail(req, timeout=0.0):
+        raise urllib.error.HTTPError(req.full_url, 409, "busy", {}, None)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(hub_server, "_net_urlopen", fail)
+    ok, why = hub_server.trigger_task_bundle_export("c5-gae", log=lambda _m: None)
+    assert ok is True and why == "busy"
+
+
+def test_trigger_reports_unreachable_console(tmp_path, monkeypatch) -> None:
+    def boom(req, timeout=0.0):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(hub_server, "_net_urlopen", boom)
+    ok, why = hub_server.trigger_task_bundle_export("c5-gae", log=lambda _m: None)
+    assert ok is False and why == "OSError"
 
 
 def test_offline_capability_header_name_is_shared_with_workers() -> None:
