@@ -109,11 +109,19 @@ def test_job_fs_has_no_top_level_mutable_container() -> None:
 
 
 def test_job_dir_keep_default_is_wired_to_the_constant() -> None:
-    """`prune_job_dirs` 的 `keep` 缺省值必须**仍是** `JOB_DIR_KEEP`（改常量即改行为）。"""
+    """`prune_job_dirs` 的 `keep` 缺省值必须**仍是** `JOB_DIR_KEEP`（改常量即改行为）。
+
+    ⚠ 那个**显式调用点**自 S4 第十二刀起住 `remote/download.py`（payload 落地的清场那一行，
+    随物料落地一起搬走）——本断言按「文本在谁那儿」改指，而不是放开不查：「找不到就红」正是
+    这条源码守卫的价值（改指新家 vs 静默放过，差的是下一个读的人知不知道它有真调用者）。
+    """
     import inspect
 
     sig = inspect.signature(job_fs_mod.prune_job_dirs)
     assert sig.parameters["keep"].default == job_fs_mod.JOB_DIR_KEEP == 2
-    # `run_job` 仍以 `JOB_DIR_KEEP` 显式调用（宿主与常量同源）
-    src = WORKER_FILE.read_text(encoding="utf-8")
+    src = (ROOT / "remote" / "download.py").read_text(encoding="utf-8")
     assert src.count("prune_job_dirs(work_dir, JOB_DIR_KEEP, log=log)") == 1
+    worker_src = WORKER_FILE.read_text(encoding="utf-8")
+    assert "prune_job_dirs(" not in worker_src, (
+        "worker.py 里又冒出 prune_job_dirs 调用点了——清场归物料落地（remote/download.py）"
+    )

@@ -754,11 +754,96 @@ HubHandler(AdminRoutes, ScheduleRoutes, ResultRoutes, BlobRoutes, OfflineRoutes,
 > （`FAIL_BODY_MAX` / `OFFLINE_*_BODY_MAX` 都住那里），后者有**两个读者**（`hub.schedule` 的端点与
 > `hub_server._HubQueue.peek_jobs` 的形参默认值），谁也 import 不了谁 ⇒ 必须住两边都能 import 的协议层。
 
+### 第十三刀（2026-09-24）：物料落地三兄弟 —— `run_job` 里那 69 行「取字节 + 摆好」下沉 `download`；顺手把两处存活日志收成一条
+
+`worker.py` **1039 → 1033 行**（`run_job` **350 → 300**），`download.py` **313 → 519**。
+层号**一处没动**：`download` 仍是 L3，新增的边 `download → job_fs`（L1）本来就是向下的。
+
+#### 刀口怎么定的：不是「哪一段长」，而是「哪一段的判据同源」
+
+`run_job` 里没有成段的分支，只有一段**线性管道**：payload 取字节 → sha 对账 → 清场重建
+`work_dir/<jid>/` → 解包 shard → code.zip 内容寻址缓存 → 解包 → `sys.path[0]`。判据是
+**失败语义是否只在本地成立**——三者（连同 `_ensure_ts_code`）同规：
+
+| 失败 | 类型 | 谁处理 |
+|---|---|---|
+| sha 不匹配 | `RetryableError`（传输损坏，重下可修复） | 调用方释放租约立即重领 |
+| 解包失败 | `ProtocolError`（内容决定性失败） | 确定性上报，不重认领 |
+
+谁改其中一条的失败语义，另两条必然要跟着改 ⇒ 它们必须住同一个模块。落地成
+**三兄弟** `_ensure_payload` / `_ensure_code` / `_ensure_ts_code`，各返回一个 `NamedTuple`。
+
+#### 为什么返回 `NamedTuple` 而不是「顺手多返一个目录」
+
+调用方要的不只是 job 目录：`code_root.parent` 才是 `ts_code_cache`、`blob_root` 才是 M2 的
+blob 根。「根目录推导」写两遍就是两个口径 ⇒ `PayloadLanded{payload_bytes, job_dir, shard_dirs,
+ dl_sec, unpack_sec}` / `CodeLanded{code_root, code_cache_dir, blob_root}` 把「摆到哪儿了」
+变成**一个**答案。搬前这两者在宿主里是同一个变量名（`code_cache_dir` 先当共享根、后被改成
+per-sha 目录），读的人要靠上下文猜——这刀顺手把这个名字歧义也拆开了
+（参数叫 `code_cache_root`，返回值里 `code_root` vs `code_cache_dir` 分列）。
+
+#### 两条语义顺序（碰了就是 bug，写在函数 docstring 里）
+
+- **清场在解包之前**：保证解包面对空目录（上一轮 shard/产物残留会让 D14 血缘校验与训练链读到脏数据）；
+- **prune 在清场之后**：放在末尾的话「本轮炸了就永远轮转不掉旧目录」——失败轮也照样清理。
+
+`sys.path.insert` **留**在落地函数里（落地与「可 import」是同一件事），而热替换护栏
+`_ACTIVE_CODE_SHA` **留宿主**——那是**进程**的状态，不是物料的状态。
+
+#### 顺手的第二处：两处存活日志收成一条
+
+`worker_loop` 里「无 job」与「纯停机达令」两条分支各写了一份 60s 周期的存活日志（同一条读数的
+两个相位）。2026-09-11 现场就是**漏了第二处**：停机期日志静默被误读成「worker 罢工」。
+现在收成 `_alive_log(log, *, halted, done, polls, idle_since)` + `ALIVE_LOG_SEC`，**到点没有**
+与计数器复位**留调用方**（那两个变量是宿主的账，模块不留状态）。
+
+#### ★「不再拆」也是一个决定（写进 `worker.py` 头部）
+
+三个宿主函数**不再往下切**，理由不是「拆不动」而是它们就是「宿主」这个概念的形状：
+`worker_loop` 持有**跨 job 存活**的东西（`uploader` 队列 / `pf_stores` / `halt_seen` / 轮询计数器）
+——搬走 = 把一个对象的生命周期交给两个模块管（第十刀已量过）；`main` 的 argparse 声明是**数据**
+（与「解析后怎么起进程」同属入口，先例 `remote/run_loop.py`）；`run_job` 每个分支只做一件事，
+再切只是把直线扯成跳转。剩下 287 行（100 条 import / 109 个名字）是**显式转发门面**。
+
+#### 注入点第三档（本刀把「名字」与「注入点」彻底分开）
+
+| 档 | 谁 | 打哪 |
+|---|---|---|
+| 组内互调（`_resolve_blob`→`download_blob`、`_ensure_*`→`download_*`） | `remote.download` 内部 | **`remote.download.*`** |
+| 预取填充器 | `remote.job_round._prefetch_fill` | **`remote.job_round.*`** |
+| 宿主 `run_job` **自己读**的 | 只有三兄弟 | `remote.worker._ensure_*` |
+
+`download_*` / `_cache_blob` / `_resolve_blob` / `_progress_logger` 在 `worker` 命名空间
+**已无读者**——转发名还在，是因为 tests 把 `remote.worker` 当**取名字的入口**直接调
+（`test_wire_reroll` / `test_control_plane_bypass` / `test_remote_ppo`）。**名字是契约，位置不是**：
+对它们 patch `remote.worker` 会**静默失效**（正是 `test_remote_ppo` 的缓存命中用例要改指本模块的原因）。
+
+#### 守卫（`test_download_split.py` +3 例 · `test_job_round_split.py` +1 例）+ 反探针 **11/11**
+
+- ★ `run_job` 里**零** `download_*` / `_cache_blob` / `_resolve_blob` 调用点（AST，比「名字在不在」更硬）；
+- ★ **接口双向一致**：两处调用点的位置实参 + 关键字**恰好**等于形参集合（13 个形参，漏传/打错名/多传都红）；
+- ★ **功能性**：炸弹放 `remote.worker.download_*`、真值放本模块 ⇒ 落地必须走到「sha 不匹配 ⇒
+  `RetryableError`」且**不写任何文件**（sha 校验在写盘之前）；
+- ★ 存活日志**恰好两处调用**、`halted` 实参是一真一假的**字面量**、`polling hub` 那一行只由
+  `_alive_log` 拥有、阈值比较恰好出现两次且都用 `ALIVE_LOG_SEC`；
+- 清场调用点从 `worker.py` 消失（`prune_job_dirs(JOB_DIR_KEEP)` 唯一的显式调用点改指 `download.py`）。
+
+反探针：run_job 又冒出下载调用 · 改属性式访问 · 漏传 `code_cache_root` · 关键字打错 ·
+落地不走本模块的 `download_payload` · worker 丢转发名 · 清场调用点消失 · worker 里又冒
+`prune_job_dirs` · 落地函数在 worker 又实现一份 · 某相位内联一份存活日志 · 阈值写死 60s。
+
+门禁 **2402 → 2406 passed / 3 skipped**；mypy **394** 源文件绿；根 `bun run check` 2120 pass / 0 fail。
+
+> 决策 → `DECISIONS.md` §2026-09-24-goalnn-worker-landing-trio。
+> ⚠ mypy 报的 `sorted()` 类型变量错（新守卫里 `halted` 混了 `str|bytes|int|float|...`）——
+> AST `Constant.value` 的静态类型就是那个联合，`bool(...)` 一下即可；`ruff check` 看不见这类错。
+
 ### 未做完（S4 余下）
 
-`remote/` 内部**已零环**（见「拆环」节），S4 余下是纯结构工作：
-`remote/worker.py` 余 **1042 行**（`worker_loop` 已缩到「轮询壳 + 回传收尾」，`run_job` 325 /
-`main` 127 是宿主本体）；`remote/hub_server.py` 余 **3017 行**，路由面已全部切完，只剩两个千行状态类
+`remote/` 内部**已零环**（见「拆环」节），`worker.py` 的拆分面**已收口**：只剩三个宿主函数
+（`run_job` 300 / `worker_loop` 197 / `main` 127）+ 287 行转发门面，且「为什么不继续切」有明文理由
+（见第十三刀）。S4 余下是纯结构工作：
+`remote/hub_server.py` 余 **3017 行**，路由面已全部切完，只剩两个千行状态类
 `_JobStore` / `_HubQueue`（拆 = 拆状态，风险与切法都不同）与引导链。
 设计见 `plan/nn-training-refactor.md` §5.3。
 `TrainingSteps` 本体还剩 952 行 / 20 方法（切法是「按一条真实调用链切」，不是按行数等分）。

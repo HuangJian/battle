@@ -2699,3 +2699,42 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
 - **门禁**：**2387 → 2402 passed / 3 skipped**；mypy **394** 源文件绿；根 `bun run check` 2120 pass / 0 fail。
 —— 全文（分组依据 / 助手对照表 / 真子类替无 socket 实例 / 又一次撞上读源码文本的守卫）→
 `docs/nn/engineering.md` §23「第十一刀」
+
+## §2026-09-24-goalnn-worker-landing-trio（2026-09-24，用户指令「清掉 remote/job_fs._ensure_commit 死代码并重构 worker.py 余下的 run_job / worker_loop / main」）
+
+- **背景**：第十刀后 `worker.py` 余 1042 行，三个宿主函数 `run_job`（350）/ `worker_loop`（197）/
+  `main`（127）之外全是转发门面。用户指令是「重构这三块」，而侦察给出的答案是：`run_job` 里确实
+  还有**一整段可搬**的（69 行物料落地），而 `worker_loop` / `main` 是**宿主本体**。
+- **备选与否决**：
+  1. **把 `worker_loop` 的轮询壳再切一块出去**——否：它持有的全是**跨 job 存活**的东西
+     （`uploader` 队列 / `pf_stores` / `halt_seen` / 轮询计数器）。第十刀已量过：`uploader` 只能
+     **传进**一轮、不能搬走（队列跨 job 存在）；再切 = 把一个对象的生命周期交给两个模块管。
+  2. **把 `main` 的 argparse 声明拆成 `remote/worker_cli.py`**——否：argparse 声明是**数据**，
+     与「解析后怎么起进程」同属入口；本仓先例 `remote/run_loop.py` 同样把 CLI 留在入口模块。
+  3. **只搬 payload 落地、code 落地留在 `run_job`**——否：两者失败语义同规（sha 不匹配 ⇒
+     `RetryableError`、解包失败 ⇒ `ProtocolError`），与原有 `_ensure_ts_code` 是同一条判据；
+     只搬一半 ⇒ 同一条规则住两个模块，下次改一条必漏另一条。
+  4. **让 `_ensure_*` 多返几个零散值（`code_root` / `blob_root` 用 tuple 位置）**——否：13 个
+     返回值里「哪个是根、哪个是 per-sha 目录」正是搬前那个**同名歧义**（`code_cache_dir` 先当共享根
+     后被改成 per-sha）。改用 `NamedTuple`，参数叫 `code_cache_root`，返回值里 `code_root` 与
+     `code_cache_dir` 分列。
+  5. **顺手把 `download_*` 在 `worker` 上的转发删掉**——否：tests 把 `remote.worker` 当**取名字的
+     入口**直接调（`test_wire_reroll` / `test_control_plane_bypass` / `test_remote_ppo` 共 7 处）。
+     **名字是契约，位置不是**：留着转发 ≠ 留着注入点（对它们 patch `worker` 已静默失效）。
+- **决定**：`run_job` 的物料落地整段（payload 与 code.zip 的「取字节 + 摆好」）下沉
+  `remote/download.py`，与原有 `_ensure_ts_code` 并列为**三兄弟**，各返回 `NamedTuple`
+  （`PayloadLanded` / `CodeLanded`）；`worker.py` **1039 → 1033**（`run_job` **350 → 300**），
+  `download.py` **313 → 519**。层号**不动**（`download` L3 → 新增边 `job_fs` L1，本就向下）。
+  另外把 `worker_loop` 里两条分支各写一份的存活日志收成 `_alive_log` + `ALIVE_LOG_SEC`。
+- **★ 「不拆」也是决定（写进 `worker.py` 头部）**：三个宿主函数不再往下切——理由不是「拆不动」而是
+  它们就是「宿主」这个概念的形状（跨 job 生命周期 / CLI 是数据 / 每分支只做一件事）。下一次动
+  `remote/` 的目标应是 `hub_server` 的两个千行状态类（拆 = 拆状态）。
+- **语义顺序（碰了就是 bug）**：清场在解包**之前**（解包要面对空目录）、prune 在清场**之后**
+  （放末尾 ⇒ 失败轮永远轮转不掉旧目录）。`sys.path.insert` 留落地（落地与「可 import」是一件事），
+  热替换护栏 `_ACTIVE_CODE_SHA` 留宿主（那是**进程**的状态）。
+- **违反后果**：`run_job` 又冒出 `download_*` 调用点 / 改属性式访问 / 调用点漏传一个形参（13 个）/
+  落地不走本模块的 `download_payload` / worker 丢转发名 / 清场调用点消失 / worker 又冒
+  `prune_job_dirs` / 落地函数在 worker 又实现一份 / 某相位内联存活日志 / 阈值写死 60s——十一类都在
+  **提交时**红（守卫 +4 例，反探针 **11/11** 命中）。
+- **门禁**：**2402 → 2406 passed / 3 skipped**；mypy **394** 源文件绿；根 `bun run check` 2120 pass / 0 fail。
+—— 全文（三兄弟判据表 / NamedTuple 的理由 / 注入点第三档表）→ `docs/nn/engineering.md` §23「第十三刀」

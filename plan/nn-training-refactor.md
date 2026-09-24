@@ -737,6 +737,33 @@ CLI 侧传 `_real_run_job`）。引擎里那个 `_real_run_job` **兜底删掉**
 **下一刀**：`hub_server` 只剩引导链与最后两个千行状态类（`_JobStore` / `_HubQueue`：拆 = 拆状态，
 与拆路由是两类工作）；`worker.py` 余 1042 行同理。
 
+#### 5.3.12 第十三刀（2026-09-24，**已完成**）—— 物料落地三兄弟下沉 `download` +「不再拆」的明文理由
+
+第十二刀（清理刀）删掉 `remote/job_fs._ensure_commit` 死代码（全仓零调用，只搬未删）之后，
+按用户指令「重构 worker.py 余下的 `run_job` / `worker_loop` / `main`」侦察。结论是：**只有
+`run_job` 里还有一整段可搬**（69 行物料落地），另两个是**宿主本体**。
+
+| 模块 | 变化 | 新模块 |
+|---|---|---|
+| `remote/worker.py` | 1039 → **1033**（`run_job` 350 → **300**） | — |
+| `remote/download.py` | 313 → **519**（`_ensure_payload` / `_ensure_code` + 2 个 `NamedTuple`） | 复用已有模块 |
+
+刀口判据不是「哪段长」而是「哪段的判据同源」：payload / code / ts_code 三者失败语义同规
+（sha 不匹配 ⇒ `RetryableError`；解包失败 ⇒ `ProtocolError`；sha 内容寻址 + tmp 原子改名）
+⇒ 必须住同一个模块。层号**一处没动**（`download` L3 → 新增边 `job_fs` L1，本就向下，无级联）。
+
+顺手的第二处：`worker_loop` 两条分支各写一份的存活日志收成 `_alive_log` + `ALIVE_LOG_SEC`
+（2026-09-11 现场：漏了第二处 ⇒ 停机期日志静默被误读成「worker 罢工」）。
+
+**★ 本刀登记的「不做」**：`run_job` / `worker_loop` / `main` **不再往下切**——理由写进
+`worker.py` 头部（跨 job 生命周期 / CLI 是数据 / 每分支只做一件事），不靠口口相传。
+下一次若还要动 `remote/`，目标应是 `hub_server` 的两个千行状态类。
+
+守卫：`test_download_split.py` +3 · `test_job_round_split.py` +1（零下载调用点 / 13 形参双向一致 /
+功能性「patch 打偏就红」/ 存活日志恰好两处调用）；反探针 **11/11**。门禁 **2402 → 2406**。
+
+> 决策 → `DECISIONS.md` §2026-09-24-goalnn-worker-landing-trio；全文 → `engineering.md` §23「第十三刀」。
+
 ### 5.4 本轮**不做**（已核，刻意保留）
 
 - `remote/notebook_boot.py` ↔ `remote/offline_boot.py` 的孪生助手（`_build_opener` /

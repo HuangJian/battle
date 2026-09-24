@@ -82,6 +82,10 @@ MOVED_SEAM = (
 #: 宿主**不得**转发的名字：留着转发名 = 留一个静默空操作的 patch 目标。
 FORBIDDEN_FACADES = ("_prefetch_fill", "PREFETCH_ROUND_SEC", "PREFETCH_WIRE_ID", "settle_result")
 
+#: 存活日志（第十二刀去重）：唯一的实现 + 它那一行的特征文本。
+ALIVE_FN = "_alive_log"
+ALIVE_TEXT = "polling hub"
+
 #: 本模块允许的顶层仓内依赖（多一个就说明搬多了/搬漏了）。
 ALLOWED_PROJECT_IMPORTS = {
     "common.protocol",
@@ -198,6 +202,49 @@ def test_the_per_job_round_is_gone_from_the_polling_loop() -> None:
     assert leftovers == [], (
         f"`worker_loop` 里还有「一轮」的调用点：{leftovers} —— "
         "那一轮只在 `remote/job_round.run_one_round` 里（本刀的划分：壳管轮询/claim/idle/收尾）"
+    )
+
+
+def test_the_alive_log_is_written_in_one_place() -> None:
+    """★ 存活日志的两个相位**共用同一实现**（第十二刀的去重：`_alive_log` + `ALIVE_LOG_SEC`）。
+
+    「无 job」与「纯停机达令」是**同一条读数的两个相位**，各写一份就会各自漂——2026-09-11
+    现场就是漏了第二处，停机期日志静默被误读成「worker 罢工」。判据三条：
+
+    1. `worker_loop` 里 `_alive_log` 调用点**恰好两处**（多一处 = 又加了一个相位）；
+    2. 两处的 `halted` 实参各是一个**字面量**且一真一假（不许把「在哪条分支」藏进默认值）；
+    3. 那一行字面量（`polling hub`）在 `worker.py` 里**只由 `_alive_log` 拥有**——别处再抄
+       一份行文本就是漂移的开始。
+    """
+    fn = _func(WORKER_FILE, "worker_loop")
+    sites = [
+        n
+        for n in ast.walk(fn)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == ALIVE_FN
+    ]
+    assert len(sites) == 2, (
+        f"`worker_loop` 里 {ALIVE_FN} 调用点 {len(sites)} 处（应为 2：无 job / 纯停机达令）"
+    )
+    halted = sorted(
+        bool(kw.value.value)
+        for call in sites
+        for kw in call.keywords
+        if kw.arg == "halted" and isinstance(kw.value, ast.Constant)
+    )
+    assert halted == [False, True], f"两处相位的 halted 实参应当是 False/True：{halted}"
+    owners = [
+        node.name
+        for node in _tree(WORKER_FILE).body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and any(
+            isinstance(c, ast.Constant) and isinstance(c.value, str) and ALIVE_TEXT in c.value
+            for c in ast.walk(node)
+        )
+    ]
+    assert owners == [ALIVE_FN], f"`{ALIVE_TEXT}` 那一行的字面量不只在 {ALIVE_FN} 里：{owners}"
+    src = WORKER_FILE.read_text(encoding="utf-8")
+    assert src.count("time.time() - _last_alive_log > ALIVE_LOG_SEC") == 2, (
+        "两处相位必须用同一个 `ALIVE_LOG_SEC` 比较（写死 60 就是又一份会漂的读数）"
     )
 
 

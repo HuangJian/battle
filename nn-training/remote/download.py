@@ -3,35 +3,60 @@
 从 `remote/worker.py` 搬出来的「把 hub 上的物料取到本地」：`_progress_logger`（进度行工厂）·
 `download_payload` / `download_code` / `download_ts_code` / `download_blob`（四类 GET，
 缺省 P1、带空闲超时与进度行）· `_cache_blob` / `_resolve_blob`（内容寻址 blob 缓存 +
-安全阀：manifest 带 sha 且取不到就**响亮失败**，绝不静默退回 warm-start）· `_ensure_ts_code`
-（kind=iter 的 TS 代码物料化：缓存命中 / 解包 / sha 校验）。
+安全阀：manifest 带 sha 且取不到就**响亮失败**，绝不静默退回 warm-start）。
+
+## 「物料落地三兄弟」（S4 第十二刀，2026-09-24）
+
+取字节与**把它摆好**是同一件事的两半，三个兄弟现在住一起（`_ensure_*`，各返回一个
+`NamedTuple` 说明「摆到哪儿了」）：
+
+| 兄弟 | 物料 | 落地到 |
+|---|---|---|
+| `_ensure_payload` | payload.tar.xz | 清场重建 `work_dir/<jid>/` + 解出 shard 目录 |
+| `_ensure_code` | code.zip | `code_cache/<sha>/` + `sys.path[0]`（内容寻址，跨课复用） |
+| `_ensure_ts_code` | TS 运行时 zip | `ts_code_cache/<sha>/`（bun 的 cwd，**另一棵树**） |
+
+三者同规：按 sha 内容寻址 + tmp 原子改名 + sha 不匹配 ⇒ `RetryableError`（传输损坏，
+重下可修复，不是内容决定性失败）。放在一起的理由不是「都跟下载有关」，而是它们的
+**判据同源**——谁改其中一条的失败语义，另两条必然要跟着改。
 
 ## 依赖方向
 
-`download → {http, wire, bulk_sched}`（全向下，DAG）：下载走 `remote.http._get_with_retry`
+`download → {http, wire, bulk_sched, job_fs}`（全向下，DAG）：下载走 `remote.http._get_with_retry`
 （退避重试 + 低速重抽 + 传输账），零字节命中记 `remote.wire._wire_hit`，P1 优先级取
-`remote.bulk_sched.BULK_P1_CRITICAL`，超时阈值取 `remote.http.BODY_*`（单一定义）。
+`remote.bulk_sched.BULK_P1_CRITICAL`，超时阈值取 `remote.http.BODY_*`（单一定义）；
+作业物料 I/O（`JOB_DIR_KEEP` / `prune_job_dirs` / `unpack_payload_or_fail`）取 `remote.job_fs`。
 **不** import `remote.worker`（`worker` 用自别名转发回来）。
 
-## 注入点
+## 注入点（S4 第十二刀后重划）
 
-本组的**调用方全部是宿主**（`run_job` / `_prefetch_fill`）⇒ patch `remote.worker.download_*`
-仍然有效（宿主在 `worker` 命名空间解析）。唯一例外是**组内互调**：`_resolve_blob` 调
-`download_blob`、`_ensure_ts_code` 调 `download_ts_code`——它们在本模块命名空间解析，
-所以「patch 后调 `_resolve_blob` / `_ensure_ts_code`」的测试必须 patch **本模块**
-（`tests/test_remote_ppo.py` 的两处 `download_blob` 即此情形）。
+`download_*` 的调用点分三档，**patch 目标随实现走**：
+
+1. **组内**（`_resolve_blob` → `download_blob`、`_ensure_ts_code` → `download_ts_code`、
+   `_ensure_payload` → `download_payload`、`_ensure_code` → `download_code`）⇒ 全部解析在
+   **本模块**，测试必须 patch `remote.download.*`。第十二刀把物料落地整段搬进本模块之后，
+   **`payload` / `code` 两个下载函数**的调用点也归到了这一档。
+2. **`job_round._prefetch_fill`**（第十刀搬走的预取填充器）⇒ patch `remote.job_round.*`。
+3. **`remote.worker`**：宿主 `run_job` 现在自己读的只有**物料落地三兄弟**
+   （`_ensure_payload` / `_ensure_code` / `_ensure_ts_code`）——`download_*` / `_cache_blob` /
+   `_resolve_blob` / `_progress_logger` 在 `worker` 命名空间**已无读者**，那些转发仍留着是因为
+   tests 把 `remote.worker` 当**取名字的入口**直接调（名字是契约，位置不是）；但它们**不再是注入点**
+   ——`monkeypatch.setattr(worker, "download_payload", …)` 会静默失效（这正是
+   `tests/test_remote_ppo.py` 的缓存命中用例要交给本模块的原因）。
 """
 
 from __future__ import annotations
 
 import hashlib
+import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from common.protocol import (
     BLOB_OPT,
     BLOB_REF,
+    PAYLOAD_NAME,
     ProtocolError,
     RetryableError,
     decode_opt_tar,
@@ -42,10 +67,15 @@ from remote.http import (
     BODY_TOTAL_TIMEOUT_SEC,
     _get_with_retry,
 )
+from remote.job_fs import JOB_DIR_KEEP, prune_job_dirs, unpack_payload_or_fail
 from remote.wire import _wire_hit
 
 __all__ = [
+    "CodeLanded",
+    "PayloadLanded",
     "_cache_blob",
+    "_ensure_code",
+    "_ensure_payload",
     "_ensure_ts_code",
     "_progress_logger",
     "_resolve_blob",
@@ -54,6 +84,7 @@ __all__ = [
     "download_payload",
     "download_ts_code",
 ]
+
 
 def _progress_logger(label: str, log: Any):
     """进度行工厂：`job X: payload 下载中 3.20 MB / 4.85 MB (66%) 用时 12s（270 KB/s）`。"""
@@ -251,6 +282,181 @@ def _resolve_blob(
 
         return _b64.b64decode(inline_b64.encode("ascii")), True, "inline"
     return b"", False, "none"
+
+
+class PayloadLanded(NamedTuple):
+    """payload 落地的结果（物料三兄弟之一，另两个见 `_ensure_code` / `_ensure_ts_code`）。
+
+    * `payload_bytes` —— 原始字节（调用方要拿 `len()` 记传输账，不重读文件）。
+    * `job_dir` —— 本 job 的工作目录（**已清场重建**：上一轮的 shard / 产物一律不留）。
+    * `shard_dirs` —— 解包出的 shard 目录（D14 血缘校验与训练链都要）。
+    * `dl_sec` —— 取到字节的墙钟（push 携带时为 `0.0`：字节没走网络，这段账归 hub）。
+    * `unpack_sec` —— 解包墙钟（M0 统一计量的另一段）。
+    """
+
+    payload_bytes: bytes
+    job_dir: Path
+    shard_dirs: list[Any]
+    dl_sec: float
+    unpack_sec: float
+
+
+class CodeLanded(NamedTuple):
+    """code.zip 落地后的三处目录——**三处都要回传**，调用方不许自己再推导一遍。
+
+    * `code_root` —— 内容寻址缓存的**根**（跨课共享；`ts_code_cache` 与它同级，
+      `blob_cache` 是它的父目录下的一员）。
+    * `code_cache_dir` —— 本 job 代码的 per-sha 目录，**已经插进 `sys.path[0]`**。
+    * `blob_root` —— M2 的 blob 缓存根（键 = raw sha256）。
+
+    为什么返回目录而不是只返回 `code_cache_dir`：调用方还要用 `code_root.parent` 算
+    `ts_code_cache`、用 `blob_root` 喂训练核。「根目录推导」写两遍就是两个口径。
+    """
+
+    code_root: Path
+    code_cache_dir: Path
+    blob_root: Path
+
+
+def _ensure_payload(
+    base_url: str,
+    token: str,
+    jid: str,
+    manifest: dict,
+    work_dir: Path,
+    *,
+    preloaded: dict | None = None,
+    log=lambda msg: None,
+) -> PayloadLanded:
+    """把 payload 取到本地并摆好：下载（或 push 携带）→ sha 校验 → 清场 → 解包。
+
+    ## 为什么「校验」在这里而不是调用方
+
+    `payload_sha256` 不匹配属**瞬时故障**（传输截断/损坏）⇒ `RetryableError`，
+    调用方会释放租约、立即重领重下。这条语义与 code / ts_code 同规，写在同一个模块里
+    才不会三条线各漂一遍（内容决定性失败走 `ProtocolError`，那是另一码事——见解包那行）。
+
+    ## 为什么清场在解包**之前**、prune 在清场**之后**
+
+    清场重建保证解包面对的是一个空目录（上一轮的 shard/产物残留会让 D14 与训练链读到
+    脏数据）；prune 放在开头是为了「失败轮也照样清理」——放到末尾的话，本轮炸了就永远
+    轮转不掉旧目录。两条顺序都是踩出来的，别顺手调换。
+
+    参数走显式传递（`base_url` / `token` / `jid` / `manifest` / `work_dir` + `preloaded`）：
+    本模块**不认识** worker 的作业状态，也不知道有几个 hub（那都是宿主的事）。
+    """
+    # M0 统一计量：payload 大小与拿到它的墙钟（push = 随 POST body 抵达，下载耗时归 hub；
+    # pull = 真下载时间）。其余拆分（unpack/opt_restore/grad）各自包在下面。
+    t_dl = time.time()
+    if preloaded is not None and "payload_zip" in preloaded:
+        raw = preloaded["payload_zip"]
+        log(f"job {jid}: payload from push ({len(raw)} bytes)")
+        payload_dl_sec = 0.0
+    else:
+        raw = download_payload(base_url, token, jid)
+        payload_dl_sec = round(time.time() - t_dl, 3)
+        log(f"job {jid}: payload downloaded ({len(raw)} bytes in {payload_dl_sec:.1f}s)")
+    if hashlib.sha256(raw).hexdigest() != manifest["payload_sha256"]:
+        # 传输损坏属瞬时故障：重下即可修复（RetryableError → 释放租约立即重领重下）
+        raise RetryableError("payload_sha256 不匹配——传输损坏（重下可修复）")
+
+    job_dir = work_dir / jid
+    if job_dir.exists():
+        from platform_utils import rmtree_best_effort
+
+        rmtree_best_effort(job_dir)
+    job_dir.mkdir(parents=True)
+    # 磁盘：本 job 之后最多留 JOB_DIR_KEEP 个目录（放开头 = 失败轮也照样清理）
+    prune_job_dirs(work_dir, JOB_DIR_KEEP, log=log)
+    zip_path = job_dir / PAYLOAD_NAME
+    zip_path.write_bytes(raw)
+    # zip 内 manifest 是占位副本，解包仅取 shard 目录；权威校验全走 job 记录 manifest。
+    # init_weights.json / opt_init.tar.b64 与 shard 目录同落 job_dir 根（解包天然如此）。
+    t_unpack = time.time()
+    # 解包失败 = 内容决定性失败（走 ProtocolError → 确定性上报，不重认领）——见 §4 事故。
+    _unused_manifest, shard_dirs = unpack_payload_or_fail(zip_path, job_dir)
+    unpack_sec = round(time.time() - t_unpack, 3)
+    return PayloadLanded(
+        payload_bytes=raw,
+        job_dir=job_dir,
+        shard_dirs=shard_dirs,
+        dl_sec=payload_dl_sec,
+        unpack_sec=unpack_sec,
+    )
+
+
+def _ensure_code(
+    base_url: str,
+    token: str,
+    jid: str,
+    manifest: dict,
+    job_dir: Path,
+    work_dir: Path,
+    *,
+    code_cache_root: Path | None = None,
+    preloaded: dict | None = None,
+    log=lambda msg: None,
+) -> CodeLanded:
+    """把 code.zip 摆到本地并**让它可 import**：内容寻址缓存 → 解包 → `sys.path[0]`。
+
+    替代 git 同步（D6）：云端 worker 不再 `git checkout`，而是用 hub 启动时打包的代码快照。
+
+    ## 内容寻址缓存（2026-09-05）
+
+    code 在多次迭代间通常不变（sha 只由源码内容决定，pack 侧时间戳已固定化），缓存命中即省
+    一次隧道下载 + 解压。缓存目录按 sha 隔离，tmp 原子改名防半截。
+
+    ## `code_cache_root`（而不是 `code_cache_dir`）
+
+    参数是**根**：多课程共享 worker（P3b C3）下 code_cache 留共享根（按 sha 内容寻址，跨课
+    复用），只有 job 目录按源分区。名字刻意区分「根」与「per-sha 子目录」——改造前这两者
+    在宿主里是同一个变量名，读的人要靠上下文猜。
+
+    ## 为什么 `sys.path.insert` 在这里
+
+    落地与「可 import」是这一步的同一件事：`sys.path` 只影响**尚未导入**的模块，所以插完
+    还要宿主那道热替换护栏（`_ACTIVE_CODE_SHA`）去挡「已 import 的旧代码」——那是**进程**
+    的状态，因此留宿主，不搬。
+    """
+    # ---- commit 校验：下载 code.zip 解压到 sys.path（替代 git 同步，D6） ----
+    # 云端 worker 不再依赖 git checkout，而是使用 hub 启动时打包的代码快照。
+    # ---- code.zip 内容寻址缓存（2026-09-05）：同 sha 只下载/解压一次 ----
+    # code 在多次迭代间通常不变（sha 只由源码内容决定，pack 侧时间戳已固定化），
+    # 缓存命中即省一次隧道下载 + 解压。缓存目录按 sha 隔离，tmp 原子改名防半截。
+    # 多课程共享 worker（P3b C3）：code_cache 留共享根（按 sha 内容寻址，跨课复用），
+    # 只有 job 目录按源分区——调用方经 code_cache_root 传入共享根。
+    code_root = code_cache_root if code_cache_root is not None else work_dir / "code_cache"
+    #: M2 B3 blob 缓存根（跨课共享，同 code_cache 约定；键 = raw sha256）。
+    blob_root = code_root.parent / "blob_cache"
+    cache_dir = code_root / manifest["code_sha256"]
+    if cache_dir.exists():
+        sys.path.insert(0, str(cache_dir))
+        _wire_hit(jid, "code")  # 零字节命中也要进本 job 的传输账（否则摘要读数失真）
+        log(f"job {jid}: code cache 命中（{manifest['code_sha256'][:12]}…）——跳过下载解压")
+    else:
+        if preloaded is not None and "code_zip" in preloaded:
+            code_raw = preloaded["code_zip"]
+        else:
+            code_raw = download_code(base_url, token, jid)
+        if hashlib.sha256(code_raw).hexdigest() != manifest["code_sha256"]:
+            # per-job 快照 sha 与 manifest 对账：不匹配 = 传输损坏（瞬时，重下可修复）
+            raise RetryableError("code_sha256 不匹配——传输损坏（重下可修复）")
+        import zipfile
+
+        code_extract_tmp = code_root / (manifest["code_sha256"] + ".tmp")
+        code_extract_tmp.mkdir(parents=True, exist_ok=True)
+        code_zip_path = job_dir / "code.zip"
+        code_zip_path.write_bytes(code_raw)
+        with zipfile.ZipFile(code_zip_path) as zf:
+            zf.extractall(code_extract_tmp)
+        cache_dir.parent.mkdir(parents=True, exist_ok=True)
+        code_extract_tmp.rename(cache_dir)
+        sys.path.insert(0, str(cache_dir))
+        log(
+            f"job {jid}: code.zip unpacked ({len(code_raw)} bytes, "
+            f"{len(list(cache_dir.rglob('*.py')))} .py files) -> sys.path[0]"
+        )
+    return CodeLanded(code_root=code_root, code_cache_dir=cache_dir, blob_root=blob_root)
 
 
 def _ensure_ts_code(

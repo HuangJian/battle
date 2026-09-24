@@ -1608,8 +1608,12 @@ def test_run_job_result_cache_reuse(tmp_path: Path, monkeypatch) -> None:
     def _boom(*_a, **_k):  # 缓存命中时不允许发生任何网络/重算
         raise AssertionError("cache hit must not download or recompute")
 
-    monkeypatch.setattr(worker_mod, "download_payload", _boom)
-    monkeypatch.setattr(worker_mod, "download_code", _boom)
+    # 两处 patch 打 `remote.download`：物料落地（S4 第十二刀）已整段搬进那个模块，
+    # `download_payload` / `download_code` 的**调用点**随之离开 `worker` ⇒ 打在
+    # `remote.worker` 上会**静默失效**（那两个名字还在，是给别处直接调用用的入口，
+    # 但 `run_job` 已不再读它们——名字是契约，位置不是）。
+    monkeypatch.setattr(download_mod, "download_payload", _boom)
+    monkeypatch.setattr(download_mod, "download_code", _boom)
     out = worker_mod.run_job(
         "http://hub",
         "t",

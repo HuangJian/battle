@@ -11,12 +11,31 @@
 
 确定性（D5）：per-job 种子 = hash(runId, it, init_weights_fp)，load/chunk/update
 前重新播种——同 job 重发 chunk 逐字节一致。
+
+## S4 拆完之后，这个模块里**还剩什么**（2026-09-24 第十三刀）
+
+只剩三个宿主函数：`run_job`（300 行，作业壳：网络 / 校验 / kind 分叉 / 上报，物料落地已搬到
+`remote/download.py`）· `worker_loop`（197 行，轮询壳：多 hub round-robin / 停机感知 / 空闲退出 /
+回传收尾）· `main`（127 行，入口：CLI → 子进程或监督器模式），外加一个纯函数 `_alive_log`。
+其余**几乎是整页**的显式转发门面：100 条 import / 109 个名字 / 287 行（第 36–370 行）。
+
+**这三个都不宜再拆——理由不是「拆不动」，而是它们就是「宿主」这个概念的形状**：
+
+* `worker_loop` 持有**跨 job 存活**的东西（`uploader` 队列、`pf_stores`、`halt_seen`、
+  轮询计数器）。把它们搬走 = 把一个对象的生命周期交给两个模块管（第十刀已经量过：
+  `uploader` 必须留宿主，只能**传进**一轮）。
+* `main` 是 CLI：argparse 声明（~70 行）是**数据**，与「解析后怎么起进程」同属入口。
+  本仓同样把 CLI 留在入口模块的先例见 `remote/run_loop.py`。
+* `run_job` 的每个分支都只做一件事（拿物料 / 查红线 / 分叉 / 上核 / 收尾），再切就只是
+  把直线扯成跳转——本刀已经把里面**最像管道**的 69 行（物料落地）拿走了（350 → 300 行）。
+
+→ 下一步若还要动 `remote/`，目标应是 `hub_server` 的两个千行状态类（拆 = 拆状态），
+不是继续切这三个函数。
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import sys
@@ -26,15 +45,20 @@ from pathlib import Path
 from typing import Any
 
 from common.protocol import (
-    PAYLOAD_NAME,
     CodeChangedError,
     ProtocolError,
-    RetryableError,
     encode_opt_tar,
     encode_weights_json,
     normalize_manifest,
     pack_result_v2,
     validate_result,
+)
+
+# `RetryableError` 是**显式转发**（`as` 自别名）：`tests/test_soft_hold_prefetch.py` 从本模块
+# 命名空间取它（`W.RetryableError`）来构造瞬时失败。本模块自己已不用它（payload/code 的
+# sha 对账随物料落地搬到 `remote/download.py`）——但名字是契约：它曾是 worker 的公共面。
+from common.protocol import (
+    RetryableError as RetryableError,
 )
 from common.protocol import (
     d14_corpus_match as protocol_d14_corpus_match,
@@ -70,11 +94,25 @@ from remote.bc_job import (
     resolve_bc_seed as resolve_bc_seed,
 )
 
-# 下载簇（S4 第七刀 → `remote/download.py`）：**显式转发**。宿主（run_job / _prefetch_fill）
-# 经这些转发名调用 ⇒ patch `remote.worker.download_*` 仍有效；但**组内互调**（`_resolve_blob`
-# → `download_blob`）解析在本模块 ⇒ 那类测试要 patch `remote.download`。
+# 下载簇（S4 第七刀）+ 物料落地（S4 第十二刀）：**显式转发**。
+# 注入点分档（第十二刀后重划）：
+#   * `run_job` **自己读**的只有 `_ensure_payload` / `_ensure_code` / `_ensure_ts_code`
+#     （物料落地三兄弟）⇒ patch `remote.worker.*` 对它们仍有效；
+#   * `download_*` / `_cache_blob` / `_resolve_blob` / `_progress_logger` 的**调用点**已全部
+#     落在 `remote.download` 内部（组内互调）或 `remote.job_round`（预取填充器）⇒ 要拦物料
+#     下载请 patch **`remote.download.*`**（打在 worker 上会**静默失效**——在 worker 命名空间
+#     没人再读它们了）。
+#   之所以保留这些转发：tests 里有多处把 `remote.worker` 当**取名字的入口**直接调
+#   （`test_wire_reroll` / `test_control_plane_bypass` / `test_remote_ppo`）——名字是契约，
+#   位置不是。它们不再是**注入点**，但仍是**入口**。
 from remote.download import (
     _cache_blob as _cache_blob,
+)
+from remote.download import (
+    _ensure_code as _ensure_code,
+)
+from remote.download import (
+    _ensure_payload as _ensure_payload,
 )
 from remote.download import (
     _ensure_ts_code as _ensure_ts_code,
@@ -397,77 +435,28 @@ def run_job(
         except Exception:
             pass  # 缓存缺失/跨 manifest/损坏 → 清场走全流程
 
-    # ---- payload 来源（D1：sha256 校验防截断/损坏，两条路径同规） ----
-    # M0 统一计量：payload 大小与拿到它的墙钟（push = 随 POST body 抵达，下载耗时归 hub；
-    # pull = 真下载时间）。其余拆分（unpack/opt_restore/grad）各自包在下面。
-    t_dl = time.time()
-    if preloaded is not None and "payload_zip" in preloaded:
-        raw = preloaded["payload_zip"]
-        log(f"job {jid}: payload from push ({len(raw)} bytes)")
-        payload_dl_sec = 0.0
-    else:
-        raw = download_payload(base_url, token, jid)
-        payload_dl_sec = round(time.time() - t_dl, 3)
-        log(f"job {jid}: payload downloaded ({len(raw)} bytes in {payload_dl_sec:.1f}s)")
-    if hashlib.sha256(raw).hexdigest() != manifest["payload_sha256"]:
-        # 传输损坏属瞬时故障：重下即可修复（RetryableError → 释放租约立即重领重下）
-        raise RetryableError("payload_sha256 不匹配——传输损坏（重下可修复）")
-
-    job_dir = work_dir / jid
-    if job_dir.exists():
-        from platform_utils import rmtree_best_effort
-
-        rmtree_best_effort(job_dir)
-    job_dir.mkdir(parents=True)
-    # 磁盘：本 job 之后最多留 JOB_DIR_KEEP 个目录（放开头 = 失败轮也照样清理）
-    prune_job_dirs(work_dir, JOB_DIR_KEEP, log=log)
-    zip_path = job_dir / PAYLOAD_NAME
-    zip_path.write_bytes(raw)
-    # zip 内 manifest 是占位副本，解包仅取 shard 目录；权威校验全走 job 记录 manifest。
-    # init_weights.json / opt_init.tar.b64 与 shard 目录同落 job_dir 根（解包天然如此）。
-    t_unpack = time.time()
-    # 解包失败 = 内容决定性失败（走 ProtocolError → 确定性上报，不重认领）——见 §4 事故。
-    _unused_manifest, shard_dirs = unpack_payload_or_fail(zip_path, job_dir)
-    unpack_sec = round(time.time() - t_unpack, 3)
-
-    # ---- commit 校验：下载 code.zip 解压到 sys.path（替代 git 同步，D6） ----
-    # 云端 worker 不再依赖 git checkout，而是使用 hub 启动时打包的代码快照。
-    # ---- code.zip 内容寻址缓存（2026-09-05）：同 sha 只下载/解压一次 ----
-    # code 在多次迭代间通常不变（sha 只由源码内容决定，pack 侧时间戳已固定化），
-    # 缓存命中即省一次隧道下载 + 解压。缓存目录按 sha 隔离，tmp 原子改名防半截。
-    # 多课程共享 worker（P3b C3）：code_cache 留共享根（按 sha 内容寻址，跨课复用），
-    # 只有 job 目录按源分区——调用方经 code_cache_dir 传入共享根。
-    code_root = code_cache_dir if code_cache_dir is not None else work_dir / "code_cache"
-    #: M2 B3 blob 缓存根（跨课共享，同 code_cache 约定；键 = raw sha256）。
-    blob_root = code_root.parent / "blob_cache"
-    code_cache_dir = code_root / manifest["code_sha256"]
-    if code_cache_dir.exists():
-        sys.path.insert(0, str(code_cache_dir))
-        _wire_hit(jid, "code")  # 零字节命中也要进本 job 的传输账（否则摘要读数失真）
-        log(f"job {jid}: code cache 命中（{manifest['code_sha256'][:12]}…）——跳过下载解压")
-    else:
-        if preloaded is not None and "code_zip" in preloaded:
-            code_raw = preloaded["code_zip"]
-        else:
-            code_raw = download_code(base_url, token, jid)
-        if hashlib.sha256(code_raw).hexdigest() != manifest["code_sha256"]:
-            # per-job 快照 sha 与 manifest 对账：不匹配 = 传输损坏（瞬时，重下可修复）
-            raise RetryableError("code_sha256 不匹配——传输损坏（重下可修复）")
-        import zipfile
-
-        code_extract_tmp = code_root / (manifest["code_sha256"] + ".tmp")
-        code_extract_tmp.mkdir(parents=True, exist_ok=True)
-        code_zip_path = job_dir / "code.zip"
-        code_zip_path.write_bytes(code_raw)
-        with zipfile.ZipFile(code_zip_path) as zf:
-            zf.extractall(code_extract_tmp)
-        code_cache_dir.parent.mkdir(parents=True, exist_ok=True)
-        code_extract_tmp.rename(code_cache_dir)
-        sys.path.insert(0, str(code_cache_dir))
-        log(
-            f"job {jid}: code.zip unpacked ({len(code_raw)} bytes, "
-            f"{len(list(code_cache_dir.rglob('*.py')))} .py files) -> sys.path[0]"
-        )
+    # ---- 物料落地（S4 第十二刀）：payload 与 code.zip 的「取字节 + 摆好」整段在
+    # `remote/download.py`（与 kind=iter 的 `_ensure_ts_code` 并列成三兄弟）。
+    # 这一刀之后 `run_job` 不再认识缓存树 / 解包 / 清场细节——它读三个 `_ensure_*` 的**返回值**，
+    # 那些返回值（`PayloadLanded` / `CodeLanded`）就是「摆到哪儿了」的完整答案。
+    landed = _ensure_payload(base_url, token, jid, manifest, work_dir, preloaded=preloaded, log=log)
+    raw = landed.payload_bytes
+    job_dir = landed.job_dir
+    shard_dirs = landed.shard_dirs
+    payload_dl_sec, unpack_sec = landed.dl_sec, landed.unpack_sec
+    # `code_cache_dir` 是 run_job 的**入参**（共享根提示），落地后换成 per-sha 目录。
+    code = _ensure_code(
+        base_url,
+        token,
+        jid,
+        manifest,
+        job_dir,
+        work_dir,
+        code_cache_root=code_cache_dir,
+        preloaded=preloaded,
+        log=log,
+    )
+    code_root, code_cache_dir, blob_root = code.code_root, code.code_cache_dir, code.blob_root
 
     # ---- 热替换护栏（2026-09-11）：本进程已 import 的代码版本必须 == 本 job 要求 ----
     # sys.path.insert 只影响**尚未导入**的模块；已进 sys.modules 的 ppo/rl 不会重读。
@@ -626,7 +615,6 @@ def run_job(
         log(f"job {jid}: ECHO (smoke) — init 权重原样回传（未跑 PPO）")
         return result
 
-
     # ---- 训练核（2026-09-24）：从算子到产物整段在 `remote/train_core.py`（L4）----
     # 本模块只剩「作业壳」：网络 / 校验 / 分叉 / 上报。核不认识 hub 的作业面，也不 import
     # 本模块（守卫钉住）；它读的模块全局都是**它自己命名空间**的（seam-free，见那边头部）。
@@ -697,11 +685,20 @@ def run_job(
 #: 本进程**已 import 的**代码 sha（对比 manifest["code_sha256"] 揭穿热替换）
 _ACTIVE_CODE_SHA: str | None = None
 
+#: 空闲期存活日志的间隔（秒）。**两处**调用（无 job / 纯停机达令）必须同频：
+#: 它们是同一条读数的两个相位，各写一份就会各自漂（2026-09-11 现场：停机期日志静默被误读成
+#: 「worker 罢工」，就是漏了第二处）。
+ALIVE_LOG_SEC = 60.0
 
 
+def _alive_log(log: Any, *, halted: bool, done: int, polls: int, idle_since: float) -> None:
+    """空闲期打一行存活日志：周期内请求数（验证轮询周期真在生效）+ 连续空闲秒数（判孤儿 job）。
 
-
-
+    「到点没有」与计数器复位**留给调用方**：那两个变量是宿主的账，本模块不留模块级状态；
+    这里只负责把那一行写对（含 `cloud halted,` 前缀——`tests/test_remote_hotswap.py` 在断言它）。
+    """
+    where = "cloud halted, polling hub" if halted else "polling hub"
+    log(f"{where} (no job yet, {done} done, {polls} polls, idle {int(time.time() - idle_since)}s)")
 
 
 def worker_loop(
@@ -814,11 +811,9 @@ def worker_loop(
                 if max_idle_sec > 0 and time.time() - idle_since > max_idle_sec:
                     log(f"idle > {max_idle_sec}s — exit")
                     break
-                # 每 60s 打一次 alive 日志，让用户知道 worker 在正常运行
-                # （附带周期内请求数——验证轮询周期真在生效 + 附带连续空闲秒数便于判断孤儿 job）。
-                if time.time() - _last_alive_log > 60:
-                    log(
-                        f"polling hub (no job yet, {done} done, {_polls_since_log} polls, idle {int(time.time() - idle_since)}s)"
+                if time.time() - _last_alive_log > ALIVE_LOG_SEC:
+                    _alive_log(
+                        log, halted=False, done=done, polls=_polls_since_log, idle_since=idle_since
                     )
                     _last_alive_log = time.time()
                     _polls_since_log = 0
@@ -829,10 +824,9 @@ def worker_loop(
                 # 纯停机达令、无任务：不退出、继续等待（云机活着=随时可续训）。
                 # 这里 job 非 None → 上面的 None 分支存活日志会被吞——补一条同频日志，
                 # 否则停机期日志静默会被误读为"worker 罢工"（2026-09-11 现场）。
-                if time.time() - _last_alive_log > 60:
-                    log(
-                        f"cloud halted, polling hub (no job yet, {done} done, "
-                        f"{_polls_since_log} polls, idle {int(time.time() - idle_since)}s)"
+                if time.time() - _last_alive_log > ALIVE_LOG_SEC:
+                    _alive_log(
+                        log, halted=True, done=done, polls=_polls_since_log, idle_since=idle_since
                     )
                     _last_alive_log = time.time()
                     _polls_since_log = 0
