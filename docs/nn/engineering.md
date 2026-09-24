@@ -7,6 +7,54 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §21 门禁 flake 清场：把「睡固定时长当同步」全部改成事件驱动（2026-09-24）
+
+**现场**：CPU 满即时连跑 8 次 `nn-python-gate.sh`（xdist `-n 12` + ruff/mypy 三路并行，
+机器上还跑着训练/控制台），红的是**不同轮的不同用例**：serve_pool 端到端、`bulk_sched`
+单通道、`eval_local` 硬顶、`push_priority` 主副本；随后负载轰炸又拖出 `batch_eval` 快/慢
+节点、`control_plane` 让路窗口、`eval_dispatch` 门与本机、`body_transfer` 停滞等待、
+`offline_deliver` 后台异常、`rollout` rescan、`async_result` 回传放行。**共同特征：用绝对
+数字（sleep / 墙钟阈值）当同步手段**。三类根因与修法：
+
+**① 共享可变文件当跨进程计数器**（`tests/test_remote_serve_pool.py` 的桩）：`count.txt` 的
+读-改-写不原子 —— Windows 上 A 在 truncate 窗口内，B `read_text()` 拿到空串 ⇒ `int("")`
+⇒ 该 worker 答 `__SERVE_ERR__` ⇒ 池杀之并回退一局，正是 flake 签名
+`{'served': 2, 'spawned': 2, 'killed': 1, 'fallback': 1}`；另一形态是 `os.replace` 撞
+`[WinError 5] Access is denied: count.txt.bumpNNNN -> count.txt`。修法：桩内计数器改**进程内**
+（跨进程复用证据换只追加的 per-worker 文件）。红检：旧计数器 5/5 红（3 次完整签名），新桩 6/6 绿。
+
+**② 睡固定时长当同步**：一律改成「等事件/状态成立，兜底超时只挡挂起、不参与判定」。
+
+| 用例 | 原来（赌调度） | 现在（构造性） |
+|------|----------------|----------------|
+| `batch_eval` 快/慢节点就绪 | 慢 ping `sleep(0.4)` + 比两个时间戳 | 慢 ping **阻塞到快节点派完第一单**（`fast_dispatched`）；`slow_gate_ok` 判定 |
+| `eval_dispatch` 本机不等门 | `post_delay=1.0` + `local_seen_at < gate_done_at` | 权重门 `post_until` 等本机首局开跑 + `post_saw_local >= 1` |
+| `eval_dispatch` 门并行 | `ping_delay=0.3` + `elapsed < 0.7` | `Barrier(3)`：三台必须**同时**进 ping（串行 ⇒ BrokenBarrier） |
+| `eval_dispatch` 收工不等慢节点 | `elapsed < 2.0` | 快节点第一口等慢节点真在跑；断言**次序**（慢节点那局在收工之后才回） |
+| `bulk_sched` 排队/抢占/让路 | `sleep(0.1/0.05)` 赌线程已起来 | `_CountingEvent`（等「我在排队」的计数）+ 等 `yield_count` 涨 |
+| `control_plane` 让路窗口 | 控制面在途 `sleep(0.15)` | 窗口**不按时长关**：等 `yield_count >= 1` 才关；bulk 先等窗口开 |
+| `body_transfer` 停滞 | `sleep(2.5)` 后读 `capfd` | print 探针置位事件，等**那行日志**出现 |
+| `offline_deliver` 后台异常 | `sleep(0.2)` | 等那行异常日志（事件） |
+| `rollout` 中途上线节点 | self 每局 `sleep(0.05)` 让窗 | self 第一局等 a97 **真的供满 2 局** |
+| `async_result` 回传放行 | `second_started.wait(0.8)` | 按模式等真事件（async：第二份 job 开算；sync：回传开传），30s 仅兑底 |
+
+**③ 绝对墙钟断言 → 次序/结构性事实**：`elapsed < 0.7/2.0/2.5` 这类把「机器多快」当契约
+的判据一律换掉（上面的表就是换法）。窄道上保留的仍保留：**契约本身就是时间**的
+（如 §104 控制面往返 ≤1s）、以及相对夹具自身延迟的下界（`elapsed < SLOW_NODE_SEC`）。
+
+**★ Windows 时钟粒度 15.6ms（本轮踩到）**：事件驱动把两个事件压到只差几微秒后，
+`time.monotonic()` 两次取样会落到**同一个** tick、`a < b` 变掷硬币（实测两个值逐位相等）。
+新写断言优先用「次序列表 / 计数字 / 结构事实」，不要用两个时间戳比大小。
+
+**有意保留的 sleep**（是夹具**模拟的工作量**，不是同步）：慢节点延迟、桩子进程 hang、
+fake HTTP RTT、`SlowResp.close()`、控制面假「在途」；以及「谓词轮询 + 兜底超时」形
+（`_wait_until` / `_pump`）—— 判据是状态，兜底只管挂起。
+
+**验收**：16 核 burner 满载下 11 个相关文件连跑 3 次（76 用例）全绿；`nn-python-gate.sh`
+连跑 3 次 **2250 passed**（ruff/mypy 均过）；每个改造过的判据都有红检（例：把
+`ping_nodes_parallel` 临时改串行 ⇒ Barrier 用例立刻红）。
+
+---
 ## §19 本机评估的子进程捕获：gbk 解码把 stdout/stderr 丢成 None（顺带刷屏 65 行/100 局）（2026-09-22）
 
 `rl/eval_local.py::run_local_eval_game` 的 `subprocess.run(capture_output=True, text=True)` 没给

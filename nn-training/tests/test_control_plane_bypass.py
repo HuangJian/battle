@@ -38,6 +38,21 @@ _BULK_BODY = b"x" * (W.BODY_CHUNK * 4)
 _CHUNK_GAP_SEC = 0.04
 
 
+def _wait_until(pred, *, timeout: float = 10.0, step: float = 0.005) -> bool:
+    """等一个**事件/状态**成立（`timeout` 只是挂起兜底，不是同步手段，2026-09-24）。
+
+    背景：本文件原先靠「控制面在途 0.15s」这类**绝对时长**当窗口，然后断言 bulk 让了路。
+    门禁机器满载时线程调度延迟能把整段窗口挤到 bulk 的两个分片间隙之外 ⇒ `yield_count==0`
+    ⇒ 用例红在环境上（04:xx 的连跑里同类失败出现过）。等到状态成立才继续，就不看机器脸色。
+    """
+    end = time.time() + timeout
+    while time.time() < end:
+        if pred():
+            return True
+        time.sleep(step)
+    return bool(pred())
+
+
 class _Handler(BaseHTTPRequestHandler):
     """hub 形状的最小服务：慢 bulk（payload）+ 秒回控制面（peek）+ 慢结果上传。"""
 
@@ -72,7 +87,9 @@ class _Handler(BaseHTTPRequestHandler):
         if n:
             self.rfile.read(n)
         if self.path.endswith("/result"):
-            time.sleep(0.25)  # 「在传」窗口：让 P2 有时间来排队
+            # 「在传」窗口 = 模拟真实回传的耗时（不是同步手段）：P2 那一腿先等
+            # `inflight_bulk == 1`（**事件**）才去申请通道，所以这里的长短不决定对错。
+            time.sleep(0.25)
         self._json({"ok": True})
 
 
@@ -99,9 +116,15 @@ def test_control_round_trip_stays_fast_while_bulk_in_flight(hub: str):
     inflight_seen: list[int] = []
     errs: list[BaseException] = []
     bulk_done = threading.Event()
+    control_window = threading.Event()
+    yielded: list[bool] = []
     cap: list[str] = []
 
     def bulk() -> None:
+        # 事件驱动（2026-09-24）：**先等控制面窗口打开再开传** —— 「bulk 在途 ∧ 控制面在途」
+        # 从「两个线程谁先被调度」变成构造性事实（原实现靠 4 片 × 40ms 的传输窗口去撞，
+        # 满载时传输可能已经跑完，控制面窗口里根本没人可让路）。
+        control_window.wait(15.0)
         try:
             W.download_payload(
                 hub,
@@ -118,10 +141,22 @@ def test_control_round_trip_stays_fast_while_bulk_in_flight(hub: str):
     tb = threading.Thread(target=bulk, daemon=True)
     tb.start()
 
-    # 控制面线程：bulk 在途期间反复问询；其中一次**抱着控制面标记**停 0.15s，
-    # 逼出真实的让路（bulk 在分片间隙暂停）。
+    # 控制面线程：先开窗口并**等 bulk 真的让路**（事件），再在 bulk 在途期间反复问询。
     def control() -> None:
-        held = False
+        with W._BULK.control(label="/jobs/status"):
+            control_window.set()
+            # 窗口**不按时长**关闭：等 `yield_count` 涨了（bulk 在分片间隙真的暂停了）才关。
+            yielded.append(_wait_until(lambda: W._BULK.stats()["yield_count"] >= 1))
+            # 窗口内先量一发：这时 bulk 一定在途（它正卡在让路里）⇒ `inflight_seen`
+            # 里出现 1 是构造性的，不靠传输窗口的长短。
+            t0 = time.time()
+            try:
+                W.peek_jobs(hub, TOKEN, worker_id="w1", n=2)
+            except BaseException as e:
+                errs.append(e)
+                return
+            lat.append(time.time() - t0)
+            inflight_seen.append(W._BULK.inflight())
         while not bulk_done.is_set():
             t0 = time.time()
             try:
@@ -131,10 +166,6 @@ def test_control_round_trip_stays_fast_while_bulk_in_flight(hub: str):
                 return
             lat.append(time.time() - t0)
             inflight_seen.append(W._BULK.inflight())
-            if not held:
-                held = True
-                with W._BULK.control(label="/jobs/status"):
-                    time.sleep(0.15)  # 控制面「在途」：bulk 该让路
             time.sleep(0.01)
 
     tc = threading.Thread(target=control, daemon=True)
@@ -142,6 +173,7 @@ def test_control_round_trip_stays_fast_while_bulk_in_flight(hub: str):
     tb.join(15)
     tc.join(15)
     assert not errs, f"传输出错：{errs!r}"
+    assert yielded and yielded[0], "bulk 在窗口内没有为控制面让路（§2.2）"
     assert bulk_done.is_set(), "bulk 下载没在窗口内结束"
     assert len(lat) >= 3, f"控制面问询次数太少，测不出结论：{len(lat)}"
     worst = max(lat)

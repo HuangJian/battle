@@ -693,16 +693,25 @@ def test_unreachable_node_is_retried_then_joins(tmp_path: Path, monkeypatch) -> 
 def test_fast_node_dispatches_without_waiting_for_slow_bringup(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """req 1：慢节点还在 ping/收权重，快节点就必须已经开派（旧的阶段串行会红）。"""
+    """req 1：慢节点还在 ping/收权重，快节点就必须已经开派（旧的阶段串行会红）。
+
+    事件驱动（2026-09-24 修 CPU 满载下的门禁 flake）：慢节点的 ping **阻塞等到快节点
+    真的派了第一单**再返回 —— 「快节点不等慢节点就绪」从「机器够快」变成构造性事实，
+    断言也就不用比墙钟。旧形态（阶段串行）下这个等待永远等不到 ⇒ 兜底 15s 后
+    `slow_gate_ok=False` ⇒ 响亮地红。
+    """
+    import threading
     import time
 
     import dist_common
 
     t: dict[str, float] = {}
+    fast_dispatched = threading.Event()
 
     def fake_ping(url, key, **kw):
         if "slow" in url:
-            time.sleep(0.4)
+            # 兜底时间只是挂起护栏，不参与判定（判定看 slow_gate_ok）
+            t["slow_gate_ok"] = fast_dispatched.wait(15.0)
             t["slow_ping_done"] = time.monotonic()
         return _ok_ping()
 
@@ -713,7 +722,8 @@ def test_fast_node_dispatches_without_waiting_for_slow_bringup(
 
     def fake_fetch(url, key, **kw):
         t.setdefault("first_fetch", time.monotonic())
-        time.sleep(0.01)  # 快节点也真花时间：保证「慢节点还在 ping」期间它已在干活
+        if "slow" not in url:
+            fast_dispatched.set()
         return _ok_manifest(int(kw["stage"]), int(kw["seed"]), kw["wver"]), {}
 
     monkeypatch.setattr(dist_common, "node_ping", fake_ping)
@@ -726,9 +736,10 @@ def test_fast_node_dispatches_without_waiting_for_slow_bringup(
     r, logs, _ = _channels_runner(tmp_path, monkeypatch, nodes=nodes)
     out = r.run()
     assert out["settled"] == out["total"] == 100
+    # 次序已由构造保证（慢节点的 ping 只可能在快节点派完第一单之后才返回），
+    # 所以这里不再比两个只差几微秒的 `monotonic()` 戳（Windows 粒度 ~15.6ms，比大小是掷硬币）。
+    assert t.get("slow_gate_ok"), "快节点没能在慢节点就绪前派单 = 阶段串行回归"
     assert "slow_ping_done" in t and "slow_weights_done" in t
-    assert t["first_fetch"] < t["slow_ping_done"], "快节点等慢节点 ping 完才派单 = 阶段串行回归"
-    assert t["first_fetch"] < t["slow_weights_done"], "快节点等慢节点收完权重才派单 = 阶段串行回归"
     assert any("node slow 就绪" in m for m in logs), "慢节点就绪后也必须投入"
 
 

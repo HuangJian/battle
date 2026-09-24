@@ -301,7 +301,13 @@ def test_soft_streak_still_bounded_when_cluster_is_down(tmp_path, monkeypatch, s
 
 
 def test_rescan_discovers_node_online_mid_round(tmp_path, monkeypatch) -> None:
-    """A4：开局 ping 失败被挡在门外的节点，轮内首个 pass（不等 120s）就能上线供样。"""
+    """A4：开局 ping 失败被挡在门外的节点，轮内首个 pass（不等 120s）就能上线供样。
+
+    事件驱动（2026-09-24 修 CPU 满载下的门禁 flake）：原来是「self 每局 `sleep(0.05)`
+    让出窗口」——满载时 self 的慢与 a97 的上线谁先发生就成了掷硬币（a97 可能一局都拿不到）。
+    现在 self 的第一局**等 a97 真的供满 2 局**才返回：「a97 中途进场并供样」是构造性的，
+    旧形态（rescan 等到 120s）下等不到 ⇒ 兜底 20s 后 `by_node[a97] == 0` ⇒ 响亮地红。
+    """
     a97 = {"n": 0}
 
     def ping(url: str, _auth: str = "", timeout: float = 3.0):
@@ -319,13 +325,23 @@ def test_rescan_discovers_node_online_mid_round(tmp_path, monkeypatch) -> None:
         ping_fn=ping,
     )
 
-    def fetch(*_a, **_kw):
-        time.sleep(0.05)  # self 慢一拍，把窗口让给中途上线的 a97
+    served = {"a97": 0}
+    a97_served_twice = threading.Event()
+    self_gate: list[bool] = []
+
+    def fetch(url: str, *_a, **_kw):
+        if "a97" in str(url):
+            served["a97"] += 1
+            if served["a97"] >= 2:
+                a97_served_twice.set()
+        elif not self_gate:
+            self_gate.append(a97_served_twice.wait(20.0))
         return h.manifest(), {}
 
     report = h.run(fetch)
     assert report["missing"] == [], report["missing"]
     by_node = report["dist"]["nodes"]
+    assert self_gate and self_gate[0], "a97 没能在 self 让位窗口内供满 2 局"
     assert by_node.get("a97", 0) >= 2, f"中途上线节点必须真的供样: {by_node}"
     assert "online mid-run" in "\n".join(h.logs)
 

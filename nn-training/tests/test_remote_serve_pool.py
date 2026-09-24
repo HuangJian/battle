@@ -27,6 +27,7 @@ if str(ROOT) not in sys.path:
 
 import remote.iter_rollout as iter_rollout
 import remote.serve_pool as serve_pool
+from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from remote import game_watch
 from remote.serve_pool import ServePool
 
@@ -35,15 +36,17 @@ from remote.serve_pool import ServePool
 #: 一个**两种模式都支持**的 stub 导出器（与真导出器同构：`main(argv)` 跑一局，`--serve` 只是
 #: 外面包一层协议循环）—— 同一份桩既能走池、也能走一次性回退，回退用例才有意义。
 #:
-#: `@COUNT@` = 共享计数器文件（记录「一局被真跑了多少次」，用来证明复用而不是重跑）；
+#: `@COUNT@` = 计数**目录**（每跑完一局落一个自己的文件，计数 = 文件数，用来证明复用而不是
+#:  重跑）；**不能**做成「一个共享文件 + read-modify-write」（2026-09-24 flake 的真身）；
 #: `@FAIL_SEED@` = 让它对该 seed 打 `__SERVE_ERR__`（造回退路径）。
 _STUB_SERVE = """\
 import json, os, sys
 from pathlib import Path
 
 sys.stdout.reconfigure(line_buffering=True)   # 管道里必须是行缓冲，否则标记行会卡住
-COUNT = Path(r"@COUNT@")
+COUNT = Path(r"@COUNT@")   # 计数目录（每局一个文件）
 FAIL_SEED = "@FAIL_SEED@"
+_SEEN = []                 # 本进程已跑的局数（给落盘文件名与 run# 提供序号）
 
 
 def one(a):
@@ -58,8 +61,17 @@ def one(a):
         # 那一局在一次性路径上真的能成功（否则测的就成了「导出器本来就坏」）
         print(f"[stub-serve] refusing s{stage}/d{seed}")
         raise RuntimeError(f"stub-refused-s{seed}")
-    n = int(COUNT.read_text()) + 1 if COUNT.exists() else 1
-    COUNT.write_text(str(n))
+    # 计数：**每局落一个自己的文件**（计数 = 文件数）。不能用一个共享文件做
+    # read-modify-write —— 2026-09-24 定位到的门禁 flake 真身，两种写法栽在同一件事上：
+    #   ① 截断 + 写（原写法）：另一个并发 worker 在截断窗口里 `read_text()` 拿到**空文件**
+    #      ⇒ `int("")` ⇒ ValueError ⇒ 它回 `__SERVE_ERR__` ⇒ 池按纪律换掉它 + 回退一次性
+    #      ⇒ 端到端用例的 `served == 3` 判红（三局产物其实齐全，纯**假红**）。
+    #   ② 唯一临时名 + `os.replace`（第一版修法）也不行：Windows 上目标文件正被另一个
+    #      进程读着时 `os.replace` 抛 `[WinError 5] Access is denied` —— 同一现场照旧。
+    # 每局写自己的文件 ⇒ 无共享可变状态 ⇒ 没有窗口/访问冲突/丢更新（并发下的计数**精确**）。
+    _SEEN.append(1)
+    COUNT.mkdir(parents=True, exist_ok=True)
+    (COUNT / f"g{os.getpid()}_{len(_SEEN)}").write_text("1")
     d = out.parent / f"rl_s{stage}_seed{seed}"
     d.mkdir(parents=True, exist_ok=True)
     (d / "manifest.json").write_text(json.dumps({"stage": stage, "seed": seed, "wver": wver}))
@@ -67,7 +79,7 @@ def one(a):
         "games": 1, "winRate": 1.0, "outcomes": {"stage_clear": 1},
         "totalSamples": 2, "totalTicks": 20, "scoreList": [1.0], "dimLists": {"kills": [1.0]},
     }))
-    print(f"[stub-serve] done s{stage}/d{seed} pid={os.getpid()} run#{n}")
+    print(f"[stub-serve] done s{stage}/d{seed} pid={os.getpid()} run#{len(_SEEN)}")
 
 
 if "--serve" in sys.argv:                     # 长驻：stdin 一行一局
@@ -125,6 +137,15 @@ def _write_stub(tmp_path: Path, body: str, name: str = "stub_serve.py", **subs: 
     return p
 
 
+def _games_run(count_dir: Path) -> int:
+    """桩落盘的「真跑过几局」= 计数目录里的文件数。
+
+    每局写**自己的**文件（不是共享文件的 read-modify-write）：无窗口、无访问冲突、无丢更新，
+    并发下也能得到**精确**局数（2026-09-24 的 flake 正是共享文件那种写法造出来的）。
+    """
+    return sum(1 for _ in count_dir.iterdir()) if count_dir.is_dir() else 0
+
+
 def _pool(tmp_path: Path, script: Path, *, workers: int = 1, ready: float = 30.0) -> ServePool:
     """按测试桩建池（`bun` = 本进程 python；ts_dir = 桩所在目录）。"""
     return ServePool(sys.executable, script.name, tmp_path, workers, ready_timeout_sec=ready)
@@ -138,6 +159,17 @@ def _argv(script: Path, stage: int, seed: int, out: str) -> list[str]:
 def _task(script: Path, stage: int, seed: int, out: str, tmp_path: Path) -> tuple[list[str], Path]:
     """一局的任务：argv + 它自己的日志路径（与 `_run_one_game` 的落点一致）。"""
     return _argv(script, stage, seed, out), (tmp_path / out / iter_rollout.ROLLOUT_LOG_NAME)
+
+
+#: 「worker 被**外力**带走」的三类回退原因：不是协议错、也不是我们的逻辑错，而是环境
+#: 把长驻子进程杀了（沙箱的删除/写守卫 ⇒ SystemExit、负载/句柄耗尽 ⇒ 起不来或当场退出）。
+#: 与之相对：`err`（导出器自己报错）与 `timeout`（跑得慢）是**被测行为**，不许当环境问题放过。
+_ENV_KILL_REASONS = frozenset({"dead", "write-failed", "no-stdin"})
+
+
+def _env_killed_worker(stats: dict) -> bool:
+    """这一轮的回退原因里有没有「worker 被外力带走」（池的计数已诚实记账）。"""
+    return bool(set(stats.get("reasons") or {}) & _ENV_KILL_REASONS)
 
 
 def _fast_poll(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -215,7 +247,7 @@ def test_try_pool_refuses_a_task_for_another_script(tmp_path: Path) -> None:
 
 def test_pool_reuses_one_worker_across_games(tmp_path: Path) -> None:
     """核心收益：N 局共用同一进程（`spawned` 不随局数增长），且每局都真跑了一次。"""
-    count = tmp_path / "count.txt"
+    count = tmp_path / "count.d"
     script = _write_stub(tmp_path, _STUB_SERVE, count=str(count), fail_seed="")
     pool = _pool(tmp_path, script)
     assert pool.start() == 1
@@ -227,7 +259,7 @@ def test_pool_reuses_one_worker_across_games(tmp_path: Path) -> None:
         assert secs is not None and secs >= 0.0
         pids.append(logp.read_text(encoding="utf-8"))
     assert pool.served == 4 and pool.spawned == 1 and pool.fallback == 0
-    assert count.read_text() == "4"  # 4 局各自跑了一次（复用进程，不是复用结果）
+    assert _games_run(count) == 4  # 4 局各自跑了一次（复用进程，不是复用结果）
     # 同一进程：四份日志里的 pid 必须一致（进程复用的直接证据）
     seen = {line.split("pid=")[1].split()[0] for p in pids for line in p.splitlines() if "pid=" in line}
     assert len(seen) == 1, seen
@@ -346,15 +378,36 @@ def test_worker_err_falls_back_once_and_drops_worker(tmp_path: Path) -> None:
 
 def test_dead_worker_falls_back_instead_of_waiting_the_cap(tmp_path: Path) -> None:
     """worker 中途死掉（OOM/信号）：立刻回退，**不等满单局硬顶**（否则整轮白等一次）。"""
+    msgs: list[str] = []
     script = _write_stub(tmp_path, _STUB_DIES, name="stub_dies.py")
-    pool = _pool(tmp_path, script)
+    pool = ServePool(sys.executable, script.name, tmp_path, 1, msgs.append)
     assert pool.start() == 1
     argv, logp = _task(script, 0, 0, "w0", tmp_path)
     t0 = time.time()
     assert pool.try_pool(argv, logp, 30.0) is None
     assert time.time() - t0 < 10.0, "死进程必须立刻唤醒等待方，不能等满 30s 硬顶"
     assert pool.fallback_reasons == {"dead": 1}
+    # 回退必须留一行**带现场**的日志（退出码）：否则那一局的 rollout.log 会被一次性路径
+    # 重写覆盖，轮末只剩 killed=1 这种没有信息量的计数（2026-09-23 flake 的取证教训）。
+    assert any("回退一次性 spawn（dead:" in m and "rc=" in m for m in msgs), msgs
     pool.close()
+
+
+def test_postmortem_reports_exit_code_and_last_words() -> None:
+    """`_postmortem` = 回退现场的唯一留痕：退出码（谁杀的）+ 尾行（它最后说了什么）。"""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import sys; print('boom-tail'); sys.exit(7)"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        encoding="utf-8",
+        **_POPEN_NO_WINDOW,
+    )
+    out, _ = proc.communicate()
+    assert proc.poll() == 7
+    worker = serve_pool._Worker(proc, "stub_serve.py")  # 进程已退出 ⇒ reader 立刻 EOF
+    lines = [ln for ln in (out or "").splitlines() if ln.strip()]
+    line = ServePool._postmortem(worker, lines)
+    assert "rc=7" in line and "0x00000007" in line and "boom-tail" in line, line
 
 
 def test_hung_task_hits_the_cap_then_falls_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -420,23 +473,52 @@ def _serve_spec(tmp_path: Path, script: Path, games: list[tuple[int, int]], **ov
 def test_run_iter_rollout_goes_through_the_pool(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, allow_stub: None
 ) -> None:
-    """接线：整轮走池 ⇒ 同一批 shard、逐局报告/日志齐全、`serve_pool` 计数诚实。"""
+    """接线：整轮走池 ⇒ 同一批 shard、逐局报告/日志齐全、`serve_pool` 计数诚实。
+
+    环境**杀子进程**（编码 agent 的删除/写守卫、负载、控制台广播）不在本用例的检验范围内，
+    但它恰恰会打在这条用例上——因为全仓只有它把**一批 python 子进程**长期挂在项目内
+    `tmp/pytest-tmp/` 下又持续写盘（2026-09-23；取证与判据：docs/nn/engineering.md §21）。
+    池对此的契约是「只慢不错、绝不丢局」：那一局回退一次性 spawn、产物齐全，只是计数变成
+    `served=2/killed=1/fallback=1`。所以这里先断言**被环境杀的那一轮产物齐全**（契约现场），
+    再用一轮干净的重跑钉「接线走池」。系统性回归不会因此漏网：真坏了每一轮计数都一样。
+    """
     monkeypatch.setattr(iter_rollout, "resolve_bun", lambda name="": sys.executable)
     monkeypatch.setattr(iter_rollout, "bun_version", lambda bun: "9.9.9-stub")
-    count = tmp_path / "count.txt"
+    count = tmp_path / "count.d"
     script = _write_stub(tmp_path, _STUB_SERVE, count=str(count), fail_seed="")
     msgs: list[str] = []
-    job_dir = tmp_path / "job"
-    job_dir.mkdir()
     spec = _serve_spec(tmp_path, script, [(3, 7), (3, 8), (4, 1)])
-    out = iter_rollout.run_iter_rollout(job_dir, spec, log=msgs.append)
+
+    def _round(name: str) -> tuple[Path, dict]:
+        d = tmp_path / name
+        d.mkdir()
+        return d, iter_rollout.run_iter_rollout(d, spec, log=msgs.append)
+
+    job_dir, out = _round("job")
+    stats = out["serve_pool"]
+    if stats is not None and _env_killed_worker(stats):
+        # 契约现场：环境杀 worker ⇒ 那一局回退一次性，**整轮照样产出齐全**（一局不丢）。
+        assert len(out["shard_dirs"]) == 3 and out["report"]["games"] == 3, (stats, msgs)
+        for i in range(3):
+            assert (job_dir / f"w{i}" / "_rl_report.json").exists(), (stats, msgs)
+        msgs.append(
+            f"[env-kill] 环境带走了长驻 worker：{stats['reasons']} ⇒ 重跑一轮钉接线（见模块注释）"
+        )
+        job_dir, out = _round("job-retry")
     assert sorted(Path(p).name for p in out["shard_dirs"]) == [
         "rl_s3_seed7", "rl_s3_seed8", "rl_s4_seed1",
     ]
     assert out["report"]["games"] == 3 and out["report"]["totalSamples"] == 6
     stats = out["serve_pool"]
-    assert stats is not None and stats["served"] == 3 and stats["fallback"] == 0
-    assert stats["spawned"] == 2  # workers=2 起满池，`spawned` 与局数无关
+    # 失败时把池的**现场**一并打出来：计数（served/spawned/killed/fallback）+ 回退原因
+    # （`reasons` 带 worker 自己的报错文本）+ 池的日志尾（`[serve-pool] …` 验尸行）。
+    # 否则断言里的 dict 会被 pytest 省略成 `{...}`，只剩「2 != 3」这种查不动的现场
+    # （2026-09-23 的 flake 就是这样白烧了一轮）。
+    assert stats is not None, (msgs[-8:], out["report"])
+    if stats["fallback"]:
+        (tmp_path / "forensics-msgs.txt").write_text("\n".join(msgs), encoding="utf-8")
+    assert stats["served"] == 3 and stats["fallback"] == 0, (stats, msgs[-8:])
+    assert stats["spawned"] == 2, (stats, msgs[-8:])  # workers=2 起满池，`spawned` 与局数无关
     assert out["report"]["elapsedSec"] >= 0.0
     # 每局：报告 + 自己的日志（日志内容来自 worker stdout，必须按局切开）
     for i, (st, sd) in enumerate([(3, 7), (3, 8), (4, 1)]):
@@ -447,13 +529,41 @@ def test_run_iter_rollout_goes_through_the_pool(
     assert any("serve_pool: served=3" in m for m in msgs), msgs
 
 
+def test_concurrent_pool_games_never_hit_the_counter_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, allow_stub: None
+) -> None:
+    """并发跑局：桩的计数器**不许**被并发读者读到空文件。
+
+    这是 2026-09-23/24 那个 pre-commit flake 的直接回归钉子（根因与取证见
+    `docs/nn/engineering.md §21`）：旧的自增写法（截断 + 写）会让另一个 worker 读到
+    截断中的空计数文件 ⇒ `int("")` ⇒ 它回 `__SERVE_ERR__` ⇒ 池按纪律换掉它并回退
+    一次性 ⇒ 端到端计数变成 `killed=1/fallback=1`（三局产物其实齐全，所以只是**假红**）。
+    4 worker × 12 局的碰撞概率远高于端到端用例的 2×3 ⇒ 旧写法下能稳定抓住这个回归。
+    """
+    monkeypatch.setattr(iter_rollout, "resolve_bun", lambda name="": sys.executable)
+    monkeypatch.setattr(iter_rollout, "bun_version", lambda bun: "")
+    count = tmp_path / "count.d"
+    script = _write_stub(tmp_path, _STUB_SERVE, count=str(count), fail_seed="")
+    msgs: list[str] = []
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    spec = _serve_spec(tmp_path, script, [(3, s) for s in range(12)], workers=4)
+    out = iter_rollout.run_iter_rollout(job_dir, spec, log=msgs.append)
+    stats = out["serve_pool"]
+    assert stats is not None, (msgs[-8:], out["report"])
+    assert stats["served"] == 12 and stats["fallback"] == 0, (stats, msgs[-8:])
+    assert stats["reasons"] == {} and out["report"]["games"] == 12, (stats, msgs[-8:])
+    # 计数必须**精确**（不只是「没报错」）：共享文件写法在并发下会丢更新
+    assert _games_run(count) == 12, (stats, msgs[-8:])
+
+
 def test_run_iter_rollout_pool_failure_still_produces_the_round(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, allow_stub: None
 ) -> None:
     """池判失败的那一局（ERR）⇒ 回退一次性 spawn，**整轮仍然成功**（池不吞局）。"""
     monkeypatch.setattr(iter_rollout, "resolve_bun", lambda name="": sys.executable)
     monkeypatch.setattr(iter_rollout, "bun_version", lambda bun: "")
-    count = tmp_path / "count.txt"
+    count = tmp_path / "count.d"
     script = _write_stub(tmp_path, _STUB_SERVE, count=str(count), fail_seed="7")
     msgs: list[str] = []
     job_dir = tmp_path / "job"
@@ -465,7 +575,7 @@ def test_run_iter_rollout_pool_failure_still_produces_the_round(
     stats = out["serve_pool"]
     assert stats is not None and stats["served"] == 1 and stats["fallback"] == 1
     assert stats["reasons"] == {"err": 1}
-    assert count.read_text() == "2"  # 被拒那一局由一次性路径真跑了（一局没丢）
+    assert _games_run(count) == 2  # 被拒那一局由一次性路径真跑了（一局没丢）
 
 
 def test_run_iter_rollout_env_switch_returns_to_per_game_spawn(
@@ -475,7 +585,7 @@ def test_run_iter_rollout_env_switch_returns_to_per_game_spawn(
     monkeypatch.setenv(serve_pool.ENV_SWITCH, "0")
     monkeypatch.setattr(iter_rollout, "resolve_bun", lambda name="": sys.executable)
     monkeypatch.setattr(iter_rollout, "bun_version", lambda bun: "")
-    count = tmp_path / "count.txt"
+    count = tmp_path / "count.d"
     script = _write_stub(tmp_path, _STUB_SERVE, count=str(count), fail_seed="")
     job_dir = tmp_path / "job"
     job_dir.mkdir()
@@ -484,7 +594,7 @@ def test_run_iter_rollout_env_switch_returns_to_per_game_spawn(
     )
     assert out["serve_pool"] is None
     assert len(out["shard_dirs"]) == 1
-    assert count.read_text() == "1"
+    assert _games_run(count) == 1
 
 
 def test_run_iter_rollout_mixed_scripts_never_builds_a_pool(

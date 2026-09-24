@@ -229,6 +229,7 @@ def test_worker_loop_starts_the_next_job_before_the_upload_ends(
     """
     events: list[str] = []
     lock = threading.Lock()
+    gates: dict[str, dict[str, bool]] = {}
 
     def _stamp(tag: str) -> None:
         with lock:
@@ -238,10 +239,13 @@ def test_worker_loop_starts_the_next_job_before_the_upload_ends(
         events.clear()
         up_release = threading.Event()
         second_started = threading.Event()
+        up_started = threading.Event()
+        releaser: dict[str, bool] = {}
 
         def _upload(base, token, jid, result, **k):
             _stamp(f"up_block:{jid}")
-            up_release.wait(5.0)
+            up_started.set()
+            up_release.wait(30.0)
             _stamp(f"up_end:{jid}")
             return 200
 
@@ -260,7 +264,15 @@ def test_worker_loop_starts_the_next_job_before_the_upload_ends(
         _patch_hub(monkeypatch, [_job(JID1), _job(JID2)])
 
         def _releaser() -> None:
-            second_started.wait(0.8)  # async 会很快等到；sync 等到超时也没关系
+            # 事件驱动（2026-09-24 修 CPU 满载下的门禁 flake）：async 的判据是「第二份 job
+            # **已开算**」——等这个事件成立再放行，而不是 `wait(0.8)`：固定时长在满载时会
+            # 先到点 ⇒ 提前放行 ⇒ `run2` 落到 `up_end` 之后 ⇒ 假红（那正是本用例要排除的）。
+            # sync 本来就不可能等到 run2（回传就在关键路径上），固定时长在那条腿上**是**
+            # 同步手段——改成等「回传真的开传了」（sync 下唯一会发生的进展事件）。
+            if mode == "sync":
+                releaser["ok"] = up_started.wait(30.0)
+            else:
+                releaser["ok"] = second_started.wait(30.0)
             up_release.set()
 
         t = threading.Thread(target=_releaser, daemon=True)
@@ -276,14 +288,17 @@ def test_worker_loop_starts_the_next_job_before_the_upload_ends(
             log=lambda _m: None,
         )
         t.join(timeout=5.0)
+        gates[mode] = dict(releaser)
         with lock:
             return list(events)
 
     a = _measure("async")
+    assert gates["async"].get("ok"), f"async：第二份 job 没能在 30s 内开算（闸门没等到事件）：{a}"
     assert a.index("run2") < a.index(f"up_end:{JID1}"), (
         f"async 下第二份 job 竟然等在回传后面 —— 回传还在关键路径上：{a}"
     )
     s = _measure("sync")
+    assert gates["sync"].get("ok"), f"sync：回传没开传（闸门没等到事件）：{s}"
     assert s.index(f"up_end:{JID1}") < s.index("run2"), (
         f"sync 基线应当等回传（否则本用例是空转）：{s}"
     )

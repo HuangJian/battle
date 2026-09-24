@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import time
 
 import pytest
 
+from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from rl.eval_local import run_eval_runner_capture
 
 #: 故意混字节：UTF-8 的中文 + 单独的 0xaf（在 gbk 与 utf-8 下都不是合法序列）。
@@ -90,16 +92,38 @@ def test_capture_watchdog_warns_slow_game_by_identity(monkeypatch) -> None:
     assert any("异常慢" in m and "s2/d9" in m for m in msgs), msgs
 
 
+def _python_launch_sec() -> float:
+    """这台机器**此刻**起一个 python 子进程需要多久 —— 硬顶必须活得比它长。
+
+    事件驱动（2026-09-24 修 CPU 满载下的门禁 flake）：硬顶窗口里唯一不可控的一段就是子进程的
+    「启动 → 写出第一行」——把它**测出来**再定硬顶，用例就不再依赖「机器必须够快」这个假设。
+    （原来写死 0.3s：满载时单是 CPython 冷启动就能吃掉它 ⇒ 杀得太早 ⇒ 尾巴当然是空的，
+    用例红在环境上而不是契约上。用与真实子进程同一组旗标（`-S`）量，才是同尺子。）
+    """
+    t0 = time.time()
+    subprocess.run(
+        [sys.executable, "-S", "-c", "pass"], timeout=120, check=False, **_POPEN_NO_WINDOW
+    )
+    return time.time() - t0
+
+
 def test_capture_hard_cap_kills_and_keeps_output(monkeypatch) -> None:
-    """硬顶：kill 子进程、抛 TimeoutExpired，但**捕获到的尾巴要留着**（诊断不被超时吃掉）。"""
+    """硬顶：kill 子进程、抛 TimeoutExpired，但**捕获到的尾巴要留着**（诊断不被超时吃掉）。
+
+    硬顶 = 实测冷启动 ×3（下限 0.3s）：倍数只是护栏、不是同步手段 —— 要钉的契约是
+    「写出来的尾巴必须留着」，不是「机器得多快」。×3 而非更大：16 核满载时实测单次冷启动
+    ~1.9s ⇒ 硬顶 ~5.7s，仍在单测耗时预算（>10s 报错）以内。
+    """
     from remote import game_watch
 
     monkeypatch.setattr(game_watch, "GAME_POLL_SEC", 0.05)
+    launch = _python_launch_sec()
+    cap = max(0.3, launch * 3)
     child = (
         "import sys, time\n"
         "sys.stdout.write('partial'); sys.stdout.flush()\n"
         "time.sleep(30)\n"
     )
     with pytest.raises(subprocess.TimeoutExpired) as e:
-        run_eval_runner_capture([sys.executable, "-c", child], 0.3, label="s2/d9")
-    assert "partial" in (e.value.output or ""), e.value.output
+        run_eval_runner_capture([sys.executable, "-S", "-c", child], cap, label="s2/d9")
+    assert "partial" in (e.value.output or ""), (e.value.output, f"cap={cap:.2f}s launch={launch:.2f}s")

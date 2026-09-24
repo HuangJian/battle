@@ -321,6 +321,34 @@ class ServePool:
         self.fallback += 1
         self.fallback_reasons[reason] = self.fallback_reasons.get(reason, 0) + 1
 
+    def _log_fallback(self, reason: str, why: str) -> None:
+        """每次回退都留一行**带现场**的日志（回退很少发生，行本身不是热路径）。"""
+        self.log(f"[serve-pool] 一局回退一次性 spawn（{reason}: {why[:300]}）")
+
+    @staticmethod
+    def _postmortem(w: _Worker, lines: list[str]) -> str:
+        """worker 已经不在时，给它留一句**验尸行**：退出码 + 它最后说的几句话。
+
+        为什么必须有（2026-09-24 取证）：「worker 没了」的回退只慢不错，但**现场会被覆盖**
+        —— 回退的那一局由一次性路径用 `w` 模式重写同一份 `rollout.log`，worker 死前吐出的
+        traceback / 守卫消息随之消失，轮末只剩 `killed=1` 这种没有信息量的计数（2026-09-23
+        的 pre-commit flake 就是这样查了一轮而拿不到凶手）。
+
+        退出码是「谁杀的」最廉价的指纹：`rc=0`＝进程自行退出（如 stdin EOF 的正常收尾）；
+        `0xC0000005`（访问违例）/ `0xC000013A`（控制台 Ctrl+C 广播）/ `0xC0000409`（fail-fast）
+        这类 NTSTATUS 值一看就知道不是我们的协议错；`rc=1` 且尾行带 SystemExit 消息 ⇒
+        沙箱删除/写守卫（见 tools/githook/_sandbox-sanitize.sh）。
+        """
+        rc = w.proc.poll()
+        if rc is None:
+            detail = "rc=<仍在运行>"
+        elif rc == 0:
+            detail = "rc=0（自行退出，不是被我们 kill）"
+        else:
+            detail = f"rc={rc}（0x{rc & 0xFFFFFFFF:08X}）"
+        tail = " | ".join(ln for ln in lines[-3:] if ln.strip())
+        return detail + (f"；尾行：{tail[:200]}" if tail else "")
+
     def _submit(
         self,
         argv: list[str],
@@ -354,6 +382,7 @@ class ServePool:
         stdin = w.proc.stdin
         if stdin is None:
             self._fallback("no-stdin")
+            self._log_fallback("no-stdin", self._postmortem(w, w.drain()))
             self._drop(w)
             return TaskOutcome(False, 0.0, [], "no-stdin")
         try:
@@ -361,6 +390,7 @@ class ServePool:
             stdin.flush()
         except (OSError, ValueError):
             self._fallback("write-failed")
+            self._log_fallback("write-failed", self._postmortem(w, w.drain()))
             self._drop(w)
             return TaskOutcome(False, 0.0, [], "write-failed")
         # 轮询等待：软告警 + 硬顶都在这里判（与一次性路径同一套 game_watch 口径）
@@ -390,16 +420,16 @@ class ServePool:
             w.busy = False
             self.served += 1
             return TaskOutcome(True, elapsed, lines, "")
+        # 验尸**必须在 `_drop` 之前**：`_drop` 会 kill（kill 之后 poll() 只剩我们自己的退出码，
+        # 真正的凶手指纹就没了）。
         if got and w.result and not w.result[0]:
             reason, why = "err", w.result[1]
-        elif w.dead:
-            reason, why = "dead", ""
         else:
-            reason, why = "timeout", ""
+            reason = "dead" if w.dead else "timeout"
+            why = self._postmortem(w, lines)
         self._fallback(reason)
+        self._log_fallback(reason, why)
         self._drop(w)
-        if why:
-            self.log(f"[serve-pool] 一局回退一次性 spawn（{reason}: {why[:200]}）")
         return TaskOutcome(False, elapsed, lines, reason)
 
     def try_pool(
