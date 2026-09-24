@@ -7,6 +7,100 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §38 opt blob 只装优化器状态、权重走内容寻址：每轮上行 −35.3%（plan/opt-blob-diet.plan.md，2026-09-24）
+
+用户 2026-09-23 指令：把「同一份权重传两遍」这件事的精减写成 plan。实测（`tmp/x20-clutch`
+it174–176 真产物 + `tmp/opt_wire_probe2.py` / `tmp/opt_blob_shape.py`）：上行 result v2 =
+**760,658 B/轮**（slim 已开），其中 `weights_json`（gz）281,782（37.0%）· opt tar（gz 477,988）里的
+`model.pt` **268,996（35.4%，gzip 压不动，1:1）** · 同 tar 的 `opt.pt` 208,783（27.4%）· JSON 头 ~1,100。
+`model.pt` 与同一个 POST 里的 `weights_json` 是**同一份权重**。
+
+### 决定
+
+1. **`pack_opt_tar` 只打 `opt.pt`**（`model.pt` 从此不进 tar）——`opt.pt` 是每轮必变、跨轮续跑真正
+   需要的唯一状态。红线（minimize-payload §1.3-1）：**不得量化 / 降质 / 裁剪**。
+2. **权重走内容寻址的 `init` blob**：`BLOB_NAMES` 加 `init`，`sha = manifest.init_weights_fp`
+   （**复用既有字段**——它的定义就是 `sha256_file(args.out)`，与内容寻址的要求逐字一致；加一个同义的
+   `init_sha` 只会造第二份真相），raw = 该轮 `init_weights.json` 原样字节。**manifest 字段集不变**。
+3. **worker 侧五源优先级**（`worker._resolve_weights`；`job_dir/init_weights.json` **只解析一次**）：
+   W0 payload → W1 `blob_cache/<init_weights_fp>` → W2 `preloaded["blobs"]["init"]` →
+   W3 `GET /jobs/{id}/blob?name=init` → W4 tar 里的 `model.pt`（旧形状兜底）。
+   四源皆尽**且**无 `model.pt` ⇒ `ProtocolError`（**绝不**静默 warm-start）；瞬时失败（5xx/网络/字节
+   sha 不符）⇒ `RetryableError`（释放租约重领重下；报成确定性失败 = `report_job_failure` 停腿）。
+4. **「稳态零下行」靠一行新代码**：`run_job` 产物段把 `weights.json` 原始字节也写进
+   `blob_cache/<sha256(raw)>`（`_cache_produced_weights`，与 opt tar 缓存同一手法）。下一轮 hub 的
+   `init_weights_fp` = `sha256(args.out)` = 同一份字节 ⇒ 同会话 100% 命中。
+   **缺它 = 每轮净亏 110 KB**（上行省 268,996 而下行多付 379,114）。opt 今天稳态命中的机制就是这个。
+5. **顺序（最容易做错的一处）**：解析必须落在 **BC 的 early-return 之后**（BC 的 `init_weights_fp`
+   是哨兵 `"bc"`）、`run_iter_rollout`（它的 `--weights init_weights.json` 相对 job 目录）与
+   `ppo_engine.build_ppo`（arch 从权重读，缺文件会静默退回默认 64/8/128）**之前**。
+6. **哨兵 sha**：`init_weights_fp ∈ {"", "bc"}`（BC job / 全新 run 首轮）⇒ **零 blob 请求**。
+   节点侧索取 `init` 还要过 `manifest.slim` 闸（非 slim 臂的权重就在 payload 里 = W0）。
+7. **升级顺序**：先停所有 worker → 升 hub → 升 worker；回退粒度 = **PR revert**（**禁半套**）。
+
+### 账（三条腿）
+
+| 腿 | 现状 | 改后 | 差 |
+|---|---|---|---|
+| 上行（每轮） | 760,658 | ~491,662 | **−268,996 B（−35.3%）** |
+| 下行 opt blob（稳态命中） | 0 | 0 | 0 |
+| 下行换机首次（miss） | 890,880 | 593,920 + 379,114 = 973,034 | +82,154 B（+9.2%，罕见事件） |
+| blob_cache 每轮占用 | 890,880 | 973,034 | +9.2%（无 quota 是既有待拍板项） |
+
+口径注（评审 F8）：`268,996` 是**单文件** `gzip(model.pt)`；真实 tar 级减量是
+`gzip(整 tar)` 之差 **477,988 − 208,783 = 269,205**（差 209 B）。两者都在噪声内。
+
+> **绝对值不是常数（2026-09-24 实测）**：`result_bytes` 随 `opt.pt` 的可压缩性漂——同为
+> 590,451 B 的 `opt.pt`，it176 压到 208,697 而落地冒烟的 128 步新生 Adam 态只压到 489,055。
+> 可判据的不变量 = 去掉 `model.pt` 成员的**差值 −262,790 B（本机反事实实测，−25.4%）**。
+> 详见 plan/opt-blob-diet.plan.md §5.2。
+
+### 被否决
+
+① 在 worker 里为 `init` 另写一条下载路径（会漏掉 `bulk_sched` 的优先级/让路/重抽账）；
+② hub 侧重打 tar（sha 漂移的老坑）；③ 用「是不是同一个 worker」当命中判据（要 hub 侧 inventory +
+TTL + 谎报处理，且换机省不掉）；④ 新增 `init_sha` manifest 字段（第二份真相）；
+⑤ 保留 `model.pt` 让旧 worker 不炸（= 没做，改由升级顺序替代）；⑥ 给 `_resolve_blob` 加 `cache`
+开关（现有路径已在命中/下载后无条件 `_cache_blob`，init 复用即得）。
+
+### 落地时测出来的四处与设计文档不同（已同步文档正文）
+
+① `_resolve_weights` 四源皆尽时**返回 `none` 而不抛**（只有 restore 段知道 W4 在不在），
+契约 = `(path | None, src, wire_bytes)`；拒绝（`ProtocolError`）与瞬时（`RetryableError`）都用**抛异常**
+表达；`kind=iter/run` 的 rollout 用不上 W4，所以那两类 job 在解析后**立即**由 `run_job` 响亮拒绝。
+② 节点侧索取 `init` 要 **`slim` + 64-hex 两道闸**：只靠 64-hex 时，`slim=False` 臂（发布端**不落**
+init blob）会被要求补一个永远不存在的 blob ⇒ **428 死循环、job 永不完成**（`e2e/test_multi_course_single_hub_e2e.py`
+抓到）。判据抽成纯函数 `worker_server.missing_blobs(manifest, sent, cached)`。
+③ payload 携带权的判定门是 **`use_opt_blob`**，不是 `use_init_blob`：`use_opt_blob = slim AND 有 opt 字节`
+⇒ 有 opt blob 就必然也有 init blob，两者等价；写成后者会把首轮/冷启动改成「不带」，多一处可漂的地方。
+（改造前这条由 `rollout_spec ⇒ keep_init_weights=True` 顺手蔽着——**那份强制正是本项要取消的**。）
+④ 产物缓存抽成 `worker._cache_produced_weights(blob_root, raw, log)`，让「产出的权重进 `blob_cache`」
+这条不变式可被单测直接钉住（`run_job` 那一层要真 torch）。
+
+### 判据
+
+`nn-training/tests/test_opt_blob_shape.py`（15 用例：tar 形状 / 五源优先级 / 失败分类 / 哨兵 /
+产物缓存闭环 / `missing_blobs` 两闸）· `test_remote_ppo.py`（blob 端点 `?name=init` 200 · 未知名 400 · 缺失 404（同一白名单路径） +
+payload diet + slim=false 臂不落 init blob）· `test_remote_iter.py`（it≥2 不带 payload 权重 / 首轮带 /
+kind=iter 发布端守卫 / opt-only tar 落位）· `remote/smoke_loopback.py`（第 2 轮起 `blob_hits ≥ 2`、
+`weights_src == "cache"`、`weights_bytes == 0`、`blob_miss_bytes == 0`、回传 tar 里无 `model.pt`）·
+`bash tools/githook/nn-python-gate.sh`（2298 passed）· `bun run check`（2144 pass / 0 fail）·
+`bun run freeze:check`（God-AI 确定性签名不变）。
+
+**E5 实测（2026-09-24，本机闭环 `smoke_loopback --rounds 2`）**：稳态轮 `blob_hits=2`（opt+init）·
+`weights_src=cache` · `weights_bytes=0` · `blob_miss_bytes=0`（首轮 `weights_src=payload`）；
+回传 tar 成员 = `{opt.pt}`，`model.pt` 不再出现。同产物反事实（`tmp/optdiet-e5-shape.py`，
+用 `_ppo_save` 重造同一份权重）：旧形状 result **1,033,096** → 新形状 **770,306** =
+**−262,790 B（−25.4%）**，new 侧与实测 `result_bytes=771,084` 逐字节吻合。
+
+### 未决（需用户另裁，不是本项的缺口）
+
+① `opt.pt` 的 Adam m/v 降精度（bf16 再 −115 KB、fp16 再 −180 KB；实测 `cos(m/√v) = 0.999998`）——
+与本项互斥且是新数值臂（需 DECISIONS + 60-seed `hard` 配对基线）；② `blob_cache` 上限/清理
+（全仓无 quota，本项使它每轮 +973 KB）；③ 状态回传降频（每 N 轮才落 hub，代价是换机耐久窗口变宽）；
+④ `course_cache`（本项结论：**不需要它**——权重与 opt 的缓存命中同源同寿命，`blob_cache/<sha>` 已吃下）。
+
+---
 ## §37 缺 bun 在**零下载**时就拒单：能力自检前移到 payload/code/ts_code 之前（2026-09-24）
 
 用户 2026-09-24 报障链的云机一端：节点上没 bun 时，worker 仍然把

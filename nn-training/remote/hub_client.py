@@ -32,6 +32,7 @@ from platform_utils import rmtree_best_effort
 from remote.protocol import (
     AUTH_HEADER,
     BLOB_DEMO,
+    BLOB_INIT,
     BLOB_OPT,
     BLOB_REF,
     FAIL_BODY_MAX,
@@ -731,6 +732,16 @@ def publish_job(
         raise HubClientError("demo bank 要求 slim=1（内容寻址；非 slim 无内联退路）——拒发")
     use_demo_blob = bool(slim and demo_raw)
     demo_sha = _sha256_bytes(demo_raw) if demo_raw else ""
+    # opt-blob-diet（2026-09-24，§3.1/§3.4）：权重的**内容寻址段**。sha 直接复用
+    # `init_weights_fp`——它的定义就是 `sha256_file(args.out)`，与内容寻址的要求逐字一致，
+    # 所以 **manifest 不新增字段**（加一个同义的 `init_sha` 只会造第二份真相）。
+    # raw 字节 = 该轮 `init_weights.json` 原样（= 上一轮 `result.weights_json` 解码后的字节）。
+    init_raw = (
+        Path(init_weights_path).read_bytes()
+        if (init_weights_path and Path(init_weights_path).exists())
+        else b""
+    )
+    use_init_blob = bool(slim and init_raw)
     opt_init = (
         ""
         if use_opt_blob
@@ -780,9 +791,15 @@ def publish_job(
     if rollout_spec is not None:
         m["ts_code_sha256"] = str(ts_code_sha256)
         m["rollout"] = rollout_spec
-        # kind=iter：节点**必须**拿得到 init 权重——它要用这份权重去跑 rollout（不只是
-        # PPO 初始化）。M2 B4「有 opt blob 就不传 init_weights.json」在这里不成立。
-        keep_init_weights = True
+        # ★ opt-blob-diet（2026-09-24，§3.4）：kind=iter 不再把 payload 撑成「带权重」。
+        # 节点侧 rollout 要的那份权重改由 `init` blob 提供（worker 的 `_resolve_weights`
+        # 会在 **rollout 之前**把它落到 `job_dir/init_weights.json`）。
+        # 代价 = 发布端多一条守卫：没有权重就根本不该发这份活（否则云上必炸在半路）。
+        if not (init_weights_path and Path(init_weights_path).exists()):
+            raise HubClientError(
+                f"kind={kind!r} 必须有 init 权重（rollout 要用它，PPO 也要用它读 arch）："
+                f"init_weights_path={init_weights_path!r} 为空或不存在——拒发"
+            )
     if kind == "run":
         assert plan_bytes is not None  # 上面已拒发（类型收窄给 mypy）
         # 计划随 payload 走（与 init_weights.json 同层）：节点解包后 `verify_plan_file(job_dir, …)`
@@ -793,6 +810,13 @@ def publish_job(
         m["plan_sha256"] = _sha256_bytes(plan_bytes)
     # M2（B4）：有 opt blob 时不传 init_weights.json（worker 从 opt 恢复即完整
     # model+Adam）。echo 冒烟要保持回显能力，keep_init_weights 时照旧带上。
+    #
+    # ★ opt-blob-diet（2026-09-24，§3.4）：「不带」的门是 **`use_opt_blob`**，不是
+    #   `use_init_blob`：`use_opt_blob = slim AND 有 opt 字节` ⇒ 有 opt blob 时必然也有
+    #   init blob（权重文件存在 ⇒ `init_weights_fp` 是 64-hex ⇒ 落盘）。所以
+    #   `not use_opt_blob or keep_init_weights` 已经等价于「两个 blob 都齐才省掉 payload
+    #   里那份」，而且把首轮/冷启动（无 opt blob）留成了 W0 —— 那条路是导出包与
+    #   `bundle.py` 依赖的（plan §2.2：离线冗余是特性，不是浪费）。
     if init_weights_path and (not use_opt_blob or keep_init_weights):
         init_copy = tmp_extra_dir / "init_weights.json"
         shutil.copyfile(init_weights_path, init_copy)
@@ -847,6 +871,8 @@ def publish_job(
         blob_path(jd, BLOB_REF).write_bytes(ref_raw)
     if use_demo_blob:
         blob_path(jd, BLOB_DEMO).write_bytes(demo_raw)
+    if use_init_blob:
+        blob_path(jd, BLOB_INIT).write_bytes(init_raw)
     m = normalize_manifest(m)
     (jd / "manifest.json").write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8")
     # 重发同一个 job（同幂等键 → 同 job_id，逐轮重试走的正是这条路）必须清掉上一次的
@@ -903,12 +929,20 @@ def publish_job(
             else f"shards={len(shard_dirs)} "
         )
         + f"data_fp={fp[:12]}… payload={sha[:12]}…"
+        + (f" init_blob={init_weights_fp[:12]}…" if use_init_blob else "")
     )
+    if use_init_blob:
+        # payload diet 读数：这一刀省下的就是 tar 里那份重复的 model.pt
+        # （实测 268,996 B/轮，见 plan/opt-blob-diet.plan.md §1.1）。
+        log(
+            f"it{it}: payload diet —— 权重走 init blob（{len(init_raw)} B raw，"
+            f"sha={init_weights_fp[:12]}…）不进 payload；tar 里不再有 model.pt"
+        )
     return m
 
 
 def _opt_tar_bytes(ckpt_remote_dir: str | Path | None) -> bytes:
-    """上轮 ppo_ckpt_remote → raw tar bytes（model.pt + opt.pt，D5）；空 = b""。
+    """上轮 ppo_ckpt_remote → raw tar bytes（D5）；空 = b""。
 
     H5（review-hy）：不打 state.json（numpy RNG 无人读，worker 按 per-job 种子重播）。
 
@@ -916,6 +950,13 @@ def _opt_tar_bytes(ckpt_remote_dir: str | Path | None) -> bytes:
     回传字节**）。只有原样字节的 sha256 才与云 worker 本地 blob_cache 的键一致 ——
     重打 tar 会因 uid/gid/mtime 规范化差异导致 sha 漂移、每轮都缓存未命中（1.19MB
     白传回来）。历史 run / 冷启动无该文件 → 从目录重打（可能未命中，走 blob 传一次）。
+
+    ★ 2026-09-24（opt-blob-diet，§4）：新形状的 tar **只装 `opt.pt`**（`worker.pack_opt_tar`）
+    且**优先路径**读的就是那个原样字节，所以稳态下这里恒为 opt-only。而**下面的回退分支
+    刻意保留 `("model.pt", "opt.pt")` 旧形状**——它只在历史 run / 冷启动（盘上没有
+    `.tar`）时走到，那时目录里通常有改造前写下的 `model.pt`：让 worker 走 W4 的 legacy
+    路径最安全。代价只是这个重打 tar 的 sha 与 worker 的 blob_cache 键不同 ⇒ 多付一次
+    下载（罕见事件）。**这是有意的兼容退路，不是漏改**（评审 F6）。
     """
     if not ckpt_remote_dir:
         return b""

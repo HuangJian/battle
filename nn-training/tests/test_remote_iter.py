@@ -597,7 +597,20 @@ def test_build_iter_spec_dodge_and_custom_stage_flow_through() -> None:
 # ------------------------------------------------------------------ 发布 / 落位（hub 侧整链）
 
 
-def _publish_iter(tmp_path: Path, *, games=((3, 7),)) -> tuple[dict, Path]:
+def _publish_iter(
+    tmp_path: Path,
+    *,
+    games=((3, 7),),
+    slim: bool = False,
+    init_weights_path: str | None = None,
+    with_ckpt: bool = False,
+) -> tuple[dict, Path]:
+    """发布一份 kind=iter job。
+
+    `with_ckpt`：造上一轮的 `ppo_ckpt_remote`（**新形状 = 只有 opt.pt**）⇒ `use_opt_blob=True`。
+    它决定 payload 带不带 `init_weights.json`（旧条件 `not use_opt_blob or keep_init_weights`）：
+    有 opt blob ⇒ 不带（权重走 init blob）；首轮/导出包无 opt blob ⇒ 带（bundle 要它）。
+    """
     from remote.hub_client import publish_job
 
     w = tmp_path / "init_weights.json"
@@ -607,6 +620,10 @@ def _publish_iter(tmp_path: Path, *, games=((3, 7),)) -> tuple[dict, Path]:
     ts = tmp_path / TS_CODE_NAME
     ts.write_bytes(b"PK\x03\x04" + b"ts-bytes" * 10)
     spec = validate_rollout_spec(_spec(list(games)))
+    ckpt = tmp_path / "it1" / "ppo_ckpt_remote"
+    if with_ckpt:
+        ckpt.mkdir(parents=True)
+        (ckpt / "opt.pt").write_bytes(b"adam-state")
     m = publish_job(
         job_root=tmp_path / "jobs",
         jsonl_path=jsonl,
@@ -628,14 +645,117 @@ def _publish_iter(tmp_path: Path, *, games=((3, 7),)) -> tuple[dict, Path]:
         epochs=1,
         mb=512,
         lr=3e-4,
-        init_weights_path=str(w),
+        init_weights_path=str(w) if init_weights_path is None else init_weights_path,
+        ckpt_remote_dir=str(ckpt) if with_ckpt else None,
         kind="iter",
         rollout_spec=spec,
         ts_code_sha256="t" * 64,
         ts_code_zip_path=ts,
+        slim=slim,
         log=lambda _m: None,
     )
     return m, w
+
+
+def _payload_names(tmp_path: Path, m: dict) -> set[str]:
+    import tarfile as _tarfile
+
+    from remote.protocol import find_payload
+
+    payload = find_payload(tmp_path / "jobs" / str(m["job_id"]))
+    assert payload is not None
+    with _tarfile.open(payload, "r:*") as tf:
+        return set(tf.getnames())
+
+
+def test_publish_iter_slim_ships_init_blob_without_payload_weights(tmp_path: Path) -> None:
+    """kind=iter + slim + 有 opt blob（即 it≥2 的形状）：权重走 `init` blob，payload 不带它。
+
+    opt-blob-diet §3.4：这是「每轮上行 −35%」的另一半 —— iter 轮的 payload 也把那份
+    281,782 B（gz）的权重拿掉（改由节点从内容寻址段取 = worker 的 W1，零下行）。
+    """
+    from remote.protocol import BLOB_INIT, blob_path
+
+    m, w = _publish_iter(tmp_path, slim=True, with_ckpt=True)
+    jd = tmp_path / "jobs" / str(m["job_id"])
+    assert m["slim"] is True and m["opt_sha"]
+    assert m["init_weights_fp"] == hashlib.sha256(w.read_bytes()).hexdigest()
+    assert blob_path(jd, BLOB_INIT).read_bytes() == w.read_bytes()
+    assert "init_weights.json" not in _payload_names(tmp_path, m), (
+        "有 opt blob 时（改造前由 kind=iter 强制带；现在不带了）权重只走 init blob"
+    )
+    assert (jd / TS_CODE_NAME).exists(), "TS 运行时仍随 job 目录（rollout 要它）"
+
+
+def test_publish_iter_first_round_keeps_payload_weights(tmp_path: Path) -> None:
+    """首轮/无 opt blob ⇒ payload **仍带** `init_weights.json`（worker 走 W0）。
+
+    「不带」的判定门是 `use_opt_blob`（不是 `use_init_blob`）：拿不到「上一轮的 tar」时
+    不可假定节点有状态，把权重随包发过去最稳（也就同时盖住了导出包与离线腿的起点）。
+    首轮之后（it≥2 有 opt blob）两个 blob 都齐 ⇒ payload 那份才省掉（上一条用例）。
+    """
+    from remote.protocol import BLOB_INIT, blob_path
+
+    m, w = _publish_iter(tmp_path, slim=True)
+    jd = tmp_path / "jobs" / str(m["job_id"])
+    assert m["opt_sha"] == "", "首轮没有 ckpt_remote ⇒ 无 opt blob"
+    assert blob_path(jd, BLOB_INIT).exists(), "init blob 仍落盘（节点走 W0，两条腿都在）"
+    assert "init_weights.json" in _payload_names(tmp_path, m)
+    assert blob_path(jd, BLOB_INIT).read_bytes() == w.read_bytes()
+
+
+def test_publish_iter_requires_init_weights(tmp_path: Path) -> None:
+    """发布端守卫（§3.4）：`rollout_spec` 非空而没有 init 权重 ⇒ **拒发**。
+
+    云上没有权重就开跑 = 必然炸在半路（rollout 的 `--weights` 打不开、`build_ppo` 读不到
+    arch）——要在发布端拦住，而不是等一条腿烧完 GPU。
+    """
+    from remote.hub_client import HubClientError
+
+    with pytest.raises(HubClientError) as e:
+        _publish_iter(tmp_path, init_weights_path="")
+    assert "init 权重" in str(e.value)
+
+
+def test_verify_and_land_extracts_opt_only_tar(tmp_path: Path) -> None:
+    """落位链对新形状的处理：`opt` tar 只装 `opt.pt` ⇒ `ppo_ckpt_remote/` 里就没有 `model.pt`。
+
+    这是形状指纹的下游面（§6.1-10）：hub 侧只当「一团字节」解包，不假设里面有 model.pt。
+    """
+    from remote.hub_client import verify_and_land
+    from remote.protocol import encode_opt_tar, encode_weights_json
+    from remote.worker import pack_opt_tar
+
+    m, w = _publish_iter(tmp_path)
+    ckpt_src = tmp_path / "ckpt_src"
+    ckpt_src.mkdir()
+    (ckpt_src / "opt.pt").write_bytes(b"\x00" * 32)
+    (ckpt_src / "model.pt").write_bytes(b"should-not-be-packed")
+    new_weights = b'{"format":"nn-weights-json","params":{"x":1}}'
+    good = {
+        "job_id": m["job_id"],
+        "data_fp": m["data_fp"],
+        "init_weights_fp": hashlib.sha256(w.read_bytes()).hexdigest(),
+        "weights_json": encode_weights_json(new_weights),
+        "opt_tar_b64": encode_opt_tar(pack_opt_tar(ckpt_src)),
+        "commit_echo": m["commit"],
+        "agg": {"policy": 0.0, "value": 0.0, "entropy": 0.0, "kl": 0.0, "mean_ret": 0.0},
+        "report": _iter_result()["report"],
+    }
+    out_w = tmp_path / "out" / "weights.json"
+    verify_and_land(
+        good,
+        m,
+        init_weights_path=str(w),
+        traj_dir=str(tmp_path / "traj2"),
+        it=1,
+        out_weights=str(out_w),
+        log=lambda _m: None,
+    )
+    ckpt = tmp_path / "traj2" / "it1" / "ppo_ckpt_remote"
+    assert (ckpt / "opt.pt").read_bytes() == b"\x00" * 32
+    assert not (ckpt / "model.pt").exists(), "新形状的 tar 里没有 model.pt（权重走 init blob）"
+    assert out_w.read_bytes() == new_weights
 
 
 def test_publish_iter_manifest_and_layout(tmp_path: Path) -> None:

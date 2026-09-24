@@ -50,6 +50,7 @@ from remote.prefetch import (
 from remote.protocol import (
     AUTH_HEADER,
     BLOB_DEMO,
+    BLOB_INIT,
     BLOB_OPT,
     BLOB_REF,
     CLAIM_MODE_BACKUP,
@@ -72,6 +73,7 @@ from remote.protocol import (
     decode_weights_json,
     encode_opt_tar,
     encode_weights_json,
+    is_content_sha,
     job_seed,
     normalize_manifest,
     pack_result_v2,
@@ -1098,6 +1100,23 @@ def download_blob(
     )
 
 
+def _cache_produced_weights(blob_root: Path, raw: bytes, log) -> str:
+    """把**本轮产出的** `weights.json` 原始字节写进 `blob_cache/<sha256(raw)>`；返回该 sha。
+
+    opt-blob-diet（2026-09-24，plan/opt-blob-diet.plan.md §3.2 W1 / §3.6-8）：下一轮 hub 的
+    `init_weights_fp` = `sha256(args.out)`，而 `args.out` 就是这份字节（`verify_and_land`
+    落的就是 `result.weights_json` 解码后的原字节）⇒ 同会话内 `init` blob 100% 命中、
+    下行零字节。
+
+    **少了这一步**：`init` 的键每轮都变、每轮必 miss ⇒ 上行省 268,996 B 而下行多付
+    379,114 B = **净亏 110 KB/轮**（评审 F1）。与 opt tar 在 `run_job` 里的缓存写入
+    （`_cache_blob(blob_root, sha256(opt_tar_raw), …)`）是同一手法、同一个理由。
+    """
+    sha = hashlib.sha256(raw).hexdigest()
+    _cache_blob(blob_root, sha, raw, log)
+    return sha
+
+
 def _cache_blob(blob_root: Path, sha: str, raw: bytes, log) -> None:
     """把 raw blob 写入 `blob_cache/<sha>`（原子改名；写失败只记日志）。"""
     if not sha or not raw:
@@ -1163,6 +1182,97 @@ def _resolve_blob(
 
         return _b64.b64decode(inline_b64.encode("ascii")), True, "inline"
     return b"", False, "none"
+
+
+#: `init_weights_fp` 的**哨兵**取值：BC job 与**全新 run 的首轮**没有 warm-start 权重，
+#: hub 恒写 `"bc"`（`hub_client.publish_job`：`init_weights_path` 为空 ⇒ `"bc"`）。
+#: 这些取值下**一个 blob 请求都不许发**——`GET ?name=init` 必然 404，会被归类成
+#: 「确定性缺失」⇒ `ProtocolError` ⇒ **BC 停腿**（plan/opt-blob-diet.plan.md §3.2 / 评审 F2）。
+_SENTINEL_INIT_FP: tuple[str, ...] = ("", "bc")
+
+#: 权重五源的固定清单（顺序 = 优先级）：错误消息与 wire 口径共用同一份。
+#: `legacy_tar`（W4）**不由** `_resolve_weights` 实现——它是 restore 段的退路，
+#: 因为只有那里知道 tar 里有没有 `model.pt`。
+WEIGHT_SOURCES: tuple[str, ...] = ("payload", "cache", "preloaded", "download", "legacy_tar")
+
+
+def _resolve_weights(
+    *,
+    job_dir: Path,
+    init_weights_fp: str,
+    blob_root: Path,
+    jid: str,
+    base_url: str,
+    token: str,
+    preloaded: dict | None,
+    log,
+) -> tuple[Path | None, str, int]:
+    """解析本轮的初始权重 → `(path | None, src, wire_bytes)`。
+
+    `src ∈ payload|cache|preloaded|download|none`（`legacy_tar` 由调用方在 restore 段判定）；
+    `wire_bytes` = **走网络的字节数**（命中/payload 恒 0，`download` 才是 raw 长度）——
+    它是「这一刀省没省下来」的直接读数（§4 的 `wire.weights_bytes`）。
+
+    plan/opt-blob-diet.plan.md §3.2 的五源优先级（先到先用）：
+
+      W0 `job_dir/init_weights.json`（payload 随包带走：离线腿/bundle/冒烟/非 slim/旧 hub）
+      W1 `blob_cache/<init_weights_fp>`（稳态命中，零字节 —— **靠 `run_job` 产物段缓存
+         自己产出的权重**：hub 下一轮的 `init_weights_fp` = `sha256(args.out)` = 同一份字节）
+      W2 `preloaded["blobs"]["init"]`（push 腿）
+      W3 `GET /jobs/{id}/blob?name=init`（换机首次；sha 必校）
+
+    **失败分类**（§3.2，与 `_resolve_blob` 的安全阀同口径）：W1–W3 的**瞬时**失败
+    （5xx / 网络 / 下回来的字节 sha 不符）在函数内就抛 `RetryableError` —— 那是「重领重下
+    能修」的，绝不能报成确定性失败（`report_job_failure` 会停掉一条腿）。W3 的**确定性**
+    不可得（404 / 旧 hub 的 400 未知名）只记一行并返回 `none`：由调用方决定走 W4 还是
+    响亮拒绝。**绝不静默 warm-start**（新开 Adam + 随机权重地把一轮跑成看起来正常）。
+
+    `init_weights_fp` 是哨兵（`""`/`"bc"`，即 BC job 或全新 run 首轮）：**零网络请求** ——
+    payload 有就照用，没有就返回 `none`（§3.2 的 64-hex 规则）。
+    """
+    path = job_dir / "init_weights.json"
+    fp = str(init_weights_fp or "")
+    if fp in _SENTINEL_INIT_FP or not is_content_sha(fp):
+        if path.exists():
+            return path, "payload", 0
+        return None, "none", 0
+    # ---- W0：payload 内那份（随包可离线跑）—— **照样校 sha**（§3.2 / 评审 F4）----
+    if path.exists():
+        raw = path.read_bytes()
+        if hashlib.sha256(raw).hexdigest() == fp:
+            return path, "payload", 0
+        # 坏字节：作废这份 + 记一行 + 回源（绝不用坏字节，也绝不静默）
+        log(f"job {jid}: payload 内 init_weights.json 与 init_weights_fp 不符 —— 作废，改走 blob")
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    # ---- W1/W2/W3：一律走 `_resolve_blob`（内容寻址 + sha 校验 + 命中即写 cache）----
+    try:
+        raw, hit, src = _resolve_blob(
+            blob_root=blob_root,
+            name=BLOB_INIT,
+            sha=fp,
+            inline_b64="",
+            jid=jid,
+            base_url=base_url,
+            token=token,
+            preloaded=preloaded,
+            log=log,
+        )
+    except RetryableError:
+        raise  # 瞬时：重领重下能修（§3.2 的失败分类红线）
+    except ProtocolError as e:
+        # 确定性不可得（404 / 未知名 400）—— **不**在这里定生死：W4 可能救它（§3.5 第三行）
+        log(f"job {jid}: init blob 不可得（{e}）—— 看 tar 里有没有旧形状的 model.pt")
+        return None, "none", 0
+    if not raw:
+        return None, "none", 0
+    path.write_bytes(raw)
+    resolved = "cache" if (hit and src == "cache") else src
+    if resolved != "cache":
+        log(f"job {jid}: init 权重来源 src={resolved}（{len(raw)} bytes，fp={fp[:12]}…）")
+    return path, resolved, (len(raw) if resolved == "download" else 0)
 
 
 def post_result(
@@ -1453,6 +1563,11 @@ def _wire_block(**over: object) -> dict:
         # 不在这里给默认值——缺席就代表「本轮没有节点侧 rollout」，不能写成 0 冒充。
         "ts_code_bytes": 0,
         "ts_code_hit": False,
+        # opt-blob-diet（2026-09-24，plan/opt-blob-diet.plan.md §4）：权重从哪个源拿到的
+        # （`payload|cache|preloaded|download|legacy_tar|none`）+ 这一刀走网络的实际字节
+        # （命中/payload 恒 0）。缺省 = 本轮没有权重解析（echo / BC）。
+        "weights_src": "",
+        "weights_bytes": 0,
     }
     w.update({k: v for k, v in over.items() if v is not None})
     return w
@@ -1541,18 +1656,29 @@ def unpack_opt_tar(tar_bytes: bytes, dest: Path) -> None:
 def pack_opt_tar(src_dir: Path) -> bytes:
     """_ppo_save 目录 → tar bytes（回传用）。
 
-    H5（review-hy）：**只打 model.pt + opt.pt，不打 state.json**——state.json 里的
-    numpy RNG 状态从未被读取（worker 每次按 per-job 种子重播，D5 自洽），tar 里躺着
-    死数据只会误导。Adam 动量（opt.pt）才是跨轮续跑真正需要的状态。
+    H5（review-hy）：**不打 state.json**——state.json 里的 numpy RNG 状态从未被读取
+    （worker 每次按 per-job 种子重播，D5 自洽），tar 里躺着死数据只会误导。
+
+    ★ 2026-09-24（opt-blob-diet，plan/opt-blob-diet.plan.md §2.1-1）：**只打 `opt.pt`**。
+    `model.pt` 从此不进 tar —— 它与同一个 POST 里的 `result.weights_json` 是**同一份权重**，
+    只是传了两遍（实测 268,996 B/轮 = 上行的 35.4%）。权重改走内容寻址的 `init` blob
+    （sha = `manifest.init_weights_fp`），模型恢复读 worker 自己解析出来的
+    `job_dir/init_weights.json`（见 `_resolve_weights`）。
+
+    Adam 动量（`opt.pt`）是本 tar 的**唯一**成员：它是跨轮续跑真正需要的、**每轮必变**的
+    状态。红线（minimize-payload §1.3-1）：不得量化/降质/裁剪。
+
+    ⚠ **形状是与 hub 的同一份契约**：`run_job` 的 restore 段按「有没有 `model.pt`」分流
+    （有 = 旧形状走 legacy 路径，无 = 新形状读 `init_weights.json`），所以本函数的成员
+    集合与那条分流**必须同 commit 改**（§5 E1+E2 的硬约束）。
     """
     import io
 
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:") as tf:
-        for name in ("model.pt", "opt.pt"):
-            p = src_dir / name
-            if p.exists():
-                tf.add(p, arcname=name)
+        p = src_dir / "opt.pt"
+        if p.exists():
+            tf.add(p, arcname="opt.pt")
     return buf.getvalue()
 
 
@@ -2241,6 +2367,42 @@ def run_job(
             log=log,
         )
 
+    # ---- opt-blob-diet（2026-09-24，plan/opt-blob-diet.plan.md §3.2/§3.3）：权重解析 ----
+    # 五源：W0 payload → W1 blob_cache → W2 preloaded → W3 GET blob（W4 旧形状 tar 的
+    # `model.pt` 由下面 restore 段承担）。**位置是本 plan 最容易做错的一处**：
+    #   ① 必须早于 `run_iter_rollout` —— kind=iter 的 rollout argv 是
+    #      `--weights init_weights.json`（相对 job 目录），权重不在就起不来；
+    #   ② 必须早于 `ppo_engine.build_ppo(...)` —— arch 从权重文件里读，缺文件会静默
+    #      退回默认 64/8/128（「建了错的模型却照跑」，§3.3-2）；
+    #   ③ 必须**晚于** BC 的 early-return —— BC job 的 `init_weights_fp` 是哨兵 `"bc"`，
+    #      进五源会给 hub 打一个必然 404 的 `?name=init`（§3.2 的 64-hex 规则）。
+    # 传输账的两个计数器在这里建账：下面 `_resolve_weights` 与后面的 opt/ref/demo 共用。
+    blob_hits = 0
+    blob_miss_bytes = 0
+    init_w, weights_src, weights_wire_bytes = _resolve_weights(
+        job_dir=job_dir,
+        init_weights_fp=str(manifest["init_weights_fp"]),
+        blob_root=blob_root,
+        jid=jid,
+        base_url=base_url,
+        token=token,
+        preloaded=preloaded,
+        log=log,
+    )
+    if weights_src == "cache":
+        blob_hits += 1
+    elif weights_src == "download":
+        blob_miss_bytes += weights_wire_bytes
+    if init_w is None and str(manifest["kind"]) in ("iter", "run"):
+        # kind=iter/run 的**节点侧 rollout** 必须有权重文件：W4 那条 tar 退路对它无效
+        # （旧 hub 对这两类 job 恒带 payload 内的 init_weights.json ⇒ 走 W0）。
+        # 新 hub 下这里只会在「四源全缺失」时触发 = 真的发错了活。
+        raise ProtocolError(
+            f"job {jid}: kind={manifest['kind']} 需要 init 权重但四源皆尽"
+            f"（试过 {'/'.join(WEIGHT_SOURCES[:4])}）"
+            f"；init_weights_fp={str(manifest['init_weights_fp'])[:12]}…——拒收"
+        )
+
     # ---- M3 kind 分叉：iter = 一整轮上云（节点自己跑 rollout 产 shard）----
     #
     # 位置很关键：必须在 mode 红线 / D14 / echo **之前**——因为本轮真正要校验的 shard
@@ -2398,12 +2560,14 @@ def run_job(
     # ---- 模型构建：opt_init（_ppo_save tar）优先，否则 init 权重 + 新 opt ----
     # hub 侧免 torch（D2）：模型权重/opt 由 tar 或 weights_json 提供，worker 负责
     # 重建——tar 内 model.pt = 上一轮 PPO 终态（含 Adam 动量，D5）。
-    init_w = job_dir / "init_weights.json"
+    # ★ opt-blob-diet（2026-09-24）：`init_w` 由上方 `_resolve_weights` 解析（五源，§3.2），
+    #   此处不再自行推导路径。**arch 必须从真实权重读**——缺文件会静默退回 per-tick 默认
+    #   64/8/128，那是「建了错的模型却照跑」（§3.3-2）。
     # 标注为 torch.nn.Module（而非推断出的 PPOStudent）：多卡分支要把 model 换成
     # DataParallel，且下游 save_weights_json / load_state_into 收的就是 Module。
-    # M2（B4）：有 opt blob 时 payload 不再带 init_weights.json（model+Adam 都在 opt
-    # tar 里）——build_ppo 只借它读 arch，缺文件走默认（per-tick 固定 64/8/128）。
-    model: torch.nn.Module = ppo_engine.build_ppo(str(init_w) if init_w.exists() else None)
+    model: torch.nn.Module = ppo_engine.build_ppo(
+        str(init_w) if (init_w is not None and init_w.exists()) else None
+    )
     # 设备解析（2026-09-10 TPU 接力）：--device tpu/xla 走 torch_xla 的 xla_device()，
     # 而不是 torch.device("xla")——后者在部分 torch_xla 版本上拿不到带序号的设备句柄。
     # torch_xla 只在真的选了 TPU 时才 import（未装 torch_xla 的机器行为不变）。
@@ -2471,8 +2635,7 @@ def run_job(
     # 安全阀（plan §4.3）：opt_sha 存在而 blob 不可得 → 响亮失败，绝不静默 warm-start
     # （那会把 D5 的 Adam 动量悄悄归零，日志上却一切正常）。
     opt_sha = str(manifest.get("opt_sha", "") or "")
-    blob_hits = 0
-    blob_miss_bytes = 0
+    # `blob_hits` / `blob_miss_bytes` 已在权重解析处（上方）建账 —— 与 init 共用一手账。
     opt_raw, opt_hit, opt_src = _resolve_blob(
         blob_root=blob_root,
         name=BLOB_OPT,
@@ -2502,8 +2665,25 @@ def run_job(
             t_opt = time.time()
             opt_dir = job_dir / "opt_init"
             unpack_opt_tar(opt_raw, opt_dir)
-            # 必须在 model.to(device_t) 之前加载 state_dict，然后统一移到目标设备
-            model.load_state_dict(torch.load(opt_dir / "model.pt", map_location="cpu"))
+            # 必须在 model.to(device_t) 之前加载 state_dict，然后统一移到目标设备。
+            # 优先级按 §3.2：W0–W3（`init_w`）**先于** W4（tar 里的 model.pt）——两者
+            # 在构造上就是同一份权重（tar 的 model.pt = 上一轮终态 = 本轮 init），但按
+            # 声明的优先级取值，`weights_src` 才不会在「同时可得」时报出误导人的源。
+            legacy_model = opt_dir / "model.pt"
+            if init_w is not None and init_w.exists():
+                load_state_into(model, str(init_w))
+            elif legacy_model.exists():
+                # ---- W4：旧形状 tar（改造前的字节 / hub 回退分支重打 / 旧 hub）----
+                # 权重在 tar 里 ⇒ 逐字节走今天的老路（§3.2 W4 / §3.5 的兼容面）。
+                model.load_state_dict(torch.load(legacy_model, map_location="cpu"))
+                weights_src = "legacy_tar"
+            else:
+                raise ProtocolError(
+                    "opt tar 无 model.pt 且权重四源皆尽"
+                    f"（试过 {'/'.join(WEIGHT_SOURCES[:4])}）"
+                    f"；init_weights_fp={str(manifest['init_weights_fp'])[:12]}…"
+                    " —— 拒收（不许静默 warm-start，D5）"
+                )
             model.to(device_t)
             opt = torch.optim.Adam(model.parameters(), lr=float(manifest["lr"]))
             # 统一 map_location="cpu"：Optimizer.load_state_dict 会把载入张量 cast 到
@@ -2513,9 +2693,14 @@ def run_job(
             opt_restore_sec = round(time.time() - t_opt, 3)
             prep_b.add("opt", f"从 opt_init（{opt_src}）恢复（Adam 动量延续，D5）")
         else:
-            # 首轮/无 tar：从 init 权重 warm-start（hub 打包时写入 payload 的 weights_json）
-            if not init_w.exists():
-                raise ProtocolError("payload 缺 init_weights.json 且无 opt_init/blob——无法构建模型")
+            # 首轮/无 tar：从 init 权重 warm-start（payload / init blob / blobs 下载）
+            if init_w is None or not init_w.exists():
+                raise ProtocolError(
+                    "无 opt_init 且权重四源皆尽"
+                    f"（试过 {'/'.join(WEIGHT_SOURCES[:4])}）"
+                    f"；init_weights_fp={str(manifest['init_weights_fp'])[:12]}…"
+                    " —— 拒收（不许静默 warm-start，D5）"
+                )
             load_state_into(model, str(init_w))
             model.to(device_t)
             opt = torch.optim.Adam(model.parameters(), lr=float(manifest["lr"]))
@@ -2754,19 +2939,27 @@ def run_job(
     raw_model.to("cpu")
     wj_path = job_dir / "weights.json"
     save_weights_json(raw_model, str(wj_path))
+    # ★ opt-blob-diet（2026-09-24，§3.2 W1 / §3.6-8）：把本轮产出的 weights.json **原始
+    # 字节**也写进 blob_cache（键 = sha256）。下一轮 hub 的 `init_weights_fp` =
+    # `sha256(args.out)` = 同一份字节的 sha（`verify_and_land` 落的就是它解码后的原字节）
+    # ⇒ 同会话内 W1 100% 命中、下行零字节。**少了这一行**：`init` blob 的键每轮都变、
+    # **每轮必 miss** ⇒ 上行省 268,996 B 而下行多付 379,114 B = **净亏 110 KB/轮**（评审 F1）。
+    wj_raw = wj_path.read_bytes()
+    _cache_produced_weights(blob_root, wj_raw, log)
     ckpt_dir = job_dir / "ppo_final"
     _ppo_save(str(ckpt_dir), raw_model, opt, int(manifest["epochs"]))
     opt_tar_raw = pack_opt_tar(ckpt_dir)
     opt_tar_b64 = encode_opt_tar(opt_tar_raw)
     # M2 B3：把刚产出的 raw opt tar 写进 blob_cache（键 = sha256）——下一轮 hub 的
     # opt_sha 由 verify_and_land 落盘的同一份原始字节算出，故同会话内 100% 命中。
+    # （与上面 weights 那一行是同一手法、同一个理由。）
     _cache_blob(blob_root, hashlib.sha256(opt_tar_raw).hexdigest(), opt_tar_raw, log)
 
     result = {
         "job_id": jid,
         "data_fp": manifest["data_fp"],
         "init_weights_fp": manifest["init_weights_fp"],
-        "weights_json": encode_weights_json(wj_path.read_bytes()),
+        "weights_json": encode_weights_json(wj_raw),
         "opt_tar_b64": opt_tar_b64,
         "agg": {
             "policy": float(agg.get("policy", 0.0)),
@@ -2796,6 +2989,8 @@ def run_job(
         grad_sec=ppo_sec,
         blob_hits=blob_hits,
         blob_miss_bytes=blob_miss_bytes,
+        weights_src=weights_src,
+        weights_bytes=weights_wire_bytes,
         ts_code_bytes=ts_code_bytes,
         ts_code_hit=ts_code_hit,
         rollout_sec=(iter_info or {}).get("rollout_sec"),

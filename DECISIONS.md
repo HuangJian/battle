@@ -2283,3 +2283,20 @@ x20 闪避系列的熔断分两类：① **崩溃类**（`mean < 6.19` / `timeou
 理由：A 腿被「变保守」杀死的形态是本系列最大失败模式；代价（`experiments.md:56` 的 notify 放行形态、
 `demo-mix` 300 轮白烧同源）用户已知并接受。**回收条件**：崩溃类漏停造成 ≥10 轮白烧 ⇒ 恢复 `halt` 并另起条目。
 —— 全文（背景 / 备选与否决 / 代价 / 回收条件）→ `docs/nn/engineering.md` §20「决策正文归档」· 锚 `### §2026-09-24-goalnn-halt-crash-vs-conservative`
+
+## §2026-09-24-goalnn-opt-blob-diet（2026-09-24，plan/opt-blob-diet.plan.md）
+
+回传的 `opt` tar 从 `model.pt + opt.pt` 缩成**只 `opt.pt`**；初始权重改走内容寻址的 **`init` blob**
+（`BLOB_NAMES` 加 `init`，`sha = manifest.init_weights_fp` —— **复用既有字段，manifest 字段集不变**）。
+上行 760,658 → ~491,662 B/轮（x20 it176 口径 **−35.3%**），稳态下行零变化；同一份权重**一个方向只传一遍**。
+**可判据的不变量是差值**：去掉 tar 里 `model.pt` 成员 = 本机实测 **−262,790 B（−25.4%）**
+（绝对值随 `opt.pt` 可压缩性漂，§38 有口径警告）。
+worker 侧五源：payload → `blob_cache` → preloaded → `GET ?name=init` → tar 里旧形状 `model.pt`；
+四源皆尽 ⇒ `ProtocolError`（**永不**静默 warm-start），瞬时 ⇒ `RetryableError`；哨兵
+`init_weights_fp ∈ {"", "bc"}`（BC job / 全新 run 首轮）⇒ **零 blob 请求**，节点侧索取 `init`
+还要过 `manifest.slim` 闸。**稳态零下行依赖 `run_job` 产物段把 `weights.json` 原始字节也写进
+`blob_cache`**（与 opt tar 缓存同一手法；缺它每轮净亏 110 KB）。
+**被否决**：另写 init 下载路径 · hub 重打 tar · 「同一 worker」当命中判据 · 新增 `init_sha` 字段 ·
+保留 `model.pt` 让旧 worker 不炸 · 给 `_resolve_blob` 加 `cache` 开关。
+**升级顺序**：停 worker → 升 hub → 升 worker（禁半套回退；混跑时旧 hub + 换机必然响亮失败）。
+—— 全文（背景 / 实测量 / 五源 / 顺序 / 落地差异 / 判据 / 未决）→ `docs/nn/remote-transport.md` §38 · 锚 `## §38`

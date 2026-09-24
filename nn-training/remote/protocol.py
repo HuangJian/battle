@@ -402,11 +402,17 @@ RUN_NODE_LABEL = "run"
 #: `--run-max-iters` 再降；计划的 end_it 一律按其与 iters_total 的交集钳制。
 RUN_MAX_ITERS_HARD_CAP = 500
 
-#: M2 blob 载荷名（pull 端点 `GET /jobs/{id}/blob?name=opt|ref|demo`；push body `blobs`）。
+#: M2 blob 载荷名（pull 端点 `GET /jobs/{id}/blob?name=opt|ref|demo|init`；push body `blobs`）。
 BLOB_OPT = "opt"
 BLOB_REF = "ref"
 BLOB_DEMO = "demo"
-BLOB_NAMES: tuple[str, ...] = (BLOB_OPT, BLOB_REF, BLOB_DEMO)
+#: opt-blob-diet（2026-09-24，plan/opt-blob-diet.plan.md §3.1）：初始权重的内容寻址段。
+#: `sha` = `manifest.init_weights_fp`（**复用既有字段，不新增**——它就是 `sha256_file(args.out)`）；
+#: `raw` = 该轮 `init_weights.json` 原样字节（= hub `args.out` = 上游 `result.weights_json`
+#: 解码后的字节）。产出方 = hub（`publish_job`），消费方 = worker（restore 的模型权重 +
+#: kind=iter 的 rollout）。**取代** tar 里那份重复的 `model.pt`。
+BLOB_INIT = "init"
+BLOB_NAMES: tuple[str, ...] = (BLOB_OPT, BLOB_REF, BLOB_DEMO, BLOB_INIT)
 
 
 class ProtocolError(ValueError):
@@ -946,10 +952,24 @@ PAYLOAD_PERTURB_NAME = "payload.perturb"
 PAYLOAD_XZ_PRESET: Literal[3] = 3
 
 
+def is_content_sha(s: str) -> bool:
+    """内容寻址 sha 的形状判据（64 位小写 hex）。
+
+    用途是**把哨兵值挡在 blob 路径之外**：`manifest.init_weights_fp` 在 BC job 与
+    「全新 run 的首轮」上是 `"bc"`（`hub_client.publish_job`：`init_weights_path` 为空
+    ⇒ `"bc"`）。拿它去查节点缓存 / 发 `GET ?name=init` 必然落空，会被归成「确定性
+    缺失」⇒ `ProtocolError` ⇒ 停腿 / 永久 428（plan/opt-blob-diet.plan.md §3.2，评审 F2）。
+
+    单一实现：worker（`_resolve_weights`）、push 腿（`push_client`）、节点服务端
+    （`worker_server._submit`）三处共用，避免各写一份形状判据。
+    """
+    return len(s) == 64 and all(c in "0123456789abcdef" for c in s)
+
+
 def blob_path(job_dir: str | Path, name: str) -> Path:
     """内容寻址 blob 在 job 目录内的落盘名（M2；hub 写、pull worker 取）。
 
-    `name` ∈ BLOB_NAMES（opt/ref/demo）。raw 字节原样存（无 base64），sha 即键。
+    `name` ∈ BLOB_NAMES（opt/ref/demo/init）。raw 字节原样存（无 base64），sha 即键。
     """
     if name not in BLOB_NAMES:
         raise ProtocolError(f"未知 blob 名 {name!r}（只接受 {BLOB_NAMES}）")
