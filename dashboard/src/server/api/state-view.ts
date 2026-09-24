@@ -128,6 +128,12 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
       // M3：rollout 执行位置的当前**生效**值（per-course > rl.* > 缺省 local）。
       rolloutSrc: resolveRolloutSrc(cfg, course),
     },
+    // ★ 2026-09-24（plan/train-mode-hot-switch §2.5）：**逐课**的生效 rollout 源。
+    //
+    //  `modes.rolloutSrc` 只有**查看课程**一个（弹窗用）；而课程矩阵是逐行全课表——没有这张表，
+    //  「配置仍是整段上云、意图却是在线」这类半状态在**非当前课程**的行上根本算不出来。
+    //  纯函数 over 内存里的 cfg（零 IO、零子进程），与 `modes.rolloutSrc` 同一取值口径。
+    courseRolloutSrc: Object.fromEntries(courses.map((c) => [c, resolveRolloutSrc(cfg, c)])),
     metrics,
     // M1 隧道 A/B：与课程账本无关（探针结果落 tmp/），故不分课程、纯只读。
     tunnelAb: readTunnelAbRuns(),

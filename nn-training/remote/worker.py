@@ -39,7 +39,7 @@ from remote.bulk_sched import (
     BulkScheduler,
     control_path,
 )
-from remote.iter_rollout import run_iter_rollout
+from remote.iter_rollout import resolve_bun, run_iter_rollout
 from remote.prefetch import (
     PREFETCH_DEPTH_DEFAULT,
     PREFETCH_DIR_NAME,
@@ -2087,6 +2087,21 @@ def run_job(
             return cached
         except Exception:
             pass  # 缓存缺失/跨 manifest/损坏 → 清场走全流程
+
+    # ---- 能力自检（plan/train-mode-hot-switch.plan.md L3.2，2026-09-24）----
+    # 缺 bun 在**零下载**时就拒单：`kind in (iter, run)` 的活要节点自己跑 rollout（
+    # `run_iter_rollout` → `resolve_bun`），而现状是先把 payload + code.zip + ts_code.zip
+    # 三件全下完（实测 3.42MB / 12.1s）才在 `run_iter_rollout` 里发现没 bun —— 全白传。
+    #
+    # ★ 位置很关键：必须在**结果复用块之后**。它前面那个 `_result.json` 命中是纯重传
+    #   （上次算完了、只是回传失败），重传不需要 bun —— 放在复用块之前会把这种情况误拒。
+    #
+    # 失败类型与原来一模一样（`resolve_bun` 抛 `ProtocolError`）：调用方按「确定性拒绝」
+    # 处理（`worker_loop` 的 `except ProtocolError` 分支注释里就有「节点能力缺失如 bun
+    # 装不上」），hub 落终局 failed、训练侧停腿 —— 不动分类，只把判定前移。
+    # `echo` 走「只验传输链」（下方 kind 分叉里整个跳过 rollout）⇒ 不该要求 bun。
+    if str(manifest["kind"]) in ("iter", "run") and not echo:
+        resolve_bun(str((manifest.get("rollout") or {}).get("bun") or ""))
 
     # ---- payload 来源（D1：sha256 校验防截断/损坏，两条路径同规） ----
     # M0 统一计量：payload 大小与拿到它的墙钟（push = 随 POST body 抵达，下载耗时归 hub；

@@ -119,6 +119,8 @@ async function render(
     loopQueue?: LoopQueueView | null
     /** 控制台意图（`stateView.courseModeIntents`）——缺省 = 旧视图/无意图。 */
     modeIntents?: Record<string, 'online' | 'offline'> | null
+    /** 逐课生效 rollout 源（`stateView.courseRolloutSrc`）——缺省 = 旧视图/不报配置侧。 */
+    courseRolloutSrc?: Record<string, string> | null
     course?: string
     onAction?: (act: string, body: Record<string, unknown>) => void
   } = {},
@@ -129,6 +131,7 @@ async function render(
       overview: props.overview === undefined ? defaultOverview() : props.overview,
       loopQueue: props.loopQueue === undefined ? queueView([lqRaw()], ['c4']) : props.loopQueue,
       modeIntents: props.modeIntents,
+      courseRolloutSrc: props.courseRolloutSrc,
       course: props.course ?? 'c4',
       onSelectCourse: () => {},
       onAction: props.onAction,
@@ -566,6 +569,31 @@ describe('「意图未生效」徽标：两个源不一致时上屏', () => {
     expect(agrees).not.toContain('意图未生效')
     const none = await render({ onAction: () => {} })
     expect(none).not.toContain('意图未生效')
+  })
+
+  it('★2026-09-24 第三个源：意图/hub 都在线 ∧ 配置仍是 run ⇒ 「配置仍是整段上云」', async () => {
+    // 用户报障的现场：切回在线后 Kaggle 仍因缺 bun 拒单（派出的 job 还是 kind="run"）——
+    // hub 与意图都回到了在线，**配置那一格没跟上**。它只在逐课配置下发后才算得出来。
+    const html = await render({
+      modeIntents: { c4: 'online' },
+      courseRolloutSrc: { c4: 'run' },
+      onAction: () => {},
+    })
+    expect(html).toContain('配置仍是整段上云')
+    expect(html).toContain('rollout_src=run')
+    // 两个源一致 ⇒ 不报「意图未生效」（两个徽标各说各的，不混成一个）
+    expect(html).not.toContain('意图未生效')
+  })
+
+  it('配置跟上了（local/node）或旧视图没下发 ⇒ 不上屏', async () => {
+    const follows = await render({
+      modeIntents: { c4: 'online' },
+      courseRolloutSrc: { c4: 'local' },
+      onAction: () => {},
+    })
+    expect(follows).not.toContain('配置仍是整段上云')
+    const legacy = await render({ modeIntents: { c4: 'online' }, onAction: () => {} })
+    expect(legacy).not.toContain('配置仍是整段上云')
   })
 
   it('hub 开关的文案：「切换成在线」（不叫「恢复在线」——那是暂停那个开关的词）', async () => {

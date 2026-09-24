@@ -56,6 +56,13 @@ export interface ConsoleState {
    *  ——「这门课先别派活」是运维的决定，不该随 hub 的重启蒸发。所以控制台记住意图，
    *  并在每次起 hub 时回灌（见 `actions/course-mode.ts::restoreCourseModes`）。 */
   courseModes?: Record<string, 'online' | 'offline'>
+  /** 每课「切离线前生效的那个非 run rollout 源」（2026-09-24，additive）。
+   *
+   *  「离线」会把 `courses.<课>.rollout_src` **覆写**成 `run`，于是显式选过 `node` 的课一下离线
+   *  再切回在线，那格已经找不回来了（静默降成 `local`）。开课路径没这个问题（弹窗每次都重选），
+   *  **热切的一次点击往返**才把它变成可达 ⇒ 切离线时把当前生效源记在这里，切回在线时恢复。
+   *  只记 `node`/`auto`（`local` 是缺省值，记了只是噪声）。 */
+  courseRolloutSrc?: Record<string, RolloutSrcMode>
 }
 
 const DEFAULT_STATE: ConsoleState = { course: '', activeCourse: '' }
@@ -73,6 +80,7 @@ export function loadConsoleState(): ConsoleState {
     }
     merged.cloudHalts = merged.cloudHalts ?? {}
     merged.courseModes = merged.courseModes ?? {}
+    merged.courseRolloutSrc = merged.courseRolloutSrc ?? {}
     delete (merged as unknown as Record<string, unknown>).cloudHalt
     return merged
   } catch {

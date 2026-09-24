@@ -98,6 +98,32 @@ def test_segment_iters_reads_course_then_rl() -> None:
         assert _run_segment_iters(_args(course_path="curricula/x1.jsonc")) == 0
 
 
+def test_console_written_course_keys_drive_the_per_round_read() -> None:
+    """控制台那颗「切离线/切换成在线」开关写的课程级键 ↔ 训练侧每轮解析（两腿的**接口**）。
+
+    plan/train-mode-hot-switch.plan.md L1：dashboard 侧 `applyTrainModeToConfig`（唯一写面）
+    写的形状就是这两把键；训练侧在 `loop_round_steps` **每轮**各读一次
+    （`_rollout_source` / `_run_segment_iters`，读的是 `dist_common.load_dist_config()`）
+    ⇒ 机制上不需要重开课。本用例把「写面 ↔ 读面」钉在一起，防两腿各自漂：
+
+      * 离线（整段上云）= `rollout_src="run"` **与** `run_iters=-1` 两键都在 ⇒ `run` + `-1`；
+      * 切回在线 = 两键**都删**（只删一个 = 半状态：要么本机采样却又被当段长，
+        要么反过来）⇒ `local` + `0`。
+
+    反向守卫在 dashboard 侧：`tests/train-mode-offline.test.ts` + `tests/course-mode.test.ts`。
+    """
+    cases: tuple[tuple[dict, str, int], ...] = (
+        ({"courses": {"x1": {"rollout_src": "run", "run_iters": -1}}}, "run", -1),
+        ({"courses": {"x1": {}}}, "local", 0),
+    )
+    for cfg, want_src, want_seg in cases:
+        with patch("rl.loop_steps.dist_common") as dc:
+            dc.load_dist_config.return_value = cfg
+            args = _args(rollout_src="auto", course_path="curricula/x1.jsonc")
+            assert _rollout_source(args) == want_src
+            assert _run_segment_iters(args) == want_seg
+
+
 def test_rollout_src_run_is_a_declared_source() -> None:
     """`run`（离线模式的机器侧写法）必须在来源枚举里——否则配置被静默读成 `local`。
 

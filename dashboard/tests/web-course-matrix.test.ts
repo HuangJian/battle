@@ -475,7 +475,43 @@ describe('modeDrift：控制台意图 ≠ hub 此刻的表', () => {
       viewing: '',
       nowSec: NOW,
     })[0]!
-    expect(row.modeDrift).toEqual({ intent: 'offline', hubOffline: false })
+    expect(row.modeDrift).toEqual({ intent: 'offline', hubOffline: false, configRun: false })
+  })
+
+  // ★ 2026-09-24（plan/train-mode-hot-switch §2.5）：第三个源 —— hub 与意图都已经是在线，
+  // 而 rl-config 里还写着 `rollout_src=run`（整段上云，要求节点装 bun）⇒ 下一段照样派 kind=run。
+  // 用户报障的现场就是这个形状（切回在线后 Kaggle 仍因缺 bun 拒单）。
+  it('意图/ hub 都回到在线 ∧ 配置仍是 run ⇒ 漂移（configRun）', () => {
+    const drift = (rolloutSrc: Record<string, string> | null): unknown =>
+      mergeCourseRows({
+        overview: ovView([ovRow({ course: 'x20-firstkill', offline: false })]),
+        queue: lqView([lqRow({ course: 'x20-firstkill' })], ['x20-firstkill']),
+        modeIntents: { 'x20-firstkill': 'online' },
+        courseRolloutSrc: rolloutSrc,
+        viewing: '',
+        nowSec: NOW,
+      })[0]!.modeDrift
+    expect(drift({ 'x20-firstkill': 'run' })).toEqual({
+      intent: 'online',
+      hubOffline: false,
+      configRun: true,
+    })
+    // 配置跟上了（local/node）⇒ 两个源都一致，不画漂移
+    expect(drift({ 'x20-firstkill': 'local' })).toBeNull()
+    expect(drift({ 'x20-firstkill': 'node' })).toBeNull()
+    // 没下发逐课配置（旧视图/夹具）⇒ 无从判断，**不编**漂移
+    expect(drift(null)).toBeNull()
+    // 意图离线时配置是 run 是**正常**的（离线就该是 run）——只有意图在线才算没跟上
+    expect(
+      mergeCourseRows({
+        overview: ovView([ovRow({ course: 'c9', offline: true })]),
+        queue: lqView([lqRow({ course: 'c9' })], ['c9']),
+        modeIntents: { c9: 'offline' },
+        courseRolloutSrc: { c9: 'run' },
+        viewing: '',
+        nowSec: NOW,
+      })[0]!.modeDrift,
+    ).toBeNull()
   })
 
   it('一致（两种方向都算一致）⇒ null：不画漂移', () => {

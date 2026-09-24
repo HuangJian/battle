@@ -550,6 +550,7 @@ export function App({ initial }: AppProps) {
                 overview={stateView?.overview ?? null}
                 loopQueue={stateView?.loopQueue ?? null}
                 modeIntents={stateView?.courseModeIntents ?? null}
+                courseRolloutSrc={stateView?.courseRolloutSrc ?? null}
                 course={viewCourse}
                 onSelectCourse={selectCourse}
                 onAction={doAction}

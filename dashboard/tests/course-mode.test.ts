@@ -11,7 +11,7 @@
  */
 
 import { afterAll, beforeEach, describe, expect, it } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
 
@@ -34,11 +34,34 @@ afterAll(() => {
 
 import { loadConsoleState, saveConsoleState } from '../src/server/actions/console-state'
 import {
+  pushCourseMode,
   readCourseModes,
   restoreCourseModes,
   restoreCourseModesNote,
   setCourseMode,
 } from '../src/server/actions/course-mode'
+
+/** 重写临时 rl-config（用例的起点状态：`courses.<课>` 已经有什么）。 */
+const writeRlConfig = (courses: Record<string, Record<string, unknown>>): void => {
+  writeFileSync(
+    process.env.BCITY_RL_CONFIG as string,
+    JSON.stringify({
+      version: 1,
+      nodes: [],
+      rl: { hub_port: 18787, remote_token: 'tok' },
+      courses,
+    }),
+    'utf-8',
+  )
+}
+
+/** 读回某门课的课程级键（不在 = `{}`）——**读盘**，不是读内存。 */
+const courseRow = (course: string): Record<string, unknown> => {
+  const cfg = JSON.parse(readFileSync(process.env.BCITY_RL_CONFIG as string, 'utf-8')) as {
+    courses?: Record<string, Record<string, unknown>>
+  }
+  return cfg.courses?.[course] ?? {}
+}
 
 interface Call {
   url: string
@@ -75,7 +98,9 @@ beforeEach(() => {
   calls = []
   mode = 'ok'
   rejectFirst = 0
-  saveConsoleState({ courseModes: {} })
+  saveConsoleState({ courseModes: {}, courseRolloutSrc: {} })
+  // 每例从「干净课程表」起步：L1 之后开关会写 rl-config，上例的残留不许漏进下一例。
+  writeRlConfig({})
 })
 
 describe('setCourseMode（热切 + 落意图）', () => {
@@ -87,8 +112,11 @@ describe('setCourseMode（热切 + 落意图）', () => {
     expect(calls[0].url).toContain('/admin/courses?course=c5&mode=offline')
     expect(calls[0].auth).toBe('Bearer tok')
     expect(readCourseModes()).toEqual({ c5: 'offline' })
+    // ★ 2026-09-24（L1）：文案换成**合并后**的语义——「只接收 it 权重/指标回传」是旧的半语义
+    //（那颗开关现在同时把本机置成整段上云），继续拿它当断言基准会把矛盾的双关锁在测试里。
     expect(r.message).toContain('已切离线')
-    expect(r.message).toContain('只接收')
+    expect(r.message).toContain('整段上云')
+    expect(r.message).not.toContain('只接收')
   })
 
   it('切回在线：意图改成 online（hub 侧由它自己复位）', async () => {
@@ -97,7 +125,7 @@ describe('setCourseMode（热切 + 落意图）', () => {
     expect(r.ok).toBe(true)
     expect(calls[0].url).toContain('mode=online')
     expect(readCourseModes()).toEqual({ c5: 'online' })
-    expect(r.message).toContain('恢复实时派发')
+    expect(r.message).toContain('本机采样 + 云机只算 PPO')
   })
 
   it('hub 拒绝（400）：意图照样落盘 + 报告原因 + 指向回灌（不静默丢意图）', async () => {
@@ -206,6 +234,85 @@ describe('restoreCourseModes（起 hub 后回灌）', () => {
     } as never)
     expect(note).toBe('')
     expect(calls).toHaveLength(0)
+  })
+})
+
+// ──────────────── L1（2026-09-24）：那颗开关 = 唯一的模式开关 ────────────────
+
+/** 用户报障：离线课切回在线后 Kaggle 仍因缺 bun 拒单（派出的 job 仍是 `kind:"run"`）。
+ *
+ *  根因：开关只翻了 hub 那半边，`courses.<课>.rollout_src=run` 一直没撒 ⇒ 下一段照样整段上云。
+ *  本组钉的就是「一颗开关 = 完整语义」（plan/train-mode-hot-switch.plan.md L1）。
+ */
+describe('★2026-09-24 L1：切模式同时写本机训练配置（不再需要重开课）', () => {
+  it('切离线：课程级两把键一起落（`run` 是声明，`run_iters:-1` 是段长）', async () => {
+    const r = await setCourseMode('x20-firstkill', 'offline')
+    expect(r.ok).toBe(true)
+    expect(courseRow('x20-firstkill')).toMatchObject({ rollout_src: 'run', run_iters: -1 })
+  })
+
+  it('切换成在线：两把键**都不在**（不是 =null / 空串——python 侧按缺席才算本机采样）', async () => {
+    await setCourseMode('x20-firstkill', 'offline')
+    const r = await setCourseMode('x20-firstkill', 'online')
+    expect(r.ok).toBe(true)
+    const row = courseRow('x20-firstkill')
+    expect('rollout_src' in row).toBe(false)
+    expect('run_iters' in row).toBe(false)
+  })
+
+  it('★ node 往返：显式选的 `node` 切离线再切回在线必须回来（否则静默降成 local）', async () => {
+    writeRlConfig({ 'x20-firstkill': { rollout_src: 'node' } })
+    await setCourseMode('x20-firstkill', 'offline')
+    await setCourseMode('x20-firstkill', 'online')
+    expect(courseRow('x20-firstkill').rollout_src).toBe('node')
+  })
+
+  it('`local` 不留痕：缺省档往返后配置里不出现 `rollout_src`（不写噪声）', async () => {
+    writeRlConfig({ 'x20-firstkill': { rollout_src: 'local' } })
+    await setCourseMode('x20-firstkill', 'offline')
+    await setCourseMode('x20-firstkill', 'online')
+    expect('rollout_src' in courseRow('x20-firstkill')).toBe(false)
+  })
+
+  it('hub 不可达：**配置照样落**（回执仍如实说 hub 未接受，意图已记录）', async () => {
+    mode = 'throw'
+    const r = await setCourseMode('x20-firstkill', 'offline')
+    expect(r.ok).toBe(false)
+    expect(r.message).toContain('意图已记录')
+    expect(courseRow('x20-firstkill')).toMatchObject({ rollout_src: 'run', run_iters: -1 })
+  })
+
+  it('文案带语义与时机：离线 ⇒ 「整段上云」（节点要 bun）；在线 ⇒ 「不需要 bun」+「段边界生效」', async () => {
+    const off = await setCourseMode('x20-firstkill', 'offline')
+    expect(off.message).toContain('整段上云')
+    expect(off.message).toContain('段边界生效')
+    const on = await setCourseMode('x20-firstkill', 'online')
+    expect(on.message).toContain('不需要 bun')
+    expect(on.message).toContain('段边界生效')
+  })
+})
+
+/** 逆测试（plan §2.2 F9）：`pushHubMode`（开课/停课的 hub 推送）曾直接调 `setCourseMode`，
+ *  于是「加一步写配置」会让**开课重复写盘 1–3 次**、还会把**停课**误翻译成「整段上云」。
+ *  所以推 hub 必须走**只推 hub + 落意图**的原语。 */
+describe('★2026-09-24 L1：`pushCourseMode`（hub+意图的原语）绝不动 rl-config', () => {
+  it('推 offline：hub 收到了、意图落了、**配置一个字没写**', async () => {
+    const r = await pushCourseMode('x20-firstkill', 'offline')
+    expect(r.ok).toBe(true)
+    expect(calls).toHaveLength(1)
+    expect(readCourseModes()).toEqual({ 'x20-firstkill': 'offline' })
+    expect(courseRow('x20-firstkill')).toEqual({})
+  })
+
+  it('回灌（restoreCourseModes）同规：它也不是用户动作，不该改训练配置', async () => {
+    saveConsoleState({ courseModes: { 'x20-firstkill': 'offline' } })
+    const r = await restoreCourseModes({
+      version: 1,
+      nodes: [],
+      rl: { hub_port: 18787, remote_token: 'tok' },
+    } as never)
+    expect(r.restored).toBe(1)
+    expect(courseRow('x20-firstkill')).toEqual({})
   })
 })
 

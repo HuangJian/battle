@@ -7,6 +7,50 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §37 缺 bun 在**零下载**时就拒单：能力自检前移到 payload/code/ts_code 之前（2026-09-24）
+
+用户 2026-09-24 报障链的云机一端：节点上没 bun 时，worker 仍然把
+**payload 296KB/2.5s + code.zip 1.58MB/6.1s + ts_code.zip 1.55MB/4.5s** 三件全下完（合计
+**3.42MB / 12.1s**，worker 日志自己的 `合计=` 行），才在 `run_iter_rollout` 里由
+`resolve_bun` 发现没 bun ⇒ `REJECTED`。全是白传。
+
+### 为什么能提前（不变量）
+
+`run_job` 拿到的 `job["manifest"]` 在**认领响应里就完整可用**（`normalize_manifest` 之后
+`rollout.bun` 必有值，缺省 `"bun"`，见 `protocol.py::ROLLOUT_SPEC_DEFAULTS`）；payload / code /
+ts_code **三件都是之后才下载的**。所以判定不需要任何字节。
+
+### 决定（plan/train-mode-hot-switch.plan.md L3.2）
+
+```python
+# 结果复用块（_result.json 命中 ⇒ 纯重传）之后、payload 下载之前
+if str(manifest["kind"]) in ("iter", "run") and not echo:
+    resolve_bun(str((manifest.get("rollout") or {}).get("bun") or ""))
+```
+
+四条判据都必须写进测试（`nn-training/tests/test_worker_bun_precheck.py`）：
+
+| # | 判据 | 为什么 |
+|---|---|---|
+| ① | `kind in (iter, run)` ∧ 无 bun ⇒ `ProtocolError` **且零下载** | 这就是本项的全部价值；实测口径 **0 字节 / <0.1s** |
+| ② | `echo=True` 豁免 | echo 只验传输链，kind 分叉里整个跳过 rollout |
+| ③ | `kind=ppo` 豁免 | 只有「节点自己跑 rollout」才需要 bun（本机采样 + 云机只算 PPO 不需要） |
+| ④ | **位置**：`_result.json` 命中时即使没 bun 也照旧重传 | 纯重传不需要 bun；放在复用块之前会误拒「已算完、只差回传」的 job |
+
+### 不动分类（只是前移）
+
+失败类型与原来**一模一样**（`resolve_bun` 抛 `ProtocolError`）：`worker_loop` 的
+`except ProtocolError` 分支本来就写着「确定性拒绝（commit 不符/模式不符/**节点能力缺失如 bun 装不上**）
+不重试」⇒ hub 落终局 failed、训练侧 `JobFailedError` 停腿。本项只把同一判定从 3.42MB 之后
+挪到 0 字节处，**不新建**异常类、不改重试策略。
+
+### 另一条腿（同一报障的配置端）
+
+「切回在线后仍然派 `kind=run`」的根因在**控制台那颗开关只翻了半场**（本机配置没改）⇒
+`docs/nn/console.md §15`。两件合起来才是完整的修法：配置端不再派 `run`；真派了 `run` 而无 bun 时
+也不再白传 3.42MB。
+
+---
 ## §36 hub 的课程发现：写动作也该触发一次真扫（回灌跑在发现之前 = 静默失配）（2026-09-23）
 
 用户 2026-09-23 报障：新开的三个离线课里，`x20-demo-mix` 在 hub 里**不是** offline（而另两个

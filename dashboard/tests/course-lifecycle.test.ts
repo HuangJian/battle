@@ -383,6 +383,10 @@ describe('stopCourse：非破坏停课（暂停意图 + hub 置离线）', () =>
     // 账本/队列保留（用户口径：暂停 = 保留队列，不删）
     expect(readFileSync(path.join(TRAJ, COURSE, 'training_log.jsonl'), 'utf-8')).toBe(before)
     expect(r.detail!.join('\n')).toContain('队列与账本一个字不动')
+    // ★ 2026-09-24（plan §2.2 F9）：停课**不是**「整段上云」——它的 hub 推送走 `pushCourseMode`
+    //（只推 hub + 落意图），绝不动 `courses.<课>`。误译成写 run/run_iters 会让「停课」把本机
+    // 采样也关掉（而停课的定义是非破坏：随时开课接着跑）。
+    expect(courseKeys(COURSE)).toEqual({})
   })
 
   it('可逆：停课 → 开课把暂停意图清掉（否则「开了课但不推进」）', async () => {

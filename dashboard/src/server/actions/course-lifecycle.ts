@@ -22,7 +22,7 @@
 
 import { appendFileSync, existsSync, mkdirSync, writeFileSync, rmSync } from 'fs'
 import path from 'path'
-import { loadConfig, saveConfig } from '../../core/config'
+import { loadConfig } from '../../core/config'
 import { readJsoncFile } from '../../core/jsonc'
 import { curriculaDir, tmpLogsDir } from '../../core/paths'
 import { validateCourseName } from '../../core/slots'
@@ -32,8 +32,8 @@ import { pruneLegacyCourseKnobs } from '../../stack/course-knobs'
 import { kickstartReceipt } from '../../stack/kickstart-receipt'
 import { pairedSeedReceipt } from '../../stack/paired-seed-receipt'
 import { remoteExecutionFace } from '../../stack/push-config'
-import { trainModeKnobs } from '../../stack/specs'
-import { type CourseMode, setCourseMode } from './course-mode'
+import { type CourseMode, pushCourseMode } from './course-mode'
+import { applyTrainModeToConfig } from './train-mode'
 import { readLoopControl, setCoursePaused } from './loop-control'
 import { loopControlPath } from '../../core/paths'
 import { launchTaskBundleExport } from '../bundles'
@@ -175,8 +175,8 @@ export function prepareCourseForOpen(course: string): { notes: string[] } {
   return { notes }
 }
 
-/** 写本课的 rl-config 键（**唯一写面**）：训练模式（`rollout_src`/`run_iters`）、
- *  rollout 位置覆盖。返回人读说明 + 最终模式。
+/** 写本课的 rl-config 键（开课那条路径；域映射已搬到 `train-mode.ts`，见该文件头）。
+ *  返回人读说明 + 最终模式。
  *
  *  ★ 2026-09-21（§3）：不再写 `remote_degrade_after`——单一 PPO 路径下没有「降级本机」这个
  *  档位（loop 没有计算能力），残留值由 `pruneLegacyCourseKnobs` 清掉。
@@ -188,33 +188,14 @@ export function writeCourseConfigForOpen(
   course: string,
   opts: OpenCourseOpts,
 ): { notes: string[]; trainMode: TrainMode } {
-  const notes: string[] = []
-  const cfg = loadConfig()
-  const courses = { ...cfg.courses }
-  const row = { ...courses[course] }
   const trainMode: TrainMode = opts.trainMode === 'offline' ? 'offline' : 'online'
-  if (opts.trainMode) {
-    const knobs = trainModeKnobs(trainMode, opts.rolloutSrc ?? 'local')
-    if (trainMode === 'offline') {
-      // 两个键缺一不可：`run` 是声明，`run_iters` 是段长（`-1` = 到课程末）。
-      row.rollout_src = knobs.rolloutSrc
-      row.run_iters = knobs.runIters ?? -1
-      notes.push('训练模式 离线：本课 rollout_src=run + run_iters=-1（整段上云）')
-    } else {
-      // 切回在线 = **撤掉离线标记**：段长必删（留着它 = 下一轮又被当成段长 + 本机采样 =
-      // 半状态），课程级的 `run` 也删。别的课程级覆盖（有人显式写过 `rollout_src:'node'`）
-      // 不归这里管 —— 除非这次显式选了新的 rollout 位置。
-      delete row.run_iters
-      if (row.rollout_src === 'run') delete row.rollout_src
-      notes.push('训练模式 在线：已撤掉离线标记（run/run_iters）')
-    }
-  }
-  if (opts.rolloutSrc && trainMode === 'online') {
-    row.rollout_src = opts.rolloutSrc
-    notes.push(`rollout 位置覆盖：courses.${course}.rollout_src=${opts.rolloutSrc}`)
-  }
-  courses[course] = row
-  saveConfig({ ...cfg, courses })
+  // 三条入口各对应一种弹窗选择；模式与 rollout 位置都没给就**不写盘**
+  //（历史行为下那是一次「内容不变的空写」，无语义——不重放它）。
+  if (!opts.trainMode && !opts.rolloutSrc) return { notes: [], trainMode }
+  // 域映射只此一处（`train-mode.ts`）；开课路径**不**开 `remember`：弹窗每次都重选，没有往返要记。
+  const notes = applyTrainModeToConfig(course, opts.trainMode ? trainMode : 'online', {
+    rolloutSrc: opts.rolloutSrc,
+  }).notes
   return { notes, trainMode }
 }
 
@@ -230,10 +211,13 @@ export async function pushHubMode(
 ): Promise<{ ok: boolean; message: string }> {
   const attempts = Math.max(1, retry.attempts ?? 3)
   const delayMs = Math.max(0, retry.delayMs ?? 2000)
-  let last = await setCourseMode(course, mode)
+  // ★ 2026-09-24（plan §2.2 F9）：调 `pushCourseMode`（**只**推 hub + 落意图）而**不是**
+  //   `setCourseMode`——后者会写训练配置：开课会因此重复写盘 1–3 次，停课（也走这里）还会把
+  //   「停课」误翻成「整段上云」。基础设施建设与用户动作的边界就在这一行。
+  let last = await pushCourseMode(course, mode)
   for (let i = 1; i < attempts && !last.ok; i++) {
     await Bun.sleep(delayMs)
-    last = await setCourseMode(course, mode)
+    last = await pushCourseMode(course, mode)
   }
   return { ok: last.ok, message: last.message }
 }

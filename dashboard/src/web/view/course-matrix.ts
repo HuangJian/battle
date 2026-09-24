@@ -314,7 +314,7 @@ export interface CourseMatrixRow {
    *
    *  ★ 带上两侧取值（而不是一个 bool）：渲染层要用它们写清「意图是 X、hub 现在当 Y」，
    *  否则组件就得自己去读那份意图表 —— 又一条知道真相的路径。 */
-  modeDrift: { intent: 'online' | 'offline'; hubOffline: boolean } | null
+  modeDrift: { intent: 'online' | 'offline'; hubOffline: boolean; configRun: boolean } | null
   /** 行内是否给**任务包操作**（导出/导入训练结果）。
    *
    *  判据 = `hub 标了离线 ∨ 控制台意图是离线`（**两个源任一为离线**）。
@@ -342,6 +342,13 @@ export interface CourseMatrixInput {
    *  与 `overview` 里的 hub 事实**分开收**：一个是运维的决定，一个是 hub 此刻的表。
    *  摆在一起才能看出「意图没落地」（`modeDrift`）——不在这里替任何一侧编事实。 */
   modeIntents?: Record<string, 'online' | 'offline'> | null
+  /** **逐课**的生效 rollout 源（`stateView.courseRolloutSrc`；缺省 = 旧视图/不报）。
+   *
+   *  为什么要它（2026-09-24）：`modeDrift` 只比「意图 vs hub」两个源，而用户报障的现场是
+   *  **第三个**源没跟上——hub 已回到在线、意图也已是在线，但 `courses.<课>.rollout_src` 还是
+   *  `run`（整段上云）⇒ 下一段照样派 `kind=run`（节点缺 bun 就拒单）。配置侧那一格只有逐课下发
+   *  才算得出来（`modes.rolloutSrc` 只有查看课程一个）。 */
+  courseRolloutSrc?: Record<string, string> | null
   viewing: string
   /** 判定「段内多久没动」的当下时刻（epoch 秒）——调用方给，便于单测。 */
   nowSec: number
@@ -357,12 +364,17 @@ export function modeDriftOf(
   ov: CourseOverviewRow | null,
   hubOnline: boolean,
   intents?: Record<string, 'online' | 'offline'> | null,
-): { intent: 'online' | 'offline'; hubOffline: boolean } | null {
+  /** 逐课生效 rollout 源（`stateView.courseRolloutSrc`）；缺 = 无从判断配置侧。 */
+  rolloutSrc?: Record<string, string> | null,
+): { intent: 'online' | 'offline'; hubOffline: boolean; configRun: boolean } | null {
   const intent = intents?.[course]
   if (!intent) return null
   if (!ov || !hubOnline || !ov.hubSeen) return null
-  if (ov.offline === (intent === 'offline')) return null
-  return { intent, hubOffline: ov.offline }
+  // 配置侧那一格（**第三个源**）：意图/ hub 都回到在线而配置还写着 `run` ⇒ 下一段仍是整段上云。
+  // 独立于「意图 vs hub」是否一致来算：两者一致也照样可能带着 `run`（用户报障的现场就是这个形状）。
+  const configRun = rolloutSrc?.[course] === 'run' && intent === 'online'
+  if (ov.offline === (intent === 'offline') && !configRun) return null
+  return { intent, hubOffline: ov.offline, configRun }
 }
 
 /** 两侧 outer join（顺序：先 hub 侧给出的序，再补训练侧独有的课 —— 稳定且「在训的在前」）。 */
@@ -412,7 +424,7 @@ export function mergeCourseRows(input: CourseMatrixInput): CourseMatrixRow[] {
       ov,
       lq,
       canToggleMode: hubOnline && (ov?.hubSeen ?? false),
-      modeDrift: modeDriftOf(course, ov, hubOnline, input.modeIntents),
+      modeDrift: modeDriftOf(course, ov, hubOnline, input.modeIntents, input.courseRolloutSrc),
       bundleOps: (ov?.offline ?? false) || input.modeIntents?.[course] === 'offline',
       queue: queueCell(ov, hubOnline),
       waiting: ov?.offline ? offlineWaitCell(ov) : waitingCell(lq),

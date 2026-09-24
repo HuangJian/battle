@@ -189,6 +189,13 @@ export interface ConsoleStateView {
    *  该课静默留在 online 而面板显示「在训/切离线」）——UI 拿它做漂移徽标，不自己推算。
    *  缺省/空 = 旧视图或没有任何意图（UI 不画漂移提示，不编状态）。 */
   courseModeIntents?: Record<string, 'online' | 'offline'> | null
+  /** **逐课**的生效 rollout 源（`courses.<课>.rollout_src` > `rl.rollout_src` > 缺省 local）。
+   *
+   *  ★ 2026-09-24（plan/train-mode-hot-switch §2.5）：`modes.rolloutSrc` 只覆盖**查看课程**，
+   *  而课程矩阵是逐行全课表——要判「hub 当它在线、可配置里还是 `run`（整段上云）」
+   *  这种半状态，非当前课程的行也需要自己的那一格。
+   *  缺省/null = 旧视图或夹具（UI 不画配置侧提示，不编状态）。 */
+  courseRolloutSrc?: Record<string, string> | null
   /** 课程生命周期事实（2026-09-20：进程启动与课程解耦后，顶部「开课/停课」入口的判据）。
    *  `enabled` = **开课标记**（`tmp/<课>/training-enabled.txt`）——训练侧 `enabled_courses`
    *  与 hub `_course_dir_live` 的同一个闸（有账本 ≠ 在训：历史课都有账本）；

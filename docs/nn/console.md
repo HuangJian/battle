@@ -7,6 +7,82 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §15 「在线/离线」收敛成**一颗开关**（本机配置 + hub 模式一起动）+ 第三源漂移徽标（2026-09-24）
+
+用户 2026-09-24 报障：「离线课切回在线后，Kaggle 仍因缺 bun 拒单」。实锤：切在线后派出的 job
+仍是 `"kind": "run"`（`tmp/<课>/remote-jobs/<job_id>/manifest.json`）。
+
+### 根因：**同名不同义的两个「离线」只有一半能被那颗开关改到**
+
+| # | 事实 | 出处 |
+|---|---|---|
+| F1 | 两个「离线」：hub 派发模式（`setCourseMode`：只写意图 + POST hub）与训练模式（`trainModeKnobs` → `courses.<课>.rollout_src=run` + `run_iters=-1`） | `server/actions/course-mode.ts`、`stack/specs.ts::trainModeKnobs` |
+| F2 | 两者**各只有一条入口且不是同一条**：训练模式**只有开课**能写（运行中往 `start` 动作发 `trainMode` 被 400 拒），hub 模式有独立开关 ⇒ 只翻后者必然半状态 | `course-lifecycle.ts`、`api/route.ts` |
+| F3 | job 的 kind 只有一个判定点：有 `plan_bytes` ⇒ `run`；有 `rollout_spec` ⇒ `iter`；都无 ⇒ `ppo` | `rl/loop_steps.py::publish_job` 调用点 |
+| F4 | bun 只在**云机自己跑 rollout** 时需要（`kind in ("iter","run")` ⇒ `run_iter_rollout` ⇒ `resolve_bun`） | `remote/worker.py`、`remote/iter_rollout.py::resolve_bun` |
+
+### 决定（plan/train-mode-hot-switch.plan.md L1）
+
+**那颗开关 = 唯一的模式开关**：`setCourseMode` ① 先落本机配置（同步写盘，python 每轮读的那份
+rl-config）② 再推 hub 镜像。机制上不需要重开课：`_rollout_source` / `_run_segment_iters` **每轮**
+各读一次 `dist_common.load_dist_config()`（`rl/loop_round_steps.py`），且控制台从不把
+`--rollout-src` / `--run-iters` 传进 trainer argv（唯一传 `--run-iters` 的是 bundle 导出，只读快照）。
+
+**语义边界（已写进回执文案）**：
+
+| 档位 | 配置 | job kind | 节点要 bun 吗 |
+|---|---|---|---|
+| 离线 | `rollout_src=run` + `run_iters=-1` | `run`（整段上云） | **要**（这是 `run` 的定义，不是 bug） |
+| 在线（缺省） | 两键**都不在**（缺席 = local） | `ppo`（本机采样，云机只算 PPO） | 不要 |
+| 在线 + 显式 `node` | `rollout_src=node` | `iter`（整轮上云） | 要（显式选择的代价） |
+
+### 写面收口（**边界就是三个函数**）
+
+| 函数 | 干什么 | 写 `courses.<课>` 吗 |
+|---|---|---|
+| `pushCourseMode` | 只推 hub + 落意图（开课 / 停课 / 回灌共用） | **绝不** |
+| `setCourseMode` | 那颗开关 = `applyTrainModeToConfig` + `pushCourseMode` | 写 |
+| `applyTrainModeToConfig`（`actions/train-mode.ts`） | 唯一写面：域换算仍走 `trainModeKnobs` | 写 |
+| `restoreCourseModes`（起 hub 回灌） | 只推 hub —— 回灌不是用户动作 | **绝不** |
+
+为什么必须拆：`pushHubMode`（开课/停课的 hub 推送，带 3×2s 重试）**就是循环调 `setCourseMode` 的**
+⇒ 往那颗开关里塞写配置，会让**开课重复写盘 1–3 次**、还会把**停课**误翻译成「整段上云」。
+
+### ★ 生效时机是**段边界**，不是「下一轮」
+
+`run_iters<0`（离线缺省）时一段 job 覆盖 `it → end_it`（**课程末**），训练侧阻塞在
+`_remote_ppo(..., wait_timeout_sec=8h)`。**切回在线在该段结束前完全无效果**——而这一段可能就是
+课程剩下的全部。**不做抢占**是有意的（已经在飞的段不取消），所以回执与文档都写明了这条，
+并指向立刻断开的把手：**停课 / 暂停**。
+
+推论（运维口径）：想「只停 hub 派发、本机继续训」请用**暂停键**，切离线现在的含义是**整段上云**。
+
+### node 往返：`offline` 会把显式选的 `node` 覆写掉
+
+`offline` 写 `rollout_src=run` 是覆写，于是「显式选过 `node` 的课」一下离线再切回在线时那格已经
+没了 ⇒ 静默降成 `rl.rollout_src`/`local`（开课路径没这个问题：弹窗每次重选）。
+**修法**：切离线前把**当前生效的非 run 源**记进 `console-state.courseRolloutSrc`（只记 `node`/`auto`——
+`local` 是缺省，记了是噪声），切回在线时取回并回执「rollout 位置恢复为 node」。
+
+### 第三源：漂移徽标现在覆盖 `rl-config` 那一格
+
+`modeDriftOf` 原来只比「控制台意图 vs hub 事实」。用户报障的现场是**第三个源**没跟上：
+hub 与意图都回到在线，而配置里还是 `run` ⇒ 下一段照样派 `kind=run`。
+
+* 取数：`stateView.courseRolloutSrc`（逐课 `resolveRolloutSrc(cfg, c)`，纯函数 over 内存 cfg、零 IO）
+  —— `modes.rolloutSrc` 只有**查看课程**一个，而矩阵是逐行全课表，非当前课程的行需要自己那一格。
+* 渲染：`modeDrift.configRun`（仅当 `intent === 'online'` 且配置是 `run`）⇒ 行上多一个
+  「配置仍是整段上云」徽标，与「意图未生效」各说各的（不混成一个）。无意图 / 旧视图 ⇒ `null`，**不编**。
+
+### 验证
+
+* `tests/course-mode.test.ts`：切离线落两键 / 切在线两键都不在 / **node 往返回到 node** / `local` 不留痕 /
+hub 不可达时配置照样落 / 文案含「整段上云」「不需要 bun」「段边界生效」；
+* 逆测试：`pushCourseMode` 与 `restoreCourseModes` **一个字都不写** rl-config（防 F9 复发）；
+* 跨语言钉子：`nn-training/tests/test_run_segment.py` 钉「控制台写的两键 ↔ `_rollout_source`/`_run_segment_iters`」；
+* 既有源码断言跟着写面搬家（`tests/train-mode-offline.test.ts`、`tests/rollout-src-launch-option.test.ts`）。
+
+---
 ## §14 离线课三处状态各说各话：hub 事实 vs 控制台意图 + 0 回传不说「回传中」（2026-09-23）
 
 用户 2026-09-23 报障（新开三个离线课 `x20-demo-mix` / `x20-firstkill` / `x20-terminal`，

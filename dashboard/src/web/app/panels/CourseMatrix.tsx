@@ -73,6 +73,12 @@ export interface CourseMatrixProps {
    *  它不在这个面板的只读事实里：hub 的 mode 是 volatile，这份是运维的决定（切离线/
    *  离线开课时写、起 hub 时回灌）。两者摆在一起才能看出「意图没落地」。 */
   modeIntents?: Record<string, 'online' | 'offline'> | null
+  /** **逐课**生效 rollout 源（`stateView.courseRolloutSrc`；缺省 = 旧视图/不报）。
+   *
+   *  漂移徽标只比「意图 vs hub」两个源是不够的：用户报障的现场是**第三个**源没跟上——
+   *  hub 与意图都回到在线，而 `courses.<课>.rollout_src` 仍是 `run`（整段上云）⇒ 下一段
+   *  照样派 `kind=run`，节点缺 bun 就拒单（2026-09-24 / plan §2.5）。 */
+  courseRolloutSrc?: Record<string, string> | null
   /** 当前查看课程（高亮）。 */
   course: string
   onSelectCourse: (course: string) => void
@@ -84,6 +90,7 @@ export function CourseMatrix({
   overview,
   loopQueue,
   modeIntents,
+  courseRolloutSrc,
   course,
   onSelectCourse,
   onAction,
@@ -94,6 +101,7 @@ export function CourseMatrix({
     overview,
     queue: loopQueue,
     modeIntents,
+    courseRolloutSrc,
     viewing: course,
     nowSec,
   })
@@ -361,7 +369,7 @@ function MatrixTr({
               {/* 漂移徽标：控制台意图 ≠ hub 此刻的表（2026-09-23 实测的那种静默失配）。
                   它只在**两个源都读到且不一致**时上屏——所以点一下这个按钮就再来一次，
                   或者点「hubServer」回灌全部意图。 */}
-              {r.modeDrift ? (
+              {r.modeDrift && r.modeDrift.hubOffline !== (r.modeDrift.intent === 'offline') ? (
                 <span
                   className="tc-mx__pausebadge tc-badge tc-badge--warn"
                   title={
@@ -372,6 +380,21 @@ function MatrixTr({
                   }
                 >
                   意图未生效
+                </span>
+              ) : null}
+              {/* 第三个源（rl-config 配置）没跟上：hub 与意图都已回到在线，而
+                  `courses.<课>.rollout_src` 还是 `run`（整段上云）⇒ 下一段照样派 `kind=run`，
+                  节点缺 bun 就拒单（2026-09-24 用户报障的那条链）。它只在逐课配置下发后才算得出来。 */}
+              {r.modeDrift?.configRun ? (
+                <span
+                  className="tc-mx__pausebadge tc-badge tc-badge--warn"
+                  title={
+                    `配置未跟上：${r.course} 的 rl-config 里仍是 rollout_src=run（整段上云，` +
+                    '要求节点装 bun）。点这个按钮一次即修正（本机配置与 hub 一起改）——' +
+                    '★ 段边界生效：已在飞的那一段不会被抢占，可能要等到段尾才换挡。'
+                  }
+                >
+                  配置仍是整段上云
                 </span>
               ) : null}
             </span>
