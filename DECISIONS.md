@@ -2284,13 +2284,42 @@ x20 闪避系列的熔断分两类：① **崩溃类**（`mean < 6.19` / `timeou
 `demo-mix` 300 轮白烧同源）用户已知并接受。**回收条件**：崩溃类漏停造成 ≥10 轮白烧 ⇒ 恢复 `halt` 并另起条目。
 —— 全文（背景 / 备选与否决 / 代价 / 回收条件）→ `docs/nn/engineering.md` §20「决策正文归档」· 锚 `### §2026-09-24-goalnn-halt-crash-vs-conservative`
 
+## §2026-09-24-job-identity-collision（2026-09-24，plan/job-identity-collision.plan.md）
+
+**job 身份纳入课程维度，且归属唯一才认**。2026-09-24 用户报障「双课程并行，调度请求 409」，
+根因是 `idempotency_key = (runId, it, init_weights_fp, data_fp)` **不含课程**：单 hub 多课程
+（`--serve` 共享 trainer）下 `runId` 进程级共享、`data_fp` 只哈希 shard 元组（per-stage seed 与课程无关）、
+`init_weights_fp` 同 warm-start、`it` 同轮 ⇒ 两门课发布出**同一个 `job_id`**；而 `course_of` 的
+「取第一个匹配」在**读（`wait_job`→`/result`）写（claim/result）两条路径**上都生效 ⇒ 两个训练轮
+读到**同一份结果**、各自落进自己的 `args.out`（静默污染 + 自持循环：污染让 `init_weights_fp`
+持续相同 ⇒ 下一轮继续撞）。
+**L1**：`idempotency_key = (runId, course_fp, it, init_weights_fp, data_fp)`。选 `course_fp`（jsonc 字节
+sha256）而非课程名/hub 课程键 —— 它是 manifest 必填字段，且**同进程内恒定**（课程字节装载时冻结，
+`args.course_frozen_bytes`）⇒ mid-run 编辑不换 id、不产生孤儿。**只做键分量，不做路由键**。
+**L1'**：`course_of` 归属**唯一才认**（≥2 门课都持有 ⇒ `None`/404 + 一行歧义日志 + `/admin/queue`
+的 `ambiguous_jids`），歧义**绝不**进 `_locate_cache`。原「取第一个匹配」正是事故的静默通道；
+代价是「响亮失败」（404/等到超时），收益是「绝不污染」—— 方向刻意如此。
+**L3**：发布端守卫 `protocol.collision_rows`，判据 = 「**完整幂等键**相同 且 落在**别的 store**」
+⇒ 拒发，位置在 `job_id` 算完之后、**任何写盘之前**（连 `.extra_tmp` 都不建）。它是哨兵（正常发布
+撞不出来），拦手写 manifest / 回灌历史 job / 跨 hub 搬目录。
+**L4**：409 不再被 worker 读成「hub 异常」；worker 打 `reason`+jid，hub 侧对每次 claim/result 拒绝
+留一行（`(jid,status)` 60s 节流）。
+**被否决**：① 给 17 个 job 作用域端点加 `course` 形参的逐端点迁移（L1 后 id 已按 store 唯一、
+L1' 已堵死静默通道 ⇒ 不值得半套迁移的第二事实源风险；重开条件 = 出现新碰撞源或需同 id 跨课程共存）；
+② 守卫判据用「四分量相同且 `course_fp` 不同」（那正是本事故的配置，L1 之后**合法**，会拒掉已修好的
+场景）；③ 用 hub 课程键（目录名/stem）当键分量（要新 manifest 字段 + 第二个派生点，违反判据唯一）；
+④ `course_fp` 纳入 `data_fp`（改所有 `data_fp` ⇒ 波及 D12 验收/离线包，另起 plan）；
+⑤ `job_seed` 纳入课程（换数值，与修复分开裁）。
+**违反后果**：再出现「两门课共享一个 job 身份」⇒ 权重互串且**静默**（三重校验天然通过）；
+把归属歧义「猜一个」⇒ 直接回到本事故的通道。
+—— 全文（现场五条实测 / 三层决定 / 判据表 / E0 成本 / 迁移）→ `docs/nn/remote-transport.md §38`
 ## §2026-09-24-goalnn-opt-blob-diet（2026-09-24，plan/opt-blob-diet.plan.md）
 
 回传的 `opt` tar 从 `model.pt + opt.pt` 缩成**只 `opt.pt`**；初始权重改走内容寻址的 **`init` blob**
 （`BLOB_NAMES` 加 `init`，`sha = manifest.init_weights_fp` —— **复用既有字段，manifest 字段集不变**）。
 上行 760,658 → ~491,662 B/轮（x20 it176 口径 **−35.3%**），稳态下行零变化；同一份权重**一个方向只传一遍**。
 **可判据的不变量是差值**：去掉 tar 里 `model.pt` 成员 = 本机实测 **−262,790 B（−25.4%）**
-（绝对值随 `opt.pt` 可压缩性漂，§38 有口径警告）。
+（绝对值随 `opt.pt` 可压缩性漂，§40 有口径警告）。
 worker 侧五源：payload → `blob_cache` → preloaded → `GET ?name=init` → tar 里旧形状 `model.pt`；
 四源皆尽 ⇒ `ProtocolError`（**永不**静默 warm-start），瞬时 ⇒ `RetryableError`；哨兵
 `init_weights_fp ∈ {"", "bc"}`（BC job / 全新 run 首轮）⇒ **零 blob 请求**，节点侧索取 `init`
@@ -2299,4 +2328,4 @@ worker 侧五源：payload → `blob_cache` → preloaded → `GET ?name=init` �
 **被否决**：另写 init 下载路径 · hub 重打 tar · 「同一 worker」当命中判据 · 新增 `init_sha` 字段 ·
 保留 `model.pt` 让旧 worker 不炸 · 给 `_resolve_blob` 加 `cache` 开关。
 **升级顺序**：停 worker → 升 hub → 升 worker（禁半套回退；混跑时旧 hub + 换机必然响亮失败）。
-—— 全文（背景 / 实测量 / 五源 / 顺序 / 落地差异 / 判据 / 未决）→ `docs/nn/remote-transport.md` §38 · 锚 `## §38`
+—— 全文（背景 / 实测量 / 五源 / 顺序 / 落地差异 / 判据 / 未决）→ `docs/nn/remote-transport.md` §40 · 锚 `## §40`

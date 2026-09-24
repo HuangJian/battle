@@ -43,6 +43,7 @@ from remote.protocol import (
     JobFailedError,
     ProtocolError,
     blob_path,
+    collision_rows,
     d14_corpus_match,
     data_fp,
     decode_opt_tar,
@@ -750,7 +751,8 @@ def publish_job(
     # 4) manifest 预建（payload_sha256 占位）→ 打包（payload 内不再带占位 manifest）
     extra_files: list[Path] = []
     tmp_extra_dir = job_root_p / ".extra_tmp"
-    tmp_extra_dir.mkdir(parents=True, exist_ok=True)
+    # ⚠ 这个 mkdir 刻意**挪到守卫之后**（下方 4b）：守卫要求「拒发时不留任何痕迹」，
+    # 而 `.extra_tmp` 也算痕迹（半份 job 目录比没有 job 更危险）。
     m = {
         "proto": 1,
         "runId": run_id,
@@ -788,6 +790,29 @@ def publish_job(
         "data_fp": fp,
         "payload_sha256": "",
     }
+    # job 身份：幂等键的五个分量在上面那份字面量里就齐了（下面只补**非键**字段），
+    # 所以刻意在这里算出来——守卫要在**任何写盘之前**用它。
+    m["job_id"] = make_job_id(m)
+    # 4b) **发布端守卫**（2026-09-24 job 身份事故，plan/job-identity-collision.plan.md §3.3）：
+    #     同一条 job 身份不许被**别的课程**占用。判据的唯一实现在 `protocol.collision_rows`。
+    #     位置：job_id 算完之后、**任何写盘之前**——拒发时不留 job 目录、不留账本行、
+    #     连 `.extra_tmp` 都不建（「半份 job」会让控制台显示一条永远等不到工人的 pending）。
+    #     `course_fp` 进键之后正常发布撞不出来 ⇒ 这是哨兵：手写 manifest / 回灌历史 job /
+    #     跨 hub 搬目录等旁路一旦造出同身份，必须在发布那一刻响亮，而不是等污染被看出来。
+    _conflicts = collision_rows(job_root_p, m)
+    if _conflicts:
+        _who = "、".join(
+            f"{r['course'] or '<单课程>'}（job={r['job_id']}）" for r in _conflicts
+        )
+        raise HubClientError(
+            f"job 身份已被别的课程占用——拒发（本课 {job_root_p.parent.name or '<单课程>'} "
+            f"course_fp={str(course_fp)[:12]}… job_id={m['job_id']!s}；占用方：{_who}）。"
+            "同一个 (runId, course_fp, it, init_weights_fp, data_fp) 只能属于一门课："
+            "两门课内容完全相同（course_fp 相同）时会共享一个 job 身份，"
+            "而 hub 无法在两者间区分归属（两个训练轮会读到同一份结果）。"
+            "处置：给其中一门课不同的课程文件（改注释也算），或换 runId 重启那条腿。"
+        )
+    tmp_extra_dir.mkdir(parents=True, exist_ok=True)
     if rollout_spec is not None:
         m["ts_code_sha256"] = str(ts_code_sha256)
         m["rollout"] = rollout_spec
@@ -845,7 +870,6 @@ def publish_job(
         m["lam"] = lam
     m["kind"] = kind
     m["seed"] = job_seed(run_id, it, init_weights_fp)
-    m["job_id"] = make_job_id(m)
     if course_name:
         # P4-W2 归属（S9）：在 job_id 计算**之后**注入——幂等键不含短名，旧链字节不变；
         # normalize_manifest 允许未知/可选键，wire 兼容（D1：未知字段忽略）。

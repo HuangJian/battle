@@ -27,7 +27,7 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | 文档 | 覆盖 | 节数 |
 |---|---|---|
 | [`docs/nn/legacy.md`](nn/legacy.md) | **早期谱系归档**（2026-08-18 ~ 08-29）：v1/v2 student、P1.5 蒸馏、BC 热启动、无道具纪元、第一代 RL 流水线 —— 已被 goal-space 取代，只作史实与教训 | 22 |
-| [`docs/nn/remote-transport.md`](nn/remote-transport.md) | hub / worker / 云机 / 隧道 / 离线任务包 / 产物回传 / 优先级调度 / wire 账 | 35 |
+| [`docs/nn/remote-transport.md`](nn/remote-transport.md) | hub / worker / 云机 / 隧道 / 离线任务包 / 产物回传 / 优先级调度 / wire 账 | 40 |
 | [`docs/nn/training-stack.md`](nn/training-stack.md) | 训练循环 · 调度器 · supervisor · 课程编排 · 采样配额 · 门禁与停车 · kickstart | 24 |
 | [`docs/nn/experiments.md`](nn/experiments.md) | 课程腿判决 / 探针 / 负结果归档（含人类探针与 BC-ref 判死） | 32 |
 | [`docs/nn/engineering.md`](nn/engineering.md) | 测试纪律 · 子进程编码契约 · 门禁耗时 · 账本与 metrics schema · 语料指纹 | 19 |
@@ -77,7 +77,7 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | # | 事项 | 出处 | 关闭判据 |
 |---|---|---|---|
 | 1 | **P0.5 实机数字未取**：阶段账 `in/out/ppo/wall` 占比、`p90` 取消延迟 | `docs/nn/remote-transport.md` §28 §29 | 一次云-hub-LAN 会话跑 `nn-training/tools/wire_report.py <worker 日志>`，把阶段表贴进 plan/文档。**在此之前 P2 预取的收益结论不成立**（机制可关：`--prefetch-depth 0`） |
-| 2 | **回传腿减重（minimize-payload）**：让 `out` 那 25s 本身变小 | `docs/nn/remote-transport.md` §30 §38 | **主项已收尾**：opt blob 只装 `opt.pt` + 权重走 `init` blob ⇒ 上行 **−35.3%**（`out` 字节本身变小，与 P2.5 的「摘出关键路径」正交且叠加）。残余未决（需用户另裁）：`opt.pt` 的 Adam m/v 降精度、`blob_cache` 上限、回传降频 |
+| 2 | **回传腿减重（minimize-payload）**：让 `out` 那 25s 本身变小 | `docs/nn/remote-transport.md` §30 §40 | **主项已收尾**：opt blob 只装 `opt.pt` + 权重走 `init` blob ⇒ 上行 **−35.3%**（`out` 字节本身变小，与 P2.5 的「摘出关键路径」正交且叠加）。残余未决（需用户另裁）：`opt.pt` 的 Adam m/v 降精度、`blob_cache` 上限、回传降频 |
 | 3 | 真云机 / 真远程轮次的**绝对值**（`wire.up_sec`、每轮墙钟、TPU 腿 target ~10s 量级） | `docs/nn/remote-transport.md` §7 | 真机轮次读数归档 |
 
 ### 3.2 TPU / 性能

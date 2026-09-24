@@ -97,6 +97,10 @@ class BulkScheduler:
         self._yield_sec_total = 0.0
         self._preempted_count = 0
         self._p0_ms: list[float] = []
+        #: **当前 slot（= 一次传输）** 的让路账：`{"token", "count", "sec"}`。让路是分片间隙
+        #: 反复发生的（现场一次 payload 下载能让路 6 次），逐次打点会把日志刷爆 ⇒ 先记在这里，
+        #: 由 `slot()` 退出时**合并成一行**（见 `slot` 的 finally）。
+        self._yield_cur: dict[str, Any] | None = None
 
     # ------------------------------------------------------------------ 槽位
 
@@ -115,7 +119,11 @@ class BulkScheduler:
 
     @contextmanager
     def slot(self, prio: str, *, label: str = "") -> Iterator[int]:
-        """占住唯一的 bulk 槽位（拿不到就在此等；P1 可以把 P2 挤出去）。"""
+        """占住唯一的 bulk 槽位（拿不到就在此等；P1 可以把 P2 挤出去）。
+
+        退出时把**本次传输**的让路账合并成一行（`bulk <label>: 让路合计 …`）——
+        让路在分片间隙反复发生，逐次打点只会刷屏。
+        """
         if prio not in (BULK_P1_CRITICAL, BULK_P2_PREFETCH):
             raise ValueError(f"未知 bulk 优先级: {prio!r}")
         t0 = self._clock()
@@ -133,6 +141,8 @@ class BulkScheduler:
                     self._holding = self._seq
                     token = self._seq
                     self._released.clear()
+                    # 本次传输的让路账从零开始（退出时合并成一行）
+                    self._yield_cur = {"token": token, "count": 0, "sec": 0.0}
                     break
             waited = True
             self._released.wait(self._wait_step)
@@ -152,6 +162,19 @@ class BulkScheduler:
                 self._holder_prio = None
                 self._holding = 0
                 self._released.set()
+                cur, self._yield_cur = self._yield_cur, None
+            # 让路账**合并成一行**（一次传输一条）：现场一次 payload 下载能让路 6 次，
+            # 逐次打点只是刷屏；秒数与次数在这里一次说清。锁外打点（日志是 I/O）。
+            if (
+                self._log is not None
+                and cur is not None
+                and cur["token"] == token
+                and cur["count"]
+            ):
+                self._log(
+                    f"bulk {label or prio}: 让路合计 {cur['sec']:.1f}s / {cur['count']} 次"
+                    f"（控制面在途；单次预算 ≤ {self._yield_budget:.0f}s）"
+                )
 
     def pace(self, token: int, prio: str = BULK_P1_CRITICAL) -> None:
         """分片间隙的让路回调（worker 把 `_read_body(pace=…)` 接到这里）。
@@ -210,6 +233,9 @@ class BulkScheduler:
         返回本次实际暂停秒数（0.0 = 没有让路）。预算 = `PAUSE_BUDGET_SEC`（单次动作），
         写死且有用例钉住 —— 停久了会被 worker 自己的 `BODY_IDLE_TIMEOUT_SEC=45s` 判成
         「body 停滞」而整份重试，也会撞上 hub 的 `SEND_TIMEOUT_SEC=60s`。
+
+        本函数**只在 `slot()` 内**被调用（worker 的 `pace` 回调就是这么接的）：让路账记在
+        所属 slot 上，由 `slot()` 退出时合并成**一行**（一次传输一条 log，见 `slot`）。
         """
         if not self.control_active():
             return 0.0
@@ -222,8 +248,10 @@ class BulkScheduler:
                 self._yield_count += 1
         with self._lock:
             self._yield_sec_total += spent
-        if self._log is not None and spent > 0:
-            self._log(f"bulk 让路 {spent:.1f}s（控制面在途；单次预算 ≤ {self._yield_budget:.0f}s）")
+            cur = self._yield_cur
+            if cur is not None and cur["token"] == token:
+                cur["count"] += 1
+                cur["sec"] += spent
         # 让路之后 P2 可能已被挤走（控制面也会触发抢占）——但只对 P2 查：
         # `_preempt_at` 是所有高优请求（含控制面）都会写的，P1 查它 = 自己把自己打断。
         if self.holder_prio() == BULK_P2_PREFETCH:

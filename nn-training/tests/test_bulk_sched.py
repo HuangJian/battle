@@ -289,6 +289,42 @@ def test_no_yield_when_no_control():
     assert time.time() - t0 < 0.05
 
 
+def test_yield_log_is_one_line_per_transfer():
+    """让路账**一次传输一行**（2026-09-24 现场：一次 payload 下载让路 6 次 = 原来刷 6 行）。
+
+    判据：① 同一 slot 内多次让路 ⇒ **只出一条**「让路合计」行，秒数与次数都是合计；
+    ② 没有让路的传输 ⇒ 一行都不出；③ 下一次传输另起一行（账不跨传输累计）。
+    """
+    budget, step = 0.06, 0.01
+    lines: list[str] = []
+    s = _sched(yield_budget_sec=budget, yield_step_sec=step, log=lines.append)
+    stop = threading.Event()
+    entered = threading.Event()
+
+    def p0() -> None:
+        with s.control(label="/jobs/x/status"):
+            entered.set()
+            stop.wait(5)
+
+    t = threading.Thread(target=p0, daemon=True)
+    t.start()
+    # 事件驱动：`control()` 先计数再 yield ⇒「entered 已置位」⇔ 控制面确实在途。
+    assert entered.wait(5), "控制面没能进入在途状态"
+    with s.slot(BULK_P1_CRITICAL, label="payload") as tok:
+        for _ in range(3):
+            s.pause_if_needed(tok)
+    assert len(lines) == 1, f"一次传输只该有一行让路账，实得 {lines}"
+    assert lines[0].startswith("bulk payload: 让路合计 "), lines[0]
+    assert "3 次" in lines[0] and "单次预算" in lines[0], lines[0]
+    stop.set()
+    t.join(5)
+
+    lines.clear()
+    with s.slot(BULK_P1_CRITICAL, label="result") as tok2:
+        s.pause_if_needed(tok2)  # 控制面已走 ⇒ 没让路
+    assert lines == [], f"没让路就不该有账：{lines}"
+
+
 # --------------------------------------------------------------- 4. 路径分流
 
 

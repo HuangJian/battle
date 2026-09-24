@@ -540,7 +540,7 @@ def peek_jobs(
         headers=_sched_headers(worker_id, offline_ok=offline_ok) or None,
     )
     if status != 200:
-        _warn_non_200(base_url, status, log)
+        _warn_non_200(base_url, status, log, body=body)
         return None
     try:
         data = json.loads(body.decode("utf-8"))
@@ -601,7 +601,7 @@ def request_priority(
             log(f"priority 问询失败（{type(e).__name__}）——按无人在做处理")
         return {"epoch": None, "priorities": {}, "reasons": {}}
     if status != 200:
-        _warn_non_200(base_url, status, log)
+        _warn_non_200(base_url, status, log, body=body)
         return {"epoch": None, "priorities": {}, "reasons": {}}
     try:
         data = json.loads(body.decode("utf-8"))
@@ -647,7 +647,7 @@ def claim_job(
         headers={"Content-Type": "application/json", **_sched_headers(worker_id)},
     )
     if status != 200:
-        _warn_non_200(base_url, status, log)
+        _warn_non_200(base_url, status, log, body=body, jid=jid)
         return None
     try:
         data = json.loads(body.decode("utf-8"))
@@ -660,11 +660,40 @@ def claim_job(
 _POLL_WARN_AT: dict[str, float] = {}
 
 
-def _warn_non_200(base_url: str, status: int, log: Any) -> None:
+def _reject_reason(body: bytes) -> str:
+    """从 hub 的错误体里抠出 `error` 文案（拿不到就空串）。
+
+    2026-09-24 事故：worker 的兜底文案把 409 说成「hub 异常」，而 hub 明明回了
+    `{"error": "claim 被拒: held (…)"}` —— 响应体被丢掉了。这里把它捡回来。
+    """
+    if not body:
+        return ""
+    try:
+        got = json.loads(body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return ""
+    if not isinstance(got, dict):
+        return ""
+    return str(got.get("error") or "").strip()
+
+
+def _warn_non_200(
+    base_url: str,
+    status: int,
+    log: Any,
+    *,
+    body: bytes = b"",
+    jid: str = "",
+) -> None:
     """非 200 的节流告警（（url, status）每分钟最多一条）。
 
     为什么要区分「队列空」与「被拒」（2026-09-16 x3-step 事故）：非 200 一律静默的话，
     被 403 ip blocked 的 worker 日志与空队列完全一样（只有 "no job yet"），现场无法判断。
+
+    ★ 文案按状态分派（2026-09-24 job 身份事故）：原实现对**所有**非 200 都写
+    「hub 异常，请检查 hub 进程与隧道」，于是 409（调度面拒绝：被持有/冻结/归属歧义）
+    被读成 hub 崩了——现场因此查错了方向。**409 是调度面的确定性拒绝，不是故障**；
+    同时把 hub 给的 reason 与 jid 打进同一行（否则只有一个状态码，仍然查不动）。
     """
     if log is None:
         return
@@ -673,12 +702,22 @@ def _warn_non_200(base_url: str, status: int, log: Any) -> None:
     if now - _POLL_WARN_AT.get(key, 0.0) <= 60:
         return
     _POLL_WARN_AT[key] = now
-    hint = (
-        "鉴权失败或该 IP 已被 hub 封禁——检查 --token 与 hub 日志 AUTH FAIL/BLOCKED"
-        if status in (401, 403)
-        else "hub 异常，请检查 hub 进程与隧道"
+    if status in (401, 403):
+        hint = "鉴权失败或该 IP 已被 hub 封禁——检查 --token 与 hub 日志 AUTH FAIL/BLOCKED"
+    elif status == 409:
+        hint = "调度面拒绝（被持有/冻结/归属歧义）——**不是** hub 故障；换一份活或等租约"
+    elif status == 404:
+        hint = "job 或归属解析不到（unknown）——旧 runId/旧代码留下的同名 job 目录？"
+    elif status >= 500:
+        hint = "hub 异常，请检查 hub 进程与隧道"
+    else:
+        hint = "hub 未预期地拒了这次请求"
+    why = _reject_reason(body)
+    log(
+        f"调度请求 {base_url}: HTTP {status} — {hint}（这不是「队列空」）"
+        + (f" [job={jid}]" if jid else "")
+        + (f" hub 说：{why}" if why else "")
     )
-    log(f"调度请求 {base_url}: HTTP {status} — {hint}（这不是「队列空」）")
 
 
 def job_started(base_url: str, token: str, jid: str, *, worker_id: str = "", timeout: float = 15.0) -> None:

@@ -1494,6 +1494,38 @@ _MISSING_ROOT = Path(tempfile.gettempdir()) / "hub-queue-missing"
 #: 这里只是「没人轮询时」的兜底：后台线程按这个节拍把新课程登记进来。
 DISCOVER_SCAN_SEC = 5.0
 
+#: "kind:jid:status" -> 上次告警墙钟（hub 侧拒绝日志的节流：同一份 job 的同一状态每分钟一行）
+_REJECT_WARN_AT: dict[str, float] = {}
+
+
+def _log_reject(
+    kind: str,
+    job_id: str,
+    status: str,
+    *,
+    course: str = "",
+    worker: str = "",
+    reason: str = "",
+) -> None:
+    """hub 侧「为什么拒了这份活」的唯一打点（2026-09-24 事故）。
+
+    现场那次 409 在 worker 日志里被兜底文案写成「hub 异常，请检查 hub 进程与隧道」，
+    而真因是身份歧义导致的跨课程路由 ⇒ hub 侧必须留下**自己那一半**的证词：
+    谁、哪门课、什么状态、什么原因。按 (kind, jid, status) 60s 节流——同一个 worker
+    在租约期内会反复撞同一道闸，逐次打点会把日志刷爆。
+    """
+    now = time.time()
+    key = f"{kind}:{job_id}:{status}"
+    if now - _REJECT_WARN_AT.get(key, 0.0) <= 60:
+        return
+    _REJECT_WARN_AT[key] = now
+    print(
+        f"[{time.strftime('%H:%M:%S')}] [hub-server] {kind} 被拒: job={job_id} "
+        f"course={course or '-'} worker={worker or '?'} status={status} "
+        f"reason={reason or '-'}",
+        flush=True,
+    )
+
 
 class _HubQueue(_AuthGuard):
     """多课程单 hub 的调度面（2026-09-18 用户指令：一个进程服务所有并行课程）。
@@ -1505,9 +1537,16 @@ class _HubQueue(_AuthGuard):
 
     本类负责三件跨课程的事：
 
-      ① **路由**：任意 `/jobs/{id}/...` 先按 job_id 找归属课程。job_id 的幂等键含
-         `runId`，而 runId 是每进程随机的 8 字节 hex（`rl/queue.py::RUN_ID`）⇒ 跨课程
-         天然不撞；判据 = 「哪个课程的 job 目录里真有它」，命中即入缓存（一次 fs 探测）。
+      ① **路由**：任意 `/jobs/{id}/...` 先按 job_id 找归属课程。判据 = 「哪个课程的 job
+         目录里真有它」，**唯一命中**才认并入缓存（一次 fs 探测）；≥2 门课都认识 ⇒ 拒答
+         （`course_of` 返 None ⇒ 404）。
+         ⚠ 这里曾写着「runId 是每进程随机的 ⇒ 跨课程天然不撞」——那句只在「一课程一进程」
+         时成立。2026-09-18 单 hub 化之后一个进程托管所有课程，`runId` 变成**进程级共享**
+         （`rl/queue.py::RUN_ID`），于是「同 runId + 同 it + 同 warm-start + 同 shard 集」
+         的两门课会撞出同一个 job_id，而首匹配路由把两个训练轮指向同一份结果（2026-09-24
+         事故）。现在的防线：幂等键含 `course_fp`（`protocol.idempotency_key`）+ 发布端守卫
+         （`protocol.collision_rows`）+ 本处的归属唯一化，三层都在
+         `plan/job-identity-collision.plan.md`。
       ② **队形**：每课程一条 FIFO（`claimable_job_ids` 本来就是发布序）；派发时
          **跨课程轮转**（`protocol.rotation_order`）—— 否则一门积压 20 轮的课会把
          其它课程饿死（5 课程机群退化成单课程机群）。
@@ -1559,6 +1598,10 @@ class _HubQueue(_AuthGuard):
         self._cursor: str | None = None
         #: job_id -> course（归属解析缓存；job_id 不可复用，故不会失效）
         self._locate_cache: dict[str, str] = {}
+        #: jid -> 同时持有它的课程（≥2 = 身份歧义）。两个用途：`course_of` 的**去重打点**
+        #: （每个 job 作用域请求都会跑它，逐次打点会把日志刷爆），以及拒答时把
+        #: 「谁和谁撞了」带进 reason。观测面的**全量**清单另有 `ambiguous_jids()`（扫盘）。
+        self._ambiguous: dict[str, list[str]] = {}
         #: 单课程 = 旧形状：进程级状态一律借那一份 store（见类 docstring ③）
         self._solo: _JobStore | None = (
             next(iter(self._stores.values())) if len(self._stores) == 1 else None
@@ -1814,15 +1857,22 @@ class _HubQueue(_AuthGuard):
         return list(self._order)
 
     def course_of(self, job_id: str) -> str | None:
-        """job_id → 归属课程；**找不到返回 None**（不是空串！）。
+        """job_id → 归属课程；**找不到 / 归属有歧义都返回 None**（不是空串！）。
 
-        为什么必须用 None 区分：单课程队列（以及旧单课程 hub）的课程名**就是空串**
+        为什么必须用 None 区分「找不到」：单课程队列（以及旧单课程 hub）的课程名**就是空串**
         （`tmp/nocourse` 那套约定）。用空串兼作「找不到」会把它当成找不到 —— 直接后果
         是 `/jobs/peek` 刚列出的 job 立刻解析不到归属，handler 打到哨兵路径上 500
         （2026-09-18 白测一次的真故障）。
 
         为什么搜目录而不是搜账本：账本行里没有课程字段（磁盘契约不变），而
         `<job_root>/<job_id>/` 的存在本身就是归属证据，且是一次 fs 调用 —— 比读账本便宜。
+
+        ★ **归属唯一才认**（2026-09-24 job 身份事故，plan/job-identity-collision.plan.md §3.2）：
+        ≥2 门课都认识同一个 jid ⇒ 返回 None + 打一行「身份歧义」。原来「取第一个匹配」正是
+        事故的**静默通道**：worker 领的是 l3 的候选，hub 把它路由到 l1 的副本（租约/结果/
+        账本各写一份，而两个 trainer 的 `wait_job` 也读到同一份 result ⇒ 权重互串）。
+        歧义一律拒答的代价是「响亮失败」（job 作用域入口 404、训练轮等到超时），
+        收益是「绝不污染」—— 这个方向是刻意选的。
         """
         jid = str(job_id or "")
         if not jid:
@@ -1830,14 +1880,60 @@ class _HubQueue(_AuthGuard):
         hit = self._locate_cache.get(jid)
         if hit is not None:
             return hit
+        holders: list[str] = []
         for course in self._order:
             try:
                 if (self._stores[course].job_root / jid).exists():
-                    self._locate_cache[jid] = course
-                    return course
+                    holders.append(course)
             except OSError:
                 continue
-        return None
+        if not holders:
+            return None
+        if len(holders) > 1:
+            self._note_ambiguous(jid, holders)
+            return None  # 歧义**绝不**进缓存（一次歧义会变成永久归属）
+        self._locate_cache[jid] = holders[0]
+        return holders[0]
+
+    def _note_ambiguous(self, job_id: str, holders: list[str]) -> None:
+        """歧义只报一次（按 jid 去重）：`course_of` 在每个 job 作用域请求上都会跑，
+        逐次打点会把日志刷爆，反而埋掉真正要看的那一行。"""
+        if job_id in self._ambiguous:
+            return
+        self._ambiguous[job_id] = list(holders)
+        print(
+            f"[hub-server] ⚠ job 身份歧义：job={job_id} 同时存在于 "
+            f"{'、'.join(holders)} —— 一律拒答（不猜归属）。"
+            "多半是旧 runId/旧代码留下的同名 job 目录：清掉非当前 runId 的 "
+            "`remote-jobs/<jid>`（或换 runId 重跑）即可。",
+            flush=True,
+        )
+
+    def ambiguous_jids(self) -> dict[str, list[str]]:
+        """同一 jid 挂在 ≥2 门课上的清单（`/admin/queue` 的观测面，只读）。
+
+        与 `course_of` 同一个事实（「哪几门课持有这个 jid」）的两个方向：那边按 jid 逐课探，
+        这边按课程列目录一次扫完 —— 观测面要的是**全量**，且不在派发热路径上。
+        单课程（<2 门）恒空，零开销。
+        """
+        if len(self._order) < 2:
+            return {}
+        seen: dict[str, list[str]] = {}
+        for course in self._order:
+            try:
+                entries = list(self._stores[course].job_root.iterdir())
+            except OSError:
+                continue
+            for p in entries:
+                # 「是 job 目录」的判据与调度面同源：带 manifest.json（`.extra_tmp`、
+                # `offline/` 这些 job_root 下的旁系目录一律不算）。
+                try:
+                    if p.name.startswith(".") or not (p / "manifest.json").exists():
+                        continue
+                except OSError:
+                    continue
+                seen.setdefault(p.name, []).append(course)
+        return {jid: cs for jid, cs in sorted(seen.items()) if len(cs) > 1}
 
     def _store_of(self, job_id: str) -> _JobStore | None:
         course = self.course_of(job_id)
@@ -2139,6 +2235,9 @@ class _HubQueue(_AuthGuard):
             "active_courses": self.active_courses(),
             "active_workers": self.active_worker_count(),
             "halt": self.all_halted(),
+            # job 身份歧义面（2026-09-24 事故）：非空 = 有 jid 挂在 ≥2 门课上，而
+            # `course_of` 对它们一律拒答（那些 job 谁都跑不了）⇒ 必须让操作员一眼看见。
+            "ambiguous_jids": self.ambiguous_jids(),
         }
 
     # ---- job 作用域委派（与 `_JobStore` 同名同签名） ----
@@ -2298,9 +2397,18 @@ class _HubQueue(_AuthGuard):
         归不归你」+ 游标推进 + 熔断告警——**不再**在这里扫整张表。
         避让的「允不允许」仍在调用方算（`may_avoid_stale_holder`，R2-2 的避让链）。
         """
-        st = self._store_of(job_id)
+        st = self._store_of(job_id)  # 内部走 course_of：歧义会记进 self._ambiguous
         if st is None:
-            return ClaimOutcome(False, "", "unknown", "unknown")
+            holders = self._ambiguous.get(job_id)
+            # 「不归本 hub 管」与「归属有歧义」在**调度面**都是拒答（都不许跨课程兜底），
+            # 但对排障是两件事 ⇒ reason 要分开（2026-09-24 事故：现场只看到一句
+            # 「hub 异常」，真因是身份歧义导致的跨课程路由）。
+            return ClaimOutcome(
+                False,
+                "",
+                "unknown",
+                f"归属歧义: {'/'.join(holders)}" if holders else "unknown",
+            )
         if mode not in CLAIM_MODES:
             return ClaimOutcome(False, "", "bad_mode", f"mode 必须是 {list(CLAIM_MODES)}")
         avoid = may_avoid_stale_holder(worker_id, self.active_worker_count())
@@ -2976,6 +3084,16 @@ class HubHandler(BaseHTTPRequestHandler):
             # 「有人比我快」的正常信号：降为低档备份（§2.3 ④），**不得**报错。
             self._json({"job_id": jid, "status": "demoted", "priority": PRIORITY_LOW})
             return
+        # 拒绝留痕（2026-09-24 事故）：worker 侧只会看到「HTTP 409」，原因得 hub 自己说。
+        # demoted 不算拒绝（上面已 return），故这里只覆盖真拒：held/frozen/unknown/…
+        _log_reject(
+            "claim",
+            jid,
+            str(out.status),
+            course=course,
+            worker=worker_id,
+            reason=str(out.reason),
+        )
         self._json({"error": f"claim 被拒: {out.status} ({out.reason})"}, 409)
 
     def _read_json_body(self, cap: int) -> dict | None:
@@ -3863,6 +3981,15 @@ class HubHandler(BaseHTTPRequestHandler):
             self.hub, jid, result, lease_token, log=lambda m: self.log_message("%s", m)
         )
         if code != 200:
+            # 与 claim 侧同规：拒收必须在 hub 日志里留下「谁、哪门课、为什么」。
+            _log_reject(
+                "result",
+                jid,
+                str(code),
+                course=self.hub.course_of(jid) or "",
+                worker=self._worker_id(),
+                reason=why,
+            )
             self._json({"error": why}, code)
             return
         self._json({"job_id": jid, "status": "accepted"})

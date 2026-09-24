@@ -7,7 +7,7 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
-## §38 opt blob 只装优化器状态、权重走内容寻址：每轮上行 −35.3%（plan/opt-blob-diet.plan.md，2026-09-24）
+## §40 opt blob 只装优化器状态、权重走内容寻址：每轮上行 −35.3%（plan/opt-blob-diet.plan.md，2026-09-24）
 
 用户 2026-09-23 指令：把「同一份权重传两遍」这件事的精减写成 plan。实测（`tmp/x20-clutch`
 it174–176 真产物 + `tmp/opt_wire_probe2.py` / `tmp/opt_blob_shape.py`）：上行 result v2 =
@@ -99,6 +99,145 @@ kind=iter 发布端守卫 / opt-only tar 落位）· `remote/smoke_loopback.py`�
 与本项互斥且是新数值臂（需 DECISIONS + 60-seed `hard` 配对基线）；② `blob_cache` 上限/清理
 （全仓无 quota，本项使它每轮 +973 KB）；③ 状态回传降频（每 N 轮才落 hub，代价是换机耐久窗口变宽）；
 ④ `course_cache`（本项结论：**不需要它**——权重与 opt 的缓存命中同源同寿命，`blob_cache/<sha>` 已吃下）。
+
+---
+## §39 bulk 让路账「一次传输一行」：逐次打点 = 刷屏（2026-09-24）
+
+现场（用户贴的 worker 日志）：一次 payload 下载里
+`bulk 让路 X.Xs（控制面在途；单次预算 ≤ 5s）` 连打 **6 行**（4.0/1.5/1.0/1.5/1.0/0.5s），
+把真正要看的两行（`blob opt 下载中 …` / `准备完成 …`）埋在中间。
+
+**为什么逐次打点是纯噪声**：让路本来就是**分片间隙反复发生**的（`_read_body` 每分片调一次
+`pace`），而每 job 的 wire 行里已经有 `yield=<n>` 的合计 ⇒ 单次让路那几行零信息增量。
+
+**改法**：让路账记在**所属 slot**（= 一次传输）上（`BulkScheduler._yield_cur`），
+`pause_if_needed` 只累加、不打印；`slot()` 退出时（含异常 / P2 被抢占退出）合并成一行：
+
+```
+bulk payload: 让路合计 9.5s / 6 次（控制面在途；单次预算 ≤ 5s）
+```
+
+`stats()` 的 `yield_count` / `yield_sec`（**步数**口径，wire 行在用）**不动** —— 只动日志。
+判据：`tests/test_bulk_sched.py::test_yield_log_is_one_line_per_transfer`（同场景旧实现打 3 行 ⇒ 改前红）。
+
+---
+## §38 job 身份跨课程碰撞：幂等键纳入课程 + 归属唯一化 + 发布端守卫（2026-09-24）
+
+用户 2026-09-24 报障「双课程并行，调度请求 409」。根因**不在传输层**，而在 **job 身份**：
+`x20-dodge-l1` 与 `x20-dodge-l3` 发布出了**同一个 `job_id`**，而 hub 的 per-job 路由取
+「第一个匹配」⇒ 两个训练轮读到**同一份结果**（静默污染，且自持循环）。
+plan：`plan/job-identity-collision.plan.md`（含一次独立评审的 M1–M5 修订记录）。
+
+### 现场五条实测
+
+① **两门课发布了同一个 job_id**：`tmp/x20-dodge-{l1,l3}/remote-jobs/` 下三轮成对出现
+`2bf293c29f33c561`(it1)、`d275349b46463d3f`(it2)、`8effb3be5adc8448`(it3)。
+
+② **两份 manifest 只差课程身份**：`course_fp`/`corpus_fp`/`payload_sha256`/`course`/`reward_formula`
+全不同，而 **`runId`/`it`/`init_weights_fp`/`data_fp` 逐字相同**。四个分量为什么全同：
+
+- `runId` 是**进程级**（`rl/queue.py::RUN_ID`）——单 hub 多课程（`--serve` 共享 trainer）后两门课同源；
+- `init_weights_fp`：两门课同一份 warm-start；
+- `data_fp`：只哈希 `(shard 目录名, wver, stage, seed)`，而 per-stage seed 与课程无关；
+- `it`：同一轮。
+
+③ **结果/租约在两份副本间交替落位**（哪一门课的目录先存在，`course_of` 就先记住谁）。
+
+④ **409 = `held`**：peek 列出 l3 的那份 → claim 被首匹配路由到 **l1** 的那份 → 它此刻
+`_claimed` 尚在、租约活着、`expected_epoch` 相同 ⇒ `_claim_locked` 命中 `held`（`:655-661`）
+⇒ `_post_claim` 回 409。优先级视图不拦是因为 `_facts_locked(exclude_worker=自己)` 把**自己的**
+痕迹排除了。**不是** frozen、**不是** stale_holder/避让、**不是** hub 崩/隧道 —— worker 那句
+「hub 异常，请检查 hub 进程与隧道」只是 `_warn_non_200` 对**所有非 200** 的兜底文案。
+
+⑤ **比 409 严重**：`verify_and_land` 的三重校验比的正是幂等键的那三个分量（两边天然相等 ⇒
+静默通过），而**训练侧的读路径也走同一个首匹配**（`wait_job` → `GET /jobs/{id}/result` →
+`_job_dir` → `course_of`）⇒ **两个 trainer 拿到同一份 `result.json`**，各自落进自己的
+`args.out`（两课 `ppo_ckpt_remote.tar` / `weights.json` 逐字节相同）。
+且这是**自持循环**：污染让两课 `init_weights_fp` 持续相同 ⇒ 下一轮 key 又撞，不会自愈。
+
+### 根因（一句话）
+
+`idempotency_key = (runId, it, init_weights_fp, data_fp)` **不含课程**，而归属解析
+（`course_of`）在**读写两条路径**上都是「取第一个匹配」—— id 撞了以后，路由**没有能力**分辨，
+也不**吭声**。
+
+### 决定（三层，各自可独立回退）
+
+**L1 幂等键纳入课程身份**（`protocol.idempotency_key`）：
+
+```python
+idempotency_key = (runId, course_fp, it, init_weights_fp, data_fp)
+```
+
+用 `course_fp`（课程 jsonc 的 sha256）而不是课程名/hub 课程键：它是 manifest **必填**字段，
+且在同一进程内**恒定**（课程字节装载时冻结 —— `rl/config.py` 落 `args.course_frozen_bytes`，
+发布腿用的正是冻结字节）⇒ mid-run 热加载编辑不换 job id、不产生孤儿。
+⚠ 它是**文件血缘**哈希，不是语料身份（那是 `corpus_fp`），也不等于 hub 的课程键
+（`<discover-root>/<目录名>`，= 课程文件 stem）；**只做键分量，不做路由键**。
+
+**L1' 归属唯一化**（`hub_server.course_of`）：≥2 门课都认识同一个 jid ⇒ 返回 `None`
+（404 `unknown`）+ 打一行「身份歧义」+ 进 `/admin/queue` 的 `ambiguous_jids`；
+歧义**绝不**进 `_locate_cache`（一次歧义会变成永久归属）。
+原「取第一个匹配」正是事故的静默通道 —— 改成「唯一才认」后，代价是**响亮失败**
+（job 作用域入口 404、训练轮等到超时），收益是**绝不污染**。方向是刻意选的。
+
+**L3 发布端守卫**（`protocol.collision_rows` + `hub_client.publish_job`）：
+判据 = 「**完整幂等键**相同 且 落在**别的 store**」⇒ `HubClientError` 拒发，
+位置在 `job_id` 算完之后、**任何写盘之前**（连 `.extra_tmp` 都不建）。
+`course_fp` 进键之后正常发布撞不出来 ⇒ 这是**哨兵**：手写 manifest / 回灌历史 job /
+跨 hub 搬目录等旁路一旦造出同身份，必须在发布那一刻响亮。
+★ 判据**不是**「四分量相同且 `course_fp` 不同」——那正是本事故的配置，而它在 L1 之后是
+**合法**的（两门课各有各的 id）；拿它当判据会把已经修好的场景全部拒掉。
+
+**L4 原因可读**（`worker._warn_non_200` + hub 侧 `_log_reject`）：409 文案从「hub 异常」
+改成「调度面拒绝（被持有/冻结/归属歧义）——**不是** hub 故障」，并把 hub 响应体里的
+`error`（`claim 被拒: held (…)`）与 jid 打进同一行；hub 侧对每次 claim/result 拒绝留一行
+`job=… course=… worker=… status=… reason=…`（按 `(jid,status)` 60s 节流）。
+
+### 判据（测试）
+
+| 位置 | 用例 | 压什么 |
+|---|---|---|
+| `tests/test_job_identity_collision.py` | `test_job_id_differs_across_courses_same_key_components` | L1：异课程 ⇒ 异 id |
+| 同上 | `test_old_key_formula_still_collides`（测试内**独立重实现**旧 4 分量公式） | 把 bug 焊成回归锚 |
+| 同上 | `test_collision_rows_flags_only_other_store` | 守卫判据（异 store 命中；同 store/异键不命中） |
+| 同上 | `test_publish_refuses_cross_store_identity` | 拒发且**不落任何文件、不记账本** |
+| 同上 | `test_publish_allows_same_components_different_course_fp` | **事故配置必须放行**（守卫不误伤） |
+| 同上 | `test_publish_twice_in_same_store_is_still_idempotent` | 幂等语义不变 |
+| 同上 | `test_ambiguous_job_id_is_refused_not_guessed` / `test_queue_state_reports_ambiguous_jids` / `test_single_course_legacy_semantics_unchanged` | L1'（拒答 / 可见 / 单课程旧语义逐字不变） |
+| 同上 | `test_claim_reject_reason_is_logged` / `test_warn_non_200_still_calls_5xx_a_hub_fault` | L4（409 ≠ hub 异常；5xx 仍是） |
+| `e2e/test_multi_course_single_hub_e2e.py` | 夹具改成「两课刻意同 `runId`/`it`/`init_weights_fp`/`data_fp`，只差 `course_fp`」+ 假 PPO 把 `course_fp` 烙进权重 | 端到端：id 不同 · 目录集合不相交 · **两课权重两两不同**（串课回归） |
+
+### 成本实测（E0，真语料）
+
+真 `tmp/`：131 个目录 / 82 份 job `manifest.json`。`collision_rows` 全量 `json.loads`
+= **399ms/次**（manifest 含内联 `opt_init`/`course` 全文，很大）⇒ 加一道**快速闸**：
+「job 目录名 **就是** `job_id`」（`course_of` 的归属证据用的同一条不变量）⇒ 只有同名目录
+才可能是冲突，**不必读任何文件**。加闸后 **14ms/次**（一次 glob + 至多 1 次读取）。
+发布是每轮一次，故可接受；超阈值再谈索引。
+
+### 被否决 / 不做
+
+- **带 `course` 参数的逐端点迁移（一稿的 L2）**：要给 17 个 job 作用域端点加形参（GET
+  `payload|ts_code|code|blob|status|result|resume|bc-metrics` + POST
+  `heartbeat|claim|start|ready|abandon|release|fail|result|epoch`）外加 worker 全链路与 push 腿。
+  L1 落地后 id 已按 store 唯一、L1' 又堵死了唯一的静默通道 ⇒ 边际收益只剩「显式意图」，
+  不值得那 17 处半套迁移的第二事实源风险。重开条件：出现新的 id 碰撞源，或需要「同 id 跨课程共存」。
+- **把 `course_fp` 纳入 `data_fp`**：能堵「同局不同课程」，但会改所有 `data_fp` ⇒ 波及 D12 验收 /
+  `iter_expected_data_fp` / 离线包与锚点，需要单独 plan。
+- **用 hub 课程键（目录名/stem）当键分量**：更贴路由命名空间，但要新增 manifest 字段 +
+  第二个派生点（`Path(job_root).parent.name`），违反「判据唯一」；且 `course_fp` 已能分开本事故。
+- **`job_seed` 纳入课程**：现在两门课同 seed ⇒ 同一 minibatch 顺序（数据不同，不构成 bug）；
+  改它 = 换数值，与修复分开裁。
+- **`verify_and_land` 加比 `payload_sha256`**：三重校验是 D12 契约，动它要过 D12 评审。
+
+### 运维（迁移）
+
+现场**换 runId 重跑**（`--serve` 重启即换）即可 —— 旧 `remote-jobs/*` 由轮转/清理自然清掉，
+本次污染的 it1–it3 本来就不可用。顺手清 `tmp/<课>/{it*,remote-jobs,training_log.jsonl}`
+可让 `ambiguous_jids` 立刻归零（不清也能跑，只是观测面会亮着旧残影）。
+**注意**：旧代码的 trainer + 新 hub 这个窗口里，旧的碰撞 job 会因归属歧义一律 404
+（`wait_job` 把它当 pending 等到超时才响亮报错，25min）——不污染，但别把它当新故障。
 
 ---
 ## §37 缺 bun 在**零下载**时就拒单：能力自检前移到 payload/code/ts_code 之前（2026-09-24）
