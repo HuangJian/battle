@@ -2633,3 +2633,36 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
   它们「找不到就红」的性质正是本刀需要的那种响亮。
 - **门禁**：**2359 → 2374 passed / 3 skipped**；mypy **387** 源文件绿；根 `bun run check` 2120 pass / 0 fail。
 —— 全文（接口清点表 / 分层级联 / 源文本守卫迁移表）→ `docs/nn/engineering.md` §23「第九刀：拆宿主」
+
+## §2026-09-24-goalnn-godmodule-jobround（2026-09-24，用户指令「拆 worker_loop 的『每 job 一轮』成 remote/job_round.py（先定档 seam）」）
+
+- **背景**：第九刀后 `worker.py` 余 1281 行，`worker_loop`（364 行）把轮询壳与「一轮」（177 行：
+  旁路线程组 + `run_job` + 回传落定 + finally 全收）织在一起——第九刀的**明确遗留项**。
+- **备选与否决**：
+  1. **只搬块、把 `_prefetch_fill` 留宿主 + 参数注入**（churn 最小：0 处测试改动）——否：它依赖最深到
+     L3（`job_lifecycle`/`download`），本来就该在 L4；留在宿主只为「少改测试」= 拿架构换便利。
+  2. **把 6 个宿主侧函数全做成注入参数**（seam object）——否：它们是本模块的**向下依赖**，注入后
+     本模块离了宿主就无法单独测；只有 `run_job` 因**住 L5**（不能反向 import）才必须注入。
+  3. **20 个入参收成一个 `RoundContext` dataclass**——否（本轮）：它们全是「宿主已经定好的事实与
+     旋钮」，分组只改调用观感、不改依赖；而分组会把「接口双向一致」的可对账性变成「哪个字段属于
+     哪组」的争议。先显式 20 参 + 守卫钉住，若真需要再单开一条决策（本仓 `run_job` 早有 15 参先例）。
+  4. **顺手拆 `_JobStore` / `_HubQueue`**——否：拆状态与拆执行是两类工作，混做会让 seam 对账失焦。
+- **决定**：`worker_loop` 的「每 job 一轮」（L943-1119）下沉 `remote/job_round.py::run_one_round`；
+  配套下沉 `_prefetch_fill`（69 行）· `settle_result`（原 `_result_settled` 闭包）·
+  `PREFETCH_WIRE_ID` / `PREFETCH_ROUND_SEC`。`worker.py` **1281 → 1042**；新模块 **418** 行。
+- **seam 分档（唯一判据：调用点解析在哪个命名空间）**：`run_job` ⇒ 注入（`run_job_fn=run_job`，
+  宿主按**裸名字**读值 ⇒ 那 10 处 `W.run_job` patch 一行不改）；`job_ready` / `abandon_job` /
+  `release_job` / `report_job_failure` / `start_cancel_watcher` / `peek_jobs` / `download_payload` /
+  `PREFETCH_ROUND_SEC` ⇒ **迁移**（12 + 8 处 setattr、4 个文件 + 2 处 `W._prefetch_fill` 调用）；
+  `uploader` 跨 job 存活 ⇒ 宿主建制并传入。`multi`（「有几个 hub」）由宿主算好 `code_cache_dir` 再传。
+- **★ 「不留假门面」成为断言**：`_prefetch_fill` / `PREFETCH_*` / `settle_result` 是内部结构而非 e2e
+  门面；照惯例留 `X as X` 转发会让 `setattr(W, "PREFETCH_ROUND_SEC", …)` 变成**没人读的变量**
+  （测试全绿、注入为零）。故钉成 `not hasattr(worker, …)`，并在宿主与模块文档写明「要拦请 patch
+  `remote.job_round.*`」。
+- **宿主账目**：搬前块内直接改宿主局部（`done += 1` / `_polls_since_accept = 0` / CodeChangedError
+  分支的 `return done`），搬后只能回读 `RoundOutcome{jid, ok, uploaded, stop}`。
+- **违反后果**：宿主留下搬走名字的转发名 / 调用点漏传一个关键字 / `run_job_fn` 写成属性式或 lambda /
+  反向 import 同层上层（含延迟）/ 顶层冒出可变容器 / 账本层号标错——六类都在**提交时**红
+  （新守卫 13 例 + 反探针七处全命中）。
+- **门禁**：**2374 → 2387 passed / 3 skipped**；mypy **389** 源文件绿；根 `bun run check` 2120 pass / 0 fail。
+—— 全文（分档表 / 注入 vs 迁移判据 / 两个守卫自身的坑）→ `docs/nn/engineering.md` §23「第十刀」

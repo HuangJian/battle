@@ -59,7 +59,8 @@ REMOTE_DIR = ROOT / "remote"
 #:   `worker` 与 `run_loop` 都站在它上面，它自己谁都不靠上层靠）；
 #: * **L3 业务簇**：`bc_job` · `download` · `job_lifecycle` · `push_dispatch`；
 #: * **L4 组装**：`hub_server`（hub 侧组装）· `train_core`（训练核：模型/opt/kickstart/demo/PPO/产物
-#:   —— 它靠 L3 的业务簇组装出一个轮次，因此**必须在宿主下面**）；
+#:   —— 它靠 L3 的业务簇组装出一个轮次，因此**必须在宿主下面**）· `job_round`（每 job 一轮：
+#:   旁路线程组 + 注入的 `run_job_fn` + 交回传 —— 与 `train_core` 同层同理由）；
 #: * **L5 宿主/入口编排**：`worker`（作业壳：网络/校验/上报）· `run_loop` · `notebook_runtime` ·
 #:   `worker_server` · `smoke_loopback` · `tunnel_ab_probe`；
 #: * **L6 引导**：`offline_boot` · `push_bootstrap`；
@@ -93,6 +94,7 @@ LAYERS: dict[str, int] = {
     "remote.job_lifecycle": 3,
     "remote.push_dispatch": 3,
     "remote.hub_server": 4,
+    "remote.job_round": 4,
     "remote.train_core": 4,
     "remote.worker": 5,
     "remote.notebook_runtime": 6,

@@ -14,7 +14,8 @@
 3. **转发同一对象** —— 宿主与测试都从 `remote.worker` 取这些名字；
 4. **顶层零可变状态** —— 这簇是纯函数面，搬它不搬状态：顶层不许出现可变容器或 `global`；
 5. ✭ **注入点分档（本刀的主坑）**，两个方向各一条**功能性**断言：
-   档位一（宿主调用点，仍在 `worker.py`）：`_prefetch_fill` 里的 `peek_jobs` ⇒ patch `remote.worker`；
+   档位一（宿主调用点，**第十刀后已搬到 `remote/job_round.py`**）：`_prefetch_fill` 里的 `peek_jobs`
+   ⇒ patch `remote.job_round`（该功能性断言随函数一起搬进 `tests/test_job_round_split.py`）；
    档位二（簇内互调，已随簇搬走）：`acquire_job` → `peek_jobs`/`request_priority`/`claim_job`
    ⇒ patch `remote.job_lifecycle`。**两个方向都要有断言**，否则「patch 打偏而测试全绿」查不出来。
 6. ✭ **`_request` 一族在 `worker.py` 已无调用点** —— `patch remote.worker._request` 从本刀起是
@@ -30,8 +31,6 @@ from __future__ import annotations
 
 import ast
 import sys
-import threading
-import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -40,7 +39,6 @@ if str(ROOT) not in sys.path:
 
 import remote.job_lifecycle as jl_mod
 import remote.worker as worker_mod
-from remote.prefetch import PrefetchStore
 from tests.helpers import remote_dag as dag
 
 JL_FILE = ROOT / "remote" / "job_lifecycle.py"
@@ -199,44 +197,11 @@ def test_cluster_internal_seam_is_the_job_lifecycle_module(monkeypatch) -> None:
     assert got["course"] == "c1", "claim 响应里缺的 course 由候选补上（该字段来自簇内互调）"
 
 
-def test_host_call_site_still_resolves_the_worker_namespace(monkeypatch, tmp_path: Path) -> None:
-    """✭ 档位一：宿主 `_prefetch_fill` 把它当**裸名字**用 ⇒ 解析在 `worker` 命名空间 ⇒
-    `monkeypatch.setattr(worker_mod, "peek_jobs", …)` 仍有效
-    （`tests/test_soft_hold_prefetch.py` 那三处就靠这个）。
-
-    功能性验证：把 `remote.job_lifecycle.peek_jobs` 换成炸弹、`remote.worker.peek_jobs` 记数，
-    填充器必须走 worker 那份（炸弹没炸、记数非零）。
-    """
-    hit: list[int] = []
-
-    def _fake_peek(*a, **k):
-        hit.append(1)
-        return ([], False)
-
-    monkeypatch.setattr(worker_mod, "peek_jobs", _fake_peek)
-    monkeypatch.setattr(
-        jl_mod,
-        "peek_jobs",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("打偏：宿主没走 worker 那份")),
-    )
-    monkeypatch.setattr(worker_mod, "PREFETCH_ROUND_SEC", 0.02)
-
-    stop = threading.Event()
-    store = PrefetchStore(tmp_path / "work", budget_bytes=1 << 20)
-    t = threading.Thread(
-        target=worker_mod._prefetch_fill,
-        args=("http://hub", "tok", store, stop),
-        kwargs={"depth": 1, "log": lambda _m: None},
-        daemon=True,
-    )
-    t.start()
-    deadline = time.time() + 5
-    while not hit and time.time() < deadline:
-        time.sleep(0.01)
-    stop.set()
-    t.join(5)
-    assert hit, "宿主 `_prefetch_fill` 没调用 `remote.worker.peek_jobs`——seam 分档变了"
-    assert not t.is_alive(), "填充器线程没退出"
+# ✭ 原「档位一：`_prefetch_fill` 走 `remote.worker.peek_jobs`」的功能性断言已随 S4 第十刀
+# （`_prefetch_fill` 搬到 `remote/job_round.py`）**搬进 `tests/test_job_round_split.py`**——
+# 那里它有同样的形状（把 `remote.job_lifecycle.peek_jobs` 换成炸弹、`remote.job_round.peek_jobs`
+# 记数），只是 patch 目标从 `remote.worker` 变成 `remote.job_round`。留这条注释是为了让
+# 「档位一去哪了」可追（删掉断言而不留指路 = 下一个读的人会以为它从没存在过）。
 
 
 def test_request_family_has_no_call_site_in_worker_any_more() -> None:

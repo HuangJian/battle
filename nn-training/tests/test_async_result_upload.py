@@ -31,6 +31,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import remote.job_round as JR
 import remote.worker as W
 from common.protocol import RetryableError
 from remote.result_upload import ResultUploader, UploadTask
@@ -208,8 +209,8 @@ def _patch_hub(monkeypatch, jobs: list[dict]) -> None:
     """把 worker_loop 的 hub 面全换成假的（只剩我们要测的那条路径是真的）。"""
     seq = list(jobs)
     monkeypatch.setattr(W, "acquire_job", lambda *a, **k: seq.pop(0) if seq else None, raising=True)
-    monkeypatch.setattr(W, "job_ready", lambda *a, **k: None, raising=True)
-    monkeypatch.setattr(W, "start_cancel_watcher", lambda *a, **k: None, raising=True)
+    monkeypatch.setattr(JR, "job_ready", lambda *a, **k: None, raising=True)
+    monkeypatch.setattr(JR, "start_cancel_watcher", lambda *a, **k: None, raising=True)
     monkeypatch.setattr(W, "_release_cloud_machine", lambda *a, **k: None, raising=True)
 
 
@@ -396,7 +397,7 @@ def test_cancelled_job_never_uploads_and_still_gets_its_wire_line(
         raise JobCancelledError("landed")
 
     monkeypatch.setattr(W, "run_job", _cancel, raising=True)
-    monkeypatch.setattr(W, "abandon_job", lambda *a, **k: None, raising=True)
+    monkeypatch.setattr(JR, "abandon_job", lambda *a, **k: None, raising=True)
     posted: list[str] = []
 
     def _post(b, t, jid, r, **k):

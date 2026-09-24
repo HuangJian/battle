@@ -36,6 +36,7 @@ if str(ROOT) not in sys.path:
 # 第八刀起，本簇住在 `remote/job_lifecycle.py`：**簇内互调**与直调 `_request` / `_wire_add`
 # 的调用点解析在该模块 ⇒ 那类 patch 目标必须是 `JL`（宿主调用的仍 patch `W`）。
 import remote.job_lifecycle as JL
+import remote.job_round as JR
 import remote.worker as W
 from common.protocol import (
     CLAIM_MODE_BACKUP,
@@ -593,16 +594,16 @@ def test_worker_loop_cancel_abandons_and_never_reports_failure(
         raise JobCancelledError("landed")
 
     monkeypatch.setattr(W, "run_job", _cancel, raising=True)
-    monkeypatch.setattr(W, "start_cancel_watcher", lambda *a, **k: None, raising=True)
+    monkeypatch.setattr(JR, "start_cancel_watcher", lambda *a, **k: None, raising=True)
     abandoned: list[str] = []
     monkeypatch.setattr(
-        W, "abandon_job", lambda *a, **k: abandoned.append(str(a[2])), raising=True
+        JR, "abandon_job", lambda *a, **k: abandoned.append(str(a[2])), raising=True
     )
     posted: list[str] = []
     monkeypatch.setattr(W, "post_result", lambda *a, **k: posted.append(str(a[2])), raising=True)
     reported: list[str] = []
     monkeypatch.setattr(
-        W, "report_job_failure", lambda *a, **k: reported.append(str(a[2])), raising=True
+        JR, "report_job_failure", lambda *a, **k: reported.append(str(a[2])), raising=True
     )
     logs: list[str] = []
     W.worker_loop(

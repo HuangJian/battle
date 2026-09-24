@@ -13,7 +13,9 @@
 4. **顶层无新增可变容器**；
 5. ✭ **注入点分档（本刀的主坑）**：`_resolve_blob` 调 `download_blob` 是**组内互调**，
    在本模块命名空间解析 ⇒ 必须 patch `remote.download`；而**宿主**（`run_job` /
-   `_prefetch_fill`）调的 `download_*` 仍解析在 `worker` ⇒ patch `remote.worker` 照旧。
+   `_prefetch_fill`）调的 `download_*` 仍按**裸名字**解析在**各自所在的宿主模块** ⇒
+   `run_job` ⇒ patch `remote.worker`；`_prefetch_fill` ⇒ patch `remote.job_round`
+   （S4 第十刀把它搬走了，本文件的宿主断言随之分成两档）。
    两个方向各一条断言，防「patch 打偏而测试全绿」。
 6. **`_progress_logger` 仍恰好两份**（本模块 + `remote/tailscale_boot.py`）——它是**有意的孪生**
    （tailscale_boot 要独立拉取），谁再抄第三份就红。
@@ -37,6 +39,8 @@ from tests.helpers import remote_dag as dag
 
 DL_FILE = ROOT / "remote" / "download.py"
 WORKER_FILE = ROOT / "remote" / "worker.py"
+#: S4 第十刀后 `_prefetch_fill` 住这里（它也是 `download_*` 的一个宿主调用点）。
+ROUND_FILE = ROOT / "remote" / "job_round.py"
 
 MOVED_NAMES = {
     "_cache_blob",
@@ -139,30 +143,42 @@ def test_intra_module_seam_is_the_download_module(monkeypatch, tmp_path: Path) -
     assert got == raw and hit is False and src == "download"
 
 
-def test_host_callers_still_resolve_the_worker_namespace() -> None:
-    """宿主侧相反档位：`run_job` / `_prefetch_fill` 把 `download_*` 当**裸名字**用 ⇒
-    解析在 `worker` 命名空间 ⇒ `monkeypatch.setattr(worker_mod, "download_payload", …)` 仍有效
-    （`tests/test_soft_hold_prefetch.py` 与 `test_remote_ppo.py` 就靠这个）。
-
-    若哪天宿主改成 `download.download_payload(...)`（属性访问），这些 patch 会静默失效——
-    本断言就是那个警报。
-    """
-    host_names = {"run_job", "_prefetch_fill"}
+def _bare_loads(path: Path, names: set[str]) -> dict[str, set[str]]:
+    """这些宿主函数各自把模块全局当**裸名字**读的全部名字（AST `Load` = 引用即接缝）。"""
     loads: dict[str, set[str]] = {}
-    for node in _tree(WORKER_FILE).body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in host_names:
+    for node in _tree(path).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names:
             loads[node.name] = {
                 n.id
                 for n in ast.walk(node)
                 if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
             }
-    assert set(loads) == host_names
-    for name in host_names:
-        assert "download_payload" in loads[name], name
-    assert "download_code" in loads["run_job"]
-    # 且**没有**属性式访问（否则就是换了命名空间）
-    src = WORKER_FILE.read_text(encoding="utf-8")
-    assert "download.download_" not in src and "download_mod.download_" not in src
+    return loads
+
+
+def test_host_callers_still_resolve_their_own_host_namespace() -> None:
+    """宿主侧相反档位：`download_*` 按**裸名字**解析在**调用点所在的模块**。
+
+    * `run_job` 仍在 `worker.py`（第十刀后它是这里唯一的 `download_*` 宿主）⇒
+      `patch remote.worker.download_payload` 仍有效（`tests/test_remote_ppo.py` 就靠这个）；
+    * `_prefetch_fill` 已随第十刀搬到 `remote/job_round.py` ⇒ 那两处
+      （`tests/test_soft_hold_prefetch.py`）要 patch `remote.job_round`。
+
+    若哪天某一处改成 `download.download_payload(...)`（属性访问），对应的 patch 会静默失效——
+    本断言就是那个警报。
+    """
+    host = _bare_loads(WORKER_FILE, {"run_job"})
+    assert set(host) == {"run_job"}, f"worker.py 的 `download_*` 宿主变了：{set(host)}"
+    assert "download_payload" in host["run_job"] and "download_code" in host["run_job"]
+
+    fill = _bare_loads(ROUND_FILE, {"_prefetch_fill"})
+    assert set(fill) == {"_prefetch_fill"}, f"job_round.py 里没有 `_prefetch_fill`：{set(fill)}"
+    assert "download_payload" in fill["_prefetch_fill"]
+
+    # 且两处都**没有**属性式访问（否则就是换了命名空间）
+    for path in (WORKER_FILE, ROUND_FILE):
+        src = path.read_text(encoding="utf-8")
+        assert "download.download_" not in src and "download_mod.download_" not in src, path.name
 
 
 def test_progress_logger_still_has_exactly_two_production_copies() -> None:

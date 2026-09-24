@@ -220,10 +220,11 @@ def test_no_keyword_is_swallowed_by_kwargs() -> None:
 
 def test_the_core_never_imports_worker_or_entry_modules() -> None:
     """★ 训练核不许 import `remote.worker` / `remote.run_loop`（含**延迟** import）。"""
+    # ★ 前缀匹配会误伤 `remote.worker_proc`（L0，合法）⇒ 按**模块名**精确比（同 test_job_round_split）
     bad = sorted(
         m
         for m in _all_imports(_tree(CORE_FILE))
-        if m.startswith(("remote.worker", "remote.run_loop"))
+        if any(m == u or m.startswith(u + ".") for u in ("remote.worker", "remote.run_loop"))
     )
     assert bad == [], (
         f"remote/train_core.py 反向 import 了 {bad} —— 训练核必须在宿主**下面**（L4 < L5）；"

@@ -31,6 +31,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import remote.job_round as JR
 import remote.worker as W
 from remote.bulk_sched import BULK_P1_CRITICAL, BULK_P2_PREFETCH, BulkPreemptError
 from remote.prefetch import (
@@ -189,19 +190,19 @@ def test_filler_uses_p2_and_only_download_payload(tmp_path: Path, monkeypatch) -
         seen.append("peek")
         return _peek_of("a" * 16, "b" * 16)
 
-    monkeypatch.setattr(W, "peek_jobs", _peek)
-    monkeypatch.setattr(W, "PREFETCH_ROUND_SEC", 0.05)
+    monkeypatch.setattr(JR, "peek_jobs", _peek)
+    monkeypatch.setattr(JR, "PREFETCH_ROUND_SEC", 0.05)
 
     def _dl(base_url, token, jid, *, bulk_prio=BULK_P1_CRITICAL, wire_jid="", log=None, **kw):
         calls.append((jid, bulk_prio, wire_jid))
         p = _payload(64)
         return p
 
-    monkeypatch.setattr(W, "download_payload", _dl)
+    monkeypatch.setattr(JR, "download_payload", _dl)
     stop = threading.Event()
 
     def _run() -> None:
-        W._prefetch_fill("http://hub", "tok", store, stop, depth=2, log=lambda _m: None)
+        JR._prefetch_fill("http://hub", "tok", store, stop, depth=2, log=lambda _m: None)
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
@@ -222,7 +223,7 @@ def test_filler_swallows_preemption_and_errors(tmp_path: Path, monkeypatch) -> N
     store = _FakeStore(tmp_path)
     boom = {"n": 0}
 
-    monkeypatch.setattr(W, "peek_jobs", lambda *a, **k: _peek_of("a" * 16))
+    monkeypatch.setattr(JR, "peek_jobs", lambda *a, **k: _peek_of("a" * 16))
 
     def _dl(*a, **k):
         boom["n"] += 1
@@ -234,13 +235,13 @@ def test_filler_swallows_preemption_and_errors(tmp_path: Path, monkeypatch) -> N
             raise W.ProtocolError("404 之类的确定性拒绝")
         return _payload(64)
 
-    monkeypatch.setattr(W, "download_payload", _dl)
-    monkeypatch.setattr(W, "PREFETCH_ROUND_SEC", 0.05)  # 别真等 5s 一轮
+    monkeypatch.setattr(JR, "download_payload", _dl)
+    monkeypatch.setattr(JR, "PREFETCH_ROUND_SEC", 0.05)  # 别真等 5s 一轮
     logs: list[str] = []
     stop = threading.Event()
 
     def _run() -> None:
-        W._prefetch_fill("http://hub", "tok", store, stop, depth=1, log=logs.append)
+        JR._prefetch_fill("http://hub", "tok", store, stop, depth=1, log=logs.append)
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
@@ -300,8 +301,8 @@ def test_worker_loop_uses_prefetched_payload_without_downloading(tmp_path: Path,
     monkeypatch.setattr(W, "acquire_job", _acquire)
     monkeypatch.setattr(W, "run_job", _run_job)
     monkeypatch.setattr(W, "post_result", lambda *a, **k: 200)
-    monkeypatch.setattr(W, "peek_jobs", lambda *a, **k: ([], False))
-    monkeypatch.setattr(W, "start_cancel_watcher", lambda *a, **k: None)
+    monkeypatch.setattr(JR, "peek_jobs", lambda *a, **k: ([], False))
+    monkeypatch.setattr(JR, "start_cancel_watcher", lambda *a, **k: None)
     monkeypatch.setattr(W, "_release_cloud_machine", lambda *a, **k: None)
 
     store = PrefetchStore(tmp_path)

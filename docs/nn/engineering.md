@@ -602,18 +602,86 @@ _wire_block（两个调用方） ─► wire.py（L1）          M0 wire 子字�
 
 > 决策 → `DECISIONS.md` §2026-09-24-goalnn-godmodule-traincore；全文 → 本节。
 
+### 第十刀（2026-09-24）：拆宿主之二 —— `worker_loop` 的「每 job 一轮」下沉 `job_round`（**seam 最密的一刀**）
+
+第九刀留下的宿主里，`worker_loop`（364 行）是一个把**两种东西**织在一起的 while：轮询壳
+（多 hub round-robin / 停机感知 / 空闲退出）与**一轮**（177 行：取活已定 → 起三个旁路线程 →
+`run_job` → 交回传 → finally 全收）。本刀拿走后者：
+
+```
+worker_loop（留 worker.py）  轮询 / claim / halt / idle / --once / 回传收尾（uploader.close）
+    └─ run_one_round() ──► job_round.py（L4）  旁路线程组 + run_job_fn + 交回传 + RoundOutcome
+配套下沉（原本都只服务这一轮，且依赖最深到 L3）：
+    _prefetch_fill（69 行）· settle_result（原 `_result_settled` 闭包）· PREFETCH_WIRE_ID/ROUND_SEC
+```
+
+`worker.py` **1281 → 1042**；新 `remote/job_round.py` **418 行**（块 177 + 填充器 69 + 落定 21 +
+数据/文档）。**这一刀第一次出现「20 个入参」，也第一次把「注入 vs 迁移」按同一个判据一次分完。**
+
+#### ★ seam 分档：只按「调用点解析在哪个命名空间」定，不按「谁定义的」
+
+先量（AST + 全仓扫 patch），再决定往哪搬：
+
+| 名字 | 宿主里的调用点 | 解析在 | 处置 |
+|---|---|---|---|
+| `run_job` | 1（`run_job_fn=run_job`） | **`remote.worker`**（读**值**） | **注入**：`run_job` 住 L5，本模块不能 import 它；宿主在调用点读裸名字 ⇒ 那 **10 处** `W.run_job` patch **一行不改** |
+| `job_ready` · `abandon_job` · `release_job` · `report_job_failure` · `start_cancel_watcher` | 各 1–2，**100% 在块内** | `remote.job_round` | **迁移**：12 处 `setattr`（4 个文件） |
+| `peek_jobs` · `download_payload` · `PREFETCH_ROUND_SEC` | 各 1–3（全在 `_prefetch_fill`） | `remote.job_round` | **迁移**：8 处 `setattr` + 2 处 `W._prefetch_fill` 直接调用 |
+| `uploader` · `post_result` | — | `remote.worker` | `uploader` 跨 job 存活（`if once:` 的 drain、最外层 `finally` 的 close/stats）⇒ **宿主建制并传入** |
+
+#### ★ 「不留假门面」第一次成为**断言**
+
+`_prefetch_fill` / `PREFETCH_ROUND_SEC` / `PREFETCH_WIRE_ID` / `settle_result` 是这一轮的**内部结构**，
+不是 e2e 直接 import 的门面（`job_ready` 那种才是）。若照惯例在 `worker.py` 留一份 `X as X` 转发，
+`setattr(W, "PREFETCH_ROUND_SEC", …)` 就变成**没人读的变量**——测试全绿、注入为零。前几刀把这
+类比作「patch 打偏而测试全绿」，本刀把它钉成 **`not hasattr(worker, …)`**（不许留），并在宿主
+文档里写明「要拦请 patch `remote.job_round.*`」。
+
+#### 宿主收回的账：`RoundOutcome`
+
+搬前块内直接改宿主局部（`done += 1` / `_polls_since_accept = 0` / CodeChangedError 分支的
+`return done`）。搬后这些**只能回读**：`RoundOutcome{jid, ok, uploaded, stop}`——
+`uploaded ⇒ done += 1`（原 `_polls_since_accept = 0` 同一条口径），`stop ⇒ 整条退出`。
+`multi` 是宿主概念（「有几个 hub」），它唯一的用处是 `code_cache_dir=shared_code_cache if multi else None`
+⇒ 由宿主算好传 `code_cache_dir`，本模块**不知道**有几个 hub。
+
+#### 新守卫（`tests/test_job_round_split.py`，13 例）+ 反探针七处
+
+定义唯一 **且宿主不留假门面** · 轮询壳里不许再有「一轮」的调用点（AST 判 `Call`）·
+**★ 接口双向一致**（调用点位置实参 + 关键字集合 == 形参集合；20 个入参**漏传一个就红**）·
+不得有 `**kwargs` 吞接口 · 不得 import 同层/上层（**含延迟**，且上游集合**从账本推**而非写死）·
+顶层零可变状态与零 `global` · **★ 档位一**（`run_job_fn` 必须是裸名字 `ast.Name`）·
+**★ 档位二功能性**（炸弹放 `worker.peek_jobs`、记数放 `job_round.peek_jobs`，填充器必须走后者）·
+宿主不得属性式访问 `job_round.`/`JR.` · **★ 宿主回读两分支功能性**（假 round：`uploaded ⇒ done==1`、
+`stop ⇒ 整条退出`）· 层号关系。
+
+**反探针七处全命中**：留假门面 · `run_job_fn` 改成 lambda · 调用点漏传 `log=log` · 改成属性式访问 ·
+延迟 import `worker` · 顶层可变容器 · 账本标成 L3。
+
+#### 顺手修掉的两个**守卫自身的**坑（都是本刀踩出来的）
+
+1. **读源码文本的守卫会与「字面量」互相打架**：`tests/test_subproc_util.py` 的「起真服务进程
+   必须借端口」按带引号的字面量扫（`"remote.worker_server"` 是它的 marker 之一）。本守卫原先把
+   上层模块列成字面量元组 ⇒ 被误判成「起了 worker_server 真进程」。改成**从账本推**
+   （`lv >= mine`）既解了假阳性，又比写死名单更强（新模块自动入列）。
+2. **既有守卫里的前缀匹配误伤**：`m.startswith("remote.worker")` 会把合法的 `remote.worker_proc`(L0)
+   判成反向依赖 ⇒ 两处改成「按模块名精确比」（`m == u or m.startswith(u + ".")`）。
+
+门禁 **2374 → 2387 passed / 3 skipped**；mypy **389** 源文件绿；根 `bun run check` 2120 pass / 0 fail。
+
+> 决策 → `DECISIONS.md` §2026-09-24-goalnn-godmodule-jobround；全文 → 本节。
+> ⚠ 踩坑（记进 memory）：反探针**回滚同长度的编辑**时，pyc 的失效判据是 (mtime, size)——
+> 秒级 mtime 相同 + size 相同 ⇒ Python 继续用**旧** pyc，于是「已复原」的源码仍报旧结论。
+> 探针脚本回滚后必须 `touch`（本刀就因此误判了一下）。
+
 ### 未做完（S4 余下）
 
 `remote/` 内部**已零环**（见「拆环」节），S4 余下是纯结构工作：
-`remote/worker.py`（**1281 行**：`worker_loop` 364 / `main` 127 / `_prefetch_fill` 69 / `run_job` 325）
-——下一刀是 **`worker_loop` 的「每 job 一轮」**（取活后的旁路线程组 + `run_job` + 回传落定，约 160 行）：
-它需要 `job_lifecycle`(L3) 与 `_prefetch_fill`，所以同样是**下沉到 L4**（新模块 `job_round`），
-但 **seam 很密**（`setattr(W, "job_ready"/"abandon_job"/"release_job"/"_release_cloud_machine"/
-"start_cancel_watcher"/"peek_jobs"/"download_payload"…)` 会被搬进新命名空间 ⇒ 全部要迁移或
-改成注入）。之后 → `hub_server` 其余路由组
-（`_get_*` 12 / `_post_*` 11 → 通用助手）→ 最后两个千行状态类（`_JobStore` / `_HubQueue`：
-拆 = 拆状态）。设计见 `plan/nn-training-refactor.md` §5.3。`TrainingSteps` 本体还剩 952 行 /
-20 方法（切法是「按一条真实调用链切」，不是按行数等分）。
+`remote/worker.py` 余 **1042 行**，其中 `worker_loop` 已缩到「轮询壳 + 回传收尾」，`run_job` 325 /
+`main` 127 是宿主本体。
+下一刀 → `hub_server` 其余路由组（`_get_*` 12 / `_post_*` 11 → 通用助手）→ 最后两个千行状态类
+（`_JobStore` / `_HubQueue`：拆 = 拆状态）。设计见 `plan/nn-training-refactor.md` §5.3。
+`TrainingSteps` 本体还剩 952 行 / 20 方法（切法是「按一条真实调用链切」，不是按行数等分）。
 
 **还挂着一项清理**：`remote/job_fs._ensure_commit` 是既存死代码（全仓零调用，只搬未删）。
 

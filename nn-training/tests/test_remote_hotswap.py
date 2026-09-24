@@ -35,6 +35,7 @@ from pathlib import Path
 import pytest
 
 import platform_utils
+import remote.job_round as JR
 from common.protocol import CodeChangedError, ProtocolError
 from platform_utils import sandbox_delete_blocked
 from remote import worker as W
@@ -78,7 +79,7 @@ def test_worker_loop_hotswap_exits_for_supervisor_respawn(monkeypatch: pytest.Mo
     monkeypatch.setattr(W, "run_job", _raise_hotswap, raising=True)
 
     released: list[str] = []
-    monkeypatch.setattr(W, "release_job", lambda *a, **k: released.append(str(a[2])), raising=True)
+    monkeypatch.setattr(JR, "release_job", lambda *a, **k: released.append(str(a[2])), raising=True)
 
     logs: list[str] = []
     with pytest.raises(SystemExit) as ei:
@@ -109,7 +110,7 @@ def test_worker_loop_hotswap_no_supervisor_returns(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(W, "run_job", _raise_hotswap, raising=True)
 
     released: list[str] = []
-    monkeypatch.setattr(W, "release_job", lambda *a, **k: released.append(str(a[2])), raising=True)
+    monkeypatch.setattr(JR, "release_job", lambda *a, **k: released.append(str(a[2])), raising=True)
 
     logs: list[str] = []
     n = W.worker_loop(

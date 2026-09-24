@@ -680,12 +680,33 @@ CLI 侧传 `_real_run_job`）。引擎里那个 `_real_run_job` **兜底删掉**
 
 > 决策 → `DECISIONS.md` §2026-09-24-goalnn-godmodule-traincore；全文 → `engineering.md` §23「第九刀」。
 
-**下一刀（侦察已做）**：`worker_loop` 的「每 job 一轮」（取活后的**旁路线程组**（预取填充 / 心跳续租 /
-取消环）+ `run_job` + 回传落定，约 160 行）→ 新 `remote/job_round.py`（同样 L4；`_prefetch_fill` 与
-`PREFETCH_*` 随之搬，否则同层边）。**它是 seam 最密的一刀**：
-`setattr(W, "job_ready"/"abandon_job"/"release_job"/"_release_cloud_machine"/"start_cancel_watcher"/
-"peek_jobs"/"download_payload")` 全部会搬进新命名空间 ⇒ 要么逐点迁移，要么改成注入
-（`run_job_fn` 那种 —— 宿主侧的直接调用点改成 `ctx.xxx`）。先做 seam 定档再动刀。
+#### 5.3.10 第十刀（2026-09-24，**已完成**）—— 拆宿主之二：`worker_loop` 的「每 job 一轮」下沉 `job_round`
+
+按用户指令「先定档 seam」执行。块 = `worker.py` L943-1119（**177 行**，取活已定 → 三个旁路线程 →
+`run_job` → 交回传 → finally 全收）+ `_prefetch_fill`（69 行）+ `_result_settled` 闭包（21 行）。
+`worker.py` **1281 → 1042**；新 `remote/job_round.py` **418 行**（L4，与 `train_core` 同层同理由）。
+
+**seam 定档（唯一判据：调用点解析在哪个命名空间；先量后下刀）**：
+
+| 名字 | 处置 | 实测 |
+|---|---|---|
+| `run_job` | **注入**（`run_job_fn=run_job`） | 住 L5 ⇒ 不能反向 import；宿主按**裸名字**读值 ⇒ 10 处 `W.run_job` patch 不改 |
+| `job_ready`·`abandon_job`·`release_job`·`report_job_failure`·`start_cancel_watcher` | **迁移** → `JR` | 12 处 setattr / 4 文件 |
+| `peek_jobs`·`download_payload`·`PREFETCH_ROUND_SEC` | **迁移** → `JR` | 8 处 setattr + 2 处 `W._prefetch_fill` 直接调用 |
+| `uploader`·`post_result` | **留宿主并传入** | 队列跨 job 存活（`if once:` drain / 最外层 `finally` close） |
+| `_prefetch_fill`·`PREFETCH_WIRE_ID`·`settle_result` | **不留门面**（断言禁） | 内部结构；留 `X as X` = 静默空操作的 patch 目标 |
+
+`multi` 是宿主概念 ⇒ 由宿主算好 `code_cache_dir` 传；宿主账目改为回读
+`RoundOutcome{jid, ok, uploaded, stop}`（搬前它们直接改宿主局部）。
+
+新守卫 `tests/test_job_round_split.py`（**13 例**）；反探针**七处全命中**。门禁 **2374 → 2387**。
+顺手修：① 上游集合从**账本推**而非写死（写死的带引号字面量会被 `test_subproc_util` 的 spawn marker
+误判）；②两处既有守卫的前缀匹配会误伤 `remote.worker_proc`（L0）⇒ 改成按模块名精确比。
+
+> 决策 → `DECISIONS.md` §2026-09-24-goalnn-godmodule-jobround；全文 → `engineering.md` §23「第十刀」。
+
+**下一刀**：`hub_server` 其余路由组（`_get_*` 12 / `_post_*` 11 → 通用助手），
+之后是最后两个千行状态类（`_JobStore` / `_HubQueue`：拆 = 拆状态）。
 
 ### 5.4 本轮**不做**（已核，刻意保留）
 
