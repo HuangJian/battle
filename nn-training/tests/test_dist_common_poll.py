@@ -16,7 +16,8 @@ def test_poll_result_abandon_fires_immediately(monkeypatch) -> None:
     """abandon_event 置位后必须立刻抛出放弃异常，不得继续轮询到 budget 耗尽。"""
 
     def fake_request(url: str, auth_key: str, timeout: float = 30.0, **kw):
-        time.sleep(0.4)  # 模拟每次 HTTP 往返
+        # sleep-ok: 夹具模拟的工作量：每次 HTTP 往返的耗时
+        time.sleep(0.4)
         return 202, b'{"status": "running"}'
 
     monkeypatch.setattr(dist_common, "_request", fake_request)
@@ -314,7 +315,8 @@ def test_abort_active_requests_never_blocks_and_gates_new_requests() -> None:
 
     class SlowResp:
         def close(self) -> None:
-            time.sleep(5.0)  # 模拟「等读线程让出内部锁」
+            # sleep-ok: 夹具模拟的工作量：close() 等读线程让出内部锁的那 81s（实测值）
+            time.sleep(5.0)
 
     dist_common.set_request_tag("t-abort")
     key = ("t-abort", SlowResp())

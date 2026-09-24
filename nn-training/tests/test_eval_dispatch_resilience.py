@@ -42,6 +42,7 @@ def _wait_until(pred: Any, *, timeout: float = 20.0, step: float = 0.02) -> bool
     while time.time() < end:
         if pred():
             return True
+        # sleep-ok: 轮询步长（等的是谓词/状态，超时只当挂起兜底）
         time.sleep(step)
     return bool(pred())
 
@@ -316,6 +317,7 @@ class _LaneHarness:
                 # 事件驱动编排点（例：并行性用 Barrier 证明，而不是比墙钟）
                 ping_hook(id_of.get(url, url))
             if ping_delay:
+                # sleep-ok: 夹具模拟的工作量：慢节点的 ping 往返
                 time.sleep(ping_delay)
             self.pinged.append(id_of.get(url, url))
             if id_of.get(url, url) in ping_fail:
@@ -336,6 +338,7 @@ class _LaneHarness:
                 self.post_wait_ok = _wait_until(self.post_until)
             self.post_saw_local = len(self.local_games)
             if post_delay:
+                # sleep-ok: 夹具模拟的工作量：权重下发的往返耗时
                 time.sleep(post_delay)
             self.gate_done_at = time.monotonic()
             if not post_ok:
@@ -529,7 +532,8 @@ def test_settled_full_teardown_does_not_wait_for_slow_node(tmp_path, monkeypatch
     def fetch(_url, _key, **kw):
         if _url == "http://slow.local":
             slow_started.set()
-            h.time.sleep(SLOW_NODE_SEC)  # 慢节点：回包对结果无用（tail-race 已由快节点结算）
+            # sleep-ok: 夹具模拟的工作量：慢节点一口 SLOW_NODE_SEC（回包对结果无用，tail-race 已由快节点结算）
+            h.time.sleep(SLOW_NODE_SEC)
             slow_done.append(h.time.monotonic())
             return h.manifest(kw["stage"], kw["seed"]), {}
         # 快节点的**第一口**先等慢节点真的在跑：否则快节点可能在慢节点线程被调度前

@@ -421,7 +421,8 @@ def test_tail_race_steals_slow_node_tail(tmp_path: Path, monkeypatch) -> None:
         slow = "slow" in url
         calls.append(("slow" if slow else "fast", task))
         if slow:
-            time.sleep(1.5)  # 慢节点：一口 1.5s（真集群 a96 是它的一百倍）
+            # sleep-ok: 夹具模拟的工作量：慢节点一口 1.5s（真集群 a96 是它的一百倍）
+            time.sleep(1.5)
         return _ok_manifest(task[0], task[1], kw["wver"]), {}
 
     nodes = [

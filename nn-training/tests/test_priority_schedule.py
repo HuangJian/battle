@@ -625,18 +625,27 @@ def test_cancel_watcher_sets_event_only_on_landed(monkeypatch: pytest.MonkeyPatc
 
     stop2 = threading.Event()
     never = threading.Event()
-    monkeypatch.setattr(W, "job_status", lambda *a, **k: {"landed": False}, raising=True)
+    polled = threading.Event()
+
+    def _status(*_a, **_k) -> dict:
+        polled.set()  # 探针已问过一次（**事件**）
+        return {"landed": False}
+
+    monkeypatch.setattr(W, "job_status", _status, raising=True)
+    saw_poll: list[bool] = []
 
     def _stop_soon() -> None:
-        import time as _t
-
-        _t.sleep(0.1)
+        # 事件驱动（2026-09-24）：等**观察到探针真的问过一次**再停 —— 原来 `sleep(0.1)`
+        # 是赌 watcher 线程已经跑起来了（满载时固定的 0.1s 会先到点 ⇒ 它一次都没轮到
+        # 就被停，用例变成空转）。10s 只是挂起兜底。
+        saw_poll.append(polled.wait(10.0))
         stop2.set()
 
     threading.Thread(target=_stop_soon, daemon=True).start()
     W.start_cancel_watcher(
         "http://hub", "tok", JID, stop2, never, interval=0.01, log=lambda m: None
     ).join(timeout=5)
+    assert saw_poll and saw_poll[0], "取消探针 10s 内一次都没问到（用例前提失效）"
     assert never.is_set() is False, "landed=False 永不取消（ready 更不取消）"
 
 

@@ -255,6 +255,7 @@ def test_post_weights_parallel_on_alive_fires_per_success(monkeypatch) -> None:
     def fake_post(url, auth_key, iter_id, sha, weights_bytes, timeout=120.0, kind="rollout"):
         order.append(f"post:{url.rsplit('/', 1)[-1]}")
         if "slow" in url:
+            # sleep-ok: 夹具模拟的工作量：慢节点收权重的那一段耗时
             time.sleep(0.15)
         if "fail" in url:
             raise dist_common.DistError(500, "x")

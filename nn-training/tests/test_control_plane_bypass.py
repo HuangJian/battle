@@ -49,6 +49,7 @@ def _wait_until(pred, *, timeout: float = 10.0, step: float = 0.005) -> bool:
     while time.time() < end:
         if pred():
             return True
+        # sleep-ok: 轮询步长（等的是谓词/状态，超时只当挂起兜底）
         time.sleep(step)
     return bool(pred())
 
@@ -77,6 +78,7 @@ class _Handler(BaseHTTPRequestHandler):
             for i in range(0, len(_BULK_BODY), W.BODY_CHUNK):
                 self.wfile.write(_BULK_BODY[i : i + W.BODY_CHUNK])
                 self.wfile.flush()
+                # sleep-ok: 夹具模拟的工作量：慢 bulk 的分片间隔
                 time.sleep(_CHUNK_GAP_SEC)
             return
         # 控制面：秒回（peek 的形状）
@@ -89,6 +91,7 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path.endswith("/result"):
             # 「在传」窗口 = 模拟真实回传的耗时（不是同步手段）：P2 那一腿先等
             # `inflight_bulk == 1`（**事件**）才去申请通道，所以这里的长短不决定对错。
+            # sleep-ok: 夹具模拟的工作量：回传「在传」的那一段耗时
             time.sleep(0.25)
         self._json({"ok": True})
 
@@ -166,6 +169,7 @@ def test_control_round_trip_stays_fast_while_bulk_in_flight(hub: str):
                 return
             lat.append(time.time() - t0)
             inflight_seen.append(W._BULK.inflight())
+            # sleep-ok: 轮询步长（探针节流：每 10ms 问一次，是采样节奏不是同步）
             time.sleep(0.01)
 
     tc = threading.Thread(target=control, daemon=True)
@@ -200,6 +204,7 @@ def test_result_upload_holds_single_channel(hub: str):
         # 等结果上传真的开传（`inflight_bulk==1`）再申请通道：这样「排队」是确定的。
         t0 = time.time()
         while W._BULK.inflight() == 0 and time.time() - t0 < 5:
+            # sleep-ok: 轮询步长（等的是 `inflight_bulk == 1` 这个状态，5s 只当挂起兜底）
             time.sleep(0.005)
         p2_waiting.set()
         try:

@@ -256,7 +256,8 @@ def test_worker_loop_starts_the_next_job_before_the_upload_ends(
                 second_started.set()
             else:
                 _stamp("run1")
-            time.sleep(0.15)  # 冒充 PPO 计算
+            # sleep-ok: 夹具模拟的工作量：冒充这一局的 PPO 计算耗时
+            time.sleep(0.15)
             return {"job_id": jid}
 
         monkeypatch.setattr(W, "post_result", _upload, raising=True)

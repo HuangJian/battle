@@ -41,6 +41,7 @@ def _wait_until(pred, *, timeout: float = 10.0, step: float = 0.01) -> bool:
     while time.time() < end:
         if pred():
             return True
+        # sleep-ok: 轮询步长（等的是谓词/状态，超时只当挂起兜底）
         time.sleep(step)
     return bool(pred())
 
@@ -60,6 +61,7 @@ class _Recorder:
             self.fail_first -= 1
             raise OSError("boom（假传输异常）")
         if self.delay:
+            # sleep-ok: 夹具模拟的工作量：假 hub 的传输耗时
             time.sleep(self.delay)
         return 200, b"{}"
 

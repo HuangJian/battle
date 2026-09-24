@@ -196,6 +196,7 @@ def test_p2_preempted_by_p1():
 
     def critical() -> None:
         with s.slot(BULK_P1_CRITICAL, label="critical"):
+            # sleep-ok: 夹具模拟的工作量：P1 持有者在「传」一小段（不是同步手段）
             time.sleep(0.05)
 
     t2 = threading.Thread(target=critical, daemon=True)
