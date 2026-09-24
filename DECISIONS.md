@@ -2666,3 +2666,36 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
   （新守卫 13 例 + 反探针七处全命中）。
 - **门禁**：**2374 → 2387 passed / 3 skipped**；mypy **389** 源文件绿；根 `bun run check` 2120 pass / 0 fail。
 —— 全文（分档表 / 注入 vs 迁移判据 / 两个守卫自身的坑）→ `docs/nn/engineering.md` §23「第十刀」
+
+## §2026-09-24-goalnn-hub-routes-split（2026-09-24，用户指令「拆 hub_server 的其余路由组：把 _get_* 12 / _post_* 11 收成通用助手」）
+
+- **背景**：第三步已把 admin 控制面（9 方法）拆成 `hub/admin.py`，定下「路由按域进混入」的先例；
+  `hub_server.py` 3728 行里余 25 个路由方法（13 `_get_*` + 12 `_post_*`，本体 644 行）全挂在
+  `HubHandler` 上，且四类形状（鉴权+404 / 读小体 / 租约头 / 递文件）各抄了 3–14 遍。
+- **备选与否决**：
+  1. **按 HTTP 方法（GET / POST）分两组**——否：把 `/jobs/peek` 与 `/jobs/{id}/code` 放进同一模块，
+     只因都是 GET；域才是变更的边界（改「租约」不该碰到「字节服务」）。
+  2. **一组一个文件共 25 个**——否：过度切分，路由的域就四个，单方法文件只会让 MRO 变成 25 项。
+  3. **一步做完「纯搬 + 去重」**——否：混在一起时一旦某条端点变味，分不清是「搬错」还是「收错」。
+     先 Phase A 逐字节等价纯搬（只改 `self.` 的解析命名空间），再 Phase B 去重。
+  4. **去重时顺手把 admin 的 `self.rfile.read(` 也收进 `_read_raw_body`**——否：`hub/admin.py` 的
+     三个读法是「读完就丢」且 try 还裹着 json，形状不同；admin 拆分早于本批助手，不在本刀范围。
+  5. **顺手拆 `_JobStore` / `_HubQueue`**——否：拆状态与拆路由是两类工作（同第十刀的理由）。
+- **决定**：25 个路由方法按**域**分成四组混入——`hub/schedule.py`（取活/租约/打点）·
+  `hub/result.py`（回传与终局）· `hub/blob.py`（字节服务）· `hub/offline.py`（离线段），与 `AdminRoutes`
+  并列进 MRO；四组共用的形状收成 5 个助手（`_job_or_404` / `_job_body` / `_lease_token` /
+  `_serve_path` / `_read_raw_body`），**实现只住 `hub_server`**（组合类提供、混入以 `Any` 声明并消费）。
+  `hub_server.py` **3728 → 3017**。`PRIORITY_BODY_MAX` / `PEEK_MAX` 随迁 `common/protocol.py`。
+- **层号是算出来的**：`_post_result` 走 `push_dispatch.accept_result`（推/拉模式必须共用同一个校验
+  函数）⇒ `hub.result` 秩 **4**，宿主 `hub_server` 被迫 **4 → 5**，`smoke_loopback` /
+  `tunnel_ab_probe` 5 → 6。其余三组只依赖 `common.protocol` ⇒ 与 `hub.admin` 同层 L0。
+- **语义保留点（`count` 不出来的）**：`known=True`（`/start` `/fail` `/result` 要「已知 job」；
+  `/ready` **故意**用 `known=False`——回传就要开始的那份可能还没落 manifest）；`_job_body` 先闸后体；
+  `_serve_path` 的 404 必须带**具体**原因；鉴权仍在**没有 job** 的端点内联（计数被守卫钉住）。
+- **违反后果**：路由方法搬回宿主 / 混入没接进 MRO / 助手在混入里又实现一份 / 抄回内联租约头 ·
+  裸读体 · 裸 `_job_id()` · 裸递文件 / 内联鉴权计数变化 / 混入上向 import 组装模块 / 账本层号标错 /
+  `known` 闸失效 / 先读体再判 job / 404 退回通用文案 / 助手变成死代码——十三类都在**提交时**红
+  （新守卫 15 例 + 反探针**十一**处全命中）。
+- **门禁**：**2387 → 2402 passed / 3 skipped**；mypy **394** 源文件绿；根 `bun run check` 2120 pass / 0 fail。
+—— 全文（分组依据 / 助手对照表 / 真子类替无 socket 实例 / 又一次撞上读源码文本的守卫）→
+`docs/nn/engineering.md` §23「第十一刀」

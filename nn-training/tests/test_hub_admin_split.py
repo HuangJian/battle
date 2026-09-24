@@ -77,8 +77,12 @@ def test_admin_methods_are_defined_in_admin_routes_only() -> None:
     assert crept_back == [], f"这些方法又回到 HubHandler 了：{crept_back}"
 
 
-def test_hub_handler_declares_the_mixin_first_in_its_bases() -> None:
-    """组合类的**基类顺序**必须是 `(AdminRoutes, BaseHTTPRequestHandler)`。
+def test_hub_handler_declares_all_mixins_before_the_base_handler() -> None:
+    """组合类的**基类顺序**必须是「所有 `*Routes` 混入在前、`BaseHTTPRequestHandler` 在最后」。
+
+    第十一刀（2026-09-24）后混入从一个变五个（admin + schedule/result/blob/offline），断言
+    也随之从「`bases[1]` 就是 handler」改成「handler 在最后一个，前面全是混入」——旧写法的
+    用意（混入必须**早于** handler）不变，只是不再假定混入恰好只有一个。
 
     MRO 顺序即基类左→右的优先序，所以这条源码断言与运行期 `__mro__` 断言等价。为何要看顺序：
     混入里为 `headers` / `rfile` 声明的类型必须与 typeshed 逐字一致，否则（若顺序写反、或有人
@@ -94,8 +98,13 @@ def test_hub_handler_declares_the_mixin_first_in_its_bases() -> None:
         n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "HubHandler"
     )
     bases = [ast.unparse(b) for b in cls.bases]
-    assert bases[0] == "AdminRoutes", bases
-    assert bases[1] == "BaseHTTPRequestHandler", bases
+    assert bases[-1] == "BaseHTTPRequestHandler", bases
+    mixins = bases[:-1]
+    assert "AdminRoutes" in mixins, bases
+    assert all(b.endswith("Routes") for b in mixins), (
+        f"`BaseHTTPRequestHandler` 之前的基类应当全是 `*Routes` 混入：{bases}"
+    )
+    assert len(mixins) >= 5, f"四组路由混入 + admin 都应当在列：{mixins}"
 
 
 def test_net_probe_support_names_moved_with_the_group() -> None:
@@ -108,7 +117,14 @@ def test_net_probe_support_names_moved_with_the_group() -> None:
 
 def test_hub_package_never_imports_hub_server() -> None:
     """混入包不得反向依赖组装模块（否则 hub_server → hub.admin → hub_server 成环）。"""
-    for name in ("admin.py", "__init__.py"):
+    for name in (
+        "admin.py",
+        "blob.py",
+        "offline.py",
+        "result.py",
+        "schedule.py",
+        "__init__.py",
+    ):
         # 用**叶子名**判据而不是带引号的点分字面量：后者是 `tests/test_subproc_util.py`
         # 「起服务必须借端口」源码守卫的标记（它假设「写过那个 patch 目标 = 会 spawn」）。
         # 本文件确实不起服务（用进程内 stub），所以不该被那个守卫接管。

@@ -674,13 +674,93 @@ worker_loop（留 worker.py）  轮询 / claim / halt / idle / --once / 回传�
 > 秒级 mtime 相同 + size 相同 ⇒ Python 继续用**旧** pyc，于是「已复原」的源码仍报旧结论。
 > 探针脚本回滚后必须 `touch`（本刀就因此误判了一下）。
 
+### 第十一刀（2026-09-24）：拆宿主之三 —— `hub_server` 的 25 个路由方法按**域**分四组，再把四组重复的形状收成 5 个助手
+
+第三步已把 admin 控制面（9 方法）拆成 `hub/admin.py` 定下了先例；本刀把**其余全部**路由按域切完，
+`HubHandler` 从此只剩「大学用：组合 + 共享助手 + 线程/共享状态」。`remote/hub_server.py`
+**3728 → 3017 行**（方法本体 644 行搬走，余下是 `_JobStore` / `_HubQueue` / 引导 / 引导链）。
+
+```
+HubHandler(AdminRoutes, ScheduleRoutes, ResultRoutes, BlobRoutes, OfflineRoutes, BaseHTTPRequestHandler)
+  schedule（153 行）取活/租约/打点：peek · priority · claim · start · ready · abandon · heartbeat · release
+  result  （240 行）回传与终局：result(POST) · fail · status · result(GET) · bc-epoch · bc-resume · bc-metrics
+  blob    （ 46 行）字节服务：payload · code · ts_code · blob · shared_code
+  offline （205 行）离线段：task-pack · resume · resume_blob · artifact · result
+```
+
+#### ★ `result` 那组让宿主升到 **L5**（层号是算出来的，第三次兑现）
+
+`_post_result` 走 `remote.push_dispatch.accept_result`——「推模式与拉模式必须用**同一个**校验函数」
+这条纪律（一份对不上账的结果被静默落盘成一轮看起来正常的训练，正是它要挡的事）。于是
+`hub.result` 的拓扑秩只能是 **4**，宿主 `hub_server` 被迫 **4 → 5**，`smoke_loopback` /
+`tunnel_ab_probe` 随之 5 → 6。`result` 单独住 L4 而其余三组住 L0（与 `hub.admin` 同层），是
+**依赖深度**决定的，不是口味：账本的秩断言把标错的当场报出来。
+
+#### Phase B：把重复了 3–5 遍的形状收成 5 个助手（实现只住 `hub_server`）
+
+| 助手 | 收掉的形状 | 原处数 |
+|---|---|---|
+| `_job_or_404(known=)` | 鉴权 + 取 `job_id` + 404 | 14 |
+| `_job_body(cap, known=)` | 上者 + 读小 JSON 体 | 4 |
+| `_lease_token()` | `X-Lease-Token` / `lease-token` 双写法 | 5 |
+| `_serve_path(p, missing=)` | 定位 → 不存在就 404 说清原因 → `_bytes` | 5 |
+| `_read_raw_body()` | 按 `Content-Length` 读满（上限留给调用方） | 3 |
+
+分两 Phase 做是有意的：先**纯搬**（逐字节等价，只改 `self.` 的解析命名空间），再**去重**——
+混在一起，一旦哪条端点变味就分不清是「搬错」还是「收错」。
+
+#### 两个语义保留点（`count` 不出来的那类）
+
+- **`known=True` 那一档**：`/start` `/fail` `/result` 要的是「已知 job」——没有它，会往一个
+  不存在的 job 打点/落账。`/peek` `/priority` `/claim` `/ready` `/abandon` `/heartbeat` `/release`
+  用 `known=False`（`/ready` 更是**故意**：回传就要开始的那份 job 可能还没落 manifest）。
+- **顺序**：`_job_body` 先闸后体（写错的 URL 不该让服务端白读一段远端体）；`_serve_path` 的 404
+  必须带**具体**原因（`no payload` vs `no ts_code zip` 是两条不同的下一步）。两者都写了功能性断言。
+- 鉴权仍然在**没有 job** 的端点内联（`/peek` `/priority` `/shared_code` `/offline/*`）——这批
+  端点的共同点是「没有 job_id 可查」，助手帮不上；计数被守卫钉住（多一处 = 又抄了一遍 404 边界）。
+
+#### 新守卫（`tests/test_hub_routes_split.py`，15 例）+ 反探针**十一**处全命中
+
+定义唯一（25 个方法住混入、`HubHandler` 不得再定义）· `HubHandler.X is Mixin.X`（**对象级**接线）·
+助手唯一实现 **且各自活着**（`≥N` 调用点，防死助手）· **漂移警报**：混入里不许再出现那四种内联形状 ·
+内联鉴权计数与位置 · 混入零上向依赖（`dag.assert_remote_module` 白名单）+ `hub/` 包不反向 import 组装模块 ·
+账本层号关系（含 `result`==4 与「宿主 == worker == 5」的对称性）·
+**★ 功能性**：`_Probe(hs.HubHandler)`（`object.__new__`，无 socket）走完 `_set`/`_job_or_404`/
+`_job_body`/`_read_raw_body` 的两侧契约。
+
+**反探针十一处**：方法搬回宿主 · 混入没接进 MRO · 助手在混入里又实现一份 · 抄回内联租约头 ·
+多一处内联鉴权 · 混入向上一层 import · 账本把 `result` 标成 L3 · 助手漏掉 `known` 闸 ·
+先读体再判 job · 404 退回通用文案 · 助手不再被调用。
+
+#### 测试侧：**真子类**而不是往实例上挂属性
+
+功能性断言要一个「能跑路由但写不出去」的 `HubHandler`。原方案 `object.__new__` + 实例上挂
+`_json`/`_bytes`/`_auth_ok` ⇒ `mypy` 的 `method-assign`（不许给方法赋值）与 `ruff` 的 `B010`
+（不许用常量 `setattr`）**互相打架**。改成 `class _Probe(hs.HubHandler)` 重写这三个方法（外加空
+`__init__` 绕开 `BaseHTTPRequestHandler.__init__` 的请求处理）：两个 linter 都认，且顺带把
+「哪些实例字段是绕过 `__init__` 直接塞的」写在了类注释里。
+
+#### 又一次撞上「读源码文本的守卫」
+
+`tests/test_subproc_util.py` 按**带引号的字面量**扫「起真服务进程」（`"remote.hub_server"` 等）。
+本守卫第一版写 `layers["remote.hub_server"]` ⇒ 被误判成起了真进程（第十刀同款坑，第二次）。
+修法：按键的**叶子名**从账本取（`_ledger_key("hub_server")`），**连解释这件事的 docstring 里也
+不许出现那个带引号的字面量**（`_code_of` 只剥 `#` 注释、保留 docstring）。
+
+门禁 **2387 → 2402 passed / 3 skipped**；mypy **394** 源文件绿；根 `bun run check` 2120 pass / 0 fail。
+
+> 决策 → `DECISIONS.md` §2026-09-24-goalnn-hub-routes-split；全文 → 本节。
+> 协议常量 `PRIORITY_BODY_MAX` / `PEEK_MAX` 随迁到 `common/protocol.py`：前者是同一族请求体上限
+> （`FAIL_BODY_MAX` / `OFFLINE_*_BODY_MAX` 都住那里），后者有**两个读者**（`hub.schedule` 的端点与
+> `hub_server._HubQueue.peek_jobs` 的形参默认值），谁也 import 不了谁 ⇒ 必须住两边都能 import 的协议层。
+
 ### 未做完（S4 余下）
 
 `remote/` 内部**已零环**（见「拆环」节），S4 余下是纯结构工作：
-`remote/worker.py` 余 **1042 行**，其中 `worker_loop` 已缩到「轮询壳 + 回传收尾」，`run_job` 325 /
-`main` 127 是宿主本体。
-下一刀 → `hub_server` 其余路由组（`_get_*` 12 / `_post_*` 11 → 通用助手）→ 最后两个千行状态类
-（`_JobStore` / `_HubQueue`：拆 = 拆状态）。设计见 `plan/nn-training-refactor.md` §5.3。
+`remote/worker.py` 余 **1042 行**（`worker_loop` 已缩到「轮询壳 + 回传收尾」，`run_job` 325 /
+`main` 127 是宿主本体）；`remote/hub_server.py` 余 **3017 行**，路由面已全部切完，只剩两个千行状态类
+`_JobStore` / `_HubQueue`（拆 = 拆状态，风险与切法都不同）与引导链。
+设计见 `plan/nn-training-refactor.md` §5.3。
 `TrainingSteps` 本体还剩 952 行 / 20 方法（切法是「按一条真实调用链切」，不是按行数等分）。
 
 **还挂着一项清理**：`remote/job_fs._ensure_commit` 是既存死代码（全仓零调用，只搬未删）。

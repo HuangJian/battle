@@ -705,8 +705,37 @@ CLI 侧传 `_real_run_job`）。引擎里那个 `_real_run_job` **兜底删掉**
 
 > 决策 → `DECISIONS.md` §2026-09-24-goalnn-godmodule-jobround；全文 → `engineering.md` §23「第十刀」。
 
-**下一刀**：`hub_server` 其余路由组（`_get_*` 12 / `_post_*` 11 → 通用助手），
-之后是最后两个千行状态类（`_JobStore` / `_HubQueue`：拆 = 拆状态）。
+#### 5.3.11 第十一刀（2026-09-24，**已完成**）—— `hub_server` 的 25 个路由方法按域分四组 + 四类形状收成 5 个助手
+
+按用户指令「拆 hub_server 的其余路由组：把 `_get_*` 12 / `_post_*` 11 收成通用助手」执行。
+第三步已有 `hub/admin.py` 先例（路由按域进混入），本刀把其余切完。
+
+| 新模块 | 方法 | 行数（本体） | 层 |
+|---|---|---|---|
+| `remote/hub/schedule.py` | peek·priority·claim·start·ready·abandon·heartbeat·release | 153 | L0 |
+| `remote/hub/result.py` | result(POST)·fail·status·result(GET)·bc-epoch·bc-resume·bc-metrics | 240 | **L4** |
+| `remote/hub/blob.py` | payload·code·ts_code·blob·shared_code | 46 | L0 |
+| `remote/hub/offline.py` | task-pack·resume·resume_blob·artifact·result | 205 | L0 |
+
+`remote/hub_server.py` **3728 → 3017**。`result` 住 L4 是因为 `_post_result` 走
+`push_dispatch.accept_result`（推/拉必须共用同一个校验函数）⇒ 宿主 `hub_server` **4 → 5**，
+`smoke_loopback` / `tunnel_ab_probe` 5 → 6。
+
+**Phase A（纯搬，逐字节等价）→ Phase B（去重）**，刻意分两步：混做会让「某条端点变味」分不清是搬错还是收错。
+五助手（实现只住 `hub_server`）：`_job_or_404(known=)` 14 处 · `_job_body(cap, known=)` 4 ·
+`_lease_token()` 5 · `_serve_path(p, missing=)` 5 · `_read_raw_body()` 3。
+`PRIORITY_BODY_MAX` / `PEEK_MAX` 随迁 `common/protocol.py`（后者有两个读者，谁也 import 不了谁）。
+
+**语义保留点**：`known=True` 只给 `/start` `/fail` `/result`（`/ready` **故意** `known=False`）；
+`_job_body` 先闸后体；`_serve_path` 的 404 带**具体**原因；鉴权仍在没有 job 的端点内联（计数钉住）。
+
+新守卫 `tests/test_hub_routes_split.py`（**15 例**，含 `_Probe(hs.HubHandler)` 无 socket 功能性）；
+反探针**十一处全命中**。门禁 **2387 → 2402**。
+
+> 决策 → `DECISIONS.md` §2026-09-24-goalnn-hub-routes-split；全文 → `engineering.md` §23「第十一刀」。
+
+**下一刀**：`hub_server` 只剩引导链与最后两个千行状态类（`_JobStore` / `_HubQueue`：拆 = 拆状态，
+与拆路由是两类工作）；`worker.py` 余 1042 行同理。
 
 ### 5.4 本轮**不做**（已核，刻意保留）
 

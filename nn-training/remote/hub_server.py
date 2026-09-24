@@ -88,18 +88,14 @@ from common.protocol import (
     COURSE_MODE_OFFLINE,
     COURSE_MODE_ONLINE,
     COURSE_MODES,
-    FAIL_BODY_MAX,
     FAIL_NAME,
-    OFFLINE_ARTIFACT_BODY_MAX,
     OFFLINE_ARTIFACT_PATH,
-    OFFLINE_CAP_HEADER,
-    OFFLINE_RESULT_BODY_MAX,
     OFFLINE_RESULT_PATH,
-    OFFLINE_RESUME_BLOB_NAMES,
     OFFLINE_RESUME_BLOB_PATH,
     OFFLINE_RESUME_PATH,
     OFFLINE_TASK_PACK_PATH,
     PAYLOAD_NAME,
+    PEEK_MAX,
     PRIORITY_HIGH,
     PRIORITY_HIGHEST,
     PRIORITY_LOW,
@@ -107,22 +103,17 @@ from common.protocol import (
     PRIORITY_NONE,
     PUSH_POLL_SEC,
     PUSH_TIMEOUT_SEC,
-    TS_CODE_NAME,
-    WIRE_V2_MAGIC,
     WORKER_ID_HEADER,
     WORKER_SEEN_WINDOW_SEC,
     ProtocolError,
-    blob_path,
     decode_opt_tar,
     decode_weights_json,
     find_payload,
-    has_offline_capability,
     job_priority,
     may_avoid_stale_holder,
     parse_course_arg,
     rotation_order,
     sanitize_run_id,
-    unpack_result_v2,
 )
 from remote._instance_lock import (
     acquire_instance_lock,
@@ -134,12 +125,18 @@ from remote.artifacts import ArtifactStore, ledger_row_from_metrics
 
 # 产物账本行 → 课程账本行的搬运**只在 remote.artifacts 实现一份**（人工导入与实时补传共用）：
 # 两份翻译必然漂开，而「两腿同字段」正是控制台那张表存在的意义。
+# HTTP 路由组（S4 第十一刀）：四组域混入，派发表（do_GET / do_POST，仍在 HubHandler）调它们。
+# 它们只向外调通用助手（`_auth_ok` / `_json` / `_bytes` / `_job_id` / `_read_json_body` …），
+# 那些助手仍住本模块 —— 混入把它们声明成 `Any`（同 `hub.admin` 的先例）。
 from remote.hub.admin import AdminRoutes
+from remote.hub.blob import BlobRoutes
+from remote.hub.offline import OfflineRoutes
+from remote.hub.result import ResultRoutes
+from remote.hub.schedule import ScheduleRoutes
 from remote.push_dispatch import (
     DEFAULT_PUSH_CONFIG,
     PushDispatcher,
     PushWorkers,
-    accept_result,
 )
 
 # ------------------------------------------------------------------ 来源判定
@@ -281,13 +278,6 @@ class _AuthGuard:
 #: `status ∈ {"ok", "backup", "demoted", "held", "frozen", "stale_holder"}`——worker 侧
 #: 只关心「拿到了吗」+「没拿到是降级还是真轮不到」：前者丢副本、后者按 low 处理。
 ClaimOutcome = namedtuple("ClaimOutcome", "ok token status reason")
-
-#: `peek` 一次最多返回的候选数（软持有深度缺省 3 的上界；防一个 worker 把队首扫空）。
-PEEK_MAX = 16
-
-#: 新调度面（peek 除外的 POST）请求体上限：都是小 JSON（job_id/worker_id/held 列表），
-#: 比 fail 体小得多。有界是硬要求（远端体绝不信 Content-Length 之外的暗示）。
-PRIORITY_BODY_MAX = 64 * 1024
 
 #: 毒包熔断阈值（plan/accident.plan.md §4.1，2026-09-21）：同一 job 被**认领后零回传**满这么多次
 #: ⇒ hub 冻结它并响亮告警。为什么是「零回传」而不是「失败」：worker 报得上来的失败早就有
@@ -2364,7 +2354,14 @@ def _write_bytes(path: Path, data: bytes) -> None:
 # ------------------------------------------------------------------ HTTP
 
 
-class HubHandler(AdminRoutes, BaseHTTPRequestHandler):
+class HubHandler(
+    AdminRoutes,
+    ScheduleRoutes,
+    ResultRoutes,
+    BlobRoutes,
+    OfflineRoutes,
+    BaseHTTPRequestHandler,
+):
     """单例 handler：类属性持共享调度面（ThreadingHTTPServer 每请求新建实例）。
 
     注：类属性名从 `store` 改为 `hub`（2026-09-18 多课程）——它现在是**多课程调度面**
@@ -2642,6 +2639,64 @@ class HubHandler(AdminRoutes, BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             return int(default)
 
+    # ---- 路由组的**通用助手**（2026-09-24 S4 第十一刀）：四组混入都只经这几个助手落地，
+    # 形状只此一份。混入把它们声明成 `Any`，实现只住这里（组合类提供、混入消费）。
+    def _lease_token(self) -> str:
+        """租约令牌头（H2）。两种写法都认——历史客户端的大小写不一致。"""
+        return self.headers.get("X-Lease-Token", "") or self.headers.get("lease-token", "")
+
+    def _job_or_404(self, *, known: bool = False) -> str | None:
+        """鉴权 + 取 `job_id` + 404。返回 None = **已经回过响应**（调用方直接 `return`）。
+
+        `known=True` 还要求 `manifest.json` 存在：未知 job 与写错的 URL 同样是 404——
+        分开了它们在排障时看起来像两件事，而它们要的下一步是同一个。
+        """
+        if not self._auth_ok():
+            return None
+        jid = self._job_id()
+        if jid is None or (known and not (self.hub._job_dir(jid) / "manifest.json").exists()):
+            self._json({"error": "not found"}, 404)
+            return None
+        return jid
+
+    def _job_body(self, cap: int, *, known: bool = False) -> tuple[str, dict] | None:
+        """`_job_or_404` + 读小 JSON 体。返回 None = 已回过响应。
+
+        取活/打点那一族（priority / claim / start / ready / abandon）的**共同前缀**：
+        「哪一份 job」与「它声称拿着什么」是同一趟请求里的两件事，分写五遍就会漂五遍。
+        """
+        jid = self._job_or_404(known=known)
+        if jid is None:
+            return None
+        body = self._read_json_body(cap)
+        if body is None:
+            return None
+        return jid, body
+
+    def _serve_path(self, p: Path, *, missing: str) -> None:
+        """递一个**已定位**的本地文件；不存在 → 404。
+
+        `missing` 是给排障的**具体**原因（"no code zip" / "no blob" …），不是通用 not found：
+        「payload 还没发布」与「这轮没打 ts_code」是两条完全不同的下一步。
+        """
+        if not p.exists():
+            self._json({"error": missing}, 404)
+            return
+        self._bytes(p.read_bytes())
+
+    def _read_raw_body(self) -> bytes | None:
+        """按 `Content-Length` 读满请求体；读不到 → 400 并返回 None。
+
+        与 `_read_capped_body` 的差别：这里**先不判上限**——`_post_fail` / `_post_result` /
+        `_post_bc_epoch` 各自有自己的界（`FAIL_BODY_MAX` / 无界 / `BC_EPOCH_BODY_MAX`）或
+        自己不做界，所以把「读」与「限」拆开，上限由调用方在那之后判。
+        """
+        try:
+            return self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        except Exception as e:
+            self._json({"error": f"read body failed: {e}"}, 400)
+            return None
+
     def _worker_id(self) -> str:
         return self.headers.get(WORKER_ID_HEADER, "")
 
@@ -2662,114 +2717,6 @@ class HubHandler(AdminRoutes, BaseHTTPRequestHandler):
             flush=True,
         )
 
-    def _get_peek(self) -> None:
-        """`GET /jobs/peek?n=K` —— **不认领**的候选查询（R1-4）；软持有的候选来源。
-
-        一次行程兼做三件事（都是旧轮询面的附带职责，退役后不能丢）：
-        ① 候选列表（无租约、无副作用、**不动 `_cursor`**）；
-        ② halt 达令（空轮询也要能感知停机）；
-        ③ 登记 worker（R2-2：`active_worker_count()` 是避让链的唯一输入）。
-        """
-        if not self._auth_ok():
-            return
-        n = max(1, min(int(self._query_int("n", 3)), PEEK_MAX))
-        offline_ok = has_offline_capability(self.headers.get(OFFLINE_CAP_HEADER, ""))
-        jobs = self.hub.peek_jobs(
-            worker_id=self._worker_id(),
-            offline_ok=offline_ok,
-            n=n,
-        )
-        self._json({"jobs": jobs, "halt": self.hub.all_halted()})
-
-    def _post_priority(self) -> None:
-        """`POST /jobs/priority` —— job 边界问询：`{epoch, priorities, reasons}`（§2.3）。
-
-        响应里的 `none` **同时是批量取消信号**：worker 拿它就地丢弃已落盘的本地副本
-        （这也是它不能被合并进“claim-with-priority 一次往返”的原因）。
-        """
-        if not self._auth_ok():
-            return
-        body = self._read_json_body(PRIORITY_BODY_MAX)
-        if body is None:
-            return
-        held = body.get("held")
-        ids = [str(j) for j in held] if isinstance(held, list) else []
-        for extra in (body.get("computing"), body.get("ready_upload")):
-            if isinstance(extra, str) and extra and extra not in ids:
-                ids.append(extra)
-        epoch, prios, reasons = self.hub.priority_view(
-            worker_id=str(body.get("worker_id") or self._worker_id()),
-            job_ids=ids,
-        )
-        self._json({"epoch": epoch, "priorities": prios, "reasons": reasons})
-
-    def _post_claim(self) -> None:
-        """`POST /jobs/{id}/claim` —— 新面（R1-9）；体 `{mode, expected_epoch}`。
-
-        返回：拿得 ⇒ `{lease_token, status, manifest?}`；命中 highest 闸 ⇒
-        `{status:"demoted", priority:"low"}`（**不是错误**，worker 按 low 处理）；
-        真的轮不到（冻结/避让/未知 job）⇒ 409。
-        """
-        if not self._auth_ok():
-            return
-        jid = self._job_id()
-        if jid is None:
-            self._json({"error": "not found"}, 404)
-            return
-        body = self._read_json_body(PRIORITY_BODY_MAX)
-        if body is None:
-            return
-        mode = str(body.get("mode") or CLAIM_MODE_EXCLUSIVE)
-        try:
-            want_epoch = body.get("expected_epoch")
-            want_epoch = None if want_epoch is None else int(want_epoch)
-        except (TypeError, ValueError):
-            self._json({"error": "expected_epoch 非法"}, 400)
-            return
-        worker_id = str(body.get("worker_id") or self._worker_id())
-        out = self.hub.claim_job(
-            jid, mode=mode, worker_id=worker_id, expected_epoch=want_epoch
-        )
-        course = self.hub.course_of(jid) or ""
-        if out.ok:
-            self._log_claim(jid, course, worker_id, mode, out.token)
-            if self.hub.mode_of(course) == COURSE_MODE_OFFLINE and mode != CLAIM_MODE_BACKUP:
-                # 发光的一行：离线课（整段）落到带标 worker 手上——这是「离线课真的在跑」
-                # 在 hub 侧的**唯一**痕迹（它不实时派发，也不会被 push 推）。
-                print(
-                    f"[{time.strftime('%H:%M:%S')}] [hub-server] 离线课整段交领："
-                    f"course={course or '-'} job={jid} worker={worker_id or '?'}"
-                    f"（带 `{OFFLINE_CAP_HEADER}` 能力头）",
-                    flush=True,
-                )
-            # 领取标记（原轮询面也做这件事）：console 据此区分「排队等取」与「已在跑」。
-            claim = self.hub._job_dir(jid) / "claimed"
-            if not claim.exists():
-                try:
-                    claim.write_text(str(self.hub._now()), encoding="utf-8")
-                except OSError:
-                    pass
-            resp: dict = {
-                "job_id": jid,
-                "course": course,
-                "status": out.status,
-                "lease_token": out.token,
-                "halt": self.hub.halt_of(course),
-                "epoch": self.hub.epoch_of(jid),
-            }
-            try:
-                mp = self.hub._job_dir(jid) / "manifest.json"
-                resp["manifest"] = json.loads(mp.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                pass
-            self._json(resp)
-            return
-        if out.status == "demoted":
-            # 「有人比我快」的正常信号：降为低档备份（§2.3 ④），**不得**报错。
-            self._json({"job_id": jid, "status": "demoted", "priority": PRIORITY_LOW})
-            return
-        self._json({"error": f"claim 被拒: {out.status} ({out.reason})"}, 409)
-
     def _read_json_body(self, cap: int) -> dict | None:
         """读并解析小 JSON 体；不合规 → 400/413 已回，返回 None。"""
         raw = self._read_capped_body(cap)
@@ -2784,472 +2731,6 @@ class HubHandler(AdminRoutes, BaseHTTPRequestHandler):
             self._json({"error": "体必须是 JSON 对象"}, 400)
             return None
         return body
-
-    def _post_start(self) -> None:
-        """`POST /jobs/{id}/start` —— 打 **computing_at**（掉队阈值的唯一时基；R2-C1）。
-
-        ⚠ 不校 `expected_epoch`（R2-C4）：闸只在 claim 一处。
-        """
-        if not self._auth_ok():
-            return
-        jid = self._job_id()
-        if jid is None or not (self.hub._job_dir(jid) / "manifest.json").exists():
-            self._json({"error": "not found"}, 404)
-            return
-        body = self._read_json_body(PRIORITY_BODY_MAX)
-        if body is None:
-            return
-        self.hub.start_job(jid, str(body.get("worker_id") or self._worker_id()))
-        self._json({"job_id": jid, "status": "computing"})
-
-    def _post_ready(self) -> None:
-        """`POST /jobs/{id}/ready` —— 算完待回传/在传（P0 小包，**永不**触发取消）。"""
-        if not self._auth_ok():
-            return
-        jid = self._job_id()
-        if jid is None:
-            self._json({"error": "not found"}, 404)
-            return
-        body = self._read_json_body(PRIORITY_BODY_MAX)
-        if body is None:
-            return
-        self.hub.set_ready(jid, str(body.get("worker_id") or self._worker_id()))
-        self._json({"job_id": jid, "status": "ready"})
-
-    def _post_abandon(self) -> None:
-        """`POST /jobs/{id}/abandon` —— 合法放弃（R1-3）：release 租约 + 零 reclaim，幂等。"""
-        if not self._auth_ok():
-            return
-        jid = self._job_id()
-        if jid is None:
-            self._json({"error": "not found"}, 404)
-            return
-        body = self._read_json_body(PRIORITY_BODY_MAX)
-        if body is None:
-            return
-        self.hub.abandon(jid, str(body.get("worker_id") or self._worker_id()))
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server] abandon job={jid} "
-            f"course={self.hub.course_of(jid) or '-'} "
-            f"worker={body.get('worker_id') or self._worker_id() or '?'} "
-            f"reason={str(body.get('reason') or '-')[:80]}",
-            flush=True,
-        )
-        self._json({"job_id": jid, "status": "abandoned"})
-
-
-    def _get_task_pack(self) -> None:
-        """`GET /offline/task-pack?course=<课>`：把整段任务包（`task-<课>.zip`）递给云机。
-
-        为什么由 hub 发：云机 notebook 的第一条路径就是「先连 hub，能通就从 hub 取包」
-        （用户口径 2026-09-19）；包本来就是本机产物（`tmp/<课>/task-<课>.zip`，控制台
-        导出写的就是它），hub 的 `<traj-root>` 正是 `tmp` ⇒ 本端点只是把**同一个文件**
-        按 HTTP 递出去，不造第二份真相。
-
-        三种拒因各说各话（非法课程名 400 / 没这个包 404 / 未鉴权 401）：人在云机上排障时，
-        「去控制台点导出」与「课程名写错了」是两条完全不同的下一步。
-        """
-        if not self._auth_ok():
-            return
-        course = self._query_course()
-        try:
-            p = self.hub.task_pack_path(course)
-        except ProtocolError as e:
-            self._json({"error": str(e), "course": course}, 400)
-            return
-        if not p.exists():
-            known = self.hub.courses()
-            self._json(
-                {
-                    "error": (
-                        f"没有任务包 {p.name}——先在控制台导出（导出要求训练已停），"
-                        "或检查课程名"
-                    ),
-                    "course": course,
-                    "path": str(p),
-                    "known_courses": known,
-                },
-                404,
-            )
-            return
-        try:
-            data = p.read_bytes()
-        except OSError as e:
-            self._json({"error": f"读任务包失败: {e}", "course": course}, 500)
-            return
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server] task-pack -> {p.name} "
-            f"({len(data)} bytes)",
-            flush=True,
-        )
-        self._bytes(data, 200, "application/zip", filename=p.name)
-
-    def _get_offline_resume(self) -> None:
-        """`GET /offline/resume?course=<课>`：递「最新同轮齐全的续跑锚点」元信息（2026-09-22）。
-
-        为什么单开一个端点而不是改进任务包：任务包是**导出那一刻**的只读快照（控制台写的
-        那个 zip，`plan_sha256` 都绑在它上面），当场重打一份就等于让 hub 去当一个「导出器」
-        ——那个能力只有 `run_rl --export-bundle` 有。所以锚点另走一条小消息：云机照旧取包，
-        再把锚点铺进产物目录（`remote.run_loop --resume-dir`）。
-
-        `resume: null` 是**正常应答**（没有比包更新的进度）——不是 404：云机要能区分
-        「hub 说没有」与「端点不可用/鉴权失败」。
-        """
-        if not self._auth_ok():
-            return
-        course = self._query_course()
-        if not course:
-            self._json({"error": "需要 ?course=<课>"}, 400)
-            return
-        try:
-            anchor = self.hub.resume_anchor(course)
-        except ProtocolError as e:
-            self._json({"error": str(e), "course": course}, 400)
-            return
-        except KeyError:
-            self._json({"error": f"未知课程 {course}", "course": course, "known": self.hub.courses()}, 404)
-            return
-        if anchor is None:
-            self._json({"course": course, "resume": None}, 200)
-            return
-        pub = {k: v for k, v in anchor.items() if not k.startswith("_")}
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server] resume-anchor -> {course} "
-            f"it{pub['it']}（{pub['source']}, wfp={str(pub['weights_fp'])[:12]}…）",
-            flush=True,
-        )
-        self._json({"course": course, "resume": pub}, 200)
-
-    def _get_offline_resume_blob(self) -> None:
-        """`GET /offline/resume/blob?course=<课>&it=N&name=<件>`：递锚点轮次的字节。
-
-        三道门：鉴权 → `name` 白名单（`OFFLINE_RESUME_BLOB_NAMES`）→ 「该 it 就是当前锚点」
-        （只服务锚点本身，不接受任意 it/任意路径——这里不是通用文件服务）。
-        """
-        if not self._auth_ok():
-            return
-        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-        course = (qs.get("course") or [""])[0].strip()
-        name = (qs.get("name") or [""])[0].strip()
-        try:
-            it = int((qs.get("it") or [""])[0])
-        except ValueError:
-            self._json({"error": "需要整数 ?it=N"}, 400)
-            return
-        if not course:
-            self._json({"error": "需要 ?course=<课>"}, 400)
-            return
-        if name not in OFFLINE_RESUME_BLOB_NAMES:
-            self._json(
-                {"error": f"name 必须是 {list(OFFLINE_RESUME_BLOB_NAMES)} 之一，收到 {name!r}"},
-                400,
-            )
-            return
-        anchor = self.hub.resume_anchor(course)
-        if anchor is None or int(anchor["it"]) != it:
-            self._json(
-                {
-                    "error": "该 it 不是当前续跑锚点（锚点可能已被更新的轮次取代）",
-                    "course": course,
-                    "it": it,
-                    "anchor_it": (int(anchor["it"]) if anchor else None),
-                },
-                409,
-            )
-            return
-        p = Path(str(anchor["_dir"])) / name
-        try:
-            data = p.read_bytes()
-        except OSError as e:
-            self._json({"error": f"读锚点件失败: {e}", "path": str(p)}, 500)
-            return
-        ctype = "application/json" if name.endswith(".json") else "application/octet-stream"
-        self._bytes(data, 200, ctype, filename=f"it-{it:03d}-{name}")
-
-
-    # ---- GET /jobs/{id}/payload ----
-    def _get_payload(self) -> None:
-        if not self._auth_ok():
-            return
-        jid = self._job_id()
-        if jid is None:
-            self._json({"error": "not found"}, 404)
-            return
-        p = find_payload(self.hub._job_dir(jid))
-        if p is None:
-            self._json({"error": "no payload"}, 404)
-            return
-        data = p.read_bytes()
-        # M0 统一计量：传输层实测（服务出去的 payload 字节）——iteration 事件对账用。
-        self.hub.record_payload_sent(jid, len(data))
-        self._bytes(data)
-
-    # ---- GET /jobs/{id}/code ----
-    def _get_code(self) -> None:
-        if not self._auth_ok():
-            return
-        jid = self._job_id()
-        if jid is None:
-            self._json({"error": "not found"}, 404)
-            return
-        p = self.hub._job_dir(jid) / "code.zip"
-        if not p.exists():
-            self._json({"error": "no code zip"}, 404)
-            return
-        self._bytes(p.read_bytes())
-
-    # ---- GET /jobs/{id}/ts_code（M3：TS 运行时 zip，kind=iter 的节点用）----
-    def _get_ts_code(self) -> None:
-        if not self._auth_ok():
-            return
-        jid = self._job_id()
-        if jid is None:
-            self._json({"error": "not found"}, 404)
-            return
-        p = self.hub._job_dir(jid) / TS_CODE_NAME
-        if not p.exists():
-            self._json({"error": "no ts_code zip"}, 404)
-            return
-        self._bytes(p.read_bytes())
-
-    # ---- GET /jobs/{id}/blob?name=opt|ref（M2 B3：内容寻址 opt/ref 载荷）----
-    def _get_blob(self) -> None:
-        if not self._auth_ok():
-            return
-        jid = self._job_id()
-        if jid is None:
-            self._json({"error": "not found"}, 404)
-            return
-        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-        name = (qs.get("name") or [""])[0]
-        try:
-            bp = blob_path(self.hub._job_dir(jid), name)
-        except ProtocolError as e:
-            self._json({"error": str(e)}, 400)
-            return
-        if not bp.exists():
-            self._json({"error": "no blob"}, 404)
-            return
-        self._bytes(bp.read_bytes())
-
-    # ---- GET /code（共享 code.zip，colab bootstrap 用） ----
-    def _get_shared_code(self) -> None:
-        if not self._auth_ok():
-            return
-        # 多课程：code.zip 是**每课程一份**（各课的训练循环往自己的 job_root 写）。
-        # `?course=` 指定就取那门课的；不指定（旧 colab bootstrap）取第一份真存在的
-        # ——代码区份份同源（同一个仓、同一支），取哪门课的都一样。
-        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-        p = self.hub.shared_code_zip((qs.get("course") or [""])[0])
-        if p is None:
-            self._json({"error": "no shared code zip — training loop 尚未启动"}, 404)
-            return
-        self._bytes(p.read_bytes())
-
-    # ---- GET /jobs/{id}/status ----
-    def _get_status(self) -> None:
-        if not self._auth_ok():
-            return
-        jid = self._job_id()
-        if jid is None:
-            self._json({"error": "not found"}, 404)
-            return
-        jd = self.hub._job_dir(jid)
-        if not (jd / "manifest.json").exists():
-            self._json({"error": "unknown job"}, 404)
-            return
-        fail = self.hub.job_failure(jid)
-        frozen = self.hub.frozen_info(jid)
-        if (jd / "result" / "result.json").exists():
-            state = "done"
-        elif fail is not None:
-            # 终局（2026-09-17）：节点已报确定性失败——控制台与 wait_job 的收尾
-            # 二次确认都读这个 state，不必再去 /result 取 410。
-            state = "failed"
-        elif (self.hub.lease_expires_in(jid) or 0.0) > 0:
-            state = "leased"
-        elif frozen is not None:
-            # ★ 毒包熔断（§4.1）：终局状态之一（与 pending/leased 并列）。训练侧只要
-            # “还会不会有人来跑”这一个答案，而冻结的答案就是「不会，除非人工解冻」。
-            state = "frozen"
-        else:
-            state = "pending"
-        resp: dict = {"job_id": jid, "state": state}
-        # 调度面摘要（2026-09-22）：cancel-watcher 靠 `landed` 判是否停算；`computing_at`
-        # 是掉队阈值的时基；`priority` 是「我该不该继续算」的现成答案。旧读方忽略未知字段。
-        sched = self.hub.job_status(jid)
-        for k in ("landed", "ready", "computing_at", "epoch"):
-            if k in sched:
-                resp[k] = sched[k]
-        if state in ("pending", "leased") and "priority" in sched:
-            resp["priority"] = sched["priority"]
-            resp["priority_reason"] = sched["reason"]
-        if frozen is not None:
-            resp["reclaims"] = int(frozen.get("reclaims", 0) or 0)
-            resp["frozen_at"] = float(frozen.get("ts", 0.0) or 0.0)
-            resp["last_worker"] = str(frozen.get("worker", "") or "")
-        if fail is not None and state == "failed":
-            resp["reason"] = str(fail.get("reason", ""))
-            resp["fail_kind"] = str(fail.get("kind", ""))
-            self._json(resp)
-            return
-        # P3b 可观测：租约剩余秒 + 距上次心跳秒（worker 吞错保持现状，文档化——
-        # 心跳 5xx 时 worker 侧只记日志不抛，见 worker._hb_loop）。
-        if state == "leased":
-            resp["lease_expires_in"] = self.hub.lease_expires_in(jid)
-            resp["last_heartbeat_ago"] = self.hub.last_heartbeat_ago(jid)
-        self._json(resp)
-
-    # ---- GET /jobs/{id}/result ----
-    def _get_result(self) -> None:
-        if not self._auth_ok():
-            return
-        jid = self._job_id()
-        if jid is None:
-            self._json({"error": "not found"}, 404)
-            return
-        r = self.hub.get_result(jid)
-        if r is None:
-            # 410 = 这个 job **不会有结果**（节点已报确定性失败，原因在体内）。
-            # 刻意不用 404（那是「还没回来，继续等」）也不用 5xx（调用方按瞬时错误
-            # 重试）——410 让 wait_job 立刻带着原因收兵，而不是等满 25 分钟。
-            fail = self.hub.job_failure(jid)
-            if fail is not None:
-                self._json(
-                    {
-                        "job_id": jid,
-                        "failed": True,
-                        "error": str(fail.get("reason", "job failed")),
-                        "fail_kind": str(fail.get("kind", "")),
-                        "fail_detail": str(fail.get("detail", "")),
-                    },
-                    410,
-                )
-                return
-            froze = self.hub.frozen_info(jid)
-            if froze is not None:
-                # ★ 毒包熔断（§4.1）：冻结也是「不会有结果」——不把训练侧挂在 25 分钟
-                # 超时上（那正是本次事故的形态：真实原因在最里面，外面只剩一行超时）。
-                # fail_kind 与节点失败区分开（控制台/日志能一眼看出这是熔断，不是能力缺失）。
-                self._json(
-                    {
-                        "job_id": jid,
-                        "failed": True,
-                        "error": (
-                            f"job 已被 hub 熔断冻结：连续 {int(froze.get('reclaims', 0) or 0)} 次"
-                            "认领后零回传（疑似内容决定性毒包）——人工确认后 "
-                            f"POST /admin/unfreeze job_id={jid} 解冻重发"
-                        ),
-                        "fail_kind": "PoisonFrozen",
-                        "fail_detail": (
-                            f"last_worker={froze.get('worker') or '?'} "
-                            f"reclaims={int(froze.get('reclaims', 0) or 0)}"
-                        ),
-                    },
-                    410,
-                )
-                return
-            self._json({"error": "not done"}, 404)
-            return
-        # M0 统一计量：把 hub 侧传输层实测字节（additive 的 wire_hub 键）随结果
-        # 一并回给训练主循环——旧读方忽略未知键，旧 result.json 不受影响。
-        stats = self.hub.wire_stats(jid)
-        if stats:
-            r = {**r, "wire_hub": stats}
-        self._json(r)
-
-    # ---- POST /jobs/{id}/heartbeat ----
-    def _post_heartbeat(self) -> None:
-        if not self._auth_ok():
-            return
-        jid = self._job_id()
-        if jid is None:
-            self._json({"error": "not found"}, 404)
-            return
-        # H2：lease_token 必填且须与原租者一致（否则拒续）
-        lease_token = self.headers.get("X-Lease-Token", "") or self.headers.get("lease-token", "")
-        ok = self.hub.heartbeat(jid, lease_token)
-        self._json({"job_id": jid, "ok": ok}, 200 if ok else 404)
-
-    # ---- POST /jobs/{id}/release ----
-    def _post_release(self) -> None:
-        """worker 瞬时失败主动还租约（2026-09-05）：仅租约持有人可释放（H2）。"""
-        if not self._auth_ok():
-            return
-        jid = self._job_id()
-        if jid is None or not (self.hub._job_dir(jid) / "manifest.json").exists():
-            self._json({"error": "not found"}, 404)
-            return
-        lease_token = self.headers.get("X-Lease-Token", "") or self.headers.get("lease-token", "")
-        if self.hub.release(jid, lease_token):
-            self._json({"job_id": jid, "status": "released"})
-        else:
-            self._json({"error": "lease mismatch or absent — 非本 job 租约持有人"}, 403)
-
-    # ---- POST /jobs/{id}/fail（节点确定性失败回报；2026-09-17）----
-    def _post_fail(self) -> None:
-        """节点判定「这个 job 在这台机器上跑不成」时回报原因（bun 缺失 / TS 运行时
-        取不到 / argv 非法）。训练侧随后从 `GET /jobs/{id}/result` 拿到 **410 + 原因**，
-        立刻停腿——不再等 25 分钟超时（超时会把「能力缺失」写成「网络/排队问题」）。
-
-        鉴权同 release/result（H2：活租约须持有人）；首写锁定见 store_job_failure。
-        """
-        if not self._auth_ok():
-            return
-        jid = self._job_id()
-        if jid is None or not (self.hub._job_dir(jid) / "manifest.json").exists():
-            self._json({"error": "not found"}, 404)
-            return
-        try:
-            raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-        except Exception as e:
-            self._json({"error": f"read body failed: {e}"}, 400)
-            return
-        if len(raw) > FAIL_BODY_MAX:
-            self._json({"error": "fail body too large"}, 400)
-            return
-        try:
-            body = json.loads(raw.decode("utf-8"))
-        except ValueError as e:
-            self._json({"error": f"bad json: {e}"}, 400)
-            return
-        if not isinstance(body, dict) or not isinstance(body.get("reason"), str) or not body["reason"]:
-            self._json({"error": "reason 必填（非空字符串）"}, 400)
-            return
-        lease_token = self.headers.get("X-Lease-Token", "") or self.headers.get(
-            "lease-token", ""
-        )
-        if not self.hub.result_token_ok(jid, lease_token):
-            self._json({"error": "lease mismatch — 非本 job 租约持有人"}, 403)
-            return
-        rec = {
-            "reason": self._clip(body["reason"], 2000),
-            "kind": self._clip(body.get("kind", ""), 200),
-            "detail": self._clip(body.get("detail", ""), 4000),
-            "worker": self._clip(body.get("worker", ""), 200),
-            "ts": self.hub._now(),
-        }
-        recorded = self.hub.store_job_failure(jid, rec)
-        if recorded:
-            # 账本事件（审计 + 控制台训练日志可见）：训练侧与会话结束后的复盘都能
-            # 看到「哪一轮、哪台机器、为什么失败」，而不是一行超时。
-            # 多课程：账本是**每课程一份**，所以追加必须带 job_id 让调度面先解归属
-            #（旧单课程 hub 只有一份账本，不需要这个参数）。
-            self.hub.append_ledger(
-                jid,
-                {
-                    "event": "job_failed",
-                    "job_id": jid,
-                    "reason": rec["reason"],
-                    "kind": rec["kind"],
-                    "worker": rec["worker"],
-                    "ts": rec["ts"],
-                },
-            )
-            self.log_message("JOB FAILED %s: %s", jid, rec["reason"])
-        self._json(
-            {"job_id": jid, "status": "failed-recorded" if recorded else "already-recorded"}
-        )
 
     @staticmethod
     def _clip(v: object, n: int) -> str:
@@ -3284,198 +2765,6 @@ class HubHandler(AdminRoutes, BaseHTTPRequestHandler):
             self._json({"error": f"请求体截断（声明 {n}，实收 {len(raw)}）"}, 400)
             return None
         return raw
-
-    def _post_offline_artifact(self) -> None:
-        """补传一轮产物：权重 + opt + 账本行 → `<job_root>/offline/<run_id>/it-NNN/`。
-
-        鉴权与其他端点完全一致（Bearer）；**没有租约**——这条腿没有 job（全离线段连 hub
-        都不需要就能跑完）。幂等/首写锁定/指纹校验见 `store_offline_artifact`。
-        """
-        if not self._auth_ok():
-            return
-        raw = self._read_capped_body(OFFLINE_ARTIFACT_BODY_MAX)
-        if raw is None:
-            return
-        try:
-            body = json.loads(raw.decode("utf-8"))
-            if not isinstance(body, dict):
-                raise ProtocolError("补传体必须是 JSON 对象")
-            # 多课程（2026-09-18）：一个 hub 服务多门课时，补传必须自报归哪门课
-            #（① 体里的 course/course_name，节点从 job manifest 拄来；② ?course=；
-            # ③ 已有 offline/<run_id>/ 的课——补传天然会重传续投，后续自动归位）。
-            course = self.hub.locate_offline_course(body, self._query_course())
-            if course is None:
-                raise ProtocolError(
-                    "补传无法归属课程：体里带 course（或 course_name），或加 ?course=；"
-                    f"本 hub 的课程：{self.hub.courses()}"
-                )
-            res = self.hub.store_offline_artifact(course, body)
-            # 本轮随体重一并到达的云机评估行 → 课程账本（去重；失败只记一笔，
-            # **不影响**补传本身的成功与否：权重才是这一趟的硬要求）。
-            try:
-                n_eval = self.hub.merge_eval_rows(course, body.get("eval_rows"))
-                if n_eval:
-                    print(
-                        f"[{time.strftime('%H:%M:%S')}] [hub-server] eval rows +{n_eval} "
-                        f"（course={course} it{body.get('it')}）",
-                        flush=True,
-                    )
-            except Exception as e:
-                print(
-                    f"[{time.strftime('%H:%M:%S')}] [hub-server] eval rows 并入失败"
-                    f"（忽略）: {type(e).__name__}: {e}",
-                    flush=True,
-                )
-        except (ProtocolError, ValueError, UnicodeDecodeError) as e:
-            self._json({"error": f"补传被拒: {e}"}, 400)
-            return
-        if res["status"] == "accepted":
-            print(
-                f"[{time.strftime('%H:%M:%S')}] [hub-server] OFFLINE course={course or '-'} "
-                f"it{res['it']} run={res['run_id']} <- {len(raw)}B",
-                flush=True,
-            )
-        # duplicate 也回 200：补传是重试友好的（重连/重启续投会重传），409 会让节点把它
-        # 当成「没成功」每轮再传一遍——而首写锁定已经保证了内容不会变。
-        self._json(res)
-
-    def _post_offline_result(self) -> None:
-        """补传段末摘要（覆盖写：它是「这条腿现在到哪了」的最新答案）。"""
-        if not self._auth_ok():
-            return
-        raw = self._read_capped_body(OFFLINE_RESULT_BODY_MAX)
-        if raw is None:
-            return
-        try:
-            body = json.loads(raw.decode("utf-8"))
-            if not isinstance(body, dict):
-                raise ProtocolError("补传体必须是 JSON 对象")
-            course = self.hub.locate_offline_course(body, self._query_course())
-            if course is None:
-                raise ProtocolError(
-                    "段末摘要无法归属课程：体里带 course（或 course_name），或加 ?course=；"
-                    f"本 hub 的课程：{self.hub.courses()}"
-                )
-            res = self.hub.store_offline_result(course, body)
-        except (ProtocolError, ValueError, UnicodeDecodeError) as e:
-            self._json({"error": f"补传被拒: {e}"}, 400)
-            return
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server] OFFLINE course={course or '-'} "
-            f"result run={res['run_id']} it{res['it_end']}",
-            flush=True,
-        )
-        self._json(res)
-
-    # ---- POST /jobs/{id}/result ----
-    def _post_result(self) -> None:
-        if not self._auth_ok():
-            return
-        jid = self._job_id()
-        if jid is None:
-            self._json({"error": "not found"}, 404)
-            return
-        jd = self.hub._job_dir(jid)
-        if not (jd / "manifest.json").exists():
-            self._json({"error": "unknown job"}, 404)
-            return
-        try:
-            raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-        except Exception as e:
-            self._json({"error": f"read body failed: {e}"}, 400)
-            return
-        # M0 统一计量：收到的 result 请求体字节（云上行实测）——即便后面校验失败
-        # 也已实收，如实记录，供对账。
-        self.hub.record_result_recv(jid, len(raw))
-        # 竞速广播：**胜负已定就不再往下走**——结果已存在的回传一律 409（与租约无关；
-        # 赢家可能持旧 token、输家根本没 token）。必须在租约校验**之前**：否则输了竞速
-        # 的副本会因「非持有人」拿 403，而 worker 把 4xx 当确定性拒绝 → 报 job 失败。
-        if (jd / "result").exists():
-            self._json({"error": "result already stored (race loser / duplicate)"}, 409)
-            return
-        try:
-            # 方案B（2026-09-10）：v2 体（gzip 裸二进制段）**按魔数自动识别** —— 不依赖
-            # Content-Type，故旧 worker（纯 JSON）与新 worker（v2）都能收。还原出的 dict
-            # 与方案A 逐字段一致（二进制字段被重新 base64）⇒ 下游零改动。
-            if raw.startswith(WIRE_V2_MAGIC):
-                result = unpack_result_v2(raw)
-            else:
-                result = json.loads(raw.decode("utf-8"))
-        except (ValueError, ProtocolError) as e:
-            self._json({"error": f"result rejected: {e}"}, 400)
-            return
-        # 对账（job_id/data_fp/init_weights_fp/commit_echo）+ 租约校验 + 首写锁定：
-        # 走 `push_dispatch.accept_result` —— **与 hub 中介 push 派发器同一个函数**。
-        # 推模式下两条腿并存（云机 POST 上来 / hub 代发后取回），校验绝不能一条有一条无：
-        # 那正是「一份对不上账的结果被静默落盘成一轮看起来正常的训练」的入口。
-        lease_token = self.headers.get("X-Lease-Token", "") or self.headers.get(
-            "lease-token", ""
-        )
-        code, why = accept_result(
-            self.hub, jid, result, lease_token, log=lambda m: self.log_message("%s", m)
-        )
-        if code != 200:
-            self._json({"error": why}, code)
-            return
-        self._json({"job_id": jid, "status": "accepted"})
-
-    # ---- POST /jobs/{id}/epoch（BC 每 epoch 回传：权重 resume + 指标行，2026-09-13）----
-    def _post_bc_epoch(self) -> None:
-        if not self._auth_ok():
-            return
-        jid = self._job_id()
-        if jid is None or not (self.hub._job_dir(jid) / "manifest.json").exists():
-            self._json({"error": "not found"}, 404)
-            return
-        try:
-            raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-        except Exception as e:
-            self._json({"error": f"read body failed: {e}"}, 400)
-            return
-        if len(raw) > self.hub.BC_EPOCH_BODY_MAX:
-            self._json({"error": "epoch body too large"}, 400)
-            return
-        try:
-            body = json.loads(raw.decode("utf-8"))
-        except ValueError as e:
-            self._json({"error": f"bad json: {e}"}, 400)
-            return
-        # 租约口径与 result 相同：活租约须持有人（防被顶掉的旧 worker 用旧 epoch
-        # 覆盖新 resume）；无租约（过期/释放/重启后）照收——resume 是幂等覆盖存最新。
-        lease_token = self.headers.get("X-Lease-Token", "") or self.headers.get(
-            "lease-token", ""
-        )
-        if not self.hub.result_token_ok(jid, lease_token):
-            self._json({"error": "lease mismatch — 非本 job 租约持有人"}, 403)
-            return
-        if not self.hub.store_bc_epoch(jid, body):
-            self._json({"error": "invalid epoch body"}, 400)
-            return
-        self._json({"job_id": jid, "status": "accepted"})
-
-    # ---- GET /jobs/{id}/resume（最新 epoch 权重——worker 重领时接续训练）----
-    def _get_bc_resume(self) -> None:
-        if not self._auth_ok():
-            return
-        jid = self._job_id()
-        if jid is None:
-            self._json({"error": "not found"}, 404)
-            return
-        r = self.hub.get_bc_resume(jid)
-        if r is None:
-            self._json({"error": "no resume checkpoint"}, 404)
-            return
-        self._json(r)
-
-    # ---- GET /jobs/{id}/bc-metrics（训练机/run_bc 轮询每 epoch 指标行）----
-    def _get_bc_metrics(self) -> None:
-        if not self._auth_ok():
-            return
-        jid = self._job_id()
-        if jid is None:
-            self._json({"error": "not found"}, 404)
-            return
-        self._json({"job_id": jid, "rows": self.hub.get_bc_metrics(jid)})
 
 
 def as_hub(store_or_hub: _JobStore | _HubQueue) -> _HubQueue:

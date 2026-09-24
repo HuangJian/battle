@@ -847,6 +847,15 @@ FAIL_NAME = "fail.json"
 #: 失败原因回传体上限（人读的诊断字符串，1 个文本块足够；防大体打爆 hub 磁盘）。
 FAIL_BODY_MAX = 64 * 1024
 
+#: `POST /jobs/{id}/start|ready|abandon` 与 `/jobs/priority` / `/jobs/{id}/claim` 的请求体上限：
+#: 都是小 JSON（job_id / worker_id / held 列表），比 fail 体小得多。有界是硬要求（远端体绝不
+#: 信 Content-Length 之外的暗示）。住协议层：hub 的路由组与调度面都要它。
+PRIORITY_BODY_MAX = 64 * 1024
+#: `GET /jobs/peek?n=K` 一次最多返回的候选数（软持有深度缺省 3 的上界；防一个 worker 把队首
+#: 扫空）。两个读者分住 `hub.schedule`（端点）与 `hub_server`（`_HubQueue.peek_jobs` 形参默认
+#: 值），谁也 import 不了谁 ⇒ 必须住两边都能 import 的协议层。
+PEEK_MAX = 16
+
 # ---- 产物补传（「中途能连上 hub 就自动回传」；2026-09-17）----
 # 全离线/半离线段把逐轮产物落在**节点本地**（Kaggle working / Colab Drive），产物本身就
 # 是交付面；补传是**第二份拷贝**：节点一旦探到 hub 可达，就 best-effort 把已落盘的轮次
