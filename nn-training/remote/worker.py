@@ -145,9 +145,6 @@ from remote.job_fs import (
     JOB_DIR_KEEP as JOB_DIR_KEEP,
 )
 from remote.job_fs import (
-    _ensure_commit as _ensure_commit,
-)
-from remote.job_fs import (
     _git_head as _git_head,
 )
 from remote.job_fs import (

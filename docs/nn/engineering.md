@@ -763,7 +763,10 @@ HubHandler(AdminRoutes, ScheduleRoutes, ResultRoutes, BlobRoutes, OfflineRoutes,
 设计见 `plan/nn-training-refactor.md` §5.3。
 `TrainingSteps` 本体还剩 952 行 / 20 方法（切法是「按一条真实调用链切」，不是按行数等分）。
 
-**还挂着一项清理**：`remote/job_fs._ensure_commit` 是既存死代码（全仓零调用，只搬未删）。
+**✅ 清理已做（2026-09-24，第十二刀）：`remote/job_fs._ensure_commit` 已删**——第六步之一登记的
+既存死代码（全仓零调用，只搬未删）。同时删 `job_fs.__all__` 条目、`worker.py` 的门面转发、
+`tests/test_job_fs_split.py` 的清单与 docstring；`REPO_ROOT` 从「`_git_head` / `_ensure_commit` 共用」
+缩成「只被 `_git_head` 用」。
 
 ---
 

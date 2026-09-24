@@ -1,7 +1,7 @@
 """拆分的**契约守卫**：作业工作区 / TAR / git 物化永住 `remote/job_fs.py`（S4 第六步之一，2026-09-23）。
 
 搬走的组：`REPO_ROOT` · `JOB_DIR_KEEP` · `_persist_result` · `prune_job_dirs` · `unpack_opt_tar` ·
-`pack_opt_tar` · `unpack_payload_or_fail` · `_git_head` · `_ensure_commit`。
+`pack_opt_tar` · `unpack_payload_or_fail` · `_git_head`。
 
 本文件钉五件事：
 
@@ -34,7 +34,6 @@ WORKER_FILE = ROOT / "remote" / "worker.py"
 MOVED_NAMES = {
     "JOB_DIR_KEEP",
     "REPO_ROOT",
-    "_ensure_commit",
     "_git_head",
     "_persist_result",
     "pack_opt_tar",

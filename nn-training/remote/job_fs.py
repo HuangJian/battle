@@ -3,8 +3,8 @@
 从 `remote/worker.py` 搬出来的「本地这一侧怎么摆作业的物料与产物」：`REPO_ROOT` ·
 `JOB_DIR_KEEP` + `prune_job_dirs`（工作目录轮转，豁免内容寻址缓存与预取暂存）·
 `unpack_opt_tar` / `pack_opt_tar`（opt 快照的 TAR 收放）· `unpack_payload_or_fail`（归档层异常
-统一转 `ProtocolError`）· `_persist_result`（结果落盘，回传失败重领时幂等复用）· `_git_head` /
-`_ensure_commit`（代码物化到目标 commit）。
+统一转 `ProtocolError`）· `_persist_result`（结果落盘，回传失败重领时幂等复用）· `_git_head`
+（当前 HEAD 读数，给证据/对账用）。
 
 ## 为什么它是「底座」
 
@@ -17,7 +17,7 @@
 
 本组**无 monkeypatch 接缝**（全仓对 `prune_job_dirs` / `unpack_payload_or_fail` / `_persist_result`
 的引用都是**直接调用**，无 `setattr`）⇒ `worker.py` 的显式转发就够，测试一行不改。
-唯一要注意的是 `REPO_ROOT`：它只被 `_git_head` / `_ensure_commit` 使用，随组搬迁；
+唯一要注意的是 `REPO_ROOT`：它只被 `_git_head` 使用，随组搬迁；
 本模块在 `remote/` 下，`Path(__file__).resolve().parent.parent` 与原值同一个 nn-training 根。
 """
 
@@ -35,7 +35,6 @@ from remote.prefetch import PREFETCH_DIR_NAME
 __all__ = [
     "JOB_DIR_KEEP",
     "REPO_ROOT",
-    "_ensure_commit",
     "_git_head",
     "_persist_result",
     "pack_opt_tar",
@@ -160,25 +159,3 @@ def _git_head(repo_root: Path = REPO_ROOT) -> str:
     except Exception:
         pass
     return ""
-
-
-def _ensure_commit(target: str, repo_root: Path = REPO_ROOT, log=lambda msg: None) -> bool:
-    """确保本地 HEAD 等于 target commit。不等则 git fetch + checkout 自动修复。
-
-    返回 True（一致）或 False（重试 5 次后仍不一致）。
-    """
-    for attempt in range(5):
-        head = _git_head(repo_root)
-        if head and head == target:
-            return True
-        log(
-            f"commit mismatch: HEAD={head[:12] if head else '?'} "
-            f"target={target[:12]} — fetching (attempt {attempt + 1}/5)"
-        )
-        try:
-            run_capture(["git", "fetch", "origin"], cwd=repo_root, timeout=60)
-            run_capture(["git", "checkout", target], cwd=repo_root, timeout=30)
-        except Exception as e:
-            log(f"git fetch/checkout failed: {e}")
-    head = _git_head(repo_root)
-    return head == target
