@@ -40,6 +40,9 @@ process.env.BCITY_LOCKS_DIR = path.join(DIR, 'locks')
 // 离线开课会自动触发任务包导出（真起 run_rl 子进程）——本套件盯的是开课生命周期，
 // 关掉这个副作用（导出正确性由 server-api-task-bundle 套件覆盖）。
 process.env.BCITY_NO_AUTO_TASK_BUNDLE = '1'
+// 同理关掉「离线开课自动补 it0 基线评估」（2026-09-24）：那是 evalA 真子进程（几百局游戏）。
+// 它自己的 argv/三态由 eval-a-baseline 套件钉；本套件只保证**它不再被真起**。
+process.env.BCITY_NO_AUTO_BASELINE_EVAL = '1'
 mkdirSync(path.join(DIR, 'traj'), { recursive: true })
 mkdirSync(path.join(DIR, 'locks'), { recursive: true })
 writeFileSync(
@@ -284,13 +287,20 @@ describe('openCourse：课程级旋钮只落 courses.<课>', () => {
   })
 
   it('离线：声明 + 段长两把键成对落课程级（缺一不可）', async () => {
-    await openCourse(COURSE, { trainMode: 'offline', hubMode: { attempts: 1, delayMs: 0 } })
+    const r = await openCourse(COURSE, {
+      trainMode: 'offline',
+      hubMode: { attempts: 1, delayMs: 0 },
+    })
     expect(courseKeys()).toMatchObject({ rollout_src: 'run', run_iters: -1 })
     // ★ 全局键（所有课共用的默认面）一个字不动——离线是**这门课**的决定
     const cfg = JSON.parse(readFileSync(process.env.BCITY_RL_CONFIG!, 'utf-8')) as {
       rl: Record<string, unknown>
     }
     expect(cfg.rl.rollout_src).toBeUndefined()
+    // 逃生阀置位 ⇒ **不**补 it0 基线（回执里没有那行 note、互斥键没被占 = 没起 evalA 子进程）；
+    // 反向（真补）由 eval-a-baseline 套件按 argv/三态钉，不在用例里真跑几百局。
+    expect(r.detail!.join('\n')).not.toContain('it0 基线')
+    expect(actions.busy.has('eval:A')).toBe(false)
   })
 
   it('在线 + rollout 位置：写课程级覆盖（不碰全局 rl.rollout_src）', async () => {

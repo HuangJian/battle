@@ -30,8 +30,36 @@ export interface EvalALaunch {
   pid?: number
 }
 
+/** 启动选项：`baseline` = it0 基线（离线开课自动补跑，见 course-lifecycle）。 */
+export interface EvalALaunchOpts {
+  /** `--baseline`：python 侧评课程活动权重 W(0)（`--iter` 恒 0），`ckpt` 可留空。 */
+  baseline?: boolean
+}
+
+/** evalA 一次性进程的 argv（纯函数，便于测试——同 `taskBundleArgs`）。
+ *
+ *  `ckpt` 空串 = 交给 python 侧按模式取（baseline → 课程活动权重 `out`）：**空就不传
+ *  这个 flag**——`--ckpt ''` 到 python 手里 `Path("")` 是 `.`（存在！），会被当权重算指纹。 */
+export function evalAArgs(
+  course: string,
+  ckpt: string,
+  iter: number,
+  opts: EvalALaunchOpts = {},
+): string[] {
+  const argv = [path.join(REPO_ROOT, 'nn-training', 'rl', 'eval_a_once.py'), '--course', course]
+  if (ckpt) argv.push('--ckpt', ckpt)
+  argv.push('--iter', String(iter), '--bun', 'bun')
+  if (opts.baseline) argv.push('--baseline')
+  return argv
+}
+
 /** 起一次 evalA（detach；互斥键在子进程退出时释放）。 */
-export function launchEvalA(course: string, ckpt: string, iter: number): EvalALaunch {
+export function launchEvalA(
+  course: string,
+  ckpt: string,
+  iter: number,
+  opts: EvalALaunchOpts = {},
+): EvalALaunch {
   if (busy.has(EVAL_A_BUSY_KEY)) return { ok: false, message: 'evalA 已在运行' }
   busy.add(EVAL_A_BUSY_KEY)
   const logFile = evalALogPath(course)
@@ -39,27 +67,13 @@ export function launchEvalA(course: string, ckpt: string, iter: number): EvalALa
   try {
     mkdirSync(path.dirname(logFile), { recursive: true })
     const out = openSync(logFile, 'a')
-    const child = spawn(
-      python,
-      [
-        path.join(REPO_ROOT, 'nn-training', 'rl', 'eval_a_once.py'),
-        '--course',
-        course,
-        '--ckpt',
-        ckpt,
-        '--iter',
-        String(iter),
-        '--bun',
-        'bun',
-      ],
-      {
-        cwd: path.join(REPO_ROOT, 'nn-training'),
-        detached: true,
-        stdio: ['ignore', out, out],
-        windowsHide: true,
-        env: { ...process.env, ...env },
-      },
-    )
+    const child = spawn(python, evalAArgs(course, ckpt, iter, opts), {
+      cwd: path.join(REPO_ROOT, 'nn-training'),
+      detached: true,
+      stdio: ['ignore', out, out],
+      windowsHide: true,
+      env: { ...process.env, ...env },
+    })
     const release = () => {
       busy.delete(EVAL_A_BUSY_KEY)
       try {
@@ -73,7 +87,9 @@ export function launchEvalA(course: string, ckpt: string, iter: number): EvalALa
     child.unref()
     return {
       ok: true,
-      message: `evalA 已启动 it${iter}（课程干净评估 → eval_log；日志 tmp/${course}/evalA.log）`,
+      message:
+        `evalA 已启动 ${opts.baseline ? 'it0 基线' : `it${iter}`}` +
+        `（课程干净评估 → eval_log；日志 tmp/${course}/evalA.log）`,
       pid: child.pid,
     }
   } catch (e) {

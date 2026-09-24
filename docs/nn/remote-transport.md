@@ -7,6 +7,47 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §42 离线腿的 it0 基线：控制台在「离线开课」那一刻补评段起点（2026-09-24）
+
+**缺口（不是猜测）**：离线档 = `courses.<课>.rollout_src:'run'`（本机不跑训练）⇒ it0 读数两条产路
+都不通——云机侧 `remote/offline_eval.CloudEvalPlan.due()` 对 `it < 1` 恒 `False`（it0 是「本机主循环
+的事」），而本机主循环的基线派发（`rl/loop_core._maybe_dispatch_baseline_eval`）在这条腿上压根不在
+场上。代价不是少一行：控制台的配对基线是 `evalIters.includes(0) ? 0 : evalIters[0]`
+（`dashboard/src/server/iters.ts:1034`）⇒ 缺 it0 时退化成「拿第一条 eval 轮当基线」，随 run 起点漂移，
+跨腿（如 x20-demo-mix vs x20-firstkill）失去共同锚。
+
+**修法**：控制台「以离线模式开课」那一刻补派一次（`course-lifecycle.openCourse` →
+`launchEvalA(course, '', 0, { baseline: true })` → `rl/eval_a_once.py --baseline`）。评的是
+**课程活动权重 `out` = 本段起点 W(0)**，也就是任务包 manifest 里 `init_weights` 的**同一份字节**
+（导出即从 `args.out` 取；`prepareCourseForOpen` 缺文件时从课程 `bc` 字节复制播种 ⇒ 新课的 out 与
+bc 同 wver，与历史腿的 in-loop 锚天然对齐）；`--iter` 恒 0，派发照走两腿共用那条路
+（`dispatch_eval_round(baseline=True)`，账本按 `iter` 隔离去重、快照文件名分流都是现成的）。
+同 wver 的 it0 summary 已落账 ⇒ 早退不重派（离线课「停课→重开」不重评）。
+
+**两个坑（写下来免得下次踩）**：
+- `baseline_summary_landed(traj_dir, wver)` 收的是**轮目录**（内部取 `traj_dir.parent / "eval_log.jsonl"`，
+  `rl/eval_local.py:803-829`）——传课程目录会去读上一级的 `tmp/eval_log.jsonl`，**恒 False**（早退失效、
+  每次开课白评一次）。本实现用同口径的 `eval_a_once._read_summary(eval_jsonl, w16, 0)`（读同一册、
+  判据逐字相同）。
+- `Path("")` 是 `.`（存在）⇒ `--ckpt` 空串会被当成目录去算指纹。TS 侧 `ckpt` 为空时**整条
+  `--ckpt` 都不传**，python 侧显式判空（非 baseline 缺 ckpt 仍响亮退 2）。
+
+**成本**：baseline 语料 = `EVAL_SEEDS[:n]`（`should_dual_track(n, baseline=True) = False` ⇒ 无轮转轨）
+= **关数 × `eval_games_per_stage`**。x20 课（4 关 × 50）= 200 局，是 A-eval（4×100 双轨 400）的一半；
+`eval_games_per_stage` 为 100/200 的课与 A-eval 等量。
+
+**门禁证据**：`tests/test_eval_a_once.py`（+4 例：缺省取 out / 已落账早退 / 缺 ckpt 拒 / iter≠0 拒）·
+`dashboard/tests/eval-a-baseline.test.ts`（argv 形状 + `shouldAutoBaseline` 三态）·
+`course-lifecycle.test.ts`（逃生阀置位不起子进程）· ruff/mypy 全绿、`pytest tests/ e2e/` 2283 passed、
+`dashboard` 1143 passed、根 `bun run check` 2139 passed。
+
+**真机判据未取**（见 `docs/nn.progress.md` §3.3 第 12 条）：点一次离线开课 ⇒ `tmp/<课>/evalA.log`
+出现 `[evalA] DONE it0 …`；**等第一轮回传落账后**（指标表的 it0 合成行需要 ≥1 条 `iter>0` 的
+`iteration` 行）控制台出现 it0 行、配对基线回到 0。字节同一性有个秒级前提：回传轮会原子推进
+`tmp/<课>/weights.json`，核对入口是 `[evalA] … wver=…` 那行 vs 包 manifest 的 `init_weights_fp`
+（不自动对账——错了能看出来就够）。
+
+---
 ## §41 离线 cell 重跑以本机产物为准 + hub 递包前判新鲜度（plan/offline-rerun-local-first.plan.md，2026-09-24）
 
 用户 2026-09-24 口径两条：①「停止 cell 后再 run，应该要能接着机器上已经跑过的 it 继续跑，而不是从 hub 取
@@ -4220,6 +4261,38 @@ job 级 `uploaded` 标志 + 主循环 `try/finally` 收尾 + `--result-upload`�
 `out_overlap_sec` + 渲染行；旧日志缺省当 0）· `tests/test_async_result_upload.py`（新，18 例）·
 `tests/test_wire_report.py`（async/sync 对照 + 旧日志兼容）。设计稿 `plan/transfer-scheduling.plan.md`
 §1.1 / §4 P2.5 / §9.5；进度 `docs/nn/remote-transport.md` §31。
+
+---
+
+### §2026-09-24-offline-it0-baseline
+
+**背景**：离线腿（`rollout_src:'run'`）没有 it0 读数——云机 `offline_eval.due()` 对 `it<1` 恒 False、
+本机主循环不在场上；而控制台的配对基线必须有 it0 才不随 run 起点漂移（跨腿配对失去共同锚，见
+`docs/nn/remote-transport.md` §42）。
+
+**决定**：把这一格交给**控制台在离线开课那一刻**补评（`launchEvalA(course, '', 0, {baseline:true})`），
+评课程活动权重 `out`（= 任务包 `init_weights` 同一份字节 = 段起点 W(0)），`iter` 恒 0，同 wver 已落账
+即早退；**云机侧一律不动**。判据按 wver（不是按「开课次数」）——换起点权重才重评。
+
+**被否决**：
+- **云机侧评 it0**（`due()` 放行 `it==0` + boot 期用包内 init_weights 评一轮）：字节同一性由构造保证，
+  但要在云侧另接一套派发/账本/产物目录约定，而 hub 侧 `dispatch_eval_round` 本来就是两腿共用那条路
+  （`iter=0` 与 A-eval 的账本隔离早已为共存设计）。收益（消灭秒级时序竞态）不抵接线面。
+- **控制台加「补跑 it0」按钮**：UI 改动 + `dashboard/src/server/build.ts` 三件套，而恢复路径已有等价物
+  ——「停课 → 重新开课」会再派一次（同 wver 命中即秒退，代价零）。
+- **包内 `init_weights` 自动对账**：要在导出/评估之间搬一份可写快照，成本不抵收益；改为在
+  `[evalA] … wver=…` 日志行里留核对入口。
+
+**违反后果**：① 缺 it0 ⇒ 配对基线退化成「首条 eval 轮」（跨腿不可比，`iters.ts:1034`）；
+② baseline 的 `iter` 被写成非 0 ⇒ 控制台把它当成那一轮的读数（启动期已响亮拒守护）；
+③ 幂等判据若改回 `baseline_summary_landed(课程目录, …)` ⇒ 恒 False，每次开课白评一轮；
+④ `--ckpt ''` 落到 python 手里是 `.`（存在）⇒ 拿目录算指纹（TS 侧空就不传 flag，已守护）。
+
+**落地物**：`nn-training/rl/eval_a_once.py`（`--baseline` / ckpt 缺省取 `ns.out` / `iter` 必 0 /
+同 wver 早退 / 透传 `baseline`）· `dashboard/src/server/eval-a-run.ts`（`evalAArgs` 纯函数 + opts）·
+`dashboard/src/server/actions/course-lifecycle.ts`（`shouldAutoBaseline` + 开课后 best-effort 派发 + 回执 note）·
+`nn-training/tests/test_eval_a_once.py`（+4 例）· `dashboard/tests/eval-a-baseline.test.ts`（新）·
+`dashboard/tests/course-lifecycle.test.ts`（逃生阀 + 不派发断言）。plan：`plan/offline-it0-baseline-eval.plan.md`。
 
 ---
 

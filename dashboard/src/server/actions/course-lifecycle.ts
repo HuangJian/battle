@@ -37,6 +37,7 @@ import { applyTrainModeToConfig } from './train-mode'
 import { readLoopControl, setCoursePaused } from './loop-control'
 import { loopControlPath } from '../../core/paths'
 import { launchTaskBundleExport } from '../bundles'
+import { launchEvalA } from '../eval-a-run'
 import { ActionError, ActionResult, done, guard, release } from './result'
 import { runRlLockHolder } from './labels'
 import { runBcLockHolder, runClusterLockHolder } from './start'
@@ -252,6 +253,19 @@ export function courseRunnerFacts(course: string, bc: boolean): CourseRunnerFact
   return { holder, cluster, conflict: holder && holder !== cluster ? holder : null }
 }
 
+/** 离线开课要不要顺手补一次 **it0 基线评估**（纯函数：模式 + 测试逃生阀，便于钉住）。
+ *
+ *  为什么在开课那一刻补（2026-09-24）：离线档 = `rollout_src:'run'`（**本机不跑训练**），
+ *  于是 it0 读数两条产路都不通——云机侧 `remote/offline_eval.CloudEvalPlan.due()` 对
+ *  `it < 1` 恒 False，而本机主循环的基线派发（`loop_core._maybe_dispatch_baseline_eval`）
+ *  压根不在场上。缺了它，控制台的配对基线退化成「第一条 eval 轮」（随 run 起点漂移，
+ *  跨腿不可比：`iters.ts` 的 `evalIters.includes(0) ? 0 : evalIters[0]`）。
+ *
+ *  `BCITY_NO_AUTO_BASELINE_EVAL`：测试逃生阀（同 `BCITY_NO_AUTO_TASK_BUNDLE`——用例不开真子进程）。 */
+export function shouldAutoBaseline(trainMode: TrainMode): boolean {
+  return trainMode === 'offline' && !process.env.BCITY_NO_AUTO_BASELINE_EVAL
+}
+
 /** **开课**：把一门课放进训练（进程没跑也能放——训练进程是发现式的，下一拍就入队）。 */
 export async function openCourse(course: string, opts: OpenCourseOpts = {}): Promise<ActionResult> {
   guard(`course-open:${course}`)
@@ -362,6 +376,14 @@ export async function openCourse(course: string, opts: OpenCourseOpts = {}): Pro
       trainMode === 'offline' && !process.env.BCITY_NO_AUTO_TASK_BUNDLE
         ? launchTaskBundleExport(c)
         : null
+    // ★ 2026-09-24：离线开课 = 本机不跑训练 ⇒ 云腿永远产不出 it0 读数（见
+    //   `shouldAutoBaseline` 的理由）。这里补一次：python 侧评的是**本段起点权重**
+    //   （缺省取课程 `out` = 任务包 manifest 里 init_weights 的同一份字节；`prepareCourseForOpen`
+    //   已保证该文件存在——缺它会从 bc 播种，播种失败则开课早就抛了）。
+    //   best-effort：起不来只记 note，**绝不让开课失败**；结果从 eval_log.jsonl 回填。
+    const autoBaseline = shouldAutoBaseline(trainMode)
+      ? launchEvalA(c, '', 0, { baseline: true })
+      : null
     return done(
       true,
       `已开课 ${c}（训练模式 ${trainMode === 'offline' ? '离线（整段上云）' : '在线'}）` +
@@ -383,6 +405,13 @@ export async function openCourse(course: string, opts: OpenCourseOpts = {}): Pro
                   : []),
               ]
             : [`任务包自动导出未能启动（${autoExport.message}）——可稍后在课程行手动「导出任务包」`]
+          : []),
+        ...(autoBaseline
+          ? autoBaseline.ok
+            ? [
+                `it0 基线评估已后台启动（it0 = 本段起点权重；读数回填 eval_log，日志 tmp/${c}/evalA.log）`,
+              ]
+            : [`it0 基线评估未能启动（${autoBaseline.message}）——停课 → 重新开课会自动补跑`]
           : []),
         ...(trainMode === 'offline'
           ? ['离线课重启 = 重新导出任务包（代码可能已变）：停课后重新开课即重打一份带当前代码的包']

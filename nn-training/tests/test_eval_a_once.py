@@ -12,8 +12,11 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 from pathlib import Path
+
+import pytest
 
 from rl import eval_a_once
 
@@ -103,3 +106,144 @@ def test_write_summary_for_wver_no_rows_returns_zero(tmp_path: Path) -> None:
     p.write_text(json.dumps(_row(wver="d" * 16)) + "\n", encoding="utf-8")
     assert eval_a_once._write_summary_for_wver(p, "a" * 16, 177, time.time()) == 0
     assert eval_a_once._read_summary(p, "a" * 16, 177) is None
+
+
+# ── it0 基线（`--baseline`；离线开课由控制台补派，2026-09-24） ─────────────────────
+# 为什么钉：离线课「本机不跑训练」（`rollout_src:'run'`）⇒ 主循环的基线派发不在场上，
+# 云机又恒不评 it<1 ⇒ 这一格只能由**手动 evalA 这条同路**补。缺口表现是静默的：控制台
+# 的配对基线会退化成「第一条 eval 轮」（随 run 起点漂移）。
+
+
+def _course_file(tmp_path: Path, out: Path, traj: Path) -> Path:
+    """最小课程 jsonc（只喂 eval_a_once 真正读的键；`extra=forbid` ⇒ 键必须合法）。"""
+    p = tmp_path / "t-baseline.jsonc"
+    body = {
+        "name": "t-baseline",
+        "out": str(out).replace("\\", "/"),
+        "traj": str(traj).replace("\\", "/"),
+        "eval_stages": "2000",
+        "eval_games_per_stage": 2,
+        "eval_every": 1,
+    }
+    p.write_text(json.dumps(body), encoding="utf-8")
+    return p
+
+
+def _ledger_rows(traj: Path) -> list[dict]:
+    p = traj / "eval_log.jsonl"
+    if not p.exists():
+        return []
+    return [json.loads(x) for x in p.read_text(encoding="utf-8").splitlines() if x.strip()]
+
+
+def _run_main(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> int:
+    monkeypatch.setattr(sys, "argv", ["eval_a_once.py", *argv])
+    return eval_a_once.main()
+
+
+def test_main_baseline_defaults_ckpt_to_course_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--baseline` 不给 `--ckpt` ⇒ 取课程活动权重 `out`（与任务包 init_weights 同字节），
+    派发照旧走 in-loop 那条路（baseline=True / iter=0），读数按账本回填。"""
+    out = tmp_path / "weights.json"
+    out.write_text('{"w": 1}', encoding="utf-8")
+    traj = tmp_path / "traj"
+    course_p = _course_file(tmp_path, out=out, traj=traj)
+
+    import dist_common
+    from rl import eval_dispatch
+
+    seen: dict = {}
+
+    def _fake_dispatch(bun, rl_path, traj_dir, args, cfg, iter_id, it, **kw):
+        seen.update(rl_path=rl_path, it_dir=Path(traj_dir), it=it, iter_id=iter_id, **kw)
+        # 落一条逐局行（与真派发器同册同 schema）——把 main 的读回/回填路径真的走一遍。
+        fp = dist_common.weights_fingerprint(rl_path)[:16]
+        with open(Path(traj_dir).parent / "eval_log.jsonl", "a", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "event": "eval",
+                        "iter": it,
+                        "wver": fp,
+                        "stage": 2000,
+                        "seed": 1,
+                        "node": "test",
+                        "win": 1,
+                        "cleared": 1,
+                        "outcome": "stage_clear",
+                    }
+                )
+                + "\n"
+            )
+
+    monkeypatch.setattr(dist_common, "load_dist_config", lambda: {})
+    monkeypatch.setattr(eval_dispatch, "dispatch_eval_round", _fake_dispatch)
+
+    rc = _run_main(monkeypatch, ["--course", str(course_p), "--iter", "0", "--baseline"])
+
+    assert rc == 0
+    assert seen["rl_path"] == str(out)  # 起点权重 = 课程 out，不是别的
+    assert seen["it"] == 0 and seen["baseline"] is True
+    assert seen["iter_id"] == "evalA.0"
+    fp = dist_common.weights_fingerprint(str(out))[:16]
+    summ = [r for r in _ledger_rows(traj) if r.get("event") == "eval_summary"]
+    assert summ and summ[-1]["iter"] == 0 and summ[-1]["wver"] == fp
+
+
+def test_main_baseline_skips_when_summary_landed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """同 wver 的 it0 summary 已落账 ⇒ 早退 0 且**不派发**（离线课「停课→重开」不重评）。"""
+    out = tmp_path / "weights.json"
+    out.write_text('{"w": 2}', encoding="utf-8")
+    traj = tmp_path / "traj"
+    traj.mkdir(parents=True, exist_ok=True)
+    course_p = _course_file(tmp_path, out=out, traj=traj)
+
+    import dist_common
+    from rl import eval_dispatch
+
+    fp = dist_common.weights_fingerprint(str(out))[:16]
+    (traj / "eval_log.jsonl").write_text(
+        json.dumps({"event": "eval_summary", "iter": 0, "wver": fp, "games": 2, "wins": 1}) + "\n",
+        encoding="utf-8",
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(dist_common, "load_dist_config", lambda: {})
+    monkeypatch.setattr(eval_dispatch, "dispatch_eval_round", lambda *a, **k: calls.append("x"))
+
+    assert _run_main(monkeypatch, ["--course", str(course_p), "--iter", "0", "--baseline"]) == 0
+    assert calls == []
+
+
+def test_main_requires_ckpt_without_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """非 baseline 仍要显式权重路径（旧行为：缺了就响亮退 2，不猜）。"""
+    out = tmp_path / "weights.json"
+    out.write_text('{"w": 3}', encoding="utf-8")
+    traj = tmp_path / "traj"
+    course_p = _course_file(tmp_path, out=out, traj=traj)
+
+    import dist_common
+    from rl import eval_dispatch
+
+    calls: list[str] = []
+    monkeypatch.setattr(dist_common, "load_dist_config", lambda: {})
+    monkeypatch.setattr(eval_dispatch, "dispatch_eval_round", lambda *a, **k: calls.append("x"))
+
+    assert _run_main(monkeypatch, ["--course", str(course_p), "--iter", "27"]) == 2
+    assert calls == []
+
+
+def test_main_baseline_rejects_nonzero_iter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--baseline` 的 iter 必为 0：落进别的 iter 槽会被当成那一轮的读数（响亮拒）。"""
+    out = tmp_path / "weights.json"
+    out.write_text('{"w": 4}', encoding="utf-8")
+    course_p = _course_file(tmp_path, out=out, traj=tmp_path / "traj")
+
+    assert _run_main(monkeypatch, ["--course", str(course_p), "--iter", "3", "--baseline"]) == 2
