@@ -1451,6 +1451,108 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
 - **刻意不动**：`docs/nn/training-stack.md` 里带日期的历史记录（R2a 落地记等）不改写；只把一处**当前**
   接线图里的 `loop_core._setup_common` 改成 `loop_lifecycle._setup_common`。
 
+### 第二十刀（2026-09-25）：组合根收尾——三簇叶子出组合类，`TrainingLoop` 变**纯组合类**
+
+用户指令：「拆 `loop_core` 剩下的基线评估链（2 成员）与叶子方法，让组合根成为纯组合类」。
+`rl/loop_core.py` **446 → 240 行**；新模块三件（合计 355 行 = 128 + 96 + 131）：`rl/loop_baseline.py::TrainingBaseline`
+（2 成员）· `rl/loop_iter_dir.py::TrainingIterDir`（2 成员）· `rl/loop_dispatch.py::TrainingDispatch`
+（3 成员）。组合根余下**只有** `__init__` + `_run_inspect`。
+
+#### 分组判据：不是「按大小」，是「判据同源」
+
+侦察器（AST）先把 7 个叶子按**它们各自被哪一步调**分组（S17 起一直是这套量法）：
+
+| 新家 | 成员 | 判据（谁调它 / 同源在哪） |
+|---|---|---|
+| `loop_baseline.py` | `_baseline_eval_weights` · `_maybe_dispatch_baseline_eval` | it0 基线（wver 指纹 + 落地摘）——`step_course_iter` |
+| `loop_iter_dir.py` | `_prepare_iter_dir` · `_check_quota_incident` | **`self._traj_dir` 里有没有本轮的活**——`step_prepare_iter` / `step_course_iter` |
+| `loop_dispatch.py` | `_rollout_phase` · `_eval_on_round` · `_evalboard_yield` | **本轮把活派给谁 / 让位给谁**——`step_rollout` / `step_eval_dispatch` / `step_record_iteration` |
+
+#### 宿主：三簇都挂 `RoundSteps` 一侧（**组合根一行不改**）
+
+mixi 级父调用者**全部**是 `RoundSteps`。`_eval_on_round` 另有 `TrainingEval` / `TrainingGuards` 两个
+sibling 调用者，但三者**互不继承**却不构成「必须挂组合根」的理由——`RoundSteps` 是组合根的**第一个
+基类**，挂在它的基类里就已经在 `TrainingLoop` 的线性化上了（与第十九刀的区别：那刀的两个 caller
+**都是**组合根的基类，交集为空 ⇒ 只能挂组合根；本刀有一个共同调用者 = `RoundSteps` ⇒ 挂它就够）。
+
+```
+class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDispatch):
+```
+
+⇒ `TrainingLoop.__bases__` 逐字不变（四件套），S17/S18/S19 三处「组合类元组」断言**两句不改**；
+但「全量 MRO 名单」与 `RoundSteps.__bases__` 的**唯一所有权**收进本刀守卫（S18/S19 那两处改成只钉
+相对位置），避免同一份名单在三处各自漂。
+
+#### ★ 顺序契约：`_eval_on_round` 的真实现必须**早于**占位
+
+`rl/loop_eval.py` 里有一个**占位** `_eval_on_round`（body `raise`，S4 第十七刀随簇搬去）：真实现必须在
+MRO 里更靠前，否则占位反过来胜出 ⇒ 静默返回 falsy 把 eval 全关掉。挂 `RoundSteps` 一侧天然满足
+（`TrainingDispatch` 的位置早于 `TrainingEval`）；守卫 `test_eval_on_round_position_contract` 同时钉
+「真实现对象恒等」「裸 `TrainingEval` 调它响亮报错」。这也是本刀唯一一条**真约束**——它决定了
+「把三簇挪到组合根末位」这个看似更整齐的方案**是错的**（反探针 ⑤ 实测变红即是这条）。
+
+#### 结构性例外：`_run_inspect` + `run_inspect` 必须同住组合根
+
+`_run_inspect` 按**模块全局**解析 `run_inspect`（那是文档化的可替换点，`rl/loop.py` 再导出它）。两者必须
+同住一个模块，而那个模块**不能** import `rl.loop_core`（它 import 当基类 ⇒ 成环）⇒ 「纯组合类」在本仓的
+答案是**是，但留一个方法**。守卫 `test_composition_root_keeps_only_the_structural_pair` 正面钉住这条闭集
+（`{__init__, _run_inspect}`）——它同时是用户目标的**自动化验收**。
+
+#### 三张跨模块手表（入边 / 出边 / 槽位）+ 写手唯一
+
+- **入边闭集**：`_check_quota_incident` 1 · `_prepare_iter_dir` 1 · `_rollout_phase` 1 · `_eval_on_round` 3 ·
+  `_evalboard_yield` 1 · `_maybe_dispatch_baseline_eval` 1（全在 `loop_round_steps.py`，除 `_eval_on_round`）。
+- **出边为空**：三簇互不调兄弟方法（7 个方法级内调零——它们是叶子）。
+- **槽位写手唯一**（S4 第十九刀那条表移交过来并**收紧**）：`_course_fp` / `_corpus_fp` **只在**
+  `loop_lifecycle._setup_common` 被**赋值**，本刀三簇只读（各恰一处）。
+
+★ 写手那条是**反探针抓出来的**：原断言写成「`loop_lifecycle` 里有个方法碰到 `_course_fp`」（宽松口径，
+从 S19 继承），而 `run_one_round` 也**读**它 ⇒ 把赋值点改名成 `_course_fp_x` 时守卫**不红**（探针 ⑬
+首次实测 17/18）。修法是加 `_self_assigns()`（只看 `Assign`/`AnnAssign` 的 target，不看读取）并断言
+赋值点集合 == `{"_setup_common"}` —— 读者随手一改就会把「谁拥有这份状态」的账翻错，所以只数「谁碰到
+这个名字」不够。
+
+#### 搬家后按路径读源码的守卫失效（本仓第九/十/十一次）——全是同族
+
+1. **`tests/test_batch_eval.py`**：按写死路径读 `loop_core.py` 找 `maybe_dispatch_batch` ⇒ 改读**持有者**
+   （`loop_round_steps.py`）+ 钉「全仓恰好一处定义」。
+2. **`e2e/test_loop_supervisor_integration.py`**：经中间名字 `rl.loop_core.time` 补 `time.sleep` ⇒ 旧家不再
+   import `time` 后响亮 `AttributeError`（好失败）⇒ 改成直接补 `time` 模块对象。
+3. **跨项目盲区（第十六刀同族）**：dashboard 的镜像常量守卫写死路径读 `loop_core.py` ⇒ 沿用第十六刀的
+   修法「源码树搜定义」（`tests/kickstart-receipt.test.ts` 改成扫 `rl/*.py`）。
+
+#### 记账校正（第二处）
+
+第十九刀公布的 `rl/loop_lifecycle.py` 行数 **617 → 672** 实际上还差一（文件真实 = **673**）：那次校正是在
+模块头注又改过之后凭旧读数写的。本次连提交消息（`git commit --amend`）带四处文档一次改齐，并把 673 与
+`wc -l` 对齐对账了一遍。**教训同第十七刀**：行数这类可测量值不要在编辑过程中随手报，落盘后量一次。
+
+#### 验证
+
+- **纯搬对账**：搬走的 **7/7 逐字节等价**（+ `_eval_on_round` 占位登记在案）；**留下的 3/3 同**
+  （`__init__` / `_run_inspect` / `run_inspect`）——即本刀对旧文件的改动只有「删块 + 补指针 + 清 import +
+  头注接线图」。
+- **守卫** `tests/test_loop_core_tail_split.py`（**13 例**）：成员定义只在新家 · 接线对象恒等 · 组装逐字
+  （`RoundSteps.__bases__` + 全量 MRO 名单）· **组合根方法闭集恰好两项** · 借用声明闭集 = 派生集 · 入边闭集
+  （AST 计数，见下）· 出边为空 · 槽位读者闭集 + **写手唯一** · 顶层 import 闭集 / 禁反向边 · 四条功能性
+  （`_check_quota_incident` 真跑且 `log` seam 落点对 · 顺序契约 · 旧家不再吸收 patch）。
+- **反探针 18/18**（每条先断言锚点唯一）。
+- **门禁**：nn **2497 → 2510 passed / 3 skipped**；ruff `All checks passed`；mypy 绿；根 `bun run check`
+  2120 pass / 0 fail；dashboard typecheck + **1105 pass / 0 fail**；`check-decisions` ok。
+- **顺手同步的 provenance**：`rl/__init__.py` / `README.md` 模块表 · `loop_core.py`（模块 + 类 + 接线图
+  docstring，并清掉两处重复的「编排」注释块与一条悬空的 T4 注释）· `rl/loop_eval.py` / `rl/loop_guards.py`
+  （占位/实现的**归属**从「loop_core 本体」改成 `rl/loop_dispatch.py::TrainingDispatch`）·
+  `tests/test_layering.py`（三模块登记，先红再登记**第五次**）· `docs/nn/console.md`（两处**当前**接线：
+  镜像常量守卫的搜法 + it0 基线派发的模块路径）。
+- **刻意不动**：`docs/nn/training-stack.md` / `remote-transport.md` 里带日期的历史记录（那时指针正确）。
+
+#### 一个写法教训：入边是语法事实，就该用语法量
+
+本刀守卫首版沿用 S17~S19 的 `src.count(f"self.{member}(")` 口径 ⇒ 新模块头注里那句「组合实例上
+`self._maybe_dispatch_baseline_eval(...)` 的解析与搬家前逐字相同」被算成**一条入边**，守卫对着**合法的
+文档**报假红。改成 AST 计**真实 `Call` 节点**（`_self_call_counts`）+ 定义面也用 AST（`_defined_names`）：
+文档字符串/注释不再能被误读成结构。
+
 ### 未做完（S4 余下）
 
 `remote/` 内部**已零环**（见「拆环」节），`worker.py` 的拆分面**已收口**：只剩三个宿主函数
@@ -1466,6 +1568,11 @@ HTTP 面（`hub/http_face.py` L5）与引导链（`hub/boot.py` L6）分开，�
 `rl/` 侧的继续：**第十八刀**切了 `loop_core` 里最大的一条链（动态采集 9 成员 / 445 行 →
 `rl/loop_volume.py`，`loop_core.py` 1386 → 931 行）——「下一刀候选」与它们的**实测理由**
 （含为什么最大文件 `batch_eval.py` 反而先不动）写在那节末尾。
+`loop_core` 这条线**已收口**：第十九刀（主循环骨架 7 成员 → `rl/loop_lifecycle.py`）与第二十刀
+（余下 7 个叶子按判据同源分成 `rl/loop_baseline.py` / `loop_iter_dir.py` / `loop_dispatch.py` 三簇）
+切完后，`rl/loop_core.py` **1386 → 240 行**，`TrainingLoop` 成了**纯组合类**（只剩 `__init__` 与
+结构性例外的 `_run_inspect`）。`rl/` 侧余下的候选是 `loop_steps.py`（666 行，12 个叶子无新链）与
+`loop_remote.py` / `loop_guards.py`（大但各自的簇已按链切过）。
 
 **✅ 清理已做（2026-09-24，第十二刀）：`remote/job_fs._ensure_commit` 已删**——第六步之一登记的
 既存死代码（全仓零调用，只搬未删）。同时删 `job_fs.__all__` 条目、`worker.py` 的门面转发、

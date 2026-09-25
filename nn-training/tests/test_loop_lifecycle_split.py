@@ -28,8 +28,8 @@ sibling 宿主都不存在。唯一出路 = 组合根 `TrainingLoop`（`__bases_
 1. 7 个成员**定义**在新家，`TrainingLoop` 里**零同名定义**（门面只能是门面）；
 2. 接线是**对象级**同一（`TrainingLoop.X is TrainingLifecycle.X`），不是同名副本；
 3. 组装是**末位追加**：`TrainingLoop.__bases__ == (RoundSteps, TrainingSteps, TrainingGuards,
-   TrainingLifecycle)`，MRO 逐项对账（多一个少一个都红）；`TrainingSteps.__bases__` /
-   `RoundSteps.__bases__` / 各 `__mro__[1]` 逐字不变（S17/S18 的纪律仍在）；
+   TrainingLifecycle)`（逐字元组与全量 MRO 名单的唯一所有者在 `test_loop_core_tail_split.py`）；
+   `TrainingSteps.__bases__` / `RoundSteps.__bases__[0]` / 各 `__mro__[1]` 逐字不变；
 4. 7 个模块级名字**随簇走且不留别名**——旧家再没有这些属性，历史的
    `setattr(rl.loop_core, "should_park_on_done", …)` 会**响亮抛 AttributeError** 而不是
    静默变成空操作（本仓撞过三次的同族陷阱）；`run_inspect` 反向：它是文档化的可替换点，
@@ -97,13 +97,11 @@ OUTBOUND_OWNERS = {
     "_sync_cloud_halt": "rl.loop_guards",
 }
 
-#: 槽位写-读手：本模块**写**、旧家**读**的槽位（跨模块手，必须显式登记）。
+#: 槽位写手：本模块**写**的槽位（跨模块手，必须显式登记）。
+#: 读者侧（`_prepare_iter_dir` / `_rollout_phase`）在 S4 第二十刀随它们搬出了旧家 ⇒ 那条
+#: 闭集表归 `test_loop_core_tail_split.py`；本文件只钉写手 + 「旧家不再有读者」。
 SLOT_HANDS_WRITTEN_BY = {
     "_setup_common": {"_course_fp", "_corpus_fp"},
-}
-SLOT_HANDS_READ_IN = {
-    "_course_fp": {"_prepare_iter_dir", "_rollout_phase"},
-    "_corpus_fp": {"_prepare_iter_dir", "_rollout_phase"},
 }
 
 #: 顶层 import 面（非 stdlib）——闭集：本模块不许长出重依赖。
@@ -259,20 +257,11 @@ def test_composition_appends_the_new_mixin() -> None:
     # 旧两刀钉的「追加不插队」纪律仍逐字成立。
     assert TrainingSteps.__bases__ == (TrainingRemote, TrainingEval)
     assert TrainingSteps.__mro__[1] is TrainingRemote
-    assert RoundSteps.__bases__ == (TrainingVolume,)
+    assert RoundSteps.__bases__[0] is TrainingVolume
     assert RoundSteps.__mro__[1] is TrainingVolume
-    # 判定 MRO（多一个少一个都红）
-    assert [c.__name__ for c in TrainingLoop.__mro__] == [
-        "TrainingLoop",
-        "RoundSteps",
-        "TrainingVolume",
-        "TrainingSteps",
-        "TrainingRemote",
-        "TrainingEval",
-        "TrainingGuards",
-        "TrainingLifecycle",
-        "object",
-    ]
+    # 本簇只要**在场**（入边要它同时被 RoundSteps 与 TrainingRemote 看到）；顺序无契约。
+    # 全量 MRO 名单的唯一所有者在 `test_loop_core_tail_split.py`（S4 第二十刀收尾那份）。
+    assert TrainingLifecycle in TrainingLoop.__mro__
 
 
 def test_host_verdict_is_the_composition_root() -> None:
@@ -365,15 +354,15 @@ def test_cross_module_outbound_hands_closed_set() -> None:
 
 
 def test_slot_hands_closed_set() -> None:
-    """槽位写-读手：本模块**写**的槽位被旧家哪个方法**读**（任何新增都要显式登记）。"""
+    """槽位写手闭集 + 旧家不再有读者（读者侧闭集表归 `test_loop_core_tail_split.py`）。"""
     life_slots = _self_slots(LIFE_PY, "TrainingLifecycle")
     core_slots = _self_slots(CORE_PY, "TrainingLoop")
     for writer, slots in SLOT_HANDS_WRITTEN_BY.items():
         got = slots & life_slots[writer]
         assert got == slots, f"{writer} 不再写 {sorted(slots - got)}"
-    for slot, readers in SLOT_HANDS_READ_IN.items():
-        got = {m for m, names in core_slots.items() if slot in names}
-        assert got == readers, f"{slot} 的旧家读者变了：{sorted(got)}"
+    for slot in SLOT_HANDS_WRITTEN_BY["_setup_common"]:
+        readers = {m for m, names in core_slots.items() if slot in names}
+        assert readers == set(), f"旧家仍有 {slot} 的读者：{sorted(readers)}"
 
 
 def test_top_level_imports_closed_no_reverse_edges() -> None:

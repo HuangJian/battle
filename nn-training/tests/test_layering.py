@@ -74,13 +74,20 @@ L2_PACKAGES = ("remote",)
 #: 它拿 `rl.loop_guards`（TrainingGuards）· `rl.loop_steps`（kickstart_coef）·
 #: `rl.rollout_phase`（join_precollect_child）三处编排 import ⇒ 同样“不同形状但同因”
 #: （经 rl 传递可达），先红、再登记。
+#: 同日（S4 第二十刀）：`loop_core` 收尾拆出三簇——实测只有两簇“经 rl 传递可达”：
+#: `loop_iter_dir`（拿 `rl.collect_only` 的 `precollect_snapshot_wver`）· `loop_dispatch`（拿
+#: `rl.rollout_phase` 的 `dispatch_rollout_phase`）；**`loop_baseline` 反而回到纯逻辑**（它只拿
+#: `dist_common` / `rl.log` / `rl.queue.RUN_ID`，三者都不达 remote）⇒ 只登记前两个。
+#: 先红、再登记（第五次）。
 RL_ORCHESTRATION = frozenset(
     {
         "bc_loop",
         "collect_only",
         "loop",
         "loop_core",
+        "loop_dispatch",
         "loop_guards",
+        "loop_iter_dir",
         "loop_lifecycle",
         "loop_plan",
         "loop_round_steps",

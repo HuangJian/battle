@@ -73,15 +73,16 @@ def test_hooks_decoupled_from_a_eval() -> None:
     """B/C 批与 A-eval 解耦（2026-09-11）：rollout 不再领批；TrainingLoop idle 窗领取。"""
     src = (ROOT / "rl" / "rollout_phase.py").read_text(encoding="utf-8")
     assert "maybe_dispatch_batch" not in src
-    # S4 第十九刀：`_evalboard_idle`（认领口）随主循环骨架搬去 `rl/loop_lifecycle.py`，
-    # `_evalboard_yield`（让位口）仍在 `loop_core` ⇒ 本断言按**持有者**读，不按写死的文件
-    # 路径读（同 S16 的修法：写死路径的守卫会在下次搬家时静默失效或假红）。
-    lc = (ROOT / "rl" / "loop_core.py").read_text(encoding="utf-8")
-    life = (ROOT / "rl" / "loop_lifecycle.py").read_text(encoding="utf-8")
-    loop_src = lc + life
-    assert "_evalboard_yield" in lc
-    assert "def _evalboard_idle" in life, "idle 认领口搬家后必须恰好一处定义"
-    assert loop_src.count("def _evalboard_idle") == 1
+    # S4 第十九/二十刀起，EvalBoard 的两个口子分住两处（认领口 `_evalboard_idle` →
+    # `rl/loop_lifecycle.py`；让位口 `_evalboard_yield` → `rl/loop_dispatch.py`）⇒ 本断言按
+    # **持有者**在整个 `rl/` 源码树里读，不按写死的文件路径读（同 S16 的修法：写死路径的守卫
+    # 会在下一次搬家时静默失效或假红——本文件已因此修过两次）。
+    rl_dir = ROOT / "rl"
+    loop_src = "".join(
+        p.read_text(encoding="utf-8") for p in sorted(rl_dir.glob("loop_*.py"))
+    ) + (rl_dir / "loop_core.py").read_text(encoding="utf-8")
+    for name in ("_evalboard_idle", "_evalboard_yield"):
+        assert loop_src.count(f"def {name}") == 1, f"{name} 搬家后必须恰好一处定义"
     assert "maybe_dispatch_batch" in loop_src
     assert "window_event=self._eb_window" in loop_src
     ed = (ROOT / "rl" / "eval_dispatch.py").read_text(encoding="utf-8")

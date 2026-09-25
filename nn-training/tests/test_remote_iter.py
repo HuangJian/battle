@@ -1247,11 +1247,13 @@ def test_iter_stats_and_quota_check_skip_on_node_rollout(
 
 
 def test_quota_incident_not_triggered_on_node_rollout(tmp_path: Path, monkeypatch) -> None:
-    from rl import loop_core as lc
+    from rl import loop_iter_dir as lid
     from rl.loop_core import TrainingLoop
 
     msgs: list[str] = []
-    monkeypatch.setattr(lc, "log", lambda m: msgs.append(m))
+    # `_check_quota_incident` 自 S4 第二十刀起住 `rl/loop_iter_dir.py`——`log` 是它**自己模块**
+    # 的全局，打 `rl.loop_core.log` 会变成**静默空操作**（本仓撞过多次的同族陷阱）。
+    monkeypatch.setattr(lid, "log", lambda m: msgs.append(m))
     args = SimpleNamespace(course_name="c4")
     # 被测方法只碰这三个属性 + args ⇒ 用 cast 声明「这是测试替身」
     # （照 test_remote_degrade.py 的 stub 口径，不构造真 TrainingLoop 的 torch 栈）。

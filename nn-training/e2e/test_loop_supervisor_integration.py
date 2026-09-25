@@ -247,11 +247,15 @@ def _fake_dist(monkeypatch: pytest.MonkeyPatch) -> None:
     是模块对象，补在哪个名字空间都算命中，故不在此列）。S4 第十九刀后主循环骨架（含它的
     `time.sleep`）住 `rl.loop_lifecycle`——`time` 本来就是模块对象，故直接补模块本身。
     """
-    import rl.loop_core as lc
+    import dist_common
     import rl.loop_round_steps as lrs
 
-    monkeypatch.setattr(lc.dist_common, "load_dist_config", lambda: {})
-    for mod in (lc, lrs):
+    # S4 第二十刀：`lc.dist_common` 这个中间名字随采集派发簇一起消失了（loop_core 不再 import
+    # dist_common）⇒ 补 `dist_common` **模块对象**本身，不再依赖任何中间命名空间。
+    monkeypatch.setattr(dist_common, "load_dist_config", lambda: {})
+    # S4 第二十刀：不再带 `lc`（loop_core）——它的名字空间里早已没有这些平台函数（那四个名字
+    # 随各簇搬进了 `loop_*` 混入）；仍在的只有 `lrs`（轮内步骤读它们的地方）。
+    for mod in (lrs,):
         if hasattr(mod, "resolve_course_quota"):
             monkeypatch.setattr(mod, "resolve_course_quota", lambda cfg, key, w, s: (w, s, ""))
         if hasattr(mod, "_rollout_source"):

@@ -11,7 +11,7 @@ _eval_policy_cfg ← _eval_join_soft_sec ← _sweep_eval_tail ← _dispatch_dela
                                             ↑                        ↑
 _join_eval ←────────────────────────────────┘                        │
 _eval_covered ← _drain_pending_eval ──────────────────────────────────┘
-（另有 `_eval_on_round` 的占位：真实现在 loop_core，MRO 胜过）
+（另有 `_eval_on_round` 的占位：真实现住 `rl/loop_dispatch.py`，MRO 胜过——S4 第二十刀前住 loop_core）
 ```
 
 切法是**混入**（与第十四/十五刀同源）：同一把锁、同一个 `self`、**零行为变化**——
@@ -182,9 +182,13 @@ def test_wiring_is_by_object_identity_not_copies() -> None:
 def test_composition_appends_the_new_mixin() -> None:
     """组装是**追加**：`(TrainingRemote, TrainingEval)`；组合类的直接基类里没有本簇。
 
-    2026-09-25（S4 第十九刀）**演进登记**：组合类元组多了第四件 `TrainingLifecycle`
+    2026-09-25（S4 第十九/二十刀）**演进登记**：组合类元组多了第四件 `TrainingLifecycle`
     （主循环骨架——它的入边 `_evalboard_idle` 被两个 sibling 调，只能挂组合根）。本用例钉的
     把心不变：本簇**不是**组合类的直接基类（逐字元组见 `test_loop_lifecycle_split.py`）。
+
+    `_eval_on_round` 那条占位/真实现的顺序契约本刀**也动了家**（真实现从组合根搬到
+    `rl/loop_dispatch.py`，仍须早于 `TrainingEval`）——这里只钉「不是同一个对象 + 真实现不在旧家」，
+    位置顺序钉在 `test_loop_core_tail_split.py`。
     """
     from rl.loop_core import TrainingLoop
     from rl.loop_eval import TrainingEval
@@ -205,10 +209,10 @@ def test_composition_appends_the_new_mixin() -> None:
         TrainingLifecycle,
     )
     assert TrainingEval not in TrainingLoop.__bases__
-    # 真实现在 loop_core；占位在 TrainingEval —— MRO 胜过它。
+    # 真实现（S4 第二十刀起住 rl/loop_dispatch，之前住组合根）；占位在 TrainingEval —— MRO 胜过它。
     assert TrainingLoop._eval_on_round is not TrainingEval._eval_on_round
-    assert TrainingLoop._eval_on_round.__module__ == "rl.loop_core"
-    assert "def _eval_on_round" in CORE_PY.read_text(encoding="utf-8")
+    assert TrainingLoop._eval_on_round.__module__ == "rl.loop_dispatch"
+    assert "def _eval_on_round" not in CORE_PY.read_text(encoding="utf-8")
 
 
 # ─────────────────────────────── 状态面 ───────────────────────────────

@@ -106,7 +106,8 @@ class TrainingGuards:
     _traj_root: Any
     _traj_dir: Any
     _course_fp: Any
-    #: 真实现在本文件；占位（MRO 破检测）在 `rl/loop_eval.py::TrainingEval`（S4 第十七刀）。
+    #: 真实现在 `rl/loop_dispatch.py::TrainingDispatch`（S4 第二十刀，之前住 loop_core）；
+    #: 占位（MRO 破检测）在 `rl/loop_eval.py::TrainingEval`（S4 第十七刀）。
     _eval_on_round: Any
     #: 云端停机达令当前置位态（门判决 → set_cloud_halt 联动；重启即复位）。
     _cloud_halted: bool

@@ -1005,6 +1005,52 @@ receipt.test.ts` 写死路径读 `loop_core.py` 找 `KICKSTART_DEFAULT_WARN` ⇒
 **门禁**：nn **2484 → 2497 passed / 3 skipped**；ruff / mypy 绿；根 `bun run check` 2120 pass / 0 fail；
 dashboard typecheck + **1105 pass / 0 fail**。
 
+#### 5.3.19 第二十刀（2026-09-25，**已完成**）—— 组合根收尾：三簇叶子出组合类 → 纯组合类
+
+用户指令：「拆 `loop_core` 剩下的基线评估链（2 成员）与叶子方法，让组合根成为纯组合类」。
+**`rl/loop_core.py` 446 → 240 行**；新模块三件（合计 355 行 = 128 + 96 + 131）——`TrainingLoop` 余下**只有**
+`__init__` + `_run_inspect`。
+
+| 新家 | 成员 | 判据（谁调它 / 同源在哪） |
+|---|---|---|
+| `rl/loop_baseline.py::TrainingBaseline` | `_baseline_eval_weights` · `_maybe_dispatch_baseline_eval` | it0 基线（wver 指纹 + 落地摘）——`step_course_iter` |
+| `rl/loop_iter_dir.py::TrainingIterDir` | `_check_quota_incident` · `_prepare_iter_dir` | **`self._traj_dir` 里有没有本轮的活**——`step_prepare_iter` / `step_course_iter` |
+| `rl/loop_dispatch.py::TrainingDispatch` | `_eval_on_round` · `_evalboard_yield` · `_rollout_phase` | **本轮把活派给谁 / 让位给谁**——`step_rollout` / `step_eval_dispatch` / `step_record_iteration` |
+
+**宿主**：mixin 级父调用者**全部**是 `RoundSteps` ⇒ 三簇挂它一侧（`class RoundSteps(TrainingVolume,
+TrainingBaseline, TrainingIterDir, TrainingDispatch)`），**`TrainingLoop.__bases__` 一行不改**。
+`_eval_on_round` 另有 `TrainingEval` / `TrainingGuards` 两个 sibling 调用者，但三者互不继承**不构成**必须挂
+组合根的理由（`RoundSteps` 是组合根的第一个基类，挂它的基类里已在 `TrainingLoop` 的线性化上）。
+
+**★ 唯一真约束 = `_eval_on_round` 的顺序契约**：`rl/loop_eval.py` 的同名成员是**占位**（body `raise`），
+真实现必须在 MRO 里更靠前，否则占位胜出 ⇒ 静默返回 falsy 把 eval 全关掉；挂 `RoundSteps` 一侧天然满足，
+改成组合根**末位**会反过来胜出（反探针 ⑤）。
+
+**结构性例外**：`_run_inspect` + 模块级 `run_inspect` 必须同住组合根（`_run_inspect` 按模块全局解析它，
+而那个模块不能 import `rl.loop_core` 当基类 ⇒ 成环）⇒ 守卫
+`test_composition_root_keeps_only_the_structural_pair` 正面钉住闭集 `{__init__, _run_inspect}`。
+
+**守卫** `tests/test_loop_core_tail_split.py`（13 例）：成员定义只在新家 · 接线对象恒等 · 组装逐字
+（`RoundSteps.__bases__` + **全量 MRO 名单的唯一所有权**）· 组合根方法闭集恰好两项 · 借用声明 == 派生集
+（类体零带值槽位）· 入边闭集（**AST 计真实 `Call`**）· 出边为空 · 槽位读者闭集 + **写手唯一** · 顶层 import
+闭集 + 禁反向边 · **★ 四条功能性**（`_check_quota_incident` 真跑且 `log` seam 落点在本模块 · 顺序契约 ·
+旧家不再吸收 patch）。反探针 **18/18**；纯搬对账 **7/7 逐字节**（留下的 **3/3** 同）。
+
+**两条教训（都是「判据口径」而不是「代码」错）**：① 写手断言首版沿用「谁碰到这个名字」 ⇒
+`run_one_round` 也**读** `_course_fp` ⇒ 改名赋值点守卫**不红**（探针首次 17/18）；改成 AST 只看赋值目标
+（`_self_assigns`）+ 断言 == `{"_setup_common"}`。② 入边首版用 `src.count("self.x(")` ⇒ 新模块头注里那句
+「`self._maybe_dispatch_baseline_eval(...)` …」被算成一条入边 ⇒ 对着合法文档报假红；改成 AST 计 `Call` 节点。
+
+**坑（第九/十/十一次同族）**：`tests/test_batch_eval.py` 写死路径读 `loop_core.py` ·
+`e2e/test_loop_supervisor_integration.py` 经中间名字 `rl.loop_core.time` 补 `time.sleep` ·
+dashboard `kickstart-receipt.test.ts` 写死路径读 python 源码 —— 全部改成「读持有者 / 源码树搜定义」。
+
+**记账校正**：第十九刀公布的 `loop_lifecycle.py` 行数 617 → 672 还差一（真值 **673**）⇒ 连提交消息带四处文档
+一次改齐。教训：可测量值落盘后量一次，别在编辑过程中随手报。
+
+**门禁**：nn **2497 → 2510 passed / 3 skipped**；ruff / mypy 绿；根 `bun run check` 2120 pass / 0 fail；
+dashboard typecheck + **1105 pass / 0 fail**；`check-decisions` ok。
+
 ### 5.4 本轮**不做**（已核，刻意保留）
 
 - `remote/notebook_boot.py` ↔ `remote/offline_boot.py` 的孪生助手（`_build_opener` /

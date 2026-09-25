@@ -1,16 +1,19 @@
 """loop_core —— TrainingLoop：RL 迭代主循环的**组合根**（2026-09-02 从 rl/loop.py 类化）。
 
-入口 rl/loop.py::run_training 是薄包装（构造 TrainingLoop + run()）。**主循环骨架**
-（setup / run() 迭代编排 / 轮派发 / 收官 / 停车）已整体搬到
-`rl/loop_lifecycle.py::TrainingLifecycle`（S4 第十九刀，2026-09-25）——本类经基类元组
-继承它；本模块余下的是 `__init__` 的槽位声明与迭代目录 / 采集派发 / 基线评估 /
-EvalBoard 窗这些**叶子**。
+
+入口 rl/loop.py::run_training 是薄包装（构造 TrainingLoop + run()）。**本类已是纯组合类**
+（S4 第二十刀，2026-09-25）：全部 20 个方法都搬进了四个基类混入，余下的**只有**
+`__init__`（槽位声明，状态归属的唯一真相）与 `_run_inspect`（唯一的结构性例外：
+它与模块级 `run_inspect` 必须同住一个模块，而那个模块不能 import 本模块当基类 ⇒ 成环）。
+
 
 MRO（组合根，全仓唯一被实例化的类）：RoundSteps（轮内 13 步；基类 = TrainingVolume
-动态采集编排）→ TrainingSteps（结算/导出/落账；基类 = TrainingRemote 远端 PPO 腿 +
-TrainingEval in-loop 评估链）→ TrainingGuards（熔断/止损/轮转）→ TrainingLifecycle
-（主循环骨架）→ 本类（__init__ / 迭代目录 / 采集派发 / 基线评估 / EvalBoard 窗）。
+动态采集编排 + TrainingBaseline it0 基线评估 + TrainingIterDir 本轮目录与产出健康 +
+TrainingDispatch 本轮派发与让位）→ TrainingSteps（结算/导出/落账；基类 = TrainingRemote
+远端 PPO 腿 + TrainingEval in-loop 评估链）→ TrainingGuards（熔断/止损/轮转）→
+TrainingLifecycle（主循环骨架）→ 本类（__init__ + _run_inspect）。
 mixin 方法以 self.* 共享同一实例状态；**槽位声明全在 `__init__`**，各 mixin 只赋值/读取。
+
 
 重构纪律：控制流与日志逐字节沿用旧 run_training 内联实现——每段提取为私有
 方法，跨阶段共享状态放 self._*（run() 局部别名 + 实例属性，不重排执行顺序）。
@@ -24,10 +27,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-import dist_common
 from common.proc import run_capture
-from platform_utils import rmtree_best_effort
-from rl.collect_only import precollect_snapshot_wver
 from rl.log import log
 from rl.loop_guards import TrainingGuards
 from rl.loop_lifecycle import TrainingLifecycle
@@ -47,9 +47,7 @@ from rl.loop_round import (
 )
 from rl.loop_round_steps import RoundSteps
 from rl.loop_steps import TrainingSteps
-from rl.queue import REPO_ROOT, RUN_ID
-from rl.resume import completed_pairs
-from rl.rollout_phase import dispatch_rollout_phase
+from rl.queue import REPO_ROOT
 
 #: 本模块的公开面。`ROUND_*` / `RoundOutcome` / `RoundContext` / `RoundYieldError` 是
 #: **再导出**（定义在 `rl.loop_round`，`rl/loop_runner.py` 从这里取）——S4 第十九刀后本模块
@@ -106,6 +104,7 @@ def run_inspect(bun: str, it: int, traj_dir: Path) -> None:
     except Exception as e:
         log(f"[run_rl] WARN inspection failed (non-fatal): {e}")
 
+
 # ---------------------------------------------------------------------------------------
 # 主循环骨架（run / run_one_round / finish_course / _park_after_completion / _setup /
 # _setup_common / _evalboard_idle）与随行的 7 个模块级定义（WAIT_RETRY_SEC / _course_file_fp /
@@ -113,6 +112,7 @@ def run_inspect(bun: str, it: int, traj_dir: Path) -> None:
 # `rl/loop_lifecycle.py::TrainingLifecycle`（S4 第十九刀，2026-09-25）。方向：入边
 # （`_evalboard_idle` 被 TrainingRemote / RoundSteps 调）把宿主锁在**组合根**，见该模块头注。
 # ---------------------------------------------------------------------------------------
+
 
 class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle):
     """RL 迭代主循环（run_training 的 OO 化；run() 为入口，失败重试内置）。
@@ -213,37 +213,22 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
         # 配额事故计数（plan P4-W3）：连续零 shard 落盘的轮数（每课一进程一本）。
         self._zero_shard_streak = 0
 
-    def _check_quota_incident(self, it: int) -> None:
-        """配额事故告警（plan P4-W3 / §3.4）：连续 2 轮零 shard 落盘 → 响亮警告行。
-
-        多课程切分下若某课本机槽位被压到 0（或与别课抢核失败），表现为该课 traj
-        连续无 shard：训练看似在跑、实则在烧空转墙钟。计数是 per-course 的（每个
-        trainer 进程一本课），console 日志页直接可见本行（不建新通道）。
-
-        M3：`rollout_src=node` 轮**本地本来就该零 shard**（采集在节点上，跑完即毁）——
-        不排除就会每轮大喊「检查配额」（假事故），把真事故的告警淹掉。
-        """
-        if getattr(self, "_node_rollout", False):
-            self._zero_shard_streak = 0
-            return
-        try:
-            n = sum(1 for _ in self._traj_dir.rglob("rl_s*_seed*"))
-        except OSError:
-            n = 0
-        self._zero_shard_streak = 0 if n else self._zero_shard_streak + 1
-        if self._zero_shard_streak >= 2:
-            log(
-                f"[quota] WARN it{it}: 连续 {self._zero_shard_streak} 轮零 shard 落盘 "
-                f"(course={getattr(self.args, 'course_name', '') or 'nocourse'}) — "
-                "检查 courses.<课>.workers/local_slots 配额或节点可用性"
-            )
-
     # ------------------------------------------------------------------ 编排
     #
-    # run / run_one_round / finish_course / _park_after_completion / _setup / _setup_common /
-    # _evalboard_idle 已搬到 `rl/loop_lifecycle.py::TrainingLifecycle`（S4 第十九刀）——它们
-    # 在组合实例上照旧解析（本类继承了该混入）；`_run_inspect` 留在这里是因为
-    # `run_inspect` 是文档化的可替换点。
+    # 本类原本的四簇方法**全部**已搬进基类混入（它们在组合实例上照旧解析）：
+    #   动态采集（按样本量；9 成员 / 445 行）→ `rl/loop_volume.py::TrainingVolume`
+    #     （S4 第十八刀；方向「调用者依赖被调用者」：生产入口全在 RoundSteps）。
+    #   主循环骨架（setup / run 编排 / 轮派发 / 收官 / 停车；7 成员）→
+    #     `rl/loop_lifecycle.py::TrainingLifecycle`（S4 第十九刀；宿主判据见该模块头注）。
+    #   剩余的 7 个叶子分三簇（S4 第二十刀，2026-09-25）：
+    #     it0 基线评估 → `rl/loop_baseline.py::TrainingBaseline` · 本轮目录与产出健康 →
+    #     `rl/loop_iter_dir.py::TrainingIterDir` · 本轮派发与让位（采集三路 / A-eval
+    #     稀疏化 / EvalBoard 关窗）→ `rl/loop_dispatch.py::TrainingDispatch`；三簇都挂
+    #     `RoundSteps` 一侧（唯一 mixin 调用者），组合根因此不必再长基类。
+    #
+    # **本类余下的唯一方法**是 `_run_inspect`：它与模块级 `run_inspect` 必须同住一个模块
+    # （`_run_inspect` 按**模块全局**解析 `run_inspect`），而那个模块不能 import `rl.loop_core`
+    # ——本模块 import 它当基类 ⇒ 成环。故这对搭档只能住组合根（可替换点 = `rl.loop_core.run_inspect`）。
 
     def _run_inspect(self, *args: Any, **kwargs: Any) -> None:
         """自动巡检的**委托点**（步骤 mixin 不能 import 本模块，否则成环）。
@@ -252,195 +237,4 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
         """
         run_inspect(*args, **kwargs)
 
-        # 吞吐 T4：预采子进程句柄与「本轮已提前 spawn」标记（run() 迭代期读写）
 
-    # -------------------------------------------------------------- 迭代步骤
-
-    def _eval_on_round(self, it: int) -> bool:
-        """吞吐 T3：本轮是否派发干净评估。per-tick 按 eval-games/eval-every/eval-at
-        三条件；intent/goal 按 eval_at（默认 '5,10,15'）——别的模式不派发不 join。
-
-        本实现 MRO 胜过 `TrainingEval._eval_on_round` 的占位（`rl/loop_eval.py`，
-        S4 第十七刀）——占位存在是为了「MRO 被改坏就响亮失败」。"""
-        args = self.args
-        if args.mode == "per-tick":
-            return (
-                int(getattr(args, "eval_games_per_stage", 0) or 0) > 0
-                and self._eval_every > 0
-                and (self._eval_every == 1 or it % self._eval_every == 0)
-                and (not self._eval_at_set or it in self._eval_at_set)
-            )
-        return it in self._eval_at_set
-
-    def _baseline_eval_weights(self, dist_cfg: dict | None) -> str | None:
-        """it0 基线可用的 bc 权重路径；前置条件不足返回 None（纯判断，零副作用）。
-
-        条件：per-tick 课程 / 有课程上下文 / in-loop eval 已开启 / dist 有 enabled
-        节点（`nodes=[]` 的纯本地路径本就不派 A-eval）/ bc 权重文件在盘上。
-        """
-        args = self.args
-        if args.mode != "per-tick":
-            return None
-        if getattr(args, "course_obj", None) is None:
-            return None
-        if int(getattr(args, "eval_games_per_stage", 0) or 0) <= 0:
-            return None
-        if self._eval_every <= 0:
-            return None
-        nodes = (dist_cfg or {}).get("nodes") or []
-        if not any(n.get("enabled", True) for n in nodes):
-            return None
-        bc = str(getattr(args, "bc", "") or "")
-        if not bc or not Path(bc).exists():
-            return None
-        return bc
-
-    def _maybe_dispatch_baseline_eval(self, dist_cfg: dict | None) -> None:
-        """it0 基线评估（bc 权重）——rollout 收官后派发，**落账前每轮重试**。
-
-        为什么（2026-09-12 用户）：in-loop eval 的配对基准此前恒取日志里**第一条**
-        eval 行，而那条基准随 run 起点漂移（resume 时首条可能是 it50，配对比的是
-        中途两点，不是"学会了多少"）。改为恒定补一条 it0 = 课程 bc 权重的干净评估：
-        跨腿可比，且与 `gates.baseline_win_rate` 同口径。
-
-        重试语义（2026-09-13 评审修订）：只要 eval_log 里尚无**同 bc 指纹**的 it0
-        summary（`baseline_summary_landed`），每轮 rollout 收官后都尝试派发——首次
-        派发撞上节点瞬时全挂/权重 POST 全失败时（EvalDispatcher 只记日志跳过），
-        下一轮自动补派，而不是等进程重启。落账即停（wver 缓存于
-        `_baseline_landed_wver`）；summary 带 dropped 也算落账（缺口在控制台诚实
-        显示为「缺N」，不为填缺口无限重跑失败局）。
-
-        本地参与：复用当轮 `self._eval_gate`（与 A-eval 同一把门，PPO 收官
-        `_join_eval` 置位）——基线本地局与 A-eval 一样让位 PPO，且快照文件名按流
-        分流（eval_dispatch 侧），并发重试轮不互相覆写。
-
-        幂等：在飞线程即跳过；跨重启/重试由 `iter == 0` 的已评估键去重，只补缺口。
-        失败绝不抛出——基线是观测设施，不得拖垮训练主线。
-        """
-        t_prev = self._baseline_eval_thread
-        if t_prev is not None and t_prev.is_alive():
-            return
-        try:
-            bc = self._baseline_eval_weights(dist_cfg)
-            if bc is None:
-                return
-            from rl.eval_local import baseline_summary_landed
-
-            try:
-                wver16 = dist_common.weights_fingerprint(bc)[:16]
-            except OSError:
-                return  # bc 读不了（检查后被删？）：不派，派发侧同样会失败
-            if wver16 == self._baseline_landed_wver:
-                return
-            if baseline_summary_landed(self._traj_dir, wver16):
-                self._baseline_landed_wver = wver16
-                return
-            from rl.eval_dispatch import dispatch_eval_bg
-            from rl.eval_local import BASELINE_EVAL_ITER
-
-            self._baseline_eval_thread = dispatch_eval_bg(
-                self.bun,
-                bc,
-                self._traj_dir,
-                self.args,
-                dist_cfg or {},
-                iter_id=f"{RUN_ID}.{BASELINE_EVAL_ITER}",
-                it=BASELINE_EVAL_ITER,
-                local_gate=self._eval_gate,
-                baseline=True,
-            )
-            log(
-                f"[eval] it0 baseline dispatched（bc 权重：{bc}）——"
-                "落账前每轮重试，结果见后续 [eval] 行"
-            )
-        except Exception as e:  # 基线派发失败不影响训练
-            log(f"[eval] WARN it0 baseline dispatch failed (non-fatal): {type(e).__name__}: {e}")
-
-    def _prepare_iter_dir(self, it: int) -> None:
-        """rollout/ppo_backend 断点感知：若该迭代已有 wver 匹配的完整 shard（中途崩过），
-        保留续跑（跳过已完成局 + 续 ppo_backend checkpoint）；否则清空重建。"""
-        args = self.args
-        traj_dir = self._traj_dir
-        wver = dist_common.weights_fingerprint(args.out)
-        # 吞吐 T4 提前预采：上一轮若在 epoch3 已 spawn，本轮对账还需接受快照 wver
-        # （θ_{N,e3} ≈ θ_N 于最后 1 个 epoch 前）——否则预采首波被当"未完成"清场。
-        extra_wver = precollect_snapshot_wver(args.out, it)
-        self._extra_wver = extra_wver
-        have_resume = bool(
-            completed_pairs(
-                traj_dir,
-                wver,
-                extra_wver=extra_wver,
-                course_fp=self._course_fp,
-                corpus_fp=self._corpus_fp,
-            )
-        )
-        if have_resume:
-            traj_dir.mkdir(parents=True, exist_ok=True)
-            log(
-                f"[run_rl] resume iteration {it}: keeping existing shards + ppo_backend checkpoint"
-                + (f" (precollect snapshot wver {extra_wver[:12]}…)" if extra_wver else "")
-            )
-        else:
-            if traj_dir.exists():
-                # 沙箱删除保护拦截时跳过（保留旧目录，训练照常）
-                rmtree_best_effort(traj_dir)
-            traj_dir.mkdir(parents=True)
-
-    def _evalboard_yield(self) -> None:
-        """rollout 抢占：关窗让出集群。在途 B/C 局停派新 seed（window_event 清位）。"""
-        self._eb_window.clear()
-        t = self._eb_thread
-        if t is not None and t.is_alive():
-            # 短等在途局收尾；不阻塞训练主链（超时即走，剩余 seed 下窗续跑）。
-            t.join(timeout=15.0)
-        self._eb_thread = None
-        # R4-G1 心跳：关窗 + 关窗时刻（console 只读，用来显示「训练忙碌中已等 N 分钟」）。
-        try:
-            from rl.eval_heartbeat import now_ms, write_state
-
-            write_state(window_open=False, last_window_closed_ts=now_ms())
-        except Exception:
-            pass
-
-    def _rollout_phase(
-        self, it: int, pairs: list[tuple[int, int]], dist_cfg: dict | None, eval_on_round: bool
-    ) -> None:
-        """单轮采集派发（三路：dist 流式 / dist 串行 / 纯本地），结果落 self._report。"""
-        args = self.args
-        (report, stream_meta, eval_thread, eval_gate, collect_child, spawned_early) = (
-            dispatch_rollout_phase(
-                args,
-                self.bun,
-                dist_cfg,
-                it,
-                self._traj_dir,
-                pairs,
-                self._jsonl_path,
-                self._model,
-                self._opt,
-                self._device,
-                self.ppo_backend,
-                self.update_kwargs,
-                self._start_it,
-                self._ref_model,
-                self._extra_wver,
-                eval_on_round,
-                course_fp=self._course_fp,
-                corpus_fp=self._corpus_fp,
-            )
-        )
-        self._report = report
-        self._stream_meta = stream_meta
-        self._eval_thread = eval_thread
-        self._eval_gate = eval_gate
-        self._collect_child = collect_child
-        self._spawned_early = spawned_early
-
-    # ------------------------------------------------- 动态采集（按样本量）
-    #
-    # 这一节（9 个成员 / 445 行，`_volume_active` … `_volume_collect_continuous`）已整体搬到
-    # `rl/loop_volume.py::TrainingVolume`（S4 第十八刀）。方向是「调用者依赖被调用者」：生产
-    # 入口全在 `RoundSteps`（`step_course_iter` → `_iteration_pairs`；`step_rollout` →
-    # `_volume_active` / `_volume_collect_continuous`）⇒ 那是基类，本类经它继承可见——
-    # 组合实例上的 `self._volume_*` 解析与搬家前逐字相同。

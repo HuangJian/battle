@@ -74,8 +74,9 @@
 起点在噪声带内且 kk ≥ 0.5（满额锚先把它拉回去，C 事故的那种配置）。
 
 **lesson**：
-- **镜像常量必须对着 python 源码核对**（单测读 `kickstart_burn.py`/`loop_core.py` 的文本取
-  字面量）：TS 侧抄一份阈值是不可避免的（控制台不能 import python），但抄完不设闸 = 两处判据
+- **镜像常量必须对着 python 源码核对**（单测在 python 源码树里**搜定义**取字面量——不写死
+  文件路径：S4 第十九刀实测，写死 `loop_core.py` 的那版在常量搬到 `rl/loop_lifecycle.py` 后就静默
+  空转了）：TS 侧抄一份阈值是不可避免的（控制台不能 import python），但抄完不设闸 = 两处判据
   各自安好、对不上号（与 §2/A 的 course_fp/corpus_fp 同一个病的预防）。
 - **同一份账本两个读法要当面对账**：控制台的 `readEvalSummaries` 全量 parse（视图构建用），
   回执读法按 `"eval_summary"` 子串预滤（18MB 账本、开课那一下）——单测钉「两者同数」，
@@ -480,7 +481,8 @@ R2a/R2b/R2c 把单进程调度器造出来了，但**没人看得见它**：`tra
 
 **改法（纯增量，训练侧与 console 两侧）**
 
-- **训练侧**（`rl/loop_core.py::_maybe_dispatch_baseline_eval`）：在本 run **首次 rollout 收官后**（`it == _start_it`；全新腿 = it1）立刻用课程 `args.bc` 派一条 `iter=0` 的干净评估作恒定基线。守卫 `_baseline_eval_weights`：per-tick / 有课程 / `eval_games_per_stage>0` / `eval_every>0` / 有 enabled dist 节点（`nodes=[]` 纯本地路径本就不派 A-eval）/ bc 文件在盘；幂等（在飞跳过 + 跨重启按 `iter==0` 去重）；**失败自吞**（基线是观测设施，不得拖垮主线）。课程默认 `eval_every>1`（c6-bonus=5）⇒ 该轮本无 A-eval，**零重复计算**。
+- **训练侧**（`rl/loop_baseline.py::TrainingBaseline._maybe_dispatch_baseline_eval`；S4 第二十刀前
+  住 `loop_core.py`）：在本 run **首次 rollout 收官后**（`it == _start_it`；全新腿 = it1）立刻用课程 `args.bc` 派一条 `iter=0` 的干净评估作恒定基线。守卫 `_baseline_eval_weights`：per-tick / 有课程 / `eval_games_per_stage>0` / `eval_every>0` / 有 enabled dist 节点（`nodes=[]` 纯本地路径本就不派 A-eval）/ bc 文件在盘；幂等（在飞跳过 + 跨重启按 `iter==0` 去重）；**失败自吞**（基线是观测设施，不得拖垮主线）。课程默认 `eval_every>1`（c6-bonus=5）⇒ 该轮本无 A-eval，**零重复计算**。
 - **`eval_done_keys` 新增 `iter_filter`**（`rl/eval_local.py`）：it0 的已评估账本按 `iter==0` 隔离。必须如此——bc 与 it1 的 `args.out` 指纹**可能相同**（it1 就是 PPO 前的 bc 初始化权重），只按 wver 去重会让 it1 的 A-eval 把基线局吞成「已评估」，it0 行永远不落盘。`dispatch_eval_round/bg` 与 `EvalDispatcher` 加尾参 `baseline=False`；it0 用独立 `iter_id = {runId}.0`（与 A-eval 的 `{runId}.N` 在 agent 结果缓存里键空间隔离）。
 - **门判据排除 it0**（`gate_check.read_trend_rows`）：`iter <= 0` 的 summary 不进趋势（用户定案：只当监控/配对基线）。否则会虚增 sustain 的「连续通过」计数、把 plateau 的上升趋势起点拉回 PPO 前。缺 `iter` 字段的旧行照旧保留（不过度收口）。
 - **Console**（`console/iters.ts`）：配对基线改为「有 it0 取 0，否则退回首个 eval 轮」（老腿逐字节兼容）；`readIterMetrics` 在有 ≥1 条真实 iteration 行时合成一条 it0 行（只有 `evalData`，rollout 派生字段一律 `NaN` —— 趋势图的缺口约定，写 0 会在图上多画一个假零点）；`MetricsTable.buildRows` 跳过 `iter<=0` 的主行，只出 eval 子行（UI 标「基线」）。

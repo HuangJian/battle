@@ -3012,3 +3012,45 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
   根 `bun run check` 2120 pass / 0 fail；dashboard typecheck + **1105 pass / 0 fail**（动了四处注释 +
   一条跨项目守卫）。
 —— 全文（侦察表 / 宿主判据 / 守卫表 / 坑）→ `docs/nn/engineering.md` §23「第十九刀」。
+
+## §2026-09-25-goalnn-loop-core-tail-split（2026-09-25，用户指令「拆 loop_core 剩下的基线评估链（2 成员）与叶子方法，让组合根成为纯组合类」）
+
+拆 `rl/loop_core.py` 的**尾簇**：**446 → 240 行**，余下的 7 个叶子按**判据同源**分三簇，各自成模块（合计 355 行 = 128 + 96 + 131）。
+`TrainingLoop` 至此是**纯组合类**——只剩 `__init__`（槽位）与 `_run_inspect`（唯一结构性例外）。
+
+- **三簇（分组判据 = 谁调它 / 同源在哪，不是按大小切）**：`rl/loop_baseline.py::TrainingBaseline`
+  （`_baseline_eval_weights` / `_maybe_dispatch_baseline_eval`，判据「日志里有没有这份 bc 权重的 it0 干净评估」）·
+  `rl/loop_iter_dir.py::TrainingIterDir`（`_check_quota_incident` / `_prepare_iter_dir`，判据「`self._traj_dir` 里有没有
+  本轮的活」）· `rl/loop_dispatch.py::TrainingDispatch`（`_rollout_phase` / `_eval_on_round` / `_evalboard_yield`，判据
+  「本轮把活派给谁 / 让位给谁」）。
+- **宿主：三簇都挂 `RoundSteps` 一侧，组合根一行不改**——mixin 级父调用者全部是 `RoundSteps`；`_eval_on_round` 另有
+  `TrainingEval` / `TrainingGuards` 两个 sibling 调用者，但三者互不继承**不构成**「必须挂组合根」的理由：`RoundSteps`
+  是组合根的**第一个基类**，挂它的基类里就已经在 `TrainingLoop` 的线性化上（与第十九刀的区别：那刀两个 caller 都是
+  组合根的基类且交集为空）。⇒ `TrainingLoop.__bases__` 逐字不变，S17/S18/S19 三处元组断言两句不改。
+- **★ 唯一真约束 = `_eval_on_round` 的顺序契约**：`rl/loop_eval.py` 的同名成员是**占位**（body `raise`），真实现必须
+  在 MRO 里更靠前，否则占位胜出 ⇒ 静默返回 falsy 把 eval 全关掉。挂 `RoundSteps` 一侧天然满足；把三簇改成组合根
+  **末位**（看似更整齐）**会反过来胜出** —— 反探针 ⑤ 实测变红。
+- **结构性例外（「纯组合类」在本仓的精确含义）**：`_run_inspect` 与模块级 `run_inspect` 必须同住组合根——`_run_inspect`
+  按**模块全局**解析它（文档化可替换点，`rl/loop.py` 再导出），而那个模块不能 import `rl.loop_core`（成环）⇒ 只能留一个
+  方法。守卫 `test_composition_root_keeps_only_the_structural_pair` 正面钉住闭集 `{__init__, _run_inspect}`。
+- **三张跨模块手表**：入边闭集（`_check_quota_incident`/`_prepare_iter_dir`/`_rollout_phase`/`_evalboard_yield`/
+  `_maybe_dispatch_baseline_eval` 各 1 · `_eval_on_round` 3）· **出边为空**（三簇互不调兄弟方法）· 槽位读者闭集 +
+  **写手唯一**（`_course_fp`/`_corpus_fp` **只在** `loop_lifecycle._setup_common` **赋值**，本刀三簇只读）。
+- **★ 写手那条是反探针抓出来的**：首版沿用 S19 的宽松口径（「谁碰到这个名字」），而 `run_one_round` 也**读**
+  `_course_fp` ⇒ 把赋值点改名成 `_course_fp_x` 时守卫**不红**（探针 ⑬ 首次 17/18）。修法：`_self_assigns()` 只看
+  `Assign`/`AnnAssign` 的 target，并断言赋值点集合 == `{"_setup_common"}`。**只数「谁碰到」不够，要把「谁拥有」写成断言**。
+- **写法教训（同一处假红）**：入边首版沿用 `src.count(f"self.{member}(")` 口径，而新模块头注里那句
+  「`self._maybe_dispatch_baseline_eval(...)` 的解析与搬家前逐字相同」被算成**一条入边** ⇒ 守卫对着**合法的文档**报假红。
+  改成 AST 计真实 `Call` 节点 + AST 求定义面：**入边是语法事实，就该用语法量**。
+- **坑（第九/十/十一次同族）**：`tests/test_batch_eval.py`（写死路径读 `loop_core.py`）·
+  `e2e/test_loop_supervisor_integration.py`（经中间名字 `rl.loop_core.time` 补 `time.sleep`）·
+  dashboard 跨项目盲区（`kickstart-receipt.test.ts` 改成源码树搜定义）。
+- **记账校正**：第十九刀公布的 `loop_lifecycle.py` 行数 **617 → 672** 还差一（真值 **673**）⇒ 连提交消息（`--amend`）
+  带四处文档一次改齐；教训：**可测量值别在编辑过程中随手报，落盘后量一次**。
+- **不做**：`docs/nn/training-stack.md` / `remote-transport.md` 里带日期的历史记录不改写（那时指针正确）。
+- **违反后果**：旧家留别名/副本 · 组合根多出方法 · `RoundSteps.__bases__` 插队或抽基类 · 三簇改挂组合根末位（顺序契约
+  翻车）· 入边被 sibling 截胡或改形状 · 新增入边/出边手 · 槽位写手或读者漂 · 顶层 import 长出或反向 import · 成员改名 ·
+  占位失去「响亮失败」语义 · 类体长出带值槽位 —— 十二类都在**提交时**红（反探针 18/18）。
+- **门禁**：nn **2497 → 2510 passed / 3 skipped**（+13 = 新守卫）；ruff `All checks passed`；mypy 绿；
+  根 `bun run check` 2120 pass / 0 fail；dashboard typecheck + **1105 pass / 0 fail**；`check-decisions` ok。
+—— 全文（分组表 / 宿主与顺序契约 / 三张表 / 反探针教训）→ `docs/nn/engineering.md` §23「第二十刀」。

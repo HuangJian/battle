@@ -29,6 +29,9 @@ import dist_common
 from rl.config import course_key_of, resolve_course_quota
 from rl.events import log_iter_error
 from rl.log import log
+from rl.loop_baseline import TrainingBaseline
+from rl.loop_dispatch import TrainingDispatch
+from rl.loop_iter_dir import TrainingIterDir
 from rl.loop_round import (
     COLLECT_LOCAL,
     COLLECT_NODE,
@@ -57,7 +60,7 @@ from rl.loop_volume import TrainingVolume
 from rl.rollout_phase import join_precollect_child, precollect_ready, spawn_next_collect
 
 
-class RoundSteps(TrainingVolume):
+class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDispatch):
     """轮内 13 步（mixin；与 `TrainingSteps` / `TrainingGuards` 以 `self.*` 共享引擎状态）。
 
     MRO 里排在最前（`TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards)`）：它只定义
@@ -81,22 +84,22 @@ class RoundSteps(TrainingVolume):
     _course_fp: Any
     _last_dist_cfg: Any
     _collect_child: Any
-    _prepare_iter_dir: Any
     _hot_reload_course: Any
     _course_iter: Any
-    # 动态采集的四个入口（`_iteration_pairs` / `_volume_active` / `_volume_collect_continuous` /
-    # `_volume_topup`）**就是真方法**：随基类 `TrainingVolume` 继承而来（`rl/loop_volume.py`，
-    # S4 第十八刀）。这里**不再**声明为 `Any`——那会遮住基类实现（mypy 也会报不兼容）。
-    _evalboard_yield: Any
+    # 随基类继承而来、**不**在这里声明为 `Any` 的那些（声明会遮住基类实现，mypy 也会报不兼容）：
+    #   · 动态采集的四个入口（`_iteration_pairs` / `_volume_active` / `_volume_collect_continuous`
+    #     / `_volume_topup`）—— 基类 `TrainingVolume`（`rl/loop_volume.py`，S4 第十八刀）
+    #   · it0 基线（`_maybe_dispatch_baseline_eval` / `_baseline_eval_weights`）—— 基类
+    #     `TrainingBaseline`；本轮目录与产出健康（`_prepare_iter_dir` / `_check_quota_incident`）
+    #     —— 基类 `TrainingIterDir`；本轮派发与让位（`_rollout_phase` / `_eval_on_round` /
+    #     `_evalboard_yield`）—— 基类 `TrainingDispatch`（S4 第二十刀，三簇都挂本类一侧）
     _evalboard_idle: Any
     _export_offline_bundle: Any
     _remote_run_segment: Any
     _remote_iter: Any
-    _rollout_phase: Any
     #: in-loop 评估链的入口（`_join_eval` / `_drain_pending_eval` 同簇）——独立实现住在
     #: `rl/loop_eval.py::TrainingEval`（S4 第十七刀）。
     _dispatch_delayed_eval: Any
-    _maybe_dispatch_baseline_eval: Any
     _log_report: Any
     #: 远端 PPO 的三相驱动（实现在 `TrainingSteps`）：`None` = 已收口，否则 = 让位/停车。
     _remote_ppo_step: Callable[[RoundContext], StepResult | None]
@@ -107,7 +110,6 @@ class RoundSteps(TrainingVolume):
     _rotate_cleanup: Any
     _auto_inspect: Any
     _run_inspect: Any
-    _check_quota_incident: Any
     _breaker: Any
     _stop_loss: Any
     # §5 干烧熔断（结果面，loop_guards.TrainingGuards）
@@ -120,7 +122,6 @@ class RoundSteps(TrainingVolume):
     _node_rollout: bool
     #: 本轮节点侧采集墙钟；None = 本轮不在节点采集（本地轮）。
     _node_rollout_sec: float | None
-    _eval_on_round: Any
     _spawned_early: Any
     _stream_meta: Any
     _agg: Any

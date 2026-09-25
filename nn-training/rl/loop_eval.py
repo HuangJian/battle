@@ -29,8 +29,9 @@ stream 报告里的 eval 线程句柄 pop 进 `_eval_thread`（R4：jsonl 写回
 
 ## `_eval_on_round` 的占位也随簇走
 
-占位 body 用 `raise` 而不用 `...`：真实现在 `TrainingLoop` 本体（`rl/loop_core.py`），MRO 胜过
-此处；万一 MRO 被改坏要**响亮失败**，而不是静默返回 falsy 把 eval 全关掉。把它放在**消费它的
+占位 body 用 `raise` 而不用 `...`：真实现住 `rl/loop_dispatch.py::TrainingDispatch`（S4 第二十刀
+前住 `loop_core.py` 的组合根本体），MRO 胜过此处；万一 MRO 被改坏要**响亮失败**，而不是静默
+返回 falsy 把 eval 全关掉。把它放在**消费它的
 模块**里比留在 `loop_steps` 更贴职责——读这一簇的人一眼看到契约。
 
 ## DI seam：本模块**没有**新的 patch 点
@@ -89,13 +90,14 @@ class TrainingEval:
     #: 本轮主链为 eval 站在外面等的秒数（缺省 0 = 不站等）；类级默认同上。
     _eval_join_sec: float = 0.0
 
-    #: 本轮是否评估轮——真实现在 TrainingLoop 本体（loop_core.py），MRO 胜过
-    #: 此处占位。body 用 raise 而不用 `...`：万一 MRO 被改坏，响亮失败而不是
-    #: 静默返回 falsy 把 eval 全关掉。
+    #: 本轮是否评估轮——真实现在 `rl/loop_dispatch.py::TrainingDispatch`（S4 第二十刀，
+    #: 前住 loop_core 的组合根本体），MRO 胜过此处占位。body 用 raise 而不用 `...`：
+    #: 万一 MRO 被改坏，响亮失败而不是静默返回 falsy 把 eval 全关掉。
 
     def _eval_on_round(self, it: int) -> bool:
         raise NotImplementedError(
-            "TrainingEval._eval_on_round 被直接调用——MRO 破坏（真实现在 TrainingLoop）"
+            "TrainingEval._eval_on_round 被直接调用——MRO 破坏"
+            "（真实现在 rl/loop_dispatch.py::TrainingDispatch）"
         )
 
     # ------------------------------------------------- in-loop eval 墙钟（2026-09-17）
