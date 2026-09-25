@@ -3313,6 +3313,31 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
   nn **2567 → 2586 passed / 3 skipped**（ruff + mypy 绿）；根 2120 / 0；dashboard typecheck + 1105 / 0；
   `check-decisions` ok。**下一步 = B2**（`rl/batch_store.py`：8 个写点 → 具名转移 + `dirty` 才落盘）。
 
+## §2026-09-25-goalnn-batch-eval-facade-b4（2026-09-25，B4：门面收尾 —— 把「门面是门面」变成机器可判的契约）
+
+**决定：`rl/batch_eval.py` 的第四步 B4 收尾 —— ① 新守卫 `tests/test_batch_eval_facade.py` 把门面形态钉成契约
+（模块级 `def` 闭集 = {`maybe_dispatch_batch`} · 自别名再导出表闭集且对象恒等 · 刻意不转发的名字响亮
+AttributeError · 门面不改写 store 交回的台账 dict）；② 删掉旧实现残留的就地改台账 `batch.setdefault("units", {})["of"]`；
+③ 散落的指路注释合并成 docstring 一张表。** 全文 → `docs/nn/engineering.md` §28「第二十八刀」。**
+
+- **1. 删除行为等价的旧残留**：那行是 B2 之前「就地改台账再落盘」的第二半（同行还有 `_persist_of(root, …)`）。
+  B2 之后它**无任何读者** —— `store.claim()` 交回的是认领时的台账快照，执行器只读 `batch_id` / `iter`
+  （`of` 走参数 `unit_of`）⇒ 删后行为等价。删了它，「门面不是第二写者」才能成为可断言的事。
+- **2. 不转发的名字是**契约**而不是例外**：执行器五常量 + `_heartbeat` · store 文件名常量 · 三个台账私有 seam ——
+  在门面上必须**响亮** AttributeError（转发会造成「名字还在、没人读」的静默空操作，S16/S19 同款）。
+- **3. 补上一条真空白**：`maybe_dispatch_batch` 此前**没有任何直接单测**（只被轮内间接覆盖）——
+  补主线（认领→规划→定型→起线程）+ 三条 requeue 路径 + 判决批权重取 unit。
+- **★ 反探针的第三种归因：断言无区分力**。首轮 13/14：把判决批权重改成 `rl_path` 优先**存活**，
+  因为用例传的是 `rl_path=None`（`None or w` 与 `w or None` 同结果）⇒ **不是探针打偏，是用例太弱**
+  （S26「先怀疑探针」、S27「守卫搜索方式太松」之后的第三种成因）。改成故意传另一份 `rl_path` 后 14/14。
+- **记一笔不改的既存缺陷**：`select_next_unit` 过滤后为空（`only_rungs` 无一命中）时门面 `return None`
+  而不 requeue，而 `claim` 看 `of>0 ∧ len(done)<of` ⇒ 该批**每窗被再认领、永不发车、无日志、永远 running**；
+  与三条兄弟路径（模式不适 / 规划失败 / 缺权重）不一致 —— 另开一刀，不在本刀静默改。
+- **记账/门禁**：`batch_eval.py` **225 → 166** · nn **2621 → 2632 passed / 3 skipped**（ruff + mypy 绿）·
+  根 `bun run check` 2120 / 0（121404 expect）· 反探针 **14/14 全红**，还原 sha256 无漂移。
+- **B1–B4 到此完整收官**（plan §5.5.4）；原 1785 行巨团的三个面各自成家，门面零迁移。**余下真实工作 = B5**
+  （`_run` 的 821 行按阶段切），按 §5.5.4 另开一轮。
+
 ## §2026-09-25-goalnn-batch-runner-b3-split（2026-09-25，B3：执行面纯搬出包 `rl/batch_runner.py`）
 
 **决定：`rl/batch_eval.py` 拆分的第三步 B3 —— `BatchEvalRunner` + `dispatch_batch_bg`（连同它独占的

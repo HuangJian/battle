@@ -1319,7 +1319,7 @@ python 侧读者都在锁里，所以受害面就是这个 TS 读者；而它的
 | **B1** | 纯规划 + 判据出包到 `rl/batch_plan.py`；`batch_eval` 再导出 | **零**（纯函数，无锁无 IO，逐字节对账） | 1785 → ~1630 · **✅ 已完成：1805 → 1616（`batch_plan.py` 271 行；逐字节对账 23/23 + 36/36，反探针 21/21，nn 2586）** |
 | **B2** | 建 `rl/batch_store.py`：8 个写点 → 具名转移；`consume_requests` 拆成「请求翻译 + 三个具名转移」；`_persist_of` 消失（并入 `set_units_of`）；落盘策略统一成 **`dirty` 才落盘** | **中**（状态机集中 + 落盘策略统一）| ✅ **已完成：1616 → 1190（`batch_store.py` 680 行；差分探针 54/54 等价，反探针 22/22，nn 2608）** |
 | **B3** | `BatchEvalRunner` + `dispatch_batch_bg` → `rl/batch_runner.py`（896 + 36 行，**纯搬**） | 零（逐字节对账） | ✅ **已完成：1190 → 223（`batch_runner.py` 1031 行；逐字节对账 8/8，反探针 17/17，nn 2621）** |
-| **B4** | 门面收尾：`batch_eval.py` = 常量 + `maybe_dispatch_batch` + 再导出 | 零 | ✅ **目标形态已达成**（B1–B3 搬完后自然退成这个形状，**223 行** < 估的 ~290）；不再是独立一步，若要收尾只剩「合并指路注释」这类零风险整理 |
+| **B4** | 门面收尾：`batch_eval.py` = 常量 + `maybe_dispatch_batch` + 再导出 | 零（只整理 + 一条行为等价删减） | ✅ **已完成：225 → 166 行**（散落的「已搬到 X」指路注释合并成 docstring 的一张表；删掉旧实现「就地改台账再落盘」的残留 `batch.setdefault("units", {})["of"]`；新守卫 `tests/test_batch_eval_facade.py` 11 例，反探针 14/14，nn 2632）。目标形态 B3 之后就已达成，本步只把「门面是门面」变成机器可判的契约 |
 | B5 | **另开一轮**：`_run` 的 821 行按阶段切（通道机器 ~500 / 收尾 ~80 / 参与度账 ~60 / 单元开头 ~60） | —— | 不在本接口范围 |
 
 行数是**分区实测的估**（落盘后以实测为准——S19/S20/S22 三次记账教训）。
@@ -1347,6 +1347,13 @@ B1 与 B3 是纯搬，可按 S21–S23 的成品流程走（逐字节对账 + �
 ⑤ 落盘是**原子**的 —— ✅ 已提前落地：`tests/test_batch_eval.py::test_batch_ledger_publish_is_atomic`
 （确定性：在 live 文件被以 `'w'` 打开的那一刻读台账，而不是靠并发时序），B2 只需把它扩到 store 的方法上。
 另加契约守卫：`status` 的赋值点闭集 = store 的具名转移（AST 数 `Assign` target，同 S20 的 `_self_assigns` 教训）。
+
+**新守卫（B4 交付物）**：`tests/test_batch_eval_facade.py` —— ① **门面契约**：模块级 `def` 闭集 =
+{`maybe_dispatch_batch`} · 自别名再导出表**闭集**（双向）且对象级恒等 · 刻意**不**转发的名字
+（执行器五常量 + `_heartbeat` · store 文件名常量 · 三个私有 seam）在门面上**响亮** AttributeError ·
+门面**不改写** store 交回的台账 dict（AST：函数体里零下标赋值 + 三次变更都经 `store.<具名转移>`）。
+② **`maybe_dispatch_batch` 的直接功能性**（此前只被轮内间接覆盖，`tests/` 无一条直接调用）：
+认领→规划→定型→起线程主线 · 三条 requeue 路径 · 判决批权重取 unit 而非批次级 `rl_path`。
 
 #### 5.5.6 明确不改的
 

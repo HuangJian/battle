@@ -1,23 +1,22 @@
-"""batch_eval — B 层批次执行（plan/rl-eval-system.md §10.3 P2）。
+"""batch_eval — B 层批次门面（plan/rl-eval-system.md §10.3 P2 · plan/nn-training-refactor.md §5.5）。
 
-BatchEvalRunner：结构参考 EvalDispatcher，复用 `fetch_task(mode='eval')` /
-`run_local_eval_game`；语料由 `ladder.json` + `batches.jsonl` 驱动
-（不要复用 dispatch_eval_bg：EvalDispatcher 无外部语料入口，§10.3）。
+**本模块是门面，不是实现**：常量 + `maybe_dispatch_batch`（轮内接线）+ 逐个再导出下面三家
+的公开名（`X as X`）⇒ 既有 import 点一行不改。四步拆分见 plan §5.5.4，契约守卫见
+`tests/test_batch_eval_facade.py`。
 
-语料规划与判据/门（`plan_units` / `plan_verdict_units` / `node_gate_reason` /
-`is_transient_error` …）自 2026-09-25（S25/B1）起住 `rl/batch_plan.py`；本模块顶部
-逐个再导出（`X as X`）⇒ 既有调用点一行不改。
+| 面 | 实现在哪 | 搬出日期 |
+|---|---|---|
+| 规划 / 判据 / 门（`plan_units` · `plan_verdict_units` · `units_for_batch` · `node_gate_reason` · `is_transient_error` · `kind_for_policy` + 桶常量） | `rl/batch_plan.py` | 2026-09-25 S25/B1（纯搬） |
+| 台账 + 请求面（`BatchStore` 八个具名转移 · 锁 · 原子发布 · `data_root` / `utc_now_iso`） | `rl/batch_store.py` | 2026-09-25 S26/B2（状态收进唯一所有者） |
+| 执行面（`BatchEvalRunner` · `dispatch_batch_bg` + 它们独占的常量与 `_heartbeat`） | `rl/batch_runner.py` | 2026-09-25 S27/B3（纯搬） |
+| 接线 `maybe_dispatch_batch` + 常量 `ONESHOT_EVAL_KIND` | **本模块** | —— |
 
-台账与请求面（`consume_requests` / `claim_pending` / `mark_unit_done` / `read_*` …）自
-2026-09-25（S26/B2）起住 `rl/batch_store.py` —— `BatchStore` 是**台账唯一所有者**：
-「一次具名转移 = 一次事务 = 一次落盘」，锁与原子发布都在那里；本模块顶部同样逐个
-再导出 ⇒ 调用点一行不改。本模块自此 = **执行面**（`BatchEvalRunner`）+ 轮内接线
-（`maybe_dispatch_batch`）+ 单元行字段（`eval_census_fields` / `eval_loot_fields`）。
+**刻意不经门面转发的**（转发了只会制造「名字还在、没人读」的静默空操作，S16/S19 记过两次）：
+执行器独占的五个常量 + `_heartbeat` · store 的内部文件名常量 · 三个台账私有 seam
+（`_persist_of` / `_requeue` / `_reopen_for_resume` —— 调用点已改到 store 的具名转移上）。
+它们在门面上是**响亮**的 AttributeError，而不是一个静默生效的 patch 锚点。
 
-执行面（`BatchEvalRunner` / `dispatch_batch_bg` + 它独占的常量与 `_heartbeat`）自
-2026-09-25（S27/B3）起住 `rl/batch_runner.py`；本模块顶部再导出两个公开名 ⇒ 调用点一行不改。
-
-关键契约：
+关键契约（原文照搬 —— 别在门面里改语义）：
   - 节点门（§6.6）：enabled ∧ ping ∧ evalSupport ∧ stageJsonSupport ∧
     bunVersion 一致 ∧ **codeHash 一致**（= rollout 门同一判据；2026-09-17 起不再比
     ping.engineEpoch——见 dist_common.check_code_hash）——**严格拒派，不静默降级**（P2 DoD）。
@@ -36,9 +35,10 @@ from pathlib import Path
 
 import dist_common
 
-# 规划 / 判据面：实现已出包到 `rl/batch_plan.py`（S25/B1，纯搬）。
-# 自别名逐条再导出（`X as X`，ruff `combine-as-imports = false` 下每条一行）⇒
-# 既有 `from rl.batch_eval import plan_units` 等调用点一行不改，且 `batch_eval.X is batch_plan.X`。
+# 再导出约定：`from <home> import X as X` 自别名，逐条一行（ruff `combine-as-imports = false`）。
+# 这是「已有 import 点一行不改」与 `batch_eval.X is <home>.X` 的全部依据；
+# 面与面的分工见顶部 docstring 的表，闭集守卫见 tests/test_batch_eval_facade.py。
+# 规划 / 判据面 → `rl/batch_plan.py`（S25/B1）
 from rl.batch_plan import BATCH_STAGE_BASE as BATCH_STAGE_BASE
 from rl.batch_plan import CORPORA_JSON as CORPORA_JSON
 from rl.batch_plan import EVAL_SEED0 as EVAL_SEED0
@@ -61,15 +61,11 @@ from rl.batch_plan import plan_verdict_units as plan_verdict_units
 from rl.batch_plan import select_next_unit as select_next_unit
 from rl.batch_plan import units_for_batch as units_for_batch
 
-# 执行面：实现已出包到 `rl/batch_runner.py`（S27/B3）。自别名再导出 ⇒ 调用点一行不改、
-# `batch_eval.BatchEvalRunner is batch_runner.BatchEvalRunner`。
+# 执行面 → `rl/batch_runner.py`（S27/B3）
 from rl.batch_runner import BatchEvalRunner as BatchEvalRunner
 from rl.batch_runner import dispatch_batch_bg as dispatch_batch_bg
 
-# 台账 / 请求面：实现已出包到 `rl/batch_store.py`（S26/B2，状态收进唯一所有者）。
-# 自别名逐条再导出（与 batch_plan / batch_runner 同款：ruff `combine-as-imports = false`
-# 下每条一行）⇒ 既有 `from rl.batch_eval import claim_pending` 等调用点一行不改，
-# 且 `batch_eval.X is batch_store.X`。
+# 台账 / 请求面 → `rl/batch_store.py`（S26/B2）
 from rl.batch_store import DEFAULT_DATA_ROOT as DEFAULT_DATA_ROOT
 from rl.batch_store import REQUESTS_DONE_FILE as REQUESTS_DONE_FILE
 from rl.batch_store import REQUESTS_FILE as REQUESTS_FILE
@@ -86,27 +82,6 @@ from rl.batch_store import utc_now_iso as utc_now_iso
 from rl.batch_store import write_batches as write_batches
 from rl.log import log
 
-# ── 规划 / 判据面：实现已出包到 `rl/batch_plan.py`（2026-09-25 B1，纯搬）────────
-# `REPO_ROOT`、四个批规划常量（阶梯 / 语料 / 关卡目录 + 三档镜像值）与全部规划/判据函数
-# 都住 `rl/batch_plan.py`；顶部 import 逐个再导出（`X as X`）⇒ 既有调用点一行不改、
-# `batch_eval.X is batch_plan.X` 恒真。
-
-# `is_transient_error`（背压/瞬断的 B 层薄转发，单一实现仍在 `dist_common`）已搬到
-# `rl/batch_plan.py`（顶部再导出）。
-
-# 执行器独占的五个常量（背压退避封顶 / 收尾僵死 / 重探间隔 / 零消费者宽限 / 恢复轮次）随
-# `BatchEvalRunner` 搬到 `rl/batch_runner.py`（S27/B3）—— **它们只被执行器读**，故本模块
-# **不再转发**：对 `rl.batch_eval.<常量>` 的 setattr / getattr 会**响亮** AttributeError，
-# 而不是「名字还在、没人读」的静默空操作（S16/S19 记过两次的坑）。
-
-
-# `node_gate_reason`（节点门判据；纯函数，单测覆盖）已搬到 `rl/batch_plan.py`（顶部再导出）。
-
-
-# `KIND_FOR_POLICY` / `kind_for_policy`（policy → agent 权重桶）已搬到 `rl/batch_plan.py`
-# （顶部再导出）。
-
-
 #: 一次性评估入口专用桶。**为什么不蹭 'rollout'**（2026-09-19 实测事故）：节点侧
 #: 同 kind 权重文件按保留份数收敛（`workdir-cleanup.WEIGHT_FILES_KEEP = 4`），而训练
 #: 作业每轮向 'rollout' 桶 POST 一份新权重 ⇒ 一次性评估那份固定权重在几秒内就被扫掉；
@@ -115,35 +90,6 @@ from rl.log import log
 #: 重试耗尽 ⇒ 单元 0/50 settled（`local_slots: 0` 时整批 0 行、exit 1）。
 #: 独立 kind 让评估权重自成一桶（该 kind 下只有它一份）⇒ 训练作业的 churn 扫不到它。
 ONESHOT_EVAL_KIND = "eval"
-
-
-# `utc_now_iso` / `data_root`（含 `DEFAULT_DATA_ROOT`）已搬到 `rl/batch_store.py`
-# （S26/B2，与台账同住 —— 它们描述的是「存储」而不是「执行」）；顶部再导出 ⇒
-# 调用点一行不改。
-
-
-
-# ── 批语料规划（纯函数面）───────────────────────────────────────────────────
-# `load_ladder` / `plan_units` / `corpora_path` / `load_corpora` / `corpus_doc` /
-# `plan_verdict_units` / `units_for_batch` / `_forces_of` / `batch_iter_id` 已搬到
-# `rl/batch_plan.py`（顶部再导出）—— 本模块只剩台账 / 执行 / 接线。
-
-
-# ── 台账 / 请求面：实现在 `rl/batch_store.py`（2026-09-25 S26/B2）──────────────────────
-# 锁（原 `_claim_guard` / `_claim_locked` → `BatchStore._tx`）、台账读改写
-# （`read_batches` / `write_batches` / `_persist_of` / `_requeue` / `_reopen_for_resume`
-# → **八个具名转移**）与请求面（`read_requests` / `read_done_req_ids` /
-# `mark_requests_done` / `consume_requests`）都收进 `BatchStore` ——
-# **一次转移 = 一次事务 = 一次落盘**（设计见 plan/nn-training-refactor.md §5.5.2）。
-# 公开名在顶部再导出（`X as X`）⇒ 既有调用点与测试一行不改；三个私有 seam
-# （`_persist_of` / `_requeue` / `_reopen_for_resume`）**不**再转发 —— 它们是私有面，
-# 调用点已改到 store 上（`set_units_of` / `requeue` / `reopen_for_resume`）。
-
-
-# ── 执行面：`BatchEvalRunner` / `dispatch_batch_bg` 已出包到 `rl/batch_runner.py`
-# （2026-09-25 S27/B3，纯搬：一个 100 局单元 = 通道机器 + 尾段竞速 + 背压重排 + 收尾三闸）。
-# 公开名在顶部再导出（`X as X`）⇒ 既有 `from rl.batch_eval import BatchEvalRunner` 一行不改
-# 且 `batch_eval.X is batch_runner.X`；它独占的常量与 `_heartbeat` **不**转发（见上）。
 
 
 def maybe_dispatch_batch(
@@ -198,7 +144,9 @@ def maybe_dispatch_batch(
         return None
     epoch = dist_common.compute_engine_epoch()
     eval_log = traj_dir.parent / "eval_log.jsonl"
-    batch.setdefault("units", {})["of"] = len(units)
+    # 定型只走 store 的具名转移。这里**不**再就地改 `batch`（旧实现「就地改台账再落盘」的残留：
+    # store 交回的是**认领时的快照**，执行器只读它的 batch_id/iter（`unit_of` 走参数传入）
+    # ⇒ 就地改只是「第二写者」的假象，门面契约见 tests/test_batch_eval_facade.py。
     store.set_units_of(str(batch.get("batch_id")), len(units))
     return dispatch_batch_bg(
         bun,
@@ -216,8 +164,3 @@ def maybe_dispatch_batch(
         window_event,
         str(batch.get("init_sha16", "")),
     )
-
-
-# `select_next_unit`（下一待跑单元的确定性挑选）已搬到 `rl/batch_plan.py`（顶部再导出）。
-
-

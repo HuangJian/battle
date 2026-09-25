@@ -2176,6 +2176,75 @@ nn 门禁 **2586 → 2608 passed / 3 skipped**（ruff + mypy 绿，442 源文件
 里带日期的历史记录与阶段普查快照（那时指针正确）；`test_kick_once_paths.py:35` 断言
 `rl/batch_eval.py` 存在 —— 门面保留即继续成立。
 
+### 第二十八刀（2026-09-25）：B4 —— 门面收尾，`batch_eval.py` 退成「常量 + 接线 + 再导出」
+
+§5.5.4 的最后一步。B3 之后目标形态其实**已经达成**（223 行），所以本步不是搬家，
+而是把「门面是门面」从**说法**变成**机器可判的契约**，顺手清掉两处遗留。
+
+`rl/batch_eval.py` **225 → 166 行**。
+
+#### 1. 门面契约（新守卫的主体）
+
+`tests/test_batch_eval_facade.py`（**11 例**）钉的是「这个文件只能是什么样」：
+
+| 断言 | 手段 | 为什么值得钉 |
+|---|---|---|
+| 模块级 `def` 闭集 = {`maybe_dispatch_batch`} · 模块级赋值闭集 = {`ONESHOT_EVAL_KIND`} | AST | B1–B3 之后门面里不该再有逻辑；回流一条就要显式改表 |
+| 自别名再导出表**闭集**（双向）+ 对象级恒等 | AST + `is` | 「既有 import 点一行不改」的全部依据；漏一条或加一条都会红 |
+| 刻意不转发的名字**响亮** AttributeError | `not hasattr` | 执行器五常量 + `_heartbeat` · store 文件名常量 · 三个私有 seam —— 转发了只会制造「名字还在、没人读」的静默空操作（S16/S19） |
+| 门面**不改写** store 交回的台账 dict | AST：函数体零下标赋值 + `store.{claim,requeue,set_units_of}` 三次具名转移 | B2 之后台账只有一个所有者；门面留下「第二写者」的痕迹就会让下一次搬家时误以为这里有状态 |
+
+#### 2. 删掉一处旧实现残留（本步唯一的删代码）
+
+`maybe_dispatch_batch` 里留着：
+
+```python
+batch.setdefault("units", {})["of"] = len(units)   # 就地改台账 dict
+_persist_of(root, str(batch.get("batch_id")), len(units))
+```
+
+它是 B2 之前「就地改台账再落盘」的形态（`git show HEAD~3:nn-training/rl/batch_eval.py`
+可验：两行并存）。B2 把 `_persist_of` 变成 `BatchStore.set_units_of` 后，第一行**不再有任何读者**：
+`store.claim()` 交回的是**认领时的台账快照**，执行器只读它的 `batch_id` / `iter`
+（`grep -n 'self.batch' rl/batch_runner.py` ⇒ 只有 `batch_id` 与 `iter`；`of` 走参数 `unit_of`）。
+所以删它是**行为等价**的，而且删掉之后「门面不是第二写者」才成为可断言的事。
+
+#### 3. 把指路注释收进一张表
+
+原先 8 段散落在大段的「`X` 已搬到 `Y`（顶部再导出）」注释（还留着「本模块只剩台账 / 执行 / 接线」
+这类**已经过期**的说法）合并成 docstring 里的一张**面 → 实现在哪 → 搬出日期**表，
+加一栏「刻意不转发的名字与理由」。信息一条没丢（特别是「转了就是静默空操作」那条陷阱），
+但读它的人三行内就知道这文件是什么。
+
+#### 4. ★ `maybe_dispatch_batch` 此前**没有一条直接单测**
+
+侦察时发现：它只被轮内（`loop_lifecycle._evalboard_idle` / `loop_dispatch._evalboard_yield`）间接覆盖，
+`tests/` 里没有任何一处直接调用 —— 而它是门面里**唯一还活着的逻辑**。本次补上直接功能性：
+认领 → 规划（含 `k%3==2` 的回归位 ⇒ of 2→3 落台账）→ 起一条执行线程的主线，
+**三条 requeue 路径**（模式不适 / 规划失败 / nn 缺权重），以及判决批「权重取 unit 而非批次级
+`rl_path`」。
+
+反探针首轮 **13/14**：⑬（把判决批权重改成 `rl_path or unit_ckpt` 优先）**存活** —— 因为原用例传的是
+`rl_path=None`，`None or w` 与 `w or None` 同结果 ⇒ **不是探针打偏，是用例的断言太弱**。
+把用例改成故意传**另一份** `rl_path` 并断言「发车用的是 unit 的 ckpt」后 14/14。
+（同 S26/S27：**存活先怀疑探针**，但也要怀疑用例本身——这是第三种归因：**断言无区分力**。）
+
+#### 5. 发现但**本刀不改**的既存缺陷
+
+`select_next_unit` 过滤后为空（`only_rungs` 里没有一个 rung 在本次 plan 的 unit 里）时返回
+`(units, None, None)`，门面 `if nxt is None or unit is None: return None` —— **不 requeue**。
+而 `claim` 的可跑判据是 `pending ∨ (running ∧ of>0 ∧ len(done)<of)`：`of` 已在建批时是 2、
+`done` 还是空 ⇒ **每个 idle 窗都会被再认领一次，永不发车、不落日志、状态永远 `running`**。
+三条兄弟路径（模式不适 / 规划失败 / 缺权重）都是「记日志 + 退回队列」，这一条不一致。
+属真设计问题（requeue 会让它每窗重试，也是另一种循环）⇒ 不静默改，另开一刀。
+
+#### 验证
+
+- **新守卫** `tests/test_batch_eval_facade.py`（11 例）· **反探针 14/14 全红**（`tmp/probe_b4.py`），
+  还原后 sha256 无漂移。
+- **门禁**：nn **2621 → 2632 passed / 3 skipped**（ruff + mypy 绿）· 根 `bun run check`
+  **2120 / 0**（121404 expect）· `check-decisions` ok。
+
 ### 未做完（S4 余下）
 
 `remote/` 内部**已零环**（见「拆环」节），`worker.py` 的拆分面**已收口**：只剩三个宿主函数
