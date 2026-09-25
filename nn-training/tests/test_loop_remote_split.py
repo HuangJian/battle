@@ -186,6 +186,7 @@ DELAYED_IMPORTS: dict[str, frozenset[str]] = {
             "rl.collect_only",
             "rl.config",
             "rl.queue",
+            "rl.resume",
             "rl.reward_library",
         }
     ),

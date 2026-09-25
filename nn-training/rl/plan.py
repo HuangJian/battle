@@ -207,6 +207,9 @@ def template_argv(
             seed=int(seed),
             wver=str(wver or ""),
             node_label=node_label,
+            # 模板由**节点**重放（job 目录 cwd）：起始分布的快照还没走云侧通道 ⇒ 课程开了
+            # state_init 时在发布前响亮拒（plan/x20-state-init.plan.md §P2.5）。
+            node_side=True,
         )
         argv.append([str(x) for x in cmd[1:]])
     return argv

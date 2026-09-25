@@ -62,7 +62,7 @@ from common.protocol import (
     job_id as make_job_id,
 )
 from platform_utils import rmtree_best_effort
-from rl.resume import walk_shard_dirs
+from rl.resume import shard_state_init_ok, walk_shard_dirs
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -107,6 +107,7 @@ def iter_shard_dirs(
     *,
     course_fp: str = "",
     corpus_fp: str = "",
+    state_init: bool = False,
 ) -> list[Path]:
     """本轮应训 shard 集：it{it} 下全部 rl_s*_seed*/manifest.json 目录（与
     `_serial_ppo` 的 load_episodes 装载口径一致——D1「wver 过滤 + resume 剔除
@@ -119,6 +120,10 @@ def iter_shard_dirs(
     永远等不到结果、训练轮空转、worker 反复领同一份死活。对账（`resume._scan_shards`）
     早就在滤血缘，只有发布端漏了——一次漏过滤 = 一份永远完不成的 job。
 
+    起始分布（P3.5，`plan/x20-state-init.plan.md`）：`state_init=True` 时只挑带 `initTick`
+    的 shard——一份标准开局的 shard 进了 payload，云端训的就经不是本轮的起始分布，
+    而 data_fp（按 (stage,seed,wver) 声明）照样匹配（静默换实验那一类）。
+
     同名 shard 去重（发布端不变量）：同一 seed 只允许一份进 payload——重复
     arcname 的 zip 由解包顺序决定训练吃哪份（偶然语义），且 data_fp 账面与
     expectedGames 不平。正常路径由 dispatch 结算退场输家副本（2026-09-06），
@@ -130,6 +135,8 @@ def iter_shard_dirs(
         return []
     cands: dict[str, list[Path]] = {}
     skipped = 0
+    skipped_init = 0
+    first_init_miss = ""
     # walk_shard_dirs 而非 rglob：发布与 dup-settle 输家退场（dispatch 结算线程 rmtree）
     # 同轮并发，rglob 会在迭代里抛 FileNotFoundError 把发布打红（2026-09-20 事故：
     # `stream collector failed` 同源；栈顶 pathlib._select_from）。见 rl/resume.py 的说明。
@@ -139,11 +146,20 @@ def iter_shard_dirs(
         if (course_fp or corpus_fp) and not _shard_lineage_ok(d, course_fp, corpus_fp, log):
             skipped += 1
             continue
+        if state_init and not _shard_state_init_ok(d, log):
+            skipped_init += 1
+            first_init_miss = first_init_miss or str(d)
+            continue
         cands.setdefault(d.name, []).append(d)
     if skipped:
         log(
             f"[publish] D14: 剔除 {skipped} 个异血缘 shard（it{it} 内混入了别的课程版本/runId 的语料）"
             "——云端会整份拒收，故不进 payload"
+        )
+    if skipped_init:
+        log(
+            f"[publish] state_init: 剔除 {skipped_init} 个缺 initTick 的 shard（标准开局产物，"
+            f"本轮的起始分布不是它；首例 {first_init_miss}）"
         )
     dirs: list[Path] = []
     for name in sorted(cands):
@@ -156,6 +172,20 @@ def iter_shard_dirs(
                 log(f"[publish] duplicate shard {name}: retire {loser} (keep {ds[0]})")
         dirs.append(ds[0])
     return dirs
+
+
+def _shard_state_init_ok(d: Path, log=lambda msg: None) -> bool:
+    """shard 是否真的从人类中段快照起跑（manifest 带正整数 `initTick`）。
+
+    判据函数与本地对账同源（`rl.resume.shard_state_init_ok`，两处共用一条规则）。
+    读不到 manifest = 不收（宁可少一份也不把标准开局的局当本轮的语料）。
+    """
+    try:
+        mm = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        log(f"[publish] shard {d} manifest 不可读（{e}）——按不满足 state_init 处理")
+        return False
+    return shard_state_init_ok(mm, True)
 
 
 def _shard_lineage_ok(
@@ -1526,6 +1556,7 @@ def verify_and_land(
     traj_dir: str | Path,
     it: int,
     out_weights: str,
+    state_init: bool = False,
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
 ) -> str:
     """三重校验（D12）+ 落盘（weights_json → args.out；opt tar → ppo_ckpt_remote）。
@@ -1557,6 +1588,9 @@ def verify_and_land(
                 log=log,
                 course_fp=str(m.get("course_fp") or ""),
                 corpus_fp=str(m.get("corpus_fp") or ""),
+                # 与发布端（`rl/loop_steps`）同一条过滤：本地重算的集合必须恒等于
+                # 打进 payload 的集合（P3.5），否则三重校验误拒一份正常 job。
+                state_init=state_init,
             )
         )
     if result["data_fp"] != local_fp:

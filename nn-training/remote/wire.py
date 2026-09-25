@@ -33,6 +33,7 @@ from remote.bulk_sched import BulkScheduler
 __all__ = [
     "WIRE_MAX_JOBS",
     "WIRE_MIN_RATE",
+    "WIRE_PREEMPT_MAX",
     "WIRE_PROBE_BYTES",
     "WIRE_PROBE_SEC",
     "WIRE_RATE_SAMPLE_MIN_BYTES",
@@ -51,6 +52,7 @@ __all__ = [
     "_wire_bucket",
     "_wire_flush",
     "_wire_hit",
+    "_wire_note_preempt",
     "_wire_note_reroll",
     "_wire_start",
     "_wire_time",
@@ -97,6 +99,9 @@ WIRE_PROBE_SEC = 3.0
 WIRE_REROLL_BUDGET_SEC = 20.0
 #: 单次下载的重抽上限（**只给幂等 GET**；POST result 永不重抽）。
 WIRE_REROLL_MAX = 3
+#: 单次**预取下载**（P2）被 P1 挤走后的重排上限（2026-09-25）：挤走不是失败，
+#: **不消耗** `attempts`。它只管抢占；坏签重抽仍归 `WIRE_REROLL_MAX`，两者独立。
+WIRE_PREEMPT_MAX = 6
 #: 会话最好速率的采样最小体量（小 body 的瞬时速率不代表链路，不参与判据）。
 WIRE_RATE_SAMPLE_MIN_BYTES = 256 * 1024
 #: 未 flush 的 job 传输账上限（push 模式没有 pull 循环的 flush 点）。
@@ -128,10 +133,13 @@ def set_bulk_log(log: Any) -> None:
 
 
 def _bulk_pace(token: int, prio: str) -> Any:
-    """分片间隙的让路回调（交给 `_read_body`）：控制面在途 ⇒ 暂停；P2 被挤 ⇒ 中断。"""
+    """分片间隙的让路回调（交给 `_read_body`）：控制面在途 ⇒ 暂停；P2 被 P1 挤 ⇒ 中断。
 
-    def _pace() -> None:
-        _BULK.pace(token, prio)
+    返回值 = 本次让路的秒数：`_read_body` 用它算**净值** elapsed 喂速率判据（2026-09-25）。
+    """
+
+    def _pace() -> float:
+        return _BULK.pace(token, prio)
 
     return _pace
 
@@ -201,6 +209,9 @@ def _wire_bucket(jid: str) -> dict:
             "times": {},  # 只有秒数的段（`ppo`）：阶段占比要用
             "wasted": 0,
             "rerolls": 0,
+            # 被 P1 挤走作废的字节（挤走不占 `wasted`：那是重抽的账，两者口径不同）。
+            "preempt_wasted": 0,
+            "preempts": 0,
             "sched0": _BULK.stats(),  # 本 job 起点的调度器快照（flush 时算增量）
             "t0": time.time(),  # 建账时刻（claim 时会被 `_wire_start` 重写）
         }
@@ -251,6 +262,19 @@ def _wire_note_reroll(jid: str, wasted: int) -> None:
     w["wasted"] += int(wasted)
 
 
+def _wire_note_preempt(jid: str, wasted: int) -> None:
+    """记一次**被 P1 挤走**（及其作废字节）——否则预取的真实成本在账上恒等于 0。
+
+    与 `_wire_note_reroll` 分开记账：重抽是「链路抽到坏签」，挤走是「P1 要带宽」，
+    两者的处置（换连接 vs 让路）完全不同，混在一起就没法判「该调哪个旋钮」。
+    """
+    if not jid:
+        return
+    w = _wire_bucket(jid)
+    w["preempts"] += 1
+    w["preempt_wasted"] += int(wasted)
+
+
 def _wire_flush(jid: str, log, *, wall_end: float | None = None) -> None:
     """打**一行**本 job 的传输账并清掉：`wire payload=… code=cache-hit reroll=1 合计=…`。
 
@@ -278,6 +302,8 @@ def _wire_flush(jid: str, log, *, wall_end: float | None = None) -> None:
         parts.append(f"{seg}={why}-hit")
     if w["rerolls"]:
         parts.append(f"reroll={w['rerolls']}(wasted {w['wasted'] / mb:.2f}MB)")
+    if w["preempts"]:  # 只在真被挤走时打（别给正常路径每行加噪）
+        parts.append(f"preempt={w['preempts']}(wasted {w['preempt_wasted'] / mb:.2f}MB)")
     # 调度账（§2.2/P0）：本 job 期间在 bulk 队列上等了多久、让路几次、控制面往返多快。
     # `p0_rt_ms_p95` 是**会话级**读数（分位数不能做增量），其余按 job 起点快照取差。
     s0 = w.get("sched0") or {}

@@ -36,6 +36,7 @@ class TrainingIterDir:
     _traj_dir: Any
     _course_fp: Any
     _corpus_fp: Any
+    _state_init: Any
     _extra_wver: Any
     _zero_shard_streak: Any
 
@@ -81,6 +82,7 @@ class TrainingIterDir:
                 extra_wver=extra_wver,
                 course_fp=self._course_fp,
                 corpus_fp=self._corpus_fp,
+                state_init=self._state_init,
             )
         )
         if have_resume:

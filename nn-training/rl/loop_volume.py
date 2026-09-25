@@ -89,6 +89,7 @@ class TrainingVolume:
     _rotate_seed: Any
     _course_fp: Any
     _corpus_fp: Any
+    _state_init: Any
     _extra_wver: Any
     _report: Any
     _stream_meta: Any
@@ -333,6 +334,7 @@ class TrainingVolume:
                 extra_wver=self._extra_wver,
                 course_fp=self._course_fp,
                 corpus_fp=self._corpus_fp,
+                state_init=self._state_init,
             )
             collected = {s: totals.get(s, (0, 0))[1] for s in stages}
             games_done = {s: totals.get(s, (0, 0))[0] for s in stages}
@@ -472,6 +474,7 @@ class TrainingVolume:
                 extra_wver=extra_wver,
                 course_fp=course_fp,
                 corpus_fp=corpus_fp,
+                state_init=self._state_init,
             )
             collected = {s: int(totals.get(s, (0, 0))[1]) for s in stages}
             games_done = {s: int(totals.get(s, (0, 0))[0]) for s in stages}
@@ -515,6 +518,7 @@ class TrainingVolume:
             extra_wver=extra_wver,
             course_fp=course_fp,
             corpus_fp=corpus_fp,
+            state_init=self._state_init,
         )
         collected_total = sum(int(totals.get(s, (0, 0))[1]) for s in stages)
         unmet = {
@@ -555,6 +559,7 @@ class TrainingVolume:
             wver,
             extra_wver=extra_wver,
             course_fp=course_fp,
+            state_init=self._state_init,
         )
         if stages:
             stage_set = {int(s) for s in stages}

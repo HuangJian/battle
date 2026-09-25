@@ -59,6 +59,9 @@ def build_iter_spec(
             seed=int(seed),
             wver=str(wver or ""),
             node_label=str(node_label or ITER_NODE_LABEL),
+            # 这份 argv 由**节点**执行（job 目录 cwd）：起始分布的快照还没走云侧通道
+            # ⇒ 课程开了 state_init 时在发布前响亮拒（plan/x20-state-init.plan.md §P2.5）。
+            node_side=True,
         )
         argv.append(list(cmd[1:]))  # 丢掉 bun 路径（节点用自己的）
     return {

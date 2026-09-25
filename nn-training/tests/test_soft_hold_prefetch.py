@@ -31,6 +31,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import remote.http as http_mod
 import remote.job_round as JR
 import remote.worker as W
 from remote.bulk_sched import BULK_P1_CRITICAL, BULK_P2_PREFETCH, BulkPreemptError
@@ -331,3 +332,76 @@ def test_worker_loop_uses_prefetched_payload_without_downloading(tmp_path: Path,
     assert n == 2, f"应当跑完两个 job：n={n} {logs}"
     assert preloaded_seen == [j2], f"第二个 job 没有走零下载开算（预取命中面没接上）：{logs}"
     assert downloads == [j1], f"第一个 job 应当正常下载；实测下载了 {downloads}：{logs}"
+
+
+# ───────────────── ⑤ 现场回归：取消环在跑时预取仍能传完（A1，2026-09-25） ─────────────────
+
+
+class _FakeResp:
+    """假响应：逐块吐数据（`_read_body` 的入参形状）。"""
+
+    def __init__(self, chunks: list[bytes], total: int) -> None:
+        self._chunks = list(chunks)
+        self.headers = {"Content-Length": str(total)}
+
+    def read(self, _n: int) -> bytes:
+        return self._chunks.pop(0) if self._chunks else b""
+
+
+def test_prefetch_survives_the_cancel_watcher_control_ring(tmp_path: Path, monkeypatch) -> None:
+    """**现场回归（A1）**：取消环每 ~1.5s 打一个控制面小包时，预取仍能**传完并入库**。
+
+    2026-09-24 现场（x20-dodge-l1/l3 双课程单云 worker）：预取**零命中**，每个 job 都刷一屏
+    `定期预取被高优 bulk 挤走 → 重试次数用完，放弃这份提前量`。根因 = `control()` 无条件写
+    `_preempt_at`，而取消环 `start_cancel_watcher` 每 1.5s 一个 `/jobs/{id}/status`
+    （`control_path()` 判为控制面）⇒ 每 1.5s 打断一次 P2 ⇒ 多 MB 的 payload 数学上永远传不完。
+
+    本用例走**真路**（`_prefetch_fill → download_payload → _get_with_retry → slot(P2) →
+    _read_body(pace)`）；只把 HTTP 换成假响应，控制面窗口等价于取消环那一个小包。
+    修复前：`pace` 第一下就被挤走 ⇒ `preempted > 0`、这份预取永远入库不了（用例红）。
+    """
+    payload = _payload(4096)
+    store = PrefetchStore(tmp_path)
+    W._BULK.reset()
+    # patch 面（S4 第十刀拆分）：`_prefetch_fill` 与它的依赖（`peek_jobs` /
+    # `PREFETCH_ROUND_SEC`）的 global 解析都在 `remote.job_round`；HTTP 核心在 `remote.http`。
+    monkeypatch.setattr(JR, "peek_jobs", lambda *a, **k: ([_summary(payload, JID)], False))
+    monkeypatch.setattr(JR, "PREFETCH_ROUND_SEC", 0.05)
+    # 控制面窗口在本用例里一直开着 ⇒ 把让路预算压小，否则每次 `pace` 要停满 5s。
+    monkeypatch.setattr(W._BULK, "_yield_budget", 0.01)
+    monkeypatch.setattr(W._BULK, "_yield_step", 0.005)
+
+    def _fake_request(base_url: str, token: str, path: str, *, pace=None, **kw):
+        """真 `_request` 的替身：只换 HTTP；控制面标记 + `_read_body(pace=…)` 全是真的。"""
+        with W._BULK.control(label="/jobs/x/status"):  # ★ 取消环那个小包的等价物
+            chunks = [payload[i : i + 512] for i in range(0, len(payload), 512)]
+            return 200, W._read_body(
+                _FakeResp(chunks, len(payload)),
+                idle_timeout=45.0,
+                total_timeout=300.0,
+                allow_reroll=bool(kw.get("allow_reroll", False)),
+                pace=pace,
+            )
+
+    monkeypatch.setattr(http_mod, "_request", _fake_request)
+    logs: list[str] = []
+    stop = threading.Event()
+    t = threading.Thread(
+        target=lambda: JR._prefetch_fill("http://hub", "tok", store, stop, depth=1, log=logs.append),
+        daemon=True,
+    )
+    t.start()
+    deadline = time.time() + 10
+    while not store.has(JID) and time.time() < deadline:
+        # sleep-ok: 轮询步长（等的是「预取入库」这个状态，10s 只当挂起兜底）
+        time.sleep(0.01)
+    stop.set()
+    t.join(10)
+
+    assert store.has(JID), f"预取没传完（控制面把 P2 挤走了？）：{logs}"
+    assert store.take(JID) is not None, "入库的那份取不回来（sha 对不上？）"
+    assert store.stats()["hits"] == 1
+    st = W._BULK.stats()
+    assert st["preempted"] == 0, f"控制面仍在抢占 P2：{st}"
+    assert st["inflight_bulk"] == 0
+    assert not any("preempt=" in ln for ln in logs), f"wire 行里出现了抢占作废：{logs}"

@@ -80,6 +80,7 @@ from rl.loop_round import (
 )
 from rl.loop_steps import kickstart_coef
 from rl.queue import REPO_ROOT, RUN_ID
+from rl.resume import state_init_enabled
 from rl.rollout_phase import join_precollect_child
 from rl.train_ledger import LedgerSpec, load_ledger
 
@@ -294,6 +295,7 @@ class TrainingLifecycle:
     _save_weights_json: Any
     _soft_remediate_count: Any
     _start_it: Any
+    _state_init: Any
     _stop_loss_streak: Any
     _total: Any
     _train_samples_total: Any
@@ -525,6 +527,9 @@ class TrainingLifecycle:
         from rl.cmd import corpus_fp_for_args
 
         self._corpus_fp = corpus_fp_for_args(args)
+        # 起始分布（plan/x20-state-init.plan.md P3.5）：本地对账/shard 侧的护栏开关。
+        # 与 _course_fp/_corpus_fp 同一处建立（一次读 args，不猜、不缓存过期值）。
+        self._state_init = state_init_enabled(args)
 
         # R2a（plan/r2-loop-task-queue §5）：**一次扫描**得到账本视图——续跑指针、累计量、
         # 熔断连击、提示类判决次数全由它重建（旧实现是 5 个扫描器各读一遍全文件）。

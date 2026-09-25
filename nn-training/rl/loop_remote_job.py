@@ -222,12 +222,17 @@ class TrainingRemoteJob(TrainingRemotePush):
         # hub 侧永远等不到结果（训练轮空转 + worker 反复领同一份死活）。过滤判据
         # 与云端同源（`common.protocol.d14_corpus_match`），故「打进 payload 的集合」
         # 恒等于「云端会接受的集合」；`verify_and_land` 用同样的两个 fp 重算 data_fp。
+        # 起始分布（P3.5）：开了 state_init 时，缺 initTick 的 shard 不进 payload——
+        # 一并进 job 里就等于云端训的是另一个起始分布，而 data_fp 账面对得上（静默换实验）。
+        from rl.resume import state_init_enabled
+
         local_shards = iter_shard_dirs(
             args.traj,
             it,
             log=(lambda _m: None) if (rollout_spec or export_path is not None) else log,
             course_fp=course_fp,
             corpus_fp=corpus_fp,
+            state_init=state_init_enabled(args),
         )
         shard_dirs = _gate_round_shards(
             local_shards=local_shards,
@@ -466,6 +471,8 @@ class TrainingRemoteJob(TrainingRemotePush):
         from remote.hub_client import mark_job_completed, verify_and_land
 
         # 三重校验 + 落位（D12）：任一不等响亮拒绝，不落盘
+        from rl.resume import state_init_enabled
+
         verify_and_land(
             result,
             sess.manifest,
@@ -473,6 +480,9 @@ class TrainingRemoteJob(TrainingRemotePush):
             traj_dir=args.traj,
             it=sess.it,
             out_weights=args.out,
+            # data_fp 重算必须用与发布**同一条**过滤（P3.5）：否则本地算出的集合
+            # 与云端收到的集合分叉，三重校验会响亮拒收一份本来正常的 job。
+            state_init=state_init_enabled(args),
             log=log,
         )
         mark_job_completed(self._jsonl_path, sess.jid)

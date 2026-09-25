@@ -7,6 +7,55 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §26 本机腿入池：trainer 自己的两条本机腿（`run_rollout` / dispatcher 本机槽）接长驻池（2026-09-25）
+
+> 接 §20/§21/§22。§22 把池接进了**节点侧** rollout 与云机离线 eval，但**训练机自己**的两条
+> 本机腿一直是逐局 `Popen`：`rl/queue_local.py::run_rollout`（无可用节点时的整轮本机采集，
+> 也是 state_init 的唯一可跑腿）与 `RolloutDispatcher` 的本机槽（`run_local_rollout`）。
+> 两者都在每局重付「进程启动 + 模块加载 + wasm 编译 + 权重解析」——而它们跑的局往往更短
+> （x20-state-init 一局 ≈ 250 样本 vs 标准局 ≈ 1290），固定开销占比反而更高。
+
+### 26.1 改了什么
+
+* `rl/queue_local.py::make_local_pool`：拿**真 argv**（`build_rollout_cmd` 为第一个 pair 拼出的
+  那份，`out_dir` 只用于取名、不落盘）去问 `remote/serve_pool.make_pool`——脚本不在
+  `SERVE_CAPABLE_SCRIPTS`（goal / intent 两种 RL 模式）就返回 None，整轮退回逐局 spawn，与
+  改动前**逐字节相同**。不再抄一份「哪个模式用哪个导出器」的判断（那是脚本选择的唯一来源）。
+* `run_rollout`：整轮建一个池（宽度 = `max(1, min(args.workers, len(pairs)))`，即本轮本机并发），
+  每局先 `pool.try_pool(cmd[1:], w{i}/rollout.log, LOCAL_GAME_TIMEOUT_SEC, …)`，拿不准就回退原来的
+  `Popen`；`finally` 里打一行 `pool.summary()` 再 `close()`。
+* `run_local_rollout`：新增可选 `pool=` 参数（默认 None = 旧行为）；dispatcher 在
+  `local_slots > 0` 时建池（宽度 = 本机槽位数）并透传。
+* 池的**生命周期**：`run_rollout` = 一轮采集；dispatcher = 一次 `run()`。为此 `run()` 拆成
+  `run()`（只管 try/finally 收池并打汇总行）+ `_run()`（原函数体）——`_run` 有多条提前 return，
+  池必须在**每一条**出口收掉（否则每轮留下 `local_slots` 个常驻 bun 等 stdin）。
+* `LOCAL_GAME_TIMEOUT_SEC = 1800.0`：本机口径一直是「不限」（本机卡住的是自己的终端，
+  云机才等于「一个卡住的 bun 永远等下去」），这个数只给池一个「死 worker 最终能被收掉」的
+  兜底。**故意不给本机腿加 5s 硬顶**：本机 8 并发实测单局 p99 16.8s（§8），超订下更慢；
+  5s 会把合法长局成批变成「kill worker + 回退一次性 spawn」——正是 §23 那条回退放大回路。
+
+### 26.2 等价性与证据（`--serve` 的硬前提是「一个任务一局、每局新建 World」）
+
+* `tests/state-init.test.ts` 新增 `P1b`：同一 argv（**带 `--init-snapshot`**）——A 各开一个子进程、
+  B 同一个 serve 进程连跑两局——shard 目录**逐文件逐字节**相同，且两边 manifest 都带 `initTick`。
+  起始分布是这条前提上最容易被突破的一处（restore 换世界；池里任何跨局残留都会让账本写着
+  「中段起跑」而样本来自别的世界）。
+* `nn-training/tests/test_local_rollout_pool.py`（真 bun + `tests/fixtures/student-golden.json`）：
+  池开 vs `NN_SERVE_POOL=0`，同一批 `(stage, seed)` 的 shard **逐文件逐字节**相同；并断言
+  `serve_pool: served=2`（池真的服务了，不是静默回退）。
+* 桩级：`tests/test_state_init.py` 断言池服务时每局 argv 仍带 `--init-snapshot`（送错一段 argv、
+  或忘了注入，都是「跑起来了但起始分布不是那个」）；`make_local_pool` 对 goal/intent 返回 None。
+* hermetic 边界：e2e 层（不需要 bun）用 **autouse 夹具** `NN_SERVE_POOL=0` 关池。
+  ⚠ 不能写在 `e2e/conftest.py` 模块级：门禁跑的是 `pytest tests/ e2e/` 一次进程，模块级 setenv
+  会把 `tests/` 里的三个真 bun 池用例一并关掉（实测全红，报「长驻 worker 池」不在日志里）。
+
+### 26.3 读数（待真机 A/B）
+
+本机腿的收益**尚未在真机上量**：§20 的 1.59× 是同一份协议在 self 节点上 100 局的对照，
+本机腿少了网络与 agent 一层，预期同量级；正式读数用现成口径（同一语料两臂、只差
+`NN_SERVE_POOL`），并按 §15 的语料轮换纪律记账。
+
+---
 ## §25 eval 腿的机器级停滞：收到尸与收不了尸必须分两档，收不了尸在**轮内**重投（2026-09-25）
 
 > 接 §24：rollout 腿当天就改成了「机器级停滞 ⇒ 轮内重投、只补没产出的局」（DECISIONS

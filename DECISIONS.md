@@ -3888,17 +3888,20 @@ wver；旧钉死 live-out 的用例已按新语义改写）+ `test_baseline_eval
 
 ## §2026-09-25-state-init-course-key（2026-09-25，课程键 `state_init` 进 CourseConfig）
 
-**来历**：`curricula/x20-state-init.jsonc`（rollout 起始分布 = 人类 demo 中段交棒，plan 六腿六负
+> _(本条的 `rebase_counters` 字段与「中段交棒」措辞已在同日被 §2026-09-25-state-init-snapshot 修订：
+> 起始分布改为**快照注入**，`rebase_counters` 删除。本条只保留「课程键怎么进配置层」那部分。)_
+
+**来历**：`curricula/x20-state-init.jsonc`（rollout 起始分布 = 人类 demo 中段起跑，plan 六腿六负
 后的第七条攻击面）起草时就带着 `state_init` 块，而 `CourseConfig` 是 `extra="forbid"` ⇒ 那个文件
 **长期加载失败**，连带 `tests/test_reward_golden.py::test_jsonc_courses_load`（遍历 `curricula/*.jsonc`）
 成为门禁唯一那条红。plan `plan/x20-state-init.plan.md` P2 = 把这个键映射进配置层。
 
-**变更**：① `StateInitBlock`（`rl/config.py`）：`bank/cut_from/cut_to/cut_step/rotate_cuts/
-rebase_counters` 全可选 + v1 缺省，`extra=forbid`，切点自相矛盾（`cut_from<0` / `cut_to>0` /
+**变更**：① `StateInitBlock`（`rl/config.py`）：`bank/cut_from/cut_to/cut_step/rotate_cuts`
+全可选 + v1 缺省，`extra=forbid`，切点自相矛盾（`cut_from<0` / `cut_to>0` /
 `cut_step<1`）在校验期拒；② `CourseConfig.state_init: StateInitBlock | None = None`（缺席 = 标准
 开局，老课程逐字节不变）；③ `flat_overrides` 把整块转成 **dict** 交出去（不进 mapping 那张标量表）；
 ④ 「声明了就必须能跑」的自洽检查住 **`apply_course`（启动期）**：`bank` 空、或不在盘上（cwd /
-仓库根 / nn-training 三种基准都认，`_resolve_state_init_bank`）⇒ `SystemExit`（响亮，不静默退回
+仓库根 / nn-training 三种基准都认，`resolve_state_init_bank`）⇒ `SystemExit`（响亮，不静默退回
 标准开局——那等于换了一个实验，而账本还以为跑的是中段起跑）。
 
 **被否决**：把 bank 存在性检查放进 `load_course`（`load_course` 只读课程文件本身；在那儿读盘会让
@@ -3929,3 +3932,175 @@ JSON 数据）· 允许 `cut_to > 0`（绝对上界：得先读银行 manifest �
 的语义改动（测试绿也算），`--theirs` 会丢本地拆分。
 **违反后果**：按文件而非按 hunk 站队 ⇒ 语义改动静默丢弃，或本地拆分的模块引用回退（import 当场炸）。
 —— 全文（冲突清单 / 门禁证据）→ 合并 commit message
+## §2026-09-25-state-init-snapshot（2026-09-25，rollout 起始分布 = 人类中段**世界快照**注入）
+
+**来历**：六条价格腿全阴性后的第七条攻击面 = 只换 rollout 的起始**状态分布**、不动任何价格项
+（plan/x20-state-init.plan.md）。首版设计是「人类**磁带**（逐 tick 输入）headless 快进 T tick
+后交棒」；评审发现六个阻断级问题，其中四条全部源自「用**输入**去重建**状态**」：B2 人类 idle
+（20–30% 帧）在动作空间里表达不了（`ScriptedInput` 的 move=0 = 继续走）、B5 快进段内可能先死、
+B6 交棒点不在决策边界上、B1 重建出的不是人类那个状态且**无外部证据**可对。改为**直接注入状态**。
+
+**决定（后来者极容易做错，故入册）**
+① 起始分布 = `cloneWorld` 快照（`tools/sim/build-state-init-bank.ts` 产物，人类**真正到达过**的世界），
+不是人类输入的产物。资产全是现成机制（`ReplayInput` + `cloneWorld`/`restoreWorld` +
+`worldTickHash`），不新造格式、不新造解码器。
+② **状态来自人类，未来来自本局抽到的 seed**：restore → 核 tickHash → `world.rng.reseed(seed)` →
+重施 CLI/关卡权威值。故 `(stage,seed)` 种子流逐轮照旧轮换（§15.1 真满足、判决段配对干净），
+而起始状态集合 = 银行 972 个切点（池小 ⇒ V 头记忆化风险，已在 plan §5 预注册读数）。
+③ **不做 rebase**：奖励 = Φ 的差分，对「继承的进度」天然不付钱；计数器列保持**游戏真值**，
+`initCounters`/`initSnapshot`/`initTick` additive-only 进 shard manifest 供分析侧自行 rebase。
+④ **v1 只在本机采集**，执法点在**两处**：ⓐ `dispatch.RolloutDispatcher.run()` **入口的派发闸门**——
+开了 `state_init` 的轮只要还剩一个可行远端节点就 `SystemExit`，否则零派发、整轮交本机腿
+（`run_rollout`）；`local_slots` **不是**这个开关（它只是并发配额，主循环照旧向 pool 派发）。
+ⓑ `node_side=True` 的三条 argv 路径（`build_rollout_cmd` / `iter_job.build_iter_spec` /
+`plan.template_argv`）在**发布前** `SystemExit`。两处都要：老导出器**静默忽略未知 flag**，云节点
+cwd = job 目录 ⇒ 「云上跑标准开局、账本写中段起跑」是最贵的错，宁可不发。
+**代价（2026-09-25 实付）**：首版只有 ⓑ，而主循环走的是 ⓐ 的 volume 路（`fetch_task` 拼任务参数
+**没有**快照项）⇒ 三条护栏一条没触发 = 混语料（pool 标准局）+ 缺 `initTick` 的 shard 被全剔 =
+无限波次，烧掉 **51.9 万 transitions** 才发现；教训 = 护栏写在 **argv 构造点**对 volume 路天生无效，
+派发模式必须在**派发入口**定。
+**被否决**：把 `local_slots` 当「纯本机」开关用（它语义只是并发配额，会让配额调参意外改采集分布）·
+只在 `fetch_task` 侧补 `node_side` 拒（闸门仍在上游派发之后，且节点侧调用点不止一处）。
+⑤ **shard 侧护栏**：缺正整数 `initTick` 的 shard 在**六个 funnel** 一律不计入（`_scan_shards` /
+`completed_pairs` / `settled_stage_totals` / `resumed_manifests` / `iter_shard_dirs` /
+`verify_and_land`），判据函数单点 = `rl.resume.shard_state_init_ok`；开关只从 `args.state_init` 派生。
+⑥ **起始分布进语料身份**（`corpus_identity_fp`，仅激活时，bank 只算文件名）：决定「一个样本从哪个
+世界开始」与 `seed_rotate`/`mode` 同类 ⇒ 课程中途加/删/改 `state_init` 时旧 shard 在四个 funnel
+全被 D14 自动排除，零额外参数。
+⑦ 保真门是**外部**证据（plan §2 M4）：切点取 `hashInterval` 整数倍 ⇒ 每个快照都能与录像记录链
+逐点对账（P0 已 2916/2916 全对）；采集侧每局 restore 后再自检一次，不符 = 该局响亮失败。
+
+**被否决**：① 磁带 FF（B2 idle 不可表达 / B5 快进段内会死 / B6 边界 / 无外部证据）·
+② 「用 demo 那一局的 seed 复现」（踩 §15.1「第 it 轮 (stage,seed) 不得与更早轮重复」= 重磨固定集，
+且训练 seed 集与 414000 判决段本体重合）· ③ 在 TS 侧 rebase 计数器（对奖励是恒等变换，却让
+`metrics.kills` 与 manifest 真值分叉）· ④ 云侧顺手做 blob 搬运（用 `node_side` 响亮拒换时间；
+规格留 P2.5，届时必须同时动 `_RETARGET_FLAGS` 与 plan 自检）· ⑤ bank **内容**进语料身份（要读盘 + 
+节点上不一定有该文件 ⇒ hub/节点指纹分叉，整份 job 误拒）。
+
+**违反后果**：把 `--init-snapshot` 放上云而不做 blob 通道 ⇒ 云上跑标准开局、账本写中段起跑 ·
+护栏只设在 argv 构造点、不管派发入口 ⇒ 主循环的 volume 路整条绕开（51.9 万 transitions 事故）·
+在 `reseed` **之后**核 tickHash ⇒ 外部证据变成恒假/恒真 · 交棒点不在 `K` 边界 ⇒ 首个决策前 K−1
+tick 由「上一帧残留动作」驱动 · 课程中途删 `state_init` 还复用旧 shard ⇒ 两种起始分布混训。
+—— 全文（六条评审处置表 / P0 实测读数 / 单局 smoke 读数 / P2.5 规格）→ `plan/x20-state-init.plan.md`
+§2 / §3 / §6 · 前身条目 `§2026-09-25-state-init-course-key`
+
+## §2026-09-25-goalnn-prefetch-p0-not-preempt — 抢占权专属 P1：控制面只让路 + P2 补齐开工门禁 + 挤走不占重试预算（plan/bulk-p2-preempt-fix）
+
+**背景**：2026-09-24 现场（x20-dodge-l1 / x20-dodge-l3 双课程 + 单云 worker）：**预取零命中**，每个 job 都刷
+`定期预取被高优 bulk 挤走 → 重试次数用完，放弃这份提前量`，且**每条** payload 下载都带
+`reroll=1(wasted 0.25MB)`。四条根因（全文读数与算术自证 → `docs/nn/remote-transport.md` §50）：
+① `control()` 里 `if self._holding: self._preempt_at = self._holding` ⇒ **任何**控制面请求都置抢占标记，
+而 job 期间常驻的取消环每 1.5s 一个 `/jobs/{id}/status` ⇒ P2 每读完一个 256KB 分片就被打断一次 ⇒
+3 次 attempt 上限 ≈1.5MB < 3.4MB payload，**数学上永远传不完**；② `_control_waiting` 只写不读且没有
+`_p1_waiting` ⇒ 被挤走后 P2 立刻回抢 ⇒ 关键下载排队 17.6s；③ 让路时间污染首块速率探针
+（256KB/5s ≈ 51KB/s 恒低于 `WIRE_MIN_RATE=80KB/s`）⇒ 每次下载假性重抽；④ 抢占作废字节不入账
+⇒ 预取成本恒等于 0。
+
+**决定（后来者极容易做错，故入册）**
+① **抢占权专属 P1**：控制面（P0）**只让 bulk 让路、永不抢占**。取消环每 1.5s 一个包是**常态**，
+一个常态事件不该有权丢掉别人的半截；P0 怕的是被大 body 拖到分钟级，而那由 `pause_if_needed`
+（分片间隙暂停，预算 ≤5s/次）解决。**不要再把「P0 能抢占」加回来**去换 p0 延迟（见「被否决」）。
+② **P2 开工门禁**：`slot()` 的 P2 分支加两条否决 —— 此刻有 P1 在等（`_p1_waiting`）或有控制面在途
+（`_control_waiting`）就不许新开工。口径是「**此刻**」而不是「最近」（取消环 1.5s 一个包，要求
+「最近无控制面」= P2 永远开不了工）。**P1 不受这道门禁**（否则两个 P1 互等）。
+③ **被挤走不占重试预算**：P2 的 `BulkPreemptError` 走独立预算 `WIRE_PREEMPT_MAX=6`（`_get_with_retry`
+因此是**外层 while + 内层 for**，`WireSlowError` 仍在内层消耗 `attempts`）；**上限用完抛的仍是
+`BulkPreemptError`**（不是 `RetryableError`）—— 挤走不是失败，`_prefetch_fill` 只吞前者。
+④ **速率判据用净值**：`elapsed_net = 墙钟 − Σ(pace() 返回的让路秒)`；`total_timeout` 与进度行
+**仍按墙钟**（它们回答的是「这份传了多久」，含暂停才诚实）。
+⑤ **抢占作废字节入账**：`BulkPreemptError.bytes_read` → `_wire_note_preempt` → wire 行
+`preempt=N(wasted X.XXMB)`（仅 N>0 打印），与日志里的「挤走」行数**恒等**（G4 的对账口径）。
+
+**被否决**：保留 P0 抢占 + 把预取深度调小/关掉（`--prefetch-depth 0`）—— 那是**拿机制换读数**，
+现场要的正是这份提前量能命中 · 取消环降频（1.5s → 更稀疏）—— 延迟判据 <20s 是硬需求，且它治不了
+「P0 有抢占权」这个根因 · 只补 P2 门禁而不动抢占权（P2 仍会被每 1.5s 打断）· 抢占也做 HTTP Range
+续传（双端改造，成本远高于本次收益）· 用 `time.sleep` 赌时序证明门禁（已改用 `_CountingEvent` 事件驱动）。
+
+**违反后果**：把「P0 可抢占」加回来 ⇒ 多 MB 预取重新变成不可用（现场那屏日志一模一样）·
+抢占计入 `attempts` ⇒ 三次被 P1 打断就把整份预取判死 · 耗尽时抛 `RetryableError` ⇒ 预取失败被
+当成节点故障上报（违反「预取失败不是失败」）· 门禁用「最近 1.5s 内无控制面」⇒ P2 永久不开工 ·
+让路算进速率 ⇒ 每次下载白扔一块（现场 100%）。
+—— 全文（现场读数表 / 四条根因 / 改后语义表 / 门禁与独立预算的测试口径 / 真机复核待办）→ `docs/nn/remote-transport.md` §50 · 锚 `## §50` ·
+同源条目 `§2026-09-22-goalnn-bulk-single-channel`（本条是它的更正/延伸：单通道与让路预算不变，改的是
+**谁有抢占权**）
+
+## §2026-09-25-local-rollout-serve-pool（2026-09-25，本机腿入池：trainer 自己的两条本机腿接 `--serve` 长驻池）
+
+**来历**：用户问「local 节点的 bun 进程是 persist 的吗？如果不是，要改！」。追证结论：**不是**——
+`rl/queue_local.py` 的两条本机腿（无可用节点时的整轮 `run_rollout` / dispatcher 本机槽的
+`run_local_rollout`）都是**逐局 `Popen`**，而长驻池（`docs/nn/runtime-opt.md` §22）当时只接在
+节点侧 rollout 与云机离线 eval 上。本机腿的局往往更短（x20-state-init 一局 ≈250 样本 vs 标准局
+≈1290），固定开销占比反而更高；而 state_init 轮的唯一可跑腿正是 `run_rollout`。
+
+**决定**：① 要不要建池由**真 argv**（`build_rollout_cmd` 为第一个 pair 拼出的那份）决定，
+`make_local_pool` 只转发给 `serve_pool.make_pool` 的白名单——脚本不在名单里（goal / intent 两种
+RL 模式）⇒ None，本轮与本改动前**逐字节相同**（不再抄一份「哪个模式用哪个导出器」的判断）；
+② 池宽度 = 本机槽位数，生命周期 = 一轮采集 / 一次 `dispatcher.run()`；
+③ 单局硬顶 `LOCAL_GAME_TIMEOUT_SEC=1800`——本机口径一直是「不限」（本机卡住的是自己的终端），
+这个数只给池一个「死 worker 最终能被收掉」的兜底，**刻意不加 5s 硬顶**；
+④ 回退与熔断完整复用节点侧那一份（池拿不准就地回退逐局 `Popen`，只慢不错）；
+⑤ `dispatcher.run()` 拆成 `run()`（只管 try/finally 收池 + 打 `summary()`）+ `_run()`：`_run` 有多条
+提前 return，池必须在**每一条**出口收掉（否则每轮留下 `local_slots` 个常驻 bun）；
+⑥ e2e 层用 **autouse 夹具**关池（该层 hermetic，不许起真 bun）。
+
+**被否决**：自建一份常驻进程池（= 第二份协议，必漂）· 把 `local_slots=0` 当「纯本机」开关用
+（并发配额 ≠ 派发模式，会让配额调参改变采集分布）· 给本机腿也上节点侧那个 5s 硬顶（本机 8 并发单局
+p99 已 16.8s，超订更慢 ⇒ 成批变成「kill worker + 回退一次性」，正是 `docs/nn/runtime-opt.md`
+§23 的回退放大回路）·
+在 `e2e/conftest.py` **模块级** `os.environ` 关池（门禁是 `pytest tests/ e2e/` 一次进程——
+实测把 `tests/` 三个真 bun 池用例一并关红）。
+
+**违反后果**：池里留跨局状态（不重建 World）⇒ 账本写「中段起跑」而样本来自别的世界 ·
+池不收 ⇒ 每轮留一批常驻 bun 等 stdin · 给本机腿加 5s 硬顶 ⇒ 回退放大回路（runtime-opt §23）·
+e2e 真起 bun ⇒ hermetic 层失约且门禁变慢 · 抄一份「哪个模式用哪个导出器」⇒ 新导出器入池时两边漂。
+
+—— 全文（改了什么 / 等价性证据 / 真机 A/B 待办）→ `docs/nn/runtime-opt.md` §26 · 锚 `## §26` ·
+同源条目 `§2026-09-25-goalnn-cloud-cpu-ledger`（池的熔断/背压/核数夹取定义在本条）·
+`§2026-09-25-state-init-snapshot`（起始分布是池化最容易被突破的一处：restore 换世界）
+
+## §2026-09-25-clutch-null-kill（2026-09-25，paired-kill 杀错臂 + 重启键坏，两处修）
+
+**来历**：C-0（`x20-clutch-null`）22:08 死在 it46，账本 `gate_verdict: paired-kill 连续 2 点
+< −3pp`；用户控制台重开课（22:15 marker 重写）毫无反应。两处都是代码与课程文件不一致：
+
+- **杀错臂**：两份课程文件只授权**单向**杀（差值 < −3pp ⇒ 杀 Cw，本腿证伪）；`rl/paired_kill.py`
+  实现却是**对称自杀**（Δ=本臂−对端，谁落后谁死）。C-0 落后（it40 −3.75pp / it45 −6.00pp）
+  恰等于 C-w 领先 +3.75/+6.0pp——正是加权要证明的——规则却杀了对照。对照一死，终点 verdict
+  （414000 配对 McNemar 要两条臂）即不可能。且 firing 在 ~2.9h，课程写的是 6h 中点、
+  日常"只看趋势不判决"。
+- **重启键坏**：`loop_serve.py` 重扫只认"不在 `runtimes` 里"的课；收官课永在 `runtimes` 里 ⇒
+  控制台停→开（marker 重写）永远没人执行。唯一的旧路是重启整个 serve 进程（打断健康腿）。
+
+**决定**：① `courses.<课>.paired_kill.self_kill`（rl-config 执行面，缺席/写坏=True，即现状；
+  只有显式 `false` 才关）：命中时判据照算、streak 照落账，只是不停车（`loop_guards._paired_kill`
+  在落账后、云端停机前return False）。C-0 经控制台设 `false`（rl-config 是 live 配置，不进库）。
+  ② serve 重扫：`reopened_parked`（纯函数：队列已终 + 落过收官副作用 + marker mtime 新于入队
+  记录）⇒ **只重置队列、复用原 runtime 与热引擎**（重走 open 会建 runner=None 的新 runtime，
+  池里旧引擎还在，`ensure_ready` 只对引擎不对 runner ⇒ 每轮断言失败进无限 RETRY，测试抓获）+
+  rounds_done 累计带过去；`_settle_rounds` 的旧文案同步改（"停→开后自动重新入队"）。
+  ③ 复活顺序写死：先设开关 → 再重启 serve（新进程才读新代码）→ C-0 从 it47 指针续跑；
+  streak 从账本重算（尾部仍 2/2）但开关已关 ⇒ 只记录不杀；it50 新 eval 点定去留。
+
+**被否决**：把对称改单向改默认（已有课程行为突变；开关缺席=现状）· 复活重建 runtime/引擎
+（丢 runner 无限 RETRY + 白付 torch 重建）· 重启键修成"只要 marker 在就重入队"
+（分不清"一直开着"与"停→开"，正常收官的课会被反复拉起）· 单课另起进程跑 C-0
+（与共享 trainer 抢同一 traj，lifecycle 明令禁止的双调度器）。
+
+**违反后果**：对照臂被杀 ⇒ 终点配对 verdict 永不可判（McNemar 要两臂同 seed 800 局）·
+收官课重开课无响应 ⇒ 唯一复活路是重启 serve（打断健康腿）· 复选用新 runtime ⇒ 无限 RETRY
+幽灵轮（账本有入队、无产出）。
+
+## §2026-09-25-state-init-routing（2026-09-25，起始分布派发：改路由不改放行名单）
+
+**来历**：c4d42a04 的派发闸门（有可行远端节点就 `SystemExit`）把 51.9 万混语料变成了 6 秒
+响亮拒，但 v1 因此构造性不可跑（self 也算节点，pool 健康时永远被拒；"只留本机"的自救指南
+是错的——只留 self 照样 abort）。另一条路"放行 local 节点"错层：`fetch_task` 协议没有快照项，
+放行≠给快照， self 经节点协议跑的还是标准开局。
+
+**决定**：`state_init` 开 ⇒ 整轮直接交纯本机 `run_rollout`、向 pool 零派发，跟节点健康度无关
+（`dispatch.run()` 入口，替代旧闸门；旧测试①按新契约改写）。additive-only 照旧。
+
+**被否决**：按"本地与否"放行名单（缺 flag 的局照样进 pool，护栏全剔=无限波次重演，且无响铃）·
+保留闸门等人下线节点（出路不存在，课程永远停车）。
+
+**违反后果**：向 pool 派发一局 ⇒ 该局标准开局 + 护栏剔除 + 波次凑不齐（无限波次）。

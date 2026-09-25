@@ -474,11 +474,15 @@ def post_result(
     req_body_json = json.dumps(result, ensure_ascii=False).encode("utf-8")
     t0 = time.time()
     for attempt in range(1, attempts + 1):
-        t_a = time.time()  # 本次尝试的墙钟（传输账用；`t0` 含退避，不适合算速率）
+        # 段账口径（2026-09-25）：只算**进槽之后**的真实上传 —— 进槽前的排队归调度账
+        # （`wait=` / `排队 … 才拿到单通道`）。现场 `result=0.63MB/18-19s` 与同一段日志里的
+        # `排队 17.6s` 高度喷合：那一大段大部分是排队，不是上传。
+        t_xfer = time.time()
         try:
             # P1 关键回传：占唯一 bulk 通道且**不被抢断**（POST 大 body 没有安全 Range）。
             # 占槽范围 = 单次尝试；退避睡眠在槽外（绝不抱着通道睡 16s）。
             with _BULK.slot(BULK_P1_CRITICAL, label="result") as _tok:
+                t_xfer = time.time()  # ★ 排队结束、开传那一刻
                 status, body = _request(
                     base_url,
                     token,
@@ -496,7 +500,7 @@ def post_result(
         except Exception as e:
             status, body = None, repr(e).encode()
         if status in (200, 201):
-            _wire_add(jid, "result", len(req_body), time.time() - t_a)
+            _wire_add(jid, "result", len(req_body), time.time() - t_xfer)
             log(
                 f"result POST ok: {len(req_body)} bytes ({ctype.rsplit('/', 1)[-1]})"
                 f" in {time.time() - t0:.1f}s (attempt {attempt})"
@@ -510,7 +514,7 @@ def post_result(
         if status == 409:
             # 竞速广播下这是**输家的正常结局**：同 job 已被别人先回传，本份结果丢弃。
             # 绝不重试、绝不当失败上报（否则一个赢家会让 N-1 个 worker 白报错）。
-            _wire_add(jid, "result", len(req_body), time.time() - t_a)  # 字节确实出去了
+            _wire_add(jid, "result", len(req_body), time.time() - t_xfer)  # 字节确实出去了
             log("result POST 409（hub 已有同 job 结果：竞速输家/重复回传）——按成功丢弃")
             return 409
         if status == 403 and mode == CLAIM_MODE_BACKUP:

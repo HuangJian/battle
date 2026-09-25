@@ -261,6 +261,7 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
     def _course_iter(self, it: int) -> None:
         """M1c：每 iter 注入课程配置的加载期上下文（holder）与超参 schedule。
 
+        - `args._it` / `args._rotate_seed`：起始分布（state_init）派生的 key 两半；
         - holder（reward_context）：reward_fn + gamma/lam + it + 血缘——loaders
           （ppo.engine.load_shard）读取，奖励唯一定义源=课程配置公式；
         - ppo_schedule（按绝对 iter 查表）：lr 改 opt.param_groups（保 Adam
@@ -268,6 +269,14 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
           供 update 期注入。
         """
         args = self.args
+        # 起始分布派生 key（plan/x20-state-init.plan.md §P3.3）：本轮的轮次 + 种子轮换基数。
+        # **每轮覆盖写**（不是累加、不是游标）——`rl/state_init.pick` 靠这两个值保证
+        # 「同 key 同起始状态」（断点续跑不换状态）、「换 it 换一整批」（§15.1 语料轮换）。
+        # 于所有 argv 构造点之前注入（argv 由 build_rollout_cmd 现读）。
+        args._it = int(it)
+        # getattr 兜底与 `loop_core.__init__` 的初值同源（0）——部分单测只构造 TrainingSteps
+        # 的一部分字段；真实路径上它在开跑前已被 resolve_rotate_seed 写好。
+        args._rotate_seed = int(getattr(self, "_rotate_seed", 0))
         course = getattr(args, "course_obj", None)
         if course is None:
             from rl.reward_context import reset as _ctx_reset

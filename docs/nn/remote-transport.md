@@ -8,6 +8,93 @@
 
 ---
 
+## §51 plan §8 三条开放问题的处置 + 段账口径修正（2026-09-25）
+
+`plan/bulk-p2-preempt-fix.plan.md` §8 留了三条「需用户另裁」的开放问题。逐条查实后的处置如下
+（三条都**不动码**，但其中一条的前提被现场数字本身推翻，另两条转成「有触发条件的待裁」）：
+
+| # | 问题 | 处置 | 判据 / 触发条件 |
+|---|---|---|---|
+| 1 | `post_result` 因 `stream=False` 不进 `_read_body` ⇒ 回传期间不让路，可能是 `p0_p95` 的另一半来源 | **不做（前提不成立）** | ① 上传本身不吃带宽：现场 `result=0.63MB/18-19s` ≈ 34 KB/s，而同一链路的 payload 下载能到 300 KB/s+（预取单跑 324 KB/s）⇒ 远未吃满；② P0 **从不进 bulk 队列**（红线 #1，独立 socket），让路与否只影响带宽竞争，而带宽竞争已由让路覆盖；③ 那 18-19s 的主体是**排队**（同段日志 `排队 17.6s 才拿到单通道`）—— 那是本轮已修的缺陷；④ 真要给回传接让路，`pace` **做不到**：POST 的大 body 是 `urlopen` 写请求体时发生的，而 `pace` 只在读**响应**时被调（回传的响应是几十字节 JSON）⇒ 得改成「`data` 传 file-like + `read(n)` 里 pace」的分块上传，属新传输改造 |
+| 2 | 取消环 1.5s 是否降频 | **保持 1.5s** | `JOB_CANCEL_POLL_SEC` 是记录在案的**用户口径**（`protocol.py:151`「1–2s 是用户口径」）且被 `tests/test_priority_schedule.py:696` 钉住（`<= 2.0`）⇒ 降频是改用户口径，不由 agent 单方面决定。且**判据上也不需要**：取消点在 **epoch 边界**（<20s 是硬需求，interval 只占其中一小段）；本轮修复后 P2 不再怕它，唯一残余影响是「控制面在途时 P2 开不了工」—— 1.5s 的间隙足够开工（P2 一旦开工就不会被控制面打断） |
+| 3 | 抢占不做 Range 续传 ⇒ 每次被 P1 打断的半截是纯浪费 | **先量后裁（已预注册门槛）** | 本轮已把作废字节入账（§50：wire 行 `preempt=N(wasted X.XXMB)`），真机跑 ≥3 个 job 即可读出真实浪费。**立项门槛**：单会话 Σwasted ≥ 一份 payload（≈3.4MB）或单次预取作废 ≥2MB ⇒ 立项做双端 Range（hub 解析 `Range` + 206/`Content-Range`；worker `_get_with_retry` 保半截 + `resume_from` 重放）；否则不做 |
+
+**顺带修正（查证 §8.1 时发现的度量 bug）**：段账的秒数是从**进槽前**起算的
+（`_get_with_retry` 的 `t_req` / `post_result` 的 `t_a`），于是它**含排队** —— 而 hub 侧
+`响应发送完成 … in X s`（`hub_server._bytes` 的 `t0` 在写完响应头之后）只量发送窗 ⇒ 两侧同段
+**不可比**（`tools/wire_report.py` 文档里「与 hub 侧同段对账即可本地化慢腿」的前提被破坏；现场
+`payload=…/321.8s` 里含 `排队 17.6s`）。改法：段账改用「进槽之后」的墙钟（`t_xfer`），排队归调度账
+（`wait=` / `排队 … 才拿到单通道`）；`_note_rate`（会话最好速率）**仍按含排队的墙钟**（保守侧，
+不抬高 `_min_rate` —— 与 §50 的口径一致）。判据：`tests/test_wire_reroll.py::test_segment_seconds_exclude_the_queue_wait` /
+`::test_result_segment_seconds_exclude_the_queue_wait`（改前红：段秒数 = 0.3s 的排队）。
+
+
+---
+
+## §50 抢占权专属 P1：控制面只让路，P2 补齐开工门禁（plan/bulk-p2-preempt-fix，2026-09-25）
+
+**现场（2026-09-24 23:09–23:20，x20-dodge-l1 / x20-dodge-l3 双课程 + 单云 worker）**
+
+| 现象 | 现场证据 |
+|---|---|
+| 预取**零命中**，每次很快被挤走 | `prefetch 43ba76c6: …被高优 bulk 挤走 —— 立即重排（1/3）（2/3）…重试次数用完` |
+| 同一份 job 的 claim 后重下 17.9s（预取刚跑到 99%） | `23:14:41 …用完` → `23:14:44 job e0554c21 claimed` → `payload=下载 3678580 bytes / 23.7s` |
+| P1 等单通道最久 17.6s | `bulk payload: 排队 17.6s 才拿到单通道`（另有 16.8s / 12.7s） |
+| 每个下载都 `reroll=1(wasted 0.25MB)` | 所有 job 的 wire 行，**含关键下载** |
+| 预取花了多少带宽看不见 | `job prefetch: wire reroll=1(wasted 0.25MB) … 合计=0.00MB/0.0s` |
+| **反证**：job 间隙（取消环已停）那次一口气跑到 99% | `23:14:35→23:14:41 0.5MB→3.50MB/3.51MB（324 KB/s）` |
+
+**四条根因**
+
+① **控制面无条件抢占 P2（主因）**：`bulk_sched.py::control()` 里 `if self._holding:
+self._preempt_at = self._holding`。而 job 期间常驻的取消环（`worker.py::start_cancel_watcher`，
+def `:814` / job 内在 `:3470` 起；周期 `JOB_CANCEL_POLL_SEC=1.5`，`protocol.py:151`）**每 1.5s** 打一个
+`/jobs/{id}/status`，`control_path()` 判为控制面 ⇒ 每 1.5s 写一次抢占标记。P2 每读完一个
+`BODY_CHUNK`=256KB（约 0.85s @300KB/s）查一次 ⇒ 每次最多搬 0.25–0.5MB，3 次 attempt 上限约
+1.5MB **< 3.4MB payload** ⇒ **数学上必然失败**。
+② **P2 在高优等待时照样能抢到槽位**：`slot()` 的 docstring 承诺「计数『有控制面在等』⇒ P2 不再新
+开工」，但 `_control_waiting` **只写不读**（全仓零读点）——没实现；被挤走后 `_get_with_retry`
+**不退避立刻重排** ⇒ P2 反复回抢 ⇒ P1 排队 17.6s。
+③ **让路时间污染首块速率探针**：`_read_body` 先 `pace()`（控制面在途时可停满 `PAUSE_BUDGET_SEC=5s`）
+才读第一块，`_reroll_decision` 用含暂停的 `elapsed` 算速率 ⇒ 256KB/5s ≈ 51KB/s，恒低于
+`WIRE_MIN_RATE=80KB/s`。算术自证：`让路合计 2.5s` 紧接着 `实测 64 KB/s`（=262144B/4.0s）；
+45 KB/s 那次正好停满 5s 预算。
+④ **抢占作废的字节不入账**：只有重抽作废走 `_wire_note_reroll`，被挤走的半截（现场 3.50MB/99%）
+计 0 ⇒ `合计=0.00MB`，预取真实成本在账上完全看不见。
+
+**改后语义**
+
+| 到达者 | 能否打断 P2 | 机制 |
+|---|---|---|
+| **P0 控制面** | ❌ **否** | 只让路（`pace()` → `pause_if_needed`，预算 ≤5s/次）；它本来就有独立 socket，不排队 |
+| **P1 bulk**（`post_result` / 开算前关键下载） | ✅ **是** | `slot()` 写 `_preempt_at` ⇒ P2 下一分片间隙抛 `BulkPreemptError`（**唯一**抢占来源） |
+| P2 自己 | — | 拿不到槽位就在 `_released` 上等 |
+
+P2 取得槽位的判据 = `inflight == 0 ∧ p1_waiting == 0 ∧ control_waiting == 0`（口径是**此刻**有 P1 /
+控制面在途，不是「最近」——取消环每 1.5s 一个是常态，要求「最近无控制面」= P2 永远开不了工）。
+被挤走**不消耗** `attempts`（独立预算 `WIRE_PREEMPT_MAX=6`；上限用完**仍抛 `BulkPreemptError`**）；
+速率判据用**净值** `elapsed = 墙钟 − Σ让路`（`total_timeout` 与进度行仍按墙钟）；被挤走的字节进
+wire 账（`preempt=N(wasted X.XXMB)`，仅 N>0 打印）。
+
+**落地（判据看函数名）**：`remote/bulk_sched.py`（`control()` 去掉抢占写；`slot()` 加 `_p1_waiting`
++ P2 门禁；`pace()` 返回让路秒数；`BulkPreemptError(bytes_read=…)`；`stats()` 增
+`p1_waiting`/`control_waiting`）· `remote/worker.py`（`_bulk_pace` 透传返回值；`_read_body` 累加让路、
+净值喂判据、把已收字节挂上异常；`_get_with_retry` 改**外层 while + 内层 for**：抢占走独立预算且
+不消耗 `attempts`；`_wire_note_preempt` + wire 行 `preempt=`）。
+
+**门禁**：`tests/test_bulk_sched.py`（+3 条与 1 条改写：`test_p2_not_preempted_by_control_yields_only` /
+`test_p1_waiting_blocks_p2` / `test_control_waiting_blocks_p2` / `test_p1_is_not_gated_by_p1_waiting`）·
+`tests/test_wire_reroll.py`（+7：净值探针 / 净值不放宽墙钟超时 / `bytes_read` 入账 / 真慢仍重抽 /
+抢占独立预算三条）· `tests/test_soft_hold_prefetch.py`（+1 现场回归：取消环在跑时预取能传完并入库，
+`preempted == 0`）。**改前必红**：把新用例拿到 HEAD 的旧代码上跑 ⇒ 12 条红（`plan/bulk-p2-preempt-fix.plan.md` §11）。
+
+**真机复核（用户操作，未取）**：合入后重拉云 worker，同一双课程场景跑 ≥3 个 job — 预取 ≥1 次
+`命中（…零下载开算）`；关键下载排队 ≤5s（现状峰值 17.6s）；`reroll=` 只在真坏签时出现；
+`preempt=N(wasted …)` 与日志里的「挤走」行数对得上；`p0_p95` ≤6s（**劣化 ⇒ 回退 `--prefetch-depth 0`**）。
+
+
+---
+
 ## §49 在线 worker 两块盘**不装 bun**：它们不跑 rollout（2026-09-25）
 
 > 现场来源：`reports/online-offline-hot-switch-audit-2026-09-25.md` §I6（它当时被当成「下一个同款坑」）；

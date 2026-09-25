@@ -124,7 +124,7 @@ def download_payload(
     且日志里连一句「失败」都没有（socket 超时的裸异常没有正文）。
 
     `bulk_prio`（2026-09-22）：开算前的关键下载用缺省 P1；**预取**（软持有）传
-    `BULK_P2_PREFETCH`——它必须能在高优传输到达时丢掉半截（`BulkPreemptError`）。
+    `BULK_P2_PREFETCH`——它必须能在 **P1 关键传输**到达时丢掉半截（`BulkPreemptError`）。
     """
     return _get_with_retry(
         base_url,

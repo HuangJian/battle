@@ -309,6 +309,9 @@ from remote.wire import (
     WIRE_MIN_RATE as WIRE_MIN_RATE,
 )
 from remote.wire import (
+    WIRE_PREEMPT_MAX as WIRE_PREEMPT_MAX,
+)
+from remote.wire import (
     WIRE_PROBE_BYTES as WIRE_PROBE_BYTES,
 )
 from remote.wire import (
@@ -352,6 +355,9 @@ from remote.wire import (
 )
 from remote.wire import (
     _wire_hit as _wire_hit,
+)
+from remote.wire import (
+    _wire_note_preempt as _wire_note_preempt,
 )
 from remote.wire import (
     _wire_note_reroll as _wire_note_reroll,

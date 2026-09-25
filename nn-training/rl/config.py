@@ -777,6 +777,82 @@ class PlayerBlock(BaseModel):
     level: int | None = None
 
 
+class StateInitBlock(BaseModel):
+    """课程 `state_init` 块：rollout 的**起始分布** = 人类 demo 中段**世界快照**交棒
+    （plan/x20-state-init.plan.md；课程 `curricula/x20-state-init.jsonc`）。
+
+    语义（TS 侧执行，P1 落地；银行由 P0 产出）：一局仍是标准的 `(stage, seed)` 游戏，但起始世界
+    换成人类 demo 在 tick `T` 的 `cloneWorld` 快照（人类**真正到达过**的状态），`T` 之后交棒
+    给策略。游戏时钟继续走（`max_ticks` 照旧对游戏时钟算，cut 吃掉 `T`）。PPO/GAE 不动
+    （中段开局数学上等价于一次截断续跑，truncated bootstrap 现成）。
+
+    为什么是快照而不是「人类磁带快进」（首版设计，已否决，plan §2 B1/B2/B5/B6）：用输入重建
+    出来的不是人类那个状态——idle 语义（人类 20–30% 帧静止）、RNG 分叉、FF 段可能先死——而
+    快照把它变成了一个纯注入问题，且每个切点都有录像 tickHash 做**外部**证据。
+
+    **缺席（`state_init is None`）= 现状逐字节不变**：这是纯增量块，老课程一个字都不受影响。
+    子字段全可选，缺省 = v1 口径（值与课程文件同源，见各自注释）；语义上**必须给 `bank`**
+    ——没有银行就没有起始分布，`apply_course` 在启动期响亮拒（不静默退回标准开局：那是另一个
+    实验，不是这个）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: 快照银行 manifest（P0 产物，`{recipe, games:[{id, stage, demoSeed, ticks, cuts[]}]}`）
+    #: + 同目录 `snapshots/<stage>-<demoSeed>-t<tick>.json`。仓库相对（`nn-training/data/...`）
+    #: 与 nn-training 相对两种写法都认——见 `resolve_state_init_bank`。
+    bank: str = ""
+    #: 切点下界（局内步数）：排除开局这一段——标准起点已经覆盖了它。
+    cut_from: int = 300
+    #: 切点上界：**负值 = 从局尾回退**（`-120` ⇒ 排除终局前 120t 的 trivial 态）。
+    cut_to: int = -120
+    #: 切点步长（同一局上可选交棒时刻的间隔）。
+    cut_step: int = 300
+    #: True = 每轮轮换切点（派生 key 带 `(runSeed, it, stage, seed)`：resume-safe、每轮换，§15.1）。
+    rotate_cuts: bool = True
+
+    # ⚠ `cut_from/cut_step` 必须同时是 `K`（决策间隔 10）与 `hashInterval`（tickHash 采样 100）的
+    # 整数倍：前者保证交棒点落在决策边界上，后者保证每个快照都有录像 tickHash 可对账。两条
+    # 都在 **P0 物化时**响亮校验（`tools/sim/build-state-init-bank.ts`）——量纲常量的单一来源在
+    # TS 侧，这里不复写一份（避免两处漂移）。
+
+    @model_validator(mode="after")
+    def _check_cuts(self) -> StateInitBlock:
+        if self.cut_from < 0:
+            raise ValueError(f"state_init.cut_from={self.cut_from} 不得为负（切点是局内步数）")
+        if self.cut_to > 0:
+            raise ValueError(
+                f"state_init.cut_to={self.cut_to} 必须 ≤0（负值 = 从局尾回退；'到局尾' 写 0）。"
+                "绝对上界要读银行读数才知道局有多长，v1 只支持相对局尾"
+            )
+        if self.cut_step < 1:
+            raise ValueError(f"state_init.cut_step={self.cut_step} 必须 ≥1（切点步长）")
+        return self
+
+
+def resolve_state_init_bank(p: str) -> Path | None:
+    """课程里的银行路径 → 盘上的文件（cwd → 仓库根 → nn-training 三种基准都认）；None = 找不到。
+
+    为什么要三种：课程里的数据路径历来混用两种基准（`bc: nn-training/weights/…` 是仓库相对，
+    `out: tmp/…` 是 nn-training 相对），而训练进程的 cwd 取决于谁拉起来的（控制台 / notebook /
+    裸命令）。这里只做**存在性**判断，不猜「哪个文件对」。
+
+    ⚠ 只保证「它在盘上」：银行**内容**（每局 ticks 是否容得下 `[cut_from, cut_to]` 这个区间）
+    要读 manifest 才知道，留给 P0/P3 的读方校验（"切点越界"在那一侧才有判据）。
+    """
+    raw = str(p or "").strip()
+    if not raw:
+        return None
+    nn_root = CURRICULA_DIR.parent
+    for cand in (Path(raw), nn_root.parent / raw, nn_root / raw):
+        try:
+            if cand.is_file():
+                return cand
+        except OSError:  # 非法路径（空串/超长/NUL）——等同「不在盘上」
+            continue
+    return None
+
+
 class CourseConfig(BaseModel):
     """课程配置文件（`nn-training/curricula/*.jsonc`）。
 
@@ -853,6 +929,10 @@ class CourseConfig(BaseModel):
     seeds: str = "0-3"
     player: PlayerBlock = PlayerBlock()
     dodge: Literal["", "off", "l0", "god"] = ""
+    #: rollout **起始分布**（plan/x20-state-init.plan.md）：人类 demo 磁带中段交棒。
+    #: 缺席 = 标准开局（老课程逐字节不变）。开训前置（银行 manifest 在盘上）由
+    #: `apply_course` 在启动期校验——`load_course` 不多读盘（它只读课程文件本身）。
+    state_init: StateInitBlock | None = None
 
     # ---- 奖励 ----
     reward: RewardBlock = RewardBlock()
@@ -1107,6 +1187,11 @@ class CourseConfig(BaseModel):
             out["backup_dir"] = self.backup_dir
         if "backup_prefix" in explicit and self.backup_prefix:
             out["backup_prefix"] = self.backup_prefix
+        if "state_init" in explicit and self.state_init is not None:
+            # 嵌套块 → **dict**（不进上面的 mapping：那一张是标量与异名映射表）。下游
+            # （P3 的 `rl/cmd.build_rollout_cmd`）只要 JSON 可序列化的数据——`echo_config`
+            # 也会 json.dumps 它，pydantic 模型对象在那里直接炸。
+            out["state_init"] = self.state_init.model_dump()
         return out
 
 
@@ -1240,6 +1325,24 @@ def corpus_identity_fp(course: CourseConfig) -> str:
     # shard 判成异身份，先例 `tests/test_rollout_volume.py:492-499`）。
     if course.paired_rotate_seed is not None:
         payload["paired_rotate_seed"] = int(course.paired_rotate_seed)
+    # 起始分布（plan/x20-state-init.plan.md P2/P3.5，2026-09-25）：**决定一个样本从哪个世界
+    # 开始**，与 seed_rotate/mode 同类——「标准开局 300 tick 后的观察」与「中段状态交棒后的
+    # 观察」不是同一种货，混进同一轮训练/dimension 统计就是换实验而不换账。故进身份：
+    #   · 课程中途加/删/改 `state_init`（含换 bank 或改切点）⇒ corpus_fp 变 ⇒ 旧 shard 在
+    #     **所有** funnel（本地对账 / hub 打包 / 云端装载）被 D14 自动排除，零额外参数；
+    #   · 反向「老节点忽略 --init-snapshot 却产出同指纹 shard」不由这里兜（同一份配置指纹
+    #     相同），由 `rl.resume.shard_state_init_ok` 的 `initTick` 护栏兜（P3.5）。
+    # ⚠ 同样**仅在激活时**（同上面两条的理由）：不加会让既有一切课程指纹漂移。
+    # bank 路径进身份但只算**文件名**：绝对/相对写法（cwd 不同）不得改变语料身份。
+    if course.state_init is not None:
+        si = course.state_init
+        payload["state_init"] = {
+            "bank": Path(si.bank).name,
+            "cut_from": si.cut_from,
+            "cut_to": si.cut_to,
+            "cut_step": si.cut_step,
+            "rotate_cuts": bool(si.rotate_cuts),
+        }
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
@@ -1284,6 +1387,29 @@ def apply_course(args, course: CourseConfig) -> None:
         raise SystemExit(
             f"[course] {course.name}: kickstart_init={_ki} 但 kickstart_ref 未开 —— "
             "缰绳没开，初值无消费方（要么两个都写，要么 kickstart_init 写 0）"
+        )
+    # ── 起始分布（plan/x20-state-init.plan.md P2）：声明了就必须**能跑**。快照银行不在盘上
+    # 就在启动期响亮拒——它是 P0 的产物，而不是「以后再补」的路径；静默退回标准开局等于
+    # 换了一个实验（而日志/账本还以为自己跑的是中段起跑那条腿）。
+    si = course.state_init
+    if si is not None:
+        if not si.bank.strip():
+            raise SystemExit(
+                f"[course] {course.name}: state_init 声明了但没给 bank —— 起始分布没有快照"
+                "银行就是空转（要么删掉整个 state_init 块，要么写 bank 路径）"
+            )
+        bank = resolve_state_init_bank(si.bank)
+        if bank is None:
+            raise SystemExit(
+                f"[course] {course.name}: state_init.bank 不在盘上（{si.bank}）——"
+                "快照银行是 plan/x20-state-init.plan.md P0 的产物"
+                "（manifest.json + snapshots/）；先把它建出来（P0 的 tickHash 对账过了才算），"
+                "再开这条腿"
+            )
+        log(
+            f"[course] state_init 起始分布：bank={bank}，切点 [{si.cut_from}, {si.cut_to}"
+            f"（负=从局尾回退）] 步 {si.cut_step}，rotate_cuts={si.rotate_cuts}"
+            "（切点由 P0 物化进 manifest.cuts[]，P3 按 key 抽——选哪个状态进语料身份）"
         )
     # 进程级课程身份导出（v5 多课程，2026-09-18）：出站的权重上报/任务下发都带它，
     # agent 侧按 (course, kind) 分桶。住在这里是因为这是训练进程**唯一**知道课程名的

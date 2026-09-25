@@ -102,7 +102,7 @@ OUTBOUND_OWNERS = {
 #: 读者侧（`_prepare_iter_dir` / `_rollout_phase`）在 S4 第二十刀随它们搬出了旧家 ⇒ 那条
 #: 闭集表归 `test_loop_core_tail_split.py`；本文件只钉写手 + 「旧家不再有读者」。
 SLOT_HANDS_WRITTEN_BY = {
-    "_setup_common": {"_course_fp", "_corpus_fp"},
+    "_setup_common": {"_course_fp", "_corpus_fp", "_state_init"},
 }
 
 #: 顶层 import 面（非 stdlib）——闭集：本模块不许长出重依赖。
@@ -117,6 +117,7 @@ TOP_IMPORTS = frozenset(
         "rl.loop_round",
         "rl.loop_steps",
         "rl.queue",
+        "rl.resume",
         "rl.rollout_phase",
         "rl.train_ledger",
     }

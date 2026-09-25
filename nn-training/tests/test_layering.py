@@ -85,13 +85,30 @@ L2_PACKAGES = ("remote",)
 #: / `loop_remote_job` / `loop_remote_fail` / `loop_remote_drive`。四者**都**经 `rl.loop_transport`
 #: （或直接 `remote.push_client`）传递可达 remote，故全部登记；`loop_remote` 退成组合根后仍经
 #: `rl.loop_remote_drive` 可达 ⇒ 名字不动（第七次）。
+#: 2026-09-25（合并 `origin/goal-nn`）：本机 rollout 接长驻池 —— `rl.queue_local` / `rl.dispatch`
+#: 改直 `import remote.serve_pool`（DECISIONS `§2026-09-23-goalnn-layering-common-sink` 早已把
+#: `serve_pool` 列为 rl 允许的 remote 目标），于是它们成为**直接**编排成员；而 `batch_*` 执行面 /
+#: `eval_*` / `stream` / `queue` / `loop_baseline`·`loop_control`·`loop_eval` 只是**经 rl 传递可达**
+#: （`rl.queue` → `rl.dispatch` → remote 这条链把归集器与批执行面一并拽进来）⇒ 同样先红、再登记。
+#: 这是一次**特征**（本机长驻池）而非拆分的连带登记，故单列一行说明形状。
 RL_ORCHESTRATION = frozenset(
     {
+        "batch_eval",
+        "batch_plan",
+        "batch_runner",
+        "batch_store",
         "bc_loop",
         "collect_only",
+        "dispatch",
+        "eval_a_once",
+        "eval_dispatch",
+        "eval_m1",
         "loop",
+        "loop_baseline",
+        "loop_control",
         "loop_core",
         "loop_dispatch",
+        "loop_eval",
         "loop_export",
         "loop_guards",
         "loop_iter_dir",
@@ -108,7 +125,10 @@ RL_ORCHESTRATION = frozenset(
         "loop_steps",
         "loop_transport",
         "loop_volume",
+        "queue",
+        "queue_local",
         "rollout_phase",
+        "stream",
     }
 )
 

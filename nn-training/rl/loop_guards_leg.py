@@ -22,7 +22,11 @@ from rl.gate_check import read_trend_rows
 from rl.kickstart_burn import burn_overrides, burn_verdict
 from rl.log import log
 from rl.paired import declared_paired_seed, latest_run_start_seed, scan_paired_courses
-from rl.paired_kill import paired_kill_overrides, paired_kill_verdict
+from rl.paired_kill import (
+    paired_kill_overrides,
+    paired_kill_self_kill,
+    paired_kill_verdict,
+)
 
 
 class TrainingGuardsLeg:
@@ -186,6 +190,11 @@ class TrainingGuardsLeg:
         if not best.tripped:
             return False
         reason = f"同 it 配对差连续 {streak} 个点 < −{margin_pp:.1f}pp（对端 {best_peer}）"
+        if not paired_kill_self_kill(dist_cfg, course_key_of(self.args)):
+            # 对照臂永不自杀（2026-09-25 C-0 事故）：判据已落账，上面的 streak 事件就是
+            # 记录；停车会撕毁终点 verdict（配对检验需要两条臂都活着），故只记录不停车。
+            log(f"[run_rl] paired-kill it{it}: {reason} ——本臂被配置为永不自杀，只记录不停车")
+            return False
         log(f"[run_rl] CRITICAL PAIRED-KILL it{it}: {reason}")
         log(
             f"[run_rl] training PAUSED; weights kept at {self.args.out}; "

@@ -16,9 +16,11 @@ import dist_common
 from common.proc import bun_version as _bun_version
 from common.proc import version_mm as _mm
 from platform_utils import rmtree_best_effort
+from remote import serve_pool
 from rl.agent_meta import record_agent_meta as _record_agent_meta_impl
 from rl.log import log
 from rl.queue_local import (
+    make_local_pool,
     pick_race_target,
     register_inflight,
     rescan_nodes,
@@ -26,7 +28,7 @@ from rl.queue_local import (
     run_rollout,
 )
 from rl.reports import combine_reports, win_of
-from rl.resume import completed_pairs, resumed_manifests
+from rl.resume import completed_pairs, resumed_manifests, state_init_enabled
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -130,8 +132,26 @@ class RolloutDispatcher:
         self.extra_wver = extra_wver
         self.course_fp = course_fp
         self.corpus_fp = corpus_fp
+        #: 本机槽的长驻池（`_run` 里按需建；生命周期 = 这一轮，见 `run`）。
+        self._pool: serve_pool.ServePool | None = None
 
     def run(self) -> dict:
+        """轮次入口 —— **拥有本机长驻池的生命周期**（池在 `_run` 里按需创建）。
+
+        单独一层的原因（2026-09-25）：`_run` 有多条提前 return（全部已续跑 / 已结算 /
+        halt 熔断），池必须在**每一条**出口都 `close()` —— 否则每轮留下一批常驻 bun
+        （本机槽有多宽就留几个，而它们会一直等 stdin）。
+        """
+        try:
+            return self._run()
+        finally:
+            pool = self._pool
+            if pool is not None:
+                self._pool = None
+                log(f"[dist] 本机 {pool.summary()}")
+                pool.close()
+
+    def _run(self) -> dict:
         # 参数局部别名（OO 化：run 主体保持原函数体裸名，指向 self 状态）
         bun = self.bun
         rl_path = self.rl_path
@@ -306,6 +326,25 @@ class RolloutDispatcher:
                     "ping": ping,  # M1d：能力位查询（stageJsonSupport）
                 }
             )
+        # ── 起始分布（state_init）：整轮纯本机（2026-09-25 路由修正）───────────────────
+        # v1 的快照**只在本机盘上**（云侧搬运 = plan/x20-state-init.plan.md §P2.5，未落地）：
+        # 只有本机腿的 argv 走 `build_rollout_cmd(node_side=False)` 拿得到 `--init-snapshot`，
+        # 而节点腿（`fetch_task` / `template_argv`）拼任务参数时**没有**快照这一项，且导出器
+        # 对未知 flag **静默忽略** ⇒ 向 pool 派发 = 云上跑标准开局、账本记中段起跑，缺 `initTick`
+        # 的 shard 还会被护栏在六个 funnel 全剔（采样波次永远凑不齐 = 无限波次；2026-09-25
+        # 实测烧掉 51.9 万 transitions）。
+        # 不看节点健康度："有节点就拒"等于构造性不可跑（self 也算节点，pool 健康时永远被拒，
+        # 而"只留本机"的自救指南是错的——只留 self 照样 abort）；"放行 local 节点"也不对
+        # （fetch 协议没有快照项，放行≠给快照）。改路由不改放行名单：开了 state_init 的轮
+        # **整轮纯本机、向 pool 零派发**——混语料无从发生，波次自然收敛。
+        # additive-only：课程没开 state_init ⇒ 本段一行不执行，逐字节旧行为。
+        if state_init_enabled(args):
+            log(
+                "[dist] state_init: local-only round — "
+                "zero pool dispatch; snapshot threaded via --init-snapshot"
+            )
+            return run_rollout(bun, rl_path, traj_dir, pairs, args)
+
         if not nodes:
             log("[dist] no eligible node — falling back to local-only rollout")
             return run_rollout(bun, rl_path, traj_dir, pairs, args)
@@ -352,6 +391,7 @@ class RolloutDispatcher:
             extra_wver=extra_wver,
             course_fp=course_fp,
             corpus_fp=corpus_fp,
+            state_init=state_init_enabled(args),
         )
         done = done_all & plan_set
         tasks = [p for p in norm_pairs if p not in done]
@@ -381,6 +421,7 @@ class RolloutDispatcher:
                     extra_wver=extra_wver,
                     course_fp=course_fp,
                     corpus_fp=corpus_fp,
+                    state_init=state_init_enabled(args),
                 )
             )
             combined["missing"] = []
@@ -407,6 +448,13 @@ class RolloutDispatcher:
             k = min(local_slots, len(tasks))
             head_tasks = deque(tasks[:k])
             tasks = tasks[k:]
+        # 本机槽的长驻池（`--serve`，与节点侧 `remote/serve_pool.py` 同一份协议）：
+        # 逐局 spawn 时每局重付进程启动 / wasm 编译 / 权重解析，池化后只付一次（节点侧实测
+        # 1.59×，docs/nn/runtime-opt.md §20）。宽度 = 本机槽位数；池起不来或某局跑挂就地回退
+        # 一次性 spawn（`make_local_pool` / `serve_pool` 内部带熔断 —— 只慢不错）。
+        probe = head_tasks[0] if head_tasks else (tasks[0] if tasks else None)
+        local_pool = make_local_pool(bun, rl_path, traj_dir, probe, args, wver, local_slots)
+        self._pool = local_pool
         all_tasks = list(tasks)  # 全量任务清单（含已划入本机保留段的）——完成判定/missing 口径
         pending: deque[tuple[int, int]] = deque(tasks)
         lock = threading.Lock()
@@ -641,7 +689,9 @@ class RolloutDispatcher:
                     if nd is None:
                         _idx = next_idx[0]
                         next_idx[0] += 1
-                        summary = run_local_rollout(bun, rl_path, traj_dir, _idx, task, args, wver)
+                        summary = run_local_rollout(
+                            bun, rl_path, traj_dir, _idx, task, args, wver, local_pool
+                        )
                     else:
                         # M1d：课程自定义关 stageJson / 命数星级覆盖（本地 slot 分支经
                         # cmd.py 透传；dist 分支在这里进查询参数）。
@@ -1123,6 +1173,7 @@ class RolloutDispatcher:
                 extra_wver=extra_wver,
                 course_fp=course_fp,
                 corpus_fp=corpus_fp,
+                state_init=state_init_enabled(args),
             )
         )
         combined["missing"] = [list(k) for k in missing]

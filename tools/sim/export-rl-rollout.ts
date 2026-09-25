@@ -43,6 +43,9 @@
  * Usage:
  *   bun tools/sim/export-rl-rollout.ts --weights tmp/rl-weights/weights.json \
  *       --out tmp/rl-traj/it1 --stages 0-3 --seeds 0-3 --max-ticks 12000
+ *
+ * 起始分布（plan/x20-state-init.plan.md P1）：`--init-snapshot <file>` 把起始世界换成人类 demo
+ * 在 tick T 的快照（单局专用：一个快照对应一局）。缺省不给 = 行为逐字节不变。
  */
 import { World } from '../../src/game/World'
 import { Simulation } from '../../src/game/Simulation'
@@ -81,6 +84,10 @@ import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import { RNG } from '../../src/utils/RNG'
 import { npyBytes } from '../../src/nn/npy'
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'fs'
+import { restoreWorld } from '../../src/snapshot/WorldSerializer'
+import type { WorldSnapshot } from '../../src/snapshot/types'
+import { worldTickHash } from '../../src/replay/tickHash'
+import { basename } from 'path'
 import { buildPack } from './pack-container'
 import { runServe } from './serve-loop'
 import {
@@ -516,8 +523,120 @@ function newShard(): ShardData {
   }
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// 起始分布注入（plan/x20-state-init.plan.md P1；银行 = tools/sim/build-state-init-bank.ts）
+//
+// 一局仍是标准 `(stage, seed)` 游戏，但**起始世界**换成人类 demo 在 tick T 的快照（人类真到达过
+// 的状态），T 之后交棒给策略。为什么是快照而不是「人类磁带快进」（plan §2 B1/B2/B5/B6）：输入
+// 重建出来的状态不是人类的状态（idle 语义、RNG 分叉、FF 段可能直接死亡），而快照把它变成
+// 一个纯注入问题。奖励不受影响：Φ 差分（Python 侧）对「继承的进度」天然不付钱。
+// ────────────────────────────────────────────────────────────────────────────
+
+/** 银行快照文件（`build-state-init-bank.ts` 产物；`snapshot` = `cloneWorld` 原样）。 */
+export interface InitSnapshotFile {
+  version: number
+  id: string
+  stage: number
+  demoSeed: number
+  tick: number
+  /** 录像记录链上该 tick 的 tickHash（银行构建期逐点核过 ⇒ 这是外部证据）。 */
+  tickHash: string
+  /** 人类在该切点的行为侧面（分析用；不参与玩法）。 */
+  human?: Record<string, number>
+  snapshot: WorldSnapshot
+  /** 来自磁盘的路径（诊断用，不存在于文件里）。 */
+  path: string
+}
+
+/**
+ * 读 + 校验快照文件。**任一条不符就抛错**（调用方响亮失败，绝不静默退回标准开局——
+ * 「日志说中段起跑、实际跑的是标准开局」是这门课最贵的错）。
+ */
+export function loadInitSnapshot(
+  path: string,
+  opts: { stageIdx: number; maxTicks: number; k?: number },
+): InitSnapshotFile {
+  if (!existsSync(path)) throw new Error(`[init] 快照文件不存在：${path}`)
+  let raw: any
+  try {
+    raw = JSON.parse(readFileSync(path, 'utf8'))
+  } catch (e) {
+    throw new Error(`[init] 快照不是合法 JSON：${path}（${(e as Error).message}）`)
+  }
+  if (!raw || typeof raw !== 'object' || !raw.snapshot) {
+    throw new Error(`[init] 快照缺 snapshot 字段：${path}`)
+  }
+  // 跨关借状态是另一个实验（plan §2 B1）：银行局的关必须就是本局的关。
+  if (raw.stage !== opts.stageIdx) {
+    throw new Error(
+      `[init] 快照 stage=${raw.stage} != 本局 stage=${opts.stageIdx}（跨关借状态被拒）`,
+    )
+  }
+  const k = opts.k ?? K
+  const tick = raw.tick
+  if (!Number.isInteger(tick) || tick <= 0) throw new Error(`[init] 快照 tick 非法：${raw.tick}`)
+  if (tick % k !== 0) {
+    throw new Error(
+      `[init] 交棒 tick ${tick} 不在决策边界上（%${k}）——首个决策前会有 ${tick % k} 个 tick ` +
+        '由残留动作驱动，静默污染（plan §2 B6）',
+    )
+  }
+  if (tick >= opts.maxTicks) {
+    throw new Error(`[init] 交棒 tick ${tick} ≥ maxTicks ${opts.maxTicks}（交棒后一局都没有）`)
+  }
+  if (typeof raw.tickHash !== 'string' || !raw.tickHash) {
+    throw new Error(`[init] 快照缺 tickHash：${path}（没有它就没有外部保真证据）`)
+  }
+  return { ...raw, path }
+}
+
+/**
+ * restore + 交棒前校验。**顺序是有原因的**（每一条都对应一种误用）：
+ *   ① `restoreWorld` 原样注入人类到达过的世界（tile/敌位/道具/计时器/基地 HP/地雷/时钟；
+ *      `state` 由序列化器恒置 `playing`——快照里不存它，银行也只收局中态）；
+ *   ② **先**核 `worldTickHash` 与录像记录链上的那一点（银行构建期逐点对过）——⚠ 必须在重开
+ *      RNG **之前**：tickHash 含 `rngState`，先 reseed 会把外部证据变成必然失败/必然放过；
+ *   ③ 再 `reseed(seed)`：状态来自人类，**未来**由本局抽到的种子决定。不重开的话，不同 seed
+ *      会产出内容完全相同的局（旋转种子名不副实，§15.1 记账失真）；
+ *   ④ 最后重新施加 CLI/关卡权威值（restore 会带回 demo 的 difficulty/lives/level）。
+ */
+export function applyInitSnapshot(
+  world: World,
+  snap: InitSnapshotFile,
+  opts: {
+    seed: number
+    difficultyKey: string
+    livesOverride: number | null
+    playerLevelOverride: number | null
+  },
+): void {
+  const { seed, difficultyKey, livesOverride, playerLevelOverride } = opts
+  restoreWorld(world, snap.snapshot)
+  if (world.frame !== snap.tick) {
+    throw new Error(`[init] 世界时钟 ${world.frame} != 快照 tick ${snap.tick}（${snap.path}）`)
+  }
+  if (worldTickHash(world) !== snap.tickHash) {
+    throw new Error(
+      `[init] tickHash 自检失败（${snap.path}）：期望 ${snap.tickHash}，实得 ${worldTickHash(world)}`,
+    )
+  }
+  if (!(world.player?.alive ?? false)) {
+    throw new Error(`[init] 快照里玩家不存活（${snap.path}）——银行只收活状态`)
+  }
+  world.rng.reseed(seed)
+  world.difficultyKey = difficultyKey
+  world.difficulty = (DIFFICULTIES as any)[difficultyKey] ?? (DIFFICULTIES as any)['classic']
+  world.rules = (RULES as any)[difficultyKey] ?? DEFAULT_RULES
+  if (livesOverride !== null) world.lives = livesOverride
+  if (playerLevelOverride !== null) world.playerLevel = playerLevelOverride
+}
+
 interface RunResult {
   shard: ShardData
+  /** 起始分布注入的事实（未注入 = 空串 / 0 / null；manifest 只在注入时追加这三个字段）。 */
+  initSnapshot: string
+  initTick: number
+  initCounters: Record<string, number> | null
   outcome: string
   ticks: number
   win: boolean
@@ -562,6 +681,7 @@ function runOne(
   customStage = false,
   livesOverride: number | null = null,
   playerLevelOverride: number | null = null,
+  init: { path: string } | null = null,
 ): RunResult {
   const world = new World()
   world.rng.reseed(seed)
@@ -586,6 +706,33 @@ function runOne(
   // 守卫②（plan §5.2）：自定义关显式 index 0——与 isArenaId 巧合解耦
   //（关卡号取值无关，1.05^index 缩放事故对自定义关同样成立）。
   world.loadStageData(stage, customStage || isArenaId(stageIdx) ? 0 : stageIdx)
+  // 起始分布（plan P1）：中段快照注入。null = 现状逐字节不变。
+  let initTick = 0
+  let initCounters: Record<string, number> | null = null
+  let initSnapshotName = ''
+  if (init) {
+    const snap = loadInitSnapshot(init.path, { stageIdx, maxTicks })
+    applyInitSnapshot(world, snap, {
+      seed,
+      difficultyKey: difficulty,
+      livesOverride,
+      playerLevelOverride,
+    })
+    initTick = snap.tick
+    initSnapshotName = basename(init.path)
+    // 交棒点的**世界事实**（继承的进度）：分析侧要 rebase 就靠它。注意快照里没有逐事件计数器
+    // （hits/shots/damage 那些是「这一局发生的事」，人类那一段的没有随状态带过来）。
+    initCounters = {
+      kills: world.killCount,
+      enemiesSpawned: world.enemiesSpawned,
+      enemiesRemaining: world.enemiesRemaining,
+      lives: world.lives,
+      playerLevel: world.playerLevel,
+      score: world.score,
+      baseHp: world.baseHp,
+      frame: world.frame,
+    }
+  }
   scripted.reset()
   // god 链臂（A3 A/B 对照专用）：God-AI 探针只读 World（自身独立 RNG，§47），
   // 不参与驱动仿真——每决策 tick 跑一次 think 判 _lastBranch==='dodge'。
@@ -637,6 +784,16 @@ function runOne(
   const seenPuIds = new Set<number>()
   let prevLivePuIds = new Set<number>()
   let prevCell = { col: -1, row: -1 }
+  if (init) {
+    // 交棒基线（plan §2 M2/M3）：metrics 只描述**交棒之后**的窗口，但不得让场上既有的东西被
+    // 当成「刚发生」。seenPuIds 预置 ⇒ `powerUpsSpawned` 不把交棒时已存在的道具算成新 spawn；
+    // prevCell 预置 ⇒ 交棒那一刻不产生假 stuckTicks。
+    for (const pu of world.powerUps) {
+      seenPuIds.add(pu.id)
+      prevLivePuIds.add(pu.id)
+    }
+    prevCell = playerCenterCell(world.player) ?? { col: -1, row: -1 }
+  }
 
   let pending: {
     obs: Uint8Array
@@ -648,7 +805,7 @@ function runOne(
     value: number
     mask: number[]
   } | null = null
-  let t = 0
+  let t = initTick // 游戏时钟继续走：cut 吃掉 T（max_ticks 仍对游戏时钟算）
   let outcome = 'timeout'
   let decisionTicks = 0 // 决策 tick 数（K 间隔）
   let dodgeTicks = 0 // L0/保底层覆盖采样动作的决策 tick 数（§3.5 覆盖率口径）
@@ -891,6 +1048,9 @@ function runOne(
   }
   return {
     shard,
+    initSnapshot: initSnapshotName,
+    initTick,
+    initCounters,
     outcome,
     ticks: t,
     win,
@@ -987,6 +1147,7 @@ export function runOneBench(
   customStage = false,
   livesOverride: number | null = null,
   playerLevelOverride: number | null = null,
+  init: { path: string } | null = null,
 ): RunResult {
   return runOne(
     stageIdx,
@@ -999,6 +1160,7 @@ export function runOneBench(
     customStage,
     livesOverride,
     playerLevelOverride,
+    init,
   )
 }
 
@@ -1065,6 +1227,8 @@ function main(argv: string[] = process.argv.slice(2)): void {
   let packPath = ''
   /** sampler HTTP：pack 直接用内存 entries，跳过 writeRlShard→read 回环（iter 仍写盘）。 */
   let packMemory = false
+  // 起始分布注入（plan/x20-state-init.plan.md P1）：快照文件路径，'' = 标准开局（旧行为）。
+  let initSnapshotPath = ''
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--out') outDir = args[++i]
     else if (args[i] === '--difficulty') difficulty = args[++i]
@@ -1084,9 +1248,16 @@ function main(argv: string[] = process.argv.slice(2)): void {
     else if (args[i] === '--corpus-fp') corpusFp = args[++i]
     else if (args[i] === '--pack') packPath = args[++i]
     else if (args[i] === '--pack-memory') packMemory = true
+    else if (args[i] === '--init-snapshot') initSnapshotPath = args[++i]
   }
   const stages = parseRange(stagesStr)
   const seeds = parseRange(seedsStr)
+  if (initSnapshotPath && (stages.length !== 1 || seeds.length !== 1)) {
+    throw new Error(
+      '[export-rl-rollout] --init-snapshot 只支持单局（--stages 与 --seeds 各一个）：' +
+        '一个快照对应一局，多局共用同一个起始世界没有任何语义',
+    )
+  }
   mkdirSync(outDir, { recursive: true })
   const weightsText = readFileSync(weightsPath, 'utf8')
 
@@ -1144,6 +1315,7 @@ function main(argv: string[] = process.argv.slice(2)): void {
         !!custom,
         resolveLivesFlag(livesOverride),
         playerLevelOverride ? parseInt(playerLevelOverride, 10) : null,
+        initSnapshotPath ? { path: initSnapshotPath } : null,
       )
       outcomes[res.outcome] = (outcomes[res.outcome] ?? 0) + 1
       if (res.win) wins++
@@ -1208,6 +1380,14 @@ function main(argv: string[] = process.argv.slice(2)): void {
         ...(wver ? { wver, node: nodeLabel } : {}),
         ...(courseFp ? { course_fp: courseFp } : {}),
         ...(corpusFp ? { corpus_fp: corpusFp } : {}),
+        // 起始分布（additive-only）：只在注入了才写。分析侧据此把「继承的进度」从读数里剔掉。
+        ...(res.initCounters
+          ? {
+              initSnapshot: res.initSnapshot,
+              initTick: res.initTick,
+              initCounters: res.initCounters,
+            }
+          : {}),
       }
       if (res.shard.n > 0) {
         lastShardManifest = manifest
@@ -1227,7 +1407,8 @@ function main(argv: string[] = process.argv.slice(2)): void {
       totalEnemyHits += res.enemyHits
       totalPowerUps += res.powerUpsCollected
       perGame.push(
-        `[OK] s${si} seed${seed} samples=${res.shard.n} outcome=${res.outcome} ticks=${res.ticks} win=${res.win} score=${res.score.toFixed(3)} kills=${res.kills} enemyHits=${res.enemyHits} hitRate=${res.playerShots > 0 ? (res.enemyHits / res.playerShots).toFixed(3) : 0}`,
+        `[OK] s${si} seed${seed} samples=${res.shard.n} outcome=${res.outcome} ticks=${res.ticks} win=${res.win} score=${res.score.toFixed(3)} kills=${res.kills} enemyHits=${res.enemyHits} hitRate=${res.playerShots > 0 ? (res.enemyHits / res.playerShots).toFixed(3) : 0}` +
+          (res.initCounters ? ` init=${res.initSnapshot}@${res.initTick}` : ''),
       )
     }
   }
@@ -1284,6 +1465,9 @@ function main(argv: string[] = process.argv.slice(2)): void {
     ...(wver ? { wver, node: nodeLabel } : {}),
     ...(courseFp ? { course_fp: courseFp } : {}),
     ...(corpusFp ? { corpus_fp: corpusFp } : {}),
+    ...(initSnapshotPath
+      ? { initSnapshot: basename(initSnapshotPath), initTick: lastShardManifest?.['initTick'] }
+      : {}),
   }
   console.log(perGame.join('\n'))
   console.log(`\n=== RL on-policy rollout (R3 v7-aligned-f3) ===`)

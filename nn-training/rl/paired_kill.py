@@ -137,3 +137,21 @@ def paired_kill_overrides(dist_cfg: dict | None, course_key: str) -> tuple[float
     )
     pts = int(p) if isinstance(p, int) and not isinstance(p, bool) and p > 0 else PAIRED_KILL_POINTS
     return (margin, pts)
+
+
+def paired_kill_self_kill(dist_cfg: dict | None, course_key: str) -> bool:
+    """本臂命中时是否真停（`courses.<课>.paired_kill.self_kill`；缺席/写坏 → True）。
+
+    2026-09-25 C-0 事故：对称自杀把**对照臂**杀了（对照落后 = 加权臂领先，正是加权要证明的；
+    而终点配对 verdict 需要两条臂都活着）。对照臂设 `self_kill: false`：判据照算、streak
+    照落账，只是不停车——"输了"照样记录，"死了"不行。
+
+    只有显式 `False` 才关（缺席保持现状对称行为：已有课程零变化；非 bool 不当 False，
+    与上面 margin/points 的脏值纪律同源）。
+    """
+    block = (((dist_cfg or {}).get("courses") or {}).get(course_key) or {}) if course_key else {}
+    pk = block.get("paired_kill") if isinstance(block, dict) else None
+    if not isinstance(pk, dict):
+        return True
+    v = pk.get("self_kill")
+    return v is not False

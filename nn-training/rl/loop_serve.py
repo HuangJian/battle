@@ -44,6 +44,7 @@ from rl.engine_pool import DEFAULT_CACHE_COURSES, DEFAULT_CACHE_MB, EnginePool
 from rl.log import close_course_sinks, log, open_course_sink, prefix_scope
 from rl.loop_control import ControlApplier, read_control
 from rl.loop_plan import (
+    COURSE_ENABLE_MARKER,
     course_facts,
     course_kind,
     course_traj,
@@ -548,6 +549,42 @@ def _all_settled(sup: Supervisor) -> bool:
 # ---------------------------------------------------------------- 主循环
 
 
+def _marker_mtime_ns(traj_root: str | Path, course: str) -> int | None:
+    """开课标记的 mtime（ns；缺失/不可读 ⇒ None）。只做存在性之外的第二事实：标记**何时**被写的。"""
+    try:
+        return (Path(traj_root) / course / COURSE_ENABLE_MARKER).stat().st_mtime_ns
+    except OSError:
+        return None
+
+
+def reopened_parked(
+    states: dict[str, str],
+    done: set[str],
+    seen_marker: dict[str, int],
+    traj_root: str | Path,
+) -> list[str]:
+    """收官后被用户重开的课（2026-09-25 C-0 复活事故）。
+
+    条件三合一，缺一不可：① 队列已终（`done`/`aborted`）② 已落过收官副作用（`done` 集 =
+    `_settle_rounds` 处理过）③ 开课标记 mtime **新于入队时记录值**（控制台停→开的唯一机器
+    含义：停课删标记、开课重写，mtime 必变；只点"开课"而标记本来就在 ⇒ mtime 不变 ⇒ 不算重开）。
+
+    调用方摘名后（`runtimes`/`done`/`seen` 三处同删），`fresh` 通道按新课重入队、指针续跑。
+    纯函数（只读标记 mtime），可单测。
+    """
+    out: list[str] = []
+    for course, state in states.items():
+        if state not in (QUEUE_DONE, ABORTED) or course not in done:
+            continue
+        prev = seen_marker.get(course)
+        if prev is None:
+            continue
+        cur = _marker_mtime_ns(traj_root, course)
+        if cur is not None and cur > prev:
+            out.append(course)
+    return out
+
+
 def _open_courses(
     names: list[str],
     runtimes: dict[str, CourseRuntime],
@@ -662,6 +699,8 @@ def serve(
     discover = not courses  # 发现模式：进程独立于课程（没课在训也照常起）
 
     runtimes: dict[str, CourseRuntime] = {}
+    # 入队时见到的开课标记 mtime（`reopened_parked` 的比较基准：只有"停→开"能让它变大）。
+    seen_marker: dict[str, int] = {}
     explicit = list(courses or [])
     if discover:
         explicit = enabled_courses(traj_root)
@@ -672,7 +711,10 @@ def serve(
                 f"[serve] {traj_root} 下暂无已开课的课程——进程照常运行，队列空着等"
                 "（先在控制台点「开课」：写 training-enabled.txt + 账本即自动入队）"
             )
-    _open_courses(explicit, runtimes, report, argv=argv, traj_root=traj_root)
+    for _c in _open_courses(explicit, runtimes, report, argv=argv, traj_root=traj_root):
+        _m = _marker_mtime_ns(traj_root, _c)
+        if _m is not None:
+            seen_marker[_c] = _m
     if not runtimes and not discover:
         report.stop_reason = "no_courses"
         log("[serve] 显式课程表里没有能开的课——退出")
@@ -721,18 +763,44 @@ def serve(
             if report.stop_reason == "all_settled" and not discover:
                 break
             if discover:
+                # 收官后重开的课：只重置队列、复用原 runtime 与热引擎（2026-09-25）——
+                # 重走 `_open_courses` 会建一个 runner=None 的新 runtime，而池里还是旧引擎，
+                # `ensure_ready` 只对引擎对象不对 runner，之后每轮断言失败进无限 RETRY。
+                # 复活本来就是"指针续跑"，引擎本来就是热的。
+                for _c in reopened_parked(
+                    {c: q.state for c, q in sup.courses.items()},
+                    done_hooked,
+                    seen_marker,
+                    traj_root,
+                ):
+                    try:
+                        _old_rounds = (
+                            sup.courses[_c].rounds_done if _c in sup.courses else 0
+                        )
+                        _enqueue(sup, runtimes, _c, step_mode=step_mode)
+                        # 新队列的 rounds_done 从 0 起：把收官前的计数带过去（状态面不断档）。
+                        sup.courses[_c].rounds_done += _old_rounds
+                    except BaseException as _e:
+                        log(f"[serve] 课程 {_c} 复活入队失败，本次仍停车：{type(_e).__name__}: {_e}")
+                        continue
+                    done_hooked.discard(_c)
+                    _m = _marker_mtime_ns(traj_root, _c)
+                    if _m is not None:
+                        seen_marker[_c] = _m
+                    log(f"[serve] 课程 {_c} 收官后被重开——重新入队，指针续跑（引擎热复用）")
                 fresh = [c for c in enabled_courses(traj_root) if c not in runtimes]
                 # 被跳过过的课不再重试（课程文件缺失 = 这一轮修不好；避免每秒刷日志）
                 fresh = [c for c in fresh if c not in report.skipped]
                 if fresh:
                     log(f"[serve] 发现新课程：{', '.join(fresh)}")
-                    _enqueue_opened(
-                        sup,
-                        runtimes,
-                        report,
-                        _open_courses(fresh, runtimes, report, argv=argv, traj_root=traj_root),
-                        step_mode=step_mode,
+                    _newly = _open_courses(
+                        fresh, runtimes, report, argv=argv, traj_root=traj_root
                     )
+                    for _c in _newly:
+                        _m = _marker_mtime_ns(traj_root, _c)
+                        if _m is not None:
+                            seen_marker[_c] = _m
+                    _enqueue_opened(sup, runtimes, report, _newly, step_mode=step_mode)
             if max_seconds and (now() - t0) >= max_seconds:
                 report.stop_reason = "max_seconds"
                 break
@@ -795,7 +863,7 @@ def _settle_rounds(
             rt.engine.finish_course(max(int(q.next_it) - 1, 0))
         log(
             f"[serve] 课程 {course} 已收官（{q.rounds_done} 轮，指针 it{q.next_it}）——"
-            "本进程不再为它接新轮（重启由控制台/启动器负责）"
+            "控制台停→开后自动重新入队（开课标记 mtime 更新即重开信号）"
         )
     if _all_settled(sup):
         return "all_settled"

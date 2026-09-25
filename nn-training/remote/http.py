@@ -50,9 +50,10 @@ from common.protocol import (
     RetryableError,
 )
 from remote import net_http
-from remote.bulk_sched import BULK_P1_CRITICAL, BulkPreemptError, control_path
+from remote.bulk_sched import BULK_P1_CRITICAL, BULK_P2_PREFETCH, BulkPreemptError, control_path
 from remote.wire import (
     _BULK,
+    WIRE_PREEMPT_MAX,
     WIRE_REROLL_MAX,
     WireSlowError,
     _bulk_pace,
@@ -60,6 +61,7 @@ from remote.wire import (
     _note_rate,
     _reroll_decision,
     _wire_add,
+    _wire_note_preempt,
     _wire_note_reroll,
 )
 
@@ -133,8 +135,12 @@ def _read_body(
     """分块读 body：报进度 + **停滞/超预算即抛**（异常正文带已收字节数与原因）。
 
     `pace`（2026-09-22，P0）：每个分片间隙调一次的回调 —— 控制面在途时它会让路暂停，
-    P2 预取被挤时它抛 `BulkPreemptError` 丢掉半截。**在读之前**调（停读 = TCP 窗口回填
+    P2 预取被 P1 挤时它抛 `BulkPreemptError` 丢掉半截。**在读之前**调（停读 = TCP 窗口回填
     暂停，正是让控制面小包挤过去的方式）。
+
+    净值判据（2026-09-25）：`pace` 的返回值 = 本次让路秒数，速率判据用
+    `净值 elapsed = 墙钟 − Σ让路`（让路不是链路的错，不该把预取判成坏签）；
+    **总超时与进度行仍按墙钟**（它们回答的是「这份传了多久」，含暂停才是诚实的）。
 
     停滞异常必须**有正文**：上游 `_get_with_retry` 只把 `repr(e)` 写进日志，裸
     `TimeoutError()` 打出来是 `TimeoutError()`——等于没写（2026-09-20 事故现场）。
@@ -148,9 +154,14 @@ def _read_body(
     t0 = time.time()
     last = t0
     probed = False
+    t_yield = 0.0  # 让路累计（秒）：只喂速率判据，墙钟超时/进度仍用 now - t0
     while True:
         if pace is not None:
-            pace()
+            try:
+                t_yield += pace() or 0.0
+            except BulkPreemptError as e:
+                e.bytes_read = len(buf)  # 被挤走的半截要入账（否则预取成本恒等于 0）
+                raise
         try:
             block = resp.read(BODY_CHUNK)
         except (TimeoutError, OSError) as e:
@@ -167,7 +178,11 @@ def _read_body(
             # 只在**首块**判一次（probed 一次性）：这样每次重抽的浪费 ≤ 一块（BODY_CHUNK），
             # 绝不会退化成「再整份重传一遍」（plan §7.2 的硬要求）。
             probed = True
-            should, rate, remain = _reroll_decision(len(buf), total, now - t0)
+            # 净值 = 墙钟 − 让路：让路不是链路的错，否则「停满 5s 预算」会让
+            # 256KB/5s ≈ 51KB/s 恒低于阈值 ⇒ 每次下载都白扔一块重抽（现场 100%）。
+            should, rate, remain = _reroll_decision(
+                len(buf), total, max(0.0, now - t0 - t_yield)
+            )
             if should:
                 raise WireSlowError(len(buf), rate, remain)
         if total_timeout is not None and now - t0 > total_timeout:
@@ -355,18 +370,23 @@ def _get_with_retry(
 
     2026-09-22（P0 bulk 单通道）：每次尝试整体占一个 bulk 槽位（`bulk_prio` 缺省 P1 = 关键
     下载；预取路径传 `BULK_P2_PREFETCH`）。被 P1 挤走时 P2 抛 `BulkPreemptError`——**不背
-    退避、立刻重排**，重试次数用完就让上层丢弃（预取是提前量，不是必须品）。槽位**不含**
-    退避睡眠：绝不抱着唯一通道睡觉。
+    退避、立刻重排**；重排有**独立预算** `WIRE_PREEMPT_MAX`（2026-09-25：不消耗 `attempts`，
+    上限用完仍抛 `BulkPreemptError`，因为挤走不是失败）。槽位**不含**退避睡眠：绝不抱着唯一
+    通道睡觉。
     """
     last: str = ""
     rerolls = 0
-    for attempt in range(1, attempts + 1):
+    preempts = 0  # 被 P1 挤走的次数（P2 专属）：独立预算，不消耗 attempts
+    attempt = 1
+    while attempt <= attempts:  # 用 while 而非 for：挤走时要**原地**重排，不推进 attempt
         # 重抽只在前几次尝试上开放：**最后一次必然老老实实传完**（否则慢链路就变成
         # 「永远下不完」——6 KB/s 的坏签确实存在，重抽是赌，不能把赌注全压在赌上）。
         allow_reroll = reroll and attempt < attempts and rerolls < WIRE_REROLL_MAX
-        t_req = time.time()
+        t_req = time.time()  # 本次尝试的**墙钟**（含排队）：只喂 `_note_rate`（保守侧）
+        t_xfer = t_req  # 进槽后重取：段账只算**真实传输**（排队归调度账 `wait=`）
         try:
             with _BULK.slot(bulk_prio, label=wire_seg or path) as _tok:
+                t_xfer = time.time()  # ★ 排队结束、开传那一刻
                 status, body = _request(
                     base_url,
                     token,
@@ -379,8 +399,27 @@ def _get_with_retry(
                     pace=_bulk_pace(_tok, bulk_prio),
                 )
         except BulkPreemptError as e:
+            _wire_note_preempt(wire_jid, int(getattr(e, "bytes_read", 0) or 0))
+            preempts += 1
+            if bulk_prio == BULK_P2_PREFETCH:
+                # 挤走不是失败：重排有独立预算，**不消耗 attempts**。耗尽时抛的仍是
+                # `BulkPreemptError`（不是 `RetryableError`）——`_prefetch_fill` 只吞前者，
+                # 落后者会把「丢半截」误报成瞬时故障。
+                if preempts <= WIRE_PREEMPT_MAX:
+                    log(
+                        f"bulk {wire_seg or path}: {e} —— 立即重排"
+                        f"（preempt {preempts}/{WIRE_PREEMPT_MAX}；不消耗重试预算）"
+                    )
+                    continue
+                log(
+                    f"bulk {wire_seg or path}: {e} —— 抢占重排上限"
+                    f"（{WIRE_PREEMPT_MAX}）用完，放弃这份提前量"
+                )
+                raise
+            # P1 不会被抢占（不变量：POST 大 body 没有安全 Range）——保留原语义。
             if attempt < attempts:
                 log(f"bulk {wire_seg or path}: {e} —— 立即重排（{attempt}/{attempts}）")
+                attempt += 1
                 continue
             log(f"bulk {wire_seg or path}: {e} —— 重试次数用完，放弃这份提前量")
             raise
@@ -393,12 +432,17 @@ def _get_with_retry(
                 f"实测 {e.rate / 1024:.0f} KB/s < 阈值 {floor / 1024:.0f} KB/s"
                 f"（按此速率剩余 {e.remain_sec:.0f}s）——断开重发（已收 {e.bytes_read} bytes 作废）"
             )
+            attempt += 1  # 重抽仍消耗 attempts（与 for 版逐字等价：continue 会推进）
             continue  # 立即换连接重抽（不退避）
         except Exception as e:  # 网络层抖动（URLError/timeout/reset）
             status, body = None, repr(e).encode()
         if status == 200:
+            # 两个口径分开（2026-09-25）：
+            #   `elapsed`（墙钟，含排队）⇒ 只喂 `_note_rate`（保守侧，不抬高 `_min_rate`）；
+            #   段账用**纯传输**秒数 —— 否则与 hub 侧「响应发送完成 … in Xs」无法对账
+            #   （现场：worker 侧 `payload=…/321.8s` 里含 `排队 17.6s 才拿到单通道`）。
             elapsed = time.time() - t_req
-            _wire_add(wire_jid, wire_seg, len(body), elapsed)
+            _wire_add(wire_jid, wire_seg, len(body), time.time() - t_xfer)
             if elapsed > 0:
                 _note_rate(len(body) / elapsed, len(body))
             return body
@@ -411,4 +455,5 @@ def _get_with_retry(
             backoff = min(2**attempt, 8)
             log(f"{path}: 瞬时失败({last}) — {backoff}s 后第 {attempt + 1}/{attempts} 次重试")
             time.sleep(backoff)
+        attempt += 1
     raise RetryableError(f"{path} 重试 {attempts} 次仍失败: {last}")

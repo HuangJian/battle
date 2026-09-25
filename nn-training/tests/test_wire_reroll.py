@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import re
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -37,6 +39,7 @@ from common.protocol import RetryableError
 from remote import http as http_mod
 from remote import wire as wire_mod
 from remote import worker as worker_mod
+from remote.bulk_sched import BULK_P1_CRITICAL, BULK_P2_PREFETCH, BulkPreemptError
 
 MB = 1024 * 1024
 
@@ -341,3 +344,254 @@ def test_post_result_never_rerolls_but_is_accounted(monkeypatch) -> None:
     worker_mod._wire_flush("j7", lines.append)
     assert "result=" in lines[0]
     assert "reroll=" not in lines[0]
+
+
+# ──────────── ⑥ 净值判据 + 抢占独立预算（2026-09-25，plan/bulk-p2-preempt-fix）────────────
+#
+# 现场（2026-09-24，x20-dodge-l1/l3 双课程单云 worker）：预取零命中，每个 payload 下载都带
+# `reroll=1(wasted 0.25MB)`。两条互不相干的根因：
+#   ① 让路时间污染首块速率探针（首块 256KB 之前先 `pace()`，可能停满 5s 预算 ⇒
+#      256KB/5s ≈ 51KB/s 恒低于 `WIRE_MIN_RATE=80KB/s`）⇒ 每次下载都假性重抽；
+#   ② 被高优挤走与真实失败共用 `attempts` 预算 ⇒ 三次被打断就把整份预取判死。
+
+
+def test_reroll_probe_uses_the_net_elapsed(monkeypatch) -> None:
+    """速率判据拿到的 `elapsed` = **墙钟 − Σ让路**（让路不是链路的错）。"""
+    seen: list[float] = []
+
+    def spy(got: int, total: int, elapsed: float, **kw):
+        seen.append(elapsed)
+        return False, 0.0, 0.0  # 本用例只关心它拿到了什么时间
+
+    # patch 面：`_read_body` 的 global 解析在 `remote.http`（S4 第五步拆分）——
+    # patch `remote.worker` 的名字只改转发名，改动不了 http 里的解析（静默空操作）。
+    monkeypatch.setattr(http_mod, "_reroll_decision", spy)
+    calls = {"n": 0}
+
+    def pace() -> float:
+        calls["n"] += 1
+        if calls["n"] > 1:  # 只有首块前那一次真让路（后两次别把用例拖慢）
+            return 0.0
+        # sleep-ok: 夹具模拟的工作量：一次停满一秒的让路（不是同步手段）
+        time.sleep(1.0)
+        return 1.0
+
+    resp = _FakeResp([b"x" * (256 * 1024)], total=8 * MB)
+    t0 = time.time()
+    out = worker_mod._read_body(
+        resp, idle_timeout=45.0, total_timeout=300.0, allow_reroll=True, pace=pace
+    )
+    wall = time.time() - t0
+    assert len(out) == 256 * 1024
+    assert wall >= 1.0, "夹具没真让路（探针没被测到）"
+    assert len(seen) == 1, f"首块只该判一次：{seen}"
+    assert seen[0] < 0.5, f"让路时间没被扣掉：elapsed={seen[0]:.3f}（应 ≈0，墙钟 ≈{wall:.2f}）"
+
+
+def test_net_elapsed_does_not_extend_the_wall_clock_timeout() -> None:
+    """净值**只**喂速率判据：`total_timeout` 仍按墙钟（暂停的 0.05s 也算总耗时）。"""
+
+    def pace() -> float:
+        # sleep-ok: 夹具模拟的工作量：一次让路（不是同步手段）
+        time.sleep(0.05)
+        return 0.05  # 声称让路了 0.05s
+
+    resp = _FakeResp([b"x" * 1024], total=2048)
+    with pytest.raises(TimeoutError, match="body 超时"):
+        worker_mod._read_body(
+            resp, idle_timeout=45.0, total_timeout=0.01, allow_reroll=False, pace=pace
+        )
+
+
+def test_preempt_error_carries_the_bytes_already_read() -> None:
+    """A4：被挤走时已收字节挂在异常上（否则预取真实成本在账上恒等于 0）。"""
+    calls = {"n": 0}
+
+    def pace() -> float:
+        calls["n"] += 1
+        if calls["n"] >= 3:
+            raise BulkPreemptError("模拟被 P1 挤走")
+        return 0.0
+
+    resp = _FakeResp([b"x" * 2048, b"y" * 2048, b"z" * 2048], total=6144)
+    with pytest.raises(BulkPreemptError) as ei:
+        worker_mod._read_body(resp, idle_timeout=45.0, total_timeout=300.0, pace=pace)
+    assert ei.value.bytes_read == 4096, f"作废字节没挂上：{ei.value.bytes_read}"
+
+
+def test_reroll_probe_still_fires_when_the_link_is_really_slow(monkeypatch) -> None:
+    """净值 ≠ 万灵药：**真**慢（没有让路可扣）仍必须重抽（别把支路修死）。"""
+    seen: list[float] = []
+
+    def spy(got: int, total: int, elapsed: float, **kw):
+        seen.append(elapsed)
+        return True, 6.4 * 1024, 1180.0  # 判「该重抽」
+
+    monkeypatch.setattr(http_mod, "_reroll_decision", spy)
+    resp = _FakeResp([b"x" * (256 * 1024)], total=8 * MB)
+    with pytest.raises(worker_mod.WireSlowError):
+        worker_mod._read_body(
+            resp, idle_timeout=45.0, total_timeout=300.0, allow_reroll=True, pace=lambda: 0.0
+        )
+    assert seen and seen[0] >= 0.0
+
+
+def test_preempt_retries_do_not_consume_attempts(monkeypatch) -> None:
+    """被 P1 挤走**不消耗** `attempts`：连挤 5 次（`attempts=3`）后仍能成功。"""
+    calls = {"n": 0}
+    body = b"p" * 128
+
+    def fake(base_url: str, token: str, path: str, **kw):
+        calls["n"] += 1
+        if calls["n"] <= 5:
+            raise BulkPreemptError("被 P1 挤走", bytes_read=MB)
+        return 200, body
+
+    monkeypatch.setattr(http_mod, "_request", fake)
+    lines: list[str] = []
+    out = worker_mod._get_with_retry(
+        "http://hub",
+        "t",
+        "/jobs/j9/payload",
+        timeout=300.0,
+        attempts=3,
+        log=lines.append,
+        wire_jid="j9",
+        wire_seg="payload",
+        reroll=True,
+        bulk_prio=BULK_P2_PREFETCH,
+    )
+    assert out == body
+    assert calls["n"] == 6, f"抢占被当成失败了（挤 5 次后应第 6 次才真传）：{calls['n']}"
+    # 每次挤走都留一行日志（G4 的对账口径靠它）
+    assert sum("挤走" in ln for ln in lines) == 5
+    worker_mod._wire_flush("j9", lines.append)
+    assert "preempt=5(wasted 5.00MB)" in lines[-1], lines[-1]
+
+
+def test_preempt_budget_is_capped_and_still_raises_preempt_error(monkeypatch) -> None:
+    """一直挤 ⇒ 最多重排 `WIRE_PREEMPT_MAX` 次，然后抛 **`BulkPreemptError`**（不是 `RetryableError`）。"""
+    calls = {"n": 0}
+
+    def fake(base_url: str, token: str, path: str, **kw):
+        calls["n"] += 1
+        raise BulkPreemptError("被 P1 挤走", bytes_read=1024)
+
+    monkeypatch.setattr(http_mod, "_request", fake)
+    lines: list[str] = []
+    with pytest.raises(BulkPreemptError):
+        worker_mod._get_with_retry(
+            "http://hub",
+            "t",
+            "/jobs/j10/payload",
+            timeout=300.0,
+            attempts=3,
+            log=lines.append,
+            wire_jid="j10",
+            wire_seg="payload",
+            bulk_prio=BULK_P2_PREFETCH,
+        )
+    assert calls["n"] == worker_mod.WIRE_PREEMPT_MAX + 1, calls
+    # G4 的对账口径：wire 行的 `preempt=N` 与日志里的「挤走」行数**恒等**
+    squashed = sum("挤走" in ln for ln in lines)
+    assert squashed == calls["n"], f"日志行数与抢占次数对不上：{squashed} != {calls['n']}"
+    worker_mod._wire_flush("j10", lines.append)
+    assert f"preempt={squashed}(wasted" in lines[-1], lines[-1]
+
+
+def test_real_failures_still_consume_attempts_after_preempts(monkeypatch) -> None:
+    """抢占不吃 `attempts`，但**真实失败照吃**：挤 2 次 + 5xx 2 次（`attempts=2`）⇒ RetryableError。"""
+    calls = {"n": 0}
+
+    def fake(base_url: str, token: str, path: str, **kw):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise BulkPreemptError("被 P1 挤走", bytes_read=0)
+        return 500, b"boom"
+
+    monkeypatch.setattr(http_mod, "_request", fake)
+    with pytest.raises(RetryableError):
+        worker_mod._get_with_retry(
+            "http://hub",
+            "t",
+            "/jobs/j11/payload",
+            timeout=60.0,
+            attempts=2,
+            log=lambda _m: None,
+            bulk_prio=BULK_P2_PREFETCH,
+        )
+    assert calls["n"] == 4, f"2 次挤走 + 2 次真实尝试：{calls['n']}"
+
+
+# ──────────── ⑦ 段账口径：排队不算传输（2026-09-25，plan/bulk-p2-preempt-fix §8.1）────────────
+#
+# 现场：同一段日志里既有 `result=0.63MB/18-19s`，又有 `bulk payload: 排队 17.6s 才拿到单通道` ——
+# 而段秒数当时是**从进槽前**起算的（`t_req` / `t_a`）⇒ 它含排队。hub 侧的
+# `响应发送完成 … in X s` 只量发送窗（`hub_server._bytes` 的 `t0` 在写完响应头之后）⇒ 两侧同段
+# 根本不可比（`tools/wire_report.py` 文档里「与 hub 侧同段对账即可本地化慢腿」的前提被破坏）。
+
+
+def _hold_slot_for(seconds: float) -> threading.Thread:
+    """占住唯一 bulk 通道 `seconds` 秒（夹具：让被测调用**真的排上队**）。"""
+    release = threading.Event()
+    holding = threading.Event()
+
+    def holder() -> None:
+        with worker_mod._BULK.slot(BULK_P1_CRITICAL, label="holder"):
+            holding.set()
+            release.wait(10)
+
+    def _free_soon() -> None:
+        # sleep-ok: 夹具模拟的工作量：持有者占住通道一段时间（不是同步手段）
+        time.sleep(seconds)
+        release.set()
+
+    th = threading.Thread(target=holder, daemon=True)
+    th.start()
+    assert holding.wait(5), "占位线程没进通道"
+    threading.Thread(target=_free_soon, daemon=True).start()
+    return th
+
+
+def _segment_seconds(line: str, seg: str) -> float:
+    m = re.search(rf"{seg}=[\d.]+MB/([\d.]+)s", line)
+    assert m, line
+    return float(m.group(1))
+
+
+def test_segment_seconds_exclude_the_queue_wait(monkeypatch) -> None:
+    """下载段账 = **纯传输**（排队归调度账 `wait=` / `排队 … 才拿到单通道`）。"""
+    th = _hold_slot_for(0.3)
+    monkeypatch.setattr(http_mod, "_request", lambda *a, **kw: (200, b"p" * 128))
+    t0 = time.time()
+    out = worker_mod._get_with_retry(
+        "http://hub",
+        "t",
+        "/jobs/jq/payload",
+        timeout=60.0,
+        attempts=1,
+        log=lambda _m: None,
+        wire_jid="jq",
+        wire_seg="payload",
+    )
+    wall = time.time() - t0
+    th.join(5)
+    assert out and wall >= 0.3, f"夹具没让这次调用真的排上队：{wall:.2f}s"
+
+    lines: list[str] = []
+    worker_mod._wire_flush("jq", lines.append)
+    assert _segment_seconds(lines[-1], "payload") < 0.2, f"段秒数把排队算进去了：{lines[-1]}"
+    assert worker_mod._BULK.stats()["queue_waits"] >= 1, "调度器没记到这次排队"
+
+
+def test_result_segment_seconds_exclude_the_queue_wait(monkeypatch) -> None:
+    """回传段同理（现场 `result=0.63MB/18-19s` 的主角）。"""
+    th = _hold_slot_for(0.3)
+    monkeypatch.setattr(JL, "_request", lambda *a, **kw: (200, b'{"ok":1}'))
+    status = worker_mod.post_result("http://hub", "t", "jr", {"a": 1}, log=lambda _m: None)
+    th.join(5)
+    assert status == 200
+
+    lines: list[str] = []
+    worker_mod._wire_flush("jr", lines.append)
+    assert _segment_seconds(lines[-1], "result") < 0.2, f"回传段秒数把排队算进去了：{lines[-1]}"
