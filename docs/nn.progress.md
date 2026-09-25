@@ -27,7 +27,7 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | 文档 | 覆盖 | 节数 |
 |---|---|---|
 | [`docs/nn/legacy.md`](nn/legacy.md) | **早期谱系归档**（2026-08-18 ~ 08-29）：v1/v2 student、P1.5 蒸馏、BC 热启动、无道具纪元、第一代 RL 流水线 —— 已被 goal-space 取代，只作史实与教训 | 22 |
-| [`docs/nn/remote-transport.md`](nn/remote-transport.md) | hub / worker / 云机 / 隧道 / 离线任务包 / 产物回传 / 优先级调度 / wire 账 | 40 |
+| [`docs/nn/remote-transport.md`](nn/remote-transport.md) | hub / worker / 云机 / 隧道 / 离线任务包 / 产物回传 / 优先级调度 / wire 账 | 41 |
 | [`docs/nn/training-stack.md`](nn/training-stack.md) | 训练循环 · 调度器 · supervisor · 课程编排 · 采样配额 · 门禁与停车 · kickstart | 24 |
 | [`docs/nn/experiments.md`](nn/experiments.md) | 课程腿判决 / 探针 / 负结果归档（含人类探针与 BC-ref 判死） | 32 |
 | [`docs/nn/engineering.md`](nn/engineering.md) | 测试纪律 · 子进程编码契约 · 门禁耗时 · 账本与 metrics schema · 语料指纹 | 19 |
@@ -99,6 +99,7 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | 12 | **离线开课补 it0 基线的真机判据未取**（代码/单测已齐，见 `docs/nn/remote-transport.md` §42） | `docs/nn/remote-transport.md` §42 | 点一次离线开课 ⇒ `tmp/<课>/evalA.log` 出现 `[evalA] DONE it0 … games=<关数×每关局数>`；**等第一轮回传落账后**控制台指标表出现 it0 行、配对基线回到 0（不再是「首条 eval 轮」） |
 | 13 | **切离线自动出包的真机判据未取**（代码/单测已齐，见 `docs/nn/remote-transport.md` §43） | `docs/nn/remote-transport.md` §43 | 在线课点「切离线」⇒ 回执带「任务包导出已启动」且 `tmp/<课>/task-<课>.zip` 出现；云机日志出现 `hub 找的落点：…`（不再是固定文案）；**包在导出窗口里云机会等到它**（不再等满 1800s） |
 | 14 | **云机清单 + 租约的真机判据未取**（代码/单测已齐，见 `docs/nn/remote-transport.md` §44） | `docs/nn/remote-transport.md` §44 | 清空 `battle.offline/<课>/` 后把 `CFG.course` 留空跑一次 cell：日志出现 `hub 清单：N 条` + `领到租约`，两门课按 `ready`+mtime 升序跑完；**第二台**同时跑 ⇒ `已被 … 持有（Ns 后过期）` 且照旧跑完；控制台 `GET /admin/offline` 的 `leases` 能看到 holder |
+| 15 | **预取被挤走修复的真机判据未取**（代码/单测已齐，见 `docs/nn/remote-transport.md` §50） | `docs/nn/remote-transport.md` §50 | 重拉云 worker 跑同一双课程 ≥3 个 job：出现 `prefetch …: 命中（…零下载开算）`；关键下载 `排队 … 才拿到单通道` **≤5s**（现状峰值 17.6s）；`preempt=` 与日志里的「挤走」行数对得上；`p0_p95` **≤6s**（劣化 ⇒ `--prefetch-depth 0`） |
 
 ### 3.4 控制台
 

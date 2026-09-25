@@ -5,7 +5,9 @@
 
 1. **单通道**：任意并发申请下 `inflight_bulk == 1`（P1/P2 一起申请也只有一条在途）。
 2. **P1 不被抢断**：`post_result` 一旦开传就只能等它传完（POST 大 body 没有安全 Range，
-   抢断 = 整份白传）；P2 预取相反——被高优/控制面挤到就该**丢半截**（幂等可重下）。
+   抢断 = 整份白传）；P2 预取相反——被 **P1** 挤到就该**丢半截**（幂等可重下）；
+   而控制面（P0）**只让它让路、不抢占**（2026-09-25：取消环每 1.5s 一个包是常态，
+   让它能抢占 = 多 MB 预取数学上永远传不完）。
 3. **让路预算有界**：单次让路 ≤ `PAUSE_BUDGET_SEC`；常量与两侧超时的**安全裕度断言**
    住在 `tests/test_pause_budget.py`（plan §5 点名的文件），这里只测「跑到预算就停」。
 """
@@ -129,6 +131,8 @@ def test_single_channel_under_concurrency():
     assert st["inflight_bulk"] == 0
     # 恰好 N-1 个申请者排过队（构造出来的，不是碰运气碰上的）
     assert st["queue_waits"] == n - 1, f"排队记账不对：{st['queue_waits']} != {n - 1}"
+    # 门禁的两个输入必须归零（泄漏 ⇒ P2 永久空转；2026-09-25）
+    assert st["p1_waiting"] == 0 and st["control_waiting"] == 0, st
 
 
 def test_p1_waits_for_p1_then_runs():
@@ -212,29 +216,154 @@ def test_p2_preempted_by_p1():
     assert s.stats()["preempted"] >= 1
 
 
-def test_p2_preempted_by_control():
-    """控制面（P0）也算高优：预取让路时同样被挤走（否则 P0 会被预取拖到分钟级）。"""
-    s = _sched()
+def test_p2_not_preempted_by_control_yields_only():
+    """控制面（P0）**只让路、不抢占**：预取不丢半截（2026-09-25 语义，取代旧的可抢占）。
+
+    旧语义的现场后果（x20-dodge-l1/l3 双课程单 worker，2026-09-24）：取消环每 1.5s 打一个
+    `/jobs/{id}/status`（`control_path()` 判为控制面）⇒ 每 1.5s 必然打断一次 P2 ⇒ 每个
+    attempt 最多搬 ~0.5MB ⇒ 3.4MB 的 payload **数学上永远传不完**（预取零命中）。
+    """
+    budget, step = 0.12, 0.02
+    s = _sched(yield_budget_sec=budget, yield_step_sec=step)
     got: list[BaseException] = []
     holding = threading.Event()
+    entered = threading.Event()
     go = threading.Event()
+    stop = threading.Event()
 
     def prefetch() -> None:
         try:
             with s.slot(BULK_P2_PREFETCH, label="prefetch") as tok:
                 holding.set()
                 go.wait(5)
-                s.pace(tok, BULK_P2_PREFETCH)
+                s.pace(tok, BULK_P2_PREFETCH)  # 分片间隙：控制面在途 ⇒ 只暂停
         except BaseException as e:
             got.append(e)
 
     t = threading.Thread(target=prefetch, daemon=True)
     t.start()
     assert holding.wait(5)
+
+    def p0() -> None:
+        with s.control(label="/jobs/x/status"):
+            entered.set()
+            stop.wait(5)
+
+    tp = threading.Thread(target=p0, daemon=True)
+    tp.start()
+    # 事件驱动：`control()` 先计数再 yield ⇒「entered 已置位」⇔ 控制面确实在途。
+    assert entered.wait(5), "控制面没能进入在途状态"
+    go.set()
+    t.join(10)
+    stop.set()
+    tp.join(5)
+    assert got == [], f"控制面把 P2 挤走了（改后应只让路）：{got}"
+    st = s.stats()
+    assert st["preempted"] == 0, "控制面仍然在抢占 P2"
+    assert st["yield_count"] >= 1, "控制面在途却没有让路（另一头失衡）"
+
+
+def test_p1_waiting_blocks_p2():
+    """P1 在等 ⇒ 新的 P2 不许新开工，且 P1 走后能接手（docstring 承诺过、此前只写不读的门禁）。
+
+    现场依据：抢占释放后 P2 立刻回抢 ⇒ 关键下载排队 17.6s / 16.8s / 12.7s（2026-09-24）。
+    """
+    s = _sched()
+    order: list[str] = []
+    waiting = _CountingEvent()
+    s._released = waiting  # 只换等待原语（仍是 Event）：用来观测「谁已经排上队」
+    holder_in = threading.Event()
+    holder_go = threading.Event()
+    p1_go = threading.Event()
+    p2_go = threading.Event()
+    p1_inside = threading.Event()
+    p1_hold = threading.Event()
+    p2_in = threading.Event()
+
+    def holder() -> None:
+        with s.slot(BULK_P2_PREFETCH, label="holder"):
+            order.append("holder-enter")
+            holder_in.set()
+            holder_go.wait(5)
+
+    def p1() -> None:
+        p1_go.wait(5)
+        with s.slot(BULK_P1_CRITICAL, label="critical"):
+            order.append("p1-enter")
+            p1_inside.set()
+            p1_hold.wait(5)
+            order.append("p1-exit")
+
+    def p2() -> None:
+        p2_go.wait(5)
+        with s.slot(BULK_P2_PREFETCH, label="prefetch"):
+            order.append("p2-enter")
+            p2_in.set()
+
+    th = threading.Thread(target=holder, daemon=True)
+    th.start()
+    assert holder_in.wait(5), "持有者没进通道"
+    t1 = threading.Thread(target=p1, daemon=True)
+    t1.start()
+    p1_go.set()
+    assert waiting.wait_until(1, timeout=10.0), "P1 没能在 10s 内排上队"
+    assert s.stats()["p1_waiting"] == 1, "p1_waiting 没记上（门禁的输入是空的）"
+    t2 = threading.Thread(target=p2, daemon=True)
+    t2.start()
+    p2_go.set()
+    assert waiting.wait_until(2, timeout=10.0), "P2 没能在 10s 内排上队"
+    # 槽位空出来：P1 必进（它不受门禁）；P2 被 p1_waiting 挡在门外
+    holder_go.set()
+    assert p1_inside.wait(10), "P1 没能在持有者走后拿到通道"
+    assert not p2_in.is_set(), "P1 还在等/在传的时候 P2 抢到了通道（门禁没生效）"
+    p1_hold.set()
+    t1.join(10)
+    t2.join(10)
+    assert order == ["holder-enter", "p1-enter", "p1-exit", "p2-enter"], order
+    assert s.stats()["p1_waiting"] == 0, "p1_waiting 没归零（泄漏 ⇒ P2 会永久空转）"
+
+
+def test_control_waiting_blocks_p2():
+    """控制面在途 ⇒ 新的 P2 不许新开工；控制面一走就能开工（门禁的另一半）。"""
+    s = _sched()
+    entered = threading.Event()
+    waiting = _CountingEvent()
+    s._released = waiting
+
+    def p2() -> None:
+        with s.slot(BULK_P2_PREFETCH, label="prefetch"):
+            entered.set()
+
     with s.control(label="/jobs/x/status"):
-        go.set()
-        t.join(5)
-    assert got and isinstance(got[0], BulkPreemptError)
+        assert s.stats()["control_waiting"] == 1
+        t = threading.Thread(target=p2, daemon=True)
+        t.start()
+        assert waiting.wait_until(1, timeout=10.0), "P2 没有在控制面在途时排队"
+        assert s.inflight() == 0, "控制面在途时 P2 抢到了通道（门禁没生效）"
+    t.join(10)
+    assert entered.is_set(), "控制面走后 P2 仍没进（门禁没释放）"
+    assert s.stats()["control_waiting"] == 0
+
+
+def test_p1_is_not_gated_by_p1_waiting():
+    """**向前守卫**：这道门禁只能作用于 P2 —— `p1_waiting` 非零时 P1 仍必能拿到槽位。
+
+    它不钉某个旧代码的缺陷（旧实现根本没有门禁），钉的是「以后别把 P1 也圈进去」：
+    P1 被 `p1_waiting` 挡住 = 两个 P1 互相堵死（现场表现为「结果回传与关键下载互等」）。
+    """
+    s = _sched()
+    s._p1_waiting = 1  # 白盒：等价于「另一个 P1 正排着队」，不必真起线程赌时序
+    got: list[int] = []
+
+    def run() -> None:
+        with s.slot(BULK_P1_CRITICAL, label="critical") as tok:
+            got.append(tok)
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(5)
+    assert got, "P1 被 p1_waiting 门禁挡住了（这道门禁只能作用于 P2）"
+    assert s._p1_waiting == 1, "白盒置入的计数被吃掉了（增/减不对称）"
 
 
 def test_p1_not_preempted_by_control():
@@ -365,5 +494,12 @@ def test_wire_line_reports_scheduler_accounting():
 def test_stats_has_dod_fields():
     """DoD 点名的三个读数必须在 `stats()` 里（P0.5 基线也靠它）。"""
     st = _sched().stats()
-    for k in ("inflight_bulk", "queue_wait_sec", "yield_count", "p0_rt_ms_p95"):
+    for k in (
+        "inflight_bulk",
+        "queue_wait_sec",
+        "yield_count",
+        "p0_rt_ms_p95",
+        "p1_waiting",
+        "control_waiting",
+    ):
         assert k in st, f"stats() 缺 {k}"

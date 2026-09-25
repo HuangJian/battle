@@ -2677,3 +2677,43 @@ JSON 数据）· 允许 `cut_to > 0`（绝对上界：得先读银行 manifest �
 落地）· 在 `load_course` 里做产物存在性检查 ⇒ 起草中的课程文件把全体遍历课程的用例打红 ·
 块内乱写键被静默忽略（`extra=forbid` 是这一层的唯一防线）。
 —— 全文（P2 落地记录 / 银行内容校验为何留 P0-P3）→ `plan/x20-state-init.plan.md` P2
+
+## §2026-09-25-goalnn-prefetch-p0-not-preempt — 抢占权专属 P1：控制面只让路 + P2 补齐开工门禁 + 挤走不占重试预算（plan/bulk-p2-preempt-fix）
+
+**背景**：2026-09-24 现场（x20-dodge-l1 / x20-dodge-l3 双课程 + 单云 worker）：**预取零命中**，每个 job 都刷
+`定期预取被高优 bulk 挤走 → 重试次数用完，放弃这份提前量`，且**每条** payload 下载都带
+`reroll=1(wasted 0.25MB)`。四条根因（全文读数与算术自证 → `docs/nn/remote-transport.md` §50）：
+① `control()` 里 `if self._holding: self._preempt_at = self._holding` ⇒ **任何**控制面请求都置抢占标记，
+而 job 期间常驻的取消环每 1.5s 一个 `/jobs/{id}/status` ⇒ P2 每读完一个 256KB 分片就被打断一次 ⇒
+3 次 attempt 上限 ≈1.5MB < 3.4MB payload，**数学上永远传不完**；② `_control_waiting` 只写不读且没有
+`_p1_waiting` ⇒ 被挤走后 P2 立刻回抢 ⇒ 关键下载排队 17.6s；③ 让路时间污染首块速率探针
+（256KB/5s ≈ 51KB/s 恒低于 `WIRE_MIN_RATE=80KB/s`）⇒ 每次下载假性重抽；④ 抢占作废字节不入账
+⇒ 预取成本恒等于 0。
+
+**决定（后来者极容易做错，故入册）**
+① **抢占权专属 P1**：控制面（P0）**只让 bulk 让路、永不抢占**。取消环每 1.5s 一个包是**常态**，
+一个常态事件不该有权丢掉别人的半截；P0 怕的是被大 body 拖到分钟级，而那由 `pause_if_needed`
+（分片间隙暂停，预算 ≤5s/次）解决。**不要再把「P0 能抢占」加回来**去换 p0 延迟（见「被否决」）。
+② **P2 开工门禁**：`slot()` 的 P2 分支加两条否决 —— 此刻有 P1 在等（`_p1_waiting`）或有控制面在途
+（`_control_waiting`）就不许新开工。口径是「**此刻**」而不是「最近」（取消环 1.5s 一个包，要求
+「最近无控制面」= P2 永远开不了工）。**P1 不受这道门禁**（否则两个 P1 互等）。
+③ **被挤走不占重试预算**：P2 的 `BulkPreemptError` 走独立预算 `WIRE_PREEMPT_MAX=6`（`_get_with_retry`
+因此是**外层 while + 内层 for**，`WireSlowError` 仍在内层消耗 `attempts`）；**上限用完抛的仍是
+`BulkPreemptError`**（不是 `RetryableError`）—— 挤走不是失败，`_prefetch_fill` 只吞前者。
+④ **速率判据用净值**：`elapsed_net = 墙钟 − Σ(pace() 返回的让路秒)`；`total_timeout` 与进度行
+**仍按墙钟**（它们回答的是「这份传了多久」，含暂停才诚实）。
+⑤ **抢占作废字节入账**：`BulkPreemptError.bytes_read` → `_wire_note_preempt` → wire 行
+`preempt=N(wasted X.XXMB)`（仅 N>0 打印），与日志里的「挤走」行数**恒等**（G4 的对账口径）。
+
+**被否决**：保留 P0 抢占 + 把预取深度调小/关掉（`--prefetch-depth 0`）—— 那是**拿机制换读数**，
+现场要的正是这份提前量能命中 · 取消环降频（1.5s → 更稀疏）—— 延迟判据 <20s 是硬需求，且它治不了
+「P0 有抢占权」这个根因 · 只补 P2 门禁而不动抢占权（P2 仍会被每 1.5s 打断）· 抢占也做 HTTP Range
+续传（双端改造，成本远高于本次收益）· 用 `time.sleep` 赌时序证明门禁（已改用 `_CountingEvent` 事件驱动）。
+
+**违反后果**：把「P0 可抢占」加回来 ⇒ 多 MB 预取重新变成不可用（现场那屏日志一模一样）·
+抢占计入 `attempts` ⇒ 三次被 P1 打断就把整份预取判死 · 耗尽时抛 `RetryableError` ⇒ 预取失败被
+当成节点故障上报（违反「预取失败不是失败」）· 门禁用「最近 1.5s 内无控制面」⇒ P2 永久不开工 ·
+让路算进速率 ⇒ 每次下载白扔一块（现场 100%）。
+—— 全文（现场读数表 / 四条根因 / 改后语义表 / 门禁与独立预算的测试口径 / 真机复核待办）→ `docs/nn/remote-transport.md` §50 · 锚 `## §50` ·
+同源条目 `§2026-09-22-goalnn-bulk-single-channel`（本条是它的更正/延伸：单通道与让路预算不变，改的是
+**谁有抢占权**）

@@ -12,8 +12,13 @@
     （控制面在途时 bulk 在分片间隙暂停）。
   · **P1 bulk 高优** —— `post_result`、**开算前的关键下载**。至多一条在途；**不被抢断**
     （POST 大 body 没有安全的 Range 语义，抢断 = 整份白传）。
-  · **P2 bulk 低优** —— 预取下载（软持有）。避让 P0/P1；**可立即打断**（丢半截，稍后重下；
-    payload 幂等 + `payload_sha256` 校验）。
+  · **P2 bulk 低优** —— 预取下载（软持有）。P1 在等 / 控制面在途时**不开工**；避让 P1；
+    **可立即打断**（丢半截，稍后重下；payload 幂等 + `payload_sha256` 校验）。
+
+**抢占权专属 P1**（2026-09-25）：控制面（P0）**只让路、不抢占**。它有自己的独立 socket，
+怕的是被大 body 拖到分钟级 —— 那由 `pause_if_needed`（分片间隙暂停，预算 ≤5s/次）解决；
+而「每 1.5s 一个取消环小包必然触发一次抢占」会让多 MB 预取**数学上永远传不完**
+（现场：预取零命中而每个 job 都 `reroll=1(wasted 0.25MB)`）。
 
 让路预算（硬约束，写死并有用例钉住）：单次让路总预算 ≤ `PAUSE_BUDGET_SEC = 5s`，
 上界取两侧较小者 —— worker 侧 `BODY_IDLE_TIMEOUT_SEC = 45s`（`_read_body` 的空闲超时：停久了
@@ -46,12 +51,20 @@ BULK_WAIT_STEP_SEC = 0.05
 
 
 class BulkPreemptError(RuntimeError):
-    """P2 bulk 被 P1/控制面挤走/打断：**丢半截、稍后重下**（payload 幂等，不算失败）。
+    """P2 bulk 被 **P1** 挤走：**丢半截、稍后重下**（payload 幂等，不算失败）。
 
     为什么要独立异常：它绝不能落进「重试 3 次仍失败 ⇒ RetryableError ⇒ release 租约回池」
     那条路——预取本来就是可有可无的提前量，丢半截只是少赚一次命中，把它当失败会把
-    「网络抖动」误报成节点故障。
+    「网络抖动」误报成节点故障。也正因为如此，抢占重排的**上限用完时抛的仍是它**
+    （不是 `RetryableError`）：`_prefetch_fill` 只吞前者。
+
+    `bytes_read`：被挤走时已收的字节（丢掉的半截）。作废字节要入账，否则预取的
+    真实成本在 wire 账上恒等于 0（现场 `job prefetch: … 合计=0.00MB`）。
     """
+
+    def __init__(self, message: str = "", *, bytes_read: int = 0) -> None:
+        super().__init__(message or "定期预取被高优 bulk 挤走：丢半截，稍后重下（payload 幂等）")
+        self.bytes_read = int(bytes_read)
 
 
 class BulkScheduler:
@@ -88,7 +101,12 @@ class BulkScheduler:
         self._holding = 0  # 当前持有者的 token
         # 控制面状态
         self._control = 0
+        #: 与 `_control` 同行 ±1（⇒ 恒等）：它在 `slot()` 里是 P2 的开工否决位之一。
+        #: 名字留「waiting」是历史原因——P0 从不排队（独立 socket），所以在途 ≡ 在等。
         self._control_waiting = 0
+        #: 正在等槽位的 P1 数（含排在另一个 P1 后面）：P2 的开工否决位。
+        #: 抢到槽位的那一瞬就 −1（持有期间恒 0）。
+        self._p1_waiting = 0
         # 统计
         self._queue_wait_total = 0.0
         self._queue_wait_max = 0.0
@@ -128,24 +146,38 @@ class BulkScheduler:
             raise ValueError(f"未知 bulk 优先级: {prio!r}")
         t0 = self._clock()
         waited = False
-        with self._lock:
-            if self._inflight and prio == BULK_P1_CRITICAL and self._holder_prio == BULK_P2_PREFETCH:
-                # ★ 抢占请求：P2 持有者在下一个分片间隙看到它就丢半截退出（见 check_preempted）。
-                self._preempt_at = self._holding
-        while True:
+        if prio == BULK_P1_CRITICAL:
             with self._lock:
-                if not self._inflight:
-                    self._seq += 1
-                    self._inflight = 1
-                    self._holder_prio = prio
-                    self._holding = self._seq
-                    token = self._seq
-                    self._released.clear()
-                    # 本次传输的让路账从零开始（退出时合并成一行）
-                    self._yield_cur = {"token": token, "count": 0, "sec": 0.0}
-                    break
-            waited = True
-            self._released.wait(self._wait_step)
+                self._p1_waiting += 1
+        try:
+            with self._lock:
+                if self._inflight and prio == BULK_P1_CRITICAL and self._holder_prio == BULK_P2_PREFETCH:
+                    # ★ 抢占请求：P2 持有者在下一个分片间隙看到它就丢半截退出（见 check_preempted）。
+                    #   这是**唯一**的抢占来源（控制面只让路，2026-09-25）。
+                    self._preempt_at = self._holding
+            while True:
+                with self._lock:
+                    # P2 的开工门禁：此刻有 P1 在等 / 有控制面在途 ⇒ 不许新开工
+                    # （docstring 一直这么承诺，但这两个计数此前只写不读 —— 2026-09-25 补上）。
+                    blocked = prio == BULK_P2_PREFETCH and (
+                        self._p1_waiting > 0 or self._control_waiting > 0
+                    )
+                    if not self._inflight and not blocked:
+                        self._seq += 1
+                        self._inflight = 1
+                        self._holder_prio = prio
+                        self._holding = self._seq
+                        token = self._seq
+                        self._released.clear()
+                        # 本次传输的让路账从零开始（退出时合并成一行）
+                        self._yield_cur = {"token": token, "count": 0, "sec": 0.0}
+                        break
+                waited = True
+                self._released.wait(self._wait_step)
+        finally:
+            if prio == BULK_P1_CRITICAL:
+                with self._lock:
+                    self._p1_waiting -= 1
         if waited:
             dt = self._clock() - t0
             with self._lock:
@@ -176,19 +208,22 @@ class BulkScheduler:
                     f"（控制面在途；单次预算 ≤ {self._yield_budget:.0f}s）"
                 )
 
-    def pace(self, token: int, prio: str = BULK_P1_CRITICAL) -> None:
+    def pace(self, token: int, prio: str = BULK_P1_CRITICAL) -> float:
         """分片间隙的让路回调（worker 把 `_read_body(pace=…)` 接到这里）。
 
-        两件事：① P2 先查是否已被高优挤走（**必须先查**：下面那个暂停点在没有控制面
+        两件事：① P2 先查是否已被 P1 挤走（**必须先查**：下面那个暂停点在没有控制面
         在途时会立刻返回，也就永远不会去查抢占——被 P1 挤走的 P2 就会一路传到底）；
         ② 控制面在途则暂停（预算内）。
+
+        **返回本次实际让路的秒数**：`_read_body` 用它算「净值 elapsed」喂给速率判据
+        （让路不是链路的错，不该把预取判成坏签）。
         """
         if prio == BULK_P2_PREFETCH:
             self.check_preempted(token)
-        self.pause_if_needed(token)
+        return self.pause_if_needed(token)
 
     def check_preempted(self, token: int) -> None:
-        """P2 的持有者在分片间隙调用：被 P1/控制面挤走 ⇒ 抛 `BulkPreemptError`（丢半截重下）。"""
+        """P2 的持有者在分片间隙调用：被 **P1** 挤走 ⇒ 抛 `BulkPreemptError`（丢半截重下）。"""
         with self._lock:
             preempted = self._preempt_at >= token > 0
         if preempted:
@@ -205,12 +240,18 @@ class BulkScheduler:
 
         独立连接由 `urllib` 天然保证（每次请求新开 connection）；本上下文只做两件事：
         ① `control_active()` 为真 ⇒ bulk 分片间隙暂停；② 计数「有控制面在等」⇒ P2 不再新开工。
+
+        **不抢占**（2026-09-25）：取消环每 1.5s 一个 `/jobs/{id}/status` 是常态，让一个
+        「每 1.5s 必然触发」的事件去打断 P2（丢半截重下，3 次 attempt 上限 ≈1.5MB）
+        ⇒ 多 MB 的预取**数学上永远传不完**（现场：预取零命中）。P0 怕的是被大 body 拖到
+        分钟级，而那由**让路**（`pause_if_needed`，预算 ≤5s/次）解决就够了。抢占权专属 P1。
+
+        `_control_waiting` 与 `_control` 在同一对语句里 ±1（不是独立的时间概念）；它只作
+        `slot()` 里 P2 门禁的读数。
         """
         with self._lock:
             self._control += 1
             self._control_waiting += 1
-            if self._holding:
-                self._preempt_at = self._holding  # 让 P2 当场退出（P1 不受影响）
         t0 = self._clock()
         try:
             yield
@@ -252,8 +293,10 @@ class BulkScheduler:
             if cur is not None and cur["token"] == token:
                 cur["count"] += 1
                 cur["sec"] += spent
-        # 让路之后 P2 可能已被挤走（控制面也会触发抢占）——但只对 P2 查：
-        # `_preempt_at` 是所有高优请求（含控制面）都会写的，P1 查它 = 自己把自己打断。
+        # 让路之后 P2 可能已被挤走 —— 但只对 P2 查：`_preempt_at` 只有 P1 会写
+        # （控制面不写，2026-09-25），P1 查它 = 自己把自己打断。
+        # ⚠ 这个尾检查是**承重**的：它抓的是「暂停**期间**被 P1 写上标记」那种情形
+        # （直接调 `pause_if_needed` 的调用方不会经过 `pace()` 的前置检查）。
         if self.holder_prio() == BULK_P2_PREFETCH:
             self.check_preempted(token)
         return spent
@@ -269,6 +312,9 @@ class BulkScheduler:
             p95 = ms[min(n - 1, int(n * 0.95))] if n else 0.0
             return {
                 "inflight_bulk": self._inflight,
+                # P2 门禁的两个读数（§3.2）：`p1_waiting` 长跑不归零 = 泄漏 ⇒ P2 永久空转。
+                "p1_waiting": self._p1_waiting,
+                "control_waiting": self._control_waiting,
                 "queue_waits": self._queue_waits,
                 "queue_wait_sec": round(self._queue_wait_total, 3),
                 "queue_wait_max_sec": round(self._queue_wait_max, 3),
