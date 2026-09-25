@@ -3312,3 +3312,31 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
 - **记账/门禁**：`batch_eval.py` **1805 → 1616** · `batch_plan.py` **271** · 守卫 **19 例**；
   nn **2567 → 2586 passed / 3 skipped**（ruff + mypy 绿）；根 2120 / 0；dashboard typecheck + 1105 / 0；
   `check-decisions` ok。**下一步 = B2**（`rl/batch_store.py`：8 个写点 → 具名转移 + `dirty` 才落盘）。
+
+## §2026-09-25-goalnn-batch-runner-b3-split（2026-09-25，B3：执行面纯搬出包 `rl/batch_runner.py`）
+
+**决定：`rl/batch_eval.py` 拆分的第三步 B3 —— `BatchEvalRunner` + `dispatch_batch_bg`（连同它独占的
+五个常量与 `_heartbeat`，共 8 个成员）纯搬到新模块 `rl/batch_runner.py`；五个常量与 `_heartbeat`
+不建门面转发。** 全文 → `docs/nn/engineering.md` §23「第二十七刀」。
+
+- **本刀题眼 = 注入点改址**：执行器的依赖注入靠**模块全局**（`bun_version` / `log` /
+  `run_local_eval_game`），搬家后 `monkeypatch.setattr("rl.batch_eval.X")` 不再生效（门面也 import `log`
+  自用 ⇒ 名字还在、没人在读 = **静默空操作**，S16/S19 记过两次的同款坑）。**改址 5 处 setattr +
+  两处按路径读源码的守卫**（`test_batch_eval_wver.py` 的 `SRC` · `test_eval_loot_fields.py` 的文件清单）。
+  又：**五个常量与 `_heartbeat` 刻意不转发** ⇒ 打在旧家会**响亮** AttributeError，而不是静默空操作。
+- **守卫演进**：`test_batch_plan_split.py` 的入边闭集原本只数旧家 ⇒ 搬走后静默退化成「2/6」
+  ⇒ 改成 `_inbound_calls()` 把**门面 + 执行器两个宿主**合并计数（用例名同步去掉 `in_the_old_home`）。
+- **★ 反探针掀出的真守卫空档（第二个同族案例）**：17 条变异 1 条存活 —— 把
+  `wver = sha256(...).hexdigest()` 改成 `[:16]` 时 `test_batch_eval_wver.py` 全绿，因为既有断言是
+  **子串**匹配（`"wver = hashlib.sha256(weights_bytes).hexdigest()" in src`，后面多 `[:16]` 照样命中）
+  ⇒ 补 `test_wver_is_never_derived_from_a_slice()`（AST：`wver` 的右值不得含切片/下标），
+  守住 2026-09-19 那场事故的**上游形态**（此前只守下游实参）。
+- **验证**：纯搬对账 **8/8 逐字节等**（`BatchEvalRunner` 896 行 · `dispatch_batch_bg` 36 · `_heartbeat` 8 ·
+  五个常量含注释行）+ 成员并集守恒 · 新守卫 `tests/test_batch_runner_split.py`（**12 例**：结构 6 /
+  注入点契约 3 / 功能性 3）· 反探针 **17/17 全红**，sha256 无漂移。
+- **记账/门禁**：`batch_eval.py` **1190 → 223**（−967）· `batch_runner.py` **1031** ·
+  nn **2608 → 2621 passed / 3 skipped**（ruff + mypy 绿，444 源文件）· 根 `bun run check` 2120 / 0
+  （121404 expect）· dashboard typecheck + 1105 / 0 · `check-decisions` ok。
+- **B4 因此不再是独立一步**：门面已自然退成目标形态（常量 + `maybe_dispatch_batch` + 再导出，**223 行**）；
+  `maybe_dispatch_batch` 留门面的理由不变（轮内接线，`test_batch_eval.py:82` 按源码树读它）。
+  **余下真实工作 = B5**（`_run` 的 821 行按阶段切），按 §5.5.4 另开一轮。

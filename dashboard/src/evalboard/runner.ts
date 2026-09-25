@@ -1,6 +1,6 @@
 /** runner.ts — B 层批次编排·规划侧（plan/rl-eval-system.md §4.3/§6.4 纯函数部分）。
  *
- * 执行侧（集群派发/断点续跑/入账）是 Python `nn-training/rl/batch_eval.py`
+ * 执行侧（集群派发/断点续跑/入账）是 Python `nn-training/rl/batch_runner.py`
  *（复用 `fetch_task(mode='eval')` / `run_local_eval_game`，不重写协议 §6.7）。
  * 本模块只做可单测的规划：每批 = 当前 rung + 下一 rung 各 100 局（同 seg 零样本
  * 前瞻）+ 每 3 批一次回归位（bc/init 钉死段 0，§2.2/K2-9）。

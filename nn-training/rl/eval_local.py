@@ -884,7 +884,7 @@ def settle_eval_summary(
                     r = json.loads(ln)
                 except Exception:
                     continue
-                # 只认本调度器落的局：B/C evalboard 行（`rl/batch_eval.py` 的
+                # 只认本调度器落的局：B/C evalboard 行（`rl/batch_runner.py` 的
                 # `BatchEvalRunner._run.record` —— 引符号名不写行号，行号跨刀会漂）同为
                 # `event:"eval"`，且 iter=0 畸形批能撞上同 (iter,wver) —— 不滤 source
                 # 会把 B/C 的局混进本臂胜率与双轨拆段（P2-7，2026-09-15）。

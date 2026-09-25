@@ -37,9 +37,13 @@ import rl.batch_plan as bp
 RL = ROOT / "rl"
 PLAN_PATH = RL / "batch_plan.py"
 EVAL_PATH = RL / "batch_eval.py"
+#: S27/B3：执行器（`BatchEvalRunner` / `dispatch_batch_bg`）纯搬到本模块，四个入边
+#: 调用点随之移家 ⇒ 入边闭集要**两个宿主一起数**（见 `_inbound_calls`）。
+RUNNER_PATH = RL / "batch_runner.py"
 
 PLAN_SRC = PLAN_PATH.read_text(encoding="utf-8")
 EVAL_SRC = EVAL_PATH.read_text(encoding="utf-8")
+RUNNER_SRC = RUNNER_PATH.read_text(encoding="utf-8")
 
 #: 搬走的 23 个成员：13 个函数 + 10 个常量（含 2 个私有名）。
 MOVED_FUNCS = (
@@ -74,7 +78,8 @@ MOVED = MOVED_FUNCS + MOVED_CONSTS
 PUBLIC_MOVED = tuple(n for n in MOVED if not n.startswith("_"))
 PRIVATE_MOVED = ("_forces_of", "_KIND_CHAR")
 
-#: 旧家剩下的调用点（AST 计真实 `Call`；归属者 = 顶层 def / 类.方法，含闭包名）。
+#: 门面 + 执行器两个宿主里对批规划成员的真实调用点
+#: （AST 计真实 `Call`；归属者 = 顶层 def / 类.方法，含闭包名）。
 INBOUND_CALLS: dict[str, dict[str, int]] = {
     "batch_iter_id": {"BatchEvalRunner._run": 1},
     "is_transient_error": {"BatchEvalRunner._run.worker": 1},
@@ -263,11 +268,25 @@ def test_old_home_has_no_back_edge_to_new_home_members_beyond_the_import() -> No
     assert imported == set(PUBLIC_MOVED), sorted(imported ^ set(PUBLIC_MOVED))
 
 
-# ───────────────────────────── ④ 入边闭集（旧家剩下的调用点）─────────────────────────────
+# ───────────────────────────── ④ 入边闭集（两个宿主里的调用点）─────────────────────────────
 
 
-def test_inbound_call_sites_in_the_old_home_are_the_expected_six() -> None:
+def _inbound_calls() -> dict[str, dict[str, int]]:
+    """门面 + 执行器两个宿主的真实 `Call` 合并计数 —— 成员搬到哪就数到哪。
+
+    B3 把 `BatchEvalRunner` 整段搬进 `rl/batch_runner.py`，四个入边调用点跟着搬家；
+    只数旧家会**静默**退化成「2/6」（漏掉执行侧那四条），所以宿主要显式列出。
+    """
     got = _calls_by_owner(EVAL_SRC, set(MOVED_FUNCS))
+    for name, by_owner in _calls_by_owner(RUNNER_SRC, set(MOVED_FUNCS)).items():
+        slot = got.setdefault(name, {})
+        for owner, count in by_owner.items():
+            slot[owner] = slot.get(owner, 0) + count
+    return got
+
+
+def test_inbound_call_sites_are_the_expected_six() -> None:
+    got = _inbound_calls()
     assert got == INBOUND_CALLS, got
 
 

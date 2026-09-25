@@ -2102,6 +2102,80 @@ nn 门禁 **2586 → 2608 passed / 3 skipped**（ruff + mypy 绿，442 源文件
 `tmp/verify_b2.py` · `tmp/probe_b2_diff.py` · `tmp/probe_b2.py`（反探针 22/22 + sha256 无漂移）·
 `tmp/measure_b2_guard.py`（守卫「先量后定」：`status` 赋值点全仓闭集实测）。
 
+### 第二十七刀（2026-09-25）：B3 —— 执行面纯搬出包 `rl/batch_runner.py`
+
+按用户指令「做 B3：把 `BatchEvalRunner` + `dispatch_batch_bg` 纯搬到 `rl/batch_runner.py`
+（含两处按路径读源码的守卫与五处 setattr 改址）」执行 —— §5.5.4 的第三步，也是四步里**唯一
+有真机械工作量**的一步（B1/B2 是设计面，B4 是收尾）。
+
+#### 成员与账
+
+`rl/batch_eval.py` **1190 → 223 行**（−967），新模块 `rl/batch_runner.py` **1031 行**。
+纯搬 **8 个成员**（`verify_b3.py` 逐字节对账 8/8，对 `git show HEAD:` 取原文段）：
+
+| 成员 | 行 | 为什么随它走 |
+|---|---|---|
+| `BatchEvalRunner`（`__init__` / `run` / `_run` / `_done_keys`） | 896 | 本体 |
+| `dispatch_batch_bg` | 36 | 唯一构造点（`maybe_dispatch_batch` 也用它） |
+| `_heartbeat` | 8 | 只被 `BatchEvalRunner` 的两个收尾点调 |
+| 五个执行器常量 `BUSY_BACKOFF_CAP_SEC` / `STUCK_GRACE_SEC` / `RECOVER_PING_SEC` / `NO_CONSUMER_GRACE_SEC` / `NODE_RECOVERY_TRIES` | 含注释行 | **只被执行器读**（AST 实测），留在旧家会制造「名字还在、没人读」 |
+
+旧家只剩 `maybe_dispatch_batch` + `ONESHOT_EVAL_KIND` + 门面再导出（`BatchEvalRunner` /
+`dispatch_batch_bg` 两条 `X as X`）。**五个常量与 `_heartbeat` 刻意不转发** ——
+`rl.batch_eval.STUCK_GRACE_SEC` 现在**响亮** AttributeError，而不是被 `monkeypatch.setattr`
+打成静默空操作（S16/S19 记过两次的同款坑）。
+
+#### ★ 本刀题眼：注入点是**模块全局**，搬家就改址
+
+执行器的依赖注入靠模块全局（`from rl.queue import bun_version` 等），所以
+`monkeypatch.setattr("rl.batch_eval.X", …)` 搬到新家后**不再生效** —— 名字还在旧家（门面
+也会 import `log` 自用），但没人在读它。两处按路径读源码的守卫同理。**改址清单（本刀正文）**：
+
+| 目标 | 处数 | 改成 |
+|---|---|---|
+| `setattr("rl.batch_eval.bun_version")` | 3 | `rl.batch_runner.bun_version` |
+| `setattr("rl.batch_eval.log")` | 2 | `rl.batch_runner.log` |
+| `setattr("rl.batch_eval.run_local_eval_game")` | 1 | `rl.batch_runner.run_local_eval_game` |
+| `setattr(be, "STUCK_GRACE_SEC", …)`（`import rl.batch_eval as be` → `as br`） | 1 | `rl.batch_runner` |
+| `tests/test_batch_eval_wver.py` 的 `SRC` | 1 | `rl/batch_runner.py`（**同时也修了它的一个真空档**，见下） |
+| `tests/test_eval_loot_fields.py` 的文件清单 | 1 | `("rl/batch_runner.py", "eval_loot_fields")` |
+
+**守卫演进**：`tests/test_batch_plan_split.py` 的「入边闭集」原本只数旧家 ⇒ B3 后静默退化成
+「2/6」（`BatchEvalRunner` 里那四条调用点已搬家）⇒ 改成 `_inbound_calls()` **两个宿主一起数**
+（门面 + 执行器），并把用例名从 `…in_the_old_home…` 改掉。
+
+#### ★ 反探针掀出的真守卫空档（第二个同族案例）
+
+17/17 全红，但首轮 ⑯ 存活：把 `wver = hashlib.sha256(weights_bytes).hexdigest()` 改成
+`…hexdigest()[:16]`，`test_batch_eval_wver.py` **全绿**。原因不是探针打偏，是**守卫真的只守下游**：
+既有的 `"wver = hashlib.sha256(weights_bytes).hexdigest()" in src` 是**子串**断言，后面多一个
+`[:16]` 照样命中。⇒ 补 `test_wver_is_never_derived_from_a_slice()`：AST 取所有 `wver` 的赋值，
+断言其右值内**不含任何切片/下标**（同一场 2026-09-19 事故的**上游形态**）。这条同时是本刀
+「守卫随成员改址」的自证 —— 只有 `SRC` 已改到新家，那条变异才会被看见。
+（与 S26 那条一样：**「存活先怀疑探针」只是第一嫌疑，不是免检**。）
+
+#### 验证
+
+- **纯搬对账 8/8 逐字节等**（`BatchEvalRunner` 896 行 · `dispatch_batch_bg` 36 · `_heartbeat` 8 ·
+  五个常量含注释行）+ 成员并集守恒（`HEAD = 旧家 + 新家`，无凭空消失/新增）。
+- **新守卫** `tests/test_batch_runner_split.py`（**12 例**，316 行）：结构契约 6（定义唯一 ·
+  门面对象恒等 · 不转发就 AttributeError · 无反向边（AST）· import 闭集 · **台账零手写**
+  `_publish`/`write_batches`/`["status"]=` 三问）+ **注入点契约 3**（三个 DI 名必须**裸名调用**且
+  是本模块全局 · 五个常量在类成员里**裸名读** · `dispatch_batch_bg` 裸名构造）+ 功能性 3
+  （心跳写点与失败静默 · `dispatch_batch_bg` 起的守护线程名/参数 · `_done_keys` 读盘口径）。
+- **反探针 17/17 全红**，还原后 sha256 无漂移（`tmp/probe_b3.py`）。
+- **门禁**：nn **2608 → 2621 passed / 3 skipped**（ruff + mypy 绿，444 源文件）· 根 `bun run check`
+  **2120 / 0**（121404 expect）· dashboard typecheck + **1105 / 0** · `check-decisions` ok。
+
+#### provenance
+
+`rl/agent_meta.py`（干净评估派发的调用者路径）· `rl/queue.py`（两处 `bun_version` 消费者）·
+`rl/eval_local.py`（`BatchEvalRunner._run.record` 的**符号名**引用）·
+`dashboard/src/evalboard/runner.ts`（执行侧 Python 路径）。
+**刻意不动**：`dist_common.py` / `tests/test_dual_track_eval.py` / `docs/evalboard-phase0-census.md`
+里带日期的历史记录与阶段普查快照（那时指针正确）；`test_kick_once_paths.py:35` 断言
+`rl/batch_eval.py` 存在 —— 门面保留即继续成立。
+
 ### 未做完（S4 余下）
 
 `remote/` 内部**已零环**（见「拆环」节），`worker.py` 的拆分面**已收口**：只剩三个宿主函数
@@ -2128,10 +2202,12 @@ HTTP 面（`hub/http_face.py` L5）与引导链（`hub/boot.py` L6）分开，�
 再往下 `batch_eval.py`（1785 行）要拆得先设计「批存储」接口（真设计改动）——**✅ 该设计已于 2026-09-25
 交付：`plan/nn-training-refactor.md` §5.5（`BatchStore` + B1–B4 迁移批次；B5 = `_run` 的 821 行另开一轮）**。
 `loop_guards.py` 也已完成（第二十三刀）。那四步已走两步：**B1**（纯函数面 → `rl/batch_plan.py`，
-第二十五刀）· **B2**（台账/请求面 → `rl/batch_store.py::BatchStore`，第二十六刀，`batch_eval.py` 1616 → 1190）
-⇒ **下一步 = B3**（`BatchEvalRunner` + `dispatch_batch_bg` 纯搬 → `rl/batch_runner.py`；注意别忘
-`tests/test_batch_eval_wver.py` / `test_eval_loot_fields.py` 两处按路径读源码的守卫随它改址，
-以及 `monkeypatch.setattr("rl.batch_eval.{bun_version,log,run_local_eval_game}", …)` 五处改址）。
+第二十五刀）· **B2**（台账/请求面 → `rl/batch_store.py::BatchStore`，第二十六刀，`batch_eval.py` 1616 → 1190）·
+**B3**（执行面 → `rl/batch_runner.py`，第二十七刀，`batch_eval.py` 1190 → 223）
+⇒ **B4 的目标形态已随之达成**（门面现在就 = 常量 + `maybe_dispatch_batch` + 再导出，**223 行**，
+比估的 ~290 还小）—— `maybe_dispatch_batch` 无处可去：它是 `TrainingLoop` 的轮内接线，
+不是执行器的成员（出边是「认领 → 规划 → 定型 → 起线程」，`test_batch_eval.py:82` 按源码树读它）。
+本系列的**余下真实工作 = B5**（`_run` 的 821 行按阶段切）——按 §5.5.4 另开一轮。
 
 **✅ 清理已做（2026-09-24，第十二刀）：`remote/job_fs._ensure_commit` 已删**——第六步之一登记的
 既存死代码（全仓零调用，只搬未删）。同时删 `job_fs.__all__` 条目、`worker.py` 的门面转发、

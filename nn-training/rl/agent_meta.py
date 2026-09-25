@@ -6,7 +6,7 @@
 
 **为什么单独一层**（与 `rl/bc_ledger.py` / `rl/train_ledger.py` 同一条理由）：
 写它有**两个调用者**——rollout 派发（`rl/dispatch.py`）与干净评估派发
-（`rl/eval_dispatch.py` / `rl/batch_eval.py`，经 `rl/queue.py` re-export）——
+（`rl/eval_dispatch.py` / `rl/batch_runner.py`，经 `rl/queue.py` re-export）——
 而写成 JSONL 的**协议只有一条**（单行、`ensure_ascii=False`、追加、父目录按需创建）。
 历史状态是两份字形相同的实现（`rl/dispatch.py::_record_agent_meta` 与
 `rl/queue.py::_record_agent_meta`），差别只在哪份先被谁 import——正是「第二份真相」

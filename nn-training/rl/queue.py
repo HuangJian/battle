@@ -5,7 +5,7 @@ import threading
 from pathlib import Path
 
 # 以下五个名字是本模块的**公共 re-export 面**（原为本地定义，2026-09-23 收敛到唯一实现）。
-# 调用方（`rl/batch_eval.py` / `rl/eval_dispatch.py` / `rl/rollout_phase.py` / e2e）与
+# 调用方（`rl/batch_runner.py` / `rl/eval_dispatch.py` / `rl/rollout_phase.py` / e2e）与
 # 既有测试都从 `rl.queue` 取这些名字 ⇒ 名字留在原位，定义只留一份。
 #   · bun_version / mm  → `common.proc`（版本探测与 major.minor 比对）
 #   · _record_agent_meta → `rl.agent_meta`（dist-agent-meta.jsonl 的唯一写面）
@@ -46,7 +46,7 @@ def local_slots_max_of(args) -> int | None:
 def bun_version(bun: str) -> str:
     """`bun --version`；探测失败/空输出 → `"?"`（唯一实现见 `common.proc.bun_version`）。
 
-    保留本名与 1 参签名（薄包装），因为 `rl/batch_eval.py` / `rl/eval_dispatch.py` 从中
+    保留本名与 1 参签名（薄包装），因为 `rl/batch_runner.py` / `rl/eval_dispatch.py` 从中
     import、且测试用 `monkeypatch.setattr(mod, "bun_version", …)` 打桩。
     """
     return _bun_version(bun, fallback="?")

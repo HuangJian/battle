@@ -192,7 +192,7 @@ def test_window_close_no_new_games(tmp_path: Path, monkeypatch) -> None:
     }
     monkeypatch.setattr(dist_common, "node_ping", lambda *a, **k: dict(ping))
     monkeypatch.setattr(dist_common, "post_weights", lambda *a, **k: "kept")
-    monkeypatch.setattr("rl.batch_eval.bun_version", lambda *a, **k: "9.9.9")
+    monkeypatch.setattr("rl.batch_runner.bun_version", lambda *a, **k: "9.9.9")
 
     def fake_fetch(url, key, **kw):
         return (
@@ -304,7 +304,7 @@ def _run_unit(
     }
     monkeypatch.setattr(dist_common, "node_ping", lambda *a, **k: dict(ping))
     monkeypatch.setattr(dist_common, "post_weights", lambda *a, **k: "kept")
-    monkeypatch.setattr("rl.batch_eval.bun_version", lambda *a, **k: "9.9.9")
+    monkeypatch.setattr("rl.batch_runner.bun_version", lambda *a, **k: "9.9.9")
     monkeypatch.setattr(dist_common, "fetch_task", fake_fetch)
     args = types.SimpleNamespace(eval_window_sec=window)
     cfg = {
@@ -325,7 +325,7 @@ def _run_unit(
     unit = units_pick(units) if units_pick else units[0]
     batch = {"batch_id": "bp", "iter": 1, "units": {"of": 1, "done": []}}
     logs: list[str] = []
-    monkeypatch.setattr("rl.batch_eval.log", lambda m: logs.append(str(m)))
+    monkeypatch.setattr("rl.batch_runner.log", lambda m: logs.append(str(m)))
     r = be.BatchEvalRunner(
         "bun", str(weights), eval_log, args, cfg, batch, unit, 0, 1, "run1", epoch, "nn", None, ""
     )
@@ -435,7 +435,7 @@ def test_remote_zero_participation_is_loud(tmp_path: Path, monkeypatch) -> None:
     # 本机槽位签名：run_local_eval_game(bun, weights, stage, seed, dir, wver=…) —— manifest
     # 必须回显 wver（validate_eval_result 按 wver 对账）。
     monkeypatch.setattr(
-        "rl.batch_eval.run_local_eval_game",
+        "rl.batch_runner.run_local_eval_game",
         lambda *a, **k: _ok_manifest(int(a[2]), int(a[3]), str(k.get("wver", ""))),
         raising=False,
     )
@@ -557,9 +557,10 @@ def test_settle_stall_exits_loudly_not_at_deadline(tmp_path: Path, monkeypatch) 
     收尾必须在 STUCK_GRACE_SEC 内以「收尾僵死」收工。
     """
     import dist_common
-    import rl.batch_eval as be
+    import rl.batch_runner as br
 
-    monkeypatch.setattr(be, "STUCK_GRACE_SEC", 0.5)
+    # 常量与执行器同住（S27/B3）⇒ 注入口也是 `rl.batch_runner`；打在旧家会是静默空操作。
+    monkeypatch.setattr(br, "STUCK_GRACE_SEC", 0.5)
 
     victim: list[tuple[int, int]] = []
 
@@ -614,7 +615,7 @@ def _channels_runner(
     weights = tmp_path / "w.json"
     weights.write_text("{}", encoding="utf-8")
     eval_log = tmp_path / "eval_log.jsonl"
-    monkeypatch.setattr("rl.batch_eval.bun_version", lambda *a, **k: "9.9.9")
+    monkeypatch.setattr("rl.batch_runner.bun_version", lambda *a, **k: "9.9.9")
     args = types.SimpleNamespace(eval_window_sec=window)
     cfg = {
         "policy": {
@@ -629,7 +630,7 @@ def _channels_runner(
     u = unit if unit is not None else plan_units(load_ladder(), 0, 0)[0]
     batch = {"batch_id": "bch", "iter": 1, "units": {"of": 1, "done": []}}
     logs: list[str] = []
-    monkeypatch.setattr("rl.batch_eval.log", lambda m: logs.append(str(m)))
+    monkeypatch.setattr("rl.batch_runner.log", lambda m: logs.append(str(m)))
     r = be.BatchEvalRunner(
         "bun",
         str(weights),
