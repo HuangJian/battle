@@ -97,12 +97,10 @@ def test_install_falls_back_to_online_when_no_tarball(
 def test_ensure_passes_tarball_from_cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """cfg["ts_tarball"] 必须传到 install（否则 notebook 填了 CFG 也没用）。
 
-    ★ **必须打桩 `bun_path`**（2026-09-25 门禁事故）：本用例把 `ts.shutil.which` 打成 None，
-    而 `ensure()` 的第一件事就是 `ensure_bun()` —— 找不到 bun 时它**真去**
-    `curl -fsSL https://bun.sh/install | bash`（超时 300s），沙箱里连不上就空等 ~51s ⇒
-    撞上「单例 10s 耗时预算」（`test_ts_offline_install.py::test_ensure_passes_tarball_from_cfg`
-    在 2428 用例的全量门禁里红）。本用例的关切只是「cfg → install 的传参」，所以直接短接
-    bun 探测；并把任何真实子进程变成响亮失败（以后再引入网络/安装分支不会静默变慢）。
+    ★ `ensure()` 里**已经没有任何 bun 分支**（2026-09-25 重裁：这两块盘不跑 rollout，不装 bun），
+    所以本用例不再需要短接 bun 探测 —— 但**真实子进程一律打成响亮失败**这条规矩留着：
+    以后再往 `ensure()` 里加网络/安装分支，会在这里当场红，而不是在沙箱里静默空等半小时
+    （此前的版本因为 `ensure()` 真去 `curl https://bun.sh/install` 而空等 ~51s）。
     """
     seen: dict = {}
 
@@ -114,7 +112,6 @@ def test_ensure_passes_tarball_from_cfg(tmp_path: Path, monkeypatch: pytest.Monk
 
     monkeypatch.setattr(ts, "install", _fake_install)
     monkeypatch.setattr(ts.shutil, "which", lambda *_a, **_k: None)
-    monkeypatch.setattr(ts, "bun_path", lambda: str(tmp_path / "bun"))
     monkeypatch.setattr(ts.subprocess, "run", _no_subprocess)
     monkeypatch.setattr(ts, "state", lambda: "Running")
     monkeypatch.setattr(ts, "start_daemon", lambda log, order="": "already-running")

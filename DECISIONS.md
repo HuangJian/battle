@@ -2516,27 +2516,40 @@ Node/Bun 无 `sched_getaffinity`）+ `hostLogicalCores` 兜底，逐条镜像 `e
 
 ---
 
-## §2026-09-25-goalnn-cloudflared-notebook-retired **【已撤回】**（2026-09-25 16:39 立，同日撤）
+## §2026-09-25-goalnn-online-worker-no-bun（2026-09-25，plan/online-offline-role-routing.plan.md §9）
 
-> ⚠️ **本条裁决错了，已全量撤回（notebook 已恢复原状）。保留它只为记住这个错的形状。**
-> 现行口径 → `plan/online-offline-role-routing.plan.md` §9 · 档案 `docs/nn/remote-transport.md` §49。
+> 前身：同日 16:39 曾立过一条 `…-cloudflared-notebook-retired`（「把 cloudflared 盘退役」）——
+> **那条是误判，已于当日全量撤回**（notebook 已恢复原状）。留下这个错形状，防止再犯。
 
-**错在哪**：把「`battle.cloudflared.ipynb` 退役」当成了治「一个任务两个执行者」的同款药。
-实情是：**两块盘是两条不同的隧道** —— `battle.tailscale.ipynb` 走 tailnet、`battle.cloudflared.ipynb`
-走 cloudflared **公网隧道**，服务**不同的云机网络环境**（进不了 tailnet 的机器只能走公网隧道）。
-它是那条**唯一**的接入方式，退役 = 砍掉一整类云机。
-**根因（一句话）**：把「**能力归属**」（谁跑 rollout）当成「**接入方式**」（怎么连到 hub）来判 ——
-能力重叠 ≠ 入口冗余。两条旁证被误读：`rollout.cloudflared.ipynb` 服务的是**采样节点**（另一件事）；
-`rl-config.nodes[]` 里的 CF URL 节点恰恰证明公网隧道是**活路**，却被当成「已有人承担」。
+**裁决（两块盘的分工与 bun）**：在线 worker 的两块盘 —— `battle.tailscale.ipynb`（**tailnet**）与
+`battle.cloudflared.ipynb`（**cloudflared 公网隧道**），服务**不同的云机网络环境**，**都保留**；
+且**都不跑 rollout** ⇒ 两块盘**不装 bun、也不传 ts 代码**。
+bun 只属于**自己跑 rollout 的链**：`battle.offline.ipynb`（Kaggle/TPU，Kaggle 不给 tailnet ⇒ 只能走
+cloudflared 隧道进 hub，它自己跑 rollout）与采样节点 `rollout.cloudflared.ipynb`。
 
-**真正的要求**（用户口径）：「只是把**它们的 bun 依赖去掉**，不是把整个 notebook 退役。」
-现状：节点侧 rollout（`kind=iter`）要节点自己有 bun 跑 TS，而 bun 现在是**从公网现装**
-（`remote/tailscale_boot.py::ensure_bun`，`curl https://bun.sh/install | bash`，且必须在改代理之前）；
-只有 tailscale 这条链会装 ⇒ cloudflared 盘每单被能力自检**零下载拒单**（安静得看不出来）。
-取向（hub 侧下发 / 盘上装但不依赖公网 / 发布可执行产物）**待裁**，见 plan §9.3。
+**拦截的错误形状（两条，都得记住）**：
+① **退役**：把「能力归属」（谁跑 rollout）当成「接入方式」（怎么连到 hub）来判 —— 能力重叠 ≠ 入口冗余；
+公网隧道的机器进不了 tailnet，那块盘就是它**唯一**的路。
+② **补装 bun**：把「在线腿收到 kind=iter 却被拒单」当成「盘少了 bun」去修（§46 那修法）——
+真正的错是**不该给不跑 rollout 的盘派 kind=iter**，而不是让它们也装上 bun。
 
-**结论（防复发）**：**两块盘都保留、两条隧道都保留**；P4 的范围只是去掉 bun 依赖。
-—— 误判留档与新口径 → `plan/online-offline-role-routing.plan.md` §9 · 档案 `docs/nn/remote-transport.md` §49
+**落地**：`remote/tailscale_boot.py` 的 `ensure()` 不再调 `ensure_bun`；`BUN_INSTALL_URL` /
+`bun_path()` / `ensure_bun()` 三处**退役**（无消费者）；`remote/iter_rollout.py::resolve_bun` 的拒单
+消息改成「这份活派错了盘」+ 指路；`tests/test_tailscale_boot_bun.py` 重写成三条边界的守卫
+（在线盘 4 份源码 + 2 个 ipynb 零 bun 安装 / 退役符号不许回来 / 跑 rollout 的盘**必顶还有** bun）。
+`kind=ppo` 本来就不碰 bun 与 ts_code（零下载自检与 `_ensure_ts_code` 都只在 `kind == "iter"` 分支），
+所以「不传 ts 代码」这一半不需要新代码 —— 守卫用例把它钉住了。
+
+**被否决**：① 退役 cloudflared 盘（见上 ①）；② 给 cloudflared 线也补装 bun（见上 ②）；
+③ bun 改由 hub 随包下发 / 发布 `bun build --compile` 产物（本仓无此流水线）—— 两条都是为「本不该发生的
+派单」修路；④ 「派单前按能力筛节点」（L3.1）—— 本次不做（另题），但拒单消息已带指路。
+
+**违反后果**：把 bun 安装加回在线引导链 ⇒ 两块盘重新背上「公网 curl + 必须在改代理之前」的顺序
+硬约束，而这件根本不需要发生；把「不跑 rollout」的盘派上 kind=iter ⇒ 每单零下载空转（安静）。
+
+**回归**：`nn-training/tests/test_tailscale_boot_bun.py`（5 条）· `tests/test_ts_offline_install.py`（去桩）。
+—— 全文（分工表、实施表、DoD、误判留档）→ `plan/online-offline-role-routing.plan.md` §9 ·
+档案 `docs/nn/remote-transport.md` §49
 
 ## §2026-09-25-evala-baseline-bc（2026-09-25，it0 基线污染修复）
 

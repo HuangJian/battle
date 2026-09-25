@@ -1,7 +1,7 @@
 # Plan: online-offline-role-routing — 让「该由哪个盘执行」成为 job 的不变式
 
 > **交付物**：本 plan + 代码（2026-09-25 已实施，见 §8 实施修订表）。
-> **状态**：**已实施**（P1/P2/P3 落地；**P5 = §7 的收尾：已实施**（2026-09-25）；P4 **重裁**（不退役，见 §9，实现待做）。
+> **状态**：**已实施**（P1/P2/P3 落地；**P5 = §7 的收尾：已实施**（2026-09-25）；P4 **重裁并已实施**（不退役，只去 bun 依赖，见 §9）。
 > 评审吸收记录见 §8；P5 的记录 = `DECISIONS §2026-09-25-goalnn-offline-leg-retired` + `docs/nn/remote-transport.md` §48。
 > P4 的误判与撤回见 §9.0。
 > **背景**：`reports/online-offline-hot-switch-audit-2026-09-25.md`（六条不足 L1–L6 / 六条不变式 I1–I6）。
@@ -149,7 +149,7 @@ CFG["offline_worker"] → supervisor argv `--offline` → worker_loop(role=…) 
 | **P1（核心）** | §2.1 role 进 manifest + §2.2 咽喉点两道闸 + §2.3 角色上报（复用载体） | `protocol.py` / `hub_client.py` / `hub_server.py` / `worker.py` / `push_dispatch.py` / `notebook_runtime.py` | ✅ 已实施 |
 | **P2** | §2.4 取包端点补 mode 闸 | `hub_server.py` | ✅ 已实施 |
 | **P3** | §2.5 配置短路 | `rl/cli.py` | ✅ 已实施 |
-| **P4** | I6 第三块盘：`battle.cloudflared.ipynb` —— **不退役**（它走 cloudflared 公网隧道，与 tailscale 盘是两条不同的接入方式）；要处理的是**两块盘的 bun 依赖**（见 §9，取向待裁） | 待定（§9.3） | ⬜ 未做 —— 初版的「退役」已于当日撤回 |
+| **P4** | I6 第三块盘：`battle.cloudflared.ipynb` —— **不退役**（cloudflared 公网隧道 / tailscale 盘 = 两条不同接入方式）；两块在线盘**都不跑 rollout** ⇒ 去掉它们的 **bun 依赖**（见 §9） | `remote/tailscale_boot.py` / `remote/iter_rollout.py` / 两个守卫用例 | ✅ 已实施（2026-09-25，含误判撤回） |
 | **P5** | **§7 的收尾**：`kind=run` 的队列项退役（砍在发布点）+ 无消费者时的响亮拒 + 离线盘报名与读数 | `rl/loop_steps.py` / `rl/loop_round_steps.py` / `rl/loop_round.py` / `rl/loop_core.py` / `rl/loop_runner.py` / `rl/cli.py` / `remote/worker.py` / `remote/run_loop.py` / `remote/offline_boot.py` / `remote/hub_server.py` | ✅ 已实施 |
 
 **实施顺序（已按此落）**：`protocol.py` 常量+映射 → `hub_client.py` 写字段 → `hub_server.py`
@@ -404,32 +404,49 @@ it0 基线 + 本机产物优先；四份 plan 在建/已实施）⇒ 保留它 =
 两条旁证被我误读 —— ① `rollout.cloudflared.ipynb` 服务的是**采样节点**（另一件事，不是这块盘的替代）；
 ② `rl-config.nodes[]` 里的 CF URL 节点恰恰证明**公网隧道是活路**，却被我当成「已有人承担」。
 
-### 9.1 重裁：真正的要求（用户口径，2026-09-25）
+### 9.1 裁决 + 分工（用户口径，2026-09-25）
 
 > 「两块盘分别用于建立**不同的网络隧道**和 hub 通信，用于**不同的云机网络环境**。
 > 只是让你把**它们的 bun 依赖去掉**，不是把整个 notebook 退役。」
+> 「cloudflared 和 tailscale **都不跑 rollout**，所以不需要 bun，**也不要传输 ts 代码**！
+> offline 只在 Kaggle TPU 机器上跑，Kaggle 不允许装 tailscale，所以**只能连 cloudflared**，
+> 它**要做 rollout**，所以要装 bun！」
 
-⇒ **两块盘都保留、两条隧道都保留**；P4 的范围只是**去掉它们对 bun 的依赖**。
+**谁跑什么、谁需要 bun（一句话一列）：**
 
-### 9.2 现在的 bun 依赖长什么样（事实，尚未改）
+| 盘 / 链 | 隧道 | 跑 rollout？ | bun？ | ts_code？ |
+|---|---|---|---|---|
+| `battle.tailscale.ipynb` | tailnet | ❌ | ❌ **不装** | ❌ 不传（`kind=ppo` 的 manifest 没有 ts_code 键） |
+| `battle.cloudflared.ipynb` | cloudflared 公网隧道 | ❌ | ❌ **不装** | ❌ 不传 |
+| `battle.offline.ipynb`（Kaggle/TPU，Kaggle 不给 tailnet ⇒ 只能走 cloudflared 隧道） | cloudflared | ✅ 自己跑 | ✅ **装**（cell 里那段，保持不动） | 本来就不走 hub 队列（取任务包） |
+| `rollout.cloudflared.ipynb`（采样节点） | cloudflared | ✅ 自己跑 | ✅ **装**（cell 里那段，保持不动） | —— |
 
-| # | 事实 | 出处 |
-|---|---|---|
-| B1 | 节点侧 rollout（`kind=iter`）要**节点自己**有 bun 跑 TS：能力自检 `remote/iter_rollout.resolve_bun` 找不到就 **零下载拒单**（`REJECTED: 节点上找不到 'bun'`） | `remote/iter_rollout.py` · `remote/worker.py` |
-| B2 | bun 的获取方式是**从公网现装**（`curl https://bun.sh/install \| bash`），且必须在改代理之前（§46：userspace tailscaled 的代理只转 Tailscale IP） | `remote/tailscale_boot.py::ensure_bun` |
-| B3 | 只有 **tailscale 这条链**会装（`ensure()` 里调 `ensure_bun`）；`battle.cloudflared.ipynb` 的 cell 与 `notebook_boot` 都不装 ⇒ 它每单被拒（审计 §I6 说的就是这条） | 同上 · `ipynb/battle.cloudflared.ipynb` |
-| B4 | `battle.offline.ipynb` 的 cell 里也有同一段安装（离线腿不受影响） | `ipynb/battle.offline.ipynb` |
+⇒ P4 = **把 bun 从两块在线盘的引导链里去掉**（不是「换个地方装」、也不是「补装」）：
+盘不跑 rollout ⇒ 它不该为 bun 付「公网 curl + 必须在改代理之前装」的代价。
+`kind=ppo` 的活本来就不碰 bun、不碰 ts_code（`worker.py` 的零下载自检与 `_ensure_ts_code` 都只在
+`kind == "iter"` 分支里），所以“不传 ts 代码”这一半**本来就成立**，不需要新代码。
 
-### 9.3 待裁：去掉「盘上装 bun」之后，bun 从哪来？
+### 9.2 实施（已落，2026-09-25）
 
-把「盘自己 curl 公网装」去掉有四条路（实施前必须定，别猜）：
+| 位置 | 改什么 |
+|---|---|
+| `remote/tailscale_boot.py` | `ensure()` **不再**调 `ensure_bun`；`BUN_INSTALL_URL` / `bun_path()` / `ensure_bun()` 三处**一并退役**（无消费者）—— 原位留一段注记说清「本模块不管 bun」与谁才需要 bun |
+| `remote/iter_rollout.py` | `resolve_bun` 的拒单消息改口：不是「盘坏了」，而是「这份活派错了盘」+ 指路（`battle.offline.ipynb` / `rollout.cloudflared.ipynb` / `rollout_src=local`） |
+| `tests/test_tailscale_boot_bun.py` | 重写为三条边界的守卫：在线盘的四份源码 + 两个 ipynb **无任何 bun 安装**；退役符号**不许回来**；跑 rollout 的两块盘**必顶还有 bun 安装** |
+| `tests/test_ts_offline_install.py` | 删掉为短接旧 bun 分支而打的桩（`ensure()` 里已无 bun 分支），保留「真实子进程一律响亮失败」以防再入网络分支 |
 
-| 取向 | 含义 | 代价 / 风险 |
-|---|---|---|
-| **A 由 hub 侧下发** | bun 随 `ts_code` / `code.zip` 下发（内容寻址缓存已有，装包代价只付一次）；盘上零安装、零公网依赖 | payload 变大（bun 未压缩约 90MB）· 要按平台架构（x64/arm64）选包 |
-| **B 盘上装，但不再依赖公网** | 保留「装」，来源改成 hub 供包；安装动作挪到与隧道无关的位置（两块盘都只调一次） | 仍是「在盘上装」，且要新增一条供包通道 |
-| **C 发布可执行产物** | rollout 入口用 `bun build --compile` 出单文件二进制随包下发 ⇒ 盘上**根本不需要 bun** | 仓库目前**没有**这条流水线（新的构建+入库产物+签名）· 原生扩展（`conv_native.so`）要一起考虑 |
-| 补装 bun（初版被否的那条） | 只在 cloudflared 线也接 `ensure_bun` | ⚠️ 与用户口径不符（那是「补装」，正是被否的方向） |
+**若有课程选 `rollout_src=node`（整轮上云）**：在线 worker 盘会被能力自检**响亮拒单**（
+`REJECTED: 节点上找不到 'bun'`）—— 这是**预期**的，要跑 rollout 就用带 bun 的盘。
+（“派单前按能力筛节点”是另一个课题 = §6/L3.1，本次不做。）
+
+### 9.3 DoD（已逐条判）
+
+- [x] 两块在线盘的引导链（4 份模块源码 + 2 个 ipynb cell）**零 bun 安装**（守卫用例逐份断言）。
+- [x] 退役的三个符号不再存在（`test_retired_bun_helpers_do_not_come_back`）。
+- [x] 跑 rollout 的两块盘（`battle.offline.ipynb` / `rollout.cloudflared.ipynb`）**仍然装有 bun**
+      —— 反向守卫，防止「只删不加」。
+- [x] `resolve_bun` 的拒单消息指路三个正确去处（不再说「随节点引导装好」）。
+- [x] `nn-python-gate` 绿（2485 passed，含 e2e 两层）+ `DECISIONS` 条目。
 
 ### 9.4 初版依据（**留档：R4 是错的**）
 

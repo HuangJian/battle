@@ -8,22 +8,33 @@
 
 ---
 
-## §49 `battle.cloudflared.ipynb` **不退役**：它与 tailscale 盘是两条不同的隧道（2026-09-25）
+## §49 在线 worker 两块盘**不装 bun**：它们不跑 rollout（2026-09-25）
 
-> 现场来源：`reports/online-offline-hot-switch-audit-2026-09-25.md` §I6；
-> 重裁与误判留档 → `plan/online-offline-role-routing.plan.md` §9。
+> 现场来源：`reports/online-offline-hot-switch-audit-2026-09-25.md` §I6（它当时被当成「下一个同款坑」）；
+> 裁决/实施/误判留档 → `plan/online-offline-role-routing.plan.md` §9 ·
+> `DECISIONS §2026-09-25-goalnn-online-worker-no-bun`。
 
-**两块盘的分工（正确口径）**：`battle.tailscale.ipynb` 走 **tailnet**，`battle.cloudflared.ipynb` 走
-**cloudflared 公网隧道** —— 它们服务**不同的云机网络环境**（进不了 tailnet 的机器只能走公网隧道），
-所以后者不是「多余的第二份实现」，而是**那条唯一的接入方式**。
-⚠️ 曾有过的「第三块盘退役」裁决是**误判**（把「能力归属」当成「接入方式」判），已于当日全量撤回，
-该 notebook 已恢复原状 —— 别再照着退役的结论去改它。
+**谁跑什么、谁需要 bun（唯一口径）**：
 
-**真正要处理的（P4 重裁）= 去掉两块盘的 bun 依赖**：节点侧 rollout（`kind=iter`）要节点自己有 bun 跑 TS，
-而 bun 现在是**从公网现装**（`remote/tailscale_boot.py::ensure_bun`，`curl https://bun.sh/install | bash`，
-且必须在改代理之前）；只有 tailscale 这条链会装 ⇒ `battle.cloudflared.ipynb` 每单被能力自检
-零下载拒单（`REJECTED: 节点上找不到 'bun'`，UI 看着像「这台盘在线但没在干活」）。
-取向（hub 侧下发 / 盘上装但不依赖公网 / 发布可执行产物）**待裁**，见 plan §9.3。
+| 盘 / 链 | 隧道 | 跑 rollout？ | bun？ |
+|---|---|---|---|
+| `battle.tailscale.ipynb` | **tailnet** | ❌ | ❌ **不装** |
+| `battle.cloudflared.ipynb` | **cloudflared 公网** | ❌ | ❌ **不装** |
+| `battle.offline.ipynb`（Kaggle TPU，Kaggle 不给 tailnet ⇒ 只能走 cloudflared 隧道） | cloudflared | ✅ 自己跑 | ✅ **装**（cell 里那段） |
+| `rollout.cloudflared.ipynb`（采样节点） | cloudflared | ✅ 自己跑 | ✅ **装**（cell 里那段） |
+
+两块盘服务**不同的云机网络环境**（进不了 tailnet 的机器只能走公网隧道）—— **两条隧道都保留**，
+各有用途。node 侧的 rollout（`kind=iter`）只在**自己跑 rollout 的链**上跑：离线盘与采样节点。
+
+**落地**：`remote/tailscale_boot.py::ensure()` 不再调 `ensure_bun`；`BUN_INSTALL_URL` / `bun_path()` /
+`ensure_bun()` **退役**（无消费者）；`resolve_bun` 的拒单消息改成「这份活派错了盘」+ 指路；
+`kind=ppo` 本来就不碰 bun／ts_code，所以「不传 ts 代码」这一半不需新代码，只用守卫用例钉住。
+
+**两个被拦截的错误形状（都要记住）**：① **「退役 cloudflared 盘」** —— 它走的是**另一条隧道**，
+是那一类云机的**唯一**接入方式，不是「多余的第二份实现」（把**能力归属**当成**接入方式**判）；
+② **「给两块盘补装 bun」**（§46 当时那个修法）—— 那是给「不该被派 kind=iter 的盘」修路；
+真正的答案是它们根本不跑 rollout。
+
 
 ---
 
@@ -142,6 +153,10 @@ worker 侧两条 HTTP 面（`/jobs/peek`、`/jobs/{id}/claim`）都应带 `X-Bat
 
 ## §46 在线腿（tailscale 盘）从来不装 bun：切到在线课程后 worker 每单零下载拒单（2026-09-25）
 
+> ⚠️ **本节的修法已被推翻（同日，见 §49）**：结论「在线腿必须自己装 bun」是错的 ——
+> 两块在线盘**不跑 rollout**，不该收到 `kind=iter`；`ensure_bun()` 已退役。本节留作事故现场记录
+> （症状与日志仍是真的），**别再按它的修法改代码**。
+
 **症状**（用户真机日志，`battle.tailscale.ipynb`，`mode=rl/pull`，Tesla T4）：
 
 ```
@@ -158,7 +173,7 @@ worker 侧两条 HTTP 面（`/jobs/peek`、`/jobs/{id}/claim`）都应带 `X-Bat
 `f274ac1b`）只是把这个失败从「payload+code.zip+ts_code.zip 下完 3.42MB / 12.1s 之后才炸」**前移到零下载**，
 不是新引入的缺陷。
 
-**修法（模块侧，不必重发 notebook）**：`remote/tailscale_boot.py` 新增 `bun_path()` / `ensure_bun(log)`，
+**修法（模块侧，不必重发 notebook）（⟵ 已被 §49 推翻，不要照着改）**：`remote/tailscale_boot.py` 新增 `bun_path()` / `ensure_bun(log)`，
 由 `ensure()` 在**第一条语句**调用 —— `ensure()` 是在线腿（`notebook_boot.run` → `tailscale_boot.ensure`）
 与 Colab 离线腿（`offline_boot.ensure_tailscale` → `tailscale_boot.ensure`）共用的「让节点具备 rollout
 环境」入口，顺序因此天然正确，调用方不必记得这条约束：
@@ -175,8 +190,8 @@ worker 侧两条 HTTP 面（`/jobs/peek`、`/jobs/{id}/claim`）都应带 `X-Bat
 跳过全部 tailscale 步骤），因此不经过 `ensure()` —— 它的 bun 仍来自 cell 里那一段（一直有）。本次修复
 命中的是**在线腿**，以及在 Colab 上会走 `ensure()` 的离线腿。
 
-**不变式**：任何「让节点具备 rollout 能力」的入口，都不得在 bun 就绪之前改写代理环境 ——
-`ensure()` 的第一条语句就是 `ensure_bun(log)`（`tests/test_tailscale_boot_bun.py` 用源码顺序钉住）。
+**不变式（已作废，见 §49）**：~~任何「让节点具备 rollout 能力」的入口，都不得在 bun 就绪之前改写
+代理环境~~ —— 本条已不存在：两块在线盘不再具备也不需具备 rollout 能力（不装 bun），旧的顺序契约随之消失。
 
 **交付链提醒**：`tailscale_boot.py` 由 notebook 从 GitHub raw 拉 ⇒ 修好要 **push + 重开会话**
 （`battle.tailscale.ipynb` 旧的「有缓存先用缓存」当天才改成「每次刷新」，在该修复生效之前，
