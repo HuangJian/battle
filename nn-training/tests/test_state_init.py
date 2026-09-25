@@ -469,20 +469,31 @@ def test_state_init_enabled_reads_args_only() -> None:
 # transitions 才发现。修法 = 闸门住在 `dispatch.run()` 入口：开了 `state_init` 的轮整轮纯本机。
 
 
-def test_state_init_refuses_to_dispatch_to_the_pool(tmp_path, monkeypatch) -> None:
-    """开 state_init + 有可行远端节点 ⇒ 派发前 SystemExit（一局也不进 pool）。
+def test_state_init_with_remote_nodes_still_runs_local_only(tmp_path, monkeypatch) -> None:
+    """开 state_init + 有可行远端节点 ⇒ **依然整轮纯本机**（2026-09-25 路由修正）。
 
-    v1 的快照只在本机盘上（plan §P2.5 未落地）：节点腿拿到的是一个仓库相对路径、文件不在
-    那儿，而导出器静默忽略未知 flag ⇒ 唯一安全的结局是拒发。
+    不看节点健康度："有节点就拒"等于构造性不可跑（self 也算节点，pool 健康时永远被拒）；
+    "放行 local 节点"也不对（fetch 协议没有快照项，放行≠给快照）。改路由不改放行名单：
+    向 pool 零派发——`fetch_task` 替身断言，只要有人取活就炸。
     """
     h = _Harness(tmp_path, monkeypatch, games=2)  # 缺省 nodes=[a97] 且 ping 绿
     h.args.state_init = {"bank": str(tmp_path / "bank" / "manifest.json")}
+    seen: dict = {}
+
+    def fake_local(bun, rl_path, traj_dir, pairs, args):
+        seen["pairs"] = list(pairs)
+        return {"games": len(pairs)}
+
+    monkeypatch.setattr(disp, "run_rollout", fake_local)
 
     def fetch(*_a, **_kw):
         raise AssertionError("state_init 轮不得向 pool 派发（节点腿拼 argv 没有快照项）")
 
-    with pytest.raises(SystemExit, match="快照只在本机盘上"):
-        h.run(fetch)
+    report = h.run(fetch)
+
+    assert seen["pairs"] == [(2000, 1), (2000, 2)], seen
+    assert "state_init: local-only round" in "\n".join(h.logs)
+    assert report == {"games": 2}
 
 
 def test_state_init_without_remote_nodes_runs_local_only(tmp_path, monkeypatch) -> None:
