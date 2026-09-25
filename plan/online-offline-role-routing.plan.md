@@ -1,12 +1,13 @@
 # Plan: online-offline-role-routing — 让「该由哪个盘执行」成为 job 的不变式
 
 > **交付物**：本 plan + 代码（2026-09-25 已实施，见 §8 实施修订表）。
-> **状态**：**已实施**（P1/P2/P3 落地；**P5 = §7 的收尾：已实施**（2026-09-25）；P4 未做，见 §3）。
+> **状态**：**已实施**（P1/P2/P3 落地；**P5 = §7 的收尾：已实施**（2026-09-25）；P4 **重裁**（不退役，见 §9，实现待做）。
 > 评审吸收记录见 §8；P5 的记录 = `DECISIONS §2026-09-25-goalnn-offline-leg-retired` + `docs/nn/remote-transport.md` §48。
+> P4 的误判与撤回见 §9.0。
 > **背景**：`reports/online-offline-hot-switch-audit-2026-09-25.md`（六条不足 L1–L6 / 六条不变式 I1–I6）。
 > **姊妹 plan**：`plan/switch-mode-drops-jobs.plan.md`（管"切换即撤单"）。本 plan 管"归属"。
 > **两者关系**：必须同批或紧接落地 —— 只做归属会出现"旧 job 一直不可领"，只做撤单会出现"撤了单但仍派给错盘"。
-> **阅读顺序**：§1 事实链 → §2 设计 → §3 分阶段 → §4 e2e → §5 DoD → §6 边界 → §7 裁决（`kind=run` 归谁）→ §8 实施修订 → §9 裁决（P4：第三块盘退役）。
+> **阅读顺序**：§1 事实链 → §2 设计 → §3 分阶段 → §4 e2e → §5 DoD → §6 边界 → §7 裁决（`kind=run` 归谁）→ §8 实施修订 → §9 P4 重裁（两块盘都留、只去 bun 依赖；含误判留档）。
 > **行号只作定位加速，判据看函数名。**
 
 ---
@@ -148,7 +149,7 @@ CFG["offline_worker"] → supervisor argv `--offline` → worker_loop(role=…) 
 | **P1（核心）** | §2.1 role 进 manifest + §2.2 咽喉点两道闸 + §2.3 角色上报（复用载体） | `protocol.py` / `hub_client.py` / `hub_server.py` / `worker.py` / `push_dispatch.py` / `notebook_runtime.py` | ✅ 已实施 |
 | **P2** | §2.4 取包端点补 mode 闸 | `hub_server.py` | ✅ 已实施 |
 | **P3** | §2.5 配置短路 | `rl/cli.py` | ✅ 已实施 |
-| **P4** | I6 第三块盘：`battle.cloudflared.ipynb` —— **明确退役**（不装 bun，见 §9） | 该 ipynb + 两处 docstring | ✅ 已实施（2026-09-25） |
+| **P4** | I6 第三块盘：`battle.cloudflared.ipynb` —— **不退役**（它走 cloudflared 公网隧道，与 tailscale 盘是两条不同的接入方式）；要处理的是**两块盘的 bun 依赖**（见 §9，取向待裁） | 待定（§9.3） | ⬜ 未做 —— 初版的「退役」已于当日撤回 |
 | **P5** | **§7 的收尾**：`kind=run` 的队列项退役（砍在发布点）+ 无消费者时的响亮拒 + 离线盘报名与读数 | `rl/loop_steps.py` / `rl/loop_round_steps.py` / `rl/loop_round.py` / `rl/loop_core.py` / `rl/loop_runner.py` / `rl/cli.py` / `remote/worker.py` / `remote/run_loop.py` / `remote/offline_boot.py` / `remote/hub_server.py` | ✅ 已实施 |
 
 **实施顺序（已按此落）**：`protocol.py` 常量+映射 → `hub_client.py` 写字段 → `hub_server.py`
@@ -386,12 +387,53 @@ it0 基线 + 本机产物优先；四份 plan 在建/已实施）⇒ 保留它 =
 
 ---
 
-## 9. 裁决：P4 —— `battle.cloudflared.ipynb` **明确退役**（不装 bun）（2026-09-25）
+## 9. P4 —— **重裁：不退役**；要处理的是**两块盘的 bun 依赖**（2026-09-25）
 
-**结论：退役**（文件保留为**零逻辑指路牌**；不装 bun、不接刷新、不再能起 worker）。
-取向对照见 §9.4。
+> ⚠️ **本节初版（2026-09-25 16:39）判的是「`battle.cloudflared.ipynb` 退役成指路牌」，那个裁决是错的**
+> —— 已实施并提交（`da3c8a68`）后**当日全量撤回**：该 notebook 已恢复原状（cell / docstring / 守卫用例
+> 全撤），本节初版内容仅作**误判留档**（§9.1–§9.4 标了「初版」的就是它）。
 
-### 9.1 依据（R1–R5，均在代码/配置/真机里核过）
+### 9.0 为什么初版是错的（根因 —— 这条必须记住）
+
+**两块 notebook 不是同一件事的两个副本，而是两条不同的隧道**：`battle.tailscale.ipynb` 走 **tailnet**、
+`battle.cloudflared.ipynb` 走 **cloudflared 公网隧道**，服务**不同的云机网络环境**
+（进不了 tailnet 的机器只能走公网隧道）。所以它不是「多余的第二份实现」，而是**唯一的那条接入方式**，
+「退役」等于砍掉一整类云机。
+
+初版错在把「**能力归属**」（谁跑 rollout）当成「**接入方式**」（怎么连到 hub）来判：能力重叠 ≠ 入口冗余。
+两条旁证被我误读 —— ① `rollout.cloudflared.ipynb` 服务的是**采样节点**（另一件事，不是这块盘的替代）；
+② `rl-config.nodes[]` 里的 CF URL 节点恰恰证明**公网隧道是活路**，却被我当成「已有人承担」。
+
+### 9.1 重裁：真正的要求（用户口径，2026-09-25）
+
+> 「两块盘分别用于建立**不同的网络隧道**和 hub 通信，用于**不同的云机网络环境**。
+> 只是让你把**它们的 bun 依赖去掉**，不是把整个 notebook 退役。」
+
+⇒ **两块盘都保留、两条隧道都保留**；P4 的范围只是**去掉它们对 bun 的依赖**。
+
+### 9.2 现在的 bun 依赖长什么样（事实，尚未改）
+
+| # | 事实 | 出处 |
+|---|---|---|
+| B1 | 节点侧 rollout（`kind=iter`）要**节点自己**有 bun 跑 TS：能力自检 `remote/iter_rollout.resolve_bun` 找不到就 **零下载拒单**（`REJECTED: 节点上找不到 'bun'`） | `remote/iter_rollout.py` · `remote/worker.py` |
+| B2 | bun 的获取方式是**从公网现装**（`curl https://bun.sh/install \| bash`），且必须在改代理之前（§46：userspace tailscaled 的代理只转 Tailscale IP） | `remote/tailscale_boot.py::ensure_bun` |
+| B3 | 只有 **tailscale 这条链**会装（`ensure()` 里调 `ensure_bun`）；`battle.cloudflared.ipynb` 的 cell 与 `notebook_boot` 都不装 ⇒ 它每单被拒（审计 §I6 说的就是这条） | 同上 · `ipynb/battle.cloudflared.ipynb` |
+| B4 | `battle.offline.ipynb` 的 cell 里也有同一段安装（离线腿不受影响） | `ipynb/battle.offline.ipynb` |
+
+### 9.3 待裁：去掉「盘上装 bun」之后，bun 从哪来？
+
+把「盘自己 curl 公网装」去掉有四条路（实施前必须定，别猜）：
+
+| 取向 | 含义 | 代价 / 风险 |
+|---|---|---|
+| **A 由 hub 侧下发** | bun 随 `ts_code` / `code.zip` 下发（内容寻址缓存已有，装包代价只付一次）；盘上零安装、零公网依赖 | payload 变大（bun 未压缩约 90MB）· 要按平台架构（x64/arm64）选包 |
+| **B 盘上装，但不再依赖公网** | 保留「装」，来源改成 hub 供包；安装动作挪到与隧道无关的位置（两块盘都只调一次） | 仍是「在盘上装」，且要新增一条供包通道 |
+| **C 发布可执行产物** | rollout 入口用 `bun build --compile` 出单文件二进制随包下发 ⇒ 盘上**根本不需要 bun** | 仓库目前**没有**这条流水线（新的构建+入库产物+签名）· 原生扩展（`conv_native.so`）要一起考虑 |
+| 补装 bun（初版被否的那条） | 只在 cloudflared 线也接 `ensure_bun` | ⚠️ 与用户口径不符（那是「补装」，正是被否的方向） |
+
+### 9.4 初版依据（**留档：R4 是错的**）
+
+#### 初版 R1–R5（2026-09-25 16:39，已被 §9.0 推翻；R4 错在把 tailnet 当唯一接入）
 
 | # | 事实 | 出处 |
 |---|---|---|
@@ -401,7 +443,7 @@ it0 基线 + 本机产物优先；四份 plan 在建/已实施）⇒ 保留它 =
 | R4 | **训练侧本来就在 tailnet 上**：push 的目的地址就是节点的 TS IP（`battle.tailscale.ipynb` 的 `rl_mode: push` 那行），用户真机日志（§46）也是这条 ⇒「训练机没有 tailnet」这个场景在系统里不存在 | `ipynb/battle.tailscale.ipynb` markdown 表 · `docs/nn/remote-transport.md` §46 |
 | R5 | 它正是审计点名的**下一个同款坑**：也能起 worker、也会被 UI 派活、却静默拒单（与 `9d…`/`ed9d3514` 同类：能力与 UI 的承诺不一致） | `reports/online-offline-hot-switch-audit-2026-09-25.md` §I6 |
 
-### 9.2 实施形状（P4）
+#### 初版实施形状（已全量撤回）
 
 1. **`nn-training/ipynb/battle.cloudflared.ipynb` 变成零逻辑指路牌**：markdown 说清「已退役 + 为什么 +
    该用哪个」，code cell 打印同一份指路后 `SystemExit` ⇒ 审计 §I6 的两个洞（**不装 bun / 不被刷新覆盖**）
@@ -422,21 +464,22 @@ it0 基线 + 本机产物优先；四份 plan 在建/已实施）⇒ 保留它 =
    （`notebook_runtime` / `push_bootstrap` / `worker_loop` / `run_pull_worker` / `run_push_worker` /
    cloudflared 二进制安装），且必须含 `SystemExit` 与三份指路 —— 防止有人「顺手把它改回可用」而没读这段裁决。
 
-### 9.3 DoD（已逐条判）
+#### 初版 DoD（已作废）
 
 - [x] 该 ipynb **零逻辑**（无 worker 引导标识），打开即指路（`SystemExit` + 该用哪个）。
 - [x] `notebook_runtime.py` / `push_bootstrap.py` 不再点它的名字（§46 的历史注记不算）。
 - [x] 能力清单与 `rl-config.nodes[]`（CF URL 节点）+ §46 的 bun 口径一致。
 - [x] `nn-python-gate` 绿（含新守卫用例）+ 一条 `DECISIONS`（含被否决项）。
 
-### 9.4 取向对照（留档）
+#### 初版取向对照（已作废）
 
-| 取向 | 本裁决 | 理由 |
+| 取向 | 初版判定 | 实情 |
 |---|---|---|
-| **退役（指路牌）** | ✅ **采用** | R1/R2/R3：它服务的能力已被两处取代，且留着它就是第二份 bootstrap 实现 + 一个静默拒单入口 |
-| 装 bun + 接刷新 | ❌ 否决 | 要服务的能力（节点侧 rollout over CF）已由 `rollout.cloudflared.ipynb` 承担；留着就得**同时**补 bun（改 cell ⇒ 用户重贴 notebook，或在模块侧为新入口再挂一个 boot 钩子）**和**把它改挂远端引导模块（R3 的第二份实现要么删、要么两边维护）；R4 说明这条接入方式训练侧用不上 ⇒ 为没有消费者的路径加钩子 |
-| 直接删文件 | ❌ 否决 | 用户 Kaggle/Colab 里可能还有旧副本，**删库不产生指路**；零逻辑牌子能把「下一次打开」变成一次明确指引（与 §7 的「响亮拒 + 一行指路」同款，且随时可从 git 历史取回） |
-| 保留可用、只在文档标注退役 | ❌ 否决 | 文档不在打开 notebook 的那一刻；§I6 的坑照旧（能起 worker、能被 UI 派活、静默拒单） |
+| 退役（指路牌） | ✅ 「采用」 | **错**：它服务的不是「同一条活的第二个执行者」，而是一条**独立的接入方式**（§9.0） |
+| 装 bun + 接刷新 | ❌ 否决 | ⚠️ 也错在方向上：用户要的是**去掉 bun 依赖**，不是「装不装」 |
+| 直接删文件 | ❌ 否决 | 结论对（不该删），但理由（「不产生指路」）建立在错的退役前提上 |
+| 保留可用、只在文档标注退役 | ❌ 否决 | 同上：前提错 |
 
-**与 §7 的关系**：两条裁决治的是同一个病 —— **一个任务不许有两个执行者**。§7 砍掉的是「队列里的整段」
-（本机 vs 云机取包），§9 砍掉的是「第三个 worker 盘」（它服务的两条活都已有正统执行者）。
+**与 §7 的关系（修正后）**：§7 治的是「**一个任务两个执行者**」（队列里的整段 vs 云机取包）——
+那条裁决成立。§9 **不是**同一件事：两块盘是**两条隧道**，各自服务一类网络环境，可以共存。
+初版把「§7 的形状」硬套到「接入方式」上，才是 P4 误判的最后一层原因。

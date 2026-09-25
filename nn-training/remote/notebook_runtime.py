@@ -1,13 +1,9 @@
-"""remote/notebook_runtime.py — 云端 notebook（`battle.tailscale.ipynb`）的运行时逻辑。
+"""remote/notebook_runtime.py — 云端 notebook（battle.cloudflared.ipynb / battle.tailscale.ipynb）的运行时逻辑。
 
 为什么在 code.zip 里（2026-09-13 单 cell 重构）：notebook cell 只留「参数 + 保活 +
 /code 引导」，设备探测 / pull / push / 崩溃退避重启全部住在本模块——随 hub 下发的
 code.zip 走，修运行时逻辑不用重发 notebook（重跑 cell 即拉到新版）。cell 端契约：
 先把解包目录插进 sys.path，再 `from remote.notebook_runtime import run_notebook`。
-
-（`battle.cloudflared.ipynb` 曾在同一份运行时上跑 worker，2026-09-25 已退役 —— 它不装 bun
-⇒ `kind=iter` 被零下载拒单，且骨架是 `notebook_boot` 的第二份内联实现；见
-`plan/online-offline-role-routing.plan.md` §9。）
 
 cfg 键（cell 的 CFG dict）：
   mode ("pull"|"push") · hub_url · hub_token · push_port · push_token ·

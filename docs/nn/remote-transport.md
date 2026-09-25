@@ -8,46 +8,22 @@
 
 ---
 
-## §49 第三块盘 `battle.cloudflared.ipynb` 明确退役：不装 bun、改成零逻辑指路牌（2026-09-25）
+## §49 `battle.cloudflared.ipynb` **不退役**：它与 tailscale 盘是两条不同的隧道（2026-09-25）
 
 > 现场来源：`reports/online-offline-hot-switch-audit-2026-09-25.md` §I6；
-> 裁决与取向对照 → `plan/online-offline-role-routing.plan.md` §9。
+> 重裁与误判留档 → `plan/online-offline-role-routing.plan.md` §9。
 
-**症状**：控制台把 `kind=iter`（节点侧 rollout/eval）的活派给这块盘的 worker，它**静默拒单**
-（worker 能力自检发现没 bun ⇒ 零下载退出）—— UI 上看着像「这台盘在线但一直没在干活」。
-同一失效形状已经咬过两次：`f274ac1b` 之前的白传、§46 的「在线腿从来没装 bun」。
+**两块盘的分工（正确口径）**：`battle.tailscale.ipynb` 走 **tailnet**，`battle.cloudflared.ipynb` 走
+**cloudflared 公网隧道** —— 它们服务**不同的云机网络环境**（进不了 tailnet 的机器只能走公网隧道），
+所以后者不是「多余的第二份实现」，而是**那条唯一的接入方式**。
+⚠️ 曾有过的「第三块盘退役」裁决是**误判**（把「能力归属」当成「接入方式」判），已于当日全量撤回，
+该 notebook 已恢复原状 —— 别再照着退役的结论去改它。
 
-**为什么选退役**（而不是补 bun）：
-
-1. **它服务的能力已有两个正统执行者**：节点侧 rollout/eval over cloudflared 归
-   `rollout.cloudflared.ipynb`（bun + `sampler-agent`；`rl-config.nodes[]` 里已有 CF URL 节点）；
-   GPU PPO 算力（`kind=ppo`：hub 采样本机 + 云机只算 PPO）归 `battle.tailscale.ipynb`。
-   而**训练侧本来就在 tailnet 上**（push 的目的地址就是节点的 TS IP）⇒「训练机没有 tailnet」
-   这个场景在系统里不存在。
-2. **它是第二份 bootstrap 实现**：那 230 行 cell = `remote/notebook_boot.py::_push` 的副本
-   （HTTP 升级服务 + 起 cloudflared + 释放端口 + spawn 完整 worker），且**不拉远端引导模块**
-   ⇒ 仓库里的修复到不了它（审计 §I6 的后半句说的就是这条）。
-3. **补 bun 也治不好**：还得同时把它改挂远端引导模块（第二份实现要么删、要么两边维护），
-   等于为一个没有消费者的路径加钩子。
-
-**实施形状（P4）**：该 ipynb 只剩一份 markdown（退役原因 + 能力清单）+ **一个 `SystemExit` cell**
-（消息里含三份替代 notebook 与 §9 指路）⇒ §I6 的两个洞（**不装 bun / 不被刷新覆盖**）
-**由构造消失**（没有逻辑可漂、没有被派活的可能）。`remote/notebook_runtime.py` 与
-`remote/push_bootstrap.py` 的抬头不再把它算作使用者（保留一行历史注记）。
-
-**该用哪个（唯一口径，= plan §9.2 那张表）**：
-
-| 你要的 | 用哪个 |
-|---|---|
-| 在线 PPO 算力（hub 采样本机 + 云机算 PPO，`kind=ppo`） | `battle.tailscale.ipynb`（pull） |
-| 节点侧 rollout/eval（`kind=iter`，需要 bun） | `battle.tailscale.ipynb`（pull/push）**或** `rollout.cloudflared.ipynb`（不需要 tailnet） |
-| 云机自主跑整课（离线） | `battle.offline.ipynb`（取任务包；**不经 hub 队列**，见 §48） |
-| BC 蒸馏 | `battle-bc.ipynb` |
-
-**回归**：`nn-training/tests/test_notebook_retired.py` —— ① 该 ipynb 不许再含任何 worker 引导
-标识（`notebook_runtime` / `push_bootstrap` / `worker_loop` / `run_pull_worker` / `run_push_worker` /
-装 cloudflared 二进制 / `YOUR_TOKEN_HERE`）；② 必须**当场**停下并指路（`SystemExit` + 三份
-notebook），不许静默什么都不做。
+**真正要处理的（P4 重裁）= 去掉两块盘的 bun 依赖**：节点侧 rollout（`kind=iter`）要节点自己有 bun 跑 TS，
+而 bun 现在是**从公网现装**（`remote/tailscale_boot.py::ensure_bun`，`curl https://bun.sh/install | bash`，
+且必须在改代理之前）；只有 tailscale 这条链会装 ⇒ `battle.cloudflared.ipynb` 每单被能力自检
+零下载拒单（`REJECTED: 节点上找不到 'bun'`，UI 看着像「这台盘在线但没在干活」）。
+取向（hub 侧下发 / 盘上装但不依赖公网 / 发布可执行产物）**待裁**，见 plan §9.3。
 
 ---
 

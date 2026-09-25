@@ -2516,41 +2516,48 @@ Node/Bun 无 `sched_getaffinity`）+ `hostLogicalCores` 兜底，逐条镜像 `e
 
 ---
 
-## §2026-09-25-goalnn-cloudflared-notebook-retired（2026-09-25，plan/online-offline-role-routing.plan.md §9）
+## §2026-09-25-goalnn-cloudflared-notebook-retired **【已撤回】**（2026-09-25 16:39 立，同日撤）
 
-**裁决**：`nn-training/ipynb/battle.cloudflared.ipynb` **明确退役** —— 变成**零逻辑指路牌**
-（Run 即 `SystemExit` + 指到该用的 notebook），**不装 bun**、不接「每次会话刷新引导模块」。
-取向对照 → plan §9.4。
+> ⚠️ **本条裁决错了，已全量撤回（notebook 已恢复原状）。保留它只为记住这个错的形状。**
+> 现行口径 → `plan/online-offline-role-routing.plan.md` §9 · 档案 `docs/nn/remote-transport.md` §49。
 
-**为什么**（R1–R5，均在代码/配置/审计里核过）：
-① 它服务的能力已有**两个**正统执行者 —— 节点侧 rollout/eval over cloudflared 归
-`rollout.cloudflared.ipynb`（bun + `sampler-agent`；`rl-config.nodes[]` 里已有 CF URL 节点），
-GPU PPO 算力归 `battle.tailscale.ipynb`（pull/push 都支持），且**训练侧本来就在 tailnet 上**
-（push 的目的地址就是节点的 TS IP）⇒「训练机没有 tailnet」这个场景在系统里不存在；
-② 它**现在什么都跑不了**：cell 与它的两条模块链都不装 bun，也都不经过 §46 那条 bun 修复
-⇒ 任何 `kind=iter`（节点侧 rollout）被 worker 的能力自检**零下载拒单** —— 而这是**静默**的
-（控制台看着像「这台盘在线但没在干活」），它顶多能跑 `kind=ppo`，那条路 tailscale 盘已覆盖；
-③ 它的 230 行 cell 是 `remote/notebook_boot.py::_push` 的**第二份内联实现**且**不拉远端引导模块**
-—— 仓库里的修复到不了它（审计 §I6 的后半句），两份必然漂。
+**错在哪**：把「`battle.cloudflared.ipynb` 退役」当成了治「一个任务两个执行者」的同款药。
+实情是：**两块盘是两条不同的隧道** —— `battle.tailscale.ipynb` 走 tailnet、`battle.cloudflared.ipynb`
+走 cloudflared **公网隧道**，服务**不同的云机网络环境**（进不了 tailnet 的机器只能走公网隧道）。
+它是那条**唯一**的接入方式，退役 = 砍掉一整类云机。
+**根因（一句话）**：把「**能力归属**」（谁跑 rollout）当成「**接入方式**」（怎么连到 hub）来判 ——
+能力重叠 ≠ 入口冗余。两条旁证被误读：`rollout.cloudflared.ipynb` 服务的是**采样节点**（另一件事）；
+`rl-config.nodes[]` 里的 CF URL 节点恰恰证明公网隧道是**活路**，却被当成「已有人承担」。
 
-**落地（P4）**：该 ipynb 只剩一份 markdown（退役原因 + 能力清单）+ 一个 `SystemExit` cell
-（消息含三份替代 notebook 与 §9 指路）；`remote/notebook_runtime.py` / `remote/push_bootstrap.py`
-的抬头不再把它算作使用者（保留一行「2026-09-25 已退役」的历史注记）。
-**能力清单（plan §9.2 那张表）= 唯一口径**：在线 PPO → `battle.tailscale.ipynb`（pull）·
-节点侧 rollout/eval → `battle.tailscale.ipynb` 或 `rollout.cloudflared.ipynb` ·
-离线自主跑整课 → `battle.offline.ipynb` · BC → `battle-bc.ipynb`。
+**真正的要求**（用户口径）：「只是把**它们的 bun 依赖去掉**，不是把整个 notebook 退役。」
+现状：节点侧 rollout（`kind=iter`）要节点自己有 bun 跑 TS，而 bun 现在是**从公网现装**
+（`remote/tailscale_boot.py::ensure_bun`，`curl https://bun.sh/install | bash`，且必须在改代理之前）；
+只有 tailscale 这条链会装 ⇒ cloudflared 盘每单被能力自检**零下载拒单**（安静得看不出来）。
+取向（hub 侧下发 / 盘上装但不依赖公网 / 发布可执行产物）**待裁**，见 plan §9.3。
 
-**被否决**：① **装 bun + 接刷新** —— 它服务的能力已被 `rollout.cloudflared.ipynb` 承担，留着就得
-**同时**补 bun（改 cell ⇒ 要求用户重贴 notebook，或在模块侧为新入口再挂一个 boot 钩子）**和**
-把它改挂远端引导模块（第二份实现要么删、要么两边维护），而 R4 说明这条接入方式训练侧用不上
-⇒ 为没有消费者的路径加钩子；② **直接删文件** —— 用户 Kaggle/Colab 里可能还有旧副本，
-**删库不产生指路**（零逻辑牌子把「下一次打开」变成一次明确指引，且随时可从 git 历史取回）；
-③ **保留可用、只在文档标注退役** —— 文档不在打开 notebook 的那一刻，§I6 的坑照旧。
+**结论（防复发）**：**两块盘都保留、两条隧道都保留**；P4 的范围只是去掉 bun 依赖。
+—— 误判留档与新口径 → `plan/online-offline-role-routing.plan.md` §9 · 档案 `docs/nn/remote-transport.md` §49
 
-**违反后果**：把引导代码贴回去 ⇒ 这块盘又能起 worker、又能被控制台派活，而它跑不了
-`kind=iter`、仓库修复也到不了它，失效方式**静默**（要等真机报障才看得见；同一形状已经咬过
-两次：`f274ac1b` 之前的白传 + §46 的「从来没装 bun」）。
+## §2026-09-25-evala-baseline-bc（2026-09-25，it0 基线污染修复）
 
-**回归**：`nn-training/tests/test_notebook_retired.py`（禁 worker 引导标识 + 必须 `SystemExit` +
-三份指路）。
-—— 全文 → `plan/online-offline-role-routing.plan.md` §9 · 档案 `docs/nn/remote-transport.md` §49
+**背景**：x20-dodge-l1/L3 的 `eval_log` it0 各混入 200 局后期权重读数（L1 混 it43、L3 混 it51），
+基线 low 被带偏 6pp（L1 it0 34.0 真值应为 40.0）。门控 verdict 不受影响（独立段），日常分析已更正。
+
+**根因（三段链）**：① `rl/eval_a_once.py --baseline` 缺省取 live `out`
+（`tmp/<课>/weights.json`，每轮被训练覆盖）；② 幂等早退判据是 `iter=0 ∧ 同 wver`，
+权重变了就不命中；③ 离线开课/重启自动补派基线（`shouldAutoBaseline`）⇒ 补派瞬间读到
+新权重，照跑并写进 it0 槽。触发两次：L1 在 10:42 重启（it43 当时最新）、L3 在 15:45
+重启（it51 当时最新）。下游放大：`kickstart-receipt` 取最后一条 it0 行当基线，控制台
+基线显示同步被带偏。
+
+**变更**：`--baseline` 缺省改取课程 `bc`（起点冻结权重，归档文件永不变）；`resolve_eval_ckpt`
+抽成单一事实来源函数；bc 缺席响亮拒（不拿 out 顶）；日志/TS 注释同步改口。
+`--ckpt` 显式永远优先；wver 幂等保留（bc 换了会自然重评）。
+
+**被否决**：① **iter=0 槽写过一次就永久锁死** —— 杀掉合法场景（课程 bc 换了要重评基线）；
+② **补派时传归档 ckpt 快照** —— 调用方（控制台开课）不知道归档布局，知识放错了地方，
+权重归属是训练侧课程文件的事实，就该 python 侧从课程文件取。
+
+**回归**：`nn-training/tests/test_eval_a_once.py`（bc 缺省 ×2：取 bc 断言 + 重启后早退不写别轮
+wver；旧钉死 live-out 的用例已按新语义改写）+ `test_baseline_eval.py` 全绿。
+—— 全文即本条 · 档案 `docs/nn/engineering.md` §25
