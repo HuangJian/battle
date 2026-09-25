@@ -887,6 +887,12 @@ def ensure_ts_tree(pack: Path | None, log: Callable[[str], None], *, dest: str |
             f"{got[:12]}… ≠ manifest 的 {want[:12]}…）——拒跑：混血会让 rollout 与权重血统不符。"
             f"\n  两条出路：① CFG.task_zip 指对**同 commit** 的任务包；② 清空重跑 {root}"
         )
+    # ★ 2026-09-25 现场回归：**首次跑**时产物目录还不存在（它本来是 `run_loop`/`import_bundle`
+    #   建的），而这里要往里写 `ts_code.zip` ⇒ 必须先把它建出来。不建的后果是**未捕获**的
+    #   `FileNotFoundError: <dest>/ts_code.zip`，整个 cell 死在「代码就位」之后（用户实测报障）。
+    #   为什么不用「等 bundle 导入来铺」：本机优先那条腿**不导入包**（argv 不带 `--bundle`），
+    #   TS 树只能由这里铺；两条腿共用一个函数，就在函数里把目录准备好。
+    root.mkdir(parents=True, exist_ok=True)
     (root / TS_CODE_NAME).write_bytes(raw)
     tree = root / TS_TREE_NAME
     tree.mkdir(parents=True, exist_ok=True)

@@ -266,6 +266,22 @@ def test_ensure_ts_tree_fills_from_the_pack_when_the_tree_is_gone(tmp_path: Path
     assert (dest / offline_boot.TS_TREE_NAME / "tools" / "sim" / "export-eval-game.ts").is_file()
 
 
+def test_ensure_ts_tree_fills_a_dest_that_does_not_exist_yet(tmp_path: Path) -> None:
+    """★ 现场回归（2026-09-25 云机实测）：**首次跑**时产物目录还不存在（它由 `run_loop` 建）。
+
+    报障原文：`代码就位: /tmp/worker-code（…来源 任务包 …）` 之后当场
+    `未捕获异常 FileNotFoundError: .../battle-offline/x20-dodge-l1/run/ts_code.zip` ——
+    整个 cell 死在补 TS 运行时那一步（写 zip 时父目录还没有）。判据：不抛、目录被建出来、
+    树也铺好（否则 `run_standalone` 的 `ensure_ts_cache_layout` 找不到运行时）。
+    """
+    pack = _pack(tmp_path / "d" / "task-c5-gae.zip", ts=TS_A)
+    dest = tmp_path / "w" / "run"
+    assert not dest.exists(), "本用例的前提：全新一跑（产物目录还没有）"
+    offline_boot.ensure_ts_tree(pack, _quiet, dest=dest)
+    assert (dest / offline_boot.TS_CODE_NAME).read_bytes() == TS_A
+    assert (dest / offline_boot.TS_TREE_NAME / "tools" / "sim" / "export-eval-game.ts").is_file()
+
+
 def test_ensure_ts_tree_refuses_a_mismatched_pack(tmp_path: Path) -> None:
     """「本机 manifest + 包里的 TS」= 混血（rollout 与权重血统不符）⇒ 拒跑。"""
     dest = _artifacts(tmp_path / "run", ts=TS_A)

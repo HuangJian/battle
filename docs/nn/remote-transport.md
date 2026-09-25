@@ -8,6 +8,42 @@
 
 ---
 
+## §45 首次跑死在补 TS 运行时那一步：产物目录还不存在就往里写 zip（2026-09-25 云机实测）
+
+**症状**（用户真机日志，`battle.offline.ipynb` 全新一跑）：取包、铺代码都顺利，紧接着
+
+```
+[00:11:39] [offline] 代码就位: /tmp/worker-code（1710636 bytes, sha12=51e0678bb5c5，来源 任务包 …）
+[00:11:39] [offline] 未捕获异常 FileNotFoundError: [Errno 2] No such file or directory:
+                     '/kaggle/working/battle-offline/x20-dodge-l1/run/ts_code.zip'
+```
+
+整个 cell 死在 rollout 之前 —— 现场看不到任何「下一步该做什么」，只能看着一句 errno 报错。
+
+**根因**：`ensure_ts_tree`（plan/offline-rerun-local-first §4.1 第 5 条）在「本机没有 `ts_code/`」
+时从包里补 TS 运行时，直接 `(dest / "ts_code.zip").write_bytes(raw)`。而**首次跑**时
+`dest`（`<work>/run`）还不存在 —— 它是 `run_loop`/`import_bundle` 建的那个目录。产物目录**已有**
+（本机优先那条腿）时目录当然在，所以这一路只在「全新一跑」时炸：`ensure_code` 的写盘是**有条件的**
+（只有 `manifest.json` 读得到才修 `code.zip`，全新一跑没有 manifest ⇒ 不写 ⇒ 不暴露同一个坑），
+`ensure_ts_tree` 的写盘是无条件的 ⇒ 只有它炸。
+
+**修法**（最小改动）：写之前 `root.mkdir(parents=True, exist_ok=True)`。
+为什么不「等 bundle 导入来铺」：本机优先那条腿**不导入包**（argv 不带 `--bundle`），TS 树只能由
+这个函数铺；两条腿共用一个函数，就在函数里把目录准备好。
+
+**为什么此前没有测试拦住（教训，比 bug 本身重要）**：`e2e/test_offline_training_e2e.py` 只覆盖
+**hub 侧**（能力闸 / 归位 / 读面 / 取包），云机侧只有单测，而单测的产物目录**全是预建好的**
+（`_artifacts()` 夹具）⇒「全新一跑」这条最常见的路径**从来没人走过**。现在两层都补上：
+单测 `test_ensure_ts_tree_fills_a_dest_that_does_not_exist_yet`（红过）+ e2e
+`test_a_fresh_run_lays_down_code_and_ts_tree_before_the_loop`（真导出器写的包 → 真 `run_one_course`
+→ `run_loop` 注入点，断言「run_loop 起来时产物目录已存在、`ts_code/` 与 `ts_code.zip` 就位、
+argv 带 `--bundle`」）。两条都在未修版本上复现过同一条 errno。
+
+**不变式**：`ensure_ts_tree` 对「产物目录不存在」「目录在但树缺」「树在」三种输入都要能走完
+（前两种要能把目录/树建出来，第三种不重解）。
+
+—— 全文（判定表 / §8 判据与上界）→ `plan/offline-rerun-local-first.plan.md` §6.1
+
 ## §44 云机不再写死课程名：hub 清单 + 领取租约（plan/offline-task-discovery.plan.md，2026-09-25）
 
 **用户口径**：「云机不应该要在 `battle.offline.ipynb` 里配置离线课程名，它应该直接向 hub 问询，

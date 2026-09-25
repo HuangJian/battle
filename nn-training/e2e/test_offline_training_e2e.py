@@ -44,14 +44,20 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import hashlib
+import zipfile
 
 import pytest
 
-from remote import net_http
+from remote import net_http, offline_boot
 from remote.artifacts import ArtifactStore
 from remote.hub_client import publish_job
 from remote.offline_deliver import OfflineDeliverer
-from remote.protocol import COURSE_ENABLE_MARKER, TS_CODE_NAME, encode_weights_json
+from remote.protocol import (
+    COURSE_ENABLE_MARKER,
+    INIT_WEIGHTS_NAME,
+    TS_CODE_NAME,
+    encode_weights_json,
+)
 from rl.iter_job import build_iter_spec
 from rl.plan import build_plan, dump_plan
 from tests.helpers.hub_poll import hub_poll
@@ -424,6 +430,102 @@ def test_segment_rounds_backfeed_into_the_right_course_and_show_up_on_the_read_f
         assert body["progress"][course][run_id]["its"] == [2, 3, 4]
     finally:
         hub.close()
+
+
+# ────────────────────── ④ 云机侧：**首次跑**（产物目录还不存在） ──────────────────────
+
+
+def _real_pack(
+    tmp_path: Path, course: str, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """用**真导出器**写一个任务包（控制台 `--export-bundle` 走的就是它）。
+
+    `normalize_manifest` 被替换成恒等（最小 manifest 缺时间戳/字段时会拒），与
+    `tests/test_offline_task_pack.py::_export_real_pack` 同一口径。
+    """
+    from remote import bundle as bundle_mod
+
+    monkeypatch.setattr(bundle_mod, "normalize_manifest", lambda m: m)
+    src = tmp_path / "_src"
+    src.mkdir(parents=True, exist_ok=True)
+    (src / INIT_WEIGHTS_NAME).write_bytes(b'{"format":"nn-weights-json","params":{"w":1}}')
+    code_zip = src / bundle_mod.CODE_NAME
+    with zipfile.ZipFile(code_zip, "w") as z:
+        z.writestr("remote/_marker.py", "VALUE = 'e2e'\n")
+    with zipfile.ZipFile(src / TS_CODE_NAME, "w") as z:
+        z.writestr("tools/sim/export-eval-game.ts", "// e2e\n")
+    plan = json.dumps({"start_it": 1, "end_it": 5}).encode("utf-8")
+    out = tmp_path / "packs" / f"task-{course}.zip"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    bundle_mod.export_bundle(
+        out,
+        manifest={
+            "kind": "run",
+            "runId": "run-e2e",
+            "it": 1,
+            "plan_sha256": hashlib.sha256(plan).hexdigest(),
+            "commit": "c" * 40,
+        },
+        plan_bytes=plan,
+        init_weights_path=src / INIT_WEIGHTS_NAME,
+        code_zip_path=code_zip,
+        ts_code_zip_path=src / TS_CODE_NAME,
+    )
+    return out
+
+
+def test_a_fresh_run_lays_down_code_and_ts_tree_before_the_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ 现场回归（2026-09-25 云机实测）：**首次跑**从**真包**起跑，走到 `run_loop` 之前不能死。
+
+    报障原文：`代码就位: /tmp/worker-code（…来源 任务包 …）` 之后当场
+    `未捕获异常 FileNotFoundError: .../battle-offline/x20-dodge-l1/run/ts_code.zip` ——
+    补 TS 运行时那一步往一个**还不存在**的产物目录里写 zip，整个 cell 死在 rollout 之前。
+
+    为什么本文件此前没拦住（而这正是补这条用例的理由）：本文件只覆盖 hub 侧，云机侧只有单测，
+    而单测的产物目录都是**预建好**的 —— 全新一跑（`<work>/run` 不存在）从来没人走过。
+
+    判据：不抛；`run_loop` 被调起时产物目录已存在、`ts_code/` + `ts_code.zip` 就位；
+    首次跑走**老规矩**（argv 带 `--bundle`，铺产物目录交给 `import_bundle`）。
+    """
+    pack = _real_pack(tmp_path, C_OFF, monkeypatch)
+    work = tmp_path / "work"
+    argv_seen: list[list[str]] = []
+    dest_existed: list[bool] = []
+
+    def fake_loop(argv: list[str]) -> int:
+        argv_seen.append(list(argv))
+        dest_existed.append((work / "run").is_dir())
+        return 0
+
+    # 代码解包到临时目录（生产缺省是 `/tmp/worker-code`：本用例不该往机器上真写那个路径）。
+    real_ensure_code = offline_boot.ensure_code
+    monkeypatch.setattr(
+        offline_boot,
+        "ensure_code",
+        lambda *a, **kw: real_ensure_code(*a, **{**kw, "code_dir": str(tmp_path / "worker-code")}),
+    )
+    cfg = {
+        "course": C_OFF,
+        "work_dir": str(work),
+        "download_dir": str(tmp_path / "out"),
+        "device": "cpu",
+        "live_backfeed": False,
+        "task_zip": str(pack),  # = 手动送包那条路：拿包就走，不经 hub
+    }
+    logs: list[str] = []
+    rc = offline_boot.run_one_course(
+        cfg, {}, logs.append, None, course=C_OFF, multi=False, run_loop_main=fake_loop
+    )
+
+    assert rc == 0, logs
+    assert dest_existed == [True], f"run_loop 起来时产物目录必须已存在；日志：{logs}"
+    argv = argv_seen[0]
+    dest = work / "run"
+    assert (dest / TS_CODE_NAME).is_file(), logs
+    assert (dest / offline_boot.TS_TREE_NAME / "tools" / "sim" / "export-eval-game.ts").is_file()
+    assert "--bundle" in argv and str(pack) in argv, argv
 
 
 # ────────────────────────── ③ 取任务包（hub → 云机） ──────────────────────────
