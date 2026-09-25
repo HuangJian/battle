@@ -331,8 +331,15 @@ def test_gate_worker_count_scales_with_cores() -> None:
     """worker 数默认派生自核数（不再写死 4），且必须有上界（内存封顶）。"""
     code = _gate_code()
     assert "NN_GATE_NPROC" in code, "缺少 NN_GATE_NPROC 逃生口"
-    assert "os.cpu_count()" in code, (
-        "worker 数应从核数派生——写死 4 在 16 核上白白浪费并行度（2026-09-17 实测 n=4 → n=12 提速 1/3）"
+    assert re.search(r"CORES=\$\(.*effective_cores", code), (
+        "worker 数应从核数派生，且核数走 platform_utils.effective_cores（容器 cgroup 配额/亲和"
+        "掩码）—— `os.cpu_count()` 在容器里报的是宿主机核数（Kaggle 224 vs 配额 96，"
+        "2026-09-25 云机卡死那笔账）；写死 4 在 16 核上白白浪费并行度（2026-09-17 实测 n=4 "
+        "→ n=12 提速 1/3）"
+    )
+    assert "cpu_count()" not in code, (
+        "门禁里不许再拿 os.cpu_count() 定并行度——「本机几核」只允许一个答案，"
+        "就是 platform_utils.effective_cores()（注释里的事故说明不算，_gate_code 已去注释）"
     )
     assert re.search(r"NPROC=\$\{NN_GATE_NPROC:-\$CORES\}", code), (
         "NPROC 默认值应 = min(核数, 上界)，且由 NN_GATE_NPROC 覆盖"

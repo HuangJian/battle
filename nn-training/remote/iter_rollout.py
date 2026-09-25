@@ -39,7 +39,7 @@ from typing import Any
 
 from log_bundle import LogBundle
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
-from platform_utils import cpu_worker_slots
+from platform_utils import cpu_worker_slots, effective_cores
 
 # 单局看门狗的口径常量与 eval **共用一份**（`remote/game_watch.py`）：点名线 5s、首次尝试硬顶
 # 也是 5s（用户口径「单局 >5s 肯定不正常」⇒ 超时原地重跑）、重试上限 ×4、最多 3 次、轮询 0.5s。
@@ -511,11 +511,13 @@ def run_iter_rollout(
     if workers < min(requested_workers, len(argvs)):
         # 夹取必须可见：否则「hub 说 220、实际跑 12」会变成一个静默的口径分叉。
         # 只在**本机上限**真的掐住了才报（「游戏数比并发数少」是常事，不是夹取）。
-        # 「本机」= 跑这一轮的节点/云机（`os.cpu_count()`），带上核数以免被误读成 hub/导出机。
+        # 「本机」= 跑这一轮的节点/云机（`effective_cores()`），带上核数以免被误读成 hub/导出机。
+        # 核数与槽位要分开报：核数是**事实**（容器配额），槽位才是夹取用的口径
+        # （`cpu_worker_slots` = max(cores−4, 0.8·cores)），两个数混在一个标签里就是下一次误读。
         rb.add(
             "并发夹取",
-            f"{requested_workers}→{workers}（跑这一轮的机器 {cpu_worker_slots()} 核上限"
-            f" {cap}｜{ENV_WORKERS_CAP}=0 可关）",
+            f"{requested_workers}→{workers}（跑这一轮的机器可用核 {effective_cores()}，"
+            f"并行槽上限 {cap}｜{ENV_WORKERS_CAP}=0 可关）",
         )
     rb.add("bun", f"{bun} ({ver or '?'})")
     rb.add("ts_root", tsd)

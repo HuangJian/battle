@@ -43,6 +43,8 @@ import { fileURLToPath } from 'node:url'
 import os from 'node:os'
 import path from 'node:path'
 
+import { effectiveCores } from '../lib/cores'
+
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 process.chdir(ROOT) // 所有相对路径以仓库根为准
 
@@ -59,11 +61,17 @@ let STAGE_SPEC = '0-34' // 缺省：经典 35 关全跑（性能网格）
 let SEED_SPEC = '1-2' // 缺省：每关 2 个 seed
 let TICKS = 1200
 let REPS = 1
-/** 物理核探测（win=CIM / darwin=sysctl / linux+android proot=/proc/cpuinfo 的 physical×core 唯一对；失败回落逻辑核）。 */
+/** 物理核探测（win=CIM / darwin=sysctl / linux+android proot=/proc/cpuinfo 的 physical×core 唯一对；失败回落逻辑核）。
+ *
+ * 逻辑核数再按 `effectiveCores()` 夹一次：容器里 `os.cpus().length` / `availableParallelism()`
+ * 会报**宿主机**核数（Kaggle 224 vs cgroup 配额 96），照它开并行 = 2.3× 超订
+ * （见 tools/lib/cores.ts 的 2026-09-25 事故）。裸机无 cgroup ⇒ 夹取是恒等操作。 */
 function detectPhysicalCores(): number {
-  const logical =
+  const logical = Math.min(
     (os as unknown as { availableParallelism?: () => number }).availableParallelism?.() ??
-    os.cpus().length
+      os.cpus().length,
+    effectiveCores(),
+  )
   const num = (out: string | undefined): number => {
     const n = parseInt((out ?? '').trim().split(/\s+/)[0] ?? '', 10)
     return Number.isFinite(n) && n > 0 ? n : 0

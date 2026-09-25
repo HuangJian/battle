@@ -71,6 +71,33 @@
 ⇒ 评估本身在超订/回退里，下一步看它的 `serve_pool` 计数与 `fallback_reasons`；④ rollout 轮末的
 `并发夹取=…`（节点腿）与 `serve_pool: …｜已熔断…`（有熔断才出现）。
 
+### 23.5 「本机几核」只有一个答案：口径铺满 TS / 脚本 / notebook（同日收尾）
+
+`effective_cores()` 先在 python 侧落地，但**读核数的地方远不止 python** —— 任何一处还在用
+「宿主机裸数」都是同一个 224/96 误读的孪生体。所以第二天把口径铺到所有**定并行度**的入口：
+
+| 位置 | 原来读什么 | 现在 |
+|---|---|---|
+| **新增 `tools/lib/cores.ts`** | — | TS 侧镜像：`cgroupCpuQuota()`（v2 `cpu.max` / v1 cfs_quota÷period）+ `affinityCores()`（`/proc/self/status` 的 `Cpus_allowed_list`，Node/Bun 没有 `sched_getaffinity`）+ `hostLogicalCores()` 兜底；三个解析器都是纯函数，`resolveEffective()` 钉优先级 |
+| `tools/lib/worker-pool.ts::physicalCores` | `os.cpus().length`（Linux）/ `sysctl hw.physicalcpu`（darwin） | 再 `min(…, effectiveCores())` —— ⇒ `defaultWorkerCount` 的下游（`eval-course-ckpt` / `export-*` / `sim-pool` / `m1-eval` / `base-loss-forensics`）在容器里不再按宿主机排 worker |
+| `tools/agent/sampler-agent.ts::CPUS` | `os.cpus().length` | `effectiveCores()` —— 它同时是**默认 `workers`** 和心跳/hello 上报的 `cpus`（控制台那行「N 核」） |
+| `tools/sim/perf-cmp-rollout.ts::detectPhysicalCores` | `availableParallelism() ?? os.cpus().length` | 再 `min(…, effectiveCores())` |
+| `dashboard/src/core/venv.ts::resolveTorchThreads` | `navigator.hardwareConcurrency` | `effectiveCores()`（仍 clamp 1..12） |
+| `nn-training/rl/cli.py --workers` | `min(os.cpu_count() or 4, 12)` | `min(effective_cores(), 12)` |
+| `tools/githook/nn-python-gate.sh` 的 `-n` | `os.cpu_count()` | `effective_cores()`（求值在 nn-training 目录内，`-S` 下 `sys.path[0]` = cwd）；`test_githook_scripts::test_gate_worker_count_scales_with_cores` 改成钉这条 |
+| `ipynb/rollout.cloudflared.ipynb`（并发度单元格）、`ipynb/battle-bc.ipynb`（EVAL_WORKERS） | `os.cpu_count()` | `effective_cores()`，拉不到 platform_utils 时才回落 `os.cpu_count()`（兜底语义保留） |
+
+**夹取只降不升**：裸机/Windows/macOS 上没有 cgroup 配额可读 ⇒ `effective_cores()` 就等于宿主机
+核数，所有下游读数**逐位不变**（本机 16 核：`effectiveCores()==16`，与改前一致）。真机收益：
+96 核配额的 Kaggle 会话上，`eval-course-ckpt` 的默认 worker 从 223 收到 92 量级，
+sampler-agent 上报的 `cpus` 从 224 变 96。
+
+**一处耦合**：dashboard 因此多消费一个仓根模块（`tools/lib/cores.ts`）⇒ 已同步
+`.github/workflows/dashboard.yml` 的 paths（`dashboard/tests/ci-scope.test.ts` 会把这条边钉红）。
+
+**用例**：`tests/effective-cores.test.ts`（10 条：v2/v1 配额解析、`Cpus_allowed_list` 区间/逗号/
+垃圾格式、取小优先级、永不为 0、本机不变量 `1 ≤ effectiveCores() ≤ hostLogicalCores()`）。
+
 ---
 ## §22 A 方案落地：节点侧 rollout **与**云机离线 eval 接入长驻池（`remote/serve_pool.py`）—— 1.45–1.47× / 1.19–1.39×，产物逐位不变（2026-09-23）
 

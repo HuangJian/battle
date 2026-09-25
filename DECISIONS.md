@@ -2419,7 +2419,16 @@ worker**）+ 补位就绪等待受**本次尝试硬顶**约束 + 回退行**带 
 只给 **96**），所以日志里那个 `workers=220` 本身就是 2.3× 超订的产物（不是「这台机器有 224 核」），
 两条腿各开满时真实超订是 4.6×；
 ④ `iter_rollout` 按该核数夹取 hub 给的并发（旧状态只有 `MAX_WORKERS=256` 一道闸；云机
-220→92），夹取进轮末日志、`NN_ROLLOUT_WORKERS_MAX=0` 可关。
+220→92），夹取进轮末日志、`NN_ROLLOUT_WORKERS_MAX=0` 可关；
+⑤ **「本机几核」只允许一个答案**（同日收尾）：口径铺到所有**定并行度**的入口 —— TS 侧新增
+`tools/lib/cores.ts`（`cgroupCpuQuota` + `affinityCores`（`/proc/self/status` 的 `Cpus_allowed_list`，
+Node/Bun 无 `sched_getaffinity`）+ `hostLogicalCores` 兜底，逐条镜像 `effective_cores`），消费方 =
+`worker-pool.physicalCores`（⇒ `eval-course-ckpt`/`export-*`/`sim-pool`/`m1-eval` 的默认 worker 数）、
+`sampler-agent` 的 `CPUS`（默认 `workers` **与**上报的 `cpus`）、`perf-cmp-rollout` 的核探测、
+`dashboard/src/core/venv.ts` 的 torch 线程数；python/脚本侧补 `rl/cli.py --workers`、
+`nn-python-gate.sh` 的 `-n`、两个 notebook 的并发单元格。**夹取只降不升** ⇒ 裸机/dev 机逐位不变
+（本机 16 核读数不变）。dashboard 因此多消费一个仓根模块 ⇒ 已同步 `.github/workflows/dashboard.yml`
+的 paths（`dashboard/tests/ci-scope.test.ts` 钉这条边）。
 **被否决**：抬高 5s 单局硬顶（用户口径「>5s 肯定不正常」，而本案的慢局正是被超订挤慢的，
 抬高只会让它更久停在超订态）· 给 eval 预留核数（2026-09-22 已否；按物理数目定池后 rollout
 就吃掉 96 核的大部分，预留等于停掉云机评估——真交替能同时满足两边）· 评估挪到另台机
@@ -2428,5 +2437,6 @@ worker**）+ 补位就绪等待受**本次尝试硬顶**约束 + 回退行**带 
 **违反后果**：两条腿同时开满 ⇒ 每轮成批超时并触发回退放大（现场：整轮 4 分钟 `[run]` 零行）·
 池无熔断 ⇒ 一个环境抖动就能把节点推入「回退越多、进程越多、越慢」的死循环 · 节点不夹取 ⇒
 小核数节点被 hub 的导出机规模打爆 · 回退行不带 kind ⇒ 一屏同形行，分不出哪条腿（本轮排查的
-第一道坎）。
+第一道坎）· 只改一处核数读数 ⇒ python 按 96 算、TS 工具/脚本按 224 算，同一次跑里两个口径
+（`eval-course-ckpt` 的默认 worker、agent 上报的 `cpus`、gate 的 `-n` 都还在按宿主机数排）。
 —— 全文（现场读数 / 三条根因 / 落地表 / 下次真机该看的四个读数）→ `docs/nn/runtime-opt.md` §23 · 锚 `## §23`

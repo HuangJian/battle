@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 
 from rl.breaker import (
     ENT_BREAK,
@@ -32,6 +31,7 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
 
     # 节点侧单局硬顶兜底值：**引用看门狗里的那个常量**（不在 help 里抄第二份数字——
     # 抄了就会漂，而 help 说的必须就是代码做的事）。函数内 import：本模块顶层不拉重物。
+    from platform_utils import effective_cores
     from remote import game_watch
 
     ap = argparse.ArgumentParser()
@@ -261,7 +261,9 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
     ap.add_argument(
         "--workers",
         type=int,
-        default=_d("workers", min(os.cpu_count() or 4, 12)),
+        # 核数走 effective_cores()（容器配额/亲和掩码 > 宿主机裸数）：os.cpu_count() 在容器里报
+        # 宿主机的 224，而 cgroup 可能只给 96（2026-09-25 云机卡死那条账）。
+        default=_d("workers", min(effective_cores(), 12)),
         help="concurrent bun rollout workers (games partitioned by seed)",
     )
     ap.add_argument(

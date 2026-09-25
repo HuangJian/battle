@@ -27,9 +27,9 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { gunzipSync, gzipSync } from 'node:zlib'
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 // /v1/restart 防循环 grace 护栏（独立纯函数文件，与单测共享——2026-09-01 重启循环修复）
+import { effectiveCores } from '../lib/cores'
 import { RESTART_GRACE_MS, shouldAcceptRestart } from './restart-guard'
 // BCV2 结果容器读写（服务耗时打点改口径用——unpack → 改 manifest → repack）。
 // 本文件另有 v1 遗留 packContainer/unpackContainer（下方导出，兼容旧消费方），
@@ -82,7 +82,11 @@ export const SHARD_FILES = [
 ] as const
 
 // ---------------- CLI ----------------
-const CPUS = os.cpus().length
+/** 本机可用核数：`effectiveCores()` 是唯一口径（容器配额/亲和掩码 > 宿主机裸数，
+ * 见 tools/lib/cores.ts 与 nn-training/platform_utils.py::effective_cores）。
+ * 用 `os.cpus().length` 会在容器里报宿主机核数（Kaggle 224 vs 配额 96）⇒ 派工与上报的
+ * cpus 都跟着虚高 2.3×（2026-09-25 云机 rollout 卡死的那条账）。 */
+const CPUS = effectiveCores()
 let port = 8443
 let workers = CPUS
 let cacheMaxBytes = 2048 * 1024 * 1024

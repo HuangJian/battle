@@ -290,4 +290,4 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | §143 | docs/nn/runtime-opt.md §12 | 端到端实测：内核优化在一局 rollout 里的确切倍率（2026-09-23） |
 | §144 | docs/nn/runtime-opt.md §14 | arm64 实机计时 + 逐项归因：无负项、零回落，但 x64 的 +44% 不迁移（2026-09-23） |
 | §145 | docs/nn/runtime-opt.md §15 | arm64 逐阶段归因：6.4 ms 花在哪 + 为什么四项不迁移（FMA 上限实验）（2026-09-23） |
-| §146 | docs/nn/runtime-opt.md §23 | 云机「rollout 卡死」三件套：两条 CPU 腿真交替 + 池熔断/背压 + 并发按核数夹取（2026-09-25） |
+| §146 | docs/nn/runtime-opt.md §23 | 云机「rollout 卡死」三件套：两条 CPU 腿真交替 + 池熔断/背压 + 并发按核数夹取；含 §23.5「本机几核只有一个答案」（TS `tools/lib/cores.ts` / 脚本 / notebook 全铺）（2026-09-25） |

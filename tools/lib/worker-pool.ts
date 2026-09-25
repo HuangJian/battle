@@ -20,21 +20,28 @@
 import { cpus } from 'node:os'
 import { execSync } from 'node:child_process'
 
+import { effectiveCores } from './cores'
+
 /**
  * Physical core count. Hyper-thread "cores" share execution units and L1/L2;
  * measured on a 4c/8t i7-4770HQ, >physical−1 workers actively *hurt* (7w
  * 1.70x vs 3w 2.40x) because sibling threads evict each other's caches.
+ *
+ * 结果**再按 `effectiveCores()` 夹一次**（2026-09-25 云机卡死）：容器里 `os.cpus().length`
+ * 报的是宿主机逻辑核（Kaggle 排 224、cgroup 只给 96），照它派 worker 就是 2.3× 超订。
+ * 夹取只降不升 ⇒ 裸机/dev 机（无 cgroup）读数与旧行为逐位相同。
  */
 export function physicalCores(): number {
+  const usable = effectiveCores()
   if (process.platform === 'darwin') {
     try {
       const n = parseInt(execSync('sysctl -n hw.physicalcpu', { encoding: 'utf8' }).trim(), 10)
-      if (Number.isInteger(n) && n >= 1) return n
+      if (Number.isInteger(n) && n >= 1) return Math.min(n, usable)
     } catch {
       // fall through to logical count
     }
   }
-  return cpus().length
+  return Math.min(cpus().length, usable)
 }
 
 /**
