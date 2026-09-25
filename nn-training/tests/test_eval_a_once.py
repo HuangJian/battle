@@ -115,10 +115,17 @@ def test_write_summary_for_wver_no_rows_returns_zero(tmp_path: Path) -> None:
 
 
 def _course_file(tmp_path: Path, out: Path, traj: Path) -> Path:
-    """最小课程 jsonc（只喂 eval_a_once 真正读的键；`extra=forbid` ⇒ 键必须合法）。"""
+    """最小课程 jsonc（只喂 eval_a_once 真正读的键；`extra=forbid` ⇒ 键必须合法）。
+
+    2026-09-25：`--baseline` 缺省取课程 bc ⇒ helper 自带 bc 文件（基线课程无 bc
+    是 malformed，下游响亮拒，不静默拿 out 顶）。
+    """
+    bc = tmp_path / "bc.json"
+    bc.write_text('{"w": "bc"}', encoding="utf-8")
     p = tmp_path / "t-baseline.jsonc"
     body = {
         "name": "t-baseline",
+        "bc": str(bc).replace("\\", "/"),
         "out": str(out).replace("\\", "/"),
         "traj": str(traj).replace("\\", "/"),
         "eval_stages": "2000",
@@ -144,12 +151,15 @@ def _run_main(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> int:
 def test_main_baseline_defaults_ckpt_to_course_out(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`--baseline` 不给 `--ckpt` ⇒ 取课程活动权重 `out`（与任务包 init_weights 同字节），
-    派发照旧走 in-loop 那条路（baseline=True / iter=0），读数按账本回填。"""
+    """`--baseline` 不给 `--ckpt` ⇒ 取课程 bc 起点冻结权重（2026-09-25 由 live `out`
+    更正：out 每轮被覆盖，重启后补派曾把 it43/it51 读数写进 it0 槽），派发照旧走
+    in-loop 那条路（baseline=True / iter=0），读数按账本回填。"""
+    bc = tmp_path / "bc.json"
+    bc.write_text('{"w": "bc"}', encoding="utf-8")
     out = tmp_path / "weights.json"
     out.write_text('{"w": 1}', encoding="utf-8")
     traj = tmp_path / "traj"
-    course_p = _course_file(tmp_path, out=out, traj=traj)
+    course_p = _course_file_with_bc(tmp_path, bc=bc, out=out, traj=traj)
 
     import dist_common
     from rl import eval_dispatch
@@ -184,10 +194,10 @@ def test_main_baseline_defaults_ckpt_to_course_out(
     rc = _run_main(monkeypatch, ["--course", str(course_p), "--iter", "0", "--baseline"])
 
     assert rc == 0
-    assert seen["rl_path"] == str(out)  # 起点权重 = 课程 out，不是别的
+    assert seen["rl_path"] == str(bc)  # 起点冻结权重 = 课程 bc，不是 live out
     assert seen["it"] == 0 and seen["baseline"] is True
     assert seen["iter_id"] == "evalA.0"
-    fp = dist_common.weights_fingerprint(str(out))[:16]
+    fp = dist_common.weights_fingerprint(str(bc))[:16]
     summ = [r for r in _ledger_rows(traj) if r.get("event") == "eval_summary"]
     assert summ and summ[-1]["iter"] == 0 and summ[-1]["wver"] == fp
 
@@ -195,7 +205,7 @@ def test_main_baseline_defaults_ckpt_to_course_out(
 def test_main_baseline_skips_when_summary_landed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """同 wver 的 it0 summary 已落账 ⇒ 早退 0 且**不派发**（离线课「停课→重开」不重评）。"""
+    """bc 的 it0 summary 已落账 ⇒ 早退 0 且**不派发**（离线课「停课→重开」不重评）。"""
     out = tmp_path / "weights.json"
     out.write_text('{"w": 2}', encoding="utf-8")
     traj = tmp_path / "traj"
@@ -205,7 +215,7 @@ def test_main_baseline_skips_when_summary_landed(
     import dist_common
     from rl import eval_dispatch
 
-    fp = dist_common.weights_fingerprint(str(out))[:16]
+    fp = dist_common.weights_fingerprint(str(tmp_path / "bc.json"))[:16]
     (traj / "eval_log.jsonl").write_text(
         json.dumps({"event": "eval_summary", "iter": 0, "wver": fp, "games": 2, "wins": 1}) + "\n",
         encoding="utf-8",
@@ -247,3 +257,103 @@ def test_main_baseline_rejects_nonzero_iter(
     course_p = _course_file(tmp_path, out=out, traj=tmp_path / "traj")
 
     assert _run_main(monkeypatch, ["--course", str(course_p), "--iter", "3", "--baseline"]) == 2
+
+
+# ── it0 基线污染回归（2026-09-25 x20-dodge-l1/L3 实测）─────────────────────────
+# 现场：两腿 eval_log it0 = 200 局 bc 真基线 + 200 局后期权重误标 it0（L1 混入 it43、
+# L3 混入 it51）。链条：`--baseline` 缺省取 live `out`（每轮被训练覆盖）＋ 停课→重开
+# 自动补派 ⇒ 补派瞬间 out 已是新权重，wver 幂等判据不命中，照跑并写进 it0 槽。
+
+
+def _course_file_with_bc(tmp_path: Path, bc: Path, out: Path, traj: Path) -> Path:
+    p = tmp_path / "t-baseline-bc.jsonc"
+    body = {
+        "name": "t-baseline-bc",
+        "bc": str(bc).replace("\\", "/"),
+        "out": str(out).replace("\\", "/"),
+        "traj": str(traj).replace("\\", "/"),
+        "eval_stages": "2000",
+        "eval_games_per_stage": 2,
+        "eval_every": 1,
+    }
+    p.write_text(json.dumps(body), encoding="utf-8")
+    return p
+
+
+def _fake_dispatch_recorder(monkeypatch: pytest.MonkeyPatch):
+    import dist_common
+    from rl import eval_dispatch
+
+    seen: dict = {}
+
+    def _fake_dispatch(bun, rl_path, traj_dir, args, cfg, iter_id, it, **kw):
+        seen.update(rl_path=rl_path, it=it, **kw)
+        fp = dist_common.weights_fingerprint(rl_path)[:16]
+        with open(Path(traj_dir).parent / "eval_log.jsonl", "a", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "event": "eval",
+                        "iter": it,
+                        "wver": fp,
+                        "stage": 2000,
+                        "seed": 1,
+                        "node": "test",
+                        "win": 1,
+                        "cleared": 1,
+                        "outcome": "stage_clear",
+                    }
+                )
+                + "\n"
+            )
+
+    monkeypatch.setattr(dist_common, "load_dist_config", lambda: {})
+    monkeypatch.setattr(eval_dispatch, "dispatch_eval_round", _fake_dispatch)
+    return seen
+
+
+def test_main_baseline_defaults_ckpt_to_frozen_bc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--baseline` 不给 `--ckpt` ⇒ 取课程 bc（起点冻结权重），绝不取 live `out`。"""
+    bc = tmp_path / "bc.json"
+    bc.write_text('{"w": "bc-frozen"}', encoding="utf-8")
+    out = tmp_path / "weights.json"
+    out.write_text('{"w": "live-it43"}', encoding="utf-8")
+    traj = tmp_path / "traj"
+    course_p = _course_file_with_bc(tmp_path, bc=bc, out=out, traj=traj)
+    seen = _fake_dispatch_recorder(monkeypatch)
+
+    rc = _run_main(monkeypatch, ["--course", str(course_p), "--iter", "0", "--baseline"])
+
+    assert rc == 0
+    assert seen["rl_path"] == str(bc)
+    assert seen["it"] == 0 and seen["baseline"] is True
+
+
+def test_main_baseline_after_restart_does_not_append_foreign_wver(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """重启后补派：bc 基线已落账而 live out 已变 ⇒ 早退、不派发、不写别轮 wver 进 it0 槽。"""
+    bc = tmp_path / "bc.json"
+    bc.write_text('{"w": "bc-frozen"}', encoding="utf-8")
+    out = tmp_path / "weights.json"
+    out.write_text('{"w": "live-it51"}', encoding="utf-8")
+    traj = tmp_path / "traj"
+    traj.mkdir(parents=True, exist_ok=True)
+    course_p = _course_file_with_bc(tmp_path, bc=bc, out=out, traj=traj)
+
+    import dist_common
+
+    fp_bc = dist_common.weights_fingerprint(str(bc))[:16]
+    (traj / "eval_log.jsonl").write_text(
+        json.dumps({"event": "eval_summary", "iter": 0, "wver": fp_bc, "games": 2, "wins": 1})
+        + "\n",
+        encoding="utf-8",
+    )
+    seen = _fake_dispatch_recorder(monkeypatch)
+
+    assert _run_main(monkeypatch, ["--course", str(course_p), "--iter", "0", "--baseline"]) == 0
+    assert seen == {}
+    rows = _ledger_rows(traj)
+    assert {r.get("wver") for r in rows if r.get("event") == "eval"} == set()

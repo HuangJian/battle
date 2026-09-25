@@ -5,6 +5,24 @@
 > **来源**：2026-09-23 由 `docs/nn.progress.md`（单文件 7.9k 行）按主题拆分；本节内编号
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
+---
+
+## §25 evalA `--baseline` 缺省改取课程 bc：it0 基线污染修复（2026-09-25）
+
+**现场**：x20-dodge-l1/L3 的 `eval_log` it0 各 400 局 = 200 局 bc 真基线（wver 11ac，
+low 40.0）+ 200 局后期权重误标 it0（L1 混 it43 bf27 low 28.0、L3 混 it51 f8ab），
+L1 日常 it0 被带成 34.0/8.16（真值 40.0/7.64），污染仅 it0、其余 iter 单 wver 干净，
+门控 verdict 不受影响。同 wver 同种子跨 run 逐局 100% 一致，确定性本身无辜。
+
+**链条**：`--baseline` 缺省取 live `out`（每轮被覆盖）＋ 停课→重开自动补派
+（`shouldAutoBaseline`，offline 才有）＋ 幂等判据 `iter=0 ∧ 同 wver`（权重变了不命中）
+⇒ 补派瞬间读到新权重并写进 it0 槽。两次触发时刻与 `run_start` 一一对应
+（L1 10:42 ↔ it43、L3 15:45 ↔ it51）。另：`kickstart-receipt` 取最后一条 it0 行，
+控制台基线显示同步被带偏（未修显示逻辑——源头正了它自然正）。
+
+**修复**（`rl/eval_a_once.py` + 注释）：`resolve_eval_ckpt` 单一来源——显式 `--ckpt`
+优先，`--baseline` 缺省取课程 `bc`；bc 缺席响亮拒。否决过「it0 槽永久锁」
+（杀掉换 bc 重评基线的合法场景）与「调用方传快照」（知识放错地方）。
 
 ---
 ## §24 metrics v8 的 Python 半链补记：两处 `eval_log` 行构造点 + 缺键语义（2026-09-25，补 §23 漏项）

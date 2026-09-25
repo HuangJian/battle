@@ -164,19 +164,33 @@ def _write_summary_for_wver(eval_jsonl: Path, key16: str, it: int, t0: float) ->
     return n
 
 
+def resolve_eval_ckpt(ckpt_arg: str, ns, baseline: bool) -> str:
+    """evalA 权重解析（单一事实来源）。
+
+    显式 --ckpt 永远优先；`--baseline` 缺省取课程 `bc`（起点冻结权重），**绝不取
+    live `out`**——out 每轮被训练覆盖，停课→重开后补派的基线会读到新权重，把别轮
+    读数写进 it0 槽（2026-09-25 x20-dodge-l1/L3 实测：各 200 局污染）。
+    bc 缺席 ⇒ 返回空串，调用方响亮拒（不静默拿 out 顶）。
+    """
+    ckpt_arg = str(ckpt_arg or "")
+    if not ckpt_arg and baseline:
+        ckpt_arg = str(getattr(ns, "bc", "") or "")
+    return ckpt_arg
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Run one A-layer clean eval for a course ckpt")
     ap.add_argument("--course", required=True)
     ap.add_argument(
         "--ckpt",
         default="",
-        help="权重文件路径（该 iter 归档或活动 weights.json）；--baseline 时可省略（取课程 out）",
+        help="权重文件路径（该 iter 归档或活动 weights.json）；--baseline 时可省略（取课程 bc 起点冻结权重）",
     )
     ap.add_argument("--iter", type=int, required=True)
     ap.add_argument(
         "--baseline",
         action="store_true",
-        help="it0 基线模式：评课程活动权重 W(0)（iter 必为 0），账本写 iter=0 行",
+        help="it0 基线模式：评课程 bc 起点冻结权重 W(0)（iter 必为 0），账本写 iter=0 行",
     )
     ap.add_argument("--bun", default="bun", help="bun 可执行文件（export-eval-game runner）")
     ap.add_argument(
@@ -228,12 +242,10 @@ def main() -> int:
     # 与训练同册：tmp/<course>/eval_log.jsonl
     eval_jsonl = traj / "eval_log.jsonl"
 
-    # 权重来源：显式 --ckpt 优先；--baseline 缺省取**课程活动权重** out（`apply_course`
-    # 只在课程显式声明 out 时挂上 ns ⇒ getattr 兜底空串）。必须先判空再 Path()：
-    # `Path("")` 是 `.`（存在！）⇒ 否则会把一个目录当权重去算指纹。
-    ckpt_arg = str(args.ckpt or "")
-    if not ckpt_arg and args.baseline:
-        ckpt_arg = str(getattr(ns, "out", "") or "")
+    # 权重来源：显式 --ckpt 优先；--baseline 缺省取课程 bc（起点冻结权重，见
+    # resolve_eval_ckpt；禁取 live out——`Path("")` 是 `.`（存在！）⇒ 必须先判空再 Path()，
+    # 否则会把一个目录当权重去算指纹。
+    ckpt_arg = resolve_eval_ckpt(str(args.ckpt or ""), ns, bool(args.baseline))
     if not ckpt_arg:
         log("[evalA] 缺 --ckpt（非 baseline 模式必须给权重路径）")
         return 2
@@ -279,7 +291,7 @@ def main() -> int:
         f"[evalA] it{args.iter} course={course.name} wver={key16[:12]}… "
         f"max_ticks={ns.max_ticks} difficulty={ns.difficulty} "
         f"→ 派发（与 in-loop 同路：节点池 {enabled or '（无，仅本机）'} + 本机份额）"
-        + ("【it0 基线：课程活动权重 = 本段起点】" if args.baseline else "")
+        + ("【it0 基线：课程 bc 起点冻结权重】" if args.baseline else "")
     )
 
     # 本机份额没有要让位的东西（手动触发的评估不在训练的 PPO 窗口里）⇒ gate 立即置位；

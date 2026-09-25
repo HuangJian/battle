@@ -32,14 +32,16 @@ export interface EvalALaunch {
 
 /** 启动选项：`baseline` = it0 基线（离线开课自动补跑，见 course-lifecycle）。 */
 export interface EvalALaunchOpts {
-  /** `--baseline`：python 侧评课程活动权重 W(0)（`--iter` 恒 0），`ckpt` 可留空。 */
+  /** `--baseline`：python 侧评课程 bc 起点冻结权重 W(0)（`--iter` 恒 0），`ckpt` 可留空。 */
   baseline?: boolean
 }
 
 /** evalA 一次性进程的 argv（纯函数，便于测试——同 `taskBundleArgs`）。
  *
- *  `ckpt` 空串 = 交给 python 侧按模式取（baseline → 课程活动权重 `out`）：**空就不传
- *  这个 flag**——`--ckpt ''` 到 python 手里 `Path("")` 是 `.`（存在！），会被当权重算指纹。 */
+ *  `ckpt` 空串 = 交给 python 侧按模式取（baseline → 课程 `bc` 起点冻结权重，禁取 live
+ *  `out`：out 每轮被覆盖，重启后补派会把新权重读数写进 it0 槽，2026-09-25 实测）：
+ *  **空就不传这个 flag**——`--ckpt ''` 到 python 手里 `Path("")` 是 `.`（存在！），
+ *  会被当权重算指纹。 */
 export function evalAArgs(
   course: string,
   ckpt: string,
