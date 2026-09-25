@@ -4,9 +4,11 @@
  * 「arena 阶梯几何 + seg=k%16 推进」的语义，判决语料是「课程关卡文件 stages ×
  * 池外 seed 段 × 多 ckpt」——混进 rungs 会污染阶梯推进与去重键空间。
  *
- * 双侧契约：Python 侧 `nn-training/rl/batch_eval.py::{load_corpora,corpus_doc,
+ * 双侧契约：Python 侧 `nn-training/rl/batch_plan.py::{load_corpora,corpus_doc,
  * plan_verdict_units}` 是同协议的镜像实现（展开 unit 在 Python，本模块只做
  * 声明层的读取/校验与 console 侧身份派生）。改一侧必须同步另一侧。
+ * （这三个名字 2026-09-25 S25/B1 从 `batch_eval.py` 搬到 `batch_plan.py`；`batch_eval`
+ * 仍以再导出提供旧名，路径变迁见 `plan/nn-training-refactor.md` §5.5.4。）
  */
 
 import { existsSync, readFileSync } from 'fs'

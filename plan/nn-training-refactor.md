@@ -1177,8 +1177,13 @@ dashboard typecheck + **1105 / 0**；`check-decisions` ok。
 > 改动只有 `write_batches` 一个函数 + 一条用例；B2 的剩余范围见 §5.5.4。
 >
 > ⚠ **行数基准顺移**：下文所有 **1785** 都是**修前**的读数；该修复给 `write_batches` 加了 20 行
-> docstring（说明为什么要原子发布）⇒ 当前 `rl/batch_eval.py` = **1805 行**，§5.5.4 的预计目标
-> （~1630 / ~1210 / ~290）按同一起点顺移，**差值（各步减多少）不变**。
+> docstring（说明为什么要原子发布）⇒ 修后 = **1805 行**，§5.5.4 的预计目标按同一起点顺移。
+>
+> **✅ B1 已落地（2026-09-25，第二十五刀）**：`rl/batch_eval.py` **1805 → 1616**，新模块
+> `rl/batch_plan.py` **271 行**（把 13 函数 + 10 常量纯搬；旧家 21 条自别名再导出 ⇒ 调用点零改动）；
+> 分层快照**未红**（新模块不达 remote）；唯一演进的守卫是 `test_dist_common_poll`（改成「按定义搜家」）。
+> 全文 → `docs/nn/engineering.md` §23「第二十五刀」；决策 → `DECISIONS.md`
+> §2026-09-25-goalnn-batch-plan-b1-split。**下一步 = B2**（`rl/batch_store.py`）。
 
 #### 5.5.1 为什么它「按链切」不动（先量后定的结论）
 
@@ -1304,7 +1309,7 @@ python 侧读者都在锁里，所以受害面就是这个 TS 读者；而它的
 
 | 步 | 做什么 | 行为风险 | 预计 |
 |---|---|---|---|
-| **B1** | 纯规划 + 判据出包到 `rl/batch_plan.py`；`batch_eval` 再导出 | **零**（纯函数，无锁无 IO，逐字节对账） | 1785 → ~1630 |
+| **B1** | 纯规划 + 判据出包到 `rl/batch_plan.py`；`batch_eval` 再导出 | **零**（纯函数，无锁无 IO，逐字节对账） | 1785 → ~1630 · **✅ 已完成：1805 → 1616（`batch_plan.py` 271 行；逐字节对账 23/23 + 36/36，反探针 21/21，nn 2586）** |
 | **B2** | 建 `rl/batch_store.py`：8 个写点 → 具名转移；`consume_requests` 拆成「请求翻译 + 三个具名转移」；`_persist_of` 消失（并入 `set_units_of`）；落盘策略统一成 **`dirty` 才落盘** | **中**（状态机集中 + 落盘策略统一）| ~1630 → ~1210 |
 | **B3** | `BatchEvalRunner` + `dispatch_batch_bg` → `rl/batch_runner.py`（896 + 36 行，**纯搬**） | 零（逐字节对账） | ~1210 → ~290 |
 | **B4** | 门面收尾：`batch_eval.py` = 常量 + `maybe_dispatch_batch` + 再导出 | 零 | ~290 |

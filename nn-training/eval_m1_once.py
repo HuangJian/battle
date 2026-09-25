@@ -47,7 +47,8 @@ sys.path.insert(0, str(ROOT / "nn-training"))
 # 逐局行解析**静默失败**（2026-09-19 实测：[dist] weights[…] 行混进了 stdout）。
 sys.stdout = sys.stderr
 
-#: 可经 agent 分派的 policy（kind 见 rl/batch_eval.KIND_FOR_POLICY）。其余 policy
+#: 可经 agent 分派的 policy（kind 见 rl/batch_plan.KIND_FOR_POLICY；`rl.batch_eval`
+#: 只是它的再导出门面，S25/B1 起实现住 `rl/batch_plan.py`）。其余 policy
 #: （intent / intent-oracle / goal-god）无远端对应物，TS 侧只在本机跑，不进这里。
 DISPATCHABLE = ("nn", "intent-exec", "goal", "god")
 

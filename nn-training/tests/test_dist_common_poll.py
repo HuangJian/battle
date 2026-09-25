@@ -235,24 +235,44 @@ def test_refresh_weights_failure_stays_cold(monkeypatch) -> None:
 
 
 def test_transient_judgement_defined_once_and_wired() -> None:
-    """源码级守卫：判据只有一份实现，A/C 层真的接线（409 自愈也不得各写一套）。"""
+    """源码级守卫：判据只有一份实现，A/C 层真的接线（409 自愈也不得各写一套）。
+
+    2026-09-25（S25/B1）：B 层那份**薄转发**随「批语料规划 + 判据/门」出包搬到了
+    `rl/batch_plan.py`（原住 `rl/batch_eval.py`）。本守卫因此不再写死文件名（写死的路径
+    下一次搬家就会**静默失效**），改成两条与位置无关的东西：
+      ① 非 `dist_common` 的同名定义**恰好一个**，且它必须是**纯转发**（判据不得复制回来）；
+      ② `rl.batch_eval` 仍拿得到**同一对象**（门面再导出）—— 按 ① 找到的那个模块比 `is`。
+    """
     import ast
+    import importlib
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
-    definers = []
-    for path in [root / "dist_common.py", *sorted((root / "rl").glob("*.py"))]:
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "is_transient_error":
-                definers.append(path.name)
-    # 只有 dist_common 是真实实现；batch_eval 允许同名但必须是纯转发。
-    assert set(definers) <= {"dist_common.py", "batch_eval.py"}, definers
-    assert "dist_common.py" in definers and len(definers) == 2, definers
-    b_src = (root / "rl" / "batch_eval.py").read_text(encoding="utf-8")
-    assert "return dist_common.is_transient_error(e)" in b_src
-    assert "TRANSIENT_HTTP_STATUS" not in b_src  # 判据逻辑不得复制回 B 层
-    assert "_BUSY_HINT" not in b_src
+
+    def definers_of(name: str) -> list[str]:
+        found = []
+        for path in [root / "dist_common.py", *sorted((root / "rl").glob("*.py"))]:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef) and node.name == name:
+                    found.append(path.name)
+        return found
+
+    definers = definers_of("is_transient_error")
+    # 只有 dist_common 是真实实现；B 层允许同名但必须是纯转发，且**恰好一份**。
+    assert "dist_common.py" in definers, definers
+    forwarders = [d for d in definers if d != "dist_common.py"]
+    assert len(forwarders) == 1, definers
+    fwd_src = (root / "rl" / forwarders[0]).read_text(encoding="utf-8")
+    assert "return dist_common.is_transient_error(e)" in fwd_src
+    assert "TRANSIENT_HTTP_STATUS" not in fwd_src  # 判据逻辑不得复制回 B 层
+    assert "_BUSY_HINT" not in fwd_src
+
+    # B 层调用点不变：`import rl.batch_eval` 拿到的那一名字必须就是上面那份转发。
+    import rl.batch_eval as be
+
+    home = importlib.import_module(f"rl.{forwarders[0][:-3]}")
+    assert be.is_transient_error is home.is_transient_error, forwarders
 
     a_layer = (root / "rl" / "dispatch.py").read_text(encoding="utf-8")
     c_layer = (root / "rl" / "eval_dispatch.py").read_text(encoding="utf-8")
@@ -266,15 +286,7 @@ def test_transient_judgement_defined_once_and_wired() -> None:
         # 带引号的标记字面量只许待在 dist_common（注释里提到它无所谓）
         assert '"task lost on node"' not in src
     # is_task_lost_error 只许有一份实现（不得复制回 A/B/C 层）
-    tl_definers = []
-    for path in [root / "dist_common.py", *sorted((root / "rl").glob("*.py"))]:
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "is_task_lost_error":
-                tl_definers.append(path.name)
-    assert tl_definers == ["dist_common.py"], tl_definers
-    b_layer = (root / "rl" / "batch_eval.py").read_text(encoding="utf-8")
-    assert "return dist_common.is_transient_error(e)" in b_layer
+    assert definers_of("is_task_lost_error") == ["dist_common.py"]
 
 
 def test_trace_enabled_env_contract(monkeypatch) -> None:

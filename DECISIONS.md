@@ -3252,3 +3252,27 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
   里的 1785 是修前读数，已在 `plan/nn-training-refactor.md` §5.5 标注基准顺移）；`tests/test_batch_eval.py` 838 → 880。
 - **门禁**：nn **2566 → 2567 passed / 3 skipped**（+1 = 新用例）；ruff / mypy 绿；
   根 `bun run check` 2120 pass / 0 fail（121404 expect，与改动前逐字一致）。
+
+## §2026-09-25-goalnn-batch-plan-b1-split（2026-09-25，B1：批语料规划 + 判据/门 纯搬出包）
+
+**决定：`rl/batch_eval.py` 拆它的第一步 B1 —— 23 个成员（13 函数 + 10 常量）纯搬到新模块
+`rl/batch_plan.py`**（1 常量 `DEFAULT_DATA_ROOT` 留给旧家，由再导出的 `REPO_ROOT` 派生）。
+全文（成员清单 / 宿主的选法 / 守卫演进 / 被否决备选 / 记账）→ `docs/nn/engineering.md` §23「第二十五刀」。
+
+- **为什么先 B1**：§2026-09-25-goalnn-batch-store-interface 的 B1–B4 里，B2（台账事务化）是真设计
+  改动、B3/B4 依赖 B2 的接口；B1 是**零锁零台账**的纯函数面（只读 `ladder.json` / `corpora.json` /
+  课程关卡文件）⇒ 可单独验证/提交/回滚，且把 B2 的改动面削到「台账 + 执行器」。
+- **零迁移依据 = 门面再导出（`X as X`，21 条）**：既有 `from rl.batch_eval import plan_units` 等调用点
+  （含 `dashboard/src/evalboard/kick-once.py`）一行不改，且 `batch_eval.X is batch_plan.X`；
+  两个私有名（`_forces_of` / `_KIND_CHAR`）刻意不再导出。
+- **唯一演进的守卫**：`tests/test_dist_common_poll.py` 写死了「同名定义只许住 `dist_common.py` /
+  `batch_eval.py` + 读 `batch_eval.py` 文本」⇒ 改为**按定义搜家**：非 `dist_common` 的同名定义恰好一个
+  且必须是纯转发，且 `rl.batch_eval` 拿到的就是那一份（对象级 `is`）。
+- **★ 反探针掀出的真漏洞**：首版 21 条变异 **4 条存活**（四个镜像常量改值）—— 守卫**拿常量比自己**
+  ⇒ 改常量同时改掉断言两边。修法 = 加一条**字面量**断言（这四个常量与
+  `dashboard/src/evalboard/{runner,store}.ts` 双侧镜像，值本身就是契约）。**测试绿 ≠ 篡改会红。**
+- **验证**：纯搬对账 **23/23 搬走 + 36/36 留下的逐字节等**（对 `git show HEAD:`）· 闭集 59 = 23 + 36 ·
+  再导出 21/21 对象恒等 · 反探针 **21/21 全红**。
+- **记账/门禁**：`batch_eval.py` **1805 → 1616** · `batch_plan.py` **271** · 守卫 **19 例**；
+  nn **2567 → 2586 passed / 3 skipped**（ruff + mypy 绿）；根 2120 / 0；dashboard typecheck + 1105 / 0；
+  `check-decisions` ok。**下一步 = B2**（`rl/batch_store.py`：8 个写点 → 具名转移 + `dirty` 才落盘）。

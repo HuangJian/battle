@@ -1900,6 +1900,95 @@ console 只读」，坏行**静默跳过**），它的 `enqueueBatch` 去重（�
 - 设计文档已标注落地状态：`plan/nn-training-refactor.md` §5.5 开头加「✅ 已先行落地」、§5.5.2 换成
   「已修 + 确定性复现用例」、§5.5.4 的 B2 去掉「修非原子写」、§5.5.5 的⑤ 改成「已提前落地」。
 
+### 第二十五刀（2026-09-25）：`batch_eval` 拆分第一步 B1 —— 「批语料规划 + 判据/门」出包
+
+用户指令：「给 batch_eval.py 设计「批存储」接口，为拆那个 1785 行的文件做准备」→ 设计（§5.5）
+交付后用户接着让先单独修那个非原子落盘缺陷（第二十四刀），然后「continue」= 按设计开工 B1。
+`rl/batch_eval.py` **1805 → 1616 行**（−189），新模块 `rl/batch_plan.py` **271 行**。
+
+#### 为什么 B1 是第一步（次序的依据，不是偏好）
+
+§5.5.4 列的 B1–B4 里：B2（8 个写点 → 具名转移 + `dirty` 才落盘）是**真设计改动**；B3/B4 要等 B2
+把「台账归谁」定下来。而 B1 搬的是**零锁、零台账读写**的纯函数面（读的是 `ladder.json` /
+`corpora.json` / 课程关卡文件这类**只读输入**）⇒ 可单独验证、单独提交、单独回滚，做完之后
+B2 的改动面只剩「台账 + 执行器」。
+
+| 搬走（23 = 13 函数 + 10 常量） | 留下（36 个顶层成员） |
+|---|---|
+| `REPO_ROOT`（路径锚点，三处路径由它派生）· `LADDER_JSON` / `CORPORA_JSON` / `LEVELS_DIR` · `REGRESSION_EVERY` / `BATCH_STAGE_BASE` / `EVAL_SEED0` / `SEGMENT_LEN` · `KIND_FOR_POLICY` / `_KIND_CHAR` · `is_transient_error` / `node_gate_reason` / `kind_for_policy` · `load_ladder` / `plan_units` / `corpora_path` / `load_corpora` / `corpus_doc` / `plan_verdict_units` / `units_for_batch` / `_forces_of` / `batch_iter_id` · `select_next_unit` | `DEFAULT_DATA_ROOT`（由再导出的 `REPO_ROOT` 派生）· `utc_now_iso` · `data_root` · `_heartbeat` · 背压/探活常量 · 锁（`_claim_guard` / `_claim_locked`）· 台账读写与请求面 · 台账巨团 · `BatchEvalRunner` · `dispatch_batch_bg` / `maybe_dispatch_batch` |
+
+`utc_now_iso` / `data_root` **故意不搬**：它们是「存储」的语义（格式与数据根），不是「规划」的——
+B2 会让它们进 `BatchStore`；现在搬进去 = 下一刀还得再搬一次。
+
+#### 宿主的选法在本刀是**反向**的
+
+前四刀都是「找一个调用者当宿主」（S19 祖先交集为空 ⇒ 组合根；S20/S21 挂调用者一侧；S22 把 DAG
+写进类声明；S23 提供者留根、调用者出包）。本刀搬的是**被调用者**——新模块被旧家调用，所以
+判据只剩一条：**依赖方向单一**。搬完 `batch_eval → batch_plan` 单向；
+
+- `batch_plan` 不 import 旧家（守卫按 **AST** 钉：`Attribute` / `Name` 里不得出现 `batch_eval`——
+  文本搜会命中 docstring 里那句合法的「既有 `from rl.batch_eval import plan_units` 一行不改」，
+  这是 S20 就记下的教训）；
+- 顶层 import 闭集 `{__future__, hashlib, json, os, pathlib, dist_common, rl.jsonc, rl.queue}`
+  （多一个也红）；
+- **分层快照未红**：`batch_plan` 经 `rl` 传递不达 remote ⇒ 不登记（与 S23 一样，**不红也是信息**）。
+
+#### 零迁移的依据 = 门面再导出
+
+旧家顶部 21 条自别名再导出（`X as X`）⇒ 既有 `from rl.batch_eval import plan_units` /
+`units_for_batch` / `select_next_unit` / `KIND_FOR_POLICY` / `BATCH_STAGE_BASE` 等调用点
+（含 `dashboard/src/evalboard/kick-once.py`）**一行不改**，且 `batch_eval.X is batch_plan.X` 恒真。
+
+★ 两条**格式**细节是 ruff 逼出来的、不是风格偏好：`combine-as-imports = false`（默认）下带 `as` 的
+括号块会被要求拆开 ⇒ 只能一条一行（与本仓 `remote/hub_server.py` 门面同形）；且 `import dist_common`
+与注释块之间要求一个空行。两个私有名（`_forces_of` / `_KIND_CHAR`）**刻意不导出**（守卫正面钉住
+「门面不得有它们」）。
+
+#### 唯一要演进的守卫：从「写死路径」改成「按定义搜家」
+
+`tests/test_dist_common_poll.py` 原来把两件事写死了：`is_transient_error` 的同名定义只允许住在
+`dist_common.py` / `batch_eval.py`，且必须读 `batch_eval.py` 的文本断言「纯转发」。搬完必然红（本刀
+预期内）。改法沿本仓已立的规矩（S16/S20 家族：**按定义搜，不写死路径**）：
+
+1. 非 `dist_common` 的同名定义**恰好一个**，且它的文件里必须是纯转发（`TRANSIENT_HTTP_STATUS` /
+   `_BUSY_HINT` 不得出现——判据不得复制回 B 层）；
+2. `importlib.import_module` 按①找到的模块名取家，再断言 `rl.batch_eval.is_transient_error is
+   家的.is_transient_error` —— **搬家不再让这条守卫静默失效**，而「门面真的再导出了同一对象」
+   从「靠人记得」变成机械事实。
+
+#### ★ 反探针擞出的真漏洞：守卫拿常量比它自己
+
+首版 21 条变异里 **4 条「存活」**：`BATCH_STAGE_BASE` / `EVAL_SEED0` / `SEGMENT_LEN` /
+`REGRESSION_EVERY` 改值全不红。查下去不是守卫空档，而是守卫自己写错了：功能性断言写的是
+`assert u["seed0"] == bp.EVAL_SEED0`——**改常量会同时改掉断言两边**，于是永远相等。
+
+修法：新增一条**字面量**断言（这四个常量是 `dashboard/src/evalboard/{runner,store}.ts` 的
+**双侧镜像**，值本身就是契约：2000 / 860001 / 100 / 3），并把功能性断言里所有自参照处换回字面量
+（`u17[0]["seed0"] == 860101` 而不是 `EVAL_SEED0 + SEGMENT_LEN * 1`）。重跑 **21/21 全红**。
+**“测试绿”与“篘改会红”是两件事**——这条已进 `MEMORY.md`。
+
+#### 验证与记账
+
+- **纯搬对账**（`tmp/verify_b1.py`，对 `git show HEAD:` 用 **AST 行区间取原文**）：
+  **23/23 搬走逐字节等 + 36/36 留下的逐字节等**；闭集 `HEAD 59 = MOVED 23 + STAYED 36`；
+  再导出 **21/21 对象恒等**。
+- **拆分脚本**是 `tmp/plan_split.py`（§17.1）：搬走的文本在**运行时从原文件提取**（不手抄），
+  每个接缝 `assert count == 1`；搬完只手动补了两处 ruff 要求的格式。
+- **新守卫** `tests/test_batch_plan_split.py`（**397 行 / 19 例**）：定义唯一 / 门面对象恒等 /
+  私有名不导出 / 无类 / import 闭集 / 禁反向边与传输层与 torch / 零锁零台账（AST 级）/ 旧家入边
+  恰好 6 条（含归属者）/ 旧家仅读 `REPO_ROOT` 一个再导出常量 / **7 条功能性（全部从新家调，
+  不经门面**⇒ 缺一个常量 import 就当场红）。
+- **入边闭集**（AST 计真实 `Call`，旧家剩 6 条）：`batch_iter_id` ← `BatchEvalRunner._run` ·
+  `is_transient_error` ← `BatchEvalRunner._run.worker` · `kind_for_policy` ← `BatchEvalRunner.__init__` ·
+  `node_gate_reason` ← `BatchEvalRunner._run.bringup` · `select_next_unit` / `units_for_batch` ←
+  `maybe_dispatch_batch`。
+- **门禁**：nn **2567 → 2586 passed / 3 skipped**（ruff `All checks passed` + mypy 绿）·
+  根 `bun run check` 2120 / 0 · dashboard typecheck + **1105 / 0**（改过 `corpora.ts` 的两行注释 ⇒
+  按规矩跑过）· `check-decisions` ok。
+- **provenance 同步**：`nn-training/eval_m1_once.py`（`rl.batch_eval.KIND_FOR_POLICY` →
+  `rl.batch_plan.KIND_FOR_POLICY`）· `dashboard/src/evalboard/corpora.ts`（双侧契约的 Python 路径
+  → `batch_plan.py::`，并注明旧名仍在再导出）。
+
 ### 未做完（S4 余下）
 
 `remote/` 内部**已零环**（见「拆环」节），`worker.py` 的拆分面**已收口**：只剩三个宿主函数
