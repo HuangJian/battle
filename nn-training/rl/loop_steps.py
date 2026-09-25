@@ -1,13 +1,18 @@
-"""loop_steps —— TrainingSteps mixin：单轮结算与梯度步（2026-09-02 从 rl/loop_core.py 拆出）。
+"""loop_steps —— TrainingSteps mixin：单轮结算与账（2026-09-02 从 rl/loop_core.py 拆出）。
 
-run_training 迭代体的「采集之后」各阶段：报告结算（stream 拆解 + 日志）、串行
-PPO 更新、权重导出与归档、iteration 事件落账。
+run_training 迭代体的「采集之后」各阶段里，**留在本文件**的是两类：
+课程读盘与配额（`_hot_reload_course` / `_course_iter` / `_per_stage_quota`）与
+落账/取证（`_write_iter_stats` / `_log_report` / `_record_iteration` / `_forensics` /
+`_commit_journal`）。八个成员彼此**零互调**（全部是叶子，各自被轮内步骤调用）。
 
-远端 PPO 腿（13 方法）在基类 `TrainingRemote`（`rl/loop_remote.py`，S4 第二步）；
-in-loop 评估链（8 成员 + 五个 eval 槽位）在基类 `TrainingEval`（`rl/loop_eval.py`，
-S4 第十七刀）。两者都是「调用者依赖被调用者」，组合类仍是
-`TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards)`；依赖的实例属性在
-TrainingLoop.__init__/迭代方法中赋值，此处仅声明类型。
+三簇移居基类（方向都是「调用者依赖被调用者」，组合类仍是
+`TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards)`）：
+  · 远端 PPO 腿（13 方法）→ `TrainingRemote`（`rl/loop_remote.py`，S4 第二步）；
+  · in-loop 评估链（8 成员 + 五个 eval 槽位）→ `TrainingEval`（`rl/loop_eval.py`，S4 第十七刀）；
+  · 产物出包（4 方法，含本文件原来**唯一**一条方法间调用链
+    `_export_offline_bundle` → `_volume_plan_block`）→ `TrainingExport`
+    （`rl/loop_export.py`，S4 第二十一刀）。
+依赖的实例属性在 TrainingLoop.__init__/迭代方法中赋值，此处仅声明类型。
 """
 
 from __future__ import annotations
@@ -17,8 +22,6 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import dist_common
-from rl.archive import backup_weights
 from rl.events import write_iteration
 from rl.log import log
 
@@ -28,8 +31,8 @@ from rl.log import log
 # `_drain_pending_eval`），所以 `TrainingEval` 是基类。**追加**在既有基类之后：两混入
 # 零重名、零互调、零 `super()` ⇒ 顺序在今天是惰性的，没有理由动已记录的 MRO。
 from rl.loop_eval import TrainingEval
+from rl.loop_export import TrainingExport
 from rl.loop_remote import TrainingRemote
-from rl.modes import _MODE_BACKUP_PREFIX
 
 if TYPE_CHECKING:
     from rl.commit_journal import CommitJournal
@@ -101,12 +104,13 @@ __all__ = [
 ]
 
 
-class TrainingSteps(TrainingRemote, TrainingEval):
-    """单轮结算与梯度步 mixin。
+class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
+    """单轮结算与账 mixin。
 
-    远端 PPO 腿（发布/领取/落位/failover，13 个方法）在基类 `TrainingRemote`
-    （`rl/loop_remote.py`）里；本类只由它驱动（`self._remote_ppo`），
-    两者共同被 `TrainingLoop` 组合。
+    三个基类按「调用者依赖被调用者」挂在本类**末位之后**（追加不插队，`__mro__[1]` 仍是
+    `TrainingRemote`）：远端 PPO 腿（`TrainingRemote`，13 方法）· in-loop 评估链
+    （`TrainingEval`，8 成员）· 产物出包（`TrainingExport`，4 方法）。本类只被它们驱动，
+    全体由 `TrainingLoop` 组合。
     """
 
     # 依赖的 TrainingLoop 实例属性（声明类型供 mypy/阅读；实际赋值在 TrainingLoop）
@@ -480,155 +484,25 @@ class TrainingSteps(TrainingRemote, TrainingEval):
             return 0
         return int(target_per_stage(target, n_stages))
 
-    # ---- 直推节点链路（提交 = 发布相位，等待 = 等待相位） ------------------------
-
-    def _ensure_ts_code(self, job_root: str, *, log: Any) -> None:
-        """M3：打包 rollout 用的 TS 运行时 zip（一次，缓存在 self 上）。
-
-        为什么在训练侧打而不是节点侧 `bun install`：`tools/sim/export-rl-rollout.ts`
-        的链路**零第三方运行时依赖**（非相对 import 只有 node 内建 `fs`/`path`），所以
-        打包即可，云机不必装依赖（plan §5.3）。内容固定时间戳 + 内容寻址 sha，
-        同源码反复跑只传一次。
-        """
-        if str(getattr(self, "_ts_code_sha256", "") or ""):
-            return
-        from remote.hub_client import pack_ts_code_zip
-
-        repo_root = Path(__file__).resolve().parents[2]  # nn-training/rl/x.py -> 仓根
-        zp = Path(job_root) / "ts_code.zip"
-        self._ts_code_sha256 = pack_ts_code_zip(repo_root, zp, log=log)
-        self._ts_code_zip_path = zp
-
-    def _volume_plan_block(self) -> dict | None:
-        """计划要带上的**动态采集块**（`target_transitions > 0` 时；见 `rl/volume_waves`）。
-
-        为什么必须进计划：全离线/半离线腿（kind=run）的逐轮语料由 `rl/plan.pairs_for` 重放
-        而成，而 `build_pairs` 根本不认 `target_transitions` —— 不带这块，云机采多少局就由
-        课程里那个 `seed_rotate` 数字决定（配小了就是**静默少采**：训练的样本量低于目标，
-        而云机没有本地集群那种实时补救机制——一轮一个 job，PPO 在 job 里跑完）。
-
-        两个口径细节：
-          * **est 用当前估计**（trailing 均值，回退课程声明值）——与 `_volume_est_samples`
-            同函数同 window，所以计划里的 G0 就是**导出那一刻**本地循环会用的那个数；节点
-            没有 hub 的 jsonl，est 只能被钉在计划里（这也是「同一计划跨机器逐字节一致」的
-            前提：现算会让两侧解出不同的语料指纹）。
-          * **mode 门与 `_per_stage_quota` 同源**：`target_transitions` 只对 per-tick 有意义
-            ⇒ 非 per-tick 返 None（= 老口径，逐字节不变）。
-
-        `--stages` 缺失/不可解析、est ≤ 0 一律**响亮退出**：静默降级回老口径正是要防的事。
-        """
-        args = self.args
-        if str(getattr(args, "mode", "")) != "per-tick":
-            return None
-        if int(getattr(args, "target_transitions", 0) or 0) <= 0:
-            return None
-        from rl.resume import trailing_samples_per_game
-        from rl.volume_waves import volume_block
-
-        declared = int(getattr(args, "est_samples_per_game", 0) or 0)
-        jsonl = getattr(self, "_jsonl_path", None)
-        est = (
-            int(trailing_samples_per_game(jsonl, window=5, fallback=declared) or declared)
-            if jsonl
-            else declared
-        )
-        try:
-            return volume_block(args, est_samples_per_game=est)
-        except ValueError as e:
-            raise SystemExit(
-                f"[run_rl] 动态采集无法写进离线计划（{e}）——修好课程/参数再导出："
-                "盘里没有的采集量规则，云机无法自行补上"
-            ) from e
-
-    def _export_offline_bundle(self, it: int, pairs: list[tuple[int, int]], n: int) -> None:
-        """`--export-bundle`：把 it..it+n-1 打成**可上传云机**的全离线任务包（本轮不训练）。
-
-        用户需求（2026-09-17）：「hub 支持打包导出训练任务（课程、初始权重、代码），以
-        kaggle/colab 官方方式上传云机后，云机全程自主完成训练」。与半离线的差别：包一旦
-        写出，hub 就可以关机——任务信息（课程/超参/血缘/计划/代码）全在包里。
-
-        轮次对齐（整条第 N 个容易错的地方）：本轮的 `it` **就是**包里要跑的第一轮（loop 的
-        `it` = last_completed+1），而包里 `plan.start_it` 必须 = `it - 1`（计划区间是
-        `start_it+1 .. end_it`，起点权重 = `args.out` = W(it-1) 的产物）。所以
-        `max_iters = n`（不是 n-1：这里没有「job 自己那一轮」要扣）。
-
-        没跑过任何一轮（`args.out` 无权重）就拒导——包里没有起点的任务等于没任务。
-        """
-        args = self.args
-        # ★ 2026-09-21（§3）：原先这里拒绝「非 remote」——`--ppo` 删除后该判据恒真、会把
-        #   整条导出路径误拒。单一 PPO 路径下「PPO 在节点上跑」是唯一形态，导出天然成立。
-        iters_total = int(getattr(args, "iters", 0) or 0)
-        if iters_total <= 0:
-            raise SystemExit(
-                "[run_rl] --export-bundle 需要课程声明 iters（包里的计划必须有终点——「跑到哪停」"
-                "是任务定义的一部分，不能靠云机猜）"
-            )
-        if it <= 1 and not dist_common.weights_fingerprint(args.out):
-            raise SystemExit(
-                f"[run_rl] --export-bundle: 没有起点权重（{args.out}）——先跑至少一轮，"
-                "或把已有权重放到 --out 指向的位置"
-            )
-        from rl.iter_job import build_iter_spec
-        from rl.plan import RUN_NODE_LABEL, build_plan, dump_plan, planned_iters
-
-        wver = dist_common.weights_fingerprint(args.out)
-        workers = int(getattr(args, "remote_iter_workers", 0) or 0) or int(
-            getattr(args, "workers", 1) or 1
-        )
-        game_timeout = float(getattr(args, "remote_iter_game_timeout", 0.0) or 0.0)
-        spec = build_iter_spec(
-            args,
-            pairs,
-            wver=wver,
-            workers=workers,
-            game_timeout_sec=game_timeout,
-            hub_bun=str(getattr(self, "bun", "bun") or "bun"),
-            node_label=RUN_NODE_LABEL,
-        )
-        plan = build_plan(
-            args,
-            it=it - 1,
-            iters_total=iters_total,
-            rotate_seed=int(self._rotate_seed),
-            max_iters=0 if n < 0 else n,
-            workers=workers,
-            game_timeout_sec=game_timeout,
-            budget_sec=float(getattr(args, "run_budget_sec", 0.0) or 0.0),
-            volume=self._volume_plan_block(),
-            log=log,
-        )
-        log(
-            f"[run_rl] 全离线导出：it{it} → it{plan['end_it']}"
-            f"（{len(planned_iters(plan))} 轮）——本轮不训练、不等待"
-        )
-        # export_path 非空 ⇒ `_remote_ppo` 只建 job 目录（打包源）+ 写包 + 抛 BundleExportedError。
-        self._remote_ppo(it, spec, plan_bytes=dump_plan(plan), export_path=str(args.export_bundle))
-
-    def _export_weights(self, it: int) -> None:
-        """权重归档（只归档不自动清理）。
-
-        ★ 2026-09-21（§3 单一 PPO 路径）：weights_json 恒由**认领到 job 的 worker** 产出、
-        经 `_remote_ppo` 三重校验落位到 args.out（D2/D12）——本机不再有 torch 导出路径
-        （goal/intent 导出分支随本机 PPO 一并退役），这里只归档 + 日志。
-        """
-        args = self.args
-        # 课程声明 backup_prefix/backup_dir 时优先（D6 课程单一事实来源）；缺省
-        # 退回按模式前缀 + 默认 nn-training/weights（旧行为）。
-        bak_prefix = str(getattr(args, "backup_prefix", "") or "") or _MODE_BACKUP_PREFIX[args.mode]
-        bak_dir = str(getattr(args, "backup_dir", "") or "") or None
-        bak = backup_weights(args.out, it, prefix=bak_prefix, backup_dir=bak_dir)
-        log(
-            f"[run_rl] ppo it{it}: weights already landed by the claimed worker "
-            f"(D12) -> {args.out}"
-        )
-        if bak:
-            log(f"[run_rl] weights archived -> {bak}")
+    # ---- 产物出包：已搬到 `rl/loop_export.py::TrainingExport`（S4 第二十一刀）------
+    #
+    # 这一簇 4 个成员是「这一轮要给出去的东西」：TS 运行时 zip（`_ensure_ts_code`）· 离线计划里的
+    # 动态采集块（`_volume_plan_block`）· 全离线任务包（`_export_offline_bundle`）· 权重归档
+    # （`_export_weights`）。**本文件原来唯一一条方法间调用链**（`_export_offline_bundle` →
+    # `_volume_plan_block`）就在这一簇里——搬走后本类**零方法间调用**（8 个成员全是叶子）。
+    #
+    # 方向：调用者依赖被调用者。调用者是 `RoundSteps`（`step_export_offline_bundle` /
+    # `step_export_weights`）与 `TrainingRemote`（`_remote_ppo_publish` → `_ensure_ts_code`、
+    # `_remote_run_segment` → `_volume_plan_block`），两者都在本类的基类之前 ⇒ 本簇挂
+    # `TrainingSteps` 的**末位**基类（`class TrainingSteps(TrainingRemote, TrainingEval,
+    # TrainingExport)`）。依据（实测）：4 个成员名在既有混入里零同名定义，末位追加不会被遮罩。
 
     # ------------------------------------------------- in-loop eval 墙钟（2026-09-17）
     # 整簇（`_eval_policy_cfg` / `_eval_join_soft_sec` / `_sweep_eval_tail` / `_join_eval` /
     # `_dispatch_delayed_eval` / `_eval_covered` / `_drain_pending_eval`，连同
     # `_eval_on_round` 的占位）已搬到 `TrainingEval`（`rl/loop_eval.py`，S4 第十七刀）——
-    # 那是本类里**唯一一条方法间调用链**，其余方法都是被轮内步骤各自调用的叶子。
+    # 那是本类里第一条被搬走的方法间调用链；留下的成员全是叶子（产物出包那一簇里还有一条
+    # `_export_offline_bundle` → `_volume_plan_block`，S4 第二十一刀一并搬去 `loop_export`）。
 
     def _record_iteration(self, it: int) -> None:
         """iteration 事件落账（字段契约在 rl/events.py::write_iteration）。

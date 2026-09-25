@@ -21,7 +21,8 @@
   loop_baseline.py TrainingBaseline mixin（it0 基线评估：指纹 + 落地摘 → 派/不派；S4 第二十刀）
   loop_iter_dir.py TrainingIterDir mixin（本轮目录续跑保留/重建 + 零 shard 配额告警；S4 第二十刀）
   loop_dispatch.py TrainingDispatch mixin（本轮派发与让位：采集三路 / A-eval 稀疏化 / EvalBoard 关窗；S4 第二十刀）
-  loop_steps.py    TrainingSteps mixin（结算 / 导出 / 落账；基类 TrainingRemote + TrainingEval）
+  loop_export.py   TrainingExport mixin（产物出包：TS 码 zip / 计划采集块 / 全离线包 / 权重归档；S4 第二十一刀）
+  loop_steps.py    TrainingSteps mixin（课程 / 落账 / 取证；基类 TrainingRemote + TrainingEval + TrainingExport）
   loop_eval.py     TrainingEval mixin（in-loop 评估链：派发 / 尾巴收拢 / join / 收官 drain；S4 第十七刀）
   loop_volume.py   TrainingVolume mixin（动态采集编排：初波/补波/连续配额 → 派发 → 报告合并；S4 第十八刀）
   loop_guards.py   TrainingGuards mixin（F4 熔断 / 止损 / keepIters 轮转）

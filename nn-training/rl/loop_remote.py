@@ -7,11 +7,14 @@
 
 ## 依赖方向：调用者依赖被调用者
 
-`rl/loop_steps.py` 里是 `class TrainingSteps(TrainingRemote)`——因为这一簇的**唯一入口**
-`_remote_ppo` 是被 TrainingSteps 的其余方法调用的（`run_training` 主链）。
-反方向只有 5 个小助手留在 TrainingSteps（`_commit_journal` / `_ensure_ts_code` /
-`_forensics` / `_per_stage_quota` / `_volume_plan_block`），它们在**组合实例**上动态解析
-（混入的常态；`TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards)` 是唯一被实例化的类）。
+`rl/loop_steps.py` 里是 `class TrainingSteps(TrainingRemote, …)`——因为这一簇的**唯一入口**
+`_remote_ppo` 是被 TrainingSteps 的其余方法调用的（`run_training` 主链）。元组此后只**追加**
+（S17 加 `TrainingEval`、S21 加 `TrainingExport`，`__mro__[1]` 恒为 `TrainingRemote`）。
+反方向靠 5 个小助手，它们在**组合实例**上动态解析（混入的常态；`TrainingLoop(RoundSteps,
+TrainingSteps, TrainingGuards, TrainingLifecycle)` 是唯一被实例化的类）：三个仍住 `TrainingSteps`
+（`_commit_journal` / `_forensics` / `_per_stage_quota`），两个随产物出包簇搬到基类
+`TrainingExport`（`_ensure_ts_code` / `_volume_plan_block`，S4 第二十一刀）——对本模块而言都是
+`self.*`，落点不影响解析。
 
 这样选而不是「给 `TrainingLoop` 加一个基类」：后者要改组合类 + 4 个「继承真混入」的测试宿主
 （`_Stub(TrainingSteps)` 等），而本方案 **`TrainingLoop` 的基类不变、测试宿主一行不改**。
@@ -20,7 +23,8 @@
 
 `dist_common` / `_push_submit` / `_push_wait_result` 被测试以**模块全局**注入；方法搬到这里，
 它们就在**本模块**的命名空间解析 ⇒ 测本模块方法的用例必须 patch `rl.loop_remote.*`
-（测 `TrainingSteps` 其余方法的用例仍 patch `rl.loop_steps.*`）。同名 seam 在两处并存是
+（测 `TrainingSteps` 其余方法的用例仍 patch `rl.loop_steps.*`；S4 第二十一刀搬走的那 4 个方法
+则 patch `rl.loop_export.*`——同名 seam 在三个命名空间里是**三个各自真实的注入点**）。同名 seam 在两处并存是
 **两个各自真实的注入点**，不是重复定义——见 tests/test_loop_transport_split.py。
 """
 

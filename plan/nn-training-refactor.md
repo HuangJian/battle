@@ -1051,6 +1051,36 @@ dashboard `kickstart-receipt.test.ts` 写死路径读 python 源码 —— 全�
 **门禁**：nn **2497 → 2510 passed / 3 skipped**；ruff / mypy 绿；根 `bun run check` 2120 pass / 0 fail；
 dashboard typecheck + **1105 pass / 0 fail**；`check-decisions` ok。
 
+#### 5.3.20 第二十一刀（2026-09-25，**已完成**）—— `TrainingSteps` 产物出包簇 → `rl/loop_export.py`
+
+用户指令：「继续按同一手法拆 `rl/loop_steps.py` 或 `loop_remote.py`」。取 `loop_steps`——**667 → 541 行**，
+新模块 `rl/loop_export.py::TrainingExport`（**210 行 / 4 成员**）。
+
+**刀口：先答「有没有链可牵」**。`TrainingSteps`（12 方法）的类内调用图**只有唯一一条方法间调用链**
+（`_export_offline_bundle` → `_volume_plan_block`），其余 **8 个是叶子**（零互调）⇒ 无连通链可牵，改按
+**判据同源**取簇：判据 = 「产物打包 / 打指纹 / 缓存 TS 码」= **出包家族**同一件事。
+
+| 新家 | 成员 | 入边（谁调它） |
+|---|---|---|
+| `rl/loop_export.py::TrainingExport` | `_ensure_ts_code` · `_volume_plan_block` · `_export_offline_bundle` · `_export_weights` | `loop_round_steps.py` ×2 · `loop_remote.py` ×1 · 本模块 ×1 |
+
+**宿主：末位追加** —— `class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport)`；`__mro__[1]` 仍是
+`TrainingRemote`，`TrainingLoop.__bases__` 一行不改。依据 = **实测遮罩面**（4 个成员名在既有混入里零同名 `def`）。
+三处钉元组的既有断言**演进登记**，全量 MRO 名单（S20 那篇）在 `TrainingEval` 后插入 `TrainingExport`。
+
+**patch 面 = 零迁移**（`rl.loop_steps` 只 patch 过 `log`，测的是留守的 `_write_iter_stats`），但仍钉「`log` seam
+落在本模块」。**死 import 清理**：`dist_common` / `backup_weights` / `_MODE_BACKUP_PREFIX`（AST 断言零引用）。
+
+**★ 真实发现**：`_export_offline_bundle` 的「无起点权重」分支**走不到**——`weights_fingerprint` → `sha256_file`
+对不存在文件**响亮抛 `FileNotFoundError`**（不是 falsy）⇒ 功能性用例改测 `iters<=0` 门（真跑 `SystemExit`）。
+
+**坑**：dashboard 跨项目盲区（第十六/十九/二十刀同族）—— `course-lifecycle.ts` 两处注释把 `--run-iters<0` 守卫
+指到 `loop_steps.py`，而守卫在 HEAD（S20）上**早已**住 `rl/loop_remote.py` ⇒ 改成 `rl/loop_remote.py`（注释-only）。
+
+**守卫** `tests/test_loop_export_split.py`（14 例）+ 反探针 **19/19**；纯搬对账 **4/4 逐字节**（留下的 **8/8** 同）。
+分层快照先红再登记**第六次**（`loop_export` 由**函数内延迟 import** `remote.hub_client` 入选）。
+**门禁**：nn **2510 → 2524 passed / 3 skipped**；ruff / mypy 绿；根 `bun run check` 2120 / 0；dashboard **1105 / 0**。
+
 ### 5.4 本轮**不做**（已核，刻意保留）
 
 - `remote/notebook_boot.py` ↔ `remote/offline_boot.py` 的孪生助手（`_build_opener` /

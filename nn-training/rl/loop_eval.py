@@ -13,7 +13,7 @@ _eval_covered ◄── _drain_pending_eval ────────────
 
 ## 依赖方向：调用者依赖被调用者
 
-`rl/loop_steps.py` 里是 `class TrainingSteps(TrainingRemote, TrainingEval)` —— 本簇是**被调用
+`rl/loop_steps.py` 里是 `class TrainingSteps(TrainingRemote, TrainingEval, …)` —— 本簇是**被调用
 者**（轮内 `_dispatch_delayed_eval` / `_join_eval` 由 `RoundSteps` 调，收官
 `_drain_pending_eval` 由 `TrainingLoop` 调），所以它是基类。**追加**在既有基类之后：两个混入
 之间零重名、零互调、零 `super()` ⇒ 顺序今天完全惰性，没有理由去动已经写在文档与守卫里的

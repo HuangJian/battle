@@ -75,6 +75,9 @@ CLUSTERS = {
 STAYS = ("__init__", "_run_inspect")
 
 #: 组装（本文件是这两条的唯一所有者）：`RoundSteps` 的基类元组与全量 MRO 名单。
+#: 2026-09-25（S4 第二十一刀）：`TrainingSteps` 末位追加 `TrainingExport` ⇒ 全量 MRO 名单里
+#: 在 `TrainingEval` 之后插入一项（`TrainingSteps.__bases__` 那三处断言由各刀的守卫自己演进——
+#: 见 `tests/test_loop_transport_split.py` / `test_loop_eval_split.py` / `test_loop_lifecycle_split.py`）。
 ROUND_STEPS_BASES = ("TrainingVolume", "TrainingBaseline", "TrainingIterDir", "TrainingDispatch")
 MRO_NAMES = [
     "TrainingLoop",
@@ -86,6 +89,7 @@ MRO_NAMES = [
     "TrainingSteps",
     "TrainingRemote",
     "TrainingEval",
+    "TrainingExport",
     "TrainingGuards",
     "TrainingLifecycle",
     "object",

@@ -78,7 +78,9 @@ L2_PACKAGES = ("remote",)
 #: `loop_iter_dir`（拿 `rl.collect_only` 的 `precollect_snapshot_wver`）· `loop_dispatch`（拿
 #: `rl.rollout_phase` 的 `dispatch_rollout_phase`）；**`loop_baseline` 反而回到纯逻辑**（它只拿
 #: `dist_common` / `rl.log` / `rl.queue.RUN_ID`，三者都不达 remote）⇒ 只登记前两个。
-#: 先红、再登记（第五次）。
+#: 同日（S4 第二十一刀）：`loop_steps` 拆出 `loop_export`（产物出包 4 方法的混入），它拿
+#: `remote.hub_client.pack_ts_code_zip`（`_ensure_ts_code` 里**延迟** import——本快照的 AST 也看
+#: 函数内 import）⇒ 同样先红、再登记（第六次）。
 RL_ORCHESTRATION = frozenset(
     {
         "bc_loop",
@@ -86,6 +88,7 @@ RL_ORCHESTRATION = frozenset(
         "loop",
         "loop_core",
         "loop_dispatch",
+        "loop_export",
         "loop_guards",
         "loop_iter_dir",
         "loop_lifecycle",

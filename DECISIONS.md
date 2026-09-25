@@ -3054,3 +3054,40 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
 - **门禁**：nn **2497 → 2510 passed / 3 skipped**（+13 = 新守卫）；ruff `All checks passed`；mypy 绿；
   根 `bun run check` 2120 pass / 0 fail；dashboard typecheck + **1105 pass / 0 fail**；`check-decisions` ok。
 —— 全文（分组表 / 宿主与顺序契约 / 三张表 / 反探针教训）→ `docs/nn/engineering.md` §23「第二十刀」。
+
+## §2026-09-25-goalnn-loop-export-cluster-split（2026-09-25，用户指令「继续按同一手法拆 `rl/loop_steps.py` 或 `loop_remote.py`」）
+
+拆 `rl/loop_steps.py` 的**产物出包簇**：**667 → 541 行**，4 个成员 → 新模块 `rl/loop_export.py::TrainingExport`
+（**210 行**）。同一对象、同一把锁、零行为变化，测试一行不改。
+
+- **侦察先答「有没有链可牵」**：`TrainingSteps`（667 行 / 12 方法）里**唯一一条方法间调用链** =
+  `_export_offline_bundle` → `_volume_plan_block`；其余 **8 个成员全是叶子**（类内零互调）。⇒ 无连通链可顺手牵，
+  改按**判据同源**取簇：判据 = 「产物打包 / 打指纹 / 缓存 TS 码」= **出包家族**的同一件事（同源失败语义：指纹不匹配 ⇒
+  `RetryableError` 之外一律响亮；缓存语义同规）。
+- **四成员**：`_ensure_ts_code` · `_volume_plan_block` · `_export_offline_bundle` · `_export_weights`。
+- **宿主：末位追加** —— `class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport)`；`__mro__[1]` 仍是
+  `TrainingRemote`，`TrainingLoop.__bases__` 一行不改。**遮罩面实测**：4 个成员名在既有混入里**零同名 `def`** ⇒
+  末位追加不会被 MRO 遮罩（这正是「追加末位」的依据，而不是「看起来整齐」）。
+- **方向 = 调用者依赖被调用者**：入边 `loop_round_steps.py` ×2（`_export_offline_bundle` / `_export_weights`）+
+  `loop_remote.py` ×1（`_volume_plan_block`）+ 本模块内 ×1（`_export_offline_bundle` → `_volume_plan_block`）；出边闭集 = `{_remote_ppo}`。
+- **patch 面 = 零迁移**：`rl.loop_steps` 命名空间被 `monkeypatch.setattr` 的只有 `log`，而它测的是**留守**的
+  `_write_iter_stats` ⇒ 本刀无 patch 点需迁移；`dist_common` / `backup_weights` / `_MODE_BACKUP_PREFIX` 全仓无测试 patch。
+  但 `log` 在**新模块**里解析 ⇒ 守卫钉「`_export_weights` 真跑且 `log` seam 落在**本模块**（打旧家一个字节都收不到）」。
+- **槽位手**：`_ts_code_sha256` / `_ts_code_zip_path` 的读手仍住 `rl/loop_remote.py`（写成闭集表）。
+- **死 import 清理**：删 `import dist_common` / `from rl.archive import backup_weights` / `from rl.modes import
+  _MODE_BACKUP_PREFIX`（AST 断言零引用）——「搬走实现后旧家的 import 会变成死代码」。
+- **★ 真实发现（不是代码错，是散文错）**：`_export_offline_bundle` 的「无起点权重」分支在盘上**走不到**——
+  `dist_common.weights_fingerprint` → `sha256_file` 对不存在的文件**响亮抛 `FileNotFoundError`**（不是返回 falsy）；
+  故功能性用例改测第一行的 `iters<=0` 门（真跑 `SystemExit`）。
+- **分层快照先红再登记（第六次）**：`RL_ORCHESTRATION` 加 `loop_export`——理由与既有条目不同：它**自己不经 remote**，
+  是 `_ensure_ts_code` 方法体内**延迟 import** `remote.hub_client` 而入选（AST 也看函数内 import）。
+- **dashboard 跨项目盲区（第十六/十九/二十刀同族）又一次**：`src/server/actions/course-lifecycle.ts` 两处注释把
+  `--run-iters<0` 守卫指到 `rl/loop_steps.py`，而该守卫在 HEAD（S20）上**早已**住 `rl/loop_remote.py`（旧文件零
+  `run-iters`）⇒ 改成 `rl/loop_remote.py`。**注释-only**。另两处 `specs.ts` / `push-config.ts` 明写「S4 首簇前在
+  `loop_steps.py`」= 历史记录，**不改**；`tests/exit-watchdog.test.ts` 是**伪造 traceback 夹具**，与真实路径无关。
+- **违反后果**：搬走成员在旧家留别名/副本 · 基类元组顺序漂（`__mro__[1]` 或组合类元组）· 入边闭集长出或被截胡 ·
+  新增出边 · 槽位手漂 · 顶层 import 长出或反向 import · 成员改名 · 旧家重吸收 `log` patch —— 均在**提交时**红
+  （反探针 19/19）。
+- **门禁**：nn **2510 → 2524 passed / 3 skipped**（+14 = 新守卫）；ruff `All checks passed`；mypy 绿；
+  根 `bun run check` 2120 pass / 0 fail；dashboard typecheck + **1105 pass / 0 fail**；`check-decisions` ok。
+—— 全文（成员表 / 宿主与末位追加依据 / 三张表 / 死 import / 反探针教训）→ `docs/nn/engineering.md` §23「第二十一刀」。

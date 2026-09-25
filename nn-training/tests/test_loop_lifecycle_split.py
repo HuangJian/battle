@@ -254,8 +254,11 @@ def test_composition_appends_the_new_mixin() -> None:
         TrainingGuards,
         TrainingLifecycle,
     )
-    # 旧两刀钉的「追加不插队」纪律仍逐字成立。
-    assert TrainingSteps.__bases__ == (TrainingRemote, TrainingEval)
+    # 旧三刀钉的「追加不插队」纪律仍逐字成立（元组已随各刀末位追加演进：S17 追加 `TrainingEval`、
+    # S21 追加 `TrainingExport`；本刀断言的是「前三项逐字不变」）。
+    from rl.loop_export import TrainingExport
+
+    assert TrainingSteps.__bases__ == (TrainingRemote, TrainingEval, TrainingExport)
     assert TrainingSteps.__mro__[1] is TrainingRemote
     assert RoundSteps.__bases__[0] is TrainingVolume
     assert RoundSteps.__mro__[1] is TrainingVolume

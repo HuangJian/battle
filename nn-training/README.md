@@ -80,6 +80,7 @@ nn-training/
 │   ├── loop_eval.py         #    in-loop 评估链 mixin：派发 → 尾巴收拢 → PPO 收官 join/交棒 → 收官 drain（TrainingSteps 的基类，S4 第十七刀）
 │   ├── loop_volume.py       #    动态采集编排 mixin：初波/补波/连续配额 → 派发 → 报告合并 → WAL（RoundSteps 的基类，S4 第十八刀）
 │   ├── loop_lifecycle.py    #    主循环骨架 mixin：setup / run 编排 / 轮派发 / 收官 / 停车（TrainingLoop 的基类，S4 第十九刀）
+│   ├── loop_export.py       #    产物出包 mixin：TS 码 zip / 计划采集块 / 全离线包 / 权重归档（TrainingSteps 的基类，S4 第二十一刀）
 │   ├── loop_baseline.py     #    it0 基线评估 mixin：bc 权重指纹 + 落地摘 → 派/不派（RoundSteps 的基类，S4 第二十刀）
 │   ├── loop_iter_dir.py     #    本轮目录与产出健康 mixin：续跑保留/重建 + 零 shard 告警（RoundSteps 的基类，S4 第二十刀）
 │   ├── loop_dispatch.py     #    本轮派发与让位 mixin：采集三路 / A-eval 稀疏化 / EvalBoard 关窗（RoundSteps 的基类，S4 第二十刀）

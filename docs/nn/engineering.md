@@ -1553,6 +1553,80 @@ MRO 里更靠前，否则占位反过来胜出 ⇒ 静默返回 falsy 把 eval �
 文档**报假红。改成 AST 计**真实 `Call` 节点**（`_self_call_counts`）+ 定义面也用 AST（`_defined_names`）：
 文档字符串/注释不再能被误读成结构。
 
+### 第二十一刀（2026-09-25）：`TrainingSteps` 的产物出包簇 → `rl/loop_export.py`
+
+用户指令：「继续按同一手法拆 `rl/loop_steps.py` 或 `loop_remote.py`」。取 `loop_steps`——**667 → 541 行**，
+4 个成员 → 新模块 `rl/loop_export.py::TrainingExport`（**210 行**）。同一对象、同一把锁、零行为变化，测试一行不改。
+
+#### 刀口：先答「有没有链可牵」，没有就按判据同源取簇
+
+`TrainingSteps`（667 行 / 12 方法）的类内调用图**只有一条方法间调用链**：`_export_offline_bundle` →
+`_volume_plan_block`；**其余 8 个成员全是叶子**（类内零互调）。⇒ 与第十七刀（叶子无链）同族，没有连通链可顺手牵，
+改按**判据同源**取簇：判据 = 「产物打包 / 打指纹 / 缓存 TS 码」= **出包家族**的同一件事。
+
+| 成员 | 干什么 | 判据 |
+|---|---|---|
+| `_ensure_ts_code` | TS 码 zip 缓存（sha256 命中即复用） | 缓存语义同规 |
+| `_volume_plan_block` | 写卷计划块 | 打包前的元数据 |
+| `_export_offline_bundle` | 导出离线任务包（唯一次级调用者） | 产物出包 |
+| `_export_weights` | 导出权重快照 | 产物出包 |
+
+#### 宿主：**末位追加**，`__mro__[1]` 与组合类一行不改
+
+`class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport)`——末位追加的依据是**实测遮罩面**：
+4 个成员名在既有混入里**零同名 `def`**（不是「看起来整齐」）。`TrainingLoop.__bases__` 逐字不变，
+`__mro__[1]` 仍是 `TrainingRemote`。三处钉 `TrainingSteps.__bases__` 的既有断言（`test_loop_transport_split` /
+`test_loop_eval_split` / `test_loop_lifecycle_split`）**演进登记**；全量 MRO 名单的唯一所有者（S20 那篇
+`test_loop_core_tail_split`）在 `TrainingEval` 后插入 `TrainingExport`。
+
+#### 三张跨模块手表
+
+- **入边闭集**：`loop_round_steps.py` ×2（`_export_offline_bundle` / `_export_weights`）· `loop_remote.py` ×1
+  （`_volume_plan_block`）· 本模块内 ×1（`_export_offline_bundle` → `_volume_plan_block`）。
+- **出边闭集 = `{_remote_ppo}`**（`loop_remote.py`）。
+- **槽位手**：`_ts_code_sha256` / `_ts_code_zip_path` 的读手仍住 `rl/loop_remote.py`。
+
+#### patch 面 = 零迁移（但对 `log` 的落点仍要钉）
+
+`rl.loop_steps` 命名空间被 `monkeypatch.setattr` 的只有 `log`，而它测的是**留守**的 `_write_iter_stats` ⇒
+本刀无 patch 点需迁移；`dist_common` / `backup_weights` / `_MODE_BACKUP_PREFIX` 全仓无测试 patch。
+但 `log` 在**新模块**里解析 ⇒ 守卫钉「`_export_weights` 真跑且 `log` seam 落在**本模块**（打旧家一个字节都收不到）」
+（第十六刀 `SEND_TIMEOUT_SEC` / 第十八刀 `log` 的同族形状，本仓又一次）。
+
+**死 import 清理**：删 `import dist_common` / `from rl.archive import backup_weights` /
+`from rl.modes import _MODE_BACKUP_PREFIX`（AST 断言零引用）——「搬走实现后旧家的 import 会变成死代码」。
+
+#### ★ 真实发现：一段**走不到**的分支（散文错，不是代码错）
+
+`_export_offline_bundle` 的「无起点权重」分支在盘上**走不到**——`dist_common.weights_fingerprint` →
+`sha256_file` 对不存在的文件**响亮抛 `FileNotFoundError`**（不是返回 falsy）。故功能性用例不去构造那个分支，
+改测第一行的 `iters<=0` 门（真跑 `SystemExit`）。
+
+#### 另一个坑：dashboard 跨项目盲区（第十六/十九/二十刀同族）又一次
+
+`dashboard/src/server/actions/course-lifecycle.ts` 两处注释把 `--run-iters<0` 守卫指到 `rl/loop_steps.py`，
+而该守卫在 HEAD（S20）上**早已**住 `rl/loop_remote.py`（旧文件零 `run-iters`）⇒ 改成 `rl/loop_remote.py`。
+**注释-only**。另两处 `specs.ts` / `push-config.ts` 明写「S4 首簇前在 `loop_steps.py`」= 历史记录，**不改**；
+`tests/exit-watchdog.test.ts` 是**伪造 traceback 夹具**，与真实路径无关。
+
+#### 验证
+
+- **纯搬对账**：搬走的 **4/4 逐字节等价**；**留下的 8/8 同**——即对旧文件的改动只有「删块 + 补指针 +
+  清 import + 头注 + 类壳 docstring」。
+- **守卫** `tests/test_loop_export_split.py`（**14 例**）：成员只在**新家** · 对象恒等 · 组装逐字（三件套 +
+  `__mro__[1]` + 本簇**不在**组合类直接基类里）· 借用声明闭集 = 派生集 · 入边闭集（AST 计真实 `Call`）·
+  出边闭集 = `{_remote_ppo}` · 槽位写-读手 · 旧家不再吸收 patch · 顶层 import 闭集 / 禁反向边 / DI 只许延迟 ·
+  **★ `loop_steps` 余下零方法间调用** · **★ 四条功能性**（`_volume_plan_block` 两道 mode/target 门 ·
+  `_ensure_ts_code` 缓存语义（seam = `remote.hub_client.pack_ts_code_zip`）· `_export_weights` 真跑且 `log` seam
+  落点 · `_export_offline_bundle` 无 iters 时响亮 `SystemExit`）。
+- **反探针 19/19**（每条先断言锚点唯一）；还原后 sha256 无漂移。
+- **分层快照先红再登记（第六次）**：`RL_ORCHESTRATION` 加 `loop_export`——它**自己不经 remote**，是
+  `_ensure_ts_code` 方法体内**延迟 import** `remote.hub_client` 而入选（AST 也看函数内 import）。
+- **门禁**：nn **2510 → 2524 passed / 3 skipped**；ruff `All checks passed`；mypy 绿；根 `bun run check`
+  2120 pass / 0 fail；dashboard typecheck + **1105 pass / 0 fail**；`check-decisions` ok。
+- **顺手同步的 provenance**：`rl/__init__.py` / `README.md` 模块表 · `rl/volume_waves.py`（`loop_steps._volume_plan_block`
+  → `loop_export._volume_plan_block`）· `rl/loop_remote.py` 头注（元组只追加 + 三个 seam 命名空间）· `rl/loop_eval.py` 头注。
+
 ### 未做完（S4 余下）
 
 `remote/` 内部**已零环**（见「拆环」节），`worker.py` 的拆分面**已收口**：只剩三个宿主函数
@@ -1571,8 +1645,10 @@ HTTP 面（`hub/http_face.py` L5）与引导链（`hub/boot.py` L6）分开，�
 `loop_core` 这条线**已收口**：第十九刀（主循环骨架 7 成员 → `rl/loop_lifecycle.py`）与第二十刀
 （余下 7 个叶子按判据同源分成 `rl/loop_baseline.py` / `loop_iter_dir.py` / `loop_dispatch.py` 三簇）
 切完后，`rl/loop_core.py` **1386 → 240 行**，`TrainingLoop` 成了**纯组合类**（只剩 `__init__` 与
-结构性例外的 `_run_inspect`）。`rl/` 侧余下的候选是 `loop_steps.py`（666 行，12 个叶子无新链）与
-`loop_remote.py` / `loop_guards.py`（大但各自的簇已按链切过）。
+结构性例外的 `_run_inspect`）。`rl/` 侧的继续：**第二十一刀**切了 `loop_steps.py` 里唯一能成簇的出包家族（4 成员 / 126 行 →
+`rl/loop_export.py`，`loop_steps.py` 667 → 541 行）——余下 8 个是**互不调用的叶子**（零新链），连同
+`loop_remote.py`（993 行，13 成员是**一个 862 行连通分量**，按链切不动）与 `loop_guards.py`（784 行）
+成为下一刀候选。
 
 **✅ 清理已做（2026-09-24，第十二刀）：`remote/job_fs._ensure_commit` 已删**——第六步之一登记的
 既存死代码（全仓零调用，只搬未删）。同时删 `job_fs.__all__` 条目、`worker.py` 的门面转发、

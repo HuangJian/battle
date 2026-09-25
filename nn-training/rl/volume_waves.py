@@ -419,7 +419,7 @@ def wave_pairs(
 #
 # ⚠ 残留（计划自带、节点无 hub 可查，所以只能这样）：云机**只跑初波**，补波是本地集群
 #   才有的机制。est 偏小（少采）时本地会补到达标，云机会短一点点；计划因此把 est **钉死**
-#   在导出那一刻的估计值上（见 `loop_steps._volume_plan_block`），而不是让节点现算。
+#   在导出那一刻的估计值上（见 `loop_export._volume_plan_block`），而不是让节点现算。
 
 #: `plan["volume"]` 的字段集（hub 组装 / 节点重放共用的形状；少一个字段就拒收）。
 VOLUME_BLOCK_FIELDS: tuple[str, ...] = (

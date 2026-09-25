@@ -23,7 +23,7 @@ _eval_covered ← _drain_pending_eval ──────────────
 
 1. 8 个成员**定义**在新家，`TrainingSteps` 里**零同名定义**（门面只能是门面）；
 2. 接线是**对象级同一**（`TrainingSteps.X is TrainingEval.X`），不是同名副本；
-3. 组装是**追加**：`__bases__ == (TrainingRemote, TrainingEval)`（组合类的直接基类里没有本簇；
+3. 组装是**追加**：`__bases__ == (TrainingRemote, TrainingEval, …)`（组合类的直接基类里没有本簇；
    2026-09-25 S4 第十九刀起那支元组的第四件是 `TrainingLifecycle`——见 test_loop_lifecycle_split）；
 4. **状态归属唯一**：五个 eval 槽位只在 `TrainingEval` 声明一处；旧类里那两处跨模块使用
    （`_log_report` 写 `_eval_thread`、`_record_iteration` 读 `_eval_join_sec`）**经继承**可见
@@ -192,13 +192,16 @@ def test_composition_appends_the_new_mixin() -> None:
     """
     from rl.loop_core import TrainingLoop
     from rl.loop_eval import TrainingEval
+
+    # S4 第二十一刀又在**末位**追加了 `TrainingExport`（产物出包）——本簇仍在原位置。
+    from rl.loop_export import TrainingExport
     from rl.loop_guards import TrainingGuards
     from rl.loop_lifecycle import TrainingLifecycle
     from rl.loop_remote import TrainingRemote
     from rl.loop_round_steps import RoundSteps
     from rl.loop_steps import TrainingSteps
 
-    assert TrainingSteps.__bases__ == (TrainingRemote, TrainingEval)
+    assert TrainingSteps.__bases__ == (TrainingRemote, TrainingEval, TrainingExport)
     # 追加（而不是插队）的判据：2026-09-23 写下的 MRO 第 2 位断言逐字仍成立。
     assert TrainingSteps.__mro__[1] is TrainingRemote
     # 组合类与四个「继承真混入」的测试宿主都不必改：本簇**不是**组合类的直接基类。
