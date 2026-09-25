@@ -968,7 +968,42 @@ _record_iteration` 的**数据流**，不是调用流）或「导出与配额」
 
 **下一刀候选（已量）**：`rl/batch_eval.py`（1785 行，全仓最大）的 35 个顶层函数是**一个 28 节点巨团**
 ⇒ 按链切不动，要拆得先设计「批存储」接口（真设计改动）；`loop_core.py` 余下的生命周期链（7 成员）
-就是「主循环骨架」本身，切开前需先答「拆出去后谁是宿主」。
+就是「主循环骨架」本身，切开前需先答「拆出去后谁是宿主」。**⇒ 第十九刀已答完并落地（见下）。**
+
+#### 5.3.18 第十九刀（2026-09-25，**已完成**）—— 主循环骨架 → `rl/loop_lifecycle.py`
+
+用户指令：「拆 `loop_core` 余下的生命周期链（7 成员 = 主循环骨架），**先答清「拆出去后谁是宿主」**」。
+**`rl/loop_core.py` 931 → 446 行**；新模块 `rl/loop_lifecycle.py::TrainingLifecycle` **673 行**
+（7 方法 351 行 + 7 个只能随它走的模块级定义 150 行 = 闭包实测）。
+
+| 判据 | 实测 | 用在哪 |
+|---|---|---|
+| 入边（谁以 `self.` 调本簇） | `loop_remote`（TrainingRemote）×1 · `loop_round_steps`（RoundSteps）×2，都打 `_evalboard_idle` | 宿主必须同时是两个 caller 的祖先 |
+| 两个 caller 的祖先集交集 | **`{object}`**（空） | **sibling 宿主不存在** ⇒ 只能挂组合根 |
+| 出边（谁在 concrete 上调它） | `.run`（`rl/loop.py`）· `.run_one_round`（`loop_runner`）· `._setup` / `.finish_course`（`loop_serve` 的多态 `engine`） | 同指 `TrainingLoop`（`BcLoop` 自带同名方法，无关） |
+| 7 个成员名在既有混入里的同名 `def` | **0** | 追加末位不会被 MRO 遮罩 |
+| 7 个模块级名字的 monkeypatch 点 | **0**（只有 4 处普通 import） | 不留别名，同步 4 处调用点 |
+
+**组装**：`TrainingLoop.__bases__` 三件套 → **末位追加**四件套；两处 S17/S18 写的「组合类三件套逐字不变」
+断言**演进登记**为四件套（两处**把心**不动：本簇不是组合类的直接基类，`TrainingSteps.__bases__` /
+`RoundSteps.__bases__` / 各 `__mro__[1]` 逐字不变）。
+
+**守卫** `tests/test_loop_lifecycle_split.py`（13 例）：成员与模块级名字只在新家 · 对象恒等 · 旧家零别名 ·
+组合类四件套 + 判定 MRO · **宿主判据的机器形式**（入边计数 + 祖先集交集为空 + `not hasattr(RoundSteps,
+"_evalboard_idle")`）· 借用声明 == 派生集 · 三张跨模块手表（入边/出边/槽位写-读）· 顶层 import 闭集 +
+禁反向边 · **★ 三条功能性**（出边手归属 · `run_one_round` 真跑通含异常分类与让位响亮报错 · 旧家不再吸收
+patch）。反探针 **18/18**；纯搬对账 **14/14 逐字节**（留下的成员 **10/10** 同）。
+
+**⚠ 三个坑（全是「搬家后按路径读源码的守卫失效」家族）**：① `tests/test_batch_eval.py` 写死路径读
+`loop_core.py` 找 `maybe_dispatch_batch` ⇒ 改读持有者 + 钉「恰好一处定义」；② `e2e/test_loop_supervisor_
+integration.py` 经中间名字 `rl.loop_core.time` 补 `time.sleep` ⇒ 旧家不再 import `time` 后响亮
+`AttributeError` ⇒ 改为直接补 `time` 模块对象；③ **dashboard 跨项目盲区**（第十六刀同族）：`kickstart-
+receipt.test.ts` 写死路径读 `loop_core.py` 找 `KICKSTART_DEFAULT_WARN` ⇒ 改成源码树搜定义
+（`rlSourceDefining`）+ 同步四处注释路径。**锚点教训（延续第十五刀）**：⑧ 原选字面量在
+`loop_round_steps.py` 里有两处，`assert count == 1` 当场拦下——锚点写错 ≠ 守卫空档。
+
+**门禁**：nn **2484 → 2497 passed / 3 skipped**；ruff / mypy 绿；根 `bun run check` 2120 pass / 0 fail；
+dashboard typecheck + **1105 pass / 0 fail**。
 
 ### 5.4 本轮**不做**（已核，刻意保留）
 

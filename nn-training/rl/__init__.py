@@ -16,7 +16,8 @@
   eval_m1.py       m1-eval 干净评估管线（intent/goal 模式；整批 + Δ 止损，DECISIONS §307）
   stream.py        流式迭代（采集与 PPO 波次重叠）
   loop.py          run_training 入口（薄包装）
-  loop_core.py     TrainingLoop 主循环（setup / 迭代编排 / 目录 / 采集派发）
+  loop_core.py     TrainingLoop 主循环**组合根**（__init__ 槽位 / 迭代目录 / 采集派发 / 基线评估）
+  loop_lifecycle.py TrainingLifecycle mixin（主循环骨架：setup / run 编排 / 轮派发 / 收官 / 停车；S4 第十九刀）
   loop_steps.py    TrainingSteps mixin（结算 / 导出 / 落账；基类 TrainingRemote + TrainingEval）
   loop_eval.py     TrainingEval mixin（in-loop 评估链：派发 / 尾巴收拢 / join / 收官 drain；S4 第十七刀）
   loop_volume.py   TrainingVolume mixin（动态采集编排：初波/补波/连续配额 → 派发 → 报告合并；S4 第十八刀）

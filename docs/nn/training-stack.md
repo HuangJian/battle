@@ -916,7 +916,7 @@ PPO、等 eval 尾巴）**不占执行权**是单进程多课程的关键；每�
 接线：
 
 ```
-loop_core._setup_common   ← load_ledger 一次
+loop_lifecycle._setup_common  ← load_ledger 一次（S4 第十九刀前住 loop_core）
     next_it / rotate_seed / ent_peak / train_sec_total / train_samples_total
     kl_streak / ent_streak / stop_loss_streak / soft_remediate_count
 events.write_*             → 返回事件 dict

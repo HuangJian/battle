@@ -1352,7 +1352,104 @@ _volume_collect_continuous（VOLUME_RULE_V2 生产路径）───────
 设计「批存储」接口（把 `read/write_batches` + `_claim_locked` 从模块全局收成一个对象）——那是设计
 改动，不是搬家。`loop_core.py` 余下的两个簇也可切：生命周期（7 成员：`run` / `_setup` / `_setup_common`
 / `run_one_round` / `_park_after_completion` / `finish_course` / `_evalboard_idle`）与基线评估（2 成员）
-——但前者就是「主循环骨架」本身，切开需先答「拆出去后谁是宿主」。
+——但前者就是「主循环骨架」本身，切开需先答「拆出去后谁是宿主」。**→ 这一问已在第十九刀答完并落地。**
+
+---
+
+### 第十九刀（2026-09-25）：主循环骨架 → `rl/loop_lifecycle.py::TrainingLifecycle`
+
+用户指令：「拆 `loop_core` 余下的生命周期链（7 成员 = 主循环骨架），**先答清「拆出去后谁是宿主」**」。
+`rl/loop_core.py` **931 → 446 行**；新模块 `rl/loop_lifecycle.py` **673 行**（7 方法 351 行 + 7 个模块级
+定义 150 行 + 借用声明块（42 名）+ 头注/import/类壳）。
+
+#### 宿主判据（本刀题眼）
+
+本仓组装修辞是「**调用者依赖被调用者**」（`rl/loop_remote.py` 头注）：把被调用的一簇挂到调用者那一侧。
+本簇**破例**，而且破得有据可查——入边把「调用者一侧」这条路堵死了：
+
+```
+_r1（入边）：rl/loop_remote.py（TrainingRemote）    → self._evalboard_idle(...)   ×1
+            rl/loop_round_steps.py（RoundSteps）  → self._evalboard_idle(...)   ×2
+```
+
+新混入要同时是两个 caller 的祖先才接得住这条**既有**入边（搬家前它解析到 `loop_core` 里的定义——
+**手数不变，只是换了落点**，两处源码一字不改）。而：
+
+```
+set(RoundSteps.__mro__)      = {RoundSteps, TrainingVolume, object}
+set(TrainingRemote.__mro__)  = {TrainingRemote, object}
+交集                          = {object}   ⇒ 任何 sibling 宿主都不存在
+```
+
+唯一出路 = 组合根 `TrainingLoop`。出边同指：`.run` / `.run_one_round` / `._setup` / `.finish_course`
+的调用者全是 `TrainingLoop` 实例——`rl/loop_serve.py` 的 `engine` 虽是 `Any`（多态：`BcLoop |
+TrainingLoop`），但 `BcLoop` **自带** `_setup`／`run_one_round`／`finish_course`（`bc_loop.py:1182` 起），
+与本簇无关。这条判据被写成**机器可检**的断言（守卫 `test_host_verdict_is_the_composition_root`）：
+入边呼叫点计数 + 祖先集交集为空 + `not hasattr(RoundSteps, "_evalboard_idle")` —— 把混入挪到 sibling
+或把定义复制进 caller 都会红。
+
+#### 组装：末位追加，两处旧断言**演进登记**
+
+```
+class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle):
+```
+
+追加末位的依据是实测：**7 个成员名在既有混入里零同名定义**（新写的侦察器扫全部混入的 `def`）⇒ MRO 不会
+遮罩。代价落在 S17/S18 写的两处断言上（它们钉「组合类三件套逐字不变」）：`test_loop_eval_split.py` 与
+`test_loop_volume_split.py` 各自把元组演进为四件套（并把 MRO 名单里插入 `TrainingLifecycle`）——两处
+**把心**未动：本簇（eval / volume）仍不是组合类的直接基类，`TrainingSteps.__bases__` /
+`RoundSteps.__bases__` / 各 `__mro__[1]` 逐字不变。判据来源：先读 `loop_remote.py` 头注看本仓为何两次
+拒绝「给 `TrainingLoop` 加基类」，再量到「这次拒绝不了」。
+
+#### 跨模块手与状态：三张表 + 借用声明
+
+- **入边闭集**：`loop_remote` ×1 · `loop_round_steps` ×2（新入边必须改表）。
+- **出边闭集**（本模块调兄弟混入，混入常态的动态解析）：`run` → `_drain_pending_eval`（TrainingEval）·
+  `run_one_round` → `round_steps` / `round_failure`（RoundSteps）· `finish_course` → `_sync_cloud_halt`
+  （TrainingGuards）。
+- **槽位写-读手**：`_course_fp` / `_corpus_fp` 由本模块 `_setup_common` **写**、旧家 `_prepare_iter_dir` /
+  `_rollout_phase` **读**（量出来的）。
+- **状态归属不变**：槽位声明仍全在 `TrainingLoop.__init__`。新混入的类级声明块只是**借用**（42 个名字，
+  与 mypy 约定同 `rl/loop_volume.py`：混入的状态契约必须在每个文件里可见），守卫断言它**逐项等于**
+  「碰到的、不属于本模块的」名字集合 —— 声明闭集是**派生**的，不是抄来的常量。
+- 一处精度细节：`round_failure` 声明为 `Callable[..., RoundOutcome]` 而不是 `Any`——`run_one_round` 直接
+  `return` 它，`Any` 会让 mypy 报 `no-any-return`；而方法体要**逐字节**保持搬前原样，所以把精度放声明里。
+
+#### ★ 三个「搬家后按路径读源码的守卫失效」坑（本仓第六/七/八次撞上）
+
+1. **`tests/test_batch_eval.py`**：按写死路径读 `loop_core.py` 找 `maybe_dispatch_batch`（B/C 批与 A-eval
+   解耦的断言）⇒ `_evalboard_idle` 搬走后假红。修法同第十六刀：读**持有者**，并把「`def _evalboard_idle`
+   全仓恰好一处」也写进断言。
+2. **`e2e/test_loop_supervisor_integration.py`**：`monkeypatch.setattr(lc.time, "sleep", …)` 经
+   **中间名字** `rl.loop_core.time` 打补丁（原意是补 `time` 模块对象）⇒ 旧家不再 import `time` 后响亮
+   `AttributeError`（**好失败**，不是静默）。改成直接补 `time` 模块对象：与原先等价，且不再依赖任何中间
+   命名空间。
+3. **跨项目盲区（第十六刀同族）**：dashboard 的镜像常量守卫按写死路径读 `nn-training/rl/loop_core.py` 找
+   `KICKSTART_DEFAULT_WARN` ⇒ 齐红。按第十六刀的修法升级为**源码树搜定义**（`rlSourceDefining(name)`：
+   扫 `nn-training/rl/*.py`，谁定义谁返回），并同步四处注释里的模块路径（`kickstart-receipt.ts` ×2 ·
+   `paired-seed-receipt.ts` · `course-lifecycle.ts` · `eval-board/index.ts` 那句过时行号）。
+
+#### 反探针锚点的教训（延续第十五刀）
+
+⑧ 原定改 `self._evalboard_idle(it, ctx.dist_cfg)` —— 该字面量在 `loop_round_steps.py` 里**有两处**，
+`assert count(old) == 1` 当场拦下。**锚点写错 ≠ 守卫空档**：改用 `loop_remote` 里唯一那处。反探针
+**18/18** 全红（每条先断言锚点唯一）。
+
+#### 验证
+
+- **纯搬对账**：AST 逐成员 ⇒ 搬走的 **14/14 逐字节等价、零申报差异**（7 方法 + 7 模块级定义）；
+  **留下的也 10/10 逐字节等价**（9 方法 + `run_inspect`）——即本刀对旧文件的改动只有「删块 + 补指针 + 换
+  基类 + 清 import」。
+- **守卫** `tests/test_loop_lifecycle_split.py`（13 例）。反探针 **18/18**。
+- **门禁**：nn **2484 → 2497 passed / 3 skipped**（+13）；ruff `All checks passed`；mypy 绿；根
+  `bun run check` 2120 pass / 0 fail；dashboard typecheck + **1105 pass / 0 fail**。
+- **顺手同步的 provenance**：`rl/__init__.py` / `README.md` 模块表 · `loop_core.py`（模块 + 类 + MRO
+  docstring + 旧位置指路注释 + `__all__` 显式声明再导出的 `ROUND_*`）· `rl/loop_guards.py` ·
+  `rl/loop_transport.py` · `rl/loop_round.py` · `rl/loop_round_steps.py` · `rl/loop_remote.py` ·
+  `rl/bc_loop.py` · `rl/collect_only.py`（4 处普通 import）· `tests/test_layering.py`（`loop_lifecycle`
+  登记进 `RL_ORCHESTRATION`，先红再登记**第四次**）。
+- **刻意不动**：`docs/nn/training-stack.md` 里带日期的历史记录（R2a 落地记等）不改写；只把一处**当前**
+  接线图里的 `loop_core._setup_common` 改成 `loop_lifecycle._setup_common`。
 
 ### 未做完（S4 余下）
 

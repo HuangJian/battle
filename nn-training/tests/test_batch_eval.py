@@ -73,11 +73,17 @@ def test_hooks_decoupled_from_a_eval() -> None:
     """B/C 批与 A-eval 解耦（2026-09-11）：rollout 不再领批；TrainingLoop idle 窗领取。"""
     src = (ROOT / "rl" / "rollout_phase.py").read_text(encoding="utf-8")
     assert "maybe_dispatch_batch" not in src
+    # S4 第十九刀：`_evalboard_idle`（认领口）随主循环骨架搬去 `rl/loop_lifecycle.py`，
+    # `_evalboard_yield`（让位口）仍在 `loop_core` ⇒ 本断言按**持有者**读，不按写死的文件
+    # 路径读（同 S16 的修法：写死路径的守卫会在下次搬家时静默失效或假红）。
     lc = (ROOT / "rl" / "loop_core.py").read_text(encoding="utf-8")
-    assert "_evalboard_idle" in lc
+    life = (ROOT / "rl" / "loop_lifecycle.py").read_text(encoding="utf-8")
+    loop_src = lc + life
     assert "_evalboard_yield" in lc
-    assert "maybe_dispatch_batch" in lc
-    assert "window_event=self._eb_window" in lc
+    assert "def _evalboard_idle" in life, "idle 认领口搬家后必须恰好一处定义"
+    assert loop_src.count("def _evalboard_idle") == 1
+    assert "maybe_dispatch_batch" in loop_src
+    assert "window_event=self._eb_window" in loop_src
     ed = (ROOT / "rl" / "eval_dispatch.py").read_text(encoding="utf-8")
     # 节点门判定在 eval_dispatch 里（2026-09-17 起 = check_code_hash，与 rollout 同源）
     assert "check_code_hash" in ed

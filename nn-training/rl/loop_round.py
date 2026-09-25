@@ -244,7 +244,7 @@ class StepResult:
 
     @property
     def is_wait(self) -> bool:
-        """要让位等外部（组合路径不支持——见 `loop_core.run_one_round` 的响亮报错）。"""
+        """要让位等外部（组合路径不支持——见 `loop_lifecycle.run_one_round` 的响亮报错）。"""
         return self.outcome is None and bool(self.reason)
 
 

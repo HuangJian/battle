@@ -26,7 +26,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from rl.events import write_run_complete
-from rl.loop_core import TrainingLoop, should_park_on_done
+from rl.loop_core import TrainingLoop
+from rl.loop_lifecycle import should_park_on_done
 
 
 def _args(**kw) -> types.SimpleNamespace:

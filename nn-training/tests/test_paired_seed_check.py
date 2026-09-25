@@ -27,7 +27,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from rl.config import CourseConfig
-from rl.loop_core import _paired_seed_startup_check
+from rl.loop_lifecycle import _paired_seed_startup_check
 from rl.paired import (
     PAIRED_KEY,
     compose_lines,

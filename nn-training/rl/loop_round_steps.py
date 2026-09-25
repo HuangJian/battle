@@ -1,6 +1,7 @@
 """loop_round_steps —— 轮内 13 步的实现（R2c-3，plan/r2-loop-task-queue §3/§4）。
 
-轮体（原 `loop_core.run_one_round` 的那 190 行顺序脚本）在这里被切成 13 个方法：
+轮体（原 `run_one_round` 的那 190 行顺序脚本；S4 第十九刀起该方法住 `rl/loop_lifecycle.py`）
+在这里被切成 13 个方法：
 一步一方法、一步一个 `RoundContext` 入参。切法**不是重新设计控制流**——除下面两处刻意
 差异，每一行都是从轮体逐字搬来的，顺序与分支条件逐条保留：
 

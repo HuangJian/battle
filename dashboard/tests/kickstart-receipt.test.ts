@@ -6,7 +6,8 @@
  *  权重已经在课程 bc 权重那一档，还要拿满额锚去拉」——没人被告知。本文件钉四件事：
  *
  *   ① **同源**：读数只有一套账本（`tmp/<课>/eval_log.jsonl`），取法与 python
- *      `kickstart_burn.baseline_reading` / `loop_core._kickstart_baseline_row` 一致
+ *      `kickstart_burn.baseline_reading` / `loop_lifecycle._kickstart_baseline_row` 一致
+ *      （后者 S4 第十九刀前住 `loop_core`）
  *      （it0 = 基线；文件序末条 it>0 = 起点），并与控制台既有的 `readEvalSummaries` 对账；
  *   ② **镜像常量不许漂**：噪声带 / 点数 / 响亮阈值对着 python 源码核对（改了 python 就红）；
  *   ③ **判据的分支全在纯函数里**：低于基线 / 噪声带内 / 高于噪声带 / 缰绳关 / 缺读数；
@@ -17,7 +18,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
 import { REPO_ROOT } from '../src/core/paths'
@@ -80,7 +81,21 @@ function writeLedger(course: string, lines: string[]): string {
 
 describe('镜像常量（权威在 python；这里防漂）', () => {
   const burnPy = readFileSync(path.join(REPO_ROOT, 'nn-training/rl/kickstart_burn.py'), 'utf-8')
-  const corePy = readFileSync(path.join(REPO_ROOT, 'nn-training/rl/loop_core.py'), 'utf-8')
+
+  /**
+   * 按**定义**在 `nn-training/rl/` 源码树里找（不写死文件）：按写死路径读源码的守卫会在下一
+   * 次搬家时静默失效或假红（S16 事故）。2026-09-25（S4 第十九刀）`KICKSTART_DEFAULT_WARN`
+   * 随主循环骨架从 `loop_core.py` 搬到 `loop_lifecycle.py`，本函数就是那次修的形态。
+   */
+  function rlSourceDefining(name: string): string {
+    const dir = path.join(REPO_ROOT, 'nn-training/rl')
+    for (const f of readdirSync(dir)) {
+      if (!f.endsWith('.py')) continue
+      const src = readFileSync(path.join(dir, f), 'utf-8')
+      if (new RegExp(`^${name}\\s*=`, 'm').test(src)) return src
+    }
+    throw new Error(`${name} 在 nn-training/rl/ 里找不到（改名了？同步本文件与镜像常量）`)
+  }
 
   /** 取 `NAME = <数字>` 的字面量（源码级核对：不 import python，只读文本）。 */
   function literal(src: string, name: string): number {
@@ -94,8 +109,10 @@ describe('镜像常量（权威在 python；这里防漂）', () => {
     expect(BURN_POINTS).toBe(literal(burnPy, 'BURN_POINTS'))
   })
 
-  it('响亮阈值 = `rl/loop_core.py::KICKSTART_DEFAULT_WARN`', () => {
-    expect(KICKSTART_DEFAULT_WARN).toBe(literal(corePy, 'KICKSTART_DEFAULT_WARN'))
+  it('响亮阈值 = `rl/loop_lifecycle.py::KICKSTART_DEFAULT_WARN`（S4 第十九刀起）', () => {
+    expect(KICKSTART_DEFAULT_WARN).toBe(
+      literal(rlSourceDefining('KICKSTART_DEFAULT_WARN'), 'KICKSTART_DEFAULT_WARN'),
+    )
   })
 
   it('账本筛选键与 python `read_trend_rows` 同一字面量（event=eval_summary）', () => {

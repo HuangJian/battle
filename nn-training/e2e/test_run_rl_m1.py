@@ -329,7 +329,7 @@ def test_kickstart_startup_check() -> None:
     print("[fast] _kickstart_startup_check：换机器缺 bc 响亮拦截＋kk 落日志")
     import tempfile
 
-    from rl.loop_core import _kickstart_startup_check
+    from rl.loop_lifecycle import _kickstart_startup_check
 
     off = types.SimpleNamespace(kickstart_ref=False)
     check(_kickstart_startup_check(off, 31) == 0.0, "未启用 → 0.0 零副作用")

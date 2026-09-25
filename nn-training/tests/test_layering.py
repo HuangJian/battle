@@ -70,6 +70,10 @@ L2_PACKAGES = ("remote",)
 #: 2026-09-25（S4 第十八刀）：`loop_core` 拆出 `loop_volume`（动态采集编排 9 个方法的混入），
 #: 它接过 `rl.rollout_phase` 的 `dispatch_rollout_phase`（补波/连续配额的派发口）⇒ 与本快照
 #: 预期的形状**不同但同因**：它自己不经 remote，只是**经 rl 传递可达**——同样先红、再登记。
+#: 同日（S4 第十九刀）：`loop_core` 再拆出 `loop_lifecycle`（主循环骨架 7 方法的混入），
+#: 它拿 `rl.loop_guards`（TrainingGuards）· `rl.loop_steps`（kickstart_coef）·
+#: `rl.rollout_phase`（join_precollect_child）三处编排 import ⇒ 同样“不同形状但同因”
+#: （经 rl 传递可达），先红、再登记。
 RL_ORCHESTRATION = frozenset(
     {
         "bc_loop",
@@ -77,6 +81,7 @@ RL_ORCHESTRATION = frozenset(
         "loop",
         "loop_core",
         "loop_guards",
+        "loop_lifecycle",
         "loop_plan",
         "loop_round_steps",
         "loop_runner",

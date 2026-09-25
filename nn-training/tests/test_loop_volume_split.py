@@ -20,7 +20,11 @@ _volume_collect_continuous（VOLUME_RULE_V2 生产路径）───────
 组装方向按本仓既有规则「调用者依赖被调用者」：本簇的外部入口**全部**在 `RoundSteps`
 （`step_rollout` / `step_volume_topup`）⇒ `class RoundSteps(TrainingVolume)`，
 **不是**给 `TrainingLoop` 加基类 —— 后者要改组合类 + 四个「继承真混入」的测试宿主，并让
-`tests/test_loop_eval_split.py` 的「组合类三件套不变」失守。本刀**零守卫改动**。
+`tests/test_loop_eval_split.py` 的「组合类直接基类」断言失守。本刀**零守卫改动**。
+
+（2026-09-25 S4 第十九刀补：主循环骨架那一簇**不得不**动用组合根——它的入边让 sibling
+ 宿主不存在；那刀把组合类元组追加成四件，并同步登记了本文件与 `test_loop_eval_split.py`
+ 的两处断言。本文件钉的 `RoundSteps.__bases__` / `__mro__[1]` 逐字不变。）
 
 ## 本文件钉住什么
 
@@ -28,8 +32,9 @@ _volume_collect_continuous（VOLUME_RULE_V2 生产路径）───────
 2. 接线是**对象级同一**（`TrainingLoop.X is TrainingVolume.X`），不是同名副本——既有用例
    （`tests/test_rollout_volume.py` / `e2e/test_volume_e2e.py`）用的就是
    `TrainingLoop._volume_topup(cast(Any, stub), …)` 这种 **unbound 绑定**；
-3. 组装是 `RoundSteps.__bases__ == (TrainingVolume,)` 且**组合类三件套逐字不变**，
-   MRO 逐项对账（多一个少一个都红）；
+3. 组装是 `RoundSteps.__bases__ == (TrainingVolume,)`（组合类元组里的第四件
+   `TrainingLifecycle` 是 S4 第十九刀新长的，同样只从**末位**追加），MRO 逐项对账
+   （多一个少一个都红）；
 4. **状态归属**：七个 volume 槽位在 `TrainingVolume` 声明；`TrainingLoop.__init__` 仍负责
    **赋值**（跨轮字段的持有者不变）。另有三处在 `TrainingSteps` 里**有意并存**的声明——
    那个 sibling mixin 继承不到 `TrainingVolume`，不给声明 mypy 就报 attr-defined；
@@ -205,9 +210,15 @@ def test_wiring_is_by_object_identity_not_copies() -> None:
 
 
 def test_composition_is_on_the_caller_side() -> None:
-    """组装在**调用者一侧**：`RoundSteps(TrainingVolume)`，组合类三件套逐字不变。"""
+    """组装在**调用者一侧**：`RoundSteps(TrainingVolume)`；第一个判据逐项均成立。
+
+    2026-09-25（S4 第十九刀）**演进登记**：组合类元组尾多了 `TrainingLifecycle`
+    （主循环骨架，入边把它锁在组合根）。旧一刀钉的「三件套逐字＋按位置追加」仍逐字成立：
+    `RoundSteps.__bases__` / `__mro__[1]` 不变，新基类只从**末位**长出（不插队）。
+    """
     from rl.loop_core import TrainingLoop
     from rl.loop_guards import TrainingGuards
+    from rl.loop_lifecycle import TrainingLifecycle
     from rl.loop_remote import TrainingRemote
     from rl.loop_round_steps import RoundSteps
     from rl.loop_steps import TrainingEval, TrainingSteps
@@ -216,8 +227,14 @@ def test_composition_is_on_the_caller_side() -> None:
     assert RoundSteps.__bases__ == (TrainingVolume,)
     assert RoundSteps.__mro__[1] is TrainingVolume
     # 判据：走调用者一侧 ⇒ 组合类与四个「继承真混入」的测试宿主一行不改。
-    assert TrainingLoop.__bases__ == (RoundSteps, TrainingSteps, TrainingGuards)
+    assert TrainingLoop.__bases__ == (
+        RoundSteps,
+        TrainingSteps,
+        TrainingGuards,
+        TrainingLifecycle,
+    )
     assert TrainingVolume not in TrainingLoop.__bases__
+    assert TrainingLifecycle not in RoundSteps.__bases__
     # 判定 MRO（多一个少一个都红）
     assert [c.__name__ for c in TrainingLoop.__mro__] == [
         "TrainingLoop",
@@ -227,6 +244,7 @@ def test_composition_is_on_the_caller_side() -> None:
         "TrainingRemote",
         "TrainingEval",
         "TrainingGuards",
+        "TrainingLifecycle",
         "object",
     ]
     # 方向对得上：**生产**入口全在 RoundSteps（它才是调用者）

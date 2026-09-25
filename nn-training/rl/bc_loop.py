@@ -1051,7 +1051,7 @@ def finish_all_rounds(
        `tailNormalCompletion`（日志尾行 includes('ALL DONE')，大小写敏感）判「正常完成」。
        原来只打小写 `all rounds done` ⇒ BC 正常跑完被标成「TrainingLoop 意外退出——
        非正常退出」红告警（实测 2026-09-14 07:32，训练其实已全部成功归档）。
-    2. 落 `run_complete` 账本事件（RL 侧 `loop_core._park_after_completion` 同款）：
+    2. 落 `run_complete` 账本事件（RL 侧 `loop_lifecycle._park_after_completion` 同款）：
        console 的「✅ 训练已完成」info 横幅由账本尾行派生。
     3. **停机操作**：向本课 hub 下发停机达令（用户 2026-09-14 定案「任务完成后执行
        停机提示/操作」）。效力说明（不粉饰）：

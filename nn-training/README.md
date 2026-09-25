@@ -79,6 +79,7 @@ nn-training/
 │   ├── loop_remote.py       #    远端 PPO 腿 mixin：发布 → 领取 → 三重校验落位 → failover → 事件落账（TrainingSteps 的基类，S4 第二步）
 │   ├── loop_eval.py         #    in-loop 评估链 mixin：派发 → 尾巴收拢 → PPO 收官 join/交棒 → 收官 drain（TrainingSteps 的基类，S4 第十七刀）
 │   ├── loop_volume.py       #    动态采集编排 mixin：初波/补波/连续配额 → 派发 → 报告合并 → WAL（RoundSteps 的基类，S4 第十八刀）
+│   ├── loop_lifecycle.py    #    主循环骨架 mixin：setup / run 编排 / 轮派发 / 收官 / 停车（TrainingLoop 的基类，S4 第十九刀）
 │   └── __init__.py          #    包入口文档
 │
 ├── scripts/                 # 【辅助脚本】一次性/诊断工具

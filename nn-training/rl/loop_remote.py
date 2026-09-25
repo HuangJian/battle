@@ -303,7 +303,7 @@ class TrainingRemote:
 
             course_path = resolve_course(course.name)
         # 课程全文快照 + course_fp = sha256(**启动冻结字节**)——与
-        # rl/cmd.course_fp_for_args / rl/loop_core._course_file_fp 同算法同字节源（D14），
+        # rl/cmd.course_fp_for_args / rl/loop_lifecycle._course_file_fp 同算法同字节源（D14），
         # 否则 CRLF 换行下 read_text 的通用换行翻译会使指纹不一致、血缘断裂。
         # 冻结 = 热加载编辑（含被拒的语料身份改动）永不进 D13 快照/指纹（不泄漏云端）。
         frozen = getattr(args, "course_frozen_bytes", None)

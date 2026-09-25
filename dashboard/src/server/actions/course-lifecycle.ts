@@ -344,7 +344,8 @@ export async function openCourse(course: string, opts: OpenCourseOpts = {}): Pro
       ...prepareCourseForOpen(c).notes,
       // §5.3 起点-基线对照行（plan/accident.plan.md）：C 事故里「本腿恢复的权重已经在 bc
       // 权重那一档、却拿满额锚去拉」这个事实，开课前盘上就有——放在回执里，操作员点开课时
-      // 直接看见。与训练侧 `loop_core._kickstart_baseline_row` 同源同数（同一份账本、同一取法）。
+      // 直接看见。与训练侧 `loop_lifecycle._kickstart_baseline_row` 同源同数（同一份账本、
+      // 同一取法；S4 第十九刀前它住 loop_core）。
       ...kickstartReceipt(c, cfg),
       // §2.5 配对 rotateSeed 核对：两臂同 V 靠课程文件保证，这一屏把「对端是谁、各臂账本
       // 末次 run_start 是不是这把 V」摆在开课那一刻（错配跑 80 轮 = 一整天算力）。

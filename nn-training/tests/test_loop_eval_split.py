@@ -23,7 +23,8 @@ _eval_covered ← _drain_pending_eval ──────────────
 
 1. 8 个成员**定义**在新家，`TrainingSteps` 里**零同名定义**（门面只能是门面）；
 2. 接线是**对象级同一**（`TrainingSteps.X is TrainingEval.X`），不是同名副本；
-3. 组装是**追加**：`__bases__ == (TrainingRemote, TrainingEval)`，且组合类三件套不变；
+3. 组装是**追加**：`__bases__ == (TrainingRemote, TrainingEval)`（组合类的直接基类里没有本簇；
+   2026-09-25 S4 第十九刀起那支元组的第四件是 `TrainingLifecycle`——见 test_loop_lifecycle_split）；
 4. **状态归属唯一**：五个 eval 槽位只在 `TrainingEval` 声明一处；旧类里那两处跨模块使用
    （`_log_report` 写 `_eval_thread`、`_record_iteration` 读 `_eval_join_sec`）**经继承**可见
    ——它们被逐条写死在 `CROSS_MODULE_HANDS` 里，将来要动必须显式改这张表；
@@ -179,10 +180,16 @@ def test_wiring_is_by_object_identity_not_copies() -> None:
 
 
 def test_composition_appends_the_new_mixin() -> None:
-    """组装是**追加**：`(TrainingRemote, TrainingEval)`，且组合类三件套不变。"""
+    """组装是**追加**：`(TrainingRemote, TrainingEval)`；组合类的直接基类里没有本簇。
+
+    2026-09-25（S4 第十九刀）**演进登记**：组合类元组多了第四件 `TrainingLifecycle`
+    （主循环骨架——它的入边 `_evalboard_idle` 被两个 sibling 调，只能挂组合根）。本用例钉的
+    把心不变：本簇**不是**组合类的直接基类（逐字元组见 `test_loop_lifecycle_split.py`）。
+    """
     from rl.loop_core import TrainingLoop
     from rl.loop_eval import TrainingEval
     from rl.loop_guards import TrainingGuards
+    from rl.loop_lifecycle import TrainingLifecycle
     from rl.loop_remote import TrainingRemote
     from rl.loop_round_steps import RoundSteps
     from rl.loop_steps import TrainingSteps
@@ -191,7 +198,12 @@ def test_composition_appends_the_new_mixin() -> None:
     # 追加（而不是插队）的判据：2026-09-23 写下的 MRO 第 2 位断言逐字仍成立。
     assert TrainingSteps.__mro__[1] is TrainingRemote
     # 组合类与四个「继承真混入」的测试宿主都不必改：本簇**不是**组合类的直接基类。
-    assert TrainingLoop.__bases__ == (RoundSteps, TrainingSteps, TrainingGuards)
+    assert TrainingLoop.__bases__ == (
+        RoundSteps,
+        TrainingSteps,
+        TrainingGuards,
+        TrainingLifecycle,
+    )
     assert TrainingEval not in TrainingLoop.__bases__
     # 真实现在 loop_core；占位在 TrainingEval —— MRO 胜过它。
     assert TrainingLoop._eval_on_round is not TrainingEval._eval_on_round

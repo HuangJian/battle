@@ -48,7 +48,7 @@ class SmokeVoidRoundError(Exception):
 
     本轮已按正常流程走完 发布→领取→三重校验落位，但权重是 init 回显而非真
     PPO 产出——作废本轮：不写 iteration 事件（last_completed_iter 续跑锚点
-    不受影响）、it 不前进。loop_core.run 捕获：--smoke 干净退出，真训练原地
+    不受影响）、it 不前进。loop_lifecycle.run 捕获：--smoke 干净退出，真训练原地
     重试同一迭代（作废不是故障，不计失败连击）。
     """
 

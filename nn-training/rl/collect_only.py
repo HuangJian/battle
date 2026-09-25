@@ -25,7 +25,9 @@ def run_collect_only(args, traj_root, rotate_seed, bun) -> None:
 
     # D14 语料血缘：预采 shard 也带 course_fp（manifest 由 exporter 写入，
     # resume 对账按 course_fp 过滤——旧课程 shard 不混入新课程预采目录）。
-    from rl.loop_core import _course_file_fp
+    # 定义自 S4 第十九刀起住 `rl/loop_lifecycle.py`；仍**延迟** import：本模块是预采子进程
+    # 的入口，启动期不拉主循环那条链（torch-free / 最小 import 面）。
+    from rl.loop_lifecycle import _course_file_fp
 
     it = args.start_it or 1
     traj_dir = traj_root / f"it{it}"

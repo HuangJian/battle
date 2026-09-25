@@ -5,7 +5,8 @@
  *  「本腿恢复的权重已经在课程 bc 权重那一档（甚至更低），还要拿满额锚去拉」——当时没有
  *  任何人被告知（操作员的动作是「点开课」，回执里只有 hub 模式与预设步骤）。
  *
- *  训练侧已在启动期打一行（`rl/loop_core._kickstart_baseline_row`）；本模块把**同一对数字**
+ *  训练侧已在启动期打一行（`rl/loop_lifecycle._kickstart_baseline_row`，S4 第十九刀前住
+ *  `loop_core`）；本模块把**同一对数字**
  *  搬到操作员真正看得见的地方：控制台的开课回执（`server/actions/course-lifecycle.ts`）。
  *
  *  **同源纪律**（与 §5.2/§2A 同一条）：
@@ -36,7 +37,7 @@ import type { RlConfig } from '../core/types'
 export const BURN_MARGIN_PP = 5.0
 /** 干烧熔断的连续点数。权威：`nn-training/rl/kickstart_burn.py::BURN_POINTS`。 */
 export const BURN_POINTS = 3
-/** 「缺省初值大到该被警告」的阈值。权威：`nn-training/rl/loop_core.py::KICKSTART_DEFAULT_WARN`。 */
+/** 「缺省初值大到该被警告」的阈值。权威：`nn-training/rl/loop_lifecycle.py::KICKSTART_DEFAULT_WARN`。 */
 export const KICKSTART_DEFAULT_WARN = 0.5
 
 /** 账本里干净评估汇总行的 `event` 字面量（与 python `read_trend_rows` 同一筛选键）。 */

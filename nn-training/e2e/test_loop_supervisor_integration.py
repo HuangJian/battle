@@ -244,7 +244,8 @@ def _fake_dist(monkeypatch: pytest.MonkeyPatch) -> None:
 
     ★ 补丁打在哪：轮内那 13 步的实现住在 `rl.loop_round_steps`（mixin），它们**在自己模块的
     全局里**查这些平台函数——只补 `rl.loop_core` 那份名字是打不中的（`dist_common` / `time`
-    是模块对象，补在哪个名字空间都算命中，故不在此列）。
+    是模块对象，补在哪个名字空间都算命中，故不在此列）。S4 第十九刀后主循环骨架（含它的
+    `time.sleep`）住 `rl.loop_lifecycle`——`time` 本来就是模块对象，故直接补模块本身。
     """
     import rl.loop_core as lc
     import rl.loop_round_steps as lrs
@@ -260,7 +261,13 @@ def _fake_dist(monkeypatch: pytest.MonkeyPatch) -> None:
         if hasattr(mod, "spawn_next_collect"):
             monkeypatch.setattr(mod, "spawn_next_collect", lambda *a, **kw: None)
     # 引擎的失败退避（time.sleep(30)）在测试里不真睡——失败语义本身仍然被验证。
-    monkeypatch.setattr(lc.time, "sleep", lambda *_a, **_kw: None)
+    # S4 第十九刀：不再经 `rl.loop_core.time` 这个中间名字访问——主循环骨架搬去
+    # `rl.loop_lifecycle` 后 loop_core 不再 import time，该属性路径消失（补丁会响亮
+    # AttributeError，而不是静默打空）。直接补 `time` **模块对象**：与原先等价（那时
+    # `lc.time` 本来就是同一个模块对象），且不再依赖任何中间名字空间。
+    import time
+
+    monkeypatch.setattr(time, "sleep", lambda *_a, **_kw: None)
 
 
 def _ledger_iters(course_dir: Path) -> list[int]:

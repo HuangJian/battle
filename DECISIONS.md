@@ -2958,3 +2958,57 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
 - **门禁**：nn **2473 → 2484 passed / 3 skipped**（+11 = 新守卫）；ruff / mypy **420** 源文件绿；
   根 `bun run check` 2120 pass / 0 fail；dashboard 未动（本刀零 `dashboard/**` 改动，故不触发其门禁）。
 —— 全文（侦察表 / 调用图 / 守卫表 / 坑 / 下一刀候选的实测理由）→ `docs/nn/engineering.md` §23「第十八刀」。
+
+## §2026-09-25-goalnn-loop-lifecycle-chain-split（2026-09-25，用户指令「拆 loop_core 余下的生命周期链（7 成员 = 主循环骨架），先答清「拆出去后谁是宿主」」）
+
+拆 `rl/loop_core.py`：**931 → 446 行**；`TrainingLoop` 本体里最后一条方法间调用链（7 成员 / 351 行）
+连同 7 个**只能随它走**的模块级定义（150 行，闭包实测）搬到 `rl/loop_lifecycle.py::TrainingLifecycle`
+（**673 行**）。
+
+- **宿主判据（本刀题眼，可证不是偏好）**：这一簇的入边是 `_evalboard_idle`——被 `rl/loop_remote.py`（1 处）
+  与 `rl/loop_round_steps.py`（2 处）以 `self.` 调用。新混入必须同时是两个 caller 的祖先才接得住这条**既有**
+  入边；而 `set(RoundSteps.__mro__) ∩ set(TrainingRemote.__mro__) == {object}` ⇒ **任何 sibling 宿主都不存在**
+  （S17/S18 的「挂到调用者一侧」在此无解），唯一出路 = 组合根 `TrainingLoop`。出边同指：`.run` /
+  `.run_one_round` / `._setup` / `.finish_course` 的调用者全是 `TrainingLoop` 实例（`loop_serve` 的 `engine`
+  是多态 `BcLoop | TrainingLoop`，而 `BcLoop` 自带 `_setup`／`run_one_round`，与本簇无关）。
+- **代价与边界**：`TrainingLoop.__bases__` 三件套 → **末位追加**四件套 `(RoundSteps, TrainingSteps,
+  TrainingGuards, TrainingLifecycle)`；追加末位的依据是实测「7 个成员名在既有混入里零同名定义」（MRO 不遮罩）。
+  `TrainingSteps.__bases__` / `RoundSteps.__bases__` / 各 `__mro__[1]` 逐字不变——S17/S18 的「追加不插队」纪律仍成立。
+- **两处旧断言的演进登记**：`tests/test_loop_eval_split.py` 与 `tests/test_loop_volume_split.py` 里钉「组合类三件套
+  逐字不变」的断言（S17/S18 写的）必须随本刀演进为四件套；改的是**断言里的事实**，两处**把心**（本簇不是组合类
+  的直接基类 / `RoundSteps` 与 `TrainingSteps` 的基类元组）逐字未动。
+- **状态归属不变**：槽位声明仍全在 `TrainingLoop.__init__`；本混入的声明块只是**借用**（逐项等于「碰到的、
+  不属于本模块的」名字集合，42 个，守卫按派生集对账）。`round_failure` 声明为 `Callable[..., RoundOutcome]`
+  而不是 `Any`——因为 `run_one_round` 直接 `return` 它，`Any` 会让 mypy 报 `no-any-return`，而方法体要逐字节
+  保持搬前原样（精度放声明里，不放方法体）。
+- **跨模块手（三张表）**：入边闭集（`loop_remote` ×1 · `loop_round_steps` ×2）· 出边闭集（`run` →
+  `_drain_pending_eval`（TrainingEval）· `run_one_round` → `round_steps`/`round_failure`（RoundSteps）·
+  `finish_course` → `_sync_cloud_halt`（TrainingGuards））· 槽位写-读手（`_course_fp`/`_corpus_fp` 由
+  `_setup_common` 写、`_prepare_iter_dir`/`_rollout_phase` 读）——全是量出来的。
+- **纯搬对账**：AST 逐成员 ⇒ **14/14 逐字节等价、零申报差异**；留下的成员 **10/10 也逐字节等价**。
+- **7 个模块级名字零 monkeypatch 点**（实测）⇒ 只同步 4 处普通 import（`rl/collect_only.py` 延迟 import 保环断 ·
+  `tests/test_loop_park.py` · `tests/test_paired_seed_check.py` · `e2e/test_run_rl_m1.py`），旧家**不留别名**
+  （陈旧 `setattr(rl.loop_core, …)` 会响亮 `AttributeError`，不是静默空操作）。`run_inspect` **反向**：它是
+  文档化的可替换点（`_run_inspect` 的委托点）⇒ 必须留在旧家，守卫正面断言。
+- **守卫** `tests/test_loop_lifecycle_split.py`（13 例）：成员/模块级名字定义只在新家 · 对象恒等 · 旧家无别名 ·
+  组合类四件套 + 判定 MRO · **宿主判据的机器形式**（入边呼叫点计数 + 祖先集交集为空 + `not hasattr(RoundSteps,
+  "_evalboard_idle")`）· 借用声明 == 派生集（且类体零带值槽位）· 三张手表 · 顶层 import 闭集与禁反向边 ·
+  **★ 三条功能性**（出边手解析到预期的那个类 · `run_one_round` 真跑通（终态直通 / 异常分类走 `round_failure` /
+  让位响亮报错）· 旧家不再吸收 patch）。反探针 **18/18**（每条先 `assert count(old) == 1`）。
+- **坑（三个，全是「搬家后按路径读源码的守卫失效」家族）**：① `tests/test_batch_eval.py` 按写死路径读
+  `loop_core.py` 找 `maybe_dispatch_batch` ⇒ 搬到 `loop_lifecycle` 后假红；改读**持有者**（并把「恰好一处定义」
+  写进断言）。② `e2e/test_loop_supervisor_integration.py` 用 `monkeypatch.setattr(lc.time, "sleep", …)`
+  这个**中间名字**打补丁 ⇒ 旧家不再 import `time` 后响亮 `AttributeError`；改成直接补 `time` **模块对象**
+  （与原先等价，且不再依赖任何中间命名空间）。③ **跨项目盲区（第十六刀同族）**：`dashboard/tests/kickstart-receipt.test.ts`
+  按写死路径读 `loop_core.py` 找 `KICKSTART_DEFAULT_WARN` ⇒ 齐红；按第十六刀的修法改成正的**源码树搜定义**
+  （`rlSourceDefining(name)`），并同步四处注释里的模块路径。
+- **反探针锚点的教训（延续第十五刀）**：⑧ 原定改 `self._evalboard_idle(it, ctx.dist_cfg)`——该字面量在
+  `loop_round_steps.py` 里**有两处**，`assert count == 1` 当场拦下（锚点写错 ≠ 守卫空档），改用 `loop_remote`
+  里唯一那处。
+- **违反后果**：旧家留别名/副本 · 成员就地在旧家重定义 · 组合类元组插队或抽掉新基类 · 挂到 sibling · 入边被
+  sibling 截胡或改形状 · 新增入边/出边手 · 槽位写手或读者漂 · 顶层 import 长出或反向 import · 成员改名 ·
+  同名副本抢走出边手的归属 · `run_inspect` 被误搬 —— 十八类都在**提交时**红。
+- **门禁**：nn **2484 → 2497 passed / 3 skipped**（+13 = 新守卫）；ruff `All checks passed`；mypy 绿；
+  根 `bun run check` 2120 pass / 0 fail；dashboard typecheck + **1105 pass / 0 fail**（动了四处注释 +
+  一条跨项目守卫）。
+—— 全文（侦察表 / 宿主判据 / 守卫表 / 坑）→ `docs/nn/engineering.md` §23「第十九刀」。

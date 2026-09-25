@@ -110,7 +110,7 @@ class TrainingGuards:
     _eval_on_round: Any
     #: 云端停机达令当前置位态（门判决 → set_cloud_halt 联动；重启即复位）。
     _cloud_halted: bool
-    #: R2a 账本视图（`loop_core._setup_common` 建立；缺失时各使用点退化，不阻断训练）。
+    #: R2a 账本视图（`loop_lifecycle._setup_common` 建立；缺失时各使用点退化，不阻断训练）。
     _ledger: Any
 
     def _ledger_apply(self, event: dict | None) -> None:
