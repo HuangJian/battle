@@ -967,7 +967,8 @@ _record_iteration` 的**数据流**，不是调用流）或「导出与配额」
 登记进 `RL_ORCHESTRATION`）。
 
 **下一刀候选（已量）**：`rl/batch_eval.py`（1785 行，全仓最大）的 35 个顶层函数是**一个 28 节点巨团**
-⇒ 按链切不动，要拆得先设计「批存储」接口（真设计改动）；`loop_core.py` 余下的生命周期链（7 成员）
+⇒ 按链切不动，要拆得先设计「批存储」接口（真设计改动）——**✅ 该设计已于 2026-09-25 交付：见 §5.5**；
+`loop_core.py` 余下的生命周期链（7 成员）
 就是「主循环骨架」本身，切开前需先答「拆出去后谁是宿主」。**⇒ 第十九刀已答完并落地（见下）。**
 
 #### 5.3.18 第十九刀（2026-09-25，**已完成**）—— 主循环骨架 → `rl/loop_lifecycle.py`
@@ -1163,3 +1164,182 @@ dashboard typecheck + **1105 / 0**；`check-decisions` ok。
 - `scripts/eval_intent_m5.py` ↔ `train/intent_probe.py` 的 `seq_features` / `build_injection`、
   两个 `build_model`：属**模型构造/特征口径**，正确落点是 `models/intent_net.py` 的类方法，
   属「改模型面」——单开一轮，别混进纯工程重构。
+
+---
+
+### 5.5 下一轮的设计（2026-09-25）—— 「批存储」接口（为拆 `rl/batch_eval.py` 做准备）
+
+> 用户指令：「给 batch_eval.py 设计「批存储」接口，为拆那个 1785 行的文件做准备」。
+> **本节只设计，不实施**；实施切在 §5.5.4 的 B1–B5，每步独立可验证可提交。
+
+#### 5.5.1 为什么它「按链切」不动（先量后定的结论）
+
+`rl/batch_eval.py` = **1785 行 / 35 个顶层函数 + 2 个类**。分区实测：
+
+| 区段 | 行 | 行数 | 内容 |
+|---|---|---|---|
+| 头部常量 + 判据/门 | 55–150 | ~96 | `data_root` · `is_transient_error` · `node_gate_reason` · `kind_for_policy` · `utc_now_iso` · 窗口/背压常量 |
+| 计划层（纯） | 168–337 | **152** | `load_ladder` · `plan_units` · `load_corpora` · `corpus_doc` · `plan_verdict_units` · `units_for_batch` · `batch_iter_id` |
+| 跨进程锁 | 347–392 | 46 | `_claim_guard` / `_claim_locked`（复用 `train.loop_util`） |
+| 台账读写 | 395–494 | **84** | `read_batches` / `write_batches` + 请求文件面（`REQUESTS_*` / `read_requests` / `read_done_req_ids` / `mark_requests_done` / 三个 key 函数） |
+| 台账巨团 | 497–731 | **231** | `consume_requests`(185) · `claim_pending`(23) · `mark_unit_done`(23) |
+| 执行器 | 734–1629 | **896** | `BatchEvalRunner`（`_run` 占 **821**） |
+| 轮内接线 | 1632–1751 | 116 | `dispatch_batch_bg` · `maybe_dispatch_batch`(68) · `select_next_unit` |
+| 台账尾部转移 | 1754–1785 | 31 | `_persist_of` · `_requeue` · `_reopen_for_resume` |
+
+**巨团的真因不是调用图，是「台账没有所有者」**：有**八个**独立的 read-modify-write 点，每个自己决定四件事——
+
+| 写点 | 改哪些字段 | 何时落盘 | 状态转移 |
+|---|---|---|---|
+| `consume_requests` | 建批 / `status→aborted` | `dirty` 才写 | pending→（新）/ aborted |
+| `claim_pending` | `status→running` | 命中即写 | pending ∨ running-未完成 → running |
+| `mark_unit_done` | `units.done` · `node_dist` · `status` | 命中即写 | → done / → pending / aborted 只回填 |
+| `_persist_of` | `units.of` | **无条件**写 | 无 |
+| `_requeue` | `status→pending` | **只在分支内**写 | running → pending（`aborted` 除外） |
+| `_reopen_for_resume` | `status→pending` | **无条件**写 | running → pending |
+
+这六种「何时落盘」策略与五个散落的 `status` 赋值，就是任何一条链都要横穿的东西 ⇒ **链切无解**（§5.2 已量过同一件事）。
+
+#### 5.5.2 接口：`BatchStore`（新模块 `rl/batch_store.py`）
+
+**契约一句话**：`<EVALBOARD_DATA>/batches.jsonl` 与两个请求文件**只有一个所有者**，
+`status` / `units` / `node_dist` 的每一次变更都发生在一个**具名转移**里，且一次转移 = 一次事务 = 一次落盘。
+
+```python
+class BatchStore:
+    """EvalBoard 批台账的唯一读写口（含跨进程锁与原子落盘）。"""
+
+    def __init__(self, root: Path | None = None) -> None: ...   # 默认 data_root()
+
+    # ── 写面：全部 = 一次事务（读 → 改 → 原子写）──
+    def enqueue(self, **spec) -> dict | None: ...         # 幂等：同 key pending / 已物化 → None
+    def enqueue_verdict(self, **spec) -> dict | None: ... # 键 = 语料 id + ckpt 标签序列
+    def abort(self, batch_id: str) -> bool: ...
+    def claim(self, *, consume: bool = True) -> dict | None: ...   # 最早可跑批 → running
+    def set_units_of(self, batch_id: str, of: int) -> None: ...    # 只定型，不动 status
+    def mark_unit_done(self, batch_id: str, unit_idx: int, node_dist: dict) -> None: ...
+    def requeue(self, batch_id: str) -> None: ...                 # 认领后发现跑不了
+    def reopen_for_resume(self, batch_id: str) -> None: ...        # yield/超时 → 保留 done
+
+    # ── 读面（无副作用）──
+    def get(self, batch_id: str) -> dict | None: ...
+    def all(self) -> list[dict]: ...
+    def done_units(self, batch_id: str) -> set[int]: ...
+
+    # ── 请求面（console 单写 / runner 单消费）──
+    def pending_requests(self) -> list[dict]: ...
+    def mark_requests_done(self, ids: Sequence[str]) -> None: ...
+    def consume_requests(self) -> dict: ...   # 请求翻译 → 调上面的具名转移
+```
+
+**状态机（唯一所有者）** —— 公开的 `status = {pending, running, done, aborted}`：
+
+| 转移 | from | to | 判据（原文照搬，不许「统一」掉） |
+|---|---|---|---|
+| `enqueue*` | — | `pending` | 同 key 无 pending **且** 无 `created_ts >= req.ts` 的已物化批 |
+| `claim` | `pending` ∨（`running` ∧ `len(done) < of`） | `running` | `of` 可为 0（未定型） |
+| `mark_unit_done` | `running` / `pending` | `done`（`of>0 ∧ ndone>=of`）否则 `pending` | ★ `of == 0` ⇒ **不判 done** |
+| `mark_unit_done` | `aborted` | `aborted` | ★ 只回填 `node_dist`，**不复活** |
+| `requeue` | `running` | `pending` | ★ `aborted` **不改**（且此时不落盘） |
+| `reopen_for_resume` | `running` | `pending` | `units.done` 保留 |
+| `abort` | `pending` / `running` | `aborted` | 命中 `batch_id` |
+
+两条 ★ 是本设计最容易在「集中化」时被抹掉的语义，守卫要**正面**钉（见 §5.5.5）。
+
+**事务与锁**：`_tx()` 取代 `@_claim_locked` 装饰器 —— 跨进程仍用 `train.loop_util` 的 `claim.lock`
+（**拒绝第三套锁**），进程内 `RLock` 可重入。收益有三：
+① `claim()` 内部调 `consume_requests()` 不再需要 `_claim_held` 那条 thread-local 缝（同一 `with` 内嵌套）；
+② 一次事务可以含多次字段修改，**只落盘一次**；③ **`dirty` 才落盘**统一六种策略（行为等价：
+现在 `_persist_of` / `_reopen_for_resume` 在什么都没变时也整文件重写一遍）。
+
+**★ 顺带修一个实测缺陷：非原子落盘。** `write_batches` 用 `Path.write_text`（**截断式**：`open('w')`
+先截断再写字节），而 `batches.jsonl` 有一个**无锁的跨语言读者** —— console/TS 的
+`dashboard/src/evalboard/batches.ts::loadBatches`（「runner 单写；console 只读」，**坏行静默跳过**）。
+python 侧读者都在锁里，所以受害面就是这个 TS 读者；而它的 `enqueueBatch` 去重（「同 course+rung+ckpt
+的 pending 批已存在则直接返回它」）**依赖读全** ⇒ 短读会导致**重复入队**。
+
+探针 `nn-training/tmp/probe_batch_store.py`（读者逐字节照抄 `loadBatches` 的读法；写者连续重写 60 轮）：
+
+| 台账规模 | 现状 `write_text` | 提案 `tmp + os.replace` |
+|---|---|---|
+| 12 批 / 2.7 KB | 短读 **142/682 = 20.8%** · 坏行 0 | **0/724** |
+| 100 批 / 22 KB | 短读 **152/456 = 33.3%** · 坏行 0 | **0/483** |
+| 2000 批 / 444 KB | 短读 **142/375 = 37.9%** · 坏行 17 | **0/431** |
+
+（比例是探针紧循环下的量；要读的是「窗口**存在**且在生产规模（十余批）也可见」+ 「`os.replace` 关得上」。）
+两处配套：`.tmp` 残留**不需要**改 `.gitignore`（`dashboard/data/evalboard/*` 整目录已忽略；
+且 `store.ts` 的 `.jsonl` 后缀过滤不会把它当行文件）；写失败时 `finally` 清理。（B2）
+
+#### 5.5.3 它解锁的拆分（目标形态）
+
+接口化之后，巨团里每个调用方只剩「说清自己要什么」，五段分区各自成立：
+
+| 模块 | 内容 | 依据 |
+|---|---|---|
+| `rl/batch_plan.py` | 纯规划 + 判据/门（`plan_units` / `plan_verdict_units` / `units_for_batch` / `load_ladder` / `load_corpora` / `corpus_doc` / `corpora_path` / `select_next_unit` / `node_gate_reason` / `kind_for_policy` / `is_transient_error` + 桶常量） | **零 IO、零锁、零 root 依赖** ⇒ 最安全的一刀 |
+| `rl/batch_store.py` | `BatchStore`（台账 + 请求面 + 锁 + 原子写 + `data_root` / `utc_now_iso`） | 唯一所有者 |
+| `rl/batch_runner.py` | `BatchEvalRunner` + `dispatch_batch_bg` | **执行面**（网络/进程/权重），与台账所有权无关 |
+| `rl/batch_eval.py`（门面） | 常量 + `maybe_dispatch_batch` + **逐个再导出**上面三家的公开名 | 保证既有 import 点一行不改 |
+
+**为什么 `maybe_dispatch_batch` 留门面**：它的入边是轮内（`loop_lifecycle._evalboard_idle` / `loop_dispatch._evalboard_yield`
+→ `self.` 调），出边是「认领 → 规划 → 定型 → 起线程」这条**编排**线；测试 `test_batch_eval.py:82` 还按**源码树**读它
+（不按写死路径）⇒ 留门面是零迁移的选择。（与 S19「入边来自多个 sibling ⇒ 锁进组合根」同源的理由。）
+
+#### 5.5.4 迁移批次（每步独立可验证、可提交、可回滚）
+
+| 步 | 做什么 | 行为风险 | 预计 |
+|---|---|---|---|
+| **B1** | 纯规划 + 判据出包到 `rl/batch_plan.py`；`batch_eval` 再导出 | **零**（纯函数，无锁无 IO，逐字节对账） | 1785 → ~1630 |
+| **B2** | 建 `rl/batch_store.py`：8 个写点 → 具名转移；`consume_requests` 拆成「请求翻译 + 三个具名转移」；`_persist_of` 消失（并入 `set_units_of`）；**修非原子写 + `dirty` 才落盘** | **中**（状态机集中 + 落盘策略统一）| ~1630 → ~1210 |
+| **B3** | `BatchEvalRunner` + `dispatch_batch_bg` → `rl/batch_runner.py`（896 + 36 行，**纯搬**） | 零（逐字节对账） | ~1210 → ~290 |
+| **B4** | 门面收尾：`batch_eval.py` = 常量 + `maybe_dispatch_batch` + 再导出 | 零 | ~290 |
+| B5 | **另开一轮**：`_run` 的 821 行按阶段切（通道机器 ~500 / 收尾 ~80 / 参与度账 ~60 / 单元开头 ~60） | —— | 不在本接口范围 |
+
+行数是**分区实测的估**（落盘后以实测为准——S19/S20/S22 三次记账教训）。
+B1 与 B3 是纯搬，可按 S21–S23 的成品流程走（逐字节对账 + 契约守卫 + 反探针）。
+**B2 是本设计的主体**，也是全仓第一次「按状态所有者切」而不是「按链/按判据切」。
+
+#### 5.5.5 守卫：要演进的 + 要新写的
+
+**已知按路径读 python 源码的（搬家即失效，逐个改址）：**
+
+| 文件 | 现在读什么 | 哪一步要改 |
+|---|---|---|
+| `nn-training/tests/test_batch_eval_wver.py:18` | `SRC = rl/batch_eval.py`（AST 钉 wver 实参） | B3（随执行器）|
+| `nn-training/tests/test_eval_loot_fields.py:89` | 清单里的 `("rl/batch_eval.py", "eval_loot_fields")` | B3 |
+| `nn-training/tests/test_dist_common_poll.py:250/252/276` | 读源码断言 `is_transient_error` 是**纯转发** | B1 |
+| `nn-training/tests/test_eval_requests.py:147` | `from rl.batch_eval import _requeue`（私有名 unbound 调用） | B2（私有 seam 改到 store 上）|
+| `dashboard/tests/evalboard-corpora.test.ts:345` | 「Python 与 TS 解析同一份 corpora.json」 | B1（核它的读法是否已按定义搜）|
+
+`test_batch_eval.py`（838 行）已按**源码树**读（`:82` glob `loop_*.py` + `loop_core.py`）——S16 修过的形态，B1–B4 不必动。
+`test_kick_once_paths.py:35` 断言 `rl/batch_eval.py` 存在 ⇒ 门面保留即继续成立。
+
+**新守卫（B2 交付物）**：`tests/test_batch_store_txn.py`，至少这五条 **★ 功能性**：
+① `mark_unit_done` 在 `of==0` 时**不判 done**；② `aborted` 批的在途 unit 只回填 `node_dist`、状态不变；
+③ `requeue` 不复活 `aborted`；④ **改了必须落盘**（dirty-tracking 的反向用例）+ 没改**不落盘**（写次数计数）；
+⑤ 落盘是**原子**的（并发读者 0 短读 / 0 坏行，把 §5.5.2 的探针固化成断言）。
+另加契约守卫：`status` 的赋值点闭集 = store 的具名转移（AST 数 `Assign` target，同 S20 的 `_self_assigns` 教训）。
+
+#### 5.5.6 明确不改的
+
+- 三个文件的**字节格式**与**写者唯一性**（`batches.jsonl` runner 单写 · `requests.jsonl` console 单写 append-only ·
+  `requests.done.jsonl` runner 单写 append-only）—— `dashboard/data/evalboard/README.md` 就是这份契约。
+- 锁实现仍复用 `train.loop_util`（**拒绝第三套锁实现**，plan P4-W4）。
+- `consume_requests` 的「任何失败只记日志、**绝不抛出**」（训练主链零风险）。
+- `EVALBOARD_DATA` / `data_root()` 口径（`rl/eval_heartbeat` 同口径依赖它）。
+- python↔TS 的字面契约：`utc_now_iso` 的 UTC+毫秒+Z 格式（`enqueueCovered` 用**字符串比较**判「已物化」）、
+  `batch_id` 生成式、`units.of=0=未定型`、`BATCH_STAGE_BASE`/`EVAL_SEED0`/`SEGMENT_LEN`/`REGRESSION_EVERY` 等双侧镜像值。
+- **公开名全部经 `rl/batch_eval` 再导出** ⇒ `eval_m1_once.py` / `eval_course_once.py` / `dashboard/src/evalboard/kick-once.py` /
+  既有测试**一行不改**（私有名 `_requeue` / `_persist_of` 不转发：它们是私有 seam，测试应当改到 store 上）。
+
+#### 5.5.7 主要风险
+
+1. **「统一」时抹掉 aborted 的两条特例**（§5.5.2 两条 ★）—— 这是本设计唯一会改变**行为**的地方，
+   守卫必须正面钉，不能只靠「搬得对」。
+2. **dirty-tracking 写错 ⇒ 漏落盘**（进度看起来正常、重启后少一批）。⇒ §5.5.5 ④。
+3. **跨语言读者的新假设**：原子写让「读者永远读到完整快照」成立，但**锁不住** TS 侧 ——
+   本接口只承诺**落盘原子**，不承诺 console 读到最新（那是下一次轮询的事）。
+
+**更早已记录：同一件事的相反先例。** §5.3.22（第二十三刀）的刀口是「多 sink 的 DAG ⇒ 提供者留根」，
+本设计是「共享可变状态的 DAG ⇒ 把状态收进一个所有者」。前者按**调用**分家，后者按**所有权**分家——
+两种刀法都不动行为，但后者顺带能修掉一类真缺陷（非原子落盘就是第一个）。

@@ -1255,7 +1255,7 @@ class TrainingSteps(TrainingRemote, TrainingEval):   # 新混入追加在既有�
 | 候选 | 实测 | 结论 |
 |---|---|---|
 | `rl/loop_core.py`（1386） | `TrainingLoop` 25 方法 / 1089 行，**3 个连通分量**：volume **9** · 生命周期 7 · 基线评估 2 | **取 volume**（最大且最内聚） |
-| `rl/batch_eval.py`（1785） | 35 个顶层函数 / 681 行，调用图是**一个 28 节点的巨团**（`consume_requests ↔ claim_pending ↔ read/write_batches ↔ mark_unit_done ↔ _requeue ↔ _persist_of ↔ maybe_dispatch_batch ↔ units_for_batch → plan_units/plan_verdict_units`） | **不动**：没有可「按链切」的缝；硬拆得先造一个「批存储」接口 = 真设计改动，另开一轮 |
+| `rl/batch_eval.py`（1785） | 35 个顶层函数 / 681 行，调用图是**一个 28 节点的巨团**（`consume_requests ↔ claim_pending ↔ read/write_batches ↔ mark_unit_done ↔ _requeue ↔ _persist_of ↔ maybe_dispatch_batch ↔ units_for_batch → plan_units/plan_verdict_units`） | **不动**：没有可「按链切」的缝；硬拆得先造一个「批存储」接口 = 真设计改动，另开一轮 —— **✅ 2026-09-25 已设计（`plan/nn-training-refactor.md` §5.5：`BatchStore` 具名转移 + 原子落盘 + B1–B4 迁移批次）** |
 | `rl/bc_loop.py`（1433） | `BcLoop` 14 方法 / 263 行，其中只有一个 9 方法分量 | 次选（收益小） |
 
 volume 簇的形态（9 成员全在一个连通分量里）：
@@ -1350,7 +1350,10 @@ _volume_collect_continuous（VOLUME_RULE_V2 生产路径）───────
 
 `rl/batch_eval.py`（1785 行，全仓最大）的 35 个顶层函数是**一个 28 节点巨团**，按链切不动；要拆得先
 设计「批存储」接口（把 `read/write_batches` + `_claim_locked` 从模块全局收成一个对象）——那是设计
-改动，不是搬家。`loop_core.py` 余下的两个簇也可切：生命周期（7 成员：`run` / `_setup` / `_setup_common`
+改动，不是搬家。**✅ 设计已交付（2026-09-25）：`plan/nn-training-refactor.md` §5.5** —— 真因是「台账没有
+所有者」（**八个**独立 read-modify-write 点 × 三种落盘策略 × 五处散落的 `status` 赋值）⇒ `BatchStore` 的
+具名转移；顺带用探针量出并修一个真缺陷：**非原子落盘**让无锁的 console 读者在生产规模也落在截断窗里
+（12 批时 142/682 短读；`tmp + os.replace` 后 0/0）。`loop_core.py` 余下的两个簇也可切：生命周期（7 成员：`run` / `_setup` / `_setup_common`
 / `run_one_round` / `_park_after_completion` / `finish_course` / `_evalboard_idle`）与基线评估（2 成员）
 ——但前者就是「主循环骨架」本身，切开需先答「拆出去后谁是宿主」。**→ 这一问已在第十九刀答完并落地。**
 
@@ -1854,7 +1857,9 @@ HTTP 面（`hub/http_face.py` L5）与引导链（`hub/boot.py` L6）分开，�
 连通分量按**判据同源**切成四簇（`loop_remote_push` / `job` / `fail` / `drive`，组合根零方法）——
 「没有链可牵」这条已经用过，剩下的**按「有没有下一条链 / 还能不能再按判据分」回答**。
 `rl/` 侧余下的候选：`loop_steps.py` 余 8 个叶子（零新链）· `loop_guards.py`（784 行）；
-再往下 `batch_eval.py`（1785 行）要拆得先设计「批存储」接口（真设计改动）。
+再往下 `batch_eval.py`（1785 行）要拆得先设计「批存储」接口（真设计改动）——**✅ 该设计已于 2026-09-25
+交付：`plan/nn-training-refactor.md` §5.5（`BatchStore` + B1–B4 迁移批次；B5 = `_run` 的 821 行另开一轮）**。
+`loop_guards.py` 也已完成（第二十三刀）。
 
 **✅ 清理已做（2026-09-24，第十二刀）：`remote/job_fs._ensure_commit` 已删**——第六步之一登记的
 既存死代码（全仓零调用，只搬未删）。同时删 `job_fs.__all__` 条目、`worker.py` 的门面转发、

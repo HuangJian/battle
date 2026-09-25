@@ -3176,3 +3176,42 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
 - **★ 反探针的元教训**：首版两条变异「存活」——查下去是**探针锚点打偏**（变异落在被测 fixture
   走不到的分支上），不是守卫漏。**「存活」先怀疑探针本身，再怀疑守卫。**
 —— 全文（刀口对照表 / 宿主定档 / 三张表 / mypy 逼出的声明面）→ `docs/nn/engineering.md` §23「第二十三刀」。
+
+## §2026-09-25-goalnn-batch-store-interface（2026-09-25，用户指令「给 `batch_eval.py` 设计「批存储」接口，为拆那个 1785 行的文件做准备」）
+
+**决定：`rl/batch_eval.py`（1785 行）的拆分前置件 = 一个 `BatchStore` 接口**（新模块 `rl/batch_store.py`）：
+`<EVALBOARD_DATA>` 的台账 `batches.jsonl` 与两个请求文件**只有一个所有者**，`status` / `units` / `node_dist`
+的每一次变更都发生在**具名转移**里，一次转移 = 一次事务 = 一次落盘。**本节只设计，实施切在 B1–B4。**
+
+- **诊断（实测，不是感觉）**：巨团的真因不是调用图，而是「**台账没有所有者**」——**八个**独立
+  read-modify-write 点（`consume_requests` / `claim_pending` / `mark_unit_done` / `_persist_of` / `_requeue` /
+  `_reopen_for_resume` + 读面），每个自己决定「改哪些字段 / 何时落盘 / 什么转移」，其中**三套落盘策略**
+  （无条件写 / 只在分支内写 / `dirty` 才写）与**五处散落的 `status` 赋值**。任何一条链都要横穿它们 ⇒
+  按链切无解（与 §5.3.17 量的同一件事）。
+- **接口**：`enqueue` / `enqueue_verdict` / `abort` / `claim` / `set_units_of` / `mark_unit_done` / `requeue` /
+  `reopen_for_resume`（写面）· `get` / `all` / `done_units`（读面）· `pending_requests` / `mark_requests_done` /
+  `consume_requests`（请求面）。`_tx()` 取代 `@_claim_locked`：跨进程仍用 `train.loop_util` 的 `claim.lock`
+  （**拒绝第三套锁**），进程内 `RLock` 可重入 ⇒ `claim()` 内部调 `consume_requests()` 不再需要
+  `_claim_held` 那条 thread-local 缝。
+- **★ 两条行为语义必须原样保留（集中化时最容易被抹掉）**：① `units.of == 0`（未定型）时 `mark_unit_done`
+  **不判 done**；② `aborted` 批的在途 unit 只回填 `node_dist`、**不复活**，且 `requeue` **不改** `aborted`。
+- **★ 顺带修一个实测缺陷：非原子落盘。** `write_batches` 用 `Path.write_text`（截断式），而 `batches.jsonl`
+  有一个**无锁的跨语言读者** —— console/TS 的 `batches.ts::loadBatches`（坏行**静默跳过**）；它的
+  `enqueueBatch` 去重**依赖读全** ⇒ 短读会**重复入队**。探针（读者照抄 TS 读法，写者连续重写 60 轮）：
+  现状在 **12 批/2.7 KB 就 142/682 短读**、2000 批 444 KB 时 142/375 短读 + 17 坏行；改 `tmp + os.replace`
+  后三档全 **0/0**。同一次事务里把六套落盘策略统一成 **`dirty` 才落盘**（行为等价，且缩小截断窗）。
+- **它解锁的拆分**：`rl/batch_plan.py`（纯规划/判据/门，零 IO ⇒ 最安全的一刀）· `rl/batch_store.py`（唯一所有者）·
+  `rl/batch_runner.py`（执行器 896 + `dispatch_batch_bg` 36，纯搬）· `rl/batch_eval.py` 退成**门面**
+  （常量 + `maybe_dispatch_batch` + 逐个**再导出**公开名 ⇒ 既有 import 点一行不改）。
+- **被否决的备选**：① 「按链切」（S19–S23 的主流刀法）—— 巨团横穿八个写点，无链可牵（§5.3.17 已量）；
+  ② 「把 store 做成一堆模块级函数 + 显式传 `root`」（= 现状换个名字）—— 所有权仍无主，三套落盘策略照旧；
+  ③ 「保留 `@_claim_locked` 装饰器、只把函数分组搬家」—— 跨函数嵌套仍靠 thread-local 缝，且一次逻辑事务
+  仍要两次落盘。
+- **明确不改**：三个文件的字节格式与**写者唯一性**（`batches.jsonl` runner 单写 / `requests.jsonl` console 单写
+  append-only / `requests.done.jsonl` runner 单写）· `EVALBOARD_DATA` 口径 · `consume_requests` 的「绝不抛出」·
+  `utc_now_iso` 的 UTC+毫秒+Z 格式（`enqueueCovered` 用**字符串比较**判「已物化」）与 `BATCH_STAGE_BASE` /
+  `EVAL_SEED0` / `SEGMENT_LEN` 等**双侧镜像**值 · 锁仍复用 `train.loop_util`。
+- **违反后果**：落盘不再原子 / 两套落盘策略并存 / `status` 在 store 之外被赋值 / `of==0` 被判 done /
+  `aborted` 被复活 / 既有 import 点被改 —— 均在提交时红（B2 交付 `tests/test_batch_store_txn.py` 五条功能性 +
+  「`status` 赋值点闭集」契约守卫）。
+—— 全文（分区实测 / 状态机表 / 方法表 / 探针数据 / B1–B5 / 守卫演进清单 / 风险）→ `plan/nn-training-refactor.md` §5.5。
