@@ -392,6 +392,63 @@ def platform_net_env() -> Iterator[None]:
                 os.environ[k] = v
 
 
+#: bun 的官方安装脚本（rollout 要节点用 bun 跑 TS；`battle.offline.ipynb` 的 cell 里是同一招）。
+BUN_INSTALL_URL = "https://bun.sh/install"
+
+
+def bun_path() -> str:
+    """节点上 bun 的可执行路径：PATH 优先，其次 `~/.bun/bin/bun`（installer 的落点）；无 → ""。"""
+    found = shutil.which("bun")
+    if found:
+        return found
+    cand = Path.home() / ".bun" / "bin" / "bun"
+    return str(cand) if cand.is_file() else ""
+
+
+def ensure_bun(log) -> str:
+    """确保节点上有 bun（`kind=iter/run` 的活要节点自己跑 rollout），返回其路径（无 → ""）。
+
+    ★ **必须在装 tailnet/代理之前调用**：bun 的安装脚本走公网 HTTPS，而 userspace
+      tailscaled 会把 `HTTP_PROXY` 指向只转发 Tailscale IP 的本地 1055 ⇒ 之后再也装不上。
+      `ensure()` 把它放在最前面，就是为了让任何调用方都不必记得这条顺序。2026-09-25 事故：
+      `battle.tailscale.ipynb` 这条链（cell + notebook_boot）**从来没装过 bun**（历史零命中），
+      课程切到在线后 worker 每单都 `REJECTED: 节点上找不到 'bun'`，零下载空转 —— 而离线盘
+      `battle.offline.ipynb` 的 cell 里一直有这段，所以只有换盘才暴露。
+
+    装不上**只记日志不抛**：能力缺失的唯一判定点仍是 worker 的零下载自检
+    （`remote/iter_rollout.resolve_bun` 抛 `ProtocolError`）—— 两处都判会分叉成两条事实源。
+    用 `platform_net_env()` 包住，是因为本函数可能被第二次调用（那时环境已被改写过）。
+    """
+    found = bun_path()
+    if not found:
+        log(f"未找到 bun → 在线安装（{BUN_INSTALL_URL}，约 10s，需公网）…")
+        try:
+            with platform_net_env():
+                p = subprocess.run(
+                    ["bash", "-lc", f"curl -fsSL {BUN_INSTALL_URL} | bash"],
+                    capture_output=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=300,
+                    check=False,
+                )
+            if p.returncode != 0:
+                tail = ((p.stderr or "") + (p.stdout or ""))[-400:]
+                log(f"bun 安装脚本 rc={p.returncode}：{tail}")
+        except (OSError, subprocess.SubprocessError) as e:
+            log(f"bun 安装失败（{type(e).__name__}: {e}）")
+        found = bun_path()
+    if not found:
+        log("!! bun 不可用 —— `kind=iter/run` 的 job 会被节点零下载拒单（见 resolve_bun）")
+        return ""
+    # installer 只改 shell rc —— 当前进程的 PATH 得自己前置，否则 `shutil.which("bun")` 仍旧找不到
+    d = str(Path(found).parent)
+    if d not in (os.environ.get("PATH") or "").split(os.pathsep):
+        os.environ["PATH"] = d + os.pathsep + (os.environ.get("PATH") or "")
+    log(f"bun 就绪：{found}")
+    return found
+
+
 def ensure(cfg: dict, log) -> dict:
     """装 → 起 daemon → 登录 → 取 IP。返回 {ip, mode, sock, proxy}。
 
@@ -401,6 +458,9 @@ def ensure(cfg: dict, log) -> dict:
     ★ 调用方必须在**进本函数之前**把凭据全部读完：本函数会改写进程的代理环境，
       之后平台 Secrets（公网 HTTPS）就走不通了。
     """
+    # ★ 顺序硬约束（2026-09-25 事故）：bun 要在**任何代理被改写之前**装好 —— 它走公网 HTTPS，
+    #   而 userspace tailscaled 的本地代理只转发 Tailscale IP。放最前面 ⇒ 调用方不必记得这条。
+    ensure_bun(log)
     if not shutil.which("tailscale"):
         install(
             log,

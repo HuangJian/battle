@@ -8,6 +8,48 @@
 
 ---
 
+## §46 在线腿（tailscale 盘）从来不装 bun：切到在线课程后 worker 每单零下载拒单（2026-09-25）
+
+**症状**（用户真机日志，`battle.tailscale.ipynb`，`mode=rl/pull`，Tesla T4）：
+
+```
+[01:39:43] [worker] job abfef8f7398938b6 REJECTED: 节点上找不到 'bun'（kind=iter 需要 bun 跑 rollout）
+           —— bun 必须随节点引导装好，且装 bun 要发生在装 tailnet/代理之前 — skip (not retried)
+```
+
+之后连续 47 次轮询空转（hub 没有第二个能跑的 job）—— 一单都没开始。
+
+**根因不是「装不上」，是「从来没装」**：`battle.tailscale.ipynb` 的 cell、`remote/notebook_boot.py`、
+`remote/tailscale_boot.py` 三处 `git log -S bun` 全空；而 `battle.offline.ipynb` 的 cell 里一直有那段
+（`curl -fsSL https://bun.sh/install | bash` + 把 `~/.bun/bin` 前置进 PATH，且刻意放在装 tailnet **之前**）。
+所以只有「课程切到在线 / 换盘」才暴露。worker 侧的能力自检（`plan/train-mode-hot-switch` L3.2，
+`f274ac1b`）只是把这个失败从「payload+code.zip+ts_code.zip 下完 3.42MB / 12.1s 之后才炸」**前移到零下载**，
+不是新引入的缺陷。
+
+**修法（模块侧，不必重发 notebook）**：`remote/tailscale_boot.py` 新增 `bun_path()` / `ensure_bun(log)`，
+由 `ensure()` 在**第一条语句**调用 —— `ensure()` 是在线腿（`notebook_boot.run` → `tailscale_boot.ensure`）
+与 Colab 离线腿（`offline_boot.ensure_tailscale` → `tailscale_boot.ensure`）共用的「让节点具备 rollout
+环境」入口，顺序因此天然正确，调用方不必记得这条约束：
+
+- 已装（`PATH` 命中，或 installer 落点 `~/.bun/bin/bun`）⇒ 跳过；
+- 未装 ⇒ **在 `platform_net_env()` 里**跑 installer（userspace tailscaled 的本地代理只转发
+  Tailscale IP，代理一改就再也装不上；`platform_net_env` 负责还原引导前的平台代理）；
+- 装成 ⇒ 把 `~/.bun/bin` **前置进 `os.environ["PATH"]`** —— installer 只改 shell rc，
+  当前进程的 PATH 不会自动更新，而 `resolve_bun` 只认 `shutil.which`；
+- 装不上 ⇒ **只记日志不抛**：能力缺失的唯一判定点仍是 `resolve_bun` 抛 `ProtocolError`。
+  两处都判会分叉成两条事实源，还会把「装 bun 失败」升级成「引导失败」，连能跑的单一起拒掉。
+
+**覆盖范围要说清**（别以为一改全绿）：Kaggle 上的**离线盘不走 tailscale**（`offline_boot.py:33` 明确
+跳过全部 tailscale 步骤），因此不经过 `ensure()` —— 它的 bun 仍来自 cell 里那一段（一直有）。本次修复
+命中的是**在线腿**，以及在 Colab 上会走 `ensure()` 的离线腿。
+
+**不变式**：任何「让节点具备 rollout 能力」的入口，都不得在 bun 就绪之前改写代理环境 ——
+`ensure()` 的第一条语句就是 `ensure_bun(log)`（`tests/test_tailscale_boot_bun.py` 用源码顺序钉住）。
+
+**交付链提醒**：`tailscale_boot.py` 由 notebook 从 GitHub raw 拉 ⇒ 修好要 **push + 重开会话**
+（`battle.tailscale.ipynb` 旧的「有缓存先用缓存」当天才改成「每次刷新」，在该修复生效之前，
+`/tmp/battle-boot` 里那份旧文件会继续被用）。
+
 ## §45 首次跑死在补 TS 运行时那一步：产物目录还不存在就往里写 zip（2026-09-25 云机实测）
 
 **症状**（用户真机日志，`battle.offline.ipynb` 全新一跑）：取包、铺代码都顺利，紧接着
