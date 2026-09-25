@@ -408,10 +408,30 @@ def read_batches(root: Path) -> list[dict]:
 
 
 def write_batches(root: Path, batches: list[dict]) -> None:
+    """写台账（**原子发布**：同目录临时文件 + `os.replace`）。
+
+    ★ 为什么不直接 `write_text`（2026-09-25 修，复现用例
+    `tests/test_batch_eval.py::test_batch_ledger_publish_is_atomic`）：`Path.write_text`
+    先 `open('w')` **原地截断** live 文件再写字节 ⇒ 「截断」到「写完」之间存在一个
+    **读者可见**的窗口。本文件的读者里有一个**无锁的跳语言读者** —— console/TS 的
+    `batches.ts::loadBatches`（「runner 单写；console 只读」，坏行**静默跳过**），而它的
+    `enqueueBatch` 去重（「同 course+rung+ckpt 的 pending 批已存在则返回它」）**依赖读全**
+    ⇒ 落在窗口里就会**重复入队**。探针实测（终次 log = `nn-training/tmp/probe-batch-store-final.log`）：
+    12 批 / 2.7 KB 短读 126/622 = 20.3%，2000 批 / 444 KB 短读 144/376 = 38.3% + 12 坏行。
+
+    `os.replace` 是**同一文件系统内的原子替换**（POSIX `rename(2)` / Win32
+    `MoveFileEx(REPLACE_EXISTING)`）⇒ 读者只会看到完整的旧快照或完整的新快照。
+    临时名**固定**（不随机）：上一次崩溃残留的 `.tmp` 会被本次直接覆盖（不累积），
+    且它不进 git（`dashboard/data/evalboard/*` 整目录已忽略）也不被任何 `.jsonl`
+    后缀过滤当作行文件。
+
+    ★ 同族未修（另开一刀）：`dashboard/src/evalboard/batches.ts::rewriteBatches`
+    （TS 侧 `claimPending` / `updateBatch`）用同样的截断式 `writeFileSync`。
+    """
     root.mkdir(parents=True, exist_ok=True)
-    (root / "batches.jsonl").write_text(
-        "".join(json.dumps(b) + "\n" for b in batches), encoding="utf-8"
-    )
+    tmp = root / "batches.jsonl.tmp"
+    tmp.write_text("".join(json.dumps(b) + "\n" for b in batches), encoding="utf-8")
+    os.replace(tmp, root / "batches.jsonl")
 
 
 REQUESTS_FILE = "requests.jsonl"

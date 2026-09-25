@@ -1353,7 +1353,8 @@ _volume_collect_continuous（VOLUME_RULE_V2 生产路径）───────
 改动，不是搬家。**✅ 设计已交付（2026-09-25）：`plan/nn-training-refactor.md` §5.5** —— 真因是「台账没有
 所有者」（**八个**独立 read-modify-write 点 × 三种落盘策略 × 五处散落的 `status` 赋值）⇒ `BatchStore` 的
 具名转移；顺带用探针量出并修一个真缺陷：**非原子落盘**让无锁的 console 读者在生产规模也落在截断窗里
-（12 批时 142/682 短读；`tmp + os.replace` 后 0/0）。`loop_core.py` 余下的两个簇也可切：生命周期（7 成员：`run` / `_setup` / `_setup_common`
+（12 批时 126/622 短读；`tmp + os.replace` 后 0/0）——**✅ 该缺陷已按 §7 提前单独修完：见第二十四刀**。
+`loop_core.py` 余下的两个簇也可切：生命周期（7 成员：`run` / `_setup` / `_setup_common`
 / `run_one_round` / `_park_after_completion` / `finish_course` / `_evalboard_idle`）与基线评估（2 成员）
 ——但前者就是「主循环骨架」本身，切开需先答「拆出去后谁是宿主」。**→ 这一问已在第十九刀答完并落地。**
 
@@ -1833,6 +1834,71 @@ TrainingLifecycle, object`。`TrainingLoop.__bases__` / `TrainingSteps.__bases__
   `rl/config.py`（in-loop 接线）。
 - **刻意不动**：`docs/nn/training-stack.md` / `docs/nn/experiments.md` / `docs/rl.progress.md` /
   `plan/feasibility-map.md` 里带日期的历史记录（那时指针正确）。
+
+### 第二十四刀（2026-09-25）：`batches.jsonl` 非原子落盘 —— 先写失败测试再修（§7）
+
+用户指令：「先把非原子落盘那个缺陷按 §7 写了失败测试再修（不等 B2，独立一小刀）」。
+这一刀**不是拆分**，是设计里 §5.5.2 顺带发现的**真缺陷**单独提前落地：改动只有 `write_batches`
+一个函数体 + 一条用例，不依赖 B2 的状态机改造。
+
+#### 缺陷：截断式发布 + 一个无锁的跳语言读者
+
+`write_batches` 用 `path.write_text(...)` —— `open('w')` **先原地截断** live 文件再写字节，
+「截断」到「写完」之间有一个**读者可见**的窗口。而 `dashboard/data/evalboard/batches.jsonl`
+的读者里有一个**不在锁里**的：console/TS 的 `batches.ts::loadBatches`（契约是「runner 单写；
+console 只读」，坏行**静默跳过**），它的 `enqueueBatch` 去重（「同 course+rung+ckpt 的 pending
+批已存在就返回它」）**依赖读全** ⇒ 短读会**重复入队**。
+
+探针实测（写者连续重写 60 轮；读者逐字节照抄 `loadBatches` 的读法）：
+
+| 台账规模 | 现状 `write_text` | 修后 `tmp + os.replace` |
+|---|---|---|
+| 12 批 / 2.7 KB | 短读 **126/622 = 20.3%** | **0/671** |
+| 100 批 / 22 KB | 短读 114/453 = 25.2% | **0/513** |
+| 2000 批 / 444 KB | 短读 144/376 = 38.3% + 12 坏行 | **0/398 · 0 坏行** |
+
+（终次实测 log = `nn-training/tmp/probe-batch-store-final.log`；比例是探针紧循环下的量，逐轮波动。）
+关键不是比例，而是**窗口在生产规模（十余批）就存在**，且 `os.replace` 关得上。
+
+#### §7 三步（照做）
+
+① **先在未改动代码上写确定性失败用例** `tests/test_batch_eval.py::test_batch_ledger_publish_is_atomic`，
+确认**红**（实测断言失败于「读者读到了 `[0]` 批」）→ ② 只做让它的最小改动（`tmp.write_text` +
+`os.replace(tmp, dst)`）→ ③ 新用例绿 + 同关注点 30 例绿 + 全部门禁绿。
+
+★ **确定性是刻意设计的**，与探针分工明确：用例**不靠线程时序、不碰墙钟** —— 它 monkeypatch
+`Path.write_text` / `Path.open`，在 live 文件被以 `'w'` 打开的**那一刻**读一次台账。写方若原地截断，
+此刻必然读到残局；写方若走临时文件发布，则 live 文件根本不会被打开来写 ⇒ 一次也读不到中间态。
+**并发探针只能当证据，不能当回归用例**（比例型断言会 flake）。
+
+#### 落盘语义（集中化时最容易被误改的两点）
+
+- 临时名**固定**为 `batches.jsonl.tmp`（不随机）⇒ 上次崩溃残留的 `.tmp` 被本次直接覆盖，**不累积** ⇒
+  **不需要** `finally` 清理、**不需要**改 `.gitignore`（`dashboard/data/evalboard/*` 整目录已忽略；
+  `store.ts` 的 `.jsonl` 后缀过滤也不会把它当行文件）。原设计里写的 `finally` 清理因此作废。
+- 字节格式与写者唯一性**一字不改**：仍是同一个写者、同一把 `train.loop_util` 锁、同一份 JSONL 文本。
+
+#### 被否决的备选
+
+① 保留 `write_text` + 加 `fsync`（不改截断语义，窗口照旧）· ② 随机/PID 后缀的临时名（残留会累积，
+需配 `finally` 清理，反而多一个删除失败面）· ③ 改成 append-only 台账（改字节格式、动 TS 双侧契约，
+属真设计改动，不是一小刀）。
+
+#### 同族未修（另开一刀）
+
+`dashboard/src/evalboard/batches.ts::rewriteBatches`（TS 侧的 `claimPending` / `updateBatch`）用**同样**的
+截断式 `writeFileSync`。它要动 `dashboard/**`、且与 P1「触发端不得写台账」的守卫相邻，值得自己一刀，
+不搭在这里。
+
+#### 记账
+
+- `rl/batch_eval.py` **1785 → 1805 行**（+20 = `write_batches` 的「为什么要原子发布」docstring；
+  §5.5 里的 1785 是修前读数，已在该节标注基准顺移）；`tests/test_batch_eval.py` 838 → 880（+42 = 用例）。
+- **门禁**：nn **2566 → 2567 passed / 3 skipped**（+1 = 新用例）；ruff / mypy 绿；
+  根 `bun run check` **2120 pass / 0 fail**（121404 expect，与改动前逐字一致 ⇒ 确认当日那 2 条
+  `dist-node-gate` 失败是并行负载 flake，非本次改动）。
+- 设计文档已标注落地状态：`plan/nn-training-refactor.md` §5.5 开头加「✅ 已先行落地」、§5.5.2 换成
+  「已修 + 确定性复现用例」、§5.5.4 的 B2 去掉「修非原子写」、§5.5.5 的⑤ 改成「已提前落地」。
 
 ### 未做完（S4 余下）
 

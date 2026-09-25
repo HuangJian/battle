@@ -3198,8 +3198,10 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
 - **★ 顺带修一个实测缺陷：非原子落盘。** `write_batches` 用 `Path.write_text`（截断式），而 `batches.jsonl`
   有一个**无锁的跨语言读者** —— console/TS 的 `batches.ts::loadBatches`（坏行**静默跳过**）；它的
   `enqueueBatch` 去重**依赖读全** ⇒ 短读会**重复入队**。探针（读者照抄 TS 读法，写者连续重写 60 轮）：
-  现状在 **12 批/2.7 KB 就 142/682 短读**、2000 批 444 KB 时 142/375 短读 + 17 坏行；改 `tmp + os.replace`
+  现状在 **12 批/2.7 KB 就 126/622 短读**、2000 批 444 KB 时 144/376 短读 + 12 坏行；改 `tmp + os.replace`
   后三档全 **0/0**。同一次事务里把六套落盘策略统一成 **`dirty` 才落盘**（行为等价，且缩小截断窗）。
+  **→ ✅ 该缺陷已按 §7 提前单独修完（2026-09-25，独立一小刀，见下一条 § 条目与 `docs/nn/engineering.md`
+  第二十四刀）**；§5.5.4 的 B2 因而只剩状态机事务化。
 - **它解锁的拆分**：`rl/batch_plan.py`（纯规划/判据/门，零 IO ⇒ 最安全的一刀）· `rl/batch_store.py`（唯一所有者）·
   `rl/batch_runner.py`（执行器 896 + `dispatch_batch_bg` 36，纯搬）· `rl/batch_eval.py` 退成**门面**
   （常量 + `maybe_dispatch_batch` + 逐个**再导出**公开名 ⇒ 既有 import 点一行不改）。
@@ -3215,3 +3217,38 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
   `aborted` 被复活 / 既有 import 点被改 —— 均在提交时红（B2 交付 `tests/test_batch_store_txn.py` 五条功能性 +
   「`status` 赋值点闭集」契约守卫）。
 —— 全文（分区实测 / 状态机表 / 方法表 / 探针数据 / B1–B5 / 守卫演进清单 / 风险）→ `plan/nn-training-refactor.md` §5.5。
+
+## §2026-09-25-goalnn-batch-ledger-atomic-publish（2026-09-25，用户指令「先把非原子落盘那个缺陷按 §7 写了失败测试再修（不等 B2，独立一小刀）」）
+
+**决定：`rl/batch_eval.write_batches` 从 `Path.write_text` 改为「同目录固定临时名 + `os.replace`」原子发布。**
+不改 `batches.jsonl` 的字节格式，不改任何调用方，不碰 B2 的状态机改造。
+
+- **缺陷**：`write_text` 先 `open('w')` **原地截断** live 文件再写字节 ⇒ 「截断」到「写完」之间有一个
+  **读者可见**的窗口。本文件的读者里有一个**无锁的跳语言读者** —— console/TS 的
+  `batches.ts::loadBatches`（「runner 单写；console 只读」，坏行**静默跳过**），而它的
+  `enqueueBatch` 去重（「同 course+rung+ckpt 的 pending 批已存在则返回它」）**依赖读全**
+  ⇒ 落在窗口里就**重复入队**。探针实测（写者连续重写 60 轮、读者照抄 `loadBatches` 读法）：
+  12 批/2.7 KB **126/622 = 20.3%** · 100 批/22 KB 114/453 = 25.2% · 2000 批/444 KB 144/376 = 38.3% + 12 坏行
+  （终次实测 log = `nn-training/tmp/probe-batch-store-final.log`；比例是探针紧循环下的量，逐轮波动）。
+- **修法与证据**：`tmp.write_text(...)` + `os.replace(tmp, dst)`（同文件系统原子替换，POSIX `rename(2)` /
+  Win32 `MoveFileEx(REPLACE_EXISTING)`）⇒ 读者只能看到**完整的旧快照或完整的新快照**。
+  同一探针复测：三档全 **0 短读 / 0 坏行**。临时名**固定**（不随机）⇒ 崩溃残留的 `.tmp` 下次直接覆盖，
+  不累积；无需 `finally` 清理、无需改 `.gitignore`（该目录整目录已忽略，且 `.jsonl` 后缀过滤不会误吸）。
+- **§7 顺序（已照做）**：① 先在未改动代码上写确定性失败用例
+  `tests/test_batch_eval.py::test_batch_ledger_publish_is_atomic` 并确认**红**（实测`读者读到了 [0] 批`）；
+  ② 只做让它的最小改动（一个函数体）；③ 新用例绿 + 同关注点 30 例绿 + 全部门禁绿。
+  ★ **确定性是刻意设计的**：不靠线程时序、不碰墙钟 —— 在 live 文件被以 `'w'` 打开的**那一刻**读一次台账。
+  写方若原地截断，此刻读到残局；写方若临时文件发布，则 live 文件根本不会被打开来写 ⇒ 一次也读不到中间态。
+  （并发探针只能当**证据**，不能当回归用例。）
+- **被否决的备选**：① 保留 `write_text` + 加 `fsync`（不改截断语义，窗口照旧）；② 随机/PID 后缀的临时名
+  （残留会累积，需配 `finally` 清理，反而多一个删除失败面）；③ 改成 append-only 台账（改字节格式、
+  动 TS 双侧契约，属真设计改动）。
+- **明确不改**：`batches.jsonl` 的字节格式与写者唯一性 · 锁仍复用 `train.loop_util` ·
+  其余五个写点的落盘策略（那属 B2 的事务化）。
+- **同族未修（另开一刀）**：`dashboard/src/evalboard/batches.ts::rewriteBatches`（TS 侧 `claimPending` /
+  `updateBatch`）也是截断式 `writeFileSync` —— 要动 `dashboard/**` 且与 P1「触发端不得写台账」的守卫相邻，
+  值得自己一刀。
+- **记账**：`rl/batch_eval.py` **1785 → 1805 行**（+20 = `write_batches` 的 docstring；§2026-09-25-goalnn-batch-store-interface
+  里的 1785 是修前读数，已在 `plan/nn-training-refactor.md` §5.5 标注基准顺移）；`tests/test_batch_eval.py` 838 → 880。
+- **门禁**：nn **2566 → 2567 passed / 3 skipped**（+1 = 新用例）；ruff / mypy 绿；
+  根 `bun run check` 2120 pass / 0 fail（121404 expect，与改动前逐字一致）。

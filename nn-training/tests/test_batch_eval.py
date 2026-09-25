@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -42,6 +43,47 @@ def test_plan_units_mirrors_runner_ts() -> None:
 def test_batch_iter_id_namespace() -> None:
     assert batch_iter_id("run1", "some-batch-id").startswith("run1.b")
     assert "ev" not in batch_iter_id("run1", "x").split(".b")[0].split(".")[-1]
+
+
+def test_batch_ledger_publish_is_atomic(tmp_path: Path, monkeypatch) -> None:
+    """台账落盘必须**原子发布**：读者只能看到完整的旧快照或完整的新快照（§7 复现用例）。
+
+    病根（2026-09-25 修）：`write_batches` 曾用 `Path.write_text` —— 它先 `open('w')`
+    **原地截断** live 文件再写字节，于是「截断」到「写完」之间有一个**读者可见**的窗口。
+    本文件的读者里有一个**无锁的跳语言读者**：console/TS 的 `batches.ts::loadBatches`
+    （「runner 单写；console 只读」，坏行**静默跳过**），而它的 `enqueueBatch` 去重
+    （「同 course+rung+ckpt 的 pending 批已存在则返回它」）**依赖读全** ⇒ 落在窗口里
+    就会**重复入队**。探针实测（写者连续重写 60 轮、读者照抄 `loadBatches` 读法）：
+    12 批/2.7 KB 时 126/622 次读落在窗口内，2000 批/444 KB 时 144/376 + 12 坏行。
+
+    确定性复现法（不靠线程时序、不碰墙钟）：live 文件被**以 'w' 模式打开**的那一刻读一次
+    台账 —— 写方若原地截断，此刻读到的是截断后的残局；写方若「临时文件 + os.replace」
+    发布，则 live 文件根本不会被打开来写 ⇒ 一次也读不到中间态。
+    """
+    live = tmp_path / "batches.jsonl"
+    old = [{"batch_id": "b-old", "status": "pending", "units": {"of": 1, "done": []}}]
+    new = [*old, {"batch_id": "b-new", "status": "pending", "units": {"of": 1, "done": []}}]
+    write_batches(tmp_path, old)
+    assert len(read_batches(tmp_path)) == 1  # 旧快照已就位
+
+    truncated: list[int] = []
+    real_open = Path.open
+
+    def hooked_open(self: Path, mode: Any = "r", *a: Any, **kw: Any) -> Any:
+        f = real_open(self, mode, *a, **kw)
+        if self == live and "w" in mode:
+            # 写方正在原地改写 live 文件 —— 读者视角此刻能看到几批？
+            truncated.append(len(read_batches(tmp_path)))
+        return f
+
+    monkeypatch.setattr(Path, "open", hooked_open)
+    write_batches(tmp_path, new)
+
+    assert truncated == [], (
+        f"落盘期间 live 文件被原地截断，读者读到了 {truncated} 批（旧 1 / 新 2）"
+        " —— 必须改成「同目录临时文件 + os.replace」发布（os.replace 是同文件系统原子替换）"
+    )
+    assert [b["batch_id"] for b in read_batches(tmp_path)] == ["b-old", "b-new"]
 
 
 def test_queue_claim_done_cycle(tmp_path: Path, monkeypatch) -> None:
