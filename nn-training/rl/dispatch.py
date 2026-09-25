@@ -333,6 +333,32 @@ class RolloutDispatcher:
                     "ping": ping,  # M1d：能力位查询（stageJsonSupport）
                 }
             )
+        # ── 起始分布（state_init）的派发闸门（2026-09-25 接线事故修复）────────────────
+        # v1 的快照**只在本机盘上**（云侧搬运 = plan/x20-state-init.plan.md §P2.5，未落地）：
+        # 只有本机腿的 argv 走 `build_rollout_cmd(node_side=False)` 拿得到 `--init-snapshot`，
+        # 而节点腿（`fetch_task` / `template_argv`）拼任务参数时**没有**快照这一项，且导出器
+        # 对未知 flag **静默忽略** ⇒ 向 pool 派发 = 云上跑标准开局、账本记中段起跑，缺 `initTick`
+        # 的 shard 还会被护栏在六个 funnel 全剔（采样波次永远凑不齐 = 无限波次）。
+        # 实测代价：2026-09-25 混语料 + 无限波次烧掉 51.9 万 transitions 才发现——
+        # 当时 `--init-snapshot` 只接进了 local-slot 分支，本轮实际走的 volume 路一个 flag 都没带。
+        # 所以这里**不靠** `local_slots`（那只是并发配额，主循环照旧向 pool 派发）：开了 state_init
+        # 的轮必须**整轮纯本机**，只要还剩一个可行远端节点就响亮拒（宁可不发，不可混语料）。
+        # additive-only：课程没开 state_init ⇒ 本段一行不执行，逐字节旧行为。
+        if state_init_enabled(args):
+            if nodes:
+                raise SystemExit(
+                    "[state_init] 本轮有 "
+                    f"{len(nodes)} 个可行远端节点（{', '.join(str(nd['id']) for nd in nodes)}）——"
+                    "起始分布 v1 的快照只在本机盘上（云侧搬运 plan/x20-state-init.plan.md §P2.5 "
+                    "未落地），节点腿拼 argv 不会带 --init-snapshot，导出器又静默忽略未知 flag ⇒ "
+                    "云上跑标准开局、账本记中段起跑（缺 initTick 的 shard 还会被护栏全剔 = 无限波次）。"
+                    "拒发：本轮禁用/停掉远端节点（或只留本机），让采集走纯本机腿"
+                )
+            log(
+                "[dist] state_init: local-only round (no eligible remote node) — "
+                "zero pool dispatch; snapshot threaded via --init-snapshot"
+            )
+
         if not nodes:
             log("[dist] no eligible node — falling back to local-only rollout")
             return run_rollout(bun, rl_path, traj_dir, pairs, args)

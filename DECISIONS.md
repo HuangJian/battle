@@ -2698,10 +2698,18 @@ B6 交棒点不在决策边界上、B1 重建出的不是人类那个状态且**
 而起始状态集合 = 银行 972 个切点（池小 ⇒ V 头记忆化风险，已在 plan §5 预注册读数）。
 ③ **不做 rebase**：奖励 = Φ 的差分，对「继承的进度」天然不付钱；计数器列保持**游戏真值**，
 `initCounters`/`initSnapshot`/`initTick` additive-only 进 shard manifest 供分析侧自行 rebase。
-④ **v1 只在本机采集**：课程开了 `state_init` ⇒ `node_side=True` 的三条 argv 路径
-（`build_rollout_cmd` / `iter_job.build_iter_spec` / `plan.template_argv`）在**发布前** `SystemExit`
-——老导出器**静默忽略未知 flag**，云节点 cwd = job 目录 ⇒ 「云上跑标准开局、账本写中段起跑」是
-最贵的错，宁可不发。
+④ **v1 只在本机采集**，执法点在**两处**：ⓐ `dispatch.RolloutDispatcher.run()` **入口的派发闸门**——
+开了 `state_init` 的轮只要还剩一个可行远端节点就 `SystemExit`，否则零派发、整轮交本机腿
+（`run_rollout`）；`local_slots` **不是**这个开关（它只是并发配额，主循环照旧向 pool 派发）。
+ⓑ `node_side=True` 的三条 argv 路径（`build_rollout_cmd` / `iter_job.build_iter_spec` /
+`plan.template_argv`）在**发布前** `SystemExit`。两处都要：老导出器**静默忽略未知 flag**，云节点
+cwd = job 目录 ⇒ 「云上跑标准开局、账本写中段起跑」是最贵的错，宁可不发。
+**代价（2026-09-25 实付）**：首版只有 ⓑ，而主循环走的是 ⓐ 的 volume 路（`fetch_task` 拼任务参数
+**没有**快照项）⇒ 三条护栏一条没触发 = 混语料（pool 标准局）+ 缺 `initTick` 的 shard 被全剔 =
+无限波次，烧掉 **51.9 万 transitions** 才发现；教训 = 护栏写在 **argv 构造点**对 volume 路天生无效，
+派发模式必须在**派发入口**定。
+**被否决**：把 `local_slots` 当「纯本机」开关用（它语义只是并发配额，会让配额调参意外改采集分布）·
+只在 `fetch_task` 侧补 `node_side` 拒（闸门仍在上游派发之后，且节点侧调用点不止一处）。
 ⑤ **shard 侧护栏**：缺正整数 `initTick` 的 shard 在**六个 funnel** 一律不计入（`_scan_shards` /
 `completed_pairs` / `settled_stage_totals` / `resumed_manifests` / `iter_shard_dirs` /
 `verify_and_land`），判据函数单点 = `rl.resume.shard_state_init_ok`；开关只从 `args.state_init` 派生。
@@ -2719,6 +2727,7 @@ B6 交棒点不在决策边界上、B1 重建出的不是人类那个状态且**
 节点上不一定有该文件 ⇒ hub/节点指纹分叉，整份 job 误拒）。
 
 **违反后果**：把 `--init-snapshot` 放上云而不做 blob 通道 ⇒ 云上跑标准开局、账本写中段起跑 ·
+护栏只设在 argv 构造点、不管派发入口 ⇒ 主循环的 volume 路整条绕开（51.9 万 transitions 事故）·
 在 `reseed` **之后**核 tickHash ⇒ 外部证据变成恒假/恒真 · 交棒点不在 `K` 边界 ⇒ 首个决策前 K−1
 tick 由「上一帧残留动作」驱动 · 课程中途删 `state_init` 还复用旧 shard ⇒ 两种起始分布混训。
 —— 全文（六条评审处置表 / P0 实测读数 / 单局 smoke 读数 / P2.5 规格）→ `plan/x20-state-init.plan.md`

@@ -26,12 +26,21 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import rl.dispatch as disp
 from rl.config import (
     CourseConfig,
     StateInitBlock,
     apply_course,
     load_course,
 )
+
+# 派发脚手架复用：起始分布的闸门住在 `dispatch.run()` 入口（2026-09-25 接线事故修复点），
+# 而「ping 门 / 权重下发 / worker 替身」那套确定性脚手架在 rollout 派发用例里——
+# `tests/` 是包（有 `__init__.py`），兄弟模块要用裸名 import 得先把本目录塞进 sys.path
+# （同 test_hub_auth_d9_order.py 的既有做法）。
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from test_rollout_dispatch_resilience import _Harness, _node  # type: ignore
 
 COURSE = "x20-state-init"
 
@@ -450,3 +459,116 @@ def test_state_init_enabled_reads_args_only() -> None:
     assert state_init_enabled(_args()) is False
     assert state_init_enabled(_args(state_init={"bank": "x"})) is True
     assert state_init_enabled(SimpleNamespace()) is False
+
+
+# ───────── ⑥ 派发闸门（2026-09-25 接线事故修复，plan §P3 补丁）─────────
+# 事故：`--init-snapshot` 当时只接进了 `build_rollout_cmd`，而**主循环走的是 `dispatch.run()`
+# 的 volume 路**（`fetch_task` 拼任务参数时没有快照项）——`local_slots` 只是并发配额，没有
+# 「纯本机」开关，主循环永远向 pool 派发。于是云上跑标准开局、账本记中段起跑，缺 `initTick`
+# 的 shard 又被护栏在六个 funnel 全剔（波次永远凑不齐）⇒ 混语料 + 无限波次，烧掉 51.9 万
+# transitions 才发现。修法 = 闸门住在 `dispatch.run()` 入口：开了 `state_init` 的轮整轮纯本机。
+
+
+def test_state_init_refuses_to_dispatch_to_the_pool(tmp_path, monkeypatch) -> None:
+    """开 state_init + 有可行远端节点 ⇒ 派发前 SystemExit（一局也不进 pool）。
+
+    v1 的快照只在本机盘上（plan §P2.5 未落地）：节点腿拿到的是一个仓库相对路径、文件不在
+    那儿，而导出器静默忽略未知 flag ⇒ 唯一安全的结局是拒发。
+    """
+    h = _Harness(tmp_path, monkeypatch, games=2)  # 缺省 nodes=[a97] 且 ping 绿
+    h.args.state_init = {"bank": str(tmp_path / "bank" / "manifest.json")}
+
+    def fetch(*_a, **_kw):
+        raise AssertionError("state_init 轮不得向 pool 派发（节点腿拼 argv 没有快照项）")
+
+    with pytest.raises(SystemExit, match="快照只在本机盘上"):
+        h.run(fetch)
+
+
+def test_state_init_without_remote_nodes_runs_local_only(tmp_path, monkeypatch) -> None:
+    """开 state_init 且没有可行远端节点 ⇒ 整轮交本机腿（`run_rollout`），零派发。
+
+    「零派发」由 `fetch_task` 替身断言：只要有人取活就炸。
+    """
+    h = _Harness(
+        tmp_path,
+        monkeypatch,
+        games=3,
+        nodes=[_node("a97")],
+        ping_fn=lambda *_a, **_k: None,  # 本轮远端节点全部不可用
+    )
+    h.args.state_init = {"bank": str(tmp_path / "bank" / "manifest.json")}
+    seen: dict = {}
+
+    def fake_local(bun, rl_path, traj_dir, pairs, args):
+        seen["pairs"] = list(pairs)
+        return {"games": len(pairs)}
+
+    monkeypatch.setattr(disp, "run_rollout", fake_local)
+
+    def fetch(*_a, **_kw):
+        raise AssertionError("零派发")
+
+    report = h.run(fetch)
+
+    assert seen["pairs"] == [(2000, 1), (2000, 2), (2000, 3)], seen
+    assert "state_init: local-only round" in "\n".join(h.logs)
+    assert report == {"games": 3}
+
+
+def test_state_init_off_keeps_dispatching_to_the_pool(tmp_path, monkeypatch) -> None:
+    """缺席（老课程）⇒ 逐字节旧行为：照旧向节点派发，`fetch_task` 拿到每一局。"""
+    h = _Harness(tmp_path, monkeypatch, games=2)
+    calls = {"n": 0}
+
+    def fetch(*_a, **_kw):
+        calls["n"] += 1
+        return h.manifest(), {}
+
+    report = h.run(fetch)
+
+    assert calls["n"] == 2
+    assert report["dist"]["nodes"] == {"a97": 2}, report["dist"]
+
+
+def test_every_local_argv_carries_a_snapshot(tmp_path, monkeypatch) -> None:
+    """闸门放行的那条腿（纯本机）逐局 argv 都带 `--init-snapshot`。
+
+    32 局里混进一局标准开局就是一局混语料（那局的 shard 还会被 `initTick` 护栏剔除）；
+    所以钉在 `run_rollout` 这一层而不是只钉 `build_rollout_cmd`。
+    """
+    import subprocess as sp
+
+    import rl.queue_local as ql
+
+    bank = _bank(tmp_path / "bank")
+    weights = tmp_path / "w.json"
+    weights.write_text('{"arch":{}}', encoding="utf-8")
+    traj = tmp_path / "it1"
+    traj.mkdir()
+    args = _si_args(bank, max_ticks=12900, difficulty="hard", dodge="", workers=3)
+    seen: list[list[str]] = []
+
+    class _Proc:
+        returncode = 0
+
+        def wait(self) -> int:
+            return 0
+
+    def fake_popen(cmd, **_kw):
+        seen.append(list(cmd))
+        out = Path(cmd[cmd.index("--out") + 1])
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "_rl_report.json").write_text(json.dumps({"games": 1}), encoding="utf-8")
+        return _Proc()
+
+    monkeypatch.setattr(sp, "Popen", fake_popen)
+    ql.run_rollout("bun", str(weights), traj, [(2000, 1), (2000, 2), (2000, 3)], args)
+
+    assert len(seen) == 3, seen
+    allowed = {"s2000-414001-t300.json", "s2000-414001-t600.json"}  # 银行里 stage 2000 的两个切点
+    for cmd in seen:
+        assert "--init-snapshot" in cmd, cmd
+        snap = Path(cmd[cmd.index("--init-snapshot") + 1]).name
+        assert snap in allowed, snap
+        assert "--stage-json" not in cmd  # 顺手钉住：注入不影响其余 argv
