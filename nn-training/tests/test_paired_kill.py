@@ -31,6 +31,7 @@ from rl.paired_kill import (
     PAIRED_KILL_MARGIN_PP,
     PAIRED_KILL_POINTS,
     paired_kill_overrides,
+    paired_kill_self_kill,
     paired_kill_verdict,
     readings_by_iter,
 )
@@ -217,3 +218,53 @@ def test_guard_stops_the_leg_and_writes_a_replayable_event(
     again = _ledger_events(tmp_path)
     assert len([e for e in again if e["event"] == "paired_kill"]) == 1
     assert len(again) == len(events) + 1
+
+
+# ────────────────────────── ④ 对照臂永不自杀（2026-09-25 C-0 事故） ──────────────────────────
+
+
+def test_self_kill_switch_defaults_to_on() -> None:
+    """`courses.<课>.paired_kill.self_kill` 缺席/写坏 ⇒ True（现状对称自杀，不动老行为）。
+
+    只有显式 `false` 才关——对照卷的命不能靠"没写配置"来保，也不能被手滑关掉。
+    """
+    assert paired_kill_self_kill(None, "t-own") is True
+    assert paired_kill_self_kill({}, "t-own") is True
+    assert paired_kill_self_kill({"courses": {"t-own": {"paired_kill": {}}}}, "t-own") is True
+    bad = {"courses": {"t-own": {"paired_kill": {"self_kill": "no"}}}}
+    assert paired_kill_self_kill(bad, "t-own") is True, "非 bool 不当 False"
+    off = {"courses": {"t-own": {"paired_kill": {"self_kill": False}}}}
+    assert paired_kill_self_kill(off, "t-own") is False
+
+
+def test_control_leg_trips_but_does_not_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ C-0 事故复现：对照臂连续落后（判据 tripped）但 `self_kill: false` ⇒ 只记录不停车。
+
+    判据照算、streak 事件照落账（复盘不断线），但不写 ABORT、不下发云端停机、不返回 True。
+    杀对照等于撕毁终点 verdict——终点配对检验需要两条臂都活着。
+    """
+    monkeypatch.setattr(paired_mod, "CURRICULA_DIR", _write_curricula(tmp_path, V), raising=True)
+    calls: list[tuple[bool, str]] = []
+
+    def _fake_set(hub, token, halt, log=None, course=""):
+        calls.append((halt, course))
+        return True
+
+    monkeypatch.setattr("rl.loop_guards.set_cloud_halt", _fake_set, raising=True)
+    monkeypatch.setattr("rl.loop_guards.dist_common.course_name_of", lambda: "t-own", raising=True)
+    _write_eval(tmp_path / "own", _own(0.40, 0.35, 0.32))
+    _write_eval(tmp_path / "t-peer", _own(0.40, 0.40, 0.40))
+    _write_peer_run_start(tmp_path, V)
+    cfg = {"courses": {"t-own": {"paired_kill": {"self_kill": False}}}}
+    g = _guards(tmp_path, remote_hub_url="http://hub", remote_token="tok")
+    g._cloud_halted = False
+
+    assert g._paired_kill(3, cfg) is False, "对照臂命中也不停车"
+    events = _ledger_events(tmp_path)
+    assert any(e["event"] == "paired_kill" and e["streak"] == 2 for e in events), "计数不断线"
+    assert not any(
+        e["event"] == "gate_verdict" and e.get("verdict") == "ABORT" for e in events
+    ), "不落 ABORT 判决"
+    assert calls == [], "不下发云端停机"

@@ -774,3 +774,39 @@ def test_course_args_match_run_rl_echo_config(tmp_path: Path, monkeypatch: pytes
     assert int(mine_args.stream) == 0 and int(mine_args.double_buffer) == 0
     assert int(theirs["stream"].strip("'")) == 0 and int(theirs["double_buffer"].strip("'")) == 0
     assert mine == theirs
+
+
+def test_done_course_reopened_by_marker_bump_runs_again(env: SimpleNamespace) -> None:
+    """★ C-0 复活事故（2026-09-25）：收官的课被控制台停→开（开课标记 mtime 更新）⇒ 重新入队。
+
+    当时的形状：`x20-clutch-null` 被 paired-kill 停在 it46，用户控制台重开课只重写了
+    `training-enabled.txt`，serve 重扫因该课仍在 `runtimes` 里而永远跳过——"重启键坏了"。
+    判据只认「标记新于入队时记录值」（停→开的唯一机器含义），不认时钟/轮次。
+    """
+    from remote.protocol import COURSE_ENABLE_MARKER
+
+    _enable_course(env.tmp, "a")
+    clock = FakeClock()
+
+    def bump(_n: int) -> None:
+        if _n == 2:  # 跑完第一轮之后，操作员做了一次停→开
+            p = env.tmp / "a" / COURSE_ENABLE_MARKER
+            t = p.stat().st_mtime_ns
+            os.utime(p, ns=(t + 10_000_000_000, t + 10_000_000_000))
+
+    clock.on_sleep = bump
+    rep = serve(
+        None,
+        prepare=False,
+        bun="bun",
+        iters=1,
+        step_mode=False,
+        traj_root=str(env.tmp),
+        now=clock.now,
+        sleep=clock.sleep,
+        poll_sec=1.0,
+        max_seconds=30.0,
+    )
+
+    assert env.opened == ["a"], "复活复用原 runtime 与热引擎，不重建（重建会丢 runner 进无限 RETRY）"
+    assert rep.courses["a"]["rounds_done"] == 2, "指针续跑第二轮"

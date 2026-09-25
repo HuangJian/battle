@@ -2806,3 +2806,35 @@ e2e 真起 bun ⇒ hermetic 层失约且门禁变慢 · 抄一份「哪个模式
 —— 全文（改了什么 / 等价性证据 / 真机 A/B 待办）→ `docs/nn/runtime-opt.md` §26 · 锚 `## §26` ·
 同源条目 `§2026-09-25-goalnn-cloud-cpu-ledger`（池的熔断/背压/核数夹取定义在本条）·
 `§2026-09-25-state-init-snapshot`（起始分布是池化最容易被突破的一处：restore 换世界）
+
+## §2026-09-25-clutch-null-kill（2026-09-25，paired-kill 杀错臂 + 重启键坏，两处修）
+
+**来历**：C-0（`x20-clutch-null`）22:08 死在 it46，账本 `gate_verdict: paired-kill 连续 2 点
+< −3pp`；用户控制台重开课（22:15 marker 重写）毫无反应。两处都是代码与课程文件不一致：
+
+- **杀错臂**：两份课程文件只授权**单向**杀（差值 < −3pp ⇒ 杀 Cw，本腿证伪）；`rl/paired_kill.py`
+  实现却是**对称自杀**（Δ=本臂−对端，谁落后谁死）。C-0 落后（it40 −3.75pp / it45 −6.00pp）
+  恰等于 C-w 领先 +3.75/+6.0pp——正是加权要证明的——规则却杀了对照。对照一死，终点 verdict
+  （414000 配对 McNemar 要两条臂）即不可能。且 firing 在 ~2.9h，课程写的是 6h 中点、
+  日常"只看趋势不判决"。
+- **重启键坏**：`loop_serve.py` 重扫只认"不在 `runtimes` 里"的课；收官课永在 `runtimes` 里 ⇒
+  控制台停→开（marker 重写）永远没人执行。唯一的旧路是重启整个 serve 进程（打断健康腿）。
+
+**决定**：① `courses.<课>.paired_kill.self_kill`（rl-config 执行面，缺席/写坏=True，即现状；
+  只有显式 `false` 才关）：命中时判据照算、streak 照落账，只是不停车（`loop_guards._paired_kill`
+  在落账后、云端停机前return False）。C-0 经控制台设 `false`（rl-config 是 live 配置，不进库）。
+  ② serve 重扫：`reopened_parked`（纯函数：队列已终 + 落过收官副作用 + marker mtime 新于入队
+  记录）⇒ **只重置队列、复用原 runtime 与热引擎**（重走 open 会建 runner=None 的新 runtime，
+  池里旧引擎还在，`ensure_ready` 只对引擎不对 runner ⇒ 每轮断言失败进无限 RETRY，测试抓获）+
+  rounds_done 累计带过去；`_settle_rounds` 的旧文案同步改（"停→开后自动重新入队"）。
+  ③ 复活顺序写死：先设开关 → 再重启 serve（新进程才读新代码）→ C-0 从 it47 指针续跑；
+  streak 从账本重算（尾部仍 2/2）但开关已关 ⇒ 只记录不杀；it50 新 eval 点定去留。
+
+**被否决**：把对称改单向改默认（已有课程行为突变；开关缺席=现状）· 复活重建 runtime/引擎
+（丢 runner 无限 RETRY + 白付 torch 重建）· 重启键修成"只要 marker 在就重入队"
+（分不清"一直开着"与"停→开"，正常收官的课会被反复拉起）· 单课另起进程跑 C-0
+（与共享 trainer 抢同一 traj，lifecycle 明令禁止的双调度器）。
+
+**违反后果**：对照臂被杀 ⇒ 终点配对 verdict 永不可判（McNemar 要两臂同 seed 800 局）·
+收官课重开课无响应 ⇒ 唯一复活路是重启 serve（打断健康腿）· 复选用新 runtime ⇒ 无限 RETRY
+幽灵轮（账本有入队、无产出）。
