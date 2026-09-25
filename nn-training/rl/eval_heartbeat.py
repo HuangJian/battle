@@ -20,7 +20,7 @@ _DEFAULT_ROOT = Path(__file__).resolve().parents[2] / "dashboard" / "data" / "ev
 
 
 def data_root() -> Path:
-    """EvalStore 数据根（EVALBOARD_DATA 覆盖；与 batch_eval.data_root 同口径）。"""
+    """EvalStore 数据根（EVALBOARD_DATA 覆盖；与 `batch_store.data_root` 同口径）。"""
     return Path(os.environ.get("EVALBOARD_DATA", str(_DEFAULT_ROOT)))
 
 

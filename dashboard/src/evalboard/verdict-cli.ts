@@ -3,7 +3,7 @@
  * 判决 = 「语料（课程关卡文件 × 池外 seed 段）× N 个 ckpt 同批同种子配对」。
  * 本 CLI 只做**入队**：按 console 单写者纪律往 `requests.jsonl` 追加一条
  * `kind=verdict` 请求（runbook：谁都不直接写 batches.jsonl / games/ —— runner 单写）。
- * 消费与执行由 runner（`rl/batch_eval.py::consume_requests` 在下窗拾取，或
+ * 消费与执行由 runner（`rl/batch_store.py::BatchStore.consume_requests` 在下窗拾取，或
  * `dashboard/src/evalboard/kick-once.py` 一次性 kick）完成。
  *
  * 用法（仓根）：

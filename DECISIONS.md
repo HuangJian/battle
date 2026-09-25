@@ -3253,6 +3253,42 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
 - **门禁**：nn **2566 → 2567 passed / 3 skipped**（+1 = 新用例）；ruff / mypy 绿；
   根 `bun run check` 2120 pass / 0 fail（121404 expect，与改动前逐字一致）。
 
+## §2026-09-25-goalnn-batch-store-b2-split（2026-09-25，B2：台账/请求面收进唯一所有者 `BatchStore`）
+
+**决定：`rl/batch_eval.py` 拆它的第二步 B2 —— 台账与两个请求文件收进新模块 `rl/batch_store.py`
+的 `BatchStore`**（`status` / `units` / `node_dist` 的每次变更 = 一个**具名转移** = 一次事务 =
+一次落盘；`_claim_guard` / `_claim_locked` → `BatchStore._tx`；`_persist_of` 并入 `set_units_of`）。
+全文（刀口 / 两条★特例 / 三套验证 / 反探针收获 / 记账）→ `docs/nn/engineering.md` §23「第二十六刀」。
+
+- **刀口 = 按状态所有者切，不是按链切**（与前五刀不同类）：台账有 8 个独立 read-modify-write 点，
+  每个自己决定「改哪些字段 / 何时落盘 / 状态怎么转」（六种落盘策略、两种在没变时也整文件重写）⇒
+  任何一条调用链都要横穿它们，**按链切无解**（plan §5.5.1 已量）；真因是**台账没有所有者**。
+  两条**语法级**契约守卫：`status` / `node_dist` 的赋值点闭集 = 五个具名转移，落盘写点闭集 = `_publish`。
+- **★ 两条刻意保留的特例语义**（集中化时最容易被「统一」掉，守卫正面钉）：① `units.of == 0`（未定型）
+  时 `mark_unit_done` **不判 done**（否则判决批在 `set_units_of` 前就被标 done，剩余 unit 永远跑不到）；
+  ② `aborted` 批的在途 unit 只回填 `node_dist`、**不复活**，`requeue` **不改** `aborted`。
+- **★ 实施时才浮出的坑（设计未预见，已回写 plan §5.5.7）**：锁若只放在单个具名转移上，
+  `consume_requests` 分不清「锁忙」与「去重跳过」两种 `None` ⇒ 把请求标成已消费却**没建批**（丢请求、
+  无日志）⇒ 整轮也拿一把 `_tx`（内层转移可重入，不多付文件锁）；回归钉子
+  `test_lock_busy_consumes_nothing_and_marks_nothing`。落盘统一成「改了才落盘」（byte 等价）。
+- **验证（三套独立证据）**：① 纯搬对账 **9/9**（AST 去 docstring 后逐字等价，`read_batches` 一处
+  **宣告差异** = 字面量提成常量）；② **★ 差分探针 54/54** —— 同一串操作分别打在旧实现
+  （`git show HEAD:` 的 `batch_eval.py`）与新 store 上，逐操作比台账/`requests.done` 规范化字节与返回值；
+  ③ 新守卫 `tests/test_batch_store_txn.py`（15 例，含结构契约与「不缓存台账」）。
+- **★ 反探针 22/22**（首轮 1 条存活 = **真守卫空档**：删「running ∧ 未完成 ⇒ 可认领」分支全绿 ——
+  既有用例那条断言走的是 `pending` 分支，孤儿批续跑路径无人覆盖；补用例后全红）。
+- **★ 顺手记下、本刀不改的既存缺陷**：`running ∧ of == 0` 的批永远不可认领（崩在「认领 → `set_units_of`」
+  窗口里就只能等 `abort`）；但把 `of == 0` 算 incomplete 会让**另一个进程在派发前抢走整批**（双派）——
+  两个方向都有代价，属真设计问题（差分探针已证与旧实现逐字相同），记在守卫注释与工程记里，**不静默改**。
+- **零迁移依据**：门面 14 条公开名自别名再导出 ⇒ 调用点一行不改且 `batch_eval.X is batch_store.X`；
+  三个私有 seam（`_persist_of` / `_requeue` / `_reopen_for_resume`）不再转发，两处测试调用点改到 store。
+- **被否决的备选**：① 删掉旧签名、改全部测试调用点（30+ 处，与 §5.5.6「一行不改」冲突，且把行为改动
+  混进搬家）；② store 做成单例/带内存缓存（会吃掉跨进程写）；③ 省掉 `consume_requests` 的外层锁
+  （就是上面那条丢请求的坑）。
+- **记账/门禁**：`batch_eval.py` **1616 → 1190** · `batch_store.py` **680** · nn **2586 → 2608 passed / 3 skipped**
+  （ruff + mypy 绿）· 根 `bun run check` 2120 / 0 · dashboard typecheck + 1105 / 0 · `check-decisions` ok。
+  **下一步 = B3**（执行器纯搬 → `rl/batch_runner.py`）。
+
 ## §2026-09-25-goalnn-batch-plan-b1-split（2026-09-25，B1：批语料规划 + 判据/门 纯搬出包）
 
 **决定：`rl/batch_eval.py` 拆它的第一步 B1 —— 23 个成员（13 函数 + 10 常量）纯搬到新模块

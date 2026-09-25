@@ -271,8 +271,14 @@ def test_inbound_call_sites_in_the_old_home_are_the_expected_six() -> None:
     assert got == INBOUND_CALLS, got
 
 
-def test_old_home_reads_exactly_one_moved_constant() -> None:
-    """旧家唯一还用的常量是 `REPO_ROOT`（`DEFAULT_DATA_ROOT` 由它派生）；其余只经 import 再导出。"""
+def test_moved_constants_are_only_reexported_never_used_by_the_old_home() -> None:
+    """旧家对搬走的常量**一个都不再读**（全部只经 `import … as …` 再导出）。
+
+    B1 时旧家还读一次 `REPO_ROOT`（派生 `DEFAULT_DATA_ROOT`）；S26/B2 把这个派生也交给了
+    `rl/batch_store.py`（与台账同住——它描述「存储」而不是「执行」）⇒ 现在旧家 = 零次。
+    本用例仍然钉「常量有没有人真的在用」：`REPO_ROOT` 的使用者现在是 `batch_store.py`，
+    数它只读一次（防「顺手到处派生」）。
+    """
     loads = _calls_by_owner(EVAL_SRC, set())
     assert loads == {}
     names = [
@@ -280,10 +286,16 @@ def test_old_home_reads_exactly_one_moved_constant() -> None:
         for n in ast.walk(ast.parse(EVAL_SRC))
         if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
     ]
-    assert names.count("REPO_ROOT") == 1
     for const in MOVED_CONSTS:
-        if const != "REPO_ROOT":
-            assert names.count(const) == 0, const
+        assert names.count(const) == 0, const
+    store_src = (RL / "batch_store.py").read_text(encoding="utf-8")
+    store_names = [
+        n.id
+        for n in ast.walk(ast.parse(store_src))
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+    ]
+    assert store_names.count("REPO_ROOT") == 1
+    assert 'DEFAULT_DATA_ROOT = REPO_ROOT / "dashboard" / "data" / "evalboard"' in store_src
 
 
 # ────────────────────────── ⑤ 功能性：从**新家**直接调（不经门面）──────────────────────────

@@ -140,13 +140,17 @@ def test_hooks_decoupled_from_a_eval() -> None:
 def test_partial_unit_reopens_batch(tmp_path: Path, monkeypatch) -> None:
     """yield/超时部分完成：不标 unit done，批回 pending 供续跑。"""
     monkeypatch.setenv("EVALBOARD_DATA", str(tmp_path))
-    from rl.batch_eval import _reopen_for_resume, read_batches
+    from rl.batch_eval import read_batches
+
+    # 私有 seam 自 S26/B2 起住 store（`_reopen_for_resume` 不再经门面再导出）——
+    # 它是「台账转移」，就该在台账的具名转移上测。
+    from rl.batch_store import BatchStore
 
     write_batches(
         tmp_path,
         [{"batch_id": "b1", "status": "running", "units": {"of": 2, "done": []}}],
     )
-    _reopen_for_resume(tmp_path, "b1")
+    BatchStore(tmp_path).reopen_for_resume("b1")
     (b,) = read_batches(tmp_path)
     assert b["status"] == "pending"
     assert b["units"]["done"] == []

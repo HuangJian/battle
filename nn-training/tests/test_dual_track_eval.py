@@ -224,9 +224,9 @@ def test_settle_summary_dual_track_fields(tmp_path: Path) -> None:
 def test_settle_summary_ignores_bc_evalboard_rows(tmp_path: Path) -> None:
     """P2-7：B/C evalboard 行（同为 `event:"eval"`）不得混进本臂胜率与双轨拆段。
 
-    病根：台账过滤只有 (event, wver, iter)，而 `batch_eval.py:703` 落的 B/C 行
-    同样满足这三条（畸形批 iter=0 能撞上同 (iter,wver)）⇒ 混进来既抬高胜率分母、
-    又把 B/C 的种子算进锚点/轮转段。
+    病根：台账过滤只有 (event, wver, iter)，而 `rl/batch_eval.py` 的
+    `BatchEvalRunner._run.record` 落的 B/C 行同样满足这三条（畸形批 iter=0 能撞上同
+    (iter,wver)）⇒ 混进来既抬高胜率分母，又把 B/C 的种子算进锚点/轮转段。
     """
     elog = tmp_path / "eval_log.jsonl"
     _write_eval_rows(

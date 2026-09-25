@@ -8,6 +8,12 @@ BatchEvalRunner：结构参考 EvalDispatcher，复用 `fetch_task(mode='eval')`
 `is_transient_error` …）自 2026-09-25（S25/B1）起住 `rl/batch_plan.py`；本模块顶部
 逐个再导出（`X as X`）⇒ 既有调用点一行不改。
 
+台账与请求面（`consume_requests` / `claim_pending` / `mark_unit_done` / `read_*` …）自
+2026-09-25（S26/B2）起住 `rl/batch_store.py` —— `BatchStore` 是**台账唯一所有者**：
+「一次具名转移 = 一次事务 = 一次落盘」，锁与原子发布都在那里；本模块顶部同样逐个
+再导出 ⇒ 调用点一行不改。本模块自此 = **执行面**（`BatchEvalRunner`）+ 轮内接线
+（`maybe_dispatch_batch`）+ 单元行字段（`eval_census_fields` / `eval_loot_fields`）。
+
 关键契约：
   - 节点门（§6.6）：enabled ∧ ping ∧ evalSupport ∧ stageJsonSupport ∧
     bunVersion 一致 ∧ **codeHash 一致**（= rollout 门同一判据；2026-09-17 起不再比
@@ -22,17 +28,12 @@ BatchEvalRunner：结构参考 EvalDispatcher，复用 `fetch_task(mode='eval')`
 
 from __future__ import annotations
 
-import functools
 import hashlib
 import json
-import os
-import random
 import shutil
 import threading
 import time
 from collections import deque
-from contextlib import contextmanager
-from datetime import datetime, timezone
 from pathlib import Path
 
 import dist_common
@@ -61,6 +62,25 @@ from rl.batch_plan import plan_units as plan_units
 from rl.batch_plan import plan_verdict_units as plan_verdict_units
 from rl.batch_plan import select_next_unit as select_next_unit
 from rl.batch_plan import units_for_batch as units_for_batch
+
+# 台账 / 请求面：实现已出包到 `rl/batch_store.py`（S26/B2，状态收进唯一所有者）。
+# 自别名逐条再导出（与上面 batch_plan 同款：ruff `combine-as-imports = false` 下每条一行）
+# ⇒ 既有 `from rl.batch_eval import claim_pending` 等调用点一行不改，
+# 且 `batch_eval.X is batch_store.X`。
+from rl.batch_store import DEFAULT_DATA_ROOT as DEFAULT_DATA_ROOT
+from rl.batch_store import REQUESTS_DONE_FILE as REQUESTS_DONE_FILE
+from rl.batch_store import REQUESTS_FILE as REQUESTS_FILE
+from rl.batch_store import BatchStore as BatchStore
+from rl.batch_store import claim_pending as claim_pending
+from rl.batch_store import consume_requests as consume_requests
+from rl.batch_store import data_root as data_root
+from rl.batch_store import mark_requests_done as mark_requests_done
+from rl.batch_store import mark_unit_done as mark_unit_done
+from rl.batch_store import read_batches as read_batches
+from rl.batch_store import read_done_req_ids as read_done_req_ids
+from rl.batch_store import read_requests as read_requests
+from rl.batch_store import utc_now_iso as utc_now_iso
+from rl.batch_store import write_batches as write_batches
 from rl.eval_local import (
     EVAL_LOCAL_SLOTS_DEFAULT,
     EVAL_TASK_ATTEMPTS,
@@ -78,13 +98,11 @@ from rl.queue_local import (
     pop_inflight,
     register_inflight,
 )
-from train.loop_util import acquire_lock, cleanup_lock
 
 # ── 规划 / 判据面：实现已出包到 `rl/batch_plan.py`（2026-09-25 B1，纯搬）────────
 # `REPO_ROOT`、四个批规划常量（阶梯 / 语料 / 关卡目录 + 三档镜像值）与全部规划/判据函数
 # 都住 `rl/batch_plan.py`；顶部 import 逐个再导出（`X as X`）⇒ 既有调用点一行不改、
 # `batch_eval.X is batch_plan.X` 恒真。
-DEFAULT_DATA_ROOT = REPO_ROOT / "dashboard" / "data" / "evalboard"
 
 #: 背压退避封顶（秒）。指数序列 0.25/0.5/1/2/4/8 覆盖 6 次重排。
 BUSY_BACKOFF_CAP_SEC = 8.0
@@ -127,20 +145,9 @@ NODE_RECOVERY_TRIES = 3
 ONESHOT_EVAL_KIND = "eval"
 
 
-def utc_now_iso() -> str:
-    """UTC ISO-8601 带毫秒 + Z —— 与 console 侧 `new Date().toISOString()` 同格式。
-
-    `consume_requests` / `enqueueCovered` 用**字符串比较**判断"批是否已物化"
-    （`batch.created_ts >= req.ts`），两侧格式必须逐字符可比。本地时间的
-    `time.strftime` 不带毫秒不带 Z，在 UTC+8 下恰好"看起来更晚"而侥幸正确，
-    换到 UTC 或负偏移时区就会误判为未物化 ⇒ 重复建批。
-    """
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-
-
-def data_root() -> Path:
-    """EvalStore 数据根（EVALBOARD_DATA 覆盖；默认 dashboard/data/evalboard）。"""
-    return Path(os.environ.get("EVALBOARD_DATA", str(DEFAULT_DATA_ROOT)))
+# `utc_now_iso` / `data_root`（含 `DEFAULT_DATA_ROOT`）已搬到 `rl/batch_store.py`
+# （S26/B2，与台账同住 —— 它们描述的是「存储」而不是「执行」）；顶部再导出 ⇒
+# 调用点一行不改。
 
 
 def _heartbeat(**patch: object) -> None:
@@ -159,418 +166,15 @@ def _heartbeat(**patch: object) -> None:
 # `rl/batch_plan.py`（顶部再导出）—— 本模块只剩台账 / 执行 / 接线。
 
 
-# ────────────────────── EvalBoard 批队列跨进程互斥（plan P4-W4 / A1） ──────────────────
-# 多课程并行 = 多个 trainer 进程各自的 EvalBoard 线程读写同一 store 的
-# `batches.jsonl`，而认领/标记全是 read-modify-write；无锁时两个进程会同时认领同一
-# 批（双花）或互相覆盖 units.done（丢批）。这里复用 `train.loop_util` 的 PID 锁
-# （**拒绝第三套锁实现**，plan P4-W4）：跨进程用文件锁 `claim.lock`，进程内另用
-# RLock 串行化（同一进程的 eval 线程 / 主循环 idle 窗本就并发）。
-# 拿不到锁（另一进程正在认领）→ 跳过本轮，下一 idle 窗重试，_que_ 绝不无锁写。
-_CLAIM_LOCK_NAME = "claim.lock"
-_CLAIM_WAIT_SEC = 2.0
-_claim_local = threading.RLock()
-_claim_held = threading.local()
-
-
-@contextmanager
-def _claim_guard(root: Path):
-    """yield True = 已持锁；False = 2s 内未取得（调用方跳过本轮）。可重入。"""
-    with _claim_local:
-        key = str(root)
-        if getattr(_claim_held, "key", "") == key:
-            yield True  # 本线程已持锁（嵌套调用：claim_pending → consume_requests）
-            return
-        root.mkdir(parents=True, exist_ok=True)
-        lock_path = str(root / _CLAIM_LOCK_NAME)
-        deadline = time.time() + _CLAIM_WAIT_SEC
-        ok = False
-        while True:
-            if acquire_lock(lock_path, tag="batcheval claim"):
-                ok = True
-                break
-            if time.time() >= deadline:
-                break
-            time.sleep(0.2)
-        _claim_held.key = key if ok else ""
-        try:
-            yield ok
-        finally:
-            _claim_held.key = ""
-            if ok:
-                cleanup_lock(lock_path)
-
-
-def _claim_locked(fn):
-    """把 batches.jsonl 读改写入口包进跨进程锁；未取得锁 → 返回 None（跳过本轮）。"""
-
-    @functools.wraps(fn)
-    def wrapper(root, *args, **kwargs):
-        with _claim_guard(Path(root)) as ok:
-            if not ok:
-                log(f"[batcheval] claim.lock 忙——跳过本轮 {fn.__name__}（下一 idle 窗重试）")
-                return None
-            return fn(root, *args, **kwargs)
-
-    return wrapper
-
-
-def read_batches(root: Path) -> list[dict]:
-    p = root / "batches.jsonl"
-    if not p.exists():
-        return []
-    out = []
-    for line in p.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            out.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return out
-
-
-def write_batches(root: Path, batches: list[dict]) -> None:
-    """写台账（**原子发布**：同目录临时文件 + `os.replace`）。
-
-    ★ 为什么不直接 `write_text`（2026-09-25 修，复现用例
-    `tests/test_batch_eval.py::test_batch_ledger_publish_is_atomic`）：`Path.write_text`
-    先 `open('w')` **原地截断** live 文件再写字节 ⇒ 「截断」到「写完」之间存在一个
-    **读者可见**的窗口。本文件的读者里有一个**无锁的跳语言读者** —— console/TS 的
-    `batches.ts::loadBatches`（「runner 单写；console 只读」，坏行**静默跳过**），而它的
-    `enqueueBatch` 去重（「同 course+rung+ckpt 的 pending 批已存在则返回它」）**依赖读全**
-    ⇒ 落在窗口里就会**重复入队**。探针实测（终次 log = `nn-training/tmp/probe-batch-store-final.log`）：
-    12 批 / 2.7 KB 短读 126/622 = 20.3%，2000 批 / 444 KB 短读 144/376 = 38.3% + 12 坏行。
-
-    `os.replace` 是**同一文件系统内的原子替换**（POSIX `rename(2)` / Win32
-    `MoveFileEx(REPLACE_EXISTING)`）⇒ 读者只会看到完整的旧快照或完整的新快照。
-    临时名**固定**（不随机）：上一次崩溃残留的 `.tmp` 会被本次直接覆盖（不累积），
-    且它不进 git（`dashboard/data/evalboard/*` 整目录已忽略）也不被任何 `.jsonl`
-    后缀过滤当作行文件。
-
-    ★ 同族未修（另开一刀）：`dashboard/src/evalboard/batches.ts::rewriteBatches`
-    （TS 侧 `claimPending` / `updateBatch`）用同样的截断式 `writeFileSync`。
-    """
-    root.mkdir(parents=True, exist_ok=True)
-    tmp = root / "batches.jsonl.tmp"
-    tmp.write_text("".join(json.dumps(b) + "\n" for b in batches), encoding="utf-8")
-    os.replace(tmp, root / "batches.jsonl")
-
-
-REQUESTS_FILE = "requests.jsonl"
-REQUESTS_DONE_FILE = "requests.done.jsonl"
-
-
-def _req_key(r: dict) -> str:
-    rid = r.get("req_id")
-    if isinstance(rid, str) and rid:
-        return rid
-    try:
-        return json.dumps(r, sort_keys=True, ensure_ascii=True)
-    except (TypeError, ValueError):
-        return repr(sorted(str(k) for k in r))
-
-
-def read_requests(root: Path) -> list[dict]:
-    """读 console 请求文件（append-only，console 唯一写者；坏行跳过）。"""
-    p = root / REQUESTS_FILE
-    if not p.exists():
-        return []
-    out = []
-    for line in p.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            r = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(r, dict) and isinstance(r.get("kind"), str):
-            out.append(r)
-    return out
-
-
-def read_done_req_ids(root: Path) -> set[str]:
-    """已消费请求 id 集（requests.done.jsonl；缺失即空集）。"""
-    p = root / REQUESTS_DONE_FILE
-    if not p.exists():
-        return set()
-    out: set[str] = set()
-    for line in p.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            r = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(r, dict) and isinstance(r.get("req_id"), str):
-            out.add(str(r["req_id"]))
-    return out
-
-
-def mark_requests_done(root: Path, ids: set[str] | list[str]) -> None:
-    """已消费标记（append-only，runner 唯一写者；requests.jsonl 本体永不重写）。"""
-    ids = list(ids)
-    if not ids:
-        return
-    root.mkdir(parents=True, exist_ok=True)
-    ts = time.strftime("%Y-%m-%dT%H:%M:%S")
-    with open(root / REQUESTS_DONE_FILE, "a", encoding="utf-8") as f:
-        for i in ids:
-            f.write(json.dumps({"req_id": i, "consumed_ts": ts}) + "\n")
-
-
-def _verdict_key_of(corpus: str, ckpts: list) -> str:
-    """判决批去重键：语料 id + ckpt 标签序列（顺序敏感——同批多 ckpt 的配对语义）。"""
-    labels = [str((c or {}).get("label") or (c or {}).get("path") or "") for c in ckpts]
-    return f"verdict|{corpus}|{','.join(labels)}"
-
-
-def _verdict_key(b: dict) -> str:
-    return _verdict_key_of(str(b.get("corpus") or ""), list(b.get("ckpts") or []))
-
-
-def _same_enq_key(b: dict, course: str, rung_from: str, ckpt: str) -> bool:
-    return (
-        b.get("course") == course
-        and b.get("rung_from") == rung_from
-        and b.get("ckpt") == ckpt
-    )
-
-
-@_claim_locked
-def consume_requests(root: Path) -> dict:
-    """消费 console 请求文件（plan/evalboard-console-ux.md §5.3，P1/P4）。
-
-    console 是 requests.jsonl 的唯一写者（append-only），本函数是唯一消费方：
-      enqueue → 无同 key pending 批且未物化则建 pending 批；
-      abort → pending/running 批标 aborted（在途 unit 跑完即停，见 mark_unit_done 守卫）；
-      ladder_start/ladder_stop → 跳过（console ticker 持有，runner 不碰）。
-    幂等：重复消费无副作用（去重 + 物化检查 + abort 复用）。
-    在 claim_pending 头部调用 ⇒ idle 窗与 kick-once.py 自动覆盖。
-    任何失败只记日志，绝不抛出（训练主链零风险）。
-    """
-    counts = {"consumed": 0, "enqueued": 0, "aborted": 0, "skipped": 0}
-    try:
-        reqs = read_requests(root)
-        if not reqs:
-            return counts
-        done_ids = read_done_req_ids(root)
-        fresh = [r for r in reqs if _req_key(r) not in done_ids]
-        if not fresh:
-            return counts
-        batches = read_batches(root)
-        dirty = False
-        consumed: list[str] = []
-        for r in fresh:
-            kind = str(r.get("kind"))
-            key = _req_key(r)
-            if kind == "enqueue":
-                course = str(r.get("course", ""))
-                rung_from = str(r.get("rung_from", ""))
-                ckpt = str(r.get("ckpt", ""))
-                if not course or not rung_from or not ckpt:
-                    consumed.append(key)
-                    counts["skipped"] += 1
-                    continue
-                if any(
-                    b.get("status") == "pending"
-                    and _same_enq_key(b, course, rung_from, ckpt)
-                    for b in batches
-                ):
-                    consumed.append(key)
-                    counts["skipped"] += 1
-                    continue
-                req_ts = str(r.get("ts", ""))
-                if req_ts and any(
-                    _same_enq_key(b, course, rung_from, ckpt)
-                    and str(b.get("created_ts", "")) >= req_ts
-                    for b in batches
-                ):
-                    consumed.append(key)
-                    counts["skipped"] += 1
-                    continue
-                # 必须与 console 侧（TS `new Date().toISOString()`）同格式：UTC +
-                # 毫秒 + Z。此前用本地时间 strftime（无毫秒无 Z），而
-                # enqueueCovered/consume_requests 用**字符串比较**判"是否已物化"
-                # ⇒ UTC+8 恰好成立、UTC/负偏移时区会误判为未物化而重复建批。
-                now = utc_now_iso()
-                stamp = now.replace("-", "").replace(":", "").replace("T", "")
-                stamp = stamp.replace(".", "").replace("Z", "")
-                try:
-                    it = int(r.get("iter", 0))
-                except (TypeError, ValueError):
-                    it = 0
-                trig = str(r.get("trigger", "standalone"))
-                if trig not in ("main", "standalone", "auto-ladder"):
-                    trig = "standalone"
-                pol = str(r.get("policy", "nn"))
-                if pol not in ("nn", "god"):
-                    pol = "nn"
-                batch: dict = {
-                    "batch_id": f"b-{stamp}-{random.randrange(0x10000):04x}",
-                    "course": course,
-                    "rung_from": rung_from,
-                    "ckpt": ckpt,
-                    "requester": str(r.get("requester", "web")),
-                    "created_ts": now,
-                    "status": "pending",
-                    "units": {"of": 2, "done": []},
-                    "k_seq": 0,
-                    "window_seq": 0,
-                    "trigger": trig,
-                    "iter": it,
-                    "node_dist": {},
-                    "elapsed_sec": None,
-                    "policy": pol,
-                }
-                for opt in ("ladder_pos", "k_seq", "init_sha16", "only_rungs"):
-                    if r.get(opt) is not None:
-                        batch[opt] = r[opt]
-                batches.append(batch)
-                dirty = True
-                consumed.append(key)
-                counts["enqueued"] += 1
-            elif kind == "verdict":
-                # 判决批（P2）：语料 id + ckpts[]（多权重同批同种子配对）。
-                corpus = str(r.get("corpus", ""))
-                raw_ckpts = r.get("ckpts") or []
-                ckpts = [
-                    c
-                    for c in raw_ckpts
-                    if isinstance(c, dict) and str(c.get("path") or "")
-                ]
-                if not corpus or not ckpts:
-                    consumed.append(key)
-                    counts["skipped"] += 1
-                    continue
-                vkey = _verdict_key_of(corpus, ckpts)
-                if any(
-                    b.get("status") == "pending" and _verdict_key(b) == vkey
-                    for b in batches
-                ):
-                    consumed.append(key)
-                    counts["skipped"] += 1
-                    continue
-                req_ts = str(r.get("ts", ""))
-                if req_ts and any(
-                    _verdict_key(b) == vkey and str(b.get("created_ts", "")) >= req_ts
-                    for b in batches
-                ):
-                    consumed.append(key)
-                    counts["skipped"] += 1
-                    continue
-                now = utc_now_iso()
-                stamp = now.replace("-", "").replace(":", "").replace("T", "")
-                stamp = stamp.replace(".", "").replace("Z", "")
-                try:
-                    it = int(r.get("iter", 0))
-                except (TypeError, ValueError):
-                    it = 0
-                pol = str(r.get("policy", "nn"))
-                if pol not in ("nn", "god"):
-                    pol = "nn"
-                vbatch: dict = {
-                    "batch_id": f"b-{stamp}-{random.randrange(0x10000):04x}",
-                    "kind": "verdict",
-                    "corpus": corpus,
-                    "ckpts": ckpts,
-                    "requester": str(r.get("requester", "web")),
-                    "created_ts": now,
-                    "status": "pending",
-                    # units.of 由 plan_verdict_units 展平后回写（= ckpts × 关卡数）。
-                    "units": {"of": 0, "done": []},
-                    "k_seq": 0,
-                    "window_seq": 0,
-                    "trigger": "verdict",
-                    "iter": it,
-                    "node_dist": {},
-                    "elapsed_sec": None,
-                    "policy": pol,
-                }
-                for opt in ("init_sha16", "only_rungs"):
-                    if r.get(opt) is not None:
-                        vbatch[opt] = r[opt]
-                batches.append(vbatch)
-                dirty = True
-                consumed.append(key)
-                counts["enqueued"] += 1
-            elif kind == "abort":
-                bid = str(r.get("batch_id", ""))
-                for b in batches:
-                    if b.get("batch_id") == bid and b.get("status") in (
-                        "pending",
-                        "running",
-                    ):
-                        b["status"] = "aborted"
-                        dirty = True
-                        counts["aborted"] += 1
-                        break
-                consumed.append(key)
-            elif kind in ("ladder_start", "ladder_stop"):
-                continue  # console ticker 持有——runner 不消费、不标记
-            else:
-                consumed.append(key)  # 未知 kind：标记消费，防反复扫描
-                counts["skipped"] += 1
-        if dirty:
-            write_batches(root, batches)
-        if consumed:
-            mark_requests_done(root, consumed)
-        counts["consumed"] = len(consumed)
-        if counts["enqueued"] or counts["aborted"]:
-            log(f"[batcheval] consume_requests: {counts}")
-        return counts
-    except Exception as e:
-        log(f"[batcheval] consume_requests failed (ignored): {type(e).__name__}: {e}")
-        return counts
-
-
-@_claim_locked
-def claim_pending(root: Path) -> dict | None:
-    """取最早可跑批并标 running。
-
-    可跑 = pending，或 running 且仍有未完成 unit（进程重启 / yield 后孤儿批）。
-    console 请求先经 consume_requests 物化为批（§5.3）；续跑靠本函数的 running 分支。
-    """
-    try:
-        consume_requests(root)
-    except Exception as e:
-        log(f"[batcheval] consume_requests failed (ignored): {type(e).__name__}: {e}")
-    batches = read_batches(root)
-    for b in batches:
-        st = b.get("status")
-        units = b.get("units") or {}
-        done = units.get("done") or []
-        of = int(units.get("of") or 0)
-        incomplete = of > 0 and len(done) < of
-        if st == "pending" or (st == "running" and incomplete):
-            b["status"] = "running"
-            write_batches(root, batches)
-            return b
-    return None
-
-
-@_claim_locked
-def mark_unit_done(root: Path, batch_id: str, unit_idx: int, node_dist: dict) -> None:
-    batches = read_batches(root)
-    for b in batches:
-        if b.get("batch_id") == batch_id:
-            if b.get("status") == "aborted":
-                # P4：在途 unit 收尾只回填 node_dist，不复活已中止批。
-                b["node_dist"] = node_dist
-                write_batches(root, batches)
-                return
-            units = b.setdefault("units", {"of": 0, "done": []})
-            if unit_idx not in units.get("done", []):
-                units["done"].append(unit_idx)
-            b["node_dist"] = node_dist
-            of = int(units.get("of") or 0)
-            ndone = len(units.get("done") or [])
-            if of > 0 and ndone >= of:
-                b["status"] = "done"
-            else:
-                # 单元未全完：回 pending，下一 idle 窗领剩余 unit（yield/重启安全）。
-                b["status"] = "pending"
-            write_batches(root, batches)
-            return
+# ── 台账 / 请求面：实现在 `rl/batch_store.py`（2026-09-25 S26/B2）──────────────────────
+# 锁（原 `_claim_guard` / `_claim_locked` → `BatchStore._tx`）、台账读改写
+# （`read_batches` / `write_batches` / `_persist_of` / `_requeue` / `_reopen_for_resume`
+# → **八个具名转移**）与请求面（`read_requests` / `read_done_req_ids` /
+# `mark_requests_done` / `consume_requests`）都收进 `BatchStore` ——
+# **一次转移 = 一次事务 = 一次落盘**（设计见 plan/nn-training-refactor.md §5.5.2）。
+# 公开名在顶部再导出（`X as X`）⇒ 既有调用点与测试一行不改；三个私有 seam
+# （`_persist_of` / `_requeue` / `_reopen_for_resume`）**不**再转发 —— 它们是私有面，
+# 调用点已改到 store 上（`set_units_of` / `requeue` / `reopen_for_resume`）。
 
 
 class BatchEvalRunner:
@@ -1431,8 +1035,8 @@ class BatchEvalRunner:
                 )
         try:
             if dropped == 0:
-                mark_unit_done(
-                    data_root(), str(self.batch.get("batch_id")), self.unit_idx, dict(node_games)
+                BatchStore(data_root()).mark_unit_done(
+                    str(self.batch.get("batch_id")), self.unit_idx, dict(node_games)
                 )
             else:
                 # 部分完成（yield/超时）：不标 unit done，批回 pending 供 idle 续跑；
@@ -1441,7 +1045,7 @@ class BatchEvalRunner:
                     f"[batcheval] {unit['rung']} u{self.unit_idx}: partial "
                     f"({dropped} left) — reopen batch for resume"
                 )
-                _reopen_for_resume(data_root(), str(self.batch.get("batch_id")))
+                BatchStore(data_root()).reopen_for_resume(str(self.batch.get("batch_id")))
         except Exception as e:
             log(f"[batcheval] WARN mark_unit_done failed: {e}")
         # R4-G1 心跳：单元结束（清 rung；window_open 留给 loop_core 的开关窗写点）。
@@ -1526,8 +1130,10 @@ def maybe_dispatch_batch(
     任何模式可跑。intent/goal + policy nn：B 层 nn 单元语义不适用（意图权重另
     桶），拒绝并记日志（未来扩展点，不静默跑错）。
     """
-    root = data_root()
-    batch = claim_pending(root)
+    # store 现建现用：只持有 root（**不缓存台账**，见 rl/batch_store 模块 docstring），
+    # root 在**调用时**解析 —— 与原来的 `data_root()` 同口径。
+    store = BatchStore()
+    batch = store.claim()
     if batch is None:
         return None
     # 判决批（P2）：语料来自注册表，unit 自带 ckpt ⇒ 不需要 rl_path，也不吃 mode
@@ -1538,13 +1144,13 @@ def maybe_dispatch_batch(
         log(
             f"[batcheval] batch {batch.get('batch_id')}: nn unit 不适用于 mode={args.mode} — 退回队列"
         )
-        _requeue(root, batch)
+        store.requeue(str(batch.get("batch_id")))
         return None
     try:
         units = units_for_batch(batch)
     except Exception as e:
         log(f"[batcheval] plan 失败 ({e}) — 退回队列")
-        _requeue(root, batch)
+        store.requeue(str(batch.get("batch_id")))
         return None
     units, nxt, unit = select_next_unit(
         units, set((batch.get("units") or {}).get("done", [])), batch.get("only_rungs")
@@ -1555,12 +1161,12 @@ def maybe_dispatch_batch(
     unit_weights = str(unit.get("ckpt") or "") or rl_path
     if policy == "nn" and not unit_weights:
         log("[batcheval] nn unit without weights — 退回队列")
-        _requeue(root, batch)
+        store.requeue(str(batch.get("batch_id")))
         return None
     epoch = dist_common.compute_engine_epoch()
     eval_log = traj_dir.parent / "eval_log.jsonl"
     batch.setdefault("units", {})["of"] = len(units)
-    _persist_of(root, str(batch.get("batch_id")), len(units))
+    store.set_units_of(str(batch.get("batch_id")), len(units))
     return dispatch_batch_bg(
         bun,
         unit_weights,
@@ -1582,35 +1188,3 @@ def maybe_dispatch_batch(
 # `select_next_unit`（下一待跑单元的确定性挑选）已搬到 `rl/batch_plan.py`（顶部再导出）。
 
 
-@_claim_locked
-def _persist_of(root: Path, batch_id: str, of: int) -> None:
-    """plan 展开后 units.of 回写台账（回归位使 of 2→3；defer 时也不丢）。"""
-    batches = read_batches(root)
-    for b in batches:
-        if b.get("batch_id") == batch_id:
-            b.setdefault("units", {})["of"] = of
-            break
-    write_batches(root, batches)
-
-
-@_claim_locked
-def _requeue(root: Path, batch: dict) -> None:
-    """认领后发现跑不了 → 状态改回 pending（§3.7 台账是队列，状态流转合法）。"""
-    batches = read_batches(root)
-    for b in batches:
-        if b.get("batch_id") == batch.get("batch_id"):
-            if b.get("status") != "aborted":
-                b["status"] = "pending"
-                write_batches(root, batches)
-            break
-
-
-@_claim_locked
-def _reopen_for_resume(root: Path, batch_id: str) -> None:
-    """部分完成（yield/超时）→ running 改回 pending，units.done 保留供续跑。"""
-    batches = read_batches(root)
-    for b in batches:
-        if b.get("batch_id") == batch_id and b.get("status") == "running":
-            b["status"] = "pending"
-            break
-    write_batches(root, batches)

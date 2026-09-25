@@ -1,7 +1,7 @@
 /** requests.ts — console → runner 请求文件（plan/evalboard-console-ux.md §5.3，P1）。
  *
  * console 是 `requests.jsonl` 的唯一写者（append-only）；runner
- *（`nn-training/rl/batch_eval.py:consume_requests`）是唯一消费方，
+ *（`nn-training/rl/batch_store.py:consume_requests`）是唯一消费方，
  *消费标记 append 到 `requests.done.jsonl`。**任何一方都不重写
  * `requests.jsonl` 本体** ⇒ D-c 双写者竞态按设计消除。
  * runner 侧是同协议的 Python 镜像实现，改一侧必须同步另一侧。

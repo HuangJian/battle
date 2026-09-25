@@ -2,7 +2,7 @@
 
 覆盖：enqueue 物化建批 / 去重（pending 同 key + 已物化跳过）/ 畸形行跳过 /
 abort（pending + running）/ ladder_* 被 runner 忽略 / mark_unit_done 与
-_requeue 不复活 aborted / claim 跳过 aborted / 坏行容忍。
+requeue 不复活 aborted / claim 跳过 aborted / 坏行容忍。
 """
 
 from __future__ import annotations
@@ -143,10 +143,10 @@ def test_aborted_stays_aborted_and_unclaimable(tmp_path: Path) -> None:
     mark_unit_done(tmp_path, "b-x", 1, {"local": 100})
     (b,) = read_batches(tmp_path)
     assert b["status"] == "aborted" and b["node_dist"] == {"local": 100}
-    # _requeue 同样不复活
-    from rl.batch_eval import _requeue
+    # requeue 同样不复活（私有 seam 自 S26/B2 起住 store：`_requeue` 不再经门面再导出）
+    from rl.batch_store import BatchStore
 
-    _requeue(tmp_path, {"batch_id": "b-x"})
+    BatchStore(tmp_path).requeue("b-x")
     assert read_batches(tmp_path)[0]["status"] == "aborted"
     # claim 跳过 aborted
     assert claim_pending(tmp_path) is None
@@ -206,9 +206,11 @@ def test_claim_lock_busy_skips_without_deleting_holder(tmp_path: Path, monkeypat
     """另一进程持锁 → 本轮跳过（返回 None），且绝不删掉别人的锁文件。"""
     import os
 
-    import rl.batch_eval as batch_eval
+    # 锁与等待时长自 S26/B2 起住 store（`rl/batch_store.py`）—— 本用例测的就是那条
+    # 锁语义（拿不到 ⇒ 本轮跳过、绝不删别人的锁），故改址到它的新家。
+    import rl.batch_store as batch_store
 
-    monkeypatch.setattr(batch_eval, "_CLAIM_WAIT_SEC", 0.2)  # 不真等 2s
+    monkeypatch.setattr(batch_store, "_CLAIM_WAIT_SEC", 0.2)  # 不真等 2s
     lp = tmp_path / "claim.lock"
     # 写本进程 PID（_pid_alive 为真）模拟「另一活进程持锁」
     lp.write_text(f"{os.getpid()}|{sys.executable}|0", encoding="utf-8")

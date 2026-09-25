@@ -9,8 +9,9 @@
   ② **这台节点能不能派 / 这个错误要不要退避** —— `node_gate_reason`（节点门）与
      `is_transient_error`（背压/瞬断；单一实现仍在 `dist_common`，这里只是 B 层薄转发）。
 
-因此本模块**零锁、零台账读写**：`batches.jsonl` 的读改写仍全住 `rl/batch_eval.py`
-（B2 会把它们收进 `BatchStore`）。`rl/batch_eval.py` 顶部逐个再导出本模块的公开名
+因此本模块**零锁、零台账读写**：`batches.jsonl` 的读改写自 2026-09-25（S26/B2）起全住
+`rl/batch_store.py`（`BatchStore` = 台账唯一所有者，一次具名转移 = 一次事务 = 一次落盘）。
+`rl/batch_eval.py` 顶部逐个再导出本模块的公开名
 （`X as X`）⇒ 既有 `from rl.batch_eval import plan_units` 等调用点一行不改，
 且 `batch_eval.X is batch_plan.X` 恒真。
 """

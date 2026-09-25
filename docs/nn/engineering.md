@@ -1989,6 +1989,119 @@ B2 会让它们进 `BatchStore`；现在搬进去 = 下一刀还得再搬一次�
   `rl.batch_plan.KIND_FOR_POLICY`）· `dashboard/src/evalboard/corpora.ts`（双侧契约的 Python 路径
   → `batch_plan.py::`，并注明旧名仍在再导出）。
 
+### 第二十六刀（2026-09-25）：B2 —— 台账收进唯一所有者 `rl/batch_store.py`（`BatchStore`）
+
+B1 之后继续按 §5.5.4 开工 B2：`rl/batch_eval.py` **1616 → 1190 行**（−426），新模块
+`rl/batch_store.py` **680 行**（含 docstring 与六个门面适配器）。这一刀与前面所有刀**不同类**：
+前面是「按链 / 按判据搬代码」，这一刀是**按状态所有者收拢**——第一次把「谁拥有可变状态」当成刀口。
+
+#### 刀口：真因不是调用图，是台账没有所有者
+
+设计阶段量的那个结论在这里兑现：台账有 **8 个独立 read-modify-write 点**（建批 / 认领 / 结算 /
+定型 / requeue / reopen / abort / 请求消费），每个自己决定「改哪些字段 / **何时落盘** / 从什么状态
+到什么状态」；六种落盘策略里有两种（`_persist_of` / `_reopen_for_resume`）在**什么都没变时也整文件
+重写**。任何一条调用链都要横穿它们 ⇒ 按链切无解（S18 已量过同一件事）。
+
+`BatchStore` 的契约一句话：`batches.jsonl` 与两个请求文件**只有一个所有者**，
+`status` / `units` / `node_dist` 的每次变更都在一个**具名转移**里，且**一次转移 = 一次事务 = 一次落盘**。
+
+| 面 | 空集 |
+|---|---|
+| 写面（8 个具名转移） | `enqueue` · `enqueue_verdict` · `abort` · `claim` · `set_units_of` · `mark_unit_done` · `requeue` · `reopen_for_resume` |
+| 读面（3） | `all` · `get` · `done_units` |
+| 请求面（4） | `pending_requests` · `done_request_ids` · `mark_requests_done` · `consume_requests` |
+
+`_claim_guard` / `_claim_locked`（装饰器）→ `BatchStore._tx`（上下文管理器）：跨进程仍用
+`train.loop_util` 的 `claim.lock`（**拒绝第三套锁**），进程内 `RLock` + 同线程同 root **可重入**
+⇒ `claim()` 里直接嵌套 `consume_requests()`，thread-local 缝保留但已只是「我持有这个 root 的锁吗」
+的标记。存量名 `_persist_of` **消失**（并入 `set_units_of`）。
+
+#### ★ 两条「集中化时最容易被抹平」的特例语义
+
+它们是设计里唯一的**行为**风险点，所以守卫正面钉（不靠「搬得对」）：
+
+1. **`units.of == 0`（未定型）时 `mark_unit_done` 不判 done** —— 判决批先建（`of=0`）、
+   `plan_verdict_units` 展平后才 `set_units_of`；这中间结算的 unit 若把批标成 done，整批剩余
+   unit 就永远跑不到；
+2. **`aborted` 批的在途 unit 只回填 `node_dist`、不复活**，且 `requeue` **不改** `aborted`
+   （后者还顺带「没改就不落盘」）。
+
+#### ★ 一个只在「一个具名转移 = 一把锁」时才会出现的坑（设计时就绕开了）
+
+初稿把锁放在**每个具名转移**上、`consume_requests` 只做「请求翻译」。看着更漂亮，但：锁忙时
+`enqueue` 返回 `None`——**与「去重跳过」不可区分** ⇒ `consume_requests` 会把请求标成**已消费**
+却**没建批**（丢请求、无日志、进度看起来正常）。这与第二十四刀那条非原子落盘同一族：
+**读者/消费者分不清两种 None**。改法 = `consume_requests` 自己也拿一把 `_tx`（整轮一把锁，内层
+转移可重入 ⇒ 不多付文件锁），锁忙时整轮跳过、请求留给下一 idle 窗。
+守卫 `test_lock_busy_consumes_nothing_and_marks_nothing` 是这一刀的**回归钉子**。
+
+#### 落盘：统一成「改了才落盘 + 原子发布」
+
+`_publish` 是**全仓唯一的台账写点**（守卫用手法闭集钉：`_publish` 的调用者只能是八个转移 +
+`write_batches` 播种缝）；六种旧策略统一为 `dirty` 才落盘——行为等价（**字节不变**：不改就不写
+≠ 写一份一样的），少掉那些「什么都没变也整文件重写」的轮次。原子发布沿用第二十四刀的
+`tmp + os.replace`（临时名固定 `batches.jsonl.tmp`）。
+
+#### 验证：三套独立证据
+
+1. **纯搬对账**（`tmp/verify_b2.py`）：9 个平移成员对 `git show HEAD:` 做 **AST 去 docstring 后
+   `ast.unparse` 逐字等价** ⇒ **9/9**（其中 `read_batches` 有一处**宣告差异**：裸字面量
+   `'batches.jsonl'` 提成常量 `BATCHES_FILE`，值相同——脚本要求「宣告的替换逐字对得上」，
+   否则「宣告」会变成遮盖真差异的挡箭牌）。
+2. **★ 差分探针**（`tmp/probe_b2_diff.py`）：同一串 **54 步**台账操作（建批/去重/物化/认领/
+   孤儿续跑/结算/of 定型/requeue/abort/reopen/判决批/越界目标/两向的「已物化」判定）分别打在
+   **旧实现**（`git show HEAD:nn-training/rl/batch_eval.py`，按文件路径 import）与**新 store** 上，
+   逐操作比较**规范化后的台账字节**（`batch_id`/`created_ts`/`consumed_ts` 掩码）+ `requests.done`
+   + 返回值 ⇒ **54/54 两侧一致**。这是「B2 不是纯搬、但行为等价」的主证据；也顺带证明了那两条
+   特例语义与旧实现**逐字相同**。
+3. **新守卫** `tests/test_batch_store_txn.py`（**15 例**）：结构契约（定义唯一 / 门面对象恒等 /
+   私有 seam 不转发 / 公开方法面 == 设计面 / `status` 赋值点闭集 == 五个具名转移 /
+   落盘唯一写点）+ `store` 只持有 `root` 且**不缓存台账**（进程外改盘立刻可见）+ **六条功能性**
+   （`of==0` 不判 done · aborted 只回填 · requeue 不复活 · **改了必落盘 / 没改不落盘**（数
+   `_publish` 调用次数）· 转移级原子发布（`Path.open` 钩子）· 锁忙不消费也不标记 · 孤儿批续跑）。
+
+#### ★ 反探针的收获：一条真守卫空档
+
+**22 条变异，首轮 21 红 / 1 存活**：删掉 `claim` 的「running ∧ 仍有未完成 unit ⇒ 可认领」分支
+**全绿**。查下去不是探针打偏，而是**真空档**——既有 `test_queue_claim_done_cycle` 里那条带注释
+「running + incomplete 也可被 claim（重启/孤儿批续跑）」的断言，走的其实是 `pending` 分支
+（`mark_unit_done` 已把它改回 `pending`）⇒ 这条**生产上真实存在**的路径（进程崩在 claim 与结算
+之间）此前**无人覆盖**。补 `test_claim_resumes_an_orphaned_running_batch` 后 **22/22 全红**。
+（S23 的教训是「存活先怀疑探针」；本刀说明它**只是第一嫌疑**，不是免检。）
+
+#### ★ 顺手记下的一个既存缺陷（本刀**不改**）
+
+同一个分支上还有一条**旧实现逐字相同**的洞：`incomplete = of > 0 and len(done) < of` ⇒
+**`running ∧ of == 0` 的批永远不可认领**（不 pending、也不算 incomplete）。生产上是「认领后到
+`set_units_of` 之间的窗口」，若进程恰好崩在窗口里，该批只能等 `abort`。这看着像 bug，但把
+`of == 0` 也算 incomplete 会让**另一个进程在派发前把整批抢走**（双派）——两个方向都有代价，
+属**真设计问题**，与「台账归谁」无关；本刀只把它写进守卫注释与本节（差分探针已证明新旧一致）。
+
+#### 守卫演进 3 处 + provenance
+
+- `tests/test_batch_plan_split.py::test_moved_constants_are_only_reexported_never_used_by_the_old_home`：
+  B1 时旧家还读一次 `REPO_ROOT`（派生 `DEFAULT_DATA_ROOT`）；B2 把这个派生也交给 store ⇒
+  改成「旧家零次 + `REPO_ROOT` 的使用者是 `batch_store.py`（数它只读一次）」。
+- `tests/test_eval_requests.py`：两处改址 —— `_CLAIM_WAIT_SEC` 的 monkeypatch 目标（锁语义测的是
+  store 的锁）、`_requeue` → `BatchStore(tmp_path).requeue(...)`（私有 seam 搬到 store）；
+  `tests/test_batch_eval.py` 的 `_reopen_for_resume` 同改。
+- provenance：`rl/batch_plan.py`（「读改写仍住 batch_eval」→ `batch_store`）·
+  `rl/eval_heartbeat.py`（`batch_eval.data_root` → `batch_store.data_root`）·
+  `dashboard/src/evalboard/{requests,verdict-cli}.ts` + `dashboard/tests/evalboard-requests.test.ts`
+  （台账/请求面指针 → `batch_store.py`）· `rl/eval_local.py` 与 `tests/test_dual_track_eval.py`
+  的两处 `batch_eval.py:703` → **符号名**（`BatchEvalRunner._run.record`；行号跨刀必漂，这已是
+  第三次为此改引用）。刻**意不动**：`docs/evalboard-phase0-census.md`、`dashboard/src/evalboard/runner.ts`
+  （执行侧仍住 `batch_eval`，B3 才动）与带日期的历史记录。
+
+#### 记账与门禁
+
+`rl/batch_eval.py` **1616 → 1190 行** · `rl/batch_store.py` **680 行** ·
+nn 门禁 **2586 → 2608 passed / 3 skipped**（ruff + mypy 绿，442 源文件）· 根 `bun run check`
+**2120 / 0**（121404 expect）· dashboard typecheck + **1105 / 0** · `check-decisions` ok。
+守卫脚本：`tmp/store_cut.py`（§17.1 显式行区间 + 每段首行 assert，自下而上应用）·
+`tmp/verify_b2.py` · `tmp/probe_b2_diff.py` · `tmp/probe_b2.py`（反探针 22/22 + sha256 无漂移）·
+`tmp/measure_b2_guard.py`（守卫「先量后定」：`status` 赋值点全仓闭集实测）。
+
 ### 未做完（S4 余下）
 
 `remote/` 内部**已零环**（见「拆环」节），`worker.py` 的拆分面**已收口**：只剩三个宿主函数
@@ -2014,7 +2127,11 @@ HTTP 面（`hub/http_face.py` L5）与引导链（`hub/boot.py` L6）分开，�
 `rl/` 侧余下的候选：`loop_steps.py` 余 8 个叶子（零新链）· `loop_guards.py`（784 行）；
 再往下 `batch_eval.py`（1785 行）要拆得先设计「批存储」接口（真设计改动）——**✅ 该设计已于 2026-09-25
 交付：`plan/nn-training-refactor.md` §5.5（`BatchStore` + B1–B4 迁移批次；B5 = `_run` 的 821 行另开一轮）**。
-`loop_guards.py` 也已完成（第二十三刀）。
+`loop_guards.py` 也已完成（第二十三刀）。那四步已走两步：**B1**（纯函数面 → `rl/batch_plan.py`，
+第二十五刀）· **B2**（台账/请求面 → `rl/batch_store.py::BatchStore`，第二十六刀，`batch_eval.py` 1616 → 1190）
+⇒ **下一步 = B3**（`BatchEvalRunner` + `dispatch_batch_bg` 纯搬 → `rl/batch_runner.py`；注意别忘
+`tests/test_batch_eval_wver.py` / `test_eval_loot_fields.py` 两处按路径读源码的守卫随它改址，
+以及 `monkeypatch.setattr("rl.batch_eval.{bun_version,log,run_local_eval_game}", …)` 五处改址）。
 
 **✅ 清理已做（2026-09-24，第十二刀）：`remote/job_fs._ensure_commit` 已删**——第六步之一登记的
 既存死代码（全仓零调用，只搬未删）。同时删 `job_fs.__all__` 条目、`worker.py` 的门面转发、

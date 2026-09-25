@@ -1183,7 +1183,14 @@ dashboard typecheck + **1105 / 0**；`check-decisions` ok。
 > `rl/batch_plan.py` **271 行**（把 13 函数 + 10 常量纯搬；旧家 21 条自别名再导出 ⇒ 调用点零改动）；
 > 分层快照**未红**（新模块不达 remote）；唯一演进的守卫是 `test_dist_common_poll`（改成「按定义搜家」）。
 > 全文 → `docs/nn/engineering.md` §23「第二十五刀」；决策 → `DECISIONS.md`
-> §2026-09-25-goalnn-batch-plan-b1-split。**下一步 = B2**（`rl/batch_store.py`）。
+> §2026-09-25-goalnn-batch-plan-b1-split。
+>
+> **✅ B2 已落地（2026-09-25，第二十六刀）**：`rl/batch_eval.py` **1616 → 1190**，新模块
+> `rl/batch_store.py` **680 行**（`BatchStore`：8 个具名转移 + 读面 3 + 请求面 4；`_tx` 取代
+> `@_claim_locked`；`dirty` 才落盘；`_publish` 是全仓唯一台账写点）。两条★特例语义由守卫正面钉；
+> **差分探针 54/54 步与旧实现等价**；反探针 22/22 全红（首轮 1 条存活 = 真空档，已补用例）。
+> 全文 → `docs/nn/engineering.md` §23「第二十六刀」；决策 → `DECISIONS.md`
+> §2026-09-25-goalnn-batch-store-b2-split。**下一步 = B3**（执行器纯搬 → `rl/batch_runner.py`）。
 
 #### 5.5.1 为什么它「按链切」不动（先量后定的结论）
 
@@ -1310,7 +1317,7 @@ python 侧读者都在锁里，所以受害面就是这个 TS 读者；而它的
 | 步 | 做什么 | 行为风险 | 预计 |
 |---|---|---|---|
 | **B1** | 纯规划 + 判据出包到 `rl/batch_plan.py`；`batch_eval` 再导出 | **零**（纯函数，无锁无 IO，逐字节对账） | 1785 → ~1630 · **✅ 已完成：1805 → 1616（`batch_plan.py` 271 行；逐字节对账 23/23 + 36/36，反探针 21/21，nn 2586）** |
-| **B2** | 建 `rl/batch_store.py`：8 个写点 → 具名转移；`consume_requests` 拆成「请求翻译 + 三个具名转移」；`_persist_of` 消失（并入 `set_units_of`）；落盘策略统一成 **`dirty` 才落盘** | **中**（状态机集中 + 落盘策略统一）| ~1630 → ~1210 |
+| **B2** | 建 `rl/batch_store.py`：8 个写点 → 具名转移；`consume_requests` 拆成「请求翻译 + 三个具名转移」；`_persist_of` 消失（并入 `set_units_of`）；落盘策略统一成 **`dirty` 才落盘** | **中**（状态机集中 + 落盘策略统一）| ✅ **已完成：1616 → 1190（`batch_store.py` 680 行；差分探针 54/54 等价，反探针 22/22，nn 2608）** |
 | **B3** | `BatchEvalRunner` + `dispatch_batch_bg` → `rl/batch_runner.py`（896 + 36 行，**纯搬**） | 零（逐字节对账） | ~1210 → ~290 |
 | **B4** | 门面收尾：`batch_eval.py` = 常量 + `maybe_dispatch_batch` + 再导出 | 零 | ~290 |
 | B5 | **另开一轮**：`_run` 的 821 行按阶段切（通道机器 ~500 / 收尾 ~80 / 参与度账 ~60 / 单元开头 ~60） | —— | 不在本接口范围 |
@@ -1364,3 +1371,17 @@ B1 与 B3 是纯搬，可按 S21–S23 的成品流程走（逐字节对账 + �
 **更早已记录：同一件事的相反先例。** §5.3.22（第二十三刀）的刀口是「多 sink 的 DAG ⇒ 提供者留根」，
 本设计是「共享可变状态的 DAG ⇒ 把状态收进一个所有者」。前者按**调用**分家，后者按**所有权**分家——
 两种刀法都不动行为，但后者顺带能修掉一类真缺陷（非原子落盘就是第一个）。
+
+**✅ B2 落实结果（2026-09-25，第二十六刀）——三条风险逐条对账**：
+
+1. **两条 ★ 特例语义被抹掉** ⇒ 守卫**正面钉**（`test_mark_unit_done_does_not_finalize_when_of_is_unset` /
+   `test_aborted_batch_only_backfills_node_dist` / `test_requeue_never_revives_aborted`），且差分探针
+   （同一串 54 步操作打在新旧两份实现上）**逐字节等价** ⇒ 特例未被「统一」掉，是实测而非声明。
+2. **dirty-tracking 写错 ⇒ 漏落盘** ⇒ `test_transitions_publish_only_when_something_changed` 两个方向都钉：
+   数 `_publish` 调用次数（「改了必落盘」与「没改不落盘」各自的反向用例），并**每次都从盘上重读**核对。
+3. **跨语言读者的新假设** ⇒ 未变：只承诺**落盘原子**（`_publish` = 唯一写点 = `tmp + os.replace`），
+   不承诺 console 读到最新。
+
+**★ 设计里没写、实施时才浮出的一条**（已回写 §5.5.2 的实现）：锁若只放在**单个具名转移**上，
+`consume_requests` 会分不清「锁忙」与「去重跳过」两种 `None` ⇒ 把请求标成已消费却没建批（丢请求）。
+因此 `consume_requests` 自己也拿一把 `_tx`（整轮一把锁、内层转移可重入）。

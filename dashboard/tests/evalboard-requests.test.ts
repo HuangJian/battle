@@ -120,7 +120,8 @@ describe('写者唯一性（P1：console/CLI 只 append 请求，runner 单写�
 })
 
 /** P1 写者唯一性：触发端（console / ui / backfill CLI）不得直接写 batches.jsonl。
- *  runner（`nn-training/rl/batch_eval.py`）是台账唯一写者；触发端只 append 请求文件。
+ *  runner（`nn-training/rl/batch_store.py` 的 `BatchStore`）是台账唯一写者；
+ *  触发端只 append 请求文件。
  *  2026-09-11：backfill.ts 曾漏网（直接 enqueueBatch，与 runner 并发即 D-c 竞态）。 */
 const WRITE_CALLS = ['enqueueBatch(', 'rewriteBatches(', 'updateBatch(', 'claimPending(']
 
