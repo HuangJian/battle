@@ -155,3 +155,18 @@ def paired_kill_self_kill(dist_cfg: dict | None, course_key: str) -> bool:
         return True
     v = pk.get("self_kill")
     return v is not False
+
+
+def paired_kill_enabled(dist_cfg: dict | None, course_key: str) -> bool:
+    """本课是否开了配对杀臂（`courses.<课>.paired_kill.enabled`；缺席/写坏 → False）。
+
+    2026-09-26 state-init 事故：默认开火把"同 V"当成"配对实验"——1789876303 只是全屋
+    种子流（L1/L3/state-init/未来一切新腿共用），刚出生的腿会被拿去跟已归档的老腿比，
+    连跪即杀。配对杀臂是实验设计（配对 race + 杀规则），必须按课显式 opt-in；
+    关了的守卫连 streak 落账都不写（没开火的枪不记弹道）。
+    """
+    block = (((dist_cfg or {}).get("courses") or {}).get(course_key) or {}) if course_key else {}
+    pk = block.get("paired_kill") if isinstance(block, dict) else None
+    if not isinstance(pk, dict):
+        return False
+    return pk.get("enabled") is True

@@ -23,6 +23,7 @@ from rl.kickstart_burn import burn_overrides, burn_verdict
 from rl.log import log
 from rl.paired import declared_paired_seed, latest_run_start_seed, scan_paired_courses
 from rl.paired_kill import (
+    paired_kill_enabled,
     paired_kill_overrides,
     paired_kill_self_kill,
     paired_kill_verdict,
@@ -129,6 +130,10 @@ class TrainingGuardsLeg:
         declared = declared_paired_seed(getattr(self.args, "course_obj", None))
         if declared is None:
             return False  # 单腿口径：没有「对端」这回事
+        if not paired_kill_enabled(dist_cfg, course_key_of(self.args)):
+            # 默认关火（2026-09-26）：配对杀臂是实验设计，必须按课显式 opt-in；
+            # 同 V 只是门派同源，不是配对实验——不对未开火的课读账本、落账、判杀。
+            return False
         self_name = str(getattr(self.args, "course", "") or "")
         siblings = scan_paired_courses(declared, self_name=self_name)
         if not siblings:

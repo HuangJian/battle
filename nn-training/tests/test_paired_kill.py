@@ -30,6 +30,7 @@ from rl.loop_guards import TrainingGuards
 from rl.paired_kill import (
     PAIRED_KILL_MARGIN_PP,
     PAIRED_KILL_POINTS,
+    paired_kill_enabled,
     paired_kill_overrides,
     paired_kill_self_kill,
     paired_kill_verdict,
@@ -202,8 +203,9 @@ def test_guard_stops_the_leg_and_writes_a_replayable_event(
     _write_peer_run_start(tmp_path, V)
     g = _guards(tmp_path, remote_hub_url="http://hub", remote_token="tok")
     g._cloud_halted = False
+    cfg = {"courses": {"t-own": {"paired_kill": {"enabled": True}}}}
 
-    assert g._paired_kill(3, None) is True, "连续两点落后 ⇒ 该杀臂"
+    assert g._paired_kill(3, cfg) is True, "连续两点落后 ⇒ 该杀臂"
     events = _ledger_events(tmp_path)
     kill = [e for e in events if e["event"] == "paired_kill"][-1]
     assert kill["streak"] == PAIRED_KILL_POINTS and kill["peer"] == "t-peer"
@@ -214,7 +216,7 @@ def test_guard_stops_the_leg_and_writes_a_replayable_event(
     assert paired_kill_verdict(_own(0.40, 0.35, 0.32), _own(0.40, 0.40, 0.40)).streak == kill["streak"]
     # 状态转移才落账：同值再判一次不重复写**计数事件**（gate_verdict 会再写一条——
     # 生产侧命中即整腿终点（`step_gate` 当轮 finish），这里连调两次是为了钉住计数口径）。
-    assert g._paired_kill(3, None) is True
+    assert g._paired_kill(3, cfg) is True
     again = _ledger_events(tmp_path)
     assert len([e for e in again if e["event"] == "paired_kill"]) == 1
     assert len(again) == len(events) + 1
@@ -257,7 +259,7 @@ def test_control_leg_trips_but_does_not_stop(
     _write_eval(tmp_path / "own", _own(0.40, 0.35, 0.32))
     _write_eval(tmp_path / "t-peer", _own(0.40, 0.40, 0.40))
     _write_peer_run_start(tmp_path, V)
-    cfg = {"courses": {"t-own": {"paired_kill": {"self_kill": False}}}}
+    cfg = {"courses": {"t-own": {"paired_kill": {"enabled": True, "self_kill": False}}}}
     g = _guards(tmp_path, remote_hub_url="http://hub", remote_token="tok")
     g._cloud_halted = False
 
@@ -268,3 +270,36 @@ def test_control_leg_trips_but_does_not_stop(
         e["event"] == "gate_verdict" and e.get("verdict") == "ABORT" for e in events
     ), "不落 ABORT 判决"
     assert calls == [], "不下发云端停机"
+
+
+# ────────────────────────── ⑤ 默认关火（2026-09-26 state-init 事故） ──────────────────────────
+
+
+def test_kill_is_opt_in_not_default() -> None:
+    """★ state-init 事故：刚出生 11 轮的新腿被拿去跟**已归档**的 L1 比（同 V 只是门派同源，
+    1789876303 是全屋种子流，不是配对实验），it5/it10 连跪两点 −4pp 当场被杀。
+
+    配对杀臂是实验设计特性（配对 race + 杀规则），必须按课显式 `enabled: true` 才判；
+    缺席/写坏 ⇒ 关（连 streak 落账都不写——没开火的枪不记弹道）。
+    """
+    assert paired_kill_enabled(None, "t-own") is False
+    assert paired_kill_enabled({}, "t-own") is False
+    assert paired_kill_enabled({"courses": {"t-own": {"paired_kill": {}}}}, "t-own") is False
+    bad = {"courses": {"t-own": {"paired_kill": {"enabled": "yes"}}}}
+    assert paired_kill_enabled(bad, "t-own") is False, "非 bool 不当 True"
+    on = {"courses": {"t-own": {"paired_kill": {"enabled": True}}}}
+    assert paired_kill_enabled(on, "t-own") is True
+
+
+def test_disabled_guard_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """没开火的守卫：判据 tripped 也返回 False，且**零落账**（不写 streak，不写 verdict）。"""
+    monkeypatch.setattr(paired_mod, "CURRICULA_DIR", _write_curricula(tmp_path, V), raising=True)
+    _write_eval(tmp_path / "own", _own(0.40, 0.35, 0.32))
+    _write_eval(tmp_path / "t-peer", _own(0.40, 0.40, 0.40))
+    _write_peer_run_start(tmp_path, V)
+    g = _guards(tmp_path)
+
+    assert g._paired_kill(3, None) is False
+    assert _ledger_events(tmp_path) == []
