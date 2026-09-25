@@ -210,6 +210,11 @@ def test_boot_loader_refreshes_every_session_and_reports_the_revision() -> None:
     assert "@ sha12=" in cell, "加载日志必须带**实际加载那份**的 sha12（branch 不足以区分新旧）"
     assert "用上一份缓存继续" in cell, "回落到缓存必须响亮说明（不能静默用旧版）"
     assert ".replace(_dst)" in cell, "写回要用原子替换（半截写入不得留下坏模块）"
+    # ★ 2026-09-25 真机事故：只换磁盘文件挡不住「同 kernel 的第二次 Run」——`import` 会命中
+    #   `sys.modules` 里上一次加载的旧模块（内存跑旧代码、日志 sha 打磁盘新版）。必须先摘再导。
+    assert "sys.modules.pop" in cell, "刷新后必须先摘 sys.modules 里的旧引导模块，否则 import 命中缓存"
+    assert cell.index("sys.modules.pop") < cell.index("import offline_boot"), "顺序：先摘再导"
+    assert "BOOT_SELF" in cell, "加载日志要带内存指纹（磁盘 sha 区分不出内存里那份的新旧）"
     assert "_branch.txt" not in cell, "旧的「按分支名失效」缓存策略已退役（它不挡同分支的新旧）"
 
 

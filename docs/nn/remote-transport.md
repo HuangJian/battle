@@ -42,6 +42,37 @@ argv 带 `--bundle`」）。两条都在未修版本上复现过同一条 errno�
 **不变式**：`ensure_ts_tree` 对「产物目录不存在」「目录在但树缺」「树在」三种输入都要能走完
 （前两种要能把目录/树建出来，第三种不重解）。
 
+**第二层（同一条报障的第二次真机，08:37）**：同一个 errno 又出现一次，而这次 `offline_boot.py`
+里**已经有那行 mkdir**。日志自证刷新到位（`引导模块 offline_boot.py 已刷新（sha12=608920196dc0）`
+= 磁盘那份正是含修复的版本），可报错照旧 ⇒ **跑的不是磁盘那份**。
+
+真因在 notebook 侧：`_load_boot` 每次会话只**刷新磁盘文件**，而同 kernel 里上一次 Run 已经
+`import` 过 `offline_boot` ⇒ `sys.modules` 里那份**旧模块继续被 import 命中**（同 kernel 不重载）。
+于是「内存跑旧代码、日志 sha 打磁盘新版」—— 那行 sha 取的是 `(dst_dir/"offline_boot.py").read_bytes()`，
+读的**是磁盘**，所以 09-22 那次「把实际加载的 sha 打进日志」的加固被整个绕过。
+
+**识别指纹（最硬的一条：用行号抓）**：traceback 帧行号与该行**磁盘文本对不上**。现场
+`ensure_ts_tree` frame @ **870**，配的源码文本是磁盘新版 870 行的 `if (root / TS_TREE_NAME).is_dir():`，
+而实际动作是 `write_bytes`。按版本对表：048d25bb（07:42 那版）`write_bytes@870` 且**没有 mkdir**；
+b697a2cd `write_bytes@890`；bf05ac21 `mkdir@895 / write_bytes@896` ⇒ **内存里跑的是 048d25bb**
+（`run_one_course@1139`、`run@1290` 也衬得上帧行号 1232 / 1330）。「帧行号来自执行版、源码文本来自
+磁盘版」这个错配本身，就是「执行对象 ≠ 磁盘文件」的判据。
+
+**修法**：① notebook 导入前 `for _m in ("offline_boot", "tailscale_boot", "remote.offline_boot"):
+sys.modules.pop(_m, None)`；② `offline_boot.py` 新增 `BOOT_SELF`（内存指纹常量），notebook 日志打
+`getattr(offline_boot, "BOOT_SELF", "<missing>")` —— **磁盘 sha 骗得过，模块对象骗不过**。
+测试：`test_offline_boot.py::test_boot_self_fingerprint_is_present` + `test_offline_notebook.py`
+三条断言（含「pop 必须在 import 之前」）。
+
+**两个盘都改了（同日）**：`battle.tailscale.ipynb` 的 `_load_boot` 原来停在更早的形态
+（「有缓存先用缓存」+ `_branch.txt` + 无 sha 日志 + 无 `sys.modules.pop`）—— 一并升到与
+offline 盘同级。两个盘的 loader 是**各自内联的两份**（没有共享实现），所以漂移风险靠
+`tests/test_notebook_boot_refresh.py` 守：关键行为（`已刷新` / `@ sha12=` / `用上一份缓存继续` /
+`.replace(_dst)` / `sys.modules.pop` / `BOOT_SELF`，加「先摘再导」顺序与「无 `_branch.txt`」）
+做成一组 needle，两个 cell 各跑一遍。
+
+**用户侧即时解**：**Restart kernel** 再跑（没重启的话，修好的 notebook 也挡不住已在内存里的那份）。
+
 —— 全文（判定表 / §8 判据与上界）→ `plan/offline-rerun-local-first.plan.md` §6.1
 
 ## §44 云机不再写死课程名：hub 清单 + 领取租约（plan/offline-task-discovery.plan.md，2026-09-25）

@@ -75,6 +75,13 @@ BUNDLE_MAGIC = "battle2-task-bundle"
 #: 解包目录（与 notebook_boot 的 `CODE_DIR` 同值：同一个进程里两份引导不打架）。
 CODE_DIR = "/tmp/worker-code"
 
+#: 引导模块自述指纹（**只给 notebook 加载后打日志用**，不参与任何逻辑）：磁盘 sha 只说明
+#: 「文件刷新成功」，说不了「内存里跑的哪一份」—— 2026-09-25 真机事故里两者恰好相反
+#: （磁盘已是新版、`sys.modules` 里还是 08:09 那版，于是「看着新的、跑着旧的」）。
+#: notebook 打 `getattr(offline_boot, "BOOT_SELF", "<missing>")`，旧模块会显示 `<missing>`。
+#: **改本文件时把末位 +1**（纯人读约定，没有代码读它做判断）。
+BOOT_SELF = "boot-2026-09-25a"
+
 #: 产物目录的三件「续跑真值」（与 `remote/artifacts.py::ArtifactStore` 逐字相同；测试守）。
 #: 三件齐全 = 本机有可续跑的产物（plan/offline-rerun-local-first §3 的判据）。
 PLAN_NAME = "plan.json"
