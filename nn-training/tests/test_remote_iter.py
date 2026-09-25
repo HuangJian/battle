@@ -31,6 +31,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import platform_utils as pu
 import remote.iter_rollout as iter_rollout
 from remote import game_watch
 from remote.iter_rollout import run_iter_rollout, scan_shard_dirs, verify_shards
@@ -983,6 +984,66 @@ def test_run_iter_rollout_with_stub_bun(tmp_path: Path, monkeypatch) -> None:
     # 每局日志与报告都落盘（诊断口径与本机 rollout 同形）
     assert (job_dir / "w0" / "rollout.log").exists()
     assert json.loads((job_dir / "w0" / "_rl_report.json").read_text())["games"] == 1
+
+
+def test_rollout_workers_are_clamped_to_the_local_core_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """hub 给的 workers 必须按**本机核数**夹取（2026-09-25 云机卡死的入口条件）。
+
+    为什么不能只靠 `MAX_WORKERS=256`：8~16 核节点上 200+ 并发 ⇒ 每局都被挤过 5s 硬顶 ⇒
+    成批超时 → 池回退放大 → 整轮停摆。夹取只改并行度：argv/wver/data_fp 一个字不动。
+    """
+    monkeypatch.setattr(iter_rollout, "resolve_bun", lambda name="": sys.executable)
+    monkeypatch.setattr(iter_rollout, "bun_version", lambda bun: "")
+    monkeypatch.setenv(iter_rollout.ENV_WORKERS_CAP, "2")
+    msgs: list[str] = []
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    spec = _stub_spec(tmp_path, [(3, 7), (4, 1), (5, 2)])
+    spec["workers"] = 220  # hub/导出机规模；本机上限 2
+    before = iter_expected_data_fp(spec)
+    out = run_iter_rollout(job_dir, spec, log=msgs.append)
+    assert out["workers"] == 2
+    assert len(out["shard_dirs"]) == 3, "夹取不动声明集/产出（只是别同时跑那么多）"
+    assert iter_expected_data_fp(spec) == before
+    assert any("并发夹取" in m and "220→2" in m for m in msgs), msgs
+    # 夹取线的加入不得把原有的轮末读数排掉
+    assert any("workers=2" in m for m in msgs), msgs
+
+    # 显式关掉夹取（实验/排障）：完全按 hub 给的数走，且不再报「夹取」
+    monkeypatch.setenv(iter_rollout.ENV_WORKERS_CAP, "0")
+    msgs2: list[str] = []
+    job_dir2 = tmp_path / "job2"
+    job_dir2.mkdir()
+    spec2 = _stub_spec(tmp_path, [(3, 7), (4, 1), (5, 2)])
+    spec2["workers"] = 220
+    out2 = run_iter_rollout(job_dir2, spec2, log=msgs2.append)
+    assert out2["workers"] == 3, "3 局 / 不夹取 ⇒ 并发受局数限制 = 3"
+    assert not any("并发夹取" in m for m in msgs2), msgs2
+
+
+def test_workers_cap_falls_back_to_cores_on_garbage_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """env 写坏（非整数）⇒ 回落核数口径（不抛、不静默禁用夹取）。"""
+    monkeypatch.setenv(iter_rollout.ENV_WORKERS_CAP, "lots")
+    monkeypatch.setattr(iter_rollout, "cpu_worker_slots", lambda cores=None: 6)
+    assert iter_rollout.workers_cap() == 6
+    monkeypatch.setenv(iter_rollout.ENV_WORKERS_CAP, "0")
+    assert iter_rollout.workers_cap() == 0
+
+
+def test_workers_cap_reads_the_container_quota_not_the_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """云机现场：`os.cpu_count()` 报 **224**（宿主机）而 cgroup 只给 **96** ⇒ 上限 **92**。
+
+    这就是「不要把 96 核读成 240/224 核」那颗钉子：核数走 `platform_utils.effective_cores()`
+    （配额/亲和掩码取小），于是日志里那个 `workers=220`（按 224 核算出来的）在云机上会被夹到
+    92 —— 2.3× 超订就地消失，而不是等它把单局墙钟推过 5s 硬顶。
+    """
+    monkeypatch.delenv(iter_rollout.ENV_WORKERS_CAP, raising=False)
+    monkeypatch.setattr(pu, "cgroup_cpu_quota", lambda: 96)  # 容器配额（物理数目）
+    monkeypatch.setattr(pu, "affinity_cores", lambda: 224)  # 宿主机读数 / cpuset 放宽
+    assert pu.effective_cores() == 96
+    assert iter_rollout.workers_cap() == 92
 
 
 def test_run_iter_rollout_rejects_undeclared_shard(tmp_path: Path, monkeypatch) -> None:

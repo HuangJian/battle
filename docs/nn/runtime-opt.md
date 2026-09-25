@@ -7,6 +7,71 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §23 云机「rollout 卡死」三件套：两条 CPU 腿真交替 + 池熔断/背压 + 并发按核数夹取（2026-09-25）
+
+> 起因（用户真机日志，`battle.offline.ipynb` × `x20-dodge-l1`，**96 核配额**的 Kaggle TPU 会话——
+> 而 `os.cpu_count()` 在容器里报宿主机的 **224**）：
+> it43 的 rollout 还是健康的（336 局 / 220 workers / **4.07s**，`served=336 spawned=220
+> killed=0 fallback=0`，单局 p50=1.42s p90=2.62s），**下一轮**在开跑 5s 后一次刷出 60+ 行
+> `[serve-pool] 一局回退一次性 spawn（timeout: rc=<仍在运行>；尾行：[features] native 启用…）`，
+> 然后 `[run]` **整整 4 分钟一行都没有**（连 60s 进度心跳都没有）——训练停摆。
+
+### 23.1 四条根因（都能落到代码行）
+
+1. **两条 CPU 腿同时开满**（主因）。`remote/run_loop._maybe_cloud_eval` 在**本轮 checkpoint
+   之后**提交评估，而**下一轮的第一步就是 rollout**（`_run_with_retries` → `run_job` →
+   `run_iter_rollout`）⇒ 评估(220 局) 与 rollout(220 局) 是**同时**开跑。旧注释写的
+   「rollout 与 eval 交替跑、互不预留」（`platform_utils.cpu_worker_slots`、
+   `offline_eval.default_slots`、`run_loop` 启用日志）**与代码事实不符**：两条腿同时各开满一份
+   ⇒ 超订。而超订**还不止一层**：`cpu_worker_slots()` 用的 `os.cpu_count()` 在容器里报的是
+   **宿主机**的核数（224），不是 cgroup 配额（96）⇒ 单人 220（= 按 224 算出来的）本身就是
+   2.3× 超订，叠加 2× 后单局墙钟从 p90≈2.6s 推到 **5s 硬顶之外** ⇒ 成批被判超时。
+   顺带解释了读数形态：`rc=<仍在运行>` + 尾行只有 native 一行 = **活着的慢局**，不是卡死的局。
+2. **池没有熔断/背压**（放大器）。`remote/serve_pool.ServePool` 一次超时 = ① kill worker
+   ② 这一局改一次性 `spawn`（再冷启动 bun）③ `_acquire` 补位又冷启动一个 = **一次超时放大
+   成三份进程**；过载时「回退越多 → 进程越多 → 越慢」是正反馈。且 `_acquire` 对新 worker 的
+   `ready.wait(60s)` 会**把一个游戏线程按 60s**（远超 5s 硬顶），而看门狗在这段里什么都打不出来
+   （静默四分钟的另一半成因）。
+3. **回退行无法归因 + 刷屏**。`_log_fallback` 不带 `kind/label/where`，而 rollout 与 eval
+   共用同一个池类 ⇒ 一屏同形行，分不出哪条腿、哪一局、现场在哪；且无节流、每条都塞一段
+   200+ 字符的 `.so` 路径。
+4. **核数按宿主机而不是按物理配额**（同上的另一半）。`cpu_worker_slots()` 原来只读
+   `os.cpu_count()` —— 容器里它报宿主机核数（224），而 cgroup 只给 96 ⇒ `workers=220`
+   本身就是从那个误读里算出来的（`max(224−4, 224×0.8)`）。所以「两条腿各开满」时真实超订是
+   96 核上的 220+220 = **4.6×**，而不是「224 核上的 220+220」。修法：`effective_cores()`
+   按 **min(cgroup 配额, 亲和掩码)** 定核，`os.cpu_count()` 只当最后的兜底。
+
+### 23.2 落地
+
+| 位置 | 改动 | 用例 |
+|---|---|---|
+| `remote/run_loop` | `EVAL_ALTERNATE_WAIT_SEC=300`：`_maybe_cloud_eval` 提交后**有界等本轮评估收线**再交回训练循环（超时只记一行 WARN，训练照常）——「交替」从注释假设变成代码保证；两者共用 `cpu_worker_slots()` 的口径因此才自洽 | `test_offline_eval_wiring::test_maybe_cloud_eval_waits_for_the_round_so_the_two_legs_really_alternate`、`::test_close_eval_drains_and_is_safe_when_disabled` |
+| `remote/serve_pool` | **熔断**：累计回退 ≥ `max(4, workers//4)` ⇒ 停用池、不再补位、余下局直接一次性（只打一行刹车现场）；回退**详情**只留前 5 条，且**带 kind/label/where**；`_acquire` 的补位就绪等待受**本次尝试硬顶**约束（等不到就交回调用方，不再固定 60s） | `test_remote_serve_pool::test_fallback_breaker_stops_rebuilding_workers`、`::test_fallback_detail_lines_are_capped_and_carry_kind_and_where`、`::test_acquire_gives_up_within_the_game_cap_instead_of_the_ready_timeout` |
+| `remote/iter_rollout` | hub 给的 `workers` 按**本机核数**夹取（旧状态只有 `MAX_WORKERS=256` 一道闸）——云机上 `220 → 92`；夹取进轮末日志；`NN_ROLLOUT_WORKERS_MAX` 可覆盖、`=0` = 不夹（实验用） | `test_remote_iter::test_rollout_workers_are_clamped_to_the_local_core_budget`、`::test_workers_cap_reads_the_container_quota_not_the_host`、`::test_workers_cap_falls_back_to_cores_on_garbage_env` |
+| `platform_utils` | **核数改走物理数目**：`effective_cores()` = min(cgroup 配额, 亲和掩码) 优先，两者都读不到才回落 `os.cpu_count()`；`cpu_worker_slots()` 缺省用它（96 核配额 ⇒ 92，不再是 220） | `test_platform_utils_cores::test_cgroup_v2_quota_converts_to_cores`、`::test_cgroup_v1_quota_converts_to_cores`、`::test_effective_cores_takes_the_smallest_signal_then_falls_back`、`::test_cpu_worker_slots_uses_the_effective_cores` |
+
+读数与口径：熔断阈值随池宽度走（220 宽 ⇒ 55；小池 4 条起步），熔断后 `summary()` 打
+`已熔断：余下 N 局走一次性`；`disabled` 后的局**不计进 fallback**（否则计数与日志被余下几百局灌满）。
+
+### 23.3 否决项
+
+* **抬高 5s 硬顶**：那是用户口径「单局 >5s 肯定不正常」的落地（§8），而本案的慢局正是
+  「被 2× 超订挤慢」——抬高只会让机器更久地停在超订态，且把真正的卡死也一起放过。
+* **给 eval 预留核数**（`--eval-slots = cores − rollout`）：用户 2026-09-22 已明确否过；
+  且按物理数目定池后 rollout 就把 96 核吃得差不多 ⇒ 预留会把 eval 挤到极少数局，等于停掉云机
+  评估。真交替能同时满足两边（各自满配、互不交叠），所以选排程而不是分账。
+* **把 eval 挪到另一台机器**：没有这条设施，且评估的语料/口径必须与 in-loop 同一份，
+  跨机反而多一层对齐风险。
+
+### 23.4 下次真机该看的四个读数
+
+① 段首那行 `云机 A 层评估已启用…并发 N 局；rollout 并行 M（同一口径、互不预留，但**本轮的
+评估跑完才开下一轮 rollout**，最多等 300s）`；② 每个评估轮前后各一条 `it<N> 评估落账`（它现在
+应紧跟在提交轮之后、下一轮 rollout 之前）；③ 若出现 `WARN: 云机评估 it<N> 超过 300s 未收线`
+⇒ 评估本身在超订/回退里，下一步看它的 `serve_pool` 计数与 `fallback_reasons`；④ rollout 轮末的
+`并发夹取=…`（节点腿）与 `serve_pool: …｜已熔断…`（有熔断才出现）。
+
+---
 ## §22 A 方案落地：节点侧 rollout **与**云机离线 eval 接入长驻池（`remote/serve_pool.py`）—— 1.45–1.47× / 1.19–1.39×，产物逐位不变（2026-09-23）
 
 > 起因：§21 追证出「离线（云机自主段）三条腿全是逐局 spawn」；用户拍板走 **A 方案**（把 `--serve`

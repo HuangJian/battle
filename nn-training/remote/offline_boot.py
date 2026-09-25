@@ -956,7 +956,9 @@ def build_run_argv(
     if float(cfg.get("budget_sec") or 0):
         argv += ["--budget-sec", str(float(cfg["budget_sec"]))]
     # rollout 并行局数：缺省（不传）= 按云机核数 `max(cores−4, cores×0.8)`，与云机 eval 同一口径。
-    # 传了就完全按它——两边都不为对方预留（rollout 与 eval 在这条链上是交替跑的）。
+    # 传了就完全按它——两边都不为对方预留，因为两者**真交替**（`run_loop._maybe_cloud_eval`
+    # 提交后有界等本轮评估收线，见那里的 EVAL_ALTERNATE_WAIT_SEC：两条腿同时开满会把单局
+    # 墙钟推过 5s 硬顶，2026-09-25 云机卡死就是这么来的）。
     if int(cfg.get("rollout_workers") or 0):
         argv += ["--rollout-workers", str(int(cfg["rollout_workers"]))]
     # 云机 A 层评估（`eval_on_cloud`）：语料/口径全部由课程（随包的 course.jsonc）决定，

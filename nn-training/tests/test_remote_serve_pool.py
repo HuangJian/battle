@@ -4,6 +4,8 @@
   * 复用：N 局共用**一个**进程（`spawned` 不随局数涨）—— 这就是 1.59× 的全部来源；
   * 日志隔离：worker stdout 混着所有局的日志，必须按局切回各自的 `rollout.log`；
   * 三类回退（ERR / 进程死掉 / 超时）都返回 None（调用方走一次性），且不留残进程；
+  * **回退要有限度**（2026-09-25 云机卡死取证）：累计回退到阈值就地熔断（停用池 + 不再补位），
+    回退行的**详情**有条数上限且带 kind/label/where，补位冷启动的等待不得超过单局硬顶；
   * 白名单与开关：名单外的脚本/`NN_SERVE_POOL=0` 连池都不建；
   * 端到端接线：`run_iter_rollout` 走池也能产出**同一批 shard**（逐局报告、聚合、日志齐全）。
 
@@ -125,6 +127,13 @@ _STUB_NO_SERVE = """\
 import sys
 print("no serve here")
 sys.exit(0)
+"""
+
+#: 起来后**不报就绪也不死**（模拟冷启动被挤在中间）：`_acquire` 的等待必须受硬顶约束。
+_STUB_SILENT = """\
+import time
+print("booting…", flush=True)
+time.sleep(3600)
 """
 
 
@@ -389,7 +398,9 @@ def test_dead_worker_falls_back_instead_of_waiting_the_cap(tmp_path: Path) -> No
     assert pool.fallback_reasons == {"dead": 1}
     # 回退必须留一行**带现场**的日志（退出码）：否则那一局的 rollout.log 会被一次性路径
     # 重写覆盖，轮末只剩 killed=1 这种没有信息量的计数（2026-09-23 flake 的取证教训）。
-    assert any("回退一次性 spawn（dead:" in m and "rc=" in m for m in msgs), msgs
+    assert any(
+        "回退一次性 spawn（kind=rollout" in m and " dead:" in m and "rc=" in m for m in msgs
+    ), msgs
     pool.close()
 
 
@@ -419,6 +430,77 @@ def test_hung_task_hits_the_cap_then_falls_back(tmp_path: Path, monkeypatch: pyt
     argv, logp = _task(script, 0, 0, "w0", tmp_path)
     assert pool.try_pool(argv, logp, 0.3) is None
     assert pool.fallback_reasons == {"timeout": 1} and pool.killed == 1
+    pool.close()
+
+
+def test_fallback_breaker_stops_rebuilding_workers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**熔断**：累计回退到阈值 ⇒ 停用池、不再补位，余下局走一次性；日志只留一行刹车现场。
+
+    为什么这条是本轮（2026-09-25 云机卡死）的核心护栏：一次超时 = kill worker + 该局一次性
+    spawn + 池补位再冷启动 ⇒ 一次超时放大成三份进程。过载时那是正反馈（越多回退越慢），
+    没有刹车就会锁死整轮（现场：5s 后一次 60+ 行回退，随后 4 分钟零行）。
+    """
+    _fast_poll(monkeypatch)
+    script = _write_stub(tmp_path, _STUB_HANGS_ON_TASK, name="stub_hang_task.py")
+    msgs: list[str] = []
+    pool = ServePool(sys.executable, script.name, tmp_path, 1, msgs.append)
+    assert pool.start() == 1
+    assert pool.breaker_after == serve_pool.FALLBACK_BREAKER_MIN  # 小池 = 下限起步
+    total = 9
+    for i in range(total):
+        argv, logp = _task(script, 0, i, f"w{i}", tmp_path)
+        assert pool.try_pool(argv, logp, 0.2) is None  # 每局都超时（桩睡死）
+    # 熔断后：不再 spawn / 不再计回退 / 余下局被绕过（走一次性）
+    assert pool.disabled is True
+    assert pool.fallback == pool.breaker_after == 4, pool.fallback
+    # 每次回退都把那个 worker 换掉 ⇒ 熔断前 spawned 与 fallback 同步增长；熔断后**停止增长**
+    assert pool.spawned == pool.fallback == 4, f"熔断后不得再补位：spawned={pool.spawned}"
+    assert pool.bypassed == total - 4
+    lines = [m for m in msgs if "serve-pool" in m]
+    assert sum(1 for m in lines if "回退一次性 spawn" in m) == 4, lines
+    assert sum(1 for m in lines if "熔断" in m) == 1, lines
+    assert lines[-1].startswith("[serve-pool] 熔断"), lines
+    assert "已熔断" in pool.summary() and f"余下 {total - 4} 局" in pool.summary()
+    pool.close()
+
+
+def test_fallback_detail_lines_are_capped_and_carry_kind_and_where(tmp_path: Path) -> None:
+    """回退详情有条数上限（对齐日志节食），且每行都能回答「哪条腿 / 哪一局 / 现场在哪」。
+
+    真 STUB 现象：rollout 与 eval 共用本模块，旧行既无 kind 也无 where ⇒ 一屏同形行，
+    分不出是哪条腿在刷（2026-09-25 现场就是这样）。
+    """
+    script = _write_stub(tmp_path, _STUB_SERVE, count=str(tmp_path / "c"), fail_seed="5")
+    msgs: list[str] = []
+    pool = ServePool(sys.executable, script.name, tmp_path, 1, msgs.append)
+    pool.breaker_after = 999  # 单独隔离「详情条数上限」（不带熔断一起测）
+    pool.start()
+    for i in range(8):
+        argv, logp = _task(script, 0, 5, f"w{i}", tmp_path)
+        assert pool.try_pool(argv, logp, 30.0, label=f"s0/d{i}") is None
+    detail = [m for m in msgs if "回退一次性 spawn" in m]
+    assert len(detail) == serve_pool.FALLBACK_LOG_DETAIL_LIMIT, detail
+    assert "kind=rollout s0/d0 err: stub-refused-s5" in detail[0], detail[0]
+    assert "现场" in detail[0] and str(tmp_path) in detail[0], detail[0]
+    pool.close()
+
+
+def test_acquire_gives_up_within_the_game_cap_instead_of_the_ready_timeout(tmp_path: Path) -> None:
+    """补位冷启动等不到就绪时，等待**受单局硬顶约束**（旧行为是固定 60s，远在 5s 硬顶之外）。
+
+    现场：机器一被挤慢，`_acquire` 就把一个游戏线程按在就绪等待里，而看门狗在这段里什么都
+    打不出来（既没有回退行、也没有进度行）——那正是「静默四分钟」的一半成因。
+    """
+    script = _write_stub(tmp_path, _STUB_SILENT, name="stub_silent.py")
+    msgs: list[str] = []
+    pool = ServePool(sys.executable, script.name, tmp_path, 2, msgs.append, ready_timeout_sec=60.0)
+    argv, logp = _task(script, 0, 0, "w0", tmp_path)
+    t0 = time.time()
+    assert pool.try_pool(argv, logp, 1.0) is None  # 不 start()：首次取槽就是冷启动
+    assert time.time() - t0 < 10.0, "就绪等待必须受本次尝试的硬顶约束，不是固定 60s"
+    assert pool.fallback_reasons == {"no-slot": 1} and pool.killed == 1
     pool.close()
 
 

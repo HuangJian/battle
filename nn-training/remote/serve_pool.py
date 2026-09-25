@@ -25,6 +25,11 @@ World」，只有这样 serve 与一次性调用的产物才逐字节一致 —�
 
 **失败一律回退一次性 spawn**（与 agent 侧同策略）：池只负责「省掉每局启动」，任何时候拿不准
 就交回调用方的一次性路径 —— **只慢不错、绝不丢局**。
+
+**但回退本身要有限度**（2026-09-25 云机卡死取证）：一次超时 = kill worker + 该局一次性 spawn
++ 池补位再冷启动一个 ⇒ 一次超时放大成**三份进程**；过载时「回退越多、进程越多、越慢」是
+正反馈，能把整轮锁死。所以本轮累计回退到阈值（`FALLBACK_BREAKER_MIN`，随池宽度走）就地
+**熔断**：不再接任务、不再补位，余下局直接一次性，并且只留一行现场（`_fallback`）。
 """
 
 from __future__ import annotations
@@ -60,6 +65,24 @@ READY_TIMEOUT_SEC = 60.0
 
 #: 关池开关（诊断/回退用）：`NN_SERVE_POOL=0` 让整轮回到逐局 spawn（口径 A，旧行为）。
 ENV_SWITCH = "NN_SERVE_POOL"
+
+#: 本轮累计回退局数的**熔断下限**：到线就停用池（余下局直接一次性 spawn）。
+#:
+#: 为什么必须有（2026-09-25 云机卡死取证）：一次超时 = ① kill 一个长驻 worker ② 这一局改
+#: 一次性 `spawn`（再冷启动一次 bun）③ 池补位又冷启动一个 ⇒ **一次超时放大成三份进程**。
+#: 过载时回退越多、进程越多、游戏越慢 ⇒ 回退更多：正反馈把机器锁死在 5s 硬顶之外，整轮
+#: 从此不再推进（现场：220 worker 的健康轮 p90=2.62s，下一轮被 2× 超订后成批踩 5s 线，
+#: 5s 后一次刷出 60+ 行回退，随后 4 分钟零行）。熔断是这条回路的唯一刹车：拿不准就退到
+#: 一次性路径（**只慢不错、绝不丢局**），但**不再重建 worker**。
+#: 阈值随池宽度走（大池按 1/4 收线，小池 4 条起步）——见 `_breaker_after`。
+FALLBACK_BREAKER_MIN = 4
+
+#: 回退行的**详情**条数上限（超出部分只由熔断行/轮末汇总报数）。
+#:
+#: 对齐日志节食口径（`remote/log_bundle.py`）：这一族行本来只回答「哪一局、为什么」，
+#: 而过载时它们成屏幕刷（现场 60+ 行/2s），把真正要看的东西埋掉；且原行**不带 kind/
+#: label/where**，rollout 与 eval 共用本模块时根本分不出是哪条腿。
+FALLBACK_LOG_DETAIL_LIMIT = 5
 
 
 def pool_enabled() -> bool:
@@ -211,6 +234,13 @@ class ServePool:
         self.fallback = 0
         self.fallback_reasons: dict[str, int] = {}
         self.closed = False
+        #: 熔断阈值（本轮累计回退到它就停用池）；见 `FALLBACK_BREAKER_MIN`。
+        self.breaker_after = max(FALLBACK_BREAKER_MIN, self.max_workers // 4)
+        #: 已熔断：不再接任务、不再补位（`workers` 收掉交给 `close()`/轮末）。
+        self.disabled = False
+        #: 熔断后被**绕过**的局数（它们走一次性路径，不计进 `fallback`——否则计数被灌满）。
+        self.bypassed = 0
+        self._fallback_logged = 0
 
     # ---------------- 生命周期 ----------------
 
@@ -287,9 +317,17 @@ class ServePool:
 
         return base(argv0) == base(self.script)
 
-    def _acquire(self) -> _Worker | None:
-        """取一个空闲 worker；池没满则补位（新 worker 也要等就绪）。"""
+    def _acquire(self, timeout_sec: float | None = None) -> _Worker | None:
+        """取一个空闲 worker；池没满则补位（新 worker 也要等就绪）。
+
+        `timeout_sec` = 这一局**本次尝试的硬顶**（`_submit` 传进来）：补位冷启动的等待
+        不得超过它 —— 否则「机器一慢」会把一个游戏线程按在就绪等待里（旧行为是固定 60s，
+        远超单局 5s 的硬顶，而看门狗在这段里什么都打不出来）。等不到就绪 ⇒ 当场放弃这个
+        新 worker，**交给调用方的一次性路径**（与「起不来」同一个出口，只慢不错）。
+        """
         with self._lock:
+            if self.disabled:
+                return None
             for w in self._workers:
                 if not w.busy and not w.dead:
                     w.busy = True
@@ -299,10 +337,19 @@ class ServePool:
         fresh = self._spawn()
         if fresh is None:
             return None
-        fresh.ready.wait(self.ready_timeout_sec)
+        budget = self.ready_timeout_sec
+        if timeout_sec is not None:
+            budget = min(budget, max(1.0, float(timeout_sec)))
+        ready = fresh.ready.wait(budget)
         with self._lock:
-            if fresh.dead or self.closed or len(self._workers) >= self.max_workers:
-                # 起不来 / 关池 / 被别的线程先占满 ⇒ 多出来的这个直接收掉
+            if (
+                not ready
+                or fresh.dead
+                or self.closed
+                or self.disabled
+                or len(self._workers) >= self.max_workers
+            ):
+                # 没等到就绪 / 起不来 / 关池 / 已熔断 / 被别的线程先占满 ⇒ 多出来的这个直接收掉
                 fresh.kill()
                 self.killed += 1
                 return None
@@ -318,12 +365,35 @@ class ServePool:
         w.kill()
 
     def _fallback(self, reason: str) -> None:
+        """记一次回退；到熔断线就地停用池并**响亮记一行**（这一行是全轮唯一的刹车现场）。
+
+        计数在锁外自增不致命（GIL 下 dict 操作原子、计数只是诊断口径），但熔断只能置一次。
+        """
         self.fallback += 1
         self.fallback_reasons[reason] = self.fallback_reasons.get(reason, 0) + 1
+        if not self.disabled and self.fallback >= self.breaker_after:
+            self.disabled = True
+            reasons = ",".join(f"{k}={v}" for k, v in sorted(self.fallback_reasons.items()))
+            self.log(
+                f"[serve-pool] 熔断：本轮停用池（fallback={self.fallback} ≥ 阈值"
+                f"{self.breaker_after}；served={self.served} spawned={self.spawned} "
+                f"killed={self.killed}｜{reasons}）——余下局直接一次性 spawn，"
+                "不再补位/不再重建 worker（避免「一次超时 → 三份进程」的放大回路）"
+            )
 
-    def _log_fallback(self, reason: str, why: str) -> None:
-        """每次回退都留一行**带现场**的日志（回退很少发生，行本身不是热路径）。"""
-        self.log(f"[serve-pool] 一局回退一次性 spawn（{reason}: {why[:300]}）")
+    def _log_fallback(self, reason: str, why: str, *, kind: str, label: str, where: str) -> None:
+        """回退行的**详情**（前 `FALLBACK_LOG_DETAIL_LIMIT` 条；之后只由熔断行/汇总报数）。
+
+        必须带 `kind`/`label`/`where`：rollout 与 eval 共用本模块，缺了它们行与行之间完全
+        同形（2026-09-25 的现场就是这样——一屏同形行，分不出哪条腿、哪一局、现场在哪）。
+        """
+        if self._fallback_logged >= FALLBACK_LOG_DETAIL_LIMIT:
+            return
+        self._fallback_logged += 1
+        self.log(
+            f"[serve-pool] 一局回退一次性 spawn（kind={kind} {label} {reason}: {why[:200]}"
+            f"；现场 {where}）"
+        )
 
     @staticmethod
     def _postmortem(w: _Worker, lines: list[str]) -> str:
@@ -371,7 +441,11 @@ class ServePool:
         """
         if self.closed or len(argv) < 2 or not self.owns(argv[0]):
             return TaskOutcome(False, 0.0, [], "not-ours")
-        w = self._acquire()
+        if self.disabled:
+            # 熔断后**不计回退**（否则计数与日志都被余下 300 局灌满）：直接交回一次性路径。
+            self.bypassed += 1
+            return TaskOutcome(False, 0.0, [], "pool-disabled")
+        w = self._acquire(timeout_sec)
         if w is None:
             self._fallback("no-slot")
             return TaskOutcome(False, 0.0, [], "no-slot")
@@ -381,16 +455,24 @@ class ServePool:
         t0 = time.time()
         stdin = w.proc.stdin
         if stdin is None:
+            self._log_fallback(
+                "no-stdin", self._postmortem(w, w.drain()), kind=kind, label=label, where=where
+            )
             self._fallback("no-stdin")
-            self._log_fallback("no-stdin", self._postmortem(w, w.drain()))
             self._drop(w)
             return TaskOutcome(False, 0.0, [], "no-stdin")
         try:
             stdin.write(json.dumps(argv[1:]) + "\n")
             stdin.flush()
         except (OSError, ValueError):
+            self._log_fallback(
+                "write-failed",
+                self._postmortem(w, w.drain()),
+                kind=kind,
+                label=label,
+                where=where,
+            )
             self._fallback("write-failed")
-            self._log_fallback("write-failed", self._postmortem(w, w.drain()))
             self._drop(w)
             return TaskOutcome(False, 0.0, [], "write-failed")
         # 轮询等待：软告警 + 硬顶都在这里判（与一次性路径同一套 game_watch 口径）
@@ -427,8 +509,8 @@ class ServePool:
         else:
             reason = "dead" if w.dead else "timeout"
             why = self._postmortem(w, lines)
+        self._log_fallback(reason, why, kind=kind, label=label, where=where)
         self._fallback(reason)
-        self._log_fallback(reason, why)
         self._drop(w)
         return TaskOutcome(False, elapsed, lines, reason)
 
@@ -491,4 +573,5 @@ class ServePool:
         return (
             f"serve_pool: served={self.served} spawned={self.spawned} killed={self.killed} "
             f"fallback={self.fallback}（{reasons}）"
+            + (f"｜已熔断：余下 {self.bypassed} 局走一次性" if self.disabled else "")
         )

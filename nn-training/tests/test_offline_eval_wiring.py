@@ -27,6 +27,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import platform_utils as pu
+import remote.run_loop as run_loop
 from platform_utils import cpu_worker_slots
 from remote import offline_boot, offline_eval
 from remote.artifacts import ArtifactStore
@@ -140,8 +142,10 @@ def test_default_slots_does_not_reserve_for_the_planned_rollout_workers(
     """计划里的 rollout 并行度**不进**缺省公式：两者交替跑，按对方扣一次等于两笔账扣同一份钱
 
     用户 2026-09-22：「不应该为 eval 保留 CPU 核数，两者都使用 max(cores − 4, cores × 0.8)」。
+    其中 cores 走 `platform_utils.effective_cores`（容器配额/亲和掩码，**不是**宿主机的
+    `os.cpu_count()`——见它那节的 224/96 事故）⇒ 用例 patch 的也是那个单一来源。
     """
-    monkeypatch.setattr(offline_eval.os, "cpu_count", lambda: 40)
+    monkeypatch.setattr(pu, "effective_cores", lambda: 40)
     monkeypatch.setattr(
         offline_eval, "run_cloud_eval", lambda **job: {"ran": True, "it": job["it"]}
     )
@@ -168,7 +172,7 @@ def test_rollout_workers_default_is_the_same_formula_as_eval(
     为什么不能沿用计划里钉着的 `plan.workers`：那是**导出机**的规模（常在 8~16 核的本机导出），
     而整段是在云机（Kaggle TPU 会话 ~96 vCPU）上跑的；两侧还交替跑，没理由互相预留。
     """
-    monkeypatch.setattr(offline_eval.os, "cpu_count", lambda: 96)
+    monkeypatch.setattr(pu, "effective_cores", lambda: 96)
     ctx, _ = _run_ctx(tmp_path / "auto", plan_workers=8)
     assert ctx.rollout_workers == cpu_worker_slots(96) == 92, "计划里的 8 不参与缺省"
     # 显式给数就完全按它（不夹取、不重算）
@@ -225,24 +229,65 @@ def test_eval_landing_triggers_a_repost_of_that_round(
 def test_close_eval_drains_and_is_safe_when_disabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """段末收线：在飞的那一轮必须被**有界**等着落账（超时就只记一笔）。
+
+    刻意**不经 `_maybe_cloud_eval`**（它现在会先有界等本轮收线，那条语义由
+    `test_maybe_cloud_eval_waits_for_the_round_so_the_two_legs_really_alternate` 钉），
+    这里直接 `submit` 把轮次置于「在飞」状态，才能确定性地断到收线那一支。
+    """
     release = __import__("threading").Event()
+    started = __import__("threading").Event()
 
     def slow(**_job: object) -> dict:
-        release.wait(10)
+        started.set()
+        release.wait(30)
         return {"ran": True}
 
     monkeypatch.setattr(offline_eval, "run_cloud_eval", slow)
     ctx, logs = _run_ctx(tmp_path / "on", eval_on_cloud=True, course=_course(eval_every=1))
     _setup_cloud_eval(ctx)
-    _maybe_cloud_eval(ctx, 2)
+    assert ctx.eval_runner is not None
+    assert ctx.eval_runner.submit(2) is True
+    assert started.wait(10), "评估没起跑"
+    _close_eval(ctx, timeout=0.3)  # 在飞 ⇒ 打收线行 + 收线超时也不报错
+    assert any("段末收线" in m and "it2" in m for m in logs), logs
     release.set()
-    _close_eval(ctx)
-    assert ctx.eval_runner is not None and ctx.eval_runner.results == [{"ran": True}]
-    assert any("段末收线" in m for m in logs)
+    assert ctx.eval_runner.wait_idle(10.0)
+    assert ctx.eval_runner.results == [{"ran": True}]
 
     # 没开评估 / 没装配 ⇒ 空操作（不抛）
     ctx_off, _ = _run_ctx(tmp_path / "off")
     _close_eval(ctx_off)
+
+
+def test_maybe_cloud_eval_waits_for_the_round_so_the_two_legs_really_alternate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**「交替」现在是代码保证的**（2026-09-25 云机卡死）：提交后要等本轮收线才交回训练循环。
+
+    事故机制：旧版提交点与下一轮 rollout 的开跑点是同一个瞬间 ⇒ 两条腿同时各开满一份
+    （96 核配额上 220+220，而那个 220 本身就是把宿主机 224 核读成配额的产物）⇒ 2× 超订 ⇒
+    成批踩 5s 硬顶 ⇒ 池回退放大 ⇒ 整轮停摆。
+    这里钉两件事：① 默认就会等（收线前不返回）；② 等是**有界**的（超时只记一行，训练继续）。
+    """
+    release = __import__("threading").Event()
+    started = __import__("threading").Event()
+
+    def slow(**_job: object) -> dict:
+        started.set()
+        release.wait(30)
+        return {"ran": True, "settled": 1}
+
+    monkeypatch.setattr(offline_eval, "run_cloud_eval", slow)
+    monkeypatch.setattr(run_loop, "EVAL_ALTERNATE_WAIT_SEC", 0.3)
+    ctx, logs = _run_ctx(tmp_path, eval_on_cloud=True, course=_course(eval_every=1))
+    _setup_cloud_eval(ctx)
+    _maybe_cloud_eval(ctx, 2)  # 在飞 + 等待超时 ⇒ 必须已返回（否则本用例挂到超时）
+    assert started.is_set(), "该提交的轮次没提交"
+    assert any("未收线" in m and "训练继续" in m for m in logs), logs
+    release.set()
+    assert ctx.eval_runner is not None and ctx.eval_runner.wait_idle(10.0)
+    _close_eval(ctx)
 
 
 def test_cloud_eval_not_assembled_without_corpus(tmp_path: Path) -> None:

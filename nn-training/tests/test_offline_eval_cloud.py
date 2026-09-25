@@ -34,6 +34,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import platform_utils as pu
 from platform_utils import cpu_worker_slots
 from remote import game_watch, offline_eval, serve_pool
 from remote.artifacts import ArtifactStore, sha256_bytes, sha256_file
@@ -94,11 +95,13 @@ def test_default_slots_is_the_same_formula_as_rollout(monkeypatch: pytest.Monkey
     两者都使用 max(cores − 4, cores × 0.8)；只要留两三个核给数据回传任务就够了」。
     老口径（先扣 `plan.workers` 再卡 64）在 96 核云机上只给 64 = 白扔三成。
     """
+    # 核数的单一来源是 `platform_utils.effective_cores`（容器配额/亲和掩码 > os.cpu_count，
+    # 见它那节的 224/96 事故）——所以这里 patch 它，而不是 `os.cpu_count`。
     for cores, want in ((96, 92), (40, 36), (16, 12), (8, 6), (4, 3), (1, 1)):
-        monkeypatch.setattr(offline_eval.os, "cpu_count", lambda c=cores: c)
+        monkeypatch.setattr(pu, "effective_cores", lambda c=cores: c)
         assert offline_eval.default_slots() == want, f"{cores} 核 → {want}"
         assert offline_eval.default_slots() == cpu_worker_slots(cores), "与 rollout 同一口径"
-    monkeypatch.setattr(offline_eval.os, "cpu_count", lambda: None)
+    monkeypatch.setattr(pu, "effective_cores", lambda: 1)
     assert offline_eval.default_slots() == 1, "读不到核数也要能跑"
 
 

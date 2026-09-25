@@ -15,6 +15,7 @@ rl/queue.py 各自维护了一份逐字节相同的 `_POPEN_NO_WINDOW`（Windows
     （门禁抖动归因用，见 docstring）。
   force_utf8_stdio() —— CLI 入口调用：把本进程 stdout/stderr 运行时钉成 UTF-8
     （压过 PYTHONIOENCODING / PYTHONUTF8 / 控制台代码页；详见 docstring）。
+  effective_cores() —— 本进程**真正能用**的核数（容器配额/亲和掩码 > os.cpu_count()）。
   cpu_worker_slots(cores=None) —— 本机 CPU 并行槽的**唯一口径**（见 docstring）：
     rollout 与 eval 都用它，谁都不为对方预留核数。
 """
@@ -120,23 +121,107 @@ def sandbox_delete_blocked(anchor: Any) -> bool:
 #: 大机器上真正生效的是下面 20% 那一支——留 4 核就够这些线程跑。
 CPU_RESERVE = 4
 
+#: 容器 CPU 配额的 cgroup 文件（v2 优先；v1 兜底）。换算成核数见 `cgroup_cpu_quota`。
+_CGROUP_V2_CPU_MAX = "/sys/fs/cgroup/cpu.max"
+_CGROUP_V1_QUOTA = "/sys/fs/cgroup/cpu/cpu.cfs_quota_us"
+_CGROUP_V1_PERIOD = "/sys/fs/cgroup/cpu/cpu.cfs_period_us"
+#: cgroup v1 没写 period 时的约定缺省（内核文档：默认 100ms ⇒ 100000µs）。
+_CGROUP_V1_PERIOD_DEFAULT = 100_000
+
+
+def _read_text(path: str) -> str | None:
+    """读一个内核伪文件；读不到/无权限 ⇒ None（诊断用途，绝不抛）。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def cgroup_cpu_quota() -> int | None:
+    """容器 cgroup 允许的 CPU 核数（quota÷period，向上取整）；不限/读不到 ⇒ None。
+
+    为什么需要它（2026-09-25 云机卡死）：容器里的 `os.cpu_count()` 报的是**宿主机**的逻辑
+    核数，不是配额。Kaggle 的 TPU 会话实测报 224 而 cgroup 只给 96 核 ⇒ 按 224 算并发就是
+    2.3× 超订（"把 96 核误读为 224 核"），单局墙钟直接被推过 5s 硬顶。
+    v2：`/sys/fs/cgroup/cpu.max`（`"9600000 100000"`；`"max 100000"` = 不限）；
+    v1：`cpu.cfs_quota_us`（`-1` = 不限）÷ `cpu.cfs_period_us`。
+    """
+    raw = _read_text(_CGROUP_V2_CPU_MAX)
+    if raw:
+        parts = raw.split()
+        if len(parts) >= 2 and parts[0] != "max":
+            try:
+                quota, period = int(parts[0]), int(parts[1])
+            except ValueError:
+                pass
+            else:
+                if quota > 0 and period > 0:
+                    return max(1, -(-quota // period))  # 向上取整
+    try:
+        quota = int(_read_text(_CGROUP_V1_QUOTA) or "0")
+        period = int(_read_text(_CGROUP_V1_PERIOD) or str(_CGROUP_V1_PERIOD_DEFAULT))
+    except ValueError:
+        return None
+    if quota > 0 and period > 0:
+        return max(1, -(-quota // period))
+    return None
+
+
+def affinity_cores() -> int | None:
+    """进程亲和掩码允许的核数（Linux `sched_getaffinity`）；无此接口/取不到 ⇒ None。
+
+    与 cgroup 配额是**两个不同的事实**（cpuset 绑核 vs 配额限流），任一比 `os.cpu_count()` 小
+    都说明这台机器给不了那么多核 ⇒ `effective_cores` 取两者的小值。
+    """
+    fn = getattr(os, "sched_getaffinity", None)
+    if fn is None:
+        return None
+    try:
+        return len(fn(0)) or None
+    except (OSError, AttributeError, NotImplementedError, TypeError):
+        return None
+
+
+def effective_cores() -> int:
+    """本进程**真正能用**的核数（单一口径）：容器配额与亲和掩码取小，都没有才回 `os.cpu_count()`。
+
+    这三个来源的优先级不是风格问题（见 `cgroup_cpu_quota` 的 224/96 事故）：
+    `os.cpu_count()` 在容器里报宿主机的核数 —— 它是**最不可信**的一个，只能当最后的兜底
+    （Windows、裸机、无 cgroup 的容器）。
+    """
+    candidates = [c for c in (cgroup_cpu_quota(), affinity_cores()) if c]
+    if candidates:
+        return max(1, min(candidates))
+    return max(1, int(os.cpu_count() or 1))
+
 
 def cpu_worker_slots(cores: int | None = None) -> int:
     """本机该开几个 CPU 并行槽：``max(cores − 4, floor(cores × 0.8))``（至少 1）。
 
+    `cores` 缺省走 `effective_cores()`（容器配额/亲和掩码 > `os.cpu_count()`）——**按物理数目**
+    算，不按宿主机报出来的大数字算（详见 `cgroup_cpu_quota` 的 224/96 事故）。
+
     **唯一口径**（用户 2026-09-22）：「rollout 和 eval 是交替进行的，所以不应该为 eval 保留
     CPU 核数——两者都使用 max(cores − 4, cores × 0.8)，只要留两三个核给数据回传任务就够」。
 
-    为什么不再「按对方留位」：云机离线段里 rollout 与 eval（以及 PPO）**是交替的**，
-    给 eval 扣掉 rollout 的并行度等于两次扣同一份钱——两边都按本函数满配，谁在跑谁就用满，
-    交错处自然错开。真正需要一直活着的只有补传线程/日志/守护，两三个核（大机器上 20% 的
-    那一支还会多留一些）绰绰有余。
+    为什么不再「按对方留位」：云机离线段里 rollout 与 eval（以及 PPO）**本该是交替的**，
+    给 eval 扣掉 rollout 的并行度等于两次扣同一份钱——两边都按本函数满配，谁在跑谁就用满。
+    真正需要一直活着的只有补传线程/日志/守护，两三个核（大机器上 20% 的那一支还会多留一些）
+    绰绰有余。
+
+    ⚠ **前提得靠排程真正成立**（2026-09-25 云机卡死）：此前 eval 的提交点与下一轮 rollout
+    的开跑点是同一个瞬间 ⇒ 两条腿同时各开满一份（96 核配额上 220+220，而那个 220 本身就是
+    把 224 核的宿主机读数当成了配额），2× 超订把单局墙钟推过 5s 硬顶 ⇒ 成批超时 + 池回退
+    放大 ⇒ 整轮停摆。所以「交替」现在是代码保证的（`remote/run_loop._maybe_cloud_eval`
+    提交后**有界等**本轮评估收线），核数也走容器口径（`effective_cores`），而不是靠注释假设；
+    同一份公式只在那个前提下才对。
 
     参照：96 vCPU 的 Kaggle TPU 会话 ⇒ 92（旧口径：先扣 rollout 再卡 64 = 白扔三成）；
     16 核 ⇒ 12（留 4）；8 核 ⇒ 6（留 2）。显式传 ``--eval-slots`` / ``--rollout-workers``
     仍然完全照用户给的数走（本函数只管缺省）。
     """
-    n = max(1, int(cores if cores is not None else (os.cpu_count() or 1)))
+    n = max(1, int(cores if cores is not None else effective_cores()))
     return max(1, min(n, max(n - CPU_RESERVE, int(n * 0.8))))
 
 

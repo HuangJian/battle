@@ -89,6 +89,19 @@ TS_CODE_ZIP_NAME = "ts_code.zip"
 #: 单轮的瞬时失败重试上限（自主模式没有 hub 兜底：重试够了就干净停下留产物）。
 ITER_RETRIES = 2
 
+#: 一轮评估**提交后**等它收线的时限（秒）——「交替」就是在这里做出来的。
+#:
+#: 为什么必须等（2026-09-25 云机卡死取证）：`_maybe_cloud_eval` 在 checkpoint 之后提交评估，
+#: 而**下一轮的第一步就是 rollout**（`_run_with_retries` → `run_job` → `run_iter_rollout`），
+#: 两条腿因此是**同时**各开满一份（96 核配额上 220+220；而那个 220 本身就是把宿主机报的
+#: 224 核当成配额的产物，见 `platform_utils.effective_cores`）—— 旧注释那句「rollout 与 eval
+#: 交替跑、互不预留」与代码事实不符。2× 超订把单局墙钟从 p90≈2.6s 推到 5s 硬顶之外 ⇒
+#: 成批超时 ⇒ 池回退放大（一次超时 = 三份进程）⇒ 整轮停不下来。
+#:
+#: 维持在**有界**：评估永不把训练按住不放 —— 超时只记一行 WARN，训练照常继续（那时两条腿
+#: 会重新交叠，日志里看得见）。真跑得慢的评估应降 `--eval-slots`/语料，而不是把等待调大。
+EVAL_ALTERNATE_WAIT_SEC = 300.0
+
 
 def _log_default(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] [run] {msg}", flush=True)
@@ -182,8 +195,10 @@ class RunContext:
         eval_game_timeout_sec: float = 0.0,
         #: rollout 的并行局数（`--rollout-workers`）。**它覆盖计划里钉着的 `plan.workers`**：
         #: 后者是**导出那台机器**的规模（常在 8~16 核的本机导出，却要在 96 vCPU 的云机上跑），
-        #: 而 rollout 与 eval 是交替跑的 ⇒ 两者共用同一口径 `platform_utils.cpu_worker_slots()`
-        #: （用户 2026-09-22：「两者都使用 max(cores − 4, cores × 0.8)」）。0 = 按本机核数自动。
+        #: 而 rollout 与 eval 是（**且必须**）交替跑的 ⇒ 两者共用同一口径
+        #: `platform_utils.cpu_worker_slots()`（用户 2026-09-22：「两者都使用 max(cores − 4,
+        #: cores × 0.8)」）。「交替」由 `EVAL_ALTERNATE_WAIT_SEC` 那条有界等保证（见它）。
+        #: 0 = 按本机核数自动。
         rollout_workers: int = 0,
         ts_tree_dir: Path | None = None,
         log: Callable[[str], None] = _log_default,
@@ -767,7 +782,12 @@ def _setup_cloud_eval(ctx: RunContext) -> None:
     ctx.log(
         f"云机 A 层评估已启用（**与下一轮 PPO 并行**，CPU）：每 {ep.eval_every} 轮 × "
         f"{len(ep.stages)} 关 × {ep.n_seeds} 种种子（diff={ep.difficulty}，并发 {ctx.eval_slots} 局"
-        + (f"；rollout 并行 {ctx.rollout_workers}（交替跑，互不预留）" if ctx.rollout_workers else "")
+        + (
+            f"；rollout 并行 {ctx.rollout_workers}（同一口径、互不预留，但**本轮的评估跑完才开"
+            f"下一轮 rollout**，最多等 {EVAL_ALTERNATE_WAIT_SEC:.0f}s）"
+            if ctx.rollout_workers
+            else ""
+        )
         + "）——与 in-loop 同一份语料/行 schema；结果落产物目录的 eval_log.jsonl"
     )
     ctx.eval_runner = CloudEvalRunner(
@@ -830,14 +850,26 @@ def _maybe_cloud_eval(ctx: RunContext, it: int) -> None:
 
     到点的那一轮还要再看一眼「上一轮评完没」——这点观测在 `CloudEvalRunner.submit` 里
     （有界等一小会，仍不空闲就跳过本轮），所以这里只负责「该不该评」。
+
+    **提交后要有界等它收线**（`EVAL_ALTERNATE_WAIT_SEC`）：评估与下一轮的 rollout 同时开跑
+    就是「2× 超订 ⇒ 成批踩 5s 硬顶」的成因（见那个常量的注释）。等它跑完，「交替」才真的
+    是交替；等超时也照常放行（评估永不按住训练）。
     """
     runner = getattr(ctx, "eval_runner", None)
     plan = getattr(ctx, "eval_plan", None)
     if not ctx.eval_on_cloud or runner is None or plan is None:
         return
     try:
-        if plan.due(it):
-            runner.submit(it)
+        if not plan.due(it):
+            return
+        if not runner.submit(it):
+            return  # 本轮没提交（上一轮还在飞）——`submit` 自己已记过一笔
+        wait_idle = getattr(runner, "wait_idle", None)
+        if wait_idle is not None and not wait_idle(EVAL_ALTERNATE_WAIT_SEC):
+            ctx.log(
+                f"WARN: 云机评估 it{it} 超过 {EVAL_ALTERNATE_WAIT_SEC:.0f}s 未收线 —— 训练继续"
+                "（评估仍在后台，会与接下来的 rollout 抢 CPU；真要缩短就降 --eval-slots/语料）"
+            )
     except Exception as e:  # 评估是旁路：任何意外都不能影响训练
         ctx.log(f"WARN: 云机评估提交失败（忽略）：{type(e).__name__}: {e}")
 

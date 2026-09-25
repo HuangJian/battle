@@ -28,6 +28,7 @@ PPO 链路（load_episodes → chunk_episodes → ppo_update）。
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -38,6 +39,7 @@ from typing import Any
 
 from log_bundle import LogBundle
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+from platform_utils import cpu_worker_slots
 
 # 单局看门狗的口径常量与 eval **共用一份**（`remote/game_watch.py`）：点名线 5s、首次尝试硬顶
 # 也是 5s（用户口径「单局 >5s 肯定不正常」⇒ 超时原地重跑）、重试上限 ×4、最多 3 次、轮询 0.5s。
@@ -59,6 +61,37 @@ ROLLOUT_LOG_NAME = "rollout.log"
 REPORT_NAME = "_rl_report.json"
 #: 并行度上限（防 hub 侧误配 workers=1000 把节点打爆；16 vCPU 节点的合理值远低于此）。
 MAX_WORKERS = 256
+
+#: 本机并行度夹取的覆盖开关（实验/排障用）：正整数 = 直接当上限，`0` = **不夹**
+#: （完全按 hub 给的 workers 走）。缺省 = 按本机核数夹取（`cpu_worker_slots()`）。
+ENV_WORKERS_CAP = "NN_ROLLOUT_WORKERS_MAX"
+
+
+def workers_cap() -> int:
+    """**跑 rollout 那台机器**的并行度上限（0 = 不夹）：缺省 = `cpu_worker_slots()`，env 可覆盖。
+
+    ⚠ 「本机」= **执行本函数的进程所在的机器**（节点/云机自己），**不是** hub、也不是导出机。
+    核数走 `platform_utils.effective_cores()`（容器配额/亲和掩码 > `os.cpu_count()`）：
+    Kaggle 的 TPU 会话 `os.cpu_count()` 报**宿主机**的 224，而 cgroup 只给 **96** 核 ⇒ 上限 92。
+    所以日志里那行 `workers=220` 本身就是一个误读的产物（220 = 按 224 核算出来的），现在它会被
+    夹成 92（`并发夹取=220→92`）——这正是本轮要拿掉的 2.3× 超订。裸机/Windows 无 cgroup，
+    `effective_cores()` = `os.cpu_count()`，行为不变。
+    夹取也**只降不升**（`min`）：hub 给的比本机口径小就照 hub 的（离线段那个「覆盖导出机规模」
+    的动作在 `run_loop.open_run_context`，同样在云机上求值，也走同一条核数口径）。
+
+    为什么必须有这道闸（2026-09-25 云机卡死）：`spec.workers` 可能是**导出机**的规模
+    （离线腿已在 plan 侧用 `--rollout-workers` 覆盖，但 kind=iter 直给的值没人夹），而节点侧
+    原来唯一的闸是 `MAX_WORKERS=256` —— 8~16 核节点上 200+ 并发意味着每局都被挤过 5s 硬顶，
+    那正是「成批超时 → 回退放大 → 整轮停摆」的入口条件。夹取只改并行度：
+    `workers` 不进 `data_fp`（见 `protocol.iter_declared_entries`），argv/wver 一个字不动。
+    """
+    raw = (os.environ.get(ENV_WORKERS_CAP) or "").strip()
+    if raw:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass  # 非法值 ⇒ 回落到核数口径（响亮的事交给日志，不在这里抛）
+    return cpu_worker_slots()
 
 
 def resolve_bun(name: str = "") -> str:
@@ -460,7 +493,9 @@ def run_iter_rollout(
     bun = resolve_bun(str(spec.get("bun") or ""))
     ver = bun_version(bun)
     argvs: list[list[str]] = list(spec["argv"])
-    workers = max(1, min(int(spec.get("workers") or 1), len(argvs), MAX_WORKERS))
+    requested_workers = max(1, int(spec.get("workers") or 1))
+    cap = workers_cap() or MAX_WORKERS  # 0 = 显式不夹
+    workers = max(1, min(requested_workers, len(argvs), MAX_WORKERS, cap))
     # 首次尝试的硬顶：plan 给了正数就完全按它；**0/缺省就是节点兜底** `DEFAULT_GAME_TIMEOUT_SEC`
     # （旧口径「0 = 不限」= 卡住的局可以永远等下去；本机历史行为不能当云机的安全策略）。
     requested = float(spec.get("game_timeout_sec") or 0.0)
@@ -473,6 +508,15 @@ def run_iter_rollout(
     rb = LogBundle(log)
     rb.add("games", len(argvs))
     rb.add("workers", workers)
+    if workers < min(requested_workers, len(argvs)):
+        # 夹取必须可见：否则「hub 说 220、实际跑 12」会变成一个静默的口径分叉。
+        # 只在**本机上限**真的掐住了才报（「游戏数比并发数少」是常事，不是夹取）。
+        # 「本机」= 跑这一轮的节点/云机（`os.cpu_count()`），带上核数以免被误读成 hub/导出机。
+        rb.add(
+            "并发夹取",
+            f"{requested_workers}→{workers}（跑这一轮的机器 {cpu_worker_slots()} 核上限"
+            f" {cap}｜{ENV_WORKERS_CAP}=0 可关）",
+        )
     rb.add("bun", f"{bun} ({ver or '?'})")
     rb.add("ts_root", tsd)
     rb.note(

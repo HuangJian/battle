@@ -181,9 +181,10 @@ def test_markdown_documents_cloud_eval_and_resume() -> None:
     """说明面必须看得见这两个开关（用户找不到的旋钮 = 不存在的旋钮）。"""
     md = "\n".join(notebook_cells(NB, "markdown"))
     assert "eval_on_cloud" in md, "云机评估开关要在说明书里"
-    assert "与下一轮 PPO 并行" in md, "并行语义是这条腿最容易被误解的地方，要写明"
+    # 排程语义必须写明（2026-09-25 云机卡死）：rollout 与评估**都吃 CPU** ⇒ 真交替
+    assert "都吃 CPU" in md and "收线后才开下一轮 rollout" in md, "交替语义要写清（旧文案「与下一轮 PPO 并行」已被事故推翻）"
     assert "续跑" in md and "同轮齐全" in md
-    # 并发口径：rollout 与 eval **同一个公式**（交替跑，互不预留）——说明书与代码里必须一致
+    # 并发口径：rollout 与 eval **同一个公式**（交替跑才互不预留）——说明书与代码里必须一致
     assert "rollout_workers" in md, "rollout 并发旋钮要在说明书里（它覆盖计划里的导出机规模）"
     assert "max(CPU−4, CPU×0.8)" in md, "并发口径要写出公式（老口径「扣掉 rollout 再卡 64」已废）"
 
