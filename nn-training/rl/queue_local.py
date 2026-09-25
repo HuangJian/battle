@@ -2,6 +2,11 @@
 
 从 rl/queue.py 拆出（2026-09-02）：run_rollout 只依赖本机并发（ThreadPoolExecutor
 spawn bun 子进程），无分布式状态——独立成模块便于单测与职责分离。
+
+**长驻池（2026-09-25）**：本机腿原先**每局** `Popen` 一个 bun——每局重付进程启动 + 模块
+加载 + wasm 编译 + 权重解析（节点侧同病实测 1.59×，见 `docs/nn/runtime-opt.md` §20/§21/§22）。
+现在两条本机腿（`run_rollout` / dispatcher 的本机槽）都先走 `remote/serve_pool.py` 的
+`--serve` 长驻池，拿不准就回退原来的一次性 spawn（**只慢不错**，回退路径逐字节旧行为）。
 """
 
 from __future__ import annotations
@@ -16,12 +21,69 @@ from typing import Any
 
 import dist_common
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
-from remote import game_watch  # 进度行节流口径与节点侧 rollout 共用一份（`progress_due`）
+
+# 进度行节流口径与节点侧 rollout 共用一份（`progress_due`）；serve_pool = 节点侧同一份长驻池。
+from remote import game_watch, serve_pool
 from rl.cmd import build_rollout_cmd
 from rl.log import log
 from rl.reports import combine_reports
 
 REPO_ROOT = Path(__file__).resolve().parents[2]  # 仓库根 battle2（rl/ 上溯 3 层，修正 2026-09-02）
+
+#: 本机腿交给长驻池的单局硬顶（秒）——**故意远大于任何合法长局**。
+#:
+#: 本机口径一直是「不限」（`game_watch` 对 `DEFAULT_GAME_TIMEOUT_SEC` 的注释：本机卡住的是
+#: 自己的终端，云机上才等于「一个卡住的 bun 永远等下去」），这个数只给池一个「死 worker
+#: 最终能被收掉」的兜底；池没服务成照样回退一次性 spawn，而那条路仍然不限。取 30min：
+#: 8 并发实测单局 p99 16.8s（`docs/nn/runtime-opt.md` §8），超订下再慢两个数量级也到不了。
+LOCAL_GAME_TIMEOUT_SEC = 1800.0
+
+
+def make_local_pool(
+    bun: str,
+    rl_path: str,
+    traj_dir: Path,
+    pair: tuple[int, int] | None,
+    args,
+    wver: str,
+    workers: int,
+) -> serve_pool.ServePool | None:
+    """按**真 argv** 决定这一轮要不要建长驻池（建不了 ⇒ None，整轮退回逐局 spawn）。
+
+    为什么拿真 argv 探、而不是再写一遍「哪个模式用哪个导出器」：`build_rollout_cmd` 是脚本
+    选择的**唯一来源**，抄一份就等着谁先漂。脚本不在 `remote/serve_pool` 的白名单里
+    （goal / intent 两种 RL 模式）⇒ `make_pool` 返回 None，本轮与本改动前逐字节相同。
+
+    池的**生命周期归调用方**（用 try/finally `close()`）：`run_rollout` = 一轮采集；dispatcher
+    = 一次 run（一个权重版本）。
+    """
+    if pair is None or workers <= 0:
+        return None
+    cmd = build_rollout_cmd(
+        bun,
+        args,
+        weights=rl_path,
+        out_dir=str(traj_dir / "w0"),  # 只为取脚本名，不落盘
+        stage=int(pair[0]),
+        seed=int(pair[1]),
+        wver=wver,
+        node_label="local",
+    )
+    if len(cmd) < 2:
+        return None
+    pool = serve_pool.make_pool(bun, cmd[1], REPO_ROOT, workers, log)
+    if pool is None:
+        return None
+    ready = pool.start()
+    if ready <= 0:
+        pool.close()  # 起不来 = 本轮退回一次性路径（与没有池逐字节相同）
+        return None
+    log(
+        f"[rollout] 长驻 worker 池：{ready}/{workers} 就绪（{cmd[1]}）——逐局进程启动 / wasm"
+        " 编译 / 权重解析只付一次；单局跑挂就地回退一次性 spawn（只慢不错）"
+    )
+    return pool
+
 
 # 进度行节流：旧口径是「每 N 局一句」（N=10）——在高并发轮上等于每秒数行，云端离线课的
 # 日志就是被它刷屏的（用户口径 2026-09-23：每分钟一句就够）。现在按**时间**节流，口径常量
@@ -29,14 +91,15 @@ REPO_ROOT = Path(__file__).resolve().parents[2]  # 仓库根 battle2（rl/ 上�
 
 
 def run_rollout(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, int]], args) -> dict:
-    """Run one rollout generation into traj_dir with up to W concurrent bun
-    processes over the given (stage, seed) game pairs.
+    """Run one rollout generation into traj_dir with up to W concurrent games over
+    the given (stage, seed) game pairs.
 
-    Each game is one single-threaded bun process writing shards under
-    traj_dir/w{i}/ — disjoint by construction, and discover_rl_shards() scans
-    recursively, so the PPO side needs no knowledge of the layout. Per-game
-    granularity saturates all cores regardless of how few stages/seeds the
-    sweep has (bun startup ~300ms is noise vs a 12000-tick game).
+    Each game writes shards under traj_dir/w{i}/ — disjoint by construction, and
+    discover_rl_shards() scans recursively, so the PPO side needs no knowledge of
+    the layout. Per-game granularity saturates all cores regardless of how few
+    stages/seeds the sweep has. 2026-09-25 起每局默认交给**长驻** bun（`--serve` 池，
+    `make_local_pool`）：进程启动 / wasm 编译 / 权重解析只付一次；池拿不准（没就绪 /
+    跑挂 / 超时）就地回退逐局 `Popen` —— 回退路径与本参数不存在时逐字节相同。
     Returns the aggregated report dict.
     """
 
@@ -44,11 +107,14 @@ def run_rollout(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, i
     # local slot 对齐），否则主进程下一轮 completed_pairs 不命中、预采产物作废。
     wver = dist_common.weights_fingerprint(rl_path)
     workers = max(1, min(args.workers, len(pairs)))
+    pool = make_local_pool(
+        bun, rl_path, traj_dir, pairs[0] if pairs else None, args, wver, workers
+    )
 
     def run_one(idx: int, si: int, seed: int) -> tuple[int, dict | None]:
         wdir = traj_dir / f"w{idx}"
         wdir.mkdir(parents=True, exist_ok=True)
-        log_f = open(wdir / "rollout.log", "w", encoding="utf-8")
+        log_path = wdir / "rollout.log"
         cmd = build_rollout_cmd(
             bun,
             args,
@@ -59,40 +125,70 @@ def run_rollout(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, i
             wver=wver,
             node_label="local",
         )
-        p = subprocess.Popen(
-            cmd, cwd=str(REPO_ROOT), stdout=log_f, stderr=subprocess.STDOUT, **_POPEN_NO_WINDOW
-        )
-        rc = p.wait()
-        log_f.close()
+        pooled = None
+        if pool is not None:
+            # `cmd[1:]` = 池的任务口径（`[脚本, …args]`，不含 bun 本身；池内部再去掉脚本路径）。
+            pooled = pool.try_pool(
+                cmd[1:],
+                log_path,
+                LOCAL_GAME_TIMEOUT_SEC,
+                label=game_watch.game_label(si, seed),
+                kind="rollout",
+            )
+        if pooled is None:
+            with open(log_path, "w", encoding="utf-8") as log_f:
+                p = subprocess.Popen(
+                    cmd,
+                    cwd=str(REPO_ROOT),
+                    stdout=log_f,
+                    stderr=subprocess.STDOUT,
+                    **_POPEN_NO_WINDOW,
+                )
+                rc = p.wait()
+        else:
+            rc = 0  # 池已把该局 stdout 落回 log_path；rc≠0 的局池不会当成功
         report = None
         if rc == 0:
             report = json.loads((wdir / "_rl_report.json").read_text(encoding="utf-8"))
         return rc, report
 
-    t0 = time.time()
-    last_log_at = t0
-    results: list[tuple[int, dict | None]] = [(1, None)] * len(pairs)
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = {ex.submit(run_one, i, si, sd): i for i, (si, sd) in enumerate(pairs)}
-        for done_n, fut in enumerate(as_completed(futures), 1):
-            results[futures[fut]] = fut.result()
-            now = time.time()
-            if game_watch.progress_due(done_n, len(pairs), now, last_log_at):
-                last_log_at = now
-                log(f"[rollout] local {done_n}/{len(pairs)} games settled ({now - t0:.0f}s)")
+    try:
+        t0 = time.time()
+        last_log_at = t0
+        results: list[tuple[int, dict | None]] = [(1, None)] * len(pairs)
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = {ex.submit(run_one, i, si, sd): i for i, (si, sd) in enumerate(pairs)}
+            for done_n, fut in enumerate(as_completed(futures), 1):
+                results[futures[fut]] = fut.result()
+                now = time.time()
+                if game_watch.progress_due(done_n, len(pairs), now, last_log_at):
+                    last_log_at = now
+                    log(f"[rollout] local {done_n}/{len(pairs)} games settled ({now - t0:.0f}s)")
 
-    failed = [i for i, (rc, _r) in enumerate(results) if rc != 0]
-    if failed:
-        tail = (traj_dir / f"w{failed[0]}" / "rollout.log").read_text(encoding="utf-8")[-2000:]
-        raise SystemExit(f"[run_rl] rollout worker(s) {failed} failed:\n{tail}")
+        failed = [i for i, (rc, _r) in enumerate(results) if rc != 0]
+        if failed:
+            tail = (traj_dir / f"w{failed[0]}" / "rollout.log").read_text(encoding="utf-8")[-2000:]
+            raise SystemExit(f"[run_rl] rollout worker(s) {failed} failed:\n{tail}")
 
-    reports = [r for _rc, r in results if r is not None]
-    return combine_reports(reports)
+        reports = [r for _rc, r in results if r is not None]
+        return combine_reports(reports)
+    finally:
+        if pool is not None:
+            log(f"[rollout] {pool.summary()}")
+            pool.close()
 
 
 def run_local_rollout(
-    bun: str, rl_path: str, traj_dir: Path, idx: int, task: tuple[int, int], args, wver: str
+    bun: str,
+    rl_path: str,
+    traj_dir: Path,
+    idx: int,
+    task: tuple[int, int],
+    args,
+    wver: str,
+    pool: serve_pool.ServePool | None = None,
 ) -> dict:
+    """dispatcher 本机槽的单局（`pool` 非空时走长驻池，拿不准就地回退一次性 spawn）。"""
     si, sd = task
     wdir = traj_dir / f"w{idx}"
     wdir.mkdir(parents=True, exist_ok=True)
@@ -106,15 +202,28 @@ def run_local_rollout(
         wver=wver,
         node_label="local",
     )
-    with open(wdir / "rollout.log", "w", encoding="utf-8") as log_f:
-        # 整局墙钟计时，与远端 agent 写入 manifest 的 elapsedSec 同口径——
-        # 此前 local 局无耗时数据，巡检「采样机健康」的局均耗时列对 local 恒为 '—'。
-        t0 = time.time()
-        p = subprocess.Popen(
-            cmd, cwd=str(REPO_ROOT), stdout=log_f, stderr=subprocess.STDOUT, **_POPEN_NO_WINDOW
+    log_path = wdir / "rollout.log"
+    # 整局墙钟计时，与远端 agent 写入 manifest 的 elapsedSec 同口径——
+    # 此前 local 局无耗时数据，巡检「采样机健康」的局均耗时列对 local 恒为 '—'。
+    t0 = time.time()
+    pooled = None
+    if pool is not None:
+        pooled = pool.try_pool(
+            cmd[1:],
+            log_path,
+            LOCAL_GAME_TIMEOUT_SEC,
+            label=game_watch.game_label(si, sd),
+            kind="rollout",
         )
-        rc = p.wait()
-        elapsed_sec = round(time.time() - t0, 3)
+    if pooled is None:
+        with open(log_path, "w", encoding="utf-8") as log_f:
+            p = subprocess.Popen(
+                cmd, cwd=str(REPO_ROOT), stdout=log_f, stderr=subprocess.STDOUT, **_POPEN_NO_WINDOW
+            )
+            rc = p.wait()
+    else:
+        rc = 0
+    elapsed_sec = round(time.time() - t0, 3)
     if rc != 0:
         raise RuntimeError(f"local rollout rc={rc} (see {wdir}/rollout.log)")
     report: dict[str, Any] = json.loads((wdir / "_rl_report.json").read_text(encoding="utf-8"))

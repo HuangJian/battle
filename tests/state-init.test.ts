@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { World } from '../src/game/World'
@@ -260,4 +260,124 @@ describe('P1 注入语义（applyInitSnapshot / runOneBench 端到端）', () =>
     expect(a.kills).toBe(b.kills)
     expect(a.shard.metrics.slice(0, 3)).toEqual(b.shard.metrics.slice(0, 3))
   })
+})
+
+const REPO_ROOT = join(import.meta.dir, '..')
+
+/**
+ * P1b：**长驻池（`--serve`）与一次性调用逐字节一致** —— 含起始分布注入。
+ *
+ * 为什么值得（2026-09-25）：本机腿（`rl/queue_local.py`）原先每局 `Popen` 一个 bun，现在默认
+ * 交给 `--serve` 长驻池（节点侧同款池实测 1.59×，见 `docs/nn/runtime-opt.md` §20/§21）。池化的
+ * 硬前提是「一个任务一局、每局新建 World」逐字节等价（`tools/sim/serve-loop.ts` 的 docstring），
+ * 而起始分布是这条前提上最容易被突破的一处：restore 会把**上一局残留的世界**换成快照，
+ * 只要池里留了任何跨局状态（缓存世界/复用 rng/忘了重建 World），产物就会悄悄不等于一次性调用
+ * ——那时账本上写的是「中段起跑」，而样本来自别的世界。
+ *
+ * 判据：同一个 argv（同一份快照文件、同一 seed）跑两遍——A 各开一个子进程（一次性），
+ * B 同一个 serve 进程连跑两局——逐文件对账，并两边都断言 `initTick` 落地。
+ */
+describe('P1b 长驻池（--serve）≡ 一次性调用（含起始分布注入）', () => {
+  it('同一 argv：池连跑两局 vs 各自一次性调用，逐文件相同且都带 initTick', async () => {
+    const dir = tmp()
+    const { path: snapPath } = writeSnapshot(dir)
+    const wpath = join(dir, 'w.json')
+    writeFileSync(wpath, WEIGHTS)
+    /** 与 `build_rollout_cmd` 产出的 argv 同形（含起始分布与课程权威值）。 */
+    const argv = (out: string, seed: number): string[] => [
+      'tools/sim/export-rl-rollout.ts',
+      '--weights',
+      wpath,
+      '--out',
+      out,
+      '--stages',
+      '0',
+      '--seeds',
+      String(seed),
+      '--max-ticks',
+      '400',
+      '--difficulty',
+      'classic',
+      '--wver',
+      'serve-test',
+      '--node-label',
+      'serve-test',
+      '--lives-override',
+      '1',
+      '--init-snapshot',
+      snapPath,
+    ]
+    const SEEDS = [42, 43]
+    for (const seed of SEEDS) {
+      const p = Bun.spawnSync([process.execPath, ...argv(join(dir, `oneshot-${seed}`), seed)], {
+        cwd: REPO_ROOT,
+        stdout: 'pipe',
+        stderr: 'pipe',
+      })
+      expect(p.exitCode).toBe(0)
+    }
+
+    const proc = Bun.spawn([process.execPath, 'tools/sim/export-rl-rollout.ts', '--serve'], {
+      cwd: REPO_ROOT,
+      stdin: 'pipe',
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    try {
+      const reader = proc.stdout.getReader()
+      const seen: string[] = []
+      const decoder = new TextDecoder()
+      let buf = ''
+      const nextLine = async (): Promise<string> => {
+        for (;;) {
+          const nl = buf.indexOf('\n')
+          if (nl >= 0) {
+            const line = buf.slice(0, nl).trim()
+            buf = buf.slice(nl + 1)
+            if (line) {
+              seen.push(line)
+              return line
+            }
+            continue
+          }
+          const { value, done } = await reader.read()
+          if (done) throw new Error(`serve stdout 关闭；已见 ${seen.join(' | ')}`)
+          buf += decoder.decode(value as Uint8Array)
+        }
+      }
+      /** 只认 `__SERVE_*__` 标记行（main 自己的汇总日志混在同一路 stdout —— agent 侧同规）。 */
+      const nextMarker = async (): Promise<string> => {
+        for (;;) {
+          const line = await nextLine()
+          if (line.startsWith('__SERVE_')) return line
+        }
+      }
+      expect(await nextMarker()).toBe('__SERVE_READY__')
+      for (const seed of SEEDS) {
+        proc.stdin.write(JSON.stringify(argv(join(dir, `pooled-${seed}`), seed).slice(1)) + '\n')
+        const marker = await nextMarker()
+        if (marker !== '__SERVE_OK__') throw new Error(`serve 未报 OK：${marker}`)
+      }
+      expect(proc.exitCode).toBe(null) // 两局都在同一个 worker 里跑完
+    } finally {
+      proc.kill('SIGTERM')
+    }
+
+    for (const seed of SEEDS) {
+      const a = join(dir, `oneshot-${seed}`, `rl_s0_seed${seed}`)
+      const b = join(dir, `pooled-${seed}`, `rl_s0_seed${seed}`)
+      const files = readdirSync(a).sort()
+      expect(files.length).toBeGreaterThan(0)
+      expect(readdirSync(b).sort()).toEqual(files)
+      for (const f of files) {
+        expect(readFileSync(join(b, f))).toEqual(readFileSync(join(a, f)))
+      }
+      const man = JSON.parse(readFileSync(join(b, 'manifest.json'), 'utf8')) as Record<
+        string,
+        unknown
+      >
+      expect(man.initTick).toBe(CUT)
+      expect(man.initSnapshot).toBe(basename(snapPath))
+    }
+  }, 60_000)
 })

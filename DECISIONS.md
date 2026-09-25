@@ -2772,3 +2772,37 @@ tick 由「上一帧残留动作」驱动 · 课程中途删 `state_init` 还复
 —— 全文（现场读数表 / 四条根因 / 改后语义表 / 门禁与独立预算的测试口径 / 真机复核待办）→ `docs/nn/remote-transport.md` §50 · 锚 `## §50` ·
 同源条目 `§2026-09-22-goalnn-bulk-single-channel`（本条是它的更正/延伸：单通道与让路预算不变，改的是
 **谁有抢占权**）
+
+## §2026-09-25-local-rollout-serve-pool（2026-09-25，本机腿入池：trainer 自己的两条本机腿接 `--serve` 长驻池）
+
+**来历**：用户问「local 节点的 bun 进程是 persist 的吗？如果不是，要改！」。追证结论：**不是**——
+`rl/queue_local.py` 的两条本机腿（无可用节点时的整轮 `run_rollout` / dispatcher 本机槽的
+`run_local_rollout`）都是**逐局 `Popen`**，而长驻池（`docs/nn/runtime-opt.md` §22）当时只接在
+节点侧 rollout 与云机离线 eval 上。本机腿的局往往更短（x20-state-init 一局 ≈250 样本 vs 标准局
+≈1290），固定开销占比反而更高；而 state_init 轮的唯一可跑腿正是 `run_rollout`。
+
+**决定**：① 要不要建池由**真 argv**（`build_rollout_cmd` 为第一个 pair 拼出的那份）决定，
+`make_local_pool` 只转发给 `serve_pool.make_pool` 的白名单——脚本不在名单里（goal / intent 两种
+RL 模式）⇒ None，本轮与本改动前**逐字节相同**（不再抄一份「哪个模式用哪个导出器」的判断）；
+② 池宽度 = 本机槽位数，生命周期 = 一轮采集 / 一次 `dispatcher.run()`；
+③ 单局硬顶 `LOCAL_GAME_TIMEOUT_SEC=1800`——本机口径一直是「不限」（本机卡住的是自己的终端），
+这个数只给池一个「死 worker 最终能被收掉」的兜底，**刻意不加 5s 硬顶**；
+④ 回退与熔断完整复用节点侧那一份（池拿不准就地回退逐局 `Popen`，只慢不错）；
+⑤ `dispatcher.run()` 拆成 `run()`（只管 try/finally 收池 + 打 `summary()`）+ `_run()`：`_run` 有多条
+提前 return，池必须在**每一条**出口收掉（否则每轮留下 `local_slots` 个常驻 bun）；
+⑥ e2e 层用 **autouse 夹具**关池（该层 hermetic，不许起真 bun）。
+
+**被否决**：自建一份常驻进程池（= 第二份协议，必漂）· 把 `local_slots=0` 当「纯本机」开关用
+（并发配额 ≠ 派发模式，会让配额调参改变采集分布）· 给本机腿也上节点侧那个 5s 硬顶（本机 8 并发单局
+p99 已 16.8s，超订更慢 ⇒ 成批变成「kill worker + 回退一次性」，正是 `docs/nn/runtime-opt.md`
+§23 的回退放大回路）·
+在 `e2e/conftest.py` **模块级** `os.environ` 关池（门禁是 `pytest tests/ e2e/` 一次进程——
+实测把 `tests/` 三个真 bun 池用例一并关红）。
+
+**违反后果**：池里留跨局状态（不重建 World）⇒ 账本写「中段起跑」而样本来自别的世界 ·
+池不收 ⇒ 每轮留一批常驻 bun 等 stdin · 给本机腿加 5s 硬顶 ⇒ 回退放大回路（runtime-opt §23）·
+e2e 真起 bun ⇒ hermetic 层失约且门禁变慢 · 抄一份「哪个模式用哪个导出器」⇒ 新导出器入池时两边漂。
+
+—— 全文（改了什么 / 等价性证据 / 真机 A/B 待办）→ `docs/nn/runtime-opt.md` §26 · 锚 `## §26` ·
+同源条目 `§2026-09-25-goalnn-cloud-cpu-ledger`（池的熔断/背压/核数夹取定义在本条）·
+`§2026-09-25-state-init-snapshot`（起始分布是池化最容易被突破的一处：restore 换世界）

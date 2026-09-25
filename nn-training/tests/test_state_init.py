@@ -532,15 +532,17 @@ def test_state_init_off_keeps_dispatching_to_the_pool(tmp_path, monkeypatch) -> 
 
 
 def test_every_local_argv_carries_a_snapshot(tmp_path, monkeypatch) -> None:
-    """闸门放行的那条腿（纯本机）逐局 argv 都带 `--init-snapshot`。
+    """闸门放行的那条腿（纯本机）逐局 argv 都带 `--init-snapshot`——**一次性 spawn 那条路**。
 
     32 局里混进一局标准开局就是一局混语料（那局的 shard 还会被 `initTick` 护栏剔除）；
     所以钉在 `run_rollout` 这一层而不是只钉 `build_rollout_cmd`。
+    `NN_SERVE_POOL=0` 强制走回退路径（池化那条路由下一例钉）。
     """
     import subprocess as sp
 
     import rl.queue_local as ql
 
+    monkeypatch.setenv("NN_SERVE_POOL", "0")  # 本条钉一次性路径（池化版见下一例）
     bank = _bank(tmp_path / "bank")
     weights = tmp_path / "w.json"
     weights.write_text('{"arch":{}}', encoding="utf-8")
@@ -572,3 +574,76 @@ def test_every_local_argv_carries_a_snapshot(tmp_path, monkeypatch) -> None:
         snap = Path(cmd[cmd.index("--init-snapshot") + 1]).name
         assert snap in allowed, snap
         assert "--stage-json" not in cmd  # 顺手钉住：注入不影响其余 argv
+
+
+def test_the_local_pool_serves_every_game_with_the_snapshot(tmp_path, monkeypatch) -> None:
+    """本机腿的**长驻池**（`--serve`）逐局 argv 都带 `--init-snapshot`，且一局都不 spawn。
+
+    为什么值得单独钉（2026-09-25）：本机腿原先每局 `Popen` 一个 bun，池化后 argv 改走 stdin
+    （`cmd[1:]`，不含 bun 本身）——送错一段（带上 bun / 带上脚本路径）或忘了注入快照，都会表现为
+    「跑起来了、但起始分布不是你要的那个」，而日志里只有一行「已结算」。
+    """
+    import rl.queue_local as ql
+    from remote import serve_pool
+
+    bank = _bank(tmp_path / "bank")
+    weights = tmp_path / "w.json"
+    weights.write_text('{"arch":{}}', encoding="utf-8")
+    traj = tmp_path / "it1"
+    traj.mkdir()
+    args = _si_args(bank, max_ticks=12900, difficulty="hard", dodge="", workers=3)
+    served: list[list[str]] = []
+    scripts: list[str] = []
+    pools: list = []
+
+    class _FakePool:
+        def __init__(self, script: str) -> None:
+            self.script = script
+            self.closed = False
+
+        def start(self) -> int:
+            return 3
+
+        def try_pool(
+            self, argv, log_path, timeout_sec, *, label="?", attempt=1, kind="rollout"
+        ) -> float:
+            served.append(list(argv))
+            out = Path(argv[argv.index("--out") + 1])
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "_rl_report.json").write_text(json.dumps({"games": 1}), encoding="utf-8")
+            log_path.write_text("served\n", encoding="utf-8")
+            return 0.01
+
+        def summary(self) -> str:
+            return f"serve_pool: served={len(served)} died=0"
+
+        def close(self) -> None:
+            self.closed = True
+
+    def fake_make_pool(bun, script, ts_dir, workers, log_fn):
+        scripts.append(str(script))
+        p = _FakePool(str(script))
+        pools.append(p)
+        return p
+
+    monkeypatch.setattr(serve_pool, "make_pool", fake_make_pool)
+
+    def boom(*_a, **_k):
+        raise AssertionError("池已服务了每一局 —— 不该还有人 spawn 一次性进程")
+
+    monkeypatch.setattr(ql.subprocess, "Popen", boom)
+    logs: list[str] = []
+    monkeypatch.setattr(ql, "log", logs.append)
+    report = ql.run_rollout("bun", str(weights), traj, [(2000, 1), (2000, 2), (2000, 3)], args)
+
+    assert scripts == ["tools/sim/export-rl-rollout.ts"], scripts  # 按真 argv 选脚本
+    assert len(served) == 3, served
+    allowed = {"s2000-414001-t300.json", "s2000-414001-t600.json"}
+    for argv in served:
+        assert argv[0] == "tools/sim/export-rl-rollout.ts", argv  # 不含 bun 本身
+        assert "--init-snapshot" in argv, argv
+        assert Path(argv[argv.index("--init-snapshot") + 1]).name in allowed, argv
+    assert report["games"] == 3, report
+    assert pools and pools[0].closed, "池必须由 run_rollout 收掉（否则每轮留一批常驻 bun）"
+    # 收益/回退要看得见（轮末一行汇总）——巡检靠它判断池到底生效没有
+    assert any("serve_pool: served=3" in m for m in logs), logs

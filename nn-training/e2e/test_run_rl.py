@@ -468,7 +468,14 @@ class _StubPpo:
 
 
 def _stub_local_rollout(
-    bun: str, rl_path: str, traj_dir: Path, idx: int, task: tuple[int, int], args, wver: str
+    bun: str,
+    rl_path: str,
+    traj_dir: Path,
+    idx: int,
+    task: tuple[int, int],
+    args,
+    wver: str,
+    pool=None,  # 本机长驻池（生产签名带它；桩不吃池，见 e2e/conftest 的 NN_SERVE_POOL=0）
 ) -> dict:
     """本地直跑桩（v3.14b 编排化重构）：返回与 export-rl-rollout 报告同构的最小
     summary（win_of / by_node 消费的字段），并写盘最小 shard 文件使 stream 的
@@ -653,11 +660,11 @@ def test_it_stream_local_loser_retire(tmp_path: Path, monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(_rdispatch, "log", _capture_log)
 
-    def _slow_stub(bun_: str, rl_path: str, traj_dir, idx: int, task, a, wver: str) -> dict:
+    def _slow_stub(bun_: str, rl_path: str, traj_dir, idx: int, task, a, wver: str, pool=None) -> dict:
         # 赌的是**相对快慢**（节点那侧是即时假服务），不是「等对方先跑」；
         # sleep-ok: 夹具模拟的工作量：让本地 worker 比节点慢一拍（制造本地做 dup 输家）
         time.sleep(0.35)
-        return _stub_local_rollout(bun_, rl_path, traj_dir, idx, task, a, wver)
+        return _stub_local_rollout(bun_, rl_path, traj_dir, idx, task, a, wver, pool)
 
     monkeypatch.setattr(_rdispatch, "run_local_rollout", _slow_stub)
     try:
