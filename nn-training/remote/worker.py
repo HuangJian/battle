@@ -1024,9 +1024,11 @@ def _get_with_retry(
         # 重抽只在前几次尝试上开放：**最后一次必然老老实实传完**（否则慢链路就变成
         # 「永远下不完」——6 KB/s 的坏签确实存在，重抽是赌，不能把赌注全压在赌上）。
         allow_reroll = reroll and attempt < attempts and rerolls < WIRE_REROLL_MAX
-        t_req = time.time()
+        t_req = time.time()  # 本次尝试的**墙钟**（含排队）：只喂 `_note_rate`（保守侧）
+        t_xfer = t_req  # 进槽后重取：段账只算**真实传输**（排队归调度账 `wait=`）
         try:
             with _BULK.slot(bulk_prio, label=wire_seg or path) as _tok:
+                t_xfer = time.time()  # ★ 排队结束、开传那一刻
                 status, body = _request(
                     base_url,
                     token,
@@ -1077,8 +1079,12 @@ def _get_with_retry(
         except Exception as e:  # 网络层抖动（URLError/timeout/reset）
             status, body = None, repr(e).encode()
         if status == 200:
+            # 两个口径分开（2026-09-25）：
+            #   `elapsed`（墙钟，含排队）⇒ 只喂 `_note_rate`（保守侧，不抬高 `_min_rate`）；
+            #   段账用**纯传输**秒数 —— 否则与 hub 侧「响应发送完成 … in Xs」无法对账
+            #   （现场：worker 侧 `payload=…/321.8s` 里含 `排队 17.6s 才拿到单通道`）。
             elapsed = time.time() - t_req
-            _wire_add(wire_jid, wire_seg, len(body), elapsed)
+            _wire_add(wire_jid, wire_seg, len(body), time.time() - t_xfer)
             if elapsed > 0:
                 _note_rate(len(body) / elapsed, len(body))
             return body
@@ -1417,11 +1423,15 @@ def post_result(
     req_body_json = json.dumps(result, ensure_ascii=False).encode("utf-8")
     t0 = time.time()
     for attempt in range(1, attempts + 1):
-        t_a = time.time()  # 本次尝试的墙钟（传输账用；`t0` 含退避，不适合算速率）
+        # 段账口径（2026-09-25）：只算**进槽之后**的真实上传 —— 进槽前的排队归调度账
+        # （`wait=` / `排队 … 才拿到单通道`）。现场 `result=0.63MB/18-19s` 与同一段日志里的
+        # `排队 17.6s` 高度喷合：那一大段大部分是排队，不是上传。
+        t_xfer = time.time()
         try:
             # P1 关键回传：占唯一 bulk 通道且**不被抢断**（POST 大 body 没有安全 Range）。
             # 占槽范围 = 单次尝试；退避睡眠在槽外（绝不抱着通道睡 16s）。
             with _BULK.slot(BULK_P1_CRITICAL, label="result") as _tok:
+                t_xfer = time.time()  # ★ 排队结束、开传那一刻
                 status, body = _request(
                     base_url,
                     token,
@@ -1439,7 +1449,7 @@ def post_result(
         except Exception as e:
             status, body = None, repr(e).encode()
         if status in (200, 201):
-            _wire_add(jid, "result", len(req_body), time.time() - t_a)
+            _wire_add(jid, "result", len(req_body), time.time() - t_xfer)
             log(
                 f"result POST ok: {len(req_body)} bytes ({ctype.rsplit('/', 1)[-1]})"
                 f" in {time.time() - t0:.1f}s (attempt {attempt})"
@@ -1453,7 +1463,7 @@ def post_result(
         if status == 409:
             # 竞速广播下这是**输家的正常结局**：同 job 已被别人先回传，本份结果丢弃。
             # 绝不重试、绝不当失败上报（否则一个赢家会让 N-1 个 worker 白报错）。
-            _wire_add(jid, "result", len(req_body), time.time() - t_a)  # 字节确实出去了
+            _wire_add(jid, "result", len(req_body), time.time() - t_xfer)  # 字节确实出去了
             log("result POST 409（hub 已有同 job 结果：竞速输家/重复回传）——按成功丢弃")
             return 409
         if status == 403 and mode == CLAIM_MODE_BACKUP:

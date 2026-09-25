@@ -8,6 +8,29 @@
 
 ---
 
+## §51 plan §8 三条开放问题的处置 + 段账口径修正（2026-09-25）
+
+`plan/bulk-p2-preempt-fix.plan.md` §8 留了三条「需用户另裁」的开放问题。逐条查实后的处置如下
+（三条都**不动码**，但其中一条的前提被现场数字本身推翻，另两条转成「有触发条件的待裁」）：
+
+| # | 问题 | 处置 | 判据 / 触发条件 |
+|---|---|---|---|
+| 1 | `post_result` 因 `stream=False` 不进 `_read_body` ⇒ 回传期间不让路，可能是 `p0_p95` 的另一半来源 | **不做（前提不成立）** | ① 上传本身不吃带宽：现场 `result=0.63MB/18-19s` ≈ 34 KB/s，而同一链路的 payload 下载能到 300 KB/s+（预取单跑 324 KB/s）⇒ 远未吃满；② P0 **从不进 bulk 队列**（红线 #1，独立 socket），让路与否只影响带宽竞争，而带宽竞争已由让路覆盖；③ 那 18-19s 的主体是**排队**（同段日志 `排队 17.6s 才拿到单通道`）—— 那是本轮已修的缺陷；④ 真要给回传接让路，`pace` **做不到**：POST 的大 body 是 `urlopen` 写请求体时发生的，而 `pace` 只在读**响应**时被调（回传的响应是几十字节 JSON）⇒ 得改成「`data` 传 file-like + `read(n)` 里 pace」的分块上传，属新传输改造 |
+| 2 | 取消环 1.5s 是否降频 | **保持 1.5s** | `JOB_CANCEL_POLL_SEC` 是记录在案的**用户口径**（`protocol.py:151`「1–2s 是用户口径」）且被 `tests/test_priority_schedule.py:696` 钉住（`<= 2.0`）⇒ 降频是改用户口径，不由 agent 单方面决定。且**判据上也不需要**：取消点在 **epoch 边界**（<20s 是硬需求，interval 只占其中一小段）；本轮修复后 P2 不再怕它，唯一残余影响是「控制面在途时 P2 开不了工」—— 1.5s 的间隙足够开工（P2 一旦开工就不会被控制面打断） |
+| 3 | 抢占不做 Range 续传 ⇒ 每次被 P1 打断的半截是纯浪费 | **先量后裁（已预注册门槛）** | 本轮已把作废字节入账（§50：wire 行 `preempt=N(wasted X.XXMB)`），真机跑 ≥3 个 job 即可读出真实浪费。**立项门槛**：单会话 Σwasted ≥ 一份 payload（≈3.4MB）或单次预取作废 ≥2MB ⇒ 立项做双端 Range（hub 解析 `Range` + 206/`Content-Range`；worker `_get_with_retry` 保半截 + `resume_from` 重放）；否则不做 |
+
+**顺带修正（查证 §8.1 时发现的度量 bug）**：段账的秒数是从**进槽前**起算的
+（`_get_with_retry` 的 `t_req` / `post_result` 的 `t_a`），于是它**含排队** —— 而 hub 侧
+`响应发送完成 … in X s`（`hub_server._bytes` 的 `t0` 在写完响应头之后）只量发送窗 ⇒ 两侧同段
+**不可比**（`tools/wire_report.py` 文档里「与 hub 侧同段对账即可本地化慢腿」的前提被破坏；现场
+`payload=…/321.8s` 里含 `排队 17.6s`）。改法：段账改用「进槽之后」的墙钟（`t_xfer`），排队归调度账
+（`wait=` / `排队 … 才拿到单通道`）；`_note_rate`（会话最好速率）**仍按含排队的墙钟**（保守侧，
+不抬高 `_min_rate` —— 与 §50 的口径一致）。判据：`tests/test_wire_reroll.py::test_segment_seconds_exclude_the_queue_wait` /
+`::test_result_segment_seconds_exclude_the_queue_wait`（改前红：段秒数 = 0.3s 的排队）。
+
+
+---
+
 ## §50 抢占权专属 P1：控制面只让路，P2 补齐开工门禁（plan/bulk-p2-preempt-fix，2026-09-25）
 
 **现场（2026-09-24 23:09–23:20，x20-dodge-l1 / x20-dodge-l3 双课程 + 单云 worker）**

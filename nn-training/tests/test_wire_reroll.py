@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import re
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -32,7 +33,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from remote import worker as worker_mod
-from remote.bulk_sched import BULK_P2_PREFETCH, BulkPreemptError
+from remote.bulk_sched import BULK_P1_CRITICAL, BULK_P2_PREFETCH, BulkPreemptError
 from remote.protocol import RetryableError
 
 MB = 1024 * 1024
@@ -504,3 +505,77 @@ def test_real_failures_still_consume_attempts_after_preempts(monkeypatch) -> Non
             bulk_prio=BULK_P2_PREFETCH,
         )
     assert calls["n"] == 4, f"2 次挤走 + 2 次真实尝试：{calls['n']}"
+
+
+# ──────────── ⑦ 段账口径：排队不算传输（2026-09-25，plan/bulk-p2-preempt-fix §8.1）────────────
+#
+# 现场：同一段日志里既有 `result=0.63MB/18-19s`，又有 `bulk payload: 排队 17.6s 才拿到单通道` ——
+# 而段秒数当时是**从进槽前**起算的（`t_req` / `t_a`）⇒ 它含排队。hub 侧的
+# `响应发送完成 … in X s` 只量发送窗（`hub_server._bytes` 的 `t0` 在写完响应头之后）⇒ 两侧同段
+# 根本不可比（`tools/wire_report.py` 文档里「与 hub 侧同段对账即可本地化慢腿」的前提被破坏）。
+
+
+def _hold_slot_for(seconds: float) -> threading.Thread:
+    """占住唯一 bulk 通道 `seconds` 秒（夹具：让被测调用**真的排上队**）。"""
+    release = threading.Event()
+    holding = threading.Event()
+
+    def holder() -> None:
+        with worker_mod._BULK.slot(BULK_P1_CRITICAL, label="holder"):
+            holding.set()
+            release.wait(10)
+
+    def _free_soon() -> None:
+        # sleep-ok: 夹具模拟的工作量：持有者占住通道一段时间（不是同步手段）
+        time.sleep(seconds)
+        release.set()
+
+    th = threading.Thread(target=holder, daemon=True)
+    th.start()
+    assert holding.wait(5), "占位线程没进通道"
+    threading.Thread(target=_free_soon, daemon=True).start()
+    return th
+
+
+def _segment_seconds(line: str, seg: str) -> float:
+    m = re.search(rf"{seg}=[\d.]+MB/([\d.]+)s", line)
+    assert m, line
+    return float(m.group(1))
+
+
+def test_segment_seconds_exclude_the_queue_wait(monkeypatch) -> None:
+    """下载段账 = **纯传输**（排队归调度账 `wait=` / `排队 … 才拿到单通道`）。"""
+    th = _hold_slot_for(0.3)
+    monkeypatch.setattr(worker_mod, "_request", lambda *a, **kw: (200, b"p" * 128))
+    t0 = time.time()
+    out = worker_mod._get_with_retry(
+        "http://hub",
+        "t",
+        "/jobs/jq/payload",
+        timeout=60.0,
+        attempts=1,
+        log=lambda _m: None,
+        wire_jid="jq",
+        wire_seg="payload",
+    )
+    wall = time.time() - t0
+    th.join(5)
+    assert out and wall >= 0.3, f"夹具没让这次调用真的排上队：{wall:.2f}s"
+
+    lines: list[str] = []
+    worker_mod._wire_flush("jq", lines.append)
+    assert _segment_seconds(lines[-1], "payload") < 0.2, f"段秒数把排队算进去了：{lines[-1]}"
+    assert worker_mod._BULK.stats()["queue_waits"] >= 1, "调度器没记到这次排队"
+
+
+def test_result_segment_seconds_exclude_the_queue_wait(monkeypatch) -> None:
+    """回传段同理（现场 `result=0.63MB/18-19s` 的主角）。"""
+    th = _hold_slot_for(0.3)
+    monkeypatch.setattr(worker_mod, "_request", lambda *a, **kw: (200, b'{"ok":1}'))
+    status = worker_mod.post_result("http://hub", "t", "jr", {"a": 1}, log=lambda _m: None)
+    th.join(5)
+    assert status == 200
+
+    lines: list[str] = []
+    worker_mod._wire_flush("jr", lines.append)
+    assert _segment_seconds(lines[-1], "result") < 0.2, f"回传段秒数把排队算进去了：{lines[-1]}"
