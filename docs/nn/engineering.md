@@ -3062,7 +3062,8 @@ FakeServer 收不到 weights 事件 ⇒ `test_it_stream_smoke` 的 I3 断言
 
 ### 新护栏：`nn-training/conftest.py`（根 conftest，用户口径）
 
-**单测 >5s 警告、>10s 报错**。放在**根** conftest 是因为门禁跑 `pytest tests/ e2e/`，两层要同规。
+**单测 >5s 警告、>30s 报错**（2026-09-26 由 10s 抬高——本机常被训练 rollout / 并行开发占满
+CPU，10s 会把被抢 CPU 的正常用例误判成退化）。放在**根** conftest 是因为门禁跑 `pytest tests/ e2e/`，两层要同规。
 实现用 `pytest_runtest_makereport` 改写 outcome（超预算即判 **failed**，不是 teardown 报错）⇒
 `-x`/xdist/summary 全是标准语义；只计 call 阶段（fixture 建拆不算）。阈值可用
 `NN_TEST_WARN_S` / `NN_TEST_FAIL_S` / `--test-warn-s` / `--test-fail-s` 覆盖；个别确需更长的用例用

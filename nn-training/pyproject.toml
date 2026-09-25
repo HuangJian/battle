@@ -230,7 +230,7 @@ addopts = "-ra -q --tb=short -x --timeout=60"
 # 裸 `python -m pytest xxx`（编码 agent 沙箱常见）此前无任何超时，被沙箱节流的测试可拖成
 # 无限卡死（实测 test_volume_topup_iterates_until_wave_cap 卡数分钟）。
 # 2026-09-20：这是**挂起**护栏（兜死锁/卡死），与 `conftest.py` 的**耗时预算**护栏分工：
-#   conftest（根）：>5s 警告、>10s **报错**（用户口径）；覆盖两个层（tests/ + e2e/），
+#   conftest（根）：>5s 警告、>30s **报错**（用户口径，2026-09-26 由 10s 抬高以抗本机 CPU 负载）；覆盖两个层（tests/ + e2e/），
 #   `NN_TEST_WARN_S` / `NN_TEST_FAIL_S` / `--test-warn-s` / `--test-fail-s` 可覆盖，
 #   个别确需更长的用例用 `@pytest.mark.time_budget(N)`（写明理由）。
 #   引入背景：门禁墙钟 157s 里绝大部分是测试在**空等生产超时**（不占 CPU）——当时最慢单测

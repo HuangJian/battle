@@ -114,7 +114,7 @@ def test_capture_hard_cap_kills_and_keeps_output(monkeypatch) -> None:
 
     硬顶 = 实测冷启动 ×3（下限 0.3s）：倍数只是护栏、不是同步手段 —— 要钉的契约是
     「写出来的尾巴必须留着」，不是「机器得多快」。×3 而非更大：16 核满载时实测单次冷启动
-    ~1.9s ⇒ 硬顶 ~5.7s，仍在单测耗时预算（>10s 报错）以内。
+    ~1.9s ⇒ 硬顶 ~5.7s，仍在单测耗时预算（>5s 警告 / >30s 报错）以内（越过警告线、离报错线远）。
     """
     from common import game_watch
 

@@ -1,13 +1,18 @@
-"""nn-training 根 conftest —— 全局 per-test **耗时预算**（2026-09-20，用户口径）。
+"""nn-training 根 conftest —— 全局 per-test **耗时预算**（2026-09-20；2026-09-26 抬高报错阈值）。
 
-用户口径：单个测试 >5s 警告、>10s **报错**。理由（2026-09-20 实测）：一个安静的
+用户口径：单个测试 >5s 警告、>30s **报错**。理由（2026-09-20 实测）：一个安静的
 26.5s 用例看起来「只是慢」，实际是三条线程停在 `all_settled.wait()` 上**纯空闲等**
 生产超时（CPU 占用低、墙钟长）——耗时预算是抓这类退化的唯一廉价信号：不占 CPU 的
 等待、真实的 sleep、串行化的网络超时，全都会在耗时上现形。
 
+报错阈值为何是 30s（2026-09-26 用户口径）：本机时常被训练 rollout / 并行开发占满 CPU，
+10s 会把「被抢 CPU 的正常用例」误判成退化（wall-clock 轮询类用例在 load 高时偶发超 10s、
+单跑即绿）⇒ 该信号的信噪比被噪声污染。抬到 30s 后，抢 CPU 的抖动被放行，而 >5s 的警告
+仍逐条留痕；真正的空等退化（本节 26.5s 级）依旧现形（先警告，>30s 才判失败）。
+
 口径与环境变量（CLI 覆盖优先）：
   · 警告  5s   → `NN_TEST_WARN_S`（`--test-warn-s`）
-  · 报错 10s   → `NN_TEST_FAIL_S`（`--test-fail-s`）
+  · 报错 30s   → `NN_TEST_FAIL_S`（`--test-fail-s`）
   · 个别用例确需更长 → 显式 `@pytest.mark.time_budget(seconds)`（**必须**在标记里
     写理由，见 pyproject markers 说明）。预算按「call 阶段」计（不含 fixture/收集）。
 
@@ -25,7 +30,7 @@ import pytest
 WARN_ENV = "NN_TEST_WARN_S"
 FAIL_ENV = "NN_TEST_FAIL_S"
 WARN_DEFAULT = 5.0
-FAIL_DEFAULT = 10.0
+FAIL_DEFAULT = 30.0
 
 
 def pytest_addoption(parser) -> None:
@@ -49,7 +54,7 @@ def pytest_addoption(parser) -> None:
 def pytest_configure(config) -> None:
     config.addinivalue_line(
         "markers",
-        "time_budget(seconds): 显式放宽该用例的耗时预算（须附理由；缺省 5s 警告 / 10s 失败）",
+        "time_budget(seconds): 显式放宽该用例的耗时预算（须附理由；缺省 5s 警告 / 30s 失败）",
     )
 
 
@@ -75,7 +80,7 @@ def pytest_runtest_makereport(item, call):
     if secs > fail:
         report.outcome = "failed"
         report.longrepr = (
-            f"耗时预算超限：本用例 call 阶段 {secs:.2f}s > {fail:g}s（用户口径 >10s 报错）。\n"
+            f"耗时预算超限：本用例 call 阶段 {secs:.2f}s > {fail:g}s（用户口径 >30s 报错）。\n"
             f"墙钟长而 CPU 低的典型成因是纯空闲等待（生产超时/固定 sleep）——请改成"
             f"事件驱动，或用 policy 旋钮把配速调小（见 docs/nn/engineering.md §14）。\n"
             f"确需更长时用 @pytest.mark.time_budget(<秒数>) 显式放宽并写明理由。"

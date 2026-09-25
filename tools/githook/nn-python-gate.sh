@@ -16,7 +16,7 @@
 #   worker 启动成本）。2026-09-20 复测（修掉一批「测试空等生产超时」后）：
 #   tests/+e2e/ = 20.1s（即上述 27s 基线所在量级；中间曾退化到 142.7s，见
 #   docs/nn/engineering.md §14）。同次引入 per-test 耗时预算护栏（nn-training/conftest.py：
-#   >5s 警告、>10s 报错；NN_TEST_WARN_S / NN_TEST_FAIL_S 可覆盖）——它专抓
+#   >5s 警告、>30s 报错；NN_TEST_WARN_S / NN_TEST_FAIL_S 可覆盖）——它专抓
 #   「不占 CPU 的等待」，这类退化不会再静默回来。
 #
 #   e2e/ 自 60e5f69 起 hermetic（FakeServer + tmp 落盘，不需要
