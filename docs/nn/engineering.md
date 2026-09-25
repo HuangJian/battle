@@ -2363,6 +2363,109 @@ requeue），与模式不适那条路径**同形**；但多了日志 ⇒ 可见�
 **字节对账不成立**，主证据必须换成「AST 变换证明 + 差分探针（返回 dict / jsonl 逐字节 / 日志序列）」
 并覆盖五条路径。两刀分开提交、各自可回滚。
 
+### 第三十一刀（2026-09-25）：B5b —— `_run_channels` 的通道机器收进 `_UnitLanes`（**状态对象化**）
+
+B5a 只给了相位边界：机器体仍是 **677 行一个方法**（状态散在函数体、11 个闭包靠**可变容器**
+`seen` / `settled: [0]` / `lanes` 绕开闭包只读限制）。本刀按**状态所有者**把它收进一个类。
+
+#### 一句话
+
+`_run_channels` **677 → 4 行**（只剩「构造 → 跑」）；机器体成 `_UnitLanes`：**675 行 / 13 方法**
+（29 个契约字段 + 23 个状态容器成属性，11 个闭包成方法，主循环成 `run()`）。
+
+#### 刀口：按状态所有者，不按调用图
+
+| 成员 | 行 | 职责 |
+|---|---|---|
+| `_UnitLanes.__init__` | 60 | 从 `_UnitPlan` **逐名**接 29 个契约字段 + 原状态块 23 个容器 |
+| `lane_state` · `bringup` · `mark_tripped` · `spawn_workers` · `supervise` · `window_open` | 200 | 通道相位（就绪即派单 / 失联重探 / 关窗即让） |
+| `record` · `params_for` · `fetch_manifest` · `worker` | 345 | 逐局相位（取参数 / 取单 / 跑局 / 落行） |
+| `_watch` | 8 | 在飞采样 |
+| `run` | 90 | 起跑 + 主循环 + 把收尾交回执行器 |
+
+**为什么不是「按调用图切」**：外层 65 个名字里 58 个被机器段读（212 处引用、**139 处在 11 个闭包内**），
+且闭包**互相调用** ⇒ 连通分量就是那 677 行。**病根同 B2：不是没有链，是状态没有所有者。**
+
+#### ★ 偏离 plan §5.6.3：**不换模块**（目标形态原写 `rl/batch_lanes.py`）
+
+机器体的依赖注入全靠**本模块全局**（从旧体实测导出 **20 个**：`log` · `run_local_eval_game` ·
+`is_transient_error` · `node_gate_reason` · `_record_agent_meta` · `pick_race_target` · `register_inflight` ·
+`pop_inflight` · `clear_inflight` · `dist_common` · `deque` · `threading` · `time` · `json` ·
+`BUSY_BACKOFF_CAP_SEC` · `STUCK_GRACE_SEC` · `EVAL_TASK_ATTEMPTS` · `eval_loot_fields` ·
+`eval_census_fields` · `_UnitPlan`）。换模块 ⇒ 每一条 `monkeypatch.setattr("rl.batch_runner.X", …)`
+都成了**静默空操作**（S16/S19/S27 记过三次的同款坑；B3 的「五个常量刻意不转发」正是为了让打在旧家
+**响亮** AttributeError）。
+
+**被否决的备选**：① 新模块 + 20 个依赖显式注入（构造函数契约退化成「什么都依赖」，且每个测试的
+patch 目标都要跟着改）；② 保留闭包但显式传状态（同量改写，却换不来「一个方法一个判据」）。
+⇒ **类住执行器同一模块**，理由写进它的 docstring。
+
+#### 迁移映射（确定性；验证用**独立机制**核同一件事）
+
+* 契约字段 / 状态容器 / 闭包名 ⇒ `self.<名>`；闭包里的 `self`（原指**执行器**）⇒ `self.owner`
+* **实参/局部与共享名重名时必须屏蔽**（否则 `params_for` 一类会把实参悄悄换成属性）——本机器里
+  实测只有 `nd` / `lane` / `task` / `slot` / `stage_id` / `manifest` / `nd_id` 等**不在**共享名里，
+  但屏蔽逻辑与断言保留：**重名就是错，不重名不加分**。
+* f-string 整条交给 AST（3.10 下 f-string 是**一个 STRING token**，内层名字看不见；且内层节点的
+  `col_offset` 指整条字符串 ⇒ 不能按位置改写），其余按标记保留注释与排版。
+
+#### 验证：字节对账不成立 ⇒ **AST 规范化等价**（对全输入成立）
+
+`nn-training/tmp/verify_b5b.py`（**不使用生成器**，独立机制）四节全绿：
+
+1. **段落守恒**：旧方法体 48 条顶层语句被「前置取值 8 + 状态块 23 + 10 个顶层 def + 主循环 6 +
+   收尾 1」**恰好覆盖一次**（切丢/切重都会红）。
+2. **规范化等价**：`self.owner.X` → `self.X`、`self.X`（X ∈ 被搬的 63 个名字）→ `X`，并抹掉
+   `AnnAssign.simple`（裸名改成属性必然 1→0 —— 那是**本刀要做的变换**，不是差异）⇒ 状态块 **23/23**
+   逐节点等 · 11 个闭包**签名 +self、体逐节点等** · `run()` = 主循环 6 + 收尾 1 · `_run_channels`
+   只剩 `return _UnitLanes(self, plan).run()`。
+3. **注入点**：从**旧体**导出它读到的 20 个模块全局，逐个断言在新类里仍是**裸名**（且不存在
+   `self.<全局名>`）—— 这一条就是「不换模块」的决定的可执行形态。
+4. **注释守恒**：旧机器体 80 条注释全在；**宣告删除 1 条**（前置取值段那句「显式取值 ⇒ 下面逐字保留、
+   不改成 plan.x」本刀正是改写它 ⇒ 已过期，换一条新的），未宣告丢失 0 条。
+
+**差分探针的替代（plan §5.6.3 原要求第 2 条）**：本刀改动的测试文件**只有 4 个**（3 处结构守卫按设计
+演进 + 1 个新守卫），其余用例在 HEAD 与新工作区**逐字节相同** ⇒ 它们在两版上全绿（HEAD 2643 /
+新 2653）即是「同 fixture ⇒ 同可观测行为」的跨版本差分；其中 `tests/test_eval_dispatch_resilience.py`
+是**真跑 `dispatch_eval_round`**（假节点 + 真台账 + 真 jsonl）的端到端场景（瞬断 502 / 熔断 /
+丢局 / 结算）。**AST 规范化等价对全输入成立**，比逐场景差分更强；因此本刀不再另写差分脚本。
+
+#### 守卫演进 3 处（「搬成员 = 改归属者名字」第四次）
+
+* `test_batch_runner_phases`：契约段从「`_run_channels` 开头**元组解包**」改到
+  「`_UnitLanes.__init__` **逐名** `self.X = plan.X`」，并新增「每个契约字段都必须真被读到
+  （`self.<字段>`）」—— 只赋值不读 = 契约退化成摆设。
+* `test_batch_plan_split`：入边归属者**换类**（`BatchEvalRunner._run_channels.worker` →
+  `_UnitLanes.worker`，`…bringup` → `_UnitLanes.bringup`）。
+* `test_batch_runner_split`：五个执行器常量的读取改成**两个类合并扫** ——
+  `BUSY_BACKOFF_CAP_SEC` / `STUCK_GRACE_SEC` 随机器搬走，只扫旧类会**静默退化**成「3/5」。
+
+#### 反探针 21/21 全红（无存活）
+
+覆盖：契约少接/接错/顺序错 · 状态名写错 · 方法里挂表外属性 · 状态块挪出 `__init__` ·
+`_run_channels` 塞逻辑 · 方法里塞嵌套 def · 方法改名 · watch 线程不再指向方法 · 机器里冒出 `store` ·
+机器自己结账 · `lane_state` 取错键 / 不再幂等 · `mark_tripped` 首轮判死 / 不排重探 / 槽位减成负数 ·
+`window_open` 无视事件 · 收尾调用少传/写错参数 · 注入点改成限定名。（首轮 5 条「锚点不唯一 / 零命中」
+**是探针自己的错**：锚点在文件里出现 2–4 次或缩进写错 ⇒ 修探针而不是改守卫，并且「锚点不唯一」
+必须**显式报错**、不许静默跳过。）sha256 无漂移。
+
+#### ★ 新获得的可测性（与 B5a 同型）
+
+`lane_state` / `mark_tripped` / `window_open` 现在**直接可调**（拆分前它们是 677 行方法里的闭包，
+只能靠「真跑一个单元」间接看）：归一化（`authKey` → `key`，2026-09-19 的真事故）· 幂等（同 nid 同一
+通道对象）· 掉线计数与「`max_recovery_tries` 才判死」· 槽位不得减成负数 · 关窗优先于墙钟。
+新守卫 `tests/test_batch_lanes_split.py` **10 例**：结构契约 6（类定义唯一 · 方法名闭集 13 ·
+**无嵌套 def**（闭包升平）· `_run_channels` 只剩转发 · **实例属性面 == 闭集 64** · 机器零台账）+ 功能 4。
+
+#### 记账
+
+`rl/batch_runner.py` **1238 → 1247 行**（`_run_channels` 677 → 4；类 675 / 13 方法）·
+nn **2643 → 2653 passed / 3 skipped**（ruff + mypy 绿，447 源文件）· 根 `bun run check` **2120 / 0**
+（121404 expect）· 反探针 **21/21 全红**（sha256 无漂移）。决策 →
+`DECISIONS.md` §2026-09-25-goalnn-batch-lanes-objectify。
+
+**B5a + B5b 至此收官**：`_run` 的 821 行 = 相位 6 + 开头 158 + 机器（类 675 / 13 方法）+ 收尾 87 + 账 47。
+
 ### 未做完（S4 余下）
 
 `remote/` 内部**已零环**（见「拆环」节），`worker.py` 的拆分面**已收口**：只剩三个宿主函数

@@ -222,9 +222,17 @@ def test_di_names_are_bound_and_called_bare_in_the_runner_module() -> None:
         assert hasattr(br, name), f"{name} 没绑进 rl.batch_runner（patch 会静默失效）"
 
 
-def test_runner_constants_are_read_bare_inside_the_runner_class() -> None:
-    """五个常量的读取必须发生在**执行器成员**里且是裸名 —— 它们只被执行器读。"""
-    loads = _load_names_in(_class_member_src(RUNNER_SRC, "BatchEvalRunner"))
+def test_runner_constants_are_read_bare_inside_the_runner_classes() -> None:
+    """五个常量的读取必须发生在**执行侧的类成员**里且是裸名 —— 它们只被执行侧读。
+
+    2026-09-25（S31/B5b）：执行侧现在有两个类 —— 开单元/收尾住 `BatchEvalRunner`，通道机器住
+    `_UnitLanes`（常量读取随机器搬过去：`BUSY_BACKOFF_CAP_SEC` / `STUCK_GRACE_SEC`）。
+    只扫旧类会**静默**退化成「3/5」—— 与 `test_batch_plan_split` 的入边归属者同型。
+    两个类都在同一模块 ⇒ 裸名 patch 锚点（`rl.batch_runner.X`）不迁移。
+    """
+    loads: set[str] = set()
+    for cls in ("BatchEvalRunner", "_UnitLanes"):
+        loads |= _load_names_in(_class_member_src(RUNNER_SRC, cls))
     missed = [c for c in MOVED_CONSTS if c not in loads]
     assert missed == [], missed
 

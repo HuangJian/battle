@@ -83,10 +83,13 @@ PRIVATE_MOVED = ("_forces_of", "_KIND_CHAR")
 INBOUND_CALLS: dict[str, dict[str, int]] = {
     # 2026-09-25（S30/B5a）：`_run` 拆成相位方法 ⇒ 归属者的方法名随成员走
     # （`batch_iter_id` 留 `_open_unit`，两个闭包调用点随 `_run_channels`）。
+    # 2026-09-25（S31/B5b）：两个闭包升成 `_UnitLanes` 的方法 ⇒ 归属者**换类**
+    # （`BatchEvalRunner._run_channels.worker` → `_UnitLanes.worker`）—— 同一族陷阱第三次：
+    # 搬成员 = 改归属者名字，只数旧宿主会静默退化。
     "batch_iter_id": {"BatchEvalRunner._open_unit": 1},
-    "is_transient_error": {"BatchEvalRunner._run_channels.worker": 1},
+    "is_transient_error": {"_UnitLanes.worker": 1},
     "kind_for_policy": {"BatchEvalRunner.__init__": 1},
-    "node_gate_reason": {"BatchEvalRunner._run_channels.bringup": 1},
+    "node_gate_reason": {"_UnitLanes.bringup": 1},
     "select_next_unit": {"maybe_dispatch_batch": 1},
     "units_for_batch": {"maybe_dispatch_batch": 1},
 }

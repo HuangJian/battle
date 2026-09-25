@@ -40,6 +40,12 @@ CLS = next(
 )
 METHODS = {n.name: n for n in CLS.body if isinstance(n, ast.FunctionDef)}
 PLAN = next(n for n in TREE.body if isinstance(n, ast.ClassDef) and n.name == "_UnitPlan")
+#: 机器体（原 `_run_channels` 体内：状态 + 11 个闭包 + 主循环）自 S31/B5b 起住 `_UnitLanes`。
+LANES = next(n for n in TREE.body if isinstance(n, ast.ClassDef) and n.name == "_UnitLanes")
+
+
+def _methods_of(cls: ast.ClassDef) -> dict[str, ast.FunctionDef]:
+    return {n.name: n for n in cls.body if isinstance(n, ast.FunctionDef)}
 
 #: `_UnitPlan` 字段（**闭集**：多一个/少一个都要显式改本表，与 `_open_unit` 同步）。
 PLAN_FIELDS = (
@@ -109,8 +115,13 @@ def test_unit_plan_fields_are_exactly_the_declared_contract() -> None:
     assert got == PLAN_FIELDS, sorted(set(got) ^ set(PLAN_FIELDS))
 
 
-def test_open_unit_returns_the_contract_and_the_machine_unpacks_it_identically() -> None:
-    """`_UnitPlan(...)` 的实参 == 字段集；机器取值段逐条 `x = plan.x`（名字写错会静默换值）。"""
+def test_open_unit_returns_the_contract_and_the_lanes_unpack_it_identically() -> None:
+    """`_UnitPlan(...)` 的实参 == 字段集；取值段逐条 `self.x = plan.x`（名字写错会静默换值）。
+
+    2026-09-25（S31/B5b）：取值段**换家** —— 原住在 `_run_channels` 开头的元组解包，现在住在
+    `_UnitLanes.__init__`（机器体收进类 ⇒ 契约由构造器逐名接）。本用例随之改成「类里每个字段
+    都以 `self.<字段>` 被读到」—— 少取一个 ⇒ 任一方法一跑就 AttributeError。
+    """
     ret = [
         n
         for n in ast.walk(METHODS["_open_unit"])
@@ -121,33 +132,21 @@ def test_open_unit_returns_the_contract_and_the_machine_unpacks_it_identically()
     assert len(kwargs) == len(ret[0].keywords) and None not in kwargs, "构造必须全用关键字"
     assert sorted(str(k) for k in kwargs) == sorted(PLAN_FIELDS)
 
-    unpacks = [
-        st
-        for st in METHODS["_run_channels"].body
-        if isinstance(st, ast.Assign) and isinstance(st.value, ast.Tuple)
-    ]
-    assert unpacks, "机器开头没有取值段"
-    lhs: list[str] = []
-    for st in unpacks:
-        tgt = st.targets[0]
-        assert isinstance(tgt, ast.Tuple)
-        value = st.value
-        assert isinstance(value, ast.Tuple)
-        left = [t.id for t in tgt.elts if isinstance(t, ast.Name)]
-        right = [v.attr for v in value.elts if isinstance(v, ast.Attribute)]
-        assert left == right, f"L{st.lineno} 取值不是恒等映射：{left} vs {right}"
-        assert all(
-            isinstance(v, ast.Attribute) and isinstance(v.value, ast.Name) and v.value.id == "plan"
-            for v in value.elts
-        ), f"L{st.lineno} 取值源不是 `plan`"
-        lhs += left
-    # 机器真读到的契约名必须都在取值段里（少一个 = 运行时 NameError）
-    read = {
-        n.id
-        for n in ast.walk(METHODS["_run_channels"])
-        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+    init = _methods_of(LANES)["__init__"]
+    body = list(init.body)
+    assert ast.unparse(body[0]) == "self.owner = owner", "第一条把执行器存成 `self.owner`"
+    assigns = [ast.unparse(st) for st in body[1 : 1 + len(PLAN_FIELDS)]]
+    assert assigns == [f"self.{n} = plan.{n}" for n in PLAN_FIELDS], \
+        "契约字段必须逐条恒等映射 `self.X = plan.X`（名字写错或漏一个会静默换值/AttributeError）"
+    # 每个契约名都必须真被读到（`self.<字段>`）—— 只赋值不读 = 契约退化成摆设
+    used = {
+        n.attr
+        for n in ast.walk(LANES)
+        if isinstance(n, ast.Attribute)
+        and isinstance(n.value, ast.Name)
+        and n.value.id == "self"
     }
-    assert not (set(PLAN_FIELDS) & read) - set(lhs), sorted((set(PLAN_FIELDS) & read) - set(lhs))
+    assert not set(PLAN_FIELDS) - used, sorted(set(PLAN_FIELDS) - used)
 
 
 def test_run_is_only_the_three_phase_wiring() -> None:
@@ -180,12 +179,14 @@ def test_settle_and_provenance_signatures_are_closed_sets() -> None:
     prov = {a.arg for a in METHODS["_log_provenance"].args.kwonlyargs}
     assert prov == set(PROV_PARAMS), sorted(prov ^ set(PROV_PARAMS))
 
-    # 调用点也是全关键字且名字对齐
+    # 调用点也是全关键字且名字对齐。
+    # 2026-09-25（S31/B5b）：`_settle_unit` 的调用点从 `_run_channels` 换到 `_UnitLanes.run`
+    # （机器体收进类；调用仍是 `self.owner._settle_unit(...)` ⇒ 归属者换了、参数表没换）。
     for call, params in (
         (
             next(
                 n
-                for n in ast.walk(METHODS["_run_channels"])
+                for n in ast.walk(_methods_of(LANES)["run"])
                 if isinstance(n, ast.Call)
                 and isinstance(n.func, ast.Attribute)
                 and n.func.attr == "_settle_unit"
