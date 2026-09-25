@@ -306,6 +306,31 @@ def test_nn_unit_without_weights_requeues(tmp_path, monkeypatch) -> None:
     assert row["status"] == "pending"
 
 
+def test_a_batch_whose_filter_matches_no_unit_is_not_left_silent(tmp_path, monkeypatch) -> None:
+    """`only_rungs` 一个都没命中本次 plan（例如 ladder 在入队与派发之间被改过、或只剩
+    一个已跑完的 rung）⇒ **记日志 + 退回队列**，与三条兄弟路径（模式不适 / 规划失败 /
+    缺权重）同形。
+
+    反例（修前）：静默 `return None`。该批留在 `running`，而 `claim` 的判据是
+    `pending ∨ (running ∧ of>0 ∧ len(done)<of)`，`of` 建批时已默认 2 ⇒ **每个 idle 窗都
+    被再认领一次，永不发车、不落一行日志、状态永远 running**。
+    """
+    monkeypatch.setenv("EVALBOARD_DATA", str(tmp_path))
+    w = _weights(tmp_path)
+    bs.BatchStore(tmp_path).enqueue(
+        course="c4", rung_from="c4l1", ckpt=w, ladder_pos=0, only_rungs=["nope"]
+    )
+    lines: list[str] = []
+    monkeypatch.setattr(be, "log", lines.append)
+    calls = _stub_dispatch(monkeypatch)
+
+    assert _call(tmp_path, rl_path=w) is None
+    assert calls == []
+    (row,) = _ledger(tmp_path)
+    assert row["status"] == "pending", "无可跑 unit 的批必须退回队列（否则永远卡在 running）"
+    assert any("only_rungs" in s for s in lines), f"必须响亮（实测日志 {lines}）"
+
+
 def test_verdict_batch_takes_weights_from_the_unit_not_rl_path(tmp_path, monkeypatch) -> None:
     """判决批：权重在 unit 上（多 ckpt 同批）⇒ 批次级 `rl_path` 只对 ladder 批生效。
 

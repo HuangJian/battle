@@ -135,6 +135,16 @@ def maybe_dispatch_batch(
         units, set((batch.get("units") or {}).get("done", [])), batch.get("only_rungs")
     )
     if nxt is None or unit is None:
+        # 规划成功但没有可跑的 unit（`only_rungs` 一个都没命中本次 plan —— ladder 在入队与派发
+        # 之间被改过、或过滤后为空）。**必须记日志 + 退回队列**，与三条兄弟路径（模式不适 /
+        # 规划失败 / 缺权重）同形：静默 return 会让该批留在 `running`，而 `claim` 的判据是
+        # `pending ∨ (running ∧ of>0 ∧ len(done)<of)`（建批时 `of` 已默认 2）⇒ 每个 idle 窗
+        # 都被再认领一次，永不发车也不落一行日志。
+        log(
+            f"[batcheval] batch {batch.get('batch_id')}: 无可跑 unit"
+            f"（only_rungs={batch.get('only_rungs')!r}）— 退回队列"
+        )
+        store.requeue(str(batch.get("batch_id")))
         return None
     # 判决批的权重在 unit 上（多 ckpt 同批）；ladder 批回落批次级 rl_path。
     unit_weights = str(unit.get("ckpt") or "") or rl_path

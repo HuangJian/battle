@@ -3313,6 +3313,28 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
   nn **2567 → 2586 passed / 3 skipped**（ruff + mypy 绿）；根 2120 / 0；dashboard typecheck + 1105 / 0；
   `check-decisions` ok。**下一步 = B2**（`rl/batch_store.py`：8 个写点 → 具名转移 + `dirty` 才落盘）。
 
+## §2026-09-25-goalnn-batch-unrunnable-filter-loud-requeue（2026-09-25，B4 发现的既存缺陷：无可跑 unit 的批不再静默卡死）
+
+**决定：`maybe_dispatch_batch` 在「规划成功但 `select_next_unit` 无待跑 unit」时，从**静默 `return None`**
+改为**记日志 + `store.requeue`**。** 依据是**代码自身的先例**（§6.2 优先级第三条）——三条兄弟路径
+（模式不适 / 规划失败 / nn 缺权重）全部是「记日志 + 退回队列」，只有这一条不一致。全文 → `docs/nn/engineering.md` §29。
+
+- **病根（可验证）**：该批留在 `running`，而 `claim` 的可跑判据是 `pending ∨ (running ∧ of>0 ∧ len(done)<of)`，
+  而 `of` 建批时已默认 **2**（`enqueue` 写 `units: {of: 2, done: []}`）⇒ **每个 idle 窗都被再认领一次，
+  永不发车、不落一行日志、状态永远 `running`**。
+- **可达条件**：`only_rungs` 没有一个命中本次 plan（ladder.json 在入队与派发之间被改过 / 只剩已跑完的 rung；
+  判决批的 rung 名是 `语料id#关卡名`，与 ladder rung id 不同域）。`backfill.ts` 与 console 都从**同一个 rung**
+  推 `ladder_pos`，所以正常路径不触发 ⇒ 属窄可达、但后果是「静默永卡」。
+- **被否决的备选**：① **只记日志、不改状态**（可观测性有了，但永不发车 + 每窗空转仍在）；
+  ② **改标 `aborted`**（终止且可见，但 abort 在本仓一直是**人的动作**，让 runner 自动中止用户请求的批
+  是新的权力，得单独设计：谁有权中止、console 怎么展示、能不能重入）。两条都不是本刀能隐式决定的 ⇒ 取先例。
+- **代价（写明不是没想到）**：批变成 `pending` 后会**每窗重新 plan 一次**（claim → plan → 过滤空 → requeue），
+  与模式不适那条路径**同形**；但多了日志 ⇒ 可见、可排查（此前是「进度看着正常」的静默）。
+- **§7 三步**：① 先在未改动代码上写确定性失败用例 `tests/test_batch_eval_facade.py::test_a_batch_whose_filter_matches_no_unit_is_not_left_silent`
+  并确认**红**（`assert 'running' == 'pending'`）→ ② 只加「记日志 + requeue」一个分支 → ③ 新用例绿 + 门禁绿。
+- **记账/门禁**：nn **2632 → 2633 passed / 3 skipped** · 根 `bun run check` 2120 / 0（121404 expect）·
+  反探针 **15/15 全红**（新增 ⑭：把该分支改回静默 return）。
+
 ## §2026-09-25-goalnn-batch-eval-facade-b4（2026-09-25，B4：门面收尾 —— 把「门面是门面」变成机器可判的契约）
 
 **决定：`rl/batch_eval.py` 的第四步 B4 收尾 —— ① 新守卫 `tests/test_batch_eval_facade.py` 把门面形态钉成契约
@@ -3332,7 +3354,8 @@ AttributeError · 门面不改写 store 交回的台账 dict）；② 删掉旧�
   （S26「先怀疑探针」、S27「守卫搜索方式太松」之后的第三种成因）。改成故意传另一份 `rl_path` 后 14/14。
 - **记一笔不改的既存缺陷**：`select_next_unit` 过滤后为空（`only_rungs` 无一命中）时门面 `return None`
   而不 requeue，而 `claim` 看 `of>0 ∧ len(done)<of` ⇒ 该批**每窗被再认领、永不发车、无日志、永远 running**；
-  与三条兄弟路径（模式不适 / 规划失败 / 缺权重）不一致 —— 另开一刀，不在本刀静默改。
+  与三条兄弟路径（模式不适 / 规划失败 / 缺权重）不一致 —— 另开一刀，不在本刀静默改
+  （→ 已按 §7 落地，见 §2026-09-25-goalnn-batch-unrunnable-filter-loud-requeue）。
 - **记账/门禁**：`batch_eval.py` **225 → 166** · nn **2621 → 2632 passed / 3 skipped**（ruff + mypy 绿）·
   根 `bun run check` 2120 / 0（121404 expect）· 反探针 **14/14 全红**，还原 sha256 无漂移。
 - **B1–B4 到此完整收官**（plan §5.5.4）；原 1785 行巨团的三个面各自成家，门面零迁移。**余下真实工作 = B5**

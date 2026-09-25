@@ -2236,7 +2236,8 @@ _persist_of(root, str(batch.get("batch_id")), len(units))
 而 `claim` 的可跑判据是 `pending ∨ (running ∧ of>0 ∧ len(done)<of)`：`of` 已在建批时是 2、
 `done` 还是空 ⇒ **每个 idle 窗都会被再认领一次，永不发车、不落日志、状态永远 `running`**。
 三条兄弟路径（模式不适 / 规划失败 / 缺权重）都是「记日志 + 退回队列」，这一条不一致。
-属真设计问题（requeue 会让它每窗重试，也是另一种循环）⇒ 不静默改，另开一刀。
+属真设计问题（requeue 会让它每窗重试，也是另一种循环）⇒ 不静默改，另开一刀
+（→ 第二十九刀，§29）。
 
 #### 验证
 
@@ -2244,6 +2245,63 @@ _persist_of(root, str(batch.get("batch_id")), len(units))
   还原后 sha256 无漂移。
 - **门禁**：nn **2621 → 2632 passed / 3 skipped**（ruff + mypy 绿）· 根 `bun run check`
   **2120 / 0**（121404 expect）· `check-decisions` ok。
+
+### 第二十九刀（2026-09-25）：无可跑 unit 的批不再静默卡死（第二十八刀记下的既存缺陷，§7 单独一刀）
+
+**刀口**：B4 侦察时发现、当刀**故意不改**的那条既存缺陷 —— `maybe_dispatch_batch` 在
+「规划成功但 `select_next_unit` 无待跑 unit」时静默 `return None`。
+
+#### 病根（为什么这是 bug 而不是「保守」）
+
+```python
+units, nxt, unit = select_next_unit(units, done, batch.get("only_rungs"))
+if nxt is None or unit is None:
+    return None          # ← 静默，什么都不做
+```
+
+该批已经在上一行被 `claim` 置为 `running`，而 `claim` 的**可跑判据**是
+`pending ∨ (running ∧ of>0 ∧ len(done)<of)`；`of` 建批时已默认 **2**（`enqueue` 写
+`units: {of: 2, done: []}`），`done` 还空 ⇒ 下次 idle 窗**又会认领它**，再规划、再过滤空、再静默返回……
+**永不发车、不落一行日志、状态永远 `running`** —— 正是本仓最忌讳的「进度看着正常」。
+
+**可达条件**：`only_rungs` 里没有一个 rung 命中本次 plan。正常路径不触发（`backfill.ts` 与 console
+都从**同一个 rung** 推 `ladder_pos`），但 ladder.json 在入队与派发之间被改过、或只剩已跑完的 rung 时
+就到得了；判决批的 rung 名是 `语料id#关卡名`，与 ladder rung id **不同域**（若将来给判决批挂上
+`only_rungs` 就是必然命中）。
+
+#### 决定：取**代码自身的先例**（§6.2 第三条）
+
+三条兄弟路径全是同一个形状 —— **记日志 + `store.requeue`**：模式不适（`mode != per-tick`）·
+规划抛错 · nn 缺权重；只有这一条不一致。于是：
+
+```python
+if nxt is None or unit is None:
+    log(f"[batcheval] batch {id}: 无可跑 unit（only_rungs={...!r}）— 退回队列")
+    store.requeue(str(batch.get("batch_id")))
+    return None
+```
+
+**被否决的备选**（§6.3 要求写明）：① **只记日志、不改状态** —— 可观测性有了，但「永不发车 +
+每窗空转」仍在；② **改标 `aborted`** —— 终止且可见，但 abort 在本仓一直是**人的动作**
+（console），让 runner 自动中止一个用户请求的批是**新的权力**，得单独设计（谁有权中止 / console
+怎么展示 / 能不能重入）⇒ 不是本刀能隐式决定的。**取先例**。
+
+**代价（写明不是没想到）**：批回到 `pending` 后会**每窗重新 plan 一次**（claim → plan → 过滤空 →
+requeue），与模式不适那条路径**同形**；但多了日志 ⇒ 可见、可排查。
+
+#### §7 三步（顺序不颠倒）
+
+① 先在未改动代码上写确定性失败用例
+`tests/test_batch_eval_facade.py::test_a_batch_whose_filter_matches_no_unit_is_not_left_silent`
+并确认**红**（`assert 'running' == 'pending'`）→ ② 只加「记日志 + requeue」一个分支 → ③ 新用例绿 +
+同关注点 12 例绿 + 门禁绿。
+
+#### 验证
+
+- 新用例 + **反探针 15/15 全红**（新增 ⑭：把该分支改回静默 `return None`；`tmp/probe_b4.py`），
+  还原后 sha256 无漂移。
+- **门禁**：nn **2632 → 2633 passed / 3 skipped**（ruff + mypy 绿）· 根 `bun run check`
+  **2120 / 0**（121404 expect）。
 
 ### 未做完（S4 余下）
 
