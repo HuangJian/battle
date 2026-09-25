@@ -132,22 +132,17 @@ def _rollout_source(args: Any) -> str:
     return val
 
 
-#: 半离线段等待预算缺省（秒）：一次 kind=run job 覆盖多轮，节点要跑完才回传。
-#: 这里只是 hub 侧的**等待上限**，不是训练预算（训练预算在计划里：budget_sec / iters）。
-#: 8h ≈ Kaggle 单会话上限：超过它还没回，几乎只能是节点挂了——响亮超时好过默默挂着。
-RUN_WAIT_DEFAULT_SEC = 8 * 3600.0
-
-
 def _run_segment_iters(args: Any) -> int:
-    """半离线段长：一次 `kind=run` job 覆盖几轮（0 = 关；<0 = 直到课程末尾）。
+    """离线课的段长声明（0 = 关；<0 = 直到课程末尾）。
 
     优先级与 `_rollout_source` 同口径：CLI `--run-iters` > `courses.<stem>.run_iters` >
-    `rl.run_iters` > 0。**缺省 0 = 关**（历史行为逐字节不变；要半离线才显式开）。
+    `rl.run_iters` > 0。**缺省 0 = 关**（历史行为逐字节不变；要离线才显式开）。
     选项住 rl-config，永不进 curricula（D14 血缘）。
 
-    语义（用户 2026-09-17 定）：一次领走 = 整段——节点收到（课程 + 初始权重 + 代码 +
-    计划）后即使 hub 彻底失联也能自己跑完，逐轮权重/指标落在产物目录（Kaggle
-    /kaggle/working、Colab Drive）+ 可打包下载。
+    ★ 2026-09-25：它曾经是「半离线整段 job 的段长」（一次领走 it..end_it、本机等 8h）
+    —— 那条腿已退役（`plan/online-offline-role-routing.plan.md` §7）。这个值现在只剩
+    两个用途：① 与 `--rollout-src run` 一起声明「这门课由云机（取包）接手」；
+    ② `--export-bundle` 的终点（控制台导出用 `-1`）。
     """
     n = int(getattr(args, "run_iters", 0) or 0)
     if n:
@@ -167,19 +162,6 @@ def _run_segment_iters(args: Any) -> int:
         return int(course.get("run_iters") or rl.get("run_iters") or 0)
     except Exception:
         return 0
-
-
-def _run_wait_sec(args: Any) -> float:
-    """半离线段的等待上限（秒）：CLI `--run-wait-sec` > `rl.run_wait_sec` > 8h。"""
-    v = float(getattr(args, "run_wait_sec", 0.0) or 0.0)
-    if v > 0:
-        return v
-    try:
-        cfg = dist_common.load_dist_config() or {}
-        v = float((cfg.get("rl") or {}).get("run_wait_sec") or 0.0)
-    except Exception:
-        v = 0.0
-    return v if v > 0 else RUN_WAIT_DEFAULT_SEC
 
 
 def _gpu_push_nodes(remote_token: str) -> list[dict]:

@@ -38,7 +38,8 @@ from typing import Any
 # 单局看门狗口径：**一律通过模块属性读**（`game_watch.X`）——import 会把值抄成第二份绑定，
 # 测试 patch 了 game_watch 那份、调用点还在读旧绑定就是静默的错口径。
 from common import game_watch
-from platform_utils import cpu_worker_slots
+from common.protocol import UnreapableChildError
+from platform_utils import cpu_worker_slots, rmtree_best_effort
 from remote import serve_pool
 from rl.eval_local import (
     a_eval_seed_list,
@@ -57,6 +58,14 @@ from rl.log import log as _rl_log
 # `game_timeout_sec` 给了正数就完全按它（且不对重试放大——配置说了算）。
 #: 新评估轮「上一轮还在飞」时的交接等待（秒）：**有界**等（不是无限 join）。
 EVAL_HANDOFF_WAIT_SEC = 120.0
+#: 「机器级停滞」的轮内重投上限（实验/排障用）：`0`/未设 = **不限**；正整数 = 重投这么多次就
+#: 放弃（把还没评的局记成本轮 `failed`，交回下一轮/下次导入重评）。
+#:
+#: 为什么缺省不限（与 rollout 腿同一口径，`remote/iter_rollout.ENV_ROUND_RETRY_MAX`）：这一档失败
+#: 是**机器**的病（D 状态 / 挂住的挂载点），现场 890s 之后自己好了；外层没有别的重订机会
+#: （`run_cloud_eval` 永不抛，云机自主段的 3 次重试只盖 rollout 腿），轮内重投就是全部。
+#: 「不限」并不意味着等：每一次都真的在跑活（只补没评的局，已落账的局不重跑）。
+ENV_EVAL_ROUND_RETRY_MAX = "NN_EVAL_ROUND_RETRY_MAX"
 #: 段末收线的缺省时限（秒）：给还在飞的评估局一点时间落账；超时只记一笔（已落的行有效）。
 DRAIN_TIMEOUT_SEC = 600.0
 #: 云机局在账本里的 node 名（见模块注释：与 local/<节点 id> 分开，便于按腿归因）。
@@ -131,10 +140,33 @@ def default_slots() -> int:
     「不应该为 eval 保留 CPU 核数，两者都使用 max(cores − 4, cores × 0.8)」）。留出的那几核是给
     补传/日志/守护线程的，不随谁在跑变化。
 
+    ⚠ **那条前提必须先是真的**（2026-09-25 云机卡死）：旧版提交点恰好落在下一轮 rollout 的
+    开跑瞬间 ⇒ 两条腿同时各开满一份（96 核配额上 220+220）⇒ 2× 超订 ⇒ 成批踩 5s 硬顶 ⇒
+    池回退放大 ⇒ 整轮停摆。现在「交替」由代码保证（`run_loop._maybe_cloud_eval` 提交后有界
+    等本轮评估收线）——同一份公式只在那个前提下成立，不再靠注释假设。
+
+    ⚠ **核数也按物理数目**（同上）：缺省走 `effective_cores()`（容器配额/亲和掩码），所以
+    96 核的 Kaggle 会话给 92，而不是把宿主机报的 224 核当配额算出 220。
+
     老口径（先扣 `plan.workers` 再卡 64）在 96 vCPU 的 Kaggle TPU 会话上给到 64，比本口径少三成。
     `--eval-slots` / `CFG.eval_slots` 给了正数就完全按它（不做任何夹取）。
     """
     return cpu_worker_slots()
+
+
+def eval_round_retry_max() -> int:
+    """轮内重投上限（`0` = 不限）；见 `ENV_EVAL_ROUND_RETRY_MAX`。非法值 → 回落不限
+    （响亮的事交给日志，不在评估腿里抛）。
+
+    ⚠ 与 rollout 腿同一个形状：读的是**跑评估这盘机器**自己的 env（不是 hub/导出机）。
+    """
+    raw = (os.environ.get(ENV_EVAL_ROUND_RETRY_MAX) or "").strip()
+    if raw:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    return 0
 
 
 def find_bun(explicit: str = "") -> str:
@@ -156,6 +188,9 @@ class CloudEvalRunner:
 
       ① **提交即返回**——`submit(it)` 只把这一轮的评估丢给后台线程，rollout/PPO 照常跑；
          eval 局是 bun 子进程（CPU），PPO 在 GPU 上，两者本来就不抢同一个资源；
+         **但 rollout 局也在 CPU 上** ⇒ 调用方提交后有界等本轮收线（`run_loop`
+         `EVAL_ALTERNATE_WAIT_SEC`）——否则两条腿同时各开满一份，2× 超订就把单局墙钟推过
+         5s 硬顶（2026-09-25 云机卡死的入口条件）；那个等待是**有界**的，本类不负责它；
       ② **逐轮不站等**——下一轮到点只做一次观测；上一轮仍在飞时**有界**等一小会
          （`EVAL_HANDOFF_WAIT_SEC`），仍不空闲就跳过本轮（下一轮到点再说），绝不把
          PPO 按在等待地里；
@@ -335,10 +370,19 @@ def run_cloud_eval(
 ) -> dict:
     """在云机跑第 `it` 轮的 A 层评估：逐局落账 + `settle_eval_summary`。**永不抛**。
 
-    返回 `{ran, games, settled, failed, skipped, wver, sec, servePool, error?}`（给调用方记日志用）。
+    返回 `{ran, games, settled, failed, skipped, wver, sec, servePool, roundRetries, error?}`
+    （给调用方记日志用）。
 
     `servePool` 只是本轮的池诊断计数（served/spawned/killed/fallback/reasons；没建池 = None）——
-    **不进 wire**：它不经任何账本/manifest，hub 侧不需要认识这个键。
+    **不进 wire**：它不经任何账本/manifest，hub 侧不需要认识这个键。`roundRetries` 同理
+    （机器级停滞导致的轮内重投次数，见下）。
+
+    **机器级停滞 ⇒ 轮内重投**（2026-09-25 用户口径：失败就重试，不关云机、不让任务失败、
+    不睡不空转）：单局若抛 `UnreapableChildError`（SIGKILL 之后收不了尸），它不是「这一局的内容
+    错了」而是「这台机器卡住了」——本函数**在轮内重投**，而且只补**没评的**局（账本
+    `eval_done_keys` 说了算：已落账的局一个字不重跑）。重投次数缺省不限（`NN_EVAL_ROUND_RETRY_MAX`
+    是操作员的上限），每次尝试自己都有界，不占用任何外层重试预算。内容面失败（rc≠0 / 确定性
+    报错）仍归 `failed`（响亮记一笔，读数少一局）——那是这一轮该留的出路。
     """
     log = log or _rl_log
     out: dict[str, Any] = {
@@ -349,6 +393,8 @@ def run_cloud_eval(
         "skipped": 0,
         "wver": "",
         "sec": 0.0,
+        #: 机器级停滞导致的轮内重投次数（0 = 没卡过；`out` 只进日志/诊断，不进 wire）。
+        "roundRetries": 0,
     }
     t0 = time.time()
     # 池的所有权在本函数（创建 → 轮末关）；先声明成 None，好让 finally 对**任何**出口都成立
@@ -426,6 +472,9 @@ def run_cloud_eval(
         #: 逐局（成功那次尝试的）墙钟 + 局身份：轮末打分布用（5s 这条线靠真数据校准）。
         game_walls: list[tuple[float, str]] = []
         retried_games: list[int] = []
+        #: 本轮「机器级停滞」（子进程收不了尸 ⇒ `UnreapableChildError`）的局：轮循环只补它们
+        #: （见 `run_one` 的那一档与下面的重投循环）。**每次尝试前清空**。
+        machine_stuck: list[tuple[int, int]] = []
         # 首次尝试的硬顶：调用方显式给了正数就完全按它（每次尝试都用它），否则节点兜底 +
         # 重试放宽（`attempt_timeout_sec`）——理由与 rollout 逐字相同。
         explicit = float(game_timeout_sec or 0.0) > 0
@@ -472,6 +521,18 @@ def run_cloud_eval(
                     )
                     wall = time.time() - t_game
                     break
+                except UnreapableChildError:
+                    # ★ **机器级停滞**（子进程 SIGKILL 之后收不了尸：D 状态 / 挂住的挂载点）。
+                    # 两条纪律（与 rollout 腿逐字同源，见 `remote/protocol.UnreapableChildError`）：
+                    #   ① **不原地重跑这一局**：`game_dir` 上可能还有活写者 ⇒ 两个进程写同一份
+                    #      `_eval_report.json`（半截/交错）⇒ 静默错读数。重投的粒度是**整轮**：
+                    #      先把它的半截产出删干净，再与其它没产出的局一起投（见轮循环）；
+                    #   ② **不记 `failed`**：那是机器的问题，不是这一局的内容（记成失败就把机器
+                    #      的错记在内容头上，而这一轮永远缺一个读数）。
+                    # 这个分支立即返回（`wall`/`err_txt` 都不必写：它们只服务 `failed` 那一笔）。
+                    with lock:
+                        machine_stuck.append((int(stage), int(seed)))
+                    return
                 except Exception as e:  # 单局失败只放弃这一局（下一轮/下次导入会重试）
                     manifest = None
                     wall = time.time() - t_game
@@ -507,15 +568,66 @@ def run_cloud_eval(
                     failed.append((int(stage), int(seed), f"落账失败 {type(e).__name__}: {e}"))
 
         eval_jsonl.parent.mkdir(parents=True, exist_ok=True)
+        # ---- 轮循环：机器级停滞 ⇒ 轮内重投，**只补没评的局**（2026-09-25 用户口径：失败就重试，
+        # 不许关云机让任务失败，也不许空转烧配额）。
+        #
+        # 为什么重投必须在**轮内**而不是交回调用方：这一腿的调用方（`CloudEvalRunner` / 云机自主段）
+        # 根本没有重订机会——`run_cloud_eval` 的纪律是「永不抛」（抛出去这一轮连 summary 都没有），
+        # 而 rollout 腿那 3 次重试也不盖这条腿。留在这里的重投既不睡（每一趟都真的在跑活）、
+        # 也不吃任何外层预算，而且**机器一好就接上**。
+        #
+        # 出路（不许无限重投的那一档）：**内容面**失败（rc≠0 / 导出器确定性报错 / 落账失败）
+        # 仍归 `failed`（响亮记一笔，读数少一局）——那是这一轮该接受的结局，不是机器问题。
+        retry_cap = eval_round_retry_max()
+        round_retries = 0
+        pending = list(todo)
         try:
-            if n_slots <= 1:
-                for task in todo:
-                    run_one(task)
-            else:
-                with ThreadPoolExecutor(
-                    max_workers=n_slots, thread_name_prefix="cloud-eval"
-                ) as ex:
-                    list(ex.map(run_one, todo))
+            while True:
+                machine_stuck.clear()
+                if n_slots <= 1:
+                    for task in pending:
+                        run_one(task)
+                else:
+                    with ThreadPoolExecutor(
+                        max_workers=n_slots, thread_name_prefix="cloud-eval"
+                    ) as ex:
+                        list(ex.map(run_one, pending))
+                if not machine_stuck:
+                    break
+                # `round_retries` = **真的重投过几次**（计数在重投前自增），所以上限判在自增之前。
+                if retry_cap and round_retries >= retry_cap:
+                    # 只有操作员显式设了上限才走这里（缺省不限）。**不上抛**：把还没评的局记成本轮
+                    # `failed` 并照常收尾——评估腿抛出去等于整轮作废（连 summary 都没了）。
+                    with lock:
+                        failed.extend(
+                            (s, d, f"机器级停滞：轮内重投已达操作员上限（{retry_cap} 次）")
+                            for s, d in machine_stuck
+                        )
+                    log(
+                        f"WARN [eval-cloud] it{it} 机器级停滞：轮内已重投 {round_retries} 次仍有"
+                        f" {len(machine_stuck)} 局收不了尸（{ENV_EVAL_ROUND_RETRY_MAX}={retry_cap} 是"
+                        "操作员设的上限）——这些局记成本轮失败，训练继续"
+                    )
+                    break
+                round_retries += 1
+                # 只补**没评的**局：盘上账本（`eval_done_keys`）说了算，已落的行不重评
+                # （不许空转）；已在 `failed` 里的内容面失败也不重投（见上面的出路）。
+                done = eval_done_keys(eval_jsonl, key16, min_iter=1)
+                failed_keys = {(s, d) for s, d, _ in failed}
+                pending = sorted(p for p in pairs if p not in done and p not in failed_keys)
+                if not pending:
+                    break
+                log(
+                    f"WARN [eval-cloud] it{it} 整轮重投第 {round_retries} 次：本次尝试有"
+                    f" {len(machine_stuck)} 局收不了尸（机器级停滞，已结算 {len(seen)}/{len(pairs)} 局）"
+                    f"——只补这 {len(pending)} 局，先清掉它们的半截产出（旧写者可能还在）；"
+                    "不报失败、不睡、不占用外层重试预算、云机不停"
+                    + ("" if not retry_cap else f"（上限 {retry_cap} 次）")
+                )
+                for stage, seed in pending:
+                    rmtree_best_effort(
+                        Path(work_dir) / f"eval-{int(it)}-s{stage}-d{seed}", ignore_errors=True
+                    )
         finally:
             if pool is not None:
                 log(f"[eval-cloud] it{it} " + pool.summary())
@@ -539,6 +651,7 @@ def run_cloud_eval(
         )
         out["settled"] = len(seen)
         out["failed"] = len(failed)
+        out["roundRetries"] = round_retries
         for stage, seed, err in failed[:5]:
             log(f"[eval-cloud] it{it}: 局 ({stage},{seed}) 失败：{err}")
         if len(failed) > 5:
@@ -571,6 +684,9 @@ def run_cloud_eval(
     if out["ran"]:
         log(
             f"[eval-cloud] it{it} DONE：{out['settled']}/{out['games']} 局落账"
-            f"（失败 {out['failed']}，{out['sec']}s，wver={out['wver'][:12]}…）"
+            f"（失败 {out['failed']}，{out['sec']}s，wver={out['wver'][:12]}…"
+            # 正常轮恒空（机器卡过才留痕，与 rollout 腿的「整轮重投」同一个口径）
+            + (f"，整轮重投 {out['roundRetries']} 次" if out.get("roundRetries") else "")
+            + "）"
         )
     return out

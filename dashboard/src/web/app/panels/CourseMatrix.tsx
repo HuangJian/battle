@@ -68,6 +68,17 @@ export interface CourseMatrixProps {
   overview: ParallelOverviewView | null
   /** 训练侧事实（`null` = 只读视图不可用）。 */
   loopQueue: LoopQueueView | null
+  /** 控制台记录的每课 hub 派发**意图**（`stateView.courseModeIntents`；缺省 = 无意图）。
+   *
+   *  它不在这个面板的只读事实里：hub 的 mode 是 volatile，这份是运维的决定（切离线/
+   *  离线开课时写、起 hub 时回灌）。两者摆在一起才能看出「意图没落地」。 */
+  modeIntents?: Record<string, 'online' | 'offline'> | null
+  /** **逐课**生效 rollout 源（`stateView.courseRolloutSrc`；缺省 = 旧视图/不报）。
+   *
+   *  漂移徽标只比「意图 vs hub」两个源是不够的：用户报障的现场是**第三个**源没跟上——
+   *  hub 与意图都回到在线，而 `courses.<课>.rollout_src` 仍是 `run`（本课仍归云机）⇒ 本机在
+   *  下一轮仍然收工、不采样（训练停住而面板看着「在训」，2026-09-24 / plan §2.5）。 */
+  courseRolloutSrc?: Record<string, string> | null
   /** 当前查看课程（高亮）。 */
   course: string
   onSelectCourse: (course: string) => void
@@ -78,13 +89,22 @@ export interface CourseMatrixProps {
 export function CourseMatrix({
   overview,
   loopQueue,
+  modeIntents,
+  courseRolloutSrc,
   course,
   onSelectCourse,
   onAction,
 }: CourseMatrixProps) {
   // 「段内多久没动」要当下时刻：读表在这里发生，纯函数只收数字（可单测、可回放）。
   const nowSec = Math.floor(Date.now() / 1000)
-  const all = mergeCourseRows({ overview, queue: loopQueue, viewing: course, nowSec })
+  const all = mergeCourseRows({
+    overview,
+    queue: loopQueue,
+    modeIntents,
+    courseRolloutSrc,
+    viewing: course,
+    nowSec,
+  })
   // 只列在训课程（见文件头注）：未在训的行留计数 chip，不静默消失。
   const rows = all.filter(isTrainingRow)
   const hidden = all.filter((r) => !isTrainingRow(r))
@@ -324,12 +344,14 @@ function MatrixTr({
             <span
               className="tc-mx__opgroup"
               role="group"
-              aria-label={`hub：${r.ov?.offline ? '恢复在线' : '切离线'}`}
+              aria-label={`hub：${r.ov?.offline ? '切换成在线' : '切离线'}`}
             >
               <button
                 type="button"
                 className="tc-btn tc-btn--sm"
-                aria-label={`hub：${r.ov?.offline ? `恢复在线 ${r.course}` : `切离线 ${r.course}`}`}
+                aria-label={`hub：${
+                  r.ov?.offline ? `切换成在线 ${r.course}` : `切离线 ${r.course}`
+                }`}
                 title={
                   r.ov?.offline
                     ? '切回在线：hub 恢复为这门课实时派发 PPO（写 hub 课程表）'
@@ -342,8 +364,39 @@ function MatrixTr({
                   })
                 }
               >
-                {r.ov?.offline ? '恢复在线' : '切离线'}
+                {r.ov?.offline ? '切换成在线' : '切离线'}
               </button>
+              {/* 漂移徽标：控制台意图 ≠ hub 此刻的表（2026-09-23 实测的那种静默失配）。
+                  它只在**两个源都读到且不一致**时上屏——所以点一下这个按钮就再来一次，
+                  或者点「hubServer」回灌全部意图。 */}
+              {r.modeDrift && r.modeDrift.hubOffline !== (r.modeDrift.intent === 'offline') ? (
+                <span
+                  className="tc-mx__pausebadge tc-badge tc-badge--warn"
+                  title={
+                    `意图未生效：控制台记的是「${r.modeDrift.intent === 'offline' ? '离线' : '在线'}」，` +
+                    `而 hub 现在把 ${r.course} 当「${r.modeDrift.hubOffline ? '离线' : '在线'}」。` +
+                    '点这个按钮再推一次（幂等）；或点「hubServer」把全部意图回灌一次。' +
+                    '常见成因：hub 刚重启，回灌跑在它发现这门课之前（那时 POST 会 400）。'
+                  }
+                >
+                  意图未生效
+                </span>
+              ) : null}
+              {/* 第三个源（rl-config 配置）没跟上：hub 与意图都已回到在线，而
+                  `courses.<课>.rollout_src` 还是 `run`（本课仍归云机）⇒ 本机在下一轮仍然收工、
+                  不采样（2026-09-24 用户报障的那条链）。它只在逐课配置下发后才算得出来。 */}
+              {r.modeDrift?.configRun ? (
+                <span
+                  className="tc-mx__pausebadge tc-badge tc-badge--warn"
+                  title={
+                    `配置未跟上：${r.course} 的 rl-config 里仍是 rollout_src=run（本课仍归云机：` +
+                    '本机在下一轮收工、不采样）。点这个按钮一次即修正（本机配置与 hub 一起改）——' +
+                    '★ 轮边界生效：下一轮换挡（不再有「段等待」）。'
+                  }
+                >
+                  配置仍是离线（云机接手）
+                </span>
+              ) : null}
             </span>
           ) : null}
           {pause ? (
@@ -377,9 +430,12 @@ function MatrixTr({
               ) : null}
             </>
           ) : null}
-          {/* ★2026-09-22 改版：离线课的任务包能力（导出/下载/导入）下沉到行内操作列——
-              「任务包」独立面板已从首页下线（无操作通道时不渲染，与其余行内动作同判据）。 */}
-          {r.ov?.offline ? <BundleRowActions course={r.course} /> : null}
+          {/* ★2026-09-22 改版：离线课的任务包能力（导出/导入训练结果）下沉到行内操作列——
+              「任务包」独立面板已从首页下线（无操作通道时不渲染，与其余行内动作同判据）。
+              ★2026-09-23（用户指令）：判据从「hub 标离线」放宽到「hub 标离线 ∨ 意图离线」
+              （`r.bundleOps`）——离线课**要先有包才能上云跑**，而回灌失配时 hub 还当它在
+              线，旧判据恰好在最需要这个键的时候把它藏了。 */}
+          {r.bundleOps ? <BundleRowActions course={r.course} /> : null}
         </td>
       ) : null}
     </tr>

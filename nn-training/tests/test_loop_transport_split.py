@@ -65,7 +65,6 @@ MOVED_DEFS = (
     "_remote_forward_agg",
     "_rollout_source",
     "_run_segment_iters",
-    "_run_wait_sec",
     "_wire_from_result",
     "fatal_remote_http",
     "kickstart_coef",
@@ -76,12 +75,17 @@ MOVED_DEFS = (
     "resolve_transport",
 )
 
-#: 随迁的 4 个模块级常量。
+#: 随迁的 3 个模块级常量。
+#:
+#: ★ 2026-09-25（并入 `origin/goal-nn`）：`RUN_WAIT_DEFAULT_SEC` 与 `_run_wait_sec` 随
+#: **半离线整段（`kind=run`）退役**一起消失（`plan/online-offline-role-routing.plan.md` §7）
+#: ——它们只服务「发一份 kind=run 队列项、随后等 8h」那条腿。退役的正面守卫住
+#: `tests/test_offline_leg_retired.py`（断言这些名字在**全仓**都不存在），本表因此**只准**
+#: 登记还活着的名字。
 MOVED_CONSTS = (
     "FATAL_REMOTE_HTTP",
     "REMOTE_TRANSPORTS",
     "ROLLOUT_SRCS",
-    "RUN_WAIT_DEFAULT_SEC",
 )
 
 MOVED = MOVED_DEFS + MOVED_CONSTS
@@ -194,7 +198,8 @@ def test_moved_push_path_reads_the_loop_transport_seams(
 
 # ────────────────────────── S4 第二步：远端 PPO 腿（loop_remote） ──────────────────────────
 
-#: 搬到 `TrainingRemote` 的 13 个方法（远端 PPO 腿，862 行）。
+#: 搬到 `TrainingRemote` 的 12 个方法（远端 PPO 腿；2026-09-25 退役半离线整段
+#: `_remote_run_segment` 后由 13 减到 12 —— 正面对账住 `tests/test_offline_leg_retired.py`）。
 REMOTE_LEG = (
     "_abort_node_failure",
     "_handle_remote_failure",
@@ -205,7 +210,6 @@ REMOTE_LEG = (
     "_remote_ppo_publish",
     "_remote_ppo_step",
     "_remote_iter",
-    "_remote_run_segment",
     "_push_fetch",
     "_push_submit_first",
     "_push_submit_node",

@@ -208,6 +208,7 @@ def test_filler_uses_p2_and_only_download_payload(tmp_path: Path, monkeypatch) -
     t.start()
     deadline = time.time() + 5
     while len(calls) < 2 and time.time() < deadline:
+        # sleep-ok: 轮询步长（等的是「预取真发了 2 次」这个状态，5s 只当挂起兜底）
         time.sleep(0.01)
     stop.set()
     t.join(5)
@@ -247,6 +248,7 @@ def test_filler_swallows_preemption_and_errors(tmp_path: Path, monkeypatch) -> N
     t.start()
     deadline = time.time() + 5
     while boom["n"] < 4 and time.time() < deadline:
+        # sleep-ok: 轮询步长（等的是「填充器重试到第 4 次」这个状态，5s 只当挂起兜底）
         time.sleep(0.01)
     stop.set()
     t.join(5)

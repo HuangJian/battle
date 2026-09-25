@@ -31,6 +31,21 @@ from common.protocol import OFFLINE_ARTIFACT_PATH, OFFLINE_RESULT_PATH
 from remote.offline_deliver import OfflineDeliverer
 
 
+def _wait_until(pred, *, timeout: float = 10.0, step: float = 0.01) -> bool:
+    """等一个**事件/状态**成立（`timeout` 只是挂起兜底，不是同步手段，2026-09-24）。
+
+    背景：本文件原先用 `time.sleep(0.2)` 赌「后台线程已经撞上那个异常了」——把线程调度
+    延迟当失败（门禁满载时容易红），而且它并不能证明顺序（只是睡够了）。
+    """
+    end = time.time() + timeout
+    while time.time() < end:
+        if pred():
+            return True
+        # sleep-ok: 轮询步长（等的是谓词/状态，超时只当挂起兜底）
+        time.sleep(step)
+    return bool(pred())
+
+
 class _Recorder:
     """假 opener：记账全部请求，可注入延迟/故障，返回 200。"""
 
@@ -46,6 +61,7 @@ class _Recorder:
             self.fail_first -= 1
             raise OSError("boom（假传输异常）")
         if self.delay:
+            # sleep-ok: 夹具模拟的工作量：假 hub 的传输耗时
             time.sleep(self.delay)
         return 200, b"{}"
 
@@ -95,7 +111,9 @@ def test_background_errors_never_reach_the_trainer_and_thread_survives(tmp_path:
     d.start()
     try:
         d.submit_round(1)
-        time.sleep(0.2)
+        # 事件驱动（2026-09-24）：等**异常真的发生了**（它一定会写一行日志）再提第二轮——
+        # 原来 `time.sleep(0.2)` 只是赌线程已经跑到那里，既不等事件也可能白等。
+        assert _wait_until(lambda: bool(logs)), "后台那个异常没留下日志（该响亮不静默）"
         d.submit_round(2)  # 线程若已死，这一轮就再也推不上去
     finally:
         d.close(timeout=10.0)

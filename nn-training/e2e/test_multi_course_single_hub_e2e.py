@@ -50,10 +50,26 @@ from tests.subproc_util import spawn_bound_port
 #: hub 与 worker 共用的 Bearer（推模式下 worker 的 authKey 就是它）。
 TOKEN = "e2e-sekret"
 
-#: 假 PPO 的「训练结果」形状（`validate_result` 契约：agg 五键 + weights_json 非空）。
-_WEIGHTS_JSON = base64.b64encode(
-    b'{"format":"nn-weights-json","params":{"e2e":1}}'
-).decode("ascii")
+#: 两门课**刻意共用**的 runId（2026-09-24 job 身份事故的现场条件：单进程多课程下
+#: runId 是进程级共享的）。与「同 warm-start + 同 shard 集」一起，构成「四分量全同」。
+SHARED_RUN_ID = "e2e-shared-run"
+
+
+def _course_fp(course: str) -> str:
+    """课程身份（真链路上是课程 jsonc 的 sha256）——两门课必须不同，否则它们就是同一门课。"""
+    return hashlib.sha256(course.encode("utf-8")).hexdigest()
+
+
+def _weights_json_for(manifest: dict) -> str:
+    """假 PPO 的「训练结果」形状（`validate_result` 契约：agg 五键 + weights_json 非空）。
+
+    ★ 把本 job 的 `course_fp` **烙进权重**：两门课若拿到同一份结果（= 事故），落盘字节
+    就完全一样；分开之后各自的权重必须不同 —— 没有这一手，「串课」这条回归判不出来。
+    """
+    raw = json.dumps(
+        {"format": "nn-weights-json", "params": {"course_fp": manifest["course_fp"]}}
+    ).encode("utf-8")
+    return base64.b64encode(raw).decode("ascii")
 
 
 def _quiet(_msg: str) -> None:
@@ -99,6 +115,7 @@ def _wait_until(pred, *, timeout: float = 30.0, step: float = 0.1) -> bool:
     while time.time() < end:
         if pred():
             return True
+        # sleep-ok: 轮询步长（等的是谓词/状态，超时只当挂起兜底）
         time.sleep(step)
     return bool(pred())
 
@@ -132,7 +149,7 @@ class _LiveWorker:
                 "data_fp": man["data_fp"],
                 "init_weights_fp": man["init_weights_fp"],
                 "commit_echo": man["commit"],
-                "weights_json": _WEIGHTS_JSON,
+                "weights_json": _weights_json_for(man),
                 "agg": {"policy": 0.1, "value": 0.2, "entropy": 3.0, "kl": 0.01, "mean_ret": 0.5},
                 "wire": {"payload_bytes": len(item.get("payload_zip") or b"")},
             },
@@ -205,6 +222,7 @@ class _Hub:
             st, body = _http(self.base, "/admin/queue", timeout=2.0)
             if st == 200 and sorted(body.get("courses") or {}) == sorted(expect):
                 return
+            # sleep-ok: 轮询步长（等的是「hub 已就绪且课程表已登记」这个状态）
             time.sleep(0.1)
         raise AssertionError(
             f"hub-server 未就绪或课程表不对（rc={self.proc.poll()}）；输出：{self.output()}"
@@ -268,14 +286,19 @@ def _make_code_zip(tmp_path: Path, name: str) -> Path:
 
 
 def _publish(course: str, job_root: Path, jsonl: Path, traj_root: Path, code_zip: Path) -> dict:
-    """训练侧真发布（hubpush）：写 payload + manifest（`dispatch="push"`）+ 账本 job_pending。"""
+    """训练侧真发布（hubpush）：写 payload + manifest（`dispatch="push"`）+ 账本 job_pending。
+
+    ★ 两门课刻意共用 `runId` / `it` / `init_weights_fp`（同一份假 warm-start）/ `data_fp`
+    （同一份假 shard 集 = 空），**只有 `course_fp` 不同** —— 这正是 2026-09-24 事故的配置，
+    也是本夹具原来**没有**压到的那个角落（原来 run_id 带课程名 ⇒ id 天生不同）。
+    """
     wfile = traj_root / "init_weights.json"
     if not wfile.exists():
         wfile.write_text('{"format":"nn-weights-json","params":{}}', encoding="utf-8")
     man = publish_job(
         job_root=job_root,
         jsonl_path=jsonl,
-        run_id=f"e2e-{course}",
+        run_id=SHARED_RUN_ID,
         it=1,
         traj_dir=traj_root / course / "it1",
         shard_dirs=[],
@@ -284,7 +307,7 @@ def _publish(course: str, job_root: Path, jsonl: Path, traj_root: Path, code_zip
         code_zip_path=code_zip,
         course='// course jsonc\n{"reward": {"formula": "score"}}',
         course_name=course,
-        course_fp="f" * 64,
+        course_fp=_course_fp(course),
         init_weights_path=str(wfile),
         reward_formula="score",
         formula_hash="h" * 40,
@@ -342,7 +365,12 @@ def test_single_hub_dispatches_two_courses_to_one_worker(tmp_path: Path) -> None
         # 训练侧各自发布（同一 it、不同课程）——两门课并行
         mans = {c: _publish(c, dirs[c][0], dirs[c][1], traj, code_zip) for c in (c_a, c_b)}
         jids = {c: mans[c]["job_id"] for c in (c_a, c_b)}
-        assert jids[c_a] != jids[c_b], "不同课程的同 it 活必须是两个 job"
+        # 先钉住前提：**幂等键的四分量确实全同**（runId/it/init_weights_fp/data_fp）——
+        # 否则这条用例就退回「夹具天生不同 id」那种假绿（正是改造前的状态）。
+        for k in ("runId", "it", "init_weights_fp", "data_fp"):
+            assert mans[c_a][k] == mans[c_b][k], f"夹具前提被破坏：{k} 两课不同 ⇒ 没压到碰撞"
+        assert mans[c_a]["course_fp"] != mans[c_b]["course_fp"], "两门课的课程身份必须不同"
+        assert jids[c_a] != jids[c_b], "不同课程的同四分量活必须是两个 job"
         for c in (c_a, c_b):
             assert mans[c]["dispatch"] == "push" and mans[c]["course_name"] == c
 
@@ -354,10 +382,21 @@ def test_single_hub_dispatches_two_courses_to_one_worker(tmp_path: Path) -> None
         for c in (c_a, c_b):
             r = results[c]
             assert r["job_id"] == jids[c]
-            assert r["data_fp"] == mans[c]["data_fp"], f"{c} 拿到了别人的结果"
+            assert r["data_fp"] == mans[c]["data_fp"]
             assert r["agg"]["mean_ret"] == 0.5
 
-        # 结果落**本课**目录（串课 = 权重写进另一门课）
+        # ★ 污染的回归判据（事故：两个 trainer 读到**同一份** result ⇒ 权重互串）：
+        # 两课拿到的权重必须各自带自己的课程身份，且**两两不同**。
+        # 注意 `data_fp` 在这一对里本来就相同（夹具刻意同 shard 集）⇒ 它**不能**再当判据，
+        # 真正能判「串没串」的只有这份烙了 course_fp 的权重体。
+        assert results[c_a]["weights_json"] != results[c_b]["weights_json"], (
+            "两门课拿到了同一份结果——串课又回来了"
+        )
+        for c in (c_a, c_b):
+            body = json.loads(base64.b64decode(results[c]["weights_json"]).decode("utf-8"))
+            assert body["params"]["course_fp"] == mans[c]["course_fp"], f"{c} 的权重是别人的"
+
+        # 结果落**本课**目录（串课 = 权重写进另一门课）；两课的 job 目录集合**不相交**
         for c, other in ((c_a, c_b), (c_b, c_a)):
             jd = dirs[c][0] / jids[c]
             assert (jd / "result" / "result.json").exists(), f"{c} 的结果没落位"
@@ -367,6 +406,18 @@ def test_single_hub_dispatches_two_courses_to_one_worker(tmp_path: Path) -> None
                 f"{c} 的账本混进了别的课的 job：{rows}"
             )
             assert not [x for x in rows if x.get("event") == "job_completed"]
+
+        def _job_dirs(c: str) -> set[str]:
+            return {
+                p.name
+                for p in dirs[c][0].iterdir()
+                if p.is_dir() and not p.name.startswith(".")
+            }
+
+        assert not (_job_dirs(c_a) & _job_dirs(c_b)), (
+            f"两课的 job 目录集合相交了：{_job_dirs(c_a) & _job_dirs(c_b)}"
+        )
+        assert hub.queue()["ambiguous_jids"] == {}, "不该出现 job 身份歧义"
 
         # 训练侧验收落位后写 job_completed（只动本课账本——两课共用一份 hub 也不能串）
         mark_job_completed(dirs[c_a][1], jids[c_a])
@@ -419,8 +470,13 @@ def test_offline_course_is_parked_and_resumes_on_going_online(tmp_path: Path) ->
 
         m_off = _publish(c_off, dirs[c_off][0], dirs[c_off][1], traj, code_zip)
         jid_off = m_off["job_id"]
-        # 离线课的活躺在队首、没人碰：等足若干部拍（0.05s/拍）仍是 pending
-        time.sleep(1.5)
+        # 离线课的活躺在队首、没人碰：等**派发器真的转过 10 拍**（`ticks` 计数 = 事件）
+        # 再断言它仍 pending —— 原来 `sleep(1.5)` 是拿时长猜「拍数应该够了」
+        # （--push-poll-sec 0.05 ⇒ 1.5s≈30 拍），满载时会睡多/睡少（2026-09-24）。
+        t0 = hub.push_state()["ticks"]
+        assert _wait_until(lambda: hub.push_state()["ticks"] >= t0 + 10, timeout=30.0), (
+            "派发器 30s 内没转过 10 拍（线程死了？）——负向断言失去前提"
+        )
         q = hub.queue()
         assert q["courses"][c_off]["pending_n"] == 1, "离线课的 job 不该消失"
         assert q["courses"][c_off]["inflight"] == [], "离线课不该被派发"

@@ -133,11 +133,15 @@ DRIFT = {
 }
 
 #: 每个混入里**允许**内联 `_auth_ok` 的次数（只有「拿不到 job」的端点才该自己鉴权）。
-ALLOWED_INLINE_AUTH = {"schedule": 2, "result": 0, "blob": 1, "offline": 5}
+#: 离线面并入 origin 的取包链 / 任务清单 / 租约三端后从 5 涨到 7：那两处新端点（`/offline/tasks`、
+#: `/offline/lease` 及其 heartbeat / release）与旧的取包链一样都不挂 job，只能自己鉴权。
+ALLOWED_INLINE_AUTH = {"schedule": 2, "result": 0, "blob": 1, "offline": 7}
 
 ALLOWED_IMPORTS = {
     "remote.hub.blob": {"common.protocol"},
-    "remote.hub.offline": {"common.protocol"},
+    # 离线段面并入 origin 的新语义后要多两处：`hub.store`（构造/注解 `_JobStore`，并要它那里的
+    # 租约/归属状态）与 `hub.task_pack`（任务包新鲜度门 / 缺包自愈门的纯判据）。
+    "remote.hub.offline": {"common.protocol", "remote.hub.store", "remote.hub.task_pack"},
     "remote.hub.result": {"common.protocol", "remote.push_dispatch"},
     "remote.hub.schedule": {"common.protocol"},
 }

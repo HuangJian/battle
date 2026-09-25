@@ -29,7 +29,7 @@
  *   · 旧训练侧 + 新 agent：落旧桶，被本课查找的第二步命中（行为与改造前一致）。
  */
 
-/** 桶键分隔符：NUL（课程名里不可能出现——`remote.protocol.parse_course_arg` 拒绝空白）。 */
+/** 桶键分隔符：NUL（课程名里不可能出现——`common.protocol.parse_course_arg` 拒绝空白）。 */
 const SEP = '\u0000'
 
 /** 桶键 = `course\0kind`（course 空串 = 旧单课程桶）。 */

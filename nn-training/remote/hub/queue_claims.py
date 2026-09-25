@@ -36,9 +36,9 @@ from common.protocol import (
     CLAIM_MODE_EXCLUSIVE,
     CLAIM_MODES,
     CLAIM_TTL_SEC,
-    COURSE_MODE_OFFLINE,
     PEEK_MAX,
     PRIORITY_NONE,
+    ROLE_ONLINE,
     find_payload,
     may_avoid_stale_holder,
     rotation_order,
@@ -52,6 +52,7 @@ class QueueClaimsMixin(QueuePeer):
     """域混入：见模块头部。"""
 
     # ---- 由组合类 `__init__` / 兄弟簇提供（混入只见 `self`；声明一律是裸注解）----
+    _ambiguous: dict[str, list[str]]
     _cursor: str | None
     _lock: Lock
     _order: list[str]
@@ -62,7 +63,7 @@ class QueueClaimsMixin(QueuePeer):
 
     # ---- 派发（跨课程轮转 + 超时换 worker） ----
     def claim_next(
-        self, worker_id: str = "", offline_ok: bool = False
+        self, worker_id: str = "", role: str = ROLE_ONLINE
     ) -> tuple[str, str, str] | None:
         """取下一份该派发的 job → (course, job_id, lease_token)；无 → None。
 
@@ -73,9 +74,12 @@ class QueueClaimsMixin(QueuePeer):
         **过期死掉的**且持有人就是本次请求者时，本次跳过它（`avoid_expired_holder`）——
         但机群只剩一个活跃 worker 时不避让（否则它自己超时过的 job 谁都领不到 = 停摆）。
 
-        离线课（2026-09-19 用户口径「也支持带特别标识的云端 worker 在线领取」）：
-        只有 `offline_ok=True`（worker 自报能跑完整段）的请求才能领——它不实时派发，
-        但也**不是**谁都领不到的坟墓。带标 worker 仍可领在线课（课程与 worker 正交）。
+        **两道闸（2026-09-25，本节头的 plan）**，判据都在 `_JobStore.role_blocked`：
+          * 归属闸（job 级）：派发只看 **job 自己的 `role`**，不再看课程当前 mode
+            （mode 易变：切一次模式，历史 job 的归属就跳一次 —— 事故本体）；
+          * 停摆闸（课程级）：离线课不向在线盘派发（活留着等切回在线）。
+        旧口径「带标 worker 仍可领在线课」**已取消**：一个盘一种任务（用户 2026-09-25
+        裁决）——这条是**行为变更**，见 `DECISIONS.md §2026-09-25-goalnn-role-routing`。
         """
         # 派发前扫一次（有最小间隔闸）：新课程/新 job 目录出现后，**下一次轮询**就能被领到，
         # 不必等后台节拍——否则新开的课在最坏情况下要等一个扫描周期才有人来领活。
@@ -84,15 +88,20 @@ class QueueClaimsMixin(QueuePeer):
         for course in rotation_order(self._order, self._cursor):
             if not self._serves_course(course):
                 continue
-            offline = self.mode_of(course) == COURSE_MODE_OFFLINE
-            if offline and not offline_ok:
-                continue
             st = self._stores[course]
             for jid in st.claimable_job_ids():
+                if st.role_blocked(jid, role):
+                    # 归属/停摆不符：**跳过这一份**，不是跳过整门课——同门课同时躺着两类
+                    # 归属的活是「模式刚热切过」的常态（正是事故现场的形状）。
+                    # 「跳过后一直无人领」的收尾是撤单腿的事
+                    # （`plan/switch-mode-drops-jobs.plan.md`），不是这一层的职责。
+                    continue
                 # 只给「允不允许避让」的闸；身份比对在 store 里（它才知道租约回收后的
                 # stale 记录，在这里判会踩时序——见 `may_avoid_stale_holder` docstring）。
                 avoid = may_avoid_stale_holder(worker_id, active_workers)
-                tok = st.claim(jid, worker_id=worker_id, avoid_stale_holder=avoid)
+                tok = st.claim(
+                    jid, worker_id=worker_id, avoid_stale_holder=avoid, role=role
+                )
                 if tok is None:
                     self._announce_freeze(course, jid)
                     continue  # 活租约在持 / 本次该避让 / 并发领取竞负 / 已熔断冻结
@@ -126,6 +135,16 @@ class QueueClaimsMixin(QueuePeer):
         st = self._stores.get(course)
         return st.claimable_job_ids() if st else []
 
+    def job_role(self, job_id: str) -> str:
+        """job 归属角色（经 store 的缓存读）；不归本 hub 管 ⇒ online（保守：不锁死别人）。"""
+        st = self._store_of(job_id)
+        return st.job_role(job_id) if st is not None else ROLE_ONLINE
+
+    def role_blocked(self, job_id: str, role: str) -> str:
+        """归属/停摆闸的**只读**探针（派发面用）；不归本 hub 管 ⇒ `""`（不锁死别人）。"""
+        st = self._store_of(job_id)
+        return st.role_blocked(job_id, role) if st is not None else ""
+
     def claim(
         self,
         job_id: str,
@@ -134,8 +153,13 @@ class QueueClaimsMixin(QueuePeer):
         avoid_stale_holder: bool = False,
         mode: str | None = None,
         expected_epoch: int | None = None,
+        role: str = ROLE_ONLINE,
     ) -> str | None:
-        """（单份领取；多课程的挑选入口是 `claim_next`——离线课的能力闸在那边。）"""
+        """（单份领取；多课程的挑选入口是 `claim_next`——归属/停摆闸在 store 里，两处共用。）
+
+        这条路的调用者包括 **push 派发**（`push_dispatch._dispatch`）——它**不是**由
+        `claim_job` 转过来的，所以闸必须住在 `_claim_locked` 里而不是各调用点。
+        """
         st = self._store_of(job_id)
         if st is None:
             return None
@@ -146,6 +170,7 @@ class QueueClaimsMixin(QueuePeer):
             avoid_stale_holder=avoid_stale_holder,
             mode=mode,
             expected_epoch=expected_epoch,
+            role=role,
         )
 
     # ---- 新调度面（2026-09-22，plan/transfer-scheduling）：peek / claim / priority ----
@@ -153,13 +178,14 @@ class QueueClaimsMixin(QueuePeer):
         self,
         *,
         worker_id: str = "",
-        offline_ok: bool = False,
+        role: str = ROLE_ONLINE,
         n: int = PEEK_MAX,
     ) -> list[dict]:
         """候选 job（**不认领**：无租约、无副作用、不动游标）——§2.6 的软持有候选来源。
 
-        与旧 `claim_next` 同三道闸：`_serves_course`（开课标记）、离线课的能力闸
-        （`offline_ok` = worker 自报能跑完整段）、冻结/已落盘的排除（在 `claimable_job_ids` 里）。
+        与 `claim_next` 同三道闸：`_serves_course`（开课标记）、**归属/停摆**
+        （`role` = 请求方自报的归属，判据与闸同源：`_JobStore.role_blocked`）、
+        冻结/已落盘的排除（在 `claimable_job_ids` 里）。
 
         跨课程公平性：顺序取 `rotation_order(self._order, self._cursor)`，**只读不写**
         （R2-C2）——游标由真正 claim 成功的那一方推进（`claim_job`）。若在这里推进，
@@ -179,10 +205,8 @@ class QueueClaimsMixin(QueuePeer):
                 break
             if not self._serves_course(course):
                 continue
-            if self.mode_of(course) == COURSE_MODE_OFFLINE and not offline_ok:
-                continue
             st = self._stores[course]
-            ids = st.claimable_job_ids()
+            ids = [j for j in st.claimable_job_ids() if not st.role_blocked(j, role)]
             if not ids:
                 continue
             jid = ids[0]
@@ -230,16 +254,29 @@ class QueueClaimsMixin(QueuePeer):
         mode: str = CLAIM_MODE_EXCLUSIVE,
         worker_id: str = "",
         expected_epoch: int | None = None,
+        role: str = ROLE_ONLINE,
     ) -> ClaimOutcome:
         """新 claim 面（`POST /jobs/{id}/claim`）的唯一实现入口。
 
         与旧 `claim_next` 的差别：挑活已在客户端（peek + priority）；这里只负责「这一份
         归不归你」+ 游标推进 + 熔断告警——**不再**在这里扫整张表。
         避让的「允不允许」仍在调用方算（`may_avoid_stale_holder`，R2-2 的避让链）。
+
+        `role`（2026-09-25）：归属/停摆不符 ⇒ `ClaimOutcome(False, "", "role"|"parked", …)`
+        ——**确定性拒**（不是 409 busy：重试一百次也不会变），面向「这个盘本来就不该跑它」。
         """
-        st = self._store_of(job_id)
+        st = self._store_of(job_id)  # 内部走 course_of：歧义会记进 self._ambiguous
         if st is None:
-            return ClaimOutcome(False, "", "unknown", "unknown")
+            holders = self._ambiguous.get(job_id)
+            # 「不归本 hub 管」与「归属有歧义」在**调度面**都是拒答（都不许跨课程兜底），
+            # 但对排障是两件事 ⇒ reason 要分开（2026-09-24 事故：现场只看到一句
+            # 「hub 异常」，真因是身份歧义导致的跨课程路由）。
+            return ClaimOutcome(
+                False,
+                "",
+                "unknown",
+                f"归属歧义: {'/'.join(holders)}" if holders else "unknown",
+            )
         if mode not in CLAIM_MODES:
             return ClaimOutcome(False, "", "bad_mode", f"mode 必须是 {list(CLAIM_MODES)}")
         avoid = may_avoid_stale_holder(worker_id, self.active_worker_count())
@@ -249,6 +286,7 @@ class QueueClaimsMixin(QueuePeer):
             worker_id=worker_id,
             avoid_stale_holder=avoid,
             expected_epoch=expected_epoch,
+            role=role,
         )
         if out.ok:
             course = self.course_of(job_id) or ""

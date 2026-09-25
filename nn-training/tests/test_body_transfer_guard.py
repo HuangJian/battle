@@ -169,12 +169,16 @@ def _payload_server(tmp_path: Path, payload: bytes):
     return srv, port, jid
 
 
-def test_hub_big_send_is_bounded_and_loud(tmp_path, monkeypatch, capfd) -> None:
+def test_hub_big_send_is_bounded_and_loud(tmp_path, monkeypatch) -> None:
     """对端半开（读端不读）时，hub 必须在发送超时内**断开并打印**已发字节数。
 
     修复前：`wfile.write()` 永久阻塞 ⇒ handler 线程永久卡在写里、日志一个字没有
     （= 云机侧「claim 后零日志」的服务器半边）。
 
+    事件驱动（2026-09-24 修 CPU 满载下的门禁 flake）：原来「故意不读 + `sleep(2.5)`"
+    然后去读 `capfd`——那个 2.5s 是押在「发送超时 0.5s 一定先到」上的，且它既不是同步
+    手段也白花 2.5s 墙钟。现在抳住**那行日志本身**（print 探针置位事件）：得到的就是
+    「hub 已经在超时内放弃并响亮打印」这个契约事件；`wait` 的 10s 只是挂起兜底。
     ⚠ patch 点是**实现所在的模块**（S4 第十六刀）：`SEND_TIMEOUT_SEC` 的唯一读者是
     `hub/http_face.py::HubHandler._bytes`，它在函数体里读的是 **http_face 的模块全局**。
     而 `remote.hub_server.SEND_TIMEOUT_SEC` 只是同一个对象的 re-export ⇒ 对它 patch 是
@@ -184,6 +188,18 @@ def test_hub_big_send_is_bounded_and_loud(tmp_path, monkeypatch, capfd) -> None:
     monkeypatch.setattr("remote.hub.http_face.SEND_TIMEOUT_SEC", 0.5)
     payload = b"P" * (4 * 1024 * 1024)
     srv, port, jid = _payload_server(tmp_path, payload)
+    lines: list[str] = []
+    stalled = threading.Event()
+    real_print = print
+
+    def _spy(*a, **kw):
+        msg = " ".join(str(x) for x in a)
+        if "发送**停滞**" in msg:
+            lines.append(msg)
+            stalled.set()
+        real_print(*a, **kw)
+
+    monkeypatch.setattr("builtins.print", _spy)
     try:
         s = socket.create_connection(("127.0.0.1", port), timeout=5)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)  # 小读缓冲：写端很快填满
@@ -193,15 +209,10 @@ def test_hub_big_send_is_bounded_and_loud(tmp_path, monkeypatch, capfd) -> None:
                 f"Host: 127.0.0.1\r\n{AUTH_HEADER}: Bearer sekret\r\n\r\n"
             ).encode()
         )
-        # 故意不读：等发送超时（0.5s）触发。留 3s 富余。
-        time.sleep(2.5)
-        logged = capfd.readouterr()
-        stall_line = [
-            line
-            for line in (logged.out + logged.err).splitlines()
-            if "发送**停滞**" in line and f"/jobs/{jid}/payload" in line
-        ]
-        assert stall_line, f"hub 未打印发送停滞行；实际输出：{logged.out!r}{logged.err!r}"
+        # 故意不读（否则写端不会被填满、停滞永远不会发生），等**停滞行**出现。
+        assert stalled.wait(10.0), f"hub 未在超时内断掉并打印停滞行；至今输出：{lines!r}"
+        stall_line = [ln for ln in lines if f"/jobs/{jid}/payload" in ln]
+        assert stall_line, f"停滞行没带路径（无法归因到 /jobs/{jid}/payload）：{lines!r}"
         assert "已发" in stall_line[0]
         # 连接已断开：继续读到 EOF，且总量 < 整份 payload（截断 = 真的没写完）
         s.shutdown(socket.SHUT_WR)

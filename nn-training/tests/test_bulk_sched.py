@@ -54,36 +54,81 @@ def _sched(**kw) -> BulkScheduler:
 # --------------------------------------------------------------- 1. 单通道
 
 
+class _CountingEvent(threading.Event):
+    """`threading.Event` + 「当前有几个线程卡在 `wait` 上」+ 等它到齐（**事件驱动**）。
+
+    为什么要它：`slot()` 内部的等待者本身不发出任何信号（`queue_waits` 要等它**拿到**槽位
+    才记账），所以「其余 7 个已经排上队」只能从等待原语上观测。每次进入/退出 `notify_all`，
+    `wait_until` 因此是条件驱动的：不轮询、不等固定时长。
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._cond = threading.Condition()
+        self._waiting = 0
+
+    def wait(self, timeout: float | None = None) -> bool:
+        with self._cond:
+            self._waiting += 1
+            self._cond.notify_all()
+        try:
+            return super().wait(timeout)
+        finally:
+            with self._cond:
+                self._waiting -= 1
+                self._cond.notify_all()
+
+    def wait_until(self, waiting: int, timeout: float) -> bool:
+        """等到「同时在等的线程数 ≥ `waiting`」；`timeout` 只是挂起兜底（不是同步手段）。"""
+        with self._cond:
+            return self._cond.wait_for(lambda: self._waiting >= waiting, timeout)
+
+
 def test_single_channel_under_concurrency():
-    """N 个并发申请（P1/P2 混合）⇒ 临界区里**最多一个**持有者，且都跑完。"""
+    """N 个并发申请（P1/P2 混合）⇒ 恰好一个持有者，其余 N-1 个**必然**排队。
+
+    事件驱动（2026-09-24 修 CPU 满载下的门禁 flake）：原来的「睡 10ms 模拟传输」隐含
+    「8 个线程会同时到达」—— 而线程启动本身就会错开，机器一满载，后面的还没起来前面的
+    已经跑完，`queue_waits` 就凑不够（实测 4 < 6）；真正的不变量（`peak == 1`）其实一直成立。
+    现在：首个持有者等**计数事件**报出「其余 7 个都已卡在等待上」才放行 ⇒ 排队是构造性的，
+    与调度无关，而且可以钉**精确值**（`== 7` 而不是 `>= 6`）。
+    """
     s = _sched(wait_step_sec=0.001)
+    n = 8
     inside = 0
     peak = 0
     lock = threading.Lock()
     done = threading.Event()
-    left = 8
+    left = n
+    waiting = _CountingEvent()
+    s._released = waiting  # 只换等待原语（仍是 Event），语义不变
 
     def worker(i: int) -> None:
         nonlocal inside, peak, left
         prio = BULK_P1_CRITICAL if i % 2 == 0 else BULK_P2_PREFETCH
-        with s.slot(prio, label=f"t{i}"):
+        with s.slot(prio, label=f"t{i}") as token:
             with lock:
                 inside += 1
                 peak = max(peak, inside)
-            time.sleep(0.01)  # 模拟一段传输
+            # **只有首个持有者**等其余申请者排上队 —— 它持着槽位，其余 7 个必然只能排队。
+            # 只能用轮次判别：后续持有者时最多只有 6 个在等（它自己就是第 7 个还没进队列的
+            # 人），再等「7 个」就会死等到超时。
+            if token == 1:
+                assert waiting.wait_until(n - 1, timeout=10.0), "其余申请者没能在 10s 内排上队"
             with lock:
                 inside -= 1
                 left -= 1
                 if left == 0:
                     done.set()
 
-    for i in range(8):
+    for i in range(n):
         threading.Thread(target=worker, args=(i,), daemon=True).start()
     assert done.wait(10), "并发申请没有全部完成（单通道死锁？）"
     assert peak == 1, f"同一时刻有 {peak} 条 bulk 在途（§2.2 要求恰好 1）"
     st = s.stats()
     assert st["inflight_bulk"] == 0
-    assert st["queue_waits"] >= 6, "后到者必须排队（否则等于没有单通道）"
+    # 恰好 N-1 个申请者排过队（构造出来的，不是碰运气碰上的）
+    assert st["queue_waits"] == n - 1, f"排队记账不对：{st['queue_waits']} != {n - 1}"
 
 
 def test_p1_waits_for_p1_then_runs():
@@ -92,16 +137,20 @@ def test_p1_waits_for_p1_then_runs():
     order: list[str] = []
     release = threading.Event()
 
+    entered = threading.Event()
+    waiting = _CountingEvent()
+    s._released = waiting  # 只换等待原语（仍是 Event）
+
     def first() -> None:
         with s.slot(BULK_P1_CRITICAL, label="first"):
             order.append("first-enter")
+            entered.set()
             release.wait(5)
             order.append("first-exit")
 
     t = threading.Thread(target=first, daemon=True)
     t.start()
-    while "first-enter" not in order:
-        time.sleep(0.005)
+    assert entered.wait(5), "先到者没进通道"
 
     def second() -> None:
         with s.slot(BULK_P1_CRITICAL, label="second"):
@@ -109,7 +158,10 @@ def test_p1_waits_for_p1_then_runs():
 
     t2 = threading.Thread(target=second, daemon=True)
     t2.start()
-    time.sleep(0.1)
+    # 事件驱动：等到「第二个**已排上队**」再断言 —— 槽位在 first 手里，它不可能已进通道。
+    # （原来靠 `time.sleep(0.1)`：满载时线程还没起来就断言，等于在赌调度 —— 而且它还会
+    #  变成假绿：第二个根本没申请时 `order == ["first-enter"]` 也成立。）
+    assert waiting.wait_until(1, timeout=10.0), "第二个申请者没能在 10s 内排上队"
     assert order == ["first-enter"], "P1 被抢断了：第二条在第一条没传完时就进了通道"
     release.set()
     t.join(5)
@@ -123,6 +175,8 @@ def test_p1_waits_for_p1_then_runs():
 def test_p2_preempted_by_p1():
     """P2 预取持有中来了 P1 ⇒ P2 在分片间隙（`pace`）看到并被中断。"""
     s = _sched()
+    waiting = _CountingEvent()
+    s._released = waiting  # 同上：用来观测「P1 已经排上队」
     got: list[BaseException] = []
     holding = threading.Event()
     go = threading.Event()
@@ -142,11 +196,15 @@ def test_p2_preempted_by_p1():
 
     def critical() -> None:
         with s.slot(BULK_P1_CRITICAL, label="critical"):
+            # sleep-ok: 夹具模拟的工作量：P1 持有者在「传」一小段（不是同步手段）
             time.sleep(0.05)
 
     t2 = threading.Thread(target=critical, daemon=True)
     t2.start()
-    time.sleep(0.05)  # 让 P1 排上队（抢占标记已写）
+    # 事件驱动：P1 一旦**排上队**，抢占标记（`_preempt_at`）就已写好 —— `slot()` 是先写
+    # 标记再进等待循环的。原来 `time.sleep(0.05)` 赌「P1 已经跑到了 `slot()`」：满载时
+    # P1 还没起来就放行 `go`，`pace` 看不到标记 ⇒ P2 不被中断 ⇒ 用例红。
+    assert waiting.wait_until(1, timeout=10.0), "P1 没能在 10s 内排上队（抢占标记未写）"
     go.set()
     t.join(5)
     t2.join(5)
@@ -198,14 +256,19 @@ def test_yield_stops_at_budget_even_if_control_stays():
     s = _sched(yield_budget_sec=budget, yield_step_sec=step)
     with s.slot(BULK_P1_CRITICAL, label="result") as tok:
         stop = threading.Event()
+        entered = threading.Event()
 
         def p0() -> None:
             with s.control(label="/jobs/x/status"):
+                entered.set()
                 stop.wait(2)  # 控制面「一直在途」
 
         t = threading.Thread(target=p0, daemon=True)
         t.start()
-        time.sleep(0.05)
+        # 事件驱动：`control()` 先计数再 yield ⇒「entered 已置位」⇔ 控制面确实在途。
+        # 原来 `time.sleep(0.05)` 赌线程已经跑起来：满载时会停到 `control_active()` 还是
+        # False ⇒ `pause_if_needed` 返回 0 ⇒ `yield_count == 0` ⇒ 用例红。
+        assert entered.wait(5), "控制面没能进入在途状态"
         t0 = time.time()
         spent = s.pause_if_needed(tok)
         elapsed = time.time() - t0
@@ -224,6 +287,42 @@ def test_no_yield_when_no_control():
         spent = s.pause_if_needed(tok)
     assert spent == 0.0
     assert time.time() - t0 < 0.05
+
+
+def test_yield_log_is_one_line_per_transfer():
+    """让路账**一次传输一行**（2026-09-24 现场：一次 payload 下载让路 6 次 = 原来刷 6 行）。
+
+    判据：① 同一 slot 内多次让路 ⇒ **只出一条**「让路合计」行，秒数与次数都是合计；
+    ② 没有让路的传输 ⇒ 一行都不出；③ 下一次传输另起一行（账不跨传输累计）。
+    """
+    budget, step = 0.06, 0.01
+    lines: list[str] = []
+    s = _sched(yield_budget_sec=budget, yield_step_sec=step, log=lines.append)
+    stop = threading.Event()
+    entered = threading.Event()
+
+    def p0() -> None:
+        with s.control(label="/jobs/x/status"):
+            entered.set()
+            stop.wait(5)
+
+    t = threading.Thread(target=p0, daemon=True)
+    t.start()
+    # 事件驱动：`control()` 先计数再 yield ⇒「entered 已置位」⇔ 控制面确实在途。
+    assert entered.wait(5), "控制面没能进入在途状态"
+    with s.slot(BULK_P1_CRITICAL, label="payload") as tok:
+        for _ in range(3):
+            s.pause_if_needed(tok)
+    assert len(lines) == 1, f"一次传输只该有一行让路账，实得 {lines}"
+    assert lines[0].startswith("bulk payload: 让路合计 "), lines[0]
+    assert "3 次" in lines[0] and "单次预算" in lines[0], lines[0]
+    stop.set()
+    t.join(5)
+
+    lines.clear()
+    with s.slot(BULK_P1_CRITICAL, label="result") as tok2:
+        s.pause_if_needed(tok2)  # 控制面已走 ⇒ 没让路
+    assert lines == [], f"没让路就不该有账：{lines}"
 
 
 # --------------------------------------------------------------- 4. 路径分流

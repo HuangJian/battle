@@ -6,7 +6,7 @@
   2) dt≠1 时变步长确实产生差异（不恒等于定长）；
   3) masked_logsoftmax：无效位压 -inf、有效位 = log_softmax；
   4) cat_logprob / cat_entropy 基本性质；
-  5) chunk_episodes：按 mb 切块、末块 ragged、键保持；
+  5) chunk_episodes：按 mb 切块（2026-09-23 起全部恰为 mb，尾部 n%mb 丢弃）、键保持；
   6) checkpoint RNG 往返：_pack/_unpack 后 np.random 状态精确重建；
   7) discover_shards / load_shard_fields：marker 过滤 + 零拷贝 astype 字段表。
 
@@ -116,21 +116,38 @@ def test_cat_logprob_entropy() -> None:
 
 
 def test_chunk_episodes() -> None:
+    """mb 对齐（2026-09-23，见 docs/nn.progress.md §140）。
+
+    形状必须**逐块恰为 mb**：ragged 末块每 epoch 只用一次，隔几十个满块步就被 XLA
+    程序缓存挤出 ⇒ 每 epoch 重编 ~12.5s（真机 it98：83.8s 里 50s 是它）。
+    丢弃的是重排序列的尾部 ⇒ 均匀随机子集，无偏。
+    两个不裁剪的分支有意保留：`shuffle=False`（对照路径逐字节不变）与单池
+    （`len(episodes)<=1` 不重排 ⇒ 裁尾等于裁掉"局末"= 有偏，宁可不裁）。
+    """
     # 显式标注：np.zeros 不同 dtype 的 ndarray join 会退化成 object，导致 ["obs"] 不可索引。
     eps: list[dict[str, np.ndarray]] = [
         {"obs": np.zeros((10, 3), dtype=np.uint8), "adv": np.zeros(10)},
         {"obs": np.zeros((5, 3), dtype=np.uint8), "adv": np.zeros(5)},
     ]
+    np.random.seed(0)
     chunks = ppo_common.chunk_episodes(eps, 4)
     sizes = [c["obs"].shape[0] for c in chunks]
-    check(sizes == [4, 4, 2, 4, 1], f"chunk 尺寸 [4,4,2,4,1] (got {sizes})")
-    check(all(set(c.keys()) == {"obs", "adv"} for c in chunks), "chunk 保留全部键")
-    # 跨 episode 不混：每个 chunk 内部数据来自单一 episode
-    check(
-        chunks[0]["obs"][0, 0] == eps[0]["obs"][0, 0]
-        and chunks[3]["obs"][0, 0] == eps[1]["obs"][0, 0],
-        "chunk 不跨 episode 混数据",
-    )
+    assert sizes == [4, 4, 4], f"每块恰为 mb=4（15 步裁到 12）(got {sizes})"
+    assert sum(sizes) == 12 == (15 // 4) * 4, "尾部 15%4=3 步丢弃"
+    assert all(set(c.keys()) == {"obs", "adv"} for c in chunks), "chunk 保留全部键"
+    # 对照路径：shuffle=False 逐字节保留旧做法（末块 ragged、不裁）。
+    seq = ppo_common.chunk_episodes(eps, 4, shuffle=False)
+    assert [c["obs"].shape[0] for c in seq] == [4, 4, 2, 4, 1], "shuffle=False 不改"
+    assert (
+        seq[0]["obs"][0, 0] == eps[0]["obs"][0, 0]
+        and seq[3]["obs"][0, 0] == eps[1]["obs"][0, 0]
+    ), "shuffle=False 不跨 episode 混数据"
+    # 单池：不重排、不裁（裁尾有偏）。
+    one = ppo_common.chunk_episodes([eps[0]], 4)
+    assert [c["obs"].shape[0] for c in one] == [4, 4, 2], "单池保持旧形状"
+    # 池子 < mb：保留一块（裁成 0 块 = 静默不训练）。
+    tiny = ppo_common.chunk_episodes([eps[0], eps[1]], 99)
+    assert [c["obs"].shape[0] for c in tiny] == [15], "池子 < mb 时不裁"
 
 
 def test_np_state_roundtrip() -> None:

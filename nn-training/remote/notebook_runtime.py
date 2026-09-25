@@ -246,12 +246,14 @@ def run_pull_worker(cfg: dict[str, Any], log) -> int:
         "--poll-sec", str(cfg["poll_interval_sec"]),
         "--max-idle-sec", str(max_idle),
     ]
-    # 离线训练模式（2026-09-19）：`CFG["offline_worker"]` 打开 ⇒ 带能力头自报「我能自己
-    # 跑完整段」——hub 只把离线课的整段 job 放给带标的 worker。缺省关（不带标的行为逐字
-    # 不变）；带标仍可领在线课（能力声明不是课程绑定）。
+    # 离线训练模式（2026-09-19）：`CFG["offline_worker"]` 打开 ⇒ 自报**归属**「本会话属于
+    # 离线盘」——hub 只把归属为 offline 的整段 job 放给这台机器，**且**它不再兼领在线盘的活
+    # （2026-09-25 语义从「能力」升为「归属」：有能力的盘接走不属于它的 job 就是那次事故；
+    # 旧口径「带标仍可领在线课」已作废）。CLI 名与头的字面量不变（混合部署兼容）；
+    # 缺省关 ⇒ 在线盘，行为逐字不变。
     if cfg.get("offline_worker"):
         restart_argv.append("--offline")
-        log("已自报离线能力（可领离线课的整段 job）")
+        log("已自报归属=离线盘（只领整段 job，不再兼领在线活）")
     log(f"worker 启动（max_idle={max_idle}s, poll={cfg['poll_interval_sec']}s, device={cfg['device_resolved']}）")
     try:
         return supervise_worker(restart_argv)

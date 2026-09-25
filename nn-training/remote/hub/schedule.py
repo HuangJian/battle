@@ -36,12 +36,12 @@ from typing import Any
 from common.protocol import (
     CLAIM_MODE_BACKUP,
     CLAIM_MODE_EXCLUSIVE,
-    COURSE_MODE_OFFLINE,
-    OFFLINE_CAP_HEADER,
     PEEK_MAX,
     PRIORITY_BODY_MAX,
     PRIORITY_LOW,
-    has_offline_capability,
+    ROLE_HEADER,
+    ROLE_OFFLINE,
+    role_from_header,
 )
 
 
@@ -64,6 +64,7 @@ class ScheduleRoutes:
     _json: Any
     _lease_token: Any
     _log_claim: Any
+    _log_reject: Any
     _query_int: Any
     _read_json_body: Any
     _worker_id: Any
@@ -80,10 +81,11 @@ class ScheduleRoutes:
         if not self._auth_ok():
             return
         n = max(1, min(int(self._query_int("n", 3)), PEEK_MAX))
-        offline_ok = has_offline_capability(self.headers.get(OFFLINE_CAP_HEADER, ""))
+        # 请求方归属（缺头/旧 worker ⇒ online；见 `role_from_header`）。
+        role = role_from_header(self.headers.get(ROLE_HEADER, ""))
         jobs = self.hub.peek_jobs(
             worker_id=self._worker_id(),
-            offline_ok=offline_ok,
+            role=role,
             n=n,
         )
         self._json({"jobs": jobs, "halt": self.hub.all_halted()})
@@ -119,6 +121,7 @@ class ScheduleRoutes:
         `{status:"demoted", priority:"low"}`（**不是错误**，worker 按 low 处理）；
         真的轮不到（冻结/避让/未知 job）⇒ 409。
         """
+        # 与其余 job 作用域端点同一条形状（鉴权 + 解析 + 404 都在 `_job_body` 里）
         got = self._job_body(PRIORITY_BODY_MAX)
         if got is None:
             return
@@ -131,19 +134,22 @@ class ScheduleRoutes:
             self._json({"error": "expected_epoch 非法"}, 400)
             return
         worker_id = str(body.get("worker_id") or self._worker_id())
+        role = role_from_header(self.headers.get(ROLE_HEADER, ""))
         out = self.hub.claim_job(
-            jid, mode=mode, worker_id=worker_id, expected_epoch=want_epoch
+            jid, mode=mode, worker_id=worker_id, expected_epoch=want_epoch, role=role
         )
         course = self.hub.course_of(jid) or ""
         if out.ok:
             self._log_claim(jid, course, worker_id, mode, out.token)
-            if self.hub.mode_of(course) == COURSE_MODE_OFFLINE and mode != CLAIM_MODE_BACKUP:
-                # 发光的一行：离线课（整段）落到带标 worker 手上——这是「离线课真的在跑」
-                # 在 hub 侧的**唯一**痕迹（它不实时派发，也不会被 push 推）。
+            # 发光的一行：整段（离线盘的活）落到**离线盘**请求者手上——这是「离线活真的在跑」
+            # 在 hub 侧的**唯一**痕迹（它不实时派发，也不会被 push 推）。
+            # ★ 判据用 **job 自己的 role**，不是课程当前 mode（后者会在热切后撒谎，
+            #   而这一行存在的意义就是事后能对上账）。
+            if self.hub.job_role(jid) == ROLE_OFFLINE and mode != CLAIM_MODE_BACKUP:
                 print(
-                    f"[{time.strftime('%H:%M:%S')}] [hub-server] 离线课整段交领："
+                    f"[{time.strftime('%H:%M:%S')}] [hub-server] 整段交领："
                     f"course={course or '-'} job={jid} worker={worker_id or '?'}"
-                    f"（带 `{OFFLINE_CAP_HEADER}` 能力头）",
+                    f"（请求方自称 `{ROLE_HEADER}={role}`）",
                     flush=True,
                 )
             # 领取标记（原轮询面也做这件事）：console 据此区分「排队等取」与「已在跑」。
@@ -172,6 +178,16 @@ class ScheduleRoutes:
             # 「有人比我快」的正常信号：降为低档备份（§2.3 ④），**不得**报错。
             self._json({"job_id": jid, "status": "demoted", "priority": PRIORITY_LOW})
             return
+        # 拒绝留痕（2026-09-24 事故）：worker 侧只会看到「HTTP 409」，原因得 hub 自己说。
+        # demoted 不算拒绝（上面已 return），故这里只覆盖真拒：held/frozen/unknown/…
+        self._log_reject(
+            "claim",
+            jid,
+            str(out.status),
+            course=course,
+            worker=worker_id,
+            reason=str(out.reason),
+        )
         self._json({"error": f"claim 被拒: {out.status} ({out.reason})"}, 409)
 
 

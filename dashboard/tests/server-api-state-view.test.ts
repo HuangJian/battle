@@ -35,6 +35,28 @@ describe('console/api.buildStateView', () => {
     expect(s.courses).toBeInstanceOf(Array)
   })
 
+  it('★2026-09-24 courseRolloutSrc：**逐课**生效 rollout 源（课程矩阵要按行判「配置没跟上」）', async () => {
+    // 为什么必须逐课：`modes.rolloutSrc` 只有**查看课程**一个（开课弹窗用），而那张表是逐行
+    // 全课表——非当前课程的行没有这一格，就判不出「hub 与意图都回到在线、配置还是 run」。
+    const before = readConfigText()
+    try {
+      const cfg = JSON.parse(before) as Record<string, unknown>
+      writeFileSync(
+        scratchConfig,
+        JSON.stringify({ ...cfg, courses: { 'p4-fast': { rollout_src: 'run' } } }, null, 2),
+        'utf-8',
+      )
+      const s = await api.buildStateView()
+      expect(s.courseRolloutSrc?.['p4-fast']).toBe('run')
+      // 没有课程级覆盖的课回落到全局/缺省（local）—— 不编一个假的「离线」
+      for (const c of s.courses.filter((x) => x !== 'p4-fast')) {
+        expect(s.courseRolloutSrc?.[c]).toBe('local')
+      }
+    } finally {
+      writeFileSync(scratchConfig, before, 'utf-8')
+    }
+  })
+
   it('课程发现含 curricula/*.jsonc（即使 tmp 无日志）', () => {
     // max 用足量窗口（500）：课程目录随阶梯（+20）与经典（+35）持续增长，
     // 固定小窗口会把任何固定课程名挤出断言范围（p4-fast 曾在 12/50 窗口两次被挤出）。

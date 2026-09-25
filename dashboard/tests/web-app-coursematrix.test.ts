@@ -117,6 +117,10 @@ async function render(
   props: {
     overview?: ParallelOverviewView | null
     loopQueue?: LoopQueueView | null
+    /** 控制台意图（`stateView.courseModeIntents`）——缺省 = 旧视图/无意图。 */
+    modeIntents?: Record<string, 'online' | 'offline'> | null
+    /** 逐课生效 rollout 源（`stateView.courseRolloutSrc`）——缺省 = 旧视图/不报配置侧。 */
+    courseRolloutSrc?: Record<string, string> | null
     course?: string
     onAction?: (act: string, body: Record<string, unknown>) => void
   } = {},
@@ -126,6 +130,8 @@ async function render(
     h(CourseMatrix, {
       overview: props.overview === undefined ? defaultOverview() : props.overview,
       loopQueue: props.loopQueue === undefined ? queueView([lqRaw()], ['c4']) : props.loopQueue,
+      modeIntents: props.modeIntents,
+      courseRolloutSrc: props.courseRolloutSrc,
       course: props.course ?? 'c4',
       onSelectCourse: () => {},
       onAction: props.onAction,
@@ -418,7 +424,7 @@ describe('操作列：两个开关并列且归属分明（§7 O4）', () => {
     // 默认夹具里 hubSeen **且在训**的课：c4 / c5 两门 → 两个 hub 开关
     // （未在训的 stalled 不上屏 ⇒ 它那个开关也就没有地方可以画）
     expect((html.match(/tc-btn tc-btn--sm" aria-label="hub：/g) ?? []).length).toBe(2)
-    expect(html).toContain('>恢复在线<') // c5 已离线
+    expect(html).toContain('>切换成在线<') // c5 已离线（文案不与「从暂停恢复」撞车）
     expect(acts).toEqual([]) // SSR 不模拟点击
   })
 
@@ -481,6 +487,119 @@ describe('操作列：两个开关并列且归属分明（§7 O4）', () => {
     expect(html).toContain('bc_epoch')
     // 页脚点名在等回传的那门课（BC 的 phase 就是 bc）
     expect(html).toContain('正在等 bc@2')
+  })
+})
+
+// ────────────────────────── 行内任务包操作（2026-09-23 用户指令） ──────────────────────────
+
+describe('任务包行内操作：「导出」一个键即取回 + 导入改真按键', () => {
+  // 用户 2026-09-23 口径：「歧义太大！去掉「下载」链接，点击导出按键就是下载已经生成的任务包；
+  // 导入也要改成按键形式，文本设为「导入训练结果」」。
+  it('只有一个「导出任务包」键：没有「下载」链接、也没有指向 /api/taskBundle 的 <a>', async () => {
+    const html = await render({ onAction: () => {} })
+    expect(html).toContain('导出任务包')
+    expect(html).not.toContain('>下载<')
+    expect(html).not.toContain('/api/taskBundle?')
+    // 导出键必须是 <button>（旧形状是 <label> 包隐藏 input：看着像键、语义不是键）
+    expect(html).toContain('aria-label="导出任务包 c5"')
+    expect(html).toMatch(/<button[^>]*aria-label="导出任务包 c5"/)
+  })
+
+  it('导入是**真按键**，文案「导入训练结果」（文件 input 隐藏且不是可见控件）', async () => {
+    const html = await render({ onAction: () => {} })
+    // 注：`[\s\S]*?` 而不是 `[^>]*` —— title 里含字面 `>`（`deliver-&lt;课>.zip`）。
+    expect(html).toMatch(
+      /<button[\s\S]*?aria-label="导入训练结果 c5"[\s\S]*?>导入训练结果<\/button>/,
+    )
+    expect(html).toMatch(/<input[^>]*type="file"[^>]*hidden/)
+    // 旧形状（`<label class="tc-btn">导入<input …></label>`）不得保留
+    expect(html).not.toMatch(/<label[^>]*tc-btn/)
+    expect(html).not.toContain('导入产物')
+  })
+
+  it('SSR（effect 不跑）显「未导出」：不编大小、也不假装有包', async () => {
+    const html = await render({ onAction: () => {} })
+    expect(html).toContain('未导出')
+    expect(html).not.toContain('tc-mx__bundleinfo')
+  })
+
+  it('任务包操作只给**离线课**（纯在线课不挂这两个键）', async () => {
+    const html = await render({
+      overview: ovView([ovRow({ course: 'c4', training: true, hubSeen: true })]),
+      onAction: () => {},
+    })
+    expect(html).not.toContain('导出任务包')
+    expect(html).not.toContain('导入训练结果')
+    // 明确「在线」意图也仍不给（只放宽到「离线意图」，不是「所有课都挂」）
+    const online = await render({
+      overview: ovView([ovRow({ course: 'c4', training: true, hubSeen: true })]),
+      modeIntents: { c4: 'online' },
+      onAction: () => {},
+    })
+    expect(online).not.toContain('导出任务包')
+  })
+
+  it('★2026-09-23：意图离线但 hub 还当它在线（失配）时**也给**任务包键', async () => {
+    // 用户指令：离线课**要先有包才能上云跑**，而回灌失配（hub 仍 online）正是最需要这个键
+    // 的时刻——旧判据（只看 hub 事实）恰好把它藏了。与此同时行上会同时出现「意图未生效」
+    // 徽标（两个事实都要说）。
+    const html = await render({
+      overview: ovView([ovRow({ course: 'c4', training: true, hubSeen: true, offline: false })]),
+      modeIntents: { c4: 'offline' },
+      onAction: () => {},
+    })
+    expect(html).toContain('aria-label="导出任务包 c4"')
+    expect(html).toContain('aria-label="导入训练结果 c4"')
+    expect(html).toContain('意图未生效')
+  })
+})
+
+// ────────────────────────── 意图 vs hub 事实的漂移徽标（2026-09-23） ──────────────────────────
+
+describe('「意图未生效」徽标：两个源不一致时上屏', () => {
+  it('意图离线 ∧ hub 在线 ⇒ 徽标 + 悬停写清两侧取值', async () => {
+    const html = await render({ modeIntents: { c4: 'offline' }, onAction: () => {} })
+    expect(html).toContain('意图未生效')
+    expect(html).toContain('控制台记的是「离线」')
+    expect(html).toContain('而 hub 现在把 c4 当「在线」')
+  })
+
+  it('一致 / 没有意图 ⇒ 不上屏（不把「不知道」画成「没问题」）', async () => {
+    const agrees = await render({ modeIntents: { c4: 'online' }, onAction: () => {} })
+    expect(agrees).not.toContain('意图未生效')
+    const none = await render({ onAction: () => {} })
+    expect(none).not.toContain('意图未生效')
+  })
+
+  it('★2026-09-24 第三个源：意图/hub 都在线 ∧ 配置仍是 run ⇒ 「配置仍是离线（云机接手）」', async () => {
+    // 用户报障的现场：切回在线后本机仍不采样（配置里 `rollout_src=run` 还在）——
+    // hub 与意图都回到了在线，**配置那一格没跟上**。它只在逐课配置下发后才算得出来。
+    const html = await render({
+      modeIntents: { c4: 'online' },
+      courseRolloutSrc: { c4: 'run' },
+      onAction: () => {},
+    })
+    expect(html).toContain('配置仍是离线（云机接手）')
+    expect(html).toContain('rollout_src=run')
+    // 两个源一致 ⇒ 不报「意图未生效」（两个徽标各说各的，不混成一个）
+    expect(html).not.toContain('意图未生效')
+  })
+
+  it('配置跟上了（local/node）或旧视图没下发 ⇒ 不上屏', async () => {
+    const follows = await render({
+      modeIntents: { c4: 'online' },
+      courseRolloutSrc: { c4: 'local' },
+      onAction: () => {},
+    })
+    expect(follows).not.toContain('配置仍是离线（云机接手）')
+    const legacy = await render({ modeIntents: { c4: 'online' }, onAction: () => {} })
+    expect(legacy).not.toContain('配置仍是离线（云机接手）')
+  })
+
+  it('hub 开关的文案：「切换成在线」（不叫「恢复在线」——那是暂停那个开关的词）', async () => {
+    const html = await render({ onAction: () => {} })
+    expect(html).toContain('>切换成在线<')
+    expect(html).toContain('aria-label="hub：切换成在线 c5"')
   })
 })
 

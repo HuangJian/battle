@@ -37,9 +37,11 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from common.protocol import (
+    BLOB_INIT,
     WIRE_JOB_MAGIC,
     CodeChangedError,
     ProtocolError,
+    is_content_sha,
     normalize_manifest,
     unpack_job_v2,
 )
@@ -54,6 +56,36 @@ from remote.worker import _wire_start as worker_wire_start
 from remote.worker import run_job
 
 AUTH_HEADER = "Authorization"
+
+
+def missing_blobs(manifest: dict, sent: dict[str, bytes], cached) -> list[str]:
+    """本 job 还缺哪些**内容寻址 blob**（`sent` = body 里带的；`cached(sha)` = 节点盘上有无）。
+
+    纯函数，`_submit` 与单测共用**同一份**判据——blob 名的形状规则只此一处。
+
+    `init`（opt-blob-diet，2026-09-24，plan/opt-blob-diet.plan.md §3.2 / 评审 F2）要先过
+    两道闸，否则会把健康的 job 卡成永久 428：
+      ① `manifest.slim` —— init 是 slim 契约的一部分（发布端
+         `use_init_blob = slim AND 有权重字节`）。非 slim 臂（A/B 回退）的权重就在
+         payload 里（worker 的 W0），这里索取一个发布端根本没写的 blob = 死循环；
+      ② `is_content_sha` —— BC job / 全新 run 首轮的 `init_weights_fp == "bc"` 不是
+         内容寻址的 sha，拿它查节点缓存恒 miss。
+    """
+    need: list[str] = []
+    for name, sha in (("opt", manifest.get("opt_sha")), ("ref", manifest.get("ref_sha"))):
+        s = str(sha or "")
+        if s and name not in sent and not cached(s):
+            need.append(name)
+    init_sha = str(manifest.get("init_weights_fp") or "")
+    if (
+        bool(manifest.get("slim"))
+        and is_content_sha(init_sha)
+        and BLOB_INIT not in sent
+        and not cached(init_sha)
+    ):
+        need.append(BLOB_INIT)
+    return need
+
 
 #: submit/kick 起后台线程的回调（state 构造后由 make 侧注入）。
 Starter = Callable[[str, dict], None]
@@ -399,11 +431,7 @@ def make_worker_server(
                     for k, v in blobs_raw.items():
                         if isinstance(v, str) and v:
                             blobs[str(k)] = base64.b64decode(v)
-                need_blobs = []
-                for name, sha in (("opt", manifest.get("opt_sha")), ("ref", manifest.get("ref_sha"))):
-                    s = str(sha or "")
-                    if s and name not in blobs and not state.blob_cached(s):
-                        need_blobs.append(name)
+                need_blobs = missing_blobs(manifest, blobs, state.blob_cached)
                 if need_blobs:
                     self._json({"error": "blob-missing", "need": need_blobs}, 428)
                     return

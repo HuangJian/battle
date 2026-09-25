@@ -401,6 +401,27 @@ def platform_net_env() -> Iterator[None]:
                 os.environ[k] = v
 
 
+# ── bun：本模块**不管**（2026-09-25 重裁，曾短暂管过）┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+#
+# 曾有的 `BUN_INSTALL_URL` / `bun_path()` / `ensure_bun()` 已**退役**（删掉，不再有消费者）。
+#
+# 为什么：bun 只有一个用途 —— 在节点上跑 rollout 的 TS（`remote/iter_rollout.resolve_bun`）。
+# 而本模块服务的那两块盘（`battle.tailscale.ipynb` 走 tailnet、`battle.cloudflared.ipynb` 走
+# cloudflared 公网隧道）**不跑 rollout** ⇒ 不需要 bun，也不该为它付「公网 curl + 必须在改代理之前装」
+# 的代价（那条顺序硬约束就是为了让一件本不需要的事能成）。
+#
+# 谁才需要 bun：**自己跑 rollout 的那些链** —— `battle.offline.ipynb`（Kaggle/TPU，连不了 tailnet，
+# 只能走 cloudflared 隧道进 hub）；它的 cell 里装着 bun，与在线 worker 的引导链无关
+# （`tests/test_tailscale_boot_bun.py` 钉住这三条边界）。
+# ⚠ 采样节点 `rollout.cloudflared.ipynb` 也在旧口径里被点名过，但**那份 notebook 从来没入库**
+# （本仓、`origin/goal-nn`、合并基三者都没有）⇒ 任何断言/指路都只能对着一个不存在的路径，
+# 已在并入时按实况收口（见 `DECISIONS.md` 的合并条目）。
+#
+# 后果（若有课程显式选 `rollout_src=node`「整轮上云」）：在线 worker 盘会被零下载拒单
+# （`resolve_bun` 响亮报 `REJECTED: 节点上找不到 'bun'`）—— 这是**正确**的：要跑 rollout 就该用
+# 带 bun 的盘。
+
+
 def ensure(cfg: dict, log) -> dict:
     """装 → 起 daemon → 登录 → 取 IP。返回 {ip, mode, sock, proxy}。
 
@@ -410,6 +431,8 @@ def ensure(cfg: dict, log) -> dict:
     ★ 调用方必须在**进本函数之前**把凭据全部读完：本函数会改写进程的代理环境，
       之后平台 Secrets（公网 HTTPS）就走不通了。
     """
+    # 本模块**不装 bun**（2026-09-25 重裁）：这两块盘不跑 rollout ⇒ 与 bun 无关，
+    # 也就不必再守「bun 必须在改代理之前装」那条顺序。理由与谁才需要 bun 见本文件上方注记。
     if not shutil.which("tailscale"):
         install(
             log,

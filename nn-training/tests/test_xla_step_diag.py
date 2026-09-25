@@ -10,8 +10,11 @@
   ① **解析正确**：`xla_metrics_snapshot()` 从 XLA 的文本报告里取到正确的量与单位
      （`07s703ms868.692us` → 秒）。测试用的是**真机取回的原文片段**（见 REPORT），
      不是编造的格式——格式漂了，日志就会静默变成 0，那比没有诊断更坏。
-  ② **接线在**：engine 的 update 循环里那行 diag 日志与 `PPO_XLA_DIAG` 开关必须存在
+  ② **接线在**：engine 的 update 循环里的诊断采样与 `PPO_XLA_DIAG` 开关必须存在
      （接线掉了，上面所有解析都是空转）。
+  ③ **打了几行**（2026-09-24 日志节食）：逐窗口**只累计、不打行**，收尾打**一行**
+     （原来每 16 步一行 ≈ 23 行/轮，云端几小时把控制台日志面板拖死）。判决要素在
+     `TestEngineWiring::test_diag_is_one_line_at_the_end` 里逐项钉住。
 """
 
 from __future__ import annotations
@@ -272,12 +275,27 @@ class TestEngineWiring:
     def setup_method(self) -> None:
         self.src = (ROOT / "ppo" / "engine.py").read_text(encoding="utf-8")
 
-    def test_engine_logs_per_chunk_diag_and_has_the_switch(self) -> None:
+    def test_engine_samples_diag_and_has_the_switch(self) -> None:
         assert "PPO_XLA_DIAG" in self.src
-        assert "[ppo] diag s=" in self.src
-        assert "图签名=" in self.src, "判决需要「形状/分支有没有变」这一栏"
         assert "xla_metrics_delta(diag_prev, _snap)" in self.src
         assert "PPO_XLA_DIAG_FIRST" in self.src and "PPO_XLA_DIAG_EVERY" in self.src
+
+    def test_diag_is_one_line_at_the_end(self) -> None:
+        """日志节食的钉子：**不许**回到逐窗口的行，且判决要素一个都不能丢。
+
+        为什么是源码断言：这是「行数」性质（跑一次算不出来），而它正是当初把浏览器卡死的
+        那个变量；哪天有人为了调试把它改回逐窗口打印，这条必须先红。
+        """
+        assert "[ppo] diag s=" not in self.src, "逐窗口一行 = 日志节食被回退（~23 行/轮）"
+        for keep in (
+            "diag_worst",  # 最慢窗口（判决的第一现场）
+            "diag_compile_dom",  # 编译主导窗口计数（说人话：墙钟买的是编译）
+            "diag_reset",  # XLA metrics 被重置的窗口计数（假读数护栏）
+            "图签名",  # 形状/分支有没有变
+            "累计编译",  # 编译税的总额
+            "到 epoch",  # 逐 epoch 的汇总（系列不能丢）
+        ):
+            assert keep in self.src, keep
 
     def test_diag_is_taken_after_mark_step(self) -> None:
         """读数必须在 mark_step 之后（编译/执行已被 drain），否则那些量恒为 0。"""

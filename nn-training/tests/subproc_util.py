@@ -215,5 +215,6 @@ def _await_listening(
             for ln in lines
         ):
             return True
+        # sleep-ok: 轮询步长（等的是「子进程自报端口」谓词，超时只当挂起兜底）
         time.sleep(0.05)
     return True

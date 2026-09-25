@@ -390,6 +390,7 @@ def test_the_moved_seam_resolves_in_the_round_module(monkeypatch, tmp_path: Path
     t.start()
     deadline = time.time() + 5
     while not hit and time.time() < deadline:
+        # sleep-ok: 轮询步长（等的是「填充器调用过了」这个谓词，超时只当挂起兜底）
         time.sleep(0.01)
     stop.set()
     t.join(5)

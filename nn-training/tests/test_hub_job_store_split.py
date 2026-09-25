@@ -7,7 +7,9 @@
 
 ## 这一刀切了什么
 
-`remote/hub_server.py` 3017 → 2072 行：`_JobStore`（1002 行 / 49 方法）按**域**拆成六个混入，
+`remote/hub_server.py` 3017 → 2072 行：`_JobStore`（1002 行 / 49 方法）按**域**拆成六个混入
+（2026-09-25 并入 `origin/goal-nn` 后 `store_offline` 多了两条课程侧落位方法 ⇒ 域方法 49 个、
+含组合类的两个共 51 个），
 组合类只留 `__init__` / `note_worker` 与**进程级状态**：
 
 ```
@@ -141,6 +143,11 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...], tuple[str, ...]]] = {
             "_reclaims",
             "_frozen",
             "_backup_authorized",
+            # 归属路由（2026-09-25 并入 origin）：`_roles` = job → online/offline；
+            # `parked` = 该课程是否停摆（发布端下闸后不再派活）；`_role_lock` 各一把。
+            "_roles",
+            "_role_lock",
+            "parked",
         ),
     ),
     "store_results": (
@@ -155,6 +162,9 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...], tuple[str, ...]]] = {
             "offline_run_dir",
             "store_offline_artifact",
             "_land_round_metrics",
+            # 回传轮的课程侧落位（2026-09-25 并入 origin）：镜像 + 归档根 + 活动权重指针。
+            "_course_backup_target",
+            "_land_offline_round_extras",
             "store_offline_result",
         ),
         (),
@@ -189,6 +199,18 @@ ALLOWED_IMPORTS = {
     "remote.hub.store_leases": {"common.protocol"},
     "remote.hub.store_results": {"common.protocol"},
     "remote.hub.store_offline": {"common.fs", "common.protocol", "remote.artifacts"},
+}
+
+#: ★ 点名豁免：允许碰哪些 `rl` 模块（缺省空 = 一个都不许）。
+#:
+#: 唯一一条是 `store_offline`：回传轮的**课程侧落位**（镜像 + 权重归档 + 活动权重指针）
+#: 要读课程 `.jsonc`（`rl.jsonc.strip_comments`）、要复用既有归档口径
+#: （`rl.archive.backup_weights`）。两者都是**纯逻辑**（stdlib-only、不达 `remote` ⇒
+#: `test_layering.RL_ORCHESTRATION` 里没有它们，不构成环），而且都是**延迟** import
+#: ——与 `queue_resume.merge_eval_rows → rl.eval_local` 同一形状（那一条住
+#: `test_hub_queue_split.py`，因为它只涉及队列侧一个混入）。多一个名字就是多一条未论证的边。
+ALLOWED_RL: dict[str, set[str]] = {
+    "remote.hub.store_offline": {"rl.archive", "rl.jsonc"},
 }
 
 
@@ -269,9 +291,11 @@ def test_every_method_lives_in_exactly_one_mixin() -> None:
         for m in defined & set(MIXIN_METHODS):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(MIXIN_METHODS) == 47, len(MIXIN_METHODS)
-    assert len(seen) == 47, len(seen)
-    assert len(MIXIN_METHODS) + len(OWN_METHODS) == 49, "旧 _JobStore 共 49 个方法"
+    assert len(MIXIN_METHODS) == 49, len(MIXIN_METHODS)
+    assert len(seen) == 49, len(seen)
+    # 49 = 拆分前 `_JobStore` 的 49 个方法；2026-09-25 并入 origin 的课程侧落位后又多了 2 条
+    # （`_course_backup_target` / `_land_offline_round_extras`）⇒ 现在 49 + 2。
+    assert len(MIXIN_METHODS) + len(OWN_METHODS) == 49 + 2, "_JobStore 的方法总数变了"
 
 
 def test_the_mixins_do_not_share_any_defined_name() -> None:
@@ -451,7 +475,9 @@ def test_process_state_names_are_declared_only_by_the_composed_class() -> None:
 def test_the_mixins_only_import_downward() -> None:
     """六个混入（+ `hub.auth` / `hub.store`）的仓内依赖是登记过的那些（多一个就说明搬漏/搬多了）。"""
     for mod, allowed in ALLOWED_IMPORTS.items():
-        dag.assert_remote_module(mod, allowed_project_imports=allowed)
+        dag.assert_remote_module(
+            mod, allowed_project_imports=allowed, allowed_rl=ALLOWED_RL.get(mod, set())
+        )
 
 
 def test_the_composed_class_moved_below_the_mixins() -> None:
@@ -512,7 +538,8 @@ def test_the_offline_writer_moved_with_its_only_caller() -> None:
             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_write_bytes"
         )
 
-    assert _calls(HUB_DIR / "store_offline.py") == 5, "离线簇的 _write_bytes 调用点变了"
+    # 9 = 原有 5 处（自回传产物）+ 并入 origin 的 4 处（交付镜像 it-NNN 三件 + 活动权重指针）
+    assert _calls(HUB_DIR / "store_offline.py") == 9, "离线簇的 _write_bytes 调用点变了"
     for other in DOMAINS:
         if other != "store_offline":
             assert _calls(HUB_DIR / f"{other}.py") == 0, f"{other} 里冒出了 _write_bytes 调用"

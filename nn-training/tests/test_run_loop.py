@@ -1,4 +1,4 @@
-"""tests/test_run_loop.py —— 半离线自主段（`remote/run_loop.py` + `remote/artifacts.py`）。
+"""tests/test_run_loop.py —— 离线自主段（`remote/run_loop.py` + `remote/artifacts.py`）。
 
 用户需求（2026-09-17）：云机从 hub 领到任务（课程 + 初始权重 + 代码）后，**即使 hub 一直
 失联**也要能全程自主跑完，并以 Kaggle/Colab 官方方式（工作目录里的产物 zip）交付逐轮权重
@@ -289,7 +289,9 @@ def test_run_standalone_loads_course_snapshot_into_iter_spec(
     此前它从不传 course ⇒ `iter_spec` 里 `stage_json_of(course, stage)` 拿不到自定义关
     （ladder 2000+）⇒ `retarget_argv` 把计划里的 `--stage-json` 整对删掉 ⇒ 导出器解析
     stage 失败 → **空局**（0 samples、rc=0、零 shard）→ 整段 rollout 被误报成环境/写盘
-    问题（半离线 worker 侧已传 course：worker.py run_plan_job(course=course)，只有这条漏）。
+    问题（`run_plan_job` 侧已传 course，只有这条漏）。注：队列那条腿 2026-09-25 退役
+    （plan/online-offline-role-routing §7）——`run_plan_job` 今天没有生产调用者，这条回归
+    守的是「从首轮结果续下去」这个入口本身（任务包/产物目录续跑共用同一段驱动）。
     """
     plan, m, job_dir, first = _prepare(tmp_path, iters=3, start_it=1)
     art = tmp_path / "art"
@@ -478,6 +480,52 @@ def test_standalone_resume_continues_without_duplicate_rows(tmp_path: Path) -> N
     assert res["it_end"] == plan["end_it"]
     # 续跑后状态仍在 complete（不是"新段"）
     assert json.loads((art / ArtifactStore.STATE_NAME).read_text())["state"] == "complete"
+
+
+def test_main_accepts_artifacts_only_and_leaves_the_local_plan_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """本机优先的真入口：`--artifacts` **单用**是合法的，且不 import 包 ⇒ 本机 plan/manifest 不动。
+
+    离线 notebook 的本机优先路径就是这条 argv（不传 `--bundle`）——它以前不存在
+    （`--bundle` 是必经之路），所以这条断言是「本机优先」的地基（plan §4.1 第 3 条）。
+    """
+    _plan, _m, _fake, _result, art = _run(tmp_path)  # 一份完整产物
+    plan_before = (art / ArtifactStore.PLAN_NAME).read_bytes()
+    man_before = (art / ArtifactStore.MANIFEST_NAME).read_bytes()
+    seen: dict[str, Any] = {}
+
+    def spy(*_a: Any, **kw: Any) -> dict[str, Any]:
+        seen.update(kw)
+        return {"it_end": 3, "run_state": "noop", "artifacts": {"dir": str(art), "zip": "x"}}
+
+    monkeypatch.setattr(run_loop_mod, "run_standalone", spy)
+    assert run_loop_mod.main(["--artifacts", str(art)]) == 0
+    assert Path(str(seen["artifacts_dir"])) == art
+    assert seen["plan"] and seen["plan"]["end_it"] > 0, "计划/清单必须从产物目录读"
+    assert (art / ArtifactStore.PLAN_NAME).read_bytes() == plan_before
+    assert (art / ArtifactStore.MANIFEST_NAME).read_bytes() == man_before
+
+
+def test_drive_says_the_local_segment_is_done_not_just_noop(tmp_path: Path) -> None:
+    """G3：`todo` 空**且** `start_from >= end_it` ⇒ 文案要点明「本机段落已完成」与下一步。
+
+    两种「空 todo」原来共用一句「无事可做」：重跑 cell 的人看不出下一步是「清目录/等新包」
+    还是「真的什么都不用做」（plan/offline-rerun-local-first §4.2）。
+    """
+    _plan, _m, _fake, _result, art = _run(tmp_path)  # 整段已跑完
+    logs: list[str] = []
+    run_standalone(
+        artifacts_dir=art,
+        max_iters=0,
+        code_cache_dir=_warm_code_cache(tmp_path),
+        run_job_fn=_FakeRunJob(tmp_path),
+        log=logs.append,
+    )
+    hit = [m for m in logs if "段落已完成" in m]
+    assert hit, logs
+    assert "清空" in hit[0] and "force_pack" in hit[0], hit
+    assert not any("无事可做" in m for m in logs), "已完成 ≠ 无事可做（两种空必须分开说）"
 
 
 def test_reclaim_skips_iterations_already_in_artifacts(tmp_path: Path) -> None:

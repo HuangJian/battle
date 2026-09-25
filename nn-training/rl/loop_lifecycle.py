@@ -69,6 +69,7 @@ from rl.loop_guards import TrainingGuards
 from rl.loop_round import (
     ROUND_BUNDLE_EXIT,
     ROUND_NEXT,
+    ROUND_OFFLINE_EXIT,
     ROUND_RETRY,
     ROUND_SMOKE_STOP,
     ROUND_STOP,
@@ -334,6 +335,9 @@ class TrainingLifecycle:
             outcome = self.run_one_round(it)
             it = outcome.it  # 段跑会推进 it；必须以返回值为准
             if outcome.status == ROUND_BUNDLE_EXIT:
+                return
+            if outcome.status == ROUND_OFFLINE_EXIT:
+                # 离线课：本机不跑这门课（云机取任务包接手）——干净收工，不是失败。
                 return
             if outcome.status == ROUND_SMOKE_STOP:
                 smoke_void = True

@@ -25,6 +25,8 @@
   * ``GAME_MAX_ATTEMPTS`` (3) —— 一局最多跑几次：超时 / rc≠0 都**原地重跑同一 argv**
     （种子在 argv 里 ⇒ 同一局是确定性的：重跑要么拿到同一份结果，要么再次响亮失败）。
   * ``GAME_POLL_SEC`` (0.5) —— 轮询粒度：软告警与硬顶都靠它发现（一次 `wait(∞)` 什么都看不见）。
+  * ``STALL_WARN_SEC`` (120.0) —— **整轮**停滞线：这么久一局都没结算就点名（带还在飞的局身份）。
+    它管的是「所有线程一起卡住、连心跳都哑了」那一档（单局看门狗在那时什么都打不出来）。
   * ``PROGRESS_LOG_SEC`` (60.0) —— 进度行的节流间隔（`progress_due()`）：**按时间**而不是
     按局数，因为这条线的成本只与墙钟有关（用户 2026-09-23：每分钟一句就够）。
 
@@ -35,6 +37,8 @@
 """
 
 from __future__ import annotations
+
+from collections.abc import Sequence
 
 #: 点名线（秒）：单局超过它就打一行 WARN 点名（正常一局亚秒级）。
 SLOW_GAME_WARN_SEC = 5.0
@@ -55,6 +59,14 @@ GAME_POLL_SEC = 0.5
 #: 而 220 并发的在线节点上是每秒数行。所以改成按**时间**节流（最后一句仍然必打，
 #: 否则「跑完了」这件事会没有落点）。
 PROGRESS_LOG_SEC = 60.0
+
+#: 「整轮停滞」的告警线（秒）：这么久**一局都没结算**就点名一次，并列出还在飞的局。
+#:
+#: 为什么需要它（2026-09-25 二次取证「rollout 卡死机器半天」）：进度行与心跳都挂在「有局结算」
+#: 上（`progress_due` 在结算主循环里被调用）⇒ 所有线程一起卡住时它们**一起哑**。现场就是
+#: 「5s 的 270/336 之后 890s 一行都没有」：机器在卡死，而日志里没有任何一条能说「谁卡住了」。
+#: 取 2×`PROGRESS_LOG_SEC`：心跳本来就每分钟一句，这一档只回答「连心跳都停了」。
+STALL_WARN_SEC = 120.0
 
 
 def attempt_timeout_sec(base_sec: float, attempt: int, explicit: bool = False) -> float:
@@ -119,6 +131,23 @@ def hard_cap_line(kind: str, label: str, elapsed: float, timeout_sec: float, whe
     )
 
 
+def stall_line(kind: str, inflight: int, since_sec: float, labels: Sequence[str]) -> str:
+    """整轮停滞行：**已停滞多久 + 还有几局在飞 + 是哪几局**（卡住时唯一能说话的读数）。
+
+    `labels` 按派发顺序给（前 3 个点名，其余只计数）——「谁卡了」正是 2026-09-22 那 651s
+    与 2026-09-25 那 890s 里最缺的一条信息。
+    """
+    who = "、".join(str(x) for x in list(labels)[:3])
+    if len(labels) > 3:
+        who += "…"
+    return (
+        f"WARN {kind} 整轮停滞：{since_sec:.0f}s 里一局都没结算（还有 {inflight} 局在飞"
+        + (f"：{who}" if who else "")
+        + "）——单局看门狗只管单局（5s 硬顶），卡住的往往是**子进程回收或挂载点 IO**，"
+        "查那两条（platform_utils.reap_bounded 的那本账）"
+    )
+
+
 def retry_line(
     kind: str,
     label: str,
@@ -166,11 +195,13 @@ __all__ = [
     "GAME_POLL_SEC",
     "RETRY_TIMEOUT_FACTOR",
     "SLOW_GAME_WARN_SEC",
+    "STALL_WARN_SEC",
     "attempt_timeout_sec",
     "game_label",
     "game_time_summary",
     "hard_cap_line",
     "retry_line",
     "slow_warn_line",
+    "stall_line",
     "warn_is_redundant",
 ]

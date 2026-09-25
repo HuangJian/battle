@@ -74,6 +74,11 @@ def _wire_block(**over: object) -> dict:
         # 不在这里给默认值——缺席就代表「本轮没有节点侧 rollout」，不能写成 0 冒充。
         "ts_code_bytes": 0,
         "ts_code_hit": False,
+        # opt-blob-diet（2026-09-24，plan/opt-blob-diet.plan.md §4）：权重从哪个源拿到的
+        # （`payload|cache|preloaded|download|legacy_tar|none`）+ 这一刀走网络的实际字节
+        # （命中/payload 恒 0）。缺省 = 本轮没有权重解析（echo / BC）。
+        "weights_src": "",
+        "weights_bytes": 0,
     }
     w.update({k: v for k, v in over.items() if v is not None})
     return w

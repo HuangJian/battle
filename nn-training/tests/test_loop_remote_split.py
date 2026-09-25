@@ -9,7 +9,7 @@ S4 第二步把「远端 PPO 腿」13 个方法（862 行，**一条连通分量
 | `TrainingRemotePush` | 把一份 job **送到节点**（提交 / 首发 / 取回） | `rl/loop_remote_push.py` | `_push_submit_node` · `_push_submit_first` · `_push_fetch` |
 | `TrainingRemoteJob` | **一份远端 PPO job 的四步** + 组合入口 | `rl/loop_remote_job.py` | `_remote_ppo` · `_remote_ppo_publish` · `_remote_ppo_probe` · `_remote_ppo_fetch` · `_remote_ppo_land` |
 | `TrainingRemoteFail` | **远端失败的唯一处置策略** | `rl/loop_remote_fail.py` | `_abort_node_failure` · `_handle_remote_failure` |
-| `TrainingRemoteDrive` | **谁驱动这条腿**（轮内 / 整轮 / 整段） | `rl/loop_remote_drive.py` | `_remote_ppo_step` · `_remote_iter` · `_remote_run_segment` |
+| `TrainingRemoteDrive` | **谁驱动这条腿**（轮内 / 整轮；整段已退役） | `rl/loop_remote_drive.py` | `_remote_ppo_step` · `_remote_iter` |
 
 依赖是**一条链**（调用者依赖被调用者）：`Push ← Job ← {Fail, Job} ← Drive`。`TrainingRemote`
 退成**零方法的组合根**（仍住 `rl/loop_remote.py` ⇒ `from rl.loop_remote import TrainingRemote`
@@ -48,7 +48,8 @@ HOMES: dict[str, tuple[str, str]] = {
     "_handle_remote_failure": ("loop_remote_fail.py", "TrainingRemoteFail"),
     "_remote_ppo_step": ("loop_remote_drive.py", "TrainingRemoteDrive"),
     "_remote_iter": ("loop_remote_drive.py", "TrainingRemoteDrive"),
-    "_remote_run_segment": ("loop_remote_drive.py", "TrainingRemoteDrive"),
+    # ★ 2026-09-25（并入 `origin/goal-nn`）：`_remote_run_segment`（半离线整段）退役，
+    # 从本表摘除——退役的正面守卫在 `tests/test_offline_leg_retired.py`。
 }
 MEMBERS = tuple(HOMES)
 
@@ -72,16 +73,17 @@ BASES: dict[str, tuple[tuple[str, ...], str]] = {
 
 #: 入边闭集：成员 → {文件: 呼叫点数}（`self.<成员>(` 的**真实 Call**；新入边必须改这张表）。
 INBOUND_CALLS: dict[str, dict[str, int]] = {
-    "_abort_node_failure": {"loop_remote_drive.py": 2, "loop_remote_fail.py": 1},
+    # 2026-09-25：半离线整段（`_remote_run_segment`）退役后 drive 侧少一个呼叫点（3 → 1）。
+    "_abort_node_failure": {"loop_remote_drive.py": 1, "loop_remote_fail.py": 1},
     "_handle_remote_failure": {"loop_remote_drive.py": 4},
-    "_remote_ppo": {"loop_export.py": 1, "loop_remote_drive.py": 2},
+    # 2026-09-25：drive 侧少一个呼叫点（退役的 `_remote_run_segment` 是原来第二个）。
+    "_remote_ppo": {"loop_export.py": 1, "loop_remote_drive.py": 1},
     "_remote_ppo_fetch": {"loop_remote_drive.py": 1, "loop_remote_job.py": 1},
     "_remote_ppo_land": {"loop_remote_drive.py": 1, "loop_remote_job.py": 1},
     "_remote_ppo_probe": {"loop_remote_drive.py": 1},
     "_remote_ppo_publish": {"loop_remote_drive.py": 1, "loop_remote_job.py": 1},
     "_remote_ppo_step": {"loop_round_steps.py": 1},
     "_remote_iter": {"loop_round_steps.py": 1},
-    "_remote_run_segment": {"loop_round_steps.py": 1},
     "_push_fetch": {"loop_remote_job.py": 1},
     "_push_submit_first": {"loop_remote_job.py": 1},
     "_push_submit_node": {"loop_remote_push.py": 2},
@@ -113,7 +115,8 @@ HELPER_HANDS: dict[str, str] = {
     "_evalboard_idle": "loop_remote_job.py",
     "_forensics": "loop_remote_job.py",
     "_per_stage_quota": "loop_remote_job.py",
-    "_volume_plan_block": "loop_remote_drive.py",
+    # `_volume_plan_block` 的唯一呼叫者（`_remote_run_segment`）已随整段退役 ⇒ 本模块不再借它
+    # （声明也跟着摘了：留着就是一条 mypy 看着没事、实际永不被调用的假契约）。
 }
 
 #: 槽位写手闭集：槽位 → {写它的文件}（跨模块共享的只能是登记的那几处）。
@@ -187,7 +190,8 @@ DELAYED_IMPORTS: dict[str, frozenset[str]] = {
         }
     ),
     "loop_remote_fail.py": frozenset(),
-    "loop_remote_drive.py": frozenset({"rl.iter_job", "rl.plan"}),
+    # `rl.plan` 随半离线整段（`_remote_run_segment`）退役 —— 它原来是那条腿算计划用的。
+    "loop_remote_drive.py": frozenset({"rl.iter_job"}),
 }
 
 #: 反向边（禁）：本族谁都不许 import 这些（它只靠 `self.*` 回调 / 组合根除外）。
@@ -567,6 +571,6 @@ def test_cross_cluster_handoff_resolves_to_one_object() -> None:
     assert TrainingLoop._remote_ppo_publish is TrainingRemoteJob._remote_ppo_publish
     assert TrainingLoop._push_submit_first is TrainingRemotePush._push_submit_first
     # 三个驱动入口的唯一所有者是 Drive（不是组合根，也不是 Job）。
-    for name in ("_remote_ppo_step", "_remote_iter", "_remote_run_segment"):
+    for name in ("_remote_ppo_step", "_remote_iter"):
         owners = [k.__name__ for k in TrainingLoop.__mro__ if name in vars(k)]
         assert owners == ["TrainingRemoteDrive"], (name, owners)

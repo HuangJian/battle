@@ -10,7 +10,7 @@
  *  1. **域无换算**：python `--rollout-src` 的 choices 就是
  *     `'auto'|'local'|'node'|'run'` 字符串，rl-config 里原样落。若有人在这里发明
  *     `on/off` 之类的中间域，训练侧 choices 会直接报错退出——所以有专项断言
- *     「preset 不得过换算函数」。（`run` = 离线训练模式的整段上云，2026-09-19 加。）
+ *     「preset 不得过换算函数」。（`run` = 离线训练模式「本机不跑这门课」，2026-09-19 加。）
  *  2. **缺省不是 auto**：python 缺省 `auto`，但 `_rollout_source()` 在 rl-config
  *     没有该键时一律返回 `local`（历史行为）。控制台若缺省成 `node`，就会在没改过
  *     配置的课上谎报「本轮上云」。
@@ -84,9 +84,14 @@ describe('preset / route / UI 接线（源码断言：跨文件链路 tsc 抓不
     const preset = readSrc('src/server/actions/preset.ts').replace(/\s+/g, ' ')
     expect(preset).not.toMatch(/rl\.rollout_src\s*=/)
     // 字符串域**原样**落（过换算函数 = 训练启动直接报错退出）
+    // ★ 2026-09-24：写面搬到 `train-mode.ts`（热切那颗开关也要用它）——断言跟着搬，
+    //   否则它会对着一个不再含该逻辑的文件读，**静默落空**。
+    const tm = readSrc('src/server/actions/train-mode.ts').replace(/\s+/g, ' ')
+    expect(tm).toContain('row.rollout_src = opts.rolloutSrc')
+    expect(tm).not.toMatch(/rollout_src = \w*[Tt]oCfg\(/)
+    // 开课路径只转调（不再自己维护第二份映射）
     const life = readSrc('src/server/actions/course-lifecycle.ts').replace(/\s+/g, ' ')
-    expect(life).toContain('row.rollout_src = opts.rolloutSrc')
-    expect(life).not.toMatch(/rollout_src = \w*[Tt]oCfg\(/)
+    expect(life).toContain('applyTrainModeToConfig')
   })
 
   it('state-view：modes 带当前生效值（UI 才能显示「改动有没有生效」）', () => {

@@ -71,6 +71,41 @@ from remote.hub.store_leases import (
 from remote.hub.store_leases import (
     ClaimOutcome as ClaimOutcome,  # 同上：测试拿 `hs.ClaimOutcome` 与 store_leases 对账
 )
+from remote.hub.task_pack import (
+    _TASK_PACK_TRIGGERS as _TASK_PACK_TRIGGERS,
+)
+
+# 任务包新鲜度门 / 缺包自愈门 / 清单读数（2026-09-24~25 的取包链）：实现住 `hub/task_pack.py`
+# （叶子模块，因为路由混入与队列混入两侧都要它）。这里**逐个自别名 re-export** —— 它们是
+# `tests/test_offline_task_{pack,queue}.py` 的读名字面（patch 账本、触发计数、纯判据都要能
+# 单独钉），与 `_JobStore` 那批同一条理由：**名字是契约，位置不是**。
+from remote.hub.task_pack import (
+    TASK_PACK_INDEX_NAME as TASK_PACK_INDEX_NAME,
+)
+from remote.hub.task_pack import (
+    TASK_PACK_MISS_TRIGGER_LIMIT as TASK_PACK_MISS_TRIGGER_LIMIT,
+)
+from remote.hub.task_pack import (
+    TASK_PACK_STALE_THROTTLE_SEC as TASK_PACK_STALE_THROTTLE_SEC,
+)
+from remote.hub.task_pack import (
+    TASK_PACK_STALE_TRIGGER_LIMIT as TASK_PACK_STALE_TRIGGER_LIMIT,
+)
+from remote.hub.task_pack import (
+    decide_task_pack as decide_task_pack,
+)
+from remote.hub.task_pack import (
+    reset_task_pack_miss_triggers as reset_task_pack_miss_triggers,
+)
+from remote.hub.task_pack import (
+    reset_task_pack_triggers as reset_task_pack_triggers,
+)
+from remote.hub.task_pack import (
+    task_pack_stale_reason as task_pack_stale_reason,
+)
+from remote.hub.task_pack import (
+    trigger_task_bundle_export as trigger_task_bundle_export,
+)
 
 #: 本门面**对外承诺**的名字全集（即上面每一条 re-export 的目标）。
 #: `tests/test_hub_entry_split.py` 正面钉住「这个集合 == 实际暴露的集合」：删一条 re-export
@@ -82,6 +117,11 @@ __all__ = [
     "SEND_CHUNK",
     "SEND_LOG_MIN_BYTES",
     "SEND_TIMEOUT_SEC",
+    "TASK_PACK_INDEX_NAME",
+    "TASK_PACK_MISS_TRIGGER_LIMIT",
+    "TASK_PACK_STALE_THROTTLE_SEC",
+    "TASK_PACK_STALE_TRIGGER_LIMIT",
+    "_TASK_PACK_TRIGGERS",
     "ClaimOutcome",
     "HubHandler",
     "_AuthGuard",
@@ -91,8 +131,13 @@ __all__ = [
     "_is_loopback",
     "as_hub",
     "attributed_source",
+    "decide_task_pack",
     "main",
     "make_server",
+    "reset_task_pack_miss_triggers",
+    "reset_task_pack_triggers",
+    "task_pack_stale_reason",
+    "trigger_task_bundle_export",
 ]
 
 

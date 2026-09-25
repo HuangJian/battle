@@ -9,6 +9,7 @@
 
 import { existsSync, readdirSync, readFileSync } from 'fs'
 import path from 'path'
+import { effectiveCores } from '../../../tools/lib/cores'
 import { NN_TRAINING } from './paths'
 import { fail, log } from './log'
 
@@ -105,11 +106,15 @@ export function ensureVenv(): boolean {
   return true
 }
 
-/** torch 线程数决策：--torch-threads 显式 > rl-config rl.torch_threads > CPU 数 clamp 1..12。 */
+/** torch 线程数决策：--torch-threads 显式 > rl-config rl.torch_threads > CPU 数 clamp 1..12。
+ *
+ * 核数走 `effectiveCores()`（容器配额/亲和掩码 > 宿主机裸数，与 python 侧
+ * `platform_utils.effective_cores` 同口径）：`navigator.hardwareConcurrency` 在容器里报的是
+ * **宿主机**核数（Kaggle 224 vs cgroup 配额 96），照它取线程数是 2.3× 超订，PPO 反而更慢。 */
 export function resolveTorchThreads(cliThreads: number, cfgThreads: number | undefined): number {
   if (cliThreads > 0) return cliThreads
   if (cfgThreads && cfgThreads > 0) return cfgThreads
-  let n = navigator.hardwareConcurrency || 4
+  let n = effectiveCores()
   if (n > 12) n = 12
   if (n < 1) n = 1
   return n

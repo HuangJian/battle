@@ -144,6 +144,7 @@ def test_total_budget_reports_progress() -> None:
         def read(self, _n: int) -> bytes:
             # 预算判据是**墙钟**比较，Windows 上 time.time() 粒度 ~15.6ms ⇒ 得真等一下
             # 才能构造出「已经超预算」的状态（总预算是 0，任何非零耗时都算超）。
+            # sleep-ok: 夹具模拟的工作量：让「慢读」真的花掉一段非零墙钟
             time.sleep(0.05)
             return super().read(_n)
 

@@ -15,6 +15,7 @@ test_dist_common_poll.py 有单测。
 from __future__ import annotations
 
 import json
+import threading
 import types
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,27 @@ import pytest
 
 import dist_common
 import rl.eval_dispatch as ed
+
+#: 慢节点的模拟单局耗时（秒）——用例断言一律与它比，不写死别的绝对数。
+SLOW_NODE_SEC = 3.0
+
+
+def _wait_until(pred: Any, *, timeout: float = 20.0, step: float = 0.02) -> bool:
+    """等一个**事件/状态**成立（`timeout` 只是挂起兜底，不是同步手段，2026-09-24）。
+
+    为什么要统一成这个形状：门禁在满载机器上跑时，任何「睡 N 秒后假设对方已经到了」
+    都是把调度延迟当失败（04:xx 的 8 次连跑里 4 个不同的用例都因此红过）。等到状态
+    成立才继续，既不用赌机器，也不会让断言变成恒真。
+    """
+    import time
+
+    end = time.time() + timeout
+    while time.time() < end:
+        if pred():
+            return True
+        # sleep-ok: 轮询步长（等的是谓词/状态，超时只当挂起兜底）
+        time.sleep(step)
+    return bool(pred())
 
 
 class _Harness:
@@ -239,6 +261,7 @@ class _LaneHarness:
         nodes: list[dict],
         local_slots: int = 0,
         ping_delay: float = 0.0,
+        ping_hook: Any = None,
         ping_fail: tuple[str, ...] = (),
         post_ok: bool = True,
         post_delay: float = 0.0,
@@ -262,6 +285,13 @@ class _LaneHarness:
         self.local_games: list[int] = []
         self.local_seen_at: list[float] = []
         self.gate_done_at: float | None = None
+        #: `post_until` 的等待结果（`None` = 该用例没挂条件）；False = 条件在兜底时间内没成立。
+        self.post_wait_ok: bool | None = None
+        #: 权重门返回的那一刻已经跑起的本机局数（结构事实，与时钟粒度无关）。
+        self.post_saw_local = 0
+        #: 可选：权重门要**等它成立**再返回（例：等本机首局真的开跑）。构造之后挂，
+        #: 这样 lambda 里引用 `h` 自己的属性时类型是确定的（mypy 友好）。
+        self.post_until: Any = None
         self.args = types.SimpleNamespace(
             eval_games_per_stage=games,
             total_stages=1,
@@ -275,12 +305,20 @@ class _LaneHarness:
             "policy": {"evalLocalSlots": local_slots, "nodeFailStreak": 3},
         }
         self.gate = threading.Event()
+        self.window_sec = window_sec
+        #: `play()` 开跑时刻 —— 用例可以用它表达「窗口已过期」这类**事件**，而不是猜时长。
+        self.play_t0 = 0.0
         if gate_open:
             self.gate.set()
         id_of = {str(n["url"]): str(n["id"]) for n in nodes}
 
         def ping(url: str, _key: str, timeout: float = 3.0) -> dict | None:
-            time.sleep(ping_delay)
+            if ping_hook is not None:
+                # 事件驱动编排点（例：并行性用 Barrier 证明，而不是比墙钟）
+                ping_hook(id_of.get(url, url))
+            if ping_delay:
+                # sleep-ok: 夹具模拟的工作量：慢节点的 ping 往返
+                time.sleep(ping_delay)
             self.pinged.append(id_of.get(url, url))
             if id_of.get(url, url) in ping_fail:
                 return None
@@ -293,7 +331,15 @@ class _LaneHarness:
             }
 
         def post(nodes_: list, *a: Any, **k: Any) -> list:
-            time.sleep(post_delay)
+            if self.post_until is not None:
+                # 事件驱动（2026-09-24 修 CPU 满载下的门禁 flake）：权重门**等条件成立**
+                # 再返回（例：等本机首局真的开跑）——「本机不等门」从「机器够快」变成
+                # 构造性事实。没等到也照样往下走：`post_wait_ok=False` 让用例响亮地红。
+                self.post_wait_ok = _wait_until(self.post_until)
+            self.post_saw_local = len(self.local_games)
+            if post_delay:
+                # sleep-ok: 夹具模拟的工作量：权重下发的往返耗时
+                time.sleep(post_delay)
             self.gate_done_at = time.monotonic()
             if not post_ok:
                 return []
@@ -341,6 +387,7 @@ class _LaneHarness:
         dist_common.weights_push_cache_reset()
         self.mp.setattr(dist_common, "fetch_task", fetch)
         t0 = self.time.monotonic()
+        self.play_t0 = t0
         ed.dispatch_eval_round(
             "bun", str(self.weights), self.traj, self.args, self.cfg, "rid.lane", 7,
             local_gate=self.gate,
@@ -368,16 +415,31 @@ def _fast_fetch(h):
 
 
 def test_gate_pings_nodes_in_parallel(tmp_path, monkeypatch) -> None:
-    """B2：门必须并行探测——3 台各 0.3s，串行 = 0.9s（实测两台超时即 ~7s）。"""
+    """B2：门必须并行探测——3 台各 0.3s，串行 = 0.9s（实测两台超时即 ~7s）。
+
+    事件驱动（2026-09-24 修 CPU 满载下的门禁 flake）：判据从「墙钟 < 0.7s」换成
+    **`Barrier(3)`** —— 三台必须**同时**进入 ping 才可能一起通过。串行实现里第一个
+    ping 永远等不到同伴 ⇒ 屏障超时（`broken` 非空）⇒ 响亮地红。原判据在满载机器上
+    会把「并行但被抢占」误判成「串行」（04:xx 连跑里同类墙钟断言红过）。
+    """
     nodes = [
         {"id": f"n{i}", "url": f"http://n{i}.local", "concurrency": 1} for i in range(3)
     ]
+    barrier = threading.Barrier(len(nodes))
+    broken: list[str] = []
+
+    def _hook(nid: str) -> None:
+        try:
+            barrier.wait(timeout=20.0)  # 兜底：串行时 20s 后 BrokenBarrierError
+        except threading.BrokenBarrierError:
+            broken.append(nid)
+
     h = _LaneHarness(
-        tmp_path, monkeypatch, games=1, nodes=nodes, ping_delay=0.3, local_slots=0
+        tmp_path, monkeypatch, games=1, nodes=nodes, local_slots=0, ping_hook=_hook
     )
-    rows, elapsed = h.play(_fast_fetch(h))
+    rows, _ = h.play(_fast_fetch(h))
+    assert not broken, f"门是串行的：这些 ping 没等到同伴（{broken}）"
     assert sorted(h.pinged) == ["n0", "n1", "n2"], "每台都要探到"
-    assert elapsed < 0.7, f"门应并行（串行 ≥0.9s，实测 {elapsed:.2f}s）"
     assert any(r.get("event") == "eval" for r in rows)
 
 
@@ -433,23 +495,26 @@ def test_weight_post_failure_without_local_still_skips(tmp_path, monkeypatch) ->
 
 
 def test_local_slots_start_before_weight_gate(tmp_path, monkeypatch) -> None:
-    """B3：本机槽位不等权重门（本地权重本就在盘上；旧形态里本地首个结果晚于门）。"""
+    """B3：本机槽位不等权重门（本地权重本就在盘上；旧形态里本地首个结果晚于门）。
+
+    事件驱动（2026-09-24 修 CPU 满载下的门禁 flake）：原来是 `post_delay=1.0`（假装
+    权重下发要 1s）+ `local_seen_at < gate_done_at` —— 满载时本机线程还没被调度，1s
+    就过去了 ⇒ 用例红在环境上。现在门**等到本机首局真的开跑**才返回（`post_until`），
+    「本机不等门」是构造性的；旧形态（门后才孵化本机线程）会让等待超时 ⇒
+    `post_wait_ok=False` ⇒ 红。
+    """
     nodes = [{"id": "a97", "url": "http://a97.local", "concurrency": 1}]
-    h = _LaneHarness(
-        tmp_path,
-        monkeypatch,
-        games=2,
-        nodes=nodes,
-        local_slots=2,
-        post_delay=1.0,
-    )
+    h = _LaneHarness(tmp_path, monkeypatch, games=2, nodes=nodes, local_slots=2)
+    h.post_until = lambda: bool(h.local_games)
     rows, _ = h.play(_fast_fetch(h))
     assert len([r for r in rows if r.get("event") == "eval"]) == 2
+    assert h.post_wait_ok, "权重门没等到本机首局开跑（旧形态：门后才孵化本机线程）"
     assert h.gate_done_at is not None, "权重门必须跑过"
     assert h.local_seen_at, "本机槽位必须真跑了局"
-    assert min(h.local_seen_at) < h.gate_done_at, (
-        "本机首局应早于权重门完成（旧形态：门后才孵化本机线程）"
-    )
+    # 不用 `local_seen_at < gate_done_at` 判次序：Windows 的 `time.monotonic()` 粒度 ~15.6ms，
+    # 事件驱动后两者只差几微秒 ⇒ 两次取样会落到**同一个** tick、`<` 变成掷硬币（2026-09-24
+    # 实测：两个值逐位相等）。契约本身（门返回前本机已开跑）由上面的 `post_wait_ok` 钉住。
+    assert h.post_saw_local >= 1, "权重门返回时本机还没开跑（旧形态：门后才孵化本机线程）"
 
 
 def test_settled_full_teardown_does_not_wait_for_slow_node(tmp_path, monkeypatch) -> None:
@@ -460,33 +525,64 @@ def test_settled_full_teardown_does_not_wait_for_slow_node(tmp_path, monkeypatch
     ]
     h = _LaneHarness(tmp_path, monkeypatch, games=4, nodes=nodes, local_slots=0)
 
+    slow_done: list[float] = []
+    slow_started = threading.Event()
+    fast_gate: list[bool] = []
+
     def fetch(_url, _key, **kw):
         if _url == "http://slow.local":
-            h.time.sleep(3.0)  # 慢节点：回包对结果无用（tail-race 已由快节点结算）
+            slow_started.set()
+            # sleep-ok: 夹具模拟的工作量：慢节点一口 SLOW_NODE_SEC（回包对结果无用，tail-race 已由快节点结算）
+            h.time.sleep(SLOW_NODE_SEC)
+            slow_done.append(h.time.monotonic())
+            return h.manifest(kw["stage"], kw["seed"]), {}
+        # 快节点的**第一口**先等慢节点真的在跑：否则快节点可能在慢节点线程被调度前
+        # 就把 4 局全吃掉（实测如此）——用例的前提（慢节点拿着一局在途）会随机消失。
+        if not fast_gate:
+            fast_gate.append(slow_started.wait(20.0))
         return h.manifest(kw["stage"], kw["seed"]), {}
 
     rows, elapsed = h.play(fetch)
+    returned_at = h.time.monotonic()
     summ = [r for r in rows if r.get("event") == "eval_summary"]
     assert summ and summ[-1]["games"] == 4, summ
-    assert elapsed < 2.0, f"settled 满后不该等慢节点（实测 {elapsed:.2f}s）"
+    assert fast_gate and fast_gate[0], "慢节点没能在 20s 内开工（用例前提失效）"
+    # 事件驱动（2026-09-24）：判据是**次序**（慢节点那局的回包在收工之后才到 ⇒ 收工没等它；
+    # 通常收工时它还在飞，列表直接为空），不是「墙钟 < 2.0s」——那个数只反映机器快慢，
+    # 反映不了「等没等」。
+    assert not slow_done or min(slow_done) > returned_at, (
+        "收工等了慢节点：它的局在 play 返回前就结束了（旧实现 join(window + taskTimeoutSec)）"
+    )
+    assert elapsed < SLOW_NODE_SEC, f"settled 满后不该等慢节点（实测 {elapsed:.2f}s）"
     assert "settled 满（4/4）" in "\n".join(h.logs)
 
 
 def test_window_expiry_still_lands_inflight_games(tmp_path, monkeypatch) -> None:
-    """B1 的反面：墙钟到点**不砍在飞**——窗口内起跑的局照样落账（有界宽限）。"""
+    """B1 的反面：墙钟到点**不砍在飞**——窗口内起跑的局照样落账（有界宽限）。
+
+    事件驱动（2026-09-24）：慢节点的回包现在**等窗口真的过期**才落地（原来是 `sleep(0.6)`
+    vs 窗口 1.0s —— 那局其实在窗口内就结算了，「到点仍在飞」这个契约根本没被测到）。
+    宽限常量是 120s，所以就算机器满载，`elapsed` 也该、且只该在窗口后一点点就返回。
+    """
     nodes = [{"id": "a97", "url": "http://a97.local", "concurrency": 1}]
     h = _LaneHarness(
         tmp_path, monkeypatch, games=1, nodes=nodes, local_slots=0, window_sec=1.0
     )
+    past_window: list[bool] = []
 
     def fetch(*_a, **kw):
-        h.time.sleep(0.6)  # 跨过窗口（1.0s）仍在飞
+        past_window.append(
+            _wait_until(
+                lambda: h.time.monotonic() - h.play_t0 >= h.window_sec + 0.05, timeout=30.0
+            )
+        )
         return h.manifest(kw["stage"], kw["seed"]), {}
 
     rows, elapsed = h.play(fetch)
     played = [r for r in rows if r.get("event") == "eval"]
+    assert past_window and past_window[0], "回包没能等到窗口过期（用例前提失效）"
     assert len(played) == 1, f"窗口到点的在飞局必须落账: {rows}"
-    assert elapsed < 2.5, f"宽限不该失控（实测 {elapsed:.2f}s）"
+    assert elapsed < h.window_sec + 5.0, f"宽限不该失控（实测 {elapsed:.2f}s）"
 
 
 # ---------------------------------------------------------------------------

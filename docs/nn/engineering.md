@@ -8,10 +8,15 @@
 >
 > **编号说明**：`§20` 是本文件的「决策正文归档」节（搬自 `DECISIONS.md`），**进度节从 §21 起**
 > （新条目置顶、号大）。
+>
+> **2026-09-25 合并说明**：origin 侧新增的 §21–§25（门禁 flake 清场 / 云端日志节食 /
+> metrics v8 / evalA 基线 / 危险暴露）按先例**保号**；本地同号的三节（`common/` 共享原语层 /
+> 断开 `rl`↔`remote` 包循环 / 神模块拆分 S4）改号为 §26–§28，全文与 `DECISIONS.md`、
+> `docs/nn.progress.md`、`plan/nn-training-refactor.md` 里的引用同步跟改。
 
 ---
 
-## §23 神模块拆分第一步：`loop_steps` 的传输/发布簇搬进 `loop_transport`（2026-09-23，用户指令「重构 nn-training：降低耦合 / 复用代码 / 提可维护性」）
+## §28 神模块拆分第一步：`loop_steps` 的传输/发布簇搬进 `loop_transport`（2026-09-23，用户指令「重构 nn-training：降低耦合 / 复用代码 / 提可维护性」）
 
 ### 一句话
 
@@ -76,7 +81,7 @@ dist_common · _push_submit · _push_wait_result      ← 被测试以 rl.loop_s
 显式 `from rl.loop_transport import (…25 个名字…)` + **列全的 `__all__`**——没有 `__all__` 时
 ruff 的 F401 会把「有意的 re-export」判成「漏删的导入」。`__all__` 里**也含私有名**
 （`_gpu_push_nodes` 等）：`from X import Y` 不看 `__all__`，而全仓无人 `import *`，故这纯粹是
-给 linter 的意图声明。先例同 §22（`game_watch` 门面用显式清单、不用 `import *`）。
+给 linter 的意图声明。先例同 §27（`game_watch` 门面用显式清单、不用 `import *`）。
 
 ### 被否决的备选
 
@@ -435,7 +440,7 @@ mypy **380** 源文件绿；根 `bun run check` 2120 pass / 0 fail。
 
 前八刀把「新模块不得反向 import `remote.worker`」这句话在**六个**拆分守卫里各写了一遍（其中三个
 还各带一份 `ALLOWED_IMPORTS` / `PROJECT_ROOTS`）。同一件事写六遍的坏处不是啰嗦而是**漂移**——
-§22 里首版 `test_layering` 就是「只给 `remote` 展开子模块、没给 `rl` 展开」而**静默变瞎**。
+§27 里首版 `test_layering` 就是「只给 `remote` 展开子模块、没给 `rl` 展开」而**静默变瞎**。
 
 现在收到 `tests/helpers/remote_dag.py`（账本 + 判据实现）与 `tests/test_remote_dag.py`（整图对账）：
 
@@ -1720,7 +1725,7 @@ dashboard 门禁照跑（1105 / 0）。
 - **记账校正（S19/S20 同款教训）**：模块行数先报了分刀时点的读数（`loop_remote_job.py` = 548），
   随后为 `_evalboard_idle` 补了一条声明（+3）⇒ 真值 **551**（四新家 = 111 / 551 / 112 / 291）。已连提交
   （`--amend`）带两处文档一次改齐。**可测量值落盘后量一次，别在编辑过程中随手报。**
-- **刻意不动**：`docs/nn/engineering.md` §23 前面的历史刀记（那时指针正确）。
+- **刻意不动**：`docs/nn/engineering.md` §28 前面的历史刀记（那时指针正确）。
 
 ### 第二十三刀（2026-09-25）：`loop_guards` 的 13 成员按判据同源切四簇（多 sink 的 DAG）
 
@@ -2237,7 +2242,7 @@ _persist_of(root, str(batch.get("batch_id")), len(units))
 `done` 还是空 ⇒ **每个 idle 窗都会被再认领一次，永不发车、不落日志、状态永远 `running`**。
 三条兄弟路径（模式不适 / 规划失败 / 缺权重）都是「记日志 + 退回队列」，这一条不一致。
 属真设计问题（requeue 会让它每窗重试，也是另一种循环）⇒ 不静默改，另开一刀
-（→ 第二十九刀，§29）。
+（→ 第二十九刀，§28）。
 
 #### 验证
 
@@ -2506,7 +2511,7 @@ HTTP 面（`hub/http_face.py` L5）与引导链（`hub/boot.py` L6）分开，�
 
 ---
 
-## §22 断开 `rl` ↔ `remote` 包循环：把纯逻辑叶子下沉到 L0，用测试钉住依赖方向（2026-09-23，用户指令「重构 nn-training：降低耦合 / 复用代码 / 提可维护性」）
+## §27 断开 `rl` ↔ `remote` 包循环：把纯逻辑叶子下沉到 L0，用测试钉住依赖方向（2026-09-23，用户指令「重构 nn-training：降低耦合 / 复用代码 / 提可维护性」）
 
 ### 一句话
 
@@ -2531,7 +2536,7 @@ S1 结束时测到：`rl/` 有 **10 个文件** import `remote/*`，`remote/` �
 |---|---|
 | `common.protocol` 的引用面 | 92 处 / **65 个文件** |
 | `common.game_watch` 的引用面 | 14 处 / **12 个文件** |
-| 三个独立引导模块是否引用它们 | **否**（安全：不触 §21 契约 4） |
+| 三个独立引导模块是否引用它们 | **否**（安全：不触 §26 契约 4） |
 | `protocol.py` 模块级可变状态 | **无**（只有常量） |
 
 两条最容易踩的坑，提前钉住：
@@ -2642,7 +2647,7 @@ remote / 纯逻辑碰编排 / remote 碰编排 / 上层包碰 remote）全部命
 
 ---
 
-## §21 `common/` 共享原语层：同口径写进注释不算单一实现（2026-09-23，用户指令「重构 nn-training：降低耦合 / 复用代码 / 提可维护性」）
+## §26 `common/` 共享原语层：同口径写进注释不算单一实现（2026-09-23，用户指令「重构 nn-training：降低耦合 / 复用代码 / 提可维护性」）
 
 ### 一句话
 
@@ -2709,6 +2714,187 @@ remote / 纯逻辑碰编排 / remote 碰编排 / 上层包碰 remote）全部命
 
 ---
 
+## §25 evalA `--baseline` 缺省改取课程 bc：it0 基线污染修复（2026-09-25）
+
+**现场**：x20-dodge-l1/L3 的 `eval_log` it0 各 400 局 = 200 局 bc 真基线（wver 11ac，
+low 40.0）+ 200 局后期权重误标 it0（L1 混 it43 bf27 low 28.0、L3 混 it51 f8ab），
+L1 日常 it0 被带成 34.0/8.16（真值 40.0/7.64），污染仅 it0、其余 iter 单 wver 干净，
+门控 verdict 不受影响。同 wver 同种子跨 run 逐局 100% 一致，确定性本身无辜。
+
+**链条**：`--baseline` 缺省取 live `out`（每轮被覆盖）＋ 停课→重开自动补派
+（`shouldAutoBaseline`，offline 才有）＋ 幂等判据 `iter=0 ∧ 同 wver`（权重变了不命中）
+⇒ 补派瞬间读到新权重并写进 it0 槽。两次触发时刻与 `run_start` 一一对应
+（L1 10:42 ↔ it43、L3 15:45 ↔ it51）。另：`kickstart-receipt` 取最后一条 it0 行，
+控制台基线显示同步被带偏（未修显示逻辑——源头正了它自然正）。
+
+**修复**（`rl/eval_a_once.py` + 注释）：`resolve_eval_ckpt` 单一来源——显式 `--ckpt`
+优先，`--baseline` 缺省取课程 `bc`；bc 缺席响亮拒。否决过「it0 槽永久锁」
+（杀掉换 bc 重评基线的合法场景）与「调用方传快照」（知识放错地方）。
+
+---
+## §24 metrics v8 的 Python 半链补记：两处 `eval_log` 行构造点 + 缺键语义（2026-09-25，补 §23 漏项）
+
+**症状**：`eval_log.jsonl` 的逐局行里 `playerHpRatio`/`dangerTicks`/`threatTicks`/`dmgFirst600`
+四列全缺 —— TS 探针表（`tmp/human-v8.ts` / `tmp/mirror-probe.ts`，走 `export-eval-game.ts`）读数正常，
+**账本没有**：过程读数在采集腿与 EvalBoard 上失明（探针看得到、逐轮行看不到）。
+
+**成因**：§23 的 lockstep 清单在 Python 侧只点了 ④（`METRICS`/版本/行数断言），漏掉**行构造点**：
+`rl/eval_local.eval_row`（本地 resim 逐局行）与 `rl/batch_eval.record`（in-loop 日常评估行）。
+v8 提交只改了 TS 导出器 + `reward_library.py`，两处 Python 行构造点**各自手写字段表** ⇒ 新列无声掉地。
+注意 ④ 类的行宽/列名对账**全绿也抓不到** —— 缺的是「行里有没有这个键」，不是「行宽对不对」。
+
+**修法（同源 helper，禁两处手写）**：`rl/eval_local.eval_v8_fields(manifest)` 单点取数，
+`eval_row` 与 `batch_eval.record` 都 `**eval_v8_fields(manifest)` 展开。
+
+**缺键语义（与 census 列故意不同，别「统一」）**：缺键 ⇒ **整键省略**，不是写 `None`。
+下游 `tools/sim/eval-course-ckpt.ts` 以「键缺席」判未知（`!== undefined` 才进 `dmg600Known` 分母）；
+写显式 `None` 落盘成 `null` 会被误计入分母、稀释 `clean600%`。合法 `0`（前 600t 零承伤的干净局）
+必须保留 ⇒ 只滤 `None`、保留 `0`。旧节点/旧报告缺键 = 未知，正是想要的。
+
+**清单据此扩到八处**：⑧ = Python 两处 `eval_log` 行构造点（经同一 helper）。加列工单见
+`plan/x20-dodge-avoidance.plan.md §2` 的八行表。
+
+**遗留（未做，非本次范围）**：m1 链路（`eval_m1_once.to_m1_row` → `rl/eval_m1` →
+`eval_ingest.m1_game_row`）不带 v8 四列 —— `tools/sim/m1-eval.ts` 的 `perGame` 契约未含
+（sim-worker telemetry 无 danger 累加器），与 `eval_ingest` docstring 记的既有缺列同口径。
+
+**验证**：新增 `tests/test_eval_row_v8.py`（4 例：helper 逐值透传 / 旧 manifest 整键省略 /
+`eval_row` 带全四列 / `batch_eval.record` 必须经 helper 的源码哨兵）；nn 门禁 ruff+mypy+pytest 绿。
+顺带修一条既有测试 bug：该用例原按仓根相对路径读源码，而门禁 cwd 是 `nn-training/` ⇒
+`FileNotFoundError`（改用 `pathlib.Path(__file__).resolve().parents[2]`）。
+
+---
+## §23 metrics v8：危险暴露四列（idx41–44）+「加列 = 全链 lockstep」（2026-09-24，plan/x20-dodge-avoidance §2）
+
+**背景**：audit §6.1 —— 41 列指标里有 `playerLevel` 却没有 hp、有 `pickupDist` 却没有威胁，
+「生存只能事后罚款」。四列 = `playerHpRatio`(41) · `dangerTicks`(42) · `threatTicks`(43) ·
+`dmgFirst600`(44)；**只加观测、不进任何现存公式**；`METRICS_DIM 41→45` · `METRICS_VERSION 7→8`。
+
+**口径冻结（改动 = 改实验，须另立决策）**：`threatTicks` = 累计「在敌方弹道/炮口线上」的 tick
+—— 同轴 ±0.75 格 + ≤6 格 +（弹：逼近 / 车：炮口朝玩家）；常数与 `src/nn/dodge-l0.ts` 同值，
+**不判墙体遮挡**（c20 阶梯关是全空场，audit §7.3；用于其它地形前必须重估）。
+`dangerTicks` 阈值 0.4 与 `goal-mask.ts` 的撤退阈值同源；`dmgFirst600` 窗 = `tick < 600`，
+`player_damage` 事件本就不含致死一击（`SimulationCombat.ts:604-609`）。
+共享实现 `src/nn/danger-metrics.ts`（纯函数、零分配、两导出器同源）；判定在 `sim.tick()`
+之后、与 `stuckTicks` 同刻累加，玩家阵亡期间不计。
+
+**lockstep 七处（漏一处 = 静默错读，成因见 §2 的 P0）**：① TS 行构造 + 两个常量 + 列注释 ·
+② `export-eval-game.ts`（Phase 2 探针走这条链） · ③ `eval-course-ckpt(.ts/-worker.ts)` 逐局行
+透传 + 汇总新增 `dmg600/thrTk/dngTk/clean600` 列 · ④ Python `METRICS` + `METRICS_VERSION` +
+行数断言 45 · ⑤ `reward_validation.DEFAULT_RANGES` 四列（`test_all_metrics_have_envelope_range` 锁） ·
+⑥ golden 重生成（`reward_golden.json` 版本号 + `v7_phi_ts_oracle.json` 宽度同步） ·
+⑦ 测试（行宽/跨语言列名/独立重实现/确定性/口径源码哨兵）。
+
+> ⚠ 2026-09-25 补：本清单漏了第 ⑧ 项 —— Python 两处 `eval_log` 行构造点
+> （`rl/eval_local.eval_row` / `rl/batch_eval.record`），实测就是这么漏掉的，见 §24。
+
+**验证（实测）**：reward golden **64/64 case 的 reward 逐位不变**、前 41 列逐位不变；
+`v7_phi_ts_oracle` phi **逐位不变**（256 行，前 31 列亦逐位不变）；nn 门禁 ruff+mypy+pytest
+**2279 passed**；`bun run check` 绿。
+
+**后果**：旧 v7 shard 与新版本不兼容（加载期按行宽/版本响亮报错，不静默错读）；
+Phase 2 探针表与训练侧读数从此同口径可比 —— 这是「加列是独立工程」的收益，代价是语料不通用。
+
+---
+## §22 云端日志节食：碎日志攒成**一行**（2026-09-24，用户报障「log 刷屏几小时把浏览器卡死」）
+
+**症状**：Kaggle / Colab 上一次离线整段训练跑几小时，控制台的日志面板是**流式**的（每多一行
+多一个 DOM 节点）⇒ 几小时后浏览器被拖死。刷屏的那几族行有个共同点 —— **没有一行是「必须
+立刻知道」的**：启动读数（编译缓存/设备/opt/demo/payload/code/ts_code/prune）、XLA 步耗诊断
+（默认开，192 步 ≈ 23 行/轮）、epoch 收尾 + PPO 完成、rollout 的设置/看门狗/池/进度。
+
+**决定**：新增原语 `nn-training/log_bundle.py::LogBundle` —— 按 key **就地替换**地攒 `k=v`，
+在**阶段完成**（`emit`，一行打完并清空）或**每 60s 心跳**（`beat`，按墙钟节流、**不清空**，
+`final_only` 字段只在完成时出现）时打一行。时钟可注入（`clock=`）⇒ 心跳节流是纯函数式的，
+测试零 `sleep`（对齐 §21 的静态守卫）。五处接线（完成时那一行 = 原来那几族行）：
+
+| 阶段 | 攒什么 | 完成行 |
+|---|---|---|
+| 本轮上云 + 本 job 准备 | `it<N>`/动量（`run_loop`）＋ payload/prune/code/ts_code/XLA 缓存/设备/opt/demo bank（`worker.run_job`）＋ shards/装载/episodes/配额（`ppo.common.load_episodes_common`） | `job <jid>: 准备完成 <t>s` |
+| PPO 训练 | epoch 行（只留**最后一个 epoch** 的 kl/entropy/policy/value/gnorm）＋ 60s 心跳 | `job <jid>: PPO done in <t>s` |
+| XLA 步耗诊断 | 逐窗口**只累计**：最慢窗口（带它那次的原始指标串）、编译主导窗口计数、metrics 重置计数、图签名、逐 epoch 汇总 | `[ppo] XLA 步耗诊断（N 步 / T s）` |
+| iter rollout | 设置/看门狗口径/池/进度/收尾/单局耗时分布 | `kind=iter rollout done in <t>s`（中断另有 `… 中断`） |
+
+**刻意**保持独立行的（事故信号，不许被埋进汇总）：**重试**与慢局点名（`game_watch.retry_line`）、
+慢局告警、`SHORT (供给不足)`、`逐局画像 0 行`、`prune: 跳过`（沙箱守卫）、后端不是 TPU 的
+**拒跑**（先 `emit` 把攒着的设备读数落下来再抛）。
+
+**回退路径逐字节不变**：`bundle=None`（`load_episodes_common`）/ 不传 `progress`（`ppo_update`）/ 
+不传 `prep`（`run_job`）时走原逐行输出 —— goal/intent/本机三条线共用这些函数，行为不变。
+
+**测试**：`tests/test_log_bundle.py`（原语契约）+ `tests/test_log_diet.py`（四处接线：给了 bundle
+一行都不 log、收尾行里字段齐全、无 bundle 时逐字原样）；`tests/test_xla_step_diag.py` 增源码钉
+（`[ppo] diag s=` 不许回来，判决要素一个不丢）。收益是**行数**（跑一次算不出来），所以用测试
+钉住 —— 为了调试改回逐行打印，这两条必须先红。
+
+---
+## §21 门禁 flake 清场：把「睡固定时长当同步」全部改成事件驱动（2026-09-24）
+
+**现场**：CPU 满即时连跑 8 次 `nn-python-gate.sh`（xdist `-n 12` + ruff/mypy 三路并行，
+机器上还跑着训练/控制台），红的是**不同轮的不同用例**：serve_pool 端到端、`bulk_sched`
+单通道、`eval_local` 硬顶、`push_priority` 主副本；随后负载轰炸又拖出 `batch_eval` 快/慢
+节点、`control_plane` 让路窗口、`eval_dispatch` 门与本机、`body_transfer` 停滞等待、
+`offline_deliver` 后台异常、`rollout` rescan、`async_result` 回传放行。**共同特征：用绝对
+数字（sleep / 墙钟阈值）当同步手段**。三类根因与修法：
+
+**① 共享可变文件当跨进程计数器**（`tests/test_remote_serve_pool.py` 的桩）：`count.txt` 的
+读-改-写不原子 —— Windows 上 A 在 truncate 窗口内，B `read_text()` 拿到空串 ⇒ `int("")`
+⇒ 该 worker 答 `__SERVE_ERR__` ⇒ 池杀之并回退一局，正是 flake 签名
+`{'served': 2, 'spawned': 2, 'killed': 1, 'fallback': 1}`；另一形态是 `os.replace` 撞
+`[WinError 5] Access is denied: count.txt.bumpNNNN -> count.txt`。修法：桩内计数器改**进程内**
+（跨进程复用证据换只追加的 per-worker 文件）。红检：旧计数器 5/5 红（3 次完整签名），新桩 6/6 绿。
+
+**② 睡固定时长当同步**：一律改成「等事件/状态成立，兜底超时只挡挂起、不参与判定」。
+
+| 用例 | 原来（赌调度） | 现在（构造性） |
+|------|----------------|----------------|
+| `batch_eval` 快/慢节点就绪 | 慢 ping `sleep(0.4)` + 比两个时间戳 | 慢 ping **阻塞到快节点派完第一单**（`fast_dispatched`）；`slow_gate_ok` 判定 |
+| `eval_dispatch` 本机不等门 | `post_delay=1.0` + `local_seen_at < gate_done_at` | 权重门 `post_until` 等本机首局开跑 + `post_saw_local >= 1` |
+| `eval_dispatch` 门并行 | `ping_delay=0.3` + `elapsed < 0.7` | `Barrier(3)`：三台必须**同时**进 ping（串行 ⇒ BrokenBarrier） |
+| `eval_dispatch` 收工不等慢节点 | `elapsed < 2.0` | 快节点第一口等慢节点真在跑；断言**次序**（慢节点那局在收工之后才回） |
+| `bulk_sched` 排队/抢占/让路 | `sleep(0.1/0.05)` 赌线程已起来 | `_CountingEvent`（等「我在排队」的计数）+ 等 `yield_count` 涨 |
+| `control_plane` 让路窗口 | 控制面在途 `sleep(0.15)` | 窗口**不按时长关**：等 `yield_count >= 1` 才关；bulk 先等窗口开 |
+| `body_transfer` 停滞 | `sleep(2.5)` 后读 `capfd` | print 探针置位事件，等**那行日志**出现 |
+| `offline_deliver` 后台异常 | `sleep(0.2)` | 等那行异常日志（事件） |
+| `rollout` 中途上线节点 | self 每局 `sleep(0.05)` 让窗 | self 第一局等 a97 **真的供满 2 局** |
+| `async_result` 回传放行 | `second_started.wait(0.8)` | 按模式等真事件（async：第二份 job 开算；sync：回传开传），30s 仅兑底 |
+
+**③ 绝对墙钟断言 → 次序/结构性事实**：`elapsed < 0.7/2.0/2.5` 这类把「机器多快」当契约
+的判据一律换掉（上面的表就是换法）。窄道上保留的仍保留：**契约本身就是时间**的
+（如 §104 控制面往返 ≤1s）、以及相对夹具自身延迟的下界（`elapsed < SLOW_NODE_SEC`）。
+
+**★ Windows 时钟粒度 15.6ms（本轮踩到）**：事件驱动把两个事件压到只差几微秒后，
+`time.monotonic()` 两次取样会落到**同一个** tick、`a < b` 变掷硬币（实测两个值逐位相等）。
+新写断言优先用「次序列表 / 计数字 / 结构事实」，不要用两个时间戳比大小。
+
+**有意保留的 sleep**（是夹具**模拟的工作量**，不是同步）：慢节点延迟、桩子进程 hang、
+fake HTTP RTT、`SlowResp.close()`、控制面假「在途」；以及「谓词轮询 + 兜底超时」形
+（`_wait_until` / `_pump`）—— 判据是状态，兜底只管挂起。
+
+**④ 静态守卫：`tests/test_no_sleep_as_sync.py`**（同轮追加）—— 只靠人盯迟早复发，
+所以把上面那条纪律做成门禁：AST 扫**两层**（`tests/` 单测层 + `e2e/` 集成层 —— 同一次
+xdist 调用、同样的机理）里**每一处** `.sleep(...)`（桩子进程源码是字符串，不算），要求
+同行尾注或上一行注释带 `# sleep-ok: <理由>`，且理由必须落进**两族闭集**：
+
+| 族 | 含义 | 例 |
+|----|------|-----|
+| `轮询步长` | 循环里等的是谓词/状态，超时只当**挂起**兜底 | `# sleep-ok: 轮询步长（等的是谓词/状态，超时只当挂起兜底）` |
+| `夹具模拟` | 睡的是**被模拟对象自身的工作量** | `# sleep-ok: 夹具模拟的工作量：慢节点一口 1.5s` |
+
+为什么是**闭集**而不是任意一句理由：自由文本下 `# sleep-ok: 等对方先跑` 也能过 —— 而那
+正是这轮 flake 的成因。两族把「能睡的原因」封死，新加 sleep 必须当场归类；归不进去就
+说明它在拿时长当同步。现况：**47 处**标注 —— `tests/` 33 处（17 文件）+ `e2e/` 14 处
+（6 文件）。兑现流程顺带改掉两处「睡时长当同步」：`test_priority_schedule` 的 `_stop_soon`
+（等取消探针**真的问过一次**再停），以及 e2e 离线课停派用例的 `sleep(1.5)`（改成等派发器
+`ticks` 计数转满 10 拍 —— 负向断言的前提从「睡够了」变成「派发器真的转过」）。**不管辖**：
+`Event.wait(timeout)` / `Thread.join(timeout)`（阻塞在信号上，超时只是兜底）。
+红检：删掉任一 `# sleep-ok:` ⇒ 守卫逐条报出 `文件:行: 源码 → 问题`。
+
+**验收**：16 核 burner 满载下 11 个相关文件连跑 3 次（76 用例）全绿；`nn-python-gate.sh`
+连跑 3 次 **2250 passed**、加上守卫后 **2253 passed**（ruff/mypy 均过）；每个改造过的
+判据都有红检（例：把 `ping_nodes_parallel` 临时改串行 ⇒ Barrier 用例立刻红）。
+
+---
 ## §19 本机评估的子进程捕获：gbk 解码把 stdout/stderr 丢成 None（顺带刷屏 65 行/100 局）（2026-09-22）
 
 `rl/eval_local.py::run_local_eval_game` 的 `subprocess.run(capture_output=True, text=True)` 没给

@@ -48,6 +48,13 @@ tailscale_boot = _load_tailscale_boot()
 
 CODE_DIR = "/tmp/worker-code"
 
+#: 引导模块自述指纹（**只给 notebook 加载后打日志用**，不参与任何逻辑）：磁盘 sha 只说明
+#: 「文件刷新成功」，说不了「内存里跑的哪一份」—— 2026-09-25 真机事故里两者恰好相反
+#: （`battle.offline.ipynb`：磁盘已是带修复的新版、`sys.modules` 里还是 07:42 那版）。
+#: notebook 打 `getattr(notebook_boot, "BOOT_SELF", "<missing>")`，旧模块会显示 `<missing>`。
+#: **改本文件时把末位 +1**（纯人读约定，没有代码读它做判断）。
+BOOT_SELF = "boot-2026-09-25a"
+
 #: code.zip 单次传输的**墙钟上限**（秒）：停滞由护栏的 idle 判据管，这条管「一直在滴水」。
 #: 实测最坏一次 1.43 MB 用了 106 s（13.5 KB/s 的坏签）⇒ 300 s 足够宽，而超了就重抽/重领。
 CODE_TOTAL_TIMEOUT_SEC = 300.0

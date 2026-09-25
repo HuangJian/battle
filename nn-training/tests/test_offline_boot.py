@@ -612,3 +612,20 @@ def test_package_partial_walks_the_course_queue(tmp_path: Path) -> None:
     )
     assert [p.name for p in made] == ["deliver-c5-gae.zip"]
     assert any("c6-gae" in m and "没有可打包的产物" in m for m in logs), logs
+
+
+def test_boot_self_fingerprint_is_present() -> None:
+    """引导模块自带「内存指纹」常量 —— notebook 加载后打它，用来识破旧模块。
+
+    2026-09-25 真机事故：notebook 的 `_load_boot` 刷新磁盘成功（日志 sha12 = 新版），
+    但同 kernel 里 `sys.modules` 还留着上一次 Run 导入的旧版 ⇒ `import` 直接命中它，
+    **内存跑旧代码、日志打磁盘新版**。现场 traceback 是两版混血：帧行号 870 配的源码文本
+    是磁盘新版的 `if (root / TS_TREE_NAME).is_dir():`，而实际动作是旧版 870 行的
+    `write_bytes` —— 于是首次起跑（`<课>/run` 还不存在）写 `ts_code.zip` 直接
+    FileNotFoundError（新版那行 mkdir 根本没跑）。修法两件：notebook 导入前
+    `sys.modules.pop`（见 tests/test_offline_notebook.py），以及本常量 ——
+    磁盘 sha 骗得过，模块对象骗不过（旧版没有它 ⇒ 日志里出现 `<missing>`）。
+    """
+    assert isinstance(offline_boot.BOOT_SELF, str) and offline_boot.BOOT_SELF.strip(), (
+        "BOOT_SELF 是「内存里那一份」的唯一可读指纹，删了 notebook 的加载日志就只剩磁盘 sha"
+    )

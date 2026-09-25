@@ -32,9 +32,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from common.protocol import PRIORITY_NONE
+from common.protocol import PRIORITY_NONE, ROLE_OFFLINE
 from remote.hub.queue_peer import QueuePeer
 from remote.hub.store import _JobStore
+from remote.hub.task_pack import OFFLINE_DISK_WINDOW_SEC, OFFLINE_LEG_HINT
 
 #: 未知 job_id 的哨兵根（随 `_job_dir` 一起搬进来）。
 #: 选 tempdir 而不是仓库内目录：任何漏网的 mkdir 都落在系统临时目录（不污染真 store），
@@ -47,7 +48,10 @@ class QueueObserveMixin(QueuePeer):
 
     # ---- 由组合类 `__init__` / 兄弟簇提供（混入只见 `self`；声明一律是裸注解）----
     _cursor: str | None
+    #: 离线盘报名表与它自己的锁（组合类 `__init__` 建；见 `note_offline_disk` 的理由）
+    _disk_lock: Any
     _now: Any
+    _offline_disks: dict[str, float]
     _order: list[str]
     _stores: dict[str, _JobStore]
 
@@ -83,6 +87,11 @@ class QueueObserveMixin(QueuePeer):
                 "pending_n": len(pending),
                 "inflight": inflight,
                 "next_job": pending[0] if pending else None,
+                # 归属可见（2026-09-25）：不说清楚「谁在等谁」，事后只能看到
+                # 「队列不降」而不知道它是在等另一块盘（事故现场就是这样）。
+                # 注意：这里**不**报 claimable 布尔——「可不可领」现在是**相对请求方角色**的
+                # 属性，一个观察者不带角色，任何布尔都会误导（plan §2.2 评审修订）。
+                "roles": {jid: self._stores[course].job_role(jid) for jid in pending},
                 # §4.1 可观测（毒包熔断）：冻了谁、冻在几次；已冻的 job 已不在 pending 里，
                 # 不给这一行就只剩「队列莫名其妙短了」
                 "frozen": {
@@ -97,6 +106,11 @@ class QueueObserveMixin(QueuePeer):
             "active_courses": self.active_courses(),
             "active_workers": self.active_worker_count(),
             "halt": self.all_halted(),
+            # job 身份歧义面（2026-09-24 事故）：非空 = 有 jid 挂在 ≥2 门课上，而
+            # `course_of` 对它们一律拒答（那些 job 谁都跑不了）⇒ 必须让操作员一眼看见。
+            "ambiguous_jids": self.ambiguous_jids(),
+            # 离线盘的报到面 + 「没人能领的离线队列项」（plan §7.2.3 的读数；见方法 docstring）
+            "offline_disk": self.offline_disk_readout(),
         }
 
     # ---- job 作用域委派（与 `_JobStore` 同名同签名） ----
@@ -197,3 +211,46 @@ class QueueObserveMixin(QueuePeer):
         hb = st._last_heartbeat.get(job_id)
         return None if hb is None else round(st._now() - hb, 1)
 
+    def note_offline_disk(self, disk_id: str) -> None:
+        """登记一次**离线盘**露面（`X-Battle-Offline` 的持有者）；空 id 记成 `<offline>`。
+
+        判据（头）由 handler 侧解析，这里只记账——与 job 腿的归属闸共用同一份 `ROLE_HEADER`
+        语义：带标 = 离线盘，缺席 = 在线盘（旧 hub/旧 worker 混合部署逐字节兼容）。
+        """
+        did = (disk_id or "").strip() or "<offline>"
+        with self._disk_lock:
+            self._offline_disks[did] = self._now()
+
+    def offline_disk_readout(self) -> dict:
+        """「本环境有没有离线盘」+「有没有没人能领的离线队列项」——plan §7.2.3 的读数。
+
+        两个数字各治一个坑：
+        · `recent_n`：有离线盘在线 ⇒ 离线课的任务包有人取（这是取包链**唯一**的报到面）；
+        · `stale_jobs`：队列里还挂着 `role=offline` 的**待领**项 ⇒ **没有消费者**。
+          `kind=run` 队列腿 2026-09-25 退役后，这类项只可能来自「盘上遗留 / 手写参数 /
+          混部期旧 hub」，`hint` 直接给该走哪条路（本机也不再有任何人在等它，不再白等 8h）。
+        """
+        now = self._now()
+        with self._disk_lock:
+            recent = sorted(
+                d
+                for d, seen in self._offline_disks.items()
+                if now - seen <= OFFLINE_DISK_WINDOW_SEC
+            )
+            last = max(self._offline_disks.values(), default=0.0)
+        stale: list[dict] = []
+        for course in self._order:
+            st = self._stores[course]
+            for jid in st.claimable_job_ids():
+                if st.job_role(jid) == ROLE_OFFLINE:
+                    stale.append({"course": course, "job_id": jid})
+        out: dict = {
+            "recent_n": len(recent),
+            "recent": recent,
+            "last_seen_ago": round(now - last, 1) if last else None,
+            "stale_jobs": stale,
+        }
+        if stale:
+            # 只有真存在「没人能领的离线项」才喊：这句话是给操作员的下一步，不是背景噪音。
+            out["hint"] = OFFLINE_LEG_HINT
+        return out

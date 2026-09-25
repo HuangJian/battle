@@ -8,7 +8,7 @@
 | 成员 | 判据（给出去的是什么） | 调用者（入边） |
 |---|---|---|
 | `_ensure_ts_code` | rollout 用的 TS 运行时 zip（内容寻址，同源码只传一次） | `loop_remote._remote_ppo_publish` |
-| `_volume_plan_block` | 离线计划里的**动态采集块** | `loop_export._export_offline_bundle` · `loop_remote._remote_run_segment` |
+| `_volume_plan_block` | 离线计划里的**动态采集块** | `loop_export._export_offline_bundle`（半离线整段退役前还有一个呼叫者 `loop_remote._remote_run_segment`）|
 | `_export_offline_bundle` | 全离线任务包（`--export-bundle`） | `loop_round_steps.step_export_offline_bundle` |
 | `_export_weights` | 权重归档 | `loop_round_steps.step_export_weights` |
 
@@ -76,11 +76,13 @@ STEPS_BASES = ("TrainingRemote", "TrainingEval", "TrainingExport")
 #: 入边闭集：成员 → {rl 模块: 呼叫点数}（`self.<成员>(` 的真实形态；新入边必须改这张表）。
 #: S4 第二十二刀把 `loop_remote` 切成四簇后，两条入边各自换了落点（实现所在模块）：
 #: `_ensure_ts_code` 的呼叫者在 `_remote_ppo_publish`（→ `loop_remote_job.py`），
-#: `_volume_plan_block` 的呼叫者在 `_remote_run_segment`（→ `loop_remote_drive.py`）。
+#: `_volume_plan_block` 的另一个呼叫者曾住 `_remote_run_segment`（`loop_remote_drive.py`）——
+#: 它随**半离线整段退役**（2026-09-25 并入 origin）一起消失 ⇒ 现在只剩 loop_export 自己那条链
+#: （`_export_offline_bundle` → 它）。退役的正面守卫在 `tests/test_offline_leg_retired.py`。
 INBOUND_CALLS: dict[str, dict[str, int]] = {
     "_ensure_ts_code": {"loop_remote_job.py": 1},
-    # 一处是 loop_export 自己那条链（`_export_offline_bundle` → 它），一处是远端分段的计划。
-    "_volume_plan_block": {"loop_export.py": 1, "loop_remote_drive.py": 1},
+    # 只剩 loop_export 自己那条链（`_export_offline_bundle` → 它）。
+    "_volume_plan_block": {"loop_export.py": 1},
     "_export_offline_bundle": {"loop_round_steps.py": 1},
     "_export_weights": {"loop_round_steps.py": 1},
 }

@@ -56,13 +56,15 @@ REMOTE_DIR = ROOT / "remote"
 #:   除 `store_offline` 外的五个状态混入（账本 / 计量 / 调度 / 租约 / 结果：只靠 `common.protocol`）；
 #: * **L1 单层传输/落盘**：`wire`（传输账）· `job_fs`（作业工作区）· `hub_client` ·
 #:   `offline_deliver` · `offline_eval` · `deliver_zip` · `iter_rollout` ·
-#:   `hub.store_offline`（离线段产物：要靠 L0 的 `artifacts` + `common.fs`，比同族高一层）；
+#:   `hub.store_offline`（离线段产物：要靠 L0 的 `artifacts` + `common.fs`，比同族高一层）·
+#:   `hub.task_pack`（任务包判据叶子：`offline` 与 `queue_offline` 的共同依赖）；
 #: * **L2 传输核心**：`http`（所有业务簇的公共底座）· `push_client` · `plan_run`（半离线执行引擎：
 #:   `worker` 与 `run_loop` 都站在它上面，它自己谁都不靠上层靠）· `hub.store`（`_JobStore`
 #:   组合类：六个混入的组装，因 `store_offline` 在 L1 ⇒ 它只能是 L2）；
 #: * **L3 业务簇**：`bc_job` · `download`（取字节 + **物料落地三兄弟** `_ensure_payload` /
 #:   `_ensure_code` / `_ensure_ts_code`，因此也依赖 L1 的 `job_fs`）· `job_lifecycle` · `push_dispatch`；
-#: * **L4 状态类/组合层**：`hub.queue`（`_HubQueue` 组合类：七个 L3 混入的组装）· `hub.result`
+#: * **L3 业务簇**：… · `hub.offline`（离线段面：`store` + `task_pack` ⇒ L3）；
+#: * **L4 状态类/组合层**：`hub.queue`（`_HubQueue` 组合类：八个 L3 混入的组装）· `hub.result`
 #:   （回传路由：要让推与拉共用同一个校验函数，因此要 `push_dispatch` L3）· `train_core`
 #:   （训练核：模型/opt/kickstart/demo/PPO/产物 —— 它靠 L3 的业务簇组装出一个轮次，因此
 #:   **必须在宿主下面**）· `job_round`（每 job 一轮：旁路线程组 + 注入的 `run_job_fn` +
@@ -88,7 +90,6 @@ LAYERS: dict[str, int] = {
     # 只靠标准库 ⇒ L0；`hub.store`（组合类）与 `hub.queue_auth`（鉴权域混入）都站在它上面。
     "remote.hub.auth": 0,
     "remote.hub.blob": 0,
-    "remote.hub.offline": 0,
     "remote.hub.schedule": 0,
     # 状态类拆分（S4 第十四刀）：`_JobStore` 的六个域混入。五个只靠协议层；`store_offline`
     # 另需 `remote.artifacts`（L0）⇒ 高一档住 L1。它们彼此**零 import**（跨域调用经 `self`）。
@@ -99,6 +100,10 @@ LAYERS: dict[str, int] = {
     "remote.hub.store_wire": 0,
     "remote.net_http": 0,
     "remote.prefetch": 0,
+    # 任务包新鲜度门 / 缺包自愈门 / 清单读数的**纯判据**（合并 origin 时新拆的叶子）：只靠
+    # `common.protocol` + `net_http`(L0) ⇒ **L1**。放在这里（而不是挂在 `hub/http_face`）是因为
+    # 它有两个低层读者：`hub.offline`（取包端点）与 `hub.queue_offline`（离线清单）。
+    "remote.hub.task_pack": 1,
 
     "remote.result_upload": 0,
     "remote.serve_pool": 0,
@@ -115,14 +120,20 @@ LAYERS: dict[str, int] = {
     # 高层次凑」，而是每一簇都要**注解** `_stores` / `_solo` / `_store_of` 的形状，而
     # `from __future__ import annotations` 只推迟求值，mypy 仍要模块级能解析那个名字；
     # 又不能用 `TYPE_CHECKING` 包（`remote_dag._collect` 把 `if` 体当**顶层**边，会造成上向边）。
-    # 于是七个都是 **L3**。
+    # 于是八个都是 **L3**。
     "remote.hub.queue_auth": 3,
     "remote.hub.queue_claims": 3,
     "remote.hub.queue_discover": 3,
     "remote.hub.queue_observe": 3,
+    # 离线任务清单 + 租约域（合并 origin 时新拆的混入）：要 `hub.store`(L2) 与
+    # `hub.task_pack`(L1) ⇒ 与其余七个同秩 **L3**。
+    "remote.hub.queue_offline": 3,
     "remote.hub.queue_resume": 3,
     "remote.hub.queue_scope": 3,
     "remote.hub.queue_store_face": 3,
+    # 离线段面：并入 origin 的新语义后它要 `hub.store`(L2，注解/构造 `_JobStore`) 与
+    # `hub.task_pack`(L1，过期门判据) ⇒ 从 L0 升到 **L3**（仍在 `hub.http_face` L5 之下）。
+    "remote.hub.offline": 3,
     "remote.iter_rollout": 1,
     "remote.job_fs": 1,
     "remote.offline_deliver": 1,
@@ -165,6 +176,9 @@ LAYERS: dict[str, int] = {
     "remote.smoke_loopback": 8,
     "remote.tunnel_ab_probe": 8,
     "remote.notebook_boot": 8,
+    # 一次性修复工具（origin 侧新增）：把**已经落地的回传轮**补做课程侧落位。它 import
+    # `remote.hub_server`（拿 `_JobStore` 起真 store）——与探针同一个位置（L8，站在门面上）。
+    "remote.backfill_offline": 8,
 }
 
 #: 允许的环（键 = 参与环的模块集合，值 = 为什么这是对的）。
@@ -411,7 +425,10 @@ def module_project_imports(module: str, *, top_only: bool = True) -> set[str]:
 
 
 def assert_remote_module(
-    module: str, *, allowed_project_imports: set[str] | None = None
+    module: str,
+    *,
+    allowed_project_imports: set[str] | None = None,
+    allowed_rl: set[str] | None = None,
 ) -> None:
     """单模块视角的账本对账（**实现只有这一处**，六个拆分守卫都调它）。
 
@@ -422,7 +439,10 @@ def assert_remote_module(
          「不许指向任何同层/上层模块」；延迟边的方向由全图对账（`layering_violations`）管；
       ③ **任何** import（含延迟）都不得碰 `rl`——传输/落盘/作业层保持 L2-pure，
          编排只许出现在 L4+ 的入口模块（`run_loop` / `smoke_loopback` / `hub_client` /
-         `offline_eval` 这几个已登记在 `test_layering.py` 的口径里）；
+         `offline_eval` 这几个已登记在 `test_layering.py` 的口径里）。
+         `allowed_rl` 是**点名豁免**（缺省空）：只有「这个模块必须落盘/归档一份课程侧产物，
+         而那条路径的解析/备份实现住在 `rl/` 里」这种情形才该用，且只准列**纯逻辑**模块
+         （stdlib-only、不达 remote ⇒ 不构成环；判据见 `test_layering.RL_ORCHESTRATION`）；
       ④ （传了白名单时）顶层仓内依赖 ⊆ 白名单。
     """
     known = set(remote_modules())
@@ -437,8 +457,9 @@ def assert_remote_module(
         "remote/ 内部的边必须严格向下（见 tests/test_remote_dag.py 的分层账本）"
     )
     rl = sorted(m for m in module_project_imports(module, top_only=False) if m.split(".")[0] == "rl")
-    assert rl == [], (
-        f"{module} 碰了 `rl`：{rl}——传输/落盘/作业层保持 L2-pure（延迟 import 也算一条边）"
+    unlisted = sorted(m for m in rl if m not in (allowed_rl or set()))
+    assert unlisted == [], (
+        f"{module} 碰了未登记的 `rl`：{unlisted}——传输/落盘/作业层保持 L2-pure（延迟 import 也算一条边）"
     )
     if allowed_project_imports is None:
         return

@@ -1,4 +1,4 @@
-"""拆分的**契约守卫**：`_HubQueue` 的七个域混入永住 `remote/hub/queue_*.py`（S4 第十五刀，2026-09-24）。
+"""拆分的**契约守卫**：`_HubQueue` 的八个域混入永住 `remote/hub/queue_*.py`（S4 第十五刀，2026-09-24）。
 
 ## 这一刀切了什么
 
@@ -7,15 +7,23 @@
 
 ```
 class _HubQueue(QueueScopeMixin, QueueDiscoverMixin, QueueAuthMixin, QueueClaimsMixin,
-                QueueResumeMixin, QueueObserveMixin, QueueStoreFaceMixin, _AuthGuard)
+                QueueResumeMixin, QueueObserveMixin, QueueOfflineMixin, QueueStoreFaceMixin,
+                _AuthGuard)
   queue_scope       课程表 · 归属路由 · 模式 · 停机达令 · worker 登记（状态的主人）
   queue_discover    自动发现三相：扫盘 / 开课标记闸 / 「在训」判据
   queue_auth        鉴权面四覆写 + halt_workers 旧名的委派（本簇**继承** `_AuthGuard`）
-  queue_claims      派发与认领：轮转挑选 · peek · 熔断告警 · 合法放弃
+  queue_claims      派发与认领：轮转挑选 · peek · 熔断告警 · 合法放弃 · 归属/停摆闸探针
   queue_resume      续跑锚点 · 离线段补传产物 · 课程路径
-  queue_observe     观测面（只读）· job 路径解析 · 哨兵根 `_MISSING_ROOT`
+  queue_observe     观测面（只读）· job 路径解析 · 哨兵根 `_MISSING_ROOT` · 离线盘报名
+  queue_offline     离线任务清单（发布端）· 课程级离线租约：认领 / 续租 / 释放
   queue_store_face  job 作用域门面：与 `_JobStore` 同名同签名的那批转发
 ```
+
+> ★ 2026-09-25（并入 `origin/goal-nn`）：origin 侧新写的**离线任务清单 + 课程级离线租约**
+> （`GET /offline/tasks`、`POST /offline/lease`、heartbeat / release 三端）在 origin 里住
+> `_HubQueue` 的一个新域 ⇒ 本仓按同一刀法再切出**第八个混入** `queue_offline`
+> （`QueueOfflineMixin`）。于是域成员从 75 涨到 91、同名门面从 31 涨到 33
+> （`job_role` / `role_blocked` 是 store 上已有的两条，队列侧按同一「认领 → 转发」形状补上）。
 
 同一刀还把**两个组合类搬出自己的家**（这是本刀能成立的**使能缝**，不是顺手清洁）：第十四刀只搬了
 `_JobStore` 的六个混入，组合类还在 `hub_server` 里；而 `queue_scope.add_course` 要**构造** store、
@@ -36,14 +44,14 @@ class _HubQueue(QueueScopeMixin, QueueDiscoverMixin, QueueAuthMixin, QueueClaims
 
 ## 本文件钉住的东西
 
-1. **定义唯一**：75 个域成员各住一家，`_HubQueue` 不得再定义任何一个（组合类只组合）；
+1. **定义唯一**：91 个域成员各住一家，`_HubQueue` 不得再定义任何一个（组合类只组合）；
 2. **接线正确**：`_HubQueue.X is Mixin.X`（同一函数对象）+ MRO 逐项 + 类常量经 MRO 可达；
 3. **★ 门面契约**（`queue_store_face` 那一簇的**存在理由**）：与 `_JobStore` 同名的方法
-   **逐参数对账**——28 个完全一致 + 3 个只多一个前置 `course`（课程寻址），且这份名单是**闭集**；
-4. **状态归属唯一**：16 个字段的**写者集合**逐字段对账（含下标/原地变更三种写法）；
+   **逐参数对账**——30 个完全一致 + 3 个只多一个前置 `course`（课程寻址），且这份名单是**闭集**；
+4. **状态归属唯一**：21 个字段的**写者集合**逐字段对账（含下标/原地变更三种写法）；
 5. **带值声明只有一处**（组合类 `__init__`）+ `QueuePeer` 是**纯声明**（方法体全是 `...`）且
    与真实现逐参数一致；
-6. **依赖方向**：七个混入彼此**零 import**、账本层号关系、`queue_resume` 的 `rl` 引用是**延迟**的；
+6. **依赖方向**：八个混入彼此**零 import**、账本层号关系、`queue_resume` 的 `rl` 引用是**延迟**的；
 7. **★ 功能性**：真的建一个 hub 跑一遍跨域链路（登记课程 → 发现 → peek/claim → 观测 → 门面），
    并证明**连最外层的门面也在同一把锁下**。
 """
@@ -64,6 +72,7 @@ import remote.hub.queue_auth as auth_mix
 import remote.hub.queue_claims as claims_mix
 import remote.hub.queue_discover as discover_mix
 import remote.hub.queue_observe as observe_mix
+import remote.hub.queue_offline as offline_mix
 import remote.hub.queue_peer as peer_mod
 import remote.hub.queue_resume as resume_mix
 import remote.hub.queue_scope as scope_mix
@@ -81,8 +90,8 @@ HUB_SERVER = NN_ROOT / "remote" / "hub_server.py"
 BOOT = HUB_DIR / "boot.py"
 QUEUE_MOD = HUB_DIR / "queue.py"
 
-#: 域 -> （混入类, 该域实现的成员）。七个域的并集**恰好**是拆分前 `_HubQueue` 的 75 个域成员
-#: （第 76 个是组合类的 `__init__`）。
+#: 域 -> （混入类, 该域实现的成员）。八个域的并集**恰好**是拆分前 `_HubQueue` 的 91 个域成员
+#: （第 92 个是组合类的 `__init__`）。
 DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
     "queue_scope": (
         scope_mix.QueueScopeMixin,
@@ -102,6 +111,9 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
             "offline_courses",
             "set_mode",
             "active_courses",
+            "_sync_parked",
+            "_note_ambiguous",
+            "ambiguous_jids",
         ),
     ),
     "queue_discover": (
@@ -124,6 +136,8 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
             "claim_job",
             "priority_view",
             "abandon",
+            "job_role",
+            "role_blocked",
         ),
     ),
     "queue_resume": (
@@ -158,6 +172,23 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
             "frozen_jobs",
             "lease_expires_in",
             "last_heartbeat_ago",
+            "note_offline_disk",
+            "offline_disk_readout",
+        ),
+    ),
+    "queue_offline": (
+        offline_mix.QueueOfflineMixin,
+        (
+            "offline_task_courses",
+            "offline_tasks",
+            "_lease_rec",
+            "offline_lease",
+            "holder_info",
+            "claim_offline",
+            "_lease_pub",
+            "heartbeat_offline",
+            "release_offline",
+            "offline_leases",
         ),
     ),
     "queue_store_face": (
@@ -209,6 +240,7 @@ FACADE_SAME_SIG = (
     "heartbeat",
     "is_blocked",
     "job_failure",
+    "job_role",
     "mark_completed",
     "note_worker",
     "reclaims",
@@ -216,6 +248,7 @@ FACADE_SAME_SIG = (
     "record_push_wire",
     "record_result_recv",
     "release",
+    "role_blocked",
     "result_token_ok",
     "set_ready",
     "start_job",
@@ -258,14 +291,21 @@ STATE_WRITERS: dict[str, frozenset[str]] = {
     "_locate_cache": frozenset({"__init__", "course_of"}),
     "_modes": frozenset({"__init__", "add_course", "set_mode"}),
     "_no_marker_warned": frozenset({"__init__", "_serves_course"}),
+    "_ambiguous": frozenset({"__init__", "_note_ambiguous"}),
+    "_disk_lock": frozenset({"__init__"}),
+    "_lease_lock": frozenset({"__init__"}),
+    "_leases": frozenset(
+        {"__init__", "_lease_rec", "claim_offline", "heartbeat_offline", "release_offline"}
+    ),
     "_now": frozenset({"__init__"}),
+    "_offline_disks": frozenset({"__init__", "note_offline_disk"}),
     "_order": frozenset({"__init__", "add_course"}),
     "_solo": frozenset({"__init__", "_adopt_solo"}),
     "_stores": frozenset({"__init__", "add_course"}),
     "_workers": frozenset({"__init__", "_adopt_solo"}),
 }
 
-#: 七个混入 + 声明面允许的仓内依赖（多一个就说明又搬漏/搬多了）。
+#: 八个混入 + 声明面允许的仓内依赖（多一个就说明又搬漏/搬多了）。
 #: `queue_resume` 不在表里：它有一处**延迟** `rl` 引用（见 `test_only_resume_touches_rl`）。
 ALLOWED_IMPORTS = {
     "remote.hub.queue_scope": {"common.protocol", "remote.hub.queue_peer", "remote.hub.store"},
@@ -285,6 +325,14 @@ ALLOWED_IMPORTS = {
         "common.protocol",
         "remote.hub.queue_peer",
         "remote.hub.store",
+        # 离线盘读数的两个窗口常量住 `hub/task_pack.py`（与 `hub.offline` 共用同一份口径）
+        "remote.hub.task_pack",
+    },
+    "remote.hub.queue_offline": {
+        "common.protocol",
+        "remote.hub.queue_peer",
+        "remote.hub.store",
+        "remote.hub.task_pack",
     },
     "remote.hub.queue_store_face": {"remote.hub.queue_peer", "remote.hub.store"},
     "remote.hub.queue_peer": {"common.protocol", "remote.hub.store_leases"},
@@ -357,9 +405,9 @@ def _writers(path: Path, cls_name: str) -> dict[str, set[str]]:
 
 
 def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
-    """75 个域成员各住一家；`_HubQueue` 不得再定义任何一个（组合类只组合）。"""
-    # 74 个**不重名**的域成员（`halt_workers` 是属性对，一个名字两个 FunctionDef）。
-    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 74, len(DOMAIN_METHODS)
+    """91 个域成员各住一家；`_HubQueue` 不得再定义任何一个（组合类只组合）。"""
+    # 91 个**不重名**的域成员（`halt_workers` 是属性对，一个名字两个 FunctionDef）。
+    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 91, len(DOMAIN_METHODS)
     seen: dict[str, str] = {}
     for domain, (cls, methods) in DOMAINS.items():
         defined = _own_defs(HUB_DIR / f"{domain}.py", cls.__name__)
@@ -369,7 +417,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
         for m in set(methods):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(seen) == 74, len(seen)
+    assert len(seen) == 91, len(seen)
 
     own = _own_defs(QUEUE_MOD, "_HubQueue")
     assert sorted(own) == list(OWN_METHODS), (
@@ -385,7 +433,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
 
 
 def test_the_eight_mixins_do_not_share_any_realized_name() -> None:
-    """七个混入的**实现名**（方法 + 类常量）两两不交（同名才会让 MRO 顺序变成语义）。"""
+    """八个混入的**实现名**（方法 + 类常量）两两不交（同名才会让 MRO 顺序变成语义）。"""
     seen: dict[str, str] = {}
     for domain, (cls, _) in DOMAINS.items():
         path = HUB_DIR / f"{domain}.py"
@@ -393,9 +441,9 @@ def test_the_eight_mixins_do_not_share_any_realized_name() -> None:
         for name in realized:
             assert seen.get(name, domain) == domain, f"{name} 同时住 {seen[name]} 与 {domain}"
             seen[name] = domain
-    # 74 个域成员名 + 两个发现类常量（`halt_workers` 的 setter 与 getter 同名，不另算一项）
+    # 91 个域成员名 + 两个发现类常量（`halt_workers` 的 setter 与 getter 同名，不另算一项）
     expect = set(DOMAIN_METHODS) | {"DISCOVER_FRESH_SEC", "DISCOVER_SCAN_MIN_SEC"}
-    assert len(seen) == 76 and set(seen) == expect, (len(seen), sorted(set(seen) ^ expect))
+    assert len(seen) == 93 and set(seen) == expect, (len(seen), sorted(set(seen) ^ expect))
 
 
 # ───────────────────── ② 接线正确 ─────────────────────
@@ -411,7 +459,7 @@ def test_the_composed_class_is_wired_to_the_mixins_by_object_identity() -> None:
 def test_the_mro_is_exactly_the_declared_order() -> None:
     """MRO 逐项对账。**顺序是语义**：同名时靠前者赢，所以按「越底层越靠后」排。
 
-    `QueuePeer` / `Protocol` / `Generic` 出现在 `_AuthGuard` 之后是必然的：七个混入都继承
+    `QueuePeer` / `Protocol` / `Generic` 出现在 `_AuthGuard` 之后是必然的：八个混入都继承
     那个 Protocol（共同声明面）。
     """
     assert [c.__name__ for c in _HubQueue.__mro__] == [
@@ -453,8 +501,8 @@ def test_class_constants_are_reachable_through_the_mro() -> None:
 # `_HubQueue` 的类 docstring 写着「对外的 job 作用域方法与 `_JobStore` **同名同签名**」。
 # 下面三条把这句话变成**可执行断言**——而不是一句随人漂的承诺。
 #
-# 侦察时逐条量了 31 个同名方法，分三档（名单写死在文件头，**闭集**）：
-#   * 28 个逐参数完全一致（`FACADE_SAME_SIG`）；
+# 侦察时逐条量了 33 个同名方法，分三档（名单写死在文件头，**闭集**）：
+#   * 30 个逐参数完全一致（`FACADE_SAME_SIG`）；
 #   * 3 个只多一个前置 `course`（`FACADE_COURSE_EXTRA`：store 是每课程一份，队列要跨课程寻址）；
 #   * `abandon` 在 store 侧叫 `abandon_job`（`FACADE_RENAMED`）。
 # 换出去、或漏接一条，下面立刻红。
@@ -484,19 +532,19 @@ def test_the_same_name_surface_is_exactly_the_declared_closed_set() -> None:
     assert common == declared, (
         f"门面名单漂了：新增 {sorted(common - declared)}，消失 {sorted(declared - common)}"
     )
-    assert len(declared) == 31, len(declared)
+    assert len(declared) == 33, len(declared)
     # 改名那一条**不是**同名（store 侧没有 `abandon`）⇒ 它不属于这个闭集，另处单独钉。
     assert "abandon" in FACADE_RENAMED and "abandon" not in common
     assert "abandon_job" in _callable_names(_JobStore)
 
 
 def test_the_identical_signature_facade_is_byte_for_byte_same_signature() -> None:
-    """★ 28 条「名字 + 参数名 + 参数种类 + 默认值」逐项相等。
+    """★ 30 条「名字 + 参数名 + 参数种类 + 默认值」逐项相等。
 
     这条在本刀里是真能抓住东西的：门面有 6 个形参全用关键字传的转发（如 `claim`）、
     有 3 个纯 `if st: st.X(...)`（无返回）、有 1 个带参注解返回值；漏一个或改一个名字就红。
     """
-    assert len(FACADE_SAME_SIG) == 28
+    assert len(FACADE_SAME_SIG) == 30
     for name in FACADE_SAME_SIG:
         want = _params(getattr(_JobStore, name))
         got = _params(getattr(_HubQueue, name))
@@ -654,13 +702,13 @@ def test_the_missing_store_default_is_the_declared_one_per_method(tmp_path: Path
     assert hub.claimable_job_ids("") == []
 
 
-# ────────────── ④ 状态归属（声明在七个模块里，但账只有一张） ──────────────
+# ────────────── ④ 状态归属（声明在八个模块里，但账只有一张） ──────────────
 
 
 def test_the_state_writer_table_matches_reality() -> None:
-    """★ 16 个字段的**写者集合**逐字段对账（含下标赋值与 `self.X.append(...)` 三种写法）。
+    """★ 21 个字段的**写者集合**逐字段对账（含下标赋值与 `self.X.append(...)` 三种写法）。
 
-    为什么需要它：状态声明分散到七个文件之后，「谁动它」是最容易漂的事。而**只数
+    为什么需要它：状态声明分散到八个文件之后，「谁动它」是最容易漂的事。而**只数
     `self.X = …` 会瞎掉一半**——`_locate_cache` / `_halts` / `_modes` / `_order` /
     `_no_marker_warned` 全部是下标或方法式变更，只看赋值会得到「只有 `__init__` 写」的假表。
     """
@@ -681,7 +729,7 @@ def test_the_state_writer_table_matches_reality() -> None:
 
 
 def test_only_the_composed_init_declares_state_with_values() -> None:
-    """★ 带值声明只在组合类 `__init__`；七个混入的状态一律是**裸注解**。
+    """★ 带值声明只在组合类 `__init__`；八个混入的状态一律是**裸注解**。
 
     这**与第十四刀刻意不同**（那时状态拆到四个 `_init_*` 钩子）：这里 `__init__` 只有 44 行
     而且几处咬合（`_solo` 决定 `_now`；`_discover_root` 决定 `_discover_last` 初值；
@@ -695,7 +743,7 @@ def test_only_the_composed_init_declares_state_with_values() -> None:
         assert valued == allowed, f"{domain} 冒出了带值声明：{sorted(valued - allowed)}"
     # 组合类的类体只有那两个常量（`_JobStore.BC_EPOCH_BODY_MAX` 的同源转发 + 形参缺省值）。
     assert _own_consts(QUEUE_MOD, "_HubQueue") == set(OWN_CONSTS)
-    # ★ 反面对账：`__init__` 里的状态声明**逐条带值**——裸注解（"这就是我的域"）只住七个混入。
+    # ★ 反面对账：`__init__` 里的状态声明**逐条带值**——裸注解（"这就是我的域"）只住八个混入。
     init = next(
         n
         for n in _cls(_tree(QUEUE_MOD), "_HubQueue").body
@@ -717,7 +765,7 @@ def test_only_the_composed_init_declares_state_with_values() -> None:
         elif isinstance(n, ast.Assign):
             declared |= {t.attr for t in n.targets if isinstance(t, ast.Attribute)}
     # 两个鉴权字段的声明点在 `hub/auth.py::_AuthGuard.__init__`（组合类在末尾调它）——
-    # 所以本类体里该少这两个，其余 14 个必须逐条在。
+    # 所以本类体里该少这两个，其余 19 个必须逐条在。
     want = set(STATE_WRITERS) - AUTH_GUARD_FIELDS
     assert declared == want, (
         f"`__init__` 申报的字段与状态表对不上：多 {sorted(declared - want)}，"
@@ -732,7 +780,7 @@ def test_queue_peer_is_declarations_only() -> None:
     """★ `QueuePeer` 是**纯声明**：每个方法体只有 `...`，无一个实现（否则就是第二份实现）。"""
     body = _cls(_tree(HUB_DIR / "queue_peer.py"), "QueuePeer").body
     funcs = [n for n in body if isinstance(n, ast.FunctionDef)]
-    assert len(funcs) == 74, len(funcs)  # 76 个成员 - `__init__` - `_store_of`（见下一条）
+    assert len(funcs) == 75, len(funcs)  # 77 个成员 - `__init__` - `_store_of`（见下一条）
     for n in funcs:
         # 只滤掉文档字符串：`...` 也是 `Expr(Constant)`，滤它就把声明本身滤没了（本守卫
         # 第一版就是这么错的 —— `halt_of` 带 docstring 才暴露出来）。
@@ -832,7 +880,7 @@ def test_the_mixins_never_import_each_other_nor_the_host() -> None:
 
 
 def test_the_layers_match_the_ledger() -> None:
-    """层号是算出来的：七个混入 L3（站在 `queue_peer`(L1) + `hub.store`(L2) 上），
+    """层号是算出来的：八个混入 L3（站在 `queue_peer`(L1) + `hub.store`(L2) 上），
     组合类 L4，HTTP 面（组装 `HubHandler` 的那层）L5，而 `hub_server` 这个**入口**在 L7
     （S4 第十六刀把它收口成薄门面，它下面还有 `hub.boot`(L6)）——`smoke_loopback` 站在入口上
     ⇒ 随迁 L8，必须仍严格向下。"""

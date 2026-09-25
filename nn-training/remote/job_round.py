@@ -48,10 +48,12 @@ from typing import Any
 
 from common.protocol import (
     HEARTBEAT_SEC,
+    ROLE_ONLINE,
     CodeChangedError,
     JobCancelledError,
     ProtocolError,
     RetryableError,
+    UnreapableChildError,
 )
 from remote.bulk_sched import BULK_P2_PREFETCH, BulkPreemptError
 from remote.download import download_payload
@@ -103,7 +105,7 @@ def _prefetch_fill(
     stop: threading.Event,
     *,
     worker_id: str = "",
-    offline_ok: bool = False,
+    role: str = ROLE_ONLINE,
     depth: int = PREFETCH_DEPTH_DEFAULT,
     skip: set[str] | None = None,
     log: Any = None,
@@ -128,7 +130,7 @@ def _prefetch_fill(
                 base_url,
                 token,
                 worker_id=worker_id,
-                offline_ok=offline_ok,
+                role=role,
                 n=max(1, int(depth)),
                 log=None,  # 预取的 peek 不进 poll 告警节流表（同一 url 会互相压报）
             )
@@ -210,11 +212,8 @@ def run_one_round(
     device: str,
     torch_threads: int,
     echo: bool,
-    artifacts_dir: str | Path | None,
-    run_max_iters: int,
-    run_budget_sec: float,
     restart_argv: list[str] | None,
-    offline_ok: bool,
+    role: str = ROLE_ONLINE,
     prefetch_depth: int,
     uploader: ResultUploader,
     run_job_fn: Callable[..., dict],
@@ -222,12 +221,11 @@ def run_one_round(
 ) -> RoundOutcome:
     """取活后的一整轮：旁路线程组 → `run_job_fn` → 交回传 → 收尾。
 
-    **入参分档**（21 个太多？它们全是「宿主已经定好的事实与旋钮」，按角色读）：
+    **入参分档**（17 个太多？它们全是「宿主已经定好的事实与旋钮」，按角色读）：
 
       · 作业身份 —— `job` · `part_dir` · `code_cache_dir` · `pf_store` · `polls_since_accept`；
       · 传输/身份 —— `base_url` · `token` · `worker_id`；
-      · 训练旋钮 —— `device` · `torch_threads` · `echo` · `artifacts_dir` · `run_max_iters` ·
-        `run_budget_sec` · `offline_ok` · `prefetch_depth`；
+      · 训练旋钮 —— `device` · `torch_threads` · `echo` · `role` · `prefetch_depth`；
       · 上报与生命周期 —— `restart_argv`（热替换）· `uploader` · `log`；
       · **注入点** —— `run_job_fn`（不能反向 import `worker`）。
 
@@ -236,7 +234,9 @@ def run_one_round(
     有几个 hub，也不该知道）。`done` / `_polls_since_accept` 是宿主的账，从 `RoundOutcome` 回读。
 
     失败语义（与搬移前逐字一致）：取消 = 零回传零 fail；瞬时失败 = `release_job` 回池；
-    确定性拒绝 = `report_job_failure`（终局）；其它 = 只 log（幂等重拉）。
+    **机器级停滞**（`UnreapableChildError`，2026-09-25）= 同一处置但**自己一行**（「机器级」
+    那一档必须能从日志里看出来）；确定性拒绝 = `report_job_failure`（终局）；其它 = 只 log
+    （幂等重拉）。
     """
 
     jid = job["job_id"]
@@ -270,7 +270,7 @@ def run_one_round(
             args=(base_url, token, pf_store, _pf_stop),
             kwargs={
                 "worker_id": worker_id,
-                "offline_ok": offline_ok,
+                "role": role,
                 "depth": prefetch_depth,
                 "skip": {jid},
                 "log": log,
@@ -310,9 +310,6 @@ def run_one_round(
             echo=echo,
             code_cache_dir=code_cache_dir,
             lease_token=lease_token,
-            artifacts_dir=artifacts_dir,
-            run_max_iters=run_max_iters,
-            run_budget_sec=run_budget_sec,
             preloaded=preloaded,  # P2 命中面：有它则 payload 段零网络
             log=log,
             should_cancel=_cancel.is_set,
@@ -357,6 +354,19 @@ def run_one_round(
             f"cancel_latency_s={time.time() - _t_ppo0:.1f}"
         )
         abandon_job(base_url, token, jid, worker_id=worker_id, reason="landed")
+    except UnreapableChildError as e:
+        # ★ 机器级停滞（子进程 SIGKILL 之后收不了尸：D 状态 / 挂住的挂载点；2026-09-25 二次取证）。
+        # **必须排在 `except RetryableError` 之前**——它是 `RetryableError` 的子类，落到那条上
+        # 处置虽然也是 release，但日志会退化成「瞬时失败」，现场就看不出「机器级」这一档（那正是
+        # 这次事故最难查的地方）。处置 = **立即还租约、立即重领重投**：不睡（云机按分钟计费，
+        # 空转就是烧配额）、不报 `report_job_failure`（那会把机器的问题记在内容头上 ⇒ hub 落终局
+        # failed ⇒ 训练停腿 ⇒ 反过来把云机停掉）、不计毒包（hub 只对**租约过期**计 reclaims，
+        # 主动 release 不算 ⇒ 反复重投永远不会把自己冻死）。
+        log(
+            f"job {jid} 机器级停滞（子进程收不了尸）: {e} — release 租约立即重领"
+            "重投同一份活（不睡/不报失败/不计毒包，云机不停）"
+        )
+        release_job(base_url, token, jid, lease_token, log=log)
     except RetryableError as e:
         # 瞬时失败（网络/5xx/传输损坏）：主动还租约立即回池——不再付 30min 过期等待
         log(f"job {jid} 瞬时失败: {e} — release 租约回池，立即可重领")

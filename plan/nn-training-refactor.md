@@ -132,7 +132,7 @@ P0 ──→ P1 ──→ P3 ──→ P4
 「响亮错误变哑巴」坑。
 
 - 决策：`DECISIONS.md` §2026-09-23-goalnn-common-primitives-layer
-- 全文与教训：`docs/nn/engineering.md` §21
+- 全文与教训：`docs/nn/engineering.md` §26
 - 回归防线：`tests/test_common_layer.py`（17 例，含 AST 源码守卫与层契约守卫）
 - **门禁：2247 passed / 3 skipped / 0 failed**（ruff + mypy 绿）。
 - 层契约（**动 `common/` 前必读**）：只依赖 stdlib、不反向 import 上层、无副作用、
@@ -142,7 +142,7 @@ P0 ──→ P1 ──→ P3 ──→ P4
 
 ### 5.2 已完成 —— S3：断开 `rl` ↔ `remote` 包循环（2026-09-23）
 
-> **编号口径**：本节曾写作「S2」，与 `docs/nn/engineering.md` §22 / `DECISIONS.md`
+> **编号口径**：本节曾写作「S2」，与 `docs/nn/engineering.md` §27 / `DECISIONS.md`
 > §2026-09-23-goalnn-layering-common-sink 的「S3」不一致 ⇒ 现统一为文档口径：
 > S1 = `common/` 原语层（§5.1，已完成）· S2 = `text=True` 编码隐患（附于 S1，已完成）·
 > **S3 = 包循环断开（本节，已完成）** · S4 = 拆神模块（§5.3，**首簇已完成**：
@@ -154,7 +154,7 @@ P0 ──→ P1 ──→ P3 ──→ P4
 纯逻辑切线、环已断、上层包不得引编排。
 
 - 决策：`DECISIONS.md` §2026-09-23-goalnn-layering-common-sink
-- 全文与教训：`docs/nn/engineering.md` §22
+- 全文与教训：`docs/nn/engineering.md` §27
 - **门禁：2252 passed / 3 skipped / 0 failed**
 
 <details><summary>原诊断与设计（保留供追溯）</summary>
@@ -195,7 +195,7 @@ L2  remote/                                                         （传输；
 **落地实测**：①②③已完成；⑤ 改由 `tests/test_layering.py` 以「纯逻辑不得 import 编排」+「remote
 不得传递触及编排（环已断）」两条性质断言承担。
 
-**④（注入式接口）当天被否决**（理由与替代方案 → `docs/nn/engineering.md` §22「同日修订」）：
+**④（注入式接口）当天被否决**（理由与替代方案 → `docs/nn/engineering.md` §27「同日修订」）：
 `loop_steps`/`loop_guards` 外部使用者为零且正要被 S4 拆、`bc_loop` 的测试直接 monkeypatch
 `remote.hub_client._request`。改做「导出器路径单源化（`EVAL_SCRIPT` 进 `common/protocol.py`）」
 ⇒ `rl/eval_local` 回纯逻辑，**编排层 17 → 11 模块**；白名单→声明式快照 `RL_ORCHESTRATION`（双向对账）。
@@ -212,7 +212,7 @@ L2  remote/                                                         （传输；
 > （19 函数 + 2 异常 + 4 常量，43–611 行）**零逻辑改动**搬到 `rl/loop_transport.py`，
 > `loop_steps` 只留显式清单门面（2328 → 1812 行）。
 > 决策 → `DECISIONS.md` §2026-09-23-goalnn-godmodule-loop-transport；全文与教训 →
-> `docs/nn/engineering.md` §23；守卫 → `tests/test_loop_transport_split.py`（7 例）。
+> `docs/nn/engineering.md` §28；守卫 → `tests/test_loop_transport_split.py`（7 例）。
 > **门禁：2262 passed / 3 skipped / 0 failed**。
 > **最大教训**：DI seam 是**模块全局**（`dist_common` / `_push_submit` / `_push_wait_result`），
 > patch 目标**随实现走**——同名 seam 在两处并存是两个真实注入点，不是重复；且
@@ -274,7 +274,7 @@ patch 目标随实现走，别名形态（`import rl.loop_steps as ls; ls.X = �
 
 > ⚠ **落地时改了方向**：下面「第二步的已知代价」一条里写的「组合类 `TrainingLoop` 要加一个基类」
 > **没有采用**——实际是 `class TrainingSteps(TrainingRemote)`（调用者依赖被调用者）。理由与收益见
-> `docs/nn/engineering.md` §23「第二步」一节。下文保留原始设计供追溯。
+> `docs/nn/engineering.md` §28「第二步」一节。下文保留原始设计供追溯。
 
 ```
 _remote_ppo_publish(302) · _remote_ppo_land(116) · _remote_run_segment(127) · _remote_iter(74)
@@ -309,7 +309,7 @@ _remote_ppo_fetch(13) · _remote_ppo_probe(12) · _push_submit_first(10) · _rem
 **首刀（已完成，同日）**：`HubHandler` 的 admin 控制面（9 方法 / 218 行）→ `remote/hub/admin.py::AdminRoutes`
 
 > 落地结果：`hub_server.py` 3974 → **3728** 行；守卫 `tests/test_hub_admin_split.py`（8 例）；门禁 **2274 passed**。
-> 决策 → `DECISIONS.md` §2026-09-23-goalnn-godmodule-hub-admin；全文 → `engineering.md` §23「第三步」。
+> 决策 → `DECISIONS.md` §2026-09-23-goalnn-godmodule-hub-admin；全文 → `engineering.md` §28「第三步」。
 > 落地时额外摸到**两个坑**（均已避开）：
 > ① **名字成环**：admin 组读的 `NET_PROBE_MAX` / `_deterministic_fill` 必须**随迁**（留下会被
 >    「hub_server import admin 拿混入」反过来要 import ⇒ 双向环；已 grep 证实全仓无其它读者 ⇒ 零门面）；
@@ -416,7 +416,7 @@ _admin_net_probe(20) · _admin_halt(18) · _admin_queue(10) · _admin_status(9) 
 反向探针两处都命中（`remote/_probe_wire.py::_WIRE` / `worker.py` 里重复实现 `_wire_flush`）。
 门禁 **2295 passed / 3 skipped**。
 
-> 决策 → `DECISIONS.md` §2026-09-23-goalnn-godmodule-wire；全文 → `engineering.md` §23「第四步」。
+> 决策 → `DECISIONS.md` §2026-09-23-goalnn-godmodule-wire；全文 → `engineering.md` §28「第四步」。
 
 #### 5.3.5 第五步（2026-09-23，**已完成**）—— HTTP 传输核心 → `remote/http.py`，BC 留待第六步
 
@@ -468,7 +468,7 @@ _admin_net_probe(20) · _admin_halt(18) · _admin_queue(10) · _admin_status(9) 
 > `test_remote_ppo` 3）。守卫：状态契约改**三宿主**（`worker` / `wire` / `http`）＋新增
 > `tests/test_http_split.py`（**8 例**，含两个方向的注入点口径各一条）。
 > 反向探针两处命中。门禁 **2295 → 2302 passed / 3 skipped**；mypy 371 源文件绿。
-> 决策 → `DECISIONS.md` §2026-09-23-goalnn-godmodule-http；全文 → `engineering.md` §23「第五步」。
+> 决策 → `DECISIONS.md` §2026-09-23-goalnn-godmodule-http；全文 → `engineering.md` §28「第五步」。
 >
 > ⚠ **差点漏掉的 seam 类**：`download_payload` 这样的**宿主外形、传输层里子**（在 `worker` 里，
 > 但走 `_get_with_retry`）——注入点在 `http`，是跑门禁才点出来的。第六步拆 BC 时同理：
@@ -494,7 +494,7 @@ _admin_net_probe(20) · _admin_halt(18) · _admin_queue(10) · _admin_status(9) 
 > 全仓对本组都是直接调用（无 `setattr`）⇒ 显式转发就够，测试一行不改。
 > 守卫 `tests/test_job_fs_split.py`（6 例）；反向探针往 worker 追加 `def prune_job_dirs` 即被点名。
 > 门禁 **2302 → 2308 passed / 3 skipped**；mypy 373 源文件绿。
-> 决策 → `DECISIONS.md` §2026-09-23-goalnn-godmodule-jobfs；全文 → `engineering.md` §23「第六步之一」。
+> 决策 → `DECISIONS.md` §2026-09-23-goalnn-godmodule-jobfs；全文 → `engineering.md` §28「第六步之一」。
 >
 > **顺带发现（已登记，未处理）**：`_ensure_commit` **全仓零调用**（只有 `_git_head` 被它自己调）
 > ——既存死代码；删代码要单开一次并有决策。
@@ -509,7 +509,7 @@ _admin_net_probe(20) · _admin_halt(18) · _admin_queue(10) · _admin_status(9) 
 > `test_torch_stays_a_deferred_import_inside_run_bc_job` 是**「顶层零 torch」这条老规矩第一次被
 > 机械钉住**（同时断言顶层没 torch 与函数体内有）。反向探针两处均命中。
 > 门禁 **2308 → 2314 passed / 3 skipped**；mypy 375 源文件绿。
-> 决策 → `DECISIONS.md` §2026-09-23-goalnn-godmodule-bcjob；全文 → `engineering.md` §23「第六步之二」。
+> 决策 → `DECISIONS.md` §2026-09-23-goalnn-godmodule-bcjob；全文 → `engineering.md` §28「第六步之二」。
 
 > **第三刀已落地（同日）**：下载簇（**252 行**）搬进 `remote/download.py`（313 行）：
 > `_progress_logger` · `download_payload` / `download_code` / `download_ts_code` /
@@ -528,7 +528,7 @@ _admin_net_probe(20) · _admin_halt(18) · _admin_queue(10) · _admin_status(9) 
 > 写死了 `remote/worker.py` ⇒ 随本刀改为 `remote/download.py`。
 > 反向探针两处均命中（worker 里重定义 `download_payload`、第三份 `_progress_logger`）。
 > 门禁 **2314 → 2321 passed / 3 skipped**；mypy **377** 源文件绿。
-> 决策 → `DECISIONS.md` §2026-09-23-goalnn-godmodule-download；全文 → `engineering.md` §23「第七刀」。
+> 决策 → `DECISIONS.md` §2026-09-23-goalnn-godmodule-download；全文 → `engineering.md` §28「第七刀」。
 
 > **（已执行）下一批刀口（worker 余下 2348 行）**：① 作业生命周期簇（`peek_jobs` / `request_priority` /
 > `claim_job` / `job_started` / `job_ready` / `abandon_job` / `job_status` / `start_cancel_watcher` /
@@ -567,7 +567,7 @@ http, wire, bulk_sched}`（全向下，零 `worker`）。
    单跑绿；全量 xdist 下恰好绿所以长期未被发现；本刀在 HEAD 上复现并修掉）。新口径：重绑式
    标量只查「名字在」+ 一条与顺序无关的语义断言（重绑只发生在所有者模块）。
 
-> 决策 → `DECISIONS.md` §2026-09-23-goalnn-godmodule-joblifecycle；全文 → `engineering.md` §23「第八刀」。
+> 决策 → `DECISIONS.md` §2026-09-23-goalnn-godmodule-joblifecycle；全文 → `engineering.md` §28「第八刀」。
 > 守卫 → `tests/test_job_lifecycle_split.py`（8 例）。
 
 > **下一批刀口（worker 余下 1805 行）**：**已无可整块搬的叶子簇**——余下都是宿主
@@ -599,7 +599,7 @@ L3 业务簇（`bc_job`/`download`/`job_lifecycle`/`push_dispatch`）→ L4 组�
 `run_plan_job` 下沉到 L1（比如 `remote/job_fs.py`）而 `worker` 直接拿，要么让 `worker.run_job`
 从调用方收这两个函数——两条都属决策，不该混进「加一条守卫」。
 
-> 决策 → `DECISIONS.md` §2026-09-23-goalnn-remote-dag-ledger；全文 → `engineering.md` §23
+> 决策 → `DECISIONS.md` §2026-09-23-goalnn-remote-dag-ledger；全文 → `engineering.md` §28
 > 「收口：`remote/` 内部依赖账本」。反探针六处全命中；门禁 **2349 passed / 3 skipped**。
 
 > **（历史）第二刀的预期执行清单**（已执行，保留供对照）：`_bc_fetch_resume` / `_bc_local_resume_dir` /
@@ -644,7 +644,7 @@ CLI 侧传 `_real_run_job`）。引擎里那个 `_real_run_job` **兜底删掉**
 `iter_spec` seam 在 `plan_run` 且测试跟着迁了 · 账本空且全图零环 · 分层 `plan_run < worker < run_loop`。
 **反探针七处全命中**（含 `plan_run` 标成 L1 → 3 处红）。
 
-> 决策 → `DECISIONS.md` §2026-09-23-goalnn-remote-ring-split；全文 → `engineering.md` §23「拆环」。
+> 决策 → `DECISIONS.md` §2026-09-23-goalnn-remote-ring-split；全文 → `engineering.md` §28「拆环」。
 > 门禁 **2349 → 2359 passed / 3 skipped**；mypy **383** 源文件绿；根 `bun run check` 2120 pass / 0 fail。
 
 **下一步（供将来对照）**：`remote/` 内部已零环，S4 余下是纯结构工作 —— `worker.py` 的宿主
@@ -678,7 +678,7 @@ CLI 侧传 `_real_run_job`）。引擎里那个 `_real_run_job` **兜底删掉**
 
 新守卫 `tests/test_train_core_split.py`（**14 例**）；反探针**七处全命中**。门禁 **2359 → 2374**。
 
-> 决策 → `DECISIONS.md` §2026-09-24-goalnn-godmodule-traincore；全文 → `engineering.md` §23「第九刀」。
+> 决策 → `DECISIONS.md` §2026-09-24-goalnn-godmodule-traincore；全文 → `engineering.md` §28「第九刀」。
 
 #### 5.3.10 第十刀（2026-09-24，**已完成**）—— 拆宿主之二：`worker_loop` 的「每 job 一轮」下沉 `job_round`
 
@@ -703,7 +703,7 @@ CLI 侧传 `_real_run_job`）。引擎里那个 `_real_run_job` **兜底删掉**
 顺手修：① 上游集合从**账本推**而非写死（写死的带引号字面量会被 `test_subproc_util` 的 spawn marker
 误判）；②两处既有守卫的前缀匹配会误伤 `remote.worker_proc`（L0）⇒ 改成按模块名精确比。
 
-> 决策 → `DECISIONS.md` §2026-09-24-goalnn-godmodule-jobround；全文 → `engineering.md` §23「第十刀」。
+> 决策 → `DECISIONS.md` §2026-09-24-goalnn-godmodule-jobround；全文 → `engineering.md` §28「第十刀」。
 
 #### 5.3.11 第十一刀（2026-09-24，**已完成**）—— `hub_server` 的 25 个路由方法按域分四组 + 四类形状收成 5 个助手
 
@@ -732,7 +732,7 @@ CLI 侧传 `_real_run_job`）。引擎里那个 `_real_run_job` **兜底删掉**
 新守卫 `tests/test_hub_routes_split.py`（**15 例**，含 `_Probe(hs.HubHandler)` 无 socket 功能性）；
 反探针**十一处全命中**。门禁 **2387 → 2402**。
 
-> 决策 → `DECISIONS.md` §2026-09-24-goalnn-hub-routes-split；全文 → `engineering.md` §23「第十一刀」。
+> 决策 → `DECISIONS.md` §2026-09-24-goalnn-hub-routes-split；全文 → `engineering.md` §28「第十一刀」。
 
 **下一刀**：`hub_server` 只剩引导链与最后两个千行状态类（`_JobStore` / `_HubQueue`：拆 = 拆状态，
 与拆路由是两类工作）；`worker.py` 余 1042 行同理。
@@ -762,7 +762,7 @@ CLI 侧传 `_real_run_job`）。引擎里那个 `_real_run_job` **兜底删掉**
 守卫：`test_download_split.py` +3 · `test_job_round_split.py` +1（零下载调用点 / 13 形参双向一致 /
 功能性「patch 打偏就红」/ 存活日志恰好两处调用）；反探针 **11/11**。门禁 **2402 → 2406**。
 
-> 决策 → `DECISIONS.md` §2026-09-24-goalnn-worker-landing-trio；全文 → `engineering.md` §23「第十三刀」。
+> 决策 → `DECISIONS.md` §2026-09-24-goalnn-worker-landing-trio；全文 → `engineering.md` §28「第十三刀」。
 
 #### 5.3.13 第十四刀（2026-09-24，**已完成**）—— 拆状态：`_JobStore` 按**域**拆成六个混入
 
@@ -797,7 +797,7 @@ CLI 侧传 `_real_run_job`）。引擎里那个 `_real_run_job` **兜底删掉**
 守卫 `tests/test_hub_job_store_split.py`（**17 例**，含两条功能性：跨域链路落在同一个对象上 ·
 持有 `_lock` 时最独立的计量簇也阻塞）；反探针 **11/11 命中**。门禁 **2406 → 2423**。
 
-> 决策 → `DECISIONS.md` §2026-09-24-goalnn-hub-jobstore-mixins；全文 → `engineering.md` §23「第十四刀」。
+> 决策 → `DECISIONS.md` §2026-09-24-goalnn-hub-jobstore-mixins；全文 → `engineering.md` §28「第十四刀」。
 
 #### 5.3.14 第十五刀（2026-09-24，**已完成**）—— `_HubQueue` 拆七混入（先办两相：先把两个类搬出宿主）
 
@@ -853,7 +853,7 @@ CLI 侧传 `_real_run_job`）。引擎里那个 `_real_run_job` **兜底删掉**
 持有 `_lock` 时最外层门面也阻塞 · `_adopt_solo` 跨域搬进程状态）；反探针 **14/14 命中**。
 门禁 **2423 → 2449**；mypy **401 → 413**。
 
-> 决策 → `DECISIONS.md` §2026-09-24-goalnn-hub-hubqueue-mixins；全文 → `engineering.md` §23「第十五刀」。
+> 决策 → `DECISIONS.md` §2026-09-24-goalnn-hub-hubqueue-mixins；全文 → `engineering.md` §28「第十五刀」。
 
 **下一刀**：`hub_server` 余 **887 行** —— 迭代器与两个状态类都已不在里面，只剩**引导链与 HTTP 面**
 （handler / 派发表 / `main` / 启动参数）。这是 S4 的最后一块结构面。
@@ -900,7 +900,7 @@ CLI 侧传 `_real_run_job`）。引擎里那个 `_real_run_job` **兜底删掉**
 反探针 **12/12 命中**。nn 门禁 **2449 → 2462**；mypy **413 → 415**；根 `bun run check` 2120 pass；
 dashboard **1105 pass / 0 fail** + typecheck 绿。
 
-> 决策 → `DECISIONS.md` §2026-09-24-goalnn-hub-entry-split；全文 → `engineering.md` §23「第十六刀」。
+> 决策 → `DECISIONS.md` §2026-09-24-goalnn-hub-entry-split；全文 → `engineering.md` §28「第十六刀」。
 
 **S4 到此收口**：`remote/` 的四个神模块（`worker` / `hub_server` / `loop_steps` / `TrainingSteps`）
 里前两个已拆完并收口（第十三·十六刀），第四个见 §5.2。余下可做的是**同一套手法**在
@@ -1182,14 +1182,14 @@ dashboard typecheck + **1105 / 0**；`check-decisions` ok。
 > **✅ B1 已落地（2026-09-25，第二十五刀）**：`rl/batch_eval.py` **1805 → 1616**，新模块
 > `rl/batch_plan.py` **271 行**（把 13 函数 + 10 常量纯搬；旧家 21 条自别名再导出 ⇒ 调用点零改动）；
 > 分层快照**未红**（新模块不达 remote）；唯一演进的守卫是 `test_dist_common_poll`（改成「按定义搜家」）。
-> 全文 → `docs/nn/engineering.md` §23「第二十五刀」；决策 → `DECISIONS.md`
+> 全文 → `docs/nn/engineering.md` §28「第二十五刀」；决策 → `DECISIONS.md`
 > §2026-09-25-goalnn-batch-plan-b1-split。
 >
 > **✅ B2 已落地（2026-09-25，第二十六刀）**：`rl/batch_eval.py` **1616 → 1190**，新模块
 > `rl/batch_store.py` **680 行**（`BatchStore`：8 个具名转移 + 读面 3 + 请求面 4；`_tx` 取代
 > `@_claim_locked`；`dirty` 才落盘；`_publish` 是全仓唯一台账写点）。两条★特例语义由守卫正面钉；
 > **差分探针 54/54 步与旧实现等价**；反探针 22/22 全红（首轮 1 条存活 = 真空档，已补用例）。
-> 全文 → `docs/nn/engineering.md` §23「第二十六刀」；决策 → `DECISIONS.md`
+> 全文 → `docs/nn/engineering.md` §28「第二十六刀」；决策 → `DECISIONS.md`
 > §2026-09-25-goalnn-batch-store-b2-split。**下一步 = B3**（执行器纯搬 → `rl/batch_runner.py`）。
 
 #### 5.5.1 为什么它「按链切」不动（先量后定的结论）
@@ -1454,7 +1454,7 @@ B5a（相位边界）、以及 B5b（状态对象化）的设计。**零行为�
 ### 5.6.3 ✅ B5b（2026-09-25，第三十一刀）：状态对象化 —— 677 行拆成 13 个方法
 
 > **落地结果（偏离见下）**：`_UnitLanes`（**同模块** `rl/batch_runner.py`，675 行 / 13 方法），
-> `_run_channels` **677 → 4 行**（只剩构造 → `run()`）。全文 → `docs/nn/engineering.md` §31；
+> `_run_channels` **677 → 4 行**（只剩构造 → `run()`）。全文 → `docs/nn/engineering.md` §28；
 > 决策 → `DECISIONS.md` §2026-09-25-goalnn-batch-lanes-objectify。
 >
 > **★ 偏离本节的目标形态：不换模块**（原写「新模块 `rl/batch_lanes.py`」）。理由 = 机器体读

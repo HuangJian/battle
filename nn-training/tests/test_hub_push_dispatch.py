@@ -104,6 +104,7 @@ def _wait_until(pred, *, timeout: float = 5.0, step: float = 0.02) -> bool:
     while time.time() < end:
         if pred():
             return True
+        # sleep-ok: 轮询步长（等的是谓词/状态，超时只当挂起兜底）
         time.sleep(step)
     return bool(pred())
 
@@ -126,6 +127,7 @@ def _pump(disp: PushDispatcher, pred, *, timeout: float = 20.0, step: float = 0.
         if pred():
             return True
         disp.tick()
+        # sleep-ok: 轮询步长（打拍节奏：等的是谓词/状态，20s 只当挂起兜底）
         time.sleep(step)
     return bool(pred())
 

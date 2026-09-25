@@ -20,7 +20,8 @@ from typing import Any
 # 测试 patch 了 game_watch 那份、调用点还在读旧绑定就是静默的错口径。
 from common import game_watch
 from common.protocol import EVAL_SCRIPT as _EVAL_SCRIPT
-from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+from common.protocol import UnreapableChildError
+from platform_utils import KILL_REAP_SEC, keep_unreaped, kill_process_tree, popen_own_group
 from rl.log import log
 
 REPO_ROOT = Path(__file__).resolve().parents[2]  # 仓库根 battle2（rl/ 上溯 3 层，修正 2026-09-03）
@@ -336,6 +337,38 @@ def eval_census_fields(manifest: dict | None) -> dict:
     return out
 
 
+#: metrics v8 危险暴露四列（plan/x20-dodge-avoidance §2；`src/nn/danger-metrics.ts`
+#: 同名同义）。`export-eval-game.ts` 顶层直出（2026-09-24）；旧报告/未同步节点缺键 = None。
+EVAL_V8_KEYS = (
+    "playerHpRatio",
+    "dangerTicks",
+    "threatTicks",
+    "dmgFirst600",
+)
+
+
+def eval_v8_fields(manifest: dict | None) -> dict:
+    """从 eval 报告 manifest 抽出 v8 四列（缺键 = 整键省略，不写 None）。
+
+    与 `eval_census_fields` 同形、但缺省语义**故意不同**：下游汇总
+    （`tools/sim/eval-course-ckpt.ts`）以“键缺席”判未知（`!== undefined` 才计入
+    `dmg600Known` 分母）；若写显式 None，JSON 落盘为 null，会被误计入分母、
+    稀释 `clean600%`。合法的 0 值（前 600t 零承伤的干净局）必须保留，
+    故只过滤 None、保留 0。
+    `rl/batch_eval.py::record`（in-loop 日常评估的行构造点）必须经本函数取数，
+    与 `eval_row` 同源——两处行构造点不得各自手写字段表（2026-09-24：v8 提交只改了
+    TS 侧，Python 两处全漏，日常 eval 失明）。
+    """
+    out: dict = {}
+    if not isinstance(manifest, dict):
+        return out
+    for k in EVAL_V8_KEYS:
+        v = manifest.get(k)
+        if v is not None:
+            out[k] = v
+    return out
+
+
 def eval_row(
     manifest: dict,
     *,
@@ -396,6 +429,8 @@ def eval_row(
         "cellsVisited": manifest.get("cellsVisited"),
         "firstKillTick": manifest.get("firstKillTick"),
         "stuckTicks": manifest.get("stuckTicks"),
+        # metrics v8 危险暴露四列（与 batch_eval.record 同源，见 eval_v8_fields）。
+        **eval_v8_fields(manifest),
         "puSpawnBomb": manifest.get("puSpawnBomb"),
         "puSpawnTank": manifest.get("puSpawnTank"),
         "puSpawnFreeze": manifest.get("puSpawnFreeze"),
@@ -437,8 +472,12 @@ def eval_row_keys(rows: list[dict]) -> set[tuple]:
     return {eval_row_key(r) for r in rows if isinstance(r, dict) and r.get("event") == "eval"}
 
 
-def read_eval_rows(eval_jsonl: Path) -> list[dict]:
-    """读账本里全部 `event:"eval"` 逐局行（文件缺失/坏行 = 跳过，绝不抛）。"""
+def _read_ledger_rows(eval_jsonl: Path, event: str) -> list[dict]:
+    """读账本里全部 `event == <event>` 行（文件缺失/坏行 = 跳过，绝不抛）。
+
+    两类调用方（逐局行 / summary 行）共用这一份行解析——两条腿的合并都靠它，
+    别再写第二个读循环（同源判据、唯一入口）。
+    """
     rows: list[dict] = []
     try:
         if not eval_jsonl.exists():
@@ -450,25 +489,99 @@ def read_eval_rows(eval_jsonl: Path) -> list[dict]:
                 r = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if isinstance(r, dict) and r.get("event") == "eval":
+            if isinstance(r, dict) and r.get("event") == event:
                 rows.append(r)
     except OSError:
         pass
     return rows
 
 
-def merge_eval_rows(src_jsonl: Path, dst_jsonl: Path) -> int:
-    """把 `src_jsonl` 的逐局 eval 行并进 `dst_jsonl`（按 `eval_row_keys` 去重），返回新增行数。
+def read_eval_rows(eval_jsonl: Path) -> list[dict]:
+    """读账本里全部 `event:"eval"` 逐局行（文件缺失/坏行 = 跳过，绝不抛）。"""
+    return _read_ledger_rows(eval_jsonl, "eval")
 
-    离线腿的读数回到课程账本**只有**这一条路：云机跑的局写在产物目录的 `eval_log.jsonl`
-    里，随 artifacts zip 回来 → 导入时并进 `tmp/<课>/eval_log.jsonl`（板子读的就是它）。
-    只并 `event:"eval"` 逐局行：`eval_summary` 由课程侧按合并后的台账重算更可信
-    （云的 summary 也一起并会与本地 summary 打架——同一 iter 两行，板子按行画曲线）。
 
-    刻意**不**重算 summary：`settle_eval_summary` 读的是同一本账本，本地下一轮
-    （或控制台 evalA）自然会把合并后的分母算对。
+def read_eval_summary_rows(eval_jsonl: Path) -> list[dict]:
+    """读账本里全部 `event:"eval_summary"` 行（文件缺失/坏行 = 跳过，绝不抛）。"""
+    return _read_ledger_rows(eval_jsonl, "eval_summary")
+
+
+def eval_summary_key(r: dict) -> tuple[int, str] | None:
+    """summary 行的身份 `(iter, wver)`；形状不合法（事件不对/缺键/负 iter）⇒ None。
+
+    与逐局行的 `eval_row_key` **分开**：summary 一个 `(iter, wver)` 只该有一行，没有
+    stage/seed 可进键。`iter <= 0` 的 it0 基线行是合法 summary（控制台的配对基准），
+    所以这里只拒负 iter。
     """
-    return append_eval_rows(dst_jsonl, read_eval_rows(src_jsonl))
+    if not isinstance(r, dict) or r.get("event") != "eval_summary":
+        return None
+    it = r.get("iter")
+    wver = str(r.get("wver") or "")
+    if not isinstance(it, int) or it < 0 or not wver:
+        return None
+    return (int(it), wver)
+
+
+def _summary_games(r: dict) -> float:
+    """summary 行的 `games`（缺/非数 = 0）——单调比较用，不猜内容。"""
+    g = r.get("games")
+    return float(g) if isinstance(g, (int, float)) and not isinstance(g, bool) else 0.0
+
+
+def append_eval_summaries(dst_jsonl: Path, rows: list[dict]) -> int:
+    """把 summary 行并进 `dst_jsonl`，**单调**：只在该 `(iter, wver)` 尚无 summary、
+    或新来的 `games` 更多（断点续跑「先部分、后补齐」的升级）时追加；返回追加行数。
+
+    为什么必须并（2026-09-23 用户实测：`x20-demo-mix` it50–110、每 5 轮 400 局、
+    `node=cloud` 的读数全在账本里，控制台却看不见）：纯云腿（云机评估 → 回传/导入）
+    **没有本地循环**，于是「summary 由课程侧按合并后的台账重算」这条退路根本不存在
+    ——只并逐局行 ⇒ 指标表 eval 列 / eval 弹窗 / 开课回执 / 门判据（都只读 summary 行）
+    对整段读数一律瞎眼。云机自己那份 summary 是在它同一本账本上结算出来的，口径与
+    in-loop 同源（`settle_eval_summary`），并过来正是「同一份读数」。
+
+    单调规则防的是「后到的旧 summary 覆盖先到的新 summary」：重投/重复导入天然会重发。
+    已有 summary 且 `games` 不少于新来的 ⇒ 一行不写（两次调用结果相同 = 幂等）。
+    """
+    have: dict[tuple[int, str], float] = {}
+    for r in read_eval_summary_rows(dst_jsonl):
+        k = eval_summary_key(r)
+        if k is not None:
+            have[k] = max(have.get(k, 0.0), _summary_games(r))
+    fresh: list[dict] = []
+    for r in rows:
+        k = eval_summary_key(r)
+        if k is None:
+            continue
+        g = _summary_games(r)
+        prev = have.get(k)
+        if prev is not None and g <= prev:
+            continue
+        have[k] = g
+        fresh.append(r)
+    if not fresh:
+        return 0
+    dst_jsonl.parent.mkdir(parents=True, exist_ok=True)
+    with open(dst_jsonl, "a", encoding="utf-8") as f:
+        for r in fresh:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    return len(fresh)
+
+
+def merge_eval_rows(src_jsonl: Path, dst_jsonl: Path) -> tuple[int, int]:
+    """把 `src_jsonl` 的云机 A 层评估（**逐局行 + summary 行**）并进 `dst_jsonl`。
+
+    返回 `(新增逐局行数, 新增 summary 行数)`。
+
+    读数回到课程账本只有这一条路：云机跑的局写在产物目录的 `eval_log.jsonl` 里，
+    随 artifacts zip 回来（导入）或随补传体到达（回传）→ 并进 `tmp/<课>/eval_log.jsonl`
+    ——**控制台与门判据只读这一份**。
+
+    逐局行按 `eval_row_key` 去重（`(iter,wver,stage,seed)`；`node` 不进键：同一局在云机与
+    节点各跑一次是同一份读数）；summary 按 `append_eval_summaries` 的单调规则并。
+    """
+    games = append_eval_rows(dst_jsonl, read_eval_rows(src_jsonl))
+    summaries = append_eval_summaries(dst_jsonl, read_eval_summary_rows(src_jsonl))
+    return (games, summaries)
 
 
 def append_eval_rows(dst_jsonl: Path, rows: list[dict]) -> int:
@@ -516,6 +629,12 @@ def run_eval_runner_capture(
     到 `timeout_sec` 才 kill 并按 `TimeoutExpired` 上抛（语义与 `subprocess.run` 逐字一致，
     包括异常体里的 captured output——诊断不能被超时吃掉）。
 
+    **收不了尸是另一档**（2026-09-25）：SIGKILL 之后 `KILL_REAP_SEC` 内连输出都收不回来 ⇒ 抛
+    `UnreapableChildError`（机器级停滞），不是普通超时——调用方对它**不原地重跑**（旧写者可能
+    还活着 ⇒ 同一目录上两个写者写同一份产出），而是清掉半截产出后整轮重投（见
+    `remote/offline_eval.run_cloud_eval` 的轮循环）。分类就住在这个抛出点上：调用方拿到的
+    异常类型就是它唯一能用的判据。
+
     软告警与硬顶同值（默认 5s = 5s）时不重复打 WARN：超时行的抛出体自己带着局身份与现场。
     """
     proc = subprocess.Popen(
@@ -526,7 +645,8 @@ def run_eval_runner_capture(
         text=True,
         encoding="utf-8",
         errors="replace",
-        **_POPEN_NO_WINDOW,
+        # 自带进程组（POSIX）：超时时能把导出器自己带的子进程一起 SIGKILL（只杀父进程会留下孤儿）。
+        **popen_own_group(),
     )
     t0 = time.time()
     warned = False
@@ -548,8 +668,27 @@ def run_eval_runner_capture(
                     )
                 )
             if elapsed >= timeout_sec:
-                proc.kill()
-                out, err = proc.communicate()  # kill 后把尾巴收干净（诊断就在这里面）
+                kill_process_tree(proc)
+                # ★ 这一步曾经是裸 `proc.communicate()`（**无上限**）：子进程卡在不可中断的 IO
+                # 里（D 状态）时它永远读不到 EOF ⇒ 一个 slot 永远出不来、而且什么都看不见
+                # （2026-09-25 云机「rollout 卡死机器半天」的同源形态，见
+                # `platform_utils.reap_bounded`）。有上限之后：尾巴收不到就收不到（诊断少一点
+                # 也比挂住强），本局按**机器级停滞**上抛（`UnreapableChildError`）——它和普通
+                # 超时是两档，调用方按那个分类决定「原地重跑」还是「整轮重投、只补没评的局」
+                # （见 `remote/offline_eval.run_cloud_eval` 的轮循环）。
+                try:
+                    out, err = proc.communicate(timeout=KILL_REAP_SEC)
+                except subprocess.TimeoutExpired:
+                    keep_unreaped(proc)  # 非阻塞地等它哪天退出再收尸（sweep_unreaped）
+                    (log_fn or log)(
+                        f"WARN {kind} 单局子进程杀不掉：{label or '?'} —— SIGKILL 之后"
+                        f" {KILL_REAP_SEC:g}s 内连输出都收不回来（pid={proc.pid}，很可能卡在不可"
+                        f"中断的 IO 里）——本局按机器级停滞上抛，不再等它"
+                    )
+                    raise UnreapableChildError(
+                        f"{kind} 单局子进程杀不掉：{label or '?'} —— SIGKILL 之后"
+                        f" {KILL_REAP_SEC:g}s 内回收不了（pid={proc.pid}）"
+                    ) from None
                 raise subprocess.TimeoutExpired(
                     cmd, timeout_sec, output=out, stderr=err
                 ) from None

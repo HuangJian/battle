@@ -95,14 +95,24 @@ def test_install_falls_back_to_online_when_no_tarball(
 
 
 def test_ensure_passes_tarball_from_cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """cfg["ts_tarball"] 必须传到 install（否则 notebook 填了 CFG 也没用）。"""
+    """cfg["ts_tarball"] 必须传到 install（否则 notebook 填了 CFG 也没用）。
+
+    ★ `ensure()` 里**已经没有任何 bun 分支**（2026-09-25 重裁：这两块盘不跑 rollout，不装 bun），
+    所以本用例不再需要短接 bun 探测 —— 但**真实子进程一律打成响亮失败**这条规矩留着：
+    以后再往 `ensure()` 里加网络/安装分支，会在这里当场红，而不是在沙箱里静默空等半小时
+    （此前的版本因为 `ensure()` 真去 `curl https://bun.sh/install` 而空等 ~51s）。
+    """
     seen: dict = {}
 
     def _fake_install(log, tarball="", **kw):
         seen["tarball"] = tarball
 
+    def _no_subprocess(*a, **k):
+        raise AssertionError("本用例不得起真实子进程（安装/daemon 都要被打桩）")
+
     monkeypatch.setattr(ts, "install", _fake_install)
     monkeypatch.setattr(ts.shutil, "which", lambda *_a, **_k: None)
+    monkeypatch.setattr(ts.subprocess, "run", _no_subprocess)
     monkeypatch.setattr(ts, "state", lambda: "Running")
     monkeypatch.setattr(ts, "start_daemon", lambda log, order="": "already-running")
     monkeypatch.setattr(ts, "self_ip", lambda: "100.64.0.9")

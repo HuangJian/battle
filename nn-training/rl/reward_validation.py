@@ -79,6 +79,12 @@ DEFAULT_RANGES: dict[str, tuple[float, float]] = {
     # 真值 = 26×26 场上中心格曼哈顿最大 25+25=50）。
     "puGotOther": (0.0, 30.0),
     "pickupDist": (-1.0, 50.0),
+    # metrics v8：危险暴露四列（plan/x20-dodge-avoidance §2）。加列必须登记域，
+    # 否则 symbolic_envelope 角点无法求值（test_all_metrics_have_envelope_range 锁）。
+    "playerHpRatio": (0.0, 1.0),  # hp/maxHp，clamp01
+    "dangerTicks": (0.0, 36000.0),  # 累计 tick 的上界 = maxTicks
+    "threatTicks": (0.0, 36000.0),
+    "dmgFirst600": (0.0, 500.0),  # 开局窗承伤上界同 playerDamageTaken
 }
 
 #: 单加性项在角点上的绝对上界（超过即判为数值爆炸风险）。

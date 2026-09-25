@@ -49,17 +49,24 @@ describe('trainModeKnobs：模式 → 课程级键（唯一推导点）', () => 
 
 // ────────────────────────── ② 落盘（preset） ──────────────────────────
 
-describe('course-lifecycle（开课）：离线落课程级键 + hub 该课置 offline', () => {
+describe('course-lifecycle / train-mode（开课）：离线落课程级键 + hub 该课置 offline', () => {
   const src = readSrc('src/server/actions/course-lifecycle.ts')
+  // ★ 2026-09-24（plan/train-mode-hot-switch §2.1）：域映射搬到 `train-mode.ts`（热切那颗开关
+  //   也要用它，而 `course-mode.ts` → `course-lifecycle.ts` 反向 import 会成环）。断言跟着搬——
+  //   不搬的话下面几条会**静默落空**（读的是不再含这段逻辑的文件）。
+  const tm = readSrc('src/server/actions/train-mode.ts')
 
   it('换算只走 trainModeKnobs（第二处推导 = 两处一定会漂开）', () => {
-    expect(src).toContain("trainModeKnobs(trainMode, opts.rolloutSrc ?? 'local')")
-    expect(src).toContain('row.rollout_src = knobs.rolloutSrc')
-    expect(src).toContain('row.run_iters = knobs.runIters ?? -1')
+    expect(tm).toContain("trainModeKnobs('offline', opts.rolloutSrc ?? 'local')")
+    expect(tm).toContain('row.rollout_src = knobs.rolloutSrc')
+    expect(tm).toContain('row.run_iters = knobs.runIters ?? -1')
+    // 开课路径本身不再自己维护一份映射（只转调）
+    expect(src).toContain('applyTrainModeToConfig')
   })
 
   it('离线档的 `run` 绝不写进全局 rl.rollout_src（否则全部课程一起离线）', () => {
-    // 写面只动 `courses.<课>` 那一行：整份文件里不得出现任何 `rl.rollout_src =` 赋值
+    // 写面只动 `courses.<课>` 那一行：唯一写面与开课路径都不得出现任何 `rl.rollout_src =` 赋值
+    expect(tm).not.toMatch(/rl\.rollout_src\s*=/)
     expect(src).not.toMatch(/rl\.rollout_src\s*=/)
     // 反向对照：**启动**侧也不碰它（课程级选项不回流向全局默认面）
     const preset = readSrc('src/server/actions/preset.ts')
@@ -67,13 +74,24 @@ describe('course-lifecycle（开课）：离线落课程级键 + hub 该课置 o
   })
 
   it('切回在线 = 撤掉离线标记（段长必删；只删 `run` 而不删段长 = 半状态）', () => {
-    expect(src).toContain('delete row.run_iters')
-    expect(src).toContain("if (row.rollout_src === 'run') delete row.rollout_src")
-    // 不得顺手清掉别的课程级覆盖（显式写的 node 是另一个理由）
-    expect(src).not.toContain('delete row.rollout_src\n')
+    expect(tm).toContain('delete row.run_iters')
+    // 课程级 `run` 才删：显式写的 `node`（另一个理由）不许顺手清掉。
+    //（旧断言是 `not.toContain('delete row.rollout_src\n')` —— readSrc 把空白压成单空格，
+    //  那个 `\n` 永远不可能出现 ⇒ 是条**恒真**的断言。换成查位置关系：删除必须在
+    //  `=== 'run'` 判定之内。）
+    const guard = tm.indexOf("if (row.rollout_src === 'run')")
+    expect(guard).toBeGreaterThan(-1)
+    expect(tm.indexOf('delete row.rollout_src')).toBeGreaterThan(guard)
   })
 
-  it('开课时把该课 hub 模式一起放对：离线 ⇒ 只让带标 worker 领；在线 ⇒ 恢复派发', () => {
+  it('node 往返记忆：切 offline 前记下生效源，切回 online 时取回（否则静默降成 local）', () => {
+    expect(tm).toContain('rememberRolloutSrc(course, resolveRolloutSrc(cfg, course))')
+    expect(tm).toContain('takeRolloutSrc(course)')
+    // 只记会丢信息的档位（local 是缺省，记了是噪声）
+    expect(tm).toContain("src === 'node' || src === 'auto'")
+  })
+
+  it('开课时把该课 hub 模式一起放对：离线 ⇒ 该课停车；在线 ⇒ 恢复派发', () => {
     expect(src).toContain("opts.trainMode === 'offline' ? 'offline' : 'online'")
     expect(src).toContain('pushHubMode(c, trainMode')
     // 结果要回话（静默切模式 = 「我明明选了在线却不动」）
@@ -117,6 +135,44 @@ describe('入口接线：route 白名单 + app 透传 + 弹窗控件', () => {
     expect(src).not.toContain("{ value: 'run', label:")
     // 离线档忽略 rollout 选择（服务端同样忽略：只认 run/run_iters 那对键）
     expect(src).toContain("trainMode === 'online' ? rolloutSrc : undefined")
+  })
+})
+
+// ────────────────────────── ③b 热切那颗开关的接线（2026-09-24 L1） ──────────────────────────
+
+describe('热切开关的接线：route → setCourseMode → 面板（三源一致性靠这条链）', () => {
+  it('route：setCourseMode 透传 course/mode（那颗开关的唯一入口）', () => {
+    const src = readSrc('src/server/api/route.ts')
+    expect(src).toContain("case 'setCourseMode'")
+    expect(src).toContain("await setCourseMode(bodyStr(body, 'course'), bodyStr(body, 'mode'))")
+  })
+
+  it('course-mode：开关 = 唯一写面 + 推 hub 两步；推 hub 的原语不能回写配置', () => {
+    const src = readSrc('src/server/actions/course-mode.ts')
+    expect(src).toContain('applyTrainModeToConfig(c, m, { remember: true })')
+    // `pushCourseMode` 是「只推 hub + 落意图」的原语：它自己不得出现配置写入
+    const pushStart = src.indexOf('export async function pushCourseMode')
+    const setStart = src.indexOf('export async function setCourseMode')
+    expect(pushStart).toBeGreaterThan(-1)
+    expect(setStart).toBeGreaterThan(pushStart)
+    expect(src.slice(pushStart, setStart)).not.toContain('applyTrainModeToConfig')
+  })
+
+  it('开课/停课的 hub 推送走 pushCourseMode（不再经过会写配置的 setCourseMode）', () => {
+    const src = readSrc('src/server/actions/course-lifecycle.ts')
+    expect(src).toContain('pushCourseMode')
+    expect(src).not.toContain('await setCourseMode(')
+  })
+
+  it('第三源的取数链：stateView 逐课下发 → app 透传 → 矩阵消费', () => {
+    const sv = readSrc('src/server/api/state-view.ts')
+    expect(sv).toContain('courseRolloutSrc')
+    expect(sv).toContain('resolveRolloutSrc(cfg, c)')
+    const app = readSrc('src/web/app/app.tsx')
+    expect(app).toContain('courseRolloutSrc={stateView?.courseRolloutSrc ?? null}')
+    const panel = readSrc('src/web/app/panels/CourseMatrix.tsx')
+    expect(panel).toContain('courseRolloutSrc,')
+    expect(panel).toContain('配置仍是离线（云机接手）')
   })
 })
 

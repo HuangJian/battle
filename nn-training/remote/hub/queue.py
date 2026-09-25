@@ -12,6 +12,7 @@ class _HubQueue(QueueScopeMixin, QueueDiscoverMixin, QueueAuthMixin, QueueClaims
   queue_claims      派发与认领：轮转挑选 · peek · 熔断告警 · 合法放弃
   queue_resume      续跑锚点 · 离线段补传产物 · 课程路径
   queue_observe     观测面（只读）· job 路径解析 · 哨兵根
+  queue_offline     离线任务清单 + 领取租约（第八个域，2026-09-25）
   queue_store_face  job 作用域门面：18 个与 `_JobStore` 同名同签名的方法
 ```
 
@@ -55,6 +56,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from threading import Lock
 
 from common.protocol import COURSE_MODE_ONLINE
 from remote.hub.auth import _AuthGuard
@@ -62,6 +64,7 @@ from remote.hub.queue_auth import QueueAuthMixin
 from remote.hub.queue_claims import QueueClaimsMixin
 from remote.hub.queue_discover import QueueDiscoverMixin
 from remote.hub.queue_observe import QueueObserveMixin
+from remote.hub.queue_offline import QueueOfflineMixin
 from remote.hub.queue_resume import QueueResumeMixin
 from remote.hub.queue_scope import QueueScopeMixin
 from remote.hub.queue_store_face import QueueStoreFaceMixin
@@ -82,6 +85,7 @@ class _HubQueue(
     QueueClaimsMixin,
     QueueResumeMixin,
     QueueObserveMixin,
+    QueueOfflineMixin,
     QueueStoreFaceMixin,
     _AuthGuard,
 ):
@@ -138,10 +142,18 @@ class _HubQueue(
         self._modes: dict[str, str] = {
             c: str(md.get(c) or COURSE_MODE_ONLINE) for c in self._order
         }
+        # 停摆位同步到 store（唯一知道 mode 的层是它）：`set_mode` 热切与启动参数两条路
+        # 都得过这里，否则「重启后离线课变成可领」这类偏差没有任何一处会报错。
+        for _c in self._order:
+            self._sync_parked(_c)
         #: 上次派发过的课程（轮转起点）；None = 从序首开始
         self._cursor: str | None = None
         #: job_id -> course（归属解析缓存；job_id 不可复用，故不会失效）
         self._locate_cache: dict[str, str] = {}
+        #: jid -> 同时持有它的课程（≥2 = 身份歧义）。两个用途：`course_of` 的**去重打点**
+        #: （每个 job 作用域请求都会跑它，逐次打点会把日志刷爆），以及拒答时把
+        #: 「谁和谁撞了」带进 reason。观测面的**全量**清单另有 `ambiguous_jids()`（扫盘）。
+        self._ambiguous: dict[str, list[str]] = {}
         #: 单课程 = 旧形状：进程级状态一律借那一份 store（见类 docstring ③）
         self._solo: _JobStore | None = (
             next(iter(self._stores.values())) if len(self._stores) == 1 else None
@@ -149,6 +161,21 @@ class _HubQueue(
         #: 自动发现的扫描闸（`_discover_last` 初值 0 ⇒ 首次调用必扫）
         if self._discover_root is not None:
             self._discover_last = float("-inf")
+        #: **离线租约**（课程 → `{token, worker_id, at, expires_at}`）：进程内、惰性过期。
+        #: 为什么住实例而不是模块（与 `_TASK_PACK_TRIGGERS` 不同）：生产一个进程一个 hub 两者等价，
+        #: 而单测里每个 hub 各自干净（共享就得分用例清账）。重启即清——与触发账本同口径：
+        #: 最坏情形由回传侧 `(run_id, it)` 首写幂等兜底（plan §3.2）。
+        self._leases: dict[str, dict] = {}
+        self._lease_lock = Lock()
+        #: 离线**盘**报名表：disk_id -> last_seen（秒）。★ 为什么单独一张表：跑
+        #: `battle.offline.ipynb` 的机器**不碰队列**（取包链全在 `/offline/*` 上），它的身份
+        #: 只能在那一面被看到；而「本环境有没有离线盘」这个读数此前恒为空（审计 §4-L3：
+        #: `CFG["offline_worker"]` 全仓只有测试设过）。与 `_leases` 同口径：进程内、只做观测
+        #: （重启即清，最坏情形由回传侧首写幂等兜底）。
+        self._offline_disks: dict[str, float] = {}
+        #: 独立锁：`offline_disk_readout` 会被 `/admin/queue` 调到，而那条路不持 `_lease_lock`
+        #: 也不该持 `_lock`（观测面不许和调度临界区互等）。
+        self._disk_lock = Lock()
         _AuthGuard.__init__(self, now_fn)
         # 时钟与单课程 store 同源（测试注入的假时钟必须一致，否则 claimed 标记的时间戳
         # 会混入真实墙钟）。

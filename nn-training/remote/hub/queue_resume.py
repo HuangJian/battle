@@ -107,23 +107,31 @@ class QueueResumeMixin(QueuePeer):
                 )
         return out
 
-    def merge_eval_rows(self, course: str, rows: object) -> int:
-        """把离线补传来的云机 A 层评估行并进**课程账本** `eval_log.jsonl`，返回新增行数。
+    def merge_eval_rows(self, course: str, rows: object) -> tuple[int, int]:
+        """把离线补传来的云机 A 层评估（逐局行 + summary 行）并进**课程账本**
+        `eval_log.jsonl`，返回 `(新增逐局行数, 新增 summary 行数)`。
 
         为什么要 hub 做这一步：那是控制台/门判唯一读的账本（`<traj>/<课>/eval_log.jsonl`），
         而云机那侧只看得见自己的产物目录——不并进去，整段的评估读数要等「跑完人工导入」
         才存在，而「一条跑偏的腿」正是这条腿要尽早看见的东西。
 
         去重按 `(iter, wver, stage, seed)`（`rl.eval_local.eval_row_key`）：补传天然会重传
-        （重连/重启续投），重复行会让曲线出现两个同一点。只接 `event:"eval"` 逐局行——
-        summary 由课程侧按合并后的台账重算，云端那份不并（避免同 iter 两个 summary 打架）。
+        （重连/重启续投），重复行会让曲线出现两个同一点。
+
+        **summary 也要并**（单调：只在该 `(iter,wver)` 还没有、或新来的 `games` 更多时追）：
+        曾经不并，靠的是「课程侧按合并后的台账重算」——纯云腿没有课程侧循环，那条退路
+        不存在 ⇒ 指标表 eval 列 / eval 弹窗 / 开课回执 / 门判据对整段读数全瞎
+        （2026-09-23 用户实测 it50–110 读数全在却不显示）。
         """
         if not isinstance(rows, list) or not rows:
-            return 0
-        from rl.eval_local import append_eval_rows
+            return (0, 0)
+        from rl.eval_local import append_eval_rows, append_eval_summaries
 
         ledger = self._stores[course].job_root.parent / "eval_log.jsonl"
-        return append_eval_rows(ledger, [r for r in rows if isinstance(r, dict)])
+        good = [r for r in rows if isinstance(r, dict)]
+        games = append_eval_rows(ledger, good)
+        summaries = append_eval_summaries(ledger, good)
+        return (games, summaries)
 
     def resume_anchor(self, course: str) -> dict | None:
         """最新一轮**同轮齐全**的续跑锚点（`None` = 没有可交回的进度）。

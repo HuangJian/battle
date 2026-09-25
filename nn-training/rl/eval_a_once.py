@@ -23,6 +23,11 @@
   python nn-training/rl/eval_a_once.py --course c4-dodge \
     --ckpt nn-training/weights/c4-dodge/c4-dodge.it27.xxx.json --iter 27
   # 本机份额覆盖（缺省跟 policy.evalLocalSlots）：--local-slots 0（纯节点）/ 8（大机器）
+
+it0 基线（`--baseline`，2026-09-24）：**离线开课**那一刻由控制台补派一次（云腿永远产不出
+这一格——`remote/offline_eval.due()` 对 it<1 恒 False，而离线课本机不跑训练 ⇒ 主循环的
+基线派发也不在场上）。权重缺省取**课程活动权重** `out`（= 任务包 manifest 里 init_weights
+的同一份字节 ⇒ 与云腿的段起点同 wver，账本可配对）；`--iter` 恒 0，已落账(wver 命中)即早退。
 """
 
 from __future__ import annotations
@@ -159,11 +164,34 @@ def _write_summary_for_wver(eval_jsonl: Path, key16: str, it: int, t0: float) ->
     return n
 
 
+def resolve_eval_ckpt(ckpt_arg: str, ns, baseline: bool) -> str:
+    """evalA 权重解析（单一事实来源）。
+
+    显式 --ckpt 永远优先；`--baseline` 缺省取课程 `bc`（起点冻结权重），**绝不取
+    live `out`**——out 每轮被训练覆盖，停课→重开后补派的基线会读到新权重，把别轮
+    读数写进 it0 槽（2026-09-25 x20-dodge-l1/L3 实测：各 200 局污染）。
+    bc 缺席 ⇒ 返回空串，调用方响亮拒（不静默拿 out 顶）。
+    """
+    ckpt_arg = str(ckpt_arg or "")
+    if not ckpt_arg and baseline:
+        ckpt_arg = str(getattr(ns, "bc", "") or "")
+    return ckpt_arg
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Run one A-layer clean eval for a course ckpt")
     ap.add_argument("--course", required=True)
-    ap.add_argument("--ckpt", required=True, help="权重文件路径（该 iter 归档或活动 weights.json）")
+    ap.add_argument(
+        "--ckpt",
+        default="",
+        help="权重文件路径（该 iter 归档或活动 weights.json）；--baseline 时可省略（取课程 bc 起点冻结权重）",
+    )
     ap.add_argument("--iter", type=int, required=True)
+    ap.add_argument(
+        "--baseline",
+        action="store_true",
+        help="it0 基线模式：评课程 bc 起点冻结权重 W(0)（iter 必为 0），账本写 iter=0 行",
+    )
     ap.add_argument("--bun", default="bun", help="bun 可执行文件（export-eval-game runner）")
     ap.add_argument(
         "--local-slots",
@@ -180,7 +208,17 @@ def main() -> int:
 
     from rl.config import apply_course, load_course
     from rl.eval_dispatch import dispatch_eval_round
+    from rl.eval_local import BASELINE_EVAL_ITER
     from rl.log import log
+
+    # it0 基线 = 「W(0) 的读数」这件事本身：iter 不是 0 就不是基线（落进别的 iter 槽会被
+    # 控制台当成那一轮的读数）。响亮拒，不静默改口。
+    if args.baseline and args.iter != BASELINE_EVAL_ITER:
+        log(
+            f"[evalA] --baseline 的 --iter 必为 {BASELINE_EVAL_ITER}（收到 {args.iter}）"
+            "——it0 基线是起点权重的读数"
+        )
+        return 2
 
     course_path = REPO / "nn-training" / "curricula" / f"{args.course}.jsonc"
     if not course_path.exists():
@@ -204,7 +242,14 @@ def main() -> int:
     # 与训练同册：tmp/<course>/eval_log.jsonl
     eval_jsonl = traj / "eval_log.jsonl"
 
-    ckpt = Path(args.ckpt)
+    # 权重来源：显式 --ckpt 优先；--baseline 缺省取课程 bc（起点冻结权重，见
+    # resolve_eval_ckpt；禁取 live out——`Path("")` 是 `.`（存在！）⇒ 必须先判空再 Path()，
+    # 否则会把一个目录当权重去算指纹。
+    ckpt_arg = resolve_eval_ckpt(str(args.ckpt or ""), ns, bool(args.baseline))
+    if not ckpt_arg:
+        log("[evalA] 缺 --ckpt（非 baseline 模式必须给权重路径）")
+        return 2
+    ckpt = Path(ckpt_arg)
     if not ckpt.is_absolute():
         for base in (REPO, REPO / "nn-training"):
             cand = base / ckpt
@@ -231,6 +276,12 @@ def main() -> int:
 
     wver = dist_common.weights_fingerprint(str(ckpt))
     key16 = wver[:16]
+    # 幂等早退（离线课「停课→重开」/重试不重派）：判据与主循环 `baseline_summary_landed`
+    # 逐字同口径——`event=eval_summary ∧ iter=0 ∧ 同 wver`（本文件的 `_read_summary` 就是
+    # 同一把尺，读的也是同一册 `traj/eval_log.jsonl`）。
+    if args.baseline and _read_summary(eval_jsonl, key16, BASELINE_EVAL_ITER) is not None:
+        log(f"[evalA] it0 基线已落账（wver={key16[:12]}…）——跳过派发")
+        return 0
     enabled = [
         str(n.get("id") or n.get("url") or "?")
         for n in (cfg.get("nodes") or [])
@@ -240,6 +291,7 @@ def main() -> int:
         f"[evalA] it{args.iter} course={course.name} wver={key16[:12]}… "
         f"max_ticks={ns.max_ticks} difficulty={ns.difficulty} "
         f"→ 派发（与 in-loop 同路：节点池 {enabled or '（无，仅本机）'} + 本机份额）"
+        + ("【it0 基线：课程 bc 起点冻结权重】" if args.baseline else "")
     )
 
     # 本机份额没有要让位的东西（手动触发的评估不在训练的 PPO 窗口里）⇒ gate 立即置位；
@@ -262,7 +314,7 @@ def main() -> int:
         args.iter,
         rollout_winrate=None,
         local_gate=gate,
-        baseline=False,
+        baseline=args.baseline,
     )
     summary = _read_summary(eval_jsonl, key16, args.iter)
     if summary is None:

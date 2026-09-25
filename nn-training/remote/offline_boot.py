@@ -56,10 +56,12 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
@@ -73,6 +75,22 @@ BUNDLE_MAGIC = "battle2-task-bundle"
 #: 解包目录（与 notebook_boot 的 `CODE_DIR` 同值：同一个进程里两份引导不打架）。
 CODE_DIR = "/tmp/worker-code"
 
+#: 引导模块自述指纹（**只给 notebook 加载后打日志用**，不参与任何逻辑）：磁盘 sha 只说明
+#: 「文件刷新成功」，说不了「内存里跑的哪一份」—— 2026-09-25 真机事故里两者恰好相反
+#: （磁盘已是新版、`sys.modules` 里还是 08:09 那版，于是「看着新的、跑着旧的」）。
+#: notebook 打 `getattr(offline_boot, "BOOT_SELF", "<missing>")`，旧模块会显示 `<missing>`。
+#: **改本文件时把末位 +1**（纯人读约定，没有代码读它做判断）。
+BOOT_SELF = "boot-2026-09-25a"
+
+#: 产物目录的三件「续跑真值」（与 `remote/artifacts.py::ArtifactStore` 逐字相同；测试守）。
+#: 三件齐全 = 本机有可续跑的产物（plan/offline-rerun-local-first §3 的判据）。
+PLAN_NAME = "plan.json"
+MANIFEST_NAME = "manifest.json"
+STATE_NAME = "state.json"
+#: TS 运行时树 / 运行时 zip（与 `bundle.TS_TREE_NAME` / `protocol.TS_CODE_NAME` 逐字相同）。
+TS_TREE_NAME = "ts_code"
+TS_CODE_NAME = "ts_code.zip"
+
 #: 产物目录里的两个包名（与 `remote/artifacts.py::ArtifactStore` 逐字相同；测试守）。
 ALL_ZIP = "artifacts.zip"
 LATEST_ZIP = "LATEST.zip"
@@ -80,6 +98,44 @@ LATEST_ZIP = "LATEST.zip"
 PARTIAL_CANDIDATES = (ALL_ZIP, LATEST_ZIP)
 #: `LATEST.zip` 里那行元信息（名字写死在 `remote/artifacts.py::_refresh_latest`）。
 LATEST_ROW_NAME = "metrics_row.json"
+
+#: 离线**任务清单 / 租约**端点（与 `remote/protocol.py` 逐字相同；**本模块不得 import
+#: `remote.*`**：包到手之前那个包还不存在）。清单协议版本与租约时长同理（测试守逐字相同）。
+#: 为什么 cloud 侧也要有一份：`offline_boot.py` 是 notebook 每次会话从 GitHub raw 刷新的那份，
+#: 而 hub 可能在**更旧**的机器上跑（老 hub 没有清单端点）⇒ 兼容必须靠运行时降级，不能靠一起发版。
+OFFLINE_TASKS_PATH = "/offline/tasks"
+OFFLINE_CLAIM_PATH = "/offline/claim"
+OFFLINE_HEARTBEAT_PATH = "/offline/heartbeat"
+OFFLINE_RELEASE_PATH = "/offline/release"
+OFFLINE_QUEUE_VERSION = 1
+OFFLINE_LEASE_TTL_SEC = 900
+#: 本机 worker 身份的落点（`<work>/.worker-id`）：**持久化** ⇒ cell 中断后重跑不会被**自己**
+#: 留下的租约挡在门外（hub 判 `mine` 直接续上；评审 G1）。
+WORKER_ID_NAME = ".worker-id"
+#: 心跳周期（秒）：租约 900s ⇒ 60s 一跳留了 15 次补跳的余量（网络抖动 / 长轮之间）。
+HEARTBEAT_SEC = 60.0
+
+#: 角色头（与 `remote/protocol.py::ROLE_HEADER` / `ROLE_HEADER_VALUE` 逐字相同；测试守——
+#: 本模块**不得 import `remote.*`**，理由见文件头）。
+#:
+#: ★ 2026-09-25（plan/online-offline-role-routing §7.0.1 #2）：跑本 notebook 的云机**天生
+#: 就是离线盘** —— 它自报这一条，hub 才认得出「离线盘在线」（`/admin/queue` 的
+#: `offline_disk` 读数），也才拦得住别人拿走离线课的任务包（与 job 腿共用同一份归属判据）。
+#: 这是**这块盘的身份**，不是「每门课一个开关」：不因此要求 ipynb 填课程名
+#: （`requested_courses` 空 ⇒ 照旧走 `/offline/tasks` 清单发现）。
+ROLE_HEADER = "X-Battle-Offline"
+ROLE_HEADER_VALUE = "1"
+
+
+def _headers(token: str) -> dict[str, str]:
+    """hub 请求头：口令 + **身份**（`X-Battle-Offline`，见 `ROLE_HEADER` 的理由）。
+
+    所有 hub 调用（探活 / 取包 / 续跑锚点 / 代码 / 清单 / 租约 / 补传）都走它：少一处
+    就等于那一次「这块盘没报名」，而漏掉的后果是**静默**的（读数少一个、包可能被别处拿走）。
+    """
+    return {"Authorization": "Bearer " + token, ROLE_HEADER: ROLE_HEADER_VALUE}
+#: 清单轮询的缺省间隔（秒）——`CFG.queue_poll_sec`（与等包轮询同档）。
+DEFAULT_QUEUE_POLL_SEC = 15.0
 
 #: 等包缺省时长（秒）：hub 没导出 / 用户还没上传，都在这条线上等。
 DEFAULT_WAIT_SEC = 1800.0
@@ -241,6 +297,71 @@ def prompt_upload(log: Callable[[str], None]) -> Path | None:
     return find_uploaded_pack({}, log)
 
 
+# ── 本机产物优先（plan/offline-rerun-local-first §3/§4.1）─────────────────────
+
+
+def _read_json_file(p: Path) -> dict | None:
+    """读一个小 json（缺失/损坏/非对象 → None）：本机产物判据**绝不因半截文件炸**。"""
+    try:
+        loaded = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def local_artifacts(dest: str | Path) -> dict | None:
+    """本机产物目录的「续跑真值」（三件齐全才认，否则 None）。
+
+    三件 = `state.json`（续跑点）+ `plan.json`（本段契约）+ `manifest.json`（代码/血统）。
+    **为什么三件都要**：`run_loop` 的 `load_planned_manifest` 就是这么判的（缺一即拒）——
+    这里不猜，只回答一个问题：要不要让包来改写这一段的计划与清单。
+    """
+    root = Path(dest)
+    st = _read_json_file(root / STATE_NAME)
+    plan = _read_json_file(root / PLAN_NAME)
+    man = _read_json_file(root / MANIFEST_NAME)
+    last_it = (st or {}).get("last_it")
+    if st is None or plan is None or man is None:
+        return None
+    if not isinstance(last_it, int) or isinstance(last_it, bool):
+        return None
+    return {
+        "root": root,
+        "last_it": last_it,
+        "start_it": int(plan.get("start_it", 0) or 0),
+        "end_it": int(plan.get("end_it", 0) or 0),
+        "plan_sha256": str(st.get("plan_sha256", "") or ""),
+        "run_id": str(st.get("run_id", "") or ""),
+        "code_sha256": str(man.get("code_sha256", "") or ""),
+        "ts_code_sha256": str(man.get("ts_code_sha256", "") or ""),
+    }
+
+
+def _sha12(text: object) -> str:
+    s = str(text or "")
+    return s[:12] if s else "-"
+
+
+def describe_local_vs_pack(local: dict, idx: dict) -> str:
+    """G2 的对照行（本机 vs 包）：同段/异段一眼可辨 —— **绝不许静默换段**。"""
+    same_plan = bool(local.get("plan_sha256")) and local["plan_sha256"] == str(
+        idx.get("plan_sha256", "") or ""
+    )
+    head = "包与本机计划一致（同一段）" if same_plan else "★ 包与本机不是同一段"
+    return (
+        f"{head}：本机 it{local['last_it']}"
+        f"（计划 it{local['start_it']}→it{local['end_it']}，plan_sha12={_sha12(local['plan_sha256'])}）"
+        f" vs 包 it{idx.get('it')}→it{idx.get('end_it')}"
+        f"（commit {_sha12(idx.get('commit'))}，plan_sha12={_sha12(idx.get('plan_sha256'))}）"
+        "——本机优先：**不**用包改写计划/清单（要换段请清空产物目录，或置 CFG.force_pack=true）"
+    )
+
+
+def _local_sha(root: Path, fname: str, key: str) -> str:
+    """从产物目录的一个 json 件里取一个 sha 字段（读不到/空 ⇒ `""` = 不设门）。"""
+    return str((_read_json_file(root / fname) or {}).get(key, "") or "")
+
+
 # ── hub 侧：解析地址 → 探活 → 取包 ─────────────────────────────────────────
 
 
@@ -273,7 +394,7 @@ def probe_hub(hub: str, token: str, log: Callable[[str], None], timeout: float =
     """`GET /ping` 探活：True/False（**只判连通性**，鉴权错也算「通」——那是配置问题不是网络问题）。"""
     try:
         req = urllib.request.Request(
-            hub.rstrip("/") + "/ping", headers={"Authorization": "Bearer " + token}
+            hub.rstrip("/") + "/ping", headers=_headers(token)
         )
         with _build_opener().open(req, timeout=timeout) as resp:
             resp.read(1)
@@ -309,6 +430,50 @@ def _fetch_guarded(
     return got
 
 
+class PackUnavailableError(SystemExit):
+    """「这门课没拿到任务包」——**只表示取包失败**，不等于训练失败。
+
+    单开一类（`SystemExit` 的子类，message 逐字不变）是为了让 `run()` 能**只**放行这一类：
+    多课程串行时跳过它继续下一门（plan/offline-switch-auto-bundle §3.5），而课程名不一致、
+    产物目录不完整这类**配置错误**照旧立即停（继续跑没有意义）。
+
+    为什么必须是 `SystemExit` 子类：既有用例与 notebook 都按 `SystemExit` 处理取包失败
+    （`pytest.raises(SystemExit)` / cell 末尾 `raise SystemExit(_rc)`）——子类让它们逐字不变。
+    """
+
+
+def _http_error_parts(
+    e: urllib.error.HTTPError, limit: int = 400
+) -> tuple[str, dict]:
+    """HTTPError 的响应正文 → `(人读正文, 解析出的 dict)`。**只读一次**。
+
+    为什么要合成一个函数（评审 F2）：HTTPError 的 fp **读完即空** ⇒ 「先 `_http_error_body(e)`
+    再读一次拿 `path`/`known_courses`」第二次只会拿到 `b""`（现场表现是「hub 说：（空正文）」）。
+    这里一次 `e.read()`，正文文本与结构体都从同一份 bytes 出。
+    """
+    try:
+        raw = e.read()
+    except Exception:  # 正文读不出来不该盖掉 HTTP 状态本身
+        return "（无正文）", {}
+    try:
+        loaded = json.loads(raw.decode("utf-8", "replace"))
+    except ValueError:
+        loaded = None
+    doc = loaded if isinstance(loaded, dict) else {}
+    if doc.get("error"):
+        return str(doc["error"])[:limit], doc
+    text = raw.decode("utf-8", "replace").strip()
+    return (text[:limit] or "（空正文）"), doc
+
+
+def _http_error_body(e: urllib.error.HTTPError, limit: int = 400) -> str:
+    """HTTPError 的响应正文（优先取 json 的 `error` 字段；读不到就说清「无正文」）。
+
+    ⚠ 只能读一次：既要不只正文、又要正文里的字段时用 `_http_error_parts`（F2）。
+    """
+    return _http_error_parts(e, limit)[0]
+
+
 def fetch_task_pack(
     hub: str,
     token: str,
@@ -325,15 +490,47 @@ def fetch_task_pack(
     url = f"{hub.rstrip('/')}/offline/task-pack?course={urllib.parse.quote(course)}"
     try:
         raw = _fetch_guarded(
-            url, {"Authorization": "Bearer " + token}, log, "task-pack", timeout
+            url, _headers(token), log, "task-pack", timeout
         )
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
             log(f"取包被拒 HTTP {e.code} —— HUB_TOKEN 不一致（手动上传仍然可行）")
         elif e.code == 404:
+            # ★ 2026-09-25（plan/offline-switch-auto-bundle §3.2）：hub 的 404 正文里带
+            #   诊断字段（`path` / `known_courses` / 触发回执），而此前只打一行固定文案 ⇒
+            #   现场无法区分「包没导出」「hub 的 traj-root 不对」「hub 压根没发现这门课」
+            #   （三条的表现逐字相同，用户 2026-09-25 因此白等 28 分钟）。这里把正文读出来。
+            body, doc = _http_error_parts(e)
             log(f"hub 上还没有 task-{course}.zip —— 先在控制台「导出任务包」")
+            if body and body not in ("（空正文）", "（无正文）"):
+                log(f"  hub 说：{body}")
+            path_s = str(doc.get("path") or "")
+            known = doc.get("known_courses")
+            if path_s:
+                log(f"  hub 找的落点：{path_s}")
+            if isinstance(known, list):
+                names = ", ".join(str(x) for x in known)
+                if course in [str(x) for x in known]:
+                    log(f"  hub 已知课程：{names or '（无）'}（含本门 ⇒ hub 找得到课，只是没这个包）")
+                else:
+                    log(
+                        f"  hub 已知课程：{names or '（一门都没有）'}（**没有本门** ⇒ hub 还没发现"
+                        "这门课：课程名不一致 / 训练目录不新鲜 / hub 的 --traj-root 不是本机 tmp）"
+                    )
+            if doc:
+                if doc.get("give_up"):
+                    log("  hub 动作：重导已到上界 —— 请到控制台手动「导出任务包」")
+                elif doc.get("triggered"):
+                    log(f"  hub 动作：{doc.get('trigger_note') or '已替我们触发了一次重导'}，稍后会重试")
+                elif doc.get("trigger_note"):
+                    log(f"  hub 动作：{doc['trigger_note']}")
+        elif e.code == 409:
+            # 409 = hub 判「包已过期」（可能已经替我们触发重导）——**正文就是下一步**：
+            # 只打一个数字的话，人在云机上看到的是「取包失败」，而真实原因已经写在正文里了
+            # （plan/offline-rerun-local-first §8.3 第 3 条）。
+            log(f"hub 说任务包已过期（HTTP 409）：{_http_error_body(e)}")
         else:
-            log(f"取包失败 HTTP {e.code} —— 稍后重试")
+            log(f"取包失败 HTTP {e.code}：{_http_error_body(e)}")
         return None
     except Exception as e:
         log(f"取包异常（{type(e).__name__}: {e}）—— 稍后重试")
@@ -366,7 +563,7 @@ def fetch_resume(
     """
     url = f"{hub.rstrip('/')}/offline/resume?course={urllib.parse.quote(course)}"
     try:
-        req = urllib.request.Request(url, headers={"Authorization": "Bearer " + token})
+        req = urllib.request.Request(url, headers=_headers(token))
         with _build_opener().open(req, timeout=timeout) as resp:
             meta = json.loads(resp.read().decode("utf-8"))
     except Exception as e:
@@ -386,7 +583,7 @@ def fetch_resume(
     for name in ("weights.json", "opt.tar", "row.json"):
         q = f"{url}&it={it}&name={urllib.parse.quote(name)}"
         try:
-            req = urllib.request.Request(q, headers={"Authorization": "Bearer " + token})
+            req = urllib.request.Request(q, headers=_headers(token))
             with _build_opener().open(req, timeout=timeout) as resp:
                 (ac_dir / name).write_bytes(resp.read())
         except Exception as e:
@@ -444,8 +641,15 @@ def obtain_pack(
     log: Callable[[str], None],
     work_dir: Path,
     stop: Any = None,
-) -> Path:
+    *,
+    optional: bool = False,
+) -> Path | None:
     """拿任务包：显式路径 → 已有落点 → （hub 取 / 等人传）等到 deadline 为止。
+
+    `optional=True`（本机已有产物时的「本机优先」路径）：**只试一次就收手**——包这时只是
+    「代码/TS 的备源」，为一个可选的东西等 30 分钟（甚至因为等不到而拒绝起跑）正是用户
+    抱怨的那种白等。所以：`wait_s` 归零、不弹上传框、取不到**返回 `None`**（不是
+    `SystemExit`——`0s` 的既有语义是「不等待，立刻报错」，与本模式无关）。
 
     **两条源在同一个循环里轮询**（每轮先看落点、再试 hub）：用户随时可能上传，hub 也随时
     可能被点上「导出」——把它们排成先后两步，会让「上传之后又等满 hub 的超时」这种事发生。
@@ -470,6 +674,8 @@ def obtain_pack(
     course = str(cfg.get("course") or "").strip()
     # 注意 `0` 是**合法**值（「不等待，立刻报错」）——不能用 `or` 兜底（falsy-zero 陷阱）。
     wait_s = DEFAULT_WAIT_SEC if cfg.get("wait_pack_sec") is None else float(cfg["wait_pack_sec"])
+    if optional:
+        wait_s = 0.0  # 本机优先：只试一次（下面的 prompt 门也是 `wait_s > 0`）
     poll_s = max(0.05, float(cfg.get("poll_sec") or DEFAULT_POLL_SEC))
     # 同样注意 `0` 是**合法**值（不限轮数）——不能用 `or` 兜底（falsy-zero 陷阱，实测踩过）。
     tries_raw = cfg.get("hub_tries")
@@ -481,10 +687,16 @@ def obtain_pack(
     hub_broken: list[str] = []
     hub_tries = 0
     hub_parked = False
-    log(
-        f"等任务包（上限 {wait_s:.0f}s）：hub 候选 {hubs or '(没配 hub 地址)'}"
-        + (f"，hub 最多试 {max_hub_tries} 轮" if max_hub_tries else "，hub 不限轮数")
-    )
+    if optional:
+        log(
+            f"本机已有产物 ⇒ 只试一次 hub 取包（不等、不弹上传框）："
+            f"hub 候选 {hubs or '(没配 hub 地址)'}"
+        )
+    else:
+        log(
+            f"等任务包（上限 {wait_s:.0f}s）：hub 候选 {hubs or '(没配 hub 地址)'}"
+            + (f"，hub 最多试 {max_hub_tries} 轮" if max_hub_tries else "，hub 不限轮数")
+        )
     while True:
         found = find_uploaded_pack(cfg, log)
         if found is not None:
@@ -523,7 +735,10 @@ def obtain_pack(
             break
         time.sleep(max(0.05, min(poll_s, deadline - time.time())))
 
-    raise SystemExit(
+    if optional:
+        log("本机优先：这次没取到包 —— 代码/TS 从产物目录取，回传 best-effort（不因此停跑）")
+        return None
+    raise PackUnavailableError(
         f"[offline] {wait_s:.0f}s 内没拿到任务包 —— 两条路任选其一：\n"
         f"  ① hub 取包：控制台「导出任务包」（导出要求该课训练已停）→ 保持 hub 在线"
         f"（{'、'.join(hubs) if hubs else 'CFG.hub_url / HUB_IP 未配'}）→ 重跑本 cell；"
@@ -568,25 +783,149 @@ def ensure_tailscale(cfg: dict, creds: dict, log: Callable[[str], None]) -> str:
 # ── 跑：code.zip 引导 → run_loop（与云端 worker 同一条链）──────────────────
 
 
-def ensure_code(pack: Path, log: Callable[[str], None], code_dir: str = CODE_DIR) -> Path:
-    """把包里的 `code.zip` 解到 `code_dir` 并插进 `sys.path`（同 commit 的运行时）。
+def _pack_member(pack: Path | None, name: str) -> bytes | None:
+    """读包里的一个成员（没包/不是 zip/没这个件 → None，不抛）——本机优先时包只是备源。"""
+    if pack is None:
+        return None
+    try:
+        with zipfile.ZipFile(pack) as zf:
+            return zf.read(name)
+    except (KeyError, OSError, zipfile.BadZipFile):
+        return None
 
-    与云端 worker 的做法同源（D6：不下 git，只吃包里那份代码）——云机上没有仓，
-    「重放 build_pairs」靠的就是这份代码与 commit 一致。
-    """
-    with zipfile.ZipFile(pack) as zf:
+
+def _code_candidates(
+    pack: Path | None, dest: Path | None, hub: str, token: str, log: Callable[[str], None]
+) -> list[tuple[str, bytes]]:
+    """代码候选（按优先级）：产物目录 → 任务包 → hub 的共享 `GET /code`（与课程无关的兜底）。"""
+    out: list[tuple[str, bytes]] = []
+    if dest is not None and (dest / CODE_NAME).is_file():
         try:
-            raw = zf.read(CODE_NAME)
-        except KeyError as e:
-            raise SystemExit(f"[offline] 任务包缺 {CODE_NAME}（包损坏？重导一次）: {pack}") from e
-    dest = Path(code_dir)
-    dest.mkdir(parents=True, exist_ok=True)
+            out.append((f"本机产物 {dest / CODE_NAME}", (dest / CODE_NAME).read_bytes()))
+        except OSError as e:
+            log(f"读本机 {CODE_NAME} 失败（{e}）——跳过它")
+    raw = _pack_member(pack, CODE_NAME)
+    if raw is not None:
+        out.append((f"任务包 {pack}", raw))
+    if hub and token:
+        try:
+            got = _fetch_guarded(
+                hub.rstrip("/") + "/code",
+                _headers(token),
+                log,
+                "code.zip",
+                PACK_TIMEOUT,
+            )
+        except Exception as e:
+            log(f"hub 取共享代码失败（{type(e).__name__}: {e}）——跳过它")
+        else:
+            out.append((f"hub {hub}/code", got))
+    return out
+
+
+def ensure_code(
+    pack: Path | None,
+    log: Callable[[str], None],
+    code_dir: str = CODE_DIR,
+    *,
+    dest: str | Path | None = None,
+    hub: str = "",
+    token: str = "",
+) -> Path:
+    """把**与本机产物同 commit** 的 `code.zip` 解到 `code_dir` 并插进 `sys.path`。
+
+    优先级（plan/offline-rerun-local-first §4.1 第 4 条）：产物目录 `<dest>/code.zip` →
+    任务包里的 `code.zip` → hub 的共享 `GET /code`。期望 sha = `<dest>/manifest.json` 的
+    `code_sha256`（读不到就不设门），**逐候选用 sha 选中**——绝不静默换代码：
+
+      * 全部对不上 ⇒ `SystemExit`，**不写任何东西**（两条出路：`CFG.task_zip` 指对同 commit
+        的包，或清空 `dest` 从头跑）；
+      * 选中的那份 ≠ 现盘 `<dest>/code.zip` ⇒ **用同 sha 副本修复**它：`run_loop` 读的是产物
+        目录那份（`_read_opt_file(root, "code.zip")`），不修就会在 worker 侧报「传输损坏」
+        ——一条指向错误原因的报错（评审 F4）。
+    """
+    root = Path(dest) if dest is not None else None
+    want = _local_sha(root, MANIFEST_NAME, "code_sha256") if root is not None else ""
+    cands = _code_candidates(pack, root, hub, token, log)
+    if not cands:
+        raise SystemExit(
+            "[offline] 没有可用的 code.zip：本机产物目录 / 任务包 / hub 共享代码三处都没有"
+            f"（产物目录 {root if root is not None else '(未给)'}）——去控制台导一次包并填 CFG.task_zip"
+        )
+    picked_src, picked = "", b""
+    why: list[str] = []
+    for src, data in cands:
+        got = hashlib.sha256(data).hexdigest()
+        if not want or got == want:
+            picked_src, picked = src, data
+            break
+        why.append(f"{src}: sha12={got[:12]}… ≠ 产物 manifest 的 {want[:12]}…")
+    if not picked:
+        raise SystemExit(
+            "[offline] 代码与本机产物对不上（绝不静默换代码、也不覆盖）：\n  "
+            + "\n  ".join(why)
+            + f"\n  两条出路：① CFG.task_zip 指对**同 commit** 的任务包；② 清空重跑 {root}"
+        )
+    code_root = Path(code_dir)
+    code_root.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(io.BytesIO(picked)) as z:
+        z.extractall(code_root)
+    if str(code_root) not in sys.path:
+        sys.path.insert(0, str(code_root))
+    log(
+        f"代码就位: {code_root}（{len(picked)} bytes, "
+        f"sha12={hashlib.sha256(picked).hexdigest()[:12]}，来源 {picked_src}）"
+    )
+    if root is not None and want:
+        live = root / CODE_NAME
+        live_sha = hashlib.sha256(live.read_bytes()).hexdigest() if live.is_file() else ""
+        if live_sha != want:
+            live.write_bytes(picked)  # manifest 背书的那份（不是"另一个版本"）
+            log(f"产物目录的 {CODE_NAME} 已按 manifest 修复（{_sha12(live_sha)} → {_sha12(want)}）")
+    return code_root
+
+
+def ensure_ts_tree(pack: Path | None, log: Callable[[str], None], *, dest: str | Path) -> None:
+    """把 TS 运行时树布置到产物目录（`<dest>/ts_code/` + `<dest>/ts_code.zip`）。
+
+    已有 `ts_code/` ⇒ **直接用**（`run_standalone` 的 `ensure_ts_cache_layout(root, …)` 兜到
+    它，幂等）；缺了才从包里补，而且补的字节必须与 `<dest>/manifest.json` 的
+    `ts_code_sha256` 相符——否则就是「本机 manifest + 包里的 TS」的混血：rollout 行为与权重
+    血统不符，读数看起来完全正常，只有 sha 能揭穿（评审 F4）。
+    """
+    root = Path(dest)
+    if (root / TS_TREE_NAME).is_dir():
+        log(f"TS 运行时用本机产物里的 {TS_TREE_NAME}/（不重解）")
+        return
+    raw = _pack_member(pack, TS_CODE_NAME)
+    if raw is None and (root / TS_CODE_NAME).is_file():
+        raw = (root / TS_CODE_NAME).read_bytes()
+    if raw is None:
+        log(
+            f"WARN: 没有 TS 运行时（{root}/{TS_TREE_NAME} 与 {TS_CODE_NAME} 都缺）——"
+            "rollout 起不来；把上一段的 ts_code/ 一起带过来，或给一个含它的包"
+        )
+        return
+    want = _local_sha(root, MANIFEST_NAME, "ts_code_sha256")
+    got = hashlib.sha256(raw).hexdigest()
+    if want and got != want:
+        raise SystemExit(
+            "[offline] TS 运行时与本机产物对不上（包里的 ts_code.zip sha12="
+            f"{got[:12]}… ≠ manifest 的 {want[:12]}…）——拒跑：混血会让 rollout 与权重血统不符。"
+            f"\n  两条出路：① CFG.task_zip 指对**同 commit** 的任务包；② 清空重跑 {root}"
+        )
+    # ★ 2026-09-25 现场回归：**首次跑**时产物目录还不存在（它本来是 `run_loop`/`import_bundle`
+    #   建的），而这里要往里写 `ts_code.zip` ⇒ 必须先把它建出来。不建的后果是**未捕获**的
+    #   `FileNotFoundError: <dest>/ts_code.zip`，整个 cell 死在「代码就位」之后（用户实测报障）。
+    #   为什么不用「等 bundle 导入来铺」：本机优先那条腿**不导入包**（argv 不带 `--bundle`），
+    #   TS 树只能由这里铺；两条腿共用一个函数，就在函数里把目录准备好。
+    root.mkdir(parents=True, exist_ok=True)
+    (root / TS_CODE_NAME).write_bytes(raw)
+    tree = root / TS_TREE_NAME
+    tree.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(io.BytesIO(raw)) as z:
-        z.extractall(dest)
-    if str(dest) not in sys.path:
-        sys.path.insert(0, str(dest))
-    log(f"代码就位: {dest}（{len(raw)} bytes, sha12={hashlib.sha256(raw).hexdigest()[:12]}）")
-    return dest
+        z.extractall(tree)
+    log(f"TS 运行时已就位: {tree}（{len(raw)} bytes, sha12={got[:12]}）")
 
 
 def write_token_file(dest_dir: Path, token: str) -> str:
@@ -605,19 +944,28 @@ def write_token_file(dest_dir: Path, token: str) -> str:
 
 def build_run_argv(
     cfg: dict,
-    pack: Path,
+    pack: Path | None,
     dest: Path,
     hub: str,
     token_file: str,
     resume_dir: str | Path | None = None,
+    *,
+    local_first: bool = False,
 ) -> list[str]:
     """run_loop 的 argv（纯函数，便于单测钉住回传/评估/锚点三组开关的形状）。
 
     `cfg["course"]` 在这一层恒是**单个**课程名（`run_one_course` 已把多课程列表拆开），
     它同时是补传的归位键（hub 侧 `<traj>/<课>/` 的目录名）与任务包名的一部分。
+
+    `local_first=True`（本机已有产物）或根本没拿到包 ⇒ **不传 `--bundle`**：包不参与，
+    plan/manifest/代码/TS 全从产物目录读（`run_loop.main` 允许 `--artifacts` 单独用）。
+    这是本 plan 的核心动作：**不存在"包覆盖本机计划"这条路径**（评审 F1/F3）。
     """
     course = str(cfg.get("course") or "").strip()
-    argv = ["--bundle", str(pack), "--artifacts", str(dest)]
+    argv: list[str] = []
+    if pack is not None and not local_first:
+        argv += ["--bundle", str(pack)]
+    argv += ["--artifacts", str(dest)]
     device = str(cfg.get("device") or "").strip()
     if device:
         argv += ["--device", device]
@@ -628,7 +976,9 @@ def build_run_argv(
     if float(cfg.get("budget_sec") or 0):
         argv += ["--budget-sec", str(float(cfg["budget_sec"]))]
     # rollout 并行局数：缺省（不传）= 按云机核数 `max(cores−4, cores×0.8)`，与云机 eval 同一口径。
-    # 传了就完全按它——两边都不为对方预留（rollout 与 eval 在这条链上是交替跑的）。
+    # 传了就完全按它——两边都不为对方预留，因为两者**真交替**（`run_loop._maybe_cloud_eval`
+    # 提交后有界等本轮评估收线，见那里的 EVAL_ALTERNATE_WAIT_SEC：两条腿同时开满会把单局
+    # 墙钟推过 5s 硬顶，2026-09-25 云机卡死就是这么来的）。
     if int(cfg.get("rollout_workers") or 0):
         argv += ["--rollout-workers", str(int(cfg["rollout_workers"]))]
     # 云机 A 层评估（`eval_on_cloud`）：语料/口径全部由课程（随包的 course.jsonc）决定，
@@ -659,14 +1009,16 @@ def build_run_argv(
 _COURSE_NAME_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
 
 
-def courses_of(cfg: dict) -> list[str]:
-    """`CFG.course` → **课程名列表**（去重、保序）：字符串 = 一门课，列表 = 串行多门。
+def requested_courses(cfg: dict) -> list[str]:
+    """`CFG.course` → 课程名列表（去重、保序）；**空 = 没点名**（交给 hub 清单）。
 
     用户指令（2026-09-22）：「battle.offline.ipynb 的 course 配置项，需支持多个离线课程名。
-    云机串行从 hub 取任务，逐个完成。」——列表即执行顺序（控制台里那几门课的名字，逐字相同）。
+    云机串行从 hub 取任务，逐个完成。」——列表即执行顺序（与控制台课程名逐字相同）。
+    用户指令（2026-09-25）：「云机不应该要在 notebook 里配置离线课程名，它应该直接向 hub
+    问询」⇒ 空不再是错误，而是「按清单跑」（`resolve_courses`/`_run_auto`）。
 
     三种写法都认：`"c5-gae"`、`["c5-gae", "c6-gae"]`、`"c5-gae, c6-gae"`（逗号/空白分隔）。
-    空列表/空名/非法名（含路径分隔符、`..` 等）一律 SystemExit —— 课程名会被拼进目录名与
+    非法名（含路径分隔符、`..` 等）一律 `SystemExit`——课程名会被拼进目录名与
     `task-<课>.zip`，含糊的名字在这里就得拦下，不能等到写盘。
     """
     raw = cfg.get("course")
@@ -689,13 +1041,18 @@ def courses_of(cfg: dict) -> list[str]:
             f"[offline] CFG.course 里的课程名非法（只允许字母/数字/._-，≤64 字）：{bad}"
             "——课程名会进目录名与任务包名，请与控制台课程名逐字对齐"
         )
+    return out
+
+
+def courses_of(cfg: dict) -> list[str]:
+    """老入口（既有调用方/用例）：空 ⇒ `SystemExit`（不知道跑哪几门课就别开跑）。"""
+    out = requested_courses(cfg)
     if not out:
         raise SystemExit(
             "[offline] CFG.course 没填 —— 取包/交付物都按课程名走，必须给"
-            "（支持多门课：列表按顺序串行跑完）"
+            "（支持多门课：列表按顺序串行跑完；新 hub 也可以留空 ⇒ 按 /offline/tasks 清单跑）"
         )
     return out
-
 
 def _split_course_names(text: str) -> list[str]:
     """一个字符串 → 课程名（逗号/空白分隔；单名就是 [name]）。"""
@@ -863,21 +1220,78 @@ def run_one_course(
     # 都按它拼；传原样的列表会拼出 "['a', 'b']" 这种目录名）。
     ccfg = {**cfg, "course": course}
 
-    pack = obtain_pack(ccfg, creds, log, work, stop=keepalive_stop)
-    idx = read_pack_index(pack)
-    log(
-        f"任务包: {idx.get('run_id')} it{idx.get('it')} → it{idx.get('end_it')}"
-        f"（commit {str(idx.get('commit') or '')[:12]}，{idx.get('created_at')}）"
-    )
-    in_name = course_from_pack_name(pack)
-    if in_name and in_name != course:
+    # ── 本机优先：产物目录三件齐全 ⇒ 不让包改写这一段的计划/清单（plan §3 判定表）──
+    # 为什么决策住在这里（而不是 `run_loop`/`bundle`）：notebook 每次会话都从 GitHub raw
+    # 刷新本文件，而 `remote.run_loop`/`remote.bundle` 来自**代码快照**（= 本机优先要保护的
+    # 那份，可能很旧）——把新参数传给旧快照只会 argparse 崩或静默退化（评审 F1）。
+    dest = work / "run"
+    local = local_artifacts(dest)
+    explicit_zip = str(ccfg.get("task_zip") or "").strip()
+    force_pack = bool(ccfg.get("force_pack", False)) or bool(explicit_zip)
+    if (dest / STATE_NAME).is_file() and local is None:
+        # 半截产物目录：让包进来会**重置**本机 state（`ArtifactStore.start` 在 run_id/plan_sha
+        # 不符时重开一段）⇒ 本机 `it-NNN/` 被重跑覆盖，比丢进度严重。这里响亮拒，不猜。
         raise SystemExit(
-            f"[offline] 文件名里的课程（{in_name}）与 CFG.course（{course}）不一致 —— "
-            "跑错课的包会把权重接在别的课程账本上。确认是它就把 CFG.course 改对，"
-            "否则去控制台导正确那门课的包"
+            f"[offline] 本机产物目录不完整（{dest}）：有 {STATE_NAME} 但缺 "
+            f"{PLAN_NAME}/{MANIFEST_NAME}。让任务包补齐会重置本机进度并**重跑**已跑过的轮次。\n"
+            "  ① 想接着本机进度跑：把缺的件找回来（上一轮的产物/备份）；\n"
+            f"  ② 想用包从头跑：清空 {dest}（或换 CFG.work_dir）后重跑本 cell。"
+        )
+    local_first = local is not None and not force_pack
+    if local is not None and force_pack:
+        log(
+            f"CFG.{'task_zip' if explicit_zip else 'force_pack'} 显式指定 ⇒ 用包覆盖本机计划/清单"
+            f"（本机 it{local['last_it']}，计划 it{local['start_it']}→it{local['end_it']}）"
         )
 
-    ensure_code(pack, log)
+    if local_first and local is not None:  # `local_first` 蕴含它非空；写出来给类型收窄
+        log(
+            f"本机已有产物 it{local['last_it']}（计划 it{local['start_it']} → it{local['end_it']}，"
+            f"run={local['run_id'] or '-'}）⇒ 本机优先：不从包里导入 plan/manifest；"
+            "包只当代码/TS 的备源"
+        )
+        pack = obtain_pack(ccfg, creds, log, work, stop=keepalive_stop, optional=True)
+        if pack is None:
+            log("本机优先：这次没取到任务包 —— 代码/TS 从产物目录取，回传 best-effort")
+    else:
+        if local is None:
+            log(f"本机没有可续跑的产物（{dest}）——按老规矩取包起跑")
+        pack = obtain_pack(ccfg, creds, log, work, stop=keepalive_stop)
+
+    idx: dict = {}
+    if pack is not None:
+        idx = read_pack_index(pack)
+        log(
+            f"任务包: {idx.get('run_id')} it{idx.get('it')} → it{idx.get('end_it')}"
+            f"（commit {_sha12(idx.get('commit'))}，{idx.get('created_at')}）"
+        )
+        in_name = course_from_pack_name(pack)
+        if in_name and in_name != course:
+            raise SystemExit(
+                f"[offline] 文件名里的课程（{in_name}）与 CFG.course（{course}）不一致 —— "
+                "跑错课的包会把权重接在别的课程账本上。确认是它就把 CFG.course 改对，"
+                "否则去控制台导正确那门课的包"
+            )
+        if local is not None:
+            log(describe_local_vs_pack(local, idx))
+    if local_first and local is not None and local["last_it"] >= local["end_it"]:
+        log(
+            f"本机段落已完成（it{local['last_it']} ≥ end_it{local['end_it']}）——"
+            "run_loop 会立刻收尾（不再跑轮次）；要用新段请清空产物目录、等新包，或置 "
+            "CFG.force_pack=true"
+        )
+
+    token = str(creds.get("HUB_TOKEN") or "")
+    hub = ""
+    # hub 探活**只做一次**：回传、续跑锚点、代码兜底三条腿共用同一个连通性结论（它们都是
+    # 「hub 此刻在不在」的问题，探两次只会让日志里出现两个可能不一致的结论）。
+    for cand in hub_candidates(ccfg, creds):
+        if probe_hub(cand, token, log):
+            hub = cand
+            break
+
+    ensure_code(pack, log, dest=dest, hub=hub, token=token)
+    ensure_ts_tree(pack, log, dest=dest)
     from remote.notebook_runtime import resolve_device  # code.zip 已在 sys.path 上
 
     if run_loop_main is None:
@@ -897,19 +1311,14 @@ def run_one_course(
             ),
         }
 
-    token = str(creds.get("HUB_TOKEN") or "")
-    hub = ""
-    # hub 探活**只做一次**：回传与「续跑锚点」两条腿共用同一个连通性结论（它们都是
-    # 「hub 此刻在不在」的问题，探两次只会让日志里出现两个可能不一致的结论）。
-    for cand in hub_candidates(ccfg, creds):
-        if probe_hub(cand, token, log):
-            hub = cand
-            break
     resume_dir: Path | None = None
     if hub:
         # 续跑锚点：hub 手里可能有更新的（自回传 / 人工导入的）完整轮次。先取它，
         # 再交给 run_loop——于是「重领任务」= 从最新进度接着跑，而不是从头重跑。
         resume_dir = fetch_resume(hub, token, course, work / "resume", log)
+    # ★ `tok_file` 必须先置空：`live_backfeed=False`（或 hub 不可达）时下面不会赋值，
+    #   而它又被传进 `build_run_argv`——原来那条路会 `NameError`（纯离线盘一直没跑到）。
+    tok_file = ""
     if bool(ccfg.get("live_backfeed", True)):
         if hub:
             tok_file = write_token_file(work, token)
@@ -919,8 +1328,7 @@ def run_one_course(
     else:
         log("实时回传关闭（CFG.live_backfeed=False）—— 跑完统一打包，手动下载导入")
 
-    dest = work / "run"
-    argv = build_run_argv(ccfg, pack, dest, hub, tok_file, resume_dir)
+    argv = build_run_argv(ccfg, pack, dest, hub, tok_file, resume_dir, local_first=local_first)
     log("开始训练：python -m remote.run_loop " + " ".join(_redact(argv)))
     rc = int(run_loop_main(argv) or 0)
     log(f"run_loop 退出 rc={rc}；产物目录 {dest}")
@@ -941,6 +1349,400 @@ def run_one_course(
     return rc
 
 
+def _json_dict(raw: bytes) -> dict:
+    """小 JSON 应答 → dict（解不开 → `{}`：一个坏应答不该把取包/排队流程炸掉）。"""
+    try:
+        doc = json.loads(raw.decode("utf-8", "replace"))
+    except ValueError:
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def _post_json(url: str, token: str, log: Callable[[str], None], *, timeout: float = PING_TIMEOUT) -> tuple[int, dict]:
+    """小 JSON POST（带 Bearer）→ `(状态码, dict)`；`HTTPError` → `(码, 正文 dict)`；连不上 → `(0, {})`。
+
+    为什么不用 `_fetch_guarded`：那是给**大 body**（几 MB 任务包）准备的停滞/低速护栏；
+    这里是几百字节的控制消息，且要的是「失败也要拿到状态码与正文」（护栏会抛）。
+    """
+    req = urllib.request.Request(
+        url, data=b"", method="POST", headers=_headers(token)
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return int(resp.status), _json_dict(resp.read())
+    except urllib.error.HTTPError as e:
+        body, doc = _http_error_parts(e)
+        if body and body not in ("（空正文）", "（无正文）"):
+            log(f"  hub 说：{body}")
+        return int(e.code), doc
+    except Exception as e:  # 连不上/超时：best-effort（训练永不因网络停摆）
+        log(f"  端点连不上（{type(e).__name__}: {e}）")
+        return 0, {}
+
+
+def _queue_work_dir(cfg: dict) -> Path:
+    """worker 身份的落点：显式 `work_dir`，否则 `<download_dir>/battle-offline`（与 `course_work_dir` 同源）。"""
+    explicit = str(cfg.get("work_dir") or "").strip()
+    return Path(explicit).expanduser() if explicit else download_dir(cfg) / "battle-offline"
+
+
+def worker_id_of(work: Path, log: Callable[[str], None]) -> str:
+    """本机 worker 身份：**持久化**在 `<work>/.worker-id`（评审 G1）。
+
+    为什么必须是文件、不是每次现生成：cell 中断/重跑时同一台机器会看到**自己**留下的租约；
+    只按「陌生人持有」拒绝就等于被自己挡在门外，白等到 900s 过期（Kaggle 上十几分钟的会话
+    预算，这一等就是整个会话）。同一个 `work_dir` 复用同一个 id ⇒ hub 判 `mine` 直接续上。
+    """
+    p = work / WORKER_ID_NAME
+    try:
+        old = p.read_text(encoding="utf-8").strip()
+    except OSError:
+        old = ""
+    if old:
+        return old
+    wid = f"{os.environ.get('HOSTNAME') or 'node'}-{uuid.uuid4().hex[:8]}"
+    try:
+        work.mkdir(parents=True, exist_ok=True)
+        p.write_text(wid + "\n", encoding="utf-8")
+        log(f"本机 worker id: {wid}（写在 {p}；重跑本 cell 会复用它）")
+    except OSError as e:
+        # 写不进去不是致命（下次重生成一个新 id，只是会被自己的旧租约挡一次）。
+        log(f"⚠ 写 {p} 失败（{e}）——本次会话的 worker id 不持久（重跑可能被自己的旧租约挡）")
+    return wid
+
+
+def fetch_task_list(
+    hub: str, token: str, log: Callable[[str], None], *, timeout: float = PING_TIMEOUT
+) -> list[dict] | None:
+    """`GET /offline/tasks` → 任务清单；`None` = **hub 不支持 / 不可达**（调用方据此降级）。"""
+    url = f"{hub.rstrip('/')}{OFFLINE_TASKS_PATH}"
+    req = urllib.request.Request(url, headers=_headers(token))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            doc = _json_dict(resp.read())
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            log(f"清单端点被拒 HTTP {e.code} —— HUB_TOKEN 不一致（本次降级到 CFG.course）")
+        elif e.code in (404, 405):
+            log("hub 没有 /offline/tasks（老 hub）⇒ 降级到 CFG.course（升级 hub 后即可不填 course）")
+        else:
+            log(f"清单端点取失败 HTTP {e.code}：{_http_error_body(e)}")
+        return None
+    except Exception as e:
+        log(f"清单端点连不上（{type(e).__name__}: {e}）⇒ 降级到 CFG.course")
+        return None
+    tasks = doc.get("tasks")
+    if not isinstance(tasks, list):
+        log("清单端点回了意外形状（没有 tasks 列表）⇒ 降级到 CFG.course")
+        return None
+    log(f"hub 清单：{len(tasks)} 条（hub_version={doc.get('hub_version')}）")
+    return [t for t in tasks if isinstance(t, dict)]
+
+
+def claim_course(
+    hub: str,
+    token: str,
+    course: str,
+    worker: str,
+    log: Callable[[str], None],
+    *,
+    takeover: bool = False,
+    timeout: float = PING_TIMEOUT,
+) -> str:
+    """领一门课的离线租约 → `lease` token（`""` = 没领到，**照旧跑**）。
+
+    为什么领不到也照跑：租约是**排他与观测**，不是训练的前置——一台云机被拒不该让这门课的
+    产物消失（plan §1.4-4「训练永不因网络停摆」）。重复劳动的代价由回传侧 `(run_id, it)`
+    首写幂等兜底（第二份判 `duplicate` 丢弃）。
+    """
+    url = (
+        f"{hub.rstrip('/')}{OFFLINE_CLAIM_PATH}?course={urllib.parse.quote(course)}"
+        f"&worker={urllib.parse.quote(worker)}" + ("&takeover=1" if takeover else "")
+    )
+    code, doc = _post_json(url, token, log, timeout=timeout)
+    lease = doc.get("lease")
+    if code == 200 and isinstance(lease, dict):
+        log(f"领到租约（{lease.get('ttl_sec')}s，worker={worker}）")
+        return str(lease.get("token") or "")
+    if code == 409:
+        holder = doc.get("holder") or {}
+        left = float(holder.get("expires_in") or 0.0)
+        log(
+            f"这门课已被 {holder.get('worker_id') or '?'} 持有（{left:.0f}s 后过期）"
+            "——本机照旧跑：产物照落，重复的那份回传会被判 duplicate 丢弃"
+        )
+    elif code == 404:
+        log("hub 说这门课还没有任务包（先到控制台「导出任务包」）")
+    return ""
+
+
+def heartbeat_loop(
+    hub: str,
+    token: str,
+    course: str,
+    lease: str,
+    log: Callable[[str], None],
+    *,
+    interval: float = HEARTBEAT_SEC,
+) -> threading.Event:
+    """起一个**守护线程**按 `interval` 续租；返回它的 stop event（调用方 `finally` 里 set）。
+
+    为什么必须另起线程：`run_loop_main(argv)` 同步阻塞到整段跑完（本文件里那行调用），
+    主线程发不了心跳。心跳失败**只记日志**：租约过期/被接管绝不能让已经在跑的训练停下来
+    （plan §1.4-4）。
+    """
+    done = threading.Event()
+    url = (
+        f"{hub.rstrip('/')}{OFFLINE_HEARTBEAT_PATH}?course={urllib.parse.quote(course)}"
+        f"&lease={urllib.parse.quote(lease)}"
+    )
+
+    def _beat() -> None:
+        while not done.wait(interval):
+            code, doc = _post_json(url, token, log)
+            if code == 200:
+                continue
+            if code == 409:
+                log(
+                    f"⚠ 租约失效（{'已过期' if doc.get('expired') else '已被接管'}）"
+                    "——继续跑完并打包（回传可能被判 duplicate 丢弃）"
+                )
+                return
+            log(f"心跳失败 HTTP {code}（不影响训练，下一跳再试）")
+
+    threading.Thread(target=_beat, name=f"offline-heartbeat-{course}", daemon=True).start()
+    return done
+
+
+def release_course(
+    hub: str, token: str, course: str, lease: str, log: Callable[[str], None], *, timeout: float = PING_TIMEOUT
+) -> None:
+    """交还租约（best-effort；失败只记一行——这一课已经跑完了）。"""
+    if not lease:
+        return
+    url = (
+        f"{hub.rstrip('/')}{OFFLINE_RELEASE_PATH}?course={urllib.parse.quote(course)}"
+        f"&lease={urllib.parse.quote(lease)}"
+    )
+    code, doc = _post_json(url, token, log, timeout=timeout)
+    if code == 200:
+        log("租约已交还")
+    elif code == 409:
+        log(f"租约没交还成功（{doc.get('error') or '不是当前持有人'}）——不影响本课成果")
+
+
+def resolve_courses(
+    cfg: dict,
+    creds: dict,
+    log: Callable[[str], None],
+    *,
+    served: dict[str, str] | None = None,
+    probe: dict | None = None,
+) -> list[dict]:
+    """本次要跑的课 → `[{"course", "pack_sha256"}]`；**空列表 = 队列为空**（正常的没事干）。
+
+    `CFG.course` 非空 ⇒ 老行为（顺序/校验一字不改），`pack_sha256` 空。
+    空 ⇒ 向 hub 问清单，过滤 `claimable` 且未被 `served[course]` 挡掉（防自激：同一份包
+    跑两次 = `run_id` 相同 ⇒ 回传全判 duplicate ⇒ 看起来在跑、实际零产出）。
+    `probe` 是调用方持有的小字典（`{"unsupported": True}`）：老 hub 只探测**一次**，
+    之后不再每轮刷一个必然失败的端点。
+    """
+    explicit = requested_courses(cfg)
+    if explicit:
+        return [{"course": c, "pack_sha256": ""} for c in explicit]
+    if probe is not None and probe.get("unsupported"):
+        raise SystemExit(_no_courses_msg("hub 没有 /offline/tasks（本会话已探过）"))
+    hubs = hub_candidates(cfg, creds)
+    if not hubs:
+        raise SystemExit(_no_courses_msg("没有可用的 hub 地址（CFG.hub_url / HUB_IP 都没配）"))
+    tasks = fetch_task_list(hubs[0], str(creds.get("HUB_TOKEN") or ""), log)
+    if tasks is None:
+        if probe is not None:
+            probe["unsupported"] = True
+        raise SystemExit(_no_courses_msg("hub 不支持任务清单（或本机连不上它）"))
+    picked: list[dict] = []
+    for t in tasks:
+        course = str(t.get("course") or "")
+        if not course or not t.get("claimable"):
+            continue
+        pack_doc = t.get("pack")
+        sha = str(pack_doc.get("sha256") or "") if isinstance(pack_doc, dict) else ""
+        if sha and served is not None and served.get(course) == sha:
+            log(f"跳过 {course}：本会话已跑过这份包（sha12={sha[:12]}）——包换了新段才会再领")
+            continue
+        picked.append({"course": course, "pack_sha256": sha})
+    if picked:
+        log("清单里可领：" + "、".join(f"{p['course']}" for p in picked))
+    return picked
+
+
+def _no_courses_msg(why: str) -> str:
+    """「不知道跑哪几门课」的唯一文案（CFG 没填 + 清单用不了 ⇒ 响亮失败，不猜）。"""
+    return (
+        f"[offline] CFG.course 没填，且拿不到任务清单：{why}。\n"
+        "  ① 填 CFG.course（可以多门，列表按顺序串行）；\n"
+        "  ② 或让 hub 侧可用 /offline/tasks（同一版本的 hub_server.py）。"
+    )
+
+
+def _run_batch(
+    cfg: dict,
+    creds: dict,
+    log: Callable[[str], None],
+    keepalive_stop: Any,
+    courses: list[str],
+    *,
+    multi: bool,
+    leases: dict | None = None,
+    shas: dict[str, str] | None = None,
+) -> int:
+    """串行跑一批课；返回 rc。失败分两类（plan/offline-switch-auto-bundle §3.5）：
+
+      · **取不到任务包**（`PackUnavailableError`）⇒ 记一行、**跳过继续下一门**；末尾汇总，
+        `M>0 ⇒ 非零 rc`，`N==0`（全跳过）⇒ 响亮 `SystemExit`；
+      · 其它 `SystemExit`（课程名不一致 / 产物目录不完整）与训练 `rc≠0` ⇒ **照旧立即停**。
+
+    `leases` 非空时逐课领租约（best-effort）+ 心跳线程 + 跑完交还，并把跑成功的包 sha 记进
+    `leases["served"]`（防自激）。租约的任何失败都**不影响**训练。
+    """
+    rc = 0
+    skipped: list[str] = []
+    for i, course in enumerate(courses):
+        rest = courses[i + 1 :]
+        log(f"===== [{i + 1}/{len(courses)}] 课程 {course} =====")
+        # 租约上下文取成局部 dict（不用 `leases[...]`）：`finally` 里也要用，而 `leases` 是
+        # 可选的（None = 老行为、不领租约）。空 dict 即「这条腿不领」。
+        ctx = leases if leases is not None else {}
+        lease = ""
+        beat: threading.Event | None = None
+        if ctx:
+            lease = claim_course(ctx["hub"], ctx["token"], course, ctx["worker"], log)
+            if lease:
+                beat = heartbeat_loop(ctx["hub"], ctx["token"], course, lease, log)
+        try:
+            rc = run_one_course(cfg, creds, log, keepalive_stop, course=course, multi=multi)
+        except PackUnavailableError as e:
+            # ★ 只放宽「取不到包」这一类（顺序必须在 `except SystemExit` **之前**，
+            #   否则会被父类吃掉）：记一行 + 继续下一门；汇总与非零退出在循环之后。
+            skipped.append(course)
+            log(f"课程 {course} 跳过（取不到任务包）：{e.code}")
+            if rest:
+                log(f"  —— 继续下一门：{rest[0]}（末尾会汇总；训练失败/配置错误仍然立即停）")
+            continue
+        except SystemExit as e:
+            if rest:
+                log(
+                    f"课程 {course} 未跑完（{e.code}）——串行到此为止，剩余 {len(rest)} 门课未执行："
+                    f"{', '.join(rest)}"
+                )
+            raise
+        finally:
+            if beat is not None:
+                beat.set()
+            if lease:
+                release_course(ctx["hub"], ctx["token"], course, lease, log)
+        if rc != 0:
+            log(
+                f"课程 {course} 退出 rc={rc} ——串行到此为止；"
+                + (f"剩余 {len(rest)} 门课未执行：{', '.join(rest)}" if rest else "它已是最后一门课")
+            )
+            return rc
+        if ctx and shas:
+            sha = str(shas.get(course) or "")
+            if sha:
+                ctx["served"][course] = sha
+        if rest:
+            log(f"课程 {course} 完成 —— 下一门：{rest[0]}")
+    if skipped:
+        done = len(courses) - len(skipped)
+        log(
+            f"本会话完成 {done} 门 / 跳过 {len(skipped)} 门（取不到任务包）"
+            f"：{', '.join(skipped)}"
+        )
+        if done == 0:
+            # 响亮失败：一门都没跑（**不谎报成功**）。注意这与「向 hub 问清单、队列为空」
+            # 是两回事 —— 后者是正常的没事干（plan/offline-task-discovery §3.3）。
+            raise SystemExit(
+                f"[offline] 没有任何一门课拿到任务包（{len(skipped)} 门全被跳过）："
+                f"{', '.join(skipped)}\n"
+                "  ① hub 取包：控制台「导出任务包」→ 保持 hub 在线 → 重跑本 cell；\n"
+                "  ② 手动送包：控制台下载 task-<课>.zip → 上传到本 notebook（或写进 "
+                "CFG['task_zip']）→ 重跑本 cell。"
+            )
+        return rc if rc else 1
+    log(f"全部课程完成（{len(courses)} 门）：{', '.join(courses)}")
+    return rc
+
+
+def _run_auto(
+    cfg: dict, creds: dict, log: Callable[[str], None], keepalive_stop: Any
+) -> int:
+    """`CFG.course` 留空时的队列循环（plan/offline-task-discovery §3.3）。
+
+    一轮：问清单 → 领租约 → 取包 → 跑完 → 交还 → 记 `served[course]=包 sha`。
+    队列空 ⇒ `queue_mode="once"` 直接收工；缺省 `"drain"` 驻守轮询，直到
+    `idle_wait_sec` / `session_budget_sec` 用尽或收到停机信号（**空队列不是错误**）。
+    """
+    served: dict[str, str] = {}
+    probe: dict = {}
+    rc = 0
+    mode = str(cfg.get("queue_mode") or "drain").strip().lower()
+
+    def _num(key: str, default: float) -> float:
+        """数值旋钮（**`0` 是合法值**：`or 缺省` 那套写法会把「立刻收工」悄悄变成等半小时）。"""
+        v = cfg.get(key)
+        if v is None or v == "":
+            return default
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return default
+
+    budget = _num("session_budget_sec", 0.0)  # 0 = 不限（与逐段的 budget_sec 不是一把旋钮）
+    idle_wait = _num("idle_wait_sec", _num("wait_pack_sec", DEFAULT_WAIT_SEC))
+    poll = _num("queue_poll_sec", DEFAULT_QUEUE_POLL_SEC)
+    start = time.monotonic()
+    idle_since = start
+    while True:
+        tasks = resolve_courses(cfg, creds, log, served=served, probe=probe)
+        if tasks:
+            idle_since = time.monotonic()
+            hubs = hub_candidates(cfg, creds)
+            worker = worker_id_of(_queue_work_dir(cfg), log)
+            batch_rc = _run_batch(
+                cfg,
+                creds,
+                log,
+                keepalive_stop,
+                [str(t["course"]) for t in tasks],
+                multi=len(tasks) > 1,
+                leases={
+                    "hub": hubs[0] if hubs else "",
+                    "token": str(creds.get("HUB_TOKEN") or ""),
+                    "worker": worker,
+                    "served": served,
+                },
+                shas={str(t["course"]): str(t.get("pack_sha256") or "") for t in tasks},
+            )
+            rc = batch_rc or rc
+            continue
+        if mode != "drain":
+            log("队列为空（queue_mode=once）⇒ 收工（rc=0：没活干不是失败）")
+            return rc
+        waited = time.monotonic() - idle_since
+        if waited >= idle_wait:
+            log(f"队列空且已等满 idle_wait_sec={idle_wait:.0f}s ⇒ 收工")
+            return rc
+        if budget > 0 and time.monotonic() - start >= budget:
+            log(f"会话预算 session_budget_sec={budget:.0f}s 用尽 ⇒ 收工")
+            return rc
+        if keepalive_stop is not None and keepalive_stop.is_set():
+            log("收到停机信号 ⇒ 收工")
+            return rc
+        log(f"队列为空 —— {poll:.0f}s 后再问一次（idle 已等 {waited:.0f}s / 上限 {idle_wait:.0f}s）")
+        time.sleep(poll)
+
+
 def run(
     cfg: dict,
     log: Callable[[str], None],
@@ -949,14 +1751,18 @@ def run(
 ) -> int:
     """cell 的唯一入口。返回 rc（交给 `SystemExit`）。
 
-    `cfg` 见 `ipynb/battle.offline.ipynb` 的 CFG（course / hub_url / device / task_zip /
-    wait_pack_sec / hub_tries / live_backfeed / budget_sec / threads / max_iters / eval_on_cloud /
-    rollout_workers …）。
+    `cfg` 见 `ipynb/battle.offline.ipynb` 的 CFG。两条路（2026-09-25 新增第二条）：
 
-    **多课程：串行跑完**（2026-09-22 用户指令）——`CFG.course` 给列表时按顺序逐门跑，
-    每门课都是完整一段（取包 → 训练 → 交付物）；哪一门没跑完就停在那里并把剩余课程
-    列出来（一门课的错误不该被下一门课的错误盖住；而“剩余课程名”是人在云机上最需要的
-    下一步）——不静默跳课。
+      · **`CFG.course` 非空** ⇒ 老行为：点名跑哪几门，顺序即执行序。取不到包的课**跳过继续**
+        下一门（末尾汇总、`M>0` 非零 rc、全跳过 ⇒ 响亮 `SystemExit`）；配置错误与训练
+        `rc≠0` 照旧**立即停**；
+      · **`CFG.course` 留空** ⇒ **向 hub 问清单**（`GET /offline/tasks`）：可领的逐个
+        `claim` → 取包 → 跑完 → `release`；`queue_mode` 缺省 `drain`（跑完一批继续驻守），
+        受 `session_budget_sec` / `idle_wait_sec` / 停机信号限制；**队列空 = 正常收工（rc=0）**。
+        老 hub（没有清单端点）⇒ 降级回「必须填 course」，此时空 ⇒ `SystemExit`。
+
+    边界（评审 X1，与 plan/offline-switch-auto-bundle §3.5 是同一句话的两半）：
+    「**点名**（CFG 或清单）要跑的课取不到包」是**异常**（响亮）；「队列本来就空」是**正常**。
     """
     # ★ 凭据一律在任何网络改动**之前**读完（2026-09-17 Kaggle 事故的时序约束）：
     #   userspace 引导会把平台 Secrets（公网 HTTPS）变成够不着的东西。
@@ -966,32 +1772,19 @@ def run(
         "TS_AUTHKEY": secret("TS_AUTHKEY", cfg.get("ts_authkey")),
     }
     log("凭据就绪（值不落日志）：" + (", ".join(k for k, v in creds.items() if v) or "（一个都没读到）"))
-    courses = courses_of(cfg)
-    multi = len(courses) > 1
-    log(f"课程队列（{len(courses)} 门，串行）：{', '.join(courses)}")
-    rc = 0
-    for i, course in enumerate(courses):
-        rest = courses[i + 1 :]
-        log(f"===== [{i + 1}/{len(courses)}] 课程 {course} =====")
-        try:
-            rc = run_one_course(cfg, creds, log, keepalive_stop, course=course, multi=multi)
-        except SystemExit as e:
-            if rest:
-                log(
-                    f"课程 {course} 未跑完（{e.code}）——串行到此为止，剩余 {len(rest)} 门课未执行："
-                    f"{', '.join(rest)}"
-                )
-            raise
-        if rc != 0:
-            log(
-                f"课程 {course} 退出 rc={rc} ——串行到此为止；"
-                + (f"剩余 {len(rest)} 门课未执行：{', '.join(rest)}" if rest else "它已是最后一门课")
-            )
-            return rc
-        if rest:
-            log(f"课程 {course} 完成 —— 下一门：{rest[0]}")
-    log(f"全部课程完成（{len(courses)} 门）：{', '.join(courses)}")
-    return rc
+    explicit = requested_courses(cfg)
+    if explicit:
+        log(f"课程队列（{len(explicit)} 门，串行，CFG 点名）：{', '.join(explicit)}")
+        return _run_batch(cfg, creds, log, keepalive_stop, explicit, multi=len(explicit) > 1)
+    if not bool(cfg.get("auto_discover", True)):
+        # 显式关掉自动发现 = 「我就是要手填 course」的口径 ⇒ 与今天逐字相同地响亮拒。
+        raise SystemExit(
+            "[offline] CFG.course 没填，且 auto_discover=False ⇒ 不知道跑哪几门课。\n"
+            "  ① 填 CFG.course（可以多门，列表按顺序串行）；\n"
+            "  ② 或把 auto_discover 打开（缺省 True）⇒ 云机向 hub 问清单。"
+        )
+    log("CFG.course 留空 ⇒ 向 hub 问任务清单（plan/offline-task-discovery）")
+    return _run_auto(cfg, creds, log, keepalive_stop)
 
 
 def _redact(argv: list[str]) -> list[str]:

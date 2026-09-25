@@ -50,6 +50,7 @@ from common.protocol import (
     JOB_CANCEL_POLL_SEC,
     PRIORITY_NONE,
     PRIORITY_ORDER,
+    ROLE_ONLINE,
     WIRE_V2_CONTENT_TYPE,
     ProtocolError,
     RetryableError,
@@ -93,7 +94,7 @@ def peek_jobs(
     token: str,
     *,
     worker_id: str = "",
-    offline_ok: bool = False,
+    role: str = ROLE_ONLINE,
     n: int = 3,
     timeout: float = 30.0,
     log: Any = None,
@@ -110,10 +111,10 @@ def peek_jobs(
         token,
         f"/jobs/peek?n={max(1, int(n))}",
         timeout=timeout,
-        headers=_sched_headers(worker_id, offline_ok=offline_ok) or None,
+        headers=_sched_headers(worker_id, role=role) or None,
     )
     if status != 200:
-        _warn_non_200(base_url, status, log)
+        _warn_non_200(base_url, status, log, body=body)
         return None
     try:
         data = json.loads(body.decode("utf-8"))
@@ -174,7 +175,7 @@ def request_priority(
             log(f"priority 问询失败（{type(e).__name__}）——按无人在做处理")
         return {"epoch": None, "priorities": {}, "reasons": {}}
     if status != 200:
-        _warn_non_200(base_url, status, log)
+        _warn_non_200(base_url, status, log, body=body)
         return {"epoch": None, "priorities": {}, "reasons": {}}
     try:
         data = json.loads(body.decode("utf-8"))
@@ -194,6 +195,7 @@ def claim_job(
     *,
     mode: str = CLAIM_MODE_EXCLUSIVE,
     worker_id: str = "",
+    role: str = ROLE_ONLINE,
     expected_epoch: int | None = None,
     timeout: float = 30.0,
     log: Any = None,
@@ -217,10 +219,12 @@ def claim_job(
         timeout=timeout,
         data=payload,
         method="POST",
-        headers={"Content-Type": "application/json", **_sched_headers(worker_id)},
+        # ★ 归属头必须随 claim 一起发（F6 的老毛病是「头只到 peek，claim 不带」；
+        # 而在归属闸下沉到 `_claim_locked` 之后，claim 不带头 = 带标 worker 自锁）。
+        headers={"Content-Type": "application/json", **_sched_headers(worker_id, role=role)},
     )
     if status != 200:
-        _warn_non_200(base_url, status, log)
+        _warn_non_200(base_url, status, log, body=body, jid=jid)
         return None
     try:
         data = json.loads(body.decode("utf-8"))
@@ -358,7 +362,7 @@ def acquire_job(
     token: str,
     *,
     worker_id: str = "",
-    offline_ok: bool = False,
+    role: str = ROLE_ONLINE,
     depth: int = 3,
     on_drop: Any = None,
     log: Any = None,
@@ -380,7 +384,7 @@ def acquire_job(
         base_url,
         token,
         worker_id=worker_id,
-        offline_ok=offline_ok,
+        role=role,
         n=depth,
         log=log,
     )
@@ -425,6 +429,7 @@ def acquire_job(
             jid,
             mode=CLAIM_MODE_EXCLUSIVE,
             worker_id=worker_id,
+            role=role,  # ★ 与 peek 同一份归属（漏了它 = 带标 worker 自锁）
             expected_epoch=epoch,
             log=log,
         )

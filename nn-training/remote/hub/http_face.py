@@ -72,12 +72,19 @@ from pathlib import Path
 from common.protocol import (
     AUTH_HEADER,
     OFFLINE_ARTIFACT_PATH,
+    OFFLINE_CLAIM_PATH,
+    OFFLINE_HEARTBEAT_PATH,
+    OFFLINE_RELEASE_PATH,
     OFFLINE_RESULT_PATH,
     OFFLINE_RESUME_BLOB_PATH,
     OFFLINE_RESUME_PATH,
     OFFLINE_TASK_PACK_PATH,
+    OFFLINE_TASKS_PATH,
+    ROLE_HEADER,
+    ROLE_OFFLINE,
     WORKER_ID_HEADER,
     ProtocolError,
+    role_from_header,
 )
 
 # 五组路由混入（S4 第十一刀把它们从 `HubHandler` 里拆出来）：本模块的 `HubHandler` 只是
@@ -118,6 +125,7 @@ CF_SOURCE_HEADER = "CF-Connecting-IP"
 SEND_TIMEOUT_SEC = 60.0
 #: 发送切片（字节）：分片写让上面的超时**每片**都生效（一次大 write 只有整体超时）。
 SEND_CHUNK = 256 * 1024
+
 #: 打「发送完成」日志的最小 body（字节）：小 JSON 不打（高频），payload/code 这类必打。
 SEND_LOG_MIN_BYTES = 256 * 1024
 
@@ -332,6 +340,19 @@ class HubHandler(
             return urllib.parse.unquote(parts[1])
         return None
 
+    def _note_offline_disk(self) -> None:
+        """离线**盘**报名（`/offline/*` 面）：带 `X-Battle-Offline` 的请求 = 这块盘自报身份。
+
+        ★ 为什么必须在这里（2026-09-25，plan §7.0.1 #2 / §7.2.3）：跑 `battle.offline.ipynb`
+        的云机**不碰 `/jobs/*`**（它走清单 + 取包 + 租约 + 补传），而角色头此前只在 worker 的
+        peek/claim 面上被读 ⇒ 离线盘在 hub 眼里是匿名的，「有没有离线盘」这个读数恒为空。
+        身份取 `?worker=`（租约面自带）；清单/取包不带 worker ⇒ 记成 `<offline>` 一个人次。
+        """
+        if role_from_header(self.headers.get(ROLE_HEADER, "")) != ROLE_OFFLINE:
+            return
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        self.hub.note_offline_disk((qs.get("worker") or [""])[0])
+
     def _query_course(self) -> str:
         """`?course=` 查询参数（空 = 未给定）。与路径解析同源（urllib.parse）。"""
         qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -340,6 +361,9 @@ class HubHandler(
     # ---- 路由 ----
     def do_GET(self) -> None:
         path = self.path.split("?", 1)[0]
+        if path.startswith("/offline/"):
+            # 离线盘报名（取包链的全部端点都在这条前缀下；见 `_note_offline_disk`）。
+            self._note_offline_disk()
         try:
             if path == "/ping" or path == "/":
                 if not self._auth_ok():
@@ -367,6 +391,8 @@ class HubHandler(
                 self._admin_offline()
             elif path == OFFLINE_TASK_PACK_PATH:
                 self._get_task_pack()
+            elif path == OFFLINE_TASKS_PATH:
+                self._get_offline_tasks()
             elif path == OFFLINE_RESUME_PATH:
                 self._get_offline_resume()
             elif path == OFFLINE_RESUME_BLOB_PATH:
@@ -397,6 +423,9 @@ class HubHandler(
 
     def do_POST(self) -> None:
         path = self.path.split("?", 1)[0]
+        if path.startswith("/offline/"):
+            # 同上：租约/补传也在这条前缀下（POST 面）。
+            self._note_offline_disk()
         try:
             if path.startswith("/jobs/") and path.endswith("/heartbeat"):
                 self._post_heartbeat()
@@ -430,6 +459,12 @@ class HubHandler(
                 self._post_offline_artifact()
             elif path == OFFLINE_RESULT_PATH:
                 self._post_offline_result()
+            elif path == OFFLINE_CLAIM_PATH:
+                self._post_offline_lease("claim")
+            elif path == OFFLINE_HEARTBEAT_PATH:
+                self._post_offline_lease("heartbeat")
+            elif path == OFFLINE_RELEASE_PATH:
+                self._post_offline_lease("release")
             else:
                 self._json({"error": "not found"}, 404)
         except (ProtocolError, ValueError) as e:
@@ -573,3 +608,34 @@ class HubHandler(
             self._json({"error": f"请求体截断（声明 {n}，实收 {len(raw)}）"}, 400)
             return None
         return raw
+    #: "kind:jid:status" -> 上次告警墙钟（hub 侧拒绝日志的 60s 节流用的）
+    _REJECT_WARN_AT: dict[str, float] = {}
+
+    def _log_reject(
+        self,
+        kind: str,
+        job_id: str,
+        status: str,
+        *,
+        course: str = "",
+        worker: str = "",
+        reason: str = "",
+    ) -> None:
+        """hub 侧「为什么拒了这份活」的唯一打点（2026-09-24 事故）。
+
+        现场那次 409 在 worker 日志里被兜底文案写成「hub 异常，请检查 hub 进程与隧道」，
+        而真因是身份歧义导致的跨课程路由 ⇒ hub 侧必须留下**自己那一半**的证词：
+        谁、哪门课、什么状态、什么原因。按 (kind, jid, status) 60s 节流——同一个 worker
+        在租约期内会反复撞同一道闸，逐次打点会把日志刷爆。
+        """
+        now = time.time()
+        key = f"{kind}:{job_id}:{status}"
+        if now - self._REJECT_WARN_AT.get(key, 0.0) <= 60:
+            return
+        self._REJECT_WARN_AT[key] = now
+        print(
+            f"[{time.strftime('%H:%M:%S')}] [hub-server] {kind} 被拒: job={job_id} "
+            f"course={course or '-'} worker={worker or '?'} status={status} "
+            f"reason={reason or '-'}",
+            flush=True,
+        )

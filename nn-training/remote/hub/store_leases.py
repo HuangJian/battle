@@ -23,6 +23,11 @@
 `_reclaims` · `_frozen`，外加 `_backup_authorized`（显式授权备份的回传放行票——它写在这里
 而不是调度簇：读它的三处全在租约/结果路径上）。
 
+归属路由（2026-09-25）也住本簇：`parked`（课程停摆位）· `_roles` / `_role_lock`（归属缓存）
+与两个判据源 `job_role()` / `role_blocked()`——**闸必须与租约写入在同一个临界区**：
+`_claim_locked` 是租约的唯一入口，闸住那里则四条认领面（claim_next / peek+claim / 按 id
+直领 / push 派发）天然同源。
+
 ## 两个对外名字（**名字是契约**）
 
 `ClaimOutcome` 与 `FREEZE_AFTER_RECLAIMS` 随本簇搬进本模块：`_HubQueue` 与
@@ -33,6 +38,7 @@
 
 from __future__ import annotations
 
+import json
 from collections import namedtuple
 from threading import Lock
 from typing import Any
@@ -44,6 +50,9 @@ from common.protocol import (
     CLAIM_TTL_SEC,
     FAIL_NAME,
     PRIORITY_HIGHEST,
+    ROLE_OFFLINE,
+    ROLE_ONLINE,
+    role_of,
 )
 
 #: `claim_outcome()` 的返回形状（新 HTTP 面的出口；`token` 为空串 = 无租约/未拿到）。
@@ -101,6 +110,7 @@ class LeaseMixin:
         #: 自己说「这个失败我能自愈」）。volatile：hub 重启即丢——重启本身就会重发未完成
         #: job（D8），计数从头起不改变结论（再烧 N 次即再冻）。
         self._reclaims: dict[str, int] = {}
+        # ---- 归属角色（2026-09-25，plan/online-offline-role-routing）----
         #: job_id -> 冻结记录（毒包熔断的**独立第二状态**）：{"reclaims", "worker", "ts",
         #: "announced"}。刻意**不**复用 `fail.json`（失败标记）：`publish_job` 重发同 job_id
         #: 会清失败标记（“重发即重试”语义，见 `claimable_job_ids` 注释）——冻结若住那里，
@@ -111,6 +121,58 @@ class LeaseMixin:
         #: 可过期 ⇒ 毒包熔断失明；job 立刻回池 ⇒ 第三/第四份可自由领取；push 腿
         #: 「hub 持租约防同一份活两处跑」的自保也会失效。标记只放行回传，不动其它语义。
         self._backup_authorized: set[str] = set()
+        #: 课程停摆（离线课 = 活留着等切回在线，2026-09-20 的既有语义）。与 job 级归属闸
+        #: **正交**：这一位说的是「这门课现在还派不派活」（课程级），`role` 说的是「这份活
+        #: 归哪块盘」（job 级）。两者共用同一个咽喉点（`role_blocked` → `_claim_locked`），
+        #: 不各自为政——由 `_HubQueue` 在 `set_mode` / 构造时同步（它是唯一知道 mode 的层）。
+        self.parked = False
+        #: job_id -> 归属角色缓存（`manifest.role`，2026-09-25）。为什么缓存：`claim_next` /
+        #: `peek` 每拍都要按角色过滤候选，而 manifest 在盘上——每拍每候选重读一次盘是白烧 IO。
+        #: 失效点 = `publish`（重发覆盖 manifest ⇒ 旧归属作废；见那里的 pop）——不靠
+        #: 「同一 job_id 的 role 永不变」这种假设。只缓存**读成功**的值（manifest 还没落定时不缓存）。
+        #: 用独立锁：`job_role` 会被持 `_lock` 的调度临界区调到，共锁会自锁。
+        self._roles: dict[str, str] = {}
+        self._role_lock = Lock()
+
+    def role_blocked(self, job_id: str, role: str) -> str:
+        """这份活能不能交给 `role`；`""` = 可以，否则是拒因（`"parked"` / `"role"`）。
+
+        **两道闸的唯一判据源**（2026-09-25）：派发面（`claim_next` / `peek_jobs` / push）
+        用它**过滤候选**，临界区（`_claim_locked`）用它**拒绝**——同一份判据两个方向，
+        不会出现「peek 说能领、claim 说不能」这类两套尺子。
+
+        为什么停摆闸也住这里（而不住各自的调用点）：push 腿（`Hub.claim`）**不经过**
+        `claim_job`，按 id 直领（`POST /jobs/{id}/claim`）也不经过 `claim_next`——闸写在
+        调用点必然漏一条（F5 就是这么来的）。
+        """
+        if self.parked and role != ROLE_OFFLINE:
+            # 离线课：只对离线盘放行（旧口径就是「带标 worker 才领得走」，现在改成按归属判）。
+            return "parked"
+        if self.job_role(job_id) != role:
+            return "role"
+        return ""
+
+    def job_role(self, job_id: str) -> str:
+        """job 的**归属角色**（`manifest.role`；旧 job 按 `kind` 兜底；读不到 ⇒ online）。
+
+        为什么读不到就归 online：这个函数的返回值会参与「你能不能领这份活」的判断。
+        归 online 的后果是「少一个人能领离线活」（看得见：队列不降），归 offline 的后果是
+        「一个能跑的活没人领、且看起来一切正常」（看不见）——两者不对称，所以倒向后者。
+        """
+        with self._role_lock:
+            cached = self._roles.get(job_id)
+        if cached is not None:
+            return cached
+        try:
+            man = json.loads((self._job_dir(job_id) / "manifest.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return ROLE_ONLINE
+        if not isinstance(man, dict):
+            return ROLE_ONLINE
+        role = role_of(man)
+        with self._role_lock:
+            self._roles[job_id] = role
+        return role
 
     # ---- 租约（P3b 独占加超时：领取即设租约，心跳续租，过期回池） ----
     def claim(
@@ -121,6 +183,7 @@ class LeaseMixin:
         avoid_stale_holder: bool = False,
         mode: str | None = None,
         expected_epoch: int | None = None,
+        role: str = ROLE_ONLINE,
     ) -> str | None:
         """领取（独占 = 设租约 + owner + last_heartbeat 三件套**同时置**）。
 
@@ -146,6 +209,7 @@ class LeaseMixin:
             worker_id=worker_id,
             avoid_stale_holder=avoid_stale_holder,
             expected_epoch=expected_epoch,
+            role=role,
         )
         return token if ok else None
 
@@ -157,6 +221,7 @@ class LeaseMixin:
         worker_id: str = "",
         avoid_stale_holder: bool = False,
         expected_epoch: int | None = None,
+        role: str = ROLE_ONLINE,
     ) -> ClaimOutcome:
         """带原因的领取（新 HTTP 面的唯一入口）：区分「降级」与「领不到」。
 
@@ -171,6 +236,7 @@ class LeaseMixin:
             worker_id=worker_id,
             avoid_stale_holder=avoid_stale_holder,
             expected_epoch=expected_epoch,
+            role=role,
         )
         if ok:
             status = "backup" if mode == CLAIM_MODE_BACKUP else "ok"
@@ -186,6 +252,7 @@ class LeaseMixin:
         worker_id: str,
         avoid_stale_holder: bool,
         expected_epoch: int | None,
+        role: str = ROLE_ONLINE,
     ) -> tuple[bool, str, str]:
         """claim 的**唯一**临界区（返回 `(ok, token, 原因)`）。
 
@@ -203,6 +270,14 @@ class LeaseMixin:
             if job_id in self._frozen:
                 # ★ 熔断（§4.1）：任何入口都不再下发（含备份副本）。
                 return False, "", "frozen"
+            blocked = self.role_blocked(job_id, role)
+            if blocked:
+                # ★ 归属/停摆闸（2026-09-25，plan/online-offline-role-routing §2.2）：租约
+                # 写入的**唯一**入口就在本函数（B3 的入口唯一性契约），所以全部认领面
+                # （claim_next / peek+claim / 按 id 直领 / push 派发）天然同源——**别**在
+                # 各自的调用点再各判一次，那又是两套会漂的判据（push 腿根本不经过
+                # `claim_job`，就是这条的必要性所在）。
+                return False, "", blocked
             now = self._now()
             if mode == CLAIM_MODE_BACKUP:
                 # 备份副本：不设租约、不动原租约（R2-3），只授权「你的回传不吃 403」。

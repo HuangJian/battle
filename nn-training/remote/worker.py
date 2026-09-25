@@ -45,6 +45,8 @@ from pathlib import Path
 from typing import Any
 
 from common.protocol import (
+    ROLE_OFFLINE,
+    ROLE_ONLINE,
     CodeChangedError,
     ProtocolError,
     encode_opt_tar,
@@ -63,6 +65,7 @@ from common.protocol import (
 from common.protocol import (
     d14_corpus_match as protocol_d14_corpus_match,
 )
+from log_bundle import LogBundle
 
 # BC 作业（S4 第六步之二 → `remote/bc_job.py`）：**显式转发**（e2e / tests 直接 import
 # 这些名字，见该模块头部；本组无 monkeypatch 接缝）。
@@ -106,6 +109,9 @@ from remote.bc_job import (
 #   （`test_wire_reroll` / `test_control_plane_bypass` / `test_remote_ppo`）——名字是契约，
 #   位置不是。它们不再是**注入点**，但仍是**入口**。
 from remote.download import (
+    WEIGHT_SOURCES as WEIGHT_SOURCES,
+)
+from remote.download import (
     _cache_blob as _cache_blob,
 )
 from remote.download import (
@@ -122,6 +128,9 @@ from remote.download import (
 )
 from remote.download import (
     _resolve_blob as _resolve_blob,
+)
+from remote.download import (
+    _resolve_weights as _resolve_weights,
 )
 from remote.download import (
     download_blob as download_blob,
@@ -175,7 +184,7 @@ from remote.http import (
 from remote.http import (
     _warn_non_200 as _warn_non_200,
 )
-from remote.iter_rollout import run_iter_rollout
+from remote.iter_rollout import resolve_bun, run_iter_rollout
 
 # 作业工作区 / 产物落盘 / TAR / git 物化（S4 第六步 → `remote/job_fs.py`）：**显式转发**。
 # 本组无 monkeypatch 接缝（全仓都是直接调用）⇒ 转发即够。
@@ -390,13 +399,13 @@ def run_job(
     code_cache_dir: Path | None = None,
     ts_code_cache_dir: Path | None = None,
     lease_token: str = "",
-    # ---- 半离线（kind=run；2026-09-17）产物目录与本次预算 ----
-    # artifacts_dir：产物根（缺省按 Kaggle /kaggle/working / Colab Drive / 工作目录自动解析）。
-    # run_max_iters / run_budget_sec：本次自主段的额外上限（0 = 只认计划）——后者是
-    # Kaggle 会话到期前「干净停机」的把手。
-    artifacts_dir: str | Path | None = None,
-    run_max_iters: int = 0,
-    run_budget_sec: float = 0.0,
+    # 日志节食（2026-09-24）：本 job 的「入口 + 启动 + 装载」读数攒进这个 bundle。
+    # 调用方（`rl/` 的常驻轮 loop）先往里放它自己那几行（`it<N>: N 局 wver=…`），本函数
+    # 再把入口/设备读数放进去，训练核把装载读数补上，装载完成时打**一行**
+    # （`nn-training/log_bundle.py`）；不传就自建（只在行数上有差别，信息量不变）。
+    prep: Any = None,
+    # 注：半离线（kind=run）那条腿的 `artifacts_dir` / `run_max_iters` / `run_budget_sec`
+    # 三个入参随 2026-09-25 的退休一起没了（`plan/online-offline-role-routing.plan.md` §7）。
     # ---- 调度面（2026-09-22，plan/transfer-scheduling R2-5）----
     # `should_cancel()`：每 **epoch 边界** 问一次「结果是不是已经 landed」——是则抛
     # `JobCancelledError`（停算丢弃，零回传/零 fail）。不在 chunk 内层加回调（用户拍板：
@@ -423,6 +432,22 @@ def run_job(
     """
     jid = job["job_id"]
     manifest = normalize_manifest(job["manifest"])
+    # 日志节食（2026-09-24）：本 job 的入口/启动/装载读数攒进这一行（`prep_b.emit`）。
+    prep_b = LogBundle(log) if prep is None else prep
+    t_prep = time.time()
+
+    # ---- 离线腿已退役（2026-09-25，plan/online-offline-role-routing §7）：kind=run 拒收 ----
+    # 「hub 发一份 kind=run 整段 job、本机等 8h」那条腿**不再有生产端**：离线课由云机
+    # **取任务包**接手（`battle.offline.ipynb` → `/offline/tasks` → `/offline/task-pack`）。
+    # 为什么拒收而不是「当成 kind=iter 跑一轮」：半跑一轮会产出权重、让控制面看着像在推进，
+    # 而 hub 侧早就不等了 —— 那正是最难查的那类静默分叉（plan §7.2 的「不许白等」）。
+    # 位置在**最前**（连结果复用/能力自检之前）：拒单不发一号指令、不下载一个字节。
+    if str(manifest["kind"]) == "run":
+        raise ProtocolError(
+            f"job {jid}: kind=run（半离线整段）这条腿已于 2026-09-25 退役 —— 离线课由云机"
+            "取任务包接手：battle.offline.ipynb（/offline/tasks 清单 → /offline/task-pack 取包）。"
+            "本 worker 拒收这份活。"
+        )
 
     # ---- 结果复用（2026-09-05）：上次已算完但回传失败 → 本地缓存直接重传，不重算 PPO ----
     cached_path = work_dir / jid / "_result.json"
@@ -435,11 +460,28 @@ def run_job(
         except Exception:
             pass  # 缓存缺失/跨 manifest/损坏 → 清场走全流程
 
+    # ---- 能力自检（plan/train-mode-hot-switch.plan.md L3.2，2026-09-24）------
+    # 缺 bun 在**零下载**时就拒单：`kind=iter` 的活要节点自己跑 rollout
+    # （`run_iter_rollout` → `resolve_bun`），而现状是先把 payload + code.zip + ts_code.zip
+    # 三件全下完（实测 3.42MB / 12.1s）才在 `run_iter_rollout` 里发现没 bun —— 全白传。
+    #
+    # ★ 位置很关键：必须在**结果复用块之后**。它前面那个 `_result.json` 命中是纯重传
+    #   （上次算完了、只是回传失败），重传不需要 bun —— 放在复用块之前会把这种情况误拒。
+    #
+    # 失败类型与原来一模一样（`resolve_bun` 抛 `ProtocolError`）：调用方按「确定性拒结」
+    # 处理（`worker_loop` 的 `except ProtocolError` 分支注释里就有「节点能力缺失如 bun
+    # 装不上」），hub 落终局 failed、训练侧停腿 —— 不动分类，只把判定前移。
+    # `echo` 走「只验传输链」（下方 kind 分叉里整个跳过 rollout）⇒ 不该要求 bun。
+    if str(manifest["kind"]) == "iter" and not echo:
+        resolve_bun(str((manifest.get("rollout") or {}).get("bun") or ""))
+
     # ---- 物料落地（S4 第十二刀）：payload 与 code.zip 的「取字节 + 摆好」整段在
     # `remote/download.py`（与 kind=iter 的 `_ensure_ts_code` 并列成三兄弟）。
     # 这一刀之后 `run_job` 不再认识缓存树 / 解包 / 清场细节——它读三个 `_ensure_*` 的**返回值**，
     # 那些返回值（`PayloadLanded` / `CodeLanded`）就是「摆到哪儿了」的完整答案。
-    landed = _ensure_payload(base_url, token, jid, manifest, work_dir, preloaded=preloaded, log=log)
+    landed = _ensure_payload(
+        base_url, token, jid, manifest, work_dir, preloaded=preloaded, log=log, bundle=prep_b
+    )
     raw = landed.payload_bytes
     job_dir = landed.job_dir
     shard_dirs = landed.shard_dirs
@@ -455,6 +497,7 @@ def run_job(
         code_cache_root=code_cache_dir,
         preloaded=preloaded,
         log=log,
+        bundle=prep_b,
     )
     code_root, code_cache_dir, blob_root = code.code_root, code.code_cache_dir, code.blob_root
 
@@ -465,7 +508,7 @@ def run_job(
     _job_sha = str(manifest["code_sha256"])
     if _ACTIVE_CODE_SHA is None:
         _ACTIVE_CODE_SHA = _job_sha
-        log(f"job {jid}: 本进程加载代码 sha={_job_sha[:12]}…（后续 job 若变化将自重启）")
+        prep_b.add("进程代码 sha", f"{_job_sha[:12]}…（后续 job 若变化将自重启）")
     elif _job_sha != _ACTIVE_CODE_SHA:
         raise CodeChangedError(_ACTIVE_CODE_SHA, _job_sha)
 
@@ -502,6 +545,42 @@ def run_job(
             log=log,
         )
 
+    # ---- opt-blob-diet（2026-09-24，plan/opt-blob-diet.plan.md §3.2/§3.3）：权重解析 ----
+    # 五源：W0 payload → W1 blob_cache → W2 preloaded → W3 GET blob（W4 旧形状 tar 的
+    # `model.pt` 由训练核的 restore 段承担）。**位置是本 plan 最容易做错的一处**：
+    #   ① 必须早于 `run_iter_rollout` —— kind=iter 的 rollout argv 是
+    #      `--weights init_weights.json`（相对 job 目录），权重不在就起不来；
+    #   ② 必须早于 `ppo_engine.build_ppo(...)` —— arch 从权重文件里读，缺文件会静默
+    #      退回默认 64/8/128（「建了错的模型却照跑」，§3.3-2）；
+    #   ③ 必须**晚于** BC 的 early-return —— BC job 的 `init_weights_fp` 是哨兵 `"bc"`，
+    #      进五源会给 hub 打一个必然 404 的 `?name=init`（§3.2 的 64-hex 规则）。
+    # 传输账的两个计数器在这里建账：后面的 opt/ref/demo blobs 与训练核共用这一手账。
+    blob_hits = 0
+    blob_miss_bytes = 0
+    init_w, weights_src, weights_wire_bytes = _resolve_weights(
+        job_dir=job_dir,
+        init_weights_fp=str(manifest["init_weights_fp"]),
+        blob_root=blob_root,
+        jid=jid,
+        base_url=base_url,
+        token=token,
+        preloaded=preloaded,
+        log=log,
+    )
+    if weights_src == "cache":
+        blob_hits += 1
+    elif weights_src == "download":
+        blob_miss_bytes += weights_wire_bytes
+    if init_w is None and str(manifest["kind"]) == "iter":
+        # kind=iter 的**节点侧 rollout** 必须有权重文件：W4 那条 tar 退路对它无效
+        # （旧 hub 对这类 job 恒带 payload 内的 init_weights.json ⇒ 走 W0）。
+        # 新 hub 下这里只会在「四源全缺失」时触发 = 真的发错了活。
+        raise ProtocolError(
+            f"job {jid}: kind={manifest['kind']} 需要 init 权重但四源皆尽"
+            f"（试过 {'/'.join(WEIGHT_SOURCES[:4])}）"
+            f"；init_weights_fp={str(manifest['init_weights_fp'])[:12]}…——拒收"
+        )
+
     # ---- M3 kind 分叉：iter = 一整轮上云（节点自己跑 rollout 产 shard）----
     #
     # 位置很关键：必须在 mode 红线 / D14 / echo **之前**——因为本轮真正要校验的 shard
@@ -510,29 +589,21 @@ def run_job(
     iter_info: dict | None = None
     ts_code_bytes = 0
     ts_code_hit = False
-    # ---- 半离线（kind=run）：先把计划接过来校验（**跑第一局之前**）----
-    # 三道门（sha / 形状 / 全段对集指纹）都在 `remote/plan_run.verify_plan_file` 里；失败 =
-    # 计划与 hub 侧不一致，此时不跑任何一局，也不写任何产物。
-    #
-    # 为什么是 `plan_run` 而不是 `run_loop`：执行引擎已下沉到 L2（`worker` 在它上面），
-    # 而 `plan_run` **不 import worker**——「一轮怎么跑」由我们**注入自己**（`run_job_fn=run_job`，
-    # 见下面 run_plan_job 的尾巴）。这条注入把原先 `run_loop ⇄ worker` 的延迟环拆掉了
-    # （`tests/helpers/remote_dag.py` 的 DEFERRED_CYCLES 因此为空）。仍然是**函数内**延迟
-    # import：保持本模块顶层的 import 面不变。
-    run_plan: dict | None = None
-    run_plan_sha = ""
-    if str(manifest["kind"]) == "run":
-        from remote.plan_run import verify_plan_file
-
-        run_plan, run_plan_sha = verify_plan_file(job_dir, manifest, log=log)
-    if str(manifest["kind"]) in ("iter", "run"):
+    if str(manifest["kind"]) == "iter":
         ts_root = (
             ts_code_cache_dir
             if ts_code_cache_dir is not None
             else code_root.parent / "ts_code_cache"
         )
         _ts_dir, ts_code_bytes, ts_code_hit = _ensure_ts_code(
-            base_url, token, jid, manifest, ts_root=ts_root, preloaded=preloaded, log=log
+            base_url,
+            token,
+            jid,
+            manifest,
+            ts_root=ts_root,
+            preloaded=preloaded,
+            log=log,
+            bundle=prep_b,
         )
         if echo:
             log(f"job {jid}: kind=iter + echo——跳过 rollout（只验传输链）")
@@ -635,45 +706,18 @@ def run_job(
         device=device,
         torch_threads=torch_threads,
         preloaded=preloaded,
+        # opt-blob-diet：五源解析在**壳**里做完（必须早于 rollout），训练核只消费结果。
+        init_w=init_w,
+        weights_src=weights_src,
+        weights_wire_bytes=weights_wire_bytes,
+        blob_hits=blob_hits,
+        blob_miss_bytes=blob_miss_bytes,
+        prep=prep_b,
+        t_prep=t_prep,
         should_cancel=should_cancel,
         on_ppo_start=on_ppo_start,
         log=log,
     )
-    # ---- 半离线尾巴（kind=run）：本轮跑完 → 把计划里剩下的轮次自己跑完 ----
-    # 位置在前面的自查**之前**：合并结果是「末轮形状 + iters 明细」，自查要用最终形状。
-    if str(manifest["kind"]) == "run" and not echo:
-        from remote.plan_run import run_plan_job
-
-        assert run_plan is not None  # kind=run 必过 verify_plan_file（上面已抛）
-        result = run_plan_job(
-            job_id=jid,
-            manifest=manifest,
-            job_dir=job_dir,
-            work_dir=work_dir,
-            plan=run_plan,
-            plan_sha256=run_plan_sha,
-            first_result=result,
-            course=course,
-            device=device,
-            torch_threads=torch_threads,
-            code_cache_dir=code_cache_dir,
-            ts_code_cache_dir=ts_code_cache_dir,
-            artifacts_dir=artifacts_dir,
-            max_iters=run_max_iters,
-            budget_sec=run_budget_sec,
-            # 产物补传：本 job 就是从这条连接上领来的（地址与 token 手边就有）——半离线段
-            # 因此默认开着补传：hub 中途失联也不至于「跑完一整段、控制面一无所知」。
-            hub_url=base_url,
-            hub_token=token,
-            # 补传的**归位键**：hub 在轮询面里告诉我们这份活属于哪门课（多课程
-            # hub 里没有它，每条补传都会被 400 「无法归属课程」拒掉——而 manifest 里的
-            # `course_name` 是课程文件的 name 字段，与 hub 的课程键不是一回事）。
-            hub_course=str(job.get("course") or ""),
-            # ★ 注入：引擎不替我们决定「一轮怎么跑」——把**自己**传进去。原先引擎里那个
-            # `_real_run_job` 兜底会反向 import 本模块（`run_loop ⇄ worker` 环的成因）。
-            run_job_fn=run_job,
-            log=log,
-        )
     validate_result(result, manifest, commit_echo_must_match=False)  # 自查
     _persist_result(work_dir, jid, result)
     return result
@@ -714,12 +758,10 @@ def worker_loop(
     max_idle_sec: float = 0.0,
     restart_argv: list[str] | None = None,
     hub_urls: list[str] | None = None,
-    # 半离线（kind=run）：产物根与本次自主段上限（透传给 run_job；缺省 = 自动解析/只认计划）
-    artifacts_dir: str | Path | None = None,
-    run_max_iters: int = 0,
-    run_budget_sec: float = 0.0,
-    # 离线训练模式（2026-09-19）：本会话能自己跑完整段 ⇒ 带能力头领离线课
-    offline_ok: bool = False,
+    # 离线训练模式（2026-09-19，2026-09-25 语义升为**归属**）：本会话属于离线盘 ⇒
+    # 只在 peek/claim 面带角色头，且只能领 `manifest.role="offline"` 的 job。
+    # 缺省 `online` = 旧 worker 行为（`--offline` 的 CLI 名与头的字面量都不变）。
+    role: str = ROLE_ONLINE,
     # 软持有预取深度（P2，2026-09-22）：0 = 关预取（只调度不预取，§7 的回退档）
     prefetch_depth: int = PREFETCH_DEPTH_DEFAULT,
     # 结果回传模式（P2.5，2026-09-22）：async = 回传**不占关键路径**（缺省）；sync = 旧行为
@@ -786,7 +828,7 @@ def worker_loop(
                     base_url,
                     token,
                     worker_id=worker_id,
-                    offline_ok=offline_ok,  # 能力自报：能自己跑完整段
+                    role=role,  # 归属自报：本会话只领本盘的活
                     # P2：已被别人落盘的 job（none 级）就地丢掉本地预取副本——再预取就白花带宽。
                     on_drop=(pf_store.drop if pf_store is not None else None),
                     log=log,
@@ -848,11 +890,12 @@ def worker_loop(
                 device=device,
                 torch_threads=torch_threads,
                 echo=echo,
-                artifacts_dir=artifacts_dir,
-                run_max_iters=run_max_iters,
-                run_budget_sec=run_budget_sec,
                 restart_argv=restart_argv,
-                offline_ok=offline_ok,
+                # 注：半离线（kind=run）腿的 `artifacts_dir` / `run_max_iters` / `run_budget_sec`
+                # 随 2026-09-25 的退休一起没了，`round` 签名里也不再有它们（见 `run_job` 注释）。
+                # 归属自报（2026-09-25）：本会话属于哪块盘 —— peek 与 claim 两条面都带它，
+                # 否则带标 worker 会在归属闸（`_JobStore._claim_locked`）上自锁。
+                role=role,
                 prefetch_depth=prefetch_depth,
                 uploader=uploader,
                 # ★ 注入点：宿主在**调用点**读 `run_job` 这个值 ⇒ patch `remote.worker.run_job`
@@ -938,33 +981,16 @@ def main() -> None:
         default=PREFETCH_DEPTH_DEFAULT,
         help=f"软持有预取深度（0=关；缺省 {PREFETCH_DEPTH_DEFAULT}）",
     )
-    # ---- 半离线（kind=run；2026-09-17）----
-    # 产物目录：缺省按 Kaggle /kaggle/working → Colab Drive → <work>/artifacts 自动解析。
-    ap.add_argument(
-        "--artifacts",
-        default="",
-        help="半离线产物目录（kind=run 的交付面；缺省自动：Kaggle /kaggle/working / Colab Drive）",
-    )
-    ap.add_argument(
-        "--run-max-iters",
-        type=int,
-        default=0,
-        help="本次自主段最多再跑几轮（0=只认计划；计划本身也有上限）",
-    )
-    ap.add_argument(
-        "--run-budget-sec",
-        type=float,
-        default=0.0,
-        help="本次自主段最多跑多少秒（0=不限；Kaggle 会话到点前干净停机的把手）",
-    )
-    # ---- 离线训练模式（2026-09-19）----
-    # 能力自报：本会话能自己跑完整段（kind=run）。hub 只把**离线课**的 job 放给带标的
-    # worker；不带标就领不到（离线课不实时派发，但不是谁都领得到的公共池）。
-    # 这是能力声明，不是课程绑定：带标 worker 照样领在线课（课程与 worker 正交）。
+    # ---- 离线训练模式 / 归属（2026-09-19 落地，2026-09-25 语义升级）----
+    # **语义**：本会话属于**离线盘**（`role=offline`）——只能领归属为 offline 的 job，且**不再**
+    # 兼领在线盘的活（一个盘一种任务，
+    # 用户 2026-09-25 裁决；旧口径「能力声明、带标仍可领在线课」已作废，见 DECISIONS
+    # §2026-09-25-goalnn-role-routing）。FLAG 名与头上的字面量都保持不变（混合部署兼容）。
     ap.add_argument(
         "--offline",
         action="store_true",
-        help="自报「能自主跑完整段」：领离线课的整段 job（kind=run）；带标仍可领在线课",
+        help="自报本会话属于**离线盘**（role=offline）：只领归属为 offline 的 job"
+        "（注：kind=run 那条腿 2026-09-25 退役后，离线课走取包链，不再经队列——见 plan §7）",
     )
     args = ap.parse_args()
     token = args.token
@@ -1008,10 +1034,7 @@ def main() -> None:
             max_idle_sec=args.max_idle_sec,
             restart_argv=sys.argv[1:],
             hub_urls=hub_urls,
-            artifacts_dir=args.artifacts or None,
-            run_max_iters=args.run_max_iters,
-            run_budget_sec=args.run_budget_sec,
-            offline_ok=args.offline,
+            role=ROLE_OFFLINE if args.offline else ROLE_ONLINE,
             prefetch_depth=args.prefetch_depth,
             result_upload=args.result_upload,
         )

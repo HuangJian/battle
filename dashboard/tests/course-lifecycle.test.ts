@@ -40,6 +40,9 @@ process.env.BCITY_LOCKS_DIR = path.join(DIR, 'locks')
 // 离线开课会自动触发任务包导出（真起 run_rl 子进程）——本套件盯的是开课生命周期，
 // 关掉这个副作用（导出正确性由 server-api-task-bundle 套件覆盖）。
 process.env.BCITY_NO_AUTO_TASK_BUNDLE = '1'
+// 同理关掉「离线开课自动补 it0 基线评估」（2026-09-24）：那是 evalA 真子进程（几百局游戏）。
+// 它自己的 argv/三态由 eval-a-baseline 套件钉；本套件只保证**它不再被真起**。
+process.env.BCITY_NO_AUTO_BASELINE_EVAL = '1'
 mkdirSync(path.join(DIR, 'traj'), { recursive: true })
 mkdirSync(path.join(DIR, 'locks'), { recursive: true })
 writeFileSync(
@@ -199,7 +202,7 @@ describe('openCourse：把「这门课存在且可被调度」写到盘上', () 
 
 // ────────────────────────── ①b 开课：离线模式预校验（2026-09-22 事故回归） ──────────────────────────
 
-describe('openCourse：离线（整段上云）要求课程声明有限 iters', () => {
+describe('openCourse：离线（云机接手）要求课程声明有限 iters', () => {
   const FIX = path.join(DIR, 'curricula-fix') // 夹具课程目录（临时 BCITY_CURRICULA_DIR）
   const trajOf = (c: string) => path.join(DIR, 'traj', c)
 
@@ -284,13 +287,20 @@ describe('openCourse：课程级旋钮只落 courses.<课>', () => {
   })
 
   it('离线：声明 + 段长两把键成对落课程级（缺一不可）', async () => {
-    await openCourse(COURSE, { trainMode: 'offline', hubMode: { attempts: 1, delayMs: 0 } })
+    const r = await openCourse(COURSE, {
+      trainMode: 'offline',
+      hubMode: { attempts: 1, delayMs: 0 },
+    })
     expect(courseKeys()).toMatchObject({ rollout_src: 'run', run_iters: -1 })
     // ★ 全局键（所有课共用的默认面）一个字不动——离线是**这门课**的决定
     const cfg = JSON.parse(readFileSync(process.env.BCITY_RL_CONFIG!, 'utf-8')) as {
       rl: Record<string, unknown>
     }
     expect(cfg.rl.rollout_src).toBeUndefined()
+    // 逃生阀置位 ⇒ **不**补 it0 基线（回执里没有那行 note、互斥键没被占 = 没起 evalA 子进程）；
+    // 反向（真补）由 eval-a-baseline 套件按 argv/三态钉，不在用例里真跑几百局。
+    expect(r.detail!.join('\n')).not.toContain('it0 基线')
+    expect(actions.busy.has('eval:A')).toBe(false)
   })
 
   it('在线 + rollout 位置：写课程级覆盖（不碰全局 rl.rollout_src）', async () => {
@@ -362,7 +372,7 @@ describe('openCourse：置 hub 模式在发现事实**之后**（事故回归）
     expect(modes[COURSE]).toBe('online')
   })
 
-  it('离线开课 ⇒ 推的是 offline（整段只交给带标 worker）', async () => {
+  it('离线开课 ⇒ 推的是 offline（该课停车：不再实时派发）', async () => {
     await openCourse(COURSE, { trainMode: 'offline', hubMode: { attempts: 1, delayMs: 0 } })
     expect(calls[0]!.url).toContain('mode=offline')
   })
@@ -383,6 +393,10 @@ describe('stopCourse：非破坏停课（暂停意图 + hub 置离线）', () =>
     // 账本/队列保留（用户口径：暂停 = 保留队列，不删）
     expect(readFileSync(path.join(TRAJ, COURSE, 'training_log.jsonl'), 'utf-8')).toBe(before)
     expect(r.detail!.join('\n')).toContain('队列与账本一个字不动')
+    // ★ 2026-09-24（plan §2.2 F9）：停课**不是**「云机接手」——它的 hub 推送走 `pushCourseMode`
+    //（只推 hub + 落意图），绝不动 `courses.<课>`。误译成写 run/run_iters 会让「停课」把本机
+    // 采样也关掉（而停课的定义是非破坏：随时开课接着跑）。
+    expect(courseKeys(COURSE)).toEqual({})
   })
 
   it('可逆：停课 → 开课把暂停意图清掉（否则「开了课但不推进」）', async () => {

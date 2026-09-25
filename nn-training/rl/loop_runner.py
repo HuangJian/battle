@@ -55,7 +55,7 @@ from rl.loop_core import (
     ROUND_WAIT,
     RoundOutcome,
 )
-from rl.loop_round import STEP_METHOD, RoundContext, StepResult
+from rl.loop_round import ROUND_OFFLINE_EXIT, STEP_METHOD, RoundContext, StepResult
 from rl.loop_scheduler import CourseQueue
 from rl.loop_tasks import (
     ROUND_TASKS,
@@ -304,6 +304,11 @@ class LoopRunner:
         if out.status == ROUND_BUNDLE_EXIT:
             self.finished = True
             self.finish_reason = "全离线任务包已导出"
+            return done(it=out.it, final=True)
+        if out.status == ROUND_OFFLINE_EXIT:
+            # 离线课：本机不跑（云机取任务包接手）。正常收官，**不是**调度层失败。
+            self.finished = True
+            self.finish_reason = "离线课由云机取任务包接手（本机不跑）"
             return done(it=out.it, final=True)
         if out.status == ROUND_STOP:
             # 硬边界（门 / 熔断 / 止损 / 预算 / 停腿）：整条腿正常收工，**不是**调度层失败。

@@ -188,7 +188,7 @@ def import_deliver_zip(
         f"状态 {st.get('state') or '?'}）"
     )
     log(f"[deliver] 末轮权重：{final_ckpt}")
-    n_eval = _merge_carried_eval_rows(final, dest_root)
+    n_eval, n_eval_sums = _merge_carried_eval_rows(final, dest_root)
     n_rows = _merge_carried_metric_rows(final, dest_root, log=log)
     return {
         "run_id": final.name,
@@ -201,38 +201,43 @@ def import_deliver_zip(
         "state": str(st.get("state") or ""),
         "rows": len(iters),
         "eval_rows": n_eval,
+        "eval_summaries": n_eval_sums,
         "metric_rows": n_rows,
         "source_zip": str(src),
         "bytes": size,
     }
 
 
-def _merge_carried_eval_rows(final: Path, dest_root: Path) -> int:
-    """把产物包里带的云机 A 层评估行（`eval_log.jsonl`）并进课程账本，返回新增行数。
+def _merge_carried_eval_rows(final: Path, dest_root: Path) -> tuple[int, int]:
+    """把产物包里带的云机 A 层评估（逐局行 + summary）并进课程账本，返回
+    `(新增逐局行数, 新增 summary 行数)`。
 
     为什么在导入时并：产物包是**云机评过的读数回到本机的唯一载体**（连 hub 都不在场时
     也成立），而控制台/门判只看 `tmp/<课程>/eval_log.jsonl`。盘上布局就是它的位置：
     导入根是 `tmp/<课程>/deliver`，账本在它的同级（`tmp/<课程>/eval_log.jsonl`）。
 
+    summary 一并并进去（`rl.eval_local.merge_eval_rows` 的单调规则）：控制台的 eval 列 /
+    弹窗 / 开课回执与门判据都只认 summary 行，纯云腿没人替它算（2026-09-23）。
+
     任何失败都只记一笔：导入的主价值是「权重可评估」，少一份读数不是导入失败。
     """
     src_jsonl = final / ArtifactStore.EVAL_LOG_NAME
     if not src_jsonl.exists():
-        return 0
+        return (0, 0)
     try:
         from rl.eval_local import merge_eval_rows
 
-        n = merge_eval_rows(src_jsonl, Path(dest_root).parent / "eval_log.jsonl")
+        n_games, n_sums = merge_eval_rows(src_jsonl, Path(dest_root).parent / "eval_log.jsonl")
     except Exception as e:  # rl 包不在（截断快照）/磁盘错——不拖垮导入
         print(f"[deliver] 评估账本并入失败（忽略）: {type(e).__name__}: {e}", flush=True)
-        return 0
-    if n:
+        return (0, 0)
+    if n_games or n_sums:
         print(
-            f"[deliver] 云机评估行并入课程账本：+{n}（源 {src_jsonl.name} → "
-            f"{Path(dest_root).parent / 'eval_log.jsonl'}）",
+            f"[deliver] 云机评估并入课程账本：+{n_games} 逐局 / +{n_sums} summary"
+            f"（源 {src_jsonl.name} → {Path(dest_root).parent / 'eval_log.jsonl'}）",
             flush=True,
         )
-    return int(n)
+    return (int(n_games), int(n_sums))
 
 
 def _merge_carried_metric_rows(

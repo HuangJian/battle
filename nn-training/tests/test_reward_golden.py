@@ -728,6 +728,10 @@ def test_item_metrics_layout_locked() -> None:
         "hitsArmor",  # idx38
         "puGotOther",  # idx39（v7：四桶外拾取残差，x5⑩ 全零 bug 补桶；不进公式）
         "pickupDist",  # idx40（v7：最近存活拾取中心格曼哈顿距离，哨兵 -1）
+        "playerHpRatio",  # idx41（v8：hp/maxHp，clamp01；与 obs s19 同源）
+        "dangerTicks",  # idx42（v8：累计 hpRatio<0.4 的 tick）
+        "threatTicks",  # idx43（v8：累计在敌方弹道/炮口线上的 tick；口径冻结在 danger-metrics.ts）
+        "dmgFirst600",  # idx44（v8：tick<600 累计承伤，不含致死一击）
     ]
     assert METRIC_INDEX["puGotBomb"] == 25
     assert METRIC_INDEX["puSpawnShield"] == 24
@@ -739,6 +743,10 @@ def test_item_metrics_layout_locked() -> None:
     assert METRIC_INDEX["hitsArmor"] == 38
     assert METRIC_INDEX["puGotOther"] == 39
     assert METRIC_INDEX["pickupDist"] == 40
+    assert METRIC_INDEX["playerHpRatio"] == 41
+    assert METRIC_INDEX["dangerTicks"] == 42
+    assert METRIC_INDEX["threatTicks"] == 43
+    assert METRIC_INDEX["dmgFirst600"] == 44
 
 
 def test_item_metrics_formula_and_envelope() -> None:
@@ -851,7 +859,7 @@ def test_credit_p6_formula_and_course() -> None:
     rep = _vr(c.reward_spec())
     assert rep.ok, rep.errors
     assert rep.warnings == (), rep.warnings
-    assert METRICS_VERSION == 7
+    assert METRICS_VERSION == 8
 
     # 公式按列加权：杀 1 basic 再杀 1 power 的两步势差 = +3 / +6（wHit/wWin 本例为 0）
     spec = RewardSpec(

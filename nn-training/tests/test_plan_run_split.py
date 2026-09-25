@@ -12,10 +12,16 @@
 
 ```
 plan_run（L2；不 import worker / run_loop）        ← 引擎：计划交接 + 运行上下文 + 单轮 + 主循环
-   ↑                              ↑
-worker（L4，kind=run 尾巴）      run_loop（L5，CLI / 独立续跑 / 门面）
-   └─ run_job_fn=run_job ─┘  └─ run_job_fn=_real_run_job ─┘   ← 「一轮怎么跑」由调用方注入
+                                  ↑
+                            run_loop（L5，CLI / 独立续跑 / 门面）
+                              └─ run_job_fn=_real_run_job   ← 「一轮怎么跑」由调用方注入
 ```
+
+★ 2026-09-25（并入 `origin/goal-nn`）：`kind=run`（半离线整段）那条腿**退役**（
+`plan/online-offline-role-routing.plan.md` §7）——worker 侧对这份活**响亮拒收**，于是图里
+那个 `worker（L4，kind=run 尾巴）` 分支没了：引擎的**唯一**驱动者就是入口。
+`worker.run_job` 侧那格注入（`run_plan_job(..., run_job_fn=run_job)`）随之消失，
+`tests/test_plan_run_split.py::test_worker_refuses_the_retired_kind_run_leg` 正面钉住这条。
 
 于是 `remote/__init__` 里那个**尾部的 `_real_run_job` 兜底被删除**：引擎不再替调用方决定用谁的
 job 执行器（那正是反向 import 的成因）。守卫钉的就是这条——**引擎里一旦出现 `_real_run_job`
@@ -27,7 +33,7 @@ job 执行器（那正是反向 import 的成因）。守卫钉的就是这条�
 |---|---|---|
 | `iter_spec` / `pairs_for` / `time` / `DRAIN_FLUSH_SEC` …（引擎读的模块全局） | **`remote.plan_run`** | **`plan_run`** |
 | 引擎的公开名（`run_plan_job` / `verify_plan_file` / `RunContext` / `_drive` …） | `run_loop` 只做**门面转发** | 取名字可以，**patch 无效**（同一对象） |
-| `worker.run_job` 侧：`plan_run.run_plan_job(..., run_job_fn=run_job)` | — | — |
+| ~~`worker.run_job` 侧：`plan_run.run_plan_job(..., run_job_fn=run_job)`~~ | — | — （kind=run 退役，2026-09-25） |
 
 `tests/test_run_loop.py` 里那条 `monkeypatch.setattr(run_loop_mod, "iter_spec", spy)` 已随本刀迁到
 `plan_run`（`run_loop` **不再转发** `iter_spec` ⇒ patch 它是 AttributeError，**响亮**而不是静默）。
@@ -199,24 +205,38 @@ def test_engine_has_no_worker_fallback_any_more() -> None:
     assert "run_job_fn 未注入" in ENGINE_FILE.read_text(encoding="utf-8")
 
 
-def test_worker_tail_imports_the_engine_and_injects_itself() -> None:
-    """worker 侧的 kind=run 尾巴：延迟 import **引擎**，并把**自己**传进去。
+def test_worker_refuses_the_retired_kind_run_leg() -> None:
+    """kind=run 那条腿已退役（2026-09-25，plan/online-offline-role-routing §7）：worker 拒收它。
 
-    这两条合起来才是「拆环」：`worker → plan_run`（向下）+ 注入 `run_job_fn`（不回指）。
+    **为什么这条取代了「worker 尾巴延迟 import 引擎」那条老守卫**：退役之前 worker 的
+except 尾巴要 `verify_plan_file` / `run_plan_job` 并 `run_job_fn=run_job` 注入自己；
+    退役之后这两条**都不该再存在**——引擎的**唯一**驱动者是入口（`remote/run_loop.py`，
+    见 `test_entry_injects_the_real_worker_and_keeps_it_deferred`）。
+
+    判据三层：
+      ① 拒收是**响亮**的（带退役说明的 `ProtocolError`，不是静默当 kind=iter 跑）；
+      ② worker 不再 import 引擎（`remote.plan_run`）——那一刀之后它连延迟 import 都不需要；
+      ③ 它更不 import 入口（`remote.run_loop`）——这条是**环**的底线，与引擎侧那条守卫
+         （`test_plan_run_never_imports_worker_or_run_loop`）配对。
     """
-    src = WORKER_FILE.read_text(encoding="utf-8")
-    assert "from remote.plan_run import verify_plan_file" in src, "worker 的 plan 校验没指向引擎"
-    assert "from remote.plan_run import run_plan_job" in src, "worker 的 plan 尾巴没指向引擎"
-    assert (
-        "run_job_fn=run_job," in src
-    ), "worker 没把**自己**注入引擎（漏了它 = 云机上 kind=run 直接 RuntimeError）"
+    assert "kind=run（半离线整段）这条腿已于 2026-09-25 退役" in WORKER_FILE.read_text(
+        encoding="utf-8"
+    ), "worker 没有对 kind=run 的退役拒收（或消息被静默换掉了）"
     tree = _tree(WORKER_FILE)
-    worker_imports = {
+    # ② 拒收之后 engine 的名字在 worker 里**一个都不该剩**（引用也算：引用 = 那条尾巴还在）
+    refs = {
+        n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+    }
+    assert not (refs & {"run_plan_job", "_real_run_job"}), (
+        f"worker 里又出现了引擎驱动名：{sorted(refs & {'run_plan_job', '_real_run_job'})}"
+    )
+    modules = {
         n.module
         for n in ast.walk(tree)
-        if isinstance(n, ast.ImportFrom) and n.module and n.module.startswith("remote.run_loop")
+        if isinstance(n, ast.ImportFrom) and n.module
     }
-    assert worker_imports == set(), f"worker 又直接 import 了入口模块：{sorted(worker_imports)}"
+    back = sorted(m for m in modules if m.startswith(("remote.plan_run", "remote.run_loop")))
+    assert back == [], f"worker 又 import 了引擎/入口：{back}（退役那条尾巴的残留）"
 
 
 def test_entry_injects_the_real_worker_and_keeps_it_deferred() -> None:

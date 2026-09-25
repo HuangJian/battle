@@ -19,9 +19,11 @@ NODE_RESULT_PATH = "/job/{jid}/result"
 # `_request` / `_job_failed_from_body` 仍是本模块其它函数（缓存查询、submit）的实现细节；
 # 结果探测自身走 `probe_job_result`（状态码分类的唯一实现，见 hub_client）。
 from common.protocol import (
+    BLOB_INIT,
     WIRE_JOB_CONTENT_TYPE,
     ProtocolError,
     RetryableError,
+    is_content_sha,
     pack_job_v2,
 )
 from remote.hub_client import PROBE_READY, PROBE_TRANSIENT, _request, probe_job_result
@@ -109,6 +111,17 @@ def submit_job(
         raw = blob_src.get(name)
         if s and raw and not blob_cached_on_node(base_url, token, s):
             blob_needs[name] = raw
+    # opt-blob-diet（2026-09-24，§4 / §3.2）：`init`（初始权重）同规——节点缓存未命中
+    # 才随 body 上传。**必须先过 `is_content_sha`**：BC job 的 `init_weights_fp == "bc"`
+    # 不是内容寻址的 sha（拿它问节点缓存 = 每轮都当 miss，评审 F2）。
+    init_sha = str(manifest.get("init_weights_fp") or "")
+    init_raw = blob_src.get(BLOB_INIT)
+    if (
+        is_content_sha(init_sha)
+        and init_raw
+        and not blob_cached_on_node(base_url, token, init_sha)
+    ):
+        blob_needs[BLOB_INIT] = init_raw
     last: str = ""
     t0 = time.time()
     # M2 B5：/job 体默认走 v2（payload/code/blob 裸二进制段，省掉 base64 的 33%%）；
@@ -179,7 +192,9 @@ def submit_job(
             # M2 B3：节点说缺 blob → 把本次携带的 blob 全补上（命中缓存的不必传）。
             if b"blob-missing" in resp:
                 for name, raw in blob_src.items():
-                    if name in ("opt", "ref") and raw:
+                    # opt-blob-diet（§4）：`init` 同规——节点说缺就得补传，否则下一次
+                    # 重试仍然 428（而 `need_blobs` 已经点名了它）。
+                    if name in ("opt", "ref", BLOB_INIT) and raw:
                         blob_needs[name] = raw
                 last = "428 blob-missing"
             elif b"ts-code-missing" in resp:

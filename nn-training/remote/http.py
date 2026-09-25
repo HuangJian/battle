@@ -31,6 +31,7 @@ heartbeat/release/fail）· 下载（payload/code/ts_code/blob）· 结果回传
 
 from __future__ import annotations
 
+import json
 import os
 import time
 import urllib.error
@@ -40,8 +41,10 @@ from typing import Any
 
 from common.protocol import (
     AUTH_HEADER,
-    OFFLINE_CAP_HEADER,
-    OFFLINE_CAP_VALUE,
+    ROLE_HEADER,
+    ROLE_HEADER_VALUE,
+    ROLE_OFFLINE,
+    ROLE_ONLINE,
     WORKER_ID_HEADER,
     ProtocolError,
     RetryableError,
@@ -182,11 +185,40 @@ def _read_body(
 _POLL_WARN_AT: dict[str, float] = {}
 
 
-def _warn_non_200(base_url: str, status: int, log: Any) -> None:
+def _reject_reason(body: bytes) -> str:
+    """从 hub 的错误体里抠出 `error` 文案（拿不到就空串）。
+
+    2026-09-24 事故：worker 的兜底文案把 409 说成「hub 异常」，而 hub 明明回了
+    `{"error": "claim 被拒: held (…)"}` —— 响应体被丢掉了。这里把它捡回来。
+    """
+    if not body:
+        return ""
+    try:
+        got = json.loads(body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return ""
+    if not isinstance(got, dict):
+        return ""
+    return str(got.get("error") or "").strip()
+
+
+def _warn_non_200(
+    base_url: str,
+    status: int,
+    log: Any,
+    *,
+    body: bytes = b"",
+    jid: str = "",
+) -> None:
     """非 200 的节流告警（（url, status）每分钟最多一条）。
 
     为什么要区分「队列空」与「被拒」（2026-09-16 x3-step 事故）：非 200 一律静默的话，
     被 403 ip blocked 的 worker 日志与空队列完全一样（只有 "no job yet"），现场无法判断。
+
+    ★ 文案按状态分派（2026-09-24 job 身份事故）：原实现对**所有**非 200 都写
+    「hub 异常，请检查 hub 进程与隧道」，于是 409（调度面拒绝：被持有/冻结/归属歧义）
+    被读成 hub 崩了——现场因此查错了方向。**409 是调度面的确定性拒绝，不是故障**；
+    同时把 hub 给的 reason 与 jid 打进同一行（否则只有一个状态码，仍然查不动）。
     """
     if log is None:
         return
@@ -195,12 +227,22 @@ def _warn_non_200(base_url: str, status: int, log: Any) -> None:
     if now - _POLL_WARN_AT.get(key, 0.0) <= 60:
         return
     _POLL_WARN_AT[key] = now
-    hint = (
-        "鉴权失败或该 IP 已被 hub 封禁——检查 --token 与 hub 日志 AUTH FAIL/BLOCKED"
-        if status in (401, 403)
-        else "hub 异常，请检查 hub 进程与隧道"
+    if status in (401, 403):
+        hint = "鉴权失败或该 IP 已被 hub 封禁——检查 --token 与 hub 日志 AUTH FAIL/BLOCKED"
+    elif status == 409:
+        hint = "调度面拒绝（被持有/冻结/归属歧义）——**不是** hub 故障；换一份活或等租约"
+    elif status == 404:
+        hint = "job 或归属解析不到（unknown）——旧 runId/旧代码留下的同名 job 目录？"
+    elif status >= 500:
+        hint = "hub 异常，请检查 hub 进程与隧道"
+    else:
+        hint = "hub 未预期地拒了这次请求"
+    why = _reject_reason(body)
+    log(
+        f"调度请求 {base_url}: HTTP {status} — {hint}（这不是「队列空」）"
+        + (f" [job={jid}]" if jid else "")
+        + (f" hub 说：{why}" if why else "")
     )
-    log(f"调度请求 {base_url}: HTTP {status} — {hint}（这不是「队列空」）")
 
 
 def _request(
@@ -262,17 +304,23 @@ def _request(
 
 # ---- 新调度面（2026-09-22，plan/transfer-scheduling）：peek / priority / claim ----
 
-def _sched_headers(worker_id: str, *, offline_ok: bool = False) -> dict[str, str]:
-    """新面的公共头：worker 身份（必须） + 可选能力声明（离线课）。
+def _sched_headers(worker_id: str, *, role: str = ROLE_ONLINE) -> dict[str, str]:
+    """新面的公共头：worker 身份（必须） + 归属角色（离线盘才带）。
 
     身份必须自报：隧道回源把全流量归成 127.0.0.1，源 IP 分不出 worker；而 hub 的
     `active_worker_count()`（避让链的唯一输入）就靠它计数——缺它避让链静默失效。
+
+    `role`（2026-09-25）：原来这里叫「能力声明」，现在语义是**归属**（本会话属于哪块盘）；
+    头名与取值不变（`X-Battle-Offline: 1`，见 `protocol.ROLE_HEADER` 的理由）。
+    ⚠ 调用点必须**都**带它（peek 与 claim 两条 HTTP 面，`acquire_job` 内部两跳都在）：
+    只在 peek 上带的话，带标 worker 会在 `claim` 那一步被归属闸
+    （`_JobStore._claim_locked`）当成 online 当场拒掉——**自锁**（peek 绿、claim 红）。
     """
     h: dict[str, str] = {}
     if worker_id:
         h[WORKER_ID_HEADER] = worker_id
-    if offline_ok:
-        h[OFFLINE_CAP_HEADER] = OFFLINE_CAP_VALUE
+    if role == ROLE_OFFLINE:
+        h[ROLE_HEADER] = ROLE_HEADER_VALUE
     return h
 
 

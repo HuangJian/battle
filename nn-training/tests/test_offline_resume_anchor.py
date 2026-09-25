@@ -41,6 +41,19 @@ TOKEN = "sekret"
 COURSE = "c5-gae"
 
 
+@pytest.fixture(autouse=True)
+def _isolate_weights_archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """把**权重归档根**指到 tmp（与 `test_offline_deliver` / `test_backfill_offline` 同一份工装）。
+
+    `POST /offline/artifact` 会顺手把这一轮归档成 `<根>/<课>/<课>.it<N>.<时间戳>.json`
+    （`hub/store_offline._land_offline_round_extras`）；不隔离就往真 `nn-training/weights/` 撒。
+    代价不是“多一个文件”而是**别的用例被它带红**（2026-09-25 并入实测）：
+    `tests/test_remote_iter_real_bun.py` 的权重夹具兜底会挑走 `weights/*/` 下任意一个 json，
+    撞上这个 `{"w":1}` 桩 ⇒ 真 bun 导出器在 `json.params` 上响亮失败。
+    """
+    monkeypatch.setenv("BCITY_WEIGHTS_ARCHIVE_ROOT", str(tmp_path / "weights-archive"))
+
+
 def _boot(tmp_path: Path) -> tuple[str, _HubQueue, ThreadingHTTPServer]:
     store = _JobStore(tmp_path / COURSE / "remote-jobs", tmp_path / COURSE / "training_log.jsonl")
     hub = _HubQueue({COURSE: store}, order=[COURSE])
@@ -204,6 +217,15 @@ def test_backfeed_eval_rows_land_in_the_course_ledger(tmp_path: Path) -> None:
     base, hub, srv = _boot(tmp_path)
     try:
         wj = b'{"w":1}'
+        summary = {
+            "event": "eval_summary",
+            "iter": 2,
+            "wver": "a" * 16,
+            "games": 4,
+            "wins": 1,
+            "winRate": 0.25,
+            "nodes": {"cloud": 4},
+        }
         rows = [
             {
                 "event": "eval",
@@ -214,7 +236,9 @@ def test_backfeed_eval_rows_land_in_the_course_ledger(tmp_path: Path) -> None:
                 "node": "cloud",
                 "win": 1,
             },
-            {"event": "eval_summary", "iter": 2, "wver": "a" * 16},  # 不该进逐局账本
+            # summary **要**进账本：控制台 eval 列 / 弹窗 / 开课回执与门判据只认它
+            # （2026-09-23：只并逐局行 ⇒ 云腿整段的读数在控制台上不可见）
+            summary,
         ]
         body = {
             "run_id": "run-a",
@@ -229,24 +253,27 @@ def test_backfeed_eval_rows_land_in_the_course_ledger(tmp_path: Path) -> None:
         assert status == 200, raw[:200]
         ledger = tmp_path / COURSE / "eval_log.jsonl"
         got = [json.loads(ln) for ln in ledger.read_text(encoding="utf-8").splitlines()]
-        assert len(got) == 1 and got[0]["seed"] == 860001 and got[0]["node"] == "cloud"
+        assert [r["event"] for r in got] == ["eval", "eval_summary"], got
+        assert got[0]["seed"] == 860001 and got[0]["node"] == "cloud"
+        assert got[1]["games"] == 4 and got[1]["winRate"] == 0.25
 
-        # 幂等重投（补传天然会重传）：同一行不再写第二次
+        # 幂等重投（补传天然会重传）：两类都不再写第二次
         status2, _ = _post(base, OFFLINE_ARTIFACT_PATH, body)
         assert status2 in (200, 409)
         got2 = [json.loads(ln) for ln in ledger.read_text(encoding="utf-8").splitlines()]
-        assert len(got2) == 1
+        assert len(got2) == 2
     finally:
         srv.shutdown()
 
 
-def test_course_specific_ledger_helper_is_idempotent(tmp_path: Path) -> None:
+def test_course_specific_ledger_helper_reports_both_kinds(tmp_path: Path) -> None:
     base, hub, srv = _boot(tmp_path)
     try:
         row = {"event": "eval", "iter": 1, "wver": "b" * 16, "stage": 3, "seed": 7}
-        assert hub.merge_eval_rows(COURSE, [row, "junk", {"event": "eval_summary"}]) == 1
-        assert hub.merge_eval_rows(COURSE, [row]) == 0
-        assert hub.merge_eval_rows(COURSE, None) == 0
+        # 返回 (逐局行, summary) 两个计数；「junk」与无身份的形状不计（不猜）
+        assert hub.merge_eval_rows(COURSE, [row, "junk", {"event": "eval_summary"}]) == (1, 0)
+        assert hub.merge_eval_rows(COURSE, [row]) == (0, 0)
+        assert hub.merge_eval_rows(COURSE, None) == (0, 0)
         ledger = tmp_path / COURSE / "eval_log.jsonl"
         assert json.loads(ledger.read_text(encoding="utf-8").strip())["seed"] == 7
     finally:

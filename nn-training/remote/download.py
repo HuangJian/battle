@@ -54,12 +54,14 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from common.protocol import (
+    BLOB_INIT,
     BLOB_OPT,
     BLOB_REF,
     PAYLOAD_NAME,
     ProtocolError,
     RetryableError,
     decode_opt_tar,
+    is_content_sha,
 )
 from remote.bulk_sched import BULK_P1_CRITICAL
 from remote.http import (
@@ -71,14 +73,17 @@ from remote.job_fs import JOB_DIR_KEEP, prune_job_dirs, unpack_payload_or_fail
 from remote.wire import _wire_hit
 
 __all__ = [
+    "WEIGHT_SOURCES",
     "CodeLanded",
     "PayloadLanded",
     "_cache_blob",
+    "_cache_produced_weights",
     "_ensure_code",
     "_ensure_payload",
     "_ensure_ts_code",
     "_progress_logger",
     "_resolve_blob",
+    "_resolve_weights",
     "download_blob",
     "download_code",
     "download_payload",
@@ -217,6 +222,23 @@ def download_blob(
     )
 
 
+def _cache_produced_weights(blob_root: Path, raw: bytes, log) -> str:
+    """把**本轮产出的** `weights.json` 原始字节写进 `blob_cache/<sha256(raw)>`；返回该 sha。
+
+    opt-blob-diet（2026-09-24，plan/opt-blob-diet.plan.md §3.2 W1 / §3.6-8）：下一轮 hub 的
+    `init_weights_fp` = `sha256(args.out)`，而 `args.out` 就是这份字节（`verify_and_land`
+    落的就是 `result.weights_json` 解码后的原字节）⇒ 同会话内 `init` blob 100% 命中、
+    下行零字节。
+
+    **少了这一步**：`init` 的键每轮都变、每轮必 miss ⇒ 上行省 268,996 B 而下行多付
+    379,114 B = **净亏 110 KB/轮**（评审 F1）。与 opt tar 在 `run_job` 里的缓存写入
+    （`_cache_blob(blob_root, sha256(opt_tar_raw), …)`）是同一手法、同一个理由。
+    """
+    sha = hashlib.sha256(raw).hexdigest()
+    _cache_blob(blob_root, sha, raw, log)
+    return sha
+
+
 def _cache_blob(blob_root: Path, sha: str, raw: bytes, log) -> None:
     """把 raw blob 写入 `blob_cache/<sha>`（原子改名；写失败只记日志）。"""
     if not sha or not raw:
@@ -284,6 +306,93 @@ def _resolve_blob(
     return b"", False, "none"
 
 
+#: `init_weights_fp` 的**哨兵**值（BC job 与全新 run 首轮都没有内容寻址的权重）：
+#: 见到它们 ⇒ 零网络请求，payload 有就照用、没有就 none（§3.2 的 64-hex 规则）。
+_SENTINEL_INIT_FP: tuple[str, ...] = ("", "bc")
+
+#: 初始权重的**五源**（优先级即顺序；W4 的 `legacy_tar` 由调用方的 restore 段判定）。
+WEIGHT_SOURCES: tuple[str, ...] = ("payload", "cache", "preloaded", "download", "legacy_tar")
+
+
+def _resolve_weights(
+    *,
+    job_dir: Path,
+    init_weights_fp: str,
+    blob_root: Path,
+    jid: str,
+    base_url: str,
+    token: str,
+    preloaded: dict | None,
+    log,
+) -> tuple[Path | None, str, int]:
+    """解析本轮的初始权重 → `(path | None, src, wire_bytes)`。
+
+    `src ∈ payload|cache|preloaded|download|none`（`legacy_tar` 由调用方在 restore 段判定）；
+    `wire_bytes` = **走网络的字节数**（命中/payload 恒 0，`download` 才是 raw 长度）——
+    它是「这一刀省没省下来」的直接读数（§4 的 `wire.weights_bytes`）。
+
+    plan/opt-blob-diet.plan.md §3.2 的五源优先级（先到先用）：
+
+      W0 `job_dir/init_weights.json`（payload 随包带走：离线腿/bundle/冒烟/非 slim/旧 hub）
+      W1 `blob_cache/<init_weights_fp>`（稳态命中，零字节 —— **靠调用方产物段缓存
+         自己产出的权重**：hub 下一轮的 `init_weights_fp` = `sha256(args.out)` = 同一份字节）
+      W2 `preloaded["blobs"]["init"]`（push 腿）
+      W3 `GET /jobs/{id}/blob?name=init`（换机首次；sha 必校）
+
+    **失败分类**（§3.2，与 `_resolve_blob` 的安全阀同口径）：W1–W3 的**瞬时**失败
+    （5xx / 网络 / 下回来的字节 sha 不符）在函数内就抛 `RetryableError` —— 那是「重领重下
+    能修」的，绝不能报成确定性失败（`report_job_failure` 会停掉一条腿）。W3 的**确定性**
+    不可得（404 / 旧 hub 的 400 未知名）只记一行并返回 `none`：由调用方决定走 W4 还是
+    响亮拒绝。**绝不静默 warm-start**（新开 Adam + 随机权重地把一轮跑成看起来正常）。
+
+    `init_weights_fp` 是哨兵（`""`/`"bc"`，即 BC job 或全新 run 首轮）：**零网络请求** ——
+    payload 有就照用，没有就返回 `none`（§3.2 的 64-hex 规则）。
+    """
+    path = job_dir / "init_weights.json"
+    fp = str(init_weights_fp or "")
+    if fp in _SENTINEL_INIT_FP or not is_content_sha(fp):
+        if path.exists():
+            return path, "payload", 0
+        return None, "none", 0
+    # ---- W0：payload 内那份（随包可离线跑）—— **照样校 sha**（§3.2 / 评审 F4）----
+    if path.exists():
+        raw = path.read_bytes()
+        if hashlib.sha256(raw).hexdigest() == fp:
+            return path, "payload", 0
+        # 坏字节：作废这份 + 记一行 + 回源（绝不用坏字节，也绝不静默）
+        log(f"job {jid}: payload 内 init_weights.json 与 init_weights_fp 不符 —— 作废，改走 blob")
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    # ---- W1/W2/W3：一律走 `_resolve_blob`（内容寻址 + sha 校验 + 命中即写 cache）----
+    try:
+        raw, hit, src = _resolve_blob(
+            blob_root=blob_root,
+            name=BLOB_INIT,
+            sha=fp,
+            inline_b64="",
+            jid=jid,
+            base_url=base_url,
+            token=token,
+            preloaded=preloaded,
+            log=log,
+        )
+    except RetryableError:
+        raise  # 瞬时：重领重下能修（§3.2 的失败分类红线）
+    except ProtocolError as e:
+        # 确定性不可得（404 / 未知名 400）—— **不**在这里定生死：W4 可能救它（§3.5 第三行）
+        log(f"job {jid}: init blob 不可得（{e}）—— 看 tar 里有没有旧形状的 model.pt")
+        return None, "none", 0
+    if not raw:
+        return None, "none", 0
+    path.write_bytes(raw)
+    resolved = "cache" if (hit and src == "cache") else src
+    if resolved != "cache":
+        log(f"job {jid}: init 权重来源 src={resolved}（{len(raw)} bytes，fp={fp[:12]}…）")
+    return path, resolved, (len(raw) if resolved == "download" else 0)
+
+
 class PayloadLanded(NamedTuple):
     """payload 落地的结果（物料三兄弟之一，另两个见 `_ensure_code` / `_ensure_ts_code`）。
 
@@ -327,6 +436,7 @@ def _ensure_payload(
     *,
     preloaded: dict | None = None,
     log=lambda msg: None,
+    bundle: Any = None,
 ) -> PayloadLanded:
     """把 payload 取到本地并摆好：下载（或 push 携带）→ sha 校验 → 清场 → 解包。
 
@@ -350,11 +460,19 @@ def _ensure_payload(
     t_dl = time.time()
     if preloaded is not None and "payload_zip" in preloaded:
         raw = preloaded["payload_zip"]
-        log(f"job {jid}: payload from push ({len(raw)} bytes)")
+        _line = f"push {len(raw)} bytes"
         payload_dl_sec = 0.0
     else:
         raw = download_payload(base_url, token, jid)
         payload_dl_sec = round(time.time() - t_dl, 3)
+        _line = f"下载 {len(raw)} bytes / {payload_dl_sec:.1f}s"
+    # 日志节食（2026-09-24）：给了 bundle 就攒进调用方那一行（短口径，见 log_bundle）；
+    # 不传时逐字节保持改造前的输出。
+    if bundle is not None:
+        bundle.add("payload", _line)
+    elif preloaded is not None and "payload_zip" in preloaded:
+        log(f"job {jid}: payload from push ({len(raw)} bytes)")
+    else:
         log(f"job {jid}: payload downloaded ({len(raw)} bytes in {payload_dl_sec:.1f}s)")
     if hashlib.sha256(raw).hexdigest() != manifest["payload_sha256"]:
         # 传输损坏属瞬时故障：重下即可修复（RetryableError → 释放租约立即重领重下）
@@ -367,7 +485,7 @@ def _ensure_payload(
         rmtree_best_effort(job_dir)
     job_dir.mkdir(parents=True)
     # 磁盘：本 job 之后最多留 JOB_DIR_KEEP 个目录（放开头 = 失败轮也照样清理）
-    prune_job_dirs(work_dir, JOB_DIR_KEEP, log=log)
+    prune_job_dirs(work_dir, JOB_DIR_KEEP, log=log, bundle=bundle)
     zip_path = job_dir / PAYLOAD_NAME
     zip_path.write_bytes(raw)
     # zip 内 manifest 是占位副本，解包仅取 shard 目录；权威校验全走 job 记录 manifest。
@@ -396,6 +514,7 @@ def _ensure_code(
     code_cache_root: Path | None = None,
     preloaded: dict | None = None,
     log=lambda msg: None,
+    bundle: Any = None,
 ) -> CodeLanded:
     """把 code.zip 摆到本地并**让它可 import**：内容寻址缓存 → 解包 → `sys.path[0]`。
 
@@ -432,7 +551,10 @@ def _ensure_code(
     if cache_dir.exists():
         sys.path.insert(0, str(cache_dir))
         _wire_hit(jid, "code")  # 零字节命中也要进本 job 的传输账（否则摘要读数失真）
-        log(f"job {jid}: code cache 命中（{manifest['code_sha256'][:12]}…）——跳过下载解压")
+        if bundle is not None:
+            bundle.add("code", f"cache 命中（{manifest['code_sha256'][:12]}…）——跳过下载解压")
+        else:
+            log(f"job {jid}: code cache 命中（{manifest['code_sha256'][:12]}…）——跳过下载解压")
     else:
         if preloaded is not None and "code_zip" in preloaded:
             code_raw = preloaded["code_zip"]
@@ -452,10 +574,14 @@ def _ensure_code(
         cache_dir.parent.mkdir(parents=True, exist_ok=True)
         code_extract_tmp.rename(cache_dir)
         sys.path.insert(0, str(cache_dir))
-        log(
-            f"job {jid}: code.zip unpacked ({len(code_raw)} bytes, "
+        _line = (
+            f"code.zip unpacked ({len(code_raw)} bytes, "
             f"{len(list(cache_dir.rglob('*.py')))} .py files) -> sys.path[0]"
         )
+        if bundle is not None:
+            bundle.add("code", _line)
+        else:
+            log(f"job {jid}: {_line}")
     return CodeLanded(code_root=code_root, code_cache_dir=cache_dir, blob_root=blob_root)
 
 
@@ -468,6 +594,7 @@ def _ensure_ts_code(
     ts_root: Path,
     preloaded: dict | None,
     log=lambda msg: None,
+    bundle: Any = None,
 ) -> tuple[Path, int, bool]:
     """M3 kind=iter：把 TS 运行时 zip 解包到内容寻址目录，返回 `(目录, 字节数, 缓存命中)`。
 
@@ -485,7 +612,10 @@ def _ensure_ts_code(
     cache = ts_root / sha
     if cache.exists():
         _wire_hit(jid, "ts_code")  # 零字节命中也要进账（与 code 同规，否则 wire 摘要读数失真）
-        log(f"job {jid}: ts_code cache 命中（{sha[:12]}…）——跳过下载解压")
+        if bundle is not None:
+            bundle.add("ts_code", f"cache 命中（{sha[:12]}…）——跳过下载解压")
+        else:
+            log(f"job {jid}: ts_code cache 命中（{sha[:12]}…）——跳过下载解压")
         return cache, 0, True
     raw = (preloaded or {}).get("ts_code_zip") or download_ts_code(base_url, token, jid, log=log)
     if hashlib.sha256(raw).hexdigest() != sha:
@@ -513,7 +643,11 @@ def _ensure_ts_code(
     except OSError:
         pass
     n_ts = len(list(cache.rglob("*.ts")))
-    log(
-        f"job {jid}: ts_code.zip unpacked ({len(raw)} bytes, {n_ts} .ts files) -> {cache.name}"
-    )
+    _line = f"ts_code.zip unpacked ({len(raw)} bytes, {n_ts} .ts files) -> {cache.name}"
+    # 日志节食（2026-09-24）：给了 bundle 就攒进调用方那一行（与 code/payload/设备同属
+    # 「本 job 准备」阶段），否则逐字节保持原输出。
+    if bundle is not None:
+        bundle.add("ts_code", _line)
+    else:
+        log(f"job {jid}: {_line}")
     return cache, len(raw), False

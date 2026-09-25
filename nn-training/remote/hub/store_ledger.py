@@ -45,6 +45,10 @@ class LedgerMixin:
     #: 兄弟簇 `store_leases` 拥有的状态（本簇的 `claimable_job_ids` 要用它判「别处在做」）
     _leases: dict[str, float]
     _frozen: dict[str, dict]
+    #: 归属缓存与它自己的锁（同住 `store_leases`）：`publish` 要随 manifest 一起失效它。
+    #: 用独立锁的理由见那里（`job_role` 会被持 `_lock` 的临界区调到，共锁会自锁）。
+    _roles: dict[str, str]
+    _role_lock: Lock
 
     def _init_ledger(self) -> None:
         #: 账本增量读缓存（H6）：文件 size -> 已解析事件列表
@@ -133,6 +137,11 @@ class LedgerMixin:
         幂等：同 job_id 已发布 → 覆盖 payload 但**不重复**追加 job_pending
         （账本按 job_id 去重——重启后重发布不产生双 pending）。
         """
+        # 归属缓存随 manifest 一起失效（2026-09-25）：重发覆盖了 manifest ⇒ 缓存里的旧
+        # 归属就是**谎报**（`job_role` 用它判「这份活归谁」，而它是租约闸的输入）。发布路径
+        # 只此一处，放在这里就不需要「同 job_id 的 role 永不变」这条假设。
+        with self._role_lock:
+            self._roles.pop(job_id, None)
         with self._lock:
             jd = self._job_dir(job_id)
             jd.mkdir(parents=True, exist_ok=True)

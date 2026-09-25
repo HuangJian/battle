@@ -32,7 +32,7 @@ sys.path.insert(0, str(ROOT / "nn-training"))
 
 import remote.iter_rollout as iter_rollout  # noqa: E402
 import remote.serve_pool as serve_pool  # noqa: E402
-from remote.protocol import data_fp, validate_rollout_spec  # noqa: E402
+from common.protocol import data_fp, validate_rollout_spec  # noqa: E402
 from rl.iter_job import build_iter_spec  # noqa: E402
 
 

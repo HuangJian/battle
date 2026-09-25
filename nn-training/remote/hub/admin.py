@@ -126,7 +126,9 @@ class AdminRoutes:
         """
         if not self._auth_ok():
             return
-        self._json({"progress": self.hub.offline_progress()}, 200)
+        self._json(
+            {"progress": self.hub.offline_progress(), "leases": self.hub.offline_leases()}, 200
+        )
 
     def _admin_courses(self, set_mode: bool = False) -> None:
         """`GET /admin/courses` 看课程表；`POST ?course=X&mode=online|offline` 热切。
@@ -149,6 +151,15 @@ class AdminRoutes:
         qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         course = (qs.get("course") or [""])[0]
         mode = (qs.get("mode") or [""])[0]
+        # 课程未知 ⇒ **按需真扫一次再试**（2026-09-23）：`set_mode` 只认已登记的课程，
+        # 而登记依赖顺带扫描（`claim_next`/`queue_state` 触发、有 2s 间隔闸）。于是
+        # 「刚开课 / hub 刚重启」那一刻打来的 mode POST 必然 400——控制台那侧的重试窗口
+        # 一旦整段落在发现之前，意图就静默失配（课留在 online，面板显示「在训/切离线」，
+        # 用户实测：三个离线课里恰有一个如此）。指名一门课的写动作有资格要求一次真扫。
+        # 只在「课不在表里」时扫（模式非法就不必扫盘了，直接落到下面 400）。
+        if not self.hub.set_mode(course, mode) and course and course not in self.hub.courses():
+            self.hub.discover(force=True)
+            self.hub.set_mode(course, mode)
         if not self.hub.set_mode(course, mode):
             self._json(
                 {

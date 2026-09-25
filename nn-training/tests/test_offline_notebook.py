@@ -33,9 +33,15 @@ CFG_KEYS = (
     "hub_url",
     "ts_authkey",
     "task_zip",
+    "force_pack",
     "wait_pack_sec",
     "prompt_upload",
     "hub_tries",
+    "auto_discover",
+    "queue_mode",
+    "queue_poll_sec",
+    "idle_wait_sec",
+    "session_budget_sec",
     "live_backfeed",
     "device",
     "threads",
@@ -110,13 +116,23 @@ def test_credentials_are_read_before_any_network_change() -> None:
 
     2026-09-22（多课程）：取包与网络动作都搬进了逐课的 `run_one_course`，所以判据是
     「`run()` 读完凭据之后才调 `run_one_course`，而 `obtain_pack` 只在 `run_one_course` 里」。
+    2026-09-25（清单/队列）：`run()` 把两个循环拆成 `_run_batch` / `_run_auto`（都在同一
+    文件、都**只**通过参数拿凭据）⇒ 判据跟着搬：`run()` 里 `creds = {` 必须早于调它们俩，
+    而 `run_one_course(` 只出现在 `_run_batch` 里。
     """
     src = Path(offline_boot.__file__).read_text(encoding="utf-8")
     body = src[src.index("def run(") :]
     body = body[: body.index("\ndef ")]  # run() 的函数体（下一个顶层 def 之前）
-    assert body.index("creds = {") < body.index("run_one_course("), (
-        "取包/网络动作必须晚于凭据读取（2026-09-17 Kaggle 事故的时序约束）"
-    )
+    for call in ("_run_batch(", "_run_auto("):
+        assert body.index("creds = {") < body.index(call), (
+            f"{call} 是碰网络的下一步，必须晚于凭据读取（2026-09-17 Kaggle 事故的时序约束）"
+        )
+    assert "run_one_course(" not in body, "取包那一步住在 _run_batch 里（别在 run() 里绕过凭据顺序）"
+    batch = src[src.index("def _run_batch(") :]
+    batch = batch[: batch.index("\ndef ")]
+    assert "creds: dict" in batch[:400], "_run_batch 必须收下已读好的凭据"
+    assert batch.index("run_one_course(") > 0
+    assert "creds: dict" in src[src.index("def _run_auto(") :][:400], "_run_auto 同上"
     per_course = src[src.index("def run_one_course(") :]
     assert "creds: dict" in per_course[:400], "run_one_course 必须收下已读好的凭据"
     assert per_course.index("pack = obtain_pack(") > 0
@@ -132,7 +148,7 @@ def test_run_reads_secrets_first_at_runtime(tmp_path: Path, monkeypatch: pytest.
         order.append(f"secret:{key}")
         return "tok" if key == "HUB_TOKEN" else ""
 
-    def spy_obtain(cfg: dict, creds: dict, log, work, stop=None):
+    def spy_obtain(cfg: dict, creds: dict, log, work, stop=None, **kw):
         order.append("obtain_pack")
         assert creds["HUB_TOKEN"] == "tok", "取包时凭据还没就绪 —— 时序反了"
         raise SystemExit("stop-here")
@@ -165,9 +181,10 @@ def test_markdown_documents_cloud_eval_and_resume() -> None:
     """说明面必须看得见这两个开关（用户找不到的旋钮 = 不存在的旋钮）。"""
     md = "\n".join(notebook_cells(NB, "markdown"))
     assert "eval_on_cloud" in md, "云机评估开关要在说明书里"
-    assert "与下一轮 PPO 并行" in md, "并行语义是这条腿最容易被误解的地方，要写明"
+    # 排程语义必须写明（2026-09-25 云机卡死）：rollout 与评估**都吃 CPU** ⇒ 真交替
+    assert "都吃 CPU" in md and "收线后才开下一轮 rollout" in md, "交替语义要写清（旧文案「与下一轮 PPO 并行」已被事故推翻）"
     assert "续跑" in md and "同轮齐全" in md
-    # 并发口径：rollout 与 eval **同一个公式**（交替跑，互不预留）——说明书与代码里必须一致
+    # 并发口径：rollout 与 eval **同一个公式**（交替跑才互不预留）——说明书与代码里必须一致
     assert "rollout_workers" in md, "rollout 并发旋钮要在说明书里（它覆盖计划里的导出机规模）"
     assert "max(CPU−4, CPU×0.8)" in md, "并发口径要写出公式（老口径「扣掉 rollout 再卡 64」已废）"
 
@@ -194,6 +211,11 @@ def test_boot_loader_refreshes_every_session_and_reports_the_revision() -> None:
     assert "@ sha12=" in cell, "加载日志必须带**实际加载那份**的 sha12（branch 不足以区分新旧）"
     assert "用上一份缓存继续" in cell, "回落到缓存必须响亮说明（不能静默用旧版）"
     assert ".replace(_dst)" in cell, "写回要用原子替换（半截写入不得留下坏模块）"
+    # ★ 2026-09-25 真机事故：只换磁盘文件挡不住「同 kernel 的第二次 Run」——`import` 会命中
+    #   `sys.modules` 里上一次加载的旧模块（内存跑旧代码、日志 sha 打磁盘新版）。必须先摘再导。
+    assert "sys.modules.pop" in cell, "刷新后必须先摘 sys.modules 里的旧引导模块，否则 import 命中缓存"
+    assert cell.index("sys.modules.pop") < cell.index("import offline_boot"), "顺序：先摘再导"
+    assert "BOOT_SELF" in cell, "加载日志要带内存指纹（磁盘 sha 区分不出内存里那份的新旧）"
     assert "_branch.txt" not in cell, "旧的「按分支名失效」缓存策略已退役（它不挡同分支的新旧）"
 
 

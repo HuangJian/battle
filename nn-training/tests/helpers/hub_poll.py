@@ -15,9 +15,13 @@ import json
 import urllib.error
 import urllib.request
 
+# 与 `common.protocol` 同值（这里**故意**不 import：本助手要能独立复现「线上头长什么样」，
+# 从被测模块取常量会把「协议常量写错了」这类事故一并静默掉）。
 WORKER_ID_HEADER = "X-Worker-Id"
-OFFLINE_CAP_HEADER = "X-Battle-Offline"
-OFFLINE_CAP_VALUE = "1"
+ROLE_HEADER = "X-Battle-Offline"
+ROLE_HEADER_VALUE = "1"
+ROLE_ONLINE = "online"
+ROLE_OFFLINE = "offline"
 
 
 def req(
@@ -55,7 +59,7 @@ def hub_poll(
     token: str,
     *,
     worker_id: str = "",
-    offline_ok: bool = False,
+    role: str = ROLE_ONLINE,
     n: int = 1,
     timeout: float = 10.0,
 ) -> dict | None:
@@ -63,12 +67,16 @@ def hub_poll(
 
     返回 `{job_id, manifest, halt, lease_token, course}`；无活但停机 ⇒ `{"halt": True}`；
     两者皆无 ⇒ `None`。`peek` 不可达/被拒同样返回 `None`（与旧面「非 200 一律 None」同规）。
+
+    `role`（2026-09-25）：与真 worker 同规——**peek 与 claim 两跳都带**同一个归属头。
+    只给 peek 带而 claim 不带的话，受闸的 job 会是「看得到、领不到」，而这是测试助手
+    最不该制造的假阳性（生产侧的对应陷阱见 `worker._sched_headers`）。
     """
     h: dict[str, str] = {}
     if worker_id:
         h[WORKER_ID_HEADER] = worker_id
-    if offline_ok:
-        h[OFFLINE_CAP_HEADER] = OFFLINE_CAP_VALUE
+    if role == ROLE_OFFLINE:
+        h[ROLE_HEADER] = ROLE_HEADER_VALUE
     st, body = req(base, token, f"/jobs/peek?n={max(1, int(n))}", headers=h, timeout=timeout)
     if st != 200:
         return None

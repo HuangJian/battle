@@ -51,7 +51,9 @@ class ResultRoutes:
     _job_or_404: Any
     _json: Any
     _lease_token: Any
+    _log_reject: Any
     _read_raw_body: Any
+    _worker_id: Any
     log_message: Any
 
 
@@ -96,6 +98,16 @@ class ResultRoutes:
             self.hub, jid, result, lease_token, log=lambda m: self.log_message("%s", m)
         )
         if code != 200:
+            # 与 claim 侧同规（2026-09-24 事故）：拒收必须在 hub 日志里留下
+            # 「谁、哪门课、为什么」——worker 侧只会看到「HTTP 409/410」。
+            self._log_reject(
+                "result",
+                jid,
+                str(code),
+                course=self.hub.course_of(jid) or "",
+                worker=self._worker_id(),
+                reason=why,
+            )
             self._json({"error": why}, code)
             return
         self._json({"job_id": jid, "status": "accepted"})

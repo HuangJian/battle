@@ -105,6 +105,7 @@ def test_wait_reports_leased_not_starvation_when_claimed(tmp_path: Path) -> None
         worker.start()
         deadline = time.time() + 5.0
         while time.time() < deadline and not any("执行中" in ln for ln in lines):
+            # sleep-ok: 轮询步长（等的是日志出现「执行中」这个状态，5s 只当挂起兜底）
             time.sleep(0.02)
         assert store.store_result(jid, {"ok": True})  # 落结果 ⇒ 探针就绪 ⇒ 等待结束
         worker.join(timeout=10.0)

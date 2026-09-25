@@ -161,6 +161,7 @@ def test_silent_child_is_accepted_after_timeout_and_tail_reads_output() -> None:
     try:
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline and not srv.lines:
+            # sleep-ok: 轮询步长（等的是「reader 收下第一行输出」这个状态，2s 只当挂起兜底）
             time.sleep(0.02)
         assert srv.lines[:1] == ["quiet-marker"], "reader 线程必须实时收下子进程输出"
         assert srv.tail().endswith("quiet-marker"), "tail() 是诊断出口，进程活着也要能取"
@@ -193,6 +194,7 @@ def test_child_output_survives_non_ascii_marker() -> None:
     try:
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline and len(srv.lines) < 2:
+            # sleep-ok: 轮询步长（等的是「两行输出都收到」这个状态，2s 只当挂起兜底）
             time.sleep(0.02)
         assert any(PORT_TAKEN_MARKER in ln for ln in srv.lines), (
             f"中文输出必须原样收下（编码错误会让它变乱码/空）: {srv.lines}"

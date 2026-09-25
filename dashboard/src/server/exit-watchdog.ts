@@ -197,7 +197,7 @@ export function tailNormalCompletion(tail: string[]): string | null {
 /** 从日志尾提取「意外退出的**具体原因**」（区别于设计内停车场；无 → null 维持泛化文案）。
  *
  *  2026-09-22 事故：run_rl 的 SystemExit abort 消息（如
- *  `[run_rl] --run-iters<0（跑到课程末尾）需要课程声明 iters——没有终点就不叫整段…`）
+ *  `[run_rl] --export-bundle 需要课程声明 iters（包里的计划必须有终点）…`）
  *  是**裸一行、无时间戳前缀**，而它的正常操作行都带 `[HH:MM:SS] ` 前缀——这就是判别面。
  *
  *  识别两类形状（都纯文本、可注入测试）：

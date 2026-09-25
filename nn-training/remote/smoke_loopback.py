@@ -318,8 +318,20 @@ def main() -> int:
             assert not m.get("opt_sha"), "首轮无 ckpt_remote → 不该有 opt blob"
         else:
             assert m.get("opt_sha"), f"it{rd} 应带 opt_sha（M2 B3）"
-            assert int(worker_wire.get("blob_hits", 0)) >= 1, (
-                f"it{rd} opt blob 应缓存命中（blob_hits={worker_wire.get('blob_hits')}）"
+            # opt-blob-diet（§3.6-4 / §6.1-14）：稳态下 **opt 与 init 两个 blob 都得命中**，
+            # 且权重零下行。`weights_src == "cache"` 就是「产物段缓存了本轮产出的权重」
+            # 那一行的回归闸（评审 F1：缺它就每轮多下 379 KB = 净亏 110 KB/轮）。
+            assert int(worker_wire.get("blob_hits", 0)) >= 2, (
+                f"it{rd} opt+init blob 都应缓存命中（blob_hits={worker_wire.get('blob_hits')}）"
+            )
+            assert worker_wire.get("weights_src") == "cache", (
+                f"it{rd} 权重应走 blob_cache 命中（weights_src={worker_wire.get('weights_src')}）"
+            )
+            assert int(worker_wire.get("weights_bytes") or 0) == 0, (
+                f"it{rd} 稳态不该有权重下行字节（weights_bytes={worker_wire.get('weights_bytes')}）"
+            )
+            assert int(worker_wire.get("blob_miss_bytes") or 0) == 0, (
+                f"it{rd} 稳态不该有 blob 未命中字节（blob_miss_bytes={worker_wire.get('blob_miss_bytes')}）"
             )
         last_wver = hashlib.sha256(out_weights.read_bytes()).hexdigest()
 
@@ -327,8 +339,19 @@ def main() -> int:
     assert out_weights.read_bytes(), "落位权重为空"
     assert last_wver != init_weights_fp, "云 PPO 未改变权重（训练未生效？）"
     ckpt = traj_dir / f"it{rounds}" / "ppo_ckpt_remote"
-    for f in ("model.pt", "opt.pt"):
-        assert (ckpt / f).exists(), f"ppo_ckpt_remote 缺 {f}（D5 opt 状态未往返）"
+    # opt-blob-diet：`opt.pt` 必有（D5 的 Adam 动量本体）；`model.pt` 只属于**旧形状**
+    # tar——新形状下权重走 `init` blob，它的有无就是形状指纹（§6.1-10）。
+    assert (ckpt / "opt.pt").exists(), "ppo_ckpt_remote 缺 opt.pt（D5 opt 状态未往返）"
+    tar_sib = ckpt.parent / (ckpt.name + ".tar")
+    if tar_sib.exists():
+        import tarfile as _tf
+
+        with _tf.open(tar_sib, "r:*") as _t:
+            _members = set(_t.getnames())
+        assert "opt.pt" in _members, f"回传 tar 缺 opt.pt：{sorted(_members)}"
+        assert "model.pt" not in _members, (
+            f"opt-blob-diet：新形状 tar 不该再有 model.pt（members={sorted(_members)}）"
+        )
     mark_job_completed(str(work / "training_log.jsonl"), jid)  # 幂等：不双写
     ledger = (work / "training_log.jsonl").read_text(encoding="utf-8")
     assert ledger.count("job_pending") == rounds and ledger.count("job_completed") == rounds, (

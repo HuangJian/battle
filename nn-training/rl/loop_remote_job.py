@@ -130,6 +130,24 @@ class TrainingRemoteJob(TrainingRemotePush):
         args = self.args
         it_dir = self._traj_dir
         t_ppo = time.time()
+        # ★ 2026-09-25（plan/online-offline-role-routing §7）：kind=run 的**队列项**退役。
+        # 生产端唯一的发布者（发一份带段长的队列项、随后等 8h 的那个方法）已删，
+        # 取包链（`--export-bundle` ⇒ 任务包）是它的完整替代（原方法名见 plan §7.6）。
+        #
+        # 谁还带 plan_bytes 而不带 export_path，就是复活那条腿——而队列里**没有消费者**
+        # （`remote/worker.py` 对 kind=run 响亮拒收）⇒ 本机会白等一整段（老代码是 8h），
+        # 症状是「队列不降、没人报错」。所以在这里**当场**拒，并把该走哪条路写进消息里
+        # （这是 kind=run 的唯一咽喉：`--export-bundle` 是唯一合法调用者，它带 export_path）。
+        if plan_bytes is not None and export_path is None:
+            raise SystemExit(
+                "[run_rl] kind=run（离线队列项）这条腿已于 2026-09-25 退役——离线课不再经"
+                " hub 队列执行：云机用 battle.offline.ipynb 取任务包接手"
+                "（/offline/tasks 清单 → /offline/task-pack 取包 → 跑完回传，"
+                "控制台「导入产物」推进本机账本）。本机此刻要发的是**任务包**："
+                "控制台「切离线」会自动跑 --export-bundle，或手工 `--export-bundle <zip>`。"
+                "（本拒绝点住 `_remote_ppo_publish`：任何新调用者只要不带 export_path 就撞上"
+                "这里，不必等谁去读代码。）"
+            )
         # 半离线（kind="run"）：plan_bytes 非空 = 本 job 之后还要节点自主把计划跑完。
         if plan_bytes is not None and rollout_spec is None:
             raise SystemExit(
@@ -317,6 +335,11 @@ class TrainingRemoteJob(TrainingRemotePush):
             keep_init_weights=bool(getattr(args, "smoke", False)),
             # M3：kind=iter 的三件套（rollout 规格 + TS 运行时 sha/文件）；
             # 非 iter 轮恒为默认（kind="ppo"，manifest 不含这两个键 —— 逐字节不变）。
+            #
+            # kind=run 的**形状**保留：今天唯一带 `plan_bytes` 的调用者是 `--export-bundle`
+            # （它同时带 `export_path` ⇒ `register=False`：只建 job 目录当打包源、不进待领池）。
+            # 「发一份 kind=run 队列项、本机等 8h」那条腿 2026-09-25 退役（plan §7）——
+            # 所以谁若**不带** export_path 传 plan_bytes，就是复活了退役腿。
             kind="run" if plan_bytes is not None else ("iter" if rollout_spec else "ppo"),
             rollout_spec=rollout_spec,
             plan_bytes=plan_bytes,
@@ -390,7 +413,6 @@ class TrainingRemoteJob(TrainingRemotePush):
             kick_on=kick_on,
             kick_kl=kick_kl,
             rollout_spec=rollout_spec,
-            segment=plan_bytes is not None,
             hub_push=hub_push,
         )
         # remote PPO 等待期集群空闲 —— 立即开 evalboard 窗领批（含等待期间新入队的）。
@@ -509,14 +531,11 @@ class TrainingRemoteJob(TrainingRemotePush):
                 "protocol": _cf_tunnel[0],
                 "edge_ip": _cf_tunnel[1],
                 "slim": bool(int(getattr(args, "remote_slim", 1) or 0)),
-                # M3：记**实测**在哪采集（node = 本轮整轮上云；run = 整段自主），不是
+                # M3：记**实测**在哪采集（node = 本轮整轮上云；local = 本机），不是
                 # args 字面量（auto 会被 _rollout_source 解析成 local/node——原样记
-                # auto 等于没记）。
-                "rollout_src": (
-                    "run"
-                    if sess.segment
-                    else ("node" if sess.rollout_spec else "local")
-                ),
+                # auto 等于没记）。离线课（`run`）不再产生 iteration 事件（本机不发活），
+                # 所以这里只可能是这两档。
+                "rollout_src": ("node" if sess.rollout_spec else "local"),
             },
         )
         # 启动协议补丁（2026-09-08 vk1 事故）：kickstart_ref 已要求时，it1 校准把

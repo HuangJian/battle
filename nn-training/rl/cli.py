@@ -9,8 +9,9 @@
 from __future__ import annotations
 
 import argparse
-import os
 
+# 核数口径的唯一实现（容器配额/亲和掩码 > `os.cpu_count()`）：`--workers` 的缺省值就靠它。
+from platform_utils import effective_cores
 from rl.breaker import (
     ENT_BREAK,
     ENT_BREAK_CONSEC,
@@ -261,7 +262,9 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
     ap.add_argument(
         "--workers",
         type=int,
-        default=_d("workers", min(os.cpu_count() or 4, 12)),
+        # 核数走 effective_cores()（容器配额/亲和掩码 > 宿主机裸数）：os.cpu_count() 在容器里报
+        # 宿主机的 224，而 cgroup 可能只给 96（2026-09-25 云机卡死那条账）。
+        default=_d("workers", min(effective_cores(), 12)),
         help="concurrent bun rollout workers (games partitioned by seed)",
     )
     ap.add_argument(
@@ -514,40 +517,43 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
     # M3（2026-09-17，plan/remote-wire-remediation §5.2）：rollout 上云开关。
     # local = 历史行为（hub 采样本机产 shard，整轮口径逐字节不变）；
     # node = 本轮由节点自己跑 rollout（kind=iter job），hub 不再本地采样。
-    # run  = 整段（kind=run job）：节点领走 it..end_it 自己跑完（离线训练模式）。
+    # run  = **离线课**（2026-09-25 起）= 本机不跑这门课（不采样/不派发/不等待），
+    #         执行者是云机（取任务包接手）。这条腿曾经是「发一份 kind=run 队列项、本机等 8h」
+    #         —— 那条已退役（plan/online-offline-role-routing §7）；形状（manifest.kind=run）
+    #         保留给 `--export-bundle` 的任务包。
     # 取值优先级：本参数 > rl-config `courses.<stem>.rollout_src` > rl.* > local。
     ap.add_argument(
         "--rollout-src",
-        default=_d("rollout_src", "auto"),
+        # ★ 默认**不**取 `rl.*`（2026-09-25，plan/online-offline-role-routing §2.5）：
+        # `_d("rollout_src", "auto")` 会把 `rl-config` 顶层的 `rl.rollout_src` 读成 argparse
+        # 默认值 ⇒ `_rollout_source` 看到非 auto 就直接早返回，**课程级
+        # `courses.<课>.rollout_src` 被整个忽略**（控制台 UI 显示 run、实际跑 local）。
+        # 写死 "auto" 只是让裁决回到课程级；`rl.rollout_src` 仍在 `_rollout_source` 的
+        # 兜底链里（课程级为空 ⇒ 照旧生效）⇒ 顶层配置的语义一字未变。
+        default="auto",
         choices=("auto", "local", "node", "run"),
         help="M3 rollout 上云：'local'=本机采样（默认行为）；'node'=本轮整轮上云"
-        "（节点 bun 跑 exporter 产 shard + 跑 PPO，kind=iter job）；'run'=**整段**上云"
-        "（一次 kind=run job 领走 it..end_it，节点自主跑完；需要 --run-iters 说明段长，"
-        "离线训练模式的机器侧写法）；'auto'=按 rl-config（rl.rollout_src /"
+        "（节点 bun 跑 exporter 产 shard + 跑 PPO，kind=iter job）；'run'=**离线课**"
+        "（本机不跑这门课：云机取任务包接手；需要 --run-iters 声明段长，控制台切离线会写这对键）；"
+        "'auto'=按 rl-config（rl.rollout_src /"
         " courses.<课>.rollout_src）解析，缺省 local；取值进 iteration"
         " 事件的 wire.rollout_src（A/B 归因用）",
     )
-    # 半离线（2026-09-17）：一次 `kind=run` job 覆盖 N 轮，节点收到（课程 + 初始权重 +
-    # 代码 + 计划）后自主跑完，hub 失联也不影响（逐轮权重/指标落在节点工作目录，
-    # Kaggle /kaggle/working / Colab Drive）。0 = 关（逐轮上云/本机，历史行为）。
+    # 段长（2026-09-17 引入的半离线「一整段」已于 2026-09-25 退役；这个参数只剩两个用途）：
+    #   ① 与 `--rollout-src run` 一起声明「这门课由云机（取包）接手」——`<0` = 跑到课程末尾；
+    #   ② `--export-bundle` 的终点（控制台导出用 `-1`）。0 = 关。
     ap.add_argument(
         "--run-iters",
         type=int,
         default=_d("run_iters", 0),
-        help="半离线整段：一次领走 N 轮（kind=run job；<0 = 跑到课程末尾）——节点自主跑完"
-        "并逐轮落产物（K/D 官方目录，可打包下载）；0 = 关",
+        help="离线课段长声明（<0 = 跑到课程末尾；与 --rollout-src run 配对）"
+        "，也是 --export-bundle 的终点；0 = 关（本机自己采样，历史行为）",
     )
     ap.add_argument(
         "--export-bundle",
         default="",
         help="全离线：把 --run-iters 那一段打成可上传 Kaggle/Colab 的任务包（zip）后退出；"
         "本轮不训练。云机侧：remote.bundle import 后 remote.run_loop 自主跑完",
-    )
-    ap.add_argument(
-        "--run-wait-sec",
-        type=float,
-        default=_d("run_wait_sec", 0.0),
-        help="半离线段的等待上限（秒；整段墙钟量级）。0 = rl.run_wait_sec > 缺省 8h",
     )
     ap.add_argument(
         "--remote-iter-game-timeout",

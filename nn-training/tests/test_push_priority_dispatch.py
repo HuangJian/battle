@@ -29,6 +29,7 @@ from tests.test_hub_push_dispatch import (
     _publish,
     _pump,
     _quiet,
+    _wait_until,
     _workers_with,
 )
 
@@ -60,7 +61,18 @@ def test_primary_then_one_backup_then_cap(tmp_path: Path, worker_factory) -> Non
     disp = _disp(hub, ws)
     try:
         # 主副本：独占 claim（`_claimed` 在持 ⇒ 下一次问询的 priority 不再是 highest）
-        assert _pump(disp, lambda: len(w1.received) + len(w2.received) >= 1)
+        #
+        # **拍点看派发器自己的同步状态**（`_inflight`），不看异步上传（2026-09-24 修 CPU 满载
+        # 下的门禁 flake）：测试是**唯一**打拍的人 ⇒「主副本已派、备份还没派」是个可以停下来
+        # 检查的状态。原来等 `received` 计数：满载时上传线程慢，20ms 打拍间隔内没落地就会被打
+        # 第二拍 ⇒ 备份先落地 ⇒ `== [jid]` 红。那不是「双主副本」，是把**快慢**当成了**先后**
+        # ——「主副本在途后备份立刻获授权」本身是 §2.9 的既定语义（同 `_backup_target`）。
+        assert _pump(
+            disp, lambda: sum(1 for r in disp._inflight.values() if r["mode"] != "backup") >= 1
+        ), "主副本没被派出去"
+        assert _wait_until(
+            lambda: len(w1.received) + len(w2.received) >= 1
+        ), "主副本没送到 worker（等状态，不打拍）"
         assert sorted(w1.received + w2.received) == [jid], "主副本只该推给一台"
         # 备份：同一份活的副本落到另一张空闲卡（hub 显式授权，无租约）
         assert _pump(disp, lambda: len(w1.received) + len(w2.received) >= 2)

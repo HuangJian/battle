@@ -120,7 +120,8 @@ def test_job_dir_keep_default_is_wired_to_the_constant() -> None:
     sig = inspect.signature(job_fs_mod.prune_job_dirs)
     assert sig.parameters["keep"].default == job_fs_mod.JOB_DIR_KEEP == 2
     src = (ROOT / "remote" / "download.py").read_text(encoding="utf-8")
-    assert src.count("prune_job_dirs(work_dir, JOB_DIR_KEEP, log=log)") == 1
+    # 2026-09-25（并入 origin）后多了一个 `bundle=`：清场的日志行攒进 prep bundle（日志节食）。
+    assert src.count("prune_job_dirs(work_dir, JOB_DIR_KEEP, log=log, bundle=bundle)") == 1
     worker_src = WORKER_FILE.read_text(encoding="utf-8")
     assert "prune_job_dirs(" not in worker_src, (
         "worker.py 里又冒出 prune_job_dirs 调用点了——清场归物料落地（remote/download.py）"

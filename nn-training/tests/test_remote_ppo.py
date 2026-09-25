@@ -38,6 +38,7 @@ if str(ROOT) not in sys.path:
 
 from common.protocol import (
     AUTH_HEADER,
+    BLOB_INIT,
     BLOB_OPT,
     BLOB_REF,
     LEASE_SEC,
@@ -730,12 +731,13 @@ def _http(
             return e.code, {}
 
 
-def _next(base: str, *, worker_id: str = "", offline_ok: bool = False) -> dict:
+def _next(base: str, *, worker_id: str = "", role: str = "online") -> dict:
     """旧轮询面的同形替代（peek + claim；实现见 `tests/helpers/hub_poll`）。
 
     返回 `{job_id, manifest, halt, lease_token, course}`；无活 ⇒ `{"job_id": None, ...}`。
+    `role`：归属声明（2026-09-25），peek 与 claim 两跳都带。
     """
-    got = hub_poll(base, "sekret", worker_id=worker_id, offline_ok=offline_ok)
+    got = hub_poll(base, "sekret", worker_id=worker_id, role=role)
     if got is None or not got.get("job_id"):
         return {"job_id": None, "halt": bool(got and got.get("halt"))}
     return got
@@ -1088,6 +1090,10 @@ def test_publish_job_slim_blob_and_payload_diet(tmp_path: Path) -> None:
     assert m["opt_bytes"] == len(opt_raw)
     assert blob_path(jd, BLOB_OPT).read_bytes() == opt_raw
     assert blob_path(jd, BLOB_REF).read_bytes() == ref_raw
+    # opt-blob-diet（2026-09-24，§3.1/§6.1-6）：权重段也落盘，sha **就是** init_weights_fp
+    # （复用既有字段 ⇒ manifest 字段集不变，见 test_manifest_m2_fields_optional）。
+    assert blob_path(jd, BLOB_INIT).read_bytes() == init_w.read_bytes()
+    assert m["init_weights_fp"] == hashlib.sha256(init_w.read_bytes()).hexdigest()
     with _tar.open(jd / PAYLOAD_NAME, "r:*") as tf:
         names = set(tf.getnames())
     assert "manifest.json" not in names, "B1：不再打占位 manifest.json"
@@ -1148,6 +1154,9 @@ def test_publish_job_slim_off_restores_legacy_inline(tmp_path: Path) -> None:
     assert m["opt_init"] == base64.b64encode(opt_raw).decode("ascii")
     assert m["ref_weights_b64"] != ""
     assert not blob_path(jd, BLOB_OPT).exists()
+    # 非 slim 臂：**不落 init blob**（权重走 payload 的 init_weights.json = worker 的 W0）。
+    # 节点侧靠 `manifest.slim` 闸住索取（见 test_opt_blob_shape 的 missing_blobs 用例）。
+    assert not blob_path(jd, BLOB_INIT).exists()
     with _tar.open(jd / PAYLOAD_NAME, "r:*") as tf:
         names = set(tf.getnames())
     assert "init_weights.json" in names
@@ -1155,7 +1164,7 @@ def test_publish_job_slim_off_restores_legacy_inline(tmp_path: Path) -> None:
 
 
 def test_hub_blob_endpoint(tmp_path: Path) -> None:
-    """M2 B3：GET /jobs/{id}/blob?name=opt|ref —— 命中回 raw，未知名 400，缺失 404。"""
+    """M2 B3：GET /jobs/{id}/blob?name=opt|ref|init —— 命中回 raw，未知名 400，缺失 404。"""
     base, store, srv, th = _boot_server(tmp_path)
     try:
         manifest = normalize_manifest(_mini_manifest())
@@ -1164,10 +1173,15 @@ def test_hub_blob_endpoint(tmp_path: Path) -> None:
         blob_path(store._job_dir(jid), BLOB_OPT).write_bytes(b"optraw")
         st, got = _http_raw(base, "sekret", f"/jobs/{jid}/blob?name=opt")
         assert st == 200 and got == b"optraw"
+        # opt-blob-diet（§4）：`init` 走同一白名单 ⇒ hub_server **零改代码**（新增名只改
+        # `BLOB_NAMES`）。三条都钉：命中 200 / 盘上无该 blob 404 / 未知名 400。
+        blob_path(store._job_dir(jid), BLOB_INIT).write_bytes(b"initraw")
+        sti, goti = _http_raw(base, "sekret", f"/jobs/{jid}/blob?name=init")
+        assert sti == 200 and goti == b"initraw"
         st2, _ = _http_raw(base, "sekret", f"/jobs/{jid}/blob?name=nope")
-        assert st2 == 400
+        assert st2 == 400, "未知名是 400（blob_path 抛 ProtocolError）——别顺手改成 404"
         st3, _ = _http_raw(base, "sekret", f"/jobs/{jid}/blob?name=ref")
-        assert st3 == 404
+        assert st3 == 404, "名字合法但盘上没这份 ⇒ 404（与未知名可区分）"
     finally:
         srv.shutdown()
         th.join(timeout=5)

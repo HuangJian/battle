@@ -39,17 +39,32 @@ from common.protocol import (
     COURSE_ENABLE_MARKER,
     COURSE_MODE_OFFLINE,
     COURSE_MODE_ONLINE,
+    ROLE_OFFLINE,
+    ROLE_ONLINE,
     WORKER_ID_HEADER,
     ProtocolError,
-    has_offline_capability,
     may_avoid_stale_holder,
     normalize_manifest,
     parse_course_arg,
+    role_from_header,
     rotation_order,
 )
 from remote.hub_server import _HubQueue, _JobStore, as_hub, make_server
 from tests.helpers.hub_poll import hub_poll
 from tests.subproc_util import spawn_bound_port
+
+
+@pytest.fixture(autouse=True)
+def _isolate_weights_archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """把**权重归档根**指到 tmp（2026-09-23）。
+
+    回传轮会往归档根写 `<课>.it<N>.<时间戳>.json`（用户口径的 ③：让控制台的 evalA 选择器
+    看得见回传段的轮次）。工装用例若往真 `nn-training/weights/` 撒这些文件，它们会被
+    `eval-board/ckpts.ts` 当成**真训练轮次**列出来 —— 所以每个碰补传的测试文件都要隔离。
+    用 env 而不是 patch 模块常量：e2e 那条是**真子进程**，patch 传不进去。
+    """
+    monkeypatch.setenv("BCITY_WEIGHTS_ARCHIVE_ROOT", str(tmp_path / "weights-archive"))
+
 
 # ------------------------------------------------------------------ 纯函数
 
@@ -111,8 +126,16 @@ class _Clock:
         self.t += dt
 
 
-def _manifest(jid: str, *, run: str = "run", it: int = 1) -> dict:
-    return normalize_manifest(
+def _manifest(
+    jid: str, *, run: str = "run", it: int = 1, kind: str = "ppo", role: str = ""
+) -> dict:
+    """一份合法 manifest。
+
+    `role` 就是**生产里 `publish_job` 写进去的那个字段**（kind⇒role 的推导在发布侧，见
+    `test_role_routing.py`）；这里直接写字段，免得在 hub 单测里造一份带 plan/rollout 规格的
+    kind=run manifest（那是 e2e 的事）。
+    """
+    m = normalize_manifest(
         {
             "proto": 1,
             "runId": run,
@@ -135,8 +158,11 @@ def _manifest(jid: str, *, run: str = "run", it: int = 1) -> dict:
             "init_weights_fp": "w" * 64,
             "data_fp": "d" * 64,
             "payload_sha256": "p" * 64,
+            "kind": kind,
+            **(({"role": role}) if role else {}),
         }
     )
+    return m
 
 
 def _hub(
@@ -157,80 +183,111 @@ def _hub(
     return _HubQueue(stores, order=list(courses), modes=modes, now_fn=clock)
 
 
-def _publish(hub: _HubQueue, course: str, jid: str, *, run: str = "run", it: int = 1) -> None:
+def _publish(
+    hub: _HubQueue,
+    course: str,
+    jid: str,
+    *,
+    run: str = "run",
+    it: int = 1,
+    kind: str = "ppo",
+    role: str = "",
+) -> None:
     st = hub._stores[course]
-    st.publish(jid, _manifest(jid, run=run, it=it), b"PK\x03\x04fake")
+    st.publish(jid, _manifest(jid, run=run, it=it, kind=kind, role=role), b"PK\x03\x04fake")
 
 
-def _claim(
-    hub: _HubQueue, worker: str, *, offline_ok: bool = False
-) -> tuple[str, str, str]:
+def _claim(hub: _HubQueue, worker: str, *, role: str = ROLE_ONLINE) -> tuple[str, str, str]:
     """取下一份该派的 job；**没有必须是失败**（否则断言会变成静默跳过）。"""
-    picked = hub.claim_next(worker_id=worker, offline_ok=offline_ok)
+    picked = hub.claim_next(worker_id=worker, role=role)
     assert picked is not None, f"应当有可派给 {worker} 的 job"
     return picked
 
 
-# ------------------------------------------------------------------ 离线课的能力闸（2026-09-19）
+# ------------------------------------------------------ 归属（role）闸（2026-09-25）
 #
-# 离线课（`kind=run` 整段）不实时派发，但**不是**谁都领不到的坟墓：用户口径「也支持带
-# 特别标识的云端 worker 在线领取」——标识语义 = 能力（「我能自己跑完整段」），不是课程绑定。
-# 判错的方向是刻意选的：低估只是少一个 worker 领离线课（队列可见地不降），高估会让只会
-# 逐轮的 worker 搬走整段 job 并在那儿卡到租约超时（不可见）。
+# **行为变更**：以前「带特别标识的 worker」是**能力声明**（带标仍可领在线课，课程与 worker
+# 正交）；现在是**归属**——一个盘一种任务（用户 2026-09-25 裁决）。为什么换：`kind=run`
+# 整段**确实**由 tailscale 盘跑得动（它有能力），事故正是「有能力的盘接走了不属于它的整段
+# job」（另一个盘两小时前缺 bun 被拒的那个 job_id，在切成在线后被它领走）。
+# ⇒ 判据 = job 自己的 `role`（发布时定死，不随 mode 漂移），不再看课程当前 mode。
+# 全量记录：`DECISIONS.md §2026-09-25-goalnn-role-routing`。
 
 
 @pytest.mark.parametrize(
     ("raw", "want"),
     [
-        ("1", True),
-        ("true", True),
-        ("YES", True),
-        ("on", True),
-        (" 1 ", True),
-        ("", False),
-        (None, False),
-        ("0", False),
-        ("false", False),
-        ("2", False),
-        ("offline", False),  # 只认白名单真值：能力名写进来不算声明
+        ("1", ROLE_OFFLINE),
+        ("true", ROLE_OFFLINE),
+        ("YES", ROLE_OFFLINE),
+        ("on", ROLE_OFFLINE),
+        (" 1 ", ROLE_OFFLINE),
+        ("offline", ROLE_OFFLINE),  # 角色字面量也认（头值的历史是 "1"）
+        (" OFFline ", ROLE_OFFLINE),
+        ("", ROLE_ONLINE),
+        (None, ROLE_ONLINE),
+        ("0", ROLE_ONLINE),
+        ("false", ROLE_ONLINE),
+        ("2", ROLE_ONLINE),
+        ("online", ROLE_ONLINE),
     ],
 )
-def test_offline_capability_header_truth_table(raw: object, want: bool) -> None:
-    assert has_offline_capability(raw) is want
+def test_role_header_truth_table(raw: object, want: str) -> None:
+    assert role_from_header(raw) == want
 
 
-def test_offline_course_needs_capability(tmp_path: Path) -> None:
-    """普通 worker 领不到离线课；带标（自报能跑整段）的领得到。"""
+def test_offline_role_job_needs_offline_role(tmp_path: Path) -> None:
+    """`kind=run`（归属 offline）的 job：在线盘请求一律领不到；离线盘请求领得到。"""
     hub = _discover_hub(tmp_path)
-    _publish_standalone(tmp_path, "c1", "j" * 16)
+    _publish_standalone(tmp_path, "c1", "j" * 16, role=ROLE_OFFLINE)
     hub.discover()
-    assert hub.set_mode("c1", COURSE_MODE_OFFLINE) is True
 
-    assert hub.claim_next(worker_id="w1") is None, "空头 = 无能力 ⇒ 不得领离线课"
-    assert hub.claim_next(worker_id="w1", offline_ok=False) is None
-    course, jid, _tok = _claim(hub, "w1", offline_ok=True)
+    assert hub.claim_next(worker_id="w1") is None, "缺头 = 在线盘 ⇒ 不得领离线盘的活"
+    assert hub.claim_next(worker_id="w1", role=ROLE_ONLINE) is None
+    course, jid, _tok = _claim(hub, "w1", role=ROLE_OFFLINE)
     assert (course, jid) == ("c1", "j" * 16)
-    # 租约在持：同一份不会被第二个带标 worker 再领一次（那是同一段跑两遍）
-    assert hub.claim_next(worker_id="w2", offline_ok=True) is None
+    # 租约在持：同一份不会被第二个离线盘 worker 再领一次（那是同一段跑两遍）
+    assert hub.claim_next(worker_id="w2", role=ROLE_OFFLINE) is None
 
 
-def test_marked_worker_still_claims_online_courses(tmp_path: Path) -> None:
-    """课程与 worker **正交**（用户 2026-09-19 再强调）：带标 worker 照样领在线课。
+def test_role_survives_mode_flips(tmp_path: Path) -> None:
+    """本 plan 的核心不变式：**归属不随课程 mode 漂移**（含连续重复的切换）。
 
-    标识是「我能跑完整段」的能力声明，不是「我只服务离线课」的归属——把它做成归属，就会
-    重新制造「某门课钉到某台机器」的耦合（R4 刚拆掉的那种）。
+    旧行为：切回在线 ⇒ 同一份离线 job 立刻敞开放给所有 worker（事故现场的形状）。
     """
     hub = _discover_hub(tmp_path)
-    _publish_standalone(tmp_path, "c-online", "a" * 16)
-    _publish_standalone(tmp_path, "c-offline", "b" * 16)
+    _publish_standalone(tmp_path, "c1", "j" * 16, role=ROLE_OFFLINE)
     hub.discover()
-    assert hub.set_mode("c-offline", COURSE_MODE_OFFLINE) is True
 
-    seen = set()
-    for _ in range(2):
-        course, _jid, _tok = _claim(hub, "w1", offline_ok=True)
-        seen.add(course)
-    assert seen == {"c-online", "c-offline"}, f"带标 worker 应两门课都能领，实得 {seen}"
+    modes = (
+        COURSE_MODE_OFFLINE,
+        COURSE_MODE_ONLINE,
+        COURSE_MODE_ONLINE,
+        COURSE_MODE_OFFLINE,
+        COURSE_MODE_ONLINE,
+    )
+    for i, mode in enumerate(modes):
+        assert hub.set_mode("c1", mode) is True
+        assert hub.job_role("j" * 16) == ROLE_OFFLINE, f"第 {i} 次切换后归属漂了（mode={mode}）"
+        assert hub.claim_next(worker_id="w1", role=ROLE_ONLINE) is None, (
+            f"第 {i} 次切换后在线盘拿到了离线盘的活（mode={mode}）"
+        )
+    # 离线盘从头到尾都能领（上面每一次尝试都没能搬走它）
+    assert _claim(hub, "w1", role=ROLE_OFFLINE)[:2] == ("c1", "j" * 16)
+
+
+def test_offline_role_worker_no_longer_claims_online_jobs(tmp_path: Path) -> None:
+    """反向：离线盘 worker 不领在线盘的活（**行为变更**，原 `test_marked_worker_still_
+    claims_online_courses` 的语义已作废——见本节头）。
+
+    这条与上一条合起来才是「一个盘一种任务」：两个方向都由同一个归属闸管。
+    """
+    hub = _discover_hub(tmp_path)
+    _publish_standalone(tmp_path, "c-online", "a" * 16)  # kind=ppo ⇒ online
+    hub.discover()
+
+    assert hub.claim_next(worker_id="w1", role=ROLE_OFFLINE) is None, "离线盘不得领在线盘的活"
+    assert _claim(hub, "w1", role=ROLE_ONLINE)[:2] == ("c-online", "a" * 16)
 
 
 def _boot(tmp_path: Path, hub: _HubQueue) -> tuple:
@@ -243,9 +300,7 @@ def _boot(tmp_path: Path, hub: _HubQueue) -> tuple:
 
 def _http_raw(base: str, path: str) -> tuple[int, bytes]:
     """取**二进制**端点（payload/blob）：`_http` 会 json.loads，对 zip 体直接爆。"""
-    req = urllib.request.Request(
-        base + path, headers={AUTH_HEADER: "Bearer sekret"}, method="GET"
-    )
+    req = urllib.request.Request(base + path, headers={AUTH_HEADER: "Bearer sekret"}, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return resp.status, resp.read()
@@ -341,15 +396,20 @@ def test_dispatch_round_robins_across_courses(tmp_path: Path) -> None:
     assert got == ["a", "b", "a"], f"轮转失效：{got}"
 
 
-def test_offline_course_is_not_dispatched(tmp_path: Path) -> None:
-    """离线课不实时派发 PPO（用户口径），但它的 job 仍在盘上、账本照记。"""
-    hub = _hub(tmp_path, offline=("b",))
-    _publish(hub, "b", "b" * 16)
-    assert hub.claim_next(worker_id="w1") is None, "离线课不得被派出去"
-    assert hub.claimable_job_ids("b") == ["b" * 16], "job 仍在（只是不派）"
-    # 在线课照常
-    _publish(hub, "a", "a" * 16)
-    assert _claim(hub, "w1")[:2] == ("a", "a" * 16)
+def test_offline_role_job_is_not_dispatched_to_online_pool(tmp_path: Path) -> None:
+    """归属 offline 的 job 不派给在线盘，但它仍在盘上、账本照记（旧名：离线课不实时派发）。
+
+    ★ 判据从「课程当前 mode」改成「**job 自己的 role**」（2026-09-25）：这条用例里的课
+    mode 是 online——旧口径下它会被派出去（这正是事故），现在不会。
+    """
+    hub = _hub(tmp_path)  # 两门课都是 online 模式
+    _publish(hub, "b", "b" * 16, role=ROLE_OFFLINE)
+    assert hub.claim_next(worker_id="w1") is None, "归属 offline 的活不得派给在线盘"
+    assert hub.claimable_job_ids("b") == ["b" * 16], "job 仍在（只是不派给这块盘）"
+    assert hub.job_role("b" * 16) == ROLE_OFFLINE
+    # 同门课的在线活照常派（归属是 job 级，不是课程级）
+    _publish(hub, "b", "c" * 16)
+    assert _claim(hub, "w1")[:2] == ("b", "c" * 16)
 
 
 def test_active_courses_excludes_offline_and_idle(tmp_path: Path) -> None:
@@ -485,6 +545,41 @@ def test_admin_queue_and_courses_surfaces(tmp_path: Path) -> None:
         th.join(timeout=5)
 
 
+def test_mode_post_discovers_the_course_on_demand(tmp_path: Path) -> None:
+    """`POST /admin/courses` 指名的课**刚建好目录、扫描还没轮到**时，也必须靠按需真扫接住。
+
+    2026-09-23 用户报障（真机日志）：共享 hub 刚重启（`courses=[]`）——控制台那份「离线意图
+    回灌」跑在第一次顺带扫描**之前**，九条 POST 全 400；随后三个离线课各自靠「开课时有界
+    重试（3×2s）」去赌发现时机，**恰有一门输掉**（最后一次重试 20:29:46、发现也 20:29:46）
+    ⇒ 该课静默留在 online，面板一直显示「在训 / 切离线」，而操作员以为自己开的是离线课。
+    修法：POST 只在「课不在表里」时跳间隔闸真扫一次再试（模式非法不白扫盘）。
+    """
+    clock = _Clock()
+    hub = _discover_hub(tmp_path, clock)
+    base, _hub_ref, srv, th = _boot(tmp_path, hub)
+    try:
+        # 第一次顺带扫描之后才开课（模拟「刚建好 remote-jobs/」）——此刻闸还没过期
+        _mk_course_dir(tmp_path, "late")
+        clock.tick(hub.DISCOVER_SCAN_MIN_SEC / 2)
+        assert hub.courses() == []
+        st, r = _http(base, "/admin/courses?course=late&mode=offline", method="POST")
+        assert st == 200, r
+        assert r["mode"] == "offline"
+        assert hub.courses() == ["late"] and hub.mode_of("late") == COURSE_MODE_OFFLINE
+        st, q = _http(base, "/admin/queue")
+        assert q["offline"] == ["late"]
+        # 真不存在的课仍然 400（按需发现不是「什么都接受」），且不改变课程表
+        st, _r = _http(base, "/admin/courses?course=ghost&mode=offline", method="POST")
+        assert st == 400 and hub.courses() == ["late"]
+        # 模式非法不用扫盘：直接 400
+        st, _r = _http(base, "/admin/courses?course=late&mode=bogus", method="POST")
+        assert st == 400 and hub.mode_of("late") == COURSE_MODE_OFFLINE
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        th.join(timeout=5)
+
+
 def test_halt_is_per_course(tmp_path: Path) -> None:
     """停机达令**按课程**（单 hub 化的关键副作用）。
 
@@ -581,7 +676,6 @@ def test_offline_artifact_routes_by_body_course(tmp_path: Path) -> None:
         )
         assert st == 400 and "course" in r["error"]
 
-
         # 续投（不带 course）靠已有 offline/<run_id>/ 自动归位
         st, r = _http(
             base,
@@ -653,11 +747,13 @@ def _mk_course_dir(tmp_path: Path, name: str, *, age: float = 0.0) -> Path:
     return d
 
 
-def _publish_standalone(root: Path, course: str, jid: str, *, it: int = 1) -> None:
+def _publish_standalone(
+    root: Path, course: str, jid: str, *, it: int = 1, kind: str = "ppo", role: str = ""
+) -> None:
     """在**hub 还不知道**这门课时就往盘上发一份 job（真实训练侧的写法，课已开）。"""
     _enable(root, course)
     st = _JobStore(root / course / "remote-jobs", root / course / "training_log.jsonl")
-    st.publish(jid, _manifest(jid, it=it), b"PK\x03\x04fake")
+    st.publish(jid, _manifest(jid, it=it, kind=kind, role=role), b"PK\x03\x04fake")
 
 
 def test_discover_registers_published_course(tmp_path: Path) -> None:
@@ -936,6 +1032,67 @@ def test_offline_backfeed_moves_the_console_table(tmp_path: Path) -> None:
         th.join(timeout=5)
 
 
+def test_offline_backfeed_mirrors_advances_active_weights_and_archives(tmp_path: Path) -> None:
+    """回传轮的**三处课程侧落位**（用户 2026-09-23 口径 ①②③）。
+
+    实测缺口：seg-1（人工导入）在 `deliver/<run>/it-000…048`，而 seg-2（回传）只在
+    `remote-jobs/offline/<run>/it-048…124` ⇒ 两段分居两棵树；`<traj>/weights.json` 整段
+    停在段起点（= 该 run 的 it0 指纹）；`nn-training/weights/<课>/` 一个回传轮都没有
+    —— 而控制台 evalA 的 iter 选择器只扫那个目录 ⇒ **回传段的权重"看不见"**（真正意义上
+    的"没落盘"）。三条一起钉，外加"不倒退"。
+    """
+    hub = _discover_hub(tmp_path)
+    _mk_course_dir(tmp_path, "c4")
+    assert hub.discover() == ["c4"], hub.courses()
+    base, _ref, srv, th = _boot(tmp_path, hub)
+    try:
+        traj = tmp_path / "c4"
+        wj3 = json.dumps({"it": 3, "w": 4.5}).encode("utf-8")
+        st, res = _http(
+            base, "/offline/artifact", method="POST", data=_artifact_body("seg-2", 3, course="c4")
+        )
+        assert st == 200 and res["status"] == "accepted", res
+        # ① 交付镜像：与导入腿同路径同文件名（两腿同构 ⇒ 找东西只翻一棵树）
+        mir = traj / "deliver" / "seg-2" / "it-003"
+        assert (mir / "weights.json").read_bytes() == wj3, "镜像要落同一份字节"
+        assert (mir / "row.json").is_file()
+        # ② 活动权重推进到该轮
+        assert (traj / "weights.json").read_bytes() == wj3, "活动权重要跟着段尾走"
+        # ③ 归档（evalA 的 iter 选择器只看这里）——隔离根由 autouse fixture 指到 tmp
+        root = Path(os.environ["BCITY_WEIGHTS_ARCHIVE_ROOT"]) / "c4"
+        arch = sorted(root.glob("c4.it3.*.json"))
+        assert len(arch) == 1 and arch[0].read_bytes() == wj3, list(root.glob("*"))
+        # ② 不倒退：账本已有更新的轮（本机循环落的 it5）⇒ 晚到的 it4 不得覆盖活动权重
+        with open(traj / "training_log.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps({"event": "iteration", "iter": 5, "kl": 0.0}) + "\n")
+        st, res = _http(
+            base, "/offline/artifact", method="POST", data=_artifact_body("seg-2", 4, course="c4")
+        )
+        assert st == 200 and res["status"] == "accepted", res
+        assert (traj / "weights.json").read_bytes() == wj3, "旧轮不得覆盖活动权重"
+        assert (traj / "deliver" / "seg-2" / "it-004" / "weights.json").is_file(), "镜像照落"
+        assert list(root.glob("c4.it4.*.json")), "归档照落（可见性不该被活动权重门挡住）"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        th.join(timeout=5)
+
+
+def test_backup_target_follows_the_course_config(tmp_path: Path) -> None:
+    """归档 `(prefix, dir)` 要跟**课程配置**走（而不是硬编码课名）——真课程声明了就用它。"""
+    st = _JobStore(tmp_path / "c4" / "remote-jobs", tmp_path / "c4" / "training_log.jsonl")
+    # 仓里有真课程配置的课（x20-noexplore 声明 backup_dir/backup_prefix）
+    assert st._course_backup_target("x20-noexplore") == (
+        "x20-noexplore",
+        str(ROOT.parent / "nn-training" / "weights" / "x20-noexplore"),
+    )
+    # 没配置的课（工装/新课）：同构缺省落到**当前归档根**（env 隔离的那一个）
+    assert st._course_backup_target("no-such-course") == (
+        "no-such-course",
+        str(Path(os.environ["BCITY_WEIGHTS_ARCHIVE_ROOT"]) / "no-such-course"),
+    )
+
+
 def test_offline_backfeed_without_a_course_is_refused_loudly_on_a_multi_course_hub(
     tmp_path: Path,
 ) -> None:
@@ -950,9 +1107,7 @@ def test_offline_backfeed_without_a_course_is_refused_loudly_on_a_multi_course_h
     assert hub.discover() == ["c4", "c5"], hub.courses()
     base, _ref, srv, th = _boot(tmp_path, hub)
     try:
-        st, body = _http(
-            base, "/offline/artifact", method="POST", data=_artifact_body("seg-2", 1)
-        )
+        st, body = _http(base, "/offline/artifact", method="POST", data=_artifact_body("seg-2", 1))
         assert st == 400 and "无法归属课程" in body["error"], body
         assert "c4" in body["error"] and "c5" in body["error"], "拒因要带上课程清单"
         assert not (tmp_path / "c4" / "remote-jobs" / "offline").exists()
@@ -1032,6 +1187,7 @@ def test_main_discover_picks_up_course_from_disk(tmp_path: Path) -> None:
                     break
             except Exception:  # 启动窗口内的连接失败是常态
                 pass
+            # sleep-ok: 轮询步长（等的是「hub 已就绪」这个状态，30s 只当挂起兜底）
             time.sleep(0.25)
         else:
             raise AssertionError(f"hub-server 未在 30s 内就绪（rc={proc.poll()}）")
@@ -1046,6 +1202,7 @@ def test_main_discover_picks_up_course_from_disk(tmp_path: Path) -> None:
             if "late" in body["courses"]:
                 seen = body
                 break
+            # sleep-ok: 轮询步长（等的是「发现线程已登记新课程」这个状态，deadline 只当兜底）
             time.sleep(0.25)
         assert seen is not None, f"--discover 没把新课程登记进来：{body}"
         assert seen["courses"]["late"]["pending_n"] == 1

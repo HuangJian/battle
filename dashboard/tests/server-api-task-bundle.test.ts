@@ -95,7 +95,7 @@ describe('任务包导出', () => {
     expect(taskBundleLogPath(COURSE).endsWith(path.join(COURSE, 'export-bundle.log'))).toBe(true)
   })
 
-  it('没导出过时 info.exists=false（下载按钮据此禁用）', () => {
+  it('没导出过时 info.exists=false（行内据此显示「未导出」）', () => {
     const info = taskBundleInfo('__never-exported-course__')
     expect(info.exists).toBe(false)
     expect(info.bytes).toBe(0)

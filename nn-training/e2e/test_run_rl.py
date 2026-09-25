@@ -364,6 +364,7 @@ class FakeAgent(BaseHTTPRequestHandler):
                         if ver != "?":
                             cache["bun"] = ver
                             break
+                        # sleep-ok: 轮询步长（等的是「bun 版本已可问出」这个状态）
                         time.sleep(0.05)
                     else:
                         cache["bun"] = "?"
@@ -388,6 +389,7 @@ class FakeAgent(BaseHTTPRequestHandler):
             self._srv.events.append(("dispatch", time.time(), key))
             # 重复派发 = 竞速副本：挂住 dup_hang 秒（慢节点 + 同步 agent 的不可中断路径）
             if self._srv.dup_hang > 0 and key in self._srv.dispatched:
+                # sleep-ok: 夹具模拟的工作量：竞速副本在慢节点上挂住 dup_hang 秒
                 time.sleep(self._srv.dup_hang)
             self._srv.dispatched.add(key)
             if key in self._srv.slow_first and key not in self._srv._slowed_once:
@@ -405,10 +407,12 @@ class FakeAgent(BaseHTTPRequestHandler):
                 while time.time() < deadline:
                     if self._srv.fetch_n.get(key, 0) >= 2:
                         break
+                    # sleep-ok: 轮询步长（等的是「第二份 fetch 已发生」这个状态）
                     time.sleep(0.05)
             if q.get("mode") == "eval" and self._srv.eval_delay > 0:
                 self._srv.eval_dispatched.set()  # I7 栅栏：eval 已派发（首局即置位）
-                time.sleep(self._srv.eval_delay)  # I7 慢 eval（后台消化模拟）
+                # sleep-ok: 夹具模拟的工作量：I7 慢 eval（后台消化模拟）
+                time.sleep(self._srv.eval_delay)
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
             body = _pack_container(*key, q["wver"], mode=q.get("mode"))
@@ -650,7 +654,9 @@ def test_it_stream_local_loser_retire(tmp_path: Path, monkeypatch: pytest.Monkey
     monkeypatch.setattr(_rdispatch, "log", _capture_log)
 
     def _slow_stub(bun_: str, rl_path: str, traj_dir, idx: int, task, a, wver: str) -> dict:
-        time.sleep(0.35)  # 节点主副本必先结算 ⇒ 本地副本必为 dup 输家
+        # 赌的是**相对快慢**（节点那侧是即时假服务），不是「等对方先跑」；
+        # sleep-ok: 夹具模拟的工作量：让本地 worker 比节点慢一拍（制造本地做 dup 输家）
+        time.sleep(0.35)
         return _stub_local_rollout(bun_, rl_path, traj_dir, idx, task, a, wver)
 
     monkeypatch.setattr(_rdispatch, "run_local_rollout", _slow_stub)
@@ -690,6 +696,7 @@ def test_it_stream_local_loser_retire(tmp_path: Path, monkeypatch: pytest.Monkey
         # 主轮已收官）——必须等它落地，否则断言与 retire 行赛跑（实测首版即踩）。
         deadline = time.time() + 5.0
         while time.time() < deadline and not any("retired" in ln for ln in lines):
+            # sleep-ok: 轮询步长（等的是「retire 行已落日志」这个状态，5s 只当挂起兜底）
             time.sleep(0.02)
         retired = [ln for ln in lines if "retired" in ln]
         local_retired = [ln for ln in retired if "node=local" in ln]
@@ -1206,14 +1213,24 @@ def test_compute_gae() -> None:
 def test_chunk_episodes() -> None:
     import ppo as ppo_mod
 
-    print("[fast] ppo.chunk_episodes (ragged 尾巴)")
-    eps = [{"obs": np.zeros((1000, 2)), "adv": np.arange(1000)}]
+    print("[fast] ppo.chunk_episodes (mb 对齐；无 ragged 末块)")
+    # 多 episode 池才走「全局重排」路径——单池分支不重排（对齐单池会丢到"局末"，有偏）。
+    eps = [
+        {"obs": np.zeros((600, 2)), "adv": np.arange(600)},
+        {"obs": np.zeros((400, 2)), "adv": np.arange(400)},
+    ]
     chs = ppo_mod.chunk_episodes(eps, 600)
     sizes = [c["obs"].shape[0] for c in chs]
-    check(sizes == [600, 400], f"ragged tail split (got {sizes})")
+    # 2026-09-23：全部恰好 mb；尾部 1000%600=400 步被丢弃（旧行为是一块 ragged 400）。
+    check(sizes == [600], f"all chunks exactly mb (got {sizes})")
     total = sum(c["obs"].shape[0] for c in chs)
-    check(total == 1000, "no samples lost")
+    check(total == 600, f"尾部按 mb 对齐丢弃 (got total={total})")
     check(all(set(c.keys()) == set(eps[0].keys()) for c in chs), "keys preserved per chunk")
+    # shuffle=False（对照路径）与单池路径保持旧行为。
+    seq = ppo_mod.chunk_episodes(eps, 600, shuffle=False)
+    check([c["obs"].shape[0] for c in seq] == [600, 400], "shuffle=False 逐字节保留 ragged")
+    one = ppo_mod.chunk_episodes([eps[1]], 600)
+    check([c["obs"].shape[0] for c in one] == [400], "单池不重排、不对齐")
 
 
 def test_backup_weights(tmp: Path) -> None:

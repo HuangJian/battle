@@ -195,6 +195,7 @@ class _VolAgent(BaseHTTPRequestHandler):
                     c["bun"] = ver
                     return ver
             except Exception:
+                # sleep-ok: 轮询步长（等的是「bun 版本已可问出」这个状态）
                 time.sleep(0.05)
         return "?"
 
@@ -240,9 +241,11 @@ class _VolAgent(BaseHTTPRequestHandler):
                 if slow_hit:
                     self._srv._slow_done.add(pair)
             if slow_hit and self._srv.slow_sec > 0:
+                # sleep-ok: 夹具模拟的工作量：慢节点一口 slow_sec 秒
                 time.sleep(self._srv.slow_sec)
             # 竞速时序控制：副本慢一拍（延迟在响应前，输赢才可塑）
             if copy_idx >= 1 and self._srv.dup_hang > 0:
+                # sleep-ok: 夹具模拟的工作量：竞速副本挂住 dup_hang 秒
                 time.sleep(self._srv.dup_hang)
             n = self._srv.samples.get(stage, 30)
             if served < self._srv.zero_first.get(stage, 0):

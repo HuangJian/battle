@@ -44,9 +44,17 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import hashlib
+import zipfile
 
-from common.protocol import COURSE_ENABLE_MARKER, TS_CODE_NAME, encode_weights_json
-from remote import net_http
+import pytest
+
+from common.protocol import (
+    COURSE_ENABLE_MARKER,
+    INIT_WEIGHTS_NAME,
+    TS_CODE_NAME,
+    encode_weights_json,
+)
+from remote import net_http, offline_boot
 from remote.artifacts import ArtifactStore
 from remote.hub_client import publish_job
 from remote.offline_deliver import OfflineDeliverer
@@ -54,6 +62,18 @@ from rl.iter_job import build_iter_spec
 from rl.plan import build_plan, dump_plan
 from tests.helpers.hub_poll import hub_poll
 from tests.subproc_util import spawn_bound_port
+
+
+@pytest.fixture(autouse=True)
+def _isolate_weights_archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """把**权重归档根**指到 tmp（2026-09-23）。
+
+    本文件拉的是**真 hub 子进程**（`remote.hub_server`），子进程继承本测试的环境 ⇒ 用 env
+    而不是 patch 模块常量。不隔离的话回传轮会往真 `nn-training/weights/` 写归档，而控制台
+    的 evalA 权重选择器会把它们当成真训练轮次列出来。
+    """
+    monkeypatch.setenv("BCITY_WEIGHTS_ARCHIVE_ROOT", str(tmp_path / "weights-archive"))
+
 
 TOKEN = "e2e-offline-sekret"
 C_OFF = "e2e-off"
@@ -147,14 +167,18 @@ def _plan_args() -> SimpleNamespace:
         course_frozen_bytes=None,
         course_path="",
         run_iters=0,
-        run_wait_sec=0.0,
     )
 
 
 def _publish_run_job(
     course: str, job_root: Path, jsonl: Path, tmp_path: Path, *, it: int = 1, n: int = 3
 ) -> dict:
-    """训练侧真发布一份 **kind="run"**（整段）job：计划随 payload、shard 由节点现产。"""
+    """真发布一份 **kind="run"** 的 manifest（计划随 payload、shard 由节点现产）。
+
+    ★ 2026-09-25：生产端**不再**发这种队列项（离线课走任务包，plan §7）——本助手造的是
+    「盘上遗留的离线项」，专门用来钉 hub 侧的归属闸与补传读面在**遗留项**上仍然正确
+    （混部期旧 hub / 旧盘上确实会有这种 job；派错盘正是 2026-09-25 事故的形态）。
+    """
     args = _plan_args()
     plan = build_plan(
         args, it=it, iters_total=it + n, rotate_seed=99, max_iters=n - 1, log=_quiet
@@ -278,6 +302,7 @@ class _Hub:
             st, body = _http(self.base, "/admin/queue", token=TOKEN)
             if st == 200 and sorted(body.get("courses") or {}) == sorted(expect):
                 return
+            # sleep-ok: 轮询步长（等的是「hub 已就绪且课程表已登记」这个状态）
             time.sleep(0.1)
         raise AssertionError(
             f"hub-server 未就绪或课程表不对（rc={self.proc.poll()}）；输出：{self.output()}"
@@ -303,11 +328,16 @@ class _Hub:
             self.proc.wait(timeout=5)
 
 
-# ────────────────────────── ① 整段 job：谁能领、谁不能 ──────────────────────────
+# ───────────── ① 队列里**遗留**的离线项：谁能领、谁不能（队列腿已退役，闸仍要对） ─────────────
 
 
 def test_offline_segment_is_claimable_only_by_a_marked_worker(tmp_path: Path) -> None:
-    """离线课的整段 job：普通 poller 领不到；带 `X-Battle-Offline` 的领得到；带标仍能领在线课。"""
+    """**遗留**的离线项：普通 poller 领不到；带 `X-Battle-Offline` 的领得到。
+
+    2026-09-25：头的语义从「能力」升为**归属**（一个盘一种任务）——旧口径「带标仍可领
+    在线课」已作废，对应的断言不再存在（归属闸会当场拒，见
+    `tests/test_role_routing.py`）。本文件保留的是跨进程那条真链路。
+    """
     traj = tmp_path / "traj"
     off_job_root, off_jsonl = _course_dirs(traj, C_OFF)
     on_job_root, on_jsonl = _course_dirs(traj, C_ON)
@@ -330,14 +360,16 @@ def test_offline_segment_is_claimable_only_by_a_marked_worker(tmp_path: Path) ->
         assert q["courses"][C_OFF]["inflight"] == [], "离线课不该派给普通 worker"
 
         # 带标 poller：整段 job 立刻到手，且响应自报归属课程（补传的归位键）
-        marked = hub_poll(hub.base, TOKEN, worker_id="marked-1", offline_ok=True)
+        marked = hub_poll(hub.base, TOKEN, worker_id="marked-1", role="offline")
         assert marked is not None, f"带标 worker 领不到离线课；输出：{hub.output()}"
         assert marked["job_id"] == man_off["job_id"]
         assert marked["course"] == C_OFF
         assert marked["manifest"]["kind"] == "run"
         assert marked["manifest"]["plan_sha256"], "整段 job 必须随计划（节点靠它自主跑完）"
-        # 观测：hub 日志里有一行「离线课整段交领」（现场排障的第一只手电）
-        assert any("离线课整段交领" in ln for ln in hub.lines), hub.output()
+        # 观测：hub 日志里有一行「整段交领」（现场排障的第一只手电）。
+        # 文案 2026-09-25 改过：判据从「课程当前 mode」换成 **job 自己的 role**，
+        # 所以行里报的是「请求方自称的角色」而不是「这是离线课」。
+        assert any("整段交领" in ln and "marked-1" in ln for ln in hub.lines), hub.output()
     finally:
         hub.close()
 
@@ -348,7 +380,10 @@ def test_offline_segment_is_claimable_only_by_a_marked_worker(tmp_path: Path) ->
 def test_segment_rounds_backfeed_into_the_right_course_and_show_up_on_the_read_face(
     tmp_path: Path,
 ) -> None:
-    """云机逐轮补传 → 落**本课**目录 → `/admin/offline` 报出段内进度（控制台读面）。"""
+    """云机逐轮补传 → 落**本课**目录 → `/admin/offline` 报出段内进度（控制台读面）。
+
+    取包腿（在跑的云机）就这么补传：每跑完一轮推一次，`course` 是 hub 下发的归位键。
+    """
     traj = tmp_path / "traj"
     off_job_root, off_jsonl = _course_dirs(traj, C_OFF)
     on_job_root, on_jsonl = _course_dirs(traj, C_ON)
@@ -358,7 +393,7 @@ def test_segment_rounds_backfeed_into_the_right_course_and_show_up_on_the_read_f
     try:
         hub.ready(expect=[C_OFF, C_ON])
         hub.set_mode(C_OFF, "offline")
-        got = hub_poll(hub.base, TOKEN, worker_id="marked-1", offline_ok=True)
+        got = hub_poll(hub.base, TOKEN, worker_id="marked-1", role="offline")
         assert got is not None and got["job_id"] == man_off["job_id"], got
         course = got["course"]
 
@@ -411,11 +446,112 @@ def test_segment_rounds_backfeed_into_the_right_course_and_show_up_on_the_read_f
         hub.close()
 
 
+# ────────────────────── ④ 云机侧：**首次跑**（产物目录还不存在） ──────────────────────
+
+
+def _real_pack(
+    tmp_path: Path, course: str, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """用**真导出器**写一个任务包（控制台 `--export-bundle` 走的就是它）。
+
+    `normalize_manifest` 被替换成恒等（最小 manifest 缺时间戳/字段时会拒），与
+    `tests/test_offline_task_pack.py::_export_real_pack` 同一口径。
+    """
+    from remote import bundle as bundle_mod
+
+    monkeypatch.setattr(bundle_mod, "normalize_manifest", lambda m: m)
+    src = tmp_path / "_src"
+    src.mkdir(parents=True, exist_ok=True)
+    (src / INIT_WEIGHTS_NAME).write_bytes(b'{"format":"nn-weights-json","params":{"w":1}}')
+    code_zip = src / bundle_mod.CODE_NAME
+    with zipfile.ZipFile(code_zip, "w") as z:
+        z.writestr("remote/_marker.py", "VALUE = 'e2e'\n")
+    with zipfile.ZipFile(src / TS_CODE_NAME, "w") as z:
+        z.writestr("tools/sim/export-eval-game.ts", "// e2e\n")
+    plan = json.dumps({"start_it": 1, "end_it": 5}).encode("utf-8")
+    out = tmp_path / "packs" / f"task-{course}.zip"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    bundle_mod.export_bundle(
+        out,
+        manifest={
+            "kind": "run",
+            "runId": "run-e2e",
+            "it": 1,
+            "plan_sha256": hashlib.sha256(plan).hexdigest(),
+            "commit": "c" * 40,
+        },
+        plan_bytes=plan,
+        init_weights_path=src / INIT_WEIGHTS_NAME,
+        code_zip_path=code_zip,
+        ts_code_zip_path=src / TS_CODE_NAME,
+    )
+    return out
+
+
+def test_a_fresh_run_lays_down_code_and_ts_tree_before_the_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ 现场回归（2026-09-25 云机实测）：**首次跑**从**真包**起跑，走到 `run_loop` 之前不能死。
+
+    报障原文：`代码就位: /tmp/worker-code（…来源 任务包 …）` 之后当场
+    `未捕获异常 FileNotFoundError: .../battle-offline/x20-dodge-l1/run/ts_code.zip` ——
+    补 TS 运行时那一步往一个**还不存在**的产物目录里写 zip，整个 cell 死在 rollout 之前。
+
+    为什么本文件此前没拦住（而这正是补这条用例的理由）：本文件只覆盖 hub 侧，云机侧只有单测，
+    而单测的产物目录都是**预建好**的 —— 全新一跑（`<work>/run` 不存在）从来没人走过。
+
+    判据：不抛；`run_loop` 被调起时产物目录已存在、`ts_code/` + `ts_code.zip` 就位；
+    首次跑走**老规矩**（argv 带 `--bundle`，铺产物目录交给 `import_bundle`）。
+    """
+    pack = _real_pack(tmp_path, C_OFF, monkeypatch)
+    work = tmp_path / "work"
+    argv_seen: list[list[str]] = []
+    dest_existed: list[bool] = []
+
+    def fake_loop(argv: list[str]) -> int:
+        argv_seen.append(list(argv))
+        dest_existed.append((work / "run").is_dir())
+        return 0
+
+    # 代码解包到临时目录（生产缺省是 `/tmp/worker-code`：本用例不该往机器上真写那个路径）。
+    real_ensure_code = offline_boot.ensure_code
+    monkeypatch.setattr(
+        offline_boot,
+        "ensure_code",
+        lambda *a, **kw: real_ensure_code(*a, **{**kw, "code_dir": str(tmp_path / "worker-code")}),
+    )
+    cfg = {
+        "course": C_OFF,
+        "work_dir": str(work),
+        "download_dir": str(tmp_path / "out"),
+        "device": "cpu",
+        "live_backfeed": False,
+        "task_zip": str(pack),  # = 手动送包那条路：拿包就走，不经 hub
+    }
+    logs: list[str] = []
+    rc = offline_boot.run_one_course(
+        cfg, {}, logs.append, None, course=C_OFF, multi=False, run_loop_main=fake_loop
+    )
+
+    assert rc == 0, logs
+    assert dest_existed == [True], f"run_loop 起来时产物目录必须已存在；日志：{logs}"
+    argv = argv_seen[0]
+    dest = work / "run"
+    assert (dest / TS_CODE_NAME).is_file(), logs
+    assert (dest / offline_boot.TS_TREE_NAME / "tools" / "sim" / "export-eval-game.ts").is_file()
+    assert "--bundle" in argv and str(pack) in argv, argv
+
+
 # ────────────────────────── ③ 取任务包（hub → 云机） ──────────────────────────
 
 
 def test_task_pack_endpoint_hands_over_the_console_export(tmp_path: Path) -> None:
-    """`GET /offline/task-pack?course=` 递的就是控制台导出的那份 zip（404/401/越界各有话说）。"""
+    """`GET /offline/task-pack?course=` 递的就是控制台导出的那份 zip（404/401/越界各有话说）。
+
+    ⚠ 取包要**先切离线**（2026-09-25 的 mode 闸，plan/online-offline-role-routing §2.4）：
+    包在盘上 ≠ 该发给你——切离线时控制台会自动导出且「已有包不动」⇒ 切回在线后包还在，
+    不查 mode 就等于在线课也能被离线盘取走跑整段（L6）。所以本用例先钉 409、切离线后 200。
+    """
     traj = tmp_path / "traj"
     _course_dirs(traj, C_OFF)
     _course_dirs(traj, C_ON)
@@ -425,13 +561,21 @@ def test_task_pack_endpoint_hands_over_the_console_export(tmp_path: Path) -> Non
     try:
         hub.ready(expect=[C_OFF, C_ON])
 
+        # 课还是在线 ⇒ 409（包在、没丢：正文要说清下一步，不是 404 把人引向「再导一次」）
+        st, raw = _http_bytes(hub.base, f"/offline/task-pack?course={C_OFF}")
+        assert st == 409 and raw != pack_bytes, (st, raw[:200])
+        assert "online" in raw.decode("utf-8"), raw[:200]
+
+        hub.set_mode(C_OFF, "offline")
         st, raw = _http_bytes(hub.base, f"/offline/task-pack?course={C_OFF}")
         assert st == 200 and raw == pack_bytes, (st, raw[:40])
         assert hashlib.sha256(raw).hexdigest() == hashlib.sha256(pack_bytes).hexdigest()
 
         # 没有这门课的包 ⇒ 404 + 人读下一步（「先去控制台导出」），而不是空体
         st, raw = _http_bytes(hub.base, f"/offline/task-pack?course={C_ON}")
-        assert st == 404 and "先在控制台导出" in raw.decode("utf-8"), (st, raw[:200])
+        # 文案 2026-09-25 改过（plan/offline-switch-auto-bundle §3.2/评审 F3）：「导出要求训练已停」是过期
+        # 口径（`exportGuard` 早就不以「训练在跑」拒导）⇒ 现在写「随时可导，不必停训」。
+        assert st == 404 and "导出任务包" in raw.decode("utf-8"), (st, raw[:200])
 
         # 未鉴权 ⇒ 401（token 是唯一入口；任务包里有课程全文与权重）
         st, _raw = _http_bytes(hub.base, f"/offline/task-pack?course={C_OFF}", token="")

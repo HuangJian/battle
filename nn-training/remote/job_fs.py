@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import tarfile
 from pathlib import Path
+from typing import Any
 
 from common.fs import extract_tar_bytes
 from common.proc import run_capture
@@ -61,7 +62,9 @@ def _persist_result(work_dir: Path, jid: str, result: dict) -> None:
     rpath.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
 
 
-def prune_job_dirs(work_dir: Path, keep: int = JOB_DIR_KEEP, log=lambda msg: None) -> int:
+def prune_job_dirs(
+    work_dir: Path, keep: int = JOB_DIR_KEEP, log=lambda msg: None, bundle: Any = None
+) -> int:
     """按 mtime 保留最近 `keep` 个 job 目录，其余删除。返回删除个数。
 
     只动 work_dir 下的 job 目录（按 jid 命名），**跳过 code_cache / blob_cache /
@@ -95,7 +98,12 @@ def prune_job_dirs(work_dir: Path, keep: int = JOB_DIR_KEEP, log=lambda msg: Non
         except BaseException as e:  # 含 SystemExit：沙箱删除守卫会打死调用线程
             log(f"prune: 跳过 {d.name}（{type(e).__name__}）")
     if removed:
-        log(f"prune: 删除 {removed} 个旧 job 目录（保留最近 {keep} 个）")
+        # 日志节食：给了 bundle 就攒进调用方那一行（prune 与 payload/设备/装载同属
+        # 「本 job 准备」阶段）。
+        if bundle is not None:
+            bundle.add("prune", f"删 {removed} 个旧 job 目录（保留最近 {keep} 个）")
+        else:
+            log(f"prune: 删除 {removed} 个旧 job 目录（保留最近 {keep} 个）")
     return removed
 
 
@@ -136,18 +144,29 @@ def unpack_opt_tar(tar_bytes: bytes, dest: Path) -> None:
 def pack_opt_tar(src_dir: Path) -> bytes:
     """_ppo_save 目录 → tar bytes（回传用）。
 
-    H5（review-hy）：**只打 model.pt + opt.pt，不打 state.json**——state.json 里的
-    numpy RNG 状态从未被读取（worker 每次按 per-job 种子重播，D5 自洽），tar 里躺着
-    死数据只会误导。Adam 动量（opt.pt）才是跨轮续跑真正需要的状态。
+    H5（review-hy）：**不打 state.json**——state.json 里的 numpy RNG 状态从未被读取
+    （worker 每次按 per-job 种子重播，D5 自洽），tar 里躺着死数据只会误导。
+
+    ★ 2026-09-24（opt-blob-diet，plan/opt-blob-diet.plan.md §2.1-1）：**只打 `opt.pt`**。
+    `model.pt` 从此不进 tar —— 它与同一个 POST 里的 `result.weights_json` 是**同一份权重**，
+    只是传了两遍（实测 268,996 B/轮 = 上行的 35.4%）。权重改走内容寻址的 `init` blob
+    （sha = `manifest.init_weights_fp`），模型恢复读 worker 自己解析出来的
+    `job_dir/init_weights.json`（见 `_resolve_weights`）。
+
+    Adam 动量（`opt.pt`）是本 tar 的**唯一**成员：它是跨轮续跑真正需要的、**每轮必变**的
+    状态。红线（minimize-payload §1.3-1）：不得量化/降质/裁剪。
+
+    ⚠ **形状是与 hub 的同一份契约**：`run_job` 的 restore 段按「有没有 `model.pt`」分流
+    （有 = 旧形状走 legacy 路径，无 = 新形状读 `init_weights.json`），所以本函数的成员
+    集合与那条分流**必须同 commit 改**（§5 E1+E2 的硬约束）。
     """
     import io
 
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:") as tf:
-        for name in ("model.pt", "opt.pt"):
-            p = src_dir / name
-            if p.exists():
-                tf.add(p, arcname=name)
+        p = src_dir / "opt.pt"
+        if p.exists():
+            tf.add(p, arcname="opt.pt")
     return buf.getvalue()
 
 

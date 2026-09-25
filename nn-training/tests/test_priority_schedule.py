@@ -8,7 +8,8 @@
     ——「claim 之后下载了 5 分钟」不算掉队（R2-C1：拿 claim 起算会把慢链路误判成慢计算，
     于是多开备份把本来就慢的链路压得更死）。
   * `GET /jobs/peek`：**不认领**（无租约、无副作用、不动游标、不改可领取池）R1-4；
-    halt 达令同行（承接退役的轮询面）；离线课的能力闸照旧。
+    halt 达令同行（承接退役的轮询面）；**归属闸照旧**（2026-09-25 判据从「课程 mode」
+    换成「job 自己的 `role`」：模式易变、归属是 job 的属性）。
   * `claim(mode="backup")`（R1-1 + R2-3）：无租约、**不动原持有者的租约**、
     授权「你的回传不吃 403」、不产 reclaim / 不进 stale 名单。
   * `abandon`（R1-3）：租约即释 + 零 reclaim（否则 TTL 过期 ⇒ 三度冻结成毒包）。
@@ -52,6 +53,7 @@ from common.protocol import (
     PRIORITY_LOW,
     PRIORITY_MEDIUM,
     PRIORITY_NONE,
+    ROLE_OFFLINE,
     STRAGGLER_SEC,
     JobCancelledError,
     ProtocolError,
@@ -345,16 +347,46 @@ def test_peek_registers_worker_for_avoidance_chain(tmp_path: Path) -> None:
         assert hub.active_worker_count() == 3
 
 
-def test_peek_carries_halt_and_offline_gate(tmp_path: Path) -> None:
-    """halt 达令同行（承接退役的轮询面）；离线课仍只对带标 worker 可见。"""
-    _publish_online_course(tmp_path)
+def test_peek_carries_halt_and_role_gate(tmp_path: Path) -> None:
+    """halt 达令同行；**归属闸**按 job 自己的 `role` 生效、与课程当前 mode 无关。
+
+    2026-09-25 语义变更（plan/online-offline-role-routing §2.2）：旧口径读「课程当前 mode」
+    ⇒ 切一次模式，历史 job 的归属就跳一次（事故本体）。现在两道闸**正交**：
+      * 归属闸（job 级，`manifest.role`）—— 在线课里的整段 job 也轮不到在线盘；
+      * 停摆闸（课程级，mode）—— 离线课对在线盘整个隐身（旧语义的「停摆」保留），
+        但它**不**能替在线盘放行归属不符的活。
+    """
+    _publish_online_course(tmp_path)  # JID：在线盘的活（_mini_manifest 无 kind ⇒ ppo）
+    OFF = "k" * 16
+    job_root = tmp_path / "c5-gae" / "remote-jobs"
+    _JobStore(job_root, tmp_path / "c5-gae" / "training_log.jsonl").publish(
+        OFF,
+        {**_mini_manifest(OFF), "kind": "run", "role": "offline"},  # 整段 job = 离线盘的活
+        b"PK\x03\x04fake",
+    )
     with _hub(tmp_path) as (base, hub):
-        assert hub.set_mode("c5-gae", COURSE_MODE_OFFLINE) is True
         plain = W.peek_jobs(base, TOKEN, worker_id="plain")
-        assert plain == ([], False), "无标：离线课不可见（也不是谁都领得到的池子）"
-        marked = W.peek_jobs(base, TOKEN, worker_id="marked", offline_ok=True)
-        assert marked is not None and [c["job_id"] for c in marked[0]] == [JID]
+        assert plain is not None and [c["job_id"] for c in plain[0]] == [JID], (
+            "在线盘只看到在线盘的活"
+        )
+        marked = W.peek_jobs(base, TOKEN, worker_id="marked", role=ROLE_OFFLINE)
+        assert marked is not None and [c["job_id"] for c in marked[0]] == [OFF], (
+            "离线盘只看到离线盘的活（一个盘一种任务）"
+        )
+        # ★ 按 id 直领同样受闸（F5：「只挡 peek」是漏的，claim 才是租约写入点）
+        assert W.claim_job(base, TOKEN, OFF, worker_id="plain") is None
+        # 停摆闸（课程级）：切成离线 ⇒ 在线盘连**在线归属**的 JID 也看不到
+        assert hub.set_mode("c5-gae", COURSE_MODE_OFFLINE) is True
+        parked = W.peek_jobs(base, TOKEN, worker_id="plain")
+        assert parked is not None and parked[0] == [], "离线课对在线盘整体隐身（停摆）"
+        # 离线盘：停摆放行，但归属闸仍拦着在线归属的 JID（两道闸正交）
+        off_view = W.peek_jobs(base, TOKEN, worker_id="marked", role=ROLE_OFFLINE)
+        assert off_view is not None and [c["job_id"] for c in off_view[0]] == [OFF]
+        # 切回在线 ⇒ 恢复；离线盘领走自己那份（停在盘上的活不丢）
         assert hub.set_mode("c5-gae", COURSE_MODE_ONLINE) is True
+        again = W.peek_jobs(base, TOKEN, worker_id="plain")
+        assert again is not None and [c["job_id"] for c in again[0]] == [JID]
+        assert W.claim_job(base, TOKEN, OFF, worker_id="marked", role=ROLE_OFFLINE) is not None
         hub.set_halt(True)  # 停机达令（空 course = 全课程默认）
         halted = W.peek_jobs(base, TOKEN, worker_id="w1")
         assert halted is not None and halted[1] is True
@@ -629,18 +661,27 @@ def test_cancel_watcher_sets_event_only_on_landed(monkeypatch: pytest.MonkeyPatc
 
     stop2 = threading.Event()
     never = threading.Event()
-    monkeypatch.setattr(JL, "job_status", lambda *a, **k: {"landed": False}, raising=True)
+    polled = threading.Event()
+
+    def _status(*_a, **_k) -> dict:
+        polled.set()  # 探针已问过一次（**事件**）
+        return {"landed": False}
+
+    monkeypatch.setattr(JL, "job_status", _status, raising=True)
+    saw_poll: list[bool] = []
 
     def _stop_soon() -> None:
-        import time as _t
-
-        _t.sleep(0.1)
+        # 事件驱动（2026-09-24）：等**观察到探针真的问过一次**再停 —— 原来 `sleep(0.1)`
+        # 是赌 watcher 线程已经跑起来了（满载时固定的 0.1s 会先到点 ⇒ 它一次都没轮到
+        # 就被停，用例变成空转）。10s 只是挂起兜底。
+        saw_poll.append(polled.wait(10.0))
         stop2.set()
 
     threading.Thread(target=_stop_soon, daemon=True).start()
     W.start_cancel_watcher(
         "http://hub", "tok", JID, stop2, never, interval=0.01, log=lambda m: None
     ).join(timeout=5)
+    assert saw_poll and saw_poll[0], "取消探针 10s 内一次都没问到（用例前提失效）"
     assert never.is_set() is False, "landed=False 永不取消（ready 更不取消）"
 
 

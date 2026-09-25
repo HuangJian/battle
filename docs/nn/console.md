@@ -7,6 +7,230 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §15 「在线/离线」收敛成**一颗开关**（本机配置 + hub 模式一起动）+ 第三源漂移徽标（2026-09-24）
+
+用户 2026-09-24 报障：「离线课切回在线后，Kaggle 仍因缺 bun 拒单」。实锤：切在线后派出的 job
+仍是 `"kind": "run"`（`tmp/<课>/remote-jobs/<job_id>/manifest.json`）。
+
+### 根因：**同名不同义的两个「离线」只有一半能被那颗开关改到**
+
+| # | 事实 | 出处 |
+|---|---|---|
+| F1 | 两个「离线」：hub 派发模式（`setCourseMode`：只写意图 + POST hub）与训练模式（`trainModeKnobs` → `courses.<课>.rollout_src=run` + `run_iters=-1`） | `server/actions/course-mode.ts`、`stack/specs.ts::trainModeKnobs` |
+| F2 | 两者**各只有一条入口且不是同一条**：训练模式**只有开课**能写（运行中往 `start` 动作发 `trainMode` 被 400 拒），hub 模式有独立开关 ⇒ 只翻后者必然半状态 | `course-lifecycle.ts`、`api/route.ts` |
+| F3 | job 的 kind 只有一个判定点：有 `plan_bytes` ⇒ `run`；有 `rollout_spec` ⇒ `iter`；都无 ⇒ `ppo` | `rl/loop_steps.py::publish_job` 调用点 |
+| F4 | bun 只在**云机自己跑 rollout** 时需要（`kind in ("iter","run")` ⇒ `run_iter_rollout` ⇒ `resolve_bun`） | `remote/worker.py`、`remote/iter_rollout.py::resolve_bun` |
+
+### 决定（plan/train-mode-hot-switch.plan.md L1）
+
+**那颗开关 = 唯一的模式开关**：`setCourseMode` ① 先落本机配置（同步写盘，python 每轮读的那份
+rl-config）② 再推 hub 镜像。机制上不需要重开课：`_rollout_source` / `_run_segment_iters` **每轮**
+各读一次 `dist_common.load_dist_config()`（`rl/loop_round_steps.py`），且控制台从不把
+`--rollout-src` / `--run-iters` 传进 trainer argv（唯一传 `--run-iters` 的是 bundle 导出，只读快照）。
+
+**语义边界（已写进回执文案）**：
+
+| 档位 | 配置 | job kind | 节点要 bun 吗 |
+|---|---|---|---|
+| 离线 | `rollout_src=run` + `run_iters=-1` | `run`（本机不跑这门课：云机取包接手） | **要**（这是 `run` 的定义，不是 bug） |
+| 在线（缺省） | 两键**都不在**（缺席 = local） | `ppo`（本机采样，云机只算 PPO） | 不要 |
+| 在线 + 显式 `node` | `rollout_src=node` | `iter`（整轮上云） | 要（显式选择的代价） |
+
+### 写面收口（**边界就是三个函数**）
+
+| 函数 | 干什么 | 写 `courses.<课>` 吗 |
+|---|---|---|
+| `pushCourseMode` | 只推 hub + 落意图（开课 / 停课 / 回灌共用） | **绝不** |
+| `setCourseMode` | 那颗开关 = `applyTrainModeToConfig` + `pushCourseMode` | 写 |
+| `applyTrainModeToConfig`（`actions/train-mode.ts`） | 唯一写面：域换算仍走 `trainModeKnobs` | 写 |
+| `restoreCourseModes`（起 hub 回灌） | 只推 hub —— 回灌不是用户动作 | **绝不** |
+
+为什么必须拆：`pushHubMode`（开课/停课的 hub 推送，带 3×2s 重试）**就是循环调 `setCourseMode` 的**
+⇒ 往那颗开关里塞写配置，会让**开课重复写盘 1–3 次**、还会把**停课**误翻译成「云机接手」。
+
+### ★ 生效时机是**段边界**，不是「下一轮」
+
+`run_iters<0`（离线缺省）时一段 job 覆盖 `it → end_it`（**课程末**），训练侧阻塞在
+`_remote_ppo(..., wait_timeout_sec=8h)`。**切回在线在该段结束前完全无效果**——而这一段可能就是
+课程剩下的全部。**不做抢占**是有意的（已经在飞的段不取消），所以回执与文档都写明了这条，
+并指向立刻断开的把手：**停课 / 暂停**。
+
+推论（运维口径）：想「只停 hub 派发、本机继续训」请用**暂停键**，切离线现在的含义是
+**这门课交给云机接手**（本机在下一个轮边界干净收官，不再有「段等待」；云机取任务包跑）。
+
+### node 往返：`offline` 会把显式选的 `node` 覆写掉
+
+`offline` 写 `rollout_src=run` 是覆写，于是「显式选过 `node` 的课」一下离线再切回在线时那格已经
+没了 ⇒ 静默降成 `rl.rollout_src`/`local`（开课路径没这个问题：弹窗每次重选）。
+**修法**：切离线前把**当前生效的非 run 源**记进 `console-state.courseRolloutSrc`（只记 `node`/`auto`——
+`local` 是缺省，记了是噪声），切回在线时取回并回执「rollout 位置恢复为 node」。
+
+### 第三源：漂移徽标现在覆盖 `rl-config` 那一格
+
+`modeDriftOf` 原来只比「控制台意图 vs hub 事实」。用户报障的现场是**第三个源**没跟上：
+hub 与意图都回到在线，而配置里还是 `run` ⇒ 下一段照样派 `kind=run`。
+
+* 取数：`stateView.courseRolloutSrc`（逐课 `resolveRolloutSrc(cfg, c)`，纯函数 over 内存 cfg、零 IO）
+  —— `modes.rolloutSrc` 只有**查看课程**一个，而矩阵是逐行全课表，非当前课程的行需要自己那一格。
+* 渲染：`modeDrift.configRun`（仅当 `intent === 'online'` 且配置是 `run`）⇒ 行上多一个
+  「配置仍是离线（云机接手）」徽标，与「意图未生效」各说各的（不混成一个）。无意图 / 旧视图 ⇒ `null`，**不编**。
+
+### 验证
+
+* `tests/course-mode.test.ts`：切离线落两键 / 切在线两键都不在 / **node 往返回到 node** / `local` 不留痕 /
+hub 不可达时配置照样落 / 文案含「本机不跑这门课」「不需要 bun」「轮边界生效」；
+* 逆测试：`pushCourseMode` 与 `restoreCourseModes` **一个字都不写** rl-config（防 F9 复发）；
+* 跨语言钉子：`nn-training/tests/test_run_segment.py` 钉「控制台写的两键 ↔ `_rollout_source`/`_run_segment_iters`」；
+* 既有源码断言跟着写面搬家（`tests/train-mode-offline.test.ts`、`tests/rollout-src-launch-option.test.ts`）。
+
+---
+## §14 离线课三处状态各说各话：hub 事实 vs 控制台意图 + 0 回传不说「回传中」（2026-09-23）
+
+用户 2026-09-23 报障（新开三个离线课 `x20-demo-mix` / `x20-firstkill` / `x20-terminal`，
+**三个都还没被云机取走**）：总览里两个「回传中」一个「等回传」；课程区 `demo-mix` 显示
+「在训」而另两个「离线（只收回传）」；操作列混着「恢复中」/「切离线」；`demo-mix` 还显示
+「等远端回传，队列 1 在飞 0」且有「切离线」却**没有**「导出任务包」。
+
+### 根因：三处独立，但都源于「同一个事实有两个源，而只有一个源在说话」
+
+| # | 现象 | 机制 |
+|---|---|---|
+| ① | 课程区 `demo-mix`「在训」/另两个「离线」 | **hub 那份 mode 才是矩阵的事实源**（`overview.rows[].offline`）。三处意图（`rl-config` 的 `rollout_src=run`、`console-state.courseModes`、`training-enabled.txt`）都是 offline，但 hub 里 `demo-mix` 是 `online` ⇒ 它走本地 13 步词（`等远端回传` + 「在训」），另两个走离线段 |
+| ② | 顶栏两个「回传中」 | pill 的离线口径只有**一个 bit**（`offline: Set<string>` = hub 说不说它离线）。「回传中」是一个**进度断言**，而 hub 侧离线段进度表（`/admin/offline`）是空的 ⇒ 旧口径把「云机还没取走包」说成「回传中」 |
+| ③ | 操作列「切离线」vs「恢复在线」 | 与 ① 同步（同一个 `overview.offline` 决定按钮文案）——**不是**第二个开关 |
+| ③b | 「恢复中」 | 它是 `pauseBadge`（暂停意图 vs 训练进程实际回执的**待生效**徽标），与「切离线/恢复在线」是两个不同元素，不在同一列打架 |
+
+①背后的真凶（hub 日志实锤）：hub 刚重启时 `courses=[]`，而控制台的「意图回灌」跑在
+**第一次顺带扫描之前** ⇒ 九条 `POST /admin/courses` 全 400；三个离线课各自靠「开课时的
+有界重试（3×2s）」去赌发现时机，**恰有一门输掉**（最后一次重试与发现同一秒）⇒ 该课静默留在
+`online`，而面板一路显示「在训 / 切离线」（操作员以为自己开的是离线课）。
+
+### 修法（四处，两层各治一半）
+
+1. **hub 侧**（`remote/hub_server.py`）：`POST /admin/courses` 在「课不在表里」时**按需真扫一次**
+   （`discover(force=True)` 跳 2s 间隔闸）再试；模式非法**不**扫盘（直接 400）。全文 →
+   `docs/nn/remote-transport.md §36`。
+2. **控制台回灌**（`server/actions/course-mode.ts`）：`restoreCourseModes` 每课**有界重试**
+   （3×2s），但**只对「hub 还不认识这门课」这一类错误**重试 —— hub 连不上重试没有意义，
+   而回灌挂在 `start` 的返回路径上，白等 N×2s 只会让「起 hub」变慢。
+3. **矩阵把两个源摆在一起**（`view/course-matrix.ts::modeDriftOf` + `CourseMatrix.tsx`）：
+   新事实 `stateView.courseModeIntents`（控制台那份**意图**，权威）与 `overview`（hub 事实）
+   比对 → 行上出「意图未生效」徽标，悬停写清「意图是 X、hub 现在当 Y」与两条恢复路径
+   （点该行开关再推一次 / 点「hubServer」回灌全部）。`null` = 无从判断（没有意图 / hub 不认识
+   它 / hub 不可达）—— **不把「不知道」画成「没问题」**，那正是这一类事故的成因。
+4. **pill 的离线口径升级**（`view/loop-queue.ts::coursePills`）：入参由「离线课名集」改为整个
+   hub 总览视图（`offline` + `offlineRounds` + `hubSeen`）⇒ 三态：
+
+   | 判据 | 状态 | tone |
+   |---|---|---|
+   | 意图 ≠ hub 事实（两个源都读到） | **意图未生效** | y |
+   | hub 离线 ∧ 已回传 > 0 | **回传中** | g |
+   | hub 离线 ∧ **0 回传** | **等云机** | y |
+
+   优先级仍在确定性事实（已暂停 / 已收官 / 已中止 / 待进程）之后，再之后才是本地「在等什么」四态。
+
+### 「导出任务包」与「下载」的区别（用户同日提问）
+
+* **导出任务包** = *生成* `<课>.zip`：只读快照（不与训练的 per-course 锁抢），随时可导，页面每 5s
+  轮询 `taskBundleInfo`；**离线开课时会自动跑一次**，且先把旧包挪进 `tmp/<课>/stale-packs/`
+  （代码可能已变）⇒ 导出完成前 hub 的 `/offline/task-pack` 404，云机会一直等新包（预期行为）。
+* **下载** = *取走*已生成的那一份（浏览器直连 `/api/taskBundle?course=`，带 attachment 文件名）
+  → 手工上传 Colab / Kaggle。包不存在时显示的是**「未导出」**，不是灰按钮。
+
+### ★ 同日修订（用户指令）：「下载」链接删掉，导出键兼取回；导入改真按键
+
+用户反馈原话：「歧义太大！去掉「下载」链接，点击导出按键就是下载已经生成的任务包；导入也要改成
+按键形式，文本设为「导入训练结果」；「恢复在线」按键，文本改为「切换成在线」」。
+
+上一条把两者分开讲，正是因为它们是**两个源上的两件事**（生成 = 控制台后台一次性快照；
+取回 = 浏览器导航到 `/api/taskBundle`）；但从操作员看，它们是**同一个意图**——「我要拿到这个包」。
+两个控件把动作挂在一个他看不见的内部状态上：包未生成时「下载」**不在页面上**（只剩一句「未导出」），
+「点了导出却没反应」于是成了最常见的误判。
+
+* **现在只有一个键**，**点一下的结局恒定 = 拿到包**：已有包 ⇒ 直接下载；尚未生成 ⇒ 先起导出，
+  轮询（复用那条 5s `taskBundleInfo`，不另起通道）看到包出现后**自动下载**。
+* **导入改真按键**（`导入训练结果`）：旧形状是 `<label>` 包隐藏 `<input type=file>`——看着像键、
+  语义不是键（键盘/SR 读出来是文件控件），而「导入产物」也没说清导入的是**云机跑出来的训练结果**
+  （权重/opt/指标），不是一份配置。
+* **「恢复在线」→「切换成在线」**（课程矩阵 hub 侧开关）：原词与**暂停**那个开关的「恢复」撞车
+  （两个开关并列在同一列，且都叫「恢复」），改成与「切离线」成对的叫法。
+* **任务包键的可见性放宽**（用户指令）：「导出任务包 / 导入训练结果」原判据只看 **hub 事实**
+  （`ov.offline`）——那形成死锁：离线课**需要包**才能上云跑，而键却要等 hub 先接受离线模式才
+  出现；回灌失配时（hub 仍当它在线，见 `modeDrift`）那个键正好不见了——**最需要它的一刻**。
+  现判据 = `hub 标离线 ∨ 意图离线`（纯函数层新字段 `CourseMatrixRow.bundleOps`；两个源都离线时
+  仍只有一个键，明确在线的课不给）。
+* 门禁：dashboard `1121 passed / 0 fail`（新增：导出键无 `<a>`/`/api/taskBundle?` 链接、导入是真
+  `<button>` 且文案、SSR 显「未导出」、任务包键只给离线课、`bundleOps` 五态（含失配时给、
+  明确在线不给）、漂移徽标上屏/不上屏、hub 开关新文案）。
+
+### 门禁
+
+`dashboard`：`bun run typecheck` + `bun run test` **1112 passed / 0 fail**（新增：pill 的「等云机」
+与「意图未生效」两例、`modeDriftOf` 四例、「有界重试只对该类错误 + 连不上不重试」两例）。
+
+---
+
+## §13 云腿 eval 在表上看不见：读方只认 `eval_summary`，而两腿都没并它（2026-09-23）
+
+> 全文（根因 / 修法 / 单调规则 / 为什么不在读方合成）在
+> `docs/nn/remote-transport.md §35`——控制台侧只记这条链的读方事实。
+
+用户实测：`x20-demo-mix` 云腿 **it50–110、每 5 轮 400 局、`node=cloud`** 的读数全在
+`tmp/<课>/eval_log.jsonl` 里（`wver` 逐轮不同、轨迹连贯），控制台**一栏不显示**。
+
+根因不在读方（读方没错），在写方：数据是**逐局行在、summary 行缺**，而本文件涉及的四个读方
+全部**只建 summary 条目**：
+
+| 读方 | 位置 | 建条目的条件 |
+|---|---|---|
+| 指标表 eval 列 / 配对基准 / 衍生列（`avgTicks` 等） | `server/iters.ts::readEvalSummaries` | `event === 'eval_summary'` |
+| eval 逐局弹窗 | `iters.ts::readLatestEvalGames` | 先按 summary 找最大 iter |
+| 开课回执「起点-基线对照」 | `stack/kickstart-receipt.ts` | 同 |
+| 门判据趋势（python 侧） | `rl/gate_check.py::read_trend_rows` | 同 |
+
+⇒ 修在写方（回传/导入合并时把 summary 一并并进去，单调规则），**读方一字未动**。
+
+---
+## §12 两腿同字段收口：`demo_bc`/`kickstart` 进搬运表 + 逐局画像改取**单局 manifest**（2026-09-23）
+
+承 §10。两个都是「同一张表两条腿不可比」的缺口，都在**数据源**上，不是显示层。
+
+### ① 搬运表漏了 `agg.kickstart` / `agg.demo_bc`（用户发现「demo_bc 全缺」）
+
+产物行的 `agg` 里**一直有**这两个键（`remote/worker.py` 的 `result.agg`），只是
+`remote/artifacts.LEDGER_FIELDS` 没收 ⇒ 回传/导入腿的 `iteration` 行永远看不到 demo 与
+缰绳遥测，而本机腿（`rl/events.write_iteration`）逐轮都写。**不是没跑，是记丢了。**
+修法一行两键；口径不变：`_dig` 给 None 就不写（旧包无此键 → 留空），真 0 照写。
+
+### ② 「耗时/击杀/残血/道具」四列的逐局画像取错了源（**四列永远空**的真因）
+
+链路上游：`readRoundActuals`（`iters.ts`）优先读 `<traj>/it<N>/per-game.json`，而那个文件由落地方
+按 `row.perGame` 写。实测 `x20-demo-mix` 的 `remote-jobs/offline/a477f…/it-124/row.json`：
+
+```
+report = {games, shards, winRate, totalSamples, totalTicks, elapsedSec,
+          outcomes, dimMeans, scoreStats}        ← 没有 perGame
+find tmp -name per-game.json → 0 个
+```
+
+根因：`iter_rollout` 当时喂给 `compact_per_game` 的是 `collect_reports` = 每局的
+**`_rl_report.json`（批次摘要）**——它的 `stage`/`seed` 是**复数数组** `stages`/`seeds`、
+没有 `kills` 这些单局字段 ⇒ `compact_per_game` 的「无 (stage,seed) 就丢」把**每一行**都丢掉
+⇒ `perGame` 恒 `[]` ⇒ 落地方不写 `per-game.json` ⇒ 四列**从没进过回传体**。
+
+修法：新增 `iter_rollout.collect_shard_manifests(shard_dirs)`，逐局画像改从 **shard 目录的单局
+`manifest.json`** 生成——那是唯一带齐那套字段、且与读方/本机腿（读方按 manifest 扫描）**同名同形**
+的来源（无需翻译层）。`scan_shard_dirs` 已保证每个 shard 目录都有它；真缺了只少一局读数并计数。
+轮末日志加 `…s｜逐局画像 N/M 行`（0 行时响亮提示）。
+
+**留白**：已落地的旧轮（如 it-048…124）`row.json` 里根本没有 `perGame` ⇒ 这四列对它们**仍然空**
+（刻意不写 0：缺数据与真零不是一回事）；重打包后的新轮才有。
+
+**验证**：`test_deliver_zip`（两键搬进 + 缺键不留 0）、`test_remote_iter`（单局 manifest 收得下、
+四列原始字段齐、批次摘要的反例、缺/坏 manifest 只少一局）、dashboard `server-iters-round-actuals`
+（读方聚合）。提交 `7130f880`。
+
+---
 ## §10 回传腿也点亮控制台（同步写 per-game.json + 课程账本行）（2026-09-22）
 
 用户之问（2026-09-22）：「**如果是云机通过网络请求回传，会算这些数据回显吗？**」——

@@ -9,7 +9,9 @@ Contents (all pure functions / constants — no torch, no ppo import):
   * `data_fp` — sha256 over sorted shard relative paths + each manifest's
     {wver, stage, seed} (D1; local recompute == manifest value on both sides)
   * payload zip pack/unpack (shard dirs + manifest.json), with `payload_sha256`
-  * idempotency key = (runId, it, init_weights_fp, data_fp) (D1)
+  * idempotency key = (runId, course_fp, it, init_weights_fp, data_fp) (D1 +
+    2026-09-24 job 身份事故：**课程身份必须进键**，否则单进程多课程下两门课共享一个
+    job_id ⇒ hub 的首匹配路由让两个 trainer 读到同一份结果）
   * per-job deterministic numpy seed = hash(runId, it, init_weights_fp) (D5)
   * result envelope validation (weights_json + opt_tar + agg + commit_echo)
   * auth: bearer token header name (D9)
@@ -57,6 +59,37 @@ WORKER_ID_HEADER = "X-Worker-Id"
 #: 「还在轮询」的判定窗口（秒）：超过它没再出现过就当该 worker 已离场，不参与判定。
 #: （2026-09-22 P3 竞速退役：本窗口现在**只**服务 `active_worker_count()` 的避让链。）
 WORKER_SEEN_WINDOW_SEC = 180.0
+
+# ---- 归属角色（role）：本会话属于哪块盘（2026-09-25，语义从「能力」升级）----
+# 原来是「能力声明」（`--offline` = 我能自主跑完整段），现在是**归属声明**。
+# 为什么必须换（2026-09-25 云机接错盘的事故，plan/online-offline-role-routing.plan.md §1）：
+# `kind=run`（整段）**确实**由 tailscale 盘跑得动——它有能力；事故正是「有能力的盘接了不
+# 属于它的整段 job」。能力闸拦不住接错盘 ⇒ 判据必须是**角色**（该由哪块盘执行）。
+# 头名与取值**保持逐字节不变**（`X-Battle-Offline: 1`）：混合部署里旧 hub/旧 worker 用同一
+# 份字面量，改名只会让带标 worker 在旧 hub 上静默掉线，而“归属判断是否正确”与名字无关。
+#: 角色头（peek / claim / 轮询面通用）：带它 = 本会话属于**离线盘**；缺席 = 在线盘。
+ROLE_HEADER = "X-Battle-Offline"
+#: 头的规范值（历史值 `1`；解析同时接受角色字面量 `offline`）。
+ROLE_HEADER_VALUE = "1"
+ROLE_OFFLINE = "offline"
+ROLE_ONLINE = "online"
+#: 两个角色（`manifest.role` 与请求方角色的合法值域，两处共用）。
+ROLES: tuple[str, ...] = (ROLE_ONLINE, ROLE_OFFLINE)
+#: job manifest 里的归属键名。
+ROLE_FIELD = "role"
+
+
+def role_from_header(raw: object) -> str:
+    """角色头 → 角色（缺头 / 空 / `0` / `false` 一律 = **online**）。
+
+    只认白名单真值（不做「非空即有」这类宽松推断）：判错的方向是明确的——低估只是少一个
+    能领离线活的人（看得见：队列不降），高估会让在线盘的 worker 领走离线盘的活（看不见）。
+    旧 worker 从不带这条头 ⇒ 它们一律按 online 处理（行为与今天一致）。
+    """
+    val = str(raw or "").strip().lower()
+    if val == ROLE_OFFLINE or val in ("1", "true", "yes", "on"):
+        return ROLE_OFFLINE
+    return ROLE_ONLINE
 
 
 def rotation_order(order: Sequence[str], start: str | None) -> list[str]:
@@ -362,6 +395,35 @@ MANIFEST_OPTIONAL_DEFAULTS: dict[str, object] = {
     "slim": False,
 }
 
+# ------------------------------------------------------------------ 归属（role）
+# job 的「该由哪块盘执行」是 **job 自己的属性**（2026-09-25，本节头的 plan）：发布时定死、
+# 此后不随课程 mode 漂移。为什么必须落成字段而不是每次现算：mode 是易变的（hub 内存表、
+# 控制台可热切），用它当判据 ⇒ 切一次模式，历史 job 的归属就跳一次（事故现场：两小时前
+# 缺 bun 被拒的那个 `kind=run` job 在切成在线后被 tailscale 盘领走）。
+#: 合法 kind 全集（`validate_manifest` 与 `KIND_ROLES` 共用一份；穷举由用例钉住）。
+MANIFEST_KINDS: tuple[str, ...] = ("ppo", "bc", "iter", "run")
+#: kind → 归属角色（**唯一**映射）：`run`（整段自主）= 离线盘的活；其余（逐轮/整轮/BC）
+#: 都是在线盘的活。加新 kind 必须同时给出角色，否则 `test_role_routing` 当场红。
+KIND_ROLES: dict[str, str] = {
+    "run": ROLE_OFFLINE,
+    "iter": ROLE_ONLINE,
+    "ppo": ROLE_ONLINE,
+    "bc": ROLE_ONLINE,
+}
+
+
+def role_of(manifest: Mapping[str, object]) -> str:
+    """job 归属角色：`manifest.role` 优先；缺失/非法 ⇒ 按 `kind` 兜底。
+
+    **不拒单**：旧 job（发布早于本字段）不能因为缺字段变孤儿（它们的 kind 就已经说明了
+    归属）；未知 kind 也回落 online（`validate_manifest` 已在入口挡掉未知 kind）。
+    """
+    raw = str(manifest.get(ROLE_FIELD) or "").strip().lower()
+    if raw in ROLES:
+        return raw
+    return KIND_ROLES.get(str(manifest.get("kind") or "ppo"), ROLE_ONLINE)
+
+
 # ------------------------------------------------------------------ M3: kind=iter
 # plan/remote-wire-remediation.plan.md §5.2：新 job kind =「一整轮」——节点自己跑
 # rollout（bun 调 exporter 产 shard）→ 接着跑既有 PPO 链路 → 只回传权重/report。
@@ -411,11 +473,17 @@ RUN_NODE_LABEL = "run"
 #: `--run-max-iters` 再降；计划的 end_it 一律按其与 iters_total 的交集钳制。
 RUN_MAX_ITERS_HARD_CAP = 500
 
-#: M2 blob 载荷名（pull 端点 `GET /jobs/{id}/blob?name=opt|ref|demo`；push body `blobs`）。
+#: M2 blob 载荷名（pull 端点 `GET /jobs/{id}/blob?name=opt|ref|demo|init`；push body `blobs`）。
 BLOB_OPT = "opt"
 BLOB_REF = "ref"
 BLOB_DEMO = "demo"
-BLOB_NAMES: tuple[str, ...] = (BLOB_OPT, BLOB_REF, BLOB_DEMO)
+#: opt-blob-diet（2026-09-24，plan/opt-blob-diet.plan.md §3.1）：初始权重的内容寻址段。
+#: `sha` = `manifest.init_weights_fp`（**复用既有字段，不新增**——它就是 `sha256_file(args.out)`）；
+#: `raw` = 该轮 `init_weights.json` 原样字节（= hub `args.out` = 上游 `result.weights_json`
+#: 解码后的字节）。产出方 = hub（`publish_job`），消费方 = worker（restore 的模型权重 +
+#: kind=iter 的 rollout）。**取代** tar 里那份重复的 `model.pt`。
+BLOB_INIT = "init"
+BLOB_NAMES: tuple[str, ...] = (BLOB_OPT, BLOB_REF, BLOB_DEMO, BLOB_INIT)
 
 
 class ProtocolError(ValueError):
@@ -428,6 +496,32 @@ class RetryableError(Exception):
     与 ProtocolError 的分界（2026-09-05，DECISIONS §340 补充 3）：4xx/字段级校验
     失败 = 确定性拒绝（重试无意义）；网络层异常与 5xx = 可重试。worker_loop 捕获
     RetryableError 后主动 release 租约回池，立即可重领（不再干等 30min 过期）。"""
+
+
+class UnreapableChildError(RetryableError):
+    """子进程 SIGKILL 之后仍然回收不了（D 状态 / 挂住的挂载点）——**机器**的病，不是内容的错。
+
+    事实基础：`kill()` 只是把信号递进去；子进程若卡在**不可中断**的 IO 里，要等那个系统调用
+    返回才真的死。`platform_utils` 的处置是**有界**回收（`reap_bounded`，预算 = `KILL_REAP_SEC`），
+    收不回来就把这个子进程记进账（`keep_unreaped`）并抛本异常 —— 绝不能在那里等下去
+    （2026-09-25 云机「卡死机器半天」的现场就是一条线程永远停在 `waitpid` 上：92 条线程里一条
+    不返回，整轮就再也收不齐，而日志里什么都看不出来）。
+
+    为什么它**必须**与普通超时分开（两腿都按这个分类分岔，2026-09-25 用户口径）：
+
+      * 普通超时（`TimeoutExpired`）= 这一局慢（内容/负载）：它有自己的出路 —— 原地重跑同一
+        argv，几次之后仍失败就是**这一轮的确定性失败**（响亮记一笔，读数少一局）；
+      * 收不了尸 = 机器卡住：旧写者**可能还活着** ⇒ 在同一个输出目录上重跑就是两个写者写同一
+        份产出（半截/交错）⇒ 静默错数据。所以腿侧的处置只能是**轮内重投**：先把它半截的产出
+        删干净，再与其它没产出的局一起投。判成本轮失败则是把机器的问题记在内容头上
+        （worker 侧 `report_job_failure` ⇒ hub 落终局 ⇒ 停腿 ⇒ 反过来把云机停掉）。
+
+    继承 `RetryableError` 是因为它在语义上就是「可重试、非确定性拒绝」；**重试的粒度由各腿自己
+    定**（rollout 腿 `remote/iter_rollout.run_iter_rollout`、eval 腿
+    `remote/offline_eval.run_cloud_eval` 都是在轮内重投，只补没产出的局；缺省不限，各自留一个
+    操作员上限 env）。worker_loop 里还有一条同名的兜底分支（还租约 + 立即重领，不报失败、
+    不冷却）。
+    """
 
 
 class JobCancelledError(RuntimeError):
@@ -496,8 +590,11 @@ def normalize_manifest(m: dict) -> dict:
     if not isinstance(m, dict):
         raise ProtocolError(f"manifest 必须是对象，收到 {type(m).__name__}")
     kind = str(m.get("kind", "ppo") or "ppo")
-    if kind not in ("ppo", "bc", "iter", "run"):
-        raise ProtocolError(f"kind={kind!r} 未知（只认 'ppo'|'bc'|'iter'|'run'）——拒收")
+    if kind not in MANIFEST_KINDS:
+        # 允许列表与 `KIND_ROLES` 同一份（`MANIFEST_KINDS`）——加 kind 而忘了给角色会当场红。
+        raise ProtocolError(
+            f"kind={kind!r} 未知（只认 {'|'.join(repr(k) for k in MANIFEST_KINDS)}）——拒收"
+        )
     required = [
         k for k in MANIFEST_REQUIRED if not (kind == "bc" and k in MANIFEST_BC_EXEMPT)
     ]
@@ -566,6 +663,11 @@ def normalize_manifest(m: dict) -> dict:
                 f"kind=iter 要求 mode='per-tick'，收到 {out['mode']!r}（M3 只上云 per-tick rollout）"
             )
         out["rollout"] = validate_rollout_spec(out["rollout"])
+    # 归属字段（2026-09-25）：**可选**（旧 job 没有它 ⇒ `role_of` 按 kind 兜底），
+    # 但一旦存在就必须合法——一个拼错的 role 静默变成 online 正是那种「看不见」的失败。
+    role_raw = out.get(ROLE_FIELD)
+    if role_raw not in (None, "") and str(role_raw) not in ROLES:
+        raise ProtocolError(f"{ROLE_FIELD}={role_raw!r} 未知（只认 {list(ROLES)}）——拒收")
     if not isinstance(out.get("normalize_ret", False), bool):
         raise ProtocolError(f"normalize_ret 必须是 bool，收到 {out.get('normalize_ret')!r}")
     if not isinstance(out.get("kickstart_kl", 0.0), (int, float)) or isinstance(
@@ -897,25 +999,20 @@ OFFLINE_RESUME_BLOB_PATH = "/offline/resume/blob"
 #: 锚点字节端点允许的文件名（白名单：拒路径穿越与「借名读别的文件」）。
 OFFLINE_RESUME_BLOB_NAMES = ("weights.json", "opt.tar", "row.json")
 
-# ---- worker 能力自报（离线训练模式，2026-09-19）----
-# 离线课（`kind="run"` 整段）与在线课（逐轮）对 worker 的要求不同：前者要求节点
-# **自己跑完整段**（rollout + PPO 全在节点、计划随 job 走）。所以「谁能领离线课」不能靠
-# 猜，要由 worker 自己声明能力。用户口径：离线模式「也支持带特别标识的云端 worker 在线
-# 领取」——标识语义 = 能力，不是课程绑定（课程与 worker 正交：带标 worker 仍可领在线课）。
-#: 能力头（轮询/peek 面）：`X-Battle-Offline: 1` = 本会话能自主跑完整段。
-OFFLINE_CAP_HEADER = "X-Battle-Offline"
-#: 头的规范值（写 1；解析放宽到常见真值）。
-OFFLINE_CAP_VALUE = "1"
-
-
-def has_offline_capability(raw: object) -> bool:
-    """能力头 → 布尔。缺头 / 空 / `0` / `false` 一律 = **无能力**。
-
-    只认白名单真值（不做「非空即有」这类宽松推断）：能力判错的方向是明确的——
-    低估只是少一个 worker 领离线课（看得见：队列不降），高估会让一个只会逐轮的
-    worker 领走整段 job 并卡在那里（看不见）。
-    """
-    return str(raw or "").strip().lower() in ("1", "true", "yes", "on")
+#: 离线**任务清单 + 领取租约**（hub → 云机，2026-09-25，`plan/offline-task-discovery.plan.md`）：
+#: 云机不再要在 notebook 里写死课程名——`GET /offline/tasks` 列出可领的离线任务
+#: （课程 + 包 + 新鲜度 + 谁在跑），云机 `claim` → 取包 → 跑完 → `release`，跑完一批再问一次。
+OFFLINE_TASKS_PATH = "/offline/tasks"
+OFFLINE_CLAIM_PATH = "/offline/claim"
+OFFLINE_HEARTBEAT_PATH = "/offline/heartbeat"
+OFFLINE_RELEASE_PATH = "/offline/release"
+#: 清单协议版本：云机据此判断能力（老 hub 没有这个端点 ⇒ 404 ⇒ 降级到 `CFG.course`）。
+OFFLINE_QUEUE_VERSION = 1
+#: 离线租约时长（秒）。为什么与逐轮 job 的 `CLAIM_TTL_SEC = 300` 不同档：离线段是**小时级**
+#: （取包 + 跑完整段 + 打包交付），300s 只会让心跳压力白增。心跳周期沿用 `HEARTBEAT_SEC = 60`。
+#: 租约只管**领取资格**，不参与回传（`/offline/artifact` 一行不改）：回传靠 `(run_id, it)`
+#: 首写幂等兜底 ⇒ 租约过期/被接管**不会**让已跑完的产物作废。
+OFFLINE_LEASE_TTL_SEC = 900
 
 _RUN_ID_OK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 #: run_id 长度上限（它同时是 hub 侧目录名，必须短且有界）。
@@ -964,10 +1061,24 @@ PAYLOAD_PERTURB_NAME = "payload.perturb"
 PAYLOAD_XZ_PRESET: Literal[3] = 3
 
 
+def is_content_sha(s: str) -> bool:
+    """内容寻址 sha 的形状判据（64 位小写 hex）。
+
+    用途是**把哨兵值挡在 blob 路径之外**：`manifest.init_weights_fp` 在 BC job 与
+    「全新 run 的首轮」上是 `"bc"`（`hub_client.publish_job`：`init_weights_path` 为空
+    ⇒ `"bc"`）。拿它去查节点缓存 / 发 `GET ?name=init` 必然落空，会被归成「确定性
+    缺失」⇒ `ProtocolError` ⇒ 停腿 / 永久 428（plan/opt-blob-diet.plan.md §3.2，评审 F2）。
+
+    单一实现：worker（`_resolve_weights`）、push 腿（`push_client`）、节点服务端
+    （`worker_server._submit`）三处共用，避免各写一份形状判据。
+    """
+    return len(s) == 64 and all(c in "0123456789abcdef" for c in s)
+
+
 def blob_path(job_dir: str | Path, name: str) -> Path:
     """内容寻址 blob 在 job 目录内的落盘名（M2；hub 写、pull worker 取）。
 
-    `name` ∈ BLOB_NAMES（opt/ref/demo）。raw 字节原样存（无 base64），sha 即键。
+    `name` ∈ BLOB_NAMES（opt/ref/demo/init）。raw 字节原样存（无 base64），sha 即键。
     """
     if name not in BLOB_NAMES:
         raise ProtocolError(f"未知 blob 名 {name!r}（只接受 {BLOB_NAMES}）")
@@ -1123,10 +1234,25 @@ def unpack_payload(payload_path: str | Path, dest: str | Path) -> tuple[dict, li
 
 
 def idempotency_key(manifest: dict) -> tuple:
-    """D1 幂等键 = (runId, it, init_weights_fp, data_fp)。云 worker 崩溃重拉同一
-    job 时按此去重；hub 账本记 job 状态，不重复发包已完成 job。"""
+    """D1 幂等键 = (runId, **course_fp**, it, init_weights_fp, data_fp)。云 worker 崩溃
+    重拉同一 job 时按此去重；hub 账本记 job 状态，不重复发包已完成 job。
+
+    ★ `course_fp` 是 2026-09-24 加的（plan/job-identity-collision.plan.md）：原来的四个
+    分量在**单进程多课程**（`--serve` 共享 trainer）下会**跨课程全同** —— runId 是进程级
+    （`rl/queue.py::RUN_ID`）、`init_weights_fp` 同 warm-start、`data_fp` 只哈希
+    (shard 目录名, wver, stage, seed) 而 per-stage seed 与课程无关、`it` 同轮 ⇒ 两门课
+    发布出**同一个 job_id**，hub 的 per-job 路由取「第一个匹配」⇒ 两个 trainer 读到同一份
+    结果，各自落进自己的 `args.out`（静默污染，且让下一轮 `init_weights_fp` 继续相同 ⇒ 自持）。
+
+    为什么用 `course_fp` 而不是课程名：它是 manifest 必填字段、语义就是「课程身份」，
+    且在**同一进程内恒定**（课程字节装载时冻结：`rl/config.py::course_from_args` 落
+    `args.course_frozen_bytes`）⇒ mid-run 热加载编辑不会换 job id、不产生孤儿。
+    ⚠ 它是**文件血缘**哈希，不是语料身份（那是 `corpus_fp`），也不等于 hub 的课程键
+    （`<discover-root>/<目录名>`，= 课程文件 stem）——本键只用来分开身份，不用来路由。
+    """
     return (
         manifest["runId"],
+        manifest["course_fp"],
         manifest["it"],
         manifest["init_weights_fp"],
         manifest["data_fp"],
@@ -1141,6 +1267,76 @@ def job_id(manifest: dict) -> str:
         h.update(str(part).encode("utf-8"))
         h.update(b"\x00")
     return h.hexdigest()[:16]
+
+
+#: 兄弟课程的 job 目录相对 job_root 的形状（发布端守卫的扫描面）：
+#: `<job_root>/../*/remote-jobs/*/manifest.json`。抽成常量是为了让「扫描面」只有一处定义。
+SIBLING_MANIFEST_GLOB = "*/remote-jobs/*/manifest.json"
+
+
+def collision_rows(job_root: str | Path, manifest: dict) -> list[dict]:
+    """发布端守卫的**唯一判据**：这份 job 的身份是否已被**别的课程**占用。
+
+    返回命中的行 `[{course, job_id, manifest_path}, …]`（空 = 放行）。
+
+    为什么需要它（2026-09-24 事故，plan/job-identity-collision.plan.md）：同一个 job 身份
+    落在两个 store 时，hub 的 per-job 路由无法区分（`course_of` 只能拒答），两个 trainer
+    会读到同一份结果 ⇒ **静默污染**。`idempotency_key` 进了 `course_fp` 之后正常发布已经
+    撞不出来，所以这道守卫是**哨兵**：手写 manifest、回灌历史 job、跨 hub 搬目录、回滚代码
+    再前进等旁路一旦制造出同身份，必须在**发布那一刻**响亮拒发，而不是等污染被看出来。
+
+    ★ 判据 = 「**完整幂等键**相同 且 落在**别的 store**」——**不是**「四分量相同且 course_fp
+    不同」：后者正是本事故的配置，而它在 `course_fp` 进键之后是**合法**的（两门课各有各的
+    id），拿它当判据会把已经修好的场景全部拒掉。
+
+    成本：一次 glob（兄弟课程数 × 每课 `remote-jobs/` 现存 job 目录数）+ **至多 1 次**
+    manifest 读取（见下方快速闸）。扫描根不存在（节点侧/自定义 `job_root` 布局）⇒ 返回空：
+    它是 best-effort 哨兵，扫不到就放过，绝不误伤。
+
+    ⚠ 快速闸的前提是「**目录名 == 该 manifest 的 `job_id`**」——这是**发布端的写入不变量**
+    （`publish_job` 先算 id、再以它为目录名），也是 `course_of` 认归属用的同一条。手写 manifest
+    若把某个键写进**别的**目录名，它连路由都对不上（`wait_job(<该键的 id>)` 会 404），
+    不构成本守卫要防的「两个 store 抢同一身份」。
+    """
+    root = Path(job_root)
+    own_course = root.parent.name  # `<root>/<课程>/remote-jobs` ⇒ 本课目录名
+    try:
+        want = idempotency_key(manifest)
+    except KeyError:
+        return []  # 本份 manifest 自己就不完整（调用方另有校验）——守卫不越权报错
+    want_jid = job_id(manifest)
+    scan_root = root.parent.parent
+    hits: list[dict] = []
+    for mp in sorted(scan_root.glob(SIBLING_MANIFEST_GLOB)):
+        # ★ 快速闸（E0 实测驱动）：job 身份 = `job_id`，而 **job 目录名就是 job_id**
+        # （`course_of` 的归属证据用的是同一条不变量）⇒ 只有**同名目录**才可能是冲突。
+        # 没有这一闸，每次发布要把兄弟课程的全部 manifest 都 `json.loads` 一遍：
+        # 真语料 82 份（含内联 opt_init/course 全文）实测 **399ms/次**；加上它 = 一次
+        # glob + 至多 1 次读取。
+        if mp.parent.name != want_jid:
+            continue
+        # 相对扫描根取第一段 = 课程目录名（不靠数 `parents`，免得扫描面一变就错位）
+        course = mp.relative_to(scan_root).parts[0]
+        if course == own_course:
+            continue  # 本课自己的历史 job（含重发布的那一份）——不算冲突
+        try:
+            other = json.loads(mp.read_text(encoding="utf-8"))
+            if not isinstance(other, dict):
+                continue
+            same = idempotency_key(other) == want
+        except (OSError, ValueError, KeyError):
+            # 缺键（更旧/手写的 manifest）或读不动 ⇒ 跳过这一行：守卫不把「读不懂」
+            # 升级成「拒发」，否则一次历史残留就能挡住整条腿。
+            continue
+        if same:
+            hits.append(
+                {
+                    "course": course,
+                    "job_id": str(other.get("job_id") or mp.parent.name),
+                    "manifest_path": str(mp),
+                }
+            )
+    return hits
 
 
 def job_seed(run_id: str, it: int, init_weights_fp: str) -> str:

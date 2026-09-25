@@ -57,6 +57,7 @@ if str(ROOT) not in sys.path:
 
 import remote.hub.boot as boot_mod
 import remote.hub.http_face as face_mod
+import remote.hub.task_pack as pack_mod
 from remote import hub_server as hs
 from remote.hub.queue import _HubQueue
 from remote.hub.store import _JobStore
@@ -67,9 +68,10 @@ ENTRY = NN_ROOT / "remote" / "hub_server.py"
 HOMES = {
     "remote/hub/http_face.py": face_mod,
     "remote/hub/boot.py": boot_mod,
+    "remote/hub/task_pack.py": pack_mod,
 }
 
-#: 搬走的 11 个成员 → 它的唯一新家（`hub_server` 一律**不得**再定义其中任何一个）。
+#: 搬走的 21 个成员 → 它的唯一新家（`hub_server` 一律**不得**再定义其中任何一个）。
 MOVED: dict[str, str] = {
     "CF_SOURCE_HEADER": "remote/hub/http_face.py",
     "SEND_TIMEOUT_SEC": "remote/hub/http_face.py",
@@ -82,6 +84,19 @@ MOVED: dict[str, str] = {
     "as_hub": "remote/hub/boot.py",
     "make_server": "remote/hub/boot.py",
     "main": "remote/hub/boot.py",
+    # 任务包链（2026-09-25 合并 origin 时随门面一起暴露）：实现住 `hub/task_pack.py`——
+    # 它是**叶子模块**，因为 `hub/offline.py`（路由）与 `hub/queue_offline.py`（队列）两侧都要
+    # 这批判据；挂在 http_face（L5）上会让两个低层读者向上 import（账本当场红）。
+    "TASK_PACK_INDEX_NAME": "remote/hub/task_pack.py",
+    "TASK_PACK_MISS_TRIGGER_LIMIT": "remote/hub/task_pack.py",
+    "TASK_PACK_STALE_THROTTLE_SEC": "remote/hub/task_pack.py",
+    "TASK_PACK_STALE_TRIGGER_LIMIT": "remote/hub/task_pack.py",
+    "_TASK_PACK_TRIGGERS": "remote/hub/task_pack.py",
+    "decide_task_pack": "remote/hub/task_pack.py",
+    "reset_task_pack_miss_triggers": "remote/hub/task_pack.py",
+    "reset_task_pack_triggers": "remote/hub/task_pack.py",
+    "task_pack_stale_reason": "remote/hub/task_pack.py",
+    "trigger_task_bundle_export": "remote/hub/task_pack.py",
 }
 
 #: 门面的对外承诺集（= `hub_server.__all__`，逐字对账）。
@@ -94,15 +109,25 @@ FACADE = (
     "SEND_CHUNK",
     "SEND_LOG_MIN_BYTES",
     "SEND_TIMEOUT_SEC",
+    "TASK_PACK_INDEX_NAME",
+    "TASK_PACK_MISS_TRIGGER_LIMIT",
+    "TASK_PACK_STALE_THROTTLE_SEC",
+    "TASK_PACK_STALE_TRIGGER_LIMIT",
     "_AuthGuard",
     "_HubQueue",
     "_JobStore",
+    "_TASK_PACK_TRIGGERS",
     "_is_ip_literal",
     "_is_loopback",
     "as_hub",
     "attributed_source",
+    "decide_task_pack",
     "main",
     "make_server",
+    "reset_task_pack_miss_triggers",
+    "reset_task_pack_triggers",
+    "task_pack_stale_reason",
+    "trigger_task_bundle_export",
 )
 
 #: 入口**不许**挂的实现用顶层 import（它们随实现搬走了；再出现就是搬漏）。
@@ -144,8 +169,8 @@ def _own_defs(rel: str) -> set[str]:
 
 
 def test_every_moved_member_lives_in_exactly_one_new_home() -> None:
-    """★ 11 个成员各住一家：定义在声明的家里，另两家**一个也不许有**（双向）。"""
-    assert len(MOVED) == 11, len(MOVED)
+    """★ 21 个成员各住一家：定义在声明的家里，另几家**一个也不许有**（双向）。"""
+    assert len(MOVED) == 21, len(MOVED)
     for name, home in MOVED.items():
         assert name in _own_defs(home), f"{home} 少了 {name}"
         for other in ("remote/hub_server.py", *HOMES):
@@ -195,7 +220,7 @@ def test_the_facade_surface_is_exactly_the_declared_closed_set() -> None:
     """★ 门面是**闭集**：`__all__` 恰好等于名单（比集合不比顺序 —— ruff 的 RUF022 会自己排
     `__all__`），无重复，且每个名字都真的解析得出来（写了一个不存在的名字 = 门面在骗人）。"""
     assert sorted(hs.__all__) == sorted(FACADE), (sorted(set(hs.__all__) ^ set(FACADE)),)
-    assert len(hs.__all__) == len(set(hs.__all__)) == 17, hs.__all__
+    assert len(hs.__all__) == len(set(hs.__all__)) == 27, hs.__all__
     for name in FACADE:
         assert getattr(hs, name, None) is not None, f"门面缺 {name}"
 
@@ -284,7 +309,7 @@ def test_the_layers_are_the_arithmetic_result() -> None:
 
 
 def test_the_two_new_modules_only_import_downward() -> None:
-    """两个新模块都不 import 入口，也不互相反向依赖（`boot → http_face` 单向）。"""
+    """三个新家（`http_face` / `boot` / `task_pack`）都不 import 入口，也不反向依赖。"""
     for rel in HOMES:
         mods: set[str] = set()
         for node in ast.walk(_tree(rel)):
@@ -352,7 +377,11 @@ def test_the_entry_module_still_looks_like_an_entry() -> None:
     `serve_forever` 只在引导链里（`main` 的尾巴）；入口自己提它一个字都算搬漏。
     """
     lines = ENTRY.read_text(encoding="utf-8").splitlines()
-    assert len(lines) < 130, len(lines)
+    # ★ 2026-09-25（并入 `origin/goal-nn`）：上限 130 → 160。长出来的是**名字清单**而不是实现
+    # ——任务包新鲜度门那 10 个名字（`TASK_PACK_*` / `decide_task_pack` / `trigger_task_bundle_export`…）
+    # 按老规矩逐个自别名 re-export，每个名字三行。判据的本意（“入口里没有实现”）由上面
+    # `__all__` 与实现模块的存在性断言共同担保，本行只挡“实现被搬回来”。
+    assert len(lines) < 160, len(lines)
     assert not any("serve_forever" in ln for ln in lines), "入口自己起了服务（副作用）"
     boot_lines = (ROOT / "remote/hub/boot.py").read_text(encoding="utf-8").splitlines()
     assert sum("serve_forever" in ln for ln in boot_lines) == 1, "起服务应当只有一处（main 的尾巴）"

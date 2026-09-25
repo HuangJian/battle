@@ -235,6 +235,7 @@ def test_simultaneous_starts_leave_exactly_one_instance(tmp_path: Path) -> None:
             alive = sum(1 for p, _ in procs if p.poll() is None)
             if alive <= 1:
                 break
+            # sleep-ok: 轮询步长（等的是「其余进程已退」这个状态，deadline 只当挂起兜底）
             time.sleep(0.3)
         if alive == 0:
             outs = "; ".join(_tail(lg) for _, lg in procs)
@@ -309,6 +310,7 @@ def _wait_ready(
             return False
         if lock.exists() and _ping_ok(port):
             return True
+        # sleep-ok: 轮询步长（等的是「锁 + 端口都就绪」这个状态，budget 只当挂起兜底）
         time.sleep(0.25)
     return False
 
@@ -384,5 +386,6 @@ def _wait_lock_owner(lock: Path, proc: subprocess.Popen, budget: float = 20.0) -
     while time.time() < deadline:
         if il.read_lock(str(lock))[0] == pid:
             return pid
+        # sleep-ok: 轮询步长（等的是「锁文件里已经写着这个 pid」这个状态，deadline 只是兜底）
         time.sleep(0.1)
     return None

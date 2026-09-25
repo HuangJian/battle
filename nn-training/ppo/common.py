@@ -540,7 +540,7 @@ def _ppo_load(ckpt_path: str | None, model, opt) -> int:
 
 # ---------------- minibatch chunking ----------------
 def chunk_episodes(episodes: list[dict], mb: int, shuffle: bool = True) -> list[dict]:
-    """Split per-episode dicts into fixed-size minibatch chunks (last chunk ragged).
+    """Split per-episode dicts into fixed-size minibatch chunks (every chunk exactly `mb`).
 
     GAE is computed per-episode BEFORE chunking; chunks are only an update-
     granularity unit (bounds activation memory, adds gradient steps).
@@ -552,6 +552,16 @@ def chunk_episodes(episodes: list[dict], mb: int, shuffle: bool = True) -> list[
     GAE/adv/ret 是逐 transition 存储的，重排不改变任何数学（on-policy 正确性
     不受影响）；RNG 用全局 np.random（由 main 播种，可复现）。
     shuffle=False 保留旧行为（逐字节一致，供对照实验）。
+
+    mb 对齐（2026-09-23，见 docs/nn.progress.md §140）：重排路径**丢弃尾部
+    `n % mb` 步**，让每个 chunk 恰为 `mb` 行（旧行为是末块 ragged）。为什么值这个
+    代价：ragged 末块每个 epoch 只用一次，中间隔着几十个满块步 ⇒ XLA 的程序缓存
+    必然把它挤出、下一 epoch 重新编译（真机实录 12~13s × epochs；it98 一轮 83.8s
+    里 50s 是它，而满块稳态只要 0.179s/步）。形状恒定后图签名恒为 `B{mb}`，编译
+    只付一次。丢的是重排序列的**尾部** ⇒ 均匀随机子集，无偏；`n % mb == 0` 时
+    逐字节不变（`idx` 的抽样顺序未动）。
+    归一化（load_episodes_common 的 adv/ret）覆盖**整池**（含被丢的 <mb 步）——
+    刻意保持「归一化粒度 = 本轮池」的既有语义，不因丢弃而改变。
     """
     if not shuffle or len(episodes) <= 1:
         out: list[dict] = []
@@ -564,7 +574,20 @@ def chunk_episodes(episodes: list[dict], mb: int, shuffle: bool = True) -> list[
     flat = {k: np.concatenate([e[k] for e in episodes], axis=0) for k in keys}
     n = flat["obs"].shape[0]
     idx = np.random.permutation(n)
-    return [{k: v[idx[s : s + mb]] for k, v in flat.items()} for s in range(0, n, mb)]
+    n_used = (n // mb) * mb
+    if n_used == 0:
+        # 池子不足一个 mb（只在小样本冒烟/单测里出现）：保留旧的一块 ragged。
+        # 丢弃会得到 0 个 chunk ⇒ 静默不训练，比多付一次小 shape 编译糟得多。
+        log(f"[chunk] WARN 池子 {n} 步 < mb={mb} ⇒ 不裁剪（单独一块 ragged）")
+        n_used = n
+    elif n_used < n:
+        log(
+            f"[chunk] mb 对齐：pooled={n} 步 → 丢弃尾部 {n - n_used} 步"
+            f"（{n_used // mb} 块 × {mb}；无 ragged 末块 ⇒ XLA 图签名恒定、不重编）"
+        )
+    return [
+        {k: v[idx[s : s + mb]] for k, v in flat.items()} for s in range(0, n_used, mb)
+    ]
 
 
 # ---------------- episode loading skeleton (ppo / ppo_intent 共用) ----------------
@@ -608,6 +631,7 @@ def load_episodes_common(
     load_log_every: int = 128,
     normalize_adv: bool = True,
     per_stage_quota: int = 0,
+    bundle: Any = None,
 ) -> list[dict]:
     """Discover shards → per-shard GAE → global normalize → episode dicts.
 
@@ -620,7 +644,13 @@ def load_episodes_common(
     shards = discover_shards(data_root, need_files)
     if not shards:
         raise SystemExit(f"[{label}] no {shard_kind} shards found under {data_root}")
-    log(f"[{label}] loaded {len(shards)} {shard_kind} shards from {data_root}")
+    # ★ 2026-09-24（日志节食）：这四行是「装载阶段」的读数集合，传给 bundle 时攒进调用方
+    # 的那**一行**（见 `log_bundle.py`）；bundle=None 时逐字节保持原输出（goal/intent/
+    # 本机三条线共用本函数，行为不变）。
+    if bundle is not None:
+        bundle.add("shards", f"{len(shards)} {shard_kind} ← {data_root}")
+    else:
+        log(f"[{label}] loaded {len(shards)} {shard_kind} shards from {data_root}")
 
     episodes: list[dict] = []
     seen_steps: dict[int, int] = {}  # stage → 已收步数（仅 per_stage_quota > 0 时启用）
@@ -628,7 +658,10 @@ def load_episodes_common(
     t_load = time.time()
     for k, sd in enumerate(shards):
         if k > 0 and k % load_log_every == 0:
-            log(f"[{label}] loading shards {k}/{len(shards)} ({time.time() - t_load:.0f}s)")
+            if bundle is not None:
+                bundle.add("装载", f"{k}/{len(shards)} {time.time() - t_load:.0f}s")
+            else:
+                log(f"[{label}] loading shards {k}/{len(shards)} ({time.time() - t_load:.0f}s)")
         d = shard_loader(sd)
         N = d["obs"].shape[0]
         if N == 0:
@@ -654,10 +687,15 @@ def load_episodes_common(
         episode["ret"] = ret.astype(np.float32)
         episodes.append(episode)
 
-    log(
-        f"[{label}] shard IO + {gae_name} done for {len(episodes)} episodes "
+    _io_line = (
+        f"shard IO + {gae_name} done for {len(episodes)} episodes "
         f"({time.time() - t_load:.0f}s)"
     )
+    if bundle is not None:
+        bundle.add("装载", f"{len(shards)}/{len(shards)} {time.time() - t_load:.0f}s")
+        bundle.add("episodes", f"{len(episodes)} eps（{gae_name} 已算）")
+    else:
+        log(f"[{label}] {_io_line}")
     if per_stage_quota > 0:
         total = sum(seen_steps.values())
         short = {
@@ -665,11 +703,17 @@ def load_episodes_common(
             for s, n in sorted(seen_steps.items())
             if n < per_stage_quota
         }
-        log(
-            f"[{label}] per-stage quota={per_stage_quota}: kept {total} steps / "
+        _quota_line = (
+            f"per-stage quota={per_stage_quota}: kept {total} steps / "
             f"{len(seen_steps)} stages, dropped {dropped_shards} shards"
-            + (f"; SHORT (供给不足) stages={short}" if short else "")
         )
+        if bundle is not None:
+            bundle.add("配额", _quota_line)
+            if short:
+                # 供给不足是**要看的**（缺哪关、缺多少），攒行不能把它埋掉 ⇒ 单独一句。
+                bundle.note(f"SHORT (供给不足) stages={short}")
+        else:
+            log(f"[{label}] {_quota_line}" + (f"; SHORT (供给不足) stages={short}" if short else ""))
     # P1-7（2026-09-02）：adv 归一化粒度参数化（normalize_adv=False 供
     # --adv-norm none 对照实验；默认 True 保持全局归一现状）。
     if normalize_adv:

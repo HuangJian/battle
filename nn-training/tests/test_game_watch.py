@@ -92,6 +92,20 @@ def test_progress_lines_are_throttled_by_time() -> None:
     assert game_watch.progress_due(2, 328, now=11.0, last_at=10.0, every=1.0) is True
 
 
+def test_stall_line_names_the_games_still_in_flight() -> None:
+    """整轮停滞行：多久没结算 + 还有几局在飞 + **是哪几局**（2026-09-25 那 890s 里最缺的）。
+
+    为什么它必须存在：进度行与心跳都挂在「有局结算」上 ⇒ 所有线程一起卡住时它们一起哑，
+    日志从「5s 的 270/336」直接跳到 890s 之后的下一行 —— 停机时没人能说出「谁卡住了」。
+    """
+    assert game_watch.STALL_WARN_SEC >= 2 * game_watch.PROGRESS_LOG_SEC  # 心跳都停了才算停滞
+    line = game_watch.stall_line("rollout", 65, 890.4, ["s2/d1", "s2/d2", "s2/d3", "s2/d4"])
+    assert "整轮停滞" in line and "890s" in line and "65 局在飞" in line
+    assert "s2/d1、s2/d2、s2/d3…" in line  # 前三个点名、其余只计数（日志不刷屏）
+    assert game_watch.stall_line("eval", 0, 130.0, []).count("在飞") == 1
+    assert "stall_line" in game_watch.__all__
+
+
 def test_rollout_progress_paths_use_the_shared_cadence() -> None:
     """两条 rollout 腿都走 `progress_due`：各自留一份「每 N 局一句」就等于刷屏会重现。"""
     for rel in ("remote/iter_rollout.py", "rl/queue_local.py"):

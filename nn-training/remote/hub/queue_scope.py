@@ -49,6 +49,8 @@ class QueueScopeMixin(QueuePeer):
     """域混入：见模块头部。"""
 
     # ---- 由组合类 `__init__` / 兄弟簇提供（混入只见 `self`；声明一律是裸注解）----
+    #: jid -> 同时持有它的课程（≥2 = 身份歧义）：`course_of` 去重打点 + 拒答理由用它。
+    _ambiguous: dict[str, list[str]]
     _auth_blocked_until: dict[str, float]
     _auth_fail: dict[str, int]
     _discover_root: Path | None
@@ -157,15 +159,22 @@ class QueueScopeMixin(QueuePeer):
         return list(self._order)
 
     def course_of(self, job_id: str) -> str | None:
-        """job_id → 归属课程；**找不到返回 None**（不是空串！）。
+        """job_id → 归属课程；**找不到 / 归属有歧义都返回 None**（不是空串！）。
 
-        为什么必须用 None 区分：单课程队列（以及旧单课程 hub）的课程名**就是空串**
+        为什么必须用 None 区分「找不到」：单课程队列（以及旧单课程 hub）的课程名**就是空串**
         （`tmp/nocourse` 那套约定）。用空串兼作「找不到」会把它当成找不到 —— 直接后果
         是 `/jobs/peek` 刚列出的 job 立刻解析不到归属，handler 打到哨兵路径上 500
         （2026-09-18 白测一次的真故障）。
 
         为什么搜目录而不是搜账本：账本行里没有课程字段（磁盘契约不变），而
         `<job_root>/<job_id>/` 的存在本身就是归属证据，且是一次 fs 调用 —— 比读账本便宜。
+
+        ★ **归属唯一才认**（2026-09-24 job 身份事故，plan/job-identity-collision.plan.md §3.2）：
+        ≥2 门课都认识同一个 jid ⇒ 返回 None + 打一行「身份歧义」。原来「取第一个匹配」正是
+        事故的**静默通道**：worker 领的是 l3 的候选，hub 把它路由到 l1 的副本（租约/结果/
+        账本各写一份，而两个 trainer 的 `wait_job` 也读到同一份 result ⇒ 权重互串）。
+        歧义一律拒答的代价是「响亮失败」（job 作用域入口 404、训练轮等到超时），
+        收益是「绝不污染」—— 这个方向是刻意选的。
         """
         jid = str(job_id or "")
         if not jid:
@@ -173,14 +182,20 @@ class QueueScopeMixin(QueuePeer):
         hit = self._locate_cache.get(jid)
         if hit is not None:
             return hit
+        holders: list[str] = []
         for course in self._order:
             try:
                 if (self._stores[course].job_root / jid).exists():
-                    self._locate_cache[jid] = course
-                    return course
+                    holders.append(course)
             except OSError:
                 continue
-        return None
+        if not holders:
+            return None
+        if len(holders) > 1:
+            self._note_ambiguous(jid, holders)
+            return None  # 歧义**绝不**进缓存（一次歧义会变成永久归属）
+        self._locate_cache[jid] = holders[0]
+        return holders[0]
 
     def _store_of(self, job_id: str) -> _JobStore | None:
         course = self.course_of(job_id)
@@ -203,6 +218,7 @@ class QueueScopeMixin(QueuePeer):
         if m not in COURSE_MODES:
             return False
         self._modes[course] = m
+        self._sync_parked(course)
         return True
 
     def active_courses(self) -> int:
@@ -220,3 +236,48 @@ class QueueScopeMixin(QueuePeer):
                 n += 1
         return n
 
+    def _sync_parked(self, course: str) -> None:
+        """把课程模式推给 store（停摆闸的唯一输入；`_JobStore.role_blocked` 读它）。"""
+        st = self._stores.get(course)
+        if st is not None:
+            st.parked = self.mode_of(course) == COURSE_MODE_OFFLINE
+
+    def _note_ambiguous(self, job_id: str, holders: list[str]) -> None:
+        """歧义只报一次（按 jid 去重）：`course_of` 在每个 job 作用域请求上都会跑，
+        逐次打点会把日志刷爆，反而埋掉真正要看的那一行。"""
+        if job_id in self._ambiguous:
+            return
+        self._ambiguous[job_id] = list(holders)
+        print(
+            f"[hub-server] ⚠ job 身份歧义：job={job_id} 同时存在于 "
+            f"{'、'.join(holders)} —— 一律拒答（不猜归属）。"
+            "多半是旧 runId/旧代码留下的同名 job 目录：清掉非当前 runId 的 "
+            "`remote-jobs/<jid>`（或换 runId 重跑）即可。",
+            flush=True,
+        )
+
+    def ambiguous_jids(self) -> dict[str, list[str]]:
+        """同一 jid 挂在 ≥2 门课上的清单（`/admin/queue` 的观测面，只读）。
+
+        与 `course_of` 同一个事实（「哪几门课持有这个 jid」）的两个方向：那边按 jid 逐课探，
+        这边按课程列目录一次扫完 —— 观测面要的是**全量**，且不在派发热路径上。
+        单课程（<2 门）恒空，零开销。
+        """
+        if len(self._order) < 2:
+            return {}
+        seen: dict[str, list[str]] = {}
+        for course in self._order:
+            try:
+                entries = list(self._stores[course].job_root.iterdir())
+            except OSError:
+                continue
+            for p in entries:
+                # 「是 job 目录」的判据与调度面同源：带 manifest.json（`.extra_tmp`、
+                # `offline/` 这些 job_root 下的旁系目录一律不算）。
+                try:
+                    if p.name.startswith(".") or not (p / "manifest.json").exists():
+                        continue
+                except OSError:
+                    continue
+                seen.setdefault(p.name, []).append(course)
+        return {jid: cs for jid, cs in sorted(seen.items()) if len(cs) > 1}

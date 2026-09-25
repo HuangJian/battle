@@ -34,7 +34,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import platform_utils as pu
 from common import game_watch
+from common.protocol import UnreapableChildError
 from platform_utils import cpu_worker_slots
 from remote import offline_eval, serve_pool
 from remote.artifacts import ArtifactStore, sha256_bytes, sha256_file
@@ -95,11 +97,13 @@ def test_default_slots_is_the_same_formula_as_rollout(monkeypatch: pytest.Monkey
     两者都使用 max(cores − 4, cores × 0.8)；只要留两三个核给数据回传任务就够了」。
     老口径（先扣 `plan.workers` 再卡 64）在 96 核云机上只给 64 = 白扔三成。
     """
+    # 核数的单一来源是 `platform_utils.effective_cores`（容器配额/亲和掩码 > os.cpu_count，
+    # 见它那节的 224/96 事故）——所以这里 patch 它，而不是 `os.cpu_count`。
     for cores, want in ((96, 92), (40, 36), (16, 12), (8, 6), (4, 3), (1, 1)):
-        monkeypatch.setattr(offline_eval.os, "cpu_count", lambda c=cores: c)
+        monkeypatch.setattr(pu, "effective_cores", lambda c=cores: c)
         assert offline_eval.default_slots() == want, f"{cores} 核 → {want}"
         assert offline_eval.default_slots() == cpu_worker_slots(cores), "与 rollout 同一口径"
-    monkeypatch.setattr(offline_eval.os, "cpu_count", lambda: None)
+    monkeypatch.setattr(pu, "effective_cores", lambda: 1)
     assert offline_eval.default_slots() == 1, "读不到核数也要能跑"
 
 
@@ -242,6 +246,9 @@ def test_run_cloud_eval_survives_single_game_failures(
     assert out["failed"] == 2 and out["settled"] == 2
     assert any("失败" in m for m in logs)
     assert eval_jsonl.exists()
+    # **内容面**的失败是这一轮该留的出路：它是确定的（同 argv 连跑 3 次都 rc≠0）⇒ 记成失败、
+    # 整轮照常收尾，绝不该被「机器级停滞」的轮内重投当成可重试的机器问题反复重投。
+    assert not any("整轮重投" in m for m in logs), logs
 
 
 def test_run_cloud_eval_watchdog_caps_and_retries_in_place(
@@ -304,6 +311,123 @@ def test_run_cloud_eval_watchdog_caps_and_retries_in_place(
         log=log,
     )
     assert timeouts == [120.0, 120.0], timeouts
+
+
+def test_unreapable_eval_game_is_resubmitted_in_round_never_failing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ eval 腿的**机器级停滞**（子进程 SIGKILL 之后收不了尸）也在**轮内重投**。
+
+    与 rollout 腿同一口径（用户 2026-09-25）：不许睡、不许空转烧配额、不许把机器的问题
+    记在内容头上（`report_job_failure` ⇒ hub 落终局 ⇒ 停腿 ⇒ 反过来把云机停掉）。四条一起钉：
+
+      ① 整轮**不许出现失败记录**：这一局是机器卡住，不是内容错；
+      ② **只补没评的局**：已落账的局一个字不重跑（不许空转烧配额）；
+      ③ **不原地重跑**那一局（同一个 `eval-<it>-s<stage>-d<seed>/` 上可能还有活写者 ⇒
+         半截/交错的 `_eval_report.json`）——重投前先把它的半截产出清掉；
+      ④ 重投之后整轮**跑成**（summary 照落账），且走的是**轮内**（不消耗调用方的重试预算）。
+    """
+    calls: list[tuple[int, int]] = []
+    course = _course(eval_stages="0-1", eval_games_per_stage=2, eval_every=1)
+    plan = eval_plan_of(course)
+    toy = eval_pairs(plan, 1)  # 语料里的一个真 (stage,seed)（种子是 860001+，不是 1）
+    target = toy[-1]
+
+    def flaky(bun, weights, stage, seed, out_dir, max_ticks, difficulty, timeout, wver, **kw):
+        calls.append((stage, seed))
+        if (stage, seed) == target and calls.count(target) == 1:
+            raise UnreapableChildError(
+                f"eval 单局超时（5.0s > 硬顶 5s）：s{stage}/d{seed}；且 SIGKILL 之后 5s 内回收不了"
+            )
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        return {
+            "win": stage == 0,
+            "cleared": True,
+            "outcome": "win" if stage == 0 else "loss",
+            "elapsedSec": 0.01,
+            "stage": stage,
+            "seed": seed,
+        }
+
+    monkeypatch.setattr(offline_eval, "run_local_eval_game", flaky)
+    monkeypatch.setattr(offline_eval, "find_bun", lambda *_a, **_k: "bun")
+    eval_jsonl = tmp_path / "eval_log.jsonl"
+    logs, log = _logs()
+    t0 = time.time()
+    out = run_cloud_eval(
+        plan=plan,
+        it=1,
+        weights_path=_weights(tmp_path),
+        eval_jsonl=eval_jsonl,
+        ts_root=_ts_root(tmp_path),
+        work_dir=tmp_path / "work",
+        course=course,
+        bun="bun",
+        slots=3,
+        log=log,
+    )
+    assert time.time() - t0 < 30.0, "重投必须先有界、再谈次数（不许把线程按在等上面）"
+    # ④ 整轮跑成：4 局全落账 + 一份 summary（读数不能因为机器抖一下就缺口）
+    assert out["ran"] and out["settled"] == 4 and out["games"] == 4, out
+    assert out["roundRetries"] == 1, out
+    # ① 机器的问题不许记成失败
+    assert out["failed"] == 0, out
+    assert not any(f"局 ({target[0]},{target[1]}) 失败" in m for m in logs), logs
+    # ③ 重投那一行要可见（带「只补几局」），并且点名了「机器级停滞」
+    assert any(
+        "整轮重投第 1 次" in m and "机器级停滞" in m and "只补这 1 局" in m for m in logs
+    ), logs
+    # ② 只补没评的那一局：其余三局各跑一次，那一局两次
+    assert calls.count(target) == 2, calls
+    assert sorted(c for c in calls if c != target) == [p for p in toy if p != target], calls
+    rows = [json.loads(ln) for ln in eval_jsonl.read_text(encoding="utf-8").splitlines()]
+    assert len([r for r in rows if r["event"] == "eval"]) == 4
+    assert len([r for r in rows if r["event"] == "eval_summary"]) == 1
+
+
+def test_eval_round_retry_cap_is_the_operators_exit_valve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """重投次数**缺省不限**（机器一好就接上）；`NN_EVAL_ROUND_RETRY_MAX` 是操作员的退出阀。
+
+    到了上限**不能上抛**（评估腿的纪律是「永不抛」：抛出去这一轮连 summary 都没有，读数整轮
+    丢掉）：把还没评的局记成本轮 `failed`（响亮）并照常收尾。
+    """
+    monkeypatch.setenv(offline_eval.ENV_EVAL_ROUND_RETRY_MAX, "2")
+
+    def always_stuck(bun, weights, stage, seed, out_dir, max_ticks, difficulty, timeout, wver, **kw):
+        if (stage, seed) == target:
+            raise UnreapableChildError("eval 单局超时；SIGKILL 之后 5s 内回收不了")
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        return {"win": True, "cleared": True, "outcome": "win", "elapsedSec": 0.01}
+
+    monkeypatch.setattr(offline_eval, "run_local_eval_game", always_stuck)
+    monkeypatch.setattr(offline_eval, "find_bun", lambda *_a, **_k: "bun")
+    course = _course(eval_stages="0-1", eval_games_per_stage=2, eval_every=1)
+    plan = eval_plan_of(course)
+    target = eval_pairs(plan, 1)[0]
+    logs, log = _logs()
+    out = run_cloud_eval(
+        plan=plan,
+        it=1,
+        weights_path=_weights(tmp_path),
+        eval_jsonl=tmp_path / "eval_log.jsonl",
+        ts_root=_ts_root(tmp_path),
+        work_dir=tmp_path / "work",
+        course=course,
+        bun="bun",
+        slots=3,
+        log=log,
+    )
+    assert out["ran"] and out["roundRetries"] == 2 and out["failed"] == 1, out
+    assert out["settled"] == 3, "别的局照落账（不因为一局卡住整轮作废）"
+    assert len([m for m in logs if "整轮重投第" in m]) == 2, logs
+    assert any(f"局 ({target[0]},{target[1]}) 失败" in m and "操作员" in m for m in logs), logs
+    # 缺省（不设 env）不许退化成有上限——那是本轮唯一的「无限重投」口径
+    monkeypatch.delenv(offline_eval.ENV_EVAL_ROUND_RETRY_MAX)
+    assert offline_eval.eval_round_retry_max() == 0
+    monkeypatch.setenv(offline_eval.ENV_EVAL_ROUND_RETRY_MAX, "不是数字")
+    assert offline_eval.eval_round_retry_max() == 0, "非法值回落不限（响亮的事交给日志）"
 
 
 def test_run_cloud_eval_skips_loudly_when_prerequisites_are_missing(
@@ -550,13 +674,17 @@ def test_backfeed_body_carries_only_this_rounds_eval_rows(tmp_path: Path) -> Non
         {"event": "eval", "iter": 2, "wver": "a" * 16, "stage": 0, "seed": 1},
         {"event": "eval", "iter": 3, "wver": "a" * 16, "stage": 0, "seed": 1},
         {"event": "eval", "iter": 2, "wver": "a" * 16, "stage": 0, "seed": 2, "source": "batcheval"},
-        {"event": "eval_summary", "iter": 2, "wver": "a" * 16},
+        # 本轮 summary 随体同行（控制台的 eval 列只认它；别轮的、B/C 的一律不带）
+        {"event": "eval_summary", "iter": 2, "wver": "a" * 16, "games": 4, "wins": 1},
+        {"event": "eval_summary", "iter": 3, "wver": "a" * 16, "games": 4, "wins": 2},
     ]
     (tmp_path / ArtifactStore.EVAL_LOG_NAME).write_text(
         "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8"
     )
     got = d._eval_rows_for(2)
-    assert [r["seed"] for r in got] == [1], "只发自家的、本轮的逐局行（source 行与 summary 不随行）"
+    assert [r["event"] for r in got] == ["eval", "eval_summary"], got
+    assert got[0]["seed"] == 1, "逐局行只发自家的、本轮的（source 行不随行）"
+    assert got[1]["games"] == 4
     assert d._eval_rows_for(9) == []
 
     # 上界：超出只发前 N 条（宁少不错——体超限会让整趟补传被拒，连权重一起丢）
